@@ -1,0 +1,849 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GodotNext — NextGI and NextGeo Implementation Plan</title>
+<meta name="description" content="Decision-complete engineering plan for clean-room Lumen-class global illumination and Nanite-class virtual geometry in GodotNext.">
+<style>
+:root{
+  --bg:#f2f3f1; --paper:#ffffff; --ink:#17201c; --muted:#5d6a64; --line:#d8ddd8;
+  --brand:#14532d; --brand2:#0f6b5c; --accent:#b45309; --bad:#9f2d20; --warn:#8a5a00;
+  --soft:#eef5ef; --soft2:#fbf3e4; --code:#101613; --radius:10px;
+  --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;font-size:16px}
+a{color:var(--brand2);text-decoration-thickness:1px;text-underline-offset:2px}
+a:hover{color:var(--accent)}
+.topbar{background:#111814;color:#e8eee9;border-bottom:4px solid var(--brand2)}
+.wrap{max-width:1240px;margin:0 auto;padding:0 28px}
+.hero{padding:34px 0 30px}
+.hero .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#9fc6ad}
+.hero h1{font-family:var(--serif);font-weight:700;font-size:44px;line-height:1.05;margin:10px 0 10px;max-width:900px}
+.hero p.lede{max-width:920px;color:#c9d6cc;font-size:18px;margin:0}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:20px}
+.chip{font-family:var(--mono);font-size:12px;border:1px solid #405148;color:#dce8de;padding:5px 8px;border-radius:999px;background:#18231c}
+.chip strong{color:#fff;font-weight:600}
+.layout{display:grid;grid-template-columns:280px 1fr;gap:28px;align-items:start;padding:28px 0 60px}
+nav.toc{position:sticky;top:18px;background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+nav.toc h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px}
+nav.toc a{display:block;padding:5px 4px;color:var(--ink);text-decoration:none;font-size:14px;border-radius:5px}
+nav.toc a:hover{background:var(--soft);color:var(--brand)}
+nav.toc a.active{background:var(--soft);color:var(--brand);font-weight:650}
+nav.toc .small{font-size:12px;color:var(--muted);border-top:1px solid var(--line);margin-top:12px;padding-top:10px}
+main{min-width:0}
+section{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:28px;margin-bottom:22px}
+section>:first-child{margin-top:0}
+h2{font-family:var(--serif);font-size:30px;line-height:1.15;margin:0 0 12px}
+h3{font-size:20px;line-height:1.25;margin:26px 0 8px}
+h4{font-size:16px;margin:20px 0 6px}
+p{margin:8px 0}
+.small{font-size:13px;color:var(--muted)}
+.lead{font-size:18px;color:#2c3a33}
+.callout{border:1px solid #b9d2bf;background:var(--soft);padding:16px 18px;border-radius:8px;margin:16px 0}
+.callout.warn{border-color:#e3c78d;background:var(--soft2)}
+.callout.bad{border-color:#dfa49b;background:#fdf0ed}
+.callout strong{color:var(--brand)}
+.callout.warn strong{color:var(--warn)} .callout.bad strong{color:var(--bad)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.panel{border:1px solid var(--line);border-radius:8px;padding:16px;background:#fff}
+.panel h3,.panel h4{margin-top:0}
+.metric{font-family:var(--serif);font-size:34px;line-height:1;color:var(--brand)}
+ul,ol{margin:8px 0 12px;padding-left:22px} li{margin:4px 0}
+code{font-family:var(--mono);font-size:.88em;background:#edf0ed;padding:1px 4px;border-radius:4px;word-break:break-word}
+pre{background:var(--code);color:#dce8de;padding:14px 16px;border-radius:8px;overflow:auto;font-size:13px;line-height:1.45}
+pre code{background:none;padding:0;color:inherit}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:14px 0}
+th,td{border:1px solid var(--line);padding:8px 9px;vertical-align:top;text-align:left}
+th{background:#eef2ee;font-weight:650;color:#24352b}
+tr:nth-child(even) td{background:#fbfcfb}
+.tag{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.02em;padding:2px 6px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.yes{color:var(--brand)} .part{color:var(--warn)} .no{color:var(--bad)} .new{color:var(--brand2)}
+.flow{display:flex;flex-wrap:wrap;gap:8px;align-items:stretch;margin:16px 0}
+.step{flex:1 1 135px;border:1px solid #b8c8bb;background:#f7faf7;border-radius:8px;padding:10px;min-height:76px}
+.step b{display:block;font-size:13px;color:var(--brand)} .step span{font-size:12px;color:var(--muted);line-height:1.35;display:block}
+.arrow{align-self:center;font-family:var(--mono);color:var(--accent);font-weight:800}
+.gantt{display:grid;gap:8px;margin:16px 0}
+.phase{display:grid;grid-template-columns:145px 1fr;gap:12px;align-items:center}
+.phase .name{font-weight:700;font-size:13px}.track{height:28px;background:#e7ebe7;border-radius:6px;position:relative;overflow:hidden;border:1px solid var(--line)}
+.bar{position:absolute;top:4px;bottom:4px;border-radius:5px;background:var(--brand2);color:white;font-size:11px;font-family:var(--mono);padding:3px 7px;white-space:nowrap;overflow:hidden}
+.bar.alt{background:var(--accent)} .bar.late{background:#64748b}
+details{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:10px 0;background:#fff}
+summary{cursor:pointer;font-weight:700}
+.filter{width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:8px;font:inherit;margin:8px 0}
+.footer{color:var(--muted);font-size:13px;padding:6px 2px 30px}
+.print-note{display:none}
+@media(max-width:900px){.layout{grid-template-columns:minmax(0,1fr)}.hero h1{font-size:34px}nav.toc{position:static}.grid2,.grid3{grid-template-columns:1fr}.phase{grid-template-columns:1fr}.wrap{padding:0 16px}section{padding:20px}table{display:block;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}th,td{min-width:118px}.chip{max-width:100%;overflow-wrap:anywhere}.flow{display:grid;grid-template-columns:1fr}.arrow{transform:rotate(90deg);justify-self:center}pre{max-width:100%}}
+@media print{body{background:#fff}.topbar{background:#fff;color:#000;border-bottom:2px solid #000}.hero p.lede,.chip{color:#222;background:#fff}.layout{display:block}nav.toc{display:none}section{border:none;padding:12px 0;break-inside:avoid}.print-note{display:block}.bar{color:#000;border:1px solid #000;background:#ddd}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<header class="topbar"><div class="wrap hero">
+  <div class="kicker">GodotNext • Renderer R&amp;D • Engineering plan</div>
+  <h1>Adding Lumen-class GI and Nanite-class geometry to GodotNext</h1>
+  <p class="lede">A clean-room implementation plan for <strong>NextGI</strong> (dynamic multi-bounce global illumination and reflections) and <strong>NextGeo</strong> (clustered virtual geometry), grounded in an audit of the actual GodotNext snapshot — not in marketing parity claims.</p>
+  <div class="meta" aria-label="Plan metadata">
+    <span class="chip">Repo <strong>Legoless/GodotNext</strong></span>
+    <span class="chip">GodotNext commit <strong>7cfeb47</strong></span>
+    <span class="chip">Upstream source <strong>godotengine/godot@95c0fa5</strong></span>
+    <span class="chip">Engine <strong>4.8.0 beta</strong></span>
+    <span class="chip">Date <strong>2026-11-01</strong></span>
+    <span class="chip">Version <strong>2.2 — Claude Opus + Agy C++ &amp; fleet audit applied</strong></span>
+    <span class="chip">Status <strong>Ready for P0a — implementation not started</strong></span>
+  </div>
+</div></header>
+
+<div class="wrap layout">
+<nav class="toc" aria-label="Table of contents">
+  <h2>Contents</h2>
+  <a href="#goal">1. Goal</a>
+  <a href="#success">2. Success criteria</a>
+  <a href="#verdict">3. Verdict and v1 scope</a>
+  <a href="#current">4. Current snapshot audit</a>
+  <a href="#decisions">5. Key decisions</a>
+  <a href="#architecture">6. Target architecture</a>
+  <a href="#nextgeo">7. NextGeo design</a>
+  <a href="#nextgi">8. NextGI design</a>
+  <a href="#shared">9. Shared foundations</a>
+  <a href="#platforms">10. Platform strategy</a>
+  <a href="#files">11. File-level change map</a>
+  <a href="#steps">12. Phased work plan</a>
+  <a href="#validation">13. Validation plan</a>
+  <a href="#estimates">14. Estimates and staffing</a>
+  <a href="#risks">15. Risks and exclusions</a>
+  <a href="#alternatives">16. Alternatives rejected</a>
+  <a href="#backlog">17. First backlog</a>
+  <a href="#open">18. Open questions</a>
+  <a href="#legal">19. Legal and naming</a>
+  <a href="#sources">20. Sources and evidence</a>
+  <div class="small">Names: “Lumen-class” and “Nanite-class” describe target behavior. Product systems are called <strong>NextGI</strong> and <strong>NextGeo</strong> to avoid Epic trademarks and implied code reuse.</div>
+</nav>
+<main>
+
+<section id="goal">
+  <h2>1. Goal</h2>
+  <p class="lead">Make GodotNext capable of dynamic, high-fidelity 3D scenes that today force a choice of Unreal Engine: dense source geometry without manual LOD chains, and moving lights/emissives/geometry with stable multi-bounce indirect light and glossy reflections.</p>
+  <div class="callout"><strong>Version 2.2 revision record:</strong> this revision applies the post-v2.1 C++ verification pass (Claude Opus + Agy) and live SSH hardware audit to Version 2.1, closing the remaining paper defects before Phase 0 starts: (1) <em>Forward+ load/clear &amp; frame order:</em> removes <code>RD::DRAW_IGNORE_ALL</code> (which maps to <code>ATTACHMENT_OPERATION_IGNORE</code> → <code>ATTACHMENT_LOAD_OP_DONT_CARE</code> and discards velocity on tile GPUs), forces the depth + normal-roughness prepass, skips <code>render_forward_clustered.cpp:2327-2330</code>’s motion-only clear when virtual geometry drew, runs Step 7 <code>PASS_MODE_COLOR</code> with <code>load_color = true</code> (<code>RD::DRAW_DEFAULT_ALL</code>), places SSAO/SSCS/SSR in Step 3b between Stage A guides and Stage B resolve, gives NextGI its own call site after <code>update_light_buffers()</code> and <code>bake_cluster()</code>, dispatches shadow-view cluster culling before <code>_render_shadow_begin</code>, and snapshots <code>prev_transformed_aabb</code> at dirty-event time before <code>_update_instance</code> overwrites it; (2) <em>Asset &amp; export safety:</em> keeps GPU buffer upload under <code>retain_authored</code> in the editor (because both <code>surface_get_arrays()</code> and the serializer <code>ArrayMesh::_get_surfaces()</code> read back via <code>MeshStorage::mesh_get_surface</code>, whereas <code>RendererDummy</code> CPU tests mask missing GPU buffers), moves optional surface stripping to export-time <code>EditorExportPlugin::_customize_resource</code>, enforces one <code>.ngm</code> per mesh with deterministic paths for <code>save_to_file</code>/standalone meshes, and turns encrypted-PCK <code>*.ngm</code> collisions into an explicit error in <code>_encrypt_and_store_data</code> instead of silently weakening user encryption; (3) <em>NextGI caches &amp; failable gates:</em> separates per-mesh SRC card descriptors from budgeted <strong>per-instance</strong> radiance pages, decouples the P0a NextGI spike from material-binding choices via <code>_render_material</code>/<code>_render_sdfgi</code>, adds a <strong>≥85% card-hit coverage</strong> gate + single-mesh <code>Concave Courtyard</code> scene (catching 6-AABB-card interior blindness) and a <strong>≤20% diffuse radiance error bound</strong> vs <code>LightmapGI</code>/path-traced reference, adds an explicit P0 decision/outcome table, and fixes Gate 5’s cost rule so SDF is not dropped merely because Ada RT cores trace faster in raw ms; and (4) <em>Fleet &amp; vertical-slice staging:</em> records live hardware — local <strong>Apple M5 Max</strong> (40-core GPU, 128 GB RAM) as daily development + Metal correctness gate, <strong>RTX 4080 SUPER machine</strong> (Windows 11, i9-12900KS, 64 GB RAM, <strong>NVIDIA RTX 4080 SUPER</strong> Vulkan 1.4.357 + <strong>Intel UHD 770</strong> non-RT fallback) as the named performance/HWRT/D3D12 gate host with calibrated Ada ms ceilings, and <strong>Linux VM</strong> (4-vCPU EPYC VM, Mesa <code>llvmpipe</code>) as Linux CPU/software-Vulkan smoke host — and splits P0 into <strong>P0a → P1 → P4 (NextGI vertical slice first)</strong> ahead of <strong>P0b → P2 → P3 (NextGeo runtime)</strong> for solo + AI-agent execution. No engine implementation has started.</div>
+  <div class="grid2">
+    <div class="panel"><h3>In scope for the program</h3><ul>
+      <li><strong>NextGeo:</strong> offline cluster hierarchy, GPU cut selection, on-demand page streaming, visibility-buffer material resolve, shadow/RT proxy generation.</li>
+      <li><strong>NextGI:</strong> screen traces, Surface and World Radiance Caches, software-SDF and post-v1 hardware-ray-traced tiers, probe far field, denoised diffuse and specular indirect light.</li>
+      <li>Shared editor import, debug views, profiling, test scenes, capability gating, and legacy fallback.</li>
+    </ul></div>
+    <div class="panel"><h3>Explicit non-goals for v1</h3><ul>
+      <li>Not a source port of Epic code and not binary/behavioral parity with Unreal Engine 5.8 in every scene.</li>
+      <li>No skinned characters, arbitrary custom shader displacement, transparent/foliage-card coverage, Mobile, Compatibility, or Web support.</li>
+      <li>No MegaLights-class many-shadow-light solver, Substrate-class material system, PCG/world-partition system, or console work in the first release.</li>
+    </ul></div>
+  </div>
+  <p>The strategic objective is a renderer we can maintain under Godot’s MIT license, built from public papers/docs and inspected open implementations where the license permits. That constraint shapes the design as much as GPU performance does.</p>
+</section>
+
+<section id="success">
+  <h2>2. Success criteria</h2>
+  <p>These are failable red-line acceptance targets, not measured results. Phase 0 profiling on the named reference machine records baseline variance and may tighten sub-budgets or freeze the image-error metric, but P0 may <strong>not</strong> relax any §2 ceiling; raising a ceiling requires an explicit, documented plan revision and scope review.</p>
+  <table>
+    <thead><tr><th>Area</th><th>v1 acceptance target</th><th>Evidence required</th></tr></thead>
+    <tbody>
+      <tr><td>Geometry scale</td><td>A 10M+ source-triangle static test scene whose working set is at least <strong>2× the configured geometry-cache budget</strong> renders from virtual geometry with no per-mesh authored LODs, <strong>0 silhouette/cut crack pixels</strong> at 1080p, and <strong>FLIP mean ≤0.05</strong> (provisional metric confirmed at P0) against the full-resolution reference at <strong>≤1.0×</strong> the discrete-LOD baseline GPU frame time.</td><td>Cluster/page statistics, cut-error debug view, golden images, discrete-LOD baseline capture.</td></tr>
+      <tr><td>Streaming</td><td>Camera flight has <strong>0 missing-geometry hole pixels</strong>. Missing pages render resident parents or the embedded coarse fallback in <code>VirtualGeometryData</code>. IO/upload work must keep <strong>p99 frame time ≤2.0× median frame time</strong> and <strong>GPU page-upload copy ≤1.0 ms/frame</strong> in the Slow IO Flight capture (provisional ceiling; P0 may tighten, not relax).</td><td>Page-cache trace, frame-time capture, forced slow-IO test.</td></tr>
+      <tr><td>Dynamic GI</td><td>Moving sun/local light, emissive object, and opening door update diffuse bounce with <strong>0 rebakes</strong>. Static scenes hold <strong>≤20% mean diffuse patch radiance error</strong> against baked <code>LightmapGI</code> / high-sample path-traced reference and <strong>≥85% near-field SRC card-hit coverage</strong> across both multi-mesh (<code>Color Box Room</code>) and single-mesh concave interiors (<code>Concave Courtyard</code>); dynamic changes converge within <strong>≤25% relative error of the static endpoint within ≤10 frames</strong> with <strong>≤5% sealed-room thin-wall light-leak ratio</strong> (provisional ceilings; P0 may tighten, not relax).</td><td>Recorded sequence with numeric patch probes vs <code>LightmapGI</code>/path-traced reference, card-hit coverage counter, temporal capture, bounce/debug views.</td></tr>
+      <tr><td>Reflections</td><td>Off-screen glossy reflections resolve from SDF + Surface/World Radiance Cache traces in v1 rather than probes alone, achieving <strong>≤30% mean radiance error</strong> vs high-sample reference across <code>roughness ≤0.4</code> patches without <code>ReflectionProbe</code> fallback (provisional ceiling; P0 may tighten, not relax); SSR remains only the near-field first hit. Hardware-RT reflections are post-v1 (P5).</td><td>Roughness sweep, off-screen emissive test, reflection debug view.</td></tr>
+      <tr><td>Performance</td><td><strong>Mid-range product target (RTX 3060 / RX 6700 XT tier at 1080p/60): ≤16.6 ms (p95)</strong> total frame for Dense City + GI, with sub-budget ceilings of cull + Hi-Z + visibility <strong>≤2.0 ms</strong>, Stage A + Stage B resolve <strong>≤2.5 ms</strong>, and NextGI + SVGF <strong>≤4.0 ms</strong> (sum ≤8.5 ms). On our named hardware gate host <strong>the RTX 4080 SUPER machine (<code>NVIDIA GeForce RTX 4080 SUPER</code>, 16 GB, driver <code>621.01</code>, Vulkan <code>1.4.357</code>, ~2.5× RTX 3060 throughput)</strong>, P0 calibrates locked-clock Ada engineering ceilings at <strong>≤6.6 ms total / ≤0.8 ms cull+vis / ≤1.0 ms Stage A+B / ≤1.6 ms NextGI+SVGF at 1080p</strong> (or unscaled §2 ceilings at <strong>1440p–4K</strong>) so flagship hardware never masks mid-range regressions.</td><td>GPU timestamp report from the test project on the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code> Vulkan/D3D12 + <code>Intel UHD 770</code> fallback check) in Session 1.</td></tr>
+      <tr><td>Compatibility</td><td>Unsupported content falls back per <code>(instance, surface, view)</code> with an editor-visible reason and <strong>0 double-drawn or missing surfaces</strong>. In Dense City Blocks, fallback must cover <strong>&lt;20% of opaque screen pixels</strong> (provisional failure line) or the phase gate fails as a scope failure, never a warning.</td><td>Fallback coverage metric and exclusion-matrix test scene.</td></tr>
+      <tr><td>Regression safety</td><td>Existing Godot CPU tests pass; GPU-backed (non-dummy) scene/OBJ import → save → reload → <code>LightmapGI::bake</code> round-trip equivalence on default <code>retain_authored</code> meshes, template builds, docs generation, and extension API checks pass on the supported build matrix.</td><td>Commands in §13 run from a clean tree, including a real-GPU editor round-trip test.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><strong>Quality reference:</strong> build the test scenes so a static camera can also be rendered through the existing baked/lightmap path for visual comparison (enabled because default <code>retain_authored</code> keeps authored <code>ArrayMesh</code> UV2/normals intact). The goal is not pixel identity; it is to expose leaks, energy loss, reflection misses, and temporal boiling before performance tuning hides them.</div>
+</section>
+
+<section id="verdict">
+  <h2>3. Verdict and v1 scope</h2>
+  <p class="lead">Forward+ already contains useful scaffolding — a thin depth/normal-roughness prepass, clustered light buffers, compute/indirect submission, and a Vulkan ray-tracing backend (modulo a TLAS device-address bug fixed in P0) — for a compute-driven visibility-buffer NextGeo and hybrid NextGI.</p>
+  <p>It does <em>not</em> contain the other prerequisites: persistent GPU scene, GPU cluster Hi-Z/culling, mesh/task shader stages, cross-driver ray tracing, geometry paging, a unified GPU material-binding/resolve model, virtual shadows, or a real-time denoiser.</p>
+  <div class="callout warn"><strong>Honest v1 cut:</strong> static opaque <code>StandardMaterial3D</code> content, Forward+ (<code>forward_plus</code>) only, Vulkan-class desktop hardware first. Everything outside that envelope stays on the current forward path and existing GI tiers.</div>
+  <table>
+    <thead><tr><th>Capability</th><th>v1</th><th>Later / separate funding</th></tr></thead>
+    <tbody>
+      <tr><td>NextGeo raster path</td><td><span class="tag yes">YES</span> Compute cull + indirect draw + visibility buffer</td><td>Mesh/task shaders; software micro-raster only if P0 proves it wins</td></tr>
+      <tr><td>NextGI diffuse</td><td><span class="tag yes">YES</span> Screen trace + two specified caches + SDF tier (P0–P4)</td><td><strong>Post-v1 (P5):</strong> Vulkan hardware-RT quality tier, then D3D12/Metal ports. HWRT is <em>not</em> in the v1 promise.</td></tr>
+      <tr><td>Reflections</td><td><span class="tag part">PARTIAL</span> Screen + SDF/world-cache traces</td><td>HWRT glossy traces and dedicated reflection denoising</td></tr>
+      <tr><td>Denoising</td><td><span class="tag yes">REQUIRED</span> SVGF-class workstream</td><td>Neural/vendor denoisers only behind optional, license-checked modules</td></tr>
+      <tr><td>Shadows</td><td><span class="tag part">REUSE</span> Existing atlases with per-view cluster cuts</td><td>Virtual Shadow Maps as its own phase; without it, shadow texel density caps the image</td></tr>
+      <tr><td>Apple platforms</td><td><span class="tag part">CORRECTNESS GATE</span> Portable SDF NextGI + single-draw NextGeo run error-free on local M5 Max Metal; no HWRT/ICB claim in v1</td><td>P6 Metal RT acceleration structures, ICB indirect-count, TBDR-tuned visibility/resolve</td></tr>
+      <tr><td>Animated content</td><td><span class="tag no">EXCLUDED</span> Legacy ArrayMesh path</td><td>Skinning-aware bounds, deformed clusters, BLAS refit/update</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Decision:</strong> do not sell v1 externally as “Lumen + Nanite for Godot.” Ship it as an experimental high-end desktop tier with explicit content rules. Full parity language would be false until shadows, denoising, material coverage, and Apple/D3D12 ray tracing are funded and measured.</p>
+</section>
+
+<section id="current">
+  <h2>4. Current snapshot audit</h2>
+  <p>Audit baseline: local Git HEAD <code>7cfeb47</code> is our single-commit GodotNext import. Its file contents came from upstream <code>95c0fa5</code>. The workflow notes’ “label mismatch” is therefore explained, not a content discrepancy.</p>
+
+  <h3>4.1 Current Forward+ frame</h3>
+  <div class="flow" aria-label="Current Forward Plus pass order">
+    <div class="step"><b>Scene setup</b><span>SDFGI/VoxelGI setup; CPU render lists</span></div><span class="arrow">→</span>
+    <div class="step"><b>Thin prepass</b><span>Optional depth + normal/roughness</span></div><span class="arrow">→</span>
+    <div class="step"><b>Pre-opaque</b><span>Shadows, GI, SSAO/SSIL/SSR, cluster bake, fog</span></div><span class="arrow">→</span>
+    <div class="step"><b>Opaque color</b><span><code>PASS_MODE_COLOR</code>; materials and lighting fused</span></div><span class="arrow">→</span>
+    <div class="step"><b>Sky + SSS</b><span>Specular merge and screen copies</span></div><span class="arrow">→</span>
+    <div class="step"><b>Transparent</b><span>Forward sorted alpha</span></div><span class="arrow">→</span>
+    <div class="step"><b>Temporal</b><span>FSR2 / MetalFX / TAA, tonemap</span></div>
+  </div>
+  <ul>
+    <li><strong>Best hook (and ordering traps to avoid):</strong> force the depth + normal-roughness prepass whenever NextGI or NextGeo is active (<code>render_forward_clustered.cpp:2198-2199, 2316</code>), add the visibility pass alongside that prepass, run Stage A material fetch and screen-space pre-opaque effects (SSAO, SSCS, SSR at <code>:1693-1719</code>) before NextGI gather, dispatch shadow-view cluster culling before <code>_render_shadow_begin</code>/<code>_render_shadow_end</code> batch draw lists (<code>:1665-1686</code>), give NextGI its own call site <em>after</em> <code>light_storage->update_light_buffers()</code> (<code>:1746</code>) and <code>bake_cluster()</code> (<code>:1752</code>) while keeping legacy SDFGI/VoxelGI at <code>gi.process_gi()</code> (<code>:1681</code>), run <code>_update_volumetric_fog</code> before Stage B lighting resolve so virtual and legacy opaque pixels premultiply identical 3D <code>fog_map</code> data, pass <code>load_color = true</code> (<code>RD::DRAW_DEFAULT_ALL</code>) into Step 7 <code>PASS_MODE_COLOR</code> (<code>:2300-2316</code>) so it preserves Stage B color/specular/velocity, skip the post-opaque velocity clear-only pass (<code>:2327-2330</code>) whenever virtual geometry drew into the view (never using <code>RD::DRAW_IGNORE_ALL</code>, which maps to <code>ATTACHMENT_LOAD_OP_DONT_CARE</code>), and keep previous-frame color-pyramid copies active under <code>using_nextgi</code>. Transparents stay forward.</li>
+    <li><strong>Preserve safe overlap where valid:</strong> current code overlaps shadow rendering with <code>gi.process_gi()</code> (<code>:1656-1686</code>) using previous-frame lights. Moving NextGI shading after <code>bake_cluster()</code> intentionally trades away that overlap for direct-lit SRC accuracy, while NextGeo Phase-1 culling and NextGI geometry SDF scroll/voxelization/JFA can still run in the early window before current-frame lights/shadows complete.</li>
+    <li><strong>Do not create a fourth renderer first:</strong> renderer selection is a hardcoded allowlist in <code>main/main.cpp</code>. Put v1 inside <code>forward_plus</code>; consider a <code>RendererSceneRenderRD</code> sibling only when the visibility path is proven.</li>
+  </ul>
+
+  <h3>4.2 GPU-driven substrate: present vs absent</h3>
+  <div class="grid2">
+    <div class="panel"><h4>Present</h4><ul>
+      <li>Compute dispatch and compute-indirect; indexed indirect draws (currently centered on MultiMesh).</li>
+      <li>Driver-level indirect-count wrappers on Vulkan/D3D12, not yet exposed through RenderingDevice/graph or enabled via Vulkan 1.2 device features.</li>
+      <li>Clustered light assignment buffer; normal/roughness, velocity, specular buffers in relevant modes.</li>
+      <li>RenderingDevice BLAS/TLAS, hit SBT, RT pipeline and ray-query APIs, with a non-Apple Vulkan backend whose <code>acceleration_structure_instance_write</code> currently passes <code>buffer_get_device_address</code> instead of <code>vkGetAccelerationStructureDeviceAddressKHR</code> (fixed in P0).</li>
+      <li>Feedback-driven texture mip streaming as an architectural template for geometry paging.</li>
+    </ul></div>
+    <div class="panel"><h4>Absent</h4><ul>
+      <li>TASK/MESH shader stages and vertex-less pipelines; pipeline creation still requires a vertex stage.</li>
+      <li>GPU instance/cluster culling and two-phase occlusion (a GPU depth pyramid already exists for SSR; cluster occlusion does not), GPU LOD choice, persistent GPU scene.</li>
+      <li>Per-cluster vertex data, cluster DAG, geometry page cache, and residency feedback.</li>
+      <li>Unified GPU material/texture resolve path (neither an RD bindless descriptor table with deferred-free lifetime nor per-material classified compute resolve exists).</li>
+      <li>Real-time denoiser, persistent SVGF guides/history, virtual shadow-map paging.</li>
+    </ul></div>
+  </div>
+
+  <h3>4.3 Driver capability matrix &amp; verified hardware fleet</h3>
+  <table>
+    <thead><tr><th>Capability</th><th>Vulkan non-Apple</th><th>Vulkan on Apple</th><th>D3D12</th><th>Metal</th></tr></thead>
+    <tbody>
+      <tr><td>Hardware RT</td><td><span class="tag part">TLAS BUG*</span> triangles, build-only; TLAS writes buffer address instead of <code>vkGetAccelerationStructureDeviceAddressKHR</code></td><td><span class="tag no">COMPILED OUT</span></td><td><span class="tag no">STUB</span> (ray stages also unmapped in <code>SPIRV_TO_MESA_STAGES</code>)</td><td><span class="tag no">STUB</span> (<code>rendering_device_driver_metal.cpp:2382-2429</code>)</td></tr>
+      <tr><td>Ray query in compute</td><td><span class="tag part">API PRESENT</span> compute emits SPIR-V 1.3 (<code>glslang</code> adds <code>SPV_KHR_ray_query</code> ungated); per-shader SPIR-V 1.4 opt-in fallback if needed</td><td><span class="tag no">NO</span></td><td><span class="tag no">NO</span></td><td><span class="tag no">NO</span></td></tr>
+      <tr><td>Multi-draw indirect</td><td><span class="tag yes">GPU NATIVE</span></td><td><span class="tag part">MOLTENVK</span></td><td><span class="tag yes">GPU NATIVE</span></td><td><span class="tag no">CPU LOOP</span> <code>metal3_objects.cpp:1506-1521</code> loops per draw; single-draw stream required</td></tr>
+      <tr><td>Indirect-count</td><td><span class="tag part">WRAPPER ONLY</span> needs <code>VkPhysicalDeviceVulkan12Features</code> consolidation + <code>drawIndirectCount</code></td><td><span class="tag part">UNVERIFIED ON APPLE</span></td><td><span class="tag part">DRIVER COMMAND EXISTS</span></td><td><span class="tag no">NOT IMPLEMENTED</span> <code>metal3_objects.cpp:1523-1525</code>; needs ICBs</td></tr>
+      <tr><td>Image atomics &amp; bindless</td><td><span class="tag yes">YES</span> (32/64-bit on RTX 4080S)</td><td><span class="tag part">GATED/OFF</span></td><td><span class="tag yes">YES</span></td><td><span class="tag yes">APPLE9+ 64-BIT</span> + argument buffers (<code>metal_device_properties.cpp:154</code>); no Metal 4 driver exists (<code>:57</code> fwd decl only)</td></tr>
+      <tr><td>Mesh/task shaders</td><td colspan="4"><span class="tag no">NOT EXPOSED BY RENDERINGDEVICE ON ANY DRIVER</span></td></tr>
+    </tbody>
+  </table>
+  <p class="small">*Live SSH fleet inventory (verified 2026-11-01): (1) <strong>RTX 4080 SUPER machine</strong> (Windows 11 25H2, Intel Core i9-12900KS 16C/24T, 64 GB RAM) hosts <strong><code>NVIDIA GeForce RTX 4080 SUPER</code></strong> (<code>device 1</code>, 16 GB VRAM, driver <code>621.01</code>, Vulkan <code>1.4.357</code> with <code>VK_KHR_acceleration_structure</code> rev 13, <code>VK_KHR_ray_query</code> rev 1, and <code>VK_EXT_shader_image_atomic_int64</code>) plus integrated <strong><code>Intel(R) UHD Graphics 770</code></strong> (<code>device 0</code>, driver <code>32.0.101.6129</code>, Vulkan <code>1.3.295</code> — built-in non-RT Vulkan/D3D12 fallback &amp; <code>--gpu-index</code> test target); (2) local <strong>Apple M5 Max Mac</strong> (40-core GPU, 128 GB unified memory, macOS Metal) is the daily build/iteration host, 10M-triangle DAG build machine, and Metal correctness gate; (3) <strong>Linux VM</strong> (Linux <code>7.2.5-3-omarchy</code> x86_64, 4-vCPU AMD EPYC 9B45 VM, 15 GiB RAM) exposes only Mesa 26.2.2 <code>llvmpipe</code> (Vulkan <code>1.4.354</code> CPU software rasterizer) and is strictly a Linux CPU/doctest/software-Vulkan fallback smoke host, never a GPU timing gate.</p>
+
+  <h3>4.4 Existing GI tiers</h3>
+  <table>
+    <thead><tr><th>System</th><th>What it proves / reuses</th><th>Hard limit for NextGI</th><th>Plan</th></tr></thead>
+    <tbody>
+      <tr><td>LightmapGI</td><td>Offline true multi-bounce; SH probes for dynamic receivers</td><td>Static geometry/lighting only</td><td>Keep as baked tier and visual reference</td></tr>
+      <tr><td>VoxelGI</td><td>Voxel cone traces, up to second bounce, fast local bake</td><td>Baked static scene representation; dynamic injection is crude</td><td>Keep as baked interior tier; do not extend into streaming solver</td></tr>
+      <tr><td>SDFGI</td><td>Cascade scroll, JFA SDF build, octahedral probe history, half-res GI buffers, fog ambient contract</td><td>128³ R8 cascades and coarse probes; one bounce plus feedback; thin-geometry leaks. <strong>Dirty regions are camera-scroll driven and <code>RendererSceneCull</code> restricts region capture to <code>FLAG_USES_BAKED_LIGHT</code> instances</strong> — moving geometry, occluder shadow changes, and emissives do not invalidate cascades today.</td><td>Reuse cascade/JFA/history infrastructure; build swept per-instance + shadow invalidation and dynamic <code>RendererSceneCull</code> region dispatch; replace integration and glossy path</td></tr>
+      <tr><td>SSIL / SSR / SSAO</td><td>Hi-Z, importance/downsampling, half-res screen effects</td><td>Screen-only; SSIL can double-count with another GI solver, and previous-color history is gated on <code>using_ssil || using_ssr</code></td><td>Reuse Hi-Z; subsume SSIL under screen probes while keeping previous-color pyramid under <code>using_nextgi</code>; SSR becomes first reflection trace</td></tr>
+      <tr><td>ReflectionProbe</td><td>Cubemap capture and local ambient fallback</td><td>Parallax is box projection only; costly always-update capture</td><td>Fallback/off-screen fill, not primary glossy solver</td></tr>
+    </tbody>
+  </table>
+
+  <h3>4.5 Existing geometry path</h3>
+  <ul>
+    <li><code>ArrayMesh</code> LODs are index-only simplifications that share full-resolution vertex buffers, so they save raster triangles but not vertex memory or streaming bandwidth.</li>
+    <li><code>ImporterMesh::generate_lods()</code> already uses meshoptimizer attribute-aware simplification and is the correct import hook for a cluster DAG builder. It simplifies whole surfaces today; it does not group clusters, lock group borders, or propagate parent error.</li>
+    <li>The vendored meshoptimizer module compiles clusterizer/partition/simplifier sources, but only simplification-related function pointers are wired into <code>SurfaceTool</code>. Meshlet construction APIs are present yet unused.</li>
+    <li><code>mesh_add_surface</code> eagerly uploads all vertices/attributes/skins/indices/LOD indices. There is no page-fault, priority, VRAM-budget, or upload-queue API for geometry.</li>
+    <li>Occlusion culling is CPU HZ/AABB and baked occluders, not a GPU depth pyramid produced from the previous rendered frame.</li>
+    <li><code>create_shadow_mesh()</code> is the precedent for an always-resident position-only proxy (queried via <code>MeshStorage::mesh_get_shadow_mesh</code> and cached once per surface into <code>GeometryInstanceSurfaceDataCache::surface_shadow</code> inside <code>RenderForwardClustered::_geometry_instance_add_surface_with_material</code>), not a per-view scene-cull selector, raster fallback, or BLAS source today.</li>
+  </ul>
+</section>
+
+<section id="decisions">
+  <h2>5. Key decisions</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Decision</th><th>Why</th><th>Rejected alternative</th></tr></thead>
+    <tbody>
+      <tr><td>D1</td><td>Build inside <code>forward_plus</code>; transparents remain forward.</td><td>Reuses cluster lights, shadows, fog, SSS/specular merge, screen copies, TAA/upscaling, and avoids renderer-selection churn.</td><td>Fourth rendering method first; CompositorEffect-only implementation that cannot remove forward material cost.</td></tr>
+      <tr><td>D2</td><td>NextGeo v1 uses compute culling + indirect hardware raster into a visibility buffer; no mesh shaders required.</td><td>RenderingDevice exposes no mesh/task stages. Compute+indirect fits RD once P0b settles per-cluster draw identity ((a) <code>shaderDrawParameters</code> vs (b) single-draw compute-expanded index/vertex streams — noting only (b) avoids Metal’s CPU per-draw loop in <code>metal3_objects.cpp:1506-1521</code>) and indirect-count feature plumbing.</td><td>Block v1 on a three-driver mesh-shader toolchain.</td></tr>
+      <tr><td>D3</td><td>NextGeo builder vendors/extends meshoptimizer hooks.</td><td>MIT license was inspected; cluster build, partition, bounds, quantization, and simplification already exist in-tree.</td><td>Write a new simplifier/clusterizer before proving runtime value.</td></tr>
+      <tr><td>D4</td><td>v1 NextGI sequence is screen trace → SDF trace shaded by the Surface Radiance Cache (SRC) → World Radiance Cache (WRC) termination, staged first as a standalone vertical slice (<code>P0a → P1 → P4</code>) before NextGeo runtime code (<code>P2/P3</code>). HWRT is a post-v1 tier (P5), tested head-to-head in P0a’s legacy-mesh comparator (§17 item 8).</td><td>Screen-first plus a world cache appears independently in the inspected Lumen docs, Brixelizer GI material, and Bevy Solari posts, and NextGI delivers immediate value on existing <code>ArrayMesh</code> content without waiting for NextGeo. SDF remains v1’s cross-vendor default whenever it meets §2’s leak/accuracy/convergence/coverage bounds within the raw NextGI ms budget (even if dedicated Ada RT cores on <code>RTX 4080 SUPER</code> trace faster in raw ms), because non-RT Vulkan/D3D12 (<code>Intel UHD 770</code>) and macOS Metal have no HWRT path in v1.</td><td>Probes-only v1 (cannot reach glossy/high-frequency goals). HWRT-only remains an explicit P0a comparator with a defined §12 outcome branch, not a pre-rejected alternative.</td></tr>
+      <tr><td>D5</td><td>For the post-v1 HWRT tier (and P0a comparator), prefer ray query in compute over full RT pipelines — <em>if</em> the P0a toolchain spike passes after fixing Vulkan’s TLAS address bug.</td><td>Avoids making every material a hit shader/SBT problem. <code>rendering_shader_container_vulkan.cpp:103-108</code> emits SPIR-V 1.3 for compute (while in-tree <code>glslang</code> emits <code>SPV_KHR_ray_query</code> without gating on 1.4), and Vulkan TLAS instance writes pass buffer addresses instead of <code>vkGetAccelerationStructureDeviceAddressKHR</code>; if <code>spirv-val</code> or drivers require SPIR-V 1.4, add a <strong>per-shader</strong> 1.4 opt-in so global compute shader cache keys do not churn.</td><td>Require closest-hit material execution or global SPIR-V 1.4 promotion for all compute shaders.</td></tr>
+      <tr><td>D6</td><td>Surface/radiance caching is required for SDF hits; direct hit shading is an HWRT quality option.</td><td>SDF intersections carry no material. Direct HWRT shading is materially more expensive and requires unified GPU material/texture access (Option A bindless descriptors or hit-classified shade queues).</td><td>Pretend SDF hit position alone can produce Lumen-class material response.</td></tr>
+      <tr><td>D7</td><td>Create GPU material records only for supported <code>StandardMaterial3D</code> features in v1, neutral across Option A/B binding until P0 decides.</td><td>Current per-material forward draws cannot feed compute visibility resolve without GPU material records (paired with Option A RD bindless tables or Option B per-material classified dispatches, benchmarked in P0); arbitrary <code>fragment()</code>/<code>light()</code> cannot execute verbatim in compute.</td><td>Promise all custom shaders on day one and discover silent shading divergence later.</td></tr>
+      <tr><td>D8</td><td>SVGF-class denoising is a prerequisite workstream, not polish.</td><td>There is no real-time denoiser; TAA only filters final color and will smear noisy GI.</td><td>Ship 1-spp traces behind TAA/FSR and call boiling a quality setting.</td></tr>
+      <tr><td>D9</td><td>Keep LightmapGI, VoxelGI, SDFGI as lower/fallback tiers.</td><td>They cover baked, interior, broad-HW, Mobile/Compatibility-adjacent use cases NextGI should not regress.</td><td>Replace all GI with one high-end solver.</td></tr>
+      <tr><td>D10</td><td>Every NextGeo mesh embeds a compact coarse renderer fallback inside <code>VirtualGeometryData</code> while retaining authored <code>ArrayMesh</code> surfaces — and their normal GPU buffer upload — in editor/authoring by default.</td><td><code>ArrayMesh::_set_surfaces</code> drops CPU byte arrays on load, and both <code>surface_get_arrays()</code> and the serializer <code>ArrayMesh::_get_surfaces()</code> (<code>mesh.cpp:1541-1605</code>) read back from GPU buffers via <code>MeshStorage::mesh_get_surface</code>. Skipping GPU upload would write empty meshes on importer save and export resaves while keeping <code>LightmapGI::bake</code> and <code>create_trimesh_shape()</code> broken; optional VRAM/disk stripping belongs at export time via <code>EditorExportPlugin::_customize_resource</code>.</td><td>Virtual-only assets that become holes on late pages, overwriting <code>ArrayMesh</code> surfaces by default, or skipping GPU upload without CPU backing and silently saving empty meshes.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="architecture">
+  <h2>6. Target architecture</h2>
+  <h3>6.1 Proposed frame flow</h3>
+  <div class="flow" aria-label="Proposed frame flow">
+    <div class="step"><b>1. Scene &amp; GPU update</b><span>Instances, pages, pre-clear velocity, snapshot <code>prev_transformed_aabb</code></span></div><span class="arrow">→</span>
+    <div class="step"><b>2. Cull + Visibility</b><span>Virtual 2-phase GPU Hi-Z + ID/velocity raster; forced depth+normal prepass</span></div><span class="arrow">→</span>
+    <div class="step"><b>3. Stage A: Material fetch</b><span>Decode virtual IDs into albedo/normal/roughness guides; merge legacy + Hi-Z</span></div><span class="arrow">→</span>
+    <div class="step"><b>3b. Screen-space pre-opaque</b><span>SSAO, SSCS, and SSR (<code>_pre_opaque_render</code>) consuming merged depth + normal/roughness</span></div><span class="arrow">→</span>
+    <div class="step"><b>4. Lights + Shadows</b><span>Early shadow-view cluster cull, <code>update_light_buffers()</code>, <code>bake_cluster()</code>, shadow atlases</span></div><span class="arrow">→</span>
+    <div class="step"><b>5. NextGI + Vol. fog</b><span>Dedicated post-<code>bake_cluster</code> NextGI call site (SRC/WRC/SDF), SVGF, <code>_update_volumetric_fog</code></span></div><span class="arrow">→</span>
+    <div class="step"><b>6. Stage B: Lighting resolve</b><span>Clustered direct light + shadows + SSAO/SSCS + denoised NextGI + 3D <code>fog_map</code></span></div><span class="arrow">→</span>
+    <div class="step"><b>7. Legacy &amp; post-opaque</b><span><code>PASS_MODE_COLOR</code> (<code>load_color=true</code> / <code>DRAW_DEFAULT_ALL</code>), skip <code>:2327</code> motion clear, <code>RENDER_LIST_MOTION</code>, sky, SSS, alpha</span></div><span class="arrow">→</span>
+    <div class="step"><b>8. History + Temporal</b><span>Color pyramid copy (<code>using_nextgi || using_ssr || using_ssil</code>); FSR2/MetalFX/TAA; tonemap</span></div>
+  </div>
+  <p><strong>Why this exact order resolves Forward+ pass collisions:</strong> (1) <em>Forced prepass + Stage A / Stage B split:</em> normal-mapped normals and roughness require material fetch before NextGI final gather and screen-space pre-opaque effects (Step 3b: SSAO, SSCS, SSR at <code>render_forward_clustered.cpp:1693-1719</code>), while direct + indirect shading needs denoised NextGI outputs. Forcing the depth + normal-roughness prepass whenever NextGI or NextGeo is active (<code>:2198-2199, 2316</code>) guarantees guide coverage across all opaque pixels and prevents Step 7 from clearing depth. (2) <em>Color, specular, and velocity preservation (no <code>DRAW_IGNORE_ALL</code>):</em> Step 7’s <code>PASS_MODE_COLOR</code> uses <code>DRAW_CLEAR_COLOR_ALL</code> whenever <code>!load_color</code> (<code>:2300-2316</code>), which would wipe Stage B’s color, separate specular, and motion vectors, while lines <code>:2327-2330</code> run a clear-only pass on <code>get_velocity_only_fb()</code> before <code>RENDER_LIST_MOTION</code> (<code>:2334-2342</code>). Note <code>RD::DRAW_IGNORE_ALL</code> maps to <code>ATTACHMENT_OPERATION_IGNORE</code> (<code>rendering_device.cpp:5743-5745</code>) → <code>ATTACHMENT_LOAD_OP_DONT_CARE</code> (<code>rendering_device_graph.cpp:2409-2410</code>), discarding velocity on tile GPUs! Instead, NextGeo pre-clears velocity to <code>Color(-1, -1, 0, 0)</code> in Step 1, writes virtual velocity in Step 2, passes <code>load_color = true</code> (<code>RD::DRAW_DEFAULT_ALL</code>) into Step 7 <code>PASS_MODE_COLOR</code>, and skips the <code>:2327-2330</code> clear-only pass whenever virtual geometry drew into the view. (3) <em>Dedicated NextGI call site, early shadow cull, and volumetric fog:</em> NextGI gets its own entry point <em>after</em> <code>light_storage->update_light_buffers()</code> (<code>:1746</code>) and <code>bake_cluster()</code> (<code>:1752</code>) while legacy SDFGI/VoxelGI remain inside <code>gi.process_gi()</code> (<code>:1681</code>); shadow-view cluster culling dispatches before <code>_render_shadow_begin</code>/<code>_render_shadow_end</code> batch draw lists (<code>:1665-1686</code>); and <code>_update_volumetric_fog</code> runs in Step 5 before both Stage B (Step 6) and legacy opaque (Step 7) premultiply 3D <code>fog_map</code>. (4) <em>Screen-trace history:</em> Step 8 extends previous-frame color-pyramid allocation and mip generation from <code>using_ssil || using_ssr</code> to <code>using_ssil || using_ssr || using_nextgi</code>.</p>
+
+  <h3>6.2 Ownership boundaries</h3>
+  <table>
+    <thead><tr><th>Layer</th><th>Owns</th><th>Must not own</th></tr></thead>
+    <tbody>
+      <tr><td>Scene resources</td><td><code>VirtualGeometryData</code> payload (including embedded coarse renderer fallback + fixed proxy) on <code>ArrayMesh</code>, preserved authored surfaces, per-surface eligibility</td><td>GPU residency or per-frame cut state</td></tr>
+      <tr><td>Editor/import</td><td>Cluster DAG build, proxy/Stage-2 card predata, <code>.ngm</code> writing + export remap metadata, import diagnostics</td><td>Runtime page eviction policy</td></tr>
+      <tr><td>RenderingServer storage</td><td>Persistent GPU scene records, GPU material records + P0-selected binding tables, page arenas, post-v1 BLAS/TLAS RIDs</td><td>Scene-tree traversal policy</td></tr>
+      <tr><td>Forward+ renderer</td><td>Per-<code>(instance, surface, view)</code> routing, Stage A/B visibility/resolve passes, legacy blending order, debug views</td><td>Asset simplification or file IO</td></tr>
+      <tr><td>NextGI subsystem</td><td>SRC/WRC/SDF caches, swept invalidation, tracing tiers, reflection and diffuse outputs</td><td>Material authoring or cluster LOD decisions</td></tr>
+      <tr><td>Effects</td><td>SVGF guides/history and reusable temporal filtering</td><td>Scene representation or GI sampling policy</td></tr>
+      <tr><td>Drivers</td><td>Capabilities, Vulkan 1.2 feature consolidation, indirect-count submission, acceleration structures, translated shaders</td><td>Godot-specific quality fallbacks (renderer decides)</td></tr>
+    </tbody>
+  </table>
+
+  <h3>6.3 Data contracts to freeze in Phase 0</h3>
+  <ol>
+    <li><strong>Visibility ID format:</strong> bit allocation for instance, surface/cluster, triangle, and material path; whether barycentrics are reconstructed from triangle data or stored/interpolated. IDs cannot be MSAA-resolved like color.</li>
+    <li><strong>GPU instance record:</strong> current/previous transform, current and dirty-event-snapshotted previous world AABBs (<code>transformed_aabb</code> and <code>prev_transformed_aabb</code>; note <code>RendererSceneCull::_update_instance</code> overwrites <code>Instance::prev_transformed_aabb</code> at <code>renderer_scene_cull.cpp:1772, 1945</code>, so the pre-move box must be captured when the dirty event fires), mesh/page-table index, <em>per-surface</em> material override indices and eligibility mask, per-instance SRC page-table handle, layer mask, cast-shadow mode, GI mode, lightmap instance data, skeleton presence (exclusion trigger), instance shader-uniform presence (exclusion trigger in v1), and double-precision handling. This mirrors the real instance inputs in scene cull; a single material-override index is insufficient.</li>
+    <li><strong>Exclusive dispatch rule (frozen in v2.1 — per <code>(instance, surface, view)</code>):</strong> virtual data is an optional payload attached to the existing <code>ArrayMesh</code> mesh RID — there is no second mesh RID and no new instance base type. Dispatch is decided per <code>(instance, surface, view)</code>, not whole-instance, so multi-surface meshes mixing opaque <code>StandardMaterial3D</code> surfaces with glass/alpha/custom-shader surfaces render eligible surfaces through virtual cluster cuts while keeping excluded surfaces on the legacy forward lists without dropping or double-drawing either. Concretely, <code>RendererSceneCull</code> retains instance culling/lists, while renderer-side surface caching and pass-list population in <code>RenderForwardClustered</code> (<code>_geometry_instance_add_surface_with_material</code> and <code>GeometryInstanceSurfaceDataCache::surface_shadow</code>, where <code>MeshStorage::mesh_get_shadow_mesh</code> is cached once per surface rather than selected per-view in <code>RendererSceneCull</code>) suppress legacy main-pass, discrete-LOD, and <code>surface_shadow</code> submission whenever virtual cuts handle that <code>(instance, surface, view)</code>. <code>MultiMesh</code> and particle consumers (<code>INSTANCE_MULTIMESH</code>, <code>INSTANCE_PARTICLES</code>) ignore <code>VirtualGeometryData</code> in v1 with a counted editor warning; <code>GridMap</code> octant <code>MultiMesh</code> cells follow that rule, whereas <code>GridMap::make_baked_meshes</code> registers standard <code>RSE::INSTANCE_MESH</code> instances that either route per-surface through NextGeo when unlightmapped or stay cleanly on the legacy lightmapped path using preserved <code>ArrayMesh</code> UV2 data.</li>
+    <li><strong>Material record:</strong> supported <code>StandardMaterial3D</code> fields, texture/material-bucket indices (supporting both Option A bindless tables and Option B classified dispatches until P0b freezes one), UV transforms, feature flags, alpha mode, fallback reason. Texture residency must cooperate with existing texture storage/streaming.</li>
+    <li><strong>Cluster record:</strong> sphere/cone bounds, parent/child range, geometric+material error, page ID, vertex/index offsets, surface/material ID, resident flag.</li>
+    <li><strong>NextGI outputs:</strong> reuse <code>RB_TEX_AMBIENT</code> and <code>RB_TEX_REFLECTION</code> initially through a dedicated post-<code>bake_cluster</code> NextGI entry point (keeping legacy SDFGI/VoxelGI at <code>gi.process_gi()</code> line <code>1681</code>); define energy scale so volumetric fog and forward lighting do not double-count SDFGI/VoxelGI/SSIL.</li>
+    <li><strong>Fallback reason enum:</strong> one shared enum used by import, editor inspector, runtime stats, and tests (unsupported driver, alpha, skinning, custom vertex/fragment feature, instance uniforms, lightmapped instance, MultiMesh/particles, missing page, material feature, platform tier).</li>
+  </ol>
+</section>
+
+<section id="nextgeo">
+  <h2>7. NextGeo design — Nanite-class virtual geometry</h2>
+
+  <h3>7.1 Offline DAG builder</h3>
+  <ol>
+    <li><strong>Hook:</strong> add <code>ImporterMesh::build_virtual_geometry()</code> next to <code>generate_lods()</code>/<code>create_shadow_mesh()</code>, driven by <code>meshes/generate_virtual_geometry</code> and per-mesh post-import overrides in <em>both</em> <code>ResourceImporterScene</code> (glTF/FBX/Blend scenes and <code>ArrayMesh</code>/<code>MeshLibrary</code> scene modes) and <code>ResourceImporterOBJ</code> (standalone <code>.obj</code> mesh imports). FBX/glTF/OBJ option propagation gets body-level verification tests.</li>
+    <li><strong>Clusterize:</strong> wire meshoptimizer meshlet construction through new <code>SurfaceTool</code> function-pointer hooks or a dedicated <code>modules/nextgeo</code> builder. If the optional meshoptimizer module is disabled, import must skip cleanly like current LOD generation.</li>
+    <li><strong>Group and simplify:</strong> partition adjacent clusters into groups; simplify each group with attribute-aware simplification while locking group borders; re-cluster. Parent geometric error is the maximum propagated child/group error, not an independent estimate.</li>
+    <li><strong>Split by surface, material, and eligibility:</strong> never merge clusters across surface/material/alpha/shadow-representation boundaries so per-<code>(instance, surface, view)</code> dispatch can virtualize opaque surfaces while leaving sibling transparent/custom-shader surfaces on legacy lists. Record why any excluded surface is legacy-only.</li>
+    <li><strong>Quantize and encode:</strong> quantized positions/normals/tangents/UVs and meshlet-local indices. Validate normal/UV seam behavior, tangent handedness, and double-sided flags against legacy renders.</li>
+    <li><strong>Build dependents:</strong> (a) a compact resident coarse renderer fallback inside <code>VirtualGeometryData</code> built from the root-level DAG cut per virtualized surface (without overwriting authored <code>ArrayMesh</code> surfaces under the default <code>retain_authored</code> mode; see §7.2), (b) a <em>fixed import-time</em> position-only proxy LOD for auxiliary captures and the post-v1 P5 RT tier (never a view-dependent cut), (c) editor bounds/preview metadata, and (d) Stage-2 per-cluster-group axis-dominant Surface Radiance Cache card descriptors upgrading P0/P1’s Stage-1 6-card surface bounds (§8.3). Collision/navigation shapes remain built from full authored geometry and do not read streamed pages.</li>
+  </ol>
+
+  <h3>7.2 Resource and file format</h3>
+  <table>
+    <thead><tr><th>Piece</th><th>Proposed shape</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>VirtualGeometryData</code></td><td>New sub-resource referenced <em>by</em> <code>ArrayMesh</code> (not a new <code>Mesh</code> subclass), in <code>scene/resources/3d/virtual_geometry_data.{h,cpp}</code></td><td>Holds DAG header summary, per-surface eligibility mask, embedded coarse renderer fallback buffers, fixed position-only proxy, Stage-2 SRC card descriptors, <code>.ngm</code> page-file UID/path, and format version. Keeping the existing <code>ArrayMesh</code> RID and preserving authored surface arrays by default means <code>LightmapGI::bake</code>, §2’s baked quality reference, <code>Mesh::get_faces()</code>, <code>create_trimesh_shape()</code>, navmesh baking, and <code>MeshInstance3D</code> picking work uncorrupted.</td></tr>
+      <tr><td><code>.ngm</code> sidecar &amp; PCK export</td><td>Versioned paged binary, <strong>one <code>.ngm</code> per mesh</strong>; proposed 64–128 KiB pages as a starting hypothesis</td><td><strong>Export &amp; encryption lifecycle:</strong> because <code>EditorExportPlatform</code> reads each exported file wholly into RAM via <code>FileAccess::get_file_as_bytes</code> (<code>editor_export_platform.cpp:1550, 1598, 1625, 1684</code>), pages are split as <strong>one <code>.ngm</code> per virtualized mesh</strong> (never a multi-GB project monolith). Imported scene/OBJ meshes write <code>.godot/imported/&lt;mesh_file&gt;-&lt;md5&gt;.ngm</code> (appended to <code>r_gen_files</code> for editor reimport tracking and emitted via <code>[remap]</code> companions), whereas external <code>save_to_file/enabled</code> and standalone <code>.res</code>/<code>.tres</code> meshes write a deterministic sibling <code>&lt;mesh_path&gt;.ngm</code> (plus a lightweight sidecar manifest so <code>EditorExportPlugin::_export_file</code> calls <code>add_file</code> → <code>save_proxy.save_file</code> at <code>:1516-1527</code> without loading full mesh arrays). Because <code>FileAccessEncrypted::open_and_parse</code> (<code>file_access_encrypted.cpp:75-85</code>) buffers whole encrypted files in RAM and no plugin can bypass <code>EditorExportPlatform::_encrypt_and_store_data</code> (<code>:434-453</code>, preset filter check <code>:377-394</code>), silently overriding user encryption is rejected as a security footgun: <code>_encrypt_and_store_data</code> instead raises an <strong>explicit hard export error</strong> whenever an <code>.ngm</code> matches active encryption filters unless the user explicitly adds <code>*.ngm</code> to the preset’s encryption exclude filter (or post-v1 per-page encryption is used). Unencrypted PCKs seek in O(1) via <code>FileAccessPack::seek</code> (<code>file_access_pack.cpp:443-452</code>).</td></tr>
+      <tr><td>DAG header</td><td>Cluster bounds/cones/errors/parents/surface-material/page mapping, root cluster IDs, total triangle counts</td><td>Uploaded to GPU only for meshes with live virtual instances in the scene, under the same VRAM budget as pages — not unconditionally for every imported mesh. Version and endian/word-size rules must be explicit.</td></tr>
+      <tr><td>Fallback mode + GPU readback safety</td><td>Importer option <code>virtual_geometry/fallback_mode</code>: <code>retain_authored</code> (default) or <code>strip_authored_to_coarse</code> (explicit opt-in) + export-time feature-tag stripping</td><td><strong>Critical readback invariant:</strong> <code>ArrayMesh::Surface</code> stores metadata only (<code>mesh.h:313-323</code>); <code>ArrayMesh::_set_surfaces</code> (<code>mesh.cpp:1719</code>) uploads arrays to <code>MeshStorage</code> and drops them, while both <code>surface_get_arrays()</code> and the serializer <code>ArrayMesh::_get_surfaces()</code> (<code>mesh.cpp:1541-1605</code>) read back from GPU buffers via <code>MeshStorage::mesh_get_surface</code> (<code>mesh_storage.cpp:680-713</code>). Skipping GPU upload in <code>MeshStorage</code> would cause importer saves and <code>EditorExportPlatform</code> customization / <code>.tres</code>→<code>.res</code> resaves (<code>:1086-1129, 1673-1674</code>) to write <strong>empty meshes</strong> (while headless <code>RendererDummy::MeshStorage</code> CPU tests pass blindly because dummy storage retains CPU copies!). Therefore <code>retain_authored</code> keeps normal GPU buffer upload in the editor so saves, <code>LightmapGI::bake</code>, and <code>create_trimesh_shape()</code> stay 100% intact, while desktop-only NextGeo exports can strip authored surfaces to the coarse fallback per feature tag via <code>EditorExportPlugin::_customize_resource</code> (or via explicit import-time <code>strip_authored_to_coarse</code> with prominent inspector warnings).</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.3 Runtime storage, streaming, and culling</h3>
+  <ul>
+    <li><strong>GPU arenas:</strong> new <code>virtual_mesh_storage</code> owns paged vertex/index arenas, cluster records, instance records, page table, free lists, and upload staging. Shared residency belongs in storage singletons, not a viewport-local structure.</li>
+    <li><strong>Feedback loop:</strong> cull computes a wanted-page bitset/queue. A CPU/IO subsystem modeled on <code>TextureStreaming</code> prioritizes visible/front-to-back pages, enforces a project VRAM budget, decompresses on worker threads, and uploads with bounded per-frame work. Resident parents (and if roots are pending, the embedded coarse fallback in <code>VirtualGeometryData</code>) render until children arrive.</li>
+    <li><strong>Cut selection:</strong> compute pass tests instance frustum, screen-projected cluster error, cone/backface criteria, residency, and per-surface eligibility. Error metric must be monotonic down the DAG so a crack-free cut exists.</li>
+    <li><strong>GPU Hi-Z:</strong> build a depth pyramid from rendered depth; use two-phase occlusion (draw previously visible, build Hi-Z, cull/draw newly visible) to avoid one-frame holes. This replaces—not extends—the CPU baked-occluder path for virtual content.</li>
+    <li><strong>Compaction:</strong> compact surviving clusters into indirect indexed draws. Phase 0 plumbs indirect-count through RenderingDevice/graph and consolidates Vulkan 1.2 <code>drawIndirectCount</code>; without driver support (Metal pre-ICB), use a bounded max count and measure empty-draw cost.</li>
+    <li><strong>Explicit auxiliary-view policy:</strong> directional/positional shadow splits/faces run coarser dedicated cluster cuts; auxiliary <code>INSTANCE_GEOMETRY_MASK</code> renders — including <code>GPUParticlesCollisionHeightField3D</code> orthographic heightfield captures, <code>ReflectionProbe</code> updates, SDF/voxelizations, and custom material captures — draw the resident coarse fallback/fixed proxy from <code>VirtualGeometryData</code> rather than multiplying full cluster-cut passes or forcing full legacy GPU buffer uploads.</li>
+  </ul>
+
+  <h3>7.4 Visibility and material resolve</h3>
+  <ul>
+    <li>Hardware-rasterize clusters through a vertex shader that pulls cluster vertices from storage buffers. Write depth, velocity-compatible previous clip data (into the Step-1 pre-cleared velocity target preserved by <code>load_color = true</code> and skipping the <code>:2327-2330</code> clear in Step 7), and a packed visibility ID. Software raster for subpixel triangles is a P0b experiment, not a v1 assumption.</li>
+    <li><strong>Per-cluster draw identity is a P0b decision (with a hard Metal constraint):</strong> Vulkan currently leaves <code>shaderDrawParameters</code> disabled and no renderer shader uses <code>gl_DrawID</code>/<code>gl_BaseInstance</code>; D3D12’s shader-container mode zeros base-instance system values; and Metal’s <code>MDCommandBuffer::render_draw_indexed_indirect</code> (<code>metal3_objects.cpp:1506-1521</code>) is a <strong>CPU per-draw loop</strong> while <code>render_draw_indexed_indirect_count</code> (<code>:1523-1525</code>) is unimplemented. Consequently, only option (b) — a single-draw compute-expanded index/vertex stream carrying cluster ID — is portable to current Metal without P6 ICB driver work. P0b benchmarks (a) indirect-count multi-draw with <code>shaderDrawParameters</code> against (b) single-draw compute-expanded streams on Vulkan (RTX 4080 SUPER) and Metal (M5 Max).</li>
+    <li><strong>Two-stage compute resolve (binding-model-neutral until P0b freezes §9):</strong> Stage A (before NextGI and Step 3b SSAO/SSCS/SSR) decodes visible triangles, reconstructs barycentrics and analytic/quad derivatives, fetches vertex attributes, and evaluates the GPU material record — using either Option A’s RD bindless descriptor table or Option B’s per-material classified compute dispatches — to populate albedo/normal/roughness guides; Stage B (after SVGF and <code>_update_volumetric_fog</code>) shades clustered direct lights/shadows, applies SSAO/SSCS, adds denoised NextGI diffuse/specular outputs, and premultiplies 3D <code>fog_map</code>.</li>
+    <li>Derivatives are a contract, not a detail: normal maps, anisotropy-like filtering, alpha edges, and texture LOD need analytic or quad-based derivative reconstruction and tests.</li>
+    <li>Alpha-scissor/hash content is excluded until material evaluation can discard during visibility and any-hit/shadow paths. Blended content, stencil overlays, <code>next_pass</code>, wireframe/points, and priority overlaps remain forward after resolve.</li>
+    <li>Custom <code>vertex()</code> that displaces or overrides position/projection invalidates offline bounds and therefore forces legacy rendering. Custom <code>fragment()</code> or <code>light()</code> forces per-surface legacy rendering unless it uses a documented, separately compiled supported subset.</li>
+  </ul>
+
+  <h3>7.5 Shadows, proxies, and interaction</h3>
+  <ul>
+    <li>v1 shadow views select a coarser cluster cut per virtualized <code>(instance, surface, view)</code> — dispatched <em>before</em> <code>_render_shadow_begin</code>/<code>_render_shadow_end</code> batch draw lists (<code>render_forward_clustered.cpp:1665-1686</code>) — while writing current shadow atlases alongside legacy shadow casters. Fixed atlas resolution and four directional splits still cap shadow sharpness until Virtual Shadow Maps land in P6.</li>
+    <li>Virtual Shadow Maps are Phase 6 because page allocation, invalidation by light/view/residency, and cluster cuts per shadow page are a system of their own.</li>
+    <li>RT proxy (post-v1 P5, plus P0’s legacy-mesh comparator) is one <em>fixed import-time</em> coarse proxy LOD per mesh — a position-only BLAS source with a stable triangle budget, never the view-dependent raster cut. Legacy-mesh BLAS building also adds acceleration-structure vertex/index usage flags in <code>MeshStorage::mesh_add_surface</code> that current upload omits.</li>
+    <li>Physics raycasts, navigation, CSG, <code>LightmapGI::bake</code>, and editor picking do not consume streamed GPU pages in v1. Under default <code>retain_authored</code> they consume intact authored <code>ArrayMesh</code> surfaces/collision shapes, and debug views surface when opt-in <code>strip_authored_to_coarse</code> is active.</li>
+  </ul>
+</section>
+
+<section id="nextgi">
+  <h2>8. NextGI design — Lumen-class global illumination</h2>
+
+  <h3>8.1 Solver layering</h3>
+  <div class="flow" aria-label="NextGI solver layering">
+    <div class="step"><b>1. Screen trace</b><span>Hi-Z + previous-color pyramid near field; catches visible detail</span></div><span class="arrow">→</span>
+    <div class="step"><b>2. SDF trace → Surface Radiance Cache</b><span>SDF hit is shaded by card-atlas radiance (§8.3), never by position alone</span></div><span class="arrow">→</span>
+    <div class="step"><b>3. World Radiance Cache</b><span>Probe-clipmap termination for far/off-screen and second-bounce feedback</span></div><span class="arrow">→</span>
+    <div class="step"><b>4. HWRT traces (post-v1 P5)</b><span>Quality tier against fixed import-time triangle proxies; ray query first</span></div><span class="arrow">→</span>
+    <div class="step"><b>5. Final gather</b><span>Screen probes, temporal accumulation, bilateral reconstruction</span></div><span class="arrow">→</span>
+    <div class="step"><b>6. Denoise</b><span>Separate diffuse/specular SVGF; guide buffers mandatory</span></div>
+  </div>
+  <p>Diffuse and specular are separate signals. Diffuse can terminate in probes/world cache earlier; glossy traces need roughness-aware direction/cone logic and cannot reuse diffuse probe blur as a substitute.</p>
+
+  <h3>8.2 Software SDF tier</h3>
+  <ul>
+    <li>Reuse SDFGI cascade infrastructure where contracts match — scrolling, JFA distance generation, probe history buffers, and half-resolution output plumbing — while <strong>replacing</strong> SDFGI’s camera-scroll-only / <code>FLAG_USES_BAKED_LIGHT</code>-only region capture with an AABB dirty-brick/region queue dispatched from <code>RendererSceneCull</code>.</li>
+    <li>Do not assume current 128³ R8 cascades are sufficient for near-field tracing. P1 benchmarks cascade resolution/bias and decides whether to keep runtime sparse cascades, add import-time mesh SDFs, or combine them. Runtime generation handles dynamic geometry directly under a voxelization budget; import-time mesh SDFs require an asset pipeline plus dynamic-instance composition.</li>
+    <li>SDF hits fetch material/radiance from the Surface Radiance Cache, never albedo guessed from position. Supported <code>StandardMaterial3D</code> surfaces shade cards via GPU material records; custom materials use a budgeted <code>MODE_RENDER_MATERIAL</code>-style raster capture into card pages as a compatibility path.</li>
+    <li>Thin/one-sided geometry is a first-class failure mode. Thickness/bias rules, probe relocation/occlusion, and sealed-room leak checks (§2’s ≤5% ceiling) belong in the solver and debug UI, not a troubleshooting footnote.</li>
+  </ul>
+
+  <h3>8.3 Two caches, per-instance radiance pages, and swept invalidation</h3>
+  <p>v1 uses two distinct caches budgeted separately. Both parameterizations below are concrete candidates tested in P0a’s end-to-end NextGI spike (§17 item 8) without waiting for P2’s DAG importer or P0b’s material-binding benchmark.</p>
+  <ul>
+    <li><strong>Surface Radiance Cache (SRC) — per-mesh descriptors, budgeted <em>per-instance</em> radiance pages:</strong>
+      <ul>
+        <li><em>Per-mesh card descriptors (two-stage):</em> Stage 1 (P0a spike, P1, and legacy-fallback meshes) builds card descriptors per eligible <code>ArrayMesh</code> surface at upload — 6 outer OBB/AABB cards for convex/solid meshes, extended to multi-box/normal-clustered interior cards whenever single-mesh concave interiors (rooms, courtyards, U-shapes) drop below §2’s <strong>≥85% card-hit coverage</strong> threshold (since 6 outer AABB faces cannot see inward-facing walls of a single-mesh room). Stage 2 (P2 NextGeo upgrade) emits tighter per-cluster-group axis-dominant card descriptors inside <code>VirtualGeometryData</code>.</li>
+        <li><em>Per-instance radiance pages &amp; eviction budget:</em> outgoing radiance depends on each instance’s world transform, local lighting/shadows, and per-surface material overrides, so <strong>radiance atlas pages are allocated per active instance, never shared per mesh</strong>. Under a fixed SRC atlas VRAM budget (e.g., 4k×4k / 64–128 MiB across 128×128–32×32 tiles), instances are scored by screen solid angle and camera distance: near instances claim higher-res pages, mid-distance instances drop page mip resolution, and tiny/far or evicted instances in heavily instanced scenes (<code>Dense City Blocks</code>) release pages via LRU and fall back cleanly to WRC probes.</li>
+        <li><em>Card capture &amp; shading:</em> P0a’s spike (and v1’s custom-material compatibility path) reuses existing <code>_render_material</code> (<code>render_forward_clustered.cpp:3061</code>) to rasterize albedo/normal/roughness/emission into card pages and <code>_render_sdfgi</code> (<code>:3203</code>) for voxelization, decoupling P0a/P1 from P0b’s Option A/B material-binding choice. Direct lights, shadow atlases, sky, and second-bounce feedback are evaluated into dirty/scheduled instance pages at NextGI’s dedicated post-<code>bake_cluster</code> call site (§6.1 Step 5).</li>
+      </ul>
+    </li>
+    <li><strong>World Radiance Cache (WRC) — terminates paths:</strong> camera-centered clipmap of irradiance probes (octahedral/SH hybrid reusing SDFGI probe history where contracts fit), updated under a fixed per-frame ray budget. It supplies far-field, off-screen, and second-bounce radiance and serves as fallback when SRC coverage or instance page budget misses.</li>
+    <li><strong>Bounce and energy model (v1):</strong> one explicit traced diffuse bounce shaded by SRC; further bounces enter through temporally accumulated SRC/WRC feedback with demodulated albedo, feedback gain &lt;1.0, and a shared firefly/max-radiance clamp, validated against §2’s <strong>≤20% diffuse radiance error bound vs <code>LightmapGI</code> / path-traced reference</strong> so an energy-biased solver cannot pass by converging to its own wrong static value. Specular uses one traced bounce terminating in SRC/WRC/sky.</li>
+    <li><strong>Swept geometry, shadow, and region-cull invalidation (new work):</strong>
+      (1) <em>Snapshotted previous + current AABBs:</em> <code>RendererSceneCull::_update_instance</code> overwrites <code>Instance::prev_transformed_aabb</code> (<code>renderer_scene_cull.h:448</code>; <code>renderer_scene_cull.cpp:1772, 1945</code>), so NextGI snapshots the pre-change world AABB when transform, visibility, mesh, material, emissive, or deletion dirty events fire, dirtying <strong>both</strong> boxes across affected SDF cascades, per-instance SRC pages, and WRC probes so moving geometry (e.g., an opening door) never leaves phantom SDF occlusion in vacated space.
+      (2) <em>Static-receiver shadow invalidation:</em> when a shadow-casting occluder moves, its swept volume (<code>prev_transformed_aabb ∪ transformed_aabb</code>) is projected along active directional-light directions and intersecting local-light frustums/radii (clipped to active NextGI cascades) to mark newly lit/shadowed static-receiver instance SRC pages and WRC probes dirty, backed by a bounded background SRC refresh ring (1/16–1/32 of resident active pages per frame) so indirect bounce on static walls converges within §2’s 10-frame target.
+      (3) <em><code>RendererSceneCull</code> dispatch:</em> extend <code>RendererSceneCull::_render_scene</code> beyond camera-scroll <code>sdfgi_get_pending_region_count</code> and <code>FLAG_USES_BAKED_LIGHT</code> so arbitrary dirty world-AABB regions cull both static and dynamic GI-contributing opaque instances under a bounded per-frame brick budget. Animated <code>TIME</code> materials are flagged by shader analysis and excluded from static SRC caching.</li>
+    <li><strong>Clean-room boundary:</strong> card/clipmap concepts come from public documentation and talks listed in §20; no card constants, layouts, or shader code are copied from any proprietary engine.</li>
+  </ul>
+
+  <h3>8.4 Hardware RT tier (post-v1 P5; P0 comparator only)</h3>
+  <ul>
+    <li>Target Vulkan non-Apple first (after P0 fixes <code>RenderingDeviceDriverVulkan::acceleration_structure_instance_write</code> to use <code>vkGetAccelerationStructureDeviceAddressKHR</code>). Build one static BLAS per mesh from the <em>fixed import-time</em> position-only NextGeo proxy LOD (§7.1, §7.5 — never a view-dependent raster cut) and from supported legacy static meshes (adding acceleration-structure vertex/index buffer usage flags in <code>MeshStorage::mesh_add_surface</code>); build/update TLAS from scene instances. Because the Vulkan path is triangles-only and build-only, dynamic/skinned geometry is excluded or rebuild-budgeted.</li>
+    <li>Use ray query in compute for probe/reflection traces. Full RT pipelines and hit shaders remain deferred unless ray-query compute fails P0/P5 gates.</li>
+    <li>HWRT direct hit shading requires position/normal/UV interpolation, texture derivatives, unified GPU material/texture lookup (Option A bindless descriptors or hit-classified shade queues), alpha policy, and emissive sampling. It is a P5 quality option, not a free replacement for SRC/WRC caching.</li>
+    <li>D3D12 DXR (including fixing <code>SPIRV_TO_MESA_STAGES</code> ray-stage mapping in <code>rendering_shader_container_d3d12.cpp</code>) and Metal acceleration structures are separate P6 driver implementations after the Vulkan vertical slice.</li>
+  </ul>
+
+  <h3>8.5 Final gather, reflections, and fog</h3>
+  <ul>
+    <li>Screen probes are placed on visible surfaces using Stage A / legacy prepass depth/normal/roughness guides, importance-sampled with previous-frame lighting, filtered spatially/temporally, then bilaterally upsampled.</li>
+    <li>When NextGI is active, disable SSIL automatically to prevent double-counting, while extending <code>RenderForwardClustered</code>’s previous-frame color-pyramid allocation and post-opaque mip copy to <code>using_ssil || using_ssr || using_nextgi</code> so §8.1’s screen traces retain lit color history even when SSR is off. Keep SSAO as contact detail only after energy tests confirm zero double-darkening.</li>
+    <li>Reflections use screen trace first, then SDF + SRC/WRC traces in v1 (and HWRT traces in P5). Reflection probes remain fallback for misses and unsupported tiers.</li>
+    <li>NextGI writes its low-resolution ambient volume (<code>ambient_texture</code>/<code>gi_inject</code>) before <code>_update_volumetric_fog</code> in §6.1 Step 5, which in turn runs before Stage B lighting resolve (Step 6) and legacy <code>PASS_MODE_COLOR</code> (Step 7) so 3D <code>fog_map</code> scattering and transmittance match across virtual and legacy opaque pixels.</li>
+    <li>Emissive surfaces contribute through GPU material records and SRC entries, governed by a shared intensity clamp/firefly policy with SVGF.</li>
+  </ul>
+
+  <h3>8.6 SVGF-class denoiser</h3>
+  <p>Allocate persistent current/previous albedo, normal/roughness, linear depth, velocity, demodulated diffuse/specular, first/second moments, variance, and history length. Force depth + normal-roughness prepass and velocity generation whenever NextGI is enabled (pre-clearing velocity in §6.1 Step 1, running Step 7 <code>PASS_MODE_COLOR</code> with <code>load_color = true</code> / <code>RD::DRAW_DEFAULT_ALL</code>, and skipping the <code>render_forward_clustered.cpp:2327-2330</code> velocity clear when virtual geometry drew — verified on both desktop Vulkan and Apple Metal TBDR so FSR2/TAA never receives discarded <code>LOAD_OP_DONT_CARE</code> motion vectors).</p>
+  <ul>
+    <li>Temporal accumulation with disocclusion rejection from depth, normal, and mesh/surface/material ID changes.</li>
+    <li>Variance-guided spatial filtering; separate kernels/radii for diffuse and specular.</li>
+    <li>Firefly clamp before temporal accumulation; blue-noise/low-discrepancy sample rotation beyond current TAA jitter.</li>
+    <li>Explicit transparent, particle, skinned, and first-frame policies. Those pixels use probe/legacy GI rather than invalid history.</li>
+    <li>Debug views for raw signal, variance, history length, rejected history, and denoised output are required deliverables, not developer-only hacks.</li>
+  </ul>
+</section>
+
+<section id="shared">
+  <h2>9. Shared foundations</h2>
+  <div class="grid2">
+    <div class="panel"><h3>RenderingDevice and graph</h3><ul>
+      <li>Plumb indirect-count from driver through RenderingDevice, graph resource tracking, and binds. In Vulkan, consolidate standalone KHR structs into <code>VkPhysicalDeviceVulkan12Features</code> (<code>VUID-VkDeviceCreateInfo-pNext-02830</code>) to enable <code>drawIndirectCount</code> cleanly alongside existing BDA/Float16Int8/MemoryModel features, and fix <code>acceleration_structure_instance_write</code> to load/call <code>vkGetAccelerationStructureDeviceAddressKHR</code>. Metal needs indirect command buffers or compute-compacted emulation.</li>
+      <li>Add capability flags for indirect-count, draw-parameters/cluster-ID path, image atomics strategy, ray query, RT pipeline, and later mesh shaders. Renderer code must query and fall back, never hard-fail on software or headless drivers.</li>
+      <li>Add BLAS update/compaction only when a measured dynamic workload in P5/P6 needs it. Do not widen the API speculatively in P1.</li>
+      <li>Every new command needs graph usages/barriers and dummy-driver behavior; bypassing the graph loses the safety model.</li>
+    </ul></div>
+    <div class="panel"><h3>Persistent GPU scene</h3><ul>
+      <li>Convert per-frame CPU instance submission into incrementally updated GPU instance/surface records for virtual content, while retaining current lists for legacy content and excluded sibling surfaces during migration.</li>
+      <li>Track both <code>transformed_aabb</code> and dirty-event-snapshotted <code>prev_transformed_aabb</code> (captured before <code>RendererSceneCull::_update_instance</code> overwrites it) plus stable IDs across frames for swept NextGI invalidation, per-instance SRC page tables, temporal history, streaming priority, post-v1 TLAS instances, and debug picking.</li>
+      <li>Free-list/compaction policy must handle scene unload, mesh replacement, skeleton changes, and editor reimport without GPU dangling IDs or un-dirtied vacated AABBs.</li>
+    </ul></div>
+    <div class="panel"><h3>Material binding — P0 decision between two models</h3><ul>
+      <li><strong>Option A, RD bindless extension:</strong> runtime descriptor arrays with partial binding/update-after-bind. Today Vulkan 1.2 features are only queried (never chained via <code>VkPhysicalDeviceVulkan12Features</code>), RD has no bindless feature flag, and <code>uniform_set_create</code>’s <code>_add_dependency</code> cascade-frees dependents when any bound texture is freed — so a global table requires an epoch/deferred-free descriptor path plus D3D12 descriptor-heap and Metal argument-buffer mappings.</li>
+      <li><strong>Option B, per-material classified dispatch:</strong> group visible clusters/pixels by material variant and run bounded Stage A/B compute dispatches reusing existing per-material uniform sets. No new descriptor model; cost scales with visible material count.</li>
+      <li>P0 benchmarks both on the material-equivalence matrix (§17 item 6) before committing §7.4/§11/§14 to either one. Under both options: GPU material records derive from <code>BaseMaterial3D</code>, texture residency cooperates with texture streaming, missing mips never sample invalid descriptors, and feature analysis is shared across eligibility, SRC capture, shadows, and editor warnings.</li>
+    </ul></div>
+    <div class="panel"><h3>Editor and observability</h3><ul>
+      <li>Viewport debug modes: cluster cut/error, page residency, visibility IDs, per-surface fallback reasons, SDF, SRC cards, WRC probes, screen probes, variance/history, RT proxy.</li>
+      <li>Import panel shows source triangles, clusters, DAG depth, pages, <code>.scn</code>/<code>.res</code> vs <code>.ngm</code> disk split (<code>retain_authored</code> vs <code>strip_authored_to_coarse</code>), estimated VRAM, build time, excluded surfaces, and proxy triangle count.</li>
+      <li>Runtime profiler scopes and counters are part of each phase exit gate: drawn clusters, wanted/resident pages, trace counts, dirty AABB/SRC updates, denoise time, fallback opaque pixel percentage.</li>
+      <li>One test project, owned by this program, becomes the visual language for every decision. No screenshot from an ad-hoc scene counts as a gate.</li>
+    </ul></div>
+  </div>
+</section>
+
+<section id="platforms">
+  <h2>10. Platform strategy</h2>
+  <table>
+    <thead><tr><th>Platform/driver</th><th>Sequence</th><th>v1 promise</th><th>Main work</th></tr></thead>
+    <tbody>
+      <tr><td>Windows/Linux Vulkan</td><td><strong>First (v1 gate)</strong></td><td>NextGeo + SDF NextGI. Performance &amp; HWRT comparator gated on <strong>the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code> Vulkan 1.4.357, calibrated Ada ceilings)</strong> + non-RT fallback on <strong><code>Intel UHD 770</code></strong>; Linux CPU/<code>llvmpipe</code> fallback on <strong>Linux VM</strong>. HWRT product tier is P5.</td><td>Consolidate <code>VkPhysicalDeviceVulkan12Features</code> (<code>drawIndirectCount</code>), fix TLAS <code>vkGetAccelerationStructureDeviceAddressKHR</code>, per-shader SPIR-V 1.4 opt-in if needed, indirect-count RD plumbing, HW raster visibility</td></tr>
+      <tr><td>macOS Metal (arm64)</td><td><strong>Local daily dev &amp; correctness gate</strong></td><td>Portable SDF NextGI + single-draw compute-expanded NextGeo must run with <strong>0 Metal validation errors and image parity on local Apple M5 Max</strong>; fallback Forward+/SDFGI remains user default until TBDR perf + P6 ICB/RT land.</td><td>Use existing argument buffers + Apple9+ 64-bit image atomics (<code>metal_device_properties.cpp:154</code>) and single-draw stream (avoiding <code>metal3_objects.cpp:1506-1521</code> CPU multi-draw loop); P6 adds Metal RT &amp; ICBs</td></tr>
+      <tr><td>Windows D3D12</td><td>Second desktop tier</td><td>NextGeo + SDF NextGI on the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code> + <code>Intel UHD 770</code>); no HWRT until DXR lands</td><td>Draw-identity path for zeroed base-instance sysvals; later P6 DXR BLAS/TLAS/SBT and full 10-stage <code>SPIRV_TO_MESA_STAGES</code> mapping in shader container; MSVC + MinGW builds</td></tr>
+      <tr><td>macOS x86_64</td><td>No new tier</td><td>Existing renderer behavior</td><td>Metal is not the root path there; capability gate must be clean</td></tr>
+      <tr><td>Mobile / Compatibility / Web</td><td>Excluded</td><td>Existing renderers and GI tiers unchanged</td><td>Default <code>retain_authored</code> preserves full <code>ArrayMesh</code> surfaces on unsupported tiers; export-time feature-tag stripping or opt-in <code>strip_authored_to_coarse</code> warns explicitly</td></tr>
+      <tr><td>XR / multiview</td><td>After mono validation</td><td>Fallback until per-view visibility/cuts are tested</td><td>Per-view IDs/cuts, stereo temporal history, crack/jitter tests</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn"><strong>Develop portably on M5 Max Metal, gate performance &amp; HWRT on RTX 4080 SUPER Vulkan:</strong> Metal ray tracing (<code>rendering_device_driver_metal.cpp:2382-2429</code>) and indirect-count (<code>metal3_objects.cpp:1523-1525</code>) are stubs, multi-draw indirect is a CPU loop, and no Metal 4 backend exists (<code>:57</code> forward declaration only) — yet SDF NextGI and single-draw compute-expanded NextGeo run cleanly on today’s Metal driver. Requiring 0-error Metal parity keeps the daily edit-compile-capture loop local on the 128 GB M5 Max while reserving ms/HWRT gates for the RTX 4080 SUPER machine.</div>
+</section>
+
+<section id="files">
+  <h2>11. File-level change map</h2>
+  <p>Filter the table by full repository-relative path or subsystem. “Modify” means a change is expected; exact line-level edits belong to phase design docs after P0 spikes.</p>
+  <input class="filter" id="fileFilter" type="search" placeholder="Filter paths… e.g. servers/rendering/renderer_rd, importer, vulkan, shader" aria-label="Filter file table">
+  <table id="fileTable">
+    <thead><tr><th>Action</th><th>Path / area</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>Modify</td><td><code>servers/rendering/rendering_device_commons.{h,cpp}</code>, <code>servers/rendering/rendering_device_enums.h</code></td><td>Capability flags for indirect-count, draw parameters, ray query, and Option A bindless (if chosen in P0); mesh-shader stages deferred to P6</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/rendering_device_driver.{h,cpp}</code>, <code>servers/rendering/rendering_device.{h,cpp}</code>, <code>servers/rendering/rendering_device_graph.{h,cpp}</code>, <code>servers/rendering/rendering_device_binds.{h,cpp}</code></td><td>Indirect-count commands, graph resource usages/barriers, Option A deferred-free descriptor lifetime if chosen in P0, optional BLAS update in P5/P6</td></tr>
+      <tr><td>Modify</td><td><code>drivers/vulkan/rendering_device_driver_vulkan.{h,cpp}</code>, <code>drivers/vulkan/rendering_shader_container_vulkan.{h,cpp}</code></td><td>Consolidate standalone KHR structs into <code>VkPhysicalDeviceVulkan12Features</code> (<code>drawIndirectCount</code>, optional descriptor indexing), enable <code>shaderDrawParameters</code> if chosen, load/call <code>vkGetAccelerationStructureDeviceAddressKHR</code> in <code>acceleration_structure_instance_write</code>, add per-shader SPIR-V 1.4 opt-in fallback if compute <code>rayQueryEXT</code> requires it</td></tr>
+      <tr><td>Modify</td><td><code>drivers/d3d12/rendering_device_driver_d3d12.{h,cpp}</code>, <code>drivers/d3d12/rendering_shader_container_d3d12.{h,cpp}</code></td><td>Capability honesty and draw-identity sysval handling in v1; P6 DXR implementation and full 10-stage <code>SPIRV_TO_MESA_STAGES</code> initialization</td></tr>
+      <tr><td>Modify</td><td><code>drivers/metal/rendering_device_driver_metal.{h,cpp}</code>, <code>drivers/metal/metal3_objects.{h,cpp}</code>, <code>drivers/metal/metal_device_properties.{h,cpp}</code></td><td>Portable v1 correctness support (argument buffers, Apple9+ 64-bit atomics, single-draw stream avoiding CPU multi-draw loop); P6 Metal acceleration structures/intersectors, ICB indirect-count, TBDR-tuned resolve</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/renderer_compositor_rd.{h,cpp}</code>, <code>servers/rendering/renderer_rd/renderer_scene_render_rd.{h,cpp}</code></td><td>Construct shared virtual-geometry and NextGI storages/effects; keep v1 inside <code>forward_plus</code></td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.{h,cpp}</code></td><td>Forced prepass, Stage A/B visibility/resolve split, Step 3b SSAO/SSCS/SSR placement, Step 1 velocity pre-clear + Step 7 <code>load_color=true</code> (<code>RD::DRAW_DEFAULT_ALL</code>) + skip <code>:2327-2330</code> motion clear (no <code>DRAW_IGNORE_ALL</code>), <code>using_nextgi</code> previous-color pyramid, dedicated post-<code>bake_cluster</code> NextGI call site, early shadow-view cluster cull before <code>_render_shadow_begin</code>, <code>_update_volumetric_fog</code> before Stage B, per-<code>(instance, surface, view)</code> legacy and <code>surface_shadow</code> suppression, auxiliary-view coarse fallback policy</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.{h,cpp}</code>, <code>servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl</code></td><td>Legacy forward consumption of NextGI buffers, <code>_render_material</code> SRC card capture &amp; <code>_render_sdfgi</code> voxelization hooks, forced guide outputs; keep compute resolve in dedicated shaders</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.{h,cpp}</code></td><td>Visibility ID targets, Stage A guides, SVGF histories/moments, previous-color pyramid lifetime under <code>using_nextgi</code>, MSAA/multiview lifetimes</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/storage_rd/material_storage.{h,cpp}</code>, <code>scene/resources/material.{h,cpp}</code></td><td>GPU material records, eligibility/<code>TIME</code> feature analysis, and P0b-selected binding path (Option A RD bindless table with deferred-free epochs or Option B per-material classified uniform-set dispatch)</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/storage_rd/mesh_storage.{h,cpp}</code></td><td>Keep GPU buffer upload intact under <code>retain_authored</code> (preserving <code>ArrayMesh::_get_surfaces</code> serializer &amp; <code>surface_get_arrays</code> readback), embedded coarse fallback interop, Stage-1 per-mesh card descriptors (radiance pages live per-instance in <code>next_gi</code>), and post-v1 P5 AS-input buffer flags / BLAS RIDs</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/rendering_server.{h,cpp}</code>, <code>servers/rendering/rendering_method.h</code>, <code>servers/rendering/dummy/storage/mesh_storage.{h,cpp}</code>, <code>servers/rendering/dummy/rasterizer_scene_dummy.{h,cpp}</code></td><td>Public NextGI settings and virtual-geometry storage APIs with complete dummy/default stubs</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/environment/renderer_gi.h</code>, <code>servers/rendering/storage/environment_storage.{h,cpp}</code></td><td><code>environment_set_nextgi</code> contracts and clean no-op behavior outside RD</td></tr>
+      <tr><td>Modify</td><td><code>scene/resources/environment.{h,cpp}</code></td><td>User-facing <code>nextgi_*</code> properties following <code>sdfgi_*</code> conventions</td></tr>
+      <tr><td>Modify</td><td><code>servers/rendering/renderer_rd/environment/fog.{h,cpp}</code>, <code>servers/rendering/renderer_rd/shaders/environment/volumetric_fog_process.glsl</code></td><td>Consume NextGI low-res <code>ambient_texture</code>/<code>gi_inject</code> before Stage B lighting resolve and legacy opaque</td></tr>
+      <tr><td>Modify</td><td><code>scene/resources/3d/importer_mesh.{h,cpp}</code></td><td><code>build_virtual_geometry()</code> beside <code>generate_lods()</code>/<code>create_shadow_mesh()</code>; Stage-2 SRC card descriptors and <code>retain_authored</code> / <code>strip_authored_to_coarse</code> handling</td></tr>
+      <tr><td>Modify</td><td><code>editor/import/3d/resource_importer_scene.{h,cpp}</code>, <code>editor/import/3d/resource_importer_obj.{h,cpp}</code></td><td><code>meshes/generate_virtual_geometry</code>, <code>virtual_geometry/fallback_mode</code>, one-<code>.ngm</code>-per-mesh generation and <code>r_gen_files</code> population for both scene/glTF/FBX and standalone <code>.obj</code> mesh imports; update option-map tests</td></tr>
+      <tr><td>Modify</td><td><code>modules/meshoptimizer/register_types.cpp</code>, <code>scene/resources/surface_tool.{h,cpp}</code></td><td>Meshlet/partition/bounds function hooks with clean module-disabled fallback</td></tr>
+      <tr><td>Modify</td><td><code>scene/resources/mesh.{h,cpp}</code> (<code>ArrayMesh</code>), <code>servers/rendering/renderer_scene_cull.{h,cpp}</code>, <code>servers/rendering/renderer_rd/storage_rd/utilities.{h,cpp}</code></td><td><code>VirtualGeometryData</code> attachment on existing mesh RID; dirty-event snapshot of <code>prev_transformed_aabb</code> before <code>_update_instance</code> overwrites it + swept shadow-caster invalidation; dynamic NextGI dirty-region dispatch in <code>RendererSceneCull</code> replacing camera/<code>FLAG_USES_BAKED_LIGHT</code>-only gating</td></tr>
+      <tr><td>Modify</td><td><code>editor/export/editor_export_platform.{h,cpp}</code>, <code>editor/export/editor_export_plugin.{h,cpp}</code>, <code>editor/file_system/editor_file_system.{h,cpp}</code></td><td>Export one <code>.ngm</code> sidecar per mesh via <code>[remap]</code> companions and deterministic <code>&lt;mesh_path&gt;.ngm</code> manifests for <code>save_to_file</code>/standalone <code>.res</code>/<code>.tres</code> meshes; optional export-time surface stripping per feature tag via <code>_customize_resource</code>; explicit hard error in <code>_encrypt_and_store_data</code> when <code>*.ngm</code> matches active encryption filters (never silent bypass)</td></tr>
+      <tr><td>Modify</td><td><code>.github/workflows/runner.yml</code>, <code>.github/workflows/static_checks.yml</code></td><td>Trim fork CI matrix to Linux/Windows/macOS editor+template builds + static checks, guard missing <code>HEAD~1</code> on shallow/initial history, and keep self-hosted GPU jobs off public PR triggers</td></tr>
+      <tr><td>Verify / test only</td><td><code>scene/3d/mesh_instance_3d.{h,cpp}</code>, <code>modules/gridmap/grid_map.{h,cpp}</code>, <code>scene/3d/multimesh_instance_3d.{h,cpp}</code>, <code>scene/3d/gpu_particles_3d.{h,cpp}</code>, <code>scene/3d/gpu_particles_collision_3d.{h,cpp}</code></td><td>Verify <code>MultiMesh</code>/particle on-demand fallback, <code>GridMap::make_baked_meshes</code> <code>INSTANCE_MESH</code> + lightmap UV2 preservation, <code>GPUParticlesCollisionHeightField3D</code> coarse-proxy view policy, and editor picking on intact <code>ArrayMesh</code> surfaces</td></tr>
+      <tr><td>Modify</td><td><code>core/config/project_settings.{h,cpp}</code></td><td>Register <code>rendering/global_illumination/nextgi/*</code> and geometry cache/page budgets under <code>rendering/limits/*</code>; regenerate class docs</td></tr>
+      <tr><td>Add</td><td><code>scene/resources/3d/virtual_geometry_data.{h,cpp}</code></td><td><code>VirtualGeometryData</code> sub-resource referenced by <code>ArrayMesh</code>: DAG header, embedded coarse fallback, fixed proxy, Stage-2 SRC card descriptors, <code>.ngm</code> path/UID</td></tr>
+      <tr><td>Add</td><td><code>modules/nextgeo/</code> (<code>register_types.{h,cpp}</code>, <code>SCsub</code>, <code>config.py</code>)</td><td>Offline DAG builder, border-locked group simplifier, <code>.ngm</code> page writer, import diagnostics</td></tr>
+      <tr><td>Add</td><td><code>servers/rendering/storage/virtual_mesh_storage.h</code>, <code>servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.{h,cpp}</code></td><td>GPU page arenas/cache, worker IO/decompression queue, cluster and persistent instance buffers</td></tr>
+      <tr><td>Add</td><td><code>servers/rendering/renderer_rd/shaders/nextgeo/</code> (<code>cluster_cull.glsl</code>, <code>hiz_pyramid.glsl</code>, <code>visibility_raster.glsl</code>, <code>material_resolve.glsl</code>)</td><td>Two-phase GPU cut selection, visibility raster, and Stage A/B material/lighting resolve</td></tr>
+      <tr><td>Add</td><td><code>servers/rendering/renderer_rd/environment/next_gi.{h,cpp}</code>, <code>servers/rendering/renderer_rd/shaders/environment/nextgi_*.glsl</code></td><td>v1 SDF + Stage-1/2 SRC + WRC + screen-probe solver, swept invalidation, and post-v1 P5 Vulkan HWRT tier</td></tr>
+      <tr><td>Add</td><td><code>servers/rendering/renderer_rd/effects/denoise.{h,cpp}</code>, <code>servers/rendering/renderer_rd/shaders/effects/svgf_*.glsl</code></td><td>Diffuse/specular temporal-spatial SVGF denoiser and debug visualizations</td></tr>
+      <tr><td>Add</td><td><code>core/io/resource_format_ngm.{h,cpp}</code> (or <code>scene/resources/3d/virtual_geometry_stream.{h,cpp}</code>)</td><td>Versioned paged <code>.ngm</code> reader with <code>FileAccessPack::seek</code> fast path and non-seekable/encrypted stream detection</td></tr>
+      <tr><td>Add</td><td><code>tests/rendering/test_nextgeo.h</code>, <code>tests/rendering/test_nextgi.h</code>, plus GodotNext GPU test project</td><td>CPU contract doctests and reproducible GPU visual/timing harness; repository path finalized before P1 code lands</td></tr>
+      <tr><td>No change intended</td><td><code>scene/3d/lightmap_gi.{h,cpp}</code>, <code>scene/3d/voxel_gi.{h,cpp}</code></td><td>Remain lower/reference tiers; preserved <code>ArrayMesh</code> surfaces ensure <code>LightmapGI::bake</code> continues working unmodified</td></tr>
+    </tbody>
+  </table>
+  <p class="small">Build integration follows Godot’s existing rules: a module directory needs <code>register_types.h</code>, <code>SCsub</code>, and <code>config.py</code>; runtime code cannot be gated as editor-only. Any ClassDB/project-setting addition requires documentation regeneration and compatibility handling for renamed import options.</p>
+</section>
+
+<section id="steps">
+  <h2>12. Phased work plan</h2>
+  <p>Phases are dependency-ordered and staged as <strong>two vertical slices</strong>: <strong>Slice 1 — NextGI first (<code>P0a → P1 → P4</code>)</strong> ships dynamic GI and SVGF denoising on existing <code>ArrayMesh</code> content with zero NextGeo runtime code, and <strong>Slice 2 — NextGeo second (<code>P0b → P2 → P3</code>)</strong> starts runtime geometry work only after P1 passes its gate (while <code>P0b</code> offline/microbenchmark spikes may run in parallel). Every phase ends with a <strong>numerically failable go/no-go gate</strong>; P0 calibration on the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code>) locks clocks and calibrated Ada ceilings, never relaxing §2’s red-line ceilings without a documented plan revision.</p>
+  <div class="gantt" aria-label="Relative phase sequence">
+    <div class="phase"><span class="name">P0a NextGI spikes</span><div class="track"><span class="bar" style="left:0%;width:14%">P0a gates P1</span></div></div>
+    <div class="phase"><span class="name">P1 NextGI shell</span><div class="track"><span class="bar" style="left:14%;width:24%">SDF + SRC/WRC + cull</span></div></div>
+    <div class="phase"><span class="name">P4 Denoiser</span><div class="track"><span class="bar alt" style="left:26%;width:24%">SVGF + glossy (Slice 1 done)</span></div></div>
+    <div class="phase"><span class="name">P0b NextGeo spikes</span><div class="track"><span class="bar" style="left:10%;width:16%">P0b gates P2/P3</span></div></div>
+    <div class="phase"><span class="name">P2 NextGeo assets</span><div class="track"><span class="bar" style="left:38%;width:20%">DAG + .ngm + PCK</span></div></div>
+    <div class="phase"><span class="name">P3 GPU draw</span><div class="track"><span class="bar" style="left:54%;width:22%">Cull + Stage A/B</span></div></div>
+    <div class="phase"><span class="name">P5 HWRT (post-v1)</span><div class="track"><span class="bar late" style="left:70%;width:16%">Vulkan RT — not in v1</span></div></div>
+    <div class="phase"><span class="name">P6 Scale-out</span><div class="track"><span class="bar late" style="left:82%;width:18%">Drivers, VSM, mesh shaders</span></div></div>
+  </div>
+
+  <h3>P0a (NextGI &amp; harness spikes — gates P1/P4) and P0b (NextGeo spikes — gates P2/P3)</h3>
+  <ul>
+    <li><strong>P0a — Fleet baseline, capture harness &amp; ray-query smoke:</strong> build editor from <code>7cfeb47</code> across local <strong>Apple M5 Max</strong> (macOS arm64 Metal), <strong>RTX 4080 SUPER machine</strong> (Windows 11, provisioning MSVC + Python + SCons + Vulkan SDK for <code>RTX 4080 SUPER</code> <code>device 1</code> and <code>Intel UHD 770</code> <code>device 0</code>), and <strong>Linux VM</strong> (Linux <code>llvmpipe</code> CPU/fallback smoke); build the §13.3 test project + Session-1 console <code>--write-movie --fixed-fps --gpu-index</code> capture harness; fix Vulkan TLAS <code>vkGetAccelerationStructureDeviceAddressKHR</code> and execute a compute <code>rayQueryEXT</code> smoke shader (opting into SPIR-V 1.4 per-shader only if <code>spirv-val</code>/drivers reject 1.3).</li>
+    <li><strong>P0a — End-to-end NextGI &amp; HWRT comparator (no P2 or P0b dependency):</strong> reusing existing <code>_render_material</code> (<code>:3061</code>) for card capture and <code>_render_sdfgi</code> (<code>:3203</code>) for voxelization on legacy <code>ArrayMesh</code> scenes (with per-instance SRC pages + WRC), run <code>Color Box Room</code>, single-mesh <code>Concave Courtyard</code>, and <code>Moving Light + Door</code> through (a) screen trace + SDF + SRC + WRC (on both RTX 4080 SUPER Vulkan and M5 Max Metal) and (b) screen trace + Vulkan compute ray-query HWRT + SRC/WRC on the RTX 4080 SUPER machine.</li>
+    <li><strong>P0a — Guide &amp; velocity preservation spike (Vulkan + Metal):</strong> verify forced prepass + Step-1 velocity pre-clear + Step-7 <code>load_color = true</code> (<code>RD::DRAW_DEFAULT_ALL</code>) + skipping <code>render_forward_clustered.cpp:2327-2330</code> preserves motion vectors across FSR2/TAA on <em>both</em> RTX 4080 SUPER Vulkan and M5 Max Metal TBDR (with zero <code>RD::DRAW_IGNORE_ALL</code> calls); freeze NextGI §6.3 contracts to unlock P1.</li>
+    <li><strong>P0b — NextGeo &amp; material-resolve spikes (measured before P2/P3 start):</strong> consolidate <code>VkPhysicalDeviceVulkan12Features</code> (<code>drawIndirectCount</code>) and benchmark indirect-count + (a) <code>shaderDrawParameters</code> vs (b) single-draw compute-expanded streams (the sole portable path on Metal); benchmark visibility IDs + Stage A/B resolve vs software micro-raster, fat G-buffer, and forward shading; benchmark Option A (RD bindless with deferred-free epochs) vs Option B (per-material classified dispatch); and run the 1M/10M-triangle meshoptimizer border-locked DAG prototype on the 128 GB M5 Max.</li>
+  </ul>
+  <p><strong>Failable exit gates:</strong>
+    (1) <em>Validation &amp; Metal portability (P0a/P0b):</em> <strong>0 Vulkan validation-layer / <code>spirv-val</code> errors</strong> on the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code> + <code>Intel UHD 770</code> fallback) and <strong>0 Metal validation errors + FLIP mean ≤0.02 parity vs Vulkan</strong> on local M5 Max for portable SDF NextGI and single-draw NextGeo paths;
+    (2) <em>NextGI quality &amp; cost (P0a Gate 5):</em> legacy-mesh NextGI spike hits <strong>≤1.2 ms raw GPU time on <code>RTX 4080 SUPER</code> at 1080p</strong> (scaling to ≤3.0 ms raw / ≤4.0 ms with SVGF on RTX 3060-tier), <strong>≤20% diffuse patch error vs <code>LightmapGI</code>/path-traced reference</strong>, <strong>≥85% near-field SRC card-hit coverage</strong> on both <code>Color Box Room</code> and single-mesh <code>Concave Courtyard</code>, <strong>≤25% convergence error within ≤10 frames</strong> on <code>Moving Light + Door</code>, and <strong>≤5% sealed-room leak ratio</strong> — SDF remains v1’s cross-vendor default whenever it satisfies these bounds within its ms ceiling (even if <code>RTX 4080 SUPER</code> RT cores trace faster in raw ms);
+    (3) <em>Cluster submit (P0b):</em> indirect-count / single-draw stream cull+compact+submit overhead <strong>≤0.15 ms GPU on <code>RTX 4080 SUPER</code></strong> (≤0.35 ms mid-range target) and <strong>≤0.20 ms CPU</strong> at 100k candidate clusters;
+    (4) <em>Visibility resolve (P0b):</em> visibility + Stage A/B resolve costs <strong>≤1.05× fat G-buffer GPU ms</strong> at 1080p/1440p on <code>RTX 4080 SUPER</code>;
+    (5) <em>Offline DAG (P0b):</em> 10M-triangle DAG builds in <strong>≤180 s CPU wall time and ≤8 GiB peak RAM</strong> on M5 Max with <strong>0 border-crack edges</strong> and <code>parent_error &gt;= max(child_error)</code> on <strong>100% of internal nodes</strong>.</p>
+  <table>
+    <thead><tr><th>P0 outcome branch</th><th>Trigger</th><th>Pre-committed engineering pivot (no silent gate relaxation)</th></tr></thead>
+    <tbody>
+      <tr><td>SDF passes quality + ms</td><td>P0a Gate 5 passes on convex + concave scenes</td><td>Proceed to P1/P4 with cross-vendor SDF + per-instance SRC + WRC; keep HWRT in P5.</td></tr>
+      <tr><td>6-card SRC fails concave coverage (&lt;85%)</td><td><code>Concave Courtyard</code> misses interior faces</td><td>Promote multi-box OBB / normal-clustered interior card split into Stage-1 SRC before P1; re-run Gate 5.</td></tr>
+      <tr><td>SDF fails leak/accuracy after brick/card tuning, HWRT passes</td><td>SDF &gt;5% leak or &gt;20% ref error within ms ceiling, while HWRT passes</td><td>Pause P1; explicitly revise §3/§10 to scope NextGI High tier to RT-capable desktop GPUs (pulling Vulkan RT + DXR ahead, keeping WRC/SDFGI fallback on non-RT/Mac).</td></tr>
+      <tr><td>Both SDF and HWRT fail quality or ms ceiling</td><td>Neither solver meets Gate 5 within §2 ceilings</td><td>Stop feature coding; isolate trace vs SRC-shading vs gather bottleneck and hold an explicit §2/§3 scope review.</td></tr>
+      <tr><td>Visibility + Stage A/B &gt;1.05× fat G-buffer</td><td>P0b Gate 4 fails across views on <code>RTX 4080 SUPER</code></td><td>Keep GPU cluster culling + single-draw/indirect raster (D2), but rasterize clusters directly into thin/fat G-buffer targets instead of software visibility-ID material fetch.</td></tr>
+    </tbody>
+  </table>
+
+  <h3>P1 — NextGI inside Forward+ (Slice 1; gated on P0a only, zero NextGeo runtime code)</h3>
+  <ul>
+    <li>Add Environment/RenderingServer/ProjectSettings plumbing and NextGI’s dedicated post-<code>bake_cluster</code> call site writing <code>RB_TEX_AMBIENT</code> / <code>RB_TEX_REFLECTION</code> (keeping legacy SDFGI/VoxelGI at <code>gi.process_gi()</code>).</li>
+    <li>Implement the <strong>Surface Radiance Cache (SRC)</strong> with per-mesh Stage-1 card descriptors (including concave interior split if triggered in P0a) and a budgeted <strong>per-instance</strong> radiance page atlas with solid-angle priority + LRU eviction to WRC, the <strong>World Radiance Cache (WRC)</strong> probe clipmap, SDF cascade tracing, and screen-probe final gather; auto-disable SSIL while keeping the previous-frame color pyramid active under <code>using_nextgi</code>.</li>
+    <li>Implement <strong>swept dynamic invalidation</strong>: snapshot <code>prev_transformed_aabb</code> at dirty-event time before <code>RendererSceneCull::_update_instance</code> overwrites it, project swept shadow-caster volumes plus a bounded background SRC refresh ring onto static-receiver instance cards, and extend <code>RendererSceneCull::_render_scene</code> dirty-region dispatch beyond camera-scroll and <code>FLAG_USES_BAKED_LIGHT</code>.</li>
+    <li>Wire <code>_render_material</code> / GPU material card shading and enforce §6.1’s forced prepass, Step 3b SSAO/SSCS/SSR placement, <code>_update_volumetric_fog</code>-before-opaque pass order, and Step 7 <code>load_color = true</code> (<code>RD::DRAW_DEFAULT_ALL</code>) + skipped <code>:2327-2330</code> velocity clear.</li>
+  </ul>
+  <p><strong>Failable exit gate (functional &amp; budget headroom, pre-SVGF; must pass before P2/P3 runtime coding begins):</strong> (1) static scenes hold <strong>≤20% mean diffuse error vs <code>LightmapGI</code>/path-traced reference</strong> and <strong>≥85% SRC card-hit coverage</strong> on <code>Color Box Room</code> + <code>Concave Courtyard</code>, while moving sun/local light, emissive toggle, and opening door converge within <strong>≤25% of the static NextGI endpoint within ≤10 frames</strong> with <strong>0 rebakes</strong> and <strong>≤5% sealed-room leak ratio</strong>; (2) raw NextGI trace + per-instance SRC/WRC/SDF update runs in <strong>≤1.2 ms GPU on the RTX 4080 SUPER machine <code>RTX 4080 SUPER</code> at 1080p</strong> (scaling to ≤3.0 ms mid-range, reserving ≥1.0 ms for P4 SVGF) and <strong>0 Metal validation errors + FLIP ≤0.02</strong> on M5 Max; (3) SVGF guide buffers achieve <strong>100% opaque pixel coverage</strong> with intact motion vectors under FSR2/TAA/MetalFX; (4) with NextGI off (default), legacy Forward+/SDFGI/VoxelGI/LightmapGI scenes show <strong>≤2% GPU frame-time delta</strong> and <strong>FLIP mean ≤0.005</strong> vs P0a baselines.</p>
+
+  <h3>P2 — NextGeo import, export, and storage (Slice 2; gated on P1 + P0b)</h3>
+  <ul>
+    <li>Wire meshoptimizer meshlet/partition hooks across <code>ImporterMesh</code>, <code>ResourceImporterScene</code>, and <code>ResourceImporterOBJ</code>; implement the DAG builder, <code>VirtualGeometryData</code> (embedded coarse renderer fallback, fixed shadow/RT proxy, Stage-2 per-cluster-group SRC card descriptors) with <code>retain_authored</code> default (keeping editor GPU buffer upload intact so <code>ArrayMesh::_get_surfaces</code> and <code>surface_get_arrays</code> never read back empty buffers), and <strong>one-<code>.ngm</code>-per-mesh</strong> v1.</li>
+    <li>Implement <code>.ngm</code> PCK export via <code>EditorExportPlatform</code> / built-in export plugin (<code>[remap]</code> companions for imported assets + deterministic <code>&lt;mesh_path&gt;.ngm</code> manifests for <code>save_to_file</code>/standalone <code>.res</code>/<code>.tres</code> assets, optional export-time surface stripping per feature tag in <code>_customize_resource</code>, and an explicit hard export error in <code>_encrypt_and_store_data</code> if <code>*.ngm</code> matches active encryption filters).</li>
+    <li>Implement GPU page arenas, worker-thread IO/decompression, VRAM budget/eviction, root pinning, and embedded coarse fallback interop.</li>
+    <li>Add CPU doctests (error monotonicity, locked borders, corrupt/version-mismatched pages, exported-PCK seeking, encrypted-PCK error enforcement) <em>plus</em> a <strong>GPU-backed editor round-trip test</strong> (import → save → reload → <code>LightmapGI::bake</code> + <code>create_trimesh_shape()</code>) that exercises real <code>MeshStorage::mesh_get_surface</code> readback rather than <code>RendererDummy</code>.</li>
+  </ul>
+  <p><strong>Failable exit gate (asset integrity, import cost, and PCK streaming):</strong> (1) repeated imports produce <strong>bit-identical SHA-256</strong> per-mesh <code>.ngm</code> files, <code>parent_error &gt;= max(child_error)</code> holds on <strong>100% of nodes</strong>, and topological border checks report <strong>0 unlocked seam edges</strong>; (2) 10M-triangle stress asset imports in <strong>≤120 s wall time and ≤6 GiB peak RSS</strong> with <code>.ngm</code> size <strong>≤1.5× raw uncompressed source mesh bytes</strong>; (3) <strong>0 crashes/leaks</strong> across 100% of corrupt/truncated/version-mismatch page doctests, and encrypted-PCK export without a <code>*.ngm</code> exclude filter fails cleanly with an actionable error (never silently writing unencrypted data or whole-file RAM buffers); (4) exported release PCKs (scene imports, <code>.obj</code> imports, and <code>save_to_file</code> external <code>.res</code> meshes) stream a ≥256 MiB working set inside a <strong>128 MiB cache budget</strong> with <strong>≤0.5 ms/frame</strong> main-thread IO dispatch, while the <strong>GPU-backed</strong> import → save → reload → <code>LightmapGI::bake</code> round-trip on <code>retain_authored</code> meshes yields <strong>non-empty surfaces and FLIP mean ≤0.005</strong> vs non-virtualized <code>ArrayMesh</code>.</p>
+
+  <h3>P3 — GPU-driven visibility path</h3>
+  <ul>
+    <li>Implement persistent GPU instance records, two-phase GPU Hi-Z cluster cull/compact, P0b’s chosen draw-identity submission (single-draw compute-expanded stream on Metal), visibility + velocity raster, Stage A material fetch, Step 3b SSAO/SSCS/SSR handoff, and Stage B lighting + 3D <code>fog_map</code> resolve.</li>
+    <li>Enforce per-<code>(instance, surface, view)</code> exclusive dispatch in <code>RenderForwardClustered</code> (suppressing legacy draws, discrete LODs, and <code>surface_shadow</code> only on virtualized surfaces while preserving sibling alpha/custom surfaces on the same <code>ArrayMesh</code>); wire Stage-2 SRC card descriptors into NextGI’s per-instance page allocator.</li>
+    <li>Dispatch dedicated coarser cluster cuts to directional/positional shadow views <em>before</em> <code>_render_shadow_begin</code>/<code>_render_shadow_end</code> batch draw lists, and route auxiliary <code>INSTANCE_GEOMETRY_MASK</code> captures (<code>GPUParticlesCollisionHeightField3D</code>, <code>ReflectionProbe</code>, SDF/material captures) to resident coarse fallback/proxy geometry.</li>
+    <li>Validate MSAA fallback, FSR2/TAA/MetalFX velocity preservation (<code>load_color = true</code> + skipped <code>:2327-2330</code> clear), SSS/specular merge, volumetric fog, multiview fallback, and double-precision camera-relative transforms across RTX 4080 SUPER Vulkan/D3D12 and M5 Max Metal.</li>
+  </ul>
+  <p><strong>Failable exit gate:</strong> (1) Dense City Blocks (≥10M source triangles, working set ≥2× cache budget) meets calibrated Ada ceilings of <strong>≤0.8 ms cull+Hi-Z+visibility</strong> and <strong>≤1.0 ms Stage A+B resolve</strong> at 1080p on the RTX 4080 SUPER machine <code>RTX 4080 SUPER</code> (≤2.0 ms / ≤2.5 ms mid-range target), at <strong>≤1.0× discrete-LOD GPU frame time</strong>, plus <strong>0 Metal validation errors</strong> on M5 Max; (2) <strong>0 crack pixels</strong>, <strong>0 missing-geometry hole pixels</strong>, and <strong>0 double-drawn/missing mixed-material surfaces</strong>, with Slow IO Flight holding <strong>p99 frame time ≤2.0× median</strong> and <strong>GPU upload copy ≤1.0 ms/frame</strong>; (3) material equivalence hits <strong>FLIP mean ≤0.05</strong> against forward reference; (4) unsupported opaque fallback covers <strong>&lt;20% of opaque screen pixels</strong> in Dense City Blocks — <strong>≥20% fails the P3 gate as a scope failure, never a warning</strong>.</p>
+
+  <h3>P4 — SVGF denoiser and reflections (completes Slice 1 on legacy meshes; re-verified with P3)</h3>
+  <ul>
+    <li>Add persistent guide/history/moments buffers; implement diffuse/specular temporal accumulation with depth/normal/ID disocclusion rejection and variance-guided spatial filtering.</li>
+    <li>Upgrade reflections to screen → SDF + SRC/WRC traces with roughness-aware cone/direction sampling, keeping <code>ReflectionProbe</code> for misses and unsupported tiers.</li>
+    <li>Add firefly clamps, blue-noise sample rotation, and golden temporal captures for camera cuts, moving lights, opening doors, and roughness sweeps.</li>
+  </ul>
+  <p><strong>Failable exit gate:</strong> (1) combined NextGI + SVGF runs in <strong>≤1.6 ms GPU on the RTX 4080 SUPER machine <code>RTX 4080 SUPER</code> at 1080p</strong> (≤4.0 ms mid-range target) and total Dense City + GI frame time is <strong>≤6.6 ms Ada / ≤16.6 ms mid-range (p95)</strong>, with <strong>0 Metal validation errors + FLIP ≤0.02</strong> on M5 Max; (2) static-scene frame-to-frame luminance standard deviation drops by <strong>≥80% vs P1 raw output</strong> to <strong>≤1.5% relative luminance σ</strong> on diffuse probe patches without violating ground-truth accuracy (<strong>≤20% diffuse error vs reference</strong>) or dynamic lag (<strong>≤25% error within ≤10 frames</strong> on Moving Light + Door and <strong>≤10% disocclusion ghost-trail error after 4 frames</strong> on camera cuts/moving occluders); (3) Roughness Corridor (<code>roughness ≤0.4</code>) resolves off-screen emissives within <strong>≤30% mean radiance error</strong> vs high-sample reference.</p>
+
+  <h3>P5 — Vulkan HWRT quality tier (post-v1)</h3>
+  <ul>
+    <li>Build BLAS/TLAS from the <em>fixed import-time</em> NextGeo RT proxy LODs (never view-dependent raster cuts) and supported legacy static meshes with AS-input buffer flags; use compute ray queries for diffuse probe and glossy reflection traces.</li>
+    <li>Add optional direct-hit shading only where GPU material-record evaluation (and Option A bindless access, if selected in P0) proves equivalent to forward shading.</li>
+    <li>Compare SDF vs HWRT quality/cost by distance and roughness; set automatic tier thresholds from captured error/ms curves.</li>
+  </ul>
+  <p><strong>Failable exit gate:</strong> (1) HWRT lowers Color Box Room sealed thin-wall leak luminance to <strong>≤1% of lit-side luminance</strong> and reduces <code>roughness ≤0.3</code> glossy reflection error by <strong>≥35% vs v1 SDF traces</strong>; (2) NextGI + SVGF in HWRT mode runs in <strong>≤6.0 ms GPU</strong> at 1080p on the reference RT GPU while maintaining <strong>≤10-frame</strong> dynamic convergence; (3) non-RT or Apple/D3D12 hardware selects v1 SDF with <strong>0 validation errors and 0% frame-time overhead</strong>.</p>
+
+  <h3>P6 — Scale-out workstreams (post-v1 unless separately funded)</h3>
+  <ul>
+    <li>D3D12 DXR implementation + 10-stage <code>SPIRV_TO_MESA_STAGES</code> shader-container support; Metal acceleration structures, ICB indirect submission, and TBDR-specific resolve.</li>
+    <li>Virtual Shadow Maps with page invalidation by view/light/residency.</li>
+    <li>Mesh/task shader stages through RenderingDevice, shader containers, translators, and all drivers.</li>
+    <li>Skinning/deformation, alpha-tested foliage, animated materials, <code>MultiMesh</code>/particles/decals as first-class virtual consumers, and multiview support.</li>
+  </ul>
+  <p><strong>Gate:</strong> each workstream gets its own numeric design/estimate after v1 instrumentation exists. None is bundled into a silent “polish” phase.</p>
+</section>
+
+<section id="validation">
+  <h2>13. Validation plan</h2>
+  <p>The snapshot has doctest CPU coverage but no GPU pixel/golden-image renderer harness. Building that harness is P0a item 2 work. Because <code>--headless</code> disables rendering (and uses <code>RendererDummy::MeshStorage</code>, which hides GPU buffer readback bugs), GPU captures run windowed/offscreen via <code>--write-movie</code> + <code>--fixed-fps</code>: locally on <strong>Apple M5 Max Metal</strong> for fast daily parity checks, and remotely inside <strong>the RTX 4080 SUPER machine’s active Windows 11 Session-1 console</strong> (dispatched via interactive Session-1 task runner with explicit <code>--gpu-index</code> to select <code>RTX 4080 SUPER</code> <code>device 1</code> vs <code>Intel UHD 770</code> <code>device 0</code>, since raw SSH Session 0 cannot create desktop swapchains). <strong>Linux VM</strong> runs Linux x86_64 C++ builds, doctests, and Mesa <code>llvmpipe</code> software-Vulkan fallback smoke tests only.</p>
+
+  <h3>13.1 Standard repository &amp; CI gates</h3>
+  <pre><code># Local daily dev &amp; Metal correctness gate (Apple M5 Max, 128 GB RAM):
+scons platform=macos target=editor dev_mode=yes arch=arm64
+
+# Named GPU perf / HWRT / D3D12 gate host (the RTX 4080 SUPER machine, Windows 11, RTX 4080 SUPER + Intel UHD 770):
+scons platform=windows target=editor dev_mode=yes d3d12=yes
+
+# Linux CPU / llvmpipe fallback smoke host (Linux VM, x86_64):
+scons platform=linuxbsd target=editor dev_mode=yes
+
+./bin/godot.&lt;platform&gt;.editor.&lt;arch&gt; --headless --test --force-colors
+./bin/godot.&lt;platform&gt;.editor.&lt;arch&gt; --headless --test --force-colors --test-case='*NextGeo*'
+./bin/godot.&lt;platform&gt;.editor.&lt;arch&gt; --headless --test --force-colors --test-case='*NextGI*'
+./bin/godot.&lt;platform&gt;.editor.&lt;arch&gt; --doctool --headless
+git diff --exit-code -- doc/classes &amp;&amp; git ls-files --others --exclude-standard -- doc/classes | (! grep .)</code></pre>
+  <ul>
+    <li>Template gates: <code>target=template_release</code> plus a minimal build with default modules off / 3D disabled where CI already exercises that shape, proving no editor-only symbols leak into runtime code.</li>
+    <li><strong>Fork CI hygiene:</strong> trim <code>.github/workflows/runner.yml</code> to Linux, Windows, and macOS editor/template builds + static checks (instead of upstream’s 9-workflow matrix), guard missing <code>HEAD~1</code> on shallow/single-commit clones in <code>.github/workflows/static_checks.yml</code>, and <strong>never attach self-hosted GPU runners (RTX 4080 SUPER) to public PR triggers</strong> on <code>Legoless/GodotNext</code> (use manual dispatch or SSH-triggered gate scripts only).</li>
+    <li>If ClassDB API changes, run the repository’s extension API validation script used by CI.</li>
+    <li>Windows covers Vulkan and D3D12 on both <code>RTX 4080 SUPER</code> and <code>Intel UHD 770</code>; Linux capability failures degrade cleanly on the Linux VM’s <code>llvmpipe</code> rather than aborting.</li>
+    <li>No skipped tests: a capability-specific test either asserts the fallback contract or is a separate hardware-gated test-project case with recorded machine/GPU/driver.</li>
+  </ul>
+
+  <h3>13.2 New CPU/doctest &amp; GPU round-trip coverage</h3>
+  <ul>
+    <li>DAG: parent error monotonicity, locked-border crack detection, per-surface material segregation, deterministic SHA-256 output, degenerate/non-indexed input behavior.</li>
+    <li>Format &amp; export: per-mesh <code>.ngm</code> round-trip, truncated/corrupt/version-mismatched pages, root-page pinning, eviction order under a tiny budget, exported-PCK packing for <code>ResourceImporterScene</code>, <code>ResourceImporterOBJ</code>, and <code>save_to_file</code> external <code>.res</code> meshes, plus explicit hard-error enforcement in <code>_encrypt_and_store_data</code> when <code>*.ngm</code> is not excluded from active PCK encryption.</li>
+    <li><strong>GPU-backed import/save/bake round-trip (mandatory because <code>RendererDummy</code> masks missing GPU buffers):</strong> on a real RenderingDevice driver (M5 Max Metal and RTX 4080 SUPER Vulkan), import a virtualized mesh under <code>retain_authored</code> → save/resave <code>.scn</code>/<code>.res</code> (exercising <code>ArrayMesh::_get_surfaces</code> → <code>MeshStorage::mesh_get_surface</code>) → reload → verify non-empty <code>surface_get_arrays()</code>, <code>create_trimesh_shape()</code>, and <code>LightmapGI::bake</code> FLIP ≤0.005, plus opt-in/export-time coarse stripping behavior.</li>
+    <li>Invalidation &amp; dispatch contracts: per-<code>(instance, surface, view)</code> mixed-material eligibility, dirty-event-snapshotted <code>prev_transformed_aabb</code> + <code>transformed_aabb</code> union, per-instance SRC page eviction/WRC fallback, swept shadow-caster static-receiver card dirtying, and dummy RenderingServer/driver fallback behavior.</li>
+    <li>Material eligibility: each fallback reason produced once by a minimal fixture; editor warning text and runtime counter agree.</li>
+  </ul>
+
+  <h3>13.3 GPU test project scenes</h3>
+  <table>
+    <thead><tr><th>Scene</th><th>Purpose</th><th>Pass evidence</th></tr></thead>
+    <tbody>
+      <tr><td>Color Box Room</td><td>Ground-truth diffuse accuracy (≤20% error vs LightmapGI/path-traced ref), sealed thin-wall leaks (≤5% v1 / ≤1% P5), emissive bounce</td><td>Fixed-camera captures vs baked LightmapGI + path-traced reference; leak probes/debug views</td></tr>
+      <tr><td>Concave Courtyard</td><td>Single-mesh concave interior/U-room SRC coverage (≥85% card-hit rate; catches 6-AABB-card blindness) + multi-instance SRC page eviction</td><td>Card-hit coverage counter, per-instance SRC page residency/LRU trace, diffuse error ≤20% vs reference</td></tr>
+      <tr><td>Moving Light + Door</td><td>Snapshotted swept AABB + static-receiver shadow invalidation (≤25% error in ≤10 frames)</td><td>Frame sequence, patch luminance trace, history-length/variance capture</td></tr>
+      <tr><td>Roughness Corridor</td><td>Glossy reflection range (≤30% error at <code>roughness ≤0.4</code>) and off-screen sources without SSR</td><td>Roughness matrix capture per GI tier with SSR on and off</td></tr>
+      <tr><td>Dense City Blocks</td><td>10M+ tris, working set ≥2× cache, thousands of instanced meshes stressing per-instance SRC budget, Hi-Z, shadow cuts, ≤6.6 ms Ada / ≤16.6 ms mid-range frame</td><td>Cluster/page + per-instance SRC stats, GPU pass timings on the RTX 4080 SUPER machine, 0-crack flight capture, &lt;20% fallback check</td></tr>
+      <tr><td>Exclusion Matrix</td><td>Mixed opaque+glass <code>ArrayMesh</code>, custom shaders, skinning, stencil, <code>next_pass</code>, <code>MultiMesh</code>, octant + baked <code>GridMap</code>, particles, <code>GPUParticlesCollisionHeightField3D</code>, animated <code>TIME</code> material</td><td>Per-surface fallback overlay; 0 holes, 0 double draws, intact FSR2/TAA/MetalFX velocity on Vulkan + Metal</td></tr>
+      <tr><td>Fog + Emissive Street</td><td>Pre-Stage-B volumetric fog GI contract and emissive fireflies</td><td>Virtual vs legacy fog parity, fog on/off energy comparison, denoise debug views</td></tr>
+      <tr><td>Slow IO Flight</td><td>Late/missing geometry pages and exported-PCK streaming</td><td>Injected IO delay + PCK run; parent/coarse fallback visible, p99 ≤2.0× median</td></tr>
+    </tbody>
+  </table>
+  <p>Golden-image comparison reports FLIP/PSNR image difference and frame-to-frame luminance σ against §2/§12 thresholds across <strong>the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code> Vulkan/D3D12 + <code>Intel UHD 770</code> fallback)</strong> and <strong>local Apple M5 Max Metal</strong>.</p>
+</section>
+
+<section id="estimates">
+  <h2>14. Estimates and staffing</h2>
+  <p>Evidence supports relative sizing. Absolute dates require a named team and P0 measurements. The scenario below is an explicit planning assumption, not a researched fact.</p>
+  <table>
+    <thead><tr><th>Workstream</th><th>Size</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>Vulkan 1.2 / TLAS fixes; indirect-count RD plumbing; settings/API shells; scene+OBJ import options; meshoptimizer hooks</td><td><span class="tag yes">S</span></td><td>Localized driver fixes or existing in-tree substrate</td></tr>
+      <tr><td>DAG builder + <code>.ngm</code> + PCK exporter; page cache; cull/Hi-Z; Vulkan ray-query probes (post-v1 P5)</td><td><span class="tag part">M EACH</span></td><td>New subsystem, mostly one driver/renderer at first</td></tr>
+      <tr><td>SDF NextGI solver + Stage-1/2 SRC + WRC + swept/shadow invalidation</td><td><span class="tag no">L</span></td><td>Solver and dynamic invalidation are the subsystem; sized L until the P0 spike reports measurements</td></tr>
+      <tr><td>Material binding &amp; resolve (Option A bindless or Option B classified dispatch); SVGF; Stage A/B resolve correctness; shadow views</td><td><span class="tag no">L EACH</span></td><td>Cross-cutting contracts and high regression surface regardless of which binding option wins P0</td></tr>
+      <tr><td>D3D12 DXR; Metal RT/ICB; mesh-shader toolchain; VSM; skinned/alpha/MultiMesh virtual coverage</td><td><span class="tag no">L / PROGRAM</span></td><td>From-scratch driver/toolchain or content-class work</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><strong>Actual execution model — solo lead + AI agents (staged by vertical slice):</strong> GodotNext is executed by a single human lead orchestrating parallel AI coding/research agents across the M5 Max, the RTX 4080 SUPER machine, and the Linux VM — not a four-person traditional engine team (where 3 senior rendering engineers + 1 tools engineer would still take ~6–8 weeks for P0 and 9–15 months through P4). While AI agents compress boilerplate, C++ plumbing, doctests, and offline DAG tooling substantially, <strong>GPU frame-graph debugging, visual artifact diagnosis, and architectural review remain bottlenecked on one human decision loop</strong>. That is why §12 enforces strict vertical-slice staging — finishing and gating <strong>Slice 1 (<code>P0a → P1 → P4</code>: NextGI + SVGF on existing meshes)</strong> before starting <strong>Slice 2 (<code>P2 → P3</code>: NextGeo runtime)</strong> — rather than opening two half-working renderer pipelines simultaneously.</div>
+  <ul>
+    <li><strong>Estimate multipliers:</strong> each RenderingDevice feature repeats across drivers; each new view (shadow, reflection, capture) repeats cluster-cut or proxy policy; each material feature expands eligibility, resolve, shadow, GI-cache, and RT representations simultaneously.</li>
+    <li><strong>Agent workstream lanes (under single-lead review):</strong> (1) harness/scene/capture automation (M5 Max + the RTX 4080 SUPER machine Session 1), (2) NextGI solver &amp; SVGF shaders/storage, (3) offline DAG/<code>.ngm</code>/export doctests (128 GB M5 Max + the Linux VM Linux), (4) Vulkan/D3D12/Metal driver capability &amp; validation checks.</li>
+    <li><strong>Rollback:</strong> every subsystem ships behind project/Environment gates defaulting off until its numeric gate passes. Default <code>retain_authored</code> keeps full authored <code>ArrayMesh</code> surfaces and GPU readback intact so disabling NextGeo (or shipping fallback tiers) restores exact legacy rendering and baking with zero reimport.</li>
+  </ul>
+</section>
+
+<section id="risks">
+  <h2>15. Risks and exclusions</h2>
+  <table>
+    <thead><tr><th>Risk</th><th>Failure mode</th><th>Mitigation / gate</th></tr></thead>
+    <tbody>
+      <tr><td>Custom vertex displacement</td><td>Offline bounds/DAG/BLAS become wrong; objects vanish or leak light</td><td>Eligibility analysis + per-surface legacy fallback; no per-frame bound rebuild in v1</td></tr>
+      <tr><td>Arbitrary fragment/light shaders</td><td>Compute resolve silently shades differently or cannot compile</td><td>Supported subset, custom-material raster card fallback, editor warning, equivalence fixtures</td></tr>
+      <tr><td>Alpha-tested foliage</td><td>Solid-quad proxies cast blocky shadows and occlude GI</td><td>Excluded per-surface in v1; later alpha-evaluating visibility/any-hit paths</td></tr>
+      <tr><td>Transparent/stencil/next-pass</td><td>One ID per pixel cannot encode ordering/overlays</td><td>Forward after Stage B resolve; reactive/history policy tested explicitly</td></tr>
+      <tr><td>Skinning/blend shapes</td><td>Bind-pose DAG and build-only BLAS fail under animation</td><td>Legacy path v1; separate deformation design later</td></tr>
+      <tr><td>Animated TIME materials</td><td>Bounds/cache/probes invalidate every frame; ghosting or full recapture cost</td><td>Animated flag; excluded from static SRC caching with budgeted fallback</td></tr>
+      <tr><td>Shadow scale</td><td>Beautiful GI with visibly low-resolution, multi-rendered shadows</td><td>Coarse per-view cuts v1; VSM is separate P6 funding</td></tr>
+      <tr><td>Metal TBDR / multi-draw CPU loop</td><td>Multi-draw indirect loops on CPU (<code>metal3_objects.cpp:1506-1521</code>); discarded load ops corrupt velocity on TBDR</td><td>Single-draw compute-expanded stream (§7.4b), explicit <code>DRAW_DEFAULT_ALL</code> loads, M5 Max Metal 0-error + FLIP ≤0.02 correctness gate; ICB/RT stay in P6</td></tr>
+      <tr><td>No denoiser maturity</td><td>Boiling, trails, disocclusion smear; quality perceived below SDFGI</td><td>P4 numeric variance/lag gate is release-blocking for dynamic NextGI defaults</td></tr>
+      <tr><td>Streaming stalls &amp; encrypted PCKs</td><td>Holes, coarse pop-in, IO saturating uploads, or <code>FileAccessEncrypted</code> buffering entire <code>.ngm</code> in RAM</td><td>Resident parent + embedded coarse fallback in <code>VirtualGeometryData</code>, one <code>.ngm</code> per mesh, explicit hard error in <code>_encrypt_and_store_data</code> unless <code>*.ngm</code> is excluded from whole-file encryption, p99 ≤2.0× median gate</td></tr>
+      <tr><td>Material representation divergence</td><td>Main view, shadow, SDF/SRC, RT proxy disagree; acne/leaks blamed on GI</td><td>One eligibility/representation matrix tested across all views</td></tr>
+      <tr><td>Import cost, empty-save readback trap, and sidecar export</td><td>10M-tri assets exceed build RAM/time, skipping GPU upload empties meshes on <code>_get_surfaces</code> save, or <code>.ngm</code> drops on export</td><td>Keep editor GPU upload intact + GPU-backed round-trip test, P2 ≤120 s / ≤6 GiB gate, export-time <code>_customize_resource</code> stripping option, per-mesh <code>&lt;mesh_path&gt;.ngm</code> manifest hook</td></tr>
+      <tr><td>MSAA/XR/double precision</td><td>Visibility IDs blend incorrectly; stereo cuts diverge; large-world jitter</td><td>Fallback by default; dedicated tests before enabling tiers</td></tr>
+      <tr><td>License contamination</td><td>Copied Epic/NVIDIA code or unaudited SDK files poison MIT fork</td><td>Clean-room protocol in §19; license gate before vendoring</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="alternatives">
+  <h2>16. Alternatives rejected</h2>
+  <table>
+    <thead><tr><th>Alternative</th><th>Decision</th><th>Reason</th></tr></thead>
+    <tbody>
+      <tr><td>Copy/port Lumen or Nanite source</td><td><span class="tag no">REJECT</span></td><td>Project policy: treat Unreal source and shaders as forbidden implementation inputs. Study public documentation/papers for a clean-room design; do not lift code, shader text, constants, or file structure. Confirm current license terms with counsel before relying on any broader permission.</td></tr>
+      <tr><td>Vendor NVIDIA RTXGI/DDGI code</td><td><span class="tag no">REJECT</span></td><td>Inspected license is proprietary NVIDIA RTX SDK terms, incompatible with open GodotNext redistribution. Reimplement probe algorithms from cited papers if needed.</td></tr>
+      <tr><td>Vendor AMD Brixelizer GI wholesale</td><td><span class="tag part">HOLD</span></td><td>GPUOpen page states MIT, but repository license file has a binary-only default with per-file exceptions. Treat as clean-room reference until a file-by-file audit proves reusable parts.</td></tr>
+      <tr><td>Mesh shaders first</td><td><span class="tag no">DEFER</span></td><td>No TASK/MESH stages, containers, translators, or vertex-less pipelines exist. Compute+indirect reaches the same first milestone without a three-driver toolchain program.</td></tr>
+      <tr><td>New fourth rendering method first</td><td><span class="tag no">DEFER</span></td><td>Renderer selection and shader variants are hardcoded around current methods. Prove passes inside Forward+; extract a sibling renderer only if contracts stabilize.</td></tr>
+      <tr><td>HWRT-only NextGI</td><td><span class="tag part">P0a COMPARATOR</span></td><td>In P0a (§17 item 8), after fixing Vulkan’s <code>vkGetAccelerationStructureDeviceAddressKHR</code> TLAS bug on the RTX 4080 SUPER machine (<code>RTX 4080 SUPER</code>), an HWRT compute ray-query vertical slice on legacy meshes (with per-instance SRC + WRC) is benchmarked head-to-head against SDF+SRC+WRC. SDF remains v1’s cross-vendor default whenever it satisfies §2’s ≤5% leak, ≤20% diffuse reference error, ≥85% card-hit coverage, and ≤10-frame convergence bounds within its ms budget (without needing to beat dedicated Ada RT cores in raw ms), because D3D12/<code>Intel UHD 770</code> and macOS Metal have no v1 HWRT path; §12’s outcome table defines the explicit scope pivot if SDF fails.</td></tr>
+      <tr><td>Probes-only NextGI</td><td><span class="tag no">INSUFFICIENT</span></td><td>Probe grids are low-frequency diffuse systems with leak/latency limits. They remain far-field, not the glossy/high-frequency solver.</td></tr>
+      <tr><td>Use an offline path tracer as the game renderer</td><td><span class="tag no">OUT OF SCOPE</span></td><td>Progressive path tracing can supply bakes/references; it lacks the game-oriented temporal/resampling, dynamic-scene, and latency contracts required here without a separate real-time design such as the inspected Solari approach.</td></tr>
+      <tr><td>Wait for an upstream SDFGI successor</td><td><span class="tag part">DO NOT BLOCK</span></td><td>No merged successor exists in this snapshot. Design NextGI to reuse whichever cascade improvements later land, but do not make an external merge the critical path.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="backlog">
+  <h2>17. First backlog — P0a (NextGI slice) &amp; P0b (NextGeo slice)</h2>
+  <p>Items <strong>1, 2, 4, 8, 9, 10, 11, and 12a</strong> form <strong>P0a</strong> (the sole prerequisite for starting P1/P4 NextGI). Items <strong>3, 5, 6, 7, and 12b</strong> form <strong>P0b</strong> (measurement spikes required before P2/P3 NextGeo runtime code starts).</p>
+  <ol>
+    <li><strong>[P0a] Baseline builds &amp; verified fleet setup:</strong> build <code>dev_mode=yes</code> editor locally on <strong>Apple M5 Max</strong> (macOS arm64 Metal), provision MSVC Build Tools + Python + SCons + Vulkan SDK (<code>spirv-val</code> + validation layers) and build on <strong>RTX 4080 SUPER machine</strong> (Windows 11, recording locked-clock baselines on <code>RTX 4080 SUPER</code> <code>device 1</code> and non-RT fallback on <code>Intel UHD 770</code> <code>device 0</code>), and run Linux x86_64 + <code>llvmpipe</code> build/<code>--test</code> smoke on <strong>Linux VM</strong>; verify <code>--doctool</code> diff and log the §19 public Nanite/Lumen talks.</li>
+    <li><strong>[P0a] Test project &amp; Session-1 GPU capture harness:</strong> create fixed cameras, scripted sequences, baked <code>LightmapGI</code> / path-traced references, and windowed/offscreen <code>--write-movie --fixed-fps --gpu-index</code> capture scripts (including the Windows Session-1 console launcher on the RTX 4080 SUPER machine and local Metal runner on M5 Max) across all eight §13.3 scenes (including single-mesh <code>Concave Courtyard</code>).</li>
+    <li><strong>[P0b] Vulkan 1.2 feature consolidation + indirect-count &amp; draw-identity benchmark:</strong> consolidate standalone KHR structs into <code>VkPhysicalDeviceVulkan12Features</code> (<code>drawIndirectCount</code>, optional descriptor indexing) and benchmark indirect-count + (a) <code>shaderDrawParameters</code> (<code>gl_DrawID</code>/<code>gl_BaseInstance</code>) vs (b) single-draw compute-expanded index/vertex streams carrying cluster ID on RTX 4080 SUPER Vulkan/D3D12 and M5 Max Metal (where <code>metal3_objects.cpp:1506-1521</code> makes multi-draw a CPU loop).</li>
+    <li><strong>[P0a] Vulkan TLAS fix + ray-query toolchain smoke test:</strong> fix <code>RenderingDeviceDriverVulkan::acceleration_structure_instance_write</code> to load/call <code>vkGetAccelerationStructureDeviceAddressKHR</code>; run a one-triangle BLAS/TLAS + compute <code>rayQueryEXT</code> shader through <code>ShaderRD</code>/<code>glslang</code> on the RTX 4080 SUPER machine <code>RTX 4080 SUPER</code> (adding a <strong>per-shader</strong> SPIR-V 1.4 opt-in only if <code>spirv-val</code> or driver rejects 1.3); verify 0 validation errors, scratch sizing, graph barriers, and deterministic hit readback.</li>
+    <li><strong>[P0b] Visibility format &amp; micro-raster benchmark:</strong> compare hardware-raster visibility IDs + Stage A/B resolve, compute software micro-raster, a conventional fat G-buffer, and forward shading at 1080p/1440p on the RTX 4080 SUPER machine <code>RTX 4080 SUPER</code> and M5 Max Metal TBDR, including analytic/quad derivative reconstruction.</li>
+    <li><strong>[P0b] Material-binding &amp; equivalence benchmark (Option A vs Option B):</strong> prototype and benchmark Option A (RD bindless descriptor array with epoch/deferred-free lifetime) against Option B (per-material classified compute dispatch reusing per-material uniform sets) across the <code>StandardMaterial3D</code> feature matrix on Vulkan and Metal.</li>
+    <li><strong>[P0b] Offline DAG spike (on 128 GB M5 Max):</strong> standalone/import-time meshoptimizer border-locked group-simplify prototype on 1M and 10M-triangle meshes; verify ≤180 s build time, ≤8 GiB peak RAM, 64 vs 128 KiB per-mesh <code>.ngm</code> page sizing, 100% monotonic parent error, and 0 border-crack edges.</li>
+    <li><strong>[P0a] End-to-end NextGI &amp; HWRT comparator spike (decoupled from item 6):</strong> reusing existing <code>_render_material</code> (<code>:3061</code>) for card capture and <code>_render_sdfgi</code> (<code>:3203</code>) for voxelization on legacy <code>ArrayMesh</code> scenes with Stage-1 per-mesh cards + budgeted per-instance SRC pages + WRC, run <code>Color Box Room</code>, single-mesh <code>Concave Courtyard</code>, and <code>Moving Light + Door</code> through (a) SDF+SRC+WRC (on RTX 4080 SUPER Vulkan and M5 Max Metal) and (b) Vulkan compute ray-query HWRT+SRC/WRC on the RTX 4080 SUPER machine; verify ≤1.2 ms Ada raw GPU time, ≤20% diffuse error vs reference, ≥85% card-hit coverage, ≤5% leak ratio, and ≤25% 10-frame convergence.</li>
+    <li><strong>[P0a] Denoiser guide &amp; velocity-preservation spike (Vulkan + Metal TBDR):</strong> persist current/previous albedo, normal/roughness, linear depth, and velocity; verify forced prepass + Step-1 velocity pre-clear + Step-7 <code>load_color = true</code> (<code>RD::DRAW_DEFAULT_ALL</code>) + skipping <code>render_forward_clustered.cpp:2327-2330</code> preserves motion vectors under FSR2/TAA/MetalFX on <em>both</em> RTX 4080 SUPER Vulkan and M5 Max Metal (zero <code>RD::DRAW_IGNORE_ALL</code> usage).</li>
+    <li><strong>[P0a] License &amp; clean-room packet:</strong> meshoptimizer NOTICE/source list; Brixelizer per-file license audit; confirm zero RTXGI/Unreal code enters the tree; commit clean-room contributor rules.</li>
+    <li><strong>[P0a] Fork maintenance &amp; CI trim:</strong> record the upstream-sync policy against <code>upstream</code>, narrow <code>.github/workflows/runner.yml</code> to Linux/Windows/macOS editor+template + static checks, guard missing <code>HEAD~1</code> in <code>.github/workflows/static_checks.yml</code>, and keep the self-hosted GPU runs off public PR triggers.</li>
+    <li><strong>[P0a / P0b] Split gate reviews &amp; contract freeze:</strong> <strong>12a</strong> evaluates P0a gates + §12’s outcome table to freeze NextGI §6.3 contracts and launch P1 immediately; <strong>12b</strong> evaluates P0b gates (draw identity, visibility vs G-buffer, Option A vs B binding, <code>.ngm</code> page size) before P2/P3 runtime work begins.</li>
+  </ol>
+  <div class="callout"><strong>First code rule:</strong> every spike lands with its measurement scene and a short result note. A renderer subsystem without a reproducible capture does not advance a phase gate.</div>
+</section>
+
+<section id="open">
+  <h2>18. Open questions and unresolved evidence</h2>
+  <p>These are carried forward deliberately. They do not block P0a; several exist precisely to be answered by P0a/P0b.</p>
+  <details open><summary>Hardware/toolchain unknowns</summary><ul>
+    <li>Once <code>acceleration_structure_instance_write</code> is fixed to use <code>vkGetAccelerationStructureDeviceAddressKHR</code>, does <code>ShaderRD</code>’s SPIR-V 1.3 compute target (<code>rendering_shader_container_vulkan.cpp:103-108</code>, where in-tree <code>glslang</code> emits <code>SPV_KHR_ray_query</code> ungated) pass <code>spirv-val</code> and NVIDIA driver <code>621.01</code> on the RTX 4080 SUPER machine, or must ray-query shaders use a per-shader SPIR-V 1.4 opt-in?</li>
+    <li>Can ray/mesh shader SPIR-V survive D3D12 (after fixing <code>SPIRV_TO_MESA_STAGES</code>) and Metal translation in the current containers? Irrelevant to v1 compute path, blocking for P6 claims.</li>
+    <li>On M5 Max Metal TBDR, how does single-draw compute-expanded visibility raster + Stage A/B resolve compare against a thin/fat G-buffer once 0-error parity is met?</li>
+    <li>Where is the hardware-raster vs software-raster triangle-size crossover on <code>RTX 4080 SUPER</code> vs <code>Intel UHD 770</code>, and how do Option A (bindless) and Option B (classified dispatch) scale across 32–512 visible materials?</li>
+  </ul></details>
+  <details><summary>Content/coverage unknowns</summary><ul>
+    <li>What percentage of representative project surfaces pass v1 per-<code>(instance, surface, view)</code> eligibility after custom shader, alpha, skinning, instance-uniform, and animated-material exclusions relative to §2’s &lt;20% ceiling?</li>
+    <li>Do auxiliary coarse-proxy policies for <code>GPUParticlesCollisionHeightField3D</code>, <code>ReflectionProbe</code>, and SDF/material captures introduce visible artifacts on hero assets that require selective coarser cuts?</li>
+    <li>What exact disk overhead does default <code>retain_authored</code> add across multi-gigabyte projects, and how often will desktop-only teams opt into <code>strip_authored_to_coarse</code>?</li>
+    <li>Do FBX, glTF, and standalone <code>ResourceImporterOBJ</code> conversion bodies propagate virtual-geometry options and <code>.ngm</code> sidecar remaps identically in every subresource save mode (embedded vs <code>save_to_file/enabled</code>)?</li>
+  </ul></details>
+  <details><summary>Design details intentionally deferred to phase notes</summary><ul>
+    <li>Runtime sparse SDF cascades vs import-time mesh SDFs vs hybrid composition for dynamic objects (benchmarked in P1 within the ≤3.0 ms raw NextGI budget).</li>
+    <li>SRC card-atlas compression, texel-density scaling, and P2’s Stage-2 per-cluster-group card refinement versus Stage-1 6-card surface bounds after P0/P1 captures.</li>
+    <li>Visibility ID bit allocation and analytic vs quad derivative reconstruction method after P0’s visibility and material-equivalence spikes.</li>
+    <li>Exact <code>.ngm</code> page size (64 vs 128 KiB), compression codec, IO thread count, eviction scoring, and optional post-v1 per-page AES-CTR encryption (for encrypted PCKs) after P2 corpus measurements.</li>
+    <li>Forward Mobile, Compatibility, Web, and dummy-renderer UX details: inspector badge format and runtime counter reporting on preserved <code>retain_authored</code> vs stripped assets.</li>
+  </ul></details>
+  <details><summary>External evidence gaps from the audit</summary><ul>
+    <li>Epic’s separate Lumen blog and Nanite SIGGRAPH deep-dive slides were not inspected during the audit; reading and logging them under §19’s clean-room rules is scheduled in §17 item 1 before P0 freezes contracts.</li>
+    <li>Lumen world-radiance-cache internals were not detailed on the inspected documentation page; NextGI specifies its own SRC + WRC candidate architecture (§8.3) from convergent public literature, not a copied layout.</li>
+    <li>Brixelizer per-file MIT coverage remains unaudited until §17 item 10; no code reuse is authorized by this plan.</li>
+    <li>Original NVIDIA RTXGI product page redirects; GitHub SDK docs/license were inspected instead.</li>
+  </ul></details>
+</section>
+
+<section id="legal">
+  <h2>19. Legal, naming, and clean-room protocol</h2>
+  <p>This section is an engineering control, not legal advice. Obtain counsel before a commercial release or before accepting code from anyone with access to proprietary engine source.</p>
+  <ol>
+    <li><strong>Names:</strong> ship systems as NextGI/NextGeo. Use “Lumen-class”/“Nanite-class” only as descriptive comparisons in internal planning; do not imply Epic affiliation or compatibility.</li>
+    <li><strong>Project-approved study inputs:</strong> public papers, official public documentation, conference talks, observed editor behavior/debug views, and permissively licensed source whose license has been recorded.</li>
+    <li><strong>Forbidden inputs:</strong> Unreal Engine source/shaders, copied constants/tables, decompiled binaries, proprietary SDK source under incompatible terms, and code generated by prompting a model to reproduce such source.</li>
+    <li><strong>Separation:</strong> contributors who have recently read relevant proprietary source should write behavior/spec notes from public sources, not implementation code for the same subsystem. Keep a source log per subsystem.</li>
+    <li><strong>Vendoring gate:</strong> every third-party file gets upstream URL, version/commit, license text, modifications, and NOTICE placement under Godot’s existing third-party conventions before merge.</li>
+    <li><strong>Asset gate:</strong> test scenes use original or clearly permissively licensed content with recorded provenance. No marketplace/demo assets from proprietary engines.</li>
+    <li><strong>Trademark gate:</strong> GodotNext remains clearly unofficial in repository description and release notes. Do not use Godot or Epic logos in a way that implies endorsement.</li>
+    <li><strong>Patent step:</strong> clean-room controls address copyright, not patents. Before any public release (not before P0), obtain a patent review of the virtual-geometry and GI techniques as implemented.</li>
+  </ol>
+</section>
+
+<section id="sources">
+  <h2>20. Sources and evidence</h2>
+  <h3>20.1 Snapshot code inspected</h3>
+  <ul>
+    <li>Renderer core &amp; scene cull: <code>servers/rendering/rendering_server.h</code>, <code>servers/rendering/rendering_method.h</code>, <code>servers/rendering/rendering_device*.{h,cpp}</code>, <code>servers/rendering/renderer_scene_cull.cpp</code>, <code>servers/rendering/renderer_rd/renderer_compositor_rd.cpp</code>, <code>servers/rendering/renderer_rd/renderer_scene_render_rd.{h,cpp}</code>, <code>servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.{h,cpp}</code>, <code>servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h</code>, <code>servers/rendering/renderer_rd/storage_rd/utilities.cpp</code>.</li>
+    <li>GI, fog &amp; effects: <code>servers/rendering/renderer_rd/environment/gi.{h,cpp}</code>, <code>servers/rendering/renderer_rd/shaders/environment/gi.glsl</code>, <code>servers/rendering/renderer_rd/environment/fog.{h,cpp}</code>, <code>servers/rendering/renderer_rd/shaders/environment/volumetric_fog_process.glsl</code>, <code>servers/rendering/renderer_rd/effects/ss_effects.{h,cpp}</code>, <code>servers/rendering/renderer_rd/effects/taa.h</code>, <code>scene/3d/lightmap_gi.cpp</code>, VoxelGI/ReflectionProbe headers and lightmapper interface.</li>
+    <li>Geometry, import &amp; export/IO: <code>scene/resources/mesh.h</code>, <code>scene/resources/surface_tool.h</code>, <code>scene/resources/3d/importer_mesh.{h,cpp}</code>, <code>editor/import/3d/resource_importer_scene.cpp</code>, <code>editor/import/3d/resource_importer_obj.cpp</code>, <code>editor/file_system/editor_file_system.cpp</code>, <code>editor/export/editor_export_platform.cpp</code>, <code>core/io/file_access_pack.cpp</code>, <code>core/io/file_access_encrypted.cpp</code>, <code>scene/resources/streamed_texture.cpp</code>, <code>modules/gridmap/grid_map.cpp</code>, <code>modules/meshoptimizer/register_types.cpp</code>, <code>servers/rendering/renderer_rd/storage_rd/mesh_storage.{h,cpp}</code>.</li>
+    <li>Shaders/materials: <code>servers/rendering/shader_types.cpp</code>, <code>servers/rendering/shader_compiler.h</code>, <code>scene/resources/material.{h,cpp}</code>, <code>servers/rendering/renderer_rd/storage_rd/material_storage.h</code>, <code>servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl</code>.</li>
+    <li>Drivers, shader containers &amp; CLI/tests: <code>drivers/vulkan/rendering_device_driver_vulkan.{h,cpp}</code>, <code>drivers/vulkan/rendering_shader_container_vulkan.cpp</code>, <code>drivers/d3d12/rendering_device_driver_d3d12.cpp</code>, <code>drivers/d3d12/rendering_shader_container_d3d12.cpp</code>, <code>drivers/metal/rendering_device_driver_metal.cpp</code>, <code>drivers/metal/metal3_objects.cpp</code>, <code>main/main.cpp</code>, <code>tests/test_main.cpp</code>, <code>SConstruct</code>, <code>methods.py</code>, and CI workflow references.</li>
+  </ul>
+  <h3>20.2 External primary sources inspected in this run</h3>
+  <ul>
+    <li><a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/lumen-technical-details-in-unreal-engine">Epic — Lumen Technical Details</a>: screen traces first; SWRT mesh/global SDF; HWRT triangles; Surface Cache cards and limits.</li>
+    <li><a href="https://dev.epicgames.com/documentation/en-us/unreal-engine/nanite-virtualized-geometry-in-unreal-engine">Epic — Nanite Virtualized Geometry</a>: hierarchical clusters, crack-free runtime cut, fine-grained streaming/compression.</li>
+    <li><a href="https://gpuopen.com/fidelityfx-brixelizer/">AMD GPUOpen — FidelityFX Brixelizer</a>: runtime sparse SDF cascades plus Brixelizer GI radiance/irradiance caches and screen probes.</li>
+    <li><a href="https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK">AMD FidelityFX SDK repository</a> and its license file: mixed terms require per-file audit before reuse.</li>
+    <li><a href="https://meshoptimizer.org/">meshoptimizer</a>, <a href="https://github.com/zeux/meshoptimizer">repository</a>, and <a href="https://raw.githubusercontent.com/zeux/meshoptimizer/master/LICENSE.md">MIT license</a>: cluster build/partition/simplification building blocks.</li>
+    <li><a href="https://github.com/NVIDIAGameWorks/RTXGI-DDGI">NVIDIA RTXGI-DDGI repository</a>, <a href="https://raw.githubusercontent.com/NVIDIAGameWorks/RTXGI-DDGI/main/docs/Algorithms.md">algorithm notes</a>, and <a href="https://raw.githubusercontent.com/NVIDIAGameWorks/RTXGI-DDGI/main/License.txt">proprietary license</a>: DDGI is a paper-level reference here, not reusable code.</li>
+    <li><a href="https://bevy.org/news/bevy-0-20/">Bevy 0.20 release notes</a> and <a href="https://jms55.github.io/posts/2026-09-18-solari-bevy-0-20/">Solari technical post</a>: real-time path tracing still terminates in a world cache, denoiser dependence, and macOS denoiser gap.</li>
+    <li><a href="https://jo.dreggn.org/vkdt/src/pipe/modules/svgf/readme.html">SVGF module summary</a>: guide/history-moment requirements used to scope the denoiser prerequisite; not treated as a code source.</li>
+  </ul>
+  <h3>20.3 Assumptions, clearly separated from evidence</h3>
+  <ul>
+    <li>Provisional numeric ceilings in §2 and §12 are failable red-line gates: P0a/P0b profiling on the RTX 4080 SUPER machine (<code>NVIDIA GeForce RTX 4080 SUPER</code>, driver <code>621.01</code>, Vulkan <code>1.4.357</code>) locks GPU clocks and calibrates Ada engineering ceilings so flagship throughput (~2.5× RTX 3060) never hides mid-range regressions, whereas relaxing any §2 ceiling requires an explicit, documented plan revision.</li>
+    <li>Proposed names, file format (<code>.ngm</code>), page sizes, and new class/file names are design proposals; none exist in the snapshot.</li>
+    <li>Live SSH hardware inspection of the RTX 4080 SUPER machine and the Linux VM was completed on <code>2026-11-01</code> (confirming <code>RTX 4080 SUPER</code> + <code>Intel UHD 770</code> on the RTX 4080 SUPER machine and CPU-only <code>llvmpipe</code> on the Linux VM), alongside direct C++ verification of commit <code>7cfeb47</code> across v2.0–v2.2. No engine build, GPU frame capture, or shader benchmark has been executed yet; runtime GPU timings and driver behavior are measured in P0a/P0b.</li>
+  </ul>
+</section>
+
+<div class="footer">
+  <p class="print-note">Printed from GodotNext docs/godotnext/nextgi-nextgeo-plan.html.</p>
+  <p>GodotNext is an unofficial experimental fork. Godot Engine source remains under its upstream MIT license; see <code>LICENSE.txt</code> and <code>COPYRIGHT.txt</code>. This plan contains no Unreal Engine code or proprietary SDK code.</p>
+</div>
+</main>
+</div>
+<script>
+(function(){
+  const input=document.getElementById('fileFilter');
+  const rows=[...document.querySelectorAll('#fileTable tbody tr')];
+  if(input){input.addEventListener('input',()=>{const q=input.value.trim().toLowerCase();rows.forEach(r=>{r.style.display=!q||r.textContent.toLowerCase().includes(q)?'':'none';});});}
+  const links=[...document.querySelectorAll('nav.toc a')];
+  const byId=new Map(links.map(a=>[a.getAttribute('href').slice(1),a]));
+  const observer=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){links.forEach(a=>a.classList.remove('active'));const a=byId.get(e.target.id);if(a)a.classList.add('active');}});},{rootMargin:'-20% 0px -70% 0px'});
+  document.querySelectorAll('main section[id]').forEach(s=>observer.observe(s));
+})();
+</script>
+</body>
+</html>
