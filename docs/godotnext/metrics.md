@@ -105,3 +105,26 @@ The process prints one JSON object with `metric`, `value`, `threshold` and `pass
 ## Python
 
 The tools need Python >= 3.11. `numpy` 2.3 and `OpenEXR` 3.5 both require it and both publish wheels for 3.11 through 3.14. `flip-evaluator` 1.7 publishes wheels through 3.13 and builds from its sdist on 3.14. The issue text says Python >= 3.10; 3.10 cannot install these pins. Doctests in the engine do not import this package.
+
+## Streaming reports (#74)
+
+These are not new Q commands. `python3 -m godotnext_metrics q15` still sums `counters.json` and still requires `MEMORY_ACCELERATION_STRUCTURES`. The streaming CLI is:
+
+```
+python3 -m godotnext_metrics.streaming_reports {q15,q14,slow-io,exclusion} --in <dir> [--out <dir>] [--markdown]
+```
+
+Schema 1. Exit 0 when the JSON object was produced, including a null source or a failed gate. Exit 2 when `--in` is missing or a sidecar is malformed. `--out` writes the JSON file and a Markdown summary.
+
+| Report | File | Sidecar | Absent until |
+|---|---|---|---|
+| Q15 geometry memory | `geometry_memory.json` | `memory_report.json` | #78 / #79 `virtual_geometry_get_memory_report` |
+| Q14 flight | `fallback_coverage.json` | `routing_frames.json` | routing counters (`legacy_drawn_virtualized_pixels`, `opaque_pixels`, or a `fallback_coverage` number) |
+| Slow IO Flight | `slow_io_flight.json` | `slow_io_params.json`, optional `timing.csv` | #78 page-upload samples. Frame-time percentiles are filled from `wall_ms` when `timing.csv` is present. `pass` stays null (PQ). |
+| Exclusion Matrix | `exclusion_matrix.json` | `cells.json`, optional `exclusion_observed.json` and `moving_track.json` | #79 `virtual_geometry_get_debug_stats` |
+
+Q15 lists `authored_remainder`, `lods`, `shadow_mesh`, `coarse_fallback`, `rt_arena`, `blas`, `tlas`, `as_scratch`, `dag_headers` and `page_cache` for `strip_authored_to_coarse`, `discrete_lod` and `retain_authored`. The ratio is stripped/baseline. It passes at or under 0.5 when both totals exist. `rt_share` is `(rt_arena + blas + tlas + as_scratch) / total` of the stripped export. `retain_authored` is reported and is not gated. A missing category on a present source makes the total null and fails. 0/0 is 0. A positive total over 0 is non-finite, becomes JSON null, and fails.
+
+Q14 over a flight reports the mean and the maximum. A frame with both pixel counters uses the frozen Q14 ratio. A frame with only `fallback_coverage` uses that number. Mean or maximum at or above 0.20 fails. An empty or absent source leaves both null and `pass` null.
+
+Each report copies `envelope` from `manifest.json` when that file is present: `host`, adapter name, `api_version` as the driver, `commit` as `build_hash`, and `seed`. `gpu_index` is parsed from `command_line.engine` and stays null when that string is missing. A DLSS run can add `dll_sha256` and `preset` from `manifest.json`'s `dlss` object. Without that object the envelope says `N/A`. The Exclusion Matrix track ships with an empty DLL hash and names FSR2 as the fallback until a build exposes a DLSS scaling mode.

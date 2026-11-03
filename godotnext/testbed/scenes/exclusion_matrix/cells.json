@@ -1,0 +1,312 @@
+{
+	"cells": [
+		{
+			"id": "mixed_opaque_glass",
+			"kind": "mesh",
+			"label": "Opaque + glass",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "opaque",
+					"reason": "NONE",
+					"route": "virtual"
+				},
+				{
+					"index": 1,
+					"name": "glass",
+					"reason": "alpha",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "next_pass",
+			"kind": "mesh",
+			"label": "next_pass",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "chain",
+					"reason": "NEXT_PASS_OR_OVERLAY",
+					"route": "legacy",
+					"whole_chain": true
+				}
+			]
+		},
+		{
+			"id": "material_overlay",
+			"kind": "mesh",
+			"label": "material_overlay",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "base",
+					"reason": "NEXT_PASS_OR_OVERLAY",
+					"route": "legacy",
+					"whole_chain": true
+				}
+			]
+		},
+		{
+			"id": "stencil_reader",
+			"kind": "mesh",
+			"label": "Stencil reader",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "reader",
+					"reason": "NEXT_PASS_OR_OVERLAY",
+					"route": "legacy",
+					"whole_chain": true
+				}
+			]
+		},
+		{
+			"id": "vertex_lighting",
+			"kind": "mesh",
+			"label": "Vertex lighting",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "VERTEX_LIGHTING",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "position_vertex",
+			"kind": "mesh",
+			"label": "Position-altering vertex()",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "UNSUPPORTED_CUSTOM_SHADER",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "screen_texture",
+			"kind": "mesh",
+			"label": "Screen texture",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "alpha",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "alpha_scissor",
+			"kind": "mesh",
+			"label": "Alpha scissor",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "alpha",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "alpha_hash",
+			"kind": "mesh",
+			"label": "Alpha hash",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "alpha",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "unsupported_derivative",
+			"kind": "mesh",
+			"label": "Non-varying dFdx",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "UNSUPPORTED_DERIVATIVE",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "skinning",
+			"kind": "mesh",
+			"label": "Skinning",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "SKINNING",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "instance_uniforms",
+			"kind": "mesh",
+			"label": "Instance uniforms",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "INSTANCE_UNIFORMS",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "multimesh",
+			"kind": "multimesh",
+			"label": "MultiMesh",
+			"surfaces": [
+				{
+					"counted_warning": true,
+					"index": 0,
+					"name": "instances",
+					"reason": "MULTIMESH_OR_PARTICLES",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "gridmap_octant",
+			"kind": "gridmap",
+			"label": "Octant GridMap",
+			"surfaces": [
+				{
+					"counted_warning": true,
+					"index": 0,
+					"name": "octant",
+					"reason": "VGD_IGNORED",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "particles",
+			"kind": "particles",
+			"label": "Particles",
+			"surfaces": [
+				{
+					"counted_warning": true,
+					"index": 0,
+					"name": "draw",
+					"reason": "MULTIMESH_OR_PARTICLES",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "baked_gridmap",
+			"kind": "baked_gridmap",
+			"label": "Baked GridMap",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "baked",
+					"reason": "BAKED_GRIDMAP",
+					"route": "legacy"
+				}
+			]
+		},
+		{
+			"id": "heightfield",
+			"kind": "heightfield",
+			"label": "Heightfield capture",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "capture",
+					"reason": "COARSE_OR_RT_PROXY",
+					"route": "auxiliary_proxy"
+				}
+			]
+		},
+		{
+			"id": "animated_time",
+			"kind": "mesh",
+			"label": "Animated TIME",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "surface",
+					"reason": "NONE",
+					"route": "virtual",
+					"src_static_cache": "excluded"
+				}
+			]
+		},
+		{
+			"id": "mutated_mesh",
+			"kind": "mesh",
+			"label": "Mutated mesh",
+			"surfaces": [
+				{
+					"index": 0,
+					"mutates_at_frame": 60,
+					"name": "surface",
+					"reason": "NONE",
+					"reason_after": "MUTATED_MESH",
+					"reason_by_frame": 61,
+					"route": "virtual",
+					"route_after": "legacy"
+				}
+			]
+		},
+		{
+			"id": "msaa_viewport",
+			"kind": "msaa",
+			"label": "MSAA viewport",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "view",
+					"reason": "MSAA",
+					"route": "legacy",
+					"whole_view": true
+				}
+			]
+		},
+		{
+			"draw_limit": "No primary XR interface. Viewport._check_xr_size sets view_count to 0 and an unallocated size when XRServer has no initialized primary interface, and the stored size clamps to 2x2. RendererViewport then skips the draw. The cell stays in the matrix with use_xr and UPDATE_ALWAYS.",
+			"id": "multiview_viewport",
+			"kind": "multiview",
+			"label": "Multiview viewport",
+			"surfaces": [
+				{
+					"index": 0,
+					"name": "view",
+					"reason": "MULTIVIEW",
+					"route": "legacy",
+					"whole_view": true
+				}
+			]
+		},
+		{
+			"id": "moving_instance",
+			"kind": "moving",
+			"label": "Moving virtual instance",
+			"surfaces": [
+				{
+					"g57": true,
+					"index": 0,
+					"name": "surface",
+					"reason": "NONE",
+					"route": "virtual"
+				}
+			]
+		}
+	],
+	"schema": 1
+}

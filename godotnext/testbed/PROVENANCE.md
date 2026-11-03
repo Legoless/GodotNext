@@ -97,7 +97,6 @@ seed `1` (one run per variant; see its README).
 | `scenes/legacy/legacy_lightmap.exr` (+ `.import`) | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/feature_parity_room.lmbake` | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/feature_parity_room.exr` (+ `.import`) | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
-
 | `generators/build_swrt_leak_room.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/swrt_leak_room_10cm/swrt_leak_room_10cm.tscn` | `build_swrt_leak_room.gd`, seed `0x6E657874` stream 40 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/swrt_leak_room_10cm/swrt_leak_room_10cm_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 40 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -130,6 +129,28 @@ seed `1` (one run per variant; see its README).
 | `scenes/sdf_import_set/sdf_import_set_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 44 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/sdf_import_set/steps.json` | `build_sdf_import_set.gd`, seed `0x6E657874` stream 44 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/swrt_content_check.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/exclusion_rules.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/exclusion_matrix.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/check_exclusion.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/README.md` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_exclusion_matrix.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/exclusion_matrix.tscn` | `build_exclusion_matrix.gd`, seed `0x6E657874` stream 74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/cells.json` | `build_exclusion_matrix.gd`, seed `0x6E657874` stream 74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/exclusion_matrix/moving_track.json` | `build_exclusion_matrix.gd`, seed `0x6E657874` stream 74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/slow_io_flight/flight.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/slow_io_flight/slow_io_flight.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/slow_io_flight/collect_memory.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/slow_io_flight/check_slow_io.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/slow_io_flight/README.md` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_slow_io_flight.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/slow_io_flight/slow_io_flight.tscn` | `build_slow_io_flight.gd`, seed `0x6E657874` stream 75 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room_streaming/override.cfg` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room_streaming/check_streaming.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room_streaming/README.md` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_feature_parity_streaming.gd` | hand-authored for #74 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room_streaming/feature_parity_room_streaming.tscn` | `build_feature_parity_streaming.gd` (instanced #64 room, no new meshes) | MIT | 2026-11-03 | the Apple M5 Max |
+
+#74 does not add binary assets. The streaming-report Python modules live under `harness/metrics/` and are covered by the harness rows above.
 
 ## Bake status
 

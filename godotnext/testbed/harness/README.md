@@ -149,8 +149,20 @@ Both runners (and therefore `run_selftest.sh`) apply a per-scene `override.cfg` 
 
 `selftest/selftest.tscn` builds 100 gray cubes from a fixed `RandomNumberGenerator` seed, one shadowed directional light, a camera named `CaptureCam`, and a WorldEnvironment with SDFGI, a procedural sky, and a linear tonemap. SDFGI bounce feedback is 0, convergence is 5 frames, and dynamic lights update every frame, so the probe history reaches a fixed point and two same-seed captures hash the same. Output goes under `godotnext/testbed/captures/`, which is gitignored. Do not commit captures. The raw power dumps are local run output.
 
+## Streaming reports (#74)
+
+Exclusion Matrix, Slow IO Flight and the Feature Parity Room streaming variant are scenes, not harness modes. Their reports are a side CLI, schema 1, and they do not add keys that Q11 reads and do not add entries to the frozen q1–q21 command set:
+
+```
+python3 -m godotnext_metrics.streaming_reports {q15,q14,slow-io,exclusion} --in <run> [--out <dir>] [--markdown]
+```
+
+`--out` writes `geometry_memory.json`, `fallback_coverage.json`, `slow_io_flight.json` or `exclusion_matrix.json`, plus a Markdown twin. Exit 0 when the report object was produced, including `source: absent` and a failed gate. Exit 2 when `--in` is missing or a sidecar is not valid JSON. Byte counts, page-upload samples and fallback debug stats stay null until #78 and #79 add the rendering-server methods. The Slow IO p99 gate stays `pass: null` (PQ).
+
+Slow IO Flight records `rendering/nextgeo/streaming/debug_io_delay_ms` as a wall-time parameter (uniform 50–250 ms per request, or 0 for the nodelay variant). The scene does not sleep. Issue 33's summary fields are unchanged.
+
 ## Left for later
 
-Wall-clock IO delays belong to the Slow IO Flight scene, not to issue 33. Issue 33 added the dynamic scenes and the §2.1 summary fields. Per-pass spread stays a print from `run_selftest.sh`. Timing numbers from these runs are not measurements.
+Per-pass spread stays a print from `run_selftest.sh`. Timing numbers from these runs are not measurements. Slow IO frame-time percentiles are filled when a `timing.csv` is present and are not a measurement.
 
 Issue 237: the RTX 4080 SUPER Session-1 runner, clock locks, `run_remote.sh`, `run_selftest.ps1`, and G0-4 as a measurement. G0-6 calibration scenes are not part of this harness. The timing file format is what those runs will use.
