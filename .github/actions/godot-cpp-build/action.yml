@@ -29,12 +29,21 @@ runs:
         ref: ${{ inputs.godot-cpp-branch }}
         path: godot-cpp
 
+    # GodotNext: godot_cpp_short_path
+    # The fork's workspace path (/home/runner/work/GodotNext/GodotNext) is longer than upstream's,
+    # which pushed godot-cpp's single `ar` command past the 128 KiB limit for one `sh -c` argument.
+    # Build from a copy under the runner's temp directory, which keeps every object path short.
+    - name: Copy to a short path
+      shell: sh
+      run: cp -R godot-cpp "${{ runner.temp }}/gc"
+
     - name: Extract API
       shell: sh
       run: ${{ inputs.bin }} --headless --dump-gdextension-interface --dump-extension-api
 
+    # GodotNext: godot_cpp_short_path
     - name: SCons Build
       shell: sh
       env:
         SCONS_CACHE: ${{ inputs.scons-cache }}
-      run: scons --directory=./godot-cpp/test "gdextension_dir=${{ github.workspace }}" ${{ inputs.scons-flags }}
+      run: scons --directory="${{ runner.temp }}/gc/test" "gdextension_dir=${{ github.workspace }}" ${{ inputs.scons-flags }}
