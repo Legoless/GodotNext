@@ -11,6 +11,8 @@ warn_return_any = true
 warn_unreachable = true
 exclude = ["thirdparty/"]
 python_version = "3.10"
+# GodotNext: metrics package root for the §13.4 tools.
+mypy_path = "godotnext/testbed/harness/metrics"
 
 [tool.ruff]
 extend-exclude = ["thirdparty"]
