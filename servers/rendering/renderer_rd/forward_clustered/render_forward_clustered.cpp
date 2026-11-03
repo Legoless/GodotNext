@@ -238,6 +238,22 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 
 			return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, voxelgi_buffer);
 		} break;
+		case DEPTH_FB_ROUGHNESS_VELOCITY: {
+			ensure_normal_roughness_texture();
+			render_buffers->ensure_velocity();
+			RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_NORMAL_ROUGHNESS_MSAA : RB_TEX_NORMAL_ROUGHNESS);
+			RID velocity_buffer = render_buffers->get_velocity_buffer(use_msaa);
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, velocity_buffer);
+		} break;
+		case DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY: {
+			ensure_normal_roughness_texture();
+			ensure_voxelgi();
+			render_buffers->ensure_velocity();
+			RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_NORMAL_ROUGHNESS_MSAA : RB_TEX_NORMAL_ROUGHNESS);
+			RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, use_msaa ? RB_TEX_VOXEL_GI_MSAA : RB_TEX_VOXEL_GI);
+			RID velocity_buffer = render_buffers->get_velocity_buffer(use_msaa);
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, voxelgi_buffer, velocity_buffer);
+		} break;
 		default: {
 			ERR_FAIL_V(RID());
 		} break;
@@ -477,10 +493,18 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_DP;
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
-				pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS;
+				if (p_params->prepass_motion) {
+					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION;
+				} else {
+					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS;
+				}
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
-				pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI;
+				if (p_params->prepass_motion) {
+					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_AND_MOTION;
+				} else {
+					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI;
+				}
 			} break;
 			case PASS_MODE_DEPTH_MATERIAL: {
 				ERR_FAIL_COND_MSG(p_params->view_count > 1, "Multiview not supported for material pass");
@@ -496,6 +520,13 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		pipeline_key.framebuffer_format_id = framebuffer_format;
 		pipeline_key.wireframe = p_params->force_wireframe;
 		pipeline_key.ubershader = 0;
+		pipeline_key.zero_velocity_write = 0;
+		if (p_params->prepass_motion) {
+			const bool mover = (surf->owner->flags_cache & INSTANCE_DATA_FLAGS_DYNAMIC) || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR);
+			pipeline_key.zero_velocity_write = mover ? 0 : 1;
+		} else if (surf->uses_prepass_velocity && (pipeline_key.color_pass_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS)) {
+			pipeline_key.zero_velocity_write = 1;
+		}
 
 		bool emulate_point_size = shader->uses_point_size && scene_shader.emulate_point_size;
 
@@ -508,7 +539,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		while (pipeline_key.ubershader < ubershader_iterations) {
 			// Skeleton and blend shape.
 			RD::VertexFormatID vertex_format = -1;
-			bool pipeline_motion_vectors = pipeline_key.color_pass_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
+			bool pipeline_motion_vectors = (pipeline_key.color_pass_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS) || p_params->prepass_motion;
 			uint64_t input_mask = shader->get_vertex_input_mask(pipeline_key.version, pipeline_key.color_pass_flags, pipeline_key.ubershader);
 			if (surf->owner->mesh_instance.is_valid()) {
 				mesh_storage->mesh_instance_surface_get_vertex_arrays_and_format(surf->owner->mesh_instance, surf->surface_index, input_mask, pipeline_motion_vectors, emulate_point_size, vertex_array_rd, vertex_format);
@@ -938,7 +969,7 @@ _FORCE_INLINE_ static uint32_t _indices_to_primitives(RSE::PrimitiveType p_primi
 	static const uint32_t subtractor[RSE::PRIMITIVE_MAX] = { 0, 0, 1, 0, 2 };
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
-void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi, bool p_using_opaque_gi, bool p_using_motion_pass, bool p_append) {
+void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi, bool p_using_opaque_gi, bool p_using_motion_pass, bool p_append, bool p_nextgi_velocity) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	uint64_t frame = RSG::rasterizer->get_frame_number();
 
@@ -1091,9 +1122,12 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				bool uses_particles = inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES;
 				bool is_multimesh_with_motion = !uses_particles && (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) && mesh_storage->_multimesh_uses_motion_vectors_offsets(inst->data->base);
 				bool is_dynamic = transform_changed || has_mesh_instance || uses_particles || is_multimesh_with_motion;
+				if (p_nextgi_velocity && is_dynamic) {
+					flags |= INSTANCE_DATA_FLAGS_DYNAMIC;
+				}
 				if (p_pass_mode == PASS_MODE_COLOR && p_using_motion_pass) {
 					uses_motion = is_dynamic;
-				} else if (is_dynamic) {
+				} else if (is_dynamic && !p_nextgi_velocity) {
 					flags |= INSTANCE_DATA_FLAGS_DYNAMIC;
 				}
 			}
@@ -1124,6 +1158,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			surf->sort.uses_forward_gi = 0;
 			surf->sort.uses_lightmap = 0;
 			surf->uses_lightmap_specular = false;
+			surf->uses_prepass_velocity = false;
 
 			// LOD
 			if (p_render_data->scene_data->screen_mesh_lod_threshold > 0.0 && mesh_storage->mesh_surface_has_lod(surf->surface)) {
@@ -1152,6 +1187,10 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				}
 			}
 
+			if (p_nextgi_velocity && (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_DEPTH) && ((inst->flags_cache & INSTANCE_DATA_FLAGS_DYNAMIC) || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR))) {
+				surf->uses_prepass_velocity = true;
+			}
+
 			// ADD Element
 			if (p_pass_mode == PASS_MODE_COLOR) {
 #ifdef DEBUG_ENABLED
@@ -1174,7 +1213,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					if (uses_gi) {
 						surf->sort.uses_forward_gi = 1;
 					}
-				} else if (p_using_motion_pass && (uses_motion || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR))) {
+				} else if (p_using_motion_pass && (uses_motion || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR)) && !surf->uses_prepass_velocity) {
 					surf->color_pass_inclusion_mask = COLOR_PASS_FLAG_MOTION_VECTORS;
 					render_list[RENDER_LIST_MOTION].add_element(surf);
 				} else {
@@ -1928,6 +1967,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_voxelgi = false;
 	// GodotNext: nextgi_frame_block
 	bool using_nextgi = false;
+	NextGIVelocityPlan velocity_plan;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
 	bool using_motion_pass = rb_data.is_valid() && using_upscaling;
@@ -1981,6 +2021,24 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (using_nextgi) {
 				using_sdfgi = false;
 			}
+			NextGIVelocityMode velocity_mode = NEXTGI_VELOCITY_NONE;
+			NextGIVelocityScale velocity_scale = NEXTGI_VELOCITY_SCALE_NONE;
+			if (scale_type == SCALE_FSR2) {
+				velocity_mode = NEXTGI_VELOCITY_SENTINEL;
+				velocity_scale = NEXTGI_VELOCITY_SCALE_FSR2;
+			} else if (scale_type == SCALE_MFX) {
+				velocity_mode = NEXTGI_VELOCITY_DENSE;
+				velocity_scale = NEXTGI_VELOCITY_SCALE_MFX;
+			} else if (using_taa) {
+				velocity_mode = NEXTGI_VELOCITY_TAA;
+			}
+			velocity_plan = nextgi_velocity_plan(velocity_scale, velocity_mode, using_taa, using_nextgi);
+			if (velocity_plan.prepass_writes) {
+				scene_shader.enable_advanced_shader_group(is_multiview);
+				global_pipeline_data_required.use_motion_vectors = true;
+				rb->ensure_velocity();
+				p_render_data->scene_data->calculate_motion_vectors = true;
+			}
 		}
 
 		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) {
@@ -2014,7 +2072,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, velocity_plan.prepass_writes);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -2051,13 +2109,26 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				depth_framebuffer = rb_data->get_depth_fb();
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
-				depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS);
-				depth_pass_clear.push_back(Color(0, 0, 0, 0));
+				if (velocity_plan.prepass_writes) {
+					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VELOCITY);
+					depth_pass_clear.push_back(Color(0, 0, 0, 0));
+					depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
+				} else {
+					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS);
+					depth_pass_clear.push_back(Color(0, 0, 0, 0));
+				}
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
-				depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI);
-				depth_pass_clear.push_back(Color(0, 0, 0, 0));
-				depth_pass_clear.push_back(Color(0, 0, 0, 0));
+				if (velocity_plan.prepass_writes) {
+					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY);
+					depth_pass_clear.push_back(Color(0, 0, 0, 0));
+					depth_pass_clear.push_back(Color(0, 0, 0, 0));
+					depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
+				} else {
+					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI);
+					depth_pass_clear.push_back(Color(0, 0, 0, 0));
+					depth_pass_clear.push_back(Color(0, 0, 0, 0));
+				}
 			} break;
 			default: {
 			};
@@ -2247,6 +2318,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		// GodotNext: nextgi_frame_block
 		finish_depth = finish_depth || using_nextgi;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+		render_list_params.prepass_motion = velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
@@ -2257,6 +2329,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
 				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 					resolve_effects->resolve_gi(rb->get_depth_msaa(v), rb_data->get_normal_roughness_msaa(v), using_voxelgi ? rb_data->get_voxelgi_msaa(v) : RID(), rb->get_depth_texture(v), rb_data->get_normal_roughness(v), using_voxelgi ? rb_data->get_voxelgi(v) : RID(), rb->get_internal_size(), texture_multisamples[msaa]);
+					if (velocity_plan.prepass_writes) {
+						RD::get_singleton()->texture_resolve_multisample(rb->get_velocity_buffer(true, v), rb->get_velocity_buffer(false, v));
+					}
 				}
 			} else if (finish_depth) {
 				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
@@ -2339,7 +2414,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
 			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
 			RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, opaque_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-			_render_list_with_draw_list(&render_list_params, opaque_framebuffer, RD::DrawFlags(load_color ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_COLOR_ALL) | (depth_pre_pass ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_DEPTH), c, 0.0f, 0u, p_render_data->render_region);
+			BitField<RD::DrawFlags> opaque_draw_flags = load_color ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_COLOR_ALL;
+			if (velocity_plan.color_pass_loads && !load_color) {
+				// Load the velocity attachment so the prepass write survives. Never DRAW_IGNORE_ALL.
+				opaque_draw_flags = RD::DRAW_CLEAR_COLOR_0 | RD::DRAW_CLEAR_COLOR_1;
+			}
+			opaque_draw_flags = opaque_draw_flags | (depth_pre_pass ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_DEPTH);
+			_render_list_with_draw_list(&render_list_params, opaque_framebuffer, opaque_draw_flags, c, 0.0f, 0u, p_render_data->render_region);
 		}
 
 		RD::get_singleton()->draw_command_end_label();
@@ -2348,8 +2429,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (scale_type == SCALE_MFX) {
 				motion_vectors_store->process(rb,
 						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
-						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform);
-			} else {
+						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform,
+						velocity_plan.mfx_preserve);
+			} else if (!velocity_plan.skip_clear_pass) {
 				Vector<Color> motion_vector_clear_colors;
 				motion_vector_clear_colors.push_back(Color(-1, -1, 0, 0));
 				RD::get_singleton()->draw_list_begin(rb_data->get_velocity_only_fb(), RD::DRAW_CLEAR_ALL, motion_vector_clear_colors);

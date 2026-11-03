@@ -8,7 +8,11 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform sampler2D depth_buffer;
+#ifdef PRESERVE_WRITTEN
+layout(rg16f, set = 0, binding = 1) uniform restrict image2D velocity_buffer;
+#else
 layout(rg16f, set = 0, binding = 1) uniform restrict writeonly image2D velocity_buffer;
+#endif
 
 layout(push_constant, std430) uniform Params {
 	highp mat4 reprojection_matrix;
@@ -28,5 +32,12 @@ void main() {
 	float depth = texelFetch(depth_buffer, pos, 0).x;
 	vec2 uv = (vec2(pos) + 0.5f) / params.resolution;
 	vec2 velocity = derive_motion_vector(uv, depth, params.reprojection_matrix);
+#ifdef PRESERVE_WRITTEN
+	vec2 existing = imageLoad(velocity_buffer, pos).xy;
+	// Exact (-1, -1) only. A nearby value is a real motion vector from the prepass.
+	if (existing.x != -1.0 || existing.y != -1.0) {
+		return;
+	}
+#endif
 	imageStore(velocity_buffer, pos, vec4(velocity, 0.0f, 0.0f));
 }

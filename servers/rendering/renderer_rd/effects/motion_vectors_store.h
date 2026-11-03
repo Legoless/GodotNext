@@ -44,6 +44,7 @@ class MotionVectorsStore {
 	MotionVectorsStoreShaderRD motion_shader;
 	RID shader_version;
 	RID pipeline;
+	RID pipeline_preserve;
 
 public:
 	MotionVectorsStore();
@@ -51,6 +52,6 @@ public:
 
 	void process(Ref<RenderSceneBuffersRD> p_render_buffers,
 			const Projection &p_current_projection, const Transform3D &p_current_transform,
-			const Projection &p_previous_projection, const Transform3D &p_previous_transform);
+			const Projection &p_previous_projection, const Transform3D &p_previous_transform, bool p_preserve_written = false);
 };
 } //namespace RendererRD

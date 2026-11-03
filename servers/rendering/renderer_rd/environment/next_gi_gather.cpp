@@ -76,8 +76,9 @@ struct GatherParamsGPU {
 	uint32_t feedback_count;
 	uint32_t feedback_stride;
 	uint32_t record_count;
+	uint32_t velocity_enabled;
 };
-static_assert(sizeof(GatherParamsGPU) == 228, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 232, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 
 struct GatherCountersGPU {
@@ -363,6 +364,15 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.feedback_count = p_feedback_count;
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
+	RID normal_roughness = dummy_color;
+	RID velocity = dummy_color;
+	if (rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
+		normal_roughness = rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness"));
+		velocity = rb->get_velocity_buffer(false);
+		params.velocity_enabled = velocity.is_valid() && normal_roughness.is_valid() ? 1u : 0u;
+	} else {
+		params.velocity_enabled = 0;
+	}
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	_free_uniform_set();
@@ -401,7 +411,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!material_depth.is_valid()) {
 		material_depth = dummy_color;
 	}
-	RD::Uniform uniforms[21] = {
+	RD::Uniform uniforms[23] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -423,9 +433,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, counter_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, feedback_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 21, Vector<RID>({ sampler_nearest, normal_roughness })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 22, Vector<RID>({ sampler_nearest, velocity })),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 21), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 23), shader_rid, 0);
 	return uniform_set.is_valid();
 }
 

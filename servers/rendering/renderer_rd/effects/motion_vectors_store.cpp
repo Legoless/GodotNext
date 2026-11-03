@@ -37,11 +37,13 @@ namespace RendererRD {
 MotionVectorsStore::MotionVectorsStore() {
 	Vector<String> modes;
 	modes.push_back("");
+	modes.push_back("#define PRESERVE_WRITTEN\n");
 
 	motion_shader.initialize(modes);
 	shader_version = motion_shader.version_create();
 
 	pipeline = RD::get_singleton()->compute_pipeline_create(motion_shader.version_get_shader(shader_version, 0));
+	pipeline_preserve = RD::get_singleton()->compute_pipeline_create(motion_shader.version_get_shader(shader_version, 1));
 }
 
 MotionVectorsStore::~MotionVectorsStore() {
@@ -50,7 +52,7 @@ MotionVectorsStore::~MotionVectorsStore() {
 
 void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 		const Projection &p_current_projection, const Transform3D &p_current_transform,
-		const Projection &p_previous_projection, const Transform3D &p_previous_transform) {
+		const Projection &p_previous_projection, const Transform3D &p_previous_transform, bool p_preserve_written) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	ERR_FAIL_NULL(material_storage);
 
@@ -75,11 +77,12 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 
 	RD::get_singleton()->draw_command_begin_label("Motion Vector Store");
 
-	RID shader = motion_shader.version_get_shader(shader_version, 0);
+	const int variant = p_preserve_written ? 1 : 0;
+	RID shader = motion_shader.version_get_shader(shader_version, variant);
 	ERR_FAIL_COND(shader.is_null());
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipeline);
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, p_preserve_written ? pipeline_preserve : pipeline);
 
 	for (uint32_t v = 0; v < view_count; v++) {
 		RID velocity = p_render_buffers->get_velocity_buffer(false, v);

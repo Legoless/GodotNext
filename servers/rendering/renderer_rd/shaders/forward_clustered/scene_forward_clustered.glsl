@@ -1019,6 +1019,14 @@ layout(location = 0) out vec4 normal_roughness_output_buffer;
 layout(location = 1) out uvec2 voxel_gi_buffer;
 #endif
 
+#ifdef MOTION_VECTORS
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 2) out vec2 motion_vector;
+#else
+layout(location = 1) out vec2 motion_vector;
+#endif
+#endif
+
 #endif //MODE_RENDER_NORMAL
 #else // RENDER DEPTH
 
@@ -1033,8 +1041,10 @@ layout(location = 0) out vec4 frag_color;
 
 #endif // RENDER DEPTH
 
+#ifndef MODE_RENDER_DEPTH
 #ifdef MOTION_VECTORS
 layout(location = 2) out vec2 motion_vector;
+#endif
 #endif
 
 #include "../scene_forward_aa_inc.glsl"

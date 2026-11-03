@@ -84,6 +84,7 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint feedback_count;
 	uint feedback_stride;
 	uint record_count;
+	uint velocity_enabled;
 }
 params;
 
@@ -98,6 +99,9 @@ layout(set = 0, binding = 19, std430) buffer NextGIGatherCounters {
 	uint pad;
 }
 counters;
+
+layout(set = 0, binding = 21) uniform sampler2D normal_roughness_tex;
+layout(set = 0, binding = 22) uniform sampler2D velocity_tex;
 
 layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIFeedbackPages {
 	uvec4 data[]; // x = indirect texel (x | y << 16), y = record, z = card
@@ -295,12 +299,24 @@ void nextgi_gather_main() {
 	}
 	vec3 origin = world + normal * origin_offset;
 
-	vec4 prev_clip = params.prev_view_proj * vec4(world, 1.0);
 	bool reset = true;
 	ivec2 prev_probe = ivec2(probe);
-	if (prev_clip.w != 0.0) {
-		vec2 prev_ndc = prev_clip.xy / prev_clip.w;
-		vec2 prev_pixel = (prev_ndc * 0.5 + 0.5) * params.screen_jitter.xy;
+	bool have_prev = false;
+	vec2 prev_pixel = vec2(0.0);
+	// Dynamic texels (roughness alpha above 0.5) carry object velocity. Static texels use camera motion from depth.
+	if (params.velocity_enabled != 0u && texelFetch(normal_roughness_tex, ipixel, 0).a > 0.5) {
+		vec2 motion = texelFetch(velocity_tex, ipixel, 0).xy;
+		prev_pixel = vec2(ipixel) + motion * params.screen_jitter.xy;
+		have_prev = true;
+	} else {
+		vec4 prev_clip = params.prev_view_proj * vec4(world, 1.0);
+		if (prev_clip.w != 0.0) {
+			vec2 prev_ndc = prev_clip.xy / prev_clip.w;
+			prev_pixel = (prev_ndc * 0.5 + 0.5) * params.screen_jitter.xy;
+			have_prev = true;
+		}
+	}
+	if (have_prev) {
 		prev_probe = ivec2(prev_pixel / 16.0);
 		if (prev_probe.x >= 0 && prev_probe.y >= 0 && prev_probe.x < int(params.probes_x) && prev_probe.y < int(params.probes_y)) {
 			float history_depth = imageLoad(probe_image, prev_probe * 4).a;

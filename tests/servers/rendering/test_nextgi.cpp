@@ -325,6 +325,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -1699,6 +1700,51 @@ TEST_CASE("[NextGI] SRC relight: page lights, the High schedule and the two mask
 
 	CHECK(nextgi_omni_attenuation(0.0f, 0.1f, 1.0f) > 1.0f);
 	CHECK_EQ(nextgi_omni_attenuation(10.0f, 0.1f, 1.0f), 0.0f);
+}
+
+TEST_CASE("[NextGI] velocity plan follows the upscaler table") {
+	const NextGIVelocityMode modes[4] = { NEXTGI_VELOCITY_NONE, NEXTGI_VELOCITY_TAA, NEXTGI_VELOCITY_SENTINEL, NEXTGI_VELOCITY_DENSE };
+	const NextGIVelocityScale scales[4] = { NEXTGI_VELOCITY_SCALE_NONE, NEXTGI_VELOCITY_SCALE_NONE, NEXTGI_VELOCITY_SCALE_FSR2, NEXTGI_VELOCITY_SCALE_MFX };
+	for (int i = 0; i < 4; i++) {
+		const NextGIVelocityPlan off = nextgi_velocity_plan(scales[i], modes[i], modes[i] == NEXTGI_VELOCITY_TAA, false);
+		CHECK_FALSE(off.active);
+		CHECK_FALSE(off.prepass_writes);
+		CHECK_FALSE(off.color_pass_loads);
+		CHECK_FALSE(off.skip_clear_pass);
+		CHECK_FALSE(off.mfx_preserve);
+	}
+
+	const NextGIVelocityPlan none = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_NONE, NEXTGI_VELOCITY_NONE, false, true);
+	CHECK(none.active);
+	CHECK(none.prepass_writes);
+	CHECK_FALSE(none.color_pass_loads);
+	CHECK_FALSE(none.skip_clear_pass);
+	CHECK_FALSE(none.mfx_preserve);
+	CHECK_EQ(none.pre_clear_r, 0.0f);
+
+	const NextGIVelocityPlan taa = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_NONE, NEXTGI_VELOCITY_TAA, true, true);
+	CHECK(taa.color_pass_loads);
+	CHECK(taa.prepass_writes);
+	CHECK_FALSE(taa.skip_clear_pass);
+	CHECK_EQ(taa.pre_clear_r, 0.0f);
+
+	const NextGIVelocityPlan fsr2 = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_FSR2, NEXTGI_VELOCITY_SENTINEL, true, true);
+	CHECK(fsr2.skip_clear_pass);
+	CHECK_FALSE(fsr2.color_pass_loads);
+	CHECK_FALSE(fsr2.mfx_preserve);
+	CHECK_EQ(fsr2.pre_clear_r, -1.0f);
+	CHECK_EQ(fsr2.pre_clear_g, -1.0f);
+
+	const NextGIVelocityPlan mfx = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_MFX, NEXTGI_VELOCITY_DENSE, false, true);
+	CHECK(mfx.mfx_preserve);
+	CHECK_FALSE(mfx.skip_clear_pass);
+	CHECK_FALSE(mfx.color_pass_loads);
+	CHECK_EQ(mfx.pre_clear_r, -1.0f);
+	CHECK_EQ(mfx.pre_clear_g, -1.0f);
+
+	CHECK(nextgi_velocity_texel_is_preclear(-1.0f, -1.0f));
+	CHECK_FALSE(nextgi_velocity_texel_is_preclear(-1.0001f, -1.2f));
+	CHECK_FALSE(nextgi_velocity_texel_is_preclear(-1.0f, -0.999f));
 }
 
 TEST_CASE("[NextGI] diffuse gather ray count is 1/16 of a 1080p frame") {
