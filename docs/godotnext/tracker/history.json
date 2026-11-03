@@ -2,9 +2,9 @@
  {
   "day": "2026-11-03",
   "build_total": 180,
-  "build_done": 39,
+  "build_done": 40,
   "in_progress": 1,
-  "ready": 16,
+  "ready": 15,
   "blocked": 124,
   "gates_passed": 0,
   "gates_total": 18
