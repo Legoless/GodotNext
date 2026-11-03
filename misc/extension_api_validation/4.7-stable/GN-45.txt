@@ -1,0 +1,5 @@
+Validate extension JSON: Error: Field 'classes/RenderingDevice/methods/blas_build/arguments': size changed value in new API, from 1 to 2.
+Validate extension JSON: Error: Field 'classes/RenderingDevice/methods/tlas_build/arguments': size changed value in new API, from 2 to 3.
+
+Added an optional AccelerationStructureBuildMode argument to RenderingDevice.blas_build and tlas_build (GodotNext #45).
+The default is BUILD, so existing calls keep their behavior. Compatibility methods registered.

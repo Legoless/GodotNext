@@ -70,6 +70,13 @@ static uint64_t _metal_as_scratch_size(NS::UInteger p_scratch_size) {
 	return p_scratch_size != 0 ? (uint64_t)p_scratch_size : 256;
 }
 
+// GodotNext: as_build_modes
+static uint64_t _metal_as_refit_scratch_size(NS::UInteger p_refit_scratch_size, uint64_t p_build_scratch_size) {
+	// A zero refit query falls back to the build scratch. The 256-byte bump above is only for a
+	// zero build scratch, and it is too small to refit.
+	return p_refit_scratch_size != 0 ? _metal_as_scratch_size(p_refit_scratch_size) : p_build_scratch_size;
+}
+
 RDD::AccelerationStructureID RenderingDeviceDriverMetal::blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAY_QUERY), AccelerationStructureID(), "Ray query is not supported by the Metal driver.");
 	ERR_FAIL_COND_V_MSG(p_geometries.size() == 0, AccelerationStructureID(), "Acceleration structure has no geometries.");
@@ -137,6 +144,9 @@ RDD::AccelerationStructureID RenderingDeviceDriverMetal::blas_create(VectorView<
 	info->descriptor = desc;
 	info->size_bytes = _metal_as_reported_size(info->as.get(), sizes.accelerationStructureSize);
 	info->scratch_size = _metal_as_scratch_size(sizes.buildScratchBufferSize);
+	// GodotNext: as_build_modes
+	info->refit_scratch_size = _metal_as_refit_scratch_size(sizes.refitScratchBufferSize, info->scratch_size);
+	info->allow_update = p_flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT);
 	info->top_level = false;
 	return AccelerationStructureID(info);
 }
@@ -167,6 +177,9 @@ RDD::AccelerationStructureID RenderingDeviceDriverMetal::tlas_create(uint32_t p_
 	info->descriptor = desc;
 	info->size_bytes = _metal_as_reported_size(info->as.get(), sizes.accelerationStructureSize);
 	info->scratch_size = _metal_as_scratch_size(sizes.buildScratchBufferSize);
+	// GodotNext: as_build_modes
+	info->refit_scratch_size = _metal_as_refit_scratch_size(sizes.refitScratchBufferSize, info->scratch_size);
+	info->allow_update = p_flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT);
 	info->max_instance_count = p_max_instance_count;
 	info->top_level = true;
 	return AccelerationStructureID(info);
@@ -235,11 +248,13 @@ void RenderingDeviceDriverMetal::acceleration_structure_free(AccelerationStructu
 	VersatileResource::free(resources_allocator, info);
 }
 
-uint32_t RenderingDeviceDriverMetal::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) {
+uint32_t RenderingDeviceDriverMetal::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) {
 	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
 	ERR_FAIL_NULL_V(info, 0);
-	ERR_FAIL_COND_V_MSG(info->scratch_size > UINT32_MAX, UINT32_MAX, "Acceleration structure scratch size does not fit in 32 bits.");
-	return (uint32_t)info->scratch_size;
+	// GodotNext: as_build_modes
+	const uint64_t scratch_size = p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE ? info->refit_scratch_size : info->scratch_size;
+	ERR_FAIL_COND_V_MSG(scratch_size > UINT32_MAX, UINT32_MAX, "Acceleration structure scratch size does not fit in 32 bits.");
+	return (uint32_t)scratch_size;
 }
 
 uint64_t RenderingDeviceDriverMetal::acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) {
@@ -248,7 +263,7 @@ uint64_t RenderingDeviceDriverMetal::acceleration_structure_get_size_bytes(Accel
 	return info->size_bytes;
 }
 
-void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
+void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, AccelerationStructureBuildMode p_mode) {
 	AccelerationStructureInfo *info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	BufferInfo *scratch = (BufferInfo *)p_scratch_buffer.id;
 	ERR_FAIL_NULL(info);
@@ -260,10 +275,16 @@ void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer
 
 	MTL3::MDCommandBuffer *cb = (MTL3::MDCommandBuffer *)p_cmd_buffer.id;
 	ERR_FAIL_NULL(cb);
-	cb->encode_acceleration_structure_build(info->as.get(), info->descriptor.get(), scratch->buffer.get(), false);
+	// GodotNext: as_build_modes
+	if (p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE) {
+		ERR_FAIL_COND_MSG(!info->allow_update, "command_build_blas UPDATE requires ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.");
+		cb->encode_acceleration_structure_refit(info->as.get(), info->descriptor.get(), info->as.get(), scratch->buffer.get(), false, true);
+	} else {
+		cb->encode_acceleration_structure_build(info->as.get(), info->descriptor.get(), scratch->buffer.get(), false);
+	}
 }
 
-void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
+void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) {
 	AccelerationStructureInfo *info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	BufferInfo *scratch = (BufferInfo *)p_scratch_buffer.id;
 	BufferInfo *instances = (BufferInfo *)p_instance_buffer.id;
@@ -314,7 +335,13 @@ void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer
 	build_desc->setInstanceCountBuffer(count_buffer);
 	build_desc->setInstanceCountBufferOffset(count_offset);
 	cb->defer_acceleration_structure_descriptor(build_desc);
-	cb->encode_acceleration_structure_build(info->as.get(), build_desc.get(), scratch->buffer.get(), true);
+	// GodotNext: as_build_modes
+	if (p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE) {
+		ERR_FAIL_COND_MSG(!info->allow_update, "command_build_tlas UPDATE requires ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.");
+		cb->encode_acceleration_structure_refit(info->as.get(), build_desc.get(), info->as.get(), scratch->buffer.get(), true, false);
+	} else {
+		cb->encode_acceleration_structure_build(info->as.get(), build_desc.get(), scratch->buffer.get(), true);
+	}
 }
 
 bool RenderingDeviceDriverMetal::_create_dummy_blas() {

@@ -89,4 +89,50 @@ inline const char *get_bind_error(BindStatus p_status) {
 	}
 }
 
+// GodotNext: as_build_modes
+// UPDATE is rejected before any driver command. Check order: an unknown mode, then a missing
+// ALLOW_UPDATE flag, then a structure that has not been built, then a top-level instance-count change.
+enum UpdateStatus {
+	UPDATE_OK,
+	UPDATE_INVALID_MODE,
+	UPDATE_MISSING_ALLOW_UPDATE,
+	UPDATE_NOT_BUILT,
+	UPDATE_INSTANCE_COUNT_CHANGED,
+};
+
+inline UpdateStatus get_update_status(RDD::AccelerationStructureBuildMode p_mode, bool p_allow_update, bool p_invalidated, bool p_is_tlas, uint32_t p_last_instance_count, uint32_t p_instance_count) {
+	if (p_mode == RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD) {
+		return UPDATE_OK;
+	}
+	if (p_mode != RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE) {
+		return UPDATE_INVALID_MODE;
+	}
+	if (!p_allow_update) {
+		return UPDATE_MISSING_ALLOW_UPDATE;
+	}
+	if (p_invalidated) {
+		return UPDATE_NOT_BUILT;
+	}
+	if (p_is_tlas && p_instance_count != p_last_instance_count) {
+		return UPDATE_INSTANCE_COUNT_CHANGED;
+	}
+	return UPDATE_OK;
+}
+
+inline const char *get_update_error(UpdateStatus p_status) {
+	switch (p_status) {
+		case UPDATE_MISSING_ALLOW_UPDATE:
+			return "Acceleration structure UPDATE requires ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.";
+		case UPDATE_NOT_BUILT:
+			return "Acceleration structure UPDATE requires a previous BUILD. The structure has not been built, or it was invalidated.";
+		case UPDATE_INSTANCE_COUNT_CHANGED:
+			return "Top-level acceleration structure UPDATE cannot change the instance count. Rebuild it instead.";
+		case UPDATE_INVALID_MODE:
+			return "Acceleration structure build mode is not BUILD or UPDATE.";
+		case UPDATE_OK:
+		default:
+			return "";
+	}
+}
+
 } // namespace RDRayQuery

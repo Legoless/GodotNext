@@ -687,6 +687,9 @@ public:
 
 	// GodotNext: metal_acceleration_structure
 	void encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, bool p_top_level);
+	// GodotNext: as_build_modes
+	// p_vertex_data selects AccelerationStructureRefitOptionVertexData. Top-level refits pass false.
+	void encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, bool p_top_level, bool p_vertex_data);
 	bool write_instance_count(uint32_t p_count, MTL::Buffer *&r_buffer, NS::UInteger &r_offset);
 	void defer_acceleration_structure_resource(MetalBuffer p_buffer);
 	void defer_acceleration_structure_descriptor(NS::SharedPtr<MTL::AccelerationStructureDescriptor> p_descriptor);

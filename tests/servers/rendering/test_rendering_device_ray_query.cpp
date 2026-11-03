@@ -142,6 +142,37 @@ TEST_CASE("[RenderingDevice][RayQuery] Acceleration structure bind rules for com
 	CHECK(String(RDRayQuery::get_bind_error(RDRayQuery::BIND_OK)).is_empty());
 }
 
+TEST_CASE("[RenderingDevice][RayQuery] Acceleration structure UPDATE is rejected before any driver command") {
+	SUBCASE("BUILD is accepted for an unbuilt structure and for a changed instance count") {
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD, false, true, false, 0, 0), RDRayQuery::UPDATE_OK);
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD, true, false, true, 2, 4), RDRayQuery::UPDATE_OK);
+	}
+	SUBCASE("A mode other than BUILD or UPDATE is rejected first") {
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::AccelerationStructureBuildMode(2), false, true, true, 1, 2), RDRayQuery::UPDATE_INVALID_MODE);
+	}
+	SUBCASE("Missing ALLOW_UPDATE is reported before an unbuilt structure") {
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, false, true, false, 0, 0), RDRayQuery::UPDATE_MISSING_ALLOW_UPDATE);
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, false, false, true, 1, 2), RDRayQuery::UPDATE_MISSING_ALLOW_UPDATE);
+	}
+	SUBCASE("UPDATE before any BUILD is rejected, including when the instance count would also change") {
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, true, true, false, 0, 0), RDRayQuery::UPDATE_NOT_BUILT);
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, true, true, true, 0, 1), RDRayQuery::UPDATE_NOT_BUILT);
+	}
+	SUBCASE("A top-level UPDATE cannot change the instance count") {
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, true, false, true, 2, 1), RDRayQuery::UPDATE_INSTANCE_COUNT_CHANGED);
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, true, false, false, 2, 1), RDRayQuery::UPDATE_OK);
+	}
+	SUBCASE("A matching UPDATE is accepted") {
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, true, false, true, 4, 4), RDRayQuery::UPDATE_OK);
+		CHECK_EQ(RDRayQuery::get_update_status(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, true, false, false, 0, 0), RDRayQuery::UPDATE_OK);
+	}
+	CHECK(String(RDRayQuery::get_update_error(RDRayQuery::UPDATE_OK)).is_empty());
+	CHECK(String(RDRayQuery::get_update_error(RDRayQuery::UPDATE_MISSING_ALLOW_UPDATE)).contains("ALLOW_UPDATE"));
+	CHECK(String(RDRayQuery::get_update_error(RDRayQuery::UPDATE_NOT_BUILT)).contains("BUILD"));
+	CHECK(String(RDRayQuery::get_update_error(RDRayQuery::UPDATE_INSTANCE_COUNT_CHANGED)).contains("instance count"));
+	CHECK(String(RDRayQuery::get_update_error(RDRayQuery::UPDATE_INVALID_MODE)).contains("BUILD or UPDATE"));
+}
+
 #ifdef RD_ENABLED
 
 TEST_CASE("[RenderingDevice][RayQuery] RT pipeline entry points fail cleanly without SUPPORTS_RAYTRACING_PIPELINE") {

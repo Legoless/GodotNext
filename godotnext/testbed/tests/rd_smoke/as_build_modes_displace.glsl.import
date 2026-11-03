@@ -1,0 +1,14 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://g6vg5ftjbuv4"
+path="res://.godot/imported/as_build_modes_displace.glsl-ff8745c58596679696413a28f46429d2.res"
+
+[deps]
+
+source_file="res://tests/rd_smoke/as_build_modes_displace.glsl"
+dest_files=["res://.godot/imported/as_build_modes_displace.glsl-ff8745c58596679696413a28f46429d2.res"]
+
+[params]
+

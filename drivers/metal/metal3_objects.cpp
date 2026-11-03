@@ -1972,6 +1972,20 @@ void MDCommandBuffer::encode_acceleration_structure_build(MTL::AccelerationStruc
 	enc->buildAccelerationStructure(p_structure, p_descriptor, p_scratch, 0);
 }
 
+// GodotNext: as_build_modes
+// In-place refit: source and destination are the same acceleration structure. Bottom-level refit
+// passes VertexData; without it Metal ignores the vertex buffers and copies the previously
+// encoded vertices. Top-level refit uses the no-options overload so the instance descriptor is read.
+void MDCommandBuffer::encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, bool p_top_level, bool p_vertex_data) {
+	MTL::AccelerationStructureCommandEncoder *enc = _ensure_as_encoder(p_top_level);
+	ERR_FAIL_NULL(enc);
+	if (p_vertex_data) {
+		enc->refitAccelerationStructure(p_source, p_descriptor, p_destination, p_scratch, 0, MTL::AccelerationStructureRefitOptionVertexData);
+	} else {
+		enc->refitAccelerationStructure(p_source, p_descriptor, p_destination, p_scratch, 0);
+	}
+}
+
 // GodotNext: metal_acceleration_structure
 bool MDCommandBuffer::write_instance_count(uint32_t p_count, MTL::Buffer *&r_buffer, NS::UInteger &r_offset) {
 	Alloc count_alloc = allocate_arg_buffer(sizeof(uint32_t));

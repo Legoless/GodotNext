@@ -35,3 +35,18 @@ How it was used: the public commit was fetched and the `spirv_msl.cpp` change wa
 | Copied files | None |
 
 How it was used: the descriptor fields, usage bits, column-major `PackedFloat4x3` instance transform, 72-byte indirect instance descriptor, and the rules that `instanceDescriptorBufferOffset` is a multiple of 64 and `instanceCountBufferOffset` is a multiple of 4 come from that header. `ExtendedLimits` is never set, because SPIRV-Cross emits `intersection_query<instancing, triangle_data>` without `extended_limits`. The header and the WWDC session do not publish a numeric non-extended instance cap. The driver reports and enforces 2^24, which is above the plan's 100,000 floor, and the testbed checks that a 100,000-instance top-level structure can be created. Metal's default triangle winding is clockwise; Godot's instance flags follow Vulkan's counter-clockwise default, so the counter-clockwise instance option is set when `FLIP_FACING` is clear.
+
+### Apple Metal acceleration-structure refit
+
+| Field | Value |
+|---|---|
+| What | Public Metal refit API: `refitAccelerationStructure`, `MTLAccelerationStructureRefitOptionVertexData`, in-place refit (source and destination may be the same object), and `refitScratchBufferSize` |
+| Upstream | https://developer.apple.com/documentation/metal/mtlaccelerationstructurecommandencoder/refit(source:descriptor:destination:scratchbuffer:scratchbufferoffset:) and the options overload https://developer.apple.com/documentation/metal/mtlaccelerationstructurecommandencoder/refit(source:descriptor:destination:scratchbuffer:scratchbufferoffset:options:). SDK headers `MTLAccelerationStructureCommandEncoder.h`, `MTLAccelerationStructure.h`, and `MTLDevice.h` |
+| Version | MacOSX27.2.sdk on the Apple M5 Max, consulted 2026-11-03. The same selectors are already wrapped by vendored metal-cpp (`thirdparty/metal-cpp/Metal/MTLAccelerationStructureCommandEncoder.hpp`, `MTLAccelerationStructure.hpp`, `MTLDevice.hpp`) |
+| License | Apple Developer Documentation and SDK headers. Consulted, not copied. No sample code was copied. metal-cpp is already vendored under Apache-2.0 |
+| Read on | 2026-11-03, for issue #45 |
+| Consulted by | The #45 implementer |
+| Used in | `drivers/metal/metal_acceleration_structure.cpp`, `drivers/metal/metal3_objects.cpp` |
+| Copied files | None |
+
+How it was used: a bottom-level UPDATE calls the options overload with `AccelerationStructureRefitOptionVertexData`. The SDK header states that without that option the vertex buffers on the geometry descriptor are ignored and previously encoded vertex data is copied. A top-level UPDATE calls the no-options overload so the instance descriptor is read. Source and destination are the same acceleration structure, which the header allows for an in-place refit. The scratch buffer for UPDATE is sized from `refitScratchBufferSize` when that query is non-zero, and otherwise from the build scratch size. `AccelerationStructureUsageRefit` was already set when `ALLOW_UPDATE` is set (#47). This issue does not change the front-face mapping.

@@ -99,6 +99,9 @@ protected:
 	RID _shader_create_from_bytecode_bind_compat_79606(const Vector<uint8_t> &p_shader_binary);
 	RID _texture_create_from_extension_bind_compat_105570(TextureType p_type, DataFormat p_format, TextureSamples p_samples, BitField<RenderingDevice::TextureUsageBits> p_usage, uint64_t p_image, uint64_t p_width, uint64_t p_height, uint64_t p_depth, uint64_t p_layers);
 	RID _texture_create_shared_from_slice_bind_compat_121937(const Ref<RDTextureView> &p_view, RID p_with_texture, uint32_t p_layer, uint32_t p_mipmap, uint32_t p_mipmaps = 1, TextureSliceType p_slice_type = TEXTURE_SLICE_2D);
+	// GodotNext: as_build_modes
+	Error _blas_build_bind_compat_gn45(RID p_blas);
+	Error _tlas_build_bind_compat_gn45(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances);
 	static void _bind_compatibility_methods();
 #endif
 
@@ -1352,6 +1355,9 @@ private:
 		// BLAS/TLAS are weakly linked, as opposed to RD dependencies.
 		HashSet<RID> acceleration_structure_dependencies;
 		bool invalidated = true;
+		// GodotNext: as_build_modes
+		BitField<AccelerationStructureFlagBits> flags = {};
+		uint32_t last_build_instance_count = 0;
 
 		// Scratch buffer used during build, owned by the AS.
 		RDD::BufferID scratch_buffer;
@@ -1376,7 +1382,7 @@ private:
 		LocalVector<InstanceBuffer> instance_buffers;
 	};
 
-	Error _acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure);
+	Error _acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure, RDD::AccelerationStructureBuildMode p_mode);
 	void _blas_remove_tlas_dependencies(AccelerationStructure *p_blas, RID p_blas_id);
 	void _tlas_remove_blas_dependencies(AccelerationStructure *p_tlas, RID p_tlas_id);
 
@@ -1412,8 +1418,8 @@ public:
 		RID blas;
 	};
 
-	Error blas_build(RID p_blas);
-	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances);
+	Error blas_build(RID p_blas, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
 
 private:
 	/**********************************/
@@ -2045,7 +2051,7 @@ private:
 	Error _buffer_update_bind(RID p_buffer, uint32_t p_offset, uint32_t p_size, const Vector<uint8_t> &p_data);
 
 	RID _blas_create(const TypedArray<RDAccelerationStructureGeometry> &p_geometries, BitField<AccelerationStructureFlagBits> p_flags);
-	Error _tlas_build(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances);
+	Error _tlas_build(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
 
 	Error _hit_sbt_range_update(RID p_hit_sbt, HitShaderBindingTableRange p_range, uint32_t p_offset, const Vector<int32_t> &p_hit_group_indices);
 
@@ -2077,6 +2083,8 @@ VARIANT_ENUM_CAST(RenderingDevice::IndexBufferFormat)
 VARIANT_BITFIELD_CAST(RenderingDevice::StorageBufferUsage)
 VARIANT_BITFIELD_CAST(RenderingDevice::BufferCreationBits)
 VARIANT_BITFIELD_CAST(RenderingDevice::AccelerationStructureFlagBits)
+// GodotNext: as_build_modes
+VARIANT_ENUM_CAST(RenderingDevice::AccelerationStructureBuildMode)
 VARIANT_BITFIELD_CAST(RenderingDevice::AccelerationStructureGeometryFlagBits)
 VARIANT_BITFIELD_CAST(RenderingDevice::AccelerationStructureInstanceFlagBits)
 VARIANT_ENUM_CAST(RenderingDevice::UniformType)

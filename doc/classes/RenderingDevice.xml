@@ -25,8 +25,11 @@
 		<method name="blas_build" experimental="">
 			<return type="int" enum="Error" />
 			<param index="0" name="blas" type="RID" />
+			<param index="1" name="mode" type="int" enum="RenderingDevice.AccelerationStructureBuildMode" default="0" />
 			<description>
-				Builds the [param blas].
+				Builds or refits the [param blas].
+				[param mode] [constant ACCELERATION_STRUCTURE_BUILD_MODE_BUILD] builds the structure from scratch. [constant ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE] refits a structure created with [constant ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT] that has already been built, for example after vertex positions change. The geometry topology must stay the same.
+				An UPDATE that the structure cannot accept returns [constant @GlobalScope.ERR_INVALID_PARAMETER] and records no build.
 			</description>
 		</method>
 		<method name="blas_create" experimental="">
@@ -1297,11 +1300,13 @@
 			<return type="int" enum="Error" />
 			<param index="0" name="tlas" type="RID" />
 			<param index="1" name="instances" type="RDAccelerationStructureInstance[]" />
+			<param index="2" name="mode" type="int" enum="RenderingDevice.AccelerationStructureBuildMode" default="0" />
 			<description>
-				Builds the [param tlas]. The contents of previous builds are discarded.
+				Builds or refits the [param tlas]. A [constant ACCELERATION_STRUCTURE_BUILD_MODE_BUILD] discards the contents of previous builds. A [constant ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE] refits a structure created with [constant ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT] that has already been built, and the instance count must stay the same.
 				Any BLAS provided through the [member RDAccelerationStructureInstance.blas] member must already have been built using the [method blas_build] method.
 				The number of instances can be equal to or smaller than the maximum instance count provided in the [method tlas_create] method.
 				An instance can use a [member RDAccelerationStructureInstance.hit_sbt_range] of [code]0[/code] when the TLAS is only traced by ray queries, for example from a compute shader. Such a TLAS can't be bound to a raytracing list.
+				An UPDATE that the structure cannot accept returns [constant @GlobalScope.ERR_INVALID_PARAMETER] and records no build.
 				[b]Note:[/b] Freeing or rebuilding any of the provided BLASes after this method invalidates the TLAS and requires it to be rebuilt.
 			</description>
 		</method>
@@ -2398,6 +2403,12 @@
 		</constant>
 		<constant name="ACCELERATION_STRUCTURE_LOW_MEMORY_BIT" value="16" enum="AccelerationStructureFlagBits" is_bitfield="true" experimental="">
 			Reduces the memory usage of the acceleration structure, potentially at the cost of reduced ray traversal performance.
+		</constant>
+		<constant name="ACCELERATION_STRUCTURE_BUILD_MODE_BUILD" value="0" enum="AccelerationStructureBuildMode" experimental="">
+			Builds an acceleration structure from scratch. This is the default of [method blas_build] and [method tlas_build].
+		</constant>
+		<constant name="ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE" value="1" enum="AccelerationStructureBuildMode" experimental="">
+			Refits an acceleration structure that was created with [constant ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT] and has already been built. Vertex positions of a bottom-level structure, or instance transforms of a top-level structure, may change. Geometry topology and the top-level instance count must stay the same.
 		</constant>
 		<constant name="ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT" value="1" enum="AccelerationStructureGeometryFlagBits" is_bitfield="true" experimental="">
 			An opaque geometry does not invoke the any hit shaders.

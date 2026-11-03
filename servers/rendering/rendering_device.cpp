@@ -301,8 +301,8 @@ RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData>
 /**** ACCELERATION STRUCTURE ****/
 /********************************/
 
-Error RenderingDevice::_acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure) {
-	uint64_t scratch_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id);
+Error RenderingDevice::_acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure, RDD::AccelerationStructureBuildMode p_mode) {
+	uint64_t scratch_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id, p_mode);
 
 	if (p_acceleration_structure->scratch_buffer) {
 		uint64_t scratch_buffer_size = driver->buffer_get_allocation_size(p_acceleration_structure->scratch_buffer);
@@ -317,6 +317,12 @@ Error RenderingDevice::_acceleration_structure_scratch_buffer_create(Acceleratio
 	}
 
 	if (!p_acceleration_structure->scratch_buffer) {
+		// GodotNext: as_build_modes
+		// The first scratch buffer covers both modes, so alternating BUILD and UPDATE does not reallocate.
+		const uint64_t build_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id, RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+		const uint64_t update_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id, RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
+		scratch_size = MAX(scratch_size, MAX(build_size, update_size));
+
 		p_acceleration_structure->scratch_buffer = driver->buffer_create(scratch_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
 		ERR_FAIL_COND_V(!p_acceleration_structure->scratch_buffer, ERR_CANT_CREATE);
 
@@ -435,6 +441,8 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 	acceleration_structure.type = RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
 	acceleration_structure.driver_id = driver->blas_create(rdd_geometries, p_flags);
 	ERR_FAIL_COND_V_MSG(!acceleration_structure.driver_id, RID(), "Failed to create BLAS.");
+	// GodotNext: as_build_modes
+	acceleration_structure.flags = p_flags;
 	// GodotNext: metal_acceleration_structure
 	acceleration_structure.size_bytes = driver->acceleration_structure_get_size_bytes(acceleration_structure.driver_id);
 	buffer_memory.add(acceleration_structure.size_bytes);
@@ -497,6 +505,8 @@ RID RenderingDevice::tlas_create(uint32_t p_max_instance_count, BitField<Acceler
 	acceleration_structure.type = RDD::ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
 	acceleration_structure.driver_id = driver->tlas_create(p_max_instance_count, p_flags);
 	ERR_FAIL_COND_V_MSG(!acceleration_structure.driver_id, RID(), "Failed to create TLAS.");
+	// GodotNext: as_build_modes
+	acceleration_structure.flags = p_flags;
 	// GodotNext: metal_acceleration_structure
 	acceleration_structure.size_bytes = driver->acceleration_structure_get_size_bytes(acceleration_structure.driver_id);
 	buffer_memory.add(acceleration_structure.size_bytes);
@@ -515,7 +525,7 @@ RID RenderingDevice::tlas_create(uint32_t p_max_instance_count, BitField<Acceler
 	return id;
 }
 
-Error RenderingDevice::blas_build(RID p_blas) {
+Error RenderingDevice::blas_build(RID p_blas, AccelerationStructureBuildMode p_mode) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
 	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Building BLAS is forbidden during creation of a draw list.");
@@ -525,18 +535,24 @@ Error RenderingDevice::blas_build(RID p_blas) {
 	AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
 	ERR_FAIL_NULL_V_MSG(blas, ERR_INVALID_PARAMETER, "BLAS argument is not valid.");
 
-	Error err = _acceleration_structure_scratch_buffer_create(blas);
+	// GodotNext: as_build_modes
+	// Reject an UPDATE before scratch allocation and before any render-graph command.
+	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, blas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), blas->invalidated, false, 0, 0);
+	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));
+
+	Error err = _acceleration_structure_scratch_buffer_create(blas, p_mode);
 	ERR_FAIL_COND_V(err != OK, err);
 
-	draw_graph.add_blas_build(blas->driver_id, blas->scratch_buffer, blas->draw_tracker, blas->draw_trackers);
+	draw_graph.add_blas_build(blas->driver_id, blas->scratch_buffer, blas->draw_tracker, blas->draw_trackers, p_mode);
 
 	blas->invalidated = false;
+	// GodotNext: as_build_modes — a refit still invalidates dependent top-level structures.
 	_blas_remove_tlas_dependencies(blas, p_blas);
 
 	return OK;
 }
 
-Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances) {
+Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
 	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a draw list.");
@@ -547,7 +563,12 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	ERR_FAIL_NULL_V_MSG(tlas, ERR_INVALID_PARAMETER, "TLAS argument is not valid.");
 	ERR_FAIL_COND_V_MSG(p_instances.size() > tlas->max_instance_count, ERR_INVALID_PARAMETER, "Exceeded the maximum amount of instances allowed in the TLAS.");
 
-	Error err = _acceleration_structure_scratch_buffer_create(tlas);
+	// GodotNext: as_build_modes
+	// Reject an UPDATE before scratch allocation, instance-buffer writes, or dependency updates.
+	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, tlas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), tlas->invalidated, true, tlas->last_build_instance_count, p_instances.size());
+	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));
+
+	Error err = _acceleration_structure_scratch_buffer_create(tlas, p_mode);
 	ERR_FAIL_COND_V(err != OK, err);
 
 	uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
@@ -641,9 +662,11 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		driver->acceleration_structure_instance_write(instance_buffer.data_ptr + instance_buffer_offset + (instance_size * i), rdd_instance);
 	}
 
-	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer.driver_id, instance_buffer_offset, p_instances.size(), tlas->draw_tracker, draw_trackers);
+	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer.driver_id, instance_buffer_offset, p_instances.size(), tlas->draw_tracker, draw_trackers, p_mode);
 
 	tlas->invalidated = false;
+	// GodotNext: as_build_modes
+	tlas->last_build_instance_count = p_instances.size();
 
 	return OK;
 }
@@ -9450,8 +9473,9 @@ void RenderingDevice::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("blas_create", "geometries", "flags"), &RenderingDevice::_blas_create);
 	ClassDB::bind_method(D_METHOD("tlas_create", "max_instance_count", "flags"), &RenderingDevice::tlas_create);
-	ClassDB::bind_method(D_METHOD("blas_build", "blas"), &RenderingDevice::blas_build);
-	ClassDB::bind_method(D_METHOD("tlas_build", "tlas", "instances"), &RenderingDevice::_tlas_build);
+	// GodotNext: as_build_modes
+	ClassDB::bind_method(D_METHOD("blas_build", "blas", "mode"), &RenderingDevice::blas_build, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
+	ClassDB::bind_method(D_METHOD("tlas_build", "tlas", "instances", "mode"), &RenderingDevice::_tlas_build, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
 
 	ClassDB::bind_method(D_METHOD("hit_sbt_create", "raytracing_pipeline", "initial_hit_group_capacity"), &RenderingDevice::hit_sbt_create);
 	ClassDB::bind_method(D_METHOD("hit_sbt_set_pipeline", "hit_sbt", "raytracing_pipeline"), &RenderingDevice::hit_sbt_set_pipeline);
@@ -9920,6 +9944,10 @@ void RenderingDevice::_bind_methods() {
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT);
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_LOW_MEMORY_BIT);
+
+	// GodotNext: as_build_modes
+	BIND_ENUM_CONSTANT(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+	BIND_ENUM_CONSTANT(ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
 
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT);
 	BIND_BITFIELD_FLAG(ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT);
@@ -10421,7 +10449,7 @@ RID RenderingDevice::_blas_create(const TypedArray<RDAccelerationStructureGeomet
 	return blas_create(geometries, p_flags);
 }
 
-Error RenderingDevice::_tlas_build(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances) {
+Error RenderingDevice::_tlas_build(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances, AccelerationStructureBuildMode p_mode) {
 	thread_local LocalVector<AccelerationStructureInstance> instances;
 	instances.resize(p_instances.size());
 
@@ -10431,7 +10459,7 @@ Error RenderingDevice::_tlas_build(RID p_tlas, const TypedArray<RDAccelerationSt
 		instances[i] = instance->base;
 	}
 
-	return tlas_build(p_tlas, instances);
+	return tlas_build(p_tlas, instances, p_mode);
 }
 
 Error RenderingDevice::_hit_sbt_range_update(RID p_hit_sbt, HitShaderBindingTableRange p_range, uint32_t p_offset, const Vector<int32_t> &p_hit_group_indices) {

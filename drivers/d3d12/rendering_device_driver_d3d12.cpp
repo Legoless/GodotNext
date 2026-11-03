@@ -5749,7 +5749,9 @@ void RenderingDeviceDriverD3D12::acceleration_structure_free(AccelerationStructu
 	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
 }
 
-uint32_t RenderingDeviceDriverD3D12::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) {
+uint32_t RenderingDeviceDriverD3D12::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) {
+	// GodotNext: as_build_modes
+	(void)p_mode;
 	ERR_FAIL_V_MSG(0, "Ray tracing is not currently supported by the D3D12 driver.");
 }
 
@@ -5769,11 +5771,15 @@ bool RenderingDeviceDriverD3D12::raytracing_pipeline_get_shader_group_handles(Ra
 
 // ----- COMMANDS -----
 
-void RenderingDeviceDriverD3D12::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
+void RenderingDeviceDriverD3D12::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, AccelerationStructureBuildMode p_mode) {
+	// GodotNext: as_build_modes
+	(void)p_mode;
 	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
 }
 
-void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
+void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) {
+	// GodotNext: as_build_modes
+	(void)p_mode;
 	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
 }
 

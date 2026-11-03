@@ -351,6 +351,9 @@ private:
 	struct RecordedBottomLevelAccelerationStructureBuildCommand : RecordedCommand {
 		RDD::AccelerationStructureID acceleration_structure;
 		RDD::BufferID scratch_buffer;
+		// GodotNext: as_build_modes
+		// UPDATE refits this structure in place, so playback passes the mode to the driver.
+		RDD::AccelerationStructureBuildMode mode = RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD;
 	};
 
 	struct RecordedTopLevelAccelerationStructureBuildCommand : RecordedCommand {
@@ -359,6 +362,8 @@ private:
 		RDD::BufferID instance_buffer;
 		uint32_t instance_offset = 0;
 		uint32_t instance_count = 0;
+		// GodotNext: as_build_modes
+		RDD::AccelerationStructureBuildMode mode = RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD;
 	};
 
 	struct RecordedBufferClearCommand : RecordedCommand {
@@ -898,8 +903,9 @@ public:
 	void initialize(RDD *p_driver, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame);
 	void finalize();
 	void begin();
-	void add_blas_build(RDD::AccelerationStructureID p_blas, RDD::BufferID p_scratch_buffer, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers);
-	void add_tlas_build(RDD::AccelerationStructureID p_tlas, RDD::BufferID p_scratch_buffer, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers);
+	// GodotNext: as_build_modes
+	void add_blas_build(RDD::AccelerationStructureID p_blas, RDD::BufferID p_scratch_buffer, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode);
+	void add_tlas_build(RDD::AccelerationStructureID p_tlas, RDD::BufferID p_scratch_buffer, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode);
 	void add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size);
 	void add_buffer_copy(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, RDD::BufferCopyRegion p_region);
 	void add_buffer_get_data(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, RDD::BufferCopyRegion p_region);

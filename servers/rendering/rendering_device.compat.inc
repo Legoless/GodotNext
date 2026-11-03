@@ -171,6 +171,16 @@ RID RenderingDevice::_texture_create_shared_from_slice_bind_compat_121937(const 
 	return _texture_create_shared_from_slice(p_view, p_with_texture, p_layer, p_mipmap, p_mipmaps, p_slice_type, 0);
 }
 
+// GodotNext: as_build_modes
+Error RenderingDevice::_blas_build_bind_compat_gn45(RID p_blas) {
+	return blas_build(p_blas, ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+}
+
+// GodotNext: as_build_modes
+Error RenderingDevice::_tlas_build_bind_compat_gn45(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances) {
+	return _tlas_build(p_tlas, p_instances, ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+}
+
 void RenderingDevice::_bind_compatibility_methods() {
 	ClassDB::bind_compatibility_method(D_METHOD("shader_create_from_bytecode", "binary_data"), &RenderingDevice::_shader_create_from_bytecode_bind_compat_79606);
 
@@ -202,6 +212,10 @@ void RenderingDevice::_bind_compatibility_methods() {
 
 	ClassDB::bind_compatibility_method(D_METHOD("texture_create_shared_from_slice", "view", "with_texture", "layer", "mipmap", "mipmaps", "slice_type"), &RenderingDevice::_texture_create_shared_from_slice_bind_compat_121937, DEFVAL(1), DEFVAL(TEXTURE_SLICE_2D));
 	ClassDB::bind_compatibility_method(D_METHOD("texture_create_from_extension", "type", "format", "samples", "usage_flags", "image", "width", "height", "depth", "layers"), &RenderingDevice::_texture_create_from_extension_bind_compat_105570);
+
+	// GodotNext: as_build_modes
+	ClassDB::bind_compatibility_method(D_METHOD("blas_build", "blas"), &RenderingDevice::_blas_build_bind_compat_gn45);
+	ClassDB::bind_compatibility_method(D_METHOD("tlas_build", "tlas", "instances"), &RenderingDevice::_tlas_build_bind_compat_gn45);
 }
 
 #endif // DISABLE_DEPRECATED

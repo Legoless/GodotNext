@@ -6352,6 +6352,11 @@ static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_B
 static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT, VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_LOW_MEMORY_BIT, VK_BUILD_ACCELERATION_STRUCTURE_LOW_MEMORY_BIT_KHR));
 
+// GodotNext: as_build_modes
+// Keep the RD build mode aligned with Vulkan so #22 can pass it through. UPDATE itself is #22.
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD, VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR));
+
 // RDD::AccelerationStructureGeometryBits == VkGeometryFlagsKHR.
 static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT, VK_GEOMETRY_OPAQUE_BIT_KHR));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT, VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR));
@@ -6530,9 +6535,12 @@ void RenderingDeviceDriverVulkan::acceleration_structure_free(AccelerationStruct
 #endif
 }
 
-uint32_t RenderingDeviceDriverVulkan::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) {
+uint32_t RenderingDeviceDriverVulkan::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) {
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	ERR_FAIL_NULL_V_MSG(accel_info, 0, "Vulkan raytracing acceleration structure input parameter is not valid.");
+	// GodotNext: as_build_modes
+	// UPDATE scratch sizing is #22. Report the build scratch for either mode.
+	(void)p_mode;
 	return accel_info->scratch_size;
 }
 
@@ -6551,7 +6559,10 @@ VkStridedDeviceAddressRegionKHR RenderingDeviceDriverVulkan::_sbt_to_vk_strided_
 
 // ----- COMMANDS -----
 
-void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
+void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, AccelerationStructureBuildMode p_mode) {
+	// GodotNext: as_build_modes
+	// Vulkan UPDATE is #22. Do not record a BUILD in its place.
+	ERR_FAIL_COND_MSG(p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, "Vulkan acceleration structure UPDATE is not implemented (#22).");
 #if VULKAN_RAYTRACING_ENABLED
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
@@ -6566,7 +6577,10 @@ void RenderingDeviceDriverVulkan::command_build_blas(CommandBufferID p_cmd_buffe
 #endif
 }
 
-void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
+void RenderingDeviceDriverVulkan::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) {
+	// GodotNext: as_build_modes
+	// Vulkan UPDATE is #22. Do not record a BUILD in its place.
+	ERR_FAIL_COND_MSG(p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, "Vulkan acceleration structure UPDATE is not implemented (#22).");
 #if VULKAN_RAYTRACING_ENABLED
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	AccelerationStructureInfo *accel_info = (AccelerationStructureInfo *)p_acceleration_structure.id;

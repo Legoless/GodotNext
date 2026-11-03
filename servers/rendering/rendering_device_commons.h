@@ -923,6 +923,14 @@ public:
 		ACCELERATION_STRUCTURE_LOW_MEMORY_BIT = (1 << 4),
 	};
 
+	// GodotNext: as_build_modes
+	// BUILD is a full build. UPDATE refits a structure created with ALLOW_UPDATE.
+	// Values match VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR / UPDATE_KHR.
+	enum AccelerationStructureBuildMode {
+		ACCELERATION_STRUCTURE_BUILD_MODE_BUILD = 0,
+		ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE = 1,
+	};
+
 	enum AccelerationStructureGeometryFlagBits {
 		ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT = (1 << 0),
 		ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT = (1 << 1),
