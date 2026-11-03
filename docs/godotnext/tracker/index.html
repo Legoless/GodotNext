@@ -44,7 +44,7 @@
   .k { font: 600 11px/1.2 var(--f-display); letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); }
 
   /* Title block */
-  .tb { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; border: 1.5px solid var(--ink); background: var(--sheet); }
+  .tb { display: grid; grid-template-columns: minmax(0, 1fr) auto; border: 1.5px solid var(--ink); background: var(--sheet); }
   .tb > div { padding: 14px 20px; display: grid; gap: 3px; align-content: center; border-left: 1px solid var(--rule); }
   .tb > div:first-child { border-left: 0; }
   .tb h1 { margin: 0; font: 700 36px/1 var(--f-display); letter-spacing: -.01em; }
@@ -52,14 +52,7 @@
   .tb .status b { color: var(--ink); }
   .tb .v { font: 600 20px/1.15 var(--f-num); white-space: nowrap; }
   .tb .s { font-size: 12px; color: var(--ink-3); white-space: nowrap; }
-  .live { display: inline-flex; align-items: center; gap: 7px; }
-  .live i { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-3); }
-  .live.on i { background: var(--done); }
-  .live.off i { background: var(--progress); }
-  .btn { justify-self: start; margin-top: 4px; font: 600 11px/1 var(--f-display); letter-spacing: .08em; text-transform: uppercase; padding: 6px 9px; border: 1px solid var(--ink); background: transparent; cursor: pointer; }
-  .btn:hover { background: var(--ink); color: var(--sheet); }
-  .btn:disabled { opacity: .5; cursor: progress; }
-  @media (max-width: 760px) { .tb { grid-template-columns: 1fr 1fr; } .tb > div:first-child { grid-column: 1 / -1; border-bottom: 1px solid var(--rule); } .tb > div:nth-child(2) { border-left: 0; } }
+  @media (max-width: 760px) { .tb { grid-template-columns: 1fr; } .tb > div:nth-child(2) { border-left: 0; border-top: 1px solid var(--rule); } }
 
   /* Four numbers */
   .kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1.5px solid var(--ink); background: var(--sheet); }
@@ -162,7 +155,7 @@
 
   <header class="tb">
     <div>
-      <span class="k">Legoless / GodotNext · plan rev 3.2</span>
+      <span class="k">Legoless / GodotNext · plan rev 3.3</span>
       <h1>GodotNext v1</h1>
       <span class="status" id="status">Loading…</span>
     </div>
@@ -170,11 +163,6 @@
       <span class="k">Next milestone</span>
       <span class="v" id="nm-v">—</span>
       <span class="s" id="nm-s">—</span>
-    </div>
-    <div>
-      <span class="k">Data</span>
-      <span class="v live" id="live"><i></i><span id="live-t">Checking</span></span>
-      <button class="btn" id="refresh" type="button">Refresh</button>
     </div>
   </header>
 
@@ -366,9 +354,6 @@
     const b = (t) => el('b', null, t);
     if (done === 0 && prog === 0) st.append(b('Not started.'), ' ', b(fmt.format(ready)), ' tasks are ready to begin.');
     else st.append(b(`${builtPct}% built.`), ' ', b(fmt.format(prog)), ' in progress, ', b(fmt.format(ready)), ' ready to begin.');
-    const live = $('live'); live.classList.toggle('on', source.live); live.classList.toggle('off', !source.live);
-    $('live-t').textContent = source.live ? `Live ${new Date(source.at).toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' })}` : 'Snapshot';
-    live.title = source.live ? 'Issue states read from GitHub just now.' : (source.error || 'Not checked yet') + `. Snapshot from ${new Date(D.generated).toLocaleDateString('en')}.`;
     $('k-built').replaceChildren(document.createTextNode(String(builtPct)), el('small', null, '%'));
     meter($('k-built-bar'), done, prog, build.length);
     $('k-built-sub').textContent = `${fmt.format(done)} of ${fmt.format(build.length)} build tasks`;
@@ -510,12 +495,10 @@
   }));
 
   async function goLive() {
-    const btn = $('refresh'); btn.disabled = true; $('live-t').textContent = 'Checking';
     try { applyLive(await fetchLive()); source = { live: true, at: new Date().toISOString(), error: null }; }
     catch (e) { source = { live: false, at: null, error: e.message || String(e) }; }
-    btn.disabled = false; render();
+    render();
   }
-  $('refresh').addEventListener('click', goLive);
   render();
   goLive();
 })();
