@@ -375,3 +375,23 @@ static func save_scene(p_root: Node, p_path: String) -> Error:
 	unique_pattern.compile("\\s+unique_id=-?\\d+")
 	text = unique_pattern.sub(text, "", true)
 	return write_text_chunked(p_path, text)
+
+
+## User flag for the deliberate regenerate-then-re-bake cycle. Without it,
+## the generators keep a scene file that already carries bake data (#238):
+## they still build and verify the scene in memory, but do not overwrite
+## the file, so a routine determinism run cannot drop a bake silently.
+static func replace_baked_requested() -> bool:
+	return OS.get_cmdline_user_args().has("--replace-baked")
+
+
+## True when the text scene at [param p_path] already carries bake data: a
+## [LightmapGI] [code]light_data[/code] assignment or a [VoxelGIData]
+## resource (sub-resource or external). Reads the scene as text on
+## purpose: loading it would need the editor import of the lightmap
+## textures, which a headless generator run cannot assume.
+static func scene_file_has_bake_data(p_path: String) -> bool:
+	if not FileAccess.file_exists(p_path):
+		return false
+	var text := FileAccess.get_file_as_string(p_path)
+	return text.contains("\nlight_data = ") or text.contains("type=\"VoxelGIData\"")

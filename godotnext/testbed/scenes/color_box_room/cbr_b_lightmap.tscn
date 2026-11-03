@@ -1,4 +1,6 @@
-[gd_scene format=3]
+[gd_scene format=3 uid="uid://djyhchrd4vjob"]
+
+[ext_resource type="LightmapGIData" uid="uid://dhgwrhfjovhma" path="res://scenes/color_box_room/cbr_b_lightmap.lmbake" id="1_jiecm"]
 
 [sub_resource type="Environment" id="Environment_l1jxh"]
 background_mode = 1
@@ -6,6 +8,8 @@ ambient_light_source = 1
 reflected_light_source = 1
 
 [sub_resource type="BoxMesh" id="BoxMesh_jiecm"]
+lightmap_size_hint = Vector2i(69, 51)
+add_uv2 = true
 size = Vector3(8.6, 0.2, 4.4)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2i7gy"]
@@ -18,30 +22,40 @@ metallic_specular = 0.0
 size = Vector3(8.6, 0.2, 4.4)
 
 [sub_resource type="BoxMesh" id="BoxMesh_aypt3"]
+lightmap_size_hint = Vector2i(69, 51)
+add_uv2 = true
 size = Vector3(8.6, 0.2, 4.4)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_wyxgx"]
 size = Vector3(8.6, 0.2, 4.4)
 
 [sub_resource type="BoxMesh" id="BoxMesh_vlkko"]
+lightmap_size_hint = Vector2i(27, 62)
+add_uv2 = true
 size = Vector3(0.2, 3.4, 4.4)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_b4n6y"]
 size = Vector3(0.2, 3.4, 4.4)
 
 [sub_resource type="BoxMesh" id="BoxMesh_hl7ie"]
+lightmap_size_hint = Vector2i(27, 62)
+add_uv2 = true
 size = Vector3(0.2, 3.4, 4.4)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_x16y7"]
 size = Vector3(0.2, 3.4, 4.4)
 
 [sub_resource type="BoxMesh" id="BoxMesh_1iaeh"]
+lightmap_size_hint = Vector2i(27, 62)
+add_uv2 = true
 size = Vector3(0.2, 3.4, 4.4)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_17pa6"]
 size = Vector3(0.2, 3.4, 4.4)
 
 [sub_resource type="BoxMesh" id="BoxMesh_t06wy"]
+lightmap_size_hint = Vector2i(24, 60)
+add_uv2 = true
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_y1c0t"]
@@ -54,18 +68,24 @@ metallic_specular = 0.0
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_wy7ih"]
+lightmap_size_hint = Vector2i(6, 41)
+add_uv2 = true
 size = Vector3(0.2, 3.4, 0.2)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_6rx5t"]
 size = Vector3(0.2, 3.4, 0.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_0uduy"]
+lightmap_size_hint = Vector2i(24, 60)
+add_uv2 = true
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_gwt7u"]
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_xdrup"]
+lightmap_size_hint = Vector2i(24, 60)
+add_uv2 = true
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_r05ei"]
@@ -78,209 +98,218 @@ metallic_specular = 0.0
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_kn4ub"]
+lightmap_size_hint = Vector2i(6, 41)
+add_uv2 = true
 size = Vector3(0.2, 3.4, 0.2)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_nh2a2"]
 size = Vector3(0.2, 3.4, 0.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_bu36p"]
+lightmap_size_hint = Vector2i(24, 60)
+add_uv2 = true
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_uwggt"]
 size = Vector3(4, 3.4, 0.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_2u7gj"]
+lightmap_size_hint = Vector2i(16, 24)
+add_uv2 = true
 size = Vector3(1.2, 1.2, 1.2)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_7f6gw"]
 size = Vector3(1.2, 1.2, 1.2)
 
 [sub_resource type="BoxMesh" id="BoxMesh_tf0n8"]
+lightmap_size_hint = Vector2i(10, 15)
+add_uv2 = true
 size = Vector3(0.6, 0.6, 0.6)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_3ucaa"]
 size = Vector3(0.6, 0.6, 0.6)
 
-[node name="ColorBoxRoomLightmap" type="Node3D"]
+[node name="ColorBoxRoomLightmap" type="Node3D" unique_id=446710513]
 metadata/shared_wall_thickness_m = 0.2
 metadata/room_interior_m = Vector3(4, 3, 4)
 
-[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=457376498]
 environment = SubResource("Environment_l1jxh")
 
-[node name="Floor" type="MeshInstance3D" parent="."]
+[node name="Floor" type="MeshInstance3D" parent="." unique_id=1360887439]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
 mesh = SubResource("BoxMesh_jiecm")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="Floor"]
+[node name="Collider" type="StaticBody3D" parent="Floor" unique_id=199375060]
 
-[node name="Shape" type="CollisionShape3D" parent="Floor/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="Floor/Collider" unique_id=795683720]
 shape = SubResource("BoxShape3D_xxbn1")
 
-[node name="Ceiling" type="MeshInstance3D" parent="."]
+[node name="Ceiling" type="MeshInstance3D" parent="." unique_id=1503699080]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.1, 0)
 mesh = SubResource("BoxMesh_aypt3")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="Ceiling"]
+[node name="Collider" type="StaticBody3D" parent="Ceiling" unique_id=1593017873]
 
-[node name="Shape" type="CollisionShape3D" parent="Ceiling/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="Ceiling/Collider" unique_id=361366792]
 shape = SubResource("BoxShape3D_wyxgx")
 
-[node name="LitEndWall" type="MeshInstance3D" parent="."]
+[node name="LitEndWall" type="MeshInstance3D" parent="." unique_id=1484668423]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.2, 1.5, 0)
 mesh = SubResource("BoxMesh_vlkko")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="LitEndWall"]
+[node name="Collider" type="StaticBody3D" parent="LitEndWall" unique_id=2131314099]
 
-[node name="Shape" type="CollisionShape3D" parent="LitEndWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="LitEndWall/Collider" unique_id=1332479420]
 shape = SubResource("BoxShape3D_b4n6y")
 
-[node name="DarkEndWall" type="MeshInstance3D" parent="."]
+[node name="DarkEndWall" type="MeshInstance3D" parent="." unique_id=1957324790]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 1.5, 0)
 mesh = SubResource("BoxMesh_hl7ie")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="DarkEndWall"]
+[node name="Collider" type="StaticBody3D" parent="DarkEndWall" unique_id=1355435143]
 
-[node name="Shape" type="CollisionShape3D" parent="DarkEndWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="DarkEndWall/Collider" unique_id=71147796]
 shape = SubResource("BoxShape3D_x16y7")
 
-[node name="SharedWall" type="MeshInstance3D" parent="."]
+[node name="SharedWall" type="MeshInstance3D" parent="." unique_id=440132732]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
 mesh = SubResource("BoxMesh_1iaeh")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="SharedWall"]
+[node name="Collider" type="StaticBody3D" parent="SharedWall" unique_id=1076158322]
 
-[node name="Shape" type="CollisionShape3D" parent="SharedWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="SharedWall/Collider" unique_id=1541157076]
 shape = SubResource("BoxShape3D_17pa6")
 
-[node name="LitNorthWall" type="MeshInstance3D" parent="."]
+[node name="LitNorthWall" type="MeshInstance3D" parent="." unique_id=1067812552]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1, 1.5, -2.1)
 mesh = SubResource("BoxMesh_t06wy")
 surface_material_override/0 = SubResource("StandardMaterial3D_y1c0t")
 
-[node name="Collider" type="StaticBody3D" parent="LitNorthWall"]
+[node name="Collider" type="StaticBody3D" parent="LitNorthWall" unique_id=1789933415]
 
-[node name="Shape" type="CollisionShape3D" parent="LitNorthWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="LitNorthWall/Collider" unique_id=459521786]
 shape = SubResource("BoxShape3D_k1jg2")
 
-[node name="SharedNorthWall" type="MeshInstance3D" parent="."]
+[node name="SharedNorthWall" type="MeshInstance3D" parent="." unique_id=1369002111]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -2.1)
 mesh = SubResource("BoxMesh_wy7ih")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="SharedNorthWall"]
+[node name="Collider" type="StaticBody3D" parent="SharedNorthWall" unique_id=621763919]
 
-[node name="Shape" type="CollisionShape3D" parent="SharedNorthWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="SharedNorthWall/Collider" unique_id=1743438977]
 shape = SubResource("BoxShape3D_6rx5t")
 
-[node name="DarkNorthWall" type="MeshInstance3D" parent="."]
+[node name="DarkNorthWall" type="MeshInstance3D" parent="." unique_id=93312066]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.1, 1.5, -2.1)
 mesh = SubResource("BoxMesh_0uduy")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="DarkNorthWall"]
+[node name="Collider" type="StaticBody3D" parent="DarkNorthWall" unique_id=1871405484]
 
-[node name="Shape" type="CollisionShape3D" parent="DarkNorthWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="DarkNorthWall/Collider" unique_id=1615970028]
 shape = SubResource("BoxShape3D_gwt7u")
 
-[node name="LitSouthWall" type="MeshInstance3D" parent="."]
+[node name="LitSouthWall" type="MeshInstance3D" parent="." unique_id=1177243237]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1, 1.5, 2.1)
 mesh = SubResource("BoxMesh_xdrup")
 surface_material_override/0 = SubResource("StandardMaterial3D_r05ei")
 
-[node name="Collider" type="StaticBody3D" parent="LitSouthWall"]
+[node name="Collider" type="StaticBody3D" parent="LitSouthWall" unique_id=367163109]
 
-[node name="Shape" type="CollisionShape3D" parent="LitSouthWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="LitSouthWall/Collider" unique_id=950896789]
 shape = SubResource("BoxShape3D_iy7jo")
 
-[node name="SharedSouthWall" type="MeshInstance3D" parent="."]
+[node name="SharedSouthWall" type="MeshInstance3D" parent="." unique_id=120310603]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 2.1)
 mesh = SubResource("BoxMesh_kn4ub")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="SharedSouthWall"]
+[node name="Collider" type="StaticBody3D" parent="SharedSouthWall" unique_id=2100406050]
 
-[node name="Shape" type="CollisionShape3D" parent="SharedSouthWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="SharedSouthWall/Collider" unique_id=874250678]
 shape = SubResource("BoxShape3D_nh2a2")
 
-[node name="DarkSouthWall" type="MeshInstance3D" parent="."]
+[node name="DarkSouthWall" type="MeshInstance3D" parent="." unique_id=1723243332]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.1, 1.5, 2.1)
 mesh = SubResource("BoxMesh_bu36p")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="DarkSouthWall"]
+[node name="Collider" type="StaticBody3D" parent="DarkSouthWall" unique_id=1979722903]
 
-[node name="Shape" type="CollisionShape3D" parent="DarkSouthWall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="DarkSouthWall/Collider" unique_id=1349360295]
 shape = SubResource("BoxShape3D_uwggt")
 
-[node name="BlockLarge" type="MeshInstance3D" parent="."]
+[node name="BlockLarge" type="MeshInstance3D" parent="." unique_id=2125558830]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.6, 0.6, -0.5)
 mesh = SubResource("BoxMesh_2u7gj")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="BlockLarge"]
+[node name="Collider" type="StaticBody3D" parent="BlockLarge" unique_id=1382958577]
 
-[node name="Shape" type="CollisionShape3D" parent="BlockLarge/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="BlockLarge/Collider" unique_id=1241822370]
 shape = SubResource("BoxShape3D_7f6gw")
 
-[node name="BlockSmall" type="MeshInstance3D" parent="."]
+[node name="BlockSmall" type="MeshInstance3D" parent="." unique_id=115620862]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.4, 0.3, 0.6)
 mesh = SubResource("BoxMesh_tf0n8")
 surface_material_override/0 = SubResource("StandardMaterial3D_2i7gy")
 
-[node name="Collider" type="StaticBody3D" parent="BlockSmall"]
+[node name="Collider" type="StaticBody3D" parent="BlockSmall" unique_id=1688891332]
 
-[node name="Shape" type="CollisionShape3D" parent="BlockSmall/Collider"]
+[node name="Shape" type="CollisionShape3D" parent="BlockSmall/Collider" unique_id=830991795]
 shape = SubResource("BoxShape3D_3ucaa")
 
-[node name="RoomLight" type="OmniLight3D" parent="."]
+[node name="RoomLight" type="OmniLight3D" parent="." unique_id=61949334]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1, 2.6, 0)
 shadow_enabled = true
 omni_range = 6.0
 
-[node name="LightmapGI" type="LightmapGI" parent="."]
+[node name="LightmapGI" type="LightmapGI" parent="." unique_id=804786551]
 quality = 3
 bounces = 16
 use_texture_for_bounces = false
 use_denoiser = false
+light_data = ExtResource("1_jiecm")
 
-[node name="CovCam0" type="Camera3D" parent="."]
+[node name="CovCam0" type="Camera3D" parent="." unique_id=585794513]
 transform = Transform3D(-0.70710677, 0.40824828, -0.57735026, 0, 0.81649655, 0.57735026, 0.70710677, 0.40824828, -0.57735026, -3.6, 2.5, -1.5)
 fov = 70.0
 far = 15.0
 
-[node name="CovCam1" type="Camera3D" parent="."]
+[node name="CovCam1" type="Camera3D" parent="." unique_id=1329368252]
 transform = Transform3D(0.70710677, 0.40824828, -0.57735026, 0, 0.81649655, 0.57735026, 0.70710677, -0.40824828, 0.57735026, -3.6, 2.5, 1.5)
 fov = 70.0
 far = 15.0
 
-[node name="CovCam2" type="Camera3D" parent="."]
+[node name="CovCam2" type="Camera3D" parent="." unique_id=1559065339]
 transform = Transform3D(-0.7071068, 0.4082483, -0.57735026, 0, 0.8164966, 0.5773503, 0.70710677, 0.40824836, -0.5773503, 0.6, 2.5, -1.5)
 fov = 70.0
 far = 15.0
 
-[node name="CovCam3" type="Camera3D" parent="."]
+[node name="CovCam3" type="Camera3D" parent="." unique_id=30855062]
 transform = Transform3D(0.7071068, 0.4082483, -0.57735026, 0, 0.8164966, 0.5773503, 0.70710677, -0.40824836, 0.5773503, 0.6, 2.5, 1.5)
 fov = 70.0
 far = 15.0
 
-[node name="CaptureCam" type="Camera3D" parent="."]
+[node name="CaptureCam" type="Camera3D" parent="." unique_id=1888594874]
 transform = Transform3D(0, 0.24253562, -0.97014254, 0, 0.97014254, 0.24253562, 1, 0, 0, -3.3, 2, 0)
 current = true
 fov = 70.0
 far = 15.0
 
-[node name="LeakCamLit" type="Camera3D" parent="."]
+[node name="LeakCamLit" type="Camera3D" parent="." unique_id=91765720]
 transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, -2.1, 1.5, 0)
 fov = 70.0
 far = 4.0
 
-[node name="LeakCamDark" type="Camera3D" parent="."]
+[node name="LeakCamDark" type="Camera3D" parent="." unique_id=1076635461]
 transform = Transform3D(0, 0, 1, 0, 1, 0, -1, 0, 0, 2.1, 1.5, 0)
 fov = 70.0
 far = 3.0

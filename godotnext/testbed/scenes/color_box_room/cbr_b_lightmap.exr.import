@@ -1,0 +1,30 @@
+[remap]
+
+importer="2d_array_texture"
+type="CompressedTexture2DArray"
+uid="uid://ct1pm6vx0tgiy"
+path.bptc="res://.godot/imported/cbr_b_lightmap.exr-ff5e276860dd2e9f134f543e8f2c9495.bptc.ctexarray"
+metadata={
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
+}
+
+[deps]
+
+source_file="res://scenes/color_box_room/cbr_b_lightmap.exr"
+dest_files=["res://.godot/imported/cbr_b_lightmap.exr-ff5e276860dd2e9f134f543e8f2c9495.bptc.ctexarray"]
+
+[params]
+
+compress/mode=2
+compress/high_quality=false
+compress/high_quality_mode=0
+compress/lossy_quality=0.7
+compress/uastc_level=0
+compress/rdo_quality_loss=0.0
+compress/hdr_compression=1
+compress/channel_pack=1
+mipmaps/generate=false
+mipmaps/limit=-1
+slices/horizontal=1
+slices/vertical=3

@@ -14,6 +14,38 @@ godot --headless --path godotnext/testbed --script res://generators/build_all.gd
 Seeded with `0x6E657874`; two runs produce byte-identical output. The
 script asserts the content-spec checks (patch counts, line of sight,
 off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
+A scene file that already carries bake data is built and verified in
+memory but kept as-is (see below), so a plain regenerate never drops a
+bake.
+
+## Re-bake after regenerating
+
+Four scenes carry editor bakes (#238): `cbr_b_lightmap.tscn`,
+`legacy_lightmap.tscn` and `feature_parity_room.tscn` (LightmapGI) and
+`legacy_voxelgi.tscn` (VoxelGI). The generators cannot bake, but a
+plain run leaves the baked `.tscn` files alone: when a target scene
+already has a LightmapGI `light_data` or VoxelGI `data` reference, the
+generator still builds and asserts it in memory, prints one
+`kept baked <scene>` line, and still rewrites its patch JSONs.
+
+For the deliberate regenerate-then-re-bake cycle, pass
+`-- --replace-baked` (to `build_all.gd`, or to
+`build_feature_parity_room.gd` for the parity room). That overwrites
+the baked `.tscn` without the bake: the `light_data` reference and the
+BoxMesh `add_uv2` flags go away, and the `.lmbake`/`.exr` files and
+the VoxelGIData are left unreferenced. Then re-bake from the
+repository root with the editor tool scene in `tests/editor_bakes/`:
+
+```
+GODOTNEXT_BACKGROUND=1 GODOTNEXT_BAKE_SCENES=1 <godot-editor> --path godotnext/testbed --rendering-driver metal --editor res://tests/editor_bakes/bake_scenes.tscn
+```
+
+The baker checks `add_uv2` on the BoxMesh resources, bakes each scene
+with its recorded settings, and saves it back over its `.tscn`. Set
+`GODOTNEXT_BAKE_SCENES_FILTER` to a path substring to bake one scene.
+The editor rewrites `project.godot` while the project is open; restore
+it afterwards (`git checkout -- godotnext/testbed/project.godot`).
+Record the new bake's host, commit and date in `PROVENANCE.md`.
 
 ## Layout
 
@@ -27,14 +59,16 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
   README.
 - `scenes/color_box_room/` — sealed lit/dark room pairs: `cbr_a.tscn`
   (0.10 m shared wall), `cbr_b.tscn` (0.20 m), `cbr_offscreen.tscn`
-  (spot behind the capture camera), `cbr_b_lightmap.tscn` (B plus an
-  unbaked `LightmapGI`), `cbr_single_40m.tscn` (one 42.4 m mesh, 7 rooms,
+  (spot behind the capture camera), `cbr_b_lightmap.tscn` (B plus a
+  baked `LightmapGI`), `cbr_single_40m.tscn` (one 42.4 m mesh, 7 rooms,
   0.10 m interior walls). Lit room: red north wall, green south wall,
   0.75 gray elsewhere (linear values, stored sRGB-encoded).
 - `scenes/concave_courtyard/` — single-mesh courtyard with a roofed
   colonnade, sun at 35° elevation and a procedural sky.
 - `scenes/legacy/` — NextGI-off baseline halls for SDFGI, VoxelGI and
-  LightmapGI.
+  LightmapGI. The VoxelGI and LightmapGI halls are baked (#238).
+- `tests/editor_bakes/` — the editor tool scene that bakes the scenes
+  above (#238). See "Re-bake after regenerating".
 - `tests/tier/` — the NextGI tier check (#15). `run_tier_check.sh`
   enables NextGI for one run through `override.cfg` and runs
   `tier_check.tscn`; the project itself keeps NextGI off.

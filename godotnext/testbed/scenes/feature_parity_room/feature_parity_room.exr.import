@@ -1,0 +1,30 @@
+[remap]
+
+importer="2d_array_texture"
+type="CompressedTexture2DArray"
+uid="uid://ba771o75q4d56"
+path.bptc="res://.godot/imported/feature_parity_room.exr-808a55a125915970013e1e0ac6de3a91.bptc.ctexarray"
+metadata={
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
+}
+
+[deps]
+
+source_file="res://scenes/feature_parity_room/feature_parity_room.exr"
+dest_files=["res://.godot/imported/feature_parity_room.exr-808a55a125915970013e1e0ac6de3a91.bptc.ctexarray"]
+
+[params]
+
+compress/mode=2
+compress/high_quality=false
+compress/high_quality_mode=0
+compress/lossy_quality=0.7
+compress/uastc_level=0
+compress/rdo_quality_loss=0.0
+compress/hdr_compression=1
+compress/channel_pack=1
+mipmaps/generate=false
+mipmaps/limit=-1
+slices/horizontal=1
+slices/vertical=3

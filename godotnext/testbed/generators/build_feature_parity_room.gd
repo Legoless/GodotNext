@@ -16,7 +16,10 @@ extends SceneTree
 ## [code]godot --headless --path godotnext/testbed --script res://generators/build_feature_parity_room.gd[/code]
 ##
 ## Seeded through [code]scaffold.gd[/code] and saved byte-stably: two runs
-## produce an identical [code].tscn[/code]. Every texture is a procedural
+## produce an identical [code].tscn[/code]. Once the scene carries its
+## editor bake (#238), a plain run builds it in memory but keeps the baked
+## file; append [code]-- --replace-baked[/code] to overwrite it for a
+## deliberate re-bake cycle. Every texture is a procedural
 ## [FastNoiseLite]/gradient resource generated here, so the scene tracks
 ## no binary assets. Multi-bounce occlusion is restart-only and project-
 ## wide, so it lives in the sibling [code]override.cfg[/code], never in
@@ -39,6 +42,11 @@ func _init() -> void:
 
 func _run() -> void:
 	var root := _build()
+	if not Scaffold.replace_baked_requested() and Scaffold.scene_file_has_bake_data(SCENE_PATH):
+		print("build_feature_parity_room: kept baked " + SCENE_PATH + " (pass -- --replace-baked to overwrite)")
+		root.free()
+		quit(0)
+		return
 	var err := Scaffold.save_scene(root, SCENE_PATH)
 	root.free()
 	if err != OK:
@@ -97,10 +105,9 @@ func _build() -> Node3D:
 	omni.light_cull_mask = WITHOUT_LAYER_2
 	Scaffold.add_owned(root, omni, root)
 
-	# Unbaked on purpose: LightmapGI::bake() is editor-only (same status as
-	# the #10 lightmap scenes). The bake settings are recorded here; the
-	# .lmbake (at most 4 MB) is produced in the editor and logged in
-	# PROVENANCE.md when done.
+	# Bake settings recorded here; the scene is baked in the editor (#238,
+	# .lmbake at most 4 MB, logged in PROVENANCE.md). A plain generator
+	# run keeps the baked file; -- --replace-baked overwrites it.
 	var lightmap := LightmapGI.new()
 	lightmap.name = "LightmapGI"
 	lightmap.bounces = 3

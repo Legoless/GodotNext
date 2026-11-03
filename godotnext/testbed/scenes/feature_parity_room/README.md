@@ -23,7 +23,7 @@ godot --headless --path godotnext/testbed --script res://scenes/feature_parity_r
 | Textured area light | `AreaLight` (`area_texture`, `area_size` 2.4 × 1.2 m) on the ceiling |
 | Projector spot and layer-culled omni | `SpotProjector` (`light_projector`), `OmniCulled` (`light_cull_mask` excludes layer 2) |
 | Depth fog with height density and aerial perspective under a sky | `WorldEnvironment`: `fog_mode = FOG_MODE_DEPTH`, `fog_height_density = 0.05`, `fog_aerial_perspective = 0.4`, procedural sky |
-| SH-probe receiver next to a lightmap | `LightmapGI` (settings recorded, **unbaked**: baking is editor-only; the `.lmbake`, at most 4 MB, is produced in the editor and logged in `PROVENANCE.md`) and `SHReceiver` (`gi_mode = GI_MODE_DYNAMIC`, not lightmapped) |
+| SH-probe receiver next to a lightmap | `LightmapGI` (baked for #238; `.lmbake` 110 KB, within the 4 MB cap, logged in `PROVENANCE.md`) and `SHReceiver` (`gi_mode = GI_MODE_DYNAMIC`, not lightmapped) |
 | Multi-bounce ambient occlusion | `override.cfg` (see below) plus AO/ORM textures on the textured materials |
 
 Eligible materials, one mesh each: the textured floor/north-wall

@@ -1,8 +1,9 @@
 # Testbed provenance
 
-Budget: tracked size ≤ 50 MB. Current total: under 1 MB (about 0.4 MB at
-creation; measure with `git ls-files godotnext/testbed | xargs du -ch`
-once tracked).
+Budget: tracked size ≤ 50 MB. Current total: about 6.4 MB (about 0.4 MB
+at creation; the #238 bakes added about 6 MB, almost all of it the
+`VoxelGIData` embedded in `legacy_voxelgi.tscn`; measure with
+`git ls-files godotnext/testbed | xargs du -ch` once tracked).
 
 Every asset in this project is an original generated in this repository.
 License for every row: MIT (same as the repository). Host for every row:
@@ -29,12 +30,12 @@ seed `1` (one run per variant; see its README).
 | `.gitignore` | hand-authored for #10 step 1 | MIT | 2026-11-03 | the Apple M5 Max |
 | `PROVENANCE.md` | hand-authored for #10 step 2 | MIT | 2026-11-03 | the Apple M5 Max |
 | `README.md` | hand-authored for #10 | MIT | 2026-11-03 | the Apple M5 Max |
-| `generators/scaffold.gd` | hand-authored for #10 step 3 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/scaffold.gd` | hand-authored for #10 step 3; bake-keeping helpers added for #238 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_color_box_room.gd` | hand-authored for #10 step 5 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_single_40m.gd` | hand-authored for #10 step 5 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_courtyard.gd` | hand-authored for #10 step 6 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_legacy.gd` | hand-authored for #10 step 8 | MIT | 2026-11-03 | the Apple M5 Max |
-| `generators/build_all.gd` | hand-authored for #10 step 3 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_all.gd` | hand-authored for #10 step 3; keeps baked scenes since #238 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/dense_city_generator.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/validate_dense_city.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/variants.cfg` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -50,7 +51,7 @@ seed `1` (one run per variant; see its README).
 | `scenes/color_box_room/cbr_offscreen.tscn` | `build_color_box_room.gd`, seed `0x6E657874` stream 3 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_offscreen_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 3 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_offscreen_patches_q3.json` | `build_color_box_room.gd`, seed `0x6E657874` stream 3 | MIT | 2026-11-03 | the Apple M5 Max |
-| `scenes/color_box_room/cbr_b_lightmap.tscn` | `build_color_box_room.gd`, seed `0x6E657874` stream 4; **unbaked**, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_b_lightmap.tscn` | `build_color_box_room.gd`, seed `0x6E657874` stream 4; baked for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_b_lightmap_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 4 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_b_lightmap_patches_q3.json` | `build_color_box_room.gd`, seed `0x6E657874` stream 4 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_single_40m.tscn` | `build_single_40m.gd`, seed `0x6E657874` stream 5 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -59,8 +60,8 @@ seed `1` (one run per variant; see its README).
 | `scenes/concave_courtyard/courtyard.tscn` | `build_courtyard.gd`, seed `0x6E657874` stream 6 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/concave_courtyard/courtyard_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 6 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/legacy/legacy_sdfgi.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 7 | MIT | 2026-11-03 | the Apple M5 Max |
-| `scenes/legacy/legacy_voxelgi.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 8; VoxelGI unbaked, see below | MIT | 2026-11-03 | the Apple M5 Max |
-| `scenes/legacy/legacy_lightmap.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 9; LightmapGI unbaked, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/legacy/legacy_voxelgi.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 8; VoxelGI baked for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/legacy/legacy_lightmap.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 9; LightmapGI baked for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/scene_args.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/dynamic_content_check.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/moving_light_door/motion.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -82,12 +83,20 @@ seed `1` (one run per variant; see its README).
 | `scenes/nextgi_perf/nextgi_perf.tscn` | `build_nextgi_perf.gd` shell only; instances are spawned at runtime from seed 1234 and are not stored | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/nextgi_perf/nextgi_perf_patches_q1.json` | `build_all.gd`, Q1 RNG seed 1234 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/nextgi_perf/steps.json` | `build_nextgi_perf.gd`, seed 1234 | MIT | 2026-11-03 | the Apple M5 Max |
-| `generators/build_feature_parity_room.gd` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
-| `scenes/feature_parity_room/feature_parity_room.tscn` | `build_feature_parity_room.gd`, seed `0x6E657874`; LightmapGI unbaked, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_feature_parity_room.gd` | hand-authored for #64; keeps the baked scene since #238 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/feature_parity_room.tscn` | `build_feature_parity_room.gd`, seed `0x6E657874`; LightmapGI baked for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/parity_room.gd` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/check_features.gd` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/override.cfg` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/README.md` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
+| `tests/editor_bakes/bake_scenes.gd` | hand-authored for #238 | MIT | 2026-11-03 | the Apple M5 Max |
+| `tests/editor_bakes/bake_scenes.tscn` | hand-authored for #238 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_b_lightmap.lmbake` | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_b_lightmap.exr` (+ `.import`) | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/legacy/legacy_lightmap.lmbake` | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/legacy/legacy_lightmap.exr` (+ `.import`) | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/feature_parity_room.lmbake` | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/feature_parity_room.exr` (+ `.import`) | editor bake for #238, see below | MIT | 2026-11-03 | the Apple M5 Max |
 
 | `generators/build_swrt_leak_room.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/swrt_leak_room_10cm/swrt_leak_room_10cm.tscn` | `build_swrt_leak_room.gd`, seed `0x6E657874` stream 40 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -124,14 +133,35 @@ seed `1` (one run per variant; see its README).
 
 ## Bake status
 
-`cbr_b_lightmap.tscn` carries the recorded bake settings (`bounces=16`,
-`quality=BAKE_QUALITY_ULTRA`, `use_denoiser=false`,
-`use_texture_for_bounces=false`, light bake mode Dynamic, which is the
-`Light3D` default and is therefore not serialized) but **no baked data**:
-`LightmapGI::bake()` is C++-only and reachable only from the editor's
-"Bake Lightmaps" button, so there is no reliable unattended bake. Bake it
-in the editor before the report-only cross-check in #27, and record the
-host here when done. The same applies to the `VoxelGI` in
-`legacy_voxelgi.tscn`, the `LightmapGI` in `legacy_lightmap.tscn` and
-the `LightmapGI` in `scenes/feature_parity_room/feature_parity_room.tscn`
-(#64; keep its `.lmbake` at most 4 MB when baked).
+All four scenes were baked for #238 on the Apple M5 Max on 2026-11-03
+with the editor built from Godot commit
+`0a0ccd1c2a782a28097e4fc206cc1913c18e8cb6`, through the
+`tests/editor_bakes/bake_scenes.tscn` tool scene (see the testbed
+README's "Re-bake after regenerating" section for the command). The
+bakes used each scene's generator-recorded settings, untouched:
+
+- `cbr_b_lightmap.tscn`: `bounces=16`, `quality=BAKE_QUALITY_ULTRA`,
+  `use_denoiser=false`, `use_texture_for_bounces=false`, light bake mode
+  Dynamic (the `Light3D` default, therefore not serialized). Bake
+  files: `cbr_b_lightmap.lmbake` (82 KB) and `cbr_b_lightmap.exr`
+  (47 KB) with its `.import`.
+- `legacy_lightmap.tscn`: `LightmapGI` defaults as generated
+  (`build_legacy.gd` changed no setting; the denoiser is the built-in
+  JNLM, no external tool). Bake files: `legacy_lightmap.lmbake`
+  (69 KB) and `legacy_lightmap.exr` (72 KB) with its `.import`.
+- `legacy_voxelgi.tscn`: `VoxelGI` as generated (`subdiv=SUBDIV_128`,
+  size 14×6×10 m). The `VoxelGIData` is embedded in the `.tscn` as a
+  sub-resource, the way a GUI bake leaves it; that takes the scene to
+  about 4.8 MB.
+- `feature_parity_room.tscn`: `bounces=3`, `quality=BAKE_QUALITY_HIGH`,
+  `use_denoiser=false`, `use_texture_for_bounces=false`. Bake files:
+  `feature_parity_room.lmbake` (110 KB, within the 4 MB cap from #64)
+  and `feature_parity_room.exr` (90 KB) with its `.import`.
+
+Baking a lightmap scene first gives its `BoxMesh` resources UV2
+(`add_uv2=true`, plus the `lightmap_size_hint` the baker writes), the
+same scene edits the editor GUI flow makes. The generators keep a
+baked scene file on a plain run — they still build and verify it in
+memory and rewrite its patch JSONs — and `-- --replace-baked`
+overwrites it for a deliberate re-bake cycle; the README says how to
+re-bake.

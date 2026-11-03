@@ -10,6 +10,12 @@ extends SceneTree
 ## patches per Color Box Room variant, the off-screen light outside every
 ## camera frustum and the 40 m single-mesh bounds) and exits non-zero on
 ## any failure, without writing the failing scene.
+##
+## A scene file that already carries bake data (a LightmapGI
+## [code]light_data[/code] or a VoxelGI [code]data[/code] reference, #238)
+## is built and verified in memory but kept as-is, so a determinism run
+## cannot drop a bake. Append [code]-- --replace-baked[/code] to the run
+## command to overwrite baked scenes for a deliberate re-bake cycle.
 
 const Scaffold := preload("res://generators/scaffold.gd")
 const ColorBoxRoom := preload("res://generators/build_color_box_room.gd")
@@ -179,11 +185,14 @@ func _process_job(p_job: Dictionary) -> void:
 		if camera != null:
 			camera.current = camera.name == &"CaptureCam"
 	if ok:
-		var err := Scaffold.save_scene(root, scene_path)
-		if err != OK:
-			_fail("%s: save failed with error %d." % [scene_path, err])
+		if not Scaffold.replace_baked_requested() and Scaffold.scene_file_has_bake_data(scene_path):
+			print("build_all: kept baked " + scene_path + " (pass -- --replace-baked to overwrite)")
 		else:
-			print("build_all: wrote " + scene_path)
+			var err := Scaffold.save_scene(root, scene_path)
+			if err != OK:
+				_fail("%s: save failed with error %d." % [scene_path, err])
+			else:
+				print("build_all: wrote " + scene_path)
 	root.free()
 
 

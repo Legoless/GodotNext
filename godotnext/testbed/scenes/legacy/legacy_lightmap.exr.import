@@ -1,0 +1,30 @@
+[remap]
+
+importer="2d_array_texture"
+type="CompressedTexture2DArray"
+uid="uid://dw83ttyksourb"
+path.bptc="res://.godot/imported/legacy_lightmap.exr-7a6e1e5fb10e98506cbdbc6e88523d4a.bptc.ctexarray"
+metadata={
+"imported_formats": ["s3tc_bptc"],
+"vram_texture": true
+}
+
+[deps]
+
+source_file="res://scenes/legacy/legacy_lightmap.exr"
+dest_files=["res://.godot/imported/legacy_lightmap.exr-7a6e1e5fb10e98506cbdbc6e88523d4a.bptc.ctexarray"]
+
+[params]
+
+compress/mode=2
+compress/high_quality=false
+compress/high_quality_mode=0
+compress/lossy_quality=0.7
+compress/uastc_level=0
+compress/rdo_quality_loss=0.0
+compress/hdr_compression=1
+compress/channel_pack=1
+mipmaps/generate=false
+mipmaps/limit=-1
+slices/horizontal=1
+slices/vertical=1
