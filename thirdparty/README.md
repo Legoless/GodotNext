@@ -1071,6 +1071,11 @@ Files extracted from upstream source:
 Versions of this SDK do not have to match the `vulkan` section, as this SDK is required
 to generate Metal source from Vulkan SPIR-V.
 
+Patches:
+
+- `0001-msl-aabb-opaque.patch` (KhronosGroup/SPIRV-Cross df0828ca, AABB-opaque check)
+- `0002-msl-argument-buffer-padding-as.patch` (treat `AccelerationStructure` as a buffer in argument-buffer index lookup and padding)
+
 
 ## spirv-headers
 

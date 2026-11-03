@@ -113,6 +113,9 @@ void CompilerMSL::add_msl_resource_binding(const MSLResourceBinding &binding)
 			ADD_ARG_IDX_TO_BINDING_NUM_LOOKUP(texture);
 			ADD_ARG_IDX_TO_BINDING_NUM_LOOKUP(sampler);
 			break;
+		case SPIRType::AccelerationStructure:
+			ADD_ARG_IDX_TO_BINDING_NUM_LOOKUP(buffer);
+			break;
 		default:
 			SPIRV_CROSS_THROW("Unexpected argument buffer resource base type. When padding argument buffer elements, "
 			                  "all descriptor set resources must be supplied with a base type by the app.");
@@ -10396,7 +10399,7 @@ void CompilerMSL::emit_instruction(const Instruction &instruction)
 	case OpRayQueryGetIntersectionCandidateAABBOpaqueKHR:
 	{
 		flush_variable_declaration(ops[0]);
-		emit_op(ops[0], ops[1], join(to_expression(ops[2]), ".is_candidate_non_opaque_bounding_box()"), false);
+		emit_op(ops[0], ops[1], join("(!", to_expression(ops[2]), ".is_candidate_non_opaque_bounding_box())"), false);
 		break;
 	}
 	case OpRayQueryConfirmIntersectionKHR:
@@ -19776,6 +19779,9 @@ void CompilerMSL::analyze_argument_buffers()
 							add_argument_buffer_padding_sampler_type(buffer_type, member_index, next_arg_buff_index, rez_bind);
 						else
 							add_argument_buffer_padding_image_type(buffer_type, member_index, next_arg_buff_index, rez_bind);
+						break;
+					case SPIRType::AccelerationStructure:
+						add_argument_buffer_padding_buffer_type(buffer_type, member_index, next_arg_buff_index, rez_bind);
 						break;
 					default:
 						break;
