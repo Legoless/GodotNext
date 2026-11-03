@@ -72,7 +72,7 @@ These are the only tests during the build:
    ```
    §22.3 lists each phase's smoke scene. Use the P0 testbed when the phase has none yet.
 4. The smoke scene renders without crashing on the M5 Max.
-5. A change to Vulkan or D3D12 code also needs the RTX 4080 SUPER run on the RTX 4080 SUPER machine, once the RTX 4080 SUPER machine is in use (§24.3).
+5. A change to Vulkan or D3D12 code also needs a run on the RTX 4080 SUPER, once that machine is in use (§24.3).
 
 ## 5. Land it
 

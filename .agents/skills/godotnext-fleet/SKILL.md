@@ -1,33 +1,33 @@
 ---
 name: godotnext-fleet
-description: Describes the GodotNext build and test machines (the M5 Max, the RTX 4080 SUPER machine with the RTX 4080 SUPER, the RTX 5090 machine and the Linux VM), what each is for, and how to reach and use them. Use when a task needs a GPU run, a Windows or Vulkan build, a remote machine, or a rendered check of an HTML page.
+description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090 and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Windows or Vulkan build, a remote machine, or a rendered check of an HTML page.
 ---
 
-# Use the GodotNext machines
+# Use the GodotNext hardware
 
-| Machine | GPU | Use | Status |
+| Hardware | System | Use | Status |
 |---|---|---|---|
-| M5 Max (the local Mac) | Apple M5 Max (Apple10), Metal | Daily build loop; Metal-first P0 and P1 work; PR basics until the RTX 4080 SUPER machine is in use (§24); Metal lines in PQ | In use |
-| the RTX 4080 SUPER machine (the RTX 4080 SUPER machine, Windows 11) | RTX 4080 SUPER (`--gpu-index 1`) | Vulkan and D3D12 work (P2, PD), DLSS builds with the lead's own SDK, the RTX 4080 SUPER PR run, NVIDIA lines in PQ | Reached over Tailscale |
-| Second machine | RTX 5090 | Every NVIDIA line in PQ; multi frame generation | To be set up before PQ (#227) |
-| the Linux VM (Linux VM) | none (llvmpipe) | CPU, doctest and software-Vulkan smoke runs; never DLSS-enabled builds | Available |
+| Apple M5 Max (Apple10) | macOS, Metal | Daily build loop; Metal-first P0 and P1 work; PR basics until the RTX 4080 SUPER is in use (§24); Metal lines in PQ | In use |
+| NVIDIA RTX 4080 SUPER | Windows 11, Vulkan and D3D12 | Vulkan and D3D12 work (P2, PD), DLSS builds with the lead's own SDK, the RTX 4080 SUPER PR run, NVIDIA lines in PQ | Remote |
+| NVIDIA RTX 5090 | Windows 11 | Every NVIDIA line in PQ; multi frame generation | To be set up before PQ (#227) |
+| Linux x86_64 VM, no GPU | Linux, llvmpipe | CPU, doctest and software-Vulkan smoke runs; never DLSS-enabled builds | Available |
 
-The Intel UHD 770 in the RTX 4080 SUPER machine (`--gpu-index 0`) runs nothing in v1. Mid-range NVIDIA, AMD and Intel GPUs ship "enabled, unvalidated" (§23.2).
+The RTX 4080 SUPER machine also has an Intel UHD 770 (`--gpu-index 0`), which runs nothing in v1. Use `--gpu-index 1` for the RTX 4080 SUPER. Mid-range NVIDIA, AMD and Intel GPUs ship "enabled, unvalidated" (§23.2).
 
-## Reaching the RTX 4080 SUPER machine
+## Using the RTX 4080 SUPER machine
 
-1. The RTX 4080 SUPER machine is reached over Tailscale with the RTX 4080 SUPER machine SSH alias from your own `~/.ssh/config`. Check the connection first:
+1. It's reached over SSH through Tailscale, using the host alias in your own `~/.ssh/config`. Check the connection first:
    ```
    tailscale status
    ```
    If Tailscale is stopped, ask the user to start it. Don't change network settings yourself.
 2. Run PowerShell remotely by piping a script, which avoids quoting problems:
    ```
-   ssh -o BatchMode=yes the RTX 4080 SUPER machine "powershell -NoProfile -Command -" < script.ps1
+   ssh -o BatchMode=yes <host> "powershell -NoProfile -Command -" < script.ps1
    ```
 3. GPU rendering needs the interactive Session-1 task runner from the harness (#12). A plain SSH session (Session 0) can't create a desktop swapchain. Use SSH for builds, file transfer and headless tests.
 
-Build commands for each machine are in plan §13.1.
+Build commands for each platform are in plan §13.1.
 
 ## Checking an HTML page (the plan, the tracker)
 

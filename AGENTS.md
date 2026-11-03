@@ -37,6 +37,6 @@ Project skills live in `.agents/skills/`. Claude Code reads the same folder thro
 | [godotnext-update-tracker](.agents/skills/godotnext-update-tracker/SKILL.md) | Refresh the tracker data after progress, or change the tracker page |
 | [godotnext-plan-revision](.agents/skills/godotnext-plan-revision/SKILL.md) | Turn a lead decision into a new plan version and carry it to the issues and the tracker |
 | [godotnext-issues](.agents/skills/godotnext-issues/SKILL.md) | Create, link, move and bulk-edit issues with the project's conventions and helper script |
-| [godotnext-fleet](.agents/skills/godotnext-fleet/SKILL.md) | Use the M5 Max, the RTX 4080 SUPER machine, the RTX 5090 machine and the Linux VM, and check HTML pages in headless Chrome |
+| [godotnext-fleet](.agents/skills/godotnext-fleet/SKILL.md) | Use the test hardware (Apple M5 Max, RTX 4080 SUPER, RTX 5090, a GPU-less Linux VM) and check HTML pages in headless Chrome |
 
 For Godot's own engine conventions (code style, tests, docs), follow `CONTRIBUTING.md` and the existing code.

@@ -70,7 +70,7 @@ Splitting and joining are lossless: join(split(plan)) is byte-identical.
 ## Standing rules a revision must not break without a lead decision
 
 - **Build first (§22).** Only PR basics run during the build. Every gate and spike runs together in PQ, and v1 signs off at MQ. M0–M8 are code-complete checkpoints, not releases.
-- **The fleet and the bar (§23).** The RTX 4080 SUPER and the RTX 5090 (second machine) run every NVIDIA line, and the M5 Max runs Metal. Timing lines pass at ≤1.20× UE 5.8 on the same machine; fixed ms values are report-only.
+- **The fleet and the bar (§23).** The RTX 4080 SUPER and the RTX 5090 (each in its own machine) run every NVIDIA line, and the M5 Max runs Metal. Timing lines pass at ≤1.20× UE 5.8 on the same machine; fixed ms values are report-only.
 - **Metal first (§24).** P0 and P1 are built on the M5 Max; P2 is Vulkan/NVIDIA.
 - **The clean room and licences (§19).**
 - **Defaults and decisions.** The ten §22.10 integrator defaults and decisions D1–D22.
