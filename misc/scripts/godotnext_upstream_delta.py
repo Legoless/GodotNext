@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Report how much of the fork's delta touches upstream Godot files.
 
-The merge base of HEAD and the base ref (default ``upstream/master``) is
+The merge base of HEAD and the base ref (default: the import commit
+``7cfeb47``, because the fork takes no upstream merges in v1) is
 found with ``git merge-base``. ``git diff --numstat`` between the merge
 base and HEAD is then filtered to paths that already exist at the merge
 base (``git cat-file -e <merge-base>:<path>``), so new GodotNext files do
@@ -11,8 +12,8 @@ totals, the file count, the top 20 files by changed lines, and every
 line. See ``docs/godotnext/fork-maintenance.md`` for the named-hook rule
 this tracks.
 
-Exit codes: 0 on success, 2 when there is no merge base (for example in a
-clone without the replace-ref graft), 1 on any other git failure.
+Exit codes: 0 on success, 2 when there is no merge base with the given
+``--base``, 1 on any other git failure.
 """
 
 import argparse
@@ -28,6 +29,9 @@ GREP_BATCH_SIZE = 256
 
 NUMSTAT_HEADER = re.compile(r"^(?P<added>-|\d+)\t(?P<deleted>-|\d+)\t(?P<path>.*)$")
 GREP_LINE = re.compile(r"^(?P<path>.*):(?P<line>\d+):(?P<text>.*)$")
+
+# The single-commit import of upstream godotengine/godot@95c0fa5 (docs/godotnext/fork-maintenance.md).
+IMPORT_COMMIT = "7cfeb473cc58d124c56b302fb313541471d96163"
 
 
 class FileDelta(TypedDict):
@@ -246,8 +250,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--base",
-        default="upstream/master",
-        help="Base ref to find the merge base against (default: upstream/master).",
+        default=IMPORT_COMMIT,
+        help="Base ref to find the merge base against (default: the import commit 7cfeb47).",
     )
     parser.add_argument(
         "--head",
@@ -266,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     except NoMergeBaseError as error:
         print(f"error: no merge base between {args.head} and {args.base}: {error}", file=sys.stderr)
         print(
-            "hint: clones that merge upstream need the replace-ref graft; see docs/godotnext/fork-maintenance.md",
+            "hint: the fork takes no upstream merges in v1; compare against the import commit (the default)",
             file=sys.stderr,
         )
         return 2
