@@ -50,3 +50,18 @@ How it was used: the descriptor fields, usage bits, column-major `PackedFloat4x3
 | Copied files | None |
 
 How it was used: a bottom-level UPDATE calls the options overload with `AccelerationStructureRefitOptionVertexData`. The SDK header states that without that option the vertex buffers on the geometry descriptor are ignored and previously encoded vertex data is copied. A top-level UPDATE calls the no-options overload so the instance descriptor is read. Source and destination are the same acceleration structure, which the header allows for an in-place refit. The scratch buffer for UPDATE is sized from `refitScratchBufferSize` when that query is non-zero, and otherwise from the build scratch size. `AccelerationStructureUsageRefit` was already set when `ALLOW_UPDATE` is set (#47). This issue does not change the front-face mapping.
+
+### Apple Metal acceleration structure compaction
+
+| Field | Value |
+|---|---|
+| What | `writeCompactedAccelerationStructureSize` and `copyAndCompactAccelerationStructure` on `MTLAccelerationStructureCommandEncoder`. The compacted size is written as `MTLDataTypeULong`. |
+| Upstream | https://developer.apple.com/documentation/metal/mtlaccelerationstructurecommandencoder and the macOS SDK header `Metal.framework/Headers/MTLAccelerationStructureCommandEncoder.h` |
+| Version | MacOSX27.2.sdk on the Apple M5 Max, consulted 2026-11-03 |
+| License | Apple Developer Documentation and SDK headers. Consulted, not copied. No sample code was copied. metal-cpp already wraps the selectors (Apache-2.0, vendored). |
+| Read on | 2026-11-03, for issue #38 |
+| Consulted by | The #38 implementer |
+| Used in | `drivers/metal/metal_acceleration_structure.cpp`, `drivers/metal/metal3_objects.cpp` |
+| Copied files | None |
+
+How it was used: the size query writes one uint64 per structure into a shared buffer, then a later command buffer copies into an acceleration structure allocated at that size. Compaction does not use a Metal usage bit. `ALLOW_COMPACTION` stays a RenderingDevice flag. `useResource` with write usage is used on the size buffer because `useHeaps` is read-only for buffer writes.

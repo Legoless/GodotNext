@@ -1260,6 +1260,15 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				const RecordedCaptureTimestampCommand *texture_capture_timestamp_command = reinterpret_cast<const RecordedCaptureTimestampCommand *>(command);
 				driver->command_timestamp_write(r_command_buffer, texture_capture_timestamp_command->pool, texture_capture_timestamp_command->index);
 			} break;
+			// GodotNext: blas_compact
+			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE: {
+				const RecordedAccelerationStructureQuerySizeCommand *query_command = reinterpret_cast<const RecordedAccelerationStructureQuerySizeCommand *>(command);
+				driver->command_acceleration_structure_write_compacted_size(r_command_buffer, VectorView<RDD::AccelerationStructureID>(&query_command->acceleration_structure, 1), query_command->pool, query_command->index);
+			} break;
+			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY: {
+				const RecordedAccelerationStructureCopyCommand *copy_command = reinterpret_cast<const RecordedAccelerationStructureCopyCommand *>(command);
+				driver->command_copy_acceleration_structure_compact(r_command_buffer, copy_command->source, copy_command->destination);
+			} break;
 			default: {
 				DEV_ASSERT(false && "Unknown recorded command type.");
 				return;
@@ -1331,6 +1340,11 @@ void RenderingDeviceGraph::_run_label_command_change(RDD::CommandBufferID p_comm
 						draw_commands = true;
 					} break;
 					case RecordedCommand::TYPE_DRIVER_CALLBACK: {
+						custom_commands = true;
+					} break;
+					// GodotNext: blas_compact
+					case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE:
+					case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY: {
 						custom_commands = true;
 					} break;
 					default: {
@@ -1551,6 +1565,15 @@ void RenderingDeviceGraph::_print_render_commands(const RecordedCommandSort *p_s
 			case RecordedCommand::TYPE_CAPTURE_TIMESTAMP: {
 				const RecordedCaptureTimestampCommand *texture_capture_timestamp_command = reinterpret_cast<const RecordedCaptureTimestampCommand *>(command);
 				print_line(command_index, "LEVEL", command_level, "CAPTURE TIMESTAMP POOL", itos(texture_capture_timestamp_command->pool.id), "INDEX", texture_capture_timestamp_command->index);
+			} break;
+			// GodotNext: blas_compact
+			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE: {
+				const RecordedAccelerationStructureQuerySizeCommand *query_command = reinterpret_cast<const RecordedAccelerationStructureQuerySizeCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "ACCELERATION STRUCTURE QUERY SIZE", itos(query_command->acceleration_structure.id), "INDEX", query_command->index);
+			} break;
+			case RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY: {
+				const RecordedAccelerationStructureCopyCommand *copy_command = reinterpret_cast<const RecordedAccelerationStructureCopyCommand *>(command);
+				print_line(command_index, "LEVEL", command_level, "ACCELERATION STRUCTURE COPY COMPACT SOURCE", itos(copy_command->source.id), "DESTINATION", itos(copy_command->destination.id));
 			} break;
 			default:
 				DEV_ASSERT(false && "Unknown recorded command type.");
@@ -1890,6 +1913,39 @@ void RenderingDeviceGraph::add_tlas_build(RDD::AccelerationStructureID p_acceler
 	usages[resource_count - 1] = RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
 
 	_add_command_to_graph(trackers.ptr(), usages.ptr(), usages.size(), command_index, command);
+}
+
+// GodotNext: blas_compact
+void RenderingDeviceGraph::add_acceleration_structure_query_size(RDD::AccelerationStructureID p_acceleration_structure, RDD::QueryPoolID p_pool, uint32_t p_index, ResourceTracker *p_tracker) {
+	DEV_ASSERT(p_tracker != nullptr);
+
+	int32_t command_index;
+	RecordedAccelerationStructureQuerySizeCommand *command = static_cast<RecordedAccelerationStructureQuerySizeCommand *>(_allocate_command(sizeof(RecordedAccelerationStructureQuerySizeCommand), command_index));
+	command->type = RecordedCommand::TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->acceleration_structure = p_acceleration_structure;
+	command->pool = p_pool;
+	command->index = p_index;
+
+	ResourceUsage usage = RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ;
+	_add_command_to_graph(&p_tracker, &usage, 1, command_index, command);
+}
+
+// GodotNext: blas_compact
+void RenderingDeviceGraph::add_acceleration_structure_copy(RDD::AccelerationStructureID p_source, ResourceTracker *p_source_tracker, RDD::AccelerationStructureID p_destination, ResourceTracker *p_destination_tracker) {
+	DEV_ASSERT(p_source_tracker != nullptr);
+	DEV_ASSERT(p_destination_tracker != nullptr);
+
+	int32_t command_index;
+	RecordedAccelerationStructureCopyCommand *command = static_cast<RecordedAccelerationStructureCopyCommand *>(_allocate_command(sizeof(RecordedAccelerationStructureCopyCommand), command_index));
+	command->type = RecordedCommand::TYPE_ACCELERATION_STRUCTURE_COPY;
+	command->self_stages = RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT;
+	command->source = p_source;
+	command->destination = p_destination;
+
+	ResourceTracker *trackers[2] = { p_source_tracker, p_destination_tracker };
+	ResourceUsage usages[2] = { RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ, RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE };
+	_add_command_to_graph(trackers, usages, 2, command_index, command);
 }
 
 void RenderingDeviceGraph::add_buffer_clear(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, uint32_t p_offset, uint32_t p_size) {
@@ -2721,6 +2777,9 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			2, // TYPE_TEXTURE_UPDATE
 			2, // TYPE_CAPTURE_TIMESTAMP
 			5, // TYPE_DRIVER_CALLBACK
+			// GodotNext: blas_compact
+			6, // TYPE_ACCELERATION_STRUCTURE_QUERY_SIZE
+			6, // TYPE_ACCELERATION_STRUCTURE_COPY
 		};
 		static_assert(std_size(PriorityTable) == RecordedCommand::TYPE_MAX, "PriorityTable must have one entry per RecordedCommand::Type");
 

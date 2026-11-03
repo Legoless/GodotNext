@@ -784,6 +784,29 @@ public:
 	// a buffer counted in buffer_memory, so Vulkan and D3D12 are not counted twice.
 	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) { return 0; }
 
+	// GodotNext: blas_compact
+	// Drivers that cannot compact leave this false. RenderingDevice then returns
+	// ERR_UNAVAILABLE and does not call the virtuals below.
+	virtual bool acceleration_structure_compaction_supported() const { return false; }
+	virtual QueryPoolID acceleration_structure_size_query_pool_create(uint32_t p_count) {
+		ERR_FAIL_V_MSG(QueryPoolID(), "Acceleration structure compaction is not implemented by this driver.");
+	}
+	virtual void acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) {
+		ERR_FAIL_MSG("Acceleration structure compaction is not implemented by this driver.");
+	}
+	virtual void acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
+		ERR_FAIL_MSG("Acceleration structure compaction is not implemented by this driver.");
+	}
+	virtual void command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) {
+		ERR_FAIL_MSG("Acceleration structure compaction is not implemented by this driver.");
+	}
+	virtual AccelerationStructureID acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) {
+		ERR_FAIL_V_MSG(AccelerationStructureID(), "Acceleration structure compaction is not implemented by this driver.");
+	}
+	virtual void command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) {
+		ERR_FAIL_MSG("Acceleration structure compaction is not implemented by this driver.");
+	}
+
 	// ----- PIPELINE -----
 
 	struct PipelineShader {

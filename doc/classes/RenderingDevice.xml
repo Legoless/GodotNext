@@ -14,6 +14,13 @@
 		<link title="Using compute shaders">$DOCS_URL/tutorials/shaders/compute_shaders.html</link>
 	</tutorials>
 	<methods>
+		<method name="acceleration_structure_get_size_bytes" experimental="">
+			<return type="int" />
+			<param index="0" name="acceleration_structure" type="RID" />
+			<description>
+				Returns the driver-reported size in bytes of [param acceleration_structure]. This is the size counted by [method get_memory_usage] for [constant MEMORY_BUFFERS]. Prints an error and returns [code]0[/code] if [param acceleration_structure] is not a valid acceleration structure.
+			</description>
+		</method>
 		<method name="barrier" deprecated="Barriers are automatically inserted by RenderingDevice.">
 			<return type="void" />
 			<param index="0" name="from" type="int" enum="RenderingDevice.BarrierMask" is_bitfield="true" default="32767" />
@@ -32,6 +39,14 @@
 				An UPDATE that the structure cannot accept returns [constant @GlobalScope.ERR_INVALID_PARAMETER] and records no build.
 			</description>
 		</method>
+		<method name="blas_compact" experimental="">
+			<return type="int" enum="Error" />
+			<param index="0" name="blas" type="RID" />
+			<description>
+				Starts asynchronous compaction of the bottom-level acceleration structure [param blas]. [param blas] must have been created with [constant ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT] and built with [method blas_build]. The size query is recorded into the current frame. After [method submit] and [method sync], the compacted structure replaces the original, [method blas_is_compacted] returns [code]true[/code], and dependent top-level acceleration structures are invalidated and must be rebuilt.
+				Returns [constant @GlobalScope.ERR_INVALID_PARAMETER] if [param blas] is invalid, is not a bottom-level structure, was created without [constant ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT], has not been built, is already compacted, or already has a compaction in progress. Returns [constant @GlobalScope.ERR_UNAVAILABLE] if this device has no ray tracing support or the driver cannot compact. A compacted structure cannot be rebuilt.
+			</description>
+		</method>
 		<method name="blas_create" experimental="">
 			<return type="RID" />
 			<param index="0" name="geometries" type="RDAccelerationStructureGeometry[]" />
@@ -40,6 +55,13 @@
 				Creates a new Bottom-Level Acceleration Structure (BLAS). It can be accessed with the RID that is returned.
 				Once finished with your RID, you will want to free the RID using the RenderingDevice's [method free_rid] method.
 				Each geometry reads its vertices from a vertex buffer or a storage buffer, and its indices from an index buffer or a storage buffer (see [member RDAccelerationStructureGeometry.index_format]). Every buffer must be created with [constant BUFFER_CREATION_DEVICE_ADDRESS_BIT] and [constant BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT]; otherwise this method prints an error and returns an invalid RID.
+			</description>
+		</method>
+		<method name="blas_is_compacted" experimental="">
+			<return type="bool" />
+			<param index="0" name="blas" type="RID" />
+			<description>
+				Returns [code]true[/code] if [param blas] has been replaced by a compacted structure. Returns [code]false[/code] for an invalid RID, a structure that is not a bottom-level acceleration structure, or a structure whose compaction has not finished. This becomes [code]true[/code] at the [method sync] that follows [method blas_compact], when the compacted structure is created, which is before the copy finishes on the GPU.
 			</description>
 		</method>
 		<method name="buffer_clear">
@@ -2393,7 +2415,7 @@
 			Allows the acceleration structure to be updated after it has been built.
 		</constant>
 		<constant name="ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT" value="2" enum="AccelerationStructureFlagBits" is_bitfield="true" experimental="">
-			Allows the acceleration structure to be compacted to reduce memory usage after it has been built.
+			Allows the acceleration structure to be compacted to reduce memory usage after it has been built. See [method blas_compact].
 		</constant>
 		<constant name="ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT" value="4" enum="AccelerationStructureFlagBits" is_bitfield="true" experimental="">
 			Prioritizes ray traversal performance over build performance when building the acceleration structure.

@@ -43,7 +43,8 @@ static_assert((uint32_t)MTL::AccelerationStructureInstanceOptionNonOpaque == (ui
 static MTL::AccelerationStructureUsage _metal_as_usage(BitField<RenderingDeviceDriver::AccelerationStructureFlagBits> p_flags) {
 	// ExtendedLimits is never set. SPIRV-Cross emits intersection_query<instancing, triangle_data>
 	// without the extended_limits tag, and a structure built with that usage would not be traversable.
-	// ALLOW_COMPACTION has no Metal usage bit; compaction is a later issue.
+	// GodotNext: blas_compact
+	// ALLOW_COMPACTION has no Metal usage bit. Compaction allocates a new structure and copies into it.
 	NS::UInteger usage = MTL::AccelerationStructureUsageNone;
 	if (p_flags.has_flag(RenderingDeviceDriver::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT)) {
 		usage |= MTL::AccelerationStructureUsageRefit;
@@ -148,6 +149,8 @@ RDD::AccelerationStructureID RenderingDeviceDriverMetal::blas_create(VectorView<
 	info->refit_scratch_size = _metal_as_refit_scratch_size(sizes.refitScratchBufferSize, info->scratch_size);
 	info->allow_update = p_flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT);
 	info->top_level = false;
+	// GodotNext: blas_compact
+	info->allow_compaction = p_flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT);
 	return AccelerationStructureID(info);
 }
 
@@ -449,4 +452,130 @@ void RenderingDeviceDriverMetal::_destroy_dummy_blas() {
 	dummy_blas_allocation.invalidate();
 	allocator->free_acceleration_structure(resource);
 	allocator->free_buffer(dummy_blas_vertices);
+}
+
+// GodotNext: blas_compact
+bool RenderingDeviceDriverMetal::acceleration_structure_compaction_supported() const {
+	// Same gate as SUPPORTS_RAY_QUERY. has_feature is not const, so the condition is repeated.
+	return RAY_QUERY_AS_READY && as_objects_ready && ray_query_caps.ray_query;
+}
+
+// GodotNext: blas_compact
+RDD::QueryPoolID RenderingDeviceDriverMetal::acceleration_structure_size_query_pool_create(uint32_t p_count) {
+	ERR_FAIL_COND_V(p_count == 0, QueryPoolID());
+	ERR_FAIL_NULL_V(allocator, QueryPoolID());
+
+	const NS::UInteger bytes = (NS::UInteger)p_count * sizeof(uint64_t);
+	MetalBuffer buffer = allocator->new_buffer(bytes, MTL::ResourceStorageModeShared | MTL::ResourceHazardTrackingModeUntracked);
+	if (!buffer.buffer) {
+		return QueryPoolID();
+	}
+	buffer.buffer->setLabel(MTLSTR("GodotNext BLAS Compacted Size"));
+	void *contents = buffer.buffer->contents();
+	if (contents == nullptr) {
+		allocator->free_buffer(buffer);
+		ERR_FAIL_V_MSG(QueryPoolID(), "Metal compacted-size query buffer is not CPU-visible.");
+	}
+	memset(contents, 0, (size_t)bytes);
+
+	AccelerationStructureSizeQueryPool *pool = VersatileResource::allocate<AccelerationStructureSizeQueryPool>(resources_allocator);
+	pool->buffer = buffer;
+	buffer.allocation.invalidate();
+	pool->count = p_count;
+	pool->mapped = static_cast<uint64_t *>(contents);
+	return QueryPoolID(pool);
+}
+
+// GodotNext: blas_compact
+void RenderingDeviceDriverMetal::acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) {
+	if (!p_pool_id) {
+		return;
+	}
+	AccelerationStructureSizeQueryPool *pool = (AccelerationStructureSizeQueryPool *)p_pool_id.id;
+	ERR_FAIL_NULL(pool);
+	ERR_FAIL_NULL(allocator);
+	pool->mapped = nullptr;
+	allocator->free_buffer(pool->buffer);
+	VersatileResource::free(resources_allocator, pool);
+}
+
+// GodotNext: blas_compact
+void RenderingDeviceDriverMetal::acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
+	AccelerationStructureSizeQueryPool *pool = (AccelerationStructureSizeQueryPool *)p_pool_id.id;
+	ERR_FAIL_NULL(pool);
+	ERR_FAIL_NULL(r_results);
+	ERR_FAIL_NULL(pool->mapped);
+	ERR_FAIL_COND(p_query_count > pool->count);
+	if (p_query_count == 0) {
+		return;
+	}
+	memcpy(r_results, pool->mapped, sizeof(uint64_t) * p_query_count);
+}
+
+// GodotNext: blas_compact
+void RenderingDeviceDriverMetal::command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) {
+	MTL3::MDCommandBuffer *cb = (MTL3::MDCommandBuffer *)p_cmd_buffer.id;
+	AccelerationStructureSizeQueryPool *pool = (AccelerationStructureSizeQueryPool *)p_pool_id.id;
+	ERR_FAIL_NULL(cb);
+	ERR_FAIL_NULL(pool);
+	ERR_FAIL_NULL(pool->buffer.buffer.get());
+	ERR_FAIL_NULL(pool->mapped);
+	ERR_FAIL_COND((uint64_t)p_first + p_acceleration_structures.size() > pool->count);
+	if (p_acceleration_structures.size() == 0) {
+		return;
+	}
+
+	// The range is zeroed on the CPU before the GPU write. Encoding runs before submit,
+	// and the buffer is shared, so the zeros are visible to the write that follows.
+	memset(pool->mapped + p_first, 0, sizeof(uint64_t) * p_acceleration_structures.size());
+
+	for (uint32_t i = 0; i < p_acceleration_structures.size(); i++) {
+		AccelerationStructureInfo *info = (AccelerationStructureInfo *)p_acceleration_structures[i].id;
+		ERR_FAIL_NULL(info);
+		ERR_FAIL_NULL(info->as.get());
+		const NS::UInteger offset = (NS::UInteger)(p_first + i) * sizeof(uint64_t);
+		cb->encode_acceleration_structure_write_compacted_size(info->as.get(), pool->buffer.buffer.get(), offset);
+	}
+}
+
+// GodotNext: blas_compact
+RDD::AccelerationStructureID RenderingDeviceDriverMetal::acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) {
+	ERR_FAIL_COND_V(p_size == 0, AccelerationStructureID());
+	ERR_FAIL_NULL_V(allocator, AccelerationStructureID());
+	const AccelerationStructureInfo *src = (const AccelerationStructureInfo *)p_src.id;
+	ERR_FAIL_NULL_V(src, AccelerationStructureID());
+	ERR_FAIL_COND_V_MSG(src->top_level, AccelerationStructureID(), "Compaction requires a bottom-level acceleration structure.");
+	ERR_FAIL_NULL_V(src->as.get(), AccelerationStructureID());
+
+	MetalAccelerationStructure created = allocator->new_acceleration_structure((NS::UInteger)p_size);
+	ERR_FAIL_COND_V_MSG(!created.structure, AccelerationStructureID(), "Failed to allocate a compacted bottom-level acceleration structure.");
+	created.structure->setLabel(MTLSTR("GodotNext Compacted BLAS"));
+
+	AccelerationStructureInfo *info = VersatileResource::allocate<AccelerationStructureInfo>(resources_allocator);
+	info->as = created.structure;
+	info->allocation = created.allocation;
+	created.allocation.invalidate();
+	// A null descriptor makes a later command_build_blas fail its existing null check.
+	info->descriptor.reset();
+	info->size_bytes = _metal_as_reported_size(info->as.get(), (NS::UInteger)p_size);
+	info->scratch_size = 0;
+	info->max_instance_count = 0;
+	info->top_level = false;
+	info->allow_compaction = false;
+	info->compacted = true;
+	return AccelerationStructureID(info);
+}
+
+// GodotNext: blas_compact
+void RenderingDeviceDriverMetal::command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) {
+	AccelerationStructureInfo *src = (AccelerationStructureInfo *)p_src.id;
+	AccelerationStructureInfo *dst = (AccelerationStructureInfo *)p_dst.id;
+	ERR_FAIL_NULL(src);
+	ERR_FAIL_NULL(dst);
+	ERR_FAIL_NULL(src->as.get());
+	ERR_FAIL_NULL(dst->as.get());
+
+	MTL3::MDCommandBuffer *cb = (MTL3::MDCommandBuffer *)p_cmd_buffer.id;
+	ERR_FAIL_NULL(cb);
+	cb->encode_acceleration_structure_copy_compact(src->as.get(), dst->as.get());
 }

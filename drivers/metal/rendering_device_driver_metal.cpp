@@ -2390,6 +2390,9 @@ RDD::PipelineID RenderingDeviceDriverMetal::compute_pipeline_create(ShaderID p_s
 // GodotNext: metal_acceleration_structure
 // blas_create, tlas_create, instance write, free, sizes and the build commands
 // are implemented in metal_acceleration_structure.cpp.
+// GodotNext: blas_compact
+// Compaction size queries, compacted allocation and the compact copy are implemented
+// in metal_acceleration_structure.cpp.
 
 // ----- PIPELINE -----
 
@@ -2408,6 +2411,9 @@ bool RenderingDeviceDriverMetal::raytracing_pipeline_get_shader_group_handles(Ra
 // ----- COMMANDS -----
 // GodotNext: metal_acceleration_structure
 // command_build_blas and command_build_tlas are implemented in metal_acceleration_structure.cpp.
+// GodotNext: blas_compact
+// command_acceleration_structure_write_compacted_size and command_copy_acceleration_structure_compact
+// are implemented in metal_acceleration_structure.cpp.
 
 void RenderingDeviceDriverMetal::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
 	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");

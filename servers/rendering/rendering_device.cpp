@@ -446,6 +446,8 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 	// GodotNext: metal_acceleration_structure
 	acceleration_structure.size_bytes = driver->acceleration_structure_get_size_bytes(acceleration_structure.driver_id);
 	buffer_memory.add(acceleration_structure.size_bytes);
+	// GodotNext: blas_compact
+	acceleration_structure.allow_compaction = p_flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT);
 
 	acceleration_structure.draw_tracker = RDG::resource_tracker_create();
 	acceleration_structure.draw_tracker->acceleration_structure_driver_id = acceleration_structure.driver_id;
@@ -534,6 +536,11 @@ Error RenderingDevice::blas_build(RID p_blas, AccelerationStructureBuildMode p_m
 
 	AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
 	ERR_FAIL_NULL_V_MSG(blas, ERR_INVALID_PARAMETER, "BLAS argument is not valid.");
+	// GodotNext: blas_compact
+	// A compacted allocation is smaller than the build descriptor, and the size query
+	// still refers to the uncompacted object. Neither can be rebuilt in place.
+	ERR_FAIL_COND_V_MSG(blas->compaction_state == BLAS_COMPACTION_QUERY_PENDING, ERR_INVALID_PARAMETER, "BLAS compaction is already in progress.");
+	ERR_FAIL_COND_V_MSG(blas->compaction_state == BLAS_COMPACTION_COMPACTED, ERR_INVALID_PARAMETER, "A compacted BLAS cannot be rebuilt.");
 
 	// GodotNext: as_build_modes
 	// Reject an UPDATE before scratch allocation and before any render-graph command.
@@ -550,6 +557,218 @@ Error RenderingDevice::blas_build(RID p_blas, AccelerationStructureBuildMode p_m
 	_blas_remove_tlas_dependencies(blas, p_blas);
 
 	return OK;
+}
+
+// GodotNext: blas_compact
+Error RenderingDevice::_blas_compaction_reserve(RDD::QueryPoolID &r_pool, uint32_t &r_index) {
+	constexpr uint32_t STRIDE = 1024;
+	Frame &current_frame = frames[frame];
+	if (!current_frame.blas_compaction_query_pools.is_empty()) {
+		Frame::BlasCompactionQueryPool &last = current_frame.blas_compaction_query_pools[current_frame.blas_compaction_query_pools.size() - 1];
+		if (last.driver_id && last.used < last.capacity) {
+			r_pool = last.driver_id;
+			r_index = last.used;
+			last.used++;
+			return OK;
+		}
+	}
+
+	RDD::QueryPoolID created = driver->acceleration_structure_size_query_pool_create(STRIDE);
+	ERR_FAIL_COND_V(!created, ERR_CANT_CREATE);
+
+	Frame::BlasCompactionQueryPool pool;
+	pool.driver_id = created;
+	pool.capacity = STRIDE;
+	pool.used = 1;
+	current_frame.blas_compaction_query_pools.push_back(pool);
+	r_pool = created;
+	r_index = 0;
+	return OK;
+}
+
+// GodotNext: blas_compact
+void RenderingDevice::_free_blas_compaction_query_pools(uint32_t p_frame) {
+	if (driver == nullptr || p_frame >= frames.size()) {
+		return;
+	}
+
+	Frame &current_frame = frames[p_frame];
+	for (Frame::BlasCompactionQueryPool &pool : current_frame.blas_compaction_query_pools) {
+		if (pool.driver_id) {
+			driver->acceleration_structure_size_query_pool_free(pool.driver_id);
+			pool.driver_id = RDD::QueryPoolID();
+		}
+	}
+	current_frame.blas_compaction_query_pools.clear();
+	current_frame.blas_compactions_pending.clear();
+}
+
+// GodotNext: blas_compact
+void RenderingDevice::_compact_blas_from_query(AccelerationStructure *p_blas, RID p_blas_rid, uint64_t p_compacted_size) {
+	if (p_compacted_size == 0 || p_compacted_size > p_blas->size_bytes || p_blas->draw_tracker == nullptr) {
+		print_verbose(vformat("BLAS compaction skipped (queried %d bytes, original %d bytes).", p_compacted_size, p_blas->size_bytes));
+		p_blas->compaction_state = BLAS_COMPACTION_NONE;
+		return;
+	}
+
+	const RDD::AccelerationStructureID source_id = p_blas->driver_id;
+	const uint64_t old_size = p_blas->size_bytes;
+	const RDD::AccelerationStructureID destination_id = driver->acceleration_structure_create_compacted(source_id, p_compacted_size);
+	if (!destination_id) {
+		p_blas->compaction_state = BLAS_COMPACTION_NONE;
+		return;
+	}
+
+	const uint64_t new_size = driver->acceleration_structure_get_size_bytes(destination_id);
+	if (new_size == 0 || new_size > old_size) {
+		print_verbose(vformat("BLAS compaction skipped: compacted allocation is %d bytes and the original is %d bytes.", new_size, old_size));
+		driver->acceleration_structure_free(destination_id);
+		p_blas->compaction_state = BLAS_COMPACTION_NONE;
+		return;
+	}
+
+	// The copy reads the old object and writes the new one. The live tracker follows the
+	// RID, so it has to name the new object before the copy is recorded. Its usage history
+	// belongs to the old object.
+	RDG::ResourceTracker *source_tracker = RDG::resource_tracker_create();
+	source_tracker->acceleration_structure_driver_id = source_id;
+	source_tracker->usage = RDG::RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ;
+
+	RDG::ResourceTracker *destination_tracker = p_blas->draw_tracker;
+	destination_tracker->acceleration_structure_driver_id = destination_id;
+	destination_tracker->usage = RDG::RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
+	destination_tracker->usage_access = {};
+	destination_tracker->current_frame_stages.clear();
+	destination_tracker->previous_frame_stages.clear();
+	destination_tracker->command_frame = -1;
+	destination_tracker->command_index = -1;
+	destination_tracker->usage_index = UINT32_MAX;
+	destination_tracker->read_full_command_list_index = -1;
+	destination_tracker->read_slice_command_list_index = -1;
+	destination_tracker->write_command_or_list_index = -1;
+	destination_tracker->write_command_list_enabled = false;
+
+	p_blas->driver_id = destination_id;
+	p_blas->size_bytes = new_size;
+	p_blas->compaction_state = BLAS_COMPACTION_COMPACTED;
+	buffer_memory.add(new_size);
+
+	draw_graph.add_acceleration_structure_copy(source_id, source_tracker, destination_id, destination_tracker);
+
+	Frame::CompactedAccelerationStructureDisposal disposal;
+	disposal.driver_id = source_id;
+	disposal.size_bytes = old_size;
+	disposal.source_tracker = source_tracker;
+	frames[frame].compacted_acceleration_structures_to_dispose_of.push_back(disposal);
+
+	// Metal stores the BLAS resource id in the instance record at build time. There is no
+	// address cache to refresh; invalidating dependent TLASes makes the next build rewrite it.
+	_blas_remove_tlas_dependencies(p_blas, p_blas_rid);
+}
+
+// GodotNext: blas_compact
+void RenderingDevice::_complete_blas_compactions() {
+	if (frames.is_empty() || driver == nullptr) {
+		return;
+	}
+
+	Frame &current_frame = frames[frame];
+	if (current_frame.blas_compactions_pending.is_empty()) {
+		_free_blas_compaction_query_pools(frame);
+		return;
+	}
+
+	LocalVector<LocalVector<uint64_t>> pool_results;
+	pool_results.resize(current_frame.blas_compaction_query_pools.size());
+	for (uint32_t pool_index = 0; pool_index < current_frame.blas_compaction_query_pools.size(); pool_index++) {
+		const Frame::BlasCompactionQueryPool &pool = current_frame.blas_compaction_query_pools[pool_index];
+		if (!pool.driver_id || pool.used == 0) {
+			continue;
+		}
+		pool_results[pool_index].resize(pool.used);
+		driver->acceleration_structure_size_query_pool_get_results(pool.driver_id, pool.used, pool_results[pool_index].ptr());
+	}
+
+	for (const Frame::BlasCompactionPending &pending : current_frame.blas_compactions_pending) {
+		AccelerationStructure *blas = acceleration_structure_owner.get_or_null(pending.blas);
+		if (blas == nullptr || blas->compaction_state != BLAS_COMPACTION_QUERY_PENDING) {
+			continue;
+		}
+
+		int pool_index = -1;
+		for (uint32_t i = 0; i < current_frame.blas_compaction_query_pools.size(); i++) {
+			if (current_frame.blas_compaction_query_pools[i].driver_id == pending.pool) {
+				pool_index = int(i);
+				break;
+			}
+		}
+
+		uint64_t compacted_size = 0;
+		if (pool_index >= 0 && pending.index < pool_results[pool_index].size()) {
+			compacted_size = pool_results[pool_index][pending.index];
+		}
+		_compact_blas_from_query(blas, pending.blas, compacted_size);
+	}
+
+	_free_blas_compaction_query_pools(frame);
+}
+
+// GodotNext: blas_compact
+Error RenderingDevice::blas_compact(RID p_blas) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+
+	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Compacting a BLAS is forbidden during creation of a draw list.");
+	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER, "Compacting a BLAS is forbidden during creation of a compute list.");
+	ERR_FAIL_COND_V_MSG(raytracing_list.active, ERR_INVALID_PARAMETER, "Compacting a BLAS is forbidden during creation of a raytracing list.");
+
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), ERR_UNAVAILABLE, "The current rendering device has neither raytracing pipeline nor ray query support.");
+	// A null driver (feature mock, or a device that failed to initialize) must not reach the ERR_FAIL defaults.
+	ERR_FAIL_COND_V_MSG(driver == nullptr || !driver->acceleration_structure_compaction_supported(), ERR_UNAVAILABLE, "BLAS compaction is not supported by this rendering driver.");
+	ERR_FAIL_COND_V_MSG(frames.is_empty(), ERR_UNAVAILABLE, "BLAS compaction requires an initialized rendering device.");
+
+	AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
+	ERR_FAIL_NULL_V_MSG(blas, ERR_INVALID_PARAMETER, "BLAS argument is not valid.");
+	ERR_FAIL_COND_V_MSG(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER, "Compaction requires a bottom-level acceleration structure.");
+	ERR_FAIL_COND_V_MSG(!blas->allow_compaction, ERR_INVALID_PARAMETER, "BLAS was not created with ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT.");
+	ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
+	ERR_FAIL_COND_V_MSG(blas->compaction_state == BLAS_COMPACTION_QUERY_PENDING, ERR_INVALID_PARAMETER, "BLAS compaction is already in progress.");
+	ERR_FAIL_COND_V_MSG(blas->compaction_state == BLAS_COMPACTION_COMPACTED, ERR_INVALID_PARAMETER, "BLAS is already compacted.");
+	ERR_FAIL_NULL_V_MSG(blas->draw_tracker, ERR_INVALID_PARAMETER, "BLAS argument is not valid.");
+
+	RDD::QueryPoolID pool;
+	uint32_t index = 0;
+	const Error err = _blas_compaction_reserve(pool, index);
+	ERR_FAIL_COND_V(err != OK, err);
+
+	draw_graph.add_acceleration_structure_query_size(blas->driver_id, pool, index, blas->draw_tracker);
+
+	Frame::BlasCompactionPending pending;
+	pending.blas = p_blas;
+	pending.pool = pool;
+	pending.index = index;
+	frames[frame].blas_compactions_pending.push_back(pending);
+	blas->compaction_state = BLAS_COMPACTION_QUERY_PENDING;
+	return OK;
+}
+
+// GodotNext: blas_compact
+bool RenderingDevice::blas_is_compacted(RID p_blas) {
+	ERR_RENDER_THREAD_GUARD_V(false);
+
+	const AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
+	if (blas == nullptr || blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL) {
+		return false;
+	}
+	return blas->compaction_state == BLAS_COMPACTION_COMPACTED;
+}
+
+// GodotNext: blas_compact
+uint64_t RenderingDevice::acceleration_structure_get_size_bytes(RID p_acceleration_structure) {
+	ERR_RENDER_THREAD_GUARD_V(0);
+
+	const AccelerationStructure *acceleration_structure = acceleration_structure_owner.get_or_null(p_acceleration_structure);
+	ERR_FAIL_NULL_V(acceleration_structure, 0);
+	return acceleration_structure->size_bytes;
 }
 
 Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode) {
@@ -8264,6 +8483,18 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 		frames[p_frame].raytracing_pipelines_to_dispose_of.pop_front();
 	}
 
+	// GodotNext: blas_compact
+	// The replaced object only. The live scratch buffer stays with the compacted BLAS.
+	while (frames[p_frame].compacted_acceleration_structures_to_dispose_of.front()) {
+		Frame::CompactedAccelerationStructureDisposal &disposal = frames[p_frame].compacted_acceleration_structures_to_dispose_of.front()->get();
+		buffer_memory.sub(disposal.size_bytes);
+		if (disposal.driver_id) {
+			driver->acceleration_structure_free(disposal.driver_id);
+		}
+		RDG::resource_tracker_free(disposal.source_tracker);
+		frames[p_frame].compacted_acceleration_structures_to_dispose_of.pop_front();
+	}
+
 	// Acceleration structures.
 	while (frames[p_frame].acceleration_structures_to_dispose_of.front()) {
 		AccelerationStructure &acceleration_structure = frames[p_frame].acceleration_structures_to_dispose_of.front()->get();
@@ -8405,6 +8636,11 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 	// Erase pending resources.
 	GodotProfileZoneGrouped(_profile_zone, "_free_pending_resources");
 	_free_pending_resources(frame);
+
+	// GodotNext: blas_compact
+	// The size-query fence has passed (the stall above) and this slot's deferred frees have run.
+	// Copies are recorded into the command buffer begun just above.
+	_complete_blas_compactions();
 
 	// Advance staging buffers if used.
 	if (upload_staging_buffers.used) {
@@ -9283,6 +9519,11 @@ void RenderingDevice::finalize() {
 		_free_pending_resources(f);
 		driver->command_pool_free(frames[i].command_pool);
 		driver->timestamp_query_pool_free(frames[i].timestamp_pool);
+		// GodotNext: blas_compact
+		// Finalize submits and stalls without _begin_frame, so a pending size query is
+		// never completed. The pool still has to be released. Index i walks every slot;
+		// f is the rotated free order and is not the slot the pool was recorded on.
+		_free_blas_compaction_query_pools(i);
 		driver->semaphore_free(frames[i].semaphore);
 		driver->fence_free(frames[i].fence);
 
@@ -9494,6 +9735,10 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("tlas_create", "max_instance_count", "flags"), &RenderingDevice::tlas_create);
 	// GodotNext: as_build_modes
 	ClassDB::bind_method(D_METHOD("blas_build", "blas", "mode"), &RenderingDevice::blas_build, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
+	// GodotNext: blas_compact
+	ClassDB::bind_method(D_METHOD("blas_compact", "blas"), &RenderingDevice::blas_compact);
+	ClassDB::bind_method(D_METHOD("blas_is_compacted", "blas"), &RenderingDevice::blas_is_compacted);
+	ClassDB::bind_method(D_METHOD("acceleration_structure_get_size_bytes", "acceleration_structure"), &RenderingDevice::acceleration_structure_get_size_bytes);
 	ClassDB::bind_method(D_METHOD("tlas_build", "tlas", "instances", "mode"), &RenderingDevice::_tlas_build, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
 
 	ClassDB::bind_method(D_METHOD("hit_sbt_create", "raytracing_pipeline", "initial_hit_group_capacity"), &RenderingDevice::hit_sbt_create);

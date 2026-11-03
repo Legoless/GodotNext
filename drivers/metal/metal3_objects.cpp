@@ -1986,6 +1986,42 @@ void MDCommandBuffer::encode_acceleration_structure_refit(MTL::AccelerationStruc
 	}
 }
 
+// GodotNext: blas_compact
+MTL::AccelerationStructureCommandEncoder *MDCommandBuffer::_ensure_as_encoder_any() {
+	// Compaction is neither a BLAS build nor a TLAS build. Reuse whichever
+	// acceleration-structure encoder is already open so a mixed level does not
+	// hit the kind assert in _ensure_as_encoder. The render graph still closes
+	// the encoder between a compact copy and a TLAS build.
+	if (type == MDCommandBufferStateType::AccelerationStructure && as.encoder) {
+		_encode_residency(as.encoder.get());
+		return as.encoder.get();
+	}
+	return _ensure_as_encoder(false);
+}
+
+// GodotNext: blas_compact
+void MDCommandBuffer::encode_acceleration_structure_write_compacted_size(MTL::AccelerationStructure *p_structure, MTL::Buffer *p_buffer, NS::UInteger p_offset) {
+	MTL::AccelerationStructureCommandEncoder *enc = _ensure_as_encoder_any();
+	ERR_FAIL_NULL(enc);
+	ERR_FAIL_NULL(p_structure);
+	ERR_FAIL_NULL(p_buffer);
+	// useHeaps marks heap resources read-only for buffer writes. The size buffer
+	// is a heap allocation, so the encoder has to declare the write explicitly.
+	_encode_residency(enc);
+	enc->useResource(p_buffer, MTL::ResourceUsageWrite);
+	enc->writeCompactedAccelerationStructureSize(p_structure, p_buffer, p_offset, MTL::DataTypeULong);
+}
+
+// GodotNext: blas_compact
+void MDCommandBuffer::encode_acceleration_structure_copy_compact(MTL::AccelerationStructure *p_src, MTL::AccelerationStructure *p_dst) {
+	MTL::AccelerationStructureCommandEncoder *enc = _ensure_as_encoder_any();
+	ERR_FAIL_NULL(enc);
+	ERR_FAIL_NULL(p_src);
+	ERR_FAIL_NULL(p_dst);
+	_encode_residency(enc);
+	enc->copyAndCompactAccelerationStructure(p_src, p_dst);
+}
+
 // GodotNext: metal_acceleration_structure
 bool MDCommandBuffer::write_instance_count(uint32_t p_count, MTL::Buffer *&r_buffer, NS::UInteger &r_offset) {
 	Alloc count_alloc = allocate_arg_buffer(sizeof(uint32_t));

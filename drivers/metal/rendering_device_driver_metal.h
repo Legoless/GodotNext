@@ -244,6 +244,18 @@ public:
 		bool allow_update = false;
 		uint32_t max_instance_count = 0;
 		bool top_level = false;
+		// GodotNext: blas_compact
+		bool allow_compaction = false;
+		bool compacted = false;
+	};
+
+	// GodotNext: blas_compact
+	// One shared uint64 per query. The GPU writes the compacted size; the CPU reads it
+	// after the command buffer that encoded the write has completed.
+	struct AccelerationStructureSizeQueryPool {
+		MetalBuffer buffer;
+		uint32_t count = 0;
+		uint64_t *mapped = nullptr;
 	};
 
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override final;
@@ -529,6 +541,12 @@ public:
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) override final;
 	// GodotNext: metal_acceleration_structure
 	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
+	// GodotNext: blas_compact
+	virtual bool acceleration_structure_compaction_supported() const override final;
+	virtual QueryPoolID acceleration_structure_size_query_pool_create(uint32_t p_count) override final;
+	virtual void acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) override final;
+	virtual void acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override final;
+	virtual AccelerationStructureID acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) override final;
 
 	// ----- PIPELINE -----
 
@@ -542,6 +560,9 @@ public:
 	// GodotNext: as_build_modes
 	virtual void command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, AccelerationStructureBuildMode p_mode) override final;
 	virtual void command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) override final;
+	// GodotNext: blas_compact
+	virtual void command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) override final;
+	virtual void command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) override final;
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) override final;
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override final;
@@ -621,7 +642,9 @@ private:
 			BufferInfo,
 			TextureInfo,
 			// GodotNext: metal_acceleration_structure
-			AccelerationStructureInfo>;
+			AccelerationStructureInfo,
+			// GodotNext: blas_compact
+			AccelerationStructureSizeQueryPool>;
 	PagedAllocator<VersatileResource, true> resources_allocator;
 
 	/******************/

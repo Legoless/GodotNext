@@ -371,6 +371,9 @@ private:
 	// GodotNext: metal_acceleration_structure
 	void _end_as();
 	MTL::AccelerationStructureCommandEncoder *_ensure_as_encoder(bool p_top_level);
+	// GodotNext: blas_compact
+	// Reuses an open acceleration-structure encoder of either kind.
+	MTL::AccelerationStructureCommandEncoder *_ensure_as_encoder_any();
 	void _free_as_staging();
 
 	enum class CopySource {
@@ -690,6 +693,9 @@ public:
 	// GodotNext: as_build_modes
 	// p_vertex_data selects AccelerationStructureRefitOptionVertexData. Top-level refits pass false.
 	void encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, bool p_top_level, bool p_vertex_data);
+	// GodotNext: blas_compact
+	void encode_acceleration_structure_write_compacted_size(MTL::AccelerationStructure *p_structure, MTL::Buffer *p_buffer, NS::UInteger p_offset);
+	void encode_acceleration_structure_copy_compact(MTL::AccelerationStructure *p_src, MTL::AccelerationStructure *p_dst);
 	bool write_instance_count(uint32_t p_count, MTL::Buffer *&r_buffer, NS::UInteger &r_offset);
 	void defer_acceleration_structure_resource(MetalBuffer p_buffer);
 	void defer_acceleration_structure_descriptor(NS::SharedPtr<MTL::AccelerationStructureDescriptor> p_descriptor);

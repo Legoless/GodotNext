@@ -1343,6 +1343,13 @@ private:
 	/**** ACCELERATION STRUCTURE ****/
 	/********************************/
 
+	// GodotNext: blas_compact
+	enum BlasCompactionState : uint8_t {
+		BLAS_COMPACTION_NONE = 0,
+		BLAS_COMPACTION_QUERY_PENDING,
+		BLAS_COMPACTION_COMPACTED,
+	};
+
 	struct AccelerationStructure {
 		// --- Shared ---
 		RDD::AccelerationStructureID driver_id;
@@ -1351,6 +1358,9 @@ private:
 		uint64_t size_bytes = 0;
 		RDD::AccelerationStructureType type = {};
 		RDG::ResourceTracker *draw_tracker = nullptr;
+		// GodotNext: blas_compact
+		bool allow_compaction = false;
+		BlasCompactionState compaction_state = BLAS_COMPACTION_NONE;
 
 		// BLAS/TLAS are weakly linked, as opposed to RD dependencies.
 		HashSet<RID> acceleration_structure_dependencies;
@@ -1384,6 +1394,11 @@ private:
 
 	Error _acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure, RDD::AccelerationStructureBuildMode p_mode);
 	void _blas_remove_tlas_dependencies(AccelerationStructure *p_blas, RID p_blas_id);
+	// GodotNext: blas_compact
+	Error _blas_compaction_reserve(RDD::QueryPoolID &r_pool, uint32_t &r_index);
+	void _free_blas_compaction_query_pools(uint32_t p_frame);
+	void _complete_blas_compactions();
+	void _compact_blas_from_query(AccelerationStructure *p_blas, RID p_blas_rid, uint64_t p_compacted_size);
 	void _tlas_remove_blas_dependencies(AccelerationStructure *p_tlas, RID p_tlas_id);
 
 	RID_Owner<AccelerationStructure, true> acceleration_structure_owner;
@@ -1419,6 +1434,10 @@ public:
 	};
 
 	Error blas_build(RID p_blas, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+	// GodotNext: blas_compact
+	Error blas_compact(RID p_blas);
+	bool blas_is_compacted(RID p_blas);
+	uint64_t acceleration_structure_get_size_bytes(RID p_acceleration_structure);
 	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
 
 private:
@@ -1830,6 +1849,27 @@ private:
 		List<RenderPipeline> render_pipelines_to_dispose_of;
 		List<ComputePipeline> compute_pipelines_to_dispose_of;
 		List<AccelerationStructure> acceleration_structures_to_dispose_of;
+		// GodotNext: blas_compact
+		// The pre-compaction object stays alive until the copy's submission has retired.
+		// It is not a normal AccelerationStructure disposal: that path also frees the live scratch buffer.
+		struct CompactedAccelerationStructureDisposal {
+			RDD::AccelerationStructureID driver_id;
+			uint64_t size_bytes = 0;
+			RDG::ResourceTracker *source_tracker = nullptr;
+		};
+		List<CompactedAccelerationStructureDisposal> compacted_acceleration_structures_to_dispose_of;
+		struct BlasCompactionQueryPool {
+			RDD::QueryPoolID driver_id;
+			uint32_t capacity = 0;
+			uint32_t used = 0;
+		};
+		struct BlasCompactionPending {
+			RID blas;
+			RDD::QueryPoolID pool;
+			uint32_t index = 0;
+		};
+		LocalVector<BlasCompactionQueryPool> blas_compaction_query_pools;
+		LocalVector<BlasCompactionPending> blas_compactions_pending;
 		List<RaytracingPipeline> raytracing_pipelines_to_dispose_of;
 
 		// Pending asynchronous data transfer for buffers.
