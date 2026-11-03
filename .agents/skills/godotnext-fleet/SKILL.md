@@ -42,3 +42,4 @@ Don't use the Claude in Chrome browser tools for this.
 
 - **DLSS:** DLSS-enabled builds run only on the owned NVIDIA cards (§19). The NVIDIA SDK never enters the repository.
 - **Timing:** don't run timing or quality measurements during the build. They belong to PQ (§22).
+- **Background runs on the M5 Max:** set `GODOTNEXT_BACKGROUND=1` for every rendered (non-headless) Godot run, so it never takes the desktop's focus (`docs/godotnext/fleet.md`).

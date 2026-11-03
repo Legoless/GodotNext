@@ -35,6 +35,9 @@
 #import "godot_application.h"
 #import "godot_application_delegate.h"
 
+// GodotNext: background_mode
+#import "godotnext_background.h"
+
 #ifdef TOOLS_ENABLED
 #import "display_server_macos_embedded.h"
 #endif
@@ -1185,7 +1188,8 @@ OS_MacOS_NSApp::OS_MacOS_NSApp(const char *p_execpath, int p_argc, char **p_argv
 	[GodotApplication sharedApplication];
 
 	// In case we are unbundled, make us a proper UI application.
-	[NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+	// GodotNext: background_mode
+	[NSApp setActivationPolicy:godotnext_background_mode() ? NSApplicationActivationPolicyAccessory : NSApplicationActivationPolicyRegular];
 
 	// Menu bar setup must go between sharedApplication above and
 	// finishLaunching below, in order to properly emulate the behavior

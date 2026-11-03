@@ -2,6 +2,16 @@
 
 Hardware is named by what it is. This file does not record host names.
 
+## Background runs on the Apple M5 Max
+
+The M5 Max is also someone's desktop. A rendered (non-headless) Godot run activates itself and takes the keyboard focus, so every unattended run there sets `GODOTNEXT_BACKGROUND=1`: agents, the harness, smoke scenes and scene checks. With it, Godot runs as an accessory app (no Dock icon or menu bar), never activates itself, and shows its windows fully transparent and click-through. The windows stay on screen, so Metal keeps drawing every frame. Captures read the viewport texture, so they are unchanged.
+
+```
+GODOTNEXT_BACKGROUND=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed --rendering-driver metal --quit-after 60 <scene>
+```
+
+`misc/scripts/godotnext_background_check.sh` checks it: a lit scene renders on Metal while the frontmost app stays the same. Don't switch apps while it runs. The mode lives in `platform/macos/godotnext_background.h` and the `background_mode` hooks.
+
 ## Ray-query toolchain (G0)
 
 This section is the issue #20 record. Keep it separate from the #11 section.

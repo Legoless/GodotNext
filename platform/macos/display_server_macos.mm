@@ -46,6 +46,9 @@
 #import "native_menu_macos.h"
 #import "os_macos.h"
 
+// GodotNext: background_mode
+#import "godotnext_background.h"
+
 #include "core/config/project_settings.h"
 #include "core/input/input.h"
 #include "core/io/file_access.h"
@@ -1798,6 +1801,13 @@ void DisplayServerMacOS::show_window(DisplayServerEnums::WindowID p_id) {
 	}
 
 	popup_open(p_id);
+	// GodotNext: background_mode
+	if (godotnext_background_mode()) {
+		[wd.window_object setAlphaValue:0.0];
+		[wd.window_object setIgnoresMouseEvents:YES];
+		[wd.window_object orderFrontRegardless];
+		return;
+	}
 	if ([wd.window_object isMiniaturized]) {
 		return;
 	} else if (wd.no_focus) {
@@ -2756,6 +2766,11 @@ void DisplayServerMacOS::window_move_to_foreground(DisplayServerEnums::WindowID 
 	ERR_FAIL_COND(!windows.has(p_window));
 	const WindowData &wd = windows[p_window];
 
+	// GodotNext: background_mode
+	if (godotnext_background_mode()) {
+		[wd.window_object orderFrontRegardless];
+		return;
+	}
 	[[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
 	if (wd.no_focus || wd.is_popup) {
 		if (wd.transient_parent != DisplayServerEnums::INVALID_WINDOW_ID) {

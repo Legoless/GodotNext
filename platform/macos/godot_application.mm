@@ -34,6 +34,9 @@
 #import "godot_application_delegate.h"
 #import "os_macos.h"
 
+// GodotNext: background_mode
+#import "godotnext_background.h"
+
 GodotApplication *GodotApp = nil;
 
 @interface GodotApplication ()
@@ -57,6 +60,10 @@ GodotApplication *GodotApp = nil;
 }
 
 - (void)activateApplication {
+	// GodotNext: background_mode
+	if (godotnext_background_mode()) {
+		return;
+	}
 	[NSApp activateIgnoringOtherApps:YES];
 	NSString *nsappname = [[[NSBundle mainBundle] infoDictionary] objectForKey:@"CFBundleName"];
 	const char *bundled_id = getenv("__CFBundleIdentifier");
