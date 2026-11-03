@@ -45,6 +45,11 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
 - `scenes/nextgi_perf/` — timing shell. Instances are spawned at
   runtime from seed 1234 (50000 by default, 100000 with
   `--instances=100000`) and are not stored in the scene.
+- `scenes/feature_parity_room/` — the D7 forward-feature parity room
+  (#64): decals, boxed reflection probe, textured area light, depth
+  fog, an SH-probe receiver and three `fallback_*` meshes, from
+  `generators/build_feature_parity_room.gd` (a separate entry point,
+  not part of `build_all.gd`). See its README.
 
 ## Conventions
 

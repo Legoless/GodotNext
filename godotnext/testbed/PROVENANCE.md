@@ -82,6 +82,12 @@ seed `1` (one run per variant; see its README).
 | `scenes/nextgi_perf/nextgi_perf.tscn` | `build_nextgi_perf.gd` shell only; instances are spawned at runtime from seed 1234 and are not stored | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/nextgi_perf/nextgi_perf_patches_q1.json` | `build_all.gd`, Q1 RNG seed 1234 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/nextgi_perf/steps.json` | `build_nextgi_perf.gd`, seed 1234 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_feature_parity_room.gd` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/feature_parity_room.tscn` | `build_feature_parity_room.gd`, seed `0x6E657874`; LightmapGI unbaked, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/parity_room.gd` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/check_features.gd` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/override.cfg` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/feature_parity_room/README.md` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
 
 ## Bake status
 
@@ -93,4 +99,6 @@ seed `1` (one run per variant; see its README).
 "Bake Lightmaps" button, so there is no reliable unattended bake. Bake it
 in the editor before the report-only cross-check in #27, and record the
 host here when done. The same applies to the `VoxelGI` in
-`legacy_voxelgi.tscn` and the `LightmapGI` in `legacy_lightmap.tscn`.
+`legacy_voxelgi.tscn`, the `LightmapGI` in `legacy_lightmap.tscn` and
+the `LightmapGI` in `scenes/feature_parity_room/feature_parity_room.tscn`
+(#64; keep its `.lmbake` at most 4 MB when baked).
