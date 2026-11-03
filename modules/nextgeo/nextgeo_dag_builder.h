@@ -109,7 +109,7 @@ struct NextGeoPage {
 	uint32_t group_count;
 	uint32_t cluster_offset;
 	uint32_t cluster_count;
-	uint32_t byte_size; // Sum of nextgeo_cluster_payload_bytes() over the page's clusters.
+	uint32_t byte_size; // nextgeo_page_bytes() of this page: header, cluster records, vertices, triangles, padding.
 };
 
 struct NextGeoSurfaceInput {
@@ -153,9 +153,19 @@ struct NextGeoBuildOutput {
 	LocalVector<uint8_t> triangles; // Three cluster-local vertex indices per triangle.
 };
 
-// Bytes a cluster occupies in a page: its vertices in the builder's float layout plus
-// three bytes per triangle. Cluster records live in the DAG header, not in pages.
+// The raw `.ngm` page header (cluster count, vertex count, triangle count, reserved) and the
+// alignment of each page. Both match the layout written by the `.ngm` reader and writer.
+static constexpr uint32_t NEXTGEO_PAGE_HEADER_BYTES = 16;
+static constexpr uint32_t NEXTGEO_PAGE_ALIGN = 16;
+
+// Bytes one cluster contributes to a raw page: its 80-byte record plus its vertices and
+// triangles. The page header and the alignment padding are added by nextgeo_page_bytes().
 uint32_t nextgeo_cluster_payload_bytes(uint32_t p_vertex_count, uint32_t p_triangle_count, uint32_t p_vertex_stride);
+
+// On-disk size of a raw page whose clusters contribute `p_cluster_payload_sum` bytes: the
+// 16-byte page header, those records and their vertices and triangles, then padding to 16
+// bytes. A build keeps this at most NextGeoBuildInput::page_size, so raw_size fits too.
+uint32_t nextgeo_page_bytes(uint32_t p_cluster_payload_sum);
 
 // Builds one cluster DAG over the eligible surfaces of a mesh (plan §7.1). The output is
 // deterministic: two builds of the same input are byte-identical, threaded or not.

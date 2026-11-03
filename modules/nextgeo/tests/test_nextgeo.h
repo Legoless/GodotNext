@@ -332,7 +332,7 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 				bad_shared++;
 			}
 		}
-		if (bytes > p_dag.page_size) {
+		if (nextgeo_page_bytes(bytes) > p_dag.page_size) {
 			bad_groups++;
 		}
 	}
@@ -366,7 +366,7 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 				bytes += nextgeo_cluster_payload_bytes(p_dag.clusters[i].vertex_count, p_dag.clusters[i].triangle_count, p_dag.vertex_stride);
 			}
 		}
-		if (bytes != page.byte_size || clusters != page.cluster_count) {
+		if (nextgeo_page_bytes(bytes) != page.byte_size || clusters != page.cluster_count) {
 			bad_pages++;
 		}
 		next_group = page.group_offset + page.group_count;
@@ -582,7 +582,9 @@ inline NextGeoCutParams far_view(const NextGeoBuildOutput &p_dag) {
 TEST_CASE("[NextGeo] Record layouts") {
 	CHECK(sizeof(NextGeoCluster) == 80);
 	CHECK(sizeof(NextGeoBVHNode) == 80);
-	CHECK(nextgeo_cluster_payload_bytes(128, 128, 12) == 128 * 12 * 4 + 128 * 3);
+	const uint32_t full_cluster = uint32_t(sizeof(NextGeoCluster)) + 128 * 12 * 4 + 128 * 3;
+	CHECK(nextgeo_cluster_payload_bytes(128, 128, 12) == full_cluster);
+	CHECK(nextgeo_page_bytes(full_cluster) == NEXTGEO_PAGE_HEADER_BYTES + full_cluster);
 }
 
 TEST_CASE("[NextGeo] Enclosing spheres") {
@@ -735,7 +737,8 @@ TEST_CASE("[NextGeo] 8-surface seam kit") {
 }
 
 TEST_CASE("[NextGeo] Small pages split groups") {
-	// One full cluster in this layout is 6528 bytes, so at most two fit in a page.
+	// One full cluster's record, vertices and triangles are 6608 bytes. With the 16-byte page
+	// header, two fit in a 16 KiB page and three do not.
 	const NextGeoBuildInput input = make_seam_kit_input(16 * 1024);
 	NextGeoBuildOutput dag;
 	REQUIRE(nextgeo_build_dag(input, dag) == OK);
@@ -907,7 +910,8 @@ TEST_CASE("[NextGeo] Invalid input is rejected") {
 		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_PARAMETER);
 	}
 	SUBCASE("page_size must hold one full cluster") {
-		input.page_size = nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, 12) - 1;
+		const uint32_t one_cluster_page = nextgeo_page_bytes(nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, 12));
+		input.page_size = one_cluster_page - 1;
 		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_PARAMETER);
 		input.page_size += 1;
 		CHECK(nextgeo_build_dag(input, output) == OK);

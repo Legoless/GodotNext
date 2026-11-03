@@ -298,6 +298,11 @@ public:
 
 VARIANT_ENUM_CAST(MeshConvexDecompositionSettings::Mode);
 
+// GodotNext: vgd_property
+#ifndef _3D_DISABLED
+class VirtualGeometryData;
+#endif
+
 class ArrayMesh : public Mesh {
 	GDCLASS(ArrayMesh, Mesh);
 	RES_BASE_EXTENSION("mesh");
@@ -322,6 +327,13 @@ private:
 		bool is_2d = false;
 	};
 	Vector<Surface> surfaces;
+	// GodotNext: vgd_detach
+#ifdef _3D_DISABLED
+	void _detach_virtual_geometry() {}
+#else
+	void _detach_virtual_geometry();
+	Ref<VirtualGeometryData> virtual_geometry;
+#endif
 	mutable RID mesh;
 	AABB aabb;
 	BlendShapeMode blend_shape_mode = BLEND_SHAPE_MODE_RELATIVE;
@@ -399,6 +411,12 @@ public:
 
 	void set_shadow_mesh(const Ref<ArrayMesh> &p_mesh);
 	Ref<ArrayMesh> get_shadow_mesh() const;
+
+	// GodotNext: vgd_property
+#ifndef _3D_DISABLED
+	void set_virtual_geometry(const Ref<VirtualGeometryData> &p_data);
+	Ref<VirtualGeometryData> get_virtual_geometry() const;
+#endif
 
 	ArrayMesh();
 

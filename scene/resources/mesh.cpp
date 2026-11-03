@@ -30,6 +30,11 @@
 
 #include "mesh.h"
 
+// GodotNext: vgd_property
+#ifndef _3D_DISABLED
+#include "scene/resources/3d/virtual_geometry_data.h"
+#endif
+
 #include "core/math/convex_hull.h"
 #include "core/object/class_db.h"
 #include "core/templates/pair.h"
@@ -1810,6 +1815,8 @@ void ArrayMesh::_recompute_aabb() {
 
 // TODO: Need to add binding to add_surface using future MeshSurfaceData object.
 void ArrayMesh::add_surface(BitField<ArrayFormat> p_format, PrimitiveType p_primitive, const Vector<uint8_t> &p_array, const Vector<uint8_t> &p_attribute_array, const Vector<uint8_t> &p_skin_array, int p_vertex_count, const Vector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<uint8_t> &p_blend_shape_data, const Vector<AABB> &p_bone_aabbs, const Vector<RenderingServerTypes::SurfaceData::LOD> &p_lods, const Vector4 p_uv_scale) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	ERR_FAIL_COND(surfaces.size() == RSE::MAX_MESH_SURFACES);
 	_create_if_empty();
 
@@ -2006,18 +2013,24 @@ String ArrayMesh::surface_get_name(int p_idx) const {
 }
 
 void ArrayMesh::surface_update_vertex_region(int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	ERR_FAIL_INDEX(p_surface, surfaces.size());
 	RS::get_singleton()->mesh_surface_update_vertex_region(mesh, p_surface, p_offset, p_data);
 	emit_changed();
 }
 
 void ArrayMesh::surface_update_attribute_region(int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	ERR_FAIL_INDEX(p_surface, surfaces.size());
 	RS::get_singleton()->mesh_surface_update_attribute_region(mesh, p_surface, p_offset, p_data);
 	emit_changed();
 }
 
 void ArrayMesh::surface_update_skin_region(int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	ERR_FAIL_INDEX(p_surface, surfaces.size());
 	RS::get_singleton()->mesh_surface_update_skin_region(mesh, p_surface, p_offset, p_data);
 	emit_changed();
@@ -2045,6 +2058,8 @@ AABB ArrayMesh::get_aabb() const {
 }
 
 void ArrayMesh::clear_surfaces() {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	if (!mesh.is_valid()) {
 		return;
 	}
@@ -2054,6 +2069,8 @@ void ArrayMesh::clear_surfaces() {
 }
 
 void ArrayMesh::surface_remove(int p_surface) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	ERR_FAIL_INDEX(p_surface, surfaces.size());
 	RS::get_singleton()->mesh_surface_remove(mesh, p_surface);
 	surfaces.remove_at(p_surface);
@@ -2076,6 +2093,8 @@ AABB ArrayMesh::get_custom_aabb() const {
 }
 
 void ArrayMesh::regen_normal_maps() {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	if (surfaces.is_empty()) {
 		return;
 	}
@@ -2107,11 +2126,15 @@ struct ArrayMeshLightmapSurface {
 };
 
 Error ArrayMesh::lightmap_unwrap(const Transform3D &p_base_transform, float p_texel_size) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	Vector<uint8_t> null_cache;
 	return lightmap_unwrap_cached(p_base_transform, p_texel_size, null_cache, null_cache, false);
 }
 
 Error ArrayMesh::lightmap_unwrap_cached(const Transform3D &p_base_transform, float p_texel_size, const Vector<uint8_t> &p_src_cache, Vector<uint8_t> &r_dst_cache, bool p_generate_cache) {
+	// GodotNext: vgd_detach
+	_detach_virtual_geometry();
 	ERR_FAIL_NULL_V(array_mesh_lightmap_unwrap_callback, ERR_UNCONFIGURED);
 	ERR_FAIL_COND_V_MSG(blend_shapes.size() != 0, ERR_UNAVAILABLE, "Can't unwrap mesh with blend shapes.");
 	ERR_FAIL_COND_V_MSG(p_texel_size <= 0.0f, ERR_PARAMETER_RANGE_ERROR, "Texel size must be greater than 0.");
@@ -2317,6 +2340,29 @@ Ref<ArrayMesh> ArrayMesh::get_shadow_mesh() const {
 	return shadow_mesh;
 }
 
+#ifndef _3D_DISABLED
+// GodotNext: vgd_property
+void ArrayMesh::_detach_virtual_geometry() {
+	if (virtual_geometry.is_null()) {
+		return;
+	}
+	virtual_geometry.unref();
+	emit_changed();
+}
+
+void ArrayMesh::set_virtual_geometry(const Ref<VirtualGeometryData> &p_data) {
+	if (virtual_geometry == p_data) {
+		return;
+	}
+	virtual_geometry = p_data;
+	emit_changed();
+}
+
+Ref<VirtualGeometryData> ArrayMesh::get_virtual_geometry() const {
+	return virtual_geometry;
+}
+#endif
+
 void ArrayMesh::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("add_blend_shape", "name"), &ArrayMesh::add_blend_shape);
 	ClassDB::bind_method(D_METHOD("get_blend_shape_count"), &ArrayMesh::get_blend_shape_count);
@@ -2361,6 +2407,12 @@ void ArrayMesh::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "blend_shape_mode", PROPERTY_HINT_ENUM, "Normalized,Relative"), "set_blend_shape_mode", "get_blend_shape_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::AABB, "custom_aabb", PROPERTY_HINT_NO_NODEPATH, "suffix:m"), "set_custom_aabb", "get_custom_aabb");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "shadow_mesh", PROPERTY_HINT_RESOURCE_TYPE, ArrayMesh::get_class_static()), "set_shadow_mesh", "get_shadow_mesh");
+#ifndef _3D_DISABLED
+	// GodotNext: vgd_property
+	ClassDB::bind_method(D_METHOD("set_virtual_geometry", "data"), &ArrayMesh::set_virtual_geometry);
+	ClassDB::bind_method(D_METHOD("get_virtual_geometry"), &ArrayMesh::get_virtual_geometry);
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "virtual_geometry", PROPERTY_HINT_RESOURCE_TYPE, "VirtualGeometryData"), "set_virtual_geometry", "get_virtual_geometry");
+#endif
 }
 
 void ArrayMesh::reload_from_file() {

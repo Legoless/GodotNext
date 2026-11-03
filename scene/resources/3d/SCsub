@@ -10,6 +10,8 @@ env.add_source_files(env.scene_sources, "joint_limitation_cone_3d.cpp")
 env.add_source_files(env.scene_sources, "mesh_library.cpp")
 env.add_source_files(env.scene_sources, "primitive_meshes.cpp")
 env.add_source_files(env.scene_sources, "skin.cpp")
+# GodotNext: vgd_source
+env.add_source_files(env.scene_sources, "virtual_geometry_data.cpp")
 env.add_source_files(env.scene_sources, "sky_material.cpp")
 env.add_source_files(env.scene_sources, "world_3d.cpp")
 env.add_source_files(env.scene_sources, "skeleton/*.cpp")

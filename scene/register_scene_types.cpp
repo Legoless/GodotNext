@@ -288,6 +288,8 @@
 #include "scene/resources/3d/navigation_mesh_source_geometry_data_3d.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/3d/sky_material.h"
+// GodotNext: vgd_register
+#include "scene/resources/3d/virtual_geometry_data.h"
 #include "scene/resources/3d/world_3d.h"
 #ifndef NAVIGATION_3D_DISABLED
 #include "scene/3d/navigation/navigation_agent_3d.h"
@@ -904,6 +906,8 @@ void register_scene_types() {
 	GDREGISTER_CLASS(MeshDataTool);
 
 #ifndef _3D_DISABLED
+	// GodotNext: vgd_register
+	GDREGISTER_CLASS(VirtualGeometryData);
 	GDREGISTER_CLASS(AudioStreamPlayer3D);
 	GDREGISTER_VIRTUAL_CLASS(PrimitiveMesh);
 	GDREGISTER_CLASS(BoxMesh);

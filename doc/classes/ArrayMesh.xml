@@ -225,5 +225,8 @@
 			An optional mesh which can be used for rendering shadows and the depth prepass. Can be used to increase performance by supplying a mesh with fused vertices and only vertex position data (without normals, UVs, colors, etc.).
 			[b]Note:[/b] This mesh must have exactly the same vertex positions as the source mesh (including the source mesh's LODs, if present). If vertex positions differ, then the mesh will not draw correctly.
 		</member>
+		<member name="virtual_geometry" type="VirtualGeometryData" setter="set_virtual_geometry" getter="get_virtual_geometry">
+			Virtual geometry for this mesh. Surface changes detach it. It is loaded after the surfaces, so a saved mesh comes back with the data attached.
+		</member>
 	</members>
 </class>

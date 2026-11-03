@@ -450,7 +450,9 @@ void _append_page_sized(const LocalVector<BuildCluster> &p_clusters, const Local
 	uint32_t current_bytes = 0;
 	for (uint32_t member : p_members) {
 		const uint32_t bytes = _cluster_bytes(p_clusters[member], p_stride);
-		if (!current.is_empty() && current_bytes + bytes > p_page_size) {
+		const bool overflows = current_bytes > UINT32_MAX - bytes;
+		const uint32_t next_payload = overflows ? UINT32_MAX : current_bytes + bytes;
+		if (!current.is_empty() && (overflows || nextgeo_page_bytes(next_payload) > p_page_size)) {
 			r_groups.push_back(std::move(current));
 			current = LocalVector<uint32_t>();
 			current_bytes = 0;
@@ -630,7 +632,18 @@ struct GroupOrderCompare {
 } // namespace
 
 uint32_t nextgeo_cluster_payload_bytes(uint32_t p_vertex_count, uint32_t p_triangle_count, uint32_t p_vertex_stride) {
-	return p_vertex_count * p_vertex_stride * uint32_t(sizeof(float)) + p_triangle_count * 3;
+	return uint32_t(sizeof(NextGeoCluster)) + p_vertex_count * p_vertex_stride * uint32_t(sizeof(float)) + p_triangle_count * 3;
+}
+
+uint32_t nextgeo_page_bytes(uint32_t p_cluster_payload_sum) {
+	// Header plus padding must fit in the sum. A payload this large cannot be a page.
+	if (p_cluster_payload_sum > UINT32_MAX - (NEXTGEO_PAGE_HEADER_BYTES + NEXTGEO_PAGE_ALIGN - 1)) {
+		return UINT32_MAX;
+	}
+	const uint32_t raw = NEXTGEO_PAGE_HEADER_BYTES + p_cluster_payload_sum;
+	const uint32_t remainder = raw % NEXTGEO_PAGE_ALIGN;
+	const uint32_t pad = remainder == 0 ? 0 : NEXTGEO_PAGE_ALIGN - remainder;
+	return raw + pad;
 }
 
 Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_output) {
@@ -644,7 +657,7 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		return merge_error;
 	}
 
-	const uint32_t max_cluster_bytes = nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, mesh.stride);
+	const uint32_t max_cluster_bytes = nextgeo_page_bytes(nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, mesh.stride));
 	ERR_FAIL_COND_V_MSG(p_input.page_size < max_cluster_bytes, ERR_INVALID_PARAMETER, vformat("NextGeo: page_size (%d bytes) must hold one full cluster (%d bytes for this vertex layout).", p_input.page_size, max_cluster_bytes));
 	ERR_FAIL_COND_V_MSG(mesh.surfaces.is_empty(), ERR_INVALID_DATA, "NextGeo: no eligible, non-degenerate triangles to build.");
 
@@ -798,14 +811,15 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 	uint8_t local_triangles[NEXTGEO_MAX_CLUSTER_TRIANGLES * 3];
 	uint32_t cluster_cursor = 0;
 	bool in_root_pages = true;
+	uint32_t page_payload = 0;
 	for (uint32_t i = 0; i < order.size(); i++) {
 		const BuildGroup &group = groups[order[i].group];
 
-		uint32_t group_bytes = 0;
+		uint32_t group_payload = 0;
 		for (uint32_t member : group.members) {
-			group_bytes += _cluster_bytes(clusters[member], mesh.stride);
+			group_payload += _cluster_bytes(clusters[member], mesh.stride);
 		}
-		ERR_FAIL_COND_V(group_bytes > p_input.page_size, ERR_BUG);
+		ERR_FAIL_COND_V(nextgeo_page_bytes(group_payload) > p_input.page_size, ERR_BUG);
 
 		// Open a new page when the group does not fit, or when the root pages end.
 		const bool leaving_roots = in_root_pages && !group.terminal;
@@ -813,17 +827,20 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 			r_output.root_page_count = r_output.pages.size();
 			in_root_pages = false;
 		}
-		if (r_output.pages.is_empty() || leaving_roots || r_output.pages[r_output.pages.size() - 1].byte_size + group_bytes > p_input.page_size) {
+		const bool payload_overflows = page_payload > UINT32_MAX - group_payload;
+		if (r_output.pages.is_empty() || leaving_roots || payload_overflows || nextgeo_page_bytes(page_payload + group_payload) > p_input.page_size) {
 			NextGeoPage page = {};
 			page.group_offset = i;
 			page.cluster_offset = cluster_cursor;
 			r_output.pages.push_back(page);
+			page_payload = 0;
 		}
 		const uint32_t page_id = r_output.pages.size() - 1;
 		NextGeoPage &page = r_output.pages[page_id];
 		page.group_count++;
 		page.cluster_count += group.members.size();
-		page.byte_size += group_bytes;
+		page_payload += group_payload;
+		page.byte_size = nextgeo_page_bytes(page_payload);
 
 		NextGeoGroup &out_group = r_output.groups[i];
 		out_group.cluster_offset = cluster_cursor;

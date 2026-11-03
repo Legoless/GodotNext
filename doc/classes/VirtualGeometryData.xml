@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="VirtualGeometryData" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Virtual geometry stored on an [ArrayMesh].
+	</brief_description>
+	<description>
+		Holds the cluster DAG, the resident root pages, a coarse fallback for every source surface, and the streaming stats of one virtualized mesh. The paged geometry lives in a [code].ngm[/code] sidecar named by [member ngm_path]; that file is not a Godot resource and has no UID.
+		An [ArrayMesh] keeps this resource as [member ArrayMesh.virtual_geometry]. Any surface mutation detaches it before the next frame. Assigning the same surfaces back, which is what loading does, leaves it in place.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="card_descriptors" type="PackedByteArray" setter="set_card_descriptors" getter="get_card_descriptors" default="PackedByteArray()">
+			Impostor card descriptors. Empty until cards are generated.
+		</member>
+		<member name="cluster_count" type="int" setter="set_cluster_count" getter="get_cluster_count" default="0">
+			Number of clusters in the DAG.
+		</member>
+		<member name="coarse_fallback" type="Array[]" setter="set_coarse_fallback" getter="get_coarse_fallback" default="[]">
+			One [Mesh] surface array per source surface. Eligible surfaces contain the root cut as ordinary vertex and index arrays. Ineligible surfaces are empty arrays of the same length.
+		</member>
+		<member name="dag_depth" type="int" setter="set_dag_depth" getter="get_dag_depth" default="0">
+			Number of levels in the cluster DAG.
+		</member>
+		<member name="dag_header" type="PackedByteArray" setter="set_dag_header" getter="get_dag_header" default="PackedByteArray()">
+			Little-endian cluster groups followed by the bounding-volume hierarchy nodes.
+		</member>
+		<member name="format_version" type="int" setter="set_format_version" getter="get_format_version" default="1">
+			Resource layout version. The current version is [code]1[/code].
+		</member>
+		<member name="group_count" type="int" setter="set_group_count" getter="get_group_count" default="0">
+			Number of cluster groups in the DAG.
+		</member>
+		<member name="ngm_path" type="String" setter="set_ngm_path" getter="get_ngm_path" default="&quot;&quot;">
+			Path of the [code].ngm[/code] sidecar that stores the paged geometry.
+		</member>
+		<member name="ngm_sha256" type="PackedByteArray" setter="set_ngm_sha256" getter="get_ngm_sha256" default="PackedByteArray()">
+			SHA-256 of the [code].ngm[/code] file bytes. 32 bytes when set. This is the hash of the file, not of the source mesh.
+		</member>
+		<member name="page_count" type="int" setter="set_page_count" getter="get_page_count" default="0">
+			Number of pages in the [code].ngm[/code] sidecar.
+		</member>
+		<member name="page_size" type="int" setter="set_page_size" getter="get_page_size" default="0">
+			Page budget in bytes used when the DAG was built. It covers the page header, the cluster records, the vertices and triangles, and the alignment padding, so every stored page fits.
+		</member>
+		<member name="root_pages" type="PackedByteArray[]" setter="set_root_pages" getter="get_root_pages" default="[]">
+			Raw payloads of the resident root pages, in page order.
+		</member>
+		<member name="rt_proxy_clusters" type="PackedInt32Array" setter="set_rt_proxy_clusters" getter="get_rt_proxy_clusters" default="PackedInt32Array()">
+			Cluster ids selected for the ray-tracing proxy.
+		</member>
+		<member name="rt_proxy_eps" type="float" setter="set_rt_proxy_eps" getter="get_rt_proxy_eps" default="0.0">
+			Position epsilon of the ray-tracing proxy.
+		</member>
+		<member name="rt_proxy_error" type="float" setter="set_rt_proxy_error" getter="get_rt_proxy_error" default="0.0">
+			Geometric error of the ray-tracing proxy.
+		</member>
+		<member name="rt_proxy_indices" type="PackedByteArray" setter="set_rt_proxy_indices" getter="get_rt_proxy_indices" default="PackedByteArray()">
+			Little-endian unsigned 32-bit indices of the ray-tracing proxy, four bytes each.
+		</member>
+		<member name="rt_proxy_parts" type="PackedInt32Array" setter="set_rt_proxy_parts" getter="get_rt_proxy_parts" default="PackedInt32Array()">
+			Groups of four integers per ray-tracing part: vertex offset, vertex count, index offset, and index count.
+		</member>
+		<member name="rt_proxy_positions" type="PackedFloat32Array" setter="set_rt_proxy_positions" getter="get_rt_proxy_positions" default="PackedFloat32Array()">
+			Positions of the ray-tracing proxy, tightly packed 32-bit xyz, including in double-precision builds.
+		</member>
+		<member name="rt_proxy_surface_ranges" type="PackedInt32Array" setter="set_rt_proxy_surface_ranges" getter="get_rt_proxy_surface_ranges" default="PackedInt32Array()">
+			Groups of two integers per part and surface, part-major and relative to that part: first index and index count. Legacy surfaces store a first index and a count of 0.
+		</member>
+		<member name="source_triangle_count" type="int" setter="set_source_triangle_count" getter="get_source_triangle_count" default="0">
+			Number of triangles in the source clusters.
+		</member>
+		<member name="source_vertex_index_bytes" type="int" setter="set_source_vertex_index_bytes" getter="get_source_vertex_index_bytes" default="0">
+			Bytes of the source positions and indices: 12 bytes per position and 4 bytes per index.
+		</member>
+		<member name="surface_eligibility" type="PackedByteArray" setter="set_surface_eligibility" getter="get_surface_eligibility" default="PackedByteArray()">
+			One byte per source surface. [code]1[/code] means the surface was virtualized, and [code]0[/code] means it stayed a legacy surface.
+		</member>
+		<member name="surface_fallback_reasons" type="PackedInt32Array" setter="set_surface_fallback_reasons" getter="get_surface_fallback_reasons" default="PackedInt32Array()">
+			One value per source surface. [code]0[/code] means the surface was virtualized, or that import has not recorded a reason yet.
+		</member>
+	</members>
+</class>

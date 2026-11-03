@@ -748,3 +748,28 @@ String DirAccessPack::get_filesystem_type() const {
 DirAccessPack::DirAccessPack() {
 	current = PackedData::get_singleton()->root;
 }
+
+// GodotNext: ngm_file_location
+bool PackedData::get_file_location(const String &p_path, String &r_pack, uint64_t &r_offset, uint64_t &r_size, bool &r_encrypted, bool &r_is_pck) const {
+	String simplified_path = p_path;
+	if (simplified_path.begins_with("uid://")) {
+		simplified_path = ResourceUID::uid_to_path(simplified_path);
+	}
+	simplified_path = simplified_path.simplify_path().trim_prefix("res://");
+	const PathMD5 key(simplified_path.md5_buffer());
+
+	HashMap<PathMD5, PackedFile, PathMD5>::ConstIterator found = files.find(key);
+	if (!found || found->value.src == nullptr) {
+		return false;
+	}
+	const PackedFile &file = found->value;
+	r_is_pck = file.src->is_pck_source();
+	if (r_is_pck && file.offset == 0) {
+		return false; // Erased PCK entry.
+	}
+	r_pack = file.pack;
+	r_offset = file.offset;
+	r_size = file.size;
+	r_encrypted = file.encrypted;
+	return true;
+}

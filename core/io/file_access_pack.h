@@ -151,6 +151,9 @@ public:
 
 	_FORCE_INLINE_ int64_t get_size(const String &p_path);
 
+	// GodotNext: ngm_file_location
+	bool get_file_location(const String &p_path, String &r_pack, uint64_t &r_offset, uint64_t &r_size, bool &r_encrypted, bool &r_is_pck) const;
+
 	_FORCE_INLINE_ Ref<DirAccess> try_open_directory(const String &p_path);
 	_FORCE_INLINE_ bool has_directory(const String &p_path);
 
@@ -162,6 +165,8 @@ class PackSource {
 public:
 	virtual bool try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) = 0;
 	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) = 0;
+	// GodotNext: ngm_file_location
+	virtual bool is_pck_source() const { return false; }
 	virtual ~PackSource() {}
 };
 
@@ -169,6 +174,8 @@ class PackedSourcePCK : public PackSource {
 public:
 	virtual bool try_open_pack(const String &p_path, bool p_replace_files, uint64_t p_offset, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
 	virtual Ref<FileAccess> get_file(const String &p_path, PackedData::PackedFile *p_file, const Vector<uint8_t> &p_decryption_key = Vector<uint8_t>()) override;
+	// GodotNext: ngm_file_location
+	virtual bool is_pck_source() const override { return true; }
 };
 
 class PackedSourceDirectory : public PackSource {
