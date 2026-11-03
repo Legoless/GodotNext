@@ -39,12 +39,25 @@ jobs:
           skip_initial_fetch: true
           files_yaml_from_source_file: .github/changed_files.yml
 
-      - name: Style checks via prek
-        uses: j178/prek-action@v3.0.0
+      # GodotNext: guard against a missing base ref (plan §13.1). On a
+      # single-commit orphan or shallow history, HEAD~1 does not exist and
+      # prek --from-ref would fail; fall back to checking all files.
+      - name: Resolve prek base ref
+        id: prek-base
         env:
           FROM_REF: >-
             ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha
             || github.event.before != '0000000000000000000000000000000000000000' && github.event.before
             || 'HEAD~1' }}
+        run: |
+          if git rev-parse -q --verify "$FROM_REF^{commit}" > /dev/null; then
+            echo "args=--from-ref $FROM_REF" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Base ref '$FROM_REF' not found; running prek with --all-files."
+            echo "args=--all-files" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Style checks via prek
+        uses: j178/prek-action@v3.0.0
         with:
-          extra-args: --from-ref ${{ env.FROM_REF }}
+          extra-args: ${{ steps.prek-base.outputs.args }}

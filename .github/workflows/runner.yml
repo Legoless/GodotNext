@@ -14,20 +14,12 @@ jobs:
     uses: ./.github/workflows/static_checks.yml
 
   # Second stage: Run all the builds and some of the tests.
-
-  android-build:
-    name: 🤖 Android
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/android_builds.yml
-    secrets:
-      SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
-
-  ios-build:
-    name: 🍏 iOS
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/ios_builds.yml
+  # GodotNext: trimmed to Linux, Windows and macOS builds plus static checks
+  # (plan §13.1). The other *_builds.yml files are left untouched so upstream
+  # merges stay conflict-free; only this runner stops calling them.
+  # Self-hosted GPU runners (the RTX 4080 SUPER and RTX 5090 machines) must
+  # never be attached to pull_request triggers on this public repository;
+  # they run via workflow_dispatch or SSH-triggered scripts only.
 
   linux-build:
     name: 🐧 Linux
@@ -48,9 +40,3 @@ jobs:
     needs: static-checks
     if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
     uses: ./.github/workflows/windows_builds.yml
-
-  web-build:
-    name: 🌐 Web
-    needs: static-checks
-    if: needs.static-checks.outputs.sources-changed == 'true' || github.event_name != 'pull_request'
-    uses: ./.github/workflows/web_builds.yml

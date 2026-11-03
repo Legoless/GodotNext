@@ -523,3 +523,32 @@
 
 /thirdparty/                                  @godotengine/buildsystem
 /thirdparty/jolt_physics/                     @godotengine/buildsystem @godotengine/jolt-physics
+
+# GodotNext
+
+/.agents/                                     @godotengine/buildsystem
+/.claude/                                     @godotengine/buildsystem
+/godotnext/                                   @godotengine/rendering
+/godotnext/**/*.bat                           @godotengine/rendering @godotengine/buildsystem
+/godotnext/**/*.py                            @godotengine/rendering @godotengine/buildsystem
+/godotnext/**/*.sh                            @godotengine/rendering @godotengine/buildsystem
+/godotnext/**/SConstruct                      @godotengine/rendering @godotengine/buildsystem
+/godotnext/**/SCsub                           @godotengine/rendering @godotengine/buildsystem
+/godotnext/**/doc_classes/                    @godotengine/rendering @godotengine/documentation
+/godotnext/**/doc/                            @godotengine/rendering @godotengine/documentation
+/godotnext/**/editor/                         @godotengine/rendering @godotengine/editor
+/godotnext/**/tests/                          @godotengine/rendering @godotengine/tests
+/godotnext/**/tests/**/*.bat                  @godotengine/rendering @godotengine/tests @godotengine/buildsystem
+/godotnext/**/tests/**/*.py                   @godotengine/rendering @godotengine/tests @godotengine/buildsystem
+/godotnext/**/tests/**/*.sh                   @godotengine/rendering @godotengine/tests @godotengine/buildsystem
+/godotnext/**/tests/**/SConstruct             @godotengine/rendering @godotengine/tests @godotengine/buildsystem
+/godotnext/**/tests/**/SCsub                  @godotengine/rendering @godotengine/tests @godotengine/buildsystem
+/docs/godotnext/                              @godotengine/documentation
+/docs/godotnext/**/*.bat                      @godotengine/documentation @godotengine/buildsystem
+/docs/godotnext/**/*.py                       @godotengine/documentation @godotengine/buildsystem
+/docs/godotnext/**/*.sh                       @godotengine/documentation @godotengine/buildsystem
+/docs/godotnext/**/SConstruct                 @godotengine/documentation @godotengine/buildsystem
+/docs/godotnext/**/SCsub                      @godotengine/documentation @godotengine/buildsystem
+/docs/godotnext/**/tests/                     @godotengine/documentation @godotengine/tests
+/docs/godotnext/**/tests/**/*.py              @godotengine/documentation @godotengine/tests @godotengine/buildsystem
+/docs/godotnext/**/tests/**/*.sh              @godotengine/documentation @godotengine/tests @godotengine/buildsystem
