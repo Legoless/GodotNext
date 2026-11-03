@@ -1,0 +1,1032 @@
+{
+	"count": 128,
+	"patches": [
+		{
+			"camera": "CovCam0",
+			"id": 0,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [26.303867, 0.000000, -6.705322],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 1,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [26.721436, 0.000000, 22.223331],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 2,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [26.793236, 0.000000, 1.791817],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 3,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [27.262873, 0.000000, -25.123867],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 4,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [28.258738, 0.000000, 23.834721],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 5,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [29.245239, 0.000000, -16.688578],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 6,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [29.287104, 0.000000, -23.140139],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 7,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [30.225296, 0.000000, 15.273197],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 8,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [30.812771, 0.000000, -38.134151],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 9,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [31.735640, 0.000000, 29.734947],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 10,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [31.763504, 0.000000, 12.806286],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 11,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [31.794718, 0.000000, 37.325203],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 12,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [32.261703, 0.000000, -21.201626],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 13,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [32.751720, 0.000000, 35.375694],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 14,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [32.773895, 0.000000, -16.716648],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 15,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [33.829689, 0.000000, 0.352936],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 16,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [34.846165, 0.000000, -27.245792],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 17,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [35.262707, 0.000000, 18.849396],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 18,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [35.758125, 0.000000, -15.216419],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 19,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.267960, 0.000000, 15.360092],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 20,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.324997, 0.000000, 2.857037],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 21,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.336403, 0.000000, 18.379219],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 22,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.795898, 0.000000, 19.834965],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 23,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.800518, 0.000000, 13.813583],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 24,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.840603, 0.000000, 7.853397],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 25,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.269363, 0.000000, -20.713644],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 26,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.320095, 0.000000, -3.186405],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 27,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.747101, 0.000000, 28.360619],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 28,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.293945, 0.000000, -26.711607],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 29,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.740021, 0.000000, 33.370689],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 30,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.864143, 0.000000, 13.333023],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 31,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [40.364716, 0.000000, 37.300888],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 32,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [40.728565, 0.000000, -25.209541],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 33,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [40.790596, 0.000000, 33.248894],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 34,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [41.727306, 0.000000, 19.850460],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 35,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [41.812843, 0.000000, -10.758024],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 36,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [41.876625, 0.000000, 35.330917],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 37,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [42.287682, 0.000000, -10.205723],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 38,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [43.265968, 0.000000, -20.141045],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 39,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [43.267841, 0.000000, 31.312904],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 40,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [43.306885, 0.000000, -35.657772],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 41,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [43.335503, 0.000000, 3.358917],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 42,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [46.319485, 0.000000, 21.723991],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 43,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [47.361961, 0.000000, 35.373901],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 44,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [47.850700, 0.000000, 5.231163],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 45,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [48.346134, 0.000000, 35.266083],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 46,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [53.377701, 0.000000, 5.307335],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 47,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [53.807083, 0.000000, 24.363258],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 48,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [54.312195, 0.000000, 25.318085],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 49,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [54.378326, 0.000000, -2.136562],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 50,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [55.350929, 0.000000, 3.287914],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 51,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [55.816910, 0.000000, -15.262888],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 52,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [56.828674, 0.000000, 14.291878],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 53,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [57.739166, 0.000000, -37.224960],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 54,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [58.792580, 0.000000, 4.864948],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 55,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [61.250015, 0.000000, -28.249020],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 56,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [61.834976, 0.000000, -32.251732],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 57,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [62.296726, 0.000000, -11.707846],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 58,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [62.345718, 0.000000, 32.827515],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 59,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [62.795158, 0.000000, -9.274023],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 60,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [64.246147, 0.000000, 36.836899],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 61,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [65.775330, 0.000000, -31.651226],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 62,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [65.814377, 0.000000, -4.765415],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 63,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [65.826035, 0.000000, -2.643806],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 64,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [66.849564, 0.000000, 19.853214],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 65,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [68.756500, 0.000000, -38.738449],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 66,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [69.721710, 0.000000, -31.186424],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 67,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [69.724411, 0.000000, 24.855606],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 68,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [70.254097, 0.000000, -18.141146],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 69,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [71.325165, 0.000000, -1.667416],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 70,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [71.874985, 0.000000, 34.804321],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 71,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [72.269295, 0.000000, 2.277477],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 72,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [72.297745, 0.000000, 32.307487],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 73,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [72.721039, 0.000000, 32.792282],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 74,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [73.284073, 0.000000, 7.857727],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 75,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [73.779625, 0.000000, 11.835526],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 76,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [75.351288, 0.000000, -25.684338],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 77,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [75.740082, 0.000000, -2.178188],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 78,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [76.265152, 0.000000, 13.874447],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 79,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [77.281998, 0.000000, 29.333618],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 80,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [77.759163, 0.000000, 7.240116],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 81,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [78.344376, 0.000000, -26.734777],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 82,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [81.312004, 0.000000, 20.761173],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 83,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [81.728836, 0.000000, 39.350510],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 84,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [81.740768, 0.000000, -20.144979],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 85,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [81.858536, 0.000000, 3.774887],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 86,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [81.870949, 0.000000, -25.261158],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 87,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [83.290161, 0.000000, -36.129856],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 88,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [83.369949, 0.000000, -19.221506],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 89,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [84.357529, 0.000000, -14.270920],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 90,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [84.732964, 0.000000, -18.125696],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 91,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [86.339340, 0.000000, -4.726940],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 92,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [86.363480, 0.000000, 8.875473],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 93,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [86.376114, 0.000000, 25.273125],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 94,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [87.250137, 0.000000, 36.345039],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 95,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [88.373871, 0.000000, -4.764099],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 96,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [89.721222, 0.000000, -25.240339],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 97,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [90.782997, 0.000000, -39.168091],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 98,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [91.858887, 0.000000, -23.739895],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 99,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [92.264290, 0.000000, -37.180248],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 100,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [93.785400, 0.000000, -3.623657],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 101,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [93.834557, 0.000000, -34.661980],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 102,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [94.303886, 0.000000, 14.307514],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 103,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [95.259178, 0.000000, -3.678974],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 104,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [96.252762, 0.000000, -20.180941],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 105,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [96.370216, 0.000000, -27.265182],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 106,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [96.815376, 0.000000, 32.821747],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 107,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [98.820168, 0.000000, 21.369541],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 108,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [98.868805, 0.000000, -36.151917],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 109,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [99.238235, 0.000000, 36.829391],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 110,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [99.305359, 0.000000, 24.742737],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 111,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [99.765991, 0.000000, 32.301544],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 112,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [99.867409, 0.000000, 22.777851],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 113,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [100.721146, 0.000000, 8.744198],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 114,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [100.741158, 0.000000, 33.855583],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 115,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [100.817276, 0.000000, -5.623077],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 116,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [102.248405, 0.000000, -34.275501],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 117,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [102.270012, 0.000000, 12.279110],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 118,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [102.720078, 0.000000, 22.233807],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 119,
+			"node": "CourtyardFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [103.327065, 0.000000, 11.747890],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 120,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [14.822417, 0.000000, -7.656581],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 121,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [15.355232, 0.000000, -0.151330],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 122,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [15.764999, 0.000000, 6.741899],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 123,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [15.809754, 0.000000, 0.759912],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 124,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [15.838478, 0.000000, 1.867002],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 125,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [18.858496, 0.000000, 6.248721],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 126,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [19.841679, 0.000000, 3.857071],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 127,
+			"node": "InteriorFloor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [21.735632, 0.000000, -5.140659],
+			"radius": 0.250000
+		}
+	],
+	"scene": "nextgi_perf.tscn",
+	"seed": 1234,
+	"version": 1
+}

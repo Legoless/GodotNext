@@ -61,6 +61,27 @@ seed `1` (one run per variant; see its README).
 | `scenes/legacy/legacy_sdfgi.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 7 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/legacy/legacy_voxelgi.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 8; VoxelGI unbaked, see below | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/legacy/legacy_lightmap.tscn` | `build_legacy.gd`, seed `0x6E657874` stream 9; LightmapGI unbaked, see below | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/scene_args.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/dynamic_content_check.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/moving_light_door/motion.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/moving_light_door/moving_light_door.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_moving_light_door.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/moving_light_door/moving_light_door.tscn` | `build_moving_light_door.gd`, seed `0x6E657874` stream 33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/moving_light_door/moving_light_door_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/moving_light_door/moving_light_door_patches_q3.json` | `build_moving_light_door.gd`, seed `0x6E657874` stream 33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/moving_light_door/steps.json` | `build_moving_light_door.gd`, seed `0x6E657874` stream 33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/time_of_day/motion.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/time_of_day/time_of_day.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_time_of_day.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/time_of_day/time_of_day.tscn` | `build_time_of_day.gd`, seed `0x6E657874` stream 34 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/time_of_day/time_of_day_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 34 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/time_of_day/steps.json` | `build_time_of_day.gd`, seed `0x6E657874` stream 34 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/nextgi_perf/layout.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/nextgi_perf/nextgi_perf.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_nextgi_perf.gd` | hand-authored for #33 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/nextgi_perf/nextgi_perf.tscn` | `build_nextgi_perf.gd` shell only; instances are spawned at runtime from seed 1234 and are not stored | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/nextgi_perf/nextgi_perf_patches_q1.json` | `build_all.gd`, Q1 RNG seed 1234 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/nextgi_perf/steps.json` | `build_nextgi_perf.gd`, seed 1234 | MIT | 2026-11-03 | the Apple M5 Max |
 
 ## Bake status
 

@@ -5,6 +5,26 @@ extends RefCounted
 
 const SCHEMA := 1
 
+# Keep in sync with godotnext_metrics/timing_summary.py.
+const TIMING_LINES: Array = [
+	["1a", "AS updates", ["nextgi_as_updates_ms", "as_updates_ms", "tlas_rebuild_ms", "skinned_refit_ms"]],
+	["1b", "AS builds", ["nextgi_as_builds_ms", "as_builds_ms", "blas_build_ms", "compaction_copies_ms", "compaction_copy_ms", "line_1b_ms", "as_updates_amortized_ms", "1b_ms"]],
+	["2a", "SRC capture", ["nextgi_src_capture_ms", "src_capture_ms"]],
+	["2b", "SRC relight", ["nextgi_src_relight_ms", "src_relight_ms"]],
+	["3", "WRC update", ["nextgi_wrc_ms", "wrc_update_ms", "translucency_volume_ms"]],
+	["4", "Screen traces", ["nextgi_screen_traces_ms", "screen_traces_ms"]],
+	["5", "HWRT diffuse gather", ["nextgi_diffuse_gather_ms", "hwrt_diffuse_gather_ms"]],
+	["7", "Gather integration", ["nextgi_gather_integration_ms", "gather_integration_ms"]],
+]
+const DIFFUSE_LINE_KEYS: Array[String] = ["1a", "2a", "2b", "3", "4", "5", "7"]
+const COUNTER_FIELDS: Array = [
+	["relight_texels", ["relight_texels", "src_relight_texels"]],
+	["shadow_rays", ["shadow_rays", "shadow_rays_traced"]],
+	["q18", ["q18", "rt_coverage"]],
+	["tlas_fill_ms", ["tlas_fill_ms"]],
+	["capture_cpu_ms", ["capture_cpu_ms"]],
+]
+
 const DLSS_FIELDS: Array = [
 	"dll_path",
 	"dll_version",
@@ -84,7 +104,7 @@ static func column_stats(values: PackedFloat64Array) -> Dictionary:
 	}
 
 
-static func summarize(rows: Array, warmup: int) -> Dictionary:
+static func summarize(rows: Array, warmup: int, host: String = "", adapter: String = "", counters_present: bool = false) -> Dictionary:
 	var wall := PackedFloat64Array()
 	var order: Array = []
 	var series := {}
@@ -103,12 +123,189 @@ static func summarize(rows: Array, warmup: int) -> Dictionary:
 	var columns := {"wall_ms": column_stats(wall)}
 	for column in order:
 		columns[column] = column_stats(series[column])
-	return {
+	var summary := {
 		"schema": SCHEMA,
 		"frames": rows.size(),
 		"warmup": warmup,
 		"columns": columns,
 	}
+	var extra := timing_fields(rows, host, adapter, counters_present)
+	for key in extra:
+		summary[key] = extra[key]
+	return summary
+
+
+## Extra summary.json fields (#33). Column stats above are unchanged.
+## Line samples use the last value of each timestamp column in a row.
+static func timing_fields(rows: Array, host: String = "", adapter: String = "", counters_present: bool = false) -> Dictionary:
+	var steady: Array[int] = []
+	var tagged: Array[int] = []
+	var parsed: Array = []
+	for index in rows.size():
+		var row: Dictionary = rows[index]
+		var columns := _timing_columns(row)
+		var sums := _timing_line_sums(columns)
+		var is_tagged := _timing_is_line_1b(columns, _timing_counters(row))
+		parsed.append({"columns": columns, "sums": sums})
+		if is_tagged:
+			tagged.append(index)
+		else:
+			steady.append(index)
+	var lines := {}
+	for spec_value in TIMING_LINES:
+		var spec: Array = spec_value
+		var key := String(spec[0])
+		var samples := PackedFloat64Array()
+		var source: Array[int] = tagged if key == "1b" else steady
+		for index in source:
+			var sums: Dictionary = parsed[index]["sums"]
+			samples.append(float(sums[key]))
+		var stats: Dictionary = column_stats(samples)
+		lines[key] = {
+			"name": String(spec[1]),
+			"p50": stats["p50"],
+			"p95": stats["p95"],
+			"p99": stats["p99"],
+			"n": stats["n"],
+		}
+	var diffuse := PackedFloat64Array()
+	for index in steady:
+		var sums: Dictionary = parsed[index]["sums"]
+		var total := 0.0
+		for key in DIFFUSE_LINE_KEYS:
+			total += float(sums[key])
+		diffuse.append(total)
+	var diffuse_stats: Dictionary = column_stats(diffuse)
+	var gpu := PackedFloat64Array()
+	for index in tagged:
+		var columns: Dictionary = parsed[index]["columns"]
+		var total := 0.0
+		for column in columns:
+			total += float(columns[column])
+		gpu.append(total)
+	var gpu_stats: Dictionary = column_stats(gpu)
+	var budget := _timing_device_budget(host, adapter)
+	var p99 := float(gpu_stats["p99"])
+	var limit = budget["limit_ms"]
+	var within = null
+	if limit != null:
+		within = p99 <= float(limit) + 1e-9
+	return {
+		"lines": lines,
+		"diffuse_path": {
+			"name": "diffuse path",
+			"columns": DIFFUSE_LINE_KEYS.duplicate(),
+			"p50": diffuse_stats["p50"],
+			"p95": diffuse_stats["p95"],
+			"p99": diffuse_stats["p99"],
+			"n": diffuse_stats["n"],
+		},
+		"line_1b_frames": {
+			"count": tagged.size(),
+			"frames": tagged,
+			"p99": p99,
+			"high_total_ms": budget["high_total_ms"],
+			"line_1b_budget_ms": budget["line_1b_budget_ms"],
+			"limit_ms": limit,
+			"device": budget["device"],
+			"within_limit": within,
+		},
+		"counters": _timing_counter_block(rows, counters_present),
+	}
+
+
+static func _timing_columns(row: Dictionary) -> Dictionary:
+	var found := {}
+	for sample in row.get("passes", []):
+		if typeof(sample) != TYPE_DICTIONARY:
+			continue
+		var column = sample.get("column", null)
+		if typeof(column) != TYPE_STRING:
+			continue
+		var ms = sample.get("ms", 0.0)
+		if not _is_number(ms):
+			continue
+		found[String(column)] = float(ms)
+	return found
+
+
+static func _timing_line_sums(columns: Dictionary) -> Dictionary:
+	var sums := {}
+	for spec_value in TIMING_LINES:
+		var spec: Array = spec_value
+		var total := 0.0
+		for name in spec[2]:
+			var key := String(name)
+			if columns.has(key):
+				total += float(columns[key])
+		sums[String(spec[0])] = total
+	return sums
+
+
+static func _timing_counters(row: Dictionary) -> Dictionary:
+	var counters = row.get("counters", {})
+	if typeof(counters) != TYPE_DICTIONARY:
+		return {}
+	return counters
+
+
+static func _timing_counter_number(counters: Dictionary, keys: Array) -> float:
+	for key in keys:
+		if not counters.has(key):
+			continue
+		var value = counters[key]
+		if _is_number(value):
+			return float(value)
+	return 0.0
+
+
+static func _timing_is_line_1b(columns: Dictionary, counters: Dictionary) -> bool:
+	if _timing_counter_number(counters, ["blas_builds", "blas_build_count"]) > 0.0:
+		return true
+	if _timing_counter_number(counters, ["compaction_copies", "compaction_copy_count"]) > 0.0:
+		return true
+	return float(_timing_line_sums(columns)["1b"]) > 0.0
+
+
+static func _timing_device_budget(host: String, adapter: String) -> Dictionary:
+	var text := host + " " + adapter
+	if text.contains("5090"):
+		return {"device": "RTX 5090", "high_total_ms": null, "line_1b_budget_ms": null, "limit_ms": null}
+	if text.contains("4080"):
+		return {"device": "RTX 4080 SUPER", "high_total_ms": 1.6, "line_1b_budget_ms": 0.1, "limit_ms": 1.7}
+	if text.contains("M5 Max"):
+		return {"device": "Apple M5 Max", "high_total_ms": 4.0, "line_1b_budget_ms": 0.25, "limit_ms": 4.25}
+	return {"device": "", "high_total_ms": null, "line_1b_budget_ms": null, "limit_ms": null}
+
+
+static func _timing_counter_block(rows: Array, counters_present: bool) -> Dictionary:
+	var present := counters_present
+	if not present:
+		for row_value in rows:
+			var row: Dictionary = row_value
+			var counters := _timing_counters(row)
+			if not counters.is_empty():
+				present = true
+				break
+	var block := {"source": "nextgi_get_counters" if present else "absent"}
+	for field_value in COUNTER_FIELDS:
+		var field: Array = field_value
+		var name := String(field[0])
+		if not present:
+			block[name] = null
+			continue
+		var samples := PackedFloat64Array()
+		for row_value in rows:
+			var row: Dictionary = row_value
+			samples.append(_timing_counter_number(_timing_counters(row), field[1]))
+		var stats: Dictionary = column_stats(samples)
+		block[name] = {
+			"p50": stats["p50"],
+			"p95": stats["p95"],
+			"p99": stats["p99"],
+			"n": stats["n"],
+		}
+	return block
 
 
 static func csv_header(rows: Array) -> PackedStringArray:

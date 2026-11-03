@@ -10,6 +10,9 @@ const FLAG_SEED := "--seed"
 const FLAG_FRAMES := "--frames"
 const FLAG_WARMUP := "--warmup"
 const FLAG_CAPTURE_FRAMES := "--capture-frames"
+const FLAG_VARIANT := "--variant"
+const FLAG_HOLD_FRAME := "--hold-frame"
+const FLAG_INSTANCES := "--instances"
 
 const KNOWN_FLAGS := {
 	FLAG_MODE: true,
@@ -20,6 +23,9 @@ const KNOWN_FLAGS := {
 	FLAG_FRAMES: true,
 	FLAG_WARMUP: true,
 	FLAG_CAPTURE_FRAMES: true,
+	FLAG_VARIANT: true,
+	FLAG_HOLD_FRAME: true,
+	FLAG_INSTANCES: true,
 }
 
 
@@ -136,6 +142,23 @@ static func parse(user_args: PackedStringArray) -> Dictionary:
 	var camera := ""
 	if values.has(FLAG_CAMERA):
 		camera = String(values[FLAG_CAMERA])
+	var variant := ""
+	if values.has(FLAG_VARIANT):
+		variant = String(values[FLAG_VARIANT])
+	var hold_frame := -1
+	if values.has(FLAG_HOLD_FRAME):
+		hold_frame = _parse_non_negative_int(String(values[FLAG_HOLD_FRAME]))
+		if hold_frame < 0:
+			result.ok = false
+			result.error = "--hold-frame must be a non-negative integer"
+			return result
+	var instances := -1
+	if values.has(FLAG_INSTANCES):
+		instances = _parse_non_negative_int(String(values[FLAG_INSTANCES]))
+		if instances < 1:
+			result.ok = false
+			result.error = "--instances must be a positive integer"
+			return result
 
 	result.args = {
 		"mode": mode,
@@ -146,6 +169,9 @@ static func parse(user_args: PackedStringArray) -> Dictionary:
 		"frames": frames,
 		"warmup": warmup,
 		"capture_frames": capture_frames,
+		"variant": variant,
+		"hold_frame": hold_frame,
+		"instances": instances,
 	}
 	return result
 

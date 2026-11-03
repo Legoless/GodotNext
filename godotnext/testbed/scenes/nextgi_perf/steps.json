@@ -1,0 +1,17 @@
+{
+	"cameras": ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam"],
+	"name": "nextgi_perf",
+	"patch_set": "q1",
+	"seed": 1234,
+	"variants": [
+		{
+			"end_frame": 599,
+			"form": "timing",
+			"frame0_action": "camera spline",
+			"id": "timing",
+			"motion_end": 600,
+			"motion_frames": 600,
+			"motion_start": 0
+		}
+	]
+}

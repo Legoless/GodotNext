@@ -1,0 +1,35 @@
+{
+	"cameras": ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam", "LeakCamLit", "LeakCamDark"],
+	"name": "moving_light_door",
+	"patch_set": "q1+q3",
+	"seed": 35310983091,
+	"variants": [
+		{
+			"end_frame": 240,
+			"form": "Q4b",
+			"frame0_action": "gap opens from 0",
+			"id": "door_open",
+			"motion_end": 120,
+			"motion_frames": 120,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 240,
+			"form": "Q4a",
+			"frame0_action": "light energy 0 to 1",
+			"id": "light_toggle",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 240,
+			"form": "Q4a",
+			"frame0_action": "door gap 0 to 1 m",
+			"id": "door_teleport",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		}
+	]
+}

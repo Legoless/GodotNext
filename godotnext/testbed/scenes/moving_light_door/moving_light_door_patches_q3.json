@@ -1,0 +1,312 @@
+{
+	"count": 32,
+	"patches": [
+		{
+			"camera": "LeakCamLit",
+			"id": 0,
+			"node": "SharedWallNegZ",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [-0.100000, 1.000000, -1.150000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 1,
+			"node": "SharedWallNegZ",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [-0.100000, 1.700000, -1.150000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 2,
+			"node": "SharedWallPosZ",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [-0.100000, 1.000000, 1.150000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 3,
+			"node": "SharedWallPosZ",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [-0.100000, 1.700000, 1.150000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 4,
+			"node": "LitEndWall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.100000, 1.000000, -1.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 5,
+			"node": "LitEndWall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.100000, 1.000000, 1.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 6,
+			"node": "LitEndWall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.100000, 2.000000, -1.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 7,
+			"node": "LitEndWall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.100000, 2.000000, 1.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 8,
+			"node": "LitNorthWall",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-3.100000, 1.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 9,
+			"node": "LitNorthWall",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-1.100000, 1.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 10,
+			"node": "LitNorthWall",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-3.100000, 2.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 11,
+			"node": "LitNorthWall",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-1.100000, 2.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 12,
+			"node": "LitSouthWall",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-3.100000, 1.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 13,
+			"node": "LitSouthWall",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-1.100000, 1.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 14,
+			"node": "LitSouthWall",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-3.100000, 2.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamLit",
+			"id": 15,
+			"node": "LitSouthWall",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-1.100000, 2.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "lit"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 16,
+			"mirror_of": 0,
+			"node": "SharedWallNegZ",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [0.100000, 1.000000, -1.150000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 17,
+			"mirror_of": 1,
+			"node": "SharedWallNegZ",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [0.100000, 1.700000, -1.150000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 18,
+			"mirror_of": 2,
+			"node": "SharedWallPosZ",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [0.100000, 1.000000, 1.150000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 19,
+			"mirror_of": 3,
+			"node": "SharedWallPosZ",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [0.100000, 1.700000, 1.150000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 20,
+			"mirror_of": 4,
+			"node": "DarkEndWall",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.100000, 1.000000, -1.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 21,
+			"mirror_of": 5,
+			"node": "DarkEndWall",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.100000, 1.000000, 1.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 22,
+			"mirror_of": 6,
+			"node": "DarkEndWall",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.100000, 2.000000, -1.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 23,
+			"mirror_of": 7,
+			"node": "DarkEndWall",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.100000, 2.000000, 1.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 24,
+			"mirror_of": 8,
+			"node": "DarkNorthWall",
+			"normal": [-0.000000, 0.000000, 1.000000],
+			"pos": [3.100000, 1.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 25,
+			"mirror_of": 9,
+			"node": "DarkNorthWall",
+			"normal": [-0.000000, 0.000000, 1.000000],
+			"pos": [1.100000, 1.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 26,
+			"mirror_of": 10,
+			"node": "DarkNorthWall",
+			"normal": [-0.000000, 0.000000, 1.000000],
+			"pos": [3.100000, 2.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 27,
+			"mirror_of": 11,
+			"node": "DarkNorthWall",
+			"normal": [-0.000000, 0.000000, 1.000000],
+			"pos": [1.100000, 2.000000, -2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 28,
+			"mirror_of": 12,
+			"node": "DarkSouthWall",
+			"normal": [-0.000000, 0.000000, -1.000000],
+			"pos": [3.100000, 1.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 29,
+			"mirror_of": 13,
+			"node": "DarkSouthWall",
+			"normal": [-0.000000, 0.000000, -1.000000],
+			"pos": [1.100000, 1.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 30,
+			"mirror_of": 14,
+			"node": "DarkSouthWall",
+			"normal": [-0.000000, 0.000000, -1.000000],
+			"pos": [3.100000, 2.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		},
+		{
+			"camera": "LeakCamDark",
+			"id": 31,
+			"mirror_of": 15,
+			"node": "DarkSouthWall",
+			"normal": [-0.000000, 0.000000, -1.000000],
+			"pos": [1.100000, 2.000000, 2.000000],
+			"radius": 0.250000,
+			"room": "dark"
+		}
+	],
+	"scene": "moving_light_door.tscn",
+	"seed": 1852143732,
+	"version": 1
+}

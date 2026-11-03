@@ -1,0 +1,345 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/moving_light_door/moving_light_door.gd" id="1_f63jn"]
+
+[sub_resource type="Environment" id="Environment_k0mmf"]
+background_mode = 1
+ambient_light_source = 1
+reflected_light_source = 1
+
+[sub_resource type="BoxMesh" id="BoxMesh_5xdui"]
+size = Vector3(8.6, 0.2, 4.4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_b8se6"]
+resource_name = "Gray075"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.88082504, 0.88082504, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_c7rbi"]
+size = Vector3(8.6, 0.2, 4.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_yagaq"]
+size = Vector3(8.6, 0.2, 4.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_s7tbu"]
+size = Vector3(8.6, 0.2, 4.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tji6s"]
+size = Vector3(0.2, 3.4, 4.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_vxrf2"]
+size = Vector3(0.2, 3.4, 4.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_e5lxi"]
+size = Vector3(0.2, 3.4, 4.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_146v4"]
+size = Vector3(0.2, 3.4, 4.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_p85p0"]
+size = Vector3(0.2, 2, 1.7)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_jribp"]
+size = Vector3(0.2, 2, 1.7)
+
+[sub_resource type="BoxMesh" id="BoxMesh_1n6jl"]
+size = Vector3(0.2, 2, 1.7)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_m0ipj"]
+size = Vector3(0.2, 2, 1.7)
+
+[sub_resource type="BoxMesh" id="BoxMesh_gdmek"]
+size = Vector3(0.2, 1.2, 4.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_asud4"]
+size = Vector3(0.2, 1.2, 4.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_n67qy"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_0u3m7"]
+resource_name = "RedWall"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.24780053, 0.24780053, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_cib6s"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ftix0"]
+size = Vector3(0.2, 3.4, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_lnw2y"]
+size = Vector3(0.2, 3.4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_txqo3"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ay3x0"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_x2wcy"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_j6tgy"]
+resource_name = "GreenWall"
+diffuse_mode = 1
+albedo_color = Color(0.24780053, 0.88082504, 0.24780053, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ourtn"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_hh0rf"]
+size = Vector3(0.2, 3.4, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_n62u3"]
+size = Vector3(0.2, 3.4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_fkx1i"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_lp1vi"]
+size = Vector3(4, 3.4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ygcc8"]
+size = Vector3(1.2, 1.2, 1.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ttl0v"]
+size = Vector3(1.2, 1.2, 1.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ma0st"]
+size = Vector3(0.6, 0.6, 0.6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_1vqge"]
+size = Vector3(0.6, 0.6, 0.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ykg1y"]
+size = Vector3(0.04, 2, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gtrpc"]
+resource_name = "Door"
+diffuse_mode = 1
+albedo_color = Color(0.7014107, 0.60124344, 0.46135613, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_gp8r8"]
+size = Vector3(0.04, 2, 1)
+
+[node name="MovingLightDoor" type="Node3D"]
+script = ExtResource("1_f63jn")
+metadata/shared_wall_thickness_m = 0.2
+metadata/room_interior_m = Vector3(4, 3, 4)
+metadata/lit_center = Vector3(-2.1, 2.2, 0)
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_k0mmf")
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_5xdui")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="Floor"]
+
+[node name="Shape" type="CollisionShape3D" parent="Floor/Collider"]
+shape = SubResource("BoxShape3D_c7rbi")
+
+[node name="Ceiling" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.1, 0)
+mesh = SubResource("BoxMesh_yagaq")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="Ceiling"]
+
+[node name="Shape" type="CollisionShape3D" parent="Ceiling/Collider"]
+shape = SubResource("BoxShape3D_s7tbu")
+
+[node name="LitEndWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4.2, 1.5, 0)
+mesh = SubResource("BoxMesh_tji6s")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="LitEndWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="LitEndWall/Collider"]
+shape = SubResource("BoxShape3D_vxrf2")
+
+[node name="DarkEndWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4.2, 1.5, 0)
+mesh = SubResource("BoxMesh_e5lxi")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="DarkEndWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="DarkEndWall/Collider"]
+shape = SubResource("BoxShape3D_146v4")
+
+[node name="SharedWallNegZ" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, -1.35)
+mesh = SubResource("BoxMesh_p85p0")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="SharedWallNegZ"]
+
+[node name="Shape" type="CollisionShape3D" parent="SharedWallNegZ/Collider"]
+shape = SubResource("BoxShape3D_jribp")
+
+[node name="SharedWallPosZ" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1.35)
+mesh = SubResource("BoxMesh_1n6jl")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="SharedWallPosZ"]
+
+[node name="Shape" type="CollisionShape3D" parent="SharedWallPosZ/Collider"]
+shape = SubResource("BoxShape3D_m0ipj")
+
+[node name="SharedWallTop" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.6, 0)
+mesh = SubResource("BoxMesh_gdmek")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="SharedWallTop"]
+
+[node name="Shape" type="CollisionShape3D" parent="SharedWallTop/Collider"]
+shape = SubResource("BoxShape3D_asud4")
+
+[node name="LitNorthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1, 1.5, -2.1)
+mesh = SubResource("BoxMesh_n67qy")
+surface_material_override/0 = SubResource("StandardMaterial3D_0u3m7")
+
+[node name="Collider" type="StaticBody3D" parent="LitNorthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="LitNorthWall/Collider"]
+shape = SubResource("BoxShape3D_cib6s")
+
+[node name="SharedNorthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -2.1)
+mesh = SubResource("BoxMesh_ftix0")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="SharedNorthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="SharedNorthWall/Collider"]
+shape = SubResource("BoxShape3D_lnw2y")
+
+[node name="DarkNorthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.1, 1.5, -2.1)
+mesh = SubResource("BoxMesh_txqo3")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="DarkNorthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="DarkNorthWall/Collider"]
+shape = SubResource("BoxShape3D_ay3x0")
+
+[node name="LitSouthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1, 1.5, 2.1)
+mesh = SubResource("BoxMesh_x2wcy")
+surface_material_override/0 = SubResource("StandardMaterial3D_j6tgy")
+
+[node name="Collider" type="StaticBody3D" parent="LitSouthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="LitSouthWall/Collider"]
+shape = SubResource("BoxShape3D_ourtn")
+
+[node name="SharedSouthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 2.1)
+mesh = SubResource("BoxMesh_hh0rf")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="SharedSouthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="SharedSouthWall/Collider"]
+shape = SubResource("BoxShape3D_n62u3")
+
+[node name="DarkSouthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.1, 1.5, 2.1)
+mesh = SubResource("BoxMesh_fkx1i")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="DarkSouthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="DarkSouthWall/Collider"]
+shape = SubResource("BoxShape3D_lp1vi")
+
+[node name="BlockLarge" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.6, 0.6, -0.6)
+mesh = SubResource("BoxMesh_ygcc8")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="BlockLarge"]
+
+[node name="Shape" type="CollisionShape3D" parent="BlockLarge/Collider"]
+shape = SubResource("BoxShape3D_ttl0v")
+
+[node name="BlockSmall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.5, 0.3, 0.9)
+mesh = SubResource("BoxMesh_ma0st")
+surface_material_override/0 = SubResource("StandardMaterial3D_b8se6")
+
+[node name="Collider" type="StaticBody3D" parent="BlockSmall"]
+
+[node name="Shape" type="CollisionShape3D" parent="BlockSmall/Collider"]
+shape = SubResource("BoxShape3D_1vqge")
+
+[node name="Door" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.12, 1, 0)
+gi_mode = 2
+mesh = SubResource("BoxMesh_ykg1y")
+surface_material_override/0 = SubResource("StandardMaterial3D_gtrpc")
+
+[node name="Collider" type="StaticBody3D" parent="Door"]
+
+[node name="Shape" type="CollisionShape3D" parent="Door/Collider"]
+shape = SubResource("BoxShape3D_gp8r8")
+
+[node name="MovingLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.1, 2.2, -1.2)
+shadow_enabled = true
+omni_range = 6.0
+
+[node name="OffscreenSpot" type="SpotLight3D" parent="."]
+transform = Transform3D(0, 0.09392259, -0.99557954, 0, 0.99557954, 0.09392259, 1, 0, 0, -5.3, 1.7, 0)
+shadow_enabled = true
+spot_range = 8.0
+spot_angle = 35.0
+
+[node name="CovCam0" type="Camera3D" parent="."]
+transform = Transform3D(-0.40273857, 0.3146918, -0.85951775, 0, 0.9390403, 0.3438071, 0.91531503, 0.13846438, -0.37818778, -3.7, 2.2, -1.3)
+fov = 70.0
+far = 16.0
+
+[node name="CovCam1" type="Camera3D" parent="."]
+transform = Transform3D(0.40273857, 0.3146918, -0.85951775, 0, 0.9390403, 0.3438071, 0.91531503, -0.13846438, 0.37818778, -3.7, 2.2, 1.3)
+fov = 70.0
+far = 16.0
+
+[node name="CovCam2" type="Camera3D" parent="."]
+transform = Transform3D(-0.48191872, 0.35161334, -0.80257237, 0, 0.91595274, 0.40128618, 0.87621593, 0.19338733, -0.44141477, 1, 2.2, -1.3)
+fov = 70.0
+far = 16.0
+
+[node name="CovCam3" type="Camera3D" parent="."]
+transform = Transform3D(0.48191872, 0.35161334, -0.80257237, 0, 0.91595274, 0.40128618, 0.87621593, -0.19338733, 0.44141477, 1, 2.2, 1.3)
+fov = 70.0
+far = 16.0
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(0, 0.12716432, -0.99188167, 0, 0.99188167, 0.12716432, 1, 0, 0, -3.9, 1.7, 0)
+current = true
+fov = 70.0
+far = 16.0
+
+[node name="LeakCamLit" type="Camera3D" parent="."]
+transform = Transform3D(0, 0.09480907, -0.99549556, 0, 0.99549556, 0.09480907, 1, 0, 0, -2.1, 1.4, 0)
+fov = 70.0
+far = 6.0
+
+[node name="LeakCamDark" type="Camera3D" parent="."]
+transform = Transform3D(0, -0.09480907, 0.99549556, 0, 0.99549556, 0.09480907, -1, 0, 0, 2.1, 1.4, 0)
+fov = 70.0
+far = 2.4

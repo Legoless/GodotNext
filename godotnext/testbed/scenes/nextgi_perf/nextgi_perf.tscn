@@ -1,0 +1,342 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/nextgi_perf/nextgi_perf.gd" id="1_o854k"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_h5o8s"]
+
+[sub_resource type="Sky" id="Sky_xlpf5"]
+sky_material = SubResource("ProceduralSkyMaterial_h5o8s")
+
+[sub_resource type="Environment" id="Environment_6pin4"]
+background_mode = 2
+sky = SubResource("Sky_xlpf5")
+ambient_light_source = 3
+reflected_light_source = 2
+
+[sub_resource type="BoxMesh" id="BoxMesh_kvysi"]
+size = Vector3(26, 0.2, 18)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_4i45p"]
+resource_name = "Interior"
+diffuse_mode = 1
+albedo_color = Color(0.80946815, 0.7977378, 0.7735731, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_4cx3r"]
+size = Vector3(26, 0.2, 18)
+
+[sub_resource type="BoxMesh" id="BoxMesh_vpf36"]
+size = Vector3(26, 0.2, 18)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_43k6s"]
+size = Vector3(26, 0.2, 18)
+
+[sub_resource type="BoxMesh" id="BoxMesh_bhtet"]
+size = Vector3(0.2, 4, 18)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_srld7"]
+size = Vector3(0.2, 4, 18)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ixl3k"]
+size = Vector3(26, 4, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_duymh"]
+size = Vector3(26, 4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_kdi51"]
+size = Vector3(26, 4, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_uo478"]
+size = Vector3(26, 4, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_djv2l"]
+size = Vector3(0.2, 4, 7)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_0f3ir"]
+size = Vector3(0.2, 4, 7)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ajxvw"]
+size = Vector3(0.2, 4, 7)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_xkrjh"]
+size = Vector3(0.2, 4, 7)
+
+[sub_resource type="BoxMesh" id="BoxMesh_4r1if"]
+size = Vector3(0.2, 1, 4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_vi14o"]
+size = Vector3(0.2, 1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ubm17"]
+size = Vector3(80, 0.2, 84)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_pbryy"]
+resource_name = "Gray075"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.88082504, 0.88082504, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_gqlkr"]
+size = Vector3(80, 0.2, 84)
+
+[sub_resource type="BoxMesh" id="BoxMesh_8y71s"]
+size = Vector3(80, 1.2, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_7ismx"]
+size = Vector3(80, 1.2, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_ebv8s"]
+size = Vector3(80, 1.2, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_mhny7"]
+size = Vector3(80, 1.2, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_1b2i1"]
+size = Vector3(0.2, 1.2, 84)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_k0q0c"]
+size = Vector3(0.2, 1.2, 84)
+
+[node name="NextGIPerf" type="Node3D"]
+script = ExtResource("1_o854k")
+metadata/instance_seed = 1234
+metadata/default_instances = 50000
+metadata/generator_stream = 35
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_6pin4")
+
+[node name="InteriorFloor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, -0.1, 0)
+mesh = SubResource("BoxMesh_kvysi")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorFloor"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorFloor/Collider"]
+shape = SubResource("BoxShape3D_4cx3r")
+
+[node name="InteriorCeiling" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 4.1, 0)
+mesh = SubResource("BoxMesh_vpf36")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorCeiling"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorCeiling/Collider"]
+shape = SubResource("BoxShape3D_43k6s")
+
+[node name="InteriorWest" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.1, 2, 0)
+mesh = SubResource("BoxMesh_bhtet")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorWest"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorWest/Collider"]
+shape = SubResource("BoxShape3D_srld7")
+
+[node name="InteriorNorth" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 2, -9.1)
+mesh = SubResource("BoxMesh_ixl3k")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorNorth"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorNorth/Collider"]
+shape = SubResource("BoxShape3D_duymh")
+
+[node name="InteriorSouth" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 2, 9.1)
+mesh = SubResource("BoxMesh_kdi51")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorSouth"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorSouth/Collider"]
+shape = SubResource("BoxShape3D_uo478")
+
+[node name="InteriorEastNegZ" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 25.1, 2, -5.5)
+mesh = SubResource("BoxMesh_djv2l")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorEastNegZ"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorEastNegZ/Collider"]
+shape = SubResource("BoxShape3D_0f3ir")
+
+[node name="InteriorEastPosZ" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 25.1, 2, 5.5)
+mesh = SubResource("BoxMesh_ajxvw")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorEastPosZ"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorEastPosZ/Collider"]
+shape = SubResource("BoxShape3D_xkrjh")
+
+[node name="InteriorEastHeader" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 25.1, 3.5, 0)
+mesh = SubResource("BoxMesh_4r1if")
+surface_material_override/0 = SubResource("StandardMaterial3D_4i45p")
+
+[node name="Collider" type="StaticBody3D" parent="InteriorEastHeader"]
+
+[node name="Shape" type="CollisionShape3D" parent="InteriorEastHeader/Collider"]
+shape = SubResource("BoxShape3D_vi14o")
+
+[node name="CourtyardFloor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 65, -0.1, 0)
+mesh = SubResource("BoxMesh_ubm17")
+surface_material_override/0 = SubResource("StandardMaterial3D_pbryy")
+
+[node name="Collider" type="StaticBody3D" parent="CourtyardFloor"]
+
+[node name="Shape" type="CollisionShape3D" parent="CourtyardFloor/Collider"]
+shape = SubResource("BoxShape3D_gqlkr")
+
+[node name="CourtyardNorth" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 65, 0.6, -42.1)
+mesh = SubResource("BoxMesh_8y71s")
+surface_material_override/0 = SubResource("StandardMaterial3D_pbryy")
+
+[node name="Collider" type="StaticBody3D" parent="CourtyardNorth"]
+
+[node name="Shape" type="CollisionShape3D" parent="CourtyardNorth/Collider"]
+shape = SubResource("BoxShape3D_7ismx")
+
+[node name="CourtyardSouth" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 65, 0.6, 42.1)
+mesh = SubResource("BoxMesh_ebv8s")
+surface_material_override/0 = SubResource("StandardMaterial3D_pbryy")
+
+[node name="Collider" type="StaticBody3D" parent="CourtyardSouth"]
+
+[node name="Shape" type="CollisionShape3D" parent="CourtyardSouth/Collider"]
+shape = SubResource("BoxShape3D_mhny7")
+
+[node name="CourtyardEast" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 105.1, 0.6, 0)
+mesh = SubResource("BoxMesh_1b2i1")
+surface_material_override/0 = SubResource("StandardMaterial3D_pbryy")
+
+[node name="Collider" type="StaticBody3D" parent="CourtyardEast"]
+
+[node name="Shape" type="CollisionShape3D" parent="CourtyardEast/Collider"]
+shape = SubResource("BoxShape3D_k0q0c")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.70710677, -0.4055798, 0.579228, 0, 0.81915206, 0.57357645, -0.70710677, -0.4055798, 0.579228, 40, 10, 0)
+shadow_enabled = true
+
+[node name="LocalLight0" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 3.2, -4)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight1" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 3.2, 4)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight2" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16, 3.2, -4)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight3" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 16, 3.2, 4)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight4" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 86, 3.5, 0)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight5" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 82.78461, 3.5, 12)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight6" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 74, 3.5, 20.784609)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight7" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 62, 3.5, 24)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight8" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 50, 3.5, 20.784609)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight9" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 41.21539, 3.5, 12)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight10" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 38, 3.5, 2.9391522e-15)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight11" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 41.21539, 3.5, -12)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight12" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 50, 3.5, -20.784609)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight13" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 62, 3.5, -24)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight14" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 74, 3.5, -20.784609)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="LocalLight15" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 82.78461, 3.5, -12)
+light_energy = 0.5
+omni_range = 12.0
+
+[node name="OffscreenSpot" type="SpotLight3D" parent="."]
+transform = Transform3D(0, 0.04993762, -0.99875236, 0, 0.99875236, 0.04993762, 1, 0, 0, -4, 3.2, 0)
+spot_range = 10.0
+spot_angle = 28.0
+
+[node name="CovCam0" type="Camera3D" parent="."]
+transform = Transform3D(-0.31622776, 0.04494946, -0.9476178, 0, 0.99887687, 0.04738089, 0.9486833, 0.014983153, -0.3158726, 40, 3.5, -15)
+fov = 70.0
+far = 80.0
+
+[node name="CovCam1" type="Camera3D" parent="."]
+transform = Transform3D(0.31622776, 0.04494946, -0.9476178, 0, 0.99887687, 0.04738089, 0.9486833, -0.014983153, 0.3158726, 40, 3.5, 15)
+fov = 70.0
+far = 80.0
+
+[node name="CovCam2" type="Camera3D" parent="."]
+transform = Transform3D(-0.5547002, 0.046083003, -0.8307732, 0, 0.99846506, 0.055384878, 0.83205026, 0.030722003, -0.5538488, 60, 4, -20)
+fov = 70.0
+far = 80.0
+
+[node name="CovCam3" type="Camera3D" parent="."]
+transform = Transform3D(0.5547002, 0.046083003, -0.8307732, 0, 0.99846506, 0.055384878, 0.83205026, -0.030722003, 0.5538488, 60, 4, 20)
+fov = 70.0
+far = 80.0
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(0, 0, -1, 0, 1, 0, 1, 0, 0, 4, 3.2, 0)
+current = true
+fov = 60.0
+far = 80.0

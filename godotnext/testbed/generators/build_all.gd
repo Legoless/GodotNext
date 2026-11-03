@@ -16,6 +16,12 @@ const ColorBoxRoom := preload("res://generators/build_color_box_room.gd")
 const Single40m := preload("res://generators/build_single_40m.gd")
 const Courtyard := preload("res://generators/build_courtyard.gd")
 const Legacy := preload("res://generators/build_legacy.gd")
+const MovingLightDoor := preload("res://generators/build_moving_light_door.gd")
+const TimeOfDay := preload("res://generators/build_time_of_day.gd")
+const NextGIPerf := preload("res://generators/build_nextgi_perf.gd")
+const DoorMotion = preload("res://scenes/moving_light_door/motion.gd")
+const SunMotion = preload("res://scenes/time_of_day/motion.gd")
+const PerfLayout = preload("res://scenes/nextgi_perf/layout.gd")
 
 const Q1_PATCH_COUNT := 128
 
@@ -27,6 +33,7 @@ func _init() -> void:
 
 
 func _run() -> void:
+	_check_contracts()
 	var color_box_dir := "res://scenes/color_box_room"
 	var jobs: Array[Dictionary] = [
 		{"built": ColorBoxRoom.build("a"), "scene": color_box_dir + "/cbr_a.tscn", "stream": 1},
@@ -41,6 +48,13 @@ func _run() -> void:
 	]
 	for job in jobs:
 		await _process_job(job)
+	var dynamic_jobs: Array[Dictionary] = [
+		{"built": MovingLightDoor.build(), "scene": "res://scenes/moving_light_door/moving_light_door.tscn", "stream": 33},
+		{"built": TimeOfDay.build(), "scene": "res://scenes/time_of_day/time_of_day.tscn", "stream": 34},
+		{"built": NextGIPerf.build(), "scene": "res://scenes/nextgi_perf/nextgi_perf.tscn", "stream": 35},
+	]
+	for job in dynamic_jobs:
+		await _process_job(job)
 	if _failures.is_empty():
 		print("build_all: all scenes built and verified.")
 		quit(0)
@@ -53,6 +67,18 @@ func _run() -> void:
 func _fail(p_message: String) -> void:
 	_failures.append(p_message)
 	printerr("build_all FAIL: " + p_message)
+
+
+func _check_contracts() -> void:
+	var door_err := String(DoorMotion.contract_error())
+	if not door_err.is_empty():
+		_fail(door_err)
+	var sun_err := String(SunMotion.contract_error())
+	if not sun_err.is_empty():
+		_fail(sun_err)
+	var perf_err := String(PerfLayout.contract_error())
+	if not perf_err.is_empty():
+		_fail(perf_err)
 
 
 func _process_job(p_job: Dictionary) -> void:
@@ -71,7 +97,14 @@ func _process_job(p_job: Dictionary) -> void:
 	if built.has("q1_surfaces"):
 		# Generate a surplus, drop patches no camera can see (for example
 		# floor patches under a block), then keep the first 128 survivors.
-		var rng := Scaffold.make_rng(int(p_job["stream"]))
+		var patch_seed := Scaffold.DEFAULT_SEED
+		var rng: RandomNumberGenerator
+		if built.has("q1_rng_seed"):
+			patch_seed = int(built["q1_rng_seed"])
+			rng = RandomNumberGenerator.new()
+			rng.seed = patch_seed
+		else:
+			rng = Scaffold.make_rng(int(p_job["stream"]))
 		var surplus := Scaffold.generate_q1_patches(built["q1_surfaces"], Q1_PATCH_COUNT * 2, rng)
 		var patches := _filter_line_of_sight(root, surplus, cameras)
 		if patches.size() < Q1_PATCH_COUNT:
@@ -80,7 +113,7 @@ func _process_job(p_job: Dictionary) -> void:
 		else:
 			patches.resize(Q1_PATCH_COUNT)
 			_sort_and_renumber(patches)
-			if not _write_json(base + "_patches_q1.json", _patch_document(scene_path, patches)):
+			if not _write_json(base + "_patches_q1.json", _patch_document(scene_path, patches, patch_seed)):
 				ok = false
 	if ok and built.has("q3_patches"):
 		var q3: Array = built["q3_patches"]
@@ -97,6 +130,10 @@ func _process_job(p_job: Dictionary) -> void:
 			ok = false
 		elif not _write_json(base + "_patches_q3.json", _patch_document(scene_path, q3)):
 			ok = false
+	if ok and built.has("steps"):
+		var steps_path := scene_path.get_base_dir().path_join("steps.json")
+		if not _write_json(steps_path, built["steps"]):
+			ok = false
 	if ok and String(built.get("offscreen_light_node", "")) != "":
 		if not _verify_offscreen(root, String(built["offscreen_light_node"]), cameras):
 			ok = false
@@ -105,6 +142,8 @@ func _process_job(p_job: Dictionary) -> void:
 			ok = false
 
 	get_root().remove_child(root)
+	if root.has_meta("skip_runtime"):
+		root.remove_meta("skip_runtime")
 	# Entering the tree makes the first camera current; restore the
 	# authored state (only CaptureCam current) before packing.
 	for camera_name in cameras:
@@ -120,11 +159,11 @@ func _process_job(p_job: Dictionary) -> void:
 	root.free()
 
 
-func _patch_document(p_scene_path: String, p_patches: Array) -> Dictionary:
+func _patch_document(p_scene_path: String, p_patches: Array, p_seed: int = Scaffold.DEFAULT_SEED) -> Dictionary:
 	return {
 		"version": 1,
 		"scene": p_scene_path.get_file(),
-		"seed": Scaffold.DEFAULT_SEED,
+		"seed": p_seed,
 		"count": p_patches.size(),
 		"patches": p_patches,
 	}

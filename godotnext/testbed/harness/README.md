@@ -76,6 +76,9 @@ After `--`:
 | `--frames=<int>` | yes | |
 | `--warmup=<int>` | no | 0 |
 | `--capture-frames=<list>` | no | empty (no EXR) |
+| `--variant=<id>` | no | empty; the scene's own default |
+| `--hold-frame=<int>` | no | unset (`-1`); freezes the scene's frame index |
+| `--instances=<int>` | no | unset; NextGI Perf uses 50000 |
 
 `--out` has to be an absolute filesystem path. `res://` and `user://` are rejected. Values can be `--flag=value` or `--flag value`.
 
@@ -96,7 +99,18 @@ Scoped to G0-4 and G0-6. There is no settle window and no movie writer. After th
 
 `timing.csv` columns are `frame,wall_ms,<pass>_ms...`. `frame` is the measurement index starting at 0. Wall time is the `Time.get_ticks_usec()` delta between `_process` calls, in milliseconds. On `frame_post_draw`, RenderingDevice timestamps are read with `get_captured_timestamps_count`, `get_captured_timestamps_frame`, `get_captured_timestamp_name`, and `get_captured_timestamp_gpu_time`. Godot leaves those queries empty unless timestamp capture is on, so timing launches pass `--gpu-profile`. That flag can also print a `GPU PROFILE` block after about a second. That print is not a measurement. A pass is the GPU-time delta to the next timestamp, named from the earlier stamp, converted from nanoseconds to milliseconds. Blank cells are passes that frame did not report. The same timestamp frame is not recorded twice.
 
-`summary.json` holds `schema`, `frames`, `warmup`, and `columns`. Each column has `p50`, `p95`, `p99`, and `n`. Percentiles use linear interpolation: rank is `(percent / 100) * (n - 1)`. Empty input is 0. A single sample is that sample. Blank GPU cells are skipped, so a pass can have `n` below `frames`.
+`summary.json` stays schema 1. It holds `schema`, `frames`, `warmup`, and `columns`, plus the §2.1 fields below. Each column has `p50`, `p95`, `p99`, and `n`. Percentiles use linear interpolation: rank is `(percent / 100) * (n - 1)`. Empty input is 0. A single sample is that sample. Blank GPU cells are skipped, so a pass can have `n` below `frames`. `timing.csv` is unchanged: the new fields are not columns.
+
+While a capture or timing run is active, the harness publishes the frame index (`is_driving_animation`, `get_animation_frame`). Capture uses the window index, warmup included. Timing holds frame 0 through the entry frame and the warmup, then uses the measured row index. `--hold-frame` on the scene wins over that index. Scenes that are not in a harness run count frames themselves, still from the frame index, never from wall time.
+
+The extra summary object:
+
+- `lines` maps `1a`, `1b`, `2a`, `2b`, `3`, `4`, `5`, and `7` to a name plus `p50`, `p95`, `p99`, and `n`. Names are AS updates, AS builds, SRC capture, SRC relight, WRC update, Screen traces, HWRT diffuse gather, and Gather integration. A timestamp column maps onto a line by its sanitized name (`nextgi_as_updates_ms`, `as_updates_ms`, `tlas_rebuild_ms`, and `skinned_refit_ms` are line 1a; `blas_build_ms`, `compaction_copy_ms`, `line_1b_ms`, `as_updates_amortized_ms`, and `1b_ms` are line 1b; the same pattern covers 2a, 2b, 3, 4, 5, and 7). The last sample of a column wins inside a row, then the mapped columns add. A missing pass is 0. Lines other than 1b use the steady frames only. Line 1b uses the tagged frames only.
+- `diffuse_path` is the percentile of the per-steady-frame sum of lines 1a, 2a, 2b, 3, 4, 5, and 7.
+- A frame is tagged line 1b when `counters.blas_builds` or `counters.compaction_copies` (or the `blas_build_count` / `compaction_copy_count` aliases) is above zero, or when the summed line-1b timestamps are above zero. `line_1b_frames` lists those indices and the p99 of their full GPU pass sum (not `wall_ms`). `high_total_ms`, `line_1b_budget_ms`, and `limit_ms` are filled when the host or the adapter names the device: Apple M5 Max is 4.00 + 0.25 = 4.25 ms, the RTX 4080 SUPER is 1.60 + 0.10 = 1.70 ms. The RTX 5090 machine has a device name and null budgets. Any other host leaves the device empty and the budgets null. `within_limit` is null when either side is null. A budget miss does not fail the run. These millisecond totals are report-only.
+- `counters.source` is `nextgi_get_counters` when `RenderingServer.nextgi_get_counters` exists or a row carried a counter object, and `absent` otherwise. The keys `relight_texels`, `shadow_rays`, `q18`, `tlas_fill_ms`, and `capture_cpu_ms` are always present. Absent counters are null. Present counters are the same percentiles over every measured frame (`src_relight_texels`, `shadow_rays_traced`, and `rt_coverage` are accepted aliases).
+
+Q11 is unchanged. It still drops line 1b by column name inside every frame, then takes p95. The frame tag above is an extra field, not a change to that definition. There is no Ada 3060 ratio and no mid-range device key.
 
 The spread across runs is printed by `run_selftest.sh` and does not fail the script. The ≤2% p95 spread is a PQ gate (G0-4), not a PR-basics failure. Do not treat a timing printout as a measurement result.
 
@@ -128,6 +142,6 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 
 ## Left for later
 
-P1b (issue 33): wall-clock IO delays, per-pass spread reports, and M5 Max timing runs used as measurements.
+Wall-clock IO delays belong to the Slow IO Flight scene, not to issue 33. Issue 33 added the dynamic scenes and the §2.1 summary fields. Per-pass spread stays a print from `run_selftest.sh`. Timing numbers from these runs are not measurements.
 
 Issue 237: the RTX 4080 SUPER Session-1 runner, clock locks, `run_remote.sh`, `run_selftest.ps1`, and G0-4 as a measurement. G0-6 calibration scenes are not part of this harness. The timing file format is what those runs will use.

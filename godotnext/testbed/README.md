@@ -38,6 +38,13 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
 - `tests/tier/` — the NextGI tier check (#15). `run_tier_check.sh`
   enables NextGI for one run through `override.cfg` and runs
   `tier_check.tscn`; the project itself keeps NextGI off.
+- `scenes/moving_light_door/` — two rooms, a 1 m door, and a moving
+  omni light. Variants: `door_open`, `light_toggle`, `door_teleport`.
+- `scenes/time_of_day/` — courtyard plus interior. Variants: `sweep`
+  (90° over 10 s) and `sun_jump` (+15° at frame 0).
+- `scenes/nextgi_perf/` — timing shell. Instances are spawned at
+  runtime from seed 1234 (50000 by default, 100000 with
+  `--instances=100000`) and are not stored in the scene.
 
 ## Conventions
 

@@ -13,6 +13,8 @@ func _initialize() -> void:
 	_test_manifest()
 	_test_percentiles()
 	_test_csv()
+	_test_timing_fields()
+	_test_animation_frame()
 	if _failures == 0:
 		print("test_args: ok")
 		quit(0)
@@ -109,6 +111,31 @@ func _test_parse() -> void:
 	_check(not bool(ArgsScript.parse(PackedStringArray([
 		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--extra=1",
 	]))["ok"]), "unknown flag fails when --mode is set")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--foo",
+	]))["ok"]), "unknown --foo fails when --mode is set")
+
+	var scene_flags: Dictionary = ArgsScript.parse(PackedStringArray([
+		"--mode=timing",
+		"--scene=res://scenes/nextgi_perf/nextgi_perf.tscn",
+		"--out=/tmp/out",
+		"--frames=8",
+		"--variant=door_open",
+		"--hold-frame=60",
+		"--instances=100000",
+	]))
+	_check(bool(scene_flags["ok"]), "scene flags parse: %s" % scene_flags["error"])
+	if bool(scene_flags["ok"]):
+		var args: Dictionary = scene_flags["args"]
+		_check(String(args["variant"]) == "door_open", "variant parsed")
+		_check(int(args["hold_frame"]) == 60, "hold-frame parsed")
+		_check(int(args["instances"]) == 100000, "instances parsed")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--hold-frame=-3",
+	]))["ok"]), "negative hold-frame fails")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--instances=0",
+	]))["ok"]), "zero instances fails")
 
 
 func _sample_manifest() -> Dictionary:
@@ -209,3 +236,51 @@ func _test_csv() -> void:
 	_check(lines[0] == "frame,wall_ms,opaque_pass_ms", "csv header")
 	_check(lines[1] == "0,1.500000,0.250000", "csv first row")
 	_check(lines[2] == "1,2.000000,", "csv blank gpu cell")
+
+
+## Keep this fixture in sync with metrics/tests/test_timing_summary.py.
+func _test_timing_fields() -> void:
+	var rows: Array = [
+		{"wall_ms": 1.0, "passes": [{"column": "as_updates_ms", "ms": 1.0}]},
+		{"wall_ms": 1.0, "passes": [
+			{"column": "as_updates_ms", "ms": 10.0},
+			{"column": "blas_build_ms", "ms": 4.0},
+		]},
+		{"wall_ms": 1.0, "passes": [{"column": "as_updates_ms", "ms": 3.0}]},
+	]
+	var summary: Dictionary = ManifestScript.summarize(rows, 0, "Apple M5 Max", "Apple M5 Max", false)
+	_check(int(summary["schema"]) == 1, "timing summary keeps schema 1")
+	_check(is_equal_approx(float(summary["lines"]["1a"]["p95"]), 2.9), "steady 1a p95 is 2.9")
+	_check(int(summary["lines"]["1a"]["n"]) == 2, "steady 1a excludes the 1b frame")
+	_check(is_equal_approx(float(summary["lines"]["1b"]["p95"]), 4.0), "line 1b p95 is 4")
+	_check(is_equal_approx(float(summary["diffuse_path"]["p95"]), 2.9), "diffuse path p95 is 2.9")
+	var tagged: Dictionary = summary["line_1b_frames"]
+	_check(tagged["frames"] == [1], "1b frame index")
+	_check(is_equal_approx(float(tagged["p99"]), 14.0), "1b frame gpu p99 is 14")
+	_check(String(tagged["device"]) == "Apple M5 Max", "M5 device")
+	_check(is_equal_approx(float(tagged["limit_ms"]), 4.25), "M5 limit is 4.25")
+	_check(tagged["within_limit"] == false, "14 ms is outside the M5 limit")
+	var counters: Dictionary = summary["counters"]
+	_check(String(counters["source"]) == "absent", "counters absent")
+	for key in ["relight_texels", "shadow_rays", "q18", "tlas_fill_ms", "capture_cpu_ms"]:
+		_check(counters[key] == null, "counter %s is null" % key)
+
+	var ada: Dictionary = ManifestScript.timing_fields(rows, "", "RTX 4080 SUPER", false)
+	_check(String(ada["line_1b_frames"]["device"]) == "RTX 4080 SUPER", "4080 device")
+	_check(is_equal_approx(float(ada["line_1b_frames"]["limit_ms"]), 1.7), "4080 limit is 1.70")
+	var blackwell: Dictionary = ManifestScript.timing_fields(rows, "RTX 5090", "RTX 4080 SUPER", false)
+	_check(String(blackwell["line_1b_frames"]["device"]) == "RTX 5090", "5090 device")
+	_check(blackwell["line_1b_frames"]["limit_ms"] == null, "5090 has no ms limit")
+	_check(blackwell["line_1b_frames"]["within_limit"] == null, "5090 within_limit is null")
+
+
+func _test_animation_frame() -> void:
+	var node = load("res://harness/harness.gd").new()
+	_check(not node.is_driving_animation(), "idle harness does not drive")
+	node._active = true
+	node._driving = true
+	node._animation_frame = 12
+	_check(node.is_driving_animation(), "driving harness publishes a frame")
+	_check(int(node.get_animation_frame()) == 12, "animation frame is 12")
+	node._active = false
+	node.free()

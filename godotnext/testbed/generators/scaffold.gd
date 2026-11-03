@@ -15,12 +15,18 @@ const Q1_PATCH_MIN_DISTANCE := 0.5
 const Q1_PATCH_EDGE_MARGIN := 0.3
 
 
+## Seed for stream [param p_stream], derived from [constant DEFAULT_SEED].
+## [method make_rng] uses this value, and scene sidecars record it.
+static func stream_seed(p_stream: int) -> int:
+	return DEFAULT_SEED + p_stream * 1013904223
+
+
 ## Returns a [RandomNumberGenerator] for stream [param p_stream], derived
 ## deterministically from [constant DEFAULT_SEED]. Every generator takes a
 ## distinct stream number so streams stay independent of build order.
 static func make_rng(p_stream: int) -> RandomNumberGenerator:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = DEFAULT_SEED + p_stream * 1013904223
+	rng.seed = stream_seed(p_stream)
 	return rng
 
 

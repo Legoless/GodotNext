@@ -46,6 +46,9 @@ var _pending_timing_row := -1
 var _seen_stamp_frames := {}
 var _manifest_written := false
 var _job := {}
+var _driving := false
+var _animation_frame := 0
+var _nextgi_counters_present := false
 
 
 func _ready() -> void:
@@ -73,9 +76,20 @@ func _ready() -> void:
 	RenderingServer.frame_post_draw.connect(_on_frame_post_draw)
 
 
+func is_driving_animation() -> bool:
+	return _active and not _failed and _driving
+
+
+func get_animation_frame() -> int:
+	return _animation_frame
+
+
 func _process(_delta: float) -> void:
 	if not _active or _failed:
 		return
+	if _phase == Phase.CAPTURE:
+		_driving = true
+		_animation_frame = _capture_index
 	match _phase:
 		Phase.BOOT:
 			_boot()
@@ -146,6 +160,8 @@ func _poll_wait_scene() -> void:
 	if _wait_goal == WaitGoal.RELOAD:
 		_phase = Phase.CAPTURE
 		_capture_index = 0
+		_driving = true
+		_animation_frame = 0
 		_seed_window()
 		_apply_capture_view()
 		return
@@ -167,6 +183,9 @@ func _start_reload() -> void:
 func _begin_timing() -> void:
 	_phase = Phase.TIMING
 	_timing_seen = 0
+	_driving = true
+	_animation_frame = 0
+	_nextgi_counters_present = RenderingServer.has_method("nextgi_get_counters")
 	_last_usec = Time.get_ticks_usec()
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	if RenderingServer.get_rendering_device() == null:
@@ -178,11 +197,13 @@ func _timing_tick() -> void:
 	var wall_ms := float(now - _last_usec) / 1000.0
 	_last_usec = now
 	if _timing_seen < _warmup:
+		_animation_frame = 0
 		_timing_seen += 1
 		return
 	if _rows.size() >= _frames:
 		return
-	_rows.append({"wall_ms": wall_ms, "passes": []})
+	_rows.append({"wall_ms": wall_ms, "passes": [], "counters": {}})
+	_animation_frame = _rows.size() - 1
 	_pending_timing_row = _rows.size() - 1
 	if _rows.size() >= _frames:
 		get_tree().quit(0 if not _failed else 1)
@@ -201,6 +222,7 @@ func _on_frame_post_draw() -> void:
 		var row_index := _pending_timing_row
 		_pending_timing_row = -1
 		_rows[row_index]["passes"] = _read_passes()
+		_rows[row_index]["counters"] = _read_nextgi_counters()
 		if row_index == 0:
 			_write_manifest()
 
@@ -335,6 +357,15 @@ func _read_passes() -> Array:
 			"ms": float(delta) / 1000000.0,
 		})
 	return passes
+
+
+func _read_nextgi_counters() -> Dictionary:
+	if not RenderingServer.has_method("nextgi_get_counters"):
+		return {}
+	var value = RenderingServer.call("nextgi_get_counters")
+	if typeof(value) != TYPE_DICTIONARY:
+		return {}
+	return (value as Dictionary).duplicate()
 
 
 func _apply_capture_view() -> void:
@@ -497,7 +528,9 @@ func _write_timing_files() -> void:
 		return
 	csv_file.store_string(ManifestScript.render_csv(_rows))
 	csv_file.close()
-	var summary := ManifestScript.summarize(_rows, _warmup)
+	var host := String(_job.get("host", OS.get_name()))
+	var adapter := RenderingServer.get_video_adapter_name()
+	var summary := ManifestScript.summarize(_rows, _warmup, host, adapter, _nextgi_counters_present)
 	var summary_path := _out.path_join("summary.json")
 	var summary_file := FileAccess.open(summary_path, FileAccess.WRITE)
 	if summary_file == null:

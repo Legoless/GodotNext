@@ -1,0 +1,26 @@
+{
+	"cameras": ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam"],
+	"name": "time_of_day",
+	"patch_set": "q1",
+	"seed": 36324887314,
+	"variants": [
+		{
+			"end_frame": 600,
+			"form": "Q4b",
+			"frame0_action": "sun elevation starts at base",
+			"id": "sweep",
+			"motion_end": 600,
+			"motion_frames": 600,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 240,
+			"form": "Q4a",
+			"frame0_action": "sun elevation +15 deg",
+			"id": "sun_jump",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		}
+	]
+}
