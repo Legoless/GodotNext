@@ -894,6 +894,19 @@ RSE::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_
 	return env->sdfgi_y_scale;
 }
 
+// GodotNext: nextgi_tier
+void RendererEnvironmentStorage::environment_set_nextgi_enabled(RID p_env, bool p_enabled) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->nextgi_enabled = p_enabled;
+}
+
+bool RendererEnvironmentStorage::environment_get_nextgi_enabled(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, false);
+	return env->nextgi_enabled;
+}
+
 // Adjustments
 
 void RendererEnvironmentStorage::environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction) {

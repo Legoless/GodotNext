@@ -1819,6 +1819,10 @@ void RendererSceneRenderRD::init() {
 		gi.init(&sky);
 	}
 
+	// GodotNext: nextgi_tier
+	// Forward+ is the renderer with dynamic GI. The tier must be known before any ray-query ShaderRD.
+	next_gi.init(is_dynamic_gi_supported());
+
 	// GodotNext: rq_selftest
 	if (OS::get_singleton()->get_environment("GODOTNEXT_RQ_SELFTEST") == "1") {
 		String report;

@@ -43,6 +43,11 @@ private:
 	RendererEnvironmentStorage environment_storage;
 	RendererCompositorStorage compositor_storage;
 
+	// GodotNext: nextgi_fallback
+protected:
+	// True when the NextGI tier is the SDFGI fallback. The RD renderer overrides it.
+	virtual bool _nextgi_sdfgi_fallback() const { return false; }
+
 public:
 	enum {
 		MAX_DIRECTIONAL_LIGHTS = 8,
@@ -252,6 +257,13 @@ public:
 	virtual void environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount p_ray_count) = 0;
 	virtual void environment_set_sdfgi_frames_to_converge(RSE::EnvironmentSDFGIFramesToConverge p_frames) = 0;
 	virtual void environment_set_sdfgi_frames_to_update_light(RSE::EnvironmentSDFGIFramesToUpdateLight p_update) = 0;
+
+	// GodotNext: nextgi_tier
+	void environment_set_nextgi_enabled(RID p_env, bool p_enabled);
+	bool environment_get_nextgi_enabled(RID p_env) const;
+	// GLES3 and the dummy renderer keep these defaults: no NextGI tier and no SDFGI fallback.
+	virtual void nextgi_set_hardware_ray_tracing(int p_mode) {}
+	virtual Dictionary nextgi_get_tier_info() const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

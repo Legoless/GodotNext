@@ -162,6 +162,9 @@ private:
 	float sdfgi_probe_bias = 1.1;
 	void _update_sdfgi();
 
+	// GodotNext: nextgi_tier
+	bool nextgi_enabled = false;
+
 	// Glow
 	bool glow_enabled = false;
 	Vector<float> glow_levels;
@@ -348,6 +351,10 @@ public:
 	float get_sdfgi_normal_bias() const;
 	void set_sdfgi_probe_bias(float p_bias);
 	float get_sdfgi_probe_bias() const;
+
+	// GodotNext: nextgi_tier
+	void set_nextgi_enabled(bool p_enabled);
+	bool is_nextgi_enabled() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

@@ -603,6 +603,16 @@ void Environment::_update_sdfgi() {
 			sdfgi_probe_bias);
 }
 
+// GodotNext: nextgi_tier
+void Environment::set_nextgi_enabled(bool p_enabled) {
+	nextgi_enabled = p_enabled;
+	RS::get_singleton()->environment_set_nextgi_enabled(environment, nextgi_enabled);
+}
+
+bool Environment::is_nextgi_enabled() const {
+	return nextgi_enabled;
+}
+
 // Glow
 
 void Environment::set_glow_enabled(bool p_enabled) {
@@ -1429,6 +1439,12 @@ void Environment::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_energy"), "set_sdfgi_energy", "get_sdfgi_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_normal_bias"), "set_sdfgi_normal_bias", "get_sdfgi_normal_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sdfgi_probe_bias"), "set_sdfgi_probe_bias", "get_sdfgi_probe_bias");
+
+	// GodotNext: nextgi_tier
+	ClassDB::bind_method(D_METHOD("set_nextgi_enabled", "enabled"), &Environment::set_nextgi_enabled);
+	ClassDB::bind_method(D_METHOD("is_nextgi_enabled"), &Environment::is_nextgi_enabled);
+	ADD_GROUP("NextGI", "nextgi_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_nextgi_enabled", "is_nextgi_enabled");
 
 	// Glow
 

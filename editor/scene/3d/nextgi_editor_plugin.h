@@ -62,6 +62,12 @@ public:
 	static String get_vulkan_switch_dialog_title();
 	static String get_vulkan_switch_dialog_text();
 
+	// The minimal tier readout in the 3D viewport's View Information (#15): "NextGI: <tier> (<reason>)",
+	// or "NextGI: <tier>" without a reason. The full overlay is P1b.
+	static String format_tier_readout(const Dictionary &p_tier_info);
+	// The readout for RenderingServer.nextgi_get_tier_info(). Empty while nextgi/enabled is false.
+	static String get_tier_readout();
+
 	virtual String get_plugin_name() const override { return "NextGI"; }
 
 	NextGIEditorPlugin();

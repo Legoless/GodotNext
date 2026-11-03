@@ -1368,6 +1368,11 @@ public:
 	PASS1(environment_set_sdfgi_frames_to_converge, RSE::EnvironmentSDFGIFramesToConverge)
 	PASS1(environment_set_sdfgi_frames_to_update_light, RSE::EnvironmentSDFGIFramesToUpdateLight)
 
+	// GodotNext: nextgi_tier
+	PASS2(environment_set_nextgi_enabled, RID, bool)
+	PASS1(nextgi_set_hardware_ray_tracing, int)
+	PASS0RC(Dictionary, nextgi_get_tier_info)
+
 	// Adjustment
 	PASS7(environment_set_adjustment, RID, bool, float, float, float, bool, RID)
 

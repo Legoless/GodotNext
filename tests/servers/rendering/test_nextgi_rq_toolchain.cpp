@@ -126,10 +126,18 @@ TEST_CASE("[NextGI] Devices without ray query report NO_RAY_QUERY and skip the S
 	const bool pass = RendererRD::NextGI::run_toolchain_selftest(report);
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)) {
-		CHECK(report.contains("\"shader\":\"NextgiRqSelftestShaderRD\""));
-		CHECK(report.contains("\"pipeline\":"));
-		CHECK(report.contains("\"spirv_word\":\"0x"));
-		CHECK_EQ(pass, report.contains("\"pipeline\":true"));
+		// Ray-query ShaderRDs initialize only under the HWRT tier (#15).
+		RendererRD::NextGI *next_gi = RendererRD::NextGI::get_singleton();
+		if (next_gi != nullptr && next_gi->can_initialize_ray_query_shaders()) {
+			CHECK(report.contains("\"shader\":\"NextgiRqSelftestShaderRD\""));
+			CHECK(report.contains("\"pipeline\":"));
+			CHECK(report.contains("\"spirv_word\":\"0x"));
+			CHECK_EQ(pass, report.contains("\"pipeline\":true"));
+		} else {
+			CHECK_FALSE(pass);
+			CHECK(report.contains("\"pass\":false"));
+			CHECK_FALSE(report.contains("NextgiRqSelftestShaderRD"));
+		}
 	} else {
 		CHECK_FALSE(pass);
 		CHECK_EQ(report, String("{\"pass\":false,\"reason\":\"NO_RAY_QUERY\"}"));

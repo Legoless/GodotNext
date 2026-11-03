@@ -41,6 +41,8 @@ GODOTNEXT_RQ_SELFTEST=1 GODOTNEXT_SPIRV_DUMP_DIR=<dir> <bin> --path <project> --
 
 Set `rendering/shader_compiler/shader_cache/enabled` to false in that project. A shader-cache hit loads bytecode in `ShaderRD::_load_from_cache` and never calls `_compile_variant`, so the dump is skipped. The dump writes every `ShaderRD` variant that compiles, as `<dir>/<name>.v<variant>.<stage>.spv`. The self-test signal is the presence or absence of `NextgiRqSelftest*.spv`.
 
+Since #15 the self-test is a ray-query ShaderRD like any other, so it initializes only under the NextGI HWRT tier (plan §3.1). On a device with ray query, the project also needs `rendering/global_illumination/nextgi/enabled = true` and `hardware_ray_tracing` other than Off. Otherwise the report names the tier reason (for example `{"pass":false,"reason":"SETTING_OFF"}`) or `DISABLED`. A device without ray query still reports `NO_RAY_QUERY`. For a one-off run, put the setting in the project's `override.cfg`, as `godotnext/testbed/tests/tier/run_tier_check.sh` does.
+
 ### D5 source lint
 
 `rg` searches comments, so the forbidden tokens must not appear in the `.glsl` text at all. The pattern is:

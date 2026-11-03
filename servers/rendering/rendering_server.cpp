@@ -3104,6 +3104,10 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_sdfgi_frames_to_update_light", "frames"), &RenderingServer::environment_set_sdfgi_frames_to_update_light);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_volume_size", "size", "depth"), &RenderingServer::environment_set_volumetric_fog_volume_size);
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_filter_active", "active"), &RenderingServer::environment_set_volumetric_fog_filter_active);
+	// GodotNext: nextgi_tier
+	ClassDB::bind_method(D_METHOD("environment_set_nextgi_enabled", "env", "enable"), &RenderingServer::environment_set_nextgi_enabled);
+	ClassDB::bind_method(D_METHOD("nextgi_set_hardware_ray_tracing", "mode"), &RenderingServer::nextgi_set_hardware_ray_tracing);
+	ClassDB::bind_method(D_METHOD("nextgi_get_tier_info"), &RenderingServer::nextgi_get_tier_info);
 
 	ClassDB::bind_method(D_METHOD("environment_bake_panorama", "environment", "bake_irradiance", "size"), &RenderingServer::environment_bake_panorama);
 
@@ -3817,6 +3821,13 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/probe_ray_count", PROPERTY_HINT_ENUM, "8 (Fastest),16,32,64,96,128 (Slowest)"), 1);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_converge", PROPERTY_HINT_ENUM, "5 (Less Latency but Lower Quality),10,15,20,25,30 (More Latency but Higher Quality)"), 5);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_update_lights", PROPERTY_HINT_ENUM, "1 (Slower),2,4,8,16 (Faster)"), 2);
+
+	// GodotNext: nextgi_settings
+	GLOBAL_DEF_RST("rendering/global_illumination/nextgi/enabled", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing", PROPERTY_HINT_ENUM, "Auto,Off,Force"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium,High,Epic"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);

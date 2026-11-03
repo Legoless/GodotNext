@@ -41,6 +41,8 @@
 #include "servers/rendering/renderer_rd/effects/tone_mapper.h"
 #include "servers/rendering/renderer_rd/effects/vrs.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
+// GodotNext: nextgi_tier
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -122,6 +124,9 @@ protected:
 
 	RendererRD::SkyRD sky;
 	RendererRD::GI gi;
+	// GodotNext: nextgi_tier
+	RendererRD::NextGI next_gi;
+	virtual bool _nextgi_sdfgi_fallback() const override { return next_gi.is_sdfgi_fallback(); }
 
 	virtual void _update_shader_quality_settings() {}
 	static bool _debug_draw_can_use_effects(RSE::ViewportDebugDraw p_debug_draw);
@@ -208,6 +213,9 @@ public:
 	virtual void environment_set_sdfgi_ray_count(RSE::EnvironmentSDFGIRayCount p_ray_count) override;
 	virtual void environment_set_sdfgi_frames_to_converge(RSE::EnvironmentSDFGIFramesToConverge p_frames) override;
 	virtual void environment_set_sdfgi_frames_to_update_light(RSE::EnvironmentSDFGIFramesToUpdateLight p_update) override;
+	// GodotNext: nextgi_tier
+	virtual void nextgi_set_hardware_ray_tracing(int p_mode) override { next_gi.set_hardware_ray_tracing(p_mode); }
+	virtual Dictionary nextgi_get_tier_info() const override { return next_gi.get_tier_info(); }
 
 	virtual Ref<Image> environment_bake_panorama(RID p_env, bool p_bake_irradiance, const Size2i &p_size) override;
 

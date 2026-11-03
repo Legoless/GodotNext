@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/tier/tier_check.gd" id="1_tier"]
+
+[node name="TierCheck" type="Node"]
+script = ExtResource("1_tier")

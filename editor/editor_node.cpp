@@ -538,6 +538,8 @@ void EditorNode::_update_from_settings() {
 	RS::get_singleton()->environment_set_sdfgi_frames_to_converge(frames_to_converge);
 	RSE::EnvironmentSDFGIRayCount ray_count = RSE::EnvironmentSDFGIRayCount(int(GLOBAL_GET("rendering/global_illumination/sdfgi/probe_ray_count")));
 	RS::get_singleton()->environment_set_sdfgi_ray_count(ray_count);
+	// GodotNext: nextgi_tier
+	RS::get_singleton()->nextgi_set_hardware_ray_tracing(int(GLOBAL_GET("rendering/global_illumination/nextgi/hardware_ray_tracing")));
 	RSE::VoxelGIQuality voxel_gi_quality = RSE::VoxelGIQuality(int(GLOBAL_GET("rendering/global_illumination/voxel_gi/quality")));
 	RS::get_singleton()->voxel_gi_set_quality(voxel_gi_quality);
 	RS::get_singleton()->environment_set_volumetric_fog_volume_size(GLOBAL_GET("rendering/environment/volumetric_fog/volume_size"), GLOBAL_GET("rendering/environment/volumetric_fog/volume_depth"));

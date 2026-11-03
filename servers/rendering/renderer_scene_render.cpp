@@ -545,7 +545,8 @@ void RendererSceneRender::environment_set_sdfgi(RID p_env, bool p_enable, int p_
 }
 
 bool RendererSceneRender::environment_get_sdfgi_enabled(RID p_env) const {
-	return environment_storage.environment_get_sdfgi_enabled(p_env);
+	// GodotNext: nextgi_fallback
+	return environment_storage.environment_get_sdfgi_enabled(p_env) || (environment_storage.environment_get_nextgi_enabled(p_env) && _nextgi_sdfgi_fallback());
 }
 
 int RendererSceneRender::environment_get_sdfgi_cascades(RID p_env) const {
@@ -582,6 +583,25 @@ float RendererSceneRender::environment_get_sdfgi_probe_bias(RID p_env) const {
 
 RSE::EnvironmentSDFGIYScale RendererSceneRender::environment_get_sdfgi_y_scale(RID p_env) const {
 	return environment_storage.environment_get_sdfgi_y_scale(p_env);
+}
+
+// GodotNext: nextgi_tier
+void RendererSceneRender::environment_set_nextgi_enabled(RID p_env, bool p_enabled) {
+	environment_storage.environment_set_nextgi_enabled(p_env, p_enabled);
+}
+
+bool RendererSceneRender::environment_get_nextgi_enabled(RID p_env) const {
+	return environment_storage.environment_get_nextgi_enabled(p_env);
+}
+
+Dictionary RendererSceneRender::nextgi_get_tier_info() const {
+	// NextGI runs only on the Forward+ RD renderer (plan §3.1, tier matrix row 14).
+	Dictionary info;
+	info["tier"] = "UNSUPPORTED_RENDERER";
+	info["reason"] = "NONE";
+	info["quality"] = "NONE";
+	info["ray_query_shaders_initialized"] = 0;
+	return info;
 }
 
 // Adjustments

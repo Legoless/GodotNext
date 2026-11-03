@@ -36,6 +36,7 @@
 #include "editor/settings/editor_settings.h"
 #include "scene/gui/dialogs.h"
 #include "scene/scene_string_names.h"
+#include "servers/rendering/rendering_server.h"
 
 void NextGIEditorPlugin::_notification(int p_what) {
 	switch (p_what) {
@@ -112,6 +113,24 @@ String NextGIEditorPlugin::get_vulkan_switch_dialog_title() {
 String NextGIEditorPlugin::get_vulkan_switch_dialog_text() {
 	// P0 copy. Until the software tier lands, a d3d12 project with NextGI on still runs SDFGI.
 	return TTR("NextGI hardware RT is not yet available on Direct3D 12, so SDFGI is used; switching sets the Windows driver to Vulkan and keeps the Direct3D 12 fallback; Windows builds lose HDR output and DComp transparency; a restart is required.");
+}
+
+String NextGIEditorPlugin::format_tier_readout(const Dictionary &p_tier_info) {
+	const String tier = p_tier_info.get("tier", String());
+	const String reason = p_tier_info.get("reason", String());
+	if (reason.is_empty() || reason == "NONE") {
+		return vformat("NextGI: %s", tier);
+	}
+	return vformat("NextGI: %s (%s)", tier, reason);
+}
+
+String NextGIEditorPlugin::get_tier_readout() {
+	if (!GLOBAL_GET_CACHED(bool, "rendering/global_illumination/nextgi/enabled")) {
+		return String();
+	}
+	RenderingServer *rs = RenderingServer::get_singleton();
+	ERR_FAIL_NULL_V(rs, String());
+	return format_tier_readout(rs->nextgi_get_tier_info());
 }
 
 NextGIEditorPlugin::NextGIEditorPlugin() {

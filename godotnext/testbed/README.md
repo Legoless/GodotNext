@@ -35,6 +35,9 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
   colonnade, sun at 35° elevation and a procedural sky.
 - `scenes/legacy/` — NextGI-off baseline halls for SDFGI, VoxelGI and
   LightmapGI.
+- `tests/tier/` — the NextGI tier check (#15). `run_tier_check.sh`
+  enables NextGI for one run through `override.cfg` and runs
+  `tier_check.tscn`; the project itself keeps NextGI off.
 
 ## Conventions
 
@@ -53,4 +56,6 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
   no textures). Quality-scene walls: roughness 1.0, metallic 0,
   `metallic_specular` 0.
 - `PROVENANCE.md` lists every asset. Keep the tracked total ≤ 50 MB.
-- `harness/` belongs to #12 and `tests/` to #17; neither lives here yet.
+- `harness/` belongs to #12. `tests/rd_api/` belongs to #17.
+  `tests/tier/` is the #15 check above; its scene is a hand-written runner,
+  not generated content.

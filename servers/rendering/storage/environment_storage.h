@@ -172,6 +172,9 @@ private:
 		float sdfgi_probe_bias = 1.1;
 		RSE::EnvironmentSDFGIYScale sdfgi_y_scale = RSE::ENV_SDFGI_Y_SCALE_75_PERCENT;
 
+		// GodotNext: nextgi_tier
+		bool nextgi_enabled = false;
+
 		// Adjustments
 		bool adjustments_enabled = false;
 		float adjustments_brightness = 1.0f;
@@ -323,6 +326,10 @@ public:
 	float environment_get_sdfgi_normal_bias(RID p_env) const;
 	float environment_get_sdfgi_probe_bias(RID p_env) const;
 	RSE::EnvironmentSDFGIYScale environment_get_sdfgi_y_scale(RID p_env) const;
+
+	// GodotNext: nextgi_tier
+	void environment_set_nextgi_enabled(RID p_env, bool p_enabled);
+	bool environment_get_nextgi_enabled(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

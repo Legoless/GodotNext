@@ -898,6 +898,11 @@ public:
 	FUNC1(environment_set_sdfgi_frames_to_converge, RSE::EnvironmentSDFGIFramesToConverge)
 	FUNC1(environment_set_sdfgi_frames_to_update_light, RSE::EnvironmentSDFGIFramesToUpdateLight)
 
+	// GodotNext: nextgi_tier
+	FUNC2(environment_set_nextgi_enabled, RID, bool)
+	FUNC1(nextgi_set_hardware_ray_tracing, int)
+	FUNC0RC(Dictionary, nextgi_get_tier_info)
+
 	FUNC3R(Ref<Image>, environment_bake_panorama, RID, bool, const Size2i &)
 
 	FUNC3(screen_space_roughness_limiter_set_active, bool, float, float)

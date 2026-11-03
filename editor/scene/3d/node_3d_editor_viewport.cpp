@@ -51,6 +51,8 @@
 #include "editor/editor_undo_redo_manager.h"
 #include "editor/plugins/editor_plugin_list.h"
 #include "editor/run/editor_run_bar.h"
+// GodotNext: nextgi_readout
+#include "editor/scene/3d/nextgi_editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_constants.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 #include "editor/scene/3d/node_3d_editor_plugin.h"
@@ -3736,6 +3738,11 @@ void Node3DEditorViewport::_notification(int p_what) {
 				text += vformat(TTR("Objects: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_OBJECTS_IN_FRAME)) + "\n";
 				text += vformat(TTR("Primitives: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_PRIMITIVES_IN_FRAME)) + "\n";
 				text += vformat(TTR("Draw Calls: %d"), viewport->get_render_info(Viewport::RENDER_INFO_TYPE_VISIBLE, Viewport::RENDER_INFO_DRAW_CALLS_IN_FRAME));
+				// GodotNext: nextgi_readout
+				const String nextgi_readout = NextGIEditorPlugin::get_tier_readout();
+				if (!nextgi_readout.is_empty()) {
+					text += "\n" + nextgi_readout;
+				}
 
 				info_label->set_text(text);
 			}

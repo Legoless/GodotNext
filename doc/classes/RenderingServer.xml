@@ -1408,6 +1408,14 @@
 				Configures glow for the specified environment RID. See [code]glow_*[/code] properties in [Environment] for more information.
 			</description>
 		</method>
+		<method name="environment_set_nextgi_enabled">
+			<return type="void" />
+			<param index="0" name="env" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<description>
+				Sets whether the specified environment RID uses NextGI. See [member Environment.nextgi_enabled] for more information.
+			</description>
+		</method>
 		<method name="environment_set_sdfgi">
 			<return type="void" />
 			<param index="0" name="env" type="RID" />
@@ -3010,6 +3018,23 @@
 			<param index="1" name="visible" type="int" />
 			<description>
 				Sets the number of instances visible at a given time. If -1, all instances that have been allocated are drawn. Equivalent to [member MultiMesh.visible_instance_count].
+			</description>
+		</method>
+		<method name="nextgi_get_tier_info" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns the NextGI tier selected for the rendering device, as a [Dictionary] with these keys:
+				- [code]tier[/code]: [code]"HWRT"[/code] (hardware ray tracing), [code]"FALLBACK"[/code] (environments with [member Environment.nextgi_enabled] run SDFGI), [code]"DISABLED"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/enabled] is [code]false[/code]) or [code]"UNSUPPORTED_RENDERER"[/code] (any rendering method other than Forward+).
+				- [code]reason[/code]: why hardware ray tracing was not selected, or [code]"NONE"[/code]. One of [code]"NO_RAY_QUERY"[/code], [code]"NOT_HW_ACCELERATED"[/code], [code]"CPU_DEVICE"[/code], [code]"D3D12_NO_DXR"[/code], [code]"METAL_SYNC_MODE"[/code], [code]"METAL_NO_ARGUMENT_BUFFERS"[/code], [code]"SETTING_OFF"[/code], [code]"AS_MEMORY"[/code], [code]"SELFTEST_FAILED"[/code] or [code]"HWRT_FAULTED"[/code].
+				- [code]quality[/code]: the resolved quality preset ([code]"MEDIUM"[/code], [code]"HIGH"[/code] or [code]"EPIC"[/code]), or [code]"NONE"[/code] when NextGI is disabled or unsupported.
+				- [code]ray_query_shaders_initialized[/code]: the number of ray-query shader versions NextGI has created. They are only created on the [code]HWRT[/code] tier.
+			</description>
+		</method>
+		<method name="nextgi_set_hardware_ray_tracing">
+			<return type="void" />
+			<param index="0" name="mode" type="int" />
+			<description>
+				Sets [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing] at runtime ([code]0[/code] Auto, [code]1[/code] Off, [code]2[/code] Force) and selects the NextGI tier again. A changed tier is printed as a new [code]NextGI:[/code] line.
 			</description>
 		</method>
 		<method name="occluder_create">

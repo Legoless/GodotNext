@@ -3099,6 +3099,25 @@
 			If [code]true[/code], renders [VoxelGI] and SDFGI ([member Environment.sdfgi_enabled]) buffers at halved resolution (e.g. 960×540 when the viewport size is 1920×1080). This improves performance significantly when VoxelGI or SDFGI is enabled, at the cost of artifacts that may be visible on polygon edges. The loss in quality becomes less noticeable as the viewport resolution increases. [LightmapGI] rendering is not affected by this setting.
 			[b]Note:[/b] This property is only read when the project starts. To set half-resolution GI at run-time, call [method RenderingServer.gi_set_use_half_resolution] instead.
 		</member>
+		<member name="rendering/global_illumination/nextgi/enabled" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use SDFGI instead. See [method RenderingServer.nextgi_get_tier_info].
+			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed and rendering is unchanged.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
+		<member name="rendering/global_illumination/nextgi/hardware_ray_tracing" type="int" setter="" getter="" default="0">
+			Whether NextGI may use hardware ray tracing. [b]Auto[/b] uses it where the rendering device supports hardware-accelerated ray queries. [b]Off[/b] always uses the fallback, with the reason [code]SETTING_OFF[/code]. [b]Force[/b] also uses ray queries on devices that are not known to be hardware accelerated, including CPU devices, and ignores a latched hardware ray-tracing fault. On a device without ray queries, [b]Force[/b] falls back with one warning.
+			[b]Note:[/b] To change this at runtime, call [method RenderingServer.nextgi_set_hardware_ray_tracing].
+		</member>
+		<member name="rendering/global_illumination/nextgi/quality" type="int" setter="" getter="" default="0">
+			The NextGI quality preset. [b]Auto[/b] currently resolves to [b]High[/b]; automatic selection from a startup benchmark is not implemented yet.
+			[b]Note:[/b] This property is only read when the project starts.
+		</member>
+		<member name="rendering/global_illumination/nextgi/rt_max_error" type="float" setter="" getter="" default="0.02">
+			The world-space bound, in meters at import scale, on the error of the ray-tracing proxy geometry that NextGI traces against.
+		</member>
+		<member name="rendering/global_illumination/nextgi/rt_scene_radius" type="float" setter="" getter="" default="200.0">
+			The radius, in meters around the main camera, within which instances are added to the NextGI ray-tracing scene.
+		</member>
 		<member name="rendering/global_illumination/sdfgi/frames_to_converge" type="int" setter="" getter="" default="5">
 			The number of frames to use for converging signed distance field global illumination. Higher values lead to a less noisy result, at the cost of taking a longer time to fully converge. This means the scene's global illumination will be too dark for a longer period of time, especially when the camera moves fast. The actual convergence speed depends on rendered framerate. For example, with the default setting of 30 frames, rendering at 60 FPS will make SDFGI fully converge after 0.5 seconds. See also [member rendering/global_illumination/sdfgi/frames_to_update_lights] and [member rendering/global_illumination/sdfgi/probe_ray_count].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI convergence speed at runtime, call [method RenderingServer.environment_set_sdfgi_frames_to_converge] instead.
