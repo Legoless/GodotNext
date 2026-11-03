@@ -45,6 +45,8 @@ class WorldEnvironment : public Node {
 	void _update_current_environment();
 	void _update_current_camera_attributes();
 	void _update_current_compositor();
+	// GodotNext: nextgi_user_surface
+	void _environment_changed();
 
 protected:
 	void _notification(int p_what);

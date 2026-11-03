@@ -33,10 +33,16 @@
 #include "core/config/project_settings.h"
 #include "core/io/file_access.h"
 #include "core/object/callable_mp.h"
+#include "core/os/os.h"
 #include "editor/editor_node.h"
 #include "editor/file_system/editor_file_system.h"
 #include "editor/settings/editor_settings.h"
+#include "scene/3d/world_environment.h"
+#include "scene/gui/box_container.h"
+#include "scene/gui/button.h"
 #include "scene/gui/dialogs.h"
+#include "scene/gui/label.h"
+#include "scene/resources/environment.h"
 #include "scene/scene_string_names.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -167,6 +173,14 @@ String NextGIEditorPlugin::get_vulkan_switch_dialog_title() {
 	return TTR("Use Vulkan on Windows for hardware RT");
 }
 
+bool NextGIEditorPlugin::should_show_inspector_vulkan_button(const String &p_host_os, const String &p_driver_windows) {
+	return p_host_os == "Windows" && p_driver_windows == "d3d12";
+}
+
+String NextGIEditorPlugin::format_status_panel(const Dictionary &p_status) {
+	return vformat("NextGI %s (%s), quality %s (%s), driver %s", String(p_status.get("tier", String())), String(p_status.get("reason", String())), String(p_status.get("quality", String())), String(p_status.get("quality_reason", String())), String(p_status.get("driver", String())));
+}
+
 String NextGIEditorPlugin::get_vulkan_switch_dialog_text() {
 	// P0 copy. Until the software tier lands, a d3d12 project with NextGI on still runs SDFGI.
 	return TTR("NextGI hardware RT is not yet available on Direct3D 12, so SDFGI is used; switching sets the Windows driver to Vulkan and keeps the Direct3D 12 fallback; Windows builds lose HDR output and DComp transparency; a restart is required.");
@@ -216,4 +230,82 @@ NextGIEditorPlugin::NextGIEditorPlugin() {
 	mesh_sdf_dialog->set_ok_button_text(TTR("Enable and Reimport"));
 	mesh_sdf_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIEditorPlugin::_mesh_sdf_confirmed));
 	add_child(mesh_sdf_dialog);
+
+	// GodotNext: nextgi_user_surface
+	Ref<EditorInspectorPluginNextGI> inspector_plugin;
+	inspector_plugin.instantiate();
+	add_inspector_plugin(inspector_plugin);
+}
+
+// GodotNext: nextgi_user_surface
+// The status panel and the Windows-only Vulkan button. The button never switches by itself:
+// confirm applies the #23 helper, then a second dialog offers the restart.
+
+class NextGIStatusPanel : public VBoxContainer {
+	GDCLASS(NextGIStatusPanel, VBoxContainer);
+
+	ConfirmationDialog *switch_dialog = nullptr;
+	ConfirmationDialog *restart_dialog = nullptr;
+
+	void _switch_pressed() {
+		switch_dialog->popup_centered();
+	}
+
+	void _switch_confirmed() {
+		NextGIEditorPlugin::apply_vulkan_switch();
+		restart_dialog->popup_centered();
+	}
+
+	void _restart_confirmed() {
+		EditorNode *editor = EditorNode::get_singleton();
+		ERR_FAIL_NULL(editor);
+		editor->restart_editor();
+	}
+
+protected:
+	static void _bind_methods() {}
+
+public:
+	NextGIStatusPanel() {
+		Label *status = memnew(Label);
+		status->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+		status->set_text(NextGIEditorPlugin::format_status_panel(RenderingServer::get_singleton()->nextgi_get_status()));
+		add_child(status);
+
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		const String driver = ps ? String(ps->get_setting("rendering/rendering_device/driver.windows", "vulkan")) : String("vulkan");
+		const String host_os = OS::get_singleton() ? OS::get_singleton()->get_name() : String();
+		if (!NextGIEditorPlugin::should_show_inspector_vulkan_button(host_os, driver)) {
+			return;
+		}
+
+		Button *button = memnew(Button);
+		button->set_text(NextGIEditorPlugin::get_vulkan_switch_dialog_title());
+		button->connect(SceneStringName(pressed), callable_mp(this, &NextGIStatusPanel::_switch_pressed));
+		add_child(button);
+
+		switch_dialog = memnew(ConfirmationDialog);
+		switch_dialog->set_title(NextGIEditorPlugin::get_vulkan_switch_dialog_title());
+		switch_dialog->set_text(NextGIEditorPlugin::get_vulkan_switch_dialog_text());
+		switch_dialog->set_autowrap(true);
+		switch_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIStatusPanel::_switch_confirmed));
+		add_child(switch_dialog);
+
+		restart_dialog = memnew(ConfirmationDialog);
+		restart_dialog->set_title(TTR("Restart Editor"));
+		restart_dialog->set_text(TTR("The Windows driver is now Vulkan, and the Direct3D 12 fallback stays on. Restart the editor to apply the change."));
+		restart_dialog->set_autowrap(true);
+		restart_dialog->set_ok_button_text(TTR("Restart"));
+		restart_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIStatusPanel::_restart_confirmed));
+		add_child(restart_dialog);
+	}
+};
+
+bool EditorInspectorPluginNextGI::can_handle(Object *p_object) {
+	return Object::cast_to<Environment>(p_object) != nullptr || Object::cast_to<WorldEnvironment>(p_object) != nullptr;
+}
+
+void EditorInspectorPluginNextGI::parse_begin(Object *p_object) {
+	ERR_FAIL_NULL(p_object);
+	add_custom_control(memnew(NextGIStatusPanel));
 }

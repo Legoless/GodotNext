@@ -30,9 +30,11 @@
 
 #pragma once
 
+#include "core/math/color.h"
 #include "core/math/vector2i.h"
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
+#include "core/templates/vector.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/rendering_device_enums.h"
 
@@ -211,6 +213,43 @@ public:
 	bool is_sdfgi_fallback() const { return result.tier == TIER_FALLBACK; }
 	// {tier, reason, quality, ray_query_shaders_initialized}, the names as in the printed line.
 	Dictionary get_tier_info() const;
+
+	// GodotNext: nextgi_user_surface
+	// {tier, reason, quality, quality_reason, driver}. reason is only a §6.3 tier reason.
+	Dictionary get_status() const;
+	// Counters whose producer has not merged are 0. TLAS instances come from the RT scene.
+	Dictionary get_counters() const;
+
+	enum DebugViewId {
+		DEBUG_VIEW_TIER,
+		DEBUG_VIEW_TLAS_HEAT,
+		DEBUG_VIEW_BLAS_COST,
+		DEBUG_VIEW_HIT_INSTANCE,
+		DEBUG_VIEW_RT_PROXY,
+		DEBUG_VIEW_SRC_CARDS,
+		DEBUG_VIEW_WRC_PROBES,
+		DEBUG_VIEW_CARD_COVERAGE,
+		DEBUG_VIEW_SCREEN_PROBES,
+		DEBUG_VIEW_FALLBACK_REASONS,
+		DEBUG_VIEW_MAX,
+	};
+
+	struct DebugView {
+		Color tint;
+		String label;
+		bool has_data = false;
+	};
+
+	static Color debug_tint_hwrt() { return Color(0.15, 0.72, 0.28); }
+	static Color debug_tint_fallback() { return Color(0.90, 0.55, 0.08); }
+	static Color debug_tint_no_data() { return Color(0.25, 0.28, 0.35); }
+
+	// Maps a ViewportDebugDraw value. DEBUG_VIEW_MAX means it is not a NextGI view.
+	static DebugViewId debug_view_from_viewport(int p_viewport_debug_draw);
+	// Tier view uses the green or amber tint. Every other view is a "no data" tint until its producer merges.
+	static DebugView resolve_debug_view(DebugViewId p_view, const TierResult &p_result);
+	static bool is_tier_reason_name(const String &p_name);
+	static Vector<String> get_instance_fallback_reason_names();
 
 	// Whether a view runs the frame block (plan §6.1): the HWRT tier, an Environment with
 	// nextgi_enabled, and neither a reflection-probe render nor the unshaded debug draw.

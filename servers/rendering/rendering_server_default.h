@@ -615,6 +615,10 @@ public:
 
 	FUNC0(sdfgi_reset)
 
+	// GodotNext: nextgi_user_surface
+	FUNC0RC(Dictionary, nextgi_get_status)
+	FUNC0RC(Dictionary, nextgi_get_counters)
+
 	/* PARTICLES */
 
 #undef ServerName
@@ -900,6 +904,11 @@ public:
 
 	// GodotNext: nextgi_tier
 	FUNC2(environment_set_nextgi_enabled, RID, bool)
+	// GodotNext: nextgi_user_surface
+	FUNC4(environment_set_nextgi, RID, bool, float, bool)
+	FUNC1RC(bool, environment_get_nextgi_enabled, RID)
+	FUNC1RC(float, environment_get_nextgi_energy, RID)
+	FUNC1RC(bool, environment_get_nextgi_read_sky_light, RID)
 	FUNC1(nextgi_set_hardware_ray_tracing, int)
 	FUNC0RC(Dictionary, nextgi_get_tier_info)
 

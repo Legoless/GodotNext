@@ -767,6 +767,46 @@
 			Draws the atlas used by [AreaLight3D] nodes in the upper left quadrant of the [Viewport].
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_TIER" value="29" enum="DebugDraw">
+			Fills the viewport with a green tint when the NextGI tier is hardware ray tracing, or an amber tint on the fallback tier, labeled with the tier and its reason.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_TLAS_HEAT" value="30" enum="DebugDraw">
+			NextGI TLAS heat. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_BLAS_COST" value="31" enum="DebugDraw">
+			NextGI BLAS cost. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_HIT_INSTANCE" value="32" enum="DebugDraw">
+			NextGI hit instance. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_RT_PROXY" value="33" enum="DebugDraw">
+			NextGI ray-tracing proxy against the raster mesh. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_SRC_CARDS" value="34" enum="DebugDraw">
+			NextGI surface-cache cards and relight age. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_WRC_PROBES" value="35" enum="DebugDraw">
+			NextGI world radiance cache probes. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_CARD_COVERAGE" value="36" enum="DebugDraw">
+			NextGI card coverage. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_SCREEN_PROBES" value="37" enum="DebugDraw">
+			NextGI screen probes. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_FALLBACK_REASONS" value="38" enum="DebugDraw">
+			NextGI per-instance fallback reasons, including [code]NOT_IN_RT_SCENE[/code], [code]RT_INSTANCE_CAP[/code] and [code]RT_DYNAMIC_EXCLUDED[/code]. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

@@ -32,6 +32,7 @@
 
 // GodotNext: nextgi_rt_scene
 #include "core/config/project_settings.h"
+#include "core/os/os.h"
 #include "core/string/print_string.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
@@ -40,6 +41,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
@@ -300,6 +302,99 @@ void NextGI::_ensure_rt_scene() {
 void NextGI::notify_ray_query_shader_initialized() {
 	ERR_FAIL_COND_MSG(!can_initialize_ray_query_shaders(), "Ray-query ShaderRDs are initialized only under the NextGI HWRT tier.");
 	ray_query_shaders_initialized++;
+}
+
+Dictionary NextGI::get_status() const {
+	Dictionary status;
+	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
+	status["tier"] = get_tier_name(result.tier);
+	status["reason"] = get_reason_name(result.reason);
+	status["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
+	if (!active) {
+		status["quality_reason"] = "NONE";
+	} else if (quality_setting == QUALITY_AUTO) {
+		status["quality_reason"] = "auto selection pending";
+	} else {
+		status["quality_reason"] = "setting";
+	}
+	String driver;
+	if (OS::get_singleton()) {
+		driver = OS::get_singleton()->get_current_rendering_driver_name();
+	}
+	status["driver"] = driver;
+	return status;
+}
+
+Dictionary NextGI::get_counters() const {
+	Dictionary counters = RendererGI::nextgi_zero_counters();
+	// GodotNext: nextgi_rt_scene
+	if (rt_scene != nullptr) {
+		counters["tlas_instances"] = int64_t(rt_scene->get_stats().instance_count);
+	}
+	return counters;
+}
+
+NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) {
+	switch (static_cast<RSE::ViewportDebugDraw>(p_viewport_debug_draw)) {
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TIER:
+			return DEBUG_VIEW_TIER;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TLAS_HEAT:
+			return DEBUG_VIEW_TLAS_HEAT;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_BLAS_COST:
+			return DEBUG_VIEW_BLAS_COST;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_HIT_INSTANCE:
+			return DEBUG_VIEW_HIT_INSTANCE;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_RT_PROXY:
+			return DEBUG_VIEW_RT_PROXY;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SRC_CARDS:
+			return DEBUG_VIEW_SRC_CARDS;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WRC_PROBES:
+			return DEBUG_VIEW_WRC_PROBES;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_CARD_COVERAGE:
+			return DEBUG_VIEW_CARD_COVERAGE;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SCREEN_PROBES:
+			return DEBUG_VIEW_SCREEN_PROBES;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_FALLBACK_REASONS:
+			return DEBUG_VIEW_FALLBACK_REASONS;
+		default:
+			return DEBUG_VIEW_MAX;
+	}
+}
+
+NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResult &p_result) {
+	DebugView view;
+	if (p_view == DEBUG_VIEW_TIER) {
+		view.has_data = true;
+		view.tint = p_result.tier == TIER_HWRT ? debug_tint_hwrt() : debug_tint_fallback();
+		view.label = vformat("%s %s", get_tier_name(p_result.tier), get_reason_name(p_result.reason));
+		return view;
+	}
+
+	view.has_data = false;
+	view.tint = debug_tint_no_data();
+	view.label = "no data";
+	if (p_view == DEBUG_VIEW_FALLBACK_REASONS) {
+		// The per-instance reasons are the legend of this view. They are not tier reasons.
+		view.label = "no data: NOT_IN_RT_SCENE, RT_INSTANCE_CAP, RT_DYNAMIC_EXCLUDED";
+	}
+	return view;
+}
+
+bool NextGI::is_tier_reason_name(const String &p_name) {
+	for (int i = 0; i < TIER_REASON_MAX; i++) {
+		if (p_name == _nextgi_reason_names[i]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+Vector<String> NextGI::get_instance_fallback_reason_names() {
+	Vector<String> names;
+	names.push_back("NOT_IN_RT_SCENE");
+	names.push_back("RT_INSTANCE_CAP");
+	names.push_back("RT_DYNAMIC_EXCLUDED");
+	return names;
 }
 
 Dictionary NextGI::get_tier_info() const {

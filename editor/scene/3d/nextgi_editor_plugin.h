@@ -30,9 +30,12 @@
 
 #pragma once
 
+#include "editor/inspector/editor_inspector.h"
 #include "editor/plugins/editor_plugin.h"
 
 class ConfirmationDialog;
+class Environment;
+class WorldEnvironment;
 
 // One-time Vulkan switch for existing d3d12 projects. #34 adds the inspector status panel to this plugin.
 class NextGIEditorPlugin : public EditorPlugin {
@@ -67,6 +70,11 @@ public:
 	static String get_vulkan_switch_dialog_title();
 	static String get_vulkan_switch_dialog_text();
 
+	// GodotNext: nextgi_user_surface
+	// The inspector button is host-OS gated. The one-time project modal is not.
+	static bool should_show_inspector_vulkan_button(const String &p_host_os, const String &p_driver_windows);
+	static String format_status_panel(const Dictionary &p_status);
+
 	// GodotNext: mesh_sdf_offer
 	// True only on a false-to-true flip of nextgi/enabled while mesh distance
 	// field generation is off and this project has not been asked before (#184).
@@ -83,4 +91,13 @@ public:
 	virtual String get_plugin_name() const override { return "NextGI"; }
 
 	NextGIEditorPlugin();
+};
+
+// GodotNext: nextgi_user_surface
+class EditorInspectorPluginNextGI : public EditorInspectorPlugin {
+	GDCLASS(EditorInspectorPluginNextGI, EditorInspectorPlugin);
+
+public:
+	virtual bool can_handle(Object *p_object) override;
+	virtual void parse_begin(Object *p_object) override;
 };

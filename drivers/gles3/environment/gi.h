@@ -81,6 +81,10 @@ public:
 	virtual uint32_t voxel_gi_get_version(RID p_voxel_gi) const override;
 
 	virtual void sdfgi_reset() override;
+
+	// GodotNext: nextgi_user_surface
+	virtual Dictionary nextgi_get_status() const override { return nextgi_unavailable_status(); }
+	virtual Dictionary nextgi_get_counters() const override { return nextgi_zero_counters(); }
 };
 
 }; // namespace GLES3

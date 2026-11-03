@@ -398,6 +398,23 @@ void GI::sdfgi_reset() {
 	sdfgi_current_version++;
 }
 
+// GodotNext: nextgi_user_surface
+Dictionary GI::nextgi_get_status() const {
+	NextGI *next_gi = NextGI::get_singleton();
+	if (next_gi == nullptr) {
+		return nextgi_unavailable_status();
+	}
+	return next_gi->get_status();
+}
+
+Dictionary GI::nextgi_get_counters() const {
+	NextGI *next_gi = NextGI::get_singleton();
+	if (next_gi == nullptr) {
+		return nextgi_zero_counters();
+	}
+	return next_gi->get_counters();
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // SDFGI
 

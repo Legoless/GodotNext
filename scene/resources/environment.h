@@ -164,6 +164,10 @@ private:
 
 	// GodotNext: nextgi_tier
 	bool nextgi_enabled = false;
+	// GodotNext: nextgi_user_surface
+	float nextgi_energy = 1.0;
+	bool nextgi_read_sky_light = true;
+	void _update_nextgi();
 
 	// Glow
 	bool glow_enabled = false;
@@ -355,6 +359,11 @@ public:
 	// GodotNext: nextgi_tier
 	void set_nextgi_enabled(bool p_enabled);
 	bool is_nextgi_enabled() const;
+	// GodotNext: nextgi_user_surface
+	void set_nextgi_energy(float p_energy);
+	float get_nextgi_energy() const;
+	void set_nextgi_read_sky_light(bool p_enabled);
+	bool is_nextgi_reading_sky_light() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

@@ -3021,6 +3021,19 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_OCCLUDERS);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_INTERNAL_BUFFER);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_CLUSTER_AREA_LIGHTS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_AREA_LIGHT_ATLAS);
+	// GodotNext: nextgi_user_surface
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TIER);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TLAS_HEAT);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_BLAS_COST);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_HIT_INSTANCE);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_RT_PROXY);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SRC_CARDS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WRC_PROBES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_CARD_COVERAGE);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SCREEN_PROBES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_FALLBACK_REASONS);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -3106,6 +3119,13 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("environment_set_volumetric_fog_filter_active", "active"), &RenderingServer::environment_set_volumetric_fog_filter_active);
 	// GodotNext: nextgi_tier
 	ClassDB::bind_method(D_METHOD("environment_set_nextgi_enabled", "env", "enable"), &RenderingServer::environment_set_nextgi_enabled);
+	// GodotNext: nextgi_user_surface
+	ClassDB::bind_method(D_METHOD("environment_set_nextgi", "env", "enable", "energy", "read_sky"), &RenderingServer::environment_set_nextgi);
+	ClassDB::bind_method(D_METHOD("environment_get_nextgi_enabled", "env"), &RenderingServer::environment_get_nextgi_enabled);
+	ClassDB::bind_method(D_METHOD("environment_get_nextgi_energy", "env"), &RenderingServer::environment_get_nextgi_energy);
+	ClassDB::bind_method(D_METHOD("environment_get_nextgi_read_sky_light", "env"), &RenderingServer::environment_get_nextgi_read_sky_light);
+	ClassDB::bind_method(D_METHOD("nextgi_get_status"), &RenderingServer::nextgi_get_status);
+	ClassDB::bind_method(D_METHOD("nextgi_get_counters"), &RenderingServer::nextgi_get_counters);
 	ClassDB::bind_method(D_METHOD("nextgi_set_hardware_ray_tracing", "mode"), &RenderingServer::nextgi_set_hardware_ray_tracing);
 	ClassDB::bind_method(D_METHOD("nextgi_get_tier_info"), &RenderingServer::nextgi_get_tier_info);
 

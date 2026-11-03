@@ -125,6 +125,14 @@ TEST_CASE("[NextGI][Editor] apply_vulkan_switch writes vulkan and keeps the D3D1
 	DirAccess::remove_absolute(temp_path.path_join("project.godot"));
 }
 
+TEST_CASE("[NextGI][Editor] The inspector Vulkan button is Windows and d3d12 only") {
+	CHECK(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "d3d12"));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("macOS", "d3d12"));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Linux", "d3d12"));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "vulkan"));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", ""));
+}
+
 TEST_CASE("[NextGI][Editor] Vulkan switch dialog names the HDR and DComp cost") {
 	TranslationServer::get_singleton()->set_locale("en");
 
@@ -166,7 +174,10 @@ TEST_CASE("[NextGI][Editor] View Information tier readout") {
 
 // Renderer-independent cases: the SDFGI fallback hook and the default (GLES3 and dummy) tier info.
 
+#include "scene/3d/world_environment.h"
+#include "scene/resources/environment.h"
 #include "servers/rendering/dummy/rasterizer_scene_dummy.h"
+#include "servers/rendering/rendering_server.h"
 
 namespace TestNextGI {
 
@@ -212,6 +223,91 @@ TEST_CASE("[NextGI] Renderers without NextGI report UNSUPPORTED_RENDERER") {
 	CHECK_EQ(String(info["reason"]), "NONE");
 	CHECK_EQ(String(info["quality"]), "NONE");
 	CHECK_EQ(int(info["ray_query_shaders_initialized"]), 0);
+}
+
+TEST_CASE("[NextGI] RenderingServer round-trips nextgi energy and sky light on the dummy renderer") {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	const RID env = rs->environment_create();
+	CHECK_FALSE(rs->environment_get_nextgi_enabled(env));
+	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_energy(env), 1.0f));
+	CHECK(rs->environment_get_nextgi_read_sky_light(env));
+
+	rs->environment_set_nextgi(env, true, 0.35f, false);
+	CHECK(rs->environment_get_nextgi_enabled(env));
+	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_energy(env), 0.35f));
+	CHECK_FALSE(rs->environment_get_nextgi_read_sky_light(env));
+
+	// The enable-only setter keeps the energy and the sky-light read.
+	rs->environment_set_nextgi_enabled(env, false);
+	CHECK_FALSE(rs->environment_get_nextgi_enabled(env));
+	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_energy(env), 0.35f));
+	CHECK_FALSE(rs->environment_get_nextgi_read_sky_light(env));
+
+	Ref<Environment> resource;
+	resource.instantiate();
+	resource->set_nextgi_energy(2.5f);
+	resource->set_nextgi_read_sky_light(false);
+	resource->set_nextgi_enabled(true);
+	CHECK(Math::is_equal_approx(resource->get_nextgi_energy(), 2.5f));
+	CHECK_FALSE(resource->is_nextgi_reading_sky_light());
+	CHECK(rs->environment_get_nextgi_enabled(resource->get_rid()));
+	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_energy(resource->get_rid()), 2.5f));
+	CHECK_FALSE(rs->environment_get_nextgi_read_sky_light(resource->get_rid()));
+
+	rs->free_rid(env);
+}
+
+TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero") {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	const Dictionary status = rs->nextgi_get_status();
+	CHECK_EQ(String(status["tier"]), "FALLBACK");
+	CHECK_EQ(String(status["reason"]), "SETTING_OFF");
+	CHECK_EQ(String(status["quality"]), "NONE");
+	CHECK_EQ(String(status["quality_reason"]), "NONE");
+	CHECK(status.has("driver"));
+	// Per-instance reasons never ride in the tier status.
+	CHECK_NE(String(status["reason"]), "NOT_IN_RT_SCENE");
+	CHECK_NE(String(status["reason"]), "RT_INSTANCE_CAP");
+	CHECK_NE(String(status["reason"]), "RT_DYNAMIC_EXCLUDED");
+
+	const Dictionary counters = rs->nextgi_get_counters();
+	const char *keys[] = {
+		"tlas_instances",
+		"rt_coverage",
+		"blas_bytes_compacted",
+		"blas_bytes_uncompacted",
+		"rt_arena_bytes",
+		"skinned_refit_triangles",
+		"rays_per_pass",
+		"src_capture_texels",
+		"src_relight_texels",
+		"src_shadow_rays",
+		"dirty_aabb",
+		"src_page_updates",
+		"clamped_energy_fraction",
+	};
+	CHECK_EQ(counters.size(), 13);
+	for (const char *key : keys) {
+		CHECK(counters.has(key));
+		CHECK_EQ(int64_t(counters[key]), int64_t(0));
+	}
+}
+
+TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT tier") {
+	Ref<Environment> env;
+	env.instantiate();
+	env->set_nextgi_enabled(true);
+	WorldEnvironment *world = memnew(WorldEnvironment);
+	world->set_environment(env);
+	const PackedStringArray warnings = world->get_configuration_warnings();
+	bool found = false;
+	for (const String &warning : warnings) {
+		if (warning.contains("FALLBACK") && warning.contains("SETTING_OFF")) {
+			found = true;
+		}
+	}
+	CHECK(found);
+	memdelete(world);
 }
 
 } // namespace TestNextGI
@@ -570,6 +666,54 @@ TEST_CASE("[NextGI] Ray-query ShaderRDs initialize only under the HWRT tier") {
 	CHECK_FALSE(next_gi.can_initialize_ray_query_shaders());
 	CHECK_FALSE(next_gi.is_sdfgi_fallback());
 	CHECK_EQ(String(next_gi.get_tier_info()["quality"]), "NONE");
+}
+
+TEST_CASE("[NextGI] Status reason stays a tier reason, and the tier view tints NO_RAY_QUERY") {
+	NextGI next_gi;
+	String line;
+	next_gi.update_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::QUALITY_AUTO, line);
+
+	const Dictionary status = next_gi.get_status();
+	CHECK_EQ(String(status["tier"]), "FALLBACK");
+	CHECK_EQ(String(status["reason"]), "NO_RAY_QUERY");
+	CHECK_EQ(String(status["quality"]), "HIGH");
+	CHECK_EQ(String(status["quality_reason"]), "auto selection pending");
+	CHECK(NextGI::is_tier_reason_name(status["reason"]));
+	for (const String &instance_reason : NextGI::get_instance_fallback_reason_names()) {
+		CHECK_FALSE(NextGI::is_tier_reason_name(instance_reason));
+		CHECK_NE(String(status["reason"]), instance_reason);
+	}
+
+	const NextGI::DebugView tier_view = NextGI::resolve_debug_view(NextGI::DEBUG_VIEW_TIER, next_gi.get_tier_result());
+	CHECK(tier_view.has_data);
+	CHECK(tier_view.tint.is_equal_approx(NextGI::debug_tint_fallback()));
+	CHECK(tier_view.label.contains("NO_RAY_QUERY"));
+	CHECK(tier_view.label.contains("FALLBACK"));
+
+	NextGI::TierResult hwrt;
+	hwrt.tier = NextGI::TIER_HWRT;
+	hwrt.reason = NextGI::TIER_REASON_NONE;
+	const NextGI::DebugView hwrt_view = NextGI::resolve_debug_view(NextGI::DEBUG_VIEW_TIER, hwrt);
+	CHECK(hwrt_view.tint.is_equal_approx(NextGI::debug_tint_hwrt()));
+	CHECK(hwrt_view.label.contains("HWRT"));
+
+	const NextGI::DebugView cards = NextGI::resolve_debug_view(NextGI::DEBUG_VIEW_SRC_CARDS, next_gi.get_tier_result());
+	CHECK_FALSE(cards.has_data);
+	CHECK(cards.tint.is_equal_approx(NextGI::debug_tint_no_data()));
+	CHECK(cards.label == "no data");
+
+	const NextGI::DebugView reasons = NextGI::resolve_debug_view(NextGI::DEBUG_VIEW_FALLBACK_REASONS, next_gi.get_tier_result());
+	CHECK(reasons.label.contains("no data"));
+	CHECK(reasons.label.contains("NOT_IN_RT_SCENE"));
+	CHECK(reasons.label.contains("RT_INSTANCE_CAP"));
+	CHECK(reasons.label.contains("RT_DYNAMIC_EXCLUDED"));
+
+	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TIER), NextGI::DEBUG_VIEW_TIER);
+	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_DISABLED), NextGI::DEBUG_VIEW_MAX);
+
+	const Dictionary counters = next_gi.get_counters();
+	CHECK_EQ(int64_t(counters["tlas_instances"]), int64_t(0));
+	CHECK_EQ(int64_t(counters["clamped_energy_fraction"]), int64_t(0));
 }
 
 TEST_CASE("[NextGI] set_hardware_ray_tracing re-evaluates the tier") {

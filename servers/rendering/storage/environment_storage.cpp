@@ -898,13 +898,35 @@ RSE::EnvironmentSDFGIYScale RendererEnvironmentStorage::environment_get_sdfgi_y_
 void RendererEnvironmentStorage::environment_set_nextgi_enabled(RID p_env, bool p_enabled) {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);
-	env->nextgi_enabled = p_enabled;
+	// Keep energy and the sky-light read; only the enable flag changes.
+	environment_set_nextgi(p_env, p_enabled, env->nextgi_energy, env->nextgi_read_sky_light);
 }
 
 bool RendererEnvironmentStorage::environment_get_nextgi_enabled(RID p_env) const {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL_V(env, false);
 	return env->nextgi_enabled;
+}
+
+// GodotNext: nextgi_user_surface
+void RendererEnvironmentStorage::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light) {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL(env);
+	env->nextgi_enabled = p_enabled;
+	env->nextgi_energy = p_energy;
+	env->nextgi_read_sky_light = p_read_sky_light;
+}
+
+float RendererEnvironmentStorage::environment_get_nextgi_energy(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, 1.0);
+	return env->nextgi_energy;
+}
+
+bool RendererEnvironmentStorage::environment_get_nextgi_read_sky_light(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->nextgi_read_sky_light;
 }
 
 // Adjustments

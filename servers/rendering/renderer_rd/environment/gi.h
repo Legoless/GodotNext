@@ -722,6 +722,10 @@ public:
 
 	virtual void sdfgi_reset() override;
 
+	// GodotNext: nextgi_user_surface
+	virtual Dictionary nextgi_get_status() const override;
+	virtual Dictionary nextgi_get_counters() const override;
+
 	struct SDFGIData {
 		float grid_size[3];
 		uint32_t max_cascades;

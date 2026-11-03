@@ -2730,6 +2730,17 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 		RID reflection_texture = rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION);
 		copy_effects->copy_to_fb_rect(ambient_texture, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, true, reflection_texture, rb->get_view_count() > 1);
 	}
+
+	// GodotNext: nextgi_user_surface
+	// A view with no merged producer clears the framebuffer to its labeled tint.
+	const RendererRD::NextGI::DebugViewId nextgi_view = RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode());
+	if (nextgi_view != RendererRD::NextGI::DEBUG_VIEW_MAX) {
+		const RendererRD::NextGI::DebugView view = RendererRD::NextGI::resolve_debug_view(nextgi_view, next_gi.get_tier_result());
+		Vector<Color> clear_colors;
+		clear_colors.push_back(view.tint);
+		RD::get_singleton()->draw_list_begin(texture_storage->render_target_get_rd_framebuffer(render_target), RD::DRAW_CLEAR_COLOR_0, clear_colors);
+		RD::get_singleton()->draw_list_end();
+	}
 }
 
 void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {

@@ -1288,6 +1288,27 @@
 				[b]Note:[/b] The equivalent resource is [Environment].
 			</description>
 		</method>
+		<method name="environment_get_nextgi_enabled" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="env" type="RID" />
+			<description>
+				Returns [code]true[/code] if the environment RID uses NextGI. See [member Environment.nextgi_enabled].
+			</description>
+		</method>
+		<method name="environment_get_nextgi_energy" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="env" type="RID" />
+			<description>
+				Returns the NextGI energy multiplier for the environment RID. See [member Environment.nextgi_energy].
+			</description>
+		</method>
+		<method name="environment_get_nextgi_read_sky_light" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="env" type="RID" />
+			<description>
+				Returns [code]true[/code] if the environment RID's NextGI includes sky light. See [member Environment.nextgi_read_sky_light].
+			</description>
+		</method>
 		<method name="environment_glow_set_use_bicubic_upscale">
 			<return type="void" />
 			<param index="0" name="enable" type="bool" />
@@ -1406,6 +1427,16 @@
 			<param index="12" name="glow_map" type="RID" />
 			<description>
 				Configures glow for the specified environment RID. See [code]glow_*[/code] properties in [Environment] for more information.
+			</description>
+		</method>
+		<method name="environment_set_nextgi">
+			<return type="void" />
+			<param index="0" name="env" type="RID" />
+			<param index="1" name="enable" type="bool" />
+			<param index="2" name="energy" type="float" />
+			<param index="3" name="read_sky" type="bool" />
+			<description>
+				Sets whether the environment RID uses NextGI, its energy multiplier, and whether it reads sky light. See [member Environment.nextgi_enabled], [member Environment.nextgi_energy] and [member Environment.nextgi_read_sky_light].
 			</description>
 		</method>
 		<method name="environment_set_nextgi_enabled">
@@ -3018,6 +3049,35 @@
 			<param index="1" name="visible" type="int" />
 			<description>
 				Sets the number of instances visible at a given time. If -1, all instances that have been allocated are drawn. Equivalent to [member MultiMesh.visible_instance_count].
+			</description>
+		</method>
+		<method name="nextgi_get_counters" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns NextGI counters as a [Dictionary]. A counter whose producer has not merged is [code]0[/code]. Keys:
+				- [code]tlas_instances[/code]: instances in the current TLAS.
+				- [code]rt_coverage[/code]: ray-traced coverage.
+				- [code]blas_bytes_compacted[/code] and [code]blas_bytes_uncompacted[/code]: BLAS memory.
+				- [code]rt_arena_bytes[/code]: RT arena bytes.
+				- [code]skinned_refit_triangles[/code]: triangles refit for skinned actors.
+				- [code]rays_per_pass[/code]: rays traced by the current pass.
+				- [code]src_capture_texels[/code] and [code]src_relight_texels[/code]: surface cache texels.
+				- [code]src_shadow_rays[/code]: ray-traced surface-cache shadow rays.
+				- [code]dirty_aabb[/code]: dirty-region updates.
+				- [code]src_page_updates[/code]: surface-cache page updates.
+				- [code]clamped_energy_fraction[/code]: fraction of energy removed by the firefly clamp.
+				The dummy renderer returns [code]0[/code] for every key.
+			</description>
+		</method>
+		<method name="nextgi_get_status" qualifiers="const">
+			<return type="Dictionary" />
+			<description>
+				Returns the NextGI user-facing status as a [Dictionary]:
+				- [code]tier[/code] and [code]reason[/code]: the same tier and tier reason as [method nextgi_get_tier_info]. [code]reason[/code] is only a tier reason, never a per-instance exclusion.
+				- [code]quality[/code]: the resolved quality preset, or [code]"NONE"[/code] when NextGI is inactive.
+				- [code]quality_reason[/code]: [code]"auto selection pending"[/code] while automatic quality is unresolved, [code]"setting"[/code] when the user picked a preset, or [code]"NONE"[/code].
+				- [code]driver[/code]: the current rendering driver name.
+				On the dummy renderer the tier is [code]"FALLBACK"[/code] and the reason is [code]"SETTING_OFF"[/code].
 			</description>
 		</method>
 		<method name="nextgi_get_tier_info" qualifiers="const">
@@ -5710,6 +5770,54 @@
 		<constant name="VIEWPORT_DEBUG_DRAW_INTERNAL_BUFFER" value="26" enum="ViewportDebugDraw">
 			Internal buffer is drawn instead of regular scene so you can see the per-pixel output that will be used by post-processing effects.
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering methods.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_CLUSTER_AREA_LIGHTS" value="27" enum="ViewportDebugDraw">
+			Draws the cluster used by [AreaLight3D] nodes to optimize light rendering.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_AREA_LIGHT_ATLAS" value="28" enum="ViewportDebugDraw">
+			Draws the atlas used by [AreaLight3D] nodes in the upper left quadrant of the viewport.
+			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_TIER" value="29" enum="ViewportDebugDraw">
+			Fills the viewport with a green tint when the NextGI tier is hardware ray tracing, or an amber tint on the fallback tier, labeled with the tier and its reason.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_TLAS_HEAT" value="30" enum="ViewportDebugDraw">
+			NextGI TLAS heat. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_BLAS_COST" value="31" enum="ViewportDebugDraw">
+			NextGI BLAS cost. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_HIT_INSTANCE" value="32" enum="ViewportDebugDraw">
+			NextGI hit instance. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_RT_PROXY" value="33" enum="ViewportDebugDraw">
+			NextGI ray-tracing proxy against the raster mesh. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SRC_CARDS" value="34" enum="ViewportDebugDraw">
+			NextGI surface-cache cards and relight age. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_WRC_PROBES" value="35" enum="ViewportDebugDraw">
+			NextGI world radiance cache probes. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_CARD_COVERAGE" value="36" enum="ViewportDebugDraw">
+			NextGI card coverage. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SCREEN_PROBES" value="37" enum="ViewportDebugDraw">
+			NextGI screen probes. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_FALLBACK_REASONS" value="38" enum="ViewportDebugDraw">
+			NextGI per-instance fallback reasons, including [code]NOT_IN_RT_SCENE[/code], [code]RT_INSTANCE_CAP[/code] and [code]RT_DYNAMIC_EXCLUDED[/code]. Shows a labeled "no data" tint until that producer is merged.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.

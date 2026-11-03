@@ -30,6 +30,9 @@
 
 #pragma once
 
+#include "core/os/os.h"
+#include "core/variant/dictionary.h"
+
 #include <cstdint>
 
 class RID;
@@ -89,4 +92,47 @@ public:
 	virtual uint32_t voxel_gi_get_version(RID p_probe) const = 0;
 
 	virtual void sdfgi_reset() = 0;
+
+	// GodotNext: nextgi_user_surface
+	// The dummy renderer reports the fallback tier with reason SETTING_OFF and zero counters.
+	virtual Dictionary nextgi_get_status() const = 0;
+	virtual Dictionary nextgi_get_counters() const = 0;
+
+	// Non-RD renderers share this pair. Producers that have not merged stay at zero.
+	static Dictionary nextgi_unavailable_status() {
+		Dictionary status;
+		status["tier"] = "FALLBACK";
+		status["reason"] = "SETTING_OFF";
+		status["quality"] = "NONE";
+		status["quality_reason"] = "NONE";
+		String driver;
+		if (OS::get_singleton()) {
+			driver = OS::get_singleton()->get_current_rendering_driver_name();
+		}
+		status["driver"] = driver;
+		return status;
+	}
+
+	static Dictionary nextgi_zero_counters() {
+		Dictionary counters;
+		static const char *keys[] = {
+			"tlas_instances",
+			"rt_coverage",
+			"blas_bytes_compacted",
+			"blas_bytes_uncompacted",
+			"rt_arena_bytes",
+			"skinned_refit_triangles",
+			"rays_per_pass",
+			"src_capture_texels",
+			"src_relight_texels",
+			"src_shadow_rays",
+			"dirty_aabb",
+			"src_page_updates",
+			"clamped_energy_fraction",
+		};
+		for (const char *key : keys) {
+			counters[key] = int64_t(0);
+		}
+		return counters;
+	}
 };

@@ -30,10 +30,12 @@
 
 #include "world_environment.h"
 
+#include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "scene/3d/node_3d.h"
 #include "scene/main/scene_tree.h"
 #include "scene/main/viewport.h"
+#include "servers/rendering/rendering_server.h"
 
 void WorldEnvironment::_notification(int p_what) {
 	switch (p_what) {
@@ -108,15 +110,25 @@ void WorldEnvironment::_update_current_compositor() {
 	get_tree()->call_group_flags(SceneTree::GROUP_CALL_DEFERRED, "_world_compositor_" + itos(get_viewport()->find_world_3d()->get_scenario().get_id()), "update_configuration_warnings");
 }
 
+void WorldEnvironment::_environment_changed() {
+	update_configuration_warnings();
+}
+
 void WorldEnvironment::set_environment(const Ref<Environment> &p_environment) {
 	if (environment == p_environment) {
 		return;
+	}
+	if (environment.is_valid() && environment->is_connected(CoreStringName(changed), callable_mp(this, &WorldEnvironment::_environment_changed))) {
+		environment->disconnect(CoreStringName(changed), callable_mp(this, &WorldEnvironment::_environment_changed));
 	}
 	if (is_inside_tree() && environment.is_valid()) {
 		remove_from_group("_world_environment_" + itos(get_viewport()->find_world_3d()->get_scenario().get_id()));
 	}
 
 	environment = p_environment;
+	if (environment.is_valid()) {
+		environment->connect(CoreStringName(changed), callable_mp(this, &WorldEnvironment::_environment_changed));
+	}
 
 	if (is_inside_tree() && environment.is_valid()) {
 		add_to_group("_world_environment_" + itos(get_viewport()->find_world_3d()->get_scenario().get_id()));
@@ -188,6 +200,15 @@ PackedStringArray WorldEnvironment::get_configuration_warnings() const {
 
 	if (environment.is_null() && camera_attributes.is_null()) {
 		warnings.push_back(RTR("To have any visible effect, WorldEnvironment requires its \"Environment\" property to contain an Environment, its \"Camera Attributes\" property to contain a CameraAttributes resource, or both."));
+	}
+
+	// GodotNext: nextgi_user_surface
+	if (environment.is_valid() && environment->is_nextgi_enabled()) {
+		Dictionary status = RS::get_singleton()->nextgi_get_status();
+		const String tier = status.get("tier", String());
+		if (tier != "HWRT") {
+			warnings.push_back(vformat(RTR("NextGI is enabled, but the active tier is %s (%s), so hardware ray tracing is not running."), tier, String(status.get("reason", String()))));
+		}
 	}
 
 	if (!is_inside_tree()) {

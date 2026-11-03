@@ -4662,7 +4662,18 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_DEBUG_CLUSTER_REFLECTION_PROBES:
 		case VIEW_DISPLAY_DEBUG_OCCLUDERS:
 		case VIEW_DISPLAY_MOTION_VECTORS:
-		case VIEW_DISPLAY_INTERNAL_BUFFER: {
+		case VIEW_DISPLAY_INTERNAL_BUFFER:
+		// GodotNext: nextgi_user_surface
+		case VIEW_DISPLAY_NEXTGI_TIER:
+		case VIEW_DISPLAY_NEXTGI_TLAS_HEAT:
+		case VIEW_DISPLAY_NEXTGI_BLAS_COST:
+		case VIEW_DISPLAY_NEXTGI_HIT_INSTANCE:
+		case VIEW_DISPLAY_NEXTGI_RT_PROXY:
+		case VIEW_DISPLAY_NEXTGI_SRC_CARDS:
+		case VIEW_DISPLAY_NEXTGI_WRC_PROBES:
+		case VIEW_DISPLAY_NEXTGI_CARD_COVERAGE:
+		case VIEW_DISPLAY_NEXTGI_SCREEN_PROBES:
+		case VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4693,6 +4704,17 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_DEBUG_OCCLUDERS,
 				VIEW_DISPLAY_MOTION_VECTORS,
 				VIEW_DISPLAY_INTERNAL_BUFFER,
+				// GodotNext: nextgi_user_surface
+				VIEW_DISPLAY_NEXTGI_TIER,
+				VIEW_DISPLAY_NEXTGI_TLAS_HEAT,
+				VIEW_DISPLAY_NEXTGI_BLAS_COST,
+				VIEW_DISPLAY_NEXTGI_HIT_INSTANCE,
+				VIEW_DISPLAY_NEXTGI_RT_PROXY,
+				VIEW_DISPLAY_NEXTGI_SRC_CARDS,
+				VIEW_DISPLAY_NEXTGI_WRC_PROBES,
+				VIEW_DISPLAY_NEXTGI_CARD_COVERAGE,
+				VIEW_DISPLAY_NEXTGI_SCREEN_PROBES,
+				VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4725,6 +4747,17 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_OCCLUDERS,
 				Viewport::DEBUG_DRAW_MOTION_VECTORS,
 				Viewport::DEBUG_DRAW_INTERNAL_BUFFER,
+				// GodotNext: nextgi_user_surface
+				Viewport::DEBUG_DRAW_NEXTGI_TIER,
+				Viewport::DEBUG_DRAW_NEXTGI_TLAS_HEAT,
+				Viewport::DEBUG_DRAW_NEXTGI_BLAS_COST,
+				Viewport::DEBUG_DRAW_NEXTGI_HIT_INSTANCE,
+				Viewport::DEBUG_DRAW_NEXTGI_RT_PROXY,
+				Viewport::DEBUG_DRAW_NEXTGI_SRC_CARDS,
+				Viewport::DEBUG_DRAW_NEXTGI_WRC_PROBES,
+				Viewport::DEBUG_DRAW_NEXTGI_CARD_COVERAGE,
+				Viewport::DEBUG_DRAW_NEXTGI_SCREEN_PROBES,
+				Viewport::DEBUG_DRAW_NEXTGI_FALLBACK_REASONS,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7074,6 +7107,28 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Represents motion vectors with colored lines in the direction of motion. Gray dots represent areas with no per-pixel motion."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Internal Buffer"), VIEW_DISPLAY_INTERNAL_BUFFER, SupportedRenderingMethods::FORWARD_PLUS_MOBILE,
 			TTRC("Shows the scene rendered in linear colorspace before any tonemapping or post-processing."));
+	// GodotNext: nextgi_user_surface
+	display_submenu->add_separator();
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Tier"), VIEW_DISPLAY_NEXTGI_TIER, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Tints the view green when NextGI hardware ray tracing is active, or amber on the fallback tier, and labels the tier and reason."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI TLAS Heat"), VIEW_DISPLAY_NEXTGI_TLAS_HEAT, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the TLAS heat producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI BLAS Cost"), VIEW_DISPLAY_NEXTGI_BLAS_COST, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the BLAS cost producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Hit Instance"), VIEW_DISPLAY_NEXTGI_HIT_INSTANCE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the hit-instance producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI RT Proxy"), VIEW_DISPLAY_NEXTGI_RT_PROXY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the RT proxy producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI SRC Cards"), VIEW_DISPLAY_NEXTGI_SRC_CARDS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the SRC card producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI WRC Probes"), VIEW_DISPLAY_NEXTGI_WRC_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the world radiance cache producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Card Coverage"), VIEW_DISPLAY_NEXTGI_CARD_COVERAGE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the card coverage producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Screen Probes"), VIEW_DISPLAY_NEXTGI_SCREEN_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint until the screen probe producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Fallback Reasons"), VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows a no data tint labeled with the per-instance fallback reasons until that producer is merged."));
 	view_display_menu->get_popup()->add_submenu_node_item(TTRC("Display Advanced..."), display_submenu, VIEW_DISPLAY_ADVANCED);
 
 	view_display_menu->get_popup()->add_separator();
