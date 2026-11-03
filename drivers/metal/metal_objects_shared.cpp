@@ -726,6 +726,9 @@ void MDCommandBufferBase::encode_push_constant_data(RDD::ShaderID p_shader, Vect
 		case MDCommandBufferStateType::Blit:
 		case MDCommandBufferStateType::None:
 			return;
+		// GodotNext: metal_acceleration_structure
+		case MDCommandBufferStateType::AccelerationStructure:
+			return;
 	}
 }
 

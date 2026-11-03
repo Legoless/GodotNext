@@ -2384,26 +2384,9 @@ RDD::PipelineID RenderingDeviceDriverMetal::compute_pipeline_create(ShaderID p_s
 #pragma mark - Raytracing
 
 // ----- ACCELERATION STRUCTURE -----
-
-RDD::AccelerationStructureID RenderingDeviceDriverMetal::blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) {
-	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the Metal driver.");
-}
-
-RDD::AccelerationStructureID RenderingDeviceDriverMetal::tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) {
-	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the Metal driver.");
-}
-
-void RenderingDeviceDriverMetal::acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
-}
-
-void RenderingDeviceDriverMetal::acceleration_structure_free(RDD::AccelerationStructureID p_acceleration_structure) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
-}
-
-uint32_t RenderingDeviceDriverMetal::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) {
-	ERR_FAIL_V_MSG(0, "Ray tracing is not currently supported by the Metal driver.");
-}
+// GodotNext: metal_acceleration_structure
+// blas_create, tlas_create, instance write, free, sizes and the build commands
+// are implemented in metal_acceleration_structure.cpp.
 
 // ----- PIPELINE -----
 
@@ -2420,14 +2403,8 @@ bool RenderingDeviceDriverMetal::raytracing_pipeline_get_shader_group_handles(Ra
 }
 
 // ----- COMMANDS -----
-
-void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
-}
-
-void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
-}
+// GodotNext: metal_acceleration_structure
+// command_build_blas and command_build_tlas are implemented in metal_acceleration_structure.cpp.
 
 void RenderingDeviceDriverMetal::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
 	ERR_FAIL_MSG("Ray tracing is not currently supported by the Metal driver.");
@@ -2541,6 +2518,13 @@ void RenderingDeviceDriverMetal::set_object_name(ObjectType p_type, ID p_driver_
 		} break;
 		case OBJECT_TYPE_PIPELINE: {
 			// Can't set label after creation.
+		} break;
+		// GodotNext: metal_acceleration_structure
+		case OBJECT_TYPE_ACCELERATION_STRUCTURE: {
+			AccelerationStructureInfo *as_info = (AccelerationStructureInfo *)p_driver_id.id;
+			if (as_info != nullptr && as_info->as) {
+				as_info->as->setLabel(label);
+			}
 		} break;
 		default: {
 			DEV_ASSERT(false);
@@ -2767,6 +2751,9 @@ uint64_t RenderingDeviceDriverMetal::limit_get(Limit p_limit) {
 			return (uint64_t)((1.0 / limits.temporalScalerInputContentMinScale) * 1000'000);
 		case LIMIT_MAX_SHADER_VARYINGS:
 			return limits.maxShaderVaryings;
+		// GodotNext: metal_acceleration_structure
+		case LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES:
+			return has_feature(SUPPORTS_RAY_QUERY) ? METAL_MAX_ACCELERATION_STRUCTURE_INSTANCES : 0;
 		default: {
 #ifdef DEV_ENABLED
 			WARN_PRINT("Returning maximum value for unknown limit " + itos(p_limit) + ".");
@@ -2831,9 +2818,9 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 			return true;
 		// GodotNext: metal_ray_query
 		case SUPPORTS_RAY_QUERY:
-			return RAY_QUERY_AS_READY && ray_query_caps.ray_query;
+			return RAY_QUERY_AS_READY && as_objects_ready && ray_query_caps.ray_query;
 		case SUPPORTS_RAY_QUERY_HARDWARE:
-			return RAY_QUERY_AS_READY && ray_query_caps.ray_query && ray_query_caps.hardware;
+			return RAY_QUERY_AS_READY && as_objects_ready && ray_query_caps.ray_query && ray_query_caps.hardware;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return false;
 		default:
@@ -2913,6 +2900,8 @@ RenderingDeviceDriverMetal::~RenderingDeviceDriverMetal() {
 	memdelete(device_properties);
 
 	if (allocator != nullptr) {
+		// GodotNext: metal_acceleration_structure
+		_destroy_dummy_blas();
 		allocator->free_buffer(copy_queue_buffer);
 
 #ifdef DEBUG_ENABLED
@@ -3000,6 +2989,13 @@ void RenderingDeviceDriverMetal::_update_ray_query_caps() {
 		ray_query_reason = RAY_QUERY_REASON_NO_RAY_QUERY;
 	} else {
 		ray_query_reason = ray_query_caps.reason;
+	}
+
+	// GodotNext: metal_acceleration_structure
+	// The dummy BLAS is what makes has_feature true. A failed build leaves the device on NO_RAY_QUERY.
+	if (RAY_QUERY_AS_READY && ray_query_caps.ray_query && !_create_dummy_blas()) {
+		ray_query_reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+		as_objects_ready = false;
 	}
 
 	const int apple_family = int(device_properties->features.highestFamily) - int(MTL::GPUFamilyApple1) + 1;

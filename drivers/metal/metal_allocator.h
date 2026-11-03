@@ -74,6 +74,12 @@ struct MetalTexture {
 	MetalAllocation allocation;
 };
 
+// GodotNext: metal_acceleration_structure
+struct MetalAccelerationStructure {
+	NS::SharedPtr<MTL::AccelerationStructure> structure;
+	MetalAllocation allocation;
+};
+
 #ifdef DEBUG_ENABLED
 struct MetalAllocatorStats {
 	/// Live statistics for the associated pool.
@@ -104,6 +110,10 @@ public:
 	virtual MetalTexture new_texture(const MTL::TextureDescriptor *p_desc) = 0;
 	virtual void free_buffer(MetalBuffer &p_buffer) = 0;
 	virtual void free_texture(MetalTexture &p_texture) = 0;
+	// GodotNext: metal_acceleration_structure
+	// Hazard-tracking mode has no placement heaps, so the default fails the create.
+	virtual MetalAccelerationStructure new_acceleration_structure(NS::UInteger p_size) { return {}; }
+	virtual void free_acceleration_structure(MetalAccelerationStructure &p_structure) { p_structure.structure.reset(); }
 
 	/// Appends all live heaps to r_heaps and returns the generation the
 	/// snapshot corresponds to. The generation increments whenever a heap is
@@ -210,6 +220,9 @@ public:
 	MetalTexture new_texture(const MTL::TextureDescriptor *p_desc) override;
 	void free_buffer(MetalBuffer &p_buffer) override;
 	void free_texture(MetalTexture &p_texture) override;
+	// GodotNext: metal_acceleration_structure
+	MetalAccelerationStructure new_acceleration_structure(NS::UInteger p_size) override;
+	void free_acceleration_structure(MetalAccelerationStructure &p_structure) override;
 	uint64_t get_heaps(LocalVector<MTL::Heap *> &r_heaps) override;
 	uint64_t get_heap_generation() const override;
 #ifdef DEBUG_ENABLED

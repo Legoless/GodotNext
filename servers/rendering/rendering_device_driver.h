@@ -778,6 +778,10 @@ public:
 
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) = 0;
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) = 0;
+	// GodotNext: metal_acceleration_structure
+	// Bytes of the acceleration structure object itself. 0 when that storage is already
+	// a buffer counted in buffer_memory, so Vulkan and D3D12 are not counted twice.
+	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) { return 0; }
 
 	// ----- PIPELINE -----
 
@@ -964,6 +968,10 @@ public:
 	static constexpr uint32_t METAL_RAY_QUERY_MIN_MSL = 20400; // MSL 2.4.
 	static constexpr uint32_t METAL_RAY_QUERY_HARDWARE_FAMILY = 1009; // Apple9.
 	static constexpr uint32_t METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE = 72;
+	// GodotNext: metal_acceleration_structure
+	// Cap accepted by tlas_create. ExtendedLimits is never set. 2^24 is above the
+	// plan's 100,000 floor and is what limit_get reports on a ray-query device.
+	static constexpr uint32_t METAL_MAX_ACCELERATION_STRUCTURE_INSTANCES = 1u << 24;
 
 	static MetalRayQueryCaps metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers);
 	// NO_RAY_QUERY until a driver overrides it. Metal does; Vulkan and D3D12 stay on this until #22.

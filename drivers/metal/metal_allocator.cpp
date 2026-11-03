@@ -353,6 +353,44 @@ void MetalHeapAllocator::free_texture(MetalTexture &p_texture) {
 	_free_allocation(p_texture.allocation);
 }
 
+// GodotNext: metal_acceleration_structure
+MetalAccelerationStructure MetalHeapAllocator::new_acceleration_structure(NS::UInteger p_size) {
+	MetalAccelerationStructure result;
+	if (p_size == 0) {
+		return result;
+	}
+
+	const uint32_t pool_index = POOL_PRIVATE;
+	MTL::SizeAndAlign sa = device->heapAccelerationStructureSizeAndAlign(p_size);
+	if (sa.size == 0) {
+		return result;
+	}
+
+	MTL::Heap *heap = nullptr;
+	if (sa.size > _preferred_block_size(pool_index) / 2) {
+		if (!_dedicated_allocate(pool_index, sa.size, result.allocation, heap)) {
+			return result;
+		}
+		result.structure = NS::TransferPtr(heap->newAccelerationStructure(p_size, 0));
+	} else {
+		uint64_t offset = 0;
+		if (!_pool_allocate(pool_index, sa.size, sa.align, result.allocation, heap, offset)) {
+			return result;
+		}
+		result.structure = NS::TransferPtr(heap->newAccelerationStructure(p_size, offset));
+	}
+	if (!result.structure) {
+		_free_allocation(result.allocation);
+	}
+	return result;
+}
+
+// GodotNext: metal_acceleration_structure
+void MetalHeapAllocator::free_acceleration_structure(MetalAccelerationStructure &p_structure) {
+	p_structure.structure.reset();
+	_free_allocation(p_structure.allocation);
+}
+
 uint64_t MetalHeapAllocator::get_heaps(LocalVector<MTL::Heap *> &r_heaps) {
 	uint64_t gen = generation.load(std::memory_order_relaxed);
 	for (uint32_t p = 0; p < POOL_COUNT; p++) {

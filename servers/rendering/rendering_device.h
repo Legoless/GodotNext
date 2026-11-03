@@ -1343,6 +1343,9 @@ private:
 	struct AccelerationStructure {
 		// --- Shared ---
 		RDD::AccelerationStructureID driver_id;
+		// GodotNext: metal_acceleration_structure
+		// Driver-reported size of the acceleration structure object, counted in buffer_memory.
+		uint64_t size_bytes = 0;
 		RDD::AccelerationStructureType type = {};
 		RDG::ResourceTracker *draw_tracker = nullptr;
 

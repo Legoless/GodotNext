@@ -2846,7 +2846,10 @@
 		<constant name="SUPPORTS_RAY_QUERY" value="11" enum="Features">
 			Support for ray query extension.
 
-			[b]Note:[/b] This is currently only supported when using Vulkan. This is not supported on macOS and iOS (even on hardware supporting raytracing) due to MoltenVK limitations.
+			[b]Note:[/b] Vulkan reports this when the device exposes ray query. The Metal driver reports it on Apple9 and later once an acceleration structure can be built.
+		</constant>
+		<constant name="SUPPORTS_RAY_QUERY_HARDWARE" value="16" enum="Features">
+			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later.
 		</constant>
 		<constant name="SUPPORTS_RAYTRACING_PIPELINE" value="12" enum="Features">
 			Support for raytracing pipeline extension.
@@ -2977,6 +2980,9 @@
 		<constant name="LIMIT_METALFX_TEMPORAL_SCALER_MAX_SCALE" value="47" enum="Limit">
 			Returns the largest value for [member ProjectSettings.rendering/scaling_3d/scale] when using the MetalFX temporal upscaler.
 			[b]Note:[/b] The returned value is multiplied by a factor of [code]1000000[/code] to preserve 6 digits of precision. It must be divided by [code]1000000.0[/code] to convert the value to a floating point number.
+		</constant>
+		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES" value="49" enum="Limit">
+			Maximum number of instances in one top-level acceleration structure.
 		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.

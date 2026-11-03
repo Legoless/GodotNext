@@ -550,6 +550,8 @@ enum class MDCommandBufferStateType {
 	InlineRender, // A one-off render encoder for clear/resolve helper commands is active.
 	Compute, // A compute encoder is active.
 	Blit, // A blit-style encoder is active.
+	// GodotNext: metal_acceleration_structure
+	AccelerationStructure, // An acceleration-structure encoder is active.
 };
 
 /// Base struct for render state shared between MTL3 and MTL4 implementations.

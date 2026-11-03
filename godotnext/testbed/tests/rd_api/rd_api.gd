@@ -6,9 +6,9 @@ extends Node
 ##   godot --path godotnext/testbed --rendering-driver <driver> res://tests/rd_api/rd_api.tscn
 ## It prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 ##
-## - A device without ray query (Metal and D3D12 today; #47 adds Metal acceleration structures)
-##   asserts the fallback errors: the acceleration structure and RT pipeline entry points return
-##   invalid RIDs.
+## - A device without ray query (D3D12 today) asserts the fallback errors: the acceleration
+##   structure and RT pipeline entry points return invalid RIDs. Metal with acceleration
+##   structures takes the ray-query branch.
 ## - A device with ray query builds two BLASes of the same quad, one from storage buffers and one
 ##   from vertex and index buffers, puts them in a 2-instance TLAS at hit_sbt_range 0 and traces
 ##   that TLAS from a ray-query compute kernel. Both instances must return the same hits, and those

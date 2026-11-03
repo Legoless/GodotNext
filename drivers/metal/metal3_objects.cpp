@@ -166,6 +166,10 @@ void MDCommandBuffer::begin_label(const char *p_label_name, const Color &p_color
 		case MDCommandBufferStateType::Blit:
 			blit.encoder->pushDebugGroup(s.get());
 			break;
+		// GodotNext: metal_acceleration_structure
+		case MDCommandBufferStateType::AccelerationStructure:
+			as.encoder->pushDebugGroup(s.get());
+			break;
 	}
 	label_stack.push_back({ type, false });
 }
@@ -195,6 +199,10 @@ void MDCommandBuffer::end_label() {
 		case MDCommandBufferStateType::Blit:
 			blit.encoder->popDebugGroup();
 			break;
+		// GodotNext: metal_acceleration_structure
+		case MDCommandBufferStateType::AccelerationStructure:
+			as.encoder->popDebugGroup();
+			break;
 	}
 }
 
@@ -220,6 +228,10 @@ void MDCommandBuffer::_pop_active_encoder_labels() {
 			case MDCommandBufferStateType::Blit:
 				blit.encoder->popDebugGroup();
 				break;
+			// GodotNext: metal_acceleration_structure
+			case MDCommandBufferStateType::AccelerationStructure:
+				as.encoder->popDebugGroup();
+				break;
 			case MDCommandBufferStateType::None:
 				break;
 		}
@@ -234,6 +246,8 @@ void MDCommandBuffer::_begin() {
 	_scratch.reset();
 	inline_render.reset();
 	release_resources();
+	// GodotNext: metal_acceleration_structure
+	_free_as_staging();
 }
 
 MDCommandBuffer::Alloc MDCommandBuffer::allocate_arg_buffer(uint32_t p_size) {
@@ -252,6 +266,9 @@ void MDCommandBuffer::_end() {
 			return _end_compute_dispatch();
 		case MDCommandBufferStateType::Blit:
 			return _end_blit();
+		// GodotNext: metal_acceleration_structure
+		case MDCommandBufferStateType::AccelerationStructure:
+			return _end_as();
 	}
 }
 
@@ -282,7 +299,8 @@ void MDCommandBuffer::pipeline_barrier(BitField<RDD::PipelineStageBits> p_src_st
 	// the transfer-worker calls in rendering_device.cpp are gated on
 	// API_TRAIT_TEXTURES_REQUIRE_LAYOUT_TRANSITIONS, which Metal returns false
 	// for, and RenderingDevice exposes no public barrier API.
-	DEV_ASSERT(!(render.encoder || compute.encoder || blit.encoder || inline_render.encoder));
+	// GodotNext: metal_acceleration_structure
+	DEV_ASSERT(!(render.encoder || compute.encoder || blit.encoder || inline_render.encoder || as.encoder));
 }
 
 #pragma mark - Timestamp
@@ -389,6 +407,9 @@ void MDCommandBuffer::bind_pipeline(RDD::PipelineID p_pipeline) {
 		_end_inline_render();
 	} else if (type == MDCommandBufferStateType::Blit) {
 		_end_blit();
+	} else if (type == MDCommandBufferStateType::AccelerationStructure) {
+		// GodotNext: metal_acceleration_structure
+		_end_as();
 	}
 
 	if (p->type == MDPipelineType::Render) {
@@ -472,6 +493,10 @@ MTL::BlitCommandEncoder *MDCommandBuffer::_ensure_blit_encoder() {
 			break;
 		case MDCommandBufferStateType::Blit:
 			return blit.encoder.get();
+		// GodotNext: metal_acceleration_structure
+		case MDCommandBufferStateType::AccelerationStructure:
+			_end_as();
+			break;
 	}
 
 	type = MDCommandBufferStateType::Blit;
@@ -909,6 +934,10 @@ MTL::RenderCommandEncoder *MDCommandBuffer::get_new_render_encoder_with_descript
 			break;
 		case MDCommandBufferStateType::Blit:
 			_end_blit();
+			break;
+		// GodotNext: metal_acceleration_structure
+		case MDCommandBufferStateType::AccelerationStructure:
+			_end_as();
 			break;
 	}
 
@@ -1614,6 +1643,9 @@ void MDCommandBuffer::compute_begin_pass() {
 		_end_inline_render();
 	} else if (type == MDCommandBufferStateType::Blit) {
 		_end_blit();
+	} else if (type == MDCommandBufferStateType::AccelerationStructure) {
+		// GodotNext: metal_acceleration_structure
+		_end_as();
 	}
 
 	type = MDCommandBufferStateType::Compute;
@@ -1801,6 +1833,142 @@ void MDCommandBuffer::_end_blit() {
 	blit.encoder->endEncoding();
 	blit.reset();
 	reset();
+}
+
+// GodotNext: metal_acceleration_structure
+MDCommandBuffer::~MDCommandBuffer() {
+	_free_as_staging();
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::_free_as_staging() {
+	if (device_driver != nullptr && device_driver->get_allocator() != nullptr) {
+		MetalAllocator *allocator = device_driver->get_allocator();
+		for (MetalBuffer &buffer : _as_staging) {
+			allocator->free_buffer(buffer);
+		}
+	}
+	_as_staging.clear();
+	_as_descriptors.clear();
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::defer_acceleration_structure_resource(MetalBuffer p_buffer) {
+	_as_staging.push_back(p_buffer);
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::defer_acceleration_structure_descriptor(NS::SharedPtr<MTL::AccelerationStructureDescriptor> p_descriptor) {
+	_as_descriptors.push_back(p_descriptor);
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::_encode_residency(MTL::AccelerationStructureCommandEncoder *p_enc) {
+	if (sync_mode == RDM::SyncMode::HazardTracking || p_enc == nullptr) {
+		return;
+	}
+	MetalAllocator *alloc = device_driver->get_allocator();
+	if (alloc->get_heap_generation() != _resident_heaps_generation) {
+		_resident_heaps.clear();
+		_resident_heaps_generation = alloc->get_heaps(_resident_heaps);
+	}
+	if (_resident_heaps.is_empty()) {
+		return;
+	}
+	p_enc->useHeaps(_resident_heaps.ptr(), _resident_heaps.size());
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::_fence_wait(MTL::AccelerationStructureCommandEncoder *p_enc) {
+	if (!p_enc) {
+		return;
+	}
+	if (MTL::Fence *fence = _fence_to_wait()) {
+		p_enc->waitForFence(fence);
+	}
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::_fence_update(MTL::AccelerationStructureCommandEncoder *p_enc) {
+	if (!p_enc) {
+		return;
+	}
+	if (MTL::Fence *fence = _fence_to_update()) {
+		p_enc->updateFence(fence);
+	}
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::_end_as() {
+	DEV_ASSERT(type == MDCommandBufferStateType::AccelerationStructure);
+
+	_pop_active_encoder_labels();
+	_fence_update(as.encoder.get());
+	as.encoder->endEncoding();
+	as.reset();
+	reset();
+}
+
+// GodotNext: metal_acceleration_structure
+MTL::AccelerationStructureCommandEncoder *MDCommandBuffer::_ensure_as_encoder(bool p_top_level) {
+	const AccelerationStructureBuildKind kind = p_top_level ? AccelerationStructureBuildKind::TLAS : AccelerationStructureBuildKind::BLAS;
+	if (type == MDCommandBufferStateType::AccelerationStructure) {
+		if (as.kind == kind) {
+			_encode_residency(as.encoder.get());
+			return as.encoder.get();
+		}
+		// The render graph ends the encoder at the level boundary. Reaching this
+		// in a dev build means a BLAS and a TLAS were encoded in one level.
+		DEV_ASSERT(as.kind == kind);
+		_end_as();
+	}
+
+	switch (type) {
+		case MDCommandBufferStateType::None:
+			break;
+		case MDCommandBufferStateType::Render:
+			render_end_pass();
+			break;
+		case MDCommandBufferStateType::InlineRender:
+			_end_inline_render();
+			break;
+		case MDCommandBufferStateType::Compute:
+			_end_compute_dispatch();
+			break;
+		case MDCommandBufferStateType::Blit:
+			_end_blit();
+			break;
+		case MDCommandBufferStateType::AccelerationStructure:
+			break;
+	}
+
+	MTL::AccelerationStructureCommandEncoder *enc = command_buffer()->accelerationStructureCommandEncoder();
+	ERR_FAIL_NULL_V(enc, nullptr);
+	type = MDCommandBufferStateType::AccelerationStructure;
+	as.kind = kind;
+	as.encoder = NS::RetainPtr(enc);
+	_encode_residency(enc);
+	_fence_wait(enc);
+	return enc;
+}
+
+// GodotNext: metal_acceleration_structure
+void MDCommandBuffer::encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, bool p_top_level) {
+	MTL::AccelerationStructureCommandEncoder *enc = _ensure_as_encoder(p_top_level);
+	ERR_FAIL_NULL(enc);
+	enc->buildAccelerationStructure(p_structure, p_descriptor, p_scratch, 0);
+}
+
+// GodotNext: metal_acceleration_structure
+bool MDCommandBuffer::write_instance_count(uint32_t p_count, MTL::Buffer *&r_buffer, NS::UInteger &r_offset) {
+	Alloc count_alloc = allocate_arg_buffer(sizeof(uint32_t));
+	if (!count_alloc.is_valid()) {
+		return false;
+	}
+	*(uint32_t *)count_alloc.ptr = p_count;
+	r_buffer = count_alloc.buffer;
+	r_offset = count_alloc.offset;
+	return true;
 }
 
 MDComputeShader::MDComputeShader(CharString p_name,
@@ -2084,6 +2252,32 @@ void MDCommandBuffer::_bind_uniforms_argument_buffers_compute(MDUniformSet *p_se
 	const UniformSet &shader_set = p_shader->sets[p_set_index];
 	if (!shader_set.active_stages.has_flag(RDD::SHADER_STAGE_COMPUTE_BIT)) {
 		return;
+	}
+
+	// GodotNext: metal_acceleration_structure
+	// useHeaps makes heap resources resident for read-only argument-buffer access.
+	// A storage buffer the shader writes needs useResource, or shader validation
+	// reports the store as Read Only. Hazard tracking already encodes this usage.
+	if (sync_mode != RDM::SyncMode::HazardTracking) {
+		const uint32_t uniform_count = MIN((uint32_t)p_set->uniforms.size(), (uint32_t)shader_set.uniforms.size());
+		for (uint32_t i = 0; i < uniform_count; i++) {
+			const UniformInfo &ui = shader_set.uniforms[i];
+			const RDD::BoundUniform &uniform = p_set->uniforms[i];
+			if ((ui.usage & MTL::ResourceUsageWrite) == 0 || uniform.ids.is_empty()) {
+				continue;
+			}
+			MTL::Buffer *buffer = nullptr;
+			if (uniform.type == RDD::UNIFORM_TYPE_STORAGE_BUFFER) {
+				const RDM::BufferInfo *info = (const RDM::BufferInfo *)uniform.ids[0].id;
+				buffer = info != nullptr ? info->buffer.get() : nullptr;
+			} else if (uniform.type == RDD::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC) {
+				const MetalBufferDynamicInfo *info = (const MetalBufferDynamicInfo *)uniform.ids[0].id;
+				buffer = info != nullptr ? info->buffer.get() : nullptr;
+			}
+			if (buffer != nullptr) {
+				enc->useResource(buffer, ui.usage);
+			}
+		}
 	}
 
 	// Check if this set has dynamic uniforms.

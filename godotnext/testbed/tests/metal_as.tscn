@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/metal_as.gd" id="1_as"]
+
+[node name="MetalAs" type="Node"]
+script = ExtResource("1_as")

@@ -89,11 +89,19 @@ protected:
 
 	MetalDeviceProperties *device_properties = nullptr;
 	// GodotNext: metal_ray_query
-	// RAY_QUERY_AS_READY stays false until the acceleration-structure issue (#47) flips it.
-	// Until then has_feature reports no ray query, and a device that would otherwise pass reports NO_RAY_QUERY.
+	// RAY_QUERY_AS_READY is the code switch. has_feature also requires the dummy BLAS
+	// (as_objects_ready), so a device that cannot build an acceleration structure stays off.
 	MetalRayQueryCaps ray_query_caps;
 	RayQueryUnsupportedReason ray_query_reason = RAY_QUERY_REASON_NO_RAY_QUERY;
-	static constexpr bool RAY_QUERY_AS_READY = false;
+	static constexpr bool RAY_QUERY_AS_READY = true;
+	bool as_objects_ready = false;
+	// GodotNext: metal_acceleration_structure
+	// One-triangle BLAS with mask 0, used when an instance has no BLAS of its own.
+	MetalBuffer dummy_blas_vertices;
+	NS::SharedPtr<MTL::AccelerationStructure> dummy_blas;
+	MetalAllocation dummy_blas_allocation;
+	bool _create_dummy_blas();
+	void _destroy_dummy_blas();
 	void _update_ray_query_caps();
 	MetalDeviceProfile device_profile;
 	RenderingShaderContainerFormatMetal *shader_container_format = nullptr;
@@ -224,11 +232,15 @@ public:
 		uint32_t _frame_idx = UINT32_MAX;
 	};
 
-	// GodotNext: metal_ray_query
-	// #47 extends this with build sizes and addresses.
+	// GodotNext: metal_acceleration_structure
 	struct AccelerationStructureInfo {
 		NS::SharedPtr<MTL::AccelerationStructure> as;
+		NS::SharedPtr<MTL::AccelerationStructureDescriptor> descriptor;
 		MetalAllocation allocation;
+		uint64_t size_bytes = 0;
+		uint64_t scratch_size = 0;
+		uint32_t max_instance_count = 0;
+		bool top_level = false;
 	};
 
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override final;
@@ -511,6 +523,8 @@ public:
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) override final;
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
+	// GodotNext: metal_acceleration_structure
+	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
 
 	// ----- PIPELINE -----
 
@@ -600,7 +614,9 @@ private:
 
 	using VersatileResource = VersatileResourceTemplate<
 			BufferInfo,
-			TextureInfo>;
+			TextureInfo,
+			// GodotNext: metal_acceleration_structure
+			AccelerationStructureInfo>;
 	PagedAllocator<VersatileResource, true> resources_allocator;
 
 	/******************/

@@ -336,6 +336,8 @@ private:
 
 	void _encode_residency(MTL::RenderCommandEncoder *p_enc);
 	void _encode_residency(MTL::ComputeCommandEncoder *p_enc);
+	// GodotNext: metal_acceleration_structure
+	void _encode_residency(MTL::AccelerationStructureCommandEncoder *p_enc);
 
 #pragma mark - Synchronization
 
@@ -344,9 +346,13 @@ private:
 	void _fence_wait(MTL::RenderCommandEncoder *p_enc);
 	void _fence_wait(MTL::ComputeCommandEncoder *p_enc);
 	void _fence_wait(MTL::BlitCommandEncoder *p_enc);
+	// GodotNext: metal_acceleration_structure
+	void _fence_wait(MTL::AccelerationStructureCommandEncoder *p_enc);
 	void _fence_update(MTL::RenderCommandEncoder *p_enc);
 	void _fence_update(MTL::ComputeCommandEncoder *p_enc);
 	void _fence_update(MTL::BlitCommandEncoder *p_enc);
+	// GodotNext: metal_acceleration_structure
+	void _fence_update(MTL::AccelerationStructureCommandEncoder *p_enc);
 
 	void reset();
 
@@ -362,6 +368,10 @@ private:
 	void _pop_active_encoder_labels();
 	void _set_inline_render_encoder(MTL::RenderCommandEncoder *p_encoder);
 	MTL::BlitCommandEncoder *_ensure_blit_encoder();
+	// GodotNext: metal_acceleration_structure
+	void _end_as();
+	MTL::AccelerationStructureCommandEncoder *_ensure_as_encoder(bool p_top_level);
+	void _free_as_staging();
 
 	enum class CopySource {
 		Buffer,
@@ -575,6 +585,25 @@ public:
 		}
 	} blit;
 
+	// GodotNext: metal_acceleration_structure
+	// BLAS and TLAS builds never share this encoder. The render graph closes it
+	// at the level boundary between them.
+	enum class AccelerationStructureBuildKind : uint8_t {
+		None,
+		BLAS,
+		TLAS,
+	};
+	struct {
+		NS::SharedPtr<MTL::AccelerationStructureCommandEncoder> encoder;
+		AccelerationStructureBuildKind kind = AccelerationStructureBuildKind::None;
+		_FORCE_INLINE_ void reset() {
+			encoder.reset();
+			kind = AccelerationStructureBuildKind::None;
+		}
+	} as;
+	LocalVector<MetalBuffer> _as_staging;
+	LocalVector<NS::SharedPtr<MTL::AccelerationStructureDescriptor>> _as_descriptors;
+
 	_FORCE_INLINE_ MTL::CommandBuffer *get_command_buffer() const {
 		return commandBuffer.get();
 	}
@@ -656,7 +685,14 @@ public:
 	void begin_label(const char *p_label_name, const Color &p_color) override;
 	void end_label() override;
 
+	// GodotNext: metal_acceleration_structure
+	void encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, bool p_top_level);
+	bool write_instance_count(uint32_t p_count, MTL::Buffer *&r_buffer, NS::UInteger &r_offset);
+	void defer_acceleration_structure_resource(MetalBuffer p_buffer);
+	void defer_acceleration_structure_descriptor(NS::SharedPtr<MTL::AccelerationStructureDescriptor> p_descriptor);
+
 	MDCommandBuffer(MTL::CommandQueue *p_queue, ::RenderingDeviceDriverMetal *p_device_driver);
+	~MDCommandBuffer();
 	MDCommandBuffer() = default;
 };
 
