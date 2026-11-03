@@ -88,6 +88,16 @@ _FORCE_INLINE_ bool nextgi_rt_should_enable(bool p_project_enabled, bool p_has_r
 	return p_project_enabled && p_has_ray_query;
 }
 
+// GodotNext: nextgi_as_slots
+// An instance enters the TLAS only once its BLAS exists (plan §8.2). In the frame block
+// "AS updates" (line 1a) runs before "AS builds" (line 1b), so the TLAS phase admits only
+// parts whose BLAS was already built by an earlier frame's builds phase. A dirty mesh is
+// skipped this frame, built later in the same frame, and joins the TLAS on the next frame:
+// a one-frame lag, never a stale or missing BLAS in the TLAS.
+_FORCE_INLINE_ bool nextgi_rt_part_enters_tlas(bool p_blas_dirty, bool p_blas_valid) {
+	return !p_blas_dirty && p_blas_valid;
+}
+
 // eps_rt = min(max_extent / 256, rt_max_error) (D13).
 _FORCE_INLINE_ float nextgi_rt_compute_eps(float p_longest_axis_size, float p_rt_max_error) {
 	return MIN(p_longest_axis_size / 256.0f, p_rt_max_error);
@@ -165,15 +175,18 @@ struct NextGIRTPartPlan {
 void nextgi_rt_split_parts(const uint32_t *p_triangle_counts, const uint32_t *p_chunks, uint32_t p_surface_count, uint32_t p_max_triangles_per_part, LocalVector<NextGIRTPartPlan> &r_parts);
 
 // The CPU-fed TLAS and the GPU instance/surface records. Owned by NextGI; created only under the
-// HWRT tier. update() consumes the v0 feed in RenderSDFGIUpdateData::nextgi_rt_instances; the P1b
-// registry (#39) replaces that feed.
+// HWRT tier. The two phases consume the v0 feed in RenderSDFGIUpdateData::nextgi_rt_instances;
+// the P1b registry (#39) replaces that feed. NextGI::render_frame calls rebuild_tlas() from the
+// "AS updates" slot (line 1a) and build_dirty_blas() from the "AS builds" slot (line 1b), in
+// that order, so a BLAS built this frame enters the TLAS next frame (see
+// nextgi_rt_part_enters_tlas).
 class NextGIRTScene {
 public:
 	struct Stats {
 		uint32_t fed_instance_count = 0;
-		uint32_t instance_count = 0; // TLAS instances (and records) of the last update.
-		uint32_t blas_build_count = 0; // BLAS builds of the last update; 0 on a static scene after frame 1.
-		uint64_t tlas_build_count = 0; // One TLAS rebuild per update with instances.
+		uint32_t instance_count = 0; // TLAS instances (and records) of the last TLAS phase.
+		uint32_t blas_build_count = 0; // BLAS builds of the last builds phase; 0 on a static scene once built.
+		uint64_t tlas_build_count = 0; // One TLAS rebuild per TLAS phase with instances.
 	};
 
 private:
@@ -190,7 +203,13 @@ private:
 public:
 	void init();
 	void free();
-	void update(const ::RenderDataRD *p_render_data);
+	// GodotNext: nextgi_as_slots
+	// The "AS updates" phase (line 1a): rebuilds the TLAS and the records from the parts
+	// whose BLAS already exists. Runs before build_dirty_blas() in the frame block.
+	void rebuild_tlas(const ::RenderDataRD *p_render_data);
+	// The "AS builds" phase (line 1b): builds the BLAS parts of every dirty fed mesh.
+	// The new parts enter the TLAS in the next frame's rebuild_tlas().
+	void build_dirty_blas(const ::RenderDataRD *p_render_data);
 
 	RID get_tlas() const { return tlas; }
 	RID get_instance_record_buffer() const { return instance_record_buffer; }

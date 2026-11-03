@@ -11,8 +11,10 @@ extends Node
 ## With --nextgi=off it only reports the buffer memory baseline.
 ##
 ## On a HWRT device it requires: at least one TLAS instance, BLAS builds on the first frames and
-## none after that on the static scene, and one TLAS rebuild per rendered frame. It prints one
-## "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
+## none after that on the static scene, and one TLAS rebuild per rendered frame after the first.
+## Since #243 the two phases run in the frame block's AS slots (AS updates before AS builds), so
+## a BLAS built in one frame enters the TLAS in the next: the first frame builds no TLAS. It prints
+## one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
 const FRAMES := 6
 
@@ -51,7 +53,11 @@ func run(args: PackedStringArray) -> Dictionary:
 
 	var last_info: Dictionary = {}
 	for frame in FRAMES:
-		await get_tree().process_frame
+		# Wait for a drawn frame rather than a process frame, so each iteration is one
+		# frame-block run and the TLAS count below is exact: FRAMES runs rebuild the
+		# TLAS FRAMES - 1 times, because the first run's AS-updates phase precedes the
+		# BLAS builds that feed it (#243).
+		await RenderingServer.frame_post_draw
 		var info: Dictionary = RenderingServer.nextgi_get_tier_info()
 		_max_blas_build_count = maxi(_max_blas_build_count, int(info.get("rt_blas_build_count", 0)))
 		last_info = info

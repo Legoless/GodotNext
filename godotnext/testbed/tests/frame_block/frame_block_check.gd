@@ -18,6 +18,10 @@ extends Node
 ## - no timestamp containing "Render GI" (process_gi skipped; meaningful with --sdfgi, which turns
 ##   the Environment's own SDFGI on);
 ## - reflection-probe faces render in some frames and never add a NextGI block;
+## - the RT scene runs inside the block's AS slots (#243): by the end it holds TLAS instances
+##   and has rebuilt the TLAS, and the result reports the widest GPU time each AS slot took
+##   between its timestamp and the next one (tracked on warmup frames too, when the static
+##   scene's BLASes build);
 ## after the run: the normal-roughness prepass texture exists (the forced prepass with SSAO, SSR,
 ## SSIL and SDFGI off) and RB_TEX_AMBIENT is 1920x1080, or 960x540 under gi/use_half_resolution.
 ## The block's DEV_ASSERT traps a dev_build binary. Other builds print an error and skip the block,
@@ -55,6 +59,8 @@ var checked_frames := 0
 var probe_frames := 0
 var render_gi_frames := 0
 var nextgi_frames := 0
+var as_updates_max_gpu_ns := 0
+var as_builds_max_gpu_ns := 0
 var seen_stamp_frames := {}
 var failures := PackedStringArray()
 var done := false
@@ -122,7 +128,7 @@ func _process(_delta: float) -> void:
 
 
 func _on_frame_post_draw() -> void:
-	if done or process_frames <= WARMUP_FRAMES:
+	if done:
 		return
 	var device := RenderingServer.get_rendering_device()
 	var count := int(device.get_captured_timestamps_count())
@@ -133,12 +139,29 @@ func _on_frame_post_draw() -> void:
 		return
 	seen_stamp_frames[stamp_frame] = true
 	var names := PackedStringArray()
+	var times := PackedInt64Array()
 	for index in count:
 		names.append(device.get_captured_timestamp_name(index))
+		times.append(int(device.get_captured_timestamp_gpu_time(index)))
+	_track_as_gpu_times(names, times)
+	if process_frames <= WARMUP_FRAMES:
+		return
 	_check_frame(names)
 	checked_frames += 1
 	if checked_frames >= frames:
 		_finish(_final_failures())
+
+
+func _track_as_gpu_times(names: PackedStringArray, times: PackedInt64Array) -> void:
+	# A slot's GPU time is the delta to the next timestamp. SLOT_NAMES offsets from
+	# "> NextGI": AS updates at +2, AS builds at +3, the following slot at +4.
+	var start := names.find("> NextGI")
+	if start < 0 or start + 4 >= names.size():
+		return
+	if names[start + 2] != "NextGI: AS updates" or names[start + 3] != "NextGI: AS builds":
+		return
+	as_updates_max_gpu_ns = maxi(as_updates_max_gpu_ns, times[start + 3] - times[start + 2])
+	as_builds_max_gpu_ns = maxi(as_builds_max_gpu_ns, times[start + 4] - times[start + 3])
 
 
 func _check_frame(names: PackedStringArray) -> void:
@@ -213,6 +236,13 @@ func _final_failures() -> PackedStringArray:
 			result.append("no normal-roughness prepass texture")
 		if probe.ambient_size != _expected_ambient_size():
 			result.append("RB_TEX_AMBIENT is %s, expected %s" % [probe.ambient_size, _expected_ambient_size()])
+		# The RT scene's only caller is the frame block's AS slots (#243), so its
+		# counters prove the AS work ran inside them.
+		var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
+		if int(tier_info.get("rt_instance_count", 0)) == 0:
+			result.append("the RT scene held no TLAS instances inside the frame block")
+		if int(tier_info.get("rt_tlas_build_count", 0)) == 0:
+			result.append("the frame block never rebuilt the TLAS (AS updates slot)")
 	return result
 
 
@@ -229,6 +259,8 @@ func _finish(final_failures: PackedStringArray) -> void:
 		"half_resolution": ProjectSettings.get_setting("rendering/global_illumination/gi/use_half_resolution", false),
 		"frames": checked_frames,
 		"nextgi_frames": nextgi_frames,
+		"as_updates_max_gpu_ns": as_updates_max_gpu_ns,
+		"as_builds_max_gpu_ns": as_builds_max_gpu_ns,
 		"reflection_probe_frames": probe_frames,
 		"render_gi_frames": render_gi_frames,
 		"internal_size": probe.internal_size if probe != null else Vector2i.ZERO,

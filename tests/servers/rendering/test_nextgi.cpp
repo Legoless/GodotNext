@@ -222,6 +222,8 @@ TEST_CASE("[NextGI] Renderers without NextGI report UNSUPPORTED_RENDERER") {
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 // GodotNext: nextgi_rt_scene
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+// GodotNext: nextgi_as_slots
+#include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -921,6 +923,44 @@ TEST_CASE("[NextGI] RT scene: record layout, origin offset and index caps hold t
 	RendererRD::NextGIInstanceRecord record;
 	CHECK_EQ(record.card_set, UINT32_MAX);
 	CHECK_EQ(record.page_table, UINT32_MAX);
+}
+
+// GodotNext: nextgi_as_slots
+TEST_CASE("[NextGI] RT scene: the TLAS and BLAS phases split across the AS slots with a one-frame lag") {
+	// The frame block runs "AS updates" (line 1a) before "AS builds" (line 1b), so
+	// rebuild_tlas can only admit BLASes an earlier frame's build_dirty_blas made.
+	CHECK(NextGI::PASS_SLOT_AS_UPDATES < NextGI::PASS_SLOT_AS_BUILDS);
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_AS_UPDATES].name), "NextGI: AS updates");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_AS_UPDATES].line), "1a");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_AS_BUILDS].name), "NextGI: AS builds");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_AS_BUILDS].line), "1b");
+
+	// A part enters the TLAS only with a BLAS that exists and is not awaiting a rebuild.
+	CHECK(RendererRD::nextgi_rt_part_enters_tlas(false, true));
+	CHECK_FALSE(RendererRD::nextgi_rt_part_enters_tlas(true, true)); // Dirty: even a stale BLAS waits.
+	CHECK_FALSE(RendererRD::nextgi_rt_part_enters_tlas(true, false)); // Dirty and never built.
+	CHECK_FALSE(RendererRD::nextgi_rt_part_enters_tlas(false, false)); // No BLAS (build failed or ineligible).
+
+	// The two-frame walk of one new mesh through the split phases: frame 1's TLAS phase
+	// skips it, frame 1's builds phase makes its BLAS, frame 2's TLAS phase admits it.
+	bool blas_dirty = true;
+	bool blas_valid = false;
+	CHECK_FALSE(RendererRD::nextgi_rt_part_enters_tlas(blas_dirty, blas_valid)); // Frame 1, AS updates.
+	blas_valid = true; // Frame 1, AS builds.
+	blas_dirty = false;
+	CHECK(RendererRD::nextgi_rt_part_enters_tlas(blas_dirty, blas_valid)); // Frame 2, AS updates.
+
+	// Both phases are callable on their own, in slot order, and stay no-ops before init
+	// (no TLAS, no device), leaving the stats at zero.
+	RendererRD::NextGIRTScene rt_scene;
+	RenderDataRD *render_data = memnew(RenderDataRD);
+	rt_scene.rebuild_tlas(render_data);
+	CHECK_EQ(rt_scene.get_stats().fed_instance_count, 0u);
+	CHECK_EQ(rt_scene.get_stats().instance_count, 0u);
+	CHECK_EQ(rt_scene.get_stats().tlas_build_count, 0u);
+	rt_scene.build_dirty_blas(render_data);
+	CHECK_EQ(rt_scene.get_stats().blas_build_count, 0u);
+	memdelete(render_data);
 }
 
 TEST_CASE("[NextGI] RT scene: a mocked device without ray query enables no arena and no BLAS") {

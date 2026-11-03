@@ -297,12 +297,6 @@ void NextGI::_ensure_rt_scene() {
 	}
 }
 
-void NextGI::update_rt_scene(const ::RenderDataRD *p_render_data) {
-	if (rt_scene != nullptr) {
-		rt_scene->update(p_render_data);
-	}
-}
-
 void NextGI::notify_ray_query_shader_initialized() {
 	ERR_FAIL_COND_MSG(!can_initialize_ray_query_shaders(), "Ray-query ShaderRDs are initialized only under the NextGI HWRT tier.");
 	ray_query_shaders_initialized++;
@@ -403,7 +397,18 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
 		RENDER_TIMESTAMP(PASS_SLOTS[slot].name);
 		rd->draw_command_begin_label(Span<char>(PASS_SLOTS[slot].name, strlen(PASS_SLOTS[slot].name)));
-		if (slot == PASS_SLOT_INTEGRATION) {
+		// GodotNext: nextgi_as_slots
+		// The RT scene runs inside its two slots (#243): the TLAS rebuild in "AS updates"
+		// (line 1a) and the BLAS builds in "AS builds" (line 1b), so the slot timestamps
+		// carry the AS cost. "AS updates" precedes "AS builds", so a BLAS built this frame
+		// reaches the TLAS through next frame's update: a one-frame lag. An instance enters
+		// the TLAS only once its BLAS exists (plan §8.2), and rebuild_tlas skips dirty
+		// meshes until then, which keeps every TLAS build correct.
+		if (slot == PASS_SLOT_AS_UPDATES && rt_scene != nullptr) {
+			rt_scene->rebuild_tlas(p_render_data);
+		} else if (slot == PASS_SLOT_AS_BUILDS && rt_scene != nullptr) {
+			rt_scene->build_dirty_blas(p_render_data);
+		} else if (slot == PASS_SLOT_INTEGRATION) {
 			// Integration (§2.1 line 7) is the final RB_TEX_AMBIENT and RB_TEX_REFLECTION writer.
 			// Reflection stays cleared in P1; ambient is cleared until the gather lands (#25).
 			_clear_gi_buffers(rb.ptr());

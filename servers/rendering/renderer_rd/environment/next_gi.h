@@ -241,8 +241,6 @@ public:
 	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution);
 
 	// GodotNext: nextgi_rt_scene
-	// Builds dirty BLAS parts and rebuilds the TLAS from the v0 feed. No-op outside the HWRT tier.
-	void update_rt_scene(const ::RenderDataRD *p_render_data);
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }
 
 	// Compile the self-test compute source the way ShaderRD would, without creating

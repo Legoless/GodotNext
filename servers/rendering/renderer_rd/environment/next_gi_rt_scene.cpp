@@ -348,7 +348,19 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
 }
 
-void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
+// GodotNext: nextgi_as_slots
+// Both AS phases gate on the same v0 feed; either phase is a no-op without it.
+static const LocalVector<RendererSceneRender::NextGIRTInstance> *_nextgi_rt_fed_instances(const ::RenderDataRD *p_render_data) {
+	const RendererSceneRender::RenderSDFGIUpdateData *update_data = p_render_data->sdfgi_update_data;
+	if (update_data == nullptr) {
+		return nullptr;
+	}
+	return update_data->nextgi_rt_instances;
+}
+
+void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
+	// This phase runs first in the frame block, so it also clears the per-frame stats;
+	// build_dirty_blas() then fills blas_build_count for the same frame.
 	stats.fed_instance_count = 0;
 	stats.instance_count = 0;
 	stats.blas_build_count = 0;
@@ -356,8 +368,8 @@ void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
 	if (tlas.is_null()) {
 		return;
 	}
-	const RendererSceneRender::RenderSDFGIUpdateData *update_data = p_render_data->sdfgi_update_data;
-	if (update_data == nullptr || update_data->nextgi_rt_instances == nullptr || update_data->nextgi_rt_instances->is_empty()) {
+	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = _nextgi_rt_fed_instances(p_render_data);
+	if (fed_instances == nullptr || fed_instances->is_empty()) {
 		return;
 	}
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
@@ -365,14 +377,13 @@ void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
 	if (!mesh_storage->mesh_nextgi_rt_is_enabled()) {
 		return;
 	}
-	stats.fed_instance_count = update_data->nextgi_rt_instances->size();
+	stats.fed_instance_count = fed_instances->size();
 
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
 	LocalVector<NextGIInstanceRecord> instance_records;
 	LocalVector<NextGISurfaceRecord> surface_records;
 
-	RD::get_singleton()->draw_command_begin_label("NextGI: AS builds");
-	for (const RendererSceneRender::NextGIRTInstance &fed : *update_data->nextgi_rt_instances) {
+	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
 		RenderGeometryInstanceBase *geometry_instance = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
 		if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
 			continue;
@@ -382,9 +393,9 @@ void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
 		if (!mesh_storage->owns_mesh(mesh)) {
 			continue;
 		}
-		if (mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
-			_build_dirty_mesh_parts(mesh);
-		}
+		// A dirty mesh is built in this frame's later "AS builds" phase and enters the
+		// TLAS next frame; its parts are skipped here (nextgi_rt_part_enters_tlas).
+		const bool blas_dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
 		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
 		if (parts == nullptr) {
 			continue;
@@ -394,7 +405,7 @@ void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
 		const Vector3 scale = transform.basis.get_scale_abs();
 		const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
 		for (const MeshStorage::NextGIRTPart &part : *parts) {
-			if (part.blas.is_null() || part.geometries.is_empty()) {
+			if (!nextgi_rt_part_enters_tlas(blas_dirty, part.blas.is_valid()) || part.geometries.is_empty()) {
 				continue;
 			}
 			if (instance_records.size() >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
@@ -448,7 +459,6 @@ void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
 			}
 		}
 	}
-	RD::get_singleton()->draw_command_end_label();
 
 	stats.instance_count = instance_records.size();
 	if (instance_records.is_empty()) {
@@ -463,11 +473,43 @@ void NextGIRTScene::update(const ::RenderDataRD *p_render_data) {
 		RD::get_singleton()->buffer_update(surface_record_buffer, 0, surface_records.size() * sizeof(NextGISurfaceRecord), surface_records.ptr());
 	}
 
-	RD::get_singleton()->draw_command_begin_label("NextGI: AS updates");
+	// No debug label here: the frame block's slot label names this work.
 	if (RD::get_singleton()->tlas_build(tlas, Span<RD::AccelerationStructureInstance>(tlas_instances.ptr(), tlas_instances.size())) == OK) {
 		stats.tlas_build_count++;
 	}
-	RD::get_singleton()->draw_command_end_label();
+}
+
+// GodotNext: nextgi_as_slots
+void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
+	ERR_FAIL_NULL(p_render_data);
+	if (tlas.is_null()) {
+		return;
+	}
+	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = _nextgi_rt_fed_instances(p_render_data);
+	if (fed_instances == nullptr || fed_instances->is_empty()) {
+		return;
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	ERR_FAIL_NULL(mesh_storage);
+	if (!mesh_storage->mesh_nextgi_rt_is_enabled()) {
+		return;
+	}
+
+	// _build_dirty_mesh_parts clears the dirty flag, so a mesh fed by several instances
+	// builds once. The new BLASes join the TLAS in the next frame's rebuild_tlas().
+	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
+		RenderGeometryInstanceBase *geometry_instance = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
+		if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
+			continue;
+		}
+		const RID mesh = geometry_instance->data->base;
+		if (!mesh_storage->owns_mesh(mesh)) {
+			continue;
+		}
+		if (mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
+			_build_dirty_mesh_parts(mesh);
+		}
+	}
 }
 
 } // namespace RendererRD
