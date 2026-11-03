@@ -37,7 +37,7 @@ Do this when issues close, as part of landing the work (see `godotnext-implement
 These rules live in `export.py` and the page script; keep them the same in both:
 
 - **done:** closed as completed. Issues closed as not planned are left out.
-- **in progress:** open and assigned, or labelled `status:in-progress`.
+- **in progress:** open and assigned, or labeled `status:in-progress`.
 - **ready:** open, with every "blocked by" issue closed.
 - **blocked:** open, waiting on at least one open issue.
 - **stage:**
@@ -51,7 +51,7 @@ These rules live in `export.py` and the page script; keep them the same in both:
 The lead set these rules:
 - **No timing estimates.** No dates, month windows, durations or pace forecasts.
 - **Minimal text.** Plain language for project managers, with one short line per section at most.
-- **The look:** an engineering-sheet style (drafting paper in light mode, a blueprint in dark mode), with these status colours:
+- **The look:** an engineering-sheet style (drafting paper in light mode, a blueprint in dark mode), with these status colors:
   - green = done;
   - amber = in progress;
   - blue = ready;

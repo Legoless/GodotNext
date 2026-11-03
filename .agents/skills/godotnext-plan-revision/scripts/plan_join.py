@@ -5,7 +5,10 @@
 
 A new section is a new fragment file plus its name in order.json at the right place.
 """
-import json, os, sys
+
+import json
+import os
+import sys
 
 frag, dst = sys.argv[1], sys.argv[2]
 order = json.load(open(os.path.join(frag, "order.json")))

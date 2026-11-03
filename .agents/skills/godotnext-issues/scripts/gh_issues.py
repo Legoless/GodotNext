@@ -13,6 +13,7 @@ godotengine/godot remote) and retries transient network errors.
 
 Write commands accept --dry-run, which prints the change instead of making it.
 """
+
 import argparse
 import json
 import os
@@ -23,8 +24,21 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 REPO = "Legoless/GodotNext"
-TRANSIENT = ("timed out", "timeout", "connection reset", "EOF", "502", "503", "504", "secondary rate limit",
-             "was submitted too quickly", "TLS handshake", "error connecting", "connection refused", "no such host")
+TRANSIENT = (
+    "timed out",
+    "timeout",
+    "connection reset",
+    "EOF",
+    "502",
+    "503",
+    "504",
+    "secondary rate limit",
+    "was submitted too quickly",
+    "TLS handshake",
+    "error connecting",
+    "connection refused",
+    "no such host",
+)
 
 
 def gh(args, input_text=None):
@@ -60,22 +74,37 @@ def issue_id(n):
 
 def cmd_snapshot(a):
     os.makedirs(a.dir, exist_ok=True)
-    r = gh(["issue", "list", "-R", REPO, "--state", "all", "--limit", "1000", "--json",
-            "number,title,state,stateReason,labels,milestone,assignees,body,url"])
+    r = gh([
+        "issue",
+        "list",
+        "-R",
+        REPO,
+        "--state",
+        "all",
+        "--limit",
+        "1000",
+        "--json",
+        "number,title,state,stateReason,labels,milestone,assignees,body,url",
+    ])
     if r.returncode != 0:
         sys.exit(r.stderr)
     issues = json.loads(r.stdout)
 
     def links(n):
-        return str(n), {"id": issue_id(n),
-                        "blocked_by": [x["number"] for x in api(f"issues/{n}/dependencies/blocked_by", paginate=True) or []],
-                        "sub_issues": [x["number"] for x in api(f"issues/{n}/sub_issues", paginate=True) or []]}
+        return str(n), {
+            "id": issue_id(n),
+            "blocked_by": [x["number"] for x in api(f"issues/{n}/dependencies/blocked_by", paginate=True) or []],
+            "sub_issues": [x["number"] for x in api(f"issues/{n}/sub_issues", paginate=True) or []],
+        }
+
     with ThreadPoolExecutor(10) as pool:
         all_links = dict(pool.map(links, [i["number"] for i in issues]))
     json.dump(issues, open(os.path.join(a.dir, "issues.json"), "w"), indent=1)
     json.dump(all_links, open(os.path.join(a.dir, "links.json"), "w"), indent=1)
-    print(f"{len(issues)} issues, {sum(len(v['blocked_by']) for v in all_links.values())} blocked-by links, "
-          f"{sum(len(v['sub_issues']) for v in all_links.values())} sub-issue links -> {a.dir}")
+    print(
+        f"{len(issues)} issues, {sum(len(v['blocked_by']) for v in all_links.values())} blocked-by links, "
+        f"{sum(len(v['sub_issues']) for v in all_links.values())} sub-issue links -> {a.dir}"
+    )
 
 
 def cmd_blockers(a):
@@ -114,7 +143,11 @@ def cmd_sub(a):
             print(f"[dry] #{c} becomes a sub-issue of #{a.parent}")
             continue
         try:
-            api(f"issues/{a.parent}/sub_issues", method="POST", payload={"sub_issue_id": issue_id(c), "replace_parent": True})
+            api(
+                f"issues/{a.parent}/sub_issues",
+                method="POST",
+                payload={"sub_issue_id": issue_id(c), "replace_parent": True},
+            )
             print(f"#{c} is now a sub-issue of #{a.parent}")
         except RuntimeError as e:
             if "already" in str(e).lower() or "duplicate" in str(e).lower():
@@ -127,8 +160,11 @@ def deps_text(n):
     def items(path):
         rows = api(f"issues/{n}/dependencies/{path}", paginate=True) or []
         return [x for x in sorted(rows, key=lambda x: x["number"]) if x.get("state_reason") != "not_planned"]
+
     before, after = items("blocked_by"), items("blocking")
-    lines = ["**Blocked by:**"] + ([f"- #{x['number']} — {x['title']}" for x in before] or ["- nothing — can start now"])
+    lines = ["**Blocked by:**"] + (
+        [f"- #{x['number']} — {x['title']}" for x in before] or ["- nothing — can start now"]
+    )
     lines += ["", "**Unblocks:**"] + ([f"- #{x['number']} — {x['title']}" for x in after] or ["- nothing directly"])
     return "\n".join(lines)
 
@@ -157,17 +193,31 @@ def cmd_deps_section(a):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = p.add_subparsers(dest="cmd", required=True)
-    s = sp.add_parser("snapshot"); s.add_argument("dir")
-    s = sp.add_parser("blockers"); s.add_argument("n", type=int)
+    s = sp.add_parser("snapshot")
+    s.add_argument("dir")
+    s = sp.add_parser("blockers")
+    s.add_argument("n", type=int)
     for name in ("block", "unblock"):
-        s = sp.add_parser(name); s.add_argument("n", type=int); s.add_argument("--by", type=int, nargs="+", required=True)
+        s = sp.add_parser(name)
+        s.add_argument("n", type=int)
+        s.add_argument("--by", type=int, nargs="+", required=True)
         s.add_argument("--dry-run", action="store_true")
-    s = sp.add_parser("sub"); s.add_argument("parent", type=int); s.add_argument("children", type=int, nargs="+")
+    s = sp.add_parser("sub")
+    s.add_argument("parent", type=int)
+    s.add_argument("children", type=int, nargs="+")
     s.add_argument("--dry-run", action="store_true")
-    s = sp.add_parser("deps-section"); s.add_argument("numbers", type=int, nargs="+"); s.add_argument("--dry-run", action="store_true")
+    s = sp.add_parser("deps-section")
+    s.add_argument("numbers", type=int, nargs="+")
+    s.add_argument("--dry-run", action="store_true")
     a = p.parse_args()
-    {"snapshot": cmd_snapshot, "blockers": cmd_blockers, "block": cmd_block,
-     "unblock": lambda x: cmd_block(x, remove=True), "sub": cmd_sub, "deps-section": cmd_deps_section}[a.cmd](a)
+    {
+        "snapshot": cmd_snapshot,
+        "blockers": cmd_blockers,
+        "block": cmd_block,
+        "unblock": lambda x: cmd_block(x, remove=True),
+        "sub": cmd_sub,
+        "deps-section": cmd_deps_section,
+    }[a.cmd](a)
 
 
 if __name__ == "__main__":

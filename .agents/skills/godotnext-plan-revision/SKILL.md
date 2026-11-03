@@ -16,7 +16,7 @@ The plan is one HTML file, `docs/godotnext/nextgi-nextgeo-plan.html`, and it's t
 | `nextgeo`, `nextgi`, `shared`, `platforms`, `files` | §7–§11: designs, shared foundations, platforms, file map |
 | `steps`, `validation`, `estimates` | §12–§14: phases and gates, validation plan and scenes, estimates and the milestone table |
 | `risks`, `alternatives`, `backlog`, `open` | §15–§18: risks, rejected alternatives, first backlog, open questions and §18.1 lead decisions |
-| `legal`, `sources` | §19–§20: clean room and licences, sources |
+| `legal`, `sources` | §19–§20: clean room and licenses, sources |
 | `parity` … `parity-upscaling` | §21: the UE 5.8 parity program (PR, PD, PS, PL, PV, PM, PP, PN, PT, PU+) |
 | `build-first` | §22: build-first execution, PR basics, smoke scenes, PQ, and the integrator defaults (§22.10) |
 | `ue-bar` | §23: the two-card test fleet and the ≤1.20× UE 5.8 bar |
@@ -72,5 +72,5 @@ Splitting and joining are lossless: join(split(plan)) is byte-identical.
 - **Build first (§22).** Only PR basics run during the build. Every gate and spike runs together in PQ, and v1 signs off at MQ. M0–M8 are code-complete checkpoints, not releases.
 - **The fleet and the bar (§23).** The RTX 4080 SUPER and the RTX 5090 (each in its own machine) run every NVIDIA line, and the M5 Max runs Metal. Timing lines pass at ≤1.20× UE 5.8 on the same machine; fixed ms values are report-only.
 - **Metal first (§24).** P0 and P1 are built on the M5 Max; P2 is Vulkan/NVIDIA.
-- **The clean room and licences (§19).**
+- **The clean room and licenses (§19).**
 - **Defaults and decisions.** The ten §22.10 integrator defaults and decisions D1–D22.

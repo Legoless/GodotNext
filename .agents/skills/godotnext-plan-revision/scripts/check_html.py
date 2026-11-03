@@ -5,6 +5,7 @@
 
 Prints "no tag errors" and "unclosed: []" when the file is well formed, and exits 1 otherwise.
 """
+
 import sys
 from html.parser import HTMLParser
 
@@ -29,7 +30,9 @@ class Checker(HTMLParser):
         if self.stack and self.stack[-1][0] == tag:
             self.stack.pop()
         else:
-            self.errors.append(f"line {self.getpos()[0]}: </{tag}> does not match <{self.stack[-1][0] if self.stack else 'nothing'}>")
+            self.errors.append(
+                f"line {self.getpos()[0]}: </{tag}> does not match <{self.stack[-1][0] if self.stack else 'nothing'}>"
+            )
 
 
 c = Checker()
