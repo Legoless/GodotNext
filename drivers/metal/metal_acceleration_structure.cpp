@@ -183,14 +183,16 @@ void RenderingDeviceDriverMetal::acceleration_structure_instance_write(uint8_t *
 	}
 	desc.transformationMatrix.columns[3] = MTL::PackedFloat3(xform.origin.x, xform.origin.y, xform.origin.z);
 
-	// Metal's default front face is clockwise. Vulkan's, and therefore Godot's, is counter-clockwise.
-	// The instance option forces counter-clockwise unless FLIP_FACING asks for the Metal default.
-	// The numeric values match, so this is not a blind cast of the Godot bitfield.
+	// Metal, Vulkan (VK_GEOMETRY_INSTANCE_TRIANGLE_FLIP_FACING_BIT_KHR, also named
+	// TRIANGLE_FRONT_COUNTERCLOCKWISE) and DXR share the same default front face and the same
+	// bit that flips it, and the Vulkan driver passes the RD flags through unchanged. So the
+	// mapping is direct: FLIP_FACING sets the counter-clockwise option (the #18 rd_smoke
+	// fixture checks the reported front face against analytic values).
 	uint32_t options = 0;
 	if (p_instance.flags.has_flag(ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT)) {
 		options |= MTL::AccelerationStructureInstanceOptionDisableTriangleCulling;
 	}
-	if (!p_instance.flags.has_flag(ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT)) {
+	if (p_instance.flags.has_flag(ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT)) {
 		options |= MTL::AccelerationStructureInstanceOptionTriangleFrontFacingWindingCounterClockwise;
 	}
 	if (p_instance.flags.has_flag(ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT)) {
