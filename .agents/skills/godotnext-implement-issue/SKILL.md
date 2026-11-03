@@ -51,14 +51,29 @@ If the issue and the plan disagree, the plan wins. Note the disagreement in your
 - **Don't measure:** don't run or tune against PQ measurements (timings, quality corpora, soaks). Under build-first (§22), fixed millisecond values are report-only targets at most.
 
 Build and test on the M5 Max (§13.1):
+
+- **SCons needs Python 3.10 or newer.** The system `python3` on macOS is 3.9. Use a virtualenv:
+  ```
+  /opt/homebrew/bin/python3 -m venv ~/.cache/godotnext-venv
+  ~/.cache/godotnext-venv/bin/pip install scons
+  ```
+- **No MoltenVK SDK means `use_volk=yes`.** `dev_mode=yes` doesn't add `.dev` to the binary name.
+
 ```
-scons platform=macos target=editor dev_mode=yes arch=arm64
-./bin/godot.macos.editor.dev.arm64 --headless --test --force-colors
-./bin/godot.macos.editor.dev.arm64 --headless --test --force-colors --test-case='*NextGI*'
-./bin/godot.macos.editor.dev.arm64 --doctool --headless
+SCONS_CACHE=$HOME/.cache/godotnext-scons ~/.cache/godotnext-venv/bin/python -m SCons platform=macos target=editor dev_mode=yes arch=arm64 use_volk=yes -j8
+./bin/godot.macos.editor.arm64 --headless --test --force-colors
+./bin/godot.macos.editor.arm64 --headless --test --force-colors --test-case='*NextGI*'
+./bin/godot.macos.editor.arm64 --doctool --headless
 git diff --exit-code -- doc/classes
 ```
-The binary name depends on the build options. Use the one SCons prints.
+
+Run the repository's style checks on every file you changed. They are the same hooks CI runs (clang-format, ruff, mypy, codespell in US English, file-format, CODEOWNERS):
+```
+git ls-files -m -o --exclude-standard | xargs uvx prek run --files
+```
+Codespell rewrites files in place. Check its edits, because it can "correct" technical acronyms.
+
+**Doctests must pass on every CI runner, including Linux and Windows without extra tools.** Never make a doctest depend on a locally installed tool such as `spirv-val`. Put that kind of check in a script under `misc/scripts/`. `godotnext_rq_toolchain_check.sh` is an example.
 
 ## 4. Pass the PR basics (§22.2)
 
