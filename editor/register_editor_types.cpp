@@ -99,6 +99,8 @@
 #include "editor/scene/3d/mesh_instance_3d_editor_plugin.h"
 #include "editor/scene/3d/mesh_library_editor_plugin.h"
 #include "editor/scene/3d/multimesh_editor_plugin.h"
+// GodotNext: nextgi_editor_plugin
+#include "editor/scene/3d/nextgi_editor_plugin.h"
 #include "editor/scene/3d/node_3d_editor_gizmos.h"
 #include "editor/scene/3d/occluder_instance_3d_editor_plugin.h"
 #include "editor/scene/3d/particles_3d_editor_plugin.h"
@@ -286,6 +288,8 @@ void register_editor_types() {
 	EditorPlugins::add_by_type<MeshLibraryEditorPlugin>();
 	EditorPlugins::add_by_type<OccluderInstance3DEditorPlugin>();
 	EditorPlugins::add_by_type<MultiMeshEditorPlugin>();
+	// GodotNext: nextgi_editor_plugin
+	EditorPlugins::add_by_type<NextGIEditorPlugin>();
 	EditorPlugins::add_by_type<Path3DEditorPlugin>();
 	EditorPlugins::add_by_type<Polygon3DEditorPlugin>();
 	EditorPlugins::add_by_type<Skeleton3DEditorPlugin>();

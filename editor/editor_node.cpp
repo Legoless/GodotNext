@@ -8519,7 +8519,15 @@ HashMap<String, Variant> EditorNode::get_initial_settings() {
 	settings["gui/common/auto_focus_strategy"] = Control::AutoFocusStrategy::STRATEGY_BALLOON;
 	settings["input_devices/joypads/ignore_joypad_on_unfocused_application"] = true;
 	settings["physics/3d/physics_engine"] = PhysicsServer3DManager::JOLT_PHYSICS_NAME;
-	settings["rendering/rendering_device/driver.windows"] = "d3d12";
+	// GodotNext: vulkan_default
+	// Interim Windows default until gate GD passes in PQ. pd-windows-dx12-default (#124) writes
+	// "d3d12" again before v1. Godot 4.6+ writes "d3d12" for HDR output and DComp transparency.
+	// New GodotNext projects give those up on Windows unless they switch back, and take on the
+	// Vulkan instability on Windows that Godot 4.6 cited. The lead reconfirmed this on 2026-11-02
+	// after that third cost. It mainly affects internal development: there is no public release
+	// before v1, and v1 ships after GD. An existing project changes only if the user accepts the
+	// one-time Vulkan switch modal.
+	settings["rendering/rendering_device/driver.windows"] = "vulkan";
 	settings["rendering/lights_and_shadows/multi_bounce_occlusion/enabled"] = true;
 	return settings;
 }
