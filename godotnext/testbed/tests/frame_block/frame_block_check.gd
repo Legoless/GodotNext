@@ -1,0 +1,240 @@
+extends Node
+
+## NextGI frame block check (#26; plan §4.1 and §6.1).
+##
+## Loads Color Box Room A into a 1920x1080 SubViewport, turns nextgi_enabled on in its Environment
+## with SSAO, SSR and SSIL off, keeps the omni shadow on, adds a shadowed DirectionalLight3D and a
+## ReflectionProbe that updates every frame. It then reads the RenderingDevice timestamps of every
+## frame (run Godot with --gpu-profile) and, after the opaque pass, the render buffers.
+##
+## run_frame_block_check.sh writes res://override.cfg (git ignores it) with nextgi/enabled=true for
+## the run and removes it afterwards:
+##   godotnext/testbed/tests/frame_block/run_frame_block_check.sh [--half-resolution] -- \
+##     <godot> --path godotnext/testbed --rendering-driver <driver> --gpu-profile \
+##     res://tests/frame_block/frame_block_check.tscn -- --expect=active|inactive [--frames=600] [--sdfgi]
+##
+## --expect=active (the HWRT tier), on every checked frame:
+## - exactly one "> NextGI" and the 12 NextGI timestamps right after it, in PASS_SLOTS order;
+## - no timestamp containing "Render GI" (process_gi skipped; meaningful with --sdfgi, which turns
+##   the Environment's own SDFGI on);
+## - reflection-probe faces render in some frames and never add a NextGI block;
+## after the run: the normal-roughness prepass texture exists (the forced prepass with SSAO, SSR,
+## SSIL and SDFGI off) and RB_TEX_AMBIENT is 1920x1080, or 960x540 under gi/use_half_resolution.
+## The block's DEV_ASSERT traps a dev_build binary. Other builds print an error and skip the block,
+## which fails the timestamp check.
+##
+## --expect=inactive (DISABLED or FALLBACK): no NextGI timestamp on any frame.
+##
+## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
+
+const ProbeScript := preload("res://tests/frame_block/frame_block_probe.gd")
+const ROOM_SCENE := "res://scenes/color_box_room/cbr_a.tscn"
+const VIEW_SIZE := Vector2i(1920, 1080)
+const WARMUP_FRAMES := 30
+const SLOT_NAMES: Array[String] = [
+	"> NextGI",
+	"NextGI: SRC capture",
+	"NextGI: AS updates",
+	"NextGI: AS builds",
+	"NextGI: SRC relight",
+	"NextGI: WRC update",
+	"NextGI: Screen traces",
+	"NextGI: Diffuse gather",
+	"NextGI: Reflection traces",
+	"NextGI: Integration",
+	"NextGI: Denoise",
+	"< NextGI",
+]
+
+var expect := ""
+var frames := 600
+var sdfgi := false
+var probe: CompositorEffect
+var process_frames := 0
+var checked_frames := 0
+var probe_frames := 0
+var render_gi_frames := 0
+var nextgi_frames := 0
+var seen_stamp_frames := {}
+var failures := PackedStringArray()
+var done := false
+
+
+func _ready() -> void:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--expect="):
+			expect = arg.trim_prefix("--expect=")
+		elif arg.begins_with("--frames="):
+			frames = int(arg.trim_prefix("--frames="))
+		elif arg == "--sdfgi":
+			sdfgi = true
+	if expect != "active" and expect != "inactive":
+		_finish(["--expect=active or --expect=inactive is required"])
+		return
+	_build_scene()
+	RenderingServer.frame_post_draw.connect(_on_frame_post_draw)
+
+
+func _build_scene() -> void:
+	var viewport := SubViewport.new()
+	viewport.size = VIEW_SIZE
+	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	add_child(viewport)
+
+	var room: Node3D = load(ROOM_SCENE).instantiate()
+	viewport.add_child(room)
+
+	var world_environment: WorldEnvironment = room.get_node("WorldEnvironment")
+	var environment: Environment = world_environment.environment.duplicate()
+	environment.nextgi_enabled = true
+	environment.ssao_enabled = false
+	environment.ssr_enabled = false
+	environment.ssil_enabled = false
+	environment.sdfgi_enabled = sdfgi
+	world_environment.environment = environment
+
+	var omni: OmniLight3D = room.get_node("RoomLight")
+	omni.shadow_enabled = true
+	var sun := DirectionalLight3D.new()
+	sun.shadow_enabled = true
+	sun.rotation_degrees = Vector3(-50.0, 30.0, 0.0)
+	room.add_child(sun)
+
+	var reflection_probe := ReflectionProbe.new()
+	reflection_probe.update_mode = ReflectionProbe.UPDATE_ALWAYS
+	reflection_probe.size = Vector3(4.0, 3.0, 4.0)
+	reflection_probe.position = Vector3(-2.05, 1.5, 0.0)
+	room.add_child(reflection_probe)
+
+	probe = ProbeScript.new()
+	var compositor := Compositor.new()
+	compositor.compositor_effects = [probe]
+	var camera: Camera3D = room.get_node("CaptureCam")
+	camera.compositor = compositor
+	camera.current = true
+
+
+func _process(_delta: float) -> void:
+	process_frames += 1
+	# A safety cap: timestamps arrive a few frames late and only while --gpu-profile is on.
+	if not done and process_frames > WARMUP_FRAMES + frames * 2 + 120:
+		_finish(["only %d of %d frames had timestamps; run Godot with --gpu-profile" % [checked_frames, frames]])
+
+
+func _on_frame_post_draw() -> void:
+	if done or process_frames <= WARMUP_FRAMES:
+		return
+	var device := RenderingServer.get_rendering_device()
+	var count := int(device.get_captured_timestamps_count())
+	if count == 0:
+		return
+	var stamp_frame := int(device.get_captured_timestamps_frame())
+	if seen_stamp_frames.has(stamp_frame):
+		return
+	seen_stamp_frames[stamp_frame] = true
+	var names := PackedStringArray()
+	for index in count:
+		names.append(device.get_captured_timestamp_name(index))
+	_check_frame(names)
+	checked_frames += 1
+	if checked_frames >= frames:
+		_finish(_final_failures())
+
+
+func _check_frame(names: PackedStringArray) -> void:
+	var begins := 0
+	var nextgi_stamps := 0
+	var probe_faces := 0
+	var render_gi := false
+	for name in names:
+		if name == "> NextGI":
+			begins += 1
+		if name.contains("NextGI"):
+			nextgi_stamps += 1
+		if name.begins_with("Render ReflectionProbe, Face"):
+			probe_faces += 1
+		if name.contains("Render GI"):
+			render_gi = true
+	if probe_faces > 0:
+		probe_frames += 1
+	if render_gi:
+		render_gi_frames += 1
+	if nextgi_stamps > 0:
+		nextgi_frames += 1
+
+	if expect == "inactive":
+		if nextgi_stamps > 0:
+			_fail("NextGI timestamps on an inactive tier: %s" % [_nextgi_names(names)])
+		return
+
+	# One main view, so exactly one block, also in frames that render reflection-probe faces.
+	if begins != 1:
+		_fail("%d NextGI blocks in a frame (%d reflection-probe faces), expected 1" % [begins, probe_faces])
+		return
+	var start := names.find("> NextGI")
+	for slot in SLOT_NAMES.size():
+		var index := start + slot
+		if index >= names.size() or names[index] != SLOT_NAMES[slot]:
+			_fail("NextGI timestamps out of order: %s" % [_nextgi_names(names)])
+			return
+	if nextgi_stamps != SLOT_NAMES.size():
+		_fail("%d NextGI timestamps in a frame, expected %d" % [nextgi_stamps, SLOT_NAMES.size()])
+	if render_gi:
+		_fail("\"Render GI\" is in the frame profile of a NextGI view")
+
+
+func _nextgi_names(names: PackedStringArray) -> String:
+	var found := PackedStringArray()
+	for name in names:
+		if name.contains("NextGI"):
+			found.append(name)
+	return ", ".join(found)
+
+
+func _fail(message: String) -> void:
+	# Keep the first occurrence of each failure, so a 600-frame run stays readable.
+	if not failures.has(message):
+		failures.append(message)
+
+
+func _expected_ambient_size() -> Vector2i:
+	var half: bool = ProjectSettings.get_setting("rendering/global_illumination/gi/use_half_resolution", false)
+	return Vector2i(VIEW_SIZE.x >> 1, VIEW_SIZE.y >> 1) if half else VIEW_SIZE
+
+
+func _final_failures() -> PackedStringArray:
+	var result := failures.duplicate()
+	if expect == "active":
+		if probe_frames == 0:
+			result.append("no frame rendered a reflection-probe face")
+		if probe.calls == 0:
+			result.append("the compositor probe never ran")
+		elif not probe.normal_roughness:
+			result.append("no normal-roughness prepass texture")
+		if probe.ambient_size != _expected_ambient_size():
+			result.append("RB_TEX_AMBIENT is %s, expected %s" % [probe.ambient_size, _expected_ambient_size()])
+	return result
+
+
+func _finish(final_failures: PackedStringArray) -> void:
+	done = true
+	var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	var result := {
+		"pass": final_failures.is_empty(),
+		"expect": expect,
+		"device": RenderingServer.get_video_adapter_name(),
+		"driver": RenderingServer.get_current_rendering_driver_name(),
+		"tier_info": tier_info,
+		"sdfgi": sdfgi,
+		"half_resolution": ProjectSettings.get_setting("rendering/global_illumination/gi/use_half_resolution", false),
+		"frames": checked_frames,
+		"nextgi_frames": nextgi_frames,
+		"reflection_probe_frames": probe_frames,
+		"render_gi_frames": render_gi_frames,
+		"internal_size": probe.internal_size if probe != null else Vector2i.ZERO,
+		"normal_roughness": probe.normal_roughness if probe != null else false,
+		"ambient_size": probe.ambient_size if probe != null else Vector2i.ZERO,
+		"failures": final_failures,
+	}
+	print("GODOTNEXT_RESULT " + JSON.stringify(result))
+	get_tree().quit(0 if final_failures.is_empty() else 1)

@@ -32,13 +32,32 @@
 
 #include "core/config/project_settings.h"
 #include "core/string/print_string.h"
+#include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
 
 NextGI *NextGI::singleton = nullptr;
+
+const NextGI::PassSlotInfo NextGI::PASS_SLOTS[NextGI::PASS_SLOT_MAX] = {
+	{ "> NextGI", "" },
+	{ "NextGI: SRC capture", "2a" },
+	{ "NextGI: AS updates", "1a" },
+	{ "NextGI: AS builds", "1b" },
+	{ "NextGI: SRC relight", "2b" },
+	{ "NextGI: WRC update", "3" },
+	{ "NextGI: Screen traces", "4" },
+	{ "NextGI: Diffuse gather", "5" },
+	{ "NextGI: Reflection traces", "6" },
+	{ "NextGI: Integration", "7" },
+	{ "NextGI: Denoise", "8" },
+	{ "< NextGI", "" },
+};
 
 static const char *_nextgi_tier_names[NextGI::TIER_MAX] = {
 	"DISABLED",
@@ -272,6 +291,95 @@ Dictionary NextGI::get_tier_info() const {
 	info["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
 	info["ray_query_shaders_initialized"] = ray_query_shaders_initialized;
 	return info;
+}
+
+bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
+	// Reflection probes sample the WRC and the sky only (plan §6.1, multiple views).
+	return p_tier == TIER_HWRT && !p_reflection_probe && p_environment_enabled && !p_unshaded;
+}
+
+Size2i NextGI::get_gi_buffer_size(const Size2i &p_internal_size, bool p_half_resolution) {
+	Size2i size = p_internal_size;
+	if (p_half_resolution) {
+		size.x >>= 1;
+		size.y >>= 1;
+	}
+	return size;
+}
+
+uint32_t NextGI::get_gi_buffer_usage_bits() {
+	return RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_STORAGE_BIT | RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+}
+
+bool NextGI::gi_buffers_need_reset(bool p_has_buffers, uint32_t p_usage_bits, bool p_using_half_size, bool p_half_resolution) {
+	if (p_using_half_size != p_half_resolution) {
+		return true;
+	}
+	const uint32_t required = get_gi_buffer_usage_bits();
+	return p_has_buffers && (p_usage_bits & required) != required;
+}
+
+void NextGI::ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_half_resolution) {
+	ERR_FAIL_NULL(p_render_buffers);
+	Ref<GI::RenderBuffersGI> rbgi = p_render_buffers->get_custom_data(RB_SCOPE_GI);
+	ERR_FAIL_COND(rbgi.is_null());
+
+	const bool has_buffers = p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT);
+	uint32_t usage_bits = 0;
+	if (has_buffers) {
+		usage_bits = RenderingDevice::get_singleton()->texture_get_format(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)).usage_bits;
+	}
+	if (gi_buffers_need_reset(has_buffers, usage_bits, rbgi->using_half_size_gi, p_half_resolution)) {
+		p_render_buffers->clear_context(RB_SCOPE_GI);
+	}
+
+	if (!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
+		const Size2i size = get_gi_buffer_size(p_render_buffers->get_internal_size(), p_half_resolution);
+		const uint32_t usage = get_gi_buffer_usage_bits();
+		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_AMBIENT, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
+		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_REFLECTION, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
+		rbgi->using_half_size_gi = p_half_resolution;
+	}
+}
+
+void NextGI::_clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_COND(!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT) || !p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION));
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const uint32_t layers = p_render_buffers->get_view_count();
+	// Alpha 0: the opaque pass mixes the buffers in by their alpha, so it keeps its own ambient and specular.
+	rd->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT), Color(0, 0, 0, 0), 0, 1, 0, layers);
+	rd->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION), Color(0, 0, 0, 0), 0, 1, 0, layers);
+}
+
+void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution) {
+	// The shadow batch fills RENDER_LIST_SECONDARY, which SRC card capture shares (plan §4.1).
+	DEV_ASSERT(!shadow_batch_open);
+	ERR_FAIL_COND_MSG(shadow_batch_open, "The NextGI frame block must not run inside a shadow batch.");
+	ERR_FAIL_NULL(p_render_data);
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	ERR_FAIL_COND_MSG(p_normal_roughness_slices == nullptr || p_normal_roughness_slices[0].is_null(), "The NextGI frame block needs the depth + normal-roughness prepass.");
+
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_BEGIN].name);
+	rd->draw_command_begin_label("NextGI");
+
+	ensure_gi_buffers(rb.ptr(), p_half_resolution);
+
+	// Every slot emits its timestamp, also while it has no work yet.
+	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
+		RENDER_TIMESTAMP(PASS_SLOTS[slot].name);
+		rd->draw_command_begin_label(Span<char>(PASS_SLOTS[slot].name, strlen(PASS_SLOTS[slot].name)));
+		if (slot == PASS_SLOT_INTEGRATION) {
+			// Integration (§2.1 line 7) is the final RB_TEX_AMBIENT and RB_TEX_REFLECTION writer.
+			// Reflection stays cleared in P1; ambient is cleared until the gather lands (#25).
+			_clear_gi_buffers(rb.ptr());
+		}
+		rd->draw_command_end_label();
+	}
+
+	rd->draw_command_end_label();
+	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_END].name);
 }
 
 NextGI::NextGI() {

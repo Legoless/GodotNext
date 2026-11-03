@@ -30,16 +30,20 @@
 
 #pragma once
 
+#include "core/math/vector2i.h"
 #include "core/string/ustring.h"
+#include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/rendering_device_enums.h"
 
+class RenderDataRD;
 class RenderingDevice;
+class RenderSceneBuffersRD;
 
 namespace RendererRD {
 
-// NextGI host entry: the §3 tier selection (#15) and the ray-query toolchain self-test (#20).
-// #36 grows run_toolchain_selftest into the startup 64-ray self-test.
+// NextGI host entry: the §3 tier selection (#15), the ray-query toolchain self-test (#20) and the
+// Forward+ frame block (#26). #36 grows run_toolchain_selftest into the startup 64-ray self-test.
 class NextGI {
 public:
 	// The NextGI tier (plan §3.1). P0 falls back to SDFGI; #187 replaces the fallback with TIER_SOFTWARE.
@@ -108,6 +112,33 @@ public:
 		bool operator!=(const TierResult &p_other) const { return !(*this == p_other); }
 	};
 
+	// The frame block's fixed slots, in plan §6.1 step 5 order. Each slot opens one RD timestamp
+	// named for its §2.1 line (Q11). Lines 1a/1b and 2a/2b have separate slots for G1-3.
+	enum PassSlot {
+		PASS_SLOT_BEGIN, // "> NextGI"
+		PASS_SLOT_SRC_CAPTURE, // 2a
+		PASS_SLOT_AS_UPDATES, // 1a
+		PASS_SLOT_AS_BUILDS, // 1b
+		PASS_SLOT_SRC_RELIGHT, // 2b
+		PASS_SLOT_WRC_UPDATE, // 3
+		PASS_SLOT_SCREEN_TRACES, // 4
+		PASS_SLOT_DIFFUSE_GATHER, // 5
+		PASS_SLOT_REFLECTION_TRACES, // 6
+		PASS_SLOT_INTEGRATION, // 7
+		PASS_SLOT_DENOISE, // 8
+		PASS_SLOT_END, // "< NextGI"
+		PASS_SLOT_MAX,
+	};
+
+	struct PassSlotInfo {
+		const char *name; // The RD timestamp and the debug label.
+		const char *line; // The §2.1 line; empty for the two block markers.
+	};
+
+	// The name-to-line table, in emission order. The timing runner maps timestamp names to §2.1
+	// lines with it and keeps line 1b out of the steady-state p95 (Q11).
+	static const PassSlotInfo PASS_SLOTS[PASS_SLOT_MAX];
+
 private:
 	static NextGI *singleton;
 
@@ -117,8 +148,10 @@ private:
 	bool reported = false;
 	TierResult reported_result;
 	int ray_query_shaders_initialized = 0;
+	bool shadow_batch_open = false;
 
 	void _report(const String &p_line, const TierResult &p_result) const;
+	void _clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const;
 
 public:
 	static NextGI *get_singleton() { return singleton; }
@@ -167,6 +200,34 @@ public:
 	bool is_sdfgi_fallback() const { return result.tier == TIER_FALLBACK; }
 	// {tier, reason, quality, ray_query_shaders_initialized}, the names as in the printed line.
 	Dictionary get_tier_info() const;
+
+	// Whether a view runs the frame block (plan §6.1): the HWRT tier, an Environment with
+	// nextgi_enabled, and neither a reflection-probe render nor the unshaded debug draw.
+	// Such a view skips GI::process_gi and forces the depth + normal-roughness prepass.
+	static bool view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded);
+
+	// RB_TEX_AMBIENT and RB_TEX_REFLECTION have the size GI::process_gi allocates: the internal
+	// size, halved per axis under gi/use_half_resolution.
+	static Size2i get_gi_buffer_size(const Size2i &p_internal_size, bool p_half_resolution);
+	// process_gi's usage bits plus CAN_COPY_TO, which texture_clear needs.
+	static uint32_t get_gi_buffer_usage_bits();
+	// True when the GI buffers must be dropped: the half-resolution mode changed (as in process_gi),
+	// or existing buffers lack the usage bits NextGI needs (process_gi created them).
+	static bool gi_buffers_need_reset(bool p_has_buffers, uint32_t p_usage_bits, bool p_using_half_size, bool p_half_resolution);
+	// Mirrors the buffer setup of GI::process_gi with get_gi_buffer_usage_bits.
+	void ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_half_resolution);
+
+	// _render_shadow_begin and _render_shadow_end bracket a shadow batch, which fills
+	// RENDER_LIST_SECONDARY. The frame block never runs inside one.
+	void notify_shadow_batch_begin() { shadow_batch_open = true; }
+	void notify_shadow_batch_end() { shadow_batch_open = false; }
+	bool is_shadow_batch_open() const { return shadow_batch_open; }
+
+	// The frame block, run right after _render_shadow_end in _pre_opaque_render for views where
+	// view_uses_frame_block holds. It writes RB_TEX_AMBIENT and RB_TEX_REFLECTION and emits every
+	// PASS_SLOTS timestamp, empty slots included. Until the gather lands both buffers are cleared to
+	// (0, 0, 0, 0), so the opaque pass keeps its own ambient and specular through the buffer alpha.
+	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution);
 
 	// Compile the self-test compute source the way ShaderRD would, without creating
 	// a GPU pipeline. Used by the offline toolchain doctest. Does not check ray-query support.

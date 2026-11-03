@@ -69,6 +69,14 @@ def test_counter_only_tag_and_alias_columns() -> None:
     assert fields["lines"]["1b"]["p95"] == 0.0
 
 
+def test_frame_block_slot_columns_map_to_lines_3_and_7() -> None:
+    # The NextGI frame block (#26) names its slots "NextGI: WRC update" and "NextGI: Integration".
+    rows = [_row([("nextgi_wrc_update_ms", 0.5), ("nextgi_integration_ms", 0.25)])]
+    fields = timing_fields(rows)
+    assert fields["lines"]["3"]["p50"] == 0.5
+    assert fields["lines"]["7"]["p50"] == 0.25
+
+
 def test_counter_aggregation_uses_aliases_and_stays_null_when_absent() -> None:
     rows = [
         _row(

@@ -40,10 +40,11 @@ LINES: tuple[LineSpec, ...] = (
     ),
     ("2a", "SRC capture", ("nextgi_src_capture_ms", "src_capture_ms")),
     ("2b", "SRC relight", ("nextgi_src_relight_ms", "src_relight_ms")),
-    ("3", "WRC update", ("nextgi_wrc_ms", "wrc_update_ms", "translucency_volume_ms")),
+    # nextgi_wrc_update_ms and nextgi_integration_ms are the NextGI frame-block slot names (#26).
+    ("3", "WRC update", ("nextgi_wrc_ms", "nextgi_wrc_update_ms", "wrc_update_ms", "translucency_volume_ms")),
     ("4", "Screen traces", ("nextgi_screen_traces_ms", "screen_traces_ms")),
     ("5", "HWRT diffuse gather", ("nextgi_diffuse_gather_ms", "hwrt_diffuse_gather_ms")),
-    ("7", "Gather integration", ("nextgi_gather_integration_ms", "gather_integration_ms")),
+    ("7", "Gather integration", ("nextgi_gather_integration_ms", "nextgi_integration_ms", "gather_integration_ms")),
 )
 
 DIFFUSE_KEYS: tuple[str, ...] = ("1a", "2a", "2b", "3", "4", "5", "7")

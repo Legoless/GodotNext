@@ -702,6 +702,124 @@ TEST_CASE("[NextGI][Metal] The acceleration structure instance size is 72") {
 	CHECK_EQ(RenderingDeviceDriver::METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE, 72u);
 }
 
+// The Forward+ frame block (#26). The GPU side needs the HWRT tier; these cases cover its rules.
+
+TEST_CASE("[NextGI] Frame block: 12 timestamp slots in plan §6.1 step 5 order, named per §2.1 line") {
+	static const char *expected_names[NextGI::PASS_SLOT_MAX] = {
+		"> NextGI",
+		"NextGI: SRC capture",
+		"NextGI: AS updates",
+		"NextGI: AS builds",
+		"NextGI: SRC relight",
+		"NextGI: WRC update",
+		"NextGI: Screen traces",
+		"NextGI: Diffuse gather",
+		"NextGI: Reflection traces",
+		"NextGI: Integration",
+		"NextGI: Denoise",
+		"< NextGI",
+	};
+	static const char *expected_lines[NextGI::PASS_SLOT_MAX] = { "", "2a", "1a", "1b", "2b", "3", "4", "5", "6", "7", "8", "" };
+
+	CHECK_EQ(int(NextGI::PASS_SLOT_MAX), 12);
+	HashSet<String> names;
+	HashSet<String> lines;
+	for (int i = 0; i < NextGI::PASS_SLOT_MAX; i++) {
+		CHECK_EQ(String(NextGI::PASS_SLOTS[i].name), String(expected_names[i]));
+		CHECK_EQ(String(NextGI::PASS_SLOTS[i].line), String(expected_lines[i]));
+		names.insert(NextGI::PASS_SLOTS[i].name);
+		if (String(NextGI::PASS_SLOTS[i].line).is_empty()) {
+			// Only the block markers have no line, and the profiler nests what they enclose.
+			CHECK((String(NextGI::PASS_SLOTS[i].name).begins_with("> ") || String(NextGI::PASS_SLOTS[i].name).begins_with("< ")));
+		} else {
+			lines.insert(NextGI::PASS_SLOTS[i].line);
+		}
+	}
+	CHECK_EQ(names.size(), 12u);
+	// One slot per §2.1 line 1a-8.
+	CHECK_EQ(lines.size(), 10u);
+	CHECK_FALSE(names.has("Render GI"));
+
+	// The enum names the same slots as the table.
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_AS_BUILDS].line), "1b");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_SRC_CAPTURE].line), "2a");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_INTEGRATION].line), "7");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_BEGIN].name), "> NextGI");
+	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_END].name), "< NextGI");
+}
+
+TEST_CASE("[NextGI] Frame block: HWRT views with nextgi_enabled only, never reflection probes") {
+	CHECK(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, false));
+
+	// Reflection-probe renders never enter the block.
+	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, true, true, false));
+	// The Environment has nextgi_enabled off, or there is no Environment.
+	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, false, false));
+	// The unshaded debug draw.
+	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, true));
+
+	// No other tier runs the block. The fallback tier keeps SDFGI and process_gi.
+	for (int tier = 0; tier < NextGI::TIER_MAX; tier++) {
+		if (tier == NextGI::TIER_HWRT) {
+			continue;
+		}
+		CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::Tier(tier), false, true, false));
+		CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::Tier(tier), true, true, false));
+	}
+
+	// Mocked devices: an RTX GPU on Vulkan runs the block, Metal without ray query (the M5 Max
+	// until #47) and D3D12 without DXR do not.
+	CHECK(NextGI::view_uses_frame_block(evaluate_mocked_device(true, "Vulkan", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU).tier, false, true, false));
+	CHECK_FALSE(NextGI::view_uses_frame_block(evaluate_mocked_device(false, "Metal", RenderingDeviceEnums::DEVICE_TYPE_INTEGRATED_GPU).tier, false, true, false));
+	CHECK_FALSE(NextGI::view_uses_frame_block(evaluate_mocked_device(false, "D3D12", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU).tier, false, true, false));
+}
+
+TEST_CASE("[NextGI] Frame block: RB_TEX_AMBIENT has the internal size, halved under half resolution") {
+	CHECK_EQ(NextGI::get_gi_buffer_size(Size2i(1920, 1080), false), Size2i(1920, 1080));
+	CHECK_EQ(NextGI::get_gi_buffer_size(Size2i(1920, 1080), true), Size2i(960, 540));
+	// Odd sizes round down, as in GI::process_gi.
+	CHECK_EQ(NextGI::get_gi_buffer_size(Size2i(1281, 721), true), Size2i(640, 360));
+	CHECK_EQ(NextGI::get_gi_buffer_size(Size2i(1281, 721), false), Size2i(1281, 721));
+}
+
+TEST_CASE("[NextGI] Frame block: GI buffers reset as in process_gi, and when they cannot be cleared") {
+	const uint32_t usage = NextGI::get_gi_buffer_usage_bits();
+	// process_gi's sampling and storage bits, plus CAN_COPY_TO for texture_clear.
+	CHECK((usage & RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT) != 0);
+	CHECK((usage & RenderingDevice::TEXTURE_USAGE_STORAGE_BIT) != 0);
+	CHECK((usage & RenderingDevice::TEXTURE_USAGE_CAN_COPY_TO_BIT) != 0);
+
+	// No buffers yet, same mode: nothing to drop.
+	CHECK_FALSE(NextGI::gi_buffers_need_reset(false, 0, false, false));
+	// Our own buffers in the same mode are kept.
+	CHECK_FALSE(NextGI::gi_buffers_need_reset(true, usage, false, false));
+	CHECK_FALSE(NextGI::gi_buffers_need_reset(true, usage, true, true));
+	// gi/use_half_resolution changed.
+	CHECK(NextGI::gi_buffers_need_reset(true, usage, false, true));
+	CHECK(NextGI::gi_buffers_need_reset(true, usage, true, false));
+	CHECK(NextGI::gi_buffers_need_reset(false, 0, true, false));
+	// process_gi's buffers lack CAN_COPY_TO.
+	const uint32_t process_gi_usage = RenderingDevice::TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice::TEXTURE_USAGE_STORAGE_BIT;
+	CHECK(NextGI::gi_buffers_need_reset(true, process_gi_usage, false, false));
+}
+
+TEST_CASE("[NextGI] Frame block: the shadow batch flag follows _render_shadow_begin and _render_shadow_end") {
+	NextGI next_gi;
+	CHECK_FALSE(next_gi.is_shadow_batch_open());
+	next_gi.notify_shadow_batch_begin();
+	CHECK(next_gi.is_shadow_batch_open());
+	next_gi.notify_shadow_batch_end();
+	CHECK_FALSE(next_gi.is_shadow_batch_open());
+
+	// The omni cube batch opens on pass 0 and closes on pass 5, before the directional batch.
+	next_gi.notify_shadow_batch_begin();
+	next_gi.notify_shadow_batch_end();
+	next_gi.notify_shadow_batch_begin();
+	CHECK(next_gi.is_shadow_batch_open());
+	next_gi.notify_shadow_batch_end();
+	CHECK_FALSE(next_gi.is_shadow_batch_open());
+}
+
 } // namespace TestNextGI
 
 #endif // RD_ENABLED
