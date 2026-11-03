@@ -1392,10 +1392,10 @@ RDD::UniformSetID RenderingDeviceDriverMetal::uniform_set_create(VectorView<Boun
 				*sru |= stage_resource_usage(RDD::SHADER_STAGE_COMPUTE, usage);
 			}
 		};
-#define ADD_USAGE(res, stage, usage) \
-	if (sync_mode == HazardTracking) { \
-		add_usage(res, stage, usage); \
-	}
+// GodotNext: metal_shader_validation
+// Record argument-buffer usage in both sync modes. Barriers mode used to skip
+// this and rely on useHeaps, which shader validation treats as read-only.
+#define ADD_USAGE(res, stage, usage) add_usage(res, stage, usage)
 
 		// Ensure the argument buffer exists for this set as some shader pipelines may
 		// have been generated with argument buffers enabled.
@@ -1496,7 +1496,10 @@ RDD::UniformSetID RenderingDeviceDriverMetal::uniform_set_create(VectorView<Boun
 
 #undef ADD_USAGE
 
-		if (sync_mode == HazardTracking) {
+		// GodotNext: metal_shader_validation
+		// The map feeds useResource. Hazard tracking already required it; barriers
+		// mode needs it so writes are not left at the heap's read-only residency.
+		{
 			for (const KeyValue<MTL::Resource *, StageResourceUsage> &keyval : bound_resources) {
 				ResourceVector *resources = set->usage_to_resources.getptr(keyval.value);
 				if (resources == nullptr) {

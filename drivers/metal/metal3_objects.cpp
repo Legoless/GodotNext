@@ -50,12 +50,18 @@
 
 #include "metal3_objects.h"
 
+// GodotNext: metal_shader_validation
+#include "drivers/metal/metal_shader_validation.h"
 #include "drivers/metal/metal_utils.h"
 #include "drivers/metal/pixel_formats.h"
 #include "drivers/metal/rendering_device_driver_metal3.h"
 #include "drivers/metal/rendering_shader_container_metal.h"
 
 #include <algorithm>
+
+// GodotNext: metal_shader_validation
+static_assert(METAL_RESOURCE_USAGE_READ == static_cast<uint32_t>(MTL::ResourceUsageRead), "MTLResourceUsageRead changed");
+static_assert(METAL_RESOURCE_USAGE_WRITE == static_cast<uint32_t>(MTL::ResourceUsageWrite), "MTLResourceUsageWrite changed");
 
 using namespace MTL3;
 
@@ -1135,9 +1141,11 @@ void MDCommandBuffer::_render_set_dirty_state() {
 		}
 	}
 
-	if (sync_mode == RDM::SyncMode::HazardTracking) {
-		render.resource_tracker.encode(render.encoder.get());
-	}
+	// GodotNext: metal_shader_validation
+	// useHeaps marks heap resources read-only. Argument-buffer resources still
+	// need useResource with the usage the shader performs, or validation
+	// reports invalid stores and non-resident textures.
+	render.resource_tracker.encode(render.encoder.get());
 
 	render.dirty.clear();
 }
@@ -1203,6 +1211,9 @@ void ResourceTracker::encode(MTL::RenderCommandEncoder *p_enc) {
 
 		MTL::ResourceUsage vert_usage = (MTL::ResourceUsage)resource_usage_for_stage(keyval.key, RDD::ShaderStage::SHADER_STAGE_VERTEX);
 		MTL::ResourceUsage frag_usage = (MTL::ResourceUsage)resource_usage_for_stage(keyval.key, RDD::ShaderStage::SHADER_STAGE_FRAGMENT);
+		// GodotNext: metal_shader_validation
+		vert_usage = (MTL::ResourceUsage)metal_shader_validation_usage((uint32_t)vert_usage);
+		frag_usage = (MTL::ResourceUsage)metal_shader_validation_usage((uint32_t)frag_usage);
 		const MTL::Resource **resources = (const MTL::Resource **)(void *)keyval.value.ptr();
 		NS::UInteger count = keyval.value.size();
 		if (vert_usage == frag_usage) {
@@ -1229,6 +1240,8 @@ void ResourceTracker::encode(MTL::ComputeCommandEncoder *p_enc) {
 			continue;
 		}
 		MTL::ResourceUsage usage = (MTL::ResourceUsage)resource_usage_for_stage(keyval.key, RDD::ShaderStage::SHADER_STAGE_COMPUTE);
+		// GodotNext: metal_shader_validation
+		usage = (MTL::ResourceUsage)metal_shader_validation_usage((uint32_t)usage);
 		if (usage != 0) {
 			const MTL::Resource **resources = (const MTL::Resource **)(void *)keyval.value.ptr();
 			p_enc->useResources(resources, keyval.value.size(), usage);
@@ -1682,9 +1695,9 @@ void MDCommandBuffer::_compute_set_dirty_state() {
 		}
 	}
 
-	if (sync_mode == RDM::SyncMode::HazardTracking) {
-		compute.resource_tracker.encode(compute.encoder.get());
-	}
+	// GodotNext: metal_shader_validation
+	// Same as the render path: declare argument-buffer usage before the dispatch.
+	compute.resource_tracker.encode(compute.encoder.get());
 
 	compute.dirty.clear();
 }

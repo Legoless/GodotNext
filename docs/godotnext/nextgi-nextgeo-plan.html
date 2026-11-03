@@ -2046,11 +2046,13 @@ $GODOT --rendering-driver vulkan --gpu-index 1 --extra-gpu-memory-tracking
 $GODOT --rendering-driver vulkan --gpu-index 1 --gpu-profile
 
 # M5 Max: Metal API and shader validation, Barriers sync and argument buffers on.
-MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 $GODOT --rendering-driver metal</code></pre>
+# Shader-validation reports reach stderr only with MTL_SHADER_VALIDATION_REPORT_TO_STDERR.
+# Count "Invalid Metal usage" and "Error detected in" as well as ERROR:.
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 $GODOT --rendering-driver metal</code></pre>
   <ul>
     <li><code>spirv-val</code> comes from the Vulkan SDK. It is a dev dependency on the RTX 4080 SUPER machine and the M5 Max, and is not vendored.</li>
     <li><strong>AS calibration [T] (G0, RTX 4080 SUPER and RTX 5090):</strong> TLAS build at 10k, 50k and 100k instances; refit throughput; BLAS build throughput with <code>PREFER_FAST_TRACE</code> vs <code>PREFER_FAST_BUILD</code>. It runs first inside PQ, and its result sets the per-frame triangle cap of §2.1 line 1b. Through the build the cap stays provisional (≤250k triangles/frame). The calibration has no UE counterpart and is logged (§23.6).</li>
-    <li><code>MTL_DEBUG_LAYER</code> and <code>MTL_SHADER_VALIDATION</code> are the standard Apple variables, not re-verified for this toolchain. Xcode captures that inspect acceleration structures go through the existing <code>"Godot Frame"</code> capture scope.</li>
+    <li><code>MTL_DEBUG_LAYER</code>, <code>MTL_SHADER_VALIDATION</code> and <code>MTL_SHADER_VALIDATION_REPORT_TO_STDERR</code> are the standard Apple variables. Without the stderr variable, shader-validation reports never reach the log. Count <code>Invalid Metal usage</code> and <code>Error detected in</code> lines as well as <code>ERROR:</code>. Xcode captures that inspect acceleration structures go through the existing <code>"Godot Frame"</code> capture scope.</li>
     <li><code>vulkaninfo</code> JSON for each gate host is archived with every gate report. The testbed pins <code>driver.windows=vulkan</code>, which is also the interim GodotNext default for new projects (D12) until GD passes in PQ and <code>pd-windows-dx12-default</code> restores D3D12 (§21.0.2).</li>
     <li>Template gates: <code>target=template_release</code> plus a minimal build with default modules off / 3D disabled where CI already exercises that shape, proving no editor-only symbols leak into runtime code.</li>
     <li><strong>Fork CI hygiene:</strong> trim <code>.github/workflows/runner.yml</code> to Linux, Windows, and macOS editor/template builds + static checks (instead of upstream’s 9-workflow matrix), guard missing <code>HEAD~1</code> on shallow/single-commit clones in <code>.github/workflows/static_checks.yml</code>, and <strong>never attach self-hosted GPU runners (the RTX 4080 SUPER and RTX 5090 machines) to public PR triggers</strong> on <code>Legoless/GodotNext</code> (use manual dispatch or SSH-triggered gate scripts only).</li>

@@ -83,9 +83,10 @@ These are the only tests during the build:
 2. CI, unit tests and doctests pass, with tests added for new code.
 3. Zero validation errors on the phase smoke scene. On the M5 Max:
    ```
-   GODOTNEXT_BACKGROUND=1 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed --rendering-driver metal <smoke scene>
+   GODOTNEXT_BACKGROUND=1 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed --rendering-driver metal <smoke scene>
    ```
    `GODOTNEXT_BACKGROUND=1` keeps every rendered run on the M5 Max from taking the desktop's focus (`docs/godotnext/fleet.md`). Set it for every non-headless run.
+   Count `Invalid Metal usage` and `Error detected in` lines as well as `ERROR:`. Shader-validation reports reach stderr only when `MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1` is set. A clean `ERROR:` count with those lines absent is the pass.
    §22.3 lists each phase's smoke scene. Use the P0 testbed when the phase has none yet.
 4. The smoke scene renders without crashing on the M5 Max.
 5. A change to Vulkan or D3D12 code also needs a run on the RTX 4080 SUPER, once that machine is in use (§24.3).

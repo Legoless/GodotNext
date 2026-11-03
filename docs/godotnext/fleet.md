@@ -12,6 +12,16 @@ GODOTNEXT_BACKGROUND=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed -
 
 `misc/scripts/godotnext_background_check.sh` checks it: a lit scene renders on Metal while the frontmost app stays the same. Don't switch apps while it runs. The mode lives in `platform/macos/godotnext_background.h` and the `background_mode` hooks.
 
+## Metal shader validation
+
+PR basics on the Apple M5 Max count Metal API and shader validation, not only Godot `ERROR:` lines. Shader-validation reports stay off stderr unless `MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1` is set. With the variable unset, a scene can render black while stdout looks clean, because validation zeros the stores it rejects.
+
+```
+GODOTNEXT_BACKGROUND=1 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed --rendering-driver metal --quit-after 60 <scene>
+```
+
+A pass is zero lines containing `Invalid Metal usage`, zero lines containing `Error detected in`, and zero lines starting with `ERROR:`. `useHeaps` marks placement-heap resources read-only. Argument-buffer writes need `useResource` with the shader's usage, or the log reports an invalid store (`resident:Read Only`) or a texture that is not resident.
+
 ## Ray-query toolchain (G0)
 
 This section is the issue #20 record. Keep it separate from the #11 section.
