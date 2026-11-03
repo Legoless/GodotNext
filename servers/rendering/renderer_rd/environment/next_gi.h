@@ -50,6 +50,10 @@ namespace RendererRD {
 // GodotNext: nextgi_rt_scene
 class NextGIRTScene;
 
+// GodotNext: nextgi_src_cards
+class NextGISRC;
+struct NextGICardClusterResult;
+
 // NextGI host entry: the §3 tier selection (#15), the ray-query toolchain self-test (#20), the
 // Forward+ frame block (#26), the RT scene (#28) and the HWRT safety net (#36): the startup
 // 64-ray self-test and the device-loss crash latch.
@@ -239,6 +243,11 @@ private:
 	NextGIRTScene *rt_scene = nullptr;
 	void _ensure_rt_scene();
 
+	// GodotNext: nextgi_src_cards
+	// The SRC card sets and material atlas (next_gi_src.h), created by the first frame block.
+	NextGISRC *src = nullptr;
+	void _capture_src_cards(RenderDataRD *p_render_data);
+
 public:
 	static NextGI *get_singleton() { return singleton; }
 
@@ -360,6 +369,12 @@ public:
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }
+
+	// GodotNext: nextgi_src_cards
+	// The §8.3 Stage-1 card clustering, nextgi_src_cluster_cards (next_gi_src.h). Pure, so doctests
+	// need no device. p_positions holds xyz float triples.
+	static void cluster_cards(const float *p_positions, uint32_t p_vertex_count, const uint32_t *p_indices, uint32_t p_index_count, NextGICardClusterResult &r_result);
+	NextGISRC *get_src() const { return src; }
 
 	// Compile the self-test compute source the way ShaderRD would, without creating
 	// a GPU pipeline. Used by the offline toolchain doctest. Does not check ray-query support.

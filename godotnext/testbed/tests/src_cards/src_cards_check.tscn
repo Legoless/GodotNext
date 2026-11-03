@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/src_cards/src_cards_check.gd" id="1_srccards"]
+
+[node name="SRCCardsCheck" type="Node"]
+script = ExtResource("1_srccards")

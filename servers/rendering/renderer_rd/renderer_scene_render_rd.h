@@ -59,6 +59,9 @@
 class RendererSceneRenderRD : public RendererSceneRender, public RenderingShaderLibrary {
 	friend RendererRD::SkyRD;
 	friend RendererRD::GI;
+	// GodotNext: nextgi_src_cards
+	// SRC card capture calls _render_material with cull_argument, as GI does for VoxelGI.
+	friend RendererRD::NextGISRC;
 
 protected:
 	RendererRD::ForwardIDStorage *forward_id_storage = nullptr;

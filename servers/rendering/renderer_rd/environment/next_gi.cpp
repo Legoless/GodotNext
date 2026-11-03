@@ -44,6 +44,9 @@
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_globals.h"
 
+// GodotNext: nextgi_src_cards
+#include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+
 using namespace RendererRD;
 
 NextGI *NextGI::singleton = nullptr;
@@ -421,6 +424,10 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_blas_build_count"] = int64_t(rt_stats.blas_build_count);
 		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
 	}
+	// GodotNext: nextgi_src_cards
+	if (src != nullptr) {
+		src->fill_info(info);
+	}
 	return info;
 }
 
@@ -510,10 +517,13 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		// reaches the TLAS through next frame's update: a one-frame lag. An instance enters
 		// the TLAS only once its BLAS exists (plan §8.2), and rebuild_tlas skips dirty
 		// meshes until then, which keeps every TLAS build correct.
+		// GodotNext: nextgi_src_cards — card capture is the "SRC capture" slot (line 2a).
 		if (slot == PASS_SLOT_AS_UPDATES && rt_scene != nullptr) {
 			rt_scene->rebuild_tlas(p_render_data);
 		} else if (slot == PASS_SLOT_AS_BUILDS && rt_scene != nullptr) {
 			rt_scene->build_dirty_blas(p_render_data);
+		} else if (slot == PASS_SLOT_SRC_CAPTURE) {
+			_capture_src_cards(p_render_data);
 		} else if (slot == PASS_SLOT_INTEGRATION) {
 			// Integration (§2.1 line 7) is the final RB_TEX_AMBIENT and RB_TEX_REFLECTION writer.
 			// Reflection stays cleared in P1; ambient is cleared until the gather lands (#25).
@@ -535,6 +545,12 @@ NextGI::NextGI() {
 
 NextGI::~NextGI() {
 	_unregister_device_lost_callback();
+	// GodotNext: nextgi_src_cards
+	if (src != nullptr) {
+		src->free();
+		memdelete(src);
+		src = nullptr;
+	}
 
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {

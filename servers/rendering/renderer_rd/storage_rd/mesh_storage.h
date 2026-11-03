@@ -480,6 +480,10 @@ public:
 	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_parts(RID p_mesh);
 	void mesh_nextgi_rt_clear_parts(RID p_mesh);
 	void mesh_nextgi_release_cpu_geometry(RID p_mesh);
+	// GodotNext: nextgi_src_cards
+	// The CPU copies of an RT surface (xyz float triples, uint32 indices) for SRC card clustering.
+	// False when the surface is not in the RT arena or its copies were released.
+	bool mesh_nextgi_get_cpu_geometry(RID p_mesh, uint32_t p_surface, Vector<float> &r_positions, Vector<uint32_t> &r_indices) const;
 
 	virtual void mesh_debug_usage(List<RenderingServerTypes::MeshInfo> *r_info) override;
 

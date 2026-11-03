@@ -749,6 +749,20 @@ void MeshStorage::mesh_nextgi_release_cpu_geometry(RID p_mesh) {
 	}
 }
 
+// GodotNext: nextgi_src_cards
+bool MeshStorage::mesh_nextgi_get_cpu_geometry(RID p_mesh, uint32_t p_surface, Vector<float> &r_positions, Vector<uint32_t> &r_indices) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, false);
+	ERR_FAIL_UNSIGNED_INDEX_V(p_surface, mesh->surface_count, false);
+	const Mesh::Surface *surface = mesh->surfaces[p_surface];
+	if (!surface->rt_eligible || surface->rt_cpu_positions.is_empty() || surface->rt_cpu_indices.is_empty()) {
+		return false;
+	}
+	r_positions = surface->rt_cpu_positions;
+	r_indices = surface->rt_cpu_indices;
+	return true;
+}
+
 int MeshStorage::mesh_get_blend_shape_count(RID p_mesh) const {
 	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, -1);

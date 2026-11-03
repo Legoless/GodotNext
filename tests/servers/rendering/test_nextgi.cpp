@@ -320,6 +320,9 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 // GodotNext: nextgi_as_slots
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
+// GodotNext: nextgi_src_cards
+#include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -1236,6 +1239,381 @@ TEST_CASE("[NextGI] RT scene: record to surface to chunk plus offset reproduces 
 		}
 	}
 	CHECK_EQ(wrong, 0);
+}
+
+// SRC Stage-1 cards (#30, plan §8.3 and D6). Clustering, packing and coverage are CPU logic; the
+// capture itself runs on the GPU (godotnext/testbed/tests/src_cards).
+
+struct SRCTestMesh {
+	LocalVector<float> positions;
+	LocalVector<uint32_t> indices;
+
+	uint32_t add_vertex(const Vector3 &p_position) {
+		positions.push_back(float(p_position.x));
+		positions.push_back(float(p_position.y));
+		positions.push_back(float(p_position.z));
+		return positions.size() / 3 - 1;
+	}
+
+	// p0..p2 counter-clockwise around the outward normal, emitted clockwise: Godot's front faces
+	// wind clockwise.
+	void add_triangle(const Vector3 &p_0, const Vector3 &p_1, const Vector3 &p_2) {
+		const uint32_t a = add_vertex(p_0);
+		const uint32_t b = add_vertex(p_1);
+		const uint32_t c = add_vertex(p_2);
+		indices.push_back(a);
+		indices.push_back(c);
+		indices.push_back(b);
+	}
+
+	// p0..p3 counter-clockwise around the outward normal, emitted clockwise as two triangles.
+	void add_quad(const Vector3 &p_0, const Vector3 &p_1, const Vector3 &p_2, const Vector3 &p_3) {
+		const uint32_t a = add_vertex(p_0);
+		const uint32_t b = add_vertex(p_1);
+		const uint32_t c = add_vertex(p_2);
+		const uint32_t d = add_vertex(p_3);
+		indices.push_back(a);
+		indices.push_back(c);
+		indices.push_back(b);
+		indices.push_back(a);
+		indices.push_back(d);
+		indices.push_back(c);
+	}
+
+	// A rectangle around p_center; p_u x p_v is its outward normal.
+	void add_face(const Vector3 &p_center, const Vector3 &p_u, const Vector3 &p_v, real_t p_half_u, real_t p_half_v) {
+		add_quad(p_center - p_u * p_half_u - p_v * p_half_v, p_center + p_u * p_half_u - p_v * p_half_v, p_center + p_u * p_half_u + p_v * p_half_v, p_center - p_u * p_half_u + p_v * p_half_v);
+	}
+
+	void add_box(const Vector3 &p_center, const Vector3 &p_half_size) {
+		const Vector3 x(1, 0, 0);
+		const Vector3 y(0, 1, 0);
+		const Vector3 z(0, 0, 1);
+		add_face(p_center + x * p_half_size.x, y, z, p_half_size.y, p_half_size.z);
+		add_face(p_center - x * p_half_size.x, z, y, p_half_size.z, p_half_size.y);
+		add_face(p_center + y * p_half_size.y, z, x, p_half_size.z, p_half_size.x);
+		add_face(p_center - y * p_half_size.y, x, z, p_half_size.x, p_half_size.z);
+		add_face(p_center + z * p_half_size.z, x, y, p_half_size.x, p_half_size.y);
+		add_face(p_center - z * p_half_size.z, y, x, p_half_size.y, p_half_size.x);
+	}
+
+	// A prism over a counter-clockwise polygon in XY, from z = 0 to p_depth. Caps are fans.
+	void add_prism(const LocalVector<Vector2> &p_polygon, real_t p_depth) {
+		for (uint32_t i = 0; i < p_polygon.size(); i++) {
+			const Vector2 a = p_polygon[i];
+			const Vector2 b = p_polygon[(i + 1) % p_polygon.size()];
+			add_quad(Vector3(a.x, a.y, 0), Vector3(b.x, b.y, 0), Vector3(b.x, b.y, p_depth), Vector3(a.x, a.y, p_depth));
+		}
+	}
+
+	void transform(const Transform3D &p_transform) {
+		for (uint32_t i = 0; i < positions.size(); i += 3) {
+			const Vector3 p = p_transform.xform(Vector3(positions[i], positions[i + 1], positions[i + 2]));
+			positions[i] = float(p.x);
+			positions[i + 1] = float(p.y);
+			positions[i + 2] = float(p.z);
+		}
+	}
+
+	void cluster(RendererRD::NextGICardClusterResult &r_result) const {
+		NextGI::cluster_cards(positions.ptr(), positions.size() / 3, indices.ptr(), indices.size(), r_result);
+	}
+};
+
+static bool src_vectors_equal(const Vector3 &p_a, const Vector3 &p_b) {
+	return (p_a - p_b).length() < 1e-5;
+}
+
+static void check_src_card_limits(const RendererRD::NextGICardClusterResult &p_result) {
+	CHECK(p_result.cards.size() <= uint32_t(RendererRD::NEXTGI_SRC_MAX_CARDS_PER_MESH));
+	for (const RendererRD::NextGICardDesc &card : p_result.cards) {
+		CHECK(card.texels_u >= uint32_t(RendererRD::NEXTGI_SRC_CARD_MIN_TEXELS));
+		CHECK(card.texels_v >= uint32_t(RendererRD::NEXTGI_SRC_CARD_MIN_TEXELS));
+		CHECK(card.texels_u <= uint32_t(RendererRD::NEXTGI_SRC_CARD_MAX_TEXELS));
+		CHECK(card.texels_v <= uint32_t(RendererRD::NEXTGI_SRC_CARD_MAX_TEXELS));
+		// A right-handed frame, so the capture camera culls like VoxelGI's look_at cameras.
+		CHECK(Math::is_equal_approx(card.get_transform().basis.determinant(), real_t(1.0), real_t(1e-5)));
+		CHECK(card.depth_range > 0.0f);
+	}
+}
+
+TEST_CASE("[NextGI] SRC cards: the GPU card records keep the §8.3 layout") {
+	CHECK_EQ(sizeof(RendererRD::NextGICard), 80u);
+	CHECK_EQ(sizeof(RendererRD::NextGICardSet), 16u);
+	CHECK_EQ(RendererRD::NEXTGI_SRC_MAX_CARDS_PER_MESH, 12);
+	CHECK_EQ(RendererRD::NEXTGI_SRC_CARD_MAX_TEXELS, 128);
+	// Until the SRC exists, records name no card set.
+	CHECK_EQ(RendererRD::NextGISRC::get_mesh_card_set(RID()), UINT32_MAX);
+	CHECK_EQ(RendererRD::NextGIInstanceRecord().card_set, UINT32_MAX);
+}
+
+TEST_CASE("[NextGI] SRC cards: an axis-aligned box gives exactly 6 axis cards with exact rects") {
+	const Vector3 center(0.5, 0.0, 0.0);
+	const Vector3 half_size(1.0, 0.5, 0.25);
+	SRCTestMesh mesh;
+	mesh.add_box(center, half_size);
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+
+	REQUIRE_EQ(result.cards.size(), 6u);
+	CHECK(Math::is_equal_approx(result.max_extent, 2.0f));
+	const float texel = result.texel_size;
+	CHECK(Math::is_equal_approx(texel, 2.0f / 128.0f));
+	check_src_card_limits(result);
+
+	// Seed order: +X, -X, +Y, -Y, +Z, -Z.
+	static const Vector3 axes[6] = { Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, -1, 0), Vector3(0, 0, 1), Vector3(0, 0, -1) };
+	LocalVector<Vector2i> sizes;
+	for (uint32_t i = 0; i < 6; i++) {
+		const RendererRD::NextGICardDesc &card = result.cards[i];
+		CHECK(src_vectors_equal(card.axis_n, axes[i]));
+		CHECK_EQ(card.triangle_count, 2u);
+		const real_t face_distance = half_size.dot(axes[i].abs());
+		const real_t half_u = half_size.dot(card.axis_u.abs());
+		const real_t half_v = half_size.dot(card.axis_v.abs());
+		CHECK(Math::is_equal_approx(real_t(card.half_u), half_u));
+		CHECK(Math::is_equal_approx(real_t(card.half_v), half_v));
+		CHECK(Math::is_equal_approx(card.area, float(4.0 * half_u * half_v)));
+		// The camera sits one texel out from the face and reaches one texel past the far side.
+		CHECK(src_vectors_equal(card.origin, center + axes[i] * (face_distance + texel)));
+		CHECK(Math::is_equal_approx(real_t(card.depth_range), real_t(face_distance * 2.0 + texel * 2.0)));
+		CHECK_EQ(card.texels_u, uint32_t(Math::round(half_u * 2.0 / texel)));
+		CHECK_EQ(card.texels_v, uint32_t(Math::round(half_v * 2.0 / texel)));
+		sizes.push_back(Vector2i(int(card.texels_u), int(card.texels_v)));
+	}
+	// The +X face is 1 x 0.5, the +Y face 2 x 0.5 and the +Z face 2 x 1.
+	CHECK_EQ(result.cards[0].texels_u * result.cards[0].texels_v, 64u * 32u);
+	CHECK_EQ(result.cards[2].texels_u * result.cards[2].texels_v, 128u * 32u);
+	CHECK_EQ(result.cards[4].texels_u * result.cards[4].texels_v, 128u * 64u);
+
+	// The packed atlas rects are exactly the card sizes, inside the atlas and apart by the gutter.
+	RendererRD::NextGIShelfPacker packer;
+	LocalVector<Rect2i> rects;
+	REQUIRE(packer.allocate_all(sizes, rects));
+	REQUIRE_EQ(rects.size(), 6u);
+	const Rect2i atlas(0, 0, RendererRD::NEXTGI_SRC_ATLAS_SIZE, RendererRD::NEXTGI_SRC_ATLAS_SIZE);
+	for (uint32_t i = 0; i < 6; i++) {
+		CHECK_EQ(rects[i].size, sizes[i]);
+		CHECK(atlas.encloses(rects[i]));
+		for (uint32_t j = i + 1; j < 6; j++) {
+			CHECK_FALSE(rects[i].grow_individual(0, 0, RendererRD::NEXTGI_SRC_ATLAS_GUTTER, RendererRD::NEXTGI_SRC_ATLAS_GUTTER).intersects(rects[j]));
+		}
+	}
+}
+
+TEST_CASE("[NextGI] SRC cards: the card frame maps capture-view coordinates to object space") {
+	SRCTestMesh mesh;
+	mesh.add_box(Vector3(0.0, 2.0, 0.0), Vector3(1.0, 1.0, 1.0));
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	REQUIRE_EQ(result.cards.size(), 6u);
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		const Transform3D frame = card.get_transform();
+		CHECK(src_vectors_equal(frame.xform(Vector3()), card.origin));
+		CHECK(src_vectors_equal(frame.basis.get_column(0), card.axis_u));
+		CHECK(src_vectors_equal(frame.basis.get_column(1), card.axis_v));
+		CHECK(src_vectors_equal(frame.basis.get_column(2), card.axis_n));
+		// The camera looks along -n: the face's center is one texel (the depth) in front of it.
+		const Vector3 face_center = Vector3(0.0, 2.0, 0.0) + card.axis_n;
+		CHECK(src_vectors_equal(frame.xform(Vector3(0, 0, -result.texel_size)), face_center));
+	}
+}
+
+TEST_CASE("[NextGI] SRC cards: an L-shaped concave mesh gives at most 12 cards") {
+	// An L with a chamfered outer corner, extruded along Z, plus its two caps.
+	LocalVector<Vector2> polygon;
+	polygon.push_back(Vector2(0.0, 0.0));
+	polygon.push_back(Vector2(1.6, 0.0));
+	polygon.push_back(Vector2(2.0, 0.4));
+	polygon.push_back(Vector2(2.0, 1.0));
+	polygon.push_back(Vector2(1.0, 1.0));
+	polygon.push_back(Vector2(1.0, 2.0));
+	polygon.push_back(Vector2(0.0, 2.0));
+	SRCTestMesh mesh;
+	mesh.add_prism(polygon, 0.5);
+	const Vector3 x(1, 0, 0);
+	const Vector3 y(0, 1, 0);
+	// Caps from three rectangles and a triangle by the chamfer; +Z at z = 0.5, -Z at z = 0.
+	mesh.add_face(Vector3(0.8, 0.5, 0.5), x, y, 0.8, 0.5);
+	mesh.add_face(Vector3(0.5, 1.5, 0.5), x, y, 0.5, 0.5);
+	mesh.add_face(Vector3(1.8, 0.7, 0.5), x, y, 0.2, 0.3);
+	mesh.add_triangle(Vector3(1.6, 0.0, 0.5), Vector3(2.0, 0.4, 0.5), Vector3(1.6, 0.4, 0.5));
+	mesh.add_face(Vector3(0.8, 0.5, 0.0), y, x, 0.5, 0.8);
+	mesh.add_face(Vector3(0.5, 1.5, 0.0), y, x, 0.5, 0.5);
+	mesh.add_face(Vector3(1.8, 0.7, 0.0), y, x, 0.3, 0.2);
+	mesh.add_triangle(Vector3(1.6, 0.0, 0.0), Vector3(1.6, 0.4, 0.0), Vector3(2.0, 0.4, 0.0));
+
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	// Six axis cards, and the chamfer (about 3% of the area) keeps one of its own.
+	CHECK_EQ(result.cards.size(), 7u);
+	CHECK(Math::is_equal_approx(result.texel_size, result.max_extent / 128.0f));
+	CHECK(Math::is_equal_approx(result.max_extent, 2.0f));
+	bool has_chamfer = false;
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		has_chamfer = has_chamfer || src_vectors_equal(card.axis_n, Vector3(1, -1, 0).normalized());
+		// The +X card covers the outer face at x = 2 and the inner one at x = 1, a unit deeper.
+		if (src_vectors_equal(card.axis_n, x)) {
+			CHECK(Math::is_equal_approx(real_t(card.origin.x), real_t(2.0 + result.texel_size)));
+			CHECK(Math::is_equal_approx(real_t(card.depth_range), real_t(2.0 + 2.0 * result.texel_size)));
+			CHECK_EQ(card.triangle_count, 4u);
+		}
+	}
+	CHECK(has_chamfer);
+}
+
+TEST_CASE("[NextGI] SRC cards: a sphere clusters into at most 12 cards") {
+	SRCTestMesh mesh;
+	const int rings = 16;
+	const int segments = 32;
+	auto point = [](int p_ring, int p_segment) {
+		const real_t theta = Math::PI * real_t(p_ring) / real_t(rings);
+		const real_t phi = Math::TAU * real_t(p_segment) / real_t(segments);
+		return Vector3(Math::sin(theta) * Math::cos(phi), Math::cos(theta), -Math::sin(theta) * Math::sin(phi)) * 3.0;
+	};
+	for (int ring = 0; ring < rings; ring++) {
+		for (int segment = 0; segment < segments; segment++) {
+			mesh.add_quad(point(ring, segment), point(ring + 1, segment), point(ring + 1, segment + 1), point(ring, segment + 1));
+		}
+	}
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	CHECK(result.cards.size() > 6u);
+	CHECK(Math::is_equal_approx(result.texel_size, result.max_extent / 128.0f));
+	// Every card faces outward: its normal points the same way as its origin from the center.
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		CHECK(card.origin.normalized().dot(card.axis_n) > 0.5);
+	}
+}
+
+TEST_CASE("[NextGI] SRC cards: no card exceeds 128x128 texels") {
+	// A 4 m plank turned 45 degrees: its own card is wider than the AABB's longest axis.
+	SRCTestMesh mesh;
+	mesh.add_box(Vector3(), Vector3(2.0, 0.05, 0.05));
+	mesh.transform(Transform3D(Basis(Vector3(0, 0, 1), Math::PI / 4.0), Vector3()));
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	CHECK(result.max_extent < 4.0f);
+	uint32_t largest = 0;
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		largest = MAX(largest, MAX(card.texels_u, card.texels_v));
+	}
+	CHECK_EQ(largest, uint32_t(RendererRD::NEXTGI_SRC_CARD_MAX_TEXELS));
+}
+
+TEST_CASE("[NextGI] SRC cards: clusters under 2% of the area merge into their nearest neighbor") {
+	// A unit box plus a 45-degree sliver of 0.17% of the area: it gets a seed, then merges.
+	SRCTestMesh mesh;
+	mesh.add_box(Vector3(), Vector3(0.5, 0.5, 0.5));
+	const Vector3 diagonal = Vector3(1, 1, 0).normalized();
+	const Vector3 across = Vector3(-1, 1, 0).normalized(); // across x Z = diagonal.
+	mesh.add_face(Vector3(0.6, 0.6, 0.0), across, Vector3(0, 0, 1), 0.05, 0.05);
+	RendererRD::NextGICardClusterResult result;
+	mesh.cluster(result);
+	check_src_card_limits(result);
+	CHECK_EQ(result.cards.size(), 6u);
+	uint32_t triangles = 0;
+	for (const RendererRD::NextGICardDesc &card : result.cards) {
+		triangles += card.triangle_count;
+		CHECK_FALSE(src_vectors_equal(card.axis_n, diagonal));
+	}
+	CHECK_EQ(triangles, 14u);
+
+	// The same sliver at 10 times the size (14% of the area) keeps a card.
+	SRCTestMesh large;
+	large.add_box(Vector3(), Vector3(0.5, 0.5, 0.5));
+	large.add_face(Vector3(0.8, 0.8, 0.0), across, Vector3(0, 0, 1), 0.5, 0.5);
+	large.cluster(result);
+	check_src_card_limits(result);
+	CHECK_EQ(result.cards.size(), 7u);
+}
+
+TEST_CASE("[NextGI] SRC cards: degenerate and empty input gives no cards") {
+	RendererRD::NextGICardClusterResult result;
+	NextGI::cluster_cards(nullptr, 0, nullptr, 0, result);
+	CHECK(result.cards.is_empty());
+
+	SRCTestMesh mesh;
+	mesh.add_quad(Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(2, 0, 0), Vector3(3, 0, 0));
+	mesh.cluster(result);
+	CHECK(result.cards.is_empty());
+
+	// Out-of-range indices are skipped.
+	const float positions[9] = { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+	const uint32_t indices[3] = { 0, 1, 5 };
+	NextGI::cluster_cards(positions, 3, indices, 3, result);
+	CHECK(result.cards.is_empty());
+}
+
+TEST_CASE("[NextGI] SRC cards: the shelf packer fills the atlas and places a card set whole or not at all") {
+	RendererRD::NextGIShelfPacker packer;
+	Rect2i rect;
+	// 128 + 1 gutter: 15 cards per shelf and 15 shelves in 2048.
+	for (int i = 0; i < 225; i++) {
+		REQUIRE(packer.allocate(128, 128, rect));
+	}
+	CHECK_EQ(rect, Rect2i(14 * 129, 14 * 129, 128, 128));
+	CHECK_FALSE(packer.allocate(128, 128, rect));
+	CHECK_EQ(packer.get_used_texels(), uint64_t(225) * 128 * 128);
+	// Smaller cards still fit the right edge and the bottom.
+	CHECK(packer.allocate(64, 64, rect));
+	CHECK_EQ(rect.position.x, 15 * 129);
+
+	RendererRD::NextGIShelfPacker small(300, 140);
+	LocalVector<Vector2i> sizes;
+	sizes.push_back(Vector2i(128, 128));
+	sizes.push_back(Vector2i(128, 128));
+	sizes.push_back(Vector2i(128, 128));
+	LocalVector<Rect2i> rects;
+	CHECK_FALSE(small.allocate_all(sizes, rects));
+	CHECK_EQ(small.get_used_texels(), 0u);
+	sizes.resize(2);
+	CHECK(small.allocate_all(sizes, rects));
+	CHECK_EQ(rects[0], Rect2i(0, 0, 128, 128));
+	CHECK_EQ(rects[1], Rect2i(129, 0, 128, 128));
+
+	// Tallest first, but the rects come back in input order.
+	RendererRD::NextGIShelfPacker ordered;
+	sizes.clear();
+	sizes.push_back(Vector2i(16, 8));
+	sizes.push_back(Vector2i(16, 32));
+	CHECK(ordered.allocate_all(sizes, rects));
+	CHECK_EQ(rects[1], Rect2i(0, 0, 16, 32));
+	CHECK_EQ(rects[0], Rect2i(17, 0, 16, 8));
+}
+
+TEST_CASE("[NextGI] SRC cards: atlas memory is under the 128 MiB High budget") {
+	// D16 framebuffer depth: 26 bytes per texel at 2048x2048 is 104 MiB.
+	CHECK_EQ(RendererRD::nextgi_src_atlas_memory_bytes(2048, 2), uint64_t(104) * 1024 * 1024);
+	CHECK(RendererRD::nextgi_src_atlas_memory_bytes(RendererRD::NEXTGI_SRC_ATLAS_SIZE, 2) <= uint64_t(RendererRD::NEXTGI_SRC_MATERIAL_BUDGET_HIGH));
+	// The X8_D24 fallback: 112 MiB.
+	CHECK(RendererRD::nextgi_src_atlas_memory_bytes(RendererRD::NEXTGI_SRC_ATLAS_SIZE, 4) <= uint64_t(RendererRD::NEXTGI_SRC_MATERIAL_BUDGET_HIGH));
+}
+
+TEST_CASE("[NextGI] SRC cards: coverage counts card texels with depth above 0") {
+	float depth[8 * 8] = {};
+	// 12 of the 16 texels of the rect (2, 2, 4, 4) are covered; texels outside it never count.
+	for (int y = 2; y < 6; y++) {
+		for (int x = 2; x < 6; x++) {
+			depth[y * 8 + x] = y < 5 ? 0.25f : 0.0f;
+		}
+	}
+	depth[0] = 1.0f;
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_src_card_coverage(depth, 8, 8, Rect2i(2, 2, 4, 4)), 0.75f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_src_card_coverage(depth, 8, 8, Rect2i(2, 2, 4, 3)), 1.0f));
+	ERR_PRINT_OFF;
+	CHECK_EQ(RendererRD::nextgi_src_card_coverage(depth, 8, 8, Rect2i(6, 6, 4, 4)), 0.0f);
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[NextGI] SRC cards: the material atlas dump setting is registered and off") {
+	const String setting = "rendering/global_illumination/nextgi/debug/dump_material_atlas";
+	REQUIRE(ProjectSettings::get_singleton()->has_setting(setting));
+	CHECK_FALSE(bool(ProjectSettings::get_singleton()->property_get_revert(setting)));
+	CHECK_EQ(RendererRD::NextGISRC::get_atlas_target_name(RendererRD::NextGISRC::ATLAS_DEPTH), "depth");
 }
 
 } // namespace TestNextGI
