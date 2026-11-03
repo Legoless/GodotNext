@@ -1,0 +1,12 @@
+[
+ {
+  "day": "2026-11-03",
+  "build_total": 172,
+  "build_done": 0,
+  "in_progress": 0,
+  "ready": 10,
+  "blocked": 162,
+  "gates_passed": 0,
+  "gates_total": 18
+ }
+]
