@@ -1,0 +1,133 @@
+# GodotNext testbed harness
+
+Capture mode and timing mode for the P0 testbed, plus the Apple M5 Max runner and the Linux VM runner. The RTX 4080 SUPER Session-1 runner, clock locks, `run_remote.sh`, `run_selftest.ps1`, and the G0-4 measurement live in issue 237.
+
+The harness autoload stays idle unless the arguments after `--` include `--mode`. Other testbed scenes are not affected.
+
+`godotnext/testbed/project.godot` in this change is a minimal stub: issue 10 step 1 (Forward+, Windows RenderingDevice driver `vulkan`, debanding off, physical light units off) plus the `Harness` autoload, a fixed 1280x720 window, HDR 2D, and the self-test as the main scene. Issue 10 owns the rest of the project. The reviewer merges the two versions.
+
+## Commands
+
+Apple M5 Max, capture. The runner refuses to start unless the machine is on AC power in High Power mode. It only reads `pmset`. It does not change power settings.
+
+```bash
+godotnext/testbed/harness/runners/macos_local.sh -- \
+  ./bin/godot.macos.editor.arm64 --path godotnext/testbed \
+  --rendering-driver metal \
+  --write-movie "$OUT/frame.png" --fixed-fps 60 --quit-after 1062 -- \
+  --mode=capture --scene=res://harness/selftest/selftest.tscn \
+  --camera=CaptureCam --out="$OUT" --seed=1 --frames=8 --warmup=4 \
+  --capture-frames=4,7
+```
+
+Apple M5 Max, timing. No movie writer. VSync is disabled on the command line and again by the harness.
+
+```bash
+godotnext/testbed/harness/runners/macos_local.sh -- \
+  ./bin/godot.macos.editor.arm64 --path godotnext/testbed \
+  --rendering-driver metal --disable-vsync --gpu-profile --quit-after 1770 -- \
+  --mode=timing --scene=res://harness/selftest/selftest.tscn \
+  --camera=CaptureCam --out="$OUT" --seed=1 --warmup=120 --frames=600
+```
+
+Linux VM, doctest only:
+
+```bash
+godotnext/testbed/harness/runners/linux_vm.sh doctest
+```
+
+Linux VM, functional capture (lavapipe). Point Vulkan at lavapipe before launching, for example with `VK_DRIVER_FILES`. The script rejects `--mode=timing`.
+
+```bash
+VK_DRIVER_FILES=/path/to/lvp_icd.json \
+  godotnext/testbed/harness/runners/linux_vm.sh functional -- \
+  --path godotnext/testbed --write-movie "$OUT/frame.png" --fixed-fps 60 \
+  --quit-after 1062 -- \
+  --mode=capture --scene=res://harness/selftest/selftest.tscn \
+  --camera=CaptureCam --out="$OUT" --seed=1 --frames=8 --warmup=4 \
+  --capture-frames=4,7
+```
+
+Self-test. Capture defaults are warmup 4, frames 8, two runs. Timing defaults are warmup 120, frames 600, three runs. `-Frames` and `-Warmup` override both. On macOS every launch goes through `macos_local.sh`.
+
+```bash
+godotnext/testbed/harness/run_selftest.sh -Mode capture -Runs 2
+godotnext/testbed/harness/run_selftest.sh -Mode timing -Runs 1 -Warmup 2 -Frames 8
+```
+
+Argument check (no GPU):
+
+```bash
+./bin/godot.macos.editor.arm64 --headless --path godotnext/testbed \
+  --script res://harness/tests/test_args.gd
+```
+
+## Arguments
+
+After `--`:
+
+| Flag | Required | Default |
+| --- | --- | --- |
+| `--mode=capture` or `--mode=timing` | yes | |
+| `--scene=res://…` | yes | |
+| `--camera=<name or NodePath>` | no | empty |
+| `--out=<absolute directory>` | yes | |
+| `--seed=<int>` | no | 1 |
+| `--frames=<int>` | yes | |
+| `--warmup=<int>` | no | 0 |
+| `--capture-frames=<list>` | no | empty (no EXR) |
+
+`--out` has to be an absolute filesystem path. `res://` and `user://` are rejected. Values can be `--flag=value` or `--flag value`.
+
+The runner passes a job file in `GODOTNEXT_HARNESS_JOB`. That is not a user argument. It carries the host label, the clock record, and the power record. The harness does not call `pmset` itself.
+
+## What a capture run does
+
+1. Seed the global RNG and every integer `seed` property.
+2. Turn HDR 2D on, debanding off, TAA off, MSAA off, and screen-space AA off. WorldEnvironment tonemap is linear, exposure is 1, and glow, adjustments, SSAO, SSIL, SSR, and fog are off. SDFGI is left as the scene set it.
+3. Wait until the canvas, mesh, surface, draw, and specialization pipeline-compilation counters have each stayed unchanged for 30 frames. Specialization compiles in the background and can keep moving. If the other four have been flat for 30 frames and specialization has not, within 900 draws, the run settles without specialization and says so. If the counters still have not settled by 1020 draws, the run fails.
+4. Reload the scene and seed again. The captured window starts on the next presented frame of the new instance, one slot per `frame_post_draw`. Reload drops the settle frames so both runs start at the same place.
+5. The captured window is `--warmup` frames followed by `--frames` frames. `--capture-frames` indexes that whole window, so with warmup 4 the first measured frame is index 4. Each listed frame is saved with `save_exr(path, false, false, -1.0)` as `hdr_%05d.exr` (linear viewport image, negatives kept, no clamp).
+6. On the way out, pre-window PNGs and the `.wav` are removed. The kept PNGs are renamed to `frame00000000.png` upward, warmup frames first. `--quit-after` on the command line is only a safety cap. The movie writer counts every drawn frame, including settle, so the cap is `900 + 30 + 120 + warmup + frames`. The harness calls `quit()` when the window ends. The issue's `warmup + frames` figure is the length of the kept window, not the process lifetime.
+
+## What a timing run does
+
+Scoped to G0-4 and G0-6. There is no settle window and no movie writer. After the scene is current, the next `--warmup` process frames are discarded and the following `--frames` process frames are recorded.
+
+`timing.csv` columns are `frame,wall_ms,<pass>_ms...`. `frame` is the measurement index starting at 0. Wall time is the `Time.get_ticks_usec()` delta between `_process` calls, in milliseconds. On `frame_post_draw`, RenderingDevice timestamps are read with `get_captured_timestamps_count`, `get_captured_timestamps_frame`, `get_captured_timestamp_name`, and `get_captured_timestamp_gpu_time`. Godot leaves those queries empty unless timestamp capture is on, so timing launches pass `--gpu-profile`. That flag can also print a `GPU PROFILE` block after about a second. That print is not a measurement. A pass is the GPU-time delta to the next timestamp, named from the earlier stamp, converted from nanoseconds to milliseconds. Blank cells are passes that frame did not report. The same timestamp frame is not recorded twice.
+
+`summary.json` holds `schema`, `frames`, `warmup`, and `columns`. Each column has `p50`, `p95`, `p99`, and `n`. Percentiles use linear interpolation: rank is `(percent / 100) * (n - 1)`. Empty input is 0. A single sample is that sample. Blank GPU cells are skipped, so a pass can have `n` below `frames`.
+
+The spread across runs is printed by `run_selftest.sh` and does not fail the script. The ≤2% p95 spread is a PQ gate (G0-4), not a PR-basics failure. Do not treat a timing printout as a measurement result.
+
+## Manifest
+
+`manifest.json` is schema 1. `dlss` is omitted unless the runner job supplies it. A manifest without `dlss` is valid. A partial `dlss` object is not.
+
+Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` (engine version hash), `command_line` (`engine`, `user`), `seed`, `mode`, `scene`, `camera`, `frames`, `warmup`, `capture_frames`, `runner`, `scaling_3d_mode`, `scaling_3d_scale`, `output_size`.
+
+`output_size` is `[width, height]` from `get_viewport().get_visible_rect().size`. `scaling_3d_mode` and `scaling_3d_scale` come from the viewport after the first captured or measured frame.
+
+`runner.clock` is `locked` and `detail`. This runner always records `locked: false`. Clock locks are issue 237.
+
+`runner.power` is `on_ac`, `powermode` (`2` is High Power), `powermode_name`, `thermal`, `before`, and `after`. Each of `before` and `after` holds the filtered `pmset -g`, `pmset -g batt`, and `pmset -g therm` text. Lines that contain a filesystem path or a "prevented by" process list are dropped before anything is written. Host labels are `Apple M5 Max`, `Linux VM`, or the OS name when no job file is present. Machine host names are not recorded.
+
+`dlss`, when present, requires `dll_path`, `dll_version`, `dll_sha256`, `dll_sha_matches_manifest`, `preset`, `allow_ota_updates`, `nvidia_driver`, `override_checklist` (`screenshot`, `state`), and `ngx_log`. Empty strings are allowed. P0 does not fill these. The upscaler fields above are the P0 record. The DLSS module fills the `dlss` object later.
+
+## Runners
+
+`runners/macos_local.sh` records power state, writes `runner_job.json`, launches the command after `--`, then patches `runner.power.after` into `manifest.json`. `--check` prints `on_ac`, `powermode`, `powermode_name`, and `thermal`, and exits without launching. Exit code 1 means the machine is not on AC power in High Power mode.
+
+`run_selftest.sh` and `runners/macos_local.sh` export `GODOTNEXT_BACKGROUND=1` unless it is already set, so harness runs on the M5 Max draw on Metal without taking the desktop's focus (`docs/godotnext/fleet.md`). Set `GODOTNEXT_BACKGROUND=0` to watch a run in a normal window.
+
+`runners/linux_vm.sh` has `doctest` and `functional`. `functional` adds `--headless`, writes a job whose host is `Linux VM` when `--out` is set, and rejects timing mode. It does not install or vendor lavapipe.
+
+## Self-test scene
+
+`selftest/selftest.tscn` builds 100 gray cubes from a fixed `RandomNumberGenerator` seed, one shadowed directional light, a camera named `CaptureCam`, and a WorldEnvironment with SDFGI, a procedural sky, and a linear tonemap. SDFGI bounce feedback is 0, convergence is 5 frames, and dynamic lights update every frame, so the probe history reaches a fixed point and two same-seed captures hash the same. Output goes under `godotnext/testbed/captures/`, which is gitignored. Do not commit captures. The raw power dumps are local run output.
+
+## Left for later
+
+P1b (issue 33): wall-clock IO delays, per-pass spread reports, and M5 Max timing runs used as measurements.
+
+Issue 237: the RTX 4080 SUPER Session-1 runner, clock locks, `run_remote.sh`, `run_selftest.ps1`, and G0-4 as a measurement. G0-6 calibration scenes are not part of this harness. The timing file format is what those runs will use.
