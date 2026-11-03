@@ -12,6 +12,17 @@ All `.tscn` and `.json` rows are outputs of
 `godot --headless --path godotnext/testbed --script res://generators/build_all.gd`,
 seed `0x6E657874`. Do not edit them by hand; edit the generator and rerun.
 
+The Dense City Blocks rows (#63) are the exception in size only: the
+generator is tracked, but its output (about 2 GB across all variants,
+including a 775 MB `.obj`) is generated on demand into the gitignored
+`generated/dense_city/` folder and never tracked. The tracked additions
+for #63 are the generator, its validator, `variants.cfg`, its README and
+`expected.json` (counts, AABBs and the reference SHA-256 of every
+output), all under `generators/dense_city/` and well under 1 MB in
+total, so the 50 MB testbed budget is unaffected by the scene scale.
+Regenerate with `res://generators/dense_city/dense_city_generator.gd`,
+seed `1` (one run per variant; see its README).
+
 | Path | Generator / author | License | Date | Host |
 |---|---|---|---|---|
 | `project.godot` | hand-authored for #10 step 1 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -24,6 +35,12 @@ seed `0x6E657874`. Do not edit them by hand; edit the generator and rerun.
 | `generators/build_courtyard.gd` | hand-authored for #10 step 6 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_legacy.gd` | hand-authored for #10 step 8 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_all.gd` | hand-authored for #10 step 3 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/dense_city/dense_city_generator.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/dense_city/validate_dense_city.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/dense_city/variants.cfg` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/dense_city/README.md` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/dense_city/expected.json` | `dense_city_generator.gd`, seed `1`, all variants | MIT | 2026-11-03 | the Apple M5 Max |
+| `generated/dense_city/**` (untracked) | `dense_city_generator.gd`, seed `1`; hashes in `expected.json` | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_a.tscn` | `build_color_box_room.gd`, seed `0x6E657874` stream 1 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_a_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 1 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/color_box_room/cbr_a_patches_q3.json` | `build_color_box_room.gd`, seed `0x6E657874` stream 1 | MIT | 2026-11-03 | the Apple M5 Max |

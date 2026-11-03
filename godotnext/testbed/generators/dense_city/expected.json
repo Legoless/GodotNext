@@ -1,0 +1,372 @@
+{
+	"geometry_cache_budget_bytes": 134217728,
+	"seed": 1,
+	"variants": {
+		"kit": {
+	"aabb": [-12.071624, 0.000086, -8.071624, 24.143248, 42.355911, 16.143248],
+	"asset": "kit_asset/kit_facade.glb",
+	"materials": 8,
+	"outputs": {
+		"kit_asset/kit_facade.glb": "e36db0e3ad0c77f9aab16b626a7440082d59a83790363f0ea33b154f18666113",
+		"kit_asset/kit_facade.glb.import": "7aa4baabfe8f2a34246432bd0b12abcbd8b74023a5ce7ff7f1a54e24c98a80cf"
+	},
+	"seams": {
+		"surfaces": 8,
+		"surfaces_with_seam": 8
+	},
+	"seed": 1,
+	"surfaces": 8,
+	"triangles": 558546,
+	"vertices": 284132
+},
+		"lod_baseline": {
+	"authored_lods": 0,
+	"import": {
+		"create_shadow_meshes": true,
+		"generate_lods": true,
+		"generate_virtual_geometry": false
+	},
+	"instance_count": 5040,
+	"instanced_triangles": 150934744,
+	"kit_seams": {
+		"surfaces": 8,
+		"surfaces_with_seam": 8
+	},
+	"meshes": [
+		{
+			"aabb": [-12.051317, 0.000074, -8.051303, 24.102633, 60.355927, 16.102608],
+			"instances": 12,
+			"name": "building_a",
+			"surfaces": 5,
+			"triangles": 1756586,
+			"vertices": 882612
+		},
+		{
+			"aabb": [-10.050569, 0.000103, -9.050569, 20.101139, 72.355896, 18.101139],
+			"instances": 12,
+			"name": "building_b",
+			"surfaces": 5,
+			"triangles": 1913770,
+			"vertices": 961460
+		},
+		{
+			"aabb": [-14.056503, -0.000053, -7.056504, 28.113007, 48.356049, 14.113007],
+			"instances": 12,
+			"name": "building_c",
+			"surfaces": 5,
+			"triangles": 1442218,
+			"vertices": 724916
+		},
+		{
+			"aabb": [-9.066009, -0.000061, -9.066010, 18.132019, 84.356026, 18.132019],
+			"instances": 12,
+			"name": "building_d",
+			"surfaces": 5,
+			"triangles": 1959178,
+			"vertices": 984340
+		},
+		{
+			"aabb": [-13.072116, -0.000174, -10.072116, 26.144230, 54.356163, 20.144232],
+			"instances": 12,
+			"name": "building_e",
+			"surfaces": 5,
+			"triangles": 1728650,
+			"vertices": 868500
+		},
+		{
+			"aabb": [-6.056764, 0.000233, -6.056763, 12.113527, 96.355713, 12.113527],
+			"instances": 20,
+			"name": "tower_slim",
+			"surfaces": 5,
+			"triangles": 537866,
+			"vertices": 271636
+		},
+		{
+			"aabb": [-8.058208, 0.000039, -6.058208, 16.116413, 24.355751, 12.116415],
+			"instances": 20,
+			"name": "building_small",
+			"surfaces": 5,
+			"triangles": 382218,
+			"vertices": 193044
+		},
+		{
+			"aabb": [-12.071624, 0.000086, -8.071624, 24.143248, 42.355911, 16.143248],
+			"instances": 40,
+			"name": "kit_facade",
+			"surfaces": 8,
+			"triangles": 558546,
+			"vertices": 284132
+		},
+		{
+			"aabb": [-1.100000, 0.000000, -0.800000, 2.200000, 2.000000, 1.600000],
+			"instances": 4900,
+			"name": "prop_rooftop",
+			"surfaces": 1,
+			"triangles": 936,
+			"vertices": 661
+		}
+	],
+	"outputs": {
+		"dense_city_lod_baseline.tscn": "9b80ca22257e981821d7b90c6b022bbf75a86bdd1d3cc3c28a201da30af4b455",
+		"kit_lod/building_a.glb": "729d00da1e5ab7c1aa038d210a9575ed461d83804088dc6a180e1178b1a20236",
+		"kit_lod/building_a.glb.import": "2dbf36574f048923c9da4555a7138c8041a388f3cbc97ebce544c28ed4651ce7",
+		"kit_lod/building_b.glb": "22bdd0449eb59c56eb4f46a0c89d48f0acd91425f9d06dba31e5cf9ec62f1b91",
+		"kit_lod/building_b.glb.import": "2ec90f32464341bf02a57c5fc84b929f720ac12214440c830b23b18f174b2877",
+		"kit_lod/building_c.glb": "5067c3966819a781650d47dcaca8baf705a9a57fa8e1c8b365aacceaf230b360",
+		"kit_lod/building_c.glb.import": "e2f9eadf3b1656e732e5b23693b6bf7524c9aa817659b22445b44355b6dac153",
+		"kit_lod/building_d.glb": "baadb8b34545d84f250e12d55843c1a815ee87981d48b5098f330db7eb38828c",
+		"kit_lod/building_d.glb.import": "6059d4a469f2397ee6d4cf980bb952accd79aca5dcd3fc8fd53dfa8ba2203f55",
+		"kit_lod/building_e.glb": "b602a85631fdafdf94d3cb221048c7c84cb97a23a2d35660525a35bd55aeecd0",
+		"kit_lod/building_e.glb.import": "dfd21e6a3ba803095377e831d3022adaf767cd7b14b6ffd6b70f2dbba00fdb8c",
+		"kit_lod/building_small.glb": "d07e749d521006dc608908480b5e637a978a24c2e3daa29d3ea2b3b5a9b23a7d",
+		"kit_lod/building_small.glb.import": "1ce09ea8c4ee05402a88b08ec6dd26731a1e035f4a63be6544ef5753922f70fc",
+		"kit_lod/kit_facade.glb": "e36db0e3ad0c77f9aab16b626a7440082d59a83790363f0ea33b154f18666113",
+		"kit_lod/kit_facade.glb.import": "e55e16b492b4fd072432bedc11b14a88ddebf35e1a52bc9e010fb1add159c0ef",
+		"kit_lod/prop_rooftop.glb": "4225a52fd7cdbf158d74752ac603437e071353343e4ae65484743ebdcbe2586c",
+		"kit_lod/prop_rooftop.glb.import": "1c7557ed41c17dc36c0402ffbb27946b17f135c0f637d0f754dea3287b318609",
+		"kit_lod/tower_slim.glb": "bdddb8fb33f4e7cc179a38ff40ec22d16d5e283e73e0413413b4c5f2c61ff844",
+		"kit_lod/tower_slim.glb.import": "1cdff20fc0c77dc50f5e7301c19217291155cbb575fa5ff0d1e56e242c27869a"
+	},
+	"reachable_clusters_lower_bound": 1182644,
+	"scene": "dense_city_lod_baseline.tscn",
+	"seed": 1,
+	"transform_fingerprint": "3b35d683d7583fc7eff91b8f1bf9bc6c588d0f08bfb9abf1ee616d79ab56526c",
+	"unique_bytes": 288841248,
+	"unique_triangles": 10279968,
+	"unique_vertices": 5171301,
+	"working_set_ratio": 2.152035
+},
+		"stress_10m": {
+	"aabb": [-109.997772, -2.191195, -109.997772, 219.997772, 4.373537, 219.997772],
+	"assets": ["stress/stress_10m.glb", "stress/stress_10m.obj"],
+	"outputs": {
+		"stress/stress_10m.glb": "36f0bd9be49af6e93525f23c43e560bbb25efa00a3541ef84a716883733c7dab",
+		"stress/stress_10m.glb.import": "54b34cc0f8c94f73282434df139d5f0b666750136321bd5dc31071c71949a1c2",
+		"stress/stress_10m.obj": "0a1ba70f507fa5a2fe60664775dc3592df98544ce4e3e868e89b8223de0e584f",
+		"stress/stress_10m.obj.import": "12d44e1902c7b1e1072c7f7f5e167ed952cf112fff77b941a318cce4134adefe"
+	},
+	"seed": 1,
+	"surfaces": 1,
+	"triangles": 10008338,
+	"vertices": 5008644
+},
+		"sweep_100m": {
+	"authored_lods": 0,
+	"instance_count": 3649,
+	"instanced_triangles": 99999720,
+	"outputs": {
+		"dense_city_sweep_100m.tscn": "09285334dfc21e24f4e298aef81a207c440b9322b753be3e778cf43c9aeb1f01",
+		"kit/building_a.glb": "729d00da1e5ab7c1aa038d210a9575ed461d83804088dc6a180e1178b1a20236",
+		"kit/building_a.glb.import": "9e15d6621f17a325d112aaaf718ef11ef35b134393cf140e01322855aa3be505",
+		"kit/building_b.glb": "22bdd0449eb59c56eb4f46a0c89d48f0acd91425f9d06dba31e5cf9ec62f1b91",
+		"kit/building_b.glb.import": "1030b95b078fe59d57c872fea3d6c439f23e0d0b238e63dfd0c6cef27a36db41",
+		"kit/building_c.glb": "5067c3966819a781650d47dcaca8baf705a9a57fa8e1c8b365aacceaf230b360",
+		"kit/building_c.glb.import": "58aacede82201a8b69e23fd2f8cbd3f69a930b209c54438edad3be6ba30c2bf6",
+		"kit/building_d.glb": "baadb8b34545d84f250e12d55843c1a815ee87981d48b5098f330db7eb38828c",
+		"kit/building_d.glb.import": "85a2400e010bdbf045ec6af52460ea3c983e47c02ba2cd0b019a16348df9c119",
+		"kit/building_e.glb": "b602a85631fdafdf94d3cb221048c7c84cb97a23a2d35660525a35bd55aeecd0",
+		"kit/building_e.glb.import": "9fd89ee3eef4a78db624abc7f533c8dfc845d9202af3cd37062f92b85e342c3b",
+		"kit/building_small.glb": "d07e749d521006dc608908480b5e637a978a24c2e3daa29d3ea2b3b5a9b23a7d",
+		"kit/building_small.glb.import": "f1b595123a79eae8f8dd4532cfc7005439672e0b892e542e03f748af230a64c6",
+		"kit/kit_facade.glb": "e36db0e3ad0c77f9aab16b626a7440082d59a83790363f0ea33b154f18666113",
+		"kit/kit_facade.glb.import": "3383aa20b96e0bb9b8dff2aeccad19f2f7658d4aa700416b138120f98c51c729",
+		"kit/prop_rooftop.glb": "4225a52fd7cdbf158d74752ac603437e071353343e4ae65484743ebdcbe2586c",
+		"kit/prop_rooftop.glb.import": "5430db7647c5309dfec64975a324e65bd5975e4d1fb62a8b1ef41d9b22e4067f",
+		"kit/tower_slim.glb": "bdddb8fb33f4e7cc179a38ff40ec22d16d5e283e73e0413413b4c5f2c61ff844",
+		"kit/tower_slim.glb.import": "50e784522d9279cbe9672d7593b8ac242d99767c894328b75eb8cd358eb05438"
+	},
+	"reachable_clusters_lower_bound": 783757,
+	"scene": "dense_city_sweep_100m.tscn",
+	"seed": 1,
+	"target_instanced_triangles": 100000000,
+	"transform_fingerprint": "ea3673b79d35718063b412c49bc40cb7efa8dfbda99f2858cdb280279807ae1c",
+	"unique_bytes": 288841248,
+	"unique_triangles": 10279968,
+	"unique_vertices": 5171301,
+	"working_set_ratio": 2.152035
+},
+		"sweep_10m": {
+	"authored_lods": 0,
+	"instance_count": 217,
+	"instanced_triangles": 9999376,
+	"outputs": {
+		"dense_city_sweep_10m.tscn": "1248b65be1f88997a8b7cce3e9a593dc81ea28d5dea9e68933630f8300bd5d78",
+		"kit/building_a.glb": "729d00da1e5ab7c1aa038d210a9575ed461d83804088dc6a180e1178b1a20236",
+		"kit/building_a.glb.import": "9e15d6621f17a325d112aaaf718ef11ef35b134393cf140e01322855aa3be505",
+		"kit/building_b.glb": "22bdd0449eb59c56eb4f46a0c89d48f0acd91425f9d06dba31e5cf9ec62f1b91",
+		"kit/building_b.glb.import": "1030b95b078fe59d57c872fea3d6c439f23e0d0b238e63dfd0c6cef27a36db41",
+		"kit/building_c.glb": "5067c3966819a781650d47dcaca8baf705a9a57fa8e1c8b365aacceaf230b360",
+		"kit/building_c.glb.import": "58aacede82201a8b69e23fd2f8cbd3f69a930b209c54438edad3be6ba30c2bf6",
+		"kit/building_d.glb": "baadb8b34545d84f250e12d55843c1a815ee87981d48b5098f330db7eb38828c",
+		"kit/building_d.glb.import": "85a2400e010bdbf045ec6af52460ea3c983e47c02ba2cd0b019a16348df9c119",
+		"kit/building_e.glb": "b602a85631fdafdf94d3cb221048c7c84cb97a23a2d35660525a35bd55aeecd0",
+		"kit/building_e.glb.import": "9fd89ee3eef4a78db624abc7f533c8dfc845d9202af3cd37062f92b85e342c3b",
+		"kit/building_small.glb": "d07e749d521006dc608908480b5e637a978a24c2e3daa29d3ea2b3b5a9b23a7d",
+		"kit/building_small.glb.import": "f1b595123a79eae8f8dd4532cfc7005439672e0b892e542e03f748af230a64c6",
+		"kit/kit_facade.glb": "e36db0e3ad0c77f9aab16b626a7440082d59a83790363f0ea33b154f18666113",
+		"kit/kit_facade.glb.import": "3383aa20b96e0bb9b8dff2aeccad19f2f7658d4aa700416b138120f98c51c729",
+		"kit/prop_rooftop.glb": "4225a52fd7cdbf158d74752ac603437e071353343e4ae65484743ebdcbe2586c",
+		"kit/prop_rooftop.glb.import": "5430db7647c5309dfec64975a324e65bd5975e4d1fb62a8b1ef41d9b22e4067f",
+		"kit/tower_slim.glb": "bdddb8fb33f4e7cc179a38ff40ec22d16d5e283e73e0413413b4c5f2c61ff844",
+		"kit/tower_slim.glb.import": "50e784522d9279cbe9672d7593b8ac242d99767c894328b75eb8cd358eb05438"
+	},
+	"reachable_clusters_lower_bound": 78269,
+	"scene": "dense_city_sweep_10m.tscn",
+	"seed": 1,
+	"target_instanced_triangles": 10000000,
+	"transform_fingerprint": "3d3c77fa702b0808828b8a6078f635d05b61391e51125f513455f45474e9e198",
+	"unique_bytes": 288841248,
+	"unique_triangles": 10279968,
+	"unique_vertices": 5171301,
+	"working_set_ratio": 2.152035
+},
+		"sweep_1b": {
+	"authored_lods": 0,
+	"instance_count": 33239,
+	"instanced_triangles": 999999976,
+	"outputs": {
+		"dense_city_sweep_1b.tscn": "1a7c7d9ff67042e1818fa228c9c844000164391c9116645d5827dccbe9e07ce4",
+		"kit/building_a.glb": "729d00da1e5ab7c1aa038d210a9575ed461d83804088dc6a180e1178b1a20236",
+		"kit/building_a.glb.import": "9e15d6621f17a325d112aaaf718ef11ef35b134393cf140e01322855aa3be505",
+		"kit/building_b.glb": "22bdd0449eb59c56eb4f46a0c89d48f0acd91425f9d06dba31e5cf9ec62f1b91",
+		"kit/building_b.glb.import": "1030b95b078fe59d57c872fea3d6c439f23e0d0b238e63dfd0c6cef27a36db41",
+		"kit/building_c.glb": "5067c3966819a781650d47dcaca8baf705a9a57fa8e1c8b365aacceaf230b360",
+		"kit/building_c.glb.import": "58aacede82201a8b69e23fd2f8cbd3f69a930b209c54438edad3be6ba30c2bf6",
+		"kit/building_d.glb": "baadb8b34545d84f250e12d55843c1a815ee87981d48b5098f330db7eb38828c",
+		"kit/building_d.glb.import": "85a2400e010bdbf045ec6af52460ea3c983e47c02ba2cd0b019a16348df9c119",
+		"kit/building_e.glb": "b602a85631fdafdf94d3cb221048c7c84cb97a23a2d35660525a35bd55aeecd0",
+		"kit/building_e.glb.import": "9fd89ee3eef4a78db624abc7f533c8dfc845d9202af3cd37062f92b85e342c3b",
+		"kit/building_small.glb": "d07e749d521006dc608908480b5e637a978a24c2e3daa29d3ea2b3b5a9b23a7d",
+		"kit/building_small.glb.import": "f1b595123a79eae8f8dd4532cfc7005439672e0b892e542e03f748af230a64c6",
+		"kit/kit_facade.glb": "e36db0e3ad0c77f9aab16b626a7440082d59a83790363f0ea33b154f18666113",
+		"kit/kit_facade.glb.import": "3383aa20b96e0bb9b8dff2aeccad19f2f7658d4aa700416b138120f98c51c729",
+		"kit/prop_rooftop.glb": "4225a52fd7cdbf158d74752ac603437e071353343e4ae65484743ebdcbe2586c",
+		"kit/prop_rooftop.glb.import": "5430db7647c5309dfec64975a324e65bd5975e4d1fb62a8b1ef41d9b22e4067f",
+		"kit/tower_slim.glb": "bdddb8fb33f4e7cc179a38ff40ec22d16d5e283e73e0413413b4c5f2c61ff844",
+		"kit/tower_slim.glb.import": "50e784522d9279cbe9672d7593b8ac242d99767c894328b75eb8cd358eb05438"
+	},
+	"reachable_clusters_lower_bound": 7835366,
+	"scene": "dense_city_sweep_1b.tscn",
+	"seed": 1,
+	"target_instanced_triangles": 1000000000,
+	"transform_fingerprint": "2ec8767eb6fdbe32582925e7a9609a1183d66623163662a352aec3f034ab7aa1",
+	"unique_bytes": 288841248,
+	"unique_triangles": 10279968,
+	"unique_vertices": 5171301,
+	"working_set_ratio": 2.152035
+},
+		"virtual": {
+	"authored_lods": 0,
+	"instance_count": 5040,
+	"instanced_triangles": 150934744,
+	"kit_seams": {
+		"surfaces": 8,
+		"surfaces_with_seam": 8
+	},
+	"meshes": [
+		{
+			"aabb": [-12.051317, 0.000074, -8.051303, 24.102633, 60.355927, 16.102608],
+			"instances": 12,
+			"name": "building_a",
+			"surfaces": 5,
+			"triangles": 1756586,
+			"vertices": 882612
+		},
+		{
+			"aabb": [-10.050569, 0.000103, -9.050569, 20.101139, 72.355896, 18.101139],
+			"instances": 12,
+			"name": "building_b",
+			"surfaces": 5,
+			"triangles": 1913770,
+			"vertices": 961460
+		},
+		{
+			"aabb": [-14.056503, -0.000053, -7.056504, 28.113007, 48.356049, 14.113007],
+			"instances": 12,
+			"name": "building_c",
+			"surfaces": 5,
+			"triangles": 1442218,
+			"vertices": 724916
+		},
+		{
+			"aabb": [-9.066009, -0.000061, -9.066010, 18.132019, 84.356026, 18.132019],
+			"instances": 12,
+			"name": "building_d",
+			"surfaces": 5,
+			"triangles": 1959178,
+			"vertices": 984340
+		},
+		{
+			"aabb": [-13.072116, -0.000174, -10.072116, 26.144230, 54.356163, 20.144232],
+			"instances": 12,
+			"name": "building_e",
+			"surfaces": 5,
+			"triangles": 1728650,
+			"vertices": 868500
+		},
+		{
+			"aabb": [-6.056764, 0.000233, -6.056763, 12.113527, 96.355713, 12.113527],
+			"instances": 20,
+			"name": "tower_slim",
+			"surfaces": 5,
+			"triangles": 537866,
+			"vertices": 271636
+		},
+		{
+			"aabb": [-8.058208, 0.000039, -6.058208, 16.116413, 24.355751, 12.116415],
+			"instances": 20,
+			"name": "building_small",
+			"surfaces": 5,
+			"triangles": 382218,
+			"vertices": 193044
+		},
+		{
+			"aabb": [-12.071624, 0.000086, -8.071624, 24.143248, 42.355911, 16.143248],
+			"instances": 40,
+			"name": "kit_facade",
+			"surfaces": 8,
+			"triangles": 558546,
+			"vertices": 284132
+		},
+		{
+			"aabb": [-1.100000, 0.000000, -0.800000, 2.200000, 2.000000, 1.600000],
+			"instances": 4900,
+			"name": "prop_rooftop",
+			"surfaces": 1,
+			"triangles": 936,
+			"vertices": 661
+		}
+	],
+	"outputs": {
+		"dense_city.tscn": "a45a1dd82243c03d324cb2880615bff7a123dd8d4af4574e769743eea5b92ebb",
+		"kit/building_a.glb": "729d00da1e5ab7c1aa038d210a9575ed461d83804088dc6a180e1178b1a20236",
+		"kit/building_a.glb.import": "9e15d6621f17a325d112aaaf718ef11ef35b134393cf140e01322855aa3be505",
+		"kit/building_b.glb": "22bdd0449eb59c56eb4f46a0c89d48f0acd91425f9d06dba31e5cf9ec62f1b91",
+		"kit/building_b.glb.import": "1030b95b078fe59d57c872fea3d6c439f23e0d0b238e63dfd0c6cef27a36db41",
+		"kit/building_c.glb": "5067c3966819a781650d47dcaca8baf705a9a57fa8e1c8b365aacceaf230b360",
+		"kit/building_c.glb.import": "58aacede82201a8b69e23fd2f8cbd3f69a930b209c54438edad3be6ba30c2bf6",
+		"kit/building_d.glb": "baadb8b34545d84f250e12d55843c1a815ee87981d48b5098f330db7eb38828c",
+		"kit/building_d.glb.import": "85a2400e010bdbf045ec6af52460ea3c983e47c02ba2cd0b019a16348df9c119",
+		"kit/building_e.glb": "b602a85631fdafdf94d3cb221048c7c84cb97a23a2d35660525a35bd55aeecd0",
+		"kit/building_e.glb.import": "9fd89ee3eef4a78db624abc7f533c8dfc845d9202af3cd37062f92b85e342c3b",
+		"kit/building_small.glb": "d07e749d521006dc608908480b5e637a978a24c2e3daa29d3ea2b3b5a9b23a7d",
+		"kit/building_small.glb.import": "f1b595123a79eae8f8dd4532cfc7005439672e0b892e542e03f748af230a64c6",
+		"kit/kit_facade.glb": "e36db0e3ad0c77f9aab16b626a7440082d59a83790363f0ea33b154f18666113",
+		"kit/kit_facade.glb.import": "3383aa20b96e0bb9b8dff2aeccad19f2f7658d4aa700416b138120f98c51c729",
+		"kit/prop_rooftop.glb": "4225a52fd7cdbf158d74752ac603437e071353343e4ae65484743ebdcbe2586c",
+		"kit/prop_rooftop.glb.import": "5430db7647c5309dfec64975a324e65bd5975e4d1fb62a8b1ef41d9b22e4067f",
+		"kit/tower_slim.glb": "bdddb8fb33f4e7cc179a38ff40ec22d16d5e283e73e0413413b4c5f2c61ff844",
+		"kit/tower_slim.glb.import": "50e784522d9279cbe9672d7593b8ac242d99767c894328b75eb8cd358eb05438"
+	},
+	"reachable_clusters_lower_bound": 1182644,
+	"scene": "dense_city.tscn",
+	"seed": 1,
+	"transform_fingerprint": "3b35d683d7583fc7eff91b8f1bf9bc6c588d0f08bfb9abf1ee616d79ab56526c",
+	"unique_bytes": 288841248,
+	"unique_triangles": 10279968,
+	"unique_vertices": 5171301,
+	"working_set_ratio": 2.152035
+}
+	},
+	"version": 1
+}

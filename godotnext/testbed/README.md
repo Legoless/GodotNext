@@ -21,6 +21,10 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
   shared seed plumbing, the chunked `SurfaceTool` and text writers, the
   deterministic JSON writer and the byte-stable scene saver that the
   later large-scene generators reuse.
+- `generators/dense_city/` — the Dense City Blocks generator (#63), a
+  separate on-demand entry point (not part of `build_all.gd`); its
+  output goes to the gitignored `generated/dense_city/`. See its
+  README.
 - `scenes/color_box_room/` — sealed lit/dark room pairs: `cbr_a.tscn`
   (0.10 m shared wall), `cbr_b.tscn` (0.20 m), `cbr_offscreen.tscn`
   (spot behind the capture camera), `cbr_b_lightmap.tscn` (B plus an
