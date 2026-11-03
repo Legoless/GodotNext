@@ -30,6 +30,8 @@
 
 #pragma once
 
+// GodotNext: mesh_sdf_bvh_extraction
+#include "core/math/mesh_sdf_builder.h"
 #include "core/templates/local_vector.h"
 #include "scene/3d/visual_instance_3d.h"
 
@@ -126,40 +128,22 @@ private:
 
 	void _find_meshes(const AABB &p_aabb, Node *p_at_node, List<PlotMesh> &plot_meshes);
 
-	struct BVH {
-		enum {
-			LEAF_BIT = 1 << 30,
-			LEAF_MASK = LEAF_BIT - 1
-		};
-		AABB bounds;
-		uint32_t children[2] = {};
-	};
-
-	struct FacePos {
-		Vector3 center;
-		uint32_t index = 0;
-	};
-
-	struct FaceSort {
-		uint32_t axis = 0;
-		bool operator()(const FacePos &p_left, const FacePos &p_right) const {
-			return p_left.center[axis] < p_right.center[axis];
-		}
-	};
-
-	uint32_t _create_bvh(LocalVector<BVH> &bvh_tree, FacePos *p_faces, uint32_t p_face_count, const Face3 *p_triangles, float p_thickness);
+	// GodotNext: mesh_sdf_bvh_extraction
+	// The BVH types and queries that used to live here moved to
+	// core/math/mesh_sdf_builder.h (MeshSDFBVH), shared with the mesh
+	// distance field builder.
 
 	struct ComputeSDFParams {
 		float *cells = nullptr;
 		Vector3i size;
 		float cell_size = 0.0;
 		Vector3 cell_offset;
-		const BVH *bvh = nullptr;
+		// GodotNext: mesh_sdf_bvh_extraction
+		const MeshSDFBVHNode *bvh = nullptr;
 		const Face3 *triangles = nullptr;
 		float thickness = 0.0;
 	};
 
-	void _find_closest_distance(const Vector3 &p_pos, const BVH *p_bvh, uint32_t p_bvh_cell, const Face3 *p_triangles, float p_thickness, float &r_closest_distance);
 	void _compute_sdf_z(uint32_t p_z, ComputeSDFParams *params);
 	void _compute_sdf(ComputeSDFParams *params);
 

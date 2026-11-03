@@ -31,8 +31,10 @@
 #include "nextgi_editor_plugin.h"
 
 #include "core/config/project_settings.h"
+#include "core/io/file_access.h"
 #include "core/object/callable_mp.h"
 #include "editor/editor_node.h"
+#include "editor/file_system/editor_file_system.h"
 #include "editor/settings/editor_settings.h"
 #include "scene/gui/dialogs.h"
 #include "scene/scene_string_names.h"
@@ -67,6 +69,12 @@ void NextGIEditorPlugin::_on_project_settings_changed() {
 
 	if (should_offer_vulkan_switch(nextgi_was_enabled, now_enabled, driver_windows, already_offered)) {
 		_offer_vulkan_switch();
+	}
+	// GodotNext: mesh_sdf_offer
+	const bool mesh_sdf_generate = ps->get_setting("rendering/global_illumination/mesh_sdf/generate", false);
+	const bool mesh_sdf_offered = editor_settings && bool(editor_settings->get_project_metadata("mesh_sdf", "generate_offered", false));
+	if (should_offer_mesh_sdf(nextgi_was_enabled, now_enabled, mesh_sdf_generate, mesh_sdf_offered)) {
+		_offer_mesh_sdf();
 	}
 	nextgi_was_enabled = now_enabled;
 }
@@ -104,6 +112,55 @@ void NextGIEditorPlugin::apply_vulkan_switch() {
 	ps->set_setting("rendering/rendering_device/fallback_to_d3d12", true);
 	const Error err = ps->save();
 	ERR_FAIL_COND_MSG(err != OK, vformat("Couldn't save project.godot after switching the Windows driver to Vulkan (error %d).", err));
+}
+
+// GodotNext: mesh_sdf_offer
+static void _collect_reimport_files(EditorFileSystemDirectory *p_dir, Vector<String> &r_files) {
+	if (p_dir == nullptr) {
+		return;
+	}
+	for (int i = 0; i < p_dir->get_file_count(); i++) {
+		String path = p_dir->get_file_path(i);
+		if (p_dir->get_file_import_is_valid(i) && FileAccess::exists(path + ".import")) {
+			r_files.push_back(path);
+		}
+	}
+	for (int i = 0; i < p_dir->get_subdir_count(); i++) {
+		_collect_reimport_files(p_dir->get_subdir(i), r_files);
+	}
+}
+
+void NextGIEditorPlugin::_offer_mesh_sdf() {
+	EditorSettings *editor_settings = EditorSettings::get_singleton();
+	if (editor_settings) {
+		editor_settings->set_project_metadata("mesh_sdf", "generate_offered", true);
+		editor_settings->save_project_metadata();
+	}
+	mesh_sdf_dialog->popup_centered();
+}
+
+void NextGIEditorPlugin::_mesh_sdf_confirmed() {
+	apply_mesh_sdf_enable();
+	EditorFileSystem *efs = EditorFileSystem::get_singleton();
+	if (efs != nullptr) {
+		Vector<String> files;
+		_collect_reimport_files(efs->get_filesystem(), files);
+		if (!files.is_empty()) {
+			efs->reimport_files(files);
+		}
+	}
+}
+
+bool NextGIEditorPlugin::should_offer_mesh_sdf(bool p_was_enabled, bool p_is_enabled, bool p_mesh_sdf_generate, bool p_already_offered) {
+	return !p_was_enabled && p_is_enabled && !p_mesh_sdf_generate && !p_already_offered;
+}
+
+void NextGIEditorPlugin::apply_mesh_sdf_enable() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	ERR_FAIL_NULL(ps);
+	ps->set_setting("rendering/global_illumination/mesh_sdf/generate", true);
+	const Error err = ps->save();
+	ERR_FAIL_COND_MSG(err != OK, vformat("Couldn't save project.godot after enabling mesh distance field generation (error %d).", err));
 }
 
 String NextGIEditorPlugin::get_vulkan_switch_dialog_title() {
@@ -149,4 +206,14 @@ NextGIEditorPlugin::NextGIEditorPlugin() {
 	restart_dialog->set_ok_button_text(TTR("Restart"));
 	restart_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIEditorPlugin::_restart_confirmed));
 	add_child(restart_dialog);
+
+	// GodotNext: mesh_sdf_offer
+	mesh_sdf_dialog = memnew(ConfirmationDialog);
+	mesh_sdf_dialog->set_title(TTR("Generate Mesh Distance Fields"));
+	mesh_sdf_dialog->set_text(TTR("NextGI's software tier traces against per-mesh distance fields. Enable \"rendering/global_illumination/mesh_sdf/generate\" and reimport project files so existing meshes get distance fields? Cancel leaves the project unchanged."));
+	mesh_sdf_dialog->set_autowrap(true);
+	mesh_sdf_dialog->set_min_size(Size2i(560, 180));
+	mesh_sdf_dialog->set_ok_button_text(TTR("Enable and Reimport"));
+	mesh_sdf_dialog->connect(SceneStringName(confirmed), callable_mp(this, &NextGIEditorPlugin::_mesh_sdf_confirmed));
+	add_child(mesh_sdf_dialog);
 }

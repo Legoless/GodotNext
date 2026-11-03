@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="MeshDistanceField" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		A per-mesh signed distance field generated at import time.
+	</brief_description>
+	<description>
+		Generated for an [ArrayMesh] during scene import when distance field generation is enabled (see [member ProjectSettings.rendering/global_illumination/mesh_sdf/generate] and the [code]meshes/generate_distance_fields[/code] import option). Distances are stored as sparse 8×8×8 bricks of 8-bit values near the surface, with 3 mip levels and one page table per mip. Page table entries are a brick index, or negative sentinels for bricks that are uniformly inside or outside. Brick values are normalized by the mip's band ([member mip_bands]).
+		The field is consumed by NextGI's software ray tracing tier. Mutating the owning mesh's surfaces detaches it.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_brick_count" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="mip" type="int" />
+			<description>
+				Returns the number of allocated 8×8×8 bricks at the given mip level.
+			</description>
+		</method>
+		<method name="get_data_size" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the total size of the stored page tables and brick data, in bytes.
+			</description>
+		</method>
+		<method name="get_mip_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of mip levels (3 for imported fields).
+			</description>
+		</method>
+		<method name="get_voxel_distance" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="mip" type="int" />
+			<param index="1" name="voxel" type="Vector3i" />
+			<description>
+				Returns the signed distance stored at the given voxel of the given mip level, in meters. Voxels in unallocated bricks return the mip band with the brick's sign.
+			</description>
+		</method>
+		<method name="is_two_sided" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the field was generated from double-sided surfaces and is therefore unsigned.
+			</description>
+		</method>
+		<method name="sample_distance" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="position" type="Vector3" />
+			<param index="1" name="mip" type="int" default="0" />
+			<description>
+				Returns the trilinearly interpolated signed distance at [param position] in mesh-local space, in meters. Negative values are inside the mesh.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="bounds" type="AABB" setter="set_bounds" getter="get_bounds" default="AABB(0, 0, 0, 0, 0, 0)">
+			The bounds of the mip 0 voxel grid in mesh-local space.
+		</member>
+		<member name="brick_data" type="PackedByteArray[]" setter="set_brick_data" getter="get_brick_data" default="[]">
+			R8 brick payloads, one [PackedByteArray] per mip level. Each brick holds 512 values in x-major order.
+		</member>
+		<member name="flags" type="int" setter="set_flags" getter="get_flags" default="0">
+			A combination of [enum Flags].
+		</member>
+		<member name="format_version" type="int" setter="set_format_version" getter="get_format_version" default="1">
+			The stored format version. Currently always [code]1[/code].
+		</member>
+		<member name="mip_bands" type="PackedFloat32Array" setter="set_mip_bands" getter="get_mip_bands" default="PackedFloat32Array()">
+			The normalization band of each mip level, in meters. Stored values span the range [code]-band[/code] to [code]band[/code].
+		</member>
+		<member name="mip_brick_grid_dimensions" type="PackedInt32Array" setter="set_mip_brick_grid_dimensions" getter="get_mip_brick_grid_dimensions" default="PackedInt32Array()">
+			The brick grid dimensions of each mip level, as groups of 3 integers (x, y, z).
+		</member>
+		<member name="mip_dimensions" type="PackedInt32Array" setter="set_mip_dimensions" getter="get_mip_dimensions" default="PackedInt32Array()">
+			The voxel dimensions of each mip level, as groups of 3 integers (x, y, z).
+		</member>
+		<member name="page_tables" type="PackedInt32Array[]" setter="set_page_tables" getter="get_page_tables" default="[]">
+			One page table per mip level, with one entry per brick slot: a brick index, [code]-1[/code] for uniformly outside bricks and [code]-2[/code] for uniformly inside bricks.
+		</member>
+		<member name="voxel_size" type="float" setter="set_voxel_size" getter="get_voxel_size" default="0.0">
+			The size of a mip 0 voxel, in meters.
+		</member>
+	</members>
+	<constants>
+		<constant name="FLAG_TWO_SIDED" value="1" enum="Flags">
+			The source surfaces are rendered double-sided, so the field has no defined interior.
+		</constant>
+		<constant name="FLAG_UNSIGNED" value="2" enum="Flags">
+			All stored distances are unsigned (a shell around the surface). Set together with [constant FLAG_TWO_SIDED].
+		</constant>
+	</constants>
+</class>

@@ -42,11 +42,16 @@ class NextGIEditorPlugin : public EditorPlugin {
 
 	ConfirmationDialog *vulkan_switch_dialog = nullptr;
 	ConfirmationDialog *restart_dialog = nullptr;
+	// GodotNext: mesh_sdf_offer
+	ConfirmationDialog *mesh_sdf_dialog = nullptr;
 
 	void _on_project_settings_changed();
 	void _offer_vulkan_switch();
 	void _vulkan_switch_confirmed();
 	void _restart_confirmed();
+	// GodotNext: mesh_sdf_offer
+	void _offer_mesh_sdf();
+	void _mesh_sdf_confirmed();
 
 protected:
 	void _notification(int p_what);
@@ -61,6 +66,13 @@ public:
 
 	static String get_vulkan_switch_dialog_title();
 	static String get_vulkan_switch_dialog_text();
+
+	// GodotNext: mesh_sdf_offer
+	// True only on a false-to-true flip of nextgi/enabled while mesh distance
+	// field generation is off and this project has not been asked before (#184).
+	static bool should_offer_mesh_sdf(bool p_was_enabled, bool p_is_enabled, bool p_mesh_sdf_generate, bool p_already_offered);
+	// Sets mesh_sdf/generate and saves project.godot. Only called after the user accepts.
+	static void apply_mesh_sdf_enable();
 
 	// The minimal tier readout in the 3D viewport's View Information (#15): "NextGI: <tier> (<reason>)",
 	// or "NextGI: <tier>" without a reason. The full overlay is P1b.

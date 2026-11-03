@@ -31,11 +31,13 @@
 #include "resource_importer_scene.h"
 
 // GodotNext: nextgeo_import
+// GodotNext: mesh_sdf_import
 #include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/io/dir_access.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
+#include "core/math/mesh_sdf_builder.h"
 #include "core/object/class_db.h"
 #include "core/object/script_language.h"
 #include "editor/editor_interface.h"
@@ -54,12 +56,14 @@
 #include "scene/animation/animation_player.h"
 #include "scene/resources/3d/box_shape_3d.h"
 #include "scene/resources/3d/importer_mesh.h"
+#include "scene/resources/3d/mesh_distance_field.h"
 #include "scene/resources/3d/mesh_library.h"
 #include "scene/resources/3d/separation_ray_shape_3d.h"
 #include "scene/resources/3d/sphere_shape_3d.h"
 #include "scene/resources/3d/world_boundary_shape_3d.h"
 #include "scene/resources/animation.h"
 #include "scene/resources/bone_map.h"
+#include "scene/resources/material.h"
 #include "scene/resources/packed_scene.h"
 #include "scene/resources/physics_material.h"
 #include "scene/resources/resource_format_text.h"
@@ -2419,6 +2423,9 @@ void ResourceImporterScene::get_internal_import_options(InternalImportCategory p
 			// GodotNext: nextgeo_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "lods/normal_merge_angle", PROPERTY_HINT_RANGE, "0,180,1,degrees"), 20.0f));
+			// GodotNext: mesh_sdf_import
+			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/distance_fields", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
+			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "distance_field/resolution_scale", PROPERTY_HINT_RANGE, "0.1,4,0.05"), 1.0f));
 		} break;
 		case INTERNAL_IMPORT_CATEGORY_MATERIAL: {
 			r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "use_external/enabled", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), false));
@@ -2771,6 +2778,9 @@ void ResourceImporterScene::get_import_options(const String &p_path, List<Import
 	// GodotNext: nextgeo_import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_virtual_geometry"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/create_shadow_meshes"), true));
+	// GodotNext: mesh_sdf_import
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_distance_fields"), bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/generate"))));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "meshes/distance_field_resolution_scale", PROPERTY_HINT_RANGE, "0.1,4,0.05"), 1.0));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "meshes/light_baking", PROPERTY_HINT_ENUM, "Disabled,Static,Static Lightmaps,Dynamic", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), 1));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "meshes/lightmap_texel_size", PROPERTY_HINT_RANGE, "0.001,100,0.001"), 0.2));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/force_disable_compression"), false));
@@ -2846,7 +2856,8 @@ Array ResourceImporterScene::_get_skinned_pose_transforms(ImporterMeshInstance3D
 	return skin_pose_transform_array;
 }
 
-Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_mesh_data, bool p_generate_lods, bool p_create_shadow_meshes, LightBakeMode p_light_bake_mode, float p_lightmap_texel_size, const Vector<uint8_t> &p_src_lightmap_cache, Vector<Vector<uint8_t>> &r_lightmap_caches) {
+// GodotNext: mesh_sdf_import
+Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_mesh_data, bool p_generate_lods, bool p_create_shadow_meshes, bool p_generate_distance_fields, float p_distance_field_resolution_scale, LightBakeMode p_light_bake_mode, float p_lightmap_texel_size, const Vector<uint8_t> &p_src_lightmap_cache, Vector<Vector<uint8_t>> &r_lightmap_caches) {
 	ImporterMeshInstance3D *src_mesh_node = Object::cast_to<ImporterMeshInstance3D>(p_node);
 	if (src_mesh_node) {
 		//is mesh
@@ -2860,6 +2871,9 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 		Ref<ImporterMesh> importer_mesh = src_mesh_node->get_mesh();
 		if (importer_mesh.is_valid()) {
 			Ref<ArrayMesh> mesh;
+			// GodotNext: mesh_sdf_import
+			bool generate_distance_fields = p_generate_distance_fields;
+			float distance_field_resolution_scale = p_distance_field_resolution_scale;
 			if (!importer_mesh->has_mesh()) {
 				//do mesh processing
 
@@ -2925,6 +2939,20 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 						} else if (virtual_geometry == MESH_OVERRIDE_DISABLE) {
 							generate_virtual_geometry = false;
 						}
+					}
+
+					// GodotNext: mesh_sdf_import
+					if (mesh_settings.has("generate/distance_fields")) {
+						int distance_fields = mesh_settings["generate/distance_fields"];
+						if (distance_fields == MESH_OVERRIDE_ENABLE) {
+							generate_distance_fields = true;
+						} else if (distance_fields == MESH_OVERRIDE_DISABLE) {
+							generate_distance_fields = false;
+						}
+					}
+
+					if (mesh_settings.has("distance_field/resolution_scale")) {
+						distance_field_resolution_scale = mesh_settings["distance_field/resolution_scale"];
 					}
 
 					if (bool(mesh_settings.get("save_to_file/enabled", false))) {
@@ -3041,6 +3069,47 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 					mesh_node->set_surface_override_material(i, src_mesh_node->get_surface_material(i));
 				}
 				mesh->merge_meta_from(*importer_mesh);
+
+				// GodotNext: mesh_sdf_import
+				// Skinned meshes are out of scope for distance fields in v1.
+				if (generate_distance_fields && src_mesh_node->get_skin().is_null() && mesh->get_distance_field().is_null()) {
+					bool two_sided = false;
+					for (int i = 0; i < mesh->get_surface_count(); i++) {
+						Ref<BaseMaterial3D> material = mesh->surface_get_material(i);
+						if (material.is_null()) {
+							material = src_mesh_node->get_surface_material(i);
+						}
+						if (material.is_valid() && material->get_cull_mode() == BaseMaterial3D::CULL_DISABLED) {
+							two_sided = true;
+							break;
+						}
+					}
+					MeshSDFSettings sdf_settings;
+					sdf_settings.voxels_per_meter = float(GLOBAL_GET("rendering/global_illumination/mesh_sdf/voxels_per_meter"));
+					sdf_settings.resolution_scale = MAX(distance_field_resolution_scale, 0.01f);
+					sdf_settings.two_sided = two_sided;
+					MeshSDFData sdf_data;
+					Error sdf_err = MeshSDFBuilder::build(mesh->get_faces(), sdf_settings, sdf_data);
+					if (sdf_err == OK) {
+						Ref<MeshDistanceField> distance_field;
+						distance_field.instantiate();
+						distance_field->set_data(sdf_data);
+						mesh->set_distance_field(distance_field);
+						mesh->set_meta("mesh_sdf_size_bytes", distance_field->get_data_size());
+						print_line(vformat("Mesh distance field for '%s': %d bytes, %d bricks at mip 0.", mesh->get_name(), distance_field->get_data_size(), distance_field->get_brick_count(0)));
+						// GodotNext: mesh_sdf_save_to_file
+						// A mesh with save_to_file set was already written above;
+						// write it again so the external file contains the field.
+						if (mesh->get_path().is_resource_file()) {
+							Error resave_err = ResourceSaver::save(mesh, mesh->get_path());
+							if (resave_err != OK) {
+								WARN_PRINT(vformat("Failed to re-save mesh %s to '%s' with its distance field.", mesh->get_name(), mesh->get_path()));
+							}
+						}
+					} else {
+						WARN_PRINT(vformat("Failed to generate a mesh distance field for '%s'.", mesh->get_name()));
+					}
+				}
 			}
 		}
 
@@ -3075,7 +3144,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 	}
 
 	for (int i = 0; i < p_node->get_child_count(); i++) {
-		_generate_meshes(p_node->get_child(i), p_mesh_data, p_generate_lods, p_create_shadow_meshes, p_light_bake_mode, p_lightmap_texel_size, p_src_lightmap_cache, r_lightmap_caches);
+		// GodotNext: mesh_sdf_import
+		_generate_meshes(p_node->get_child(i), p_mesh_data, p_generate_lods, p_create_shadow_meshes, p_generate_distance_fields, p_distance_field_resolution_scale, p_light_bake_mode, p_lightmap_texel_size, p_src_lightmap_cache, r_lightmap_caches);
 	}
 
 	return p_node;
@@ -3533,6 +3603,9 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 
 	bool gen_lods = bool(p_options["meshes/generate_lods"]);
 	bool create_shadow_meshes = bool(p_options["meshes/create_shadow_meshes"]);
+	// GodotNext: mesh_sdf_import
+	bool generate_distance_fields = p_options.has("meshes/generate_distance_fields") && bool(p_options["meshes/generate_distance_fields"]);
+	float distance_field_resolution_scale = p_options.has("meshes/distance_field_resolution_scale") ? float(p_options["meshes/distance_field_resolution_scale"]) : 1.0f;
 	int light_bake_mode = p_options["meshes/light_baking"];
 	float texel_size = p_options["meshes/lightmap_texel_size"];
 	float lightmap_texel_size = MAX(0.001, texel_size);
@@ -3547,7 +3620,8 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 		}
 	}
 
-	scene = _generate_meshes(scene, mesh_data, gen_lods, create_shadow_meshes, LightBakeMode(light_bake_mode), lightmap_texel_size, src_lightmap_cache, mesh_lightmap_caches);
+	// GodotNext: mesh_sdf_import
+	scene = _generate_meshes(scene, mesh_data, gen_lods, create_shadow_meshes, generate_distance_fields, distance_field_resolution_scale, LightBakeMode(light_bake_mode), lightmap_texel_size, src_lightmap_cache, mesh_lightmap_caches);
 
 	if (mesh_lightmap_caches.size()) {
 		Ref<FileAccess> f = FileAccess::open(p_source_file + ".unwrap_cache", FileAccess::WRITE);

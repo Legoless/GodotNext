@@ -200,154 +200,9 @@ void GPUParticlesCollisionSDF3D::_find_meshes(const AABB &p_aabb, Node *p_at_nod
 	}
 }
 
-uint32_t GPUParticlesCollisionSDF3D::_create_bvh(LocalVector<BVH> &bvh_tree, FacePos *p_faces, uint32_t p_face_count, const Face3 *p_triangles, float p_thickness) {
-	if (p_face_count == 1) {
-		return BVH::LEAF_BIT | p_faces[0].index;
-	}
-
-	uint32_t index = bvh_tree.size();
-	{
-		BVH bvh;
-
-		for (uint32_t i = 0; i < p_face_count; i++) {
-			const Face3 &f = p_triangles[p_faces[i].index];
-			AABB aabb(f.vertex[0], Vector3());
-			aabb.expand_to(f.vertex[1]);
-			aabb.expand_to(f.vertex[2]);
-			if (p_thickness > 0.0) {
-				Vector3 normal = p_triangles[p_faces[i].index].get_plane().normal;
-				aabb.expand_to(f.vertex[0] - normal * p_thickness);
-				aabb.expand_to(f.vertex[1] - normal * p_thickness);
-				aabb.expand_to(f.vertex[2] - normal * p_thickness);
-			}
-			if (i == 0) {
-				bvh.bounds = aabb;
-			} else {
-				bvh.bounds.merge_with(aabb);
-			}
-		}
-		bvh_tree.push_back(bvh);
-	}
-
-	uint32_t middle = p_face_count / 2;
-
-	SortArray<FacePos, FaceSort> s;
-	s.compare.axis = bvh_tree[index].bounds.get_longest_axis_index();
-	s.sort(p_faces, p_face_count);
-
-	uint32_t left = _create_bvh(bvh_tree, p_faces, middle, p_triangles, p_thickness);
-	uint32_t right = _create_bvh(bvh_tree, p_faces + middle, p_face_count - middle, p_triangles, p_thickness);
-
-	bvh_tree[index].children[0] = left;
-	bvh_tree[index].children[1] = right;
-
-	return index;
-}
-
-static _FORCE_INLINE_ real_t Vector3_dot2(const Vector3 &p_vec3) {
-	return p_vec3.dot(p_vec3);
-}
-
-void GPUParticlesCollisionSDF3D::_find_closest_distance(const Vector3 &p_pos, const BVH *p_bvh, uint32_t p_bvh_cell, const Face3 *p_triangles, float p_thickness, float &r_closest_distance) {
-	if (p_bvh_cell & BVH::LEAF_BIT) {
-		p_bvh_cell &= BVH::LEAF_MASK; //remove bit
-
-		Vector3 point = p_pos;
-		Plane p = p_triangles[p_bvh_cell].get_plane();
-		float d = p.distance_to(point);
-		float inside_d = 1e20;
-		if (d < 0 && d > -p_thickness) {
-			//inside planes, do this in 2D
-
-			Vector3 x_axis = (p_triangles[p_bvh_cell].vertex[0] - p_triangles[p_bvh_cell].vertex[1]).normalized();
-			Vector3 y_axis = p.normal.cross(x_axis).normalized();
-
-			Vector2 points[3];
-			for (int i = 0; i < 3; i++) {
-				points[i] = Vector2(x_axis.dot(p_triangles[p_bvh_cell].vertex[i]), y_axis.dot(p_triangles[p_bvh_cell].vertex[i]));
-			}
-
-			Vector2 p2d = Vector2(x_axis.dot(point), y_axis.dot(point));
-
-			{
-				// https://www.shadertoy.com/view/XsXSz4
-
-				Vector2 e0 = points[1] - points[0];
-				Vector2 e1 = points[2] - points[1];
-				Vector2 e2 = points[0] - points[2];
-
-				Vector2 v0 = p2d - points[0];
-				Vector2 v1 = p2d - points[1];
-				Vector2 v2 = p2d - points[2];
-
-				Vector2 pq0 = v0 - e0 * CLAMP(v0.dot(e0) / e0.dot(e0), 0.0, 1.0);
-				Vector2 pq1 = v1 - e1 * CLAMP(v1.dot(e1) / e1.dot(e1), 0.0, 1.0);
-				Vector2 pq2 = v2 - e2 * CLAMP(v2.dot(e2) / e2.dot(e2), 0.0, 1.0);
-
-				float s = SIGN(e0.x * e2.y - e0.y * e2.x);
-				Vector2 d2 = Vector2(pq0.dot(pq0), s * (v0.x * e0.y - v0.y * e0.x)).min(Vector2(pq1.dot(pq1), s * (v1.x * e1.y - v1.y * e1.x))).min(Vector2(pq2.dot(pq2), s * (v2.x * e2.y - v2.y * e2.x)));
-
-				inside_d = -Math::sqrt(d2.x) * SIGN(d2.y);
-			}
-
-			//make sure distance to planes is not shorter if inside
-			if (inside_d < 0) {
-				inside_d = MAX(inside_d, d);
-				inside_d = MAX(inside_d, -(p_thickness + d));
-			}
-
-			r_closest_distance = MIN(r_closest_distance, inside_d);
-		} else {
-			if (d < 0) {
-				point -= p.normal * p_thickness; //flatten
-			}
-
-			// https://iquilezles.org/www/articles/distfunctions/distfunctions.htm
-			Vector3 a = p_triangles[p_bvh_cell].vertex[0];
-			Vector3 b = p_triangles[p_bvh_cell].vertex[1];
-			Vector3 c = p_triangles[p_bvh_cell].vertex[2];
-
-			Vector3 ba = b - a;
-			Vector3 pa = point - a;
-			Vector3 cb = c - b;
-			Vector3 pb = point - b;
-			Vector3 ac = a - c;
-			Vector3 pc = point - c;
-			Vector3 nor = ba.cross(ac);
-
-			inside_d = Math::sqrt(
-					(SIGN(ba.cross(nor).dot(pa)) + SIGN(cb.cross(nor).dot(pb)) + SIGN(ac.cross(nor).dot(pc)) < 2.0)
-							? MIN(MIN(
-										  Vector3_dot2(ba * CLAMP(ba.dot(pa) / Vector3_dot2(ba), 0.0, 1.0) - pa),
-										  Vector3_dot2(cb * CLAMP(cb.dot(pb) / Vector3_dot2(cb), 0.0, 1.0) - pb)),
-									  Vector3_dot2(ac * CLAMP(ac.dot(pc) / Vector3_dot2(ac), 0.0, 1.0) - pc))
-							: nor.dot(pa) * nor.dot(pa) / Vector3_dot2(nor));
-
-			r_closest_distance = MIN(r_closest_distance, inside_d);
-		}
-
-	} else {
-		bool pass = true;
-		if (!p_bvh[p_bvh_cell].bounds.has_point(p_pos)) {
-			//outside, find closest point
-			Vector3 he = p_bvh[p_bvh_cell].bounds.size * 0.5f;
-			Vector3 center = p_bvh[p_bvh_cell].bounds.position + he;
-
-			Vector3 rel = (p_pos - center).abs();
-			Vector3 closest = rel.min(he);
-			float d = rel.distance_to(closest);
-
-			if (d >= r_closest_distance) {
-				pass = false; //already closer than this aabb, discard
-			}
-		}
-
-		if (pass) {
-			_find_closest_distance(p_pos, p_bvh, p_bvh[p_bvh_cell].children[0], p_triangles, p_thickness, r_closest_distance);
-			_find_closest_distance(p_pos, p_bvh, p_bvh[p_bvh_cell].children[1], p_triangles, p_thickness, r_closest_distance);
-		}
-	}
-}
+// GodotNext: mesh_sdf_bvh_extraction
+// _create_bvh and _find_closest_distance moved to MeshSDFBVH in
+// core/math/mesh_sdf_builder.cpp, shared with the mesh distance field builder.
 
 void GPUParticlesCollisionSDF3D::_compute_sdf_z(uint32_t p_z, ComputeSDFParams *params) {
 	int32_t z_ofs = p_z * params->size.y * params->size.x;
@@ -361,7 +216,8 @@ void GPUParticlesCollisionSDF3D::_compute_sdf_z(uint32_t p_z, ComputeSDFParams *
 
 			cell = 1e20;
 
-			_find_closest_distance(pos, params->bvh, 0, params->triangles, params->thickness, cell);
+			// GodotNext: mesh_sdf_bvh_extraction
+			MeshSDFBVH::find_closest_distance(pos, params->bvh, 0, params->triangles, params->thickness, cell);
 		}
 	}
 }
@@ -477,7 +333,8 @@ Ref<Image> GPUParticlesCollisionSDF3D::bake() {
 		return Ref<Image>();
 	}
 
-	LocalVector<FacePos> face_pos;
+	// GodotNext: mesh_sdf_bvh_extraction
+	LocalVector<MeshSDFFacePos> face_pos;
 
 	face_pos.resize(faces.size());
 
@@ -485,7 +342,8 @@ Ref<Image> GPUParticlesCollisionSDF3D::bake() {
 
 	for (uint32_t i = 0; i < faces.size(); i++) {
 		face_pos[i].index = i;
-		face_pos[i].center = (faces[i].vertex[0] + faces[i].vertex[1] + faces[i].vertex[2]) / 2;
+		// GodotNext: mesh_sdf_centroid_fix
+		face_pos[i].center = (faces[i].vertex[0] + faces[i].vertex[1] + faces[i].vertex[2]) / 3;
 		if (th > 0.0) {
 			face_pos[i].center -= faces[i].get_plane().normal * th * 0.5;
 		}
@@ -495,9 +353,10 @@ Ref<Image> GPUParticlesCollisionSDF3D::bake() {
 		bake_step_function(0, "Creating BVH");
 	}
 
-	LocalVector<BVH> bvh;
+	// GodotNext: mesh_sdf_bvh_extraction
+	LocalVector<MeshSDFBVHNode> bvh;
 
-	_create_bvh(bvh, face_pos.ptr(), face_pos.size(), faces.ptr(), th);
+	MeshSDFBVH::create_bvh(bvh, face_pos.ptr(), face_pos.size(), faces.ptr(), th);
 
 	Vector<uint8_t> cells_data;
 	cells_data.resize(sdf_size.z * sdf_size.y * sdf_size.x * (int)sizeof(float));

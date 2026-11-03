@@ -221,6 +221,9 @@
 		<member name="custom_aabb" type="AABB" setter="set_custom_aabb" getter="get_custom_aabb" default="AABB(0, 0, 0, 0, 0, 0)">
 			Overrides the [AABB] with one defined by user for use with frustum culling. Especially useful to avoid unexpected culling when using a shader to offset vertices.
 		</member>
+		<member name="distance_field" type="MeshDistanceField" setter="set_distance_field" getter="get_distance_field">
+			The per-mesh signed distance field generated at import time, used by NextGI's software ray tracing tier. Mutating this mesh's surfaces clears it, since the field would no longer match the geometry.
+		</member>
 		<member name="shadow_mesh" type="ArrayMesh" setter="set_shadow_mesh" getter="get_shadow_mesh">
 			An optional mesh which can be used for rendering shadows and the depth prepass. Can be used to increase performance by supplying a mesh with fused vertices and only vertex position data (without normals, UVs, colors, etc.).
 			[b]Note:[/b] This mesh must have exactly the same vertex positions as the source mesh (including the source mesh's LODs, if present). If vertex positions differ, then the mesh will not draw correctly.

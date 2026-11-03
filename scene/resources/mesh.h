@@ -303,6 +303,11 @@ VARIANT_ENUM_CAST(MeshConvexDecompositionSettings::Mode);
 class VirtualGeometryData;
 #endif
 
+// GodotNext: mesh_sdf_property
+#ifndef _3D_DISABLED
+class MeshDistanceField;
+#endif
+
 class ArrayMesh : public Mesh {
 	GDCLASS(ArrayMesh, Mesh);
 	RES_BASE_EXTENSION("mesh");
@@ -333,6 +338,13 @@ private:
 #else
 	void _detach_virtual_geometry();
 	Ref<VirtualGeometryData> virtual_geometry;
+#endif
+	// GodotNext: mesh_sdf_detach
+#ifdef _3D_DISABLED
+	void _detach_distance_field() {}
+#else
+	void _detach_distance_field();
+	Ref<MeshDistanceField> distance_field;
 #endif
 	mutable RID mesh;
 	AABB aabb;
@@ -416,6 +428,12 @@ public:
 #ifndef _3D_DISABLED
 	void set_virtual_geometry(const Ref<VirtualGeometryData> &p_data);
 	Ref<VirtualGeometryData> get_virtual_geometry() const;
+#endif
+
+	// GodotNext: mesh_sdf_property
+#ifndef _3D_DISABLED
+	void set_distance_field(const Ref<MeshDistanceField> &p_distance_field);
+	Ref<MeshDistanceField> get_distance_field() const;
 #endif
 
 	ArrayMesh();

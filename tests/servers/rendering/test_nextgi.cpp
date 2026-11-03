@@ -72,6 +72,23 @@ TEST_CASE("[NextGI][Editor] Vulkan switch offer truth table") {
 	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, false, "d3d12", false));
 }
 
+// GodotNext: mesh_sdf_offer_test
+TEST_CASE("[MeshSDF][Editor] New projects generate mesh distance fields") {
+	const HashMap<String, Variant> settings = EditorNode::get_initial_settings();
+	const Variant *generate = settings.getptr("rendering/global_illumination/mesh_sdf/generate");
+	REQUIRE(generate != nullptr);
+	CHECK_EQ(bool(*generate), true);
+}
+
+TEST_CASE("[MeshSDF][Editor] Mesh SDF offer truth table") {
+	CHECK(NextGIEditorPlugin::should_offer_mesh_sdf(false, true, false, false));
+
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_mesh_sdf(false, true, false, true));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_mesh_sdf(false, true, true, false));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_mesh_sdf(true, true, false, false));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_mesh_sdf(false, false, false, false));
+}
+
 TEST_CASE("[NextGI][Editor] apply_vulkan_switch writes vulkan and keeps the D3D12 fallback") {
 	ProjectSettings *ps = ProjectSettings::get_singleton();
 	const String driver_setting = "rendering/rendering_device/driver.windows";

@@ -8531,6 +8531,8 @@ HashMap<String, Variant> EditorNode::get_initial_settings() {
 	// one-time Vulkan switch modal.
 	settings["rendering/rendering_device/driver.windows"] = "vulkan";
 	settings["rendering/lights_and_shadows/multi_bounce_occlusion/enabled"] = true;
+	// GodotNext: mesh_sdf_default
+	settings["rendering/global_illumination/mesh_sdf/generate"] = true;
 	return settings;
 }
 

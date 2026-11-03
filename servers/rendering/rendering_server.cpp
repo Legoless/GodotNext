@@ -3829,6 +3829,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 
+	// GodotNext: mesh_sdf_settings
+	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/mesh_sdf/voxels_per_meter", PROPERTY_HINT_RANGE, "1,100,0.1,or_greater"), 10.0);
+
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_depth", PROPERTY_HINT_RANGE, "16,512,1"), 64);
