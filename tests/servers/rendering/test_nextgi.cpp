@@ -451,7 +451,8 @@ TEST_CASE("[NextGI] Device inputs: the G0-2 configurations with mocked device fe
 	CHECK_EQ(result.reason, NextGI::D3D12_NO_DXR);
 	CHECK(result.warn_force);
 
-	// The Apple M5 Max today: Metal has no ray query in the engine until #48 and #47.
+	// A mocked Metal device without ray query. The live M5 Max reports the same until #47
+	// flips the acceleration-structure gate. The [NextGI][Metal] cases feed the helper.
 	result = evaluate_mocked_device(false, "Metal", RenderingDeviceEnums::DEVICE_TYPE_INTEGRATED_GPU);
 	CHECK_EQ(result.tier, NextGI::TIER_FALLBACK);
 	CHECK_EQ(result.reason, NextGI::NO_RAY_QUERY);
@@ -587,6 +588,101 @@ TEST_CASE("[NextGI] The toolchain self-test stays off outside the HWRT tier") {
 	CHECK_EQ(report, "{\"pass\":false,\"reason\":\"SETTING_OFF\"}");
 	CHECK_EQ(next_gi.get_ray_query_shaders_initialized(), 0);
 	memdelete(rd);
+}
+
+// Metal ray-query capability (#48). The helper is pure; these cases feed it into evaluate_tier.
+// Apple8's experimental opt-in is #131. Until the acceleration-structure issue lands, has_feature
+// stays false; that gate is not part of the helper.
+
+static NextGI::TierReason metal_tier_reason(RenderingDeviceDriver::RayQueryUnsupportedReason p_reason) {
+	switch (p_reason) {
+		case RenderingDeviceDriver::RAY_QUERY_SUPPORTED:
+			return NextGI::TIER_REASON_NONE;
+		case RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY:
+			return NextGI::NO_RAY_QUERY;
+		case RenderingDeviceDriver::RAY_QUERY_REASON_D3D12_NO_DXR:
+			return NextGI::D3D12_NO_DXR;
+		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE:
+			return NextGI::METAL_SYNC_MODE;
+		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS:
+			return NextGI::METAL_NO_ARGUMENT_BUFFERS;
+	}
+	return NextGI::NO_RAY_QUERY;
+}
+
+static RenderingDeviceDriver::MetalRayQueryCaps metal_family(uint32_t p_family, bool p_barriers = true, bool p_argument_buffers = true, bool p_macos = true, uint32_t p_os_major = RenderingDeviceDriver::METAL_RAY_QUERY_MIN_OS_MAJOR, bool p_supports_raytracing = true, uint32_t p_msl_version = RenderingDeviceDriver::METAL_RAY_QUERY_MIN_MSL, bool p_gpu_address = true) {
+	return RenderingDeviceDriver::metal_ray_query_caps(p_family, p_macos, p_os_major, p_supports_raytracing, p_msl_version, p_gpu_address, p_barriers, p_argument_buffers);
+}
+
+static void check_metal_tier(const RenderingDeviceDriver::MetalRayQueryCaps &p_caps, NextGI::Tier p_tier, NextGI::TierReason p_reason, NextGI::HardwareRayTracing p_hwrt = NextGI::HARDWARE_RAY_TRACING_AUTO) {
+	NextGI::TierInputs inputs = hwrt_inputs();
+	inputs.hwrt_setting = p_hwrt;
+	inputs.ray_query = p_caps.ray_query;
+	inputs.ray_query_hw = p_caps.hardware;
+	inputs.driver_reason = p_caps.ray_query ? NextGI::TIER_REASON_NONE : metal_tier_reason(p_caps.reason);
+	const bool warn_force = p_hwrt == NextGI::HARDWARE_RAY_TRACING_FORCE && !p_caps.ray_query;
+	check_tier(inputs, p_tier, p_reason, warn_force);
+}
+
+TEST_CASE("[NextGI][Metal] Apple7 and Apple8 give NOT_HW_ACCELERATED, and HWRT under force") {
+	for (uint32_t family : { 1007u, 1008u }) {
+		const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(family);
+		CHECK(caps.ray_query);
+		CHECK_FALSE(caps.hardware);
+		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+		check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::NOT_HW_ACCELERATED);
+		check_metal_tier(caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_FORCE);
+	}
+}
+
+TEST_CASE("[NextGI][Metal] Apple9, Apple10 and Apple11 give HWRT") {
+	for (uint32_t family : { 1009u, 1010u, 1011u }) {
+		const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(family);
+		CHECK(caps.ray_query);
+		CHECK(caps.hardware);
+		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+		check_metal_tier(caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+	}
+}
+
+TEST_CASE("[NextGI][Metal] No Barriers sync gives METAL_SYNC_MODE") {
+	const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(1010, false, true);
+	CHECK_FALSE(caps.ray_query);
+	CHECK_FALSE(caps.hardware);
+	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE);
+	check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::METAL_SYNC_MODE);
+
+	// Barriers is checked before argument buffers.
+	const RenderingDeviceDriver::MetalRayQueryCaps both = metal_family(1010, false, false);
+	CHECK_EQ(both.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE);
+	check_metal_tier(both, NextGI::TIER_FALLBACK, NextGI::METAL_SYNC_MODE);
+}
+
+TEST_CASE("[NextGI][Metal] Argument buffers off gives METAL_NO_ARGUMENT_BUFFERS") {
+	const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(1010, true, false);
+	CHECK_FALSE(caps.ray_query);
+	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS);
+	check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::METAL_NO_ARGUMENT_BUFFERS);
+}
+
+TEST_CASE("[NextGI][Metal] macOS 13 gives NO_RAY_QUERY") {
+	const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(1010, true, true, true, 13);
+	CHECK_FALSE(caps.ray_query);
+	CHECK_FALSE(caps.hardware);
+	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
+	check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+}
+
+TEST_CASE("[NextGI][Metal] A missing ray-query capability gives NO_RAY_QUERY") {
+	CHECK_EQ(metal_family(1010, true, true, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
+	CHECK_EQ(metal_family(1010, true, true, true, 14, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
+	CHECK_EQ(metal_family(1010, true, true, true, 14, true, 20300).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
+	CHECK_EQ(metal_family(1010, true, true, true, 14, true, RenderingDeviceDriver::METAL_RAY_QUERY_MIN_MSL, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
+	check_metal_tier(metal_family(1009, true, true, false), NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+}
+
+TEST_CASE("[NextGI][Metal] The acceleration structure instance size is 72") {
+	CHECK_EQ(RenderingDeviceDriver::METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE, 72u);
 }
 
 } // namespace TestNextGI

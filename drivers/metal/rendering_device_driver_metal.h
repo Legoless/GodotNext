@@ -88,6 +88,13 @@ protected:
 	uint32_t _frames_drawn = 0;
 
 	MetalDeviceProperties *device_properties = nullptr;
+	// GodotNext: metal_ray_query
+	// RAY_QUERY_AS_READY stays false until the acceleration-structure issue (#47) flips it.
+	// Until then has_feature reports no ray query, and a device that would otherwise pass reports NO_RAY_QUERY.
+	MetalRayQueryCaps ray_query_caps;
+	RayQueryUnsupportedReason ray_query_reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+	static constexpr bool RAY_QUERY_AS_READY = false;
+	void _update_ray_query_caps();
 	MetalDeviceProfile device_profile;
 	RenderingShaderContainerFormatMetal *shader_container_format = nullptr;
 	PixelFormats *pixel_formats = nullptr;
@@ -215,6 +222,13 @@ public:
 		// If dynamic buffer, then its range is [0; RenderingDeviceDriverMetal::frame_count)
 		// else it's UINT32_MAX.
 		uint32_t _frame_idx = UINT32_MAX;
+	};
+
+	// GodotNext: metal_ray_query
+	// #47 extends this with build sizes and addresses.
+	struct AccelerationStructureInfo {
+		NS::SharedPtr<MTL::AccelerationStructure> as;
+		MetalAllocation allocation;
 	};
 
 	virtual BufferID buffer_create(uint64_t p_size, BitField<BufferUsageBits> p_usage, MemoryAllocationType p_allocation_type, uint64_t p_frames_drawn) override final;
@@ -551,6 +565,8 @@ public:
 	virtual uint64_t limit_get(Limit p_limit) override final;
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override final;
 	virtual bool has_feature(Features p_feature) override final;
+	// GodotNext: metal_ray_query
+	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const override { return ray_query_reason; }
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;

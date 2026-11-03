@@ -104,6 +104,9 @@ struct MetalDeviceProfile {
 		Apple7 = 1007,
 		Apple8 = 1008,
 		Apple9 = 1009,
+		// GodotNext: metal_ray_query
+		Apple10 = 1010,
+		Apple11 = 1011,
 	};
 
 	enum class ArgumentBuffersTier : uint32_t {

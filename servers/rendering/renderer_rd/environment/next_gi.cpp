@@ -68,6 +68,22 @@ static const char *_nextgi_quality_names[NextGI::QUALITY_MAX] = {
 	"EPIC",
 };
 
+static NextGI::TierReason _nextgi_reason_from_driver(RenderingDeviceCommons::RayQueryUnsupportedReason p_reason) {
+	switch (p_reason) {
+		case RenderingDeviceCommons::RAY_QUERY_SUPPORTED:
+			return NextGI::TIER_REASON_NONE;
+		case RenderingDeviceCommons::RAY_QUERY_REASON_NO_RAY_QUERY:
+			return NextGI::NO_RAY_QUERY;
+		case RenderingDeviceCommons::RAY_QUERY_REASON_D3D12_NO_DXR:
+			return NextGI::D3D12_NO_DXR;
+		case RenderingDeviceCommons::RAY_QUERY_REASON_METAL_SYNC_MODE:
+			return NextGI::METAL_SYNC_MODE;
+		case RenderingDeviceCommons::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS:
+			return NextGI::METAL_NO_ARGUMENT_BUFFERS;
+	}
+	return NextGI::NO_RAY_QUERY;
+}
+
 static bool _nextgi_is_driver_reason(NextGI::TierReason p_reason) {
 	switch (p_reason) {
 		case NextGI::NO_RAY_QUERY:
@@ -134,10 +150,22 @@ NextGI::TierResult NextGI::evaluate_tier(const TierInputs &p_inputs) {
 
 void NextGI::collect_device_inputs(const RenderingDevice *p_device, const String &p_api_name, RenderingDeviceEnums::DeviceType p_device_type, TierInputs &r_inputs) {
 	r_inputs.ray_query = p_device != nullptr && p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY);
-	// Interim driver inputs (see the header). #22 and #48 replace both lines with the driver's own values.
+	r_inputs.cpu_device = p_device_type == RenderingDeviceEnums::DEVICE_TYPE_CPU;
+
+	// Metal reports the helper's reason and the hardware flag. Other drivers keep the interim
+	// mapping until #22.
+	RenderingDeviceDriver *driver = p_device != nullptr ? p_device->get_device_driver() : nullptr;
+	if (driver != nullptr && p_api_name == "Metal") {
+		r_inputs.ray_query_hw = p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY_HARDWARE);
+		r_inputs.driver_reason = _nextgi_reason_from_driver(driver->get_ray_query_unsupported_reason());
+		if (r_inputs.ray_query) {
+			r_inputs.driver_reason = TIER_REASON_NONE;
+		}
+		return;
+	}
+
 	r_inputs.driver_reason = r_inputs.ray_query ? TIER_REASON_NONE : (p_api_name == "D3D12" ? D3D12_NO_DXR : NO_RAY_QUERY);
 	r_inputs.ray_query_hw = r_inputs.ray_query;
-	r_inputs.cpu_device = p_device_type == RenderingDeviceEnums::DEVICE_TYPE_CPU;
 }
 
 NextGI::Quality NextGI::resolve_quality(Quality p_setting) {

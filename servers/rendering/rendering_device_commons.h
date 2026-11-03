@@ -1038,6 +1038,19 @@ public:
 		SUPPORTS_HDR_OUTPUT,
 		SUPPORTS_RASTERIZATION_RATE_MAP,
 		SUPPORTS_GPU_MAPPABLE_BUFFER,
+		// GodotNext: metal_ray_query
+		// Driver knowledge only. Metal sets it for Apple9 and later. Vulkan's RT-core allowlist is #22.
+		SUPPORTS_RAY_QUERY_HARDWARE,
+	};
+
+	// GodotNext: metal_ray_query
+	// Returned with SUPPORTS_RAY_QUERY. #22 fills the Vulkan and D3D12 cases.
+	enum RayQueryUnsupportedReason {
+		RAY_QUERY_SUPPORTED,
+		RAY_QUERY_REASON_NO_RAY_QUERY,
+		RAY_QUERY_REASON_D3D12_NO_DXR,
+		RAY_QUERY_REASON_METAL_SYNC_MODE,
+		RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS,
 	};
 
 	enum SubgroupOperations {

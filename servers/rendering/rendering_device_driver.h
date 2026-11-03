@@ -950,6 +950,25 @@ public:
 	virtual uint64_t get_lazily_memory_used() = 0;
 	virtual uint64_t limit_get(Limit p_limit) = 0;
 	virtual uint64_t api_trait_get(ApiTrait p_trait);
+	// GodotNext: metal_ray_query
+	// Pure Metal ray-query capability check. Always compiled, so the doctests run without a GPU.
+	// msl_version uses major * 10000 + minor * 100, the same encoding as the Metal driver.
+	// hardware is true only when ray query is on and apple_family is Apple9 (1009) or later.
+	struct MetalRayQueryCaps {
+		bool ray_query = false;
+		bool hardware = false;
+		RayQueryUnsupportedReason reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+	};
+
+	static constexpr uint32_t METAL_RAY_QUERY_MIN_OS_MAJOR = 14;
+	static constexpr uint32_t METAL_RAY_QUERY_MIN_MSL = 20400; // MSL 2.4.
+	static constexpr uint32_t METAL_RAY_QUERY_HARDWARE_FAMILY = 1009; // Apple9.
+	static constexpr uint32_t METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE = 72;
+
+	static MetalRayQueryCaps metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers);
+	// NO_RAY_QUERY until a driver overrides it. Metal does; Vulkan and D3D12 stay on this until #22.
+	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const { return RAY_QUERY_REASON_NO_RAY_QUERY; }
+
 	virtual bool has_feature(Features p_feature) = 0;
 	virtual const MultiviewCapabilities &get_multiview_capabilities() = 0;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() = 0;

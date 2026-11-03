@@ -64,6 +64,28 @@ uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 	}
 }
 
+// GodotNext: metal_ray_query
+RenderingDeviceDriver::MetalRayQueryCaps RenderingDeviceDriver::metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers) {
+	MetalRayQueryCaps caps;
+	// The first failing check wins.
+	if (!p_is_macos || p_os_major < METAL_RAY_QUERY_MIN_OS_MAJOR || !p_supports_raytracing || p_msl_version < METAL_RAY_QUERY_MIN_MSL || !p_gpu_address) {
+		caps.reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+		return caps;
+	}
+	if (!p_barriers) {
+		caps.reason = RAY_QUERY_REASON_METAL_SYNC_MODE;
+		return caps;
+	}
+	if (!p_argument_buffers) {
+		caps.reason = RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS;
+		return caps;
+	}
+	caps.ray_query = true;
+	caps.hardware = p_apple_family >= METAL_RAY_QUERY_HARDWARE_FAMILY;
+	caps.reason = RAY_QUERY_SUPPORTED;
+	return caps;
+}
+
 /******************/
 
 void RenderingDeviceDriver::command_begin_compute_pass(CommandBufferID p_cmd_buffer) {

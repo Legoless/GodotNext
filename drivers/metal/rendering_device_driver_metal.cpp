@@ -1482,6 +1482,12 @@ RDD::UniformSetID RenderingDeviceDriverMetal::uniform_set_create(VectorView<Boun
 
 					ADD_USAGE(buffer->buffer.get(), ui.active_stages, ui.usage);
 				} break;
+				// GodotNext: metal_ray_query
+				case UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+					const AccelerationStructureInfo *as_info = (const AccelerationStructureInfo *)uniform.ids[0].id;
+					*(MTL::ResourceID *)(ptr + idx.buffer) = as_info->as->gpuResourceID();
+					ADD_USAGE(as_info->as.get(), ui.active_stages, ui.usage);
+				} break;
 				default: {
 					DEV_ASSERT(false);
 				}
@@ -2782,6 +2788,10 @@ uint64_t RenderingDeviceDriverMetal::api_trait_get(ApiTrait p_trait) {
 			return false;
 		case API_TRAIT_TEXTURES_REQUIRE_LAYOUT_TRANSITIONS:
 			return false;
+		// GodotNext: metal_ray_query
+		case API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE:
+			static_assert(sizeof(MTL::IndirectAccelerationStructureInstanceDescriptor) == METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
+			return METAL_ACCELERATION_STRUCTURE_INSTANCE_SIZE;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
@@ -2819,6 +2829,13 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 		}
 		case SUPPORTS_GPU_MAPPABLE_BUFFER:
 			return true;
+		// GodotNext: metal_ray_query
+		case SUPPORTS_RAY_QUERY:
+			return RAY_QUERY_AS_READY && ray_query_caps.ray_query;
+		case SUPPORTS_RAY_QUERY_HARDWARE:
+			return RAY_QUERY_AS_READY && ray_query_caps.ray_query && ray_query_caps.hardware;
+		case SUPPORTS_RAYTRACING_PIPELINE:
+			return false;
 		default:
 			return false;
 	}
@@ -2943,6 +2960,59 @@ void RenderingDeviceDriverMetal::encode_imported_resources(MTL::ComputeCommandEn
 	}
 }
 
+// GodotNext: metal_ray_query
+static const char *_metal_ray_query_reason_name(RenderingDeviceDriver::RayQueryUnsupportedReason p_reason) {
+	switch (p_reason) {
+		case RenderingDeviceDriver::RAY_QUERY_SUPPORTED:
+			return "RAY_QUERY_SUPPORTED";
+		case RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY:
+			return "NO_RAY_QUERY";
+		case RenderingDeviceDriver::RAY_QUERY_REASON_D3D12_NO_DXR:
+			return "D3D12_NO_DXR";
+		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE:
+			return "METAL_SYNC_MODE";
+		case RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS:
+			return "METAL_NO_ARGUMENT_BUFFERS";
+	}
+	return "NO_RAY_QUERY";
+}
+
+void RenderingDeviceDriverMetal::_update_ray_query_caps() {
+	const uint32_t os_major = device_properties->os_version / 10000;
+	ray_query_caps = metal_ray_query_caps(
+			(uint32_t)device_properties->features.highestFamily,
+#if TARGET_OS_OSX
+			true,
+#else
+			false,
+#endif
+			os_major,
+			device->supportsRaytracing(),
+			device_properties->features.msl_target_version,
+			device_properties->features.supports_gpu_address,
+			sync_mode == Barriers,
+			device_properties->features.argument_buffers_enabled());
+
+	if (RAY_QUERY_AS_READY) {
+		ray_query_reason = ray_query_caps.reason;
+	} else if (ray_query_caps.ray_query) {
+		// The device could run ray query, but acceleration structures are not in the driver yet.
+		ray_query_reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+	} else {
+		ray_query_reason = ray_query_caps.reason;
+	}
+
+	const int apple_family = int(device_properties->features.highestFamily) - int(MTL::GPUFamilyApple1) + 1;
+	print_verbose(vformat("Metal: GPU family Apple%d.", apple_family));
+	print_verbose(vformat("Metal: ray query helper ray_query=%s hardware=%s reason=%s; reported reason=%s has_feature=%s instance_size=%d.",
+			ray_query_caps.ray_query ? "true" : "false",
+			ray_query_caps.hardware ? "true" : "false",
+			_metal_ray_query_reason_name(ray_query_caps.reason),
+			_metal_ray_query_reason_name(ray_query_reason),
+			has_feature(SUPPORTS_RAY_QUERY) ? "true" : "false",
+			api_trait_get(API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE)));
+}
+
 void RenderingDeviceDriverMetal::_check_capabilities() {
 	capabilities.device_family = DEVICE_METAL;
 	parse_msl_version(device_properties->features.msl_target_version, capabilities.version_major, capabilities.version_minor);
@@ -2998,7 +3068,16 @@ static MetalDeviceProfile device_profile_from_properties(MetalDeviceProperties *
 		case MTL::GPUFamilyApple9:
 			res.gpu = DP::GPU::Apple9;
 			break;
+		case MTL::GPUFamilyApple10:
+			res.gpu = DP::GPU::Apple10;
+			break;
 		default: {
+			// GodotNext: metal_ray_query
+			// Apple11 is 1011. metal-cpp's GPUFamily enum stops at Apple10, so it cannot be a case label.
+			if (p_device_properties->features.highestFamily == static_cast<MTL::GPUFamily>(1011)) {
+				res.gpu = DP::GPU::Apple11;
+				break;
+			}
 			// Programming error if the default case is hit.
 			CRASH_NOW_MSG("Unsupported GPU family");
 		} break;
@@ -3027,6 +3106,8 @@ Error RenderingDeviceDriverMetal::_initialize(uint32_t p_device_index, uint32_t 
 	}
 
 	device_properties = memnew(MetalDeviceProperties(device));
+	// GodotNext: metal_ray_query
+	_update_ray_query_caps();
 	pixel_formats = memnew(PixelFormats(device, device_properties->features));
 	device_profile = device_profile_from_properties(device_properties);
 	resource_cache = std::make_unique<MDResourceCache>(device, *pixel_formats, device_properties->limits.maxPerStageBufferCount);

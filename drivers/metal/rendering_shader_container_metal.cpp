@@ -263,6 +263,14 @@ MetalDeviceProfile::MinimumRequirements RenderingShaderContainerMetal::inspect_s
 			const uint32_t instruction = *words;
 			const uint16_t word_count = instruction >> 16;
 			spv::Op opcode = static_cast<spv::Op>(instruction & 0xFFFF);
+			// GodotNext: metal_ray_query
+			// Ray query in compute needs Apple6 and MSL 2.4. Checked before the image-atomic early continue.
+			if (word_count >= 2 && opcode == spv::OpCapability && words[1] == spv::CapabilityRayQueryKHR) {
+				if (reqs.gpu < MetalDeviceProfile::GPU::Apple6) {
+					reqs.gpu = MetalDeviceProfile::GPU::Apple6;
+				}
+				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_24);
+			}
 			if (opcode == spv::OpImageTexelPointer) {
 				atomic_image_ids.insert(words[3]);
 			}
@@ -562,6 +570,15 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 						found->get_indexes(UniformData::IndexType::SLOT).texture = next_index(Texture, binding_stride);
 						found->get_indexes(UniformData::IndexType::ARG).texture = next_arg_index(binding_stride);
 						rb.basetype = SPIRType::BaseType::Image;
+					} break;
+					// GodotNext: metal_ray_query
+					case RDC::UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+						found->data_type = MTL::DataTypeInstanceAccelerationStructure;
+						found->access = MTL::BindingAccessReadOnly;
+						found->usage = MTL::ResourceUsageRead;
+						found->get_indexes(UniformData::IndexType::SLOT).buffer = next_index(Buffer, binding_stride);
+						found->get_indexes(UniformData::IndexType::ARG).buffer = next_arg_index(binding_stride);
+						rb.basetype = SPIRType::AccelerationStructure;
 					} break;
 					case RDC::UNIFORM_TYPE_MAX:
 					default:

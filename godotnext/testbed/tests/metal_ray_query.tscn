@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/metal_ray_query.gd" id="1_rq"]
+
+[node name="MetalRayQuery" type="Node"]
+script = ExtResource("1_rq")

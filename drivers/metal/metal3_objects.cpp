@@ -1853,6 +1853,23 @@ void DirectEncoder::set(MTL::Buffer **p_buffers, const NS::UInteger *p_offsets, 
 	}
 }
 
+// GodotNext: metal_ray_query
+void DirectEncoder::set(MTL::AccelerationStructure *p_acceleration_structure, uint32_t p_index) {
+	// Acceleration structures share the buffer index, so a later buffer bind must not see a stale slot.
+	cache.invalidate_buffer(p_index);
+	switch (mode) {
+		case RENDER: {
+			MTL::RenderCommandEncoder *enc = static_cast<MTL::RenderCommandEncoder *>(encoder);
+			enc->setVertexAccelerationStructure(p_acceleration_structure, p_index);
+			enc->setFragmentAccelerationStructure(p_acceleration_structure, p_index);
+		} break;
+		case COMPUTE: {
+			MTL::ComputeCommandEncoder *enc = static_cast<MTL::ComputeCommandEncoder *>(encoder);
+			enc->setAccelerationStructure(p_acceleration_structure, p_index);
+		} break;
+	}
+}
+
 void DirectEncoder::set(MTL::Buffer *p_buffer, NS::UInteger p_offset, uint32_t p_index) {
 	if (cache.update(p_buffer, p_offset, p_index)) {
 		switch (mode) {
@@ -2044,6 +2061,11 @@ void MDCommandBuffer::_bind_uniforms_direct(MDUniformSet *p_set, MDShader *p_sha
 				}
 				NS::Range texture_range = { indexes.texture, count };
 				p_enc.set(objects, texture_range);
+			} break;
+			// GodotNext: metal_ray_query
+			case RDD::UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+				const RDM::AccelerationStructureInfo *as_info = (const RDM::AccelerationStructureInfo *)uniform.ids[0].id;
+				p_enc.set(as_info->as.get(), indexes.buffer);
 			} break;
 			default: {
 				DEV_ASSERT(false);

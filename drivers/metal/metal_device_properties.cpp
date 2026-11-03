@@ -69,11 +69,18 @@ constexpr MTL::GPUFamily GPUFamilyApple9 = static_cast<MTL::GPUFamily>(1009);
 constexpr MTL::GPUFamily GPUFamilyApple9 = MTL::GPUFamilyApple9;
 #endif
 
+// GodotNext: metal_ray_query
+// metal-cpp's GPUFamily stops at Apple10. Both are casts so the scan does not depend on the SDK enum.
+constexpr MTL::GPUFamily GPUFamilyApple10 = static_cast<MTL::GPUFamily>(1010);
+constexpr MTL::GPUFamily GPUFamilyApple11 = static_cast<MTL::GPUFamily>(1011);
+static_assert(int(GPUFamilyApple10) + 1 == int(GPUFamilyApple11));
+
 API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0), visionos(1.0))
 MTL::GPUFamily &operator--(MTL::GPUFamily &p_family) {
 	p_family = static_cast<MTL::GPUFamily>(static_cast<int>(p_family) - 1);
 	if (p_family < MTL::GPUFamilyApple1) {
-		p_family = GPUFamilyApple9;
+		// GodotNext: metal_ray_query
+		p_family = GPUFamilyApple11;
 	}
 
 	return p_family;
@@ -107,7 +114,8 @@ void MetalDeviceProperties::init_features(MTL::Device *p_device) {
 	}
 
 	features.highestFamily = MTL::GPUFamilyApple1;
-	for (MTL::GPUFamily family = GPUFamilyApple9; family >= MTL::GPUFamilyApple1; --family) {
+	// GodotNext: metal_ray_query
+	for (MTL::GPUFamily family = GPUFamilyApple11; family >= MTL::GPUFamilyApple1; --family) {
 		if (p_device->supportsFamily(family)) {
 			features.highestFamily = family;
 			break;

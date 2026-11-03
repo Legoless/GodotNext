@@ -132,8 +132,8 @@ public:
 
 	// Fills the device side of the inputs from a RenderingDevice (which may have mocked features)
 	// plus the driver's API name and device type.
-	// Until #22 (Vulkan, P2) and #48 (Metal) add the driver's reason code and SUPPORTS_RAY_QUERY_HARDWARE,
-	// the reason comes from the API name (D3D12 -> D3D12_NO_DXR, else NO_RAY_QUERY) and every ray-query
+	// Metal (#48) reports its reason and SUPPORTS_RAY_QUERY_HARDWARE. Until #22, other drivers still
+	// take the reason from the API name (D3D12 -> D3D12_NO_DXR, else NO_RAY_QUERY) and every ray-query
 	// device counts as hardware accelerated.
 	static void collect_device_inputs(const RenderingDevice *p_device, const String &p_api_name, RenderingDeviceEnums::DeviceType p_device_type, TierInputs &r_inputs);
 

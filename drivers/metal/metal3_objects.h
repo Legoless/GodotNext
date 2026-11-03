@@ -268,6 +268,8 @@ struct DirectEncoder {
 
 	void set(MTL::Buffer **p_buffers, const NS::UInteger *p_offsets, NS::Range p_range);
 	void set(MTL::Buffer *p_buffer, NS::UInteger p_offset, uint32_t p_index);
+	// GodotNext: metal_ray_query
+	void set(MTL::AccelerationStructure *p_acceleration_structure, uint32_t p_index);
 	void set(MTL::Texture **p_textures, NS::Range p_range);
 	void set(MTL::SamplerState **p_samplers, NS::Range p_range);
 

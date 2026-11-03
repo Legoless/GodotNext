@@ -96,7 +96,10 @@ const MetalDeviceProfile *MetalDeviceProfile::get_profile(Platform p_platform, G
 				case GPU::Apple6:
 				case GPU::Apple7:
 				case GPU::Apple8:
-				case GPU::Apple9: {
+				case GPU::Apple9:
+				// GodotNext: metal_ray_query
+				case GPU::Apple10:
+				case GPU::Apple11: {
 					res.features.use_argument_buffers = p_min_os_version >= os_version::IOS_16_0;
 					res.features.simdPermute = true;
 				} break;
@@ -114,7 +117,10 @@ const MetalDeviceProfile *MetalDeviceProfile::get_profile(Platform p_platform, G
 
 			switch (p_gpu) {
 				case GPU::Apple8:
-				case GPU::Apple9: {
+				case GPU::Apple9:
+				// GodotNext: metal_ray_query
+				case GPU::Apple10:
+				case GPU::Apple11: {
 					res.features.use_argument_buffers = true;
 					res.features.simdPermute = true;
 				} break;
