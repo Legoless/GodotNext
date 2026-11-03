@@ -54,7 +54,7 @@
 //  32  u32     group_count
 //  36  u32     dag_depth
 //  40  u32     vertex_layout (NextGeoVertexLayout bits)
-//  44  u32     reserved = 0
+//  44  u32     skin_influences: 0, or 4/8 when flags bit 1 (skinned) is set
 //  48  u64     page_table_offset
 //  56  u8[32]  source_sha256 (SHA-256 of the raw page payloads, in page order)
 //  88  u8[40]  zeros
@@ -64,10 +64,18 @@
 // `crc32` is the ISO-HDLC CRC of the stored bytes. For the raw codec, stored_size == raw_size.
 //
 // Each page starts 16-byte aligned. Its payload (the bytes `NGMFile::read_page` returns) is:
-//   u32 cluster_count, vertex_count, triangle_count, reserved;
+//   u32 cluster_count, vertex_count, triangle_count, skin_bytes;
 //   cluster_count records of 80 bytes (NextGeoCluster layout, page-local vertex and triangle offsets);
 //   vertices, vertex_count * stride floats, stride derived from vertex_layout;
-//   triangles, triangle_count * 3 bytes.
+//   triangles, triangle_count * 3 bytes;
+//   skinning section, `skin_bytes` bytes (0 when the skinned flag is clear), per cluster:
+//     u8 bone_count, u8 influences, u16 reserved;
+//     bone_count times: u16 global bone, 6 f32 bind-space AABB (min xyz, max xyz);
+//     vertex_count * influences u8 cluster-local bone indices;
+//     vertex_count * influences unorm16 weights.
+// The skinning section is per-page so every stored page (section included) stays within
+// `page_size`. The version stays 1: files without the section are plain v1, and a v1
+// reader that predates the section rejects a skinned file on its unknown flag.
 // Bytes between a page's stored payload and the next 16-byte boundary are zero and are not
 // part of the CRC. `page_size` budgets the whole stored page: the 16-byte header, every
 // cluster record, the vertices and triangles, and that padding. `raw_size` is the payload
@@ -78,6 +86,9 @@ static constexpr uint32_t NGM_HEADER_SIZE = 128;
 static constexpr uint32_t NGM_PAGE_TABLE_ENTRY_SIZE = 32;
 static constexpr uint32_t NGM_PAGE_ALIGN = 16;
 static constexpr uint32_t NGM_FLAG_MESHOPT = 1u << 0;
+// Pages carry the skinning section, and `skin_influences` is 4 or 8 (issue #159).
+static constexpr uint32_t NGM_FLAG_SKINNED = 1u << 1;
+static constexpr uint32_t NGM_KNOWN_FLAGS = NGM_FLAG_MESHOPT | NGM_FLAG_SKINNED;
 // Provisional until G4 measures 64 KiB against 128 KiB (plan §18.2, §22.10). Not a format limit:
 // the header stores whatever budget the build used.
 static constexpr uint32_t NGM_PROVISIONAL_PAGE_SIZE = 64 * 1024;
@@ -93,6 +104,7 @@ struct NGMHeader {
 	uint32_t group_count = 0;
 	uint32_t dag_depth = 0;
 	uint32_t vertex_layout = 0;
+	uint32_t skin_influences = 0; // 0, 4 or 8; non-zero iff NGM_FLAG_SKINNED is set.
 	uint8_t source_sha256[32] = {};
 };
 

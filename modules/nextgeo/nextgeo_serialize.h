@@ -42,7 +42,8 @@ class VirtualGeometryData;
 Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint8_t>> &r_pages);
 
 // Fills an `NGMHeader` from a build and the payloads `nextgeo_write_pages` produced.
-// `source_sha256` is the SHA-256 of those payloads in page order. Flags stay clear (raw).
+// `source_sha256` is the SHA-256 of those payloads in page order. The codec stays raw;
+// a skinned build sets NGM_FLAG_SKINNED and `skin_influences`.
 Error nextgeo_fill_ngm_header(const NextGeoBuildOutput &p_output, const Vector<Vector<uint8_t>> &p_pages, NGMHeader &r_header);
 
 // Fills `dag_header` (groups, then BVH8 nodes), `root_pages`, the per-surface root-cut

@@ -1618,7 +1618,7 @@ bool ImporterMesh::_surface_is_virtualized(int p_surface) const {
 	return eligibility[p_surface] == 1;
 }
 
-PackedInt32Array ImporterMesh::get_virtual_geometry_eligibility() const {
+PackedInt32Array ImporterMesh::get_virtual_geometry_eligibility(bool p_skinned) const {
 	PackedInt32Array reasons;
 	reasons.resize(surfaces.size());
 	for (int i = 0; i < surfaces.size(); i++) {
@@ -1626,7 +1626,12 @@ PackedInt32Array ImporterMesh::get_virtual_geometry_eligibility() const {
 			reasons.write[i] = NEXTGEO_FALLBACK_UNSUPPORTED_PRIMITIVE;
 			continue;
 		}
-		if (blend_shapes.size() > 0 || surfaces[i].blend_shape_data.size() > 0 || _variant_has_items(surfaces[i].arrays[Mesh::ARRAY_BONES]) || _variant_has_items(surfaces[i].arrays[Mesh::ARRAY_WEIGHTS])) {
+		// GodotNext: nextgeo_skinned
+		if (blend_shapes.size() > 0 || surfaces[i].blend_shape_data.size() > 0) {
+			reasons.write[i] = NEXTGEO_FALLBACK_BLEND_SHAPES;
+			continue;
+		}
+		if (!p_skinned && (_variant_has_items(surfaces[i].arrays[Mesh::ARRAY_BONES]) || _variant_has_items(surfaces[i].arrays[Mesh::ARRAY_WEIGHTS]))) {
 			reasons.write[i] = NEXTGEO_FALLBACK_SKINNING;
 			continue;
 		}
@@ -1666,11 +1671,12 @@ Ref<VirtualGeometryData> ImporterMesh::get_virtual_geometry() const {
 	return virtual_geometry;
 }
 
-Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path) {
+Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path, bool p_skinned) {
 	mesh.unref();
 	virtual_geometry.unref();
 
-	const PackedInt32Array reasons = get_virtual_geometry_eligibility();
+	// GodotNext: nextgeo_skinned
+	const PackedInt32Array reasons = get_virtual_geometry_eligibility(p_skinned);
 	PackedByteArray eligible;
 	eligible.resize(reasons.size());
 	bool any_eligible = false;
@@ -1704,7 +1710,9 @@ Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path) {
 
 	NGMHeader header;
 	header.version = NGM_VERSION;
-	header.flags = 0;
+	// GodotNext: nextgeo_skinned
+	header.flags = built->get_skin_influences() == 0 ? 0 : NGM_FLAG_SKINNED;
+	header.skin_influences = uint32_t(built->get_skin_influences());
 	header.page_size = uint32_t(built->get_page_size());
 	header.page_count = uint32_t(pages.size());
 	header.root_page_count = uint32_t(built->get_root_pages().size());
@@ -1811,7 +1819,8 @@ void ImporterMesh::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("generate_lods", "normal_merge_angle", "normal_split_angle", "bone_transform_array"), &ImporterMesh::_generate_lods_bind);
 	// GodotNext: nextgeo_import
-	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path"), &ImporterMesh::build_virtual_geometry);
+	// GodotNext: nextgeo_skinned
+	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path", "skinned"), &ImporterMesh::build_virtual_geometry, DEFVAL(false));
 	ClassDB::bind_method(D_METHOD("get_mesh", "base_mesh"), &ImporterMesh::get_mesh, DEFVAL(Ref<ArrayMesh>()));
 	ClassDB::bind_static_method("ImporterMesh", D_METHOD("from_mesh", "mesh"), &ImporterMesh::from_mesh);
 	ClassDB::bind_method(D_METHOD("clear"), &ImporterMesh::clear);

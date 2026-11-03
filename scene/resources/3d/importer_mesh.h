@@ -131,10 +131,13 @@ public:
 	typedef Error (*BuildVirtualGeometryFunc)(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
 	static BuildVirtualGeometryFunc build_virtual_geometry_func;
 	// One int per surface. 0 = eligible. Any other value is a NextGeoFallback reason.
-	PackedInt32Array get_virtual_geometry_eligibility() const;
+	// GodotNext: nextgeo_skinned
+	// `p_skinned` opts surfaces with bones and weights in (issue #159); blend shapes
+	// stay ineligible either way.
+	PackedInt32Array get_virtual_geometry_eligibility(bool p_skinned = false) const;
 	// Writes `p_ngm_path` and attaches VirtualGeometryData. A null hook, or a mesh with no
 	// eligible surface, returns OK and leaves virtual geometry unset.
-	Error build_virtual_geometry(const String &p_ngm_path);
+	Error build_virtual_geometry(const String &p_ngm_path, bool p_skinned = false);
 	// OBJ `strip_authored_to_coarse` only. Scene import never calls this.
 	void strip_authored_surfaces_to_coarse();
 	Ref<VirtualGeometryData> get_virtual_geometry() const;

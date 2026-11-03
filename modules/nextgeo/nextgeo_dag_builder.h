@@ -46,6 +46,9 @@ static constexpr uint32_t NEXTGEO_MAX_CLUSTER_TRIANGLES = 128;
 static constexpr uint32_t NEXTGEO_MAX_CLUSTER_VERTICES = 128;
 // Target clusters per group handed to meshopt_partitionClusters().
 static constexpr uint32_t NEXTGEO_GROUP_CLUSTERS = 8;
+// Most bones one skinned cluster may touch (issue #159). Bone indices are stored
+// cluster-local in 8 bits; weights stay unorm16, matching `skeleton.glsl`.
+static constexpr uint32_t NEXTGEO_MAX_CLUSTER_BONES = 16;
 
 // Attributes in the merged vertex stream. Position, normal, tangent and UV0 are always
 // present; UV2 and color are present when any eligible surface has them.
@@ -112,6 +115,13 @@ struct NextGeoPage {
 	uint32_t byte_size; // nextgeo_page_bytes() of this page: header, cluster records, vertices, triangles, padding.
 };
 
+// Per-cluster skinning range (skinned builds only). `bone_offset` indexes
+// NextGeoBuildOutput::skin_bones (and skin_bounds, 6 floats per bone).
+struct NextGeoClusterSkin {
+	uint32_t bone_offset = 0;
+	uint8_t bone_count = 0; // At most NEXTGEO_MAX_CLUSTER_BONES, except a lone triangle that touches more.
+};
+
 struct NextGeoSurfaceInput {
 	Vector<Vector3> positions;
 	Vector<Vector3> normals; // Optional; empty or one per vertex.
@@ -119,6 +129,11 @@ struct NextGeoSurfaceInput {
 	Vector<Vector2> uv0; // Optional; empty or one per vertex.
 	Vector<Vector2> uv2; // Optional; empty or one per vertex.
 	Vector<Color> colors; // Optional; empty or one per vertex.
+	// Skinning (Mesh::ARRAY_BONES / ARRAY_WEIGHTS layout). `skin_influences` is 0
+	// (unskinned), 4 or 8; when non-zero, both arrays hold that many entries per vertex.
+	Vector<int32_t> bones;
+	Vector<float> weights;
+	uint32_t skin_influences = 0;
 	Vector<int32_t> indices; // Triangle list. Empty = non-indexed (identical vertices are welded).
 	// Ineligible surfaces stay legacy-only. They are not virtualized, but eligible vertices
 	// that share a position with them are locked, so the border never opens.
@@ -151,6 +166,16 @@ struct NextGeoBuildOutput {
 	LocalVector<float> vertices; // vertex_stride floats per vertex, cluster-local runs.
 	LocalVector<uint32_t> vertex_sources; // Per output vertex: its vertex index in the source surface.
 	LocalVector<uint8_t> triangles; // Three cluster-local vertex indices per triangle.
+
+	// Skinning (issue #159). Empty when `skin_influences` is 0. Retained vertices keep
+	// their source bones and weights; nothing is interpolated. Group LOD bounds stay in
+	// bind pose; the runtime scales the error by the maximum bone scale.
+	uint32_t skin_influences = 0; // 0, 4 or 8: influences stored per output vertex.
+	LocalVector<NextGeoClusterSkin> cluster_skin; // Parallel to `clusters`.
+	LocalVector<uint16_t> skin_bones; // Sorted global bone index per cluster bone.
+	LocalVector<float> skin_bounds; // Per cluster bone: bind-space AABB (min xyz, max xyz) of its vertices with weight > 0.
+	LocalVector<uint8_t> skin_indices; // Per output vertex, `skin_influences` cluster-local bone indices.
+	LocalVector<uint16_t> skin_weights; // Per output vertex, `skin_influences` unorm16 weights.
 };
 
 // The raw `.ngm` page header (cluster count, vertex count, triangle count, reserved) and the
@@ -161,6 +186,11 @@ static constexpr uint32_t NEXTGEO_PAGE_ALIGN = 16;
 // Bytes one cluster contributes to a raw page: its 80-byte record plus its vertices and
 // triangles. The page header and the alignment padding are added by nextgeo_page_bytes().
 uint32_t nextgeo_cluster_payload_bytes(uint32_t p_vertex_count, uint32_t p_triangle_count, uint32_t p_vertex_stride);
+
+// Bytes one skinned cluster adds to a raw page (the `.ngm` skinning section): a 4-byte
+// header, 26 bytes per cluster bone (u16 global bone + 6 float bounds), then 3 bytes per
+// influence per vertex (u8 cluster-local index + unorm16 weight). See nextgeo_serialize.cpp.
+uint32_t nextgeo_cluster_skin_bytes(uint32_t p_bone_count, uint32_t p_vertex_count, uint32_t p_influences);
 
 // On-disk size of a raw page whose clusters contribute `p_cluster_payload_sum` bytes: the
 // 16-byte page header, those records and their vertices and triangles, then padding to 16

@@ -2351,7 +2351,8 @@ Error ResourceImporterScene::_save_virtual_geometry_single_mesh(const String &p_
 	}
 
 	const String key = _ngm_source_path + "::" + importer_mesh->get_name();
-	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries);
+	// GodotNext: nextgeo_skinned
+	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries, _ngm_skinned);
 	Ref<ArrayMesh> mesh = importer_mesh->get_mesh();
 	ERR_FAIL_COND_V_MSG(mesh.is_null(), ERR_INVALID_DATA, "Cannot save single mesh from '" + p_source_file + "'.");
 	mesh->set_path(save_file_path, true);
@@ -2422,6 +2423,8 @@ void ResourceImporterScene::get_internal_import_options(InternalImportCategory p
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/lods", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			// GodotNext: nextgeo_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
+			// GodotNext: nextgeo_skinned
+			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry_skinned", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "lods/normal_merge_angle", PROPERTY_HINT_RANGE, "0,180,1,degrees"), 20.0f));
 			// GodotNext: mesh_sdf_import
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/distance_fields", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
@@ -2777,6 +2780,8 @@ void ResourceImporterScene::get_import_options(const String &p_path, List<Import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_lods"), true));
 	// GodotNext: nextgeo_import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_virtual_geometry"), false));
+	// GodotNext: nextgeo_skinned
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/virtual_geometry_skinned"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/create_shadow_meshes"), true));
 	// GodotNext: mesh_sdf_import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_distance_fields"), bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/generate"))));
@@ -2884,6 +2889,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 				String save_to_file;
 				// GodotNext: nextgeo_import
 				bool generate_virtual_geometry = _ngm_generate && !_ngm_single_mesh;
+				// GodotNext: nextgeo_skinned
+				bool virtual_geometry_skinned = _ngm_skinned;
 
 				String mesh_id = importer_mesh->get_meta("import_id", importer_mesh->get_name());
 
@@ -2955,6 +2962,16 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 						distance_field_resolution_scale = mesh_settings["distance_field/resolution_scale"];
 					}
 
+					// GodotNext: nextgeo_skinned
+					if (!_ngm_single_mesh && mesh_settings.has("generate/virtual_geometry_skinned")) {
+						int skinned_override = mesh_settings["generate/virtual_geometry_skinned"];
+						if (skinned_override == MESH_OVERRIDE_ENABLE) {
+							virtual_geometry_skinned = true;
+						} else if (skinned_override == MESH_OVERRIDE_DISABLE) {
+							virtual_geometry_skinned = false;
+						}
+					}
+
 					if (bool(mesh_settings.get("save_to_file/enabled", false))) {
 						save_to_file = mesh_settings.get("save_to_file/path", String());
 						if (!ResourceUID::ensure_path(save_to_file).is_resource_file()) {
@@ -3021,7 +3038,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 					} else {
 						ngm_path = ResourceUID::ensure_path(save_to_file) + ".ngm";
 					}
-					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries);
+					// GodotNext: nextgeo_skinned
+					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries, virtual_geometry_skinned);
 				}
 
 				if (generate_lods) {
@@ -3462,6 +3480,8 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	_ngm_base_path = p_save_path;
 	_ngm_source_path = ProjectSettings::get_singleton()->localize_path(p_source_file);
 	_ngm_generate = p_options.has("meshes/generate_virtual_geometry") && bool(p_options["meshes/generate_virtual_geometry"]);
+	// GodotNext: nextgeo_skinned
+	_ngm_skinned = p_options.has("meshes/virtual_geometry_skinned") && bool(p_options["meshes/virtual_geometry_skinned"]);
 	_ngm_single_mesh = _ngm_generate && _scene_import_type == "ArrayMesh";
 	_ngm_gen_files = r_gen_files;
 

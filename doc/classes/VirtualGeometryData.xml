@@ -67,6 +67,9 @@
 		<member name="rt_proxy_surface_ranges" type="PackedInt32Array" setter="set_rt_proxy_surface_ranges" getter="get_rt_proxy_surface_ranges" default="PackedInt32Array()">
 			Groups of two integers per part and surface, part-major and relative to that part: first index and index count. Legacy surfaces store a first index and a count of 0.
 		</member>
+		<member name="skin_influences" type="int" setter="set_skin_influences" getter="get_skin_influences" default="0">
+			Bone influences stored per vertex in the page file skinning section: 0 for an unskinned mesh, otherwise 4 or 8.
+		</member>
 		<member name="source_triangle_count" type="int" setter="set_source_triangle_count" getter="get_source_triangle_count" default="0">
 			Number of triangles in the source clusters.
 		</member>

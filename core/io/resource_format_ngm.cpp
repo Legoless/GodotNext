@@ -162,9 +162,11 @@ Error NGMWriter::write(const String &p_path, const NGMHeader &p_header, const Ve
 	ERR_FAIL_COND_V_MSG(p_header.page_size == 0, ERR_INVALID_PARAMETER, "NGM: page_size is required.");
 	ERR_FAIL_COND_V_MSG(p_header.page_count != uint32_t(p_pages.size()), ERR_INVALID_PARAMETER, "NGM: page_count does not match the page list.");
 	ERR_FAIL_COND_V_MSG(p_header.root_page_count > p_header.page_count, ERR_INVALID_PARAMETER, "NGM: root_page_count exceeds page_count.");
-	if ((p_header.flags & ~NGM_FLAG_MESHOPT) != 0) {
+	if ((p_header.flags & ~NGM_KNOWN_FLAGS) != 0) {
 		ERR_FAIL_V_MSG(ERR_INVALID_PARAMETER, "NGM: unknown flag bits.");
 	}
+	const bool skinned = (p_header.flags & NGM_FLAG_SKINNED) != 0;
+	ERR_FAIL_COND_V_MSG(skinned != (p_header.skin_influences == 4 || p_header.skin_influences == 8), ERR_INVALID_PARAMETER, "NGM: the skinned flag requires 4 or 8 skin influences, and skin influences require the flag.");
 	if ((p_header.flags & NGM_FLAG_MESHOPT) != 0) {
 		ERR_FAIL_V_MSG(ERR_UNAVAILABLE, "NGM: the provisional codec is raw; meshopt pages are not written.");
 	}
@@ -212,7 +214,7 @@ Error NGMWriter::write(const String &p_path, const NGMHeader &p_header, const Ve
 	stored = stored && store_u32(file, p_header.group_count);
 	stored = stored && store_u32(file, p_header.dag_depth);
 	stored = stored && store_u32(file, p_header.vertex_layout);
-	stored = stored && store_u32(file, 0); // Reserved.
+	stored = stored && store_u32(file, p_header.skin_influences);
 	stored = stored && store_u64(file, NGM_HEADER_SIZE); // Page table follows the header.
 	stored = stored && file->store_buffer(p_header.source_sha256, 32);
 	uint8_t padding[40] = {};
@@ -342,7 +344,7 @@ Error NGMFile::open(const String &p_path) {
 		return ERR_FILE_CORRUPT;
 	}
 	header.flags = load_u32(bytes + 12);
-	if ((header.flags & ~NGM_FLAG_MESHOPT) != 0) {
+	if ((header.flags & ~NGM_KNOWN_FLAGS) != 0) {
 		return ERR_FILE_UNRECOGNIZED;
 	}
 	if ((header.flags & NGM_FLAG_MESHOPT) != 0) {
@@ -355,7 +357,12 @@ Error NGMFile::open(const String &p_path) {
 	header.group_count = load_u32(bytes + 32);
 	header.dag_depth = load_u32(bytes + 36);
 	header.vertex_layout = load_u32(bytes + 40);
-	if (load_u32(bytes + 44) != 0 || header.page_size == 0 || header.root_page_count > header.page_count) {
+	header.skin_influences = load_u32(bytes + 44);
+	const bool skinned = (header.flags & NGM_FLAG_SKINNED) != 0;
+	if (skinned != (header.skin_influences == 4 || header.skin_influences == 8)) {
+		return ERR_FILE_CORRUPT;
+	}
+	if (header.page_size == 0 || header.root_page_count > header.page_count) {
 		return ERR_FILE_CORRUPT;
 	}
 	const uint64_t table_offset = load_u64(bytes + 48);

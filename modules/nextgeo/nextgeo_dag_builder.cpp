@@ -61,7 +61,10 @@ constexpr uint32_t MAX_LEVELS = 64;
 // normals always, color when present. UVs, tangents and surfaces are kept by seams.
 constexpr float NORMAL_WEIGHT = 1.0f;
 constexpr float COLOR_WEIGHT = 1.0f;
-constexpr uint32_t MAX_ATTRIBUTES = 7;
+// Skin weights count in the simplifier's attribute error (issue #159, step 3).
+constexpr float SKIN_WEIGHT = 1.0f;
+// Normal (3) + color (4) + skin weights (at most 8).
+constexpr uint32_t MAX_ATTRIBUTES = 15;
 
 struct MergedSurface {
 	uint16_t surface_id = 0;
@@ -85,11 +88,17 @@ struct MergedMesh {
 	LocalVector<uint8_t> vertex_lock; // Permanent locks (shared with ineligible siblings).
 	LocalVector<uint32_t> position_remap; // First vertex with the same position.
 	LocalVector<MergedSurface> surfaces;
+
+	// Skinning, padded to `skin_influences` per merged vertex (0 = unskinned mesh).
+	uint32_t skin_influences = 0;
+	LocalVector<int32_t> skin_bones;
+	LocalVector<float> skin_weights;
 };
 
 struct BuildCluster {
 	LocalVector<uint32_t> indices; // Merged vertex indices, 3 per triangle.
 	uint32_t vertex_count = 0;
+	LocalVector<uint16_t> bones; // Sorted global bones touched with weight > 0 (skinned builds).
 	uint16_t surface_id = 0;
 	float bounds[4] = {};
 	int8_t cone_axis[3] = {};
@@ -156,6 +165,62 @@ void _write_sphere(const meshopt_Bounds &p_bounds, float r_sphere[4]) {
 	r_sphere[3] = p_bounds.radius;
 }
 
+// Sorted global bones touched (weight > 0) by the merged vertices of `p_indices`.
+void _collect_bones(const MergedMesh &p_mesh, const LocalVector<uint32_t> &p_indices, LocalVector<uint16_t> &r_bones) {
+	r_bones.clear();
+	if (p_mesh.skin_influences == 0) {
+		return;
+	}
+	for (uint32_t index : p_indices) {
+		const uint32_t base = index * p_mesh.skin_influences;
+		for (uint32_t k = 0; k < p_mesh.skin_influences; k++) {
+			if (p_mesh.skin_weights[base + k] > 0.0f) {
+				r_bones.push_back(uint16_t(p_mesh.skin_bones[base + k]));
+			}
+		}
+	}
+	r_bones.sort();
+	uint32_t write = 0;
+	for (uint32_t i = 0; i < r_bones.size(); i++) {
+		if (write == 0 || r_bones[write - 1] != r_bones[i]) {
+			r_bones[write++] = r_bones[i];
+		}
+	}
+	r_bones.resize(write);
+}
+
+bool _bone_in(const LocalVector<uint16_t> &p_bones, uint16_t p_bone) {
+	for (uint16_t bone : p_bones) {
+		if (bone == p_bone) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// One build cluster over a merged-index triangle list: bounds, cone and bone list.
+void _make_cluster(const MergedMesh &p_mesh, LocalVector<uint32_t> &&p_indices, uint16_t p_surface_id, LocalVector<BuildCluster> &r_clusters) {
+	if (p_indices.is_empty()) {
+		return;
+	}
+	BuildCluster cluster;
+	cluster.surface_id = p_surface_id;
+	cluster.indices = std::move(p_indices);
+
+	LocalVector<uint32_t> unique(cluster.indices);
+	_sort_unique(unique);
+	cluster.vertex_count = unique.size();
+	_collect_bones(p_mesh, cluster.indices, cluster.bones);
+
+	const meshopt_Bounds bounds = meshopt_computeClusterBounds(cluster.indices.ptr(), cluster.indices.size(), p_mesh.positions.ptr(), p_mesh.vertex_count, sizeof(float) * 3);
+	_write_sphere(bounds, cluster.bounds);
+	for (uint32_t k = 0; k < 3; k++) {
+		cluster.cone_axis[k] = bounds.cone_axis_s8[k];
+	}
+	cluster.cone_cutoff = bounds.cone_cutoff_s8;
+	r_clusters.push_back(std::move(cluster));
+}
+
 // Splits a single-surface triangle list into clusters of at most 128 vertices and 128
 // triangles (plan §7.1, step 4.2). Vertices are compacted first so that the meshlet
 // builder's cost does not scale with the size of the whole merged stream.
@@ -202,22 +267,57 @@ void _clusterize(const MergedMesh &p_mesh, const uint32_t *p_indices, uint32_t p
 		const meshopt_Meshlet &meshlet = meshlets[uint32_t(m)];
 		meshopt_optimizeMeshlet(&meshlet_vertices[meshlet.vertex_offset], &meshlet_triangles[meshlet.triangle_offset], meshlet.triangle_count, meshlet.vertex_count);
 
-		BuildCluster cluster;
-		cluster.surface_id = p_surface_id;
-		cluster.vertex_count = meshlet.vertex_count;
-		cluster.indices.resize(meshlet.triangle_count * 3);
+		LocalVector<uint32_t> indices;
+		indices.resize(meshlet.triangle_count * 3);
 		for (uint32_t j = 0; j < meshlet.triangle_count * 3; j++) {
-			cluster.indices[j] = unique[meshlet_vertices[meshlet.vertex_offset + meshlet_triangles[meshlet.triangle_offset + j]]];
+			indices[j] = unique[meshlet_vertices[meshlet.vertex_offset + meshlet_triangles[meshlet.triangle_offset + j]]];
 		}
 
-		const meshopt_Bounds bounds = meshopt_computeClusterBounds(cluster.indices.ptr(), cluster.indices.size(), p_mesh.positions.ptr(), p_mesh.vertex_count, sizeof(float) * 3);
-		_write_sphere(bounds, cluster.bounds);
-		for (uint32_t k = 0; k < 3; k++) {
-			cluster.cone_axis[k] = bounds.cone_axis_s8[k];
+		if (p_mesh.skin_influences == 0) {
+			_make_cluster(p_mesh, std::move(indices), p_surface_id, r_clusters);
+			continue;
 		}
-		cluster.cone_cutoff = bounds.cone_cutoff_s8;
 
-		r_clusters.push_back(std::move(cluster));
+		// Bone limit (issue #159, step 4): split the meshlet's triangles, in order,
+		// until every part touches at most NEXTGEO_MAX_CLUSTER_BONES bones. A lone
+		// triangle that touches more keeps all of its bones; dropping an influence
+		// would change the skinned result.
+		LocalVector<uint32_t> current;
+		LocalVector<uint16_t> current_bones;
+		for (uint32_t t = 0; t < indices.size(); t += 3) {
+			LocalVector<uint16_t> tri_bones;
+			for (uint32_t c = 0; c < 3; c++) {
+				const uint32_t base = indices[t + c] * p_mesh.skin_influences;
+				for (uint32_t k = 0; k < p_mesh.skin_influences; k++) {
+					if (p_mesh.skin_weights[base + k] > 0.0f) {
+						const uint16_t bone = uint16_t(p_mesh.skin_bones[base + k]);
+						if (!_bone_in(tri_bones, bone)) {
+							tri_bones.push_back(bone);
+						}
+					}
+				}
+			}
+			uint32_t extra = 0;
+			for (uint16_t bone : tri_bones) {
+				if (!_bone_in(current_bones, bone)) {
+					extra++;
+				}
+			}
+			if (!current.is_empty() && current_bones.size() + extra > NEXTGEO_MAX_CLUSTER_BONES) {
+				_make_cluster(p_mesh, std::move(current), p_surface_id, r_clusters);
+				current = LocalVector<uint32_t>();
+				current_bones.clear();
+			}
+			for (uint16_t bone : tri_bones) {
+				if (!_bone_in(current_bones, bone)) {
+					current_bones.push_back(bone);
+				}
+			}
+			current.push_back(indices[t + 0]);
+			current.push_back(indices[t + 1]);
+			current.push_back(indices[t + 2]);
+		}
+		_make_cluster(p_mesh, std::move(current), p_surface_id, r_clusters);
 	}
 }
 
@@ -289,6 +389,16 @@ Error _merge_surfaces(const NextGeoBuildInput &p_input, MergedMesh &r_mesh, uint
 		ERR_FAIL_COND_V_MSG(!surface.uv0.is_empty() && surface.uv0.size() != count, ERR_INVALID_DATA, vformat("NextGeo: surface %d has a UV count that does not match its vertices.", s));
 		ERR_FAIL_COND_V_MSG(!surface.uv2.is_empty() && surface.uv2.size() != count, ERR_INVALID_DATA, vformat("NextGeo: surface %d has a UV2 count that does not match its vertices.", s));
 		ERR_FAIL_COND_V_MSG(!surface.colors.is_empty() && surface.colors.size() != count, ERR_INVALID_DATA, vformat("NextGeo: surface %d has a color count that does not match its vertices.", s));
+		ERR_FAIL_COND_V_MSG(surface.skin_influences != 0 && surface.skin_influences != 4 && surface.skin_influences != 8, ERR_INVALID_DATA, vformat("NextGeo: surface %d has %d skin influences; only 0, 4 or 8 are supported.", s, surface.skin_influences));
+		if (surface.skin_influences == 0) {
+			ERR_FAIL_COND_V_MSG(!surface.bones.is_empty() || !surface.weights.is_empty(), ERR_INVALID_DATA, vformat("NextGeo: surface %d has bones or weights without skin influences.", s));
+		} else {
+			ERR_FAIL_COND_V_MSG(surface.bones.size() != count * int(surface.skin_influences) || surface.weights.size() != count * int(surface.skin_influences), ERR_INVALID_DATA, vformat("NextGeo: surface %d has a bone or weight count that does not match its vertices.", s));
+			for (int i = 0; i < surface.bones.size(); i++) {
+				ERR_FAIL_COND_V_MSG(surface.bones[i] < 0 || surface.bones[i] > int(UINT16_MAX), ERR_INVALID_DATA, vformat("NextGeo: surface %d has an out-of-range bone index.", s));
+				ERR_FAIL_COND_V_MSG(!std::isfinite(double(surface.weights[i])) || surface.weights[i] < 0.0f, ERR_INVALID_DATA, vformat("NextGeo: surface %d has a non-finite or negative skin weight.", s));
+			}
+		}
 		ERR_FAIL_COND_V_MSG(surface.indices.size() % 3 != 0, ERR_INVALID_DATA, vformat("NextGeo: surface %d has an index count that is not a multiple of 3.", s));
 		ERR_FAIL_COND_V_MSG(surface.indices.is_empty() && count % 3 != 0, ERR_INVALID_DATA, vformat("NextGeo: non-indexed surface %d has a vertex count that is not a multiple of 3.", s));
 		for (int i = 0; i < count; i++) {
@@ -304,6 +414,7 @@ Error _merge_surfaces(const NextGeoBuildInput &p_input, MergedMesh &r_mesh, uint
 			if (!surface.colors.is_empty()) {
 				r_mesh.layout |= NEXTGEO_VERTEX_COLOR;
 			}
+			r_mesh.skin_influences = MAX(r_mesh.skin_influences, surface.skin_influences);
 		}
 	}
 
@@ -323,6 +434,9 @@ Error _merge_surfaces(const NextGeoBuildInput &p_input, MergedMesh &r_mesh, uint
 		for (uint32_t k = 0; k < 4; k++) {
 			r_mesh.attribute_weights[r_mesh.attribute_count++] = COLOR_WEIGHT;
 		}
+	}
+	for (uint32_t k = 0; k < r_mesh.skin_influences; k++) {
+		r_mesh.attribute_weights[r_mesh.attribute_count++] = SKIN_WEIGHT;
 	}
 
 	HashSet<Vector3> ineligible_positions;
@@ -357,9 +471,29 @@ Error _merge_surfaces(const NextGeoBuildInput &p_input, MergedMesh &r_mesh, uint
 		surface_indices.clear();
 		if (surface.indices.is_empty()) {
 			// Non-indexed: weld identical vertices so the triangles become connected.
+			// Skinned vertices weld on their bones and weights too, so copies that only
+			// differ in skinning stay apart.
+			LocalVector<float> weld_vertices;
+			const float *weld_data = surface_vertices.ptr();
+			uint32_t weld_stride = r_mesh.stride;
+			if (surface.skin_influences > 0 && count > 0) {
+				weld_stride = r_mesh.stride + surface.skin_influences * 2;
+				weld_vertices.resize(count * weld_stride);
+				for (uint32_t i = 0; i < count; i++) {
+					float *dst = &weld_vertices[i * weld_stride];
+					for (uint32_t k = 0; k < r_mesh.stride; k++) {
+						dst[k] = surface_vertices[i * r_mesh.stride + k];
+					}
+					for (uint32_t k = 0; k < surface.skin_influences; k++) {
+						dst[r_mesh.stride + k] = float(surface.bones[i * surface.skin_influences + k]);
+						dst[r_mesh.stride + surface.skin_influences + k] = surface.weights[i * surface.skin_influences + k];
+					}
+				}
+				weld_data = weld_vertices.ptr();
+			}
 			LocalVector<uint32_t> remap;
 			remap.resize(count);
-			const size_t unique_count = count == 0 ? 0 : meshopt_generateVertexRemap(remap.ptr(), nullptr, count, surface_vertices.ptr(), count, sizeof(float) * r_mesh.stride);
+			const size_t unique_count = count == 0 ? 0 : meshopt_generateVertexRemap(remap.ptr(), nullptr, count, weld_data, count, sizeof(float) * weld_stride);
 			LocalVector<float> welded;
 			welded.resize(uint32_t(unique_count) * r_mesh.stride);
 			surface_sources.resize(uint32_t(unique_count));
@@ -422,6 +556,17 @@ Error _merge_surfaces(const NextGeoBuildInput &p_input, MergedMesh &r_mesh, uint
 					r_mesh.attributes.push_back(vertex[r_mesh.color_offset + k]);
 				}
 			}
+			// Skin weights are simplifier attributes; bones and weights are kept per
+			// merged vertex, padded with zero weights to the mesh influence count.
+			const uint32_t source_vertex = surface_sources[i];
+			for (uint32_t k = 0; k < r_mesh.skin_influences; k++) {
+				const bool have = k < surface.skin_influences;
+				const int32_t bone = have ? surface.bones[source_vertex * surface.skin_influences + k] : 0;
+				const float weight = have ? surface.weights[source_vertex * surface.skin_influences + k] : 0.0f;
+				r_mesh.attributes.push_back(weight);
+				r_mesh.skin_bones.push_back(bone);
+				r_mesh.skin_weights.push_back(weight);
+			}
 			r_mesh.vertex_source.push_back(surface_sources[i]);
 			r_mesh.vertex_surface.push_back(uint16_t(s));
 			const Vector3 position(vertex[0], vertex[1], vertex[2]);
@@ -440,16 +585,20 @@ Error _merge_surfaces(const NextGeoBuildInput &p_input, MergedMesh &r_mesh, uint
 	return OK;
 }
 
-uint32_t _cluster_bytes(const BuildCluster &p_cluster, uint32_t p_stride) {
-	return nextgeo_cluster_payload_bytes(p_cluster.vertex_count, p_cluster.indices.size() / 3, p_stride);
+uint32_t _cluster_bytes(const BuildCluster &p_cluster, uint32_t p_stride, uint32_t p_influences) {
+	uint32_t bytes = nextgeo_cluster_payload_bytes(p_cluster.vertex_count, p_cluster.indices.size() / 3, p_stride);
+	if (p_influences > 0) {
+		bytes += nextgeo_cluster_skin_bytes(p_cluster.bones.size(), p_cluster.vertex_count, p_influences);
+	}
+	return bytes;
 }
 
 // Splits a group into consecutive runs that each fit in one page.
-void _append_page_sized(const LocalVector<BuildCluster> &p_clusters, const LocalVector<uint32_t> &p_members, uint32_t p_stride, uint32_t p_page_size, LocalVector<LocalVector<uint32_t>> &r_groups) {
+void _append_page_sized(const LocalVector<BuildCluster> &p_clusters, const LocalVector<uint32_t> &p_members, uint32_t p_stride, uint32_t p_influences, uint32_t p_page_size, LocalVector<LocalVector<uint32_t>> &r_groups) {
 	LocalVector<uint32_t> current;
 	uint32_t current_bytes = 0;
 	for (uint32_t member : p_members) {
-		const uint32_t bytes = _cluster_bytes(p_clusters[member], p_stride);
+		const uint32_t bytes = _cluster_bytes(p_clusters[member], p_stride, p_influences);
 		const bool overflows = current_bytes > UINT32_MAX - bytes;
 		const uint32_t next_payload = overflows ? UINT32_MAX : current_bytes + bytes;
 		if (!current.is_empty() && (overflows || nextgeo_page_bytes(next_payload) > p_page_size)) {
@@ -496,7 +645,7 @@ void _partition(const MergedMesh &p_mesh, const LocalVector<BuildCluster> &p_clu
 
 	for (const LocalVector<uint32_t> &partition : partitions) {
 		if (!partition.is_empty()) {
-			_append_page_sized(p_clusters, partition, p_mesh.stride, p_page_size, r_groups);
+			_append_page_sized(p_clusters, partition, p_mesh.stride, p_mesh.skin_influences, p_page_size, r_groups);
 		}
 	}
 }
@@ -635,6 +784,13 @@ uint32_t nextgeo_cluster_payload_bytes(uint32_t p_vertex_count, uint32_t p_trian
 	return uint32_t(sizeof(NextGeoCluster)) + p_vertex_count * p_vertex_stride * uint32_t(sizeof(float)) + p_triangle_count * 3;
 }
 
+uint32_t nextgeo_cluster_skin_bytes(uint32_t p_bone_count, uint32_t p_vertex_count, uint32_t p_influences) {
+	if (p_influences == 0) {
+		return 0;
+	}
+	return 4 + p_bone_count * 26 + p_vertex_count * p_influences * 3;
+}
+
 uint32_t nextgeo_page_bytes(uint32_t p_cluster_payload_sum) {
 	// Header plus padding must fit in the sum. A payload this large cannot be a page.
 	if (p_cluster_payload_sum > UINT32_MAX - (NEXTGEO_PAGE_HEADER_BYTES + NEXTGEO_PAGE_ALIGN - 1)) {
@@ -657,7 +813,11 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		return merge_error;
 	}
 
-	const uint32_t max_cluster_bytes = nextgeo_page_bytes(nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, mesh.stride));
+	uint32_t full_cluster_bytes = nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, mesh.stride);
+	if (mesh.skin_influences > 0) {
+		full_cluster_bytes += nextgeo_cluster_skin_bytes(NEXTGEO_MAX_CLUSTER_BONES, NEXTGEO_MAX_CLUSTER_VERTICES, mesh.skin_influences);
+	}
+	const uint32_t max_cluster_bytes = nextgeo_page_bytes(full_cluster_bytes);
 	ERR_FAIL_COND_V_MSG(p_input.page_size < max_cluster_bytes, ERR_INVALID_PARAMETER, vformat("NextGeo: page_size (%d bytes) must hold one full cluster (%d bytes for this vertex layout).", p_input.page_size, max_cluster_bytes));
 	ERR_FAIL_COND_V_MSG(mesh.surfaces.is_empty(), ERR_INVALID_DATA, "NextGeo: no eligible, non-degenerate triangles to build.");
 
@@ -715,7 +875,7 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		LocalVector<LocalVector<uint32_t>> parts;
 		const bool last = pending.size() == 1 || pending_triangles <= NEXTGEO_MAX_CLUSTER_TRIANGLES || depth + 1 >= MAX_LEVELS;
 		if (last) {
-			_append_page_sized(clusters, pending, mesh.stride, p_input.page_size, parts);
+			_append_page_sized(clusters, pending, mesh.stride, mesh.skin_influences, p_input.page_size, parts);
 		} else {
 			_partition(mesh, clusters, pending, p_input.page_size, parts);
 		}
@@ -806,6 +966,10 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 		total_clusters += group.members.size();
 	}
 	r_output.clusters.resize_initialized(total_clusters);
+	r_output.skin_influences = mesh.skin_influences;
+	if (mesh.skin_influences > 0) {
+		r_output.cluster_skin.resize_initialized(total_clusters);
+	}
 
 	uint32_t local_vertices[NEXTGEO_MAX_CLUSTER_VERTICES];
 	uint8_t local_triangles[NEXTGEO_MAX_CLUSTER_TRIANGLES * 3];
@@ -817,7 +981,7 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 
 		uint32_t group_payload = 0;
 		for (uint32_t member : group.members) {
-			group_payload += _cluster_bytes(clusters[member], mesh.stride);
+			group_payload += _cluster_bytes(clusters[member], mesh.stride, mesh.skin_influences);
 		}
 		ERR_FAIL_COND_V(nextgeo_page_bytes(group_payload) > p_input.page_size, ERR_BUG);
 
@@ -862,6 +1026,7 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 			const size_t vertex_count = meshopt_extractMeshletIndices(local_vertices, local_triangles, cluster.indices.ptr(), index_count);
 			ERR_FAIL_COND_V(vertex_count != cluster.vertex_count, ERR_BUG);
 
+			const uint32_t out_index = cluster_cursor;
 			NextGeoCluster &out = r_output.clusters[cluster_cursor++];
 			for (uint32_t k = 0; k < 4; k++) {
 				out.bounds[k] = cluster.bounds[k];
@@ -896,6 +1061,55 @@ Error nextgeo_build_dag(const NextGeoBuildInput &p_input, NextGeoBuildOutput &r_
 			}
 			for (uint32_t j = 0; j < index_count; j++) {
 				r_output.triangles.push_back(local_triangles[j]);
+			}
+
+			if (mesh.skin_influences > 0) {
+				// Per-cluster bones and bind-space bounds (issue #159, steps 4-5): for
+				// each bone, the AABB of this cluster's vertices with weight > 0 on it.
+				// Linear blend skinning stays in the hull of the per-bone transforms,
+				// so the union of (bone transform x AABB) bounds the skinned cluster.
+				NextGeoClusterSkin &skin = r_output.cluster_skin[out_index];
+				skin.bone_offset = r_output.skin_bones.size();
+				skin.bone_count = uint8_t(cluster.bones.size());
+				const uint32_t bounds_base = r_output.skin_bounds.size();
+				for (uint16_t bone : cluster.bones) {
+					r_output.skin_bones.push_back(bone);
+					for (uint32_t k = 0; k < 3; k++) {
+						r_output.skin_bounds.push_back(FLT_MAX);
+					}
+					for (uint32_t k = 0; k < 3; k++) {
+						r_output.skin_bounds.push_back(-FLT_MAX);
+					}
+				}
+				for (uint32_t v = 0; v < vertex_count; v++) {
+					const uint32_t source = local_vertices[v];
+					const float *position = &mesh.positions[source * 3];
+					const uint32_t base = source * mesh.skin_influences;
+					for (uint32_t k = 0; k < mesh.skin_influences; k++) {
+						const float weight = mesh.skin_weights[base + k];
+						uint8_t local_bone = 0;
+						if (weight > 0.0f) {
+							const uint16_t bone = uint16_t(mesh.skin_bones[base + k]);
+							uint32_t slot = cluster.bones.size();
+							for (uint32_t b = 0; b < cluster.bones.size(); b++) {
+								if (cluster.bones[b] == bone) {
+									slot = b;
+									break;
+								}
+							}
+							ERR_FAIL_COND_V(slot >= cluster.bones.size(), ERR_BUG);
+							local_bone = uint8_t(slot);
+							float *aabb = &r_output.skin_bounds[bounds_base + slot * 6];
+							for (uint32_t axis = 0; axis < 3; axis++) {
+								aabb[axis] = MIN(aabb[axis], position[axis]);
+								aabb[3 + axis] = MAX(aabb[3 + axis], position[axis]);
+							}
+						}
+						r_output.skin_indices.push_back(local_bone);
+						const float clamped = CLAMP(weight, 0.0f, 1.0f);
+						r_output.skin_weights.push_back(uint16_t(clamped * 65535.0f + 0.5f));
+					}
+				}
 			}
 		}
 

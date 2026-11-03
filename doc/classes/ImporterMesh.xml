@@ -39,8 +39,9 @@
 		<method name="build_virtual_geometry">
 			<return type="int" enum="Error" />
 			<param index="0" name="ngm_path" type="String" />
+			<param index="1" name="skinned" type="bool" default="false" />
 			<description>
-				Builds virtual geometry for every eligible surface and writes the [code].ngm[/code] page file to [param ngm_path]. Ineligible surfaces stay on the forward path and record a fallback reason. Returns [constant OK] without attaching data when the builder is unavailable or no surface is eligible.
+				Builds virtual geometry for every eligible surface and writes the [code].ngm[/code] page file to [param ngm_path]. Ineligible surfaces stay on the forward path and record a fallback reason. If [param skinned] is [code]true[/code], surfaces with bone weights are eligible and their skinning data is stored in the page file; otherwise they stay on the forward path. Surfaces with blend shapes always stay on the forward path. Returns [constant OK] without attaching data when the builder is unavailable or no surface is eligible.
 			</description>
 		</method>
 		<method name="clear">

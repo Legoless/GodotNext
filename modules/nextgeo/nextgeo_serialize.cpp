@@ -188,6 +188,53 @@ Error page_ranges(const NextGeoBuildOutput &p_output, const NextGeoPage &p_page,
 	return OK;
 }
 
+// The skinning arrays must line up with the clusters and output vertices.
+Error check_skin(const NextGeoBuildOutput &p_output) {
+	if (p_output.skin_influences == 0) {
+		return (!p_output.cluster_skin.is_empty() || !p_output.skin_indices.is_empty() || !p_output.skin_weights.is_empty()) ? ERR_INVALID_DATA : OK;
+	}
+	if (p_output.skin_influences != 4 && p_output.skin_influences != 8) {
+		return ERR_INVALID_DATA;
+	}
+	if (p_output.cluster_skin.size() != p_output.clusters.size()) {
+		return ERR_INVALID_DATA;
+	}
+	const uint64_t per_vertex = uint64_t(p_output.vertex_sources.size()) * p_output.skin_influences;
+	if (uint64_t(p_output.skin_indices.size()) != per_vertex || uint64_t(p_output.skin_weights.size()) != per_vertex) {
+		return ERR_INVALID_DATA;
+	}
+	if (uint64_t(p_output.skin_bounds.size()) != uint64_t(p_output.skin_bones.size()) * 6) {
+		return ERR_INVALID_DATA;
+	}
+	for (uint32_t i = 0; i < p_output.clusters.size(); i++) {
+		const NextGeoClusterSkin &skin = p_output.cluster_skin[i];
+		if (uint64_t(skin.bone_offset) + skin.bone_count > uint64_t(p_output.skin_bones.size())) {
+			return ERR_INVALID_DATA;
+		}
+		const NextGeoCluster &cluster = p_output.clusters[i];
+		const uint64_t begin = uint64_t(cluster.vertex_offset) * p_output.skin_influences;
+		const uint64_t count = uint64_t(cluster.vertex_count) * p_output.skin_influences;
+		if (begin > per_vertex || count > per_vertex - begin) {
+			return ERR_INVALID_DATA;
+		}
+		for (uint64_t j = begin; j < begin + count; j++) {
+			if (p_output.skin_weights[j] > 0 && p_output.skin_indices[j] >= skin.bone_count) {
+				return ERR_INVALID_DATA;
+			}
+		}
+	}
+	return OK;
+}
+
+uint64_t page_skin_bytes(const NextGeoBuildOutput &p_output, const NextGeoPage &p_page) {
+	uint64_t bytes = 0;
+	for (uint32_t i = 0; i < p_page.cluster_count; i++) {
+		const uint32_t cluster_index = p_page.cluster_offset + i;
+		bytes += nextgeo_cluster_skin_bytes(p_output.cluster_skin[cluster_index].bone_count, p_output.clusters[cluster_index].vertex_count, p_output.skin_influences);
+	}
+	return bytes;
+}
+
 } // namespace
 
 Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint8_t>> &r_pages) {
@@ -196,6 +243,10 @@ Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint
 	const Error layout_error = decode_layout(p_output.vertex_layout, p_output.vertex_stride, layout);
 	if (layout_error != OK) {
 		return layout_error;
+	}
+	const Error skin_error = check_skin(p_output);
+	if (skin_error != OK) {
+		return skin_error;
 	}
 
 	r_pages.resize(p_output.pages.size());
@@ -209,13 +260,14 @@ Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint
 			return range_error;
 		}
 
-		const uint64_t payload = 16ull + uint64_t(page.cluster_count) * 80ull + uint64_t(vertex_count) * layout.stride * 4ull + uint64_t(triangle_count) * 3ull;
+		const uint64_t skin_bytes = p_output.skin_influences == 0 ? 0 : page_skin_bytes(p_output, page);
+		const uint64_t payload = 16ull + uint64_t(page.cluster_count) * 80ull + uint64_t(vertex_count) * layout.stride * 4ull + uint64_t(triangle_count) * 3ull + skin_bytes;
 		ByteWriter writer;
 		writer.reserve(payload);
 		writer.u32(page.cluster_count);
 		writer.u32(vertex_count);
 		writer.u32(triangle_count);
-		writer.u32(0);
+		writer.u32(uint32_t(skin_bytes));
 
 		uint32_t local_vertex = 0;
 		uint32_t local_triangle = 0;
@@ -245,6 +297,34 @@ Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint
 			}
 		}
 
+		// Skinning section (issue #159): per cluster, its bones with bind-space
+		// bounds, then cluster-local indices and unorm16 weights per vertex.
+		if (p_output.skin_influences > 0) {
+			for (uint32_t i = 0; i < page.cluster_count; i++) {
+				const uint32_t cluster_index = page.cluster_offset + i;
+				const NextGeoCluster &cluster = p_output.clusters[cluster_index];
+				const NextGeoClusterSkin &skin = p_output.cluster_skin[cluster_index];
+				writer.u8(skin.bone_count);
+				writer.u8(uint8_t(p_output.skin_influences));
+				writer.u16(0);
+				for (uint32_t b = 0; b < skin.bone_count; b++) {
+					writer.u16(p_output.skin_bones[skin.bone_offset + b]);
+					const float *aabb = &p_output.skin_bounds[uint64_t(skin.bone_offset + b) * 6];
+					for (uint32_t k = 0; k < 6; k++) {
+						writer.f32(aabb[k]);
+					}
+				}
+				const uint64_t begin = uint64_t(cluster.vertex_offset) * p_output.skin_influences;
+				const uint32_t count = uint32_t(cluster.vertex_count) * p_output.skin_influences;
+				for (uint32_t j = 0; j < count; j++) {
+					writer.u8(p_output.skin_indices[begin + j]);
+				}
+				for (uint32_t j = 0; j < count; j++) {
+					writer.u16(p_output.skin_weights[begin + j]);
+				}
+			}
+		}
+
 		if (writer.error != OK || writer.cursor != payload) {
 			r_pages.clear();
 			return writer.error != OK ? writer.error : ERR_BUG;
@@ -259,8 +339,12 @@ Error nextgeo_fill_ngm_header(const NextGeoBuildOutput &p_output, const Vector<V
 	if (p_output.page_size == 0 || p_pages.size() != int(p_output.pages.size()) || p_output.root_page_count > uint32_t(p_pages.size())) {
 		return ERR_INVALID_PARAMETER;
 	}
+	if (check_skin(p_output) != OK) {
+		return ERR_INVALID_DATA;
+	}
 	r_header.version = NGM_VERSION;
-	r_header.flags = 0;
+	r_header.flags = p_output.skin_influences == 0 ? 0 : NGM_FLAG_SKINNED;
+	r_header.skin_influences = p_output.skin_influences;
 	r_header.page_size = p_output.page_size;
 	r_header.page_count = uint32_t(p_pages.size());
 	r_header.root_page_count = p_output.root_page_count;
@@ -295,6 +379,10 @@ Error nextgeo_fill_vgd(const NextGeoBuildInput &p_input, const NextGeoBuildOutpu
 	const Error layout_error = decode_layout(p_output.vertex_layout, p_output.vertex_stride, layout);
 	if (layout_error != OK) {
 		return layout_error;
+	}
+	const Error skin_error = check_skin(p_output);
+	if (skin_error != OK) {
+		return skin_error;
 	}
 
 	const uint64_t dag_bytes = 8ull + uint64_t(p_output.groups.size()) * 60ull + uint64_t(p_output.bvh.size()) * 80ull;
@@ -347,6 +435,8 @@ Error nextgeo_fill_vgd(const NextGeoBuildInput &p_input, const NextGeoBuildOutpu
 		PackedVector2Array uv0;
 		PackedVector2Array uv2;
 		PackedColorArray colors;
+		PackedInt32Array bones; // Global bone indices, `skin_influences` per vertex.
+		PackedFloat32Array weights;
 		PackedInt32Array indices;
 	};
 	Vector<SurfaceBuild> built;
@@ -396,6 +486,18 @@ Error nextgeo_fill_vgd(const NextGeoBuildInput &p_input, const NextGeoBuildOutpu
 				if (layout.has_color) {
 					surface.colors.push_back(Color(vertex[layout.color], vertex[layout.color + 1], vertex[layout.color + 2], vertex[layout.color + 3]));
 				}
+				if (p_output.skin_influences > 0) {
+					// The coarse fallback renders through the legacy path, so it needs
+					// global bones and float weights again.
+					const NextGeoClusterSkin &skin = p_output.cluster_skin[page.cluster_offset + i];
+					const uint64_t begin = (uint64_t(cluster.vertex_offset) + v) * p_output.skin_influences;
+					for (uint32_t k = 0; k < p_output.skin_influences; k++) {
+						const uint16_t weight = p_output.skin_weights[begin + k];
+						const uint8_t local_bone = p_output.skin_indices[begin + k];
+						surface.bones.push_back(weight > 0 ? int32_t(p_output.skin_bones[skin.bone_offset + local_bone]) : 0);
+						surface.weights.push_back(float(weight) / 65535.0f);
+					}
+				}
 			}
 			const uint8_t *tris = p_output.triangles.ptr() + triangle_begin;
 			for (uint32_t t = 0; t < cluster.triangle_count; t++) {
@@ -441,6 +543,10 @@ Error nextgeo_fill_vgd(const NextGeoBuildInput &p_input, const NextGeoBuildOutpu
 		if (!built[i].colors.is_empty()) {
 			arrays[Mesh::ARRAY_COLOR] = built[i].colors;
 		}
+		if (!built[i].bones.is_empty()) {
+			arrays[Mesh::ARRAY_BONES] = built[i].bones;
+			arrays[Mesh::ARRAY_WEIGHTS] = built[i].weights;
+		}
 		if (!built[i].indices.is_empty()) {
 			arrays[Mesh::ARRAY_INDEX] = built[i].indices;
 		}
@@ -472,5 +578,6 @@ Error nextgeo_fill_vgd(const NextGeoBuildInput &p_input, const NextGeoBuildOutpu
 	p_data->set_dag_depth(p_output.dag_depth);
 	p_data->set_page_count(p_pages.size());
 	p_data->set_page_size(p_output.page_size);
+	p_data->set_skin_influences(int(p_output.skin_influences));
 	return OK;
 }

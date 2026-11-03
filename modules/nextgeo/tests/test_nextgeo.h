@@ -36,6 +36,7 @@
 
 #include "core/math/math_funcs.h"
 #include "core/math/random_pcg.h"
+#include "core/math/transform_3d.h"
 #include "core/templates/hash_set.h"
 #include "tests/test_macros.h"
 
@@ -248,6 +249,16 @@ inline bool aabb_contains(const float p_min[3], const float p_max[3], const floa
 	return true;
 }
 
+// Page bytes of one cluster: geometry payload plus its skinning section, if any.
+inline uint32_t cluster_page_bytes(const NextGeoBuildOutput &p_dag, uint32_t p_index) {
+	const NextGeoCluster &cluster = p_dag.clusters[p_index];
+	uint32_t bytes = nextgeo_cluster_payload_bytes(cluster.vertex_count, cluster.triangle_count, p_dag.vertex_stride);
+	if (p_dag.skin_influences > 0) {
+		bytes += nextgeo_cluster_skin_bytes(p_dag.cluster_skin[p_index].bone_count, cluster.vertex_count, p_dag.skin_influences);
+	}
+	return bytes;
+}
+
 // Checks every structural invariant of a built DAG against its input.
 inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeoBuildOutput &p_dag) {
 	const uint32_t cluster_count = p_dag.clusters.size();
@@ -312,7 +323,7 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 		uint32_t bytes = 0;
 		for (uint32_t i = group.cluster_offset; i < next_cluster && i < cluster_count; i++) {
 			const NextGeoCluster &cluster = p_dag.clusters[i];
-			bytes += nextgeo_cluster_payload_bytes(cluster.vertex_count, cluster.triangle_count, p_dag.vertex_stride);
+			bytes += cluster_page_bytes(p_dag, i);
 			if (!same_sphere(cluster.parent_lod, group.parent_lod) || cluster.parent_error != group.parent_error || cluster.page_id != group.page_id) {
 				bad_shared++;
 			}
@@ -363,7 +374,7 @@ inline void check_dag_invariants(const NextGeoBuildInput &p_input, const NextGeo
 			}
 			clusters += group.cluster_count;
 			for (uint32_t i = group.cluster_offset; i < group.cluster_offset + group.cluster_count; i++) {
-				bytes += nextgeo_cluster_payload_bytes(p_dag.clusters[i].vertex_count, p_dag.clusters[i].triangle_count, p_dag.vertex_stride);
+				bytes += cluster_page_bytes(p_dag, i);
 			}
 		}
 		if (nextgeo_page_bytes(bytes) != page.byte_size || clusters != page.cluster_count) {
@@ -561,7 +572,9 @@ inline bool same_output(const NextGeoBuildOutput &p_a, const NextGeoBuildOutput 
 			p_a.root_page_count == p_b.root_page_count && p_a.dag_depth == p_b.dag_depth && p_a.source_triangle_count == p_b.source_triangle_count &&
 			p_a.dropped_triangle_count == p_b.dropped_triangle_count && same_bytes(p_a.clusters, p_b.clusters) && same_bytes(p_a.groups, p_b.groups) &&
 			same_bytes(p_a.pages, p_b.pages) && same_bytes(p_a.bvh, p_b.bvh) && same_bytes(p_a.vertices, p_b.vertices) &&
-			same_bytes(p_a.vertex_sources, p_b.vertex_sources) && same_bytes(p_a.triangles, p_b.triangles);
+			same_bytes(p_a.vertex_sources, p_b.vertex_sources) && same_bytes(p_a.triangles, p_b.triangles) &&
+			p_a.skin_influences == p_b.skin_influences && same_bytes(p_a.cluster_skin, p_b.cluster_skin) && same_bytes(p_a.skin_bones, p_b.skin_bones) &&
+			same_bytes(p_a.skin_bounds, p_b.skin_bounds) && same_bytes(p_a.skin_indices, p_b.skin_indices) && same_bytes(p_a.skin_weights, p_b.skin_weights);
 }
 
 inline uint64_t cut_triangles(const NextGeoBuildOutput &p_dag, const LocalVector<uint32_t> &p_cut) {
@@ -934,6 +947,302 @@ TEST_CASE("[NextGeo] Invalid input is rejected") {
 	SUBCASE("No eligible surface") {
 		input.page_size = TEST_PAGE_SIZE;
 		input.surfaces.write[0].eligible = false;
+		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
+	}
+	ERR_PRINT_ON;
+}
+
+// --- Skinned rigs (issue #159) ---
+// The Character Walk asset is not in this repository, so two synthetic rigs and one
+// character-like grid stand in for it; the asset run is PQ work.
+
+inline void init_skin(NextGeoSurfaceInput &r_surface, uint32_t p_influences) {
+	r_surface.skin_influences = p_influences;
+	r_surface.bones.resize(r_surface.positions.size() * int(p_influences));
+	r_surface.weights.resize(r_surface.positions.size() * int(p_influences));
+}
+
+inline void set_skin(NextGeoSurfaceInput &r_surface, int p_vertex, const int32_t *p_bones, const float *p_weights) {
+	for (uint32_t k = 0; k < r_surface.skin_influences; k++) {
+		r_surface.bones.write[p_vertex * int(r_surface.skin_influences) + int(k)] = p_bones[k];
+		r_surface.weights.write[p_vertex * int(r_surface.skin_influences) + int(k)] = p_weights[k];
+	}
+}
+
+// Rig 1: a chain along x. Bone i owns the strip [i, i + 1) and blends into i + 1.
+inline NextGeoBuildInput make_chain_rig_input() {
+	NextGeoSurfaceInput surface;
+	append_grid_block(surface, 0, 48, 0, 8, 0.25f, 1.0f, HEIGHT_TERRAIN);
+	init_skin(surface, 4);
+	for (int v = 0; v < surface.positions.size(); v++) {
+		const float x = float(surface.positions[v].x);
+		const int bone = CLAMP(int(x), 0, 11);
+		const float frac = CLAMP(x - float(bone), 0.0f, 1.0f);
+		const int32_t bones[4] = { bone, MIN(bone + 1, 11), bone, bone };
+		const float weights[4] = { 1.0f - frac, bone < 11 ? frac : 0.0f, 0.0f, 0.0f };
+		const float fixed[4] = { bone < 11 ? weights[0] : 1.0f, weights[1], 0.0f, 0.0f };
+		set_skin(surface, v, bones, fixed);
+	}
+	NextGeoBuildInput input;
+	input.surfaces.push_back(surface);
+	input.page_size = TEST_PAGE_SIZE;
+	return input;
+}
+
+// Rig 2: a sphere with 8 influences per vertex over 24 bones.
+inline NextGeoBuildInput make_sphere_rig_input() {
+	NextGeoSurfaceInput surface = make_sphere(32, 20);
+	init_skin(surface, 8);
+	for (int v = 0; v < surface.positions.size(); v++) {
+		const Vector3 position = surface.positions[v];
+		const int base = CLAMP(int((float(position.y) + 1.0f) * 6.0f), 0, 11);
+		int32_t bones[8];
+		float weights[8];
+		for (int k = 0; k < 8; k++) {
+			bones[k] = (base * 2 + k) % 24;
+			weights[k] = float(8 - k) / 36.0f; // Sums to 1.
+		}
+		set_skin(surface, v, bones, weights);
+	}
+	NextGeoBuildInput input;
+	input.surfaces.push_back(surface);
+	input.page_size = TEST_PAGE_SIZE;
+	return input;
+}
+
+// Rig 3: a character-like sheet. Sixteen bones on a 4 x 4 lattice; every vertex
+// blends the four nearest bone centers with bilinear weights.
+inline NextGeoBuildInput make_grid_rig_input() {
+	NextGeoSurfaceInput surface;
+	append_grid_block(surface, 0, 32, 0, 32, 0.25f, 1.0f, HEIGHT_TERRAIN);
+	init_skin(surface, 4);
+	for (int v = 0; v < surface.positions.size(); v++) {
+		const float gx = CLAMP(float(surface.positions[v].x) / 8.0f * 3.0f, 0.0f, 2.999f);
+		const float gz = CLAMP(float(surface.positions[v].z) / 8.0f * 3.0f, 0.0f, 2.999f);
+		const int ix = int(gx);
+		const int iz = int(gz);
+		const float fx = gx - float(ix);
+		const float fz = gz - float(iz);
+		const int32_t bones[4] = { iz * 4 + ix, iz * 4 + ix + 1, (iz + 1) * 4 + ix, (iz + 1) * 4 + ix + 1 };
+		const float weights[4] = { (1.0f - fx) * (1.0f - fz), fx * (1.0f - fz), (1.0f - fx) * fz, fx * fz };
+		set_skin(surface, v, bones, weights);
+	}
+	NextGeoBuildInput input;
+	input.surfaces.push_back(surface);
+	input.page_size = TEST_PAGE_SIZE;
+	return input;
+}
+
+inline void check_skin_invariants(const NextGeoBuildInput &p_input, const NextGeoBuildOutput &p_dag) {
+	REQUIRE((p_dag.skin_influences == 4 || p_dag.skin_influences == 8));
+	REQUIRE(p_dag.cluster_skin.size() == p_dag.clusters.size());
+	CHECK(p_dag.skin_indices.size() == p_dag.vertex_sources.size() * p_dag.skin_influences);
+	CHECK(p_dag.skin_weights.size() == p_dag.vertex_sources.size() * p_dag.skin_influences);
+	CHECK(p_dag.skin_bounds.size() == p_dag.skin_bones.size() * 6);
+
+	uint32_t bad_bone_lists = 0;
+	uint32_t bad_weights = 0;
+	uint32_t bad_bones = 0;
+	uint32_t bad_bounds = 0;
+	for (uint32_t ci = 0; ci < p_dag.clusters.size(); ci++) {
+		const NextGeoCluster &cluster = p_dag.clusters[ci];
+		const NextGeoClusterSkin &skin = p_dag.cluster_skin[ci];
+		// Split clusters touch at most 16 bones. A lone (coarse) triangle cannot be
+		// split further, so it may touch up to 3 * influences: at most 12 with the
+		// 4-weight layout, 24 with 8 weights.
+		const uint32_t bone_limit = cluster.triangle_count == 1 ? 3 * p_dag.skin_influences : NEXTGEO_MAX_CLUSTER_BONES;
+		if (skin.bone_count > bone_limit || skin.bone_offset + skin.bone_count > p_dag.skin_bones.size()) {
+			bad_bone_lists++;
+			continue;
+		}
+		for (uint32_t b = 1; b < skin.bone_count; b++) {
+			if (p_dag.skin_bones[skin.bone_offset + b] <= p_dag.skin_bones[skin.bone_offset + b - 1]) {
+				bad_bone_lists++;
+			}
+		}
+		const NextGeoSurfaceInput &surface = p_input.surfaces[cluster.surface_id];
+		for (uint32_t v = 0; v < cluster.vertex_count; v++) {
+			const uint32_t out_vertex = cluster.vertex_offset + v;
+			const uint32_t source = p_dag.vertex_sources[out_vertex];
+			const float *position = &p_dag.vertices[out_vertex * p_dag.vertex_stride];
+			for (uint32_t k = 0; k < p_dag.skin_influences; k++) {
+				const uint32_t slot = out_vertex * p_dag.skin_influences + k;
+				const float weight = float(p_dag.skin_weights[slot]) / 65535.0f;
+				// Retained vertices keep their source weights (unorm16 rounding only).
+				if (k < surface.skin_influences && std::abs(weight - surface.weights[source * surface.skin_influences + k]) > 1.0f / 65535.0f) {
+					bad_weights++;
+				}
+				if (p_dag.skin_weights[slot] == 0) {
+					continue;
+				}
+				const uint8_t local_bone = p_dag.skin_indices[slot];
+				if (local_bone >= skin.bone_count) {
+					bad_bones++;
+					continue;
+				}
+				if (k < surface.skin_influences && surface.weights[source * surface.skin_influences + k] > 0.0f &&
+						p_dag.skin_bones[skin.bone_offset + local_bone] != uint16_t(surface.bones[source * surface.skin_influences + k])) {
+					bad_bones++;
+				}
+				// The bind-space AABB of a bone contains every vertex weighted on it.
+				const float *aabb = &p_dag.skin_bounds[uint32_t(skin.bone_offset + local_bone) * 6];
+				for (int axis = 0; axis < 3; axis++) {
+					if (position[axis] < aabb[axis] || position[axis] > aabb[3 + axis]) {
+						bad_bounds++;
+					}
+				}
+			}
+		}
+	}
+	CHECK_MESSAGE(bad_bone_lists == 0, "Cluster bone lists are sorted, in range and at most 16 long.");
+	CHECK_MESSAGE(bad_weights == 0, "Retained vertices keep their source weights (unorm16 rounding only).");
+	CHECK_MESSAGE(bad_bones == 0, "Cluster-local bone indices resolve to the source bones.");
+	CHECK_MESSAGE(bad_bounds == 0, "Bone AABBs contain their bind-pose vertices.");
+}
+
+// Poses every output vertex under random bone transforms and checks it against the
+// union of (bone transform x bind-space AABB) of its cluster.
+inline uint32_t count_pose_bound_violations(const NextGeoBuildOutput &p_dag, uint32_t p_poses, uint64_t p_seed) {
+	uint32_t bone_total = 0;
+	for (uint16_t bone : p_dag.skin_bones) {
+		bone_total = MAX(bone_total, uint32_t(bone) + 1);
+	}
+	RandomPCG rng(p_seed);
+	LocalVector<Transform3D> transforms;
+	transforms.resize(bone_total);
+	uint32_t violations = 0;
+	constexpr double EPS = 0.01;
+	for (uint32_t pose = 0; pose < p_poses; pose++) {
+		for (uint32_t b = 0; b < bone_total; b++) {
+			Basis basis = Basis::from_euler(Vector3(rng.randd() * Math::TAU, rng.randd() * Math::TAU, rng.randd() * Math::TAU));
+			basis.scale(Vector3(0.5 + rng.randd() * 1.5, 0.5 + rng.randd() * 1.5, 0.5 + rng.randd() * 1.5));
+			transforms[b] = Transform3D(basis, Vector3(rng.randd() * 4.0 - 2.0, rng.randd() * 4.0 - 2.0, rng.randd() * 4.0 - 2.0));
+		}
+		for (uint32_t ci = 0; ci < p_dag.clusters.size(); ci++) {
+			const NextGeoCluster &cluster = p_dag.clusters[ci];
+			const NextGeoClusterSkin &skin = p_dag.cluster_skin[ci];
+			if (skin.bone_count == 0) {
+				continue;
+			}
+			Vector3 bound_min(FLT_MAX, FLT_MAX, FLT_MAX);
+			Vector3 bound_max(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+			for (uint32_t b = 0; b < skin.bone_count; b++) {
+				const float *aabb = &p_dag.skin_bounds[uint32_t(skin.bone_offset + b) * 6];
+				const Transform3D &xf = transforms[p_dag.skin_bones[skin.bone_offset + b]];
+				for (int corner = 0; corner < 8; corner++) {
+					const Vector3 posed = xf.xform(Vector3(aabb[(corner & 1) ? 3 : 0], aabb[(corner & 2) ? 4 : 1], aabb[(corner & 4) ? 5 : 2]));
+					bound_min = bound_min.min(posed);
+					bound_max = bound_max.max(posed);
+				}
+			}
+			for (uint32_t v = 0; v < cluster.vertex_count; v++) {
+				const uint32_t out_vertex = cluster.vertex_offset + v;
+				const float *vertex = &p_dag.vertices[out_vertex * p_dag.vertex_stride];
+				const Vector3 bind(vertex[0], vertex[1], vertex[2]);
+				Vector3 posed;
+				for (uint32_t k = 0; k < p_dag.skin_influences; k++) {
+					const uint32_t slot = out_vertex * p_dag.skin_influences + k;
+					const float weight = float(p_dag.skin_weights[slot]) / 65535.0f;
+					if (weight == 0.0f) {
+						continue;
+					}
+					const uint16_t bone = p_dag.skin_bones[skin.bone_offset + p_dag.skin_indices[slot]];
+					posed += transforms[bone].xform(bind) * weight;
+				}
+				if (posed.x < bound_min.x - EPS || posed.y < bound_min.y - EPS || posed.z < bound_min.z - EPS ||
+						posed.x > bound_max.x + EPS || posed.y > bound_max.y + EPS || posed.z > bound_max.z + EPS) {
+					violations++;
+				}
+			}
+		}
+	}
+	return violations;
+}
+
+TEST_CASE("[NextGeo] Skinned DAGs keep the 16-bone limit, source weights and bone bounds") {
+	const NextGeoBuildInput inputs[3] = { make_chain_rig_input(), make_sphere_rig_input(), make_grid_rig_input() };
+	for (int rig = 0; rig < 3; rig++) {
+		NextGeoBuildOutput dag;
+		REQUIRE(nextgeo_build_dag(inputs[rig], dag) == OK);
+		check_dag_invariants(inputs[rig], dag);
+		check_skin_invariants(inputs[rig], dag);
+		CHECK_MESSAGE(count_pose_bound_violations(dag, 1000, TEST_SEED + 100 + rig) == 0, "1,000 random poses: every skinned vertex inside its cluster bound.");
+	}
+}
+
+TEST_CASE("[NextGeo] Skinned clusters split at the bone limit") {
+	NextGeoSurfaceInput surface;
+	append_grid_block(surface, 0, 32, 0, 32, 1.0f, 1.0f, HEIGHT_TERRAIN);
+	init_skin(surface, 4);
+	// One distinct bone per vertex: an unsplit 128-vertex cluster would touch 128.
+	for (int v = 0; v < surface.positions.size(); v++) {
+		const int32_t bones[4] = { v, v, v, v };
+		const float weights[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+		set_skin(surface, v, bones, weights);
+	}
+	NextGeoBuildInput input;
+	input.surfaces.push_back(surface);
+	input.page_size = TEST_PAGE_SIZE;
+	NextGeoBuildOutput dag;
+	REQUIRE(nextgeo_build_dag(input, dag) == OK);
+	check_dag_invariants(input, dag);
+	check_skin_invariants(input, dag);
+	uint32_t one_triangles = 0;
+	for (const NextGeoCluster &cluster : dag.clusters) {
+		if (cluster.refined_group < 0) {
+			one_triangles += cluster.triangle_count;
+		}
+	}
+	CHECK(one_triangles == dag.source_triangle_count);
+}
+
+TEST_CASE("[NextGeo] Skinned pages fit a one-cluster page_size") {
+	NextGeoBuildInput input = make_chain_rig_input();
+	input.page_size = nextgeo_page_bytes(nextgeo_cluster_payload_bytes(NEXTGEO_MAX_CLUSTER_VERTICES, NEXTGEO_MAX_CLUSTER_TRIANGLES, 12) +
+			nextgeo_cluster_skin_bytes(NEXTGEO_MAX_CLUSTER_BONES, NEXTGEO_MAX_CLUSTER_VERTICES, 4));
+	NextGeoBuildOutput dag;
+	REQUIRE(nextgeo_build_dag(input, dag) == OK);
+	check_dag_invariants(input, dag);
+	check_skin_invariants(input, dag);
+	CHECK(dag.pages.size() > 1);
+}
+
+TEST_CASE("[NextGeo] Two skinned builds are byte-identical") {
+	const NextGeoBuildInput input = make_grid_rig_input();
+	NextGeoBuildOutput first;
+	NextGeoBuildOutput second;
+	REQUIRE(nextgeo_build_dag(input, first) == OK);
+	REQUIRE(nextgeo_build_dag(input, second) == OK);
+	CHECK_MESSAGE(same_output(first, second), "Two threaded skinned builds give byte-identical output, skinning included.");
+	NextGeoBuildInput single_input = input;
+	single_input.use_threads = false;
+	NextGeoBuildOutput single;
+	REQUIRE(nextgeo_build_dag(single_input, single) == OK);
+	CHECK(same_output(first, single));
+}
+
+TEST_CASE("[NextGeo] Invalid skinning input is rejected") {
+	NextGeoBuildInput input = make_chain_rig_input();
+	NextGeoBuildOutput output;
+	ERR_PRINT_OFF;
+	SUBCASE("Mismatched bone count") {
+		input.surfaces.write[0].bones.resize(3);
+		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
+	}
+	SUBCASE("Negative bone index") {
+		input.surfaces.write[0].bones.write[0] = -1;
+		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
+	}
+	SUBCASE("Unsupported influence count") {
+		input.surfaces.write[0].skin_influences = 5;
+		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
+	}
+	SUBCASE("Negative weight") {
+		input.surfaces.write[0].weights.write[0] = -0.5f;
+		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
+	}
+	SUBCASE("Bones without influences") {
+		input.surfaces.write[0].skin_influences = 0;
 		CHECK(nextgeo_build_dag(input, output) == ERR_INVALID_DATA);
 	}
 	ERR_PRINT_ON;

@@ -239,6 +239,15 @@ int64_t VirtualGeometryData::get_page_size() const {
 	return page_size;
 }
 
+void VirtualGeometryData::set_skin_influences(int p_influences) {
+	skin_influences = p_influences;
+	emit_changed();
+}
+
+int VirtualGeometryData::get_skin_influences() const {
+	return skin_influences;
+}
+
 void VirtualGeometryData::set_ngm_page_table(uint32_t p_vertex_layout, const PackedInt32Array &p_page_groups) {
 	ngm_vertex_layout = p_vertex_layout;
 	ngm_page_groups = p_page_groups;
@@ -276,6 +285,7 @@ void VirtualGeometryData::reset_state() {
 	dag_depth = 0;
 	page_count = 0;
 	page_size = 0;
+	skin_influences = 0;
 	ngm_vertex_layout = 0;
 	ngm_page_groups.clear();
 }
@@ -327,6 +337,8 @@ void VirtualGeometryData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_page_count"), &VirtualGeometryData::get_page_count);
 	ClassDB::bind_method(D_METHOD("set_page_size", "size"), &VirtualGeometryData::set_page_size);
 	ClassDB::bind_method(D_METHOD("get_page_size"), &VirtualGeometryData::get_page_size);
+	ClassDB::bind_method(D_METHOD("set_skin_influences", "influences"), &VirtualGeometryData::set_skin_influences);
+	ClassDB::bind_method(D_METHOD("get_skin_influences"), &VirtualGeometryData::get_skin_influences);
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "format_version"), "set_format_version", "get_format_version");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "dag_header", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_dag_header", "get_dag_header");
@@ -351,4 +363,5 @@ void VirtualGeometryData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "dag_depth"), "set_dag_depth", "get_dag_depth");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "page_count"), "set_page_count", "get_page_count");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "page_size"), "set_page_size", "get_page_size");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "skin_influences"), "set_skin_influences", "get_skin_influences");
 }

@@ -146,7 +146,9 @@ TEST_CASE("[NextGeo][Import] Eligibility reasons match the fallback codes") {
 		TypedArray<Array> shapes;
 		shapes.push_back(shape_arrays);
 		shaped->add_surface(Mesh::PRIMITIVE_TRIANGLES, donor->get_surface_arrays(0), shapes);
-		CHECK(shaped->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_SKINNING);
+		// Blend shapes stay legacy with their own reason, skinned opt-in included (#159).
+		CHECK(shaped->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_BLEND_SHAPES);
+		CHECK(shaped->get_virtual_geometry_eligibility(true)[0] == NEXTGEO_FALLBACK_BLEND_SHAPES);
 	}
 
 	{
@@ -176,6 +178,8 @@ TEST_CASE("[NextGeo][Import] Eligibility reasons match the fallback codes") {
 		skinned.instantiate();
 		skinned->add_surface(Mesh::PRIMITIVE_TRIANGLES, arrays);
 		CHECK(skinned->get_virtual_geometry_eligibility()[0] == NEXTGEO_FALLBACK_SKINNING);
+		// The skinned opt-in (issue #159) makes the same surface eligible.
+		CHECK(skinned->get_virtual_geometry_eligibility(true)[0] == NEXTGEO_FALLBACK_NONE);
 	}
 
 	{

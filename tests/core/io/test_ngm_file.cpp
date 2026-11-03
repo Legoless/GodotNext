@@ -245,11 +245,19 @@ TEST_CASE("[NextGeo][NGM] Corrupt, truncated and version-mismatched files") {
 	}
 
 	Vector<uint8_t> unknown_flag = original;
-	store_u32(unknown_flag, 12, 2);
+	store_u32(unknown_flag, 12, 4); // Bit 1 is NGM_FLAG_SKINNED (#159); bit 2 stays unknown.
 	{
 		Ref<NGMFile> file;
 		file.instantiate();
 		CHECK(file->open(write_patched("ngm72_unknown_flag.ngm", unknown_flag)) == ERR_FILE_UNRECOGNIZED);
+	}
+
+	Vector<uint8_t> skinned_without_influences = original;
+	store_u32(skinned_without_influences, 12, NGM_FLAG_SKINNED);
+	{
+		Ref<NGMFile> file;
+		file.instantiate();
+		CHECK(file->open(write_patched("ngm159_skinned_no_influences.ngm", skinned_without_influences)) == ERR_FILE_CORRUPT);
 	}
 
 	Vector<uint8_t> bad_crc = original;

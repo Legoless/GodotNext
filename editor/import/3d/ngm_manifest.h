@@ -40,7 +40,7 @@ String ngm_embedded_path(const String &p_base_path, const String &p_key);
 // mesh does not fail the scene import. `p_strip_authored` replaces virtualized surfaces
 // with the coarse root cut (OBJ `strip_authored_to_coarse` only). A mesh with no eligible
 // surface, or a null hook, adds no entry.
-Error ngm_build_mesh(const Ref<ImporterMesh> &p_mesh, const String &p_ngm_path, const String &p_key, bool p_strip_authored, Array &r_entries);
+Error ngm_build_mesh(const Ref<ImporterMesh> &p_mesh, const String &p_ngm_path, const String &p_key, bool p_strip_authored, Array &r_entries, bool p_skinned = false);
 
 // Writes `<base>.ngm_manifest.json` and drops `.ngm` files listed in the previous manifest
 // that this import no longer produces, including `save_to_file` siblings. When generation

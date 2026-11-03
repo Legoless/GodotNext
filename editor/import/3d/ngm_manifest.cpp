@@ -107,9 +107,9 @@ static void _delete_stale(const Array &p_old_entries, const HashSet<String> &p_k
 	}
 }
 
-Error ngm_build_mesh(const Ref<ImporterMesh> &p_mesh, const String &p_ngm_path, const String &p_key, bool p_strip_authored, Array &r_entries) {
+Error ngm_build_mesh(const Ref<ImporterMesh> &p_mesh, const String &p_ngm_path, const String &p_key, bool p_strip_authored, Array &r_entries, bool p_skinned) {
 	ERR_FAIL_COND_V(p_mesh.is_null(), ERR_INVALID_PARAMETER);
-	const Error err = p_mesh->build_virtual_geometry(p_ngm_path);
+	const Error err = p_mesh->build_virtual_geometry(p_ngm_path, p_skinned);
 	if (err != OK) {
 		WARN_PRINT(vformat("Virtual geometry build failed for '%s' (error %d). The mesh will import without virtual geometry.", p_key, err));
 		return OK;

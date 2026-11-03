@@ -236,6 +236,8 @@ class ResourceImporterScene : public ResourceImporter {
 	String _ngm_base_path;
 	String _ngm_source_path;
 	bool _ngm_generate = false;
+	// GodotNext: nextgeo_skinned
+	bool _ngm_skinned = false;
 	bool _ngm_single_mesh = false;
 	Array _ngm_entries;
 	List<String> *_ngm_gen_files = nullptr;

@@ -121,13 +121,20 @@ static Vector<int32_t> _as_indices(const Variant &p_value) {
 	return p_value;
 }
 
-static void _copy_triangle_surface(const Array &p_arrays, NextGeoSurfaceInput &r_surface) {
+static void _copy_triangle_surface(const Array &p_arrays, uint64_t p_flags, NextGeoSurfaceInput &r_surface) {
 	r_surface.positions = _as_vec3(p_arrays[Mesh::ARRAY_VERTEX]);
 	r_surface.normals = _as_vec3(p_arrays[Mesh::ARRAY_NORMAL]);
 	r_surface.tangents = _as_floats(p_arrays[Mesh::ARRAY_TANGENT]);
 	r_surface.uv0 = _as_vec2(p_arrays[Mesh::ARRAY_TEX_UV]);
 	r_surface.uv2 = _as_vec2(p_arrays[Mesh::ARRAY_TEX_UV2]);
 	r_surface.colors = _as_colors(p_arrays[Mesh::ARRAY_COLOR]);
+	// Skinned surfaces (issue #159): both the 4-weight layout and
+	// ARRAY_FLAG_USE_8_BONE_WEIGHTS. The builder validates the array sizes.
+	r_surface.bones = _as_indices(p_arrays[Mesh::ARRAY_BONES]);
+	r_surface.weights = _as_floats(p_arrays[Mesh::ARRAY_WEIGHTS]);
+	if (!r_surface.bones.is_empty() || !r_surface.weights.is_empty()) {
+		r_surface.skin_influences = (p_flags & Mesh::ARRAY_FLAG_USE_8_BONE_WEIGHTS) != 0 ? 8 : 4;
+	}
 	r_surface.indices = _as_indices(p_arrays[Mesh::ARRAY_INDEX]);
 
 	const int count = r_surface.positions.size();
@@ -166,7 +173,7 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 		// lines up with the ImporterMesh, but they are empty so the builder does not
 		// reject the whole mesh. Ineligible triangles are passed through so borders lock.
 		if (src.primitive == Mesh::PRIMITIVE_TRIANGLES && _arrays_are_triangles(src.arrays)) {
-			_copy_triangle_surface(src.arrays, surface);
+			_copy_triangle_surface(src.arrays, src.flags, surface);
 			surface.eligible = want_eligible;
 			if (want_eligible) {
 				any_eligible = true;

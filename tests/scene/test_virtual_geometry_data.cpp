@@ -410,6 +410,87 @@ void check_written_pages_fit(uint32_t p_page_size, const String &p_path, bool p_
 	NGMHandlePool::get_singleton().clear();
 }
 
+NextGeoSurfaceInput make_skinned_grid(int p_cells) {
+	NextGeoSurfaceInput surface = make_grid(p_cells);
+	surface.skin_influences = 4;
+	surface.bones.resize(surface.positions.size() * 4);
+	surface.weights.resize(surface.positions.size() * 4);
+	for (int v = 0; v < surface.positions.size(); v++) {
+		const int bone = CLAMP(int(surface.positions[v].x) / 4, 0, 3);
+		for (int k = 0; k < 4; k++) {
+			surface.bones.write[v * 4 + k] = bone;
+			surface.weights.write[v * 4 + k] = k == 0 ? 1.0f : 0.0f;
+		}
+	}
+	return surface;
+}
+
+TEST_CASE("[NextGeo][VGD] Skinned build writes a byte-identical .ngm with a skinning section") {
+	NGMHandlePool::get_singleton().clear();
+	Vector<uint8_t> files[3];
+	for (int run = 0; run < 3; run++) {
+		NextGeoBuildInput input;
+		input.surfaces.push_back(make_skinned_grid(16));
+		input.page_size = NGM_PROVISIONAL_PAGE_SIZE;
+		input.use_threads = run != 2;
+		NextGeoBuildOutput output;
+		REQUIRE(nextgeo_build_dag(input, output) == OK);
+		CHECK(output.skin_influences == 4);
+
+		Vector<Vector<uint8_t>> payloads;
+		REQUIRE(nextgeo_write_pages(output, payloads) == OK);
+		for (int i = 0; i < payloads.size(); i++) {
+			CHECK(uint32_t(payloads[i].size()) <= NGM_PROVISIONAL_PAGE_SIZE);
+			// The page header's skin_bytes covers the section after the triangles.
+			CHECK(read_u32(payloads[i], 12) > 0);
+		}
+
+		Ref<VirtualGeometryData> data;
+		data.instantiate();
+		REQUIRE(nextgeo_fill_vgd(input, output, payloads, data) == OK);
+		CHECK(data->get_skin_influences() == 4);
+		TypedArray<Array> fallback = data->get_coarse_fallback();
+		REQUIRE(fallback.size() == 1);
+		Array arrays = fallback[0];
+		PackedVector3Array fallback_vertices = arrays[Mesh::ARRAY_VERTEX];
+		PackedInt32Array fallback_bones = arrays[Mesh::ARRAY_BONES];
+		PackedFloat32Array fallback_weights = arrays[Mesh::ARRAY_WEIGHTS];
+		CHECK(fallback_bones.size() == fallback_vertices.size() * 4);
+		CHECK(fallback_weights.size() == fallback_vertices.size() * 4);
+
+		NGMHeader header;
+		REQUIRE(nextgeo_fill_ngm_header(output, payloads, header) == OK);
+		CHECK(header.version == NGM_VERSION);
+		CHECK(header.flags == NGM_FLAG_SKINNED);
+		CHECK(header.skin_influences == 4);
+
+		Vector<NGMPage> pages;
+		pages.resize(payloads.size());
+		for (int i = 0; i < payloads.size(); i++) {
+			pages.write[i].bytes = payloads[i];
+			pages.write[i].first_group = output.pages[i].group_offset;
+			pages.write[i].group_count = output.pages[i].group_count;
+		}
+		const String path = TestUtils::get_temp_path("ngm159_skinned_" + itos(run) + ".ngm");
+		REQUIRE(NGMWriter::write(path, header, pages) == OK);
+		files[run] = FileAccess::get_file_as_bytes(path);
+
+		Ref<NGMFile> file;
+		file.instantiate();
+		REQUIRE(file->open(path) == OK);
+		CHECK(file->get_header().flags == NGM_FLAG_SKINNED);
+		CHECK(file->get_header().skin_influences == 4);
+		for (int i = 0; i < payloads.size(); i++) {
+			Vector<uint8_t> read_back;
+			REQUIRE(file->read_page(i, read_back) == OK);
+			CHECK(read_back == payloads[i]);
+		}
+		DirAccess::remove_absolute(path);
+	}
+	CHECK_MESSAGE((files[0] == files[1] && files[1] == files[2]), "Byte-identical .ngm across 3 runs (threaded, threaded, single-threaded).");
+	NGMHandlePool::get_singleton().clear();
+}
+
 TEST_CASE("[NextGeo][VGD] Every stored page fits in page_size") {
 	NGMHandlePool::get_singleton().clear();
 	check_written_pages_fit(NGM_PROVISIONAL_PAGE_SIZE, TestUtils::get_temp_path("ngm72_pages_64k.ngm"), false);

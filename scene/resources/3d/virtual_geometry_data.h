@@ -69,6 +69,7 @@ private:
 	int64_t dag_depth = 0;
 	int64_t page_count = 0;
 	int64_t page_size = 0;
+	int skin_influences = 0; // 0 (unskinned), 4 or 8. The skinning data is in the `.ngm` pages.
 	// Not saved and not bound. The importer hook stashes what NGMWriter needs beyond the
 	// page payloads: vertex layout, and (first_group, group_count) pairs in page order.
 	uint32_t ngm_vertex_layout = 0;
@@ -158,6 +159,9 @@ public:
 
 	void set_page_size(int64_t p_size);
 	int64_t get_page_size() const;
+
+	void set_skin_influences(int p_influences);
+	int get_skin_influences() const;
 
 	// Transient `.ngm` write table. Cleared by reset_state. Not a property.
 	void set_ngm_page_table(uint32_t p_vertex_layout, const PackedInt32Array &p_page_groups);

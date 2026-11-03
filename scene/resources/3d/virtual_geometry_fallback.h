@@ -60,4 +60,7 @@ enum NextGeoFallback {
 	NEXTGEO_FALLBACK_MSAA = 19,
 	NEXTGEO_FALLBACK_MULTIVIEW = 20,
 	NEXTGEO_FALLBACK_DEBUG_DRAW = 21,
+	// Blend shapes stay on legacy raster (issue #159); skinning alone no longer
+	// implies this or NEXTGEO_FALLBACK_SKINNING when skinned virtual geometry is on.
+	NEXTGEO_FALLBACK_BLEND_SHAPES = 22,
 };
