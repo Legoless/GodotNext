@@ -3118,6 +3118,12 @@ Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 	VkResult fence_status = vkGetFenceStatus(vk_device, fence->vk_fence);
 	if (fence_status == VK_NOT_READY) {
 		VkResult err = vkWaitForFences(vk_device, 1, &fence->vk_fence, VK_TRUE, UINT64_MAX);
+		// GodotNext: hwrt_safety_net
+		if (err == VK_ERROR_DEVICE_LOST) {
+			notify_device_lost();
+			print_lost_device_info();
+			CRASH_NOW_MSG("Vulkan device was lost. This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).");
+		}
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't wait for Vulkan fence (VkResult error %d).", err));
 	}
 
@@ -3329,6 +3335,8 @@ Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueu
 		device_queue.submit_mutex.unlock();
 
 		if (err == VK_ERROR_DEVICE_LOST) {
+			// GodotNext: hwrt_safety_net
+			notify_device_lost();
 			print_lost_device_info();
 			CRASH_NOW_MSG("Vulkan device was lost. This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).");
 		}
@@ -7549,6 +7557,11 @@ String RenderingDeviceDriverVulkan::get_api_name() const {
 String RenderingDeviceDriverVulkan::get_api_version() const {
 	uint32_t api_version = physical_device_properties.apiVersion;
 	return vformat("%d.%d.%d", VK_API_VERSION_MAJOR(api_version), VK_API_VERSION_MINOR(api_version), VK_API_VERSION_PATCH(api_version));
+}
+
+// GodotNext: hwrt_safety_net
+String RenderingDeviceDriverVulkan::get_driver_version_key() const {
+	return format_vulkan_driver_version_key(physical_device_properties.vendorID, physical_device_properties.deviceID, physical_device_properties.driverVersion);
 }
 
 String RenderingDeviceDriverVulkan::get_pipeline_cache_uuid() const {

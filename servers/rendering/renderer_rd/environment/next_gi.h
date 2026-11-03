@@ -51,8 +51,8 @@ namespace RendererRD {
 class NextGIRTScene;
 
 // NextGI host entry: the §3 tier selection (#15), the ray-query toolchain self-test (#20), the
-// Forward+ frame block (#26) and the RT scene (#28). #36 grows run_toolchain_selftest into the
-// startup 64-ray self-test.
+// Forward+ frame block (#26), the RT scene (#28) and the HWRT safety net (#36): the startup
+// 64-ray self-test and the device-loss crash latch.
 class NextGI {
 public:
 	// The NextGI tier (plan §3.1). P0 falls back to SDFGI; #187 replaces the fallback with TIER_SOFTWARE.
@@ -106,7 +106,7 @@ public:
 		TierReason driver_reason = NO_RAY_QUERY; // The driver's reason code when ray_query is false.
 		bool cpu_device = false; // get_device_type() == DEVICE_TYPE_CPU. Only the rule checks it.
 		bool ray_query_hw = false; // SUPPORTS_RAY_QUERY_HARDWARE: driver knowledge only.
-		// Pass defaults until #36 (self-test and crash latch) and the P1b AS budget (#39) feed them.
+		// #36 feeds selftest_passed and fault_latched. The AS budget stays a pass until #39.
 		bool selftest_passed = true;
 		bool fault_latched = false;
 		bool as_memory_ok = true;
@@ -148,6 +148,68 @@ public:
 	// lines with it and keeps line 1b out of the steady-state p95 (Q11).
 	static const PassSlotInfo PASS_SLOTS[PASS_SLOT_MAX];
 
+	// Startup self-test (#36). 48 hits, each at least 1e-3 in barycentric distance from every
+	// edge and with a distinct t, then 16 misses. One triangle, one instance, hit_sbt_range 0.
+	static constexpr int HWRT_SELFTEST_RAY_COUNT = 64;
+	static constexpr int HWRT_SELFTEST_HIT_COUNT = 48;
+	static constexpr int HWRT_SELFTEST_MISS_COUNT = 16;
+	static constexpr double HWRT_SELFTEST_REL_T = 1e-5;
+	static constexpr double HWRT_SELFTEST_ABS_BARY = 1e-5;
+	static constexpr double HWRT_SELFTEST_MIN_EDGE = 1e-3;
+
+	// std430 layout of the self-test ray: origin.xyz, tmin, dir.xyz, tmax. 32 bytes.
+	struct HWRTSelfTestRay {
+		float origin_x = 0.0f;
+		float origin_y = 0.0f;
+		float origin_z = 0.0f;
+		float tmin = 0.0f;
+		float dir_x = 0.0f;
+		float dir_y = 0.0f;
+		float dir_z = 0.0f;
+		float tmax = 0.0f;
+	};
+
+	// std430 layout of NextGIRayResult. 32 bytes.
+	struct HWRTSelfTestRecord {
+		float t = 0.0f;
+		uint32_t custom_index = 0;
+		uint32_t geometry_index = 0;
+		uint32_t primitive = 0;
+		float bary_u = 0.0f;
+		float bary_v = 0.0f;
+		uint32_t front_face = 0;
+		uint32_t hit = 0;
+	};
+
+	struct HWRTFaultFile {
+		bool valid = false;
+		String driver_key;
+		int64_t time = 0;
+	};
+
+	struct HWRTFaultLatch {
+		bool latched = false;
+		bool file_present = false;
+	};
+
+	// Captured when the callback is registered. The callback only writes this file.
+	struct HWRTFaultCallbackState {
+		String path;
+		String driver_key;
+	};
+
+	static void fill_hwrt_selftest(HWRTSelfTestRay (&r_rays)[HWRT_SELFTEST_RAY_COUNT], HWRTSelfTestRecord (&r_expected)[HWRT_SELFTEST_RAY_COUNT]);
+	// IDs exact, t within HWRT_SELFTEST_REL_T relative, barycentrics within HWRT_SELFTEST_ABS_BARY.
+	// p_corrupt_expected_t adds 1 to the first expected t (GODOTNEXT_NEXTGI_SELFTEST_CORRUPT).
+	static bool hwrt_selftest_records_match(const HWRTSelfTestRecord *p_got, const HWRTSelfTestRecord *p_expected, int p_count, bool p_corrupt_expected_t, String *r_reason = nullptr);
+	static String hwrt_fault_file_path();
+	static bool write_hwrt_fault_file(const String &p_path, const String &p_driver_key, int64_t p_time);
+	static HWRTFaultFile read_hwrt_fault_file(const String &p_path);
+	static void remove_hwrt_fault_file(const String &p_path);
+	// Same key and not Force latches. A different key deletes the file. Force keeps the file and does not latch.
+	static HWRTFaultLatch resolve_hwrt_fault_latch(const String &p_path, const String &p_driver_key, HardwareRayTracing p_setting);
+	static void hwrt_device_lost_callback(void *p_userdata);
+
 private:
 	static NextGI *singleton;
 
@@ -158,9 +220,20 @@ private:
 	TierResult reported_result;
 	int ray_query_shaders_initialized = 0;
 	bool shadow_batch_open = false;
+	// GodotNext: hwrt_safety_net
+	bool selftest_report_time = false;
+	uint64_t selftest_usec = 0;
+	int hwrt_frame_index = 0;
+	bool fault_callback_registered = false;
+	HWRTFaultCallbackState fault_callback_state;
 
 	void _report(const String &p_line, const TierResult &p_result) const;
 	void _clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const;
+	void _apply_safety_net(TierInputs &r_inputs);
+	void _sync_device_lost_callback();
+	void _unregister_device_lost_callback();
+	void _maybe_simulate_device_lost();
+	bool _run_hwrt_selftest(RenderingDevice *p_device, uint64_t &r_usec);
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *rt_scene = nullptr;
@@ -191,6 +264,12 @@ public:
 	static String get_quality_name(Quality p_quality);
 	// The one printed line, e.g. "NextGI: tier=FALLBACK reason=D3D12_NO_DXR (SDFGI fallback) quality=HIGH (auto selection pending)".
 	static String format_tier_line(const TierResult &p_result, Quality p_quality_setting);
+	// Prints that line. Appends " selftest=<ms>ms" when this selection ran the startup self-test.
+	void log_tier_selection(const String &p_line);
+
+	// The startup self-test source, built the way ShaderRD would. The only ray-query ShaderRD
+	// that is created before the HWRT decision, and it is freed again before the decision returns.
+	static String build_hwrt_selftest_source();
 
 	// Reads the nextgi/* project settings and the device, then evaluates and reports the tier.
 	void init(bool p_forward_plus);

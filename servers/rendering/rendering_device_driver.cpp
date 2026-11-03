@@ -94,4 +94,33 @@ void RenderingDeviceDriver::command_begin_compute_pass(CommandBufferID p_cmd_buf
 void RenderingDeviceDriver::command_end_compute_pass(CommandBufferID p_cmd_buffer) {
 }
 
+// GodotNext: hwrt_safety_net
+String RenderingDeviceDriver::format_driver_version_key(const String &p_vendor, const String &p_device_name, const String &p_api_version) {
+	return p_vendor + "|" + p_device_name + "|" + p_api_version;
+}
+
+String RenderingDeviceDriver::format_vulkan_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint32_t p_driver_version) {
+	return String::num_uint64(p_vendor_id) + ":" + String::num_uint64(p_device_id) + ":" + String::num_uint64(p_driver_version);
+}
+
+void RenderingDeviceDriver::set_driver_version_identity(const String &p_vendor, const String &p_device_name) {
+	driver_version_vendor = p_vendor;
+	driver_version_device = p_device_name;
+}
+
+String RenderingDeviceDriver::get_driver_version_key() const {
+	return format_driver_version_key(driver_version_vendor, driver_version_device, get_api_version());
+}
+
+void RenderingDeviceDriver::set_device_lost_callback(DeviceLostCallback p_callback, void *p_userdata) {
+	device_lost_callback = p_callback;
+	device_lost_userdata = p_userdata;
+}
+
+void RenderingDeviceDriver::notify_device_lost() {
+	if (device_lost_callback != nullptr) {
+		device_lost_callback(device_lost_userdata);
+	}
+}
+
 RenderingDeviceDriver::~RenderingDeviceDriver() {}

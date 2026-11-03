@@ -265,11 +265,13 @@ void NextGI::init(bool p_forward_plus) {
 	if (rd != nullptr) {
 		collect_device_inputs(rd, rd->get_device_api_name(), rd->get_device_type(), new_inputs);
 	}
+	_apply_safety_net(new_inputs);
 
 	String line;
 	if (update_tier(new_inputs, new_quality, line)) {
-		_report(line, result);
+		log_tier_selection(line);
 	}
+	_sync_device_lost_callback();
 
 	// GodotNext: nextgi_rt_scene
 	_ensure_rt_scene();
@@ -279,9 +281,16 @@ void NextGI::set_hardware_ray_tracing(int p_mode) {
 	ERR_FAIL_INDEX(p_mode, HARDWARE_RAY_TRACING_MAX);
 	TierInputs new_inputs = inputs;
 	new_inputs.hwrt_setting = HardwareRayTracing(p_mode);
+	// Doctests build their own NextGI. Only the renderer instance talks to the live device.
+	if (singleton == this) {
+		_apply_safety_net(new_inputs);
+	}
 	String line;
 	if (update_tier(new_inputs, quality_setting, line)) {
-		_report(line, result);
+		log_tier_selection(line);
+	}
+	if (singleton == this) {
+		_sync_device_lost_callback();
 	}
 
 	// GodotNext: nextgi_rt_scene
@@ -482,6 +491,8 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	ERR_FAIL_COND(rb.is_null());
 	ERR_FAIL_COND_MSG(p_normal_roughness_slices == nullptr || p_normal_roughness_slices[0].is_null(), "The NextGI frame block needs the depth + normal-roughness prepass.");
 
+	_maybe_simulate_device_lost();
+
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_BEGIN].name);
 	rd->draw_command_begin_label("NextGI");
@@ -523,6 +534,8 @@ NextGI::NextGI() {
 }
 
 NextGI::~NextGI() {
+	_unregister_device_lost_callback();
+
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
 		rt_scene->free();

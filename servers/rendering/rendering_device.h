@@ -1989,6 +1989,9 @@ public:
 	RenderingDeviceEnums::DeviceType get_device_type() const;
 	String get_device_api_name() const;
 	String get_device_api_version() const;
+	// GodotNext: hwrt_safety_net
+	String get_driver_version_key() const;
+	void set_device_lost_callback(RenderingDeviceDriver::DeviceLostCallback p_callback, void *p_userdata);
 	String get_device_pipeline_cache_uuid() const;
 
 	DriverWorkarounds get_driver_workarounds() const;

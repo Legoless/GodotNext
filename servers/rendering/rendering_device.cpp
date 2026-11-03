@@ -8176,6 +8176,21 @@ String RenderingDevice::get_device_api_version() const {
 	return driver->get_api_version();
 }
 
+// GodotNext: hwrt_safety_net
+String RenderingDevice::get_driver_version_key() const {
+	if (driver == nullptr) {
+		return String();
+	}
+	return driver->get_driver_version_key();
+}
+
+void RenderingDevice::set_device_lost_callback(RenderingDeviceDriver::DeviceLostCallback p_callback, void *p_userdata) {
+	if (driver == nullptr) {
+		return;
+	}
+	driver->set_device_lost_callback(p_callback, p_userdata);
+}
+
 String RenderingDevice::get_device_pipeline_cache_uuid() const {
 	return driver->get_pipeline_cache_uuid();
 }
@@ -8697,6 +8712,10 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	device = context->device_get(device_index);
 	err = driver->initialize(device_index, frame_count);
 	ERR_FAIL_COND_V_MSG(err != OK, FAILED, "Failed to initialize driver for device.");
+
+	// GodotNext: hwrt_safety_net
+	// The default driver-version key is vendor, device name and API version. Vulkan replaces it.
+	driver->set_driver_version_identity(_get_device_vendor_name(device), device.name);
 
 	if (is_main_instance) {
 		// Only the singleton instance with a display should print this information.

@@ -804,6 +804,8 @@ public:
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;
 	virtual String get_api_name() const override final;
 	virtual String get_api_version() const override final;
+	// GodotNext: hwrt_safety_net
+	virtual String get_driver_version_key() const override final;
 	virtual String get_pipeline_cache_uuid() const override final;
 	virtual const Capabilities &get_capabilities() const override final;
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const override final;

@@ -985,6 +985,15 @@ public:
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() = 0;
 	virtual String get_api_name() const = 0;
 	virtual String get_api_version() const = 0;
+	// GodotNext: hwrt_safety_net
+	// Default key is vendor, device name and API version. Vulkan overrides with vendorID:deviceID:driverVersion.
+	static String format_driver_version_key(const String &p_vendor, const String &p_device_name, const String &p_api_version);
+	static String format_vulkan_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint32_t p_driver_version);
+	void set_driver_version_identity(const String &p_vendor, const String &p_device_name);
+	virtual String get_driver_version_key() const;
+	typedef void (*DeviceLostCallback)(void *);
+	void set_device_lost_callback(DeviceLostCallback p_callback, void *p_userdata);
+	void notify_device_lost();
 	virtual String get_pipeline_cache_uuid() const = 0;
 	virtual const Capabilities &get_capabilities() const = 0;
 	virtual const RenderingShaderContainerFormat &get_shader_container_format() const = 0;
@@ -995,6 +1004,14 @@ public:
 
 	/******************/
 
+private:
+	// GodotNext: hwrt_safety_net
+	DeviceLostCallback device_lost_callback = nullptr;
+	void *device_lost_userdata = nullptr;
+	String driver_version_vendor;
+	String driver_version_device;
+
+public:
 	virtual ~RenderingDeviceDriver();
 };
 
