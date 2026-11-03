@@ -72,6 +72,11 @@ Record the new bake's host, commit and date in `PROVENANCE.md`.
 - `tests/tier/` — the NextGI tier check (#15). `run_tier_check.sh`
   enables NextGI for one run through `override.cfg` and runs
   `tier_check.tscn`; the project itself keeps NextGI off.
+- `tests/export/` — export fixtures and checks (#66, #242).
+  `run_export_check.sh <godot>` exports the whole testbed with the
+  "NextGeo Linux" and "NextGeo Android" presets, fails on any `ERROR:`
+  line and checks with `check_voxelgi_pack.gd` that each pack keeps the
+  VoxelGI hall's baked data.
 - `scenes/moving_light_door/` — two rooms, a 1 m door, and a moving
   omni light. Variants: `door_open`, `light_toggle`, `door_teleport`.
 - `scenes/time_of_day/` — courtyard plus interior. Variants: `sweep`

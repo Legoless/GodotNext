@@ -51,6 +51,9 @@ const String ENV_SCRIPT_ENCRYPTION_KEY = "GODOT_SCRIPT_ENCRYPTION_KEY";
 class EditorExportPlatform : public RefCounted {
 	GDCLASS(EditorExportPlatform, RefCounted);
 
+	// GodotNext: export_customize_skip_disabled
+	friend class ExportCustomizeTestAccess;
+
 protected:
 	static void _bind_methods();
 

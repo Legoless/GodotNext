@@ -34,27 +34,56 @@
 #include "core/math/transform_3d.h"
 #include "core/math/vector3i.h"
 #include "core/templates/rid.h"
+// GodotNext: dummy_voxel_gi_data
+#include "core/templates/rid_owner.h"
 #include "servers/rendering/environment/renderer_gi.h"
+// GodotNext: dummy_voxel_gi_data
+#include "servers/rendering/storage/utilities.h"
 
 namespace RendererDummy {
 
 class GI : public RendererGI {
+	// GodotNext: dummy_voxel_gi_data
+	// Keep the baked data, so a headless run (export, tools) saves it back unchanged.
+	static GI *singleton;
+
+	struct VoxelGI {
+		Transform3D to_cell_xform;
+		AABB bounds;
+		Vector3i octree_size;
+		Vector<uint8_t> octree_cells;
+		Vector<uint8_t> data_cells;
+		Vector<uint8_t> distance_field;
+		Vector<int> level_counts;
+		Dependency dependency;
+	};
+
+	mutable RID_Owner<VoxelGI, true> voxel_gi_owner;
+
 public:
 	/* VOXEL GI API */
 
-	virtual RID voxel_gi_allocate() override { return RID(); }
-	virtual void voxel_gi_free(RID p_rid) override {}
-	virtual void voxel_gi_initialize(RID p_rid) override {}
-	virtual void voxel_gi_allocate_data(RID p_voxel_gi, const Transform3D &p_to_cell_xform, const AABB &p_aabb, const Vector3i &p_octree_size, const Vector<uint8_t> &p_octree_cells, const Vector<uint8_t> &p_data_cells, const Vector<uint8_t> &p_distance_field, const Vector<int> &p_level_counts) override {}
+	// GodotNext: dummy_voxel_gi_data
+	static GI *get_singleton() { return singleton; }
+	GI();
+	~GI();
 
-	virtual AABB voxel_gi_get_bounds(RID p_voxel_gi) const override { return AABB(); }
-	virtual Vector3i voxel_gi_get_octree_size(RID p_voxel_gi) const override { return Vector3i(); }
-	virtual Vector<uint8_t> voxel_gi_get_octree_cells(RID p_voxel_gi) const override { return Vector<uint8_t>(); }
-	virtual Vector<uint8_t> voxel_gi_get_data_cells(RID p_voxel_gi) const override { return Vector<uint8_t>(); }
-	virtual Vector<uint8_t> voxel_gi_get_distance_field(RID p_voxel_gi) const override { return Vector<uint8_t>(); }
+	bool owns_voxel_gi(RID p_rid) const { return voxel_gi_owner.owns(p_rid); }
+	Dependency *voxel_gi_get_dependency(RID p_voxel_gi) const;
 
-	virtual Vector<int> voxel_gi_get_level_counts(RID p_voxel_gi) const override { return Vector<int>(); }
-	virtual Transform3D voxel_gi_get_to_cell_xform(RID p_voxel_gi) const override { return Transform3D(); }
+	virtual RID voxel_gi_allocate() override;
+	virtual void voxel_gi_free(RID p_rid) override;
+	virtual void voxel_gi_initialize(RID p_rid) override;
+	virtual void voxel_gi_allocate_data(RID p_voxel_gi, const Transform3D &p_to_cell_xform, const AABB &p_aabb, const Vector3i &p_octree_size, const Vector<uint8_t> &p_octree_cells, const Vector<uint8_t> &p_data_cells, const Vector<uint8_t> &p_distance_field, const Vector<int> &p_level_counts) override;
+
+	virtual AABB voxel_gi_get_bounds(RID p_voxel_gi) const override;
+	virtual Vector3i voxel_gi_get_octree_size(RID p_voxel_gi) const override;
+	virtual Vector<uint8_t> voxel_gi_get_octree_cells(RID p_voxel_gi) const override;
+	virtual Vector<uint8_t> voxel_gi_get_data_cells(RID p_voxel_gi) const override;
+	virtual Vector<uint8_t> voxel_gi_get_distance_field(RID p_voxel_gi) const override;
+
+	virtual Vector<int> voxel_gi_get_level_counts(RID p_voxel_gi) const override;
+	virtual Transform3D voxel_gi_get_to_cell_xform(RID p_voxel_gi) const override;
 
 	virtual void voxel_gi_set_dynamic_range(RID p_voxel_gi, float p_range) override {}
 	virtual float voxel_gi_get_dynamic_range(RID p_voxel_gi) const override { return 0; }

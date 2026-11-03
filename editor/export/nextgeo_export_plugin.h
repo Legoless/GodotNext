@@ -40,7 +40,10 @@
 class NextGeoExportPlugin : public EditorExportPlugin {
 	GDSOFTCLASS(NextGeoExportPlugin, EditorExportPlugin);
 
-	static constexpr uint32_t PLUGIN_VERSION = 1;
+	// Part of the customization configuration hash, so bumping it invalidates cached exports.
+	// 2: #242 fixed the dummy renderer dropping VoxelGI data, so scenes cached by version 1 may
+	// lack their GI data.
+	static constexpr uint32_t PLUGIN_VERSION = 2;
 
 	HashSet<String> exported_ngm;
 	bool strip_resources = false;

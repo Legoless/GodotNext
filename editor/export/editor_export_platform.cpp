@@ -925,6 +925,11 @@ bool EditorExportPlatform::_export_customize_object(Object *p_object, LocalVecto
 	List<PropertyInfo> props;
 	p_object->get_property_list(&props);
 	for (const PropertyInfo &E : props) {
+		// GodotNext: export_customize_skip_disabled
+		// Skip properties _validate_property disabled: they are not saved and may not be readable (GPUParticles3D draw passes past draw_passes).
+		if (E.usage == PROPERTY_USAGE_NONE) {
+			continue;
+		}
 		switch (E.type) {
 			case Variant::OBJECT: {
 				Ref<Resource> res = p_object->get(E.name);

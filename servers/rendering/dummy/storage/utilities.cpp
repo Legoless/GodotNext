@@ -30,6 +30,8 @@
 
 #include "utilities.h"
 
+// GodotNext: dummy_voxel_gi_data
+#include "servers/rendering/dummy/environment/gi.h"
 #include "servers/rendering/dummy/storage/light_storage.h"
 #include "servers/rendering/dummy/storage/material_storage.h"
 #include "servers/rendering/dummy/storage/mesh_storage.h"
@@ -46,6 +48,9 @@ RSE::InstanceType Utilities::get_base_type(RID p_rid) const {
 		return RSE::INSTANCE_MULTIMESH;
 	} else if (RendererDummy::LightStorage::get_singleton()->owns_lightmap(p_rid)) {
 		return RSE::INSTANCE_LIGHTMAP;
+		// GodotNext: dummy_voxel_gi_data
+	} else if (RendererDummy::GI::get_singleton()->owns_voxel_gi(p_rid)) {
+		return RSE::INSTANCE_VOXEL_GI;
 	}
 	return RSE::INSTANCE_NONE;
 }
@@ -68,6 +73,10 @@ bool Utilities::free(RID p_rid) {
 	} else if (RendererDummy::MaterialStorage::get_singleton()->owns_material(p_rid)) {
 		RendererDummy::MaterialStorage::get_singleton()->material_free(p_rid);
 		return true;
+		// GodotNext: dummy_voxel_gi_data
+	} else if (RendererDummy::GI::get_singleton()->owns_voxel_gi(p_rid)) {
+		RendererDummy::GI::get_singleton()->voxel_gi_free(p_rid);
+		return true;
 	}
 	return false;
 }
@@ -76,6 +85,9 @@ void Utilities::base_update_dependency(RID p_base, DependencyTracker *p_instance
 	if (RendererDummy::MeshStorage::get_singleton()->owns_mesh(p_base)) {
 		DummyMesh *mesh = RendererDummy::MeshStorage::get_singleton()->get_mesh(p_base);
 		p_instance->update_dependency(&mesh->dependency);
+		// GodotNext: dummy_voxel_gi_data
+	} else if (RendererDummy::GI::get_singleton()->owns_voxel_gi(p_base)) {
+		p_instance->update_dependency(RendererDummy::GI::get_singleton()->voxel_gi_get_dependency(p_base));
 	}
 }
 
