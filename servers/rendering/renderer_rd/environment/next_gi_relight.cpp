@@ -1,0 +1,881 @@
+/**************************************************************************/
+/*  next_gi_relight.cpp                                                   */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
+#include "next_gi_relight.h"
+
+#include "core/config/project_settings.h"
+#include "core/math/projection.h"
+#include "servers/rendering/renderer_geometry_instance.h"
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
+#include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server_globals.h"
+
+using namespace RendererRD;
+
+NextGIRelight *NextGIRelight::singleton = nullptr;
+
+struct NextGIRelightPageGPU {
+	uint32_t record_index = 0;
+	uint32_t card_index = 0;
+	uint32_t radiance_origin = 0;
+	uint32_t radiance_size = 0;
+	uint32_t mask_origin = 0;
+	uint32_t mask_size = 0;
+	uint32_t light_offset = 0;
+	uint32_t shadowed_count = 0;
+	uint32_t light_count = 0;
+	uint32_t stable_id = 0;
+	uint32_t pad0 = 0;
+	uint32_t pad1 = 0;
+};
+static_assert(sizeof(NextGIRelightPageGPU) == 48, "The relight page must match nextgi_src_relight.glsl.");
+
+struct NextGIRelightParamsGPU {
+	uint32_t frame = 0;
+	uint32_t ray_budget = 0;
+	uint32_t page_count = 0;
+	float rt_radius = 0.0f;
+};
+static_assert(sizeof(NextGIRelightParamsGPU) == 16, "The relight params must match nextgi_src_relight.glsl.");
+
+struct NextGIRelightCountersGPU {
+	uint32_t traced = 0;
+	uint32_t skipped = 0;
+	uint32_t reserved = 0;
+	uint32_t pad = 0;
+};
+
+struct NextGIRelight::ShaderState {
+	NextgiSrcRelightShaderRD shader;
+	RID version;
+	RID pipeline;
+};
+
+static uint32_t _pack_xy(uint32_t p_x, uint32_t p_y) {
+	return p_x | (p_y << 16);
+}
+
+static void _projection_to_columns(const Projection &p_projection, float r_matrix[16]) {
+	for (int column = 0; column < 4; column++) {
+		for (int row = 0; row < 4; row++) {
+			r_matrix[column * 4 + row] = p_projection.columns[column][row];
+		}
+	}
+}
+
+static Projection _world_shadow_matrix(const Projection &p_camera, const Transform3D &p_light_transform, const Rect2 &p_atlas) {
+	Projection correction;
+	correction.set_depth_correction(false, true, false);
+	const Projection camera = correction * p_camera;
+	Projection bias;
+	bias.set_light_bias();
+	Projection rect;
+	rect.set_light_atlas_rect(p_atlas);
+	// World space, where the forward renderer uses view space (D14).
+	return rect * bias * camera * Projection(p_light_transform.inverse());
+}
+
+static Basis _record_basis(const NextGIInstanceRecord &p_record) {
+	Basis basis;
+	basis.rows[0] = Vector3(p_record.object_to_world[0], p_record.object_to_world[1], p_record.object_to_world[2]);
+	basis.rows[1] = Vector3(p_record.object_to_world[4], p_record.object_to_world[5], p_record.object_to_world[6]);
+	basis.rows[2] = Vector3(p_record.object_to_world[8], p_record.object_to_world[9], p_record.object_to_world[10]);
+	return basis;
+}
+
+static Vector3 _record_origin(const NextGIInstanceRecord &p_record) {
+	return Vector3(p_record.object_to_world[3], p_record.object_to_world[7], p_record.object_to_world[11]);
+}
+
+static Vector3 _card_world(const NextGICard &p_card, const NextGIInstanceRecord &p_record, const Vector3 &p_object) {
+	return _record_basis(p_record).xform(p_object) + _record_origin(p_record);
+}
+
+static AABB _card_world_aabb(const NextGICard &p_card, const NextGIInstanceRecord &p_record) {
+	const Vector3 origin(p_card.origin[0], p_card.origin[1], p_card.origin[2]);
+	const Vector3 axis_u(p_card.axis_u[0], p_card.axis_u[1], p_card.axis_u[2]);
+	const Vector3 axis_v(p_card.axis_v[0], p_card.axis_v[1], p_card.axis_v[2]);
+	const Vector3 axis_n(p_card.axis_n[0], p_card.axis_n[1], p_card.axis_n[2]);
+	AABB bounds;
+	bool first = true;
+	for (int su = -1; su <= 1; su += 2) {
+		for (int sv = -1; sv <= 1; sv += 2) {
+			for (int sz = 0; sz <= 1; sz++) {
+				const Vector3 object = origin + axis_u * (float(su) * p_card.axis_u[3]) + axis_v * (float(sv) * p_card.axis_v[3]) + axis_n * (-p_card.axis_n[3] * float(sz));
+				const Vector3 world = _card_world(p_card, p_record, object);
+				if (first) {
+					bounds.position = world;
+					bounds.size = Vector3();
+					first = false;
+				} else {
+					bounds.expand_to(world);
+				}
+			}
+		}
+	}
+	return bounds;
+}
+
+NextGIRelight::NextGIRelight() {
+	if (singleton == nullptr) {
+		singleton = this;
+	}
+}
+
+NextGIRelight::~NextGIRelight() {
+	free_resources();
+	if (singleton == this) {
+		singleton = nullptr;
+	}
+}
+
+void NextGIRelight::_reset_uniform_set() {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd != nullptr && uniform_set.is_valid()) {
+		rd->free_rid(uniform_set);
+	}
+	uniform_set = RID();
+}
+
+void NextGIRelight::free_resources() {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	_reset_uniform_set();
+	if (shader != nullptr) {
+		if (rd != nullptr && shader->pipeline.is_valid()) {
+			rd->free_rid(shader->pipeline);
+		}
+		if (shader->version.is_valid()) {
+			shader->shader.version_free(shader->version);
+		}
+		memdelete(shader);
+		shader = nullptr;
+	}
+	if (rd == nullptr) {
+		return;
+	}
+	RID buffers[7] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer };
+	for (int i = 0; i < 7; i++) {
+		if (buffers[i].is_valid()) {
+			rd->free_rid(buffers[i]);
+		}
+	}
+	light_buffer = RID();
+	reuse_buffer = RID();
+	page_buffer = RID();
+	index_buffer = RID();
+	counter_buffer = RID();
+	probe_buffer = RID();
+	params_buffer = RID();
+	if (radiance.is_valid()) {
+		rd->free_rid(radiance);
+	}
+	if (mask.is_valid()) {
+		rd->free_rid(mask);
+	}
+	if (dummy_depth.is_valid()) {
+		rd->free_rid(dummy_depth);
+	}
+	if (material_sampler.is_valid()) {
+		rd->free_rid(material_sampler);
+	}
+	if (shadow_sampler.is_valid()) {
+		rd->free_rid(shadow_sampler);
+	}
+	radiance = RID();
+	mask = RID();
+	dummy_depth = RID();
+	material_sampler = RID();
+	shadow_sampler = RID();
+	atlases_ready = false;
+}
+
+bool NextGIRelight::_ensure_atlases() {
+	if (atlases_ready) {
+		return radiance.is_valid() && mask.is_valid();
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+
+	RD::SamplerState material_state;
+	material_state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
+	material_state.min_filter = RD::SAMPLER_FILTER_NEAREST;
+	material_sampler = rd->sampler_create(material_state);
+
+	RD::SamplerState shadow_state;
+	shadow_state.mag_filter = RD::SAMPLER_FILTER_NEAREST;
+	shadow_state.min_filter = RD::SAMPLER_FILTER_NEAREST;
+	shadow_state.enable_compare = true;
+	shadow_state.compare_op = RD::COMPARE_OP_GREATER;
+	shadow_sampler = rd->sampler_create(shadow_state);
+
+	BitField<RD::TextureUsageBits> storage = RD::TEXTURE_USAGE_STORAGE_BIT;
+	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
+	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_TO_BIT);
+	radiance_is_packed = rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, storage);
+	RD::TextureFormat tf;
+	tf.width = NEXTGI_SRC_RADIANCE_SIZE;
+	tf.height = NEXTGI_SRC_RADIANCE_SIZE;
+	tf.texture_type = RD::TEXTURE_TYPE_2D;
+	tf.usage_bits = storage;
+	tf.format = radiance_is_packed ? RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32 : RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	radiance = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(radiance.is_null(), false);
+	rd->set_resource_name(radiance, "NextGI SRC Radiance");
+	rd->texture_clear(radiance, Color(0, 0, 0, 1), 0, 1, 0, 1);
+	radiance_bytes = uint64_t(NEXTGI_SRC_RADIANCE_SIZE) * NEXTGI_SRC_RADIANCE_SIZE * (radiance_is_packed ? 4 : 8);
+
+	tf.width = NEXTGI_SRC_MASK_SIZE;
+	tf.height = NEXTGI_SRC_MASK_SIZE;
+	tf.format = RD::DATA_FORMAT_R8_UINT;
+	mask = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(mask.is_null(), false);
+	rd->set_resource_name(mask, "NextGI SRC Shadow Mask");
+	rd->texture_clear(mask, Color(0, 0, 0, 0), 0, 1, 0, 1);
+
+	tf.width = 1;
+	tf.height = 1;
+	tf.format = RD::DATA_FORMAT_D32_SFLOAT;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	dummy_depth = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(dummy_depth.is_null(), false);
+
+	atlases_ready = true;
+	if (!logged_atlas) {
+		logged_atlas = true;
+		const double mask_bytes = double(NEXTGI_SRC_MASK_SIZE) * double(NEXTGI_SRC_MASK_SIZE);
+		print_line(vformat("NextGI SRC: radiance atlas %dx%d %s, %.1f MiB; shadow mask %dx%d R8, %.1f MiB.", NEXTGI_SRC_RADIANCE_SIZE, NEXTGI_SRC_RADIANCE_SIZE, radiance_is_packed ? "B10G11R11" : "RGBA16F", double(radiance_bytes) / (1024.0 * 1024.0), NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE, mask_bytes / (1024.0 * 1024.0)));
+	}
+	return true;
+}
+
+bool NextGIRelight::_ensure_shader() {
+	if (shader != nullptr && shader->pipeline.is_valid()) {
+		return true;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	NextGI *next_gi = NextGI::get_singleton();
+	ERR_FAIL_NULL_V(next_gi, false);
+	ERR_FAIL_COND_V(!next_gi->can_initialize_ray_query_shaders(), false);
+
+	if (shader == nullptr) {
+		shader = memnew(ShaderState);
+		Vector<String> defines;
+		defines.push_back(radiance_is_packed ? "" : "#define NEXTGI_RADIANCE_RGBA16F\n");
+		shader->shader.initialize(defines);
+		shader->version = shader->shader.version_create(false);
+		if (!shader->version.is_valid()) {
+			memdelete(shader);
+			shader = nullptr;
+			ERR_FAIL_V_MSG(false, "The NextGI SRC relight shader failed to compile.");
+		}
+		next_gi->notify_ray_query_shader_initialized();
+	}
+	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
+	shader->pipeline = rd->compute_pipeline_create(shader_rid);
+	ERR_FAIL_COND_V(shader->pipeline.is_null(), false);
+	return true;
+}
+
+void NextGIRelight::init() {
+	_ensure_atlases();
+}
+
+RID NextGIRelight::_storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t p_count, uint32_t p_stride) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const uint32_t count = MAX(p_count, 1u);
+	if (r_buffer.is_valid() && r_capacity >= count) {
+		return r_buffer;
+	}
+	if (r_buffer.is_valid()) {
+		_reset_uniform_set();
+		rd->free_rid(r_buffer);
+	}
+	r_capacity = MAX(count, r_capacity * 2);
+	r_buffer = rd->storage_buffer_create(r_capacity * p_stride);
+	_reset_uniform_set();
+	return r_buffer;
+}
+
+uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record) {
+	if (p_instance == nullptr || r_record.card_set == UINT32_MAX) {
+		return UINT32_MAX;
+	}
+	if (!_ensure_atlases()) {
+		return UINT32_MAX;
+	}
+	NextGISRC *src = NextGISRC::get_singleton();
+	if (src == nullptr) {
+		return UINT32_MAX;
+	}
+	const uint32_t *existing = instance_index.getptr(p_instance);
+	if (existing != nullptr) {
+		InstancePages &pages = instances[*existing];
+		pages.record = r_record;
+		pages.record_index = r_record.tlas_index;
+		r_record.page_table = pages.page_table;
+		return pages.page_table;
+	}
+	NextGICardSet card_set;
+	if (!src->copy_card_set(r_record.card_set, card_set) || card_set.card_count == 0) {
+		return UINT32_MAX;
+	}
+
+	InstancePages pages;
+	pages.instance = p_instance;
+	pages.record = r_record;
+	pages.record_index = r_record.tlas_index;
+	pages.page_table = page_table_count;
+	bool fitted = true;
+	for (uint32_t i = 0; i < card_set.card_count; i++) {
+		NextGICard card;
+		if (!src->copy_card(card_set.first_card + i, card)) {
+			fitted = false;
+			break;
+		}
+		const uint32_t card_w = MAX(card.atlas_rect[2], 1u);
+		const uint32_t card_h = MAX(card.atlas_rect[3], 1u);
+		Rect2i radiance_rect;
+		Rect2i mask_rect;
+		if (!radiance_packer.allocate(card_w, card_h, radiance_rect) || !mask_packer.allocate(MAX(card_w / 2, 1u), MAX(card_h / 2, 1u), mask_rect)) {
+			fitted = false;
+			break;
+		}
+		CardPage page;
+		page.card_index = card_set.first_card + i;
+		page.radiance_x = radiance_rect.position.x;
+		page.radiance_y = radiance_rect.position.y;
+		page.radiance_w = radiance_rect.size.x;
+		page.radiance_h = radiance_rect.size.y;
+		page.mask_x = mask_rect.position.x;
+		page.mask_y = mask_rect.position.y;
+		page.mask_w = mask_rect.size.x;
+		page.mask_h = mask_rect.size.y;
+		page.stable_id = page_table_count + pages.cards.size();
+		pages.cards.push_back(page);
+	}
+	if (!fitted || pages.cards.is_empty()) {
+		alloc_failures++;
+		return UINT32_MAX;
+	}
+	page_table_count += pages.cards.size();
+	r_record.page_table = pages.page_table;
+	instance_index.insert(p_instance, instances.size());
+	instances.push_back(pages);
+	return pages.page_table;
+}
+
+void NextGIRelight::relight(RenderDataRD *p_render_data) {
+	ERR_FAIL_NULL(p_render_data);
+	last_texels = 0;
+	last_rays = 0;
+	last_rays_skipped = 0;
+	last_unshadowed = 0;
+	last_light_count = 0;
+	last_directional = 0;
+	last_dynamic = 0;
+	last_static = 0;
+	probe_rgb.clear();
+	mask_pages.clear();
+	if (p_render_data->sdfgi_update_data == nullptr || !_ensure_atlases() || !_ensure_shader()) {
+		return;
+	}
+	NextGI *next_gi = NextGI::get_singleton();
+	NextGISRC *src = NextGISRC::get_singleton();
+	if (next_gi == nullptr || next_gi->get_rt_scene() == nullptr || src == nullptr || src->get_card_buffer().is_null()) {
+		return;
+	}
+	const RID tlas = next_gi->get_rt_scene()->get_tlas();
+	if (tlas.is_null() || instances.is_empty()) {
+		return;
+	}
+
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	LightStorage *light_storage = LightStorage::get_singleton();
+	ERR_FAIL_NULL(rd);
+	ERR_FAIL_NULL(light_storage);
+
+	float exposure = 1.0f;
+	if (p_render_data->camera_attributes.is_valid() && RSG::camera_attributes != nullptr) {
+		exposure = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);
+	}
+	const bool physical = RendererSceneRenderRD::get_singleton() != nullptr && RendererSceneRenderRD::get_singleton()->is_using_physical_light_units();
+
+	struct CpuLight {
+		NextGILight gpu;
+		RID instance;
+		bool directional = false;
+		bool is_static = false;
+		bool has_shadow = false;
+	};
+	LocalVector<CpuLight> cpu_lights;
+
+	auto add_light = [&](RID p_light_instance, bool p_directional, bool p_static) {
+		if (!light_storage->owns_light_instance(p_light_instance)) {
+			return;
+		}
+		const RID light = light_storage->light_instance_get_base_light(p_light_instance);
+		const RSE::LightBakeMode bake = RSG::light_storage->light_get_bake_mode(light);
+		if (bake == RSE::LIGHT_BAKE_DISABLED) {
+			return;
+		}
+		if (p_directional && RSG::light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+			return;
+		}
+		const Transform3D transform = light_storage->light_instance_get_base_transform(p_light_instance);
+		const Vector3 travel = -transform.basis.get_column(Vector3::AXIS_Z).normalized();
+		Color color = RSG::light_storage->light_get_color(light).srgb_to_linear();
+		float energy = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY) * RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_INDIRECT_ENERGY);
+		const RSE::LightType type = RSG::light_storage->light_get_type(light);
+		if (physical) {
+			energy *= RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_INTENSITY);
+			if (type == RSE::LIGHT_OMNI) {
+				energy *= 1.0f / (Math::PI * 4.0f);
+			} else if (type == RSE::LIGHT_SPOT) {
+				energy *= 1.0f / Math::PI;
+			}
+		}
+		energy *= exposure;
+		const float range = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE);
+		const float spot_atten = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ATTENUATION);
+
+		CpuLight cpu;
+		cpu.instance = p_light_instance;
+		cpu.directional = p_directional;
+		cpu.is_static = p_static;
+		cpu.has_shadow = RSG::light_storage->light_has_shadow(light);
+		cpu.gpu.color_energy[0] = color.r;
+		cpu.gpu.color_energy[1] = color.g;
+		cpu.gpu.color_energy[2] = color.b;
+		cpu.gpu.color_energy[3] = energy;
+		cpu.gpu.position_inv_range[0] = transform.origin.x;
+		cpu.gpu.position_inv_range[1] = transform.origin.y;
+		cpu.gpu.position_inv_range[2] = transform.origin.z;
+		cpu.gpu.position_inv_range[3] = range > 0.0f ? 1.0f / range : 0.0f;
+		cpu.gpu.direction_type[0] = travel.x;
+		cpu.gpu.direction_type[1] = travel.y;
+		cpu.gpu.direction_type[2] = travel.z;
+		cpu.gpu.direction_type[3] = float(type);
+		cpu.gpu.attenuation = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION);
+		cpu.gpu.cos_spot = Math::cos(Math::deg_to_rad(RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ANGLE)));
+		cpu.gpu.inv_spot_atten = spot_atten > 0.0f ? 1.0f / spot_atten : 1.0f;
+		cpu.gpu.flags = (NEXTGI_LIGHT_REUSE_NONE << NEXTGI_LIGHT_REUSE_SHIFT);
+		if (cpu.has_shadow) {
+			cpu.gpu.flags |= NEXTGI_LIGHT_FLAG_SHADOW;
+		}
+		if (p_static) {
+			cpu.gpu.flags |= NEXTGI_LIGHT_FLAG_STATIC;
+		}
+		cpu_lights.push_back(cpu);
+		if (p_directional) {
+			last_directional++;
+		} else if (p_static) {
+			last_static++;
+		} else {
+			last_dynamic++;
+		}
+	};
+
+	const RendererSceneRender::RenderSDFGIUpdateData *feed = p_render_data->sdfgi_update_data;
+	if (feed->directional_lights != nullptr) {
+		for (int i = 0; i < feed->directional_lights->size(); i++) {
+			add_light(feed->directional_lights->get(i), true, false);
+		}
+	}
+	for (uint32_t i = 0; i < feed->positional_light_count; i++) {
+		add_light(feed->positional_light_instances[i], false, false);
+	}
+	for (uint32_t i = 0; i < feed->nextgi_static_light_count; i++) {
+		add_light(feed->nextgi_static_light_instances[i], false, true);
+	}
+	last_light_count = cpu_lights.size();
+
+	LocalVector<NextGIShadowReuse> reuses;
+	const uint64_t scene_pass = RendererSceneRenderRD::get_singleton()->get_scene_pass();
+	for (CpuLight &cpu : cpu_lights) {
+		if (!cpu.has_shadow) {
+			continue;
+		}
+		const bool rendered = light_storage->light_instance_get_shadow_pass(cpu.instance) == scene_pass;
+		const uint32_t reuse_index = reuses.size();
+		uint32_t written = 0;
+		auto push_entry = [&](const Projection &p_camera, const Rect2 &p_atlas, uint32_t p_source, int p_split) {
+			if (p_atlas.size.x <= 0.0f || p_atlas.size.y <= 0.0f) {
+				return;
+			}
+			NextGIShadowReuse entry;
+			_projection_to_columns(_world_shadow_matrix(p_camera, light_storage->light_instance_get_shadow_transform(cpu.instance, p_split), p_atlas), entry.matrix);
+			entry.atlas[0] = p_atlas.position.x;
+			entry.atlas[1] = p_atlas.position.y;
+			entry.atlas[2] = p_atlas.size.x;
+			entry.atlas[3] = p_atlas.size.y;
+			const float bias_scale = light_storage->light_instance_get_shadow_bias_scale(cpu.instance, p_split);
+			const RID base = light_storage->light_instance_get_base_light(cpu.instance);
+			entry.bias = RSG::light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS) / 100.0f * bias_scale;
+			entry.source = p_source;
+			reuses.push_back(entry);
+			written++;
+		};
+		if (rendered && cpu.directional && light_storage->directional_shadow_get_texture().is_valid()) {
+			for (int split = 0; split < 4; split++) {
+				push_entry(light_storage->light_instance_get_shadow_camera(cpu.instance, split), light_storage->light_instance_get_directional_shadow_atlas_rect(cpu.instance, split), NEXTGI_REUSE_DIRECTIONAL, split);
+			}
+		} else if (rendered && !cpu.directional && p_render_data->shadow_atlas.is_valid() && light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, cpu.instance)) {
+			Vector2i omni_offset;
+			const Rect2 atlas = light_storage->light_instance_get_shadow_atlas_rect(cpu.instance, p_render_data->shadow_atlas, omni_offset);
+			push_entry(light_storage->light_instance_get_shadow_camera(cpu.instance, 0), atlas, NEXTGI_REUSE_POSITIONAL, 0);
+		}
+		if (written == 0) {
+			continue;
+		}
+		cpu.gpu.flags = (cpu.gpu.flags & 0xFFu) | (reuse_index << NEXTGI_LIGHT_REUSE_SHIFT);
+		for (; written < 4; written++) {
+			NextGIShadowReuse empty;
+			reuses.push_back(empty);
+		}
+	}
+
+	struct FlatPage {
+		uint32_t instance = 0;
+		uint32_t card = 0;
+		uint32_t texels = 0;
+	};
+	LocalVector<FlatPage> flat;
+	for (uint32_t i = 0; i < instances.size(); i++) {
+		for (uint32_t c = 0; c < instances[i].cards.size(); c++) {
+			FlatPage page;
+			page.instance = i;
+			page.card = c;
+			page.texels = instances[i].cards[c].radiance_w * instances[i].cards[c].radiance_h;
+			flat.push_back(page);
+		}
+	}
+	flat_page_count = flat.size();
+	LocalVector<uint32_t> texel_counts;
+	texel_counts.resize(flat.size());
+	for (uint32_t i = 0; i < flat.size(); i++) {
+		texel_counts[i] = flat[i].texels;
+	}
+	LocalVector<uint32_t> scheduled;
+	scheduled.resize(flat.size());
+	const uint32_t scheduled_count = nextgi_schedule_relight(texel_counts.ptr(), flat.size(), schedule_cursor, NEXTGI_SRC_RELIGHT_TEXEL_CAP, scheduled.ptr(), scheduled.size());
+
+	LocalVector<NextGILight> gpu_lights;
+	gpu_lights.resize(MAX(cpu_lights.size(), 1u));
+	for (uint32_t i = 0; i < cpu_lights.size(); i++) {
+		gpu_lights[i] = cpu_lights[i].gpu;
+	}
+	LocalVector<NextGIRelightPageGPU> gpu_pages;
+	LocalVector<uint32_t> gpu_indices;
+	uint32_t max_w = 1;
+	uint32_t max_h = 1;
+	for (uint32_t s = 0; s < scheduled_count; s++) {
+		const FlatPage &flat_page = flat[scheduled[s]];
+		const InstancePages &instance_pages = instances[flat_page.instance];
+		const CardPage &card_page = instance_pages.cards[flat_page.card];
+		NextGICard card;
+		if (!src->copy_card(card_page.card_index, card)) {
+			continue;
+		}
+		const AABB bounds = _card_world_aabb(card, instance_pages.record);
+		const Vector3 center = _card_world(card, instance_pages.record, Vector3(card.origin[0], card.origin[1], card.origin[2]));
+		const Vector3 normal = _record_basis(instance_pages.record).xform(Vector3(card.axis_n[0], card.axis_n[1], card.axis_n[2])).normalized();
+
+		LocalVector<NextGIPageLightCandidate> candidates;
+		for (uint32_t light_index = 0; light_index < cpu_lights.size(); light_index++) {
+			const CpuLight &cpu = cpu_lights[light_index];
+			if (!nextgi_light_reaches_receiver(cpu.is_static, instance_pages.record.rt_flags)) {
+				continue;
+			}
+			if (!cpu.directional) {
+				const AABB light_bounds = light_storage->light_instance_get_base_aabb(cpu.instance);
+				if (!bounds.intersects(light_bounds)) {
+					continue;
+				}
+			}
+			const Vector3 light_position(cpu.gpu.position_inv_range[0], cpu.gpu.position_inv_range[1], cpu.gpu.position_inv_range[2]);
+			const Vector3 travel(cpu.gpu.direction_type[0], cpu.gpu.direction_type[1], cpu.gpu.direction_type[2]);
+			float atten = 1.0f;
+			float ndotl = 0.0f;
+			if (cpu.directional) {
+				ndotl = normal.dot(-travel);
+			} else {
+				const Vector3 delta = light_position - center;
+				const float distance = delta.length();
+				const Vector3 to_light = distance > 0.0f ? delta / distance : Vector3(0, 1, 0);
+				ndotl = normal.dot(to_light);
+				const int type = int(cpu.gpu.direction_type[3] + 0.5f);
+				if (type == RSE::LIGHT_SPOT) {
+					atten = nextgi_spot_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation, (-to_light).dot(travel), cpu.gpu.cos_spot, cpu.gpu.inv_spot_atten);
+				} else {
+					atten = nextgi_omni_attenuation(distance, cpu.gpu.position_inv_range[3], cpu.gpu.attenuation);
+				}
+			}
+			const float rank = cpu.gpu.color_energy[3] * atten * MAX(ndotl, 0.0f);
+			if (rank <= 0.0f) {
+				continue;
+			}
+			NextGIPageLightCandidate candidate;
+			candidate.light_index = light_index;
+			candidate.energy = rank;
+			candidate.has_shadow = cpu.has_shadow;
+			candidates.push_back(candidate);
+		}
+		LocalVector<uint32_t> shadowed;
+		LocalVector<uint32_t> unshadowed;
+		nextgi_select_page_lights(candidates.ptr(), candidates.size(), NEXTGI_SRC_MAX_SHADOWED_LIGHTS, shadowed, unshadowed);
+		max_shadowed = MAX(max_shadowed, shadowed.size());
+		max_mask_evals = MAX(max_mask_evals, MIN(shadowed.size(), uint32_t(NEXTGI_SRC_MASK_EVALS_PER_FRAME)));
+		last_unshadowed += unshadowed.size();
+
+		NextGIRelightPageGPU gpu_page;
+		gpu_page.record_index = instance_pages.record_index;
+		gpu_page.card_index = card_page.card_index;
+		gpu_page.radiance_origin = _pack_xy(card_page.radiance_x, card_page.radiance_y);
+		gpu_page.radiance_size = _pack_xy(card_page.radiance_w, card_page.radiance_h);
+		gpu_page.mask_origin = _pack_xy(card_page.mask_x, card_page.mask_y);
+		gpu_page.mask_size = _pack_xy(card_page.mask_w, card_page.mask_h);
+		gpu_page.light_offset = gpu_indices.size();
+		gpu_page.shadowed_count = shadowed.size();
+		gpu_page.light_count = shadowed.size() + unshadowed.size();
+		gpu_page.stable_id = card_page.stable_id;
+		for (uint32_t index : shadowed) {
+			gpu_indices.push_back(index);
+		}
+		for (uint32_t index : unshadowed) {
+			gpu_indices.push_back(index);
+		}
+		gpu_pages.push_back(gpu_page);
+		last_texels += card_page.radiance_w * card_page.radiance_h;
+		max_w = MAX(max_w, card_page.radiance_w);
+		max_h = MAX(max_h, card_page.radiance_h);
+	}
+	max_texels = MAX(max_texels, last_texels);
+
+	_storage_buffer(light_buffer, light_capacity, gpu_lights.size(), sizeof(NextGILight));
+	_storage_buffer(reuse_buffer, reuse_capacity, MAX(reuses.size(), 1u), sizeof(NextGIShadowReuse));
+	_storage_buffer(page_buffer, page_capacity, MAX(gpu_pages.size(), 1u), sizeof(NextGIRelightPageGPU));
+	_storage_buffer(index_buffer, index_capacity, MAX(gpu_indices.size(), 1u), sizeof(uint32_t));
+
+	if (!probe_buffer.is_valid() || probe_capacity < MAX(page_table_count, 1u)) {
+		if (probe_buffer.is_valid()) {
+			_reset_uniform_set();
+			rd->free_rid(probe_buffer);
+		}
+		probe_capacity = MAX(page_table_count, 1u);
+		probe_buffer = rd->storage_buffer_create(probe_capacity * sizeof(float) * 4);
+		_reset_uniform_set();
+	}
+	if (!params_buffer.is_valid()) {
+		params_buffer = rd->storage_buffer_create(sizeof(NextGIRelightParamsGPU));
+		_reset_uniform_set();
+	}
+	if (!counter_buffer.is_valid()) {
+		counter_buffer = rd->storage_buffer_create(sizeof(NextGIRelightCountersGPU));
+		_reset_uniform_set();
+	}
+
+	if (!gpu_lights.is_empty()) {
+		rd->buffer_update(light_buffer, 0, gpu_lights.size() * sizeof(NextGILight), gpu_lights.ptr());
+	}
+	if (!reuses.is_empty()) {
+		rd->buffer_update(reuse_buffer, 0, reuses.size() * sizeof(NextGIShadowReuse), reuses.ptr());
+	} else {
+		NextGIShadowReuse empty;
+		rd->buffer_update(reuse_buffer, 0, sizeof(empty), &empty);
+	}
+	if (!gpu_pages.is_empty()) {
+		rd->buffer_update(page_buffer, 0, gpu_pages.size() * sizeof(NextGIRelightPageGPU), gpu_pages.ptr());
+	}
+	if (!gpu_indices.is_empty()) {
+		rd->buffer_update(index_buffer, 0, gpu_indices.size() * sizeof(uint32_t), gpu_indices.ptr());
+	}
+	NextGIRelightCountersGPU zero_counters;
+	rd->buffer_update(counter_buffer, 0, sizeof(zero_counters), &zero_counters);
+	const float rt_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
+	NextGIRelightParamsGPU params;
+	params.frame = frame;
+	params.ray_budget = NEXTGI_SRC_RELIGHT_RAY_CAP;
+	params.page_count = gpu_pages.size();
+	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
+	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
+
+	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
+	RID directional_tex = light_storage->directional_shadow_get_texture();
+	if (!directional_tex.is_valid()) {
+		directional_tex = dummy_depth;
+	}
+	RID positional_tex = dummy_depth;
+	if (p_render_data->shadow_atlas.is_valid()) {
+		const RID atlas_tex = light_storage->shadow_atlas_get_texture(p_render_data->shadow_atlas);
+		if (atlas_tex.is_valid()) {
+			positional_tex = atlas_tex;
+		}
+	}
+	static RID cached_directional;
+	static RID cached_positional;
+	static RID cached_cards;
+	static RID cached_records;
+	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != next_gi->get_rt_scene()->get_instance_record_buffer()) {
+		_reset_uniform_set();
+		cached_directional = directional_tex;
+		cached_positional = positional_tex;
+		cached_cards = src->get_card_buffer();
+		cached_records = next_gi->get_rt_scene()->get_instance_record_buffer();
+	}
+	if (!uniform_set.is_valid()) {
+		RD::Uniform uniforms[19] = {
+			RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
+			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, mask),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ material_sampler, src->get_atlas_texture(NextGISRC::ATLAS_ALBEDO) })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ material_sampler, src->get_atlas_texture(NextGISRC::ATLAS_NORMAL) })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ material_sampler, src->get_atlas_texture(NextGISRC::ATLAS_EMISSION) })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, Vector<RID>({ material_sampler, src->get_atlas_texture(NextGISRC::ATLAS_DEPTH) })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ shadow_sampler, directional_tex })),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, Vector<RID>({ shadow_sampler, positional_tex })),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, src->get_card_buffer()),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, src->get_card_set_buffer()),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, next_gi->get_rt_scene()->get_instance_record_buffer()),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, light_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, reuse_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, index_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, counter_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, probe_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
+		};
+		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 19), shader_rid, 0);
+	}
+	if (uniform_set.is_valid() && !gpu_pages.is_empty()) {
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shader->pipeline);
+		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, gpu_pages.size());
+		rd->compute_list_end();
+		const Vector<uint8_t> counters = rd->buffer_get_data(counter_buffer);
+		if (counters.size() >= int(sizeof(NextGIRelightCountersGPU))) {
+			NextGIRelightCountersGPU got;
+			memcpy(&got, counters.ptr(), sizeof(got));
+			last_rays = got.traced;
+			last_rays_skipped = got.skipped;
+			max_rays = MAX(max_rays, last_rays);
+		}
+	}
+	frame++;
+
+	const bool read_probes = bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/read_page_radiance"));
+	const bool read_mask = bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/read_shadow_mask"));
+	if (read_probes && probe_buffer.is_valid() && page_table_count > 0) {
+		const Vector<uint8_t> data = rd->buffer_get_data(probe_buffer, 0, page_table_count * sizeof(float) * 4);
+		if (data.size() >= int(page_table_count * sizeof(float) * 4)) {
+			const float *probes = reinterpret_cast<const float *>(data.ptr());
+			probe_rgb.resize(page_table_count * 3);
+			for (uint32_t i = 0; i < page_table_count; i++) {
+				probe_rgb.write[i * 3 + 0] = probes[i * 4 + 0];
+				probe_rgb.write[i * 3 + 1] = probes[i * 4 + 1];
+				probe_rgb.write[i * 3 + 2] = probes[i * 4 + 2];
+			}
+		}
+	}
+	if (read_mask && mask.is_valid()) {
+		const Vector<uint8_t> data = rd->texture_get_data(mask, 0);
+		if (data.size() >= NEXTGI_SRC_MASK_SIZE * NEXTGI_SRC_MASK_SIZE) {
+			for (const InstancePages &instance_pages : instances) {
+				for (const CardPage &card_page : instance_pages.cards) {
+					NextGICard card;
+					if (!src->copy_card(card_page.card_index, card)) {
+						continue;
+					}
+					PackedByteArray bytes;
+					bytes.resize(card_page.mask_w * card_page.mask_h);
+					for (uint32_t y = 0; y < card_page.mask_h; y++) {
+						for (uint32_t x = 0; x < card_page.mask_w; x++) {
+							bytes.write[y * card_page.mask_w + x] = data[(card_page.mask_y + y) * NEXTGI_SRC_MASK_SIZE + card_page.mask_x + x];
+						}
+					}
+					PackedFloat32Array world;
+					world.resize(12);
+					for (int i = 0; i < 12; i++) {
+						world.write[i] = instance_pages.record.object_to_world[i];
+					}
+					Dictionary page;
+					page["stable_id"] = card_page.stable_id;
+					page["radiance_w"] = card_page.radiance_w;
+					page["radiance_h"] = card_page.radiance_h;
+					page["mask_w"] = card_page.mask_w;
+					page["mask_h"] = card_page.mask_h;
+					page["mask"] = bytes;
+					page["origin"] = Vector3(card.origin[0], card.origin[1], card.origin[2]);
+					page["axis_u"] = Vector3(card.axis_u[0], card.axis_u[1], card.axis_u[2]);
+					page["axis_v"] = Vector3(card.axis_v[0], card.axis_v[1], card.axis_v[2]);
+					page["axis_n"] = Vector3(card.axis_n[0], card.axis_n[1], card.axis_n[2]);
+					page["half_u"] = card.axis_u[3];
+					page["half_v"] = card.axis_v[3];
+					page["depth"] = card.axis_n[3];
+					page["world"] = world;
+					mask_pages.push_back(page);
+				}
+			}
+		}
+	}
+	// Drop the set before the frame ends. A later free of the TLAS or the card buffers would
+	// otherwise free it through the dependency map, and shutdown would free it again.
+	_reset_uniform_set();
+}
+
+void NextGIRelight::fill_info(Dictionary &r_info) const {
+	r_info["src_relight_texels"] = int64_t(last_texels);
+	r_info["src_relight_rays"] = int64_t(last_rays);
+	r_info["src_relight_rays_skipped"] = int64_t(last_rays_skipped);
+	r_info["src_relight_max_texels"] = int64_t(max_texels);
+	r_info["src_relight_max_rays"] = int64_t(max_rays);
+	r_info["src_max_shadowed_lights"] = int64_t(max_shadowed);
+	r_info["src_max_mask_evals"] = int64_t(max_mask_evals);
+	r_info["src_unshadowed_light_count"] = int64_t(last_unshadowed);
+	r_info["src_light_count"] = int64_t(last_light_count);
+	r_info["src_light_directional_count"] = int64_t(last_directional);
+	r_info["src_light_dynamic_count"] = int64_t(last_dynamic);
+	r_info["src_light_static_count"] = int64_t(last_static);
+	r_info["src_page_count"] = int64_t(flat_page_count);
+	r_info["src_page_alloc_failures"] = int64_t(alloc_failures);
+	r_info["src_radiance_bytes"] = int64_t(radiance_bytes);
+	r_info["src_radiance_format"] = radiance_is_packed ? String("B10G11R11") : String("RGBA16F");
+	if (!probe_rgb.is_empty()) {
+		r_info["src_page_probes"] = probe_rgb;
+	}
+	if (!mask_pages.is_empty()) {
+		r_info["src_mask_pages"] = mask_pages;
+	}
+}

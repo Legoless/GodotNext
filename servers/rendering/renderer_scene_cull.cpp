@@ -30,11 +30,13 @@
 
 #include "renderer_scene_cull.h"
 
+// GodotNext: nextgi_src_relight
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -640,9 +642,8 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 			case RSE::INSTANCE_LIGHT: {
 				InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
 
-				if (scenario && instance->visible && RSG::light_storage->light_get_type(instance->base) != RSE::LIGHT_DIRECTIONAL && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
-					scenario->dynamic_lights.erase(light->instance);
-				}
+				// GodotNext: nextgi_src_relight
+				_nextgi_sync_positional_light(scenario, light->instance, false, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 
 #ifdef DEBUG_ENABLED
 				if (light->geometries.size()) {
@@ -868,9 +869,8 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 		switch (instance->base_type) {
 			case RSE::INSTANCE_LIGHT: {
 				InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
-				if (instance->visible && RSG::light_storage->light_get_type(instance->base) != RSE::LIGHT_DIRECTIONAL && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
-					instance->scenario->dynamic_lights.erase(light->instance);
-				}
+				// GodotNext: nextgi_src_relight
+				_nextgi_sync_positional_light(instance->scenario, light->instance, false, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 
 #ifdef DEBUG_ENABLED
 				if (light->geometries.size()) {
@@ -935,6 +935,8 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 				if (RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL) {
 					light->D = scenario->directional_lights.push_back(instance);
 				}
+				// GodotNext: nextgi_src_relight
+				_nextgi_sync_positional_light(scenario, light->instance, instance->visible, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 			} break;
 			case RSE::INSTANCE_VOXEL_GI: {
 				InstanceVoxelGIData *voxel_gi = static_cast<InstanceVoxelGIData *>(instance->base_data);
@@ -1095,13 +1097,8 @@ void RendererSceneCull::instance_set_visible(RID p_instance, bool p_visible) {
 
 	if (instance->base_type == RSE::INSTANCE_LIGHT) {
 		InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
-		if (instance->scenario && RSG::light_storage->light_get_type(instance->base) != RSE::LIGHT_DIRECTIONAL && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
-			if (p_visible) {
-				instance->scenario->dynamic_lights.push_back(light->instance);
-			} else {
-				instance->scenario->dynamic_lights.erase(light->instance);
-			}
-		}
+		// GodotNext: nextgi_src_relight
+		_nextgi_sync_positional_light(instance->scenario, light->instance, p_visible, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 	}
 
 	if (instance->base_type == RSE::INSTANCE_PARTICLES_COLLISION) {
@@ -1634,6 +1631,13 @@ void RendererSceneCull::instance_geometry_get_shader_parameter_list(RID p_instan
 	instance->instance_uniforms.get_property_list(*p_parameters);
 }
 
+void RendererSceneCull::_nextgi_sync_positional_light(Scenario *p_scenario, RID p_light_instance, bool p_visible, bool p_directional, RSE::LightBakeMode p_bake) const {
+	if (p_scenario == nullptr || !p_light_instance.is_valid()) {
+		return;
+	}
+	RendererRD::nextgi_sync_positional_light(p_scenario->dynamic_lights, p_scenario->static_lights, p_light_instance, RendererRD::nextgi_positional_light_list(p_visible, true, p_directional, p_bake));
+}
+
 void RendererSceneCull::_update_instance(Instance *p_instance) const {
 	p_instance->version++;
 
@@ -1656,17 +1660,11 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		light->make_shadow_dirty();
 
 		RSE::LightBakeMode bake_mode = RSG::light_storage->light_get_bake_mode(p_instance->base);
-		if (RSG::light_storage->light_get_type(p_instance->base) != RSE::LIGHT_DIRECTIONAL && bake_mode != light->bake_mode) {
-			if (p_instance->visible && p_instance->scenario && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
-				p_instance->scenario->dynamic_lights.erase(light->instance);
-			}
-
+		if (bake_mode != light->bake_mode) {
 			light->bake_mode = bake_mode;
-
-			if (p_instance->visible && p_instance->scenario && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
-				p_instance->scenario->dynamic_lights.push_back(light->instance);
-			}
 		}
+		// GodotNext: nextgi_src_relight
+		_nextgi_sync_positional_light(p_instance->scenario, light->instance, p_instance->visible, RSG::light_storage->light_get_type(p_instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 
 		uint32_t max_sdfgi_cascade = RSG::light_storage->light_get_max_sdfgi_cascade(p_instance->base);
 		if (light->max_sdfgi_cascade != max_sdfgi_cascade) {
@@ -3706,6 +3704,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.directional_lights = &directional_lights;
 			sdfgi_update_data.positional_light_instances = scenario->dynamic_lights.ptr();
 			sdfgi_update_data.positional_light_count = scenario->dynamic_lights.size();
+			// GodotNext: nextgi_src_relight
+			sdfgi_update_data.nextgi_static_light_instances = scenario->static_lights.ptr();
+			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
 		}
 
 		// GodotNext: nextgi_rt_feed

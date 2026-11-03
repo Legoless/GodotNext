@@ -45,6 +45,7 @@
 #include "servers/rendering/rendering_server_globals.h"
 
 // GodotNext: nextgi_src_cards
+#include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 
 using namespace RendererRD;
@@ -428,7 +429,16 @@ Dictionary NextGI::get_tier_info() const {
 	if (src != nullptr) {
 		src->fill_info(info);
 	}
+	if (relight != nullptr) {
+		relight->fill_info(info);
+	}
 	return info;
+}
+
+void NextGI::_relight_src(RenderDataRD *p_render_data) {
+	if (relight != nullptr) {
+		relight->relight(p_render_data);
+	}
 }
 
 bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
@@ -500,6 +510,13 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	_maybe_simulate_device_lost();
 
+	// GodotNext: nextgi_src_relight
+	// Pages are assigned during the TLAS phase, which runs after card capture and before relight.
+	if (relight == nullptr) {
+		relight = memnew(NextGIRelight);
+		relight->init();
+	}
+
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_BEGIN].name);
 	rd->draw_command_begin_label("NextGI");
@@ -524,6 +541,8 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			rt_scene->build_dirty_blas(p_render_data);
 		} else if (slot == PASS_SLOT_SRC_CAPTURE) {
 			_capture_src_cards(p_render_data);
+		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
+			_relight_src(p_render_data);
 		} else if (slot == PASS_SLOT_INTEGRATION) {
 			// Integration (§2.1 line 7) is the final RB_TEX_AMBIENT and RB_TEX_REFLECTION writer.
 			// Reflection stays cleared in P1; ambient is cleared until the gather lands (#25).
@@ -550,6 +569,10 @@ NextGI::~NextGI() {
 		src->free();
 		memdelete(src);
 		src = nullptr;
+	}
+	if (relight != nullptr) {
+		memdelete(relight);
+		relight = nullptr;
 	}
 
 	// GodotNext: nextgi_rt_scene

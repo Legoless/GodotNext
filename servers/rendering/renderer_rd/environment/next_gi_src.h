@@ -250,6 +250,22 @@ public:
 
 	const Stats &get_stats() const { return stats; }
 	uint64_t get_atlas_memory() const { return atlas_memory; }
+	uint32_t get_card_count() const { return cards.size(); }
+	uint32_t get_card_set_count() const { return card_sets.size(); }
+	bool copy_card(uint32_t p_index, NextGICard &r_card) const {
+		if (p_index >= cards.size()) {
+			return false;
+		}
+		r_card = cards[p_index];
+		return true;
+	}
+	bool copy_card_set(uint32_t p_index, NextGICardSet &r_set) const {
+		if (p_index >= card_sets.size()) {
+			return false;
+		}
+		r_set = card_sets[p_index];
+		return true;
+	}
 	RID get_atlas_texture(AtlasTarget p_target) const;
 	RID get_card_buffer() const { return card_buffer; }
 	RID get_card_set_buffer() const { return card_set_buffer; }

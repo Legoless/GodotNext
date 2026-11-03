@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/src_relight/src_relight_check.gd" id="1_relight"]
+
+[node name="SRCRelightCheck" type="Node"]
+script = ExtResource("1_relight")

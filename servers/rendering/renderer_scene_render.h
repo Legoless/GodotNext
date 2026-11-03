@@ -324,6 +324,11 @@ public:
 		const RID *positional_light_instances;
 		uint32_t positional_light_count;
 
+		// GodotNext: nextgi_src_relight
+		// Non-directional LIGHT_BAKE_STATIC lights, beside positional_light_instances (the DYNAMIC list).
+		const RID *nextgi_static_light_instances = nullptr;
+		uint32_t nextgi_static_light_count = 0;
+
 		// GodotNext: nextgi_rt_feed
 		const LocalVector<NextGIRTInstance> *nextgi_rt_instances = nullptr;
 	};

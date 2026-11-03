@@ -3850,6 +3850,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 	// GodotNext: nextgi_src_cards
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/dump_material_atlas", false);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_page_radiance", false);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_shadow_mask", false);
 
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);

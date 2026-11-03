@@ -355,6 +355,9 @@ public:
 		SelfList<Instance>::List instances;
 
 		LocalVector<RID> dynamic_lights;
+		// GodotNext: nextgi_src_relight
+		// Non-directional LIGHT_BAKE_STATIC lights. NextGI's world-space set reads this beside dynamic_lights (D14).
+		LocalVector<RID> static_lights;
 
 		PagedArray<InstanceBounds> instance_aabbs;
 		PagedArray<InstanceData> instance_data;
@@ -1091,6 +1094,8 @@ public:
 	virtual uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance) const;
+	// GodotNext: nextgi_src_relight
+	void _nextgi_sync_positional_light(Scenario *p_scenario, RID p_light_instance, bool p_visible, bool p_directional, RSE::LightBakeMode p_bake) const;
 	_FORCE_INLINE_ void _update_instance_aabb(Instance *p_instance) const;
 	_FORCE_INLINE_ void _update_dirty_instance(Instance *p_instance) const;
 	_FORCE_INLINE_ void _update_instance_lightmap_captures(Instance *p_instance) const;

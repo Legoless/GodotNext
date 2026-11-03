@@ -323,6 +323,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 // GodotNext: nextgi_src_cards
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 
@@ -1609,11 +1610,105 @@ TEST_CASE("[NextGI] SRC cards: coverage counts card texels with depth above 0") 
 	ERR_PRINT_ON;
 }
 
+TEST_CASE("[NextGI] SRC relight: DISABLED never enters and STATIC is dropped only for lightmapped receivers") {
+	using namespace RendererRD;
+	CHECK_EQ(sizeof(NextGILight), 64);
+	CHECK_EQ(nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_DISABLED), NEXTGI_POSITIONAL_LIGHT_NONE);
+	CHECK_EQ(nextgi_positional_light_list(true, true, true, RSE::LIGHT_BAKE_STATIC), NEXTGI_POSITIONAL_LIGHT_NONE);
+	CHECK_EQ(nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_DYNAMIC), NEXTGI_POSITIONAL_LIGHT_DYNAMIC);
+	CHECK_EQ(nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_STATIC), NEXTGI_POSITIONAL_LIGHT_STATIC);
+	CHECK_EQ(nextgi_positional_light_list(false, true, false, RSE::LIGHT_BAKE_STATIC), NEXTGI_POSITIONAL_LIGHT_NONE);
+	CHECK_EQ(nextgi_positional_light_list(true, false, false, RSE::LIGHT_BAKE_STATIC), NEXTGI_POSITIONAL_LIGHT_NONE);
+
+	LocalVector<int> dynamic_lights;
+	LocalVector<int> static_lights;
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_STATIC));
+	REQUIRE_EQ(static_lights.size(), 1);
+	CHECK(dynamic_lights.is_empty());
+	// Hidden, then shown again.
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(false, true, false, RSE::LIGHT_BAKE_STATIC));
+	CHECK(static_lights.is_empty());
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_STATIC));
+	CHECK_EQ(static_lights.size(), 1);
+	// Leaving the scenario drops it. Entering another scenario puts it back.
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(true, false, false, RSE::LIGHT_BAKE_STATIC));
+	CHECK(static_lights.is_empty());
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_STATIC));
+	CHECK_EQ(static_lights[0], 7);
+	// Bake mode moves it onto the dynamic list and off the static one.
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_DYNAMIC));
+	CHECK(static_lights.is_empty());
+	REQUIRE_EQ(dynamic_lights.size(), 1);
+	CHECK_EQ(dynamic_lights[0], 7);
+	nextgi_sync_positional_light(dynamic_lights, static_lights, 7, nextgi_positional_light_list(true, true, false, RSE::LIGHT_BAKE_DISABLED));
+	CHECK(dynamic_lights.is_empty());
+	CHECK(static_lights.is_empty());
+
+	CHECK(nextgi_light_reaches_receiver(true, 0));
+	CHECK_FALSE(nextgi_light_reaches_receiver(true, NEXTGI_RT_FLAG_LIGHTMAPPED));
+	CHECK(nextgi_light_reaches_receiver(false, NEXTGI_RT_FLAG_LIGHTMAPPED));
+}
+
+TEST_CASE("[NextGI] SRC relight: page lights, the High schedule and the two mask slots") {
+	using namespace RendererRD;
+	NextGIPageLightCandidate lights[10];
+	for (uint32_t i = 0; i < 10; i++) {
+		lights[i].light_index = i;
+		lights[i].energy = 10.0f - float(i);
+		lights[i].has_shadow = i != 1;
+	}
+	LocalVector<uint32_t> shadowed;
+	LocalVector<uint32_t> unshadowed;
+	nextgi_select_page_lights(lights, 10, NEXTGI_SRC_MAX_SHADOWED_LIGHTS, shadowed, unshadowed);
+	REQUIRE_EQ(shadowed.size(), 8);
+	CHECK_EQ(shadowed[0], 0);
+	CHECK_EQ(shadowed[1], 2); // The brighter unshadowed light does not take a shadow slot.
+	CHECK_EQ(unshadowed[0], 1);
+	CHECK_EQ(unshadowed[unshadowed.size() - 1], 9);
+	CHECK_EQ(shadowed.size() + unshadowed.size(), 10);
+
+	uint32_t slot_a = 0;
+	uint32_t slot_b = 0;
+	nextgi_mask_slots(0, 0, slot_a, slot_b);
+	CHECK_EQ(slot_a, UINT32_MAX);
+	nextgi_mask_slots(0, 4, slot_a, slot_b);
+	CHECK_EQ(slot_a, 0);
+	CHECK_EQ(slot_b, 1);
+	nextgi_mask_slots(1, 4, slot_a, slot_b);
+	CHECK_EQ(slot_a, 2);
+	CHECK_EQ(slot_b, 3);
+	nextgi_mask_slots(1, 1, slot_a, slot_b);
+	CHECK_EQ(slot_a, 0);
+	CHECK_EQ(slot_b, 0);
+
+	uint32_t texels[5] = { 100000, 100000, 100000, 100000, 100000 };
+	uint32_t indices[5] = {};
+	uint32_t cursor = 0;
+	CHECK_EQ(nextgi_schedule_relight(texels, 5, cursor, NEXTGI_SRC_RELIGHT_TEXEL_CAP, indices, 5), 2);
+	CHECK_EQ(indices[0], 0);
+	CHECK_EQ(indices[1], 1);
+	CHECK_EQ(cursor, 2);
+	CHECK_EQ(nextgi_schedule_relight(texels, 5, cursor, NEXTGI_SRC_RELIGHT_TEXEL_CAP, indices, 5), 2);
+	CHECK_EQ(indices[0], 2);
+	CHECK_EQ(cursor, 4);
+	CHECK_EQ(nextgi_schedule_relight(texels, 5, cursor, NEXTGI_SRC_RELIGHT_TEXEL_CAP, indices, 5), 2);
+	CHECK_EQ(indices[0], 4);
+	CHECK_EQ(indices[1], 0);
+	CHECK_EQ(cursor, 1);
+
+	CHECK(nextgi_omni_attenuation(0.0f, 0.1f, 1.0f) > 1.0f);
+	CHECK_EQ(nextgi_omni_attenuation(10.0f, 0.1f, 1.0f), 0.0f);
+}
+
 TEST_CASE("[NextGI] SRC cards: the material atlas dump setting is registered and off") {
 	const String setting = "rendering/global_illumination/nextgi/debug/dump_material_atlas";
 	REQUIRE(ProjectSettings::get_singleton()->has_setting(setting));
 	CHECK_FALSE(bool(ProjectSettings::get_singleton()->property_get_revert(setting)));
 	CHECK_EQ(RendererRD::NextGISRC::get_atlas_target_name(RendererRD::NextGISRC::ATLAS_DEPTH), "depth");
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/read_page_radiance"));
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/read_shadow_mask"));
+	CHECK_FALSE(bool(ProjectSettings::get_singleton()->property_get_revert("rendering/global_illumination/nextgi/debug/read_page_radiance")));
+	CHECK_FALSE(bool(ProjectSettings::get_singleton()->property_get_revert("rendering/global_illumination/nextgi/debug/read_shadow_mask")));
 }
 
 } // namespace TestNextGI

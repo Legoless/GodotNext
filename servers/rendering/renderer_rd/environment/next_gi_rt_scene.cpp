@@ -32,6 +32,7 @@
 
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_geometry_instance.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -431,6 +432,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			// GodotNext: nextgi_src_cards
 			// Every part record of the mesh shares its SRC card set (§6.3); UINT32_MAX until built.
 			record.card_set = NextGISRC::get_mesh_card_set(mesh);
+			if (NextGIRelight::get_singleton() != nullptr) {
+				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record);
+			}
 
 			float eps_rt = 0.0f;
 			for (const NextGIRTPartGeometry &part_geometry : part.geometries) {

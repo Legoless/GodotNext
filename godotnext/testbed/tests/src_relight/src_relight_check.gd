@@ -1,0 +1,353 @@
+extends Node
+
+## NextGI SRC world-space relight check (#31, D14).
+##
+## Renders --frames frames (600 by default) of --scene and checks the High caps: at most 256k
+## relit texels and 256k traced shadow rays per frame, at most 8 shadowed lights per page and at
+## most 2 mask evaluations. Extra modes:
+##   --probes          compare page radiance with the camera aimed toward and away from the light
+##   --shadow-fixture  plane, box and a downward sun; the mask matches the analytic footprint
+##   --light-lists     STATIC / DYNAMIC / DISABLED tracking for visibility, scenario and bake mode
+## Prints one "GODOTNEXT_RESULT <json>" line.
+
+const TEXEL_CAP := 256 * 1024
+const RAY_CAP := 256 * 1024
+
+var _failures := PackedStringArray()
+
+
+func _ready() -> void:
+	var result := await run(OS.get_cmdline_user_args())
+	print("GODOTNEXT_RESULT " + JSON.stringify(result))
+	get_tree().quit(0 if result["pass"] else 1)
+
+
+func _check(condition: bool, what: String) -> void:
+	if not condition:
+		_failures.append(what)
+
+
+func run(args: PackedStringArray) -> Dictionary:
+	var scene_path := "res://scenes/color_box_room/cbr_a.tscn"
+	var frames := 600
+	var probes := false
+	var shadow_fixture := false
+	var light_lists := false
+	for arg in args:
+		if arg.begins_with("--scene="):
+			scene_path = arg.trim_prefix("--scene=")
+		elif arg.begins_with("--frames="):
+			frames = int(arg.trim_prefix("--frames="))
+		elif arg == "--probes":
+			probes = true
+		elif arg == "--shadow-fixture":
+			shadow_fixture = true
+		elif arg == "--light-lists":
+			light_lists = true
+
+	var enabled: bool = ProjectSettings.get_setting("rendering/global_illumination/nextgi/enabled", false)
+	var root := Node3D.new()
+	add_child(root)
+	if shadow_fixture:
+		_build_shadow_fixture(root)
+		scene_path = "shadow-fixture"
+	elif light_lists:
+		_build_light_list_scene(root)
+		scene_path = "light-lists"
+	else:
+		var packed: PackedScene = load(scene_path)
+		_check(packed != null, "scene loads: " + scene_path)
+		if packed == null:
+			return _result(scene_path, enabled, {})
+		root.add_child(packed.instantiate())
+	_prepare(root)
+
+	var max_texels := 0
+	var max_rays := 0
+	var max_shadowed := 0
+	var max_evals := 0
+	var info: Dictionary = {}
+	if probes:
+		return await _run_probes(root, scene_path, enabled, frames)
+	if light_lists:
+		return await _run_light_lists(root, scene_path, enabled)
+
+	for frame in frames:
+		await get_tree().process_frame
+		info = RenderingServer.nextgi_get_tier_info()
+		if info.get("tier", "") != "HWRT":
+			continue
+		max_texels = maxi(max_texels, int(info.get("src_relight_texels", 0)))
+		max_rays = maxi(max_rays, int(info.get("src_relight_rays", 0)))
+		max_shadowed = maxi(max_shadowed, int(info.get("src_max_shadowed_lights", 0)))
+		max_evals = maxi(max_evals, int(info.get("src_max_mask_evals", 0)))
+	_check(info.get("tier", "") == "HWRT", "HWRT tier")
+	_check(max_texels > 0, "at least one relit texel")
+	_check(max_texels <= TEXEL_CAP, "relit texels %d stay within 256k" % max_texels)
+	_check(max_rays <= RAY_CAP, "traced rays %d stay within 256k" % max_rays)
+	_check(max_shadowed <= 8, "shadowed lights per page %d" % max_shadowed)
+	_check(max_evals <= 2, "mask evaluations %d" % max_evals)
+	if shadow_fixture:
+		_check_shadow_mask(info)
+	var result := _result(scene_path, enabled, info)
+	result["max_texels"] = max_texels
+	result["max_rays"] = max_rays
+	result["max_shadowed"] = max_shadowed
+	result["max_evals"] = max_evals
+	return result
+
+
+func _run_probes(root: Node3D, scene_path: String, enabled: bool, frames: int) -> Dictionary:
+	var toward := root.find_child("LeakCamLit", true, false) as Camera3D
+	var away := root.find_child("LeakCamDark", true, false) as Camera3D
+	_check(toward != null and away != null, "toward and away cameras")
+	if toward == null or away == null:
+		return _result(scene_path, enabled, {})
+	toward.current = true
+	for frame in frames:
+		await get_tree().process_frame
+	var first: PackedFloat32Array = RenderingServer.nextgi_get_tier_info().get("src_page_probes", PackedFloat32Array())
+	away.current = true
+	toward.current = false
+	for frame in frames:
+		await get_tree().process_frame
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	var second: PackedFloat32Array = info.get("src_page_probes", PackedFloat32Array())
+	_check(first.size() > 0 and first.size() == second.size(), "probe readback on both cameras")
+	var lit := 0
+	for i in mini(first.size(), second.size()):
+		var scale := maxf(first[i], second[i])
+		var delta := absf(first[i] - second[i])
+		var ok := delta <= 0.01 if scale < 0.02 else delta <= 0.01 * scale
+		if not ok:
+			_check(false, "probe %d changed from %.4f to %.4f" % [i, first[i], second[i]])
+			break
+		if scale >= 0.02:
+			lit += 1
+	_check(lit > 0, "a lit page was compared")
+	return _result(scene_path, enabled, info)
+
+
+func _run_light_lists(root: Node3D, scene_path: String, enabled: bool) -> Dictionary:
+	var static_light := root.get_node("StaticLight") as OmniLight3D
+	var dynamic_light := root.get_node("DynamicLight") as OmniLight3D
+	var disabled_light := root.get_node("DisabledLight") as OmniLight3D
+	for frame in 30:
+		await get_tree().process_frame
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	_check(int(info.get("src_light_static_count", 0)) == 1, "one static light, got %s" % str(info.get("src_light_static_count", 0)))
+	_check(int(info.get("src_light_dynamic_count", 0)) == 1, "one dynamic light")
+	_check(int(info.get("src_light_directional_count", 0)) == 0, "the disabled directional is absent")
+	disabled_light.light_bake_mode = Light3D.BAKE_DYNAMIC
+	for frame in 8:
+		await get_tree().process_frame
+	info = RenderingServer.nextgi_get_tier_info()
+	_check(int(info.get("src_light_dynamic_count", 0)) == 2, "enabling the disabled light adds a dynamic light")
+	disabled_light.light_bake_mode = Light3D.BAKE_DISABLED
+	static_light.visible = false
+	for frame in 8:
+		await get_tree().process_frame
+	info = RenderingServer.nextgi_get_tier_info()
+	_check(int(info.get("src_light_static_count", 0)) == 0, "hiding the static light drops it")
+	_check(int(info.get("src_light_dynamic_count", 0)) == 1, "DISABLED stays out and the dynamic light remains, count %s" % str(info.get("src_light_count", 0)))
+	var holder := Node3D.new()
+	root.remove_child(dynamic_light)
+	holder.add_child(dynamic_light)
+	for frame in 8:
+		await get_tree().process_frame
+	info = RenderingServer.nextgi_get_tier_info()
+	_check(int(info.get("src_light_dynamic_count", 0)) == 0, "leaving the scenario drops the dynamic light")
+	holder.remove_child(dynamic_light)
+	root.add_child(dynamic_light)
+	dynamic_light.light_bake_mode = Light3D.BAKE_STATIC
+	for frame in 8:
+		await get_tree().process_frame
+	info = RenderingServer.nextgi_get_tier_info()
+	_check(int(info.get("src_light_static_count", 0)) >= 1, "re-entering as STATIC puts the light on the static list")
+	_check(int(info.get("src_light_dynamic_count", 0)) == 0, "the bake-mode change left the dynamic list")
+	return _result(scene_path, enabled, info)
+
+
+func _check_shadow_mask(info: Dictionary) -> void:
+	var pages: Array = info.get("src_mask_pages", [])
+	_check(not pages.is_empty(), "shadow mask readback")
+	var page: Dictionary = {}
+	var best_y := 1000.0
+	for candidate in pages:
+		var normal: Vector3 = _world_normal(candidate)
+		if normal.y < 0.5:
+			continue
+		var center := _mask_world(candidate, int(candidate["mask_w"]) / 2, int(candidate["mask_h"]) / 2)
+		if center.y < best_y:
+			best_y = center.y
+			page = candidate
+	_check(best_y < 0.5, "the ground card faces up at y %.2f" % best_y)
+	if page.is_empty():
+		return
+	var mask: PackedByteArray = page["mask"]
+	var mask_w := int(page["mask_w"])
+	var mask_h := int(page["mask_h"])
+	var radiance_w := maxi(int(page["radiance_w"]), 1)
+	var half_u := float(page["half_u"])
+	var half_v := float(page["half_v"])
+	var texel_u := (2.0 * half_u) / float(radiance_w) * float(radiance_w) / float(maxi(mask_w, 1))
+	var texel_v := (2.0 * float(page["half_v"])) / float(maxi(int(page["radiance_h"]), 1)) * float(maxi(int(page["radiance_h"]), 1)) / float(maxi(mask_h, 1))
+	# One mask texel of the shadow edge, plus the texel center, is the allowed band.
+	var margin := maxf(absf(texel_u), absf(texel_v)) * 2.0
+	var camera := Vector3(0, 3, 3)
+	var near_checked := 0
+	var far_checked := 0
+	var near_bad := 0
+	var far_bad := 0
+	var nonzero := 0
+	var sample := Vector3.ZERO
+	for y in mask_h:
+		for x in mask_w:
+			var world := _mask_world(page, x, y)
+			if x == mask_w / 2 and y == mask_h / 2:
+				sample = world
+			if (mask[y * mask_w + x] & 1) != 0:
+				nonzero += 1
+			var inside := absf(world.x) <= 1.0 and absf(world.z) <= 1.0
+			var edge := absf(absf(world.x) - 1.0) <= margin or absf(absf(world.z) - 1.0) <= margin
+			if edge:
+				continue
+			var lit := (mask[y * mask_w + x] & 1) != 0
+			var distance := world.distance_to(camera)
+			if distance < 3.0:
+				near_checked += 1
+				if lit == inside:
+					near_bad += 1
+			elif distance > 6.0:
+				far_checked += 1
+				if lit == inside:
+					far_bad += 1
+	_check(near_checked > 0, "shadow-map texels were checked (near %d far %d lit %d sample %s)" % [near_checked, far_checked, nonzero, sample])
+	_check(far_checked > 0, "traced texels beyond the shadow distance were checked")
+	_check(near_bad == 0, "%d shadow-map texels disagree with the analytic footprint" % near_bad)
+	_check(far_bad == 0, "%d traced texels disagree with the analytic footprint" % far_bad)
+
+
+func _mask_world(page: Dictionary, x: int, y: int) -> Vector3:
+	var radiance_w := float(maxi(int(page["radiance_w"]), 1))
+	var radiance_h := float(maxi(int(page["radiance_h"]), 1))
+	var mask_w := float(maxi(int(page["mask_w"]), 1))
+	var mask_h := float(maxi(int(page["mask_h"]), 1))
+	var texel_x := float(x) * radiance_w / mask_w
+	var texel_y := float(y) * radiance_h / mask_h
+	var xu := ((texel_x + 0.5) / radiance_w * 2.0 - 1.0) * float(page["half_u"])
+	var yv := ((texel_y + 0.5) / radiance_h * 2.0 - 1.0) * float(page["half_v"])
+	var origin: Vector3 = page["origin"]
+	var axis_u: Vector3 = page["axis_u"]
+	var axis_v: Vector3 = page["axis_v"]
+	var object := origin + axis_u * xu + axis_v * yv
+	var rows: PackedFloat32Array = page["world"]
+	return Vector3(
+			rows[0] * object.x + rows[1] * object.y + rows[2] * object.z + rows[3],
+			rows[4] * object.x + rows[5] * object.y + rows[6] * object.z + rows[7],
+			rows[8] * object.x + rows[9] * object.y + rows[10] * object.z + rows[11])
+
+
+func _world_normal(page: Dictionary) -> Vector3:
+	var axis_n: Vector3 = page["axis_n"]
+	var rows: PackedFloat32Array = page["world"]
+	return Vector3(
+			rows[0] * axis_n.x + rows[1] * axis_n.y + rows[2] * axis_n.z,
+			rows[4] * axis_n.x + rows[5] * axis_n.y + rows[6] * axis_n.z,
+			rows[8] * axis_n.x + rows[9] * axis_n.y + rows[10] * axis_n.z).normalized()
+
+
+func _prepare(node: Node) -> void:
+	var stack: Array[Node] = [node]
+	while not stack.is_empty():
+		var current: Node = stack.pop_back()
+		if current is WorldEnvironment:
+			var world_environment := current as WorldEnvironment
+			if world_environment.environment != null:
+				var environment := world_environment.environment.duplicate()
+				environment.nextgi_enabled = true
+				world_environment.environment = environment
+		elif current is OmniLight3D:
+			(current as OmniLight3D).shadow_enabled = true
+		elif current is DirectionalLight3D:
+			(current as DirectionalLight3D).shadow_enabled = true
+		elif current is GeometryInstance3D:
+			(current as GeometryInstance3D).gi_mode = GeometryInstance3D.GI_MODE_STATIC
+		for child in current.get_children():
+			stack.append(child)
+
+
+func _build_shadow_fixture(root: Node3D) -> void:
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_COLOR
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	environment.nextgi_enabled = true
+	var world := WorldEnvironment.new()
+	world.environment = environment
+	root.add_child(world)
+	var ground := MeshInstance3D.new()
+	var ground_mesh := BoxMesh.new()
+	ground_mesh.size = Vector3(20, 0.2, 20)
+	ground.mesh = ground_mesh
+	ground.position = Vector3(0, -0.1, 0)
+	root.add_child(ground)
+	var block := MeshInstance3D.new()
+	var block_mesh := BoxMesh.new()
+	block_mesh.size = Vector3(2, 2, 2)
+	block.mesh = block_mesh
+	block.position = Vector3(0, 1, 0)
+	root.add_child(block)
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-90, 0, 0)
+	sun.shadow_enabled = true
+	sun.directional_shadow_max_distance = 4.0
+	sun.shadow_bias = 0.1
+	root.add_child(sun)
+	var camera := Camera3D.new()
+	camera.position = Vector3(0, 3, 3)
+	camera.look_at_from_position(camera.position, Vector3(0, 0, 1), Vector3.UP)
+	camera.current = true
+	root.add_child(camera)
+
+
+func _build_light_list_scene(root: Node3D) -> void:
+	var environment := Environment.new()
+	environment.nextgi_enabled = true
+	var world := WorldEnvironment.new()
+	world.environment = environment
+	root.add_child(world)
+	var mesh_instance := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(2, 2, 2)
+	mesh_instance.mesh = box
+	root.add_child(mesh_instance)
+	var camera := Camera3D.new()
+	camera.position = Vector3(0, 2, 4)
+	camera.look_at_from_position(camera.position, Vector3.ZERO, Vector3.UP)
+	camera.current = true
+	root.add_child(camera)
+	_add_omni(root, "StaticLight", Light3D.BAKE_STATIC, Vector3(3, 2, 0))
+	_add_omni(root, "DynamicLight", Light3D.BAKE_DYNAMIC, Vector3(-3, 2, 0))
+	_add_omni(root, "DisabledLight", Light3D.BAKE_DISABLED, Vector3(0, 2, 3))
+
+
+func _add_omni(root: Node3D, node_name: String, bake: Light3D.BakeMode, position: Vector3) -> void:
+	var light := OmniLight3D.new()
+	light.name = node_name
+	light.light_bake_mode = bake
+	light.omni_range = 12.0
+	light.position = position
+	light.shadow_enabled = false
+	root.add_child(light)
+
+
+func _result(scene_path: String, enabled: bool, info: Dictionary) -> Dictionary:
+	return {
+		"pass": _failures.is_empty(),
+		"scene": scene_path,
+		"device": RenderingServer.get_video_adapter_name(),
+		"driver": RenderingServer.get_current_rendering_driver_name(),
+		"nextgi_enabled": enabled,
+		"tier": info.get("tier", ""),
+		"failures": _failures,
+	}

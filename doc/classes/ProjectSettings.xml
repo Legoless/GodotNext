@@ -3108,6 +3108,12 @@
 		<member name="rendering/global_illumination/nextgi/debug/dump_material_atlas" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI saves its surface cache material atlas once every known card has been captured: the albedo, normal, ORM, emission and depth targets go to [code]user://nextgi_atlas_*.exr[/code], and the log gets the coverage of each card (the fraction of its texels with a depth above 0). This is a debugging aid; it reads the atlas back from the GPU. It is read when NextGI creates the atlas, so changes take effect after a restart.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/read_page_radiance" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_page_probes[/code], the center-texel radiance of each surface-cache page. This reads a small buffer back from the GPU.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/read_shadow_mask" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_mask_pages[/code], the shadow-mask texels of each page. This reads the mask atlas back from the GPU.
+		</member>
 		<member name="rendering/global_illumination/nextgi/enabled" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use SDFGI instead. See [method RenderingServer.nextgi_get_tier_info].
 			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed and rendering is unchanged.
