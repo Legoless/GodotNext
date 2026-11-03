@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/rd_api/rd_api.gd" id="1_rdapi"]
+
+[node name="RdApi" type="Node"]
+script = ExtResource("1_rdapi")

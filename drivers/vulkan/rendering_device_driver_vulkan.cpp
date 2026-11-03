@@ -6611,6 +6611,10 @@ void RenderingDeviceDriverVulkan::command_trace_rays(CommandBufferID p_cmd_buffe
 
 RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) {
 #if VULKAN_RAYTRACING_ENABLED
+	// GodotNext: rd_ray_query_api
+	// Loaded only with VK_KHR_ray_tracing_pipeline; a ray-query-only device leaves it null.
+	ERR_FAIL_NULL_V(device_functions.CreateRaytracingPipelinesKHR, RaytracingPipelineID());
+
 	VkPipelineShaderStageCreateInfo *stages = ALLOCA_ARRAY(VkPipelineShaderStageCreateInfo, p_shaders.size());
 
 	for (uint32_t i = 0; i < p_shaders.size(); i++) {

@@ -41,6 +41,8 @@
 #include "core/templates/fixed_vector.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device_binds.h"
+// GodotNext: rd_ray_query_api
+#include "servers/rendering/rendering_device_ray_query.h"
 #include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_include_db.h"
 
@@ -370,8 +372,12 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 		rdd_geometry = {};
 		rdd_geometry.flags = rd_geometry.flags;
 
-		Buffer *vertex_buffer = vertex_buffer_owner.get_or_null(rd_geometry.vertex_buffer);
-		ERR_FAIL_NULL_V(vertex_buffer, RID());
+		// GodotNext: rd_ray_query_api
+		// Vertex data comes from a vertex buffer or a storage buffer, created as a build input (plan §9 RT API item 5).
+		const bool vertex_source_valid = vertex_buffer_owner.owns(rd_geometry.vertex_buffer) || storage_buffer_owner.owns(rd_geometry.vertex_buffer);
+		Buffer *vertex_buffer = vertex_source_valid ? _get_buffer_from_owner(rd_geometry.vertex_buffer) : nullptr;
+		ERR_FAIL_NULL_V_MSG(vertex_buffer, RID(), "The vertex buffer of geometry " + itos(i) + " must be a vertex buffer or a storage buffer.");
+		ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(vertex_buffer->usage), RID(), RDRayQuery::get_build_input_usage_error("vertex", i));
 
 		ERR_FAIL_COND_V_MSG((rd_geometry.vertex_offset + rd_geometry.vertex_count * rd_geometry.vertex_stride) > vertex_buffer->size, RID(), "The specified vertex offset and count are outside the range of the vertex buffer.");
 		ERR_FAIL_COND_V_MSG(rd_geometry.vertex_format >= DataFormat::DATA_FORMAT_MAX, RID(), "An invalid vertex format was specified.");
@@ -391,18 +397,29 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 		_check_transfer_worker_buffer(vertex_buffer);
 
 		if (rd_geometry.index_buffer.is_valid()) {
-			IndexBuffer *index_buffer = index_buffer_owner.get_or_null(rd_geometry.index_buffer);
-			ERR_FAIL_NULL_V(index_buffer, RID());
-
-			uint32_t index_stride = (index_buffer->format == INDEX_BUFFER_FORMAT_UINT32 ? sizeof(uint32_t) : sizeof(uint16_t));
+			// GodotNext: rd_ray_query_api
+			// Index data comes from an index buffer, in its own format, or from a storage buffer read as index_format.
+			IndexBuffer *typed_index_buffer = index_buffer_owner.get_or_null(rd_geometry.index_buffer);
+			Buffer *index_buffer = typed_index_buffer;
+			if (index_buffer == nullptr && storage_buffer_owner.owns(rd_geometry.index_buffer)) {
+				index_buffer = storage_buffer_owner.get_or_null(rd_geometry.index_buffer);
+			}
+			ERR_FAIL_NULL_V_MSG(index_buffer, RID(), "The index buffer of geometry " + itos(i) + " must be an index buffer or a storage buffer.");
+			ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(index_buffer->usage), RID(), RDRayQuery::get_build_input_usage_error("index", i));
+			const IndexBufferFormat index_format = typed_index_buffer != nullptr ? typed_index_buffer->format : rd_geometry.index_format;
+			ERR_FAIL_COND_V_MSG(!RDRayQuery::is_valid_index_format(index_format), RID(), "An invalid index format was specified.");
+			uint32_t index_stride = (index_format == INDEX_BUFFER_FORMAT_UINT32 ? sizeof(uint32_t) : sizeof(uint16_t));
 			ERR_FAIL_COND_V_MSG((rd_geometry.index_offset + rd_geometry.index_count * index_stride) > index_buffer->size, RID(), "The specified index offset and count are outside the range of the index buffer.");
 #ifdef DEBUG_ENABLED
-			ERR_FAIL_COND_V_MSG(index_buffer->max_index != 0xFFFFFFFF && index_buffer->max_index >= rd_geometry.vertex_count, RID(), "The index buffer contains an index that is outside the specified vertex range.");
+			// GodotNext: rd_ray_query_api
+			// Only an index buffer tracks its maximum index.
+			ERR_FAIL_COND_V_MSG(typed_index_buffer != nullptr && typed_index_buffer->max_index != 0xFFFFFFFF && typed_index_buffer->max_index >= rd_geometry.vertex_count, RID(), "The index buffer contains an index that is outside the specified vertex range.");
 #endif
 			rdd_geometry.index_buffer = index_buffer->driver_id;
 			rdd_geometry.index_offset = rd_geometry.index_offset;
 			rdd_geometry.index_count = rd_geometry.index_count;
-			rdd_geometry.index_format = index_buffer->format;
+			// GodotNext: rd_ray_query_api
+			rdd_geometry.index_format = index_format;
 
 			if (index_buffer->draw_tracker != nullptr) {
 				draw_trackers.push_back(index_buffer->draw_tracker);
@@ -575,6 +592,8 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	AccelerationStructure::InstanceBuffer &instance_buffer = tlas->instance_buffers[instance_buffer_index];
 
 	_tlas_remove_blas_dependencies(tlas, p_tlas);
+	// GodotNext: rd_ray_query_api
+	tlas->has_zero_sbt_instances = false;
 
 	thread_local LocalVector<RDG::ResourceTracker *> draw_trackers;
 	draw_trackers.clear();
@@ -590,7 +609,12 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		rdd_instance.flags = rd_instance.flags;
 
 		if (rd_instance.blas.is_valid()) {
-			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
+			// GodotNext: rd_ray_query_api
+			// hit_sbt_range 0 is valid: it decodes to SBT offset 0, for ray-query-only use (plan D5).
+			// raytracing_list_bind_uniform_set rejects such a TLAS.
+			if (RDRayQuery::is_ray_query_only_instance(true, rd_instance.hit_sbt_range)) {
+				tlas->has_zero_sbt_instances = true;
+			}
 
 			AccelerationStructure *blas = acceleration_structure_owner.get_or_null(rd_instance.blas);
 			ERR_FAIL_NULL_V(blas, ERR_INVALID_PARAMETER);
@@ -691,6 +715,8 @@ void RenderingDevice::_hit_sbt_add_dirty_range(HitShaderBindingTable *p_hit_sbt,
 
 RID RenderingDevice::hit_sbt_create(RID p_raytracing_pipeline, uint32_t p_initial_hit_group_capacity) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), RID(), "The current rendering device has neither raytracing pipeline nor ray query support.");
+	// GodotNext: rd_ray_query_api
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE), RID(), RDRayQuery::ERROR_NO_RAYTRACING_PIPELINE);
 
 	RaytracingPipeline *raytracing_pipeline = raytracing_pipeline_owner.get_or_null(p_raytracing_pipeline);
 	ERR_FAIL_NULL_V(raytracing_pipeline, RID());
@@ -5266,6 +5292,9 @@ Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPip
 
 RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), RID(), "The current rendering device has neither raytracing pipeline nor ray query support.");
+	// GodotNext: rd_ray_query_api
+	// A ray-query-only device has no RT pipeline entry points in its driver.
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE), RID(), RDRayQuery::ERROR_NO_RAYTRACING_PIPELINE);
 
 	struct PipelineShaderKey : PipelineShader {
 		ShaderStage shader_stage = {};
@@ -6615,6 +6644,9 @@ void RenderingDevice::raytracing_list_bind_uniform_set(RaytracingListID p_list, 
 		AccelerationStructure *acceleration_structure = acceleration_structure_owner.get_or_null(acceleration_structure_id);
 		ERR_FAIL_NULL(acceleration_structure);
 		ERR_FAIL_COND_MSG(acceleration_structure->invalidated, "Acceleration structure either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
+		// GodotNext: rd_ray_query_api
+		const RDRayQuery::BindStatus bind_status = RDRayQuery::get_bind_status(acceleration_structure->invalidated, acceleration_structure->has_zero_sbt_instances, true);
+		ERR_FAIL_COND_MSG(bind_status != RDRayQuery::BIND_OK, RDRayQuery::get_bind_error(bind_status));
 	}
 #endif
 
@@ -6879,6 +6911,17 @@ void RenderingDevice::compute_list_bind_uniform_set(ComputeListID p_list, RID p_
 
 	UniformSet *uniform_set = uniform_set_owner.get_or_null(p_uniform_set);
 	ERR_FAIL_NULL(uniform_set);
+
+	// GodotNext: rd_ray_query_api
+#ifdef DEBUG_ENABLED
+	// Validate the acceleration structures, as raytracing_list_bind_uniform_set does, for ray queries.
+	for (RID acceleration_structure_id : uniform_set->acceleration_structures) {
+		AccelerationStructure *acceleration_structure = acceleration_structure_owner.get_or_null(acceleration_structure_id);
+		ERR_FAIL_NULL(acceleration_structure);
+		const RDRayQuery::BindStatus bind_status = RDRayQuery::get_bind_status(acceleration_structure->invalidated, acceleration_structure->has_zero_sbt_instances, false);
+		ERR_FAIL_COND_MSG(bind_status != RDRayQuery::BIND_OK, RDRayQuery::get_bind_error(bind_status));
+	}
+#endif
 
 	if (p_index > compute_list.state.set_count) {
 		compute_list.state.set_count = p_index;
@@ -9289,6 +9332,11 @@ RenderingDevice *RenderingDevice::create_local_device() {
 }
 
 bool RenderingDevice::has_feature(const Features p_feature) const {
+	// GodotNext: rd_feature_mock
+	if (unlikely(feature_mock_enabled)) {
+		return (feature_mock_supported & (uint64_t(1) << p_feature)) != 0;
+	}
+
 	// Some features can be deduced from the capabilities without querying the driver and looking at the capabilities.
 	switch (p_feature) {
 		case SUPPORTS_MULTIVIEW: {
@@ -9305,6 +9353,13 @@ bool RenderingDevice::has_feature(const Features p_feature) const {
 		default:
 			return driver->has_feature(p_feature);
 	}
+}
+
+// GodotNext: rd_feature_mock
+void RenderingDevice::set_feature_mock(bool p_enabled, uint64_t p_supported_features) {
+	ERR_FAIL_COND_MSG(driver != nullptr, "Device features can only be mocked on a RenderingDevice without a driver.");
+	feature_mock_enabled = p_enabled;
+	feature_mock_supported = p_enabled ? p_supported_features : 0;
 }
 
 void RenderingDevice::_bind_methods() {

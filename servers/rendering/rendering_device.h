@@ -85,6 +85,9 @@ private:
 	RenderingContextDriver *context = nullptr;
 	RenderingDeviceDriver *driver = nullptr;
 	RenderingContextDriver::Device device;
+	// GodotNext: rd_feature_mock
+	bool feature_mock_enabled = false;
+	uint64_t feature_mock_supported = 0;
 
 	bool local_device_processing = false;
 	bool is_main_instance = false;
@@ -1035,6 +1038,10 @@ public:
 	const RDD::Capabilities &get_device_capabilities() const { return driver->get_capabilities(); }
 
 	bool has_feature(const Features p_feature) const;
+	// GodotNext: rd_feature_mock
+	// Unit tests mock the device capabilities of a RenderingDevice that has no driver: has_feature()
+	// then reports bit (1 << feature) of p_supported_features. Fails on a device with a driver.
+	void set_feature_mock(bool p_enabled, uint64_t p_supported_features = 0);
 
 	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true);
 	Vector<uint8_t> shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");
@@ -1352,6 +1359,9 @@ private:
 
 		// --- Top Level ---
 		uint32_t max_instance_count = 0;
+		// GodotNext: rd_ray_query_api
+		// Set by tlas_build when an instance has a BLAS and hit_sbt_range 0 (ray-query only).
+		bool has_zero_sbt_instances = false;
 
 		struct InstanceBuffer {
 			RDD::BufferID driver_id;
@@ -1380,6 +1390,9 @@ public:
 		RID index_buffer;
 		uint32_t index_offset = 0;
 		uint32_t index_count = 0;
+		// GodotNext: rd_ray_query_api
+		// Format of a storage-buffer index source. An index buffer uses its own format.
+		IndexBufferFormat index_format = INDEX_BUFFER_FORMAT_UINT32;
 	};
 
 	RID blas_create(Span<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags);

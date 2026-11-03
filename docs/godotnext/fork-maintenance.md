@@ -57,6 +57,8 @@ Fork code stays out of upstream files wherever possible:
   names the hook (for example the subsystem and what it hooks). Keep the
   block as small as the hook allows, so it can be found and reviewed by
   searching for the marker.
+- The class reference XML in `doc/classes` is the exception: `--doctool`
+  regenerates it and drops comments, so its edits stay unmarked.
 
 Lines changed in upstream files are tracked at each gate with
 [`misc/scripts/godotnext_upstream_delta.py`](../../misc/scripts/godotnext_upstream_delta.py),

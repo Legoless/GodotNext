@@ -36,6 +36,7 @@
 			<description>
 				Creates a new Bottom-Level Acceleration Structure (BLAS). It can be accessed with the RID that is returned.
 				Once finished with your RID, you will want to free the RID using the RenderingDevice's [method free_rid] method.
+				Each geometry reads its vertices from a vertex buffer or a storage buffer, and its indices from an index buffer or a storage buffer (see [member RDAccelerationStructureGeometry.index_format]). Every buffer must be created with [constant BUFFER_CREATION_DEVICE_ADDRESS_BIT] and [constant BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT]; otherwise this method prints an error and returns an invalid RID.
 			</description>
 		</method>
 		<method name="buffer_clear">
@@ -171,6 +172,7 @@
 			<param index="2" name="set_index" type="int" />
 			<description>
 				Binds the [param uniform_set] to this [param compute_list]. Godot ensures that all textures in the uniform set have the correct Vulkan access masks. If Godot had to change access masks of textures, it will raise a Vulkan image memory barrier.
+				In debug builds, binding an acceleration structure that has not been built yet, or that has been invalidated, prints an error and the uniform set is not bound.
 			</description>
 		</method>
 		<method name="compute_list_dispatch">
@@ -726,6 +728,7 @@
 				Once finished with your RID, you will want to free the RID using the RenderingDevice's [method free_rid] method.
 				This will be freed automatically when the [param raytracing_pipeline] is freed.
 				The hit SBT resizes itself as needed. [param initial_hit_group_capacity] is used to allocate the initial backing memory.
+				[b]Note:[/b] Requires [constant SUPPORTS_RAYTRACING_PIPELINE]. Without it, this method prints an error and returns an invalid RID. Ray queries don't need a hit SBT: see [member RDAccelerationStructureInstance.hit_sbt_range].
 			</description>
 		</method>
 		<method name="hit_sbt_range_alloc" experimental="">
@@ -877,6 +880,7 @@
 			<param index="2" name="set_index" type="int" />
 			<description>
 				Binds the [param uniform_set] to this [param raytracing_list].
+				In debug builds, binding an acceleration structure that has not been built yet, or that has been invalidated, prints an error and the uniform set is not bound. So does binding a TLAS built with an instance whose [member RDAccelerationStructureInstance.hit_sbt_range] is [code]0[/code], because such a TLAS is ray-query only.
 			</description>
 		</method>
 		<method name="raytracing_list_end" experimental="">
@@ -922,6 +926,7 @@
 				- [param raygen_shaders] is indexed in [method raytracing_list_trace_rays].
 				- [param miss_shaders] is indexed in [code]traceRayEXT[/code].
 				- [param hit_groups] is indexed in [method hit_sbt_range_update].
+				[b]Note:[/b] Requires [constant SUPPORTS_RAYTRACING_PIPELINE]. Without it, this method prints an error and returns an invalid RID, including on devices that support only [constant SUPPORTS_RAY_QUERY].
 			</description>
 		</method>
 		<method name="raytracing_pipeline_is_valid" experimental="">
@@ -1296,6 +1301,7 @@
 				Builds the [param tlas]. The contents of previous builds are discarded.
 				Any BLAS provided through the [member RDAccelerationStructureInstance.blas] member must already have been built using the [method blas_build] method.
 				The number of instances can be equal to or smaller than the maximum instance count provided in the [method tlas_create] method.
+				An instance can use a [member RDAccelerationStructureInstance.hit_sbt_range] of [code]0[/code] when the TLAS is only traced by ray queries, for example from a compute shader. Such a TLAS can't be bound to a raytracing list.
 				[b]Note:[/b] Freeing or rebuilding any of the provided BLASes after this method invalidates the TLAS and requires it to be rebuilt.
 			</description>
 		</method>

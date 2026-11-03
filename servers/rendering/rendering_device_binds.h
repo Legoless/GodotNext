@@ -761,6 +761,8 @@ public:
 	RD_SETGET(RID, index_buffer)
 	RD_SETGET(uint32_t, index_offset)
 	RD_SETGET(uint32_t, index_count)
+	// GodotNext: rd_ray_query_api
+	RD_SETGET(RD::IndexBufferFormat, index_format)
 
 protected:
 	static void _bind_methods() {
@@ -773,6 +775,8 @@ protected:
 		RD_BIND(Variant::RID, RDAccelerationStructureGeometry, index_buffer);
 		RD_BIND(Variant::INT, RDAccelerationStructureGeometry, index_offset);
 		RD_BIND(Variant::INT, RDAccelerationStructureGeometry, index_count);
+		// GodotNext: rd_ray_query_api
+		RD_BIND(Variant::INT, RDAccelerationStructureGeometry, index_format);
 	}
 };
 

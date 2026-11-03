@@ -6,6 +6,7 @@
 	<description>
 		[RDAccelerationStructureGeometry] describes a set of triangles used as raytracing geometry in the [method RenderingDevice.blas_create] method.
 		The geometry is always in triangle list form, either indexed or non-indexed. Triangle strips are not supported.
+		Vertex and index data can come from vertex and index buffers or from storage buffers, for example ones written by a compute shader. Every buffer must be created with [constant RenderingDevice.BUFFER_CREATION_DEVICE_ADDRESS_BIT] and [constant RenderingDevice.BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT], otherwise [method RenderingDevice.blas_create] fails.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -15,15 +16,19 @@
 		</member>
 		<member name="index_buffer" type="RID" setter="set_index_buffer" getter="get_index_buffer" default="RID()">
 			Buffer containing vertex indices. If [code]null[/code], triangles are non-indexed.
+			This is an index buffer created with [method RenderingDevice.index_buffer_create], which uses its own format, or a storage buffer created with [method RenderingDevice.storage_buffer_create], which is read as [member index_format].
 		</member>
 		<member name="index_count" type="int" setter="set_index_count" getter="get_index_count" default="0">
 			Number of indices used by this geometry in [member index_buffer].
+		</member>
+		<member name="index_format" type="int" setter="set_index_format" getter="get_index_format" enum="RenderingDevice.IndexBufferFormat" default="1">
+			Format of the indices when [member index_buffer] is a storage buffer. An index buffer uses the format it was created with, and this property is ignored.
 		</member>
 		<member name="index_offset" type="int" setter="set_index_offset" getter="get_index_offset" default="0">
 			Byte offset of the first index in [member index_buffer].
 		</member>
 		<member name="vertex_buffer" type="RID" setter="set_vertex_buffer" getter="get_vertex_buffer" default="RID()">
-			Buffer containing vertices.
+			Buffer containing vertices. This is a vertex buffer created with [method RenderingDevice.vertex_buffer_create] or a storage buffer created with [method RenderingDevice.storage_buffer_create].
 		</member>
 		<member name="vertex_count" type="int" setter="set_vertex_count" getter="get_vertex_count" default="0">
 			Number of vertices used by this geometry in [member vertex_buffer].
