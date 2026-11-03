@@ -7,3 +7,5 @@ tests/roundtrip/bake_out/
 # The SDF import set (#181) is tracked OBJ content, not object code:
 # undo the repository root's *.obj rule for it.
 !/assets/sdf_import_set/*.obj
+# Import writes the save_to_file sidecar beside the saved mesh.
+tests/export/*.ngm

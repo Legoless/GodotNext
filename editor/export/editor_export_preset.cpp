@@ -723,3 +723,25 @@ String EditorExportPreset::get_version(const StringName &p_preset_string, bool p
 
 	return result;
 }
+
+// GodotNext: ngm_export
+bool EditorExportPreset::is_path_encrypted(const String &p_path) const {
+	if (!enc_pck) {
+		return false;
+	}
+
+	bool encrypt = false;
+	for (const String &filter : enc_in_filters) {
+		if (p_path.matchn(filter) || p_path.trim_prefix("res://").matchn(filter)) {
+			encrypt = true;
+			break;
+		}
+	}
+	for (const String &filter : enc_ex_filters) {
+		if (p_path.matchn(filter) || p_path.trim_prefix("res://").matchn(filter)) {
+			encrypt = false;
+			break;
+		}
+	}
+	return encrypt;
+}

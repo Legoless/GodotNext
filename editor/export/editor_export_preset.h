@@ -31,6 +31,8 @@
 #pragma once
 
 class EditorExportPlatform;
+// GodotNext: ngm_export
+class NextGeoExportTestAccess;
 
 #include "core/object/ref_counted.h"
 #include "core/variant/type_info.h"
@@ -81,6 +83,8 @@ private:
 
 	friend class EditorExport;
 	friend class EditorExportPlatform;
+	// GodotNext: ngm_export
+	friend class NextGeoExportTestAccess;
 
 	HashMap<StringName, PropertyInfo> properties;
 	HashMap<StringName, Variant> values;
@@ -210,6 +214,10 @@ public:
 
 	void set_enc_directory(bool p_enabled);
 	bool get_enc_directory() const;
+
+	// GodotNext: ngm_export
+	// Include filters first, then exclude filters. An exclude match wins. Empty filters encrypt nothing.
+	bool is_path_encrypted(const String &p_path) const;
 
 	void set_script_encryption_key(const String &p_key);
 	String get_script_encryption_key() const;

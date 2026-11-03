@@ -54,6 +54,8 @@
 #include "editor/editor_string_names.h"
 #include "editor/export/editor_export.h"
 #include "editor/export/editor_export_plugin.h"
+// GodotNext: ngm_export
+#include "editor/export/nextgeo_export_plugin.h"
 #include "editor/file_system/editor_file_system.h"
 #include "editor/file_system/editor_paths.h"
 #include "editor/script/script_editor_plugin.h"
@@ -375,23 +377,8 @@ void EditorExportPlatform::_unload_patches() {
 }
 
 Error EditorExportPlatform::_encrypt_and_store_data(Ref<FileAccess> p_fd, const Ref<EditorExportPreset> &p_preset, const String &p_path, const Vector<uint8_t> &p_data, bool &r_encrypt) {
-	r_encrypt = false;
-
-	if (p_preset->get_enc_pck()) {
-		for (const String &filter : p_preset->get_enc_in_filters()) {
-			if (p_path.matchn(filter) || p_path.trim_prefix("res://").matchn(filter)) {
-				r_encrypt = true;
-				break;
-			}
-		}
-
-		for (const String &filter : p_preset->get_enc_ex_filters()) {
-			if (p_path.matchn(filter) || p_path.trim_prefix("res://").matchn(filter)) {
-				r_encrypt = false;
-				break;
-			}
-		}
-	}
+	// GodotNext: ngm_export
+	r_encrypt = p_preset->is_path_encrypted(p_path);
 
 	Ref<FileAccessEncrypted> fae;
 	Ref<FileAccess> ftmp = p_fd;
@@ -551,6 +538,12 @@ Error EditorExportPlatform::_save_zip_file(const Ref<EditorExportPreset> &p_pres
 
 	zipFile zip = (zipFile)zd->zip;
 
+	// GodotNext: ngm_zip_stored
+	// Store the sidecar uncompressed so a page read can seek to a byte offset.
+	const bool ngm_stored = path.get_extension().to_lower() == "ngm";
+	const int zip_method = ngm_stored ? 0 : Z_DEFLATED;
+	const int zip_level = ngm_stored ? 0 : Z_DEFAULT_COMPRESSION;
+
 	zipOpenNewFileInZip(zip,
 			path.utf8().get_data(),
 			nullptr,
@@ -559,8 +552,8 @@ Error EditorExportPlatform::_save_zip_file(const Ref<EditorExportPreset> &p_pres
 			nullptr,
 			0,
 			nullptr,
-			Z_DEFLATED,
-			Z_DEFAULT_COMPRESSION);
+			zip_method,
+			zip_level);
 
 	zipWriteInFileInZip(zip, p_data.ptr(), p_data.size());
 	zipCloseFileInZip(zip);
@@ -2254,6 +2247,18 @@ bool EditorExportPlatform::_encrypt_and_store_directory(Ref<FileAccess> p_fd, Pa
 }
 
 Error EditorExportPlatform::save_pack(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &p_path, Vector<SharedObject> *p_so_files, SaveFileFunction p_save_func, RemoveFileFunction p_remove_func, bool p_embed, int64_t *r_embedded_start, int64_t *r_embedded_size) {
+	// GodotNext: ngm_encryption_precheck
+	// save_pack opens the output before any file is written. Stop first so a rejected export leaves no file.
+	{
+		String ngm_error;
+		const Error ngm_err = NextGeoExportPlugin::validate_encryption(p_preset, ngm_error);
+		if (ngm_err != OK) {
+			add_message(EXPORT_MESSAGE_ERROR, TTR("Save PCK"), ngm_error);
+			ERR_PRINT(ngm_error);
+			return ngm_err;
+		}
+	}
+
 	EditorProgress ep("savepack", TTR("Packing"), 102, true);
 
 	if (p_save_func == nullptr) {

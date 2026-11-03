@@ -76,6 +76,8 @@
 #include "editor/export/editor_export.h"
 #include "editor/export/export_template_manager.h"
 #include "editor/export/gdextension_export_plugin.h"
+// GodotNext: ngm_export
+#include "editor/export/nextgeo_export_plugin.h"
 #include "editor/export/project_export.h"
 #include "editor/export/project_zip_packer.h"
 #include "editor/export/register_exporters.h"
@@ -9691,6 +9693,11 @@ EditorNode::EditorNode() {
 	dedicated_server_export_plugin.instantiate();
 
 	EditorExport::get_singleton()->add_export_plugin(dedicated_server_export_plugin);
+
+	// GodotNext: ngm_export
+	Ref<NextGeoExportPlugin> nextgeo_export_plugin;
+	nextgeo_export_plugin.instantiate();
+	EditorExport::get_singleton()->add_export_plugin(nextgeo_export_plugin);
 
 #ifdef RD_ENABLED
 	Ref<ShaderBakerExportPlugin> shader_baker_export_plugin;

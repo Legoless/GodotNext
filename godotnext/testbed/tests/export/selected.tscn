@@ -1,0 +1,14 @@
+[gd_scene load_steps=4 format=3 uid="uid://bngm66sel0001"]
+
+[ext_resource type="PackedScene" uid="uid://bngm66embed01" path="res://tests/export/embedded.gltf" id="1_emb"]
+[ext_resource type="PackedScene" uid="uid://bngm66saved01" path="res://tests/export/saved.gltf" id="2_sav"]
+[ext_resource type="ArrayMesh" uid="uid://bngm66obj0001" path="res://tests/export/prop.obj" id="3_obj"]
+
+[node name="Selected" type="Node3D"]
+
+[node name="Embedded" parent="." instance=ExtResource("1_emb")]
+
+[node name="Saved" parent="." instance=ExtResource("2_sav")]
+
+[node name="Prop" type="MeshInstance3D" parent="."]
+mesh = ExtResource("3_obj")

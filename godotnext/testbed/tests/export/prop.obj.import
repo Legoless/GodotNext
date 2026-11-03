@@ -1,0 +1,27 @@
+[remap]
+
+importer="wavefront_obj"
+importer_version=1
+type="Mesh"
+uid="uid://bngm66obj0001"
+path="res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.mesh"
+
+[deps]
+
+files=["res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.mesh", "res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.ngm", "res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.ngm_manifest.json"]
+
+source_file="res://tests/export/prop.obj"
+dest_files=["res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.mesh", "res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.mesh", "res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.ngm", "res://.godot/imported/prop.obj-cb9539e2645f75451a0b6a48450d2b62.ngm_manifest.json"]
+
+[params]
+
+generate_tangents=true
+generate_lods=true
+generate_virtual_geometry=true
+virtual_geometry_fallback_mode=0
+generate_shadow_mesh=true
+generate_lightmap_uv2=true
+generate_lightmap_uv2_texel_size=0.2
+scale_mesh=Vector3(1, 1, 1)
+offset_mesh=Vector3(0, 0, 0)
+force_disable_mesh_compression=false

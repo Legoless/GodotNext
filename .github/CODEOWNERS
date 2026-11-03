@@ -558,3 +558,4 @@
 /modules/nextgeo/tests/                       @godotengine/rendering @godotengine/tests
 /modules/nextgeo/editor/                      @godotengine/rendering @godotengine/editor
 /modules/nextgeo/doc_classes/                 @godotengine/rendering @godotengine/documentation
+/tests/editor/                                 @godotengine/tests @godotengine/editor

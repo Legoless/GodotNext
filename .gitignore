@@ -291,6 +291,9 @@ Generated\ Files/
 *.ilk
 *.meta
 *.obj
+# GodotNext: testbed_obj_sources
+# Wavefront meshes under the testbed are source files, not Visual Studio objects.
+!godotnext/testbed/**/*.obj
 *.iobj
 *.pch
 *.pdb
