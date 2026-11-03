@@ -423,12 +423,61 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 	Vector<RD::ShaderStageSPIRVData> variant_stages = compile_stages(variant_stage_sources, dynamic_buffers);
 	ERR_FAIL_COND(variant_stages.is_empty());
 
+	// GodotNext: spirv_dump
+	_dump_spirv_if_requested(variant, variant_stages);
+
 	Vector<uint8_t> shader_data = RD::get_singleton()->shader_compile_binary_from_spirv(variant_stages, name + ":" + itos(variant));
 	ERR_FAIL_COND(shader_data.is_empty());
 
 	{
 		p_data.version->variants.write[variant] = RD::get_singleton()->shader_create_from_bytecode_with_samplers(shader_data, p_data.version->variants[variant], immutable_samplers);
 		p_data.version->variant_data.write[variant] = shader_data;
+	}
+}
+
+// GodotNext: spirv_dump
+static const char *_spirv_dump_stage_name(RD::ShaderStage p_stage) {
+	switch (p_stage) {
+		case RD::SHADER_STAGE_VERTEX:
+			return "vertex";
+		case RD::SHADER_STAGE_FRAGMENT:
+			return "fragment";
+		case RD::SHADER_STAGE_TESSELATION_CONTROL:
+			return "tesselation_control";
+		case RD::SHADER_STAGE_TESSELATION_EVALUATION:
+			return "tesselation_evaluation";
+		case RD::SHADER_STAGE_COMPUTE:
+			return "compute";
+		case RD::SHADER_STAGE_RAYGEN:
+			return "raygen";
+		case RD::SHADER_STAGE_ANY_HIT:
+			return "any_hit";
+		case RD::SHADER_STAGE_CLOSEST_HIT:
+			return "closest_hit";
+		case RD::SHADER_STAGE_MISS:
+			return "miss";
+		case RD::SHADER_STAGE_INTERSECTION:
+			return "intersection";
+		default:
+			return "stage";
+	}
+}
+
+void ShaderRD::_dump_spirv_if_requested(uint32_t p_variant, const Vector<RD::ShaderStageSPIRVData> &p_stages) {
+	String dir = OS::get_singleton()->get_environment("GODOTNEXT_SPIRV_DUMP_DIR");
+	if (dir.is_empty()) {
+		return;
+	}
+
+	DirAccess::make_dir_recursive_absolute(dir);
+	for (int i = 0; i < p_stages.size(); i++) {
+		const String path = dir.path_join(name + ".v" + itos(p_variant) + "." + _spirv_dump_stage_name(p_stages[i].shader_stage) + ".spv");
+		Ref<FileAccess> file = FileAccess::open(path, FileAccess::WRITE);
+		if (file.is_null()) {
+			ERR_PRINT("GODOTNEXT_SPIRV_DUMP_DIR: failed to write " + path);
+			continue;
+		}
+		file->store_buffer(p_stages[i].spirv);
 	}
 }
 
@@ -978,8 +1027,12 @@ bool ShaderRD::shader_cache_cleanup_on_start = false;
 
 ShaderRD::ShaderRD() {
 	// Do not feel forced to use this, in most cases it makes little to no difference.
+	// GodotNext: rq_selftest
+	// Headless doctests have no RenderingDevice. The ray-query toolchain check builds
+	// this object only to expand sources, so a missing device keeps the 64-wide default.
 	bool use_32_threads = false;
-	if (RD::get_singleton()->get_device_vendor_name() == "NVIDIA") {
+	RD *rd = RD::get_singleton();
+	if (rd && rd->get_device_vendor_name() == "NVIDIA") {
 		use_32_threads = true;
 	}
 	String base_compute_define_text;

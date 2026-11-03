@@ -32,7 +32,10 @@
 
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
+#include "core/os/os.h"
+#include "core/string/print_string.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/decal_data_inc.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/light_data_inc.glsl.gen.h"
@@ -1814,6 +1817,13 @@ void RendererSceneRenderRD::init() {
 
 	if (is_dynamic_gi_supported()) {
 		gi.init(&sky);
+	}
+
+	// GodotNext: rq_selftest
+	if (OS::get_singleton()->get_environment("GODOTNEXT_RQ_SELFTEST") == "1") {
+		String report;
+		RendererRD::NextGI::run_toolchain_selftest(report);
+		print_line(String("GODOTNEXT_RESULT ") + report);
 	}
 
 	{ //decals

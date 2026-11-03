@@ -39,6 +39,12 @@
 
 class StringBuilder;
 
+// GodotNext: spirv_dump
+// When GODOTNEXT_SPIRV_DUMP_DIR is set, _compile_variant writes each
+// stage's SPIR-V to <dir>/<name>.v<variant>.<stage>.spv. A shader-cache hit loads
+// bytecode in _load_from_cache and never calls _compile_variant, so the dump is
+// skipped. Runs that need the files set rendering/shader_compiler/shader_cache/enabled=false.
+
 class ShaderRD {
 public:
 	struct VariantDefine {
@@ -100,6 +106,8 @@ private:
 
 	// Vector will have the size of SHADER_STAGE_MAX and unused stages will have empty strings.
 	void _compile_variant(uint32_t p_variant, CompileData p_data);
+	// GodotNext: spirv_dump
+	void _dump_spirv_if_requested(uint32_t p_variant, const Vector<RD::ShaderStageSPIRVData> &p_stages);
 
 	void _initialize_version(Version *p_version);
 	void _clear_version(Version *p_version);
