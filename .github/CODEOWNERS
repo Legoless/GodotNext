@@ -552,3 +552,7 @@
 /docs/godotnext/**/tests/                     @godotengine/documentation @godotengine/tests
 /docs/godotnext/**/tests/**/*.py              @godotengine/documentation @godotengine/tests @godotengine/buildsystem
 /docs/godotnext/**/tests/**/*.sh              @godotengine/documentation @godotengine/tests @godotengine/buildsystem
+/modules/nextgeo/                             @godotengine/rendering
+/modules/nextgeo/**/*.py                      @godotengine/rendering @godotengine/buildsystem
+/modules/nextgeo/**/SCsub                     @godotengine/rendering @godotengine/buildsystem
+/modules/nextgeo/tests/                       @godotengine/rendering @godotengine/tests

@@ -123,6 +123,13 @@ Copyright: 2020, Manuel Prandini
  2007-2014, Juan Linietsky, Ariel Manzur
 License: Expat
 
+# GodotNext: nextgeo_clusterlod
+Files: modules/nextgeo/nextgeo_dag_builder.cpp
+Comment: meshoptimizer
+Copyright: 2016-2026, Arseny Kapoulkine
+ 2014-present, Godot Engine contributors
+License: Expat
+
 Files: platform/android/java/editor/src/main/java/com/android/*
  platform/android/java/lib/src/main/aidl/com/android/*
  platform/android/java/lib/src/main/res/layout/status_bar_ongoing_event_progress_bar.xml
