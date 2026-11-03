@@ -45,7 +45,10 @@ TEST_FORCE_LINK(test_importer_mesh_virtual_geometry)
 #include "modules/modules_enabled.gen.h"
 
 #ifdef MODULE_NEXTGEO_ENABLED
+#include "core/config/project_settings.h"
 #include "scene/resources/3d/virtual_geometry_data.h"
+
+#include "modules/nextgeo/nextgeo_rt_proxy.h"
 #endif
 
 #ifdef TOOLS_ENABLED
@@ -228,6 +231,44 @@ void expect_same_geometry(const Ref<VirtualGeometryData> &p_a, const Ref<Virtual
 	CHECK(p_a->get_page_size() == p_b->get_page_size());
 	CHECK(p_a->get_ngm_sha256() == p_b->get_ngm_sha256());
 	CHECK(p_a->get_ngm_sha256().size() == 32);
+	CHECK(p_a->get_rt_proxy_positions() == p_b->get_rt_proxy_positions());
+	CHECK(p_a->get_rt_proxy_indices() == p_b->get_rt_proxy_indices());
+	CHECK(p_a->get_rt_proxy_parts() == p_b->get_rt_proxy_parts());
+	CHECK(p_a->get_rt_proxy_surface_ranges() == p_b->get_rt_proxy_surface_ranges());
+	CHECK(p_a->get_rt_proxy_clusters() == p_b->get_rt_proxy_clusters());
+	CHECK(p_a->get_rt_proxy_eps() == doctest::Approx(p_b->get_rt_proxy_eps()));
+	CHECK(p_a->get_rt_proxy_error() == doctest::Approx(p_b->get_rt_proxy_error()));
+}
+
+// eps_rt = min(max_extent / 256, rendering/global_illumination/nextgi/rt_max_error).
+float expected_proxy_eps(float p_max_extent) {
+	const float rt_max_error = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_max_error"));
+	return float(MIN(double(p_max_extent) / 256.0, double(rt_max_error)));
+}
+
+void check_filled_proxy(const Ref<VirtualGeometryData> &p_data, float p_max_extent, int p_surface_count) {
+	REQUIRE(p_data.is_valid());
+	CHECK_FALSE(p_data->get_rt_proxy_positions().is_empty());
+	CHECK_FALSE(p_data->get_rt_proxy_indices().is_empty());
+	CHECK_FALSE(p_data->get_rt_proxy_parts().is_empty());
+	CHECK_FALSE(p_data->get_rt_proxy_surface_ranges().is_empty());
+	CHECK_FALSE(p_data->get_rt_proxy_clusters().is_empty());
+	CHECK(p_data->get_rt_proxy_positions().size() % 3 == 0);
+	CHECK(p_data->get_rt_proxy_indices().size() % 4 == 0);
+	CHECK(p_data->get_rt_proxy_eps() == doctest::Approx(expected_proxy_eps(p_max_extent)));
+	CHECK(p_data->get_rt_proxy_error() <= p_data->get_rt_proxy_eps());
+
+	const PackedInt32Array parts = p_data->get_rt_proxy_parts();
+	CHECK(parts.size() % 4 == 0);
+	const int part_count = parts.size() / 4;
+	REQUIRE(part_count >= 1);
+	CHECK(p_data->get_rt_proxy_surface_ranges().size() == part_count * p_surface_count * 2);
+	for (int part = 0; part < part_count; part++) {
+		const int index_count = parts[part * 4 + 3];
+		CHECK(index_count > 0);
+		CHECK(index_count % 3 == 0);
+		CHECK(uint32_t(index_count / 3) <= NEXTGEO_RT_PROXY_MAX_PART_TRIANGLES);
+	}
 }
 
 TEST_CASE("[NextGeo][Import] Virtualized surfaces have no LODs and no shadow mesh") {
@@ -282,6 +323,82 @@ TEST_CASE("[NextGeo][Import] A mixed mesh virtualizes only the eligible surface"
 	CHECK(mesh->get_surface_lod_count(1) > 0);
 	mesh->create_shadow_mesh();
 	CHECK(mesh->get_shadow_mesh().is_null());
+}
+
+TEST_CASE("[NextGeo][Import] A virtualized import stores a filled RT proxy") {
+	// 4 m extent: max_extent/256 is 1.5625 cm, under the 2 cm default, so the extent binds.
+	Ref<ImporterMesh> small = grid_mesh(4, "extent", Ref<Material>());
+	const String small_path = TestUtils::get_temp_path("ngm241_extent.ngm");
+	CHECK(small->build_virtual_geometry(small_path) == OK);
+	check_filled_proxy(small->get_virtual_geometry(), 4.0f, 1);
+
+	// 8 m extent: max_extent/256 is 3.125 cm, so the rt_max_error setting binds.
+	Ref<ImporterMesh> wide = grid_mesh(8, "setting", Ref<Material>());
+	const String wide_path = TestUtils::get_temp_path("ngm241_setting.ngm");
+	CHECK(wide->build_virtual_geometry(wide_path) == OK);
+	check_filled_proxy(wide->get_virtual_geometry(), 8.0f, 1);
+	REQUIRE(expected_proxy_eps(4.0f) != doctest::Approx(expected_proxy_eps(8.0f)));
+}
+
+TEST_CASE("[NextGeo][Import] Two imports write identical RT proxy bytes") {
+	const String path_a = TestUtils::get_temp_path("ngm241_proxy_a.ngm");
+	const String path_b = TestUtils::get_temp_path("ngm241_proxy_b.ngm");
+	Ref<ImporterMesh> mesh_a = grid_mesh(4, "proxy", Ref<Material>());
+	Ref<ImporterMesh> mesh_b = grid_mesh(4, "proxy", Ref<Material>());
+	CHECK(mesh_a->build_virtual_geometry(path_a) == OK);
+	CHECK(mesh_b->build_virtual_geometry(path_b) == OK);
+	const Ref<VirtualGeometryData> a = mesh_a->get_virtual_geometry();
+	const Ref<VirtualGeometryData> b = mesh_b->get_virtual_geometry();
+	REQUIRE(a.is_valid());
+	REQUIRE(b.is_valid());
+	check_filled_proxy(a, 4.0f, 1);
+	CHECK(a->get_rt_proxy_positions() == b->get_rt_proxy_positions());
+	CHECK(a->get_rt_proxy_indices() == b->get_rt_proxy_indices());
+	CHECK(a->get_rt_proxy_parts() == b->get_rt_proxy_parts());
+	CHECK(a->get_rt_proxy_surface_ranges() == b->get_rt_proxy_surface_ranges());
+	CHECK(a->get_rt_proxy_clusters() == b->get_rt_proxy_clusters());
+	CHECK(a->get_rt_proxy_eps() == doctest::Approx(b->get_rt_proxy_eps()));
+	CHECK(a->get_rt_proxy_error() == doctest::Approx(b->get_rt_proxy_error()));
+}
+
+TEST_CASE("[NextGeo][Import] An ineligible surface has an empty RT proxy range") {
+	// The eligible grid spans 1 m. The legacy triangle spans x = 10..50, so the
+	// mesh AABB is 50 m and eps_rt follows that, not the eligible surface alone.
+	Ref<ImporterMesh> mesh = grid_mesh(1, "eligible", Ref<Material>());
+	Ref<StandardMaterial3D> alpha = standard_material();
+	alpha->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA);
+	PackedVector3Array vertices;
+	vertices.push_back(Vector3(10, 0, 0));
+	vertices.push_back(Vector3(50, 0, 0));
+	vertices.push_back(Vector3(10, 1, 0));
+	PackedInt32Array indices;
+	indices.push_back(0);
+	indices.push_back(1);
+	indices.push_back(2);
+	Array arrays;
+	arrays.resize(Mesh::ARRAY_MAX);
+	arrays[Mesh::ARRAY_VERTEX] = vertices;
+	arrays[Mesh::ARRAY_INDEX] = indices;
+	mesh->add_surface(Mesh::PRIMITIVE_TRIANGLES, arrays, TypedArray<Array>(), Dictionary(), alpha, "legacy");
+
+	const String path = TestUtils::get_temp_path("ngm241_legacy.ngm");
+	CHECK(mesh->build_virtual_geometry(path) == OK);
+	const Ref<VirtualGeometryData> data = mesh->get_virtual_geometry();
+	check_filled_proxy(data, 50.0f, 2);
+	REQUIRE(expected_proxy_eps(50.0f) != doctest::Approx(expected_proxy_eps(1.0f)));
+	CHECK(data->get_surface_eligibility()[0] == 1);
+	CHECK(data->get_surface_eligibility()[1] == 0);
+
+	const PackedInt32Array ranges = data->get_rt_proxy_surface_ranges();
+	const int part_count = data->get_rt_proxy_parts().size() / 4;
+	for (int part = 0; part < part_count; part++) {
+		const int legacy = (part * 2 + 1) * 2;
+		CHECK(ranges[legacy] == 0);
+		CHECK(ranges[legacy + 1] == 0);
+		const int eligible = part * 4;
+		CHECK(ranges[eligible] == 0);
+		CHECK(ranges[eligible + 1] > 0);
+	}
 }
 
 TEST_CASE("[NextGeo][Import] Two builds write the same bytes and the same geometry") {

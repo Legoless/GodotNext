@@ -67,6 +67,27 @@ its 10M-triangle `.obj` is the measured G4-2 run in PQ. Until then, move
 `generated/dense_city/stress/` aside before `--import` if you only need
 the city scenes.
 
+## RT proxy sizes (#241)
+
+Recorded on the Apple M5 Max after importing with virtual geometry on
+(`meshes/generate_virtual_geometry=true`) at the default
+`rendering/global_illumination/nextgi/rt_max_error` of 2 cm. These are the
+fixed RT proxy on `VirtualGeometryData`, not timings. Bytes are the proxy
+payload: 12 bytes per welded vertex (float32 xyz) plus 4 bytes per index
+(uint32). Both meshes are wider than 5.12 m, so `rt_proxy_eps` is 0.02.
+Each part has at most 131072 triangles; the cut is split into two parts.
+
+| Asset | Source triangles | Proxy triangles | Vertices | Bytes | Parts |
+|---|---:|---:|---:|---:|---:|
+| `kit_asset/kit_facade.glb` (`--variant=kit`, 8 materials) | 558546 | 158698 | 80572 | 2871240 | 2 |
+| `stress/stress_10m.glb` (`--variant=stress_10m`) | 10008338 | 155754 | 80615 | 2836428 | 2 |
+
+Part triangle counts are 131023 and 27675 for the kit, and 131056 and
+24698 for the stress mesh. `rt_proxy_error` is 0.01452501 (kit) and
+0.01985045 (stress). The stress `.obj` is the same mesh with virtual
+geometry left off in its pre-seeded import; the sizes above are from the
+`.glb`.
+
 ## Validate
 
 After generating and importing:

@@ -37,9 +37,11 @@ class ImporterMesh;
 class VirtualGeometryData;
 
 // ImporterMesh::build_virtual_geometry_func. `p_eligible` is one byte per surface,
-// 1 = eligible. Fills `r_vgd` and the raw page payloads. The caller writes the `.ngm`.
+// 1 = eligible. Fills `r_vgd` (including the fixed RT proxy) and the raw page
+// payloads. The caller writes the `.ngm`.
 //
-// The ray-tracing proxy builder (`nextgeo_build_rt_proxy`, plan §7.1) and the
-// `rt_max_error` project setting are not in the tree. RT proxy fields stay empty.
-// Card descriptors stay empty until P5.
+// The proxy is the DAG cut at eps_rt = min(max_extent / 256,
+// `rendering/global_illumination/nextgi/rt_max_error`) (plan §7.1). The mesh
+// AABB and the surface count cover every source surface, so an ineligible
+// surface gets a [0, 0] range in every part. Card descriptors stay empty until P5.
 Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);

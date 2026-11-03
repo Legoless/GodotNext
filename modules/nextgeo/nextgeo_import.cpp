@@ -31,17 +31,39 @@
 #include "nextgeo_import.h"
 
 #include "nextgeo_dag_builder.h"
+#include "nextgeo_rt_proxy.h"
 #include "nextgeo_serialize.h"
 
+#include "core/config/project_settings.h"
 #include "core/io/resource_format_ngm.h"
+#include "core/math/aabb.h"
 #include "scene/resources/3d/importer_mesh.h"
 #include "scene/resources/3d/virtual_geometry_data.h"
 #include "scene/resources/mesh.h"
 
-// The ray-tracing proxy (plan §7.1, `eps_rt = min(max_extent/256, rt_max_error)`) is not
-// built here. `nextgeo_build_rt_proxy()` does not exist yet, and neither does the
-// `rt_max_error` project setting. RT proxy fields stay at their empty defaults. Card
-// descriptors stay empty until P5.
+// Card descriptors stay empty until P5. The fixed RT proxy is filled below.
+
+// Bounds of every source surface, ineligible and non-triangle surfaces included.
+// eps_rt uses this AABB, so a large legacy surface still bounds the proxy error.
+static bool _mesh_aabb(const ImporterMesh *p_mesh, AABB &r_aabb) {
+	bool has_point = false;
+	for (int i = 0; i < p_mesh->get_surface_count(); i++) {
+		const Array arrays = p_mesh->get_surface_arrays(i);
+		if (arrays.size() != Mesh::ARRAY_MAX || arrays[Mesh::ARRAY_VERTEX].get_type() == Variant::NIL) {
+			continue;
+		}
+		const PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
+		for (int v = 0; v < vertices.size(); v++) {
+			if (!has_point) {
+				r_aabb = AABB(vertices[v], Vector3());
+				has_point = true;
+			} else {
+				r_aabb.expand_to(vertices[v]);
+			}
+		}
+	}
+	return has_point;
+}
 
 static bool _arrays_are_triangles(const Array &p_arrays) {
 	if (p_arrays.size() != Mesh::ARRAY_MAX) {
@@ -169,6 +191,30 @@ Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_
 
 	r_vgd.instantiate();
 	err = nextgeo_fill_vgd(input, output, r_pages, r_vgd);
+	if (err != OK) {
+		r_vgd.unref();
+		r_pages.clear();
+		return err;
+	}
+
+	// Fixed RT proxy (plan §7.1): the error-only DAG cut at
+	// eps_rt = min(max_extent / 256, rt_max_error). A changed project setting
+	// applies on the next import. Ineligible surfaces get [0, 0] ranges.
+	AABB mesh_aabb;
+	if (!_mesh_aabb(p_mesh, mesh_aabb)) {
+		r_vgd.unref();
+		r_pages.clear();
+		return ERR_INVALID_DATA;
+	}
+	const float rt_max_error = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_max_error"));
+	NextGeoRTProxy proxy;
+	err = nextgeo_build_rt_proxy(output, mesh_aabb, rt_max_error, uint32_t(p_mesh->get_surface_count()), proxy);
+	if (err != OK) {
+		r_vgd.unref();
+		r_pages.clear();
+		return err;
+	}
+	err = nextgeo_fill_vgd_rt_proxy(proxy, r_vgd);
 	if (err != OK) {
 		r_vgd.unref();
 		r_pages.clear();
