@@ -1,0 +1,19 @@
+{
+	"cameras": ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam"],
+	"closed_meshes": ["box", "sphere", "cylinder", "cone", "torus", "capsule", "tetrahedron", "octahedron", "icosahedron", "hexagonal_prism", "l_prism", "wedge"],
+	"name": "sdf_import_set",
+	"open_meshes": ["plane_sheet", "open_box", "open_tube", "hemisphere_bowl"],
+	"patch_set": "q1",
+	"seed": 46463929544,
+	"variants": [
+		{
+			"end_frame": 0,
+			"form": "GS-5",
+			"frame0_action": "none (static)",
+			"id": "sign_set",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		}
+	]
+}

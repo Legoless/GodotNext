@@ -50,6 +50,29 @@ off-screen light frustum, 40 m mesh bounds) and exits non-zero on failure.
   fog, an SH-probe receiver and three `fallback_*` meshes, from
   `generators/build_feature_parity_room.gd` (a separate entry point,
   not part of `build_all.gd`). See its README.
+- `scenes/swrt_leak_room_10cm/` and `scenes/swrt_leak_room_20cm/` —
+  sealed single rooms (#181, GS-1) whose every wall is 0.10 m or
+  0.20 m thick (`wall_thickness_m` metadata), a sun outside on a
+  ground slab and one emissive ceiling panel inside as the only
+  interior source. Extra camera: `ExteriorCam`.
+- `scenes/swrt_kitbash/` — overlap-heavy kitbash shell (#181, GS-9).
+  The 2,400 rock instances (half `MeshInstance3D`, half `MultiMesh`)
+  are spawned at runtime from the seeded layout (piles within 30 m)
+  and are not stored in the scene.
+- `scenes/swrt_runtime_mesh/` — runtime procedural mesh room (#181,
+  GS-6). The scene script builds a 20,000-triangle torus `ArrayMesh`
+  at frame 60 (t = 1 s) and moves it at frame 180 (t = 3 s);
+  frame-driven like the other dynamic scenes, `--hold-frame` works.
+- `assets/sdf_import_set/` — the GS-5 sign set (#181): 12 closed and
+  4 open OBJ meshes plus `manifest.json` and the 512-ray parity
+  `sign_reference.json`, from `generators/build_sdf_assets.gd` and
+  `generators/sdf_sign_reference.gd` (separate entry points, not part
+  of `build_all.gd`). See its README.
+- `scenes/sdf_import_set/` — display scene for the sign set: the same
+  16 meshes in two rows, closed gray and open orange, with the mesh
+  name, `sdf_closed` flag and triangle count as node metadata.
+- `scenes/swrt_content_check.gd` — headless contract checks for the
+  four #181 scenes and the SDF assets (run it directly as a script).
 
 ## Conventions
 

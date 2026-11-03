@@ -89,6 +89,39 @@ seed `1` (one run per variant; see its README).
 | `scenes/feature_parity_room/override.cfg` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
 | `scenes/feature_parity_room/README.md` | hand-authored for #64 | MIT | 2026-11-03 | the Apple M5 Max |
 
+| `generators/build_swrt_leak_room.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_leak_room_10cm/swrt_leak_room_10cm.tscn` | `build_swrt_leak_room.gd`, seed `0x6E657874` stream 40 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_leak_room_10cm/swrt_leak_room_10cm_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 40 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_leak_room_10cm/steps.json` | `build_swrt_leak_room.gd`, seed `0x6E657874` stream 40 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_leak_room_20cm/swrt_leak_room_20cm.tscn` | `build_swrt_leak_room.gd`, seed `0x6E657874` stream 41 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_leak_room_20cm/swrt_leak_room_20cm_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 41 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_leak_room_20cm/steps.json` | `build_swrt_leak_room.gd`, seed `0x6E657874` stream 41 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_kitbash/layout.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_kitbash/swrt_kitbash.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_swrt_kitbash.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_kitbash/swrt_kitbash.tscn` | `build_swrt_kitbash.gd` shell only; the 2,400 instances are spawned at runtime from seed 18142 and are not stored | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_kitbash/swrt_kitbash_patches_q1.json` | `build_all.gd`, Q1 RNG seed 18142 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_kitbash/steps.json` | `build_swrt_kitbash.gd`, seed 18142 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_runtime_mesh/spec.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_runtime_mesh/swrt_runtime_mesh.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_swrt_runtime_mesh.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_runtime_mesh/swrt_runtime_mesh.tscn` | `build_swrt_runtime_mesh.gd`, seed `0x6E657874` stream 43; the 20,000-triangle mesh is built at runtime and is not stored | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_runtime_mesh/swrt_runtime_mesh_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 43 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_runtime_mesh/steps.json` | `build_swrt_runtime_mesh.gd`, seed `0x6E657874` stream 43 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/sdf_mesh_library.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_sdf_assets.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/sdf_sign_reference.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_sdf_import_set.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `assets/sdf_import_set/*.obj` (16 files) | `build_sdf_assets.gd` from `sdf_mesh_library.gd`; SHA-256 per file in `manifest.json` | MIT | 2026-11-03 | the Apple M5 Max |
+| `assets/sdf_import_set/*.obj.import` (16 files) | editor OBJ importer defaults (`--headless --import`); no distance-field option exists yet, see the set's README | MIT | 2026-11-03 | the Apple M5 Max |
+| `assets/sdf_import_set/manifest.json` | `build_sdf_assets.gd` | MIT | 2026-11-03 | the Apple M5 Max |
+| `assets/sdf_import_set/sign_reference.json` | `sdf_sign_reference.gd`, 512 Fibonacci rays per voxel center | MIT | 2026-11-03 | the Apple M5 Max |
+| `assets/sdf_import_set/README.md` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/sdf_import_set/sdf_import_set.tscn` | `build_sdf_import_set.gd`, seed `0x6E657874` stream 44 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/sdf_import_set/sdf_import_set_patches_q1.json` | `build_all.gd`, seed `0x6E657874` stream 44 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/sdf_import_set/steps.json` | `build_sdf_import_set.gd`, seed `0x6E657874` stream 44 | MIT | 2026-11-03 | the Apple M5 Max |
+| `scenes/swrt_content_check.gd` | hand-authored for #181 | MIT | 2026-11-03 | the Apple M5 Max |
+
 ## Bake status
 
 `cbr_b_lightmap.tscn` carries the recorded bake settings (`bounces=16`,

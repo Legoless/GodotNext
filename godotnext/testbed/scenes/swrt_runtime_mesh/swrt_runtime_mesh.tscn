@@ -1,0 +1,177 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/swrt_runtime_mesh/swrt_runtime_mesh.gd" id="1_3cwjg"]
+
+[sub_resource type="Environment" id="Environment_bdg72"]
+background_mode = 1
+ambient_light_source = 1
+reflected_light_source = 1
+
+[sub_resource type="BoxMesh" id="BoxMesh_o0e1y"]
+size = Vector3(10.4, 0.2, 8.4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2p35o"]
+resource_name = "Gray075"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.88082504, 0.88082504, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_1ew8u"]
+size = Vector3(10.4, 0.2, 8.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_m018c"]
+size = Vector3(10.4, 0.2, 8.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wlt3d"]
+size = Vector3(10.4, 0.2, 8.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_thh3o"]
+size = Vector3(0.2, 3.9, 8.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_esdqy"]
+size = Vector3(0.2, 3.9, 8.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_5r0rs"]
+size = Vector3(0.2, 3.9, 8.4)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_3vudo"]
+size = Vector3(0.2, 3.9, 8.4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_bqjjh"]
+size = Vector3(10.4, 3.9, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_502n7"]
+size = Vector3(10.4, 3.9, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_1lao5"]
+size = Vector3(10.4, 3.9, 0.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wsxpb"]
+size = Vector3(10.4, 3.9, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tfpb0"]
+size = Vector3(2.2, 0.02, 2.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wjsn2"]
+resource_name = "MarkerA"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.48452926, 0.48452926, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_obwjw"]
+size = Vector3(2.2, 0.02, 2.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_vmqkn"]
+resource_name = "MarkerB"
+diffuse_mode = 1
+albedo_color = Color(0.48452926, 0.48452926, 0.88082504, 1)
+metallic_specular = 0.0
+
+[node name="SwrtRuntimeMesh" type="Node3D"]
+script = ExtResource("1_3cwjg")
+metadata/room_interior_m = Vector3(10, 3.5, 8)
+metadata/generator_stream = 43
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_bdg72")
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_o0e1y")
+surface_material_override/0 = SubResource("StandardMaterial3D_2p35o")
+
+[node name="Collider" type="StaticBody3D" parent="Floor"]
+
+[node name="Shape" type="CollisionShape3D" parent="Floor/Collider"]
+shape = SubResource("BoxShape3D_1ew8u")
+
+[node name="Ceiling" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.6, 0)
+mesh = SubResource("BoxMesh_m018c")
+surface_material_override/0 = SubResource("StandardMaterial3D_2p35o")
+
+[node name="Collider" type="StaticBody3D" parent="Ceiling"]
+
+[node name="Shape" type="CollisionShape3D" parent="Ceiling/Collider"]
+shape = SubResource("BoxShape3D_wlt3d")
+
+[node name="WestWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -5.1, 1.75, 0)
+mesh = SubResource("BoxMesh_thh3o")
+surface_material_override/0 = SubResource("StandardMaterial3D_2p35o")
+
+[node name="Collider" type="StaticBody3D" parent="WestWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="WestWall/Collider"]
+shape = SubResource("BoxShape3D_esdqy")
+
+[node name="EastWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5.1, 1.75, 0)
+mesh = SubResource("BoxMesh_5r0rs")
+surface_material_override/0 = SubResource("StandardMaterial3D_2p35o")
+
+[node name="Collider" type="StaticBody3D" parent="EastWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="EastWall/Collider"]
+shape = SubResource("BoxShape3D_3vudo")
+
+[node name="NorthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.75, -4.1)
+mesh = SubResource("BoxMesh_bqjjh")
+surface_material_override/0 = SubResource("StandardMaterial3D_2p35o")
+
+[node name="Collider" type="StaticBody3D" parent="NorthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="NorthWall/Collider"]
+shape = SubResource("BoxShape3D_502n7")
+
+[node name="SouthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.75, 4.1)
+mesh = SubResource("BoxMesh_1lao5")
+surface_material_override/0 = SubResource("StandardMaterial3D_2p35o")
+
+[node name="Collider" type="StaticBody3D" parent="SouthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="SouthWall/Collider"]
+shape = SubResource("BoxShape3D_wsxpb")
+
+[node name="MarkerA" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.8, 0.01, 0)
+mesh = SubResource("BoxMesh_tfpb0")
+surface_material_override/0 = SubResource("StandardMaterial3D_wjsn2")
+
+[node name="MarkerB" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.8, 0.01, 0)
+mesh = SubResource("BoxMesh_obwjw")
+surface_material_override/0 = SubResource("StandardMaterial3D_vmqkn")
+
+[node name="RoomLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0)
+shadow_enabled = true
+omni_range = 9.0
+
+[node name="CovCam0" type="Camera3D" parent="."]
+transform = Transform3D(-0.6139406, 0.23766544, -0.7527231, 0, 0.9535959, 0.30108923, 0.7893522, 0.1848509, -0.5854513, -4.5, 2.8, -3.5)
+fov = 70.0
+far = 20.0
+
+[node name="CovCam1" type="Camera3D" parent="."]
+transform = Transform3D(0.6139406, 0.23766544, -0.7527231, 0, 0.9535959, 0.30108923, 0.7893522, -0.1848509, 0.5854513, -4.5, 2.8, 3.5)
+fov = 70.0
+far = 20.0
+
+[node name="CovCam2" type="Camera3D" parent="."]
+transform = Transform3D(-0.6139406, -0.23766544, 0.7527231, 0, 0.9535959, 0.30108923, -0.7893522, 0.1848509, -0.5854513, 4.5, 2.8, -3.5)
+fov = 70.0
+far = 20.0
+
+[node name="CovCam3" type="Camera3D" parent="."]
+transform = Transform3D(0.6139406, -0.23766544, 0.7527231, 0, 0.9535959, 0.30108923, -0.7893522, -0.1848509, 0.5854513, 4.5, 2.8, 3.5)
+fov = 70.0
+far = 20.0
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9782342, 0.20750421, 0, -0.20750421, 0.9782342, 0, 1.8, 3.3)
+current = true
+fov = 70.0
+far = 20.0

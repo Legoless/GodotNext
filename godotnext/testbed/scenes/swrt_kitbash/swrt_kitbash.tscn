@@ -1,0 +1,80 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/swrt_kitbash/swrt_kitbash.gd" id="1_e5fas"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_0gtan"]
+
+[sub_resource type="Sky" id="Sky_51gh3"]
+sky_material = SubResource("ProceduralSkyMaterial_0gtan")
+
+[sub_resource type="Environment" id="Environment_u4ax6"]
+background_mode = 2
+sky = SubResource("Sky_51gh3")
+ambient_light_source = 3
+reflected_light_source = 2
+
+[sub_resource type="BoxMesh" id="BoxMesh_18haq"]
+size = Vector3(70, 0.2, 70)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_0xglm"]
+resource_name = "Ground"
+diffuse_mode = 1
+albedo_color = Color(0.735357, 0.72202736, 0.7014107, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_e8rl3"]
+size = Vector3(70, 0.2, 70)
+
+[node name="SwrtKitbash" type="Node3D"]
+script = ExtResource("1_e5fas")
+metadata/instance_seed = 18142
+metadata/default_instances = 2400
+metadata/generator_stream = 42
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_u4ax6")
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.1, 0)
+mesh = SubResource("BoxMesh_18haq")
+surface_material_override/0 = SubResource("StandardMaterial3D_0xglm")
+
+[node name="Collider" type="StaticBody3D" parent="Ground"]
+
+[node name="Shape" type="CollisionShape3D" parent="Ground/Collider"]
+shape = SubResource("BoxShape3D_e8rl3")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.70710677, -0.4055798, 0.579228, 0, 0.81915206, 0.57357645, -0.70710677, -0.4055798, 0.579228, 20, 15, 20)
+shadow_enabled = true
+
+[node name="OffscreenSpot" type="SpotLight3D" parent="."]
+transform = Transform3D(0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 38, 0)
+spot_range = 50.0
+spot_angle = 25.0
+
+[node name="CovCam0" type="Camera3D" parent="."]
+transform = Transform3D(-0.70710677, -0.1964897, 0.6792583, 0, 0.9606163, 0.2778784, -0.70710677, 0.1964897, -0.6792583, 22, 10, -22)
+fov = 70.0
+far = 90.0
+
+[node name="CovCam1" type="Camera3D" parent="."]
+transform = Transform3D(0.70710677, 0.1964897, -0.6792583, 0, 0.9606163, 0.2778784, 0.70710677, -0.1964897, 0.6792583, -22, 10, 22)
+fov = 70.0
+far = 90.0
+
+[node name="CovCam2" type="Camera3D" parent="."]
+transform = Transform3D(-0.70710677, 0.2814639, -0.64867413, 0, 0.91736376, 0.39805004, 0.70710677, 0.2814639, -0.64867413, -22, 14, -22)
+fov = 70.0
+far = 90.0
+
+[node name="CovCam3" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.3589791, 0.9333456, 0, -0.9333456, 0.3589791, 0, 26, 10)
+fov = 70.0
+far = 90.0
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(0.70710677, -0.14919543, 0.6911879, 0, 0.9774873, 0.21099421, -0.70710677, -0.14919543, 0.6911879, 19, 7, 19)
+current = true
+fov = 60.0
+far = 90.0

@@ -1,0 +1,20 @@
+{
+	"cameras": ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam"],
+	"name": "swrt_runtime_mesh",
+	"patch_set": "q1",
+	"seed": 45450025321,
+	"variants": [
+		{
+			"build_frame": 60,
+			"end_frame": 240,
+			"form": "GS-6",
+			"frame0_action": "mesh built at frame 60, moved at frame 180",
+			"id": "runtime_mesh",
+			"motion_end": 180,
+			"motion_frames": 0,
+			"motion_start": 60,
+			"move_frame": 180,
+			"triangles": 20000
+		}
+	]
+}

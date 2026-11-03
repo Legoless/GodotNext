@@ -19,9 +19,16 @@ const Legacy := preload("res://generators/build_legacy.gd")
 const MovingLightDoor := preload("res://generators/build_moving_light_door.gd")
 const TimeOfDay := preload("res://generators/build_time_of_day.gd")
 const NextGIPerf := preload("res://generators/build_nextgi_perf.gd")
+const SwrtLeakRoom := preload("res://generators/build_swrt_leak_room.gd")
+const SwrtKitbash := preload("res://generators/build_swrt_kitbash.gd")
+const SwrtRuntimeMesh := preload("res://generators/build_swrt_runtime_mesh.gd")
+const SdfImportSet := preload("res://generators/build_sdf_import_set.gd")
 const DoorMotion = preload("res://scenes/moving_light_door/motion.gd")
 const SunMotion = preload("res://scenes/time_of_day/motion.gd")
 const PerfLayout = preload("res://scenes/nextgi_perf/layout.gd")
+const KitbashLayout = preload("res://scenes/swrt_kitbash/layout.gd")
+const RuntimeMeshSpec = preload("res://scenes/swrt_runtime_mesh/spec.gd")
+const SdfMeshes := preload("res://generators/sdf_mesh_library.gd")
 
 const Q1_PATCH_COUNT := 128
 
@@ -55,6 +62,18 @@ func _run() -> void:
 	]
 	for job in dynamic_jobs:
 		await _process_job(job)
+	# SWRT content (#181): the leak rooms, the kitbash and runtime-mesh
+	# shells, and the SDF import-set display scene. The OBJ assets and
+	# the sign reference have their own entry points.
+	var swrt_jobs: Array[Dictionary] = [
+		{"built": SwrtLeakRoom.build("10cm"), "scene": "res://scenes/swrt_leak_room_10cm/swrt_leak_room_10cm.tscn", "stream": SwrtLeakRoom.STREAM_10CM},
+		{"built": SwrtLeakRoom.build("20cm"), "scene": "res://scenes/swrt_leak_room_20cm/swrt_leak_room_20cm.tscn", "stream": SwrtLeakRoom.STREAM_20CM},
+		{"built": SwrtKitbash.build(), "scene": "res://scenes/swrt_kitbash/swrt_kitbash.tscn", "stream": SwrtKitbash.STREAM},
+		{"built": SwrtRuntimeMesh.build(), "scene": "res://scenes/swrt_runtime_mesh/swrt_runtime_mesh.tscn", "stream": SwrtRuntimeMesh.STREAM},
+		{"built": SdfImportSet.build(), "scene": "res://scenes/sdf_import_set/sdf_import_set.tscn", "stream": SdfImportSet.STREAM},
+	]
+	for job in swrt_jobs:
+		await _process_job(job)
 	if _failures.is_empty():
 		print("build_all: all scenes built and verified.")
 		quit(0)
@@ -79,6 +98,15 @@ func _check_contracts() -> void:
 	var perf_err := String(PerfLayout.contract_error())
 	if not perf_err.is_empty():
 		_fail(perf_err)
+	var kitbash_err := String(KitbashLayout.contract_error())
+	if not kitbash_err.is_empty():
+		_fail(kitbash_err)
+	var runtime_err := String(RuntimeMeshSpec.contract_error())
+	if not runtime_err.is_empty():
+		_fail(runtime_err)
+	var sdf_err := String(SdfMeshes.contract_error())
+	if not sdf_err.is_empty():
+		_fail(sdf_err)
 
 
 func _process_job(p_job: Dictionary) -> void:

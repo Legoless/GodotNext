@@ -1,0 +1,18 @@
+{
+	"cameras": ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam"],
+	"instances_default": 2400,
+	"name": "swrt_kitbash",
+	"patch_set": "q1",
+	"seed": 18142,
+	"variants": [
+		{
+			"end_frame": 0,
+			"form": "GS-9",
+			"frame0_action": "none (static piles)",
+			"id": "overlap",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		}
+	]
+}

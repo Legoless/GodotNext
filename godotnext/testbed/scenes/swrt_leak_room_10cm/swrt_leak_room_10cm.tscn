@@ -1,0 +1,227 @@
+[gd_scene format=3]
+
+[sub_resource type="Environment" id="Environment_yloc7"]
+background_mode = 1
+ambient_light_source = 1
+reflected_light_source = 1
+
+[sub_resource type="BoxMesh" id="BoxMesh_4ef8g"]
+size = Vector3(5.2, 0.1, 5.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_eg32k"]
+resource_name = "Gray075"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.88082504, 0.88082504, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_qao8u"]
+size = Vector3(5.2, 0.1, 5.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_cghbh"]
+size = Vector3(5.2, 0.1, 5.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_3lkf6"]
+size = Vector3(5.2, 0.1, 5.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_smcr4"]
+size = Vector3(0.1, 3.2, 5.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_hni5k"]
+size = Vector3(0.1, 3.2, 5.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_xrsjl"]
+size = Vector3(0.1, 3.2, 5.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_5avx5"]
+size = Vector3(0.1, 3.2, 5.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_vxyxh"]
+size = Vector3(5.2, 3.2, 0.1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gnrb4"]
+resource_name = "RedWall"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.24780053, 0.24780053, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_18fkh"]
+size = Vector3(5.2, 3.2, 0.1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_1i255"]
+size = Vector3(5.2, 3.2, 0.1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_gn755"]
+resource_name = "GreenWall"
+diffuse_mode = 1
+albedo_color = Color(0.24780053, 0.88082504, 0.24780053, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_wu3kr"]
+size = Vector3(5.2, 3.2, 0.1)
+
+[sub_resource type="BoxMesh" id="BoxMesh_6wgbr"]
+size = Vector3(24, 0.2, 24)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_nela1"]
+resource_name = "Ground"
+diffuse_mode = 1
+albedo_color = Color(0.7014107, 0.7014107, 0.7014107, 1)
+metallic_specular = 0.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_bh1rk"]
+size = Vector3(1.2, 1.2, 1.2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_y4o5u"]
+size = Vector3(1.2, 1.2, 1.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_214eh"]
+size = Vector3(0.6, 0.6, 0.6)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_i2fji"]
+size = Vector3(0.6, 0.6, 0.6)
+
+[sub_resource type="BoxMesh" id="BoxMesh_jwysh"]
+size = Vector3(1.2, 0.06, 1.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_nvfww"]
+resource_name = "EmissivePanel"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic_specular = 0.0
+emission_enabled = true
+emission = Color(1, 0.97769153, 0.9309246, 1)
+emission_energy_multiplier = 4.0
+
+[node name="SwrtLeakRoom10 Cm" type="Node3D"]
+metadata/wall_thickness_m = 0.1
+metadata/room_interior_m = Vector3(5, 3, 5)
+metadata/generator_stream = 40
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_yloc7")
+
+[node name="Floor" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.05, 0)
+mesh = SubResource("BoxMesh_4ef8g")
+surface_material_override/0 = SubResource("StandardMaterial3D_eg32k")
+
+[node name="Collider" type="StaticBody3D" parent="Floor"]
+
+[node name="Shape" type="CollisionShape3D" parent="Floor/Collider"]
+shape = SubResource("BoxShape3D_qao8u")
+
+[node name="Ceiling" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.05, 0)
+mesh = SubResource("BoxMesh_cghbh")
+surface_material_override/0 = SubResource("StandardMaterial3D_eg32k")
+
+[node name="Collider" type="StaticBody3D" parent="Ceiling"]
+
+[node name="Shape" type="CollisionShape3D" parent="Ceiling/Collider"]
+shape = SubResource("BoxShape3D_3lkf6")
+
+[node name="WestWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.55, 1.5, 0)
+mesh = SubResource("BoxMesh_smcr4")
+surface_material_override/0 = SubResource("StandardMaterial3D_eg32k")
+
+[node name="Collider" type="StaticBody3D" parent="WestWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="WestWall/Collider"]
+shape = SubResource("BoxShape3D_hni5k")
+
+[node name="EastWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2.55, 1.5, 0)
+mesh = SubResource("BoxMesh_xrsjl")
+surface_material_override/0 = SubResource("StandardMaterial3D_eg32k")
+
+[node name="Collider" type="StaticBody3D" parent="EastWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="EastWall/Collider"]
+shape = SubResource("BoxShape3D_5avx5")
+
+[node name="NorthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, -2.55)
+mesh = SubResource("BoxMesh_vxyxh")
+surface_material_override/0 = SubResource("StandardMaterial3D_gnrb4")
+
+[node name="Collider" type="StaticBody3D" parent="NorthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="NorthWall/Collider"]
+shape = SubResource("BoxShape3D_18fkh")
+
+[node name="SouthWall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 2.55)
+mesh = SubResource("BoxMesh_1i255")
+surface_material_override/0 = SubResource("StandardMaterial3D_gn755")
+
+[node name="Collider" type="StaticBody3D" parent="SouthWall"]
+
+[node name="Shape" type="CollisionShape3D" parent="SouthWall/Collider"]
+shape = SubResource("BoxShape3D_wu3kr")
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.2, 0)
+mesh = SubResource("BoxMesh_6wgbr")
+surface_material_override/0 = SubResource("StandardMaterial3D_nela1")
+
+[node name="BlockLarge" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.6, 0.6, -0.5)
+mesh = SubResource("BoxMesh_bh1rk")
+surface_material_override/0 = SubResource("StandardMaterial3D_eg32k")
+
+[node name="Collider" type="StaticBody3D" parent="BlockLarge"]
+
+[node name="Shape" type="CollisionShape3D" parent="BlockLarge/Collider"]
+shape = SubResource("BoxShape3D_y4o5u")
+
+[node name="BlockSmall" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.7, 0.3, 0.6)
+mesh = SubResource("BoxMesh_214eh")
+surface_material_override/0 = SubResource("StandardMaterial3D_eg32k")
+
+[node name="Collider" type="StaticBody3D" parent="BlockSmall"]
+
+[node name="Shape" type="CollisionShape3D" parent="BlockSmall/Collider"]
+shape = SubResource("BoxShape3D_i2fji")
+
+[node name="EmissivePanel" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.97, 0)
+mesh = SubResource("BoxMesh_jwysh")
+surface_material_override/0 = SubResource("StandardMaterial3D_nvfww")
+metadata/emission_energy_multiplier = 4.0
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.70710677, -0.4055798, 0.579228, 0, 0.81915206, 0.57357645, -0.70710677, -0.4055798, 0.579228, 8, 10, 8)
+shadow_enabled = true
+
+[node name="CovCam0" type="Camera3D" parent="."]
+transform = Transform3D(-0.70710677, 0.29674244, -0.6418286, 0, 0.9076827, 0.41965717, 0.70710677, 0.29674244, -0.6418286, -2.1, 2.5, -2.1)
+fov = 70.0
+far = 15.0
+
+[node name="CovCam1" type="Camera3D" parent="."]
+transform = Transform3D(0.70710677, 0.29674244, -0.6418286, 0, 0.9076827, 0.41965717, 0.70710677, -0.29674244, 0.6418286, -2.1, 2.5, 2.1)
+fov = 70.0
+far = 15.0
+
+[node name="CovCam2" type="Camera3D" parent="."]
+transform = Transform3D(-0.70710677, -0.29674244, 0.6418286, 0, 0.9076827, 0.41965717, -0.70710677, 0.29674244, -0.6418286, 2.1, 2.5, -2.1)
+fov = 70.0
+far = 15.0
+
+[node name="CovCam3" type="Camera3D" parent="."]
+transform = Transform3D(0.70710677, -0.29674244, 0.6418286, 0, 0.9076827, 0.41965717, -0.70710677, -0.29674244, 0.6418286, 2.1, 2.5, 2.1)
+fov = 70.0
+far = 15.0
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(0, -0.04540767, -0.99896854, 0, 0.99896854, -0.04540767, 1, 0, 0, -1.9, 1.5, 0)
+current = true
+fov = 70.0
+far = 15.0
+
+[node name="ExteriorCam" type="Camera3D" parent="."]
+transform = Transform3D(0.7071068, -0.22361709, 0.670817, 0, 0.9486786, 0.3162423, -0.7071068, -0.22361709, 0.670817, 7, 4.5, 7)
+fov = 70.0
+far = 40.0
