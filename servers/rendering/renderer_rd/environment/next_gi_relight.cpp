@@ -212,6 +212,14 @@ void NextGIRelight::free_resources() {
 	if (shadow_sampler.is_valid()) {
 		rd->free_rid(shadow_sampler);
 	}
+	if (indirect_texture.is_valid()) {
+		rd->free_rid(indirect_texture);
+	}
+	if (page_rect_buffer.is_valid()) {
+		rd->free_rid(page_rect_buffer);
+	}
+	indirect_texture = RID();
+	page_rect_buffer = RID();
 	radiance = RID();
 	mask = RID();
 	dummy_depth = RID();
@@ -247,7 +255,7 @@ bool NextGIRelight::_ensure_atlases() {
 	tf.width = NEXTGI_SRC_RADIANCE_SIZE;
 	tf.height = NEXTGI_SRC_RADIANCE_SIZE;
 	tf.texture_type = RD::TEXTURE_TYPE_2D;
-	tf.usage_bits = storage;
+	tf.usage_bits = storage | RD::TEXTURE_USAGE_SAMPLING_BIT;
 	tf.format = radiance_is_packed ? RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32 : RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	radiance = rd->texture_create(tf, RD::TextureView());
 	ERR_FAIL_COND_V(radiance.is_null(), false);
@@ -262,6 +270,15 @@ bool NextGIRelight::_ensure_atlases() {
 	ERR_FAIL_COND_V(mask.is_null(), false);
 	rd->set_resource_name(mask, "NextGI SRC Shadow Mask");
 	rd->texture_clear(mask, Color(0, 0, 0, 0), 0, 1, 0, 1);
+
+	tf.width = NEXTGI_SRC_RADIANCE_SIZE / 8;
+	tf.height = NEXTGI_SRC_RADIANCE_SIZE / 8;
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	indirect_texture = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(indirect_texture.is_null(), false);
+	rd->set_resource_name(indirect_texture, "NextGI SRC Indirect");
+	rd->texture_clear(indirect_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
 
 	tf.width = 1;
 	tf.height = 1;
@@ -406,6 +423,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	last_directional = 0;
 	last_dynamic = 0;
 	last_static = 0;
+	scheduled_pages.clear();
 	probe_rgb.clear();
 	mask_pages.clear();
 	if (p_render_data->sdfgi_update_data == nullptr || !_ensure_atlases() || !_ensure_shader()) {
@@ -417,7 +435,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		return;
 	}
 	const RID tlas = next_gi->get_rt_scene()->get_tlas();
-	if (tlas.is_null() || instances.is_empty()) {
+	if (tlas.is_null() || instances.is_empty() || next_gi->get_rt_scene()->get_stats().tlas_build_count == 0) {
 		return;
 	}
 
@@ -677,6 +695,18 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			gpu_indices.push_back(index);
 		}
 		gpu_pages.push_back(gpu_page);
+		const uint32_t blocks_x = MAX((card_page.radiance_w + 7u) / 8u, 1u);
+		const uint32_t blocks_y = MAX((card_page.radiance_h + 7u) / 8u, 1u);
+		for (uint32_t by = 0; by < blocks_y; by++) {
+			for (uint32_t bx = 0; bx < blocks_x; bx++) {
+				ScheduledPage scheduled;
+				scheduled.indirect_x = (card_page.radiance_x / 8u) + bx;
+				scheduled.indirect_y = (card_page.radiance_y / 8u) + by;
+				scheduled.record_index = instance_pages.record_index;
+				scheduled.card_index = card_page.card_index;
+				scheduled_pages.push_back(scheduled);
+			}
+		}
 		last_texels += card_page.radiance_w * card_page.radiance_h;
 		max_w = MAX(max_w, card_page.radiance_w);
 		max_h = MAX(max_h, card_page.radiance_h);
@@ -755,7 +785,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cached_records = next_gi->get_rt_scene()->get_instance_record_buffer();
 	}
 	if (!uniform_set.is_valid()) {
-		RD::Uniform uniforms[19] = {
+		RD::Uniform uniforms[20] = {
 			RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, mask),
@@ -775,8 +805,9 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, counter_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, probe_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ material_sampler, indirect_texture })),
 		};
-		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 19), shader_rid, 0);
+		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
 	}
 	if (uniform_set.is_valid() && !gpu_pages.is_empty()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
@@ -850,9 +881,48 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			}
 		}
 	}
+	_upload_page_rects();
 	// Drop the set before the frame ends. A later free of the TLAS or the card buffers would
 	// otherwise free it through the dependency map, and shutdown would free it again.
 	_reset_uniform_set();
+}
+
+void NextGIRelight::_upload_page_rects() {
+	if (page_table_count == 0) {
+		return;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL(rd);
+	if (!page_rect_buffer.is_valid() || page_rect_capacity < page_table_count) {
+		if (page_rect_buffer.is_valid()) {
+			rd->free_rid(page_rect_buffer);
+		}
+		page_rect_capacity = MAX(page_table_count, page_rect_capacity * 2);
+		page_rect_buffer = rd->storage_buffer_create(page_rect_capacity * sizeof(uint32_t) * 2);
+	}
+	LocalVector<uint32_t> words;
+	words.resize(page_table_count * 2);
+	for (uint32_t i = 0; i < words.size(); i++) {
+		words[i] = 0;
+	}
+	for (const InstancePages &instance_pages : instances) {
+		for (const CardPage &card : instance_pages.cards) {
+			if (card.stable_id >= page_table_count) {
+				continue;
+			}
+			words[card.stable_id * 2] = _pack_xy(card.radiance_x, card.radiance_y);
+			words[card.stable_id * 2 + 1] = _pack_xy(card.radiance_w, card.radiance_h);
+		}
+	}
+	rd->buffer_update(page_rect_buffer, 0, words.size() * sizeof(uint32_t), words.ptr());
+}
+
+float NextGIRelight::get_max_origin_offset() const {
+	float max_offset = 0.0f;
+	for (const InstancePages &instance_pages : instances) {
+		max_offset = MAX(max_offset, instance_pages.record.origin_offset);
+	}
+	return max_offset;
 }
 
 void NextGIRelight::fill_info(Dictionary &r_info) const {

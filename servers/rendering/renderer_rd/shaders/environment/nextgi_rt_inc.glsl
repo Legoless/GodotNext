@@ -82,4 +82,17 @@ struct NextGILight {
 // nextgi_shadow_ray is defined by the relight shader, not here. This include is pulled into the
 // self-test, whose source is required to contain exactly one rayQueryProceedEXT.
 
-#endif
+struct NextGISurfaceRecord {
+	uint vertex_offset;
+	uint index_offset;
+	uint triangle_count;
+	uint flags;
+};
+
+// Same query as nextgi_trace_opaque. The proceed stays in that one function.
+bool nextgi_trace(vec3 origin, vec3 direction, float tmax, out NextGIHit hit) {
+	hit = nextgi_trace_opaque(origin, 0.0, direction, tmax, 0xFFu);
+	return hit.hit;
+}
+
+#endif // NEXTGI_RT_INC_GLSL

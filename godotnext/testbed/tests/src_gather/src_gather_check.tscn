@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/src_gather/src_gather_check.gd" id="1_gather"]
+
+[node name="SRCGatherCheck" type="Node"]
+script = ExtResource("1_gather")

@@ -35,6 +35,7 @@ layout(set = 0, binding = 3) uniform sampler2D albedo_tex;
 layout(set = 0, binding = 4) uniform sampler2D normal_tex;
 layout(set = 0, binding = 5) uniform sampler2D emission_tex;
 layout(set = 0, binding = 6) uniform sampler2D depth_tex;
+layout(set = 0, binding = 19) uniform sampler2D src_indirect_tex;
 layout(set = 0, binding = 7) uniform sampler2DShadow directional_shadow_tex;
 layout(set = 0, binding = 8) uniform sampler2DShadow positional_shadow_tex;
 
@@ -292,7 +293,8 @@ void main() {
 		}
 		direct += light.color_energy.rgb * light.color_energy.a * atten * ndotl * shadow;
 	}
-	vec3 radiance = emission + (albedo / PI) * direct;
+	vec3 indirect = texelFetch(src_indirect_tex, radiance_coord / 8, 0).rgb;
+	vec3 radiance = emission + (albedo / PI) * (direct + indirect);
 	imageStore(radiance_image, radiance_coord, vec4(radiance, 1.0));
 
 	uvec2 center = (size / 2u) & ~1u;

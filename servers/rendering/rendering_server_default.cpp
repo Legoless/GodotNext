@@ -38,6 +38,9 @@
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+#ifdef RD_ENABLED
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
+#endif
 
 #ifndef XR_DISABLED
 #include "servers/xr/xr_server.h"
@@ -322,6 +325,13 @@ uint64_t RenderingServerDefault::get_rendering_info(RSE::RenderingInfo p_info) {
 	} else if (p_info == RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION);
 	}
+#ifdef RD_ENABLED
+	else if (p_info == RSE::RENDERING_INFO_NEXTGI_COVERAGE_HITS) {
+		return RendererRD::nextgi_gather_coverage_hits();
+	} else if (p_info == RSE::RENDERING_INFO_NEXTGI_COVERAGE_RAYS) {
+		return RendererRD::nextgi_gather_coverage_rays();
+	}
+#endif
 	return RSG::utilities->get_rendering_info(p_info);
 }
 

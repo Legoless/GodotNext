@@ -40,6 +40,7 @@ TEST_FORCE_LINK(test_nextgi_hwrt_safety)
 #include "core/string/print_string.h"
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/rendering_device.h"
 
 #include "modules/modules_enabled.gen.h"
@@ -356,6 +357,22 @@ TEST_CASE("[NextGI] HWRT self-test source follows the ray-query rules") {
 	CHECK_FALSE(source.contains("ray_tracing_position_fetch"));
 }
 
+TEST_CASE("[NextGI] diffuse gather source follows the ray-query rules") {
+	const String source = RendererRD::NextGIGather::build_shader_source();
+	REQUIRE_FALSE(source.is_empty());
+	REQUIRE(source.contains("local_size_x = 8"));
+	REQUIRE(source.contains("local_size_y = 8"));
+	REQUIRE(source.contains("nextgi_trace("));
+	CHECK_EQ(TestNextGIHWRTSafety::count_occurrences(source, "rayQueryProceedEXT("), 1);
+	CHECK_FALSE(source.contains("shared uint"));
+	CHECK_FALSE(source.contains("shared float"));
+	CHECK_FALSE(source.contains("shared int"));
+	CHECK_FALSE(source.contains("shared vec"));
+	CHECK_FALSE(source.contains("rayQueryGetIntersectionTriangleVertexPositionsEXT"));
+	CHECK_FALSE(source.contains("GL_EXT_buffer_reference"));
+	CHECK_FALSE(source.contains("while"));
+}
+
 #ifdef MODULE_GLSLANG_ENABLED
 TEST_CASE("[NextGI] HWRT self-test compiles through glslang to SPIR-V 1.3") {
 	const String source = NextGI::build_hwrt_selftest_source();
@@ -374,6 +391,25 @@ TEST_CASE("[NextGI] HWRT self-test compiles through glslang to SPIR-V 1.3") {
 	REQUIRE_GE(spirv.size(), 20);
 	CHECK_EQ(TestNextGIHWRTSafety::spirv_word_at(spirv, 0), 0x07230203u);
 	CHECK_EQ(TestNextGIHWRTSafety::spirv_word_at(spirv, 1), 0x00010300u);
+}
+
+TEST_CASE("[NextGI] diffuse gather compiles through glslang to SPIR-V 1.3") {
+	const String source = RendererRD::NextGIGather::build_shader_source();
+	REQUIRE_FALSE(source.is_empty());
+
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(
+			RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+			source,
+			RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+			RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3,
+			&error);
+	if (spirv.is_empty()) {
+		print_line(error);
+		FAIL_CHECK("glslang failed to compile the NextGI gather");
+	}
+	REQUIRE_GE(spirv.size(), 20);
+	CHECK_EQ(TestNextGIHWRTSafety::spirv_word_at(spirv, 0), 0x07230203u);
 }
 #endif // MODULE_GLSLANG_ENABLED
 

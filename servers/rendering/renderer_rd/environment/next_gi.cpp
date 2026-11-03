@@ -45,6 +45,7 @@
 #include "servers/rendering/rendering_server_globals.h"
 
 // GodotNext: nextgi_src_cards
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 
@@ -432,7 +433,22 @@ Dictionary NextGI::get_tier_info() const {
 	if (relight != nullptr) {
 		relight->fill_info(info);
 	}
+	if (gather != nullptr) {
+		gather->fill_info(info);
+	}
 	return info;
+}
+
+void NextGI::_gather(RenderDataRD *p_render_data) {
+	if (gather != nullptr) {
+		gather->gather(p_render_data);
+	}
+}
+
+void NextGI::_integrate(RenderDataRD *p_render_data) {
+	if (gather != nullptr) {
+		gather->integrate(p_render_data);
+	}
 }
 
 void NextGI::_relight_src(RenderDataRD *p_render_data) {
@@ -516,6 +532,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		relight = memnew(NextGIRelight);
 		relight->init();
 	}
+	if (gather == nullptr) {
+		gather = memnew(NextGIGather);
+		gather->init();
+	}
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_BEGIN].name);
@@ -543,10 +563,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			_capture_src_cards(p_render_data);
 		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
 			_relight_src(p_render_data);
+		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
+			_gather(p_render_data);
 		} else if (slot == PASS_SLOT_INTEGRATION) {
-			// Integration (§2.1 line 7) is the final RB_TEX_AMBIENT and RB_TEX_REFLECTION writer.
-			// Reflection stays cleared in P1; ambient is cleared until the gather lands (#25).
+			// Integration (§2.1 line 7) writes RB_TEX_AMBIENT from the gather probes. Reflection stays cleared.
 			_clear_gi_buffers(rb.ptr());
+			_integrate(p_render_data);
 		}
 		rd->draw_command_end_label();
 	}
@@ -569,6 +591,10 @@ NextGI::~NextGI() {
 		src->free();
 		memdelete(src);
 		src = nullptr;
+	}
+	if (gather != nullptr) {
+		memdelete(gather);
+		gather = nullptr;
 	}
 	if (relight != nullptr) {
 		memdelete(relight);

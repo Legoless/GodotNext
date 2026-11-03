@@ -3105,6 +3105,9 @@
 		<member name="rendering/global_illumination/mesh_sdf/voxels_per_meter" type="float" setter="" getter="" default="10.0">
 			The base resolution of generated [MeshDistanceField]s, in voxels per meter, before the per-import and per-mesh resolution scale is applied. The longest axis of a field is clamped to 128 voxels.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/coverage_counter" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], NextGI traces one coverage ray per half-resolution pixel and reports the hit and ray counts through [method RenderingServer.get_rendering_info].
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/dump_material_atlas" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI saves its surface cache material atlas once every known card has been captured: the albedo, normal, ORM, emission and depth targets go to [code]user://nextgi_atlas_*.exr[/code], and the log gets the coverage of each card (the fraction of its texels with a depth above 0). This is a debugging aid; it reads the atlas back from the GPU. It is read when NextGI creates the atlas, so changes take effect after a restart.
 		</member>

@@ -336,6 +336,8 @@ public:
 
 	RID sky_get_material(RID p_sky) const;
 	RID sky_get_radiance_texture_rd(RID p_sky) const;
+	// 2D view. Array radiance (the default) exposes the first roughness layer; a single octmap is returned as-is.
+	RID sky_get_radiance_texture_2d(RID p_sky) const;
 	float sky_get_baked_exposure(RID p_sky) const;
 
 	RID allocate_sky_rid();

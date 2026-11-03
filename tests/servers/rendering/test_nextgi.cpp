@@ -322,6 +322,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 // GodotNext: nextgi_src_cards
 #include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/rendering_device.h"
@@ -1698,6 +1699,19 @@ TEST_CASE("[NextGI] SRC relight: page lights, the High schedule and the two mask
 
 	CHECK(nextgi_omni_attenuation(0.0f, 0.1f, 1.0f) > 1.0f);
 	CHECK_EQ(nextgi_omni_attenuation(10.0f, 0.1f, 1.0f), 0.0f);
+}
+
+TEST_CASE("[NextGI] diffuse gather ray count is 1/16 of a 1080p frame") {
+	using namespace RendererRD;
+	CHECK_EQ(nextgi_gather_probe_count_axis(1920), 120);
+	CHECK_EQ(nextgi_gather_probe_count_axis(1080), 68);
+	CHECK_EQ(nextgi_gather_ray_count(1920, 1080), 130560);
+	CHECK_EQ(nextgi_gather_ray_count(16, 16), 16);
+	CHECK(nextgi_gather_history_resets(1.0f, 0.0f));
+	CHECK_FALSE(nextgi_gather_history_resets(1.0f, 1.05f));
+	CHECK(nextgi_gather_history_resets(1.0f, 1.2f));
+	CHECK_EQ(nextgi_rt_origin_offset(0.02f, 1.0f), 0.05f);
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/coverage_counter"));
 }
 
 TEST_CASE("[NextGI] SRC cards: the material atlas dump setting is registered and off") {

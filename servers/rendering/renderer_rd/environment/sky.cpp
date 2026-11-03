@@ -1727,6 +1727,15 @@ RID SkyRD::sky_get_radiance_texture_rd(RID p_sky) const {
 	return sky->radiance;
 }
 
+RID SkyRD::sky_get_radiance_texture_2d(RID p_sky) const {
+	Sky *sky = get_sky(p_sky);
+	ERR_FAIL_NULL_V(sky, RID());
+	if (sky->radiance_first_layer_slice.is_valid()) {
+		return sky->radiance_first_layer_slice;
+	}
+	return sky->radiance;
+}
+
 float SkyRD::sky_get_uv_border_size(RID p_sky) {
 	Sky *sky = get_sky(p_sky);
 	ERR_FAIL_NULL_V(sky, 1.0);

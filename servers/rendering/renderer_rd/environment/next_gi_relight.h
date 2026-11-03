@@ -121,10 +121,26 @@ class NextGIRelight {
 	PackedFloat32Array probe_rgb;
 	Array mask_pages;
 
+public:
+	struct ScheduledPage {
+		uint32_t indirect_x = 0;
+		uint32_t indirect_y = 0;
+		uint32_t record_index = 0;
+		uint32_t card_index = 0;
+		uint32_t block_count = 0;
+	};
+
+private:
+	LocalVector<ScheduledPage> scheduled_pages;
+	RID page_rect_buffer;
+	uint32_t page_rect_capacity = 0;
+	RID indirect_texture;
+
 	bool _ensure_atlases();
 	bool _ensure_shader();
 	RID _storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t p_count, uint32_t p_stride);
 	void _reset_uniform_set();
+	void _upload_page_rects();
 
 public:
 	static NextGIRelight *get_singleton() { return singleton; }
@@ -138,6 +154,13 @@ public:
 
 	// Line 2b. Builds the scenario light set, schedules pages under the High caps and dispatches the relight shader.
 	void relight(RenderDataRD *p_render_data);
+
+	RID get_page_rect_buffer() const { return page_rect_buffer; }
+	uint32_t get_page_rect_count() const { return page_table_count; }
+	RID get_indirect_texture() const { return indirect_texture; }
+	RID get_radiance_texture() const { return radiance; }
+	const LocalVector<ScheduledPage> &get_scheduled_pages() const { return scheduled_pages; }
+	float get_max_origin_offset() const;
 
 	void fill_info(Dictionary &r_info) const;
 

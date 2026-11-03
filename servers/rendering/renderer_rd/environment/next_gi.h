@@ -57,6 +57,9 @@ struct NextGICardClusterResult;
 // GodotNext: nextgi_src_relight
 class NextGIRelight;
 
+// GodotNext: nextgi_gather
+class NextGIGather;
+
 // NextGI host entry: the §3 tier selection (#15), the ray-query toolchain self-test (#20), the
 // Forward+ frame block (#26), the RT scene (#28) and the HWRT safety net (#36): the startup
 // 64-ray self-test and the device-loss crash latch.
@@ -254,6 +257,11 @@ private:
 	// GodotNext: nextgi_src_relight
 	NextGIRelight *relight = nullptr;
 	void _relight_src(RenderDataRD *p_render_data);
+
+	// GodotNext: nextgi_gather
+	NextGIGather *gather = nullptr;
+	void _gather(RenderDataRD *p_render_data);
+	void _integrate(RenderDataRD *p_render_data);
 
 public:
 	static NextGI *get_singleton() { return singleton; }
