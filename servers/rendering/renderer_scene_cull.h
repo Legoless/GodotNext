@@ -904,6 +904,9 @@ public:
 		PagedArray<RenderGeometryInstance *> sdfgi_region_geometry_instances[SDFGI_MAX_CASCADES * SDFGI_MAX_REGIONS_PER_CASCADE];
 		PagedArray<RID> sdfgi_cascade_lights[SDFGI_MAX_CASCADES];
 
+		// GodotNext: nextgi_rt_feed
+		LocalVector<RendererSceneRender::NextGIRTInstance> nextgi_rt_instances;
+
 		void clear() {
 			geometry_instances.clear();
 			lights.clear();
@@ -927,6 +930,9 @@ public:
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].clear();
 			}
+
+			// GodotNext: nextgi_rt_feed
+			nextgi_rt_instances.clear();
 		}
 
 		void reset() {
@@ -952,6 +958,9 @@ public:
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].reset();
 			}
+
+			// GodotNext: nextgi_rt_feed
+			nextgi_rt_instances.clear();
 		}
 
 		void append_from(InstanceCullResult &p_cull_result) {
@@ -977,6 +986,11 @@ public:
 
 			for (int i = 0; i < SDFGI_MAX_CASCADES; i++) {
 				sdfgi_cascade_lights[i].merge_unordered(p_cull_result.sdfgi_cascade_lights[i]);
+			}
+
+			// GodotNext: nextgi_rt_feed
+			for (const RendererSceneRender::NextGIRTInstance &instance : p_cull_result.nextgi_rt_instances) {
+				nextgi_rt_instances.push_back(instance);
 			}
 		}
 

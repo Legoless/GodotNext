@@ -1822,6 +1822,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// sdfgi first
 	_update_sdfgi(p_render_data);
 
+	// GodotNext: nextgi_rt_scene
+	// The AS build/update slot (#28); #26's frame block will own the wider NextGI pass order.
+	if (!is_reflection_probe) {
+		next_gi.update_rt_scene(p_render_data);
+	}
+
 	// assign render indices to voxel_gi_instances
 	for (uint32_t i = 0; i < (uint32_t)p_render_data->voxel_gi_instances->size(); i++) {
 		RID voxel_gi_instance = (*p_render_data->voxel_gi_instances)[i];

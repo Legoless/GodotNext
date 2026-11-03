@@ -3707,6 +3707,26 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.positional_light_instances = scenario->dynamic_lights.ptr();
 			sdfgi_update_data.positional_light_count = scenario->dynamic_lights.size();
 		}
+
+		// GodotNext: nextgi_rt_feed
+		// v0 feed (#28): every visible baked/dynamic-GI mesh instance of the scenario, unculled.
+		sdfgi_update_data.nextgi_rt_instances = &scene_cull_result.nextgi_rt_instances;
+		if (p_reflection_probe.is_null() && scene_render->environment_get_nextgi_enabled(p_environment)) {
+			for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
+				Instance *instance = E->self();
+				if (instance->base_type != RSE::INSTANCE_MESH || !instance->visible || !(instance->baked_light || instance->dynamic_gi) || instance->mesh_instance.is_valid()) {
+					continue;
+				}
+				InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(instance->base_data);
+				if (geometry_data == nullptr || geometry_data->geometry_instance == nullptr) {
+					continue;
+				}
+				RendererSceneRender::NextGIRTInstance rt_instance;
+				rt_instance.geometry_instance = geometry_data->geometry_instance;
+				rt_instance.lightmapped = instance->lightmap != nullptr;
+				scene_cull_result.nextgi_rt_instances.push_back(rt_instance);
+			}
+		}
 	}
 
 	//append the directional lights to the lights culled

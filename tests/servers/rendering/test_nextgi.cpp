@@ -220,7 +220,10 @@ TEST_CASE("[NextGI] Renderers without NextGI report UNSUPPORTED_RENDERER") {
 
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+// GodotNext: nextgi_rt_scene
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server.h"
 
 // The §3.1 tier rule (#15). Device capabilities are mocked: the rule is pure, and the device inputs
 // come from a driverless RenderingDevice through the rd_feature_mock hook (#17).
@@ -818,6 +821,237 @@ TEST_CASE("[NextGI] Frame block: the shadow batch flag follows _render_shadow_be
 	CHECK(next_gi.is_shadow_batch_open());
 	next_gi.notify_shadow_batch_end();
 	CHECK_FALSE(next_gi.is_shadow_batch_open());
+}
+
+// The RT scene v0 contracts and pure helpers (#28, plan D13 and §6.3). No GPU: the arena
+// allocator, the decode and the part split are CPU logic; a mocked device covers the non-RT gate.
+
+TEST_CASE("[NextGI] RT scene: eps_rt is min(max_extent/256, rt_max_error)") {
+	// 40 m: max_extent/256 is 15.6 cm, so the 2 cm setting binds.
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_rt_compute_eps(40.0f, 0.02f), 0.02f));
+	// 1 m: max_extent/256 is 3.9 mm and binds.
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_rt_compute_eps(1.0f, 0.02f), 1.0f / 256.0f));
+}
+
+TEST_CASE("[NextGI] RT scene: the coarsest LOD with edge_length <= eps_rt wins") {
+	const float edge_lengths[] = { 0.001f, 0.01f, 0.1f };
+	CHECK_EQ(RendererRD::nextgi_rt_select_lod(edge_lengths, 3, 0.02f), 1);
+	CHECK_EQ(RendererRD::nextgi_rt_select_lod(edge_lengths, 3, 0.1f), 2);
+	CHECK_EQ(RendererRD::nextgi_rt_select_lod(edge_lengths, 3, 0.0005f), -1); // Base indices.
+	CHECK_EQ(RendererRD::nextgi_rt_select_lod(nullptr, 0, 1.0f), -1);
+}
+
+TEST_CASE("[NextGI] RT scene: 300k triangles split into 3 BLAS parts, never coarsened") {
+	const uint32_t triangle_counts[] = { 300000 };
+	const uint32_t chunks[] = { 0 };
+	LocalVector<RendererRD::NextGIRTPartPlan> parts;
+	RendererRD::nextgi_rt_split_parts(triangle_counts, chunks, 1, RendererRD::NEXTGI_RT_MAX_TRIANGLES_PER_BLAS, parts);
+	REQUIRE_EQ(parts.size(), 3u);
+	CHECK_EQ(parts[0].triangle_count, 131072u);
+	CHECK_EQ(parts[1].triangle_count, 131072u);
+	CHECK_EQ(parts[2].triangle_count, 37856u);
+	uint32_t total = 0;
+	for (const RendererRD::NextGIRTPartPlan &part : parts) {
+		total += part.triangle_count;
+		CHECK(part.triangle_count <= uint32_t(RendererRD::NEXTGI_RT_MAX_TRIANGLES_PER_BLAS));
+	}
+	CHECK_EQ(total, 300000u);
+	CHECK_EQ(parts[1].geometries[0].first_triangle, 131072u);
+}
+
+TEST_CASE("[NextGI] RT scene: whole surfaces pack first and parts never span chunks") {
+	const uint32_t triangle_counts[] = { 100000, 100000, 5000, 10 };
+	const uint32_t chunks[] = { 0, 0, 0, 1 };
+	LocalVector<RendererRD::NextGIRTPartPlan> parts;
+	RendererRD::nextgi_rt_split_parts(triangle_counts, chunks, 4, RendererRD::NEXTGI_RT_MAX_TRIANGLES_PER_BLAS, parts);
+	REQUIRE_EQ(parts.size(), 3u);
+	CHECK_EQ(parts[0].geometries.size(), 1u);
+	CHECK_EQ(parts[1].geometries.size(), 2u); // Surfaces 1 and 2 share one BLAS.
+	CHECK_EQ(parts[1].first_surface, 1u);
+	CHECK_EQ(parts[1].surface_count, 2u);
+	CHECK_EQ(parts[2].chunk, 1u);
+}
+
+TEST_CASE("[NextGI] RT scene: arena ranges never move, frees coalesce, an unfit range opens a chunk") {
+	RendererRD::NextGIArenaAllocator allocator(256);
+	const RendererRD::NextGIArenaAllocator::Allocation a = allocator.allocate(100);
+	const RendererRD::NextGIArenaAllocator::Allocation b = allocator.allocate(100);
+	REQUIRE(a.is_valid());
+	REQUIRE(b.is_valid());
+	CHECK_EQ(a.chunk, 0u);
+	CHECK_EQ(a.offset, 0u);
+	CHECK_EQ(b.offset, 112u); // 16 B aligned.
+	CHECK(a.new_chunk);
+	CHECK_FALSE(b.new_chunk);
+
+	allocator.free_range(a);
+	const RendererRD::NextGIArenaAllocator::Allocation c = allocator.allocate(50);
+	CHECK_EQ(c.offset, 0u); // The freed range is reused; b kept its offset.
+	CHECK_EQ(b.offset, 112u);
+
+	// Freeing both neighbors coalesces into a range that takes a 200 B allocation in chunk 0.
+	allocator.free_range(c);
+	allocator.free_range(b);
+	const RendererRD::NextGIArenaAllocator::Allocation d = allocator.allocate(200);
+	CHECK_EQ(d.chunk, 0u);
+	CHECK_EQ(d.offset, 0u);
+
+	// Nothing in chunk 0 fits another 100 B now, so a second chunk opens.
+	const RendererRD::NextGIArenaAllocator::Allocation e = allocator.allocate(100);
+	CHECK_EQ(e.chunk, 1u);
+	CHECK(e.new_chunk);
+	CHECK_EQ(allocator.get_chunk_count(), 2u);
+
+	// Larger than one chunk never allocates.
+	ERR_PRINT_OFF;
+	CHECK_FALSE(allocator.allocate(257).is_valid());
+	ERR_PRINT_ON;
+}
+
+TEST_CASE("[NextGI] RT scene: record layout, origin offset and index caps hold the §6.3 contract") {
+	CHECK_EQ(sizeof(RendererRD::NextGIInstanceRecord), 80u);
+	CHECK_EQ(sizeof(RendererRD::NextGISurfaceRecord), 16u);
+	CHECK_EQ(RendererRD::NEXTGI_RT_TLAS_CAPACITY, 100000);
+	CHECK(RendererRD::NEXTGI_RT_RECORD_INDEX_MAX < (1 << 24));
+	CHECK_EQ(RendererRD::NEXTGI_RT_CHUNK_SIZE, 256 * 1024 * 1024);
+
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_rt_origin_offset(0.001f, 1.0f), 0.004f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_rt_origin_offset(0.02f, 10.0f), 0.05f)); // Capped.
+
+	RendererRD::NextGIInstanceRecord record;
+	CHECK_EQ(record.card_set, UINT32_MAX);
+	CHECK_EQ(record.page_table, UINT32_MAX);
+}
+
+TEST_CASE("[NextGI] RT scene: a mocked device without ray query enables no arena and no BLAS") {
+	RenderingDevice *rd = memnew(RenderingDevice);
+	rd->set_feature_mock(true, 0);
+	CHECK_FALSE(rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY));
+	CHECK_FALSE(RendererRD::nextgi_rt_should_enable(true, rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)));
+	rd->set_feature_mock(true, ray_query_feature_bits(true));
+	CHECK(RendererRD::nextgi_rt_should_enable(true, rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)));
+	CHECK_FALSE(RendererRD::nextgi_rt_should_enable(false, rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)));
+	memdelete(rd);
+}
+
+// Builds one indexed triangle soup through the canonical surface-data path, optionally compressed.
+static RenderingServerTypes::SurfaceData rt_test_surface_data(const PackedVector3Array &p_vertices, const PackedInt32Array &p_indices, bool p_compressed) {
+	Array arrays;
+	arrays.resize(RSE::ARRAY_MAX);
+	arrays[RSE::ARRAY_VERTEX] = p_vertices;
+	arrays[RSE::ARRAY_INDEX] = p_indices;
+	RenderingServerTypes::SurfaceData surface_data;
+	const uint64_t compress_format = p_compressed ? uint64_t(RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) : 0;
+	const Error err = RenderingServer::get_singleton()->mesh_create_surface_data_from_arrays(&surface_data, RSE::PRIMITIVE_TRIANGLES, arrays, Array(), Dictionary(), compress_format);
+	REQUIRE_EQ(err, OK);
+	return surface_data;
+}
+
+static void check_rt_decode_matches_arrays(bool p_compressed) {
+	PackedVector3Array vertices;
+	vertices.push_back(Vector3(-2.0f, 0.0f, 1.0f));
+	vertices.push_back(Vector3(3.0f, -1.0f, 0.5f));
+	vertices.push_back(Vector3(0.25f, 4.0f, -3.0f));
+	vertices.push_back(Vector3(1.0f, 1.0f, 1.0f));
+	PackedInt32Array indices;
+	indices.push_back(0);
+	indices.push_back(1);
+	indices.push_back(2);
+	indices.push_back(0);
+	indices.push_back(2);
+	indices.push_back(3);
+
+	const RenderingServerTypes::SurfaceData surface_data = rt_test_surface_data(vertices, indices, p_compressed);
+	if (p_compressed) {
+		CHECK((surface_data.format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) != 0);
+	}
+
+	Vector<float> positions;
+	REQUIRE(RendererRD::nextgi_rt_decode_positions(surface_data.format, surface_data.vertex_data, surface_data.vertex_count, surface_data.aabb, positions));
+	REQUIRE_EQ(positions.size(), 12);
+
+	// The reference is the engine's own decode of the same bytes.
+	const Array arrays = RenderingServer::get_singleton()->mesh_create_arrays_from_surface_data(surface_data);
+	const PackedVector3Array reference = arrays[RSE::ARRAY_VERTEX];
+	REQUIRE_EQ(reference.size(), 4);
+	const double tolerance = 1e-6 * double(surface_data.aabb.get_longest_axis_size());
+	for (int i = 0; i < 4; i++) {
+		CHECK(Math::abs(double(positions[i * 3 + 0]) - double(reference[i].x)) <= tolerance);
+		CHECK(Math::abs(double(positions[i * 3 + 1]) - double(reference[i].y)) <= tolerance);
+		CHECK(Math::abs(double(positions[i * 3 + 2]) - double(reference[i].z)) <= tolerance);
+	}
+}
+
+TEST_CASE("[NextGI] RT scene: decoded positions match mesh_create_arrays_from_surface_data") {
+	REQUIRE(RenderingServer::get_singleton() != nullptr);
+	check_rt_decode_matches_arrays(false);
+	check_rt_decode_matches_arrays(true);
+}
+
+TEST_CASE("[NextGI] RT scene: record to surface to chunk plus offset reproduces 1000 seeded triangles") {
+	REQUIRE(RenderingServer::get_singleton() != nullptr);
+	// A deterministic LCG soup of 1000 triangles.
+	uint32_t seed = 0x12345678u;
+	auto next_float = [&seed]() {
+		seed = seed * 1664525u + 1013904223u;
+		return float((seed >> 8) & 0xFFFFFF) / float(0xFFFFFF) * 20.0f - 10.0f;
+	};
+	PackedVector3Array vertices;
+	PackedInt32Array indices;
+	for (int i = 0; i < 1000; i++) {
+		for (int v = 0; v < 3; v++) {
+			vertices.push_back(Vector3(next_float(), next_float(), next_float()));
+			indices.push_back(i * 3 + v);
+		}
+	}
+	const RenderingServerTypes::SurfaceData surface_data = rt_test_surface_data(vertices, indices, false);
+
+	Vector<float> positions;
+	REQUIRE(RendererRD::nextgi_rt_decode_positions(surface_data.format, surface_data.vertex_data, surface_data.vertex_count, surface_data.aabb, positions));
+	Vector<uint32_t> widened;
+	const bool is_index_16 = surface_data.vertex_count <= 65536 && surface_data.vertex_count > 0;
+	RendererRD::nextgi_rt_widen_indices(surface_data.index_data, surface_data.index_count, is_index_16, surface_data.vertex_count, widened);
+	REQUIRE_EQ(widened.size(), 3000);
+
+	// Write the decoded geometry into a CPU mirror of an arena chunk at the allocator's offsets.
+	RendererRD::NextGIArenaAllocator allocator(1 << 20);
+	const uint32_t vertex_bytes = uint32_t(positions.size()) * sizeof(float);
+	const uint32_t index_bytes = uint32_t(widened.size()) * sizeof(uint32_t);
+	const RendererRD::NextGIArenaAllocator::Allocation allocation = allocator.allocate(vertex_bytes + index_bytes);
+	REQUIRE(allocation.is_valid());
+	Vector<uint8_t> chunk;
+	chunk.resize(1 << 20);
+	memcpy(chunk.ptrw() + allocation.offset, positions.ptr(), vertex_bytes);
+	memcpy(chunk.ptrw() + allocation.offset + vertex_bytes, widened.ptr(), index_bytes);
+
+	// Read it back the way a hit shader does: instance record -> surface record -> chunk + offset.
+	RendererRD::NextGISurfaceRecord surface_record;
+	surface_record.vertex_offset = allocation.offset;
+	surface_record.index_offset = allocation.offset + vertex_bytes;
+	surface_record.triangle_count = 1000;
+	RendererRD::NextGIInstanceRecord instance_record;
+	instance_record.surface_base = 0;
+	instance_record.surface_count = 1;
+	instance_record.arena_chunk = allocation.chunk;
+	CHECK_EQ(instance_record.arena_chunk, 0u);
+
+	const float *chunk_positions = reinterpret_cast<const float *>(chunk.ptr() + surface_record.vertex_offset);
+	const uint32_t *chunk_indices = reinterpret_cast<const uint32_t *>(chunk.ptr() + surface_record.index_offset);
+	int wrong = 0;
+	for (uint32_t t = 0; t < surface_record.triangle_count; t++) {
+		for (int corner = 0; corner < 3; corner++) {
+			const uint32_t index = chunk_indices[t * 3 + corner];
+			if (index != uint32_t(indices[t * 3 + corner])) {
+				wrong++;
+				continue;
+			}
+			const Vector3 expected = vertices[index];
+			if (chunk_positions[index * 3 + 0] != expected.x || chunk_positions[index * 3 + 1] != expected.y || chunk_positions[index * 3 + 2] != expected.z) {
+				wrong++;
+			}
+		}
+	}
+	CHECK_EQ(wrong, 0);
 }
 
 } // namespace TestNextGI

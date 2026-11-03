@@ -33,7 +33,9 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
+// GodotNext: nextgi_rt_arena
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/shaders/skeleton.glsl.gen.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/mesh_storage.h"
@@ -61,6 +63,26 @@ public:
 
 	enum IndirectMultiMesh : uint32_t {
 		INDIRECT_MULTIMESH_COMMAND_STRIDE = 5
+	};
+
+	// GodotNext: nextgi_rt_arena
+	// One BLAS part of a mesh (plan D13): whole surfaces first, split at the 128k triangle cap.
+	struct NextGIRTPart {
+		RID blas;
+		uint32_t first_surface = 0;
+		uint32_t surface_count = 0;
+		LocalVector<NextGIRTPartGeometry> geometries;
+	};
+
+	struct NextGIRTSurfaceInfo {
+		bool eligible = false;
+		uint32_t chunk = UINT32_MAX;
+		uint32_t vertex_offset = 0; // Bytes in the chunk.
+		uint32_t vertex_count = 0;
+		uint32_t index_offset = 0;
+		uint32_t index_count = 0;
+		float eps = 0.0f;
+		RID material;
 	};
 
 private:
@@ -151,6 +173,20 @@ private:
 			uint64_t particles_render_pass = 0;
 
 			RID uniform_set;
+
+			// GodotNext: nextgi_rt_arena
+			uint32_t rt_chunk = UINT32_MAX;
+			uint32_t rt_vertex_offset = 0;
+			uint32_t rt_vertex_count = 0;
+			uint32_t rt_index_offset = 0;
+			uint32_t rt_index_count = 0;
+			uint32_t rt_allocation_size = 0;
+			float rt_eps = 0.0f;
+			float rt_edge_length = 0.0f; // 0 = base indices.
+			bool rt_eligible = false;
+			// CPU copies, kept until mesh_nextgi_release_cpu_geometry() (the SRC card work).
+			Vector<float> rt_cpu_positions;
+			Vector<uint32_t> rt_cpu_indices;
 		};
 
 		uint32_t blend_shape_count = 0;
@@ -176,6 +212,10 @@ private:
 		String path;
 
 		Dependency dependency;
+
+		// GodotNext: nextgi_rt_arena
+		LocalVector<NextGIRTPart> nextgi_parts;
+		bool nextgi_blas_dirty = false;
 	};
 
 	mutable RID_Owner<Mesh, true> mesh_owner;
@@ -213,6 +253,22 @@ private:
 	RD::VertexFormatID _mesh_surface_generate_vertex_format(uint64_t p_surface_format, uint64_t p_input_mask, bool p_instanced_surface, bool p_input_motion_vectors, bool p_point_size_emulated, uint32_t &r_position_stride);
 	void _mesh_surface_generate_version_for_input_mask(Mesh::Surface::Version &v, Mesh::Surface *s, uint64_t p_input_mask, bool p_input_motion_vectors, bool p_point_size_emulated, MeshInstance::Surface *mis = nullptr, uint32_t p_current_buffer = 0, uint32_t p_previous_buffer = 0);
 	void _mesh_surface_clear(Mesh *p_mesh, int p_surface);
+
+	// GodotNext: nextgi_rt_arena
+	bool nextgi_rt_enabled = false;
+	float nextgi_rt_max_error = 0.02f;
+	NextGIArenaAllocator nextgi_rt_allocator;
+	struct NextGIRTChunk {
+		RID buffer;
+		uint64_t device_address = 0;
+	};
+	LocalVector<NextGIRTChunk> nextgi_rt_chunks;
+	RID nextgi_rt_chunk_address_buffer;
+
+	void _mesh_nextgi_rt_add_surface(Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data);
+	void _mesh_nextgi_rt_clear_parts(Mesh *p_mesh);
+	RID _mesh_nextgi_rt_ensure_chunk(uint32_t p_chunk);
+	void _mesh_nextgi_rt_rebuild_chunk_address_buffer();
 
 	void _mesh_instance_clear(MeshInstance *mi);
 	void _mesh_instance_add_surface(MeshInstance *mi, Mesh *mesh, uint32_t p_surface);
@@ -411,6 +467,19 @@ public:
 
 	virtual void mesh_clear(RID p_mesh) override;
 	virtual void mesh_surface_remove(RID p_mesh, int p_surface) override;
+
+	// GodotNext: nextgi_rt_arena
+	bool mesh_nextgi_rt_is_enabled() const { return nextgi_rt_enabled; }
+	uint32_t mesh_nextgi_rt_get_chunk_count() const { return nextgi_rt_chunks.size(); }
+	RID mesh_nextgi_rt_get_chunk_buffer(uint32_t p_chunk) const;
+	RID mesh_nextgi_rt_get_chunk_address_buffer() const { return nextgi_rt_chunk_address_buffer; }
+	uint64_t mesh_nextgi_rt_get_chunk_device_address(uint32_t p_chunk) const;
+	bool mesh_nextgi_rt_get_surface_info(RID p_mesh, uint32_t p_surface, NextGIRTSurfaceInfo &r_info) const;
+	bool mesh_nextgi_rt_is_blas_dirty(RID p_mesh) const;
+	void mesh_nextgi_rt_set_blas_dirty(RID p_mesh, bool p_dirty);
+	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_parts(RID p_mesh);
+	void mesh_nextgi_rt_clear_parts(RID p_mesh);
+	void mesh_nextgi_release_cpu_geometry(RID p_mesh);
 
 	virtual void mesh_debug_usage(List<RenderingServerTypes::MeshInfo> *r_info) override;
 

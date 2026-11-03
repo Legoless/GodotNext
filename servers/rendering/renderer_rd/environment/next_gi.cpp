@@ -30,9 +30,11 @@
 
 #include "next_gi.h"
 
+// GodotNext: nextgi_rt_scene
 #include "core/config/project_settings.h"
 #include "core/string/print_string.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -266,6 +268,9 @@ void NextGI::init(bool p_forward_plus) {
 	if (update_tier(new_inputs, new_quality, line)) {
 		_report(line, result);
 	}
+
+	// GodotNext: nextgi_rt_scene
+	_ensure_rt_scene();
 }
 
 void NextGI::set_hardware_ray_tracing(int p_mode) {
@@ -275,6 +280,26 @@ void NextGI::set_hardware_ray_tracing(int p_mode) {
 	String line;
 	if (update_tier(new_inputs, quality_setting, line)) {
 		_report(line, result);
+	}
+
+	// GodotNext: nextgi_rt_scene
+	_ensure_rt_scene();
+}
+
+// GodotNext: nextgi_rt_scene
+void NextGI::_ensure_rt_scene() {
+	// The tier can be HWRT in doctests with mocked inputs and no live device; the RT scene
+	// exists only on a real ray-query device.
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (result.tier == TIER_HWRT && rt_scene == nullptr && rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)) {
+		rt_scene = memnew(NextGIRTScene);
+		rt_scene->init();
+	}
+}
+
+void NextGI::update_rt_scene(const ::RenderDataRD *p_render_data) {
+	if (rt_scene != nullptr) {
+		rt_scene->update(p_render_data);
 	}
 }
 
@@ -290,6 +315,14 @@ Dictionary NextGI::get_tier_info() const {
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
 	info["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
 	info["ray_query_shaders_initialized"] = ray_query_shaders_initialized;
+	// GodotNext: nextgi_rt_scene
+	if (rt_scene != nullptr) {
+		const NextGIRTScene::Stats &rt_stats = rt_scene->get_stats();
+		info["rt_fed_instance_count"] = int64_t(rt_stats.fed_instance_count);
+		info["rt_instance_count"] = int64_t(rt_stats.instance_count);
+		info["rt_blas_build_count"] = int64_t(rt_stats.blas_build_count);
+		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
+	}
 	return info;
 }
 
@@ -390,6 +423,13 @@ NextGI::NextGI() {
 }
 
 NextGI::~NextGI() {
+	// GodotNext: nextgi_rt_scene
+	if (rt_scene != nullptr) {
+		rt_scene->free();
+		memdelete(rt_scene);
+		rt_scene = nullptr;
+	}
+
 	if (singleton == this) {
 		singleton = nullptr;
 	}

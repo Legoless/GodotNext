@@ -30,6 +30,8 @@
 
 #include "mesh_storage.h"
 
+// GodotNext: nextgi_rt_arena
+#include "core/config/project_settings.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -44,6 +46,10 @@ MeshStorage *MeshStorage::get_singleton() {
 
 MeshStorage::MeshStorage() {
 	singleton = this;
+
+	// GodotNext: nextgi_rt_arena
+	nextgi_rt_max_error = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_max_error"));
+	nextgi_rt_enabled = nextgi_rt_should_enable(bool(GLOBAL_GET("rendering/global_illumination/nextgi/enabled")), RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY));
 
 	default_rd_storage_buffer = RD::get_singleton()->storage_buffer_create(sizeof(uint32_t) * 4);
 
@@ -196,6 +202,17 @@ MeshStorage::~MeshStorage() {
 	skeleton_shader.shader.version_free(skeleton_shader.version);
 
 	RD::get_singleton()->free_rid(default_rd_storage_buffer);
+
+	// GodotNext: nextgi_rt_arena
+	for (const NextGIRTChunk &chunk : nextgi_rt_chunks) {
+		if (chunk.buffer.is_valid()) {
+			RD::get_singleton()->free_rid(chunk.buffer);
+		}
+	}
+	nextgi_rt_chunks.clear();
+	if (nextgi_rt_chunk_address_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(nextgi_rt_chunk_address_buffer);
+	}
 
 	singleton = nullptr;
 }
@@ -501,6 +518,9 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 	mesh->surfaces[mesh->surface_count] = s;
 	mesh->surface_count++;
 
+	// GodotNext: nextgi_rt_arena
+	_mesh_nextgi_rt_add_surface(mesh, s, new_surface);
+
 	for (MeshInstance *mi : mesh->instances) {
 		_mesh_instance_add_surface(mi, mesh, mesh->surface_count - 1);
 	}
@@ -518,6 +538,18 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 
 void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 	Mesh::Surface &s = *p_mesh->surfaces[p_surface];
+
+	// GodotNext: nextgi_rt_arena
+	if (s.rt_chunk != UINT32_MAX) {
+		NextGIArenaAllocator::Allocation allocation;
+		allocation.chunk = s.rt_chunk;
+		allocation.offset = s.rt_vertex_offset;
+		allocation.size = s.rt_allocation_size;
+		nextgi_rt_allocator.free_range(allocation);
+		s.rt_chunk = UINT32_MAX;
+	}
+	_mesh_nextgi_rt_clear_parts(p_mesh);
+	p_mesh->nextgi_blas_dirty = true;
 
 	if (s.vertex_buffer.is_valid()) {
 		RD::get_singleton()->free_rid(s.vertex_buffer); // Clears arrays as dependency automatically, including all versions.
@@ -548,6 +580,173 @@ void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 	}
 
 	memdelete(p_mesh->surfaces[p_surface]);
+}
+
+// GodotNext: nextgi_rt_arena
+RID MeshStorage::_mesh_nextgi_rt_ensure_chunk(uint32_t p_chunk) {
+	while (nextgi_rt_chunks.size() <= p_chunk) {
+		NextGIRTChunk chunk;
+		const BitField<RD::BufferCreationBits> creation_bits = RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT;
+		chunk.buffer = RD::get_singleton()->storage_buffer_create(nextgi_rt_allocator.get_chunk_size(), Vector<uint8_t>(), 0, creation_bits);
+		if (chunk.buffer.is_null()) {
+			return RID();
+		}
+		chunk.device_address = RD::get_singleton()->buffer_get_device_address(chunk.buffer);
+		nextgi_rt_chunks.push_back(chunk);
+		_mesh_nextgi_rt_rebuild_chunk_address_buffer();
+	}
+	return nextgi_rt_chunks[p_chunk].buffer;
+}
+
+void MeshStorage::_mesh_nextgi_rt_rebuild_chunk_address_buffer() {
+	Vector<uint8_t> data;
+	data.resize(int64_t(nextgi_rt_chunks.size()) * sizeof(uint64_t));
+	uint64_t *addresses = reinterpret_cast<uint64_t *>(data.ptrw());
+	for (uint32_t i = 0; i < nextgi_rt_chunks.size(); i++) {
+		addresses[i] = nextgi_rt_chunks[i].device_address; // One uvec2 per chunk.
+	}
+	if (nextgi_rt_chunk_address_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(nextgi_rt_chunk_address_buffer);
+	}
+	nextgi_rt_chunk_address_buffer = RD::get_singleton()->storage_buffer_create(data.size(), data);
+}
+
+void MeshStorage::_mesh_nextgi_rt_add_surface(Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data) {
+	if (!nextgi_rt_enabled) {
+		return;
+	}
+	const bool eligible = p_surface_data.primitive == RSE::PRIMITIVE_TRIANGLES && !(p_surface_data.format & RSE::ARRAY_FLAG_USE_2D_VERTICES) && p_surface_data.skin_data.is_empty() && p_mesh->blend_shape_count == 0;
+	if (!eligible) {
+		return;
+	}
+
+	const float eps_rt = nextgi_rt_compute_eps(float(p_surface_data.aabb.get_longest_axis_size()), nextgi_rt_max_error);
+	const bool is_index_16 = p_surface_data.vertex_count <= 65536 && p_surface_data.vertex_count > 0;
+
+	LocalVector<float> edge_lengths;
+	edge_lengths.resize(uint32_t(p_surface_data.lods.size()));
+	for (int i = 0; i < p_surface_data.lods.size(); i++) {
+		edge_lengths[i] = p_surface_data.lods[i].edge_length;
+	}
+	const int lod = nextgi_rt_select_lod(edge_lengths.ptr(), edge_lengths.size(), eps_rt);
+	const Vector<uint8_t> *index_data = &p_surface_data.index_data;
+	uint32_t index_count = p_surface_data.index_count;
+	float edge_length = 0.0f;
+	if (lod >= 0) {
+		index_data = &p_surface_data.lods[lod].index_data;
+		index_count = uint32_t(index_data->size()) / (is_index_16 ? 2 : 4);
+		edge_length = p_surface_data.lods[lod].edge_length;
+	}
+
+	if (!nextgi_rt_decode_positions(p_surface_data.format, p_surface_data.vertex_data, p_surface_data.vertex_count, p_surface_data.aabb, p_surface->rt_cpu_positions)) {
+		return;
+	}
+	nextgi_rt_widen_indices(*index_data, index_count, is_index_16, p_surface_data.vertex_count, p_surface->rt_cpu_indices);
+	// BLAS geometries need whole triangles.
+	p_surface->rt_cpu_indices.resize(p_surface->rt_cpu_indices.size() / 3 * 3);
+	if (p_surface->rt_cpu_indices.is_empty()) {
+		p_surface->rt_cpu_positions.clear();
+		return;
+	}
+
+	const uint32_t vertex_bytes = p_surface_data.vertex_count * sizeof(float) * 3;
+	const uint32_t index_offset_in_allocation = (vertex_bytes + NEXTGI_RT_ALIGNMENT - 1) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1);
+	const uint32_t index_bytes = uint32_t(p_surface->rt_cpu_indices.size()) * sizeof(uint32_t);
+	const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(index_offset_in_allocation + index_bytes);
+	if (!allocation.is_valid()) {
+		p_surface->rt_cpu_positions.clear();
+		p_surface->rt_cpu_indices.clear();
+		return;
+	}
+	const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(allocation.chunk);
+	if (chunk_buffer.is_null()) {
+		nextgi_rt_allocator.free_range(allocation);
+		p_surface->rt_cpu_positions.clear();
+		p_surface->rt_cpu_indices.clear();
+		return;
+	}
+	RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset, vertex_bytes, p_surface->rt_cpu_positions.ptr());
+	RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset + index_offset_in_allocation, index_bytes, p_surface->rt_cpu_indices.ptr());
+
+	p_surface->rt_chunk = allocation.chunk;
+	p_surface->rt_vertex_offset = allocation.offset;
+	p_surface->rt_vertex_count = p_surface_data.vertex_count;
+	p_surface->rt_index_offset = allocation.offset + index_offset_in_allocation;
+	p_surface->rt_index_count = uint32_t(p_surface->rt_cpu_indices.size());
+	p_surface->rt_allocation_size = allocation.size;
+	p_surface->rt_eps = eps_rt;
+	p_surface->rt_edge_length = edge_length;
+	p_surface->rt_eligible = true;
+	p_mesh->nextgi_blas_dirty = true;
+}
+
+void MeshStorage::_mesh_nextgi_rt_clear_parts(Mesh *p_mesh) {
+	for (NextGIRTPart &part : p_mesh->nextgi_parts) {
+		if (part.blas.is_valid()) {
+			RD::get_singleton()->free_rid(part.blas);
+			part.blas = RID();
+		}
+	}
+	p_mesh->nextgi_parts.clear();
+}
+
+RID MeshStorage::mesh_nextgi_rt_get_chunk_buffer(uint32_t p_chunk) const {
+	ERR_FAIL_UNSIGNED_INDEX_V(p_chunk, nextgi_rt_chunks.size(), RID());
+	return nextgi_rt_chunks[p_chunk].buffer;
+}
+
+uint64_t MeshStorage::mesh_nextgi_rt_get_chunk_device_address(uint32_t p_chunk) const {
+	ERR_FAIL_UNSIGNED_INDEX_V(p_chunk, nextgi_rt_chunks.size(), 0);
+	return nextgi_rt_chunks[p_chunk].device_address;
+}
+
+bool MeshStorage::mesh_nextgi_rt_get_surface_info(RID p_mesh, uint32_t p_surface, NextGIRTSurfaceInfo &r_info) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, false);
+	ERR_FAIL_UNSIGNED_INDEX_V(p_surface, mesh->surface_count, false);
+	const Mesh::Surface *surface = mesh->surfaces[p_surface];
+	r_info.eligible = surface->rt_eligible;
+	r_info.chunk = surface->rt_chunk;
+	r_info.vertex_offset = surface->rt_vertex_offset;
+	r_info.vertex_count = surface->rt_vertex_count;
+	r_info.index_offset = surface->rt_index_offset;
+	r_info.index_count = surface->rt_index_count;
+	r_info.eps = surface->rt_eps;
+	r_info.material = surface->material;
+	return true;
+}
+
+bool MeshStorage::mesh_nextgi_rt_is_blas_dirty(RID p_mesh) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, false);
+	return mesh->nextgi_blas_dirty;
+}
+
+void MeshStorage::mesh_nextgi_rt_set_blas_dirty(RID p_mesh, bool p_dirty) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL(mesh);
+	mesh->nextgi_blas_dirty = p_dirty;
+}
+
+LocalVector<MeshStorage::NextGIRTPart> *MeshStorage::mesh_nextgi_rt_get_parts(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, nullptr);
+	return &mesh->nextgi_parts;
+}
+
+void MeshStorage::mesh_nextgi_rt_clear_parts(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL(mesh);
+	_mesh_nextgi_rt_clear_parts(mesh);
+}
+
+void MeshStorage::mesh_nextgi_release_cpu_geometry(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL(mesh);
+	for (uint32_t i = 0; i < mesh->surface_count; i++) {
+		mesh->surfaces[i]->rt_cpu_positions.clear();
+		mesh->surfaces[i]->rt_cpu_indices.clear();
+	}
 }
 
 int MeshStorage::mesh_get_blend_shape_count(RID p_mesh) const {

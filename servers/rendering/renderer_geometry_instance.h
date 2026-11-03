@@ -111,6 +111,10 @@ public:
 
 	int32_t shader_uniforms_offset = -1;
 
+	// GodotNext: nextgi_rt_scene
+	// First of this instance's contiguous NextGI part records; UINT32_MAX when not in the RT scene.
+	uint32_t nextgi_record_index = UINT32_MAX;
+
 	struct Data {
 		//data used less often goes into regular heap
 		RID base;

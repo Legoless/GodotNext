@@ -303,6 +303,13 @@ public:
 		PagedArray<RenderGeometryInstance *> instances;
 	};
 
+	// GodotNext: nextgi_rt_feed
+	// One v0 RT-scene feed entry (#28); the P1b registry (#39) replaces this feed.
+	struct NextGIRTInstance {
+		RenderGeometryInstance *geometry_instance = nullptr;
+		bool lightmapped = false;
+	};
+
 	struct RenderSDFGIUpdateData {
 		bool update_static = false;
 		uint32_t static_cascade_count;
@@ -312,6 +319,9 @@ public:
 		const Vector<RID> *directional_lights;
 		const RID *positional_light_instances;
 		uint32_t positional_light_count;
+
+		// GodotNext: nextgi_rt_feed
+		const LocalVector<NextGIRTInstance> *nextgi_rt_instances = nullptr;
 	};
 
 	struct CameraData {
