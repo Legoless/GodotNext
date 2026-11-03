@@ -1,0 +1,13 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://3vv2gm4xobxs"
+path="res://.godot/imported/rq_kernel.glsl-23c9b8e8433f3bc59fd0846fa910b333.res"
+
+[deps]
+
+source_file="res://tests/rd_smoke/rq_kernel.glsl"
+dest_files=["res://.godot/imported/rq_kernel.glsl-23c9b8e8433f3bc59fd0846fa910b333.res"]
+
+[params]
