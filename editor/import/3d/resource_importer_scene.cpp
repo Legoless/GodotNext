@@ -30,6 +30,8 @@
 
 #include "resource_importer_scene.h"
 
+// GodotNext: nextgeo_import
+#include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/io/dir_access.h"
 #include "core/io/resource_loader.h"
@@ -38,6 +40,7 @@
 #include "core/object/script_language.h"
 #include "editor/editor_interface.h"
 #include "editor/editor_node.h"
+#include "editor/import/3d/ngm_manifest.h"
 #include "editor/import/3d/scene_import_settings.h"
 #include "editor/settings/editor_settings.h"
 #include "scene/3d/importer_mesh_instance_3d.h"
@@ -2265,6 +2268,10 @@ Error ResourceImporterScene::_save_scene_as_single_mesh(const String &p_source_f
 	TypedArray<Node> mesh_instance_nodes = p_godot_scene->find_children("*", "MeshInstance3D", true, false);
 	const int mesh_inst_count = mesh_instance_nodes.size();
 	ERR_FAIL_COND_V_MSG(mesh_inst_count == 0, ERR_INVALID_DATA, "Cannot import GLTF file " + p_source_file + " as a single mesh, because it contains no meshes.");
+	// GodotNext: nextgeo_import
+	if (_ngm_single_mesh) {
+		return _save_virtual_geometry_single_mesh(p_source_file, p_save_path, p_godot_scene, p_options, p_flags);
+	}
 	const String save_file_path = p_save_path + ".res";
 	// If there is just one mesh, we can save it directly, preserving that one mesh exactly as it is.
 	if (mesh_inst_count == 1) {
@@ -2295,6 +2302,56 @@ Error ResourceImporterScene::_save_scene_as_single_mesh(const String &p_source_f
 	const bool deduplicate_surfaces = p_options.has("array_mesh/deduplicate_surfaces") && p_options["array_mesh/deduplicate_surfaces"];
 	Ref<ImporterMesh> merged_mesh = ImporterMesh::merge_importer_meshes(importer_mesh_instances, relative_transforms, deduplicate_surfaces);
 	return ResourceSaver::save(merged_mesh->get_mesh(), save_file_path, p_flags);
+}
+
+// GodotNext: nextgeo_import
+Error ResourceImporterScene::_save_virtual_geometry_single_mesh(const String &p_source_file, const String &p_save_path, Node *p_godot_scene, const HashMap<StringName, Variant> &p_options, int p_flags) {
+	TypedArray<Node> mesh_instance_nodes = p_godot_scene->find_children("*", "MeshInstance3D", true, false);
+	const int mesh_inst_count = mesh_instance_nodes.size();
+	ERR_FAIL_COND_V_MSG(mesh_inst_count == 0, ERR_INVALID_DATA, "Cannot import file " + p_source_file + " as a single mesh, because it contains no meshes.");
+	const String save_file_path = p_save_path + ".res";
+
+	Ref<ImporterMesh> importer_mesh;
+	if (mesh_inst_count == 1) {
+		MeshInstance3D *mesh_inst = Object::cast_to<MeshInstance3D>(mesh_instance_nodes[0]);
+		Ref<ArrayMesh> array_mesh = mesh_inst->get_mesh();
+		ERR_FAIL_COND_V_MSG(array_mesh.is_null(), ERR_INVALID_DATA, "Cannot import file " + p_source_file + " as a single mesh, because it contains no ArrayMesh.");
+		importer_mesh = ImporterMesh::from_mesh(array_mesh);
+		if (importer_mesh->get_name().is_empty()) {
+			importer_mesh->set_name(mesh_inst->get_name());
+		}
+	} else {
+		TypedArray<ImporterMesh> importer_mesh_instances;
+		TypedArray<Transform3D> relative_transforms;
+		for (int i = 0; i < mesh_inst_count; i++) {
+			MeshInstance3D *mesh_inst_node = Object::cast_to<MeshInstance3D>(mesh_instance_nodes[i]);
+			Ref<ArrayMesh> array_mesh = mesh_inst_node->get_mesh();
+			if (array_mesh.is_null()) {
+				continue;
+			}
+			Transform3D global_transform = mesh_inst_node->get_transform();
+			Node3D *parent = Object::cast_to<Node3D>(mesh_inst_node->get_parent());
+			while (parent != nullptr) {
+				global_transform = parent->get_transform() * global_transform;
+				parent = Object::cast_to<Node3D>(parent->get_parent());
+			}
+			importer_mesh_instances.append(ImporterMesh::from_mesh(array_mesh));
+			relative_transforms.append(global_transform);
+		}
+		const bool deduplicate_surfaces = p_options.has("array_mesh/deduplicate_surfaces") && bool(p_options["array_mesh/deduplicate_surfaces"]);
+		importer_mesh = ImporterMesh::merge_importer_meshes(importer_mesh_instances, relative_transforms, deduplicate_surfaces);
+	}
+	ERR_FAIL_COND_V_MSG(importer_mesh.is_null(), ERR_INVALID_DATA, "Cannot import file " + p_source_file + " as a single mesh.");
+	if (importer_mesh->get_name().is_empty()) {
+		importer_mesh->set_name(p_source_file.get_file().get_basename());
+	}
+
+	const String key = _ngm_source_path + "::" + importer_mesh->get_name();
+	ngm_build_mesh(importer_mesh, p_save_path + ".ngm", key, false, _ngm_entries);
+	Ref<ArrayMesh> mesh = importer_mesh->get_mesh();
+	ERR_FAIL_COND_V_MSG(mesh.is_null(), ERR_INVALID_DATA, "Cannot save single mesh from '" + p_source_file + "'.");
+	mesh->set_path(save_file_path, true);
+	return ResourceSaver::save(mesh, save_file_path, p_flags);
 }
 
 void ResourceImporterScene::get_internal_import_options(InternalImportCategory p_category, List<ImportOption> *r_options) const {
@@ -2359,6 +2416,8 @@ void ResourceImporterScene::get_internal_import_options(InternalImportCategory p
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/shadow_meshes", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/lightmap_uv", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/lods", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
+			// GodotNext: nextgeo_import
+			r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "generate/virtual_geometry", PROPERTY_HINT_ENUM, "Default,Enable,Disable"), 0));
 			r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "lods/normal_merge_angle", PROPERTY_HINT_RANGE, "0,180,1,degrees"), 20.0f));
 		} break;
 		case INTERNAL_IMPORT_CATEGORY_MATERIAL: {
@@ -2709,6 +2768,8 @@ void ResourceImporterScene::get_import_options(const String &p_path, List<Import
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "nodes/use_node_type_suffixes"), true));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/ensure_tangents"), true));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_lods"), true));
+	// GodotNext: nextgeo_import
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/generate_virtual_geometry"), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "meshes/create_shadow_meshes"), true));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "meshes/light_baking", PROPERTY_HINT_ENUM, "Disabled,Static,Static Lightmaps,Dynamic", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), 1));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "meshes/lightmap_texel_size", PROPERTY_HINT_RANGE, "0.001,100,0.001"), 0.2));
@@ -2807,6 +2868,8 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 				bool create_shadow_meshes = p_create_shadow_meshes;
 				bool bake_lightmaps = p_light_bake_mode == LIGHT_BAKE_STATIC_LIGHTMAPS;
 				String save_to_file;
+				// GodotNext: nextgeo_import
+				bool generate_virtual_geometry = _ngm_generate && !_ngm_single_mesh;
 
 				String mesh_id = importer_mesh->get_meta("import_id", importer_mesh->get_name());
 
@@ -2854,6 +2917,16 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 						merge_angle = mesh_settings["lods/normal_merge_angle"];
 					}
 
+					// GodotNext: nextgeo_import
+					if (!_ngm_single_mesh && mesh_settings.has("generate/virtual_geometry")) {
+						int virtual_geometry = mesh_settings["generate/virtual_geometry"];
+						if (virtual_geometry == MESH_OVERRIDE_ENABLE) {
+							generate_virtual_geometry = true;
+						} else if (virtual_geometry == MESH_OVERRIDE_DISABLE) {
+							generate_virtual_geometry = false;
+						}
+					}
+
 					if (bool(mesh_settings.get("save_to_file/enabled", false))) {
 						save_to_file = mesh_settings.get("save_to_file/path", String());
 						if (!ResourceUID::ensure_path(save_to_file).is_resource_file()) {
@@ -2864,6 +2937,12 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 					for (int i = 0; i < post_importer_plugins.size(); i++) {
 						post_importer_plugins.write[i]->internal_process(EditorScenePostImportPlugin::INTERNAL_IMPORT_CATEGORY_MESH, nullptr, src_mesh_node, importer_mesh, mesh_settings);
 					}
+				}
+
+				// GodotNext: nextgeo_import
+				if (_ngm_single_mesh) {
+					generate_lods = false;
+					create_shadow_meshes = false;
 				}
 
 				if (bake_lightmaps) {
@@ -2899,6 +2978,22 @@ Node *ResourceImporterScene::_generate_meshes(Node *p_node, const Dictionary &p_
 							r_lightmap_caches.push_back(lightmap_cache);
 						}
 					}
+				}
+
+				// GodotNext: nextgeo_import
+				if (generate_virtual_geometry) {
+					String mesh_name = importer_mesh->get_name();
+					if (mesh_name.is_empty()) {
+						mesh_name = String(src_mesh_node->get_name());
+					}
+					const String key = _ngm_source_path + "::" + mesh_name;
+					String ngm_path;
+					if (save_to_file.is_empty()) {
+						ngm_path = ngm_embedded_path(_ngm_base_path, key);
+					} else {
+						ngm_path = ResourceUID::ensure_path(save_to_file) + ".ngm";
+					}
+					ngm_build_mesh(importer_mesh, ngm_path, key, false, _ngm_entries);
 				}
 
 				if (generate_lods) {
@@ -3292,6 +3387,14 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 	ERR_FAIL_COND_V(importer.is_null(), ERR_FILE_UNRECOGNIZED);
 	ERR_FAIL_COND_V(p_options.is_empty(), ERR_BUG);
 
+	// GodotNext: nextgeo_import
+	_ngm_entries.clear();
+	_ngm_base_path = p_save_path;
+	_ngm_source_path = ProjectSettings::get_singleton()->localize_path(p_source_file);
+	_ngm_generate = p_options.has("meshes/generate_virtual_geometry") && bool(p_options["meshes/generate_virtual_geometry"]);
+	_ngm_single_mesh = _ngm_generate && _scene_import_type == "ArrayMesh";
+	_ngm_gen_files = r_gen_files;
+
 	int import_flags = 0;
 
 	if (_scene_import_type == "AnimationLibrary") {
@@ -3558,6 +3661,9 @@ Error ResourceImporterScene::import(ResourceUID::ID p_source_id, const String &p
 
 	//this is not the time to reimport, wait until import process is done, import file is saved, etc.
 	//EditorNode::get_singleton()->reload_scene(p_source_file);
+
+	// GodotNext: nextgeo_import
+	ngm_manifest_commit(_ngm_base_path, _ngm_source_path, _ngm_entries, _ngm_gen_files, _ngm_generate);
 
 	return OK;
 }

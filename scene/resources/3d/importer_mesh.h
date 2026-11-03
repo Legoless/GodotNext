@@ -35,6 +35,9 @@
 #include "scene/resources/mesh.h"
 #include "scene/resources/navigation_mesh.h"
 
+// GodotNext: nextgeo_import
+class VirtualGeometryData;
+
 #ifndef PHYSICS_3D_DISABLED
 #include "scene/resources/3d/concave_polygon_shape_3d.h"
 #include "scene/resources/3d/convex_polygon_shape_3d.h"
@@ -76,6 +79,11 @@ class ImporterMesh : public Resource {
 	Ref<ArrayMesh> mesh;
 
 	Ref<ImporterMesh> shadow_mesh;
+
+	// GodotNext: nextgeo_import
+	friend Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+	bool _surface_is_virtualized(int p_surface) const;
+	Ref<VirtualGeometryData> virtual_geometry;
 
 	Size2i lightmap_size_hint;
 
@@ -119,6 +127,18 @@ public:
 
 	void generate_lods(float p_normal_merge_angle, Array p_skin_pose_transform_array);
 
+	// GodotNext: nextgeo_import
+	typedef Error (*BuildVirtualGeometryFunc)(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);
+	static BuildVirtualGeometryFunc build_virtual_geometry_func;
+	// One int per surface. 0 = eligible. Any other value is a NextGeoFallback reason.
+	PackedInt32Array get_virtual_geometry_eligibility() const;
+	// Writes `p_ngm_path` and attaches VirtualGeometryData. A null hook, or a mesh with no
+	// eligible surface, returns OK and leaves virtual geometry unset.
+	Error build_virtual_geometry(const String &p_ngm_path);
+	// OBJ `strip_authored_to_coarse` only. Scene import never calls this.
+	void strip_authored_surfaces_to_coarse();
+	Ref<VirtualGeometryData> get_virtual_geometry() const;
+
 	void create_shadow_mesh();
 	Ref<ImporterMesh> get_shadow_mesh() const;
 
@@ -138,4 +158,6 @@ public:
 	Ref<ArrayMesh> get_mesh(const Ref<ArrayMesh> &p_base = Ref<ArrayMesh>());
 	static Ref<ImporterMesh> from_mesh(const Ref<Mesh> &p_mesh);
 	void clear();
+	// GodotNext: nextgeo_import
+	~ImporterMesh();
 };

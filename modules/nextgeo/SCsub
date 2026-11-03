@@ -11,4 +11,6 @@ env_nextgeo = env_modules.Clone()
 module_obj = []
 
 env_nextgeo.add_source_files(module_obj, "*.cpp")
+if env.editor_build:
+    env_nextgeo.add_source_files(module_obj, "editor/*.cpp")
 env.modules_sources += module_obj

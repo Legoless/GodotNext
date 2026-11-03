@@ -69,6 +69,10 @@ private:
 	int64_t dag_depth = 0;
 	int64_t page_count = 0;
 	int64_t page_size = 0;
+	// Not saved and not bound. The importer hook stashes what NGMWriter needs beyond the
+	// page payloads: vertex layout, and (first_group, group_count) pairs in page order.
+	uint32_t ngm_vertex_layout = 0;
+	PackedInt32Array ngm_page_groups;
 
 protected:
 	static void _bind_methods();
@@ -154,4 +158,9 @@ public:
 
 	void set_page_size(int64_t p_size);
 	int64_t get_page_size() const;
+
+	// Transient `.ngm` write table. Cleared by reset_state. Not a property.
+	void set_ngm_page_table(uint32_t p_vertex_layout, const PackedInt32Array &p_page_groups);
+	uint32_t get_ngm_vertex_layout() const;
+	PackedInt32Array get_ngm_page_groups() const;
 };

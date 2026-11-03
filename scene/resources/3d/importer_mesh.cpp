@@ -30,9 +30,16 @@
 
 #include "importer_mesh.h"
 
+#include "core/crypto/crypto_core.h"
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
 #include "core/io/marshalls.h"
+#include "core/io/resource_format_ngm.h"
 #include "core/math/random_pcg.h"
 #include "core/object/class_db.h"
+#include "scene/resources/3d/virtual_geometry_data.h"
+#include "scene/resources/3d/virtual_geometry_fallback.h"
+#include "scene/resources/material.h"
 #include "scene/resources/surface_tool.h"
 
 #ifndef PHYSICS_3D_DISABLED
@@ -40,6 +47,12 @@
 #endif // PHYSICS_3D_DISABLED
 
 #include <cfloat> // FLT_EPSILON
+
+// GodotNext: nextgeo_import
+ImporterMesh::BuildVirtualGeometryFunc ImporterMesh::build_virtual_geometry_func = nullptr;
+
+ImporterMesh::~ImporterMesh() {
+}
 
 Ref<ImporterMesh> ImporterMesh::merge_importer_meshes(const TypedArray<ImporterMesh> &p_importer_meshes, const TypedArray<Transform3D> &p_relative_transforms, bool p_deduplicate_surfaces) {
 	// Setup and safety checks.
@@ -587,6 +600,10 @@ void ImporterMesh::generate_lods(float p_normal_merge_angle, Array p_bone_transf
 		}
 
 		surfaces.write[i].lods.clear();
+		// GodotNext: nextgeo_import
+		if (_surface_is_virtualized(i)) {
+			continue;
+		}
 		Vector<Vector3> vertices = surfaces[i].arrays[RSE::ARRAY_VERTEX];
 		PackedInt32Array indices = surfaces[i].arrays[RSE::ARRAY_INDEX];
 		Vector<Vector3> normals = surfaces[i].arrays[RSE::ARRAY_NORMAL];
@@ -903,6 +920,8 @@ Ref<ArrayMesh> ImporterMesh::get_mesh(const Ref<ArrayMesh> &p_base) {
 			Ref<ArrayMesh> shadow = shadow_mesh->get_mesh();
 			mesh->set_shadow_mesh(shadow);
 		}
+		// GodotNext: nextgeo_import
+		mesh->set_virtual_geometry(virtual_geometry);
 	}
 
 	return mesh;
@@ -950,11 +969,20 @@ void ImporterMesh::clear() {
 	surfaces.clear();
 	blend_shapes.clear();
 	mesh.unref();
+	// GodotNext: nextgeo_import
+	virtual_geometry.unref();
 }
 
 void ImporterMesh::create_shadow_mesh() {
 	if (shadow_mesh.is_valid()) {
 		shadow_mesh.unref();
+	}
+
+	// GodotNext: nextgeo_import
+	for (int i = 0; i < surfaces.size(); i++) {
+		if (_surface_is_virtualized(i)) {
+			return;
+		}
 	}
 
 	//no shadow mesh for blendshapes
@@ -1544,6 +1572,218 @@ Size2i ImporterMesh::get_lightmap_size_hint() const {
 	return lightmap_size_hint;
 }
 
+// GodotNext: nextgeo_import
+static bool _variant_has_items(const Variant &p_value) {
+	if (p_value.get_type() == Variant::NIL) {
+		return false;
+	}
+	if (p_value.get_type() == Variant::PACKED_INT32_ARRAY) {
+		return PackedInt32Array(p_value).size() > 0;
+	}
+	if (p_value.get_type() == Variant::PACKED_FLOAT32_ARRAY) {
+		return PackedFloat32Array(p_value).size() > 0;
+	}
+	return true;
+}
+
+static bool _triangle_arrays_are_buildable(const Array &p_arrays) {
+	if (p_arrays.size() != Mesh::ARRAY_MAX) {
+		return false;
+	}
+	if (p_arrays[Mesh::ARRAY_VERTEX].get_type() == Variant::NIL) {
+		return false;
+	}
+	const PackedVector3Array vertices = p_arrays[Mesh::ARRAY_VERTEX];
+	if (vertices.is_empty()) {
+		return false;
+	}
+	if (p_arrays[Mesh::ARRAY_INDEX].get_type() == Variant::NIL) {
+		return vertices.size() % 3 == 0;
+	}
+	const PackedInt32Array indices = p_arrays[Mesh::ARRAY_INDEX];
+	if (indices.is_empty()) {
+		return vertices.size() % 3 == 0;
+	}
+	return indices.size() % 3 == 0;
+}
+
+bool ImporterMesh::_surface_is_virtualized(int p_surface) const {
+	if (virtual_geometry.is_null()) {
+		return false;
+	}
+	const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
+	if (p_surface < 0 || p_surface >= eligibility.size()) {
+		return false;
+	}
+	return eligibility[p_surface] == 1;
+}
+
+PackedInt32Array ImporterMesh::get_virtual_geometry_eligibility() const {
+	PackedInt32Array reasons;
+	reasons.resize(surfaces.size());
+	for (int i = 0; i < surfaces.size(); i++) {
+		if (surfaces[i].primitive != Mesh::PRIMITIVE_TRIANGLES || !_triangle_arrays_are_buildable(surfaces[i].arrays)) {
+			reasons.write[i] = NEXTGEO_FALLBACK_UNSUPPORTED_PRIMITIVE;
+			continue;
+		}
+		if (blend_shapes.size() > 0 || surfaces[i].blend_shape_data.size() > 0 || _variant_has_items(surfaces[i].arrays[Mesh::ARRAY_BONES]) || _variant_has_items(surfaces[i].arrays[Mesh::ARRAY_WEIGHTS])) {
+			reasons.write[i] = NEXTGEO_FALLBACK_SKINNING;
+			continue;
+		}
+		const Ref<Material> material = surfaces[i].material;
+		if (material.is_null()) {
+			reasons.write[i] = NEXTGEO_FALLBACK_NONE;
+			continue;
+		}
+		if (material->get_next_pass().is_valid()) {
+			reasons.write[i] = NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY;
+			continue;
+		}
+		const Ref<BaseMaterial3D> base = material;
+		if (base.is_valid()) {
+			if (base->get_stencil_mode() != BaseMaterial3D::STENCIL_MODE_DISABLED) {
+				reasons.write[i] = NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY;
+			} else if (base->get_shading_mode() == BaseMaterial3D::SHADING_MODE_PER_VERTEX) {
+				reasons.write[i] = NEXTGEO_FALLBACK_VERTEX_LIGHTING;
+			} else if (base->get_transparency() != BaseMaterial3D::TRANSPARENCY_DISABLED || base->get_blend_mode() != BaseMaterial3D::BLEND_MODE_MIX || base->get_feature(BaseMaterial3D::FEATURE_REFRACTION)) {
+				reasons.write[i] = NEXTGEO_FALLBACK_ALPHA;
+			} else {
+				reasons.write[i] = NEXTGEO_FALLBACK_NONE;
+			}
+			continue;
+		}
+		if (material->get_shader_mode() != Shader::MODE_SPATIAL) {
+			reasons.write[i] = NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER;
+			continue;
+		}
+		// Spatial ShaderMaterial: source is not scanned. next_pass was already rejected.
+		reasons.write[i] = NEXTGEO_FALLBACK_NONE;
+	}
+	return reasons;
+}
+
+Ref<VirtualGeometryData> ImporterMesh::get_virtual_geometry() const {
+	return virtual_geometry;
+}
+
+Error ImporterMesh::build_virtual_geometry(const String &p_ngm_path) {
+	mesh.unref();
+	virtual_geometry.unref();
+
+	const PackedInt32Array reasons = get_virtual_geometry_eligibility();
+	PackedByteArray eligible;
+	eligible.resize(reasons.size());
+	bool any_eligible = false;
+	for (int i = 0; i < reasons.size(); i++) {
+		const bool surface_eligible = int(reasons[i]) == NEXTGEO_FALLBACK_NONE;
+		eligible.write[i] = surface_eligible ? 1 : 0;
+		any_eligible = any_eligible || surface_eligible;
+	}
+	if (!any_eligible) {
+		return OK;
+	}
+	if (p_ngm_path.is_empty()) {
+		return ERR_INVALID_PARAMETER;
+	}
+	if (build_virtual_geometry_func == nullptr) {
+		return OK;
+	}
+
+	Ref<VirtualGeometryData> built;
+	Vector<Vector<uint8_t>> pages;
+	const Error err = build_virtual_geometry_func(this, eligible, built, pages);
+	if (err != OK) {
+		return err;
+	}
+	if (built.is_null() || pages.is_empty()) {
+		return ERR_INVALID_DATA;
+	}
+
+	built->set_surface_eligibility(eligible);
+	built->set_surface_fallback_reasons(reasons);
+
+	NGMHeader header;
+	header.version = NGM_VERSION;
+	header.flags = 0;
+	header.page_size = uint32_t(built->get_page_size());
+	header.page_count = uint32_t(pages.size());
+	header.root_page_count = uint32_t(built->get_root_pages().size());
+	header.cluster_count = uint32_t(built->get_cluster_count());
+	header.group_count = uint32_t(built->get_group_count());
+	header.dag_depth = uint32_t(built->get_dag_depth());
+	header.vertex_layout = built->get_ngm_vertex_layout();
+	if (header.vertex_layout == 0) {
+		return ERR_INVALID_DATA;
+	}
+
+	const PackedInt32Array groups = built->get_ngm_page_groups();
+	if (groups.size() != pages.size() * 2) {
+		return ERR_INVALID_DATA;
+	}
+
+	CryptoCore::SHA256Context sha;
+	const Error started = sha.start();
+	if (started != OK) {
+		return started;
+	}
+	for (int i = 0; i < pages.size(); i++) {
+		if (!pages[i].is_empty()) {
+			sha.update(pages[i].ptr(), pages[i].size());
+		}
+	}
+	sha.finish(header.source_sha256);
+
+	Vector<NGMPage> ngm_pages;
+	ngm_pages.resize(pages.size());
+	for (int i = 0; i < pages.size(); i++) {
+		ngm_pages.write[i].bytes = pages[i];
+		ngm_pages.write[i].first_group = uint32_t(groups[i * 2]);
+		ngm_pages.write[i].group_count = uint32_t(groups[i * 2 + 1]);
+	}
+
+	DirAccess::make_dir_recursive_absolute(p_ngm_path.get_base_dir());
+	const Error write_err = NGMWriter::write(p_ngm_path, header, ngm_pages);
+	if (write_err != OK) {
+		return write_err;
+	}
+
+	const String hex = FileAccess::get_sha256(p_ngm_path);
+	const Vector<uint8_t> decoded = hex.hex_decode();
+	if (decoded.size() != 32) {
+		return ERR_FILE_CORRUPT;
+	}
+	PackedByteArray sha_bytes;
+	sha_bytes.resize(32);
+	for (int i = 0; i < 32; i++) {
+		sha_bytes.write[i] = decoded[i];
+	}
+	built->set_ngm_sha256(sha_bytes);
+	built->set_ngm_path(p_ngm_path);
+	virtual_geometry = built;
+	return OK;
+}
+
+void ImporterMesh::strip_authored_surfaces_to_coarse() {
+	if (virtual_geometry.is_null()) {
+		return;
+	}
+	const TypedArray<Array> coarse = virtual_geometry->get_coarse_fallback();
+	for (int i = 0; i < surfaces.size(); i++) {
+		if (!_surface_is_virtualized(i) || i >= coarse.size()) {
+			continue;
+		}
+		const Array fallback = coarse[i];
+		if (fallback.size() != Mesh::ARRAY_MAX || fallback[Mesh::ARRAY_VERTEX].get_type() == Variant::NIL) {
+			continue;
+		}
+		surfaces.write[i].arrays = fallback;
+		surfaces.write[i].lods.clear();
+		surfaces.write[i].blend_shape_data.clear();
+	}
+	mesh.unref();
+	WARN_PRINT("Virtual geometry fallback mode strip_authored_to_coarse replaced authored surfaces with the coarse root cut. The authored mesh is no longer stored.");
+}
+
 void ImporterMesh::_bind_methods() {
 	ClassDB::bind_static_method("ImporterMesh", D_METHOD("merge_importer_meshes", "importer_meshes", "relative_transforms", "deduplicate_surfaces"), &ImporterMesh::merge_importer_meshes, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("add_blend_shape", "name"), &ImporterMesh::add_blend_shape);
@@ -1570,6 +1810,8 @@ void ImporterMesh::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_surface_material", "surface_idx", "material"), &ImporterMesh::set_surface_material);
 
 	ClassDB::bind_method(D_METHOD("generate_lods", "normal_merge_angle", "normal_split_angle", "bone_transform_array"), &ImporterMesh::_generate_lods_bind);
+	// GodotNext: nextgeo_import
+	ClassDB::bind_method(D_METHOD("build_virtual_geometry", "ngm_path"), &ImporterMesh::build_virtual_geometry);
 	ClassDB::bind_method(D_METHOD("get_mesh", "base_mesh"), &ImporterMesh::get_mesh, DEFVAL(Ref<ArrayMesh>()));
 	ClassDB::bind_static_method("ImporterMesh", D_METHOD("from_mesh", "mesh"), &ImporterMesh::from_mesh);
 	ClassDB::bind_method(D_METHOD("clear"), &ImporterMesh::clear);

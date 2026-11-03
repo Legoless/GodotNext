@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="NextGeoTestBridge" inherits="Object" api_type="editor" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Bakes a [LightmapGI] from a script.
+	</brief_description>
+	<description>
+		Editor-only helper for the virtual geometry round trip. Lightmap baking is not exposed to scripts, so this class calls it.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="bake_lightmap" qualifiers="static">
+			<return type="int" />
+			<param index="0" name="lightmap" type="Object" />
+			<param index="1" name="from_node" type="Node" />
+			<param index="2" name="image_data_path" type="String" />
+			<description>
+				Bakes [param lightmap] starting at [param from_node] and writes the image data to [param image_data_path], which must be a resource path. Returns a [enum LightmapGI.BakeError] value. If EditorSettings or EditorPaths is missing, the bake is not started and the return is LightmapGI.BAKE_ERROR_NO_LIGHTMAPPER.
+			</description>
+		</method>
+	</methods>
+</class>

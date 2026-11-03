@@ -30,20 +30,33 @@
 
 #include "register_types.h"
 
-// The NextGeo offline DAG builder is a plain C++ API (`nextgeo_build_dag()`), so the
-// module registers no classes yet. The importer integration installs its hook here
-// at the SCENE level; while this module is disabled (for example with
-// `module_meshoptimizer_enabled=no`) that hook stays null and imports skip virtual
-// geometry, like LOD generation does without meshoptimizer.
+#include "nextgeo_import.h"
+
+#include "core/object/class_db.h"
+#include "scene/resources/3d/importer_mesh.h"
+
+#ifdef TOOLS_ENABLED
+#include "modules/nextgeo/editor/nextgeo_test_bridge.h"
+#endif
+
+// The importer hook is installed at the SCENE level. While this module is disabled
+// (for example with `module_meshoptimizer_enabled=no`) that hook stays null and imports
+// skip virtual geometry, like LOD generation does without meshoptimizer.
 
 void initialize_nextgeo_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
-		return;
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		ImporterMesh::build_virtual_geometry_func = nextgeo_import_build;
 	}
+
+#ifdef TOOLS_ENABLED
+	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
+		GDREGISTER_CLASS(NextGeoTestBridge);
+	}
+#endif
 }
 
 void uninitialize_nextgeo_module(ModuleInitializationLevel p_level) {
-	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
-		return;
+	if (p_level == MODULE_INITIALIZATION_LEVEL_SCENE) {
+		ImporterMesh::build_virtual_geometry_func = nullptr;
 	}
 }

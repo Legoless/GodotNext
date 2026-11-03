@@ -2,3 +2,4 @@
 captures/
 generated/
 /override.cfg
+tests/roundtrip/bake_out/

@@ -39,6 +39,10 @@
 #include "scene/resources/mesh.h"
 #include "scene/resources/surface_tool.h"
 
+// GodotNext: nextgeo_import
+#include "core/config/project_settings.h"
+#include "editor/import/3d/ngm_manifest.h"
+
 static Error _parse_material_library(const String &p_path, HashMap<String, Ref<StandardMaterial3D>> &material_map, List<String> *r_missing_deps) {
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, vformat("Couldn't open MTL file '%s', it may not exist or not be readable.", p_path));
@@ -218,7 +222,10 @@ static Error _parse_material_library(const String &p_path, HashMap<String, Ref<S
 	return OK;
 }
 
-static Error _parse_obj(const String &p_path, List<Ref<ImporterMesh>> &r_meshes, bool p_single_mesh, bool p_generate_tangents, bool p_generate_lods, bool p_generate_shadow_mesh, bool p_generate_lightmap_uv2, float p_generate_lightmap_uv2_texel_size, const PackedByteArray &p_src_lightmap_cache, Vector3 p_scale_mesh, Vector3 p_offset_mesh, bool p_disable_compression, Vector<Vector<uint8_t>> &r_lightmap_caches, List<String> *r_missing_deps) {
+// GodotNext: nextgeo_import
+// Trailing arguments default so EditorOBJImporter::import_scene keeps scene import in
+// charge of virtual geometry. ResourceImporterOBJ::import is the caller that sets them.
+static Error _parse_obj(const String &p_path, List<Ref<ImporterMesh>> &r_meshes, bool p_single_mesh, bool p_generate_tangents, bool p_generate_lods, bool p_generate_shadow_mesh, bool p_generate_lightmap_uv2, float p_generate_lightmap_uv2_texel_size, const PackedByteArray &p_src_lightmap_cache, Vector3 p_scale_mesh, Vector3 p_offset_mesh, bool p_disable_compression, Vector<Vector<uint8_t>> &r_lightmap_caches, List<String> *r_missing_deps, bool p_generate_virtual_geometry = false, int p_virtual_geometry_fallback_mode = 0, const String &p_ngm_base_path = String(), const String &p_source_path = String(), Array *r_ngm_entries = nullptr) {
 	Ref<FileAccess> f = FileAccess::open(p_path, FileAccess::READ);
 	ERR_FAIL_COND_V_MSG(f.is_null(), ERR_CANT_OPEN, vformat("Couldn't open OBJ file '%s', it may not exist or not be readable.", p_path));
 
@@ -562,6 +569,18 @@ static Error _parse_obj(const String &p_path, List<Ref<ImporterMesh>> &r_meshes,
 		}
 	}
 
+	// GodotNext: nextgeo_import
+	if (p_generate_virtual_geometry && mesh.is_valid() && mesh->get_surface_count() > 0 && r_ngm_entries != nullptr) {
+		if (mesh->get_name().is_empty()) {
+			mesh->set_name(name);
+		}
+		const String source = p_source_path.is_empty() ? p_path : p_source_path;
+		const String key = source + "::" + mesh->get_name();
+		const String ngm_path = (p_ngm_base_path.is_empty() ? p_path : p_ngm_base_path) + ".ngm";
+		const bool strip_authored = p_virtual_geometry_fallback_mode == 1; // strip_authored_to_coarse
+		ngm_build_mesh(mesh, ngm_path, key, strip_authored, *r_ngm_entries);
+	}
+
 	if (p_generate_lods) {
 		// Use normal merge/split angles that match the defaults used for 3D scene importing.
 		mesh->generate_lods(60.0f, {});
@@ -653,6 +672,9 @@ String ResourceImporterOBJ::get_preset_name(int p_idx) const {
 void ResourceImporterOBJ::get_import_options(const String &p_path, List<ImportOption> *r_options, int p_preset) const {
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_tangents"), true));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_lods"), true));
+	// GodotNext: nextgeo_import
+	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_virtual_geometry"), false));
+	r_options->push_back(ImportOption(PropertyInfo(Variant::INT, "virtual_geometry_fallback_mode", PROPERTY_HINT_ENUM, "retain_authored,strip_authored_to_coarse"), 0));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_shadow_mesh"), true));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::BOOL, "generate_lightmap_uv2", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_UPDATE_ALL_IF_MODIFIED), false));
 	r_options->push_back(ImportOption(PropertyInfo(Variant::FLOAT, "generate_lightmap_uv2_texel_size", PROPERTY_HINT_RANGE, "0.001,100,0.001"), 0.2));
@@ -684,7 +706,12 @@ Error ResourceImporterOBJ::import(ResourceUID::ID p_source_id, const String &p_s
 		}
 	}
 
-	err = _parse_obj(p_source_file, meshes, true, p_options["generate_tangents"], p_options["generate_lods"], p_options["generate_shadow_mesh"], p_options["generate_lightmap_uv2"], p_options["generate_lightmap_uv2_texel_size"], src_lightmap_cache, p_options["scale_mesh"], p_options["offset_mesh"], p_options["force_disable_mesh_compression"], mesh_lightmap_caches, nullptr);
+	// GodotNext: nextgeo_import
+	const bool generate_virtual_geometry = p_options.has("generate_virtual_geometry") && bool(p_options["generate_virtual_geometry"]);
+	const int virtual_geometry_fallback_mode = p_options.has("virtual_geometry_fallback_mode") ? int(p_options["virtual_geometry_fallback_mode"]) : 0;
+	Array ngm_entries;
+	const String ngm_source = ProjectSettings::get_singleton()->localize_path(p_source_file);
+	err = _parse_obj(p_source_file, meshes, true, p_options["generate_tangents"], p_options["generate_lods"], p_options["generate_shadow_mesh"], p_options["generate_lightmap_uv2"], p_options["generate_lightmap_uv2_texel_size"], src_lightmap_cache, p_options["scale_mesh"], p_options["offset_mesh"], p_options["force_disable_mesh_compression"], mesh_lightmap_caches, nullptr, generate_virtual_geometry, virtual_geometry_fallback_mode, p_save_path, ngm_source, &ngm_entries);
 
 	if (mesh_lightmap_caches.size()) {
 		Ref<FileAccess> f = FileAccess::open(p_source_file + ".unwrap_cache", FileAccess::WRITE);
@@ -707,6 +734,9 @@ Error ResourceImporterOBJ::import(ResourceUID::ID p_source_id, const String &p_s
 	ERR_FAIL_COND_V_MSG(err != OK, err, "Cannot save Mesh to file '" + save_path + "'.");
 
 	r_gen_files->push_back(save_path);
+
+	// GodotNext: nextgeo_import
+	ngm_manifest_commit(p_save_path, ngm_source, ngm_entries, r_gen_files, generate_virtual_geometry);
 
 	return OK;
 }

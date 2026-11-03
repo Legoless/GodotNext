@@ -239,6 +239,19 @@ int64_t VirtualGeometryData::get_page_size() const {
 	return page_size;
 }
 
+void VirtualGeometryData::set_ngm_page_table(uint32_t p_vertex_layout, const PackedInt32Array &p_page_groups) {
+	ngm_vertex_layout = p_vertex_layout;
+	ngm_page_groups = p_page_groups;
+}
+
+uint32_t VirtualGeometryData::get_ngm_vertex_layout() const {
+	return ngm_vertex_layout;
+}
+
+PackedInt32Array VirtualGeometryData::get_ngm_page_groups() const {
+	return ngm_page_groups;
+}
+
 void VirtualGeometryData::reset_state() {
 	format_version = FORMAT_VERSION;
 	dag_header.clear();
@@ -263,6 +276,8 @@ void VirtualGeometryData::reset_state() {
 	dag_depth = 0;
 	page_count = 0;
 	page_size = 0;
+	ngm_vertex_layout = 0;
+	ngm_page_groups.clear();
 }
 
 void VirtualGeometryData::_bind_methods() {

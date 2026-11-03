@@ -48,6 +48,8 @@
 #include "editor/inspector/editor_resource_preview.h"
 #include "editor/script/script_editor_plugin.h"
 #include "editor/settings/editor_settings.h"
+// GodotNext: nextgeo_import
+#include "editor/import/3d/ngm_manifest.h"
 #include "editor/settings/project_settings_editor.h"
 #include "scene/main/scene_tree.h"
 #include "scene/resources/packed_scene.h"
@@ -1629,6 +1631,9 @@ void EditorFileSystem::_scan_fs_changes(EditorFileSystemDirectory *p_dir, ScanPr
 }
 
 void EditorFileSystem::_delete_internal_files(const String &p_file) {
+	// GodotNext: nextgeo_import
+	// The manifest path comes from the imported resource listed in the `.import` file.
+	ngm_delete_imported_sidecars(p_file);
 	if (FileAccess::exists(p_file + ".import")) {
 		List<String> paths;
 		ResourceFormatImporter::get_singleton()->get_internal_resource_path_list(p_file, &paths);

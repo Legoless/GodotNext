@@ -231,6 +231,15 @@ class ResourceImporterScene : public ResourceImporter {
 
 	void _optimize_track_usage(AnimationPlayer *p_player, AnimationImportTracks *p_track_actions);
 
+	// GodotNext: nextgeo_import
+	String _ngm_base_path;
+	String _ngm_source_path;
+	bool _ngm_generate = false;
+	bool _ngm_single_mesh = false;
+	Array _ngm_entries;
+	List<String> *_ngm_gen_files = nullptr;
+	Error _save_virtual_geometry_single_mesh(const String &p_source_file, const String &p_save_path, Node *p_godot_scene, const HashMap<StringName, Variant> &p_options, int p_flags);
+
 	String _scene_import_type = "PackedScene";
 
 public:
