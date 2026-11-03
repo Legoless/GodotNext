@@ -257,8 +257,8 @@
 
   // What each phase delivers, in plain words, grouped by area (plan §12, §21).
   const AREAS = [
-    ['Foundations', [['P0', 'Ray tracing, timing tools and a reference image'], ['PR', 'Modern GPU features the later work builds on']]],
-    ['Lighting', [['P1a', 'Proof the lighting method works on still scenes'], ['P1b', 'Real-time bounce lighting on NVIDIA GPUs'], ['P2', 'The same lighting on Apple Silicon Macs'], ['P3', 'Reflections, moving characters, glass and fog'], ['PD', 'Ray-traced lighting on DirectX 12'], ['PS', 'Lighting on GPUs without ray-tracing hardware'], ['PL', 'High-end extras: hit lighting and far field']]],
+    ['Foundations', [['P0', 'Ray tracing on the Mac, timing tools and a reference image'], ['PR', 'Modern GPU features the later work builds on']]],
+    ['Lighting', [['P1a', 'Proof the lighting method works on still scenes'], ['P1b', 'Real-time bounce lighting on Apple Silicon Macs'], ['P2', 'The same lighting on NVIDIA GPUs (Vulkan)'], ['P3', 'Reflections, moving characters, glass and fog'], ['PD', 'Ray-traced lighting on DirectX 12'], ['PS', 'Lighting on GPUs without ray-tracing hardware'], ['PL', 'High-end extras: hit lighting and far field']]],
     ['Geometry', [['P4', 'Huge meshes imported and prepared for streaming'], ['P5', 'Film-quality geometry drawn in real time'], ['PN', 'Full Nanite set: foliage, characters, displacement']]],
     ['Shadows and lights', [['PV', 'Sharp shadows across huge scenes'], ['PM', 'Thousands of lights, all casting shadows']]],
     ['Image quality', [['PU', 'NVIDIA DLSS upscaling'], ['PT', 'TSR, the default upscaler'], ['PU+', 'DLSS frame generation and ray reconstruction'], ['PP', 'Built-in path tracer for reference renders']]],
@@ -266,7 +266,7 @@
   ];
   // Milestones: when each part of the engine is code-complete (plan §14).
   const MILESTONES = [
-    ['M0', 'Foundations in place'], ['M1', 'Bounce lighting on NVIDIA'], ['M2', 'Lighting on Mac'],
+    ['M0', 'Foundations in place'], ['M1', 'Bounce lighting on Mac'], ['M2', 'Lighting on NVIDIA'],
     ['M3', 'Full lighting + DLSS'], ['M4', 'Nanite-style geometry'], ['M5', 'DirectX 12 + Lumen parity'],
     ['M6', 'Shadows, MegaLights, path tracer'], ['M7', 'Nanite parity'], ['M8', 'Upscaling: TSR + full DLSS'],
   ];
