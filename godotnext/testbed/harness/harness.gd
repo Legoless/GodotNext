@@ -384,16 +384,30 @@ func _apply_capture_view() -> void:
 		var environment := (node as WorldEnvironment).environment
 		if environment == null:
 			continue
-		environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
-		environment.tonemap_exposure = 1.0
-		environment.glow_enabled = false
-		environment.adjustment_enabled = false
-		environment.ssao_enabled = false
-		environment.ssil_enabled = false
-		environment.ssr_enabled = false
-		environment.fog_enabled = false
-		environment.volumetric_fog_enabled = false
+		apply_capture_environment(environment)
+		print("harness: capture fog_enabled=%s volumetric_fog_enabled=%s" % [environment.fog_enabled, environment.volumetric_fog_enabled])
 	_activate_camera(scene)
+
+
+## Capture-mode environment (§13, #240): linear tonemap at exposure 1,
+## glow and adjustments off. The scene's fog and volumetric fog stay as
+## authored. Depth fog is evaluated per frame, so it is already
+## deterministic under --fixed-fps. Volumetric fog temporal
+## reprojection is the one history-carrying part: its accumulated
+## history would depend on how many settle frames ran before the
+## captured window. Pinning it off gives every captured frame the
+## fixed state of no history, in both the settle pass and the
+## reloaded instance this is applied to, so two same-seed captures
+## stay byte-identical with fog on.
+static func apply_capture_environment(environment: Environment) -> void:
+	environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+	environment.tonemap_exposure = 1.0
+	environment.glow_enabled = false
+	environment.adjustment_enabled = false
+	environment.ssao_enabled = false
+	environment.ssil_enabled = false
+	environment.ssr_enabled = false
+	environment.volumetric_fog_temporal_reprojection_enabled = false
 
 
 func _activate_camera(scene: Node) -> void:
@@ -494,6 +508,8 @@ func _build_manifest() -> Dictionary:
 	}
 	if _job.has("dlss") and typeof(_job["dlss"]) == TYPE_DICTIONARY:
 		manifest["dlss"] = (_job["dlss"] as Dictionary).duplicate(true)
+	if _job.has("override") and typeof(_job["override"]) == TYPE_DICTIONARY:
+		manifest["override"] = (_job["override"] as Dictionary).duplicate(true)
 	return manifest
 
 

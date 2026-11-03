@@ -48,18 +48,23 @@ VK_DRIVER_FILES=/path/to/lvp_icd.json \
   --capture-frames=4,7
 ```
 
-Self-test. Capture defaults are warmup 4, frames 8, two runs. Timing defaults are warmup 120, frames 600, three runs. `-Frames` and `-Warmup` override both. On macOS every launch goes through `macos_local.sh`.
+Self-test. Capture defaults are warmup 4, frames 8, two runs. Timing defaults are warmup 120, frames 600, three runs. `-Frames` and `-Warmup` override both. On macOS every launch goes through `macos_local.sh`. `-Scene`, `-Camera`, and `-Label` point the same driver at another scene; output then lands in `captures/<label>` (the scene file name when no label is given).
 
 ```bash
 godotnext/testbed/harness/run_selftest.sh -Mode capture -Runs 2
 godotnext/testbed/harness/run_selftest.sh -Mode timing -Runs 1 -Warmup 2 -Frames 8
+godotnext/testbed/harness/run_selftest.sh -Mode capture -Runs 2 \
+  -Scene res://scenes/feature_parity_room/feature_parity_room.tscn -Camera cam_0
 ```
 
-Argument check (no GPU):
+The last form is the Feature Parity Room capture-identity pair (#240): two same-seed captures with the room's fog on, compared by SHA-256, plus the manifest override check below.
+
+Argument and override checks (no GPU):
 
 ```bash
 ./bin/godot.macos.editor.arm64 --headless --path godotnext/testbed \
   --script res://harness/tests/test_args.gd
+godotnext/testbed/harness/tests/test_override.sh
 ```
 
 ## Arguments
@@ -87,7 +92,7 @@ The runner passes a job file in `GODOTNEXT_HARNESS_JOB`. That is not a user argu
 ## What a capture run does
 
 1. Seed the global RNG and every integer `seed` property.
-2. Turn HDR 2D on, debanding off, TAA off, MSAA off, and screen-space AA off. WorldEnvironment tonemap is linear, exposure is 1, and glow, adjustments, SSAO, SSIL, SSR, and fog are off. SDFGI is left as the scene set it.
+2. Turn HDR 2D on, debanding off, TAA off, MSAA off, and screen-space AA off. WorldEnvironment tonemap is linear, exposure is 1, and glow, adjustments, SSAO, SSIL, and SSR are off. Fog and volumetric fog stay as the scene set them (#240). Depth fog is evaluated per frame, so it is deterministic under `--fixed-fps` already. Volumetric fog temporal reprojection is the one history-carrying part: its accumulated history would depend on how many settle frames ran before the captured window. Capture mode pins `volumetric_fog_temporal_reprojection_enabled` off, so every captured frame starts from the fixed state of no history. The same settings are reapplied to the reloaded instance in step 4, so two same-seed captures stay byte-identical with fog on. SDFGI is left as the scene set it.
 3. Wait until the canvas, mesh, surface, draw, and specialization pipeline-compilation counters have each stayed unchanged for 30 frames. Specialization compiles in the background and can keep moving. If the other four have been flat for 30 frames and specialization has not, within 900 draws, the run settles without specialization and says so. If the counters still have not settled by 1020 draws, the run fails.
 4. Reload the scene and seed again. The captured window starts on the next presented frame of the new instance, one slot per `frame_post_draw`. Reload drops the settle frames so both runs start at the same place.
 5. The captured window is `--warmup` frames followed by `--frames` frames. `--capture-frames` indexes that whole window, so with warmup 4 the first measured frame is index 4. Each listed frame is saved with `save_exr(path, false, false, -1.0)` as `hdr_%05d.exr` (linear viewport image, negatives kept, no clamp).
@@ -116,9 +121,11 @@ The spread across runs is printed by `run_selftest.sh` and does not fail the scr
 
 ## Manifest
 
-`manifest.json` is schema 1. `dlss` is omitted unless the runner job supplies it. A manifest without `dlss` is valid. A partial `dlss` object is not.
+`manifest.json` is schema 1. `dlss` is omitted unless the runner job supplies it. A manifest without `dlss` is valid. A partial `dlss` object is not. `override` follows the same rule (#240): the runners always supply it, a manifest without it (a direct launch with no runner job) is valid, and a partial record is not.
 
-Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` (engine version hash), `command_line` (`engine`, `user`), `seed`, `mode`, `scene`, `camera`, `frames`, `warmup`, `capture_frames`, `runner`, `scaling_3d_mode`, `scaling_3d_scale`, `output_size`.
+Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` (engine version hash), `command_line` (`engine`, `user`), `seed`, `mode`, `scene`, `camera`, `frames`, `warmup`, `capture_frames`, `runner`, `scaling_3d_mode`, `scaling_3d_scale`, `output_size`, and `override` when a runner supplied it.
+
+`override` is `applied` (bool), `source` (the `res://` path of the per-scene file that was copied to `res://override.cfg` for the launch), and `sha256` (hex digest of that file). A scene with no per-scene `override.cfg` records `applied: false` with empty `source` and `sha256`.
 
 `output_size` is `[width, height]` from `get_viewport().get_visible_rect().size`. `scaling_3d_mode` and `scaling_3d_scale` come from the viewport after the first captured or measured frame.
 
@@ -135,6 +142,8 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 `run_selftest.sh` and `runners/macos_local.sh` export `GODOTNEXT_BACKGROUND=1` unless it is already set, so harness runs on the M5 Max draw on Metal without taking the desktop's focus (`docs/godotnext/fleet.md`). Set `GODOTNEXT_BACKGROUND=0` to watch a run in a normal window.
 
 `runners/linux_vm.sh` has `doctest` and `functional`. `functional` adds `--headless`, writes a job whose host is `Linux VM` when `--out` is set, and rejects timing mode. It does not install or vendor lavapipe.
+
+Both runners (and therefore `run_selftest.sh`) apply a per-scene `override.cfg` (#240, `runners/scene_override.sh`): when the folder holding `--scene` contains an `override.cfg`, the runner copies it to the testbed root before launching, records it in the runner job (and so in the manifest), and removes the root copy when the launch ends, including on failure. The testbed root is the `--path` argument when given, else `godotnext/testbed`. An existing root `override.cfg` is never overwritten: the runner refuses to launch, as `tests/tier/run_tier_check.sh` does. A scene at the testbed root already has its `override.cfg` in place, so nothing is copied or removed, but the record still names it. `linux_vm.sh doctest` runs no scene, so it never applies one.
 
 ## Self-test scene
 

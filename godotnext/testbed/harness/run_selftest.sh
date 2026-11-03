@@ -19,16 +19,24 @@ Runs=0
 Frames=0
 Warmup=-1
 Seed=1
+Scene=""
+Camera=""
+Label=""
 
 usage() {
 	cat <<'EOF'
-Usage: run_selftest.sh [-Mode capture|timing|all] [-Runs N] [-Frames N] [-Warmup N] [-Seed N]
+Usage: run_selftest.sh [-Mode capture|timing|all] [-Runs N] [-Frames N] [-Warmup N] [-Seed N] [-Scene res://...] [-Camera name] [-Label name]
 
 Capture defaults are warmup 4, frames 8, and EXR slots at the warmup index and
 three frames later. Timing defaults are warmup 120 and frames 600.
 -Frames and -Warmup override those defaults for the selected mode.
+-Scene and -Camera default to the self-test scene and its CaptureCam.
+-Label names the captures/<label> output folder; it defaults to selftest,
+or to the scene file name when -Scene is given without one.
 On macOS the launch goes through runners/macos_local.sh.
 On Linux, timing is rejected and capture goes through runners/linux_vm.sh.
+The runner applies a per-scene override.cfg next to -Scene for that launch
+only (#240) and records it in the manifest.
 EOF
 }
 
@@ -54,6 +62,18 @@ while [[ $# -gt 0 ]]; do
 		Seed=$2
 		shift 2
 		;;
+	-Scene)
+		Scene=$2
+		shift 2
+		;;
+	-Camera)
+		Camera=$2
+		shift 2
+		;;
+	-Label)
+		Label=$2
+		shift 2
+		;;
 	--help|-h)
 		usage
 		exit 0
@@ -65,6 +85,27 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
+
+if [[ -n "$Scene" ]]; then
+	scene=$Scene
+fi
+if [[ -n "$Camera" ]]; then
+	camera=$Camera
+fi
+if [[ -z "$Label" ]]; then
+	if [[ -n "$Scene" ]]; then
+		Label=$(basename "$scene" .tscn)
+	else
+		Label=selftest
+	fi
+fi
+case "$Label" in
+*/*|..|"")
+	echo "run_selftest.sh: -Label must be one folder name" >&2
+	exit 2
+	;;
+esac
+captures_root="$testbed/captures/$Label"
 
 case "$Mode" in
 capture|timing|all) ;;
@@ -153,7 +194,7 @@ launch_godot() {
 
 run_capture() {
 	index=$1
-	out="$testbed/captures/selftest/capture_${index}"
+	out="$captures_root/capture_${index}"
 	rm -rf "$out"
 	mkdir -p "$out"
 	list=$(capture_list_for "$capture_warmup" "$capture_frame_count")
@@ -177,6 +218,10 @@ run_capture() {
 	fi
 	status=$?
 	set -e
+	if [[ -e "$testbed/override.cfg" ]]; then
+		echo "run_selftest.sh: the runner left a root override.cfg behind" >&2
+		exit 1
+	fi
 	# write_end() runs after the harness trims the movie, so remove any wav
 	# the writer still has open at process exit.
 	rm -f "$out"/*.wav
@@ -215,7 +260,7 @@ compare_captures() {
 		echo "run_selftest.sh: one capture run, hash comparison skipped"
 		return
 	fi
-	CAPTURE_ROOT="$testbed/captures/selftest" CAPTURE_RUNS="$capture_runs" python3 - <<'PY'
+	CAPTURE_ROOT="$captures_root" CAPTURE_RUNS="$capture_runs" python3 - <<'PY'
 import hashlib
 import os
 import sys
@@ -265,12 +310,34 @@ PY
 
 check_manifest() {
 	out=$1
-	python3 - "$out/manifest.json" <<'PY'
+	TESTBED_DIR="$testbed" SCENE_RES="$scene" python3 - "$out/manifest.json" <<'PY'
+import hashlib
 import json
+import os
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     data = json.load(handle)
+
+scene = os.environ["SCENE_RES"]
+folder = scene[len("res://"):].rsplit("/", 1)[0] if "/" in scene[len("res://"):] else ""
+override_path = os.path.join(os.environ["TESTBED_DIR"], folder, "override.cfg") if folder else os.path.join(os.environ["TESTBED_DIR"], "override.cfg")
+record = data.get("override")
+if not isinstance(record, dict):
+    sys.stderr.write("manifest missing the override record\n")
+    sys.exit(1)
+if os.path.isfile(override_path):
+    expected_source = "res://" + (folder + "/" if folder else "") + "override.cfg"
+    if record.get("applied") is not True or record.get("source") != expected_source:
+        sys.stderr.write("manifest override record does not name %s\n" % expected_source)
+        sys.exit(1)
+    digest = hashlib.sha256(open(override_path, "rb").read()).hexdigest()
+    if record.get("sha256") != digest:
+        sys.stderr.write("manifest override sha256 does not match the scene file\n")
+        sys.exit(1)
+elif record.get("applied") is not False or record.get("source") or record.get("sha256"):
+    sys.stderr.write("manifest override record should be unused for this scene\n")
+    sys.exit(1)
 missing = [key for key in ("scaling_3d_mode", "scaling_3d_scale", "output_size") if key not in data]
 if missing:
     sys.stderr.write("manifest missing %s\n" % ", ".join(missing))
@@ -296,7 +363,7 @@ PY
 
 run_timing() {
 	index=$1
-	out="$testbed/captures/selftest/timing_${index}"
+	out="$captures_root/timing_${index}"
 	rm -rf "$out"
 	mkdir -p "$out"
 	quit_after=$(quit_after_for "$timing_warmup" "$timing_frame_count")
@@ -317,6 +384,10 @@ run_timing() {
 	fi
 	status=$?
 	set -e
+	if [[ -e "$testbed/override.cfg" ]]; then
+		echo "run_selftest.sh: the runner left a root override.cfg behind" >&2
+		exit 1
+	fi
 	if [[ $status -ne 0 ]]; then
 		echo "run_selftest.sh: timing run $index exited $status" >&2
 		exit "$status"
@@ -366,7 +437,7 @@ report_spread() {
 		echo "timing: one run, spread is not computed here (the spread gate is PQ)"
 		return
 	fi
-	TIMING_ROOT="$testbed/captures/selftest" TIMING_RUNS="$timing_runs" python3 - <<'PY'
+	TIMING_ROOT="$captures_root" TIMING_RUNS="$timing_runs" python3 - <<'PY'
 import json
 import os
 
@@ -392,7 +463,7 @@ if [[ "$Mode" == "capture" || "$Mode" == "all" ]]; then
 	run_index=1
 	while [[ $run_index -le $capture_runs ]]; do
 		run_capture "$run_index"
-		check_manifest "$testbed/captures/selftest/capture_${run_index}"
+		check_manifest "$captures_root/capture_${run_index}"
 		run_index=$((run_index + 1))
 	done
 	compare_captures
@@ -402,7 +473,7 @@ if [[ "$Mode" == "timing" || "$Mode" == "all" ]]; then
 	run_index=1
 	while [[ $run_index -le $timing_runs ]]; do
 		run_timing "$run_index"
-		check_manifest "$testbed/captures/selftest/timing_${run_index}"
+		check_manifest "$captures_root/timing_${run_index}"
 		run_index=$((run_index + 1))
 	done
 	report_spread

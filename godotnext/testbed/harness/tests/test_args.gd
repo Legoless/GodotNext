@@ -15,6 +15,7 @@ func _initialize() -> void:
 	_test_csv()
 	_test_timing_fields()
 	_test_animation_frame()
+	_test_capture_environment()
 	if _failures == 0:
 		print("test_args: ok")
 		quit(0)
@@ -203,6 +204,34 @@ func _test_manifest() -> void:
 	extra["note"] = "extra keys are allowed"
 	_check(ManifestScript.validate(extra).is_empty(), "extra keys validate")
 
+	var with_override := sample.duplicate(true)
+	with_override["override"] = {
+		"applied": true,
+		"source": "res://scenes/feature_parity_room/override.cfg",
+		"sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+	_check(ManifestScript.validate(with_override).is_empty(), "applied override record validates")
+
+	var without_override := sample.duplicate(true)
+	without_override["override"] = {"applied": false, "source": "", "sha256": ""}
+	_check(ManifestScript.validate(without_override).is_empty(), "unused override record validates")
+
+	var partial_override := sample.duplicate(true)
+	partial_override["override"] = {"applied": true}
+	_check(not ManifestScript.validate(partial_override).is_empty(), "partial override record fails")
+
+	var sourceless := sample.duplicate(true)
+	sourceless["override"] = {"applied": true, "source": "", "sha256": ""}
+	_check(not ManifestScript.validate(sourceless).is_empty(), "applied override without a source fails")
+
+	_check(
+		ManifestScript.override_source_for_scene("res://scenes/feature_parity_room/feature_parity_room.tscn")
+		== "res://scenes/feature_parity_room/override.cfg",
+		"override source sits next to the scene"
+	)
+	_check(ManifestScript.override_source_for_scene("res://a.tscn") == "res://override.cfg", "root scene override source")
+	_check(ManifestScript.override_source_for_scene("not-a-scene") == "", "non-res scene has no override source")
+
 
 func _test_percentiles() -> void:
 	_check(ManifestScript.percentile(PackedFloat64Array(), 50.0) == 0.0, "empty percentile is 0")
@@ -284,3 +313,28 @@ func _test_animation_frame() -> void:
 	_check(int(node.get_animation_frame()) == 12, "animation frame is 12")
 	node._active = false
 	node.free()
+
+
+## Capture mode keeps the scene's fog (#240). Volumetric fog is made
+## deterministic by pinning its temporal reprojection off, not by
+## turning the fog itself off.
+func _test_capture_environment() -> void:
+	var harness_script = load("res://harness/harness.gd")
+	var environment := Environment.new()
+	environment.fog_enabled = true
+	environment.volumetric_fog_enabled = true
+	environment.volumetric_fog_temporal_reprojection_enabled = true
+	environment.glow_enabled = true
+	harness_script.apply_capture_environment(environment)
+	_check(environment.fog_enabled, "capture keeps depth fog on")
+	_check(environment.volumetric_fog_enabled, "capture keeps volumetric fog on")
+	_check(not environment.volumetric_fog_temporal_reprojection_enabled, "capture pins volumetric temporal reprojection off")
+	_check(environment.tonemap_mode == Environment.TONE_MAPPER_LINEAR, "capture tonemap is linear")
+	_check(is_equal_approx(environment.tonemap_exposure, 1.0), "capture exposure is 1")
+	_check(not environment.glow_enabled, "capture glow is off")
+	_check(not environment.adjustment_enabled, "capture adjustments are off")
+
+	var fogless := Environment.new()
+	harness_script.apply_capture_environment(fogless)
+	_check(not fogless.fog_enabled, "capture leaves fogless scenes fogless")
+	_check(not fogless.volumetric_fog_enabled, "capture leaves volumetric fogless scenes fogless")

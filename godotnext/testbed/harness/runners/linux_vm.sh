@@ -6,6 +6,8 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scene_override.sh
+source "$script_dir/scene_override.sh"
 repo_root=$(cd "$script_dir/../../../.." && pwd)
 GODOT="${GODOT:-$repo_root/bin/godot.linuxbsd.editor.x86_64}"
 
@@ -61,11 +63,17 @@ find_out_dir() {
 write_job() {
 	JOB_PATH="$out_dir/runner_job.json"
 	export GODOTNEXT_HARNESS_JOB="$JOB_PATH"
-	JOB_PATH="$JOB_PATH" python3 - <<'PY'
+	JOB_PATH="$JOB_PATH" OVERRIDE_SOURCE="$SCENE_OVERRIDE_SOURCE" \
+		OVERRIDE_SHA256="$SCENE_OVERRIDE_SHA256" python3 - <<'PY'
 import json
 import os
 
 job = {
+    "override": {
+        "applied": bool(os.environ["OVERRIDE_SOURCE"]),
+        "source": os.environ["OVERRIDE_SOURCE"],
+        "sha256": os.environ["OVERRIDE_SHA256"],
+    },
     "host": "Linux VM",
     "clock": {
         "locked": False,
@@ -124,9 +132,31 @@ functional)
 			;;
 		esac
 		mkdir -p "$out_dir"
+	fi
+	# A per-scene override.cfg next to --scene applies to this launch only (#240).
+	scene_arg=$(scene_override_find_arg scene "${func_args[@]}")
+	path_arg=$(scene_override_find_arg path "${func_args[@]}")
+	testbed_dir="$repo_root/godotnext/testbed"
+	if [[ -n "$path_arg" ]]; then
+		case "$path_arg" in
+		/*) testbed_dir=$path_arg ;;
+		*) testbed_dir="$PWD/$path_arg" ;;
+		esac
+	fi
+	if ! scene_override_apply "$testbed_dir" "$scene_arg"; then
+		exit 2
+	fi
+	trap scene_override_remove EXIT
+	if [[ -n "$out_dir" ]]; then
 		write_job
 	fi
-	exec "$GODOT" --headless "${func_args[@]}"
+	set +e
+	"$GODOT" --headless "${func_args[@]}"
+	status=$?
+	set -e
+	scene_override_remove
+	trap - EXIT
+	exit "$status"
 	;;
 --help|-h|help)
 	usage

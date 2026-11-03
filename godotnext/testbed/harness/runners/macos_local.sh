@@ -9,6 +9,8 @@ set -euo pipefail
 export GODOTNEXT_BACKGROUND="${GODOTNEXT_BACKGROUND:-1}"
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scene_override.sh
+source "$script_dir/scene_override.sh"
 repo_root=$(cd "$script_dir/../../../.." && pwd)
 GODOT="${GODOT:-$repo_root/bin/godot.macos.editor.arm64}"
 HOST_NAME="Apple M5 Max"
@@ -81,6 +83,7 @@ write_job() {
 	PMSET_RAW="$pmset_raw" BATT_RAW="$batt_raw" THERM_RAW="$therm_raw" \
 		POWERMODE="$powermode" MODE_LABEL="$mode_label" THERMAL="$thermal" ON_AC="$on_ac" \
 		JOB_PATH="$JOB_PATH" HOST_NAME="$HOST_NAME" \
+		OVERRIDE_SOURCE="$SCENE_OVERRIDE_SOURCE" OVERRIDE_SHA256="$SCENE_OVERRIDE_SHA256" \
 		python3 - <<'PY'
 import json
 import os
@@ -88,6 +91,11 @@ import os
 on_ac = os.environ["ON_AC"] == "true"
 powermode = os.environ.get("POWERMODE", "")
 job = {
+    "override": {
+        "applied": bool(os.environ["OVERRIDE_SOURCE"]),
+        "source": os.environ["OVERRIDE_SOURCE"],
+        "sha256": os.environ["OVERRIDE_SHA256"],
+    },
     "host": os.environ["HOST_NAME"],
     "clock": {
         "locked": False,
@@ -226,6 +234,22 @@ case "$out_dir" in
 esac
 
 mkdir -p "$out_dir"
+
+# A per-scene override.cfg next to --scene applies to this launch only (#240).
+scene_arg=$(scene_override_find_arg scene "${godot_args[@]}")
+path_arg=$(scene_override_find_arg path "${godot_args[@]}")
+testbed_dir="$repo_root/godotnext/testbed"
+if [[ -n "$path_arg" ]]; then
+	case "$path_arg" in
+	/*) testbed_dir=$path_arg ;;
+	*) testbed_dir="$PWD/$path_arg" ;;
+	esac
+fi
+if ! scene_override_apply "$testbed_dir" "$scene_arg"; then
+	exit 2
+fi
+trap scene_override_remove EXIT
+
 write_job
 
 set +e

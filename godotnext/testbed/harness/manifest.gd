@@ -38,6 +38,15 @@ const DLSS_FIELDS: Array = [
 ]
 
 
+## The res:// path of the per-scene override next to a scene (#240).
+## The runners copy that file to res://override.cfg for one launch.
+## Keep in sync with runners/scene_override.sh.
+static func override_source_for_scene(scene: String) -> String:
+	if not scene.begins_with("res://"):
+		return ""
+	return scene.get_base_dir().path_join("override.cfg")
+
+
 static func percentile(values: PackedFloat64Array, percent: float) -> float:
 	# Linear interpolation, numpy-style. Rank is (percent/100) * (n-1).
 	var count := values.size()
@@ -392,6 +401,8 @@ static func validate(data: Dictionary) -> PackedStringArray:
 	_validate_runner(data.get("runner", null), errors)
 	if data.has("dlss"):
 		_validate_dlss(data["dlss"], errors)
+	if data.has("override"):
+		_validate_override(data["override"], errors)
 	return errors
 
 
@@ -466,6 +477,29 @@ static func _validate_runner(value, errors: PackedStringArray) -> void:
 		errors.append("runner.power.before must be an object")
 	if power.has("after") and typeof(power["after"]) != TYPE_DICTIONARY:
 		errors.append("runner.power.after must be an object")
+
+
+## Per-scene override record (#240). Optional like dlss: a manifest
+## without it is valid, a partial record is not.
+static func _validate_override(value, errors: PackedStringArray) -> void:
+	if typeof(value) != TYPE_DICTIONARY:
+		errors.append("override must be an object when present")
+		return
+	_require_keys(value, ["applied", "source", "sha256"], "override", errors)
+	if value.has("applied") and typeof(value["applied"]) != TYPE_BOOL:
+		errors.append("override.applied must be a bool")
+	if value.has("source") and not _is_string(value["source"]):
+		errors.append("override.source must be a string")
+	if value.has("sha256") and not _is_string(value["sha256"]):
+		errors.append("override.sha256 must be a string")
+	if value.get("applied", false) == true:
+		if String(value.get("source", "")).is_empty():
+			errors.append("override.source must name the applied file")
+		if String(value.get("sha256", "")).length() != 64:
+			errors.append("override.sha256 must be a SHA-256 hex digest")
+	elif value.has("source") and value.has("sha256"):
+		if not String(value["source"]).is_empty() or not String(value["sha256"]).is_empty():
+			errors.append("unused override must leave source and sha256 empty")
 
 
 static func _validate_dlss(value, errors: PackedStringArray) -> void:
