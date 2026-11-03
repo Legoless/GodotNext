@@ -83,13 +83,10 @@
   .s-done { background: var(--done); } .s-progress { background: var(--progress); } .s-ready { background: var(--ready); }
   .s-blocked { background-color: var(--blocked-bg); background-image: repeating-linear-gradient(135deg, var(--blocked) 0 1.2px, transparent 1.2px 5px); }
 
-  /* Timeline */
-  .tl svg { display: block; width: 100%; height: auto; overflow: visible; }
-  .tl text { font: 12px var(--f-text); fill: var(--ink-2); }
-  .tl .code { font: 700 13px var(--f-display); fill: var(--ink); }
-  .tl .ax { font: 500 11px var(--f-num); fill: var(--ink-3); }
-  .tl .pct { font: 600 12px var(--f-num); fill: var(--ink); }
-  .tl .win { font: 500 11px var(--f-num); fill: var(--ink-2); }
+  /* Road to v1 */
+  .road .ph { grid-template-columns: 3.2em minmax(0, 1fr) minmax(120px, 42%) 3.6em; }
+  .road .ph.end .c { color: var(--ink-3); }
+  .road .later { font: 500 12px/1 var(--f-num); color: var(--ink-3); }
   .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 0; border: 1px solid var(--rule); background: var(--sheet); }
   .facts > div { padding: 10px 14px; border-left: 1px solid var(--rule); display: grid; gap: 2px; }
   .facts > div:first-child { border-left: 0; }
@@ -170,9 +167,9 @@
       <span class="status" id="status">Loading…</span>
     </div>
     <div>
-      <span class="k">v1 estimate</span>
-      <span class="v">Month 36–60</span>
-      <span class="s">plus final test · one lead</span>
+      <span class="k">Next milestone</span>
+      <span class="v" id="nm-v">—</span>
+      <span class="s" id="nm-s">—</span>
     </div>
     <div>
       <span class="k">Data</span>
@@ -189,13 +186,12 @@
   </div>
 
   <section id="when">
-    <div class="sh"><h2>When is v1?</h2><span class="k">Months from the start of the build</span></div>
-    <p class="one">Bars show when each milestone is expected to be code-complete. Figures are the plan's upper bound for one lead; the plan re-estimates after the team of six is hired.</p>
-    <div class="tl" id="timeline"></div>
+    <div class="sh"><h2>Road to v1</h2><span class="k">Nine milestones, then the final test</span></div>
+    <p class="one">A milestone is reached when its part of the engine is code-complete. After all nine, every test runs together and v1 ships.</p>
+    <div class="road" id="road-rows"></div>
     <div class="facts">
-      <div><b id="f-pace">No pace yet</b><span id="f-pace-sub">A forecast appears once tasks start closing.</span></div>
       <div><b id="f-chain">—</b><span>tasks must happen one after another. Extra people can't shorten that chain.</span></div>
-      <div><b>Final test</b><span>Starts when the build is done. Its length is set then.</span></div>
+      <div><b>Final test</b><span>Starts when every milestone is reached.</span></div>
     </div>
   </section>
 
@@ -268,11 +264,11 @@
     ['Image quality', [['PU', 'NVIDIA DLSS upscaling'], ['PT', 'TSR, the default upscaler'], ['PU+', 'DLSS frame generation and ray reconstruction'], ['PP', 'Built-in path tracer for reference renders']]],
     ['Release prep', [['PQ', 'Test machines and UE 5.8 comparison scenes']]],
   ];
-  // Milestones with the plan's month windows (§14, upper bound for one lead).
+  // Milestones: when each part of the engine is code-complete (plan §14).
   const MILESTONES = [
-    ['M0', 'Foundations in place', 2, 3], ['M1', 'Bounce lighting on NVIDIA', 6, 8], ['M2', 'Lighting on Mac', 6, 9],
-    ['M3', 'Full lighting + DLSS', 12, 18], ['M4', 'Nanite-style geometry', 20, 30], ['M5', 'DirectX 12 + Lumen parity', 18, 36],
-    ['M6', 'Shadows, MegaLights, path tracer', 24, 42], ['M7', 'Nanite parity', 30, 48], ['M8', 'Upscaling: TSR + full DLSS', 36, 60],
+    ['M0', 'Foundations in place'], ['M1', 'Bounce lighting on NVIDIA'], ['M2', 'Lighting on Mac'],
+    ['M3', 'Full lighting + DLSS'], ['M4', 'Nanite-style geometry'], ['M5', 'DirectX 12 + Lumen parity'],
+    ['M6', 'Shadows, MegaLights, path tracer'], ['M7', 'Nanite parity'], ['M8', 'Upscaling: TSR + full DLSS'],
   ];
   const GATE_ORDER = ['G0', 'G1a', 'G1', 'G2', 'GU', 'G3', 'G4', 'G5', 'GR', 'GD', 'GS', 'GL', 'GV', 'GM', 'GP', 'GN', 'GT', 'GU+'];
   const ORDER = ['done', 'in progress', 'ready', 'blocked'];
@@ -381,8 +377,8 @@
     $('k-ready').textContent = fmt.format(ready);
     $('k-ready-sub').textContent = prog ? `${fmt.format(prog)} in progress` : 'nobody assigned yet';
 
-    renderTimeline(build);
-    renderFacts(build, chain);
+    renderRoad(build, gates);
+    $('f-chain').textContent = `${fmt.format(chain)} steps`;
     renderAreas(byPhase);
     renderNext();
     renderTest(gates);
@@ -390,72 +386,30 @@
     $('all-k').textContent = `${fmt.format(rows.filter((r) => r.stage !== 'post-v1').length)} tasks and tests`;
   }
 
-  function renderTimeline(build) {
-    const host = $('timeline'); host.replaceChildren();
-    const W = Math.max(340, host.clientWidth);
-    const narrow = W < 640;
-    const labelW = narrow ? 150 : 250, pctW = 46, rowH = 26, top = 26;
-    const rowsN = MILESTONES.length + 2;
-    const H = top + rowsN * rowH + 8;
-    const x0 = labelW, x1 = W - pctW, maxM = 66;
-    const x = (m) => x0 + (m / maxM) * (x1 - x0);
-    const svg = sv('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'Milestone timeline in months' }, host);
-    // year grid
-    for (let m = 0; m <= 60; m += 12) {
-      sv('line', { x1: x(m), x2: x(m), y1: top - 6, y2: H - 4, stroke: css('--rule-soft') }, svg);
-      sv('text', { class: 'ax', x: x(m), y: 12, 'text-anchor': m === 0 ? 'start' : 'middle' }, svg).textContent = m === 0 ? 'start' : `${m / 12} yr`;
-    }
-    sv('text', { class: 'ax', x: W, y: 12, 'text-anchor': 'end' }, svg).textContent = 'done';
-    MILESTONES.forEach(([code, name, a, bnd], i) => {
-      const y = top + i * rowH;
+  function renderRoad(build, gates) {
+    const host = $('road-rows'); host.replaceChildren();
+    let next = null;
+    const row = (code, name, sub, d, ip, total, tipText, cls) => {
+      const r = el('div', 'ph' + (cls ? ' ' + cls : ''));
+      const w = el('div', 'what', name); if (sub) w.appendChild(el('span', 'ms', sub));
+      let m;
+      if (total == null) { m = el('span', 'later', 'after the final test'); }
+      else { m = el('div', 'meter'); meter(m, d, ip, total); }
+      r.append(el('span', 'c', code), w, m, el('span', 'p', total == null ? '' : `${pctOf(d, total)}%`));
+      if (tipText) { r.addEventListener('pointermove', (ev) => showTip(ev, code, tipText)); r.addEventListener('pointerleave', hideTip); }
+      host.appendChild(r);
+    };
+    for (const [code, name] of MILESTONES) {
       const items = build.filter((r) => r.milestone === code);
-      const d = items.filter((r) => r.status === 'done').length;
-      sv('text', { class: 'code', x: 0, y: y + rowH / 2, dy: '0.35em' }, svg).textContent = code;
-      const t = sv('text', { x: 34, y: y + rowH / 2, dy: '0.35em' }, svg); t.textContent = narrow && name.length > 18 ? name.slice(0, 17) + '…' : name;
-      sv('line', { x1: x(0), x2: x(a), y1: y + rowH / 2, y2: y + rowH / 2, stroke: css('--rule'), 'stroke-dasharray': '2 3' }, svg);
-      const bar = sv('rect', { x: x(a), y: y + 6, width: Math.max(4, x(bnd) - x(a)), height: rowH - 12, fill: css('--window'), 'fill-opacity': .85 }, svg);
-      const wl = sv('text', { class: 'win', x: x(bnd) + 6, y: y + rowH / 2, dy: '0.35em' }, svg); wl.textContent = `mo ${a}–${bnd}`;
-      if (x(bnd) + 60 > x1) { wl.setAttribute('x', x(a) - 6); wl.setAttribute('text-anchor', 'end'); }
-      sv('text', { class: 'pct', x: W, y: y + rowH / 2, dy: '0.35em', 'text-anchor': 'end' }, svg).textContent = `${pctOf(d, items.length)}%`;
-      const hit = sv('rect', { x: 0, y, width: W, height: rowH, fill: 'transparent' }, svg);
-      hit.addEventListener('pointermove', (ev) => showTip(ev, `${code} · month ${a}–${bnd}`, `${name}. ${d} of ${items.length} tasks done.`));
-      hit.addEventListener('pointerleave', hideTip);
-    });
-    // final test + v1
-    const yq = top + MILESTONES.length * rowH, yv = yq + rowH;
-    sv('text', { class: 'code', x: 0, y: yq + rowH / 2, dy: '0.35em' }, svg).textContent = 'PQ';
-    sv('text', { x: 34, y: yq + rowH / 2, dy: '0.35em' }, svg).textContent = 'Final test';
-    const pat = sv('pattern', { id: 'hatch', width: 6, height: 6, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, sv('defs', {}, svg));
-    sv('rect', { width: 1.4, height: 6, fill: css('--blocked') }, pat);
-    sv('rect', { x: x(60), y: yq + 6, width: x(64) - x(60), height: rowH - 12, fill: 'url(#hatch)', stroke: css('--blocked') }, svg);
-    sv('text', { class: 'win', x: x(60) - 6, y: yq + rowH / 2, dy: '0.35em', 'text-anchor': 'end' }, svg).textContent = 'after the build';
-    sv('text', { class: 'code', x: 0, y: yv + rowH / 2, dy: '0.35em' }, svg).textContent = 'v1';
-    sv('text', { x: 34, y: yv + rowH / 2, dy: '0.35em' }, svg).textContent = 'Release (MQ)';
-    const cx = x(65), cy = yv + rowH / 2;
-    sv('path', { d: `M${cx},${cy - 8} L${cx + 8},${cy} L${cx},${cy + 8} L${cx - 8},${cy} Z`, fill: css('--ink') }, svg);
-    sv('text', { class: 'win', x: cx - 14, y: cy, dy: '0.35em', 'text-anchor': 'end' }, svg).textContent = 'month 36–60 + test';
-  }
-
-  function renderFacts(build, chain) {
-    $('f-chain').textContent = `${fmt.format(chain)} steps`;
-    const hist = (D.history || []).slice().sort((a, b) => a.day.localeCompare(b.day));
-    const pts = hist.map((h) => ({ t: Date.parse(h.day + 'T00:00:00Z'), done: h.build_done }));
-    if (source.live) {
-      const today = Date.parse(new Date().toISOString().slice(0, 10) + 'T00:00:00Z');
-      const d = build.filter((r) => r.status === 'done').length;
-      const i = pts.findIndex((p) => p.t === today); if (i >= 0) pts[i].done = d; else pts.push({ t: today, done: d });
+      const d = items.filter((r) => r.status === 'done').length, ip = items.filter((r) => r.status === 'in progress').length;
+      if (!next && d < items.length) next = { code, name, pct: pctOf(d, items.length) };
+      row(code, name, `${items.length} tasks`, d, ip, items.length, `${d} done, ${ip} in progress, ${items.length - d - ip} to do`);
     }
-    const first = pts.find((p) => p.done > 0) ? pts[0] : null, last = pts[pts.length - 1];
-    if (first && last && last.done > first.done && last.t > first.t) {
-      const perWeek = (last.done - first.done) / ((last.t - first.t) / (7 * 864e5));
-      const left = build.length - last.done;
-      const eta = new Date(last.t + (left / perWeek) * 7 * 864e5);
-      $('f-pace').textContent = `Build done ~${eta.toLocaleDateString('en', { month: 'short', year: 'numeric' })}`;
-      $('f-pace-sub').textContent = `At the current pace of ${perWeek.toFixed(1)} tasks a week.`;
-    } else {
-      $('f-pace').textContent = 'No pace yet';
-      $('f-pace-sub').textContent = 'A forecast from real progress appears once tasks start closing.';
-    }
+    const gp = gates.filter((r) => r.status === 'done').length, gi = gates.filter((r) => r.status === 'in progress').length;
+    row('PQ', 'Final test', `${gates.length} tests`, gp, gi, gates.length, `${gp} of ${gates.length} tests passed`, 'end');
+    row('v1', 'Release (MQ)', '', 0, 0, null, null, 'end');
+    $('nm-v').textContent = next ? next.code : 'PQ';
+    $('nm-s').textContent = next ? `${next.name} · ${next.pct}%` : 'Final test';
   }
 
   function renderAreas(byPhase) {
@@ -554,8 +508,6 @@
     btn.closest('th').setAttribute('aria-sort', view.dir > 0 ? 'ascending' : 'descending');
     renderAll();
   }));
-  let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => renderTimeline(rows.filter((r) => r.stage === 'build')), 150); });
-  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => renderTimeline(rows.filter((r) => r.stage === 'build')));
 
   async function goLive() {
     const btn = $('refresh'); btn.disabled = true; $('live-t').textContent = 'Checking';
