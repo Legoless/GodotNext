@@ -39,8 +39,15 @@ class LightStorage : public RendererLightStorage {
 private:
 	static LightStorage *singleton;
 	/* LIGHTMAP */
+	// GodotNext: dummy_lightmap_probe_data
+	// Keep the probe capture data, so a headless run (export, tools) saves it back unchanged.
 	struct Lightmap {
-		// dummy lightmap, no data
+		AABB bounds;
+		bool interior = false;
+		PackedVector3Array points;
+		PackedColorArray point_sh;
+		PackedInt32Array tetrahedra;
+		PackedInt32Array bsp_tree;
 	};
 
 	mutable RID_Owner<Lightmap, true> lightmap_owner;
@@ -190,17 +197,18 @@ public:
 	virtual void lightmap_free(RID p_rid) override;
 
 	virtual void lightmap_set_textures(RID p_lightmap, RID p_light, bool p_uses_spherical_haromics) override {}
-	virtual void lightmap_set_probe_bounds(RID p_lightmap, const AABB &p_bounds) override {}
-	virtual void lightmap_set_probe_interior(RID p_lightmap, bool p_interior) override {}
-	virtual void lightmap_set_probe_capture_data(RID p_lightmap, const PackedVector3Array &p_points, const PackedColorArray &p_point_sh, const PackedInt32Array &p_tetrahedra, const PackedInt32Array &p_bsp_tree) override {}
+	// GodotNext: dummy_lightmap_probe_data
+	virtual void lightmap_set_probe_bounds(RID p_lightmap, const AABB &p_bounds) override;
+	virtual void lightmap_set_probe_interior(RID p_lightmap, bool p_interior) override;
+	virtual void lightmap_set_probe_capture_data(RID p_lightmap, const PackedVector3Array &p_points, const PackedColorArray &p_point_sh, const PackedInt32Array &p_tetrahedra, const PackedInt32Array &p_bsp_tree) override;
 	virtual void lightmap_set_baked_exposure_normalization(RID p_lightmap, float p_exposure) override {}
-	virtual PackedVector3Array lightmap_get_probe_capture_points(RID p_lightmap) const override { return PackedVector3Array(); }
-	virtual PackedColorArray lightmap_get_probe_capture_sh(RID p_lightmap) const override { return PackedColorArray(); }
-	virtual PackedInt32Array lightmap_get_probe_capture_tetrahedra(RID p_lightmap) const override { return PackedInt32Array(); }
-	virtual PackedInt32Array lightmap_get_probe_capture_bsp_tree(RID p_lightmap) const override { return PackedInt32Array(); }
-	virtual AABB lightmap_get_aabb(RID p_lightmap) const override { return AABB(); }
+	virtual PackedVector3Array lightmap_get_probe_capture_points(RID p_lightmap) const override;
+	virtual PackedColorArray lightmap_get_probe_capture_sh(RID p_lightmap) const override;
+	virtual PackedInt32Array lightmap_get_probe_capture_tetrahedra(RID p_lightmap) const override;
+	virtual PackedInt32Array lightmap_get_probe_capture_bsp_tree(RID p_lightmap) const override;
+	virtual AABB lightmap_get_aabb(RID p_lightmap) const override;
 	virtual void lightmap_tap_sh_light(RID p_lightmap, const Vector3 &p_point, Color *r_sh) override {}
-	virtual bool lightmap_is_interior(RID p_lightmap) const override { return false; }
+	virtual bool lightmap_is_interior(RID p_lightmap) const override;
 	virtual void lightmap_set_probe_capture_update_speed(float p_speed) override {}
 	virtual float lightmap_get_probe_capture_update_speed() const override { return 0; }
 

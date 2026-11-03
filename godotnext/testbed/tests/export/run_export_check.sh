@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Exports the whole testbed and fails on any ERROR: line (#242).
+# Exports the whole testbed and fails on any ERROR: line (#242, #244).
 #
 # Usage:
 #   run_export_check.sh <godot> [preset ...]
@@ -8,7 +8,9 @@
 # clears the export cache, runs --export-pack and counts the ERROR: lines in the log. The cache is
 # cleared so every scene is converted again; a cached copy would hide conversion errors. Each pack
 # is then checked with check_voxelgi_pack.gd, which loads the legacy VoxelGI scene from the pack and
-# compares its GI data with the project's. Exits non-zero if any step fails or prints ERROR:.
+# compares its GI data with the project's, and with check_lightmap_pack.gd, which does the same for
+# the probe data of the LightmapGIData embedded in embedded_lightmap.tscn. Exits non-zero if any
+# step fails or prints ERROR:.
 #
 # Example on the Apple M5 Max:
 #   godotnext/testbed/tests/export/run_export_check.sh ./bin/godot.macos.editor.arm64
@@ -65,6 +67,8 @@ for preset in "${presets[@]}"; do
 	if [[ -f "$pack" ]]; then
 		run_step "voxelgi_$index" --script res://tests/export/check_voxelgi_pack.gd -- "$pack"
 		grep '^GODOTNEXT_RESULT' "$work/voxelgi_$index.log" || true
+		run_step "lightmap_$index" --script res://tests/export/check_lightmap_pack.gd -- "$pack"
+		grep '^GODOTNEXT_RESULT' "$work/lightmap_$index.log" || true
 	else
 		echo "run_export_check.sh: \"$preset\" wrote no pack" >&2
 		failures=$((failures + 1))

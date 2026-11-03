@@ -73,6 +73,75 @@ void LightStorage::lightmap_free(RID p_rid) {
 	lightmap_owner.free(p_rid);
 }
 
+// GodotNext: dummy_lightmap_probe_data
+// The dummy renderer stores no GPU state, but LightmapGIData reads its probe
+// data back from the rendering server when it is saved. Headless runs (exports
+// and other tools) use this renderer, so it keeps the data the resource set.
+
+void LightStorage::lightmap_set_probe_bounds(RID p_lightmap, const AABB &p_bounds) {
+	Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL(lightmap);
+	lightmap->bounds = p_bounds;
+}
+
+void LightStorage::lightmap_set_probe_interior(RID p_lightmap, bool p_interior) {
+	Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL(lightmap);
+	lightmap->interior = p_interior;
+}
+
+void LightStorage::lightmap_set_probe_capture_data(RID p_lightmap, const PackedVector3Array &p_points, const PackedColorArray &p_point_sh, const PackedInt32Array &p_tetrahedra, const PackedInt32Array &p_bsp_tree) {
+	Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL(lightmap);
+
+	if (p_points.size()) {
+		ERR_FAIL_COND(p_points.size() * 9 != p_point_sh.size());
+		ERR_FAIL_COND((p_tetrahedra.size() % 4) != 0);
+		ERR_FAIL_COND((p_bsp_tree.size() % 6) != 0);
+	}
+
+	lightmap->points = p_points;
+	lightmap->point_sh = p_point_sh;
+	lightmap->tetrahedra = p_tetrahedra;
+	lightmap->bsp_tree = p_bsp_tree;
+}
+
+PackedVector3Array LightStorage::lightmap_get_probe_capture_points(RID p_lightmap) const {
+	const Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lightmap, PackedVector3Array());
+	return lightmap->points;
+}
+
+PackedColorArray LightStorage::lightmap_get_probe_capture_sh(RID p_lightmap) const {
+	const Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lightmap, PackedColorArray());
+	return lightmap->point_sh;
+}
+
+PackedInt32Array LightStorage::lightmap_get_probe_capture_tetrahedra(RID p_lightmap) const {
+	const Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lightmap, PackedInt32Array());
+	return lightmap->tetrahedra;
+}
+
+PackedInt32Array LightStorage::lightmap_get_probe_capture_bsp_tree(RID p_lightmap) const {
+	const Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lightmap, PackedInt32Array());
+	return lightmap->bsp_tree;
+}
+
+AABB LightStorage::lightmap_get_aabb(RID p_lightmap) const {
+	const Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lightmap, AABB());
+	return lightmap->bounds;
+}
+
+bool LightStorage::lightmap_is_interior(RID p_lightmap) const {
+	const Lightmap *lightmap = lightmap_owner.get_or_null(p_lightmap);
+	ERR_FAIL_NULL_V(lightmap, false);
+	return lightmap->interior;
+}
+
 /* LIGHTMAP INSTANCE */
 
 RID LightStorage::lightmap_instance_create(RID p_lightmap) {
