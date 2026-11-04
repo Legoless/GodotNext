@@ -318,6 +318,10 @@ public:
 		Transform3D rt_transform;
 		bool has_rt_transform = false;
 		uint32_t element_index = UINT32_MAX;
+		// GodotNext: tlas_from_buffer — a dynamic MultiMesh fed as one GPU source instead of per element.
+		RID multimesh;
+		uint32_t multimesh_stride = 0; // Floats per element in the transform buffer.
+		uint32_t multimesh_count = 0;
 	};
 
 	struct RenderSDFGIUpdateData {

@@ -3830,6 +3830,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					Transform3D world;
 					bool has_world = false;
 					uint32_t element_index = UINT32_MAX;
+					// GodotNext: tlas_from_buffer
+					RID gpu_multimesh;
+					uint32_t gpu_stride = 0;
+					uint32_t gpu_count = 0;
 				};
 				LocalVector<RTCandidate> picked;
 				LocalVector<float> angular;
@@ -3868,15 +3872,34 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 						if (!mesh_storage->owns_mesh(mesh)) {
 							continue;
 						}
-						const bool excluded = mesh_storage->multimesh_uses_indirect(instance->base) || mesh_storage->multimesh_is_rt_dynamic(instance->base);
+						const bool indirect = mesh_storage->multimesh_uses_indirect(instance->base);
+						const bool excluded = indirect || mesh_storage->multimesh_is_rt_dynamic(instance->base);
 						if (excluded) {
 							if (parent_distance > scene_radius) {
 								continue;
 							}
-							uint32_t element_count = 0;
-							uint32_t stride = 0;
-							mesh_storage->multimesh_get_rt_transforms(instance->base, element_count, stride);
-							dynamic_excluded += MAX(element_count, 1u);
+							// The visible count is CPU-known for an animated MultiMesh; an indirect
+							// count lives on the GPU and keeps the dynamic exclusion until that lands.
+							const int visible = mesh_storage->_multimesh_get_visible_instances(instance->base);
+							const uint32_t element_count = uint32_t(MAX(visible, 0));
+							if (indirect) {
+								dynamic_excluded += MAX(element_count, 1u);
+								continue;
+							}
+							if (element_count == 0) {
+								continue;
+							}
+							RTCandidate candidate;
+							candidate.instance = instance;
+							candidate.angular = RendererRD::nextgi_rt_angular_radius(parent_distance, parent_aabb.size.length() * 0.5f);
+							candidate.mesh_override = mesh;
+							candidate.world = instance->transform;
+							candidate.gpu_multimesh = instance->base;
+							candidate.gpu_stride = mesh_storage->multimesh_get_stride(instance->base);
+							candidate.gpu_count = element_count;
+							picked.push_back(candidate);
+							angular.push_back(candidate.angular);
+							reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 							continue;
 						}
 						uint32_t element_count = 0;
@@ -3952,8 +3975,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					rt_instance.rt_transform = picked[i].world;
 					rt_instance.has_rt_transform = picked[i].has_world;
 					rt_instance.element_index = picked[i].element_index;
+					rt_instance.multimesh = picked[i].gpu_multimesh;
+					rt_instance.multimesh_stride = picked[i].gpu_stride;
+					rt_instance.multimesh_count = picked[i].gpu_count;
 					scenario->nextgi_rt_selection.push_back(rt_instance);
-					selected++;
+					selected += picked[i].gpu_multimesh.is_valid() ? picked[i].gpu_count : 1;
 				}
 				scenario->nextgi_rt_not_in_scene = not_in_scene;
 				scenario->nextgi_rt_instance_cap = instance_cap;
