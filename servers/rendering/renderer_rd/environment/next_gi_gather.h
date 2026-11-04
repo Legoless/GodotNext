@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/effects/denoise.h"
 
 class RenderDataRD;
+class RenderSceneBuffersRD;
 
 namespace RendererRD {
 
@@ -80,9 +81,22 @@ class NextGIGather {
 
 	RID probe_image;
 	RID probe_scratch;
+	RID probe_history;
+	RID history_length;
+	RID reset_mask_buffer;
+	RID ambient_scratch;
+	RID prev_ambient;
+	uint32_t ambient_w = 0;
+	uint32_t ambient_h = 0;
+	bool ambient_history_valid = false;
 	RID last_depth;
 	RID last_normal_roughness;
+	RID last_velocity;
 	Projection last_inv_projection;
+	Projection last_prev_view_proj;
+	Vector3 last_camera_pos;
+	Vector3 last_prev_camera_pos;
+	bool history_valid = false;
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID params_buffer;
@@ -115,6 +129,7 @@ class NextGIGather {
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
 	bool _bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride);
 	void _denoise_probes();
+	void _stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers);
 	void _read_counters();
 	void _free_uniform_set();
 

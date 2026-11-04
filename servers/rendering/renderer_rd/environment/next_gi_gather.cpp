@@ -170,7 +170,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[9] = { probe_image, probe_scratch, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[14] = { probe_image, probe_scratch, probe_history, history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -260,7 +260,7 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 		tf.width = 1;
 		tf.height = 1;
 		tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		dummy_storage = rd->texture_create(tf, RD::TextureView());
 		rd->texture_clear(dummy_storage, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	}
@@ -273,6 +273,31 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	if (!counter_buffer.is_valid()) {
 		counter_buffer = rd->storage_buffer_create(sizeof(GatherCountersGPU));
 	}
+	if (!ambient_scratch.is_valid() || ambient_w != p_screen_w || ambient_h != p_screen_h) {
+		if (ambient_scratch.is_valid()) {
+			rd->free_rid(ambient_scratch);
+			ambient_scratch = RID();
+		}
+		if (prev_ambient.is_valid()) {
+			rd->free_rid(prev_ambient);
+			prev_ambient = RID();
+		}
+		RD::TextureFormat ambient_tf;
+		ambient_tf.width = MAX(p_screen_w, 1u);
+		ambient_tf.height = MAX(p_screen_h, 1u);
+		ambient_tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		ambient_tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+		ambient_scratch = rd->texture_create(ambient_tf, RD::TextureView());
+		ERR_FAIL_COND_V(ambient_scratch.is_null(), false);
+		rd->texture_clear(ambient_scratch, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		prev_ambient = rd->texture_create(ambient_tf, RD::TextureView());
+		ERR_FAIL_COND_V(prev_ambient.is_null(), false);
+		rd->texture_clear(prev_ambient, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		ambient_w = p_screen_w;
+		ambient_h = p_screen_h;
+		ambient_history_valid = false;
+	}
+
 	if (probe_image.is_valid() && probe_w == probes_x && probe_h == probes_y) {
 		if (!confidence_buffer.is_valid()) {
 			confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
@@ -287,6 +312,19 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 		rd->free_rid(probe_scratch);
 		probe_scratch = RID();
 	}
+	if (probe_history.is_valid()) {
+		rd->free_rid(probe_history);
+		probe_history = RID();
+	}
+	if (history_length.is_valid()) {
+		rd->free_rid(history_length);
+		history_length = RID();
+	}
+	if (reset_mask_buffer.is_valid()) {
+		rd->free_rid(reset_mask_buffer);
+		reset_mask_buffer = RID();
+	}
+	history_valid = false;
 	if (confidence_buffer.is_valid()) {
 		rd->free_rid(confidence_buffer);
 		confidence_buffer = RID();
@@ -296,13 +334,38 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	tf.height = MAX(probes_y * 4, 1u);
 	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	// GodotNext: the diffuse denoiser reads the probe texels as a sampler and writes the scratch copy.
-	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	probe_image = rd->texture_create(tf, RD::TextureView());
 	ERR_FAIL_COND_V(probe_image.is_null(), false);
 	rd->texture_clear(probe_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	probe_scratch = rd->texture_create(tf, RD::TextureView());
 	ERR_FAIL_COND_V(probe_scratch.is_null(), false);
 	rd->texture_clear(probe_scratch, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	probe_history = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(probe_history.is_null(), false);
+	rd->texture_clear(probe_history, Color(0, 0, 0, 0), 0, 1, 0, 1);
+
+	RD::TextureFormat tf_length;
+	tf_length.width = MAX(probes_x, 1u);
+	tf_length.height = MAX(probes_y, 1u);
+	tf_length.format = RD::DATA_FORMAT_R8_UINT;
+	tf_length.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
+	history_length = rd->texture_create(tf_length, RD::TextureView());
+	ERR_FAIL_COND_V(history_length.is_null(), false);
+
+	// No per-probe dirty AABB list exists yet, so the mask starts clear. select_reset_probes()
+	// already turns such a list into the mask the temporal pass reads.
+	const PackedByteArray reset_mask = NextGIDenoise::select_reset_probes(Vector<Rect2i>(), Size2i(probes_x, probes_y));
+	Vector<uint32_t> reset_values;
+	reset_values.resize(reset_mask.size());
+	for (int i = 0; i < reset_mask.size(); i++) {
+		reset_values.write[i] = reset_mask[i] != 0 ? 1u : 0u;
+	}
+	reset_mask_buffer = rd->storage_buffer_create(MAX(uint32_t(reset_values.size()), 1u) * sizeof(uint32_t));
+	ERR_FAIL_COND_V(reset_mask_buffer.is_null(), false);
+	if (!reset_values.is_empty()) {
+		rd->buffer_update(reset_mask_buffer, 0, reset_values.size() * sizeof(uint32_t), reset_values.ptr());
+	}
 	confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
 	probe_w = probes_x;
 	probe_h = probes_y;
@@ -376,6 +439,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	GatherParamsGPU params;
 	_store_projection(view_proj.inverse(), params.inv_view_proj);
 	_store_projection(prev_view_proj, params.prev_view_proj);
+	last_prev_view_proj = prev_view_proj;
+	last_camera_pos = scene_data->cam_transform.origin;
+	last_prev_camera_pos = scene_data->prev_cam_transform.origin;
 	params.camera_pos[0] = scene_data->cam_transform.origin.x;
 	params.camera_pos[1] = scene_data->cam_transform.origin.y;
 	params.camera_pos[2] = scene_data->cam_transform.origin.z;
@@ -424,6 +490,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	}
 	last_depth = depth;
 	last_inv_projection = scene_data->cam_projection.inverse();
+	last_velocity = velocity.is_valid() ? velocity : RID();
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	_free_uniform_set();
@@ -510,13 +577,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, chunks[3]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_rects),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 15, probe_image),
-		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, ambient_scratch),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 17, indirect),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, counter_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, feedback_buffer),
-		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 21, Vector<RID>({ sampler_nearest, normal_roughness })),
-		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 22, Vector<RID>({ sampler_nearest, velocity })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, ref_materials),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, ref_lights),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, ref_params),
@@ -528,7 +593,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 31, Vector<RID>({ sampler, last_frame_texture })),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 32), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 30), shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -646,6 +711,39 @@ void NextGIGather::_denoise_probes() {
 	// Second iteration, swapped, so the filtered result ends in probe_image for the integration.
 	SWAP(params.probe_radiance, params.probe_radiance_out);
 	denoise->process_diffuse(params);
+
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const Vector3i probe_extent(probe_w * 4, probe_h * 4, 1);
+	if (!history_valid) {
+		// First frame: the raw radiance seeds the history and there is nothing to reproject.
+		rd->texture_copy(probe_image, probe_history, Vector3(0, 0, 0), Vector3(0, 0, 0), Vector3(probe_extent), 0, 0, 0, 0);
+		history_valid = true;
+		return;
+	}
+
+	NextGIDenoise::TemporalParams temporal;
+	temporal.probe_radiance = probe_image;
+	temporal.probe_radiance_out = probe_scratch;
+	temporal.probe_history = probe_history;
+	temporal.depth = last_depth;
+	temporal.normal_roughness = last_normal_roughness;
+	temporal.velocity = last_velocity.is_valid() ? last_velocity : dummy_color;
+	temporal.history_length = history_length;
+	temporal.reset_mask = reset_mask_buffer;
+	temporal.probe_size = Size2i(probe_extent.x, probe_extent.y);
+	temporal.screen_size = Size2i(last_screen_w, last_screen_h);
+	temporal.prev_view_proj = last_prev_view_proj;
+	temporal.inv_projection = last_inv_projection;
+	temporal.camera_pos = last_camera_pos;
+	temporal.prev_camera_pos = last_prev_camera_pos;
+	temporal.history_cap = 16;
+	temporal.velocity_enabled = last_velocity.is_valid();
+	denoise->process_temporal(temporal);
+
+	// The integration reads probe_image, so land the accumulated result there, then keep this
+	// frame's output as next frame's history.
+	rd->texture_copy(probe_scratch, probe_image, Vector3(0, 0, 0), Vector3(0, 0, 0), Vector3(probe_extent), 0, 0, 0, 0);
+	SWAP(probe_history, probe_scratch);
 }
 
 void NextGIGather::integrate(RenderDataRD *p_render_data) {
@@ -668,7 +766,31 @@ void NextGIGather::integrate(RenderDataRD *p_render_data) {
 	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 	rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 	rd->compute_list_end();
+	_stabilize_ambient(p_render_data->render_buffers);
 	_free_uniform_set();
+}
+
+void NextGIGather::_stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers) {
+	if (denoise == nullptr || !ambient_scratch.is_valid() || !prev_ambient.is_valid() || p_render_buffers.is_null()) {
+		return;
+	}
+	if (!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
+		return;
+	}
+	RID ambient = p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT);
+	const RD::TextureFormat format = RenderingDevice::get_singleton()->texture_get_format(ambient);
+
+	NextGIDenoise::StabilizeParams params;
+	params.current = ambient_scratch;
+	params.previous = prev_ambient;
+	params.output = ambient;
+	params.screen_size = Size2i(format.width, format.height);
+	// The first frame has no previous output: write the current value through unchanged.
+	params.stabilizer_enabled = ambient_history_valid;
+	denoise->process_stabilize(params);
+
+	SWAP(ambient_scratch, prev_ambient);
+	ambient_history_valid = true;
 }
 
 String NextGIGather::build_shader_source(int p_variant) {

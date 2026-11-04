@@ -45,12 +45,14 @@ NextGIDenoise::NextGIDenoise() {
 	for (int i = 0; i < MODE_MAX; i++) {
 		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
 	}
+	temporal_params_buffer = RD::get_singleton()->storage_buffer_create(sizeof(TemporalParamsGPU));
 }
 
 NextGIDenoise::~NextGIDenoise() {
 	for (int i = 0; i < MODE_MAX; i++) {
 		RD::get_singleton()->free_rid(pipelines[i]);
 	}
+	RD::get_singleton()->free_rid(temporal_params_buffer);
 	shader.version_free(shader_version);
 }
 
@@ -114,19 +116,22 @@ void NextGIDenoise::process_temporal(const TemporalParams &p_params) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	ERR_FAIL_NULL(material_storage);
 
-	TemporalPushConstant push_constant;
+	TemporalParamsGPU gpu_params;
 	for (int i = 0; i < 16; i++) {
-		push_constant.prev_view_proj[i] = p_params.prev_view_proj.columns[i / 4][i % 4];
-		push_constant.inv_projection[i] = p_params.inv_projection.columns[i / 4][i % 4];
+		gpu_params.prev_view_proj[i] = p_params.prev_view_proj.columns[i / 4][i % 4];
+		gpu_params.inv_projection[i] = p_params.inv_projection.columns[i / 4][i % 4];
 	}
-	push_constant.camera_pos[0] = p_params.camera_pos.x;
-	push_constant.camera_pos[1] = p_params.camera_pos.y;
-	push_constant.camera_pos[2] = p_params.camera_pos.z;
-	push_constant.camera_pos[3] = 1.0f;
-	push_constant.prev_camera_pos[0] = p_params.prev_camera_pos.x;
-	push_constant.prev_camera_pos[1] = p_params.prev_camera_pos.y;
-	push_constant.prev_camera_pos[2] = p_params.prev_camera_pos.z;
-	push_constant.prev_camera_pos[3] = 1.0f;
+	gpu_params.camera_pos[0] = p_params.camera_pos.x;
+	gpu_params.camera_pos[1] = p_params.camera_pos.y;
+	gpu_params.camera_pos[2] = p_params.camera_pos.z;
+	gpu_params.camera_pos[3] = 1.0f;
+	gpu_params.prev_camera_pos[0] = p_params.prev_camera_pos.x;
+	gpu_params.prev_camera_pos[1] = p_params.prev_camera_pos.y;
+	gpu_params.prev_camera_pos[2] = p_params.prev_camera_pos.z;
+	gpu_params.prev_camera_pos[3] = 1.0f;
+	RD::get_singleton()->buffer_update(temporal_params_buffer, 0, sizeof(TemporalParamsGPU), &gpu_params);
+
+	TemporalPushConstant push_constant;
 	push_constant.probe_size[0] = p_params.probe_size.width;
 	push_constant.probe_size[1] = p_params.probe_size.height;
 	push_constant.screen_size[0] = p_params.screen_size.width;
@@ -150,8 +155,9 @@ void NextGIDenoise::process_temporal(const TemporalParams &p_params) {
 	RD::Uniform u_velocity(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.velocity }));
 	RD::Uniform u_reset_mask(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_params.reset_mask);
 	RD::Uniform u_history_length(RD::UNIFORM_TYPE_IMAGE, 7, Vector<RID>({ p_params.history_length }));
+	RD::Uniform u_temporal_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, temporal_params_buffer);
 
-	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_probe_history, u_depth, u_normal_roughness, u_velocity, u_reset_mask, u_history_length);
+	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_probe_history, u_depth, u_normal_roughness, u_velocity, u_reset_mask, u_history_length, u_temporal_params);
 	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the temporal uniform set.");
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();

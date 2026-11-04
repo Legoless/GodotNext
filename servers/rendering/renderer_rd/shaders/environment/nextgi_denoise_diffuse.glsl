@@ -116,11 +116,15 @@ layout(set = 0, binding = 6, std430) restrict readonly buffer NextGIDenoiseReset
 reset_mask;
 layout(r8ui, set = 0, binding = 7) uniform uimage2D history_length_image;
 
-layout(push_constant, std430) uniform Params {
+layout(set = 0, binding = 8, std430) restrict readonly buffer NextGIDenoiseTemporalParams {
 	mat4 prev_view_proj;
 	mat4 inv_projection;
 	vec4 camera_pos;
 	vec4 prev_camera_pos;
+}
+temporal;
+
+layout(push_constant, std430) uniform Params {
 	ivec2 probe_size;
 	ivec2 screen_size;
 	float depth_tolerance;
@@ -133,7 +137,7 @@ layout(push_constant, std430) uniform Params {
 params;
 
 vec3 nextgi_denoise_view_position(vec2 p_uv, float p_depth) {
-	vec4 view = params.inv_projection * vec4(p_uv * 2.0 - 1.0, p_depth, 1.0);
+	vec4 view = temporal.inv_projection * vec4(p_uv * 2.0 - 1.0, p_depth, 1.0);
 	return view.xyz / view.w;
 }
 
@@ -158,7 +162,7 @@ void main() {
 	float depth = textureLod(depth_tex, uv, 0.0).r;
 	vec3 normal = normalize(textureLod(normal_roughness_tex, uv, 0.0).xyz * 2.0 - 1.0);
 	vec3 world = nextgi_denoise_view_position(uv, depth);
-	float distance_to_camera = length(world - params.camera_pos.xyz);
+	float distance_to_camera = length(world - temporal.camera_pos.xyz);
 
 	vec4 current = textureLod(probe_radiance, (vec2(texel) + 0.5) / vec2(params.probe_size), 0.0);
 
@@ -171,7 +175,7 @@ void main() {
 		prev_probe = ivec2((vec2(anchor) + motion * vec2(params.screen_size)) / float(params.probe_extent));
 		have_prev = true;
 	} else {
-		vec4 prev_clip = params.prev_view_proj * vec4(world, 1.0);
+		vec4 prev_clip = temporal.prev_view_proj * vec4(world, 1.0);
 		if (prev_clip.w != 0.0) {
 			vec2 prev_ndc = prev_clip.xy / prev_clip.w;
 			vec2 prev_pixel = (prev_ndc * 0.5 + 0.5) * vec2(params.screen_size);
@@ -190,7 +194,7 @@ void main() {
 	vec4 history = textureLod(probe_history, (vec2(prev_texel) + 0.5) / vec2(params.probe_size), 0.0);
 
 	// Depth rejection: the history's stored distance is from the camera that wrote it.
-	float previous_distance = length(world - params.prev_camera_pos.xyz);
+	float previous_distance = length(world - temporal.prev_camera_pos.xyz);
 	if (history.a <= 0.0 || abs(previous_distance - history.a) > params.depth_tolerance * history.a) {
 		reset = true;
 	}

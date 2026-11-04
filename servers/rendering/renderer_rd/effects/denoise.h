@@ -128,11 +128,15 @@ private:
 		uint32_t probe_extent;
 	};
 
-	struct TemporalPushConstant {
+	// The matrices do not fit the 128-byte push-constant limit, so they travel in a storage buffer.
+	struct TemporalParamsGPU {
 		float prev_view_proj[16];
 		float inv_projection[16];
 		float camera_pos[4];
 		float prev_camera_pos[4];
+	};
+
+	struct TemporalPushConstant {
 		int32_t probe_size[2];
 		int32_t screen_size[2];
 		float depth_tolerance;
@@ -152,6 +156,7 @@ private:
 	NextgiDenoiseDiffuseShaderRD shader;
 	RID shader_version;
 	RID pipelines[MODE_MAX];
+	RID temporal_params_buffer;
 };
 
 } // namespace RendererRD

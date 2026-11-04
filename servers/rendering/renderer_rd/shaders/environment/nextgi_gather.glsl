@@ -126,9 +126,6 @@ layout(set = 0, binding = 19, std430) buffer NextGIGatherCounters {
 }
 counters;
 
-layout(set = 0, binding = 21) uniform sampler2D normal_roughness_tex;
-layout(set = 0, binding = 22) uniform sampler2D velocity_tex;
-
 layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIFeedbackPages {
 	uvec4 data[]; // x = indirect texel (x | y << 16), y = record, z = card
 }
@@ -443,36 +440,6 @@ void nextgi_gather_main() {
 	}
 	vec3 origin = world + normal * origin_offset;
 
-	bool reset = true;
-	ivec2 prev_probe = ivec2(probe);
-	bool have_prev = false;
-	vec2 prev_pixel = vec2(0.0);
-	// Dynamic texels (roughness alpha above 0.5) carry object velocity. Static texels use camera motion from depth.
-	if (params.velocity_enabled != 0u && texelFetch(normal_roughness_tex, ipixel, 0).a > 0.5) {
-		vec2 motion = texelFetch(velocity_tex, ipixel, 0).xy;
-		prev_pixel = vec2(ipixel) + motion * params.screen_jitter.xy;
-		have_prev = true;
-	} else {
-		vec4 prev_clip = params.prev_view_proj * vec4(world, 1.0);
-		if (prev_clip.w != 0.0) {
-			vec2 prev_ndc = prev_clip.xy / prev_clip.w;
-			prev_pixel = (prev_ndc * 0.5 + 0.5) * params.screen_jitter.xy;
-			have_prev = true;
-		}
-	}
-	if (have_prev) {
-		prev_probe = ivec2(prev_pixel / 16.0);
-		if (prev_probe.x >= 0 && prev_probe.y >= 0 && prev_probe.x < int(params.probes_x) && prev_probe.y < int(params.probes_y)) {
-			float history_depth = imageLoad(probe_image, prev_probe * 4).a;
-			// History stores distance from the camera that wrote it. Compare in that camera, so a pan is not a reset.
-			float dist = length(world - params.prev_camera_pos.xyz);
-			reset = history_depth <= 0.0 || abs(dist - history_depth) > 0.1 * history_depth;
-		}
-	}
-	if (reset) {
-		atomicAdd(counters.history_resets, 1u);
-	}
-
 	float angle = float(params.frame) * 2.3999632;
 	float ca = cos(angle);
 	float sa = sin(angle);
@@ -526,9 +493,8 @@ void nextgi_gather_main() {
 		}
 		confidence_sum += ray_confidence;
 		ivec2 dest = ivec2(probe) * 4 + ivec2(ix, iy);
-		vec4 history = reset ? vec4(0.0) : imageLoad(probe_image, prev_probe * 4 + ivec2(ix, iy));
-		vec3 blended = reset ? radiance : history.rgb * 0.9 + radiance * 0.1;
-		imageStore(probe_image, dest, vec4(blended, length(world - params.camera_pos.xyz)));
+		// Raw radiance: the temporal pass in NextGIDenoise is the single accumulator (#53, D8).
+		imageStore(probe_image, dest, vec4(radiance, length(world - params.camera_pos.xyz)));
 	}
 	if (uncovered_count > 0u) {
 		atomicAdd(counters.uncovered, uncovered_count);
