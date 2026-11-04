@@ -97,6 +97,8 @@ class NextGIGather {
 	Vector3 last_camera_pos;
 	Vector3 last_prev_camera_pos;
 	bool history_valid = false;
+	bool rr_stabilizer_enabled = true;
+	uint32_t rr_probe_history_cap = 16;
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID params_buffer;

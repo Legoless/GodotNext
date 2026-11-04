@@ -219,6 +219,29 @@ String NextGIDenoise::build_shader_source(int p_variant) {
 	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
 }
 
+NextGIDenoise::RRHooks NextGIDenoise::parse_rr_hooks(const String &p_value) {
+	RRHooks hooks;
+	for (const String &entry : p_value.split(",")) {
+		const String trimmed = entry.strip_edges();
+		const int equal = trimmed.find("=");
+		if (equal <= 0) {
+			continue;
+		}
+		const String key = trimmed.substr(0, equal).strip_edges();
+		const String value = trimmed.substr(equal + 1).strip_edges();
+		if (key == "stabilizer") {
+			if (value == "0") {
+				hooks.stabilizer_enabled = false;
+			} else if (value == "1") {
+				hooks.stabilizer_enabled = true;
+			}
+		} else if (key == "probe_history" && value.is_valid_int()) {
+			hooks.probe_temporal_max_history = uint32_t(CLAMP(value.to_int(), 0, 4096));
+		}
+	}
+	return hooks;
+}
+
 PackedByteArray NextGIDenoise::select_reset_probes(const Vector<Rect2i> &p_dirty_regions, const Size2i &p_probe_size) {
 	const int width = MAX(p_probe_size.width, 0);
 	const int height = MAX(p_probe_size.height, 0);

@@ -389,6 +389,16 @@ NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) 
 			return DEBUG_VIEW_SCREEN_PROBES;
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_FALLBACK_REASONS:
 			return DEBUG_VIEW_FALLBACK_REASONS;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_RAW:
+			return DEBUG_VIEW_DENOISE_RAW;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_VARIANCE:
+			return DEBUG_VIEW_DENOISE_VARIANCE;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_HISTORY:
+			return DEBUG_VIEW_DENOISE_HISTORY;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_REJECTED:
+			return DEBUG_VIEW_DENOISE_REJECTED;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_DENOISED:
+			return DEBUG_VIEW_DENOISE_DENOISED;
 		default:
 			return DEBUG_VIEW_MAX;
 	}
@@ -406,6 +416,17 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 	view.has_data = false;
 	view.tint = debug_tint_no_data();
 	view.label = "no data";
+	if (p_view >= DEBUG_VIEW_DENOISE_RAW && p_view <= DEBUG_VIEW_DENOISE_DENOISED) {
+		// The denoise passes run, but the GPU debug source that tints them is not wired yet.
+		static const char *const denoise_labels[] = {
+			"denoise raw: GPU debug source pending",
+			"denoise variance: GPU debug source pending",
+			"denoise history length: GPU debug source pending",
+			"denoise rejected history: GPU debug source pending",
+			"denoise result: GPU debug source pending",
+		};
+		view.label = denoise_labels[p_view - DEBUG_VIEW_DENOISE_RAW];
+	}
 	if (p_view == DEBUG_VIEW_FALLBACK_REASONS) {
 		// The per-instance reasons are the legend of this view. They are not tier reasons.
 		view.label = "no data: NOT_IN_RT_SCENE, RT_INSTANCE_CAP, RT_DYNAMIC_EXCLUDED";

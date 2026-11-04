@@ -265,6 +265,28 @@ TEST_CASE("[NextGI][Metal] The Metal shader container compiles the ray-query Sha
 #endif // METAL_ENABLED && MODULE_GLSLANG_ENABLED
 #endif // RD_ENABLED
 
+TEST_CASE("[NextGI][Denoise] RR hook override parses the documented keys") {
+	const RendererRD::NextGIDenoise::RRHooks defaults = RendererRD::NextGIDenoise::parse_rr_hooks("");
+	CHECK(defaults.stabilizer_enabled);
+	CHECK_EQ(defaults.probe_temporal_max_history, 16u);
+
+	const RendererRD::NextGIDenoise::RRHooks both = RendererRD::NextGIDenoise::parse_rr_hooks("stabilizer=0,probe_history=4");
+	CHECK_FALSE(both.stabilizer_enabled);
+	CHECK_EQ(both.probe_temporal_max_history, 4u);
+
+	// 0 is the pass-through cap the temporal pass reads.
+	CHECK_EQ(RendererRD::NextGIDenoise::parse_rr_hooks("probe_history=0").probe_temporal_max_history, 0u);
+
+	// Unknown keys, missing values and junk fall back to the defaults; later entries win.
+	const RendererRD::NextGIDenoise::RRHooks junk = RendererRD::NextGIDenoise::parse_rr_hooks("stabilizer=maybe,probe_history=,junk=3,,probe_history=abc");
+	CHECK(junk.stabilizer_enabled);
+	CHECK_EQ(junk.probe_temporal_max_history, 16u);
+	CHECK_FALSE(RendererRD::NextGIDenoise::parse_rr_hooks("stabilizer=1,stabilizer=0").stabilizer_enabled);
+	CHECK(RendererRD::NextGIDenoise::parse_rr_hooks(" stabilizer = 0 ").stabilizer_enabled == false);
+	// Out-of-range caps clamp instead of wrapping.
+	CHECK_EQ(RendererRD::NextGIDenoise::parse_rr_hooks("probe_history=99999").probe_temporal_max_history, 4096u);
+}
+
 } // namespace TestNextGI
 
 #endif // TOOLS_ENABLED
@@ -2280,6 +2302,39 @@ TEST_CASE("[NextGI][Denoise] Every denoise mode expands to its own compute stage
 		CHECK_MESSAGE(!spirv.is_empty(), error);
 #endif // MODULE_GLSLANG_ENABLED
 	}
+}
+
+TEST_CASE("[NextGI][Denoise] The five denoise views map and label") {
+	struct ViewCase {
+		RSE::ViewportDebugDraw draw;
+		NextGI::DebugViewId view;
+		const char *label;
+	};
+	const ViewCase cases[] = {
+		{ RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_RAW, NextGI::DEBUG_VIEW_DENOISE_RAW, "raw" },
+		{ RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_VARIANCE, NextGI::DEBUG_VIEW_DENOISE_VARIANCE, "variance" },
+		{ RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_HISTORY, NextGI::DEBUG_VIEW_DENOISE_HISTORY, "history length" },
+		{ RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_REJECTED, NextGI::DEBUG_VIEW_DENOISE_REJECTED, "rejected history" },
+		{ RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_DENOISED, NextGI::DEBUG_VIEW_DENOISE_DENOISED, "result" },
+	};
+
+	NextGI::TierResult tier;
+	tier.tier = NextGI::TIER_HWRT;
+	tier.reason = NextGI::TIER_REASON_NONE;
+
+	for (const ViewCase &view_case : cases) {
+		CHECK_EQ(NextGI::debug_view_from_viewport(view_case.draw), view_case.view);
+		const NextGI::DebugView view = NextGI::resolve_debug_view(view_case.view, tier);
+		CHECK_FALSE(view.has_data);
+		CHECK(view.tint.is_equal_approx(NextGI::debug_tint_no_data()));
+		CHECK(view.label.contains("denoise"));
+		CHECK(view.label.contains(view_case.label));
+	}
+
+	// The five views are contiguous, which resolve_debug_view relies on.
+	CHECK_EQ(int(NextGI::DEBUG_VIEW_DENOISE_DENOISED) - int(NextGI::DEBUG_VIEW_DENOISE_RAW), 4);
+	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_FALLBACK_REASONS), NextGI::DEBUG_VIEW_FALLBACK_REASONS);
+	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_DISABLED), NextGI::DEBUG_VIEW_MAX);
 }
 
 } // namespace TestNextGI

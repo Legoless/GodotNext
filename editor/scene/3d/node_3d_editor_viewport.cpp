@@ -4673,7 +4673,12 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_NEXTGI_WRC_PROBES:
 		case VIEW_DISPLAY_NEXTGI_CARD_COVERAGE:
 		case VIEW_DISPLAY_NEXTGI_SCREEN_PROBES:
-		case VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS: {
+		case VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS:
+		case VIEW_DISPLAY_NEXTGI_DENOISE_RAW:
+		case VIEW_DISPLAY_NEXTGI_DENOISE_VARIANCE:
+		case VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY:
+		case VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED:
+		case VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4715,6 +4720,11 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_NEXTGI_CARD_COVERAGE,
 				VIEW_DISPLAY_NEXTGI_SCREEN_PROBES,
 				VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS,
+				VIEW_DISPLAY_NEXTGI_DENOISE_RAW,
+				VIEW_DISPLAY_NEXTGI_DENOISE_VARIANCE,
+				VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY,
+				VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED,
+				VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4758,6 +4768,11 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_NEXTGI_CARD_COVERAGE,
 				Viewport::DEBUG_DRAW_NEXTGI_SCREEN_PROBES,
 				Viewport::DEBUG_DRAW_NEXTGI_FALLBACK_REASONS,
+				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_RAW,
+				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_VARIANCE,
+				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_HISTORY,
+				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_REJECTED,
+				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_DENOISED,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7129,6 +7144,16 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Shows a no data tint until the screen probe producer is merged."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Fallback Reasons"), VIEW_DISPLAY_NEXTGI_FALLBACK_REASONS, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows a no data tint labeled with the per-instance fallback reasons until that producer is merged."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Raw"), VIEW_DISPLAY_NEXTGI_DENOISE_RAW, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the raw diffuse probes before the denoise passes. The passes run today; the GPU debug source that would tint per pixel is still pending, so the view draws a labeled tint."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Variance"), VIEW_DISPLAY_NEXTGI_DENOISE_VARIANCE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the probe neighbourhood variance the temporal clamp uses. The GPU debug source is still pending, so the view draws a labeled tint."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise History Length"), VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the per-probe history length (0 to 16). The GPU debug source is still pending, so the view draws a labeled tint."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Rejected History"), VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the probes whose history was rejected this frame. The GPU debug source is still pending, so the view draws a labeled tint."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Result"), VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the denoised diffuse after the temporal pass and the stabilizer. The GPU debug source is still pending, so the view draws a labeled tint."));
 	view_display_menu->get_popup()->add_submenu_node_item(TTRC("Display Advanced..."), display_submenu, VIEW_DISPLAY_ADVANCED);
 
 	view_display_menu->get_popup()->add_separator();

@@ -5819,6 +5819,16 @@
 			NextGI per-instance fallback reasons, including [code]NOT_IN_RT_SCENE[/code], [code]RT_INSTANCE_CAP[/code] and [code]RT_DYNAMIC_EXCLUDED[/code]. Shows a labeled "no data" tint until that producer is merged.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_RAW" value="39" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_VARIANCE" value="40" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_HISTORY" value="41" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_REJECTED" value="42" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_DENOISED" value="43" enum="ViewportDebugDraw">
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

@@ -374,6 +374,14 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 
 void NextGIGather::init() {
 	denoise = memnew(NextGIDenoise);
+#ifdef DEBUG_ENABLED
+	// GodotNext: nextgi_rr_hooks
+	if (OS::get_singleton() != nullptr) {
+		const NextGIDenoise::RRHooks hooks = NextGIDenoise::parse_rr_hooks(OS::get_singleton()->get_environment("GODOT_NEXTGI_RR_HOOKS"));
+		rr_stabilizer_enabled = hooks.stabilizer_enabled;
+		rr_probe_history_cap = hooks.probe_temporal_max_history;
+	}
+#endif
 }
 
 bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride) {
@@ -577,7 +585,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, chunks[3]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_rects),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 15, probe_image),
-		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, ambient_scratch),
+		// GodotNext: nextgi_rr_hooks — with the stabilizer off, the integration writes ambient directly.
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 16, rr_stabilizer_enabled ? ambient_scratch : rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 17, indirect),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, counter_buffer),
@@ -736,7 +745,7 @@ void NextGIGather::_denoise_probes() {
 	temporal.inv_projection = last_inv_projection;
 	temporal.camera_pos = last_camera_pos;
 	temporal.prev_camera_pos = last_prev_camera_pos;
-	temporal.history_cap = 16;
+	temporal.history_cap = rr_probe_history_cap;
 	temporal.velocity_enabled = last_velocity.is_valid();
 	denoise->process_temporal(temporal);
 
@@ -771,7 +780,7 @@ void NextGIGather::integrate(RenderDataRD *p_render_data) {
 }
 
 void NextGIGather::_stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers) {
-	if (denoise == nullptr || !ambient_scratch.is_valid() || !prev_ambient.is_valid() || p_render_buffers.is_null()) {
+	if (!rr_stabilizer_enabled || denoise == nullptr || !ambient_scratch.is_valid() || !prev_ambient.is_valid() || p_render_buffers.is_null()) {
 		return;
 	}
 	if (!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {

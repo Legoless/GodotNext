@@ -114,6 +114,15 @@ public:
 	// One byte per probe, 1 when the probe falls inside any dirty AABB from the RT registry (#39).
 	static PackedByteArray select_reset_probes(const Vector<Rect2i> &p_dirty_regions, const Size2i &p_probe_size);
 
+	// GodotNext: nextgi_rr_hooks
+	// Default-off RR hooks (#206). Parsed once from GODOT_NEXTGI_RR_HOOKS in debug builds, so the
+	// DLSS-RR mode can bypass the stabilizer and cap the probe history without a project setting.
+	struct RRHooks {
+		bool stabilizer_enabled = true;
+		uint32_t probe_temporal_max_history = 16;
+	};
+	static RRHooks parse_rr_hooks(const String &p_value);
+
 	// Expanded source of one mode's compute stage. Used by the doctests; no GPU compile.
 	static String build_shader_source(int p_variant = MODE_PROBE_SPATIAL);
 
