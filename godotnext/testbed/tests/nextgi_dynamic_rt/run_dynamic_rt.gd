@@ -16,6 +16,7 @@ extends Node3D
 const SMALL_COUNT := 64
 const HUGE_COUNT := 110000
 const FRAMES := 24
+const PARTICLES := 1024
 
 var _small: MultiMeshInstance3D
 var _huge: MultiMeshInstance3D
@@ -78,7 +79,7 @@ func _make_multimesh(count: int, size: float, spread: float) -> MultiMeshInstanc
 
 func _make_particles() -> void:
 	var particles := GPUParticles3D.new()
-	particles.amount = 1024
+	particles.amount = PARTICLES
 	particles.lifetime = 1.0
 	particles.emitting = true
 	particles.position = Vector3(0, 0, -3)
@@ -109,8 +110,8 @@ func _process(_delta: float) -> void:
 		_failures.append("tier is %s, expected HWRT" % tier)
 	if instance_cap < HUGE_COUNT:
 		_failures.append("rt_instance_cap %d does not count the %d over-budget elements" % [instance_cap, HUGE_COUNT])
-	if tlas_instances < SMALL_COUNT:
-		_failures.append("tlas_instances %d does not include the %d small dynamic elements" % [tlas_instances, SMALL_COUNT])
+	if tlas_instances < SMALL_COUNT + PARTICLES:
+		_failures.append("tlas_instances %d does not include the %d small dynamic elements and %d particles" % [tlas_instances, SMALL_COUNT, PARTICLES])
 
 	var ok := _failures.is_empty()
 	print("GODOTNEXT_RESULT " + JSON.stringify({

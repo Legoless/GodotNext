@@ -3851,16 +3851,43 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					const AABB &parent_aabb = instance->transformed_aabb;
 					const float parent_distance = parent_aabb.get_center().distance_to(anchor);
 					if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+						// GodotNext: tlas_from_buffer — one GPU source per system, first draw pass mesh.
+						RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
+						if (particles_storage == nullptr || !particles_storage->owns_particles(instance->base) || particles_storage->particles_is_inactive(instance->base)) {
+							continue;
+						}
 						if (parent_distance > scene_radius) {
 							continue;
 						}
-						uint32_t amount = 1;
-						RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
-						if (particles_storage != nullptr) {
-							uint32_t trail_divisor = 1;
-							amount = MAX(particles_storage->particles_get_amount(instance->base, trail_divisor), 1u);
+						uint32_t trail_divisor = 1;
+						const uint32_t amount = particles_storage->particles_get_amount(instance->base, trail_divisor);
+						if (amount == 0) {
+							continue;
 						}
-						dynamic_excluded += amount;
+						RID pass_mesh;
+						const int pass_count = particles_storage->particles_get_draw_passes(instance->base);
+						for (int pass = 0; pass < pass_count; pass++) {
+							const RID pass_rid = particles_storage->particles_get_draw_pass_mesh(instance->base, pass);
+							if (pass_rid.is_valid()) {
+								pass_mesh = pass_rid;
+								break;
+							}
+						}
+						if (pass_mesh.is_null()) {
+							continue;
+						}
+						RTCandidate candidate;
+						candidate.instance = instance;
+						candidate.angular = RendererRD::nextgi_rt_angular_radius(parent_distance, parent_aabb.size.length() * 0.5f);
+						candidate.mesh_override = pass_mesh;
+						candidate.world = instance->transform;
+						candidate.gpu_source = instance->base;
+						candidate.gpu_stride = 20; // Five vec4 per element: three transform rows, colour, custom.
+						candidate.gpu_count = amount;
+						candidate.gpu_particles = true;
+						picked.push_back(candidate);
+						angular.push_back(candidate.angular);
+						reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 						continue;
 					}
 					if (instance->base_type == RSE::INSTANCE_MULTIMESH) {
@@ -3932,45 +3959,6 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 							angular.push_back(candidate.angular);
 							reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 						}
-						continue;
-					}
-					if (instance->base_type == RSE::INSTANCE_PARTICLES) {
-						RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
-						if (particles_storage == nullptr || !particles_storage->owns_particles(instance->base) || particles_storage->particles_is_inactive(instance->base)) {
-							continue;
-						}
-						if (parent_distance > scene_radius) {
-							continue;
-						}
-						uint32_t trail_divisor = 1;
-						const uint32_t amount = particles_storage->particles_get_amount(instance->base, trail_divisor);
-						if (amount == 0) {
-							continue;
-						}
-						RID pass_mesh;
-						const int pass_count = particles_storage->particles_get_draw_passes(instance->base);
-						for (int pass = 0; pass < pass_count; pass++) {
-							const RID pass_rid = particles_storage->particles_get_draw_pass_mesh(instance->base, pass);
-							if (pass_rid.is_valid()) {
-								pass_mesh = pass_rid;
-								break;
-							}
-						}
-						if (pass_mesh.is_null()) {
-							continue;
-						}
-						RTCandidate candidate;
-						candidate.instance = instance;
-						candidate.angular = RendererRD::nextgi_rt_angular_radius(parent_distance, parent_aabb.size.length() * 0.5f);
-						candidate.mesh_override = pass_mesh;
-						candidate.world = instance->transform;
-						candidate.gpu_source = instance->base;
-						candidate.gpu_stride = 20; // Five vec4 per element: three transform rows, colour, custom.
-						candidate.gpu_count = amount;
-						candidate.gpu_particles = true;
-						picked.push_back(candidate);
-						angular.push_back(candidate.angular);
-						reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 						continue;
 					}
 					const bool skinned = instance->mesh_instance.is_valid();
