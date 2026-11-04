@@ -28,6 +28,23 @@ GODOTNEXT_BACKGROUND=1 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALI
 
 A pass is zero lines containing `Invalid Metal usage`, zero lines containing `Error detected in`, and zero lines starting with `ERROR:`. `useHeaps` marks placement-heap resources read-only. Argument-buffer writes need `useResource` with the shader's usage, or the log reports an invalid store (`resident:Read Only`) or a texture that is not resident.
 
+## Apple M5 Max environment (recorded 2026-11-04, #11)
+
+| Item | Value |
+|---|---|
+| Host | Apple M5 Max |
+| GPU | Apple M5 Max, 40 cores, Metal 4 |
+| macOS | 27.0.1 (26A434) |
+| Compiler | Apple clang 21.0.0 (clang-2100.4.1.1) |
+| Build | `SCONS_CACHE=$HOME/.cache/godotnext-scons ~/.cache/godotnext-venv/bin/python -m SCons platform=macos target=editor dev_mode=yes arch=arm64 use_volk=yes -j8` |
+| Editor binary | `bin/godot.macos.editor.arm64` |
+| Vulkan | Built with `use_volk=yes` (no MoltenVK SDK); Vulkan RT stays compiled out, and Metal is the P0/P1 backend here |
+| Metal ray query | Active: the HWRT tier reports `NextGI: tier=HWRT reason=NONE` and the ray-query self-test passes |
+| Doctests | `--headless --test`: 1632 passed, 0 failed, 3 platform skips that predate this record |
+| SPIR-V tools | SPIRV-Tools v2026.4 (2026-09-10); SPIRV-Cross built 2026-09-16, both from `/opt/homebrew/bin` |
+
+The dev tools are a local dependency, never vendored (§13.1). Wall time is not recorded yet: the scons cache is warm (2.5 GB), so the builds so far are 9–15 s incremental runs, not a cold full build. The RTX 4080 SUPER, RTX 5090 and Linux VM rows and the raw `vulkaninfo` JSON need those machines (§24.3).
+
 ## Ray-query toolchain (G0)
 
 This section is the issue #20 record. Keep it separate from the #11 section.
