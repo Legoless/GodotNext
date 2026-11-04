@@ -288,11 +288,13 @@ TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero"
 		"src_capture_texels",
 		"src_relight_texels",
 		"src_shadow_rays",
+		"src_dirty_pages",
+		"src_max_relight_age_frames",
 		"dirty_aabb",
 		"src_page_updates",
 		"clamped_energy_fraction",
 	};
-	CHECK_EQ(counters.size(), 19);
+	CHECK_EQ(counters.size(), 21);
 	for (const char *key : keys) {
 		CHECK(counters.has(key));
 		CHECK_EQ(int64_t(counters[key]), int64_t(0));
@@ -2070,6 +2072,45 @@ TEST_CASE("[NextGI] MultiMesh classification, element expansion and Q18") {
 	CHECK_EQ(RendererRD::nextgi_rt_coverage_percent(coverage), 95);
 	coverage.denominator = 0;
 	CHECK_EQ(RendererRD::nextgi_rt_coverage_percent(coverage), 0);
+}
+
+TEST_CASE("[NextGI] SRC work streams: sweeps, bake filter and both caps") {
+	const AABB swept(Vector3(0, 0, 0), Vector3(1, 1, 1));
+	const AABB sweep = RendererRD::nextgi_src_directional_sweep(swept, Vector3(0, 0, 1), 10.0f);
+	CHECK(sweep.position.z < -9.0f);
+	CHECK(sweep.intersects(AABB(Vector3(0, 0, -5), Vector3(1, 1, 1))));
+
+	const AABB page(Vector3(2, 0, 0), Vector3(0.2f, 0.2f, 0.2f));
+	CHECK(RendererRD::nextgi_src_local_light_dirties_page(page, swept, Vector3(0, 0, 0), 4.0f));
+	CHECK_FALSE(RendererRD::nextgi_src_local_light_dirties_page(page, swept, Vector3(0, 0, 0), 0.5f));
+
+	const AABB merged = RendererRD::nextgi_src_event_bounds(AABB(Vector3(0, 0, 0), Vector3(1, 1, 1)), true, AABB(Vector3(2, 0, 0), Vector3(1, 1, 1)), true);
+	CHECK(merged.size.x > 2.5f);
+	CHECK(RendererRD::nextgi_light_reaches_receiver(false, RendererRD::NEXTGI_RT_FLAG_LIGHTMAPPED));
+	CHECK_FALSE(RendererRD::nextgi_light_reaches_receiver(true, RendererRD::NEXTGI_RT_FLAG_LIGHTMAPPED));
+	CHECK(RendererRD::nextgi_src_scale_changed(1.0f, 1.02f));
+	CHECK_FALSE(RendererRD::nextgi_src_scale_changed(1.0f, 1.005f));
+
+	RendererRD::NextGISrcSchedulePage pages[4];
+	for (int i = 0; i < 4; i++) {
+		pages[i].texels = 100000;
+		pages[i].ray_estimate = 100000;
+		pages[i].last_relit_frame = uint32_t(i);
+	}
+	pages[0].dirty_direct = true;
+	pages[0].priority = 1.0f;
+	pages[1].dirty_direct = true;
+	pages[1].priority = 5.0f;
+	uint32_t order[4] = {};
+	const uint32_t scheduled = RendererRD::nextgi_src_schedule_streams(pages, 4, 150000, 150000, order, 4);
+	CHECK_EQ(scheduled, 1u);
+	CHECK_EQ(order[0], 1u);
+	const uint32_t high = RendererRD::nextgi_src_budget_for_quality(2);
+	const uint32_t medium = RendererRD::nextgi_src_budget_for_quality(1);
+	const uint32_t epic = RendererRD::nextgi_src_budget_for_quality(3);
+	CHECK_EQ(high, 256u * 1024u);
+	CHECK_EQ(medium, 128u * 1024u);
+	CHECK_EQ(epic, 512u * 1024u);
 }
 
 } // namespace TestNextGI

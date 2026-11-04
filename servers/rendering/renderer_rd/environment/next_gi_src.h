@@ -338,6 +338,7 @@ public:
 		r_card = cards[p_index];
 		return true;
 	}
+	void invalidate_captures(uint32_t p_card_set);
 	bool copy_card_set(uint32_t p_index, NextGICardSet &r_set) const {
 		if (p_index >= card_sets.size()) {
 			return false;

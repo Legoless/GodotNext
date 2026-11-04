@@ -41,9 +41,97 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
 
+#include <algorithm>
 #include <cstdint>
 
 using namespace RendererRD;
+
+namespace RendererRD {
+
+uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint32_t p_count, uint32_t p_texel_cap, uint32_t p_ray_cap, uint32_t *r_indices, uint32_t p_capacity) {
+	if (p_pages == nullptr || r_indices == nullptr || p_count == 0 || p_capacity == 0) {
+		return 0;
+	}
+	LocalVector<uint32_t> dirty;
+	LocalVector<uint32_t> near;
+	LocalVector<uint32_t> rest;
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (p_pages[i].dirty_direct) {
+			dirty.push_back(i);
+		} else if (p_pages[i].near_dirty) {
+			near.push_back(i);
+		} else {
+			rest.push_back(i);
+		}
+	}
+	struct ByPriority {
+		const NextGISrcSchedulePage *pages = nullptr;
+		bool operator()(uint32_t p_a, uint32_t p_b) const { return pages[p_a].priority > pages[p_b].priority; }
+	} by_priority;
+	by_priority.pages = p_pages;
+	if (dirty.size() > 1) {
+		std::sort(dirty.ptr(), dirty.ptr() + dirty.size(), by_priority);
+	}
+	struct ByAge {
+		const NextGISrcSchedulePage *pages = nullptr;
+		bool operator()(uint32_t p_a, uint32_t p_b) const { return pages[p_a].last_relit_frame < pages[p_b].last_relit_frame; }
+	} by_age;
+	by_age.pages = p_pages;
+	if (near.size() > 1) {
+		std::sort(near.ptr(), near.ptr() + near.size(), by_age);
+	}
+	if (rest.size() > 1) {
+		std::sort(rest.ptr(), rest.ptr() + rest.size(), by_age);
+	}
+	const uint32_t near_limit = MAX(p_count / 16u, 1u);
+	uint32_t scheduled = 0;
+	uint32_t texels = 0;
+	uint32_t rays = 0;
+	uint32_t near_taken = 0;
+	auto take = [&](uint32_t p_index, bool p_counts_as_near) {
+		if (scheduled >= p_capacity) {
+			return false;
+		}
+		if (p_counts_as_near && near_taken >= near_limit) {
+			return false;
+		}
+		const NextGISrcSchedulePage &page = p_pages[p_index];
+		if (page.texels == 0) {
+			return true;
+		}
+		if (scheduled > 0 && (texels + page.texels > p_texel_cap || rays + page.ray_estimate > p_ray_cap)) {
+			return false;
+		}
+		r_indices[scheduled++] = p_index;
+		texels += page.texels;
+		rays += page.ray_estimate;
+		if (p_counts_as_near) {
+			near_taken++;
+		}
+		return texels < p_texel_cap && rays < p_ray_cap;
+	};
+	for (uint32_t index : dirty) {
+		if (!take(index, false)) {
+			return scheduled;
+		}
+	}
+	for (uint32_t index : near) {
+		if (near_taken >= near_limit) {
+			break;
+		}
+		if (!take(index, true)) {
+			return scheduled;
+		}
+	}
+	for (uint32_t index : rest) {
+		if (!take(index, false)) {
+			return scheduled;
+		}
+	}
+	return scheduled;
+}
+
+} // namespace RendererRD
 
 NextGIRelight *NextGIRelight::singleton = nullptr;
 
@@ -632,25 +720,97 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		uint32_t card = 0;
 		uint32_t texels = 0;
 	};
+	const RendererSceneRender::RenderSDFGIUpdateData *work_events = p_render_data->sdfgi_update_data;
+	const uint32_t shadow_lights = MIN(last_directional + last_dynamic + last_static, 2u);
+	const Vector3 camera = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
 	LocalVector<FlatPage> flat;
+	LocalVector<NextGISrcSchedulePage> work;
+	last_dirty_pages = 0;
+	last_max_age = 0;
 	for (uint32_t i = 0; i < instances.size(); i++) {
-		for (uint32_t c = 0; c < instances[i].cards.size(); c++) {
+		InstancePages &instance_pages = instances[i];
+		float max_scale = 0.0f;
+		for (int row = 0; row < 3; row++) {
+			const Vector3 axis(instance_pages.record.object_to_world[row * 4], instance_pages.record.object_to_world[row * 4 + 1], instance_pages.record.object_to_world[row * 4 + 2]);
+			max_scale = MAX(max_scale, axis.length());
+		}
+		if (nextgi_src_scale_changed(instance_pages.captured_scale, max_scale)) {
+			src->invalidate_captures(instance_pages.record.card_set);
+		}
+		if (max_scale > 0.0f) {
+			instance_pages.captured_scale = max_scale;
+		}
+		for (uint32_t c = 0; c < instance_pages.cards.size(); c++) {
+			CardPage &card_page = instance_pages.cards[c];
+			NextGICard card;
+			AABB bounds;
+			Vector3 center = camera;
+			if (src->copy_card(card_page.card_index, card)) {
+				bounds = _card_world_aabb(card, instance_pages.record);
+				center = bounds.get_center();
+				const bool directional = work_events != nullptr && work_events->nextgi_directional_light_dirty;
+				bool dirty = directional;
+				if (work_events != nullptr) {
+					for (uint32_t v = 0; v < work_events->nextgi_dirty_volume_count && !dirty; v++) {
+						const AABB swept = work_events->nextgi_dirty_volumes[v];
+						dirty = bounds.intersects(swept);
+						if (!dirty) {
+							for (uint32_t light_index = 0; light_index < cpu_lights.size() && !dirty; light_index++) {
+								const CpuLight &cpu = cpu_lights[light_index];
+								if (cpu.directional) {
+									dirty = bounds.intersects(nextgi_src_directional_sweep(swept, Vector3(cpu.gpu.direction_type[0], cpu.gpu.direction_type[1], cpu.gpu.direction_type[2]), float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"))));
+								} else {
+									const float range = cpu.gpu.position_inv_range[3] > 0.0f ? 1.0f / cpu.gpu.position_inv_range[3] : 0.0f;
+									dirty = nextgi_src_local_light_dirties_page(bounds, swept, Vector3(cpu.gpu.position_inv_range[0], cpu.gpu.position_inv_range[1], cpu.gpu.position_inv_range[2]), range);
+								}
+							}
+						}
+					}
+					for (uint32_t v = 0; v < work_events->nextgi_light_volume_count && !dirty; v++) {
+						dirty = bounds.intersects(work_events->nextgi_light_volumes[v]);
+					}
+				}
+				card_page.dirty_direct = card_page.dirty_direct || dirty;
+				AABB grown = bounds;
+				grown.grow_by(1.0f);
+				card_page.near_dirty = false;
+				if (work_events != nullptr) {
+					for (uint32_t v = 0; v < work_events->nextgi_dirty_volume_count && !card_page.near_dirty; v++) {
+						card_page.near_dirty = grown.intersects(work_events->nextgi_dirty_volumes[v]);
+					}
+					for (uint32_t v = 0; v < work_events->nextgi_light_volume_count && !card_page.near_dirty; v++) {
+						card_page.near_dirty = grown.intersects(work_events->nextgi_light_volumes[v]);
+					}
+				}
+			}
 			FlatPage page;
 			page.instance = i;
 			page.card = c;
-			page.texels = instances[i].cards[c].radiance_w * instances[i].cards[c].radiance_h;
+			page.texels = card_page.radiance_w * card_page.radiance_h;
 			flat.push_back(page);
+			NextGISrcSchedulePage item;
+			item.texels = page.texels;
+			item.ray_estimate = nextgi_src_page_ray_estimate(page.texels, shadow_lights, card_page.ray_fraction);
+			item.last_relit_frame = card_page.last_relit_frame;
+			const float distance = MAX(center.distance_to(camera), 0.5f);
+			item.priority = float(page.texels) / (distance * distance);
+			item.dirty_direct = card_page.dirty_direct;
+			item.near_dirty = card_page.near_dirty;
+			work.push_back(item);
+			if (card_page.dirty_direct) {
+				last_dirty_pages++;
+			}
+			if (card_page.last_relit_frame > 0 && frame >= card_page.last_relit_frame) {
+				last_max_age = MAX(last_max_age, frame - card_page.last_relit_frame);
+			}
 		}
 	}
 	flat_page_count = flat.size();
-	LocalVector<uint32_t> texel_counts;
-	texel_counts.resize(flat.size());
-	for (uint32_t i = 0; i < flat.size(); i++) {
-		texel_counts[i] = flat[i].texels;
-	}
 	LocalVector<uint32_t> scheduled;
 	scheduled.resize(flat.size());
-	const uint32_t scheduled_count = nextgi_schedule_relight(texel_counts.ptr(), flat.size(), schedule_cursor, NEXTGI_SRC_RELIGHT_TEXEL_CAP, scheduled.ptr(), scheduled.size());
+	const uint32_t budget = nextgi_src_budget_for_quality(int(next_gi->get_resolved_quality()));
+	const uint32_t scheduled_count = flat.is_empty() ? 0 : nextgi_src_schedule_streams(work.ptr(), flat.size(), budget, budget, scheduled.ptr(), scheduled.size());
+	schedule_cursor = flat.is_empty() ? 0 : (schedule_cursor + scheduled_count) % flat.size();
 
 	LocalVector<NextGILight> gpu_lights;
 	gpu_lights.resize(MAX(cpu_lights.size(), 1u));
@@ -663,8 +823,10 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	uint32_t max_h = 1;
 	for (uint32_t s = 0; s < scheduled_count; s++) {
 		const FlatPage &flat_page = flat[scheduled[s]];
-		const InstancePages &instance_pages = instances[flat_page.instance];
-		const CardPage &card_page = instance_pages.cards[flat_page.card];
+		InstancePages &instance_pages = instances[flat_page.instance];
+		CardPage &card_page = instance_pages.cards[flat_page.card];
+		card_page.dirty_direct = false;
+		card_page.last_relit_frame = frame;
 		NextGICard card;
 		if (!src->copy_card(card_page.card_index, card)) {
 			continue;
@@ -865,6 +1027,17 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			last_rays = got.traced;
 			last_rays_skipped = got.skipped;
 			max_rays = MAX(max_rays, last_rays);
+			uint32_t estimated = 0;
+			for (uint32_t s = 0; s < scheduled_count && s < work.size(); s++) {
+				estimated += work[scheduled[s]].ray_estimate;
+			}
+			if (estimated > 0) {
+				const float fraction = CLAMP(float(last_rays) / float(estimated), 0.0f, 1.0f);
+				for (uint32_t s = 0; s < scheduled_count; s++) {
+					const FlatPage &flat_page = flat[scheduled[s]];
+					instances[flat_page.instance].cards[flat_page.card].ray_fraction = fraction;
+				}
+			}
 		}
 	}
 	frame++;
@@ -973,6 +1146,9 @@ void NextGIRelight::fill_info(Dictionary &r_info) const {
 	r_info["src_page_evictions"] = int64_t(page_evictions);
 	r_info["src_radiance_bytes"] = int64_t(radiance_bytes);
 	r_info["src_relight_texels"] = int64_t(last_texels);
+	r_info["src_shadow_rays"] = int64_t(last_rays);
+	r_info["src_dirty_pages"] = int64_t(last_dirty_pages);
+	r_info["src_max_relight_age_frames"] = int64_t(last_max_age);
 	r_info["src_relight_rays"] = int64_t(last_rays);
 	r_info["src_relight_rays_skipped"] = int64_t(last_rays_skipped);
 	r_info["src_relight_max_texels"] = int64_t(max_texels);

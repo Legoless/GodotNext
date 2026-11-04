@@ -132,6 +132,8 @@ public:
 			"src_capture_texels",
 			"src_relight_texels",
 			"src_shadow_rays",
+			"src_dirty_pages",
+			"src_max_relight_age_frames",
 			"dirty_aabb",
 			"src_page_updates",
 			"clamped_energy_fraction",

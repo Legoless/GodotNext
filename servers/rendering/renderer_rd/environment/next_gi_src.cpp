@@ -1106,6 +1106,19 @@ void NextGISRC::_on_dump_data(const Vector<uint8_t> &p_data, int p_target) {
 	print_line(vformat("NextGI SRC: %d cards in %d card sets, minimum coverage %.3f.", cards.size(), card_sets.size(), coverage_min));
 }
 
+void NextGISRC::invalidate_captures(uint32_t p_card_set) {
+	if (p_card_set >= card_sets.size()) {
+		return;
+	}
+	const NextGICardSet &set = card_sets[p_card_set];
+	for (uint32_t i = 0; i < set.card_count; i++) {
+		const uint32_t card = set.first_card + i;
+		if (card < card_capture_counts.size()) {
+			card_capture_counts[card] = 0;
+		}
+	}
+}
+
 void NextGISRC::fill_info(Dictionary &r_info) const {
 	r_info["src_card_set_count"] = int64_t(stats.card_set_count);
 	r_info["src_card_count"] = int64_t(stats.card_count);

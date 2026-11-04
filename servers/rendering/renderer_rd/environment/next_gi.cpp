@@ -358,6 +358,12 @@ Dictionary NextGI::get_counters() const {
 		counters["rt_dynamic_excluded"] = int64_t(coverage.dynamic_excluded);
 		counters["rt_blas_pending"] = int64_t(coverage.blas_pending);
 	}
+	if (relight != nullptr) {
+		counters["src_relight_texels"] = int64_t(relight->get_last_texels());
+		counters["src_shadow_rays"] = int64_t(relight->get_last_rays());
+		counters["src_dirty_pages"] = int64_t(relight->get_dirty_pages());
+		counters["src_max_relight_age_frames"] = int64_t(relight->get_max_relight_age());
+	}
 	return counters;
 }
 

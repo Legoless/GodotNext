@@ -3966,6 +3966,27 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_rt_instance_cap = scenario->nextgi_rt_instance_cap;
 			sdfgi_update_data.nextgi_rt_dynamic_excluded = scenario->nextgi_rt_dynamic_excluded;
 			sdfgi_update_data.nextgi_rt_selected = scenario->nextgi_rt_selected;
+			scene_cull_result.nextgi_dirty_volumes.clear();
+			scene_cull_result.nextgi_light_volumes.clear();
+			scene_cull_result.nextgi_directional_light_dirty = false;
+			for (const NextGIRegistryDirtyEvent &event : scenario->nextgi_dirty_published) {
+				scene_cull_result.nextgi_dirty_volumes.push_back(RendererRD::nextgi_src_event_bounds(event.old_aabb, event.has_old, event.new_aabb, event.has_new));
+			}
+			for (const NextGIRegistryLightEvent &event : scenario->nextgi_light_published) {
+				if (event.directional) {
+					scene_cull_result.nextgi_directional_light_dirty = true;
+					continue;
+				}
+				if (event.bake == int(RendererRD::NEXTGI_LIGHT_DISABLED)) {
+					continue;
+				}
+				scene_cull_result.nextgi_light_volumes.push_back(RendererRD::nextgi_src_event_bounds(event.old_aabb, true, event.new_aabb, true));
+			}
+			sdfgi_update_data.nextgi_dirty_volumes = scene_cull_result.nextgi_dirty_volumes.ptr();
+			sdfgi_update_data.nextgi_dirty_volume_count = scene_cull_result.nextgi_dirty_volumes.size();
+			sdfgi_update_data.nextgi_light_volumes = scene_cull_result.nextgi_light_volumes.ptr();
+			sdfgi_update_data.nextgi_light_volume_count = scene_cull_result.nextgi_light_volumes.size();
+			sdfgi_update_data.nextgi_directional_light_dirty = scene_cull_result.nextgi_directional_light_dirty;
 			for (const RendererSceneRender::NextGIRTInstance &rt_instance : scenario->nextgi_rt_selection) {
 				scene_cull_result.nextgi_rt_instances.push_back(rt_instance);
 			}

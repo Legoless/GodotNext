@@ -286,6 +286,7 @@ public:
 
 	// Auto resolves to High until the startup microbenchmark lands (#55).
 	static Quality resolve_quality(Quality p_setting);
+	Quality get_resolved_quality() const { return resolve_quality(quality_setting); }
 
 	static String get_tier_name(Tier p_tier);
 	static String get_reason_name(TierReason p_reason);

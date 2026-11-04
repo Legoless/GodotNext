@@ -277,11 +277,6 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		uncovered = false;
 		return true;
 	}
-	if (found_fallback) {
-		radiance = fallback;
-		uncovered = true;
-		return true;
-	}
 	return false;
 }
 
@@ -355,6 +350,21 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 	vec3 radiance;
 	bool uncovered = false;
 	if (!nextgi_src_lookup(hit, radiance, uncovered)) {
+		vec3 missed_pos;
+		vec3 missed_normal;
+		if (nextgi_hit_object_pos_normal(hit, missed_pos, missed_normal) && hit.custom_index < params.record_count) {
+			NextGIInstanceRecord rec = records.data[hit.custom_index];
+			vec3 world = vec3(
+					dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), missed_pos) + rec.object_to_world[3],
+					dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), missed_pos) + rec.object_to_world[7],
+					dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), missed_pos) + rec.object_to_world[11]);
+			vec3 cached = nextgi_wrc_sample(world, -ray_dir);
+			if (nextgi_wrc_hit_cache) {
+				confidence = nextgi_wrc_confidence;
+				uncovered_count++;
+				return cached;
+			}
+		}
 		return nextgi_miss_radiance(ray_dir);
 	}
 	confidence = 1.0;

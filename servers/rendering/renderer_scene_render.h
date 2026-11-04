@@ -343,6 +343,11 @@ public:
 		uint32_t nextgi_rt_instance_cap = 0;
 		uint32_t nextgi_rt_dynamic_excluded = 0;
 		uint32_t nextgi_rt_selected = 0;
+		const AABB *nextgi_dirty_volumes = nullptr;
+		uint32_t nextgi_dirty_volume_count = 0;
+		const AABB *nextgi_light_volumes = nullptr;
+		uint32_t nextgi_light_volume_count = 0;
+		bool nextgi_directional_light_dirty = false;
 	};
 
 	struct CameraData {

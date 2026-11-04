@@ -231,4 +231,86 @@ inline uint32_t nextgi_schedule_relight(const uint32_t *p_texels, uint32_t p_pag
 	return scheduled;
 }
 
+// Medium, High, Epic texel and shadow-ray caps. Auto and unknown settings are High until #55.
+inline uint32_t nextgi_src_budget_for_quality(int p_quality) {
+	if (p_quality == 1) {
+		return 128u * 1024u;
+	}
+	if (p_quality == 3) {
+		return 512u * 1024u;
+	}
+	return 256u * 1024u;
+}
+
+inline uint32_t nextgi_src_page_ray_estimate(uint32_t p_texels, uint32_t p_shadowed_lights, float p_ray_fraction) {
+	const uint32_t lights = MIN(p_shadowed_lights, 2u);
+	const float fraction = CLAMP(p_ray_fraction, 0.0f, 1.0f);
+	return uint32_t(float(p_texels / 4u) * float(lights) * fraction);
+}
+
+inline bool nextgi_src_scale_changed(float p_captured, float p_current) {
+	if (p_captured <= 0.0f) {
+		return false;
+	}
+	return Math::abs(p_current - p_captured) > 0.01f * p_captured;
+}
+
+inline AABB nextgi_src_event_bounds(const AABB &p_old, bool p_has_old, const AABB &p_new, bool p_has_new) {
+	if (p_has_old && p_has_new) {
+		return p_old.merge(p_new);
+	}
+	if (p_has_new) {
+		return p_new;
+	}
+	return p_old;
+}
+
+// S ∪ (S − L·R). L is the direction the light travels.
+inline AABB nextgi_src_directional_sweep(const AABB &p_swept, const Vector3 &p_travel, float p_radius) {
+	Vector3 direction = p_travel;
+	if (direction.length_squared() > 0.000001f) {
+		direction = direction.normalized();
+	}
+	AABB shifted = p_swept;
+	shifted.position -= direction * p_radius;
+	return p_swept.merge(shifted);
+}
+
+inline bool nextgi_src_sphere_meets_aabb(const Vector3 &p_center, float p_radius, const AABB &p_aabb) {
+	const Vector3 end = p_aabb.position + p_aabb.size;
+	const Vector3 closest(
+			CLAMP(p_center.x, p_aabb.position.x, end.x),
+			CLAMP(p_center.y, p_aabb.position.y, end.y),
+			CLAMP(p_center.z, p_aabb.position.z, end.z));
+	return closest.distance_squared_to(p_center) <= p_radius * p_radius;
+}
+
+// The swept volume meets the light's range, and the page is inside that range and meets the volume extruded away from the light.
+inline bool nextgi_src_local_light_dirties_page(const AABB &p_page, const AABB &p_swept, const Vector3 &p_light, float p_range) {
+	if (p_range <= 0.0f || !nextgi_src_sphere_meets_aabb(p_light, p_range, p_swept) || !nextgi_src_sphere_meets_aabb(p_light, p_range, p_page)) {
+		return false;
+	}
+	Vector3 away = p_page.get_center() - p_light;
+	const float length = away.length();
+	if (length <= 0.0001f) {
+		return p_page.intersects(p_swept);
+	}
+	away /= length;
+	AABB shifted = p_swept;
+	shifted.position += away * MAX(p_range - length, 0.0f);
+	return p_page.intersects(p_swept.merge(shifted));
+}
+
+struct NextGISrcSchedulePage {
+	uint32_t texels = 0;
+	uint32_t ray_estimate = 0;
+	uint32_t last_relit_frame = 0;
+	float priority = 0.0f;
+	bool dirty_direct = false;
+	bool near_dirty = false;
+};
+
+// Stream 2 (dirty, highest priority first), then stream 3 (near a dirty region, at most 1/16 of the pages), then the oldest pages. Stops at either cap.
+uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint32_t p_count, uint32_t p_texel_cap, uint32_t p_ray_cap, uint32_t *r_indices, uint32_t p_capacity);
+
 } // namespace RendererRD

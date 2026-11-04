@@ -947,6 +947,9 @@ public:
 
 		// GodotNext: nextgi_rt_feed
 		LocalVector<RendererSceneRender::NextGIRTInstance> nextgi_rt_instances;
+		LocalVector<AABB> nextgi_dirty_volumes;
+		LocalVector<AABB> nextgi_light_volumes;
+		bool nextgi_directional_light_dirty = false;
 
 		void clear() {
 			geometry_instances.clear();
@@ -974,6 +977,9 @@ public:
 
 			// GodotNext: nextgi_rt_feed
 			nextgi_rt_instances.clear();
+			nextgi_dirty_volumes.clear();
+			nextgi_light_volumes.clear();
+			nextgi_directional_light_dirty = false;
 		}
 
 		void reset() {
@@ -1002,6 +1008,9 @@ public:
 
 			// GodotNext: nextgi_rt_feed
 			nextgi_rt_instances.clear();
+			nextgi_dirty_volumes.clear();
+			nextgi_light_volumes.clear();
+			nextgi_directional_light_dirty = false;
 		}
 
 		void append_from(InstanceCullResult &p_cull_result) {

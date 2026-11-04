@@ -61,6 +61,10 @@ class NextGIRelight {
 		uint32_t mask_w = 0;
 		uint32_t mask_h = 0;
 		uint32_t stable_id = 0;
+		bool dirty_direct = true;
+		bool near_dirty = false;
+		uint32_t last_relit_frame = 0;
+		float ray_fraction = 1.0f;
 	};
 
 	struct InstancePages {
@@ -72,6 +76,7 @@ class NextGIRelight {
 		NextGIInstanceRecord record;
 		LocalVector<CardPage> cards;
 		uint64_t last_used = 0;
+		float captured_scale = 0.0f;
 	};
 
 	RID radiance;
@@ -111,6 +116,8 @@ class NextGIRelight {
 	uint32_t frame = 0;
 	uint32_t last_texels = 0;
 	uint32_t last_rays = 0;
+	uint32_t last_dirty_pages = 0;
+	uint32_t last_max_age = 0;
 	uint32_t last_rays_skipped = 0;
 	uint32_t max_texels = 0;
 	uint32_t max_rays = 0;
@@ -167,6 +174,10 @@ public:
 	RID get_radiance_texture() const { return radiance; }
 	const LocalVector<ScheduledPage> &get_scheduled_pages() const { return scheduled_pages; }
 	float get_max_origin_offset() const;
+	uint32_t get_last_texels() const { return last_texels; }
+	uint32_t get_last_rays() const { return last_rays; }
+	uint32_t get_dirty_pages() const { return last_dirty_pages; }
+	uint32_t get_max_relight_age() const { return last_max_age; }
 
 	void fill_info(Dictionary &r_info) const;
 
