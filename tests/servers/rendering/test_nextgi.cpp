@@ -326,6 +326,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
@@ -1994,6 +1995,30 @@ TEST_CASE("[NextGI] SRC production: atlas budget, material sharing, capture cap,
 	CHECK_EQ(RendererRD::nextgi_src_lru_evict(pages, 3, 2, evict), 2u);
 	CHECK_EQ(evict[0], 5u);
 	CHECK_EQ(evict[1], 6u);
+}
+
+TEST_CASE("[NextGI] WRC layout, relocation and diffuse handoff") {
+	CHECK_EQ(RendererRD::nextgi_wrc_bytes(), 14ull * 1024ull * 1024ull);
+	CHECK_EQ(RendererRD::NEXTGI_WRC_PROBE_COUNT, 16384u);
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_wrc_spacing(0), 1.0f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_wrc_spacing(1), 2.0f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_wrc_spacing(3), 8.0f));
+	CHECK_EQ(RendererRD::nextgi_wrc_level_for_distance(3.0f), 0u);
+	CHECK_EQ(RendererRD::nextgi_wrc_level_for_distance(12.0f), 1u);
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_wrc_handoff_distance(3.0f), 1.5f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_wrc_handoff_distance(12.0f), 3.0f));
+
+	const Vector3 probe(1.0f, 2.0f, 3.0f);
+	CHECK_EQ(RendererRD::nextgi_wrc_relocate(probe, Vector3(10, 0, 0), 0.2f, 2.0f), probe);
+	const Vector3 moved = RendererRD::nextgi_wrc_relocate(probe, Vector3(10, 0, 0), 0.5f, 2.0f);
+	CHECK(Math::is_equal_approx(moved.x, 1.8f));
+	CHECK(Math::is_equal_approx(moved.distance_to(probe), 0.8f));
+	CHECK(moved.distance_to(probe) <= 0.4f * 2.0f + 0.0001f);
+
+	const Vector3 snapped = RendererRD::nextgi_wrc_snap_origin(Vector3(1.2f, -0.4f, 3.9f), 2.0f);
+	CHECK(Math::is_equal_approx(snapped.x, 0.0f));
+	CHECK(Math::is_equal_approx(snapped.y, -2.0f));
+	CHECK(Math::is_equal_approx(snapped.z, 2.0f));
 }
 
 } // namespace TestNextGI

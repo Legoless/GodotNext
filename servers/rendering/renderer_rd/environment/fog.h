@@ -141,6 +141,7 @@ private:
 		enum {
 			VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY,
 			VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI,
+			VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_NEXTGI,
 			VOLUMETRIC_FOG_PROCESS_SHADER_FILTER,
 			VOLUMETRIC_FOG_PROCESS_SHADER_FOG,
 			VOLUMETRIC_FOG_PROCESS_SHADER_COPY,
@@ -327,6 +328,8 @@ public:
 		} gi_dependent_sets;
 
 		RID sdfgi_uniform_set;
+		RID nextgi_uniform_set;
+		RID nextgi_density_uniform_set;
 		RID sky_uniform_set;
 
 		int last_shadow_filter = -1;
@@ -367,6 +370,12 @@ public:
 		ClusterBuilderRD *cluster_builder;
 		GI *gi;
 		Ref<GI::SDFGI> sdfgi;
+		bool use_nextgi = false;
+		RID nextgi_sh_r;
+		RID nextgi_sh_g;
+		RID nextgi_sh_b;
+		RID nextgi_params;
+		RID nextgi_counters;
 		Ref<GI::RenderBuffersGI> rbgi;
 		RID env;
 		SkyRD *sky;

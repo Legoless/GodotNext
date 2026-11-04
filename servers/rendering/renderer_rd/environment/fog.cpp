@@ -314,6 +314,7 @@ ALBEDO = vec3(1.0);
 				base_define += no_atomics ? "\n#define NO_IMAGE_ATOMICS" : "";
 				volumetric_fog_modes.push_back(ShaderRD::VariantDefine(shader_group, base_define + "\n#define MODE_DENSITY\n", false));
 				volumetric_fog_modes.push_back(ShaderRD::VariantDefine(shader_group, base_define + "\n#define MODE_DENSITY\n#define ENABLE_SDFGI\n", false));
+				volumetric_fog_modes.push_back(ShaderRD::VariantDefine(shader_group, base_define + "\n#define MODE_DENSITY\n#define ENABLE_NEXTGI\n", false));
 				volumetric_fog_modes.push_back(ShaderRD::VariantDefine(shader_group, base_define + "\n#define MODE_FILTER\n", false));
 				volumetric_fog_modes.push_back(ShaderRD::VariantDefine(shader_group, base_define + "\n#define MODE_FOG\n", false));
 				volumetric_fog_modes.push_back(ShaderRD::VariantDefine(shader_group, base_define + "\n#define MODE_COPY\n", false));
@@ -542,6 +543,12 @@ Fog::VolumetricFog::~VolumetricFog() {
 
 	if (sdfgi_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sdfgi_uniform_set)) {
 		RD::get_singleton()->free_rid(sdfgi_uniform_set);
+	}
+	if (nextgi_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(nextgi_uniform_set)) {
+		RD::get_singleton()->free_rid(nextgi_uniform_set);
+	}
+	if (nextgi_density_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(nextgi_density_uniform_set)) {
+		RD::get_singleton()->free_rid(nextgi_density_uniform_set);
 	}
 	if (sky_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(sky_uniform_set)) {
 		RD::get_singleton()->free_rid(sky_uniform_set);
@@ -1025,10 +1032,44 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 			uniforms.remove_at(9);
 			uniforms.write[8].set_id(0, aux8);
 			fog->gi_dependent_sets.process_uniform_set_density = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY)), 0);
+			if (fog->nextgi_density_uniform_set.is_valid() && RD::get_singleton()->uniform_set_is_valid(fog->nextgi_density_uniform_set)) {
+				RD::get_singleton()->free_rid(fog->nextgi_density_uniform_set);
+			}
+			fog->nextgi_density_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_NEXTGI)), 0);
 		}
 	}
 
-	bool using_sdfgi = RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_gi_inject(p_settings.env) > 0.0001 && RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_enabled(p_settings.env) && (p_settings.sdfgi.is_valid());
+	bool using_sdfgi = !p_settings.use_nextgi && RendererSceneRenderRD::get_singleton()->environment_get_volumetric_fog_gi_inject(p_settings.env) > 0.0001 && RendererSceneRenderRD::get_singleton()->environment_get_sdfgi_enabled(p_settings.env) && (p_settings.sdfgi.is_valid());
+	const bool using_nextgi = p_settings.use_nextgi && p_settings.nextgi_sh_r.is_valid() && p_settings.nextgi_params.is_valid() && p_settings.nextgi_counters.is_valid();
+	if (using_nextgi && (fog->nextgi_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(fog->nextgi_uniform_set))) {
+		Vector<RD::Uniform> uniforms;
+		RD::Uniform sh_r;
+		sh_r.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		sh_r.binding = 0;
+		sh_r.append_id(p_settings.nextgi_sh_r);
+		uniforms.push_back(sh_r);
+		RD::Uniform sh_g;
+		sh_g.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		sh_g.binding = 1;
+		sh_g.append_id(p_settings.nextgi_sh_g);
+		uniforms.push_back(sh_g);
+		RD::Uniform sh_b;
+		sh_b.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		sh_b.binding = 2;
+		sh_b.append_id(p_settings.nextgi_sh_b);
+		uniforms.push_back(sh_b);
+		RD::Uniform params_uniform;
+		params_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		params_uniform.binding = 3;
+		params_uniform.append_id(p_settings.nextgi_params);
+		uniforms.push_back(params_uniform);
+		RD::Uniform counters_uniform;
+		counters_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		counters_uniform.binding = 4;
+		counters_uniform.append_id(p_settings.nextgi_counters);
+		uniforms.push_back(counters_uniform);
+		fog->nextgi_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, volumetric_fog.process_shader.version_get_shader(volumetric_fog.process_shader_version, _get_fog_process_variant(VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_NEXTGI)), 1);
+	}
 
 	if (using_sdfgi) {
 		if (fog->sdfgi_uniform_set.is_null() || !RD::get_singleton()->uniform_set_is_valid(fog->sdfgi_uniform_set)) {
@@ -1173,11 +1214,18 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
 
-	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, volumetric_fog.process_pipelines[using_sdfgi ? VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI : VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY].get_rid());
+	const int density_pipeline = using_nextgi ? VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_NEXTGI : (using_sdfgi ? VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY_WITH_SDFGI : VolumetricFogShader::VOLUMETRIC_FOG_PROCESS_SHADER_DENSITY);
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, volumetric_fog.process_pipelines[density_pipeline].get_rid());
 
-	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, fog->gi_dependent_sets.process_uniform_set_density, 0);
+	RID density_set = fog->gi_dependent_sets.process_uniform_set_density;
+	if (using_nextgi && fog->nextgi_density_uniform_set.is_valid()) {
+		density_set = fog->nextgi_density_uniform_set;
+	}
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, density_set, 0);
 
-	if (using_sdfgi) {
+	if (using_nextgi && fog->nextgi_uniform_set.is_valid()) {
+		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, fog->nextgi_uniform_set, 1);
+	} else if (using_sdfgi) {
 		RD::get_singleton()->compute_list_bind_uniform_set(compute_list, fog->sdfgi_uniform_set, 1);
 	}
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, fog->width, fog->height, fog->depth);

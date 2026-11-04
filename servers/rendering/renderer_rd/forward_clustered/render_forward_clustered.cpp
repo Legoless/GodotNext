@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -1447,6 +1448,15 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.cluster_builder = rb_data->cluster_builder;
 		settings.rbgi = rbgi;
 		settings.sdfgi = sdfgi;
+		RendererRD::NextGIWRC *wrc = next_gi.get_wrc();
+		settings.use_nextgi = environment_get_nextgi_enabled(p_environment) && next_gi.get_tier_result().tier == RendererRD::NextGI::TIER_HWRT && wrc != nullptr && wrc->is_ready();
+		if (settings.use_nextgi) {
+			settings.nextgi_sh_r = wrc->get_sh_r();
+			settings.nextgi_sh_g = wrc->get_sh_g();
+			settings.nextgi_sh_b = wrc->get_sh_b();
+			settings.nextgi_params = wrc->get_params_buffer();
+			settings.nextgi_counters = wrc->get_counter_buffer();
+		}
 		settings.env = p_environment;
 		settings.sky = &sky;
 		settings.gi = &gi;

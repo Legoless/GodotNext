@@ -60,6 +60,7 @@ class NextGIRelight;
 // GodotNext: nextgi_gather
 class NextGIGather;
 class NextGIReference;
+class NextGIWRC;
 
 // NextGI host entry: the §3 tier selection (#15), the ray-query toolchain self-test (#20), the
 // Forward+ frame block (#26), the RT scene (#28) and the HWRT safety net (#36): the startup
@@ -262,6 +263,7 @@ private:
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;
 	NextGIReference *reference = nullptr;
+	NextGIWRC *wrc = nullptr;
 	void _gather(RenderDataRD *p_render_data);
 	void _integrate(RenderDataRD *p_render_data);
 
@@ -389,6 +391,7 @@ public:
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }
 	NextGIReference *get_reference() const { return reference; }
+	NextGIWRC *get_wrc() const { return wrc; }
 
 	// GodotNext: nextgi_src_cards
 	// The §8.3 Stage-1 card clustering, nextgi_src_cluster_cards (next_gi_src.h). Pure, so doctests

@@ -13,7 +13,21 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT nextgi_tlas;
+layout(set = 0, binding = 26) uniform sampler2D nextgi_wrc_radiance;
+layout(set = 0, binding = 27) uniform sampler2D nextgi_wrc_visibility;
+layout(set = 0, binding = 28, std430) restrict readonly buffer NextGIGatherWRCParams {
+	vec4 camera;
+	vec4 sky;
+	vec4 origin_spacing;
+	uvec4 dispatch;
+	uint page_rect_count;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+}
+nextgi_wrc;
 #define NEXTGI_TLAS nextgi_tlas
+#define NEXTGI_WRC
 #include "nextgi_rt_inc.glsl"
 
 layout(set = 0, binding = 1) uniform sampler2D depth_tex;
@@ -100,6 +114,8 @@ layout(set = 0, binding = 19, std430) buffer NextGIGatherCounters {
 	uint coverage_hits;
 	uint coverage_rays;
 	uint miss_radiance_bits; // packed as a scaled luminance
+	uint wrc_samples;
+	uint sky_samples;
 	uint pad;
 }
 counters;
@@ -409,10 +425,19 @@ void nextgi_gather_main() {
 		NextGIHit hit;
 		vec3 radiance;
 		atomicAdd(counters.rays, 1u);
-		if (nextgi_trace(origin, dir, params.rt_radius, hit)) {
+		float handoff = nextgi_wrc_handoff(origin);
+		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
+		if (nextgi_trace(origin, dir, tmax, hit)) {
 			radiance = nextgi_shade_hit(hit, dir, uncovered_count);
 		} else {
-			radiance = nextgi_miss_radiance(dir);
+			radiance = nextgi_wrc_sample(origin + dir * tmax, dir);
+			if (!nextgi_wrc_hit_cache) {
+				radiance = nextgi_miss_radiance(dir);
+				atomicAdd(counters.sky_samples, 1u);
+			} else {
+				atomicAdd(counters.wrc_samples, 1u);
+				uncovered_count++;
+			}
 			atomicAdd(counters.misses, 1u);
 			uint lum = uint(clamp(dot(radiance, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0));
 			atomicAdd(counters.miss_radiance_bits, lum);
@@ -503,8 +528,17 @@ void nextgi_feedback_main() {
 		vec3 dir = nextgi_orient(normal, local_dir);
 		NextGIHit hit;
 		vec3 radiance = nextgi_miss_radiance(dir);
-		if (nextgi_trace(origin, dir, params.rt_radius, hit)) {
+		float handoff = nextgi_wrc_handoff(origin);
+		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
+		if (nextgi_trace(origin, dir, tmax, hit)) {
 			radiance = nextgi_shade_hit(hit, dir, uncovered_count);
+		} else {
+			radiance = nextgi_wrc_sample(origin + dir * tmax, dir);
+			if (!nextgi_wrc_hit_cache) {
+				radiance = nextgi_miss_radiance(dir);
+			} else {
+				uncovered_count++;
+			}
 		}
 		accum += radiance;
 	}
@@ -534,6 +568,9 @@ void nextgi_coverage_main() {
 	bool uncovered = false;
 	if (nextgi_src_lookup(hit, radiance, uncovered) && !uncovered) {
 		atomicAdd(counters.coverage_hits, 1u);
+	} else {
+		// A WRC sample, or an SRC miss, is uncovered for Q2.
+		atomicAdd(counters.uncovered, 1u);
 	}
 }
 

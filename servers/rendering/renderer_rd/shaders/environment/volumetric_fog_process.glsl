@@ -149,6 +149,34 @@ layout(set = 1, binding = 2) uniform texture3D sdfgi_occlusion_texture;
 
 #endif //SDFGI
 
+#ifdef ENABLE_NEXTGI
+layout(set = 1, binding = 0) uniform texture3D nextgi_sh_r;
+layout(set = 1, binding = 1) uniform texture3D nextgi_sh_g;
+layout(set = 1, binding = 2) uniform texture3D nextgi_sh_b;
+layout(set = 1, binding = 3, std430) readonly buffer NextGIFogParams {
+	vec4 camera;
+	vec4 sky;
+	vec4 origin_spacing;
+	uvec4 dispatch;
+	uint page_rect_count;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+}
+nextgi_wrc_fog;
+layout(set = 1, binding = 4, std430) buffer NextGIFogCounters {
+	uint rays;
+	uint hits;
+	uint sky_misses;
+	uint energy_bits;
+	uint samples;
+	uint ambient_bits;
+	uint pad_a;
+	uint pad_b;
+}
+nextgi_fog_counters;
+#endif
+
 layout(set = 0, binding = 15, std140) uniform Params {
 	vec2 fog_frustum_size_begin;
 	vec2 fog_frustum_size_end;
@@ -796,6 +824,33 @@ void main() {
 			total_light += ambient_total * params.gi_inject;
 		}
 
+#endif
+
+#ifdef ENABLE_NEXTGI
+		{
+			float dist = length(world_pos - nextgi_wrc_fog.camera.xyz);
+			float spacing = 1.0;
+			uint level = 0u;
+			if (dist > 8.0) {
+				spacing = 2.0;
+				level = 1u;
+			}
+			if (dist > 16.0) {
+				spacing = 4.0;
+				level = 2u;
+			}
+			if (dist > 32.0) {
+				spacing = 8.0;
+				level = 3u;
+			}
+			vec3 level_origin = floor(nextgi_wrc_fog.origin_spacing.xyz / spacing) * spacing;
+			vec3 cell = (world_pos - level_origin) / spacing + vec3(7.5);
+			vec3 uv = vec3((clamp(cell.xy, vec2(0.0), vec2(15.0)) + vec2(0.5)) / 16.0, (clamp(cell.z, 0.0, 15.0) + float(level) * 16.0 + 0.5) / 64.0);
+			vec3 ambient = vec3(textureLod(sampler3D(nextgi_sh_r, linear_sampler), uv, 0.0).r, textureLod(sampler3D(nextgi_sh_g, linear_sampler), uv, 0.0).r, textureLod(sampler3D(nextgi_sh_b, linear_sampler), uv, 0.0).r);
+			total_light += ambient * params.gi_inject;
+			atomicAdd(nextgi_fog_counters.samples, 1u);
+			atomicAdd(nextgi_fog_counters.ambient_bits, uint(clamp(dot(ambient, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0)));
+		}
 #endif
 	}
 

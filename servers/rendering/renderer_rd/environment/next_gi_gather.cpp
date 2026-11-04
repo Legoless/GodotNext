@@ -36,6 +36,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
@@ -95,6 +96,8 @@ struct GatherCountersGPU {
 	uint32_t coverage_hits = 0;
 	uint32_t coverage_rays = 0;
 	uint32_t miss_radiance_bits = 0;
+	uint32_t wrc_samples = 0;
+	uint32_t sky_samples = 0;
 	uint32_t pad = 0;
 };
 
@@ -435,7 +438,22 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 			hit_radiance_reference = true;
 		}
 	}
-	RD::Uniform uniforms[26] = {
+	NextGIWRC *wrc = next_gi->get_wrc();
+	RID wrc_radiance = dummy_color;
+	RID wrc_visibility = dummy_color;
+	RID wrc_params = dummy_buffer;
+	if (wrc != nullptr && wrc->is_ready()) {
+		if (wrc->get_radiance().is_valid()) {
+			wrc_radiance = wrc->get_radiance();
+		}
+		if (wrc->get_visibility().is_valid()) {
+			wrc_visibility = wrc->get_visibility();
+		}
+		if (wrc->get_params_buffer().is_valid()) {
+			wrc_params = wrc->get_params_buffer();
+		}
+	}
+	RD::Uniform uniforms[29] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -462,9 +480,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, ref_materials),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, ref_lights),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, ref_params),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 26, Vector<RID>({ sampler, wrc_radiance })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 27, Vector<RID>({ sampler, wrc_visibility })),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, wrc_params),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 26), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 29), shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -486,6 +507,8 @@ void NextGIGather::_read_counters() {
 	last_coverage_hits = got.coverage_hits;
 	last_coverage_rays = got.coverage_rays;
 	last_miss_luminance = float(got.miss_radiance_bits) / 64.0f;
+	last_wrc_samples = got.wrc_samples;
+	last_sky_samples = got.sky_samples;
 	nextgi_coverage_hits = got.coverage_hits;
 	nextgi_coverage_rays = got.coverage_rays;
 }
@@ -607,5 +630,7 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["src_gather_miss_luminance"] = last_miss_luminance;
 	r_info["src_coverage_hits"] = int64_t(last_coverage_hits);
 	r_info["src_coverage_rays"] = int64_t(last_coverage_rays);
+	r_info["wrc_gather_samples"] = int64_t(last_wrc_samples);
+	r_info["wrc_sky_samples"] = int64_t(last_sky_samples);
 	r_info["gather_hit_radiance_reference"] = hit_radiance_reference;
 }

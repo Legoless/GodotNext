@@ -1,0 +1,133 @@
+/**************************************************************************/
+/*  next_gi_wrc.h                                                         */
+/**************************************************************************/
+/*                         This file is part of:                          */
+/*                             GODOT ENGINE                               */
+/*                        https://godotengine.org                         */
+/**************************************************************************/
+/* Copyright (c) 2014-present Godot Engine contributors (see AUTHORS.md). */
+/* Copyright (c) 2007-2014 Juan Linietsky, Ariel Manzur.                  */
+/*                                                                        */
+/* Permission is hereby granted, free of charge, to any person obtaining  */
+/* a copy of this software and associated documentation files (the        */
+/* "Software"), to deal in the Software without restriction, including    */
+/* without limitation the rights to use, copy, modify, merge, publish,    */
+/* distribute, sublicense, and/or sell copies of the Software, and to     */
+/* permit persons to whom the Software is furnished to do so, subject to  */
+/* the following conditions:                                              */
+/*                                                                        */
+/* The above copyright notice and this permission notice shall be         */
+/* included in all copies or substantial portions of the Software.        */
+/*                                                                        */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
+/* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
+/* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
+/* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
+/* CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,   */
+/* TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE      */
+/* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
+/**************************************************************************/
+
+#pragma once
+
+#include "core/math/vector3.h"
+#include "core/templates/rid.h"
+#include "core/variant/dictionary.h"
+
+class RenderDataRD;
+
+namespace RendererRD {
+
+// World Radiance Cache (D15). 4 clipmaps of 16³ probes. The byte total is the packed layout
+// without history: 896 B/probe * 16384 probes = 14 MiB.
+enum {
+	NEXTGI_WRC_LEVELS = 4,
+	NEXTGI_WRC_GRID = 16,
+	NEXTGI_WRC_PROBE_COUNT = NEXTGI_WRC_LEVELS * NEXTGI_WRC_GRID * NEXTGI_WRC_GRID * NEXTGI_WRC_GRID,
+	NEXTGI_WRC_PROBE_BYTES = 896,
+	NEXTGI_WRC_PROBES_PER_FRAME = 512,
+};
+
+static_assert(NEXTGI_WRC_PROBE_COUNT == 16384, "The WRC is 4 * 16^3 probes.");
+static_assert(uint64_t(NEXTGI_WRC_PROBE_BYTES) * NEXTGI_WRC_PROBE_COUNT == 14ull * 1024ull * 1024ull, "The WRC layout is 14 MiB.");
+
+_FORCE_INLINE_ uint64_t nextgi_wrc_bytes() {
+	return uint64_t(NEXTGI_WRC_PROBE_BYTES) * NEXTGI_WRC_PROBE_COUNT;
+}
+
+_FORCE_INLINE_ float nextgi_wrc_spacing(uint32_t p_level) {
+	return float(1u << MIN(p_level, uint32_t(NEXTGI_WRC_LEVELS - 1)));
+}
+
+// Finest clipmap whose half-extent (8 * spacing) contains the distance from the camera.
+uint32_t nextgi_wrc_level_for_distance(float p_distance);
+
+// Diffuse rays stop at 1.5x the spacing of that level.
+_FORCE_INLINE_ float nextgi_wrc_handoff_distance(float p_distance) {
+	return 1.5f * nextgi_wrc_spacing(nextgi_wrc_level_for_distance(p_distance));
+}
+
+// Each level origin snaps to its spacing.
+Vector3 nextgi_wrc_snap_origin(const Vector3 &p_camera, float p_spacing);
+
+// A probe with more than 25% back-face hits moves along the mean escape direction, at most 0.4x spacing.
+Vector3 nextgi_wrc_relocate(const Vector3 &p_probe, const Vector3 &p_mean_escape, float p_backface_fraction, float p_spacing);
+
+// One cache per scenario. The frame block's "WRC update" slot traces a budget of probes.
+class NextGIWRC {
+	static NextGIWRC *singleton;
+
+	struct ShaderState;
+	ShaderState *shader = nullptr;
+
+	RID radiance;
+	RID mip4;
+	RID mip2;
+	RID visibility;
+	RID sh_r;
+	RID sh_g;
+	RID sh_b;
+	RID offsets;
+	RID params_buffer;
+	RID counter_buffer;
+	RID uniform_set;
+	RID sampler;
+	RID dummy_tex;
+	RID dummy_buffer;
+	bool packed_radiance = true;
+	uint32_t cursor = 0;
+	uint32_t frame = 0;
+	uint32_t last_rays = 0;
+	uint32_t last_hits = 0;
+	uint32_t last_sky = 0;
+	uint32_t last_energy_bits = 0;
+	uint32_t fog_samples = 0;
+	uint32_t fog_ambient_bits = 0;
+
+	bool _ensure_textures();
+	bool _ensure_shader();
+	void _free_uniform_set();
+	void _read_counters();
+
+public:
+	static NextGIWRC *get_singleton() { return singleton; }
+
+	void update(const RenderDataRD *p_render_data);
+	void fill_info(Dictionary &r_info) const;
+
+	RID get_radiance() const { return radiance; }
+	RID get_visibility() const { return visibility; }
+	RID get_sh_r() const { return sh_r; }
+	RID get_sh_g() const { return sh_g; }
+	RID get_sh_b() const { return sh_b; }
+	RID get_params_buffer() const { return params_buffer; }
+	RID get_counter_buffer() const { return counter_buffer; }
+	bool is_ready() const { return radiance.is_valid(); }
+
+	void free_resources();
+
+	NextGIWRC();
+	~NextGIWRC();
+};
+
+} // namespace RendererRD

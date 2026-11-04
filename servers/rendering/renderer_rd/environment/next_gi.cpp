@@ -31,6 +31,7 @@
 #include "next_gi.h"
 
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 
 // GodotNext: nextgi_rt_scene
 #include "core/config/project_settings.h"
@@ -448,6 +449,9 @@ Dictionary NextGI::get_tier_info() const {
 	if (reference != nullptr) {
 		reference->fill_info(info);
 	}
+	if (wrc != nullptr) {
+		wrc->fill_info(info);
+	}
 	return info;
 }
 
@@ -596,6 +600,11 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			_capture_src_cards(p_render_data);
 		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
 			_relight_src(p_render_data);
+		} else if (slot == PASS_SLOT_WRC_UPDATE) {
+			if (wrc == nullptr) {
+				wrc = memnew(NextGIWRC);
+			}
+			wrc->update(p_render_data);
 		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
 			_gather(p_render_data);
 		} else if (slot == PASS_SLOT_INTEGRATION) {
@@ -641,6 +650,11 @@ NextGI::~NextGI() {
 		reference->free();
 		memdelete(reference);
 		reference = nullptr;
+	}
+	if (wrc != nullptr) {
+		wrc->free_resources();
+		memdelete(wrc);
+		wrc = nullptr;
 	}
 	if (relight != nullptr) {
 		memdelete(relight);

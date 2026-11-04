@@ -85,6 +85,8 @@ class NextGIGather {
 	uint32_t last_coverage_hits = 0;
 	uint32_t last_coverage_rays = 0;
 	float last_miss_luminance = 0.0f;
+	uint32_t last_wrc_samples = 0;
+	uint32_t last_sky_samples = 0;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
 	bool hit_radiance_reference = false;
