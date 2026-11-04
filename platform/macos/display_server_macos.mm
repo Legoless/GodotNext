@@ -1805,7 +1805,12 @@ void DisplayServerMacOS::show_window(DisplayServerEnums::WindowID p_id) {
 	if (godotnext_background_mode()) {
 		[wd.window_object setAlphaValue:0.0];
 		[wd.window_object setIgnoresMouseEvents:YES];
-		[wd.window_object orderFrontRegardless];
+		// GodotNext: background_hidden
+		// An export run never presents a frame, so the window stays ordered out instead of showing
+		// a full-screen transparent tile.
+		if (!godotnext_background_hidden()) {
+			[wd.window_object orderFrontRegardless];
+		}
 		return;
 	}
 	if ([wd.window_object isMiniaturized]) {
@@ -2768,7 +2773,10 @@ void DisplayServerMacOS::window_move_to_foreground(DisplayServerEnums::WindowID 
 
 	// GodotNext: background_mode
 	if (godotnext_background_mode()) {
-		[wd.window_object orderFrontRegardless];
+		// GodotNext: background_hidden
+		if (!godotnext_background_hidden()) {
+			[wd.window_object orderFrontRegardless];
+		}
 		return;
 	}
 	[[NSApplication sharedApplication] activateIgnoringOtherApps:YES];

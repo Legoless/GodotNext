@@ -12,6 +12,12 @@ GODOTNEXT_BACKGROUND=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed -
 
 `misc/scripts/godotnext_background_check.sh` checks it: a lit scene renders on Metal while the frontmost app stays the same. Don't switch apps while it runs. The mode lives in `platform/macos/godotnext_background.h` and the `background_mode` hooks.
 
+A transparent window is still a window: it shows as a blank tile in Mission Control, and the editor's main window spans the whole screen during `--export-pack` (the editor ignores `--position` and `--resolution`). Export runs never present a frame, so they also set `GODOTNEXT_BACKGROUND_HIDDEN=1`, which keeps the window ordered out. The shader baker still compiles on the RenderingDevice.
+
+```
+GODOTNEXT_BACKGROUND=1 GODOTNEXT_BACKGROUND_HIDDEN=1 ./bin/godot.macos.editor.arm64 --path godotnext/testbed --rendering-driver metal --export-pack "macOS (baker)" <out.pck>
+```
+
 ## Metal shader validation
 
 PR basics on the Apple M5 Max count Metal API and shader validation, not only Godot `ERROR:` lines. Shader-validation reports stay off stderr unless `MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1` is set. With the variable unset, a scene can render black while stdout looks clean, because validation zeros the stores it rejects.

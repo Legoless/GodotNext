@@ -45,3 +45,15 @@ inline bool godotnext_background_mode() {
 	}();
 	return enabled;
 }
+
+// GodotNext: fully hidden runs on the Apple M5 Max.
+// A transparent window still shows as a blank tile in Mission Control, and the editor's main window
+// spans the whole screen during `--export-pack`. Export runs never draw through the window, so with
+// GODOTNEXT_BACKGROUND_HIDDEN=1 (and GODOTNEXT_BACKGROUND=1) the window is never ordered on screen.
+inline bool godotnext_background_hidden() {
+	static const bool enabled = [] {
+		const char *value = getenv("GODOTNEXT_BACKGROUND_HIDDEN");
+		return value != nullptr && strcmp(value, "1") == 0;
+	}();
+	return enabled;
+}
