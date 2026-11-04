@@ -40,6 +40,7 @@
 #include "servers/rendering/rendering_server_globals.h"
 #ifdef RD_ENABLED
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #endif
 
 #ifndef XR_DISABLED
@@ -330,6 +331,8 @@ uint64_t RenderingServerDefault::get_rendering_info(RSE::RenderingInfo p_info) {
 		return RendererRD::nextgi_gather_coverage_hits();
 	} else if (p_info == RSE::RENDERING_INFO_NEXTGI_COVERAGE_RAYS) {
 		return RendererRD::nextgi_gather_coverage_rays();
+	} else if (p_info == RSE::RENDERING_INFO_NEXTGI_REFERENCE_SAMPLES) {
+		return RendererRD::nextgi_reference_sample_count();
 	}
 #endif
 	return RSG::utilities->get_rendering_info(p_info);

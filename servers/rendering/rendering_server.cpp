@@ -3593,6 +3593,7 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_NEXTGI_COVERAGE_HITS);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_NEXTGI_COVERAGE_RAYS);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_NEXTGI_REFERENCE_SAMPLES);
 
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_CANVAS);
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_MESH);
@@ -3855,6 +3856,11 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_page_radiance", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_shadow_mask", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/coverage_counter", false);
+	// GodotNext: nextgi_reference
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_mode", PROPERTY_HINT_ENUM, "Off,Full,Direct Only"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_seed", PROPERTY_HINT_RANGE, "1,4096,1"), 1);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/gather_hit_radiance", PROPERTY_HINT_ENUM, "SRC,Reference"), 0);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/reference_readback", false);
 
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);

@@ -30,6 +30,8 @@
 
 #include "next_gi.h"
 
+#include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
+
 // GodotNext: nextgi_rt_scene
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
@@ -443,7 +445,21 @@ Dictionary NextGI::get_tier_info() const {
 	if (gather != nullptr) {
 		gather->fill_info(info);
 	}
+	if (reference != nullptr) {
+		reference->fill_info(info);
+	}
 	return info;
+}
+
+void NextGI::composite_reference(RID p_color) {
+	if (int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")) == 0) {
+		return;
+	}
+	// The frame block does not run when the HWRT tier is inactive, so this is the path that logs that case.
+	if (reference == nullptr) {
+		reference = memnew(NextGIReference);
+	}
+	reference->composite(p_color);
 }
 
 void NextGI::_gather(RenderDataRD *p_render_data) {
@@ -543,6 +559,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		gather = memnew(NextGIGather);
 		gather->init();
 	}
+	if (reference == nullptr) {
+		reference = memnew(NextGIReference);
+	}
+	reference->invalidate_tables();
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_BEGIN].name);
@@ -586,6 +606,8 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		rd->draw_command_end_label();
 	}
 
+	// The reference sample uses the TLAS built earlier in this frame, before compaction.
+	reference->render(p_render_data);
 	// Compaction copies invalidate the TLAS when the device frame restarts. Card capture can
 	// force that restart with a readback, so the copy is queued only after this frame's traces.
 	if (rt_scene != nullptr) {
@@ -614,6 +636,11 @@ NextGI::~NextGI() {
 	if (gather != nullptr) {
 		memdelete(gather);
 		gather = nullptr;
+	}
+	if (reference != nullptr) {
+		reference->free();
+		memdelete(reference);
+		reference = nullptr;
 	}
 	if (relight != nullptr) {
 		memdelete(relight);

@@ -2759,6 +2759,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		RENDER_TIMESTAMP("Tonemap");
 
+		// GodotNext: nextgi_reference
+		// The path-traced mean replaces the HDR color before tonemapping.
+		next_gi.composite_reference(rb->get_internal_texture());
+
 		_render_buffers_post_process_and_tonemap(p_render_data);
 	}
 

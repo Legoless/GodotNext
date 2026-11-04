@@ -87,6 +87,7 @@ class NextGIGather {
 	float last_miss_luminance = 0.0f;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
+	bool hit_radiance_reference = false;
 
 	bool _ensure_shader();
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
@@ -104,7 +105,7 @@ public:
 	void fill_info(Dictionary &r_info) const;
 
 	// Expanded gather source (variant 0) for the kernel-rule doctest. No GPU compile.
-	static String build_shader_source();
+	static String build_shader_source(int p_variant = 0);
 
 	NextGIGather();
 	~NextGIGather();

@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/math/projection.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
@@ -77,9 +78,14 @@ struct GatherParamsGPU {
 	uint32_t feedback_stride;
 	uint32_t record_count;
 	uint32_t velocity_enabled;
+	uint32_t page_rect_count;
+	uint32_t pad0;
+	uint32_t pad1;
+	uint32_t pad2;
 };
-static_assert(sizeof(GatherParamsGPU) == 232, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 248, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
+static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
 struct GatherCountersGPU {
 	uint32_t rays = 0;
@@ -95,7 +101,7 @@ struct GatherCountersGPU {
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
-	RID pipelines[4];
+	RID pipelines[5];
 };
 
 static void _store_projection(const Projection &p_projection, float r_matrix[16]) {
@@ -192,6 +198,7 @@ bool NextGIGather::_ensure_shader() {
 	defines.push_back("#define MODE_INTEGRATE\n");
 	defines.push_back("#define MODE_SRC_FEEDBACK\n");
 	defines.push_back("#define MODE_COVERAGE\n");
+	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
 	shader->shader.initialize(defines);
 	shader->version = shader->shader.version_create(false);
 	if (!shader->version.is_valid()) {
@@ -201,9 +208,10 @@ bool NextGIGather::_ensure_shader() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		shader->pipelines[i] = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, i));
 		if (!shader->pipelines[i].is_valid()) {
+			shader->shader.version_free(shader->version);
 			memdelete(shader);
 			shader = nullptr;
 			ERR_FAIL_V_MSG(false, "The NextGI gather pipeline failed to compile.");
@@ -364,6 +372,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.feedback_count = p_feedback_count;
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
+	params.page_rect_count = relight->get_page_rect_count();
 	RID normal_roughness = dummy_color;
 	RID velocity = dummy_color;
 	if (rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
@@ -411,7 +420,22 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!material_depth.is_valid()) {
 		material_depth = dummy_color;
 	}
-	RD::Uniform uniforms[23] = {
+	hit_radiance_reference = false;
+	RID ref_materials = dummy_buffer;
+	RID ref_lights = dummy_buffer;
+	RID ref_params = dummy_buffer;
+	if (int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/gather_hit_radiance")) == 1 && next_gi->get_reference() != nullptr) {
+		RID materials;
+		RID lights;
+		RID estimator;
+		if (next_gi->get_reference()->prepare_estimator(p_render_data, materials, lights, estimator)) {
+			ref_materials = materials;
+			ref_lights = lights;
+			ref_params = estimator;
+			hit_radiance_reference = true;
+		}
+	}
+	RD::Uniform uniforms[26] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -435,9 +459,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, feedback_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 21, Vector<RID>({ sampler_nearest, normal_roughness })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 22, Vector<RID>({ sampler_nearest, velocity })),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, ref_materials),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, ref_lights),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, ref_params),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 23), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 26), shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -501,7 +528,7 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 	const uint32_t groups_y = MAX((nextgi_gather_probe_count_axis(last_screen_h) + 7u) / 8u, 1u);
 	{
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[0]);
+		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[hit_radiance_reference ? 4 : 0]);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
@@ -550,14 +577,18 @@ void NextGIGather::integrate(RenderDataRD *p_render_data) {
 	_free_uniform_set();
 }
 
-String NextGIGather::build_shader_source() {
+String NextGIGather::build_shader_source(int p_variant) {
 	NextgiGatherShaderRD shader;
 	Vector<String> defines;
 	defines.push_back("");
+	defines.push_back("#define MODE_INTEGRATE\n");
+	defines.push_back("#define MODE_SRC_FEEDBACK\n");
+	defines.push_back("#define MODE_COVERAGE\n");
+	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
 	shader.initialize(defines);
 	const RID version = shader.version_create(false);
 	ERR_FAIL_COND_V(!version.is_valid(), String());
-	const Vector<String> sources = shader.version_build_variant_stage_sources(version, 0);
+	const Vector<String> sources = shader.version_build_variant_stage_sources(version, p_variant);
 	shader.version_free(version);
 	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
 		return String();
@@ -576,4 +607,5 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["src_gather_miss_luminance"] = last_miss_luminance;
 	r_info["src_coverage_hits"] = int64_t(last_coverage_hits);
 	r_info["src_coverage_rays"] = int64_t(last_coverage_rays);
+	r_info["gather_hit_radiance_reference"] = hit_radiance_reference;
 }

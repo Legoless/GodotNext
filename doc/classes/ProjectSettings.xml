@@ -3111,11 +3111,23 @@
 		<member name="rendering/global_illumination/nextgi/debug/dump_material_atlas" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI saves its surface cache material atlas once every known card has been captured: the albedo, normal, ORM, emission and depth targets go to [code]user://nextgi_atlas_*.exr[/code], and the log gets the coverage of each card (the fraction of its texels with a depth above 0). This is a debugging aid; it reads the atlas back from the GPU. It is read when NextGI creates the atlas, so changes take effect after a restart.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/gather_hit_radiance" type="int" setter="" getter="" default="0">
+			How NextGI shades a gather hit. [code]0[/code] is the surface cache. [code]1[/code] is the reference path tracer, at 16 samples per hit. Misses still sample the sky.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/read_page_radiance" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_page_probes[/code], the center-texel radiance of each surface-cache page. This reads a small buffer back from the GPU.
 		</member>
 		<member name="rendering/global_illumination/nextgi/debug/read_shadow_mask" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_mask_pages[/code], the shadow-mask texels of each page. This reads the mask atlas back from the GPU.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/reference_mode" type="int" setter="" getter="" default="0">
+			Reference path tracer mode. [code]0[/code] is off. [code]1[/code] accumulates a full path-traced image and composites it into the HDR color before tonemapping. [code]2[/code] is direct lighting only. This requires the hardware ray tracing tier. When that tier is inactive, NextGI logs one error and does not create the shader.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/reference_readback" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes the reference sample count, mean, min, max and hash. Viewports up to 64×64 also include per-pixel luminance. This reads the accumulation image back from the GPU.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/reference_seed" type="int" setter="" getter="" default="1">
+			Seed for the reference path tracer. The same seed and scene produce the same accumulation.
 		</member>
 		<member name="rendering/global_illumination/nextgi/enabled" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use SDFGI instead. See [method RenderingServer.nextgi_get_tier_info].

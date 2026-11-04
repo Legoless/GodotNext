@@ -6448,6 +6448,9 @@
 		<constant name="RENDERING_INFO_NEXTGI_COVERAGE_RAYS" value="12" enum="RenderingInfo">
 			Rays from the NextGI coverage counter whose hit distance is at most 10 m.
 		</constant>
+		<constant name="RENDERING_INFO_NEXTGI_REFERENCE_SAMPLES" value="13" enum="RenderingInfo">
+			Samples accumulated by the NextGI reference path tracer.
+		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.
 		</constant>

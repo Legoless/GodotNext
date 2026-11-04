@@ -85,6 +85,10 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint feedback_stride;
 	uint record_count;
 	uint velocity_enabled;
+	uint page_rect_count;
+	uint pad0;
+	uint pad1;
+	uint pad2;
 }
 params;
 
@@ -107,6 +111,38 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIFeedbackPag
 	uvec4 data[]; // x = indirect texel (x | y << 16), y = record, z = card
 }
 feedback_pages;
+
+struct NextGIRefMaterial {
+	vec4 albedo_metal;
+	vec4 emission_roughness;
+	vec4 specular_mode;
+};
+
+layout(set = 0, binding = 23, std430) restrict readonly buffer NextGIGatherRefMaterials {
+	NextGIRefMaterial data[];
+}
+materials;
+
+layout(set = 0, binding = 24, std430) restrict readonly buffer NextGIGatherRefLights {
+	vec4 data[];
+}
+lights;
+
+layout(set = 0, binding = 25, std430) restrict readonly buffer NextGIGatherRefParams {
+	vec4 cam_origin_fov;
+	vec4 cam_forward_aspect;
+	vec4 cam_up;
+	vec4 cam_right;
+	uvec4 dispatch;
+	uvec4 counts;
+	vec4 sky_color;
+	vec4 exposure_clear;
+}
+ref_params;
+
+#ifdef MODE_HIT_RADIANCE_REFERENCE
+#include "nextgi_reference_pt_inc.glsl"
+#endif
 
 #include "../oct_inc.glsl"
 
@@ -189,7 +225,11 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		vec2 texel = vec2((u / card.axis_u.w) * 0.5 + 0.5, (v / card.axis_v.w) * 0.5 + 0.5) * card_size;
 		ivec2 material = ivec2(card.atlas_rect.xy) + ivec2(clamp(texel, vec2(0.0), card_size - 1.0));
 		float card_depth = texelFetch(material_depth_tex, material, 0).r;
-		uvec2 page = page_rects.data[rec.page_table + i];
+		uint page_index = rec.page_table + i;
+		if (page_index >= params.page_rect_count) {
+			continue;
+		}
+		uvec2 page = page_rects.data[page_index];
 		uvec2 page_origin = uvec2(page.x & 0xFFFFu, page.x >> 16u);
 		uvec2 page_size = max(uvec2(page.y & 0xFFFFu, page.y >> 16u), uvec2(1u));
 		ivec2 radiance_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - 1.0));
@@ -265,16 +305,34 @@ vec3 nextgi_miss_radiance(vec3 direction) {
 	return params.ambient_color.rgb;
 }
 
-vec3 nextgi_shade_hit(NextGIHit hit, inout uint uncovered_count) {
+vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count) {
+#ifdef MODE_HIT_RADIANCE_REFERENCE
+	// 16 estimator samples at the hit. Misses stay on the sky path in the caller.
+	vec3 object_pos;
+	vec3 face_normal;
+	if (!nextgi_hit_object_pos_normal(hit, object_pos, face_normal) || hit.custom_index >= params.record_count) {
+		return nextgi_miss_radiance(ray_dir);
+	}
+	NextGIInstanceRecord rec = records.data[hit.custom_index];
+	vec3 world = nextgi_pt_mul_point(rec, object_pos);
+	vec3 face = nextgi_pt_mul_normal(rec, face_normal);
+	vec3 accum = vec3(0.0);
+	uint rng = nextgi_pt_hash(hit.custom_index ^ params.frame ^ ref_params.counts.x);
+	for (uint s = 0u; s < 16u; s++) {
+		accum += nextgi_pt_radiance(world + face * rec.origin_offset, -ray_dir, rng);
+	}
+	return accum / 16.0;
+#else
 	vec3 radiance;
 	bool uncovered = false;
 	if (!nextgi_src_lookup(hit, radiance, uncovered)) {
-		return nextgi_miss_radiance(vec3(0.0, 1.0, 0.0));
+		return nextgi_miss_radiance(ray_dir);
 	}
 	if (uncovered) {
 		uncovered_count++;
 	}
 	return radiance;
+#endif
 }
 
 void nextgi_gather_main() {
@@ -347,7 +405,7 @@ void nextgi_gather_main() {
 		vec3 radiance;
 		atomicAdd(counters.rays, 1u);
 		if (nextgi_trace(origin, dir, params.rt_radius, hit)) {
-			radiance = nextgi_shade_hit(hit, uncovered_count);
+			radiance = nextgi_shade_hit(hit, dir, uncovered_count);
 		} else {
 			radiance = nextgi_miss_radiance(dir);
 			atomicAdd(counters.misses, 1u);
@@ -441,7 +499,7 @@ void nextgi_feedback_main() {
 		NextGIHit hit;
 		vec3 radiance = nextgi_miss_radiance(dir);
 		if (nextgi_trace(origin, dir, params.rt_radius, hit)) {
-			radiance = nextgi_shade_hit(hit, uncovered_count);
+			radiance = nextgi_shade_hit(hit, dir, uncovered_count);
 		}
 		accum += radiance;
 	}

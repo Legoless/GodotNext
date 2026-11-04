@@ -59,6 +59,7 @@ class NextGIRelight;
 
 // GodotNext: nextgi_gather
 class NextGIGather;
+class NextGIReference;
 
 // NextGI host entry: the §3 tier selection (#15), the ray-query toolchain self-test (#20), the
 // Forward+ frame block (#26), the RT scene (#28) and the HWRT safety net (#36): the startup
@@ -260,6 +261,7 @@ private:
 
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;
+	NextGIReference *reference = nullptr;
 	void _gather(RenderDataRD *p_render_data);
 	void _integrate(RenderDataRD *p_render_data);
 
@@ -381,9 +383,12 @@ public:
 	// PASS_SLOTS timestamp, empty slots included. Until the gather lands both buffers are cleared to
 	// (0, 0, 0, 0), so the opaque pass keeps its own ambient and specular through the buffer alpha.
 	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution);
+	// Writes the reference mean into the HDR color when reference_mode is on.
+	void composite_reference(RID p_color);
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }
+	NextGIReference *get_reference() const { return reference; }
 
 	// GodotNext: nextgi_src_cards
 	// The §8.3 Stage-1 card clustering, nextgi_src_cluster_cards (next_gi_src.h). Pure, so doctests

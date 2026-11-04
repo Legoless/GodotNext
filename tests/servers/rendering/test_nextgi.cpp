@@ -317,6 +317,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 // GodotNext: nextgi_rt_scene
+#include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 // GodotNext: nextgi_as_slots
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -1901,6 +1902,16 @@ TEST_CASE("[NextGI] RT registry: light events, one delivery across two views, ar
 	line = String();
 	CHECK_FALSE(next_gi.update_tier(as_memory, NextGI::QUALITY_AUTO, line));
 	CHECK(line.is_empty());
+}
+
+TEST_CASE("[NextGI] reference path tracer furnace equilibrium and HWRT shader gate") {
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_reference_furnace_equilibrium(1.0f, 0.8f), 5.0f));
+	CHECK(RendererRD::nextgi_reference_shader_allowed(true));
+	CHECK_FALSE(RendererRD::nextgi_reference_shader_allowed(false));
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/reference_mode"));
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/reference_seed"));
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/gather_hit_radiance"));
+	CHECK_EQ(int(ProjectSettings::get_singleton()->get_setting("rendering/global_illumination/nextgi/debug/reference_mode")), 0);
 }
 
 } // namespace TestNextGI

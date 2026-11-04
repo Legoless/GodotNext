@@ -371,6 +371,12 @@ TEST_CASE("[NextGI] diffuse gather source follows the ray-query rules") {
 	CHECK_FALSE(source.contains("rayQueryGetIntersectionTriangleVertexPositionsEXT"));
 	CHECK_FALSE(source.contains("GL_EXT_buffer_reference"));
 	CHECK_FALSE(source.contains("while"));
+
+	const String diagnostic = RendererRD::NextGIGather::build_shader_source(4);
+	REQUIRE_FALSE(diagnostic.is_empty());
+	REQUIRE(diagnostic.contains("nextgi_pt_radiance("));
+	CHECK_EQ(TestNextGIHWRTSafety::count_occurrences(diagnostic, "rayQueryProceedEXT("), 1);
+	CHECK_FALSE(diagnostic.contains("while"));
 }
 
 #ifdef MODULE_GLSLANG_ENABLED

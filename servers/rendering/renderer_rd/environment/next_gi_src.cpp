@@ -530,6 +530,9 @@ void NextGISRC::free() {
 
 bool NextGISRC::_build_card_set(RID p_mesh) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
+		return false;
+	}
 	// The cards cover exactly the surfaces in the mesh's BLAS parts, so hits always find a card set.
 	// No parts yet means the RT scene has not built them; try again next frame.
 	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);

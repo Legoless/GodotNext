@@ -436,6 +436,9 @@ void NextGIRTScene::_ensure_record_buffers(uint32_t p_instance_count, uint32_t p
 
 void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
+		return;
+	}
 	const bool dynamic = mesh_storage->mesh_nextgi_rt_is_dynamic(p_mesh);
 	const LocalVector<MeshStorage::NextGIRTPart> *old_parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
 	if (old_parts != nullptr) {
@@ -809,7 +812,7 @@ void NextGIRTScene::compact_after_traces() {
 
 uint32_t NextGIRTScene::_mesh_triangle_count(RID p_mesh) const {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
-	if (mesh_storage == nullptr) {
+	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
 		return 0;
 	}
 	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
@@ -841,7 +844,12 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 	}
 	LocalVector<RID> ids;
 	LocalVector<NextGIASMesh> meshes;
+	LocalVector<RID> stale_meshes;
 	for (const KeyValue<RID, uint64_t> &entry : mesh_last_tlas_frame) {
+		if (!mesh_storage->owns_mesh(entry.key)) {
+			stale_meshes.push_back(entry.key);
+			continue;
+		}
 		NextGIASMesh mesh;
 		mesh.id = ids.size();
 		ids.push_back(entry.key);
@@ -857,6 +865,9 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 		mesh.bytes = bytes;
 		mesh.frames_absent = p_frame > entry.value ? uint32_t(p_frame - entry.value) : 0;
 		meshes.push_back(mesh);
+	}
+	for (const RID &stale : stale_meshes) {
+		mesh_last_tlas_frame.erase(stale);
 	}
 	LocalVector<uint32_t> evict;
 	evict.resize(meshes.size());
