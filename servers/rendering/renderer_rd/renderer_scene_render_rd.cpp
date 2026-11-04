@@ -1066,6 +1066,20 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 	return can_use_effects;
 }
 
+uint32_t RendererSceneRenderRD::_render_nextgi_card_batch(const NextGICardCapture *p_cards, uint32_t p_count, RID p_framebuffer) {
+	if (p_cards == nullptr || p_count == 0 || !p_framebuffer.is_valid()) {
+		return 0;
+	}
+	if (cull_argument.size() == 0) {
+		cull_argument.push_back(nullptr);
+	}
+	for (uint32_t i = 0; i < p_count; i++) {
+		cull_argument[0] = p_cards[i].instance;
+		_render_material(p_cards[i].cam_transform, p_cards[i].projection, true, cull_argument, p_framebuffer, p_cards[i].rect, 1.0);
+	}
+	return p_count;
+}
+
 void RendererSceneRenderRD::_render_buffers_debug_draw(const RenderDataRD *p_render_data) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();

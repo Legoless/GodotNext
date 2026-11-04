@@ -69,6 +69,7 @@ class NextGIRelight {
 		uint32_t record_index = 0;
 		NextGIInstanceRecord record;
 		LocalVector<CardPage> cards;
+		uint64_t last_used = 0;
 	};
 
 	RID radiance;
@@ -81,7 +82,9 @@ class NextGIRelight {
 	bool atlases_ready = false;
 	bool logged_atlas = false;
 
-	NextGIShelfPacker radiance_packer{ NEXTGI_SRC_RADIANCE_SIZE, NEXTGI_SRC_RADIANCE_SIZE };
+	NextGIBuddyAllocator radiance_buddy{ NEXTGI_SRC_RADIANCE_SIZE, NEXTGI_SRC_PAGE_MIN };
+	uint64_t page_clock = 1;
+	uint32_t page_evictions = 0;
 	NextGIShelfPacker mask_packer{ NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE };
 	LocalVector<InstancePages> instances;
 	HashMap<RenderGeometryInstance *, uint32_t> instance_index;
@@ -141,6 +144,7 @@ private:
 	RID _storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t p_count, uint32_t p_stride);
 	void _reset_uniform_set();
 	void _upload_page_rects();
+	bool _evict_oldest_pages();
 
 public:
 	static NextGIRelight *get_singleton() { return singleton; }

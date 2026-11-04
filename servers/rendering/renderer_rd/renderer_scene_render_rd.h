@@ -97,6 +97,17 @@ protected:
 	virtual void _render_scene(RenderDataRD *p_render_data, const Color &p_default_color) = 0;
 	virtual void _render_buffers_debug_draw(const RenderDataRD *p_render_data);
 
+	// One card in a batched SRC capture. cam_transform is the card camera (instance × card frame).
+	struct NextGICardCapture {
+		RenderGeometryInstance *instance = nullptr;
+		Transform3D cam_transform;
+		Projection projection;
+		Rect2i rect;
+	};
+
+	// One draw list for every card. The default draws each card with _render_material.
+	// Returns the number of draw lists opened.
+	virtual uint32_t _render_nextgi_card_batch(const NextGICardCapture *p_cards, uint32_t p_count, RID p_framebuffer);
 	virtual void _render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) = 0;
 	virtual void _render_uv2(const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region) = 0;
 	virtual void _render_sdfgi(Ref<RenderSceneBuffersRD> p_render_buffers, const Vector3i &p_from, const Vector3i &p_size, const AABB &p_bounds, const PagedArray<RenderGeometryInstance *> &p_instances, const RID &p_albedo_texture, const RID &p_emission_texture, const RID &p_emission_aniso_texture, const RID &p_geom_facing_texture, float p_exposure_normalization) = 0;

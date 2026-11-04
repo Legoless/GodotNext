@@ -204,6 +204,11 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 	if (rec.card_set == 0xFFFFFFFFu || rec.page_table == 0xFFFFFFFFu) {
 		return false;
 	}
+	// Bit 31 marks a page that was evicted. D6 treats that as uncovered until it is resident again.
+	if ((rec.page_table & 0x80000000u) != 0u) {
+		uncovered = true;
+		return false;
+	}
 	NextGICardSet card_set = card_sets.data[rec.card_set];
 	float best_align = -2.0;
 	float fallback_align = -2.0;

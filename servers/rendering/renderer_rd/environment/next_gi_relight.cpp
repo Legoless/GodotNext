@@ -345,6 +345,28 @@ RID NextGIRelight::_storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t
 	return r_buffer;
 }
 
+bool NextGIRelight::_evict_oldest_pages() {
+	if (instances.is_empty()) {
+		return false;
+	}
+	uint32_t oldest = 0;
+	for (uint32_t i = 1; i < instances.size(); i++) {
+		if (instances[i].last_used < instances[oldest].last_used) {
+			oldest = i;
+		}
+	}
+	for (const CardPage &page : instances[oldest].cards) {
+		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+	}
+	instance_index.erase(instances[oldest].instance);
+	instances.remove_at(oldest);
+	for (uint32_t i = oldest; i < instances.size(); i++) {
+		instance_index[instances[i].instance] = i;
+	}
+	page_evictions++;
+	return true;
+}
+
 uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record) {
 	if (p_instance == nullptr || r_record.card_set == UINT32_MAX) {
 		return UINT32_MAX;
@@ -361,6 +383,7 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 		InstancePages &pages = instances[*existing];
 		pages.record = r_record;
 		pages.record_index = r_record.tlas_index;
+		pages.last_used = page_clock++;
 		r_record.page_table = pages.page_table;
 		return pages.page_table;
 	}
@@ -385,7 +408,14 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 		const uint32_t card_h = MAX(card.atlas_rect[3], 1u);
 		Rect2i radiance_rect;
 		Rect2i mask_rect;
-		if (!radiance_packer.allocate(card_w, card_h, radiance_rect) || !mask_packer.allocate(MAX(card_w / 2, 1u), MAX(card_h / 2, 1u), mask_rect)) {
+		if (!radiance_buddy.allocate(card_w, card_h, radiance_rect)) {
+			if (!_evict_oldest_pages() || !radiance_buddy.allocate(card_w, card_h, radiance_rect)) {
+				fitted = false;
+				break;
+			}
+		}
+		if (!mask_packer.allocate(MAX(card_w / 2, 1u), MAX(card_h / 2, 1u), mask_rect)) {
+			radiance_buddy.free_block(radiance_rect);
 			fitted = false;
 			break;
 		}
@@ -403,9 +433,13 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 		pages.cards.push_back(page);
 	}
 	if (!fitted || pages.cards.is_empty()) {
+		for (const CardPage &page : pages.cards) {
+			radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+		}
 		alloc_failures++;
-		return UINT32_MAX;
+		return 0x80000000u;
 	}
+	pages.last_used = page_clock++;
 	page_table_count += pages.cards.size();
 	r_record.page_table = pages.page_table;
 	instance_index.insert(p_instance, instances.size());
@@ -926,6 +960,9 @@ float NextGIRelight::get_max_origin_offset() const {
 }
 
 void NextGIRelight::fill_info(Dictionary &r_info) const {
+	r_info["src_resident_pages"] = int64_t(page_table_count);
+	r_info["src_page_evictions"] = int64_t(page_evictions);
+	r_info["src_radiance_bytes"] = int64_t(radiance_bytes);
 	r_info["src_relight_texels"] = int64_t(last_texels);
 	r_info["src_relight_rays"] = int64_t(last_rays);
 	r_info["src_relight_rays_skipped"] = int64_t(last_rays_skipped);

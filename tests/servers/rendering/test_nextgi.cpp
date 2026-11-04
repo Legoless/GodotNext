@@ -1914,6 +1914,88 @@ TEST_CASE("[NextGI] reference path tracer furnace equilibrium and HWRT shader ga
 	CHECK_EQ(int(ProjectSettings::get_singleton()->get_setting("rendering/global_illumination/nextgi/debug/reference_mode")), 0);
 }
 
+TEST_CASE("[NextGI] SRC production: atlas budget, material sharing, capture cap, buddy and LRU") {
+	const RendererRD::NextGIAtlasBudget high = RendererRD::nextgi_src_atlas_budget(false);
+	const RendererRD::NextGIAtlasBudget epic = RendererRD::nextgi_src_atlas_budget(true);
+	CHECK_EQ(high.radiance_bytes, uint64_t(64 * 1024 * 1024));
+	CHECK_EQ(high.material_bytes, uint64_t(128 * 1024 * 1024));
+	CHECK_EQ(epic.radiance_bytes, uint64_t(128 * 1024 * 1024));
+	CHECK_EQ(epic.material_bytes, uint64_t(256 * 1024 * 1024));
+	CHECK_EQ(epic.radiance_width, 4096u);
+	CHECK_EQ(epic.radiance_height, 8192u);
+
+	const uint64_t shared = RendererRD::nextgi_src_material_key(7, 0, nullptr, 0);
+	RendererRD::NextGIMaterialCaptures captures;
+	bool created = false;
+	for (int i = 0; i < 100; i++) {
+		captures.capture(shared, created);
+		CHECK_EQ(created, i == 0);
+	}
+	CHECK_EQ(captures.get_count(), 1u);
+	const uint64_t surfaces[1] = { 3 };
+	const uint64_t overridden = RendererRD::nextgi_src_material_key(7, 9, surfaces, 1);
+	captures.capture(overridden, created);
+	CHECK(created);
+	CHECK_EQ(captures.get_count(), 2u);
+
+	CHECK_EQ(RendererRD::nextgi_src_page_level(Math::PI, 128), 0u);
+	CHECK(RendererRD::nextgi_src_page_level(0.0f, 128) <= 3u);
+
+	RendererRD::NextGICaptureCandidate cards[3];
+	cards[0] = { 0, 0.1f, 100, true };
+	cards[1] = { 1, 0.9f, 100, true };
+	cards[2] = { 2, 1.0f, 100, false };
+	uint32_t accepted[3] = {};
+	CHECK_EQ(RendererRD::nextgi_src_select_captures(cards, 3, accepted, 2, 1000000), 2u);
+	CHECK_EQ(accepted[0], 1u);
+	CHECK_EQ(accepted[1], 0u);
+
+	RendererRD::NextGIBuddyAllocator buddy(64, 16);
+	Rect2i a, b, c, d;
+	REQUIRE(buddy.allocate(16, 16, a));
+	REQUIRE(buddy.allocate(16, 16, b));
+	REQUIRE(buddy.allocate(16, 16, c));
+	REQUIRE(buddy.allocate(16, 16, d));
+	CHECK(a != b);
+	CHECK(buddy.free_block(a));
+	CHECK(buddy.free_block(b));
+	CHECK(buddy.free_block(c));
+	CHECK(buddy.free_block(d));
+	Rect2i merged;
+	REQUIRE(buddy.allocate(64, 64, merged));
+	CHECK_EQ(merged, Rect2i(0, 0, 64, 64));
+	CHECK(buddy.free_block(merged));
+
+	RendererRD::NextGIBuddyAllocator stress(256, 16);
+	LocalVector<Rect2i> live;
+	uint32_t rng = 1;
+	for (int step = 0; step < 10000; step++) {
+		rng = rng * 1664525u + 1013904223u;
+		if (!live.is_empty() && (rng & 3u) == 0u) {
+			const uint32_t index = (rng >> 8) % live.size();
+			REQUIRE(stress.free_block(live[index]));
+			live.remove_at(index);
+		} else {
+			const uint32_t side = 16u << ((rng >> 16) & 3u);
+			Rect2i rect;
+			if (stress.allocate(side, side, rect)) {
+				live.push_back(rect);
+			}
+		}
+		for (uint32_t i = 0; i < live.size(); i++) {
+			for (uint32_t j = i + 1; j < live.size(); j++) {
+				CHECK_FALSE(live[i].intersects(live[j]));
+			}
+		}
+	}
+
+	RendererRD::NextGIPageUse pages[3] = { { 4, 30 }, { 5, 10 }, { 6, 20 } };
+	uint32_t evict[3] = {};
+	CHECK_EQ(RendererRD::nextgi_src_lru_evict(pages, 3, 2, evict), 2u);
+	CHECK_EQ(evict[0], 5u);
+	CHECK_EQ(evict[1], 6u);
+}
+
 } // namespace TestNextGI
 
 #endif // RD_ENABLED

@@ -57,6 +57,11 @@ enum {
 	NEXTGI_SRC_ATLAS_SIZE = 2048,
 	NEXTGI_SRC_ATLAS_GUTTER = 1, // Texels kept free right of and below each card.
 	NEXTGI_SRC_MATERIAL_BUDGET_HIGH = 128 * 1024 * 1024, // Material atlas budget at High (§8.3).
+	NEXTGI_SRC_MATERIAL_BUDGET_EPIC = 256 * 1024 * 1024,
+	NEXTGI_SRC_CAPTURE_CARD_CAP = 64,
+	NEXTGI_SRC_CAPTURE_TEXEL_CAP = 1000000,
+	NEXTGI_SRC_PAGE_MIN = 16,
+	NEXTGI_SRC_PAGE_LEVEL_MAX = 3,
 };
 
 // A face normal within this angle of a seed adds no seed of its own.
@@ -161,6 +166,74 @@ public:
 	uint32_t get_height() const { return height; }
 };
 
+// High is 4096² radiance (64 MiB at 4 bytes) and a 128 MiB material budget. Epic doubles both:
+// radiance becomes 4096×8192.
+struct NextGIAtlasBudget {
+	uint32_t radiance_width = 4096;
+	uint32_t radiance_height = 4096;
+	uint64_t radiance_bytes = 0;
+	uint64_t material_bytes = 0;
+};
+
+NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic);
+
+// Ω ≈ π r²/d². Distance 0 is a full hemisphere.
+float nextgi_src_solid_angle(float p_radius, float p_distance);
+
+// L = clamp(floor(log2(full / needed)), 0, 3). needed grows with solid angle; L = 0 is full resolution.
+uint32_t nextgi_src_page_level(float p_solid_angle, uint32_t p_full_texels);
+
+// FNV-1a of the mesh, the override and the surface materials. Equal keys share one material capture.
+uint64_t nextgi_src_material_key(uint64_t p_mesh_id, uint64_t p_override_id, const uint64_t *p_surface_ids, uint32_t p_surface_count);
+
+// One capture id per distinct material key.
+class NextGIMaterialCaptures {
+	HashMap<uint64_t, uint32_t> ids;
+	uint32_t count = 0;
+
+public:
+	uint32_t capture(uint64_t p_key, bool &r_new);
+	uint32_t get_count() const { return count; }
+	uint32_t get_id(uint64_t p_key) const;
+};
+
+struct NextGICaptureCandidate {
+	uint32_t id = 0;
+	float solid_angle = 0.0f;
+	uint32_t texels = 0;
+	bool first_residency = false;
+};
+
+// Highest solid angle first, first residency before a level change. Stops at the card or texel cap.
+uint32_t nextgi_src_select_captures(const NextGICaptureCandidate *p_items, uint32_t p_count, uint32_t *r_accepted, uint32_t p_card_cap, uint32_t p_texel_cap);
+
+struct NextGIPageUse {
+	uint32_t id = 0;
+	uint64_t last_used = 0;
+};
+
+// Oldest last_used first. Writes up to p_need ids.
+uint32_t nextgi_src_lru_evict(const NextGIPageUse *p_pages, uint32_t p_count, uint32_t p_need, uint32_t *r_evict);
+
+// Quad buddy allocator. Blocks are squares, minimum 16, split into four. Free siblings merge.
+class NextGIBuddyAllocator {
+	uint32_t size = 4096;
+	uint32_t min_block = NEXTGI_SRC_PAGE_MIN;
+	static constexpr uint32_t LEVELS = 16;
+	LocalVector<Rect2i> free_lists[LEVELS];
+
+	uint32_t _level(uint32_t p_side) const;
+	uint32_t _round(uint32_t p_side) const;
+	bool _ensure(uint32_t p_side);
+	void _merge(const Rect2i &p_block);
+
+public:
+	explicit NextGIBuddyAllocator(uint32_t p_size = 4096, uint32_t p_min = NEXTGI_SRC_PAGE_MIN);
+	bool allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_rect);
+	bool free_block(const Rect2i &p_rect);
+	void reset();
+};
+
 // The SRC card sets and material atlas, owned by NextGI and created by the frame block's first run
 // under the HWRT tier. Card sets are per mesh in P1a, captured with one representative instance
 // (the shared (mesh, override set) atlas and the per-instance LRU are P1b, #41).
@@ -184,6 +257,10 @@ public:
 		uint64_t capture_frames = 0; // Frames with at least one capture.
 		uint64_t shadow_batch_refusals = 0; // Capture requests inside a shadow batch; must stay 0.
 		uint32_t failed_mesh_count = 0; // Meshes with no cards (no triangles) or no atlas space.
+		uint32_t capture_draw_lists = 0; // Last frame. One batched list, or 0 when nothing was queued.
+		uint32_t capture_texels = 0;
+		float capture_cpu_ms = 0.0f;
+		uint32_t material_capture_count = 0; // Distinct (mesh, material) keys.
 	};
 
 private:
@@ -213,6 +290,7 @@ private:
 	LocalVector<NextGICardSet> card_sets;
 	LocalVector<CardSetState> card_set_states;
 	HashMap<RID, uint32_t> mesh_card_sets;
+	HashMap<uint64_t, uint32_t> key_card_sets;
 	HashSet<RID> failed_meshes;
 	Stats stats;
 
@@ -227,8 +305,7 @@ private:
 	LocalVector<float> card_coverage; // Per card, filled by the depth download.
 
 	void _create_atlas();
-	bool _build_card_set(RID p_mesh);
-	void _capture_card(RenderGeometryInstance *p_instance, const Transform3D &p_instance_transform, uint32_t p_card);
+	bool _build_card_set(RID p_mesh, uint64_t p_key);
 	void _upload_gpu_data();
 	void _request_dump();
 	void _on_dump_data(const Vector<uint8_t> &p_data, int p_target);
@@ -238,6 +315,8 @@ public:
 	static NextGISRC *get_singleton() { return singleton; }
 	// The card set of a mesh for NextGIInstanceRecord::card_set; UINT32_MAX when it has none yet.
 	static uint32_t get_mesh_card_set(RID p_mesh);
+	// The card set for this instance's mesh and materials. UINT32_MAX until that key is captured.
+	static uint32_t get_instance_card_set(RenderGeometryInstance *p_instance);
 
 	static String get_atlas_target_name(AtlasTarget p_target);
 

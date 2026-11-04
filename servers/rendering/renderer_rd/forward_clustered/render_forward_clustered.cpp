@@ -3185,6 +3185,85 @@ void RenderForwardClustered::_render_particle_collider_heightfield(RID p_fb, con
 	RD::get_singleton()->draw_command_end_label();
 }
 
+uint32_t RenderForwardClustered::_render_nextgi_card_batch(const NextGICardCapture *p_cards, uint32_t p_count, RID p_framebuffer) {
+	if (p_cards == nullptr || p_count == 0 || !p_framebuffer.is_valid()) {
+		return 0;
+	}
+	p_count = MIN(p_count, 64u);
+	RenderingDevice *rd = RD::get_singleton();
+	_update_render_base_uniform_set();
+	render_list[RENDER_LIST_SECONDARY].clear();
+	if (cull_argument.size() == 0) {
+		cull_argument.push_back(nullptr);
+	}
+
+	struct CardPass {
+		uint32_t element_from = 0;
+		uint32_t element_count = 0;
+		uint32_t uniform_buffer_index = 0;
+		Rect2i rect;
+		RID rp_uniform_set;
+	};
+	LocalVector<CardPass> passes;
+	const Size2i screen_size = rd->framebuffer_get_size(p_framebuffer);
+	for (uint32_t i = 0; i < p_count; i++) {
+		RenderSceneDataRD scene_data;
+		scene_data.cam_projection = p_cards[i].projection;
+		scene_data.cam_transform = p_cards[i].cam_transform;
+		scene_data.view_projection[0] = p_cards[i].projection;
+		scene_data.dual_paraboloid_side = 0;
+		scene_data.material_uv2_mode = false;
+		scene_data.opaque_prepass_threshold = 0.0f;
+		scene_data.emissive_exposure_normalization = 1.0f;
+		scene_data.time = time;
+		scene_data.time_step = time_step;
+		scene_data.main_cam_transform = p_cards[i].cam_transform;
+
+		cull_argument[0] = p_cards[i].instance;
+		RenderDataRD render_data;
+		render_data.scene_data = &scene_data;
+		render_data.cluster_size = 1;
+		render_data.cluster_max_elements = 32;
+		render_data.instances = &cull_argument;
+
+		Size2i viewport_size = p_cards[i].rect.size;
+		if (viewport_size == Size2i()) {
+			viewport_size = screen_size;
+		}
+		CardPass pass;
+		pass.uniform_buffer_index = _setup_environment(&render_data, true, screen_size, viewport_size, Color());
+		pass.element_from = render_list[RENDER_LIST_SECONDARY].elements.size();
+		_fill_render_list(RENDER_LIST_SECONDARY, &render_data, PASS_MODE_DEPTH_MATERIAL, false, false, false, true);
+		pass.element_count = render_list[RENDER_LIST_SECONDARY].elements.size() - pass.element_from;
+		render_list[RENDER_LIST_SECONDARY].sort_by_key_range(pass.element_from, pass.element_count);
+		_fill_instance_data(RENDER_LIST_SECONDARY, nullptr, pass.element_from, pass.element_count, false);
+		pass.rect = p_cards[i].rect;
+		passes.push_back(pass);
+	}
+	if (scene_state.instance_buffer[RENDER_LIST_SECONDARY].get_size(0u) > 0u) {
+		rd->buffer_flush(scene_state.instance_buffer[RENDER_LIST_SECONDARY]._get(0u));
+	}
+	for (CardPass &pass : passes) {
+		pass.rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_SECONDARY, nullptr, false, RID(), RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), pass.uniform_buffer_index, false);
+	}
+
+	const RD::FramebufferFormatID fb_format = rd->framebuffer_get_format(p_framebuffer);
+	// Depth of new rects must start at 0. Color stays: earlier cards already live in this atlas.
+	const RD::DrawListID draw_list = rd->draw_list_begin(p_framebuffer, RD::DRAW_CLEAR_DEPTH, Vector<Color>(), 0.0f);
+	for (const CardPass &pass : passes) {
+		if (pass.element_count == 0) {
+			continue;
+		}
+		rd->draw_list_set_viewport(draw_list, pass.rect);
+		rd->draw_list_enable_scissor(draw_list, Rect2(pass.rect));
+		RenderListParameters params(render_list[RENDER_LIST_SECONDARY].elements.ptr() + pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + pass.element_from, pass.element_count, true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, pass.rp_uniform_set, false, Vector2(), 0.0f, 0.0f, 1, pass.element_from);
+		params.framebuffer_format = fb_format;
+		_render_list(draw_list, fb_format, &params, 0, pass.element_count);
+	}
+	rd->draw_list_end();
+	return 1;
+}
+
 void RenderForwardClustered::_render_material(const Transform3D &p_cam_transform, const Projection &p_cam_projection, bool p_cam_orthogonal, const PagedArray<RenderGeometryInstance *> &p_instances, RID p_framebuffer, const Rect2i &p_region, float p_exposure_normalization) {
 	RENDER_TIMESTAMP("Setup Rendering 3D Material");
 

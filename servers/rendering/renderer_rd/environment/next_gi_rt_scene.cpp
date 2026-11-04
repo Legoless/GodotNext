@@ -633,7 +633,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			record.tlas_index = record_index;
 			// GodotNext: nextgi_src_cards
 			// Every part record of the mesh shares its SRC card set (§6.3); UINT32_MAX until built.
-			record.card_set = NextGISRC::get_mesh_card_set(mesh);
+			record.card_set = NextGISRC::get_instance_card_set(geometry_instance);
+			if (record.card_set == UINT32_MAX) {
+				record.card_set = NextGISRC::get_mesh_card_set(mesh);
+			}
 			if (NextGIRelight::get_singleton() != nullptr) {
 				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record);
 			}
