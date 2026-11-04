@@ -46,8 +46,15 @@ TEST_FORCE_LINK(test_nextgi)
 #include "tests/test_utils.h"
 
 #ifdef RD_ENABLED
+#include "modules/modules_enabled.gen.h"
 // GodotNext: shader_baker_ray_query
 #include "editor/export/shader_baker/shader_baker_export_plugin.h"
+#ifdef METAL_ENABLED
+#include "drivers/metal/rendering_shader_container_metal.h"
+#endif // METAL_ENABLED
+#ifdef MODULE_GLSLANG_ENABLED
+#include "modules/glslang/shader_compile.h"
+#endif // MODULE_GLSLANG_ENABLED
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -196,6 +203,64 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 	CHECK(NextgiSelftestShaderRD().requires_ray_query());
 	CHECK(NextgiRqSelftestShaderRD().requires_ray_query());
 }
+
+#if defined(METAL_ENABLED) && defined(MODULE_GLSLANG_ENABLED)
+static bool metal_container_compiles(ShaderRD &p_shader) {
+	p_shader.initialize({ "" });
+	const RID version = p_shader.version_create(false);
+	if (!version.is_valid()) {
+		return false;
+	}
+	const Vector<String> sources = p_shader.version_build_variant_stage_sources(version, 0);
+	p_shader.version_free(version);
+	if (sources.size() <= RenderingDeviceCommons::SHADER_STAGE_COMPUTE) {
+		return false;
+	}
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(
+			RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+			sources[RenderingDeviceCommons::SHADER_STAGE_COMPUTE],
+			RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+			RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_6,
+			&error);
+	if (spirv.is_empty()) {
+		print_line("metal container: glslang failed: " + error);
+		return false;
+	}
+	RenderingDeviceCommons::ShaderStageSPIRVData stage;
+	stage.shader_stage = RenderingDeviceCommons::SHADER_STAGE_COMPUTE;
+	stage.spirv = spirv;
+	Vector<RenderingDeviceCommons::ShaderStageSPIRVData> stages;
+	stages.push_back(stage);
+
+	const MetalDeviceProfile *profile = MetalDeviceProfile::get_profile(MetalDeviceProfile::Platform::macOS, MetalDeviceProfile::GPU::Apple7, os_version::MACOS_13_0);
+	if (profile == nullptr) {
+		return false;
+	}
+	RenderingShaderContainerFormatMetal format(profile, true);
+	Ref<RenderingShaderContainer> container = format.create_container();
+	return container.is_valid() && container->set_code_from_spirv(p_shader.get_name(), stages);
+}
+
+TEST_CASE("[NextGI][Metal] The Metal shader container compiles the ray-query ShaderRDs") {
+	{
+		NextgiGatherShaderRD shader;
+		CHECK(metal_container_compiles(shader));
+	}
+	{
+		NextgiSrcRelightShaderRD shader;
+		CHECK(metal_container_compiles(shader));
+	}
+	{
+		NextgiWrcUpdateShaderRD shader;
+		CHECK(metal_container_compiles(shader));
+	}
+	{
+		NextgiReferenceShaderRD shader;
+		CHECK(metal_container_compiles(shader));
+	}
+}
+#endif // METAL_ENABLED && MODULE_GLSLANG_ENABLED
 #endif // RD_ENABLED
 
 } // namespace TestNextGI
