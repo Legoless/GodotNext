@@ -346,6 +346,14 @@ public:
 	};
 	// Expanded source of the GPU instance-record encoder. Used by the doctests; no GPU compile.
 	static String build_instances_shader_source(int p_layout = INSTANCE_LAYOUT_VULKAN_64);
+	// Dynamic sources share the 100k TLAS capacity with the CPU-fed instances.
+	_FORCE_INLINE_ uint32_t static nextgi_rt_dynamic_budget(uint32_t p_capacity, uint32_t p_cpu_count) {
+		return p_cpu_count < p_capacity ? p_capacity - p_cpu_count : 0;
+	}
+	// Encodes p_count elements of p_source_buffer into the GPU instance-record buffer at p_dest_offset.
+	// p_visible_count of them are active; the rest keep mask 0. Returns the records written.
+	uint32_t encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit);
+	RID get_gpu_instance_buffer() const { return gpu_instance_buffer; }
 
 	struct Stats {
 		uint32_t fed_instance_count = 0;
@@ -368,6 +376,11 @@ private:
 	};
 
 	RID tlas;
+	RID gpu_instance_buffer;
+	uint32_t gpu_instance_capacity = 0;
+	struct InstanceEncoder;
+	InstanceEncoder *instance_encoder = nullptr;
+	bool _ensure_gpu_instance_buffer();
 	RID instance_record_buffer;
 	RID surface_record_buffer;
 	uint32_t instance_record_capacity = 0;

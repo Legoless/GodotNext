@@ -905,6 +905,7 @@ Error RenderingDevice::tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer,
 
 	const uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
 	ERR_FAIL_COND_V_MSG(!tlas_instance_range_valid(p_offset, p_count, instance_size, instance_buffer->size), ERR_INVALID_PARAMETER, "Instance range is not 16-byte aligned or lies outside the buffer.");
+	ERR_FAIL_COND_V_MSG(!RDRayQuery::has_build_input_usage(instance_buffer->usage), ERR_INVALID_PARAMETER, "The instance buffer was not created with device-address and acceleration-structure build-input usage.");
 
 	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, tlas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), tlas->invalidated, true, tlas->last_build_instance_count, p_count);
 	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));

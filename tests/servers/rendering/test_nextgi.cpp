@@ -2368,6 +2368,15 @@ TEST_CASE("[NextGI][RT] The GPU instance encoder compiles for both API layouts")
 	}
 }
 
+TEST_CASE("[NextGI][RT] Dynamic instance budget shares the TLAS capacity") {
+	// Dynamic sources take what the CPU-fed instances leave of the 100k cap.
+	CHECK_EQ(RendererRD::NextGIRTScene::nextgi_rt_dynamic_budget(100000, 0), 100000u);
+	CHECK_EQ(RendererRD::NextGIRTScene::nextgi_rt_dynamic_budget(100000, 50000), 50000u);
+	CHECK_EQ(RendererRD::NextGIRTScene::nextgi_rt_dynamic_budget(100000, 99999), 1u);
+	CHECK_EQ(RendererRD::NextGIRTScene::nextgi_rt_dynamic_budget(100000, 100000), 0u);
+	CHECK_EQ(RendererRD::NextGIRTScene::nextgi_rt_dynamic_budget(100000, 120000), 0u);
+}
+
 } // namespace TestNextGI
 
 #endif // RD_ENABLED

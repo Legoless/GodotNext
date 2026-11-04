@@ -426,17 +426,51 @@ static bool _nextgi_rt_material_is_alpha(RID p_material) {
 	return material_data->shader_data->uses_alpha_pass() || material_data->shader_data->uses_alpha_clip;
 }
 
+struct NextGIRTScene::InstanceEncoder {
+	NextgiRtInstancesShaderRD shader;
+	RID version;
+	RID pipelines[INSTANCE_LAYOUT_MAX] = { RID(), RID() };
+};
+
 void NextGIRTScene::init() {
 	ERR_FAIL_COND(tlas.is_valid());
 	ERR_FAIL_NULL(RD::get_singleton());
 	ERR_FAIL_COND(!RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY));
 	tlas = RD::get_singleton()->tlas_create(NEXTGI_RT_TLAS_CAPACITY, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+
+	// GodotNext: tlas_from_buffer
+	instance_encoder = memnew(InstanceEncoder);
+	Vector<String> defines;
+	defines.push_back("\n#define INSTANCE_64\n");
+	defines.push_back("\n#define INSTANCE_72\n");
+	instance_encoder->shader.initialize(defines);
+	instance_encoder->version = instance_encoder->shader.version_create();
+	for (int i = 0; i < INSTANCE_LAYOUT_MAX; i++) {
+		instance_encoder->pipelines[i] = RD::get_singleton()->compute_pipeline_create(instance_encoder->shader.version_get_shader(instance_encoder->version, i));
+	}
 }
 
 void NextGIRTScene::free() {
 	if (RD::get_singleton() == nullptr) {
 		return;
 	}
+	if (instance_encoder != nullptr) {
+		for (int i = 0; i < INSTANCE_LAYOUT_MAX; i++) {
+			if (instance_encoder->pipelines[i].is_valid()) {
+				RD::get_singleton()->free_rid(instance_encoder->pipelines[i]);
+			}
+		}
+		if (instance_encoder->version.is_valid()) {
+			instance_encoder->shader.version_free(instance_encoder->version);
+		}
+		memdelete(instance_encoder);
+		instance_encoder = nullptr;
+	}
+	if (gpu_instance_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(gpu_instance_buffer);
+		gpu_instance_buffer = RID();
+	}
+	gpu_instance_capacity = 0;
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
 		tlas = RID();
@@ -948,6 +982,81 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 	}
 	stats.as_bytes = total;
 	as_memory_exceeded = over;
+}
+
+bool NextGIRTScene::_ensure_gpu_instance_buffer() {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (gpu_instance_buffer.is_valid() && gpu_instance_capacity == NEXTGI_RT_TLAS_CAPACITY) {
+		return true;
+	}
+	if (gpu_instance_buffer.is_valid()) {
+		rd->free_rid(gpu_instance_buffer);
+		gpu_instance_buffer = RID();
+	}
+	const uint32_t record_size = rd->acceleration_structure_get_instance_size();
+	ERR_FAIL_COND_V(record_size == 0, false);
+	gpu_instance_buffer = rd->storage_buffer_create(NEXTGI_RT_TLAS_CAPACITY * record_size, {}, 0, RenderingDevice::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RenderingDevice::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	gpu_instance_capacity = gpu_instance_buffer.is_valid() ? NEXTGI_RT_TLAS_CAPACITY : 0;
+	return gpu_instance_buffer.is_valid();
+}
+
+uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit) {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, 0);
+	ERR_FAIL_COND_V(p_count == 0 || p_source_buffer.is_null() || p_blas.is_null() || p_source_stride_floats < 12, 0);
+	ERR_FAIL_COND_V(p_dest_offset + p_count > NEXTGI_RT_TLAS_CAPACITY, 0);
+	ERR_FAIL_NULL_V(instance_encoder, 0);
+	ERR_FAIL_COND_V(!_ensure_gpu_instance_buffer(), 0);
+
+	const uint64_t blas_reference = rd->acceleration_structure_get_instance_reference(p_blas);
+	ERR_FAIL_COND_V_MSG(blas_reference == 0, 0, "The BLAS has no GPU instance reference on this API.");
+
+	const int layout = rd->acceleration_structure_get_instance_size() == 72 ? INSTANCE_LAYOUT_METAL_72 : INSTANCE_LAYOUT_VULKAN_64;
+	RID shader = instance_encoder->shader.version_get_shader(instance_encoder->version, layout);
+
+	RD::Uniform u_source(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_source_buffer);
+	RD::Uniform u_destination(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, gpu_instance_buffer);
+	RD::Uniform uniforms[2] = { u_source, u_destination };
+	RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 2), shader, 0);
+	ERR_FAIL_COND_V(uniform_set.is_null(), 0);
+
+	uint32_t push_constants[20] = {};
+	// counts: element count, source offset, destination offset, id base.
+	push_constants[0] = p_count;
+	push_constants[1] = 0;
+	push_constants[2] = p_dest_offset;
+	push_constants[3] = p_id_base;
+	// layout: stride in floats, visible count, API flags, instance mask.
+	push_constants[4] = p_source_stride_floats;
+	push_constants[5] = p_visible_count;
+	push_constants[6] = p_flags;
+	push_constants[7] = 0xFFu;
+	// camera: position and the distance limit.
+	auto to_bits = [](float p_value) {
+		uint32_t bits = 0;
+		memcpy(&bits, &p_value, sizeof(bits));
+		return bits;
+	};
+	push_constants[8] = to_bits(p_camera.x);
+	push_constants[9] = to_bits(p_camera.y);
+	push_constants[10] = to_bits(p_camera.z);
+	push_constants[11] = to_bits(p_max_distance);
+	// refs: BLAS reference low and high.
+	push_constants[12] = uint32_t(blas_reference & 0xFFFFFFFFu);
+	push_constants[13] = uint32_t(blas_reference >> 32u);
+	// limits: angular radius limit in radians.
+	push_constants[16] = to_bits(p_angle_limit);
+
+	const uint32_t groups = MAX((p_count + 63u) / 64u, 1u);
+	RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, instance_encoder->pipelines[layout]);
+	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+	rd->compute_list_set_push_constant(list, push_constants, sizeof(push_constants));
+	rd->compute_list_dispatch(list, groups, 1, 1);
+	rd->compute_list_end();
+	rd->free_rid(uniform_set);
+	return p_count;
 }
 
 String NextGIRTScene::build_instances_shader_source(int p_layout) {
