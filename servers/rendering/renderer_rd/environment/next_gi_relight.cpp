@@ -435,7 +435,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		return;
 	}
 	const RID tlas = next_gi->get_rt_scene()->get_tlas();
-	if (tlas.is_null() || instances.is_empty() || next_gi->get_rt_scene()->get_stats().tlas_build_count == 0) {
+	if (tlas.is_null() || instances.is_empty() || !next_gi->get_rt_scene()->is_tlas_traceable()) {
 		return;
 	}
 

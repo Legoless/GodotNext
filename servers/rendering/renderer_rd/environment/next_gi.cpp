@@ -424,7 +424,14 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_fed_instance_count"] = int64_t(rt_stats.fed_instance_count);
 		info["rt_instance_count"] = int64_t(rt_stats.instance_count);
 		info["rt_blas_build_count"] = int64_t(rt_stats.blas_build_count);
+		info["rt_blas_build_triangles"] = int64_t(rt_stats.blas_build_triangles);
+		info["rt_compaction_copies"] = int64_t(rt_stats.compaction_copies);
+		info["rt_refit_triangles"] = int64_t(rt_stats.refit_triangles);
+		info["rt_as_bytes"] = int64_t(rt_stats.as_bytes);
+		info["rt_tlas_fill_ms"] = rt_stats.tlas_fill_ms;
+		info["rt_scene_update_ms"] = rt_stats.scene_update_ms;
 		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
+		info["rt_as_memory_exceeded"] = rt_scene->is_as_memory_exceeded();
 	}
 	// GodotNext: nextgi_src_cards
 	if (src != nullptr) {
@@ -559,6 +566,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			rt_scene->rebuild_tlas(p_render_data);
 		} else if (slot == PASS_SLOT_AS_BUILDS && rt_scene != nullptr) {
 			rt_scene->build_dirty_blas(p_render_data);
+			TierInputs budget_inputs = inputs;
+			budget_inputs.as_memory_ok = !rt_scene->is_as_memory_exceeded();
+			String budget_line;
+			if (update_tier(budget_inputs, quality_setting, budget_line)) {
+				log_tier_selection(budget_line);
+			}
 		} else if (slot == PASS_SLOT_SRC_CAPTURE) {
 			_capture_src_cards(p_render_data);
 		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
@@ -571,6 +584,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			_integrate(p_render_data);
 		}
 		rd->draw_command_end_label();
+	}
+
+	// Compaction copies invalidate the TLAS when the device frame restarts. Card capture can
+	// force that restart with a readback, so the copy is queued only after this frame's traces.
+	if (rt_scene != nullptr) {
+		rt_scene->compact_after_traces();
 	}
 
 	rd->draw_command_end_label();

@@ -36,6 +36,7 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
@@ -49,6 +50,8 @@
 #ifdef DEBUG_CULL_TIME
 #include "core/os/os.h"
 #endif
+
+static void _nextgi_emit_dirty(RendererSceneCull::Scenario *p_scenario, RendererSceneCull::Instance *p_instance, RendererRD::NextGIDirtyKind p_kind);
 
 /* HALTON SEQUENCE */
 
@@ -860,6 +863,7 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 	ERR_FAIL_NULL(instance);
 
 	if (instance->scenario) {
+		_nextgi_emit_dirty(instance->scenario, instance, RendererRD::NEXTGI_DIRTY_SCENARIO);
 		instance->scenario->instances.remove(&instance->scenario_item);
 
 		if (instance->indexer_id.is_valid()) {
@@ -1631,11 +1635,66 @@ void RendererSceneCull::instance_geometry_get_shader_parameter_list(RID p_instan
 	instance->instance_uniforms.get_property_list(*p_parameters);
 }
 
+static bool _nextgi_rid_list_has(const LocalVector<RID> &p_list, RID p_id) {
+	for (uint32_t i = 0; i < p_list.size(); i++) {
+		if (p_list[i] == p_id) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static RendererRD::NextGILightBake _nextgi_light_bake(RSE::LightBakeMode p_bake) {
+	if (p_bake == RSE::LIGHT_BAKE_STATIC) {
+		return RendererRD::NEXTGI_LIGHT_STATIC;
+	}
+	if (p_bake == RSE::LIGHT_BAKE_DYNAMIC) {
+		return RendererRD::NEXTGI_LIGHT_DYNAMIC;
+	}
+	return RendererRD::NEXTGI_LIGHT_DISABLED;
+}
+
+static void _nextgi_emit_dirty(RendererSceneCull::Scenario *p_scenario, RendererSceneCull::Instance *p_instance, RendererRD::NextGIDirtyKind p_kind) {
+	if (p_scenario == nullptr || p_instance == nullptr) {
+		return;
+	}
+	const RendererRD::NextGIDirtyRegion region = RendererRD::nextgi_rt_dirty_region(p_kind);
+	RendererSceneCull::NextGIRegistryDirtyEvent event;
+	event.instance = p_instance->self;
+	event.old_aabb = p_instance->prev_transformed_aabb;
+	event.new_aabb = p_instance->transformed_aabb;
+	event.has_old = region.has_old;
+	event.has_new = region.has_new;
+	p_scenario->nextgi_dirty_writing.push_back(event);
+}
+
+static void _nextgi_emit_light(RendererSceneCull::Scenario *p_scenario, RID p_light_instance, RendererRD::NextGILightChange p_change, RendererRD::NextGILightBake p_bake, bool p_directional, const AABB &p_old_aabb, const AABB &p_new_aabb) {
+	if (p_scenario == nullptr || !RendererRD::nextgi_rt_light_event_emits(p_bake)) {
+		return;
+	}
+	RendererSceneCull::NextGIRegistryLightEvent event;
+	event.light_instance = p_light_instance;
+	event.change = p_change;
+	event.bake = p_bake;
+	event.directional = p_directional;
+	event.old_aabb = p_old_aabb;
+	event.new_aabb = p_new_aabb;
+	p_scenario->nextgi_light_writing.push_back(event);
+}
+
 void RendererSceneCull::_nextgi_sync_positional_light(Scenario *p_scenario, RID p_light_instance, bool p_visible, bool p_directional, RSE::LightBakeMode p_bake) const {
 	if (p_scenario == nullptr || !p_light_instance.is_valid()) {
 		return;
 	}
+	const bool was_listed = _nextgi_rid_list_has(p_scenario->dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
 	RendererRD::nextgi_sync_positional_light(p_scenario->dynamic_lights, p_scenario->static_lights, p_light_instance, RendererRD::nextgi_positional_light_list(p_visible, true, p_directional, p_bake));
+	const bool now_listed = _nextgi_rid_list_has(p_scenario->dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
+	const RendererRD::NextGILightBake bake = _nextgi_light_bake(p_bake);
+	if (was_listed && !now_listed) {
+		_nextgi_emit_light(p_scenario, p_light_instance, RendererRD::NEXTGI_LIGHT_REMOVE, bake, p_directional, AABB(), AABB());
+	} else if (!was_listed && now_listed) {
+		_nextgi_emit_light(p_scenario, p_light_instance, RendererRD::NEXTGI_LIGHT_ADD, bake, p_directional, AABB(), AABB());
+	}
 }
 
 void RendererSceneCull::_update_instance(Instance *p_instance) const {
@@ -1664,7 +1723,34 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 			light->bake_mode = bake_mode;
 		}
 		// GodotNext: nextgi_src_relight
-		_nextgi_sync_positional_light(p_instance->scenario, light->instance, p_instance->visible, RSG::light_storage->light_get_type(p_instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
+		const bool directional = RSG::light_storage->light_get_type(p_instance->base) == RSE::LIGHT_DIRECTIONAL;
+		_nextgi_sync_positional_light(p_instance->scenario, light->instance, p_instance->visible, directional, light->bake_mode);
+		const RendererRD::NextGILightBake light_bake = _nextgi_light_bake(light->bake_mode);
+		if (RendererRD::nextgi_rt_light_event_emits(light_bake)) {
+			const float energy = RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_ENERGY);
+			const float range = RSG::light_storage->light_get_param(p_instance->base, RSE::LIGHT_PARAM_RANGE);
+			const bool shadow = RSG::light_storage->light_has_shadow(p_instance->base);
+			const Color color = RSG::light_storage->light_get_color(p_instance->base);
+			if (light->nextgi_light_snapshot_valid) {
+				if (light->nextgi_energy != energy) {
+					_nextgi_emit_light(p_instance->scenario, light->instance, RendererRD::NEXTGI_LIGHT_ENERGY, light_bake, directional, p_instance->prev_transformed_aabb, p_instance->transformed_aabb);
+				}
+				if (light->nextgi_color != color) {
+					_nextgi_emit_light(p_instance->scenario, light->instance, RendererRD::NEXTGI_LIGHT_COLOR, light_bake, directional, p_instance->prev_transformed_aabb, p_instance->transformed_aabb);
+				}
+				if (light->nextgi_range != range) {
+					_nextgi_emit_light(p_instance->scenario, light->instance, RendererRD::NEXTGI_LIGHT_RANGE, light_bake, directional, p_instance->prev_transformed_aabb, p_instance->transformed_aabb);
+				}
+				if (light->nextgi_shadow != shadow) {
+					_nextgi_emit_light(p_instance->scenario, light->instance, RendererRD::NEXTGI_LIGHT_SHADOW, light_bake, directional, p_instance->prev_transformed_aabb, p_instance->transformed_aabb);
+				}
+			}
+			light->nextgi_energy = energy;
+			light->nextgi_range = range;
+			light->nextgi_shadow = shadow;
+			light->nextgi_color = color;
+			light->nextgi_light_snapshot_valid = true;
+		}
 
 		uint32_t max_sdfgi_cascade = RSG::light_storage->light_get_max_sdfgi_cascade(p_instance->base);
 		if (light->max_sdfgi_cascade != max_sdfgi_cascade) {
@@ -1712,10 +1798,12 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 			RendererSceneOcclusionCull::get_singleton()->scenario_set_instance(p_instance->scenario->self, p_instance->self, p_instance->base, *instance_xform, p_instance->visible);
 		}
 	} else if (p_instance->base_type == RSE::INSTANCE_NONE) {
+		_nextgi_emit_dirty(p_instance->scenario, p_instance, RendererRD::NEXTGI_DIRTY_FREED);
 		return;
 	}
 
 	if (!p_instance->aabb.has_surface()) {
+		_nextgi_emit_dirty(p_instance->scenario, p_instance, RendererRD::NEXTGI_DIRTY_FREED);
 		return;
 	}
 
@@ -1767,6 +1855,7 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 
 	// note: we had to remove is equal approx check here, it meant that det == 0.000004 won't work, which is the case for some of our scenes.
 	if (p_instance->scenario == nullptr || !p_instance->visible || instance_xform->basis.determinant() == 0) {
+		_nextgi_emit_dirty(p_instance->scenario, p_instance, RendererRD::NEXTGI_DIRTY_HIDDEN);
 		p_instance->prev_transformed_aabb = p_instance->transformed_aabb;
 		return;
 	}
@@ -1940,6 +2029,14 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 
 	pair.pair();
 
+	if (p_instance->prev_transformed_aabb != p_instance->transformed_aabb) {
+		_nextgi_emit_dirty(p_instance->scenario, p_instance, RendererRD::NEXTGI_DIRTY_MOVED);
+		if (p_instance->base_type == RSE::INSTANCE_LIGHT && p_instance->base_data != nullptr) {
+			InstanceLightData *light = static_cast<InstanceLightData *>(p_instance->base_data);
+			const bool directional = RSG::light_storage->light_get_type(p_instance->base) == RSE::LIGHT_DIRECTIONAL;
+			_nextgi_emit_light(p_instance->scenario, light->instance, RendererRD::NEXTGI_LIGHT_MOVE, _nextgi_light_bake(light->bake_mode), directional, p_instance->prev_transformed_aabb, p_instance->transformed_aabb);
+		}
+	}
 	p_instance->prev_transformed_aabb = p_instance->transformed_aabb;
 }
 
@@ -3709,22 +3806,59 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
 		}
 
-		// GodotNext: nextgi_rt_feed
-		// v0 feed (#28): every visible baked/dynamic-GI mesh instance of the scenario, unculled.
+		// GodotNext: nextgi_rt_registry
+		// One selection per scenario per frame, within rt_scene_radius of the first view's camera.
+		// No frustum cull: an instance behind the camera and inside the radius stays in the TLAS.
 		sdfgi_update_data.nextgi_rt_instances = &scene_cull_result.nextgi_rt_instances;
 		if (p_reflection_probe.is_null() && scene_render->environment_get_nextgi_enabled(p_environment)) {
-			for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
-				Instance *instance = E->self();
-				if (instance->base_type != RSE::INSTANCE_MESH || !instance->visible || !(instance->baked_light || instance->dynamic_gi) || instance->mesh_instance.is_valid()) {
-					continue;
+			const uint64_t frame = RSG::rasterizer->get_frame_number();
+			if (scenario->nextgi_rt_selection_frame != frame) {
+				scenario->nextgi_dirty_published = scenario->nextgi_dirty_writing;
+				scenario->nextgi_dirty_writing.clear();
+				scenario->nextgi_light_published = scenario->nextgi_light_writing;
+				scenario->nextgi_light_writing.clear();
+				scenario->nextgi_rt_selection.clear();
+				scenario->nextgi_rt_selection_frame = frame;
+				const float scene_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
+				const Vector3 anchor = p_camera_data->main_transform.origin;
+				LocalVector<Instance *> picked;
+				LocalVector<float> angular;
+				LocalVector<RendererRD::NextGIRTExclusion> reasons;
+				for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
+					Instance *instance = E->self();
+					const bool skinned = instance->mesh_instance.is_valid();
+					if (!RendererRD::nextgi_rt_instance_eligible(instance->base_type == RSE::INSTANCE_MESH, instance->visible, instance->baked_light || instance->dynamic_gi, skinned)) {
+						continue;
+					}
+					const AABB &aabb = instance->transformed_aabb;
+					const float bound = aabb.size.length() * 0.5f;
+					const float distance = aabb.get_center().distance_to(anchor);
+					if (RendererRD::nextgi_rt_cull_instance(distance, bound, scene_radius) != RendererRD::NEXTGI_RT_INCLUDED) {
+						continue;
+					}
+					picked.push_back(instance);
+					angular.push_back(RendererRD::nextgi_rt_angular_radius(distance, bound));
+					reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 				}
-				InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(instance->base_data);
-				if (geometry_data == nullptr || geometry_data->geometry_instance == nullptr) {
-					continue;
+				if (!reasons.is_empty()) {
+					RendererRD::nextgi_rt_apply_instance_cap(angular.ptr(), reasons.ptr(), reasons.size(), RendererRD::NEXTGI_RT_TLAS_CAPACITY);
 				}
-				RendererSceneRender::NextGIRTInstance rt_instance;
-				rt_instance.geometry_instance = geometry_data->geometry_instance;
-				rt_instance.lightmapped = instance->lightmap != nullptr;
+				for (uint32_t i = 0; i < picked.size(); i++) {
+					if (reasons[i] != RendererRD::NEXTGI_RT_INCLUDED) {
+						continue;
+					}
+					InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(picked[i]->base_data);
+					if (geometry_data == nullptr || geometry_data->geometry_instance == nullptr) {
+						continue;
+					}
+					RendererSceneRender::NextGIRTInstance rt_instance;
+					rt_instance.geometry_instance = geometry_data->geometry_instance;
+					rt_instance.lightmapped = picked[i]->lightmap != nullptr;
+					rt_instance.angular_radius = angular[i];
+					scenario->nextgi_rt_selection.push_back(rt_instance);
+				}
+			}
+			for (const RendererSceneRender::NextGIRTInstance &rt_instance : scenario->nextgi_rt_selection) {
 				scene_cull_result.nextgi_rt_instances.push_back(rt_instance);
 			}
 		}

@@ -32,6 +32,7 @@
 
 // GodotNext: nextgi_rt_arena
 #include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -728,6 +729,40 @@ void MeshStorage::mesh_nextgi_rt_set_blas_dirty(RID p_mesh, bool p_dirty) {
 	mesh->nextgi_blas_dirty = p_dirty;
 }
 
+void MeshStorage::mesh_nextgi_rt_note_vertex_update(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL(mesh);
+	if (RSG::rasterizer == nullptr) {
+		return;
+	}
+	const uint32_t frame = RSG::rasterizer->get_frame_number();
+	if (mesh->nextgi_rt_update_frames[0] != frame) {
+		for (int i = 3; i > 0; i--) {
+			mesh->nextgi_rt_update_frames[i] = mesh->nextgi_rt_update_frames[i - 1];
+		}
+		mesh->nextgi_rt_update_frames[0] = frame;
+	}
+	mesh->nextgi_rt_dynamic = nextgi_rt_surface_is_dynamic(frame, mesh->nextgi_rt_update_frames);
+}
+
+bool MeshStorage::mesh_nextgi_rt_is_dynamic(RID p_mesh) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, false);
+	return mesh->nextgi_rt_dynamic;
+}
+
+void MeshStorage::mesh_nextgi_rt_set_allows_update(RID p_mesh, bool p_allows) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL(mesh);
+	mesh->nextgi_rt_allows_update = p_allows;
+}
+
+bool MeshStorage::mesh_nextgi_rt_allows_update(RID p_mesh) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, false);
+	return mesh->nextgi_rt_allows_update;
+}
+
 LocalVector<MeshStorage::NextGIRTPart> *MeshStorage::mesh_nextgi_rt_get_parts(RID p_mesh) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, nullptr);
@@ -794,6 +829,18 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 	const uint8_t *r = p_data.ptr();
 
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->vertex_buffer, p_offset, data_size, r);
+	// GodotNext: nextgi_rt_registry
+	if (nextgi_rt_enabled) {
+		Mesh::Surface *surface = mesh->surfaces[p_surface];
+		const uint32_t pos_bytes = uint32_t(surface->rt_cpu_positions.size()) * sizeof(float);
+		if (uint32_t(p_offset) < pos_bytes && surface->rt_chunk != UINT32_MAX && surface->rt_chunk < nextgi_rt_chunks.size()) {
+			const uint32_t count = MIN(uint32_t(data_size), pos_bytes - uint32_t(p_offset));
+			nextgi_rt_patch_positions(surface->rt_cpu_positions, uint32_t(p_offset), r, count);
+			RD::get_singleton()->buffer_update(nextgi_rt_chunks[surface->rt_chunk].buffer, surface->rt_vertex_offset + uint32_t(p_offset), count, r);
+		}
+		mesh->nextgi_blas_dirty = true;
+		mesh_nextgi_rt_note_vertex_update(p_mesh);
+	}
 }
 
 void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {

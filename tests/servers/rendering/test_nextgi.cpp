@@ -1771,6 +1771,138 @@ TEST_CASE("[NextGI] SRC cards: the material atlas dump setting is registered and
 	CHECK_FALSE(bool(ProjectSettings::get_singleton()->property_get_revert("rendering/global_illumination/nextgi/debug/read_shadow_mask")));
 }
 
+TEST_CASE("[NextGI] RT registry: cull, cap, eligibility and refit") {
+	using namespace RendererRD;
+	CHECK(nextgi_rt_instance_eligible(true, true, true, false));
+	CHECK_FALSE(nextgi_rt_instance_eligible(true, true, true, true));
+	CHECK_FALSE(nextgi_rt_instance_eligible(true, false, true, false));
+	CHECK_FALSE(nextgi_rt_instance_eligible(false, true, true, false));
+	CHECK_FALSE(nextgi_rt_instance_eligible(true, true, false, false));
+
+	// 10 m, inside the radius and inside the 30 m angular cull: included, frustum or not.
+	CHECK_EQ(nextgi_rt_cull_instance(10.0f, 1.0f, 200.0f), NEXTGI_RT_INCLUDED);
+	CHECK_EQ(nextgi_rt_cull_instance(250.0f, 10.0f, 200.0f), NEXTGI_RT_NOT_IN_SCENE);
+	// 100 m and a 1 cm radius is under half a degree.
+	CHECK_EQ(nextgi_rt_cull_instance(100.0f, 0.01f, 200.0f), NEXTGI_RT_NOT_IN_SCENE);
+	CHECK(nextgi_rt_angular_radius(0.0f, 1.0f) > 1.0f);
+
+	float angular[3] = { 0.1f, 0.5f, 0.2f };
+	NextGIRTExclusion reasons[3] = { NEXTGI_RT_INCLUDED, NEXTGI_RT_INCLUDED, NEXTGI_RT_INCLUDED };
+	nextgi_rt_apply_instance_cap(angular, reasons, 3, 2);
+	CHECK_EQ(reasons[0], NEXTGI_RT_INSTANCE_CAP);
+	CHECK_EQ(reasons[1], NEXTGI_RT_INCLUDED);
+	CHECK_EQ(reasons[2], NEXTGI_RT_INCLUDED);
+
+	const NextGIDirtyKind kinds[4] = { NEXTGI_DIRTY_MOVED, NEXTGI_DIRTY_FREED, NEXTGI_DIRTY_SCENARIO, NEXTGI_DIRTY_HIDDEN };
+	for (NextGIDirtyKind kind : kinds) {
+		const NextGIDirtyRegion region = nextgi_rt_dirty_region(kind);
+		CHECK(region.has_old);
+		CHECK_EQ(region.has_new, kind == NEXTGI_DIRTY_MOVED);
+	}
+
+	const uint32_t frames[4] = { 8, 7, 6, 5 };
+	CHECK(nextgi_rt_surface_is_dynamic(8, frames));
+	const uint32_t gap[4] = { 8, 7, 5, 4 };
+	CHECK_FALSE(nextgi_rt_surface_is_dynamic(8, gap));
+	CHECK_EQ(nextgi_rt_refit_or_exclude(150000, 60000, NEXTGI_RT_REFIT_TRIANGLE_CAP), NEXTGI_RT_DYNAMIC_EXCLUDED);
+	CHECK_EQ(nextgi_rt_refit_or_exclude(100000, 50000, NEXTGI_RT_REFIT_TRIANGLE_CAP), NEXTGI_RT_INCLUDED);
+
+	NextGIBuildItem builds[3];
+	builds[0].id = 0;
+	builds[0].triangles = 40000;
+	builds[0].is_new = false;
+	builds[0].angular_radius = 0.9f;
+	builds[1].id = 1;
+	builds[1].triangles = 100000;
+	builds[1].is_new = true;
+	builds[1].angular_radius = 0.1f;
+	builds[2].id = 2;
+	builds[2].triangles = 100000;
+	builds[2].is_new = false;
+	builds[2].angular_radius = 0.2f;
+	uint32_t accepted[3] = {};
+	uint32_t triangles = 0;
+	CHECK_EQ(nextgi_rt_schedule_builds(builds, 3, 150000, accepted, 3, triangles), 2u);
+	CHECK_EQ(accepted[0], 1u);
+	CHECK_EQ(accepted[1], 0u);
+	CHECK_EQ(triangles, 140000u);
+
+	CHECK(nextgi_rt_chunk_needs_defrag(80, 256));
+	CHECK_FALSE(nextgi_rt_chunk_needs_defrag(10, 256));
+}
+
+TEST_CASE("[NextGI] RT registry: light events, one delivery across two views, arena churn and AS memory") {
+	using namespace RendererRD;
+	for (int change = NEXTGI_LIGHT_ADD; change < NEXTGI_LIGHT_CHANGE_MAX; change++) {
+		CHECK(nextgi_rt_light_event_emits(NEXTGI_LIGHT_DYNAMIC));
+		CHECK(nextgi_rt_light_event_emits(NEXTGI_LIGHT_STATIC));
+		CHECK_FALSE(nextgi_rt_light_event_emits(NEXTGI_LIGHT_DISABLED));
+		CHECK_EQ(change >= NEXTGI_LIGHT_ADD, true);
+	}
+
+	NextGIRTEventBuffer<int> events;
+	events.push(1);
+	events.push(2);
+	events.push(3);
+	events.swap(1);
+	CHECK_EQ(events.read().size(), events.read().size());
+	CHECK_EQ(events.read().size(), 3);
+	CHECK_EQ(events.read()[0], 1);
+	CHECK_EQ(events.read()[2], 3);
+	events.swap(2);
+	CHECK_EQ(events.read().size(), 0);
+
+	NextGIArenaAllocator allocator(1 << 20);
+	for (int i = 0; i < 10000; i++) {
+		const NextGIArenaAllocator::Allocation allocation = allocator.allocate(64);
+		CHECK(allocation.is_valid());
+		allocator.free_range(allocation);
+	}
+	const NextGIArenaAllocator::Allocation again = allocator.allocate(64);
+	CHECK_EQ(again.chunk, 0u);
+	CHECK_EQ(again.offset, 0u);
+	CHECK_EQ(allocator.get_chunk_count(), 1u);
+
+	Vector<float> positions;
+	positions.resize(3);
+	positions.write[0] = 1.0f;
+	positions.write[1] = 2.0f;
+	positions.write[2] = 3.0f;
+	const float replacement[3] = { 4.0f, 5.0f, 6.0f };
+	nextgi_rt_patch_positions(positions, 0, reinterpret_cast<const uint8_t *>(replacement), sizeof(replacement));
+	CHECK_EQ(positions[0], 4.0f);
+	CHECK_EQ(positions[2], 6.0f);
+
+	const uint64_t mebibyte = 1024ull * 1024ull;
+	NextGIASMesh meshes[3];
+	meshes[0].id = 7;
+	meshes[0].bytes = 40 * mebibyte;
+	meshes[0].frames_absent = 200;
+	meshes[1].id = 8;
+	meshes[1].bytes = 40 * mebibyte;
+	meshes[1].frames_absent = 0;
+	meshes[2].id = 9;
+	meshes[2].bytes = 40 * mebibyte;
+	meshes[2].frames_absent = 0;
+	uint32_t evict[3] = {};
+	uint32_t evict_count = 0;
+	const bool over = nextgi_rt_evict_as_memory(meshes, 3, 64 * mebibyte, NEXTGI_RT_ABSENT_FRAMES, evict, evict_count);
+	CHECK(over);
+	CHECK_EQ(evict_count, 1u);
+	CHECK_EQ(evict[0], 7u);
+
+	NextGI next_gi;
+	String line;
+	NextGI::TierInputs as_memory = hwrt_inputs();
+	as_memory.as_memory_ok = false;
+	REQUIRE(next_gi.update_tier(as_memory, NextGI::QUALITY_AUTO, line));
+	CHECK(line.contains("reason=AS_MEMORY"));
+	CHECK_EQ(line.count("NextGI:"), 1);
+	line = String();
+	CHECK_FALSE(next_gi.update_tier(as_memory, NextGI::QUALITY_AUTO, line));
+	CHECK(line.is_empty());
+}
+
 } // namespace TestNextGI
 
 #endif // RD_ENABLED

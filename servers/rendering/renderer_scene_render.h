@@ -312,6 +312,7 @@ public:
 	struct NextGIRTInstance {
 		RenderGeometryInstance *geometry_instance = nullptr;
 		bool lightmapped = false;
+		float angular_radius = 0.0f;
 	};
 
 	struct RenderSDFGIUpdateData {

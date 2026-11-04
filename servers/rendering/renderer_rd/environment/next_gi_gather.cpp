@@ -302,7 +302,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	const RID tlas = next_gi->get_rt_scene()->get_tlas();
 	const RID depth = rb->get_depth_texture();
 	// A frame that did not rebuild the TLAS still holds the previous build, which a freed mesh invalidates.
-	if (!tlas.is_valid() || next_gi->get_rt_scene()->get_stats().tlas_build_count == 0 || !depth.is_valid() || !rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
+	if (!tlas.is_valid() || !next_gi->get_rt_scene()->is_tlas_traceable() || !depth.is_valid() || !rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 		return false;
 	}
 
@@ -529,7 +529,8 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 
 void NextGIGather::integrate(RenderDataRD *p_render_data) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd == nullptr || shader == nullptr || !uniform_set.is_valid()) {
+	NextGI *next_gi = NextGI::get_singleton();
+	if (rd == nullptr || shader == nullptr || !uniform_set.is_valid() || next_gi == nullptr || next_gi->get_rt_scene() == nullptr || !next_gi->get_rt_scene()->is_tlas_traceable()) {
 		return;
 	}
 	uint32_t width = last_screen_w;

@@ -32,6 +32,7 @@
 
 #include "core/math/aabb.h"
 #include "core/math/transform_3d.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
@@ -174,6 +175,131 @@ struct NextGIRTPartPlan {
 // Surfaces with a triangle count of 0 (ineligible or alpha-excluded) are skipped.
 void nextgi_rt_split_parts(const uint32_t *p_triangle_counts, const uint32_t *p_chunks, uint32_t p_surface_count, uint32_t p_max_triangles_per_part, LocalVector<NextGIRTPartPlan> &r_parts);
 
+// GodotNext: nextgi_rt_registry
+// Scenario-wide selection (#39). These reasons are the per-instance Fallback enum, not tier reasons.
+enum NextGIRTExclusion {
+	NEXTGI_RT_INCLUDED = 0,
+	NEXTGI_RT_NOT_IN_SCENE,
+	NEXTGI_RT_INSTANCE_CAP,
+	NEXTGI_RT_DYNAMIC_EXCLUDED,
+};
+
+enum {
+	NEXTGI_RT_BUILD_TRIANGLE_CAP = 250000, // Provisional until G0-6 (#9) measures it in PQ.
+	NEXTGI_RT_REFIT_TRIANGLE_CAP = 200000,
+	NEXTGI_RT_ABSENT_FRAMES = 120,
+};
+
+static constexpr float NEXTGI_RT_ANGULAR_CULL_DISTANCE = 30.0f;
+static constexpr uint64_t NEXTGI_RT_AS_BUDGET_BYTES = 1024ull * 1024ull * 1024ull;
+
+_FORCE_INLINE_ bool nextgi_rt_instance_eligible(bool p_mesh, bool p_visible, bool p_gi_contributing, bool p_skinned) {
+	return p_mesh && p_visible && p_gi_contributing && !p_skinned;
+}
+
+// asin(min(1, r/d)). A distance of 0 (the camera is inside the bounds) is a full hemisphere.
+float nextgi_rt_angular_radius(float p_distance, float p_bounding_radius);
+
+// Outside rt_scene_radius, or beyond 30 m and under 0.5°, is NOT_IN_RT_SCENE. No frustum test.
+NextGIRTExclusion nextgi_rt_cull_instance(float p_distance, float p_bounding_radius, float p_scene_radius);
+
+// Keeps the p_cap largest angular radii. The rest become RT_INSTANCE_CAP. p_angular is reordered.
+void nextgi_rt_apply_instance_cap(float *p_angular, NextGIRTExclusion *p_reasons, uint32_t p_count, uint32_t p_cap);
+
+enum NextGIDirtyKind {
+	NEXTGI_DIRTY_MOVED,
+	NEXTGI_DIRTY_FREED,
+	NEXTGI_DIRTY_SCENARIO,
+	NEXTGI_DIRTY_HIDDEN,
+};
+
+struct NextGIDirtyRegion {
+	bool has_old = false;
+	bool has_new = false;
+};
+
+NextGIDirtyRegion nextgi_rt_dirty_region(NextGIDirtyKind p_kind);
+
+enum NextGILightBake {
+	NEXTGI_LIGHT_DISABLED,
+	NEXTGI_LIGHT_STATIC,
+	NEXTGI_LIGHT_DYNAMIC,
+};
+
+enum NextGILightChange {
+	NEXTGI_LIGHT_ADD,
+	NEXTGI_LIGHT_REMOVE,
+	NEXTGI_LIGHT_MOVE,
+	NEXTGI_LIGHT_ENERGY,
+	NEXTGI_LIGHT_COLOR,
+	NEXTGI_LIGHT_RANGE,
+	NEXTGI_LIGHT_SHADOW,
+	NEXTGI_LIGHT_CHANGE_MAX,
+};
+
+// DISABLED lights emit nothing. STATIC and DYNAMIC emit every change.
+_FORCE_INLINE_ bool nextgi_rt_light_event_emits(NextGILightBake p_bake) {
+	return p_bake != NEXTGI_LIGHT_DISABLED;
+}
+
+// A surface updated on each of the last 4 frames is dynamic and refits instead of rebuilding.
+bool nextgi_rt_surface_is_dynamic(uint32_t p_frame, const uint32_t p_update_frames[4]);
+
+// Past the refit triangle cap, the instance is RT_DYNAMIC_EXCLUDED. Otherwise it refits.
+NextGIRTExclusion nextgi_rt_refit_or_exclude(uint32_t p_refit_triangles_so_far, uint32_t p_triangles, uint32_t p_refit_cap);
+
+struct NextGIBuildItem {
+	uint32_t id = 0;
+	uint32_t triangles = 0;
+	bool is_new = false;
+	float angular_radius = 0.0f;
+};
+
+// New instances first, then largest angular radius. Builds and compaction copies both spend the cap.
+// Returns how many items were accepted. The walk stops at the first item that does not fit.
+uint32_t nextgi_rt_schedule_builds(const NextGIBuildItem *p_items, uint32_t p_count, uint32_t p_triangle_cap, uint32_t *r_accepted, uint32_t p_accepted_capacity, uint32_t &r_triangles);
+
+// A chunk with more than a quarter of its bytes free is fragmented and its BLASes are rebuilt into fresh ranges.
+_FORCE_INLINE_ bool nextgi_rt_chunk_needs_defrag(uint64_t p_free_bytes, uint64_t p_chunk_bytes) {
+	return p_chunk_bytes > 0 && p_free_bytes * 4 > p_chunk_bytes;
+}
+
+struct NextGIASMesh {
+	uint32_t id = 0;
+	uint64_t bytes = 0;
+	uint32_t frames_absent = 0; // Frames since this mesh was in the TLAS.
+};
+
+// Evicts meshes absent for at least p_absent_frames, oldest first. Returns true when the
+// remainder still exceeds the budget: the tier falls back with AS_MEMORY.
+bool nextgi_rt_evict_as_memory(const NextGIASMesh *p_meshes, uint32_t p_count, uint64_t p_budget, uint32_t p_absent_frames, uint32_t *r_evict, uint32_t &r_evict_count);
+
+// Patches the CPU-decoded position copy. A range past the positions is ignored.
+void nextgi_rt_patch_positions(Vector<float> &r_positions, uint32_t p_byte_offset, const uint8_t *p_data, uint32_t p_size);
+
+// One published list per frame. Two views read it; the next swap drops it.
+template <typename T>
+class NextGIRTEventBuffer {
+	LocalVector<T> sides[2];
+	int published = -1;
+	int writing = 0;
+	uint64_t frame = 0;
+
+public:
+	void push(const T &p_event) { sides[writing].push_back(p_event); }
+	void swap(uint64_t p_frame) {
+		published = writing;
+		writing = 1 - writing;
+		sides[writing].clear();
+		frame = p_frame;
+	}
+	uint64_t get_frame() const { return frame; }
+	const LocalVector<T> &read() const {
+		static const LocalVector<T> empty;
+		return published < 0 ? empty : sides[published];
+	}
+};
+
 // The CPU-fed TLAS and the GPU instance/surface records. Owned by NextGI; created only under the
 // HWRT tier. The two phases consume the v0 feed in RenderSDFGIUpdateData::nextgi_rt_instances;
 // the P1b registry (#39) replaces that feed. NextGI::render_frame calls rebuild_tlas() from the
@@ -186,19 +312,38 @@ public:
 		uint32_t fed_instance_count = 0;
 		uint32_t instance_count = 0; // TLAS instances (and records) of the last TLAS phase.
 		uint32_t blas_build_count = 0; // BLAS builds of the last builds phase; 0 on a static scene once built.
+		uint32_t blas_build_triangles = 0;
+		uint32_t compaction_copies = 0;
+		uint32_t refit_triangles = 0;
+		uint64_t as_bytes = 0;
+		double tlas_fill_ms = 0.0;
+		double scene_update_ms = 0.0;
 		uint64_t tlas_build_count = 0; // One TLAS rebuild per TLAS phase with instances.
 	};
 
 private:
+	struct PendingCompact {
+		RID blas;
+		uint32_t triangles = 0;
+	};
+
 	RID tlas;
 	RID instance_record_buffer;
 	RID surface_record_buffer;
 	uint32_t instance_record_capacity = 0;
 	uint32_t surface_record_capacity = 0;
 	Stats stats;
+	LocalVector<PendingCompact> pending_compactions;
+	HashMap<RID, uint64_t> mesh_last_tlas_frame;
+	bool as_memory_exceeded = false;
+	bool tlas_traceable = false;
+	uint32_t compaction_triangles_this_frame = 0;
+	uint64_t as_budget_bytes = NEXTGI_RT_AS_BUDGET_BYTES;
 
 	void _build_dirty_mesh_parts(RID p_mesh);
 	void _ensure_record_buffers(uint32_t p_instance_count, uint32_t p_surface_count);
+	uint32_t _mesh_triangle_count(RID p_mesh) const;
+	void _apply_as_budget(uint64_t p_frame);
 
 public:
 	void init();
@@ -210,11 +355,18 @@ public:
 	// The "AS builds" phase (line 1b): builds the BLAS parts of every dirty fed mesh.
 	// The new parts enter the TLAS in the next frame's rebuild_tlas().
 	void build_dirty_blas(const ::RenderDataRD *p_render_data);
+	// Queues compaction after this frame's traces. A readback during card capture flushes the
+	// device, and completing a compaction invalidates the TLAS those traces still bind.
+	void compact_after_traces();
 
 	RID get_tlas() const { return tlas; }
 	RID get_instance_record_buffer() const { return instance_record_buffer; }
 	RID get_surface_record_buffer() const { return surface_record_buffer; }
 	const Stats &get_stats() const { return stats; }
+	bool is_as_memory_exceeded() const { return as_memory_exceeded; }
+	// True only after this frame's TLAS build, and only while line 1b has not rebuilt a BLAS the TLAS references.
+	bool is_tlas_traceable() const { return tlas_traceable; }
+	void set_as_budget_bytes(uint64_t p_bytes) { as_budget_bytes = p_bytes; }
 
 	NextGIRTScene() {}
 	~NextGIRTScene() {}

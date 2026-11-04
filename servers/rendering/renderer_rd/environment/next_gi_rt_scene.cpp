@@ -30,6 +30,12 @@
 
 #include "next_gi_rt_scene.h"
 
+#include "core/math/math_funcs.h"
+#include "core/os/os.h"
+#include "servers/rendering/rendering_server_globals.h"
+
+#include <algorithm>
+
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
@@ -227,6 +233,146 @@ void nextgi_rt_split_parts(const uint32_t *p_triangle_counts, const uint32_t *p_
 	flush();
 }
 
+float nextgi_rt_angular_radius(float p_distance, float p_bounding_radius) {
+	if (p_bounding_radius <= 0.0f) {
+		return 0.0f;
+	}
+	if (p_distance <= 0.0f) {
+		return Math::PI * 0.5f;
+	}
+	return Math::asin(MIN(1.0f, p_bounding_radius / p_distance));
+}
+
+NextGIRTExclusion nextgi_rt_cull_instance(float p_distance, float p_bounding_radius, float p_scene_radius) {
+	if (p_distance > p_scene_radius) {
+		return NEXTGI_RT_NOT_IN_SCENE;
+	}
+	if (p_distance > NEXTGI_RT_ANGULAR_CULL_DISTANCE && nextgi_rt_angular_radius(p_distance, p_bounding_radius) < Math::deg_to_rad(0.5f)) {
+		return NEXTGI_RT_NOT_IN_SCENE;
+	}
+	return NEXTGI_RT_INCLUDED;
+}
+
+void nextgi_rt_apply_instance_cap(float *p_angular, NextGIRTExclusion *p_reasons, uint32_t p_count, uint32_t p_cap) {
+	LocalVector<uint32_t> included;
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (p_reasons[i] == NEXTGI_RT_INCLUDED) {
+			included.push_back(i);
+		}
+	}
+	if (included.size() <= p_cap) {
+		return;
+	}
+	struct Greater {
+		const float *angular = nullptr;
+		bool operator()(uint32_t p_a, uint32_t p_b) const { return angular[p_a] > angular[p_b]; }
+	} greater;
+	greater.angular = p_angular;
+	std::nth_element(included.ptr(), included.ptr() + p_cap, included.ptr() + included.size(), greater);
+	for (uint32_t i = p_cap; i < included.size(); i++) {
+		p_reasons[included[i]] = NEXTGI_RT_INSTANCE_CAP;
+	}
+}
+
+NextGIDirtyRegion nextgi_rt_dirty_region(NextGIDirtyKind p_kind) {
+	NextGIDirtyRegion region;
+	region.has_old = true;
+	region.has_new = p_kind == NEXTGI_DIRTY_MOVED;
+	return region;
+}
+
+bool nextgi_rt_surface_is_dynamic(uint32_t p_frame, const uint32_t p_update_frames[4]) {
+	for (uint32_t i = 0; i < 4; i++) {
+		if (p_update_frames[i] != p_frame - i) {
+			return false;
+		}
+	}
+	return true;
+}
+
+NextGIRTExclusion nextgi_rt_refit_or_exclude(uint32_t p_refit_triangles_so_far, uint32_t p_triangles, uint32_t p_refit_cap) {
+	if (p_refit_triangles_so_far + p_triangles > p_refit_cap) {
+		return NEXTGI_RT_DYNAMIC_EXCLUDED;
+	}
+	return NEXTGI_RT_INCLUDED;
+}
+
+uint32_t nextgi_rt_schedule_builds(const NextGIBuildItem *p_items, uint32_t p_count, uint32_t p_triangle_cap, uint32_t *r_accepted, uint32_t p_accepted_capacity, uint32_t &r_triangles) {
+	LocalVector<uint32_t> order;
+	order.resize(p_count);
+	for (uint32_t i = 0; i < p_count; i++) {
+		order[i] = i;
+	}
+	struct Less {
+		const NextGIBuildItem *items = nullptr;
+		bool operator()(uint32_t p_a, uint32_t p_b) const {
+			const NextGIBuildItem &a = items[p_a];
+			const NextGIBuildItem &b = items[p_b];
+			if (a.is_new != b.is_new) {
+				return a.is_new;
+			}
+			return a.angular_radius > b.angular_radius;
+		}
+	} less;
+	less.items = p_items;
+	if (p_count > 1) {
+		std::sort(order.ptr(), order.ptr() + p_count, less);
+	}
+	uint32_t accepted = 0;
+	r_triangles = 0;
+	for (uint32_t i = 0; i < p_count; i++) {
+		const NextGIBuildItem &item = p_items[order[i]];
+		if (r_triangles + item.triangles > p_triangle_cap) {
+			break;
+		}
+		if (accepted < p_accepted_capacity && r_accepted != nullptr) {
+			r_accepted[accepted] = item.id;
+		}
+		accepted++;
+		r_triangles += item.triangles;
+	}
+	return accepted;
+}
+
+bool nextgi_rt_evict_as_memory(const NextGIASMesh *p_meshes, uint32_t p_count, uint64_t p_budget, uint32_t p_absent_frames, uint32_t *r_evict, uint32_t &r_evict_count) {
+	r_evict_count = 0;
+	uint64_t total = 0;
+	for (uint32_t i = 0; i < p_count; i++) {
+		total += p_meshes[i].bytes;
+	}
+	LocalVector<uint32_t> absent;
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (p_meshes[i].frames_absent >= p_absent_frames) {
+			absent.push_back(i);
+		}
+	}
+	struct Older {
+		const NextGIASMesh *meshes = nullptr;
+		bool operator()(uint32_t p_a, uint32_t p_b) const { return meshes[p_a].frames_absent > meshes[p_b].frames_absent; }
+	} older;
+	older.meshes = p_meshes;
+	if (absent.size() > 1) {
+		std::sort(absent.ptr(), absent.ptr() + absent.size(), older);
+	}
+	for (uint32_t index : absent) {
+		if (total <= p_budget) {
+			break;
+		}
+		r_evict[r_evict_count++] = p_meshes[index].id;
+		total -= p_meshes[index].bytes;
+	}
+	return total > p_budget;
+}
+
+void nextgi_rt_patch_positions(Vector<float> &r_positions, uint32_t p_byte_offset, const uint8_t *p_data, uint32_t p_size) {
+	const uint32_t pos_bytes = uint32_t(r_positions.size()) * sizeof(float);
+	if (p_data == nullptr || p_size == 0 || p_byte_offset >= pos_bytes) {
+		return;
+	}
+	const uint32_t count = MIN(p_size, pos_bytes - p_byte_offset);
+	memcpy(reinterpret_cast<uint8_t *>(r_positions.ptrw()) + p_byte_offset, p_data, count);
+}
+
 // D17: alpha surfaces stay out of the RT scene in v0. The check uses the mesh surface's own
 // material, matching FLAG_PASS_ALPHA / uses_alpha_clip of the forward shader data.
 static bool _nextgi_rt_material_is_alpha(RID p_material) {
@@ -290,6 +436,19 @@ void NextGIRTScene::_ensure_record_buffers(uint32_t p_instance_count, uint32_t p
 
 void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	const bool dynamic = mesh_storage->mesh_nextgi_rt_is_dynamic(p_mesh);
+	const LocalVector<MeshStorage::NextGIRTPart> *old_parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	if (old_parts != nullptr) {
+		for (const MeshStorage::NextGIRTPart &old_part : *old_parts) {
+			for (uint32_t i = 0; i < pending_compactions.size();) {
+				if (pending_compactions[i].blas == old_part.blas) {
+					pending_compactions.remove_at(i);
+				} else {
+					i++;
+				}
+			}
+		}
+	}
 	mesh_storage->mesh_nextgi_rt_clear_parts(p_mesh);
 
 	const uint32_t surface_count = uint32_t(mesh_storage->mesh_get_surface_count(p_mesh));
@@ -341,13 +500,29 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 		part.first_surface = plan.first_surface;
 		part.surface_count = plan.surface_count;
 		part.geometries = plan.geometries;
-		part.blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(geometries.ptr(), geometries.size()), RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+		part.triangle_count = plan.triangle_count;
+		// Static BLASes compact one frame later. A dynamic mesh is rebuilt once with ALLOW_UPDATE, then refit.
+		BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT;
+		if (dynamic) {
+			flags = flags | RD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT;
+		} else {
+			flags = flags | RD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT;
+		}
+		part.blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(geometries.ptr(), geometries.size()), flags);
 		if (part.blas.is_valid()) {
 			RD::get_singleton()->blas_build(part.blas);
 			stats.blas_build_count++;
+			stats.blas_build_triangles += plan.triangle_count;
+			if (!dynamic) {
+				PendingCompact pending;
+				pending.blas = part.blas;
+				pending.triangles = plan.triangle_count;
+				pending_compactions.push_back(pending);
+			}
 		}
 		parts->push_back(part);
 	}
+	mesh_storage->mesh_nextgi_rt_set_allows_update(p_mesh, dynamic);
 	mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
 }
 
@@ -367,6 +542,11 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	stats.fed_instance_count = 0;
 	stats.instance_count = 0;
 	stats.blas_build_count = 0;
+	stats.blas_build_triangles = 0;
+	stats.compaction_copies = 0;
+	stats.refit_triangles = 0;
+	tlas_traceable = false;
+	compaction_triangles_this_frame = 0;
 	ERR_FAIL_NULL(p_render_data);
 	if (tlas.is_null()) {
 		return;
@@ -381,6 +561,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		return;
 	}
 	stats.fed_instance_count = fed_instances->size();
+	const uint64_t ticks_start = OS::get_singleton() != nullptr ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
 	LocalVector<NextGIInstanceRecord> instance_records;
@@ -398,10 +579,28 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		}
 		// A dirty mesh is built in this frame's later "AS builds" phase and enters the
 		// TLAS next frame; its parts are skipped here (nextgi_rt_part_enters_tlas).
-		const bool blas_dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
+		bool blas_dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
 		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
 		if (parts == nullptr) {
 			continue;
+		}
+		// A surface updated on each of the last 4 frames refits in this phase, up to the refit cap.
+		if (blas_dirty && mesh_storage->mesh_nextgi_rt_is_dynamic(mesh) && mesh_storage->mesh_nextgi_rt_allows_update(mesh)) {
+			uint32_t triangles = 0;
+			for (const MeshStorage::NextGIRTPart &part : *parts) {
+				triangles += part.triangle_count;
+			}
+			if (nextgi_rt_refit_or_exclude(stats.refit_triangles, triangles, NEXTGI_RT_REFIT_TRIANGLE_CAP) != NEXTGI_RT_INCLUDED) {
+				continue;
+			}
+			for (const MeshStorage::NextGIRTPart &part : *parts) {
+				if (part.blas.is_valid()) {
+					RD::get_singleton()->blas_build(part.blas, RD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
+				}
+			}
+			mesh_storage->mesh_nextgi_rt_set_blas_dirty(mesh, false);
+			stats.refit_triangles += triangles;
+			blas_dirty = false;
 		}
 
 		const Transform3D &transform = geometry_instance->transform;
@@ -453,6 +652,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			}
 			record.origin_offset = nextgi_rt_origin_offset(eps_rt, max_scale);
 			instance_records.push_back(record);
+			if (RSG::rasterizer != nullptr) {
+				mesh_last_tlas_frame[mesh] = RSG::rasterizer->get_frame_number();
+			}
 
 			RD::AccelerationStructureInstance tlas_instance;
 			tlas_instance.transform = transform;
@@ -470,6 +672,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	}
 
 	stats.instance_count = instance_records.size();
+	if (OS::get_singleton() != nullptr) {
+		stats.tlas_fill_ms = double(OS::get_singleton()->get_ticks_usec() - ticks_start) / 1000.0;
+	}
 	if (instance_records.is_empty()) {
 		return;
 	}
@@ -485,6 +690,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	// No debug label here: the frame block's slot label names this work.
 	if (RD::get_singleton()->tlas_build(tlas, Span<RD::AccelerationStructureInstance>(tlas_instances.ptr(), tlas_instances.size())) == OK) {
 		stats.tlas_build_count++;
+		tlas_traceable = true;
 	}
 }
 
@@ -503,22 +709,179 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 	if (!mesh_storage->mesh_nextgi_rt_is_enabled()) {
 		return;
 	}
+	const uint64_t ticks_start = OS::get_singleton() != nullptr ? OS::get_singleton()->get_ticks_usec() : 0;
+	const uint32_t spent_triangles = compaction_triangles_this_frame;
 
-	// _build_dirty_mesh_parts clears the dirty flag, so a mesh fed by several instances
-	// builds once. The new BLASes join the TLAS in the next frame's rebuild_tlas().
+	// New BLASes first, then the largest angular radius. A mesh that does not fit stays dirty.
+	HashMap<RID, NextGIBuildItem> unique;
+	LocalVector<RID> meshes;
+	uint32_t next_id = 0;
 	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
 		RenderGeometryInstanceBase *geometry_instance = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
 		if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
 			continue;
 		}
 		const RID mesh = geometry_instance->data->base;
-		if (!mesh_storage->owns_mesh(mesh)) {
+		if (!mesh_storage->owns_mesh(mesh) || !mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
 			continue;
 		}
-		if (mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
-			_build_dirty_mesh_parts(mesh);
+		if (mesh_storage->mesh_nextgi_rt_is_dynamic(mesh) && mesh_storage->mesh_nextgi_rt_allows_update(mesh)) {
+			// Line 1a already refit this mesh, or excluded it past the refit cap.
+			continue;
+		}
+		if (unique.has(mesh)) {
+			NextGIBuildItem &item = unique[mesh];
+			item.angular_radius = MAX(item.angular_radius, fed.angular_radius);
+			continue;
+		}
+		NextGIBuildItem item;
+		item.id = next_id++;
+		item.triangles = _mesh_triangle_count(mesh);
+		item.angular_radius = fed.angular_radius;
+		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
+		item.is_new = parts == nullptr || parts->is_empty();
+		if (!item.is_new) {
+			item.is_new = true;
+			for (const MeshStorage::NextGIRTPart &part : *parts) {
+				if (part.blas.is_valid()) {
+					item.is_new = false;
+					break;
+				}
+			}
+		}
+		unique.insert(mesh, item);
+		meshes.push_back(mesh);
+	}
+
+	LocalVector<NextGIBuildItem> items;
+	items.resize(meshes.size());
+	for (uint32_t i = 0; i < meshes.size(); i++) {
+		items[unique[meshes[i]].id] = unique[meshes[i]];
+	}
+	LocalVector<uint32_t> accepted_ids;
+	accepted_ids.resize(items.size());
+	uint32_t scheduled_triangles = 0;
+	const uint32_t triangle_budget = spent_triangles >= uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP) ? 0 : uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP) - spent_triangles;
+	const uint32_t accepted_count = nextgi_rt_schedule_builds(items.ptr(), items.size(), triangle_budget, accepted_ids.ptr(), accepted_ids.size(), scheduled_triangles);
+	HashMap<uint32_t, bool> accepted;
+	for (uint32_t i = 0; i < accepted_count; i++) {
+		accepted.insert(accepted_ids[i], true);
+	}
+	for (const RID &mesh : meshes) {
+		if (!accepted.has(unique[mesh].id)) {
+			continue;
+		}
+		_build_dirty_mesh_parts(mesh);
+		// Rebuilding a BLAS that this frame's TLAS already references invalidates that TLAS.
+		tlas_traceable = false;
+	}
+
+	uint64_t frame = 0;
+	if (RSG::rasterizer != nullptr) {
+		frame = RSG::rasterizer->get_frame_number();
+	}
+	_apply_as_budget(frame);
+	if (OS::get_singleton() != nullptr) {
+		stats.scene_update_ms = double(OS::get_singleton()->get_ticks_usec() - ticks_start) / 1000.0;
+	}
+}
+
+void NextGIRTScene::compact_after_traces() {
+	if (tlas.is_null() || RD::get_singleton() == nullptr || pending_compactions.is_empty()) {
+		return;
+	}
+	LocalVector<PendingCompact> deferred;
+	for (const PendingCompact &pending : pending_compactions) {
+		if (compaction_triangles_this_frame + pending.triangles > uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP)) {
+			deferred.push_back(pending);
+			continue;
+		}
+		if (RD::get_singleton()->blas_compact(pending.blas) == OK) {
+			stats.compaction_copies++;
+			compaction_triangles_this_frame += pending.triangles;
+			// The copy completes on a later device frame and invalidates this TLAS.
+			// Traces in this frame have already been recorded.
+			tlas_traceable = false;
 		}
 	}
+	pending_compactions = deferred;
+}
+
+uint32_t NextGIRTScene::_mesh_triangle_count(RID p_mesh) const {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr) {
+		return 0;
+	}
+	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	if (parts != nullptr && !parts->is_empty()) {
+		uint32_t triangles = 0;
+		for (const MeshStorage::NextGIRTPart &part : *parts) {
+			triangles += part.triangle_count;
+		}
+		if (triangles > 0) {
+			return triangles;
+		}
+	}
+	uint32_t triangles = 0;
+	const uint32_t surface_count = uint32_t(mesh_storage->mesh_get_surface_count(p_mesh));
+	for (uint32_t i = 0; i < surface_count; i++) {
+		MeshStorage::NextGIRTSurfaceInfo info;
+		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, i, info) || !info.eligible || _nextgi_rt_material_is_alpha(info.material)) {
+			continue;
+		}
+		triangles += info.index_count / 3;
+	}
+	return triangles;
+}
+
+void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr || RD::get_singleton() == nullptr) {
+		return;
+	}
+	LocalVector<RID> ids;
+	LocalVector<NextGIASMesh> meshes;
+	for (const KeyValue<RID, uint64_t> &entry : mesh_last_tlas_frame) {
+		NextGIASMesh mesh;
+		mesh.id = ids.size();
+		ids.push_back(entry.key);
+		uint64_t bytes = 0;
+		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(entry.key);
+		if (parts != nullptr) {
+			for (const MeshStorage::NextGIRTPart &part : *parts) {
+				if (part.blas.is_valid()) {
+					bytes += RD::get_singleton()->acceleration_structure_get_size_bytes(part.blas);
+				}
+			}
+		}
+		mesh.bytes = bytes;
+		mesh.frames_absent = p_frame > entry.value ? uint32_t(p_frame - entry.value) : 0;
+		meshes.push_back(mesh);
+	}
+	LocalVector<uint32_t> evict;
+	evict.resize(meshes.size());
+	uint32_t evict_count = 0;
+	const bool over = meshes.is_empty() ? false : nextgi_rt_evict_as_memory(meshes.ptr(), meshes.size(), as_budget_bytes, NEXTGI_RT_ABSENT_FRAMES, evict.ptr(), evict_count);
+	for (uint32_t i = 0; i < evict_count; i++) {
+		mesh_storage->mesh_nextgi_rt_clear_parts(ids[evict[i]]);
+		mesh_last_tlas_frame.erase(ids[evict[i]]);
+		tlas_traceable = false;
+	}
+	uint64_t total = 0;
+	for (uint32_t i = 0; i < meshes.size(); i++) {
+		bool evicted = false;
+		for (uint32_t e = 0; e < evict_count; e++) {
+			if (evict[e] == meshes[i].id) {
+				evicted = true;
+				break;
+			}
+		}
+		if (!evicted) {
+			total += meshes[i].bytes;
+		}
+	}
+	stats.as_bytes = total;
+	as_memory_exceeded = over;
 }
 
 } // namespace RendererRD

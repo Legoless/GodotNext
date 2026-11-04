@@ -331,6 +331,25 @@ public:
 	PagedArrayPool<InstanceData> instance_data_page_pool;
 	PagedArrayPool<InstanceVisibilityData> instance_visibility_data_page_pool;
 
+	// GodotNext: nextgi_rt_registry
+	// Old+new for a move. Free, scenario leave and hide carry the old bounds only.
+	struct NextGIRegistryDirtyEvent {
+		RID instance;
+		AABB old_aabb;
+		AABB new_aabb;
+		bool has_old = false;
+		bool has_new = false;
+	};
+
+	struct NextGIRegistryLightEvent {
+		RID light_instance;
+		int change = 0;
+		int bake = 0;
+		bool directional = false;
+		AABB old_aabb;
+		AABB new_aabb;
+	};
+
 	struct Scenario {
 		enum IndexerType {
 			INDEXER_GEOMETRY, //for geometry
@@ -358,6 +377,14 @@ public:
 		// GodotNext: nextgi_src_relight
 		// Non-directional LIGHT_BAKE_STATIC lights. NextGI's world-space set reads this beside dynamic_lights (D14).
 		LocalVector<RID> static_lights;
+		// GodotNext: nextgi_rt_registry
+		// One selection per scenario per frame, shared by every view. The first view of the frame is the anchor.
+		uint64_t nextgi_rt_selection_frame = UINT64_MAX;
+		LocalVector<RendererSceneRender::NextGIRTInstance> nextgi_rt_selection;
+		LocalVector<NextGIRegistryDirtyEvent> nextgi_dirty_writing;
+		LocalVector<NextGIRegistryDirtyEvent> nextgi_dirty_published;
+		LocalVector<NextGIRegistryLightEvent> nextgi_light_writing;
+		LocalVector<NextGIRegistryLightEvent> nextgi_light_published;
 
 		PagedArray<InstanceBounds> instance_aabbs;
 		PagedArray<InstanceData> instance_data;
@@ -710,6 +737,12 @@ public:
 		RSE::LightBakeMode bake_mode;
 		uint32_t max_sdfgi_cascade = 2;
 		uint32_t cull_mask = 0xFFFFFFFF;
+		// GodotNext: nextgi_rt_registry
+		bool nextgi_light_snapshot_valid = false;
+		float nextgi_energy = 0.0f;
+		float nextgi_range = 0.0f;
+		bool nextgi_shadow = false;
+		Color nextgi_color;
 
 	private:
 		// Instead of a single dirty flag, we maintain a count

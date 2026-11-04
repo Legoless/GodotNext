@@ -13,6 +13,12 @@ var _saw := false
 func _ready() -> void:
 	if bool(get_meta("skip_runtime", false)):
 		return
+	var world := get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if world != null and world.environment != null and bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/enabled", false)):
+		var environment := world.environment.duplicate()
+		environment.nextgi_enabled = true
+		environment.sdfgi_enabled = false
+		world.environment = environment
 	process_priority = 1
 	_hold = SceneArgs.int_value("--hold-frame", -1)
 	var count := SceneArgs.int_value("--instances", Layout.DEFAULT_INSTANCES)

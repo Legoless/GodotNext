@@ -71,6 +71,7 @@ public:
 		RID blas;
 		uint32_t first_surface = 0;
 		uint32_t surface_count = 0;
+		uint32_t triangle_count = 0;
 		LocalVector<NextGIRTPartGeometry> geometries;
 	};
 
@@ -216,6 +217,10 @@ private:
 		// GodotNext: nextgi_rt_arena
 		LocalVector<NextGIRTPart> nextgi_parts;
 		bool nextgi_blas_dirty = false;
+		// Newest frame is index 0. Four consecutive frames make the mesh dynamic (line 1a refit).
+		uint32_t nextgi_rt_update_frames[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
+		bool nextgi_rt_dynamic = false;
+		bool nextgi_rt_allows_update = false;
 	};
 
 	mutable RID_Owner<Mesh, true> mesh_owner;
@@ -477,6 +482,10 @@ public:
 	bool mesh_nextgi_rt_get_surface_info(RID p_mesh, uint32_t p_surface, NextGIRTSurfaceInfo &r_info) const;
 	bool mesh_nextgi_rt_is_blas_dirty(RID p_mesh) const;
 	void mesh_nextgi_rt_set_blas_dirty(RID p_mesh, bool p_dirty);
+	void mesh_nextgi_rt_note_vertex_update(RID p_mesh);
+	bool mesh_nextgi_rt_is_dynamic(RID p_mesh) const;
+	void mesh_nextgi_rt_set_allows_update(RID p_mesh, bool p_allows);
+	bool mesh_nextgi_rt_allows_update(RID p_mesh) const;
 	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_parts(RID p_mesh);
 	void mesh_nextgi_rt_clear_parts(RID p_mesh);
 	void mesh_nextgi_release_cpu_geometry(RID p_mesh);
