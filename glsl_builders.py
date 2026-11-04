@@ -205,13 +205,19 @@ def build_rd_header(filename: str, shader: str) -> None:
     # Store the code of all stages in a single compressed buffer, as null-terminated strings.
     buffer = b""
     setup_args = []
+    # GodotNext: shader_baker_ray_query
+    uses_ray_query = False
     for lines in stages:
         if lines is None:
             setup_args.append("nullptr")
         else:
             setup_args.append(f"_code.get_data() + {len(buffer)}")
+            if any("GL_EXT_ray_query" in line for line in lines):
+                uses_ray_query = True
             buffer += "\n".join(lines).encode() + b"\n\0"
     compressed = compress_buffer(buffer)
+    # GodotNext: shader_baker_ray_query
+    ray_query_mark = "\t\tset_requires_ray_query(true);\n" if uses_ray_query else ""
 
     with generated_wrapper(filename) as file:
         file.write(f"""\
@@ -225,7 +231,7 @@ public:
 		}};
 		const CharString _code = _decompress_code(_code_compressed, {len(compressed)}, {len(buffer)});
 
-		{setup_function}({", ".join(setup_args)}, "{class_name}");
+{ray_query_mark}		{setup_function}({", ".join(setup_args)}, "{class_name}");
 	}}
 }};
 """)

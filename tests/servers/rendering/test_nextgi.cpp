@@ -45,6 +45,17 @@ TEST_FORCE_LINK(test_nextgi)
 #include "editor/scene/3d/nextgi_editor_plugin.h"
 #include "tests/test_utils.h"
 
+#ifdef RD_ENABLED
+// GodotNext: shader_baker_ray_query
+#include "editor/export/shader_baker/shader_baker_export_plugin.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_selftest.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
+#endif // RD_ENABLED
+
 namespace TestNextGI {
 
 static void restore_setting(const String &p_name, bool p_existed, const Variant &p_previous) {
@@ -167,6 +178,25 @@ TEST_CASE("[NextGI][Editor] View Information tier readout") {
 	CHECK(NextGIEditorPlugin::get_tier_readout().is_empty());
 	restore_setting(enabled_setting, had_enabled, previous_enabled);
 }
+
+#ifdef RD_ENABLED
+// GodotNext: shader_baker_ray_query
+TEST_CASE("[NextGI][Editor] Shader baker keeps ray-query versions only for AS containers") {
+	CHECK(ShaderBakerExportPlugin::should_bake_version(false, false));
+	CHECK(ShaderBakerExportPlugin::should_bake_version(false, true));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_bake_version(true, false));
+	CHECK(ShaderBakerExportPlugin::should_bake_version(true, true));
+}
+
+TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader baker") {
+	CHECK(NextgiGatherShaderRD().requires_ray_query());
+	CHECK(NextgiSrcRelightShaderRD().requires_ray_query());
+	CHECK(NextgiWrcUpdateShaderRD().requires_ray_query());
+	CHECK(NextgiReferenceShaderRD().requires_ray_query());
+	CHECK(NextgiSelftestShaderRD().requires_ray_query());
+	CHECK(NextgiRqSelftestShaderRD().requires_ray_query());
+}
+#endif // RD_ENABLED
 
 } // namespace TestNextGI
 

@@ -40,7 +40,21 @@
 #include "core/version.h"
 #include "servers/rendering/shader_include_db.h"
 
+#include <cstring>
+
 #define ENABLE_SHADER_CACHE 1
+
+// GodotNext: shader_baker_ray_query
+bool ShaderRD::_stage_templates_use_ray_query() const {
+	for (int stage = 0; stage < STAGE_TYPE_MAX; stage++) {
+		for (const StageTemplate::Chunk &chunk : stage_templates[stage].chunks) {
+			if (chunk.type == StageTemplate::Chunk::TYPE_TEXT && strstr(chunk.text.get_data(), "GL_EXT_ray_query") != nullptr) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
 
 void ShaderRD::_add_stage(const char *p_code, StageType p_stage_type) {
 	Vector<String> lines = String(p_code).split("\n");
@@ -1048,6 +1062,8 @@ ShaderRD::ShaderRD() {
 void ShaderRD::initialize(const Vector<String> &p_variant_defines, const String &p_general_defines, const Vector<RD::PipelineImmutableSampler> &p_immutable_samplers, const Vector<uint64_t> &p_dynamic_buffers) {
 	ERR_FAIL_COND(variant_defines.size());
 	ERR_FAIL_COND(p_variant_defines.is_empty());
+	// GodotNext: shader_baker_ray_query
+	DEV_ASSERT(!_stage_templates_use_ray_query() || requires_ray_query());
 
 	general_defines = p_general_defines.utf8();
 	immutable_samplers = p_immutable_samplers;
@@ -1133,6 +1149,8 @@ void ShaderRD::_initialize_cache() {
 void ShaderRD::initialize(const Vector<VariantDefine> &p_variant_defines, const String &p_general_defines, const Vector<RD::PipelineImmutableSampler> &p_immutable_samplers, const Vector<uint64_t> &p_dynamic_buffers) {
 	ERR_FAIL_COND(variant_defines.size());
 	ERR_FAIL_COND(p_variant_defines.is_empty());
+	// GodotNext: shader_baker_ray_query
+	DEV_ASSERT(!_stage_templates_use_ray_query() || requires_ray_query());
 
 	general_defines = p_general_defines.utf8();
 	immutable_samplers = p_immutable_samplers;

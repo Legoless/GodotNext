@@ -61,6 +61,8 @@ public:
 	virtual Ref<RenderingShaderContainer> create_container() const override;
 	virtual ShaderLanguageVersion get_shader_language_version() const override;
 	virtual ShaderSpirvVersion get_shader_spirv_version(ShaderStage p_stage) const override;
+	// GodotNext: shader_baker_ray_query
+	virtual bool supports_acceleration_structures() const override { return true; }
 	void set_debug_info_enabled(bool p_debug_info_enabled);
 	bool get_debug_info_enabled() const;
 	RenderingShaderContainerFormatVulkan();

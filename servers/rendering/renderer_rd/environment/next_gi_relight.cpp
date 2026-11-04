@@ -401,7 +401,9 @@ bool NextGIRelight::_ensure_shader() {
 		Vector<String> defines;
 		defines.push_back(radiance_is_packed ? "" : "#define NEXTGI_RADIANCE_RGBA16F\n");
 		shader->shader.initialize(defines);
-		shader->version = shader->shader.version_create(false);
+		// GodotNext: shader_baker_ray_query
+		// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
+		shader->version = shader->shader.version_create(true);
 		if (!shader->version.is_valid()) {
 			memdelete(shader);
 			shader = nullptr;

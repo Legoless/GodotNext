@@ -84,6 +84,7 @@ protected:
 	uint64_t customization_configuration_hash = 0;
 	uint32_t tasks_processed = 0;
 	uint32_t tasks_total = 0;
+	uint32_t skipped_ray_query_versions = 0;
 	std::atomic<bool> tasks_cancelled;
 	BinaryMutex tasks_mutex;
 	ConditionVariable tasks_condition;
@@ -103,6 +104,9 @@ protected:
 	void _process_work_item(WorkItem p_work_item);
 
 public:
+	// GodotNext: shader_baker_ray_query
+	static bool should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures);
+
 	ShaderBakerExportPlugin();
 	virtual ~ShaderBakerExportPlugin() override;
 	void add_platform(Ref<ShaderBakerExportPluginPlatform> p_platform);

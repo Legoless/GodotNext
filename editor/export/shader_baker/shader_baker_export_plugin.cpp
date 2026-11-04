@@ -53,6 +53,11 @@ String ShaderBakerExportPlugin::get_name() const {
 	return "ShaderBaker";
 }
 
+// GodotNext: shader_baker_ray_query
+bool ShaderBakerExportPlugin::should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures) {
+	return !p_requires_ray_query || p_supports_acceleration_structures;
+}
+
 bool ShaderBakerExportPlugin::_is_active(const Vector<String> &p_features) const {
 	// Shader baker should only work when a RendererRD driver is active, as the embedded shaders won't be found otherwise.
 	return RendererSceneRenderRD::get_singleton() != nullptr && RendererRD::MaterialStorage::get_singleton() != nullptr && p_features.has("shader_baker");
@@ -109,6 +114,7 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	shader_cache_renderer_name = RendererSceneRenderRD::get_singleton()->get_name();
 	tasks_processed = 0;
 	tasks_total = 0;
+	skipped_ray_query_versions = 0;
 	tasks_cancelled = false;
 
 	StringBuilder to_hash;
@@ -182,6 +188,11 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 }
 
 void ShaderBakerExportPlugin::_end_customize_resources() {
+	// GodotNext: shader_baker_ray_query
+	if (!shader_container_driver.is_empty()) {
+		print_line(vformat("Shader baker: driver '%s', skipped %d ray-query shader version(s).", shader_container_driver, skipped_ray_query_versions));
+	}
+
 	if (!_initialize_cache_directory()) {
 		return;
 	}
@@ -371,6 +382,13 @@ uint64_t ShaderBakerExportPlugin::_get_customization_configuration_hash() const 
 }
 
 void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID p_version) {
+	// GodotNext: shader_baker_ray_query
+	ERR_FAIL_NULL(shader_container_format);
+	if (!should_bake_version(p_shader->requires_ray_query(), shader_container_format->supports_acceleration_structures())) {
+		skipped_ray_query_versions++;
+		return;
+	}
+
 	const int64_t variant_count = p_shader->get_variant_count();
 	const int64_t group_count = p_shader->get_group_count();
 	LocalVector<ShaderGroupItem> group_items;

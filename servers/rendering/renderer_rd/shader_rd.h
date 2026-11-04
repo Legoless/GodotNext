@@ -104,6 +104,9 @@ private:
 		int group = 0;
 	};
 
+	// GodotNext: shader_baker_ray_query
+	bool _stage_templates_use_ray_query() const;
+
 	// Vector will have the size of SHADER_STAGE_MAX and unused stages will have empty strings.
 	void _compile_variant(uint32_t p_variant, CompileData p_data);
 	// GodotNext: spirv_dump
@@ -145,6 +148,8 @@ private:
 	};
 
 	RD::PipelineType pipeline_type = RD::PIPELINE_TYPE_RASTERIZATION;
+
+	bool ray_query_required = false;
 
 	String name;
 
@@ -201,6 +206,10 @@ protected:
 	void setup_raytracing(const char *p_raygen_code, const char *p_any_hit_code, const char *p_closest_hit_code, const char *p_miss_code, const char *p_intersection_code, const char *p_name);
 
 public:
+	// GodotNext: shader_baker_ray_query
+	void set_requires_ray_query(bool p_enabled) { ray_query_required = p_enabled; }
+	bool requires_ray_query() const { return ray_query_required; }
+
 	RID version_create(bool p_embedded = true);
 
 	void version_set_code(RID p_version, const HashMap<String, String> &p_code, const String &p_uniforms, const String &p_vertex_globals, const String &p_fragment_globals, const Vector<String> &p_custom_defines);

@@ -29,6 +29,7 @@ window/size/viewport_height=1080
 
 renderer/rendering_method="forward_plus"
 renderer/rendering_method.mobile="mobile"
+rendering_device/driver.baker_d3d12="d3d12"
 rendering_device/driver.windows="vulkan"
 anti_aliasing/quality/use_debanding=false
 lights_and_shadows/use_physical_light_units=false

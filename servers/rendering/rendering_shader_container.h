@@ -311,4 +311,6 @@ public:
 	virtual Ref<RenderingShaderContainer> create_container() const = 0;
 	virtual ShaderLanguageVersion get_shader_language_version() const = 0;
 	virtual ShaderSpirvVersion get_shader_spirv_version(ShaderStage p_stage) const = 0;
+	// GodotNext: shader_baker_ray_query
+	virtual bool supports_acceleration_structures() const { return false; }
 };
