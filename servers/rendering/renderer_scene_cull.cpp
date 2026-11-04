@@ -38,6 +38,8 @@
 #include "core/object/worker_thread_pool.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
+#include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
@@ -3821,43 +3823,149 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				scenario->nextgi_rt_selection_frame = frame;
 				const float scene_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
 				const Vector3 anchor = p_camera_data->main_transform.origin;
-				LocalVector<Instance *> picked;
+				struct RTCandidate {
+					Instance *instance = nullptr;
+					float angular = 0.0f;
+					RID mesh_override;
+					Transform3D world;
+					bool has_world = false;
+					uint32_t element_index = UINT32_MAX;
+				};
+				LocalVector<RTCandidate> picked;
 				LocalVector<float> angular;
 				LocalVector<RendererRD::NextGIRTExclusion> reasons;
+				uint32_t not_in_scene = 0;
+				uint32_t dynamic_excluded = 0;
+				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 				for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
 					Instance *instance = E->self();
+					if (!instance->visible || !(instance->baked_light || instance->dynamic_gi)) {
+						continue;
+					}
+					const AABB &parent_aabb = instance->transformed_aabb;
+					const float parent_distance = parent_aabb.get_center().distance_to(anchor);
+					if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+						if (parent_distance > scene_radius) {
+							continue;
+						}
+						uint32_t amount = 1;
+						RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
+						if (particles_storage != nullptr) {
+							uint32_t trail_divisor = 1;
+							amount = MAX(particles_storage->particles_get_amount(instance->base, trail_divisor), 1u);
+						}
+						dynamic_excluded += amount;
+						continue;
+					}
+					if (instance->base_type == RSE::INSTANCE_MULTIMESH) {
+						if (mesh_storage == nullptr || !mesh_storage->owns_multimesh(instance->base)) {
+							continue;
+						}
+						if (mesh_storage->multimesh_get_transform_format(instance->base) != RSE::MULTIMESH_TRANSFORM_3D) {
+							continue;
+						}
+						const RID mesh = mesh_storage->multimesh_get_mesh(instance->base);
+						if (!mesh_storage->owns_mesh(mesh)) {
+							continue;
+						}
+						const bool excluded = mesh_storage->multimesh_uses_indirect(instance->base) || mesh_storage->multimesh_is_rt_dynamic(instance->base);
+						if (excluded) {
+							if (parent_distance > scene_radius) {
+								continue;
+							}
+							uint32_t element_count = 0;
+							uint32_t stride = 0;
+							mesh_storage->multimesh_get_rt_transforms(instance->base, element_count, stride);
+							dynamic_excluded += MAX(element_count, 1u);
+							continue;
+						}
+						uint32_t element_count = 0;
+						uint32_t stride = 0;
+						const float *transforms = mesh_storage->multimesh_get_rt_transforms(instance->base, element_count, stride);
+						if (transforms == nullptr || stride < 12) {
+							continue;
+						}
+						const AABB mesh_aabb = mesh_storage->mesh_get_aabb(mesh);
+						for (uint32_t element = 0; element < element_count; element++) {
+							const Transform3D world = RendererRD::nextgi_rt_element_world(instance->transform, transforms + element * stride);
+							const AABB element_aabb = world.xform(mesh_aabb);
+							const float bound = element_aabb.size.length() * 0.5f;
+							const float distance = element_aabb.get_center().distance_to(anchor);
+							if (distance > scene_radius) {
+								continue;
+							}
+							if (RendererRD::nextgi_rt_cull_instance(distance, bound, scene_radius) != RendererRD::NEXTGI_RT_INCLUDED) {
+								not_in_scene++;
+								continue;
+							}
+							RTCandidate candidate;
+							candidate.instance = instance;
+							candidate.angular = RendererRD::nextgi_rt_angular_radius(distance, bound);
+							candidate.mesh_override = mesh;
+							candidate.world = world;
+							candidate.has_world = true;
+							candidate.element_index = element;
+							picked.push_back(candidate);
+							angular.push_back(candidate.angular);
+							reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
+						}
+						continue;
+					}
 					const bool skinned = instance->mesh_instance.is_valid();
-					if (!RendererRD::nextgi_rt_instance_eligible(instance->base_type == RSE::INSTANCE_MESH, instance->visible, instance->baked_light || instance->dynamic_gi, skinned)) {
+					if (!RendererRD::nextgi_rt_instance_eligible(instance->base_type == RSE::INSTANCE_MESH, true, true, skinned)) {
 						continue;
 					}
-					const AABB &aabb = instance->transformed_aabb;
-					const float bound = aabb.size.length() * 0.5f;
-					const float distance = aabb.get_center().distance_to(anchor);
-					if (RendererRD::nextgi_rt_cull_instance(distance, bound, scene_radius) != RendererRD::NEXTGI_RT_INCLUDED) {
+					const float bound = parent_aabb.size.length() * 0.5f;
+					if (parent_distance > scene_radius) {
 						continue;
 					}
-					picked.push_back(instance);
-					angular.push_back(RendererRD::nextgi_rt_angular_radius(distance, bound));
+					if (RendererRD::nextgi_rt_cull_instance(parent_distance, bound, scene_radius) != RendererRD::NEXTGI_RT_INCLUDED) {
+						not_in_scene++;
+						continue;
+					}
+					RTCandidate candidate;
+					candidate.instance = instance;
+					candidate.angular = RendererRD::nextgi_rt_angular_radius(parent_distance, bound);
+					picked.push_back(candidate);
+					angular.push_back(candidate.angular);
 					reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 				}
 				if (!reasons.is_empty()) {
 					RendererRD::nextgi_rt_apply_instance_cap(angular.ptr(), reasons.ptr(), reasons.size(), RendererRD::NEXTGI_RT_TLAS_CAPACITY);
 				}
+				uint32_t instance_cap = 0;
+				uint32_t selected = 0;
 				for (uint32_t i = 0; i < picked.size(); i++) {
 					if (reasons[i] != RendererRD::NEXTGI_RT_INCLUDED) {
+						instance_cap++;
 						continue;
 					}
-					InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(picked[i]->base_data);
+					InstanceGeometryData *geometry_data = static_cast<InstanceGeometryData *>(picked[i].instance->base_data);
 					if (geometry_data == nullptr || geometry_data->geometry_instance == nullptr) {
 						continue;
 					}
 					RendererSceneRender::NextGIRTInstance rt_instance;
 					rt_instance.geometry_instance = geometry_data->geometry_instance;
-					rt_instance.lightmapped = picked[i]->lightmap != nullptr;
+					rt_instance.lightmapped = picked[i].instance->lightmap != nullptr;
 					rt_instance.angular_radius = angular[i];
+					rt_instance.mesh_override = picked[i].mesh_override;
+					rt_instance.rt_transform = picked[i].world;
+					rt_instance.has_rt_transform = picked[i].has_world;
+					rt_instance.element_index = picked[i].element_index;
 					scenario->nextgi_rt_selection.push_back(rt_instance);
+					selected++;
 				}
+				scenario->nextgi_rt_not_in_scene = not_in_scene;
+				scenario->nextgi_rt_instance_cap = instance_cap;
+				scenario->nextgi_rt_dynamic_excluded = dynamic_excluded;
+				scenario->nextgi_rt_selected = selected;
+				scenario->nextgi_rt_denominator = not_in_scene + instance_cap + dynamic_excluded + selected;
 			}
+			sdfgi_update_data.nextgi_rt_denominator = scenario->nextgi_rt_denominator;
+			sdfgi_update_data.nextgi_rt_not_in_scene = scenario->nextgi_rt_not_in_scene;
+			sdfgi_update_data.nextgi_rt_instance_cap = scenario->nextgi_rt_instance_cap;
+			sdfgi_update_data.nextgi_rt_dynamic_excluded = scenario->nextgi_rt_dynamic_excluded;
+			sdfgi_update_data.nextgi_rt_selected = scenario->nextgi_rt_selected;
 			for (const RendererSceneRender::NextGIRTInstance &rt_instance : scenario->nextgi_rt_selection) {
 				scene_cull_result.nextgi_rt_instances.push_back(rt_instance);
 			}

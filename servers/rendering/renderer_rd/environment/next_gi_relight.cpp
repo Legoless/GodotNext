@@ -41,6 +41,8 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
 
+#include <cstdint>
+
 using namespace RendererRD;
 
 NextGIRelight *NextGIRelight::singleton = nullptr;
@@ -358,19 +360,24 @@ bool NextGIRelight::_evict_oldest_pages() {
 	for (const CardPage &page : instances[oldest].cards) {
 		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
 	}
-	instance_index.erase(instances[oldest].instance);
+	instance_index.erase(instances[oldest].page_key);
 	instances.remove_at(oldest);
 	for (uint32_t i = oldest; i < instances.size(); i++) {
-		instance_index[instances[i].instance] = i;
+		instance_index[instances[i].page_key] = i;
 	}
 	page_evictions++;
 	return true;
 }
 
-uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record) {
+static uint64_t _nextgi_page_key(RenderGeometryInstance *p_instance, uint32_t p_element) {
+	return uint64_t(uintptr_t(p_instance)) ^ (uint64_t(p_element) * 0x9E3779B97F4A7C15ULL);
+}
+
+uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element) {
 	if (p_instance == nullptr || r_record.card_set == UINT32_MAX) {
 		return UINT32_MAX;
 	}
+	const uint64_t page_key = _nextgi_page_key(p_instance, p_element);
 	if (!_ensure_atlases()) {
 		return UINT32_MAX;
 	}
@@ -378,7 +385,7 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 	if (src == nullptr) {
 		return UINT32_MAX;
 	}
-	const uint32_t *existing = instance_index.getptr(p_instance);
+	const uint32_t *existing = instance_index.getptr(page_key);
 	if (existing != nullptr) {
 		InstancePages &pages = instances[*existing];
 		pages.record = r_record;
@@ -394,6 +401,8 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 
 	InstancePages pages;
 	pages.instance = p_instance;
+	pages.element = p_element;
+	pages.page_key = page_key;
 	pages.record = r_record;
 	pages.record_index = r_record.tlas_index;
 	pages.page_table = page_table_count;
@@ -442,7 +451,7 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 	pages.last_used = page_clock++;
 	page_table_count += pages.cards.size();
 	r_record.page_table = pages.page_table;
-	instance_index.insert(p_instance, instances.size());
+	instance_index.insert(page_key, instances.size());
 	instances.push_back(pages);
 	return pages.page_table;
 }

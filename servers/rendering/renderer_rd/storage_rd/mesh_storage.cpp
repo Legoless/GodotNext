@@ -1899,6 +1899,7 @@ void MeshStorage::_multimesh_allocate_data(RID p_multimesh, int p_instances, RSE
 	}
 
 	multimesh->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MULTIMESH);
+	_multimesh_note_rt_change(multimesh);
 }
 
 void MeshStorage::_multimesh_enable_motion_vectors(MultiMesh *multimesh) {
@@ -2072,7 +2073,47 @@ bool MeshStorage::_multimesh_uses_motion_vectors(MultiMesh *multimesh) {
 	return (RSG::rasterizer->get_frame_number() - multimesh->motion_vectors_last_change) < 2;
 }
 
+void MeshStorage::_multimesh_note_rt_change(MultiMesh *multimesh) {
+	if (multimesh == nullptr || RSG::rasterizer == nullptr) {
+		return;
+	}
+	NextGIMultiMeshChange state;
+	state.last_change_frame = multimesh->rt_last_change_frame;
+	state.change_streak = multimesh->rt_change_streak;
+	nextgi_rt_note_multimesh_change(state, RSG::rasterizer->get_frame_number());
+	multimesh->rt_last_change_frame = state.last_change_frame;
+	multimesh->rt_change_streak = state.change_streak;
+}
+
+bool MeshStorage::multimesh_is_rt_dynamic(RID p_multimesh) const {
+	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+	ERR_FAIL_NULL_V(multimesh, false);
+	NextGIMultiMeshChange state;
+	state.last_change_frame = multimesh->rt_last_change_frame;
+	state.change_streak = multimesh->rt_change_streak;
+	return nextgi_rt_multimesh_is_dynamic(state);
+}
+
+const float *MeshStorage::multimesh_get_rt_transforms(RID p_multimesh, uint32_t &r_count, uint32_t &r_stride) const {
+	r_count = 0;
+	r_stride = 0;
+	MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+	ERR_FAIL_NULL_V(multimesh, nullptr);
+	if (multimesh->instances <= 0 || multimesh->xform_format != RSE::MULTIMESH_TRANSFORM_3D) {
+		return nullptr;
+	}
+	_multimesh_make_local(multimesh);
+	const uint32_t visible = multimesh->visible_instances >= 0 ? uint32_t(multimesh->visible_instances) : uint32_t(multimesh->instances);
+	r_count = visible;
+	r_stride = multimesh->stride_cache;
+	if (visible == 0 || multimesh->data_cache.is_empty() || multimesh->stride_cache < 12) {
+		return nullptr;
+	}
+	return multimesh->data_cache.ptr() + multimesh->motion_vectors_current_offset * multimesh->stride_cache;
+}
+
 void MeshStorage::_multimesh_mark_dirty(MultiMesh *multimesh, int p_index, bool p_aabb) {
+	_multimesh_note_rt_change(multimesh);
 	uint32_t region_index = p_index / MULTIMESH_DIRTY_REGION_SIZE;
 #ifdef DEBUG_ENABLED
 	uint32_t data_cache_dirty_region_count = Math::division_round_up(multimesh->instances, MULTIMESH_DIRTY_REGION_SIZE);
@@ -2442,6 +2483,7 @@ void MeshStorage::_multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_
 		}
 		multimesh->buffer_set = true;
 	}
+	_multimesh_note_rt_change(multimesh);
 
 	if (multimesh->data_cache.size()) {
 		float *cache_data = multimesh->data_cache.ptrw();
@@ -2510,6 +2552,7 @@ void MeshStorage::_multimesh_set_visible_instances(RID p_multimesh, int p_visibl
 	}
 
 	multimesh->visible_instances = p_visible;
+	_multimesh_note_rt_change(multimesh);
 
 	if (multimesh->indirect) { //we have to update the command buffer for the instance counts, in each stride this will be the second integer.
 		Mesh *mesh = mesh_owner.get_or_null(multimesh->mesh);

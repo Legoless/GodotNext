@@ -381,6 +381,11 @@ public:
 		// One selection per scenario per frame, shared by every view. The first view of the frame is the anchor.
 		uint64_t nextgi_rt_selection_frame = UINT64_MAX;
 		LocalVector<RendererSceneRender::NextGIRTInstance> nextgi_rt_selection;
+		uint32_t nextgi_rt_denominator = 0;
+		uint32_t nextgi_rt_not_in_scene = 0;
+		uint32_t nextgi_rt_instance_cap = 0;
+		uint32_t nextgi_rt_dynamic_excluded = 0;
+		uint32_t nextgi_rt_selected = 0;
 		LocalVector<NextGIRegistryDirtyEvent> nextgi_dirty_writing;
 		LocalVector<NextGIRegistryDirtyEvent> nextgi_dirty_published;
 		LocalVector<NextGIRegistryLightEvent> nextgi_light_writing;

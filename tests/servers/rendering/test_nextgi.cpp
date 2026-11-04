@@ -274,6 +274,12 @@ TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero"
 	const char *keys[] = {
 		"tlas_instances",
 		"rt_coverage",
+		"rt_coverage_numerator",
+		"rt_coverage_denominator",
+		"rt_not_in_scene",
+		"rt_instance_cap",
+		"rt_dynamic_excluded",
+		"rt_blas_pending",
 		"blas_bytes_compacted",
 		"blas_bytes_uncompacted",
 		"rt_arena_bytes",
@@ -286,7 +292,7 @@ TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero"
 		"src_page_updates",
 		"clamped_energy_fraction",
 	};
-	CHECK_EQ(counters.size(), 13);
+	CHECK_EQ(counters.size(), 19);
 	for (const char *key : keys) {
 		CHECK(counters.has(key));
 		CHECK_EQ(int64_t(counters[key]), int64_t(0));
@@ -2025,6 +2031,45 @@ TEST_CASE("[NextGI] WRC layout, relocation and diffuse handoff") {
 	CHECK(Math::is_equal_approx(snapped.x, 0.0f));
 	CHECK(Math::is_equal_approx(snapped.y, -2.0f));
 	CHECK(Math::is_equal_approx(snapped.z, 2.0f));
+}
+
+TEST_CASE("[NextGI] MultiMesh classification, element expansion and Q18") {
+	RendererRD::NextGIMultiMeshChange change;
+	for (uint64_t frame = 1; frame <= 7; frame++) {
+		RendererRD::nextgi_rt_note_multimesh_change(change, frame);
+		CHECK_FALSE(RendererRD::nextgi_rt_multimesh_is_dynamic(change));
+	}
+	RendererRD::nextgi_rt_note_multimesh_change(change, 8);
+	CHECK(RendererRD::nextgi_rt_multimesh_is_dynamic(change));
+	RendererRD::nextgi_rt_note_multimesh_change(change, 8);
+	CHECK_EQ(change.change_streak, 8);
+	RendererRD::nextgi_rt_note_multimesh_change(change, 20);
+	CHECK_FALSE(RendererRD::nextgi_rt_multimesh_is_dynamic(change));
+	CHECK_EQ(change.change_streak, 1);
+
+	const float rows[12] = { 1, 0, 0, 2, 0, 1, 0, 3, 0, 0, 1, 4 };
+	const Transform3D world = RendererRD::nextgi_rt_element_world(Transform3D(Basis(), Vector3(10, 0, 0)), rows);
+	CHECK(Math::is_equal_approx(world.origin.x, 12.0f));
+	CHECK(Math::is_equal_approx(world.origin.y, 3.0f));
+	CHECK(Math::is_equal_approx(world.origin.z, 4.0f));
+
+	float angular[3] = { 0.2f, 0.9f, 0.4f };
+	RendererRD::NextGIRTExclusion reasons[3] = { RendererRD::NEXTGI_RT_INCLUDED, RendererRD::NEXTGI_RT_INCLUDED, RendererRD::NEXTGI_RT_INCLUDED };
+	RendererRD::nextgi_rt_apply_instance_cap(angular, reasons, 3, 2);
+	CHECK_EQ(reasons[0], RendererRD::NEXTGI_RT_INSTANCE_CAP);
+	CHECK_EQ(reasons[1], RendererRD::NEXTGI_RT_INCLUDED);
+	CHECK_EQ(reasons[2], RendererRD::NEXTGI_RT_INCLUDED);
+
+	RendererRD::NextGIRTCoverage coverage;
+	coverage.denominator = 100;
+	coverage.numerator = 95;
+	coverage.not_in_scene = 3;
+	coverage.instance_cap = 1;
+	coverage.dynamic_excluded = 1;
+	coverage.blas_pending = 0;
+	CHECK_EQ(RendererRD::nextgi_rt_coverage_percent(coverage), 95);
+	coverage.denominator = 0;
+	CHECK_EQ(RendererRD::nextgi_rt_coverage_percent(coverage), 0);
 }
 
 } // namespace TestNextGI

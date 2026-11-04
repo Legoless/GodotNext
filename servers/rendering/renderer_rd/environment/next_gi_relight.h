@@ -65,6 +65,8 @@ class NextGIRelight {
 
 	struct InstancePages {
 		RenderGeometryInstance *instance = nullptr;
+		uint32_t element = UINT32_MAX;
+		uint64_t page_key = 0;
 		uint32_t page_table = UINT32_MAX;
 		uint32_t record_index = 0;
 		NextGIInstanceRecord record;
@@ -87,7 +89,7 @@ class NextGIRelight {
 	uint32_t page_evictions = 0;
 	NextGIShelfPacker mask_packer{ NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE };
 	LocalVector<InstancePages> instances;
-	HashMap<RenderGeometryInstance *, uint32_t> instance_index;
+	HashMap<uint64_t, uint32_t> instance_index;
 	uint32_t page_table_count = 0;
 	uint32_t alloc_failures = 0;
 
@@ -154,7 +156,7 @@ public:
 
 	// Allocates radiance and mask rects for the instance's cards. Writes page_table on the record.
 	// Later parts of the same instance share the allocation. Returns UINT32_MAX when the mesh has no cards.
-	uint32_t assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record);
+	uint32_t assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element = UINT32_MAX);
 
 	// Line 2b. Builds the scenario light set, schedules pages under the High caps and dispatches the relight shader.
 	void relight(RenderDataRD *p_render_data);

@@ -243,6 +243,41 @@ float nextgi_rt_angular_radius(float p_distance, float p_bounding_radius) {
 	return Math::asin(MIN(1.0f, p_bounding_radius / p_distance));
 }
 
+void nextgi_rt_note_multimesh_change(NextGIMultiMeshChange &r_state, uint64_t p_frame) {
+	if (r_state.last_change_frame == p_frame) {
+		return;
+	}
+	if (p_frame == r_state.last_change_frame + 1 && r_state.change_streak > 0) {
+		r_state.change_streak = MIN(uint8_t(r_state.change_streak + 1), uint8_t(255));
+	} else {
+		r_state.change_streak = 1;
+	}
+	r_state.last_change_frame = p_frame;
+}
+
+Transform3D nextgi_rt_element_transform(const float *p_rows_3x4) {
+	Transform3D transform;
+	if (p_rows_3x4 == nullptr) {
+		return transform;
+	}
+	transform.basis.rows[0] = Vector3(p_rows_3x4[0], p_rows_3x4[1], p_rows_3x4[2]);
+	transform.basis.rows[1] = Vector3(p_rows_3x4[4], p_rows_3x4[5], p_rows_3x4[6]);
+	transform.basis.rows[2] = Vector3(p_rows_3x4[8], p_rows_3x4[9], p_rows_3x4[10]);
+	transform.origin = Vector3(p_rows_3x4[3], p_rows_3x4[7], p_rows_3x4[11]);
+	return transform;
+}
+
+Transform3D nextgi_rt_element_world(const Transform3D &p_instance, const float *p_rows_3x4) {
+	return p_instance * nextgi_rt_element_transform(p_rows_3x4);
+}
+
+int64_t nextgi_rt_coverage_percent(const NextGIRTCoverage &p_coverage) {
+	if (p_coverage.denominator == 0) {
+		return 0;
+	}
+	return int64_t(p_coverage.numerator) * 100 / int64_t(p_coverage.denominator);
+}
+
 NextGIRTExclusion nextgi_rt_cull_instance(float p_distance, float p_bounding_radius, float p_scene_radius) {
 	if (p_distance > p_scene_radius) {
 		return NEXTGI_RT_NOT_IN_SCENE;
@@ -564,6 +599,13 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		return;
 	}
 	stats.fed_instance_count = fed_instances->size();
+	const RendererSceneRender::RenderSDFGIUpdateData *update_data = p_render_data->sdfgi_update_data;
+	stats.coverage.not_in_scene = update_data != nullptr ? update_data->nextgi_rt_not_in_scene : 0;
+	stats.coverage.instance_cap = update_data != nullptr ? update_data->nextgi_rt_instance_cap : 0;
+	stats.coverage.dynamic_excluded = update_data != nullptr ? update_data->nextgi_rt_dynamic_excluded : 0;
+	stats.coverage.denominator = update_data != nullptr ? update_data->nextgi_rt_denominator : 0;
+	stats.coverage.numerator = 0;
+	stats.coverage.blas_pending = 0;
 	const uint64_t ticks_start = OS::get_singleton() != nullptr ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
@@ -576,8 +618,9 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			continue;
 		}
 		geometry_instance->nextgi_record_index = UINT32_MAX;
-		const RID mesh = geometry_instance->data->base;
+		const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : geometry_instance->data->base;
 		if (!mesh_storage->owns_mesh(mesh)) {
+			stats.coverage.blas_pending++;
 			continue;
 		}
 		// A dirty mesh is built in this frame's later "AS builds" phase and enters the
@@ -585,6 +628,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		bool blas_dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
 		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
 		if (parts == nullptr) {
+			stats.coverage.blas_pending++;
 			continue;
 		}
 		// A surface updated on each of the last 4 frames refits in this phase, up to the refit cap.
@@ -606,7 +650,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			blas_dirty = false;
 		}
 
-		const Transform3D &transform = geometry_instance->transform;
+		const Transform3D transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+		bool entered_tlas = false;
 		const Vector3 scale = transform.basis.get_scale_abs();
 		const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
 		for (const MeshStorage::NextGIRTPart &part : *parts) {
@@ -638,7 +683,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				record.card_set = NextGISRC::get_mesh_card_set(mesh);
 			}
 			if (NextGIRelight::get_singleton() != nullptr) {
-				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record);
+				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
 			}
 
 			float eps_rt = 0.0f;
@@ -674,6 +719,12 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			if (geometry_instance->nextgi_record_index == UINT32_MAX) {
 				geometry_instance->nextgi_record_index = record_index;
 			}
+			entered_tlas = true;
+		}
+		if (entered_tlas) {
+			stats.coverage.numerator++;
+		} else {
+			stats.coverage.blas_pending++;
 		}
 	}
 
@@ -727,7 +778,7 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 		if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
 			continue;
 		}
-		const RID mesh = geometry_instance->data->base;
+		const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : geometry_instance->data->base;
 		if (!mesh_storage->owns_mesh(mesh) || !mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
 			continue;
 		}

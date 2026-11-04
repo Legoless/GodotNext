@@ -303,6 +303,9 @@ private:
 		uint32_t motion_vectors_current_offset = 0;
 		uint32_t motion_vectors_previous_offset = 0;
 		uint64_t motion_vectors_last_change = -1;
+		// GodotNext: nextgi_rt_multimesh. Changed on each of the last 8 frames means the MultiMesh is dynamic.
+		uint64_t rt_last_change_frame = 0;
+		uint8_t rt_change_streak = 0;
 		uint32_t stride_cache = 0;
 		uint32_t color_offset_cache = 0;
 		uint32_t custom_data_offset_cache = 0;
@@ -335,6 +338,7 @@ private:
 	_FORCE_INLINE_ void _multimesh_update_motion_vectors_data_cache(MultiMesh *multimesh);
 	_FORCE_INLINE_ bool _multimesh_uses_motion_vectors(MultiMesh *multimesh);
 	_FORCE_INLINE_ void _multimesh_mark_dirty(MultiMesh *multimesh, int p_index, bool p_aabb);
+	void _multimesh_note_rt_change(MultiMesh *multimesh);
 	_FORCE_INLINE_ void _multimesh_mark_all_dirty(MultiMesh *multimesh, bool p_data, bool p_aabb);
 	_FORCE_INLINE_ void _multimesh_re_create_aabb(MultiMesh *multimesh, const float *p_data, int p_instances);
 	_FORCE_INLINE_ void _multimesh_create_indirect_command_buffer(MultiMesh *multimesh);
@@ -787,6 +791,10 @@ public:
 		ERR_FAIL_NULL_V(multimesh, false);
 		return multimesh->indirect;
 	}
+
+	bool multimesh_is_rt_dynamic(RID p_multimesh) const;
+	// CPU transforms at the current motion offset. Calls the one-time readback when the cache is empty.
+	const float *multimesh_get_rt_transforms(RID p_multimesh, uint32_t &r_count, uint32_t &r_stride) const;
 
 	_FORCE_INLINE_ RSE::MultimeshTransformFormat multimesh_get_transform_format(RID p_multimesh) const {
 		MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);

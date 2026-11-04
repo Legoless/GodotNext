@@ -942,7 +942,7 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 			if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
 				continue;
 			}
-			const RID mesh = geometry_instance->data->base;
+			const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : geometry_instance->data->base;
 			if (!mesh_storage->owns_mesh(mesh) || failed_meshes.has(mesh)) {
 				continue;
 			}
@@ -963,7 +963,7 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 				queued_cards.insert(card);
 				PendingCard item;
 				item.instance = geometry_instance;
-				item.instance_transform = geometry_instance->transform;
+				item.instance_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
 				item.card = card;
 				item.set_index = *set_index;
 				item.solid_angle = nextgi_src_solid_angle(Math::sin(fed.angular_radius), 1.0f);

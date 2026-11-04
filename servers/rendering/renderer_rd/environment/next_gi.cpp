@@ -348,6 +348,15 @@ Dictionary NextGI::get_counters() const {
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
 		counters["tlas_instances"] = int64_t(rt_scene->get_stats().instance_count);
+		const NextGIRTCoverage &coverage = rt_scene->get_stats().coverage;
+		const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+		counters["rt_coverage"] = frame >= 120 ? nextgi_rt_coverage_percent(coverage) : int64_t(0);
+		counters["rt_coverage_numerator"] = int64_t(coverage.numerator);
+		counters["rt_coverage_denominator"] = int64_t(coverage.denominator);
+		counters["rt_not_in_scene"] = int64_t(coverage.not_in_scene);
+		counters["rt_instance_cap"] = int64_t(coverage.instance_cap);
+		counters["rt_dynamic_excluded"] = int64_t(coverage.dynamic_excluded);
+		counters["rt_blas_pending"] = int64_t(coverage.blas_pending);
 	}
 	return counters;
 }

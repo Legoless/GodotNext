@@ -197,6 +197,36 @@ _FORCE_INLINE_ bool nextgi_rt_instance_eligible(bool p_mesh, bool p_visible, boo
 	return p_mesh && p_visible && p_gi_contributing && !p_skinned;
 }
 
+// A MultiMesh rewritten on each of the last 8 frames is dynamic and stays out of the TLAS.
+enum { NEXTGI_RT_DYNAMIC_CHANGE_STREAK = 8 };
+
+struct NextGIMultiMeshChange {
+	uint64_t last_change_frame = 0;
+	uint8_t change_streak = 0;
+};
+
+// One change per frame. A same-frame repeat does not advance the streak. A gap resets it to 1.
+void nextgi_rt_note_multimesh_change(NextGIMultiMeshChange &r_state, uint64_t p_frame);
+_FORCE_INLINE_ bool nextgi_rt_multimesh_is_dynamic(const NextGIMultiMeshChange &p_state) {
+	return p_state.change_streak >= NEXTGI_RT_DYNAMIC_CHANGE_STREAK;
+}
+
+// Element 3x4 is row-major, matching MeshStorage's MultiMesh cache (basis rows, then origin component).
+Transform3D nextgi_rt_element_transform(const float *p_rows_3x4);
+Transform3D nextgi_rt_element_world(const Transform3D &p_instance, const float *p_rows_3x4);
+
+struct NextGIRTCoverage {
+	uint32_t denominator = 0;
+	uint32_t numerator = 0;
+	uint32_t not_in_scene = 0;
+	uint32_t instance_cap = 0;
+	uint32_t dynamic_excluded = 0;
+	uint32_t blas_pending = 0;
+};
+
+// Integer percent. An empty denominator is 0, not a divide.
+int64_t nextgi_rt_coverage_percent(const NextGIRTCoverage &p_coverage);
+
 // asin(min(1, r/d)). A distance of 0 (the camera is inside the bounds) is a full hemisphere.
 float nextgi_rt_angular_radius(float p_distance, float p_bounding_radius);
 
@@ -311,6 +341,7 @@ public:
 	struct Stats {
 		uint32_t fed_instance_count = 0;
 		uint32_t instance_count = 0; // TLAS instances (and records) of the last TLAS phase.
+		NextGIRTCoverage coverage;
 		uint32_t blas_build_count = 0; // BLAS builds of the last builds phase; 0 on a static scene once built.
 		uint32_t blas_build_triangles = 0;
 		uint32_t compaction_copies = 0;

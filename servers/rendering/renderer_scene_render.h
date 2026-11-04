@@ -313,6 +313,11 @@ public:
 		RenderGeometryInstance *geometry_instance = nullptr;
 		bool lightmapped = false;
 		float angular_radius = 0.0f;
+		// A MultiMesh element. mesh_override is the shared mesh; rt_transform is instance × element.
+		RID mesh_override;
+		Transform3D rt_transform;
+		bool has_rt_transform = false;
+		uint32_t element_index = UINT32_MAX;
 	};
 
 	struct RenderSDFGIUpdateData {
@@ -332,6 +337,12 @@ public:
 
 		// GodotNext: nextgi_rt_feed
 		const LocalVector<NextGIRTInstance> *nextgi_rt_instances = nullptr;
+		// GodotNext: nextgi_rt_multimesh. Q18 inputs from the scenario selection. The TLAS phase fills the numerator.
+		uint32_t nextgi_rt_denominator = 0;
+		uint32_t nextgi_rt_not_in_scene = 0;
+		uint32_t nextgi_rt_instance_cap = 0;
+		uint32_t nextgi_rt_dynamic_excluded = 0;
+		uint32_t nextgi_rt_selected = 0;
 	};
 
 	struct CameraData {

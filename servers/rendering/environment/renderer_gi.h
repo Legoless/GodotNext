@@ -118,6 +118,12 @@ public:
 		static const char *keys[] = {
 			"tlas_instances",
 			"rt_coverage",
+			"rt_coverage_numerator",
+			"rt_coverage_denominator",
+			"rt_not_in_scene",
+			"rt_instance_cap",
+			"rt_dynamic_excluded",
+			"rt_blas_pending",
 			"blas_bytes_compacted",
 			"blas_bytes_uncompacted",
 			"rt_arena_bytes",
