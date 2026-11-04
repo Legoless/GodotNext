@@ -3882,8 +3882,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 							}
 							// The visible count is CPU-known for an animated MultiMesh; an indirect
 							// count lives on the GPU and keeps the dynamic exclusion until that lands.
+							// -1 means every instance is visible.
 							const int visible = mesh_storage->_multimesh_get_visible_instances(instance->base);
-							const uint32_t element_count = uint32_t(MAX(visible, 0));
+							const uint32_t element_count = visible < 0 ? uint32_t(MAX(mesh_storage->_multimesh_get_instance_count(instance->base), 0)) : uint32_t(visible);
 							if (element_count == 0) {
 								continue;
 							}
