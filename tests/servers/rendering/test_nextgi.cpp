@@ -2337,6 +2337,37 @@ TEST_CASE("[NextGI][Denoise] The five denoise views map and label") {
 	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_DISABLED), NextGI::DEBUG_VIEW_MAX);
 }
 
+TEST_CASE("[NextGI][RT] The GPU instance encoder compiles for both API layouts") {
+	struct LayoutCase {
+		RendererRD::NextGIRTScene::InstanceLayout layout;
+		const char *marker;
+	};
+	const LayoutCase cases[] = {
+		{ RendererRD::NextGIRTScene::INSTANCE_LAYOUT_VULKAN_64, "(params.counts.z + index) * 16u" },
+		{ RendererRD::NextGIRTScene::INSTANCE_LAYOUT_METAL_72, "(params.counts.z + index) * 18u" },
+	};
+
+	for (const LayoutCase &layout_case : cases) {
+		const String source = RendererRD::NextGIRTScene::build_instances_shader_source(layout_case.layout);
+		REQUIRE_FALSE(source.is_empty());
+		CHECK(source.contains("local_size_x = 64"));
+		CHECK(source.contains(layout_case.marker));
+		CHECK(source.contains("nextgi_instance_mask"));
+		// The inactive-element guard catches particles parked at -INF.
+		CHECK(source.contains("3.0e38"));
+#ifdef MODULE_GLSLANG_ENABLED
+		String error;
+		const Vector<uint8_t> spirv = compile_glslang_shader(
+				RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+				source,
+				RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+				RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_6,
+				&error);
+		CHECK_MESSAGE(!spirv.is_empty(), error);
+#endif // MODULE_GLSLANG_ENABLED
+	}
+}
+
 } // namespace TestNextGI
 
 #endif // RD_ENABLED

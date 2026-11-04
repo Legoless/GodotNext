@@ -338,6 +338,15 @@ public:
 // nextgi_rt_part_enters_tlas).
 class NextGIRTScene {
 public:
+	// GodotNext: tlas_from_buffer
+	enum InstanceLayout {
+		INSTANCE_LAYOUT_VULKAN_64 = 0,
+		INSTANCE_LAYOUT_METAL_72 = 1,
+		INSTANCE_LAYOUT_MAX,
+	};
+	// Expanded source of the GPU instance-record encoder. Used by the doctests; no GPU compile.
+	static String build_instances_shader_source(int p_layout = INSTANCE_LAYOUT_VULKAN_64);
+
 	struct Stats {
 		uint32_t fed_instance_count = 0;
 		uint32_t instance_count = 0; // TLAS instances (and records) of the last TLAS phase.

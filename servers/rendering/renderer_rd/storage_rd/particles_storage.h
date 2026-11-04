@@ -567,6 +567,13 @@ public:
 
 	void particles_get_instance_buffer_motion_vectors_offsets(RID p_particles, uint32_t &r_current_offset, uint32_t &r_prev_offset);
 
+	// GodotNext: tlas_from_buffer
+	// Five vec4 per element: three transform rows, colour and custom data.
+	_FORCE_INLINE_ RID particles_get_instance_buffer(RID p_particles) const {
+		Particles *particles = particles_owner.get_or_null(p_particles);
+		return particles != nullptr ? particles->particle_instance_buffer : RID();
+	}
+
 	virtual void particles_add_collision(RID p_particles, RID p_particles_collision_instance) override;
 	virtual void particles_remove_collision(RID p_particles, RID p_particles_collision_instance) override;
 	void particles_set_canvas_sdf_collision(RID p_particles, bool p_enable, const Transform2D &p_xform, const Rect2 &p_to_screen, RID p_texture);

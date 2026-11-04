@@ -796,6 +796,13 @@ public:
 	// CPU transforms at the current motion offset. Calls the one-time readback when the cache is empty.
 	const float *multimesh_get_rt_transforms(RID p_multimesh, uint32_t &r_count, uint32_t &r_stride) const;
 
+	// GodotNext: tlas_from_buffer
+	// Floats per element in the GPU transform buffer, for the instance-record encoder.
+	_FORCE_INLINE_ uint32_t multimesh_get_stride(RID p_multimesh) const {
+		MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
+		return multimesh != nullptr ? multimesh->stride_cache : 0;
+	}
+
 	_FORCE_INLINE_ RSE::MultimeshTransformFormat multimesh_get_transform_format(RID p_multimesh) const {
 		MultiMesh *multimesh = multimesh_owner.get_or_null(p_multimesh);
 		ERR_FAIL_NULL_V(multimesh, RSE::MULTIMESH_TRANSFORM_3D);

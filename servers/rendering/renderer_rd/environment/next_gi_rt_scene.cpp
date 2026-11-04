@@ -41,6 +41,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_instances.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -947,6 +948,22 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 	}
 	stats.as_bytes = total;
 	as_memory_exceeded = over;
+}
+
+String NextGIRTScene::build_instances_shader_source(int p_layout) {
+	NextgiRtInstancesShaderRD shader;
+	Vector<String> defines;
+	defines.push_back("\n#define INSTANCE_64\n");
+	defines.push_back("\n#define INSTANCE_72\n");
+	shader.initialize(defines);
+	const RID version = shader.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = shader.version_build_variant_stage_sources(version, CLAMP(p_layout, 0, int(INSTANCE_LAYOUT_MAX) - 1));
+	shader.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
 }
 
 } // namespace RendererRD
