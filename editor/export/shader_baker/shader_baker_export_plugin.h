@@ -106,6 +106,9 @@ protected:
 public:
 	// GodotNext: shader_baker_ray_query
 	static bool should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures);
+	// GodotNext: scene customization happens outside the tree, so script-only `global_*` properties
+	// cannot be read without reporting an error, and the material does not use them.
+	static bool should_copy_scene_property(const StringName &p_name);
 
 	ShaderBakerExportPlugin();
 	virtual ~ShaderBakerExportPlugin() override;

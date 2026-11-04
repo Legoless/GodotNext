@@ -58,6 +58,13 @@ bool ShaderBakerExportPlugin::should_bake_version(bool p_requires_ray_query, boo
 	return !p_requires_ray_query || p_supports_acceleration_structures;
 }
 
+// GodotNext: scene customization
+bool ShaderBakerExportPlugin::should_copy_scene_property(const StringName &p_name) {
+	// The scene is instantiated outside the tree, so a `global_*` getter reports `!is_inside_tree()`
+	// and returns a default. Only the Label3D/Sprite3D material properties are read, so skip them.
+	return !String(p_name).begins_with("global_");
+}
+
 bool ShaderBakerExportPlugin::_is_active(const Vector<String> &p_features) const {
 	// Shader baker should only work when a RendererRD driver is active, as the embedded shaders won't be found otherwise.
 	return RendererSceneRenderRD::get_singleton() != nullptr && RendererRD::MaterialStorage::get_singleton() != nullptr && p_features.has("shader_baker");
@@ -334,6 +341,9 @@ Node *ShaderBakerExportPlugin::_customize_scene(Node *p_root, const String &p_pa
 			List<PropertyInfo> property_list;
 			node->get_property_list(&property_list);
 			for (const PropertyInfo &info : property_list) {
+				if (!should_copy_scene_property(info.name)) {
+					continue;
+				}
 				bool valid = false;
 				Variant property = node->get(info.name, &valid);
 				if (valid) {

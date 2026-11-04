@@ -36,7 +36,9 @@ TEST_FORCE_LINK(test_export_customize)
 
 #include "editor/export/editor_export_platform_extension.h"
 #include "editor/export/editor_export_plugin.h"
+#include "editor/export/shader_baker/shader_baker_export_plugin.h"
 #include "scene/3d/gpu_particles_3d.h"
+#include "scene/3d/label_3d.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/image_texture.h"
 #include "tests/test_tools.h"
@@ -113,6 +115,34 @@ TEST_CASE("[SceneTree][ExportCustomize] Resource customization skips disabled GP
 	}
 
 	memdelete(particles);
+}
+
+TEST_CASE("[ShaderBaker] Scene customization skips global properties") {
+	// The baker instantiates each exported scene without adding it to the tree, so a `global_*`
+	// getter reports `!is_inside_tree()` and returns a default. None of them feed the material.
+	CHECK_FALSE(ShaderBakerExportPlugin::should_copy_scene_property("global_transform"));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_copy_scene_property("global_position"));
+	CHECK(ShaderBakerExportPlugin::should_copy_scene_property("transparent"));
+	CHECK(ShaderBakerExportPlugin::should_copy_scene_property("billboard"));
+
+	Label3D *label = memnew(Label3D);
+	List<PropertyInfo> properties;
+	label->get_property_list(&properties);
+	bool saw_global_transform = false;
+	for (const PropertyInfo &info : properties) {
+		if (info.name == StringName("global_transform")) {
+			saw_global_transform = true;
+		}
+		if (!ShaderBakerExportPlugin::should_copy_scene_property(info.name)) {
+			continue;
+		}
+		bool valid = false;
+		ErrorDetector ed;
+		label->get(info.name, &valid);
+		CHECK_FALSE(ed.has_error);
+	}
+	CHECK(saw_global_transform);
+	memdelete(label);
 }
 
 } // namespace TestExportCustomize
