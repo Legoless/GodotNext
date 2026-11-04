@@ -61,6 +61,8 @@ TEST_FORCE_LINK(test_nextgi)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
+// GodotNext: denoise_reset_regions
+#include "servers/rendering/renderer_rd/effects/denoise.h"
 #endif // RD_ENABLED
 
 namespace TestNextGI {
@@ -2206,6 +2208,45 @@ TEST_CASE("[NextGI] SRC work streams: sweeps, bake filter and both caps") {
 	CHECK_EQ(high, 256u * 1024u);
 	CHECK_EQ(medium, 128u * 1024u);
 	CHECK_EQ(epic, 512u * 1024u);
+}
+
+TEST_CASE("[NextGI][Denoise] Reset-region selection marks exactly the dirty probes") {
+	// The temporal pass rejects history inside the dirty AABBs from the RT registry (#39). The mask
+	// is one byte per probe so it can be uploaded as-is.
+	const PackedByteArray empty = RendererRD::NextGIDenoise::select_reset_probes(Vector<Rect2i>(), Size2i(4, 3));
+	REQUIRE(empty.size() == 12);
+	for (int i = 0; i < empty.size(); i++) {
+		CHECK_EQ(empty[i], 0);
+	}
+
+	const Vector<Rect2i> single = { Rect2i(1, 1, 2, 1) };
+	const PackedByteArray mask = RendererRD::NextGIDenoise::select_reset_probes(single, Size2i(4, 3));
+	REQUIRE(mask.size() == 12);
+	for (int y = 0; y < 3; y++) {
+		for (int x = 0; x < 4; x++) {
+			const bool inside = (x == 1 || x == 2) && y == 1;
+			CHECK_EQ(mask[y * 4 + x], inside ? 1 : 0);
+		}
+	}
+
+	// Overlapping regions union, and parts outside the grid are clipped.
+	const Vector<Rect2i> overlapping = { Rect2i(2, 0, 4, 2), Rect2i(-1, 2, 2, 4) };
+	const PackedByteArray clipped = RendererRD::NextGIDenoise::select_reset_probes(overlapping, Size2i(4, 3));
+	REQUIRE(clipped.size() == 12);
+	for (int y = 0; y < 3; y++) {
+		for (int x = 0; x < 4; x++) {
+			const bool inside = (x >= 2 && y <= 1) || (x <= 0 && y == 2);
+			CHECK_EQ(clipped[y * 4 + x], inside ? 1 : 0);
+		}
+	}
+
+	// A fully off-grid region leaves the mask clear, and an empty grid is handled.
+	const Vector<Rect2i> away = { Rect2i(10, 10, 2, 2) };
+	const PackedByteArray off_grid = RendererRD::NextGIDenoise::select_reset_probes(away, Size2i(4, 3));
+	for (int i = 0; i < off_grid.size(); i++) {
+		CHECK_EQ(off_grid[i], 0);
+	}
+	CHECK_EQ(RendererRD::NextGIDenoise::select_reset_probes(Vector<Rect2i>(), Size2i()).size(), 0);
 }
 
 } // namespace TestNextGI
