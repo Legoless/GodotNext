@@ -1,0 +1,35 @@
+{
+	"cameras": ["CaptureCam", "CovCam0", "CovCam1"],
+	"name": "glass_water",
+	"patch_set": "q1",
+	"seed": 56602971774,
+	"variants": [
+		{
+			"end_frame": 240,
+			"form": "Q4a",
+			"frame0_action": "omni energy 0 to 8",
+			"id": "light_toggle",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 0,
+			"form": "static",
+			"frame0_action": "alpha scissor, treat_as_opaque false",
+			"id": "fence_scissor",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 0,
+			"form": "static",
+			"frame0_action": "alpha scissor, treat_as_opaque true",
+			"id": "fence_opaque",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		}
+	]
+}

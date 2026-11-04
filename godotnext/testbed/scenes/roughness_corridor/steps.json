@@ -1,0 +1,17 @@
+{
+	"cameras": ["Cam0", "Cam1", "Cam2", "CaptureCam"],
+	"name": "roughness_corridor",
+	"patch_set": "q1",
+	"seed": 54575163328,
+	"variants": [
+		{
+			"end_frame": 599,
+			"form": "timing",
+			"frame0_action": "fixed cameras",
+			"id": "static",
+			"motion_end": 600,
+			"motion_frames": 600,
+			"motion_start": 0
+		}
+	]
+}

@@ -143,6 +143,11 @@ static func _steps() -> Dictionary:
 				"end_frame": Layout.SPLINE_FRAMES - 1, "motion_frames": Layout.SPLINE_FRAMES,
 				"motion_start": 0, "motion_end": Layout.SPLINE_FRAMES,
 			},
+			{
+				"id": "p3", "form": "timing", "frame0_action": "4 skinned characters follow the spline",
+				"end_frame": Layout.SPLINE_FRAMES - 1, "motion_frames": Layout.SPLINE_FRAMES,
+				"motion_start": 0, "motion_end": Layout.SPLINE_FRAMES,
+			},
 		],
 		"cameras": CAMERAS,
 		"patch_set": "q1",

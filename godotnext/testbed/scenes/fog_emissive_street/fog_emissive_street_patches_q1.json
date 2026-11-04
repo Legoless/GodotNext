@@ -1,0 +1,1160 @@
+{
+	"count": 128,
+	"patches": [
+		{
+			"camera": "CaptureCam",
+			"id": 0,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.916374, 0.000000, 1.724732],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 1,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.399957, 0.000000, 2.897497],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 2,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.235159, 0.000000, -2.978930],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 3,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.709483, 0.000000, -3.190980],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 4,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.328824, 0.000000, -0.776101],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 5,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.759986, 0.000000, 2.118883],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 6,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.958690, 0.000000, -1.460306],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 7,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.643933, 0.000000, -1.965016],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 8,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.630423, 0.000000, 3.654573],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 9,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.016375, 0.000000, -4.150128],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 10,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.353955, 0.000000, -0.351512],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 11,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.944936, 0.000000, -1.229490],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 12,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.282800, 0.000000, -0.133486],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 13,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.253465, 0.000000, 0.899063],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 14,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.951474, 0.000000, -3.692860],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 15,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.571773, 0.000000, -0.951685],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 16,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.535579, 0.000000, -1.833578],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 17,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.650995, 0.000000, 0.830909],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 18,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.492034, 0.000000, -3.881581],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 19,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.969843, 0.000000, -2.336470],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 20,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.085997, 0.000000, -1.473995],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 21,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.775280, 0.000000, 1.137840],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 22,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.686264, 0.000000, 3.095572],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 23,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.415374, 0.000000, 1.907896],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 24,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.859787, 0.000000, -2.423594],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 25,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.493701, 0.000000, 2.841127],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 26,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.057142, 0.000000, 1.157025],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 27,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.192407, 0.000000, 4.070818],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 28,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.796258, 0.000000, -0.929258],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 29,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.348678, 0.000000, -3.238591],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 30,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.933459, 0.000000, 3.697443],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 31,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.334919, 0.000000, -2.418170],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 32,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.856142, 0.000000, 0.173817],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 33,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.268870, 0.000000, 0.051131],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 34,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.974196, 0.000000, -0.618636],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 35,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.847898, 0.000000, -4.056577],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 36,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.380437, 0.000000, 1.274840],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 37,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.140487, 0.000000, 2.363928],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 38,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.989810, 0.000000, 2.435948],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 39,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.145966, 0.000000, -2.940012],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 40,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.860449, 0.000000, 1.397059],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 41,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.478204, 0.000000, -3.538249],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 42,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.230013, 0.000000, 0.597869],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 43,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.689838, 0.000000, 0.361151],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 44,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.349822, 0.000000, 2.415342],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 45,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.316004, 0.000000, 4.114893],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 46,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.742952, 0.000000, 2.592424],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 47,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.344850, 0.000000, -0.892688],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 48,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.164742, 0.000000, -0.488319],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 49,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.640365, 0.000000, 3.981113],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 50,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.896925, 0.000000, -0.575912],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 51,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.212042, 0.000000, 3.177516],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 52,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.884736, 0.000000, 2.286200],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 53,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.715656, 0.000000, 1.800638],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 54,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.723386, 0.000000, -1.900048],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 55,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.017180, 0.000000, 0.271454],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 56,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.359052, 0.000000, -1.668147],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 57,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.700715, 0.000000, 2.846585],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 58,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.157004, 0.000000, 3.363782],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 59,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.701279, 0.000000, 3.410202],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 60,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.942796, 0.000000, 2.790438],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 61,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.759429, 0.000000, -0.149116],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 62,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.032308, 0.000000, -3.941262],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 63,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.913363, 0.000000, -2.611559],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 64,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.751068, 0.000000, -3.749455],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 65,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.819771, 0.000000, -2.982594],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 66,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.037361, 0.000000, 1.490242],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 67,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.918411, 0.000000, 0.146054],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 68,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.970299, 0.000000, 3.857407],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 69,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.442310, 0.000000, 0.775784],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 70,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.571915, 0.000000, 3.099407],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 71,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.401726, 0.000000, 3.937067],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 72,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.004139, 0.000000, -0.698823],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 73,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.694290, 0.000000, -3.716343],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 74,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.245411, 0.000000, -2.283514],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 75,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.127880, 0.000000, 1.282443],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 76,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.672611, 0.000000, 3.025384],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 77,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.331520, 0.000000, -3.430320],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 78,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.580219, 0.000000, -0.345545],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 79,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.645271, 0.000000, 2.615082],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 80,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.374954, 0.000000, -0.196112],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 81,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.098698, 0.000000, -0.812372],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 82,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.434269, 0.000000, 4.133665],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 83,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.507244, 0.000000, 0.310798],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 84,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.664673, 0.000000, -1.171192],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 85,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.542358, 0.000000, 1.082786],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 86,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.266518, 0.000000, -0.972623],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 87,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.298721, 0.000000, 2.248942],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 88,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.478306, 0.000000, -2.846175],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 89,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.120426, 0.000000, 2.438830],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 90,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.149002, 0.000000, -2.420655],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 91,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.533924, 0.000000, 2.047562],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 92,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.072083, 0.000000, -3.977322],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 93,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.750256, 0.000000, 0.351334],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 94,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.585056, 0.000000, 1.540007],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 95,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.999050, 0.000000, 0.398830],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 96,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.216808, 0.000000, -3.775561],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 97,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.632244, 0.000000, 3.246945],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 98,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.340027, 0.000000, 4.188077],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 99,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.960499, 0.000000, 0.859175],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 100,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.369850, 0.000000, -1.709974],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 101,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.322979, 0.000000, -2.944493],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 102,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.613827, 0.000000, -0.351041],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 103,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.271587, 0.000000, -3.886125],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 104,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.899078, 0.000000, 0.785494],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 105,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.546101, 0.000000, -2.465634],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 106,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.612061, 0.000000, 1.531950],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 107,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.127647, 0.000000, -1.509835],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 108,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.199707, 0.000000, 3.412748],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 109,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.671814, 0.000000, -3.301488],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 110,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.321301, 0.000000, 1.979275],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 111,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.743408, 0.000000, 1.093353],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 112,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.103287, 0.000000, 1.964966],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 113,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.152996, 0.000000, -0.610771],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 114,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.316170, 0.000000, 0.104837],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 115,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.922737, 0.000000, -1.286995],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 116,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.064358, 0.000000, -2.548412],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 117,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.602371, 0.000000, -1.938662],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 118,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.734390, 0.000000, 3.653019],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 119,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.544140, 0.000000, -2.152554],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 120,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.367203, 0.000000, 0.276982],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 121,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.941399, 0.000000, -2.834886],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 122,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [39.169098, 0.000000, 3.250926],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 123,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.457062, 0.000000, 1.532868],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 124,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [38.236324, 0.000000, 3.412048],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 125,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [37.673618, 0.000000, -1.532008],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 126,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.348919, 0.000000, 3.348443],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 127,
+			"kind": "outside_fog",
+			"node": "Road",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [36.799492, 0.000000, 4.186033],
+			"radius": 0.250000
+		}
+	],
+	"scene": "fog_emissive_street.tscn",
+	"seed": 54575163328,
+	"version": 1
+}

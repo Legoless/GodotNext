@@ -1,0 +1,223 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/fog_emissive_street/street.gd" id="1_gyq5e"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_1bne1"]
+
+[sub_resource type="Sky" id="Sky_wjc3j"]
+sky_material = SubResource("ProceduralSkyMaterial_1bne1")
+
+[sub_resource type="Environment" id="Environment_ypjne"]
+background_mode = 2
+sky = SubResource("Sky_wjc3j")
+ambient_light_source = 3
+reflected_light_source = 2
+volumetric_fog_enabled = true
+volumetric_fog_density = 0.03
+volumetric_fog_length = 48.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_pgxdt"]
+size = Vector3(40, 0.2, 10)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_02t8m"]
+resource_name = "Asphalt"
+diffuse_mode = 1
+albedo_color = Color(0.50638646, 0.50638646, 0.5271128, 1)
+metallic_specular = 0.0
+roughness = 0.95
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_cbpel"]
+size = Vector3(40, 0.2, 10)
+
+[sub_resource type="BoxMesh" id="BoxMesh_e7gsi"]
+size = Vector3(8, 4, 2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ggpf1"]
+resource_name = "Facade"
+diffuse_mode = 1
+albedo_color = Color(0.76737565, 0.7483791, 0.72202736, 1)
+metallic_specular = 0.0
+roughness = 0.88
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_h58iv"]
+size = Vector3(8, 4, 2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_0fi30"]
+size = Vector3(10, 5, 2)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_dnbik"]
+size = Vector3(10, 5, 2)
+
+[sub_resource type="FogMaterial" id="FogMaterial_fcqfv"]
+density = 0.12
+
+[sub_resource type="FogMaterial" id="FogMaterial_ek5dq"]
+density = 0.15
+
+[sub_resource type="FogMaterial" id="FogMaterial_8qg6c"]
+density = 0.18
+
+[sub_resource type="BoxMesh" id="BoxMesh_0opw7"]
+size = Vector3(1.4, 0.7, 0.06)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_w1ge8"]
+resource_name = "SignLarge"
+diffuse_mode = 1
+albedo_color = Color(0.15170372, 0.15170372, 0.15170372, 1)
+metallic_specular = 0.0
+roughness = 0.45
+emission_enabled = true
+emission = Color(1, 0.9309246, 0.6651851, 1)
+emission_energy_multiplier = 16.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_w3uvd"]
+size = Vector3(0.02, 0.02, 0.01)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kmfti"]
+resource_name = "SignSmallA"
+diffuse_mode = 1
+albedo_color = Color(0.15170372, 0.15170372, 0.15170372, 1)
+metallic_specular = 0.0
+roughness = 0.45
+emission_enabled = true
+emission = Color(1, 0.48452926, 0.42358288, 1)
+emission_energy_multiplier = 64.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_gm08i"]
+size = Vector3(0.025, 0.02, 0.01)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_unjk8"]
+resource_name = "SignSmallB"
+diffuse_mode = 1
+albedo_color = Color(0.15170372, 0.15170372, 0.15170372, 1)
+metallic_specular = 0.0
+roughness = 0.45
+emission_enabled = true
+emission = Color(0.58383155, 0.9063318, 1, 1)
+emission_energy_multiplier = 32.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_wau2x"]
+size = Vector3(0.45, 0.3, 0.05)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_timhr"]
+resource_name = "SignMid"
+diffuse_mode = 1
+albedo_color = Color(0.15170372, 0.15170372, 0.15170372, 1)
+metallic_specular = 0.0
+roughness = 0.45
+emission_enabled = true
+emission = Color(1, 0.97769153, 0.9063318, 1)
+emission_energy_multiplier = 48.0
+
+[node name="FogEmissiveStreet" type="Node3D"]
+script = ExtResource("1_gyq5e")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_ypjne")
+
+[node name="Road" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, -0.1, 0)
+mesh = SubResource("BoxMesh_pgxdt")
+surface_material_override/0 = SubResource("StandardMaterial3D_02t8m")
+
+[node name="Collider" type="StaticBody3D" parent="Road"]
+
+[node name="Shape" type="CollisionShape3D" parent="Road/Collider"]
+shape = SubResource("BoxShape3D_cbpel")
+
+[node name="BlockA" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, -6.2)
+mesh = SubResource("BoxMesh_e7gsi")
+surface_material_override/0 = SubResource("StandardMaterial3D_ggpf1")
+
+[node name="Collider" type="StaticBody3D" parent="BlockA"]
+
+[node name="Shape" type="CollisionShape3D" parent="BlockA/Collider"]
+shape = SubResource("BoxShape3D_h58iv")
+
+[node name="BlockB" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 24, 2.5, 6.2)
+mesh = SubResource("BoxMesh_0fi30")
+surface_material_override/0 = SubResource("StandardMaterial3D_ggpf1")
+
+[node name="Collider" type="StaticBody3D" parent="BlockB"]
+
+[node name="Shape" type="CollisionShape3D" parent="BlockB/Collider"]
+shape = SubResource("BoxShape3D_dnbik")
+
+[node name="FogVolumes" type="Node3D" parent="."]
+
+[node name="FogVolume0" type="FogVolume" parent="FogVolumes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 1.2, 0)
+size = Vector3(4, 2.4, 3)
+material = SubResource("FogMaterial_fcqfv")
+
+[node name="FogVolume1" type="FogVolume" parent="FogVolumes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 18, 1.2, 0)
+size = Vector3(4, 2.4, 3)
+material = SubResource("FogMaterial_ek5dq")
+
+[node name="FogVolume2" type="FogVolume" parent="FogVolumes"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 28, 1.2, 0)
+size = Vector3(4, 2.4, 3)
+material = SubResource("FogMaterial_8qg6c")
+
+[node name="SignLarge" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 22, 2.4, 4.9)
+mesh = SubResource("BoxMesh_0opw7")
+surface_material_override/0 = SubResource("StandardMaterial3D_w1ge8")
+metadata/emission_energy = 16.0
+metadata/under_four_card_texels = false
+
+[node name="SignSmallA" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 2.2, -4.9)
+mesh = SubResource("BoxMesh_w3uvd")
+surface_material_override/0 = SubResource("StandardMaterial3D_kmfti")
+metadata/emission_energy = 64.0
+metadata/under_four_card_texels = true
+
+[node name="SignSmallALight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 6, 2.2, -5.05)
+light_color = Color(1, 0.2, 0.15, 1)
+light_energy = 4.0
+omni_range = 2.5
+
+[node name="SignSmallB" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 30, 1.8, 4.9)
+mesh = SubResource("BoxMesh_gm08i")
+surface_material_override/0 = SubResource("StandardMaterial3D_unjk8")
+metadata/emission_energy = 32.0
+metadata/under_four_card_texels = true
+
+[node name="SignSmallBLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 30, 1.8, 5.05)
+light_color = Color(0.3, 0.8, 1, 1)
+light_energy = 2.0
+omni_range = 2.5
+
+[node name="SignMid" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 14, 2.6, -4.9)
+mesh = SubResource("BoxMesh_wau2x")
+surface_material_override/0 = SubResource("StandardMaterial3D_timhr")
+metadata/emission_energy = 48.0
+metadata/under_four_card_texels = false
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(-0.24253562, -0.8501449, 0.467365, 0, 0.4817488, 0.87630934, -0.9701425, 0.21253623, -0.11684125, 20, 6, 8)
+shadow_enabled = true
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(0.3303504, 0.03709085, -0.9431293, 0, 0.9992276, 0.03929705, 0.9438583, -0.012981797, 0.33009523, 4, 1.7, 4.2)
+current = true
+fov = 60.0
+far = 50.0
+
+[node name="CovCam0" type="Camera3D" parent="."]
+transform = Transform3D(-0.40081885, 0.083584376, -0.9123365, 0, 0.9958295, 0.09123365, 0.91615736, 0.036568165, -0.39914724, 2, 1.8, -3.5)
+fov = 70.0
+far = 50.0
+
+[node name="CovCam1" type="Camera3D" parent="."]
+transform = Transform3D(0.40081885, -0.06280273, 0.91400224, 0, 0.99764764, 0.06855016, -0.9161573, -0.027476197, 0.399876, 36, 1.8, 3.5)
+fov = 70.0
+far = 40.0

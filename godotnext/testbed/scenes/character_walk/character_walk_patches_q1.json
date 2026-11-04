@@ -1,0 +1,3496 @@
+{
+	"count": 352,
+	"patches": [
+		{
+			"camera": "CaptureCam",
+			"id": 0,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.009435, 0.000000, -0.330574],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 1,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.603655, 0.000000, -0.383864],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 2,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.339462, 0.000000, -0.541422],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 3,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.871047, 0.000000, 0.815836],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 4,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.078180, 0.000000, 0.588418],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 5,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.508639, 0.000000, 0.405227],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 6,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.746082, 0.000000, 0.485842],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 7,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.715755, 0.000000, -0.806498],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 8,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.716116, 0.000000, 0.219413],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 9,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.417416, 0.000000, -0.230692],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 10,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.892774, 0.000000, -0.583281],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 11,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.046442, 0.000000, -0.932032],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 12,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.601688, 0.000000, 0.183851],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 13,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.245462, 0.000000, 0.878376],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 14,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.282444, 0.000000, -0.883539],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 15,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.151516, 0.000000, 0.326156],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 16,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.420000, 0.877767, 0.060000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 17,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.342233, 1.020000, 0.015000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 18,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.311133, 0.984467, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 19,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.160000, 1.086667, -0.008900],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 20,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.320000, 1.153333, 0.080000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 21,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.450000, 1.450266, 0.084000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 22,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.450000, 1.420633, 0.042000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 23,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.450000, 1.386667, 0.012000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 24,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.450000, 1.356967, -0.030000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 25,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.450000, 1.323033, -0.060000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 26,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.110000, 1.293333, -0.078000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 27,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.110000, 1.259367, -0.048000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 28,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.110000, 1.229733, -0.006000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 29,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.110000, 1.475767, 0.006000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 30,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.110000, 1.446033, 0.048000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 31,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.110000, 1.412133, 0.078000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 32,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.199033, 1.480000, -0.024000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 33,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.288100, 1.480000, -0.048000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 34,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.393300, 1.480000, -0.078000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 35,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.166700, 1.200000, -0.078000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 36,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.271900, 1.200000, -0.048000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 37,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.360967, 1.200000, -0.024000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 38,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.126200, 1.267867, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 39,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.166700, 1.233967, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 40,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.223300, 1.204233, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 41,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.239500, 1.450266, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 42,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.296200, 1.420633, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 43,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.336700, 1.386667, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 44,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.393300, 1.356967, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 45,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.433800, 1.323033, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 46,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.409500, 1.293333, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 47,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.369033, 1.259367, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 48,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.312400, 1.229733, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 49,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.296200, 1.475767, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 50,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.239500, 1.446033, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 51,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.199033, 1.412133, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 52,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.142400, 1.382433, -0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 53,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.370000, 1.757767, 0.050000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 54,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.190000, 1.745533, -0.010000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 55,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.290000, 1.770000, -0.050000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 56,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.330000, 1.550000, 0.040000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 57,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.350000, 1.684467, 0.090000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 58,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.100000, 1.222233, 0.029333],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 59,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.100000, 1.337767, -0.013333],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 60,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.020000, 1.200533, 0.002667],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 61,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.041333, 1.410000, -0.002667],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 62,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.094667, 1.150000, 0.029333],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 63,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.073333, 1.251100, 0.040000],
+			"pose": 0,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 64,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.291343, 0.000000, 0.218832],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 65,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.975019, 0.000000, -0.548426],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 66,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.891587, 0.000000, 0.795373],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 67,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.814149, 0.000000, 0.482840],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 68,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.532450, 0.000000, 0.651177],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 69,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.400748, 0.000000, 0.579271],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 70,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.260447, 0.000000, -0.796885],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 71,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.104729, 0.000000, 0.830529],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 72,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.780135, 0.000000, 0.063894],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 73,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.472368, 0.000000, -0.070187],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 74,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.672654, 0.000000, -0.364541],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 75,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.369665, 0.000000, -0.449137],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 76,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.028485, 0.000000, 0.602918],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 77,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.101230, 0.000000, -0.023842],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 78,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.608342, 0.000000, -0.791704],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 79,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.556888, 0.000000, -0.562991],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 80,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.780000, 0.877767, 0.060000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 81,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.702233, 1.020000, 0.015000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 82,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.671133, 0.984467, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 83,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.520000, 1.086667, -0.008900],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 84,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.680000, 1.153333, 0.080000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 85,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.810000, 1.450266, 0.084000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 86,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.810000, 1.420633, 0.042000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 87,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.810000, 1.386667, 0.012000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 88,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.810000, 1.356967, -0.030000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 89,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.810000, 1.323033, -0.060000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 90,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.470000, 1.293333, -0.078000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 91,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.470000, 1.259367, -0.048000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 92,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.470000, 1.229733, -0.006000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 93,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.470000, 1.475767, 0.006000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 94,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.470000, 1.446033, 0.048000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 95,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.470000, 1.412133, 0.078000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 96,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.559033, 1.480000, -0.024000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 97,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.648100, 1.480000, -0.048000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 98,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.753300, 1.480000, -0.078000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 99,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.526700, 1.200000, -0.078000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 100,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.631900, 1.200000, -0.048000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 101,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.720967, 1.200000, -0.024000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 102,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.486200, 1.267867, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 103,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.526700, 1.233967, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 104,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.583300, 1.204233, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 105,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.599500, 1.450266, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 106,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.656200, 1.420633, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 107,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.696700, 1.386667, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 108,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.753300, 1.356967, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 109,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.793800, 1.323033, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 110,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.769500, 1.293333, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 111,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.729033, 1.259367, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 112,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.672400, 1.229733, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 113,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.656200, 1.475767, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 114,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.599500, 1.446033, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 115,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.559033, 1.412133, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 116,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.502400, 1.382433, -0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 117,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.730000, 1.757767, 0.050000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 118,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.550000, 1.745533, -0.010000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 119,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.650000, 1.770000, -0.050000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 120,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.690000, 1.550000, 0.040000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 121,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.710000, 1.684467, 0.090000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 122,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.460000, 1.222233, 0.029333],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 123,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.460000, 1.337767, -0.013333],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 124,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.380000, 1.200533, 0.002667],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 125,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.401333, 1.410000, -0.002667],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 126,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.454667, 1.150000, 0.029333],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 127,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.433333, 1.251100, 0.040000],
+			"pose": 1,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 128,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.653115, 0.000000, -0.479759],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 129,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.693930, 0.000000, 0.539898],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 130,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.161892, 0.000000, -0.556677],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 131,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.675127, 0.000000, -0.581047],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 132,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.583448, 0.000000, -0.176601],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 133,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.025194, 0.000000, -0.381236],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 134,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.622813, 0.000000, -0.033891],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 135,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.854779, 0.000000, -0.231955],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 136,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.480819, 0.000000, 0.353373],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 137,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.470676, 0.000000, 0.157534],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 138,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.841748, 0.000000, 0.195297],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 139,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.840781, 0.000000, -0.333801],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 140,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.563576, 0.000000, -0.779492],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 141,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.494337, 0.000000, -0.774103],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 142,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.860367, 0.000000, 0.350040],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 143,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.337237, 0.000000, -0.711282],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 144,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.140000, 0.877767, 0.060000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 145,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.062233, 1.020000, 0.015000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 146,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.031133, 0.984467, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 147,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.880000, 1.086667, -0.008900],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 148,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.040000, 1.153333, 0.080000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 149,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.170000, 1.450266, 0.084000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 150,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.170000, 1.420633, 0.042000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 151,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.170000, 1.386667, 0.012000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 152,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.170000, 1.356967, -0.030000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 153,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.170000, 1.323033, -0.060000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 154,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.830000, 1.293333, -0.078000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 155,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.830000, 1.259367, -0.048000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 156,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.830000, 1.229733, -0.006000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 157,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.830000, 1.475767, 0.006000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 158,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.830000, 1.446033, 0.048000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 159,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.830000, 1.412133, 0.078000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 160,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.919033, 1.480000, -0.024000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 161,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.008100, 1.480000, -0.048000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 162,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.113300, 1.480000, -0.078000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 163,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.886700, 1.200000, -0.078000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 164,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.991900, 1.200000, -0.048000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 165,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.080967, 1.200000, -0.024000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 166,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.846200, 1.267867, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 167,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.886700, 1.233967, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 168,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.943300, 1.204233, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 169,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.959500, 1.450266, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 170,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.016200, 1.420633, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 171,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.056700, 1.386667, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 172,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.113300, 1.356967, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 173,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.153800, 1.323033, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 174,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.129500, 1.293333, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 175,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.089033, 1.259367, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 176,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.032400, 1.229733, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 177,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.016200, 1.475767, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 178,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.959500, 1.446033, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 179,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.919033, 1.412133, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 180,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.862400, 1.382433, -0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 181,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.090000, 1.757767, 0.050000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 182,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.910000, 1.745533, -0.010000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 183,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.010000, 1.770000, -0.050000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 184,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.050000, 1.550000, 0.040000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 185,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.070000, 1.684467, 0.090000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 186,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.820000, 1.222233, 0.029333],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 187,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.820000, 1.337767, -0.013333],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 188,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.740000, 1.200533, 0.002667],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 189,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.761333, 1.410000, -0.002667],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 190,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.814667, 1.150000, 0.029333],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 191,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.793333, 1.251100, 0.040000],
+			"pose": 2,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 192,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.466132, 0.000000, -0.500943],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 193,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.868775, 0.000000, -0.568044],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 194,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.848704, 0.000000, -0.748006],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 195,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.786488, 0.000000, 0.209970],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 196,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.057744, 0.000000, 0.942249],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 197,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.298378, 0.000000, 0.146383],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 198,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.633343, 0.000000, 0.514423],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 199,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.616506, 0.000000, 0.151257],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 200,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.404673, 0.000000, 0.527078],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 201,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.087283, 0.000000, -0.195048],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 202,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.650326, 0.000000, -0.357711],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 203,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.373760, 0.000000, 0.242359],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 204,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.097394, 0.000000, -0.626318],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 205,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.702431, 0.000000, -0.817609],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 206,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.087239, 0.000000, 0.292937],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 207,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.761144, 0.000000, 0.651692],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 208,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.500000, 0.877767, 0.060000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 209,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.422233, 1.020000, 0.015000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 210,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.391133, 0.984467, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 211,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.240000, 1.086667, -0.008900],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 212,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.400000, 1.153333, 0.080000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 213,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.530000, 1.450266, 0.084000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 214,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.530000, 1.420633, 0.042000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 215,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.530000, 1.386667, 0.012000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 216,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.530000, 1.356967, -0.030000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 217,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.530000, 1.323033, -0.060000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 218,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.190000, 1.293333, -0.078000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 219,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.190000, 1.259367, -0.048000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 220,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.190000, 1.229733, -0.006000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 221,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.190000, 1.475767, 0.006000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 222,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.190000, 1.446033, 0.048000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 223,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.190000, 1.412133, 0.078000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 224,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.279033, 1.480000, -0.024000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 225,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.368100, 1.480000, -0.048000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 226,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.473300, 1.480000, -0.078000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 227,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.246700, 1.200000, -0.078000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 228,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.351900, 1.200000, -0.048000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 229,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.440967, 1.200000, -0.024000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 230,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.206200, 1.267867, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 231,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.246700, 1.233967, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 232,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.303300, 1.204233, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 233,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.319500, 1.450266, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 234,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.376200, 1.420633, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 235,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.416700, 1.386667, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 236,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.473300, 1.356967, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 237,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.513800, 1.323033, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 238,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.489500, 1.293333, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 239,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.449033, 1.259367, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 240,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.392400, 1.229733, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 241,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.376200, 1.475767, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 242,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.319500, 1.446033, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 243,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.279033, 1.412133, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 244,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.222400, 1.382433, -0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 245,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.450000, 1.757767, 0.050000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 246,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.270000, 1.745533, -0.010000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 247,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.370000, 1.770000, -0.050000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 248,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.410000, 1.550000, 0.040000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 249,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.430000, 1.684467, 0.090000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 250,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.180000, 1.222233, 0.029333],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 251,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.180000, 1.337767, -0.013333],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 252,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.100000, 1.200533, 0.002667],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 253,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.121333, 1.410000, -0.002667],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 254,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.174667, 1.150000, 0.029333],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 255,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.153333, 1.251100, 0.040000],
+			"pose": 3,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 256,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.108932, 0.000000, -0.046644],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 257,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.039631, 0.000000, 0.712633],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 258,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.458793, 0.000000, -0.728627],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 259,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.024172, 0.000000, 0.486128],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 260,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.603528, 0.000000, 0.649560],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 261,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.897691, 0.000000, -0.082334],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 262,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.392893, 0.000000, -0.040178],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 263,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.965840, 0.000000, -0.325450],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 264,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.141837, 0.000000, 0.130835],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 265,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.679327, 0.000000, -0.312726],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 266,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.285787, 0.000000, 0.443060],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 267,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.176505, 0.000000, 0.726853],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 268,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.191725, 0.000000, -0.878724],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 269,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.700836, 0.000000, -0.769819],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 270,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.955305, 0.000000, 0.520495],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 271,
+			"kind": "floor",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.435852, 0.000000, -0.421226],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 272,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.860000, 0.877767, 0.060000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 273,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.782234, 1.020000, 0.015000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 274,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.751134, 0.984467, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 275,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.600000, 1.086667, -0.008900],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 276,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.760000, 1.153333, 0.080000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 277,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.890000, 1.450266, 0.084000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 278,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.890000, 1.420633, 0.042000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 279,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.890000, 1.386667, 0.012000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 280,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.890000, 1.356967, -0.030000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 281,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.890000, 1.323033, -0.060000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 282,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.550000, 1.293333, -0.078000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 283,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.550000, 1.259367, -0.048000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 284,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.550000, 1.229733, -0.006000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 285,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.550000, 1.475767, 0.006000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 286,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.550000, 1.446033, 0.048000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 287,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.550000, 1.412133, 0.078000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 288,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.639034, 1.480000, -0.024000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 289,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.728100, 1.480000, -0.048000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 290,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.833300, 1.480000, -0.078000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 291,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.606700, 1.200000, -0.078000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 292,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.711900, 1.200000, -0.048000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 293,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.800967, 1.200000, -0.024000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 294,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.566200, 1.267867, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 295,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.606700, 1.233967, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 296,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.663300, 1.204233, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 297,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.679500, 1.450266, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 298,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.736200, 1.420633, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 299,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.776700, 1.386667, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 300,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.833300, 1.356967, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 301,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.873800, 1.323033, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 302,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.849500, 1.293333, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 303,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.809034, 1.259367, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 304,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.752400, 1.229733, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 305,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.736200, 1.475767, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 306,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.679500, 1.446033, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 307,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.639034, 1.412133, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 308,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.582400, 1.382433, -0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 309,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.810000, 1.757767, 0.050000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 310,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.630000, 1.745533, -0.010000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 311,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.730000, 1.770000, -0.050000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 312,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.770000, 1.550000, 0.040000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 313,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.790000, 1.684467, 0.090000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 314,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.540000, 1.222233, 0.029333],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 315,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.540000, 1.337767, -0.013333],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 316,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.460000, 1.200533, 0.002667],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 317,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.481334, 1.410000, -0.002667],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 318,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.534667, 1.150000, 0.029333],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 319,
+			"kind": "character",
+			"node": "Character",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.513334, 1.251100, 0.040000],
+			"pose": 4,
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 320,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.407846, 0.000000, 0.240953],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 321,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.215002, 0.000000, -0.362946],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 322,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.300733, 0.000000, 0.130102],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 323,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.492012, 0.000000, -0.471490],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 324,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.031094, 0.000000, -0.092464],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 325,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.029810, 0.000000, 0.312283],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 326,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.619437, 0.000000, 0.200933],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 327,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.630011, 0.000000, -0.178566],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 328,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.978825, 0.000000, 0.367530],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 329,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.688370, 0.000000, -0.009367],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 330,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.999241, 0.000000, 0.449036],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 331,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.255116, 0.000000, 0.095810],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 332,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.152057, 0.000000, -0.313889],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 333,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.690358, 0.000000, -0.211503],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 334,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.183357, 0.000000, -0.052628],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 335,
+			"kind": "vacated",
+			"node": "Floor",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.699717, 0.000000, -0.450877],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 336,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 0.400000, -0.079843],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 337,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 0.520000, -0.120285],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 338,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 0.640000, 0.378145],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 339,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 0.760000, -0.313796],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 340,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 0.880000, -0.262017],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 341,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.000000, 0.218195],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 342,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.120000, -0.084323],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 343,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.240000, 0.000706],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 344,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.360000, -0.373235],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 345,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.480000, -0.137613],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 346,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.600000, -0.483622],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 347,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.720000, 0.228661],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 348,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.840000, 0.432936],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 349,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 1.960000, -0.318200],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 350,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 2.080000, 0.375896],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 351,
+			"kind": "vacated",
+			"node": "Wall",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [2.080000, 2.200000, -0.124277],
+			"radius": 0.250000
+		}
+	],
+	"scene": "character_walk.tscn",
+	"seed": 54575163328,
+	"version": 1
+}

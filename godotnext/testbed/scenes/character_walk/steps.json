@@ -1,0 +1,89 @@
+{
+	"cameras": ["CaptureCam", "CovCam0", "CovCam1", "CovCam2", "CovCam3"],
+	"name": "character_walk",
+	"patch_set": "q1",
+	"seed": 54575163328,
+	"variants": [
+		{
+			"end_frame": 239,
+			"form": "timing",
+			"frame0_action": "cross the sun/shadow threshold",
+			"id": "walk",
+			"motion_end": 240,
+			"motion_frames": 240,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 0,
+			"form": "Q4a",
+			"frame0_action": "character removed 0.3 m from the wall",
+			"id": "vacated",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 240,
+			"form": "Q4a",
+			"frame0_action": "empty endpoint",
+			"id": "empty",
+			"motion_end": 240,
+			"motion_frames": 0,
+			"motion_start": 240
+		},
+		{
+			"end_frame": 599,
+			"form": "timing",
+			"frame0_action": "20 skinned characters",
+			"id": "soak_20",
+			"motion_end": 600,
+			"motion_frames": 600,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 24,
+			"form": "Q1",
+			"frame0_action": "hold path frame 24",
+			"id": "pose_0",
+			"motion_end": 24,
+			"motion_frames": 0,
+			"motion_start": 24
+		},
+		{
+			"end_frame": 72,
+			"form": "Q1",
+			"frame0_action": "hold path frame 72",
+			"id": "pose_1",
+			"motion_end": 72,
+			"motion_frames": 0,
+			"motion_start": 72
+		},
+		{
+			"end_frame": 120,
+			"form": "Q1",
+			"frame0_action": "hold path frame 120",
+			"id": "pose_2",
+			"motion_end": 120,
+			"motion_frames": 0,
+			"motion_start": 120
+		},
+		{
+			"end_frame": 168,
+			"form": "Q1",
+			"frame0_action": "hold path frame 168",
+			"id": "pose_3",
+			"motion_end": 168,
+			"motion_frames": 0,
+			"motion_start": 168
+		},
+		{
+			"end_frame": 216,
+			"form": "Q1",
+			"frame0_action": "hold path frame 216",
+			"id": "pose_4",
+			"motion_end": 216,
+			"motion_frames": 0,
+			"motion_start": 216
+		}
+	]
+}

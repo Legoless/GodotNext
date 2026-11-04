@@ -1,0 +1,26 @@
+{
+	"cameras": ["CaptureCam", "CovCam0", "CovCam1"],
+	"name": "fog_emissive_street",
+	"patch_set": "q1",
+	"seed": 57616875997,
+	"variants": [
+		{
+			"end_frame": 599,
+			"form": "timing",
+			"frame0_action": "volumetric fog and 3 volumes",
+			"id": "fog_on",
+			"motion_end": 600,
+			"motion_frames": 600,
+			"motion_start": 0
+		},
+		{
+			"end_frame": 0,
+			"form": "static",
+			"frame0_action": "fog disabled",
+			"id": "fog_off",
+			"motion_end": 0,
+			"motion_frames": 0,
+			"motion_start": 0
+		}
+	]
+}

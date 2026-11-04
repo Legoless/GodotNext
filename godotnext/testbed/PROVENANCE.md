@@ -1,8 +1,9 @@
 # Testbed provenance
 
-Budget: tracked size ≤ 50 MB. Current total: about 6.4 MB (about 0.4 MB
+Budget: tracked size ≤ 50 MB. Current total: about 10 MB (about 0.4 MB
 at creation; the #238 bakes added about 6 MB, almost all of it the
-`VoxelGIData` embedded in `legacy_voxelgi.tscn`; measure with
+`VoxelGIData` embedded in `legacy_voxelgi.tscn`; #52 adds about 2 MB,
+almost all of it the generated walker mesh. Measure with
 `git ls-files godotnext/testbed | xargs du -ch` once tracked).
 
 Every asset in this project is an original generated in this repository.
@@ -151,6 +152,30 @@ seed `1` (one run per variant; see its README).
 | `scenes/feature_parity_room_streaming/feature_parity_room_streaming.tscn` | `build_feature_parity_streaming.gd` (instanced #64 room, no new meshes) | MIT | 2026-11-03 | the Apple M5 Max |
 
 #74 does not add binary assets. The streaming-report Python modules live under `harness/metrics/` and are covered by the harness rows above.
+
+| `scenes/character_walk/character.gd` | original walker, authored for #52; no external mesh | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/character_walk/walk.gd` | hand-authored for #52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `generators/build_p3_content.gd` | hand-authored for #52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `generators/build_p3.gd` | hand-authored for #52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/character_walk/character_walk.tscn` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/character_walk/character_walk_patches_q1.json` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/character_walk/steps.json` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/roughness_corridor/corridor.gd` | hand-authored for #52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/roughness_corridor/roughness_corridor.tscn` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/roughness_corridor/roughness_corridor_patches_q1.json` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/roughness_corridor/roughness_corridor_masks.json` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/roughness_corridor/steps.json` | `build_p3_content.gd`, seed `0x6E657874` stream 52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/glass_water/glass_water.gd` | hand-authored for #52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/glass_water/glass_water.tscn` | `build_p3_content.gd`, seed `0x6E657874` stream 54 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/glass_water/glass_water_patches_q1.json` | `build_p3_content.gd`, seed `0x6E657874` stream 54 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/glass_water/glass_water_masks.json` | `build_p3_content.gd`, seed `0x6E657874` stream 54 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/glass_water/steps.json` | `build_p3_content.gd`, seed `0x6E657874` stream 54 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/fog_emissive_street/street.gd` | hand-authored for #52 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/fog_emissive_street/fog_emissive_street.tscn` | `build_p3_content.gd`, seed `0x6E657874` stream 55 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/fog_emissive_street/fog_emissive_street_patches_q1.json` | `build_p3_content.gd`, seed `0x6E657874` stream 55 | MIT | 2026-11-04 | the Apple M5 Max |
+| `scenes/fog_emissive_street/steps.json` | `build_p3_content.gd`, seed `0x6E657874` stream 55 | MIT | 2026-11-04 | the Apple M5 Max |
+
+#52 adds no downloaded asset. The walker is an original 10,000-triangle skinned mesh, so `soak_20` is 200,000 skinned triangles. Two generator runs write byte-identical scene files. The NextGI Perf P1 scene file is unchanged; variant `p3` spawns four of these walkers at runtime.
 
 ## Bake status
 

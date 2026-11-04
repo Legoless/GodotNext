@@ -12,6 +12,15 @@
 			"motion_end": 600,
 			"motion_frames": 600,
 			"motion_start": 0
+		},
+		{
+			"end_frame": 599,
+			"form": "timing",
+			"frame0_action": "4 skinned characters follow the spline",
+			"id": "p3",
+			"motion_end": 600,
+			"motion_frames": 600,
+			"motion_start": 0
 		}
 	]
 }

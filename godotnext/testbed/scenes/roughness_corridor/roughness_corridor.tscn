@@ -1,0 +1,273 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/roughness_corridor/corridor.gd" id="1_ls640"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_pv01b"]
+
+[sub_resource type="Sky" id="Sky_ck7im"]
+sky_material = SubResource("ProceduralSkyMaterial_pv01b")
+
+[sub_resource type="Environment" id="Environment_ed23r"]
+background_mode = 2
+sky = SubResource("Sky_ck7im")
+ambient_light_source = 3
+reflected_light_source = 2
+
+[sub_resource type="BoxMesh" id="BoxMesh_rgaql"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_m8f44"]
+resource_name = "Strip0.050"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.05
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_5oqmc"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_3c4i3"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_s0wkd"]
+resource_name = "Strip0.100"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.1
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_tavhd"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_vuar4"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_5hnq4"]
+resource_name = "Strip0.175"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.175
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_d8ejg"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_5yny0"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_fx7ys"]
+resource_name = "Strip0.250"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.25
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_rdq8o"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_hklur"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_u08pt"]
+resource_name = "Strip0.325"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.325
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_84ur5"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_jkdq8"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_7t0iq"]
+resource_name = "Strip0.400"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.4
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_h12yi"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_m16xc"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_urc5y"]
+resource_name = "Strip0.600"
+diffuse_mode = 1
+albedo_color = Color(0.9546871, 0.9546871, 0.9546871, 1)
+metallic = 1.0
+roughness = 0.6
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_nhq4g"]
+size = Vector3(2, 0.1, 4)
+
+[sub_resource type="BoxMesh" id="BoxMesh_8aaj5"]
+size = Vector3(14, 3, 0.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_u7rug"]
+resource_name = "WallNorth"
+diffuse_mode = 1
+albedo_color = Color(0.88082504, 0.5370987, 0.50638646, 1)
+metallic_specular = 0.0
+roughness = 0.85
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_30dqi"]
+size = Vector3(14, 3, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_2oemi"]
+size = Vector3(14, 3, 0.2)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_2al7p"]
+resource_name = "WallSouth"
+diffuse_mode = 1
+albedo_color = Color(0.50638646, 0.6262097, 0.86504203, 1)
+metallic_specular = 0.0
+roughness = 0.85
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_4uf33"]
+size = Vector3(14, 3, 0.2)
+
+[sub_resource type="BoxMesh" id="BoxMesh_xstq0"]
+size = Vector3(0.4, 0.8, 0.8)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_q5oqd"]
+resource_name = "OffscreenEmissive"
+diffuse_mode = 1
+albedo_color = Color(0.15170372, 0.15170372, 0.15170372, 1)
+metallic_specular = 0.0
+roughness = 0.4
+emission_enabled = true
+emission = Color(1, 0.6262097, 0.24780053, 1)
+emission_energy_multiplier = 8.0
+
+[node name="RoughnessCorridor" type="Node3D"]
+script = ExtResource("1_ls640")
+metadata/emissive_outside_frustum = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_ed23r")
+
+[node name="Strips" type="Node3D" parent="."]
+
+[node name="Strip0" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, -0.05, 0)
+mesh = SubResource("BoxMesh_rgaql")
+surface_material_override/0 = SubResource("StandardMaterial3D_m8f44")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip0"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip0/Collider"]
+shape = SubResource("BoxShape3D_5oqmc")
+
+[node name="Strip1" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 3, -0.05, 0)
+mesh = SubResource("BoxMesh_3c4i3")
+surface_material_override/0 = SubResource("StandardMaterial3D_s0wkd")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip1"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip1/Collider"]
+shape = SubResource("BoxShape3D_tavhd")
+
+[node name="Strip2" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, -0.05, 0)
+mesh = SubResource("BoxMesh_vuar4")
+surface_material_override/0 = SubResource("StandardMaterial3D_5hnq4")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip2"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip2/Collider"]
+shape = SubResource("BoxShape3D_d8ejg")
+
+[node name="Strip3" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, -0.05, 0)
+mesh = SubResource("BoxMesh_5yny0")
+surface_material_override/0 = SubResource("StandardMaterial3D_fx7ys")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip3"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip3/Collider"]
+shape = SubResource("BoxShape3D_rdq8o")
+
+[node name="Strip4" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 9, -0.05, 0)
+mesh = SubResource("BoxMesh_hklur")
+surface_material_override/0 = SubResource("StandardMaterial3D_u08pt")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip4"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip4/Collider"]
+shape = SubResource("BoxShape3D_84ur5")
+
+[node name="Strip5" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 11, -0.05, 0)
+mesh = SubResource("BoxMesh_jkdq8")
+surface_material_override/0 = SubResource("StandardMaterial3D_7t0iq")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip5"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip5/Collider"]
+shape = SubResource("BoxShape3D_h12yi")
+
+[node name="Strip6" type="MeshInstance3D" parent="Strips"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 13, -0.05, 0)
+mesh = SubResource("BoxMesh_m16xc")
+surface_material_override/0 = SubResource("StandardMaterial3D_urc5y")
+
+[node name="Collider" type="StaticBody3D" parent="Strips/Strip6"]
+
+[node name="Shape" type="CollisionShape3D" parent="Strips/Strip6/Collider"]
+shape = SubResource("BoxShape3D_nhq4g")
+
+[node name="WallNorth" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.5, -2.15)
+mesh = SubResource("BoxMesh_8aaj5")
+surface_material_override/0 = SubResource("StandardMaterial3D_u7rug")
+
+[node name="Collider" type="StaticBody3D" parent="WallNorth"]
+
+[node name="Shape" type="CollisionShape3D" parent="WallNorth/Collider"]
+shape = SubResource("BoxShape3D_30dqi")
+
+[node name="WallSouth" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 1.5, 2.15)
+mesh = SubResource("BoxMesh_2oemi")
+surface_material_override/0 = SubResource("StandardMaterial3D_2al7p")
+
+[node name="Collider" type="StaticBody3D" parent="WallSouth"]
+
+[node name="Shape" type="CollisionShape3D" parent="WallSouth/Collider"]
+shape = SubResource("BoxShape3D_4uf33")
+
+[node name="OffscreenEmissive" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -2.5, 1.4, 0)
+mesh = SubResource("BoxMesh_xstq0")
+surface_material_override/0 = SubResource("StandardMaterial3D_q5oqd")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.7071068, -0.6709365, 0.22325823, 0, 0.31573483, 0.9488475, -0.7071068, -0.6709365, 0.22325823, 7, 5, 0)
+shadow_enabled = true
+
+[node name="Cam0" type="Camera3D" parent="."]
+transform = Transform3D(0, 0.089637704, -0.9959744, 0, 0.9959744, 0.089637704, 1, 0, 0, 1, 1.45, 0)
+fov = 50.0
+far = 30.0
+
+[node name="Cam1" type="Camera3D" parent="."]
+transform = Transform3D(-0.26962996, 0.12865804, -0.95433056, 0, 0.9910345, 0.13360628, 0.962964, 0.036024258, -0.2672126, 5, 1.5, -1.2)
+fov = 50.0
+far = 30.0
+
+[node name="Cam2" type="Camera3D" parent="."]
+transform = Transform3D(0.28734788, 0.1693096, -0.9427436, 0, 0.98425317, 0.17676441, 0.95782626, -0.05079288, 0.2828231, 9, 1.55, 1.2)
+fov = 50.0
+far = 30.0
+
+[node name="CaptureCam" type="Camera3D" parent="."]
+transform = Transform3D(-0.19611613, 0.095694885, -0.9759001, 0, 0.99522674, 0.097590014, 0.9805807, 0.019138977, -0.19518003, 3, 1.5, -1)
+current = true
+fov = 55.0
+far = 40.0
