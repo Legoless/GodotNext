@@ -29,12 +29,20 @@ layout(set = 0, binding = 1, std430) restrict writeonly buffer NextGIRtInstanceD
 }
 destination;
 
+// Indirect sources (a MultiMesh command buffer) publish their element count on the GPU. The dummy
+// buffer holds 0 and the indirect flag is off for every other source.
+layout(set = 0, binding = 2, std430) restrict readonly buffer NextGIRtInstanceCount {
+	uint count;
+}
+count_buffer;
+
 layout(push_constant, std430) uniform Params {
 	uvec4 counts; // x = element count, y = source element offset, z = destination instance offset, w = id base.
 	uvec4 info; // x = source stride in floats, y = visible count, z = API flags, w = instance mask.
 	vec4 camera; // xyz = camera position, w = maximum distance for the angular mask (30 m).
 	uvec4 refs; // x = BLAS reference low, y = high, z and w unused.
 	vec4 limits; // x = angular radius limit in radians (0.5 degrees).
+	uvec4 extra; // x = 1 when the element count comes from count_buffer.
 }
 params;
 
@@ -62,8 +70,12 @@ uint nextgi_instance_mask(bool p_active, vec3 p_origin, float p_scale) {
 }
 
 void main() {
+	uint count = params.counts.x;
+	if (params.extra.x != 0u) {
+		count = min(count, count_buffer.count);
+	}
 	const uint index = gl_GlobalInvocationID.x;
-	if (index >= params.counts.x) {
+	if (index >= count) {
 		return;
 	}
 

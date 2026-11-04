@@ -352,7 +352,7 @@ public:
 	}
 	// Encodes p_count elements of p_source_buffer into the GPU instance-record buffer at p_dest_offset.
 	// p_visible_count of them are active; the rest keep mask 0. Returns the records written.
-	uint32_t encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset = 0);
+	uint32_t encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset = 0, RID p_count_buffer = RID());
 	RID get_gpu_instance_buffer() const { return gpu_instance_buffer; }
 
 	struct Stats {
@@ -377,6 +377,7 @@ private:
 
 	RID tlas;
 	RID gpu_instance_buffer;
+	RID gpu_count_dummy;
 	uint32_t gpu_instance_capacity = 0;
 	struct InstanceEncoder;
 	InstanceEncoder *instance_encoder = nullptr;

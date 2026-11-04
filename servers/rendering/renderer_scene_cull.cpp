@@ -3831,9 +3831,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					bool has_world = false;
 					uint32_t element_index = UINT32_MAX;
 					// GodotNext: tlas_from_buffer
-					RID gpu_multimesh;
+					RID gpu_source;
 					uint32_t gpu_stride = 0;
 					uint32_t gpu_count = 0;
+					bool gpu_particles = false;
+					bool gpu_indirect = false;
 				};
 				LocalVector<RTCandidate> picked;
 				LocalVector<float> angular;
@@ -3882,10 +3884,6 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 							// count lives on the GPU and keeps the dynamic exclusion until that lands.
 							const int visible = mesh_storage->_multimesh_get_visible_instances(instance->base);
 							const uint32_t element_count = uint32_t(MAX(visible, 0));
-							if (indirect) {
-								dynamic_excluded += MAX(element_count, 1u);
-								continue;
-							}
 							if (element_count == 0) {
 								continue;
 							}
@@ -3894,9 +3892,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 							candidate.angular = RendererRD::nextgi_rt_angular_radius(parent_distance, parent_aabb.size.length() * 0.5f);
 							candidate.mesh_override = mesh;
 							candidate.world = instance->transform;
-							candidate.gpu_multimesh = instance->base;
+							candidate.gpu_source = instance->base;
 							candidate.gpu_stride = mesh_storage->multimesh_get_stride(instance->base);
 							candidate.gpu_count = element_count;
+							candidate.gpu_indirect = indirect;
 							picked.push_back(candidate);
 							angular.push_back(candidate.angular);
 							reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
@@ -3932,6 +3931,45 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 							angular.push_back(candidate.angular);
 							reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 						}
+						continue;
+					}
+					if (instance->base_type == RSE::INSTANCE_PARTICLES) {
+						RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
+						if (particles_storage == nullptr || !particles_storage->owns_particles(instance->base) || particles_storage->particles_is_inactive(instance->base)) {
+							continue;
+						}
+						if (parent_distance > scene_radius) {
+							continue;
+						}
+						uint32_t trail_divisor = 1;
+						const uint32_t amount = particles_storage->particles_get_amount(instance->base, trail_divisor);
+						if (amount == 0) {
+							continue;
+						}
+						RID pass_mesh;
+						const int pass_count = particles_storage->particles_get_draw_passes(instance->base);
+						for (int pass = 0; pass < pass_count; pass++) {
+							const RID pass_rid = particles_storage->particles_get_draw_pass_mesh(instance->base, pass);
+							if (pass_rid.is_valid()) {
+								pass_mesh = pass_rid;
+								break;
+							}
+						}
+						if (pass_mesh.is_null()) {
+							continue;
+						}
+						RTCandidate candidate;
+						candidate.instance = instance;
+						candidate.angular = RendererRD::nextgi_rt_angular_radius(parent_distance, parent_aabb.size.length() * 0.5f);
+						candidate.mesh_override = pass_mesh;
+						candidate.world = instance->transform;
+						candidate.gpu_source = instance->base;
+						candidate.gpu_stride = 20; // Five vec4 per element: three transform rows, colour, custom.
+						candidate.gpu_count = amount;
+						candidate.gpu_particles = true;
+						picked.push_back(candidate);
+						angular.push_back(candidate.angular);
+						reasons.push_back(RendererRD::NEXTGI_RT_INCLUDED);
 						continue;
 					}
 					const bool skinned = instance->mesh_instance.is_valid();
@@ -3975,11 +4013,13 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					rt_instance.rt_transform = picked[i].world;
 					rt_instance.has_rt_transform = picked[i].has_world;
 					rt_instance.element_index = picked[i].element_index;
-					rt_instance.multimesh = picked[i].gpu_multimesh;
-					rt_instance.multimesh_stride = picked[i].gpu_stride;
-					rt_instance.multimesh_count = picked[i].gpu_count;
+					rt_instance.gpu_source = picked[i].gpu_source;
+					rt_instance.gpu_stride = picked[i].gpu_stride;
+					rt_instance.gpu_count = picked[i].gpu_count;
+					rt_instance.gpu_particles = picked[i].gpu_particles;
+					rt_instance.gpu_indirect = picked[i].gpu_indirect;
 					scenario->nextgi_rt_selection.push_back(rt_instance);
-					selected += picked[i].gpu_multimesh.is_valid() ? picked[i].gpu_count : 1;
+					selected += picked[i].gpu_source.is_valid() ? picked[i].gpu_count : 1;
 				}
 				scenario->nextgi_rt_not_in_scene = not_in_scene;
 				scenario->nextgi_rt_instance_cap = instance_cap;

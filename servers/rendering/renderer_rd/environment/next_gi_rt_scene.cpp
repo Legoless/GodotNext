@@ -44,6 +44,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_instances.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
+#include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -470,6 +471,10 @@ void NextGIRTScene::free() {
 		RD::get_singleton()->free_rid(gpu_instance_buffer);
 		gpu_instance_buffer = RID();
 	}
+	if (gpu_count_dummy.is_valid()) {
+		RD::get_singleton()->free_rid(gpu_count_dummy);
+		gpu_count_dummy = RID();
+	}
 	gpu_instance_capacity = 0;
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
@@ -648,7 +653,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	LocalVector<NextGISurfaceRecord> surface_records;
 
 	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
-		if (fed.multimesh.is_valid()) {
+		if (fed.gpu_source.is_valid()) {
 			// A dynamic MultiMesh is one GPU source, encoded after this CPU pass (#57).
 			continue;
 		}
@@ -771,9 +776,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	// Dynamic MultiMesh sources share the TLAS with the CPU-fed instances. Farthest sources are
 	// dropped first when they do not fit the 100k cap.
 	struct GpuSource {
-		RID multimesh;
+		RID source;
 		RID buffer;
 		RID blas;
+		RID count_buffer;
 		uint32_t count = 0;
 		uint32_t stride = 0;
 		uint32_t element_offset = 0;
@@ -783,17 +789,17 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	uint32_t dynamic_budget = nextgi_rt_dynamic_budget(NEXTGI_RT_TLAS_CAPACITY, tlas_instances.size());
 	LocalVector<GpuSource> gpu_candidates;
 	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
-		if (!fed.multimesh.is_valid() || fed.multimesh_count == 0 || fed.multimesh_stride < 12 || !mesh_storage->owns_multimesh(fed.multimesh)) {
+		if (!fed.gpu_source.is_valid() || fed.gpu_count == 0 || fed.gpu_stride < 12) {
 			continue;
 		}
-		const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : mesh_storage->multimesh_get_mesh(fed.multimesh);
-		if (!mesh_storage->owns_mesh(mesh)) {
-			stats.coverage.blas_pending += fed.multimesh_count;
+		const RID mesh = fed.mesh_override;
+		if (mesh.is_null() || !mesh_storage->owns_mesh(mesh)) {
+			stats.coverage.blas_pending += fed.gpu_count;
 			continue;
 		}
 		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
 		if (parts == nullptr) {
-			stats.coverage.blas_pending += fed.multimesh_count;
+			stats.coverage.blas_pending += fed.gpu_count;
 			continue;
 		}
 		RID blas;
@@ -804,24 +810,38 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			}
 		}
 		if (blas.is_null()) {
-			stats.coverage.blas_pending += fed.multimesh_count;
+			stats.coverage.blas_pending += fed.gpu_count;
 			continue;
 		}
-		const RID buffer = mesh_storage->_multimesh_get_buffer_rd_rid(fed.multimesh);
-		if (buffer.is_null()) {
-			continue;
-		}
-		uint32_t current_offset = 0;
-		uint32_t previous_offset = 0;
-		mesh_storage->_multimesh_get_motion_vectors_offsets(fed.multimesh, current_offset, previous_offset);
 
 		GpuSource source;
-		source.multimesh = fed.multimesh;
-		source.buffer = buffer;
+		source.source = fed.gpu_source;
 		source.blas = blas;
-		source.count = fed.multimesh_count;
-		source.stride = fed.multimesh_stride;
-		source.element_offset = current_offset;
+		source.count = fed.gpu_count;
+		source.stride = fed.gpu_stride;
+		if (fed.gpu_particles) {
+			ParticlesStorage *particles = ParticlesStorage::get_singleton();
+			if (particles == nullptr) {
+				continue;
+			}
+			source.buffer = particles->particles_get_instance_buffer(fed.gpu_source);
+			source.element_offset = 0;
+		} else {
+			if (!mesh_storage->owns_multimesh(fed.gpu_source)) {
+				continue;
+			}
+			source.buffer = mesh_storage->_multimesh_get_buffer_rd_rid(fed.gpu_source);
+			uint32_t current_offset = 0;
+			uint32_t previous_offset = 0;
+			mesh_storage->_multimesh_get_motion_vectors_offsets(fed.gpu_source, current_offset, previous_offset);
+			source.element_offset = current_offset;
+			if (fed.gpu_indirect) {
+				source.count_buffer = mesh_storage->_multimesh_get_command_buffer_rd_rid(fed.gpu_source);
+			}
+		}
+		if (source.buffer.is_null()) {
+			continue;
+		}
 		source.distance = (fed.has_rt_transform ? fed.rt_transform.origin : Vector3()).distance_to(camera_pos);
 		gpu_candidates.push_back(source);
 	}
@@ -880,7 +900,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			}
 			uint32_t cursor = tlas_instances.size();
 			for (const GpuSource &source : gpu_sources) {
-				const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, source.blas, cursor, 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset);
+				const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, source.blas, cursor, 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset, source.count_buffer);
 				if (encoded == 0) {
 					continue;
 				}
@@ -1113,11 +1133,15 @@ bool NextGIRTScene::_ensure_gpu_instance_buffer() {
 	const uint32_t record_size = rd->acceleration_structure_get_instance_size();
 	ERR_FAIL_COND_V(record_size == 0, false);
 	gpu_instance_buffer = rd->storage_buffer_create(NEXTGI_RT_TLAS_CAPACITY * record_size, {}, 0, RenderingDevice::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RenderingDevice::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+	if (gpu_count_dummy.is_null()) {
+		const uint32_t zero = 0;
+		gpu_count_dummy = rd->storage_buffer_create(sizeof(uint32_t), Span<uint8_t>((uint8_t *)&zero, sizeof(zero)));
+	}
 	gpu_instance_capacity = gpu_instance_buffer.is_valid() ? NEXTGI_RT_TLAS_CAPACITY : 0;
 	return gpu_instance_buffer.is_valid();
 }
 
-uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset) {
+uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset, RID p_count_buffer) {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL_V(rd, 0);
 	ERR_FAIL_COND_V(p_count == 0 || p_source_buffer.is_null() || p_blas.is_null() || p_source_stride_floats < 12, 0);
@@ -1131,13 +1155,15 @@ uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_sou
 	const int layout = rd->acceleration_structure_get_instance_size() == 72 ? INSTANCE_LAYOUT_METAL_72 : INSTANCE_LAYOUT_VULKAN_64;
 	RID shader = instance_encoder->shader.version_get_shader(instance_encoder->version, layout);
 
+	const bool indirect = p_count_buffer.is_valid() && gpu_count_dummy.is_valid();
 	RD::Uniform u_source(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_source_buffer);
 	RD::Uniform u_destination(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, gpu_instance_buffer);
-	RD::Uniform uniforms[2] = { u_source, u_destination };
-	RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 2), shader, 0);
+	RD::Uniform u_count(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, indirect ? p_count_buffer : gpu_count_dummy);
+	RD::Uniform uniforms[3] = { u_source, u_destination, u_count };
+	RID uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 3), shader, 0);
 	ERR_FAIL_COND_V(uniform_set.is_null(), 0);
 
-	uint32_t push_constants[20] = {};
+	uint32_t push_constants[24] = {};
 	// counts: element count, source offset, destination offset, id base.
 	push_constants[0] = p_count;
 	push_constants[1] = p_source_element_offset;
@@ -1163,6 +1189,8 @@ uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_sou
 	push_constants[13] = uint32_t(blas_reference >> 32u);
 	// limits: angular radius limit in radians.
 	push_constants[16] = to_bits(p_angle_limit);
+	// extra: the element count comes from the count buffer (indirect MultiMesh).
+	push_constants[20] = indirect ? 1u : 0u;
 
 	const uint32_t groups = MAX((p_count + 63u) / 64u, 1u);
 	RD::ComputeListID list = rd->compute_list_begin();
