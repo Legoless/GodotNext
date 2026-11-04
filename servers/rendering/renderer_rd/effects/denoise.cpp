@@ -38,13 +38,19 @@ using namespace RendererRD;
 NextGIDenoise::NextGIDenoise() {
 	Vector<String> shader_modes;
 	shader_modes.push_back("\n#define MODE_PROBE_SPATIAL\n");
+	shader_modes.push_back("\n#define MODE_PROBE_TEMPORAL\n");
+	shader_modes.push_back("\n#define MODE_STABILIZE\n");
 	shader.initialize(shader_modes);
 	shader_version = shader.version_create();
-	pipeline = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, 0));
+	for (int i = 0; i < MODE_MAX; i++) {
+		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
+	}
 }
 
 NextGIDenoise::~NextGIDenoise() {
-	RD::get_singleton()->free_rid(pipeline);
+	for (int i = 0; i < MODE_MAX; i++) {
+		RD::get_singleton()->free_rid(pipelines[i]);
+	}
 	shader.version_free(shader_version);
 }
 
@@ -53,7 +59,6 @@ void NextGIDenoise::process_diffuse(const DiffuseParams &p_params) {
 	ERR_FAIL_COND_MSG(!p_params.probe_radiance_out.is_valid(), "NextGIDenoise: probe radiance output is invalid.");
 	ERR_FAIL_COND_MSG(!p_params.depth.is_valid(), "NextGIDenoise: depth is invalid.");
 	ERR_FAIL_COND_MSG(!p_params.normal_roughness.is_valid(), "NextGIDenoise: normal-roughness guide is invalid.");
-	ERR_FAIL_COND_MSG(!p_params.probe_hit_distance.is_valid(), "NextGIDenoise: probe hit distance is invalid.");
 	ERR_FAIL_COND_MSG(p_params.probe_radiance == p_params.probe_radiance_out, "NextGIDenoise: the spatial pass cannot read and write the same probe texture.");
 
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
@@ -71,27 +76,141 @@ void NextGIDenoise::process_diffuse(const DiffuseParams &p_params) {
 	push_constant.screen_size[1] = p_params.screen_size.height;
 	push_constant.depth_threshold = p_params.depth_threshold;
 	push_constant.normal_power = p_params.normal_power;
-	push_constant.probe_temporal_max_history = p_params.probe_temporal_max_history;
-	push_constant.stabilizer_enabled = p_params.stabilizer_enabled ? 1u : 0u;
+	push_constant.probe_stride = p_params.probe_stride;
+	push_constant.probe_extent = p_params.probe_extent;
 
 	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
-	RID denoise_shader = shader.version_get_shader(shader_version, 0);
+	RID denoise_shader = shader.version_get_shader(shader_version, MODE_PROBE_SPATIAL);
 
 	RD::Uniform u_probe_radiance(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_params.probe_radiance }));
 	RD::Uniform u_probe_radiance_out(RD::UNIFORM_TYPE_IMAGE, 1, Vector<RID>({ p_params.probe_radiance_out }));
 	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ default_sampler, p_params.depth }));
 	RD::Uniform u_normal_roughness(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ default_sampler, p_params.normal_roughness }));
-	RD::Uniform u_probe_hit(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ default_sampler, p_params.probe_hit_distance }));
 
-	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_depth, u_normal_roughness, u_probe_hit);
-	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the diffuse uniform set.");
+	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_depth, u_normal_roughness);
+	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the spatial uniform set.");
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
-	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipeline);
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[MODE_PROBE_SPATIAL]);
 	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
 	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(DiffusePushConstant));
 	RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_params.probe_size.width, p_params.probe_size.height, 1);
 	RD::get_singleton()->compute_list_end();
+}
+
+void NextGIDenoise::process_temporal(const TemporalParams &p_params) {
+	ERR_FAIL_COND_MSG(!p_params.probe_radiance.is_valid(), "NextGIDenoise: probe radiance is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.probe_radiance_out.is_valid(), "NextGIDenoise: probe radiance output is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.probe_history.is_valid(), "NextGIDenoise: probe history is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.depth.is_valid(), "NextGIDenoise: depth is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.normal_roughness.is_valid(), "NextGIDenoise: normal-roughness guide is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.velocity.is_valid(), "NextGIDenoise: velocity is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.history_length.is_valid(), "NextGIDenoise: history length is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.reset_mask.is_valid(), "NextGIDenoise: reset mask is invalid.");
+	ERR_FAIL_COND_MSG(p_params.probe_radiance == p_params.probe_radiance_out, "NextGIDenoise: the temporal pass cannot read and write the same probe texture.");
+
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	TemporalPushConstant push_constant;
+	for (int i = 0; i < 16; i++) {
+		push_constant.prev_view_proj[i] = p_params.prev_view_proj.columns[i / 4][i % 4];
+		push_constant.inv_projection[i] = p_params.inv_projection.columns[i / 4][i % 4];
+	}
+	push_constant.camera_pos[0] = p_params.camera_pos.x;
+	push_constant.camera_pos[1] = p_params.camera_pos.y;
+	push_constant.camera_pos[2] = p_params.camera_pos.z;
+	push_constant.camera_pos[3] = 1.0f;
+	push_constant.prev_camera_pos[0] = p_params.prev_camera_pos.x;
+	push_constant.prev_camera_pos[1] = p_params.prev_camera_pos.y;
+	push_constant.prev_camera_pos[2] = p_params.prev_camera_pos.z;
+	push_constant.prev_camera_pos[3] = 1.0f;
+	push_constant.probe_size[0] = p_params.probe_size.width;
+	push_constant.probe_size[1] = p_params.probe_size.height;
+	push_constant.screen_size[0] = p_params.screen_size.width;
+	push_constant.screen_size[1] = p_params.screen_size.height;
+	push_constant.depth_tolerance = p_params.depth_tolerance;
+	push_constant.normal_tolerance = p_params.normal_tolerance;
+	push_constant.history_cap = p_params.history_cap;
+	push_constant.velocity_enabled = p_params.velocity_enabled ? 1u : 0u;
+	push_constant.probe_stride = p_params.probe_stride;
+	push_constant.probe_extent = p_params.probe_extent;
+
+	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID denoise_shader = shader.version_get_shader(shader_version, MODE_PROBE_TEMPORAL);
+
+	RD::Uniform u_probe_radiance(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ linear_sampler, p_params.probe_radiance }));
+	RD::Uniform u_probe_radiance_out(RD::UNIFORM_TYPE_IMAGE, 1, Vector<RID>({ p_params.probe_radiance_out }));
+	RD::Uniform u_probe_history(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ linear_sampler, p_params.probe_history }));
+	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ nearest_sampler, p_params.depth }));
+	RD::Uniform u_normal_roughness(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ nearest_sampler, p_params.normal_roughness }));
+	RD::Uniform u_velocity(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ nearest_sampler, p_params.velocity }));
+	RD::Uniform u_reset_mask(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_params.reset_mask);
+	RD::Uniform u_history_length(RD::UNIFORM_TYPE_IMAGE, 7, Vector<RID>({ p_params.history_length }));
+
+	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_probe_history, u_depth, u_normal_roughness, u_velocity, u_reset_mask, u_history_length);
+	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the temporal uniform set.");
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[MODE_PROBE_TEMPORAL]);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(TemporalPushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_params.probe_size.width, p_params.probe_size.height, 1);
+	RD::get_singleton()->compute_list_end();
+}
+
+void NextGIDenoise::process_stabilize(const StabilizeParams &p_params) {
+	ERR_FAIL_COND_MSG(!p_params.current.is_valid(), "NextGIDenoise: current ambient is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.previous.is_valid(), "NextGIDenoise: previous ambient is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.output.is_valid(), "NextGIDenoise: ambient output is invalid.");
+
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	StabilizePushConstant push_constant;
+	push_constant.screen_size[0] = p_params.screen_size.width;
+	push_constant.screen_size[1] = p_params.screen_size.height;
+	push_constant.blend_weight = p_params.blend_weight;
+	push_constant.stabilizer_enabled = p_params.stabilizer_enabled ? 1u : 0u;
+
+	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID denoise_shader = shader.version_get_shader(shader_version, MODE_STABILIZE);
+
+	RD::Uniform u_current(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ linear_sampler, p_params.current }));
+	RD::Uniform u_previous(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ linear_sampler, p_params.previous }));
+	RD::Uniform u_output(RD::UNIFORM_TYPE_IMAGE, 2, Vector<RID>({ p_params.output }));
+
+	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_current, u_previous, u_output);
+	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the stabilize uniform set.");
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, pipelines[MODE_STABILIZE]);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(StabilizePushConstant));
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_params.screen_size.width, p_params.screen_size.height, 1);
+	RD::get_singleton()->compute_list_end();
+}
+
+String NextGIDenoise::build_shader_source(int p_variant) {
+	NextgiDenoiseDiffuseShaderRD shader_rd;
+	Vector<String> defines;
+	defines.push_back("\n#define MODE_PROBE_SPATIAL\n");
+	defines.push_back("\n#define MODE_PROBE_TEMPORAL\n");
+	defines.push_back("\n#define MODE_STABILIZE\n");
+	shader_rd.initialize(defines);
+	const RID version = shader_rd.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = shader_rd.version_build_variant_stage_sources(version, CLAMP(p_variant, 0, int(MODE_MAX) - 1));
+	shader_rd.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
 }
 
 PackedByteArray NextGIDenoise::select_reset_probes(const Vector<Rect2i> &p_dirty_regions, const Size2i &p_probe_size) {
@@ -110,7 +229,7 @@ PackedByteArray NextGIDenoise::select_reset_probes(const Vector<Rect2i> &p_dirty
 	for (const Rect2i &region : p_dirty_regions) {
 		const Rect2i clipped = region.intersection(bounds);
 		for (int y = clipped.position.y; y < clipped.position.y + clipped.size.height; y++) {
-			for (int x = clipped.position.x; x < clipped.position.x + clipped.size.x; x++) {
+			for (int x = clipped.position.x; x < clipped.position.x + clipped.size.width; x++) {
 				mask_data[y * width + x] = 1;
 			}
 		}

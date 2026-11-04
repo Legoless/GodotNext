@@ -148,6 +148,10 @@ void NextGIGather::_free_uniform_set() {
 
 void NextGIGather::free_resources() {
 	_free_uniform_set();
+	if (denoise != nullptr) {
+		memdelete(denoise);
+		denoise = nullptr;
+	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (shader != nullptr) {
 		if (rd != nullptr) {
@@ -166,7 +170,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[8] = { probe_image, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[9] = { probe_image, probe_scratch, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -279,6 +283,10 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	if (probe_image.is_valid()) {
 		rd->free_rid(probe_image);
 	}
+	if (probe_scratch.is_valid()) {
+		rd->free_rid(probe_scratch);
+		probe_scratch = RID();
+	}
 	if (confidence_buffer.is_valid()) {
 		rd->free_rid(confidence_buffer);
 		confidence_buffer = RID();
@@ -287,10 +295,14 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	tf.width = MAX(probes_x * 4, 1u);
 	tf.height = MAX(probes_y * 4, 1u);
 	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	// GodotNext: the diffuse denoiser reads the probe texels as a sampler and writes the scratch copy.
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	probe_image = rd->texture_create(tf, RD::TextureView());
 	ERR_FAIL_COND_V(probe_image.is_null(), false);
 	rd->texture_clear(probe_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	probe_scratch = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(probe_scratch.is_null(), false);
+	rd->texture_clear(probe_scratch, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
 	probe_w = probes_x;
 	probe_h = probes_y;
@@ -298,6 +310,7 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 }
 
 void NextGIGather::init() {
+	denoise = memnew(NextGIDenoise);
 }
 
 bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride) {
@@ -400,13 +413,17 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	}
 	RID normal_roughness = dummy_color;
 	RID velocity = dummy_color;
+	last_normal_roughness = RID();
 	if (rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
 		normal_roughness = rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness"));
 		velocity = rb->get_velocity_buffer(false);
 		params.velocity_enabled = velocity.is_valid() && normal_roughness.is_valid() ? 1u : 0u;
+		last_normal_roughness = normal_roughness;
 	} else {
 		params.velocity_enabled = 0;
 	}
+	last_depth = depth;
+	last_inv_projection = scene_data->cam_projection.inverse();
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	_free_uniform_set();
@@ -601,7 +618,34 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 		rd->compute_list_end();
 	}
 	_read_counters();
+	// GodotNext: nextgi_denoise
+	// Spatial denoise of the fresh probe texels, between the gather and the ambient integration.
+	// The temporal pass replaces the gather's own history blend when it lands (#53 step 4).
+	_denoise_probes();
 	frame++;
+}
+
+void NextGIGather::_denoise_probes() {
+	if (denoise == nullptr || probe_w == 0 || probe_h == 0 || !probe_image.is_valid() || !probe_scratch.is_valid()) {
+		return;
+	}
+	if (!last_depth.is_valid() || !last_normal_roughness.is_valid()) {
+		return;
+	}
+
+	NextGIDenoise::DiffuseParams params;
+	params.probe_radiance = probe_image;
+	params.probe_radiance_out = probe_scratch;
+	params.depth = last_depth;
+	params.normal_roughness = last_normal_roughness;
+	params.probe_size = Size2i(probe_w * 4, probe_h * 4);
+	params.screen_size = Size2i(last_screen_w, last_screen_h);
+	params.inv_projection = last_inv_projection;
+	denoise->process_diffuse(params);
+
+	// Second iteration, swapped, so the filtered result ends in probe_image for the integration.
+	SWAP(params.probe_radiance, params.probe_radiance_out);
+	denoise->process_diffuse(params);
 }
 
 void NextGIGather::integrate(RenderDataRD *p_render_data) {

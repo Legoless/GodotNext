@@ -31,9 +31,11 @@
 #pragma once
 
 #include "core/math/math_funcs.h"
+#include "core/math/projection.h"
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/effects/denoise.h"
 
 class RenderDataRD;
 
@@ -77,6 +79,11 @@ class NextGIGather {
 	ShaderState *shader = nullptr;
 
 	RID probe_image;
+	RID probe_scratch;
+	RID last_depth;
+	RID last_normal_roughness;
+	Projection last_inv_projection;
+	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID params_buffer;
 	RID counter_buffer;
@@ -107,6 +114,7 @@ class NextGIGather {
 	bool _ensure_shader();
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
 	bool _bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride);
+	void _denoise_probes();
 	void _read_counters();
 	void _free_uniform_set();
 

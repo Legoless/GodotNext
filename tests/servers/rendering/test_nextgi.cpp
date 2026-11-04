@@ -2249,6 +2249,39 @@ TEST_CASE("[NextGI][Denoise] Reset-region selection marks exactly the dirty prob
 	CHECK_EQ(RendererRD::NextGIDenoise::select_reset_probes(Vector<Rect2i>(), Size2i()).size(), 0);
 }
 
+TEST_CASE("[NextGI][Denoise] Every denoise mode expands to its own compute stage") {
+	// The raw stage source keeps every #ifdef branch; the real check is that each variant compiles
+	// with its own mode define, which is what the shader compiler sees.
+	struct ModeCase {
+		RendererRD::NextGIDenoise::Mode mode;
+		const char *token;
+		const char *define;
+	};
+	const ModeCase cases[] = {
+		{ RendererRD::NextGIDenoise::MODE_PROBE_SPATIAL, "NEXTGI_DENOISE_KERNEL", "MODE_PROBE_SPATIAL" },
+		{ RendererRD::NextGIDenoise::MODE_PROBE_TEMPORAL, "history_length_image", "MODE_PROBE_TEMPORAL" },
+		{ RendererRD::NextGIDenoise::MODE_STABILIZE, "stabilizer_enabled", "MODE_STABILIZE" },
+	};
+
+	for (const ModeCase &mode_case : cases) {
+		const String source = RendererRD::NextGIDenoise::build_shader_source(mode_case.mode);
+		REQUIRE_FALSE(source.is_empty());
+		CHECK(source.contains("local_size_x = 8"));
+		CHECK(source.contains(mode_case.token));
+		CHECK(source.contains(mode_case.define));
+#ifdef MODULE_GLSLANG_ENABLED
+		String error;
+		const Vector<uint8_t> spirv = compile_glslang_shader(
+				RenderingDeviceCommons::SHADER_STAGE_COMPUTE,
+				source,
+				RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1,
+				RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_6,
+				&error);
+		CHECK_MESSAGE(!spirv.is_empty(), error);
+#endif // MODULE_GLSLANG_ENABLED
+	}
+}
+
 } // namespace TestNextGI
 
 #endif // RD_ENABLED
