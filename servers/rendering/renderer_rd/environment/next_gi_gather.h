@@ -56,6 +56,17 @@ _FORCE_INLINE_ bool nextgi_gather_history_resets(float p_depth, float p_history_
 	return Math::abs(p_depth - p_history_depth) > 0.1f * p_history_depth;
 }
 
+// Screen and SRC hits are fully confident. A world-cache hit stays below 1. Sky is 0.
+_FORCE_INLINE_ float nextgi_sample_confidence(bool p_screen_hit, bool p_src_hit, bool p_wrc_hit, float p_wrc_weight) {
+	if (p_screen_hit || p_src_hit) {
+		return 1.0f;
+	}
+	if (p_wrc_hit) {
+		return MIN(MAX(p_wrc_weight, 0.0f), 0.99f);
+	}
+	return 0.0f;
+}
+
 uint64_t nextgi_gather_coverage_hits();
 uint64_t nextgi_gather_coverage_rays();
 
@@ -70,6 +81,7 @@ class NextGIGather {
 	RID params_buffer;
 	RID counter_buffer;
 	RID feedback_buffer;
+	RID confidence_buffer;
 	RID dummy_color;
 	RID dummy_storage;
 	RID dummy_buffer;
@@ -87,6 +99,7 @@ class NextGIGather {
 	float last_miss_luminance = 0.0f;
 	uint32_t last_wrc_samples = 0;
 	uint32_t last_sky_samples = 0;
+	uint32_t last_screen_hits = 0;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
 	bool hit_radiance_reference = false;

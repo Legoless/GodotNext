@@ -37,6 +37,7 @@
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
+#include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
@@ -600,6 +601,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			_capture_src_cards(p_render_data);
 		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
 			_relight_src(p_render_data);
+		} else if (slot == PASS_SLOT_SCREEN_TRACES) {
+			Ref<RenderSceneBuffersRD> buffers = p_render_data->render_buffers;
+			SSEffects *ss_effects = SSEffects::get_singleton();
+			if (buffers.is_valid() && ss_effects != nullptr) {
+				ss_effects->build_hiz(buffers);
+			}
 		} else if (slot == PASS_SLOT_WRC_UPDATE) {
 			if (wrc == nullptr) {
 				wrc = memnew(NextGIWRC);

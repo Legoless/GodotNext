@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/projection.h"
+#include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
@@ -98,7 +99,7 @@ struct GatherCountersGPU {
 	uint32_t miss_radiance_bits = 0;
 	uint32_t wrc_samples = 0;
 	uint32_t sky_samples = 0;
-	uint32_t pad = 0;
+	uint32_t screen_hits = 0;
 };
 
 struct NextGIGather::ShaderState {
@@ -165,7 +166,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[7] = { probe_image, params_buffer, counter_buffer, feedback_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[8] = { probe_image, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -181,6 +182,7 @@ void NextGIGather::free_resources() {
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
+	confidence_buffer = RID();
 	dummy_color = RID();
 	dummy_storage = RID();
 	dummy_buffer = RID();
@@ -266,11 +268,18 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 		counter_buffer = rd->storage_buffer_create(sizeof(GatherCountersGPU));
 	}
 	if (probe_image.is_valid() && probe_w == probes_x && probe_h == probes_y) {
-		return probe_image.is_valid();
+		if (!confidence_buffer.is_valid()) {
+			confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
+		}
+		return probe_image.is_valid() && confidence_buffer.is_valid();
 	}
 	_free_uniform_set();
 	if (probe_image.is_valid()) {
 		rd->free_rid(probe_image);
+	}
+	if (confidence_buffer.is_valid()) {
+		rd->free_rid(confidence_buffer);
+		confidence_buffer = RID();
 	}
 	RD::TextureFormat tf;
 	tf.width = MAX(probes_x * 4, 1u);
@@ -280,6 +289,7 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	probe_image = rd->texture_create(tf, RD::TextureView());
 	ERR_FAIL_COND_V(probe_image.is_null(), false);
 	rd->texture_clear(probe_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
 	probe_w = probes_x;
 	probe_h = probes_y;
 	return true;
@@ -376,6 +386,16 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	params.page_rect_count = relight->get_page_rect_count();
+	RID hiz_texture = dummy_color;
+	RID last_frame_texture = dummy_color;
+	if (rb.is_valid() && rb->has_texture(RB_SCOPE_SSR, RB_HIZ) && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME)) {
+		const RD::TextureFormat hiz_format = rd->texture_get_format(rb->get_texture(RB_SCOPE_SSR, RB_HIZ));
+		const RD::TextureFormat color_format = rd->texture_get_format(rb->get_texture(RB_SCOPE_SSLF, RB_LAST_FRAME));
+		hiz_texture = rb->get_texture_slice(RB_SCOPE_SSR, RB_HIZ, 0, 0, 1, hiz_format.mipmaps);
+		last_frame_texture = rb->get_texture_slice(RB_SCOPE_SSLF, RB_LAST_FRAME, 0, 0, 1, color_format.mipmaps);
+		params.pad0 = hiz_texture.is_valid() && last_frame_texture.is_valid() ? 1u : 0u;
+		params.pad1 = hiz_format.mipmaps > 0 ? hiz_format.mipmaps - 1 : 0;
+	}
 	RID normal_roughness = dummy_color;
 	RID velocity = dummy_color;
 	if (rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
@@ -453,7 +473,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 			wrc_params = wrc->get_params_buffer();
 		}
 	}
-	RD::Uniform uniforms[29] = {
+	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
+	RD::Uniform uniforms[32] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -483,9 +504,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 26, Vector<RID>({ sampler, wrc_radiance })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 27, Vector<RID>({ sampler, wrc_visibility })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, wrc_params),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, confidence),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 30, Vector<RID>({ sampler_nearest, hiz_texture })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 31, Vector<RID>({ sampler, last_frame_texture })),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 29), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 32), shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -509,6 +533,7 @@ void NextGIGather::_read_counters() {
 	last_miss_luminance = float(got.miss_radiance_bits) / 64.0f;
 	last_wrc_samples = got.wrc_samples;
 	last_sky_samples = got.sky_samples;
+	last_screen_hits = got.screen_hits;
 	nextgi_coverage_hits = got.coverage_hits;
 	nextgi_coverage_rays = got.coverage_rays;
 }
@@ -632,5 +657,6 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["src_coverage_rays"] = int64_t(last_coverage_rays);
 	r_info["wrc_gather_samples"] = int64_t(last_wrc_samples);
 	r_info["wrc_sky_samples"] = int64_t(last_sky_samples);
+	r_info["screen_trace_hits"] = int64_t(last_screen_hits);
 	r_info["gather_hit_radiance_reference"] = hit_radiance_reference;
 }

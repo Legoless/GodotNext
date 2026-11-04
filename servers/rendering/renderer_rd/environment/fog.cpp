@@ -938,7 +938,11 @@ void Fog::volumetric_fog_update(const VolumetricFogSettings &p_settings, const P
 			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 13;
 			for (int i = 0; i < RendererRD::GI::MAX_VOXEL_GI_INSTANCES; i++) {
-				u.append_id(p_settings.rbgi->voxel_gi_textures[i]);
+				RID texture = p_settings.rbgi->voxel_gi_textures[i];
+				if (!texture.is_valid()) {
+					texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE);
+				}
+				u.append_id(texture);
 			}
 			uniforms.push_back(u);
 			copy_uniforms.push_back(u);

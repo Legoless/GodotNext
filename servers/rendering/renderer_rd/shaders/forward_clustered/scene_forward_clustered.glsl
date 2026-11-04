@@ -2057,6 +2057,8 @@ void fragment_shader(in SceneData scene_data) {
 		ambient_light = amb_accum.rgb;
 	}
 
+	vec4 nextgi_buffer_ambient = vec4(0.0);
+	vec4 nextgi_buffer_reflection = vec4(0.0);
 	if (!sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_GI_BUFFERS)) { //use GI buffers
 
 		vec2 coord;
@@ -2098,8 +2100,12 @@ void fragment_shader(in SceneData scene_data) {
 		vec4 buffer_reflection = textureLod(sampler2D(reflection_buffer, SAMPLER_LINEAR_CLAMP), coord, 0.0);
 #endif // USE_MULTIVIEW
 
-		ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
-		indirect_specular_light = mix(indirect_specular_light, buffer_reflection.rgb, buffer_reflection.a);
+		nextgi_buffer_ambient = buffer_ambient;
+		nextgi_buffer_reflection = buffer_reflection;
+		if (!bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
+			ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
+			indirect_specular_light = mix(indirect_specular_light, buffer_reflection.rgb, buffer_reflection.a);
+		}
 	}
 #endif // !USE_LIGHTMAP
 
@@ -2210,6 +2216,11 @@ void fragment_shader(in SceneData scene_data) {
 #if !defined(USE_LIGHTMAP)
 		if (ambient_accum.a > 0.0) {
 			ambient_light = ambient_accum.rgb;
+		}
+		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
+			// Reflection probes stay in the mix by (1 - NextGI confidence). Confidence is RB_TEX_AMBIENT.a.
+			ambient_light = mix(ambient_light, nextgi_buffer_ambient.rgb, nextgi_buffer_ambient.a);
+			indirect_specular_light = mix(indirect_specular_light, nextgi_buffer_reflection.rgb, nextgi_buffer_reflection.a);
 		}
 #endif
 	}

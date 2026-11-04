@@ -799,8 +799,10 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		scene_state.ubo.ssao_light_affect = environment_get_ssao_direct_light_affect(p_render_data->environment);
 		uint32_t ss_flags = 0;
 		if (p_opaque_render_buffers) {
+			const bool nextgi_view = RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
-			ss_flags |= environment_get_ssil_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
+			ss_flags |= (!nextgi_view && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
+			ss_flags |= nextgi_view ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
 
@@ -970,7 +972,7 @@ _FORCE_INLINE_ static uint32_t _indices_to_primitives(RSE::PrimitiveType p_primi
 	static const uint32_t subtractor[RSE::PRIMITIVE_MAX] = { 0, 0, 1, 0, 2 };
 	return (p_indices - subtractor[p_primitive]) / divisor[p_primitive];
 }
-void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi, bool p_using_opaque_gi, bool p_using_motion_pass, bool p_append, bool p_nextgi_velocity) {
+void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi, bool p_using_opaque_gi, bool p_using_motion_pass, bool p_append, bool p_nextgi_velocity, bool p_using_nextgi) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	uint64_t frame = RSG::rasterizer->get_frame_number();
 
@@ -1068,7 +1070,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					inst->gi_offset_cache = 0xFFFFFFFF;
 				}
 
-			} else if (inst->lightmap_sh) {
+			} else if (inst->lightmap_sh && !p_using_nextgi) {
 				if (lightmap_captures_used < scene_state.max_lightmap_captures) {
 					const Color *src_capture = inst->lightmap_sh->sh;
 					LightmapCaptureData &lcd = scene_state.lightmap_captures[lightmap_captures_used];
@@ -1085,11 +1087,13 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				}
 
 			} else {
-				if (p_using_opaque_gi) {
+				if (p_using_opaque_gi || (p_using_nextgi && inst->lightmap_sh)) {
 					flags |= INSTANCE_DATA_FLAG_USE_GI_BUFFERS;
 				}
 
-				if (inst->voxel_gi_instances[0].is_valid()) {
+				if (p_using_nextgi) {
+					inst->gi_offset_cache = 0xFFFFFFFF;
+				} else if (inst->voxel_gi_instances[0].is_valid()) {
 					uint32_t probe0_index = 0xFFFF;
 					uint32_t probe1_index = 0xFFFF;
 
@@ -1740,8 +1744,12 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	// GodotNext: nextgi_frame_block
 	// Right after the shadow batch, which shares RENDER_LIST_SECONDARY with SRC card capture.
+	// The last-frame color is allocated first so the screen trace can read the previous frame.
+	if (rb.is_valid() && ss_effects && (p_use_ssil || p_use_ssr || p_use_nextgi)) {
+		ss_effects->allocate_last_frame_buffer(rb, p_use_ssil, p_use_ssr, p_use_nextgi);
+	}
 	if (p_use_nextgi && rb.is_valid()) {
-		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.half_resolution);
+		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution());
 	}
 
 	if (rb_data.is_valid() && ss_effects) {
@@ -1749,8 +1757,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		// This should allow most of the processing to happen in parallel even if we're doing
 		// drawcalls per eye/view. It will all sync up at the barrier.
 
-		if (p_use_ssil || p_use_ssr) {
-			ss_effects->allocate_last_frame_buffer(rb, p_use_ssil, p_use_ssr);
+		if ((p_use_ssil || p_use_ssr) && !p_use_nextgi) {
+			ss_effects->allocate_last_frame_buffer(rb, p_use_ssil, p_use_ssr, false);
 		}
 
 		if (p_use_ssao || p_use_ssil) {
@@ -1868,8 +1876,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool ce_needs_normal_roughness = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_ROUGHNESS);
 	bool ce_needs_separate_specular = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_SEPARATE_SPECULAR);
 
+	// GodotNext: nextgi_forward — a NextGI view does not run SDFGI or VoxelGI.
+	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
+
 	// sdfgi first
-	_update_sdfgi(p_render_data);
+	if (!nextgi_view) {
+		_update_sdfgi(p_render_data);
+	}
 
 	// assign render indices to voxel_gi_instances
 	for (uint32_t i = 0; i < (uint32_t)p_render_data->voxel_gi_instances->size(); i++) {
@@ -1889,7 +1902,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		p_render_data->voxel_gi_count = 0;
 
-		if (rb->has_custom_data(RB_SCOPE_SDFGI)) {
+		if (!nextgi_view && rb->has_custom_data(RB_SCOPE_SDFGI)) {
 			Ref<RendererRD::GI::SDFGI> sdfgi = rb->get_custom_data(RB_SCOPE_SDFGI);
 			if (sdfgi.is_valid()) {
 				sdfgi->update_cascades();
@@ -1898,7 +1911,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 		}
 
-		gi.setup_voxel_gi_instances(p_render_data, p_render_data->render_buffers, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances, p_render_data->voxel_gi_count);
+		if (!nextgi_view) {
+			gi.setup_voxel_gi_instances(p_render_data, p_render_data->render_buffers, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances, p_render_data->voxel_gi_count);
+		}
 	} else {
 		ERR_PRINT("No render buffer nor reflection atlas, bug"); // Should never happen!
 		current_cluster_builder = nullptr;
@@ -2027,9 +2042,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 			}
 			// GodotNext: nextgi_frame_block
-			using_nextgi = RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
+			using_nextgi = nextgi_view;
 			if (using_nextgi) {
 				using_sdfgi = false;
+				using_voxelgi = false;
+				if (using_ssil) {
+					WARN_PRINT_ONCE("Screen-space indirect lighting is disabled for views that use NextGI.");
+				}
+				using_ssil = false;
 			}
 			NextGIVelocityMode velocity_mode = NEXTGI_VELOCITY_NONE;
 			NextGIVelocityScale velocity_scale = NEXTGI_VELOCITY_SCALE_NONE;
@@ -2082,7 +2102,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, velocity_plan.prepass_writes);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, velocity_plan.prepass_writes, using_nextgi);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -2669,7 +2689,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
-	if (using_ssil || using_ssr) {
+	if (using_ssil || using_ssr || using_nextgi) {
 		RENDER_TIMESTAMP("Copy Final Framebuffer (SSIL/SSR)");
 		_copy_framebuffer_to_ss_effects(rb, using_ssil, using_ssr);
 	}

@@ -2015,6 +2015,12 @@ TEST_CASE("[NextGI] WRC layout, relocation and diffuse handoff") {
 	CHECK(Math::is_equal_approx(moved.distance_to(probe), 0.8f));
 	CHECK(moved.distance_to(probe) <= 0.4f * 2.0f + 0.0001f);
 
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_sample_confidence(true, false, false, 0.2f), 1.0f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_sample_confidence(false, true, true, 0.2f), 1.0f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_sample_confidence(false, false, true, 0.4f), 0.4f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_sample_confidence(false, false, true, 2.0f), 0.99f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_sample_confidence(false, false, false, 1.0f), 0.0f));
+
 	const Vector3 snapped = RendererRD::nextgi_wrc_snap_origin(Vector3(1.2f, -0.4f, 3.9f), 2.0f);
 	CHECK(Math::is_equal_approx(snapped.x, 0.0f));
 	CHECK(Math::is_equal_approx(snapped.y, -2.0f));

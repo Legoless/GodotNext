@@ -80,6 +80,9 @@ class CopyEffects;
 class SSEffects {
 private:
 	static SSEffects *singleton;
+	uint64_t hiz_built_frame = 0;
+
+	void _build_hiz_mips(Ref<RenderSceneBuffersRD> p_render_buffers, const Size2i &p_size, uint32_t p_mipmaps);
 
 public:
 	static SSEffects *get_singleton() { return singleton; }
@@ -89,7 +92,10 @@ public:
 
 	/* Last Frame */
 
-	void allocate_last_frame_buffer(Ref<RenderSceneBuffersRD> p_render_buffers, bool p_use_ssil, bool p_use_ssr);
+	void allocate_last_frame_buffer(Ref<RenderSceneBuffersRD> p_render_buffers, bool p_use_ssil, bool p_use_ssr, bool p_full_res_full_mips = false);
+	// Full-resolution Hi-Z in RB_SCOPE_SSR/RB_HIZ. A second call in the same frame is a no-op.
+	void build_hiz(Ref<RenderSceneBuffersRD> p_render_buffers);
+	bool hiz_built_this_frame() const;
 	void copy_internal_texture_to_last_frame(Ref<RenderSceneBuffersRD> p_render_buffers, CopyEffects &p_copy_effects);
 
 	/* SS Downsampler */

@@ -827,6 +827,7 @@ public:
 	RID default_voxel_gi_buffer;
 
 	bool half_resolution = false;
+	bool is_half_resolution() const { return half_resolution; }
 	GiShaderRD shader;
 	RID shader_version;
 	PipelineDeferredRD pipelines[SHADER_SPECIALIZATION_VARIATIONS][MODE_MAX];

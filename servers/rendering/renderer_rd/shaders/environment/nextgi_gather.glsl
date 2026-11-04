@@ -15,6 +15,12 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform accelerationStructureEXT nextgi_tlas;
 layout(set = 0, binding = 26) uniform sampler2D nextgi_wrc_radiance;
 layout(set = 0, binding = 27) uniform sampler2D nextgi_wrc_visibility;
+layout(set = 0, binding = 29, std430) restrict buffer NextGIGatherConfidence {
+	float data[];
+}
+confidence_data;
+layout(set = 0, binding = 30) uniform sampler2D hiz_tex;
+layout(set = 0, binding = 31) uniform sampler2D last_frame_tex;
 layout(set = 0, binding = 28, std430) restrict readonly buffer NextGIGatherWRCParams {
 	vec4 camera;
 	vec4 sky;
@@ -116,7 +122,7 @@ layout(set = 0, binding = 19, std430) buffer NextGIGatherCounters {
 	uint miss_radiance_bits; // packed as a scaled luminance
 	uint wrc_samples;
 	uint sky_samples;
-	uint pad;
+	uint screen_hits;
 }
 counters;
 
@@ -326,7 +332,8 @@ vec3 nextgi_miss_radiance(vec3 direction) {
 	return params.ambient_color.rgb;
 }
 
-vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count) {
+vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, out float confidence) {
+	confidence = 0.0;
 #ifdef MODE_HIT_RADIANCE_REFERENCE
 	// 16 estimator samples at the hit. Misses stay on the sky path in the caller.
 	vec3 object_pos;
@@ -334,6 +341,7 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count) {
 	if (!nextgi_hit_object_pos_normal(hit, object_pos, face_normal) || hit.custom_index >= params.record_count) {
 		return nextgi_miss_radiance(ray_dir);
 	}
+	confidence = 1.0;
 	NextGIInstanceRecord rec = records.data[hit.custom_index];
 	vec3 world = nextgi_pt_mul_point(rec, object_pos);
 	vec3 face = nextgi_pt_mul_normal(rec, face_normal);
@@ -349,11 +357,57 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count) {
 	if (!nextgi_src_lookup(hit, radiance, uncovered)) {
 		return nextgi_miss_radiance(ray_dir);
 	}
+	confidence = 1.0;
 	if (uncovered) {
 		uncovered_count++;
 	}
 	return radiance;
 #endif
+}
+
+// Hi-Z march, at most 24 steps. A hit samples the last frame. A miss leaves march_end on the ray.
+bool nextgi_screen_trace(vec3 origin, vec3 direction, float tmax, out vec3 color, out vec3 march_end) {
+	color = vec3(0.0);
+	march_end = origin;
+	if (params.pad0 == 0u) {
+		return false;
+	}
+	mat4 view_proj = inverse(params.inv_view_proj);
+	vec3 far_pos = origin + direction * tmax;
+	vec4 clip0 = view_proj * vec4(origin, 1.0);
+	vec4 clip1 = view_proj * vec4(far_pos, 1.0);
+	if (clip0.w <= 0.001) {
+		return false;
+	}
+	vec3 ndc0 = clip0.xyz / clip0.w;
+	vec3 ndc1 = clip1.w > 0.001 ? clip1.xyz / clip1.w : ndc0;
+	vec2 uv0 = ndc0.xy * 0.5 + 0.5;
+	vec2 uv1 = ndc1.xy * 0.5 + 0.5;
+	vec2 screen = max(params.screen_jitter.xy, vec2(1.0));
+	float mip = clamp(log2(max(length((uv1 - uv0) * screen) / 24.0, 1.0)), 0.0, float(params.pad1));
+	bool left_screen = false;
+	for (int step = 0; step < 24; step++) {
+		float t = (float(step) + 0.5) / 24.0;
+		vec2 uv = mix(uv0, uv1, t);
+		march_end = mix(origin, far_pos, t);
+		if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
+			left_screen = true;
+			break;
+		}
+		float scene_z = textureLod(hiz_tex, uv, mip).r;
+		ivec2 pixel = ivec2(clamp(uv * screen, vec2(0.0), screen - 1.0));
+		vec3 scene_pos = nextgi_unproject(vec2(pixel), scene_z);
+		float scene_dist = max(length(scene_pos - params.camera_pos.xyz), 0.001);
+		float ray_dist = length(march_end - params.camera_pos.xyz);
+		if (ray_dist > scene_dist && ray_dist < scene_dist + 0.1 * scene_dist) {
+			color = textureLod(last_frame_tex, uv, 0.0).rgb;
+			return true;
+		}
+	}
+	if (!left_screen) {
+		march_end = origin;
+	}
+	return false;
 }
 
 void nextgi_gather_main() {
@@ -365,6 +419,7 @@ void nextgi_gather_main() {
 	ivec2 ipixel = ivec2(clamp(pixel, vec2(0.0), params.screen_jitter.xy - 1.0));
 	float depth = texelFetch(depth_tex, ipixel, 0).r;
 	if (depth <= 0.0) {
+		confidence_data.data[probe.y * params.probes_x + probe.x] = 0.0;
 		return;
 	}
 	vec3 world = nextgi_unproject(vec2(ipixel), depth);
@@ -412,6 +467,7 @@ void nextgi_gather_main() {
 	float ca = cos(angle);
 	float sa = sin(angle);
 	uint uncovered_count = 0u;
+	float confidence_sum = 0.0;
 	for (uint i = 0u; i < 16u; i++) {
 		uint ix = i & 3u;
 		uint iy = i >> 2u;
@@ -424,17 +480,33 @@ void nextgi_gather_main() {
 		}
 		NextGIHit hit;
 		vec3 radiance;
+		float ray_confidence = 0.0;
 		atomicAdd(counters.rays, 1u);
 		float handoff = nextgi_wrc_handoff(origin);
 		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
-		if (nextgi_trace(origin, dir, tmax, hit)) {
-			radiance = nextgi_shade_hit(hit, dir, uncovered_count);
+		vec3 screen_color;
+		vec3 march_end;
+		bool screen_hit = nextgi_screen_trace(origin, dir, tmax, screen_color, march_end);
+		float traveled = length(march_end - origin);
+		vec3 trace_origin = origin;
+		float trace_tmax = tmax;
+		if (traveled > 0.001 && traveled + 0.001 < tmax) {
+			trace_origin = march_end;
+			trace_tmax = tmax - traveled;
+		}
+		if (screen_hit) {
+			radiance = screen_color;
+			ray_confidence = 1.0;
+			atomicAdd(counters.screen_hits, 1u);
+		} else if (nextgi_trace(trace_origin, dir, trace_tmax, hit)) {
+			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
 		} else {
-			radiance = nextgi_wrc_sample(origin + dir * tmax, dir);
+			radiance = nextgi_wrc_sample(trace_origin + dir * trace_tmax, dir);
 			if (!nextgi_wrc_hit_cache) {
 				radiance = nextgi_miss_radiance(dir);
 				atomicAdd(counters.sky_samples, 1u);
 			} else {
+				ray_confidence = nextgi_wrc_confidence;
 				atomicAdd(counters.wrc_samples, 1u);
 				uncovered_count++;
 			}
@@ -442,6 +514,7 @@ void nextgi_gather_main() {
 			uint lum = uint(clamp(dot(radiance, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0));
 			atomicAdd(counters.miss_radiance_bits, lum);
 		}
+		confidence_sum += ray_confidence;
 		ivec2 dest = ivec2(probe) * 4 + ivec2(ix, iy);
 		vec4 history = reset ? vec4(0.0) : imageLoad(probe_image, prev_probe * 4 + ivec2(ix, iy));
 		vec3 blended = reset ? radiance : history.rgb * 0.9 + radiance * 0.1;
@@ -450,6 +523,7 @@ void nextgi_gather_main() {
 	if (uncovered_count > 0u) {
 		atomicAdd(counters.uncovered, uncovered_count);
 	}
+	confidence_data.data[probe.y * params.probes_x + probe.x] = confidence_sum / 16.0;
 }
 
 void nextgi_integrate_main() {
@@ -473,6 +547,7 @@ void nextgi_integrate_main() {
 	vec2 fract_p = probe_f - vec2(base);
 	vec3 accum = vec3(0.0);
 	float weight = 0.0;
+	float conf_accum = 0.0;
 	for (int oy = 0; oy <= 1; oy++) {
 		for (int ox = 0; ox <= 1; ox++) {
 			ivec2 id = base + ivec2(ox, oy);
@@ -488,12 +563,15 @@ void nextgi_integrate_main() {
 			}
 			irradiance /= 16.0;
 			float w = bilinear * depth_weight * max(dot(normal, normal), 0.0);
+			float probe_confidence = confidence_data.data[uint(id.y) * params.probes_x + uint(id.x)];
 			accum += irradiance * w;
+			conf_accum += probe_confidence * w;
 			weight += w;
 		}
 	}
 	vec3 out_irr = weight > 0.0 ? accum / weight : vec3(0.0);
-	imageStore(ambient_image, pixel, vec4(out_irr / PI, 1.0));
+	float out_confidence = weight > 0.0 ? conf_accum / weight : 0.0;
+	imageStore(ambient_image, pixel, vec4(out_irr / PI, out_confidence));
 }
 
 void nextgi_feedback_main() {
@@ -531,7 +609,8 @@ void nextgi_feedback_main() {
 		float handoff = nextgi_wrc_handoff(origin);
 		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
 		if (nextgi_trace(origin, dir, tmax, hit)) {
-			radiance = nextgi_shade_hit(hit, dir, uncovered_count);
+			float ignored_confidence = 0.0;
+			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ignored_confidence);
 		} else {
 			radiance = nextgi_wrc_sample(origin + dir * tmax, dir);
 			if (!nextgi_wrc_hit_cache) {

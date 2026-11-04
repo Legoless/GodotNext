@@ -97,6 +97,8 @@ bool nextgi_trace(vec3 origin, vec3 direction, float tmax, out NextGIHit hit) {
 
 // Set by nextgi_wrc_sample. False means the caller should use the sky.
 bool nextgi_wrc_hit_cache = false;
+// Chebyshev weight of a cache hit, kept below 1 so a screen or SRC hit stays stronger.
+float nextgi_wrc_confidence = 0.0;
 
 #ifdef NEXTGI_WRC
 // Diffuse handoff distance. Negative means the cache is not valid and the caller keeps its own tmax.
@@ -132,6 +134,7 @@ vec2 nextgi_wrc_oct_uv(vec3 direction) {
 // Trilinear sample of the 8 probes around p, weighted by Chebyshev visibility from the moments.
 vec3 nextgi_wrc_sample(vec3 p, vec3 dir) {
 	nextgi_wrc_hit_cache = false;
+	nextgi_wrc_confidence = 0.0;
 	if (nextgi_wrc.camera.w < 0.5) {
 		return vec3(0.0);
 	}
@@ -180,6 +183,7 @@ vec3 nextgi_wrc_sample(vec3 p, vec3 dir) {
 		return vec3(0.0);
 	}
 	nextgi_wrc_hit_cache = true;
+	nextgi_wrc_confidence = min(weight_sum / 8.0, 0.99);
 	return accum / weight_sum;
 }
 #endif // NEXTGI_WRC
