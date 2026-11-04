@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/rd_smoke/tlas_from_buffer.gd" id="1"]
+
+[node name="TlasFromBuffer" type="Node"]
+script = ExtResource("1")
