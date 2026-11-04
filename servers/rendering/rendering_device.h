@@ -102,6 +102,9 @@ protected:
 	// GodotNext: as_build_modes
 	Error _blas_build_bind_compat_gn45(RID p_blas);
 	Error _tlas_build_bind_compat_gn45(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances);
+	// GodotNext: tlas_from_buffer
+	Error _tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer, uint64_t p_offset, uint32_t p_count, const TypedArray<RID> &p_referenced_blases, AccelerationStructureBuildMode p_mode);
+	PackedByteArray _acceleration_structure_instance_encode(const Ref<RDAccelerationStructureInstance> &p_instance);
 	static void _bind_compatibility_methods();
 #endif
 
@@ -1439,6 +1442,22 @@ public:
 	bool blas_is_compacted(RID p_blas);
 	uint64_t acceleration_structure_get_size_bytes(RID p_acceleration_structure);
 	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+	// GodotNext: tlas_from_buffer
+	// Builds the TLAS from instances a compute pass already wrote, e.g. particles and dynamic MultiMesh.
+	Error tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer, uint64_t p_offset, uint32_t p_count, Span<RID> p_referenced_blases, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
+	uint32_t acceleration_structure_get_instance_size();
+	uint64_t acceleration_structure_get_instance_reference(RID p_blas);
+	Error acceleration_structure_instance_encode(const AccelerationStructureInstance &p_instance, uint8_t *r_dst);
+
+	// GodotNext: tlas_from_buffer
+	// A GPU instance-record build reads p_count records of the API instance size at a 16-byte aligned offset.
+	static bool tlas_instance_range_valid(uint64_t p_offset, uint32_t p_count, uint32_t p_instance_size, uint64_t p_buffer_size) {
+		if ((p_offset & 15u) != 0) {
+			return false;
+		}
+		const uint64_t bytes = uint64_t(p_count) * p_instance_size;
+		return p_offset <= p_buffer_size && bytes <= p_buffer_size - p_offset;
+	}
 
 private:
 	/**********************************/

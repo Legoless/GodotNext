@@ -288,4 +288,18 @@ TEST_CASE("[RenderingDevice][RayQuery] RDAccelerationStructureGeometry exposes i
 	CHECK_EQ(geometry->get_index_format(), RenderingDevice::INDEX_BUFFER_FORMAT_UINT16);
 }
 
+// GodotNext: tlas_from_buffer
+TEST_CASE("[RenderingDevice][RayQuery] GPU instance-record range validation") {
+	// 16-byte alignment, in-bounds and no multiplication overflow.
+	CHECK(RenderingDevice::tlas_instance_range_valid(0, 4, 64, 256));
+	CHECK(RenderingDevice::tlas_instance_range_valid(128, 2, 64, 256));
+	CHECK(RenderingDevice::tlas_instance_range_valid(0, 0, 64, 0));
+
+	CHECK_FALSE(RenderingDevice::tlas_instance_range_valid(8, 4, 64, 256)); // Misaligned offset.
+	CHECK_FALSE(RenderingDevice::tlas_instance_range_valid(0, 5, 64, 256)); // One record past the end.
+	CHECK_FALSE(RenderingDevice::tlas_instance_range_valid(256, 1, 64, 256)); // Offset at the end, count 1.
+	CHECK_FALSE(RenderingDevice::tlas_instance_range_valid(0, 1, 72, 64)); // Metal's 72-byte record does not fit.
+	CHECK(RenderingDevice::tlas_instance_range_valid(std::numeric_limits<uint32_t>::max() * 16ull, 0, 64, std::numeric_limits<uint64_t>::max()));
+}
+
 #endif // RD_ENABLED

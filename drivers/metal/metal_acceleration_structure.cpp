@@ -188,6 +188,14 @@ RDD::AccelerationStructureID RenderingDeviceDriverMetal::tlas_create(uint32_t p_
 	return AccelerationStructureID(info);
 }
 
+uint64_t RenderingDeviceDriverMetal::acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) {
+	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	if (info == nullptr || !info->as) {
+		return 0;
+	}
+	return info->as->gpuResourceID()._impl;
+}
+
 void RenderingDeviceDriverMetal::acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) {
 	ERR_FAIL_NULL(r_driver_instance);
 

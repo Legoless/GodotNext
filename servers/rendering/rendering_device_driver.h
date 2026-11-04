@@ -775,6 +775,10 @@ public:
 
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) = 0;
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) = 0;
+	// GodotNext: tlas_from_buffer
+	// Opaque reference a GPU-written instance record needs for this BLAS: the Vulkan device address,
+	// or Metal's resource ID. 0 when the API has no GPU instance path yet (D3D12).
+	virtual uint64_t acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) = 0;
 
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) = 0;
 	// GodotNext: as_build_modes

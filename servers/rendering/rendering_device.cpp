@@ -890,6 +890,96 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	return OK;
 }
 
+Error RenderingDevice::tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer, uint64_t p_offset, uint32_t p_count, Span<RID> p_referenced_blases, AccelerationStructureBuildMode p_mode) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+
+	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a draw list.");
+	ERR_FAIL_COND_V_MSG(compute_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a compute list.");
+	ERR_FAIL_COND_V_MSG(raytracing_list.active, ERR_INVALID_PARAMETER, "Building TLAS is forbidden during creation of a raytracing list.");
+
+	AccelerationStructure *tlas = acceleration_structure_owner.get_or_null(p_tlas);
+	ERR_FAIL_NULL_V_MSG(tlas, ERR_INVALID_PARAMETER, "TLAS argument is not valid.");
+	Buffer *instance_buffer = storage_buffer_owner.get_or_null(p_instance_buffer);
+	ERR_FAIL_NULL_V_MSG(instance_buffer, ERR_INVALID_PARAMETER, "Instance buffer is not valid.");
+	ERR_FAIL_COND_V_MSG(p_count > tlas->max_instance_count, ERR_INVALID_PARAMETER, "Exceeded the maximum amount of instances allowed in the TLAS.");
+
+	const uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
+	ERR_FAIL_COND_V_MSG(!tlas_instance_range_valid(p_offset, p_count, instance_size, instance_buffer->size), ERR_INVALID_PARAMETER, "Instance range is not 16-byte aligned or lies outside the buffer.");
+
+	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, tlas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), tlas->invalidated, true, tlas->last_build_instance_count, p_count);
+	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));
+
+	Error err = _acceleration_structure_scratch_buffer_create(tlas, p_mode);
+	ERR_FAIL_COND_V(err != OK, err);
+
+	_tlas_remove_blas_dependencies(tlas, p_tlas);
+	// A GPU-written record may carry SBT offset 0, which this path cannot inspect. Report no zero-SBT
+	// instance so ray-tracing bindings keep working; ray-query-only use is unaffected.
+	tlas->has_zero_sbt_instances = false;
+
+	thread_local LocalVector<RDG::ResourceTracker *> draw_trackers;
+	draw_trackers.clear();
+
+	for (RID blas_rid : p_referenced_blases) {
+		AccelerationStructure *blas = acceleration_structure_owner.get_or_null(blas_rid);
+		ERR_FAIL_NULL_V(blas, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
+
+		if (!tlas->acceleration_structure_dependencies.has(blas_rid)) {
+			tlas->acceleration_structure_dependencies.insert(blas_rid);
+			blas->acceleration_structure_dependencies.insert(p_tlas);
+			if (blas->draw_tracker != nullptr) {
+				draw_trackers.push_back(blas->draw_tracker);
+			}
+		}
+	}
+
+	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer->driver_id, p_offset, p_count, tlas->draw_tracker, draw_trackers, p_mode, instance_buffer->draw_tracker);
+
+	tlas->invalidated = false;
+	tlas->last_build_instance_count = p_count;
+
+	return OK;
+}
+
+uint32_t RenderingDevice::acceleration_structure_get_instance_size() {
+	ERR_RENDER_THREAD_GUARD_V(0);
+	return driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
+}
+
+uint64_t RenderingDevice::acceleration_structure_get_instance_reference(RID p_blas) {
+	ERR_RENDER_THREAD_GUARD_V(0);
+	AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_blas);
+	ERR_FAIL_NULL_V_MSG(blas, 0, "Acceleration structure argument is not valid.");
+	ERR_FAIL_COND_V_MSG(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, 0, "Instance references are only defined for bottom-level acceleration structures.");
+	ERR_FAIL_COND_V_MSG(blas->invalidated, 0, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
+	return driver->acceleration_structure_get_instance_reference(blas->driver_id);
+}
+
+Error RenderingDevice::acceleration_structure_instance_encode(const AccelerationStructureInstance &p_instance, uint8_t *r_dst) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_FAIL_NULL_V(r_dst, ERR_INVALID_PARAMETER);
+
+	RDD::AccelerationStructureInstance rdd_instance;
+	rdd_instance.transform = p_instance.transform;
+	rdd_instance.id = p_instance.id;
+	rdd_instance.mask = p_instance.mask;
+	rdd_instance.hit_sbt_offset = _decode_hit_sbt_range_offset(p_instance.hit_sbt_range);
+	rdd_instance.flags = p_instance.flags;
+
+	if (p_instance.blas.is_valid()) {
+		AccelerationStructure *blas = acceleration_structure_owner.get_or_null(p_instance.blas);
+		ERR_FAIL_NULL_V(blas, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V(blas->type != RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL, ERR_INVALID_PARAMETER);
+		ERR_FAIL_COND_V_MSG(blas->invalidated, ERR_INVALID_PARAMETER, "BLAS either has not been built yet, or has been invalidated by an operation and needs to be rebuilt.");
+		rdd_instance.blas = blas->driver_id;
+	}
+
+	driver->acceleration_structure_instance_write(r_dst, rdd_instance);
+	return OK;
+}
+
 /**********************************/
 /**** HIT SHADER BINDING TABLE ****/
 /**********************************/
@@ -9740,6 +9830,11 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("blas_is_compacted", "blas"), &RenderingDevice::blas_is_compacted);
 	ClassDB::bind_method(D_METHOD("acceleration_structure_get_size_bytes", "acceleration_structure"), &RenderingDevice::acceleration_structure_get_size_bytes);
 	ClassDB::bind_method(D_METHOD("tlas_build", "tlas", "instances", "mode"), &RenderingDevice::_tlas_build, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
+	// GodotNext: tlas_from_buffer
+	ClassDB::bind_method(D_METHOD("tlas_build_from_buffer", "tlas", "instance_buffer", "offset", "count", "referenced_blases", "mode"), &RenderingDevice::_tlas_build_from_buffer, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
+	ClassDB::bind_method(D_METHOD("acceleration_structure_get_instance_size"), &RenderingDevice::acceleration_structure_get_instance_size);
+	ClassDB::bind_method(D_METHOD("acceleration_structure_get_instance_reference", "blas"), &RenderingDevice::acceleration_structure_get_instance_reference);
+	ClassDB::bind_method(D_METHOD("acceleration_structure_instance_encode", "instance"), &RenderingDevice::_acceleration_structure_instance_encode);
 
 	ClassDB::bind_method(D_METHOD("hit_sbt_create", "raytracing_pipeline", "initial_hit_group_capacity"), &RenderingDevice::hit_sbt_create);
 	ClassDB::bind_method(D_METHOD("hit_sbt_set_pipeline", "hit_sbt", "raytracing_pipeline"), &RenderingDevice::hit_sbt_set_pipeline);
@@ -10724,6 +10819,24 @@ Error RenderingDevice::_tlas_build(RID p_tlas, const TypedArray<RDAccelerationSt
 	}
 
 	return tlas_build(p_tlas, instances, p_mode);
+}
+
+Error RenderingDevice::_tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer, uint64_t p_offset, uint32_t p_count, const TypedArray<RID> &p_referenced_blases, AccelerationStructureBuildMode p_mode) {
+	thread_local LocalVector<RID> blases;
+	blases.resize(p_referenced_blases.size());
+	for (int i = 0; i < p_referenced_blases.size(); i++) {
+		blases[i] = p_referenced_blases[i];
+	}
+	return tlas_build_from_buffer(p_tlas, p_instance_buffer, p_offset, p_count, blases, p_mode);
+}
+
+PackedByteArray RenderingDevice::_acceleration_structure_instance_encode(const Ref<RDAccelerationStructureInstance> &p_instance) {
+	ERR_FAIL_COND_V(p_instance.is_null(), PackedByteArray());
+	PackedByteArray bytes;
+	bytes.resize(acceleration_structure_get_instance_size());
+	ERR_FAIL_COND_V(bytes.is_empty(), PackedByteArray());
+	ERR_FAIL_COND_V(acceleration_structure_instance_encode(p_instance->base, bytes.ptrw()) != OK, PackedByteArray());
+	return bytes;
 }
 
 Error RenderingDevice::_hit_sbt_range_update(RID p_hit_sbt, HitShaderBindingTableRange p_range, uint32_t p_offset, const Vector<int32_t> &p_hit_group_indices) {

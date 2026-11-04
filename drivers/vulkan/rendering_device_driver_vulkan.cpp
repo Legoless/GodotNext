@@ -6503,6 +6503,18 @@ void RenderingDeviceDriverVulkan::acceleration_structure_instance_write(uint8_t 
 #endif
 }
 
+uint64_t RenderingDeviceDriverVulkan::acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) {
+#if VULKAN_RAYTRACING_ENABLED
+	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	if (info == nullptr || !info->buffer) {
+		return 0;
+	}
+	return buffer_get_device_address(info->buffer);
+#else
+	return 0;
+#endif
+}
+
 #if VULKAN_RAYTRACING_ENABLED
 static VkDeviceAddress _align_up_address(VkDeviceAddress address, VkDeviceAddress alignment) {
 	return (address + (alignment - 1)) & ~(alignment - 1);

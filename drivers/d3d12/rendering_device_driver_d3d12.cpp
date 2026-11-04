@@ -5741,6 +5741,11 @@ RDD::AccelerationStructureID RenderingDeviceDriverD3D12::tlas_create(uint32_t p_
 	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the D3D12 driver.");
 }
 
+uint64_t RenderingDeviceDriverD3D12::acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) {
+	// D3D12 has no GPU instance-record path until DXR 1.1 lands (#118).
+	return 0;
+}
+
 void RenderingDeviceDriverD3D12::acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) {
 	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
 }
