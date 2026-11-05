@@ -141,7 +141,7 @@ public:
 	// Instance records.
 	uint32_t instance_record_allocate(RID p_instance, RID p_mesh);
 	void instance_record_free(uint32_t p_record);
-	void instance_record_set_transform(uint32_t p_record, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible, bool p_teleport = false);
+	void instance_record_set_transform(uint32_t p_record, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible, bool p_teleport = false, float p_lod_bias = 0.0f);
 	void instance_record_set_state(uint32_t p_record, uint32_t p_flags);
 	void instance_record_set_layer_mask(uint32_t p_record, uint32_t p_layer_mask);
 	void instance_record_set_gi_flags(uint32_t p_record, uint32_t p_gi_flags);
@@ -182,7 +182,7 @@ protected:
 
 	void _ensure_capacity(uint32_t p_records);
 	void _mark_dirty(uint32_t p_record);
-	void _write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb);
+	void _write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb, float p_lod_bias);
 
 	LocalVector<Record> records;
 	LocalVector<MeshRecord> mesh_records;

@@ -852,6 +852,7 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 		if (instance->base_type == RSE::INSTANCE_MESH) {
 			_instance_update_mesh_instance(instance);
 		}
+		_instance_record_attach(instance);
 
 		//forcefully update the dependency now, so if for some reason it gets removed, we can immediately clear it
 		RSG::utilities->base_update_dependency(p_base, &instance->dependency_tracker);
@@ -959,6 +960,7 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 
 		_instance_queue_update(instance, true, true);
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_set_layer_mask(RID p_instance, uint32_t p_mask) {
@@ -993,6 +995,7 @@ void RendererSceneCull::instance_set_layer_mask(RID p_instance, uint32_t p_mask)
 			}
 		}
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_set_pivot_data(RID p_instance, float p_sorting_offset, bool p_use_aabb_center) {
@@ -1122,6 +1125,7 @@ void RendererSceneCull::instance_set_visible(RID p_instance, bool p_visible) {
 			RendererSceneOcclusionCull::get_singleton()->scenario_set_instance(instance->scenario->self, p_instance, instance->base, instance->transform, p_visible);
 		}
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_teleport(RID p_instance) {
@@ -1178,6 +1182,7 @@ void RendererSceneCull::instance_attach_skeleton(RID p_instance, RID p_skeleton)
 		ERR_FAIL_NULL(geom->geometry_instance);
 		geom->geometry_instance->set_skeleton(p_skeleton);
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_set_extra_visibility_margin(RID p_instance, real_t p_margin) {
@@ -1396,6 +1401,7 @@ void RendererSceneCull::instance_geometry_set_material_override(RID p_instance, 
 		ERR_FAIL_NULL(geom->geometry_instance);
 		geom->geometry_instance->set_material_override(p_material);
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_geometry_set_material_overlay(RID p_instance, RID p_material) {
@@ -1410,6 +1416,7 @@ void RendererSceneCull::instance_geometry_set_material_overlay(RID p_instance, R
 		ERR_FAIL_NULL(geom->geometry_instance);
 		geom->geometry_instance->set_material_overlay(p_material);
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_geometry_set_visibility_range(RID p_instance, float p_min, float p_max, float p_min_margin, float p_max_margin, RSE::VisibilityRangeFadeMode p_fade_mode) {
@@ -1699,6 +1706,80 @@ void RendererSceneCull::_nextgi_sync_positional_light(Scenario *p_scenario, RID 
 	}
 }
 
+// GodotNext: nextgeo_instance_records (#75)
+void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
+	if (RSG::virtual_mesh_storage == nullptr) {
+		return;
+	}
+	const bool wants = p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid() && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_instance->base);
+	if (!wants) {
+		_instance_record_release(p_instance);
+		return;
+	}
+	if (p_instance->virtual_record == UINT32_MAX) {
+		p_instance->virtual_record = RSG::virtual_mesh_storage->instance_record_allocate(p_instance->self, p_instance->base);
+	}
+	_instance_record_update_state(p_instance);
+	const AABB world = p_instance->transformed_aabb.has_surface() ? p_instance->transformed_aabb : p_instance->transform.xform(p_instance->aabb);
+	_instance_record_set_transform(p_instance, p_instance->transform, world, p_instance->visible);
+}
+
+void RendererSceneCull::_instance_record_release(Instance *p_instance) const {
+	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
+		return;
+	}
+	RSG::virtual_mesh_storage->instance_record_free(p_instance->virtual_record);
+	p_instance->virtual_record = UINT32_MAX;
+}
+
+void RendererSceneCull::_instance_record_update_state(Instance *p_instance) const {
+	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
+		return;
+	}
+	uint32_t flags = RendererVirtualMeshStorage::RECORD_VALID;
+	if (p_instance->visible) {
+		flags |= RendererVirtualMeshStorage::RECORD_VISIBLE;
+	}
+	switch (p_instance->cast_shadows) {
+		case RSE::SHADOW_CASTING_SETTING_ON:
+			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_ON;
+			break;
+		case RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED:
+			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_DOUBLE_SIDED;
+			break;
+		case RSE::SHADOW_CASTING_SETTING_OFF:
+		case RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY:
+			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF;
+			break;
+	}
+	if (p_instance->skeleton.is_valid()) {
+		flags |= RendererVirtualMeshStorage::RECORD_HAS_SKELETON;
+	}
+	if (p_instance->material_override.is_valid() || p_instance->material_overlay.is_valid() || !p_instance->materials.is_empty()) {
+		flags |= RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS;
+	}
+	RSG::virtual_mesh_storage->instance_record_set_state(p_instance->virtual_record, flags);
+	RSG::virtual_mesh_storage->instance_record_set_layer_mask(p_instance->virtual_record, p_instance->layer_mask);
+
+	uint32_t gi_flags = RendererVirtualMeshStorage::GI_MODE_NONE;
+	if (p_instance->dynamic_gi) {
+		gi_flags = RendererVirtualMeshStorage::GI_MODE_DYNAMIC;
+	} else if (p_instance->baked_light) {
+		gi_flags = RendererVirtualMeshStorage::GI_MODE_STATIC;
+	}
+	if (p_instance->lightmap != nullptr) {
+		gi_flags |= RendererVirtualMeshStorage::GI_LIGHTMAPPED;
+	}
+	RSG::virtual_mesh_storage->instance_record_set_gi_flags(p_instance->virtual_record, gi_flags);
+}
+
+void RendererSceneCull::_instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const {
+	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
+		return;
+	}
+	RSG::virtual_mesh_storage->instance_record_set_transform(p_instance->virtual_record, p_transform, p_world_aabb, p_visible, p_instance->teleported, p_instance->lod_bias);
+}
+
 void RendererSceneCull::_update_instance(Instance *p_instance) const {
 	p_instance->version++;
 
@@ -1823,6 +1904,11 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 	AABB new_aabb;
 	new_aabb = instance_xform->xform(p_instance->aabb);
 	p_instance->transformed_aabb = new_aabb;
+
+	// GodotNext: nextgeo_instance_records (#75). The hide path below still
+	// reaches this write so the record ends up invisible this frame.
+	_instance_record_set_transform(p_instance, *instance_xform, new_aabb,
+			p_instance->scenario != nullptr && p_instance->visible && instance_xform->basis.determinant() != 0);
 
 	if ((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) {
 		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);

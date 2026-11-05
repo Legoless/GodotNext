@@ -410,6 +410,11 @@ public:
 	static void _instance_unpair(Instance *p_A, Instance *p_B);
 
 	void _instance_update_mesh_instance(Instance *p_instance) const;
+	// GodotNext: nextgeo_instance_records (#75).
+	void _instance_record_attach(Instance *p_instance) const;
+	void _instance_record_release(Instance *p_instance) const;
+	void _instance_record_update_state(Instance *p_instance) const;
+	void _instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const;
 
 	virtual RID scenario_allocate();
 	virtual void scenario_initialize(RID p_rid);
@@ -450,6 +455,8 @@ public:
 		RID material_overlay;
 
 		RID mesh_instance; //only used for meshes and when skeleton/blendshapes exist
+		// GodotNext: nextgeo_instance_records (#75). Persistent GPU record, UINT32_MAX = none.
+		uint32_t virtual_record = UINT32_MAX;
 
 		Transform3D transform;
 		bool teleported = false;

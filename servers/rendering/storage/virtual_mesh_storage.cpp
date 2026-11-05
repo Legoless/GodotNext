@@ -65,7 +65,7 @@ void RendererVirtualMeshStorage::_mark_dirty(uint32_t p_record) {
 	}
 }
 
-void RendererVirtualMeshStorage::_write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb) {
+void RendererVirtualMeshStorage::_write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb, float p_lod_bias) {
 	for (int row = 0; row < 3; row++) {
 		r_record.transform[row][0] = p_transform.basis.rows[row][0];
 		r_record.transform[row][1] = p_transform.basis.rows[row][1];
@@ -80,7 +80,7 @@ void RendererVirtualMeshStorage::_write_transform(Record &r_record, const Transf
 	r_record.world_aabb_max[0] = p_world_aabb.position.x + p_world_aabb.size.x;
 	r_record.world_aabb_max[1] = p_world_aabb.position.y + p_world_aabb.size.y;
 	r_record.world_aabb_max[2] = p_world_aabb.position.z + p_world_aabb.size.z;
-	r_record.world_aabb_max[3] = 0.0f;
+	r_record.world_aabb_max[3] = p_lod_bias;
 }
 
 void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const RenderingServerTypes::VirtualGeometryDesc &p_desc) {
@@ -217,7 +217,7 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 	}
 }
 
-void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible, bool p_teleport) {
+void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible, bool p_teleport, float p_lod_bias) {
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
 	}
@@ -235,7 +235,7 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 	const bool jumped = !first && Math::abs(Math::sqrt(new_distance) - Math::sqrt(distance)) > teleport_distance;
 
 	if (first || p_teleport || jumped) {
-		_write_transform(record, p_transform, p_world_aabb);
+		_write_transform(record, p_transform, p_world_aabb, p_lod_bias);
 		for (int row = 0; row < 3; row++) {
 			for (int column = 0; column < 4; column++) {
 				record.prev_transform[row][column] = record.transform[row][column];
@@ -259,7 +259,7 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 			record.prev_world_aabb_min[index] = record.world_aabb_min[index];
 			record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 		}
-		_write_transform(record, p_transform, p_world_aabb);
+		_write_transform(record, p_transform, p_world_aabb, p_lod_bias);
 		record.flags |= RECORD_MOVED;
 		record.flags &= ~RECORD_TELEPORTED;
 	}
