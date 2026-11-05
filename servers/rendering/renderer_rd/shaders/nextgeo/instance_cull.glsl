@@ -33,7 +33,14 @@ bool aabb_visible(vec3 lo, vec3 hi) {
 	return true;
 }
 
+layout(set = 0, binding = 8, std430) buffer restrict Phase2Nodes {
+	uvec2 data[];
+} phase2_nodes;
+
 bool hiz_occluded(vec4 world_min, vec4 world_max) {
+	if (cull.cull.w == 0u) {
+		return false; // Occlusion off (the CPU parity reference).
+	}
 	vec3 lo = world_min.xyz;
 	vec3 hi = world_max.xyz;
 	vec4 clip_min = cull.prev_view_proj * vec4(lo, 1.0);
@@ -57,6 +64,24 @@ bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	return farthest_depth < occlusion;
 }
 
+#ifdef PHASE2
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	if (index >= counters.phase2_count) {
+		return;
+	}
+	uvec2 entry = phase2_nodes.data[index];
+	NextGeoInstanceRecord record = instances.data[entry.x];
+	if (!aabb_visible(record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
+		return;
+	}
+	if (hiz_occluded(record.world_aabb_min, record.world_aabb_max)) {
+		return;
+	}
+	uint slot = atomicAdd(counters.phase1_count, 1u);
+	nodes.data[slot] = uvec2(entry.x, 0u);
+}
+#else
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	uint count = cull.cull.y;
@@ -74,10 +99,11 @@ void main() {
 	}
 	if (hiz_occluded(record.prev_world_aabb_min, record.prev_world_aabb_max)) {
 		uint slot = atomicAdd(counters.phase2_count, 1u);
-		nodes.data[slot] = uvec2(index, record.virtual_mesh);
+		phase2_nodes.data[slot] = uvec2(index, record.virtual_mesh);
 		return;
 	}
 	uint slot = atomicAdd(counters.phase1_count, 1u);
 	// Level 0 always starts at the mesh's BVH root (node 0).
 	nodes.data[slot] = uvec2(index, 0u);
 }
+#endif

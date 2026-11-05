@@ -2370,7 +2370,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_record_buffer().is_valid() && RSG::virtual_mesh_storage->get_record_count() > 0 && p_render_data->scene_data != nullptr) {
 			RENDER_TIMESTAMP("NextGeo HiZ");
 			const Projection view_projection = p_render_data->scene_data->view_projection[0];
-			nextgeo_cut.dispatch(RSG::virtual_mesh_storage, view_projection, view_projection, p_render_data->scene_data->cam_transform.origin, rb->get_internal_size(), p_render_data->scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/debug_stats")));
+			nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, view_projection, p_render_data->scene_data->cam_transform.origin, rb->get_internal_size(), p_render_data->scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")));
 			RENDER_TIMESTAMP("NextGeo Phase2 Cull");
 		}
 

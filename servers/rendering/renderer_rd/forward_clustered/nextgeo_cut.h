@@ -34,6 +34,7 @@
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/cluster_cull.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/hiz_pyramid.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/instance_cull.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
@@ -45,9 +46,9 @@ class NextGeoCut {
 public:
 	static constexpr uint32_t NODE_CAPACITY = 1u << 17;
 	static constexpr uint32_t GROUP_CAPACITY = 1u << 17;
-	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 19;
+	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 21;
 
-	void dispatch(RendererVirtualMeshStorage *p_storage, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_debug_stats);
+	void dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats);
 	void free_resources();
 
 	static Dictionary get_last_stats();
@@ -61,13 +62,18 @@ private:
 	InstanceCullShaderRD instance_shader;
 	RID instance_version;
 	RID instance_pipeline;
+	RID instance_phase2;
 	ClusterCullShaderRD cluster_shader;
 	RID cluster_version;
 	RID cluster_bvh;
 	RID cluster_leaf;
+	HizPyramidShaderRD hiz_shader;
+	RID hiz_version;
+	RID hiz_pipeline;
 
 	RID params;
 	RID nodes;
+	RID phase2_nodes;
 	RID groups;
 	RID clusters;
 	RID level_a;
@@ -75,6 +81,8 @@ private:
 	RID counters;
 	RID dummy_hiz;
 	RID dummy_sampler;
+	RID hiz_prev;
+	Size2i hiz_size;
 	RID dummy_hiz_set;
 	bool initialized = false;
 	bool failed = false;

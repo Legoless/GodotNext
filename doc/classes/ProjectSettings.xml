@@ -3350,6 +3350,9 @@
 		<member name="rendering/nextgeo/max_pixel_error" type="float" setter="" getter="" default="1.0">
 			The projected-error budget in pixels at the internal resolution for NextGeo's instance and cluster cuts. A cut is accepted when its projected error is at most this value; it applies on the next frame.
 		</member>
+		<member name="rendering/nextgeo/occlusion" type="bool" setter="" getter="" default="true">
+			Enable the NextGeo previous-Hi-Z occlusion test and its two-phase re-cull. Off gives the CPU-reference parity cut (the debug comparison).
+		</member>
 		<member name="rendering/occlusion_culling/bvh_build_quality" type="int" setter="" getter="" default="2">
 			The [url=https://en.wikipedia.org/wiki/Bounding_volume_hierarchy]Bounding Volume Hierarchy[/url] quality to use when rendering the occlusion culling buffer. Higher values will result in more accurate occlusion culling, at the cost of higher CPU usage. See also [member rendering/occlusion_culling/occlusion_rays_per_thread].
 			[b]Note:[/b] This property is only read when the project starts. To adjust the BVH build quality at runtime, use [method RenderingServer.viewport_set_occlusion_culling_build_quality].

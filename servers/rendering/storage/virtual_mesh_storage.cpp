@@ -86,6 +86,13 @@ uint32_t RendererVirtualMeshStorage::_alloc_dag(uint32_t p_size) {
 			return UINT32_MAX;
 		}
 		dag_capacity = capacity;
+		// A resize replaces the GPU buffer; restore every mesh blob already
+		// resident so their record offsets stay valid.
+		for (const KeyValue<RID, MeshInfo> &entry : meshes) {
+			if (entry.value.dag_size != 0 && !entry.value.desc.dag_header.is_empty()) {
+				_upload_dag(entry.value.dag_offset, entry.value.desc.dag_header.ptr(), entry.value.dag_size);
+			}
+		}
 	}
 	const uint32_t offset = dag_used;
 	dag_used += aligned;
