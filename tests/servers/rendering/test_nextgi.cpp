@@ -2560,6 +2560,48 @@ TEST_CASE("[NextGI][SDF] Atlas page tables and release") {
 	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
 }
 
+TEST_CASE("[NextGI][SDF] Instance table reasons and world-to-local") {
+	NextGISDFAtlas atlas(64);
+	const Ref<MeshDistanceField> field = _make_test_sdf();
+	const RID mesh = RID::from_uint64(7700);
+	REQUIRE(atlas.register_mesh(mesh, field));
+	const uint32_t sdf_id = atlas.get_mesh_id(mesh);
+	CHECK_NE(sdf_id, UINT32_MAX);
+
+	NextGISDFInstances instances;
+	instances.begin_frame();
+	const Transform3D transform(Basis(Vector3(0.0f, 1.0f, 0.0f), 0.5f), Vector3(1.0f, 2.0f, 3.0f));
+	const uint32_t included = instances.add(atlas, mesh, transform, false, false, 1.5f, true);
+	CHECK_EQ(included, uint32_t(0));
+	CHECK_EQ(instances.get_record(0).reason, uint32_t(NEXTGI_SDF_INCLUDED));
+	CHECK_EQ(instances.get_record(0).sdf_id, sdf_id);
+	CHECK_EQ(instances.get_record(0).scale_bound, 1.5f);
+	CHECK_EQ((instances.get_record(0).flags & NextGISDFInstances::INSTANCE_VISIBLE), uint32_t(NextGISDFInstances::INSTANCE_VISIBLE));
+	// world_to_local maps the instance origin back to the local origin.
+	const float *rows = &instances.get_record(0).world_to_local[0][0];
+	const Vector3 origin(1.0f, 2.0f, 3.0f);
+	const Vector3 local(
+			rows[0] * origin.x + rows[1] * origin.y + rows[2] * origin.z + rows[3],
+			rows[4] * origin.x + rows[5] * origin.y + rows[6] * origin.z + rows[7],
+			rows[8] * origin.x + rows[9] * origin.y + rows[10] * origin.z + rows[11]);
+	CHECK(local.length() < 1e-5f);
+
+	const uint32_t skinned = instances.add(atlas, mesh, transform, true, false, 1.0f, true);
+	CHECK_EQ(instances.get_record(skinned).reason, uint32_t(NEXTGI_SDF_UNSUPPORTED_DEFORMATION));
+	const uint32_t no_field = instances.add(atlas, RID::from_uint64(7701), transform, false, false, 1.0f, true);
+	CHECK_EQ(instances.get_record(no_field).reason, uint32_t(NEXTGI_SDF_NO_FIELD));
+	CHECK_EQ(instances.get_reason_count(NEXTGI_SDF_INCLUDED), uint32_t(1));
+	CHECK_EQ(instances.get_reason_count(NEXTGI_SDF_UNSUPPORTED_DEFORMATION), uint32_t(1));
+	CHECK_EQ(instances.get_reason_count(NEXTGI_SDF_NO_FIELD), uint32_t(1));
+	CHECK_EQ(instances.get_count(), uint32_t(3));
+
+	// free_all releases every brick and forgets the mesh ids.
+	atlas.free_all();
+	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
+	CHECK_EQ(atlas.get_mesh_id(mesh), UINT32_MAX);
+	CHECK_FALSE(atlas.has_mesh(mesh));
+}
+
 TEST_CASE("[NextGI][SDF] Atlas churn leaves no resident bricks") {
 	NextGISDFAtlas atlas(64);
 	const Ref<MeshDistanceField> field = _make_test_sdf();

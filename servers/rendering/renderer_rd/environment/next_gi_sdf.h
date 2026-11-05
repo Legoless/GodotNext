@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/math/transform_3d.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "scene/resources/3d/mesh_distance_field.h"
@@ -106,6 +107,8 @@ public:
 	uint32_t get_pool_used() const { return pool.get_used_count(); }
 	uint64_t get_resident_bytes() const { return resident_bytes; }
 	uint64_t get_pool_size_bytes() const { return pool.get_size_bytes(); }
+	uint32_t get_mesh_id(RID p_mesh) const;
+	void free_all();
 
 private:
 	RID _ensure_buffer();
@@ -114,5 +117,53 @@ private:
 	NextGISDFPool pool;
 	RID atlas_buffer;
 	HashMap<RID, MeshPages> meshes;
+	HashMap<RID, uint32_t> mesh_ids;
+	LocalVector<RID> mesh_order;
 	uint64_t resident_bytes = 0;
+};
+
+// GodotNext: ps_mesh_sdf_atlas (#185)
+// The per-instance SWRT table, indexed by the frame's GI instance selection
+// (the same list that feeds the NextGI records). skinned and
+// vertex-displacing instances carry SDF_UNSUPPORTED_DEFORMATION.
+enum NextGISDFInstanceReason {
+	NEXTGI_SDF_INCLUDED = 0,
+	NEXTGI_SDF_UNSUPPORTED_DEFORMATION,
+	NEXTGI_SDF_NO_FIELD,
+	NEXTGI_SDF_INSTANCE_CAP,
+};
+
+class NextGISDFInstances {
+public:
+	enum Flags {
+		INSTANCE_VISIBLE = 1 << 0,
+	};
+
+	struct Record {
+		float world_to_local[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
+		float scale_bound = 0.0f;
+		uint32_t sdf_id = UINT32_MAX;
+		uint32_t reason = NEXTGI_SDF_INCLUDED;
+		uint32_t flags = 0;
+		uint32_t pad = 0;
+	};
+	static constexpr uint32_t RECORD_BYTES = sizeof(Record);
+	static constexpr uint32_t MAX_INSTANCES = 100000;
+
+	void begin_frame();
+	// Returns the record index, or UINT32_MAX when the table is full.
+	uint32_t add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible);
+	void upload();
+	void clear();
+
+	uint32_t get_count() const { return uint32_t(records.size()); }
+	const Record &get_record(uint32_t p_index) const { return records[p_index]; }
+	uint32_t get_reason_count(uint32_t p_reason) const;
+	RID get_buffer() const { return buffer; }
+
+private:
+	LocalVector<Record> records;
+	RID buffer;
+	uint32_t buffer_capacity = 0;
+	uint32_t reason_counts[4] = { 0, 0, 0, 0 };
 };

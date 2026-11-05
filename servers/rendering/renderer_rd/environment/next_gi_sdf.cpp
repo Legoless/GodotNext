@@ -115,6 +115,12 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 	ERR_FAIL_COND_V(p_field.is_null(), false);
 
 	unregister_mesh(p_mesh);
+	const uint32_t mesh_id = mesh_ids.has(p_mesh) ? mesh_ids[p_mesh] : uint32_t(mesh_order.size());
+	if (!mesh_ids.has(p_mesh)) {
+		mesh_ids.insert(p_mesh, mesh_id);
+		mesh_order.push_back(p_mesh);
+	}
+	(void)mesh_id;
 
 	const int mip_count = p_field->get_mip_count();
 	if (mip_count <= 0) {
@@ -200,6 +206,101 @@ void NextGISDFAtlas::unregister_mesh(RID p_mesh) {
 	}
 	_release_pages(*pages);
 	meshes.erase(p_mesh);
+}
+
+uint32_t NextGISDFAtlas::get_mesh_id(RID p_mesh) const {
+	const uint32_t *id = mesh_ids.getptr(p_mesh);
+	return id != nullptr && meshes.has(p_mesh) ? *id : UINT32_MAX;
+}
+
+void NextGISDFAtlas::free_all() {
+	LocalVector<RID> registered;
+	for (const KeyValue<RID, MeshPages> &entry : meshes) {
+		registered.push_back(entry.key);
+	}
+	for (const RID &mesh : registered) {
+		unregister_mesh(mesh);
+	}
+	RD *rd = RD::get_singleton();
+	if (rd != nullptr && atlas_buffer.is_valid()) {
+		rd->free_rid(atlas_buffer);
+	}
+	atlas_buffer = RID();
+	mesh_ids.clear();
+	mesh_order.clear();
+}
+
+void NextGISDFInstances::begin_frame() {
+	records.clear();
+	for (uint32_t &count : reason_counts) {
+		count = 0;
+	}
+}
+
+uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible) {
+	if (records.size() >= MAX_INSTANCES) {
+		reason_counts[NEXTGI_SDF_INSTANCE_CAP]++;
+		return UINT32_MAX;
+	}
+	Record record;
+	const Transform3D world_to_local = p_transform.affine_inverse();
+	for (int row = 0; row < 3; row++) {
+		record.world_to_local[row][0] = world_to_local.basis.rows[row][0];
+		record.world_to_local[row][1] = world_to_local.basis.rows[row][1];
+		record.world_to_local[row][2] = world_to_local.basis.rows[row][2];
+		record.world_to_local[row][3] = world_to_local.origin[row];
+	}
+	record.scale_bound = p_scale_bound;
+	if (p_visible) {
+		record.flags |= INSTANCE_VISIBLE;
+	}
+	if (p_skinned || p_has_instance_uniforms) {
+		record.reason = NEXTGI_SDF_UNSUPPORTED_DEFORMATION;
+	} else {
+		const uint32_t sdf_id = p_atlas.get_mesh_id(p_mesh);
+		if (sdf_id == UINT32_MAX) {
+			record.reason = NEXTGI_SDF_NO_FIELD;
+		} else {
+			record.sdf_id = sdf_id;
+		}
+	}
+	reason_counts[record.reason]++;
+	records.push_back(record);
+	return uint32_t(records.size() - 1);
+}
+
+void NextGISDFInstances::upload() {
+	RD *rd = RD::get_singleton();
+	if (rd == nullptr || records.is_empty()) {
+		return;
+	}
+	const uint32_t required = uint32_t(records.size());
+	if (buffer.is_null() || buffer_capacity < required) {
+		if (buffer.is_valid()) {
+			rd->free_rid(buffer);
+		}
+		buffer_capacity = MAX(required, MAX_INSTANCES / 4);
+		buffer = rd->storage_buffer_create(buffer_capacity * RECORD_BYTES);
+	}
+	ERR_FAIL_COND(buffer.is_null());
+	rd->buffer_update(buffer, 0, required * RECORD_BYTES, records.ptr());
+}
+
+void NextGISDFInstances::clear() {
+	records.clear();
+	for (uint32_t &count : reason_counts) {
+		count = 0;
+	}
+	RD *rd = RD::get_singleton();
+	if (rd != nullptr && buffer.is_valid()) {
+		rd->free_rid(buffer);
+	}
+	buffer = RID();
+	buffer_capacity = 0;
+}
+
+uint32_t NextGISDFInstances::get_reason_count(uint32_t p_reason) const {
+	return p_reason < 4 ? reason_counts[p_reason] : 0;
 }
 
 bool NextGISDFAtlas::has_mesh(RID p_mesh) const {

@@ -666,6 +666,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	stats.coverage.denominator = update_data != nullptr ? update_data->nextgi_rt_denominator : 0;
 	stats.coverage.numerator = 0;
 	stats.coverage.blas_pending = 0;
+	// GodotNext: ps_mesh_sdf_atlas (#185). One SDF instance per fed GI instance.
+	sdf_instances.begin_frame();
 	const uint64_t ticks_start = OS::get_singleton() != nullptr ? OS::get_singleton()->get_ticks_usec() : 0;
 
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
@@ -688,6 +690,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		if (!mesh_storage->owns_mesh(mesh)) {
 			stats.coverage.blas_pending++;
 			continue;
+		}
+		{
+			const Transform3D sdf_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+			const Vector3 sdf_scale = sdf_transform.basis.get_scale();
+			const bool sdf_skinned = geometry_instance->mesh_instance.is_valid();
+			const bool sdf_instance_uniforms = geometry_instance->data->material_override.is_valid() || geometry_instance->data->material_overlay.is_valid();
+			MeshStorage *sdf_mesh_storage = MeshStorage::get_singleton();
+			if (sdf_mesh_storage != nullptr) {
+				sdf_instances.add(sdf_mesh_storage->get_sdf_atlas(), mesh, sdf_transform, sdf_skinned, sdf_instance_uniforms, MAX(sdf_scale.x, MAX(sdf_scale.y, sdf_scale.z)), true);
+			}
 		}
 		// GodotNext: nextgi_skinned_actors (#59). A skinned instance enters through its posed
 		// slots; its bind-pose parts never enter the TLAS. Each slot holds the posed vertices
@@ -1098,6 +1110,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		stats.tlas_build_count++;
 		tlas_traceable = true;
 	}
+	sdf_instances.upload();
 }
 
 // GodotNext: nextgi_as_slots

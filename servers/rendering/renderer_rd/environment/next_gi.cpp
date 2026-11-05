@@ -293,6 +293,15 @@ bool NextGI::update_tier(const TierInputs &p_inputs, Quality p_quality_setting, 
 	quality_setting = p_quality_setting;
 	result = evaluate_tier(inputs);
 
+	// GodotNext: ps_mesh_sdf_atlas (#185). keep_when_hwrt=false releases the
+	// brick pool while HWRT is active; the runtime tier switch is then disabled.
+	if (result.tier == TIER_HWRT && !bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/keep_when_hwrt"))) {
+		MeshStorage *mesh_storage = MeshStorage::get_singleton();
+		if (mesh_storage != nullptr && mesh_storage->get_sdf_atlas().get_resident_bytes() > 0) {
+			mesh_storage->get_sdf_atlas().free_all();
+		}
+	}
+
 	if (!inputs.project_enabled) {
 		// A later enable is a new selection, so it prints again.
 		reported = false;
@@ -622,6 +631,12 @@ Dictionary NextGI::get_tier_info() const {
 			info["mesh_sdf_pool_capacity"] = int64_t(sdf_atlas.get_pool_capacity());
 			info["mesh_sdf_jobs"] = int64_t(MeshStorage::get_singleton()->get_sdf_job_count());
 			info["mesh_sdf_pending"] = int64_t(MeshStorage::get_singleton()->get_sdf_pending_count());
+			if (rt_scene != nullptr) {
+				const NextGISDFInstances &sdf_instances = rt_scene->get_sdf_instances();
+				info["sdf_instance_count"] = int64_t(sdf_instances.get_count());
+				info["sdf_unsupported_deformation"] = int64_t(sdf_instances.get_reason_count(NEXTGI_SDF_UNSUPPORTED_DEFORMATION));
+				info["sdf_no_field"] = int64_t(sdf_instances.get_reason_count(NEXTGI_SDF_NO_FIELD));
+			}
 		}
 	}
 	// GodotNext: nextgi_src_cards

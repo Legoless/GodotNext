@@ -37,6 +37,8 @@
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
 
+#include "next_gi_sdf.h"
+
 class RenderDataRD;
 
 namespace RendererRD {
@@ -378,6 +380,9 @@ public:
 	// p_visible_count of them are active; the rest keep mask 0. Returns the records written.
 	uint32_t encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset = 0, RID p_count_buffer = RID());
 	RID get_gpu_instance_buffer() const { return gpu_instance_buffer; }
+	// GodotNext: ps_mesh_sdf_atlas (#185).
+	NextGISDFInstances &get_sdf_instances() { return sdf_instances; }
+	const NextGISDFInstances &get_sdf_instances() const { return sdf_instances; }
 
 	struct Stats {
 		uint32_t fed_instance_count = 0;
@@ -415,6 +420,7 @@ private:
 	uint32_t instance_record_capacity = 0;
 	uint32_t surface_record_capacity = 0;
 	Stats stats;
+	NextGISDFInstances sdf_instances;
 	// GodotNext: nextgi_skinned_actors (#59). Per-instance posed BLASes keyed by (instance, surface).
 	struct SkinnedPart {
 		RID blas;

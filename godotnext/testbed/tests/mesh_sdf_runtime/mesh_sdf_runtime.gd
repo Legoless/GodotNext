@@ -62,6 +62,8 @@ func _ready() -> void:
 	sky.sky_material = ProceduralSkyMaterial.new()
 	environment.sky = sky
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	environment.nextgi_enabled = true
+	environment.sdfgi_enabled = false
 	var world := WorldEnvironment.new()
 	world.environment = environment
 	add_child(world)
@@ -72,11 +74,14 @@ func _process(_delta: float) -> void:
 	_frames += 1
 	if _frames == 300:
 		var info: Dictionary = RenderingServer.nextgi_get_tier_info()
-		print("MESH_SDF_CHECK resident=%s used=%s capacity=%s jobs=%s pending=%s" % [
+		print("MESH_SDF_CHECK resident=%s used=%s capacity=%s jobs=%s pending=%s sdf_instances=%s unsupported=%s no_field=%s" % [
 			info.get("mesh_sdf_resident_bytes", -1),
 			info.get("mesh_sdf_pool_used", -1),
 			info.get("mesh_sdf_pool_capacity", -1),
 			info.get("mesh_sdf_jobs", -1),
 			info.get("mesh_sdf_pending", -1),
+			info.get("sdf_instance_count", -1),
+			info.get("sdf_unsupported_deformation", -1),
+			info.get("sdf_no_field", -1),
 		])
 		get_tree().quit(0)
