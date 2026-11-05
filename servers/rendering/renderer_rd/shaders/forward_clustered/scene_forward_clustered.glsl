@@ -2203,6 +2203,13 @@ void fragment_shader(in SceneData scene_data) {
 		}
 #endif
 
+		// GodotNext: nextgi_alpha_policy (#61). Cut fallback for transparent reflections: fill the
+		// remaining ReflectionProbe weight with the WRC irradiance at the instance origin.
+		if (reflection_accum.a < 1.0 && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {
+			vec3 instance_origin = vec3(instances.data[instance_index].transform[0].w, instances.data[instance_index].transform[1].w, instances.data[instance_index].transform[2].w);
+			reflection_accum.rgb += nextgi_wrc_translucency_sh(instance_origin) * (1.0 - reflection_accum.a);
+			reflection_accum.a = 1.0;
+		}
 		if (reflection_accum.a > 0.0) {
 			indirect_specular_light = reflection_accum.rgb;
 		}
@@ -2221,6 +2228,11 @@ void fragment_shader(in SceneData scene_data) {
 			// Reflection probes stay in the mix by (1 - NextGI confidence). Confidence is RB_TEX_AMBIENT.a.
 			ambient_light = mix(ambient_light, nextgi_buffer_ambient.rgb, nextgi_buffer_ambient.a);
 			indirect_specular_light = mix(indirect_specular_light, nextgi_buffer_reflection.rgb, nextgi_buffer_reflection.a);
+		}
+		// GodotNext: nextgi_alpha_policy (#61). Cut fallback: WRC irradiance at the object center.
+		if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {
+			vec3 instance_origin = vec3(instances.data[instance_index].transform[0].w, instances.data[instance_index].transform[1].w, instances.data[instance_index].transform[2].w);
+			ambient_light = nextgi_wrc_translucency_sh(instance_origin);
 		}
 #endif
 	}

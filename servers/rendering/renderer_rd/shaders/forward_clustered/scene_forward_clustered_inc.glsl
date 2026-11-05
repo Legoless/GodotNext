@@ -526,6 +526,33 @@ layout(set = 1, binding = 38, std430) buffer restrict MaterialFeedbackBuffer {
 material_feedback;
 #endif
 
+// GodotNext: nextgi_alpha_policy (#61). WRC SH clipmap for the translucency cut fallback.
+layout(set = 1, binding = 39) uniform texture3D nextgi_wrc_sh_r;
+layout(set = 1, binding = 40) uniform texture3D nextgi_wrc_sh_g;
+layout(set = 1, binding = 41) uniform texture3D nextgi_wrc_sh_b;
+layout(set = 1, binding = 42, std430) restrict readonly buffer NextGIWRCForward {
+	vec4 camera;
+	vec4 sky;
+	vec4 origin_spacing;
+	uvec4 dispatch;
+}
+nextgi_wrc_fwd;
+
+vec3 nextgi_wrc_translucency_sh(vec3 p_world) {
+	float distance = length(p_world - nextgi_wrc_fwd.camera.xyz);
+	float level = clamp(floor(log2(max(distance / 8.0, 1.0))), 0.0, 3.0);
+	float spacing = nextgi_wrc_fwd.origin_spacing.w * exp2(level);
+	vec3 level_origin = floor(nextgi_wrc_fwd.origin_spacing.xyz / spacing) * spacing;
+	vec3 rel = (p_world - level_origin) / spacing + 7.5;
+	ivec3 cell = clamp(ivec3(round(rel)), ivec3(0), ivec3(15));
+	cell.z += int(level) * 16;
+	vec3 sh;
+	sh.r = texelFetch(sampler3D(nextgi_wrc_sh_r, SAMPLER_LINEAR_CLAMP), cell, 0).r;
+	sh.g = texelFetch(sampler3D(nextgi_wrc_sh_g, SAMPLER_LINEAR_CLAMP), cell, 0).r;
+	sh.b = texelFetch(sampler3D(nextgi_wrc_sh_b, SAMPLER_LINEAR_CLAMP), cell, 0).r;
+	return sh;
+}
+
 /* Set 2 Skeleton & Instancing (can change per item) */
 
 layout(set = 2, binding = 0, std430) restrict readonly buffer Transforms {

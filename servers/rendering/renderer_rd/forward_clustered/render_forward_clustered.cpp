@@ -4157,6 +4157,31 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		uniforms.push_back(u);
 	}
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
+	{
+		// GodotNext: nextgi_alpha_policy (#61). WRC SH clipmap for the translucency cut fallback.
+		RendererRD::NextGIWRC *wrc = next_gi.get_wrc();
+		RID sh_textures[3] = { RID(), RID(), RID() };
+		RID wrc_params;
+		if (wrc != nullptr && wrc->is_ready()) {
+			sh_textures[0] = wrc->get_sh_r();
+			sh_textures[1] = wrc->get_sh_g();
+			sh_textures[2] = wrc->get_sh_b();
+			wrc_params = wrc->get_params_buffer();
+		}
+		const RID white_3d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE);
+		for (int i = 0; i < 3; i++) {
+			RD::Uniform u;
+			u.binding = 39 + i;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.append_id(sh_textures[i].is_valid() ? sh_textures[i] : white_3d);
+			uniforms.push_back(u);
+		}
+		RD::Uniform u;
+		u.binding = 42;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(wrc_params.is_valid() ? wrc_params : scene_shader.default_material_feedback_buffer);
+		uniforms.push_back(u);
+	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }
