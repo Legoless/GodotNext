@@ -237,7 +237,8 @@ private:
 			// posed xyz float vertices followed by the coarsest-LOD indices, so a hit reads both
 			// from this one chunk (NextGISurfaceRecord stays 16 bytes, plan §6.3).
 			uint32_t rt_arena_chunk = UINT32_MAX;
-			uint32_t rt_arena_offset = 0;
+			uint32_t rt_arena_bind_offset = 0; // Bind-pose vertices (D6 card lookup).
+			uint32_t rt_arena_offset = 0; // Posed vertices (the skinner writes here).
 			uint32_t rt_arena_index_offset = 0;
 			uint32_t rt_arena_vertex_count = 0;
 			uint32_t rt_arena_index_count = 0;
@@ -517,7 +518,8 @@ public:
 	// The slot covers posed vertices and the coarsest-LOD index copy in one chunk.
 	struct NextGIRTSlotInfo {
 		uint32_t chunk = UINT32_MAX;
-		uint32_t vertex_offset = 0; // Bytes in chunk.
+		uint32_t bind_vertex_offset = 0; // Bytes in chunk; the bind-pose copy.
+		uint32_t vertex_offset = 0; // Bytes in chunk; the posed copy.
 		uint32_t vertex_count = 0;
 		uint32_t index_offset = 0; // Bytes in chunk.
 		uint32_t index_count = 0;

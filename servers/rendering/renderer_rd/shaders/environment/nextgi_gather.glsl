@@ -247,13 +247,44 @@ bool nextgi_hit_object_pos_normal(NextGIHit hit, out vec3 object_pos, out vec3 f
 	return true;
 }
 
+// GodotNext: nextgi_skinned_actors (#59). D6 samples a skinned surface's bind-pose cards at
+// the posed hit's triangle and barycentrics; bit 0 of flags marks the posed slot and bits
+// 8-31 hold the bind-pose vertex offset in 16-byte units.
+bool nextgi_hit_bind_pose_pos_normal(NextGIHit hit, out vec3 object_pos, out vec3 face_normal) {
+	if (!hit.hit || hit.custom_index >= params.record_count) {
+		return false;
+	}
+	NextGIInstanceRecord rec = records.data[hit.custom_index];
+	if (hit.geometry_index >= rec.surface_count) {
+		return false;
+	}
+	NextGISurfaceRecord surface = surfaces.data[rec.surface_base + hit.geometry_index];
+	uint vertex_base = surface.vertex_offset;
+	if ((surface.flags & 1u) != 0u) {
+		vertex_base = (surface.flags >> 8u) * 16u;
+	}
+	uint index_byte = surface.index_offset + hit.primitive * 12u;
+	uint i0 = nextgi_chunk_uint(rec.arena_chunk, index_byte);
+	uint i1 = nextgi_chunk_uint(rec.arena_chunk, index_byte + 4u);
+	uint i2 = nextgi_chunk_uint(rec.arena_chunk, index_byte + 8u);
+	vec3 p0 = nextgi_chunk_vec3(rec.arena_chunk, vertex_base + i0 * 12u);
+	vec3 p1 = nextgi_chunk_vec3(rec.arena_chunk, vertex_base + i1 * 12u);
+	vec3 p2 = nextgi_chunk_vec3(rec.arena_chunk, vertex_base + i2 * 12u);
+	object_pos = p0 * (1.0 - hit.bary.x - hit.bary.y) + p1 * hit.bary.x + p2 * hit.bary.y;
+	face_normal = normalize(cross(p1 - p0, p2 - p0));
+	if (!hit.front_face) {
+		face_normal = -face_normal;
+	}
+	return true;
+}
+
 // D6. uncovered is set when only the best-axis card, without the depth test, qualified.
 bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 	radiance = vec3(0.0);
 	uncovered = false;
 	vec3 object_pos;
 	vec3 face_normal;
-	if (!nextgi_hit_object_pos_normal(hit, object_pos, face_normal)) {
+	if (!nextgi_hit_bind_pose_pos_normal(hit, object_pos, face_normal)) {
 		return false;
 	}
 	NextGIInstanceRecord rec = records.data[hit.custom_index];

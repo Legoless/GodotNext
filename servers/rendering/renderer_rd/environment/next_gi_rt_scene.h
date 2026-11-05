@@ -62,6 +62,12 @@ enum NextGIInstanceRTFlags {
 	NEXTGI_RT_FLAG_LIGHTMAPPED = 1 << 4,
 };
 
+// NextGISurfaceRecord::flags (plan §6.3 hit record). Bits 8-31 carry the bind-pose vertex
+// offset of a skinned slot in NEXTGI_RT_ALIGNMENT units, so the record stays 16 bytes.
+enum NextGISurfaceRTFlags {
+	NEXTGI_RT_SURFACE_FLAG_SKINNED = 1 << 0,
+};
+
 // std430 GPU records. The sizes are part of the §6.3 contract; do not repack them.
 struct NextGIInstanceRecord {
 	float object_to_world[12]; // 3x4 rows, packed like the drivers' TLAS instance transform.

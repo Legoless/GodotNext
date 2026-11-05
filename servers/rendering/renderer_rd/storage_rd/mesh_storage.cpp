@@ -821,6 +821,7 @@ bool MeshStorage::mesh_instance_get_rt_slot(RID p_instance, uint32_t p_surface, 
 		return false;
 	}
 	r_slot.chunk = surface.rt_arena_chunk;
+	r_slot.bind_vertex_offset = surface.rt_arena_bind_offset;
 	r_slot.vertex_offset = surface.rt_arena_offset;
 	r_slot.vertex_count = surface.rt_arena_vertex_count;
 	r_slot.index_offset = surface.rt_arena_index_offset;
@@ -1402,17 +1403,22 @@ void MeshStorage::_mesh_instance_add_surface_buffer(MeshInstance *mi, Mesh *mesh
 	// indices from this single chunk, so NextGISurfaceRecord keeps its 16-byte layout (§6.3).
 	if (p_buffer_index == 0 && nextgi_rt_enabled && (mesh->surfaces[p_surface]->format & RSE::ARRAY_FORMAT_BONES)) {
 		const Mesh::Surface *mesh_surface = mesh->surfaces[p_surface];
-		if (!mesh_surface->rt_cpu_indices.is_empty()) {
+		if (!mesh_surface->rt_cpu_indices.is_empty() && mesh_surface->rt_cpu_positions.size() == mesh_surface->vertex_count * 3) {
+			// [bind-pose vertices][posed vertices][coarsest-LOD indices], each 16-byte aligned.
 			const uint32_t vertex_bytes = mesh_surface->vertex_count * 3u * uint32_t(sizeof(float));
-			const uint32_t index_offset_in_allocation = (vertex_bytes + NEXTGI_RT_ALIGNMENT - 1) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1);
+			const uint32_t posed_offset_in_allocation = (vertex_bytes + NEXTGI_RT_ALIGNMENT - 1) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1);
+			const uint32_t index_offset_in_allocation = (posed_offset_in_allocation + vertex_bytes + NEXTGI_RT_ALIGNMENT - 1) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1);
 			const uint32_t index_bytes = uint32_t(mesh_surface->rt_cpu_indices.size()) * uint32_t(sizeof(uint32_t));
 			const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(index_offset_in_allocation + index_bytes);
 			if (allocation.is_valid()) {
 				const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(allocation.chunk);
 				if (chunk_buffer.is_valid()) {
+					// The bind-pose copy stays fixed; D6 samples its cards at the posed hit's triangle.
+					RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset, vertex_bytes, mesh_surface->rt_cpu_positions.ptr());
 					RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset + index_offset_in_allocation, index_bytes, mesh_surface->rt_cpu_indices.ptr());
 					s->rt_arena_chunk = allocation.chunk;
-					s->rt_arena_offset = allocation.offset;
+					s->rt_arena_bind_offset = allocation.offset;
+					s->rt_arena_offset = allocation.offset + posed_offset_in_allocation;
 					s->rt_arena_index_offset = allocation.offset + index_offset_in_allocation;
 					s->rt_arena_vertex_count = mesh_surface->vertex_count;
 					s->rt_arena_index_count = uint32_t(mesh_surface->rt_cpu_indices.size());
@@ -1457,6 +1463,7 @@ void MeshStorage::_mesh_instance_remove_surface(MeshInstance *mi, int p_surface)
 		allocation.size = surface.rt_arena_size;
 		nextgi_rt_allocator.free_range(allocation);
 		surface.rt_arena_chunk = UINT32_MAX;
+		surface.rt_arena_bind_offset = 0;
 		surface.rt_arena_offset = 0;
 		surface.rt_arena_index_offset = 0;
 		surface.rt_arena_vertex_count = 0;

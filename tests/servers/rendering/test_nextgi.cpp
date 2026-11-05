@@ -2393,6 +2393,13 @@ TEST_CASE("[NextGI][Skinned] Refit schedule and triangle budget") {
 	CHECK(RendererRD::nextgi_rt_skinned_build(4, 28, 1000, 0, 200000) == Build::NEXTGI_SKINNED_REBUILD);
 	CHECK(RendererRD::nextgi_rt_skinned_build(4, 27, 1000, 0, 200000) == Build::NEXTGI_SKINNED_REFIT);
 	CHECK(RendererRD::nextgi_rt_skinned_build(0, 0, 1000, 0, 200000) == Build::NEXTGI_SKINNED_REBUILD);
+	// The 16-byte surface record packs the posed flag and the bind-pose offset for D6.
+	const uint32_t bind_offset = 4096;
+	const uint32_t flags = RendererRD::NEXTGI_RT_SURFACE_FLAG_SKINNED | ((bind_offset / RendererRD::NEXTGI_RT_ALIGNMENT) << 8);
+	CHECK_EQ(flags & 1u, uint32_t(RendererRD::NEXTGI_RT_SURFACE_FLAG_SKINNED));
+	CHECK_EQ((flags >> 8) * RendererRD::NEXTGI_RT_ALIGNMENT, bind_offset);
+	CHECK_EQ(sizeof(RendererRD::NextGISurfaceRecord), size_t(16));
+	CHECK_EQ(sizeof(RendererRD::NextGIInstanceRecord), size_t(80));
 }
 
 // GodotNext: nextgi_quality_presets (#55).

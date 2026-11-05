@@ -796,6 +796,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					surface_record.vertex_offset = slot.vertex_offset;
 					surface_record.index_offset = slot.index_offset;
 					surface_record.triangle_count = slot.index_count / 3;
+					// D6 samples the bind-pose cards at the posed hit's triangle and barycentrics.
+					surface_record.flags = NEXTGI_RT_SURFACE_FLAG_SKINNED | ((slot.bind_vertex_offset / NEXTGI_RT_ALIGNMENT) << 8);
 					surface_records.push_back(surface_record);
 					instance_records.push_back(record);
 					RD::AccelerationStructureInstance tlas_instance;
