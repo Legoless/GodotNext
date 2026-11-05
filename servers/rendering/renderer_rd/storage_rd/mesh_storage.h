@@ -236,6 +236,8 @@ private:
 			// GodotNext: nextgi_skinned_actors (#59). Per-instance posed slot (UINT32_MAX = none).
 			uint32_t rt_arena_chunk = UINT32_MAX;
 			uint32_t rt_arena_offset = 0;
+			uint32_t rt_arena_size = 0;
+			RID rt_arena_uniform_set;
 			uint32_t current_buffer = 0;
 			uint32_t previous_buffer = 0;
 			uint64_t last_change = 0;

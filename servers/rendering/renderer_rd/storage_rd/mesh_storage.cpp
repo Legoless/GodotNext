@@ -1359,6 +1359,17 @@ void MeshStorage::_mesh_instance_add_surface(MeshInstance *mi, Mesh *mesh, uint3
 void MeshStorage::_mesh_instance_add_surface_buffer(MeshInstance *mi, Mesh *mesh, MeshInstance::Surface *s, uint32_t p_surface, uint32_t p_buffer_index) {
 	s->vertex_buffer[p_buffer_index] = RD::get_singleton()->vertex_buffer_create(mesh->surfaces[p_surface]->vertex_buffer_size, Vector<uint8_t>(), RD::BUFFER_CREATION_AS_STORAGE_BIT);
 
+	// GodotNext: nextgi_skinned_actors (#59). One posed slot per skinned instance surface.
+	if (p_buffer_index == 0 && nextgi_rt_enabled && (mesh->surfaces[p_surface]->format & RSE::ARRAY_FORMAT_BONES)) {
+		const uint32_t slot_bytes = mesh->surfaces[p_surface]->vertex_count * 3u * uint32_t(sizeof(float));
+		const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(slot_bytes);
+		if (allocation.is_valid()) {
+			s->rt_arena_chunk = allocation.chunk;
+			s->rt_arena_offset = allocation.offset / uint32_t(sizeof(float));
+			s->rt_arena_size = allocation.size;
+		}
+	}
+
 	Vector<RD::Uniform> uniforms;
 	{
 		RD::Uniform u;
@@ -1383,6 +1394,22 @@ void MeshStorage::_mesh_instance_add_surface_buffer(MeshInstance *mi, Mesh *mesh
 
 void MeshStorage::_mesh_instance_remove_surface(MeshInstance *mi, int p_surface) {
 	MeshInstance::Surface &surface = mi->surfaces[p_surface];
+
+	// GodotNext: nextgi_skinned_actors (#59).
+	if (surface.rt_arena_chunk != UINT32_MAX) {
+		NextGIArenaAllocator::Allocation allocation;
+		allocation.chunk = surface.rt_arena_chunk;
+		allocation.offset = surface.rt_arena_offset * uint32_t(sizeof(float));
+		allocation.size = surface.rt_arena_size;
+		nextgi_rt_allocator.free_range(allocation);
+		surface.rt_arena_chunk = UINT32_MAX;
+		surface.rt_arena_offset = 0;
+		surface.rt_arena_size = 0;
+	}
+	if (surface.rt_arena_uniform_set.is_valid()) {
+		RD::get_singleton()->free_rid(surface.rt_arena_uniform_set);
+		surface.rt_arena_uniform_set = RID();
+	}
 
 	if (surface.versions) {
 		for (uint32_t j = 0; j < surface.version_count; j++) {
@@ -1500,12 +1527,15 @@ void MeshStorage::update_mesh_instances() {
 			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, write_rt_arena ? skeleton_shader.pipeline_rt[mode] : skeleton_shader.pipeline[mode]);
 			{
 				// GodotNext: nextgi_skinned_actors (#59). Set 3 is the posed arena slot's chunk.
-				RD::Uniform arena_uniform;
-				arena_uniform.binding = 0;
-				arena_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-				RID chunk_buffer = write_rt_arena ? mesh_nextgi_rt_get_chunk_buffer(mi->surfaces[i].rt_arena_chunk) : default_rd_storage_buffer;
-				arena_uniform.append_id(chunk_buffer.is_valid() ? chunk_buffer : default_rd_storage_buffer);
-				RID arena_set = RD::get_singleton()->uniform_set_create(Vector<RD::Uniform>({ arena_uniform }), skeleton_shader.version_shader[mode], SkeletonShader::UNIFORM_SET_RT_ARENA);
+				if (write_rt_arena && mi->surfaces[i].rt_arena_uniform_set.is_null()) {
+					RD::Uniform arena_uniform;
+					arena_uniform.binding = 0;
+					arena_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+					RID chunk_buffer = mesh_nextgi_rt_get_chunk_buffer(mi->surfaces[i].rt_arena_chunk);
+					arena_uniform.append_id(chunk_buffer.is_valid() ? chunk_buffer : default_rd_storage_buffer);
+					mi->surfaces[i].rt_arena_uniform_set = RD::get_singleton()->uniform_set_create(Vector<RD::Uniform>({ arena_uniform }), skeleton_shader.version_shader[mode], SkeletonShader::UNIFORM_SET_RT_ARENA);
+				}
+				RID arena_set = write_rt_arena ? mi->surfaces[i].rt_arena_uniform_set : RID();
 				if (arena_set.is_valid()) {
 					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, arena_set, SkeletonShader::UNIFORM_SET_RT_ARENA);
 				}
