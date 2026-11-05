@@ -367,6 +367,45 @@ Dictionary NextGI::get_counters() const {
 	return counters;
 }
 
+int NextGI::nextgi_multiview_choose_anchor(const ViewAnchorCandidate *p_views, uint32_t p_count, int p_previous) {
+	if (p_views == nullptr || p_count == 0) {
+		return -1;
+	}
+	// Keep last frame's anchor while it still renders, so the scenario center never flips.
+	if (p_previous >= 0 && uint32_t(p_previous) < p_count && p_views[p_previous].valid) {
+		return p_previous;
+	}
+	int best_attached = -1;
+	int best_hint = -1;
+	int best_area = -1;
+	for (uint32_t i = 0; i < p_count; i++) {
+		if (!p_views[i].valid) {
+			continue;
+		}
+		if (p_views[i].screen_attached && (best_attached < 0 || p_views[i].area > p_views[best_attached].area)) {
+			best_attached = int(i);
+		}
+		if (p_views[i].editor_hint && best_hint < 0) {
+			best_hint = int(i);
+		}
+		if (best_area < 0 || p_views[i].area > p_views[best_area].area || (p_views[i].area == p_views[best_area].area && p_views[i].order < p_views[best_area].order)) {
+			best_area = int(i);
+		}
+	}
+	if (best_attached >= 0) {
+		return best_attached;
+	}
+	if (best_hint >= 0) {
+		return best_hint;
+	}
+	return best_area;
+}
+
+bool NextGI::nextgi_multiview_should_run_scenario(uint64_t p_last_frame, uint64_t p_frame) {
+	// Once per scenario per frame, whoever the first NextGI view is.
+	return p_last_frame != p_frame;
+}
+
 NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) {
 	switch (static_cast<RSE::ViewportDebugDraw>(p_viewport_debug_draw)) {
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TIER:

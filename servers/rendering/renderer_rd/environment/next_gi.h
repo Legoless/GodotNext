@@ -274,6 +274,18 @@ private:
 public:
 	static NextGI *get_singleton() { return singleton; }
 
+	// GodotNext: nextgi_multiview (#58). One anchor per scenario, chosen with hysteresis so the
+	// TLAS center never flips between frames. Pure helpers, so doctests need no device.
+	struct ViewAnchorCandidate {
+		bool valid = false;
+		bool screen_attached = false;
+		bool editor_hint = false;
+		uint64_t area = 0;
+		uint32_t order = 0;
+	};
+	static int nextgi_multiview_choose_anchor(const ViewAnchorCandidate *p_views, uint32_t p_count, int p_previous);
+	static bool nextgi_multiview_should_run_scenario(uint64_t p_last_frame, uint64_t p_frame);
+
 	// The §3.1 rule. Pure, so doctests need no device. The first failing check wins:
 	// !forward_plus -> UNSUPPORTED_RENDERER; !project_enabled -> DISABLED; Off -> SETTING_OFF;
 	// !ray_query -> the driver's reason (warn_force under Force); unless Force, cpu_device -> CPU_DEVICE,

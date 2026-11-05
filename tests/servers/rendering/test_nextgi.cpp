@@ -2379,6 +2379,44 @@ TEST_CASE("[NextGI][RT] Dynamic instance budget shares the TLAS capacity") {
 
 } // namespace TestNextGI
 
+// GodotNext: nextgi_multiview (#58).
+TEST_CASE("[NextGI][MultiView] Anchor selection and scenario scheduling") {
+	using Candidate = RendererRD::NextGI::ViewAnchorCandidate;
+	Candidate views[4];
+	views[0].valid = true;
+	views[0].area = 900;
+	views[0].order = 0;
+	views[1].valid = true;
+	views[1].screen_attached = true;
+	views[1].area = 100;
+	views[1].order = 1;
+	views[2].valid = true;
+	views[2].editor_hint = true;
+	views[2].area = 500;
+	views[2].order = 2;
+	views[3].valid = false;
+	views[3].area = 1000;
+
+	// A screen-attached viewport wins over a larger one.
+	CHECK(RendererRD::NextGI::nextgi_multiview_choose_anchor(views, 4, -1) == 1);
+	// Last frame's anchor is kept while it still renders.
+	CHECK(RendererRD::NextGI::nextgi_multiview_choose_anchor(views, 4, 0) == 0);
+	views[1].screen_attached = false;
+	// Without an attached viewport the editor hint wins.
+	CHECK(RendererRD::NextGI::nextgi_multiview_choose_anchor(views, 4, -1) == 2);
+	views[2].editor_hint = false;
+	// Otherwise the largest area wins.
+	CHECK(RendererRD::NextGI::nextgi_multiview_choose_anchor(views, 4, -1) == 0);
+	views[0].valid = false;
+	// With neither, the largest remaining area wins.
+	CHECK(RendererRD::NextGI::nextgi_multiview_choose_anchor(views, 4, -1) == 2);
+	// A stale previous anchor is replaced.
+	CHECK(RendererRD::NextGI::nextgi_multiview_choose_anchor(views, 4, 0) == 2);
+	// The scenario runs once per frame.
+	CHECK_FALSE(RendererRD::NextGI::nextgi_multiview_should_run_scenario(7, 7));
+	CHECK(RendererRD::NextGI::nextgi_multiview_should_run_scenario(6, 7));
+}
+
 // GodotNext: nextgi_alpha_policy (#61).
 #include "scene/resources/material.h"
 
