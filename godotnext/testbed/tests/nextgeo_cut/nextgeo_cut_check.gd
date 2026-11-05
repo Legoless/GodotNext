@@ -13,6 +13,7 @@ var _frames := 0
 var _matched := 0
 var _checked := 0
 var _max_phase2 := 0
+var _last_tick := -1
 var _rng := RandomNumberGenerator.new()
 var _city: Node3D
 var _camera: Camera3D
@@ -54,7 +55,9 @@ func _process(_delta: float) -> void:
 		var stats: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(get_viewport().get_viewport_rid())
 		if view == 0:
 			print("NEXTGEO_CUT_VIEW0 %s" % JSON.stringify(stats))
-		if stats.has("cut_match"):
+		var tick := int(stats.get("tick", -1))
+		if stats.has("cut_match") and tick != _last_tick:
+			_last_tick = tick
 			_checked += 1
 			if bool(stats["cut_match"]):
 				_matched += 1

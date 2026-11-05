@@ -443,13 +443,17 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		}
 	}
 
-	if (p_debug_stats) {
+	const uint32_t stats_interval = MAX(uint32_t(GLOBAL_GET("rendering/nextgeo/debug_stats_interval")), 1u);
+	const bool read_stats = p_debug_stats && (stats_counter++ % stats_interval == 0);
+	if (read_stats) {
+		stats_tick++;
 		const Vector<uint8_t> raw = rd->buffer_get_data(counters, 0, sizeof(CutCounters));
 		if (raw.size() < int(sizeof(CutCounters))) {
 			return;
 		}
 		const CutCounters *stats = reinterpret_cast<const CutCounters *>(raw.ptr());
 		Dictionary info;
+		info["tick"] = int64_t(stats_tick);
 		info["record_count"] = int64_t(record_count);
 		info["used_records"] = int64_t(RSG::virtual_mesh_storage->get_record_count());
 		{
@@ -476,24 +480,6 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		info["overflow"] = int64_t(stats->overflow);
 		info["occlusion"] = p_occlusion;
 		info["hiz"] = have_prev;
-		if (have_prev && hiz_prev.is_valid()) {
-			const Vector<uint8_t> hiz_raw = rd->texture_get_data(hiz_prev, 0);
-			float hiz_min = 1.0f;
-			float hiz_max = 0.0f;
-			uint32_t hiz_nonzero = 0;
-			for (int index = 0; index + 4 <= hiz_raw.size(); index += 4) {
-				float value = 0.0f;
-				memcpy(&value, hiz_raw.ptr() + index, sizeof(float));
-				hiz_min = MIN(hiz_min, value);
-				hiz_max = MAX(hiz_max, value);
-				if (value > 0.0f) {
-					hiz_nonzero++;
-				}
-			}
-			info["hiz_min"] = hiz_min;
-			info["hiz_max"] = hiz_max;
-			info["hiz_nonzero"] = int64_t(hiz_nonzero);
-		}
 		info["cluster_capacity"] = int64_t(CLUSTER_CAPACITY);
 		if (stats->cluster_count > 0 && stats->cluster_count <= CLUSTER_CAPACITY) {
 			const Vector<uint8_t> raw_clusters = rd->buffer_get_data(clusters, 0, stats->cluster_count * 8);

@@ -86,4 +86,6 @@ private:
 	RID dummy_hiz_set;
 	bool initialized = false;
 	bool failed = false;
+	uint32_t stats_tick = 0;
+	uint32_t stats_counter = 0;
 };
