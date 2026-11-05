@@ -46,6 +46,7 @@ bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	vec4 clip_min = cull.prev_view_proj * vec4(lo, 1.0);
 	vec4 clip_max = cull.prev_view_proj * vec4(hi, 1.0);
 	if (clip_min.w <= 0.0 || clip_max.w <= 0.0) {
+		atomicAdd(counters.cut_lo, 1u); // hiz_behind diagnostic
 		return false; // Behind the previous camera; keep it for phase 1.
 	}
 	vec2 ndc_min = clip_min.xy / clip_min.w;
@@ -53,6 +54,7 @@ bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	vec2 uv_min = ndc_min * 0.5 + 0.5;
 	vec2 uv_max = ndc_max * 0.5 + 0.5;
 	if (uv_max.x < 0.0 || uv_max.y < 0.0 || uv_min.x > 1.0 || uv_min.y > 1.0) {
+		atomicAdd(counters.cut_hi, 1u); // hiz_oob diagnostic
 		return false;
 	}
 	// Reverse-Z: the farthest corner is the minimum of the two depths.
@@ -97,7 +99,9 @@ void main() {
 	if (!aabb_visible(record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
 		return;
 	}
+	atomicAdd(counters.pad[0], 1u); // hiz_tested
 	if (hiz_occluded(record.prev_world_aabb_min, record.prev_world_aabb_max)) {
+		atomicAdd(counters.pad[1], 1u); // hiz_hit
 		uint slot = atomicAdd(counters.phase2_count, 1u);
 		phase2_nodes.data[slot] = uvec2(index, record.virtual_mesh);
 		return;

@@ -348,7 +348,7 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			if (hiz_prev.is_valid()) {
 				Vector<uint8_t> clear;
 				clear.resize(hiz_target_size.x * hiz_target_size.y * 4);
-				clear.fill(0);
+				clear.fill(0); // 0 = far in reverse-Z, so the first frame culls nothing.
 				rd->texture_update(hiz_prev, 0, clear);
 			}
 		}
@@ -464,6 +464,10 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 				info["first_dag_offset"] = int64_t(mesh->dag_offset);
 			}
 		}
+		info["hiz_tested"] = int64_t(stats->pad[0]);
+		info["hiz_hit"] = int64_t(stats->pad[1]);
+		info["hiz_behind"] = int64_t(stats->cut_lo);
+		info["hiz_oob"] = int64_t(stats->cut_hi);
 		info["phase1_instances"] = int64_t(stats->phase1);
 		info["phase2_instances"] = int64_t(stats->phase2);
 		info["bvh_levels"] = int64_t(max_levels);
