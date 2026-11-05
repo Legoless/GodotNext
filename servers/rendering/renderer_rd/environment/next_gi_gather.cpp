@@ -187,7 +187,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[20] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[21] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -206,6 +206,7 @@ void NextGIGather::free_resources() {
 	debug_rejected = RID();
 	reflect_counter_buffer = RID();
 	specular_debug = RID();
+	clamp_totals_buffer = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -614,6 +615,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!reflect_counter_buffer.is_valid()) {
 		reflect_counter_buffer = rd->storage_buffer_create(sizeof(ReflectCountersGPU));
 	}
+	if (!clamp_totals_buffer.is_valid()) {
+		clamp_totals_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 2);
+	}
 	if (params.reflect_debug != 0u && !specular_debug.is_valid()) {
 		RD::TextureFormat debug_tf;
 		debug_tf.width = MAX(last_screen_w / 2u, 1u);
@@ -623,7 +627,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
 	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	RD::Uniform uniforms[37] = {
+	RD::Uniform uniforms[38] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -660,12 +664,13 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, clamp_totals_buffer.is_valid() ? clamp_totals_buffer : dummy_buffer),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
-	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), reflect_shader_rid, 0);
+	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), reflect_shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -673,6 +678,15 @@ void NextGIGather::_read_counters() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd == nullptr || !counter_buffer.is_valid()) {
 		return;
+	}
+	if (clamp_totals_buffer.is_valid()) {
+		const Vector<uint8_t> clamp_data = rd->buffer_get_data(clamp_totals_buffer);
+		if (clamp_data.size() >= 8) {
+			uint32_t values[2] = { 0u, 0u };
+			memcpy(values, clamp_data.ptr(), sizeof(values));
+			last_clamp_removed = values[0];
+			last_clamp_total = values[1];
+		}
 	}
 	if (reflect_counter_buffer.is_valid()) {
 		const Vector<uint8_t> reflect_data = rd->buffer_get_data(reflect_counter_buffer);
@@ -738,6 +752,8 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 	}
 	GatherCountersGPU zero;
 	rd->buffer_update(counter_buffer, 0, sizeof(zero), &zero);
+	const uint32_t clamp_zero[2] = { 0u, 0u };
+	rd->buffer_update(clamp_totals_buffer, 0, sizeof(clamp_zero), clamp_zero);
 	const uint32_t groups_x = MAX((nextgi_gather_probe_count_axis(last_screen_w) + 7u) / 8u, 1u);
 	const uint32_t groups_y = MAX((nextgi_gather_probe_count_axis(last_screen_h) + 7u) / 8u, 1u);
 	{
@@ -984,6 +1000,9 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["wrc_sky_samples"] = int64_t(last_sky_samples);
 	r_info["screen_trace_hits"] = int64_t(last_screen_hits);
 	r_info["gather_hit_radiance_reference"] = hit_radiance_reference;
+	r_info["clamped_energy_fraction"] = last_clamp_total > 0 ? double(last_clamp_removed) / double(last_clamp_total) : 0.0;
+	r_info["clamped_energy_removed"] = int64_t(last_clamp_removed);
+	r_info["clamped_energy_total"] = int64_t(last_clamp_total);
 	r_info["reflection_rays"] = int64_t(last_reflection_traced);
 	r_info["reflection_hits"] = int64_t(last_reflection_hits);
 	r_info["reflection_misses"] = int64_t(last_reflection_misses);

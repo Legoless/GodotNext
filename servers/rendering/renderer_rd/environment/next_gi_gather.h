@@ -109,6 +109,7 @@ class NextGIGather {
 	RID reflect_uniform_set;
 	RID reflect_counter_buffer;
 	RID specular_debug;
+	RID clamp_totals_buffer;
 	RID params_buffer;
 	RID counter_buffer;
 	RID feedback_buffer;
@@ -133,6 +134,8 @@ class NextGIGather {
 	uint32_t last_screen_hits = 0;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
+	uint32_t last_clamp_removed = 0;
+	uint32_t last_clamp_total = 0;
 	uint32_t last_reflection_traced = 0;
 	uint32_t last_reflection_hits = 0;
 	uint32_t last_reflection_misses = 0;

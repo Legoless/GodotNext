@@ -25,6 +25,13 @@ layout(set = 0, binding = 31) uniform sampler2D last_frame_tex;
 // the specular radiance plus its confidence into RB_TEX_REFLECTION.
 layout(set = 0, binding = 32) uniform sampler2D normal_roughness_tex;
 layout(rgba16f, set = 0, binding = 33) uniform image2D reflection_image;
+// GodotNext: nextgi_firefly_clamp (#54). Clamped-energy counter (Q16): removed and total sample
+// luminance in quarter units, summed with 32-bit integer atomics (order independent).
+layout(set = 0, binding = 37, std430) buffer NextGIClampTotals {
+	uint removed;
+	uint total;
+}
+clamp_totals;
 layout(r16f, set = 0, binding = 35) uniform image2D specular_hit_image;
 layout(rgba16f, set = 0, binding = 36) uniform image2D specular_debug_image;
 layout(set = 0, binding = 34, std430) buffer NextGIReflectCounters {
@@ -457,6 +464,7 @@ void nextgi_gather_main() {
 	}
 	vec3 origin = world + normal * origin_offset;
 
+	vec3 raw_radiance[16];
 	float angle = float(params.frame) * 2.3999632;
 	float ca = cos(angle);
 	float sa = sin(angle);
@@ -509,10 +517,36 @@ void nextgi_gather_main() {
 			atomicAdd(counters.miss_radiance_bits, lum);
 		}
 		confidence_sum += ray_confidence;
-		ivec2 dest = ivec2(probe) * 4 + ivec2(ix, iy);
-		// Raw radiance: the temporal pass in NextGIDenoise is the single accumulator (#53, D8).
-		imageStore(probe_image, dest, vec4(radiance, length(world - params.camera_pos.xyz)));
+		raw_radiance[i] = radiance;
 	}
+
+	// GodotNext: nextgi_firefly_clamp (#54). Clamp each raw sample's luminance to mean + 3 sigma of
+	// this probe's 16 rays (emissive radiance included), then count the removed energy for Q16.
+	const vec3 luminance_weights = vec3(0.2126, 0.7152, 0.0722);
+	float lum_sum = 0.0;
+	for (uint i = 0u; i < 16u; i++) {
+		lum_sum += dot(raw_radiance[i], luminance_weights);
+	}
+	const float mean_lum = lum_sum / 16.0;
+	float variance = 0.0;
+	for (uint i = 0u; i < 16u; i++) {
+		const float delta = dot(raw_radiance[i], luminance_weights) - mean_lum;
+		variance += delta * delta;
+	}
+	const float clamp_limit = mean_lum + 3.0 * sqrt(variance / 16.0);
+	float removed = 0.0;
+	for (uint i = 0u; i < 16u; i++) {
+		vec3 radiance = raw_radiance[i];
+		const float luminance = dot(radiance, luminance_weights);
+		if (luminance > clamp_limit && luminance > 0.0) {
+			radiance *= clamp_limit / luminance;
+			removed += luminance - clamp_limit;
+		}
+		// Raw radiance: the temporal pass in NextGIDenoise is the single accumulator (#53, D8).
+		imageStore(probe_image, ivec2(probe) * 4 + ivec2(i & 3u, i >> 2u), vec4(radiance, length(world - params.camera_pos.xyz)));
+	}
+	atomicAdd(clamp_totals.removed, uint(removed * 4.0));
+	atomicAdd(clamp_totals.total, uint(lum_sum * 4.0));
 	if (uncovered_count > 0u) {
 		atomicAdd(counters.uncovered, uncovered_count);
 	}
