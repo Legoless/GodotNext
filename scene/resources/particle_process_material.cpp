@@ -153,6 +153,17 @@ void ParticleProcessMaterial::init_shaders() {
 void ParticleProcessMaterial::finish_shaders() {
 	dirty_materials.clear();
 
+	// GodotNext: shader_baker_export_cleanup (#245). Materials that outlive the RenderingServer
+	// (resources held until after an export run) would otherwise free their shader RIDs too late
+	// and report them as leaked at exit. Free every remaining variant here, while it is still up.
+	MutexLock lock(shader_map_mutex);
+	if (RS::get_singleton() != nullptr) {
+		for (const KeyValue<MaterialKey, ShaderData> &E : shader_map) {
+			RS::get_singleton()->free_rid(E.value.shader);
+		}
+	}
+	shader_map.clear();
+
 	memdelete(shader_names);
 	shader_names = nullptr;
 }
