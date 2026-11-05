@@ -22,6 +22,7 @@ const OUT := "res://generated/pn_content"
 const FIELD_STREAM := 71
 const CLIFF_STREAM := 72
 const ROAD_STREAM := 73
+const CROWD_STREAM := 74
 
 const FIELD_HALF_M := 200.0
 const TREE_COUNT := 100000
@@ -37,6 +38,11 @@ const CLIFF_GRID := Vector2i(256, 128)
 
 const ROAD_LENGTH_M := 2000.0
 const ROAD_HALF_WIDTH_M := 3.5
+
+const CROWD_COUNT := 100
+const CROWD_TARGET_TRIANGLES := 500000
+# 8x per axis on the P3 body boxes gives about 561k triangles.
+const CROWD_SEGMENT_SCALE := 8
 
 
 static func contract_error() -> String:
@@ -64,6 +70,7 @@ static func save_all(p_host: SceneTree) -> Array[String]:
 		{"built": build_foliage_field("voxels"), "scene": OUT + "/foliage_field_voxels.tscn"},
 		{"built": build_displacement_cliff(), "scene": OUT + "/displacement_cliff.tscn"},
 		{"built": build_spline_road(), "scene": OUT + "/spline_road.tscn"},
+		{"built": build_character_crowd(), "scene": OUT + "/character_crowd.tscn"},
 	]
 	for job in jobs:
 		var built: Dictionary = job["built"]
@@ -80,6 +87,8 @@ static func save_all(p_host: SceneTree) -> Array[String]:
 			root.free()
 			continue
 		p_host.get_root().remove_child(root)
+		if root.has_meta("skip_runtime"):
+			root.remove_meta("skip_runtime")
 		var err := Scaffold.save_scene(root, scene_path)
 		if err != OK:
 			failures.append("%s: save failed with error %d." % [scene_path, err])
@@ -619,6 +628,71 @@ static func _rail_quad(p_tool: SurfaceTool, p_previous_bottom: Vector3, p_bottom
 	p_tool.add_vertex(p_previous_top)
 
 
+# --- Character Crowd ---------------------------------------------------------
+
+## 100 skinned walkers of the P3 rig at about 561k triangles each (500k is
+## the §21.4.3 target). The dense mesh is saved once beside the scene so the
+## scene text stays bounded.
+static func build_character_crowd() -> Dictionary:
+	var root := Node3D.new()
+	root.name = "CharacterCrowd"
+	root.set_script(load("res://scenes/character_crowd/crowd.gd"))
+	root.set_meta("skip_runtime", true)
+	root.set_meta("seed", Scaffold.stream_seed(CROWD_STREAM))
+	root.set_meta("crowd_count", CROWD_COUNT)
+	_add_world(root, Color(0.6, 0.72, 0.85), 0.9)
+	_add_sun(root, Vector3(-0.5, -0.75, -0.3), Vector3(0.0, 40.0, 0.0))
+
+	var ground_mesh := PlaneMesh.new()
+	ground_mesh.size = Vector2(120.0, 120.0)
+	ground_mesh.material = Scaffold.make_constant_material("CrowdGround", Color(0.3, 0.3, 0.28), 0.95)
+	var ground := MeshInstance3D.new()
+	ground.name = "Ground"
+	ground.mesh = ground_mesh
+	Scaffold.add_owned(root, ground, root)
+
+	_ensure_dir(OUT)
+	var dense := Character.shared_mesh_scaled(CROWD_SEGMENT_SCALE)
+	var mesh_path := OUT + "/character_crowd_mesh.res"
+	var saved := ResourceSaver.save(dense, mesh_path) == OK
+	var shared_mesh: ArrayMesh = load(mesh_path) if saved else dense
+	var triangles := shared_mesh.get_faces().size() / 3
+
+	var rng := Scaffold.make_rng(CROWD_STREAM + 1)
+	var crowd := Node3D.new()
+	crowd.name = "Crowd"
+	Scaffold.add_owned(root, crowd, root)
+	for index in range(CROWD_COUNT):
+		var actor := Character.make_character("Crowd%03d" % index, shared_mesh)
+		var column := index % 10
+		var row := index / 10
+		actor.position = Vector3(float(column) * 2.6 - 11.7, 0.0, float(row) * 2.6 - 11.7)
+		actor.rotation.y = rng.randf_range(-PI, PI)
+		Character.apply_walk_frame(actor, 0, index * 3)
+		Scaffold.add_owned(crowd, actor, root)
+
+	var flight := Path3D.new()
+	flight.name = "FlightPath"
+	var curve := Curve3D.new()
+	for point in [Vector3(-32.0, 4.0, 34.0), Vector3(-10.0, 2.0, 18.0), Vector3(12.0, 3.0, 20.0),
+			Vector3(30.0, 6.0, 30.0), Vector3(24.0, 14.0, 40.0), Vector3(-14.0, 16.0, 42.0)]:
+		curve.add_point(point)
+	flight.curve = curve
+	Scaffold.add_owned(root, flight, root)
+	Scaffold.make_camera(root, root, "cam_main", Vector3(0.0, 2.0, 30.0), Vector3(0.0, 1.0, 0.0), 120.0, 60.0, true)
+	Scaffold.make_camera(root, root, "cam_side", Vector3(30.0, 1.7, 0.0), Vector3(0.0, 1.0, 0.0), 120.0, 60.0)
+	Scaffold.make_camera(root, root, "cam_high", Vector3(0.0, 22.0, 26.0), Vector3(0.0, 0.5, 0.0), 160.0, 55.0)
+	Scaffold.make_camera(root, root, "cam_close", Vector3(3.0, 1.6, 6.0), Vector3(0.0, 1.0, 0.0), 60.0, 70.0)
+
+	root.set_meta("triangles_per_actor", triangles)
+	return {
+		"root": root,
+		"actors": CROWD_COUNT,
+		"triangles": triangles,
+		"check": "character_crowd",
+	}
+
+
 # --- Shared ------------------------------------------------------------------
 
 static func _ensure_dir(p_path: String) -> void:
@@ -674,6 +748,12 @@ static func _verify(p_root: Node3D, p_built: Dictionary, p_failures: Array[Strin
 				p_failures.append("%s: cliff has %d triangles, expected at least 60000." % [p_scene, int(p_built["triangles"])])
 			if p_root.get_node_or_null("Cliff") == null:
 				p_failures.append("%s: Cliff mesh missing." % p_scene)
+		"character_crowd":
+			var crowd := p_root.get_node_or_null("Crowd")
+			if crowd == null or crowd.get_child_count() != CROWD_COUNT:
+				p_failures.append("%s: crowd has %d actors, expected %d." % [p_scene, crowd.get_child_count() if crowd != null else 0, CROWD_COUNT])
+			if int(p_built["triangles"]) < CROWD_TARGET_TRIANGLES:
+				p_failures.append("%s: each actor has %d triangles, expected at least %d." % [p_scene, int(p_built["triangles"]), CROWD_TARGET_TRIANGLES])
 		"spline_road":
 			var road := p_root.get_node_or_null("Road") as MeshInstance3D
 			if road == null or road.mesh == null:

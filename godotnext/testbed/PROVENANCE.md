@@ -27,10 +27,11 @@ seed `1` (one run per variant; see its README).
 
 The PN content rows (#148) follow the same rule: the generator is tracked
 and its output is generated on demand into the gitignored
-`generated/pn_content/` folder (about 30 MB for the three Foliage Field
-variants, Displacement Cliff and Spline Road). Every mesh, leaf texture
-and MultiMesh transform is procedural from the generator's fixed streams;
-no third-party file is involved. Regenerate with
+`generated/pn_content/` folder (about 116 MB for the three Foliage Field
+variants, Displacement Cliff, Spline Road and Character Crowd; the crowd's
+561k-triangle shared mesh is most of it). Every mesh, leaf texture,
+MultiMesh transform and skinned body is procedural from the generator's
+fixed streams; no third-party file is involved. Regenerate with
 `godot --headless --path godotnext/testbed --script res://generators/build_pn.gd`
 and run a scene through the harness with `--scene=res://generated/pn_content/<name>.tscn`.
 
@@ -49,6 +50,8 @@ and run a scene through the harness with `--scene=res://generated/pn_content/<na
 | `generators/dense_city/dense_city_generator.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_pn_content.gd` | hand-authored for #148 | MIT | 2026-11-05 | the Apple M5 Max |
 | `generators/build_pn.gd` | hand-authored for #148 | MIT | 2026-11-05 | the Apple M5 Max |
+| `generators/validate_pn_content.gd` | hand-authored for #148 | MIT | 2026-11-05 | the Apple M5 Max |
+| `scenes/character_crowd/crowd.gd` | hand-authored for #148 | MIT | 2026-11-05 | the Apple M5 Max |
 | `generators/dense_city/validate_dense_city.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/variants.cfg` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/README.md` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |

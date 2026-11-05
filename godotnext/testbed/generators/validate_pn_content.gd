@@ -16,6 +16,8 @@ extends SceneTree
 const OUT := "res://generated/pn_content"
 const FOLIAGE_SCENES: Array[String] = ["foliage_field.tscn", "foliage_field_assemblies.tscn", "foliage_field_voxels.tscn"]
 const TREE_GRASS_TOTAL := 200000
+const CROWD_COUNT := 100
+const CROWD_MIN_TRIANGLES := 500000
 const CLIFF_MIN_TRIANGLES := 60000
 const ROAD_MIN_TRIANGLES := 1000
 
@@ -42,6 +44,7 @@ func _run() -> void:
 		_check_foliage(scene)
 	_check_cliff()
 	_check_road()
+	_check_crowd()
 	if _failures.is_empty():
 		print("validate_pn_content: all scenes verified.")
 		quit(0)
@@ -116,6 +119,21 @@ func _check_cliff() -> void:
 	_check(material != null and material.albedo_texture is NoiseTexture2D,
 			"displacement_cliff has no tiling noise height texture.")
 	_check_cameras_and_path(root, "displacement_cliff.tscn")
+	root.free()
+
+
+func _check_crowd() -> void:
+	var root := _load_scene("character_crowd.tscn")
+	if root == null:
+		return
+	_check(root.get_script() != null, "character_crowd.tscn has no crowd runtime script.")
+	var crowd := root.get_node_or_null("Crowd")
+	var count := crowd.get_child_count() if crowd != null else 0
+	_check(count == CROWD_COUNT, "character_crowd.tscn has %d actors, expected %d." % [count, CROWD_COUNT])
+	if crowd != null and count > 0:
+		var triangles := int(crowd.get_child(0).get_meta("triangles", 0))
+		_check(triangles >= CROWD_MIN_TRIANGLES, "character_crowd actor has %d triangles, expected at least %d." % [triangles, CROWD_MIN_TRIANGLES])
+	_check_cameras_and_path(root, "character_crowd.tscn")
 	root.free()
 
 

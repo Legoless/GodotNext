@@ -37,6 +37,7 @@ const BONE_SHIN_R := 11
 static var _mesh: ArrayMesh
 static var _skin: Skin
 static var _animation: Animation
+static var _mesh_scaled := {}
 
 
 static func contract_error() -> String:
@@ -68,6 +69,17 @@ static func contract_error() -> String:
 static func shared_mesh() -> ArrayMesh:
 	_ensure()
 	return _mesh
+
+
+## A denser body for the PN Character Crowd (#148): every body box is
+## subdivided by [param p_segment_scale] per axis, so 8 gives about 561k
+## triangles with the same skeleton and skin bindings. Cached per scale.
+static func shared_mesh_scaled(p_segment_scale: int) -> ArrayMesh:
+	if p_segment_scale <= 1:
+		return shared_mesh()
+	if not _mesh_scaled.has(p_segment_scale):
+		_mesh_scaled[p_segment_scale] = _build_mesh(p_segment_scale, false)["mesh"]
+	return _mesh_scaled[p_segment_scale]
 
 
 static func shared_skin() -> Skin:
@@ -103,7 +115,7 @@ static func perf_position(p_index: int, p_frame: int) -> Vector3:
 	return Vector3(camera.x, 0.0, camera.z) + basis.x * offset.x + (-basis.z) * offset.y
 
 
-static func make_character(p_name: String) -> Node3D:
+static func make_character(p_name: String, p_mesh: ArrayMesh = null) -> Node3D:
 	var root := Node3D.new()
 	root.name = p_name
 	var skeleton := Skeleton3D.new()
@@ -112,7 +124,7 @@ static func make_character(p_name: String) -> Node3D:
 	root.add_child(skeleton)
 	var visual := MeshInstance3D.new()
 	visual.name = "Visual"
-	visual.mesh = shared_mesh()
+	visual.mesh = p_mesh if p_mesh != null else shared_mesh()
 	visual.skin = shared_skin()
 	visual.skeleton = NodePath("../Skeleton3D")
 	var material := Scaffold.make_constant_material("Walker", Color(0.62, 0.48, 0.38), 0.9, 0.0)
@@ -125,7 +137,7 @@ static func make_character(p_name: String) -> Node3D:
 	player.add_animation_library(&"", library)
 	player.assigned_animation = &"walk"
 	root.add_child(player)
-	root.set_meta("triangles", triangle_count())
+	root.set_meta("triangles", visual.mesh.get_faces().size() / 3)
 	return root
 
 
@@ -240,7 +252,7 @@ static func _swing(p_animation: Animation, p_bone: String, p_degrees: float, p_p
 		p_animation.rotation_track_insert_key(track, u * WALK_CYCLE_SEC, Quaternion(Vector3.RIGHT, angle))
 
 
-static func _build_mesh() -> Dictionary:
+static func _build_mesh(p_segment_scale: int = 1, p_fill: bool = true) -> Dictionary:
 	var skin := Skin.new()
 	var parents: Array[int] = [-1, 0, 1, 2, 2, 4, 2, 6, 0, 8, 0, 10]
 	var origins: Array[Vector3] = [
@@ -257,25 +269,25 @@ static func _build_mesh() -> Dictionary:
 	var tool := SurfaceTool.new()
 	tool.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var tris := 0
-	tris += _add_box(tool, global[BONE_HIPS] * Vector3(0.0, 0.02, 0.0), Vector3(0.28, 0.16, 0.18), Vector3i(6, 3, 4), BONE_HIPS)
-	tris += _add_box(tool, global[BONE_SPINE] * Vector3(0.0, 0.08, 0.0), Vector3(0.24, 0.16, 0.16), Vector3i(4, 4, 3), BONE_SPINE)
-	tris += _add_box(tool, global[BONE_CHEST] * Vector3(0.0, 0.08, 0.0), Vector3(0.34, 0.28, 0.18), Vector3i(14, 22, 10), BONE_CHEST)
-	tris += _add_box(tool, global[BONE_HEAD] * Vector3(0.0, 0.12, 0.0), Vector3(0.18, 0.22, 0.18), Vector3i(6, 6, 6), BONE_HEAD)
-	tris += _add_box(tool, global[BONE_UARM_L] * Vector3(0.0, -0.14, 0.0), Vector3(0.08, 0.26, 0.08), Vector3i(5, 12, 5), BONE_UARM_L)
-	tris += _add_box(tool, global[BONE_LARM_L] * Vector3(0.0, -0.13, 0.0), Vector3(0.07, 0.24, 0.07), Vector3i(4, 10, 4), BONE_LARM_L)
-	tris += _add_box(tool, global[BONE_UARM_R] * Vector3(0.0, -0.14, 0.0), Vector3(0.08, 0.26, 0.08), Vector3i(5, 12, 5), BONE_UARM_R)
-	tris += _add_box(tool, global[BONE_LARM_R] * Vector3(0.0, -0.13, 0.0), Vector3(0.07, 0.24, 0.07), Vector3i(4, 10, 4), BONE_LARM_R)
-	tris += _add_box(tool, global[BONE_THIGH_L] * Vector3(0.0, -0.20, 0.0), Vector3(0.12, 0.38, 0.12), Vector3i(6, 14, 6), BONE_THIGH_L)
-	tris += _add_box(tool, global[BONE_SHIN_L] * Vector3(0.0, -0.18, 0.0), Vector3(0.09, 0.36, 0.09), Vector3i(5, 12, 5), BONE_SHIN_L)
-	tris += _add_box(tool, global[BONE_THIGH_R] * Vector3(0.0, -0.20, 0.0), Vector3(0.12, 0.38, 0.12), Vector3i(6, 14, 6), BONE_THIGH_R)
-	tris += _add_box(tool, global[BONE_SHIN_R] * Vector3(0.0, -0.18, 0.0), Vector3(0.09, 0.36, 0.09), Vector3i(5, 12, 5), BONE_SHIN_R)
-	tris += _add_box(tool, global[BONE_UARM_L] * Vector3(0.0, -0.28, 0.0), Vector3(0.06, 0.06, 0.06), Vector3i(3, 3, 3), BONE_LARM_L)
-	tris += _add_box(tool, global[BONE_UARM_R] * Vector3(0.0, -0.28, 0.0), Vector3(0.06, 0.06, 0.06), Vector3i(3, 3, 3), BONE_LARM_R)
-	tris += _add_box(tool, global[BONE_SHIN_L] * Vector3(0.0, -0.38, 0.06), Vector3(0.10, 0.06, 0.18), Vector3i(4, 2, 6), BONE_SHIN_L)
-	tris += _add_box(tool, global[BONE_SHIN_R] * Vector3(0.0, -0.38, 0.06), Vector3(0.10, 0.06, 0.18), Vector3i(4, 2, 6), BONE_SHIN_R)
+	tris += _add_box(tool, global[BONE_HIPS] * Vector3(0.0, 0.02, 0.0), Vector3(0.28, 0.16, 0.18), Vector3i(6 * p_segment_scale, 3 * p_segment_scale, 4 * p_segment_scale), BONE_HIPS)
+	tris += _add_box(tool, global[BONE_SPINE] * Vector3(0.0, 0.08, 0.0), Vector3(0.24, 0.16, 0.16), Vector3i(4 * p_segment_scale, 4 * p_segment_scale, 3 * p_segment_scale), BONE_SPINE)
+	tris += _add_box(tool, global[BONE_CHEST] * Vector3(0.0, 0.08, 0.0), Vector3(0.34, 0.28, 0.18), Vector3i(14 * p_segment_scale, 22 * p_segment_scale, 10 * p_segment_scale), BONE_CHEST)
+	tris += _add_box(tool, global[BONE_HEAD] * Vector3(0.0, 0.12, 0.0), Vector3(0.18, 0.22, 0.18), Vector3i(6 * p_segment_scale, 6 * p_segment_scale, 6 * p_segment_scale), BONE_HEAD)
+	tris += _add_box(tool, global[BONE_UARM_L] * Vector3(0.0, -0.14, 0.0), Vector3(0.08, 0.26, 0.08), Vector3i(5 * p_segment_scale, 12 * p_segment_scale, 5 * p_segment_scale), BONE_UARM_L)
+	tris += _add_box(tool, global[BONE_LARM_L] * Vector3(0.0, -0.13, 0.0), Vector3(0.07, 0.24, 0.07), Vector3i(4 * p_segment_scale, 10 * p_segment_scale, 4 * p_segment_scale), BONE_LARM_L)
+	tris += _add_box(tool, global[BONE_UARM_R] * Vector3(0.0, -0.14, 0.0), Vector3(0.08, 0.26, 0.08), Vector3i(5 * p_segment_scale, 12 * p_segment_scale, 5 * p_segment_scale), BONE_UARM_R)
+	tris += _add_box(tool, global[BONE_LARM_R] * Vector3(0.0, -0.13, 0.0), Vector3(0.07, 0.24, 0.07), Vector3i(4 * p_segment_scale, 10 * p_segment_scale, 4 * p_segment_scale), BONE_LARM_R)
+	tris += _add_box(tool, global[BONE_THIGH_L] * Vector3(0.0, -0.20, 0.0), Vector3(0.12, 0.38, 0.12), Vector3i(6 * p_segment_scale, 14 * p_segment_scale, 6 * p_segment_scale), BONE_THIGH_L)
+	tris += _add_box(tool, global[BONE_SHIN_L] * Vector3(0.0, -0.18, 0.0), Vector3(0.09, 0.36, 0.09), Vector3i(5 * p_segment_scale, 12 * p_segment_scale, 5 * p_segment_scale), BONE_SHIN_L)
+	tris += _add_box(tool, global[BONE_THIGH_R] * Vector3(0.0, -0.20, 0.0), Vector3(0.12, 0.38, 0.12), Vector3i(6 * p_segment_scale, 14 * p_segment_scale, 6 * p_segment_scale), BONE_THIGH_R)
+	tris += _add_box(tool, global[BONE_SHIN_R] * Vector3(0.0, -0.18, 0.0), Vector3(0.09, 0.36, 0.09), Vector3i(5 * p_segment_scale, 12 * p_segment_scale, 5 * p_segment_scale), BONE_SHIN_R)
+	tris += _add_box(tool, global[BONE_UARM_L] * Vector3(0.0, -0.28, 0.0), Vector3(0.06, 0.06, 0.06), Vector3i(3 * p_segment_scale, 3 * p_segment_scale, 3 * p_segment_scale), BONE_LARM_L)
+	tris += _add_box(tool, global[BONE_UARM_R] * Vector3(0.0, -0.28, 0.0), Vector3(0.06, 0.06, 0.06), Vector3i(3 * p_segment_scale, 3 * p_segment_scale, 3 * p_segment_scale), BONE_LARM_R)
+	tris += _add_box(tool, global[BONE_SHIN_L] * Vector3(0.0, -0.38, 0.06), Vector3(0.10, 0.06, 0.18), Vector3i(4 * p_segment_scale, 2 * p_segment_scale, 6 * p_segment_scale), BONE_SHIN_L)
+	tris += _add_box(tool, global[BONE_SHIN_R] * Vector3(0.0, -0.38, 0.06), Vector3(0.10, 0.06, 0.18), Vector3i(4 * p_segment_scale, 2 * p_segment_scale, 6 * p_segment_scale), BONE_SHIN_R)
 	var column := 0
 	var row := 0
-	while tris < TRIANGLES:
+	while p_fill and tris < TRIANGLES:
 		var center := global[BONE_CHEST] * Vector3(-0.12 + float(column) * 0.012, 0.02 + float(row) * 0.012, 0.10)
 		_add_quad(tool, center, Vector3(0.005, 0.0, 0.0), Vector3(0.0, 0.005, 0.0), Vector3(0.0, 0.0, 1.0), BONE_CHEST)
 		tris += 2
