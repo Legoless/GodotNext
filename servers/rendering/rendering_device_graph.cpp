@@ -2032,7 +2032,7 @@ void RenderingDeviceGraph::add_buffer_update(RDD::BufferID p_dst, ResourceTracke
 	_add_command_to_graph(&p_dst_tracker, &buffer_usage, 1, command_index, command);
 }
 
-void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<RenderingDeviceGraph::ResourceUsage> p_usages) {
+void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<RenderingDeviceGraph::ResourceUsage> p_usages, BitField<RDD::PipelineStageBits> p_stages) {
 	DEV_ASSERT(p_trackers.size() == p_usages.size());
 
 	int32_t command_index;
@@ -2040,7 +2040,18 @@ void RenderingDeviceGraph::add_driver_callback(RDD::DriverCallback p_callback, v
 	command->type = RecordedCommand::TYPE_DRIVER_CALLBACK;
 	command->callback = p_callback;
 	command->userdata = p_userdata;
+	// GodotNext: pu_core_rd_callback_stages (#101). The callback's own stage seeds the barriers on
+	// both sides, exactly like a compute or draw command.
+	command->self_stages = p_stages;
 	_add_command_to_graph((ResourceTracker **)p_trackers.ptr(), (ResourceUsage *)p_usages.ptr(), p_trackers.size(), command_index, command);
+}
+
+void RenderingDeviceGraph::command_get_stages(int32_t p_command_index, BitField<RDD::PipelineStageBits> &r_self, BitField<RDD::PipelineStageBits> &r_previous, BitField<RDD::PipelineStageBits> &r_next) const {
+	DEV_ASSERT(p_command_index >= 0 && p_command_index < command_count);
+	const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
+	r_self = command->self_stages;
+	r_previous = command->previous_stages;
+	r_next = command->next_stages;
 }
 
 void RenderingDeviceGraph::add_raytracing_list_begin() {

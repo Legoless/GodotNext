@@ -1613,7 +1613,7 @@ Error RenderingDevice::buffer_update(RID p_buffer, uint32_t p_offset, uint32_t p
 	return _buffer_update(buffer, p_buffer, p_offset, p_size, p_data);
 }
 
-Error RenderingDevice::driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources) {
+Error RenderingDevice::driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources, BitField<RDD::PipelineStageBits> p_stages) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 
 	ERR_FAIL_COND_V_MSG(draw_list.active, ERR_INVALID_PARAMETER,
@@ -1663,10 +1663,50 @@ Error RenderingDevice::driver_callback_add(RDD::DriverCallback p_callback, void 
 		}
 	}
 
-	draw_graph.add_driver_callback(p_callback, p_userdata, trackers, usages);
+	draw_graph.add_driver_callback(p_callback, p_userdata, trackers, usages, p_stages);
 
 	return OK;
 }
+
+#ifdef DEV_ENABLED
+// GodotNext: pu_core_rd_callback_stages (#101). Records the colour clear inside the driver callback so
+// the sync fixture can prove that the callback's declared stages reach the barriers around it.
+struct DevDriverCallbackClear {
+	RDD::TextureID texture;
+	Color color;
+	RDD::TextureSubresourceRange range;
+};
+
+static void _dev_driver_callback_clear_run(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_command_buffer, void *p_userdata) {
+	const DevDriverCallbackClear *clear = static_cast<const DevDriverCallbackClear *>(p_userdata);
+	p_driver->command_clear_color_texture(p_command_buffer, clear->texture, RDD::TEXTURE_LAYOUT_GENERAL, clear->color, clear->range);
+}
+
+void RenderingDevice::_dev_driver_callback_clear(RID p_texture, const Color &p_color, bool p_force_zero_stages) {
+	ERR_RENDER_THREAD_GUARD();
+	ERR_FAIL_COND_MSG(draw_list.active || compute_list.active || raytracing_list.active, "The dev clear callback must be added outside a list.");
+
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	ERR_FAIL_NULL_MSG(texture, "The dev clear callback needs a valid texture.");
+
+	DevDriverCallbackClear *clear = memnew(DevDriverCallbackClear);
+	clear->texture = texture->driver_id;
+	clear->color = p_color;
+	clear->range.aspect = RDD::TEXTURE_ASPECT_COLOR_BIT;
+	clear->range.base_mipmap = 0;
+	clear->range.mipmap_count = texture->mipmaps;
+	clear->range.base_layer = 0;
+	clear->range.layer_count = texture->layers;
+	dev_callback_clears.push_back(clear);
+
+	CallbackResource resource;
+	resource.rid = p_texture;
+	resource.type = CALLBACK_RESOURCE_TYPE_TEXTURE;
+	resource.usage = CALLBACK_RESOURCE_USAGE_GENERAL;
+	const BitField<RDD::PipelineStageBits> stages = p_force_zero_stages ? BitField<RDD::PipelineStageBits>() : BitField<RDD::PipelineStageBits>(RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT);
+	driver_callback_add((RDD::DriverCallback)_dev_driver_callback_clear_run, clear, VectorView<CallbackResource>(&resource, 1), stages);
+}
+#endif
 
 String RenderingDevice::get_perf_report() const {
 	String perf_report_text;
@@ -9745,6 +9785,9 @@ void RenderingDevice::set_feature_mock(bool p_enabled, uint64_t p_supported_feat
 }
 
 void RenderingDevice::_bind_methods() {
+#ifdef DEV_ENABLED
+	ClassDB::bind_method(D_METHOD("_dev_driver_callback_clear", "texture", "color", "force_zero_stages"), &RenderingDevice::_dev_driver_callback_clear);
+#endif
 	ClassDB::bind_method(D_METHOD("texture_create", "format", "view", "data"), &RenderingDevice::_texture_create, DEFVAL(Array()));
 	ClassDB::bind_method(D_METHOD("texture_create_shared", "view", "with_texture"), &RenderingDevice::_texture_create_shared);
 	ClassDB::bind_method(D_METHOD("texture_create_shared_from_slice", "view", "with_texture", "layer", "mipmap", "mipmaps", "slice_type", "layers"), &RenderingDevice::_texture_create_shared_from_slice, DEFVAL(1), DEFVAL(TEXTURE_SLICE_2D), DEFVAL(0));
@@ -10582,6 +10625,13 @@ void RenderingDevice::make_current() {
 
 RenderingDevice::~RenderingDevice() {
 	finalize();
+
+#ifdef DEV_ENABLED
+	for (void *clear : dev_callback_clears) {
+		memdelete(static_cast<DevDriverCallbackClear *>(clear));
+	}
+	dev_callback_clears.clear();
+#endif
 
 	if (singleton == this) {
 		singleton = nullptr;

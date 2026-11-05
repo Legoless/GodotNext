@@ -919,6 +919,9 @@ public:
 	void initialize(RDD *p_driver, RenderPassCreationFunction p_render_pass_creation_function, uint32_t p_frame_count, RDD::CommandQueueFamilyID p_secondary_command_queue_family, uint32_t p_secondary_command_buffers_per_frame);
 	void finalize();
 	void begin();
+	// GodotNext: pu_core_rd_callback_stages (#101). C++-only read of the stages a recorded command
+	// declared and the stages it inherited from its neighbors. Add-time data, no driver call.
+	void command_get_stages(int32_t p_command_index, BitField<RDD::PipelineStageBits> &r_self, BitField<RDD::PipelineStageBits> &r_previous, BitField<RDD::PipelineStageBits> &r_next) const;
 	// GodotNext: as_build_modes
 	void add_blas_build(RDD::AccelerationStructureID p_blas, RDD::BufferID p_scratch_buffer, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode);
 	// GodotNext: tlas_from_buffer — p_instance_tracker is the GPU-written instance buffer, null on the CPU path.
@@ -930,7 +933,7 @@ public:
 	void add_buffer_copy(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, RDD::BufferCopyRegion p_region);
 	void add_buffer_get_data(RDD::BufferID p_src, ResourceTracker *p_src_tracker, RDD::BufferID p_dst, RDD::BufferCopyRegion p_region);
 	void add_buffer_update(RDD::BufferID p_dst, ResourceTracker *p_dst_tracker, VectorView<RecordedBufferCopy> p_buffer_copies);
-	void add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
+	void add_driver_callback(RDD::DriverCallback p_callback, void *p_userdata, VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages, BitField<RDD::PipelineStageBits> p_stages);
 	void add_raytracing_list_begin();
 	void add_raytracing_list_bind_pipeline(RDD::RaytracingPipelineID p_pipeline);
 	void add_raytracing_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);

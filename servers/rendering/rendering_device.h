@@ -330,7 +330,13 @@ public:
 		CallbackResourceUsage usage = CALLBACK_RESOURCE_USAGE_NONE;
 	};
 
-	Error driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources);
+	Error driver_callback_add(RDD::DriverCallback p_callback, void *p_userdata, VectorView<CallbackResource> p_resources, BitField<RDD::PipelineStageBits> p_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT);
+#ifdef DEV_ENABLED
+	// GodotNext: pu_core_rd_callback_stages (#101). Dev-only fixture for the callback sync test:
+	// clears a texture from a driver callback with the declared stages, or none when forced.
+	void _dev_driver_callback_clear(RID p_texture, const Color &p_color, bool p_force_zero_stages);
+	LocalVector<void *> dev_callback_clears;
+#endif
 
 	/*****************/
 	/**** TEXTURE ****/
