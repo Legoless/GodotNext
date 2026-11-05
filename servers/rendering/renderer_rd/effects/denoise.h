@@ -170,6 +170,9 @@ public:
 	struct RRHooks {
 		bool stabilizer_enabled = true;
 		uint32_t probe_temporal_max_history = 16;
+		// GodotNext: nextgi_denoise_specular (#54). Default-off DLSS-RR hooks (#206).
+		bool specular_filter_enabled = true;
+		int sampling_mode = 0; // 0 = blue-noise tile, 1 = white hash.
 	};
 	static RRHooks parse_rr_hooks(const String &p_value);
 

@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
+#include "servers/rendering/renderer_rd/environment/nextgi_blue_noise.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
@@ -88,8 +89,10 @@ struct GatherParamsGPU {
 	float reflect_divisor;
 	uint32_t reflect_enabled;
 	uint32_t reflect_debug;
+	uint32_t sampling_mode;
+	uint32_t pad4;
 };
-static_assert(sizeof(GatherParamsGPU) == 264, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 272, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -187,7 +190,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[26] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[27] = { blue_noise_texture, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -212,6 +215,7 @@ void NextGIGather::free_resources() {
 	specular_scratch = RID();
 	specular_denoised = RID();
 	specular_history_length = RID();
+	blue_noise_texture = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -426,6 +430,8 @@ void NextGIGather::init() {
 		const NextGIDenoise::RRHooks hooks = NextGIDenoise::parse_rr_hooks(OS::get_singleton()->get_environment("GODOT_NEXTGI_RR_HOOKS"));
 		rr_stabilizer_enabled = hooks.stabilizer_enabled;
 		rr_probe_history_cap = hooks.probe_temporal_max_history;
+		rr_specular_filter_enabled = hooks.specular_filter_enabled;
+		rr_sampling_mode = uint32_t(hooks.sampling_mode);
 	}
 #endif
 }
@@ -526,6 +532,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.reflect_divisor = 2.0f;
 	params.reflect_enabled = 1u;
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
+	params.sampling_mode = rr_sampling_mode;
+	params.pad4 = 0u;
 	RID hiz_texture = dummy_color;
 	RID last_frame_texture = dummy_color;
 	if (rb.is_valid() && rb->has_texture(RB_SCOPE_SSR, RB_HIZ) && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME)) {
@@ -624,6 +632,19 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!clamp_totals_buffer.is_valid()) {
 		clamp_totals_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 2);
 	}
+	if (!blue_noise_texture.is_valid()) {
+		RD::TextureFormat noise_format;
+		noise_format.width = 64;
+		noise_format.height = 64;
+		noise_format.format = RD::DATA_FORMAT_R8G8_UNORM;
+		noise_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<Vector<uint8_t>> noise_data;
+		Vector<uint8_t> noise;
+		noise.resize(64 * 64 * 2);
+		memcpy(noise.ptrw(), nextgi_blue_noise_tile, 64 * 64 * 2);
+		noise_data.push_back(noise);
+		blue_noise_texture = rd->texture_create(noise_format, RD::TextureView(), noise_data);
+	}
 	last_reflection_output = rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : RID();
 	last_specular_hit = rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID();
 	if (last_screen_w > 0 && last_screen_h > 0) {
@@ -657,7 +678,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
 	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	RD::Uniform uniforms[38] = {
+	RD::Uniform uniforms[39] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -695,12 +716,13 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, clamp_totals_buffer.is_valid() ? clamp_totals_buffer : dummy_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 38, Vector<RID>({ sampler_nearest, blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color })),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
-	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), reflect_shader_rid, 0);
+	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), reflect_shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -960,6 +982,25 @@ void NextGIGather::_denoise_specular() {
 	}
 	const Size2i trace_size(MAX(last_screen_w / 2u, 1u), MAX(last_screen_h / 2u, 1u));
 	const Size2i screen_size(last_screen_w, last_screen_h);
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+
+	if (!rr_specular_filter_enabled) {
+		// DLSS-RR bypass hook (#206): raw specular goes straight to the upsample and the history
+		// is dropped so re-enabling starts fresh.
+		if (specular_history.is_valid()) {
+			rd->texture_clear(specular_history, Color(0, 0, 0, 0), 0, 1, 0, 1);
+			rd->texture_clear(specular_history_length, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		}
+		NextGIDenoise::SpecularUpsampleParams upsample;
+		upsample.raw = specular_raw;
+		upsample.depth = last_depth;
+		upsample.normal_roughness = last_normal_roughness;
+		upsample.output = last_reflection_output;
+		upsample.trace_size = trace_size;
+		upsample.screen_size = screen_size;
+		denoise->process_specular_upsample(upsample);
+		return;
+	}
 
 	NextGIDenoise::SpecularTemporalParams temporal;
 	temporal.raw = specular_raw;
@@ -979,7 +1020,6 @@ void NextGIGather::_denoise_specular() {
 	temporal.velocity_enabled = last_velocity.is_valid();
 	denoise->process_specular_temporal(temporal);
 
-	RenderingDevice *rd = RenderingDevice::get_singleton();
 	const Vector3i extent(trace_size.width, trace_size.height, 1);
 	rd->texture_copy(specular_denoised, specular_history, Vector3(), Vector3(), extent, 0, 0, 0, 0);
 

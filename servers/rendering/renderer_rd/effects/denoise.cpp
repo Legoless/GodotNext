@@ -402,6 +402,18 @@ NextGIDenoise::RRHooks NextGIDenoise::parse_rr_hooks(const String &p_value) {
 			}
 		} else if (key == "probe_history" && value.is_valid_int()) {
 			hooks.probe_temporal_max_history = uint32_t(CLAMP(value.to_int(), 0, 4096));
+		} else if (key == "specular_filter") {
+			if (value == "0") {
+				hooks.specular_filter_enabled = false;
+			} else if (value == "1") {
+				hooks.specular_filter_enabled = true;
+			}
+		} else if (key == "sampling") {
+			if (value == "white") {
+				hooks.sampling_mode = 1;
+			} else if (value == "blue") {
+				hooks.sampling_mode = 0;
+			}
 		}
 	}
 	return hooks;

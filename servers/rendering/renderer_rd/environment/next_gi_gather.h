@@ -104,12 +104,15 @@ class NextGIGather {
 	bool history_valid = false;
 	bool rr_stabilizer_enabled = true;
 	uint32_t rr_probe_history_cap = 16;
+	bool rr_specular_filter_enabled = true;
+	uint32_t rr_sampling_mode = 0;
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID reflect_uniform_set;
 	RID reflect_counter_buffer;
 	RID specular_debug;
 	RID clamp_totals_buffer;
+	RID blue_noise_texture;
 	RID specular_raw;
 	RID specular_history;
 	RID specular_scratch;

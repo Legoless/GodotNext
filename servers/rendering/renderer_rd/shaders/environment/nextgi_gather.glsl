@@ -27,6 +27,8 @@ layout(set = 0, binding = 32) uniform sampler2D normal_roughness_tex;
 layout(rgba16f, set = 0, binding = 33) uniform image2D reflection_image;
 // GodotNext: nextgi_firefly_clamp (#54). Clamped-energy counter (Q16): removed and total sample
 // luminance in quarter units, summed with 32-bit integer atomics (order independent).
+// GodotNext: nextgi_blue_noise (#54). 64x64 RG8 void-and-cluster tile.
+layout(set = 0, binding = 38) uniform sampler2D blue_noise_tex;
 layout(set = 0, binding = 37, std430) buffer NextGIClampTotals {
 	uint removed;
 	uint total;
@@ -55,6 +57,13 @@ nextgi_wrc;
 #define NEXTGI_TLAS nextgi_tlas
 #define NEXTGI_WRC
 #include "nextgi_rt_inc.glsl"
+
+// GodotNext: nextgi_blue_noise (#54). R2-rotated 64x64 tile lookup, wrapping by bitmask.
+vec2 nextgi_blue_noise_sample(ivec2 p_pixel, uint p_frame) {
+	vec2 offset = fract(vec2(p_frame) * vec2(0.7548776662, 0.5698402910)) * 64.0;
+	ivec2 coord = (p_pixel + ivec2(offset)) & ivec2(63);
+	return texelFetch(blue_noise_tex, coord, 0).rg;
+}
 
 layout(set = 0, binding = 1) uniform sampler2D depth_tex;
 layout(set = 0, binding = 2) uniform sampler2D radiance_tex;
@@ -133,6 +142,8 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	float reflect_divisor;
 	uint reflect_enabled;
 	uint reflect_debug;
+	uint sampling_mode;
+	uint pad4;
 }
 params;
 
@@ -466,6 +477,9 @@ void nextgi_gather_main() {
 
 	vec3 raw_radiance[16];
 	float angle = float(params.frame) * 2.3999632;
+	if (params.sampling_mode == 0u) {
+		angle = nextgi_blue_noise_sample(ivec2(gl_GlobalInvocationID.xy), params.frame).x * 6.2831853;
+	}
 	float ca = cos(angle);
 	float sa = sin(angle);
 	uint uncovered_count = 0u;
@@ -733,6 +747,9 @@ void nextgi_reflect_main() {
 
 	uint hash = nextgi_reflect_hash(uint(uv.x * 65535.0) ^ (uint(uv.y * 65535.0) << 16) ^ params.frame);
 	vec2 seed = vec2(float(hash & 0xFFFFu), float(hash >> 16)) / 65535.0;
+	if (params.sampling_mode == 0u) {
+		seed = nextgi_blue_noise_sample(pixel, params.frame);
+	}
 
 	vec3 radiance;
 	float confidence = 0.0;
