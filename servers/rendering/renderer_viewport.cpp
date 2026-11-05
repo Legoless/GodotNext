@@ -30,6 +30,8 @@
 
 #include "renderer_viewport.h"
 
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/transform_interpolator.h"
@@ -133,6 +135,37 @@ Vector<RendererViewport::Viewport *> RendererViewport::_sort_active_viewports() 
 	return result;
 }
 
+// GodotNext: pu_dlss_scaling_mode (#103).
+static const char *scaling_3d_reason_name(RSE::ViewportScaling3DReason p_reason) {
+	switch (p_reason) {
+		case RSE::VIEWPORT_SCALING_3D_REASON_NONE:
+			return "none";
+		case RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED:
+			return "renderer unsupported";
+		case RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED:
+			return "API unsupported";
+		case RSE::VIEWPORT_SCALING_3D_REASON_MODULE_DISABLED:
+			return "module disabled";
+		case RSE::VIEWPORT_SCALING_3D_REASON_NOT_NVIDIA_RTX:
+			return "not an NVIDIA RTX device";
+		case RSE::VIEWPORT_SCALING_3D_REASON_DRIVER_TOO_OLD:
+			return "driver too old";
+		case RSE::VIEWPORT_SCALING_3D_REASON_RUNTIME_MISSING:
+			return "runtime missing";
+		case RSE::VIEWPORT_SCALING_3D_REASON_EXTENSION_MISSING:
+			return "extension missing";
+		case RSE::VIEWPORT_SCALING_3D_REASON_PROJECT_ID_MISSING:
+			return "project ID missing";
+		case RSE::VIEWPORT_SCALING_3D_REASON_FEATURE_CREATE_FAILED:
+			return "feature creation failed";
+		case RSE::VIEWPORT_SCALING_3D_REASON_SCALE_UNSUPPORTED:
+			return "scale unsupported";
+		case RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED:
+			return "view count unsupported";
+	}
+	return "unknown";
+}
+
 void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 	if (p_viewport->render_buffers.is_valid()) {
 		if (p_viewport->size.width == 0 || p_viewport->size.height == 0) {
@@ -141,6 +174,10 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			const float EPSILON = 0.0001;
 			float scaling_3d_scale = p_viewport->scaling_3d_scale;
 			RSE::ViewportScaling3DMode scaling_3d_mode = p_viewport->scaling_3d_mode;
+			// GodotNext: pu_dlss_scaling_mode (#103). The setter keeps the
+			// request; this records the reason and the effective scale.
+			p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+			p_viewport->effective_scaling_3d_scale = scaling_3d_scale;
 			bool upscaler_available = p_viewport->fsr_enabled;
 			RSE::ViewportScaling3DType scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 
@@ -154,12 +191,18 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			}
 
 			if (scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_NEAREST && OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
+				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+					p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED;
+				}
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
-				WARN_PRINT_ONCE("MetalFX and FSR upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
+				WARN_PRINT_ONCE("MetalFX, FSR and DLSS upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
 			}
 
-			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
+			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
+				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+					p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED;
+				}
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 				WARN_PRINT_ONCE("MetalFX temporal and FSR upscaling are not supported in the Mobile renderer. Falling back to bilinear scaling.");
@@ -168,6 +211,36 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			RenderingServerEnums::ViewportMSAA msaa_3d = p_viewport->msaa_3d;
 
 #ifdef RD_ENABLED
+			// GodotNext: pu_dlss_scaling_mode (#103). §3.2 order: API, module,
+			// module reasons, scale/view limits; then fall back to MetalFX
+			// temporal or FSR2 with one reason.
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+				float effective_scale = scaling_3d_scale;
+				RSE::ViewportScaling3DReason module_reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+				if (upscaler != nullptr) {
+					module_reason = upscaler->get_availability(p_viewport->view_count, scaling_3d_scale, effective_scale);
+					scaling_3d_scale = effective_scale;
+				}
+				const RSE::ViewportScaling3DReason reason = nextgi_resolve_dlss_reason(
+						RD::get_singleton()->get_device_api_name() == "Vulkan", upscaler != nullptr, module_reason,
+						scaling_3d_scale, p_viewport->view_count, p_viewport->size.width, p_viewport->size.height);
+				if (reason != RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
+					p_viewport->scaling_3d_reason = reason;
+					static uint32_t logged_dlss_reasons = 0;
+					if ((logged_dlss_reasons & (1u << reason)) == 0) {
+						logged_dlss_reasons |= 1u << reason;
+						WARN_PRINT(vformat("DLSS 3D scaling is unavailable (%s). Falling back to a supported upscaler.", scaling_3d_reason_name(reason)));
+					}
+					if (RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL)) {
+						scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL;
+					} else {
+						scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+					}
+					scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
+				}
+			}
+
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL && !RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL)) {
 				if (RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_SPATIAL)) {
 					// Prefer MetalFX spatial if it is supported, which will be much more efficient than FSR2,
@@ -226,6 +299,15 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 			}
+
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS && msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
+				WARN_PRINT_ONCE("DLSS does not support 3D MSAA. Disabling 3D MSAA internally.");
+				msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
+			}
+
+			p_viewport->effective_scaling_3d_scale = scaling_3d_scale;
+			// Store the resolved active mode for the status API.
+			p_viewport->scaling_3d_mode = scaling_3d_mode;
 
 			if (use_taa && scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
 				// Temporal upscalers can't be used with TAA.
@@ -1046,6 +1128,19 @@ void RendererViewport::viewport_set_use_xr(RID p_viewport, bool p_use_xr) {
 }
 #endif // !XR_DISABLED
 
+Dictionary RendererViewport::viewport_get_scaling_3d_status(RID p_viewport) const {
+	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL_V(viewport, Dictionary());
+	Dictionary status;
+	status["requested_mode"] = viewport->requested_scaling_3d_mode;
+	// The resolved mode lives on the render buffers; the viewport keeps the request.
+	status["active_mode"] = viewport->scaling_3d_mode;
+	status["reason"] = viewport->scaling_3d_reason;
+	status["effective_scale"] = viewport->effective_scaling_3d_scale;
+	status["preset"] = int(GLOBAL_GET("rendering/scaling_3d/dlss/preset"));
+	return status;
+}
+
 void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::ViewportScaling3DMode p_mode) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
@@ -1075,6 +1170,7 @@ void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::Viewpor
 
 	bool motion_vectors_before = _viewport_requires_motion_vectors(viewport);
 	viewport->scaling_3d_mode = p_mode;
+	viewport->requested_scaling_3d_mode = p_mode;
 
 	bool motion_vectors_after = _viewport_requires_motion_vectors(viewport);
 	if (motion_vectors_before != motion_vectors_after) {

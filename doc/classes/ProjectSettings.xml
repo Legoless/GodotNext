@@ -3102,6 +3102,15 @@
 		<member name="rendering/global_illumination/mesh_sdf/generate" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], scene imports generate a [MeshDistanceField] for each mesh by default. This is the default value of the [code]meshes/generate_distance_fields[/code] import option; it can be overridden per file and per mesh. New projects set this to [code]true[/code]. The fields are used by NextGI's software ray tracing tier.
 		</member>
+		<member name="rendering/global_illumination/mesh_sdf/keep_when_hwrt" type="bool" setter="" getter="" default="true">
+			Keep the mesh SDF pool resident while hardware ray tracing is active, so the tier can switch at runtime. When disabled the pool is freed in the HWRT tier.
+		</member>
+		<member name="rendering/global_illumination/mesh_sdf/pool_size_mb" type="int" setter="" getter="" default="256">
+			Size of the mesh SDF brick pool in MiB.
+		</member>
+		<member name="rendering/global_illumination/mesh_sdf/runtime_generate" type="bool" setter="" getter="" default="true">
+			Generate mesh SDFs asynchronously for meshes created at runtime that have no imported field.
+		</member>
 		<member name="rendering/global_illumination/mesh_sdf/voxels_per_meter" type="float" setter="" getter="" default="10.0">
 			The base resolution of generated [MeshDistanceField]s, in voxels per meter, before the per-import and per-mesh resolution scale is applied. The longest axis of a field is clamped to 128 voxels.
 		</member>
@@ -3509,6 +3518,18 @@
 			The number of descriptors per pool. Godot's Vulkan backend uses linear pools for descriptors that will be created and destroyed within a single frame. Instead of destroying every single descriptor every frame, they all can be destroyed at once by resetting the pool they belong to.
 			A larger number is more efficient up to a limit, after that it will only waste RAM (maximum efficiency is achieved when there is no more than 1 pool per frame). A small number could end up with one pool per descriptor, which negatively impacts performance.
 			[b]Note:[/b] Changing this property requires a restart to take effect.
+		</member>
+		<member name="rendering/scaling_3d/dlss/allow_ota_updates" type="bool" setter="" getter="" default="false">
+			Allow the NVIDIA runtime to apply over-the-air updates (DLSS SDK Supplement 6.1). Developer builds only.
+		</member>
+		<member name="rendering/scaling_3d/dlss/application_id" type="int" setter="" getter="" default="0">
+			The application ID passed to the DLSS runtime (0 lets the runtime choose). Developer builds only.
+		</member>
+		<member name="rendering/scaling_3d/dlss/preset" type="int" setter="" getter="" default="0">
+			The DLSS preset (Default, J, K, L or M). Developer builds only.
+		</member>
+		<member name="rendering/scaling_3d/dlss/project_id" type="String" setter="" getter="" default="&quot;&quot;">
+			The project ID passed to the DLSS runtime. Developer builds only; see the license packet.
 		</member>
 		<member name="rendering/scaling_3d/fsr_sharpness" type="float" setter="" getter="" default="0.2">
 			Determines how sharp the upscaled image will be when using the FSR upscaling mode. Sharpness halves with every whole number. Values go from 0.0 (sharpest) to 2.0. Values above 2.0 won't make a visible difference.

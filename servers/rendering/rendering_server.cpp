@@ -36,6 +36,7 @@
 #include "core/object/class_db.h"
 #include "core/os/os.h"
 #include "core/variant/typed_array.h"
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/shader_language.h"
@@ -2251,6 +2252,23 @@ void RenderingServer::get_argument_options(const StringName &p_function, int p_i
 }
 #endif
 
+RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode) {
+	// GodotNext: pu_dlss_scaling_mode (#103). Non-DLSS modes keep their
+	// existing rules; DLSS reports the API/module reason.
+	if (p_mode != RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+		return RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+	}
+	if (RD::get_singleton() == nullptr || RD::get_singleton()->get_device_api_name() != "Vulkan") {
+		return RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED;
+	}
+	TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+	if (upscaler == nullptr) {
+		return RSE::VIEWPORT_SCALING_3D_REASON_MODULE_DISABLED;
+	}
+	float effective_scale = 1.0f;
+	return upscaler->get_availability(1, 1.0f, effective_scale);
+}
+
 void RenderingServer::_bind_methods() {
 	BIND_CONSTANT(RSE::NO_INDEX_ARRAY);
 	BIND_CONSTANT(RSE::ARRAY_WEIGHTS_SIZE);
@@ -2874,6 +2892,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_canvas_cull_mask", "viewport", "canvas_cull_mask"), &RenderingServer::viewport_set_canvas_cull_mask);
 
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_mode", "viewport", "scaling_3d_mode"), &RenderingServer::viewport_set_scaling_3d_mode);
+	ClassDB::bind_method(D_METHOD("viewport_get_scaling_3d_status", "viewport"), &RenderingServer::viewport_get_scaling_3d_status);
+	ClassDB::bind_method(D_METHOD("scaling_3d_mode_get_availability", "mode"), &RenderingServer::scaling_3d_mode_get_availability);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);
@@ -2934,7 +2954,21 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_NEAREST);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_MAX);
+
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_MODULE_DISABLED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_NOT_NVIDIA_RTX);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_DRIVER_TOO_OLD);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_RUNTIME_MISSING);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_EXTENSION_MISSING);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_PROJECT_ID_MISSING);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_FEATURE_CREATE_FAILED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_SCALE_UNSUPPORTED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_UPDATE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_UPDATE_ONCE); // Then goes to disabled, must be manually updated.
@@ -3814,16 +3848,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/anti_aliasing/quality/use_debanding", false);
 
 	{
-		String mode_hints;
-		String mode_hints_metal;
-		{
-			Vector<String> mode_hints_arr = { "Nearest (Fastest):5", "Bilinear (Fastest):0", "FSR 1.0 (Fast):1", "FSR 2.2 (Slow):2" };
-			mode_hints = String(",").join(mode_hints_arr);
-
-			mode_hints_arr.push_back("MetalFX (Spatial - Fast):3");
-			mode_hints_arr.push_back("MetalFX (Temporal - Slow):4");
-			mode_hints_metal = String(",").join(mode_hints_arr);
-		}
+		// GodotNext: pu_dlss_scaling_mode (#103). DLSS is only listed while an
+		// upscaler is registered, so a default build's hint is unchanged.
+		const String mode_hints = TemporalUpscalerRegistry::build_mode_hint(false);
+		const String mode_hints_metal = TemporalUpscalerRegistry::build_mode_hint(true);
 
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/mode", PROPERTY_HINT_ENUM, mode_hints), 0);
 		GLOBAL_DEF_NOVAL(PropertyInfo(Variant::INT, "rendering/scaling_3d/mode.ios", PROPERTY_HINT_ENUM, mode_hints_metal), 0);
@@ -3831,6 +3859,11 @@ void RenderingServer::init() {
 	}
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/scale", PROPERTY_HINT_RANGE, "0.1,2.0,0.0001"), 1.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
+	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/scaling_3d/dlss/project_id", PROPERTY_HINT_NONE, ""), String());
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/application_id", PROPERTY_HINT_RANGE, "0,2147483647,1"), 0);
+	GLOBAL_DEF("rendering/scaling_3d/dlss/allow_ota_updates", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/textures/default_filters/texture_mipmap_bias", PROPERTY_HINT_RANGE, "-2,2,0.001"), 0.0f);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/decals/filter", PROPERTY_HINT_ENUM, "Nearest (Fast),Linear (Fast),Nearest Mipmap (Fast),Linear Mipmap (Fast),Nearest Mipmap Anisotropic (Average),Linear Mipmap Anisotropic (Average)"), RSE::DECAL_FILTER_LINEAR_MIPMAPS);
