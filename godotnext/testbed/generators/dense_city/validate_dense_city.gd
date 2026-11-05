@@ -59,10 +59,15 @@ func _run() -> void:
 	var entry: Dictionary = variants[_variant]
 	_check_output_hashes(entry)
 	match _variant:
-		"virtual", "lod_baseline":
+		"virtual", "lod_baseline", "micro_detail":
 			_check_city(entry, _variant == "lod_baseline")
 			if _variant == "lod_baseline":
 				_check_baseline_transforms(variants)
+			if _variant == "micro_detail":
+				_check(int(entry.get("subdivide_facades", 0)) >= 2,
+						"micro_detail subdivide_facades is %s, expected at least 2." % str(entry.get("subdivide_facades", 0)))
+				_check(float(entry.get("subpixel_fraction_estimate", 0.0)) >= 0.30,
+						"micro_detail sub-pixel fraction is %s, expected at least 0.30." % str(entry.get("subpixel_fraction_estimate", 0.0)))
 		"sweep_10m", "sweep_100m", "sweep_1b":
 			_check_city(entry, false)
 		"kit":

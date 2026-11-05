@@ -36,7 +36,11 @@ const Scaffold := preload("res://generators/scaffold.gd")
 
 const EXPECTED_PATH := "res://generators/dense_city/expected.json"
 const CFG_PATH := "res://generators/dense_city/variants.cfg"
-const VARIANTS: Array[String] = ["virtual", "lod_baseline", "sweep_10m", "sweep_100m", "sweep_1b", "kit", "stress_10m"]
+const VARIANTS: Array[String] = ["virtual", "lod_baseline", "sweep_10m", "sweep_100m", "sweep_1b", "kit", "stress_10m", "micro_detail"]
+## PN Micro Detail (#148): four times the base Dense City facade triangle
+## count, i.e. two subdivisions on each axis. Override with
+## `--subdivide-facades=N` for a heavier or lighter run.
+const MICRO_DETAIL_SUBDIVIDE := 2
 
 ## Mesh recipes for the kit. Subdivisions are (width, height) quad counts of
 ## each facade plane; the generator counts the actual triangles from the
@@ -88,6 +92,7 @@ const STRESS_SUBDIV := 2236
 var _seed := 1
 var _variant := "virtual"
 var _materials := 8
+var _subdivide_facades := 0
 var _out := "res://generated/dense_city"
 var _cfg := {}
 var _failures: Array[String] = []
@@ -117,6 +122,8 @@ func _run() -> void:
 			_variant = arg.trim_prefix("--variant=")
 		elif arg.begins_with("--materials="):
 			_materials = maxi(int(arg.trim_prefix("--materials=")), 1)
+		elif arg.begins_with("--subdivide-facades="):
+			_subdivide_facades = maxi(int(arg.trim_prefix("--subdivide-facades=")), 1)
 		elif arg.begins_with("--out="):
 			_out = arg.trim_prefix("--out=")
 		else:
@@ -136,6 +143,8 @@ func _run() -> void:
 				entry = _variant_sweep()
 			"kit":
 				entry = _variant_kit()
+			"micro_detail":
+				entry = _variant_micro_detail()
 			"stress_10m":
 				entry = _variant_stress()
 	if not entry.is_empty() and _failures.is_empty():
@@ -755,7 +764,7 @@ func _build_kit_meshes(p_kit_materials: int) -> Dictionary:
 	var stats: Array = []
 	var kit_seams := {}
 	for index in range(RECIPES.size()):
-		var recipe := RECIPES[index]
+		var recipe := _scaled_recipe(RECIPES[index])
 		var rng := _rng(100 + index)
 		var mesh: ArrayMesh
 		match String(recipe["kind"]):
@@ -937,8 +946,93 @@ func _variant_sweep() -> Dictionary:
 	return counters
 
 
+## Scales a recipe's facade grids and window grid for Micro Detail (#148).
+## The roof grid and the kit perimeter scale with the facades so the
+## surfaces stay coincident.
+func _scaled_recipe(p_recipe: Dictionary) -> Dictionary:
+	var scale := _subdivide_facades
+	if scale <= 1:
+		return p_recipe
+	var recipe := p_recipe.duplicate()
+	for key in ["front", "side", "roof"]:
+		if recipe.has(key):
+			var grid: Vector2i = recipe[key]
+			recipe[key] = Vector2i(grid.x * scale, grid.y * scale)
+	for key in ["cols", "rows", "perimeter_subdiv", "height_subdiv"]:
+		if recipe.has(key):
+			recipe[key] = int(recipe[key]) * scale
+	return recipe
+
+
+## Deterministic sub-pixel estimate through Micro Detail's main camera at
+## 1080p: the average facade triangle area projected at each placement's
+## distance, counted as sub-pixel when it falls under 1 px². The harness
+## counts the rendered triangles in PQ (GN-1); this is the build-time
+## design check.
+func _subpixel_fraction_estimate(p_stats: Array, p_placements: Array) -> float:
+	var camera_position := Vector3(-260.0, 2.0, 0.0)
+	var camera_target := Vector3(200.0, 14.0, 0.0)
+	var forward := (camera_target - camera_position).normalized()
+	var tan_half := tan(deg_to_rad(70.0) * 0.5)
+	var total := 0.0
+	var subpixel := 0.0
+	for placement_value in p_placements:
+		var placement: Dictionary = placement_value
+		var mesh_index := int(placement["mesh"])
+		var stats: Dictionary = p_stats[mesh_index]
+		var recipe := _scaled_recipe(RECIPES[mesh_index])
+		if not recipe.has("front") or not recipe.has("side"):
+			continue
+		var width := float(recipe["w"])
+		var depth := float(recipe["d"])
+		var height := float(recipe["h"])
+		var front: Vector2i = recipe["front"]
+		var side: Vector2i = recipe["side"]
+		var facade_triangles := 2.0 * (float(front.x) * float(front.y) + float(side.x) * float(side.y))
+		if facade_triangles <= 0.0:
+			continue
+		var average_area := 2.0 * (width * height + depth * height) / facade_triangles
+		var transform: Transform3D = placement["transform"]
+		var to_instance := transform.origin - camera_position
+		var distance := maxf(to_instance.dot(forward), 1.0)
+		if to_instance.dot(forward) <= 0.0:
+			continue
+		var pixels_per_meter := 540.0 / (distance * tan_half)
+		var triangle_pixels := average_area * pixels_per_meter * pixels_per_meter
+		var triangles := float(stats["triangles"])
+		total += triangles
+		if triangle_pixels < 1.0:
+			subpixel += triangles
+	return 0.0 if total <= 0.0 else subpixel / total
+
+
+func _variant_micro_detail() -> Dictionary:
+	if _subdivide_facades <= 0:
+		_subdivide_facades = int(_cfg.get("subdivide_facades", MICRO_DETAIL_SUBDIVIDE))
+	var built := _build_kit_meshes(int(_cfg["kit_materials"]))
+	var paths := _write_kit("kit_micro_detail", true, built["meshes"])
+	if paths.is_empty():
+		return {}
+	var placements := _make_placements()
+	var counters := _city_counters(built["stats"], placements)
+	_print_counters(counters)
+	var fraction := _subpixel_fraction_estimate(built["stats"], placements)
+	print("dense_city: micro_detail subdivide=%d subpixel_fraction=%.4f" % [_subdivide_facades, fraction])
+	_check(_subdivide_facades >= MICRO_DETAIL_SUBDIVIDE,
+			"micro_detail: subdivide_facades=%d, expected at least %d." % [_subdivide_facades, MICRO_DETAIL_SUBDIVIDE])
+	_check(fraction >= 0.30,
+			"micro_detail: sub-pixel fraction %.4f, expected at least 0.30." % fraction)
+	if not _write_city_scene(_out + "/micro_detail.tscn", "MicroDetail", placements, paths, int(counters["instanced_triangles"])):
+		return {}
+	counters["scene"] = "micro_detail.tscn"
+	counters["subdivide_facades"] = _subdivide_facades
+	counters["subpixel_fraction_estimate"] = fraction
+	counters["transform_fingerprint"] = _transform_fingerprint(placements)
+	return counters
+
+
 func _variant_kit() -> Dictionary:
-	var recipe := RECIPES[KIT_RECIPE_INDEX]
+	var recipe := _scaled_recipe(RECIPES[KIT_RECIPE_INDEX])
 	var built := _build_kit_mesh(recipe, _materials, _rng(100 + KIT_RECIPE_INDEX))
 	var mesh: ArrayMesh = built["mesh"]
 	var stats := _mesh_stats(mesh)

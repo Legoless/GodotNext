@@ -136,6 +136,116 @@
 	"unique_vertices": 5171301,
 	"working_set_ratio": 2.152035
 },
+		"micro_detail": {
+	"authored_lods": 0,
+	"instance_count": 5040,
+	"instanced_triangles": 587470360,
+	"meshes": [
+		{
+			"aabb": [-12.051314, -0.000093, -8.051317, 24.102627, 60.356094, 16.102634],
+			"instances": 12,
+			"name": "building_a",
+			"surfaces": 5,
+			"triangles": 7009098,
+			"vertices": 3513172
+		},
+		{
+			"aabb": [-10.050569, 0.000027, -9.050569, 20.101137, 72.355972, 18.101139],
+			"instances": 12,
+			"name": "building_b",
+			"surfaces": 5,
+			"triangles": 7636810,
+			"vertices": 3827540
+		},
+		{
+			"aabb": [-14.056502, 0.000164, -7.056503, 28.113003, 48.355835, 14.113007],
+			"instances": 12,
+			"name": "building_c",
+			"surfaces": 5,
+			"triangles": 5753674,
+			"vertices": 2884436
+		},
+		{
+			"aabb": [-9.066019, -0.000046, -9.066019, 18.132038, 84.356041, 18.132038],
+			"instances": 12,
+			"name": "building_d",
+			"surfaces": 5,
+			"triangles": 7817738,
+			"vertices": 3918356
+		},
+		{
+			"aabb": [-13.072128, 0.000189, -10.072128, 26.144257, 54.355812, 20.144257],
+			"instances": 12,
+			"name": "building_e",
+			"surfaces": 5,
+			"triangles": 6897930,
+			"vertices": 3457300
+		},
+		{
+			"aabb": [-6.056778, 0.000084, -6.056778, 12.113556, 96.355911, 12.113556],
+			"instances": 20,
+			"name": "tower_slim",
+			"surfaces": 5,
+			"triangles": 2140682,
+			"vertices": 1075732
+		},
+		{
+			"aabb": [-8.058215, 0.000058, -6.058215, 16.116432, 24.355942, 12.116430],
+			"instances": 20,
+			"name": "building_small",
+			"surfaces": 5,
+			"triangles": 1521162,
+			"vertices": 764436
+		},
+		{
+			"aabb": [-12.071632, 0.000036, -8.071632, 24.143265, 42.355965, 16.143265],
+			"instances": 40,
+			"name": "kit_facade",
+			"surfaces": 8,
+			"triangles": 2206602,
+			"vertices": 1112988
+		},
+		{
+			"aabb": [-1.100000, 0.000000, -0.800000, 2.200000, 2.000000, 1.600000],
+			"instances": 4900,
+			"name": "prop_rooftop",
+			"surfaces": 1,
+			"triangles": 936,
+			"vertices": 661
+		}
+	],
+	"outputs": {
+		"kit_micro_detail/building_a.glb": "8838470a33a7264ebccee2d43fb7f587e19d1ff5d415d41e2284b56ce26aad62",
+		"kit_micro_detail/building_a.glb.import": "1a8941dac71ec3627ccb93b0001512d1f3ea4f6ba5677a6db1b57178eee3ac21",
+		"kit_micro_detail/building_b.glb": "7f1db2cf1ee68d5f3fbe9dc7bb7ca65827e0013e7b035b2685458557ec208a78",
+		"kit_micro_detail/building_b.glb.import": "9b328cfea9f8c2fb263ca4fc9c081c2efa5e15e6d1dbf2c9d37c21846d064a2e",
+		"kit_micro_detail/building_c.glb": "3c48b038db9afe5c8c75c44d122b42ca0211d7497603a4406db03cb82580536c",
+		"kit_micro_detail/building_c.glb.import": "868573afec16bd7f298d4f3046f14871a7d4d7eadb033e4ae710688175793a9c",
+		"kit_micro_detail/building_d.glb": "e83c256522673f543cfd9eaa74ed293e5b0a1a7dbba98d08a3af7537c4a7c136",
+		"kit_micro_detail/building_d.glb.import": "941d2ab5a518c9184d2deb1c99f868df11d9ef4d0c9f98cae527b0b2dd50f081",
+		"kit_micro_detail/building_e.glb": "ffbe4f116fbc9dbcd68af07428df314a6dd6b489527f1f43e3fec58e81544811",
+		"kit_micro_detail/building_e.glb.import": "1138c2904b2d3e413341b76de40ab26fe93168be2565aaf354fadef0b5741d3b",
+		"kit_micro_detail/building_small.glb": "b16d32507e48fabef07326857d7c17760df0a1ef891cfb089e197ca247e1771f",
+		"kit_micro_detail/building_small.glb.import": "064cff48621bcaea4d705e4595ed12fe4ae42190d2251f41dbaebd40b1f15bb9",
+		"kit_micro_detail/kit_facade.glb": "bdd20d5c12345fc2f989a189b087ff0ba627d41a9fac1d1b8d3e6568ded08ea0",
+		"kit_micro_detail/kit_facade.glb.import": "15630d066382d39ce5254da633040b64a6af606fd181f448067948c7e9b1aa14",
+		"kit_micro_detail/prop_rooftop.glb": "35b35bc3647d67e11aa7a4dc317d223f29adfcf793492598a7509753d9746e3f",
+		"kit_micro_detail/prop_rooftop.glb.import": "0dfc08643d535dd29cec1775505564bc633016789ab97fb2ab2e2026067ea349",
+		"kit_micro_detail/tower_slim.glb": "190cb93d359d77fb091cede63431c5810692a6d261dc7eed04b3f612c8a66a6e",
+		"kit_micro_detail/tower_slim.glb.import": "1ec2bb84ff8b2558face1994d60c05620f6a2fd7d0084533dbf6154a27dfd527",
+		"micro_detail.tscn": "e2b6f22175c7dc14c69cc9169bb3edecdf273ffae90a1f4b286b7b8c8d559318"
+	},
+	"reachable_clusters_lower_bound": 4593092,
+	"scene": "micro_detail.tscn",
+	"seed": 1,
+	"subdivide_facades": 2,
+	"subpixel_fraction_estimate": 0.993929,
+	"transform_fingerprint": "3b35d683d7583fc7eff91b8f1bf9bc6c588d0f08bfb9abf1ee616d79ab56526c",
+	"unique_bytes": 1149563456,
+	"unique_triangles": 40984632,
+	"unique_vertices": 20554621,
+	"working_set_ratio": 8.564915
+},
 		"stress_10m": {
 	"aabb": [-109.997772, -2.191195, -109.997772, 219.997772, 4.373537, 219.997772],
 	"assets": ["stress/stress_10m.glb", "stress/stress_10m.obj"],

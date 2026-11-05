@@ -19,14 +19,16 @@ godot --headless --path godotnext/testbed --script res://generators/dense_city/d
 godot --headless --path godotnext/testbed --script res://generators/dense_city/dense_city_generator.gd -- --seed=1 --variant=sweep_1b
 godot --headless --path godotnext/testbed --script res://generators/dense_city/dense_city_generator.gd -- --seed=1 --variant=kit --materials=8
 godot --headless --path godotnext/testbed --script res://generators/dense_city/dense_city_generator.gd -- --seed=1 --variant=stress_10m
+godot --headless --path godotnext/testbed --script res://generators/dense_city/dense_city_generator.gd -- --seed=1 --variant=micro_detail
 godot --headless --path godotnext/testbed --import
 ```
 
 Arguments after `--`: `--seed=<int>` (default 1), `--variant=...` (above),
 `--materials=<n>` (kit variant surface/material count, default 8, for
-#71), `--out=res://generated/dense_city`. Targets (instance and triangle
-minima, the provisional 128 MiB geometry-cache budget, sweep totals) live
-in `variants.cfg`.
+#71), `--subdivide-facades=<n>` (Micro Detail facade multiplier, default
+2, #148), `--out=res://generated/dense_city`. Targets (instance and
+triangle minima, the provisional 128 MiB geometry-cache budget, sweep
+totals) live in `variants.cfg`.
 
 Outputs under `generated/dense_city/`:
 
@@ -38,6 +40,7 @@ Outputs under `generated/dense_city/`:
 | `dense_city_sweep_10m.tscn`, `..._100m.tscn`, `..._1b.tscn` | The same kit instanced to 10M / 100M / 1B instanced triangles (within 5%; measured: within 0.01%) |
 | `kit_asset/kit_facade.glb` | The multi-material kit asset alone (G4-2 / #71): one surface per material, neighbors sharing coincident seam loops |
 | `stress/stress_10m.glb`, `stress/stress_10m.obj` | One single-surface 10M-triangle mesh (the G4-2 import stress asset) |
+| `micro_detail.tscn` + `kit_micro_detail/` | PN Micro Detail (#148, §21.4.3): the same city with 4× the facade triangle count (2× per axis). 40.98M unique and 587.47M instanced triangles, and the generator's deterministic 1080p estimate puts 99.4% of visible triangles under 1 px². This is the PN phase smoke scene (§22.3). |
 
 Only this folder's scripts, `variants.cfg`, this README and
 `expected.json` are tracked (under 1 MB); generated output is created on
