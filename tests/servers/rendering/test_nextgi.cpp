@@ -2379,6 +2379,43 @@ TEST_CASE("[NextGI][RT] Dynamic instance budget shares the TLAS capacity") {
 
 } // namespace TestNextGI
 
+// GodotNext: nextgi_quality_presets (#55).
+TEST_CASE("[NextGI][Quality] Preset budgets and atlas sizes") {
+	using Q = RendererRD::NextGI::Quality;
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_MEDIUM, false), 870u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_HIGH, false), 1600u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_EPIC, false), 3200u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_MEDIUM, true), 2175u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_HIGH, true), 4000u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_EPIC, true), 8000u);
+
+	const RendererRD::NextGI::QualityParams &medium = RendererRD::NextGI::get_quality_params(Q::QUALITY_MEDIUM);
+	const RendererRD::NextGI::QualityParams &high = RendererRD::NextGI::get_quality_params(Q::QUALITY_HIGH);
+	const RendererRD::NextGI::QualityParams &epic = RendererRD::NextGI::get_quality_params(Q::QUALITY_EPIC);
+	CHECK_EQ(medium.src_radiance_mib, 64u);
+	CHECK_EQ(medium.src_material_mib, 128u);
+	CHECK_EQ(epic.src_radiance_mib, 128u);
+	CHECK_EQ(epic.src_material_mib, 256u);
+	CHECK_EQ(medium.reflection_divisor, 4u);
+	CHECK_EQ(high.reflection_divisor, 2u);
+	CHECK_EQ(epic.reflection_divisor, 1u);
+	CHECK(std::abs(medium.max_trace_roughness - 0.25f) < 1e-6f);
+	CHECK_EQ(medium.relight_texels, 128u * 1024u);
+	CHECK_EQ(epic.relight_shadow_rays, 512u * 1024u);
+	// The startup benchmark maps to High at or under 5 ms, else Medium.
+	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(1200) == Q::QUALITY_HIGH);
+	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(5000) == Q::QUALITY_HIGH);
+	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(5001) == Q::QUALITY_MEDIUM);
+	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(0) == Q::QUALITY_MEDIUM);
+	// Medium is High x 0.5 except line 1a.
+	CHECK_EQ(medium.ada_lines_us[0], high.ada_lines_us[0]);
+	CHECK_EQ(medium.apple_lines_us[0], high.apple_lines_us[0]);
+	for (int i = 1; i < 9; i++) {
+		CHECK_EQ(medium.ada_lines_us[i] * 2, high.ada_lines_us[i]);
+		CHECK_EQ(medium.apple_lines_us[i] * 2, high.apple_lines_us[i]);
+	}
+}
+
 // GodotNext: nextgi_multiview (#58).
 TEST_CASE("[NextGI][MultiView] Anchor selection and scenario scheduling") {
 	using Candidate = RendererRD::NextGI::ViewAnchorCandidate;

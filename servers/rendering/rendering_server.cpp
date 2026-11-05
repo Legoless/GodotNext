@@ -3860,7 +3860,7 @@ void RenderingServer::init() {
 	// GodotNext: nextgi_settings
 	GLOBAL_DEF_RST("rendering/global_illumination/nextgi/enabled", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing", PROPERTY_HINT_ENUM, "Auto,Off,Force"), 0);
-	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium,High,Epic"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium (fast),High (60 FPS class),Epic (30 FPS class)"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
 	// GodotNext: nextgi_src_cards

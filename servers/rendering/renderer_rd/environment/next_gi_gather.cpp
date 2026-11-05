@@ -531,8 +531,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	params.page_rect_count = relight->get_page_rect_count();
-	params.max_trace_roughness = 0.4f;
-	params.reflect_divisor = 2.0f;
+	const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
+	params.max_trace_roughness = quality.max_trace_roughness;
+	params.reflect_divisor = float(quality.reflection_divisor);
 	params.reflect_enabled = 1u;
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
 	params.sampling_mode = rr_sampling_mode;

@@ -274,6 +274,25 @@ private:
 public:
 	static NextGI *get_singleton() { return singleton; }
 
+	// GodotNext: nextgi_quality_presets (#55). One table holds every per-preset value.
+	struct QualityParams {
+		uint32_t diffuse_rays_per_probe = 16;
+		uint32_t reflection_divisor = 2;
+		float max_trace_roughness = 0.4f;
+		uint32_t relight_texels = 256 * 1024;
+		uint32_t relight_shadow_rays = 256 * 1024;
+		uint32_t src_radiance_mib = 64;
+		uint32_t src_material_mib = 128;
+		// Report-only line budgets, lines 1a, 2a, 2b, 3, 4, 5, 6, 7, 8 (µs).
+		uint32_t ada_lines_us[9] = {};
+		uint32_t apple_lines_us[9] = {};
+	};
+	static const QualityParams QUALITY_PARAMS[QUALITY_MAX];
+	static const QualityParams &get_quality_params(Quality p_quality);
+	static uint32_t nextgi_quality_total_us(Quality p_quality, bool p_apple);
+	Quality get_quality_setting() const { return quality_setting; }
+	static Quality nextgi_auto_quality_from_usec(uint64_t p_usec);
+
 	// GodotNext: nextgi_multiview (#58). One anchor per scenario, chosen with hysteresis so the
 	// TLAS center never flips between frames. Pure helpers, so doctests need no device.
 	struct ViewAnchorCandidate {
@@ -377,6 +396,8 @@ public:
 		bool has_data = false;
 	};
 
+	static Quality auto_quality;
+	static String auto_reason;
 	DebugViewId active_debug_view = DEBUG_VIEW_MAX;
 	// GodotNext: nextgi_multiview (#58). Scenario passes run once per scenario per frame.
 	uint64_t scenario_frame = UINT64_MAX;

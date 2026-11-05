@@ -334,6 +334,13 @@ void NextGI::_apply_safety_net(TierInputs &r_inputs) {
 		r_inputs.selftest_passed = nextgi_selftest_cache.passed;
 		selftest_usec = nextgi_selftest_cache.usec;
 		selftest_report_time = true;
+		if (auto_quality == QUALITY_AUTO && selftest_usec > 0) {
+			auto_quality = nextgi_auto_quality_from_usec(selftest_usec);
+			auto_reason = vformat("auto: benchmark %.2f ms, %s", double(selftest_usec) / 1000.0, get_quality_name(auto_quality));
+			if (quality_setting == QUALITY_AUTO) {
+				print_line("NextGI: " + auto_reason);
+			}
+		}
 		return;
 	}
 
@@ -346,6 +353,13 @@ void NextGI::_apply_safety_net(TierInputs &r_inputs) {
 	r_inputs.selftest_passed = passed;
 	selftest_usec = usec;
 	selftest_report_time = true;
+	if (auto_quality == QUALITY_AUTO && selftest_usec > 0) {
+		auto_quality = nextgi_auto_quality_from_usec(selftest_usec);
+		auto_reason = vformat("auto: benchmark %.2f ms, %s", double(selftest_usec) / 1000.0, get_quality_name(auto_quality));
+		if (quality_setting == QUALITY_AUTO) {
+			print_line("NextGI: " + auto_reason);
+		}
+	}
 }
 
 void NextGI::_unregister_device_lost_callback() {

@@ -57,6 +57,32 @@ using namespace RendererRD;
 
 NextGI *NextGI::singleton = nullptr;
 
+// GodotNext: nextgi_quality_presets (#55). Indexed by Quality; AUTO resolves to High first.
+const NextGI::QualityParams NextGI::QUALITY_PARAMS[NextGI::QUALITY_MAX] = {
+	// QUALITY_AUTO: the resolved preset supplies the values.
+	{ 16, 2, 0.4f, 256 * 1024, 256 * 1024, 64, 128, { 140, 60, 140, 100, 140, 300, 240, 160, 320 }, { 350, 150, 350, 250, 350, 750, 600, 400, 800 } },
+	// QUALITY_MEDIUM: High x 0.5 except line 1a.
+	{ 8, 4, 0.25f, 128 * 1024, 128 * 1024, 64, 128, { 140, 30, 70, 50, 70, 150, 120, 80, 160 }, { 350, 75, 175, 125, 175, 375, 300, 200, 400 } },
+	// QUALITY_HIGH.
+	{ 16, 2, 0.4f, 256 * 1024, 256 * 1024, 64, 128, { 140, 60, 140, 100, 140, 300, 240, 160, 320 }, { 350, 150, 350, 250, 350, 750, 600, 400, 800 } },
+	// QUALITY_EPIC: 2x High; 2a + 2b share the 300/750 us entry.
+	{ 64, 1, 0.4f, 512 * 1024, 512 * 1024, 128, 256, { 140, 150, 150, 160, 240, 800, 800, 300, 460 }, { 350, 375, 375, 400, 600, 2000, 2000, 750, 1150 } },
+};
+
+const NextGI::QualityParams &NextGI::get_quality_params(Quality p_quality) {
+	const Quality resolved = resolve_quality(p_quality);
+	return QUALITY_PARAMS[resolved];
+}
+
+uint32_t NextGI::nextgi_quality_total_us(Quality p_quality, bool p_apple) {
+	const QualityParams &params = get_quality_params(p_quality);
+	uint32_t total = 0;
+	for (int i = 0; i < 9; i++) {
+		total += p_apple ? params.apple_lines_us[i] : params.ada_lines_us[i];
+	}
+	return total;
+}
+
 const NextGI::PassSlotInfo NextGI::PASS_SLOTS[NextGI::PASS_SLOT_MAX] = {
 	{ "> NextGI", "" },
 	{ "NextGI: SRC capture", "2a" },
@@ -200,8 +226,19 @@ void NextGI::collect_device_inputs(const RenderingDevice *p_device, const String
 	r_inputs.ray_query_hw = r_inputs.ray_query;
 }
 
+// GodotNext: nextgi_quality_presets (#55). Startup benchmark rule: <= 5 ms picks High, else Medium.
+NextGI::Quality NextGI::nextgi_auto_quality_from_usec(uint64_t p_usec) {
+	return p_usec > 0 && p_usec <= 5000 ? QUALITY_HIGH : QUALITY_MEDIUM;
+}
+
+NextGI::Quality NextGI::auto_quality = NextGI::QUALITY_AUTO;
+String NextGI::auto_reason;
+
 NextGI::Quality NextGI::resolve_quality(Quality p_setting) {
-	if (p_setting <= QUALITY_AUTO || p_setting >= QUALITY_MAX) {
+	if (p_setting == QUALITY_AUTO) {
+		return auto_quality == QUALITY_AUTO ? QUALITY_HIGH : auto_quality;
+	}
+	if (p_setting < QUALITY_MEDIUM || p_setting >= QUALITY_MAX) {
 		return QUALITY_HIGH;
 	}
 	return p_setting;
@@ -230,7 +267,7 @@ String NextGI::format_tier_line(const TierResult &p_result, Quality p_quality_se
 	if (p_result.tier == TIER_HWRT || p_result.tier == TIER_FALLBACK) {
 		line += " quality=" + get_quality_name(resolve_quality(p_quality_setting));
 		if (p_quality_setting == QUALITY_AUTO) {
-			line += " (auto selection pending)";
+			line += auto_reason.is_empty() ? " (auto selection pending)" : " (" + auto_reason + ")";
 		}
 	}
 	return line;
@@ -331,7 +368,7 @@ Dictionary NextGI::get_status() const {
 	if (!active) {
 		status["quality_reason"] = "NONE";
 	} else if (quality_setting == QUALITY_AUTO) {
-		status["quality_reason"] = "auto selection pending";
+		status["quality_reason"] = auto_reason.is_empty() ? "auto selection pending" : auto_reason;
 	} else {
 		status["quality_reason"] = "setting";
 	}
