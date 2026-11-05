@@ -261,6 +261,7 @@ public:
 		uint32_t capture_texels = 0;
 		float capture_cpu_ms = 0.0f;
 		uint32_t material_capture_count = 0; // Distinct (mesh, material) keys.
+		uint32_t emissive_below_card_res = 0; // Emissive surfaces under 4 card texels (#60).
 	};
 
 private:
@@ -281,6 +282,8 @@ private:
 		RID mesh;
 		uint32_t captured = 0;
 		bool released = false;
+		// GodotNext: nextgi_emissive_contract (#60). Longest axis of each surface, keyed by surface.
+		HashMap<uint32_t, float> surface_extents;
 	};
 
 	NextGIShelfPacker packer;
@@ -292,6 +295,7 @@ private:
 	HashMap<RID, uint32_t> mesh_card_sets;
 	HashMap<uint64_t, uint32_t> key_card_sets;
 	HashSet<RID> failed_meshes;
+	HashSet<RID> emissive_warned_meshes;
 	Stats stats;
 
 	enum DumpState {
@@ -306,6 +310,7 @@ private:
 
 	void _create_atlas();
 	bool _build_card_set(RID p_mesh, uint64_t p_key);
+	void _check_emissive_contract(RenderGeometryInstance *p_instance, uint32_t p_set_index);
 	void _upload_gpu_data();
 	void _request_dump();
 	void _on_dump_data(const Vector<uint8_t> &p_data, int p_target);

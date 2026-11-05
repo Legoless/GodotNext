@@ -776,6 +776,67 @@ void NextGISRC::free() {
 	card_set_capacity = 0;
 }
 
+// GodotNext: nextgi_emissive_contract (#60). Emissive surfaces smaller than four card texels
+// cannot be resolved by the SRC; the contract asks for a light instead (plan §8.5). Card texels are
+// authored at 1 cm for emissive content, so the threshold is 4 cm, the same rule the testbed
+// content uses (build_p3_content.gd, under_four_card_texels).
+static constexpr float NEXTGI_SRC_EMISSIVE_MIN_TEXEL_METERS = 0.01f;
+
+static bool _nextgi_src_material_is_emissive(RID p_material) {
+	MaterialStorage *storage = MaterialStorage::get_singleton();
+	if (storage == nullptr || !storage->owns_material(p_material)) {
+		return false;
+	}
+	const Variant emission = storage->material_get_param(p_material, "emission");
+	if (emission.get_type() != Variant::COLOR) {
+		return false;
+	}
+	const Color color = emission;
+	if (color.r <= 0.0f && color.g <= 0.0f && color.b <= 0.0f) {
+		return false;
+	}
+	const Variant energy = storage->material_get_param(p_material, "emission_energy");
+	const float multiplier = (energy.get_type() == Variant::FLOAT || energy.get_type() == Variant::INT) ? float(energy) : 1.0f;
+	return (color.r + color.g + color.b) * multiplier > 0.0f;
+}
+
+void NextGISRC::_check_emissive_contract(RenderGeometryInstance *p_instance, uint32_t p_set_index) {
+	RenderGeometryInstanceBase *geometry = static_cast<RenderGeometryInstanceBase *>(p_instance);
+	if (geometry == nullptr || geometry->data == nullptr || p_set_index >= card_set_states.size()) {
+		return;
+	}
+	const CardSetState &state = card_set_states[p_set_index];
+	const float min_extent = NEXTGI_SRC_EMISSIVE_MIN_TEXEL_METERS * 4.0f;
+	bool below = false;
+	if (geometry->data->material_override.is_valid()) {
+		below = _nextgi_src_material_is_emissive(geometry->data->material_override);
+		if (below) {
+			// An override applies to every surface; the largest one decides whether it is resolved.
+			float largest = 0.0f;
+			for (const KeyValue<uint32_t, float> &entry : state.surface_extents) {
+				largest = MAX(largest, entry.value);
+			}
+			below = largest > 0.0f && largest < min_extent;
+		}
+	} else {
+		for (uint32_t i = 0; i < geometry->data->surface_materials.size(); i++) {
+			const float *extent = state.surface_extents.getptr(i);
+			if (extent != nullptr && *extent > 0.0f && *extent < min_extent && _nextgi_src_material_is_emissive(geometry->data->surface_materials[i])) {
+				below = true;
+				break;
+			}
+		}
+	}
+	if (!below) {
+		return;
+	}
+	stats.emissive_below_card_res++;
+	if (!emissive_warned_meshes.has(state.mesh)) {
+		emissive_warned_meshes.insert(state.mesh);
+		WARN_PRINT(vformat("NextGI SRC: mesh RID %d has an emissive surface smaller than 4 card texels; author it as a light (plan 8.5).", state.mesh.get_id()));
+	}
+}
+
 bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
@@ -798,6 +859,7 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 
 	LocalVector<float> positions;
 	LocalVector<uint32_t> indices;
+	HashMap<uint32_t, float> surface_extents;
 	for (uint32_t surface : surfaces) {
 		Vector<float> surface_positions;
 		Vector<uint32_t> surface_indices;
@@ -805,6 +867,18 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 			continue;
 		}
 		const uint32_t base = positions.size() / 3;
+		// GodotNext: nextgi_emissive_contract (#60). Track the longest axis of this surface.
+		Vector3 lo(Math::INF, Math::INF, Math::INF);
+		Vector3 hi(-Math::INF, -Math::INF, -Math::INF);
+		for (int i = 0; i + 2 < surface_positions.size(); i += 3) {
+			const Vector3 vertex(surface_positions[i], surface_positions[i + 1], surface_positions[i + 2]);
+			lo = lo.min(vertex);
+			hi = hi.max(vertex);
+		}
+		if (lo.x <= hi.x) {
+			const Vector3 extent = hi - lo;
+			surface_extents.insert(surface, MAX(extent.x, MAX(extent.y, extent.z)));
+		}
 		for (int i = 0; i < surface_positions.size(); i++) {
 			positions.push_back(surface_positions[i]);
 		}
@@ -870,6 +944,7 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 	card_sets.push_back(set);
 	CardSetState state;
 	state.mesh = p_mesh;
+	state.surface_extents = surface_extents;
 	card_set_states.push_back(state);
 	if (!mesh_card_sets.has(p_mesh)) {
 		mesh_card_sets.insert(p_mesh, set_index);
@@ -954,6 +1029,7 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 				}
 				set_index = key_card_sets.getptr(key);
 				ERR_CONTINUE(set_index == nullptr);
+				_check_emissive_contract(geometry_instance, *set_index);
 			}
 			const NextGICardSet &set = card_sets[*set_index];
 			for (uint32_t card = set.first_card; card < set.first_card + set.card_count; card++) {
@@ -1120,6 +1196,7 @@ void NextGISRC::invalidate_captures(uint32_t p_card_set) {
 }
 
 void NextGISRC::fill_info(Dictionary &r_info) const {
+	r_info["src_emissive_below_card_res"] = int64_t(stats.emissive_below_card_res);
 	r_info["src_card_set_count"] = int64_t(stats.card_set_count);
 	r_info["src_card_count"] = int64_t(stats.card_count);
 	r_info["src_captured_card_count"] = int64_t(stats.captured_card_count);
