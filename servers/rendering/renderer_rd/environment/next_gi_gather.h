@@ -110,6 +110,8 @@ class NextGIGather {
 	RID reflect_counter_buffer;
 	RID specular_debug;
 	RID clamp_totals_buffer;
+	RID specular_raw;
+	RID last_reflection_output;
 	RID params_buffer;
 	RID counter_buffer;
 	RID feedback_buffer;

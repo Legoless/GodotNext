@@ -34,6 +34,7 @@
 #include "core/math/vector3.h"
 #include "core/variant/variant.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_diffuse.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_denoise_specular.glsl.gen.h"
 
 namespace RendererRD {
 
@@ -113,6 +114,18 @@ public:
 	NextGIDenoise();
 	~NextGIDenoise();
 
+	// GodotNext: nextgi_denoise_specular (#54). Joint-bilateral upsample of the specular trace from
+	// its trace resolution into RB_TEX_REFLECTION.
+	struct SpecularUpsampleParams {
+		RID raw; // Trace-resolution radiance + confidence.
+		RID depth; // Full-resolution depth.
+		RID normal_roughness; // Full-resolution normal-roughness guide.
+		RID output; // RB_TEX_REFLECTION at the GI buffer resolution.
+		Size2i trace_size;
+		Size2i screen_size;
+	};
+	void process_specular_upsample(const SpecularUpsampleParams &p_params);
+
 	void process_diffuse(const DiffuseParams &p_params);
 	void process_temporal(const TemporalParams &p_params);
 	void process_stabilize(const StabilizeParams &p_params);
@@ -173,6 +186,10 @@ private:
 	NextgiDenoiseDiffuseShaderRD shader;
 	RID shader_version;
 	RID pipelines[MODE_MAX];
+
+	NextgiDenoiseSpecularShaderRD specular_shader;
+	RID specular_version;
+	RID specular_upsample;
 	RID temporal_params_buffer;
 };
 

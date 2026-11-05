@@ -42,6 +42,11 @@ NextGIDenoise::NextGIDenoise() {
 	shader_modes.push_back("\n#define MODE_STABILIZE\n");
 	shader.initialize(shader_modes);
 	shader_version = shader.version_create();
+	Vector<String> specular_modes;
+	specular_modes.push_back("");
+	specular_shader.initialize(specular_modes);
+	specular_version = specular_shader.version_create();
+	specular_upsample = RD::get_singleton()->compute_pipeline_create(specular_shader.version_get_shader(specular_version, 0));
 	for (int i = 0; i < MODE_MAX; i++) {
 		pipelines[i] = RD::get_singleton()->compute_pipeline_create(shader.version_get_shader(shader_version, i));
 	}
@@ -54,6 +59,45 @@ NextGIDenoise::~NextGIDenoise() {
 	}
 	RD::get_singleton()->free_rid(temporal_params_buffer);
 	shader.version_free(shader_version);
+	RD::get_singleton()->free_rid(specular_upsample);
+	specular_shader.version_free(specular_version);
+}
+
+void NextGIDenoise::process_specular_upsample(const SpecularUpsampleParams &p_params) {
+	ERR_FAIL_COND_MSG(!p_params.raw.is_valid(), "NextGIDenoise: specular raw is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.depth.is_valid(), "NextGIDenoise: specular depth is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.normal_roughness.is_valid(), "NextGIDenoise: specular normal-roughness is invalid.");
+	ERR_FAIL_COND_MSG(!p_params.output.is_valid(), "NextGIDenoise: specular output is invalid.");
+
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	struct PushConstant {
+		int32_t trace_size[2];
+		int32_t screen_size[2];
+	} push_constant;
+	push_constant.trace_size[0] = p_params.trace_size.width;
+	push_constant.trace_size[1] = p_params.trace_size.height;
+	push_constant.screen_size[0] = p_params.screen_size.width;
+	push_constant.screen_size[1] = p_params.screen_size.height;
+
+	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RID shader_rid = specular_shader.version_get_shader(specular_version, 0);
+	RD::Uniform u_raw(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ nearest_sampler, p_params.raw }));
+	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ nearest_sampler, p_params.depth }));
+	RD::Uniform u_normal_roughness(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ nearest_sampler, p_params.normal_roughness }));
+	RD::Uniform u_output(RD::UNIFORM_TYPE_IMAGE, 3, Vector<RID>({ p_params.output }));
+	RID uniform_set = uniform_set_cache->get_cache(shader_rid, 0, u_raw, u_depth, u_normal_roughness, u_output);
+	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the specular upsample uniform set.");
+
+	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();
+	RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, specular_upsample);
+	RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set, 0);
+	RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(push_constant));
+	RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_params.screen_size.width, p_params.screen_size.height, 1);
+	RD::get_singleton()->compute_list_end();
 }
 
 void NextGIDenoise::process_diffuse(const DiffuseParams &p_params) {

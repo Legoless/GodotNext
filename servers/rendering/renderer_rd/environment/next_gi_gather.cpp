@@ -187,7 +187,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[21] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[22] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -207,6 +207,7 @@ void NextGIGather::free_resources() {
 	reflect_counter_buffer = RID();
 	specular_debug = RID();
 	clamp_totals_buffer = RID();
+	specular_raw = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -618,6 +619,24 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!clamp_totals_buffer.is_valid()) {
 		clamp_totals_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 2);
 	}
+	last_reflection_output = rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : RID();
+	if (last_screen_w > 0 && last_screen_h > 0) {
+		const uint32_t trace_w = MAX(last_screen_w / 2u, 1u);
+		const uint32_t trace_h = MAX(last_screen_h / 2u, 1u);
+		const RD::TextureFormat specular_format = rd->texture_get_format(specular_raw.is_valid() ? specular_raw : probe_image);
+		if (!specular_raw.is_valid() || specular_format.width != trace_w || specular_format.height != trace_h) {
+			if (specular_raw.is_valid()) {
+				rd->free_rid(specular_raw);
+			}
+			RD::TextureFormat trace_format;
+			trace_format.width = trace_w;
+			trace_format.height = trace_h;
+			trace_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+			trace_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+			specular_raw = rd->texture_create(trace_format, RD::TextureView());
+			rd->texture_clear(specular_raw, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		}
+	}
 	if (params.reflect_debug != 0u && !specular_debug.is_valid()) {
 		RD::TextureFormat debug_tf;
 		debug_tf.width = MAX(last_screen_w / 2u, 1u);
@@ -660,7 +679,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 30, Vector<RID>({ sampler_nearest, hiz_texture })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 31, Vector<RID>({ sampler, last_frame_texture })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 32, Vector<RID>({ sampler_nearest, normal_roughness })),
-		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : probe_image })),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ specular_raw.is_valid() ? specular_raw : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
@@ -795,6 +814,17 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
 		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
 		rd->compute_list_end();
+	}
+	// GodotNext: nextgi_denoise_specular (#54). Upsample the trace into RB_TEX_REFLECTION.
+	if (denoise != nullptr && specular_raw.is_valid() && last_reflection_output.is_valid() && last_normal_roughness.is_valid() && last_depth.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
+		NextGIDenoise::SpecularUpsampleParams specular;
+		specular.raw = specular_raw;
+		specular.depth = last_depth;
+		specular.normal_roughness = last_normal_roughness;
+		specular.output = last_reflection_output;
+		specular.trace_size = Size2i(MAX(last_screen_w / 2u, 1u), MAX(last_screen_h / 2u, 1u));
+		specular.screen_size = Size2i(last_screen_w, last_screen_h);
+		denoise->process_specular_upsample(specular);
 	}
 	_read_counters();
 	frame++;
