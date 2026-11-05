@@ -30,6 +30,19 @@ jobs:
         run: |
           bash ./misc/scripts/gitignore_check.sh
 
+      # GodotNext: plan §19 / GU-6. No NVIDIA SDK file enters the repository.
+      # The planted fixture lives outside the checkout and must be rejected.
+      - name: Proprietary SDK guard (check_proprietary_sdk_files.py)
+        run: |
+          python3 ./misc/scripts/check_proprietary_sdk_files.py
+          plant="$RUNNER_TEMP/sdk-plant"
+          mkdir -p "$plant/include" "$plant/lib"
+          touch "$plant/include/nvsdk_ngx.h" "$plant/lib/nvngx_dlss.dll"
+          if python3 ./misc/scripts/check_proprietary_sdk_files.py --root "$plant"; then
+            echo "The proprietary SDK guard accepted the planted fixture." >&2
+            exit 1
+          fi
+
       - name: Get changed files
         id: changed-files
         uses: tj-actions/changed-files@v47

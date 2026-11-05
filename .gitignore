@@ -399,3 +399,14 @@ $RECYCLE.BIN/
 *.msp
 *.lnk
 *.generated.props
+
+# Proprietary SDKs (NVIDIA DLSS/NGX, plan §19). No NVIDIA header, library,
+# runtime or sample enters the repository; the guard is
+# misc/scripts/check_proprietary_sdk_files.py.
+nvsdk_ngx*.h
+nvsdk_ngx*.lib
+libnvsdk_ngx.a
+libsdk_nvngx.a
+nvngx_*.dll
+libnvidia-ngx*.so*
+sl_nvperf.*
