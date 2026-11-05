@@ -342,7 +342,7 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			hiz_format.format = RD::DATA_FORMAT_R32_SFLOAT;
 			hiz_format.width = hiz_target_size.x;
 			hiz_format.height = hiz_target_size.y;
-			hiz_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+			hiz_format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 			hiz_prev = rd->texture_create(hiz_format, RD::TextureView());
 			hiz_size = hiz_target_size;
 			if (hiz_prev.is_valid()) {
@@ -472,6 +472,24 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		info["overflow"] = int64_t(stats->overflow);
 		info["occlusion"] = p_occlusion;
 		info["hiz"] = have_prev;
+		if (have_prev && hiz_prev.is_valid()) {
+			const Vector<uint8_t> hiz_raw = rd->texture_get_data(hiz_prev, 0);
+			float hiz_min = 1.0f;
+			float hiz_max = 0.0f;
+			uint32_t hiz_nonzero = 0;
+			for (int index = 0; index + 4 <= hiz_raw.size(); index += 4) {
+				float value = 0.0f;
+				memcpy(&value, hiz_raw.ptr() + index, sizeof(float));
+				hiz_min = MIN(hiz_min, value);
+				hiz_max = MAX(hiz_max, value);
+				if (value > 0.0f) {
+					hiz_nonzero++;
+				}
+			}
+			info["hiz_min"] = hiz_min;
+			info["hiz_max"] = hiz_max;
+			info["hiz_nonzero"] = int64_t(hiz_nonzero);
+		}
 		info["cluster_capacity"] = int64_t(CLUSTER_CAPACITY);
 		if (stats->cluster_count > 0 && stats->cluster_count <= CLUSTER_CAPACITY) {
 			const Vector<uint8_t> raw_clusters = rd->buffer_get_data(clusters, 0, stats->cluster_count * 8);
