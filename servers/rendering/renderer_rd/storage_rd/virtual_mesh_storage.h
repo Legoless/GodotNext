@@ -41,12 +41,18 @@ namespace RendererRD {
 class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	RID record_buffer;
 	RID mesh_record_buffer;
+	// GodotNext: nextgeo_gpu_cull (#76). Per-mesh DAG blobs (groups + BVH8).
+	RID dag_buffer;
+	uint32_t dag_bytes = 0;
 	uint32_t buffer_capacity = 0;
 	uint32_t mesh_buffer_capacity = 0;
 
 protected:
 	void _upload_records(uint32_t p_first, uint32_t p_count) override;
 	void _upload_mesh_records(uint32_t p_first, uint32_t p_count) override;
+	bool _resize_dag(uint32_t p_bytes) override;
+	void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_dag() override;
 
 public:
 	VirtualMeshStorage();
@@ -54,6 +60,7 @@ public:
 
 	RID get_record_buffer() const { return record_buffer; }
 	RID get_mesh_record_buffer() const { return mesh_record_buffer; }
+	RID get_dag_buffer() const { return dag_buffer; }
 
 	void free_resources();
 };

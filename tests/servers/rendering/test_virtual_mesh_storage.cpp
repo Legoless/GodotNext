@@ -46,6 +46,8 @@ public:
 	uint32_t last_count = 0;
 	int mesh_upload_calls = 0;
 	uint32_t uploaded_mesh_records = 0;
+	uint32_t dag_capacity = 0;
+	uint32_t uploaded_dag_bytes = 0;
 
 protected:
 	void _upload_records(uint32_t p_first, uint32_t p_count) override {
@@ -60,6 +62,15 @@ protected:
 		(void)p_first;
 		(void)p_count;
 	}
+	bool _resize_dag(uint32_t p_bytes) override {
+		dag_capacity = p_bytes;
+		return true;
+	}
+	void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override {
+		(void)p_offset;
+		(void)p_data;
+		uploaded_dag_bytes += p_size;
+	}
 };
 
 static RenderingServerTypes::VirtualGeometryDesc _desc(uint32_t p_mask) {
@@ -69,6 +80,65 @@ static RenderingServerTypes::VirtualGeometryDesc _desc(uint32_t p_mask) {
 	desc.dag_header.resize(8);
 	desc.root_pages.push_back(Vector<uint8_t>());
 	return desc;
+}
+
+static void _append_u32(Vector<uint8_t> &r_bytes, uint32_t p_value) {
+	const uint8_t *raw = reinterpret_cast<const uint8_t *>(&p_value);
+	for (int index = 0; index < 4; index++) {
+		r_bytes.push_back(raw[index]);
+	}
+}
+
+static void _append_f32(Vector<uint8_t> &r_bytes, float p_value) {
+	uint32_t bits = 0;
+	memcpy(&bits, &p_value, sizeof(uint32_t));
+	_append_u32(r_bytes, bits);
+}
+
+// Two groups and a two-level BVH8: root (node 0) -> node 1 -> two leaf groups.
+static Vector<uint8_t> _test_dag() {
+	Vector<uint8_t> dag;
+	_append_u32(dag, 2); // group count
+	_append_u32(dag, 2); // BVH node count
+	for (int group = 0; group < 2; group++) {
+		_append_u32(dag, group == 0 ? 5 : 10); // cluster offset
+		_append_u32(dag, group == 0 ? 3 : 4); // cluster count
+		_append_u32(dag, 0); // page id
+		_append_u32(dag, 0); // depth
+		for (int index = 0; index < 4; index++) {
+			_append_f32(dag, 0.0f); // parent LOD sphere
+		}
+		_append_f32(dag, 1.0f); // parent error
+		for (int index = 0; index < 3; index++) {
+			_append_f32(dag, -1.0f); // aabb min
+		}
+		for (int index = 0; index < 3; index++) {
+			_append_f32(dag, 1.0f); // aabb max
+		}
+	}
+	for (int node = 0; node < 2; node++) {
+		for (int index = 0; index < 4; index++) {
+			_append_f32(dag, 0.0f); // lod sphere
+		}
+		_append_f32(dag, 1.0f); // max parent error
+		for (int index = 0; index < 3; index++) {
+			_append_f32(dag, -1.0f); // aabb min
+		}
+		for (int index = 0; index < 3; index++) {
+			_append_f32(dag, 1.0f); // aabb max
+		}
+		_append_u32(dag, node == 0 ? 1 : 2); // child count
+		for (int child = 0; child < 8; child++) {
+			uint32_t value = 0xFFFFFFFFu;
+			if (node == 0 && child == 0) {
+				value = 1; // node 1
+			} else if (node == 1 && child < 2) {
+				value = 0x80000000u | uint32_t(child); // leaf group
+			}
+			_append_u32(dag, value);
+		}
+	}
+	return dag;
 }
 
 static Transform3D _transform(float p_x) {
@@ -246,6 +316,40 @@ TEST_CASE("[NextGeo][Records] Dirty runs and RT fields") {
 	storage.mesh_set_virtual_geometry(mesh, _desc(0x1));
 	CHECK(storage.mesh_has_virtual_geometry(mesh));
 	CHECK_EQ(storage.get_mesh_record(mesh).surface_count, uint32_t(1));
+}
+
+TEST_CASE("[NextGeo][Records] DAG offsets and BVH level count") {
+	TestVirtualMeshStorage storage;
+	const RID mesh = RID::from_uint64(5001);
+	RenderingServerTypes::VirtualGeometryDesc desc = _desc(0x3);
+	desc.dag_header = _test_dag();
+	CHECK_EQ(desc.dag_header.size(), size_t(8 + 2 * 60 + 2 * 80));
+	storage.mesh_set_virtual_geometry(mesh, desc);
+
+	const RendererVirtualMeshStorage::MeshRecord &record = storage.get_mesh_record(mesh);
+	CHECK_EQ(record.group_offset, uint32_t(8));
+	CHECK_EQ(record.bvh_node_offset, uint32_t(8 + 2 * 60));
+	CHECK_EQ(record.bvh_level_count, uint32_t(2));
+	CHECK_EQ(record.cluster_offset, uint32_t(5));
+	CHECK_EQ(record.cluster_count, uint32_t(7));
+	CHECK_EQ(record.surface_count, uint32_t(2));
+	CHECK_EQ(storage.uploaded_dag_bytes, uint32_t(desc.dag_header.size()));
+	CHECK(storage.dag_capacity >= desc.dag_header.size());
+
+	// A second mesh lands after the first, 16-byte aligned.
+	const RID second = RID::from_uint64(5002);
+	storage.mesh_set_virtual_geometry(second, desc);
+	const RendererVirtualMeshStorage::MeshRecord &second_record = storage.get_mesh_record(second);
+	CHECK(second_record.group_offset >= record.group_offset + record.bvh_node_offset - 8 + 2 * 80);
+	CHECK_EQ((second_record.group_offset - 8) % 16, uint32_t(0));
+	CHECK_EQ(second_record.bvh_level_count, uint32_t(2));
+
+	// Clearing releases the DAG range, so a re-set reuses the first range.
+	storage.mesh_clear_virtual_geometry(mesh, 0);
+	storage.mesh_set_virtual_geometry(mesh, desc);
+	const RendererVirtualMeshStorage::MeshRecord &reused = storage.get_mesh_record(mesh);
+	CHECK_EQ(reused.group_offset, uint32_t(8));
+	CHECK_EQ(reused.cluster_count, uint32_t(7));
 }
 
 TEST_CASE("[NextGeo][Records] Capacity doubles from 4096") {

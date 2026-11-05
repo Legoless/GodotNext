@@ -44,6 +44,7 @@ RendererVirtualMeshStorage::RendererVirtualMeshStorage() {
 }
 
 RendererVirtualMeshStorage::~RendererVirtualMeshStorage() {
+	_reset_dag();
 }
 
 void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
@@ -57,6 +58,118 @@ void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
 	records.resize(capacity);
 	slot_states.resize(capacity);
 	record_capacity = capacity;
+}
+
+uint32_t RendererVirtualMeshStorage::_alloc_dag(uint32_t p_size) {
+	if (p_size == 0) {
+		return UINT32_MAX;
+	}
+	const uint32_t aligned = (p_size + 15u) & ~15u;
+	for (uint32_t index = 0; index < dag_free.size(); index++) {
+		if (dag_free[index].size < aligned) {
+			continue;
+		}
+		const uint32_t offset = dag_free[index].offset;
+		dag_free[index].offset += aligned;
+		dag_free[index].size -= aligned;
+		if (dag_free[index].size == 0) {
+			dag_free.remove_at(index);
+		}
+		return offset;
+	}
+	if (dag_used + aligned > dag_capacity) {
+		uint32_t capacity = dag_capacity == 0 ? 1024u * 1024u : dag_capacity;
+		while (capacity < dag_used + aligned) {
+			capacity *= 2;
+		}
+		if (!_resize_dag(capacity)) {
+			return UINT32_MAX;
+		}
+		dag_capacity = capacity;
+	}
+	const uint32_t offset = dag_used;
+	dag_used += aligned;
+	return offset;
+}
+
+void RendererVirtualMeshStorage::_free_dag(uint32_t p_offset, uint32_t p_size) {
+	if (p_size == 0) {
+		return;
+	}
+	DAGFree range;
+	range.offset = p_offset;
+	range.size = (p_size + 15u) & ~15u;
+	dag_free.push_back(range);
+}
+
+RendererVirtualMeshStorage::MeshRecord RendererVirtualMeshStorage::_parse_dag(const Vector<uint8_t> &p_dag, uint32_t p_base) {
+	MeshRecord record;
+	const uint32_t size = uint32_t(p_dag.size());
+	if (size < 8) {
+		return record;
+	}
+	uint32_t group_count = 0;
+	uint32_t bvh_count = 0;
+	memcpy(&group_count, p_dag.ptr(), sizeof(uint32_t));
+	memcpy(&bvh_count, p_dag.ptr() + 4, sizeof(uint32_t));
+	const uint64_t expected = 8ull + uint64_t(group_count) * 60ull + uint64_t(bvh_count) * 80ull;
+	if (expected > size) {
+		return record;
+	}
+	record.group_offset = p_base + 8;
+	record.bvh_node_offset = p_base + 8 + group_count * 60;
+	record.bvh_level_count = 0;
+	if (group_count > 0) {
+		uint32_t first_cluster = 0;
+		uint32_t total_clusters = 0;
+		memcpy(&first_cluster, p_dag.ptr() + 8, sizeof(uint32_t));
+		for (uint32_t group = 0; group < group_count; group++) {
+			uint32_t cluster_count = 0;
+			memcpy(&cluster_count, p_dag.ptr() + 8 + group * 60 + 4, sizeof(uint32_t));
+			total_clusters += cluster_count;
+		}
+		record.cluster_offset = first_cluster;
+		record.cluster_count = total_clusters;
+	}
+	if (bvh_count > 0) {
+		// Level-synchronous dispatches follow the tree depth from the root (node 0).
+		LocalVector<uint32_t> queue;
+		LocalVector<uint8_t> visited;
+		visited.resize(bvh_count);
+		memset(visited.ptr(), 0, bvh_count);
+		queue.push_back(0);
+		visited[0] = 1;
+		uint32_t head = 0;
+		uint32_t max_level = 0;
+		LocalVector<uint32_t> levels;
+		levels.push_back(0);
+		while (head < queue.size()) {
+			const uint32_t node = queue[head];
+			const uint32_t level = levels[head];
+			head++;
+			max_level = MAX(max_level, level);
+			uint32_t child_count = 0;
+			memcpy(&child_count, p_dag.ptr() + record.bvh_node_offset - p_base + node * 80 + 44, sizeof(uint32_t));
+			if (child_count > 8) {
+				child_count = 8;
+			}
+			for (uint32_t child = 0; child < child_count; child++) {
+				uint32_t value = 0;
+				memcpy(&value, p_dag.ptr() + record.bvh_node_offset - p_base + node * 80 + 48 + child * 4, sizeof(uint32_t));
+				if ((value & 0x80000000u) != 0) {
+					continue;
+				}
+				if (value >= bvh_count || visited[value]) {
+					continue;
+				}
+				visited[value] = 1;
+				queue.push_back(value);
+				levels.push_back(level + 1);
+			}
+		}
+		record.bvh_level_count = max_level + 1;
+	}
+	return record;
 }
 
 void RendererVirtualMeshStorage::_mark_dirty(uint32_t p_record) {
@@ -112,11 +225,27 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	info.desc = p_desc;
 	info.record = record;
 	info.mesh = p_mesh;
-	MeshInfo *previous = meshes.getptr(p_mesh);
-	if (previous != nullptr) {
-		info.live_instances = previous->live_instances;
+	// GodotNext: nextgeo_gpu_cull (#76). Upload the DAG blob and fill the
+	// mesh record's offsets for the instance/BVH cull.
+	MeshInfo *old_info = meshes.getptr(p_mesh);
+	if (old_info != nullptr && old_info->dag_size != 0) {
+		_free_dag(old_info->dag_offset, old_info->dag_size);
+	}
+	if (!p_desc.dag_header.is_empty()) {
+		const uint32_t dag_offset = _alloc_dag(uint32_t(p_desc.dag_header.size()));
+		if (dag_offset != UINT32_MAX) {
+			info.dag_offset = dag_offset;
+			info.dag_size = uint32_t(p_desc.dag_header.size());
+			_upload_dag(dag_offset, p_desc.dag_header.ptr(), info.dag_size);
+			info.record = _parse_dag(p_desc.dag_header, dag_offset);
+			info.record.surface_count = surface_count;
+		}
+	}
+	if (old_info != nullptr) {
+		info.live_instances = old_info->live_instances;
 	}
 	meshes[p_mesh] = info;
+	mesh_records[index] = info.record;
 	mesh_record_dirty[index] = 1;
 	mesh_records_dirty = true;
 
@@ -138,6 +267,10 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	}
 	mesh_record_dirty[*index] = 1;
 	mesh_records_dirty = true;
+	MeshInfo *info = meshes.getptr(p_mesh);
+	if (info != nullptr) {
+		_free_dag(info->dag_offset, info->dag_size);
+	}
 	meshes.erase(p_mesh);
 	for (uint32_t slot = 0; slot < used_slots; slot++) {
 		if (!slot_states[slot].allocated || records[slot].virtual_mesh != *index) {

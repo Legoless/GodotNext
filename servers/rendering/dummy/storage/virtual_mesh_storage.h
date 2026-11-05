@@ -50,9 +50,21 @@ protected:
 		(void)p_first;
 		(void)p_count;
 	}
+	bool _resize_dag(uint32_t p_bytes) override {
+		dag_bytes = p_bytes;
+		return true;
+	}
+	void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override {
+		(void)p_offset;
+		(void)p_data;
+		(void)p_size;
+	}
+
+	uint32_t dag_bytes = 0;
 
 public:
 	int get_record_upload_calls() const { return record_upload_calls; }
+	uint32_t get_dag_bytes() const { return dag_bytes; }
 };
 
 } // namespace RendererDummy

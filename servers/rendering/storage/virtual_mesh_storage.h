@@ -128,6 +128,10 @@ public:
 		RID mesh;
 		uint32_t live_instances = 0;
 		bool record_dirty = false;
+		// GodotNext: nextgeo_gpu_cull (#76). The mesh's DAG blob in the global
+		// DAG buffer; the mesh record's offsets are relative to its base.
+		uint32_t dag_offset = 0;
+		uint32_t dag_size = 0;
 	};
 
 	RendererVirtualMeshStorage();
@@ -165,6 +169,10 @@ public:
 protected:
 	virtual void _upload_records(uint32_t p_first, uint32_t p_count) = 0;
 	virtual void _upload_mesh_records(uint32_t p_first, uint32_t p_count) = 0;
+	// GodotNext: nextgeo_gpu_cull (#76). The DAG buffer lives in the renderer.
+	virtual bool _resize_dag(uint32_t p_bytes) { return false; }
+	virtual void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
+	virtual void _reset_dag() {}
 	// Renderer-specific bookkeeping after a record slot is reused.
 	virtual void _record_reused(uint32_t p_record) {}
 	// Renderer-specific refusal (for example an out-of-memory RD buffer).
@@ -182,6 +190,9 @@ protected:
 
 	void _ensure_capacity(uint32_t p_records);
 	void _mark_dirty(uint32_t p_record);
+	uint32_t _alloc_dag(uint32_t p_size);
+	void _free_dag(uint32_t p_offset, uint32_t p_size);
+	MeshRecord _parse_dag(const Vector<uint8_t> &p_dag, uint32_t p_base);
 	void _write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb, float p_lod_bias);
 
 	LocalVector<Record> records;
@@ -197,6 +208,13 @@ protected:
 
 	uint32_t record_capacity = 0;
 	uint32_t used_slots = 0;
+	uint32_t dag_used = 0;
+	uint32_t dag_capacity = 0;
+	struct DAGFree {
+		uint32_t offset = 0;
+		uint32_t size = 0;
+	};
+	LocalVector<DAGFree> dag_free;
 	uint32_t live_records = 0;
 	uint32_t frame = 0;
 	bool mesh_records_dirty = false;

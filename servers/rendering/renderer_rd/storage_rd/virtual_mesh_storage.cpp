@@ -56,6 +56,42 @@ void VirtualMeshStorage::free_resources() {
 	}
 	buffer_capacity = 0;
 	mesh_buffer_capacity = 0;
+	_reset_dag();
+}
+
+bool VirtualMeshStorage::_resize_dag(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	if (dag_buffer.is_valid()) {
+		rd->free_rid(dag_buffer);
+		dag_buffer = RID();
+	}
+	dag_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	dag_buffer = rd->storage_buffer_create(p_bytes);
+	return dag_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || dag_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > dag_bytes);
+	rd->buffer_update(dag_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_dag() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && dag_buffer.is_valid()) {
+		rd->free_rid(dag_buffer);
+	}
+	dag_buffer = RID();
+	dag_bytes = 0;
 }
 
 void VirtualMeshStorage::_upload_records(uint32_t p_first, uint32_t p_count) {
