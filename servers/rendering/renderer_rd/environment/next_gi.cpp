@@ -403,6 +403,16 @@ NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) 
 			return DEBUG_VIEW_REFLECTION;
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_HIT:
 			return DEBUG_VIEW_SPECULAR_HIT;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_RAW:
+			return DEBUG_VIEW_SPECULAR_RAW;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_VARIANCE:
+			return DEBUG_VIEW_SPECULAR_VARIANCE;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_HISTORY:
+			return DEBUG_VIEW_SPECULAR_HISTORY;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_REJECTED:
+			return DEBUG_VIEW_SPECULAR_REJECTED;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_DENOISED:
+			return DEBUG_VIEW_SPECULAR_DENOISED;
 		default:
 			return DEBUG_VIEW_MAX;
 	}
@@ -436,6 +446,21 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 	}
 	if (p_view == DEBUG_VIEW_SPECULAR_HIT) {
 		view.label = "specular hit distance";
+	}
+	if (p_view == DEBUG_VIEW_SPECULAR_RAW) {
+		view.label = "specular raw";
+	}
+	if (p_view == DEBUG_VIEW_SPECULAR_VARIANCE) {
+		view.label = "specular variance";
+	}
+	if (p_view == DEBUG_VIEW_SPECULAR_HISTORY) {
+		view.label = "specular history length";
+	}
+	if (p_view == DEBUG_VIEW_SPECULAR_REJECTED) {
+		view.label = "specular rejected history";
+	}
+	if (p_view == DEBUG_VIEW_SPECULAR_DENOISED) {
+		view.label = "specular denoised";
 	}
 	if (p_view == DEBUG_VIEW_FALLBACK_REASONS) {
 		// The per-instance reasons are the legend of this view. They are not tier reasons.
@@ -511,6 +536,10 @@ void NextGI::composite_reference(RID p_color) {
 		reference = memnew(NextGIReference);
 	}
 	reference->composite(p_color);
+}
+
+RID NextGI::get_specular_filter_debug_texture(DebugViewId p_view) const {
+	return gather != nullptr ? gather->get_specular_filter_debug_texture(int(p_view)) : RID();
 }
 
 RID NextGI::get_specular_debug_texture() const {

@@ -5833,6 +5833,16 @@
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_HIT" value="45" enum="ViewportDebugDraw">
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_RAW" value="46" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_VARIANCE" value="47" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_HISTORY" value="48" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_REJECTED" value="49" enum="ViewportDebugDraw">
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_DENOISED" value="50" enum="ViewportDebugDraw">
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

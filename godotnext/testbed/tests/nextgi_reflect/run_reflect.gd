@@ -53,6 +53,13 @@ func _run() -> void:
 
 	# The two reflection debug views must present the traced image, not a flat tint.
 	var views := {}
+	var specular_views := [
+		[Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_RAW, "specular_raw", true],
+		[Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_VARIANCE, "specular_variance", true],
+		[Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_HISTORY, "specular_history", true],
+		[Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_REJECTED, "specular_rejected", false],
+		[Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_DENOISED, "specular_denoised", true],
+	]
 	for entry in [[Viewport.DEBUG_DRAW_NEXTGI_REFLECTION, "reflection"], [Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_HIT, "specular_hit"]]:
 		get_viewport().debug_draw = int(entry[0])
 		for i in 6:
@@ -70,6 +77,25 @@ func _run() -> void:
 		views[entry[1]] = not uniform
 		if uniform:
 			_failures.append("%s debug view rendered a uniform image" % entry[1])
+	# The five specular-filter views: raw, variance, history, rejected, denoised.
+	for entry in specular_views:
+		get_viewport().debug_draw = int(entry[0])
+		for i in 6:
+			await RenderingServer.frame_post_draw
+		var image := get_viewport().get_texture().get_image()
+		var first: Color = image.get_pixel(0, 0)
+		var uniform := true
+		for y in range(0, image.get_height(), 64):
+			for x in range(0, image.get_width(), 64):
+				if image.get_pixel(x, y) != first:
+					uniform = false
+					break
+			if not uniform:
+				break
+		views[entry[1]] = not uniform
+		if uniform and bool(entry[2]):
+			_failures.append("%s debug view rendered a uniform image" % entry[1])
+
 	get_viewport().debug_draw = Viewport.DEBUG_DRAW_DISABLED
 
 	var ok := _failures.is_empty()

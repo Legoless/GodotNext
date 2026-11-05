@@ -118,6 +118,9 @@ class NextGIGather {
 	RID specular_scratch;
 	RID specular_denoised;
 	RID specular_history_length;
+	RID specular_debug_variance;
+	RID specular_debug_rejected;
+	RID specular_final;
 	RID last_reflection_output;
 	RID last_specular_hit;
 	Projection last_inv_view_proj;
@@ -174,6 +177,7 @@ public:
 	RID get_debug_texture(int p_view) const;
 	// Log-scaled specular hit distance for DEBUG_VIEW_SPECULAR_HIT (#60).
 	RID get_specular_debug_texture() const;
+	RID get_specular_filter_debug_texture(int p_view) const;
 
 	// Expanded gather source (variant 0) for the kernel-rule doctest. No GPU compile.
 	static String build_shader_source(int p_variant = 0);

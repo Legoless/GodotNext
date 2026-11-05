@@ -88,6 +88,8 @@ void NextGIDenoise::process_specular_temporal(const SpecularTemporalParams &p_pa
 		float normal_tolerance;
 		uint32_t velocity_enabled;
 		uint32_t history_cap_min;
+		uint32_t debug_views;
+		uint32_t pad;
 	} push_constant;
 	push_constant.trace_size[0] = p_params.trace_size.width;
 	push_constant.trace_size[1] = p_params.trace_size.height;
@@ -97,6 +99,9 @@ void NextGIDenoise::process_specular_temporal(const SpecularTemporalParams &p_pa
 	push_constant.normal_tolerance = 0.9f;
 	push_constant.velocity_enabled = p_params.velocity_enabled ? 1u : 0u;
 	push_constant.history_cap_min = p_params.history_cap_min;
+	push_constant.debug_views = p_params.debug_views ? 1u : 0u;
+	push_constant.pad = 0u;
+	ERR_FAIL_COND_MSG(p_params.debug_views && (!p_params.debug_variance.is_valid() || !p_params.debug_rejected.is_valid()), "NextGIDenoise: the specular debug views need two images.");
 
 	float gpu_params[40];
 	for (int i = 0; i < 16; i++) {
@@ -124,7 +129,9 @@ void NextGIDenoise::process_specular_temporal(const SpecularTemporalParams &p_pa
 	RD::Uniform u_output(RD::UNIFORM_TYPE_IMAGE, 6, Vector<RID>({ p_params.output }));
 	RD::Uniform u_history_length(RD::UNIFORM_TYPE_IMAGE, 7, Vector<RID>({ p_params.history_length }));
 	RD::Uniform u_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, specular_params_buffer);
-	RID uniform_set = uniform_set_cache->get_cache(shader_rid, 0, u_raw, u_history, u_depth, u_normal_roughness, u_velocity, u_hit_distance, u_output, u_history_length, u_params);
+	RD::Uniform u_debug_variance(RD::UNIFORM_TYPE_IMAGE, 9, Vector<RID>({ p_params.debug_variance.is_valid() ? p_params.debug_variance : p_params.output }));
+	RD::Uniform u_debug_rejected(RD::UNIFORM_TYPE_IMAGE, 10, Vector<RID>({ p_params.debug_rejected.is_valid() ? p_params.debug_rejected : p_params.output }));
+	RID uniform_set = uniform_set_cache->get_cache(shader_rid, 0, u_raw, u_history, u_depth, u_normal_roughness, u_velocity, u_hit_distance, u_output, u_history_length, u_params, u_debug_variance, u_debug_rejected);
 	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the specular temporal uniform set.");
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();

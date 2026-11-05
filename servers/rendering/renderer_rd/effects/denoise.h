@@ -141,6 +141,10 @@ public:
 		Vector3 prev_camera_pos;
 		bool velocity_enabled = false;
 		uint32_t history_cap_min = 8;
+		// #54 debug views: write the variance and rejected-history images.
+		bool debug_views = false;
+		RID debug_variance;
+		RID debug_rejected;
 	};
 	struct SpecularSpatialParams {
 		RID source;

@@ -190,7 +190,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[27] = { blue_noise_texture, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[29] = { blue_noise_texture, specular_debug_variance, specular_debug_rejected, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -215,6 +215,9 @@ void NextGIGather::free_resources() {
 	specular_scratch = RID();
 	specular_denoised = RID();
 	specular_history_length = RID();
+	specular_debug_variance = RID();
+	specular_debug_rejected = RID();
+	specular_final = RID();
 	blue_noise_texture = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
@@ -652,7 +655,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		const uint32_t trace_h = MAX(last_screen_h / 2u, 1u);
 		const RD::TextureFormat specular_format = rd->texture_get_format(specular_raw.is_valid() ? specular_raw : probe_image);
 		if (!specular_raw.is_valid() || specular_format.width != trace_w || specular_format.height != trace_h) {
-			RID *textures[5] = { &specular_raw, &specular_history, &specular_scratch, &specular_denoised, &specular_history_length };
+			RID *textures[7] = { &specular_raw, &specular_history, &specular_scratch, &specular_denoised, &specular_history_length, &specular_debug_variance, &specular_debug_rejected };
 			for (RID *texture : textures) {
 				if (texture->is_valid()) {
 					rd->free_rid(*texture);
@@ -999,6 +1002,7 @@ void NextGIGather::_denoise_specular() {
 		upsample.trace_size = trace_size;
 		upsample.screen_size = screen_size;
 		denoise->process_specular_upsample(upsample);
+		specular_final = specular_raw;
 		return;
 	}
 
@@ -1018,6 +1022,10 @@ void NextGIGather::_denoise_specular() {
 	temporal.camera_pos = last_camera_pos;
 	temporal.prev_camera_pos = last_prev_camera_pos;
 	temporal.velocity_enabled = last_velocity.is_valid();
+	const NextGI::DebugViewId active_view = NextGI::get_singleton() != nullptr ? NextGI::get_singleton()->get_active_debug_view() : NextGI::DEBUG_VIEW_MAX;
+	temporal.debug_views = active_view == NextGI::DEBUG_VIEW_SPECULAR_VARIANCE || active_view == NextGI::DEBUG_VIEW_SPECULAR_REJECTED;
+	temporal.debug_variance = specular_debug_variance;
+	temporal.debug_rejected = specular_debug_rejected;
 	denoise->process_specular_temporal(temporal);
 
 	const Vector3i extent(trace_size.width, trace_size.height, 1);
@@ -1047,6 +1055,24 @@ void NextGIGather::_denoise_specular() {
 	upsample.trace_size = trace_size;
 	upsample.screen_size = screen_size;
 	denoise->process_specular_upsample(upsample);
+	specular_final = source;
+}
+
+RID NextGIGather::get_specular_filter_debug_texture(int p_view) const {
+	switch (NextGI::DebugViewId(p_view)) {
+		case NextGI::DEBUG_VIEW_SPECULAR_RAW:
+			return specular_raw;
+		case NextGI::DEBUG_VIEW_SPECULAR_VARIANCE:
+			return specular_debug_variance;
+		case NextGI::DEBUG_VIEW_SPECULAR_HISTORY:
+			return specular_history_length;
+		case NextGI::DEBUG_VIEW_SPECULAR_REJECTED:
+			return specular_debug_rejected;
+		case NextGI::DEBUG_VIEW_SPECULAR_DENOISED:
+			return specular_final;
+		default:
+			return RID();
+	}
 }
 
 void NextGIGather::integrate(RenderDataRD *p_render_data) {

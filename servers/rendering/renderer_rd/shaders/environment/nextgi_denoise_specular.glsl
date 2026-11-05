@@ -22,6 +22,8 @@ layout(set = 0, binding = 4) uniform sampler2D velocity_tex;
 layout(set = 0, binding = 5) uniform sampler2D hit_distance_tex;
 layout(rgba16f, set = 0, binding = 6) uniform image2D output_image;
 layout(rgba16f, set = 0, binding = 7) uniform image2D history_length_image;
+layout(rgba16f, set = 0, binding = 9) uniform image2D debug_variance_image;
+layout(rgba16f, set = 0, binding = 10) uniform image2D debug_rejected_image;
 layout(set = 0, binding = 8, std430) readonly buffer NextGISpecularParams {
 	mat4 prev_view_proj;
 	mat4 inv_view_proj;
@@ -37,6 +39,8 @@ layout(push_constant, std430) uniform Push {
 	float normal_tolerance;
 	uint velocity_enabled;
 	uint history_cap_min;
+	uint debug_views;
+	uint pad;
 }
 push;
 
@@ -116,6 +120,10 @@ void main() {
 	history_length = valid ? min(history_length + 1u, max(cap_max, push.history_cap_min)) : 1u;
 	const float blend = 1.0 / float(max(history_length, 1u));
 	vec3 result = mix(clamped, current.rgb, blend);
+	if (push.debug_views != 0u) {
+		imageStore(debug_variance_image, pixel, vec4(sigma, 1.0));
+		imageStore(debug_rejected_image, pixel, vec4(valid ? 0.0 : 1.0, 0.0, 0.0, 1.0));
+	}
 	imageStore(output_image, pixel, vec4(result, current.a));
 	imageStore(history_length_image, pixel, vec4(float(min(history_length, 255u)) / 255.0, 0.0, 0.0, 1.0));
 }
