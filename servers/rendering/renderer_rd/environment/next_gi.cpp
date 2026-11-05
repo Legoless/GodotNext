@@ -483,6 +483,7 @@ Vector<String> NextGI::get_instance_fallback_reason_names() {
 	names.push_back("NOT_IN_RT_SCENE");
 	names.push_back("RT_INSTANCE_CAP");
 	names.push_back("RT_DYNAMIC_EXCLUDED");
+	names.push_back("ALPHA_TESTED_RT_EXCLUDED");
 	return names;
 }
 

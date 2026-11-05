@@ -182,6 +182,8 @@ enum NextGIRTExclusion {
 	NEXTGI_RT_NOT_IN_SCENE,
 	NEXTGI_RT_INSTANCE_CAP,
 	NEXTGI_RT_DYNAMIC_EXCLUDED,
+	// GodotNext: nextgi_alpha_policy (#61).
+	NEXTGI_RT_ALPHA_TESTED_EXCLUDED,
 };
 
 enum {
@@ -221,6 +223,8 @@ struct NextGIRTCoverage {
 	uint32_t not_in_scene = 0;
 	uint32_t instance_cap = 0;
 	uint32_t dynamic_excluded = 0;
+	// GodotNext: nextgi_alpha_policy (#61).
+	uint32_t alpha_excluded = 0;
 	uint32_t blas_pending = 0;
 };
 

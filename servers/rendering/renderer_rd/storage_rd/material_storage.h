@@ -80,6 +80,14 @@ public:
 
 		virtual void set_code(const String &p_Code) = 0;
 		virtual bool is_animated() const = 0;
+		// GodotNext: nextgi_alpha_policy (#61). How a material participates in the RT scene.
+		enum NextGIRTClass {
+			NEXTGI_RT_OPAQUE,
+			NEXTGI_RT_ALPHA_TESTED,
+			NEXTGI_RT_BLENDED,
+		};
+		virtual NextGIRTClass get_nextgi_rt_class() const { return NEXTGI_RT_OPAQUE; }
+
 		virtual bool casts_shadows() const = 0;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const = 0;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const = 0;
@@ -497,6 +505,8 @@ public:
 
 	virtual void material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) override;
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const override;
+	// GodotNext: nextgi_alpha_policy (#61).
+	ShaderData::NextGIRTClass material_get_nextgi_rt_class(RID p_material);
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;

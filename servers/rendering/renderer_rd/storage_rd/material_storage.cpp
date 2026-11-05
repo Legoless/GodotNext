@@ -2590,6 +2590,14 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 	}
 }
 
+MaterialStorage::ShaderData::NextGIRTClass MaterialStorage::material_get_nextgi_rt_class(RID p_material) {
+	ShaderData *shader_data = material_get_shader_data(p_material);
+	if (shader_data == nullptr) {
+		return ShaderData::NEXTGI_RT_OPAQUE;
+	}
+	return shader_data->get_nextgi_rt_class();
+}
+
 Variant MaterialStorage::material_get_param(RID p_material, const StringName &p_param) const {
 	Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL_V(material, Variant());

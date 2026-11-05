@@ -128,6 +128,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["ALPHA_ANTIALIASING_EDGE"] = &uses_alpha_antialiasing;
 	actions.usage_flag_pointers["ALPHA_TEXTURE_COORDINATE"] = &uses_alpha_antialiasing;
 	actions.render_mode_flags["depth_prepass_alpha"] = &uses_depth_prepass_alpha;
+	// GodotNext: nextgi_alpha_policy (#61).
+	actions.render_mode_flags["nextgi_rt_opaque"] = &nextgi_rt_opaque;
 
 	actions.usage_flag_pointers["SSS_STRENGTH"] = &uses_sss;
 	actions.usage_flag_pointers["SSS_TRANSMITTANCE_DEPTH"] = &uses_transmittance;
@@ -249,6 +251,16 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 
 bool SceneShaderForwardClustered::ShaderData::is_animated() const {
 	return (uses_fragment_time && uses_discard) || (uses_vertex_time && uses_vertex);
+}
+
+RendererRD::MaterialStorage::ShaderData::NextGIRTClass SceneShaderForwardClustered::ShaderData::get_nextgi_rt_class() const {
+	if (uses_alpha_clip || uses_discard) {
+		return nextgi_rt_opaque ? RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE : RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_ALPHA_TESTED;
+	}
+	const bool has_read_screen_alpha = uses_screen_texture || uses_depth_texture || uses_normal_texture;
+	const bool has_base_alpha = (uses_alpha && (!uses_alpha_clip || uses_alpha_antialiasing)) || has_read_screen_alpha;
+	const bool has_alpha = has_base_alpha || uses_blend_alpha;
+	return has_alpha ? RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_BLENDED : RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE;
 }
 
 bool SceneShaderForwardClustered::ShaderData::casts_shadows() const {

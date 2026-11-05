@@ -297,6 +297,9 @@
 		<member name="msdf_pixel_range" type="float" setter="set_msdf_pixel_range" getter="get_msdf_pixel_range" default="4.0">
 			The width of the range around the shape between the minimum and maximum representable signed distance.
 		</member>
+		<member name="nextgi_rt_treat_as_opaque" type="bool" setter="set_flag" getter="get_flag" default="false">
+			If [code]true[/code], an alpha-scissor or alpha-hash material is traced as opaque by NextGI's ray tracing, so it can occlude and bounce light. Blended materials are never traced.
+		</member>
 		<member name="no_depth_test" type="bool" setter="set_flag" getter="get_flag" default="false">
 			If [code]true[/code], depth testing is disabled and the object will be drawn in render order.
 		</member>
@@ -785,7 +788,9 @@
 		<constant name="FLAG_USE_FOV_OVERRIDE" value="24" enum="Flags">
 			Enables using [member fov_override].
 		</constant>
-		<constant name="FLAG_MAX" value="25" enum="Flags">
+		<constant name="FLAG_NEXTGI_RT_OPAQUE" value="25" enum="Flags">
+		</constant>
+		<constant name="FLAG_MAX" value="26" enum="Flags">
 			Represents the size of the [enum Flags] enum.
 		</constant>
 		<constant name="DIFFUSE_BURLEY" value="0" enum="DiffuseMode">

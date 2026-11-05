@@ -410,21 +410,15 @@ void nextgi_rt_patch_positions(Vector<float> &r_positions, uint32_t p_byte_offse
 	memcpy(reinterpret_cast<uint8_t *>(r_positions.ptrw()) + p_byte_offset, p_data, count);
 }
 
-// D17: alpha surfaces stay out of the RT scene in v0. The check uses the mesh surface's own
-// material, matching FLAG_PASS_ALPHA / uses_alpha_clip of the forward shader data.
+// GodotNext: nextgi_alpha_policy (#61). Only effective-opaque surfaces enter the TLAS. Alpha-tested
+// materials join it only with the `nextgi_rt_opaque` render mode (the BaseMaterial3D override);
+// blended surfaces never do.
 static bool _nextgi_rt_material_is_alpha(RID p_material) {
-	if (p_material.is_null()) {
-		return false;
-	}
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
-	if (material_storage == nullptr || !material_storage->owns_material(p_material)) {
+	if (p_material.is_null() || material_storage == nullptr) {
 		return false;
 	}
-	RendererSceneRenderImplementation::SceneShaderForwardClustered::MaterialData *material_data = static_cast<RendererSceneRenderImplementation::SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(p_material, MaterialStorage::SHADER_TYPE_3D));
-	if (material_data == nullptr || material_data->shader_data == nullptr) {
-		return false;
-	}
-	return material_data->shader_data->uses_alpha_pass() || material_data->shader_data->uses_alpha_clip;
+	return material_storage->material_get_nextgi_rt_class(p_material) != MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE;
 }
 
 struct NextGIRTScene::InstanceEncoder {
@@ -543,6 +537,7 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 			continue;
 		}
 		if (_nextgi_rt_material_is_alpha(surface_infos[i].material)) {
+			stats.coverage.alpha_excluded++;
 			continue;
 		}
 		triangle_counts[i] = surface_infos[i].index_count / 3;
@@ -639,6 +634,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		return;
 	}
 	stats.fed_instance_count = fed_instances->size();
+	stats.coverage.alpha_excluded = 0;
 	const RendererSceneRender::RenderSDFGIUpdateData *update_data = p_render_data->sdfgi_update_data;
 	stats.coverage.not_in_scene = update_data != nullptr ? update_data->nextgi_rt_not_in_scene : 0;
 	stats.coverage.instance_cap = update_data != nullptr ? update_data->nextgi_rt_instance_cap : 0;

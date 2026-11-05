@@ -2379,4 +2379,18 @@ TEST_CASE("[NextGI][RT] Dynamic instance budget shares the TLAS capacity") {
 
 } // namespace TestNextGI
 
+// GodotNext: nextgi_alpha_policy (#61).
+#include "scene/resources/material.h"
+
+TEST_CASE("[NextGI][Alpha] BaseMaterial3D nextgi_rt_treat_as_opaque round trip") {
+	Ref<StandardMaterial3D> material;
+	material.instantiate();
+	CHECK_FALSE(material->get_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE));
+	material->set_transparency(BaseMaterial3D::TRANSPARENCY_ALPHA_SCISSOR);
+	material->set_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE, true);
+	CHECK(material->get_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE));
+	material->set_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE, false);
+	CHECK_FALSE(material->get_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE));
+}
+
 #endif // RD_ENABLED
