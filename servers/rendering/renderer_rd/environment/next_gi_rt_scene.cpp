@@ -30,6 +30,8 @@
 
 #include "next_gi_rt_scene.h"
 
+#include "next_gi_sdf_stream.h"
+
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -490,6 +492,11 @@ void NextGIRTScene::free() {
 		}
 	}
 	skinned_parts.clear();
+	if (sdf_stream != nullptr) {
+		sdf_stream->free_resources();
+		memdelete(sdf_stream);
+		sdf_stream = nullptr;
+	}
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
 		tlas = RID();
@@ -1111,6 +1118,15 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		tlas_traceable = true;
 	}
 	sdf_instances.upload();
+	// GodotNext: ps_mesh_sdf_atlas (#185). Request mips from camera distance;
+	// the readback is applied one frame later with a 4 MiB budget.
+	if (sdf_stream == nullptr) {
+		sdf_stream = memnew(NextGISDFStream);
+	}
+	sdf_stream->poll(mesh_storage->get_sdf_atlas(), frame);
+	if (mesh_storage->get_sdf_atlas().get_resident_bytes() > 0) {
+		sdf_stream->dispatch(sdf_instances.get_buffer(), sdf_instances.get_count(), camera_origin);
+	}
 }
 
 // GodotNext: nextgi_as_slots

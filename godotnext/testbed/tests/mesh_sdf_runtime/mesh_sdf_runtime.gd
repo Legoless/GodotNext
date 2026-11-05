@@ -49,7 +49,7 @@ func _ready() -> void:
 	add_child(instance)
 
 	var camera := Camera3D.new()
-	camera.position = Vector3(0.0, 5.0, 9.0)
+	camera.position = Vector3(0.0, 120.0, 120.0)
 	camera.rotation_degrees = Vector3(-30.0, 0.0, 0.0)
 	camera.current = true
 	add_child(camera)

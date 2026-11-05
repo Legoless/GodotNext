@@ -40,6 +40,7 @@
 #include "next_gi_sdf.h"
 
 class RenderDataRD;
+class NextGISDFStream;
 
 namespace RendererRD {
 
@@ -421,6 +422,7 @@ private:
 	uint32_t surface_record_capacity = 0;
 	Stats stats;
 	NextGISDFInstances sdf_instances;
+	NextGISDFStream *sdf_stream = nullptr;
 	// GodotNext: nextgi_skinned_actors (#59). Per-instance posed BLASes keyed by (instance, surface).
 	struct SkinnedPart {
 		RID blas;

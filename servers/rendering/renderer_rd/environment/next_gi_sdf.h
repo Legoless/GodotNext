@@ -89,6 +89,9 @@ public:
 		// MeshSDFData::PAGE_FAR_OUTSIDE / PAGE_FAR_INSIDE sentinel.
 		Vector<PackedInt32Array> page_tables;
 		Vector<PackedInt32Array> slots;
+		Vector<PackedInt32Array> source_tables; // CPU page tables, kept for reloads.
+		Vector<uint8_t> mip_loaded; // Mip 0 is loaded at registration.
+		Vector<uint64_t> mip_last_requested;
 		uint32_t mip_count = 0;
 		uint64_t resident_bytes = 0;
 	};
@@ -108,6 +111,11 @@ public:
 	uint64_t get_resident_bytes() const { return resident_bytes; }
 	uint64_t get_pool_size_bytes() const { return pool.get_size_bytes(); }
 	uint32_t get_mesh_id(RID p_mesh) const;
+	uint32_t get_mip_count(uint32_t p_mesh_id) const;
+	// Streams the requested mips in, up to p_budget_bytes (the caller passes
+	// 4 MiB), and evicts mips idle for 60 frames. p_requests is one mip per
+	// instance in the instance table; sdf_id UINT32_MAX entries are skipped.
+	void stream_mips(const LocalVector<uint32_t> &p_sdf_ids, const LocalVector<uint32_t> &p_mips, uint64_t p_frame, uint64_t p_budget_bytes);
 	void free_all();
 
 private:
@@ -141,11 +149,13 @@ public:
 
 	struct Record {
 		float world_to_local[3][4] = { { 1.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 1.0f, 0.0f } };
-		float scale_bound = 0.0f;
+		float world_position[4] = { 0.0f, 0.0f, 0.0f, 1.0f }; // w = scale bound.
 		uint32_t sdf_id = UINT32_MAX;
 		uint32_t reason = NEXTGI_SDF_INCLUDED;
 		uint32_t flags = 0;
-		uint32_t pad = 0;
+		uint32_t required_mip = 0; // Written by the streaming shader.
+		uint32_t mip_count = 1;
+		uint32_t pad[3] = { 0, 0, 0 };
 	};
 	static constexpr uint32_t RECORD_BYTES = sizeof(Record);
 	static constexpr uint32_t MAX_INSTANCES = 100000;

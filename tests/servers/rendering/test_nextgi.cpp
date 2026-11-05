@@ -2528,7 +2528,8 @@ TEST_CASE("[NextGI][SDF] Atlas page tables and release") {
 	CHECK_EQ(int(pages->mip_count), field->get_mip_count());
 	CHECK_EQ(pages->page_tables.size(), size_t(field->get_mip_count()));
 	CHECK(pages->resident_bytes > 0);
-	CHECK_EQ(atlas.get_pool_used(), uint32_t(pages->resident_bytes / NextGISDFPool::BRICK_BYTES));
+	// Registration allocates every mip's slots but uploads mip 0 only.
+	CHECK(atlas.get_pool_used() >= uint32_t(pages->resident_bytes / NextGISDFPool::BRICK_BYTES));
 
 	const TypedArray<PackedInt32Array> source = field->get_page_tables();
 	for (int mip = 0; mip < field->get_mip_count(); mip++) {
@@ -2555,6 +2556,24 @@ TEST_CASE("[NextGI][SDF] Atlas page tables and release") {
 	CHECK(atlas.register_mesh(mesh, field));
 	CHECK_EQ(atlas.get_pool_used(), used);
 
+	// Streaming a higher mip loads it and evicts it after 60 idle frames.
+	const uint32_t id = atlas.get_mesh_id(mesh);
+	CHECK_NE(id, UINT32_MAX);
+	CHECK(atlas.get_mip_count(id) >= 2);
+	const uint64_t resident_before = atlas.get_resident_bytes();
+	const uint32_t used_before = atlas.get_pool_used();
+	LocalVector<uint32_t> ids;
+	LocalVector<uint32_t> mips;
+	ids.push_back(id);
+	mips.push_back(1);
+	atlas.stream_mips(ids, mips, 1, 4 * 1024 * 1024);
+	CHECK(atlas.get_resident_bytes() > resident_before);
+	CHECK(atlas.get_pool_used() > used_before);
+	LocalVector<uint32_t> none_ids;
+	LocalVector<uint32_t> none_mips;
+	atlas.stream_mips(none_ids, none_mips, 70, 4 * 1024 * 1024);
+	CHECK_EQ(atlas.get_resident_bytes(), resident_before);
+
 	atlas.unregister_mesh(mesh);
 	CHECK_FALSE(atlas.has_mesh(mesh));
 	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
@@ -2575,7 +2594,7 @@ TEST_CASE("[NextGI][SDF] Instance table reasons and world-to-local") {
 	CHECK_EQ(included, uint32_t(0));
 	CHECK_EQ(instances.get_record(0).reason, uint32_t(NEXTGI_SDF_INCLUDED));
 	CHECK_EQ(instances.get_record(0).sdf_id, sdf_id);
-	CHECK_EQ(instances.get_record(0).scale_bound, 1.5f);
+	CHECK_EQ(instances.get_record(0).world_position[3], 1.5f);
 	CHECK_EQ((instances.get_record(0).flags & NextGISDFInstances::INSTANCE_VISIBLE), uint32_t(NextGISDFInstances::INSTANCE_VISIBLE));
 	// world_to_local maps the instance origin back to the local origin.
 	const float *rows = &instances.get_record(0).world_to_local[0][0];

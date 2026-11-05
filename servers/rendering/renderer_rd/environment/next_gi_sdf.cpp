@@ -120,7 +120,6 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 		mesh_ids.insert(p_mesh, mesh_id);
 		mesh_order.push_back(p_mesh);
 	}
-	(void)mesh_id;
 
 	const int mip_count = p_field->get_mip_count();
 	if (mip_count <= 0) {
@@ -138,10 +137,20 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 		return false;
 	}
 
-	uint64_t reserved_bytes = 0;
+	// All mips get their pool slots up front (bricks never move). Mip 0 is
+	// uploaded now; higher mips stream in on request.
 	for (int mip = 0; mip < mip_count; mip++) {
 		const PackedInt32Array table = source_tables[mip];
 		const PackedByteArray bricks = source_bricks[mip];
+		if (mip > 0) {
+			// Higher mips stream in on request and allocate their slots then.
+			pages.slots.push_back(PackedInt32Array());
+			pages.source_tables.push_back(table);
+			pages.mip_loaded.push_back(0);
+			pages.mip_last_requested.push_back(0);
+			pages.page_tables.push_back(table);
+			continue;
+		}
 		uint32_t brick_count = 0;
 		for (int index = 0; index < table.size(); index++) {
 			if (table[index] >= 0) {
@@ -150,7 +159,6 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 		}
 		LocalVector<uint32_t> slots;
 		if (!pool.allocate(brick_count, slots)) {
-			// Roll back the mips already reserved.
 			for (PackedInt32Array &allocated : pages.slots) {
 				for (int index = 0; index < allocated.size(); index++) {
 					pool.free_slot(uint32_t(allocated[index]));
@@ -158,6 +166,16 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 			}
 			return false;
 		}
+		PackedInt32Array packed_slots;
+		packed_slots.resize(slots.size());
+		for (uint32_t index = 0; index < slots.size(); index++) {
+			packed_slots.set(index, int32_t(slots[index]));
+		}
+		pages.slots.push_back(packed_slots);
+		pages.source_tables.push_back(table);
+		pages.mip_loaded.push_back(mip == 0 ? 1 : 0);
+		pages.mip_last_requested.push_back(0);
+
 		PackedInt32Array gpu_table;
 		gpu_table.resize(table.size());
 		uint32_t cursor = 0;
@@ -169,32 +187,25 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 			}
 			const uint32_t byte_offset = uint32_t(brick) * NextGISDFPool::BRICK_BYTES;
 			if (byte_offset + NextGISDFPool::BRICK_BYTES > uint32_t(bricks.size())) {
-				// A malformed table; release everything and refuse the mesh.
 				for (PackedInt32Array &allocated : pages.slots) {
-					for (int index = 0; index < allocated.size(); index++) {
-						pool.free_slot(uint32_t(allocated[index]));
+					for (int slot_index = 0; slot_index < allocated.size(); slot_index++) {
+						pool.free_slot(uint32_t(allocated[slot_index]));
 					}
 				}
-				pool.free(slots);
 				return false;
 			}
 			const uint32_t slot = slots[cursor++];
 			gpu_table.set(index, int32_t(slot));
-			if (buffer.is_valid() && rd != nullptr) {
+			if (mip == 0 && buffer.is_valid() && rd != nullptr) {
 				rd->buffer_update(buffer, slot * NextGISDFPool::BRICK_BYTES, NextGISDFPool::BRICK_BYTES, bricks.ptr() + byte_offset);
 			}
-			reserved_bytes += NextGISDFPool::BRICK_BYTES;
 		}
 		pages.page_tables.push_back(gpu_table);
-		PackedInt32Array packed_slots;
-		packed_slots.resize(slots.size());
-		for (uint32_t index = 0; index < slots.size(); index++) {
-			packed_slots.set(index, int32_t(slots[index]));
+		if (mip == 0) {
+			pages.resident_bytes += uint64_t(brick_count) * NextGISDFPool::BRICK_BYTES;
 		}
-		pages.slots.push_back(packed_slots);
 	}
-	pages.resident_bytes = reserved_bytes;
-	resident_bytes += reserved_bytes;
+	resident_bytes += pages.resident_bytes;
 	meshes.insert(p_mesh, pages);
 	return true;
 }
@@ -211,6 +222,103 @@ void NextGISDFAtlas::unregister_mesh(RID p_mesh) {
 uint32_t NextGISDFAtlas::get_mesh_id(RID p_mesh) const {
 	const uint32_t *id = mesh_ids.getptr(p_mesh);
 	return id != nullptr && meshes.has(p_mesh) ? *id : UINT32_MAX;
+}
+
+uint32_t NextGISDFAtlas::get_mip_count(uint32_t p_mesh_id) const {
+	if (p_mesh_id >= mesh_order.size()) {
+		return 1;
+	}
+	const MeshPages *pages = meshes.getptr(mesh_order[p_mesh_id]);
+	return pages != nullptr ? MAX(pages->mip_count, 1u) : 1;
+}
+
+void NextGISDFAtlas::stream_mips(const LocalVector<uint32_t> &p_sdf_ids, const LocalVector<uint32_t> &p_mips, uint64_t p_frame, uint64_t p_budget_bytes) {
+	RD *rd = RD::get_singleton();
+	const RID buffer = _ensure_buffer();
+	const uint32_t count = MIN(p_sdf_ids.size(), p_mips.size());
+	uint64_t budget = p_budget_bytes;
+
+	// Requests are applied mip order first (nearest detail first).
+	for (uint32_t mip = 1; mip < 8 && budget > 0; mip++) {
+		for (uint32_t index = 0; index < count && budget > 0; index++) {
+			const uint32_t mesh_id = p_sdf_ids[index];
+			if (mesh_id == UINT32_MAX || p_mips[index] < mip) {
+				continue;
+			}
+			if (mesh_id >= mesh_order.size()) {
+				continue;
+			}
+			MeshPages *pages = meshes.getptr(mesh_order[mesh_id]);
+			if (pages == nullptr || mip >= pages->mip_count) {
+				continue;
+			}
+			if (pages->mip_loaded[mip]) {
+				pages->mip_last_requested.write[mip] = p_frame;
+				continue;
+			}
+			const PackedInt32Array &source = pages->source_tables[mip];
+			uint32_t brick_count = 0;
+			for (int brick_index = 0; brick_index < source.size(); brick_index++) {
+				if (source[brick_index] >= 0) {
+					brick_count++;
+				}
+			}
+			const uint64_t bytes = uint64_t(brick_count) * NextGISDFPool::BRICK_BYTES;
+			if (bytes > budget) {
+				continue;
+			}
+			LocalVector<uint32_t> slots;
+			if (!pool.allocate(brick_count, slots)) {
+				continue;
+			}
+			const PackedByteArray bricks = pages->field->get_brick_data()[mip];
+			PackedInt32Array gpu_table;
+			gpu_table.resize(source.size());
+			uint32_t cursor = 0;
+			for (int brick_index = 0; brick_index < source.size(); brick_index++) {
+				const int32_t brick = source[brick_index];
+				if (brick < 0) {
+					gpu_table.set(brick_index, brick);
+					continue;
+				}
+				const uint32_t slot = slots[cursor++];
+				gpu_table.set(brick_index, int32_t(slot));
+				if (buffer.is_valid() && rd != nullptr) {
+					rd->buffer_update(buffer, slot * NextGISDFPool::BRICK_BYTES, NextGISDFPool::BRICK_BYTES, bricks.ptr() + uint32_t(brick) * NextGISDFPool::BRICK_BYTES);
+				}
+			}
+			PackedInt32Array packed_slots;
+			packed_slots.resize(slots.size());
+			for (uint32_t slot_index = 0; slot_index < slots.size(); slot_index++) {
+				packed_slots.set(slot_index, int32_t(slots[slot_index]));
+			}
+			pages->slots.write[mip] = packed_slots;
+			pages->page_tables.write[mip] = gpu_table;
+			pages->mip_loaded.write[mip] = 1;
+			pages->mip_last_requested.write[mip] = p_frame;
+			pages->resident_bytes += bytes;
+			resident_bytes += bytes;
+			budget -= bytes;
+		}
+	}
+
+	// Evict higher mips idle for 60 frames.
+	for (const KeyValue<RID, MeshPages> &entry : meshes) {
+		MeshPages &pages = const_cast<MeshPages &>(entry.value);
+		for (uint32_t mip = 1; mip < pages.mip_count; mip++) {
+			if (!pages.mip_loaded[mip] || p_frame - pages.mip_last_requested[mip] <= 60) {
+				continue;
+			}
+			const uint64_t bytes = uint64_t(pages.slots[mip].size()) * NextGISDFPool::BRICK_BYTES;
+			for (int slot_index = 0; slot_index < pages.slots[mip].size(); slot_index++) {
+				pool.free_slot(uint32_t(pages.slots[mip][slot_index]));
+			}
+			pages.slots.write[mip].clear();
+			pages.mip_loaded.write[mip] = 0;
+			pages.resident_bytes -= MIN(pages.resident_bytes, bytes);
+			resident_bytes -= MIN(resident_bytes, bytes);
+		}
+	}
 }
 
 void NextGISDFAtlas::free_all() {
@@ -250,7 +358,10 @@ uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, cons
 		record.world_to_local[row][2] = world_to_local.basis.rows[row][2];
 		record.world_to_local[row][3] = world_to_local.origin[row];
 	}
-	record.scale_bound = p_scale_bound;
+	record.world_position[0] = p_transform.origin.x;
+	record.world_position[1] = p_transform.origin.y;
+	record.world_position[2] = p_transform.origin.z;
+	record.world_position[3] = MAX(p_scale_bound, 0.001f);
 	if (p_visible) {
 		record.flags |= INSTANCE_VISIBLE;
 	}
@@ -262,6 +373,7 @@ uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, cons
 			record.reason = NEXTGI_SDF_NO_FIELD;
 		} else {
 			record.sdf_id = sdf_id;
+			record.mip_count = p_atlas.get_mip_count(sdf_id);
 		}
 	}
 	reason_counts[record.reason]++;
