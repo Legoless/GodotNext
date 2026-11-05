@@ -2415,6 +2415,10 @@ TEST_CASE("[NextGI][MultiView] Anchor selection and scenario scheduling") {
 	// The scenario runs once per frame.
 	CHECK_FALSE(RendererRD::NextGI::nextgi_multiview_should_run_scenario(7, 7));
 	CHECK(RendererRD::NextGI::nextgi_multiview_should_run_scenario(6, 7));
+	// Secondary views get their own timestamp names.
+	CHECK(RendererRD::NextGI::nextgi_multiview_pass_name("NextGI: Diffuse gather", 0, false) == "NextGI: Diffuse gather");
+	CHECK(RendererRD::NextGI::nextgi_multiview_pass_name("NextGI: Diffuse gather", 1, true) == "NextGI:View1:Diffuse gather");
+	CHECK(RendererRD::NextGI::nextgi_multiview_pass_name("> NextGI", 2, true) == "NextGI:View2:> NextGI");
 }
 
 // GodotNext: nextgi_alpha_policy (#61).

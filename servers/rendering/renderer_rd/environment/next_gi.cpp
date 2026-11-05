@@ -401,6 +401,17 @@ int NextGI::nextgi_multiview_choose_anchor(const ViewAnchorCandidate *p_views, u
 	return best_area;
 }
 
+String NextGI::nextgi_multiview_pass_name(const String &p_name, uint32_t p_view, bool p_multiview) {
+	if (!p_multiview) {
+		return p_name;
+	}
+	String stripped = p_name;
+	if (stripped.begins_with("NextGI:")) {
+		stripped = stripped.substr(7).strip_edges();
+	}
+	return vformat("NextGI:View%d:%s", p_view, stripped);
+}
+
 bool NextGI::nextgi_multiview_should_run_scenario(uint64_t p_last_frame, uint64_t p_frame) {
 	// Once per scenario per frame, whoever the first NextGI view is.
 	return p_last_frame != p_frame;
@@ -718,9 +729,25 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	ensure_gi_buffers(rb.ptr(), p_half_resolution);
 
+	// GodotNext: nextgi_multiview (#58). Scenario passes run once per scenario per frame; the
+	// per-view passes (screen traces, gather, reflections, integration, denoise) run per view.
+	const uint64_t render_frame_number = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	const bool new_scenario = nextgi_multiview_should_run_scenario(scenario_frame, render_frame_number);
+	if (new_scenario) {
+		scenario_frame = render_frame_number;
+		view_ordinal = 0;
+	}
+	const uint32_t view_index = view_ordinal++;
+	const bool multiview = view_index > 0 || rb->get_view_count() > 1;
+
 	// Every slot emits its timestamp, also while it has no work yet.
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
-		RENDER_TIMESTAMP(PASS_SLOTS[slot].name);
+		const bool scenario_slot = slot == PASS_SLOT_AS_UPDATES || slot == PASS_SLOT_AS_BUILDS || slot == PASS_SLOT_SRC_CAPTURE || slot == PASS_SLOT_SRC_RELIGHT || slot == PASS_SLOT_WRC_UPDATE;
+		if (scenario_slot && !new_scenario) {
+			// Secondary views reuse this frame's AS, SRC and WRC work.
+			continue;
+		}
+		RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[slot].name, view_index, multiview));
 		rd->draw_command_begin_label(Span<char>(PASS_SLOTS[slot].name, strlen(PASS_SLOTS[slot].name)));
 		// GodotNext: nextgi_as_slots
 		// The RT scene runs inside its two slots (#243): the TLAS rebuild in "AS updates"
@@ -775,7 +802,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	}
 
 	rd->draw_command_end_label();
-	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_END].name);
+	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));
 }
 
 NextGI::NextGI() {

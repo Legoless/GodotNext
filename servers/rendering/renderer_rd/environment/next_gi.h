@@ -285,6 +285,7 @@ public:
 	};
 	static int nextgi_multiview_choose_anchor(const ViewAnchorCandidate *p_views, uint32_t p_count, int p_previous);
 	static bool nextgi_multiview_should_run_scenario(uint64_t p_last_frame, uint64_t p_frame);
+	static String nextgi_multiview_pass_name(const String &p_name, uint32_t p_view, bool p_multiview);
 
 	// The §3.1 rule. Pure, so doctests need no device. The first failing check wins:
 	// !forward_plus -> UNSUPPORTED_RENDERER; !project_enabled -> DISABLED; Off -> SETTING_OFF;
@@ -377,6 +378,9 @@ public:
 	};
 
 	DebugViewId active_debug_view = DEBUG_VIEW_MAX;
+	// GodotNext: nextgi_multiview (#58). Scenario passes run once per scenario per frame.
+	uint64_t scenario_frame = UINT64_MAX;
+	uint32_t view_ordinal = 0;
 
 	static Color debug_tint_hwrt() { return Color(0.15, 0.72, 0.28); }
 	static Color debug_tint_fallback() { return Color(0.90, 0.55, 0.08); }
