@@ -142,6 +142,13 @@ void NextGIDenoise::process_temporal(const TemporalParams &p_params) {
 	push_constant.velocity_enabled = p_params.velocity_enabled ? 1u : 0u;
 	push_constant.probe_stride = p_params.probe_stride;
 	push_constant.probe_extent = p_params.probe_extent;
+	push_constant.debug_views = p_params.debug_views ? 1u : 0u;
+	ERR_FAIL_COND_MSG(p_params.debug_views && (!p_params.debug_variance.is_valid() || !p_params.debug_history.is_valid() || !p_params.debug_rejected.is_valid()), "NextGIDenoise: the debug views need three valid images.");
+
+	// Inactive debug views still need a valid image binding; the output texture is one.
+	RID debug_variance = p_params.debug_variance.is_valid() ? p_params.debug_variance : p_params.probe_radiance_out;
+	RID debug_history = p_params.debug_history.is_valid() ? p_params.debug_history : p_params.probe_radiance_out;
+	RID debug_rejected = p_params.debug_rejected.is_valid() ? p_params.debug_rejected : p_params.probe_radiance_out;
 
 	RID linear_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
 	RID nearest_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
@@ -156,8 +163,11 @@ void NextGIDenoise::process_temporal(const TemporalParams &p_params) {
 	RD::Uniform u_reset_mask(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_params.reset_mask);
 	RD::Uniform u_history_length(RD::UNIFORM_TYPE_IMAGE, 7, Vector<RID>({ p_params.history_length }));
 	RD::Uniform u_temporal_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, temporal_params_buffer);
+	RD::Uniform u_debug_variance(RD::UNIFORM_TYPE_IMAGE, 9, Vector<RID>({ debug_variance }));
+	RD::Uniform u_debug_history(RD::UNIFORM_TYPE_IMAGE, 10, Vector<RID>({ debug_history }));
+	RD::Uniform u_debug_rejected(RD::UNIFORM_TYPE_IMAGE, 11, Vector<RID>({ debug_rejected }));
 
-	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_probe_history, u_depth, u_normal_roughness, u_velocity, u_reset_mask, u_history_length, u_temporal_params);
+	RID uniform_set = uniform_set_cache->get_cache(denoise_shader, 0, u_probe_radiance, u_probe_radiance_out, u_probe_history, u_depth, u_normal_roughness, u_velocity, u_reset_mask, u_history_length, u_temporal_params, u_debug_variance, u_debug_history, u_debug_rejected);
 	ERR_FAIL_COND_MSG(uniform_set.is_null(), "NextGIDenoise: could not build the temporal uniform set.");
 
 	RD::ComputeListID compute_list = RD::get_singleton()->compute_list_begin();

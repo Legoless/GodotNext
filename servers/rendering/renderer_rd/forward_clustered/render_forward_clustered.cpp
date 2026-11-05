@@ -1749,6 +1749,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		ss_effects->allocate_last_frame_buffer(rb, p_use_ssil, p_use_ssr, p_use_nextgi);
 	}
 	if (p_use_nextgi && rb.is_valid()) {
+		next_gi.set_active_debug_view(RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode()));
 		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution());
 	}
 
@@ -2848,14 +2849,28 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 	}
 
 	// GodotNext: nextgi_user_surface
-	// A view with no merged producer clears the framebuffer to its labeled tint.
+	// Denoise views (#53) copy their producer texture. A view with no merged producer clears the
+	// framebuffer to its labeled tint.
 	const RendererRD::NextGI::DebugViewId nextgi_view = RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode());
 	if (nextgi_view != RendererRD::NextGI::DEBUG_VIEW_MAX) {
-		const RendererRD::NextGI::DebugView view = RendererRD::NextGI::resolve_debug_view(nextgi_view, next_gi.get_tier_result());
-		Vector<Color> clear_colors;
-		clear_colors.push_back(view.tint);
-		RD::get_singleton()->draw_list_begin(texture_storage->render_target_get_rd_framebuffer(render_target), RD::DRAW_CLEAR_COLOR_0, clear_colors);
-		RD::get_singleton()->draw_list_end();
+		RID nextgi_source;
+		if (nextgi_view == RendererRD::NextGI::DEBUG_VIEW_DENOISE_DENOISED) {
+			if (rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
+				nextgi_source = rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT);
+			}
+		} else {
+			nextgi_source = next_gi.get_denoise_debug_texture(nextgi_view);
+		}
+		if (nextgi_source.is_valid()) {
+			const Size2i rtsize = texture_storage->render_target_get_size(render_target);
+			copy_effects->copy_to_fb_rect(nextgi_source, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false);
+		} else {
+			const RendererRD::NextGI::DebugView view = RendererRD::NextGI::resolve_debug_view(nextgi_view, next_gi.get_tier_result());
+			Vector<Color> clear_colors;
+			clear_colors.push_back(view.tint);
+			RD::get_singleton()->draw_list_begin(texture_storage->render_target_get_rd_framebuffer(render_target), RD::DRAW_CLEAR_COLOR_0, clear_colors);
+			RD::get_singleton()->draw_list_end();
+		}
 	}
 }
 

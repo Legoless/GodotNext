@@ -115,6 +115,9 @@ layout(set = 0, binding = 6, std430) restrict readonly buffer NextGIDenoiseReset
 }
 reset_mask;
 layout(r8ui, set = 0, binding = 7) uniform uimage2D history_length_image;
+layout(rgba16f, set = 0, binding = 9) uniform image2D debug_variance_image;
+layout(rgba16f, set = 0, binding = 10) uniform image2D debug_history_image;
+layout(rgba16f, set = 0, binding = 11) uniform image2D debug_rejected_image;
 
 layout(set = 0, binding = 8, std430) restrict readonly buffer NextGIDenoiseTemporalParams {
 	mat4 prev_view_proj;
@@ -133,6 +136,7 @@ layout(push_constant, std430) uniform Params {
 	uint velocity_enabled;
 	uint probe_stride;
 	uint probe_extent;
+	uint debug_views;
 }
 params;
 
@@ -230,14 +234,23 @@ void main() {
 		}
 	}
 	vec3 out_rgb = current.rgb;
+	vec3 debug_sigma = vec3(0.0);
 	if (count > 0.0) {
 		mean /= count;
 		vec3 variance = max(mean_sq / count - mean * mean, vec3(0.0));
-		vec3 sigma = sqrt(variance);
-		vec3 clamped = clamp(history.rgb, mean - 1.5 * sigma, mean + 1.5 * sigma);
+		debug_sigma = sqrt(variance);
+		vec3 clamped = clamp(history.rgb, mean - 1.5 * debug_sigma, mean + 1.5 * debug_sigma);
 		// With a history cap of 0 the pass is a pass-through, for the DLSS-RR bypass hook (#206).
 		float weight = params.history_cap == 0u ? 1.0 : 1.0 / float(history_length + 1u);
 		out_rgb = reset ? current.rgb : mix(clamped, current.rgb, weight);
+	}
+
+	// Optional debug views (#53): variance, history length and rejection. Values are written per
+	// texel so the debug copy can show the full trace resolution.
+	if (params.debug_views != 0u) {
+		imageStore(debug_variance_image, texel, vec4(debug_sigma, 1.0));
+		imageStore(debug_history_image, texel, vec4(float(history_length) / 255.0, 0.0, 0.0, 1.0));
+		imageStore(debug_rejected_image, texel, vec4(reset ? 1.0 : 0.0, 0.0, 0.0, 1.0));
 	}
 
 	imageStore(probe_radiance_out, texel, vec4(out_rgb, distance_to_camera));

@@ -90,6 +90,13 @@ public:
 		bool velocity_enabled = false;
 		uint32_t probe_stride = 4;
 		uint32_t probe_extent = 16;
+		// Optional debug views (#53). When p_debug_views is true the pass writes per-texel
+		// variance, history length and rejection, and the three RIDs must be valid and sized
+		// like the probe radiance texture.
+		bool debug_views = false;
+		RID debug_variance;
+		RID debug_history;
+		RID debug_rejected;
 	};
 
 	// One stabilizer pass. It never accumulates: the previous output is clamped to the current
@@ -154,6 +161,7 @@ private:
 		uint32_t velocity_enabled;
 		uint32_t probe_stride;
 		uint32_t probe_extent;
+		uint32_t debug_views;
 	};
 
 	struct StabilizePushConstant {

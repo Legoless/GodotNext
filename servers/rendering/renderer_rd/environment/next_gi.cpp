@@ -417,13 +417,13 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 	view.tint = debug_tint_no_data();
 	view.label = "no data";
 	if (p_view >= DEBUG_VIEW_DENOISE_RAW && p_view <= DEBUG_VIEW_DENOISE_DENOISED) {
-		// The denoise passes run, but the GPU debug source that tints them is not wired yet.
+		// The denoise passes write these sources; the renderer copies the texture for the view.
 		static const char *const denoise_labels[] = {
-			"denoise raw: GPU debug source pending",
-			"denoise variance: GPU debug source pending",
-			"denoise history length: GPU debug source pending",
-			"denoise rejected history: GPU debug source pending",
-			"denoise result: GPU debug source pending",
+			"denoise raw",
+			"denoise variance",
+			"denoise history length",
+			"denoise rejected history",
+			"denoise result",
 		};
 		view.label = denoise_labels[p_view - DEBUG_VIEW_DENOISE_RAW];
 	}
@@ -501,6 +501,10 @@ void NextGI::composite_reference(RID p_color) {
 		reference = memnew(NextGIReference);
 	}
 	reference->composite(p_color);
+}
+
+RID NextGI::get_denoise_debug_texture(DebugViewId p_view) const {
+	return gather != nullptr ? gather->get_debug_texture(int(p_view)) : RID();
 }
 
 void NextGI::_gather(RenderDataRD *p_render_data) {

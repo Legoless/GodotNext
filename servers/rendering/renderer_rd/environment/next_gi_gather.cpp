@@ -170,7 +170,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[14] = { probe_image, probe_scratch, probe_history, history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[18] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -183,6 +183,10 @@ void NextGIGather::free_resources() {
 		rd->free_rid(sampler_nearest);
 	}
 	probe_image = RID();
+	debug_raw = RID();
+	debug_variance = RID();
+	debug_history = RID();
+	debug_rejected = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -319,6 +323,22 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	if (history_length.is_valid()) {
 		rd->free_rid(history_length);
 		history_length = RID();
+	}
+	if (debug_raw.is_valid()) {
+		rd->free_rid(debug_raw);
+		debug_raw = RID();
+	}
+	if (debug_variance.is_valid()) {
+		rd->free_rid(debug_variance);
+		debug_variance = RID();
+	}
+	if (debug_history.is_valid()) {
+		rd->free_rid(debug_history);
+		debug_history = RID();
+	}
+	if (debug_rejected.is_valid()) {
+		rd->free_rid(debug_rejected);
+		debug_rejected = RID();
 	}
 	if (reset_mask_buffer.is_valid()) {
 		rd->free_rid(reset_mask_buffer);
@@ -707,6 +727,20 @@ void NextGIGather::_denoise_probes() {
 		return;
 	}
 
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	NextGI *next_gi = NextGI::get_singleton();
+	const int debug_view = next_gi != nullptr ? int(next_gi->get_active_debug_view()) : -1;
+	const bool raw_view = debug_view == int(NextGI::DEBUG_VIEW_DENOISE_RAW);
+	const bool variance_view = debug_view == int(NextGI::DEBUG_VIEW_DENOISE_VARIANCE);
+	const bool history_view = debug_view == int(NextGI::DEBUG_VIEW_DENOISE_HISTORY);
+	const bool rejected_view = debug_view == int(NextGI::DEBUG_VIEW_DENOISE_REJECTED);
+	if ((raw_view || variance_view || history_view || rejected_view) && _ensure_debug_textures()) {
+		if (raw_view) {
+			const Vector3i extent(probe_w * 4, probe_h * 4, 1);
+			rd->texture_copy(probe_image, debug_raw, Vector3(), Vector3(), extent, 0, 0, 0, 0);
+		}
+	}
+
 	NextGIDenoise::DiffuseParams params;
 	params.probe_radiance = probe_image;
 	params.probe_radiance_out = probe_scratch;
@@ -721,7 +755,6 @@ void NextGIGather::_denoise_probes() {
 	SWAP(params.probe_radiance, params.probe_radiance_out);
 	denoise->process_diffuse(params);
 
-	RenderingDevice *rd = RenderingDevice::get_singleton();
 	const Vector3i probe_extent(probe_w * 4, probe_h * 4, 1);
 	if (!history_valid) {
 		// First frame: the raw radiance seeds the history and there is nothing to reproject.
@@ -747,12 +780,57 @@ void NextGIGather::_denoise_probes() {
 	temporal.prev_camera_pos = last_prev_camera_pos;
 	temporal.history_cap = rr_probe_history_cap;
 	temporal.velocity_enabled = last_velocity.is_valid();
+	temporal.debug_views = variance_view || history_view || rejected_view;
+	if (temporal.debug_views) {
+		temporal.debug_variance = debug_variance;
+		temporal.debug_history = debug_history;
+		temporal.debug_rejected = debug_rejected;
+	}
 	denoise->process_temporal(temporal);
 
 	// The integration reads probe_image, so land the accumulated result there, then keep this
 	// frame's output as next frame's history.
 	rd->texture_copy(probe_scratch, probe_image, Vector3(0, 0, 0), Vector3(0, 0, 0), Vector3(probe_extent), 0, 0, 0, 0);
 	SWAP(probe_history, probe_scratch);
+}
+
+bool NextGIGather::_ensure_debug_textures() {
+	if (debug_raw.is_valid() && debug_variance.is_valid() && debug_history.is_valid() && debug_rejected.is_valid()) {
+		return true;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	RD::TextureFormat tf;
+	tf.width = MAX(probe_w * 4, 1u);
+	tf.height = MAX(probe_h * 4, 1u);
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+	RID *textures[4] = { &debug_raw, &debug_variance, &debug_history, &debug_rejected };
+	for (RID *texture : textures) {
+		*texture = rd->texture_create(tf, RD::TextureView());
+		if (texture->is_null()) {
+			return false;
+		}
+		rd->texture_clear(*texture, Color(0, 0, 0, 1), 0, 1, 0, 1);
+	}
+	return true;
+}
+
+RID NextGIGather::get_debug_texture(int p_view) const {
+	switch (NextGI::DebugViewId(p_view)) {
+		case NextGI::DEBUG_VIEW_DENOISE_RAW:
+			return debug_raw;
+		case NextGI::DEBUG_VIEW_DENOISE_VARIANCE:
+			return debug_variance;
+		case NextGI::DEBUG_VIEW_DENOISE_HISTORY:
+			return debug_history;
+		case NextGI::DEBUG_VIEW_DENOISE_REJECTED:
+			return debug_rejected;
+		default:
+			return RID();
+	}
 }
 
 void NextGIGather::integrate(RenderDataRD *p_render_data) {

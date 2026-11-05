@@ -83,6 +83,11 @@ class NextGIGather {
 	RID probe_scratch;
 	RID probe_history;
 	RID history_length;
+	// GodotNext: nextgi_denoise_debug — per-view debug copies for the denoise views (#53).
+	RID debug_raw;
+	RID debug_variance;
+	RID debug_history;
+	RID debug_rejected;
 	RID reset_mask_buffer;
 	RID ambient_scratch;
 	RID prev_ambient;
@@ -131,6 +136,7 @@ class NextGIGather {
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
 	bool _bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride);
 	void _denoise_probes();
+	bool _ensure_debug_textures();
 	void _stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers);
 	void _read_counters();
 	void _free_uniform_set();
@@ -143,6 +149,8 @@ public:
 	void gather(RenderDataRD *p_render_data);
 	void integrate(RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;
+	// #53 debug views: 10 raw, 11 variance, 12 history, 13 rejected (NextGI::DebugViewId order).
+	RID get_debug_texture(int p_view) const;
 
 	// Expanded gather source (variant 0) for the kernel-rule doctest. No GPU compile.
 	static String build_shader_source(int p_variant = 0);

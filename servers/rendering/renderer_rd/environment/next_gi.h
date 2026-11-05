@@ -353,12 +353,20 @@ public:
 		bool has_data = false;
 	};
 
+	DebugViewId active_debug_view = DEBUG_VIEW_MAX;
+
 	static Color debug_tint_hwrt() { return Color(0.15, 0.72, 0.28); }
 	static Color debug_tint_fallback() { return Color(0.90, 0.55, 0.08); }
 	static Color debug_tint_no_data() { return Color(0.25, 0.28, 0.35); }
 
 	// Maps a ViewportDebugDraw value. DEBUG_VIEW_MAX means it is not a NextGI view.
 	static DebugViewId debug_view_from_viewport(int p_viewport_debug_draw);
+	// #53 denoise views: the renderer publishes the active view each frame so the gather only
+	// allocates and writes the debug images while one of them is on screen.
+	void set_active_debug_view(DebugViewId p_view) { active_debug_view = p_view; }
+	DebugViewId get_active_debug_view() const { return active_debug_view; }
+	// Texture for DEBUG_VIEW_DENOISE_RAW/VARIANCE/HISTORY/REJECTED, or an invalid RID.
+	RID get_denoise_debug_texture(DebugViewId p_view) const;
 	// Tier view uses the green or amber tint. Every other view is a "no data" tint until its producer merges.
 	static DebugView resolve_debug_view(DebugViewId p_view, const TierResult &p_result);
 	static bool is_tier_reason_name(const String &p_name);
