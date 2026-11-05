@@ -124,6 +124,36 @@ public:
 		Size2i trace_size;
 		Size2i screen_size;
 	};
+	struct SpecularTemporalParams {
+		RID raw;
+		RID history;
+		RID depth;
+		RID normal_roughness;
+		RID velocity;
+		RID hit_distance;
+		RID output;
+		RID history_length;
+		Size2i trace_size;
+		Size2i screen_size;
+		Projection prev_view_proj;
+		Projection inv_view_proj;
+		Vector3 camera_pos;
+		Vector3 prev_camera_pos;
+		bool velocity_enabled = false;
+		uint32_t history_cap_min = 8;
+	};
+	struct SpecularSpatialParams {
+		RID source;
+		RID depth;
+		RID normal_roughness;
+		RID output;
+		Size2i trace_size;
+		Size2i screen_size;
+		int32_t step = 1;
+		float normal_power = 8.0f;
+	};
+	void process_specular_temporal(const SpecularTemporalParams &p_params);
+	void process_specular_spatial(const SpecularSpatialParams &p_params);
 	void process_specular_upsample(const SpecularUpsampleParams &p_params);
 
 	void process_diffuse(const DiffuseParams &p_params);
@@ -189,7 +219,10 @@ private:
 
 	NextgiDenoiseSpecularShaderRD specular_shader;
 	RID specular_version;
+	RID specular_temporal;
+	RID specular_spatial;
 	RID specular_upsample;
+	RID specular_params_buffer;
 	RID temporal_params_buffer;
 };
 

@@ -111,7 +111,13 @@ class NextGIGather {
 	RID specular_debug;
 	RID clamp_totals_buffer;
 	RID specular_raw;
+	RID specular_history;
+	RID specular_scratch;
+	RID specular_denoised;
+	RID specular_history_length;
 	RID last_reflection_output;
+	RID last_specular_hit;
+	Projection last_inv_view_proj;
 	RID params_buffer;
 	RID counter_buffer;
 	RID feedback_buffer;
@@ -147,6 +153,7 @@ class NextGIGather {
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
 	bool _bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride);
 	void _denoise_probes();
+	void _denoise_specular();
 	bool _ensure_debug_textures();
 	void _stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers);
 	void _read_counters();

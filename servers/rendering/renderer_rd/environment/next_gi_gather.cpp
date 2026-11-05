@@ -187,7 +187,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[22] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[26] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -208,6 +208,10 @@ void NextGIGather::free_resources() {
 	specular_debug = RID();
 	clamp_totals_buffer = RID();
 	specular_raw = RID();
+	specular_history = RID();
+	specular_scratch = RID();
+	specular_denoised = RID();
+	specular_history_length = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -484,6 +488,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	RenderSceneDataRD *scene_data = p_render_data->scene_data;
 	ERR_FAIL_NULL_V(scene_data, false);
 	const Projection view_proj = scene_data->cam_projection * Projection(scene_data->cam_transform.affine_inverse());
+	last_inv_view_proj = view_proj.inverse();
 	// prev_view_projection is the projection only. Match the current matrix, including the previous camera.
 	const Projection prev_view_proj = scene_data->prev_cam_projection * Projection(scene_data->prev_cam_transform.affine_inverse());
 	GatherParamsGPU params;
@@ -620,21 +625,27 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		clamp_totals_buffer = rd->storage_buffer_create(sizeof(uint32_t) * 2);
 	}
 	last_reflection_output = rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : RID();
+	last_specular_hit = rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID();
 	if (last_screen_w > 0 && last_screen_h > 0) {
 		const uint32_t trace_w = MAX(last_screen_w / 2u, 1u);
 		const uint32_t trace_h = MAX(last_screen_h / 2u, 1u);
 		const RD::TextureFormat specular_format = rd->texture_get_format(specular_raw.is_valid() ? specular_raw : probe_image);
 		if (!specular_raw.is_valid() || specular_format.width != trace_w || specular_format.height != trace_h) {
-			if (specular_raw.is_valid()) {
-				rd->free_rid(specular_raw);
+			RID *textures[5] = { &specular_raw, &specular_history, &specular_scratch, &specular_denoised, &specular_history_length };
+			for (RID *texture : textures) {
+				if (texture->is_valid()) {
+					rd->free_rid(*texture);
+				}
 			}
 			RD::TextureFormat trace_format;
 			trace_format.width = trace_w;
 			trace_format.height = trace_h;
 			trace_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 			trace_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
-			specular_raw = rd->texture_create(trace_format, RD::TextureView());
-			rd->texture_clear(specular_raw, Color(0, 0, 0, 0), 0, 1, 0, 1);
+			for (RID *texture : textures) {
+				*texture = rd->texture_create(trace_format, RD::TextureView());
+				rd->texture_clear(*texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+			}
 		}
 	}
 	if (params.reflect_debug != 0u && !specular_debug.is_valid()) {
@@ -815,17 +826,9 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
 		rd->compute_list_end();
 	}
-	// GodotNext: nextgi_denoise_specular (#54). Upsample the trace into RB_TEX_REFLECTION.
-	if (denoise != nullptr && specular_raw.is_valid() && last_reflection_output.is_valid() && last_normal_roughness.is_valid() && last_depth.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
-		NextGIDenoise::SpecularUpsampleParams specular;
-		specular.raw = specular_raw;
-		specular.depth = last_depth;
-		specular.normal_roughness = last_normal_roughness;
-		specular.output = last_reflection_output;
-		specular.trace_size = Size2i(MAX(last_screen_w / 2u, 1u), MAX(last_screen_h / 2u, 1u));
-		specular.screen_size = Size2i(last_screen_w, last_screen_h);
-		denoise->process_specular_upsample(specular);
-	}
+	// GodotNext: nextgi_denoise_specular (#54). Temporal accumulation, then a three-pass a-trous
+	// spatial filter, then the joint-bilateral upsample into RB_TEX_REFLECTION.
+	_denoise_specular();
 	_read_counters();
 	frame++;
 }
@@ -946,6 +949,64 @@ RID NextGIGather::get_debug_texture(int p_view) const {
 		default:
 			return RID();
 	}
+}
+
+void NextGIGather::_denoise_specular() {
+	if (denoise == nullptr || !specular_raw.is_valid() || !specular_history.is_valid() || !specular_denoised.is_valid() || !specular_scratch.is_valid() || !specular_history_length.is_valid()) {
+		return;
+	}
+	if (!last_depth.is_valid() || !last_normal_roughness.is_valid() || !last_reflection_output.is_valid() || last_screen_w == 0 || last_screen_h == 0) {
+		return;
+	}
+	const Size2i trace_size(MAX(last_screen_w / 2u, 1u), MAX(last_screen_h / 2u, 1u));
+	const Size2i screen_size(last_screen_w, last_screen_h);
+
+	NextGIDenoise::SpecularTemporalParams temporal;
+	temporal.raw = specular_raw;
+	temporal.history = specular_history;
+	temporal.depth = last_depth;
+	temporal.normal_roughness = last_normal_roughness;
+	temporal.velocity = last_velocity.is_valid() ? last_velocity : dummy_color;
+	temporal.hit_distance = last_specular_hit.is_valid() ? last_specular_hit : dummy_color;
+	temporal.output = specular_denoised;
+	temporal.history_length = specular_history_length;
+	temporal.trace_size = trace_size;
+	temporal.screen_size = screen_size;
+	temporal.prev_view_proj = last_prev_view_proj;
+	temporal.inv_view_proj = last_inv_view_proj;
+	temporal.camera_pos = last_camera_pos;
+	temporal.prev_camera_pos = last_prev_camera_pos;
+	temporal.velocity_enabled = last_velocity.is_valid();
+	denoise->process_specular_temporal(temporal);
+
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const Vector3i extent(trace_size.width, trace_size.height, 1);
+	rd->texture_copy(specular_denoised, specular_history, Vector3(), Vector3(), extent, 0, 0, 0, 0);
+
+	RID source = specular_denoised;
+	RID destination = specular_scratch;
+	const int steps[3] = { 1, 2, 4 };
+	for (int i = 0; i < 3; i++) {
+		NextGIDenoise::SpecularSpatialParams spatial;
+		spatial.source = source;
+		spatial.depth = last_depth;
+		spatial.normal_roughness = last_normal_roughness;
+		spatial.output = destination;
+		spatial.trace_size = trace_size;
+		spatial.screen_size = screen_size;
+		spatial.step = steps[i];
+		denoise->process_specular_spatial(spatial);
+		SWAP(source, destination);
+	}
+
+	NextGIDenoise::SpecularUpsampleParams upsample;
+	upsample.raw = source;
+	upsample.depth = last_depth;
+	upsample.normal_roughness = last_normal_roughness;
+	upsample.output = last_reflection_output;
+	upsample.trace_size = trace_size;
+	upsample.screen_size = screen_size;
+	denoise->process_specular_upsample(upsample);
 }
 
 void NextGIGather::integrate(RenderDataRD *p_render_data) {
