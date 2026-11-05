@@ -25,6 +25,15 @@ total, so the 50 MB testbed budget is unaffected by the scene scale.
 Regenerate with `res://generators/dense_city/dense_city_generator.gd`,
 seed `1` (one run per variant; see its README).
 
+The PN content rows (#148) follow the same rule: the generator is tracked
+and its output is generated on demand into the gitignored
+`generated/pn_content/` folder (about 30 MB for the three Foliage Field
+variants, Displacement Cliff and Spline Road). Every mesh, leaf texture
+and MultiMesh transform is procedural from the generator's fixed streams;
+no third-party file is involved. Regenerate with
+`godot --headless --path godotnext/testbed --script res://generators/build_pn.gd`
+and run a scene through the harness with `--scene=res://generated/pn_content/<name>.tscn`.
+
 | Path | Generator / author | License | Date | Host |
 |---|---|---|---|---|
 | `project.godot` | hand-authored for #10 step 1 | MIT | 2026-11-03 | the Apple M5 Max |
@@ -38,6 +47,8 @@ seed `1` (one run per variant; see its README).
 | `generators/build_legacy.gd` | hand-authored for #10 step 8 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/build_all.gd` | hand-authored for #10 step 3; keeps baked scenes since #238 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/dense_city_generator.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
+| `generators/build_pn_content.gd` | hand-authored for #148 | MIT | 2026-11-05 | the Apple M5 Max |
+| `generators/build_pn.gd` | hand-authored for #148 | MIT | 2026-11-05 | the Apple M5 Max |
 | `generators/dense_city/validate_dense_city.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/variants.cfg` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/README.md` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
