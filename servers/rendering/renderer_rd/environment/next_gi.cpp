@@ -253,12 +253,8 @@ void NextGI::_settings_changed() {
 		return;
 	}
 	quality_setting = new_quality;
-	// The gather reallocates its probe targets when the ray stride changes; the SRC atlases follow
-	// the preset, so rebuild them while the server is alive.
-	if (src != nullptr) {
-		src->free();
-		src->init();
-	}
+	// The gather reallocates its probe targets when the ray stride changes; the SRC atlas sizes
+	// only change with the preset at creation, so nothing is rebuilt mid-frame.
 	print_line(vformat("NextGI: quality=%s (%s)", get_quality_name(resolve_quality(quality_setting)), quality_setting == QUALITY_AUTO ? "setting auto" : "setting change"));
 }
 

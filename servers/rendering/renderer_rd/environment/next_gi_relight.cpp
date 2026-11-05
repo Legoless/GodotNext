@@ -342,9 +342,9 @@ bool NextGIRelight::_ensure_atlases() {
 	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_TO_BIT);
 	radiance_is_packed = rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, storage);
 	// GodotNext: nextgi_quality_presets (#55). The radiance atlas doubles in height at Epic.
-	// GodotNext: nextgi_quality_presets (#55). The radiance atlas height stays 4096 for now; the
-	// Epic doubling is tracked in the preset table and lands with the page-allocator resize.
-	const NextGIAtlasBudget atlas_budget = nextgi_src_atlas_budget(false);
+	// GodotNext: nextgi_quality_presets (#55). The radiance atlas doubles in height at Epic.
+	const bool epic = NextGI::get_singleton() != nullptr && NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).src_radiance_mib > 64;
+	const NextGIAtlasBudget atlas_budget = nextgi_src_atlas_budget(epic);
 	RD::TextureFormat tf;
 	tf.width = atlas_budget.radiance_width;
 	tf.height = atlas_budget.radiance_height;
