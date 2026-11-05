@@ -122,6 +122,17 @@ struct MeshInfo {
 	uint64_t vertex_count = 0;
 };
 
+// GodotNext: nextgeo_instance_records (#75)
+// What the renderer needs to know about a mesh's virtual geometry. The DAG
+// header and root pages are CPU copies of the .ngm metadata; the path is used
+// by the paged reader. Surfaces outside the mask stay on the legacy path.
+struct VirtualGeometryDesc {
+	Vector<uint8_t> dag_header;
+	Vector<Vector<uint8_t>> root_pages;
+	String ngm_path;
+	uint32_t eligible_surface_mask = 0;
+};
+
 /* STATUS INFORMATION */
 
 struct FrameProfileArea {
