@@ -570,6 +570,7 @@ void NextGI::ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_ha
 		const uint32_t usage = get_gi_buffer_usage_bits();
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_AMBIENT, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_REFLECTION, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
+		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, RenderingDevice::DATA_FORMAT_R16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
 		rbgi->using_half_size_gi = p_half_resolution;
 	}
 }
@@ -586,7 +587,20 @@ void NextGI::_clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const 
 	ERR_FAIL_COND(!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION));
 	// The reflect pass (#60) writes every trace pixel, so the clear only covers frames where the
 	// specular trace is unavailable. Alpha 0 keeps the opaque pass's own specular.
-	RenderingDevice::get_singleton()->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION), Color(0, 0, 0, 0), 0, 1, 0, p_render_buffers->get_view_count());
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const uint32_t layers = p_render_buffers->get_view_count();
+	rd->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION), Color(0, 0, 0, 0), 0, 1, 0, layers);
+	if (p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT)) {
+		// Misses are 65504 in the trace; clear to the same value so a skipped frame stays a miss.
+		rd->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT), Color(65504.0, 0, 0, 0), 0, 1, 0, layers);
+	}
+}
+
+RID NextGI::get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const {
+	if (p_render_buffers == nullptr || !p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT)) {
+		return RID();
+	}
+	return p_render_buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, MAX(p_view, 0), 0);
 }
 
 void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution) {

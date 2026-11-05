@@ -614,7 +614,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		reflect_counter_buffer = rd->storage_buffer_create(sizeof(ReflectCountersGPU));
 	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	RD::Uniform uniforms[35] = {
+	RD::Uniform uniforms[36] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -649,12 +649,13 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 32, Vector<RID>({ sampler_nearest, normal_roughness })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : probe_image })),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 33), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 34), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
-	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 33), reflect_shader_rid, 0);
+	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 34), reflect_shader_rid, 0);
 	return uniform_set.is_valid();
 }
 

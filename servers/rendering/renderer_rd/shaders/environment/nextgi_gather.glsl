@@ -25,6 +25,7 @@ layout(set = 0, binding = 31) uniform sampler2D last_frame_tex;
 // the specular radiance plus its confidence into RB_TEX_REFLECTION.
 layout(set = 0, binding = 32) uniform sampler2D normal_roughness_tex;
 layout(rgba16f, set = 0, binding = 33) uniform image2D reflection_image;
+layout(r16f, set = 0, binding = 35) uniform image2D specular_hit_image;
 layout(set = 0, binding = 34, std430) buffer NextGIReflectCounters {
 	uint traced;
 	uint hits;
@@ -680,6 +681,7 @@ void nextgi_reflect_main() {
 	float depth = texelFetch(depth_tex, full, 0).r;
 	if (depth <= 0.0 || params.reflect_enabled == 0u) {
 		imageStore(reflection_image, pixel, vec4(0.0));
+		imageStore(specular_hit_image, pixel, vec4(65504.0));
 		return;
 	}
 	atomicAdd(reflect_counters.traced, 1u);
@@ -699,6 +701,7 @@ void nextgi_reflect_main() {
 
 	vec3 radiance;
 	float confidence = 0.0;
+	float hit_distance = 65504.0;
 	if (roughness <= params.max_trace_roughness) {
 		vec3 direction = nextgi_reflect_sample_ggx(normal, view_dir, roughness, seed);
 		if (dot(direction, normal) <= 0.0) {
@@ -721,9 +724,11 @@ void nextgi_reflect_main() {
 		if (screen_hit) {
 			radiance = screen_color;
 			confidence = 1.0;
+			hit_distance = traveled;
 			atomicAdd(reflect_counters.hits, 1u);
 		} else if (nextgi_trace(trace_origin, direction, trace_tmax, hit)) {
 			radiance = nextgi_shade_hit(hit, direction, uncovered_count, confidence);
+			hit_distance = traveled + hit.t;
 			atomicAdd(reflect_counters.hits, 1u);
 		} else {
 			radiance = nextgi_wrc_sample(trace_origin + direction * trace_tmax, direction);
@@ -740,6 +745,7 @@ void nextgi_reflect_main() {
 		confidence = nextgi_wrc_confidence;
 	}
 	imageStore(reflection_image, pixel, vec4(radiance, clamp(confidence, 0.0, 1.0)));
+	imageStore(specular_hit_image, pixel, vec4(hit_distance));
 }
 
 void main() {

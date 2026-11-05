@@ -54,6 +54,7 @@
 
 #define RB_TEX_AMBIENT SNAME("ambient")
 #define RB_TEX_REFLECTION SNAME("reflection")
+#define RB_TEX_SPECULAR_HIT SNAME("specular_hit") // R16F world-space first-hit distance (#60)
 
 // Forward declare RenderDataRD and RendererSceneRenderRD so we can pass it into some of our methods, these classes are pretty tightly bound
 class RenderDataRD;
