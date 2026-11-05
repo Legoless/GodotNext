@@ -327,6 +327,19 @@ bool nextgi_rt_surface_is_dynamic(uint32_t p_frame, const uint32_t p_update_fram
 	return true;
 }
 
+NextGISkinnedBuild nextgi_rt_skinned_build(uint32_t p_instance_id, uint32_t p_frame, uint32_t p_triangles, uint32_t p_triangles_so_far, uint32_t p_triangle_cap) {
+	if (p_triangles_so_far + p_triangles > p_triangle_cap) {
+		return NEXTGI_SKINNED_SKIP;
+	}
+	// Rebuild every 32 frames per instance, rotating across instances so the cost spreads.
+	return (p_frame + p_instance_id) % 32u == 0u ? NEXTGI_SKINNED_REBUILD : NEXTGI_SKINNED_REFIT;
+}
+
+uint32_t nextgi_rt_skinned_triangle_budget(bool p_ada_class) {
+	// Ada: 200k skinned triangles per frame; the mid-range class ships at 100k (unvalidated, §23).
+	return p_ada_class ? 200000u : 100000u;
+}
+
 NextGIRTExclusion nextgi_rt_refit_or_exclude(uint32_t p_refit_triangles_so_far, uint32_t p_triangles, uint32_t p_refit_cap) {
 	if (p_refit_triangles_so_far + p_triangles > p_refit_cap) {
 		return NEXTGI_RT_DYNAMIC_EXCLUDED;

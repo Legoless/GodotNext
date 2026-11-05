@@ -231,6 +231,17 @@ struct NextGIRTCoverage {
 // Integer percent. An empty denominator is 0, not a divide.
 int64_t nextgi_rt_coverage_percent(const NextGIRTCoverage &p_coverage);
 
+// GodotNext: nextgi_skinned_actors (#59). Skinned BLAS work: nearest-first within the per-frame
+// triangle budget, refit every frame with a rebuild every 32 frames.
+enum NextGISkinnedBuild {
+	NEXTGI_SKINNED_SKIP = 0,
+	NEXTGI_SKINNED_REFIT,
+	NEXTGI_SKINNED_REBUILD,
+};
+
+NextGISkinnedBuild nextgi_rt_skinned_build(uint32_t p_instance_id, uint32_t p_frame, uint32_t p_triangles, uint32_t p_triangles_so_far, uint32_t p_triangle_cap);
+uint32_t nextgi_rt_skinned_triangle_budget(bool p_ada_class);
+
 // asin(min(1, r/d)). A distance of 0 (the camera is inside the bounds) is a full hemisphere.
 float nextgi_rt_angular_radius(float p_distance, float p_bounding_radius);
 

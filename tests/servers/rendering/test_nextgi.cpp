@@ -2379,6 +2379,21 @@ TEST_CASE("[NextGI][RT] Dynamic instance budget shares the TLAS capacity") {
 
 } // namespace TestNextGI
 
+// GodotNext: nextgi_skinned_actors (#59).
+TEST_CASE("[NextGI][Skinned] Refit schedule and triangle budget") {
+	using Build = RendererRD::NextGISkinnedBuild;
+	// Budget per GPU class.
+	CHECK_EQ(RendererRD::nextgi_rt_skinned_triangle_budget(true), 200000u);
+	CHECK_EQ(RendererRD::nextgi_rt_skinned_triangle_budget(false), 100000u);
+	// Over-budget instances are skipped.
+	CHECK(RendererRD::nextgi_rt_skinned_build(3, 10, 50000, 160000, 200000) == Build::NEXTGI_SKINNED_SKIP);
+	CHECK(RendererRD::nextgi_rt_skinned_build(3, 10, 40000, 160000, 200000) == Build::NEXTGI_SKINNED_REFIT);
+	// (frame + instance) % 32 == 0 rebuilds, otherwise refits.
+	CHECK(RendererRD::nextgi_rt_skinned_build(4, 28, 1000, 0, 200000) == Build::NEXTGI_SKINNED_REBUILD);
+	CHECK(RendererRD::nextgi_rt_skinned_build(4, 27, 1000, 0, 200000) == Build::NEXTGI_SKINNED_REFIT);
+	CHECK(RendererRD::nextgi_rt_skinned_build(0, 0, 1000, 0, 200000) == Build::NEXTGI_SKINNED_REBUILD);
+}
+
 // GodotNext: nextgi_quality_presets (#55).
 TEST_CASE("[NextGI][Quality] Preset budgets and atlas sizes") {
 	using Q = RendererRD::NextGI::Quality;
