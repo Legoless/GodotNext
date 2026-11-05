@@ -535,8 +535,30 @@ layout(set = 1, binding = 42, std430) restrict readonly buffer NextGIWRCForward 
 	vec4 sky;
 	vec4 origin_spacing;
 	uvec4 dispatch;
+	uint page_rect_count;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+	mat4 inv_view_proj;
+	vec4 volume; // x width, y height, z near, w far.
 }
 nextgi_wrc_fwd;
+// GodotNext: nextgi_translucency_volume (#61).
+layout(set = 1, binding = 43) uniform texture3D nextgi_translucency_r;
+layout(set = 1, binding = 44) uniform texture3D nextgi_translucency_g;
+layout(set = 1, binding = 45) uniform texture3D nextgi_translucency_b;
+
+vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth) {
+	const float near = nextgi_wrc_fwd.volume.z;
+	const float far = nextgi_wrc_fwd.volume.w;
+	float slice = clamp(log(max(p_linear_depth, near) / near) / log(far / near), 0.0, 1.0);
+	vec3 coord = vec3(p_screen_uv, slice);
+	vec3 sh;
+	sh.r = texture(sampler3D(nextgi_translucency_r, SAMPLER_LINEAR_CLAMP), coord).r;
+	sh.g = texture(sampler3D(nextgi_translucency_g, SAMPLER_LINEAR_CLAMP), coord).r;
+	sh.b = texture(sampler3D(nextgi_translucency_b, SAMPLER_LINEAR_CLAMP), coord).r;
+	return sh;
+}
 
 vec3 nextgi_wrc_translucency_sh(vec3 p_world) {
 	float distance = length(p_world - nextgi_wrc_fwd.camera.xyz);

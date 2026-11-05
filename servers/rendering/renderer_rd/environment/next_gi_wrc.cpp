@@ -47,6 +47,7 @@ struct NextGIWRC::ShaderState {
 	RID version;
 	RID trace;
 	RID project;
+	RID translucency;
 };
 
 struct NextGIWRCParamsGPU {
@@ -59,8 +60,10 @@ struct NextGIWRCParamsGPU {
 	uint32_t record_count = 0;
 	uint32_t page_rect_count = 0;
 	uint32_t pad[3] = {};
+	float inv_view_proj[16] = {};
+	float volume[4] = {}; // x width, y height, z near, w far.
 };
-static_assert(sizeof(NextGIWRCParamsGPU) == 80, "WRC params must match nextgi_wrc_update.glsl.");
+static_assert(sizeof(NextGIWRCParamsGPU) == 160, "WRC params must match nextgi_wrc_update.glsl.");
 
 struct NextGIWRCCountersGPU {
 	uint32_t rays = 0;
@@ -127,10 +130,16 @@ NextGIWRC::~NextGIWRC() {
 
 void NextGIWRC::_free_uniform_set() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd != nullptr && uniform_set.is_valid() && rd->uniform_set_is_valid(uniform_set)) {
-		rd->free_rid(uniform_set);
+	if (rd != nullptr) {
+		if (uniform_set.is_valid() && rd->uniform_set_is_valid(uniform_set)) {
+			rd->free_rid(uniform_set);
+		}
+		if (volume_uniform_set.is_valid() && rd->uniform_set_is_valid(volume_uniform_set)) {
+			rd->free_rid(volume_uniform_set);
+		}
 	}
 	uniform_set = RID();
+	volume_uniform_set = RID();
 }
 
 void NextGIWRC::free_resources() {
@@ -146,7 +155,7 @@ void NextGIWRC::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[13] = { radiance, mip4, mip2, visibility, sh_r, sh_g, sh_b, offsets, params_buffer, counter_buffer, sampler, dummy_tex, dummy_buffer };
+	RID resources[16] = { radiance, mip4, mip2, visibility, sh_r, sh_g, sh_b, offsets, translucency_r, translucency_g, translucency_b, params_buffer, counter_buffer, sampler, dummy_tex, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -160,6 +169,10 @@ void NextGIWRC::free_resources() {
 	sh_g = RID();
 	sh_b = RID();
 	offsets = RID();
+	translucency_r = RID();
+	translucency_g = RID();
+	translucency_b = RID();
+	translucency_size = Vector3i();
 	params_buffer = RID();
 	counter_buffer = RID();
 	sampler = RID();
@@ -247,7 +260,8 @@ bool NextGIWRC::_ensure_shader() {
 	shader = memnew(ShaderState);
 	Vector<String> defines;
 	defines.push_back("");
-	defines.push_back("#define MODE_SH\n");
+	defines.push_back("\n#define MODE_SH\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_VOLUME\n");
 	shader->shader.initialize(defines);
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
@@ -260,7 +274,8 @@ bool NextGIWRC::_ensure_shader() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	shader->trace = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 0));
 	shader->project = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 1));
-	if (!shader->trace.is_valid() || !shader->project.is_valid()) {
+	shader->translucency = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 2));
+	if (!shader->trace.is_valid() || !shader->project.is_valid() || !shader->translucency.is_valid()) {
 		shader->shader.version_free(shader->version);
 		memdelete(shader);
 		shader = nullptr;
@@ -302,6 +317,27 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	const Vector3 camera = p_render_data->scene_data->cam_transform.origin;
+	// GodotNext: nextgi_translucency_volume (#61). 1/16-screen x 32 slice irradiance volume.
+	Size2i screen = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_internal_size() : Size2i(1, 1);
+	const Vector3i volume_size(MAX((screen.width + 15) / 16, 1), MAX((screen.height + 15) / 16, 1), 32);
+	if (volume_size != translucency_size) {
+		RID *textures[3] = { &translucency_r, &translucency_g, &translucency_b };
+		for (RID *texture : textures) {
+			if (texture->is_valid()) {
+				rd->free_rid(*texture);
+			}
+			RD::TextureFormat volume_format;
+			volume_format.texture_type = RD::TEXTURE_TYPE_3D;
+			volume_format.width = volume_size.x;
+			volume_format.height = volume_size.y;
+			volume_format.depth = volume_size.z;
+			volume_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+			volume_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+			*texture = rd->texture_create(volume_format, RD::TextureView());
+			rd->texture_clear(*texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		}
+		translucency_size = volume_size;
+	}
 	const Vector3 origin = nextgi_wrc_snap_origin(camera, 1.0f);
 	NextGIWRCParamsGPU params;
 	params.camera[0] = camera.x;
@@ -318,6 +354,15 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	params.page_rect_count = relight != nullptr ? relight->get_page_rect_count() : 0;
+	const Projection view_proj = p_render_data->scene_data->cam_projection * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+	const Projection inv_view_proj = view_proj.inverse();
+	for (int i = 0; i < 16; i++) {
+		params.inv_view_proj[i] = inv_view_proj.columns[i / 4][i % 4];
+	}
+	params.volume[0] = float(volume_size.x);
+	params.volume[1] = float(volume_size.y);
+	params.volume[2] = 0.05f;
+	params.volume[3] = 64.0f;
 	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
 	if (scene != nullptr && p_render_data->environment.is_valid()) {
 		const Color bg = scene->environment_get_bg_color(p_render_data->environment);
@@ -358,7 +403,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		return p_texture.is_valid() ? p_texture : dummy_tex;
 	};
 	_free_uniform_set();
-	RD::Uniform uniforms[22] = {
+	RD::Uniform uniforms[25] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, visibility),
@@ -381,8 +426,12 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ sampler, valid_tex(material_depth) })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, counter_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 25, translucency_r),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 26, translucency_g),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 27, translucency_b),
 	};
 	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 22), shader->shader.version_get_shader(shader->version, 0), 0);
+	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 25), shader->shader.version_get_shader(shader->version, 2), 0);
 	if (uniform_set.is_valid()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->trace);
@@ -393,6 +442,16 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		rd->compute_list_dispatch(list, NEXTGI_WRC_PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_end();
+	}
+	// GodotNext: nextgi_translucency_volume (#61). One froxel per invocation.
+	if (volume_uniform_set.is_valid() && translucency_r.is_valid()) {
+		RENDER_TIMESTAMP("WRC trace");
+		const RD::ComputeListID volume_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(volume_list, shader->translucency);
+		rd->compute_list_bind_uniform_set(volume_list, volume_uniform_set, 0);
+		rd->compute_list_dispatch(volume_list, (translucency_size.x + 7) / 8, (translucency_size.y + 7) / 8, 32);
+		rd->compute_list_end();
+		RENDER_TIMESTAMP("Translucency volume");
 	}
 	_read_counters();
 	// Fog runs after this slot and adds into the same buffer. Keep the previous frame's fog totals.
@@ -411,4 +470,5 @@ void NextGIWRC::fill_info(Dictionary &r_info) const {
 	r_info["wrc_energy_bits"] = int64_t(last_energy_bits);
 	r_info["wrc_fog_samples"] = int64_t(fog_samples);
 	r_info["wrc_fog_ambient_bits"] = int64_t(fog_ambient_bits);
+	r_info["translucency_volume_bytes"] = int64_t(translucency_size.x) * int64_t(translucency_size.y) * 32 * 3 * 8;
 }

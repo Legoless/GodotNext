@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/math/vector3.h"
+#include "core/math/vector3i.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
 
@@ -89,8 +90,14 @@ class NextGIWRC {
 	RID sh_b;
 	RID offsets;
 	RID params_buffer;
+	// GodotNext: nextgi_translucency_volume (#61). 1/16-screen x 32-slice SH volume.
+	RID translucency_r;
+	RID translucency_g;
+	RID translucency_b;
+	Vector3i translucency_size;
 	RID counter_buffer;
 	RID uniform_set;
+	RID volume_uniform_set;
 	RID sampler;
 	RID dummy_tex;
 	RID dummy_buffer;
@@ -121,6 +128,10 @@ public:
 	RID get_sh_g() const { return sh_g; }
 	RID get_sh_b() const { return sh_b; }
 	RID get_params_buffer() const { return params_buffer; }
+	RID get_translucency_r() const { return translucency_r; }
+	RID get_translucency_g() const { return translucency_g; }
+	RID get_translucency_b() const { return translucency_b; }
+	Vector3i get_translucency_size() const { return translucency_size; }
 	RID get_counter_buffer() const { return counter_buffer; }
 	bool is_ready() const { return radiance.is_valid(); }
 

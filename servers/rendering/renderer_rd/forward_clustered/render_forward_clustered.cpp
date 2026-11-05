@@ -4168,12 +4168,12 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 			sh_textures[2] = wrc->get_sh_b();
 			wrc_params = wrc->get_params_buffer();
 		}
-		const RID white_3d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE);
+		const RID black_3d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
 		for (int i = 0; i < 3; i++) {
 			RD::Uniform u;
 			u.binding = 39 + i;
 			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
-			u.append_id(sh_textures[i].is_valid() ? sh_textures[i] : white_3d);
+			u.append_id(sh_textures[i].is_valid() ? sh_textures[i] : black_3d);
 			uniforms.push_back(u);
 		}
 		RD::Uniform u;
@@ -4181,6 +4181,19 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 		u.append_id(wrc_params.is_valid() ? wrc_params : scene_shader.default_material_feedback_buffer);
 		uniforms.push_back(u);
+		RID volume_textures[3] = { RID(), RID(), RID() };
+		if (wrc != nullptr && wrc->is_ready()) {
+			volume_textures[0] = wrc->get_translucency_r();
+			volume_textures[1] = wrc->get_translucency_g();
+			volume_textures[2] = wrc->get_translucency_b();
+		}
+		for (int i = 0; i < 3; i++) {
+			RD::Uniform volume_uniform;
+			volume_uniform.binding = 43 + i;
+			volume_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			volume_uniform.append_id(volume_textures[i].is_valid() ? volume_textures[i] : black_3d);
+			uniforms.push_back(volume_uniform);
+		}
 	}
 
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);

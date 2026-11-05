@@ -71,6 +71,8 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIWRCParams {
 	uint pad0;
 	uint pad1;
 	uint pad2;
+	mat4 inv_view_proj; // GodotNext: nextgi_translucency_volume (#61).
+	vec4 volume; // x width, y height, z near, w far.
 }
 params;
 
@@ -318,9 +320,42 @@ void nextgi_wrc_project() {
 	imageStore(radiance_image, origin + ivec2(9, 9), imageLoad(radiance_image, origin + ivec2(8, 8)));
 }
 
+#ifdef MODE_TRANSLUCENCY_VOLUME
+layout(rgba16f, set = 0, binding = 25) uniform image3D translucency_r_image;
+layout(rgba16f, set = 0, binding = 26) uniform image3D translucency_g_image;
+layout(rgba16f, set = 0, binding = 27) uniform image3D translucency_b_image;
+
+// GodotNext: nextgi_translucency_volume (#61). One froxel per invocation: 1/16-screen x 32
+// exponential slices from 0.05 m to 64 m, carrying the WRC SH irradiance at the slice center.
+void nextgi_translucency_volume_main() {
+	ivec3 froxel = ivec3(gl_GlobalInvocationID.xyz);
+	ivec2 size = ivec2(params.volume.xy);
+	if (froxel.x >= size.x || froxel.y >= size.y || froxel.z >= 32) {
+		return;
+	}
+	vec2 uv = (vec2(froxel.xy) + 0.5) / vec2(size);
+	float slice = (float(froxel.z) + 0.5) / 32.0;
+	float depth = params.volume.z * pow(params.volume.w / params.volume.z, slice);
+	vec4 clip = params.inv_view_proj * vec4(uv * 2.0 - 1.0, depth, 1.0);
+	vec3 world = clip.xyz / clip.w;
+	float cam_distance = length(world - params.camera.xyz);
+	float level = clamp(floor(log2(max(cam_distance / 8.0, 1.0))), 0.0, 3.0);
+	float spacing = params.origin_spacing.w * exp2(level);
+	vec3 level_origin = floor(params.origin_spacing.xyz / spacing) * spacing;
+	vec3 rel = (world - level_origin) / spacing + 7.5;
+	ivec3 cell = clamp(ivec3(round(rel)), ivec3(0), ivec3(15));
+	cell.z += int(level) * 16;
+	imageStore(translucency_r_image, froxel, vec4(imageLoad(sh_r_image, cell).r, 0.0, 0.0, 0.0));
+	imageStore(translucency_g_image, froxel, vec4(imageLoad(sh_g_image, cell).r, 0.0, 0.0, 0.0));
+	imageStore(translucency_b_image, froxel, vec4(imageLoad(sh_b_image, cell).r, 0.0, 0.0, 0.0));
+}
+#endif
+
 void main() {
 #ifdef MODE_SH
 	nextgi_wrc_project();
+#elif defined(MODE_TRANSLUCENCY_VOLUME)
+	nextgi_translucency_volume_main();
 #else
 	nextgi_wrc_trace();
 #endif
