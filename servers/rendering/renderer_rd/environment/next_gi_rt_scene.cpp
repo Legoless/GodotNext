@@ -483,6 +483,13 @@ void NextGIRTScene::free() {
 		gpu_count_dummy = RID();
 	}
 	gpu_instance_capacity = 0;
+	// GodotNext: nextgi_skinned_actors (#59).
+	for (const KeyValue<uint64_t, SkinnedPart> &entry : skinned_parts) {
+		if (entry.value.blas.is_valid()) {
+			RD::get_singleton()->free_rid(entry.value.blas);
+		}
+	}
+	skinned_parts.clear();
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
 		tlas = RID();
@@ -631,6 +638,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	stats.blas_build_triangles = 0;
 	stats.compaction_copies = 0;
 	stats.refit_triangles = 0;
+	// GodotNext: nextgi_skinned_actors (#59). Per-frame skinned counters.
+	stats.skinned_instances = 0;
+	stats.skinned_refit_triangles = 0;
+	stats.skinned_build_triangles = 0;
 	tlas_traceable = false;
 	compaction_triangles_this_frame = 0;
 	ERR_FAIL_NULL(p_render_data);
@@ -660,6 +671,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
 	LocalVector<NextGIInstanceRecord> instance_records;
 	LocalVector<NextGISurfaceRecord> surface_records;
+	const Vector3 camera_origin = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 
 	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
 		if (fed.gpu_source.is_valid()) {
@@ -676,6 +689,138 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			stats.coverage.blas_pending++;
 			continue;
 		}
+		// GodotNext: nextgi_skinned_actors (#59). A skinned instance enters through its posed
+		// slots; its bind-pose parts never enter the TLAS. Each slot holds the posed vertices
+		// followed by the coarsest-LOD index copy, so one chunk serves the BLAS and the hit fetch.
+		const RID skinned_instance = geometry_instance->mesh_instance;
+		if (skinned_instance.is_valid()) {
+			LocalVector<uint32_t> slot_surfaces;
+			LocalVector<MeshStorage::NextGIRTSlotInfo> slots;
+			uint32_t skinned_triangles = 0;
+			const uint32_t skinned_surface_count = mesh_storage->mesh_get_surface_count(mesh);
+			for (uint32_t surface_index = 0; surface_index < skinned_surface_count; surface_index++) {
+				MeshStorage::NextGIRTSlotInfo slot;
+				if (!mesh_storage->mesh_instance_get_rt_slot(skinned_instance, surface_index, slot)) {
+					continue;
+				}
+				slot_surfaces.push_back(surface_index);
+				slots.push_back(slot);
+				skinned_triangles += slot.index_count / 3;
+			}
+			if (slots.is_empty()) {
+				stats.coverage.dynamic_excluded++;
+				continue;
+			}
+			const Transform3D instance_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+			const Vector3 scale = instance_transform.basis.get_scale();
+			const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
+			// Distance drop-out beyond 30 m keeps crowds inside the per-frame refit budget (D17).
+			const bool within_range = camera_origin.distance_squared_to(instance_transform.origin) <= NEXTGI_RT_ANGULAR_CULL_DISTANCE * NEXTGI_RT_ANGULAR_CULL_DISTANCE;
+			const uint32_t skinned_budget = nextgi_rt_skinned_triangle_budget(true);
+			const NextGISkinnedBuild build = within_range ? nextgi_rt_skinned_build(uint32_t(skinned_instance.get_id()), uint32_t(frame), skinned_triangles, stats.skinned_refit_triangles + stats.skinned_build_triangles, skinned_budget) : NEXTGI_SKINNED_SKIP;
+			const uint32_t skinned_card_set = NextGISRC::get_instance_card_set(geometry_instance) != UINT32_MAX ? NextGISRC::get_instance_card_set(geometry_instance) : NextGISRC::get_mesh_card_set(mesh);
+			const uint32_t first_record = instance_records.size();
+			bool skinned_entered = false;
+			if (build != NEXTGI_SKINNED_SKIP) {
+				for (uint32_t k = 0; k < slots.size(); k++) {
+					MeshStorage::NextGIRTSurfaceInfo info;
+					if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, slot_surfaces[k], info)) {
+						continue;
+					}
+					const MeshStorage::NextGIRTSlotInfo &slot = slots[k];
+					const uint64_t key = (uint64_t(skinned_instance.get_id()) << 32) | slot_surfaces[k];
+					SkinnedPart *part = skinned_parts.getptr(key);
+					if (part == nullptr) {
+						const RID chunk_buffer = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(slot.chunk);
+						if (chunk_buffer.is_null()) {
+							continue;
+						}
+						RD::AccelerationStructureGeometry geometry;
+						geometry.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
+						geometry.vertex_buffer = chunk_buffer;
+						geometry.vertex_offset = slot.vertex_offset;
+						geometry.vertex_stride = sizeof(float) * 3;
+						geometry.vertex_count = slot.vertex_count;
+						geometry.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+						geometry.index_buffer = chunk_buffer;
+						geometry.index_offset = slot.index_offset;
+						geometry.index_count = slot.index_count;
+						geometry.index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+						BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT | RD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT;
+						const RID blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(&geometry, 1), flags);
+						if (!blas.is_valid()) {
+							continue;
+						}
+						RD::get_singleton()->blas_build(blas);
+						stats.skinned_build_triangles += slot.index_count / 3;
+						SkinnedPart created;
+						created.blas = blas;
+						created.triangles = slot.index_count / 3;
+						created.last_frame = frame;
+						skinned_parts.insert(key, created);
+						part = skinned_parts.getptr(key);
+					} else if (build == NEXTGI_SKINNED_REBUILD) {
+						RD::get_singleton()->blas_build(part->blas);
+						stats.skinned_build_triangles += part->triangles;
+						part->last_frame = frame;
+					} else {
+						RD::get_singleton()->blas_build(part->blas, RD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
+						stats.skinned_refit_triangles += part->triangles;
+						part->last_frame = frame;
+					}
+					if (part == nullptr || !part->blas.is_valid()) {
+						continue;
+					}
+					NextGIInstanceRecord record;
+					for (int row = 0; row < 3; row++) {
+						record.object_to_world[row * 4 + 0] = instance_transform.basis.rows[row][0];
+						record.object_to_world[row * 4 + 1] = instance_transform.basis.rows[row][1];
+						record.object_to_world[row * 4 + 2] = instance_transform.basis.rows[row][2];
+					}
+					record.object_to_world[3] = instance_transform.origin.x;
+					record.object_to_world[7] = instance_transform.origin.y;
+					record.object_to_world[11] = instance_transform.origin.z;
+					record.surface_base = surface_records.size();
+					record.surface_count = 1;
+					// Bind-pose cards shade the posed hit; without a card set the hit shades from the WRC.
+					record.card_set = skinned_card_set;
+					record.page_table = 0x80000000u;
+					if (skinned_card_set != UINT32_MAX && NextGIRelight::get_singleton() != nullptr) {
+						record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
+					}
+					record.rt_flags = NEXTGI_RT_FLAG_SKINNED;
+					record.origin_offset = nextgi_rt_origin_offset(info.eps, max_scale);
+					record.tlas_index = instance_records.size();
+					record.arena_chunk = slot.chunk;
+					NextGISurfaceRecord surface_record;
+					surface_record.vertex_offset = slot.vertex_offset;
+					surface_record.index_offset = slot.index_offset;
+					surface_record.triangle_count = slot.index_count / 3;
+					surface_records.push_back(surface_record);
+					instance_records.push_back(record);
+					RD::AccelerationStructureInstance tlas_instance;
+					tlas_instance.transform = instance_transform;
+					tlas_instance.id = record.tlas_index;
+					tlas_instance.mask = 0xFF;
+					tlas_instance.hit_sbt_range = 0;
+					tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+					tlas_instance.blas = part->blas;
+					tlas_instances.push_back(tlas_instance);
+					skinned_entered = true;
+				}
+			}
+			if (skinned_entered) {
+				stats.skinned_instances++;
+				stats.coverage.numerator++;
+				if (geometry_instance->nextgi_record_index == UINT32_MAX && first_record < instance_records.size()) {
+					geometry_instance->nextgi_record_index = first_record;
+				}
+			} else {
+				stats.coverage.dynamic_excluded++;
+			}
+			continue;
+		}
+
 		// A dirty mesh is built in this frame's later "AS builds" phase and enters the
 		// TLAS next frame; its parts are skipped here (nextgi_rt_part_enters_tlas).
 		bool blas_dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
@@ -864,6 +1009,28 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		}
 		dynamic_budget -= source.count;
 		gpu_sources.push_back(source);
+	}
+
+	// GodotNext: nextgi_skinned_actors (#59). Counts refits and rebuilds of this frame's
+	// skinned BLAS work; the marker sits inside the "AS updates" slot (line 1a).
+	if (stats.skinned_refit_triangles > 0 || stats.skinned_build_triangles > 0) {
+		RENDER_TIMESTAMP("Skinned refit");
+	}
+	// A skinned part absent for the full drop-out window is freed; its slot geometry may be reused.
+	{
+		LocalVector<uint64_t> stale;
+		for (const KeyValue<uint64_t, SkinnedPart> &entry : skinned_parts) {
+			if (entry.value.last_frame + NEXTGI_RT_ABSENT_FRAMES < frame) {
+				stale.push_back(entry.key);
+			}
+		}
+		for (uint64_t key : stale) {
+			SkinnedPart *part = skinned_parts.getptr(key);
+			if (part != nullptr && part->blas.is_valid()) {
+				RD::get_singleton()->free_rid(part->blas);
+			}
+			skinned_parts.erase(key);
+		}
 	}
 
 	stats.instance_count = instance_records.size();

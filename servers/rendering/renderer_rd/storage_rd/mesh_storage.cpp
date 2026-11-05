@@ -622,10 +622,13 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(Mesh *p_mesh, Mesh::Surface *p_sur
 	if (!nextgi_rt_enabled) {
 		return;
 	}
-	const bool eligible = p_surface_data.primitive == RSE::PRIMITIVE_TRIANGLES && !(p_surface_data.format & RSE::ARRAY_FLAG_USE_2D_VERTICES) && p_surface_data.skin_data.is_empty() && p_mesh->blend_shape_count == 0;
-	if (!eligible) {
+	// Triangles with float32 positions always keep a CPU copy: the static arena and SRC cards
+	// read it, and #59 uses it for the bind-pose cards and posed slots of skinned actors.
+	if (p_surface_data.primitive != RSE::PRIMITIVE_TRIANGLES || (p_surface_data.format & RSE::ARRAY_FLAG_USE_2D_VERTICES)) {
 		return;
 	}
+	// A skinned or blend-shaped surface only keeps the bind-pose copy; its geometry deforms.
+	const bool arena_eligible = p_surface_data.skin_data.is_empty() && p_mesh->blend_shape_count == 0;
 
 	const float eps_rt = nextgi_rt_compute_eps(float(p_surface_data.aabb.get_longest_axis_size()), nextgi_rt_max_error);
 	const bool is_index_16 = p_surface_data.vertex_count <= 65536 && p_surface_data.vertex_count > 0;
@@ -655,6 +658,14 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(Mesh *p_mesh, Mesh::Surface *p_sur
 		p_surface->rt_cpu_positions.clear();
 		return;
 	}
+	p_surface->rt_eps = eps_rt;
+	p_surface->rt_edge_length = edge_length;
+	if (!arena_eligible) {
+		// GodotNext: nextgi_skinned_actors (#59). Deforming surfaces stay out of the static
+		// arena; the bind-pose CPU copy serves the cards and the per-instance posed slots.
+		p_surface->rt_eligible = false;
+		return;
+	}
 
 	const uint32_t vertex_bytes = p_surface_data.vertex_count * sizeof(float) * 3;
 	const uint32_t index_offset_in_allocation = (vertex_bytes + NEXTGI_RT_ALIGNMENT - 1) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1);
@@ -681,8 +692,6 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(Mesh *p_mesh, Mesh::Surface *p_sur
 	p_surface->rt_index_offset = allocation.offset + index_offset_in_allocation;
 	p_surface->rt_index_count = uint32_t(p_surface->rt_cpu_indices.size());
 	p_surface->rt_allocation_size = allocation.size;
-	p_surface->rt_eps = eps_rt;
-	p_surface->rt_edge_length = edge_length;
 	p_surface->rt_eligible = true;
 	p_mesh->nextgi_blas_dirty = true;
 }
@@ -790,13 +799,42 @@ void MeshStorage::mesh_nextgi_release_cpu_geometry(RID p_mesh) {
 	}
 }
 
-// GodotNext: nextgi_src_cards
+bool MeshStorage::mesh_nextgi_rt_is_skinned(RID p_mesh) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, false);
+	for (uint32_t i = 0; i < mesh->surface_count; i++) {
+		if (mesh->surfaces[i]->format & RSE::ARRAY_FORMAT_BONES) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// GodotNext: nextgi_skinned_actors (#59)
+bool MeshStorage::mesh_instance_get_rt_slot(RID p_instance, uint32_t p_surface, NextGIRTSlotInfo &r_slot) const {
+	MeshInstance *mi = mesh_instance_owner.get_or_null(p_instance);
+	if (mi == nullptr || p_surface >= mi->surfaces.size()) {
+		return false;
+	}
+	const MeshInstance::Surface &surface = mi->surfaces[p_surface];
+	if (surface.rt_arena_chunk == UINT32_MAX || surface.rt_arena_index_count == 0) {
+		return false;
+	}
+	r_slot.chunk = surface.rt_arena_chunk;
+	r_slot.vertex_offset = surface.rt_arena_offset;
+	r_slot.vertex_count = surface.rt_arena_vertex_count;
+	r_slot.index_offset = surface.rt_arena_index_offset;
+	r_slot.index_count = surface.rt_arena_index_count;
+	return true;
+}
+
 bool MeshStorage::mesh_nextgi_get_cpu_geometry(RID p_mesh, uint32_t p_surface, Vector<float> &r_positions, Vector<uint32_t> &r_indices) const {
 	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, false);
 	ERR_FAIL_UNSIGNED_INDEX_V(p_surface, mesh->surface_count, false);
 	const Mesh::Surface *surface = mesh->surfaces[p_surface];
-	if (!surface->rt_eligible || surface->rt_cpu_positions.is_empty() || surface->rt_cpu_indices.is_empty()) {
+	// Deforming surfaces keep the bind-pose copy too (#59 bind-pose cards).
+	if (surface->rt_cpu_positions.is_empty() || surface->rt_cpu_indices.is_empty()) {
 		return false;
 	}
 	r_positions = surface->rt_cpu_positions;
@@ -1359,14 +1397,30 @@ void MeshStorage::_mesh_instance_add_surface(MeshInstance *mi, Mesh *mesh, uint3
 void MeshStorage::_mesh_instance_add_surface_buffer(MeshInstance *mi, Mesh *mesh, MeshInstance::Surface *s, uint32_t p_surface, uint32_t p_buffer_index) {
 	s->vertex_buffer[p_buffer_index] = RD::get_singleton()->vertex_buffer_create(mesh->surfaces[p_surface]->vertex_buffer_size, Vector<uint8_t>(), RD::BUFFER_CREATION_AS_STORAGE_BIT);
 
-	// GodotNext: nextgi_skinned_actors (#59). One posed slot per skinned instance surface.
+	// GodotNext: nextgi_skinned_actors (#59). One posed slot per skinned instance surface:
+	// posed xyz float vertices, then the coarsest-LOD index copy. A hit reads vertices and
+	// indices from this single chunk, so NextGISurfaceRecord keeps its 16-byte layout (§6.3).
 	if (p_buffer_index == 0 && nextgi_rt_enabled && (mesh->surfaces[p_surface]->format & RSE::ARRAY_FORMAT_BONES)) {
-		const uint32_t slot_bytes = mesh->surfaces[p_surface]->vertex_count * 3u * uint32_t(sizeof(float));
-		const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(slot_bytes);
-		if (allocation.is_valid()) {
-			s->rt_arena_chunk = allocation.chunk;
-			s->rt_arena_offset = allocation.offset / uint32_t(sizeof(float));
-			s->rt_arena_size = allocation.size;
+		const Mesh::Surface *mesh_surface = mesh->surfaces[p_surface];
+		if (!mesh_surface->rt_cpu_indices.is_empty()) {
+			const uint32_t vertex_bytes = mesh_surface->vertex_count * 3u * uint32_t(sizeof(float));
+			const uint32_t index_offset_in_allocation = (vertex_bytes + NEXTGI_RT_ALIGNMENT - 1) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1);
+			const uint32_t index_bytes = uint32_t(mesh_surface->rt_cpu_indices.size()) * uint32_t(sizeof(uint32_t));
+			const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(index_offset_in_allocation + index_bytes);
+			if (allocation.is_valid()) {
+				const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(allocation.chunk);
+				if (chunk_buffer.is_valid()) {
+					RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset + index_offset_in_allocation, index_bytes, mesh_surface->rt_cpu_indices.ptr());
+					s->rt_arena_chunk = allocation.chunk;
+					s->rt_arena_offset = allocation.offset;
+					s->rt_arena_index_offset = allocation.offset + index_offset_in_allocation;
+					s->rt_arena_vertex_count = mesh_surface->vertex_count;
+					s->rt_arena_index_count = uint32_t(mesh_surface->rt_cpu_indices.size());
+					s->rt_arena_size = allocation.size;
+				} else {
+					nextgi_rt_allocator.free_range(allocation);
+				}
+			}
 		}
 	}
 
@@ -1399,11 +1453,14 @@ void MeshStorage::_mesh_instance_remove_surface(MeshInstance *mi, int p_surface)
 	if (surface.rt_arena_chunk != UINT32_MAX) {
 		NextGIArenaAllocator::Allocation allocation;
 		allocation.chunk = surface.rt_arena_chunk;
-		allocation.offset = surface.rt_arena_offset * uint32_t(sizeof(float));
+		allocation.offset = surface.rt_arena_offset;
 		allocation.size = surface.rt_arena_size;
 		nextgi_rt_allocator.free_range(allocation);
 		surface.rt_arena_chunk = UINT32_MAX;
 		surface.rt_arena_offset = 0;
+		surface.rt_arena_index_offset = 0;
+		surface.rt_arena_vertex_count = 0;
+		surface.rt_arena_index_count = 0;
 		surface.rt_arena_size = 0;
 	}
 	if (surface.rt_arena_uniform_set.is_valid()) {
@@ -1584,7 +1641,8 @@ void MeshStorage::update_mesh_instances() {
 
 			push_constant.blend_shape_count = mi->mesh->blend_shape_count;
 			push_constant.normalized_blend_shapes = mi->mesh->blend_shape_mode == RSE::BLEND_SHAPE_MODE_NORMALIZED;
-			push_constant.rt_arena_offset = write_rt_arena ? mi->surfaces[i].rt_arena_offset : 0u;
+			// The shader indexes the arena in floats.
+			push_constant.rt_arena_offset = write_rt_arena ? mi->surfaces[i].rt_arena_offset / uint32_t(sizeof(float)) : 0u;
 
 			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SkeletonShader::PushConstant));
 

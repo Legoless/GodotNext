@@ -1903,10 +1903,11 @@ TEST_CASE("[NextGI] SRC cards: the material atlas dump setting is registered and
 TEST_CASE("[NextGI] RT registry: cull, cap, eligibility and refit") {
 	using namespace RendererRD;
 	CHECK(nextgi_rt_instance_eligible(true, true, true, false));
-	CHECK_FALSE(nextgi_rt_instance_eligible(true, true, true, true));
-	CHECK_FALSE(nextgi_rt_instance_eligible(true, false, true, false));
-	CHECK_FALSE(nextgi_rt_instance_eligible(false, true, true, false));
-	CHECK_FALSE(nextgi_rt_instance_eligible(true, true, false, false));
+	// #59: skinned actors enter through their posed slots, refitted every frame.
+	CHECK(nextgi_rt_instance_eligible(true, true, true, true));
+	CHECK_FALSE(nextgi_rt_instance_eligible(true, false, true, true));
+	CHECK_FALSE(nextgi_rt_instance_eligible(false, true, true, true));
+	CHECK_FALSE(nextgi_rt_instance_eligible(true, true, false, true));
 
 	// 10 m, inside the radius and inside the 30 m angular cull: included, frustum or not.
 	CHECK_EQ(nextgi_rt_cull_instance(10.0f, 1.0f, 200.0f), NEXTGI_RT_INCLUDED);

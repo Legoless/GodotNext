@@ -848,7 +848,7 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 	// The cards cover exactly the surfaces in the mesh's BLAS parts, so hits always find a card set.
 	// No parts yet means the RT scene has not built them; try again next frame.
 	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
-	if (parts == nullptr || parts->is_empty()) {
+	if (parts == nullptr) {
 		return false;
 	}
 	LocalVector<uint32_t> surfaces;
@@ -857,6 +857,17 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 			if (!surfaces.has(geometry.surface)) {
 				surfaces.push_back(geometry.surface);
 			}
+		}
+	}
+	if (surfaces.is_empty()) {
+		// GodotNext: nextgi_skinned_actors (#59). A skinned mesh has no static BLAS parts; its
+		// bind-pose cards come from the mesh's CPU geometry instead.
+		if (!mesh_storage->mesh_nextgi_rt_is_skinned(p_mesh)) {
+			return false; // No parts yet: the RT scene has not built them; try again next frame.
+		}
+		const int surface_count = mesh_storage->mesh_get_surface_count(p_mesh);
+		for (int surface = 0; surface < surface_count; surface++) {
+			surfaces.push_back(uint32_t(surface));
 		}
 	}
 

@@ -233,9 +233,14 @@ private:
 		struct Surface {
 			RID vertex_buffer[2];
 			RID uniform_set[2];
-			// GodotNext: nextgi_skinned_actors (#59). Per-instance posed slot (UINT32_MAX = none).
+			// GodotNext: nextgi_skinned_actors (#59). Per-instance posed slot (UINT32_MAX = none):
+			// posed xyz float vertices followed by the coarsest-LOD indices, so a hit reads both
+			// from this one chunk (NextGISurfaceRecord stays 16 bytes, plan §6.3).
 			uint32_t rt_arena_chunk = UINT32_MAX;
 			uint32_t rt_arena_offset = 0;
+			uint32_t rt_arena_index_offset = 0;
+			uint32_t rt_arena_vertex_count = 0;
+			uint32_t rt_arena_index_count = 0;
 			uint32_t rt_arena_size = 0;
 			RID rt_arena_uniform_set;
 			uint32_t current_buffer = 0;
@@ -501,10 +506,23 @@ public:
 	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_parts(RID p_mesh);
 	void mesh_nextgi_rt_clear_parts(RID p_mesh);
 	void mesh_nextgi_release_cpu_geometry(RID p_mesh);
+	// GodotNext: nextgi_skinned_actors (#59). True when a surface is bone-driven, so the mesh has
+	// no static BLAS parts and its cards come from the bind-pose CPU copy.
+	bool mesh_nextgi_rt_is_skinned(RID p_mesh) const;
 	// GodotNext: nextgi_src_cards
 	// The CPU copies of an RT surface (xyz float triples, uint32 indices) for SRC card clustering.
 	// False when the surface is not in the RT arena or its copies were released.
 	bool mesh_nextgi_get_cpu_geometry(RID p_mesh, uint32_t p_surface, Vector<float> &r_positions, Vector<uint32_t> &r_indices) const;
+	// GodotNext: nextgi_skinned_actors (#59). The per-instance posed slot of a skinned surface.
+	// The slot covers posed vertices and the coarsest-LOD index copy in one chunk.
+	struct NextGIRTSlotInfo {
+		uint32_t chunk = UINT32_MAX;
+		uint32_t vertex_offset = 0; // Bytes in chunk.
+		uint32_t vertex_count = 0;
+		uint32_t index_offset = 0; // Bytes in chunk.
+		uint32_t index_count = 0;
+	};
+	bool mesh_instance_get_rt_slot(RID p_instance, uint32_t p_surface, NextGIRTSlotInfo &r_slot) const;
 
 	virtual void mesh_debug_usage(List<RenderingServerTypes::MeshInfo> *r_info) override;
 

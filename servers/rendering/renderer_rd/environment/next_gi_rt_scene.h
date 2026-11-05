@@ -196,7 +196,10 @@ static constexpr float NEXTGI_RT_ANGULAR_CULL_DISTANCE = 30.0f;
 static constexpr uint64_t NEXTGI_RT_AS_BUDGET_BYTES = 1024ull * 1024ull * 1024ull;
 
 _FORCE_INLINE_ bool nextgi_rt_instance_eligible(bool p_mesh, bool p_visible, bool p_gi_contributing, bool p_skinned) {
-	return p_mesh && p_visible && p_gi_contributing && !p_skinned;
+	// GodotNext: nextgi_skinned_actors (#59). Skinned actors enter the TLAS through their posed
+	// slots (refit with a 32-frame rebuild), so they are no longer reception-only.
+	(void)p_skinned;
+	return p_mesh && p_visible && p_gi_contributing;
 }
 
 // A MultiMesh rewritten on each of the last 8 frames is dynamic and stays out of the TLAS.
@@ -378,6 +381,10 @@ public:
 		uint32_t blas_build_triangles = 0;
 		uint32_t compaction_copies = 0;
 		uint32_t refit_triangles = 0;
+		// GodotNext: nextgi_skinned_actors (#59).
+		uint32_t skinned_instances = 0;
+		uint32_t skinned_refit_triangles = 0;
+		uint32_t skinned_build_triangles = 0;
 		uint64_t as_bytes = 0;
 		double tlas_fill_ms = 0.0;
 		double scene_update_ms = 0.0;
@@ -402,6 +409,13 @@ private:
 	uint32_t instance_record_capacity = 0;
 	uint32_t surface_record_capacity = 0;
 	Stats stats;
+	// GodotNext: nextgi_skinned_actors (#59). Per-instance posed BLASes keyed by (instance, surface).
+	struct SkinnedPart {
+		RID blas;
+		uint32_t triangles = 0;
+		uint64_t last_frame = 0;
+	};
+	HashMap<uint64_t, SkinnedPart> skinned_parts;
 	LocalVector<PendingCompact> pending_compactions;
 	HashMap<RID, uint64_t> mesh_last_tlas_frame;
 	bool as_memory_exceeded = false;
