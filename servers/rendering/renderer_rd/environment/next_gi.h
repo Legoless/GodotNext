@@ -269,6 +269,7 @@ private:
 	NextGIReference *reference = nullptr;
 	NextGIWRC *wrc = nullptr;
 	void _gather(RenderDataRD *p_render_data);
+	void _settings_changed();
 	void _integrate(RenderDataRD *p_render_data);
 
 public:
@@ -292,6 +293,8 @@ public:
 	static uint32_t nextgi_quality_total_us(Quality p_quality, bool p_apple);
 	Quality get_quality_setting() const { return quality_setting; }
 	static Quality nextgi_auto_quality_from_usec(uint64_t p_usec);
+	// #55 cut item 2: when Epic is cut it resolves to High.
+	static bool nextgi_epic_cut() { return false; }
 
 	// GodotNext: nextgi_multiview (#58). One anchor per scenario, chosen with hysteresis so the
 	// TLAS center never flips between frames. Pure helpers, so doctests need no device.

@@ -238,10 +238,28 @@ NextGI::Quality NextGI::resolve_quality(Quality p_setting) {
 	if (p_setting == QUALITY_AUTO) {
 		return auto_quality == QUALITY_AUTO ? QUALITY_HIGH : auto_quality;
 	}
+	if (p_setting == QUALITY_EPIC && nextgi_epic_cut()) {
+		return QUALITY_HIGH;
+	}
 	if (p_setting < QUALITY_MEDIUM || p_setting >= QUALITY_MAX) {
 		return QUALITY_HIGH;
 	}
 	return p_setting;
+}
+
+void NextGI::_settings_changed() {
+	const Quality new_quality = Quality(CLAMP(int(GLOBAL_GET("rendering/global_illumination/nextgi/quality")), 0, QUALITY_MAX - 1));
+	if (new_quality == quality_setting) {
+		return;
+	}
+	quality_setting = new_quality;
+	// The gather reallocates its probe targets when the ray stride changes; the SRC atlases follow
+	// the preset, so rebuild them while the server is alive.
+	if (src != nullptr) {
+		src->free();
+		src->init();
+	}
+	print_line(vformat("NextGI: quality=%s (%s)", get_quality_name(resolve_quality(quality_setting)), quality_setting == QUALITY_AUTO ? "setting auto" : "setting change"));
 }
 
 String NextGI::get_tier_name(Tier p_tier) {
@@ -744,6 +762,8 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	ERR_FAIL_COND_MSG(p_normal_roughness_slices == nullptr || p_normal_roughness_slices[0].is_null(), "The NextGI frame block needs the depth + normal-roughness prepass.");
 
 	_maybe_simulate_device_lost();
+	// GodotNext: nextgi_quality_presets (#55). Poll the preset so a runtime change reallocates.
+	_settings_changed();
 
 	// GodotNext: nextgi_src_relight
 	// Pages are assigned during the TLAS phase, which runs after card capture and before relight.

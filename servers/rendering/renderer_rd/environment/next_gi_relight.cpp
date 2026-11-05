@@ -341,9 +341,13 @@ bool NextGIRelight::_ensure_atlases() {
 	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
 	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_TO_BIT);
 	radiance_is_packed = rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, storage);
+	// GodotNext: nextgi_quality_presets (#55). The radiance atlas doubles in height at Epic.
+	// GodotNext: nextgi_quality_presets (#55). The radiance atlas height stays 4096 for now; the
+	// Epic doubling is tracked in the preset table and lands with the page-allocator resize.
+	const NextGIAtlasBudget atlas_budget = nextgi_src_atlas_budget(false);
 	RD::TextureFormat tf;
-	tf.width = NEXTGI_SRC_RADIANCE_SIZE;
-	tf.height = NEXTGI_SRC_RADIANCE_SIZE;
+	tf.width = atlas_budget.radiance_width;
+	tf.height = atlas_budget.radiance_height;
 	tf.texture_type = RD::TEXTURE_TYPE_2D;
 	tf.usage_bits = storage | RD::TEXTURE_USAGE_SAMPLING_BIT;
 	tf.format = radiance_is_packed ? RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32 : RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
@@ -351,7 +355,7 @@ bool NextGIRelight::_ensure_atlases() {
 	ERR_FAIL_COND_V(radiance.is_null(), false);
 	rd->set_resource_name(radiance, "NextGI SRC Radiance");
 	rd->texture_clear(radiance, Color(0, 0, 0, 1), 0, 1, 0, 1);
-	radiance_bytes = uint64_t(NEXTGI_SRC_RADIANCE_SIZE) * NEXTGI_SRC_RADIANCE_SIZE * (radiance_is_packed ? 4 : 8);
+	radiance_bytes = uint64_t(atlas_budget.radiance_width) * atlas_budget.radiance_height * (radiance_is_packed ? 4 : 8);
 
 	tf.width = NEXTGI_SRC_MASK_SIZE;
 	tf.height = NEXTGI_SRC_MASK_SIZE;
@@ -361,8 +365,8 @@ bool NextGIRelight::_ensure_atlases() {
 	rd->set_resource_name(mask, "NextGI SRC Shadow Mask");
 	rd->texture_clear(mask, Color(0, 0, 0, 0), 0, 1, 0, 1);
 
-	tf.width = NEXTGI_SRC_RADIANCE_SIZE / 8;
-	tf.height = NEXTGI_SRC_RADIANCE_SIZE / 8;
+	tf.width = atlas_budget.radiance_width / 8;
+	tf.height = atlas_budget.radiance_height / 8;
 	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	indirect_texture = rd->texture_create(tf, RD::TextureView());
@@ -381,7 +385,7 @@ bool NextGIRelight::_ensure_atlases() {
 	if (!logged_atlas) {
 		logged_atlas = true;
 		const double mask_bytes = double(NEXTGI_SRC_MASK_SIZE) * double(NEXTGI_SRC_MASK_SIZE);
-		print_line(vformat("NextGI SRC: radiance atlas %dx%d %s, %.1f MiB; shadow mask %dx%d R8, %.1f MiB.", NEXTGI_SRC_RADIANCE_SIZE, NEXTGI_SRC_RADIANCE_SIZE, radiance_is_packed ? "B10G11R11" : "RGBA16F", double(radiance_bytes) / (1024.0 * 1024.0), NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE, mask_bytes / (1024.0 * 1024.0)));
+		print_line(vformat("NextGI SRC: radiance atlas %dx%d %s, %.1f MiB; shadow mask %dx%d R8, %.1f MiB.", atlas_budget.radiance_width, atlas_budget.radiance_height, radiance_is_packed ? "B10G11R11" : "RGBA16F", double(radiance_bytes) / (1024.0 * 1024.0), NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE, mask_bytes / (1024.0 * 1024.0)));
 	}
 	return true;
 }
@@ -963,7 +967,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	const float rt_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
 	NextGIRelightParamsGPU params;
 	params.frame = frame;
-	params.ray_budget = NEXTGI_SRC_RELIGHT_RAY_CAP;
+	params.ray_budget = NextGI::get_singleton() != nullptr ? NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).relight_shadow_rays : NEXTGI_SRC_RELIGHT_RAY_CAP;
 	params.page_count = gpu_pages.size();
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);

@@ -144,6 +144,8 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint reflect_debug;
 	uint sampling_mode;
 	uint pad4;
+	uint ray_stride;
+	uint ray_count;
 }
 params;
 
@@ -475,7 +477,7 @@ void nextgi_gather_main() {
 	}
 	vec3 origin = world + normal * origin_offset;
 
-	vec3 raw_radiance[16];
+	vec3 raw_radiance[64];
 	float angle = float(params.frame) * 2.3999632;
 	if (params.sampling_mode == 0u) {
 		angle = nextgi_blue_noise_sample(ivec2(gl_GlobalInvocationID.xy), params.frame).x * 6.2831853;
@@ -484,10 +486,10 @@ void nextgi_gather_main() {
 	float sa = sin(angle);
 	uint uncovered_count = 0u;
 	float confidence_sum = 0.0;
-	for (uint i = 0u; i < 16u; i++) {
-		uint ix = i & 3u;
-		uint iy = i >> 2u;
-		vec2 uv = (vec2(ix, iy) + 0.5) / 4.0;
+	for (uint i = 0u; i < params.ray_count; i++) {
+		uint ix = i % params.ray_stride;
+		uint iy = i / params.ray_stride;
+		vec2 uv = (vec2(ix, iy) + 0.5) / float(params.ray_stride);
 		uv = uv * 2.0 - 1.0;
 		uv = vec2(ca * uv.x - sa * uv.y, sa * uv.x + ca * uv.y);
 		vec3 dir = nextgi_orient(normal, oct_to_vec3(uv));
@@ -538,26 +540,28 @@ void nextgi_gather_main() {
 	// this probe's 16 rays (emissive radiance included), then count the removed energy for Q16.
 	const vec3 luminance_weights = vec3(0.2126, 0.7152, 0.0722);
 	float lum_sum = 0.0;
-	for (uint i = 0u; i < 16u; i++) {
+	for (uint i = 0u; i < params.ray_count; i++) {
 		lum_sum += dot(raw_radiance[i], luminance_weights);
 	}
-	const float mean_lum = lum_sum / 16.0;
+	const float mean_lum = lum_sum / float(params.ray_count);
 	float variance = 0.0;
-	for (uint i = 0u; i < 16u; i++) {
+	for (uint i = 0u; i < params.ray_count; i++) {
 		const float delta = dot(raw_radiance[i], luminance_weights) - mean_lum;
 		variance += delta * delta;
 	}
-	const float clamp_limit = mean_lum + 3.0 * sqrt(variance / 16.0);
+	const float clamp_limit = mean_lum + 3.0 * sqrt(variance / float(params.ray_count));
 	float removed = 0.0;
-	for (uint i = 0u; i < 16u; i++) {
-		vec3 radiance = raw_radiance[i];
+	const uint texels = params.ray_stride * params.ray_stride;
+	for (uint t = 0u; t < texels; t++) {
+		vec3 radiance = raw_radiance[t % params.ray_count];
 		const float luminance = dot(radiance, luminance_weights);
 		if (luminance > clamp_limit && luminance > 0.0) {
 			radiance *= clamp_limit / luminance;
 			removed += luminance - clamp_limit;
 		}
 		// Raw radiance: the temporal pass in NextGIDenoise is the single accumulator (#53, D8).
-		imageStore(probe_image, ivec2(probe) * 4 + ivec2(i & 3u, i >> 2u), vec4(radiance, length(world - params.camera_pos.xyz)));
+		ivec2 texel = ivec2(probe) * int(params.ray_stride) + ivec2(t % params.ray_stride, t / params.ray_stride);
+		imageStore(probe_image, texel, vec4(radiance, length(world - params.camera_pos.xyz)));
 	}
 	atomicAdd(clamp_totals.removed, uint(removed * 4.0));
 	atomicAdd(clamp_totals.total, uint(lum_sum * 4.0));
@@ -599,10 +603,10 @@ void nextgi_integrate_main() {
 			vec4 probe = imageLoad(probe_image, id * 4);
 			float depth_weight = probe.a <= 0.0 ? 0.0 : 1.0 / (1.0 + abs(length(world - params.camera_pos.xyz) - probe.a) * 4.0);
 			vec3 irradiance = vec3(0.0);
-			for (uint i = 0u; i < 16u; i++) {
-				irradiance += imageLoad(probe_image, id * 4 + ivec2(i & 3u, i >> 2u)).rgb;
+			for (uint i = 0u; i < params.ray_stride * params.ray_stride; i++) {
+				irradiance += imageLoad(probe_image, id * int(params.ray_stride) + ivec2(i % params.ray_stride, i / params.ray_stride)).rgb;
 			}
-			irradiance /= 16.0;
+			irradiance /= float(params.ray_stride * params.ray_stride);
 			float w = bilinear * depth_weight * max(dot(normal, normal), 0.0);
 			float probe_confidence = confidence_data.data[uint(id.y) * params.probes_x + uint(id.x)];
 			accum += irradiance * w;

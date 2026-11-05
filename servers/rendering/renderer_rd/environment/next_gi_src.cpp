@@ -733,9 +733,12 @@ void NextGISRC::_create_atlas() {
 	ERR_FAIL_COND(atlas_fb.is_null());
 
 	atlas_memory = nextgi_src_atlas_memory_bytes(NEXTGI_SRC_ATLAS_SIZE, d16 ? 2 : 4);
+	// GodotNext: nextgi_quality_presets (#55). The material budget follows the preset.
+	const bool epic = NextGI::get_singleton() != nullptr && NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).src_material_mib > 128;
+	const uint64_t material_budget = epic ? uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_EPIC) : uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH);
 	// Worded without the "NextGI:" prefix, so the tier stays the only such line in the log.
-	print_line(vformat("NextGI SRC: material atlas %dx%d, %.1f MiB of the %d MiB High budget (framebuffer depth %s).", NEXTGI_SRC_ATLAS_SIZE, NEXTGI_SRC_ATLAS_SIZE, double(atlas_memory) / (1024.0 * 1024.0), NEXTGI_SRC_MATERIAL_BUDGET_HIGH / (1024 * 1024), d16 ? "D16" : "X8_D24"));
-	ERR_FAIL_COND_MSG(atlas_memory > uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH), "The NextGI SRC material atlas is over the High budget.");
+	print_line(vformat("NextGI SRC: material atlas %dx%d, %.1f MiB of the %d MiB %s budget (framebuffer depth %s).", NEXTGI_SRC_ATLAS_SIZE, NEXTGI_SRC_ATLAS_SIZE, double(atlas_memory) / (1024.0 * 1024.0), int(material_budget / (1024 * 1024)), epic ? "Epic" : "High", d16 ? "D16" : "X8_D24"));
+	ERR_FAIL_COND_MSG(atlas_memory > material_budget, "The NextGI SRC material atlas is over the preset budget.");
 }
 
 void NextGISRC::init() {

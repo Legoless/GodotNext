@@ -91,8 +91,10 @@ struct GatherParamsGPU {
 	uint32_t reflect_debug;
 	uint32_t sampling_mode;
 	uint32_t pad4;
+	uint32_t ray_stride;
+	uint32_t ray_count;
 };
-static_assert(sizeof(GatherParamsGPU) == 272, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 280, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -335,7 +337,7 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 		ambient_history_valid = false;
 	}
 
-	if (probe_image.is_valid() && probe_w == probes_x && probe_h == probes_y) {
+	if (probe_image.is_valid() && probe_w == probes_x && probe_h == probes_y && target_stride == ray_stride) {
 		if (!confidence_buffer.is_valid()) {
 			confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
 		}
@@ -383,8 +385,8 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 		confidence_buffer = RID();
 	}
 	RD::TextureFormat tf;
-	tf.width = MAX(probes_x * 4, 1u);
-	tf.height = MAX(probes_y * 4, 1u);
+	tf.width = MAX(probes_x * ray_stride, 1u);
+	tf.height = MAX(probes_y * ray_stride, 1u);
 	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	// GodotNext: the diffuse denoiser reads the probe texels as a sampler and writes the scratch copy.
 	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
@@ -422,6 +424,7 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	confidence_buffer = rd->storage_buffer_create(sizeof(float) * MAX(probes_x * probes_y, 1u));
 	probe_w = probes_x;
 	probe_h = probes_y;
+	target_stride = ray_stride;
 	return true;
 }
 
@@ -538,6 +541,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
 	params.sampling_mode = rr_sampling_mode;
 	params.pad4 = 0u;
+	params.ray_stride = ray_stride;
+	params.ray_count = ray_count;
 	RID hiz_texture = dummy_color;
 	RID last_frame_texture = dummy_color;
 	if (rb.is_valid() && rb->has_texture(RB_SCOPE_SSR, RB_HIZ) && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME)) {
@@ -776,6 +781,11 @@ void NextGIGather::_read_counters() {
 
 void NextGIGather::gather(RenderDataRD *p_render_data) {
 	last_rays = 0;
+	if (NextGI *next_gi = NextGI::get_singleton()) {
+		const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
+		ray_stride = quality.diffuse_rays_per_probe >= 64 ? 8u : 4u;
+		ray_count = quality.diffuse_rays_per_probe;
+	}
 	last_misses = 0;
 	last_resets = 0;
 	last_uncovered = 0;
@@ -876,7 +886,7 @@ void NextGIGather::_denoise_probes() {
 	const bool rejected_view = debug_view == int(NextGI::DEBUG_VIEW_DENOISE_REJECTED);
 	if ((raw_view || variance_view || history_view || rejected_view) && _ensure_debug_textures()) {
 		if (raw_view) {
-			const Vector3i extent(probe_w * 4, probe_h * 4, 1);
+			const Vector3i extent(probe_w * ray_stride, probe_h * ray_stride, 1);
 			rd->texture_copy(probe_image, debug_raw, Vector3(), Vector3(), extent, 0, 0, 0, 0);
 		}
 	}
@@ -886,8 +896,10 @@ void NextGIGather::_denoise_probes() {
 	params.probe_radiance_out = probe_scratch;
 	params.depth = last_depth;
 	params.normal_roughness = last_normal_roughness;
-	params.probe_size = Size2i(probe_w * 4, probe_h * 4);
+	params.probe_size = Size2i(probe_w * ray_stride, probe_h * ray_stride);
 	params.screen_size = Size2i(last_screen_w, last_screen_h);
+	params.probe_stride = ray_stride;
+	params.probe_extent = 16;
 	params.inv_projection = last_inv_projection;
 	denoise->process_diffuse(params);
 
@@ -895,7 +907,7 @@ void NextGIGather::_denoise_probes() {
 	SWAP(params.probe_radiance, params.probe_radiance_out);
 	denoise->process_diffuse(params);
 
-	const Vector3i probe_extent(probe_w * 4, probe_h * 4, 1);
+	const Vector3i probe_extent(probe_w * ray_stride, probe_h * ray_stride, 1);
 	if (!history_valid) {
 		// First frame: the raw radiance seeds the history and there is nothing to reproject.
 		rd->texture_copy(probe_image, probe_history, Vector3(0, 0, 0), Vector3(0, 0, 0), Vector3(probe_extent), 0, 0, 0, 0);
@@ -918,6 +930,8 @@ void NextGIGather::_denoise_probes() {
 	temporal.inv_projection = last_inv_projection;
 	temporal.camera_pos = last_camera_pos;
 	temporal.prev_camera_pos = last_prev_camera_pos;
+	temporal.probe_stride = ray_stride;
+	temporal.probe_extent = 16;
 	temporal.history_cap = rr_probe_history_cap;
 	temporal.velocity_enabled = last_velocity.is_valid();
 	temporal.debug_views = variance_view || history_view || rejected_view;
@@ -943,8 +957,8 @@ bool NextGIGather::_ensure_debug_textures() {
 		return false;
 	}
 	RD::TextureFormat tf;
-	tf.width = MAX(probe_w * 4, 1u);
-	tf.height = MAX(probe_h * 4, 1u);
+	tf.width = MAX(probe_w * ray_stride, 1u);
+	tf.height = MAX(probe_h * ray_stride, 1u);
 	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 	RID *textures[4] = { &debug_raw, &debug_variance, &debug_history, &debug_rejected };
@@ -1150,7 +1164,7 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["src_gather_uncovered"] = int64_t(last_uncovered);
 	r_info["src_gather_screen_width"] = int64_t(last_screen_w);
 	r_info["src_gather_screen_height"] = int64_t(last_screen_h);
-	r_info["src_gather_expected_rays"] = int64_t(nextgi_gather_ray_count(last_screen_w, last_screen_h));
+	r_info["src_gather_expected_rays"] = int64_t(nextgi_gather_probe_count_axis(last_screen_w)) * int64_t(nextgi_gather_probe_count_axis(last_screen_h)) * int64_t(ray_count);
 	r_info["src_gather_miss_luminance"] = last_miss_luminance;
 	r_info["src_coverage_hits"] = int64_t(last_coverage_hits);
 	r_info["src_coverage_rays"] = int64_t(last_coverage_rays);

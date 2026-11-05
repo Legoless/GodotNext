@@ -148,6 +148,9 @@ class NextGIGather {
 	uint32_t last_screen_hits = 0;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
+	uint32_t target_stride = 0;
+	uint32_t ray_stride = 4;
+	uint32_t ray_count = 16;
 	uint32_t last_clamp_removed = 0;
 	uint32_t last_clamp_total = 0;
 	uint32_t last_reflection_traced = 0;
