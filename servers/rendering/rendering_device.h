@@ -336,6 +336,10 @@ public:
 	// clears a texture from a driver callback with the declared stages, or none when forced.
 	void _dev_driver_callback_clear(RID p_texture, const Color &p_color, bool p_force_zero_stages);
 	LocalVector<void *> dev_callback_clears;
+	Dictionary _dev_texture_native_info(RID p_texture);
+	void _dev_capture_command_buffer_handle();
+	int64_t _dev_get_captured_command_buffer_handle() const;
+	uint64_t dev_captured_command_buffer_handle = 0;
 #endif
 
 	/*****************/
@@ -493,6 +497,8 @@ public:
 	bool texture_is_shared(RID p_texture);
 	bool texture_is_valid(RID p_texture);
 	TextureFormat texture_get_format(RID p_texture);
+	// GodotNext: pu_core_rd_native_interop (#102). C++-only vendor interop metadata for a texture.
+	Error texture_get_native_info(RID p_texture, RDD::TextureNativeInfo &r_info);
 	Size2i texture_size(RID p_texture);
 #ifndef DISABLE_DEPRECATED
 	uint64_t texture_get_native_handle(RID p_texture);

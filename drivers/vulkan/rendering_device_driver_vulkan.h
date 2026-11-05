@@ -795,6 +795,10 @@ public:
 
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) override final;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) override final;
+	// GodotNext: pu_core_rd_native_interop (#102).
+	virtual uint64_t command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) override final;
+	virtual Error texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info) override final;
+	static void texture_native_info_from_create_infos(const VkImageCreateInfo &p_image_info, const VkImageViewCreateInfo &p_view_info, VkImageView p_view, TextureNativeInfo &r_info);
 	virtual uint64_t get_total_memory_used() override final;
 	virtual uint64_t get_lazily_memory_used() override final;
 	virtual uint64_t limit_get(Limit p_limit) override final;

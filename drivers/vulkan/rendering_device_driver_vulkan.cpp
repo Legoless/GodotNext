@@ -7324,6 +7324,46 @@ void RenderingDeviceDriverVulkan::set_object_name(ObjectType p_type, ID p_driver
 	}
 }
 
+uint64_t RenderingDeviceDriverVulkan::command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) {
+	const CommandBufferInfo *cmd_info = (const CommandBufferInfo *)p_cmd_buffer.id;
+	return (uint64_t)cmd_info->vk_command_buffer;
+}
+
+void RenderingDeviceDriverVulkan::texture_native_info_from_create_infos(const VkImageCreateInfo &p_image_info, const VkImageViewCreateInfo &p_view_info, VkImageView p_view, TextureNativeInfo &r_info) {
+	r_info.image = (uint64_t)p_view_info.image;
+	r_info.view = (uint64_t)p_view;
+	r_info.format = (uint64_t)p_view_info.format;
+	r_info.aspect = {};
+	const VkImageAspectFlags aspect_mask = p_view_info.subresourceRange.aspectMask;
+	if (aspect_mask & VK_IMAGE_ASPECT_COLOR_BIT) {
+		r_info.aspect.set_flag(TEXTURE_ASPECT_COLOR_BIT);
+	}
+	if (aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) {
+		r_info.aspect.set_flag(TEXTURE_ASPECT_DEPTH_BIT);
+	}
+	if (aspect_mask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+		r_info.aspect.set_flag(TEXTURE_ASPECT_STENCIL_BIT);
+	}
+	r_info.base_mipmap = p_view_info.subresourceRange.baseMipLevel;
+	r_info.mipmap_count = p_view_info.subresourceRange.levelCount;
+	r_info.base_layer = p_view_info.subresourceRange.baseArrayLayer;
+	r_info.layer_count = p_view_info.subresourceRange.layerCount;
+	if (p_image_info.sType != 0) {
+		r_info.width = MAX(1u, p_image_info.extent.width >> r_info.base_mipmap);
+		r_info.height = MAX(1u, p_image_info.extent.height >> r_info.base_mipmap);
+	} else {
+		// Textures created from an extension have no create info; the extent is unknown here.
+		r_info.width = 0;
+		r_info.height = 0;
+	}
+}
+
+Error RenderingDeviceDriverVulkan::texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info) {
+	const TextureInfo *tex_info = (const TextureInfo *)p_texture.id;
+	texture_native_info_from_create_infos(tex_info->vk_create_info, tex_info->vk_view_create_info, tex_info->vk_view, r_info);
+	return OK;
+}
+
 uint64_t RenderingDeviceDriverVulkan::get_resource_native_handle(DriverResource p_type, ID p_driver_id) {
 	switch (p_type) {
 		case DRIVER_RESOURCE_LOGICAL_DEVICE: {

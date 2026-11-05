@@ -1706,6 +1706,41 @@ void RenderingDevice::_dev_driver_callback_clear(RID p_texture, const Color &p_c
 	const BitField<RDD::PipelineStageBits> stages = p_force_zero_stages ? BitField<RDD::PipelineStageBits>() : BitField<RDD::PipelineStageBits>(RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT);
 	driver_callback_add((RDD::DriverCallback)_dev_driver_callback_clear_run, clear, VectorView<CallbackResource>(&resource, 1), stages);
 }
+
+static void _dev_capture_command_buffer_run(RenderingDeviceDriver *p_driver, RDD::CommandBufferID p_cmd_buffer, void *p_userdata) {
+	uint64_t *handle = static_cast<uint64_t *>(p_userdata);
+	*handle = p_driver->command_buffer_get_native_handle(p_cmd_buffer);
+}
+
+void RenderingDevice::_dev_capture_command_buffer_handle() {
+	ERR_RENDER_THREAD_GUARD();
+	dev_captured_command_buffer_handle = 0;
+	driver_callback_add((RDD::DriverCallback)_dev_capture_command_buffer_run, &dev_captured_command_buffer_handle, VectorView<CallbackResource>());
+}
+
+int64_t RenderingDevice::_dev_get_captured_command_buffer_handle() const {
+	return int64_t(dev_captured_command_buffer_handle);
+}
+
+Dictionary RenderingDevice::_dev_texture_native_info(RID p_texture) {
+	RDD::TextureNativeInfo info;
+	const Error err = texture_get_native_info(p_texture, info);
+	Dictionary out;
+	out["error"] = int(err);
+	out["image"] = int64_t(info.image);
+	out["view"] = int64_t(info.view);
+	out["format"] = int64_t(info.format);
+	out["aspect_color"] = info.aspect.has_flag(RDD::TEXTURE_ASPECT_COLOR_BIT);
+	out["aspect_depth"] = info.aspect.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT);
+	out["aspect_stencil"] = info.aspect.has_flag(RDD::TEXTURE_ASPECT_STENCIL_BIT);
+	out["base_mipmap"] = int(info.base_mipmap);
+	out["mipmap_count"] = int(info.mipmap_count);
+	out["base_layer"] = int(info.base_layer);
+	out["layer_count"] = int(info.layer_count);
+	out["width"] = int(info.width);
+	out["height"] = int(info.height);
+	return out;
+}
 #endif
 
 String RenderingDevice::get_perf_report() const {
@@ -3381,7 +3416,16 @@ bool RenderingDevice::texture_is_valid(RID p_texture) {
 	return texture_owner.owns(p_texture);
 }
 
-RD::TextureFormat RenderingDevice::texture_get_format(RID p_texture) {
+Error RenderingDevice::texture_get_native_info(RID p_texture, RDD::TextureNativeInfo &r_info) {
+	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	Texture *texture = texture_owner.get_or_null(p_texture);
+	if (texture == nullptr) {
+		return ERR_INVALID_PARAMETER;
+	}
+	return driver->texture_get_native_info(texture->driver_id, r_info);
+}
+
+RenderingDevice::TextureFormat RenderingDevice::texture_get_format(RID p_texture) {
 	ERR_RENDER_THREAD_GUARD_V(TextureFormat());
 
 	Texture *tex = texture_owner.get_or_null(p_texture);
@@ -9787,6 +9831,9 @@ void RenderingDevice::set_feature_mock(bool p_enabled, uint64_t p_supported_feat
 void RenderingDevice::_bind_methods() {
 #ifdef DEV_ENABLED
 	ClassDB::bind_method(D_METHOD("_dev_driver_callback_clear", "texture", "color", "force_zero_stages"), &RenderingDevice::_dev_driver_callback_clear);
+	ClassDB::bind_method(D_METHOD("_dev_texture_native_info", "texture"), &RenderingDevice::_dev_texture_native_info);
+	ClassDB::bind_method(D_METHOD("_dev_capture_command_buffer_handle"), &RenderingDevice::_dev_capture_command_buffer_handle);
+	ClassDB::bind_method(D_METHOD("_dev_get_captured_command_buffer_handle"), &RenderingDevice::_dev_get_captured_command_buffer_handle);
 #endif
 	ClassDB::bind_method(D_METHOD("texture_create", "format", "view", "data"), &RenderingDevice::_texture_create, DEFVAL(Array()));
 	ClassDB::bind_method(D_METHOD("texture_create_shared", "view", "with_texture"), &RenderingDevice::_texture_create_shared);

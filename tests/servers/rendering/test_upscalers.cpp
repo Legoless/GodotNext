@@ -91,3 +91,58 @@ TEST_CASE("[Upscalers][RDGraph] Driver callback default stages") {
 	graph.resource_tracker_free(tracker);
 }
 #endif // RD_ENABLED
+
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/rendering_device_driver_vulkan.h"
+
+// GodotNext: pu_core_rd_native_interop (#102). The static helper is pure, so the slice and depth
+// cases need no device.
+TEST_CASE("[Upscalers][Interop] Vulkan texture native info") {
+	VkImageCreateInfo image_info = {};
+	image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+	image_info.imageType = VK_IMAGE_TYPE_2D;
+	image_info.extent = { 256, 128, 1 };
+	image_info.mipLevels = 3;
+	image_info.arrayLayers = 2;
+
+	VkImageViewCreateInfo view_info = {};
+	view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	view_info.image = (VkImage)0x1234;
+	view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+	view_info.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+	view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	view_info.subresourceRange.baseMipLevel = 1;
+	view_info.subresourceRange.levelCount = 1;
+	view_info.subresourceRange.baseArrayLayer = 1;
+	view_info.subresourceRange.layerCount = 1;
+
+	RDD::TextureNativeInfo info;
+	RenderingDeviceDriverVulkan::texture_native_info_from_create_infos(image_info, view_info, (VkImageView)0x5678, info);
+	CHECK(info.image == 0x1234u);
+	CHECK(info.view == 0x5678u);
+	CHECK(info.format == uint64_t(VK_FORMAT_R16G16B16A16_SFLOAT));
+	CHECK(info.aspect.has_flag(RDD::TEXTURE_ASPECT_COLOR_BIT));
+	CHECK_FALSE(info.aspect.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT));
+	CHECK(info.base_mipmap == 1);
+	CHECK(info.mipmap_count == 1);
+	CHECK(info.base_layer == 1);
+	CHECK(info.layer_count == 1);
+	CHECK(info.width == 128);
+	CHECK(info.height == 64);
+
+	// A depth view reports the depth aspect.
+	view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	view_info.format = VK_FORMAT_D32_SFLOAT;
+	RenderingDeviceDriverVulkan::texture_native_info_from_create_infos(image_info, view_info, (VkImageView)0x9abc, info);
+	CHECK(info.aspect.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT));
+	CHECK_FALSE(info.aspect.has_flag(RDD::TEXTURE_ASPECT_COLOR_BIT));
+	CHECK(info.format == uint64_t(VK_FORMAT_D32_SFLOAT));
+
+	// A texture created from an extension has no image create info; the extent is unknown.
+	VkImageCreateInfo no_image_info = {};
+	RenderingDeviceDriverVulkan::texture_native_info_from_create_infos(no_image_info, view_info, (VkImageView)0xdef0, info);
+	CHECK(info.image == 0x1234u);
+	CHECK(info.width == 0);
+	CHECK(info.height == 0);
+}
+#endif // VULKAN_ENABLED

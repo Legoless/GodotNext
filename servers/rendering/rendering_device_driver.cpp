@@ -34,6 +34,14 @@
 /**** MISC ****/
 /**************/
 
+uint64_t RenderingDeviceDriver::command_buffer_get_native_handle(CommandBufferID p_cmd_buffer) {
+	return 0;
+}
+
+Error RenderingDeviceDriver::texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info) {
+	return ERR_UNAVAILABLE;
+}
+
 uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 	// Sensible canonical defaults.
 	switch (p_trait) {

@@ -979,6 +979,22 @@ public:
 
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) = 0;
 	virtual uint64_t get_resource_native_handle(DriverResource p_type, ID p_driver_id) = 0;
+	// GodotNext: pu_core_rd_native_interop (#102). Vendor interop metadata. The base defaults return
+	// no handle and ERR_UNAVAILABLE; the Vulkan driver fills them for NGX image-view resources.
+	struct TextureNativeInfo {
+		uint64_t image = 0;
+		uint64_t view = 0;
+		uint64_t format = 0;
+		BitField<TextureAspectBits> aspect = {};
+		uint32_t base_mipmap = 0;
+		uint32_t mipmap_count = 0;
+		uint32_t base_layer = 0;
+		uint32_t layer_count = 0;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+	virtual uint64_t command_buffer_get_native_handle(CommandBufferID p_cmd_buffer);
+	virtual Error texture_get_native_info(TextureID p_texture, TextureNativeInfo &r_info);
 	virtual uint64_t get_total_memory_used() = 0;
 	virtual uint64_t get_lazily_memory_used() = 0;
 	virtual uint64_t limit_get(Limit p_limit) = 0;
