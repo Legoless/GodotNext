@@ -108,6 +108,7 @@ class NextGIGather {
 	RID uniform_set;
 	RID reflect_uniform_set;
 	RID reflect_counter_buffer;
+	RID specular_debug;
 	RID params_buffer;
 	RID counter_buffer;
 	RID feedback_buffer;
@@ -156,6 +157,8 @@ public:
 	void fill_info(Dictionary &r_info) const;
 	// #53 debug views: 10 raw, 11 variance, 12 history, 13 rejected (NextGI::DebugViewId order).
 	RID get_debug_texture(int p_view) const;
+	// Log-scaled specular hit distance for DEBUG_VIEW_SPECULAR_HIT (#60).
+	RID get_specular_debug_texture() const;
 
 	// Expanded gather source (variant 0) for the kernel-rule doctest. No GPU compile.
 	static String build_shader_source(int p_variant = 0);

@@ -348,6 +348,8 @@ public:
 		DEBUG_VIEW_DENOISE_HISTORY,
 		DEBUG_VIEW_DENOISE_REJECTED,
 		DEBUG_VIEW_DENOISE_DENOISED,
+		DEBUG_VIEW_REFLECTION,
+		DEBUG_VIEW_SPECULAR_HIT,
 		DEBUG_VIEW_MAX,
 	};
 
@@ -371,6 +373,8 @@ public:
 	DebugViewId get_active_debug_view() const { return active_debug_view; }
 	// Texture for DEBUG_VIEW_DENOISE_RAW/VARIANCE/HISTORY/REJECTED, or an invalid RID.
 	RID get_denoise_debug_texture(DebugViewId p_view) const;
+	// #60 hit-distance debug view (log-scaled), or an invalid RID.
+	RID get_specular_debug_texture() const;
 	// Tier view uses the green or amber tint. Every other view is a "no data" tint until its producer merges.
 	static DebugView resolve_debug_view(DebugViewId p_view, const TierResult &p_result);
 	static bool is_tier_reason_name(const String &p_name);

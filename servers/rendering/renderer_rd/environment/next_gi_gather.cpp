@@ -87,7 +87,7 @@ struct GatherParamsGPU {
 	float max_trace_roughness;
 	float reflect_divisor;
 	uint32_t reflect_enabled;
-	uint32_t pad3;
+	uint32_t reflect_debug;
 };
 static_assert(sizeof(GatherParamsGPU) == 264, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
@@ -187,7 +187,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[19] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[20] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -205,6 +205,7 @@ void NextGIGather::free_resources() {
 	debug_history = RID();
 	debug_rejected = RID();
 	reflect_counter_buffer = RID();
+	specular_debug = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -517,7 +518,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.max_trace_roughness = 0.4f;
 	params.reflect_divisor = 2.0f;
 	params.reflect_enabled = 1u;
-	params.pad3 = 0u;
+	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
 	RID hiz_texture = dummy_color;
 	RID last_frame_texture = dummy_color;
 	if (rb.is_valid() && rb->has_texture(RB_SCOPE_SSR, RB_HIZ) && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME)) {
@@ -613,8 +614,16 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!reflect_counter_buffer.is_valid()) {
 		reflect_counter_buffer = rd->storage_buffer_create(sizeof(ReflectCountersGPU));
 	}
+	if (params.reflect_debug != 0u && !specular_debug.is_valid()) {
+		RD::TextureFormat debug_tf;
+		debug_tf.width = MAX(last_screen_w / 2u, 1u);
+		debug_tf.height = MAX(last_screen_h / 2u, 1u);
+		debug_tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		debug_tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
+	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	RD::Uniform uniforms[36] = {
+	RD::Uniform uniforms[37] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -650,12 +659,13 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : probe_image })),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 34), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
-	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 34), reflect_shader_rid, 0);
+	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), reflect_shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -871,6 +881,10 @@ bool NextGIGather::_ensure_debug_textures() {
 		rd->texture_clear(*texture, Color(0, 0, 0, 1), 0, 1, 0, 1);
 	}
 	return true;
+}
+
+RID NextGIGather::get_specular_debug_texture() const {
+	return specular_debug;
 }
 
 RID NextGIGather::get_debug_texture(int p_view) const {

@@ -2858,6 +2858,12 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 			if (rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 				nextgi_source = rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT);
 			}
+		} else if (nextgi_view == RendererRD::NextGI::DEBUG_VIEW_REFLECTION) {
+			if (rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION)) {
+				nextgi_source = rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION);
+			}
+		} else if (nextgi_view == RendererRD::NextGI::DEBUG_VIEW_SPECULAR_HIT) {
+			nextgi_source = next_gi.get_specular_debug_texture();
 		} else {
 			nextgi_source = next_gi.get_denoise_debug_texture(nextgi_view);
 		}

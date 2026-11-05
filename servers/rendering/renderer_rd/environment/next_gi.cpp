@@ -399,6 +399,10 @@ NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) 
 			return DEBUG_VIEW_DENOISE_REJECTED;
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_DENOISE_DENOISED:
 			return DEBUG_VIEW_DENOISE_DENOISED;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_REFLECTION:
+			return DEBUG_VIEW_REFLECTION;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_HIT:
+			return DEBUG_VIEW_SPECULAR_HIT;
 		default:
 			return DEBUG_VIEW_MAX;
 	}
@@ -426,6 +430,12 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 			"denoise result",
 		};
 		view.label = denoise_labels[p_view - DEBUG_VIEW_DENOISE_RAW];
+	}
+	if (p_view == DEBUG_VIEW_REFLECTION) {
+		view.label = "reflection only";
+	}
+	if (p_view == DEBUG_VIEW_SPECULAR_HIT) {
+		view.label = "specular hit distance";
 	}
 	if (p_view == DEBUG_VIEW_FALLBACK_REASONS) {
 		// The per-instance reasons are the legend of this view. They are not tier reasons.
@@ -501,6 +511,10 @@ void NextGI::composite_reference(RID p_color) {
 		reference = memnew(NextGIReference);
 	}
 	reference->composite(p_color);
+}
+
+RID NextGI::get_specular_debug_texture() const {
+	return gather != nullptr ? gather->get_specular_debug_texture() : RID();
 }
 
 RID NextGI::get_denoise_debug_texture(DebugViewId p_view) const {

@@ -817,6 +817,10 @@
 		</constant>
 		<constant name="DEBUG_DRAW_NEXTGI_DENOISE_DENOISED" value="43" enum="DebugDraw">
 		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_REFLECTION" value="44" enum="DebugDraw">
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGI_SPECULAR_HIT" value="45" enum="DebugDraw">
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

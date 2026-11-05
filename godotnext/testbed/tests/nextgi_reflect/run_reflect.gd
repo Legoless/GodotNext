@@ -51,6 +51,27 @@ func _run() -> void:
 	if hits + misses > rays * 2:
 		_failures.append("hit and miss counts exceed the traced pixels")
 
+	# The two reflection debug views must present the traced image, not a flat tint.
+	var views := {}
+	for entry in [[Viewport.DEBUG_DRAW_NEXTGI_REFLECTION, "reflection"], [Viewport.DEBUG_DRAW_NEXTGI_SPECULAR_HIT, "specular_hit"]]:
+		get_viewport().debug_draw = int(entry[0])
+		for i in 6:
+			await RenderingServer.frame_post_draw
+		var image := get_viewport().get_texture().get_image()
+		var first: Color = image.get_pixel(0, 0)
+		var uniform := true
+		for y in range(0, image.get_height(), 64):
+			for x in range(0, image.get_width(), 64):
+				if image.get_pixel(x, y) != first:
+					uniform = false
+					break
+			if not uniform:
+				break
+		views[entry[1]] = not uniform
+		if uniform:
+			_failures.append("%s debug view rendered a uniform image" % entry[1])
+	get_viewport().debug_draw = Viewport.DEBUG_DRAW_DISABLED
+
 	var ok := _failures.is_empty()
 	print("GODOTNEXT_RESULT " + JSON.stringify({
 		"test": "nextgi_reflect",
@@ -59,6 +80,7 @@ func _run() -> void:
 		"rays": rays,
 		"hits": hits,
 		"misses": misses,
+		"views": views,
 		"failures": _failures,
 	}))
 	get_tree().quit(0 if ok else 1)

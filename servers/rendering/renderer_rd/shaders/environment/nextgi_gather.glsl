@@ -26,6 +26,7 @@ layout(set = 0, binding = 31) uniform sampler2D last_frame_tex;
 layout(set = 0, binding = 32) uniform sampler2D normal_roughness_tex;
 layout(rgba16f, set = 0, binding = 33) uniform image2D reflection_image;
 layout(r16f, set = 0, binding = 35) uniform image2D specular_hit_image;
+layout(rgba16f, set = 0, binding = 36) uniform image2D specular_debug_image;
 layout(set = 0, binding = 34, std430) buffer NextGIReflectCounters {
 	uint traced;
 	uint hits;
@@ -124,7 +125,7 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	float max_trace_roughness;
 	float reflect_divisor;
 	uint reflect_enabled;
-	uint pad3;
+	uint reflect_debug;
 }
 params;
 
@@ -746,6 +747,10 @@ void nextgi_reflect_main() {
 	}
 	imageStore(reflection_image, pixel, vec4(radiance, clamp(confidence, 0.0, 1.0)));
 	imageStore(specular_hit_image, pixel, vec4(hit_distance));
+	if (params.reflect_debug != 0u) {
+		float scaled = hit_distance >= 65504.0 ? 1.0 : clamp(log2(1.0 + hit_distance) / 8.0, 0.0, 1.0);
+		imageStore(specular_debug_image, pixel, vec4(vec3(scaled), 1.0));
+	}
 }
 
 void main() {
