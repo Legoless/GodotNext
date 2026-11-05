@@ -84,10 +84,21 @@ struct GatherParamsGPU {
 	uint32_t pad0;
 	uint32_t pad1;
 	uint32_t pad2;
+	float max_trace_roughness;
+	float reflect_divisor;
+	uint32_t reflect_enabled;
+	uint32_t pad3;
 };
-static_assert(sizeof(GatherParamsGPU) == 248, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 264, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
+
+struct ReflectCountersGPU {
+	uint32_t traced = 0;
+	uint32_t hits = 0;
+	uint32_t misses = 0;
+	uint32_t pad = 0;
+};
 
 struct GatherCountersGPU {
 	uint32_t rays = 0;
@@ -105,7 +116,7 @@ struct GatherCountersGPU {
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
-	RID pipelines[5];
+	RID pipelines[6];
 };
 
 static void _store_projection(const Projection &p_projection, float r_matrix[16]) {
@@ -140,10 +151,16 @@ NextGIGather::~NextGIGather() {
 
 void NextGIGather::_free_uniform_set() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd != nullptr && uniform_set.is_valid()) {
-		rd->free_rid(uniform_set);
+	if (rd != nullptr) {
+		if (uniform_set.is_valid()) {
+			rd->free_rid(uniform_set);
+		}
+		if (reflect_uniform_set.is_valid()) {
+			rd->free_rid(reflect_uniform_set);
+		}
 	}
 	uniform_set = RID();
+	reflect_uniform_set = RID();
 }
 
 void NextGIGather::free_resources() {
@@ -170,7 +187,7 @@ void NextGIGather::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[18] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[19] = { probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -187,6 +204,7 @@ void NextGIGather::free_resources() {
 	debug_variance = RID();
 	debug_history = RID();
 	debug_rejected = RID();
+	reflect_counter_buffer = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
 	feedback_buffer = RID();
@@ -212,6 +230,7 @@ bool NextGIGather::_ensure_shader() {
 	defines.push_back("#define MODE_SRC_FEEDBACK\n");
 	defines.push_back("#define MODE_COVERAGE\n");
 	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
+	defines.push_back("#define MODE_REFLECT\n");
 	shader->shader.initialize(defines);
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
@@ -223,7 +242,7 @@ bool NextGIGather::_ensure_shader() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 6; i++) {
 		shader->pipelines[i] = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, i));
 		if (!shader->pipelines[i].is_valid()) {
 			shader->shader.version_free(shader->version);
@@ -495,6 +514,10 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	params.page_rect_count = relight->get_page_rect_count();
+	params.max_trace_roughness = 0.4f;
+	params.reflect_divisor = 2.0f;
+	params.reflect_enabled = 1u;
+	params.pad3 = 0u;
 	RID hiz_texture = dummy_color;
 	RID last_frame_texture = dummy_color;
 	if (rb.is_valid() && rb->has_texture(RB_SCOPE_SSR, RB_HIZ) && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME)) {
@@ -587,8 +610,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 			wrc_params = wrc->get_params_buffer();
 		}
 	}
+	if (!reflect_counter_buffer.is_valid()) {
+		reflect_counter_buffer = rd->storage_buffer_create(sizeof(ReflectCountersGPU));
+	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	RD::Uniform uniforms[32] = {
+	RD::Uniform uniforms[35] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -620,9 +646,15 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, confidence),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 30, Vector<RID>({ sampler_nearest, hiz_texture })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 31, Vector<RID>({ sampler, last_frame_texture })),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 32, Vector<RID>({ sampler_nearest, normal_roughness })),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : probe_image })),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 30), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 33), shader_rid, 0);
+	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
+	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
+	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 33), reflect_shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -630,6 +662,16 @@ void NextGIGather::_read_counters() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd == nullptr || !counter_buffer.is_valid()) {
 		return;
+	}
+	if (reflect_counter_buffer.is_valid()) {
+		const Vector<uint8_t> reflect_data = rd->buffer_get_data(reflect_counter_buffer);
+		if (reflect_data.size() >= int(sizeof(ReflectCountersGPU))) {
+			ReflectCountersGPU reflect_got;
+			memcpy(&reflect_got, reflect_data.ptr(), sizeof(ReflectCountersGPU));
+			last_reflection_traced = reflect_got.traced;
+			last_reflection_hits = reflect_got.hits;
+			last_reflection_misses = reflect_got.misses;
+		}
 	}
 	const Vector<uint8_t> data = rd->buffer_get_data(counter_buffer);
 	if (data.size() < int(sizeof(GatherCountersGPU))) {
@@ -711,11 +753,23 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 		rd->compute_list_dispatch(list, half_x, half_y, 1);
 		rd->compute_list_end();
 	}
-	_read_counters();
 	// GodotNext: nextgi_denoise
 	// Spatial denoise of the fresh probe texels, between the gather and the ambient integration.
 	// The temporal pass replaces the gather's own history blend when it lands (#53 step 4).
 	_denoise_probes();
+	// GodotNext: nextgi_reflect (#60). One specular trace per half-resolution pixel.
+	if (reflect_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
+		ReflectCountersGPU zero_reflect;
+		rd->buffer_update(reflect_counter_buffer, 0, sizeof(zero_reflect), &zero_reflect);
+		const uint32_t width = MAX((last_screen_w + 1u) / 2u, 1u);
+		const uint32_t height = MAX((last_screen_h + 1u) / 2u, 1u);
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[5]);
+		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
+		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
+		rd->compute_list_end();
+	}
+	_read_counters();
 	frame++;
 }
 
@@ -888,6 +942,7 @@ String NextGIGather::build_shader_source(int p_variant) {
 	defines.push_back("#define MODE_SRC_FEEDBACK\n");
 	defines.push_back("#define MODE_COVERAGE\n");
 	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
+	defines.push_back("#define MODE_REFLECT\n");
 	shader.initialize(defines);
 	const RID version = shader.version_create(false);
 	ERR_FAIL_COND_V(!version.is_valid(), String());
@@ -914,4 +969,7 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["wrc_sky_samples"] = int64_t(last_sky_samples);
 	r_info["screen_trace_hits"] = int64_t(last_screen_hits);
 	r_info["gather_hit_radiance_reference"] = hit_radiance_reference;
+	r_info["reflection_rays"] = int64_t(last_reflection_traced);
+	r_info["reflection_hits"] = int64_t(last_reflection_hits);
+	r_info["reflection_misses"] = int64_t(last_reflection_misses);
 }

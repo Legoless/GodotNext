@@ -575,12 +575,18 @@ void NextGI::ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_ha
 }
 
 void NextGI::_clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const {
-	ERR_FAIL_COND(!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT) || !p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION));
+	ERR_FAIL_COND(!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT));
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	const uint32_t layers = p_render_buffers->get_view_count();
 	// Alpha 0: the opaque pass mixes the buffers in by their alpha, so it keeps its own ambient and specular.
 	rd->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT), Color(0, 0, 0, 0), 0, 1, 0, layers);
-	rd->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION), Color(0, 0, 0, 0), 0, 1, 0, layers);
+}
+
+void NextGI::_clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const {
+	ERR_FAIL_COND(!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION));
+	// The reflect pass (#60) writes every trace pixel, so the clear only covers frames where the
+	// specular trace is unavailable. Alpha 0 keeps the opaque pass's own specular.
+	RenderingDevice::get_singleton()->texture_clear(p_render_buffers->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION), Color(0, 0, 0, 0), 0, 1, 0, p_render_buffers->get_view_count());
 }
 
 void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution) {
@@ -653,6 +659,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			}
 			wrc->update(p_render_data);
 		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
+			_clear_gi_reflection(rb.ptr());
 			_gather(p_render_data);
 		} else if (slot == PASS_SLOT_INTEGRATION) {
 			// Integration (§2.1 line 7) writes RB_TEX_AMBIENT from the gather probes. Reflection stays cleared.

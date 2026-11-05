@@ -106,6 +106,8 @@ class NextGIGather {
 	uint32_t rr_probe_history_cap = 16;
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
+	RID reflect_uniform_set;
+	RID reflect_counter_buffer;
 	RID params_buffer;
 	RID counter_buffer;
 	RID feedback_buffer;
@@ -130,6 +132,9 @@ class NextGIGather {
 	uint32_t last_screen_hits = 0;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
+	uint32_t last_reflection_traced = 0;
+	uint32_t last_reflection_hits = 0;
+	uint32_t last_reflection_misses = 0;
 	bool hit_radiance_reference = false;
 
 	bool _ensure_shader();

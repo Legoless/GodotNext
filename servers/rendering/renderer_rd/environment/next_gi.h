@@ -241,6 +241,8 @@ private:
 
 	void _report(const String &p_line, const TierResult &p_result) const;
 	void _clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const;
+	// #60: the specular trace writes RB_TEX_REFLECTION after the gather, so clear it up front.
+	void _clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const;
 	void _apply_safety_net(TierInputs &r_inputs);
 	void _sync_device_lost_callback();
 	void _unregister_device_lost_callback();

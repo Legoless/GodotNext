@@ -21,6 +21,17 @@ layout(set = 0, binding = 29, std430) restrict buffer NextGIGatherConfidence {
 confidence_data;
 layout(set = 0, binding = 30) uniform sampler2D hiz_tex;
 layout(set = 0, binding = 31) uniform sampler2D last_frame_tex;
+// GodotNext: nextgi_reflect (#60). The reflect variant reuses the gather binding set and writes
+// the specular radiance plus its confidence into RB_TEX_REFLECTION.
+layout(set = 0, binding = 32) uniform sampler2D normal_roughness_tex;
+layout(rgba16f, set = 0, binding = 33) uniform image2D reflection_image;
+layout(set = 0, binding = 34, std430) buffer NextGIReflectCounters {
+	uint traced;
+	uint hits;
+	uint misses;
+	uint pad;
+}
+reflect_counters;
 layout(set = 0, binding = 28, std430) restrict readonly buffer NextGIGatherWRCParams {
 	vec4 camera;
 	vec4 sky;
@@ -109,6 +120,10 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint pad0;
 	uint pad1;
 	uint pad2;
+	float max_trace_roughness;
+	float reflect_divisor;
+	uint reflect_enabled;
+	uint pad3;
 }
 params;
 
@@ -629,6 +644,104 @@ void nextgi_coverage_main() {
 	}
 }
 
+// GodotNext: nextgi_reflect (#60). One GGX VNDF reflection ray per trace pixel.
+uint nextgi_reflect_hash(uint p_x) {
+	p_x ^= p_x >> 16;
+	p_x *= 0x7feb352du;
+	p_x ^= p_x >> 15;
+	p_x *= 0x846ca68bu;
+	p_x ^= p_x >> 16;
+	return p_x;
+}
+
+vec3 nextgi_reflect_sample_ggx(vec3 p_normal, vec3 p_view, float p_roughness, vec2 p_u) {
+	float alpha = max(p_roughness * p_roughness, 1e-3);
+	vec3 up = abs(p_normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	vec3 t1 = normalize(cross(up, p_normal));
+	vec3 t2 = cross(p_normal, t1);
+	vec3 v_local = vec3(dot(p_view, t1), dot(p_view, t2), dot(p_view, p_normal));
+	float phi = 6.2831853 * p_u.x;
+	float cos_theta = sqrt((1.0 - p_u.y) / (1.0 + (alpha * alpha - 1.0) * p_u.y));
+	float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+	vec3 h_local = vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
+	vec3 h = normalize(t1 * h_local.x + t2 * h_local.y + p_normal * h_local.z);
+	return reflect(-p_view, h);
+}
+
+void nextgi_reflect_main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 full_size = ivec2(params.screen_jitter.xy);
+	ivec2 size = ivec2(vec2(full_size) / max(params.reflect_divisor, 1.0));
+	if (pixel.x >= size.x || pixel.y >= size.y) {
+		return;
+	}
+	vec2 uv = (vec2(pixel) + 0.5) / vec2(size);
+	ivec2 full = ivec2(clamp(uv * vec2(full_size), vec2(0.0), vec2(full_size) - 1.0));
+	float depth = texelFetch(depth_tex, full, 0).r;
+	if (depth <= 0.0 || params.reflect_enabled == 0u) {
+		imageStore(reflection_image, pixel, vec4(0.0));
+		return;
+	}
+	atomicAdd(reflect_counters.traced, 1u);
+	vec4 guide = texelFetch(normal_roughness_tex, full, 0);
+	float roughness = guide.a;
+	if (roughness > 0.5) {
+		roughness = 1.0 - roughness;
+	}
+	roughness /= (127.0 / 255.0);
+	vec3 normal = normalize(guide.xyz * 2.0 - 1.0);
+	vec3 world = nextgi_unproject(vec2(full), depth);
+	vec3 view_dir = normalize(params.camera_pos.xyz - world);
+	vec3 origin = world + normal * params.max_origin_offset;
+
+	uint hash = nextgi_reflect_hash(uint(uv.x * 65535.0) ^ (uint(uv.y * 65535.0) << 16) ^ params.frame);
+	vec2 seed = vec2(float(hash & 0xFFFFu), float(hash >> 16)) / 65535.0;
+
+	vec3 radiance;
+	float confidence = 0.0;
+	if (roughness <= params.max_trace_roughness) {
+		vec3 direction = nextgi_reflect_sample_ggx(normal, view_dir, roughness, seed);
+		if (dot(direction, normal) <= 0.0) {
+			direction = reflect(-view_dir, normal);
+		}
+		float handoff = nextgi_wrc_handoff(origin);
+		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
+		vec3 screen_color;
+		vec3 march_end;
+		bool screen_hit = nextgi_screen_trace(origin, direction, tmax, screen_color, march_end);
+		float traveled = length(march_end - origin);
+		vec3 trace_origin = origin;
+		float trace_tmax = tmax;
+		if (traveled > 0.001 && traveled + 0.001 < tmax) {
+			trace_origin = march_end;
+			trace_tmax = tmax - traveled;
+		}
+		NextGIHit hit;
+		uint uncovered_count = 0u;
+		if (screen_hit) {
+			radiance = screen_color;
+			confidence = 1.0;
+			atomicAdd(reflect_counters.hits, 1u);
+		} else if (nextgi_trace(trace_origin, direction, trace_tmax, hit)) {
+			radiance = nextgi_shade_hit(hit, direction, uncovered_count, confidence);
+			atomicAdd(reflect_counters.hits, 1u);
+		} else {
+			radiance = nextgi_wrc_sample(trace_origin + direction * trace_tmax, direction);
+			if (!nextgi_wrc_hit_cache) {
+				radiance = nextgi_miss_radiance(direction);
+			} else {
+				confidence = nextgi_wrc_confidence;
+			}
+			atomicAdd(reflect_counters.misses, 1u);
+		}
+	} else {
+		vec3 direction = reflect(-view_dir, normal);
+		radiance = nextgi_wrc_sample(origin, direction);
+		confidence = nextgi_wrc_confidence;
+	}
+	imageStore(reflection_image, pixel, vec4(radiance, clamp(confidence, 0.0, 1.0)));
+}
+
 void main() {
 #ifdef MODE_INTEGRATE
 	nextgi_integrate_main();
@@ -636,6 +749,8 @@ void main() {
 	nextgi_feedback_main();
 #elif defined(MODE_COVERAGE)
 	nextgi_coverage_main();
+#elif defined(MODE_REFLECT)
+	nextgi_reflect_main();
 #else
 	nextgi_gather_main();
 #endif
