@@ -58,9 +58,9 @@ public:
 	VirtualMeshStorage();
 	virtual ~VirtualMeshStorage() override;
 
-	RID get_record_buffer() const { return record_buffer; }
-	RID get_mesh_record_buffer() const { return mesh_record_buffer; }
-	RID get_dag_buffer() const { return dag_buffer; }
+	RID get_dag_buffer() const override { return dag_buffer; }
+	RID get_record_buffer() const override { return record_buffer; }
+	RID get_mesh_record_buffer() const override { return mesh_record_buffer; }
 
 	void free_resources();
 };

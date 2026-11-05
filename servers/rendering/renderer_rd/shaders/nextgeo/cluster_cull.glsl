@@ -26,7 +26,7 @@ layout(set = 0, binding = 11, std430) buffer restrict ClustersOut {
 } clusters_out;
 
 layout(push_constant, std430) uniform Params {
-	uint input_count;
+	uint level;
 	uint output_capacity;
 	uint phase1_offset;
 	uint phase2_offset;
@@ -60,7 +60,8 @@ float dag_float(uint p_byte_offset) {
 #ifdef CLUSTER_CULL
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	if (index >= params.input_count) {
+	uint input_count = counters.group_count;
+	if (index >= input_count) {
 		return;
 	}
 	uvec2 entry = level_input.data[index];
@@ -69,6 +70,9 @@ void main() {
 		return;
 	}
 	NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+	if (mesh.bvh_node_offset <= mesh.group_offset) {
+		return;
+	}
 	uint group_count = (mesh.bvh_node_offset - mesh.group_offset) / 60u;
 	if (entry.y >= group_count) {
 		return;
@@ -82,18 +86,19 @@ void main() {
 		return;
 	}
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
-		uint slot = atomicAdd(counters.cut_hi, 1u);
+		uint slot = atomicAdd(counters.cluster_count, 1u);
 		if (slot >= params.output_capacity) {
 			atomicAdd(counters.overflow, 1u);
 			return;
 		}
-		clusters_out.data[params.phase2_offset + slot] = uvec2(entry.x, cluster_offset + cluster);
+		clusters_out.data[slot] = uvec2(entry.x, cluster_offset + cluster);
 	}
 }
 #else
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	if (index >= params.input_count) {
+	uint input_count = params.level == 0u ? counters.phase1_count : counters.level_counts[params.level - 1u];
+	if (index >= input_count) {
 		return;
 	}
 	uvec2 entry = level_input.data[index];
@@ -109,14 +114,14 @@ void main() {
 	for (uint child = 0u; child < child_count; child++) {
 		uint value = dag_uint(base + 48u + child * 4u);
 		if ((value & NEXTGEO_BVH_LEAF_BIT) != 0u) {
-			uint slot = atomicAdd(counters.phase1_count, 1u);
+			uint slot = atomicAdd(counters.group_count, 1u);
 			if (slot >= params.output_capacity) {
 				atomicAdd(counters.overflow, 1u);
 				continue;
 			}
 			groups_out.data[slot] = uvec2(entry.x, value & ~NEXTGEO_BVH_LEAF_BIT);
 		} else {
-			uint slot = atomicAdd(counters.cut_lo, 1u);
+			uint slot = atomicAdd(counters.level_counts[params.level], 1u);
 			if (slot >= params.output_capacity) {
 				atomicAdd(counters.overflow, 1u);
 				continue;

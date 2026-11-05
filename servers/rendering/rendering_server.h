@@ -574,6 +574,8 @@ public:
 	// GodotNext: pu_dlss_scaling_mode (#103). Requested/active mode and reason.
 	virtual Dictionary viewport_get_scaling_3d_status(RID p_viewport) = 0;
 	RSE::ViewportScaling3DReason scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode);
+	// GodotNext: nextgeo_gpu_cull (#76). Per-stage cut counters and cut hash.
+	Dictionary virtual_geometry_get_debug_stats(RID p_viewport);
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_texture_mipmap_bias(RID p_viewport, float p_texture_mipmap_bias) = 0;

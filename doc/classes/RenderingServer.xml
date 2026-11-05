@@ -4682,6 +4682,13 @@
 				If set to [constant RenderingServer.VIEWPORT_VRS_UPDATE_ONCE], the input texture is copied once and the mode is changed to [constant RenderingServer.VIEWPORT_VRS_UPDATE_DISABLED].
 			</description>
 		</method>
+		<method name="virtual_geometry_get_debug_stats">
+			<return type="Dictionary" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				Returns the NextGeo cut counters and hashes for the main view: phase-1/phase-2 instance counts, BVH levels, group and cluster counts, overflow, the GPU cut hash and, when [code]rendering/nextgeo/debug_stats[/code] is on, the CPU reference hash and counts.
+			</description>
+		</method>
 		<method name="visibility_notifier_create">
 			<return type="RID" />
 			<description>

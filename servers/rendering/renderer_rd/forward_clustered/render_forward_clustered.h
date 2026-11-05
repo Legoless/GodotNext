@@ -37,6 +37,7 @@
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -60,6 +61,9 @@ namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
+
+	// GodotNext: nextgeo_gpu_cull (#76).
+	NextGeoCut nextgeo_cut;
 
 	enum {
 		SCENE_UNIFORM_SET = 0,

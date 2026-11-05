@@ -37,6 +37,7 @@
 #include "core/os/os.h"
 #include "core/variant/typed_array.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/shader_language.h"
@@ -2252,6 +2253,13 @@ void RenderingServer::get_argument_options(const StringName &p_function, int p_i
 }
 #endif
 
+Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
+	// GodotNext: nextgeo_gpu_cull (#76). The build-phase snapshot is per main
+	// view; the viewport RID is accepted for future per-view stats.
+	(void)p_viewport;
+	return NextGeoCut::get_last_stats();
+}
+
 RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode) {
 	// GodotNext: pu_dlss_scaling_mode (#103). Non-DLSS modes keep their
 	// existing rules; DLSS reports the API/module reason.
@@ -2894,6 +2902,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_mode", "viewport", "scaling_3d_mode"), &RenderingServer::viewport_set_scaling_3d_mode);
 	ClassDB::bind_method(D_METHOD("viewport_get_scaling_3d_status", "viewport"), &RenderingServer::viewport_get_scaling_3d_status);
 	ClassDB::bind_method(D_METHOD("scaling_3d_mode_get_availability", "mode"), &RenderingServer::scaling_3d_mode_get_availability);
+	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);
@@ -3862,6 +3871,7 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_gpu_cull (#76). Cluster/instance cut budget in pixels
 	// at the internal resolution; applies next frame.
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/max_pixel_error", PROPERTY_HINT_RANGE, "0.25,8,0.05"), 1.0);
+	GLOBAL_DEF("rendering/nextgeo/debug_stats", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

@@ -51,9 +51,12 @@ layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint phase1_count;
 	uint phase2_count;
 	uint overflow;
+	uint cluster_count;
 	uint cut_lo;
 	uint cut_hi;
-	uint pad[3];
+	uint group_count;
+	uint level_counts[8];
+	uint pad[2];
 } counters;
 
 layout(set = 0, binding = 6, std430) buffer restrict Nodes {

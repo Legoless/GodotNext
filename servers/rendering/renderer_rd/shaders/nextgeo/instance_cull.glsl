@@ -78,5 +78,6 @@ void main() {
 		return;
 	}
 	uint slot = atomicAdd(counters.phase1_count, 1u);
-	nodes.data[slot] = uvec2(index, record.virtual_mesh);
+	// Level 0 always starts at the mesh's BVH root (node 0).
+	nodes.data[slot] = uvec2(index, 0u);
 }

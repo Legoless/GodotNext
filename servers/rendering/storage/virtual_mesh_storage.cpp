@@ -172,6 +172,18 @@ RendererVirtualMeshStorage::MeshRecord RendererVirtualMeshStorage::_parse_dag(co
 	return record;
 }
 
+const RendererVirtualMeshStorage::MeshInfo *RendererVirtualMeshStorage::get_mesh_info(uint32_t p_mesh_index) const {
+	return p_mesh_index < mesh_order.size() ? meshes.getptr(mesh_order[p_mesh_index]) : nullptr;
+}
+
+uint32_t RendererVirtualMeshStorage::get_max_bvh_levels() const {
+	uint32_t levels = 0;
+	for (const MeshRecord &record : mesh_records) {
+		levels = MAX(levels, record.bvh_level_count);
+	}
+	return MIN(levels, 8u);
+}
+
 void RendererVirtualMeshStorage::_mark_dirty(uint32_t p_record) {
 	if (p_record < slot_states.size()) {
 		slot_states[p_record].dirty = true;
@@ -206,6 +218,7 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		index = mesh_rids.size();
 		mesh_indices.insert(p_mesh, index);
 		mesh_rids.push_back(p_mesh);
+		mesh_order.push_back(p_mesh);
 		mesh_records.push_back(MeshRecord());
 		mesh_record_dirty.push_back(0);
 	}

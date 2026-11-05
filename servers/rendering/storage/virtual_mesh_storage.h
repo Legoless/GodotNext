@@ -165,6 +165,14 @@ public:
 	uint32_t get_live_record_count() const { return live_records; }
 	uint32_t get_frame() const { return frame; }
 	const HashMap<RID, MeshInfo> &get_meshes() const { return meshes; }
+	// GodotNext: nextgeo_gpu_cull (#76).
+	// GodotNext: nextgeo_gpu_cull (#76). CPU reference access for the cut hash.
+	const MeshInfo *get_mesh_info(uint32_t p_mesh_index) const;
+	virtual RID get_record_buffer() const { return RID(); }
+	virtual RID get_mesh_record_buffer() const { return RID(); }
+	virtual RID get_dag_buffer() const { return RID(); }
+	uint32_t get_record_count() const { return used_slots; }
+	uint32_t get_max_bvh_levels() const;
 
 protected:
 	virtual void _upload_records(uint32_t p_first, uint32_t p_count) = 0;
@@ -203,6 +211,7 @@ protected:
 
 	HashMap<RID, MeshInfo> meshes;
 	HashMap<RID, uint32_t> mesh_indices;
+	LocalVector<RID> mesh_order; // mesh index -> RID
 	LocalVector<RID> mesh_rids;
 	LocalVector<uint8_t> mesh_record_dirty;
 

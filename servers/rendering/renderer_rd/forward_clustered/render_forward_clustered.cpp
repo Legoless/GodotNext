@@ -2360,6 +2360,20 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		RD::get_singleton()->draw_command_end_label();
 
+		// GodotNext: nextgeo_gpu_cull (#76). Cull the persistent NextGeo
+		// records after the depth pre-pass, before the opaque pass.
+		if (RSG::virtual_mesh_storage != nullptr) {
+			// GodotNext: nextgeo_instance_records (#75). Upload the dirty records
+			// before this frame's cut; idempotent after the first view.
+			RSG::virtual_mesh_storage->flush();
+		}
+		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_record_buffer().is_valid() && RSG::virtual_mesh_storage->get_record_count() > 0 && p_render_data->scene_data != nullptr) {
+			RENDER_TIMESTAMP("NextGeo HiZ");
+			const Projection view_projection = p_render_data->scene_data->view_projection[0];
+			nextgeo_cut.dispatch(RSG::virtual_mesh_storage, view_projection, view_projection, p_render_data->scene_data->cam_transform.origin, rb->get_internal_size(), p_render_data->scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/debug_stats")));
+			RENDER_TIMESTAMP("NextGeo Phase2 Cull");
+		}
+
 		if (use_msaa) {
 			RENDER_TIMESTAMP("Resolve Depth Pre-Pass (MSAA)");
 			RD::get_singleton()->draw_command_begin_label("Resolve Depth Pre-Pass (MSAA)");
@@ -5701,6 +5715,7 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	nextgeo_cut.free_resources();
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;
