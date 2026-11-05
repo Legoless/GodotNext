@@ -1590,16 +1590,18 @@ void MeshStorage::update_mesh_instances() {
 			const int mode = array_is_2d ? SkeletonShader::SHADER_MODE_2D : SkeletonShader::SHADER_MODE_3D;
 			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, write_rt_arena ? skeleton_shader.pipeline_rt[mode] : skeleton_shader.pipeline[mode]);
 			{
-				// GodotNext: nextgi_skinned_actors (#59). Set 3 is the posed arena slot's chunk.
-				if (write_rt_arena && mi->surfaces[i].rt_arena_uniform_set.is_null()) {
+				// GodotNext: nextgi_skinned_actors (#59). The skeleton shader always
+				// declares set 3: bind the posed slot's chunk, or the default buffer
+				// while NextGI is off.
+				if (mi->surfaces[i].rt_arena_uniform_set.is_null()) {
 					RD::Uniform arena_uniform;
 					arena_uniform.binding = 0;
 					arena_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-					RID chunk_buffer = mesh_nextgi_rt_get_chunk_buffer(mi->surfaces[i].rt_arena_chunk);
+					RID chunk_buffer = write_rt_arena ? mesh_nextgi_rt_get_chunk_buffer(mi->surfaces[i].rt_arena_chunk) : RID();
 					arena_uniform.append_id(chunk_buffer.is_valid() ? chunk_buffer : default_rd_storage_buffer);
 					mi->surfaces[i].rt_arena_uniform_set = RD::get_singleton()->uniform_set_create(Vector<RD::Uniform>({ arena_uniform }), skeleton_shader.version_shader[mode], SkeletonShader::UNIFORM_SET_RT_ARENA);
 				}
-				RID arena_set = write_rt_arena ? mi->surfaces[i].rt_arena_uniform_set : RID();
+				RID arena_set = mi->surfaces[i].rt_arena_uniform_set;
 				if (arena_set.is_valid()) {
 					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, arena_set, SkeletonShader::UNIFORM_SET_RT_ARENA);
 				}

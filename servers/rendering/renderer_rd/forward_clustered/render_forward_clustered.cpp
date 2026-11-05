@@ -799,7 +799,7 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		scene_state.ubo.ssao_light_affect = environment_get_ssao_direct_light_affect(p_render_data->environment);
 		uint32_t ss_flags = 0;
 		if (p_opaque_render_buffers) {
-			const bool nextgi_view = RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
+			const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
 			ss_flags |= (!nextgi_view && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
 			ss_flags |= nextgi_view ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;

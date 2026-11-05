@@ -3898,7 +3898,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		// One selection per scenario per frame, within rt_scene_radius of the first view's camera.
 		// No frustum cull: an instance behind the camera and inside the radius stays in the TLAS.
 		sdfgi_update_data.nextgi_rt_instances = &scene_cull_result.nextgi_rt_instances;
-		if (p_reflection_probe.is_null() && scene_render->environment_get_nextgi_enabled(p_environment)) {
+		if (p_reflection_probe.is_null() && p_environment.is_valid() && scene_render->environment_get_nextgi_enabled(p_environment)) {
 			const uint64_t frame = RSG::rasterizer->get_frame_number();
 			if (scenario->nextgi_rt_selection_frame != frame) {
 				scenario->nextgi_dirty_published = scenario->nextgi_dirty_writing;
