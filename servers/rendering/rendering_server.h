@@ -45,6 +45,8 @@ namespace Geometry3D {
 struct MeshData;
 }
 
+class MeshDistanceField;
+
 // Helper macros for code outside of the rendering server, but that is
 // called by the rendering server.
 #ifdef DEBUG_ENABLED
@@ -240,6 +242,8 @@ public:
 	virtual AABB mesh_get_custom_aabb(RID p_mesh) const = 0;
 
 	virtual void mesh_set_path(RID p_mesh, const String &p_path) = 0;
+	// GodotNext: ps_mesh_sdf_atlas (#185). C++ only.
+	virtual void mesh_set_distance_field(RID p_mesh, const Ref<MeshDistanceField> &p_field) = 0;
 	virtual String mesh_get_path(RID p_mesh) const = 0;
 
 	virtual void mesh_set_shadow_mesh(RID p_mesh, RID p_shadow_mesh) = 0;

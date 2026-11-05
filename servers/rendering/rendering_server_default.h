@@ -41,6 +41,7 @@
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_globals.h"
+#include "scene/resources/3d/mesh_distance_field.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/server_wrap_mt_common.h"
 
@@ -416,6 +417,7 @@ public:
 	FUNC1RC(AABB, mesh_get_custom_aabb, RID)
 
 	FUNC2(mesh_set_path, RID, const String &)
+	FUNC2(mesh_set_distance_field, RID, const Ref<MeshDistanceField> &)
 	FUNC1RC(String, mesh_get_path, RID)
 
 	FUNC2(mesh_set_shadow_mesh, RID, RID)

@@ -446,7 +446,10 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 // GodotNext: nextgi_rt_scene
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "core/math/mesh_sdf_builder.h"
 #include "core/math/random_number_generator.h"
+#include "scene/resources/3d/primitive_meshes.h"
+#include "scene/resources/mesh.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 // GodotNext: nextgi_as_slots
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -2492,6 +2495,84 @@ TEST_CASE("[NextGI][SDF] Brick pool churn over 10,000 operations") {
 	pool.free(rest);
 	CHECK_EQ(pool.get_used_count(), uint32_t(0));
 	CHECK_EQ(pool.get_free_count(), capacity);
+}
+
+// GodotNext: ps_mesh_sdf_atlas (#185).
+static Ref<MeshDistanceField> _make_test_sdf() {
+	Ref<BoxMesh> box;
+	box.instantiate();
+	box->set_size(Vector3(1.0f, 1.0f, 1.0f));
+	MeshSDFSettings settings;
+	settings.voxels_per_meter = 8.0f;
+	MeshSDFData data;
+	const Error err = MeshSDFBuilder::build(box->get_faces(), settings, data);
+	CHECK(err == OK);
+	CHECK(data.is_valid());
+	Ref<MeshDistanceField> field;
+	field.instantiate();
+	field->set_data(data);
+	return field;
+}
+
+TEST_CASE("[NextGI][SDF] Atlas page tables and release") {
+	NextGISDFAtlas atlas(64);
+	const Ref<MeshDistanceField> field = _make_test_sdf();
+	REQUIRE(field.is_valid());
+	REQUIRE(field->get_mip_count() > 0);
+	const RID mesh = RID::from_uint64(9001);
+	CHECK(atlas.register_mesh(mesh, field));
+	CHECK(atlas.has_mesh(mesh));
+
+	const NextGISDFAtlas::MeshPages *pages = atlas.get_pages(mesh);
+	REQUIRE(pages != nullptr);
+	CHECK_EQ(int(pages->mip_count), field->get_mip_count());
+	CHECK_EQ(pages->page_tables.size(), size_t(field->get_mip_count()));
+	CHECK(pages->resident_bytes > 0);
+	CHECK_EQ(atlas.get_pool_used(), uint32_t(pages->resident_bytes / NextGISDFPool::BRICK_BYTES));
+
+	const TypedArray<PackedInt32Array> source = field->get_page_tables();
+	for (int mip = 0; mip < field->get_mip_count(); mip++) {
+		const PackedInt32Array &gpu = pages->page_tables[mip];
+		const PackedInt32Array &cpu = source[mip];
+		CHECK_EQ(gpu.size(), cpu.size());
+		LocalVector<uint8_t> used_slots;
+		used_slots.resize(atlas.get_pool_capacity());
+		memset(used_slots.ptr(), 0, atlas.get_pool_capacity());
+		for (int index = 0; index < gpu.size(); index++) {
+			if (cpu[index] < 0) {
+				CHECK_EQ(gpu[index], cpu[index]);
+				continue;
+			}
+			CHECK(gpu[index] >= 0);
+			CHECK(gpu[index] < int32_t(atlas.get_pool_capacity()));
+			CHECK_EQ(used_slots[gpu[index]], 0);
+			used_slots[gpu[index]] = 1;
+		}
+	}
+
+	// The same field replaces its previous pages without leaking slots.
+	const uint32_t used = atlas.get_pool_used();
+	CHECK(atlas.register_mesh(mesh, field));
+	CHECK_EQ(atlas.get_pool_used(), used);
+
+	atlas.unregister_mesh(mesh);
+	CHECK_FALSE(atlas.has_mesh(mesh));
+	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
+}
+
+TEST_CASE("[NextGI][SDF] Atlas churn leaves no resident bricks") {
+	NextGISDFAtlas atlas(64);
+	const Ref<MeshDistanceField> field = _make_test_sdf();
+	REQUIRE(field.is_valid());
+	for (int step = 0; step < 100; step++) {
+		const RID mesh = RID::from_uint64(10000 + step);
+		CHECK(atlas.register_mesh(mesh, field));
+		CHECK(atlas.has_mesh(mesh));
+		CHECK(atlas.get_pool_used() > 0);
+		atlas.unregister_mesh(mesh);
+		CHECK_FALSE(atlas.has_mesh(mesh));
+	}
+	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
 }
 
 // GodotNext: nextgi_quality_presets (#55).

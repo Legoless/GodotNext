@@ -3877,6 +3877,9 @@ void RenderingServer::init() {
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/mesh_sdf/voxels_per_meter", PROPERTY_HINT_RANGE, "1,100,0.1,or_greater"), 10.0);
+	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/runtime_generate", true);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/mesh_sdf/pool_size_mb", PROPERTY_HINT_RANGE, "8,2048,1,or_greater"), 256);
+	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/keep_when_hwrt", true);
 
 	GLOBAL_DEF_RST("rendering/environment/fog/use_legacy_blending", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/volumetric_fog/volume_size", PROPERTY_HINT_RANGE, "16,512,1"), 64);

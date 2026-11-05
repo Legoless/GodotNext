@@ -37,11 +37,19 @@
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/storage/utilities.h"
 
+class MeshDistanceField;
+
 class RendererMeshStorage {
 public:
 	virtual ~RendererMeshStorage() {}
 
 	/* MESH API */
+
+	// GodotNext: ps_mesh_sdf_atlas (#185). Registers the CPU SDF resource with
+	// the GPU brick atlas; backends without the atlas ignore it.
+	virtual void mesh_set_distance_field(RID p_mesh, const Ref<MeshDistanceField> &p_field) {}
+	// GodotNext: ps_mesh_sdf_atlas (#185). Poll runtime SDF work once per frame.
+	virtual void mesh_update_sdf() {}
 
 	virtual RID mesh_allocate() = 0;
 	virtual void mesh_initialize(RID p_rid) = 0;

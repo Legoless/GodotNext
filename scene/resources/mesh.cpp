@@ -1622,6 +1622,7 @@ void ArrayMesh::_create_if_empty() const {
 		RS::get_singleton()->mesh_set_path(mesh, get_path());
 #ifndef _3D_DISABLED
 		_push_virtual_geometry_to_rs();
+		_push_distance_field_to_rs();
 #endif
 	}
 }
@@ -1734,6 +1735,7 @@ void ArrayMesh::_set_surfaces(const Array &p_surfaces) {
 		RS::get_singleton()->mesh_set_path(mesh, get_path());
 #ifndef _3D_DISABLED
 		_push_virtual_geometry_to_rs();
+		_push_distance_field_to_rs();
 #endif
 	}
 
@@ -2437,6 +2439,16 @@ void ArrayMesh::set_distance_field(const Ref<MeshDistanceField> &p_distance_fiel
 	}
 	distance_field = p_distance_field;
 	emit_changed();
+	_push_distance_field_to_rs();
+}
+
+void ArrayMesh::_push_distance_field_to_rs() const {
+	if (mesh.is_null()) {
+		// The RS mesh RID is created with the first surface; _create_if_empty()
+		// and mesh_create_from_surfaces() push again after that.
+		return;
+	}
+	RS::get_singleton()->mesh_set_distance_field(mesh, distance_field);
 }
 
 Ref<MeshDistanceField> ArrayMesh::get_distance_field() const {

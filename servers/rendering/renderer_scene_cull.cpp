@@ -3516,6 +3516,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 
 	ERR_FAIL_COND(p_render_buffers.is_null());
 
+	// GodotNext: ps_mesh_sdf_atlas (#185). Poll runtime SDF jobs once per view;
+	// a scene without skinned instances never reaches update_mesh_instances().
+	RSG::mesh_storage->mesh_update_sdf();
+
 	render_pass++;
 
 	scene_render->set_scene_pass(render_pass);

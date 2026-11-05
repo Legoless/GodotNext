@@ -35,7 +35,12 @@
 #include "core/templates/self_list.h"
 // GodotNext: nextgi_rt_arena
 #include "servers/rendering/renderer_compositor.h"
+#include "core/math/mesh_sdf_builder.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/templates/hash_set.h"
+#include "core/templates/safe_refcount.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/renderer_rd/shaders/skeleton.glsl.gen.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/mesh_storage.h"
@@ -274,6 +279,26 @@ private:
 	bool nextgi_rt_enabled = false;
 	float nextgi_rt_max_error = 0.02f;
 	NextGIArenaAllocator nextgi_rt_allocator;
+	// GodotNext: ps_mesh_sdf_atlas (#185).
+	NextGISDFAtlas sdf_atlas;
+	struct SDFJob {
+		RID mesh;
+		Vector<Face3> faces;
+		MeshSDFSettings settings;
+		Ref<MeshDistanceField> result;
+		SafeFlag done;
+	};
+	struct SDFJobState {
+		SDFJob *job = nullptr;
+		WorkerThreadPool::TaskID task = WorkerThreadPool::INVALID_TASK_ID;
+	};
+	LocalVector<SDFJobState> sdf_jobs;
+	HashSet<RID> sdf_pending;
+	HashSet<RID> sdf_baked;
+	bool sdf_runtime_generate = true;
+	bool sdf_keep_when_hwrt = true;
+	static void _sdf_build_task(void *p_userdata);
+	void _poll_sdf_jobs();
 	struct NextGIRTChunk {
 		RID buffer;
 		uint64_t device_address = 0;
@@ -451,6 +476,8 @@ public:
 	virtual RID mesh_allocate() override;
 	virtual void mesh_initialize(RID p_mesh) override;
 	virtual void mesh_free(RID p_rid) override;
+	virtual void mesh_set_distance_field(RID p_mesh, const Ref<MeshDistanceField> &p_field) override;
+	virtual void mesh_update_sdf() override;
 
 	virtual void mesh_set_blend_shape_count(RID p_mesh, int p_blend_shape_count) override;
 
@@ -514,6 +541,10 @@ public:
 	// The CPU copies of an RT surface (xyz float triples, uint32 indices) for SRC card clustering.
 	// False when the surface is not in the RT arena or its copies were released.
 	bool mesh_nextgi_get_cpu_geometry(RID p_mesh, uint32_t p_surface, Vector<float> &r_positions, Vector<uint32_t> &r_indices) const;
+	// GodotNext: ps_mesh_sdf_atlas (#185).
+	NextGISDFAtlas &get_sdf_atlas() { return sdf_atlas; }
+	uint32_t get_sdf_job_count() const { return sdf_jobs.size(); }
+	uint32_t get_sdf_pending_count() const { return sdf_pending.size(); }
 	// GodotNext: nextgi_skinned_actors (#59). The per-instance posed slot of a skinned surface.
 	// The slot covers posed vertices and the coarsest-LOD index copy in one chunk.
 	struct NextGIRTSlotInfo {

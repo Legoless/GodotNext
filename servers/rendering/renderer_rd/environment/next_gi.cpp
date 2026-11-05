@@ -42,6 +42,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -613,6 +614,15 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_scene_update_ms"] = rt_stats.scene_update_ms;
 		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
 		info["rt_as_memory_exceeded"] = rt_scene->is_as_memory_exceeded();
+		// GodotNext: ps_mesh_sdf_atlas (#185).
+		if (MeshStorage::get_singleton() != nullptr) {
+			NextGISDFAtlas &sdf_atlas = MeshStorage::get_singleton()->get_sdf_atlas();
+			info["mesh_sdf_resident_bytes"] = int64_t(sdf_atlas.get_resident_bytes());
+			info["mesh_sdf_pool_used"] = int64_t(sdf_atlas.get_pool_used());
+			info["mesh_sdf_pool_capacity"] = int64_t(sdf_atlas.get_pool_capacity());
+			info["mesh_sdf_jobs"] = int64_t(MeshStorage::get_singleton()->get_sdf_job_count());
+			info["mesh_sdf_pending"] = int64_t(MeshStorage::get_singleton()->get_sdf_pending_count());
+		}
 	}
 	// GodotNext: nextgi_src_cards
 	if (src != nullptr) {

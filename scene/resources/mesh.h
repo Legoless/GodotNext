@@ -345,6 +345,7 @@ private:
 	void _detach_distance_field() {}
 #else
 	void _detach_distance_field();
+	void _push_distance_field_to_rs() const;
 	Ref<MeshDistanceField> distance_field;
 #endif
 	mutable RID mesh;

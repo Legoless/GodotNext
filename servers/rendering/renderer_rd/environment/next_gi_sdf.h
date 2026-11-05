@@ -30,7 +30,9 @@
 
 #pragma once
 
+#include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
+#include "scene/resources/3d/mesh_distance_field.h"
 
 // GodotNext: ps_mesh_sdf_atlas (#185, plan §21.2 L3)
 //
@@ -69,4 +71,48 @@ private:
 	uint32_t used = 0;
 	LocalVector<uint32_t> free_list;
 	LocalVector<uint8_t> slots; // 1 = allocated, for validation and tests.
+};
+
+// GodotNext: ps_mesh_sdf_atlas (#185)
+//
+// The GPU side of the pool: one R8 brick buffer (slot * 512 B) plus the
+// per-mesh mip page tables. The RD in this tree updates whole texture layers
+// only, so the atlas is a linear brick buffer rather than a Texture3D; the
+// logical brick layout is unchanged and shaders address it as
+// slot * BRICK_VOXELS + voxel.
+class NextGISDFAtlas {
+public:
+	struct MeshPages {
+		Ref<MeshDistanceField> field;
+		// One entry per brick slot of the source mip: a pool slot, or the
+		// MeshSDFData::PAGE_FAR_OUTSIDE / PAGE_FAR_INSIDE sentinel.
+		Vector<PackedInt32Array> page_tables;
+		Vector<PackedInt32Array> slots;
+		uint32_t mip_count = 0;
+		uint64_t resident_bytes = 0;
+	};
+
+	explicit NextGISDFAtlas(uint32_t p_size_mb = NextGISDFPool::DEFAULT_POOL_MB);
+
+	// Allocates and uploads every brick of the field. Re-registering a mesh
+	// releases the previous pages first. All-or-nothing.
+	bool register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_field);
+	void unregister_mesh(RID p_mesh);
+	bool has_mesh(RID p_mesh) const;
+	const MeshPages *get_pages(RID p_mesh) const;
+
+	RID get_atlas_buffer() const { return atlas_buffer; }
+	uint32_t get_pool_capacity() const { return pool.get_capacity(); }
+	uint32_t get_pool_used() const { return pool.get_used_count(); }
+	uint64_t get_resident_bytes() const { return resident_bytes; }
+	uint64_t get_pool_size_bytes() const { return pool.get_size_bytes(); }
+
+private:
+	RID _ensure_buffer();
+	void _release_pages(MeshPages &r_pages);
+
+	NextGISDFPool pool;
+	RID atlas_buffer;
+	HashMap<RID, MeshPages> meshes;
+	uint64_t resident_bytes = 0;
 };

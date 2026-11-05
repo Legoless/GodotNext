@@ -45,8 +45,11 @@ MeshStorage *MeshStorage::get_singleton() {
 	return singleton;
 }
 
-MeshStorage::MeshStorage() {
+MeshStorage::MeshStorage() :
+		sdf_atlas(uint32_t(GLOBAL_GET("rendering/global_illumination/mesh_sdf/pool_size_mb"))) {
 	singleton = this;
+	sdf_runtime_generate = bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/runtime_generate"));
+	sdf_keep_when_hwrt = bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/keep_when_hwrt"));
 
 	// GodotNext: nextgi_rt_arena
 	nextgi_rt_max_error = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_max_error"));
@@ -250,6 +253,100 @@ RID MeshStorage::mesh_allocate() {
 
 void MeshStorage::mesh_initialize(RID p_rid) {
 	mesh_owner.initialize_rid(p_rid, Mesh());
+}
+
+void MeshStorage::mesh_set_distance_field(RID p_mesh, const Ref<MeshDistanceField> &p_field) {
+	// GodotNext: ps_mesh_sdf_atlas (#185). Register the baked field; a null
+	// field releases the mesh's pool slots.
+	sdf_pending.erase(p_mesh);
+	if (p_field.is_valid()) {
+		if (sdf_atlas.register_mesh(p_mesh, p_field)) {
+			sdf_baked.insert(p_mesh);
+		}
+	} else {
+		sdf_atlas.unregister_mesh(p_mesh);
+		sdf_baked.erase(p_mesh);
+	}
+}
+
+void MeshStorage::mesh_update_sdf() {
+	_poll_sdf_jobs();
+}
+
+void MeshStorage::_sdf_build_task(void *p_userdata) {
+	SDFJob *job = static_cast<SDFJob *>(p_userdata);
+	MeshSDFData data;
+	if (MeshSDFBuilder::build(job->faces, job->settings, data) == OK && data.is_valid()) {
+		Ref<MeshDistanceField> field;
+		field.instantiate();
+		field->set_data(data);
+		job->result = field;
+	}
+	job->done.set();
+}
+
+void MeshStorage::_poll_sdf_jobs() {
+	// Start jobs for meshes whose surfaces settled since the last frame.
+	if (!sdf_pending.is_empty()) {
+		LocalVector<RID> pending;
+		for (const RID &mesh_rid : sdf_pending) {
+			pending.push_back(mesh_rid);
+		}
+		sdf_pending.clear();
+		for (const RID &mesh_rid : pending) {
+			Mesh *mesh = mesh_owner.get_or_null(mesh_rid);
+			if (mesh == nullptr || sdf_baked.has(mesh_rid) || sdf_atlas.has_mesh(mesh_rid)) {
+				continue;
+			}
+			SDFJob *job = memnew(SDFJob);
+			job->mesh = mesh_rid;
+			for (uint32_t surface = 0; surface < mesh->surface_count; surface++) {
+				const Mesh::Surface *s = mesh->surfaces[surface];
+				const uint32_t vertex_count = uint32_t(s->rt_cpu_positions.size() / 3);
+				if (vertex_count == 0 || s->rt_cpu_indices.is_empty()) {
+					continue;
+				}
+				for (uint32_t index = 0; index + 2 < s->rt_cpu_indices.size(); index += 3) {
+					const uint32_t i0 = s->rt_cpu_indices[index];
+					const uint32_t i1 = s->rt_cpu_indices[index + 1];
+					const uint32_t i2 = s->rt_cpu_indices[index + 2];
+					if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count) {
+						continue;
+					}
+					job->faces.push_back(Face3(
+							Vector3(s->rt_cpu_positions[i0 * 3], s->rt_cpu_positions[i0 * 3 + 1], s->rt_cpu_positions[i0 * 3 + 2]),
+							Vector3(s->rt_cpu_positions[i1 * 3], s->rt_cpu_positions[i1 * 3 + 1], s->rt_cpu_positions[i1 * 3 + 2]),
+							Vector3(s->rt_cpu_positions[i2 * 3], s->rt_cpu_positions[i2 * 3 + 1], s->rt_cpu_positions[i2 * 3 + 2])));
+				}
+			}
+			if (job->faces.is_empty()) {
+				memdelete(job);
+				continue;
+			}
+			job->settings.voxels_per_meter = float(GLOBAL_GET("rendering/global_illumination/mesh_sdf/voxels_per_meter"));
+			SDFJobState state;
+			state.job = job;
+			state.task = WorkerThreadPool::get_singleton()->add_native_task(&MeshStorage::_sdf_build_task, job, false, "Mesh SDF");
+			sdf_jobs.push_back(state);
+		}
+	}
+
+	// Upload completed fields on the main thread.
+	for (int index = int(sdf_jobs.size()) - 1; index >= 0; index--) {
+		SDFJobState &state = sdf_jobs[index];
+		if (!state.job->done.is_set()) {
+			continue;
+		}
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(state.task);
+		SDFJob *job = state.job;
+		if (job->result.is_valid() && mesh_owner.owns(job->mesh) && !sdf_baked.has(job->mesh)) {
+			if (sdf_atlas.register_mesh(job->mesh, job->result)) {
+				sdf_baked.insert(job->mesh);
+			}
+		}
+		memdelete(job);
+		sdf_jobs.remove_at(index);
+	}
 }
 
 void MeshStorage::mesh_free(RID p_rid) {
@@ -527,6 +624,11 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 
 	// GodotNext: nextgi_rt_arena
 	_mesh_nextgi_rt_add_surface(mesh, s, new_surface);
+	// GodotNext: ps_mesh_sdf_atlas (#185). Generate a runtime SDF one frame
+	// later, once the mesh's surfaces have settled.
+	if (sdf_runtime_generate && !sdf_baked.has(p_mesh)) {
+		sdf_pending.insert(p_mesh);
+	}
 
 	for (MeshInstance *mi : mesh->instances) {
 		_mesh_instance_add_surface(mi, mesh, mesh->surface_count - 1);
@@ -864,6 +966,9 @@ RSE::BlendShapeMode MeshStorage::mesh_get_blend_shape_mode(RID p_mesh) const {
 }
 
 void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
+	// GodotNext: ps_mesh_sdf_atlas (#185). The baked field is stale and is
+	// released; runtime regeneration re-registers it.
+	sdf_atlas.unregister_mesh(p_mesh);
 	ERR_FAIL_COND(p_data.is_empty());
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
@@ -1199,6 +1304,8 @@ void MeshStorage::mesh_set_shadow_mesh(RID p_mesh, RID p_shadow_mesh) {
 void MeshStorage::mesh_clear(RID p_mesh) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	// GodotNext: ps_mesh_sdf_atlas (#185). No dangling pool slots.
+	sdf_atlas.unregister_mesh(p_mesh);
 
 	// Clear instance data before mesh data.
 	for (MeshInstance *mi : mesh->instances) {
@@ -1534,6 +1641,7 @@ void MeshStorage::mesh_instance_set_canvas_item_transform(RID p_mesh_instance, c
 }
 
 void MeshStorage::update_mesh_instances() {
+	_poll_sdf_jobs();
 	while (dirty_mesh_instance_weights.first()) {
 		MeshInstance *mi = dirty_mesh_instance_weights.first()->self();
 
