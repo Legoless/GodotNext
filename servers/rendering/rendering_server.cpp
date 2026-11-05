@@ -3864,7 +3864,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_shadow_mask", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/coverage_counter", false);
 	// GodotNext: nextgi_reference
-	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_mode", PROPERTY_HINT_ENUM, "Off,Full,Direct Only"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_mode", PROPERTY_HINT_ENUM, "Off,Full,Direct Only,Reflections Only"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_seed", PROPERTY_HINT_RANGE, "1,4096,1"), 1);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/gather_hit_radiance", PROPERTY_HINT_ENUM, "SRC,Reference"), 0);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/reference_readback", false);

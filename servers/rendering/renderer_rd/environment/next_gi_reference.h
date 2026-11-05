@@ -55,6 +55,9 @@ class NextGIReference {
 	struct ShaderState;
 	ShaderState *shader = nullptr;
 	RID accumulation;
+	// GodotNext: nextgi_reference_reflections (#60 step 6).
+	RID reflection_guides;
+	RID reflection_distance;
 	RID material_buffer;
 	RID light_buffer;
 	RID params_buffer;
@@ -96,6 +99,8 @@ public:
 	void composite(RID p_color);
 	void fill_info(Dictionary &r_info) const;
 	uint32_t get_samples() const { return samples; }
+	// Mean first-hit distance (r) and hit fraction (g) of the reflection-only reference.
+	RID get_reflection_distance() const { return reflection_distance; }
 	bool is_active() const;
 
 	NextGIReference() {}

@@ -330,6 +330,43 @@ vec3 nextgi_pt_radiance_at(vec3 position, vec3 normal, vec3 wo, uint material, i
 	return accumulated;
 }
 
+// GodotNext: nextgi_reference_reflections (#60 step 6). One GGX lobe sample for the
+// reflection-only reference; the out parameters feed the per-pixel hit distance and hit fraction.
+vec3 nextgi_pt_sample_ggx(vec3 p_normal, vec3 p_view, float p_roughness, inout uint p_rng) {
+	float alpha = max(p_roughness * p_roughness, 1e-3);
+	vec3 tangent;
+	vec3 bitangent;
+	nextgi_pt_basis(p_normal, tangent, bitangent);
+	float u1 = nextgi_pt_rnd(p_rng);
+	float u2 = nextgi_pt_rnd(p_rng);
+	float phi = 6.2831853 * u1;
+	float cos_theta = sqrt((1.0 - u2) / (1.0 + (alpha * alpha - 1.0) * u2));
+	float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
+	vec3 h = tangent * (sin_theta * cos(phi)) + bitangent * (sin_theta * sin(phi)) + p_normal * cos_theta;
+	return reflect(-p_view, normalize(h));
+}
+
+vec3 nextgi_pt_reflection(vec3 p_position, vec3 p_normal, vec3 p_view, uint p_material, inout uint p_rng, out float r_distance, out float r_hit) {
+	r_distance = 0.0;
+	r_hit = 0.0;
+	const float roughness = materials.data[p_material].emission_roughness.w;
+	vec3 direction = nextgi_pt_sample_ggx(p_normal, p_view, roughness, p_rng);
+	vec3 origin = p_position + p_normal * NEXTGI_PT_ORIGIN_OFFSET;
+	NextGIHit hit;
+	if (!nextgi_trace(origin, direction, 1.0e6, hit)) {
+		return ref_params.sky_color.rgb;
+	}
+	r_distance = hit.t;
+	r_hit = 1.0;
+	vec3 position;
+	vec3 normal;
+	uint material;
+	if (!nextgi_pt_hit_surface(hit, position, normal, material)) {
+		return ref_params.sky_color.rgb;
+	}
+	return nextgi_pt_radiance_at(position, normal, -direction, material, p_rng);
+}
+
 vec3 nextgi_pt_radiance(vec3 origin, vec3 wo, inout uint rng) {
 	NextGIHit hit;
 	if (!nextgi_trace(origin, -wo, 0.2, hit)) {

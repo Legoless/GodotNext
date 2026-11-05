@@ -137,7 +137,7 @@ void NextGIReference::free() {
 		shader = nullptr;
 	}
 	if (rd != nullptr) {
-		RID resources[5] = { accumulation, material_buffer, light_buffer, params_buffer, estimator_buffer };
+		RID resources[7] = { accumulation, reflection_guides, reflection_distance, material_buffer, light_buffer, params_buffer, estimator_buffer };
 		for (RID resource : resources) {
 			if (resource.is_valid()) {
 				rd->free_rid(resource);
@@ -148,6 +148,8 @@ void NextGIReference::free() {
 		}
 	}
 	accumulation = RID();
+	reflection_guides = RID();
+	reflection_distance = RID();
 	material_buffer = RID();
 	light_buffer = RID();
 	params_buffer = RID();
@@ -370,7 +372,7 @@ bool NextGIReference::prepare_estimator(const RenderDataRD *p_render_data, RID &
 	}
 	NextGI *next_gi = NextGI::get_singleton();
 	NextGIRefGPUParams params;
-	params.direct_only = int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")) == 2 ? 1u : 0u;
+	params.direct_only = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
 	params.seed = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_seed")));
 	params.light_count = light_count;
 	params.surface_count = surface_count;
@@ -435,6 +437,20 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 		format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 		accumulation = rd->texture_create(format, RD::TextureView());
 		rd->texture_clear(accumulation, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		if (reflection_guides.is_valid()) {
+			rd->free_rid(reflection_guides);
+		}
+		if (reflection_distance.is_valid()) {
+			rd->free_rid(reflection_distance);
+		}
+		RD::TextureFormat guide_format = format;
+		guide_format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+		reflection_guides = rd->texture_create(guide_format, RD::TextureView());
+		rd->texture_clear(reflection_guides, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		RD::TextureFormat distance_format = format;
+		distance_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+		reflection_distance = rd->texture_create(distance_format, RD::TextureView());
+		rd->texture_clear(reflection_distance, Color(0, 0, 0, 0), 0, 1, 0, 1);
 	}
 	uint32_t surface_count = 0;
 	uint32_t light_count = 0;
@@ -478,7 +494,7 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	params.width = width;
 	params.height = height;
 	params.sample_index = samples;
-	params.direct_only = int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")) == 2 ? 1u : 0u;
+	params.direct_only = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
 	params.seed = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_seed")));
 	params.light_count = light_count;
 	params.surface_count = surface_count;
@@ -511,7 +527,7 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	if (!surfaces.is_valid()) {
 		surfaces = dummy_buffer;
 	}
-	RD::Uniform uniforms[12] = {
+	RD::Uniform uniforms[14] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, accumulation),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, accumulation),
@@ -524,8 +540,10 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, chunks[2]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, chunks[3]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, params_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, reflection_guides),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, reflection_distance),
 	};
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 12), shader->shader.version_get_shader(shader->version, 0), 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 14), shader->shader.version_get_shader(shader->version, 0), 0);
 	if (!uniform_set.is_valid()) {
 		return;
 	}
@@ -646,7 +664,7 @@ void NextGIReference::composite(RID p_color) {
 			}
 		}
 	}
-	RD::Uniform uniforms[12] = {
+	RD::Uniform uniforms[14] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, accumulation),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_color),
@@ -659,8 +677,10 @@ void NextGIReference::composite(RID p_color) {
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, chunks[2]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, chunks[3]),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, params_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 12, reflection_guides),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 13, reflection_distance),
 	};
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 12), shader->shader.version_get_shader(shader->version, 1), 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 14), shader->shader.version_get_shader(shader->version, 1), 0);
 	if (!uniform_set.is_valid()) {
 		return;
 	}
