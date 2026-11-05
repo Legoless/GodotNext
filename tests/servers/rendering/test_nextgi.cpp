@@ -446,6 +446,8 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 // GodotNext: nextgi_rt_scene
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "core/math/random_number_generator.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 // GodotNext: nextgi_as_slots
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 // GodotNext: nextgi_src_cards
@@ -2400,6 +2402,96 @@ TEST_CASE("[NextGI][Skinned] Refit schedule and triangle budget") {
 	CHECK_EQ((flags >> 8) * RendererRD::NEXTGI_RT_ALIGNMENT, bind_offset);
 	CHECK_EQ(sizeof(RendererRD::NextGISurfaceRecord), size_t(16));
 	CHECK_EQ(sizeof(RendererRD::NextGIInstanceRecord), size_t(80));
+}
+
+// GodotNext: ps_mesh_sdf_atlas (#185).
+TEST_CASE("[NextGI][SDF] Brick pool allocation") {
+	NextGISDFPool pool(64);
+	const uint32_t capacity = pool.get_capacity();
+	CHECK_EQ(capacity, uint32_t(64 * 1024 * 1024 / NextGISDFPool::BRICK_BYTES));
+	CHECK_EQ(pool.get_used_count(), uint32_t(0));
+	CHECK_EQ(pool.get_free_count(), capacity);
+
+	LocalVector<uint32_t> first;
+	CHECK(pool.allocate(100, first));
+	CHECK_EQ(first.size(), uint32_t(100));
+	CHECK_EQ(pool.get_used_count(), uint32_t(100));
+	for (uint32_t index = 0; index < first.size(); index++) {
+		CHECK(pool.is_allocated(first[index]));
+		for (uint32_t other = index + 1; other < first.size(); other++) {
+			CHECK_NE(first[index], first[other]);
+		}
+	}
+
+	// All-or-nothing: an over-capacity request changes nothing.
+	const uint32_t free_before = pool.get_free_count();
+	LocalVector<uint32_t> too_many;
+	CHECK_FALSE(pool.allocate(free_before + 1, too_many));
+	CHECK_EQ(pool.get_free_count(), free_before);
+	CHECK(too_many.is_empty());
+
+	pool.free(first);
+	CHECK_EQ(pool.get_used_count(), uint32_t(0));
+	CHECK_EQ(pool.get_free_count(), capacity);
+}
+
+TEST_CASE("[NextGI][SDF] Brick pool churn over 10,000 operations") {
+	NextGISDFPool pool(64);
+	const uint32_t capacity = pool.get_capacity();
+	LocalVector<uint8_t> owned;
+	owned.resize(capacity);
+	memset(owned.ptr(), 0, capacity);
+	LocalVector<uint32_t> live_slots;
+	RandomNumberGenerator rng;
+	rng.set_seed(0x5DF5EED);
+	uint32_t live = 0;
+
+	for (int step = 0; step < 10000; step++) {
+		const bool want_allocate = live == 0 || rng.randf() < 0.55f;
+		if (want_allocate) {
+			const uint32_t count = 1 + rng.randi() % 8;
+			LocalVector<uint32_t> slots;
+			if (!pool.allocate(count, slots)) {
+				continue;
+			}
+			CHECK_EQ(slots.size(), count);
+			for (const uint32_t &slot : slots) {
+				CHECK_EQ(owned[slot], 0);
+				CHECK(pool.is_allocated(slot));
+				owned[slot] = 1;
+				live_slots.push_back(slot);
+				live++;
+			}
+		} else {
+			const uint32_t index = rng.randi() % live_slots.size();
+			const uint32_t slot = live_slots[index];
+			live_slots.remove_at(index);
+			pool.free_slot(slot);
+			CHECK_EQ(owned[slot], 1);
+			CHECK_FALSE(pool.is_allocated(slot));
+			owned[slot] = 0;
+			live--;
+		}
+	}
+
+	CHECK_EQ(pool.get_used_count(), live);
+	CHECK_EQ(pool.get_free_count(), capacity - live);
+
+	// Draining the pool returns every remaining slot exactly once.
+	LocalVector<uint32_t> rest;
+	CHECK(pool.allocate(pool.get_free_count(), rest));
+	CHECK_EQ(rest.size(), capacity - live);
+	for (const uint32_t &slot : rest) {
+		CHECK_EQ(owned[slot], 0);
+		owned[slot] = 1;
+	}
+	for (const uint32_t &slot : live_slots) {
+		CHECK(pool.is_allocated(slot));
+	}
+	pool.free(live_slots);
+	pool.free(rest);
+	CHECK_EQ(pool.get_used_count(), uint32_t(0));
+	CHECK_EQ(pool.get_free_count(), capacity);
 }
 
 // GodotNext: nextgi_quality_presets (#55).
