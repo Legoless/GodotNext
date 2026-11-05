@@ -36,6 +36,7 @@ const KitbashLayout = preload("res://scenes/swrt_kitbash/layout.gd")
 const RuntimeMeshSpec = preload("res://scenes/swrt_runtime_mesh/spec.gd")
 const SdfMeshes := preload("res://generators/sdf_mesh_library.gd")
 const P3Content := preload("res://generators/build_p3_content.gd")
+const PVContent := preload("res://generators/build_pv_content.gd")
 
 const Q1_PATCH_COUNT := 128
 
@@ -83,6 +84,8 @@ func _run() -> void:
 		await _process_job(job)
 	for failure in await P3Content.save_all(self):
 		_fail(failure)
+	for failure in await PVContent.save_all(self):
+		_fail(failure)
 	if _failures.is_empty():
 		print("build_all: all scenes built and verified.")
 		quit(0)
@@ -119,6 +122,9 @@ func _check_contracts() -> void:
 	var p3_err := String(P3Content.contract_error())
 	if not p3_err.is_empty():
 		_fail(p3_err)
+	var pv_err := String(PVContent.contract_error())
+	if not pv_err.is_empty():
+		_fail(pv_err)
 
 
 func _process_job(p_job: Dictionary) -> void:

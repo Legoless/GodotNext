@@ -1,0 +1,325 @@
+[gd_scene format=3]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_kprqg"]
+sky_top_color = Color(0.04, 0.05, 0.07, 1)
+sky_horizon_color = Color(0.12, 0.125, 0.14500001, 1)
+ground_bottom_color = Color(0.016, 0.020000001, 0.028, 0.4)
+ground_horizon_color = Color(0.04, 0.05, 0.07, 1)
+
+[sub_resource type="Sky" id="Sky_pil7i"]
+sky_material = SubResource("ProceduralSkyMaterial_kprqg")
+
+[sub_resource type="Environment" id="Environment_p43f2"]
+background_mode = 2
+sky = SubResource("Sky_pil7i")
+ambient_light_source = 3
+ambient_light_energy = 0.2
+reflected_light_source = 2
+volumetric_fog_enabled = true
+volumetric_fog_density = 0.08
+volumetric_fog_albedo = Color(0.9, 0.92, 0.95, 1)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jtp5r"]
+resource_name = "FogStone"
+diffuse_mode = 1
+albedo_color = Color(0.6799757, 0.672633, 0.6651851, 1)
+metallic_specular = 0.0
+roughness = 0.9
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ogq40"]
+material = SubResource("StandardMaterial3D_jtp5r")
+size = Vector2(44, 24)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jjrfq"]
+resource_name = "FogWall"
+diffuse_mode = 1
+albedo_color = Color(0.5657284, 0.57487106, 0.59261936, 1)
+metallic_specular = 0.0
+roughness = 0.88
+
+[sub_resource type="BoxMesh" id="BoxMesh_7c2a5"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(44, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_myno4"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_8wcov"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_oawpr"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_mom1y"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_s85an"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_npj7i"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_tu3yr"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_r7xql"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_wuide"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_1g8ny"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_2ny0b"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="BoxMesh" id="BoxMesh_6g18c"]
+material = SubResource("StandardMaterial3D_jjrfq")
+size = Vector3(6.5, 10, 0.5)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_juh61"]
+resource_name = "FogGlass"
+transparency = 1
+cull_mode = 2
+albedo_color = Color(0.55, 0.72, 0.85, 0.22)
+roughness = 0.05
+
+[sub_resource type="BoxMesh" id="BoxMesh_ohs67"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_oygfr"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_itxpd"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_r4cdy"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_rufn6"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_e28wh"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_6dlg0"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="BoxMesh" id="BoxMesh_lxt77"]
+material = SubResource("StandardMaterial3D_juh61")
+size = Vector3(2.4, 3.2, 0.08)
+
+[sub_resource type="Curve3D" id="Curve3D_efawl"]
+_data = {
+"points": PackedVector3Array(0, 0, 0, 0, 0, 0, -18, 3, 8, 0, 0, 0, 0, 0, 0, 0, 2.5, 3, 0, 0, 0, 0, 0, 0, 18, 3, 8),
+"tilts": PackedFloat32Array(0, 0, 0)
+}
+point_count = 3
+
+[node name="FogHall" type="Node3D"]
+metadata/seed = 86006194241
+metadata/window_spots = 8
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_p43f2")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.8574929, -0.39531276, 0.3292928, 0, 0.64003015, 0.7683498, -0.5144958, -0.65885454, 0.54882133, 0, 30, 0)
+light_energy = 0.7
+light_angular_distance = 0.5
+shadow_enabled = true
+directional_shadow_max_distance = 200.0
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+mesh = SubResource("PlaneMesh_ogq40")
+
+[node name="HallBack" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5, -10)
+mesh = SubResource("BoxMesh_7c2a5")
+
+[node name="HallSideA0" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 5, 10)
+mesh = SubResource("BoxMesh_myno4")
+
+[node name="HallSideB0" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -20, 5, -9.5)
+mesh = SubResource("BoxMesh_8wcov")
+
+[node name="HallSideA1" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 5, 10)
+mesh = SubResource("BoxMesh_oawpr")
+
+[node name="HallSideB1" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -12, 5, -9.5)
+mesh = SubResource("BoxMesh_mom1y")
+
+[node name="HallSideA2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 5, 10)
+mesh = SubResource("BoxMesh_s85an")
+
+[node name="HallSideB2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -4, 5, -9.5)
+mesh = SubResource("BoxMesh_npj7i")
+
+[node name="HallSideA3" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 5, 10)
+mesh = SubResource("BoxMesh_tu3yr")
+
+[node name="HallSideB3" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 4, 5, -9.5)
+mesh = SubResource("BoxMesh_r7xql")
+
+[node name="HallSideA4" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 5, 10)
+mesh = SubResource("BoxMesh_wuide")
+
+[node name="HallSideB4" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 5, -9.5)
+mesh = SubResource("BoxMesh_1g8ny")
+
+[node name="HallSideA5" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, 5, 10)
+mesh = SubResource("BoxMesh_2ny0b")
+
+[node name="HallSideB5" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 20, 5, -9.5)
+mesh = SubResource("BoxMesh_6g18c")
+
+[node name="Window0" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -18, 4.2, -9.7)
+mesh = SubResource("BoxMesh_ohs67")
+
+[node name="WindowSpot0" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, -18, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window1" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -13, 4.2, -9.7)
+mesh = SubResource("BoxMesh_oygfr")
+
+[node name="WindowSpot1" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, -13, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 4.2, -9.7)
+mesh = SubResource("BoxMesh_itxpd")
+
+[node name="WindowSpot2" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, -8, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window3" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -3, 4.2, -9.7)
+mesh = SubResource("BoxMesh_r4cdy")
+
+[node name="WindowSpot3" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, -3, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window4" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 2, 4.2, -9.7)
+mesh = SubResource("BoxMesh_rufn6")
+
+[node name="WindowSpot4" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, 2, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window5" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 4.2, -9.7)
+mesh = SubResource("BoxMesh_e28wh")
+
+[node name="WindowSpot5" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, 7, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window6" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 12, 4.2, -9.7)
+mesh = SubResource("BoxMesh_6dlg0")
+
+[node name="WindowSpot6" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, 12, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="Window7" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 17, 4.2, -9.7)
+mesh = SubResource("BoxMesh_lxt77")
+
+[node name="WindowSpot7" type="SpotLight3D" parent="."]
+transform = Transform3D(-1, 0, 0, 0, 0.97618705, 0.21693046, 0, 0.21693046, -0.97618705, 17, 6, -16)
+light_color = Color(1, 0.92, 0.78, 1)
+light_energy = 5.0
+shadow_enabled = true
+spot_range = 30.0
+spot_angle = 22.0
+
+[node name="cam_main" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9997705, -0.02142365, 0, 0.02142365, 0.9997705, 0, 2.2, 6)
+current = true
+fov = 65.0
+far = 80.0
+
+[node name="cam_windows" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.97014254, -0.24253564, 0, 0.24253564, 0.97014254, 0, 2, -2)
+fov = 70.0
+far = 60.0
+
+[node name="cam_side" type="Camera3D" parent="."]
+transform = Transform3D(0.4472136, 0.016663775, 0.89427197, 0, 0.99982643, -0.018630667, -0.8944272, 0.008331887, 0.44713598, 18, 2.5, 6)
+fov = 60.0
+far = 80.0
+
+[node name="cam_high" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9320047, 0.36244628, 0, -0.36244628, 0.9320047, 0, 9, 12)
+fov = 55.0
+far = 100.0
+
+[node name="FlightPath" type="Path3D" parent="."]
+curve = SubResource("Curve3D_efawl")
