@@ -30,6 +30,8 @@
 
 #include "renderer_compositor_rd.h"
 
+#include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
+
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
@@ -173,6 +175,8 @@ uint64_t RendererCompositorRD::frame = 1;
 
 void RendererCompositorRD::finalize() {
 	texture_storage->_tex_blit_shader_free();
+	memdelete(virtual_mesh_storage);
+	virtual_mesh_storage = nullptr;
 	memdelete(scene);
 	memdelete(canvas);
 	memdelete(fog);
@@ -393,6 +397,14 @@ RendererCompositorRD::RendererCompositorRD() {
 
 	ERR_FAIL_NULL_MSG(scene, "No RendererSceneRenderRDs available.");
 	scene->init();
+
+#ifdef FORWARD_RD_ENABLED
+	// GodotNext: nextgeo_instance_records (#75). Only Forward+ gets persistent
+	// NextGeo records; Mobile and GLES3 keep the RS calls as no-ops.
+	if (rendering_method != "mobile" && textures_per_stage >= 48) {
+		virtual_mesh_storage = memnew(RendererRD::VirtualMeshStorage);
+	}
+#endif
 }
 
 RendererCompositorRD::~RendererCompositorRD() {

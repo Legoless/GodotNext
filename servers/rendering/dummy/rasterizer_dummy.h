@@ -31,6 +31,7 @@
 #pragma once
 
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 #include "servers/rendering/rendering_server_enums.h"
 
 class RasterizerCanvasDummy;
@@ -45,6 +46,7 @@ class MeshStorage;
 class ParticlesStorage;
 class TextureStorage;
 class Utilities;
+class VirtualMeshStorage;
 } //namespace RendererDummy
 
 class RasterizerDummy : public RendererCompositor {
@@ -65,6 +67,7 @@ protected:
 	RendererDummy::ParticlesStorage *particles_storage = nullptr;
 	RendererDummy::TextureStorage *texture_storage = nullptr;
 	RendererDummy::Utilities *utilities = nullptr;
+	RendererDummy::VirtualMeshStorage *virtual_mesh_storage = nullptr;
 
 public:
 	RendererCanvasRender *get_canvas() override;
@@ -75,6 +78,7 @@ public:
 	RendererLightStorage *get_light_storage() override;
 	RendererMaterialStorage *get_material_storage() override;
 	RendererMeshStorage *get_mesh_storage() override;
+	RendererVirtualMeshStorage *get_virtual_mesh_storage() override;
 	RendererParticlesStorage *get_particles_storage() override;
 	RendererTextureStorage *get_texture_storage() override;
 	RendererUtilities *get_utilities() override;

@@ -33,6 +33,7 @@
 #include "servers/display/display_server_enums.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 
 class RendererCanvasRender;
 class RendererSceneRender;
@@ -70,6 +71,9 @@ public:
 	virtual RendererLightStorage *get_light_storage() = 0;
 	virtual RendererMaterialStorage *get_material_storage() = 0;
 	virtual RendererMeshStorage *get_mesh_storage() = 0;
+	// GodotNext: nextgeo_instance_records (#75). Backends without persistent
+	// NextGeo records return nullptr and the RS calls become no-ops.
+	virtual RendererVirtualMeshStorage *get_virtual_mesh_storage() { return nullptr; }
 	virtual RendererParticlesStorage *get_particles_storage() = 0;
 	virtual RendererTextureStorage *get_texture_storage() = 0;
 	virtual RendererUtilities *get_utilities() = 0;

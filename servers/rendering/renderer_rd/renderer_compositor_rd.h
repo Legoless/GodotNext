@@ -32,6 +32,8 @@
 
 #include "core/io/image.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/renderer_canvas_render_rd.h"
@@ -60,6 +62,8 @@ protected:
 	RendererRD::ParticlesStorage *particles_storage = nullptr;
 	RendererRD::TextureStorage *texture_storage = nullptr;
 	RendererRD::Utilities *utilities = nullptr;
+	// GodotNext: nextgeo_instance_records (#75).
+	RendererRD::VirtualMeshStorage *virtual_mesh_storage = nullptr;
 
 	enum BlitMode {
 		BLIT_MODE_NORMAL,
@@ -122,6 +126,7 @@ public:
 	virtual RendererLightStorage *get_light_storage() override { return light_storage; }
 	virtual RendererMaterialStorage *get_material_storage() override { return material_storage; }
 	virtual RendererMeshStorage *get_mesh_storage() override { return mesh_storage; }
+	virtual RendererVirtualMeshStorage *get_virtual_mesh_storage() override { return virtual_mesh_storage; }
 	virtual RendererParticlesStorage *get_particles_storage() override { return particles_storage; }
 	virtual RendererTextureStorage *get_texture_storage() override { return texture_storage; }
 	virtual RendererGI *get_gi() override {

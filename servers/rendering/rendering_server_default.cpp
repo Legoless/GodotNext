@@ -255,6 +255,7 @@ void RenderingServerDefault::_init() {
 	RSG::light_storage = RSG::rasterizer->get_light_storage();
 	RSG::material_storage = RSG::rasterizer->get_material_storage();
 	RSG::mesh_storage = RSG::rasterizer->get_mesh_storage();
+	RSG::virtual_mesh_storage = RSG::rasterizer->get_virtual_mesh_storage();
 	RSG::particles_storage = RSG::rasterizer->get_particles_storage();
 	RSG::texture_storage = RSG::rasterizer->get_texture_storage();
 	RSG::gi = RSG::rasterizer->get_gi();

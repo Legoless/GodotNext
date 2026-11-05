@@ -1620,6 +1620,9 @@ void ArrayMesh::_create_if_empty() const {
 		RS::get_singleton()->mesh_set_blend_shape_mode(mesh, (RSE::BlendShapeMode)blend_shape_mode);
 		RS::get_singleton()->mesh_set_blend_shape_count(mesh, blend_shapes.size());
 		RS::get_singleton()->mesh_set_path(mesh, get_path());
+#ifndef _3D_DISABLED
+		_push_virtual_geometry_to_rs();
+#endif
 	}
 }
 
@@ -1729,6 +1732,9 @@ void ArrayMesh::_set_surfaces(const Array &p_surfaces) {
 		mesh = RS::get_singleton()->mesh_create_from_surfaces(surface_data, blend_shapes.size());
 		RS::get_singleton()->mesh_set_blend_shape_mode(mesh, (RSE::BlendShapeMode)blend_shape_mode);
 		RS::get_singleton()->mesh_set_path(mesh, get_path());
+#ifndef _3D_DISABLED
+		_push_virtual_geometry_to_rs();
+#endif
 	}
 
 	surfaces.clear();
@@ -2379,6 +2385,35 @@ void ArrayMesh::set_virtual_geometry(const Ref<VirtualGeometryData> &p_data) {
 	}
 	virtual_geometry = p_data;
 	emit_changed();
+	if (mesh.is_null()) {
+		// The RS mesh RID is created with the first surface; _create_if_empty()
+		// and mesh_create_from_surfaces() re-run the push, so a VGD set before
+		// the first surface is still delivered.
+		return;
+	}
+	_push_virtual_geometry_to_rs();
+}
+
+void ArrayMesh::_push_virtual_geometry_to_rs() const {
+	if (mesh.is_null()) {
+		return;
+	}
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	if (virtual_geometry.is_valid()) {
+		desc.dag_header = virtual_geometry->get_dag_header();
+		const TypedArray<PackedByteArray> pages = virtual_geometry->get_root_pages();
+		for (int index = 0; index < pages.size(); index++) {
+			desc.root_pages.push_back(pages[index]);
+		}
+		desc.ngm_path = virtual_geometry->get_ngm_path();
+		const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
+		for (int index = 0; index < eligibility.size() && index < 32; index++) {
+			if (eligibility[index] == 1) {
+				desc.eligible_surface_mask |= 1u << index;
+			}
+		}
+	}
+	RS::get_singleton()->mesh_set_virtual_geometry(mesh, desc);
 }
 
 Ref<VirtualGeometryData> ArrayMesh::get_virtual_geometry() const {

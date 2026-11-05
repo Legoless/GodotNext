@@ -247,6 +247,10 @@ public:
 	virtual void mesh_surface_remove(RID p_mesh, int p_surface) = 0;
 	virtual void mesh_clear(RID p_mesh) = 0;
 
+	// GodotNext: nextgeo_instance_records (#75). C++ only; no-ops on Mobile/GLES3.
+	virtual void mesh_set_virtual_geometry(RID p_mesh, const RenderingServerTypes::VirtualGeometryDesc &p_desc) = 0;
+	virtual void mesh_clear_virtual_geometry(RID p_mesh, uint32_t p_reason) = 0;
+
 	virtual RID mesh_surface_get_vertex_buffer_rd_rid(RID p_mesh, int p_surface) const = 0;
 	virtual RID mesh_surface_get_attribute_buffer_rd_rid(RID p_mesh, int p_surface) const = 0;
 	virtual RID mesh_surface_get_skin_buffer_rd_rid(RID p_mesh, int p_surface) const = 0;

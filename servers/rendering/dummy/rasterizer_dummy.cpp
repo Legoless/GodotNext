@@ -41,6 +41,7 @@
 #include "servers/rendering/dummy/storage/particles_storage.h"
 #include "servers/rendering/dummy/storage/texture_storage.h"
 #include "servers/rendering/dummy/storage/utilities.h"
+#include "servers/rendering/dummy/storage/virtual_mesh_storage.h"
 
 void RasterizerDummy::end_frame(bool p_present) {
 	if (p_present) {
@@ -70,6 +71,10 @@ RendererMaterialStorage *RasterizerDummy::get_material_storage() {
 RendererMeshStorage *RasterizerDummy::get_mesh_storage() {
 	return mesh_storage;
 }
+
+RendererVirtualMeshStorage *RasterizerDummy::get_virtual_mesh_storage() {
+	return virtual_mesh_storage;
+}
 RendererParticlesStorage *RasterizerDummy::get_particles_storage() {
 	return particles_storage;
 }
@@ -92,6 +97,7 @@ RasterizerDummy::RasterizerDummy() {
 	particles_storage = memnew(RendererDummy::ParticlesStorage);
 	texture_storage = memnew(RendererDummy::TextureStorage);
 	utilities = memnew(RendererDummy::Utilities);
+	virtual_mesh_storage = memnew(RendererDummy::VirtualMeshStorage);
 }
 
 RasterizerDummy::~RasterizerDummy() {
@@ -106,4 +112,5 @@ RasterizerDummy::~RasterizerDummy() {
 	memdelete(particles_storage);
 	memdelete(texture_storage);
 	memdelete(utilities);
+	memdelete(virtual_mesh_storage);
 }

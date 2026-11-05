@@ -337,6 +337,7 @@ private:
 	void _detach_virtual_geometry() {}
 #else
 	void _detach_virtual_geometry();
+	void _push_virtual_geometry_to_rs() const;
 	Ref<VirtualGeometryData> virtual_geometry;
 #endif
 	// GodotNext: mesh_sdf_detach

@@ -39,6 +39,7 @@
 #include "servers/rendering/storage/particles_storage.h"
 #include "servers/rendering/storage/texture_storage.h"
 #include "servers/rendering/storage/utilities.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 
 class RendererCompositor;
 class RendererCanvasCull;
@@ -54,6 +55,7 @@ public:
 	static inline RendererLightStorage *light_storage = nullptr;
 	static inline RendererMaterialStorage *material_storage = nullptr;
 	static inline RendererMeshStorage *mesh_storage = nullptr;
+	static inline RendererVirtualMeshStorage *virtual_mesh_storage = nullptr;
 	static inline RendererParticlesStorage *particles_storage = nullptr;
 	static inline RendererTextureStorage *texture_storage = nullptr;
 	static inline RendererGI *gi = nullptr;

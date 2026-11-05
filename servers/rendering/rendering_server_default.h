@@ -420,6 +420,33 @@ public:
 
 	FUNC2(mesh_set_shadow_mesh, RID, RID)
 
+	// GodotNext: nextgeo_instance_records (#75). Early-return on backends
+	// without a virtual mesh storage (Mobile, GLES3).
+	virtual void mesh_set_virtual_geometry(RID p_mesh, const RenderingServerTypes::VirtualGeometryDesc &p_desc) override {
+		if (RSG::virtual_mesh_storage == nullptr) {
+			return;
+		}
+		WRITE_ACTION
+		if (ASYNC_COND_PUSH) {
+			command_queue.push(RSG::virtual_mesh_storage, &RendererVirtualMeshStorage::mesh_set_virtual_geometry, p_mesh, p_desc);
+		} else {
+			command_queue.flush_if_pending();
+			RSG::virtual_mesh_storage->mesh_set_virtual_geometry(p_mesh, p_desc);
+		}
+	}
+	virtual void mesh_clear_virtual_geometry(RID p_mesh, uint32_t p_reason) override {
+		if (RSG::virtual_mesh_storage == nullptr) {
+			return;
+		}
+		WRITE_ACTION
+		if (ASYNC_COND_PUSH) {
+			command_queue.push(RSG::virtual_mesh_storage, &RendererVirtualMeshStorage::mesh_clear_virtual_geometry, p_mesh, p_reason);
+		} else {
+			command_queue.flush_if_pending();
+			RSG::virtual_mesh_storage->mesh_clear_virtual_geometry(p_mesh, p_reason);
+		}
+	}
+
 	FUNC2(mesh_surface_remove, RID, int)
 	FUNC1(mesh_clear, RID)
 
