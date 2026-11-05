@@ -4,6 +4,8 @@
 
 #VERSION_DEFINES
 
+layout(constant_id = 0) const bool sc_write_rt_arena = false;
+
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 0, binding = 1, std430) buffer restrict writeonly DstVertexData {
@@ -31,6 +33,11 @@ layout(set = 1, binding = 2, std430) buffer restrict readonly BlendShapeData {
 }
 src_blend_shapes;
 
+layout(set = 3, binding = 0, std430) buffer restrict writeonly RTArena {
+	float data[];
+}
+rt_arena;
+
 layout(set = 2, binding = 0, std430) buffer restrict readonly SkeletonData {
 	vec4 data[];
 }
@@ -50,7 +57,7 @@ layout(push_constant, std430) uniform Params {
 	uint blend_shape_count;
 	bool normalized_blend_shapes;
 	uint normal_tangent_stride;
-	uint pad1;
+	uint rt_arena_offset; // Floats within the slot's chunk; #59.
 
 	vec2 skeleton_transform_x;
 	vec2 skeleton_transform_y;
@@ -297,6 +304,14 @@ void main() {
 	dst_vertices.data[dst_offset + 0] = uvertex.x;
 	dst_vertices.data[dst_offset + 1] = uvertex.y;
 	dst_vertices.data[dst_offset + 2] = uvertex.z;
+
+	// GodotNext: nextgi_skinned_actors (#59). Posed positions for the instance's RT-arena slot.
+	if (sc_write_rt_arena) {
+		uint arena_offset = params.rt_arena_offset + index * 3u;
+		rt_arena.data[arena_offset + 0] = vertex.x;
+		rt_arena.data[arena_offset + 1] = vertex.y;
+		rt_arena.data[arena_offset + 2] = vertex.z;
+	}
 
 	uint dst_normal = params.vertex_count * params.vertex_stride + index * params.normal_tangent_stride;
 

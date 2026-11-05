@@ -178,6 +178,12 @@ MeshStorage::MeshStorage() {
 		for (int i = 0; i < SkeletonShader::SHADER_MODE_MAX; i++) {
 			skeleton_shader.version_shader[i] = skeleton_shader.shader.version_get_shader(skeleton_shader.version, i);
 			skeleton_shader.pipeline[i] = RD::get_singleton()->compute_pipeline_create(skeleton_shader.version_shader[i]);
+			// GodotNext: nextgi_skinned_actors (#59). Same shader, with the posed RT-arena write enabled.
+			RD::PipelineSpecializationConstant write_arena;
+			write_arena.type = RD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL;
+			write_arena.constant_id = 0;
+			write_arena.bool_value = true;
+			skeleton_shader.pipeline_rt[i] = RD::get_singleton()->compute_pipeline_create(skeleton_shader.version_shader[i], Vector<RD::PipelineSpecializationConstant>({ write_arena }));
 		}
 
 		{
@@ -1489,8 +1495,21 @@ void MeshStorage::update_mesh_instances() {
 			}
 
 			bool array_is_2d = mi->mesh->surfaces[i]->format & RSE::ARRAY_FLAG_USE_2D_VERTICES;
-
-			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, skeleton_shader.pipeline[array_is_2d ? SkeletonShader::SHADER_MODE_2D : SkeletonShader::SHADER_MODE_3D]);
+			const bool write_rt_arena = !array_is_2d && mi->surfaces[i].rt_arena_chunk != UINT32_MAX;
+			const int mode = array_is_2d ? SkeletonShader::SHADER_MODE_2D : SkeletonShader::SHADER_MODE_3D;
+			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, write_rt_arena ? skeleton_shader.pipeline_rt[mode] : skeleton_shader.pipeline[mode]);
+			{
+				// GodotNext: nextgi_skinned_actors (#59). Set 3 is the posed arena slot's chunk.
+				RD::Uniform arena_uniform;
+				arena_uniform.binding = 0;
+				arena_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				RID chunk_buffer = write_rt_arena ? mesh_nextgi_rt_get_chunk_buffer(mi->surfaces[i].rt_arena_chunk) : default_rd_storage_buffer;
+				arena_uniform.append_id(chunk_buffer.is_valid() ? chunk_buffer : default_rd_storage_buffer);
+				RID arena_set = RD::get_singleton()->uniform_set_create(Vector<RD::Uniform>({ arena_uniform }), skeleton_shader.version_shader[mode], SkeletonShader::UNIFORM_SET_RT_ARENA);
+				if (arena_set.is_valid()) {
+					RD::get_singleton()->compute_list_bind_uniform_set(compute_list, arena_set, SkeletonShader::UNIFORM_SET_RT_ARENA);
+				}
+			}
 
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mi_surface_uniform_set, SkeletonShader::UNIFORM_SET_INSTANCE);
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, mi->mesh->surfaces[i]->uniform_set, SkeletonShader::UNIFORM_SET_SURFACE);
@@ -1535,7 +1554,7 @@ void MeshStorage::update_mesh_instances() {
 
 			push_constant.blend_shape_count = mi->mesh->blend_shape_count;
 			push_constant.normalized_blend_shapes = mi->mesh->blend_shape_mode == RSE::BLEND_SHAPE_MODE_NORMALIZED;
-			push_constant.pad1 = 0;
+			push_constant.rt_arena_offset = write_rt_arena ? mi->surfaces[i].rt_arena_offset : 0u;
 
 			RD::get_singleton()->compute_list_set_push_constant(compute_list, &push_constant, sizeof(SkeletonShader::PushConstant));
 

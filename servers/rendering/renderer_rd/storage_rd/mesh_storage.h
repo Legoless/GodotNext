@@ -233,6 +233,9 @@ private:
 		struct Surface {
 			RID vertex_buffer[2];
 			RID uniform_set[2];
+			// GodotNext: nextgi_skinned_actors (#59). Per-instance posed slot (UINT32_MAX = none).
+			uint32_t rt_arena_chunk = UINT32_MAX;
+			uint32_t rt_arena_offset = 0;
 			uint32_t current_buffer = 0;
 			uint32_t previous_buffer = 0;
 			uint64_t last_change = 0;
@@ -360,7 +363,7 @@ private:
 			uint32_t blend_shape_count;
 			uint32_t normalized_blend_shapes;
 			uint32_t normal_tangent_stride;
-			uint32_t pad1;
+			uint32_t rt_arena_offset;
 			float skeleton_transform_x[2];
 			float skeleton_transform_y[2];
 
@@ -375,6 +378,7 @@ private:
 			UNIFORM_SET_INSTANCE = 0,
 			UNIFORM_SET_SURFACE = 1,
 			UNIFORM_SET_SKELETON = 2,
+			UNIFORM_SET_RT_ARENA = 3,
 		};
 		enum {
 			SHADER_MODE_2D,
@@ -386,6 +390,8 @@ private:
 		RID version;
 		RID version_shader[SHADER_MODE_MAX];
 		RID pipeline[SHADER_MODE_MAX];
+		// GodotNext: nextgi_skinned_actors (#59). Variant that also writes the posed slot.
+		RID pipeline_rt[SHADER_MODE_MAX];
 
 		RID default_skeleton_uniform_set;
 	} skeleton_shader;
