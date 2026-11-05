@@ -278,6 +278,8 @@ private:
 
 	// When changing any of these enums, remember to change the corresponding enums in the shader files as well.
 	enum {
+		// GodotNext: nextgi_alpha_policy (#61). Alpha instances that shade from NextGI.
+		INSTANCE_DATA_FLAG_USE_NEXTGI_TRANSLUCENCY = 1 << 0,
 		INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT = 1 << 2,
 		INSTANCE_DATA_FLAGS_DYNAMIC = 1 << 3,
 		INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE = 1 << 4,
@@ -809,6 +811,9 @@ private:
 
 	/* Debug */
 	void _debug_draw_cluster(Ref<RenderSceneBuffersRD> p_render_buffers);
+
+	// GodotNext: nextgi_alpha_policy (#61). True while the NextGI frame block runs this frame.
+	bool nextgi_active = false;
 
 protected:
 	/* setup */

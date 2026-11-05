@@ -900,6 +900,11 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 		}
 
 		instance_data.flags = inst->flags_cache;
+		// GodotNext: nextgi_alpha_policy (#61). Transparent instances take their ambient from the
+		// translucency path instead of the opaque GI buffers.
+		if (p_render_list == RENDER_LIST_ALPHA && nextgi_active && !(instance_data.flags & INSTANCE_DATA_FLAG_USE_LIGHTMAP)) {
+			instance_data.flags |= INSTANCE_DATA_FLAG_USE_NEXTGI_TRANSLUCENCY;
+		}
 		instance_data.gi_offset = inst->gi_offset_cache;
 		instance_data.layer_mask = inst->layer_mask;
 		instance_data.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
@@ -2044,6 +2049,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 			// GodotNext: nextgi_frame_block
 			using_nextgi = nextgi_view;
+			nextgi_active = using_nextgi;
 			if (using_nextgi) {
 				using_sdfgi = false;
 				using_voxelgi = false;
