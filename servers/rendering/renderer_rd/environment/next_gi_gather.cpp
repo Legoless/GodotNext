@@ -782,7 +782,7 @@ void NextGIGather::_read_counters() {
 	nextgi_coverage_rays = got.coverage_rays;
 }
 
-void NextGIGather::gather(RenderDataRD *p_render_data) {
+void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	last_rays = 0;
 	if (NextGI *next_gi = NextGI::get_singleton()) {
 		const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
@@ -794,7 +794,7 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 	last_uncovered = 0;
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	LocalVector<uint32_t> feedback;
-	if (relight != nullptr) {
+	if (p_diffuse && relight != nullptr) {
 		for (const NextGIRelight::ScheduledPage &page : relight->get_scheduled_pages()) {
 			feedback.push_back(page.indirect_x | (page.indirect_y << 16));
 			feedback.push_back(page.record_index);
@@ -825,14 +825,15 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 	rd->buffer_update(clamp_totals_buffer, 0, sizeof(clamp_zero), clamp_zero);
 	const uint32_t groups_x = MAX((nextgi_gather_probe_count_axis(last_screen_w) + 7u) / 8u, 1u);
 	const uint32_t groups_y = MAX((nextgi_gather_probe_count_axis(last_screen_h) + 7u) / 8u, 1u);
-	{
+	if (p_diffuse) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[hit_radiance_reference ? 4 : 0]);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
+		diffuse_dispatches++;
 	}
-	if (feedback_count > 0) {
+	if (p_diffuse && feedback_count > 0) {
 		const uint32_t feedback_groups_y = MAX((feedback_count + 63u) / 64u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[2]);
@@ -840,7 +841,7 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 		rd->compute_list_dispatch(list, 1, feedback_groups_y, 1);
 		rd->compute_list_end();
 	}
-	if (bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/coverage_counter"))) {
+	if (p_diffuse && bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/coverage_counter"))) {
 		const uint32_t half_x = MAX((last_screen_w / 2u + 7u) / 8u, 1u);
 		const uint32_t half_y = MAX((last_screen_h / 2u + 7u) / 8u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
@@ -852,7 +853,9 @@ void NextGIGather::gather(RenderDataRD *p_render_data) {
 	// GodotNext: nextgi_denoise
 	// Spatial denoise of the fresh probe texels, between the gather and the ambient integration.
 	// The temporal pass replaces the gather's own history blend when it lands (#53 step 4).
-	_denoise_probes();
+	if (p_diffuse) {
+		_denoise_probes();
+	}
 	// GodotNext: nextgi_reflect (#60). One specular trace per half-resolution pixel.
 	if (reflect_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
 		ReflectCountersGPU zero_reflect;
@@ -1161,6 +1164,8 @@ String NextGIGather::build_shader_source(int p_variant) {
 }
 
 void NextGIGather::fill_info(Dictionary &r_info) const {
+	r_info["gather_mode"] = NextGI::is_reflections_only() ? "reflections_only" : "gi_and_reflections";
+	r_info["gather_diffuse_dispatches"] = int64_t(diffuse_dispatches);
 	r_info["src_gather_rays"] = int64_t(last_rays);
 	r_info["src_gather_misses"] = int64_t(last_misses);
 	r_info["src_gather_history_resets"] = int64_t(last_resets);

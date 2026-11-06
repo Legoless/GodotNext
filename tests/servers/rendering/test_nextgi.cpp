@@ -2745,3 +2745,12 @@ TEST_CASE("[NextGI] Max roughness to trace caps the quality preset") {
 	CHECK(Math::is_equal_approx(NextGI::nextgi_effective_max_roughness(0.4f, 2.0f), 0.4f));
 	CHECK(Math::is_equal_approx(NextGI::nextgi_effective_max_roughness(0.4f, -1.0f), 0.0f));
 }
+
+TEST_CASE("[NextGI] Reflections-only mode resolves from the setting") {
+	using namespace RendererRD;
+	CHECK(NextGI::nextgi_mode_from_setting(0) == NextGI::MODE_GI_AND_REFLECTIONS);
+	CHECK(NextGI::nextgi_mode_from_setting(1) == NextGI::MODE_REFLECTIONS_ONLY);
+	CHECK(NextGI::nextgi_mode_from_setting(99) == NextGI::MODE_GI_AND_REFLECTIONS);
+	CHECK_EQ(String(NextGI::get_mode_name(NextGI::MODE_GI_AND_REFLECTIONS)), String("gi_and_reflections"));
+	CHECK_EQ(String(NextGI::get_mode_name(NextGI::MODE_REFLECTIONS_ONLY)), String("reflections_only"));
+}

@@ -101,6 +101,18 @@ public:
 		HARDWARE_RAY_TRACING_MAX,
 	};
 
+	// rendering/global_illumination/nextgi/mode (#132).
+	enum Mode {
+		MODE_GI_AND_REFLECTIONS,
+		MODE_REFLECTIONS_ONLY,
+		MODE_MAX,
+	};
+	static Mode nextgi_mode_from_setting(int p_setting) {
+		return p_setting == MODE_REFLECTIONS_ONLY ? MODE_REFLECTIONS_ONLY : MODE_GI_AND_REFLECTIONS;
+	}
+	static const char *get_mode_name(Mode p_mode);
+	static bool is_reflections_only();
+
 	// rendering/global_illumination/nextgi/quality.
 	enum Quality {
 		QUALITY_AUTO,

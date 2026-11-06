@@ -3147,6 +3147,9 @@
 			Whether NextGI may use hardware ray tracing. [b]Auto[/b] uses it where the rendering device supports hardware-accelerated ray queries. [b]Off[/b] always uses the fallback, with the reason [code]SETTING_OFF[/code]. [b]Force[/b] also uses ray queries on devices that are not known to be hardware accelerated, including CPU devices, and ignores a latched hardware ray-tracing fault. On a device without ray queries, [b]Force[/b] falls back with one warning.
 			[b]Note:[/b] To change this at runtime, call [method RenderingServer.nextgi_set_hardware_ray_tracing].
 		</member>
+		<member name="rendering/global_illumination/nextgi/mode" type="int" setter="" getter="" default="0">
+			Selects what NextGI renders. [code]GI and reflections[/code] runs the diffuse gather, integration and reflections. [code]Reflections only[/code] skips the diffuse gather and integration, keeping the LightmapGI or VoxelGI ambient writer, while still tracing and denoising reflections from the lit SRC.
+		</member>
 		<member name="rendering/global_illumination/nextgi/quality" type="int" setter="" getter="" default="0">
 			The NextGI quality preset. [b]Auto[/b] runs the startup benchmark and picks [b]High[/b] at 5 ms or less, else [b]Medium[/b]. [b]Medium[/b] uses half the High diffuse ray budget with reflections at quarter resolution up to roughness 0.25; [b]High[/b] is the P1 budget with reflections at half resolution up to 0.4; [b]Epic[/b] traces four times the High diffuse rays with full-resolution reflections and doubled SRC atlases.
 			[b]Note:[/b] This property is only read when the project starts.

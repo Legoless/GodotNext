@@ -383,8 +383,17 @@ void NextGI::notify_ray_query_shader_initialized() {
 	ray_query_shaders_initialized++;
 }
 
+const char *NextGI::get_mode_name(Mode p_mode) {
+	return p_mode == MODE_REFLECTIONS_ONLY ? "reflections_only" : "gi_and_reflections";
+}
+
+bool NextGI::is_reflections_only() {
+	return nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))) == MODE_REFLECTIONS_ONLY;
+}
+
 Dictionary NextGI::get_status() const {
 	Dictionary status;
+	status["mode"] = get_mode_name(nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))));
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
 	status["tier"] = get_tier_name(result.tier);
 	status["reason"] = get_reason_name(result.reason);
@@ -683,7 +692,7 @@ RID NextGI::get_denoise_debug_texture(DebugViewId p_view) const {
 
 void NextGI::_gather(RenderDataRD *p_render_data) {
 	if (gather != nullptr) {
-		gather->gather(p_render_data);
+		gather->gather(p_render_data, !is_reflections_only());
 	}
 }
 
@@ -869,8 +878,11 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			_gather(p_render_data);
 		} else if (slot == PASS_SLOT_INTEGRATION) {
 			// Integration (§2.1 line 7) writes RB_TEX_AMBIENT from the gather probes. Reflection stays cleared.
-			_clear_gi_buffers(rb.ptr());
-			_integrate(p_render_data);
+			// Reflections-only keeps the ambient writer (LightmapGI/VoxelGI) untouched.
+			if (!is_reflections_only()) {
+				_clear_gi_buffers(rb.ptr());
+				_integrate(p_render_data);
+			}
 		}
 		rd->draw_command_end_label();
 	}

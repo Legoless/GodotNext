@@ -137,6 +137,7 @@ class NextGIGather {
 	uint32_t probe_h = 0;
 	uint32_t frame = 0;
 	uint32_t last_rays = 0;
+	uint32_t diffuse_dispatches = 0;
 	uint32_t last_misses = 0;
 	uint32_t last_resets = 0;
 	uint32_t last_uncovered = 0;
@@ -173,7 +174,7 @@ public:
 
 	void init();
 	void free_resources();
-	void gather(RenderDataRD *p_render_data);
+	void gather(RenderDataRD *p_render_data, bool p_diffuse = true);
 	void integrate(RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;
 	// #53 debug views: 10 raw, 11 variance, 12 history, 13 rejected (NextGI::DebugViewId order).
