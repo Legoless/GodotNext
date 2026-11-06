@@ -35,6 +35,7 @@
 #include "scene/main/scene_tree.h"
 #include "scene/main/window.h"
 #include "scene/resources/3d/primitive_meshes.h"
+#include "scene/resources/surface_tool.h"
 #include "tests/test_macros.h"
 
 namespace TestGridMap {
@@ -117,6 +118,30 @@ TEST_CASE("[SceneTree][GridMap][MeshLibrary] Octant querying") {
 	SceneTree::get_singleton()->get_root()->remove_child(grid_map);
 
 	memdelete(grid_map);
+}
+
+
+// GodotNext: nextgeo_exclusive_dispatch (#79). make_baked_meshes commits fresh
+// SurfaceTool meshes, so the baked output carries no VGD and routes legacy by
+// construction (plan §7.5 and §6.3 BAKED_GRIDMAP). The GridMap bake itself
+// needs a live World3D, so this asserts the construction invariant headlessly.
+TEST_CASE("[NextGeo][Routing] SurfaceTool commit carries no virtual geometry") {
+	Ref<SurfaceTool> surface_tool;
+	surface_tool.instantiate();
+	surface_tool->begin(Mesh::PRIMITIVE_TRIANGLES);
+	surface_tool->set_normal(Vector3(0, 0, 1));
+	surface_tool->add_vertex(Vector3(0, 0, 0));
+	surface_tool->set_normal(Vector3(0, 0, 1));
+	surface_tool->add_vertex(Vector3(1, 0, 0));
+	surface_tool->set_normal(Vector3(0, 0, 1));
+	surface_tool->add_vertex(Vector3(0, 1, 0));
+
+	Ref<ArrayMesh> mesh;
+	mesh.instantiate();
+	surface_tool->commit(mesh);
+	CHECK(mesh.is_valid());
+	CHECK_EQ(mesh->get_surface_count(), 1);
+	CHECK(mesh->get_virtual_geometry().is_null());
 }
 
 } // namespace TestGridMap
