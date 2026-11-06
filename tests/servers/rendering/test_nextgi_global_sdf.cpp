@@ -36,6 +36,7 @@ TEST_FORCE_LINK(test_nextgi_global_sdf)
 #include "core/math/random_number_generator.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
 
 namespace {
 
@@ -148,4 +149,73 @@ TEST_CASE("[NextGI][GlobalSDF] Dirty bricks cover the old and new bounds") {
 	}
 	CHECK(covers_old);
 	CHECK(covers_new);
+}
+
+TEST_CASE("[NextGI][GlobalSDF] GPU brick pool and page tables") {
+	NextGIGlobalSDFGPU gpu(3);
+	CHECK_EQ(gpu.get_capacity(), uint32_t(3));
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(0));
+	CHECK_EQ(gpu.get_page_table(0).size(), int(NextGIGlobalSDF::BRICKS_PER_LEVEL));
+
+	float voxels[NextGIGlobalSDF::BRICK_VOXELS];
+	for (uint32_t index = 0; index < NextGIGlobalSDF::BRICK_VOXELS; index++) {
+		voxels[index] = float(index) / 512.0f;
+	}
+	const Vector3i brick_a(1, 2, 3);
+	const Vector3i brick_b(2, 2, 3);
+	REQUIRE(gpu.upload_brick(0, brick_a, voxels));
+	CHECK(gpu.has_brick(0, brick_a));
+	const int32_t slot_a = gpu.get_slot(0, brick_a);
+	CHECK(slot_a >= 0);
+	CHECK(gpu.has_brick(0, brick_a)); // The page table entry points at the slot.
+	CHECK(gpu.get_page_table(0)[1 + 2 * 16 + 3 * 256] == slot_a);
+
+	// Half-float round-trip for every voxel.
+	for (int z = 0; z < 8; z++) {
+		for (int y = 0; y < 8; y++) {
+			for (int x = 0; x < 8; x++) {
+				const uint32_t index = uint32_t(x + y * 8 + z * 64);
+				CHECK(Math::is_equal_approx(gpu.get_voxel(0, brick_a, Vector3i(x, y, z)), float(index) / 512.0f));
+			}
+		}
+	}
+
+	REQUIRE(gpu.upload_brick(0, brick_b, voxels));
+	CHECK(gpu.get_slot(0, brick_b) != slot_a);
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(2));
+
+	// The same brick coordinate in another level gets its own slot.
+	REQUIRE(gpu.upload_brick(1, brick_a, voxels));
+	CHECK(gpu.get_slot(1, brick_a) != slot_a);
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(3));
+
+	// Re-uploading an existing brick keeps its slot.
+	REQUIRE(gpu.upload_brick(0, brick_a, voxels));
+	CHECK_EQ(gpu.get_slot(0, brick_a), slot_a);
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(3));
+
+	// The fourth allocation exhausts the pool.
+	CHECK_FALSE(gpu.upload_brick(0, Vector3i(3, 2, 3), voxels));
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(3));
+
+	gpu.release_level(0);
+	CHECK_FALSE(gpu.has_brick(0, brick_a));
+	CHECK_FALSE(gpu.has_brick(0, brick_b));
+	CHECK(gpu.has_brick(1, brick_a));
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(1));
+	CHECK(gpu.get_page_table(0)[1 + 2 * 16 + 3 * 256] == NextGIGlobalSDFGPU::PAGE_UNALLOCATED);
+
+	// Released slots are reused.
+	REQUIRE(gpu.upload_brick(0, brick_b, voxels));
+	CHECK(gpu.has_brick(0, brick_b));
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(2));
+
+	// Out-of-page-table bricks are rejected.
+	CHECK_FALSE(gpu.upload_brick(0, Vector3i(-1, 0, 0), voxels));
+	CHECK_FALSE(gpu.upload_brick(0, Vector3i(16, 0, 0), voxels));
+	CHECK_FALSE(gpu.upload_brick(NextGIGlobalSDF::MAX_LEVELS, brick_a, voxels));
+	CHECK_EQ(gpu.get_slot(0, Vector3i(-1, 0, 0)), NextGIGlobalSDFGPU::PAGE_UNALLOCATED);
+
+	gpu.free_all();
+	CHECK_EQ(gpu.get_used_bricks(), uint32_t(0));
 }
