@@ -56,6 +56,7 @@ layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint cut_hi;
 	uint group_count;
 	uint level_counts[8];
+	uint cut_hash[2];
 	uint pad[2];
 } counters;
 

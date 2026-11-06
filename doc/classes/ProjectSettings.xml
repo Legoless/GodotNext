@@ -3345,16 +3345,19 @@
 			[b]Note:[/b] This property is only read when the project starts. To adjust the automatic LOD threshold at runtime, set [member Viewport.mesh_lod_threshold] on the root [Viewport].
 		</member>
 		<member name="rendering/nextgeo/debug_stats" type="bool" setter="" getter="" default="false">
-			Read the NextGeo cut counters and cluster list back each frame for the debug stats and the GPU-vs-CPU cut comparison. It stalls the GPU; leave it off outside tests.
+			Publish the NextGeo cut counters and the GPU/CPU cut hash comparison through [method RenderingServer.virtual_geometry_get_debug_stats]. The 76-byte counter read is taken at the start of the following frame, before the counters reset, so it does not add a per-frame GPU stall. Leave it off outside tests.
 		</member>
 		<member name="rendering/nextgeo/debug_stats_interval" type="int" setter="" getter="" default="1">
 			Read the NextGeo cut debug stats every N frames instead of every frame, to limit the GPU stall during long sweeps.
+		</member>
+		<member name="rendering/nextgeo/hiz_debug" type="bool" setter="" getter="" default="false">
+			Read the previous and current Hi-Z chains back with the cut debug stats and report their centre depth. It is a debug-only readback and stalls the GPU.
 		</member>
 		<member name="rendering/nextgeo/max_pixel_error" type="float" setter="" getter="" default="1.0">
 			The projected-error budget in pixels at the internal resolution for NextGeo's instance and cluster cuts. A cut is accepted when its projected error is at most this value; it applies on the next frame.
 		</member>
 		<member name="rendering/nextgeo/occlusion" type="bool" setter="" getter="" default="true">
-			Enable the NextGeo previous-Hi-Z occlusion test and its two-phase re-cull. Off gives the CPU-reference parity cut (the debug comparison).
+			Enable the NextGeo two-phase Hi-Z occlusion test. Phase 1 tests the previous frame's Hi-Z chain; phase 2 re-tests the instances it occluded against the chain built from the current depth, so moving occluders disocclude in the same frame. Off gives the CPU-reference parity cut (the debug comparison).
 		</member>
 		<member name="rendering/occlusion_culling/bvh_build_quality" type="int" setter="" getter="" default="2">
 			The [url=https://en.wikipedia.org/wiki/Bounding_volume_hierarchy]Bounding Volume Hierarchy[/url] quality to use when rendering the occlusion culling buffer. Higher values will result in more accurate occlusion culling, at the cost of higher CPU usage. See also [member rendering/occlusion_culling/occlusion_rays_per_thread].

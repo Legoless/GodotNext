@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -47,6 +47,7 @@ public:
 	static constexpr uint32_t NODE_CAPACITY = 1u << 17;
 	static constexpr uint32_t GROUP_CAPACITY = 1u << 17;
 	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 21;
+	static constexpr uint32_t HIZ_MAX_MIPS = 16;
 
 	void dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats);
 	void free_resources();
@@ -55,9 +56,15 @@ public:
 
 private:
 	bool _ensure();
+	void _ensure_hiz(const Size2i &p_internal_size);
+	void _build_hiz(RID p_depth, const Size2i &p_internal_size);
+	void _swap_hiz();
+	void _release_hiz();
 	RID _storage(uint32_t p_bytes);
 	RID _uniform_set(const Vector<RD::Uniform> &p_uniforms, int p_variant);
 	void _set_common_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_input, RID p_output, RID p_groups, RID p_clusters);
+	void _request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev);
+	void _publish_stats(const PackedByteArray &p_data);
 
 	InstanceCullShaderRD instance_shader;
 	RID instance_version;
@@ -67,6 +74,7 @@ private:
 	RID cluster_version;
 	RID cluster_bvh;
 	RID cluster_leaf;
+	RID cluster_hash;
 	HizPyramidShaderRD hiz_shader;
 	RID hiz_version;
 	RID hiz_pipeline;
@@ -81,11 +89,20 @@ private:
 	RID counters;
 	RID dummy_hiz;
 	RID dummy_sampler;
-	RID hiz_prev;
+
+	// Hi-Z chain: [0] is the previous frame's, [1] the one built from this
+	// frame's depth; they swap after the cut.
+	RID hiz_texture[2];
+	RID hiz_views[2][HIZ_MAX_MIPS];
+	uint32_t hiz_mips = 0;
 	Size2i hiz_size;
-	RID dummy_hiz_set;
+	bool hiz_primed = false;
+
 	bool initialized = false;
 	bool failed = false;
 	uint32_t stats_tick = 0;
 	uint32_t stats_counter = 0;
+	uint64_t stats_cpu_hash = 0;
+	Dictionary stats_info;
+	bool stats_pending_read = false;
 };

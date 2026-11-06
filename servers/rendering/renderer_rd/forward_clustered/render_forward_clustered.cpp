@@ -2369,8 +2369,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		}
 		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_record_buffer().is_valid() && RSG::virtual_mesh_storage->get_record_count() > 0 && p_render_data->scene_data != nullptr) {
 			RENDER_TIMESTAMP("NextGeo HiZ");
-			const Projection view_projection = p_render_data->scene_data->view_projection[0];
-			nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, view_projection, p_render_data->scene_data->cam_transform.origin, rb->get_internal_size(), p_render_data->scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")));
+			// scene_data->view_projection is the raw camera projection; the scene
+			// shaders use the depth-corrected projection times the view matrix,
+			// which is the matrix the depth buffer and reverse-Z Hi-Z are in.
+			const RenderSceneDataRD *scene_data = p_render_data->scene_data;
+			const Projection view_projection = scene_data->get_view_projection(0) * scene_data->cam_transform.affine_inverse();
+			Projection prev_correction;
+			prev_correction.set_depth_correction(scene_data->flip_y);
+			const Projection prev_view_projection = (prev_correction * scene_data->prev_view_projection[0]) * scene_data->prev_cam_transform.affine_inverse();
+			nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")));
 			RENDER_TIMESTAMP("NextGeo Phase2 Cull");
 		}
 

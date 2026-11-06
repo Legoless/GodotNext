@@ -70,14 +70,21 @@ inline bool nextgeo_instance_cullable(uint32_t p_flags, uint32_t p_layer_mask, u
 
 // Order-independent 64-bit cut hash over (record, cluster) pairs, so the GPU
 // compaction can be compared with the CPU reference regardless of order.
+// 32-bit mix (Chris Wellons' lowbias32). The shader builds the same hash from
+// two 32-bit words; 64-bit integer types are not portable to the Metal path.
+inline uint32_t nextgeo_cut_mix32(uint32_t p_value) {
+	p_value ^= p_value >> 16;
+	p_value *= 0x7feb352du;
+	p_value ^= p_value >> 15;
+	p_value *= 0x846ca68bu;
+	p_value ^= p_value >> 16;
+	return p_value;
+}
+
 inline uint64_t nextgeo_cut_pair_hash(uint32_t p_record, uint32_t p_cluster) {
-	uint64_t h = (uint64_t(p_record) << 32) | uint64_t(p_cluster);
-	h ^= h >> 33;
-	h *= 0xff51afd7ed558ccdull;
-	h ^= h >> 33;
-	h *= 0xc4ceb9fe1a85ec53ull;
-	h ^= h >> 33;
-	return h;
+	const uint32_t lo = nextgeo_cut_mix32(p_record ^ nextgeo_cut_mix32(p_cluster ^ 0x9e3779b9u));
+	const uint32_t hi = nextgeo_cut_mix32(p_record ^ 0x85ebca6bu) ^ nextgeo_cut_mix32(p_cluster ^ 0xc2b2ae35u);
+	return (uint64_t(hi) << 32) | uint64_t(lo);
 }
 
 inline uint64_t nextgeo_cut_hash(const LocalVector<uint64_t> &p_pairs) {

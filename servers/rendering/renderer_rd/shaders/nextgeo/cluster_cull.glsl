@@ -6,6 +6,7 @@
 // cluster compaction. Variants:
 //   (none)       BVH_LEVEL: descend one level of the tree.
 //   CLUSTER_CULL: test leaf groups and emit (record, cluster).
+//   CUT_HASH:    XOR the order-independent hash of every compacted cluster.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
@@ -25,6 +26,30 @@ layout(set = 0, binding = 11, std430) buffer restrict ClustersOut {
 	uvec2 data[];
 } clusters_out;
 
+#ifdef CUT_HASH
+// Matches RendererRD::nextgeo_cut_pair_hash, split into two 32-bit words so
+// the Metal backend never sees a 64-bit integer type.
+uint mix32(uint x) {
+	x ^= x >> 16;
+	x *= 0x7feb352du;
+	x ^= x >> 15;
+	x *= 0x846ca68bu;
+	x ^= x >> 16;
+	return x;
+}
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	if (index >= counters.cluster_count) {
+		return;
+	}
+	uvec2 pair = clusters_out.data[index];
+	uint lo = mix32(pair.x ^ mix32(pair.y ^ 0x9e3779b9u));
+	uint hi = mix32(pair.x ^ 0x85ebca6bu) ^ mix32(pair.y ^ 0xc2b2ae35u);
+	atomicXor(counters.cut_hash[0], lo);
+	atomicXor(counters.cut_hash[1], hi);
+}
+#else
 layout(push_constant, std430) uniform Params {
 	uint level;
 	uint output_capacity;
@@ -46,7 +71,7 @@ float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p
 	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
 	float radius = p_lod_sphere.w * scale;
 	float distance = max(length(center - cull.camera.xyz) - radius, cull.view.z);
-	return p_max_parent_error * scale * 0.5 * cull.view.y * cull.view_proj[1][1] / distance * cull.view.w;
+	return p_max_parent_error * scale * 0.5 * cull.view.y * abs(cull.view_proj[1][1]) / distance * cull.view.w;
 }
 
 uint dag_uint(uint p_byte_offset) {
@@ -130,4 +155,5 @@ void main() {
 		}
 	}
 }
+#endif
 #endif

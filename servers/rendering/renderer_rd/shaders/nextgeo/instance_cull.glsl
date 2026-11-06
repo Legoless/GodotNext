@@ -43,27 +43,45 @@ bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	}
 	vec3 lo = world_min.xyz;
 	vec3 hi = world_max.xyz;
-	vec4 clip_min = cull.prev_view_proj * vec4(lo, 1.0);
-	vec4 clip_max = cull.prev_view_proj * vec4(hi, 1.0);
-	if (clip_min.w <= 0.0 || clip_max.w <= 0.0) {
-		atomicAdd(counters.cut_lo, 1u); // hiz_behind diagnostic
-		return false; // Behind the previous camera; keep it for phase 1.
+	vec2 uv_min = vec2(2.0);
+	vec2 uv_max = vec2(-1.0);
+	// Reverse-Z: the nearest corner has the largest depth; the whole box is
+	// hidden only when even its nearest point is behind the stored surface.
+	float nearest_depth = 0.0;
+	bool any_front = false;
+	for (int corner = 0; corner < 8; corner++) {
+		vec3 world = vec3((corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y, (corner & 4) != 0 ? hi.z : lo.z);
+		vec4 clip = cull.prev_view_proj * vec4(world, 1.0);
+		if (clip.w <= 0.0) {
+			continue;
+		}
+		any_front = true;
+		vec2 uv = clip.xy / clip.w * 0.5 + 0.5;
+		uv_min = min(uv_min, uv);
+		uv_max = max(uv_max, uv);
+		nearest_depth = max(nearest_depth, clip.z / clip.w);
 	}
-	vec2 ndc_min = clip_min.xy / clip_min.w;
-	vec2 ndc_max = clip_max.xy / clip_max.w;
-	vec2 uv_min = ndc_min * 0.5 + 0.5;
-	vec2 uv_max = ndc_max * 0.5 + 0.5;
-	if (uv_max.x < 0.0 || uv_max.y < 0.0 || uv_min.x > 1.0 || uv_min.y > 1.0) {
+	if (!any_front) {
+		atomicAdd(counters.cut_lo, 1u); // hiz_behind diagnostic
+		return false;
+	}
+	// Only cull when the whole projected box is on screen; an off-screen part
+	// could be visible and must keep the instance.
+	if (uv_min.x < 0.0 || uv_min.y < 0.0 || uv_max.x > 1.0 || uv_max.y > 1.0) {
 		atomicAdd(counters.cut_hi, 1u); // hiz_oob diagnostic
 		return false;
 	}
-	// Reverse-Z: the farthest corner is the minimum of the two depths.
-	float farthest_depth = min(clip_min.z / clip_min.w, clip_max.z / clip_max.w);
-	vec2 uv = clamp((uv_min + uv_max) * 0.5, vec2(0.0), vec2(1.0));
-	vec2 size = abs(uv_max - uv_min) * cull.view.xy;
-	float mip = max(log2(max(size.x, size.y)), 0.0);
-	float occlusion = textureLod(hiz_prev, uv, mip).r;
-	return farthest_depth < occlusion;
+	// Level 0 is half the internal resolution; pick the mip whose texel spans
+	// the box and take the farthest (minimum) of four taps, which keeps the
+	// test conservative (a false miss costs clusters, a false hit drops the box).
+	vec2 size = (uv_max - uv_min) * cull.view.xy * 0.5;
+	float mip = max(floor(log2(max(max(size.x, size.y), 1.0))), 0.0);
+	float occlusion = 1.0;
+	for (int tap = 0; tap < 4; tap++) {
+		vec2 uv = vec2((tap & 1) != 0 ? uv_max.x : uv_min.x, (tap & 2) != 0 ? uv_max.y : uv_min.y);
+		occlusion = min(occlusion, textureLod(hiz_prev, uv, mip).r);
+	}
+	return nearest_depth < occlusion;
 }
 
 #ifdef PHASE2
