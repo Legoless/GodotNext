@@ -386,6 +386,8 @@ void NextGeoCut::_request_stats(uint32_t p_record_count, uint32_t p_max_levels, 
 	stats_info["hiz"] = p_have_prev;
 	stats_info["hiz_mips"] = int64_t(hiz_mips);
 	stats_info["cluster_capacity"] = int64_t(CLUSTER_CAPACITY);
+	stats_info["nextgeo_double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
+	stats_info["nextgeo_missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
 
 	uint32_t cpu_instances = 0;
 	uint32_t cpu_groups = 0;

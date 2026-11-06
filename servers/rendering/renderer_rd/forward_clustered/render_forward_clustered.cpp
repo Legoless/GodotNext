@@ -998,6 +998,25 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	RenderList *rl = &render_list[p_render_list];
 	_update_dirty_geometry_instances();
 
+	// GodotNext: nextgeo_exclusive_dispatch (#79). Routing is per view: MSAA,
+	// multiview and unsupported debug views keep virtual surfaces legacy for
+	// the whole view, and nothing is virtual until #80 sets draw-ready.
+	bool nextgeo_virtual_view = false;
+	RendererRD::NextGeoFallback nextgeo_view_reason = RendererRD::NEXTGEO_FALLBACK_NONE;
+	if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->is_nextgeo_draw_ready()) {
+		bool view_msaa = false;
+		if (p_render_data->render_buffers.is_valid()) {
+			RenderSceneBuffersRD *scene_buffers = Object::cast_to<RenderSceneBuffersRD>(*p_render_data->render_buffers);
+			view_msaa = scene_buffers != nullptr && scene_buffers->get_texture_samples() != RD::TEXTURE_SAMPLES_1;
+		}
+		bool unsupported_debug_draw = false;
+#ifdef DEBUG_ENABLED
+		unsupported_debug_draw = get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
+#endif
+		nextgeo_view_reason = RendererRD::nextgeo_view_fallback(view_msaa, p_render_data->scene_data->view_count > 1, unsupported_debug_draw);
+		nextgeo_virtual_view = nextgeo_view_reason == RendererRD::NEXTGEO_FALLBACK_NONE;
+	}
+
 	if (!p_append) {
 		rl->clear();
 		if (p_render_list == RENDER_LIST_OPAQUE) {
@@ -1165,6 +1184,26 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		}
 
 		while (surf) {
+			// A virtual surface is drawn by the NextGeo resolve, not by the
+			// legacy opaque/motion lists.
+			const bool surface_virtual = (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0;
+			const bool skip_virtual = nextgeo_virtual_view && surface_virtual && (p_render_list == RENDER_LIST_OPAQUE || p_render_list == RENDER_LIST_MOTION);
+#ifdef DEBUG_ENABLED
+			if (nextgeo_virtual_view && p_pass_mode == PASS_MODE_COLOR && p_render_list == RENDER_LIST_OPAQUE) {
+				if (surface_virtual && !skip_virtual) {
+					// The skip below must have caught it; an add here is a double dispatch.
+					RSG::virtual_mesh_storage->nextgeo_count_double_dispatch();
+				} else if (!surface_virtual && inst->data->base.is_valid() &&
+						RSG::virtual_mesh_storage->mesh_has_virtual_geometry(inst->data->base) &&
+						RSG::virtual_mesh_storage->mesh_surface_is_virtual(inst->data->base, surf->surface_index)) {
+					RSG::virtual_mesh_storage->nextgeo_count_missing();
+				}
+			}
+#endif
+			if (skip_virtual) {
+				surf = surf->next;
+				continue;
+			}
 			surf->sort.uses_forward_gi = 0;
 			surf->sort.uses_lightmap = 0;
 			surf->uses_lightmap_specular = false;
@@ -1854,6 +1893,10 @@ void RenderForwardClustered::_process_sss(Ref<RenderSceneBuffersRD> p_render_buf
 
 void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
 	scene_state.used_uniform_buffer_count = 0;
+	if (RSG::virtual_mesh_storage != nullptr) {
+		// GodotNext: nextgeo_exclusive_dispatch (#79). These must stay 0.
+		RSG::virtual_mesh_storage->nextgeo_reset_counters();
+	}
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -4619,7 +4662,7 @@ void RenderForwardClustered::_update_global_pipeline_data_requirements_from_ligh
 	global_pipeline_data_required.use_shadow_dual_paraboloid = light_storage->get_shadow_dual_paraboloid_used();
 }
 
-void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh) {
+void RenderForwardClustered::_geometry_instance_add_surface_with_material(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, uint32_t p_material_id, uint32_t p_shader_id, RID p_mesh, bool p_chain_blocked) {
 	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
 	uint32_t flags = 0;
 
@@ -4696,9 +4739,32 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		material_shadow = p_material;
 	}
 
+	// GodotNext: nextgeo_exclusive_dispatch (#79). Mark the surface as a
+	// virtual-geometry candidate here; the view-level gates (MSAA, multiview,
+	// debug draw, draw_ready) are applied when the render list is filled.
+	RendererRD::NextGeoSurfaceFacts route_facts;
+	route_facts.instance_mesh = ginstance->data->base_type == RSE::INSTANCE_MESH;
+	if (route_facts.instance_mesh && RSG::virtual_mesh_storage != nullptr) {
+		route_facts.mesh_has_virtual_geometry = RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
+		route_facts.surface_in_mask = route_facts.mesh_has_virtual_geometry && RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, p_surface);
+		route_facts.mutated = RSG::virtual_mesh_storage->mesh_clear_reason(p_mesh) == RendererRD::NEXTGEO_FALLBACK_MUTATED_MESH;
+	}
+	route_facts.skeleton = ginstance->data->skeleton.is_valid();
+	route_facts.instance_uniforms = ginstance->shader_uniforms_offset >= 0;
+	route_facts.lightmapped = ginstance->lightmap_instance.is_valid();
+	route_facts.chain_blocked = p_chain_blocked;
+	// Eligibility is recorded regardless of the draw-ready gate; the gate is
+	// applied per view so caches built before #80 still route once it is set.
+	route_facts.draw_ready = true;
+	const RendererRD::NextGeoSurfaceRoute route = RendererRD::nextgeo_resolve_surface_route(route_facts);
+	if (route.virtual_geometry) {
+		flags |= GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL;
+	}
+
 	GeometryInstanceSurfaceDataCache *sdcache = geometry_instance_surface_alloc.alloc();
 
 	sdcache->flags = flags;
+	sdcache->nextgeo_fallback_reason = route.reason;
 
 	sdcache->shader = p_material->shader_data;
 	sdcache->material = p_material;
@@ -4755,11 +4821,28 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 #endif
 }
 
-void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, RID p_mat_src, RID p_mesh) {
+void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(GeometryInstanceForwardClustered *ginstance, uint32_t p_surface, SceneShaderForwardClustered::MaterialData *p_material, RID p_mat_src, RID p_mesh, bool p_overlay) {
 	SceneShaderForwardClustered::MaterialData *material = p_material;
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 
-	_geometry_instance_add_surface_with_material(ginstance, p_surface, material, p_mat_src.get_local_index(), material_storage->material_get_shader_id(p_mat_src), p_mesh);
+	// A next pass, a material overlay or stencil anywhere in the chain clears
+	// virtual routing for the whole chain, base surface included.
+	bool chain_blocked = p_overlay || material->next_pass.is_valid();
+	for (SceneShaderForwardClustered::MaterialData *walk = material; walk != nullptr;) {
+		if (walk->shader_data->stencil_enabled) {
+			chain_blocked = true;
+		}
+		if (walk->next_pass.is_null()) {
+			break;
+		}
+		SceneShaderForwardClustered::MaterialData *next = static_cast<SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(walk->next_pass, RendererRD::MaterialStorage::SHADER_TYPE_3D));
+		if (next == nullptr || !next->shader_data->is_valid()) {
+			break;
+		}
+		walk = next;
+	}
+
+	_geometry_instance_add_surface_with_material(ginstance, p_surface, material, p_mat_src.get_local_index(), material_storage->material_get_shader_id(p_mat_src), p_mesh, chain_blocked);
 
 	while (material->next_pass.is_valid()) {
 		RID next_pass = material->next_pass;
@@ -4770,7 +4853,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material_chain(
 		if (ginstance->data->dirty_dependencies) {
 			material_storage->material_update_dependency(next_pass, &ginstance->data->dependency_tracker);
 		}
-		_geometry_instance_add_surface_with_material(ginstance, p_surface, material, next_pass.get_local_index(), material_storage->material_get_shader_id(next_pass), p_mesh);
+		_geometry_instance_add_surface_with_material(ginstance, p_surface, material, next_pass.get_local_index(), material_storage->material_get_shader_id(next_pass), p_mesh, chain_blocked);
 	}
 }
 
@@ -4800,7 +4883,15 @@ void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForw
 
 	ERR_FAIL_NULL(material);
 
-	_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh);
+	// The overlay is resolved before the base chain so a valid overlay blocks
+	// routing for the base surface too.
+	bool overlay_valid = false;
+	if (ginstance->data->material_overlay.is_valid()) {
+		SceneShaderForwardClustered::MaterialData *overlay = static_cast<SceneShaderForwardClustered::MaterialData *>(material_storage->material_get_data(ginstance->data->material_overlay, RendererRD::MaterialStorage::SHADER_TYPE_3D));
+		overlay_valid = overlay != nullptr && overlay->shader_data->is_valid();
+	}
+
+	_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh, overlay_valid);
 
 	if (ginstance->data->material_overlay.is_valid()) {
 		m_src = ginstance->data->material_overlay;
@@ -4811,7 +4902,7 @@ void RenderForwardClustered::_geometry_instance_add_surface(GeometryInstanceForw
 				material_storage->material_update_dependency(m_src, &ginstance->data->dependency_tracker);
 			}
 
-			_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh);
+			_geometry_instance_add_surface_with_material_chain(ginstance, p_surface, material, m_src, p_mesh, overlay_valid);
 		}
 	}
 }

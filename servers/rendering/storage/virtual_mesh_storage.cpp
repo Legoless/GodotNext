@@ -217,6 +217,7 @@ void RendererVirtualMeshStorage::_write_transform(Record &r_record, const Transf
 
 void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const RenderingServerTypes::VirtualGeometryDesc &p_desc) {
 	ERR_FAIL_COND(p_mesh.is_null());
+	mesh_clear_reasons.erase(p_mesh);
 	uint32_t index = 0;
 	const uint32_t *existing = mesh_indices.getptr(p_mesh);
 	if (existing != nullptr) {
@@ -300,13 +301,26 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 		records[slot].surface_mask = 0;
 		_mark_dirty(slot);
 	}
-	// p_reason is propagated by the NextGeo fallback overlay (#80); the record
-	// store only needs to know the mesh is gone.
-	(void)p_reason;
+	// Keep the reason for the routing fallback overlay (#79); the record store
+	// only needs to know the mesh is gone.
+	mesh_clear_reasons[p_mesh] = p_reason;
 }
 
 bool RendererVirtualMeshStorage::mesh_has_virtual_geometry(RID p_mesh) const {
 	return meshes.has(p_mesh);
+}
+
+bool RendererVirtualMeshStorage::mesh_surface_is_virtual(RID p_mesh, uint32_t p_surface) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	if (info == nullptr || p_surface >= 32) {
+		return false;
+	}
+	return (info->desc.eligible_surface_mask & (1u << p_surface)) != 0;
+}
+
+uint32_t RendererVirtualMeshStorage::mesh_clear_reason(RID p_mesh) const {
+	const uint32_t *reason = mesh_clear_reasons.getptr(p_mesh);
+	return reason != nullptr ? *reason : 0;
 }
 
 uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RID p_mesh) {

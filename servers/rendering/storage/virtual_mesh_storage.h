@@ -141,6 +141,22 @@ public:
 	void mesh_set_virtual_geometry(RID p_mesh, const RenderingServerTypes::VirtualGeometryDesc &p_desc);
 	void mesh_clear_virtual_geometry(RID p_mesh, uint32_t p_reason);
 	bool mesh_has_virtual_geometry(RID p_mesh) const;
+	// GodotNext: nextgeo_exclusive_dispatch (#79). The surface is inside the
+	// mesh's eligible_surface_mask (index < 32).
+	bool mesh_surface_is_virtual(RID p_mesh, uint32_t p_surface) const;
+	// 0 while the mesh still has VGD or never had it; the clear reason after
+	// a mesh_clear_virtual_geometry.
+	uint32_t mesh_clear_reason(RID p_mesh) const;
+	bool is_nextgeo_draw_ready() const { return nextgeo_draw_ready; }
+	void set_nextgeo_draw_ready(bool p_ready) { nextgeo_draw_ready = p_ready; }
+	void nextgeo_reset_counters() {
+		nextgeo_double_dispatch = 0;
+		nextgeo_missing = 0;
+	}
+	void nextgeo_count_double_dispatch() { nextgeo_double_dispatch++; }
+	void nextgeo_count_missing() { nextgeo_missing++; }
+	uint32_t nextgeo_get_double_dispatch() const { return nextgeo_double_dispatch; }
+	uint32_t nextgeo_get_missing() const { return nextgeo_missing; }
 
 	// Instance records.
 	uint32_t instance_record_allocate(RID p_instance, RID p_mesh);
@@ -212,6 +228,10 @@ protected:
 	HashMap<RID, MeshInfo> meshes;
 	HashMap<RID, uint32_t> mesh_indices;
 	LocalVector<RID> mesh_order; // mesh index -> RID
+	HashMap<RID, uint32_t> mesh_clear_reasons;
+	bool nextgeo_draw_ready = false;
+	uint32_t nextgeo_double_dispatch = 0;
+	uint32_t nextgeo_missing = 0;
 	LocalVector<RID> mesh_rids;
 	LocalVector<uint8_t> mesh_record_dirty;
 

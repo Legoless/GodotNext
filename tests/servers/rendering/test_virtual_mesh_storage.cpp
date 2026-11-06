@@ -364,3 +364,42 @@ TEST_CASE("[NextGeo][Records] Capacity doubles from 4096") {
 	CHECK_EQ(storage.instance_record_allocate(RID::from_uint64(9999), mesh), uint32_t(4096));
 	CHECK_EQ(storage.get_record_capacity(), uint32_t(8192));
 }
+
+TEST_CASE("[NextGeo][Routing] Surface mask, clear reason and counters") {
+	TestVirtualMeshStorage storage;
+	const RID mesh = RID::from_uint64(5101);
+	RenderingServerTypes::VirtualGeometryDesc desc = _desc(0x5); // surfaces 0 and 2
+	storage.mesh_set_virtual_geometry(mesh, desc);
+
+	CHECK(storage.mesh_has_virtual_geometry(mesh));
+	CHECK(storage.mesh_surface_is_virtual(mesh, 0));
+	CHECK_FALSE(storage.mesh_surface_is_virtual(mesh, 1));
+	CHECK(storage.mesh_surface_is_virtual(mesh, 2));
+	CHECK_FALSE(storage.mesh_surface_is_virtual(mesh, 40)); // outside the 32-bit mask
+	CHECK_FALSE(storage.mesh_surface_is_virtual(RID(), 0));
+	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(0));
+
+	// draw-ready is off until #80 publishes the resolve.
+	CHECK_FALSE(storage.is_nextgeo_draw_ready());
+	storage.set_nextgeo_draw_ready(true);
+	CHECK(storage.is_nextgeo_draw_ready());
+
+	storage.nextgeo_reset_counters();
+	storage.nextgeo_count_double_dispatch();
+	storage.nextgeo_count_missing();
+	CHECK_EQ(storage.nextgeo_get_double_dispatch(), uint32_t(1));
+	CHECK_EQ(storage.nextgeo_get_missing(), uint32_t(1));
+	storage.nextgeo_reset_counters();
+	CHECK_EQ(storage.nextgeo_get_double_dispatch(), uint32_t(0));
+	CHECK_EQ(storage.nextgeo_get_missing(), uint32_t(0));
+
+	// A cleared mesh keeps the reason for the fallback overlay.
+	storage.mesh_clear_virtual_geometry(mesh, 7);
+	CHECK_FALSE(storage.mesh_has_virtual_geometry(mesh));
+	CHECK_FALSE(storage.mesh_surface_is_virtual(mesh, 0));
+	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(7));
+
+	// Setting VGD again clears the old reason.
+	storage.mesh_set_virtual_geometry(mesh, desc);
+	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(0));
+}
