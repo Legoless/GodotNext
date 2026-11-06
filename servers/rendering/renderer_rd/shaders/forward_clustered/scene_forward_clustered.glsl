@@ -2104,7 +2104,14 @@ void fragment_shader(in SceneData scene_data) {
 		nextgi_buffer_reflection = buffer_reflection;
 		if (!bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
 			ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
-			indirect_specular_light = mix(indirect_specular_light, buffer_reflection.rgb, buffer_reflection.a);
+			// GodotNext: nextgi_reflection_behaviours (#132). With NextGI
+			// reflections and SSR both off, the GI probe radiance is the rough
+			// specular term instead of unshadowed sky.
+			vec4 rough_reflection = buffer_reflection;
+			if (rough_reflection.a <= 0.0) {
+				rough_reflection = buffer_ambient;
+			}
+			indirect_specular_light = mix(indirect_specular_light, rough_reflection.rgb, rough_reflection.a);
 		}
 	}
 #endif // !USE_LIGHTMAP
@@ -2226,7 +2233,11 @@ void fragment_shader(in SceneData scene_data) {
 		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
 			// Reflection probes stay in the mix by (1 - NextGI confidence). Confidence is RB_TEX_AMBIENT.a.
 			ambient_light = mix(ambient_light, nextgi_buffer_ambient.rgb, nextgi_buffer_ambient.a);
-			indirect_specular_light = mix(indirect_specular_light, nextgi_buffer_reflection.rgb, nextgi_buffer_reflection.a);
+			vec4 nextgi_rough_reflection = nextgi_buffer_reflection;
+			if (nextgi_rough_reflection.a <= 0.0) {
+				nextgi_rough_reflection = nextgi_buffer_ambient;
+			}
+			indirect_specular_light = mix(indirect_specular_light, nextgi_rough_reflection.rgb, nextgi_rough_reflection.a);
 		}
 		// GodotNext: nextgi_alpha_policy (#61). Cut fallback: WRC irradiance at the object center.
 		if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {

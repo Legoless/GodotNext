@@ -40,12 +40,20 @@ func _process(_delta: float) -> void:
 	var counters: Dictionary = RenderingServer.nextgi_get_tier_info()
 	var mode := str(status.get("mode", ""))
 	var diffuse := int(counters.get("gather_diffuse_dispatches", -1))
-	print("NEXTGI_MODE requested=%d mode=%s diffuse=%d" % [_requested, mode, diffuse])
+	var reflections := bool(status.get("reflections", false))
+	var reflection_rays := int(counters.get("reflection_rays", -1))
+	print("NEXTGI_MODE requested=%d mode=%s diffuse=%d reflections=%s reflection_rays=%d" % [_requested, mode, diffuse, reflections, reflection_rays])
 	var expected := "reflections_only" if _requested == 1 else "gi_and_reflections"
 	var ok := mode == expected
 	if _requested == 1 and diffuse != 0:
 		ok = false
 	if _requested == 0 and diffuse <= 0:
+		ok = false
+	if reflections != bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/reflections", true)):
+		ok = false
+	if reflections and reflection_rays <= 0:
+		ok = false
+	if not reflections and reflection_rays != 0:
 		ok = false
 	print("NEXTGI_MODE_RESULT pass=%s" % str(ok))
 	get_tree().quit(0 if ok else 1)

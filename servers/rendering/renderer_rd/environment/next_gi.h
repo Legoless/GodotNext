@@ -112,6 +112,8 @@ public:
 	}
 	static const char *get_mode_name(Mode p_mode);
 	static bool is_reflections_only();
+	// rendering/global_illumination/nextgi/reflections (#132).
+	static bool is_reflections_enabled();
 
 	// rendering/global_illumination/nextgi/quality.
 	enum Quality {

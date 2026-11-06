@@ -391,9 +391,14 @@ bool NextGI::is_reflections_only() {
 	return nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))) == MODE_REFLECTIONS_ONLY;
 }
 
+bool NextGI::is_reflections_enabled() {
+	return bool(GLOBAL_GET("rendering/global_illumination/nextgi/reflections"));
+}
+
 Dictionary NextGI::get_status() const {
 	Dictionary status;
 	status["mode"] = get_mode_name(nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))));
+	status["reflections"] = is_reflections_enabled();
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
 	status["tier"] = get_tier_name(result.tier);
 	status["reason"] = get_reason_name(result.reason);

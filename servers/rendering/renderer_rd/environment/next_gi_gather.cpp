@@ -550,7 +550,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	const float env_max_roughness = p_render_data->environment.is_valid() ? scene->environment_get_nextgi_max_roughness_to_trace(p_render_data->environment) : 0.4f;
 	params.max_trace_roughness = NextGI::nextgi_effective_max_roughness(quality.max_trace_roughness, env_max_roughness);
 	params.reflect_divisor = float(quality.reflection_divisor);
-	params.reflect_enabled = 1u;
+	params.reflect_enabled = NextGI::is_reflections_enabled() ? 1u : 0u;
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
 	params.sampling_mode = rr_sampling_mode;
 	params.pad4 = 0u;

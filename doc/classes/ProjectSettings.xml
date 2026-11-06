@@ -3154,6 +3154,9 @@
 			The NextGI quality preset. [b]Auto[/b] runs the startup benchmark and picks [b]High[/b] at 5 ms or less, else [b]Medium[/b]. [b]Medium[/b] uses half the High diffuse ray budget with reflections at quarter resolution up to roughness 0.25; [b]High[/b] is the P1 budget with reflections at half resolution up to 0.4; [b]Epic[/b] traces four times the High diffuse rays with full-resolution reflections and doubled SRC atlases.
 			[b]Note:[/b] This property is only read when the project starts.
 		</member>
+		<member name="rendering/global_illumination/nextgi/reflections" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], NextGI traces and denoises specular reflections. When off (and screen-space reflections are off), the opaque pass uses the GI probe radiance for specular instead of unshadowed sky, so rough reflections still pick up bounced light.
+		</member>
 		<member name="rendering/global_illumination/nextgi/rt_max_error" type="float" setter="" getter="" default="0.02">
 			The world-space bound, in meters at import scale, on the error of the ray-tracing proxy geometry that NextGI traces against.
 		</member>

@@ -2755,3 +2755,10 @@ TEST_CASE("[NextGI] Reflections-only mode resolves from the setting") {
 	CHECK_EQ(String(NextGI::get_mode_name(NextGI::MODE_GI_AND_REFLECTIONS)), String("gi_and_reflections"));
 	CHECK_EQ(String(NextGI::get_mode_name(NextGI::MODE_REFLECTIONS_ONLY)), String("reflections_only"));
 }
+
+TEST_CASE("[NextGI] Reflections setting is readable") {
+	using namespace RendererRD;
+	// The default enables the specular trace; the reflections-off fallback is
+	// covered by the nextgi_mode testbed scene.
+	CHECK(NextGI::is_reflections_enabled());
+}
