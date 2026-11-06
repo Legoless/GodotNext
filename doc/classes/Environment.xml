@@ -208,6 +208,9 @@
 		<member name="nextgi_energy" type="float" setter="set_nextgi_energy" getter="get_nextgi_energy" default="1.0">
 			The energy multiplier for NextGI indirect light. Higher values make the indirect lighting brighter. [code]1.0[/code] is the default.
 		</member>
+		<member name="nextgi_fog_on_reflection_hits" type="bool" setter="set_nextgi_fog_on_reflection_hits" getter="is_nextgi_fog_on_reflection_hits" default="true">
+			If [code]true[/code] and fog is enabled, the Environment's depth and height fog is applied to NextGI reflection hit radiance using the ray's hit distance. GI rays stay unfogged, matching UE 5.8's [code]HeightFogOnGI = 0[/code].
+		</member>
 		<member name="nextgi_max_roughness_to_trace" type="float" setter="set_nextgi_max_roughness_to_trace" getter="get_nextgi_max_roughness_to_trace" default="0.4">
 			The maximum surface roughness that NextGI traces a specular reflection for; rougher surfaces use the radiance cache instead. This is an upper bound on the quality preset's value, so Medium keeps its [code]0.25[/code] and a lower value refines any preset.
 		</member>

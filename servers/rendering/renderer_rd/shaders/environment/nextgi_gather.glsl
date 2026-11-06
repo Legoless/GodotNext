@@ -146,6 +146,16 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint pad4;
 	uint ray_stride;
 	uint ray_count;
+	// GodotNext: nextgi_reflection_behaviours (#132). Fog at reflection hits.
+	uint fog_enabled;
+	uint fog_depth_mode;
+	float fog_density;
+	float fog_height;
+	float fog_height_density;
+	float fog_depth_begin;
+	float fog_depth_end;
+	float fog_depth_curve;
+	vec4 fog_light_color;
 }
 params;
 
@@ -739,6 +749,26 @@ uint nextgi_reflect_hash(uint p_x) {
 	return p_x;
 }
 
+// GodotNext: nextgi_reflection_behaviours (#132). Mirrors the forward fog
+// formula for a hit at p_distance/p_world; sky misses keep their radiance.
+vec3 nextgi_reflection_fog(vec3 p_radiance, vec3 p_world, float p_distance) {
+	if (params.fog_enabled == 0u || p_distance >= 65504.0) {
+		return p_radiance;
+	}
+	float amount;
+	if (params.fog_depth_mode != 0u) {
+		float fog_z = smoothstep(params.fog_depth_begin, params.fog_depth_end, p_distance);
+		amount = pow(fog_z, params.fog_depth_curve) * params.fog_density;
+	} else {
+		amount = 1.0 - exp(min(0.0, -p_distance * params.fog_density));
+	}
+	if (abs(params.fog_height_density) >= 0.0001) {
+		float y_dist = p_world.y - params.fog_height;
+		amount = max(1.0 - exp(min(0.0, y_dist * params.fog_height_density)), amount);
+	}
+	return mix(p_radiance, params.fog_light_color.rgb * params.fog_light_color.a, clamp(amount, 0.0, 1.0));
+}
+
 vec3 nextgi_reflect_sample_ggx(vec3 p_normal, vec3 p_view, float p_roughness, vec2 p_u) {
 	float alpha = max(p_roughness * p_roughness, 1e-3);
 	vec3 up = abs(p_normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
@@ -826,6 +856,7 @@ void nextgi_reflect_main() {
 			}
 			atomicAdd(reflect_counters.misses, 1u);
 		}
+		radiance = nextgi_reflection_fog(radiance, origin + direction * hit_distance, hit_distance);
 	} else {
 		vec3 direction = reflect(-view_dir, normal);
 		radiance = nextgi_wrc_sample(origin, direction);

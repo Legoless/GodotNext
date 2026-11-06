@@ -899,7 +899,7 @@ void RendererEnvironmentStorage::environment_set_nextgi_enabled(RID p_env, bool 
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);
 	// Keep energy and the sky-light read; only the enable flag changes.
-	environment_set_nextgi(p_env, p_enabled, env->nextgi_energy, env->nextgi_read_sky_light, env->nextgi_max_roughness_to_trace);
+	environment_set_nextgi(p_env, p_enabled, env->nextgi_energy, env->nextgi_read_sky_light, env->nextgi_max_roughness_to_trace, env->nextgi_fog_on_reflection_hits);
 }
 
 bool RendererEnvironmentStorage::environment_get_nextgi_enabled(RID p_env) const {
@@ -909,13 +909,14 @@ bool RendererEnvironmentStorage::environment_get_nextgi_enabled(RID p_env) const
 }
 
 // GodotNext: nextgi_user_surface
-void RendererEnvironmentStorage::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness) {
+void RendererEnvironmentStorage::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits) {
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL(env);
 	env->nextgi_enabled = p_enabled;
 	env->nextgi_energy = p_energy;
 	env->nextgi_read_sky_light = p_read_sky_light;
 	env->nextgi_max_roughness_to_trace = p_max_roughness;
+	env->nextgi_fog_on_reflection_hits = p_fog_hits;
 }
 
 float RendererEnvironmentStorage::environment_get_nextgi_energy(RID p_env) const {
@@ -934,6 +935,12 @@ float RendererEnvironmentStorage::environment_get_nextgi_max_roughness_to_trace(
 	Environment *env = environment_owner.get_or_null(p_env);
 	ERR_FAIL_NULL_V(env, 0.4f);
 	return env->nextgi_max_roughness_to_trace;
+}
+
+bool RendererEnvironmentStorage::environment_get_nextgi_fog_on_reflection_hits(RID p_env) const {
+	Environment *env = environment_owner.get_or_null(p_env);
+	ERR_FAIL_NULL_V(env, true);
+	return env->nextgi_fog_on_reflection_hits;
 }
 
 

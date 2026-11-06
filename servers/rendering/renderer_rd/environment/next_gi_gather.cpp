@@ -93,8 +93,18 @@ struct GatherParamsGPU {
 	uint32_t pad4;
 	uint32_t ray_stride;
 	uint32_t ray_count;
+	// GodotNext: nextgi_reflection_behaviours (#132). Fog at reflection hits.
+	uint32_t fog_enabled;
+	uint32_t fog_depth_mode;
+	float fog_density;
+	float fog_height;
+	float fog_height_density;
+	float fog_depth_begin;
+	float fog_depth_end;
+	float fog_depth_curve;
+	float fog_light_color[4];
 };
-static_assert(sizeof(GatherParamsGPU) == 280, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 328, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -546,6 +556,36 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.pad4 = 0u;
 	params.ray_stride = ray_stride;
 	params.ray_count = ray_count;
+	params.fog_enabled = 0u;
+	params.fog_depth_mode = 0u;
+	params.fog_density = 0.0f;
+	params.fog_height = 0.0f;
+	params.fog_height_density = 0.0f;
+	params.fog_depth_begin = 0.0f;
+	params.fog_depth_end = 1.0f;
+	params.fog_depth_curve = 1.0f;
+	params.fog_light_color[0] = 0.0f;
+	params.fog_light_color[1] = 0.0f;
+	params.fog_light_color[2] = 0.0f;
+	params.fog_light_color[3] = 1.0f;
+	if (p_render_data->environment.is_valid()) {
+		const RID environment = p_render_data->environment;
+		if (scene->environment_get_fog_enabled(environment) && scene->environment_get_nextgi_fog_on_reflection_hits(environment)) {
+			params.fog_enabled = 1u;
+			params.fog_depth_mode = scene->environment_get_fog_mode(environment) == RSE::ENV_FOG_MODE_DEPTH ? 1u : 0u;
+			params.fog_density = scene->environment_get_fog_density(environment);
+			params.fog_height = scene->environment_get_fog_height(environment);
+			params.fog_height_density = scene->environment_get_fog_height_density(environment);
+			params.fog_depth_begin = scene->environment_get_fog_depth_begin(environment);
+			params.fog_depth_end = MAX(scene->environment_get_fog_depth_end(environment), params.fog_depth_begin + 0.001f);
+			params.fog_depth_curve = scene->environment_get_fog_depth_curve(environment);
+			const Color fog_light = scene->environment_get_fog_light_color(environment);
+			params.fog_light_color[0] = fog_light.r;
+			params.fog_light_color[1] = fog_light.g;
+			params.fog_light_color[2] = fog_light.b;
+			params.fog_light_color[3] = scene->environment_get_fog_light_energy(environment);
+		}
+	}
 	RID hiz_texture = dummy_color;
 	RID last_frame_texture = dummy_color;
 	if (rb.is_valid() && rb->has_texture(RB_SCOPE_SSR, RB_HIZ) && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME)) {

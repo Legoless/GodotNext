@@ -262,11 +262,12 @@ public:
 	void environment_set_nextgi_enabled(RID p_env, bool p_enabled);
 	bool environment_get_nextgi_enabled(RID p_env) const;
 	// GodotNext: nextgi_user_surface
-	void environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness);
+	void environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits);
 	float environment_get_nextgi_energy(RID p_env) const;
 	bool environment_get_nextgi_read_sky_light(RID p_env) const;
 	// GodotNext: nextgi_reflection_behaviours (#132).
 	float environment_get_nextgi_max_roughness_to_trace(RID p_env) const;
+	bool environment_get_nextgi_fog_on_reflection_hits(RID p_env) const;
 	// GLES3 and the dummy renderer keep these defaults: no NextGI tier and no SDFGI fallback.
 	virtual void nextgi_set_hardware_ray_tracing(int p_mode) {}
 	virtual Dictionary nextgi_get_tier_info() const;

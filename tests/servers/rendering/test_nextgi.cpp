@@ -353,11 +353,12 @@ TEST_CASE("[NextGI] RenderingServer round-trips nextgi energy and sky light on t
 
 	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_max_roughness_to_trace(env), 0.4f));
 
-	rs->environment_set_nextgi(env, true, 0.35f, false, 0.25f);
+	rs->environment_set_nextgi(env, true, 0.35f, false, 0.25f, false);
 	CHECK(rs->environment_get_nextgi_enabled(env));
 	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_energy(env), 0.35f));
 	CHECK_FALSE(rs->environment_get_nextgi_read_sky_light(env));
 	CHECK(Math::is_equal_approx(rs->environment_get_nextgi_max_roughness_to_trace(env), 0.25f));
+	CHECK_FALSE(rs->environment_get_nextgi_fog_on_reflection_hits(env));
 
 	// The enable-only setter keeps the energy and the sky-light read.
 	rs->environment_set_nextgi_enabled(env, false);

@@ -1436,6 +1436,7 @@
 			<param index="2" name="energy" type="float" />
 			<param index="3" name="read_sky" type="bool" />
 			<param index="4" name="max_roughness" type="float" />
+			<param index="5" name="fog_hits" type="bool" />
 			<description>
 				Sets whether the environment RID uses NextGI, its energy multiplier, whether it reads sky light, and the maximum roughness it traces a reflection for. See [member Environment.nextgi_enabled], [member Environment.nextgi_energy], [member Environment.nextgi_read_sky_light] and [member Environment.nextgi_max_roughness_to_trace].
 			</description>

@@ -20,6 +20,12 @@ func _ready() -> void:
 	if world != null and world.environment != null:
 		var environment := world.environment.duplicate()
 		environment.nextgi_enabled = true
+		# Exercise the reflection fog path as well.
+		environment.fog_enabled = true
+		environment.fog_light_color = Color(0.6, 0.65, 0.7)
+		environment.fog_density = 0.02
+		environment.fog_height = 2.0
+		environment.fog_height_density = 0.02
 		world.environment = environment
 	var camera := scene.get_node_or_null("CaptureCam") as Camera3D
 	if camera != null:

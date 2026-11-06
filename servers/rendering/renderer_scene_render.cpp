@@ -595,8 +595,8 @@ bool RendererSceneRender::environment_get_nextgi_enabled(RID p_env) const {
 }
 
 // GodotNext: nextgi_user_surface
-void RendererSceneRender::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness) {
-	environment_storage.environment_set_nextgi(p_env, p_enabled, p_energy, p_read_sky_light, p_max_roughness);
+void RendererSceneRender::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits) {
+	environment_storage.environment_set_nextgi(p_env, p_enabled, p_energy, p_read_sky_light, p_max_roughness, p_fog_hits);
 }
 
 float RendererSceneRender::environment_get_nextgi_energy(RID p_env) const {
@@ -609,6 +609,10 @@ bool RendererSceneRender::environment_get_nextgi_read_sky_light(RID p_env) const
 
 float RendererSceneRender::environment_get_nextgi_max_roughness_to_trace(RID p_env) const {
 	return environment_storage.environment_get_nextgi_max_roughness_to_trace(p_env);
+}
+
+bool RendererSceneRender::environment_get_nextgi_fog_on_reflection_hits(RID p_env) const {
+	return environment_storage.environment_get_nextgi_fog_on_reflection_hits(p_env);
 }
 
 
