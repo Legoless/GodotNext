@@ -178,6 +178,93 @@ void NextGIGlobalSDF::compose_brick(const Vector<Instance> &p_instances, uint32_
 	}
 }
 
+static uint32_t _voxel_index(const Vector3i &p_voxel) {
+	return uint32_t(p_voxel.x) + uint32_t(p_voxel.y) * NextGIGlobalSDF::BRICK_SIZE + uint32_t(p_voxel.z) * NextGIGlobalSDF::BRICK_SIZE * NextGIGlobalSDF::BRICK_SIZE;
+}
+
+bool NextGIGlobalSDF::get_coverage_bit(const BrickSplit &p_split, const Vector3i &p_voxel) {
+	const uint32_t index = _voxel_index(p_voxel);
+	return (p_split.coverage[index >> 3] & (1u << (index & 7))) != 0;
+}
+
+void NextGIGlobalSDF::set_coverage_bit(BrickSplit &r_split, const Vector3i &p_voxel, bool p_value) {
+	const uint32_t index = _voxel_index(p_voxel);
+	if (p_value) {
+		r_split.coverage[index >> 3] |= uint8_t(1u << (index & 7));
+	} else {
+		r_split.coverage[index >> 3] &= uint8_t(~(1u << (index & 7)));
+	}
+}
+
+void NextGIGlobalSDF::compose_brick_split(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, BrickSplit &r_split) {
+	r_split.static_distance.resize(BRICK_VOXELS);
+	r_split.dynamic_distance.resize(BRICK_VOXELS);
+	for (uint32_t voxel = 0; voxel < BRICK_VOXELS; voxel++) {
+		r_split.static_distance[voxel] = 1e30f;
+		r_split.dynamic_distance[voxel] = 1e30f;
+	}
+	memset(r_split.coverage, 0, sizeof(r_split.coverage));
+	const Vector3i base = p_brick * int(BRICK_SIZE);
+	for (uint32_t culled = 0; culled < p_culled_count; culled++) {
+		const uint32_t index = p_culled[culled];
+		if (index >= uint32_t(p_instances.size())) {
+			continue;
+		}
+		const Instance &instance = p_instances[index];
+		if (instance.field == nullptr || !instance.field->is_valid()) {
+			continue;
+		}
+		LocalVector<float> &target = instance.dynamic ? r_split.dynamic_distance : r_split.static_distance;
+		for (int z = 0; z < int(BRICK_SIZE); z++) {
+			for (int y = 0; y < int(BRICK_SIZE); y++) {
+				for (int x = 0; x < int(BRICK_SIZE); x++) {
+					const Vector3 world = voxel_center(p_level, p_origin, base + Vector3i(x, y, z));
+					const Vector3 local = instance.transform.affine_inverse().xform(world);
+					const Vector3 scale = instance.transform.basis.get_scale();
+					const float world_scale = MAX(scale.x, MAX(scale.y, scale.z));
+					const float distance = instance.field->sample_distance(local) * world_scale;
+					const uint32_t voxel = _voxel_index(Vector3i(x, y, z));
+					if (distance < target[voxel]) {
+						target[voxel] = distance;
+						// The winning sample decides the coverage bit; a
+						// dynamic instance may clear a static two-sided bit.
+						if (instance.dynamic || !instance.two_sided) {
+							// Recomputed below from the final winner.
+						}
+					}
+				}
+			}
+		}
+	}
+	// Recompute the coverage from the winning samples (two-sided instance wins
+	// tie with the static side).
+	for (uint32_t culled = 0; culled < p_culled_count; culled++) {
+		const uint32_t index = p_culled[culled];
+		if (index >= uint32_t(p_instances.size())) {
+			continue;
+		}
+		const Instance &instance = p_instances[index];
+		if (instance.field == nullptr || !instance.field->is_valid() || !instance.two_sided) {
+			continue;
+		}
+		LocalVector<float> &target = instance.dynamic ? r_split.dynamic_distance : r_split.static_distance;
+		for (int z = 0; z < int(BRICK_SIZE); z++) {
+			for (int y = 0; y < int(BRICK_SIZE); y++) {
+				for (int x = 0; x < int(BRICK_SIZE); x++) {
+					const Vector3 world = voxel_center(p_level, p_origin, base + Vector3i(x, y, z));
+					const Vector3 local = instance.transform.affine_inverse().xform(world);
+					const Vector3 scale = instance.transform.basis.get_scale();
+					const float world_scale = MAX(scale.x, MAX(scale.y, scale.z));
+					const uint32_t voxel = _voxel_index(Vector3i(x, y, z));
+					if (Math::is_equal_approx(instance.field->sample_distance(local) * world_scale, target[voxel])) {
+						set_coverage_bit(r_split, Vector3i(x, y, z), true);
+					}
+				}
+			}
+		}
+	}
+}
+
 uint32_t NextGIGlobalSDF::cull_instances_for_brick(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, uint32_t *r_indices, uint32_t p_max_indices) {
 	const float voxel = level_voxel_size(p_level);
 	const float brick_size = voxel * float(BRICK_SIZE);

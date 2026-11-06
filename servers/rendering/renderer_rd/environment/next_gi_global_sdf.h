@@ -92,6 +92,19 @@ public:
 	// keep their flags for the static/dynamic split and the coverage bit.
 	static uint32_t cull_instances_for_brick(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, uint32_t *r_indices, uint32_t p_max_indices);
 
+	// Static/dynamic split and the two-sided coverage bit, the layout the
+	// compositing compute writes: static bricks hold only static instances,
+	// dynamic bricks only dynamic ones and composite over static at lookup;
+	// a voxel whose winning sample is two-sided sets its coverage bit.
+	struct BrickSplit {
+		LocalVector<float> static_distance;
+		LocalVector<float> dynamic_distance;
+		uint8_t coverage[BRICK_VOXELS / 8] = {};
+	};
+	static void compose_brick_split(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, BrickSplit &r_split);
+	static bool get_coverage_bit(const BrickSplit &p_split, const Vector3i &p_voxel);
+	static void set_coverage_bit(BrickSplit &r_split, const Vector3i &p_voxel, bool p_value);
+
 	// The level-0 bricks an instance's old and new AABBs touch; the caller
 	// recomposes only these (dirty bricks).
 	static void dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count);

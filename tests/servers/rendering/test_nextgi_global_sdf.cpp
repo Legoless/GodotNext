@@ -332,3 +332,59 @@ TEST_CASE("[NextGI][GlobalSDF] Brick instance culling and flags") {
 	CHECK(instances[1].dynamic);
 	CHECK(instances[1].two_sided);
 }
+
+TEST_CASE("[NextGI][GlobalSDF] Static/dynamic brick split and coverage bit") {
+	const MeshSDFData wall = _wall_sdf();
+	Vector<NextGIGlobalSDF::Instance> instances;
+	NextGIGlobalSDF::Instance statik;
+	statik.field = &wall;
+	instances.push_back(statik);
+	NextGIGlobalSDF::Instance dynamic;
+	dynamic.field = &wall;
+	dynamic.transform.origin = Vector3(0.6f, 0.0f, 0.0f);
+	dynamic.dynamic = true;
+	dynamic.two_sided = true;
+	instances.push_back(dynamic);
+
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(-1.0f, -1.0f, -1.0f), 0);
+	const Vector3i brick(2, 2, 2);
+	uint32_t culled[4];
+	const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, brick, culled, 4);
+	REQUIRE_EQ(culled_count, uint32_t(2));
+
+	NextGIGlobalSDF::BrickSplit split;
+	NextGIGlobalSDF::compose_brick_split(instances, culled, culled_count, 0, origin, brick, split);
+	REQUIRE_EQ(split.static_distance.size(), NextGIGlobalSDF::BRICK_VOXELS);
+	REQUIRE_EQ(split.dynamic_distance.size(), NextGIGlobalSDF::BRICK_VOXELS);
+
+	Vector<NextGIGlobalSDF::Instance> static_only;
+	static_only.push_back(statik);
+	Vector<NextGIGlobalSDF::Instance> both;
+	both.push_back(statik);
+	both.push_back(dynamic);
+
+	const Vector3i base = brick * 8;
+	uint32_t dynamic_wins = 0;
+	uint32_t static_wins = 0;
+	for (int z = 0; z < 8; z++) {
+		for (int y = 0; y < 8; y++) {
+			for (int x = 0; x < 8; x++) {
+				const Vector3 world = NextGIGlobalSDF::voxel_center(0, origin, base + Vector3i(x, y, z));
+				const uint32_t index = uint32_t(x + y * 8 + z * 64);
+				// The static slot never sees the dynamic instance.
+				CHECK(Math::is_equal_approx(split.static_distance[index], NextGIGlobalSDF::reference_distance(static_only, world)));
+				const float combined = MIN(split.static_distance[index], split.dynamic_distance[index]);
+				CHECK(Math::is_equal_approx(combined, NextGIGlobalSDF::reference_distance(both, world)));
+				const bool covered = NextGIGlobalSDF::get_coverage_bit(split, Vector3i(x, y, z));
+				if (split.dynamic_distance[index] < split.static_distance[index]) {
+					dynamic_wins++;
+					CHECK(covered); // The two-sided dynamic instance wins here.
+				} else {
+					static_wins++;
+				}
+			}
+		}
+	}
+	CHECK(dynamic_wins > 0);
+	CHECK(static_wins > 0);
+}
