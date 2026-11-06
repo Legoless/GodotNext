@@ -167,6 +167,8 @@ private:
 	// GodotNext: nextgi_user_surface
 	float nextgi_energy = 1.0;
 	bool nextgi_read_sky_light = true;
+	// GodotNext: nextgi_reflection_behaviours (#132).
+	float nextgi_max_roughness_to_trace = 0.4f;
 	void _update_nextgi();
 
 	// Glow
@@ -364,6 +366,9 @@ public:
 	float get_nextgi_energy() const;
 	void set_nextgi_read_sky_light(bool p_enabled);
 	bool is_nextgi_reading_sky_light() const;
+	// GodotNext: nextgi_reflection_behaviours (#132).
+	void set_nextgi_max_roughness_to_trace(float p_roughness);
+	float get_nextgi_max_roughness_to_trace() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

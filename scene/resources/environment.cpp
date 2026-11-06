@@ -633,8 +633,18 @@ bool Environment::is_nextgi_reading_sky_light() const {
 }
 
 void Environment::_update_nextgi() {
-	RS::get_singleton()->environment_set_nextgi(environment, nextgi_enabled, nextgi_energy, nextgi_read_sky_light);
+	RS::get_singleton()->environment_set_nextgi(environment, nextgi_enabled, nextgi_energy, nextgi_read_sky_light, nextgi_max_roughness_to_trace);
 }
+
+void Environment::set_nextgi_max_roughness_to_trace(float p_roughness) {
+	nextgi_max_roughness_to_trace = p_roughness;
+	_update_nextgi();
+}
+
+float Environment::get_nextgi_max_roughness_to_trace() const {
+	return nextgi_max_roughness_to_trace;
+}
+
 
 // Glow
 
@@ -1470,11 +1480,16 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_nextgi_energy", "energy"), &Environment::set_nextgi_energy);
 	ClassDB::bind_method(D_METHOD("get_nextgi_energy"), &Environment::get_nextgi_energy);
 	ClassDB::bind_method(D_METHOD("set_nextgi_read_sky_light", "enabled"), &Environment::set_nextgi_read_sky_light);
+	// GodotNext: nextgi_reflection_behaviours (#132).
+	ClassDB::bind_method(D_METHOD("set_nextgi_max_roughness_to_trace", "roughness"), &Environment::set_nextgi_max_roughness_to_trace);
+	ClassDB::bind_method(D_METHOD("get_nextgi_max_roughness_to_trace"), &Environment::get_nextgi_max_roughness_to_trace);
 	ClassDB::bind_method(D_METHOD("is_nextgi_reading_sky_light"), &Environment::is_nextgi_reading_sky_light);
 	ADD_GROUP("NextGI", "nextgi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_nextgi_enabled", "is_nextgi_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "nextgi_energy", PROPERTY_HINT_RANGE, "0,16,0.01,or_greater"), "set_nextgi_energy", "get_nextgi_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_read_sky_light"), "set_nextgi_read_sky_light", "is_nextgi_reading_sky_light");
+	// GodotNext: nextgi_reflection_behaviours (#132).
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "nextgi_max_roughness_to_trace", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_nextgi_max_roughness_to_trace", "get_nextgi_max_roughness_to_trace");
 
 	// Glow
 

@@ -208,6 +208,9 @@
 		<member name="nextgi_energy" type="float" setter="set_nextgi_energy" getter="get_nextgi_energy" default="1.0">
 			The energy multiplier for NextGI indirect light. Higher values make the indirect lighting brighter. [code]1.0[/code] is the default.
 		</member>
+		<member name="nextgi_max_roughness_to_trace" type="float" setter="set_nextgi_max_roughness_to_trace" getter="get_nextgi_max_roughness_to_trace" default="0.4">
+			The maximum surface roughness that NextGI traces a specular reflection for; rougher surfaces use the radiance cache instead. This is an upper bound on the quality preset's value, so Medium keeps its [code]0.25[/code] and a lower value refines any preset.
+		</member>
 		<member name="nextgi_read_sky_light" type="bool" setter="set_nextgi_read_sky_light" getter="is_nextgi_reading_sky_light" default="true">
 			If [code]true[/code], NextGI includes sky light in the indirect result. Set this to [code]false[/code] for interior scenes that should not pick up the sky.
 		</member>

@@ -290,6 +290,12 @@ public:
 	};
 	static const QualityParams QUALITY_PARAMS[QUALITY_MAX];
 	static const QualityParams &get_quality_params(Quality p_quality);
+	// GodotNext: nextgi_reflection_behaviours (#132). The Environment value is
+	// a cap: the quality preset keeps its per-tier value, and a lower
+	// Environment value refines it further.
+	static float nextgi_effective_max_roughness(float p_quality, float p_environment) {
+		return CLAMP(MIN(p_quality, p_environment), 0.0f, 1.0f);
+	}
 	static uint32_t nextgi_quality_total_us(Quality p_quality, bool p_apple);
 	Quality get_quality_setting() const { return quality_setting; }
 	static Quality nextgi_auto_quality_from_usec(uint64_t p_usec);

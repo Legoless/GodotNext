@@ -535,7 +535,10 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	params.page_rect_count = relight->get_page_rect_count();
 	const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
-	params.max_trace_roughness = quality.max_trace_roughness;
+	// GodotNext: nextgi_reflection_behaviours (#132). The Environment value caps
+	// the quality preset.
+	const float env_max_roughness = p_render_data->environment.is_valid() ? scene->environment_get_nextgi_max_roughness_to_trace(p_render_data->environment) : 0.4f;
+	params.max_trace_roughness = NextGI::nextgi_effective_max_roughness(quality.max_trace_roughness, env_max_roughness);
 	params.reflect_divisor = float(quality.reflection_divisor);
 	params.reflect_enabled = 1u;
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;

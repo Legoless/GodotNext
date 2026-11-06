@@ -177,6 +177,8 @@ private:
 		// GodotNext: nextgi_user_surface
 		float nextgi_energy = 1.0;
 		bool nextgi_read_sky_light = true;
+		// GodotNext: nextgi_reflection_behaviours (#132).
+		float nextgi_max_roughness_to_trace = 0.4f;
 
 		// Adjustments
 		bool adjustments_enabled = false;
@@ -334,9 +336,11 @@ public:
 	void environment_set_nextgi_enabled(RID p_env, bool p_enabled);
 	bool environment_get_nextgi_enabled(RID p_env) const;
 	// GodotNext: nextgi_user_surface
-	void environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light);
+	void environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness);
 	float environment_get_nextgi_energy(RID p_env) const;
 	bool environment_get_nextgi_read_sky_light(RID p_env) const;
+	// GodotNext: nextgi_reflection_behaviours (#132).
+	float environment_get_nextgi_max_roughness_to_trace(RID p_env) const;
 
 	// Adjustment
 	void environment_set_adjustment(RID p_env, bool p_enable, float p_brightness, float p_contrast, float p_saturation, bool p_use_1d_color_correction, RID p_color_correction);

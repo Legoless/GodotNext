@@ -935,10 +935,11 @@ public:
 	// GodotNext: nextgi_tier
 	FUNC2(environment_set_nextgi_enabled, RID, bool)
 	// GodotNext: nextgi_user_surface
-	FUNC4(environment_set_nextgi, RID, bool, float, bool)
+	FUNC5(environment_set_nextgi, RID, bool, float, bool, float)
 	FUNC1RC(bool, environment_get_nextgi_enabled, RID)
 	FUNC1RC(float, environment_get_nextgi_energy, RID)
 	FUNC1RC(bool, environment_get_nextgi_read_sky_light, RID)
+	FUNC1RC(float, environment_get_nextgi_max_roughness_to_trace, RID)
 	FUNC1(nextgi_set_hardware_ray_tracing, int)
 	FUNC0RC(Dictionary, nextgi_get_tier_info)
 

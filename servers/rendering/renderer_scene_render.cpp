@@ -595,8 +595,8 @@ bool RendererSceneRender::environment_get_nextgi_enabled(RID p_env) const {
 }
 
 // GodotNext: nextgi_user_surface
-void RendererSceneRender::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light) {
-	environment_storage.environment_set_nextgi(p_env, p_enabled, p_energy, p_read_sky_light);
+void RendererSceneRender::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness) {
+	environment_storage.environment_set_nextgi(p_env, p_enabled, p_energy, p_read_sky_light, p_max_roughness);
 }
 
 float RendererSceneRender::environment_get_nextgi_energy(RID p_env) const {
@@ -606,6 +606,11 @@ float RendererSceneRender::environment_get_nextgi_energy(RID p_env) const {
 bool RendererSceneRender::environment_get_nextgi_read_sky_light(RID p_env) const {
 	return environment_storage.environment_get_nextgi_read_sky_light(p_env);
 }
+
+float RendererSceneRender::environment_get_nextgi_max_roughness_to_trace(RID p_env) const {
+	return environment_storage.environment_get_nextgi_max_roughness_to_trace(p_env);
+}
+
 
 Dictionary RendererSceneRender::nextgi_get_tier_info() const {
 	// NextGI runs only on the Forward+ RD renderer (plan §3.1, tier matrix row 14).
