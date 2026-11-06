@@ -178,6 +178,34 @@ void NextGIGlobalSDF::compose_brick(const Vector<Instance> &p_instances, uint32_
 	}
 }
 
+uint32_t NextGIGlobalSDF::cull_instances_for_brick(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, uint32_t *r_indices, uint32_t p_max_indices) {
+	const float voxel = level_voxel_size(p_level);
+	const float brick_size = voxel * float(BRICK_SIZE);
+	const Vector3 brick_min(
+			float(p_origin.x + p_brick.x * int(BRICK_SIZE)) * voxel,
+			float(p_origin.y + p_brick.y * int(BRICK_SIZE)) * voxel,
+			float(p_origin.z + p_brick.z * int(BRICK_SIZE)) * voxel);
+	AABB brick_aabb(brick_min, Vector3(brick_size, brick_size, brick_size));
+	// One voxel of band on top of the brick keeps the min-composite conservative.
+	brick_aabb.grow_by(voxel);
+	uint32_t count = 0;
+	for (uint32_t index = 0; index < uint32_t(p_instances.size()); index++) {
+		const Instance &instance = p_instances[index];
+		if (instance.field == nullptr || !instance.field->is_valid()) {
+			continue;
+		}
+		const AABB world_bounds = instance.transform.xform(instance.field->bounds);
+		if (!world_bounds.intersects(brick_aabb)) {
+			continue;
+		}
+		if (count < p_max_indices) {
+			r_indices[count] = index;
+		}
+		count++;
+	}
+	return MIN(count, p_max_indices);
+}
+
 void NextGIGlobalSDF::dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count) {
 	r_count = 0;
 	const float brick_world = level_voxel_size(0) * float(BRICK_SIZE);

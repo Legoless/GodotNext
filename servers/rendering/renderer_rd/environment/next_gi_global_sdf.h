@@ -87,6 +87,11 @@ public:
 	static float reference_distance(const Vector<Instance> &p_instances, const Vector3 &p_world);
 	// Composes one brick's voxel centers, in brick-local voxel order.
 	static void compose_brick(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, float *r_voxels);
+	// The instances whose mesh-SDF band can reach a level brick. The caller
+	// min-composites only these into the brick; dynamic and two-sided instances
+	// keep their flags for the static/dynamic split and the coverage bit.
+	static uint32_t cull_instances_for_brick(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, uint32_t *r_indices, uint32_t p_max_indices);
+
 	// The level-0 bricks an instance's old and new AABBs touch; the caller
 	// recomposes only these (dirty bricks).
 	static void dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count);

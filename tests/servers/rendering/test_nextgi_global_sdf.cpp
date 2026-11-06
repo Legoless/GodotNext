@@ -292,3 +292,43 @@ TEST_CASE("[NextGI][GlobalSDF] Coarse level resample and propagation") {
 		CHECK(relaxed[index] < 1e29f);
 	}
 }
+
+TEST_CASE("[NextGI][GlobalSDF] Brick instance culling and flags") {
+	const MeshSDFData wall = _wall_sdf();
+	Vector<NextGIGlobalSDF::Instance> instances;
+	NextGIGlobalSDF::Instance near_instance;
+	near_instance.field = &wall;
+	instances.push_back(near_instance);
+	NextGIGlobalSDF::Instance far_instance;
+	far_instance.field = &wall;
+	far_instance.transform.origin = Vector3(100.0f, 0.0f, 0.0f);
+	far_instance.dynamic = true;
+	far_instance.two_sided = true;
+	instances.push_back(far_instance);
+
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(-1.0f, -1.0f, -1.0f), 0);
+	uint32_t indices[8];
+	// The brick containing the origin is reached by the near instance only.
+	const uint32_t near_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, Vector3i(2, 2, 2), indices, 8);
+	REQUIRE_EQ(near_count, uint32_t(1));
+	CHECK_EQ(indices[0], uint32_t(0));
+	CHECK_FALSE(instances[indices[0]].dynamic);
+	CHECK_FALSE(instances[indices[0]].two_sided);
+
+	// A far brick sees neither instance.
+	const uint32_t far_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, Vector3i(15, 15, 15), indices, 8);
+	CHECK_EQ(far_count, uint32_t(0));
+
+	// Moving the near instance out leaves its old brick empty.
+	instances.write[0].transform.origin = Vector3(-100.0f, 0.0f, 0.0f);
+	const uint32_t moved_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, Vector3i(2, 2, 2), indices, 8);
+	CHECK_EQ(moved_count, uint32_t(0));
+
+	// The capacity clamps, and the dynamic/two-sided flags ride on the instance.
+	instances.write[0].transform.origin = Vector3();
+	instances.write[1].transform.origin = Vector3();
+	const uint32_t clamped = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, Vector3i(2, 2, 2), indices, 1);
+	CHECK_EQ(clamped, uint32_t(1));
+	CHECK(instances[1].dynamic);
+	CHECK(instances[1].two_sided);
+}
