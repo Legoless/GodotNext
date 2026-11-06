@@ -5,7 +5,7 @@ description: Picks a ready GodotNext issue, implements it Metal-first, passes th
 
 # Implement a GodotNext issue
 
-GodotNext is a Godot fork that brings full UE 5.8 rendering parity to v1. Every task is a GitHub issue on `Legoless/GodotNext`, written from the plan in `docs/godotnext/nextgi-nextgeo-plan.html`. This skill takes one issue from "ready" to "closed on master".
+GodotNext is a Godot fork that brings full UE rendering parity to v1: UE 5.8, with Nanite and Lumen at UE 5.9 (§25). Every task is a GitHub issue on `Legoless/GodotNext`, written from the plan in `docs/godotnext/nextgi-nextgeo-plan.html`. This skill takes one issue from "ready" to "closed on master".
 
 ## 1. Pick a ready issue
 
@@ -33,7 +33,7 @@ Every task body has the same sections:
 | Section | Use |
 |---|---|
 | Summary | What to build |
-| Plan reference | Read these plan sections before coding (`#steps` is §12, `#parity` §21, `#build-first` §22, `#ue-bar` §23, `#metal-first` §24, `#legal` §19) |
+| Plan reference | Read these plan sections before coding (`#steps` is §12, `#parity` §21, `#build-first` §22, `#ue-bar` §23, `#metal-first` §24, `#ue59` §25, `#legal` §19) |
 | Dependencies | Generated; don't edit by hand |
 | Implementation steps | The intended approach, with file and line pointers into the fork |
 | Acceptance criteria | "PR basics" (do now) and "Measured in PQ" (leave unticked; PQ runs them) |
@@ -112,7 +112,7 @@ git push origin master
   - Never read Unreal Engine source or shaders, or any UE plugin source (including NVIDIA's UE DLSS plugin).
   - Never read NvRTX, or the DLSS sample or Donut source.
   - Never use decompiled binaries or model output that reproduces such code.
-  - UE 5.8 runs only as a black-box binary for the comparison (§23.7), and UE projects stay outside this repository.
+  - UE (5.9 for the comparison, §25.4) runs only as a black-box binary for the comparison (§23.7), and UE projects stay outside this repository.
 - **The NVIDIA SDK:** never commit NVIDIA SDK files. The DLSS SDK stays developer-supplied, outside the tree, and CI uses the mock backend.
 - **Scope:** don't change scope silently. If the work shows the plan is wrong, change the plan with `godotnext-plan-revision` first.
 - **Third-party code:** it needs its upstream URL, version, license and modifications recorded before it merges (§19, vendoring gate).

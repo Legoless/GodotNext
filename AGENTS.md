@@ -1,6 +1,6 @@
 # GodotNext agent guide
 
-GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.8 rendering parity to v1. That means NextGI (Lumen-class global illumination), NextGeo (Nanite-class geometry), virtual shadow maps, MegaLights, a path tracer, TSR and full DLSS.
+GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine rendering parity to v1: UE 5.8, with Nanite and Lumen at UE 5.9 (plan §25). That means NextGI (Lumen-class global illumination), NextGeo (Nanite-class geometry), virtual shadow maps, MegaLights, a path tracer, TSR and full DLSS.
 
 ## Where things are
 
@@ -9,6 +9,7 @@ GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.8 ren
   - §22: build-first execution and the final test phase (PQ).
   - §23: the test fleet and the UE 5.8 bar.
   - §24: the Metal-first build order.
+  - §25: UE 5.9 for Nanite and Lumen, and the UE 5.9 comparison build.
   - §19: the clean room.
 - **The work breakdown:** issues on `Legoless/GodotNext`. The roadmap tracker is #2, the phase epics are its sub-issues, and the final test phase is #224.
 - **The build tracker:** `docs/godotnext/tracker/index.html`, the project-manager view of progress.
@@ -21,7 +22,7 @@ GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.8 ren
 - **The clean room (§19):**
   - Never read Unreal Engine source or shaders, UE plugin source (including NVIDIA's UE DLSS plugin), NvRTX, or the DLSS sample and Donut source.
   - Never commit NVIDIA SDK files.
-  - UE 5.8 runs only as a black-box binary for the performance comparison, and UE projects stay outside this repository.
+  - UE (5.9 for the comparison, §25) runs only as a black-box binary for the performance comparison, and UE projects stay outside this repository.
 - **No upstream merges in v1 (§18.1).** The fork stays on its Godot 4.8-beta snapshot. A needed upstream fix is cherry-picked by hand as a normal commit (see `docs/godotnext/fork-maintenance.md`).
 - **Tests.** Add tests for new code, and never skip, disable or conditionally skip a test.
 - **Landing work.** The lead decided on 2026-11-03: commit finished issue work straight to master with "Closes #N" and push. No branches or PRs unless the lead asks. No AI attribution or `Co-Authored-By` lines.
