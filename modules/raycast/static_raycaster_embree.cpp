@@ -36,7 +36,10 @@
 #include <pmmintrin.h>
 #endif
 
-RTCDevice StaticRaycasterEmbree::embree_device;
+RTCDevice StaticRaycasterEmbree::embree_device = nullptr;
+BinaryMutex StaticRaycasterEmbree::embree_device_mutex;
+ConditionVariable StaticRaycasterEmbree::embree_device_idle;
+uint32_t StaticRaycasterEmbree::embree_device_users = 0;
 
 Ref<StaticRaycaster> StaticRaycasterEmbree::create_embree_raycaster() {
 	return memnew(StaticRaycasterEmbree);
@@ -47,8 +50,13 @@ void StaticRaycasterEmbree::make_default_raycaster() {
 }
 
 void StaticRaycasterEmbree::free() {
+	MutexLock lock(embree_device_mutex);
+	while (embree_device_users > 0) {
+		embree_device_idle.wait(lock);
+	}
 	if (embree_device) {
 		rtcReleaseDevice(embree_device);
+		embree_device = nullptr;
 	}
 }
 
@@ -123,17 +131,25 @@ StaticRaycasterEmbree::StaticRaycasterEmbree() {
 	_MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 #endif
 
+	MutexLock lock(embree_device_mutex);
 	if (!embree_device) {
 		embree_device = rtcNewDevice(nullptr);
 		rtcSetDeviceErrorFunction(embree_device, &embree_error_handler, nullptr);
 	}
 
 	embree_scene = rtcNewScene(embree_device);
+	embree_device_users++;
 }
 
 StaticRaycasterEmbree::~StaticRaycasterEmbree() {
 	if (embree_scene != nullptr) {
 		rtcReleaseScene(embree_scene);
+	}
+	MutexLock lock(embree_device_mutex);
+	DEV_ASSERT(embree_device_users > 0);
+	embree_device_users--;
+	if (embree_device_users == 0) {
+		embree_device_idle.notify_all();
 	}
 }
 

@@ -30,10 +30,9 @@
 
 #include "next_gi_rt_scene.h"
 
-#include "next_gi_sdf_stream.h"
-
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_sdf_stream.h"
 #include "servers/rendering/rendering_server_globals.h"
 
 #include <algorithm>
@@ -497,6 +496,7 @@ void NextGIRTScene::free() {
 		memdelete(sdf_stream);
 		sdf_stream = nullptr;
 	}
+	sdf_instances.clear();
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
 		tlas = RID();

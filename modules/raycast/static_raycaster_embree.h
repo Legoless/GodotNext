@@ -33,6 +33,7 @@
 #ifdef TOOLS_ENABLED
 
 #include "core/math/static_raycaster.h"
+#include "core/os/condition_variable.h"
 
 #include <embree4/rtcore.h>
 
@@ -41,7 +42,10 @@ class StaticRaycasterEmbree : public StaticRaycaster {
 
 private:
 	static RTCDevice embree_device;
-	RTCScene embree_scene;
+	static BinaryMutex embree_device_mutex;
+	static ConditionVariable embree_device_idle;
+	static uint32_t embree_device_users;
+	RTCScene embree_scene = nullptr;
 
 	HashSet<int> filter_meshes;
 

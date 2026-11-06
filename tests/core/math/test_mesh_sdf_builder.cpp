@@ -37,6 +37,7 @@ TEST_FORCE_LINK(test_mesh_sdf_builder)
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
 #include "core/math/mesh_sdf_builder.h"
+#include "core/object/worker_thread_pool.h"
 #include "scene/resources/3d/mesh_distance_field.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/mesh.h"
@@ -316,6 +317,38 @@ TEST_CASE("[MeshSDF][SceneTree] Empty input fails without a field") {
 	Error err = MeshSDFBuilder::build(Vector<Face3>(), settings, data);
 	CHECK(err != OK);
 	CHECK_FALSE(data.is_valid());
+}
+
+struct ConcurrentBuild {
+	const Vector<Face3> *faces = nullptr;
+	MeshSDFSettings settings;
+	MeshSDFData data;
+	Error error = FAILED;
+};
+
+static void run_concurrent_build(void *p_userdata) {
+	ConcurrentBuild *build = static_cast<ConcurrentBuild *>(p_userdata);
+	build->error = MeshSDFBuilder::build(*build->faces, build->settings, build->data);
+}
+
+TEST_CASE("[MeshSDF][SceneTree] Concurrent builds are independent") {
+	Ref<BoxMesh> box;
+	box.instantiate();
+	const Vector<Face3> faces = box->get_faces();
+	constexpr int BUILD_COUNT = 16;
+	ConcurrentBuild builds[BUILD_COUNT];
+	WorkerThreadPool::TaskID tasks[BUILD_COUNT];
+	for (int i = 0; i < BUILD_COUNT; i++) {
+		builds[i].faces = &faces;
+		builds[i].settings.voxels_per_meter = 8.0f;
+		tasks[i] = WorkerThreadPool::get_singleton()->add_native_task(&run_concurrent_build, &builds[i], false, "Concurrent mesh SDF test");
+	}
+	for (int i = 0; i < BUILD_COUNT; i++) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(tasks[i]);
+		CHECK(builds[i].error == OK);
+		CHECK(builds[i].data.is_valid());
+		CHECK(builds[i].data.sample_distance(Vector3()) < 0.0f);
+	}
 }
 
 } // namespace TestMeshSDFBuilder

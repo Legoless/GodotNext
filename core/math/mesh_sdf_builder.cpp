@@ -459,9 +459,10 @@ Error MeshSDFBuilder::build(const Vector<Face3> &p_faces, const MeshSDFSettings 
 	job.cells = dense.ptrw();
 
 	MeshSDFBuilder builder;
-	if (WorkerThreadPool::get_singleton() != nullptr) {
-		WorkerThreadPool::GroupID group = WorkerThreadPool::get_singleton()->add_template_group_task(&builder, &MeshSDFBuilder::_compute_sdf_z, &job, dimensions.z);
-		WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group);
+	WorkerThreadPool *pool = WorkerThreadPool::get_singleton();
+	if (pool != nullptr && pool->get_thread_index() == -1) {
+		WorkerThreadPool::GroupID group = pool->add_template_group_task(&builder, &MeshSDFBuilder::_compute_sdf_z, &job, dimensions.z);
+		pool->wait_for_group_task_completion(group);
 	} else {
 		for (int z = 0; z < dimensions.z; z++) {
 			builder._compute_sdf_z(uint32_t(z), &job);

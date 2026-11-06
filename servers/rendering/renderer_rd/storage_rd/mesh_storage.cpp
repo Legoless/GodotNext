@@ -204,6 +204,15 @@ MeshStorage::MeshStorage() :
 }
 
 MeshStorage::~MeshStorage() {
+	for (SDFJobState &state : sdf_jobs) {
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(state.task);
+		memdelete(state.job);
+	}
+	sdf_jobs.clear();
+	sdf_pending.clear();
+	sdf_atlas.free_all();
+	sdf_baked.clear();
+
 	//def buffers
 	for (int i = 0; i < DEFAULT_RD_BUFFER_MAX; i++) {
 		RD::get_singleton()->free_rid(mesh_default_rd_buffers[i]);

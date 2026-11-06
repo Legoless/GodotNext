@@ -448,12 +448,12 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 // GodotNext: nextgi_rt_scene
-#include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
-#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "core/math/mesh_sdf_builder.h"
 #include "core/math/random_number_generator.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "scene/resources/mesh.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 // GodotNext: nextgi_as_slots
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -2617,6 +2617,10 @@ TEST_CASE("[NextGI][SDF] Instance table reasons and world-to-local") {
 	CHECK_EQ(instances.get_reason_count(NEXTGI_SDF_UNSUPPORTED_DEFORMATION), uint32_t(1));
 	CHECK_EQ(instances.get_reason_count(NEXTGI_SDF_NO_FIELD), uint32_t(1));
 	CHECK_EQ(instances.get_count(), uint32_t(3));
+
+	instances.clear();
+	CHECK_EQ(instances.get_count(), uint32_t(0));
+	CHECK(instances.get_buffer().is_null());
 
 	// free_all releases every brick and forgets the mesh ids.
 	atlas.free_all();
