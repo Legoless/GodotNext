@@ -16,13 +16,13 @@ affiliation or compatibility.
 Project-approved study inputs are:
 
 - Public papers, official public documentation, and conference talks.
-  This includes public Unreal Engine 5.8 documentation and
-  Epic/SIGGRAPH talks (Lumen 2022, MegaLights 2025).
+  This includes public Unreal Engine 5.8 and 5.9 documentation and
+  release notes, and Epic/SIGGRAPH talks (Lumen 2022, MegaLights 2025).
 - Observed editor behavior and debug views. Running the Unreal Engine
-  5.8 editor and packaged builds for the performance comparison counts
-  here: Unreal Engine 5.8 is used only as a black-box binary, it is
-  never built from source, and Unreal Engine projects stay outside this
-  repository (§23.7).
+  5.9 editor and packaged builds for the performance comparison counts
+  here (the plan targets UE 5.9 since v3.6, §25): Unreal Engine is used
+  only as a black-box binary, it is never built from source, and Unreal
+  Engine projects stay outside this repository (§23.7).
 - Permissively licensed source whose license has been recorded,
   including Khronos, Apple and Microsoft specifications and samples with
   recorded licenses.

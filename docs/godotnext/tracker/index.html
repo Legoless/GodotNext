@@ -198,7 +198,7 @@
     </section>
     <section id="test">
       <div class="sh"><h2>Final test</h2><span class="k">18 gates · milestone MQ</span></div>
-      <div class="rule"><span>Every timing test must be within</span><b>1.20×</b><span>of UE 5.8 on the same machine.</span></div>
+      <div class="rule"><span>Every timing test must be within</span><b>1.20×</b><span>of UE 5.9 on the same machine.</span></div>
       <div class="gatebox" id="gates"></div>
       <ul class="fleet" id="fleet"></ul>
     </section>
@@ -250,7 +250,7 @@
     ['Geometry', [['P4', 'Huge meshes imported and prepared for streaming'], ['P5', 'Film-quality geometry drawn in real time'], ['PN', 'Full Nanite set: foliage, characters, displacement']]],
     ['Shadows and lights', [['PV', 'Sharp shadows across huge scenes'], ['PM', 'Thousands of lights, all casting shadows']]],
     ['Image quality', [['PU', 'NVIDIA DLSS upscaling'], ['PT', 'TSR, the default upscaler'], ['PU+', 'DLSS frame generation and ray reconstruction'], ['PP', 'Built-in path tracer for reference renders']]],
-    ['Release prep', [['PQ', 'Test machines and UE 5.8 comparison scenes']]],
+    ['Release prep', [['PQ', 'Test machines and UE 5.9 comparison scenes']]],
   ];
   // Milestones: when each part of the engine is code-complete (plan §14).
   const MILESTONES = [
@@ -451,7 +451,7 @@
     item(true, 'RTX 4080 SUPER', 'ready');
     item(states[227] === 'CLOSED', 'RTX 5090 in a second machine', states[227] === 'CLOSED' ? 'ready' : 'to set up');
     item(true, 'M5 Max for Metal', 'ready');
-    item(ue.length > 0 && ueDone === ue.length, 'UE 5.8 comparison scenes', `${ueDone} of ${ue.length}`);
+    item(ue.length > 0 && ueDone === ue.length, 'UE 5.9 comparison scenes', `${ueDone} of ${ue.length}`);
   }
 
   const view = { q: '', phase: '', status: '', sort: 'phase_order', dir: 1 };

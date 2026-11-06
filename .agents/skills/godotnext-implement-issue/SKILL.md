@@ -5,7 +5,7 @@ description: Picks a ready GodotNext issue, implements it Metal-first, passes th
 
 # Implement a GodotNext issue
 
-GodotNext is a Godot fork that brings full UE rendering parity to v1: UE 5.8, with Nanite and Lumen at UE 5.9 (§25). Every task is a GitHub issue on `Legoless/GodotNext`, written from the plan in `docs/godotnext/nextgi-nextgeo-plan.html`. This skill takes one issue from "ready" to "closed on master".
+GodotNext is a Godot fork that brings full UE 5.9 rendering parity to v1 (§25). Every task is a GitHub issue on `Legoless/GodotNext`, written from the plan in `docs/godotnext/nextgi-nextgeo-plan.html`. This skill takes one issue from "ready" to "closed on master".
 
 ## 1. Pick a ready issue
 

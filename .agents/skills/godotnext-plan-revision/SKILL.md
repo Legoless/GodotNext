@@ -17,11 +17,11 @@ The plan is one HTML file, `docs/godotnext/nextgi-nextgeo-plan.html`, and it's t
 | `steps`, `validation`, `estimates` | §12–§14: phases and gates, validation plan and scenes, estimates and the milestone table |
 | `risks`, `alternatives`, `backlog`, `open` | §15–§18: risks, rejected alternatives, first backlog, open questions and §18.1 lead decisions |
 | `legal`, `sources` | §19–§20: clean room and licenses, sources |
-| `parity` … `parity-upscaling` | §21: the UE 5.8 parity program (PR, PD, PS, PL, PV, PM, PP, PN, PT, PU+) |
+| `parity` … `parity-upscaling` | §21: the UE parity program (PR, PD, PS, PL, PV, PM, PP, PN, PT, PU+) |
 | `build-first` | §22: build-first execution, PR basics, smoke scenes, PQ, and the integrator defaults (§22.10) |
-| `ue-bar` | §23: the two-card test fleet and the ≤1.20× UE 5.8 bar |
+| `ue-bar` | §23: the two-card test fleet and the ≤1.20× UE 5.9 bar |
 | `metal-first` | §24: the Metal-first build order |
-| `ue59` | §25: UE 5.9 for Nanite and Lumen, and the UE 5.9 comparison build |
+| `ue59` | §25: UE 5.9 as the v1 target, and how 5.9 changes enter the plan |
 | `revisions`, `evidence` | Appendix A revision history, Appendix B evidence index |
 
 The head (before `goal`) holds the version chip, the one-page summary, the milestone table and the table of contents.
@@ -71,8 +71,8 @@ Splitting and joining are lossless: join(split(plan)) is byte-identical.
 ## Standing rules a revision must not break without a lead decision
 
 - **Build first (§22).** Only PR basics run during the build. Every gate and spike runs together in PQ, and v1 signs off at MQ. M0–M8 are code-complete checkpoints, not releases.
-- **The fleet and the bar (§23).** The RTX 4080 SUPER and the RTX 5090 (each in its own machine) run every NVIDIA line, and the M5 Max runs Metal. Timing lines pass at ≤1.20× UE 5.8 on the same machine; fixed ms values are report-only.
+- **The fleet and the bar (§23).** The RTX 4080 SUPER and the RTX 5090 (each in its own machine) run every NVIDIA line, and the M5 Max runs Metal. Timing lines pass at ≤1.20× UE 5.9 on the same machine; fixed ms values are report-only.
 - **Metal first (§24).** P0 and P1 are built on the M5 Max; P2 is Vulkan/NVIDIA.
-- **UE versions (§25).** Nanite and Lumen follow UE 5.9 and the rest UE 5.8; PQ compares against UE 5.9 final.
+- **UE version (§25).** v1 targets UE 5.9; UE 5.8 facts stand until the §25.3 re-check; PQ compares against UE 5.9 final.
 - **The clean room and licenses (§19).**
 - **Defaults and decisions.** The ten §22.10 integrator defaults and decisions D1–D22.

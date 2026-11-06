@@ -1,15 +1,15 @@
 # GodotNext agent guide
 
-GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine rendering parity to v1: UE 5.8, with Nanite and Lumen at UE 5.9 (plan §25). That means NextGI (Lumen-class global illumination), NextGeo (Nanite-class geometry), virtual shadow maps, MegaLights, a path tracer, TSR and full DLSS.
+GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.9 rendering parity to v1 (plan §25). That means NextGI (Lumen-class global illumination), NextGeo (Nanite-class geometry), virtual shadow maps, MegaLights, a path tracer, TSR and full DLSS.
 
 ## Where things are
 
 - **The plan:** `docs/godotnext/nextgi-nextgeo-plan.html`. It's the source of truth.
   - §12 and §21: phases and gates.
   - §22: build-first execution and the final test phase (PQ).
-  - §23: the test fleet and the UE 5.8 bar.
+  - §23: the test fleet and the UE bar.
   - §24: the Metal-first build order.
-  - §25: UE 5.9 for Nanite and Lumen, and the UE 5.9 comparison build.
+  - §25: UE 5.9 as the v1 target, and how 5.9 changes enter the plan.
   - §19: the clean room.
 - **The work breakdown:** issues on `Legoless/GodotNext`. The roadmap tracker is #2, the phase epics are its sub-issues, and the final test phase is #224.
 - **The build tracker:** `docs/godotnext/tracker/index.html`, the project-manager view of progress.
