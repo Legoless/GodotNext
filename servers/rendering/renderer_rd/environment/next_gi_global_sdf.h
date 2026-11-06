@@ -94,6 +94,12 @@ public:
 	NextGIGlobalSDF();
 	~NextGIGlobalSDF();
 
+	static constexpr uint32_t COARSE_VOXELS = COARSE_SIZE * COARSE_SIZE * COARSE_SIZE;
+	// 1/4-resolution coarse level: resample the field at the coarse centres,
+	// then relax with 4 forward/backward neighbour sweeps (plan §21.2 step 4).
+	static void build_coarse(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_iterations, LocalVector<float> &r_coarse);
+	static float coarse_voxel_size(uint32_t p_level) { return 4.0f * level_voxel_size(p_level); }
+
 	// Rebuilds the bricks of one level overlapping p_world_bounds and returns
 	// how many were written. Bricks outside the level are skipped.
 	uint32_t update_region(uint32_t p_level, const Vector3i &p_origin, const AABB &p_world_bounds, const Vector<Instance> &p_instances);

@@ -218,6 +218,65 @@ void NextGIGlobalSDF::dirty_bricks(const AABB &p_old_world, const AABB &p_new_wo
 	add(p_new_world);
 }
 
+void NextGIGlobalSDF::build_coarse(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_iterations, LocalVector<float> &r_coarse) {
+	r_coarse.resize(COARSE_VOXELS);
+	const float step = coarse_voxel_size(p_level);
+	for (uint32_t z = 0; z < COARSE_SIZE; z++) {
+		for (uint32_t y = 0; y < COARSE_SIZE; y++) {
+			for (uint32_t x = 0; x < COARSE_SIZE; x++) {
+				// The coarse voxel sits at 4x the fine voxel stride.
+				const Vector3 world(
+						float(p_origin.x + int(x) * 4) * level_voxel_size(p_level) + step * 0.5f,
+						float(p_origin.y + int(y) * 4) * level_voxel_size(p_level) + step * 0.5f,
+						float(p_origin.z + int(z) * 4) * level_voxel_size(p_level) + step * 0.5f);
+				r_coarse[x + y * COARSE_SIZE + z * COARSE_SIZE * COARSE_SIZE] = reference_distance(p_instances, world);
+			}
+		}
+	}
+	// Fast-sweep relaxation: a neighbour that already holds a finite distance
+	// can only lower this voxel, so apply the six-neighbour rule in both
+	// directions p_iterations times.
+	auto relax = [&](uint32_t x, uint32_t y, uint32_t z) {
+		const uint32_t index = x + y * COARSE_SIZE + z * COARSE_SIZE * COARSE_SIZE;
+		float value = r_coarse[index];
+		if (x > 0) {
+			value = MIN(value, r_coarse[index - 1] + step);
+		}
+		if (y > 0) {
+			value = MIN(value, r_coarse[index - COARSE_SIZE] + step);
+		}
+		if (z > 0) {
+			value = MIN(value, r_coarse[index - COARSE_SIZE * COARSE_SIZE] + step);
+		}
+		if (x + 1 < COARSE_SIZE) {
+			value = MIN(value, r_coarse[index + 1] + step);
+		}
+		if (y + 1 < COARSE_SIZE) {
+			value = MIN(value, r_coarse[index + COARSE_SIZE] + step);
+		}
+		if (z + 1 < COARSE_SIZE) {
+			value = MIN(value, r_coarse[index + COARSE_SIZE * COARSE_SIZE] + step);
+		}
+		r_coarse[index] = value;
+	};
+	for (uint32_t iteration = 0; iteration < p_iterations; iteration++) {
+		for (uint32_t z = 0; z < COARSE_SIZE; z++) {
+			for (uint32_t y = 0; y < COARSE_SIZE; y++) {
+				for (uint32_t x = 0; x < COARSE_SIZE; x++) {
+					relax(x, y, z);
+				}
+			}
+		}
+		for (int z = int(COARSE_SIZE) - 1; z >= 0; z--) {
+			for (int y = int(COARSE_SIZE) - 1; y >= 0; y--) {
+				for (int x = int(COARSE_SIZE) - 1; x >= 0; x--) {
+					relax(uint32_t(x), uint32_t(y), uint32_t(z));
+				}
+			}
+		}
+	}
+}
+
 NextGIGlobalSDF::NextGIGlobalSDF() {
 	bricks.resize(MAX_LEVELS);
 }

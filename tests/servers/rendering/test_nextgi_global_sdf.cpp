@@ -251,3 +251,44 @@ TEST_CASE("[NextGI][GlobalSDF] Level cadence and scroll reuse") {
 	CHECK_EQ(count, SDF::BRICKS_PER_LEVEL);
 	CHECK_EQ(SDF::scrolled_edge_bricks(Vector3i(), bricks, 4096), uint32_t(0));
 }
+
+TEST_CASE("[NextGI][GlobalSDF] Coarse level resample and propagation") {
+	const MeshSDFData wall = _wall_sdf();
+	Vector<NextGIGlobalSDF::Instance> instances;
+	NextGIGlobalSDF::Instance instance;
+	instance.field = &wall;
+	instances.push_back(instance);
+
+	CHECK_EQ(NextGIGlobalSDF::COARSE_VOXELS, uint32_t(32 * 32 * 32));
+	CHECK(Math::is_equal_approx(NextGIGlobalSDF::coarse_voxel_size(0), 0.4f));
+
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(-1.0f, -1.0f, -1.0f), 0);
+	LocalVector<float> raw;
+	LocalVector<float> relaxed;
+	NextGIGlobalSDF::build_coarse(instances, 0, origin, 0, raw);
+	NextGIGlobalSDF::build_coarse(instances, 0, origin, 4, relaxed);
+	CHECK_EQ(raw.size(), NextGIGlobalSDF::COARSE_VOXELS);
+	REQUIRE_EQ(relaxed.size(), NextGIGlobalSDF::COARSE_VOXELS);
+
+	// The raw resample matches the brute-force field at the coarse centres.
+	float max_error = 0.0f;
+	for (uint32_t z = 0; z < 32; z++) {
+		for (uint32_t y = 0; y < 32; y++) {
+			for (uint32_t x = 0; x < 32; x++) {
+				const Vector3 world(
+						float(origin.x + int(x) * 4) * 0.1f + 0.2f,
+						float(origin.y + int(y) * 4) * 0.1f + 0.2f,
+						float(origin.z + int(z) * 4) * 0.1f + 0.2f);
+				const uint32_t index = x + y * 32 + z * 32 * 32;
+				max_error = MAX(max_error, Math::abs(raw[index] - NextGIGlobalSDF::reference_distance(instances, world)));
+			}
+		}
+	}
+	CHECK(max_error <= NextGIGlobalSDF::coarse_voxel_size(0));
+
+	// Propagation only lowers values and fills the whole level.
+	for (uint32_t index = 0; index < NextGIGlobalSDF::COARSE_VOXELS; index++) {
+		CHECK(relaxed[index] <= raw[index] + 0.0001f);
+		CHECK(relaxed[index] < 1e29f);
+	}
+}
