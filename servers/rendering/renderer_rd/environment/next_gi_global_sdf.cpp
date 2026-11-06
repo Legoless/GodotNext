@@ -91,6 +91,49 @@ Vector3i NextGIGlobalSDF::scrolled_origin(const Vector3 &p_camera, uint32_t p_le
 			_floor_div(voxel.z, int(BRICK_SIZE)) * int(BRICK_SIZE));
 }
 
+bool NextGIGlobalSDF::level_updates_on_frame(uint32_t p_level, uint64_t p_frame) {
+	if (p_level >= MAX_LEVELS) {
+		return false;
+	}
+	const uint64_t interval = uint64_t(1) << p_level;
+	return (p_frame & (interval - 1)) == 0;
+}
+
+Vector3i NextGIGlobalSDF::scroll_brick_delta(const Vector3i &p_old_origin, const Vector3i &p_new_origin) {
+	return Vector3i(
+			_floor_div(p_new_origin.x, int(BRICK_SIZE)) - _floor_div(p_old_origin.x, int(BRICK_SIZE)),
+			_floor_div(p_new_origin.y, int(BRICK_SIZE)) - _floor_div(p_old_origin.y, int(BRICK_SIZE)),
+			_floor_div(p_new_origin.z, int(BRICK_SIZE)) - _floor_div(p_old_origin.z, int(BRICK_SIZE)));
+}
+
+uint32_t NextGIGlobalSDF::scrolled_edge_bricks(const Vector3i &p_delta_bricks, Vector3i *r_bricks, uint32_t p_max_bricks) {
+	uint32_t count = 0;
+	const int page = int(PAGE_SIZE);
+	auto append = [&](int x, int y, int z) {
+		if (x < 0 || y < 0 || z < 0 || x >= page || y >= page || z >= page || count >= p_max_bricks) {
+			return;
+		}
+		r_bricks[count++] = Vector3i(x, y, z);
+	};
+	// Walk the new page table and keep bricks that fall outside the shifted
+	// old range. A full-table walk is cheap (4096 entries) and exact for
+	// multi-axis scrolls.
+	for (int z = 0; z < page; z++) {
+		for (int y = 0; y < page; y++) {
+			for (int x = 0; x < page; x++) {
+				const int old_x = x + p_delta_bricks.x;
+				const int old_y = y + p_delta_bricks.y;
+				const int old_z = z + p_delta_bricks.z;
+				if (old_x >= 0 && old_y >= 0 && old_z >= 0 && old_x < page && old_y < page && old_z < page) {
+					continue; // Reused by the shift.
+				}
+				append(x, y, z);
+			}
+		}
+	}
+	return count;
+}
+
 Vector3i NextGIGlobalSDF::world_to_voxel(uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world) {
 	const float voxel_size = level_voxel_size(p_level);
 	return Vector3i(

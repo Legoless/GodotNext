@@ -72,6 +72,13 @@ public:
 	static uint32_t level_for_distance(float p_distance, uint32_t p_levels);
 	// Camera-scrolled level origin in voxels, snapped to the brick size.
 	static Vector3i scrolled_origin(const Vector3 &p_camera, uint32_t p_level);
+	// Level i updates every 2^i frames (plan §21.2 step 3).
+	static bool level_updates_on_frame(uint32_t p_level, uint64_t p_frame);
+	// The brick-space shift from the old level origin to the new one.
+	static Vector3i scroll_brick_delta(const Vector3i &p_old_origin, const Vector3i &p_new_origin);
+	// The new page-table bricks on the leading edges of a scroll; the rest is
+	// reused by shifting. Returns the number written to r_bricks.
+	static uint32_t scrolled_edge_bricks(const Vector3i &p_delta_bricks, Vector3i *r_bricks, uint32_t p_max_bricks);
 	static Vector3i world_to_voxel(uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world);
 	static Vector3 voxel_center(uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_voxel);
 

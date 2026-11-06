@@ -219,3 +219,35 @@ TEST_CASE("[NextGI][GlobalSDF] GPU brick pool and page tables") {
 	gpu.free_all();
 	CHECK_EQ(gpu.get_used_bricks(), uint32_t(0));
 }
+
+TEST_CASE("[NextGI][GlobalSDF] Level cadence and scroll reuse") {
+	using SDF = NextGIGlobalSDF;
+	// Level i rebuilds every 2^i frames.
+	for (uint32_t level = 0; level < 4; level++) {
+		const uint64_t interval = uint64_t(1) << level;
+		for (uint64_t frame = 0; frame < 32; frame++) {
+			CHECK_EQ(SDF::level_updates_on_frame(level, frame), (frame % interval) == 0);
+		}
+	}
+	CHECK_FALSE(SDF::level_updates_on_frame(SDF::MAX_LEVELS, 0));
+
+	// One brick of scroll on +x rebuilds exactly one page-table slab.
+	const Vector3i delta(1, 0, 0);
+	CHECK_EQ(SDF::scroll_brick_delta(Vector3i(), Vector3i(8, 0, 0)), delta);
+	CHECK_EQ(SDF::scroll_brick_delta(Vector3i(8, 0, 0), Vector3i()), Vector3i(-1, 0, 0));
+	Vector3i bricks[4096];
+	uint32_t count = SDF::scrolled_edge_bricks(delta, bricks, 4096);
+	CHECK_EQ(count, uint32_t(16 * 16));
+	for (uint32_t index = 0; index < count; index++) {
+		CHECK_EQ(bricks[index].x, int(SDF::PAGE_SIZE) - 1);
+	}
+
+	// Two bricks in x and one in y: x slabs plus the remaining y row.
+	count = SDF::scrolled_edge_bricks(Vector3i(2, 1, 0), bricks, 4096);
+	CHECK_EQ(count, uint32_t(2 * 16 * 16 + 14 * 16));
+
+	// A full-page scroll rebuilds everything, and a zero scroll nothing.
+	count = SDF::scrolled_edge_bricks(Vector3i(int(SDF::PAGE_SIZE), 0, 0), bricks, 4096);
+	CHECK_EQ(count, SDF::BRICKS_PER_LEVEL);
+	CHECK_EQ(SDF::scrolled_edge_bricks(Vector3i(), bricks, 4096), uint32_t(0));
+}
