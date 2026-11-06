@@ -4747,7 +4747,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	if (route_facts.instance_mesh && RSG::virtual_mesh_storage != nullptr) {
 		route_facts.mesh_has_virtual_geometry = RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 		route_facts.surface_in_mask = route_facts.mesh_has_virtual_geometry && RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, p_surface);
-		route_facts.mutated = RSG::virtual_mesh_storage->mesh_clear_reason(p_mesh) == RendererRD::NEXTGEO_FALLBACK_MUTATED_MESH;
+		route_facts.mutated = RSG::virtual_mesh_storage->mesh_clear_reason(p_mesh) == RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_MUTATED_MESH;
 	}
 	route_facts.skeleton = ginstance->data->skeleton.is_valid();
 	route_facts.instance_uniforms = ginstance->shader_uniforms_offset >= 0;

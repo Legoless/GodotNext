@@ -2378,6 +2378,11 @@ void ArrayMesh::_detach_virtual_geometry() {
 		return;
 	}
 	virtual_geometry.unref();
+	if (mesh.is_valid()) {
+		// GodotNext: nextgeo_exclusive_dispatch (#79). The server must drop
+		// the VGD before the mutated surface is drawn, so it routes legacy.
+		RS::get_singleton()->mesh_clear_virtual_geometry(mesh, RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_MUTATED_MESH);
+	}
 	emit_changed();
 }
 
@@ -2415,7 +2420,12 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 			}
 		}
 	}
-	RS::get_singleton()->mesh_set_virtual_geometry(mesh, desc);
+	if (virtual_geometry.is_valid()) {
+		RS::get_singleton()->mesh_set_virtual_geometry(mesh, desc);
+	} else {
+		// A null VGD detaches the mesh; the renderer routes it legacy.
+		RS::get_singleton()->mesh_clear_virtual_geometry(mesh, RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_MUTATED_MESH);
+	}
 }
 
 Ref<VirtualGeometryData> ArrayMesh::get_virtual_geometry() const {

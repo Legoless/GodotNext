@@ -126,6 +126,13 @@ struct MeshInfo {
 // What the renderer needs to know about a mesh's virtual geometry. The DAG
 // header and root pages are CPU copies of the .ngm metadata; the path is used
 // by the paged reader. Surfaces outside the mask stay on the legacy path.
+// GodotNext: nextgeo_exclusive_dispatch (#79). Why a mesh lost its VGD.
+enum VirtualGeometryClearReason : uint32_t {
+	VIRTUAL_GEOMETRY_CLEAR_NONE = 0,
+	VIRTUAL_GEOMETRY_CLEAR_MUTATED_MESH = 1,
+	VIRTUAL_GEOMETRY_CLEAR_BAKED_GRIDMAP = 2,
+};
+
 struct VirtualGeometryDesc {
 	Vector<uint8_t> dag_header;
 	Vector<Vector<uint8_t>> root_pages;
