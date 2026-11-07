@@ -971,6 +971,28 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 		}
 	}
 
+	// Select the primary 3D viewport for NextGeo streaming (#78): prefer a screen-attached
+	// root 3D viewport, then an unparented root 3D viewport, then the largest active 3D viewport.
+	main_3d_render_target = RID();
+	int best_main_3d_tier = 0;
+	int64_t best_main_3d_area = -1;
+	for (int i = 0; i < sorted_active_viewports.size(); i++) {
+		Viewport *vp = sorted_active_viewports[i];
+		if (vp->last_pass != draw_viewports_pass || vp->disable_3d || !vp->scenario.is_valid() || !vp->camera.is_valid()) {
+			continue;
+		}
+		int tier = 1;
+		if (!vp->parent.is_valid()) {
+			tier = (vp->viewport_to_screen != DisplayServerEnums::INVALID_WINDOW_ID || vp->viewport_to_screen_rect != Rect2() || vp->use_xr) ? 3 : 2;
+		}
+		const int64_t area = int64_t(vp->size.x) * int64_t(vp->size.y);
+		if (tier > best_main_3d_tier || (tier == best_main_3d_tier && area > best_main_3d_area)) {
+			best_main_3d_tier = tier;
+			best_main_3d_area = area;
+			main_3d_render_target = vp->render_target;
+		}
+	}
+
 	int vertices_drawn = 0;
 	int objects_drawn = 0;
 	int draw_calls_used = 0;

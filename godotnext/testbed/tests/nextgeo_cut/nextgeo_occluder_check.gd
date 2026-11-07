@@ -14,7 +14,7 @@ const COVERED := Vector3(0.0, 20.0, 0.0)
 const AWAY := Vector3(0.0, 20.0, 300.0)
 const TOGGLE_FRAME := 10
 const TOGGLE_PERIOD := 8
-const LAST_FRAME := 72
+const LAST_FRAME := 76
 
 var _occluder: MeshInstance3D
 var _frames := 0
@@ -22,6 +22,9 @@ var _ticks: Dictionary = {}
 
 
 func _ready() -> void:
+	ProjectSettings.set_setting("rendering/nextgeo/debug_stats", true)
+	ProjectSettings.set_setting("rendering/nextgeo/debug_stats_interval", 1)
+	ProjectSettings.set_setting("rendering/nextgeo/occlusion", true)
 	if not ResourceLoader.exists(KIT):
 		print("NEXTGEO_OCCLUDER skip: %s is missing." % KIT)
 		get_tree().quit(0)

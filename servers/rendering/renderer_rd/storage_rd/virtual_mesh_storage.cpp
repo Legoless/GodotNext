@@ -42,6 +42,7 @@ VirtualMeshStorage::~VirtualMeshStorage() {
 }
 
 void VirtualMeshStorage::free_resources() {
+	wait_for_streaming_tasks(true);
 	RenderingDevice *rd = RD::get_singleton();
 	if (rd == nullptr) {
 		return;
@@ -59,6 +60,7 @@ void VirtualMeshStorage::free_resources() {
 	_reset_dag();
 	_reset_pages();
 	_reset_clusters();
+	_reset_residency();
 }
 
 bool VirtualMeshStorage::_resize_dag(uint32_t p_bytes) {
@@ -164,6 +166,41 @@ void VirtualMeshStorage::_reset_clusters() {
 	}
 	cluster_buffer = RID();
 	cluster_bytes = 0;
+}
+
+bool VirtualMeshStorage::_resize_residency(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	if (residency_buffer.is_valid()) {
+		rd->free_rid(residency_buffer);
+		residency_buffer = RID();
+	}
+	residency_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	residency_buffer = rd->storage_buffer_create(p_bytes);
+	return residency_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_residency(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || residency_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > residency_bytes);
+	rd->buffer_update(residency_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_residency() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && residency_buffer.is_valid()) {
+		rd->free_rid(residency_buffer);
+	}
+	residency_buffer = RID();
+	residency_bytes = 0;
 }
 
 void VirtualMeshStorage::_upload_records(uint32_t p_first, uint32_t p_count) {

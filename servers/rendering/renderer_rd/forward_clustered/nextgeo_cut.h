@@ -75,8 +75,10 @@ public:
 	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 21;
 	static constexpr uint32_t PHASE2_CLUSTER_BASE = CLUSTER_CAPACITY / 2;
 	static constexpr uint32_t HIZ_MAX_MIPS = 16;
+	static constexpr uint32_t REQUEST_CAPACITY = 4096;
+	static constexpr uint32_t REQUEST_USED_WORDS = 2048;
 
-	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr);
+	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
 	void free_resources();
 
 	RID get_clusters_buffer() const { return clusters; }
@@ -93,9 +95,12 @@ private:
 	void _release_hiz();
 	RID _storage(uint32_t p_bytes);
 	RID _uniform_set(const LocalVector<RD::Uniform> &p_uniforms, int p_variant);
-	void _set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out);
-	void _request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev, uint32_t p_raster_draws);
-	void _publish_stats(const PackedByteArray &p_data);
+	void _set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_hiz_tex, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out, RID p_request_buf);
+	void _request_stats(uint32_t p_ring_slot, RID p_counters_buf, uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev, uint32_t p_raster_draws);
+	void _publish_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
+	static void _readback_cut_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
+	static void _readback_page_requests_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
+	void _on_page_requests_readback(const PackedByteArray &p_data, uint32_t p_ring_slot);
 
 	InstanceCullShaderRD instance_shader;
 	RID instance_version;
@@ -125,6 +130,14 @@ private:
 	RID bvh_args[2];
 	RID draw_args;
 	RID counters;
+	RID aux_counters;
+	RID counters_ring[3];
+	uint32_t counters_ring_cursor = 0;
+	bool counters_ring_pending[3] = { false, false, false };
+	RID request_ring[3];
+	uint32_t request_ring_cursor = 0;
+	bool request_ring_pending[3] = { false, false, false };
+	LocalVector<uint64_t> pending_readback_tokens;
 	RID dummy_page_buf;
 	RID dummy_hiz;
 	RID dummy_sampler;
@@ -141,7 +154,6 @@ private:
 	bool failed = false;
 	uint32_t stats_tick = 0;
 	uint32_t stats_counter = 0;
-	uint64_t stats_cpu_hash = 0;
-	Dictionary stats_info;
-	bool stats_pending_read = false;
+	uint64_t stats_ring_cpu_hash[3] = { 0, 0, 0 };
+	Dictionary stats_ring_info[3];
 };

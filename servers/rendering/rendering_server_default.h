@@ -100,6 +100,12 @@ class RenderingServerDefault : public RenderingServer {
 	Dictionary _virtual_geometry_get_debug_stats(RID p_viewport) {
 		return RenderingServer::virtual_geometry_get_debug_stats(p_viewport);
 	}
+	Dictionary _virtual_geometry_get_memory_report() {
+		return RenderingServer::virtual_geometry_get_memory_report();
+	}
+	Dictionary _virtual_geometry_get_routing_counters() {
+		return RenderingServer::virtual_geometry_get_routing_counters();
+	}
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -1295,6 +1301,28 @@ public:
 		} else {
 			Dictionary ret;
 			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_geometry_get_debug_stats, &ret, p_viewport);
+			return ret;
+		}
+	}
+
+	virtual Dictionary virtual_geometry_get_memory_report() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _virtual_geometry_get_memory_report();
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_geometry_get_memory_report, &ret);
+			return ret;
+		}
+	}
+
+	virtual Dictionary virtual_geometry_get_routing_counters() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _virtual_geometry_get_routing_counters();
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_geometry_get_routing_counters, &ret);
 			return ret;
 		}
 	}

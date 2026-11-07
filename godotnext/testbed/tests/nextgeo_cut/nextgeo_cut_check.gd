@@ -11,6 +11,7 @@ extends Node3D
 
 const CITY := "res://generated/dense_city/micro_detail.tscn"
 const SCALES: Array[float] = [0.5, 1.0, 4.0]
+const MAX_WAIT_FRAMES := 180
 
 var _views := 24
 var _checked := 0
@@ -19,6 +20,8 @@ var _max_phase2 := 0
 var _max_overflow := 0
 var _last_tick := -1
 var _view := -1
+var _min_render_frame := 0
+var _wait_frames := 0
 var _rng := RandomNumberGenerator.new()
 var _city: Node3D
 var _camera: Camera3D
@@ -26,6 +29,9 @@ var _frames := 0
 
 
 func _ready() -> void:
+	ProjectSettings.set_setting("rendering/nextgeo/debug_stats", true)
+	ProjectSettings.set_setting("rendering/nextgeo/debug_stats_interval", 1)
+	ProjectSettings.set_setting("rendering/nextgeo/occlusion", false)
 	var args := OS.get_cmdline_user_args()
 	for index in range(args.size()):
 		if args[index].begins_with("--views="):
@@ -46,6 +52,8 @@ func _ready() -> void:
 
 func _apply_view(p_view: int) -> void:
 	_view = p_view
+	_min_render_frame = Engine.get_frames_drawn()
+	_wait_frames = 0
 	_city.scale = Vector3.ONE * SCALES[p_view % SCALES.size()]
 	var angle := _rng.randf_range(0.0, TAU)
 	# Alternate close street-level views with far orbit views so buildings
@@ -57,6 +65,11 @@ func _apply_view(p_view: int) -> void:
 
 func _process(_delta: float) -> void:
 	_frames += 1
+	_wait_frames += 1
+	if _wait_frames > MAX_WAIT_FRAMES:
+		printerr("NEXTGEO_CUT FAIL: timed out after %d frames waiting for stats on view %d." % [_wait_frames, _view])
+		get_tree().quit(1)
+		return
 	if _frames <= 2:
 		return
 	var stats: Dictionary = RenderingServer.virtual_geometry_get_debug_stats(get_viewport().get_viewport_rid())
@@ -64,6 +77,8 @@ func _process(_delta: float) -> void:
 	if tick == _last_tick or not stats.has("cut_match"):
 		return
 	_last_tick = tick
+	if int(stats.get("render_frame", 0)) < _min_render_frame:
+		return
 	if _view >= 0:
 		_checked += 1
 		if bool(stats["cut_match"]):

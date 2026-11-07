@@ -492,3 +492,38 @@ Error NGMFile::read_page(uint32_t p_index, Vector<uint8_t> &r_raw) const {
 	r_raw = stored;
 	return OK;
 }
+
+Error NGMFile::read_page_cluster_records(uint32_t p_index, uint32_t &r_cluster_count, Vector<uint8_t> &r_records) const {
+	r_cluster_count = 0;
+	r_records.clear();
+	if (!opened) {
+		return ERR_UNCONFIGURED;
+	}
+	if (p_index >= uint32_t(pages.size())) {
+		return ERR_FILE_CORRUPT;
+	}
+	const PageEntry &page = pages[p_index];
+	if (page.stored_size < 16u || page.offset > UINT64_MAX - base_offset) {
+		return ERR_FILE_CORRUPT;
+	}
+	Vector<uint8_t> page_hdr;
+	const Error hdr_error = NGMHandlePool::get_singleton().read_at(key, open_path, base_offset + page.offset, 16u, page_hdr);
+	if (hdr_error != OK) {
+		return hdr_error;
+	}
+	uint32_t cluster_count = 0;
+	memcpy(&cluster_count, page_hdr.ptr(), sizeof(uint32_t));
+	const uint64_t record_bytes = uint64_t(cluster_count) * 80ull;
+	if (16ull + record_bytes > uint64_t(page.stored_size)) {
+		return ERR_FILE_CORRUPT;
+	}
+	if (record_bytes > 0) {
+		const Error rec_error = NGMHandlePool::get_singleton().read_at(key, open_path, base_offset + page.offset + 16ull, record_bytes, r_records);
+		if (rec_error != OK) {
+			r_records.clear();
+			return rec_error;
+		}
+	}
+	r_cluster_count = cluster_count;
+	return OK;
+}

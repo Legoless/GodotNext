@@ -207,6 +207,7 @@ public:
 	int num_viewports_with_motion_vectors = 0;
 
 private:
+	RID main_3d_render_target;
 	Vector<Viewport *> _sort_active_viewports();
 	void _viewport_set_size(Viewport *p_viewport, int p_width, int p_height, uint32_t p_view_count);
 	bool _viewport_requires_motion_vectors(Viewport *p_viewport);
@@ -316,6 +317,7 @@ public:
 	void handle_timestamp(String p_timestamp, uint64_t p_cpu_time, uint64_t p_gpu_time);
 
 	void draw_viewports(bool p_swap_buffers);
+	RID get_main_3d_render_target() const { return main_3d_render_target; }
 
 	bool free(RID p_rid);
 

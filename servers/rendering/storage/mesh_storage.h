@@ -247,4 +247,14 @@ public:
 
 	void update_interpolation_tick(bool p_process = true);
 	void update_interpolation_frame(bool p_process = true);
+
+	// GodotNext: nextgeo_residency (#78). Q15 geometry memory read accessors.
+	struct GeometryMemoryReport {
+		uint64_t authored_remainder = 0;
+		uint64_t lods = 0;
+		uint64_t shadow_mesh = 0;
+		uint64_t coarse_fallback = 0;
+		uint64_t rt_arena = 0;
+	};
+	virtual GeometryMemoryReport get_geometry_memory_report() const { return GeometryMemoryReport(); }
 };

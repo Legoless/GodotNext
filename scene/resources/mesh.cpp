@@ -2413,10 +2413,31 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 			desc.root_pages.push_back(pages[index]);
 		}
 		desc.ngm_path = virtual_geometry->get_ngm_path();
+		desc.page_size = uint32_t(MAX(virtual_geometry->get_page_size(), 0));
+		desc.page_count = uint32_t(MAX(virtual_geometry->get_page_count(), 0));
 		const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
 		for (int index = 0; index < eligibility.size() && index < 32; index++) {
 			if (eligibility[index] == 1) {
 				desc.eligible_surface_mask |= 1u << index;
+			}
+		}
+		if (desc.eligible_surface_mask != 0) {
+			const TypedArray<Array> coarse = virtual_geometry->get_coarse_fallback();
+			if (coarse.is_empty()) {
+				desc.stripped_to_coarse = true;
+			} else {
+				uint64_t eligible_tris = 0;
+				for (int index = 0; index < surfaces.size() && index < 32; index++) {
+					if ((desc.eligible_surface_mask & (1u << index)) == 0) {
+						continue;
+					}
+					const uint64_t len = surfaces[index].index_array_length > 0 ? uint64_t(surfaces[index].index_array_length) : uint64_t(surfaces[index].array_length);
+					eligible_tris += len / 3ull;
+				}
+				const int64_t src_tris = virtual_geometry->get_source_triangle_count();
+				if (src_tris > 0 && eligible_tris < uint64_t(src_tris)) {
+					desc.stripped_to_coarse = true;
+				}
 			}
 		}
 		desc.vertex_layout = virtual_geometry->get_ngm_vertex_layout();

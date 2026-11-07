@@ -1453,6 +1453,8 @@ public:
 	Error blas_compact(RID p_blas);
 	bool blas_is_compacted(RID p_blas);
 	uint64_t acceleration_structure_get_size_bytes(RID p_acceleration_structure);
+	// GodotNext: nextgeo_residency (#78). Totals matching RD buffer_memory AS accounting.
+	void get_acceleration_structure_memory(uint64_t &r_blas_bytes, uint64_t &r_tlas_bytes, uint64_t &r_scratch_bytes);
 	Error tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode = ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
 	// GodotNext: tlas_from_buffer
 	// Builds the TLAS from instances a compute pass already wrote, e.g. particles and dynamic MultiMesh.

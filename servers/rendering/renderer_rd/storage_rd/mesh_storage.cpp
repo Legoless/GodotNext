@@ -1427,6 +1427,51 @@ void MeshStorage::mesh_debug_usage(List<RenderingServerTypes::MeshInfo> *r_info)
 	}
 }
 
+RendererMeshStorage::GeometryMemoryReport MeshStorage::get_geometry_memory_report() const {
+	GeometryMemoryReport report;
+	const LocalVector<RID> owned = mesh_owner.get_owned_list();
+	HashSet<RID> shadow_rids;
+	for (const RID &mesh_rid : owned) {
+		const Mesh *mesh = mesh_owner.get_or_null(mesh_rid);
+		if (mesh != nullptr && mesh->shadow_mesh.is_valid() && mesh->shadow_mesh != mesh_rid) {
+			shadow_rids.insert(mesh->shadow_mesh);
+		}
+	}
+	for (const RID &mesh_rid : owned) {
+		const Mesh *mesh = mesh_owner.get_or_null(mesh_rid);
+		if (mesh == nullptr) {
+			continue;
+		}
+		const bool is_shadow = shadow_rids.has(mesh_rid);
+		const bool has_vg = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(mesh_rid);
+		const bool stripped = has_vg && RSG::virtual_mesh_storage->mesh_is_stripped_to_coarse(mesh_rid);
+		for (uint32_t surface_index = 0; surface_index < mesh->surface_count; surface_index++) {
+			const Mesh::Surface *surface = mesh->surfaces[surface_index];
+			if (surface == nullptr) {
+				continue;
+			}
+			const uint64_t surf_bytes = surface->vertex_buffer_size + surface->attribute_buffer_size + surface->skin_buffer_size + uint64_t(surface->index_buffer_size) + surface->blend_shape_buffer_size;
+			uint64_t lod_bytes = 0;
+			for (uint32_t lod_index = 0; lod_index < surface->lod_count; lod_index++) {
+				lod_bytes += uint64_t(surface->lods[lod_index].index_buffer_size);
+			}
+			if (is_shadow) {
+				report.shadow_mesh += surf_bytes + lod_bytes;
+			} else if (stripped && surface->lod_count == 0 && RSG::virtual_mesh_storage->mesh_surface_is_virtual(mesh_rid, surface_index)) {
+				report.coarse_fallback += surf_bytes;
+			} else {
+				report.authored_remainder += surf_bytes;
+				report.lods += lod_bytes;
+			}
+		}
+	}
+	report.rt_arena = uint64_t(nextgi_rt_chunks.size()) * uint64_t(nextgi_rt_allocator.get_chunk_size());
+	if (nextgi_rt_chunk_address_buffer.is_valid()) {
+		report.rt_arena += uint64_t(MAX(nextgi_rt_chunks.size(), 1u)) * sizeof(uint64_t);
+	}
+	return report;
+}
+
 bool MeshStorage::mesh_needs_instance(RID p_mesh, bool p_has_skeleton) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, false);

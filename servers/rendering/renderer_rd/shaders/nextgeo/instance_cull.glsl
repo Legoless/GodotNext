@@ -41,7 +41,7 @@ layout(set = 0, binding = 8, std430) buffer restrict Phase2Nodes {
 phase2_nodes;
 
 bool hiz_occluded(vec4 world_min, vec4 world_max, mat4 proj_mat) {
-	if (cull.cull.w == 0u) {
+	if ((cull.cull.w & 1u) == 0u) {
 		return false; // Occlusion off (the CPU parity reference).
 	}
 	vec3 lo = world_min.xyz;

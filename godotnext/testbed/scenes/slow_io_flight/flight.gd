@@ -83,11 +83,7 @@ static func apply_delay_setting(p_variant: String) -> bool:
 	if not ProjectSettings.has_setting(DELAY_SETTING):
 		return false
 	var record := delay_record(p_variant)
-	# One project value cannot hold a per-request range. #78 reads min_ms and
-	# max_ms from the run report and sleeps that long per request. When the
-	# setting exists early, the delayed variant stores the lower bound so a
-	# run is never silent, and the report still carries the full range.
-	ProjectSettings.set_setting(DELAY_SETTING, int(record["min_ms"]))
+	ProjectSettings.set_setting(DELAY_SETTING, Vector2(float(record["min_ms"]), float(record["max_ms"])))
 	return true
 
 

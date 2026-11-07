@@ -3333,6 +3333,12 @@
 			The maximum number of uniforms that can be used by the global shader uniform buffer. Each item takes up one slot. In other words, a single uniform float and a uniform vec4 will take the same amount of space in the buffer.
 			[b]Note:[/b] When using the Compatibility renderer, most mobile devices (and all web exports) will be limited to a maximum size of 1024 due to hardware constraints.
 		</member>
+		<member name="rendering/limits/nextgeo/geometry_cache_mb" type="int" setter="" getter="" default="512">
+			Size in MiB of the fixed-slot NextGeo GPU streaming page cache. Pinned coarse root pages and streamed virtual geometry pages share this arena; non-pinned leaf pages are evicted LRU-first when the cache is full.
+		</member>
+		<member name="rendering/limits/nextgeo/page_upload_kib_per_frame" type="int" setter="" getter="" default="4096">
+			Maximum compressed/raw NextGeo page payload bytes (in KiB) uploaded from completed background IO tasks to the GPU page cache in a single frame. Remaining staged pages stay queued in priority order for subsequent frames.
+		</member>
 		<member name="rendering/limits/opengl/max_decals" type="int" setter="" getter="" default="64">
 			Max number of decals that can be rendered in a frame. This is further limited by hardware support. Setting this low will reduce memory usage, may decrease shader compile times, and may result in faster rendering on low-end, mobile, or web devices.
 			[b]Note:[/b] This setting is only effective when using the Compatibility rendering method, not Forward+ and Mobile.
@@ -3369,7 +3375,7 @@
 			Disable backface culling in the NextGeo visibility raster so interior and crack diagnostics (Q5) render both sides of virtual clusters.
 		</member>
 		<member name="rendering/nextgeo/debug_stats" type="bool" setter="" getter="" default="false">
-			Publish the NextGeo cut counters and the GPU/CPU cut hash comparison through [method RenderingServer.virtual_geometry_get_debug_stats]. The counter read is taken at the start of the following frame, before the counters reset, so it does not add a per-frame GPU stall. Leave it off outside tests.
+			Publish the NextGeo cut counters and the GPU/CPU cut hash comparison through [method RenderingServer.virtual_geometry_get_debug_stats]. The counter read is queued asynchronously on a ring buffer so it does not add a mid-frame GPU stall. Leave it off outside tests.
 		</member>
 		<member name="rendering/nextgeo/debug_stats_interval" type="int" setter="" getter="" default="1">
 			Read the NextGeo cut debug stats every N frames instead of every frame, to limit the GPU stall during long sweeps.
@@ -3382,6 +3388,9 @@
 		</member>
 		<member name="rendering/nextgeo/occlusion" type="bool" setter="" getter="" default="true">
 			Enable the NextGeo two-phase Hi-Z occlusion test. Phase 1 tests the previous frame's Hi-Z chain; phase 2 re-tests the instances it occluded against the chain built from the current depth, so moving occluders disocclude in the same frame. Off gives the CPU-reference parity cut (the debug comparison).
+		</member>
+		<member name="rendering/nextgeo/streaming/debug_io_delay_ms" type="Vector2" setter="" getter="" default="Vector2(0, 0)">
+			Injects a deterministic seeded uniform wall-time IO delay in milliseconds ([code]Vector2(min_ms, max_ms)[/code]) on each background NextGeo page read request for slow-storage streaming stress tests. Set to [code]Vector2(0, 0)[/code] outside tests.
 		</member>
 		<member name="rendering/nextgeo/visibility_only" type="bool" setter="" getter="" default="false">
 			Skip virtual surfaces in the legacy opaque and motion render lists before Stage A/B resolve is enabled, isolating NextGeo visibility-buffer, depth, and motion-vector output for diagnostics and tests.

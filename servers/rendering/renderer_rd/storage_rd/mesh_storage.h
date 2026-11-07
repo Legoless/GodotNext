@@ -538,6 +538,7 @@ public:
 	// GodotNext: nextgi_skinned_actors (#59). True when a surface is bone-driven, so the mesh has
 	// no static BLAS parts and its cards come from the bind-pose CPU copy.
 	bool mesh_nextgi_rt_is_skinned(RID p_mesh) const;
+	virtual GeometryMemoryReport get_geometry_memory_report() const override;
 	// GodotNext: nextgi_src_cards
 	// The CPU copies of an RT surface (xyz float triples, uint32 indices) for SRC card clustering.
 	// False when the surface is not in the RT arena or its copies were released.

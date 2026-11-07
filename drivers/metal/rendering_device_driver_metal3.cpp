@@ -182,7 +182,7 @@ Error RenderingDeviceDriverMetal::_execute_and_present_barriers(CommandQueueID p
 	Fence *fence = (Fence *)(p_cmd_fence.id);
 	if (fence != nullptr) {
 		cmd_buffer->end();
-		MTL::CommandBuffer *cb = cmd_buffer->get_command_buffer();
+		MTL::CommandBuffer *cb = cmd_buffer->command_buffer();
 		fence->signal(cb);
 	}
 
@@ -223,7 +223,7 @@ Error RenderingDeviceDriverMetal::_execute_and_present(CommandQueueID p_cmd_queu
 	Fence *fence = (Fence *)(p_cmd_fence.id);
 	if (fence != nullptr) {
 		cmd_buffer->end();
-		MTL::CommandBuffer *cb = cmd_buffer->get_command_buffer();
+		MTL::CommandBuffer *cb = cmd_buffer->command_buffer();
 		fence->signal(cb);
 	}
 

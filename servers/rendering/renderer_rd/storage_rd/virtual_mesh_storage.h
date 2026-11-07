@@ -34,21 +34,21 @@
 
 namespace RendererRD {
 
-// GodotNext: nextgeo_instance_records (#75)
-// The RenderingDevice-backed record store. The CPU layout and scheduling live
-// in RendererVirtualMeshStorage; this class owns the two storage buffers and
-// uploads the dirty runs.
+// GodotNext: nextgeo_instance_records (#75), nextgeo_residency (#78)
+// The RenderingDevice-backed record store and fixed-slot page arena.
 class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	RID record_buffer;
 	RID mesh_record_buffer;
 	// GodotNext: nextgeo_gpu_cull (#76). Per-mesh DAG blobs (groups + BVH8).
 	RID dag_buffer;
 	uint32_t dag_bytes = 0;
-	// GodotNext: nextgeo_visibility_raster (#83). Page arena + cluster lookup.
+	// GodotNext: nextgeo_visibility_raster (#83) / nextgeo_residency (#78).
 	RID page_buffer;
 	uint32_t page_bytes = 0;
 	RID cluster_buffer;
 	uint32_t cluster_bytes = 0;
+	RID residency_buffer;
+	uint32_t residency_bytes = 0;
 	uint32_t buffer_capacity = 0;
 	uint32_t mesh_buffer_capacity = 0;
 
@@ -64,6 +64,9 @@ protected:
 	bool _resize_clusters(uint32_t p_bytes) override;
 	void _upload_clusters(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
 	void _reset_clusters() override;
+	bool _resize_residency(uint32_t p_bytes) override;
+	void _upload_residency(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_residency() override;
 
 public:
 	VirtualMeshStorage();
@@ -72,6 +75,7 @@ public:
 	RID get_dag_buffer() const override { return dag_buffer; }
 	RID get_page_buffer() const override { return page_buffer; }
 	RID get_cluster_buffer() const override { return cluster_buffer; }
+	RID get_residency_buffer() const override { return residency_buffer; }
 	RID get_record_buffer() const override { return record_buffer; }
 	RID get_mesh_record_buffer() const override { return mesh_record_buffer; }
 

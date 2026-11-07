@@ -280,8 +280,10 @@ void MDCommandBuffer::_end() {
 
 void MDCommandBuffer::_commit() {
 	end();
-	commandBuffer->commit();
-	commandBuffer.reset();
+	if (commandBuffer) {
+		commandBuffer->commit();
+		commandBuffer.reset();
+	}
 	state_begin = false;
 }
 

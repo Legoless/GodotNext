@@ -78,6 +78,18 @@ layout(set = 0, binding = 13, std430) buffer restrict DrawArgs {
 	uvec4 data[];
 }
 draw_args;
+layout(set = 0, binding = 14, std430) buffer restrict readonly Pages {
+	uint data[];
+}
+pages;
+// Word layout:
+//   [0] = request_count, [1] = request_capacity, [2] = overflow, [3] = used_slot_words
+//   [4 .. 4 + used_slot_words) = active resident slot bitset
+//   [4 + used_slot_words + req * 4 + 0..3] = ((visible<<31)|mesh_idx, page_id, dist_bits, err_bits)
+layout(set = 0, binding = 15, std430) buffer restrict PageRequests {
+	uint data[];
+}
+page_requests;
 
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 	return vec3(
@@ -89,6 +101,9 @@ vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 // Plan §7.3 step 3: the projected error of a mesh-space sphere with the
 // node's maximum parent error as the geometric error term.
 float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error) {
+	if (p_max_parent_error >= 3.4e38) {
+		return cull.camera.w + 1.0;
+	}
 	float scale = p_record.world_aabb_min.w;
 	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
 	float radius = p_lod_sphere.w * scale;
@@ -104,6 +119,20 @@ float dag_float(uint p_byte_offset) {
 	return uintBitsToFloat(dag.data[p_byte_offset >> 2u]);
 }
 
+bool mesh_group_refine_ok(uint p_mesh_idx, uint p_group_idx) {
+	if (p_mesh_idx >= residency.data[1]) {
+		return true;
+	}
+	uint hdr = 2u + p_mesh_idx * 4u;
+	uint res_groups = residency.data[hdr + 2u];
+	if (p_group_idx >= res_groups) {
+		return false;
+	}
+	uint refine_off = residency.data[hdr + 0u];
+	uint word = residency.data[refine_off + (p_group_idx >> 5u)];
+	return (word & (1u << (p_group_idx & 31u))) != 0u;
+}
+
 #ifdef CLUSTER_CULL
 void main() {
 	uint index = gl_GlobalInvocationID.x;
@@ -116,31 +145,102 @@ void main() {
 	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || record.virtual_mesh == 0xFFFFFFFFu) {
 		return;
 	}
-	NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+	uint mesh_idx = record.virtual_mesh;
+	NextGeoMeshRecord mesh = meshes.data[mesh_idx];
 	if (mesh.bvh_node_offset <= mesh.group_offset) {
 		return;
 	}
 	uint group_count = (mesh.bvh_node_offset - mesh.group_offset) / 60u;
-	if (entry.y >= group_count) {
+	if (entry.y >= group_count || !mesh_group_refine_ok(mesh_idx, entry.y)) {
 		return;
 	}
 	const uint base = mesh.group_offset + entry.y * 60u;
 	uint cluster_offset = dag_uint(base);
 	uint cluster_count = dag_uint(base + 4u);
+	uint group_page_id = dag_uint(base + 8u);
 	vec4 parent_lod = vec4(dag_float(base + 16u), dag_float(base + 20u), dag_float(base + 24u), dag_float(base + 28u));
 	float parent_error = dag_float(base + 32u);
 	if (projected_error(record, parent_lod, parent_error) <= cull.camera.w) {
 		return;
 	}
+
+	uint page_slot = 0xFFFFFFFFu;
+	uint page_first_cluster = 0u;
+	uint slot_page_size = residency.data[0];
+	if (mesh_idx < residency.data[1]) {
+		uint hdr = 2u + mesh_idx * 4u;
+		uint page_table_off = residency.data[hdr + 1u];
+		uint res_pages = residency.data[hdr + 3u];
+		if (group_page_id < res_pages) {
+			page_slot = residency.data[page_table_off + group_page_id * 2u + 0u];
+			page_first_cluster = residency.data[page_table_off + group_page_id * 2u + 1u];
+		}
+	}
+	uint page_cluster_hdr = (page_slot != 0xFFFFFFFFu && slot_page_size >= 96u) ? pages.data[(page_slot * slot_page_size) >> 2u] : 0u;
+	uint last_requested_page = 0xFFFFFFFFu;
+	bool emitted_any = false;
+
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
+		uint global_cluster = cluster_offset + cluster;
+		if (page_cluster_hdr > 0u && global_cluster >= mesh.cluster_offset) {
+			uint local_cluster = global_cluster - mesh.cluster_offset;
+			if (local_cluster >= page_first_cluster && (local_cluster - page_first_cluster) < page_cluster_hdr) {
+				uint in_page = local_cluster - page_first_cluster;
+				uint rec_word = ((page_slot * slot_page_size) >> 2u) + 4u + in_page * 20u;
+				int refined_group = int(pages.data[rec_word + 15u]);
+				if (refined_group >= 0 && uint(refined_group) < group_count) {
+					vec4 own_lod = vec4(
+							uintBitsToFloat(pages.data[rec_word + 5u]),
+							uintBitsToFloat(pages.data[rec_word + 6u]),
+							uintBitsToFloat(pages.data[rec_word + 7u]),
+							uintBitsToFloat(pages.data[rec_word + 8u]));
+					float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
+					float child_px_err = projected_error(record, own_lod, own_error);
+					if (child_px_err > cull.camera.w) {
+						uint child_g = uint(refined_group);
+						if (mesh_group_refine_ok(mesh_idx, child_g)) {
+							continue;
+						}
+						if ((cull.cull.w & 2u) != 0u) {
+							uint missing_page = dag_uint(mesh.group_offset + child_g * 60u + 8u);
+							if (missing_page != last_requested_page) {
+								last_requested_page = missing_page;
+								float scale = record.world_aabb_min.w;
+								vec3 center = instance_point(record, own_lod.xyz);
+								float dist = max(length(center - cull.camera.xyz) - own_lod.w * scale, 0.0);
+								uint req_slot = atomicAdd(page_requests.data[0], 1u);
+								if (req_slot < page_requests.data[1]) {
+									uint req_base = 4u + page_requests.data[3] + req_slot * 4u;
+									page_requests.data[req_base + 0u] = (1u << 31u) | mesh_idx;
+									page_requests.data[req_base + 1u] = missing_page;
+									page_requests.data[req_base + 2u] = floatBitsToUint(dist);
+									page_requests.data[req_base + 3u] = floatBitsToUint(child_px_err);
+								} else {
+									atomicAdd(page_requests.data[2], 1u);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		uint slot = params.phase == 0u ? atomicAdd(counters.phase1_clusters, 1u) : atomicAdd(counters.phase2_clusters, 1u);
 		if (slot >= params.output_capacity) {
 			atomicAdd(counters.overflow, 1u);
-			return;
+			break;
 		}
+		emitted_any = true;
 		atomicAdd(counters.cluster_count, 1u);
 		atomicAdd(draw_args.data[params.phase].y, 1u);
-		clusters_out.data[params.list_base + slot] = uvec2(entry.x, cluster_offset + cluster);
+		clusters_out.data[params.list_base + slot] = uvec2(entry.x, global_cluster);
+	}
+
+	if (emitted_any && (cull.cull.w & 2u) != 0u && page_slot != 0xFFFFFFFFu) {
+		uint word_idx = page_slot >> 5u;
+		if (word_idx < page_requests.data[3]) {
+			atomicOr(page_requests.data[4u + word_idx], 1u << (page_slot & 31u));
+		}
 	}
 }
 #else

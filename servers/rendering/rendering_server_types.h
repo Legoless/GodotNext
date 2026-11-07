@@ -139,6 +139,9 @@ struct VirtualGeometryDesc {
 	String ngm_path;
 	uint32_t eligible_surface_mask = 0;
 	uint32_t vertex_layout = 0;
+	uint32_t page_size = 0;
+	uint32_t page_count = 0;
+	bool stripped_to_coarse = false;
 };
 
 /* STATUS INFORMATION */

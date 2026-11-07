@@ -255,9 +255,9 @@ public:
 
 		if (drawable != nullptr) {
 			if (vsync_mode != DisplayServerEnums::VSYNC_DISABLED) {
-				p_cmd_buffer->get_command_buffer()->presentDrawableAfterMinimumDuration(drawable, present_minimum_duration);
+				p_cmd_buffer->command_buffer()->presentDrawableAfterMinimumDuration(drawable, present_minimum_duration);
 			} else {
-				p_cmd_buffer->get_command_buffer()->presentDrawable(drawable);
+				p_cmd_buffer->command_buffer()->presentDrawable(drawable);
 			}
 		}
 	}
@@ -403,11 +403,11 @@ public:
 		MDFrameBufferTexture *frame_buffer = &frame_buffers[rear];
 
 		if (drawables[rear] != nullptr) {
-			p_cmd_buffer->get_command_buffer()->presentDrawable(drawables[rear]);
+			p_cmd_buffer->command_buffer()->presentDrawable(drawables[rear]);
 			drawables[rear] = nullptr;
 		}
 
-		p_cmd_buffer->get_command_buffer()->addScheduledHandler([frame_buffer, this](MTL::CommandBuffer *) {
+		p_cmd_buffer->command_buffer()->addScheduledHandler([frame_buffer, this](MTL::CommandBuffer *) {
 			frame_buffer->unset_texture(0);
 			count.fetch_add(-1, std::memory_order_relaxed);
 		});

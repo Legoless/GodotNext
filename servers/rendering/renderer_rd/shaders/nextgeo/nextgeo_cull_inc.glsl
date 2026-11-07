@@ -43,14 +43,14 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly CullParams {
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
 	vec4 view; // x = internal width, y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = phase2 offset
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view)
 }
 cull;
 
-layout(set = 0, binding = 4, std430) buffer restrict Lists {
-	uvec2 data[];
+layout(set = 0, binding = 4, std430) buffer restrict readonly Residency {
+	uint data[];
 }
-lists;
+residency;
 
 layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint phase1_count;

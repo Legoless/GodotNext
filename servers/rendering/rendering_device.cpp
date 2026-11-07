@@ -771,6 +771,35 @@ uint64_t RenderingDevice::acceleration_structure_get_size_bytes(RID p_accelerati
 	return acceleration_structure->size_bytes;
 }
 
+void RenderingDevice::get_acceleration_structure_memory(uint64_t &r_blas_bytes, uint64_t &r_tlas_bytes, uint64_t &r_scratch_bytes) {
+	r_blas_bytes = 0;
+	r_tlas_bytes = 0;
+	r_scratch_bytes = 0;
+	ERR_RENDER_THREAD_GUARD();
+	if (driver == nullptr) {
+		return;
+	}
+	for (const RID &as_rid : acceleration_structure_owner.get_owned_list()) {
+		const AccelerationStructure *as = acceleration_structure_owner.get_or_null(as_rid);
+		if (as == nullptr) {
+			continue;
+		}
+		if (as->type == RDD::ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL) {
+			r_blas_bytes += as->size_bytes;
+		} else if (as->type == RDD::ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+			r_tlas_bytes += as->size_bytes;
+			for (const AccelerationStructure::InstanceBuffer &ib : as->instance_buffers) {
+				if (ib.driver_id) {
+					r_tlas_bytes += driver->buffer_get_allocation_size(ib.driver_id);
+				}
+			}
+		}
+		if (as->scratch_buffer) {
+			r_scratch_bytes += driver->buffer_get_allocation_size(as->scratch_buffer);
+		}
+	}
+}
+
 Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance> p_instances, AccelerationStructureBuildMode p_mode) {
 	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
 

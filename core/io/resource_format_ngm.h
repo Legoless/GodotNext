@@ -150,10 +150,15 @@ public:
 	Error open(const String &p_path);
 	// Bounds or CRC failure returns ERR_FILE_CORRUPT and clears `r_raw`. Never crashes.
 	Error read_page(uint32_t p_index, Vector<uint8_t> &r_raw) const;
+	// Reads only the 16-byte page header and 80-byte cluster records of `p_index` (raw v1).
+	Error read_page_cluster_records(uint32_t p_index, uint32_t &r_cluster_count, Vector<uint8_t> &r_records) const;
 
 	bool is_open() const { return opened; }
 	const NGMHeader &get_header() const { return header; }
 	uint32_t get_page_count() const { return pages.size(); }
+	uint32_t get_page_first_group(uint32_t p_index) const { return p_index < uint32_t(pages.size()) ? pages[p_index].first_group : 0u; }
+	uint32_t get_page_group_count(uint32_t p_index) const { return p_index < uint32_t(pages.size()) ? pages[p_index].group_count : 0u; }
+	uint32_t get_page_raw_size(uint32_t p_index) const { return p_index < uint32_t(pages.size()) ? pages[p_index].raw_size : 0u; }
 };
 
 // LRU of at most NGM_MAX_HANDLES file handles. A PCK is one key (the physical pack path);

@@ -360,8 +360,6 @@ private:
 	NS::SharedPtr<MTL::CommandBuffer> commandBuffer;
 	bool state_begin = false;
 
-	MTL::CommandBuffer *command_buffer();
-
 	void _end_compute_dispatch();
 	void _end_inline_render();
 	void _end_blit();
@@ -607,6 +605,7 @@ public:
 	LocalVector<MetalBuffer> _as_staging;
 	LocalVector<NS::SharedPtr<MTL::AccelerationStructureDescriptor>> _as_descriptors;
 
+	MTL::CommandBuffer *command_buffer();
 	_FORCE_INLINE_ MTL::CommandBuffer *get_command_buffer() const {
 		return commandBuffer.get();
 	}

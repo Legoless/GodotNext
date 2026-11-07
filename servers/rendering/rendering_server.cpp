@@ -2267,6 +2267,14 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 	if (RSG::virtual_mesh_storage != nullptr) {
 		stats["double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
 		stats["missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
+		stats["child_resident_without_parent"] = int64_t(RSG::virtual_mesh_storage->get_child_resident_without_parent_count());
+		stats["evictions_with_resident_child"] = int64_t(RSG::virtual_mesh_storage->get_evictions_with_resident_child_count());
+		stats["non_main_view_requests"] = int64_t(RSG::virtual_mesh_storage->get_non_main_view_request_count());
+		stats["page_uploads"] = int64_t(RSG::virtual_mesh_storage->get_total_page_uploads());
+		stats["page_evictions"] = int64_t(RSG::virtual_mesh_storage->get_total_page_evictions());
+		stats["resident_pages"] = int64_t(RSG::virtual_mesh_storage->get_resident_page_count());
+		stats["pinned_pages"] = int64_t(RSG::virtual_mesh_storage->get_pinned_page_count());
+		stats["page_upload_ms"] = RSG::virtual_mesh_storage->get_last_page_upload_ms();
 	}
 	if (p_viewport.is_valid() && RSG::viewport != nullptr) {
 		const RendererViewport::Viewport *vp = RSG::viewport->viewport_owner.get_or_null(p_viewport);
@@ -2280,6 +2288,68 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 		}
 	}
 	return stats;
+}
+
+Dictionary RenderingServer::virtual_geometry_get_memory_report() {
+	// GodotNext: nextgeo_residency (#78, Q15). All 10 geometry VRAM categories in bytes.
+	RendererMeshStorage::GeometryMemoryReport mesh_mem;
+	if (RSG::mesh_storage != nullptr) {
+		mesh_mem = RSG::mesh_storage->get_geometry_memory_report();
+	}
+	uint64_t blas_bytes = 0;
+	uint64_t tlas_bytes = 0;
+	uint64_t as_scratch_bytes = 0;
+	if (RD::get_singleton() != nullptr) {
+		RD::get_singleton()->get_acceleration_structure_memory(blas_bytes, tlas_bytes, as_scratch_bytes);
+	}
+	uint64_t dag_headers_bytes = 0;
+	uint64_t page_cache_bytes = 0;
+	if (RSG::virtual_mesh_storage != nullptr) {
+		dag_headers_bytes = RSG::virtual_mesh_storage->get_dag_allocation_bytes();
+		page_cache_bytes = RSG::virtual_mesh_storage->get_page_arena_allocation_bytes();
+	}
+
+	Dictionary report;
+	report["authored_remainder"] = int64_t(mesh_mem.authored_remainder);
+	report["lods"] = int64_t(mesh_mem.lods);
+	report["shadow_mesh"] = int64_t(mesh_mem.shadow_mesh);
+	report["coarse_fallback"] = int64_t(mesh_mem.coarse_fallback);
+	report["rt_arena"] = int64_t(mesh_mem.rt_arena);
+	report["blas"] = int64_t(blas_bytes);
+	report["tlas"] = int64_t(tlas_bytes);
+	report["as_scratch"] = int64_t(as_scratch_bytes);
+	report["dag_headers"] = int64_t(dag_headers_bytes);
+	report["page_cache"] = int64_t(page_cache_bytes);
+	return report;
+}
+
+Dictionary RenderingServer::virtual_geometry_get_routing_counters() {
+	// GodotNext: nextgeo_residency (#78, Q12). Routing, residency invariants and page-upload GPU time.
+	Dictionary out;
+	if (RSG::virtual_mesh_storage != nullptr) {
+		out["page_upload_ms"] = RSG::virtual_mesh_storage->get_last_page_upload_ms();
+		out["double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
+		out["missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
+		out["child_resident_without_parent"] = int64_t(RSG::virtual_mesh_storage->get_child_resident_without_parent_count());
+		out["evictions_with_resident_child"] = int64_t(RSG::virtual_mesh_storage->get_evictions_with_resident_child_count());
+		out["non_main_view_requests"] = int64_t(RSG::virtual_mesh_storage->get_non_main_view_request_count());
+		out["page_uploads"] = int64_t(RSG::virtual_mesh_storage->get_total_page_uploads());
+		out["page_evictions"] = int64_t(RSG::virtual_mesh_storage->get_total_page_evictions());
+		out["resident_pages"] = int64_t(RSG::virtual_mesh_storage->get_resident_page_count());
+		out["pinned_pages"] = int64_t(RSG::virtual_mesh_storage->get_pinned_page_count());
+	} else {
+		out["page_upload_ms"] = 0.0;
+		out["double_dispatch"] = int64_t(0);
+		out["missing"] = int64_t(0);
+		out["child_resident_without_parent"] = int64_t(0);
+		out["evictions_with_resident_child"] = int64_t(0);
+		out["non_main_view_requests"] = int64_t(0);
+		out["page_uploads"] = int64_t(0);
+		out["page_evictions"] = int64_t(0);
+		out["resident_pages"] = int64_t(0);
+		out["pinned_pages"] = int64_t(0);
+	}
+	return out;
 }
 
 RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode) {
@@ -2926,6 +2996,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_reset_temporal_history", "viewport"), &RenderingServer::viewport_reset_temporal_history);
 	ClassDB::bind_method(D_METHOD("scaling_3d_mode_get_availability", "mode"), &RenderingServer::scaling_3d_mode_get_availability);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats, DEFVAL(RID()));
+	ClassDB::bind_method(D_METHOD("virtual_geometry_get_memory_report"), &RenderingServer::virtual_geometry_get_memory_report);
+	ClassDB::bind_method(D_METHOD("virtual_geometry_get_routing_counters"), &RenderingServer::virtual_geometry_get_routing_counters);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);
@@ -3907,6 +3979,10 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_visibility_raster (#83).
 	GLOBAL_DEF("rendering/nextgeo/debug_backface", false);
 	GLOBAL_DEF("rendering/nextgeo/visibility_only", false);
+	// GodotNext: nextgeo_residency (#78).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/geometry_cache_mb", PROPERTY_HINT_RANGE, "16,2047,1,suffix:MiB"), 512);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/page_upload_kib_per_frame", PROPERTY_HINT_RANGE, "64,65536,64,suffix:KiB"), 4096);
+	GLOBAL_DEF("rendering/nextgeo/streaming/debug_io_delay_ms", Vector2(0, 0));
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);
