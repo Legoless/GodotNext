@@ -8,8 +8,10 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+// clang-format off
 #include "nextgeo_records_inc.glsl"
 #include "nextgeo_cull_inc.glsl"
+// clang-format on
 
 bool aabb_visible(vec3 lo, vec3 hi) {
 	for (uint plane = 0u; plane < 6u; plane++) {
@@ -35,7 +37,8 @@ bool aabb_visible(vec3 lo, vec3 hi) {
 
 layout(set = 0, binding = 8, std430) buffer restrict Phase2Nodes {
 	uvec2 data[];
-} phase2_nodes;
+}
+phase2_nodes;
 
 bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	if (cull.cull.w == 0u) {
@@ -84,6 +87,11 @@ bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	return nearest_depth < occlusion;
 }
 
+layout(set = 0, binding = 9, std430) buffer restrict BVHArgs {
+	uvec4 data[];
+}
+bvh_args;
+
 #ifdef PHASE2
 void main() {
 	uint index = gl_GlobalInvocationID.x;
@@ -99,6 +107,7 @@ void main() {
 		return;
 	}
 	uint slot = atomicAdd(counters.phase1_count, 1u);
+	atomicMax(bvh_args.data[0].x, (slot + 64u) / 64u);
 	nodes.data[slot] = uvec2(entry.x, 0u);
 }
 #else
@@ -125,6 +134,7 @@ void main() {
 		return;
 	}
 	uint slot = atomicAdd(counters.phase1_count, 1u);
+	atomicMax(bvh_args.data[0].x, (slot + 64u) / 64u);
 	// Level 0 always starts at the mesh's BVH root (node 0).
 	nodes.data[slot] = uvec2(index, 0u);
 }

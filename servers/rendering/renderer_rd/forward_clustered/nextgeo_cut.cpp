@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -34,7 +34,6 @@
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
-
 
 namespace {
 struct CutParams {
@@ -229,6 +228,7 @@ bool NextGeoCut::_ensure() {
 	clusters = _storage(CLUSTER_CAPACITY * 8);
 	level_a = _storage(NODE_CAPACITY * 8);
 	level_b = _storage(NODE_CAPACITY * 8);
+	bvh_args = rd->storage_buffer_create(9 * 4 * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 
 	RD::TextureFormat format;
 	format.format = RD::DATA_FORMAT_R32_SFLOAT;
@@ -249,7 +249,7 @@ bool NextGeoCut::_ensure() {
 	sampler_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	sampler_state.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	dummy_sampler = rd->sampler_create(sampler_state);
-	initialized = params.is_valid() && counters.is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
+	initialized = params.is_valid() && counters.is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && bvh_args.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
 	if (!initialized) {
 		failed = true;
 	}
@@ -371,8 +371,8 @@ void NextGeoCut::_set_common_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_inp
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_output));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, p_groups));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, p_clusters));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, bvh_args));
 }
-
 
 void NextGeoCut::_request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev) {
 	RenderingDevice *rd = RD::get_singleton();
@@ -413,7 +413,6 @@ void NextGeoCut::_request_stats(uint32_t p_record_count, uint32_t p_max_levels, 
 	// same frame without a second buffer or an async request per frame.
 	stats_pending_read = true;
 }
-
 
 void NextGeoCut::_publish_stats(const PackedByteArray &p_data) {
 	if (p_data.size() < int(sizeof(CutCounters))) {
@@ -492,7 +491,7 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	rd->buffer_update(params, 0, sizeof(CutParams), &cut);
 
 	// Publish the previous frame's cut: the read is taken before this frame's
-	// reset, so the counters still hold the frame the CPU reference modelled.
+	// reset, so the counters still hold the frame the CPU reference modeled.
 	if (stats_pending_read) {
 		const Vector<uint8_t> raw = rd->buffer_get_data(counters, 0, sizeof(CutCounters));
 		PackedByteArray data;
@@ -505,6 +504,13 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	CutCounters zero;
 	memset(&zero, 0, sizeof(CutCounters));
 	rd->buffer_update(counters, 0, sizeof(CutCounters), &zero);
+	uint32_t args_zero[9 * 4];
+	for (uint32_t level = 0; level < 9; level++) {
+		args_zero[level * 4] = 0;
+		args_zero[level * 4 + 1] = 1;
+		args_zero[level * 4 + 2] = 1;
+	}
+	rd->buffer_update(bvh_args, 0, sizeof(args_zero), args_zero);
 
 	// Hi-Z for this frame, built from the depth pre-pass. Phase 1 tests the
 	// previous frame's chain, phase 2 the current one; they swap afterwards.
@@ -532,6 +538,7 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, have_prev ? hiz_texture[0] : dummy_hiz })),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args),
 		};
 		RID set = rd->uniform_set_create(uniforms, instance_shader.version_get_shader(instance_version, 0), 0);
 		if (!set.is_valid()) {
@@ -557,6 +564,7 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, hiz_texture[1] })),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args),
 		};
 		RID set = rd->uniform_set_create(uniforms, instance_shader.version_get_shader(instance_version, 1), 0);
 		if (set.is_valid()) {
@@ -584,7 +592,7 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		rd->compute_list_bind_uniform_set(list, set, 0);
 		const uint32_t push[4] = { level, NODE_CAPACITY, 0, 0 };
 		rd->compute_list_set_push_constant(list, push, sizeof(push));
-		rd->compute_list_dispatch(list, (NODE_CAPACITY + 63) / 64, 1, 1);
+		rd->compute_list_dispatch_indirect(list, bvh_args, level * 4 * sizeof(uint32_t));
 		rd->compute_list_end();
 		input = output;
 	}
@@ -656,7 +664,7 @@ void NextGeoCut::free_resources() {
 	cluster_leaf = RID();
 	cluster_hash = RID();
 	hiz_pipeline = RID();
-	for (RID *buffer : { &params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &counters }) {
+	for (RID *buffer : { &params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args, &counters }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();

@@ -10,21 +10,27 @@
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
+// clang-format off
 #include "nextgeo_records_inc.glsl"
 #include "nextgeo_cull_inc.glsl"
+// clang-format on
 
 layout(set = 0, binding = 8, std430) buffer restrict readonly LevelInput {
 	uvec2 data[];
-} level_input;
+}
+level_input;
 layout(set = 0, binding = 9, std430) buffer restrict LevelOutput {
 	uvec2 data[];
-} level_output;
+}
+level_output;
 layout(set = 0, binding = 10, std430) buffer restrict GroupsOut {
 	uvec2 data[];
-} groups_out;
+}
+groups_out;
 layout(set = 0, binding = 11, std430) buffer restrict ClustersOut {
 	uvec2 data[];
-} clusters_out;
+}
+clusters_out;
 
 #ifdef CUT_HASH
 // Matches RendererRD::nextgeo_cut_pair_hash, split into two 32-bit words so
@@ -55,7 +61,12 @@ layout(push_constant, std430) uniform Params {
 	uint output_capacity;
 	uint phase1_offset;
 	uint phase2_offset;
-} params;
+}
+params;
+layout(set = 0, binding = 12, std430) buffer restrict BVHArgs {
+	uvec4 data[];
+}
+bvh_args;
 
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 	return vec3(
@@ -150,6 +161,33 @@ void main() {
 			if (slot >= params.output_capacity) {
 				atomicAdd(counters.overflow, 1u);
 				continue;
+			}
+			uint groups = (slot + 64u) / 64u;
+			switch (params.level) {
+				case 0u:
+					atomicMax(bvh_args.data[1].x, groups);
+					break;
+				case 1u:
+					atomicMax(bvh_args.data[2].x, groups);
+					break;
+				case 2u:
+					atomicMax(bvh_args.data[3].x, groups);
+					break;
+				case 3u:
+					atomicMax(bvh_args.data[4].x, groups);
+					break;
+				case 4u:
+					atomicMax(bvh_args.data[5].x, groups);
+					break;
+				case 5u:
+					atomicMax(bvh_args.data[6].x, groups);
+					break;
+				case 6u:
+					atomicMax(bvh_args.data[7].x, groups);
+					break;
+				default:
+					atomicMax(bvh_args.data[8].x, groups);
+					break;
 			}
 			level_output.data[slot] = uvec2(entry.x, value);
 		}

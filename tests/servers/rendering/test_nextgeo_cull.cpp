@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -64,6 +64,14 @@ TEST_CASE("[NextGeo][Cull] Projected error") {
 	// The cut accepts at most the pixel budget.
 	CHECK_FALSE(nextgeo_cut_passes(px, 1.0f));
 	CHECK(nextgeo_cut_passes(0.5f, 1.0f));
+}
+
+TEST_CASE("[NextGeo][Cull] Indirect dispatch group counts") {
+	CHECK_EQ(nextgeo_dispatch_group_count(0), 0u);
+	CHECK_EQ(nextgeo_dispatch_group_count(1), 1u);
+	CHECK_EQ(nextgeo_dispatch_group_count(64), 1u);
+	CHECK_EQ(nextgeo_dispatch_group_count(65), 2u);
+	CHECK_EQ(nextgeo_dispatch_group_count(4096), 64u);
 }
 
 TEST_CASE("[NextGeo][Cull] Instance predicates") {

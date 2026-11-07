@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -57,6 +57,10 @@ inline float nextgeo_projected_error(const Vector3 &p_center, float p_radius, co
 // A cut is accepted when the projected error is at most the pixel budget.
 inline bool nextgeo_cut_passes(float p_projected_error, float p_max_pixel_error) {
 	return p_projected_error <= p_max_pixel_error;
+}
+
+inline uint32_t nextgeo_dispatch_group_count(uint32_t p_invocation_count) {
+	return (p_invocation_count + 63) / 64;
 }
 
 // Instance-level cull predicates (plan §7.3 step 4).

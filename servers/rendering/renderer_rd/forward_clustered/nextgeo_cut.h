@@ -86,6 +86,7 @@ private:
 	RID clusters;
 	RID level_a;
 	RID level_b;
+	RID bvh_args;
 	RID counters;
 	RID dummy_hiz;
 	RID dummy_sampler;
