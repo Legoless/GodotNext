@@ -71,20 +71,20 @@ uint32_t NextGIGlobalSDF::level_for_distance(float p_distance, uint32_t p_levels
 	if (p_levels == 0) {
 		return 0;
 	}
-	const float extent = level_extent(0);
-	if (p_distance <= extent) {
+	const float half_extent = level_extent(0) * 0.5f;
+	if (p_distance <= half_extent) {
 		return 0;
 	}
-	const uint32_t level = uint32_t(Math::ceil(Math::log2(p_distance / extent)));
+	const uint32_t level = uint32_t(Math::ceil(Math::log2(p_distance / half_extent)));
 	return MIN(level, p_levels - 1);
 }
 
 Vector3i NextGIGlobalSDF::scrolled_origin(const Vector3 &p_camera, uint32_t p_level) {
 	const float voxel_size = level_voxel_size(p_level);
 	const Vector3i voxel(
-			int(Math::floor(p_camera.x / voxel_size)),
-			int(Math::floor(p_camera.y / voxel_size)),
-			int(Math::floor(p_camera.z / voxel_size)));
+			int(Math::floor(p_camera.x / voxel_size)) - int(LEVEL_SIZE / 2),
+			int(Math::floor(p_camera.y / voxel_size)) - int(LEVEL_SIZE / 2),
+			int(Math::floor(p_camera.z / voxel_size)) - int(LEVEL_SIZE / 2));
 	return Vector3i(
 			_floor_div(voxel.x, int(BRICK_SIZE)) * int(BRICK_SIZE),
 			_floor_div(voxel.y, int(BRICK_SIZE)) * int(BRICK_SIZE),
@@ -150,18 +150,20 @@ Vector3 NextGIGlobalSDF::voxel_center(uint32_t p_level, const Vector3i &p_origin
 			float(p_origin.z + p_voxel.z) * voxel_size + voxel_size * 0.5f);
 }
 
+float NextGIGlobalSDF::sample_instance(const Instance &p_instance, const Vector3 &p_world) {
+	if (p_instance.field == nullptr || !p_instance.field->is_valid()) {
+		return 1e30f;
+	}
+	const Vector3 local = p_instance.transform.affine_inverse().xform(p_world);
+	const Vector3 scale = p_instance.transform.basis.get_scale();
+	const float world_scale = MAX(scale.x, MAX(scale.y, scale.z));
+	return p_instance.field->sample_distance(local) * world_scale;
+}
+
 float NextGIGlobalSDF::reference_distance(const Vector<Instance> &p_instances, const Vector3 &p_world) {
 	float distance = 1e30f;
 	for (const Instance &instance : p_instances) {
-		if (instance.field == nullptr || !instance.field->is_valid()) {
-			continue;
-		}
-		const Vector3 local = instance.transform.affine_inverse().xform(p_world);
-		const Vector3 scale = instance.transform.basis.get_scale();
-		// The mesh SDF is in local metres. A non-uniform scale is bounded by
-		// the largest axis, which keeps the field conservative.
-		const float world_scale = MAX(scale.x, MAX(scale.y, scale.z));
-		distance = MIN(distance, instance.field->sample_distance(local) * world_scale);
+		distance = MIN(distance, sample_instance(instance, p_world));
 	}
 	return distance;
 }
@@ -219,18 +221,10 @@ void NextGIGlobalSDF::compose_brick_split(const Vector<Instance> &p_instances, c
 			for (int y = 0; y < int(BRICK_SIZE); y++) {
 				for (int x = 0; x < int(BRICK_SIZE); x++) {
 					const Vector3 world = voxel_center(p_level, p_origin, base + Vector3i(x, y, z));
-					const Vector3 local = instance.transform.affine_inverse().xform(world);
-					const Vector3 scale = instance.transform.basis.get_scale();
-					const float world_scale = MAX(scale.x, MAX(scale.y, scale.z));
-					const float distance = instance.field->sample_distance(local) * world_scale;
+					const float distance = sample_instance(instance, world);
 					const uint32_t voxel = _voxel_index(Vector3i(x, y, z));
 					if (distance < target[voxel]) {
 						target[voxel] = distance;
-						// The winning sample decides the coverage bit; a
-						// dynamic instance may clear a static two-sided bit.
-						if (instance.dynamic || !instance.two_sided) {
-							// Recomputed below from the final winner.
-						}
 					}
 				}
 			}
@@ -252,11 +246,9 @@ void NextGIGlobalSDF::compose_brick_split(const Vector<Instance> &p_instances, c
 			for (int y = 0; y < int(BRICK_SIZE); y++) {
 				for (int x = 0; x < int(BRICK_SIZE); x++) {
 					const Vector3 world = voxel_center(p_level, p_origin, base + Vector3i(x, y, z));
-					const Vector3 local = instance.transform.affine_inverse().xform(world);
-					const Vector3 scale = instance.transform.basis.get_scale();
-					const float world_scale = MAX(scale.x, MAX(scale.y, scale.z));
+					const float distance = sample_instance(instance, world);
 					const uint32_t voxel = _voxel_index(Vector3i(x, y, z));
-					if (Math::is_equal_approx(instance.field->sample_distance(local) * world_scale, target[voxel])) {
+					if (distance < 1e29f && Math::is_equal_approx(distance, target[voxel])) {
 						set_coverage_bit(r_split, Vector3i(x, y, z), true);
 					}
 				}
@@ -293,9 +285,9 @@ uint32_t NextGIGlobalSDF::cull_instances_for_brick(const Vector<Instance> &p_ins
 	return MIN(count, p_max_indices);
 }
 
-void NextGIGlobalSDF::dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count) {
+void NextGIGlobalSDF::dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count, uint32_t p_level) {
 	r_count = 0;
-	const float brick_world = level_voxel_size(0) * float(BRICK_SIZE);
+	const float brick_world = level_voxel_size(p_level) * float(BRICK_SIZE);
 	auto add = [&](const AABB &p_aabb) {
 		if (p_aabb.size.x < 0.0f || p_aabb.size.y < 0.0f || p_aabb.size.z < 0.0f) {
 			return;
@@ -348,7 +340,7 @@ void NextGIGlobalSDF::build_coarse(const Vector<Instance> &p_instances, uint32_t
 			}
 		}
 	}
-	// Fast-sweep relaxation: a neighbour that already holds a finite distance
+	// Fast-sweep relaxation: a neighbor that already holds a finite distance
 	// can only lower this voxel, so apply the six-neighbour rule in both
 	// directions p_iterations times.
 	auto relax = [&](uint32_t x, uint32_t y, uint32_t z) {
@@ -390,6 +382,33 @@ void NextGIGlobalSDF::build_coarse(const Vector<Instance> &p_instances, uint32_t
 			}
 		}
 	}
+}
+
+uint32_t NextGIGlobalSDF::trace_coarse_steps(const LocalVector<float> &p_coarse, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_ray_origin, const Vector3 &p_ray_direction, uint32_t p_max_steps) {
+	if (p_level >= MAX_LEVELS || p_coarse.size() != COARSE_VOXELS || p_ray_direction.length_squared() < 1e-20f) {
+		return 0;
+	}
+	const float fine_step = level_voxel_size(p_level);
+	const float coarse_step = coarse_voxel_size(p_level);
+	const Vector3 direction = p_ray_direction.normalized();
+	Vector3 position = p_ray_origin;
+	for (uint32_t step = 0; step < p_max_steps; step++) {
+		const Vector3i voxel(
+				int(Math::floor(position.x / coarse_step)) - _floor_div(p_origin.x, 4),
+				int(Math::floor(position.y / coarse_step)) - _floor_div(p_origin.y, 4),
+				int(Math::floor(position.z / coarse_step)) - _floor_div(p_origin.z, 4));
+		if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 || voxel.x >= int(COARSE_SIZE) || voxel.y >= int(COARSE_SIZE) || voxel.z >= int(COARSE_SIZE)) {
+			return MAX(step, 1u);
+		}
+		const uint32_t index = voxel.x + COARSE_SIZE * (voxel.y + COARSE_SIZE * voxel.z);
+		const float distance = Math::abs(p_coarse[index]);
+		if (distance <= fine_step) {
+			return step + 1;
+		}
+		const float advance = CLAMP(distance - coarse_step * Math::sqrt(0.75f), fine_step, level_extent(p_level));
+		position += direction * advance;
+	}
+	return p_max_steps;
 }
 
 NextGIGlobalSDF::NextGIGlobalSDF() {

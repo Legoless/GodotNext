@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -110,6 +110,7 @@ public:
 	uint32_t get_pool_used() const { return pool.get_used_count(); }
 	uint64_t get_resident_bytes() const { return resident_bytes; }
 	uint64_t get_pool_size_bytes() const { return pool.get_size_bytes(); }
+	uint64_t get_generation() const { return generation; }
 	uint32_t get_mesh_id(RID p_mesh) const;
 	uint32_t get_mip_count(uint32_t p_mesh_id) const;
 	// Streams the requested mips in, up to p_budget_bytes (the caller passes
@@ -128,6 +129,7 @@ private:
 	HashMap<RID, uint32_t> mesh_ids;
 	LocalVector<RID> mesh_order;
 	uint64_t resident_bytes = 0;
+	uint64_t generation = 1;
 };
 
 // GodotNext: ps_mesh_sdf_atlas (#185)
@@ -162,17 +164,23 @@ public:
 
 	void begin_frame();
 	// Returns the record index, or UINT32_MAX when the table is full.
-	uint32_t add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible);
+	uint32_t add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible, bool p_dynamic = false);
 	void upload();
 	void clear();
 
 	uint32_t get_count() const { return uint32_t(records.size()); }
 	const Record &get_record(uint32_t p_index) const { return records[p_index]; }
+	const Transform3D &get_transform(uint32_t p_index) const { return transforms[p_index]; }
+	RID get_mesh(uint32_t p_index) const { return meshes[p_index]; }
+	bool is_dynamic(uint32_t p_index) const { return dynamic[p_index] != 0; }
 	uint32_t get_reason_count(uint32_t p_reason) const;
 	RID get_buffer() const { return buffer; }
 
 private:
 	LocalVector<Record> records;
+	LocalVector<Transform3D> transforms;
+	LocalVector<RID> meshes;
+	LocalVector<uint8_t> dynamic;
 	RID buffer;
 	uint32_t buffer_capacity = 0;
 	uint32_t reason_counts[4] = { 0, 0, 0, 0 };

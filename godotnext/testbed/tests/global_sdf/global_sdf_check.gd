@@ -1,0 +1,72 @@
+extends Node3D
+## #182: compare the live global-SDF GPU data with the CPU reference.
+## The slice and coarse ray-step heatmap are both displayed and saved.
+
+var _frames := 0
+var _sprite: Sprite3D
+var _step_sprite: Sprite3D
+
+
+func _ready() -> void:
+	var room: PackedScene = load("res://scenes/nextgi_perf/nextgi_perf.tscn")
+	add_child(room.instantiate())
+	_sprite = _make_sprite(Vector3(-2.0, 2.0, -2.0))
+	_step_sprite = _make_sprite(Vector3(2.0, 2.0, -2.0))
+	var camera := Camera3D.new()
+	add_child(camera)
+	camera.position = Vector3(0.0, 3.0, 6.0)
+	camera.look_at(Vector3(0.0, 2.0, -2.0))
+	camera.current = true
+
+
+func _make_sprite(p_position: Vector3) -> Sprite3D:
+	var sprite := Sprite3D.new()
+	sprite.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	sprite.position = p_position
+	sprite.scale = Vector3(3.0, 3.0, 3.0)
+	add_child(sprite)
+	return sprite
+
+
+func _process(_delta: float) -> void:
+	_frames += 1
+	if _frames > 600:
+		print("GLOBAL_SDF_FAIL: no GPU slice arrived")
+		get_tree().quit(1)
+		return
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	if not info.has("global_sdf_slice"):
+		if _frames % 60 == 0:
+			print("GLOBAL_SDF_WAIT frame=%d instances=%s jobs=%s pending=%s resident=%s rt_fed=%s" % [_frames, info.get("sdf_instance_count", -1), info.get("mesh_sdf_jobs", -1), info.get("mesh_sdf_pending", -1), info.get("mesh_sdf_resident_bytes", -1), info.get("rt_fed_instance_count", -1)])
+		return
+	if int(info.get("global_sdf_levels", 0)) < 6:
+		return
+	var slice: PackedFloat32Array = info["global_sdf_slice"]
+	var coverage: PackedByteArray = info["global_sdf_coverage"]
+	var step_counts: PackedByteArray = info["global_sdf_step_counts"]
+	var image := Image.create(128, 128, false, Image.FORMAT_RGB8)
+	var step_image := Image.create(128, 128, false, Image.FORMAT_RGB8)
+	var nonzero_steps := 0
+	for y in range(128):
+		for x in range(128):
+			var index := x + y * 128
+			var magnitude := clampf(absf(slice[index]), 0.0, 1.0)
+			var color := Color(magnitude, 0.15, 1.0 - magnitude)
+			if coverage[index] != 0:
+				color = Color(0.1, 0.9, 0.25)
+			image.set_pixel(x, y, color)
+			var count := int(step_counts[index])
+			nonzero_steps += int(count > 0)
+			var heat := clampf(float(count) / 64.0, 0.0, 1.0)
+			step_image.set_pixel(x, y, Color(heat, 0.2, 1.0 - heat))
+	_sprite.texture = ImageTexture.create_from_image(image)
+	_step_sprite.texture = ImageTexture.create_from_image(step_image)
+	var slice_error := image.save_png("user://global_sdf_slice.png")
+	var step_error := step_image.save_png("user://global_sdf_step_counts.png")
+	var random_checked := int(info.get("global_sdf_random_checked", 0))
+	var random_error := float(info.get("global_sdf_random_max_error", 1e30))
+	var sign_mismatches := int(info.get("global_sdf_sign_mismatches", -1))
+	var passed := bool(info.get("global_sdf_random_valid", false)) and random_checked == 10000 and random_error <= 0.1 and sign_mismatches == 0 and bool(info.get("global_sdf_coarse_valid", false)) and nonzero_steps > 0 and slice_error == OK and step_error == OK
+	print("GLOBAL_SDF_SUMMARY random_checked=%d random_max_error=%.6f sign_mismatches=%d slice_checked=%d slice_max_error=%.6f levels=%d bricks=%d steps=%d instances=%d origin=%s slice_y=%d" % [random_checked, random_error, sign_mismatches, int(info.get("global_sdf_checked", 0)), float(info.get("global_sdf_max_error", 0.0)), int(info.get("global_sdf_levels", 0)), int(info.get("global_sdf_used_bricks", 0)), nonzero_steps, int(info.get("global_sdf_instances", 0)), str(info.get("global_sdf_origin", Vector3i())), int(info.get("global_sdf_slice_y", -1))])
+	print("GLOBAL_SDF_IMAGES dir=%s slice_error=%d step_error=%d" % [OS.get_user_data_dir(), slice_error, step_error])
+	get_tree().quit(0 if passed else 1)

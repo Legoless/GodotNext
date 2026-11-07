@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -207,6 +207,7 @@ bool NextGISDFAtlas::register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_f
 	}
 	resident_bytes += pages.resident_bytes;
 	meshes.insert(p_mesh, pages);
+	generation++;
 	return true;
 }
 
@@ -217,6 +218,7 @@ void NextGISDFAtlas::unregister_mesh(RID p_mesh) {
 	}
 	_release_pages(*pages);
 	meshes.erase(p_mesh);
+	generation++;
 }
 
 uint32_t NextGISDFAtlas::get_mesh_id(RID p_mesh) const {
@@ -340,12 +342,15 @@ void NextGISDFAtlas::free_all() {
 
 void NextGISDFInstances::begin_frame() {
 	records.clear();
+	transforms.clear();
+	meshes.clear();
+	dynamic.clear();
 	for (uint32_t &count : reason_counts) {
 		count = 0;
 	}
 }
 
-uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible) {
+uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible, bool p_dynamic) {
 	if (records.size() >= MAX_INSTANCES) {
 		reason_counts[NEXTGI_SDF_INSTANCE_CAP]++;
 		return UINT32_MAX;
@@ -378,6 +383,9 @@ uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, cons
 	}
 	reason_counts[record.reason]++;
 	records.push_back(record);
+	transforms.push_back(p_transform);
+	meshes.push_back(p_mesh);
+	dynamic.push_back(p_dynamic ? 1 : 0);
 	return uint32_t(records.size() - 1);
 }
 
@@ -400,6 +408,9 @@ void NextGISDFInstances::upload() {
 
 void NextGISDFInstances::clear() {
 	records.clear();
+	transforms.clear();
+	meshes.clear();
+	dynamic.clear();
 	for (uint32_t &count : reason_counts) {
 		count = 0;
 	}

@@ -34,6 +34,7 @@
 #include "core/os/thread.h"
 #include "core/templates/command_queue_mt.h"
 #include "core/templates/hash_map.h"
+#include "scene/resources/3d/mesh_distance_field.h"
 #include "servers/rendering/renderer_canvas_cull.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_viewport.h"
@@ -41,7 +42,6 @@
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_globals.h"
-#include "scene/resources/3d/mesh_distance_field.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/server_wrap_mt_common.h"
 
@@ -935,7 +935,7 @@ public:
 	// GodotNext: nextgi_tier
 	FUNC2(environment_set_nextgi_enabled, RID, bool)
 	// GodotNext: nextgi_user_surface
-	FUNC6(environment_set_nextgi, RID, bool, float, bool, float, bool)
+	FUNC7(environment_set_nextgi, RID, bool, float, bool, float, bool, float)
 	FUNC1RC(bool, environment_get_nextgi_enabled, RID)
 	FUNC1RC(float, environment_get_nextgi_energy, RID)
 	FUNC1RC(bool, environment_get_nextgi_read_sky_light, RID)

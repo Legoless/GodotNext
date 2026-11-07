@@ -70,8 +70,9 @@ public:
 	static float level_extent(uint32_t p_level);
 	// The level whose extent covers p_distance (0 at the camera).
 	static uint32_t level_for_distance(float p_distance, uint32_t p_levels);
-	// Camera-scrolled level origin in voxels, snapped to the brick size.
+	// Camera-centred level origin in voxels, snapped to the brick size.
 	static Vector3i scrolled_origin(const Vector3 &p_camera, uint32_t p_level);
+	static float sample_instance(const Instance &p_instance, const Vector3 &p_world);
 	// Level i updates every 2^i frames (plan §21.2 step 3).
 	static bool level_updates_on_frame(uint32_t p_level, uint64_t p_frame);
 	// The brick-space shift from the old level origin to the new one.
@@ -105,18 +106,18 @@ public:
 	static bool get_coverage_bit(const BrickSplit &p_split, const Vector3i &p_voxel);
 	static void set_coverage_bit(BrickSplit &r_split, const Vector3i &p_voxel, bool p_value);
 
-	// The level-0 bricks an instance's old and new AABBs touch; the caller
-	// recomposes only these (dirty bricks).
-	static void dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count);
+	// The bricks an instance's old and new AABBs touch at p_level.
+	static void dirty_bricks(const AABB &p_old_world, const AABB &p_new_world, const Vector3i &p_origin, Vector3i *r_bricks, uint32_t p_max_bricks, uint32_t &r_count, uint32_t p_level = 0);
 
 	NextGIGlobalSDF();
 	~NextGIGlobalSDF();
 
 	static constexpr uint32_t COARSE_VOXELS = COARSE_SIZE * COARSE_SIZE * COARSE_SIZE;
-	// 1/4-resolution coarse level: resample the field at the coarse centres,
-	// then relax with 4 forward/backward neighbour sweeps (plan §21.2 step 4).
+	// 1/4-resolution coarse level: resample the field at the coarse centers,
+	// then relax with 4 forward/backward neighbor sweeps (plan §21.2 step 4).
 	static void build_coarse(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_iterations, LocalVector<float> &r_coarse);
 	static float coarse_voxel_size(uint32_t p_level) { return 4.0f * level_voxel_size(p_level); }
+	static uint32_t trace_coarse_steps(const LocalVector<float> &p_coarse, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_ray_origin, const Vector3 &p_ray_direction, uint32_t p_max_steps = 256);
 
 	// Rebuilds the bricks of one level overlapping p_world_bounds and returns
 	// how many were written. Bricks outside the level are skipped.

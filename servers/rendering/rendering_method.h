@@ -321,7 +321,7 @@ public:
 	// GodotNext: nextgi_tier
 	virtual void environment_set_nextgi_enabled(RID p_env, bool p_enabled) = 0;
 	// GodotNext: nextgi_user_surface
-	virtual void environment_set_nextgi(RID p_env, bool p_enable, float p_energy, bool p_read_sky, float p_max_roughness, bool p_fog_hits) = 0;
+	virtual void environment_set_nextgi(RID p_env, bool p_enable, float p_energy, bool p_read_sky, float p_max_roughness, bool p_fog_hits, float p_view_distance = 200.0f) = 0;
 	virtual bool environment_get_nextgi_enabled(RID p_env) const = 0;
 	virtual float environment_get_nextgi_energy(RID p_env) const = 0;
 	virtual bool environment_get_nextgi_read_sky_light(RID p_env) const = 0;

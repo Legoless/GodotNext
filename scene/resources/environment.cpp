@@ -633,7 +633,16 @@ bool Environment::is_nextgi_reading_sky_light() const {
 }
 
 void Environment::_update_nextgi() {
-	RS::get_singleton()->environment_set_nextgi(environment, nextgi_enabled, nextgi_energy, nextgi_read_sky_light, nextgi_max_roughness_to_trace, nextgi_fog_on_reflection_hits);
+	RS::get_singleton()->environment_set_nextgi(environment, nextgi_enabled, nextgi_energy, nextgi_read_sky_light, nextgi_max_roughness_to_trace, nextgi_fog_on_reflection_hits, nextgi_scene_view_distance);
+}
+
+void Environment::set_nextgi_scene_view_distance(float p_distance) {
+	nextgi_scene_view_distance = CLAMP(p_distance, 0.0f, 800.0f);
+	_update_nextgi();
+}
+
+float Environment::get_nextgi_scene_view_distance() const {
+	return nextgi_scene_view_distance;
 }
 
 void Environment::set_nextgi_max_roughness_to_trace(float p_roughness) {
@@ -653,7 +662,6 @@ void Environment::set_nextgi_fog_on_reflection_hits(bool p_enabled) {
 bool Environment::is_nextgi_fog_on_reflection_hits() const {
 	return nextgi_fog_on_reflection_hits;
 }
-
 
 // Glow
 
@@ -1494,6 +1502,8 @@ void Environment::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_nextgi_max_roughness_to_trace"), &Environment::get_nextgi_max_roughness_to_trace);
 	ClassDB::bind_method(D_METHOD("set_nextgi_fog_on_reflection_hits", "enabled"), &Environment::set_nextgi_fog_on_reflection_hits);
 	ClassDB::bind_method(D_METHOD("is_nextgi_fog_on_reflection_hits"), &Environment::is_nextgi_fog_on_reflection_hits);
+	ClassDB::bind_method(D_METHOD("set_nextgi_scene_view_distance", "distance"), &Environment::set_nextgi_scene_view_distance);
+	ClassDB::bind_method(D_METHOD("get_nextgi_scene_view_distance"), &Environment::get_nextgi_scene_view_distance);
 	ClassDB::bind_method(D_METHOD("is_nextgi_reading_sky_light"), &Environment::is_nextgi_reading_sky_light);
 	ADD_GROUP("NextGI", "nextgi_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_nextgi_enabled", "is_nextgi_enabled");
@@ -1502,6 +1512,7 @@ void Environment::_bind_methods() {
 	// GodotNext: nextgi_reflection_behaviours (#132).
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "nextgi_max_roughness_to_trace", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_nextgi_max_roughness_to_trace", "get_nextgi_max_roughness_to_trace");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "nextgi_fog_on_reflection_hits"), "set_nextgi_fog_on_reflection_hits", "is_nextgi_fog_on_reflection_hits");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "nextgi_scene_view_distance", PROPERTY_HINT_RANGE, "0,800,0.1,or_greater,suffix:m"), "set_nextgi_scene_view_distance", "get_nextgi_scene_view_distance");
 
 	// Glow
 

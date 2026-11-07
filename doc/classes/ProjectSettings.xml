@@ -3123,6 +3123,9 @@
 		<member name="rendering/global_illumination/nextgi/debug/gather_hit_radiance" type="int" setter="" getter="" default="0">
 			How NextGI shades a gather hit. [code]0[/code] is the surface cache. [code]1[/code] is the reference path tracer, at 16 samples per hit. Misses still sample the sky.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/global_sdf" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], NextGI builds global distance-field clipmaps from the available mesh distance fields and includes a distance slice, coarse ray-step counts and CPU-reference comparisons in [method RenderingServer.nextgi_get_tier_info]. This is a debugging aid; it reads GPU buffers back.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/read_page_radiance" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_page_probes[/code], the center-texel radiance of each surface-cache page. This reads a small buffer back from the GPU.
 		</member>
@@ -3357,7 +3360,7 @@
 			Read the NextGeo cut debug stats every N frames instead of every frame, to limit the GPU stall during long sweeps.
 		</member>
 		<member name="rendering/nextgeo/hiz_debug" type="bool" setter="" getter="" default="false">
-			Read the previous and current Hi-Z chains back with the cut debug stats and report their centre depth. It is a debug-only readback and stalls the GPU.
+			Read the previous and current Hi-Z chains back with the cut debug stats and report their center depth. It is a debug-only readback and stalls the GPU.
 		</member>
 		<member name="rendering/nextgeo/max_pixel_error" type="float" setter="" getter="" default="1.0">
 			The projected-error budget in pixels at the internal resolution for NextGeo's instance and cluster cuts. A cut is accepted when its projected error is at most this value; it applies on the next frame.

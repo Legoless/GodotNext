@@ -170,6 +170,7 @@ private:
 	// GodotNext: nextgi_reflection_behaviours (#132).
 	float nextgi_max_roughness_to_trace = 0.4f;
 	bool nextgi_fog_on_reflection_hits = true;
+	float nextgi_scene_view_distance = 200.0f;
 	void _update_nextgi();
 
 	// Glow
@@ -372,6 +373,8 @@ public:
 	float get_nextgi_max_roughness_to_trace() const;
 	void set_nextgi_fog_on_reflection_hits(bool p_enabled);
 	bool is_nextgi_fog_on_reflection_hits() const;
+	void set_nextgi_scene_view_distance(float p_distance);
+	float get_nextgi_scene_view_distance() const;
 
 	// Glow
 	void set_glow_enabled(bool p_enabled);

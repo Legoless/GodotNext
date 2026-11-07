@@ -33,6 +33,9 @@
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf.h"
+#include "servers/rendering/renderer_rd/shader_rd.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_global_sdf.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_global_sdf_coarse.glsl.gen.h"
 
 // GodotNext: ps_global_sdf (#182, plan §21.2 L4)
 //
@@ -44,6 +47,7 @@ class NextGIGlobalSDFGPU {
 public:
 	static constexpr uint32_t BRICKS_PER_LEVEL = NextGIGlobalSDF::BRICKS_PER_LEVEL;
 	static constexpr uint32_t BRICK_BYTES = NextGIGlobalSDF::BRICK_VOXELS * 2; // R16F.
+	static constexpr uint32_t COVERAGE_BYTES = NextGIGlobalSDF::BRICK_VOXELS / 8;
 	static constexpr uint32_t DEFAULT_POOL_BRICKS = 16384; // 16 MiB.
 	static constexpr int32_t PAGE_UNALLOCATED = -1;
 
@@ -54,7 +58,14 @@ public:
 	void ensure_buffers();
 	// Packs and uploads one brick, allocating a pool slot on first use.
 	bool upload_brick(uint32_t p_level, const Vector3i &p_brick, const float *p_voxels);
+	// Composites the selected bricks through the compute pipeline.
+	bool update_bricks(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i *p_bricks, uint32_t p_count);
+	// Reads one static/dynamic/coverage brick back from the GPU.
+	bool download_brick(uint32_t p_level, const Vector3i &p_brick, NextGIGlobalSDF::BrickSplit &r_split) const;
+	bool download_coarse(uint32_t p_level, LocalVector<float> &r_coarse) const;
+	bool validate_reference(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float &r_max_error, uint32_t &r_sign_mismatches, uint32_t &r_checked) const;
 	void release_level(uint32_t p_level);
+	void scroll_level(uint32_t p_level, const Vector3i &p_delta_bricks);
 	void free_all();
 
 	int32_t get_slot(uint32_t p_level, const Vector3i &p_brick) const;
@@ -63,7 +74,10 @@ public:
 	uint32_t get_capacity() const { return capacity; }
 	const PackedInt32Array &get_page_table(uint32_t p_level) const { return page_tables[p_level]; }
 	RID get_pool_buffer() const { return pool_buffer; }
+	RID get_dynamic_pool_buffer() const { return dynamic_pool_buffer; }
+	RID get_coverage_buffer() const { return coverage_buffer; }
 	RID get_page_buffer(uint32_t p_level) const { return p_level < page_buffers.size() ? page_buffers[p_level] : RID(); }
+	RID get_coarse_buffer(uint32_t p_level) const { return p_level < coarse_buffers.size() ? coarse_buffers[p_level] : RID(); }
 	// Reads back the packed half of one voxel from the CPU mirror.
 	float get_voxel(uint32_t p_level, const Vector3i &p_brick, const Vector3i &p_voxel) const;
 
@@ -71,13 +85,31 @@ private:
 	static uint32_t _table_index(const Vector3i &p_brick);
 	bool _allocate_slot(uint32_t &r_slot);
 	void _free_slot(uint32_t p_slot);
+	bool _ensure_pipeline();
+	bool _update_coarse(uint32_t p_level, const Vector3i &p_origin);
+	uint32_t _allocate_brick(uint32_t p_level, const Vector3i &p_brick);
+	void _release_brick(uint32_t p_level, const Vector3i &p_brick);
 
 	uint32_t capacity = 0;
 	uint32_t used = 0;
-	PackedByteArray pool_data;
+	mutable PackedByteArray pool_data;
 	Vector<PackedInt32Array> page_tables;
 	Vector<uint8_t> slot_used;
 	Vector<int32_t> free_slots;
 	RID pool_buffer;
+	RID dynamic_pool_buffer;
+	RID coverage_buffer;
 	Vector<RID> page_buffers;
+	Vector<RID> coarse_buffers;
+	Vector<RID> coarse_uniforms;
+	RID coarse_scratch;
+
+	NextgiGlobalSdfShaderRD shader;
+	RID version;
+	RID pipeline;
+	bool pipeline_failed = false;
+	NextgiGlobalSdfCoarseShaderRD coarse_shader;
+	RID coarse_version;
+	RID coarse_pipeline;
+	bool coarse_pipeline_failed = false;
 };

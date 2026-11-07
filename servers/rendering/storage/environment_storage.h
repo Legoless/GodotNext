@@ -180,6 +180,7 @@ private:
 		// GodotNext: nextgi_reflection_behaviours (#132).
 		float nextgi_max_roughness_to_trace = 0.4f;
 		bool nextgi_fog_on_reflection_hits = true;
+		float nextgi_scene_view_distance = 200.0f;
 
 		// Adjustments
 		bool adjustments_enabled = false;
@@ -337,7 +338,8 @@ public:
 	void environment_set_nextgi_enabled(RID p_env, bool p_enabled);
 	bool environment_get_nextgi_enabled(RID p_env) const;
 	// GodotNext: nextgi_user_surface
-	void environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits);
+	void environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits, float p_view_distance = 200.0f);
+	float environment_get_nextgi_scene_view_distance(RID p_env) const;
 	float environment_get_nextgi_energy(RID p_env) const;
 	bool environment_get_nextgi_read_sky_light(RID p_env) const;
 	// GodotNext: nextgi_reflection_behaviours (#132).

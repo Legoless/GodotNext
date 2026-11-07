@@ -217,6 +217,9 @@
 		<member name="nextgi_read_sky_light" type="bool" setter="set_nextgi_read_sky_light" getter="is_nextgi_reading_sky_light" default="true">
 			If [code]true[/code], NextGI includes sky light in the indirect result. Set this to [code]false[/code] for interior scenes that should not pick up the sky.
 		</member>
+		<member name="nextgi_scene_view_distance" type="float" setter="set_nextgi_scene_view_distance" getter="get_nextgi_scene_view_distance" default="200.0">
+			The farthest distance covered by the global distance-field clipmaps when NextGI is enabled, in meters. The default of [code]200.0[/code] uses six levels. Larger values add coarser levels, up to [code]800.0[/code].
+		</member>
 		<member name="reflected_light_source" type="int" setter="set_reflection_source" getter="get_reflection_source" enum="Environment.ReflectionSource" default="0">
 			The reflected (specular) light source.
 		</member>

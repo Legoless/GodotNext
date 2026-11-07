@@ -36,8 +36,8 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
-
-#include "next_gi_sdf.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 
 class RenderDataRD;
 class NextGISDFStream;
@@ -384,6 +384,8 @@ public:
 	// GodotNext: ps_mesh_sdf_atlas (#185).
 	NextGISDFInstances &get_sdf_instances() { return sdf_instances; }
 	const NextGISDFInstances &get_sdf_instances() const { return sdf_instances; }
+	void update_global_sdf(const ::RenderDataRD *p_render_data);
+	Dictionary get_global_sdf_debug() const;
 
 	struct Stats {
 		uint32_t fed_instance_count = 0;
@@ -423,6 +425,11 @@ private:
 	Stats stats;
 	NextGISDFInstances sdf_instances;
 	NextGISDFStream *sdf_stream = nullptr;
+	NextGIGlobalSDFGPU global_sdf;
+	HashSet<uint32_t> global_sdf_initialized_levels;
+	Vector3i global_sdf_origin;
+	Vector3i global_sdf_origins[NextGIGlobalSDF::MAX_LEVELS];
+	uint64_t global_sdf_generation = 0;
 	// GodotNext: nextgi_skinned_actors (#59). Per-instance posed BLASes keyed by (instance, surface).
 	struct SkinnedPart {
 		RID blas;

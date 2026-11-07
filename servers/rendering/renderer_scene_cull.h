@@ -1444,7 +1444,7 @@ public:
 	// GodotNext: nextgi_tier
 	PASS2(environment_set_nextgi_enabled, RID, bool)
 	// GodotNext: nextgi_user_surface
-	PASS6(environment_set_nextgi, RID, bool, float, bool, float, bool)
+	PASS7(environment_set_nextgi, RID, bool, float, bool, float, bool, float)
 	PASS1RC(bool, environment_get_nextgi_enabled, RID)
 	PASS1RC(float, environment_get_nextgi_energy, RID)
 	PASS1RC(bool, environment_get_nextgi_read_sky_light, RID)

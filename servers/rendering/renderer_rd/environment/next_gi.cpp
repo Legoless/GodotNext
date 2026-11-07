@@ -637,6 +637,9 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_scene_update_ms"] = rt_stats.scene_update_ms;
 		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
 		info["rt_as_memory_exceeded"] = rt_scene->is_as_memory_exceeded();
+		if (bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/global_sdf"))) {
+			info.merge(rt_scene->get_global_sdf_debug());
+		}
 		// GodotNext: ps_mesh_sdf_atlas (#185).
 		if (MeshStorage::get_singleton() != nullptr) {
 			NextGISDFAtlas &sdf_atlas = MeshStorage::get_singleton()->get_sdf_atlas();

@@ -3175,7 +3175,7 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: nextgi_tier
 	ClassDB::bind_method(D_METHOD("environment_set_nextgi_enabled", "env", "enable"), &RenderingServer::environment_set_nextgi_enabled);
 	// GodotNext: nextgi_user_surface
-	ClassDB::bind_method(D_METHOD("environment_set_nextgi", "env", "enable", "energy", "read_sky", "max_roughness", "fog_hits"), &RenderingServer::environment_set_nextgi);
+	ClassDB::bind_method(D_METHOD("environment_set_nextgi", "env", "enable", "energy", "read_sky", "max_roughness", "fog_hits", "view_distance"), &RenderingServer::environment_set_nextgi);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_enabled", "env"), &RenderingServer::environment_get_nextgi_enabled);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_energy", "env"), &RenderingServer::environment_get_nextgi_energy);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_read_sky_light", "env"), &RenderingServer::environment_get_nextgi_read_sky_light);
@@ -3920,6 +3920,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_page_radiance", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_shadow_mask", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/coverage_counter", false);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/global_sdf", false);
 	// GodotNext: nextgi_reference
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_mode", PROPERTY_HINT_ENUM, "Off,Full,Direct Only,Reflections Only"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_seed", PROPERTY_HINT_RANGE, "1,4096,1"), 1);

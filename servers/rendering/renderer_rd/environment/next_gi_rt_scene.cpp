@@ -30,6 +30,7 @@
 
 #include "next_gi_rt_scene.h"
 
+#include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf_stream.h"
@@ -49,6 +50,7 @@
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/storage/environment_storage.h"
 
 namespace RendererRD {
 
@@ -497,6 +499,8 @@ void NextGIRTScene::free() {
 		sdf_stream = nullptr;
 	}
 	sdf_instances.clear();
+	global_sdf.free_all();
+	global_sdf_initialized_levels.clear();
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
 		tlas = RID();
@@ -705,7 +709,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			const bool sdf_instance_uniforms = geometry_instance->data->material_override.is_valid() || geometry_instance->data->material_overlay.is_valid();
 			MeshStorage *sdf_mesh_storage = MeshStorage::get_singleton();
 			if (sdf_mesh_storage != nullptr) {
-				sdf_instances.add(sdf_mesh_storage->get_sdf_atlas(), mesh, sdf_transform, sdf_skinned, sdf_instance_uniforms, MAX(sdf_scale.x, MAX(sdf_scale.y, sdf_scale.z)), true);
+				sdf_instances.add(sdf_mesh_storage->get_sdf_atlas(), mesh, sdf_transform, sdf_skinned, sdf_instance_uniforms, MAX(sdf_scale.x, MAX(sdf_scale.y, sdf_scale.z)), true, sdf_mesh_storage->mesh_nextgi_rt_is_dynamic(mesh));
 			}
 		}
 		// GodotNext: nextgi_skinned_actors (#59). A skinned instance enters through its posed
@@ -1127,6 +1131,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (mesh_storage->get_sdf_atlas().get_resident_bytes() > 0) {
 		sdf_stream->dispatch(sdf_instances.get_buffer(), sdf_instances.get_count(), camera_origin);
 	}
+	update_global_sdf(p_render_data);
 }
 
 // GodotNext: nextgi_as_slots
@@ -1424,6 +1429,196 @@ String NextGIRTScene::build_instances_shader_source(int p_layout) {
 		return String();
 	}
 	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
+} // namespace RendererRD
+
+namespace RendererRD {
+
+static Vector<NextGIGlobalSDF::Instance> nextgi_global_sdf_instances(const NextGISDFInstances &p_instances) {
+	static LocalVector<MeshSDFData> fields;
+	fields.clear();
+	const uint32_t count = p_instances.get_count();
+	fields.reserve(count);
+	Vector<NextGIGlobalSDF::Instance> instances;
+	instances.reserve(count);
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr) {
+		return instances;
+	}
+	for (uint32_t index = 0; index < count; index++) {
+		const RID mesh = p_instances.get_mesh(index);
+		const NextGISDFAtlas::MeshPages *pages = mesh_storage->get_sdf_atlas().get_pages(mesh);
+		if (pages == nullptr || pages->field.is_null()) {
+			continue;
+		}
+		fields.push_back(pages->field->get_data());
+		NextGIGlobalSDF::Instance instance;
+		instance.transform = p_instances.get_transform(index);
+		instance.field = &fields[fields.size() - 1];
+		instance.dynamic = p_instances.is_dynamic(index);
+		instance.two_sided = pages->field->is_two_sided();
+		instances.push_back(instance);
+	}
+	return instances;
+}
+
+void NextGIRTScene::update_global_sdf(const ::RenderDataRD *p_render_data) {
+	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/global_sdf"))) {
+		return;
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	ERR_FAIL_NULL(mesh_storage);
+	const uint64_t generation = mesh_storage->get_sdf_atlas().get_generation();
+	if (generation != global_sdf_generation) {
+		global_sdf.free_all();
+		global_sdf_initialized_levels.clear();
+		global_sdf_generation = generation;
+	}
+	const Vector<NextGIGlobalSDF::Instance> instances = nextgi_global_sdf_instances(sdf_instances);
+	if (instances.is_empty()) {
+		if (!global_sdf_initialized_levels.is_empty()) {
+			global_sdf.free_all();
+			global_sdf_initialized_levels.clear();
+		}
+		return;
+	}
+	const Vector3 camera = p_render_data != nullptr && p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	const float view_distance = p_render_data != nullptr ? RendererEnvironmentStorage::get_singleton()->environment_get_nextgi_scene_view_distance(p_render_data->environment) : 200.0f;
+	const uint32_t levels = NextGIGlobalSDF::level_count(view_distance);
+	for (uint32_t level = 0; level < levels; level++) {
+		if (global_sdf_initialized_levels.has(level) && !NextGIGlobalSDF::level_updates_on_frame(level, frame)) {
+			continue;
+		}
+		const Vector3i origin = NextGIGlobalSDF::scrolled_origin(camera, level);
+		if (level == 0) {
+			global_sdf_origin = origin;
+		}
+		Vector3i bricks[NextGIGlobalSDF::BRICKS_PER_LEVEL];
+		uint32_t count = 0;
+		if (!global_sdf_initialized_levels.has(level)) {
+			for (int z = 0; z < int(NextGIGlobalSDF::PAGE_SIZE); z++) {
+				for (int y = 0; y < int(NextGIGlobalSDF::PAGE_SIZE); y++) {
+					for (int x = 0; x < int(NextGIGlobalSDF::PAGE_SIZE); x++) {
+						bricks[count++] = Vector3i(x, y, z);
+					}
+				}
+			}
+		} else {
+			if (origin != global_sdf_origins[level]) {
+				const Vector3i delta = NextGIGlobalSDF::scroll_brick_delta(global_sdf_origins[level], origin);
+				global_sdf.scroll_level(level, delta);
+				count = NextGIGlobalSDF::scrolled_edge_bricks(delta, bricks, NextGIGlobalSDF::BRICKS_PER_LEVEL);
+			}
+			if (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) {
+				for (uint32_t index = 0; index < p_render_data->sdfgi_update_data->nextgi_dirty_volume_count; index++) {
+					const AABB &volume = p_render_data->sdfgi_update_data->nextgi_dirty_volumes[index];
+					NextGIGlobalSDF::dirty_bricks(volume, volume, origin, bricks + count, NextGIGlobalSDF::BRICKS_PER_LEVEL - count, count, level);
+				}
+			}
+		}
+		global_sdf_origins[level] = origin;
+		if (global_sdf.update_bricks(instances, level, origin, bricks, count)) {
+			global_sdf_initialized_levels.insert(level);
+		}
+	}
+}
+
+Dictionary NextGIRTScene::get_global_sdf_debug() const {
+	Dictionary info;
+	info["global_sdf_checked"] = 0;
+	info["global_sdf_max_error"] = 0.0;
+	if (!global_sdf_initialized_levels.has(0)) {
+		return info;
+	}
+	const Vector<NextGIGlobalSDF::Instance> instances = nextgi_global_sdf_instances(sdf_instances);
+	PackedFloat32Array slice;
+	PackedByteArray coverage;
+	PackedByteArray step_counts;
+	slice.resize(NextGIGlobalSDF::LEVEL_SIZE * NextGIGlobalSDF::LEVEL_SIZE);
+	coverage.resize(slice.size());
+	step_counts.resize(slice.size());
+	int slice_y = 16;
+	float slice_area = 0.0f;
+	Vector3 slice_center;
+	const AABB level_bounds(Vector3(global_sdf_origin) * NextGIGlobalSDF::level_voxel_size(0), Vector3(NextGIGlobalSDF::level_extent(0), NextGIGlobalSDF::level_extent(0), NextGIGlobalSDF::level_extent(0)));
+	for (const NextGIGlobalSDF::Instance &instance : instances) {
+		if (instance.field == nullptr || !instance.field->is_valid()) {
+			continue;
+		}
+		const AABB overlap = instance.transform.xform(instance.field->bounds).intersection(level_bounds);
+		const float area = overlap.size.x * overlap.size.z;
+		if (overlap.size.y > 0.0f && area > slice_area) {
+			slice_area = area;
+			slice_center = instance.transform.xform(instance.field->bounds.get_center());
+		}
+	}
+	if (slice_area > 0.0f) {
+		slice_y = CLAMP(NextGIGlobalSDF::world_to_voxel(0, global_sdf_origin, slice_center).y, 0, int(NextGIGlobalSDF::LEVEL_SIZE) - 1);
+	}
+	slice.fill(65504.0f);
+	float max_error = 0.0;
+	int checked = 0;
+	LocalVector<uint32_t> culled;
+	culled.resize(instances.size());
+	for (int brick_z = 0; brick_z < int(NextGIGlobalSDF::PAGE_SIZE); brick_z++) {
+		for (int brick_x = 0; brick_x < int(NextGIGlobalSDF::PAGE_SIZE); brick_x++) {
+			const Vector3i brick(brick_x, slice_y / int(NextGIGlobalSDF::BRICK_SIZE), brick_z);
+			NextGIGlobalSDF::BrickSplit split;
+			const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, global_sdf_origin, brick, culled.ptr(), culled.size());
+			if (!global_sdf.download_brick(0, brick, split)) {
+				continue;
+			}
+			for (int local_z = 0; local_z < int(NextGIGlobalSDF::BRICK_SIZE); local_z++) {
+				for (int local_x = 0; local_x < int(NextGIGlobalSDF::BRICK_SIZE); local_x++) {
+					const int x = brick_x * int(NextGIGlobalSDF::BRICK_SIZE) + local_x;
+					const int z = brick_z * int(NextGIGlobalSDF::BRICK_SIZE) + local_z;
+					const int local_index = local_x + local_z * int(NextGIGlobalSDF::BRICK_SIZE * NextGIGlobalSDF::BRICK_SIZE);
+					const int index = x + z * int(NextGIGlobalSDF::LEVEL_SIZE);
+					const float distance = MIN(split.static_distance[local_index], split.dynamic_distance[local_index]);
+					slice.set(index, distance);
+					coverage.set(index, NextGIGlobalSDF::get_coverage_bit(split, Vector3i(local_x, 0, local_z)) ? 1 : 0);
+					const Vector3 world = NextGIGlobalSDF::voxel_center(0, global_sdf_origin, Vector3i(x, slice_y, z));
+					float reference = 65504.0f;
+					for (uint32_t i = 0; i < culled_count; i++) {
+						reference = MIN(reference, NextGIGlobalSDF::sample_instance(instances[culled[i]], world));
+					}
+					max_error = MAX(max_error, Math::abs(distance - reference));
+					checked++;
+				}
+			}
+		}
+	}
+	LocalVector<float> coarse;
+	const bool coarse_valid = global_sdf.download_coarse(0, coarse);
+	for (int z = 0; z < int(NextGIGlobalSDF::LEVEL_SIZE); z++) {
+		for (int x = 0; x < int(NextGIGlobalSDF::LEVEL_SIZE); x++) {
+			const Vector3 start = NextGIGlobalSDF::voxel_center(0, global_sdf_origin, Vector3i(x, slice_y, 0));
+			const uint32_t steps = coarse_valid ? NextGIGlobalSDF::trace_coarse_steps(coarse, 0, global_sdf_origin, start, Vector3(0.0f, 0.0f, 1.0f)) : 0;
+			step_counts.set(x + z * int(NextGIGlobalSDF::LEVEL_SIZE), MIN(steps, 255u));
+		}
+	}
+	uint32_t sign_mismatches = 0;
+	uint32_t random_checked = 0;
+	float random_max_error = 0.0;
+	const bool random_valid = global_sdf.validate_reference(instances, 0, global_sdf_origin, 10000, random_max_error, sign_mismatches, random_checked);
+	info["global_sdf_slice"] = slice;
+	info["global_sdf_coverage"] = coverage;
+	info["global_sdf_step_counts"] = step_counts;
+	info["global_sdf_coarse_valid"] = coarse_valid;
+	info["global_sdf_slice_y"] = slice_y;
+	info["global_sdf_origin"] = global_sdf_origin;
+	info["global_sdf_instances"] = instances.size();
+	info["global_sdf_checked"] = checked;
+	info["global_sdf_max_error"] = max_error;
+	info["global_sdf_random_valid"] = random_valid;
+	info["global_sdf_random_checked"] = random_checked;
+	info["global_sdf_random_max_error"] = random_max_error;
+	info["global_sdf_sign_mismatches"] = sign_mismatches;
+	info["global_sdf_used_bricks"] = global_sdf.get_used_bricks();
+	info["global_sdf_levels"] = global_sdf_initialized_levels.size();
+	return info;
 }
 
 } // namespace RendererRD
