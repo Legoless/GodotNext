@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -344,8 +344,16 @@ TEST_CASE("[NextGeo][Records] DAG offsets and BVH level count") {
 	CHECK_EQ((second_record.group_offset - 8) % 16, uint32_t(0));
 	CHECK_EQ(second_record.bvh_level_count, uint32_t(2));
 
-	// Clearing releases the DAG range, so a re-set reuses the first range.
+	// Clearing zeroes the MeshRecord, marks it dirty, and releases the DAG range so a re-set reuses it.
+	storage.flush();
+	const int mesh_uploads_before_clear = storage.mesh_upload_calls;
 	storage.mesh_clear_virtual_geometry(mesh, 0);
+	const RendererVirtualMeshStorage::MeshRecord &cleared = storage.get_mesh_record(mesh);
+	CHECK_EQ(cleared.bvh_level_count, uint32_t(0));
+	CHECK_EQ(cleared.bvh_node_offset, uint32_t(0));
+	CHECK_EQ(cleared.surface_count, uint32_t(0));
+	storage.flush();
+	CHECK(storage.mesh_upload_calls > mesh_uploads_before_clear);
 	storage.mesh_set_virtual_geometry(mesh, desc);
 	const RendererVirtualMeshStorage::MeshRecord &reused = storage.get_mesh_record(mesh);
 	CHECK_EQ(reused.group_offset, uint32_t(8));
@@ -399,7 +407,11 @@ TEST_CASE("[NextGeo][Routing] Surface mask, clear reason and counters") {
 	CHECK_FALSE(storage.mesh_surface_is_virtual(mesh, 0));
 	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(7));
 
-	// Setting VGD again clears the old reason.
+	// Setting VGD again clears the old reason, and VIRTUAL_GEOMETRY_CLEAR_NONE erases a stored reason.
 	storage.mesh_set_virtual_geometry(mesh, desc);
+	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(0));
+	storage.mesh_clear_virtual_geometry(mesh, 7);
+	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(7));
+	storage.mesh_clear_virtual_geometry(mesh, 0);
 	CHECK_EQ(storage.mesh_clear_reason(mesh), uint32_t(0));
 }

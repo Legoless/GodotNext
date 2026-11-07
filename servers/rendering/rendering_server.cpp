@@ -38,10 +38,15 @@
 #include "core/variant/typed_array.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
+#include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_method.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server_types.h"
 #include "servers/rendering/shader_language.h"
 #include "servers/rendering/shader_warnings.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 
 RenderingServer *RenderingServer::singleton = nullptr;
 RenderingServer *(*RenderingServer::create_func)() = nullptr;
@@ -2254,10 +2259,27 @@ void RenderingServer::get_argument_options(const StringName &p_function, int p_i
 #endif
 
 Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
-	// GodotNext: nextgeo_gpu_cull (#76). The build-phase snapshot is per main
-	// view; the viewport RID is accepted for future per-view stats.
-	(void)p_viewport;
-	return NextGeoCut::get_last_stats();
+	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80).
+	if (p_viewport.is_valid() && RSG::scene != nullptr && RSG::scene->is_instance(p_viewport)) {
+		return RSG::scene->instance_get_virtual_geometry_debug_stats(p_viewport);
+	}
+	Dictionary stats = NextGeoCut::get_last_stats();
+	if (RSG::virtual_mesh_storage != nullptr) {
+		stats["double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
+		stats["missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
+	}
+	if (p_viewport.is_valid() && RSG::viewport != nullptr) {
+		const RendererViewport::Viewport *vp = RSG::viewport->viewport_owner.get_or_null(p_viewport);
+		if (vp != nullptr) {
+			const bool view_msaa = vp->msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
+			const bool view_multiview = vp->use_xr || vp->view_count > 1;
+			const bool view_debug = vp->debug_draw != RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
+			const RendererRD::NextGeoFallback view_fb = RendererRD::nextgeo_view_fallback(view_msaa, view_multiview, view_debug);
+			stats["view_route"] = view_fb == RendererRD::NEXTGEO_FALLBACK_NONE ? "virtual" : "legacy";
+			stats["view_reason"] = RendererRD::nextgeo_fallback_name(view_fb);
+		}
+	}
+	return stats;
 }
 
 RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode) {
@@ -2903,7 +2925,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_get_scaling_3d_status", "viewport"), &RenderingServer::viewport_get_scaling_3d_status);
 	ClassDB::bind_method(D_METHOD("viewport_reset_temporal_history", "viewport"), &RenderingServer::viewport_reset_temporal_history);
 	ClassDB::bind_method(D_METHOD("scaling_3d_mode_get_availability", "mode"), &RenderingServer::scaling_3d_mode_get_availability);
-	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats);
+	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);

@@ -30,8 +30,6 @@
 
 #include "renderer_compositor_rd.h"
 
-#include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
-
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
@@ -39,6 +37,8 @@
 #include "servers/display/display_server.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server_types.h"
 
 void RendererCompositorRD::blit_render_targets_to_screen(DisplayServerEnums::WindowID p_screen, const RenderingServerTypes::BlitToScreen *p_render_targets, int p_amount) {
@@ -131,6 +131,10 @@ void RendererCompositorRD::begin_frame(double frame_step) {
 	double time_roll_over = GLOBAL_GET_CACHED(double, "rendering/limits/time/time_rollover_secs");
 	time = Math::fmod(time, time_roll_over);
 
+	if (virtual_mesh_storage != nullptr) {
+		virtual_mesh_storage->begin_frame();
+	}
+
 	canvas->set_time(time);
 	scene->set_time(time, frame_step);
 }
@@ -175,14 +179,15 @@ uint64_t RendererCompositorRD::frame = 1;
 
 void RendererCompositorRD::finalize() {
 	texture_storage->_tex_blit_shader_free();
-	memdelete(virtual_mesh_storage);
-	virtual_mesh_storage = nullptr;
 	memdelete(scene);
 	memdelete(canvas);
 	memdelete(fog);
 	memdelete(particles_storage);
 	memdelete(light_storage);
 	memdelete(mesh_storage);
+	memdelete(virtual_mesh_storage);
+	virtual_mesh_storage = nullptr;
+	RSG::virtual_mesh_storage = nullptr;
 	memdelete(material_storage);
 	memdelete(texture_storage);
 	memdelete(utilities);

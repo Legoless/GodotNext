@@ -48,6 +48,10 @@ enum NextGeoFallback : uint32_t {
 	NEXTGEO_FALLBACK_DEBUG_DRAW,
 	NEXTGEO_FALLBACK_MUTATED_MESH,
 	NEXTGEO_FALLBACK_BAKED_GRIDMAP,
+	NEXTGEO_FALLBACK_VERTEX_LIGHTING,
+	NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER,
+	NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE,
+	NEXTGEO_FALLBACK_ALPHA,
 	NEXTGEO_FALLBACK_MAX,
 };
 
@@ -65,6 +69,7 @@ struct NextGeoSurfaceFacts {
 	bool chain_blocked = false; // next pass, material overlay or stencil anywhere in the chain.
 	bool mutated = false;
 	bool baked_gridmap = false;
+	NextGeoFallback material_fallback = NEXTGEO_FALLBACK_NONE;
 	bool msaa = false;
 	bool multiview = false;
 	bool unsupported_debug_draw = false;
@@ -96,7 +101,10 @@ inline NextGeoSurfaceRoute nextgeo_resolve_surface_route(const NextGeoSurfaceFac
 	if (p_facts.mutated) {
 		return { false, NEXTGEO_FALLBACK_MUTATED_MESH };
 	}
-	if (!p_facts.instance_mesh || !p_facts.mesh_has_virtual_geometry || !p_facts.surface_in_mask) {
+	if (p_facts.baked_gridmap) {
+		return { false, NEXTGEO_FALLBACK_BAKED_GRIDMAP };
+	}
+	if (!p_facts.instance_mesh || !p_facts.mesh_has_virtual_geometry) {
 		return { false, NEXTGEO_FALLBACK_NONE };
 	}
 	const NextGeoFallback view = nextgeo_view_fallback(p_facts.msaa, p_facts.multiview, p_facts.unsupported_debug_draw);
@@ -115,10 +123,52 @@ inline NextGeoSurfaceRoute nextgeo_resolve_surface_route(const NextGeoSurfaceFac
 	if (p_facts.chain_blocked) {
 		return { false, NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY };
 	}
+	if (p_facts.material_fallback != NEXTGEO_FALLBACK_NONE) {
+		return { false, p_facts.material_fallback };
+	}
+	if (!p_facts.surface_in_mask) {
+		return { false, NEXTGEO_FALLBACK_NONE };
+	}
 	if (!p_facts.draw_ready) {
 		return { false, NEXTGEO_FALLBACK_NONE };
 	}
 	return { true, NEXTGEO_FALLBACK_NONE };
+}
+
+inline const char *nextgeo_fallback_name(NextGeoFallback p_reason) {
+	switch (p_reason) {
+		case NEXTGEO_FALLBACK_NONE:
+			return "NONE";
+		case NEXTGEO_FALLBACK_SKINNING:
+			return "SKINNING";
+		case NEXTGEO_FALLBACK_INSTANCE_UNIFORMS:
+			return "INSTANCE_UNIFORMS";
+		case NEXTGEO_FALLBACK_LIGHTMAPPED_INSTANCE:
+			return "LIGHTMAPPED_INSTANCE";
+		case NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY:
+			return "NEXT_PASS_OR_OVERLAY";
+		case NEXTGEO_FALLBACK_MSAA:
+			return "MSAA";
+		case NEXTGEO_FALLBACK_MULTIVIEW:
+			return "MULTIVIEW";
+		case NEXTGEO_FALLBACK_DEBUG_DRAW:
+			return "DEBUG_DRAW";
+		case NEXTGEO_FALLBACK_MUTATED_MESH:
+			return "MUTATED_MESH";
+		case NEXTGEO_FALLBACK_BAKED_GRIDMAP:
+			return "BAKED_GRIDMAP";
+		case NEXTGEO_FALLBACK_VERTEX_LIGHTING:
+			return "VERTEX_LIGHTING";
+		case NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER:
+			return "UNSUPPORTED_CUSTOM_SHADER";
+		case NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE:
+			return "UNSUPPORTED_DERIVATIVE";
+		case NEXTGEO_FALLBACK_ALPHA:
+			return "alpha";
+		case NEXTGEO_FALLBACK_MAX:
+			break;
+	}
+	return "NONE";
 }
 
 } // namespace RendererRD

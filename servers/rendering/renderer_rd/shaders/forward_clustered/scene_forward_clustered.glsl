@@ -19,6 +19,39 @@
 
 /* INPUT ATTRIBS */
 
+#ifdef MODE_VISIBILITY_RESOLVE
+
+#ifdef MATERIAL_UNIFORMS_USED
+/* clang-format off */
+layout(set = MATERIAL_UNIFORM_SET, binding = 0, std140) uniform MaterialUniforms {
+#MATERIAL_UNIFORMS
+} material;
+/* clang-format on */
+#endif
+
+invariant gl_Position;
+
+#GLOBALS
+
+void main() {
+	uint packed_tile = nextgeo_tile_list.data[resolve_push.tile_list_base + uint(gl_InstanceIndex)];
+	uvec2 tile = uvec2(packed_tile & 0xFFFFu, packed_tile >> 16u);
+	const uvec2 quad_corners[6] = uvec2[6](
+			uvec2(0u, 0u),
+			uvec2(1u, 0u),
+			uvec2(1u, 1u),
+			uvec2(0u, 0u),
+			uvec2(1u, 1u),
+			uvec2(0u, 1u));
+	uvec2 corner = quad_corners[uint(gl_VertexIndex) % 6u];
+	vec2 min_px = vec2(tile * 8u);
+	vec2 max_px = min(min_px + vec2(8.0), scene_data_block.data.viewport_size);
+	vec2 px = mix(min_px, max_px, vec2(corner));
+	gl_Position = vec4(px * scene_data_block.data.screen_pixel_size * 2.0 - 1.0, 0.0, 1.0);
+}
+
+#else
+
 // Always contains vertex position in XYZ, can contain tangent angle in W.
 layout(location = 0) in vec4 vertex_angle_attrib;
 
@@ -859,9 +892,12 @@ void main() {
 			screen_position);
 }
 
+#endif // MODE_VISIBILITY_RESOLVE
+
 #[fragment]
 
 #version 450
+#extension GL_EXT_samplerless_texture_functions : enable
 
 #VERSION_DEFINES
 
@@ -894,10 +930,18 @@ void main() {
 #define TEXTURE_STREAMING_NO_DEPTH_WRITE
 #endif
 
-#if !defined(DEPTH_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
+#if !defined(MODE_VISIBILITY_RESOLVE) && !defined(DEPTH_USED) && (!defined(TEXTURE_STREAMING_MAY_DISCARD) || (defined(TEXTURE_STREAMING_NO_DEPTH_WRITE) && !defined(STENCIL_WRITE_USED)))
 layout(early_fragment_tests) in;
 #endif
 #endif // TEXTURE_STREAMING
+
+#include "../scene_forward_streaming_inc.glsl"
+
+#ifdef STREAMING_LOD_USED
+float streaming_lod = 32.0; // Defaults to value past the coursest quality.
+#endif
+
+#ifndef MODE_VISIBILITY_RESOLVE
 
 layout(location = 0) in vec3 vertex_interp;
 
@@ -911,12 +955,6 @@ layout(location = 2) in vec4 color_interp;
 
 #ifdef UV_USED
 layout(location = 3) in vec2 uv_interp;
-#endif
-
-#include "../scene_forward_streaming_inc.glsl"
-
-#ifdef STREAMING_LOD_USED
-float streaming_lod = 32.0; // Defaults to value past the coursest quality.
 #endif
 
 #if defined(UV2_USED) || defined(USE_LIGHTMAP)
@@ -940,6 +978,64 @@ layout(location = 9) in float dp_clip;
 #endif
 
 layout(location = 10) in flat uint instance_index_interp;
+
+#else // MODE_VISIBILITY_RESOLVE
+
+vec3 vertex_interp = vec3(0.0);
+vec3 vertex_interp_ddx = vec3(0.0);
+vec3 vertex_interp_ddy = vec3(0.0);
+
+vec3 normal_interp = vec3(0.0, 0.0, 1.0);
+vec3 normal_interp_ddx = vec3(0.0);
+vec3 normal_interp_ddy = vec3(0.0);
+
+vec4 color_interp = vec4(1.0);
+vec4 color_interp_ddx = vec4(0.0);
+vec4 color_interp_ddy = vec4(0.0);
+
+vec2 uv_interp = vec2(0.0);
+vec2 uv_interp_ddx = vec2(0.0);
+vec2 uv_interp_ddy = vec2(0.0);
+
+vec2 uv2_interp = vec2(0.0);
+vec2 uv2_interp_ddx = vec2(0.0);
+vec2 uv2_interp_ddy = vec2(0.0);
+
+vec3 tangent_interp = vec3(1.0, 0.0, 0.0);
+vec3 tangent_interp_ddx = vec3(0.0);
+vec3 tangent_interp_ddy = vec3(0.0);
+
+vec3 binormal_interp = vec3(0.0, 1.0, 0.0);
+vec3 binormal_interp_ddx = vec3(0.0);
+vec3 binormal_interp_ddy = vec3(0.0);
+
+vec3 view_ddx = vec3(0.0);
+vec3 view_ddy = vec3(0.0);
+
+vec4 _ng_fragcoord = vec4(0.0, 0.0, 0.0, 1.0);
+vec4 _ng_fragcoord_ddx = vec4(1.0, 0.0, 0.0, 0.0);
+vec4 _ng_fragcoord_ddy = vec4(0.0, 1.0, 0.0, 0.0);
+bool _ng_front_facing = true;
+uint instance_index_interp = 0u;
+
+int _ng_vertex_id = 0;
+int _ng_instance_id = 0;
+vec4 color_attrib = vec4(1.0);
+vec2 uv_attrib = vec2(0.0);
+vec2 uv2_attrib = vec2(0.0);
+vec4 custom0_attrib = vec4(0.0);
+vec4 custom1_attrib = vec4(0.0);
+vec4 custom2_attrib = vec4(0.0);
+vec4 custom3_attrib = vec4(0.0);
+uvec4 bone_attrib = uvec4(0u);
+vec4 weight_attrib = vec4(0.0);
+
+#ifdef MOTION_VECTORS
+vec4 screen_position = vec4(0.0, 0.0, 0.0, 1.0);
+vec4 prev_screen_position = vec4(0.0, 0.0, 0.0, 1.0);
+#endif
+
+#endif // !MODE_VISIBILITY_RESOLVE
 
 #ifdef USE_LIGHTMAP
 #include "../bicubic_filter_inc.glsl"
@@ -965,12 +1061,21 @@ ivec2 multiview_uv(ivec2 uv) {
 }
 #endif // !USE_MULTIVIEW
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED) && defined(USE_VERTEX_LIGHTING)
+#ifdef MODE_VISIBILITY_RESOLVE
+vec4 diffuse_light_interp = vec4(0.0);
+vec4 specular_light_interp = vec4(0.0);
+#else
 layout(location = 12) in vec4 diffuse_light_interp;
 layout(location = 13) in vec4 specular_light_interp;
 #endif
+#endif
 
 #if defined(POINT_SIZE_USED) && defined(POINT_COORD_USED)
+#ifdef MODE_VISIBILITY_RESOLVE
+vec2 point_coord_interp = vec2(0.5);
+#else
 layout(location = 14) in vec2 point_coord_interp;
+#endif
 #endif
 
 //defines to keep compatibility with vertex
@@ -1019,7 +1124,13 @@ layout(location = 0) out vec4 normal_roughness_output_buffer;
 layout(location = 1) out uvec2 voxel_gi_buffer;
 #endif
 
-#ifdef MOTION_VECTORS
+#ifdef MODE_VISIBILITY_RESOLVE
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 2) out uint nextgeo_instance_id;
+#else
+layout(location = 1) out uint nextgeo_instance_id;
+#endif
+#elif defined(MOTION_VECTORS)
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 2) out vec2 motion_vector;
 #else
@@ -1071,7 +1182,11 @@ vec4 volumetric_fog_process(vec2 screen_uv, float z) {
 		fog_pos.z = pow(fog_pos.z, implementation_data.volumetric_fog_detail_spread);
 	}
 
+#ifdef MODE_VISIBILITY_RESOLVE
+	return textureLod(sampler3D(volumetric_fog_texture, SAMPLER_LINEAR_CLAMP), fog_pos, 0.0);
+#else
 	return texture(sampler3D(volumetric_fog_texture, SAMPLER_LINEAR_CLAMP), fog_pos);
+#endif
 }
 
 vec4 fog_process(vec3 vertex) {
@@ -1085,7 +1200,11 @@ vec4 fog_process(vec3 vertex) {
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 		float roughness_lod, blend;
 		blend = modf(mip_level * MAX_ROUGHNESS_LOD, roughness_lod);
+#ifdef MODE_VISIBILITY_RESOLVE
+		float cube_lod = vec3_to_oct_lod(scene_data_block.data.radiance_inverse_xform * vertex_interp_ddx, scene_data_block.data.radiance_inverse_xform * vertex_interp_ddy, scene_data_block.data.radiance_pixel_size);
+#else
 		float cube_lod = vec3_to_oct_lod(dFdx(cube_view), dFdy(cube_view), scene_data_block.data.radiance_pixel_size);
+#endif
 		vec2 cube_uv = vec3_to_oct_with_border(cube_view, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
 		vec3 sky_sample_a = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(cube_uv, roughness_lod), cube_lod).rgb;
 		vec3 sky_sample_b = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(cube_uv, roughness_lod + 1), cube_lod).rgb;
@@ -1168,7 +1287,11 @@ vec3 encode24(vec3 v) {
 	vTexCoord = vTexCoord.x < vTexCoord.y ? vTexCoord.yx : vTexCoord.xy;
 	// Stretch:
 	vTexCoord.y /= vTexCoord.x;
+#ifdef MODE_VISIBILITY_RESOLVE
+	float fFittingScale = textureLod(sampler2D(best_fit_normal_texture, SAMPLER_NEAREST_CLAMP), vTexCoord, 0.0).r;
+#else
 	float fFittingScale = texture(sampler2D(best_fit_normal_texture, SAMPLER_NEAREST_CLAMP), vTexCoord).r;
+#endif
 	// Make vector touch unit cube
 	vec3 result = v / maxNAbs;
 	// scale the normal to get the best fit
@@ -1176,6 +1299,198 @@ vec3 encode24(vec3 v) {
 	return result;
 }
 #endif // MODE_RENDER_NORMAL_ROUGHNESS
+
+#ifdef MODE_VISIBILITY_RESOLVE
+
+vec3 _ng_safe_normalize(vec3 v, vec3 fallback) {
+	float l = length(v);
+	return l > 1e-12 ? (v / l) : fallback;
+}
+
+vec3 _ng_d_normalize(vec3 u, vec3 n, vec3 du) {
+	return (du - n * dot(n, du)) / max(length(u), 1e-8);
+}
+
+vec3 _ng_d_reflect(vec3 i, vec3 di, vec3 n, vec3 dn) {
+	return di - 2.0 * ((dot(dn, i) + dot(n, di)) * n + dot(n, i) * dn);
+}
+
+#ifdef USE_DOUBLE_PRECISION
+vec3 _ng_quick_two_sum(vec3 a, vec3 b, out vec3 out_p) {
+	vec3 s = a + b;
+	out_p = b - (s - a);
+	return s;
+}
+
+vec3 _ng_two_sum(vec3 a, vec3 b, out vec3 out_p) {
+	vec3 s = a + b;
+	vec3 v = s - a;
+	out_p = (a - (s - v)) + (b - v);
+	return s;
+}
+
+vec3 _ng_double_add_vec3(vec3 base_a, vec3 prec_a, vec3 base_b, vec3 prec_b, out vec3 out_precision) {
+	vec3 s, t, se, te;
+	s = _ng_two_sum(base_a, base_b, se);
+	t = _ng_two_sum(prec_a, prec_b, te);
+	se += t;
+	s = _ng_quick_two_sum(s, se, se);
+	se += te;
+	s = _ng_quick_two_sum(s, se, out_precision);
+	return s;
+}
+#endif
+
+#undef projection_matrix
+#undef inv_projection_matrix
+#undef global_time
+
+void _ng_resolve_vertex_corner(
+		in vec3 vertex_input,
+		in vec3 normal_input,
+		in vec3 tangent_input,
+		in vec3 binormal_input,
+		in uint instance_index,
+		in SceneData scene_data,
+		in mat3x4 in_model_matrix,
+#ifdef USE_DOUBLE_PRECISION
+		in vec3 model_precision,
+#endif
+		out vec4 r_clip_pos) {
+	vec4 instance_custom = vec4(0.0);
+#if defined(COLOR_USED)
+	color_interp = color_attrib;
+#endif
+
+	mat4 inv_view_matrix = transpose(mat4(scene_data.inv_view_matrix[0],
+			scene_data.inv_view_matrix[1],
+			scene_data.inv_view_matrix[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+
+	mat4 model_matrix = transpose(mat4(in_model_matrix[0],
+			in_model_matrix[1],
+			in_model_matrix[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+
+#ifdef USE_DOUBLE_PRECISION
+	vec3 view_precision = scene_data.inv_view_precision.xyz;
+#endif
+
+	mat3 model_normal_matrix;
+	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_NON_UNIFORM_SCALE)) {
+		model_normal_matrix = transpose(inverse(mat3(model_matrix)));
+	} else {
+		model_normal_matrix = mat3(model_matrix);
+	}
+
+	mat4 read_model_matrix = model_matrix;
+
+	vec3 vertex = vertex_input;
+	vec3 normal_highp = normal_input;
+	vec3 tangent = tangent_input;
+	vec3 binormal = binormal_input;
+
+	uv_interp = uv_attrib;
+	uv2_interp = uv2_attrib;
+
+	vec4 position = vec4(1.0);
+	mat4 projection_matrix = scene_data.projection_matrix;
+	mat4 inv_projection_matrix = scene_data.inv_projection_matrix;
+	vec3 eye_offset = vec3(0.0, 0.0, 0.0);
+	float global_time = scene_data.time;
+
+#if !defined(SKIP_TRANSFORM_USED) && defined(VERTEX_WORLD_COORDS_USED)
+	vertex = (model_matrix * vec4(vertex, 1.0)).xyz;
+#ifdef NORMAL_USED
+	normal_highp = model_normal_matrix * normal_highp;
+#endif
+#ifdef TANGENT_USED
+	tangent = mat3(model_matrix) * tangent;
+	binormal = mat3(model_matrix) * binormal;
+#endif
+#endif
+
+	float z_clip_scale = 1.0;
+	float roughness_highp = 1.0;
+	float point_size = 1.0;
+
+	mat4 read_view_matrix = transpose(mat4(scene_data.view_matrix[0],
+			scene_data.view_matrix[1],
+			scene_data.view_matrix[2],
+			vec4(0.0, 0.0, 0.0, 1.0)));
+
+#ifdef USE_DOUBLE_PRECISION
+	mat4 modelview = read_view_matrix * model_matrix;
+	vec3 model_origin = model_matrix[3].xyz;
+	vec3 temp_precision;
+	modelview[3].xyz = _ng_double_add_vec3(model_origin, model_precision, inv_view_matrix[3].xyz, view_precision, temp_precision);
+	modelview[3].xyz = mat3(read_view_matrix) * modelview[3].xyz;
+#else
+	mat4 modelview = read_view_matrix * model_matrix;
+#endif
+	mat3 modelview_normal = mat3(read_view_matrix) * model_normal_matrix;
+	vec2 read_viewport_size = scene_data.viewport_size;
+
+	{
+#CODE : RESOLVE_VERTEX
+	}
+
+	vec3 normal = normal_highp;
+
+#if !defined(SKIP_TRANSFORM_USED) && !defined(VERTEX_WORLD_COORDS_USED)
+	vertex = (modelview * vec4(vertex, 1.0)).xyz;
+#ifdef NORMAL_USED
+	normal = modelview_normal * normal;
+#endif
+#ifdef TANGENT_USED
+	tangent = mat3(modelview) * tangent;
+	binormal = mat3(modelview) * binormal;
+#endif
+#endif
+
+#if !defined(SKIP_TRANSFORM_USED) && defined(VERTEX_WORLD_COORDS_USED)
+	vertex = (read_view_matrix * vec4(vertex, 1.0)).xyz;
+#ifdef NORMAL_USED
+	normal = (read_view_matrix * vec4(normal, 0.0)).xyz;
+#endif
+#ifdef TANGENT_USED
+	binormal = (read_view_matrix * vec4(binormal, 0.0)).xyz;
+	tangent = (read_view_matrix * vec4(tangent, 0.0)).xyz;
+#endif
+#endif
+
+	vertex_interp = vertex;
+#ifdef NORMAL_USED
+	normal_interp = _ng_safe_normalize(normal, vec3(0.0, 0.0, 1.0));
+#endif
+#ifdef TANGENT_USED
+	tangent_interp = _ng_safe_normalize(tangent, vec3(1.0, 0.0, 0.0));
+	binormal_interp = _ng_safe_normalize(binormal, vec3(0.0, 1.0, 0.0));
+#endif
+
+#ifdef OVERRIDE_POSITION
+	r_clip_pos = position;
+#else
+	r_clip_pos = projection_matrix * vec4(vertex_interp, 1.0);
+#endif
+
+#ifdef Z_CLIP_SCALE_USED
+	if (!bool(scene_data.flags & SCENE_DATA_FLAGS_IN_SHADOW_PASS)) {
+		r_clip_pos.z = mix(r_clip_pos.w, r_clip_pos.z, z_clip_scale);
+	}
+#endif
+}
+
+#ifdef USE_MULTIVIEW
+#define projection_matrix scene_data.projection_matrix_view[ViewIndex]
+#define inv_projection_matrix scene_data.inv_projection_matrix_view[ViewIndex]
+#else
+#define projection_matrix scene_data.projection_matrix
+#define inv_projection_matrix scene_data.inv_projection_matrix
+#endif
+#define global_time scene_data_block.data.time
+
+#endif // MODE_VISIBILITY_RESOLVE
 
 void fragment_shader(in SceneData scene_data) {
 	uint instance_index = instance_index_interp;
@@ -1236,9 +1551,17 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef NORMAL_USED
 	vec3 normal_highp = normal_interp;
 #if defined(DO_SIDE_CHECK)
+#ifdef MODE_VISIBILITY_RESOLVE
+	if (!_ng_front_facing) {
+		normal_highp = -normal_highp;
+		normal_interp_ddx = -normal_interp_ddx;
+		normal_interp_ddy = -normal_interp_ddy;
+	}
+#else
 	if (!gl_FrontFacing) {
 		normal_highp = -normal_highp;
 	}
+#endif
 #endif // DO_SIDE_CHECK
 #endif // NORMAL_USED
 
@@ -1320,7 +1643,11 @@ void fragment_shader(in SceneData scene_data) {
 	if (sc_emulate_point_size) {
 		point_coord = point_coord_interp;
 	} else {
+#ifdef MODE_VISIBILITY_RESOLVE
+		point_coord = vec2(0.5);
+#else
 		point_coord = gl_PointCoord;
+#endif
 	}
 #else // !POINT_SIZE_USED
 	vec2 point_coord = vec2(0.5);
@@ -1356,6 +1683,10 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef NORMAL_USED
 	vec3 geo_normal = normalize(normal);
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec3 geo_normal_ddx = _ng_d_normalize(normal, geo_normal, normal_interp_ddx);
+	vec3 geo_normal_ddy = _ng_d_normalize(normal, geo_normal, normal_interp_ddy);
+#endif
 #endif // NORMAL_USED
 
 #ifndef USE_SHADOW_TO_OPACITY
@@ -1380,8 +1711,13 @@ void fragment_shader(in SceneData scene_data) {
 	if (sc_material_feedback()) {
 		// Instance has materials which require feedback.
 #if !defined(STREAMING_LOD_USED)
+#ifdef MODE_VISIBILITY_RESOLVE
+		vec2 uv_ddx = uv_interp_ddx;
+		vec2 uv_ddy = uv_interp_ddy;
+#else
 		vec2 uv_ddx = dFdx(uv_interp);
 		vec2 uv_ddy = dFdy(uv_interp);
+#endif
 #endif
 
 		if (!gl_HelperInvocation) {
@@ -1404,8 +1740,15 @@ void fragment_shader(in SceneData scene_data) {
 			// If that is not true then probably need a subgroupAllEqual check first + fallback.
 			uint subgroup_max_mip = subgroupMax(required_mip);
 			if (subgroupElect()) {
+#ifdef MODE_VISIBILITY_RESOLVE
+				const uint material_feedback_index = resolve_push.material_feedback_index;
+				if (material_feedback_index != 0xFFFFFFFFu) {
+					atomicMax(material_feedback.data[material_feedback_index], subgroup_max_mip);
+				}
+#else
 				const uint material_feedback_index = instances.data[instance_index].material_feedback_index;
 				atomicMax(material_feedback.data[material_feedback_index], subgroup_max_mip);
+#endif
 			}
 		}
 	}
@@ -1573,8 +1916,13 @@ void fragment_shader(in SceneData scene_data) {
 	uint cluster_z = uint(clamp((-vertex.z / scene_data.z_far) * 32.0, 0.0, 31.0));
 
 	//used for interpolating anything cluster related
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec3 vertex_ddx = vertex_interp_ddx;
+	vec3 vertex_ddy = vertex_interp_ddy;
+#else
 	vec3 vertex_ddx = dFdx(vertex);
 	vec3 vertex_ddy = dFdy(vertex);
+#endif
 
 	{ // process decals
 
@@ -1685,7 +2033,11 @@ void fragment_shader(in SceneData scene_data) {
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_ROUGHNESS_LIMITER)) {
 		//https://www.jp.square-enix.com/tech/library/pdf/ImprovedGeometricSpecularAA.pdf
 		float roughness2 = roughness * roughness;
+#ifdef MODE_VISIBILITY_RESOLVE
+		vec3 dndu = geo_normal_ddx, dndv = geo_normal_ddy;
+#else
 		vec3 dndu = dFdx(normal), dndv = dFdy(normal);
+#endif
 		float variance = scene_data.roughness_limiter_amount * (dot(dndu, dndu) + dot(dndv, dndv));
 		float kernelRoughness2 = min(2.0 * variance, scene_data.roughness_limiter_limit); //limit effect
 		float filteredRoughness2 = min(1.0, roughness2 + kernelRoughness2);
@@ -1742,7 +2094,13 @@ void fragment_shader(in SceneData scene_data) {
 
 		blend = modf(sqrt(roughness) * MAX_ROUGHNESS_LOD, roughness_lod);
 
+#ifdef MODE_VISIBILITY_RESOLVE
+		vec3 ref_vec_ddx = scene_data.radiance_inverse_xform * mix(_ng_d_reflect(-view, -view_ddx, normal, geo_normal_ddx), geo_normal_ddx, roughness * roughness);
+		vec3 ref_vec_ddy = scene_data.radiance_inverse_xform * mix(_ng_d_reflect(-view, -view_ddy, normal, geo_normal_ddy), geo_normal_ddy, roughness * roughness);
+		float ref_lod = vec3_to_oct_lod(ref_vec_ddx, ref_vec_ddy, scene_data_block.data.radiance_pixel_size);
+#else
 		float ref_lod = vec3_to_oct_lod(dFdx(ref_vec), dFdy(ref_vec), scene_data_block.data.radiance_pixel_size);
+#endif
 		vec2 ref_uv = vec3_to_oct_with_border(ref_vec, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
 		vec3 indirect_sample_a = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(ref_uv, roughness_lod), ref_lod).rgb;
 		vec3 indirect_sample_b = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(ref_uv, roughness_lod + 1), ref_lod).rgb;
@@ -1767,13 +2125,21 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifndef USE_LIGHTMAP
 	//lightmap overrides everything
+#ifdef MODE_VISIBILITY_RESOLVE
+	if (!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP_CAPTURE) && bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
+#else
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_LIGHT)) {
+#endif
 		ambient_light = scene_data.ambient_light_color_energy.rgb;
 
 		if (bool(scene_data.flags & SCENE_DATA_FLAGS_USE_AMBIENT_CUBEMAP)) {
 			vec3 ambient_dir = scene_data.radiance_inverse_xform * indirect_normal;
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
+#ifdef MODE_VISIBILITY_RESOLVE
+			float ambient_lod = vec3_to_oct_lod(scene_data.radiance_inverse_xform * geo_normal_ddx, scene_data.radiance_inverse_xform * geo_normal_ddy, scene_data_block.data.radiance_pixel_size);
+#else
 			float ambient_lod = vec3_to_oct_lod(dFdx(ambient_dir), dFdy(ambient_dir), scene_data_block.data.radiance_pixel_size);
+#endif
 			vec2 ambient_uv = vec3_to_oct_with_border(ambient_dir, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
 			vec3 cubemap_ambient = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(ambient_uv, MAX_ROUGHNESS_LOD), ambient_lod).rgb;
 #else
@@ -1805,7 +2171,14 @@ void fragment_shader(in SceneData scene_data) {
 		float lod, blend;
 		blend = modf(roughness_lod, lod);
 
+#ifdef MODE_VISIBILITY_RESOLVE
+		float cc_mix = mix(0.001, 0.1, clearcoat_roughness);
+		vec3 cc_ref_ddx = scene_data.radiance_inverse_xform * mix(_ng_d_reflect(-view, -view_ddx, geo_normal, geo_normal_ddx), geo_normal_ddx, cc_mix);
+		vec3 cc_ref_ddy = scene_data.radiance_inverse_xform * mix(_ng_d_reflect(-view, -view_ddy, geo_normal, geo_normal_ddy), geo_normal_ddy, cc_mix);
+		float ref_lod = vec3_to_oct_lod(cc_ref_ddx, cc_ref_ddy, scene_data_block.data.radiance_pixel_size);
+#else
 		float ref_lod = vec3_to_oct_lod(dFdx(cc_radiance_ref_vec), dFdy(cc_radiance_ref_vec), scene_data_block.data.radiance_pixel_size);
+#endif
 		vec2 ref_uv = vec3_to_oct_with_border(cc_radiance_ref_vec, vec2(scene_data_block.data.radiance_border_size, 1.0 - scene_data_block.data.radiance_border_size * 2.0));
 		vec3 clearcoat_sample_a = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(ref_uv, lod), ref_lod).rgb;
 		vec3 clearcoat_sample_b = textureLod(sampler2DArray(radiance_octmap, DEFAULT_SAMPLER_LINEAR_WITH_MIPMAPS_CLAMP), vec3(ref_uv, lod + 1), ref_lod).rgb;
@@ -1829,7 +2202,7 @@ void fragment_shader(in SceneData scene_data) {
 /// GI ///
 #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
 #ifndef AMBIENT_LIGHT_DISABLED
-#ifdef USE_LIGHTMAP
+#if defined(USE_LIGHTMAP) || defined(MODE_VISIBILITY_RESOLVE)
 
 	//lightmap
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP_CAPTURE)) { //has lightmap capture
@@ -1857,8 +2230,9 @@ void fragment_shader(in SceneData scene_data) {
 								 c[2] * lightmap_captures.data[index].sh[7].rgb * wnormal.x * wnormal.z +
 								 c[4] * lightmap_captures.data[index].sh[8].rgb * (wnormal.x * wnormal.x - wnormal.y * wnormal.y)) *
 				scene_data.IBL_exposure_normalization;
-
-	} else if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) { // has actual lightmap
+	}
+#ifdef USE_LIGHTMAP
+	else if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) { // has actual lightmap
 		bool uses_sh = bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_SH_LIGHTMAP);
 		uint ofs = instances.data[instance_index].gi_offset & 0xFFFF;
 		uint slice = instances.data[instance_index].gi_offset >> 16;
@@ -1962,6 +2336,7 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 #endif // USE_LIGHTMAP
+#endif // USE_LIGHTMAP || MODE_VISIBILITY_RESOLVE
 
 #ifndef USE_LIGHTMAP
 	if (sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_SDFGI)) { //has lightmap capture
@@ -2135,10 +2510,18 @@ void fragment_shader(in SceneData scene_data) {
 	}
 
 	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {
+#ifdef MODE_VISIBILITY_RESOLVE
+#ifdef USE_MULTIVIEW
+		float ssao = textureLod(sampler2DArray(ao_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex), 0.0).r;
+#else
+		float ssao = textureLod(sampler2D(ao_buffer, SAMPLER_LINEAR_CLAMP), screen_uv, 0.0).r;
+#endif
+#else
 #ifdef USE_MULTIVIEW
 		float ssao = texture(sampler2DArray(ao_buffer, SAMPLER_LINEAR_CLAMP), vec3(screen_uv, ViewIndex)).r;
 #else
 		float ssao = texture(sampler2D(ao_buffer, SAMPLER_LINEAR_CLAMP), screen_uv).r;
+#endif
 #endif
 		ao = min(ao, ssao);
 		ao_light_affect = mix(ao_light_affect, max(ao_light_affect, implementation_data.ssao_light_affect), implementation_data.ssao_ao_affect);
@@ -3201,6 +3584,10 @@ void fragment_shader(in SceneData scene_data) {
 	}
 #endif
 
+#ifdef MODE_VISIBILITY_RESOLVE
+	nextgeo_instance_id = instance_index;
+#endif
+
 #endif //MODE_RENDER_NORMAL_ROUGHNESS
 
 //nothing happens, so a tree-ssa optimizer will result in no fragment shader :)
@@ -3276,6 +3663,272 @@ void fragment_shader(in SceneData scene_data) {
 }
 
 void main() {
+#ifdef MODE_VISIBILITY_RESOLVE
+	ivec2 _ng_px = ivec2(gl_FragCoord.xy);
+	uint _ng_vis_id = texelFetch(nextgeo_visibility_tex, _ng_px, 0).r;
+	if (_ng_vis_id == 0xFFFFFFFFu) {
+		discard;
+	}
+
+	uint _ng_vis_cluster = _ng_vis_id >> 7u;
+	uint _ng_tri_idx = _ng_vis_id & 0x7Fu;
+	uvec2 _ng_entry = nextgeo_visible_clusters.data[_ng_vis_cluster];
+	NextGeoInstanceRecord _ng_record = nextgeo_records.data[_ng_entry.x];
+	if ((_ng_record.flags & NEXTGEO_RECORD_VALID) == 0u) {
+		discard;
+	}
+
+	NextGeoMeshRecord _ng_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
+	if (_ng_mesh.page_count == 0u || _ng_entry.y < _ng_mesh.cluster_offset) {
+		discard;
+	}
+	uint _ng_local_cluster = _ng_entry.y - _ng_mesh.cluster_offset;
+	if (_ng_local_cluster >= _ng_mesh.cluster_count) {
+		discard;
+	}
+
+	uvec4 _ng_desc = nextgeo_cluster_table.data[_ng_mesh.page_table_offset + _ng_local_cluster];
+	uint _ng_surface_id = _ng_desc.w & 0xFFFFu;
+	if (_ng_surface_id >= 32u || (_ng_record.surface_mask & (1u << _ng_surface_id)) == 0u) {
+		discard;
+	}
+
+	uint _ng_bucket_entry = nextgeo_bucket_table.data[_ng_record.bucket_base + _ng_surface_id];
+	if ((_ng_bucket_entry & NEXTGEO_BUCKET_ID_MASK) != resolve_push.bucket_id) {
+		discard;
+	}
+
+	uint _ng_stride = _ng_desc.z & 0xFFu;
+	uint _ng_vert_count = (_ng_desc.z >> 8u) & 0xFFu;
+	uint _ng_tri_count = (_ng_desc.z >> 16u) & 0xFFu;
+	uint _ng_layout = (_ng_desc.z >> 24u) & 0xFFu;
+	if (_ng_tri_idx >= _ng_tri_count || _ng_stride < 3u || _ng_vert_count == 0u) {
+		discard;
+	}
+	if (_ng_layout == 0u) {
+		if (_ng_stride == 3u) {
+			_ng_layout = 0x01u;
+		} else if (_ng_stride == 5u) {
+			_ng_layout = 0x09u;
+		} else if (_ng_stride == 6u) {
+			_ng_layout = 0x03u;
+		} else if (_ng_stride == 7u) {
+			_ng_layout = 0x21u;
+		} else if (_ng_stride == 8u) {
+			_ng_layout = 0x0Bu;
+		} else if (_ng_stride == 10u) {
+			_ng_layout = 0x07u;
+		} else if (_ng_stride == 12u) {
+			_ng_layout = 0x0Fu;
+		} else if (_ng_stride == 14u) {
+			_ng_layout = 0x1Fu;
+		} else if (_ng_stride == 16u) {
+			_ng_layout = 0x2Fu;
+		} else if (_ng_stride >= 18u) {
+			_ng_layout = 0x3Fu;
+		}
+	}
+
+	instance_index_interp = _ng_entry.x;
+	_ng_instance_id = int(_ng_entry.x);
+	mat3x4 _ng_cur_xform = mat3x4(_ng_record.transform[0], _ng_record.transform[1], _ng_record.transform[2]);
+#ifdef MOTION_VECTORS
+	mat3x4 _ng_prev_xform = mat3x4(_ng_record.prev_transform[0], _ng_record.prev_transform[1], _ng_record.prev_transform[2]);
+	vec4 _ng_prev_clip_c[3];
+#endif
+	vec4 _ng_clip_c[3];
+	vec3 _ng_vtx_c[3];
+	vec3 _ng_nrm_c[3];
+	vec3 _ng_tan_c[3];
+	vec3 _ng_bin_c[3];
+	vec2 _ng_uv_c[3];
+	vec2 _ng_uv2_c[3];
+	vec4 _ng_col_c[3];
+
+	for (uint _ng_corner = 0u; _ng_corner < 3u; _ng_corner++) {
+		uint _ng_idx_byte = _ng_desc.y + _ng_tri_idx * 3u + _ng_corner;
+		uint _ng_v_idx = (nextgeo_pages.data[_ng_idx_byte >> 2u] >> ((_ng_idx_byte & 3u) * 8u)) & 0xFFu;
+		if (_ng_v_idx >= _ng_vert_count) {
+			discard;
+		}
+		uint _ng_w = _ng_desc.x + _ng_v_idx * _ng_stride;
+
+		vec3 _ng_c_pos = vec3(
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+				uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
+		_ng_w += 3u;
+
+		vec3 _ng_c_nrm = vec3(0.0, 0.0, 1.0);
+		if ((_ng_layout & 0x02u) != 0u) {
+			_ng_c_nrm = vec3(
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]));
+			_ng_w += 3u;
+		}
+
+		vec3 _ng_c_tan = vec3(1.0, 0.0, 0.0);
+		vec3 _ng_c_bin = vec3(0.0, 1.0, 0.0);
+		if ((_ng_layout & 0x04u) != 0u) {
+			vec4 _ng_tan4 = vec4(
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
+			_ng_w += 4u;
+			_ng_c_tan = _ng_tan4.xyz;
+			_ng_c_bin = _ng_safe_normalize(cross(_ng_c_nrm, _ng_tan4.xyz) * _ng_tan4.w, vec3(0.0, 1.0, 0.0));
+		}
+
+		vec2 _ng_c_uv = vec2(0.0);
+		if ((_ng_layout & 0x08u) != 0u) {
+			_ng_c_uv = vec2(
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
+			_ng_w += 2u;
+		}
+
+		vec2 _ng_c_uv2 = vec2(0.0);
+		if ((_ng_layout & 0x10u) != 0u) {
+			_ng_c_uv2 = vec2(
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]));
+			_ng_w += 2u;
+		}
+
+		vec4 _ng_c_col = vec4(1.0);
+		if ((_ng_layout & 0x20u) != 0u) {
+			_ng_c_col = vec4(
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 0u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 1u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 2u]),
+					uintBitsToFloat(nextgeo_pages.data[_ng_w + 3u]));
+			_ng_w += 4u;
+		}
+
+		_ng_vertex_id = int(_ng_v_idx);
+		uv_attrib = _ng_c_uv;
+		uv2_attrib = _ng_c_uv2;
+		color_attrib = _ng_c_col;
+
+#ifdef MOTION_VECTORS
+		_ng_resolve_vertex_corner(
+				_ng_c_pos,
+				_ng_c_nrm,
+				_ng_c_tan,
+				_ng_c_bin,
+				_ng_entry.x,
+				scene_data_block.prev_data,
+				_ng_prev_xform,
+#ifdef USE_DOUBLE_PRECISION
+				_ng_record.prev_model_precision.xyz,
+#endif
+				_ng_prev_clip_c[_ng_corner]);
+#endif
+
+		_ng_resolve_vertex_corner(
+				_ng_c_pos,
+				_ng_c_nrm,
+				_ng_c_tan,
+				_ng_c_bin,
+				_ng_entry.x,
+				scene_data_block.data,
+				_ng_cur_xform,
+#ifdef USE_DOUBLE_PRECISION
+				_ng_record.model_precision.xyz,
+#endif
+				_ng_clip_c[_ng_corner]);
+
+		_ng_vtx_c[_ng_corner] = vertex_interp;
+		_ng_nrm_c[_ng_corner] = normal_interp;
+		_ng_tan_c[_ng_corner] = tangent_interp;
+		_ng_bin_c[_ng_corner] = binormal_interp;
+		_ng_uv_c[_ng_corner] = uv_interp;
+		_ng_uv2_c[_ng_corner] = uv2_interp;
+		_ng_col_c[_ng_corner] = color_interp;
+		{
+#CODE : RESOLVE_VERTEX_STORE
+		}
+	}
+
+	vec2 _ng_ndc0 = _ng_clip_c[0].xy / _ng_clip_c[0].w;
+	vec2 _ng_ndc1 = _ng_clip_c[1].xy / _ng_clip_c[1].w;
+	vec2 _ng_ndc2 = _ng_clip_c[2].xy / _ng_clip_c[2].w;
+	vec2 _ng_e1 = _ng_ndc1 - _ng_ndc0;
+	vec2 _ng_e2 = _ng_ndc2 - _ng_ndc0;
+	float _ng_det = _ng_e1.x * _ng_e2.y - _ng_e1.y * _ng_e2.x;
+	_ng_front_facing = (_ng_det > 0.0);
+
+	float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
+	vec2 _ng_p = gl_FragCoord.xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0;
+	vec2 _ng_dp = _ng_p - _ng_ndc0;
+	float _ng_l1 = (_ng_dp.x * _ng_e2.y - _ng_dp.y * _ng_e2.x) * _ng_inv_det;
+	float _ng_l2 = (_ng_e1.x * _ng_dp.y - _ng_e1.y * _ng_dp.x) * _ng_inv_det;
+	float _ng_l0 = 1.0 - _ng_l1 - _ng_l2;
+	vec3 _ng_l = vec3(_ng_l0, _ng_l1, _ng_l2);
+
+	vec3 _ng_dl_dx = vec3(-(_ng_e2.y - _ng_e1.y), _ng_e2.y, -_ng_e1.y) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.x);
+	vec3 _ng_dl_dy = vec3(-(-_ng_e2.x + _ng_e1.x), -_ng_e2.x, _ng_e1.x) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.y);
+
+	vec3 _ng_inv_w = vec3(1.0 / _ng_clip_c[0].w, 1.0 / _ng_clip_c[1].w, 1.0 / _ng_clip_c[2].w);
+	vec3 _ng_q = _ng_l * _ng_inv_w;
+	float _ng_inv_w_sum = _ng_q.x + _ng_q.y + _ng_q.z;
+	float _ng_w_interp = abs(_ng_inv_w_sum) > 1e-20 ? (1.0 / _ng_inv_w_sum) : 1.0;
+	vec3 _ng_bary = _ng_q * _ng_w_interp;
+
+	vec3 _ng_dq_dx = _ng_dl_dx * _ng_inv_w;
+	vec3 _ng_dq_dy = _ng_dl_dy * _ng_inv_w;
+	vec3 _ng_dbary_dx = (_ng_dq_dx - _ng_bary * (_ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z)) * _ng_w_interp;
+	vec3 _ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
+
+	vec3 _ng_z_ndc_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z) * _ng_inv_w;
+	_ng_fragcoord = vec4(gl_FragCoord.xy, dot(_ng_l, _ng_z_ndc_c), _ng_inv_w_sum);
+	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dl_dx, _ng_z_ndc_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
+	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dl_dy, _ng_z_ndc_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
+
+	vertex_interp = _ng_vtx_c[0] * _ng_bary.x + _ng_vtx_c[1] * _ng_bary.y + _ng_vtx_c[2] * _ng_bary.z;
+	vertex_interp_ddx = _ng_vtx_c[0] * _ng_dbary_dx.x + _ng_vtx_c[1] * _ng_dbary_dx.y + _ng_vtx_c[2] * _ng_dbary_dx.z;
+	vertex_interp_ddy = _ng_vtx_c[0] * _ng_dbary_dy.x + _ng_vtx_c[1] * _ng_dbary_dy.y + _ng_vtx_c[2] * _ng_dbary_dy.z;
+
+	normal_interp = _ng_nrm_c[0] * _ng_bary.x + _ng_nrm_c[1] * _ng_bary.y + _ng_nrm_c[2] * _ng_bary.z;
+	normal_interp_ddx = _ng_nrm_c[0] * _ng_dbary_dx.x + _ng_nrm_c[1] * _ng_dbary_dx.y + _ng_nrm_c[2] * _ng_dbary_dx.z;
+	normal_interp_ddy = _ng_nrm_c[0] * _ng_dbary_dy.x + _ng_nrm_c[1] * _ng_dbary_dy.y + _ng_nrm_c[2] * _ng_dbary_dy.z;
+
+	tangent_interp = _ng_tan_c[0] * _ng_bary.x + _ng_tan_c[1] * _ng_bary.y + _ng_tan_c[2] * _ng_bary.z;
+	tangent_interp_ddx = _ng_tan_c[0] * _ng_dbary_dx.x + _ng_tan_c[1] * _ng_dbary_dx.y + _ng_tan_c[2] * _ng_dbary_dx.z;
+	tangent_interp_ddy = _ng_tan_c[0] * _ng_dbary_dy.x + _ng_tan_c[1] * _ng_dbary_dy.y + _ng_tan_c[2] * _ng_dbary_dy.z;
+
+	binormal_interp = _ng_bin_c[0] * _ng_bary.x + _ng_bin_c[1] * _ng_bary.y + _ng_bin_c[2] * _ng_bary.z;
+	binormal_interp_ddx = _ng_bin_c[0] * _ng_dbary_dx.x + _ng_bin_c[1] * _ng_dbary_dx.y + _ng_bin_c[2] * _ng_dbary_dx.z;
+	binormal_interp_ddy = _ng_bin_c[0] * _ng_dbary_dy.x + _ng_bin_c[1] * _ng_dbary_dy.y + _ng_bin_c[2] * _ng_dbary_dy.z;
+
+	uv_interp = _ng_uv_c[0] * _ng_bary.x + _ng_uv_c[1] * _ng_bary.y + _ng_uv_c[2] * _ng_bary.z;
+	uv_interp_ddx = _ng_uv_c[0] * _ng_dbary_dx.x + _ng_uv_c[1] * _ng_dbary_dx.y + _ng_uv_c[2] * _ng_dbary_dx.z;
+	uv_interp_ddy = _ng_uv_c[0] * _ng_dbary_dy.x + _ng_uv_c[1] * _ng_dbary_dy.y + _ng_uv_c[2] * _ng_dbary_dy.z;
+
+	uv2_interp = _ng_uv2_c[0] * _ng_bary.x + _ng_uv2_c[1] * _ng_bary.y + _ng_uv2_c[2] * _ng_bary.z;
+	uv2_interp_ddx = _ng_uv2_c[0] * _ng_dbary_dx.x + _ng_uv2_c[1] * _ng_dbary_dx.y + _ng_uv2_c[2] * _ng_dbary_dx.z;
+	uv2_interp_ddy = _ng_uv2_c[0] * _ng_dbary_dy.x + _ng_uv2_c[1] * _ng_dbary_dy.y + _ng_uv2_c[2] * _ng_dbary_dy.z;
+
+	color_interp = _ng_col_c[0] * _ng_bary.x + _ng_col_c[1] * _ng_bary.y + _ng_col_c[2] * _ng_bary.z;
+	color_interp_ddx = _ng_col_c[0] * _ng_dbary_dx.x + _ng_col_c[1] * _ng_dbary_dx.y + _ng_col_c[2] * _ng_dbary_dx.z;
+	color_interp_ddy = _ng_col_c[0] * _ng_dbary_dy.x + _ng_col_c[1] * _ng_dbary_dy.y + _ng_col_c[2] * _ng_dbary_dy.z;
+
+	vec3 _ng_view_init = -_ng_safe_normalize(vertex_interp, vec3(0.0, 0.0, -1.0));
+	view_ddx = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddx);
+	view_ddy = _ng_d_normalize(-vertex_interp, _ng_view_init, -vertex_interp_ddy);
+
+#ifdef MOTION_VECTORS
+	screen_position = _ng_clip_c[0] * _ng_bary.x + _ng_clip_c[1] * _ng_bary.y + _ng_clip_c[2] * _ng_bary.z;
+	prev_screen_position = _ng_prev_clip_c[0] * _ng_bary.x + _ng_prev_clip_c[1] * _ng_bary.y + _ng_prev_clip_c[2] * _ng_bary.z;
+#endif
+
+	{
+#CODE : RESOLVE_INTERPOLATE
+	}
+#endif // MODE_VISIBILITY_RESOLVE
+
 #ifdef UBERSHADER
 	bool front_facing = gl_FrontFacing;
 	if (uc_cull_mode() == POLYGON_CULL_BACK && !front_facing) {

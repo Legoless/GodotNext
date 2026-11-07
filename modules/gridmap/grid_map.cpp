@@ -99,6 +99,7 @@ bool GridMap::_set(const StringName &p_name, const Variant &p_value) {
 			BakedMesh bm;
 			bm.mesh = meshes[i];
 			ERR_CONTINUE(bm.mesh.is_null());
+			RS::get_singleton()->mesh_clear_virtual_geometry(bm.mesh->get_rid(), RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_BAKED_GRIDMAP);
 			bm.instance = RS::get_singleton()->instance_create();
 			RS::get_singleton()->instance_set_base(bm.instance, bm.mesh->get_rid());
 			RS::get_singleton()->instance_attach_object_instance_id(bm.instance, get_instance_id());
@@ -1857,6 +1858,7 @@ void GridMap::make_baked_meshes(bool p_gen_lightmap_uv, float p_lightmap_uv_texe
 
 		BakedMesh bm;
 		bm.mesh = mesh;
+		RS::get_singleton()->mesh_clear_virtual_geometry(bm.mesh->get_rid(), RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_BAKED_GRIDMAP);
 		bm.instance = RS::get_singleton()->instance_create();
 		RS::get_singleton()->instance_set_base(bm.instance, bm.mesh->get_rid());
 		RS::get_singleton()->instance_attach_object_instance_id(bm.instance, get_instance_id());

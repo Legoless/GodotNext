@@ -60,6 +60,7 @@
 #include "core/io/packet_peer_udp.h"
 #include "core/io/pck_packer.h"
 #include "core/io/resource_format_binary.h"
+#include "core/io/resource_format_ngm.h"
 #include "core/io/resource_importer.h"
 #include "core/io/resource_loader.h"
 #include "core/io/resource_saver.h"
@@ -487,6 +488,7 @@ void unregister_core_types() {
 	}
 
 	ResourceLoader::finalize();
+	NGMHandlePool::get_singleton().clear();
 
 	ClassDB::cleanup_defaults();
 	memdelete(_time);

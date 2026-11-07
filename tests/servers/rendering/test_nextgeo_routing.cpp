@@ -101,6 +101,44 @@ TEST_CASE("[NextGeo][Routing] Per-instance and chain fallback reasons") {
 	facts.surface_in_mask = false;
 	CHECK_FALSE(nextgeo_resolve_surface_route(facts).virtual_geometry);
 	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_MUTATED_MESH);
+
+	// A baked GridMap mesh carries BAKED_GRIDMAP without VGD.
+	facts = _candidate();
+	facts.baked_gridmap = true;
+	facts.mesh_has_virtual_geometry = false;
+	facts.surface_in_mask = false;
+	CHECK_FALSE(nextgeo_resolve_surface_route(facts).virtual_geometry);
+	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_BAKED_GRIDMAP);
+	CHECK_EQ(String(nextgeo_fallback_name(NEXTGEO_FALLBACK_BAKED_GRIDMAP)), "BAKED_GRIDMAP");
+}
+
+TEST_CASE("[NextGeo][Routing] Material fallback reasons and mixed-surface alpha reporting") {
+	NextGeoSurfaceFacts facts = _candidate();
+	facts.material_fallback = NEXTGEO_FALLBACK_VERTEX_LIGHTING;
+	CHECK_FALSE(nextgeo_resolve_surface_route(facts).virtual_geometry);
+	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_VERTEX_LIGHTING);
+	CHECK_EQ(String(nextgeo_fallback_name(NEXTGEO_FALLBACK_VERTEX_LIGHTING)), "VERTEX_LIGHTING");
+
+	facts = _candidate();
+	facts.material_fallback = NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER;
+	CHECK_FALSE(nextgeo_resolve_surface_route(facts).virtual_geometry);
+	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER);
+	CHECK_EQ(String(nextgeo_fallback_name(NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER)), "UNSUPPORTED_CUSTOM_SHADER");
+
+	facts = _candidate();
+	facts.material_fallback = NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE;
+	CHECK_FALSE(nextgeo_resolve_surface_route(facts).virtual_geometry);
+	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE);
+	CHECK_EQ(String(nextgeo_fallback_name(NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE)), "UNSUPPORTED_DERIVATIVE");
+
+	// On a mixed opaque + glass mesh, surface 1 is excluded from the VGD mask AND
+	// uses an alpha material; it must still report "alpha" rather than "NONE".
+	facts = _candidate();
+	facts.surface_in_mask = false;
+	facts.material_fallback = NEXTGEO_FALLBACK_ALPHA;
+	CHECK_FALSE(nextgeo_resolve_surface_route(facts).virtual_geometry);
+	CHECK_EQ(nextgeo_resolve_surface_route(facts).reason, NEXTGEO_FALLBACK_ALPHA);
+	CHECK_EQ(String(nextgeo_fallback_name(NEXTGEO_FALLBACK_ALPHA)), "alpha");
 }
 
 TEST_CASE("[NextGeo][Routing] View-level precedence") {

@@ -461,8 +461,14 @@ uint32_t TextureStreaming::feedback_buffer_material_index(RID p_material) {
 	// Put the RID for the material into the feedback buffer's rid_map at the index of the material info.
 	MaterialFeedbackBuffer *_buffer = feedback_buffer_owner.get_or_null(current_feedback_buffer);
 	if (_buffer) {
+		if (!_buffer->buffer.is_valid()) {
+			return UINT32_MAX;
+		}
 		// material_info_owner.get_index() is thread-safe (only reads from RID_Owner which is thread-safe)
 		uint32_t index = material_info_owner.get_index(p_material);
+		if ((index + 1) * sizeof(uint32_t) > _buffer->buffer_size) {
+			return UINT32_MAX;
+		}
 		if (_buffer->rid_map.size() <= (index + 1)) {
 			_buffer->rid_map.resize(index + 1);
 		}

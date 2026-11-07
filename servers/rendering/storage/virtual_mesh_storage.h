@@ -127,7 +127,7 @@ public:
 	struct ClusterGPUDesc {
 		uint32_t pos_word_offset = 0;
 		uint32_t tri_byte_offset = 0;
-		uint32_t stride_and_counts = 0; // bits 0..7 = float stride, 8..15 = verts, 16..23 = tris.
+		uint32_t stride_and_counts = 0; // bits 0..7 = float stride, 8..15 = verts, 16..23 = tris, 24..31 = vertex_layout.
 		uint32_t surface_and_page = 0; // bits 0..15 = surface_id, 16..31 = page_id.
 	};
 
@@ -182,6 +182,7 @@ public:
 	void instance_record_set_state(uint32_t p_record, uint32_t p_flags);
 	void instance_record_set_layer_mask(uint32_t p_record, uint32_t p_layer_mask);
 	void instance_record_set_gi_flags(uint32_t p_record, uint32_t p_gi_flags);
+	void instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask);
 	// tlas_instance_index, blas_handle, rt_arena_chunk, rt_arena_offset, src_page_table, card_set.
 	void instance_record_set_rt(uint32_t p_record, const uint32_t p_rt_fields[6]);
 

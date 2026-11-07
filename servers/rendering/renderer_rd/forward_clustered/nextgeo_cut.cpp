@@ -31,6 +31,7 @@
 #include "nextgeo_cut.h"
 
 #include "core/config/project_settings.h"
+#include "core/os/mutex.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
@@ -80,11 +81,16 @@ struct RasterParams {
 	uint32_t visible_capacity;
 	uint32_t reset_velocity;
 	float cull_sign;
-	uint32_t pad0;
+	uint32_t bucket_table_words;
 };
 static_assert(sizeof(RasterParams) == 288, "RasterParams must stay 288 bytes.");
 
+Mutex s_stats_mutex;
 Dictionary s_last_stats;
+uint32_t s_resolve_active_buckets = 0;
+uint32_t s_resolve_stage_a_draws = 0;
+uint32_t s_resolve_stage_b_draws = 0;
+bool s_resolve_stage_b_wrote = false;
 
 uint32_t read_u32(const uint8_t *p_data, uint32_t p_offset) {
 	uint32_t value = 0;
@@ -117,6 +123,8 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 		const RendererVirtualMeshStorage::Record &record = p_storage->get_record(record_index);
 		if ((record.flags & (RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE)) != (RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_VISIBLE) ||
 				(record.flags & (RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS)) != 0 ||
+				(record.gi_flags & RendererVirtualMeshStorage::GI_LIGHTMAPPED) != 0 ||
+				record.surface_mask == 0 ||
 				(record.layer_mask & cull_mask) == 0) {
 			continue;
 		}
@@ -222,17 +230,22 @@ bool NextGeoCut::_ensure() {
 	if (rd == nullptr) {
 		return false;
 	}
-	instance_shader.initialize(Vector<String>({ "", "\n#define PHASE2\n" }));
+#ifdef REAL_T_IS_DOUBLE
+	const String base_defines = "\n#define REAL_T_IS_DOUBLE\n";
+#else
+	const String base_defines = "";
+#endif
+	instance_shader.initialize(Vector<String>({ base_defines, base_defines + "\n#define PHASE2\n" }));
 	instance_version = instance_shader.version_create();
-	cluster_shader.initialize(Vector<String>({ "", "\n#define CLUSTER_CULL\n", "\n#define CUT_HASH\n" }));
+	cluster_shader.initialize(Vector<String>({ base_defines, base_defines + "\n#define CLUSTER_CULL\n", base_defines + "\n#define CUT_HASH\n" }));
 	cluster_version = cluster_shader.version_create();
 	hiz_shader.initialize(Vector<String>({ "", "\n#define CLEAR_VISIBILITY\n" }));
 	hiz_version = hiz_shader.version_create();
 	raster_shader.initialize(Vector<String>({
-			"",
-			"\n#define WITH_VELOCITY\n",
-			"\n#define DEBUG_BACKFACE\n",
-			"\n#define WITH_VELOCITY\n#define DEBUG_BACKFACE\n",
+			base_defines,
+			base_defines + "\n#define WITH_VELOCITY\n",
+			base_defines + "\n#define DEBUG_BACKFACE\n",
+			base_defines + "\n#define WITH_VELOCITY\n#define DEBUG_BACKFACE\n",
 	}));
 	raster_version = raster_shader.version_create();
 	if (!instance_version.is_valid() || !cluster_version.is_valid() || !hiz_version.is_valid() || !raster_version.is_valid()) {
@@ -433,6 +446,7 @@ bool NextGeoCut::_draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	}
 	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
 	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
+	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
 	RID shader = raster_shader.version_get_shader(raster_version, variant);
 	RD::Uniform u0(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
 	RD::Uniform u1(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
@@ -440,7 +454,8 @@ bool NextGeoCut::_draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, cons
 	RD::Uniform u3(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf);
 	RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters);
 	RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params);
-	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5);
+	RD::Uniform u6(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf);
+	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5, u6);
 	if (!set.is_valid()) {
 		return false;
 	}
@@ -561,7 +576,14 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data) {
 	info["cut_match"] = gpu_hash == stats_cpu_hash;
 	stats_tick++;
 	info["tick"] = int64_t(stats_tick);
-	s_last_stats = info.duplicate();
+	{
+		MutexLock lock(s_stats_mutex);
+		info["resolve_active_buckets"] = int64_t(s_resolve_active_buckets);
+		info["resolve_stage_a_draws"] = int64_t(s_resolve_stage_a_draws);
+		info["resolve_stage_b_draws"] = int64_t(s_resolve_stage_b_draws);
+		info["resolve_stage_b_wrote"] = s_resolve_stage_b_wrote;
+		s_last_stats = info.duplicate();
+	}
 	stats_info.clear();
 }
 
@@ -595,7 +617,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		rp.visible_capacity = CLUSTER_CAPACITY;
 		rp.reset_velocity = p_raster->reset_velocity ? 1u : 0u;
 		rp.cull_sign = p_raster->reverse_cull ? -1.0f : 1.0f;
-		rp.pad0 = 0u;
+		rp.bucket_table_words = p_raster->bucket_table.is_valid() ? p_raster->bucket_table_words : 0u;
 		rd->buffer_update(raster_params, 0, sizeof(RasterParams), &rp);
 		_clear_visibility_targets(p_raster->visibility, p_raster->instance_id, p_internal_size);
 	}
@@ -893,9 +915,30 @@ void NextGeoCut::free_resources() {
 		rd->free_rid(dummy_sampler);
 		dummy_sampler = RID();
 	}
+	{
+		MutexLock lock(s_stats_mutex);
+		s_last_stats.clear();
+		s_resolve_active_buckets = 0;
+		s_resolve_stage_a_draws = 0;
+		s_resolve_stage_b_draws = 0;
+		s_resolve_stage_b_wrote = false;
+	}
 	initialized = false;
 }
 
+void NextGeoCut::set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote) {
+	MutexLock lock(s_stats_mutex);
+	s_resolve_active_buckets = p_active_buckets;
+	s_resolve_stage_a_draws = p_stage_a_draws;
+	s_resolve_stage_b_draws = p_stage_b_draws;
+	s_resolve_stage_b_wrote = p_stage_b_wrote;
+	s_last_stats["resolve_active_buckets"] = int64_t(p_active_buckets);
+	s_last_stats["resolve_stage_a_draws"] = int64_t(p_stage_a_draws);
+	s_last_stats["resolve_stage_b_draws"] = int64_t(p_stage_b_draws);
+	s_last_stats["resolve_stage_b_wrote"] = p_stage_b_wrote;
+}
+
 Dictionary NextGeoCut::get_last_stats() {
-	return s_last_stats;
+	MutexLock lock(s_stats_mutex);
+	return s_last_stats.duplicate();
 }

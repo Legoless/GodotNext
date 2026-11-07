@@ -87,6 +87,8 @@ public:
 			NEXTGI_RT_BLENDED,
 		};
 		virtual NextGIRTClass get_nextgi_rt_class() const { return NEXTGI_RT_OPAQUE; }
+		// GodotNext: nextgeo_resolve (#80). Material-level fallback reason (RendererRD::NextGeoFallback).
+		virtual uint32_t get_nextgeo_fallback() const { return 0; }
 
 		virtual bool casts_shadows() const = 0;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const = 0;
@@ -96,6 +98,14 @@ public:
 
 		static RD::PipelineColorBlendState::Attachment blend_mode_to_blend_attachment(BlendMode p_mode);
 		static bool blend_mode_uses_blend_alpha(BlendMode p_mode);
+	};
+
+	// GodotNext: nextgeo_resolve (#80, plan §6.3). Material-bucket resolve entry.
+	struct MaterialBucket {
+		RID resolve_pipeline;
+		RID uniform_set;
+		uint32_t material_feedback_index = UINT32_MAX;
+		uint32_t fallback_reason = 0;
 	};
 
 	struct MaterialData {

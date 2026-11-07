@@ -177,6 +177,9 @@ void VirtualMeshStorage::_upload_records(uint32_t p_first, uint32_t p_count) {
 		}
 		buffer_capacity = record_capacity;
 		record_buffer = rd->storage_buffer_create(buffer_capacity * sizeof(Record));
+		ERR_FAIL_COND(record_buffer.is_null());
+		rd->buffer_update(record_buffer, 0, record_capacity * sizeof(Record), records.ptr());
+		return;
 	}
 	ERR_FAIL_COND(record_buffer.is_null());
 	ERR_FAIL_COND(p_first + p_count > record_capacity);
@@ -195,6 +198,9 @@ void VirtualMeshStorage::_upload_mesh_records(uint32_t p_first, uint32_t p_count
 		}
 		mesh_buffer_capacity = required;
 		mesh_record_buffer = rd->storage_buffer_create(mesh_buffer_capacity * sizeof(MeshRecord));
+		ERR_FAIL_COND(mesh_record_buffer.is_null());
+		rd->buffer_update(mesh_record_buffer, 0, required * sizeof(MeshRecord), mesh_records.ptr());
+		return;
 	}
 	ERR_FAIL_COND(mesh_record_buffer.is_null());
 	ERR_FAIL_COND(p_first + p_count > mesh_buffer_capacity);

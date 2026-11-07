@@ -2419,6 +2419,31 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 				desc.eligible_surface_mask |= 1u << index;
 			}
 		}
+		desc.vertex_layout = virtual_geometry->get_ngm_vertex_layout();
+		if (desc.vertex_layout == 0) {
+			for (int index = 0; index < surfaces.size() && index < 32; index++) {
+				if ((desc.eligible_surface_mask & (1u << index)) == 0) {
+					continue;
+				}
+				const BitField<ArrayFormat> fmt = surfaces[index].format;
+				desc.vertex_layout |= (1u << 0);
+				if (fmt.has_flag(ARRAY_FORMAT_NORMAL)) {
+					desc.vertex_layout |= (1u << 1);
+				}
+				if (fmt.has_flag(ARRAY_FORMAT_TANGENT)) {
+					desc.vertex_layout |= (1u << 2);
+				}
+				if (fmt.has_flag(ARRAY_FORMAT_TEX_UV)) {
+					desc.vertex_layout |= (1u << 3);
+				}
+				if (fmt.has_flag(ARRAY_FORMAT_TEX_UV2)) {
+					desc.vertex_layout |= (1u << 4);
+				}
+				if (fmt.has_flag(ARRAY_FORMAT_COLOR)) {
+					desc.vertex_layout |= (1u << 5);
+				}
+			}
+		}
 	}
 	if (virtual_geometry.is_valid()) {
 		RS::get_singleton()->mesh_set_virtual_geometry(mesh, desc);

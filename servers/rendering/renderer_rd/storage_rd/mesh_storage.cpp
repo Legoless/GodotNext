@@ -35,6 +35,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server_types.h"
 
 using namespace RendererRD;
@@ -361,6 +362,9 @@ void MeshStorage::_poll_sdf_jobs() {
 }
 
 void MeshStorage::mesh_free(RID p_rid) {
+	if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_rid)) {
+		RSG::virtual_mesh_storage->mesh_clear_virtual_geometry(p_rid, RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_NONE);
+	}
 	mesh_clear(p_rid);
 	mesh_set_shadow_mesh(p_rid, RID());
 	Mesh *mesh = mesh_owner.get_or_null(p_rid);

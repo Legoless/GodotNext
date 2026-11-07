@@ -591,6 +591,30 @@ void RendererSceneCull::instance_initialize(RID p_rid) {
 	instance->self = p_rid;
 }
 
+bool RendererSceneCull::is_instance(RID p_instance) const {
+	return instance_owner.owns(p_instance);
+}
+
+Dictionary RendererSceneCull::instance_get_virtual_geometry_debug_stats(RID p_instance) const {
+	update_dirty_instances();
+	const Instance *instance = instance_owner.get_or_null(p_instance);
+	if (instance == nullptr) {
+		return Dictionary();
+	}
+	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data != nullptr) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
+		if (geom->geometry_instance != nullptr) {
+			return scene_render->geometry_instance_get_nextgeo_debug_stats(geom->geometry_instance);
+		}
+	}
+	Dictionary d;
+	d["record_index"] = -1;
+	d["route"] = "legacy";
+	d["reason"] = "NONE";
+	d["surfaces"] = Array();
+	return d;
+}
+
 void RendererSceneCull::_instance_update_mesh_instance(Instance *p_instance) const {
 	bool needs_instance = RSG::mesh_storage->mesh_needs_instance(p_instance->base, p_instance->skeleton.is_valid());
 	if (needs_instance != p_instance->mesh_instance.is_valid()) {
@@ -721,6 +745,8 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 			default: {
 			}
 		}
+
+		_instance_record_release(instance);
 
 		if (instance->base_data) {
 			memdelete(instance->base_data);
@@ -1598,6 +1624,7 @@ void RendererSceneCull::instance_geometry_set_lightmap(RID p_instance, RID p_lig
 		ERR_FAIL_NULL(geom->geometry_instance);
 		geom->geometry_instance->set_use_lightmap(lightmap_instance_rid, p_lightmap_uv_scale, p_slice_index);
 	}
+	_instance_record_update_state(instance);
 }
 
 void RendererSceneCull::instance_geometry_set_lod_bias(RID p_instance, float p_lod_bias) {
@@ -1618,6 +1645,7 @@ void RendererSceneCull::instance_geometry_set_shader_parameter(RID p_instance, c
 	ERR_FAIL_NULL(instance);
 
 	instance->instance_uniforms.set(instance->self, p_parameter, p_value);
+	_instance_record_update_state(instance);
 }
 
 Variant RendererSceneCull::instance_geometry_get_shader_parameter(RID p_instance, const StringName &p_parameter) const {
@@ -1727,12 +1755,24 @@ void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 	if (p_instance->virtual_record == UINT32_MAX) {
 		p_instance->virtual_record = RSG::virtual_mesh_storage->instance_record_allocate(p_instance->self, p_instance->base);
 	}
+	if (((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && p_instance->base_data != nullptr) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
+		if (geom->geometry_instance != nullptr) {
+			geom->geometry_instance->set_nextgeo_record_index(p_instance->virtual_record);
+		}
+	}
 	_instance_record_update_state(p_instance);
 	const AABB world = p_instance->transformed_aabb.has_surface() ? p_instance->transformed_aabb : p_instance->transform.xform(p_instance->aabb);
 	_instance_record_set_transform(p_instance, p_instance->transform, world, p_instance->visible);
 }
 
 void RendererSceneCull::_instance_record_release(Instance *p_instance) const {
+	if (((1 << p_instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && p_instance->base_data != nullptr) {
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(p_instance->base_data);
+		if (geom->geometry_instance != nullptr) {
+			geom->geometry_instance->set_nextgeo_record_index(UINT32_MAX);
+		}
+	}
 	if (RSG::virtual_mesh_storage == nullptr || p_instance->virtual_record == UINT32_MAX) {
 		return;
 	}
@@ -1763,7 +1803,7 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 	if (p_instance->skeleton.is_valid()) {
 		flags |= RendererVirtualMeshStorage::RECORD_HAS_SKELETON;
 	}
-	if (p_instance->material_override.is_valid() || p_instance->material_overlay.is_valid() || !p_instance->materials.is_empty()) {
+	if (p_instance->instance_uniforms.location() >= 0 || p_instance->material_overlay.is_valid()) {
 		flags |= RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS;
 	}
 	RSG::virtual_mesh_storage->instance_record_set_state(p_instance->virtual_record, flags);
@@ -4877,6 +4917,7 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 			ERR_FAIL_NULL(geom->geometry_instance);
 			geom->geometry_instance->set_surface_materials(p_instance->materials);
 		}
+		_instance_record_update_state(p_instance);
 	}
 
 	_instance_update_list.remove(&p_instance->update_item);

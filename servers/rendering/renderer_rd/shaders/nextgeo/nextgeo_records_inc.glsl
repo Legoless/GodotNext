@@ -25,7 +25,7 @@ struct NextGeoInstanceRecord {
 	uint src_page_table; // 208
 	uint card_set; // 212
 	uint pad1[2]; // 216
-#ifdef REAL_T_IS_DOUBLE
+#if defined(REAL_T_IS_DOUBLE) || defined(USE_DOUBLE_PRECISION)
 	vec4 model_precision; // 224
 	vec4 prev_model_precision; // 240
 #endif
@@ -64,3 +64,9 @@ const uint NEXTGEO_GI_MODE_NONE = 0u << 0;
 const uint NEXTGEO_GI_MODE_STATIC = 1u << 0;
 const uint NEXTGEO_GI_MODE_DYNAMIC = 2u << 0;
 const uint NEXTGEO_GI_LIGHTMAPPED = 1u << 2;
+
+// Per-(record, surface_id) bucket table entry bits (#80).
+const uint NEXTGEO_BUCKET_ID_MASK = 0x0FFFFFFFu;
+const uint NEXTGEO_BUCKET_INVALID = 0x0FFFFFFFu;
+const uint NEXTGEO_BUCKET_CULL_FRONT = 1u << 28u;
+const uint NEXTGEO_BUCKET_CULL_DISABLED = 1u << 29u;

@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_resolve.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
@@ -63,9 +64,14 @@ namespace RendererSceneRenderImplementation {
 
 class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
+	friend class NextGeoResolve;
 
-	// GodotNext: nextgeo_gpu_cull (#76).
+	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80).
 	NextGeoCut nextgeo_cut;
+	NextGeoResolve nextgeo_resolve;
+	bool nextgeo_virtual_active = false;
+	bool nextgeo_visibility_only_active = false;
+	LocalVector<uint32_t> nextgeo_bucket_table;
 
 	enum {
 		SCENE_UNIFORM_SET = 0,
@@ -163,6 +169,7 @@ public:
 		RID get_color_only_fb();
 		RID get_color_pass_fb(uint32_t p_color_pass_flags);
 		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB);
+		RID get_nextgeo_stage_a_fb(bool p_voxel_gi);
 		RID get_specular_only_fb();
 		RID get_velocity_only_fb();
 
@@ -474,6 +481,8 @@ private:
 
 		void grow_instance_buffer(RenderListType p_render_list, uint32_t p_req_element_count, bool p_append);
 	} scene_state;
+
+	LocalVector<SceneState::InstanceData> nextgeo_instance_data;
 
 	static RenderForwardClustered *singleton;
 
@@ -881,6 +890,7 @@ public:
 
 	virtual RenderGeometryInstance *geometry_instance_create(RID p_base) override;
 	virtual void geometry_instance_free(RenderGeometryInstance *p_geometry_instance) override;
+	virtual Dictionary geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const override;
 
 	virtual uint32_t geometry_instance_get_pair_mask() override;
 

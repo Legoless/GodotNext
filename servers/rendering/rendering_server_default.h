@@ -97,6 +97,9 @@ class RenderingServerDefault : public RenderingServer {
 	void _free(RID p_rid);
 
 	void _call_on_render_thread(const Callable &p_callable);
+	Dictionary _virtual_geometry_get_debug_stats(RID p_viewport) {
+		return RenderingServer::virtual_geometry_get_debug_stats(p_viewport);
+	}
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -1282,6 +1285,17 @@ public:
 			p_callable.call();
 		} else {
 			command_queue.push(this, &RenderingServerDefault::_call_on_render_thread, p_callable);
+		}
+	}
+
+	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID()) override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _virtual_geometry_get_debug_stats(p_viewport);
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_geometry_get_debug_stats, &ret, p_viewport);
+			return ret;
 		}
 	}
 

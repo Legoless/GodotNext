@@ -266,6 +266,21 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 	}
 }
 
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_nextgeo_stage_a_fb(bool p_voxel_gi) {
+	ERR_FAIL_NULL_V(render_buffers, RID());
+	ensure_normal_roughness_texture();
+	render_buffers->ensure_nextgeo_targets();
+
+	RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS);
+	RID instance_id_buffer = render_buffers->get_nextgeo_instance_id();
+	if (p_voxel_gi) {
+		ensure_voxelgi();
+		RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI);
+		return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, voxelgi_buffer, instance_id_buffer);
+	}
+	return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, instance_id_buffer);
+}
+
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_specular_only_fb() {
 	bool use_msaa = render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED;
 
@@ -1014,24 +1029,30 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	RenderList *rl = &render_list[p_render_list];
 	_update_dirty_geometry_instances();
 
-	// GodotNext: nextgeo_exclusive_dispatch (#79). Routing is per view: MSAA,
-	// multiview and unsupported debug views keep virtual surfaces legacy for
-	// the whole view, and nothing is virtual until #80 sets draw-ready.
+	// GodotNext: nextgeo_exclusive_dispatch (#79) / nextgeo_resolve (#80).
+	// Routing is per main view: MSAA, multiview, reflection probes, auxiliary
+	// passes and unsupported debug views keep virtual surfaces legacy.
 	bool nextgeo_virtual_view = false;
-	RendererRD::NextGeoFallback nextgeo_view_reason = RendererRD::NEXTGEO_FALLBACK_NONE;
-	if (RSG::virtual_mesh_storage != nullptr && (RSG::virtual_mesh_storage->is_nextgeo_draw_ready() || bool(GLOBAL_GET("rendering/nextgeo/visibility_only")))) {
-		bool view_msaa = false;
-		if (p_render_data->render_buffers.is_valid()) {
-			RenderSceneBuffersRD *scene_buffers = Object::cast_to<RenderSceneBuffersRD>(*p_render_data->render_buffers);
-			view_msaa = scene_buffers != nullptr && scene_buffers->get_texture_samples() != RD::TEXTURE_SAMPLES_1;
+	if (nextgeo_virtual_active &&
+			p_render_list == RENDER_LIST_OPAQUE &&
+			p_pass_mode == PASS_MODE_COLOR &&
+			!p_render_data->reflection_probe.is_valid() &&
+			p_render_data->render_buffers.is_valid() &&
+			RSG::virtual_mesh_storage != nullptr) {
+		nextgeo_virtual_view = true;
+		if (!p_append && !nextgeo_visibility_only_active) {
+			nextgeo_resolve.begin_frame();
+			const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
+			nextgeo_bucket_table.resize(MAX(record_count * 32u, 1u));
+			for (uint32_t k = 0; k < nextgeo_bucket_table.size(); k++) {
+				nextgeo_bucket_table[k] = NextGeoResolve::BUCKET_INVALID;
+			}
+			nextgeo_instance_data.resize(MAX(record_count, 1u));
+			memset(nextgeo_instance_data.ptr(), 0, nextgeo_instance_data.size() * sizeof(SceneState::InstanceData));
 		}
-		bool unsupported_debug_draw = false;
-#ifdef DEBUG_ENABLED
-		unsupported_debug_draw = get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
-#endif
-		nextgeo_view_reason = RendererRD::nextgeo_view_fallback(view_msaa, p_render_data->scene_data->view_count > 1, unsupported_debug_draw);
-		nextgeo_virtual_view = nextgeo_view_reason == RendererRD::NEXTGEO_FALLBACK_NONE;
 	}
+
+	bool nextgeo_request_redraw = false;
 
 	if (!p_append) {
 		rl->clear();
@@ -1209,7 +1230,12 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 				if (surface_virtual && !skip_virtual) {
 					// The skip below must have caught it; an add here is a double dispatch.
 					RSG::virtual_mesh_storage->nextgeo_count_double_dispatch();
-				} else if (!surface_virtual && inst->data->base.is_valid() &&
+				} else if (surface_virtual && skip_virtual && inst->nextgeo_record_index == UINT32_MAX) {
+					RSG::virtual_mesh_storage->nextgeo_count_missing();
+				} else if (!surface_virtual &&
+						surf->nextgeo_fallback_reason == RendererRD::NEXTGEO_FALLBACK_NONE &&
+						inst->data->base_type == RSE::INSTANCE_MESH &&
+						inst->data->base.is_valid() &&
 						RSG::virtual_mesh_storage->mesh_has_virtual_geometry(inst->data->base) &&
 						RSG::virtual_mesh_storage->mesh_surface_is_virtual(inst->data->base, surf->surface_index)) {
 					RSG::virtual_mesh_storage->nextgeo_count_missing();
@@ -1217,6 +1243,72 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			}
 #endif
 			if (skip_virtual) {
+				if (!nextgeo_visibility_only_active && p_render_list == RENDER_LIST_OPAQUE && inst->nextgeo_record_index < nextgeo_instance_data.size() && surf->surface_index < 32) {
+					const uint32_t rec = inst->nextgeo_record_index;
+					SceneState::InstanceData &idata = nextgeo_instance_data[rec];
+					if (inst->store_transform_cache) {
+						RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->transform, idata.transform);
+						RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->prev_transform, idata.prev_transform);
+#ifdef REAL_T_IS_DOUBLE
+						RendererRD::MaterialStorage::split_double(inst->transform.origin.x, &idata.transform[3], &idata.model_precision[0]);
+						RendererRD::MaterialStorage::split_double(inst->transform.origin.y, &idata.transform[7], &idata.model_precision[1]);
+						RendererRD::MaterialStorage::split_double(inst->transform.origin.z, &idata.transform[11], &idata.model_precision[2]);
+						RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.x, &idata.prev_transform[3], &idata.prev_model_precision[0]);
+						RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.y, &idata.prev_transform[7], &idata.prev_model_precision[1]);
+						RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.z, &idata.prev_transform[11], &idata.prev_model_precision[2]);
+#endif
+					} else {
+						RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), idata.transform);
+						RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), idata.prev_transform);
+					}
+					idata.flags = inst->flags_cache;
+					idata.gi_offset = inst->gi_offset_cache;
+					idata.layer_mask = inst->layer_mask;
+					idata.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
+					idata.set_lightmap_uv_scale(inst->lightmap_uv_scale);
+					idata.set_compressed_aabb(AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0)));
+					idata.material_feedback_index = UINT32_MAX;
+					idata.set_uv_scale(Vector4(0.0, 0.0, 0.0, 0.0));
+
+					uint32_t material_feedback_index = UINT32_MAX;
+#ifdef MODULE_TEXTURE_STREAMING_ENABLED
+					if (surf->material->material_feedback_rid.is_valid() && TextureStreaming::get_singleton() != nullptr) {
+						material_feedback_index = TextureStreaming::get_singleton()->feedback_buffer_material_index(surf->material->material_feedback_rid);
+					}
+#endif
+					SceneShaderForwardClustered::ShaderSpecialization bucket_spec = {};
+					bucket_spec.use_forward_gi = uses_gi;
+					bucket_spec.use_light_soft_shadows = inst->using_softshadows;
+					bucket_spec.use_light_projector = inst->using_projectors;
+					bucket_spec.use_lightmap_specular = uses_lightmap_specular;
+					bucket_spec.material_feedback = material_feedback_index != UINT32_MAX ? 1 : 0;
+
+					const uint32_t bucket_id = nextgeo_resolve.register_bucket(surf->material, surf->shader, surf->material_uniform_set, material_feedback_index, bucket_spec);
+					if (bucket_id != NextGeoResolve::BUCKET_INVALID && (rec * 32u + surf->surface_index) < nextgeo_bucket_table.size()) {
+						uint32_t cull_bits = 0u;
+						if (surf->shader->cull_mode == RSE::CULL_MODE_DISABLED) {
+							cull_bits |= (1u << 24u); // NEXTGEO_BUCKET_CULL_DISABLED
+						} else if (surf->shader->cull_mode == RSE::CULL_MODE_FRONT) {
+							cull_bits |= (1u << 25u); // NEXTGEO_BUCKET_CULL_FRONT
+						}
+						nextgeo_bucket_table[rec * 32u + surf->surface_index] = (bucket_id & 0x00FFFFFFu) | cull_bits;
+					}
+					if (surf->shader->uses_time) {
+						nextgeo_request_redraw = true;
+					}
+					if (uses_lightmap) {
+						scene_state.used_lightmap = true;
+					}
+					if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_SUBSURFACE_SCATTERING) {
+						scene_state.used_sss = true;
+					}
+					if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_NORMAL_TEXTURE) {
+						scene_state.used_normal_texture = true;
+					}
+					if (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DEPTH_TEXTURE) {
+						scene_state.used_depth_texture = true;
+					}
+				}
 				surf = surf->next;
 				continue;
 			}
@@ -1328,6 +1420,9 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 
 	if (p_render_list == RENDER_LIST_OPAQUE && lightmap_captures_used) {
 		RD::get_singleton()->buffer_update(scene_state.lightmap_capture_buffer, 0, sizeof(LightmapCaptureData) * lightmap_captures_used, scene_state.lightmap_captures);
+	}
+	if (nextgeo_request_redraw) {
+		RenderingServerDefault::redraw_request();
 	}
 }
 
@@ -1973,9 +2068,16 @@ void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_d
 
 void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
 	scene_state.used_uniform_buffer_count = 0;
+	const bool visibility_only = bool(GLOBAL_GET("rendering/nextgeo/visibility_only"));
+	if (RSG::virtual_mesh_storage != nullptr) {
+		RSG::virtual_mesh_storage->set_nextgeo_draw_ready(!visibility_only);
+	}
+	_update_dirty_geometry_instances();
 	if (RSG::virtual_mesh_storage != nullptr) {
 		// GodotNext: nextgeo_exclusive_dispatch (#79). These must stay 0.
-		RSG::virtual_mesh_storage->nextgeo_reset_counters();
+		if (p_render_data == nullptr || !p_render_data->reflection_probe.is_valid()) {
+			RSG::virtual_mesh_storage->nextgeo_reset_counters();
+		}
 		// GodotNext: nextgeo_instance_records (#75). Upload dirty records
 		// before this frame's views inspect record buffers; idempotent after
 		// the first view.
@@ -2177,6 +2279,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 #endif
 			const bool view_msaa = rb->get_texture_samples() != RD::TEXTURE_SAMPLES_1;
 			using_nextgeo = RendererRD::nextgeo_view_fallback(view_msaa, p_render_data->scene_data->view_count > 1, unsupported_debug_draw) == RendererRD::NEXTGEO_FALLBACK_NONE;
+			if (using_nextgeo && !visibility_only) {
+				scene_shader.enable_nextgeo_shader_group();
+			}
 		}
 
 		if (p_render_data->scene_data->calculate_motion_vectors) {
@@ -2268,6 +2373,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// May have changed due to the above (light buffer enlarged, as an example).
 	_update_render_base_uniform_set();
+
+	nextgeo_virtual_active = using_nextgeo;
+	nextgeo_visibility_only_active = visibility_only;
 
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
@@ -2558,8 +2666,44 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			raster_inputs.reset_velocity = reset_temporal_history;
 			raster_inputs.reverse_cull = reverse_cull;
 			raster_inputs.debug_backface = bool(GLOBAL_GET("rendering/nextgeo/debug_backface"));
+			if (!visibility_only) {
+				nextgeo_resolve.upload_tables(
+						nextgeo_bucket_table.ptr(),
+						nextgeo_bucket_table.size(),
+						nextgeo_instance_data.ptr(),
+						nextgeo_instance_data.size() * sizeof(SceneState::InstanceData));
+				raster_inputs.bucket_table = nextgeo_resolve.get_bucket_table_buffer();
+				raster_inputs.bucket_table_words = nextgeo_bucket_table.size();
+			}
 
 			nextgeo_drew = nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")), &raster_inputs);
+			if (nextgeo_drew && !visibility_only && nextgeo_resolve.get_bucket_count() > 0) {
+				RENDER_TIMESTAMP("NextGeo Resolve Classify");
+				RD::get_singleton()->draw_command_begin_label("NextGeo Resolve Classify");
+				const bool nextgeo_classified = nextgeo_resolve.classify(RSG::virtual_mesh_storage, rb->get_nextgeo_visibility(), nextgeo_cut.get_clusters_buffer(), rb->get_internal_size());
+				RD::get_singleton()->draw_command_end_label();
+				if (nextgeo_classified) {
+					RENDER_TIMESTAMP("NextGeo Stage A");
+					RD::get_singleton()->draw_command_begin_label("NextGeo Stage A");
+					bool stage_a_redraw = false;
+					nextgeo_resolve.draw_stage_a(
+							RSG::virtual_mesh_storage,
+							rb->get_nextgeo_visibility(),
+							nextgeo_cut.get_clusters_buffer(),
+							rb_data->get_nextgeo_stage_a_fb(using_voxelgi),
+							render_base_uniform_set,
+							rp_uniform_set,
+							base_specialization,
+							using_voxelgi,
+							reverse_cull,
+							p_render_data->render_region,
+							stage_a_redraw);
+					if (stage_a_redraw) {
+						RenderingServerDefault::redraw_request();
+					}
+					RD::get_singleton()->draw_command_end_label();
+				}
+			}
 		}
 
 		if (use_msaa) {
@@ -2640,30 +2784,85 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		bool render_motion_pass = !render_list[RENDER_LIST_MOTION].elements.is_empty();
 
 		{
-			// GodotNext: nextgeo_visibility_raster (#83). Stage B (#80) sets stage_b_wrote.
-			const bool stage_b_wrote = false;
-			load_color = RendererRD::nextgeo_should_load_color(load_color, nextgeo_drew, stage_b_wrote);
-
-			Vector<Color> c;
-			if (!load_color) {
-				if (using_separate_specular || rb_data.is_valid()) {
-					// Effects that rely on separate specular, like subsurface scattering, must clear the alpha to zero.
-					clear_color.a = 0;
-				}
-				c.push_back(clear_color);
-
-				if (rb_data.is_valid()) {
-					c.push_back(Color(0, 0, 0, 0)); // Separate specular.
-					c.push_back(Color(0, 0, 0, 0)); // Motion vector. Pushed to the clear color vector even if the framebuffer isn't bound.
-				}
-			}
-
+			// GodotNext: nextgeo_visibility_raster (#83) / nextgeo_resolve (#80).
+			bool stage_b_wrote = false;
+			uint32_t stage_b_draws = 0;
 			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
 			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
+
+			auto build_opaque_clear_colors = [&](bool p_load_color) {
+				Vector<Color> colors;
+				if (!p_load_color) {
+					Color cc = clear_color;
+					if (using_separate_specular || rb_data.is_valid()) {
+						// Effects that rely on separate specular, like subsurface scattering, must clear the alpha to zero.
+						cc.a = 0;
+					}
+					colors.push_back(cc);
+					if (rb_data.is_valid()) {
+						colors.push_back(Color(0, 0, 0, 0)); // Separate specular.
+						colors.push_back(Color(0, 0, 0, 0)); // Motion vector. Pushed to the clear color vector even if the framebuffer isn't bound.
+					}
+				}
+				return colors;
+			};
+
+			if (nextgeo_drew && !visibility_only && nextgeo_resolve.get_bucket_count() > 0) {
+				RENDER_TIMESTAMP("NextGeo Stage B");
+				RD::get_singleton()->draw_command_begin_label("NextGeo Stage B");
+				uint32_t stage_b_pipeline_flags = 0;
+				if (opaque_color_pass_flags & COLOR_PASS_FLAG_SEPARATE_SPECULAR) {
+					stage_b_pipeline_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_SEPARATE_SPECULAR;
+				}
+				if (opaque_color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS) {
+					stage_b_pipeline_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
+				}
+				const bool zero_vel = velocity_plan.prepass_writes && (stage_b_pipeline_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS);
+				const BitField<RD::DrawFlags> stage_b_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
+				const Vector<Color> stage_b_clear = build_opaque_clear_colors(load_color);
+				bool stage_b_redraw = false;
+				const bool stage_b_opened = nextgeo_resolve.draw_stage_b(
+						RSG::virtual_mesh_storage,
+						rb->get_nextgeo_visibility(),
+						nextgeo_cut.get_clusters_buffer(),
+						opaque_framebuffer,
+						stage_b_draw_flags,
+						stage_b_clear,
+						render_base_uniform_set,
+						rp_uniform_set,
+						stage_b_pipeline_flags,
+						zero_vel,
+						p_render_data->directional_light_soft_shadows,
+						base_specialization,
+						reverse_cull,
+						p_render_data->render_region,
+						stage_b_redraw,
+						stage_b_draws);
+				if (stage_b_redraw) {
+					RenderingServerDefault::redraw_request();
+				}
+				stage_b_wrote = stage_b_opened && stage_b_draws > 0;
+				if (stage_b_opened) {
+					load_color = true;
+				}
+				RD::get_singleton()->draw_command_end_label();
+			}
+
+			load_color = RendererRD::nextgeo_should_load_color(load_color, nextgeo_drew, stage_b_wrote);
+			Vector<Color> c = build_opaque_clear_colors(load_color);
 			RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, opaque_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 			// Load the velocity attachment on TAA when prepass/NextGeo wrote it; never DRAW_IGNORE_ALL (§6.1).
 			BitField<RD::DrawFlags> opaque_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
-			_render_list_with_draw_list(&render_list_params, opaque_framebuffer, opaque_draw_flags, c, 0.0f, 0u, p_render_data->render_region);
+			if (!stage_b_wrote || !render_list[RENDER_LIST_OPAQUE].elements.is_empty()) {
+				_render_list_with_draw_list(&render_list_params, opaque_framebuffer, opaque_draw_flags, c, 0.0f, 0u, p_render_data->render_region);
+			}
+			if (!is_reflection_probe) {
+				NextGeoCut::set_resolve_stats(
+						(!visibility_only && nextgeo_drew) ? nextgeo_resolve.get_last_published_bucket_count() : 0,
+						(!visibility_only && nextgeo_drew) ? nextgeo_resolve.get_last_published_stage_a_draws() : 0,
+						stage_b_draws,
+						stage_b_wrote);
+			}
 		}
 
 		RD::get_singleton()->draw_command_end_label();
@@ -3058,6 +3257,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			sdfgi->debug_draw(p_render_data->scene_data->view_count, p_render_data->scene_data->view_projection, p_render_data->scene_data->cam_transform, size.x, size.y, rb->get_render_target(), source_texture, view_rids);
 		}
 	}
+
+	nextgeo_virtual_active = false;
+	nextgeo_visibility_only_active = false;
 }
 
 void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_render_data) {
@@ -4961,22 +5163,29 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 		material_shadow = p_material;
 	}
 
-	// GodotNext: nextgeo_exclusive_dispatch (#79). Mark the surface as a
-	// virtual-geometry candidate here; the view-level gates (MSAA, multiview,
-	// debug draw, draw_ready) are applied when the render list is filled.
+	// GodotNext: nextgeo_exclusive_dispatch (#79) / nextgeo_resolve (#80).
+	// Mark the surface as a virtual-geometry candidate here; the view-level
+	// gates (MSAA, multiview, debug draw, draw_ready) are applied per view.
 	RendererRD::NextGeoSurfaceFacts route_facts;
 	route_facts.instance_mesh = ginstance->data->base_type == RSE::INSTANCE_MESH;
 	if (route_facts.instance_mesh && RSG::virtual_mesh_storage != nullptr) {
 		route_facts.mesh_has_virtual_geometry = RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 		route_facts.surface_in_mask = route_facts.mesh_has_virtual_geometry && RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, p_surface);
-		route_facts.mutated = RSG::virtual_mesh_storage->mesh_clear_reason(p_mesh) == RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_MUTATED_MESH;
+		const uint32_t clear_reason = RSG::virtual_mesh_storage->mesh_clear_reason(p_mesh);
+		route_facts.mutated = clear_reason == RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_MUTATED_MESH;
+		route_facts.baked_gridmap = clear_reason == RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_BAKED_GRIDMAP;
 	}
 	route_facts.skeleton = ginstance->data->skeleton.is_valid();
 	route_facts.instance_uniforms = ginstance->shader_uniforms_offset >= 0;
 	route_facts.lightmapped = ginstance->lightmap_instance.is_valid();
 	route_facts.chain_blocked = p_chain_blocked;
+	route_facts.material_fallback = RendererRD::NextGeoFallback(p_material->shader_data->get_nextgeo_fallback());
+	if (route_facts.material_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
+			(ginstance->fade_near || ginstance->fade_far || (ginstance->force_alpha * ginstance->parent_fade_alpha) < FADE_ALPHA_PASS_THRESHOLD)) {
+		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_ALPHA;
+	}
 	// Eligibility is recorded regardless of the draw-ready gate; the gate is
-	// applied per view so caches built before #80 still route once it is set.
+	// applied per view so caches built before draw-ready still route once set.
 	route_facts.draw_ready = true;
 	const RendererRD::NextGeoSurfaceRoute route = RendererRD::nextgeo_resolve_surface_route(route_facts);
 	if (route.virtual_geometry) {
@@ -5284,6 +5493,16 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 	if (ginstance->data->dirty_dependencies) {
 		ginstance->data->dependency_tracker.update_end();
 		ginstance->data->dirty_dependencies = false;
+	}
+
+	if (RSG::virtual_mesh_storage != nullptr && ginstance->nextgeo_record_index != UINT32_MAX) {
+		uint32_t virtual_surface_mask = 0u;
+		for (GeometryInstanceSurfaceDataCache *s = ginstance->surface_caches; s != nullptr; s = s->next) {
+			if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) && s->surface_index < 32) {
+				virtual_surface_mask |= (1u << s->surface_index);
+			}
+		}
+		RSG::virtual_mesh_storage->instance_record_set_surface_mask(ginstance->nextgeo_record_index, virtual_surface_mask);
 	}
 
 	ginstance->dirty_list_element.remove_from_list();
@@ -5747,6 +5966,76 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 	geometry_instance_alloc.free(ginstance);
 }
 
+Dictionary RenderForwardClustered::geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const {
+	Dictionary out;
+	if (p_geometry_instance == nullptr) {
+		return out;
+	}
+	const_cast<RenderForwardClustered *>(this)->_update_dirty_geometry_instances();
+	const GeometryInstanceForwardClustered *ginstance = static_cast<const GeometryInstanceForwardClustered *>(p_geometry_instance);
+	const bool draw_ready = RSG::virtual_mesh_storage == nullptr || RSG::virtual_mesh_storage->is_nextgeo_draw_ready() || bool(GLOBAL_GET("rendering/nextgeo/visibility_only"));
+	const bool is_multimesh_or_particles = ginstance->data->base_type == RSE::INSTANCE_MULTIMESH || ginstance->data->base_type == RSE::INSTANCE_PARTICLES;
+
+	struct SurfaceEntry {
+		uint32_t index = 0;
+		bool is_virtual = false;
+		String reason;
+	};
+	LocalVector<SurfaceEntry> ordered;
+	for (const GeometryInstanceSurfaceDataCache *s = ginstance->surface_caches; s != nullptr; s = s->next) {
+		bool found = false;
+		for (uint32_t k = 0; k < ordered.size(); k++) {
+			if (ordered[k].index == s->surface_index) {
+				found = true;
+				break;
+			}
+		}
+		if (found) {
+			continue;
+		}
+		SurfaceEntry entry;
+		entry.index = s->surface_index;
+		if (is_multimesh_or_particles) {
+			entry.is_virtual = false;
+			entry.reason = "MULTIMESH_OR_PARTICLES";
+		} else {
+			entry.is_virtual = ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0) && draw_ready;
+			entry.reason = RendererRD::nextgeo_fallback_name(RendererRD::NextGeoFallback(s->nextgeo_fallback_reason));
+		}
+		ordered.push_back(entry);
+	}
+	for (uint32_t a = 0; a < ordered.size(); a++) {
+		for (uint32_t b = a + 1; b < ordered.size(); b++) {
+			if (ordered[b].index < ordered[a].index) {
+				SWAP(ordered[a], ordered[b]);
+			}
+		}
+	}
+
+	Array surfaces;
+	for (uint32_t i = 0; i < ordered.size(); i++) {
+		Dictionary sd;
+		sd["surface"] = int64_t(ordered[i].index);
+		sd["route"] = ordered[i].is_virtual ? "virtual" : "legacy";
+		sd["reason"] = ordered[i].reason;
+		surfaces.push_back(sd);
+	}
+
+	out["record_index"] = ginstance->nextgeo_record_index == UINT32_MAX ? int64_t(-1) : int64_t(ginstance->nextgeo_record_index);
+	out["surfaces"] = surfaces;
+	if (!ordered.is_empty()) {
+		out["route"] = ordered[0].is_virtual ? "virtual" : "legacy";
+		out["reason"] = ordered[0].reason;
+	} else if (is_multimesh_or_particles) {
+		out["route"] = "legacy";
+		out["reason"] = "MULTIMESH_OR_PARTICLES";
+	} else {
+		out["route"] = "legacy";
+		out["reason"] = "NONE";
+	}
+	return out;
+}
+
 uint32_t RenderForwardClustered::geometry_instance_get_pair_mask() {
 	return (1 << RSE::INSTANCE_VOXEL_GI);
 }
@@ -6031,6 +6320,9 @@ RenderForwardClustered::RenderForwardClustered() {
 	ss_effects = memnew(RendererRD::SSEffects);
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
 	TemporalUpscalerRegistry::initialize_dev_copy_upscaler();
+	if (RSG::virtual_mesh_storage != nullptr) {
+		RSG::virtual_mesh_storage->set_nextgeo_draw_ready(!bool(GLOBAL_GET("rendering/nextgeo/visibility_only")));
+	}
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
@@ -6039,6 +6331,7 @@ RenderForwardClustered::RenderForwardClustered() {
 RenderForwardClustered::~RenderForwardClustered() {
 	next_gi.free_far_field();
 	nextgeo_cut.free_resources();
+	nextgeo_resolve.free_resources();
 	TemporalUpscalerRegistry::shutdown();
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);

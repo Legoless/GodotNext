@@ -60,6 +60,8 @@ struct NextGeoRasterInputs {
 	bool reset_velocity = false;
 	bool reverse_cull = false;
 	bool debug_backface = false;
+	RID bucket_table;
+	uint32_t bucket_table_words = 0;
 };
 
 // GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
@@ -77,6 +79,8 @@ public:
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr);
 	void free_resources();
 
+	RID get_clusters_buffer() const { return clusters; }
+	static void set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote);
 	static Dictionary get_last_stats();
 
 private:

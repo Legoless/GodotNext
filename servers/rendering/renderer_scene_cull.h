@@ -1102,6 +1102,8 @@ public:
 
 	virtual RID instance_allocate();
 	virtual void instance_initialize(RID p_rid);
+	virtual bool is_instance(RID p_instance) const;
+	virtual Dictionary instance_get_virtual_geometry_debug_stats(RID p_instance) const;
 
 	virtual void instance_set_base(RID p_instance, RID p_base);
 	virtual void instance_set_scenario(RID p_instance, RID p_scenario);

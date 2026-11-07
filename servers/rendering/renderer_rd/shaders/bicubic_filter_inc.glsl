@@ -53,6 +53,11 @@ vec4 texture_array_bicubic(texture2DArray tex, vec3 uv, vec2 texture_size) {
 	vec2 p2 = (vec2(iuv.x + h0x, iuv.y + h1y) - vec2(0.5)) * texel_size;
 	vec2 p3 = (vec2(iuv.x + h1x, iuv.y + h1y) - vec2(0.5)) * texel_size;
 
+#ifdef MODE_VISIBILITY_RESOLVE
+	return (g0(fuv.y) * (g0x * textureLod(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p0, uv.z), 0.0) + g1x * textureLod(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p1, uv.z), 0.0))) +
+			(g1(fuv.y) * (g0x * textureLod(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p2, uv.z), 0.0) + g1x * textureLod(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p3, uv.z), 0.0)));
+#else
 	return (g0(fuv.y) * (g0x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p0, uv.z)) + g1x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p1, uv.z)))) +
 			(g1(fuv.y) * (g0x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p2, uv.z)) + g1x * texture(sampler2DArray(tex, SAMPLER_LINEAR_CLAMP), vec3(p3, uv.z))));
+#endif
 }

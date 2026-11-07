@@ -59,6 +59,7 @@ public:
 		int *stencil_reference = nullptr;
 
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> *uniforms = nullptr;
+		bool visibility_resolve = false;
 	};
 
 	struct GeneratedCode {
@@ -90,6 +91,7 @@ public:
 		bool uses_screen_texture = false;
 		bool uses_depth_texture = false;
 		bool uses_normal_roughness_texture = false;
+		bool uses_unsupported_derivative = false;
 	};
 
 	struct DefaultIdentifierActions {
@@ -98,6 +100,11 @@ public:
 		HashMap<StringName, String> stencil_mode_defines;
 		HashMap<StringName, String> usage_defines;
 		HashMap<StringName, String> custom_samplers;
+		HashMap<StringName, Pair<String, String>> resolve_builtin_derivatives;
+		HashMap<StringName, Pair<String, String>> resolve_mutable_builtin_derivatives;
+		HashSet<StringName> resolve_uniform_builtins;
+		HashMap<StringName, String> resolve_renames;
+		HashMap<StringName, String> resolve_vertex_renames;
 		ShaderLanguage::TextureFilter default_filter = ShaderLanguage::TextureFilter::FILTER_NEAREST;
 		ShaderLanguage::TextureRepeat default_repeat = ShaderLanguage::TextureRepeat::REPEAT_DISABLE;
 		int base_texture_binding_index = 0;
@@ -118,6 +125,7 @@ private:
 
 	void _dump_function_deps(const ShaderLanguage::ShaderNode *p_node, const StringName &p_for_func, const HashMap<StringName, String> &p_func_code, String &r_to_add, HashSet<StringName> &added);
 	String _dump_node_code(const ShaderLanguage::Node *p_node, int p_level, GeneratedCode &r_gen_code, IdentifierActions &p_actions, const DefaultIdentifierActions &p_default_actions, bool p_assigning, bool p_scope = true);
+	void _compile_visibility_resolve(GeneratedCode &r_gen_code, IdentifierActions &p_actions, const DefaultIdentifierActions &p_default_actions);
 
 	const ShaderLanguage::ShaderNode *shader = nullptr;
 	const ShaderLanguage::FunctionNode *function = nullptr;

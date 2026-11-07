@@ -94,20 +94,32 @@ void RenderGeometryInstanceBase::set_layer_mask(uint32_t p_layer_mask) {
 }
 
 void RenderGeometryInstanceBase::set_fade_range(bool p_enable_near, float p_near_begin, float p_near_end, bool p_enable_far, float p_far_begin, float p_far_end) {
+	const bool changed = fade_near != p_enable_near || fade_far != p_enable_far;
 	fade_near = p_enable_near;
 	fade_near_begin = p_near_begin;
 	fade_near_end = p_near_end;
 	fade_far = p_enable_far;
 	fade_far_begin = p_far_begin;
 	fade_far_end = p_far_end;
+	if (changed) {
+		_mark_dirty();
+	}
 }
 
 void RenderGeometryInstanceBase::set_parent_fade_alpha(float p_alpha) {
+	const bool was_faded = (force_alpha * parent_fade_alpha) < 0.999f;
 	parent_fade_alpha = p_alpha;
+	if (was_faded != ((force_alpha * parent_fade_alpha) < 0.999f)) {
+		_mark_dirty();
+	}
 }
 
 void RenderGeometryInstanceBase::set_transparency(float p_transparency) {
+	const bool was_faded = (force_alpha * parent_fade_alpha) < 0.999f;
 	force_alpha = CLAMP(1.0 - p_transparency, 0, 1);
+	if (was_faded != ((force_alpha * parent_fade_alpha) < 0.999f)) {
+		_mark_dirty();
+	}
 }
 
 void RenderGeometryInstanceBase::set_use_baked_light(bool p_enable) {

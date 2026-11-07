@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -48,6 +49,7 @@ public:
 		SHADER_GROUP_ADVANCED,
 		SHADER_GROUP_MULTIVIEW,
 		SHADER_GROUP_ADVANCED_MULTIVIEW,
+		SHADER_GROUP_NEXTGEO,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -68,6 +70,14 @@ public:
 		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW = 12;
 		constexpr static uint16_t SHADER_VERSION_NEXTGI_TRANSLUCENCY_MARK = 13;
 		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 14;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_BASE = 14 * 2 + (1 << 5);
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 0;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 1;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 2;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 3;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_MOTION_VECTORS = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 4;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 5;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COUNT = 6;
 	};
 
 	enum ShaderColorPassFlags {
@@ -95,6 +105,9 @@ public:
 		PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW,
 		PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK,
 		PIPELINE_VERSION_COLOR_PASS,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR,
 		PIPELINE_VERSION_MAX
 	};
 
@@ -234,7 +247,7 @@ public:
 
 		RID version;
 
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT;
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -284,6 +297,11 @@ public:
 		bool uses_world_coordinates = false;
 		bool uses_screen_texture_mipmaps = false;
 		bool uses_z_clip_scale = false;
+		bool uses_vertex_lighting = false;
+		bool uses_skip_vertex_transform = false;
+		bool writes_depth = false;
+		bool uses_unsupported_derivative = false;
+		RendererRD::NextGeoFallback nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		RSE::CullMode cull_mode = RSE::CULL_MODE_DISABLED;
 
 		bool stencil_enabled = false;
@@ -321,6 +339,7 @@ public:
 		virtual bool casts_shadows() const;
 		// GodotNext: nextgi_alpha_policy (#61).
 		virtual RendererRD::MaterialStorage::ShaderData::NextGIRTClass get_nextgi_rt_class() const;
+		virtual uint32_t get_nextgeo_fallback() const { return uint32_t(nextgeo_fallback); }
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const;
 		uint16_t _get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const;
@@ -402,8 +421,10 @@ public:
 	void set_default_specialization(const ShaderSpecialization &p_specialization);
 	void enable_multiview_shader_group();
 	void enable_advanced_shader_group(bool p_needs_multiview = false);
+	void enable_nextgeo_shader_group();
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
+	bool is_nextgeo_shader_group_enabled() const;
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 	RID get_default_shader_rd(bool p_is_multiview = false);
 };

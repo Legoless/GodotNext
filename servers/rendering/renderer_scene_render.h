@@ -417,5 +417,6 @@ public:
 	virtual void material_set_use_debanding(bool p_enable) = 0;
 
 	virtual void update() = 0;
+	virtual Dictionary geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const { return Dictionary(); }
 	virtual ~RendererSceneRender() {}
 };

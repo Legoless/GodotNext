@@ -138,6 +138,7 @@ struct VirtualGeometryDesc {
 	Vector<Vector<uint8_t>> root_pages;
 	String ngm_path;
 	uint32_t eligible_surface_mask = 0;
+	uint32_t vertex_layout = 0;
 };
 
 /* STATUS INFORMATION */

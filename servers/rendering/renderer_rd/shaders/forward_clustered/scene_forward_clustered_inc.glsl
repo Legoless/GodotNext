@@ -13,6 +13,10 @@
 #include "../oct_inc.glsl"
 #include "../scene_data_inc.glsl"
 
+#ifdef MODE_VISIBILITY_RESOLVE
+#include "../nextgeo/nextgeo_records_inc.glsl"
+#endif
+
 #if !defined(MODE_RENDER_DEPTH) || defined(MODE_RENDER_MATERIAL) || defined(MODE_RENDER_SDF) || defined(MODE_RENDER_NORMAL_ROUGHNESS) || defined(MODE_RENDER_VOXEL_GI) || defined(TANGENT_USED) || defined(NORMAL_MAP_USED) || defined(BENT_NORMAL_MAP_USED) || defined(LIGHT_ANISOTROPY_USED)
 #ifndef NORMAL_USED
 #define NORMAL_USED
@@ -23,6 +27,15 @@
 #define TANGENT_USED
 #endif
 
+#ifdef MODE_VISIBILITY_RESOLVE
+layout(push_constant, std430) uniform ResolvePush {
+	uint bucket_id;
+	uint material_feedback_index;
+	uint tile_list_base;
+	float cull_sign;
+}
+resolve_push;
+#else
 layout(push_constant, std430) uniform DrawCall {
 	uint instance_index;
 	uint uv_offset;
@@ -36,6 +49,7 @@ layout(push_constant, std430) uniform DrawCall {
 #endif
 }
 draw_call;
+#endif
 
 /* Specialization Constants */
 
@@ -380,10 +394,17 @@ struct InstanceData {
 #endif
 };
 
+#ifdef MODE_VISIBILITY_RESOLVE
+layout(set = 1, binding = 2, std430) buffer restrict readonly LegacyInstanceDataBuffer {
+	InstanceData data[];
+}
+_ng_unused_legacy_instances;
+#else
 layout(set = 1, binding = 2, std430) buffer restrict readonly InstanceDataBuffer {
 	InstanceData data[];
 }
 instances;
+#endif
 
 #ifdef USE_RADIANCE_OCTMAP_ARRAY
 
@@ -559,9 +580,15 @@ vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth, vec3 p_w
 	const float far = nextgi_wrc_fwd.volume.w;
 	float slice = clamp(log(max(p_linear_depth, near) / near) / log(far / near), 0.0, 1.0);
 	vec3 coord = vec3(p_screen_uv, slice);
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec4 red = textureLod(sampler3D(nextgi_translucency_r, SAMPLER_LINEAR_CLAMP), coord, 0.0);
+	vec4 green = textureLod(sampler3D(nextgi_translucency_g, SAMPLER_LINEAR_CLAMP), coord, 0.0);
+	vec4 blue = textureLod(sampler3D(nextgi_translucency_b, SAMPLER_LINEAR_CLAMP), coord, 0.0);
+#else
 	vec4 red = texture(sampler3D(nextgi_translucency_r, SAMPLER_LINEAR_CLAMP), coord);
 	vec4 green = texture(sampler3D(nextgi_translucency_g, SAMPLER_LINEAR_CLAMP), coord);
 	vec4 blue = texture(sampler3D(nextgi_translucency_b, SAMPLER_LINEAR_CLAMP), coord);
+#endif
 	vec3 direction = normalize(p_world_direction);
 	vec3 irradiance = vec3(red.r, green.r, blue.r);
 	irradiance += direction.x * vec3(red.g, green.g, blue.g);
@@ -587,9 +614,57 @@ vec3 nextgi_wrc_translucency_sh(vec3 p_world) {
 
 /* Set 2 Skeleton & Instancing (can change per item) */
 
+#ifdef MODE_VISIBILITY_RESOLVE
+
+layout(set = 2, binding = 0) uniform utexture2D nextgeo_visibility_tex;
+
+layout(set = 2, binding = 1, std430) restrict readonly buffer NextGeoVisibleClusters {
+	uvec2 data[];
+}
+nextgeo_visible_clusters;
+
+layout(set = 2, binding = 2, std430) restrict readonly buffer NextGeoRecords {
+	NextGeoInstanceRecord data[];
+}
+nextgeo_records;
+
+layout(set = 2, binding = 3, std430) restrict readonly buffer NextGeoMeshes {
+	NextGeoMeshRecord data[];
+}
+nextgeo_meshes;
+
+layout(set = 2, binding = 4, std430) restrict readonly buffer NextGeoClusterTable {
+	uvec4 data[];
+}
+nextgeo_cluster_table;
+
+layout(set = 2, binding = 5, std430) restrict readonly buffer NextGeoPages {
+	uint data[];
+}
+nextgeo_pages;
+
+layout(set = 2, binding = 6, std430) restrict readonly buffer NextGeoBucketTable {
+	uint data[];
+}
+nextgeo_bucket_table;
+
+layout(set = 2, binding = 7, std430) restrict readonly buffer NextGeoTileList {
+	uint data[];
+}
+nextgeo_tile_list;
+
+layout(set = 2, binding = 8, std430) restrict readonly buffer InstanceDataBuffer {
+	InstanceData data[];
+}
+instances;
+
+#else
+
 layout(set = 2, binding = 0, std430) restrict readonly buffer Transforms {
 	vec4 data[];
 }
 transforms;
+
+#endif
 
 /* Set 3 User Material */

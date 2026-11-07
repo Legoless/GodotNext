@@ -74,6 +74,9 @@ public:
 	virtual void pair_voxel_gi_instances(const RID *p_voxel_gi_instances, uint32_t p_voxel_gi_instance_count) = 0;
 
 	virtual void set_softshadow_projector_pairing(bool p_softshadow, bool p_projector) = 0;
+
+	// GodotNext: nextgeo_resolve (#80)
+	virtual void set_nextgeo_record_index(uint32_t p_index) {}
 };
 
 // Base implementation of RenderGeometryInstance shared by internal renderers.
@@ -114,6 +117,9 @@ public:
 	// GodotNext: nextgi_rt_scene
 	// First of this instance's contiguous NextGI part records; UINT32_MAX when not in the RT scene.
 	uint32_t nextgi_record_index = UINT32_MAX;
+
+	// GodotNext: nextgeo_resolve (#80)
+	uint32_t nextgeo_record_index = UINT32_MAX;
 
 	struct Data {
 		//data used less often goes into regular heap
@@ -157,4 +163,13 @@ public:
 
 	virtual Transform3D get_transform() override;
 	virtual AABB get_aabb() override;
+
+	virtual void set_nextgeo_record_index(uint32_t p_index) override {
+		if (nextgeo_record_index != p_index) {
+			nextgeo_record_index = p_index;
+			if (p_index != UINT32_MAX) {
+				_mark_dirty();
+			}
+		}
+	}
 };

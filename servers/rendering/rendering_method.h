@@ -85,6 +85,8 @@ public:
 
 	virtual RID instance_allocate() = 0;
 	virtual void instance_initialize(RID p_rid) = 0;
+	virtual bool is_instance(RID p_instance) const { return false; }
+	virtual Dictionary instance_get_virtual_geometry_debug_stats(RID p_instance) const { return Dictionary(); }
 
 	virtual void instance_set_base(RID p_instance, RID p_base) = 0;
 	virtual void instance_set_scenario(RID p_instance, RID p_scenario) = 0;

@@ -575,8 +575,9 @@ public:
 	virtual Dictionary viewport_get_scaling_3d_status(RID p_viewport) = 0;
 	virtual void viewport_reset_temporal_history(RID p_viewport) = 0;
 	RSE::ViewportScaling3DReason scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode);
-	// GodotNext: nextgeo_gpu_cull (#76). Per-stage cut counters and cut hash.
-	Dictionary virtual_geometry_get_debug_stats(RID p_viewport);
+	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80). Per-stage cut
+	// and resolve counters for a viewport, or per-surface routing for an instance.
+	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID());
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_texture_mipmap_bias(RID p_viewport, float p_texture_mipmap_bias) = 0;

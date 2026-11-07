@@ -113,7 +113,7 @@ void main() {
 	}
 	uvec2 entry = level_input.data[index];
 	NextGeoInstanceRecord record = instances.data[entry.x];
-	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u) {
+	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || record.virtual_mesh == 0xFFFFFFFFu) {
 		return;
 	}
 	NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
@@ -157,7 +157,13 @@ void main() {
 	}
 	uvec2 entry = level_input.data[index];
 	NextGeoInstanceRecord record = instances.data[entry.x];
+	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || record.virtual_mesh == 0xFFFFFFFFu) {
+		return;
+	}
 	NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+	if (mesh.bvh_level_count == 0u || mesh.bvh_node_offset == 0u) {
+		return;
+	}
 	const uint base = mesh.bvh_node_offset + entry.y * 80u;
 	vec4 lod_sphere = vec4(dag_float(base), dag_float(base + 4u), dag_float(base + 8u), dag_float(base + 12u));
 	float max_parent_error = dag_float(base + 16u);

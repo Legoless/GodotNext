@@ -97,6 +97,7 @@ public:
 	virtual void mesh_debug_usage(List<RenderingServerTypes::MeshInfo> *r_info) = 0;
 
 	virtual bool mesh_needs_instance(RID p_mesh, bool p_has_skeleton) = 0;
+	virtual void mesh_notify_dependency_changed(RID p_mesh) {}
 
 	/* MESH INSTANCE */
 

@@ -62,9 +62,14 @@ layout(set = 0, binding = 5, std430) buffer restrict readonly RasterParams {
 	uint visible_capacity;
 	uint reset_velocity;
 	float cull_sign;
-	uint pad0;
+	uint bucket_table_words;
 }
 raster;
+
+layout(set = 0, binding = 6, std430) buffer restrict readonly BucketTable {
+	uint data[];
+}
+bucket_table;
 
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
@@ -108,15 +113,58 @@ void main() {
 	uint stride = desc.z & 0xFFu;
 	uint vert_count = (desc.z >> 8u) & 0xFFu;
 	uint tri_count = (desc.z >> 16u) & 0xFFu;
-	if (t >= tri_count || stride < 3u || vert_count == 0u) {
+	uint surface_id = desc.w & 0xFFFFu;
+	if (t >= tri_count || stride < 3u || vert_count == 0u || surface_id >= 32u || (record.surface_mask & (1u << surface_id)) == 0u) {
 		collapse_triangle();
 		return;
 	}
 
+	uint bucket_flags = 0u;
+	if (raster.bucket_table_words > 0u) {
+		uint bucket_slot = record.bucket_base + surface_id;
+		if (bucket_slot >= raster.bucket_table_words) {
+			collapse_triangle();
+			return;
+		}
+		uint bucket_word = bucket_table.data[bucket_slot];
+		if ((bucket_word & 0x00FFFFFFu) == 0x00FFFFFFu) {
+			collapse_triangle();
+			return;
+		}
+		bucket_flags = bucket_word;
+	}
+
 #ifndef DEBUG_BACKFACE
-	mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
-	if (determinant(basis) * raster.cull_sign < 0.0 && corner != 0u) {
-		corner = 3u - corner;
+	if ((bucket_flags & (1u << 24u)) != 0u) {
+		// NEXTGEO_BUCKET_CULL_DISABLED: orient the triangle clockwise in clip space so both faces pass POLYGON_CULL_BACK.
+		vec4 tri_clip[3];
+		for (uint c = 0u; c < 3u; c++) {
+			uint ib = desc.y + t * 3u + c;
+			uint vi = (pages.data[ib >> 2u] >> ((ib & 3u) * 8u)) & 0xFFu;
+			if (vi >= vert_count) {
+				collapse_triangle();
+				return;
+			}
+			uint pw = desc.x + vi * stride;
+			vec3 lp = vec3(
+					uintBitsToFloat(pages.data[pw + 0u]),
+					uintBitsToFloat(pages.data[pw + 1u]),
+					uintBitsToFloat(pages.data[pw + 2u]));
+			vec3 wp = vec3(
+					dot(record.transform[0].xyz, lp) + record.transform[0].w,
+					dot(record.transform[1].xyz, lp) + record.transform[1].w,
+					dot(record.transform[2].xyz, lp) + record.transform[2].w);
+			tri_clip[c] = raster.proj * (raster.view * vec4(wp, 1.0));
+		}
+		if (determinant(mat3(tri_clip[0].xyw, tri_clip[1].xyw, tri_clip[2].xyw)) < 0.0 && corner != 0u) {
+			corner = 3u - corner;
+		}
+	} else {
+		float effective_cull_sign = ((bucket_flags & (1u << 25u)) != 0u) ? -raster.cull_sign : raster.cull_sign;
+		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
+		if (determinant(basis) * effective_cull_sign < 0.0 && corner != 0u) {
+			corner = 3u - corner;
+		}
 	}
 #endif
 
@@ -184,9 +232,14 @@ layout(set = 0, binding = 5, std430) buffer restrict readonly RasterParams {
 	uint visible_capacity;
 	uint reset_velocity;
 	float cull_sign;
-	uint pad0;
+	uint bucket_table_words;
 }
 raster;
+
+layout(set = 0, binding = 6, std430) buffer restrict readonly BucketTable {
+	uint data[];
+}
+bucket_table;
 
 void main() {
 	visibility_out = vis_id_in;

@@ -33,6 +33,7 @@
 #include "core/io/file_access.h"
 #include "core/io/resource_format_ngm.h"
 #include "core/math/math_funcs.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 #ifdef REAL_T_IS_DOUBLE
 static_assert(sizeof(RendererVirtualMeshStorage::Record) == 256, "NextGeo instance record must stay 256 bytes under REAL_T_IS_DOUBLE (plan §6.3).");
@@ -67,16 +68,43 @@ uint32_t _ngm_vertex_float_stride(uint32_t p_vertex_layout) {
 	return stride;
 }
 
+uint32_t _infer_vertex_layout_from_stride(uint32_t p_stride) {
+	switch (p_stride) {
+		case 3:
+			return 0x01u;
+		case 5:
+			return 0x09u;
+		case 6:
+			return 0x03u;
+		case 7:
+			return 0x21u;
+		case 8:
+			return 0x0Bu;
+		case 10:
+			return 0x07u;
+		case 12:
+			return 0x0Fu;
+		case 14:
+			return 0x1Fu;
+		case 16:
+			return 0x2Fu;
+		default:
+			return p_stride >= 18 ? 0x3Fu : 0x01u;
+	}
+}
+
 static constexpr uint32_t MAX_EAGER_PAGE_ARENA_BYTES = 128u * 1024u * 1024u;
 
-void _collect_mesh_pages(const RenderingServerTypes::VirtualGeometryDesc &p_desc, uint32_t p_used_bytes, Vector<Vector<uint8_t>> &r_pages, uint32_t &r_layout_stride) {
+void _collect_mesh_pages(const RenderingServerTypes::VirtualGeometryDesc &p_desc, uint32_t p_used_bytes, Vector<Vector<uint8_t>> &r_pages, uint32_t &r_layout_stride, uint32_t &r_vertex_layout) {
 	r_pages.clear();
 	r_layout_stride = 0;
+	r_vertex_layout = p_desc.vertex_layout;
 	if (!p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
 		Ref<NGMFile> ngm;
 		ngm.instantiate();
 		if (ngm->open(p_desc.ngm_path) == OK && ngm->get_page_count() > 0) {
-			r_layout_stride = _ngm_vertex_float_stride(ngm->get_header().vertex_layout);
+			r_vertex_layout = ngm->get_header().vertex_layout;
+			r_layout_stride = _ngm_vertex_float_stride(r_vertex_layout);
 			const uint32_t page_count = ngm->get_page_count();
 			uint64_t running_bytes = uint64_t(p_used_bytes);
 			if (running_bytes < uint64_t(MAX_EAGER_PAGE_ARENA_BYTES)) {
@@ -99,6 +127,9 @@ void _collect_mesh_pages(const RenderingServerTypes::VirtualGeometryDesc &p_desc
 				r_pages.clear();
 			}
 		}
+	}
+	if (r_layout_stride == 0 && r_vertex_layout != 0) {
+		r_layout_stride = _ngm_vertex_float_stride(r_vertex_layout);
 	}
 	r_pages = p_desc.root_pages;
 }
@@ -151,7 +182,7 @@ void _compute_page_cluster_bases(const Vector<uint8_t> &p_dag, uint32_t p_first_
 	}
 }
 
-void _pack_page_and_cluster_blobs(const Vector<Vector<uint8_t>> &p_pages, const Vector<uint8_t> &p_dag, uint32_t p_first_cluster, uint32_t p_expected_clusters, uint32_t p_layout_stride, uint32_t p_page_base_bytes, uint32_t p_blob_bytes, Vector<uint8_t> &r_page_blob, Vector<uint8_t> &r_cluster_blob) {
+void _pack_page_and_cluster_blobs(const Vector<Vector<uint8_t>> &p_pages, const Vector<uint8_t> &p_dag, uint32_t p_first_cluster, uint32_t p_expected_clusters, uint32_t p_layout_stride, uint32_t p_vertex_layout, uint32_t p_page_base_bytes, uint32_t p_blob_bytes, Vector<uint8_t> &r_page_blob, Vector<uint8_t> &r_cluster_blob) {
 	r_page_blob.resize(int(p_blob_bytes));
 	if (p_blob_bytes > 0) {
 		memset(r_page_blob.ptrw(), 0, p_blob_bytes);
@@ -191,6 +222,7 @@ void _pack_page_and_cluster_blobs(const Vector<Vector<uint8_t>> &p_pages, const 
 		if (uint64_t(page_vertices) * uint64_t(stride) * 4ull != vertex_bytes) {
 			continue;
 		}
+		const uint32_t vertex_layout = p_vertex_layout != 0 ? p_vertex_layout : _infer_vertex_layout_from_stride(stride);
 		memcpy(r_page_blob.ptrw() + cursor, raw.ptr(), raw.size());
 		const uint32_t page_global = p_page_base_bytes + cursor;
 		const uint32_t page_vert_bytes = page_global + 16u + page_clusters * 80u;
@@ -213,7 +245,7 @@ void _pack_page_and_cluster_blobs(const Vector<Vector<uint8_t>> &p_pages, const 
 			RendererVirtualMeshStorage::ClusterGPUDesc desc;
 			desc.pos_word_offset = (page_vert_bytes >> 2u) + vertex_offset * stride;
 			desc.tri_byte_offset = page_tri_bytes + triangle_offset * 3u;
-			desc.stride_and_counts = (stride & 0xFFu) | (uint32_t(vertex_count) << 8u) | (uint32_t(triangle_count) << 16u);
+			desc.stride_and_counts = (stride & 0xFFu) | (uint32_t(vertex_count) << 8u) | (uint32_t(triangle_count) << 16u) | ((vertex_layout & 0xFFu) << 24u);
 			desc.surface_and_page = uint32_t(surface_id) | (uint32_t(page) << 16u);
 			descs[base_cluster + i] = desc;
 		}
@@ -562,14 +594,15 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	}
 	Vector<Vector<uint8_t>> raw_pages;
 	uint32_t layout_stride = 0;
-	_collect_mesh_pages(p_desc, page_used, raw_pages, layout_stride);
+	uint32_t vertex_layout = 0;
+	_collect_mesh_pages(p_desc, page_used, raw_pages, layout_stride, vertex_layout);
 	uint32_t valid_pages = 0;
 	uint32_t total_clusters = 0;
 	const uint32_t page_blob_bytes = _measure_page_blob_size(raw_pages, valid_pages, total_clusters);
 	if (page_blob_bytes > 0 && total_clusters > 0) {
 		const uint32_t page_offset = _alloc_pages(page_blob_bytes);
 		if (page_offset != UINT32_MAX) {
-			_pack_page_and_cluster_blobs(raw_pages, p_desc.dag_header, info.record.cluster_offset, info.record.cluster_count, layout_stride, page_offset, page_blob_bytes, info.page_blob, info.cluster_blob);
+			_pack_page_and_cluster_blobs(raw_pages, p_desc.dag_header, info.record.cluster_offset, info.record.cluster_count, layout_stride, vertex_layout, page_offset, page_blob_bytes, info.page_blob, info.cluster_blob);
 			const uint32_t cluster_bytes = uint32_t(info.cluster_blob.size());
 			const uint32_t cluster_offset = cluster_bytes > 0 ? _alloc_clusters(cluster_bytes) : UINT32_MAX;
 			if (cluster_offset != UINT32_MAX) {
@@ -607,14 +640,21 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		records[slot].surface_mask = p_desc.eligible_surface_mask;
 		_mark_dirty(slot);
 	}
+	if (RSG::mesh_storage != nullptr) {
+		RSG::mesh_storage->mesh_notify_dependency_changed(p_mesh);
+	}
 }
 
 void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_t p_reason) {
 	ERR_FAIL_COND(p_mesh.is_null());
 	const uint32_t *index = mesh_indices.getptr(p_mesh);
 	if (index == nullptr) {
+		if (p_reason != RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_NONE) {
+			mesh_clear_reasons[p_mesh] = p_reason;
+		}
 		return;
 	}
+	mesh_records[*index] = MeshRecord();
 	mesh_record_dirty[*index] = 1;
 	mesh_records_dirty = true;
 	MeshInfo *info = meshes.getptr(p_mesh);
@@ -634,7 +674,14 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	}
 	// Keep the reason for the routing fallback overlay (#79); the record store
 	// only needs to know the mesh is gone.
-	mesh_clear_reasons[p_mesh] = p_reason;
+	if (p_reason != RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_NONE) {
+		mesh_clear_reasons[p_mesh] = p_reason;
+	} else {
+		mesh_clear_reasons.erase(p_mesh);
+	}
+	if (RSG::mesh_storage != nullptr) {
+		RSG::mesh_storage->mesh_notify_dependency_changed(p_mesh);
+	}
 }
 
 bool RendererVirtualMeshStorage::mesh_has_virtual_geometry(RID p_mesh) const {
@@ -671,6 +718,7 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 
 	Record &record = records[slot];
 	record = Record();
+	record.bucket_base = slot * 32u;
 	SlotState &state = slot_states[slot];
 	state.allocated = true;
 	state.dirty = true;
@@ -788,6 +836,17 @@ void RendererVirtualMeshStorage::instance_record_set_gi_flags(uint32_t p_record,
 		return;
 	}
 	records[p_record].gi_flags = p_gi_flags;
+	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	if (records[p_record].surface_mask == p_surface_mask) {
+		return;
+	}
+	records[p_record].surface_mask = p_surface_mask;
 	_mark_dirty(p_record);
 }
 

@@ -83,6 +83,11 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_world_coordinates = false;
 	uses_particle_trails = false;
 	uses_z_clip_scale = false;
+	uses_vertex_lighting = false;
+	uses_skip_vertex_transform = false;
+	writes_depth = false;
+	uses_unsupported_derivative = false;
+	nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 
 	int depth_drawi = DEPTH_DRAW_OPAQUE;
 
@@ -121,6 +126,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["wireframe"] = &wireframe;
 	actions.render_mode_flags["particle_trails"] = &uses_particle_trails;
 	actions.render_mode_flags["world_vertex_coords"] = &uses_world_coordinates;
+	actions.render_mode_flags["vertex_lighting"] = &uses_vertex_lighting;
+	actions.render_mode_flags["skip_vertex_transform"] = &uses_skip_vertex_transform;
 
 	actions.usage_flag_pointers["ALPHA"] = &uses_alpha;
 	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &uses_alpha_clip;
@@ -156,6 +163,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.write_flag_pointers["TANGENT"] = &writes_tangent;
 	actions.write_flag_pointers["BINORMAL"] = &writes_tangent;
 	actions.write_flag_pointers["Z_CLIP_SCALE"] = &uses_z_clip_scale;
+	actions.write_flag_pointers["DEPTH"] = &writes_depth;
+
+	actions.visibility_resolve = true;
 
 	actions.stencil_mode_values["read"] = Pair<int *, int>(&stencil_readi, STENCIL_FLAG_READ);
 	actions.stencil_mode_values["write"] = Pair<int *, int>(&stencil_writei, STENCIL_FLAG_WRITE);
@@ -247,6 +257,23 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	}
 
 	uses_blend_alpha = blend_mode_uses_blend_alpha(BlendMode(blend_mode));
+	uses_unsupported_derivative = gen_code.uses_unsupported_derivative;
+
+	// GodotNext: nextgeo_resolve (#80, plan §7.4). Classify material-level NextGeo fallback reason.
+	const bool force_vertex_shading = GLOBAL_GET_CACHED(bool, "rendering/shading/overrides/force_vertex_shading");
+	if (stencil_enabled) {
+		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY;
+	} else if (uses_vertex_lighting || force_vertex_shading) {
+		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_VERTEX_LIGHTING;
+	} else if (uses_alpha_pass() || uses_alpha_clip || uses_discard || uses_alpha_antialiasing || alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF) {
+		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_ALPHA;
+	} else if (uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform || uses_z_clip_scale || uses_point_size || uses_particle_trails || wireframe || writes_depth) {
+		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER;
+	} else if (uses_unsupported_derivative) {
+		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE;
+	} else {
+		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+	}
 }
 
 bool SceneShaderForwardClustered::ShaderData::is_animated() const {
@@ -343,6 +370,22 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
 		} break;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR: {
+			const bool sep_spec = (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_SEPARATE_SPECULAR) != 0;
+			const bool motion = (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS) != 0;
+			if (sep_spec && motion) {
+				return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS;
+			} else if (motion) {
+				return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_MOTION_VECTORS;
+			} else if (sep_spec) {
+				return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR;
+			}
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COLOR;
+		} break;
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -385,7 +428,11 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		}
 	}
 
-	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK) {
+	const bool is_visibility_resolve = p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES ||
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI ||
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR;
+
+	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || is_visibility_resolve) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
 	}
 	bool use_stencil = stencil_enabled && p_pipeline_key.version == PIPELINE_VERSION_COLOR_PASS;
@@ -440,18 +487,20 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		RD::RENDER_PRIMITIVE_TRIANGLE_STRIPS,
 	};
 
-	bool emulate_point_size_flag = uses_point_size && SceneShaderForwardClustered::singleton->emulate_point_size;
+	bool emulate_point_size_flag = uses_point_size && !is_visibility_resolve && SceneShaderForwardClustered::singleton->emulate_point_size;
 
 	RD::RenderPrimitive primitive_rd;
-	if (uses_point_size) {
+	if (is_visibility_resolve) {
+		primitive_rd = RD::RENDER_PRIMITIVE_TRIANGLES;
+	} else if (uses_point_size) {
 		primitive_rd = emulate_point_size_flag ? RD::RENDER_PRIMITIVE_TRIANGLES : RD::RENDER_PRIMITIVE_POINTS;
 	} else {
 		primitive_rd = primitive_rd_table[p_pipeline_key.primitive_type];
 	}
 
 	RD::PipelineRasterizationState raster_state;
-	raster_state.cull_mode = p_pipeline_key.cull_mode;
-	raster_state.wireframe = wireframe || p_pipeline_key.wireframe;
+	raster_state.cull_mode = is_visibility_resolve ? RD::POLYGON_CULL_DISABLED : p_pipeline_key.cull_mode;
+	raster_state.wireframe = is_visibility_resolve ? false : (wireframe || p_pipeline_key.wireframe);
 
 	RD::PipelineMultisampleState multisample_state;
 	multisample_state.sample_count = RD::get_singleton()->framebuffer_format_get_texture_samples(p_pipeline_key.framebuffer_format_id, 0);
@@ -504,6 +553,15 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL:
 				// Writes to normal and roughness in opaque way.
 				blend_state = RD::PipelineColorBlendState::create_disabled(5);
+				break;
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES:
+				blend_state = RD::PipelineColorBlendState::create_disabled(2);
+				break;
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI:
+				blend_state = RD::PipelineColorBlendState::create_disabled(3);
+				break;
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR:
+				blend_state = blend_state_color_opaque;
 				break;
 			case PIPELINE_VERSION_DEPTH_PASS:
 			case PIPELINE_VERSION_DEPTH_PASS_DP:
@@ -736,6 +794,14 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 			shader_versions.push_back(ShaderRD::VariantDefine(group, version, false));
 		}
+
+		// GodotNext: nextgeo_resolve (#80). Stage A guide variants and Stage B opaque color variants.
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_COLOR
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_MOTION_VECTORS
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
@@ -972,6 +1038,45 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 		actions.check_multiview_samplers = true;
 
+		// GodotNext: nextgeo_resolve (#80). Analytic derivative bindings for MODE_VISIBILITY_RESOLVE.
+		actions.resolve_builtin_derivatives["VERTEX"] = Pair<String, String>("vertex_interp_ddx", "vertex_interp_ddy");
+		actions.resolve_builtin_derivatives["UV"] = Pair<String, String>("uv_interp_ddx", "uv_interp_ddy");
+		actions.resolve_builtin_derivatives["UV2"] = Pair<String, String>("uv2_interp_ddx", "uv2_interp_ddy");
+		actions.resolve_builtin_derivatives["COLOR"] = Pair<String, String>("color_interp_ddx", "color_interp_ddy");
+		actions.resolve_builtin_derivatives["VIEW"] = Pair<String, String>("view_ddx", "view_ddy");
+		actions.resolve_builtin_derivatives["SCREEN_UV"] = Pair<String, String>("vec2(scene_data_block.data.screen_pixel_size.x, 0.0)", "vec2(0.0, scene_data_block.data.screen_pixel_size.y)");
+		actions.resolve_builtin_derivatives["FRAGCOORD"] = Pair<String, String>("_ng_fragcoord_ddx", "_ng_fragcoord_ddy");
+		actions.resolve_builtin_derivatives["POINT_COORD"] = Pair<String, String>("vec2(0.0)", "vec2(0.0)");
+
+		actions.resolve_mutable_builtin_derivatives["NORMAL"] = Pair<String, String>("normal_interp_ddx", "normal_interp_ddy");
+		actions.resolve_mutable_builtin_derivatives["TANGENT"] = Pair<String, String>("tangent_interp_ddx", "tangent_interp_ddy");
+		actions.resolve_mutable_builtin_derivatives["BINORMAL"] = Pair<String, String>("binormal_interp_ddx", "binormal_interp_ddy");
+
+		actions.resolve_uniform_builtins.insert("TIME");
+		actions.resolve_uniform_builtins.insert("EXPOSURE");
+		actions.resolve_uniform_builtins.insert("PI");
+		actions.resolve_uniform_builtins.insert("TAU");
+		actions.resolve_uniform_builtins.insert("E");
+		actions.resolve_uniform_builtins.insert("CLIP_SPACE_FAR");
+		actions.resolve_uniform_builtins.insert("VIEWPORT_SIZE");
+		actions.resolve_uniform_builtins.insert("NODE_POSITION_WORLD");
+		actions.resolve_uniform_builtins.insert("CAMERA_POSITION_WORLD");
+		actions.resolve_uniform_builtins.insert("CAMERA_DIRECTION_WORLD");
+		actions.resolve_uniform_builtins.insert("NODE_POSITION_VIEW");
+		actions.resolve_uniform_builtins.insert("EYE_OFFSET");
+		actions.resolve_uniform_builtins.insert("MODEL_MATRIX");
+		actions.resolve_uniform_builtins.insert("MODEL_NORMAL_MATRIX");
+		actions.resolve_uniform_builtins.insert("VIEW_MATRIX");
+		actions.resolve_uniform_builtins.insert("INV_VIEW_MATRIX");
+		actions.resolve_uniform_builtins.insert("PROJECTION_MATRIX");
+		actions.resolve_uniform_builtins.insert("INV_PROJECTION_MATRIX");
+		actions.resolve_uniform_builtins.insert("MAIN_CAM_INV_VIEW_MATRIX");
+
+		actions.resolve_renames["FRONT_FACING"] = "_ng_front_facing";
+		actions.resolve_renames["FRAGCOORD"] = "_ng_fragcoord";
+		actions.resolve_vertex_renames["VERTEX_ID"] = "_ng_vertex_id";
+		actions.resolve_vertex_renames["INSTANCE_ID"] = "_ng_instance_id";
+
 		compiler.initialize(actions);
 	}
 
@@ -1094,6 +1199,10 @@ void SceneShaderForwardClustered::enable_advanced_shader_group(bool p_needs_mult
 	shader.enable_group(SHADER_GROUP_ADVANCED);
 }
 
+void SceneShaderForwardClustered::enable_nextgeo_shader_group() {
+	shader.enable_group(SHADER_GROUP_NEXTGEO);
+}
+
 bool SceneShaderForwardClustered::is_multiview_shader_group_enabled() const {
 	return shader.is_group_enabled(SHADER_GROUP_MULTIVIEW);
 }
@@ -1104,6 +1213,10 @@ bool SceneShaderForwardClustered::is_advanced_shader_group_enabled(bool p_multiv
 	} else {
 		return shader.is_group_enabled(SHADER_GROUP_ADVANCED);
 	}
+}
+
+bool SceneShaderForwardClustered::is_nextgeo_shader_group_enabled() const {
+	return shader.is_group_enabled(SHADER_GROUP_NEXTGEO);
 }
 
 uint32_t SceneShaderForwardClustered::get_pipeline_compilations(RSE::PipelineSource p_source) {

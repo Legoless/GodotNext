@@ -327,8 +327,13 @@ void ltc_evaluate_specular(vec3 normal, vec3 eye_vec, float roughness, vec3 poin
 	const float LTC_LUT_SIZE = float(64.0);
 	vec2 lut_pos = vec2(max(roughness, float(0.02)), theta / float(0.5 * M_PI));
 	vec2 lut_uv = vec2(lut_pos * (float(63.0) / LTC_LUT_SIZE) + vec2(float(0.5) / LTC_LUT_SIZE)); // offset by 1 pixel
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec4 M_brdf_abcd = textureLod(sampler2D(ltc_lut1, lut_sampler), lut_uv, 0.0);
+	vec3 M_brdf_e_mag_fres = textureLod(sampler2D(ltc_lut2, lut_sampler), lut_uv, 0.0).xyz;
+#else
 	vec4 M_brdf_abcd = texture(sampler2D(ltc_lut1, lut_sampler), lut_uv);
 	vec3 M_brdf_e_mag_fres = texture(sampler2D(ltc_lut2, lut_sampler), lut_uv).xyz;
+#endif
 	float scale = 1.0 / (M_brdf_abcd.x * M_brdf_e_mag_fres.x - M_brdf_abcd.y * M_brdf_abcd.w);
 
 	mat3 M_inv = mat3(

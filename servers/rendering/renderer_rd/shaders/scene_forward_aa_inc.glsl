@@ -10,8 +10,13 @@ float hash_3d(vec3 p) {
 }
 
 half compute_alpha_hash_threshold(vec3 pos, float hash_scale) {
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec3 dx = vec3(0.0);
+	vec3 dy = vec3(0.0);
+#else
 	vec3 dx = dFdx(pos);
 	vec3 dy = dFdy(pos);
+#endif
 
 	float delta_max_sqr = max(length(dx), length(dy));
 	float pix_scale = 1.0 / (hash_scale * delta_max_sqr);
@@ -43,15 +48,24 @@ half compute_alpha_hash_threshold(vec3 pos, float hash_scale) {
 #ifdef ALPHA_ANTIALIASING_EDGE_USED
 
 half calc_mip_level(vec2 texture_coord) {
+#ifdef MODE_VISIBILITY_RESOLVE
+	vec2 dx = vec2(0.0);
+	vec2 dy = vec2(0.0);
+#else
 	vec2 dx = dFdx(texture_coord);
 	vec2 dy = dFdy(texture_coord);
+#endif
 	float delta_max_sqr = max(dot(dx, dx), dot(dy, dy));
 	return max(half(0.0), half(0.5) * half(log2(delta_max_sqr)));
 }
 
 half compute_alpha_antialiasing_edge(half input_alpha, vec2 texture_coord, half alpha_edge) {
 	input_alpha *= half(1.0) + calc_mip_level(texture_coord) * half(0.25);
+#ifdef MODE_VISIBILITY_RESOLVE
+	input_alpha = (input_alpha - alpha_edge) / half(0.0001) + half(0.5);
+#else
 	input_alpha = (input_alpha - alpha_edge) / max(fwidth(input_alpha), half(0.0001)) + half(0.5);
+#endif
 	return clamp(input_alpha, half(0.0), half(1.0));
 }
 
