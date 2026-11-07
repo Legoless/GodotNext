@@ -308,9 +308,10 @@ struct NextGISrcSchedulePage {
 	float priority = 0.0f;
 	bool dirty_direct = false;
 	bool near_dirty = false;
+	bool far_field = false;
 };
 
-// Stream 2 (dirty, highest priority first), then stream 3 (near a dirty region, at most 1/16 of the pages), then the oldest pages. Stops at either cap.
+// Stream 2 (dirty, highest priority first), then stream 3 (near a dirty region, at most 1/16 of the pages), then the oldest near pages and far pages. Stops at either cap.
 uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint32_t p_count, uint32_t p_texel_cap, uint32_t p_ray_cap, uint32_t *r_indices, uint32_t p_capacity);
 
 } // namespace RendererRD

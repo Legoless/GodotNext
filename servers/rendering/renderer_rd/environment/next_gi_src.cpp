@@ -41,6 +41,7 @@
 #include "core/variant/variant.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -334,6 +335,24 @@ bool NextGIShelfPacker::allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_
 	if (p_width > width || p_height > height) {
 		return false;
 	}
+	for (uint32_t i = 0; i < free_rects.size(); i++) {
+		const Rect2i &free = free_rects[i];
+		if (free.size.x < int(p_width) || free.size.y < int(p_height)) {
+			continue;
+		}
+		r_rect = Rect2i(free.position, Vector2i(int(p_width), int(p_height)));
+		const Rect2i right(free.position.x + int(p_width), free.position.y, free.size.x - int(p_width), free.size.y);
+		const Rect2i bottom(free.position.x, free.position.y + int(p_height), free.size.x, free.size.y - int(p_height));
+		free_rects.remove_at(i);
+		if (right.size.x > 0) {
+			free_rects.push_back(right);
+		}
+		if (bottom.size.y > 0) {
+			free_rects.push_back(bottom);
+		}
+		used_texels += uint64_t(p_width) * p_height;
+		return true;
+	}
 	for (Shelf &shelf : shelves) {
 		// The shelf must be tall enough, and the rect must fit what is left of its width (the
 		// gutter may run past the atlas edge).
@@ -393,13 +412,69 @@ bool NextGIShelfPacker::allocate_all(const LocalVector<Vector2i> &p_sizes, Local
 	return true;
 }
 
+void NextGIShelfPacker::free(const Rect2i &p_rect) {
+	if (p_rect.size.x <= 0 || p_rect.size.y <= 0) {
+		return;
+	}
+	used_texels -= MIN(used_texels, uint64_t(p_rect.size.x) * uint64_t(p_rect.size.y));
+	Rect2i rect = p_rect;
+	for (uint32_t i = 0; i < free_rects.size();) {
+		const Rect2i &other = free_rects[i];
+		if (other.position.y != rect.position.y || other.size.y != rect.size.y) {
+			i++;
+			continue;
+		}
+		if (other.position.x + other.size.x == rect.position.x) {
+			rect.position.x = other.position.x;
+			rect.size.x += other.size.x;
+			free_rects.remove_at(i);
+		} else if (rect.position.x + rect.size.x == other.position.x) {
+			rect.size.x += other.size.x;
+			free_rects.remove_at(i);
+		} else {
+			i++;
+		}
+	}
+	free_rects.push_back(rect);
+}
+
 void NextGIShelfPacker::reset() {
 	top = 0;
 	used_texels = 0;
 	shelves.clear();
+	free_rects.clear();
 }
 
 // NextGI entry points (next_gi.h) for the cards.
+
+void nextgi_src_axis_cards(const AABB &p_bounds, NextGICardClusterResult &r_result) {
+	r_result.cards.clear();
+	r_result.max_extent = float(p_bounds.get_longest_axis_size());
+	r_result.texel_size = r_result.max_extent / float(NEXTGI_SRC_CARD_MAX_TEXELS);
+	r_result.total_area = 0.0f;
+	if (!(r_result.max_extent > 0.0f)) {
+		return;
+	}
+	const Vector3 center = p_bounds.get_center();
+	for (const Vector3 &axis : _nextgi_src_axis_seeds) {
+		const int normal_axis = axis.x != 0.0f ? 0 : (axis.y != 0.0f ? 1 : 2);
+		const int u_axis = (normal_axis + 1) % 3;
+		NextGICardDesc card;
+		card.axis_n = axis;
+		card.axis_u[u_axis] = 1.0f;
+		card.axis_v = card.axis_n.cross(card.axis_u);
+		card.half_u = MAX(p_bounds.size[u_axis] * 0.5f, r_result.texel_size * 0.5f);
+		const int v_axis = (u_axis + 1) % 3;
+		card.half_v = MAX(p_bounds.size[v_axis] * 0.5f, r_result.texel_size * 0.5f);
+		card.origin = center + axis * (p_bounds.size[normal_axis] * 0.5f + r_result.texel_size);
+		card.depth_range = p_bounds.size[normal_axis] + r_result.texel_size * 2.0f;
+		card.texels_u = _nextgi_src_card_texels(card.half_u * 2.0f, r_result.texel_size);
+		card.texels_v = _nextgi_src_card_texels(card.half_v * 2.0f, r_result.texel_size);
+		card.area = card.half_u * card.half_v * 4.0f;
+		r_result.total_area += card.area;
+		r_result.cards.push_back(card);
+	}
+}
 
 void NextGI::cluster_cards(const float *p_positions, uint32_t p_vertex_count, const uint32_t *p_indices, uint32_t p_index_count, NextGICardClusterResult &r_result) {
 	nextgi_src_cluster_cards(p_positions, p_vertex_count, p_indices, p_index_count, r_result);
@@ -840,7 +915,7 @@ void NextGISRC::_check_emissive_contract(RenderGeometryInstance *p_instance, uin
 	}
 }
 
-bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
+bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
 		return false;
@@ -902,7 +977,15 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key) {
 	}
 
 	NextGICardClusterResult result;
-	nextgi_src_cluster_cards(positions.ptr(), positions.size() / 3, indices.ptr(), indices.size(), result);
+	if (p_axis_cards) {
+		AABB bounds;
+		for (uint32_t i = 0; i < positions.size(); i += 3) {
+			bounds.expand_to(Vector3(positions[i], positions[i + 1], positions[i + 2]));
+		}
+		nextgi_src_axis_cards(bounds, result);
+	} else {
+		nextgi_src_cluster_cards(positions.ptr(), positions.size() / 3, indices.ptr(), indices.size(), result);
+	}
 	if (result.cards.is_empty()) {
 		// No CPU geometry (already released) or only degenerate triangles.
 		failed_meshes.insert(p_mesh);
@@ -1059,6 +1142,42 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 				item.solid_angle = nextgi_src_solid_angle(Math::sin(fed.angular_radius), 1.0f);
 				item.texels = cards[card].atlas_rect[2] * cards[card].atlas_rect[3];
 				item.mesh = mesh;
+				pending.push_back(item);
+			}
+		}
+	}
+	NextGI *next_gi = NextGI::get_singleton();
+	if (next_gi != nullptr && next_gi->get_rt_scene() != nullptr && next_gi->get_rt_scene()->get_far_field() != nullptr) {
+		LocalVector<NextGIFarField::CaptureSource> far_sources;
+		next_gi->get_rt_scene()->get_far_field()->capture_sources(far_sources);
+		for (const NextGIFarField::CaptureSource &source : far_sources) {
+			if (source.instance == nullptr || failed_meshes.has(source.mesh)) {
+				continue;
+			}
+			const uint64_t key = _nextgi_src_instance_key(source.instance);
+			const uint32_t *set_index = key_card_sets.getptr(key);
+			if (set_index == nullptr) {
+				if (!_build_card_set(source.mesh, key, true)) {
+					continue;
+				}
+				set_index = key_card_sets.getptr(key);
+				ERR_CONTINUE(set_index == nullptr);
+				_check_emissive_contract(source.instance, *set_index);
+			}
+			const NextGICardSet &set = card_sets[*set_index];
+			for (uint32_t card = set.first_card; card < set.first_card + set.card_count; card++) {
+				if (card_capture_counts[card] != 0 || queued_cards.has(card)) {
+					continue;
+				}
+				queued_cards.insert(card);
+				PendingCard item;
+				item.instance = source.instance;
+				item.instance_transform = source.transform;
+				item.card = card;
+				item.set_index = *set_index;
+				item.solid_angle = nextgi_src_solid_angle(Math::sin(source.angular_radius), 1.0f);
+				item.texels = cards[card].atlas_rect[2] * cards[card].atlas_rect[3];
+				item.mesh = source.mesh;
 				pending.push_back(item);
 			}
 		}

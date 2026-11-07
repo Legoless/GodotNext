@@ -106,6 +106,12 @@ public:
 		GI_MODE_DYNAMIC
 	};
 
+	enum FarFieldMode {
+		FAR_FIELD_AUTO = RSE::FAR_FIELD_AUTO,
+		FAR_FIELD_ALWAYS = RSE::FAR_FIELD_ALWAYS,
+		FAR_FIELD_NEVER = RSE::FAR_FIELD_NEVER,
+	};
+
 	enum LightmapScale {
 		LIGHTMAP_SCALE_1X,
 		LIGHTMAP_SCALE_2X,
@@ -142,6 +148,7 @@ private:
 	AABB custom_aabb;
 	float lightmap_texel_scale = 1.0f;
 	GIMode gi_mode = GI_MODE_STATIC;
+	FarFieldMode gi_far_field = FAR_FIELD_AUTO;
 	bool ignore_occlusion_culling = false;
 
 	const StringName *_instance_uniform_get_remap(const StringName &p_name) const;
@@ -192,6 +199,8 @@ public:
 
 	void set_gi_mode(GIMode p_mode);
 	GIMode get_gi_mode() const;
+	void set_gi_far_field(FarFieldMode p_mode);
+	FarFieldMode get_gi_far_field() const;
 
 	void set_lightmap_texel_scale(float p_scale);
 	float get_lightmap_texel_scale() const;
@@ -219,5 +228,6 @@ public:
 
 VARIANT_ENUM_CAST(GeometryInstance3D::ShadowCastingSetting);
 VARIANT_ENUM_CAST(GeometryInstance3D::GIMode);
+VARIANT_ENUM_CAST(GeometryInstance3D::FarFieldMode);
 VARIANT_ENUM_CAST(GeometryInstance3D::LightmapScale);
 VARIANT_ENUM_CAST(GeometryInstance3D::VisibilityRangeFadeMode);

@@ -1542,6 +1542,22 @@ TEST_CASE("[NextGI] SRC cards: an axis-aligned box gives exactly 6 axis cards wi
 	}
 }
 
+TEST_CASE("[NextGI][FarField] Six axis cards bound a proxy cell") {
+	const AABB bounds(Vector3(-2, -1, -3), Vector3(4, 2, 6));
+	RendererRD::NextGICardClusterResult result;
+	RendererRD::nextgi_src_axis_cards(bounds, result);
+	REQUIRE_EQ(result.cards.size(), 6u);
+	CHECK_EQ(result.max_extent, 6.0f);
+	for (uint32_t i = 0; i < result.cards.size(); i++) {
+		const RendererRD::NextGICardDesc &card = result.cards[i];
+		CHECK(card.axis_u.cross(card.axis_v).is_equal_approx(card.axis_n));
+		CHECK(Math::is_equal_approx(card.origin.distance_to(bounds.get_center()), bounds.size[i / 2] * 0.5f + result.texel_size));
+		CHECK(Math::is_equal_approx(card.depth_range, bounds.size[i / 2] + result.texel_size * 2.0f));
+		CHECK(card.texels_u >= 4u);
+		CHECK(card.texels_v >= 4u);
+	}
+}
+
 TEST_CASE("[NextGI] SRC cards: the card frame maps capture-view coordinates to object space") {
 	SRCTestMesh mesh;
 	mesh.add_box(Vector3(0.0, 2.0, 0.0), Vector3(1.0, 1.0, 1.0));
@@ -1724,6 +1740,21 @@ TEST_CASE("[NextGI] SRC cards: the shelf packer fills the atlas and places a car
 	CHECK(ordered.allocate_all(sizes, rects));
 	CHECK_EQ(rects[1], Rect2i(0, 0, 16, 32));
 	CHECK_EQ(rects[0], Rect2i(17, 0, 16, 8));
+
+	RendererRD::NextGIShelfPacker reused(65, 65);
+	Rect2i first;
+	Rect2i second;
+	REQUIRE(reused.allocate(64, 32, first));
+	REQUIRE(reused.allocate(64, 32, second));
+	REQUIRE_FALSE(reused.allocate(32, 32, rect));
+	reused.free(first);
+	REQUIRE(reused.allocate(32, 32, rect));
+	CHECK_EQ(rect, Rect2i(0, 0, 32, 32));
+	CHECK_EQ(reused.get_used_texels(), 64u * 32u + 32u * 32u);
+	reused.free(rect);
+	REQUIRE(reused.allocate(64, 32, rect));
+	CHECK_EQ(rect, first);
+	CHECK_EQ(reused.get_used_texels(), 64u * 64u);
 }
 
 TEST_CASE("[NextGI] SRC cards: atlas memory is under the 128 MiB High budget") {
@@ -2234,6 +2265,12 @@ TEST_CASE("[NextGI] SRC work streams: sweeps, bake filter and both caps") {
 	const uint32_t scheduled = RendererRD::nextgi_src_schedule_streams(pages, 4, 150000, 150000, order, 4);
 	CHECK_EQ(scheduled, 1u);
 	CHECK_EQ(order[0], 1u);
+	pages[0].dirty_direct = false;
+	pages[1].dirty_direct = false;
+	pages[0].far_field = true;
+	CHECK_EQ(RendererRD::nextgi_src_schedule_streams(pages, 4, 400000, 400000, order, 4), 4u);
+	CHECK_EQ(order[0], 1u);
+	CHECK_EQ(order[3], 0u);
 	const uint32_t high = RendererRD::nextgi_src_budget_for_quality(2);
 	const uint32_t medium = RendererRD::nextgi_src_budget_for_quality(1);
 	const uint32_t epic = RendererRD::nextgi_src_budget_for_quality(3);

@@ -116,6 +116,7 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIRelightPara
 	uint ray_budget;
 	uint page_count;
 	float rt_radius;
+	uint page_offset;
 }
 params;
 
@@ -169,7 +170,7 @@ int nextgi_reuse_state(uint reuse_index, vec3 world) {
 }
 
 void main() {
-	uint slot = gl_WorkGroupID.z;
+	uint slot = gl_WorkGroupID.z + params.page_offset;
 	if (slot >= params.page_count) {
 		return;
 	}

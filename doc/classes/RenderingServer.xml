@@ -1949,6 +1949,14 @@
 				Sets the shadow casting setting. Equivalent to [member GeometryInstance3D.cast_shadow].
 			</description>
 		</method>
+		<method name="instance_geometry_set_far_field">
+			<return type="void" />
+			<param index="0" name="instance" type="RID" />
+			<param index="1" name="mode" type="int" enum="RenderingServer.FarFieldMode" />
+			<description>
+				Sets whether the geometry instance contributes to NextGI's far-field proxies. Equivalent to [member GeometryInstance3D.gi_far_field].
+			</description>
+		</method>
 		<method name="instance_geometry_set_flag">
 			<return type="void" />
 			<param index="0" name="instance" type="RID" />
@@ -6285,6 +6293,15 @@
 		</constant>
 		<constant name="VISIBILITY_RANGE_FADE_DEPENDENCIES" value="2" enum="VisibilityRangeFadeMode" keywords="LOD_FADE_DEPENDENCIES">
 			Fade-in the given instance's dependencies when reaching its visibility range limits.
+		</constant>
+		<constant name="FAR_FIELD_AUTO" value="0" enum="FarFieldMode">
+			Include the instance when its visibility range reaches the far shell. An unlimited visibility range is included.
+		</constant>
+		<constant name="FAR_FIELD_ALWAYS" value="1" enum="FarFieldMode">
+			Force an otherwise eligible instance to contribute to the far-field proxies, regardless of its visibility range.
+		</constant>
+		<constant name="FAR_FIELD_NEVER" value="2" enum="FarFieldMode">
+			Exclude the instance from the far-field proxies.
 		</constant>
 		<constant name="BAKE_CHANNEL_ALBEDO_ALPHA" value="0" enum="BakeChannels">
 			Index of [Image] in array of [Image]s returned by [method bake_render_uv2]. Image uses [constant Image.FORMAT_RGBA8] and contains albedo color in the [code].rgb[/code] channels and alpha in the [code].a[/code] channel.

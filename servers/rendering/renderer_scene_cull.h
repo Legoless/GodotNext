@@ -40,6 +40,7 @@
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
 #include "servers/rendering/instance_uniforms.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_scene_occlusion_cull.h"
 #include "servers/rendering/renderer_scene_render.h"
 #include "servers/rendering/rendering_method.h"
@@ -503,6 +504,7 @@ public:
 		float visibility_range_begin_margin = 0.0f;
 		float visibility_range_end_margin = 0.0f;
 		RSE::VisibilityRangeFadeMode visibility_range_fade_mode = RSE::VISIBILITY_RANGE_FADE_DISABLED;
+		RSE::FarFieldMode far_field_mode = RSE::FAR_FIELD_AUTO;
 		Instance *visibility_parent = nullptr;
 		HashSet<Instance *> visibility_dependencies;
 		uint32_t visibility_dependencies_depth = 0;
@@ -954,6 +956,7 @@ public:
 
 		// GodotNext: nextgi_rt_feed
 		LocalVector<RendererSceneRender::NextGIRTInstance> nextgi_rt_instances;
+		LocalVector<NextGIFarSource> nextgi_far_sources;
 		LocalVector<AABB> nextgi_dirty_volumes;
 		LocalVector<AABB> nextgi_light_volumes;
 		bool nextgi_directional_light_dirty = false;
@@ -984,6 +987,7 @@ public:
 
 			// GodotNext: nextgi_rt_feed
 			nextgi_rt_instances.clear();
+			nextgi_far_sources.clear();
 			nextgi_dirty_volumes.clear();
 			nextgi_light_volumes.clear();
 			nextgi_directional_light_dirty = false;
@@ -1015,6 +1019,7 @@ public:
 
 			// GodotNext: nextgi_rt_feed
 			nextgi_rt_instances.clear();
+			nextgi_far_sources.clear();
 			nextgi_dirty_volumes.clear();
 			nextgi_light_volumes.clear();
 			nextgi_directional_light_dirty = false;
@@ -1135,6 +1140,7 @@ public:
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material);
 
 	virtual void instance_geometry_set_visibility_range(RID p_instance, float p_min, float p_max, float p_min_margin, float p_max_margin, RSE::VisibilityRangeFadeMode p_fade_mode);
+	virtual void instance_geometry_set_far_field(RID p_instance, RSE::FarFieldMode p_mode);
 
 	virtual void instance_geometry_set_lightmap(RID p_instance, RID p_lightmap, const Rect2 &p_lightmap_uv_scale, int p_slice_index);
 	virtual void instance_geometry_set_lod_bias(RID p_instance, float p_lod_bias);

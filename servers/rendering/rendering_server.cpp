@@ -3329,6 +3329,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_override", "instance", "material"), &RenderingServer::instance_geometry_set_material_override);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_overlay", "instance", "material"), &RenderingServer::instance_geometry_set_material_overlay);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_visibility_range", "instance", "min", "max", "min_margin", "max_margin", "fade_mode"), &RenderingServer::instance_geometry_set_visibility_range);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_far_field", "instance", "mode"), &RenderingServer::instance_geometry_set_far_field);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_lightmap", "instance", "lightmap", "lightmap_uv_scale", "lightmap_slice"), &RenderingServer::instance_geometry_set_lightmap);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_lod_bias", "instance", "lod_bias"), &RenderingServer::instance_geometry_set_lod_bias);
 
@@ -3372,6 +3373,10 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_SELF);
 	BIND_ENUM_CONSTANT(RSE::VISIBILITY_RANGE_FADE_DEPENDENCIES);
+
+	BIND_ENUM_CONSTANT(RSE::FAR_FIELD_AUTO);
+	BIND_ENUM_CONSTANT(RSE::FAR_FIELD_ALWAYS);
+	BIND_ENUM_CONSTANT(RSE::FAR_FIELD_NEVER);
 
 	/* Bake 3D Object */
 
@@ -3915,6 +3920,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/reflections", true);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_max_error", PROPERTY_HINT_RANGE, "0.0001,1,0.0001,or_greater,suffix:m"), 0.02);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field", false);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/far_field_distance", PROPERTY_HINT_RANGE, "200,100000,1,or_greater,suffix:m"), 1000.0);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field_occlusion_only", false);
 	// GodotNext: nextgi_src_cards
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/dump_material_atlas", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_page_radiance", false);

@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf_stream.h"
 #include "servers/rendering/rendering_server_globals.h"
 
@@ -461,7 +462,17 @@ void NextGIRTScene::init() {
 	}
 }
 
+void NextGIRTScene::free_far_field() {
+	if (far_field != nullptr) {
+		far_field->free();
+		memdelete(far_field);
+		far_field = nullptr;
+	}
+}
+
 void NextGIRTScene::free() {
+	free_far_field();
+	total_record_count = 0;
 	if (RD::get_singleton() == nullptr) {
 		return;
 	}
@@ -630,6 +641,93 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
 }
 
+RID NextGIRTScene::build_far_proxy_mesh(RID p_mesh) {
+	_build_dirty_mesh_parts(p_mesh);
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	ERR_FAIL_NULL_V(mesh_storage, RID());
+	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	if (parts == nullptr || parts->size() != 1 || (*parts)[0].geometries.is_empty()) {
+		return RID();
+	}
+	return (*parts)[0].blas;
+}
+
+bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_instance, const Transform3D &p_transform, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces, RD::AccelerationStructureInstance &r_tlas_instance) {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	ERR_FAIL_NULL_V(mesh_storage, false);
+	ERR_FAIL_NULL_V(p_instance, false);
+	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	if (parts == nullptr || parts->size() != 1 || r_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
+		return false;
+	}
+	const MeshStorage::NextGIRTPart &part = (*parts)[0];
+	if (part.geometries.is_empty() || part.blas.is_null()) {
+		return false;
+	}
+	NextGIInstanceRecord record;
+	for (int i = 0; i < 3; i++) {
+		record.object_to_world[i * 4 + 0] = p_transform.basis.rows[i][0];
+		record.object_to_world[i * 4 + 1] = p_transform.basis.rows[i][1];
+		record.object_to_world[i * 4 + 2] = p_transform.basis.rows[i][2];
+	}
+	record.object_to_world[3] = p_transform.origin.x;
+	record.object_to_world[7] = p_transform.origin.y;
+	record.object_to_world[11] = p_transform.origin.z;
+	record.surface_base = r_surfaces.size();
+	record.surface_count = part.geometries.size();
+	record.rt_flags = NEXTGI_RT_FLAG_FAR;
+	record.card_set = NextGISRC::get_instance_card_set(p_instance);
+	if (record.card_set == UINT32_MAX) {
+		return false;
+	}
+	record.tlas_index = r_records.size();
+	if (NextGIRelight::get_singleton() != nullptr) {
+		record.page_table = NextGIRelight::get_singleton()->assign_pages(p_instance, record);
+	}
+	float eps_rt = 0.0f;
+	for (const NextGIRTPartGeometry &geometry : part.geometries) {
+		MeshStorage::NextGIRTSurfaceInfo info;
+		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, geometry.surface, info)) {
+			return false;
+		}
+		record.arena_chunk = info.chunk;
+		eps_rt = MAX(eps_rt, info.eps);
+		NextGISurfaceRecord surface;
+		surface.vertex_offset = info.vertex_offset;
+		surface.index_offset = info.index_offset + geometry.first_triangle * 3 * sizeof(uint32_t);
+		surface.triangle_count = geometry.triangle_count;
+		r_surfaces.push_back(surface);
+	}
+	const Vector3 scale = p_transform.basis.get_scale_abs();
+	record.origin_offset = nextgi_rt_origin_offset(eps_rt, MAX(scale.x, MAX(scale.y, scale.z)));
+	r_records.push_back(record);
+	r_tlas_instance.transform = p_transform;
+	r_tlas_instance.id = record.tlas_index;
+	r_tlas_instance.mask = 0xFF;
+	r_tlas_instance.hit_sbt_range = 0;
+	r_tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+	r_tlas_instance.blas = part.blas;
+	return true;
+}
+
+void NextGIRTScene::_update_far_records(const ::RenderDataRD *p_render_data, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces) {
+	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field"))) {
+		if (far_field != nullptr) {
+			far_field->free();
+			memdelete(far_field);
+			far_field = nullptr;
+		}
+		total_record_count = r_records.size();
+		return;
+	}
+	if (far_field == nullptr) {
+		far_field = memnew(NextGIFarField);
+		far_field->init(this);
+	}
+	far_field->update(p_render_data, r_records, r_surfaces);
+	total_record_count = r_records.size();
+}
+
 // GodotNext: nextgi_as_slots
 // Both AS phases gate on the same v0 feed; either phase is a no-op without it.
 static const LocalVector<RendererSceneRender::NextGIRTInstance> *_nextgi_rt_fed_instances(const ::RenderDataRD *p_render_data) {
@@ -661,11 +759,27 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	}
 	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = _nextgi_rt_fed_instances(p_render_data);
 	if (fed_instances == nullptr || fed_instances->is_empty()) {
+		LocalVector<NextGIInstanceRecord> records;
+		LocalVector<NextGISurfaceRecord> surfaces;
+		_update_far_records(p_render_data, records, surfaces);
+		_ensure_record_buffers(records.size(), surfaces.size());
+		if (instance_record_buffer.is_valid() && !records.is_empty()) {
+			RD::get_singleton()->buffer_update(instance_record_buffer, 0, records.size() * sizeof(NextGIInstanceRecord), records.ptr());
+		}
+		if (surface_record_buffer.is_valid() && !surfaces.is_empty()) {
+			RD::get_singleton()->buffer_update(surface_record_buffer, 0, surfaces.size() * sizeof(NextGISurfaceRecord), surfaces.ptr());
+		}
 		return;
 	}
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	ERR_FAIL_NULL(mesh_storage);
 	if (!mesh_storage->mesh_nextgi_rt_is_enabled()) {
+		if (far_field != nullptr) {
+			far_field->free();
+			memdelete(far_field);
+			far_field = nullptr;
+		}
+		total_record_count = 0;
 		return;
 	}
 	stats.fed_instance_count = fed_instances->size();
@@ -1063,9 +1177,17 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		stats.tlas_fill_ms = double(OS::get_singleton()->get_ticks_usec() - ticks_start) / 1000.0;
 	}
 	if (instance_records.is_empty() && gpu_sources.is_empty()) {
+		_update_far_records(p_render_data, instance_records, surface_records);
+		_ensure_record_buffers(instance_records.size(), surface_records.size());
+		if (instance_record_buffer.is_valid() && !instance_records.is_empty()) {
+			RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());
+		}
+		if (surface_record_buffer.is_valid() && !surface_records.is_empty()) {
+			RD::get_singleton()->buffer_update(surface_record_buffer, 0, surface_records.size() * sizeof(NextGISurfaceRecord), surface_records.ptr());
+		}
 		return;
 	}
-
+	_update_far_records(p_render_data, instance_records, surface_records);
 	_ensure_record_buffers(instance_records.size(), surface_records.size());
 	if (instance_record_buffer.is_valid()) {
 		RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());

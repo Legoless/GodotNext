@@ -128,6 +128,7 @@ struct NextGICardClusterResult {
 // nearest neighbor. Card texels per axis are clamp(ceil(extent / texel_size), 4, 128).
 // Degenerate triangles are ignored.
 void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count, const uint32_t *p_indices, uint32_t p_index_count, NextGICardClusterResult &r_result);
+void nextgi_src_axis_cards(const AABB &p_bounds, NextGICardClusterResult &r_result);
 
 // The material atlas: albedo, normal and orm RGBA8, emission RGBA16F, depth R32F, plus the
 // framebuffer depth (D16 when supported, else X8_D24).
@@ -150,6 +151,7 @@ class NextGIShelfPacker {
 	uint32_t top = 0;
 	uint64_t used_texels = 0;
 	LocalVector<Shelf> shelves;
+	LocalVector<Rect2i> free_rects;
 
 public:
 	explicit NextGIShelfPacker(uint32_t p_width = NEXTGI_SRC_ATLAS_SIZE, uint32_t p_height = NEXTGI_SRC_ATLAS_SIZE) :
@@ -157,6 +159,7 @@ public:
 
 	// First shelf that fits; otherwise a new shelf of the rect's height. False when full.
 	bool allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_rect);
+	void free(const Rect2i &p_rect);
 	// Places every size or none of them, tallest first. r_rects keeps the input order.
 	bool allocate_all(const LocalVector<Vector2i> &p_sizes, LocalVector<Rect2i> &r_rects);
 	void reset();
@@ -309,7 +312,7 @@ private:
 	LocalVector<float> card_coverage; // Per card, filled by the depth download.
 
 	void _create_atlas();
-	bool _build_card_set(RID p_mesh, uint64_t p_key);
+	bool _build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards = false);
 	void _check_emissive_contract(RenderGeometryInstance *p_instance, uint32_t p_set_index);
 	void _upload_gpu_data();
 	void _request_dump();

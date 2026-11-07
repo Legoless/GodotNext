@@ -39,6 +39,7 @@
 #include "core/string/print_string.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -637,6 +638,17 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_scene_update_ms"] = rt_stats.scene_update_ms;
 		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
 		info["rt_as_memory_exceeded"] = rt_scene->is_as_memory_exceeded();
+		if (rt_scene->get_far_field() != nullptr) {
+			const NextGIFarField::Stats &far_stats = rt_scene->get_far_field()->get_stats();
+			info["far_field_cell_count"] = int64_t(far_stats.cell_count);
+			info["far_field_pending_count"] = int64_t(far_stats.pending_count);
+			info["far_field_proxy_bytes"] = int64_t(far_stats.proxy_bytes);
+			info["far_field_budget_exceeded"] = far_stats.budget_exceeded;
+			info["far_field_tlas_build_count"] = int64_t(far_stats.tlas_build_count);
+			info["far_field_trace_ready"] = rt_scene->get_far_field()->is_trace_ready();
+			info["far_field_near_cap"] = int64_t(NEXTGI_RT_TLAS_CAPACITY);
+			info["far_field_occlusion_only"] = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_occlusion_only"));
+		}
 		if (bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/global_sdf"))) {
 			info.merge(rt_scene->get_global_sdf_debug());
 		}
@@ -911,6 +923,12 @@ NextGI::NextGI() {
 	// Doctests build their own instances; the renderer's instance is the first one.
 	if (singleton == nullptr) {
 		singleton = this;
+	}
+}
+
+void NextGI::free_far_field() {
+	if (rt_scene != nullptr) {
+		rt_scene->free_far_field();
 	}
 }
 

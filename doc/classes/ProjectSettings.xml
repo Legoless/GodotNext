@@ -3146,6 +3146,15 @@
 			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed and rendering is unchanged.
 			[b]Note:[/b] This property is only read when the project starts.
 		</member>
+		<member name="rendering/global_illumination/nextgi/far_field" type="bool" setter="" getter="" default="false">
+			Enables far-field reflection traces in NextGI's hardware ray-tracing tier. Static opaque geometry is merged into 64 m cell proxies and traced in a separate acceleration structure beyond [member rendering/global_illumination/nextgi/rt_scene_radius].
+		</member>
+		<member name="rendering/global_illumination/nextgi/far_field_distance" type="float" setter="" getter="" default="1000.0">
+			Maximum distance in meters for far-field reflection traces. Has no effect when [member rendering/global_illumination/nextgi/far_field] is disabled.
+		</member>
+		<member name="rendering/global_illumination/nextgi/far_field_occlusion_only" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], far-field reflection hits return zero sky visibility and misses return full sky visibility, instead of shaded radiance. Has no effect when [member rendering/global_illumination/nextgi/far_field] is disabled.
+		</member>
 		<member name="rendering/global_illumination/nextgi/hardware_ray_tracing" type="int" setter="" getter="" default="0">
 			Whether NextGI may use hardware ray tracing. [b]Auto[/b] uses it where the rendering device supports hardware-accelerated ray queries. [b]Off[/b] always uses the fallback, with the reason [code]SETTING_OFF[/code]. [b]Force[/b] also uses ray queries on devices that are not known to be hardware accelerated, including CPU devices, and ignores a latched hardware ray-tracing fault. On a device without ray queries, [b]Force[/b] falls back with one warning.
 			[b]Note:[/b] To change this at runtime, call [method RenderingServer.nextgi_set_hardware_ray_tracing].

@@ -34,6 +34,7 @@
 #include "core/math/projection.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -55,8 +56,11 @@ uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint3
 	LocalVector<uint32_t> dirty;
 	LocalVector<uint32_t> near;
 	LocalVector<uint32_t> rest;
+	LocalVector<uint32_t> far_rest;
 	for (uint32_t i = 0; i < p_count; i++) {
-		if (p_pages[i].dirty_direct) {
+		if (p_pages[i].far_field) {
+			far_rest.push_back(i);
+		} else if (p_pages[i].dirty_direct) {
 			dirty.push_back(i);
 		} else if (p_pages[i].near_dirty) {
 			near.push_back(i);
@@ -82,6 +86,12 @@ uint32_t nextgi_src_schedule_streams(const NextGISrcSchedulePage *p_pages, uint3
 	}
 	if (rest.size() > 1) {
 		std::sort(rest.ptr(), rest.ptr() + rest.size(), by_age);
+	}
+	if (far_rest.size() > 1) {
+		std::sort(far_rest.ptr(), far_rest.ptr() + far_rest.size(), by_age);
+	}
+	for (const uint32_t index : far_rest) {
+		rest.push_back(index);
 	}
 	const uint32_t near_limit = MAX(p_count / 16u, 1u);
 	uint32_t scheduled = 0;
@@ -156,8 +166,9 @@ struct NextGIRelightParamsGPU {
 	uint32_t ray_budget = 0;
 	uint32_t page_count = 0;
 	float rt_radius = 0.0f;
+	uint32_t page_offset = 0;
 };
-static_assert(sizeof(NextGIRelightParamsGPU) == 16, "The relight params must match nextgi_src_relight.glsl.");
+static_assert(sizeof(NextGIRelightParamsGPU) == 20, "The relight params must match nextgi_src_relight.glsl.");
 
 struct NextGIRelightCountersGPU {
 	uint32_t traced = 0;
@@ -252,10 +263,16 @@ NextGIRelight::~NextGIRelight() {
 
 void NextGIRelight::_reset_uniform_set() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd != nullptr && uniform_set.is_valid()) {
-		rd->free_rid(uniform_set);
+	if (rd != nullptr) {
+		if (uniform_set.is_valid()) {
+			rd->free_rid(uniform_set);
+		}
+		if (far_uniform_set.is_valid()) {
+			rd->free_rid(far_uniform_set);
+		}
 	}
 	uniform_set = RID();
+	far_uniform_set = RID();
 }
 
 void NextGIRelight::free_resources() {
@@ -453,6 +470,7 @@ bool NextGIRelight::_evict_oldest_pages() {
 	}
 	for (const CardPage &page : instances[oldest].cards) {
 		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+		mask_packer.free(Rect2i(int(page.mask_x), int(page.mask_y), int(page.mask_w), int(page.mask_h)));
 	}
 	instance_index.erase(instances[oldest].page_key);
 	instances.remove_at(oldest);
@@ -465,6 +483,27 @@ bool NextGIRelight::_evict_oldest_pages() {
 
 static uint64_t _nextgi_page_key(RenderGeometryInstance *p_instance, uint32_t p_element) {
 	return uint64_t(uintptr_t(p_instance)) ^ (uint64_t(p_element) * 0x9E3779B97F4A7C15ULL);
+}
+
+void NextGIRelight::release_instance(RenderGeometryInstance *p_instance) {
+	if (p_instance == nullptr) {
+		return;
+	}
+	const uint64_t page_key = _nextgi_page_key(p_instance, UINT32_MAX);
+	const uint32_t *existing = instance_index.getptr(page_key);
+	if (existing == nullptr) {
+		return;
+	}
+	const uint32_t index = *existing;
+	for (const CardPage &page : instances[index].cards) {
+		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+		mask_packer.free(Rect2i(int(page.mask_x), int(page.mask_y), int(page.mask_w), int(page.mask_h)));
+	}
+	instance_index.erase(page_key);
+	instances.remove_at(index);
+	for (uint32_t i = index; i < instances.size(); i++) {
+		instance_index[instances[i].page_key] = i;
+	}
 }
 
 uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element) {
@@ -572,7 +611,10 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		return;
 	}
 	const RID tlas = next_gi->get_rt_scene()->get_tlas();
-	if (tlas.is_null() || instances.is_empty() || !next_gi->get_rt_scene()->is_tlas_traceable()) {
+	const NextGIFarField *far_field = next_gi->get_rt_scene()->get_far_field();
+	const bool near_ready = tlas.is_valid() && next_gi->get_rt_scene()->is_tlas_traceable();
+	const bool far_ready = far_field != nullptr && far_field->is_trace_ready();
+	if (instances.is_empty() || (!near_ready && !far_ready)) {
 		return;
 	}
 
@@ -799,9 +841,11 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			item.ray_estimate = nextgi_src_page_ray_estimate(page.texels, shadow_lights, card_page.ray_fraction);
 			item.last_relit_frame = card_page.last_relit_frame;
 			const float distance = MAX(center.distance_to(camera), 0.5f);
-			item.priority = float(page.texels) / (distance * distance);
-			item.dirty_direct = card_page.dirty_direct;
-			item.near_dirty = card_page.near_dirty;
+			const bool far_page = (instance_pages.record.rt_flags & NEXTGI_RT_FLAG_FAR) != 0;
+			item.far_field = far_page;
+			item.priority = far_page ? 0.0f : float(page.texels) / (distance * distance);
+			item.dirty_direct = card_page.dirty_direct && !far_page;
+			item.near_dirty = card_page.near_dirty && !far_page;
 			work.push_back(item);
 			if (card_page.dirty_direct) {
 				last_dirty_pages++;
@@ -824,6 +868,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		gpu_lights[i] = cpu_lights[i].gpu;
 	}
 	LocalVector<NextGIRelightPageGPU> gpu_pages;
+	LocalVector<NextGIRelightPageGPU> far_gpu_pages;
 	LocalVector<uint32_t> gpu_indices;
 	uint32_t max_w = 1;
 	uint32_t max_h = 1;
@@ -905,7 +950,11 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		for (uint32_t index : unshadowed) {
 			gpu_indices.push_back(index);
 		}
-		gpu_pages.push_back(gpu_page);
+		if ((instance_pages.record.rt_flags & NEXTGI_RT_FLAG_FAR) != 0) {
+			far_gpu_pages.push_back(gpu_page);
+		} else {
+			gpu_pages.push_back(gpu_page);
+		}
 		const uint32_t blocks_x = MAX((card_page.radiance_w + 7u) / 8u, 1u);
 		const uint32_t blocks_y = MAX((card_page.radiance_h + 7u) / 8u, 1u);
 		for (uint32_t by = 0; by < blocks_y; by++) {
@@ -926,7 +975,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 
 	_storage_buffer(light_buffer, light_capacity, gpu_lights.size(), sizeof(NextGILight));
 	_storage_buffer(reuse_buffer, reuse_capacity, MAX(reuses.size(), 1u), sizeof(NextGIShadowReuse));
-	_storage_buffer(page_buffer, page_capacity, MAX(gpu_pages.size(), 1u), sizeof(NextGIRelightPageGPU));
+	_storage_buffer(page_buffer, page_capacity, MAX(gpu_pages.size() + far_gpu_pages.size(), 1u), sizeof(NextGIRelightPageGPU));
 	_storage_buffer(index_buffer, index_capacity, MAX(gpu_indices.size(), 1u), sizeof(uint32_t));
 
 	if (!probe_buffer.is_valid() || probe_capacity < MAX(page_table_count, 1u)) {
@@ -959,6 +1008,9 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	if (!gpu_pages.is_empty()) {
 		rd->buffer_update(page_buffer, 0, gpu_pages.size() * sizeof(NextGIRelightPageGPU), gpu_pages.ptr());
 	}
+	if (!far_gpu_pages.is_empty()) {
+		rd->buffer_update(page_buffer, gpu_pages.size() * sizeof(NextGIRelightPageGPU), far_gpu_pages.size() * sizeof(NextGIRelightPageGPU), far_gpu_pages.ptr());
+	}
 	if (!gpu_indices.is_empty()) {
 		rd->buffer_update(index_buffer, 0, gpu_indices.size() * sizeof(uint32_t), gpu_indices.ptr());
 	}
@@ -968,7 +1020,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	NextGIRelightParamsGPU params;
 	params.frame = frame;
 	params.ray_budget = NextGI::get_singleton() != nullptr ? NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).relight_shadow_rays : NEXTGI_SRC_RELIGHT_RAY_CAP;
-	params.page_count = gpu_pages.size();
+	params.page_count = gpu_pages.size() + far_gpu_pages.size();
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
@@ -984,16 +1036,21 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			positional_tex = atlas_tex;
 		}
 	}
+	const RID far_tlas = far_ready ? far_field->get_tlas() : tlas;
 	static RID cached_directional;
 	static RID cached_positional;
 	static RID cached_cards;
 	static RID cached_records;
-	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != next_gi->get_rt_scene()->get_instance_record_buffer()) {
+	static RID cached_near_tlas;
+	static RID cached_far_tlas;
+	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != next_gi->get_rt_scene()->get_instance_record_buffer() || cached_near_tlas != tlas || cached_far_tlas != far_tlas) {
 		_reset_uniform_set();
 		cached_directional = directional_tex;
 		cached_positional = positional_tex;
 		cached_cards = src->get_card_buffer();
 		cached_records = next_gi->get_rt_scene()->get_instance_record_buffer();
+		cached_near_tlas = tlas;
+		cached_far_tlas = far_tlas;
 	}
 	if (!uniform_set.is_valid()) {
 		RD::Uniform uniforms[20] = {
@@ -1019,30 +1076,48 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ material_sampler, indirect_texture })),
 		};
 		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
+		uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
+		far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
 	}
-	if (uniform_set.is_valid() && !gpu_pages.is_empty()) {
+	const uint32_t total_pages = gpu_pages.size() + far_gpu_pages.size();
+	const uint32_t near_budget = total_pages > 0 ? uint32_t(uint64_t(params.ray_budget) * gpu_pages.size() / total_pages) : 0;
+	const uint32_t far_budget = params.ray_budget - near_budget;
+	params.ray_budget = near_budget;
+	params.page_offset = 0;
+	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
+	if (near_ready && uniform_set.is_valid() && !gpu_pages.is_empty()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->pipeline);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, gpu_pages.size());
 		rd->compute_list_end();
-		const Vector<uint8_t> counters = rd->buffer_get_data(counter_buffer);
-		if (counters.size() >= int(sizeof(NextGIRelightCountersGPU))) {
-			NextGIRelightCountersGPU got;
-			memcpy(&got, counters.ptr(), sizeof(got));
-			last_rays = got.traced;
-			last_rays_skipped = got.skipped;
-			max_rays = MAX(max_rays, last_rays);
-			uint32_t estimated = 0;
-			for (uint32_t s = 0; s < scheduled_count && s < work.size(); s++) {
-				estimated += work[scheduled[s]].ray_estimate;
-			}
-			if (estimated > 0) {
-				const float fraction = CLAMP(float(last_rays) / float(estimated), 0.0f, 1.0f);
-				for (uint32_t s = 0; s < scheduled_count; s++) {
-					const FlatPage &flat_page = flat[scheduled[s]];
-					instances[flat_page.instance].cards[flat_page.card].ray_fraction = fraction;
-				}
+	}
+	params.ray_budget = far_budget;
+	params.page_offset = gpu_pages.size();
+	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
+	if (far_ready && far_uniform_set.is_valid() && !far_gpu_pages.is_empty()) {
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shader->pipeline);
+		rd->compute_list_bind_uniform_set(list, far_uniform_set, 0);
+		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, far_gpu_pages.size());
+		rd->compute_list_end();
+	}
+	const Vector<uint8_t> counters = rd->buffer_get_data(counter_buffer);
+	if (counters.size() >= int(sizeof(NextGIRelightCountersGPU))) {
+		NextGIRelightCountersGPU got;
+		memcpy(&got, counters.ptr(), sizeof(got));
+		last_rays = got.traced;
+		last_rays_skipped = got.skipped;
+		max_rays = MAX(max_rays, last_rays);
+		uint32_t estimated = 0;
+		for (uint32_t s = 0; s < scheduled_count && s < work.size(); s++) {
+			estimated += work[scheduled[s]].ray_estimate;
+		}
+		if (estimated > 0) {
+			const float fraction = CLAMP(float(last_rays) / float(estimated), 0.0f, 1.0f);
+			for (uint32_t s = 0; s < scheduled_count; s++) {
+				const FlatPage &flat_page = flat[scheduled[s]];
+				instances[flat_page.instance].cards[flat_page.card].ray_fraction = fraction;
 			}
 		}
 	}

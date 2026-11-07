@@ -34,6 +34,7 @@
 #include "core/math/projection.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
@@ -103,8 +104,10 @@ struct GatherParamsGPU {
 	float fog_depth_end;
 	float fog_depth_curve;
 	float fog_light_color[4];
+	float far_distance;
+	uint32_t far_occlusion_only;
 };
-static_assert(sizeof(GatherParamsGPU) == 328, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 336, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -131,7 +134,7 @@ struct GatherCountersGPU {
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
-	RID pipelines[6];
+	RID pipelines[7];
 };
 
 static void _store_projection(const Projection &p_projection, float r_matrix[16]) {
@@ -173,9 +176,13 @@ void NextGIGather::_free_uniform_set() {
 		if (reflect_uniform_set.is_valid()) {
 			rd->free_rid(reflect_uniform_set);
 		}
+		if (reflect_far_uniform_set.is_valid()) {
+			rd->free_rid(reflect_far_uniform_set);
+		}
 	}
 	uniform_set = RID();
 	reflect_uniform_set = RID();
+	reflect_far_uniform_set = RID();
 }
 
 void NextGIGather::free_resources() {
@@ -187,7 +194,7 @@ void NextGIGather::free_resources() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (shader != nullptr) {
 		if (rd != nullptr) {
-			for (int i = 0; i < 4; i++) {
+			for (int i = 0; i < 7; i++) {
 				if (shader->pipelines[i].is_valid()) {
 					rd->free_rid(shader->pipelines[i]);
 				}
@@ -257,6 +264,7 @@ bool NextGIGather::_ensure_shader() {
 	defines.push_back("#define MODE_COVERAGE\n");
 	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
 	defines.push_back("#define MODE_REFLECT\n");
+	defines.push_back("#define MODE_FAR_FIELD\n");
 	shader->shader.initialize(defines);
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
@@ -268,7 +276,7 @@ bool NextGIGather::_ensure_shader() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < 7; i++) {
 		shader->pipelines[i] = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, i));
 		if (!shader->pipelines[i].is_valid()) {
 			shader->shader.version_free(shader->version);
@@ -542,7 +550,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.sky_enabled = sky_enabled;
 	params.feedback_count = p_feedback_count;
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
-	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
+	params.record_count = next_gi->get_rt_scene()->get_total_record_count();
+	params.far_distance = MAX(float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance")), params.rt_radius);
+	params.far_occlusion_only = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_occlusion_only")) ? 1u : 0u;
 	params.page_rect_count = relight->get_page_rect_count();
 	const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
 	// GodotNext: nextgi_reflection_behaviours (#132). The Environment value caps
@@ -730,7 +740,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
 	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	RD::Uniform uniforms[39] = {
+	const NextGIFarField *far_field = next_gi->get_rt_scene()->get_far_field();
+	const RID far_tlas = far_field != nullptr && far_field->is_trace_ready() ? far_field->get_tlas() : tlas;
+	RD::Uniform uniforms[40] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
@@ -769,12 +781,15 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, clamp_totals_buffer.is_valid() ? clamp_totals_buffer : dummy_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 38, Vector<RID>({ sampler_nearest, blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color })),
+		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 39, far_tlas),
 	};
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
 	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
 	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), reflect_shader_rid, 0);
+	const RID reflect_far_shader_rid = shader->shader.version_get_shader(shader->version, 6);
+	reflect_far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 40), reflect_far_shader_rid, 0);
 	return uniform_set.is_valid();
 }
 
@@ -905,6 +920,16 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[5]);
 		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
+		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
+		rd->compute_list_end();
+	}
+	const NextGIFarField *far_field = NextGI::get_singleton()->get_rt_scene()->get_far_field();
+	if (far_field != nullptr && far_field->is_trace_ready() && reflect_far_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
+		const uint32_t width = MAX((last_screen_w + 1u) / 2u, 1u);
+		const uint32_t height = MAX((last_screen_h + 1u) / 2u, 1u);
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[6]);
+		rd->compute_list_bind_uniform_set(list, reflect_far_uniform_set, 0);
 		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
 		rd->compute_list_end();
 	}

@@ -40,7 +40,9 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 
 class RenderDataRD;
+class RenderGeometryInstance;
 class NextGISDFStream;
+class NextGIFarField;
 
 namespace RendererRD {
 
@@ -425,6 +427,8 @@ private:
 	Stats stats;
 	NextGISDFInstances sdf_instances;
 	NextGISDFStream *sdf_stream = nullptr;
+	NextGIFarField *far_field = nullptr;
+	uint32_t total_record_count = 0;
 	NextGIGlobalSDFGPU global_sdf;
 	HashSet<uint32_t> global_sdf_initialized_levels;
 	Vector3i global_sdf_origin;
@@ -448,9 +452,11 @@ private:
 	void _ensure_record_buffers(uint32_t p_instance_count, uint32_t p_surface_count);
 	uint32_t _mesh_triangle_count(RID p_mesh) const;
 	void _apply_as_budget(uint64_t p_frame);
+	void _update_far_records(const ::RenderDataRD *p_render_data, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces);
 
 public:
 	void init();
+	void free_far_field();
 	void free();
 	// GodotNext: nextgi_as_slots
 	// The "AS updates" phase (line 1a): rebuilds the TLAS and the records from the parts
@@ -464,6 +470,10 @@ public:
 	void compact_after_traces();
 
 	RID get_tlas() const { return tlas; }
+	RID build_far_proxy_mesh(RID p_mesh);
+	bool append_far_proxy(RID p_mesh, RenderGeometryInstance *p_instance, const Transform3D &p_transform, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces, RD::AccelerationStructureInstance &r_tlas_instance);
+	NextGIFarField *get_far_field() const { return far_field; }
+	uint32_t get_total_record_count() const { return total_record_count; }
 	RID get_instance_record_buffer() const { return instance_record_buffer; }
 	RID get_surface_record_buffer() const { return surface_record_buffer; }
 	const Stats &get_stats() const { return stats; }

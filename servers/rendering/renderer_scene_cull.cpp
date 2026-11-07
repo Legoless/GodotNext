@@ -36,8 +36,10 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/callable_mp.h"
 #include "core/object/worker_thread_pool.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/rendering_light_culler.h"
@@ -1439,6 +1441,12 @@ void RendererSceneCull::instance_geometry_set_visibility_range(RID p_instance, f
 		vd.range_end_margin = instance->visibility_range_end_margin;
 		vd.fade_mode = p_fade_mode;
 	}
+}
+
+void RendererSceneCull::instance_geometry_set_far_field(RID p_instance, RSE::FarFieldMode p_mode) {
+	Instance *instance = instance_owner.get_or_null(p_instance);
+	ERR_FAIL_NULL(instance);
+	instance->far_field_mode = p_mode;
 }
 
 void RendererSceneCull::instance_set_visibility_parent(RID p_instance, RID p_parent_instance) {
@@ -4106,6 +4114,75 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				scenario->nextgi_rt_selected = selected;
 				scenario->nextgi_rt_denominator = not_in_scene + instance_cap + dynamic_excluded + selected;
 			}
+			scene_cull_result.nextgi_far_sources.clear();
+			if (bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field"))) {
+				RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+				RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
+				const float near_distance = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
+				const float far_distance = float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance"));
+				const Vector3 camera = p_camera_data->main_transform.origin;
+				for (SelfList<Instance> *E = scenario->instances.first(); E; E = E->next()) {
+					const Instance *instance = E->self();
+					if (instance->base_type != RSE::INSTANCE_MESH && instance->base_type != RSE::INSTANCE_MULTIMESH) {
+						continue;
+					}
+					const RID mesh = instance->base_type == RSE::INSTANCE_MULTIMESH ? mesh_storage->multimesh_get_mesh(instance->base) : instance->base;
+					if (mesh_storage == nullptr || !mesh_storage->owns_mesh(mesh)) {
+						continue;
+					}
+					NextGIFarSource source;
+					source.mesh = mesh;
+					source.mode = instance->far_field_mode;
+					source.visibility_end = MAX(instance->visibility_range_end + instance->visibility_range_end_margin, 0.0f);
+					source.revision = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh) ? 1u : 0u;
+					bool opaque = false;
+					const int surface_count = mesh_storage->mesh_get_surface_count(mesh);
+					source.materials.resize(surface_count);
+					for (int surface = 0; surface < surface_count; surface++) {
+						RendererRD::MeshStorage::NextGIRTSurfaceInfo info;
+						if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, surface, info) || !info.eligible) {
+							continue;
+						}
+						RID material = instance->material_override.is_valid() ? instance->material_override : (surface < instance->materials.size() && instance->materials[surface].is_valid() ? instance->materials[surface] : info.material);
+						if (material_storage != nullptr && material.is_valid() && material_storage->material_get_nextgi_rt_class(material) != RendererRD::MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE) {
+							continue;
+						}
+						source.materials.write[surface] = material;
+						opaque = true;
+					}
+					auto append_source = [&](const Transform3D &p_transform, const AABB &p_bounds) {
+						if (!NextGIFarField::include_source(source, instance->visible, instance->baked_light, opaque, instance->mesh_instance.is_valid(), mesh_storage->mesh_nextgi_rt_is_dynamic(mesh), near_distance)) {
+							return;
+						}
+						if (!NextGIFarField::intersects_shell(p_bounds, camera, near_distance, far_distance)) {
+							return;
+						}
+						source.transform = p_transform;
+						source.bounds = p_bounds;
+						scene_cull_result.nextgi_far_sources.push_back(source);
+					};
+					if (instance->base_type == RSE::INSTANCE_MESH) {
+						append_source(instance->transform, instance->transformed_aabb);
+						continue;
+					}
+					if (mesh_storage->multimesh_get_transform_format(instance->base) != RSE::MULTIMESH_TRANSFORM_3D || mesh_storage->multimesh_is_rt_dynamic(instance->base) || mesh_storage->multimesh_uses_indirect(instance->base)) {
+						continue;
+					}
+					uint32_t count = 0;
+					uint32_t stride = 0;
+					const float *transforms = mesh_storage->multimesh_get_rt_transforms(instance->base, count, stride);
+					if (transforms == nullptr || stride < 12) {
+						continue;
+					}
+					const AABB mesh_bounds = mesh_storage->mesh_get_aabb(mesh);
+					for (uint32_t element = 0; element < count; element++) {
+						const Transform3D world = RendererRD::nextgi_rt_element_world(instance->transform, transforms + element * stride);
+						append_source(world, world.xform(mesh_bounds));
+					}
+				}
+			}
+			sdfgi_update_data.nextgi_far_sources = scene_cull_result.nextgi_far_sources.ptr();
+			sdfgi_update_data.nextgi_far_source_count = scene_cull_result.nextgi_far_sources.size();
 			sdfgi_update_data.nextgi_rt_denominator = scenario->nextgi_rt_denominator;
 			sdfgi_update_data.nextgi_rt_not_in_scene = scenario->nextgi_rt_not_in_scene;
 			sdfgi_update_data.nextgi_rt_instance_cap = scenario->nextgi_rt_instance_cap;

@@ -860,6 +860,12 @@ enum VisibilityRangeFadeMode {
 	VISIBILITY_RANGE_FADE_DEPENDENCIES,
 };
 
+enum FarFieldMode : uint8_t {
+	FAR_FIELD_AUTO,
+	FAR_FIELD_ALWAYS,
+	FAR_FIELD_NEVER,
+};
+
 /* BAKE API */
 
 enum BakeChannels {

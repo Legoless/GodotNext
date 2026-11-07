@@ -38,6 +38,8 @@
 #include "servers/rendering/storage/environment_storage.h"
 #include "servers/rendering/storage/render_scene_buffers.h"
 
+struct NextGIFarSource;
+
 class RendererSceneRender {
 private:
 	RendererEnvironmentStorage environment_storage;
@@ -347,6 +349,8 @@ public:
 
 		// GodotNext: nextgi_rt_feed
 		const LocalVector<NextGIRTInstance> *nextgi_rt_instances = nullptr;
+		const NextGIFarSource *nextgi_far_sources = nullptr;
+		uint32_t nextgi_far_source_count = 0;
 		// GodotNext: nextgi_rt_multimesh. Q18 inputs from the scenario selection. The TLAS phase fills the numerator.
 		uint32_t nextgi_rt_denominator = 0;
 		uint32_t nextgi_rt_not_in_scene = 0;

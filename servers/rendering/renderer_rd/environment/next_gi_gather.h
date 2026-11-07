@@ -109,6 +109,7 @@ class NextGIGather {
 	NextGIDenoise *denoise = nullptr;
 	RID uniform_set;
 	RID reflect_uniform_set;
+	RID reflect_far_uniform_set;
 	RID reflect_counter_buffer;
 	RID specular_debug;
 	RID clamp_totals_buffer;

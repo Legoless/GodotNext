@@ -106,6 +106,7 @@ class NextGIRelight {
 	RID probe_buffer;
 	RID params_buffer;
 	RID uniform_set;
+	RID far_uniform_set;
 	uint32_t light_capacity = 0;
 	uint32_t reuse_capacity = 0;
 	uint32_t page_capacity = 0;
@@ -164,6 +165,7 @@ public:
 	// Allocates radiance and mask rects for the instance's cards. Writes page_table on the record.
 	// Later parts of the same instance share the allocation. Returns UINT32_MAX when the mesh has no cards.
 	uint32_t assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element = UINT32_MAX);
+	void release_instance(RenderGeometryInstance *p_instance);
 
 	// Line 2b. Builds the scenario light set, schedules pages under the High caps and dispatches the relight shader.
 	void relight(RenderDataRD *p_render_data);

@@ -39,6 +39,9 @@
 		<member name="extra_cull_margin" type="float" setter="set_extra_cull_margin" getter="get_extra_cull_margin" default="0.0">
 			The extra distance added to the GeometryInstance3D's bounding box ([AABB]) to increase its cull box.
 		</member>
+		<member name="gi_far_field" type="int" setter="set_gi_far_field" getter="get_gi_far_field" enum="GeometryInstance3D.FarFieldMode" default="0">
+			Controls whether this instance contributes to NextGI's far-field proxies. [constant FAR_FIELD_AUTO] includes instances whose visibility range reaches the far shell. [constant FAR_FIELD_ALWAYS] forces inclusion, and [constant FAR_FIELD_NEVER] excludes the instance. Only static, GI-contributing, opaque geometry is eligible. Used only when [member ProjectSettings.rendering/global_illumination/nextgi/far_field] is enabled in the hardware ray-tracing tier.
+		</member>
 		<member name="gi_lightmap_scale" type="int" setter="set_lightmap_scale" getter="get_lightmap_scale" enum="GeometryInstance3D.LightmapScale" default="0" deprecated="Use [member gi_lightmap_texel_scale] instead.">
 			The texel density to use for lightmapping in [LightmapGI].
 		</member>
@@ -114,6 +117,15 @@
 		</constant>
 		<constant name="GI_MODE_DYNAMIC" value="2" enum="GIMode">
 			Dynamic global illumination mode. Use for dynamic objects that contribute to global illumination. This GI mode is only effective when using [VoxelGI], but it has a higher performance impact than [constant GI_MODE_STATIC]. When using other GI methods, this will act the same as [constant GI_MODE_DISABLED]. When using [LightmapGI], the object will receive indirect lighting using lightmap probes instead of using the baked lightmap texture.
+		</constant>
+		<constant name="FAR_FIELD_AUTO" value="0" enum="FarFieldMode">
+			Include the instance when its visibility range reaches the far shell. An unlimited visibility range is included.
+		</constant>
+		<constant name="FAR_FIELD_ALWAYS" value="1" enum="FarFieldMode">
+			Force an otherwise eligible instance to contribute to the far-field proxies, regardless of its visibility range.
+		</constant>
+		<constant name="FAR_FIELD_NEVER" value="2" enum="FarFieldMode">
+			Exclude the instance from the far-field proxies.
 		</constant>
 		<constant name="LIGHTMAP_SCALE_1X" value="0" enum="LightmapScale" deprecated="Use [member gi_lightmap_texel_scale] instead.">
 			The standard texel density for lightmapping with [LightmapGI].

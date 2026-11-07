@@ -54,7 +54,12 @@ layout(set = 0, binding = 28, std430) restrict readonly buffer NextGIGatherWRCPa
 	uint pad2;
 }
 nextgi_wrc;
+#ifdef MODE_FAR_FIELD
+layout(set = 0, binding = 39) uniform accelerationStructureEXT far_tlas;
+#define NEXTGI_TLAS far_tlas
+#else
 #define NEXTGI_TLAS nextgi_tlas
+#endif
 #define NEXTGI_WRC
 #include "nextgi_rt_inc.glsl"
 
@@ -156,6 +161,8 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	float fog_depth_end;
 	float fog_depth_curve;
 	vec4 fog_light_color;
+	float far_distance;
+	uint far_occlusion_only;
 }
 params;
 
@@ -694,7 +701,9 @@ void nextgi_feedback_main() {
 		vec3 radiance = nextgi_miss_radiance(dir);
 		float handoff = nextgi_wrc_handoff(origin);
 		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
-		if (nextgi_trace(origin, dir, tmax, hit)) {
+		if ((rec.rt_flags & 8u) != 0u) {
+			radiance = nextgi_miss_radiance(dir);
+		} else if (nextgi_trace(origin, dir, tmax, hit)) {
 			float ignored_confidence = 0.0;
 			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ignored_confidence);
 		} else {
@@ -837,26 +846,71 @@ void nextgi_reflect_main() {
 			trace_tmax = tmax - traveled;
 		}
 		NextGIHit hit;
+#ifdef MODE_FAR_FIELD
+		bool visibility_only = false;
+#endif
 		uint uncovered_count = 0u;
 		if (screen_hit) {
 			radiance = screen_color;
 			confidence = 1.0;
 			hit_distance = traveled;
 			atomicAdd(reflect_counters.hits, 1u);
-		} else if (nextgi_trace(trace_origin, direction, trace_tmax, hit)) {
-			radiance = nextgi_shade_hit(hit, direction, uncovered_count, confidence);
-			hit_distance = traveled + hit.t;
-			atomicAdd(reflect_counters.hits, 1u);
 		} else {
-			radiance = nextgi_wrc_sample(trace_origin + direction * trace_tmax, direction);
-			if (!nextgi_wrc_hit_cache) {
-				radiance = nextgi_miss_radiance(direction);
+			bool hit_result;
+#ifdef MODE_FAR_FIELD
+			hit = nextgi_trace_near_opaque(trace_origin, direction, trace_tmax);
+			hit_result = hit.hit;
+			if (!hit_result) {
+				visibility_only = params.far_occlusion_only != 0u;
+				hit_result = nextgi_trace(origin + direction * params.rt_radius, direction, max(params.far_distance - params.rt_radius, 0.0), hit);
+				if (hit_result) {
+					hit_distance = params.rt_radius + hit.t;
+				}
 			} else {
-				confidence = nextgi_wrc_confidence;
+				hit_distance = traveled + hit.t;
 			}
-			atomicAdd(reflect_counters.misses, 1u);
+#else
+			hit_result = nextgi_trace(trace_origin, direction, trace_tmax, hit);
+			hit_distance = traveled + hit.t;
+#endif
+			if (hit_result) {
+				atomicAdd(reflect_counters.hits, 1u);
+#ifdef MODE_FAR_FIELD
+				if (params.far_occlusion_only != 0u && (records.data[hit.custom_index].rt_flags & 8u) != 0u) {
+					radiance = vec3(0.0);
+					confidence = 1.0;
+				} else {
+					radiance = nextgi_shade_hit(hit, direction, uncovered_count, confidence);
+				}
+#else
+				radiance = nextgi_shade_hit(hit, direction, uncovered_count, confidence);
+#endif
+			} else {
+#ifdef MODE_FAR_FIELD
+				if (params.far_occlusion_only != 0u) {
+					radiance = vec3(1.0);
+					confidence = 1.0;
+				} else {
+					radiance = nextgi_miss_radiance(direction);
+				}
+#else
+				radiance = nextgi_wrc_sample(trace_origin + direction * trace_tmax, direction);
+				if (!nextgi_wrc_hit_cache) {
+					radiance = nextgi_miss_radiance(direction);
+				} else {
+					confidence = nextgi_wrc_confidence;
+				}
+#endif
+				atomicAdd(reflect_counters.misses, 1u);
+			}
 		}
+#ifdef MODE_FAR_FIELD
+		if (!visibility_only) {
+			radiance = nextgi_reflection_fog(radiance, origin + direction * hit_distance, hit_distance);
+		}
+#else
 		radiance = nextgi_reflection_fog(radiance, origin + direction * hit_distance, hit_distance);
+#endif
 	} else {
 		vec3 direction = reflect(-view_dir, normal);
 		radiance = nextgi_wrc_sample(origin, direction);
@@ -877,7 +931,7 @@ void main() {
 	nextgi_feedback_main();
 #elif defined(MODE_COVERAGE)
 	nextgi_coverage_main();
-#elif defined(MODE_REFLECT)
+#elif defined(MODE_REFLECT) || defined(MODE_FAR_FIELD)
 	nextgi_reflect_main();
 #else
 	nextgi_gather_main();

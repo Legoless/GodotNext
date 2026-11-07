@@ -497,6 +497,8 @@ public:
 	// The report is JSON. On success it includes the SPIR-V version word, pipeline creation and the shader name.
 	static bool run_toolchain_selftest(String &r_report);
 
+	void free_far_field();
+
 	NextGI();
 	~NextGI();
 };

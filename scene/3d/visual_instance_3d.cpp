@@ -494,6 +494,15 @@ GeometryInstance3D::LightmapScale GeometryInstance3D::get_lightmap_scale() const
 }
 #endif // DISABLE_DEPRECATED
 
+void GeometryInstance3D::set_gi_far_field(FarFieldMode p_mode) {
+	gi_far_field = p_mode;
+	RS::get_singleton()->instance_geometry_set_far_field(get_instance(), (RSE::FarFieldMode)p_mode);
+}
+
+GeometryInstance3D::FarFieldMode GeometryInstance3D::get_gi_far_field() const {
+	return gi_far_field;
+}
+
 void GeometryInstance3D::set_gi_mode(GIMode p_mode) {
 	switch (p_mode) {
 		case GI_MODE_DISABLED: {
@@ -610,6 +619,8 @@ void GeometryInstance3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_gi_mode", "mode"), &GeometryInstance3D::set_gi_mode);
 	ClassDB::bind_method(D_METHOD("get_gi_mode"), &GeometryInstance3D::get_gi_mode);
+	ClassDB::bind_method(D_METHOD("set_gi_far_field", "mode"), &GeometryInstance3D::set_gi_far_field);
+	ClassDB::bind_method(D_METHOD("get_gi_far_field"), &GeometryInstance3D::get_gi_far_field);
 
 	ClassDB::bind_method(D_METHOD("set_ignore_occlusion_culling", "ignore_culling"), &GeometryInstance3D::set_ignore_occlusion_culling);
 	ClassDB::bind_method(D_METHOD("is_ignoring_occlusion_culling"), &GeometryInstance3D::is_ignoring_occlusion_culling);
@@ -629,6 +640,7 @@ void GeometryInstance3D::_bind_methods() {
 
 	ADD_GROUP("Global Illumination", "gi_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "gi_mode", PROPERTY_HINT_ENUM, "Disabled,Static,Dynamic"), "set_gi_mode", "get_gi_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "gi_far_field", PROPERTY_HINT_ENUM, "Auto,Always,Never"), "set_gi_far_field", "get_gi_far_field");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gi_lightmap_texel_scale", PROPERTY_HINT_RANGE, "0.01,10,0.0001,or_greater"), "set_lightmap_texel_scale", "get_lightmap_texel_scale");
 #ifndef DISABLE_DEPRECATED
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "gi_lightmap_scale", PROPERTY_HINT_ENUM, String::utf8("1×,2×,4×,8×"), PROPERTY_USAGE_NONE), "set_lightmap_scale", "get_lightmap_scale");
@@ -649,6 +661,9 @@ void GeometryInstance3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(GI_MODE_DISABLED);
 	BIND_ENUM_CONSTANT(GI_MODE_STATIC);
 	BIND_ENUM_CONSTANT(GI_MODE_DYNAMIC);
+	BIND_ENUM_CONSTANT(FAR_FIELD_AUTO);
+	BIND_ENUM_CONSTANT(FAR_FIELD_ALWAYS);
+	BIND_ENUM_CONSTANT(FAR_FIELD_NEVER);
 
 	BIND_ENUM_CONSTANT(LIGHTMAP_SCALE_1X);
 	BIND_ENUM_CONSTANT(LIGHTMAP_SCALE_2X);

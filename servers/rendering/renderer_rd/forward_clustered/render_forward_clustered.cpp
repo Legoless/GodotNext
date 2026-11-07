@@ -5813,6 +5813,7 @@ RenderForwardClustered::RenderForwardClustered() {
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	next_gi.free_far_field();
 	nextgeo_cut.free_resources();
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);

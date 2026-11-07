@@ -41,6 +41,18 @@ NextGIHit nextgi_trace_opaque(vec3 origin, float tmin, vec3 dir, float tmax, uin
 	return hit;
 }
 
+#ifdef MODE_FAR_FIELD
+#define NEXTGI_NEAR_TRACE_RESTORE NEXTGI_TLAS
+#undef NEXTGI_TLAS
+#define NEXTGI_TLAS nextgi_tlas
+NextGIHit nextgi_trace_near_opaque(vec3 origin, vec3 dir, float tmax) {
+	return nextgi_trace_opaque(origin, 0.0, dir, tmax, 0xFFu);
+}
+#undef NEXTGI_TLAS
+#define NEXTGI_TLAS NEXTGI_NEAR_TRACE_RESTORE
+#undef NEXTGI_NEAR_TRACE_RESTORE
+#endif
+
 // Mirrors of the §6.3 records, the §8.3 cards and the D14 light (#31). std430, same layout as the C++ structs.
 struct NextGIInstanceRecord {
 	float object_to_world[12];
