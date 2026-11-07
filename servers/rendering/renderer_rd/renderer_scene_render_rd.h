@@ -192,6 +192,7 @@ private:
 
 public:
 	static RendererSceneRenderRD *get_singleton() { return singleton; }
+	RendererRD::CopyEffects *get_copy_effects() { return copy_effects; }
 
 	/* LIGHTING */
 

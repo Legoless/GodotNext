@@ -284,6 +284,7 @@ private:
 	NextGIFrontLayer *front_layer = nullptr;
 	NextGIReference *reference = nullptr;
 	NextGIWRC *wrc = nullptr;
+	uint32_t rough_reflection_mip_count = 1;
 	void _gather(RenderDataRD *p_render_data);
 	void _settings_changed();
 	void _integrate(RenderDataRD *p_render_data);
@@ -311,6 +312,10 @@ public:
 	// Environment value refines it further.
 	static float nextgi_effective_max_roughness(float p_quality, float p_environment) {
 		return CLAMP(MIN(p_quality, p_environment), 0.0f, 1.0f);
+	}
+	static float nextgi_roughness_to_lod(float p_roughness) {
+		const float roughness = CLAMP(p_roughness, 0.0f, 1.0f);
+		return roughness * roughness * 6.0f;
 	}
 	static uint32_t nextgi_quality_total_us(Quality p_quality, bool p_apple);
 	Quality get_quality_setting() const { return quality_setting; }
@@ -451,7 +456,8 @@ public:
 
 	// Whether a view runs the frame block (plan §6.1): the HWRT tier, an Environment with
 	// nextgi_enabled, and neither a reflection-probe render nor the unshaded debug draw.
-	// Such a view skips GI::process_gi and forces the depth + normal-roughness prepass.
+	// Such a view forces the depth + normal-roughness prepass. VoxelGI still
+	// runs through GI::process_gi when reflections-only mode supplies the diffuse lighting.
 	static bool view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded);
 
 	// RB_TEX_AMBIENT and RB_TEX_REFLECTION have the size GI::process_gi allocates: the internal

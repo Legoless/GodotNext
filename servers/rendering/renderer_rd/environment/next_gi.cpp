@@ -35,6 +35,7 @@
 
 // GodotNext: nextgi_rt_scene
 #include "core/config/project_settings.h"
+#include "core/io/image.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
@@ -42,6 +43,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -621,6 +623,7 @@ Dictionary NextGI::get_tier_info() const {
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
 	info["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
 	info["ray_query_shaders_initialized"] = ray_query_shaders_initialized;
+	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
 		const NextGIRTScene::Stats &rt_stats = rt_scene->get_stats();
@@ -724,6 +727,22 @@ void NextGI::_integrate(RenderDataRD *p_render_data) {
 	if (gather != nullptr) {
 		gather->integrate(p_render_data);
 	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (rb.is_null() || is_reflections_only() || is_reflections_enabled()) {
+		return;
+	}
+	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+	ERR_FAIL_NULL(scene);
+	const uint32_t layers = rb->get_view_count();
+	const uint32_t mipmaps = rb->get_texture_format(RB_SCOPE_GI, RB_TEX_AMBIENT).mipmaps;
+	for (uint32_t layer = 0; layer < layers; layer++) {
+		RID source = rb->get_texture_slice(RB_SCOPE_GI, RB_TEX_AMBIENT, layer, 0);
+		for (uint32_t mip = 1; mip < mipmaps; mip++) {
+			const RID destination = rb->get_texture_slice(RB_SCOPE_GI, RB_TEX_AMBIENT, layer, mip);
+			scene->get_copy_effects()->make_mipmap(source, destination, rb->get_texture_slice_size(RB_SCOPE_GI, RB_TEX_AMBIENT, mip));
+			source = destination;
+		}
+	}
 }
 
 void NextGI::_relight_src(RenderDataRD *p_render_data) {
@@ -775,9 +794,11 @@ void NextGI::ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_ha
 	if (!p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 		const Size2i size = get_gi_buffer_size(p_render_buffers->get_internal_size(), p_half_resolution);
 		const uint32_t usage = get_gi_buffer_usage_bits();
-		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_AMBIENT, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
+		const uint32_t mipmaps = Image::get_image_required_mipmaps(size.x, size.y, Image::FORMAT_RGBAH);
+		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_AMBIENT, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size, 0, mipmaps);
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_REFLECTION, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, RenderingDevice::DATA_FORMAT_R16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
+		rough_reflection_mip_count = mipmaps;
 		rbgi->using_half_size_gi = p_half_resolution;
 	}
 }

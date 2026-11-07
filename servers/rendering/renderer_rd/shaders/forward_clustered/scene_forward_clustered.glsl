@@ -1956,8 +1956,9 @@ void fragment_shader(in SceneData scene_data) {
 			}
 		}
 	}
-#else
+#endif // USE_LIGHTMAP
 
+#ifndef USE_LIGHTMAP
 	if (sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_SDFGI)) { //has lightmap capture
 
 		//make vertex orientation the world one, but still align to camera
@@ -2064,10 +2065,11 @@ void fragment_shader(in SceneData scene_data) {
 		indirect_specular_light = spec_accum.rgb;
 		ambient_light = amb_accum.rgb;
 	}
+#endif // !USE_LIGHTMAP
 
 	vec4 nextgi_buffer_ambient = vec4(0.0);
 	vec4 nextgi_buffer_reflection = vec4(0.0);
-	if (!sc_use_forward_gi() && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_GI_BUFFERS)) { //use GI buffers
+	if (!sc_use_forward_gi() && (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_GI_BUFFERS) || (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI) && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)))) { //use GI buffers
 
 		vec2 coord;
 
@@ -2110,19 +2112,22 @@ void fragment_shader(in SceneData scene_data) {
 
 		nextgi_buffer_ambient = buffer_ambient;
 		nextgi_buffer_reflection = buffer_reflection;
-		if (!bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
-			ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
+		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION)) {
+			if (!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+				ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
+			}
 			// GodotNext: nextgi_reflection_behaviours (#132). With NextGI
 			// reflections and SSR both off, the GI probe radiance is the rough
 			// specular term instead of unshadowed sky.
-			vec4 rough_reflection = buffer_reflection;
-			if (rough_reflection.a <= 0.0) {
-				rough_reflection = buffer_ambient;
-			}
-			indirect_specular_light = mix(indirect_specular_light, rough_reflection.rgb, rough_reflection.a);
+			float rough_reflection_lod = clamp(roughness, 0.0, 1.0);
+			rough_reflection_lod *= rough_reflection_lod * 6.0;
+#ifdef USE_MULTIVIEW
+			indirect_specular_light = textureLod(sampler2DArray(ambient_buffer, SAMPLER_LINEAR_CLAMP), vec3(coord, ViewIndex), rough_reflection_lod).rgb;
+#else // USE_MULTIVIEW
+			indirect_specular_light = textureLod(sampler2D(ambient_buffer, SAMPLER_LINEAR_CLAMP), coord, rough_reflection_lod).rgb;
+#endif // USE_MULTIVIEW
 		}
 	}
-#endif // !USE_LIGHTMAP
 
 	if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO)) {
 #ifdef USE_MULTIVIEW
@@ -2243,13 +2248,14 @@ void fragment_shader(in SceneData scene_data) {
 		}
 #endif
 
-#if !defined(USE_LIGHTMAP)
-		if (ambient_accum.a > 0.0) {
+		if (!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP) && ambient_accum.a > 0.0) {
 			ambient_light = ambient_accum.rgb;
 		}
-		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
-			// Reflection probes stay in the mix by (1 - NextGI confidence). Confidence is RB_TEX_AMBIENT.a.
-			ambient_light = mix(ambient_light, nextgi_buffer_ambient.rgb, nextgi_buffer_ambient.a);
+		if (bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI) && !bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION)) {
+			if (!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+				// Reflection probes stay in the mix by (1 - NextGI confidence). Confidence is RB_TEX_AMBIENT.a.
+				ambient_light = mix(ambient_light, nextgi_buffer_ambient.rgb, nextgi_buffer_ambient.a);
+			}
 			vec4 nextgi_rough_reflection = nextgi_buffer_reflection;
 			if (nextgi_rough_reflection.a <= 0.0) {
 				nextgi_rough_reflection = nextgi_buffer_ambient;
@@ -2257,10 +2263,9 @@ void fragment_shader(in SceneData scene_data) {
 			indirect_specular_light = mix(indirect_specular_light, nextgi_rough_reflection.rgb, nextgi_rough_reflection.a);
 		}
 		// GodotNext: nextgi_alpha_policy (#61). Cut fallback: WRC irradiance at the object center.
-		if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {
+		if (!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP) && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {
 			ambient_light = nextgi_translucency_volume(screen_uv, -vertex_interp.z);
 		}
-#endif
 	}
 
 	//finalize ambient light here

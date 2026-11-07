@@ -813,6 +813,7 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
 			ss_flags |= (!nextgi_view && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
 			ss_flags |= nextgi_view ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
+			ss_flags |= nextgi_view && !RendererRD::NextGI::is_reflections_enabled() && !environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
 
@@ -1761,8 +1762,8 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	bool render_shadows = p_render_data->directional_shadows.size() || p_render_data->shadows.size();
 	bool render_gi = rb.is_valid() && p_use_gi;
 	// GodotNext: nextgi_frame_block
-	// NextGI views skip process_gi; the frame block below writes the GI buffers instead.
-	render_gi = render_gi && !p_use_nextgi;
+	// NextGI writes these buffers except when VoxelGI supplies diffuse lighting in reflections-only mode.
+	render_gi = render_gi && (!p_use_nextgi || RendererRD::NextGI::is_reflections_only());
 
 	if (render_shadows && render_gi) {
 		RENDER_TIMESTAMP("Render GI + Render Directional/SpotLight Shadows (Parallel)");
@@ -1968,8 +1969,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool ce_needs_normal_roughness = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_ROUGHNESS);
 	bool ce_needs_separate_specular = _compositor_effects_has_flag(p_render_data, RSE::COMPOSITOR_EFFECT_FLAG_NEEDS_SEPARATE_SPECULAR);
 
-	// GodotNext: nextgi_forward — a NextGI view does not run SDFGI or VoxelGI.
+	// GodotNext: nextgi_forward — a NextGI view does not run SDFGI. VoxelGI
+	// supplies diffuse lighting only in reflections-only mode.
 	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
+	const bool nextgi_voxel_gi = nextgi_view && RendererRD::NextGI::is_reflections_only();
 
 	// sdfgi first
 	if (!nextgi_view) {
@@ -2003,7 +2006,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 		}
 
-		if (!nextgi_view) {
+		if (!nextgi_view || nextgi_voxel_gi) {
 			gi.setup_voxel_gi_instances(p_render_data, p_render_data->render_buffers, p_render_data->scene_data->cam_transform, *p_render_data->voxel_gi_instances, p_render_data->voxel_gi_count);
 		}
 	} else {
@@ -2138,7 +2141,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			nextgi_active = using_nextgi;
 			if (using_nextgi) {
 				using_sdfgi = false;
-				using_voxelgi = false;
+				using_voxelgi = nextgi_voxel_gi;
 				if (using_ssil) {
 					WARN_PRINT_ONCE("Screen-space indirect lighting is disabled for views that use NextGI.");
 				}

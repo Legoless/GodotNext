@@ -2803,3 +2803,12 @@ TEST_CASE("[NextGI] Reflections setting is readable") {
 	// covered by the nextgi_mode testbed scene.
 	CHECK(NextGI::is_reflections_enabled());
 }
+
+TEST_CASE("[NextGI] Rough reflection filtering follows roughness") {
+	using namespace RendererRD;
+	CHECK(Math::is_equal_approx(NextGI::nextgi_roughness_to_lod(0.0f), 0.0f));
+	CHECK(Math::is_equal_approx(NextGI::nextgi_roughness_to_lod(0.5f), 1.5f));
+	CHECK(Math::is_equal_approx(NextGI::nextgi_roughness_to_lod(1.0f), 6.0f));
+	CHECK(Math::is_equal_approx(NextGI::nextgi_roughness_to_lod(-1.0f), 0.0f));
+	CHECK(NextGI::is_reflections_enabled());
+}
