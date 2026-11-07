@@ -19,6 +19,7 @@ run/flush_stdout_on_print=true
 [autoload]
 
 Harness="*res://harness/harness.gd"
+SSAAReference="*res://harness/ssaa_reference.gd"
 
 [display]
 

@@ -2808,6 +2808,10 @@ DisplayServerEnums::WindowID DisplayServerMacOS::get_focused_window() const {
 }
 
 bool DisplayServerMacOS::window_can_draw(DisplayServerEnums::WindowID p_window) const {
+	// GodotNext: background_mode
+	if (godotnext_background_mode() && !godotnext_background_hidden()) {
+		return [windows[p_window].window_object isVisible];
+	}
 	return windows[p_window].is_visible;
 }
 
@@ -2815,7 +2819,8 @@ bool DisplayServerMacOS::can_any_window_draw() const {
 	_THREAD_SAFE_METHOD_
 
 	for (const KeyValue<DisplayServerEnums::WindowID, WindowData> &E : windows) {
-		if (E.value.is_visible) {
+		// GodotNext: background_mode
+		if (E.value.is_visible || (godotnext_background_mode() && !godotnext_background_hidden() && [E.value.window_object isVisible])) {
 			return true;
 		}
 	}

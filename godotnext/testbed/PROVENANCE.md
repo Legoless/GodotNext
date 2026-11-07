@@ -244,3 +244,27 @@ baked scene file on a plain run — they still build and verify it in
 memory and rewrite its patch JSONs — and `-- --replace-baked`
 overwrites it for a deliberate re-bake cycle; the README says how to
 re-bake.
+
+
+## Upscaler Torture (#95)
+
+Every entry below is original content generated in this repository, with no third-party assets. The scene and all generated resources use seed `0x6E657874`; the date and host apply to every row: 2026-11-07, the Apple M5 Max.
+
+| Path | Generator / author | License | Date | Host |
+|---|---|---|---|---|
+| `generators/upscaler_torture.gd` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/runners/upscaler_jobs.sh` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/ssaa_reference.gd` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/velocity_dump.gd` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/velocity_dump.glsl` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/metrics/q19_upscaler_flip.py` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/metrics/q21_invalid_mv.py` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `harness/metrics/tests/test_upscaler_scripts.py` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/torture_timeline.gd` | hand-authored for #95 | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/upscaler_torture.tscn` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/chain_link.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/checker.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/concentric_moire.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/emissive_stripes.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/wire_2mm.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+| `scenes/upscaler_torture/character_mesh.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |

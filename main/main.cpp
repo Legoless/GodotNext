@@ -4892,6 +4892,9 @@ int Main::start() {
 				movie_size.height = window_height_override;
 			}
 		}
+		if (force_res) {
+			movie_size = window_size;
+		}
 		movie_writer->begin(movie_size, fixed_fps, Engine::get_singleton()->get_write_movie_path());
 	}
 
@@ -5126,17 +5129,20 @@ bool Main::iteration() {
 								 DisplayServer::get_singleton()->has_additional_outputs()) &&
 			RenderingServer::get_singleton()->is_render_loop_enabled();
 
+	bool drew_frame = false;
 	if (wants_present || has_pending_resources_for_processing) {
 		wants_present |= force_redraw_requested;
 		if ((!force_redraw_requested) && OS::get_singleton()->is_in_low_processor_usage_mode()) {
 			if (RenderingServer::get_singleton()->has_changed()) {
 				RenderingServer::get_singleton()->draw(wants_present, scaled_step); // flush visual commands
 				Engine::get_singleton()->increment_frames_drawn();
+				drew_frame = true;
 			}
 		} else {
 			RenderingServer::get_singleton()->draw(wants_present, scaled_step); // flush visual commands
 			Engine::get_singleton()->increment_frames_drawn();
 			force_redraw_requested = false;
+			drew_frame = true;
 		}
 	}
 
@@ -5190,7 +5196,7 @@ bool Main::iteration() {
 
 	iterating--;
 
-	if (movie_writer) {
+	if (movie_writer && drew_frame) {
 		GodotProfileZoneGrouped(_profile_zone, "movie_writer->add_frame");
 		movie_writer->add_frame();
 	}

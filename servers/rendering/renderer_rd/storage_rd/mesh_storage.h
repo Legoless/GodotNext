@@ -34,11 +34,11 @@
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
 // GodotNext: nextgi_rt_arena
-#include "servers/rendering/renderer_compositor.h"
 #include "core/math/mesh_sdf_builder.h"
 #include "core/object/worker_thread_pool.h"
 #include "core/templates/hash_set.h"
 #include "core/templates/safe_refcount.h"
+#include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/renderer_rd/shaders/skeleton.glsl.gen.h"
@@ -95,6 +95,7 @@ private:
 	static MeshStorage *singleton;
 
 	RID default_rd_storage_buffer;
+	RID default_rt_arena_buffer;
 
 	/* Mesh */
 

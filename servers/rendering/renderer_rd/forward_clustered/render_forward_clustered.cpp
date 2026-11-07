@@ -4621,6 +4621,37 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 		u.append_id(instance_buffer);
 		uniforms.push_back(u);
 	}
+	{
+		const RID black_3d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
+		for (int i = 0; i < 3; i++) {
+			RD::Uniform u;
+			u.binding = 39 + i;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.append_id(black_3d);
+			uniforms.push_back(u);
+		}
+		RD::Uniform u;
+		u.binding = 42;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(scene_shader.default_material_feedback_buffer);
+		uniforms.push_back(u);
+		for (int i = 0; i < 3; i++) {
+			RD::Uniform volume_uniform;
+			volume_uniform.binding = 43 + i;
+			volume_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			volume_uniform.append_id(black_3d);
+			uniforms.push_back(volume_uniform);
+		}
+		const RID nearest_sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+		for (uint32_t i = 0; i < 3; i++) {
+			RD::Uniform layer_uniform;
+			layer_uniform.binding = 46 + i;
+			layer_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+			layer_uniform.append_id(nearest_sampler);
+			layer_uniform.append_id(texture_storage->texture_rd_get_default(i == 2 ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
+			uniforms.push_back(layer_uniform);
+		}
+	}
 
 	if (scene_shader.default_shader_sdfgi_rd.is_null()) {
 		// The variant for SDF from the default material should only be retrieved when SDFGI is required.

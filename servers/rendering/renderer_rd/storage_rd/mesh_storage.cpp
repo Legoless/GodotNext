@@ -56,6 +56,7 @@ MeshStorage::MeshStorage() :
 	nextgi_rt_enabled = nextgi_rt_should_enable(bool(GLOBAL_GET("rendering/global_illumination/nextgi/enabled")), RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY));
 
 	default_rd_storage_buffer = RD::get_singleton()->storage_buffer_create(sizeof(uint32_t) * 4);
+	default_rt_arena_buffer = RD::get_singleton()->storage_buffer_create(sizeof(uint32_t) * 4);
 
 	//default rd buffers
 	{
@@ -221,6 +222,7 @@ MeshStorage::~MeshStorage() {
 	skeleton_shader.shader.version_free(skeleton_shader.version);
 
 	RD::get_singleton()->free_rid(default_rd_storage_buffer);
+	RD::get_singleton()->free_rid(default_rt_arena_buffer);
 
 	// GodotNext: nextgi_rt_arena
 	for (const NextGIRTChunk &chunk : nextgi_rt_chunks) {
@@ -1715,7 +1717,7 @@ void MeshStorage::update_mesh_instances() {
 					arena_uniform.binding = 0;
 					arena_uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 					RID chunk_buffer = write_rt_arena ? mesh_nextgi_rt_get_chunk_buffer(mi->surfaces[i].rt_arena_chunk) : RID();
-					arena_uniform.append_id(chunk_buffer.is_valid() ? chunk_buffer : default_rd_storage_buffer);
+					arena_uniform.append_id(chunk_buffer.is_valid() ? chunk_buffer : default_rt_arena_buffer);
 					mi->surfaces[i].rt_arena_uniform_set = RD::get_singleton()->uniform_set_create(Vector<RD::Uniform>({ arena_uniform }), skeleton_shader.version_shader[mode], SkeletonShader::UNIFORM_SET_RT_ARENA);
 				}
 				RID arena_set = mi->surfaces[i].rt_arena_uniform_set;

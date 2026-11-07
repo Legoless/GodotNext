@@ -1,0 +1,13 @@
+[remap]
+
+importer="glsl"
+type="RDShaderFile"
+uid="uid://1djj4jmw4jn7"
+path="res://.godot/imported/velocity_dump.glsl-60bc780b35bd11738a8913a76e0d0418.res"
+
+[deps]
+
+source_file="res://harness/velocity_dump.glsl"
+dest_files=["res://.godot/imported/velocity_dump.glsl-60bc780b35bd11738a8913a76e0d0418.res"]
+
+[params]

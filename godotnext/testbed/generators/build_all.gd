@@ -37,6 +37,7 @@ const RuntimeMeshSpec = preload("res://scenes/swrt_runtime_mesh/spec.gd")
 const SdfMeshes := preload("res://generators/sdf_mesh_library.gd")
 const P3Content := preload("res://generators/build_p3_content.gd")
 const PVContent := preload("res://generators/build_pv_content.gd")
+const UpscalerTorture := preload("res://generators/upscaler_torture.gd")
 
 const Q1_PATCH_COUNT := 128
 
@@ -48,6 +49,10 @@ func _init() -> void:
 
 
 func _run() -> void:
+	if OS.get_cmdline_user_args().has("--only=upscaler_torture"):
+		_save_upscaler_torture()
+		quit(0 if _failures.is_empty() else 1)
+		return
 	_check_contracts()
 	var color_box_dir := "res://scenes/color_box_room"
 	var jobs: Array[Dictionary] = [
@@ -86,6 +91,7 @@ func _run() -> void:
 		_fail(failure)
 	for failure in await PVContent.save_all(self):
 		_fail(failure)
+	_save_upscaler_torture()
 	if _failures.is_empty():
 		print("build_all: all scenes built and verified.")
 		quit(0)
@@ -93,6 +99,14 @@ func _run() -> void:
 		for failure in _failures:
 			push_error("build_all: " + failure)
 		quit(1)
+
+
+func _save_upscaler_torture() -> void:
+	var built := UpscalerTorture.build()
+	var err := Scaffold.save_scene(built["root"], UpscalerTorture.SCENE_PATH)
+	if err != OK:
+		_fail("upscaler_torture: save failed with error %d." % err)
+	built["root"].free()
 
 
 func _fail(p_message: String) -> void:

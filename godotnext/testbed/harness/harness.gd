@@ -24,6 +24,7 @@ var _seed_value := 1
 var _frames := 0
 var _warmup := 0
 var _capture_frames: Array = []
+var _output_resolution: Array = []
 
 var _phase := Phase.BOOT
 var _wait_goal := WaitGoal.INITIAL
@@ -52,7 +53,7 @@ var _nextgi_counters_present := false
 
 
 func _ready() -> void:
-	var parsed: Dictionary = ArgsScript.parse(OS.get_cmdline_user_args())
+	var parsed: Dictionary = ArgsScript.parse(OS.get_cmdline_user_args(), OS.get_cmdline_args())
 	if not bool(parsed["present"]):
 		set_process(false)
 		return
@@ -70,7 +71,12 @@ func _ready() -> void:
 	_frames = int(args["frames"])
 	_warmup = int(args["warmup"])
 	_capture_frames = args["capture_frames"]
+	_output_resolution = args.get("output_resolution", [])
 	_load_job()
+	_job["velocity_dump"] = args.get("velocity_dump", "0")
+	if String(_job["velocity_dump"]) == "1" and _mode != "capture":
+		_fail("--velocity-dump requires --mode=capture")
+		return
 	DirAccess.make_dir_recursive_absolute(_out)
 	OS.low_processor_usage_mode = false
 	RenderingServer.frame_post_draw.connect(_on_frame_post_draw)
@@ -78,6 +84,10 @@ func _ready() -> void:
 
 func is_driving_animation() -> bool:
 	return _active and not _failed and _driving
+
+
+func is_settling() -> bool:
+	return _active and not _failed and _phase == Phase.SETTLE
 
 
 func get_animation_frame() -> int:
@@ -119,6 +129,12 @@ func _exit_tree() -> void:
 
 
 func _boot() -> void:
+	if _output_resolution.size() == 2:
+		var root := get_tree().root
+		if root != null:
+			root.content_scale_mode = Window.CONTENT_SCALE_MODE_VIEWPORT
+			root.content_scale_aspect = Window.CONTENT_SCALE_ASPECT_KEEP
+			root.content_scale_size = Vector2i(int(_output_resolution[0]), int(_output_resolution[1]))
 	_seed_window()
 	if _mode == "capture":
 		var viewport := get_viewport()
@@ -131,10 +147,37 @@ func _boot() -> void:
 	_request_scene(current)
 
 
+func _attach_velocity_dump(record_csv: bool) -> bool:
+	if String(_job.get("velocity_dump", "0")) != "1":
+		return true
+	var scene := get_tree().current_scene
+	if scene == null:
+		_fail("--velocity-dump requires a loaded scene")
+		return false
+	var environments := scene.find_children("*", "WorldEnvironment", true, true)
+	if environments.is_empty():
+		_fail("--velocity-dump requires a WorldEnvironment")
+		return false
+	var world := environments[0] as WorldEnvironment
+	if world.compositor == null:
+		world.compositor = Compositor.new()
+	else:
+		world.compositor = world.compositor.duplicate() as Compositor
+	var effect = load("res://harness/velocity_dump.gd").new()
+	effect.output_dir = _out if record_csv else ""
+	effect.max_frames = (_warmup + _frames) if record_csv else 0
+	var effects: Array[CompositorEffect] = world.compositor.compositor_effects.duplicate()
+	effects.append(effect)
+	world.compositor.compositor_effects = effects
+	return true
+
+
 func _enter_loaded_scene() -> void:
 	if _mode == "capture":
 		_phase = Phase.SETTLE
 		_reset_settle()
+		if not _attach_velocity_dump(false):
+			return
 		_apply_capture_view()
 		print("harness: settling until pipeline compilations stay flat for %d frames" % SETTLE_FLAT)
 	else:
@@ -163,6 +206,8 @@ func _poll_wait_scene() -> void:
 		_driving = true
 		_animation_frame = 0
 		_seed_window()
+		if not _attach_velocity_dump(true):
+			return
 		_apply_capture_view()
 		return
 	_enter_loaded_scene()
@@ -374,7 +419,7 @@ func _apply_capture_view() -> void:
 		return
 	viewport.use_hdr_2d = true
 	viewport.use_debanding = false
-	viewport.use_taa = false
+	viewport.use_taa = bool(ProjectSettings.get_setting("rendering/anti_aliasing/quality/use_taa", false))
 	viewport.screen_space_aa = Viewport.SCREEN_SPACE_AA_DISABLED
 	viewport.msaa_3d = Viewport.MSAA_DISABLED
 	var scene := get_tree().current_scene
@@ -387,6 +432,9 @@ func _apply_capture_view() -> void:
 		apply_capture_environment(environment)
 		print("harness: capture fog_enabled=%s volumetric_fog_enabled=%s" % [environment.fog_enabled, environment.volumetric_fog_enabled])
 	_activate_camera(scene)
+	var ssaa := get_node_or_null("/root/SSAAReference")
+	if ssaa != null and ssaa.has_method("apply_if_active"):
+		ssaa.call("apply_if_active", viewport, scene)
 
 
 ## Capture-mode environment (§13, #240): linear tonemap at exposure 1,
@@ -435,6 +483,8 @@ func _seed_nodes(node: Node) -> void:
 	for property in node.get_property_list():
 		if String(property["name"]) == "seed" and int(property["type"]) == TYPE_INT:
 			node.set("seed", _seed_value)
+			if node is GPUParticles3D:
+				(node as GPUParticles3D).restart(true)
 			break
 	for child in node.get_children():
 		_seed_nodes(child)
@@ -505,6 +555,8 @@ func _build_manifest() -> Dictionary:
 		"scaling_3d_mode": scaling_mode,
 		"scaling_3d_scale": scaling_scale,
 		"output_size": output_size,
+		"msaa_3d": int(viewport.msaa_3d) if viewport != null else 0,
+		"video_memory_used": int(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)),
 	}
 	if _job.has("dlss") and typeof(_job["dlss"]) == TYPE_DICTIONARY:
 		manifest["dlss"] = (_job["dlss"] as Dictionary).duplicate(true)

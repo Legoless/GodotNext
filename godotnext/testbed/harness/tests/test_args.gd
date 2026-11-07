@@ -138,6 +138,49 @@ func _test_parse() -> void:
 		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--instances=0",
 	]))["ok"]), "zero instances fails")
 
+	var torture_flags: Dictionary = ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://scenes/upscaler_torture/upscaler_torture.tscn", "--out=/tmp/out", "--frames=410",
+		"--velocity-dump", "--reference=ssaa", "--msaa=8", "--mask=alpha_particles", "--upscaler=fsr2", "--scale=0.5",
+	]))
+	_check(bool(torture_flags["ok"]), "upscaler capture flags parse: %s" % torture_flags["error"])
+	if bool(torture_flags["ok"]):
+		var args: Dictionary = torture_flags["args"]
+		_check(String(args["velocity_dump"]) == "1", "bare velocity-dump flag")
+		_check(String(args["reference"]) == "ssaa", "SSAA reference parsed")
+		_check(String(args["msaa"]) == "8", "MSAA parsed")
+		_check(String(args["mask"]) == "alpha_particles", "mask parsed")
+		_check(String(args["upscaler"]) == "fsr2", "upscaler parsed")
+		_check(is_equal_approx(float(args["scale"]), 0.5), "scale parsed")
+
+	var engine_inferred: Dictionary = ArgsScript.parse(
+		PackedStringArray(["--mode=capture", "--out=/tmp/out", "--seed=1", "--velocity-dump"]),
+		PackedStringArray([
+			"--path", "godotnext/testbed", "--resolution", "2560x1440", "--quit-after", "720",
+			"res://scenes/upscaler_torture/upscaler_torture.tscn", "--",
+			"--mode=capture", "--out=/tmp/out", "--seed=1", "--velocity-dump",
+		])
+	)
+	_check(bool(engine_inferred["ok"]), "positional scene + quit-after inferred from engine args")
+	if bool(engine_inferred["ok"]):
+		var args: Dictionary = engine_inferred["args"]
+		_check(String(args["scene"]) == "res://scenes/upscaler_torture/upscaler_torture.tscn", "engine scene inferred")
+		_check(int(args["frames"]) == 600, "quit-after capture defaults to 600 frames")
+		_check(args["output_resolution"] == [2560, 1440], "engine --resolution inferred")
+
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--msaa=2",
+	]))["ok"]), "invalid --msaa fails")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--mask=unknown",
+	]))["ok"]), "invalid --mask fails")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--upscaler=bicubic",
+	]))["ok"]), "invalid --upscaler fails")
+
+	var ssaa_script = load("res://harness/ssaa_reference.gd")
+	_check(not ssaa_script._has_upscaler_or_reference_flags(captured["args"]), "plain capture leaves SSAAReference idle")
+	_check(ssaa_script._has_upscaler_or_reference_flags(torture_flags["args"]), "upscaler flags activate SSAAReference")
+
 
 func _sample_manifest() -> Dictionary:
 	return {
