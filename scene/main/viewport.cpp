@@ -5110,6 +5110,11 @@ Viewport::Scaling3DMode Viewport::get_scaling_3d_mode() const {
 	return scaling_3d_mode;
 }
 
+void Viewport::reset_temporal_history() {
+	ERR_MAIN_THREAD_GUARD;
+	RS::get_singleton()->viewport_reset_temporal_history(viewport);
+}
+
 void Viewport::set_scaling_3d_scale(float p_scaling_3d_scale) {
 	ERR_MAIN_THREAD_GUARD;
 	// Clamp to reasonable values that are actually useful.
@@ -5372,6 +5377,7 @@ void Viewport::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_scaling_3d_mode", "scaling_3d_mode"), &Viewport::set_scaling_3d_mode);
 	ClassDB::bind_method(D_METHOD("get_scaling_3d_mode"), &Viewport::get_scaling_3d_mode);
+	ClassDB::bind_method(D_METHOD("reset_temporal_history"), &Viewport::reset_temporal_history);
 
 	ClassDB::bind_method(D_METHOD("set_scaling_3d_scale", "scale"), &Viewport::set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("get_scaling_3d_scale"), &Viewport::get_scaling_3d_scale);

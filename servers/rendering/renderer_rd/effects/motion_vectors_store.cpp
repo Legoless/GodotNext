@@ -52,7 +52,7 @@ MotionVectorsStore::~MotionVectorsStore() {
 
 void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 		const Projection &p_current_projection, const Transform3D &p_current_transform,
-		const Projection &p_previous_projection, const Transform3D &p_previous_transform, bool p_preserve_written) {
+		const Projection &p_previous_projection, const Transform3D &p_previous_transform, bool p_preserve_written, bool p_reset) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	ERR_FAIL_NULL(material_storage);
 
@@ -66,6 +66,8 @@ void MotionVectorsStore::process(Ref<RenderSceneBuffersRD> p_render_buffers,
 	{
 		push_constant.resolution[0] = internal_size.width;
 		push_constant.resolution[1] = internal_size.height;
+		push_constant.pad[0] = p_reset ? 1 : 0;
+		push_constant.pad[1] = 0;
 
 		Projection correction;
 		correction.set_depth_correction(true, true, false);

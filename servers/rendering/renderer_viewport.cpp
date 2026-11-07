@@ -30,8 +30,6 @@
 
 #include "renderer_viewport.h"
 
-#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
-
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
 #include "core/math/transform_interpolator.h"
@@ -41,6 +39,8 @@
 #include "servers/display/display_server.h"
 #include "servers/rendering/renderer_canvas_cull.h"
 #include "servers/rendering/renderer_compositor.h"
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_scene_occlusion_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_method.h"
@@ -219,18 +219,28 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				float effective_scale = scaling_3d_scale;
 				RSE::ViewportScaling3DReason module_reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
 				if (upscaler != nullptr) {
-					module_reason = upscaler->get_availability(p_viewport->view_count, scaling_3d_scale, effective_scale);
-					scaling_3d_scale = effective_scale;
+					Ref<RenderSceneBuffersRD> render_buffers = p_viewport->render_buffers;
+					module_reason = upscaler->get_context_error(render_buffers.ptr());
+					if (module_reason == RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
+						module_reason = upscaler->get_availability(p_viewport->view_count, scaling_3d_scale, effective_scale);
+						scaling_3d_scale = effective_scale;
+					}
 				}
 				const RSE::ViewportScaling3DReason reason = nextgi_resolve_dlss_reason(
-						RD::get_singleton()->get_device_api_name() == "Vulkan", upscaler != nullptr, module_reason,
-						scaling_3d_scale, p_viewport->view_count, p_viewport->size.width, p_viewport->size.height);
+						upscaler != nullptr && upscaler->supports_api(RD::get_singleton()->get_device_api_name()), upscaler != nullptr, module_reason,
+						scaling_3d_scale, p_viewport->view_count, p_viewport->size.width, p_viewport->size.height,
+						upscaler != nullptr && upscaler->supports_multiview());
 				if (reason != RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
 					p_viewport->scaling_3d_reason = reason;
 					static uint32_t logged_dlss_reasons = 0;
 					if ((logged_dlss_reasons & (1u << reason)) == 0) {
 						logged_dlss_reasons |= 1u << reason;
 						WARN_PRINT(vformat("DLSS 3D scaling is unavailable (%s). Falling back to a supported upscaler.", scaling_3d_reason_name(reason)));
+					}
+					if (upscaler != nullptr) {
+						Ref<RenderSceneBuffersRD> render_buffers = p_viewport->render_buffers;
+						upscaler->free_contexts(render_buffers.ptr());
+						upscaler->clear_context_error(render_buffers.ptr());
 					}
 					if (RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL)) {
 						scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL;
@@ -331,6 +341,15 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 					render_width = CLAMP(target_width * scaling_3d_scale, 1, 16384);
 					render_height = CLAMP(target_height * scaling_3d_scale, 1, 16384);
 					break;
+				case RSE::VIEWPORT_SCALING_3D_MODE_DLSS: {
+					target_width = p_viewport->size.width;
+					target_height = p_viewport->size.height;
+					TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+					ERR_FAIL_NULL(upscaler);
+					const Size2i render_size = upscaler->get_render_size(p_viewport->size, scaling_3d_scale);
+					render_width = render_size.width;
+					render_height = render_size.height;
+				} break;
 				case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL:
 				case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL:
 				case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
@@ -359,10 +378,12 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			}
 
 			uint32_t jitter_phase_count = 0;
-			if (scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
-				// Implementation has been copied from ffxFsr2GetJitterPhaseCount.
-				// Also used for MetalFX Temporal scaling.
-				jitter_phase_count = uint32_t(8.0f * std::pow(float(target_width) / render_width, 2.0f));
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+				ERR_FAIL_NULL(upscaler);
+				jitter_phase_count = upscaler->jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
+			} else if (scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
+				jitter_phase_count = nextgi_temporal_jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height), false);
 			} else if (use_taa) {
 				// Default jitter count for TAA.
 				jitter_phase_count = 16;
@@ -1061,6 +1082,14 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			}
 		}
 
+		if (vp->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS && vp->render_buffers.is_valid()) {
+			Ref<RenderSceneBuffersRD> render_buffers = vp->render_buffers;
+			TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+			if (upscaler != nullptr && upscaler->get_context_error(render_buffers.ptr()) != RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
+				_configure_3d_render_buffers(vp);
+			}
+		}
+
 		if (vp->update_mode == RSE::VIEWPORT_UPDATE_ONCE) {
 			vp->update_mode = RSE::VIEWPORT_UPDATE_DISABLED;
 		}
@@ -1139,6 +1168,14 @@ Dictionary RendererViewport::viewport_get_scaling_3d_status(RID p_viewport) cons
 	status["effective_scale"] = viewport->effective_scaling_3d_scale;
 	status["preset"] = int(GLOBAL_GET("rendering/scaling_3d/dlss/preset"));
 	return status;
+}
+
+void RendererViewport::viewport_reset_temporal_history(RID p_viewport) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	if (viewport->render_buffers.is_valid()) {
+		viewport->render_buffers->set_temporal_history_reset();
+	}
 }
 
 void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::ViewportScaling3DMode p_mode) {

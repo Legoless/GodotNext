@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/temporal_history_reset/temporal_history_reset.gd" id="1"]
+
+[node name="TemporalHistoryReset" type="Node3D"]
+script = ExtResource("1")

@@ -132,6 +132,10 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		cluster_builder = nullptr;
 	}
 
+	if (render_buffers != nullptr) {
+		TemporalUpscalerRegistry::free_contexts(render_buffers);
+	}
+
 	if (fsr2_context) {
 		memdelete(fsr2_context);
 		fsr2_context = nullptr;
@@ -2058,11 +2062,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	bool using_debug_mvs = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS;
 	bool using_taa = rb->get_use_taa();
+	const bool reset_temporal_history = !is_reflection_probe && rb_data.is_valid() && rb->consume_temporal_history_reset();
+	TemporalUpscaler *external_upscaler = nullptr;
 
 	enum {
 		SCALE_NONE,
 		SCALE_FSR2,
 		SCALE_MFX,
+		SCALE_EXTERNAL,
 	} scale_type = SCALE_NONE;
 
 	switch (rb->get_scaling_3d_mode()) {
@@ -2076,11 +2083,20 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			scale_type = SCALE_NONE;
 #endif
 			break;
+		case RSE::VIEWPORT_SCALING_3D_MODE_DLSS:
+			external_upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+			if (external_upscaler != nullptr) {
+				scale_type = SCALE_EXTERNAL;
+			}
+			break;
 		default:
 			break;
 	}
 
 	bool using_upscaling = scale_type != SCALE_NONE;
+	if (reset_temporal_history) {
+		print_verbose(vformat("GODOTNEXT_TEMPORAL_RESET mode=%d", scale_type));
+	}
 
 	// check if we need motion vectors
 	bool motion_vectors_required;
@@ -2186,6 +2202,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			} else if (scale_type == SCALE_MFX) {
 				velocity_mode = NEXTGI_VELOCITY_DENSE;
 				velocity_scale = NEXTGI_VELOCITY_SCALE_MFX;
+			} else if (scale_type == SCALE_EXTERNAL) {
+				velocity_mode = NEXTGI_VELOCITY_DENSE;
+				velocity_scale = NEXTGI_VELOCITY_SCALE_EXTERNAL;
 			} else if (using_taa) {
 				velocity_mode = NEXTGI_VELOCITY_TAA;
 			}
@@ -2607,11 +2626,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RD::get_singleton()->draw_command_end_label();
 
 		if (using_motion_pass) {
-			if (scale_type == SCALE_MFX) {
+			if (scale_type == SCALE_MFX || scale_type == SCALE_EXTERNAL) {
 				motion_vectors_store->process(rb,
 						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
 						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform,
-						velocity_plan.mfx_preserve);
+						velocity_plan.mfx_preserve, reset_temporal_history);
 			} else if (!velocity_plan.skip_clear_pass) {
 				Vector<Color> motion_vector_clear_colors;
 				motion_vector_clear_colors.push_back(Color(-1, -1, 0, 0));
@@ -2885,7 +2904,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				params.fovy = fovy;
 				params.jitter = jitter;
 				params.delta_time = float(time_step);
-				params.reset_accumulation = false; // FIXME: The engine does not provide a way to reset the accumulation.
+				params.reset_accumulation = reset_temporal_history;
 
 				Projection correction;
 				correction.set_depth_correction(true, true, false);
@@ -2922,13 +2941,43 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				params.exposure = exposure;
 				params.dst = rb->get_upscaled_texture(v);
 				params.jitter_offset = jitter;
-				params.reset = reset;
+				params.reset = reset || reset_temporal_history;
 
 				mfx_temporal_effect->process(rb_data->get_mfx_temporal_context(), params);
 			}
 
 			RD::get_singleton()->draw_command_end_label();
 #endif
+		} else if (scale_type == SCALE_EXTERNAL) {
+			const String label = String::utf8(external_upscaler->get_label().ptr());
+			RD::get_singleton()->draw_command_begin_label(external_upscaler->get_label());
+			RENDER_TIMESTAMP(label);
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				const RSE::ViewportScaling3DReason reason = external_upscaler->ensure_context(rb.ptr(), v);
+				if (reason != RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
+					external_upscaler->latch_context_error(rb.ptr(), reason);
+					break;
+				}
+				const real_t fov = p_render_data->scene_data->cam_projection.get_fov();
+				const real_t aspect = p_render_data->scene_data->cam_projection.get_aspect();
+				TemporalUpscaler::Inputs inputs;
+				inputs.color = rb->get_internal_texture(v);
+				inputs.depth = rb->get_depth_texture(v);
+				inputs.velocity = rb->get_velocity_buffer(false, v);
+				inputs.output = rb->get_upscaled_texture(v);
+				inputs.internal_size = rb->get_internal_size();
+				inputs.motion_vector_scale = rb->get_internal_size();
+				inputs.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+				inputs.world_to_view = p_render_data->scene_data->cam_transform.affine_inverse();
+				inputs.view_to_clip = p_render_data->scene_data->cam_projection;
+				inputs.z_near = p_render_data->scene_data->z_near;
+				inputs.z_far = p_render_data->scene_data->z_far;
+				inputs.fovy = p_render_data->scene_data->cam_projection.get_fovy(fov, 1.0 / aspect);
+				inputs.delta_time = float(time_step);
+				inputs.reset = reset_temporal_history;
+				external_upscaler->process(rb, v, inputs);
+			}
+			RD::get_singleton()->draw_command_end_label();
 		} else if (using_taa) {
 			RD::get_singleton()->draw_command_begin_label("TAA");
 			RENDER_TIMESTAMP("TAA");
@@ -5906,8 +5955,9 @@ RenderForwardClustered::RenderForwardClustered() {
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
 	ss_effects = memnew(RendererRD::SSEffects);
-#ifdef METAL_MFXTEMPORAL_ENABLED
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
+	TemporalUpscalerRegistry::initialize_dev_copy_upscaler();
+#ifdef METAL_MFXTEMPORAL_ENABLED
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
 }
@@ -5915,6 +5965,7 @@ RenderForwardClustered::RenderForwardClustered() {
 RenderForwardClustered::~RenderForwardClustered() {
 	next_gi.free_far_field();
 	nextgeo_cut.free_resources();
+	TemporalUpscalerRegistry::shutdown();
 	if (ss_effects != nullptr) {
 		memdelete(ss_effects);
 		ss_effects = nullptr;
@@ -5935,12 +5986,12 @@ RenderForwardClustered::~RenderForwardClustered() {
 		memdelete(mfx_temporal_effect);
 		mfx_temporal_effect = nullptr;
 	}
+#endif
 
 	if (motion_vectors_store) {
 		memdelete(motion_vectors_store);
 		motion_vectors_store = nullptr;
 	}
-#endif
 
 	RD::get_singleton()->free_rid(shadow_sampler);
 	RSG::light_storage->directional_shadow_atlas_set_size(0);

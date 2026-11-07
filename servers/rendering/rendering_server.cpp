@@ -2266,10 +2266,10 @@ RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(R
 	if (p_mode != RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
 		return RSE::VIEWPORT_SCALING_3D_REASON_NONE;
 	}
-	if (RD::get_singleton() == nullptr || RD::get_singleton()->get_device_api_name() != "Vulkan") {
+	TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+	if (RD::get_singleton() == nullptr || (upscaler == nullptr ? RD::get_singleton()->get_device_api_name() != "Vulkan" : !upscaler->supports_api(RD::get_singleton()->get_device_api_name()))) {
 		return RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED;
 	}
-	TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 	if (upscaler == nullptr) {
 		return RSE::VIEWPORT_SCALING_3D_REASON_MODULE_DISABLED;
 	}
@@ -2901,6 +2901,7 @@ void RenderingServer::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_mode", "viewport", "scaling_3d_mode"), &RenderingServer::viewport_set_scaling_3d_mode);
 	ClassDB::bind_method(D_METHOD("viewport_get_scaling_3d_status", "viewport"), &RenderingServer::viewport_get_scaling_3d_status);
+	ClassDB::bind_method(D_METHOD("viewport_reset_temporal_history", "viewport"), &RenderingServer::viewport_reset_temporal_history);
 	ClassDB::bind_method(D_METHOD("scaling_3d_mode_get_availability", "mode"), &RenderingServer::scaling_3d_mode_get_availability);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);

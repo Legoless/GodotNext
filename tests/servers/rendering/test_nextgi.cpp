@@ -1925,6 +1925,20 @@ TEST_CASE("[NextGI] velocity plan follows the upscaler table") {
 	CHECK_EQ(mfx.pre_clear_r, -1.0f);
 	CHECK_EQ(mfx.pre_clear_g, -1.0f);
 
+	const NextGIVelocityPlan external = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_EXTERNAL, NEXTGI_VELOCITY_DENSE, false, true);
+	CHECK(external.active);
+	CHECK_EQ(external.pre_clear_r, mfx.pre_clear_r);
+	CHECK_EQ(external.pre_clear_g, mfx.pre_clear_g);
+	CHECK_EQ(external.prepass_writes, mfx.prepass_writes);
+	CHECK_EQ(external.color_pass_loads, mfx.color_pass_loads);
+	CHECK_EQ(external.skip_clear_pass, mfx.skip_clear_pass);
+	CHECK_EQ(external.mfx_preserve, mfx.mfx_preserve);
+	const NextGIVelocityPlan external_off = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_EXTERNAL, NEXTGI_VELOCITY_DENSE, false, false);
+	const NextGIVelocityPlan mfx_off = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_MFX, NEXTGI_VELOCITY_DENSE, false, false);
+	CHECK_EQ(external_off.active, mfx_off.active);
+	CHECK_EQ(external_off.prepass_writes, mfx_off.prepass_writes);
+	CHECK_EQ(external_off.mfx_preserve, mfx_off.mfx_preserve);
+
 	CHECK(nextgi_velocity_texel_is_preclear(-1.0f, -1.0f));
 	CHECK_FALSE(nextgi_velocity_texel_is_preclear(-1.0001f, -1.2f));
 	CHECK_FALSE(nextgi_velocity_texel_is_preclear(-1.0f, -0.999f));

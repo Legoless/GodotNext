@@ -238,6 +238,7 @@ public:
 
 	void viewport_set_scaling_3d_mode(RID p_viewport, RSE::ViewportScaling3DMode p_mode);
 	Dictionary viewport_get_scaling_3d_status(RID p_viewport) const;
+	void viewport_reset_temporal_history(RID p_viewport);
 	void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale);
 	void viewport_set_fsr_sharpness(RID p_viewport, float p_sharpness);
 	void viewport_set_texture_mipmap_bias(RID p_viewport, float p_mipmap_bias);

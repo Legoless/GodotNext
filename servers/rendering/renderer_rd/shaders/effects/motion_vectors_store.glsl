@@ -28,6 +28,10 @@ void main() {
 	}
 
 	ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+	if (params.pad[0] != 0) {
+		imageStore(velocity_buffer, pos, vec4(0.0));
+		return;
+	}
 
 	float depth = texelFetch(depth_buffer, pos, 0).x;
 	vec2 uv = (vec2(pos) + 0.5f) / params.resolution;
@@ -35,7 +39,7 @@ void main() {
 #ifdef PRESERVE_WRITTEN
 	vec2 existing = imageLoad(velocity_buffer, pos).xy;
 	// Exact (-1, -1) only. A nearby value is a real motion vector from the prepass.
-	if (existing.x != -1.0 || existing.y != -1.0) {
+	if (floatBitsToUint(existing) != floatBitsToUint(vec2(-1.0))) {
 		return;
 	}
 #endif

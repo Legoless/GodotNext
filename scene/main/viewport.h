@@ -629,6 +629,7 @@ public:
 
 	void set_scaling_3d_mode(Scaling3DMode p_scaling_3d_mode);
 	Scaling3DMode get_scaling_3d_mode() const;
+	void reset_temporal_history();
 
 	void set_scaling_3d_scale(float p_scaling_3d_scale);
 	float get_scaling_3d_scale() const;

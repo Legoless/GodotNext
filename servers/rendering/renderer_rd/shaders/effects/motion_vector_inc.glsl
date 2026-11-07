@@ -1,5 +1,8 @@
 vec2 derive_motion_vector(vec2 uv, float depth, mat4 reprojection_matrix) {
 	vec4 previous_pos_ndc = reprojection_matrix * vec4(uv * 2.0f - 1.0f, depth * 2.0f - 1.0f, 1.0f);
+	if (previous_pos_ndc.w <= 1e-6) {
+		return vec2(0.0);
+	}
 	return 0.5f + (previous_pos_ndc.xy / previous_pos_ndc.w) * 0.5f - uv;
 }
 

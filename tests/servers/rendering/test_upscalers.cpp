@@ -44,8 +44,30 @@ class MockUpscaler : public TemporalUpscaler {
 public:
 	RSE::ViewportScaling3DReason reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
 	float clamped_scale = -1.0f;
+	float bias = -1.0f;
+	bool multiview = false;
+	HashMap<RenderSceneBuffersRD *, uint32_t> contexts;
+	Inputs last_inputs;
+	uint32_t processed_views = 0;
 
 	String get_display_name() const override { return "Mock DLSS"; }
+	const Span<char> get_label() const override { return "Mock Temporal Upscale"; }
+	float mip_bias_offset() const override { return bias; }
+	bool supports_multiview() const override { return multiview; }
+	RSE::ViewportScaling3DReason ensure_context(RenderSceneBuffersRD *p_render_buffers, uint32_t p_view) override {
+		if (p_view > 0 && !supports_multiview()) {
+			return RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED;
+		}
+		contexts[p_render_buffers] |= 1u << p_view;
+		return RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+	}
+	void process(Ref<RenderSceneBuffersRD> p_render_buffers, uint32_t p_view, const Inputs &p_inputs) override {
+		(void)p_render_buffers;
+		(void)p_view;
+		last_inputs = p_inputs;
+		processed_views++;
+	}
+	void free_contexts(RenderSceneBuffersRD *p_render_buffers) override { contexts.erase(p_render_buffers); }
 	RSE::ViewportScaling3DReason get_availability(uint32_t p_view_count, float p_scale, float &r_effective_scale) const override {
 		(void)p_view_count;
 		r_effective_scale = clamped_scale > 0.0f ? clamped_scale : p_scale;
@@ -133,4 +155,63 @@ TEST_CASE("[Upscalers] Mock availability and server query") {
 		CHECK_EQ(rs->scaling_3d_mode_get_availability(RSE::VIEWPORT_SCALING_3D_MODE_DLSS), RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED);
 	}
 	TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+}
+
+TEST_CASE("[Upscalers] Per-view contexts and dispatch inputs") {
+	MockUpscaler mock;
+	RenderSceneBuffersRD *first = reinterpret_cast<RenderSceneBuffersRD *>(uintptr_t(1));
+	RenderSceneBuffersRD *second = reinterpret_cast<RenderSceneBuffersRD *>(uintptr_t(2));
+	CHECK_EQ(mock.ensure_context(first, 0), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	CHECK_EQ(mock.ensure_context(second, 0), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	CHECK_EQ(mock.contexts.size(), 2);
+	CHECK_EQ(mock.ensure_context(first, 1), RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED);
+	mock.free_contexts(first);
+	CHECK_EQ(mock.contexts.size(), 1);
+	mock.multiview = true;
+	CHECK_EQ(mock.ensure_context(first, 0), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	CHECK_EQ(mock.ensure_context(first, 1), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	CHECK_EQ(mock.contexts[first], 3);
+	CHECK_EQ(nextgi_resolve_dlss_reason(true, true, RSE::VIEWPORT_SCALING_3D_REASON_NONE, 0.75f, 2, 1920, 1080, true), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	mock.free_contexts(first);
+	mock.free_contexts(second);
+
+	TemporalUpscaler::Inputs inputs;
+	inputs.internal_size = Size2i(1280, 720);
+	inputs.motion_vector_scale = inputs.internal_size;
+	inputs.jitter = Vector2(0.25f, -0.5f) * Vector2(inputs.internal_size) * 0.5f;
+	inputs.reset = true;
+	mock.process(Ref<RenderSceneBuffersRD>(), 0, inputs);
+	CHECK_EQ(mock.processed_views, 1);
+	CHECK(mock.last_inputs.motion_vector_scale == inputs.internal_size);
+	CHECK(mock.last_inputs.jitter.is_equal_approx(Vector2(160, -180)));
+	CHECK(mock.last_inputs.reset);
+}
+
+TEST_CASE("[Upscalers] Temporal mip bias and jitter phases") {
+	const float scales[] = { 1.0f, 0.667f, 0.58f, 0.5f, 0.333f };
+	for (float scale : scales) {
+		CHECK(Math::is_equal_approx(nextgi_temporal_mip_bias(scale, 0.125f, -1.0f), Math::log2(scale) + 0.125f - 1.0f, 1e-6f));
+		CHECK(Math::is_equal_approx(nextgi_temporal_mip_bias(scale, 0.0f, -0.5f), Math::log2(scale) - 0.5f, 1e-6f));
+	}
+	for (const Size2i &target : { Size2i(2560, 1440), Size2i(3840, 2160) }) {
+		const float scales[] = { 1.0f, 2.0f / 3.0f, 0.58f, 0.5f, 1.0f / 3.0f };
+		const uint32_t expected[] = { 8, 18, 24, 32, 72 };
+		for (int i = 0; i < 5; i++) {
+			Size2i render = MockUpscaler().get_render_size(target, scales[i]);
+			CHECK_EQ(nextgi_temporal_jitter_phase_count(target, render, true), expected[i]);
+		}
+	}
+	CHECK_EQ(nextgi_temporal_jitter_phase_count(Size2i(1920, 1080), Size2i(1120, 630), false), 23);
+}
+
+TEST_CASE("[Upscalers] Temporal history reset is one-shot") {
+	TemporalHistoryReset reset;
+	CHECK_FALSE(reset.consume());
+	reset.request();
+	reset.request();
+	CHECK(reset.consume());
+	CHECK_FALSE(reset.consume());
+	reset.request();
+	CHECK(reset.consume());
+	CHECK_FALSE(reset.consume());
 }

@@ -4348,6 +4348,13 @@
 				Detaches a viewport from a canvas.
 			</description>
 		</method>
+		<method name="viewport_reset_temporal_history">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				Resets temporal upscaling and motion-vector history for one frame on [param viewport]. NextGI history is not affected.
+			</description>
+		</method>
 		<method name="viewport_set_active">
 			<return type="void" />
 			<param index="0" name="viewport" type="RID" />

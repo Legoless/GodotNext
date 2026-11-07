@@ -107,10 +107,14 @@ void RenderSceneBuffersRD::update_samplers() {
 	float computed_mipmap_bias = texture_mipmap_bias;
 
 	if (use_taa || (RSE::scaling_3d_mode_type(scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL)) {
-		// Use negative mipmap LOD bias when TAA or FSR2 is enabled to compensate for loss of sharpness.
-		// This restores sharpness in still images to be roughly at the same level as without TAA,
-		// but moving scenes will still be blurrier.
-		computed_mipmap_bias -= 0.5;
+		float offset = -0.5f;
+		if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+			TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+			if (upscaler != nullptr) {
+				offset = upscaler->mip_bias_offset();
+			}
+		}
+		computed_mipmap_bias += offset;
 	}
 
 	if (screen_space_aa == RSE::VIEWPORT_SCREEN_SPACE_AA_FXAA) {
@@ -174,6 +178,7 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 
 	ERR_FAIL_COND_MSG(view_count == 0, "Must have at least 1 view");
 
+	temporal_history_reset.request();
 	vrs_mode = texture_storage->render_target_get_vrs_mode(render_target);
 
 	update_samplers();

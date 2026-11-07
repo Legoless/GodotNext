@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/templates/hash_map.h"
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_rd/effects/vrs.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
@@ -85,6 +86,7 @@ private:
 	RSE::ViewportScaling3DMode scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
 	float fsr_sharpness = 0.2f;
 	float texture_mipmap_bias = 0.0f;
+	TemporalHistoryReset temporal_history_reset;
 	RSE::ViewportAnisotropicFiltering anisotropic_filtering_level = RSE::VIEWPORT_ANISOTROPY_4X;
 
 #ifdef METAL_ENABLED
@@ -207,6 +209,8 @@ public:
 	virtual void set_texture_mipmap_bias(float p_texture_mipmap_bias) override;
 	virtual void set_anisotropic_filtering_level(RSE::ViewportAnisotropicFiltering p_anisotropic_filtering_level) override;
 	virtual void set_use_debanding(bool p_use_debanding) override;
+	virtual void set_temporal_history_reset() override { temporal_history_reset.request(); }
+	bool consume_temporal_history_reset() { return temporal_history_reset.consume(); }
 
 #ifdef METAL_ENABLED
 	void ensure_mfx(RendererRD::MFXSpatialEffect *p_effect);
