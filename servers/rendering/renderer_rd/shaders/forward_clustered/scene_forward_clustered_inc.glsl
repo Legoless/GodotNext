@@ -542,6 +542,8 @@ layout(set = 1, binding = 42, std430) restrict readonly buffer NextGIWRCForward 
 	uint pad2;
 	mat4 inv_view_proj;
 	vec4 volume; // x width, y height, z near, w far.
+	mat4 previous_view_proj;
+	vec4 history;
 }
 nextgi_wrc_fwd;
 // GodotNext: nextgi_translucency_volume (#61).
@@ -552,16 +554,20 @@ layout(set = 1, binding = 46) uniform sampler2D nextgi_front_layer_opaque_depth;
 layout(set = 1, binding = 47) uniform sampler2D nextgi_front_layer_depth;
 layout(set = 1, binding = 48) uniform sampler2D nextgi_front_layer_reflection;
 
-vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth) {
+vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth, vec3 p_world_direction) {
 	const float near = nextgi_wrc_fwd.volume.z;
 	const float far = nextgi_wrc_fwd.volume.w;
 	float slice = clamp(log(max(p_linear_depth, near) / near) / log(far / near), 0.0, 1.0);
 	vec3 coord = vec3(p_screen_uv, slice);
-	vec3 sh;
-	sh.r = texture(sampler3D(nextgi_translucency_r, SAMPLER_LINEAR_CLAMP), coord).r;
-	sh.g = texture(sampler3D(nextgi_translucency_g, SAMPLER_LINEAR_CLAMP), coord).r;
-	sh.b = texture(sampler3D(nextgi_translucency_b, SAMPLER_LINEAR_CLAMP), coord).r;
-	return sh;
+	vec4 red = texture(sampler3D(nextgi_translucency_r, SAMPLER_LINEAR_CLAMP), coord);
+	vec4 green = texture(sampler3D(nextgi_translucency_g, SAMPLER_LINEAR_CLAMP), coord);
+	vec4 blue = texture(sampler3D(nextgi_translucency_b, SAMPLER_LINEAR_CLAMP), coord);
+	vec3 direction = normalize(p_world_direction);
+	vec3 irradiance = vec3(red.r, green.r, blue.r);
+	irradiance += direction.x * vec3(red.g, green.g, blue.g);
+	irradiance += direction.y * vec3(red.b, green.b, blue.b);
+	irradiance += direction.z * vec3(red.a, green.a, blue.a);
+	return max(irradiance, vec3(0.0));
 }
 
 vec3 nextgi_wrc_translucency_sh(vec3 p_world) {

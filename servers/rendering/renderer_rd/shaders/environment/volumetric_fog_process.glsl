@@ -162,6 +162,8 @@ layout(set = 1, binding = 3, std430) readonly buffer NextGIFogParams {
 	uint pad0;
 	uint pad1;
 	uint pad2;
+	mat4 inv_view_proj;
+	vec4 volume;
 }
 nextgi_wrc_fog;
 layout(set = 1, binding = 4, std430) buffer NextGIFogCounters {
@@ -828,24 +830,8 @@ void main() {
 
 #ifdef ENABLE_NEXTGI
 		{
-			float dist = length(world_pos - nextgi_wrc_fog.camera.xyz);
-			float spacing = 1.0;
-			uint level = 0u;
-			if (dist > 8.0) {
-				spacing = 2.0;
-				level = 1u;
-			}
-			if (dist > 16.0) {
-				spacing = 4.0;
-				level = 2u;
-			}
-			if (dist > 32.0) {
-				spacing = 8.0;
-				level = 3u;
-			}
-			vec3 level_origin = floor(nextgi_wrc_fog.origin_spacing.xyz / spacing) * spacing;
-			vec3 cell = (world_pos - level_origin) / spacing + vec3(7.5);
-			vec3 uv = vec3((clamp(cell.xy, vec2(0.0), vec2(15.0)) + vec2(0.5)) / 16.0, (clamp(cell.z, 0.0, 15.0) + float(level) * 16.0 + 0.5) / 64.0);
+			float slice = clamp(log(max(abs(view_pos.z), nextgi_wrc_fog.volume.z) / nextgi_wrc_fog.volume.z) / log(nextgi_wrc_fog.volume.w / nextgi_wrc_fog.volume.z), 0.0, 1.0);
+			vec3 uv = vec3(clamp(fog_unit_pos.xy, vec2(0.0), vec2(1.0)), slice);
 			vec3 ambient = vec3(textureLod(sampler3D(nextgi_sh_r, linear_sampler), uv, 0.0).r, textureLod(sampler3D(nextgi_sh_g, linear_sampler), uv, 0.0).r, textureLod(sampler3D(nextgi_sh_b, linear_sampler), uv, 0.0).r);
 			total_light += ambient * params.gi_inject;
 			atomicAdd(nextgi_fog_counters.samples, 1u);

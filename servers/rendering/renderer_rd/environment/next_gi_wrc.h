@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "core/math/projection.h"
+#include "core/math/vector2i.h"
 #include "core/math/vector3.h"
 #include "core/math/vector3i.h"
 #include "core/templates/rid.h"
@@ -74,6 +76,12 @@ Vector3 nextgi_wrc_snap_origin(const Vector3 &p_camera, float p_spacing);
 // A probe with more than 25% back-face hits moves along the mean escape direction, at most 0.4x spacing.
 Vector3 nextgi_wrc_relocate(const Vector3 &p_probe, const Vector3 &p_mean_escape, float p_backface_fraction, float p_spacing);
 
+// Translucency probes occupy the two fine WRC levels, with a bounded per-frame trace set.
+static const uint32_t NEXTGI_TRANSLUCENCY_PROBE_CAP = 4096;
+int32_t nextgi_translucency_probe_index(const Vector3 &p_world, const Vector3 &p_camera, const Vector3 &p_origin);
+uint32_t nextgi_translucency_volume_level(float p_distance, bool p_lite);
+float nextgi_translucency_history_weight(bool p_valid, const Vector2 &p_previous_uv);
+
 // One cache per scenario. The frame block's "WRC update" slot traces a budget of probes.
 class NextGIWRC {
 	static NextGIWRC *singleton;
@@ -94,6 +102,24 @@ class NextGIWRC {
 	RID translucency_r;
 	RID translucency_g;
 	RID translucency_b;
+	RID translucency_history_r;
+	RID translucency_history_g;
+	RID translucency_history_b;
+	RID translucency_radiance;
+	RID translucency_mip4;
+	RID translucency_mip2;
+	RID translucency_visibility;
+	RID translucency_sh_r;
+	RID translucency_sh_g;
+	RID translucency_sh_b;
+	RID translucency_offsets;
+	RID translucency_mark_texture;
+	RID translucency_mark_framebuffer;
+	RID translucency_marks;
+	RID translucency_indices;
+	RID translucency_uniform_set;
+	RID translucency_mark_uniform_set;
+	Size2i translucency_mark_size;
 	Vector3i translucency_size;
 	RID counter_buffer;
 	RID uniform_set;
@@ -110,8 +136,19 @@ class NextGIWRC {
 	uint32_t last_energy_bits = 0;
 	uint32_t fog_samples = 0;
 	uint32_t fog_ambient_bits = 0;
+	uint32_t translucency_marked = 0;
+	uint32_t translucency_rays = 0;
+	uint32_t translucency_hits = 0;
+	float translucency_sky_energy = 0.0f;
+	bool volume_history_valid = false;
+	bool has_previous_camera = false;
+	bool previous_sky_read = false;
+	Projection previous_view_projection;
+	Vector3 previous_camera_position;
+	Vector3 previous_camera_forward;
 
 	bool _ensure_textures();
+	bool _ensure_translucency_cache();
 	bool _ensure_shader();
 	void _free_uniform_set();
 	void _read_counters();
@@ -134,6 +171,9 @@ public:
 	Vector3i get_translucency_size() const { return translucency_size; }
 	RID get_counter_buffer() const { return counter_buffer; }
 	bool is_ready() const { return radiance.is_valid(); }
+	RID get_translucency_mark_target(const Size2i &p_size);
+	RID get_translucency_mark_texture() const { return translucency_mark_texture; }
+	bool uses_translucency_probes() const;
 
 	void free_resources();
 

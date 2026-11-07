@@ -1309,6 +1309,11 @@ void fragment_shader(in SceneData scene_data) {
 			vec4(0.0, 0.0, 0.0, 1.0)));
 	vec2 read_viewport_size = scene_data.viewport_size;
 
+#ifdef MODE_RENDER_NEXTGI_TRANSLUCENCY_MARK
+	frag_color = vec4(mat3(inv_view_matrix) * vertex, 1.0);
+	return;
+#endif
+
 #ifdef POINT_COORD_USED
 #ifdef POINT_SIZE_USED
 	vec2 point_coord;
@@ -2226,7 +2231,7 @@ void fragment_shader(in SceneData scene_data) {
 		// GodotNext: nextgi_alpha_policy (#61). Cut fallback for transparent reflections: fill the
 		// remaining ReflectionProbe weight with the WRC irradiance at the instance origin.
 		if (reflection_accum.a < 1.0 && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {
-			reflection_accum.rgb += nextgi_translucency_volume(screen_uv, -vertex_interp.z) * (1.0 - reflection_accum.a);
+			reflection_accum.rgb += nextgi_translucency_volume(screen_uv, -vertex_interp.z, mat3(inv_view_matrix) * ref_vec) * (1.0 - reflection_accum.a);
 			reflection_accum.a = 1.0;
 		}
 		if (reflection_accum.a > 0.0) {
@@ -2264,7 +2269,7 @@ void fragment_shader(in SceneData scene_data) {
 		}
 		// GodotNext: nextgi_alpha_policy (#61). Cut fallback: WRC irradiance at the object center.
 		if (!bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP) && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_NEXTGI_TRANSLUCENCY)) {
-			ambient_light = nextgi_translucency_volume(screen_uv, -vertex_interp.z);
+			ambient_light = nextgi_translucency_volume(screen_uv, -vertex_interp.z, mat3(inv_view_matrix) * normal);
 		}
 	}
 

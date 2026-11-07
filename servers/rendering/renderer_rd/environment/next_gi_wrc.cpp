@@ -48,6 +48,9 @@ struct NextGIWRC::ShaderState {
 	RID trace;
 	RID project;
 	RID translucency;
+	RID translucency_mark;
+	RID translucency_trace;
+	RID translucency_project;
 };
 
 struct NextGIWRCParamsGPU {
@@ -62,8 +65,11 @@ struct NextGIWRCParamsGPU {
 	uint32_t pad[3] = {};
 	float inv_view_proj[16] = {};
 	float volume[4] = {}; // x width, y height, z near, w far.
+	uint32_t previous_view_padding[4] = {};
+	float previous_view_proj[16] = {};
+	float history[4] = {}; // blend, Lite, valid, sky lighting enabled.
 };
-static_assert(sizeof(NextGIWRCParamsGPU) == 160, "WRC params must match nextgi_wrc_update.glsl.");
+static_assert(sizeof(NextGIWRCParamsGPU) == 256, "WRC params must match nextgi_wrc_update.glsl.");
 
 struct NextGIWRCCountersGPU {
 	uint32_t rays = 0;
@@ -74,6 +80,11 @@ struct NextGIWRCCountersGPU {
 	uint32_t fog_ambient_bits = 0;
 	uint32_t pad_a = 0;
 	uint32_t pad_b = 0;
+	uint32_t translucent_probes = 0;
+	uint32_t translucent_rays = 0;
+	uint32_t translucent_hits = 0;
+	uint32_t translucent_sky_misses = 0;
+	uint32_t translucent_sky_energy = 0;
 };
 
 NextGIWRC *NextGIWRC::singleton = nullptr;
@@ -114,6 +125,30 @@ Vector3 nextgi_wrc_relocate(const Vector3 &p_probe, const Vector3 &p_mean_escape
 	return p_probe + p_mean_escape / length * travel;
 }
 
+int32_t nextgi_translucency_probe_index(const Vector3 &p_world, const Vector3 &p_camera, const Vector3 &p_origin) {
+	const float distance = p_world.distance_to(p_camera);
+	if (distance > 16.0f) {
+		return -1;
+	}
+	const uint32_t level = distance <= 8.0f ? 0 : 1;
+	const float spacing = nextgi_wrc_spacing(level);
+	const Vector3 origin = nextgi_wrc_snap_origin(p_origin, spacing);
+	const Vector3 rel = (p_world - origin) / spacing + Vector3(7.5, 7.5, 7.5);
+	const Vector3i cell(
+			CLAMP(int(Math::round(rel.x)), 0, 15),
+			CLAMP(int(Math::round(rel.y)), 0, 15),
+			CLAMP(int(Math::round(rel.z)), 0, 15));
+	return level * 4096 + cell.x + cell.y * 16 + cell.z * 256;
+}
+
+uint32_t nextgi_translucency_volume_level(float p_distance, bool p_lite) {
+	return MIN(nextgi_wrc_level_for_distance(p_distance) + uint32_t(p_lite), uint32_t(NEXTGI_WRC_LEVELS - 1));
+}
+
+float nextgi_translucency_history_weight(bool p_valid, const Vector2 &p_previous_uv) {
+	return p_valid && p_previous_uv.x >= 0.0f && p_previous_uv.y >= 0.0f && p_previous_uv.x <= 1.0f && p_previous_uv.y <= 1.0f ? 0.9f : 0.0f;
+}
+
 } // namespace RendererRD
 
 NextGIWRC::NextGIWRC() {
@@ -137,9 +172,17 @@ void NextGIWRC::_free_uniform_set() {
 		if (volume_uniform_set.is_valid() && rd->uniform_set_is_valid(volume_uniform_set)) {
 			rd->free_rid(volume_uniform_set);
 		}
+		if (translucency_uniform_set.is_valid() && rd->uniform_set_is_valid(translucency_uniform_set)) {
+			rd->free_rid(translucency_uniform_set);
+		}
+		if (translucency_mark_uniform_set.is_valid() && rd->uniform_set_is_valid(translucency_mark_uniform_set)) {
+			rd->free_rid(translucency_mark_uniform_set);
+		}
 	}
 	uniform_set = RID();
 	volume_uniform_set = RID();
+	translucency_uniform_set = RID();
+	translucency_mark_uniform_set = RID();
 }
 
 void NextGIWRC::free_resources() {
@@ -155,7 +198,7 @@ void NextGIWRC::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID resources[16] = { radiance, mip4, mip2, visibility, sh_r, sh_g, sh_b, offsets, translucency_r, translucency_g, translucency_b, params_buffer, counter_buffer, sampler, dummy_tex, dummy_buffer };
+	RID resources[31] = { radiance, mip4, mip2, visibility, sh_r, sh_g, sh_b, offsets, translucency_r, translucency_g, translucency_b, translucency_history_r, translucency_history_g, translucency_history_b, translucency_radiance, translucency_mip4, translucency_mip2, translucency_visibility, translucency_sh_r, translucency_sh_g, translucency_sh_b, translucency_offsets, translucency_mark_framebuffer, translucency_mark_texture, translucency_marks, translucency_indices, params_buffer, counter_buffer, sampler, dummy_tex, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -172,12 +215,67 @@ void NextGIWRC::free_resources() {
 	translucency_r = RID();
 	translucency_g = RID();
 	translucency_b = RID();
+	translucency_history_r = RID();
+	translucency_history_g = RID();
+	translucency_history_b = RID();
+	translucency_radiance = RID();
+	translucency_mip4 = RID();
+	translucency_mip2 = RID();
+	translucency_visibility = RID();
+	translucency_sh_r = RID();
+	translucency_sh_g = RID();
+	translucency_sh_b = RID();
+	translucency_offsets = RID();
+	translucency_mark_texture = RID();
+	translucency_mark_framebuffer = RID();
+	translucency_marks = RID();
+	translucency_indices = RID();
+	translucency_mark_size = Size2i();
 	translucency_size = Vector3i();
 	params_buffer = RID();
 	counter_buffer = RID();
 	sampler = RID();
 	dummy_tex = RID();
 	dummy_buffer = RID();
+	volume_history_valid = false;
+	has_previous_camera = false;
+	previous_sky_read = false;
+	translucency_marked = 0;
+	translucency_rays = 0;
+	translucency_hits = 0;
+}
+
+RID NextGIWRC::get_translucency_mark_target(const Size2i &p_size) {
+	ERR_FAIL_COND_V(p_size.x <= 0 || p_size.y <= 0, RID());
+	if (translucency_mark_size == p_size && translucency_mark_framebuffer.is_valid()) {
+		return translucency_mark_framebuffer;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, RID());
+	if (translucency_mark_framebuffer.is_valid()) {
+		rd->free_rid(translucency_mark_framebuffer);
+		translucency_mark_framebuffer = RID();
+	}
+	if (translucency_mark_texture.is_valid()) {
+		rd->free_rid(translucency_mark_texture);
+	}
+	RD::TextureFormat format;
+	format.width = p_size.x;
+	format.height = p_size.y;
+	format.format = RD::DATA_FORMAT_R32G32B32A32_SFLOAT;
+	format.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+	translucency_mark_texture = rd->texture_create(format, RD::TextureView());
+	ERR_FAIL_COND_V(translucency_mark_texture.is_null(), RID());
+	rd->set_resource_name(translucency_mark_texture, "NextGI Translucency Probe Marks");
+	translucency_mark_framebuffer = rd->framebuffer_create(Vector<RID>({ translucency_mark_texture }));
+	rd->set_resource_name(translucency_mark_framebuffer, "NextGI Translucency Mark Framebuffer");
+	translucency_mark_size = p_size;
+	return translucency_mark_framebuffer;
+}
+
+bool NextGIWRC::uses_translucency_probes() const {
+	NextGI *next_gi = NextGI::get_singleton();
+	return next_gi != nullptr && next_gi->get_resolved_quality() != NextGI::QUALITY_MEDIUM;
 }
 
 bool NextGIWRC::_ensure_textures() {
@@ -250,6 +348,50 @@ bool NextGIWRC::_ensure_textures() {
 	return radiance.is_valid() && counter_buffer.is_valid() && dummy_tex.is_valid();
 }
 
+bool NextGIWRC::_ensure_translucency_cache() {
+	if (translucency_radiance.is_valid()) {
+		return true;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	RD::TextureFormat tf;
+	tf.texture_type = RD::TEXTURE_TYPE_2D;
+	tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	tf.width = 640;
+	tf.height = 640;
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	translucency_radiance = rd->texture_create(tf, RD::TextureView());
+	ERR_FAIL_COND_V(translucency_radiance.is_null(), false);
+	rd->set_resource_name(translucency_radiance, "NextGI Translucency Radiance");
+	tf.width = 512;
+	tf.height = 512;
+	tf.format = RD::DATA_FORMAT_R16G16_SFLOAT;
+	translucency_visibility = rd->texture_create(tf, RD::TextureView());
+	tf.width = 384;
+	tf.height = 384;
+	tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	translucency_mip4 = rd->texture_create(tf, RD::TextureView());
+	tf.width = 256;
+	tf.height = 256;
+	translucency_mip2 = rd->texture_create(tf, RD::TextureView());
+	tf.texture_type = RD::TEXTURE_TYPE_3D;
+	tf.width = 16;
+	tf.height = 16;
+	tf.depth = 32;
+	translucency_sh_r = rd->texture_create(tf, RD::TextureView());
+	translucency_sh_g = rd->texture_create(tf, RD::TextureView());
+	translucency_sh_b = rd->texture_create(tf, RD::TextureView());
+	translucency_offsets = rd->texture_create(tf, RD::TextureView());
+	RID textures[] = { translucency_radiance, translucency_visibility, translucency_mip4, translucency_mip2, translucency_sh_r, translucency_sh_g, translucency_sh_b, translucency_offsets };
+	for (const RID &texture : textures) {
+		ERR_FAIL_COND_V(texture.is_null(), false);
+		rd->texture_clear(texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+	}
+	translucency_marks = rd->storage_buffer_create(256 * sizeof(uint32_t));
+	translucency_indices = rd->storage_buffer_create((NEXTGI_TRANSLUCENCY_PROBE_CAP + 1) * sizeof(uint32_t));
+	return translucency_marks.is_valid() && translucency_indices.is_valid();
+}
+
 bool NextGIWRC::_ensure_shader() {
 	if (shader != nullptr && shader->version.is_valid()) {
 		return true;
@@ -262,6 +404,9 @@ bool NextGIWRC::_ensure_shader() {
 	defines.push_back("");
 	defines.push_back("\n#define MODE_SH\n");
 	defines.push_back("\n#define MODE_TRANSLUCENCY_VOLUME\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_MARK\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_TRACE\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_PROJECT\n");
 	shader->shader.initialize(defines);
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
@@ -275,7 +420,10 @@ bool NextGIWRC::_ensure_shader() {
 	shader->trace = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 0));
 	shader->project = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 1));
 	shader->translucency = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 2));
-	if (!shader->trace.is_valid() || !shader->project.is_valid() || !shader->translucency.is_valid()) {
+	shader->translucency_mark = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 3));
+	shader->translucency_trace = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 4));
+	shader->translucency_project = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 5));
+	if (!shader->trace.is_valid() || !shader->project.is_valid() || !shader->translucency.is_valid() || !shader->translucency_mark.is_valid() || !shader->translucency_trace.is_valid() || !shader->translucency_project.is_valid()) {
 		shader->shader.version_free(shader->version);
 		memdelete(shader);
 		shader = nullptr;
@@ -302,6 +450,10 @@ void NextGIWRC::_read_counters() {
 	last_energy_bits = got.energy_bits;
 	fog_samples = got.fog_samples;
 	fog_ambient_bits = got.fog_ambient_bits;
+	translucency_marked = MIN(got.translucent_probes, NEXTGI_TRANSLUCENCY_PROBE_CAP);
+	translucency_rays = got.translucent_rays;
+	translucency_hits = got.translucent_hits;
+	translucency_sky_energy = float(got.translucent_sky_energy) / 64.0f;
 }
 
 void NextGIWRC::update(const RenderDataRD *p_render_data) {
@@ -312,7 +464,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	if (next_gi == nullptr || !next_gi->can_initialize_ray_query_shaders() || next_gi->get_rt_scene() == nullptr || !next_gi->get_rt_scene()->is_tlas_traceable()) {
 		return;
 	}
-	if (!_ensure_textures() || !_ensure_shader()) {
+	if (!_ensure_textures() || !_ensure_translucency_cache() || !_ensure_shader()) {
 		return;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -321,7 +473,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	Size2i screen = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_internal_size() : Size2i(1, 1);
 	const Vector3i volume_size(MAX((screen.width + 15) / 16, 1), MAX((screen.height + 15) / 16, 1), 32);
 	if (volume_size != translucency_size) {
-		RID *textures[3] = { &translucency_r, &translucency_g, &translucency_b };
+		RID *textures[6] = { &translucency_r, &translucency_g, &translucency_b, &translucency_history_r, &translucency_history_g, &translucency_history_b };
 		for (RID *texture : textures) {
 			if (texture->is_valid()) {
 				rd->free_rid(*texture);
@@ -332,11 +484,12 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 			volume_format.height = volume_size.y;
 			volume_format.depth = volume_size.z;
 			volume_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-			volume_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+			volume_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 			*texture = rd->texture_create(volume_format, RD::TextureView());
 			rd->texture_clear(*texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
 		}
 		translucency_size = volume_size;
+		volume_history_valid = false;
 	}
 	const Vector3 origin = nextgi_wrc_snap_origin(camera, 1.0f);
 	NextGIWRCParamsGPU params;
@@ -371,12 +524,32 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		params.sky[1] = bg.g * energy;
 		params.sky[2] = bg.b * energy;
 	}
+	const bool sky_read = scene != nullptr && p_render_data->environment.is_valid() && scene->environment_get_nextgi_read_sky_light(p_render_data->environment);
+	const Vector3 forward = -p_render_data->scene_data->cam_transform.basis.get_column(2).normalized();
+	if (!has_previous_camera || camera.distance_to(previous_camera_position) > 16.0f || forward.dot(previous_camera_forward) < 0.5f || previous_sky_read != sky_read) {
+		volume_history_valid = false;
+	}
+	params.history[0] = 0.9f;
+	params.history[1] = uses_translucency_probes() ? 0.0f : 1.0f;
+	params.history[2] = volume_history_valid ? 1.0f : 0.0f;
+	params.history[3] = sky_read ? 1.0f : 0.0f;
+	const Projection history_projection = has_previous_camera ? previous_view_projection : view_proj;
+	for (int i = 0; i < 16; i++) {
+		params.previous_view_proj[i] = history_projection.columns[i / 4][i % 4];
+	}
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 	_read_counters();
 	const uint32_t previous_fog_samples = fog_samples;
 	const uint32_t previous_fog_bits = fog_ambient_bits;
 	NextGIWRCCountersGPU zero;
 	rd->buffer_update(counter_buffer, 0, sizeof(zero), &zero);
+	uint32_t mark_zero[256] = {};
+	rd->buffer_update(translucency_marks, 0, sizeof(mark_zero), mark_zero);
+	uint32_t index_zero = 0;
+	rd->buffer_update(translucency_indices, 0, sizeof(index_zero), &index_zero);
+	translucency_marked = 0;
+	translucency_rays = 0;
+	translucency_hits = 0;
 
 	NextGISRC *src = NextGISRC::get_singleton();
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
@@ -403,7 +576,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		return p_texture.is_valid() ? p_texture : dummy_tex;
 	};
 	_free_uniform_set();
-	RD::Uniform uniforms[25] = {
+	RD::Uniform uniforms[35] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, visibility),
@@ -426,12 +599,30 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ sampler, valid_tex(material_depth) })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, params_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, counter_buffer),
+		RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 22, valid_tex(translucency_mark_texture)),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 23, translucency_marks),
+		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 24, translucency_indices),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 25, translucency_r),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 26, translucency_g),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 27, translucency_b),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 28, translucency_sh_r),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 29, translucency_sh_g),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 30, translucency_sh_b),
+		RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 31, translucency_history_r),
+		RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 32, translucency_history_g),
+		RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 33, translucency_history_b),
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 34, sampler),
 	};
 	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 22), shader->shader.version_get_shader(shader->version, 0), 0);
-	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 25), shader->shader.version_get_shader(shader->version, 2), 0);
+	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader->shader.version_get_shader(shader->version, 2), 0);
+	translucency_mark_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader->shader.version_get_shader(shader->version, 3), 0);
+	rd->set_resource_name(translucency_mark_uniform_set, "NextGI Translucency Mark Uniforms");
+	uniforms[1] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, translucency_radiance);
+	uniforms[2] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, translucency_visibility);
+	uniforms[6] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, translucency_offsets);
+	uniforms[7] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, translucency_mip4);
+	uniforms[8] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, translucency_mip2);
+	translucency_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader->shader.version_get_shader(shader->version, 4), 0);
 	if (uniform_set.is_valid()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->trace);
@@ -443,20 +634,46 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		rd->compute_list_dispatch(list, NEXTGI_WRC_PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_end();
 	}
-	// GodotNext: nextgi_translucency_volume (#61). One froxel per invocation.
+	if (uses_translucency_probes() && translucency_mark_texture.is_valid() && translucency_mark_uniform_set.is_valid() && translucency_uniform_set.is_valid()) {
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shader->translucency_mark);
+		rd->compute_list_bind_uniform_set(list, translucency_mark_uniform_set, 0);
+		rd->compute_list_dispatch(list, (translucency_size.x + 7) / 8, (translucency_size.y + 7) / 8, 1);
+		rd->compute_list_add_barrier(list);
+		rd->compute_list_bind_compute_pipeline(list, shader->translucency_trace);
+		rd->compute_list_bind_uniform_set(list, translucency_uniform_set, 0);
+		rd->compute_list_dispatch(list, 8192, 1, 1);
+		rd->compute_list_end();
+		_read_counters();
+	}
+	if (translucency_marked > 0 && translucency_uniform_set.is_valid()) {
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, shader->translucency_project);
+		rd->compute_list_bind_uniform_set(list, translucency_uniform_set, 0);
+		rd->compute_list_dispatch(list, translucency_marked, 1, 1);
+		rd->compute_list_end();
+	}
+	// One shared volume feeds forward translucency and volumetric fog.
 	if (volume_uniform_set.is_valid() && translucency_r.is_valid()) {
-		RENDER_TIMESTAMP("WRC trace");
 		const RD::ComputeListID volume_list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(volume_list, shader->translucency);
 		rd->compute_list_bind_uniform_set(volume_list, volume_uniform_set, 0);
 		rd->compute_list_dispatch(volume_list, (translucency_size.x + 7) / 8, (translucency_size.y + 7) / 8, 32);
 		rd->compute_list_end();
-		RENDER_TIMESTAMP("Translucency volume");
+		rd->texture_copy(translucency_r, translucency_history_r, Vector3(), Vector3(), Vector3(translucency_size), 0, 0, 0, 0);
+		rd->texture_copy(translucency_g, translucency_history_g, Vector3(), Vector3(), Vector3(translucency_size), 0, 0, 0, 0);
+		rd->texture_copy(translucency_b, translucency_history_b, Vector3(), Vector3(), Vector3(translucency_size), 0, 0, 0, 0);
+		volume_history_valid = true;
 	}
 	_read_counters();
 	// Fog runs after this slot and adds into the same buffer. Keep the previous frame's fog totals.
 	fog_samples = previous_fog_samples;
 	fog_ambient_bits = previous_fog_bits;
+	previous_view_projection = view_proj;
+	previous_camera_position = camera;
+	previous_camera_forward = forward;
+	previous_sky_read = sky_read;
+	has_previous_camera = true;
 	cursor = (cursor + NEXTGI_WRC_PROBES_PER_FRAME) % NEXTGI_WRC_PROBE_COUNT;
 	frame++;
 }
@@ -470,5 +687,11 @@ void NextGIWRC::fill_info(Dictionary &r_info) const {
 	r_info["wrc_energy_bits"] = int64_t(last_energy_bits);
 	r_info["wrc_fog_samples"] = int64_t(fog_samples);
 	r_info["wrc_fog_ambient_bits"] = int64_t(fog_ambient_bits);
-	r_info["translucency_volume_bytes"] = int64_t(translucency_size.x) * int64_t(translucency_size.y) * 32 * 3 * 8;
+	r_info["translucency_volume_bytes"] = int64_t(translucency_size.x) * int64_t(translucency_size.y) * 32 * 6 * 8;
+	r_info["translucency_marked_probes"] = int64_t(translucency_marked);
+	r_info["translucency_probe_rays"] = int64_t(translucency_rays);
+	r_info["translucency_probe_hits"] = int64_t(translucency_hits);
+	r_info["translucency_history_valid"] = volume_history_valid;
+	r_info["translucency_lite"] = !uses_translucency_probes();
+	r_info["translucency_sky_energy"] = translucency_sky_energy;
 }

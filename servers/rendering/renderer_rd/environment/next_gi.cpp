@@ -399,6 +399,13 @@ bool NextGI::is_reflections_enabled() {
 	return bool(GLOBAL_GET("rendering/global_illumination/nextgi/reflections"));
 }
 
+NextGIWRC *NextGI::ensure_wrc() {
+	if (wrc == nullptr) {
+		wrc = memnew(NextGIWRC);
+	}
+	return wrc;
+}
+
 Dictionary NextGI::get_status() const {
 	Dictionary status;
 	status["mode"] = get_mode_name(nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))));
@@ -914,10 +921,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 				ss_effects->build_hiz(buffers);
 			}
 		} else if (slot == PASS_SLOT_WRC_UPDATE) {
-			if (wrc == nullptr) {
-				wrc = memnew(NextGIWRC);
-			}
-			wrc->update(p_render_data);
+			ensure_wrc()->update(p_render_data);
 		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
 			_clear_gi_reflection(rb.ptr());
 			_gather(p_render_data);

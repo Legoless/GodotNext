@@ -2812,3 +2812,18 @@ TEST_CASE("[NextGI] Rough reflection filtering follows roughness") {
 	CHECK(Math::is_equal_approx(NextGI::nextgi_roughness_to_lod(-1.0f), 0.0f));
 	CHECK(NextGI::is_reflections_enabled());
 }
+
+TEST_CASE("[NextGI] Translucency probe mapping and temporal history") {
+	CHECK_EQ(RendererRD::nextgi_translucency_probe_index(Vector3(0.5, 0.5, 0.5), Vector3(), Vector3()), 2184);
+	CHECK_EQ(RendererRD::nextgi_translucency_probe_index(Vector3(9, 0, 0), Vector3(), Vector3()), 6284);
+	CHECK_EQ(RendererRD::nextgi_translucency_probe_index(Vector3(17, 0, 0), Vector3(), Vector3()), -1);
+	CHECK_EQ(RendererRD::nextgi_translucency_probe_index(Vector3(-15, 0, 0), Vector3(), Vector3()), 6272);
+	CHECK_EQ(RendererRD::nextgi_translucency_probe_index(Vector3(4, 4, 4), Vector3(), Vector3()), 3276);
+	CHECK_EQ(RendererRD::nextgi_translucency_volume_level(8.0f, true), 1u);
+	CHECK_EQ(RendererRD::nextgi_translucency_volume_level(32.0f, true), 3u);
+	CHECK_EQ(RendererRD::nextgi_translucency_volume_level(8.0f, false), 0u);
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(true, Vector2(0.5, 0.5)), 0.9f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(false, Vector2(0.5, 0.5)), 0.0f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(true, Vector2(-0.1, 0.5)), 0.0f));
+	CHECK(Math::is_equal_approx(RendererRD::nextgi_translucency_history_weight(true, Vector2(0.5, 1.1)), 0.0f));
+}

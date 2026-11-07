@@ -516,7 +516,7 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			} break;
 			case PASS_MODE_DEPTH_MATERIAL: {
 				ERR_FAIL_COND_MSG(p_params->view_count > 1, "Multiview not supported for material pass");
-				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL;
+				pipeline_key.version = p_params->nextgi_translucency_mark ? SceneShaderForwardClustered::PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL;
 			} break;
 			case PASS_MODE_SDF: {
 				// Note, SDF is prepared in world space, this shouldn't be a multiview buffer even when stereoscopic rendering is used.
@@ -1510,9 +1510,9 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		RendererRD::NextGIWRC *wrc = next_gi.get_wrc();
 		settings.use_nextgi = environment_get_nextgi_enabled(p_environment) && next_gi.get_tier_result().tier == RendererRD::NextGI::TIER_HWRT && wrc != nullptr && wrc->is_ready();
 		if (settings.use_nextgi) {
-			settings.nextgi_sh_r = wrc->get_sh_r();
-			settings.nextgi_sh_g = wrc->get_sh_g();
-			settings.nextgi_sh_b = wrc->get_sh_b();
+			settings.nextgi_sh_r = wrc->get_translucency_r();
+			settings.nextgi_sh_g = wrc->get_translucency_g();
+			settings.nextgi_sh_b = wrc->get_translucency_b();
 			settings.nextgi_params = wrc->get_params_buffer();
 			settings.nextgi_counters = wrc->get_counter_buffer();
 		}
@@ -1805,6 +1805,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	}
 	if (p_use_nextgi && rb.is_valid()) {
 		next_gi.set_active_debug_view(RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode()));
+		_render_nextgi_translucency_mark(p_render_data);
 		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution());
 	}
 
@@ -1900,6 +1901,36 @@ void RenderForwardClustered::_process_sss(Ref<RenderSceneBuffersRD> p_render_buf
 		RID depth_texture = p_render_buffers->get_depth_texture(v);
 		ss_effects->sub_surface_scattering(p_render_buffers, internal_texture, depth_texture, p_camera, internal_size);
 	}
+}
+
+void RenderForwardClustered::_render_nextgi_translucency_mark(RenderDataRD *p_render_data) {
+	if (p_render_data->scene_data->view_count != 1 || render_list[RENDER_LIST_ALPHA].elements.is_empty()) {
+		return;
+	}
+	RendererRD::NextGIWRC *wrc = next_gi.ensure_wrc();
+	if (!wrc->uses_translucency_probes()) {
+		return;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	ERR_FAIL_COND(rb.is_null());
+	const Size2i size = rb->get_internal_size();
+	const Size2i mark_size(MAX((size.x + 15) / 16, 1), MAX((size.y + 15) / 16, 1));
+	const RID target = wrc->get_translucency_mark_target(mark_size);
+	if (target.is_null()) {
+		return;
+	}
+	next_gi.ensure_gi_buffers(rb.ptr(), gi.is_half_resolution());
+	RD::get_singleton()->draw_command_begin_label("NextGI Translucency Marks");
+	const uint32_t uniform_buffer_index = _setup_environment(p_render_data, false, mark_size, mark_size, Color(), false);
+	const RID uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, RID(), rb->get_samplers(), uniform_buffer_index, true);
+	RenderListParameters params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), p_render_data->scene_data->cam_transform.basis.determinant() < 0, PASS_MODE_DEPTH_MATERIAL, 0, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, 1, 0, scene_shader.default_specialization, false);
+	params.nextgi_translucency_mark = true;
+	params.framebuffer_format = RD::get_singleton()->framebuffer_get_format(target);
+	Vector<Color> clear;
+	clear.push_back(Color(0, 0, 0, 0));
+	_render_list_with_draw_list(&params, target, RD::DRAW_CLEAR_ALL, clear);
+	_setup_environment(p_render_data, false, size, size, Color(), false);
+	RD::get_singleton()->draw_command_end_label();
 }
 
 void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {

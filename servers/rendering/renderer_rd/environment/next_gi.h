@@ -491,6 +491,7 @@ public:
 	bool has_front_layer() const { return front_layer != nullptr; }
 	NextGIReference *get_reference() const { return reference; }
 	NextGIWRC *get_wrc() const { return wrc; }
+	NextGIWRC *ensure_wrc();
 
 	// GodotNext: nextgi_src_cards
 	// The §8.3 Stage-1 card clustering, nextgi_src_cluster_cards (next_gi_src.h). Pure, so doctests

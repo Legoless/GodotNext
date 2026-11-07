@@ -14,7 +14,11 @@ layout(set = 0, binding = 0) uniform accelerationStructureEXT nextgi_tlas;
 #define NEXTGI_TLAS nextgi_tlas
 #include "nextgi_rt_inc.glsl"
 
+#if defined(MODE_TRANSLUCENCY_TRACE) || defined(MODE_TRANSLUCENCY_PROJECT)
+layout(rgba16f, set = 0, binding = 1) uniform image2D radiance_image;
+#else
 layout(r11f_g11f_b10f, set = 0, binding = 1) uniform image2D radiance_image;
+#endif
 layout(rg16f, set = 0, binding = 2) uniform image2D visibility_image;
 layout(rgba16f, set = 0, binding = 3) uniform image3D sh_r_image;
 layout(rgba16f, set = 0, binding = 4) uniform image3D sh_g_image;
@@ -73,6 +77,8 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIWRCParams {
 	uint pad2;
 	mat4 inv_view_proj; // GodotNext: nextgi_translucency_volume (#61).
 	vec4 volume; // x width, y height, z near, w far.
+	mat4 previous_view_proj;
+	vec4 history; // blend, Lite, valid, sky lighting enabled.
 }
 params;
 
@@ -85,10 +91,30 @@ layout(set = 0, binding = 21, std430) buffer NextGIWRCCounters {
 	uint fog_ambient_bits;
 	uint pad_a;
 	uint pad_b;
+	uint translucent_probes;
+	uint translucent_rays;
+	uint translucent_hits;
+	uint translucent_sky_misses;
+	uint translucent_sky_energy;
 }
 counters;
 
+#if defined(MODE_TRANSLUCENCY_MARK) || defined(MODE_TRANSLUCENCY_TRACE) || defined(MODE_TRANSLUCENCY_PROJECT) || defined(MODE_TRANSLUCENCY_VOLUME)
+layout(set = 0, binding = 22) uniform texture2D translucency_mark_tex;
+layout(set = 0, binding = 23, std430) buffer NextGITranslucencyMarks {
+	uint data[];
+}
+translucency_marks;
+layout(set = 0, binding = 24, std430) buffer NextGITranslucencyIndices {
+	uint count;
+	uint data[];
+}
+translucency_indices;
+layout(set = 0, binding = 34) uniform sampler translucency_sampler;
+#endif
+
 shared uint wrc_backfaces;
+shared uint wrc_probe;
 shared vec3 wrc_escape_samples[64];
 
 uint nextgi_wrc_chunk_uint(uint chunk, uint byte_offset) {
@@ -215,13 +241,36 @@ ivec3 nextgi_wrc_probe_cell(uint probe) {
 void nextgi_wrc_trace() {
 	if (gl_LocalInvocationIndex == 0u) {
 		wrc_backfaces = 0u;
+#ifdef MODE_TRANSLUCENCY_TRACE
+		wrc_probe = 0xFFFFFFFFu;
+		uint candidate = gl_WorkGroupID.x;
+		uint mask = 1u << (candidate % 32u);
+		if ((translucency_marks.data[candidate / 32u] & mask) != 0u) {
+			uint slot = atomicAdd(translucency_indices.count, 1u);
+			if (slot < 4096u) {
+				translucency_indices.data[slot] = candidate;
+				wrc_probe = candidate;
+				atomicAdd(counters.translucent_probes, 1u);
+			} else {
+				atomicAnd(translucency_marks.data[candidate / 32u], ~mask);
+			}
+		}
+#else
+		wrc_probe = (params.dispatch.x + gl_WorkGroupID.x) % 16384u;
+#endif
 	}
 	wrc_escape_samples[gl_LocalInvocationIndex] = vec3(0.0);
 	barrier();
+#ifdef MODE_TRANSLUCENCY_TRACE
+	if (wrc_probe == 0xFFFFFFFFu) {
+		return;
+	}
+#else
 	if (gl_WorkGroupID.x >= params.dispatch.y) {
 		return;
 	}
-	uint probe = (params.dispatch.x + gl_WorkGroupID.x) % 16384u;
+#endif
+	uint probe = wrc_probe;
 	ivec2 local = ivec2(gl_LocalInvocationID.xy);
 	vec3 direction = nextgi_wrc_oct_dir(local);
 	ivec3 cell = nextgi_wrc_probe_cell(probe);
@@ -234,11 +283,19 @@ void nextgi_wrc_trace() {
 	ivec2 radiance_texel = nextgi_wrc_radiance_texel(probe, local);
 	vec3 previous = imageLoad(radiance_image, radiance_texel).rgb;
 	NextGIHit hit;
+#ifdef MODE_TRANSLUCENCY_TRACE
+	atomicAdd(counters.translucent_rays, 1u);
+#else
 	atomicAdd(counters.rays, 1u);
+#endif
 	vec3 sample_radiance = params.sky.rgb;
 	bool back_face = false;
 	if (nextgi_trace(probe_pos, direction, 1.0e6, hit)) {
+#ifdef MODE_TRANSLUCENCY_TRACE
+		atomicAdd(counters.translucent_hits, 1u);
+#else
 		atomicAdd(counters.hits, 1u);
+#endif
 		bool uncovered = false;
 		vec3 looked_up = vec3(0.0);
 		if (!nextgi_src_lookup(hit, looked_up, uncovered)) {
@@ -247,7 +304,15 @@ void nextgi_wrc_trace() {
 		sample_radiance = looked_up;
 		back_face = !hit.front_face && hit.t < 0.5 * spacing;
 	} else {
+#ifdef MODE_TRANSLUCENCY_TRACE
+		atomicAdd(counters.translucent_sky_misses, 1u);
+		if (params.history.w < 0.5) {
+			sample_radiance = vec3(0.0);
+		}
+		atomicAdd(counters.translucent_sky_energy, uint(clamp(dot(sample_radiance, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0)));
+#else
 		atomicAdd(counters.sky_misses, 1u);
+#endif
 	}
 	float blend = previous_offset.w > 0.5 ? 0.1 : 1.0;
 	vec3 blended = mix(previous, sample_radiance, blend);
@@ -276,21 +341,49 @@ void nextgi_wrc_trace() {
 }
 
 void nextgi_wrc_project() {
-	if (gl_LocalInvocationIndex != 0u || gl_WorkGroupID.x >= params.dispatch.y) {
+	if (gl_LocalInvocationIndex != 0u) {
+		return;
+	}
+#ifdef MODE_TRANSLUCENCY_PROJECT
+	if (gl_WorkGroupID.x >= min(translucency_indices.count, 4096u)) {
+		return;
+	}
+	uint probe = translucency_indices.data[gl_WorkGroupID.x];
+#else
+	if (gl_WorkGroupID.x >= params.dispatch.y) {
 		return;
 	}
 	uint probe = (params.dispatch.x + gl_WorkGroupID.x) % 16384u;
+#endif
 	vec3 sum = vec3(0.0);
+#ifdef MODE_TRANSLUCENCY_PROJECT
+	vec3 l1r = vec3(0.0);
+	vec3 l1g = vec3(0.0);
+	vec3 l1b = vec3(0.0);
+#endif
 	for (uint y = 0u; y < 8u; y++) {
 		for (uint x = 0u; x < 8u; x++) {
-			sum += imageLoad(radiance_image, nextgi_wrc_radiance_texel(probe, ivec2(x, y))).rgb;
+			vec3 sample_radiance = imageLoad(radiance_image, nextgi_wrc_radiance_texel(probe, ivec2(x, y))).rgb;
+			sum += sample_radiance;
+#ifdef MODE_TRANSLUCENCY_PROJECT
+			vec3 direction = nextgi_wrc_oct_dir(ivec2(x, y));
+			l1r += direction * sample_radiance.r;
+			l1g += direction * sample_radiance.g;
+			l1b += direction * sample_radiance.b;
+#endif
 		}
 	}
 	sum /= 64.0;
 	ivec3 cell = nextgi_wrc_probe_cell(probe);
+#ifdef MODE_TRANSLUCENCY_PROJECT
+	imageStore(sh_r_image, cell, vec4(sum.r, l1r / 64.0));
+	imageStore(sh_g_image, cell, vec4(sum.g, l1g / 64.0));
+	imageStore(sh_b_image, cell, vec4(sum.b, l1b / 64.0));
+#else
 	imageStore(sh_r_image, cell, vec4(sum.r, 0.0, 0.0, 0.0));
 	imageStore(sh_g_image, cell, vec4(sum.g, 0.0, 0.0, 0.0));
 	imageStore(sh_b_image, cell, vec4(sum.b, 0.0, 0.0, 0.0));
+#endif
 	uvec2 tile = uvec2(probe % 128u, probe / 128u);
 	for (uint y = 0u; y < 4u; y++) {
 		for (uint x = 0u; x < 4u; x++) {
@@ -320,13 +413,41 @@ void nextgi_wrc_project() {
 	imageStore(radiance_image, origin + ivec2(9, 9), imageLoad(radiance_image, origin + ivec2(8, 8)));
 }
 
+#ifdef MODE_TRANSLUCENCY_MARK
+void nextgi_translucency_mark_main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	ivec2 size = ivec2(params.volume.xy);
+	if (pixel.x >= size.x || pixel.y >= size.y) {
+		return;
+	}
+	vec4 world = texelFetch(sampler2D(translucency_mark_tex, translucency_sampler), pixel, 0);
+	if (world.a <= 0.0) {
+		return;
+	}
+	float distance = length(world.xyz - params.camera.xyz);
+	if (distance > 16.0) {
+		return;
+	}
+	uint level = distance <= 8.0 ? 0u : 1u;
+	float spacing = params.origin_spacing.w * float(1u << level);
+	vec3 level_origin = floor(params.origin_spacing.xyz / spacing) * spacing;
+	ivec3 cell = clamp(ivec3(round((world.xyz - level_origin) / spacing + 7.5)), ivec3(0), ivec3(15));
+	uint probe = level * 4096u + uint(cell.x + cell.y * 16 + cell.z * 256);
+	atomicOr(translucency_marks.data[probe / 32u], 1u << (probe % 32u));
+}
+#endif
+
 #ifdef MODE_TRANSLUCENCY_VOLUME
 layout(rgba16f, set = 0, binding = 25) uniform image3D translucency_r_image;
 layout(rgba16f, set = 0, binding = 26) uniform image3D translucency_g_image;
 layout(rgba16f, set = 0, binding = 27) uniform image3D translucency_b_image;
+layout(rgba16f, set = 0, binding = 28) uniform image3D translucency_sh_r_image;
+layout(rgba16f, set = 0, binding = 29) uniform image3D translucency_sh_g_image;
+layout(rgba16f, set = 0, binding = 30) uniform image3D translucency_sh_b_image;
+layout(set = 0, binding = 31) uniform texture3D translucency_history_r;
+layout(set = 0, binding = 32) uniform texture3D translucency_history_g;
+layout(set = 0, binding = 33) uniform texture3D translucency_history_b;
 
-// GodotNext: nextgi_translucency_volume (#61). One froxel per invocation: 1/16-screen x 32
-// exponential slices from 0.05 m to 64 m, carrying the WRC SH irradiance at the slice center.
 void nextgi_translucency_volume_main() {
 	ivec3 froxel = ivec3(gl_GlobalInvocationID.xyz);
 	ivec2 size = ivec2(params.volume.xy);
@@ -339,15 +460,43 @@ void nextgi_translucency_volume_main() {
 	vec4 clip = params.inv_view_proj * vec4(uv * 2.0 - 1.0, depth, 1.0);
 	vec3 world = clip.xyz / clip.w;
 	float cam_distance = length(world - params.camera.xyz);
-	float level = clamp(floor(log2(max(cam_distance / 8.0, 1.0))), 0.0, 3.0);
+	float base_level = clamp(floor(log2(max(cam_distance / 8.0, 1.0))), 0.0, 3.0);
+	float level = min(base_level + (params.history.y > 0.5 ? 1.0 : 0.0), 3.0);
 	float spacing = params.origin_spacing.w * exp2(level);
 	vec3 level_origin = floor(params.origin_spacing.xyz / spacing) * spacing;
 	vec3 rel = (world - level_origin) / spacing + 7.5;
 	ivec3 cell = clamp(ivec3(round(rel)), ivec3(0), ivec3(15));
-	cell.z += int(level) * 16;
-	imageStore(translucency_r_image, froxel, vec4(imageLoad(sh_r_image, cell).r, 0.0, 0.0, 0.0));
-	imageStore(translucency_g_image, froxel, vec4(imageLoad(sh_g_image, cell).r, 0.0, 0.0, 0.0));
-	imageStore(translucency_b_image, froxel, vec4(imageLoad(sh_b_image, cell).r, 0.0, 0.0, 0.0));
+	uint probe = uint(level) * 4096u + uint(cell.x + cell.y * 16 + cell.z * 256);
+	bool traced = params.history.y < 0.5 && level < 2.0 && (translucency_marks.data[probe / 32u] & (1u << (probe % 32u))) != 0u;
+	vec4 red;
+	vec4 green;
+	vec4 blue;
+	if (traced) {
+		cell.z += int(level) * 16;
+		red = imageLoad(translucency_sh_r_image, cell);
+		green = imageLoad(translucency_sh_g_image, cell);
+		blue = imageLoad(translucency_sh_b_image, cell);
+	} else {
+		cell.z += int(level) * 16;
+		red = vec4(imageLoad(sh_r_image, cell).r, 0.0, 0.0, 0.0);
+		green = vec4(imageLoad(sh_g_image, cell).r, 0.0, 0.0, 0.0);
+		blue = vec4(imageLoad(sh_b_image, cell).r, 0.0, 0.0, 0.0);
+	}
+	vec4 previous_clip = params.previous_view_proj * vec4(world, 1.0);
+	vec3 history_coord = vec3(0.0);
+	if (previous_clip.w > 0.0) {
+		vec2 previous_uv = previous_clip.xy / previous_clip.w * 0.5 + 0.5;
+		float previous_depth = previous_clip.z / previous_clip.w;
+		float previous_slice = clamp(log(max(previous_depth, params.volume.z) / params.volume.z) / log(params.volume.w / params.volume.z), 0.0, 1.0);
+		history_coord = vec3(previous_uv, previous_slice);
+	}
+	float weight = params.history.z > 0.5 && all(greaterThanEqual(history_coord.xy, vec2(0.0))) && all(lessThanEqual(history_coord.xy, vec2(1.0))) ? params.history.x : 0.0;
+	vec4 history_r = texture(sampler3D(translucency_history_r, translucency_sampler), history_coord);
+	vec4 history_g = texture(sampler3D(translucency_history_g, translucency_sampler), history_coord);
+	vec4 history_b = texture(sampler3D(translucency_history_b, translucency_sampler), history_coord);
+	imageStore(translucency_r_image, froxel, mix(red, history_r, weight));
+	imageStore(translucency_g_image, froxel, mix(green, history_g, weight));
+	imageStore(translucency_b_image, froxel, mix(blue, history_b, weight));
 }
 #endif
 
@@ -356,6 +505,10 @@ void main() {
 	nextgi_wrc_project();
 #elif defined(MODE_TRANSLUCENCY_VOLUME)
 	nextgi_translucency_volume_main();
+#elif defined(MODE_TRANSLUCENCY_MARK)
+	nextgi_translucency_mark_main();
+#elif defined(MODE_TRANSLUCENCY_PROJECT)
+	nextgi_wrc_project();
 #else
 	nextgi_wrc_trace();
 #endif
