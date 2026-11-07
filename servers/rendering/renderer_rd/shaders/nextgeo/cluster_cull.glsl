@@ -35,6 +35,8 @@ clusters_out;
 #ifdef CUT_HASH
 // Matches RendererRD::nextgeo_cut_pair_hash, split into two 32-bit words so
 // the Metal backend never sees a 64-bit integer type.
+const uint PHASE2_CLUSTER_BASE = 1u << 20u;
+
 uint mix32(uint x) {
 	x ^= x >> 16;
 	x *= 0x7feb352du;
@@ -44,29 +46,38 @@ uint mix32(uint x) {
 	return x;
 }
 
-void main() {
-	uint index = gl_GlobalInvocationID.x;
-	if (index >= counters.cluster_count) {
-		return;
-	}
-	uvec2 pair = clusters_out.data[index];
+void hash_pair(uvec2 pair) {
 	uint lo = mix32(pair.x ^ mix32(pair.y ^ 0x9e3779b9u));
 	uint hi = mix32(pair.x ^ 0x85ebca6bu) ^ mix32(pair.y ^ 0xc2b2ae35u);
 	atomicXor(counters.cut_hash[0], lo);
 	atomicXor(counters.cut_hash[1], hi);
 }
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	if (index < counters.phase1_clusters) {
+		hash_pair(clusters_out.data[index]);
+	}
+	if (index < counters.phase2_clusters) {
+		hash_pair(clusters_out.data[PHASE2_CLUSTER_BASE + index]);
+	}
+}
 #else
 layout(push_constant, std430) uniform Params {
 	uint level;
 	uint output_capacity;
-	uint phase1_offset;
-	uint phase2_offset;
+	uint list_base;
+	uint phase;
 }
 params;
 layout(set = 0, binding = 12, std430) buffer restrict BVHArgs {
 	uvec4 data[];
 }
 bvh_args;
+layout(set = 0, binding = 13, std430) buffer restrict DrawArgs {
+	uvec4 data[];
+}
+draw_args;
 
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 	return vec3(
@@ -96,7 +107,7 @@ float dag_float(uint p_byte_offset) {
 #ifdef CLUSTER_CULL
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	uint input_count = counters.group_count;
+	uint input_count = params.phase == 0u ? counters.group_count : counters.phase2_group_count;
 	if (index >= input_count) {
 		return;
 	}
@@ -122,18 +133,25 @@ void main() {
 		return;
 	}
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
-		uint slot = atomicAdd(counters.cluster_count, 1u);
+		uint slot = params.phase == 0u ? atomicAdd(counters.phase1_clusters, 1u) : atomicAdd(counters.phase2_clusters, 1u);
 		if (slot >= params.output_capacity) {
 			atomicAdd(counters.overflow, 1u);
 			return;
 		}
-		clusters_out.data[slot] = uvec2(entry.x, cluster_offset + cluster);
+		atomicAdd(counters.cluster_count, 1u);
+		atomicAdd(draw_args.data[params.phase].y, 1u);
+		clusters_out.data[params.list_base + slot] = uvec2(entry.x, cluster_offset + cluster);
 	}
 }
 #else
 void main() {
 	uint index = gl_GlobalInvocationID.x;
-	uint input_count = params.level == 0u ? counters.phase1_count : counters.level_counts[params.level - 1u];
+	uint input_count = 0u;
+	if (params.phase == 0u) {
+		input_count = params.level == 0u ? counters.phase1_count : counters.level_counts[params.level - 1u];
+	} else {
+		input_count = params.level == 0u ? counters.phase2_visible_count : counters.phase2_level_counts[params.level - 1u];
+	}
 	if (index >= input_count) {
 		return;
 	}
@@ -150,45 +168,27 @@ void main() {
 	for (uint child = 0u; child < child_count; child++) {
 		uint value = dag_uint(base + 48u + child * 4u);
 		if ((value & NEXTGEO_BVH_LEAF_BIT) != 0u) {
-			uint slot = atomicAdd(counters.group_count, 1u);
+			uint slot = 0u;
+			if (params.phase == 0u) {
+				slot = atomicAdd(counters.group_count, 1u);
+			} else {
+				atomicAdd(counters.group_count, 1u);
+				slot = atomicAdd(counters.phase2_group_count, 1u);
+			}
 			if (slot >= params.output_capacity) {
 				atomicAdd(counters.overflow, 1u);
 				continue;
 			}
 			groups_out.data[slot] = uvec2(entry.x, value & ~NEXTGEO_BVH_LEAF_BIT);
 		} else {
-			uint slot = atomicAdd(counters.level_counts[params.level], 1u);
+			uint slot = params.phase == 0u ? atomicAdd(counters.level_counts[params.level], 1u) : atomicAdd(counters.phase2_level_counts[params.level], 1u);
 			if (slot >= params.output_capacity) {
 				atomicAdd(counters.overflow, 1u);
 				continue;
 			}
 			uint groups = (slot + 64u) / 64u;
-			switch (params.level) {
-				case 0u:
-					atomicMax(bvh_args.data[1].x, groups);
-					break;
-				case 1u:
-					atomicMax(bvh_args.data[2].x, groups);
-					break;
-				case 2u:
-					atomicMax(bvh_args.data[3].x, groups);
-					break;
-				case 3u:
-					atomicMax(bvh_args.data[4].x, groups);
-					break;
-				case 4u:
-					atomicMax(bvh_args.data[5].x, groups);
-					break;
-				case 5u:
-					atomicMax(bvh_args.data[6].x, groups);
-					break;
-				case 6u:
-					atomicMax(bvh_args.data[7].x, groups);
-					break;
-				default:
-					atomicMax(bvh_args.data[8].x, groups);
-					break;
-			}
+			uint args_base = params.phase == 0u ? 1u : 10u;
+			atomicMax(bvh_args.data[args_base + min(params.level, 7u)].x, groups);
 			level_output.data[slot] = uvec2(entry.x, value);
 		}
 	}

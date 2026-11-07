@@ -30,26 +30,51 @@
 
 #pragma once
 
+#include "core/math/color.h"
 #include "core/math/projection.h"
+#include "core/math/transform_3d.h"
+#include "core/math/vector2.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/cluster_cull.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/hiz_pyramid.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/instance_cull.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
 
-// GodotNext: nextgeo_gpu_cull (#76)
-// The GPU cut manager: instance cull (level 0), one BVH8 dispatch per level,
-// then the leaf-group test and compaction into (record, cluster).
+struct NextGeoRasterInputs {
+	RID visibility;
+	RID instance_id;
+	RID velocity;
+	RID depth;
+	Projection proj;
+	Transform3D view;
+	Projection prev_proj;
+	Transform3D prev_view;
+	Vector2 taa_jitter;
+	Vector2 prev_taa_jitter;
+	Color velocity_clear;
+	bool clear_velocity = false;
+	bool reset_velocity = false;
+	bool reverse_cull = false;
+	bool debug_backface = false;
+};
+
+// GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
+// The GPU cut manager and draw path (c) visibility raster: instance cull,
+// level-synchronous BVH8 traversal, cluster compaction and 1 indirect draw
+// per phase per view.
 class NextGeoCut {
 public:
 	static constexpr uint32_t NODE_CAPACITY = 1u << 17;
 	static constexpr uint32_t GROUP_CAPACITY = 1u << 17;
 	static constexpr uint32_t CLUSTER_CAPACITY = 1u << 21;
+	static constexpr uint32_t PHASE2_CLUSTER_BASE = CLUSTER_CAPACITY / 2;
 	static constexpr uint32_t HIZ_MAX_MIPS = 16;
 
-	void dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats);
+	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr);
 	void free_resources();
 
 	static Dictionary get_last_stats();
@@ -58,12 +83,14 @@ private:
 	bool _ensure();
 	void _ensure_hiz(const Size2i &p_internal_size);
 	void _build_hiz(RID p_depth, const Size2i &p_internal_size);
+	void _clear_visibility_targets(RID p_visibility, RID p_instance_id, const Size2i &p_internal_size);
+	bool _draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster);
 	void _swap_hiz();
 	void _release_hiz();
 	RID _storage(uint32_t p_bytes);
-	RID _uniform_set(const Vector<RD::Uniform> &p_uniforms, int p_variant);
-	void _set_common_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_input, RID p_output, RID p_groups, RID p_clusters);
-	void _request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev);
+	RID _uniform_set(const LocalVector<RD::Uniform> &p_uniforms, int p_variant);
+	void _set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out);
+	void _request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev, uint32_t p_raster_draws);
 	void _publish_stats(const PackedByteArray &p_data);
 
 	InstanceCullShaderRD instance_shader;
@@ -78,16 +105,23 @@ private:
 	HizPyramidShaderRD hiz_shader;
 	RID hiz_version;
 	RID hiz_pipeline;
+	RID clear_vis_pipeline;
+	VisibilityRasterShaderRD raster_shader;
+	RID raster_version;
+	PipelineCacheRD raster_pipelines[4];
 
 	RID params;
+	RID raster_params;
 	RID nodes;
 	RID phase2_nodes;
 	RID groups;
 	RID clusters;
 	RID level_a;
 	RID level_b;
-	RID bvh_args;
+	RID bvh_args[2];
+	RID draw_args;
 	RID counters;
+	RID dummy_page_buf;
 	RID dummy_hiz;
 	RID dummy_sampler;
 

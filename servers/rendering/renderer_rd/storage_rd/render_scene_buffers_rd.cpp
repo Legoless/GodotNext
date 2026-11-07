@@ -798,6 +798,28 @@ RID RenderSceneBuffersRD::get_velocity_depth_buffer() {
 	return velocity_depth;
 }
 
+void RenderSceneBuffersRD::ensure_nextgeo_targets() {
+	const uint32_t usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | (can_be_storage ? RD::TEXTURE_USAGE_STORAGE_BIT : 0) | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+	if (!has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VISIBILITY)) {
+		create_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VISIBILITY, RD::DATA_FORMAT_R32_UINT, usage_bits, RD::TEXTURE_SAMPLES_1, internal_size, 1, 1);
+	}
+	if (!has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID)) {
+		create_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID, RD::DATA_FORMAT_R32_UINT, usage_bits, RD::TEXTURE_SAMPLES_1, internal_size, 1, 1);
+	}
+}
+
+bool RenderSceneBuffersRD::has_nextgeo_targets() const {
+	return has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VISIBILITY) && has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID);
+}
+
+RID RenderSceneBuffersRD::get_nextgeo_visibility() const {
+	return has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VISIBILITY) ? get_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VISIBILITY) : RID();
+}
+
+RID RenderSceneBuffersRD::get_nextgeo_instance_id() const {
+	return has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID) ? get_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID) : RID();
+}
+
 uint32_t RenderSceneBuffersRD::get_color_usage_bits(bool p_resolve, bool p_msaa, bool p_storage) {
 	DEV_ASSERT((!p_resolve && !p_msaa) || (p_resolve != p_msaa));
 

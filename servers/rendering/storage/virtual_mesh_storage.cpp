@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -30,6 +30,8 @@
 
 #include "virtual_mesh_storage.h"
 
+#include "core/io/file_access.h"
+#include "core/io/resource_format_ngm.h"
 #include "core/math/math_funcs.h"
 
 #ifdef REAL_T_IS_DOUBLE
@@ -38,6 +40,194 @@ static_assert(sizeof(RendererVirtualMeshStorage::Record) == 256, "NextGeo instan
 static_assert(sizeof(RendererVirtualMeshStorage::Record) == 224, "NextGeo instance record must stay 224 bytes (plan §6.3).");
 #endif
 static_assert(sizeof(RendererVirtualMeshStorage::MeshRecord) == 32, "NextGeo mesh record must stay 32 bytes (plan §6.3).");
+static_assert(sizeof(RendererVirtualMeshStorage::ClusterGPUDesc) == 16, "NextGeo cluster GPU descriptor must stay 16 bytes.");
+
+namespace {
+
+uint32_t _ngm_vertex_float_stride(uint32_t p_vertex_layout) {
+	uint32_t stride = 0;
+	if ((p_vertex_layout & (1u << 0)) != 0) {
+		stride += 3; // POSITION
+	}
+	if ((p_vertex_layout & (1u << 1)) != 0) {
+		stride += 3; // NORMAL
+	}
+	if ((p_vertex_layout & (1u << 2)) != 0) {
+		stride += 4; // TANGENT
+	}
+	if ((p_vertex_layout & (1u << 3)) != 0) {
+		stride += 2; // UV0
+	}
+	if ((p_vertex_layout & (1u << 4)) != 0) {
+		stride += 2; // UV2
+	}
+	if ((p_vertex_layout & (1u << 5)) != 0) {
+		stride += 4; // COLOR
+	}
+	return stride;
+}
+
+static constexpr uint32_t MAX_EAGER_PAGE_ARENA_BYTES = 128u * 1024u * 1024u;
+
+void _collect_mesh_pages(const RenderingServerTypes::VirtualGeometryDesc &p_desc, uint32_t p_used_bytes, Vector<Vector<uint8_t>> &r_pages, uint32_t &r_layout_stride) {
+	r_pages.clear();
+	r_layout_stride = 0;
+	if (!p_desc.ngm_path.is_empty() && FileAccess::exists(p_desc.ngm_path)) {
+		Ref<NGMFile> ngm;
+		ngm.instantiate();
+		if (ngm->open(p_desc.ngm_path) == OK && ngm->get_page_count() > 0) {
+			r_layout_stride = _ngm_vertex_float_stride(ngm->get_header().vertex_layout);
+			const uint32_t page_count = ngm->get_page_count();
+			uint64_t running_bytes = uint64_t(p_used_bytes);
+			if (running_bytes < uint64_t(MAX_EAGER_PAGE_ARENA_BYTES)) {
+				r_pages.resize(int(page_count));
+				bool all_ok = true;
+				for (uint32_t page = 0; page < page_count; page++) {
+					if (ngm->read_page(page, r_pages.write[page]) != OK) {
+						all_ok = false;
+						break;
+					}
+					running_bytes += (uint64_t(r_pages[page].size()) + 15ull) & ~15ull;
+					if (running_bytes > uint64_t(MAX_EAGER_PAGE_ARENA_BYTES)) {
+						all_ok = false;
+						break;
+					}
+				}
+				if (all_ok) {
+					return;
+				}
+				r_pages.clear();
+			}
+		}
+	}
+	r_pages = p_desc.root_pages;
+}
+
+uint32_t _measure_page_blob_size(const Vector<Vector<uint8_t>> &p_pages, uint32_t &r_valid_pages, uint32_t &r_total_clusters) {
+	uint32_t bytes = 0;
+	r_valid_pages = 0;
+	r_total_clusters = 0;
+	for (int page = 0; page < p_pages.size(); page++) {
+		const Vector<uint8_t> &raw = p_pages[page];
+		if (raw.size() < 16) {
+			continue;
+		}
+		uint32_t header[4] = { 0, 0, 0, 0 };
+		memcpy(header, raw.ptr(), sizeof(header));
+		const uint64_t min_bytes = 16ull + uint64_t(header[0]) * 80ull + uint64_t(header[2]) * 3ull + uint64_t(header[3]);
+		if (min_bytes > uint64_t(raw.size())) {
+			continue;
+		}
+		bytes += (uint32_t(raw.size()) + 15u) & ~15u;
+		r_valid_pages++;
+		r_total_clusters += header[0];
+	}
+	return bytes;
+}
+
+void _compute_page_cluster_bases(const Vector<uint8_t> &p_dag, uint32_t p_first_cluster, int p_page_count, LocalVector<uint32_t> &r_bases) {
+	r_bases.resize(uint32_t(MAX(p_page_count, 0)));
+	for (uint32_t i = 0; i < r_bases.size(); i++) {
+		r_bases[i] = UINT32_MAX;
+	}
+	if (p_dag.size() < 8 || r_bases.is_empty()) {
+		return;
+	}
+	uint32_t group_count = 0;
+	uint32_t bvh_count = 0;
+	memcpy(&group_count, p_dag.ptr(), sizeof(uint32_t));
+	memcpy(&bvh_count, p_dag.ptr() + 4, sizeof(uint32_t));
+	if (8ull + uint64_t(group_count) * 60ull + uint64_t(bvh_count) * 80ull > uint64_t(p_dag.size())) {
+		return;
+	}
+	for (uint32_t g = 0; g < group_count; g++) {
+		uint32_t cluster_offset = 0;
+		uint32_t page_id = 0;
+		memcpy(&cluster_offset, p_dag.ptr() + 8 + g * 60, sizeof(uint32_t));
+		memcpy(&page_id, p_dag.ptr() + 8 + g * 60 + 8, sizeof(uint32_t));
+		if (page_id < r_bases.size() && cluster_offset >= p_first_cluster) {
+			r_bases[page_id] = MIN(r_bases[page_id], cluster_offset - p_first_cluster);
+		}
+	}
+}
+
+void _pack_page_and_cluster_blobs(const Vector<Vector<uint8_t>> &p_pages, const Vector<uint8_t> &p_dag, uint32_t p_first_cluster, uint32_t p_expected_clusters, uint32_t p_layout_stride, uint32_t p_page_base_bytes, uint32_t p_blob_bytes, Vector<uint8_t> &r_page_blob, Vector<uint8_t> &r_cluster_blob) {
+	r_page_blob.resize(int(p_blob_bytes));
+	if (p_blob_bytes > 0) {
+		memset(r_page_blob.ptrw(), 0, p_blob_bytes);
+	}
+	LocalVector<uint32_t> page_cluster_bases;
+	_compute_page_cluster_bases(p_dag, p_first_cluster, p_pages.size(), page_cluster_bases);
+	LocalVector<RendererVirtualMeshStorage::ClusterGPUDesc> descs;
+	if (p_expected_clusters > 0) {
+		descs.resize(p_expected_clusters);
+	}
+	uint32_t sequential_cluster = 0;
+	uint32_t cursor = 0;
+	for (int page = 0; page < p_pages.size(); page++) {
+		const Vector<uint8_t> &raw = p_pages[page];
+		if (raw.size() < 16) {
+			continue;
+		}
+		uint32_t header[4] = { 0, 0, 0, 0 };
+		memcpy(header, raw.ptr(), sizeof(header));
+		const uint32_t page_clusters = header[0];
+		const uint32_t page_vertices = header[1];
+		const uint32_t page_triangles = header[2];
+		const uint32_t skin_bytes = header[3];
+		const uint64_t fixed_bytes = 16ull + uint64_t(page_clusters) * 80ull + uint64_t(page_triangles) * 3ull + uint64_t(skin_bytes);
+		if (fixed_bytes > uint64_t(raw.size())) {
+			continue;
+		}
+		const uint64_t vertex_bytes = uint64_t(raw.size()) - fixed_bytes;
+		uint32_t stride = p_layout_stride;
+		if (stride == 0) {
+			if (page_vertices > 0 && (vertex_bytes % (uint64_t(page_vertices) * 4ull)) == 0) {
+				stride = uint32_t(vertex_bytes / (uint64_t(page_vertices) * 4ull));
+			} else {
+				stride = 3u;
+			}
+		}
+		if (uint64_t(page_vertices) * uint64_t(stride) * 4ull != vertex_bytes) {
+			continue;
+		}
+		memcpy(r_page_blob.ptrw() + cursor, raw.ptr(), raw.size());
+		const uint32_t page_global = p_page_base_bytes + cursor;
+		const uint32_t page_vert_bytes = page_global + 16u + page_clusters * 80u;
+		const uint32_t page_tri_bytes = page_vert_bytes + page_vertices * stride * 4u;
+		const uint32_t base_cluster = (uint32_t(page) < page_cluster_bases.size() && page_cluster_bases[page] != UINT32_MAX) ? page_cluster_bases[page] : sequential_cluster;
+		if (base_cluster + page_clusters > descs.size()) {
+			descs.resize(base_cluster + page_clusters);
+		}
+		for (uint32_t i = 0; i < page_clusters; i++) {
+			const uint8_t *rec = raw.ptr() + 16u + i * 80u;
+			uint32_t vertex_offset = 0;
+			uint32_t triangle_offset = 0;
+			uint16_t surface_id = 0;
+			memcpy(&vertex_offset, rec + 68, sizeof(uint32_t));
+			memcpy(&triangle_offset, rec + 72, sizeof(uint32_t));
+			const uint8_t vertex_count = rec[76];
+			const uint8_t triangle_count = rec[77];
+			memcpy(&surface_id, rec + 78, sizeof(uint16_t));
+
+			RendererVirtualMeshStorage::ClusterGPUDesc desc;
+			desc.pos_word_offset = (page_vert_bytes >> 2u) + vertex_offset * stride;
+			desc.tri_byte_offset = page_tri_bytes + triangle_offset * 3u;
+			desc.stride_and_counts = (stride & 0xFFu) | (uint32_t(vertex_count) << 8u) | (uint32_t(triangle_count) << 16u);
+			desc.surface_and_page = uint32_t(surface_id) | (uint32_t(page) << 16u);
+			descs[base_cluster + i] = desc;
+		}
+		sequential_cluster = MAX(sequential_cluster, base_cluster + page_clusters);
+		cursor += (uint32_t(raw.size()) + 15u) & ~15u;
+	}
+	const uint32_t cluster_bytes = descs.size() * sizeof(RendererVirtualMeshStorage::ClusterGPUDesc);
+	r_cluster_blob.resize(int(cluster_bytes));
+	if (cluster_bytes > 0) {
+		memcpy(r_cluster_blob.ptrw(), descs.ptr(), cluster_bytes);
+	}
+}
+
+} // namespace
 
 RendererVirtualMeshStorage::RendererVirtualMeshStorage() {
 	_ensure_capacity(INITIAL_RECORD_CAPACITY);
@@ -45,6 +235,8 @@ RendererVirtualMeshStorage::RendererVirtualMeshStorage() {
 
 RendererVirtualMeshStorage::~RendererVirtualMeshStorage() {
 	_reset_dag();
+	_reset_pages();
+	_reset_clusters();
 }
 
 void RendererVirtualMeshStorage::_ensure_capacity(uint32_t p_records) {
@@ -107,6 +299,104 @@ void RendererVirtualMeshStorage::_free_dag(uint32_t p_offset, uint32_t p_size) {
 	range.offset = p_offset;
 	range.size = (p_size + 15u) & ~15u;
 	dag_free.push_back(range);
+}
+
+uint32_t RendererVirtualMeshStorage::_alloc_pages(uint32_t p_size) {
+	if (p_size == 0) {
+		return UINT32_MAX;
+	}
+	const uint32_t aligned = (p_size + 15u) & ~15u;
+	for (uint32_t index = 0; index < page_free.size(); index++) {
+		if (page_free[index].size < aligned) {
+			continue;
+		}
+		const uint32_t offset = page_free[index].offset;
+		page_free[index].offset += aligned;
+		page_free[index].size -= aligned;
+		if (page_free[index].size == 0) {
+			page_free.remove_at(index);
+		}
+		return offset;
+	}
+	const uint64_t required = uint64_t(page_used) + uint64_t(aligned);
+	if (required > 0x80000000ull) {
+		return UINT32_MAX;
+	}
+	if (required > page_capacity) {
+		uint64_t capacity = page_capacity == 0 ? 1024ull * 1024ull : uint64_t(page_capacity);
+		while (capacity < required) {
+			capacity *= 2ull;
+		}
+		if (capacity > 0x80000000ull || !_resize_pages(uint32_t(capacity))) {
+			return UINT32_MAX;
+		}
+		page_capacity = uint32_t(capacity);
+		for (const KeyValue<RID, MeshInfo> &entry : meshes) {
+			if (entry.value.page_size != 0 && !entry.value.page_blob.is_empty()) {
+				_upload_pages(entry.value.page_offset, entry.value.page_blob.ptr(), entry.value.page_size);
+			}
+		}
+	}
+	const uint32_t offset = page_used;
+	page_used += aligned;
+	return offset;
+}
+
+void RendererVirtualMeshStorage::_free_pages(uint32_t p_offset, uint32_t p_size) {
+	if (p_size == 0) {
+		return;
+	}
+	DAGFree range;
+	range.offset = p_offset;
+	range.size = (p_size + 15u) & ~15u;
+	page_free.push_back(range);
+}
+
+uint32_t RendererVirtualMeshStorage::_alloc_clusters(uint32_t p_size) {
+	if (p_size == 0) {
+		return UINT32_MAX;
+	}
+	const uint32_t aligned = (p_size + 15u) & ~15u;
+	for (uint32_t index = 0; index < cluster_free.size(); index++) {
+		if (cluster_free[index].size < aligned) {
+			continue;
+		}
+		const uint32_t offset = cluster_free[index].offset;
+		cluster_free[index].offset += aligned;
+		cluster_free[index].size -= aligned;
+		if (cluster_free[index].size == 0) {
+			cluster_free.remove_at(index);
+		}
+		return offset;
+	}
+	if (cluster_used + aligned > cluster_capacity) {
+		uint32_t capacity = cluster_capacity == 0 ? 256u * 1024u : cluster_capacity;
+		while (capacity < cluster_used + aligned) {
+			capacity *= 2;
+		}
+		if (!_resize_clusters(capacity)) {
+			return UINT32_MAX;
+		}
+		cluster_capacity = capacity;
+		for (const KeyValue<RID, MeshInfo> &entry : meshes) {
+			if (entry.value.cluster_table_size != 0 && !entry.value.cluster_blob.is_empty()) {
+				_upload_clusters(entry.value.cluster_table_offset, entry.value.cluster_blob.ptr(), entry.value.cluster_table_size);
+			}
+		}
+	}
+	const uint32_t offset = cluster_used;
+	cluster_used += aligned;
+	return offset;
+}
+
+void RendererVirtualMeshStorage::_free_clusters(uint32_t p_offset, uint32_t p_size) {
+	if (p_size == 0) {
+		return;
+	}
+	DAGFree range;
+	range.offset = p_offset;
+	range.size = (p_size + 15u) & ~15u;
+	cluster_free.push_back(range);
 }
 
 RendererVirtualMeshStorage::MeshRecord RendererVirtualMeshStorage::_parse_dag(const Vector<uint8_t> &p_dag, uint32_t p_base) {
@@ -249,8 +539,16 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 	// GodotNext: nextgeo_gpu_cull (#76). Upload the DAG blob and fill the
 	// mesh record's offsets for the instance/BVH cull.
 	MeshInfo *old_info = meshes.getptr(p_mesh);
-	if (old_info != nullptr && old_info->dag_size != 0) {
-		_free_dag(old_info->dag_offset, old_info->dag_size);
+	if (old_info != nullptr) {
+		if (old_info->dag_size != 0) {
+			_free_dag(old_info->dag_offset, old_info->dag_size);
+		}
+		if (old_info->page_size != 0) {
+			_free_pages(old_info->page_offset, old_info->page_size);
+		}
+		if (old_info->cluster_table_size != 0) {
+			_free_clusters(old_info->cluster_table_offset, old_info->cluster_table_size);
+		}
 	}
 	if (!p_desc.dag_header.is_empty()) {
 		const uint32_t dag_offset = _alloc_dag(uint32_t(p_desc.dag_header.size()));
@@ -260,6 +558,37 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 			_upload_dag(dag_offset, p_desc.dag_header.ptr(), info.dag_size);
 			info.record = _parse_dag(p_desc.dag_header, dag_offset);
 			info.record.surface_count = surface_count;
+		}
+	}
+	Vector<Vector<uint8_t>> raw_pages;
+	uint32_t layout_stride = 0;
+	_collect_mesh_pages(p_desc, page_used, raw_pages, layout_stride);
+	uint32_t valid_pages = 0;
+	uint32_t total_clusters = 0;
+	const uint32_t page_blob_bytes = _measure_page_blob_size(raw_pages, valid_pages, total_clusters);
+	if (page_blob_bytes > 0 && total_clusters > 0) {
+		const uint32_t page_offset = _alloc_pages(page_blob_bytes);
+		if (page_offset != UINT32_MAX) {
+			_pack_page_and_cluster_blobs(raw_pages, p_desc.dag_header, info.record.cluster_offset, info.record.cluster_count, layout_stride, page_offset, page_blob_bytes, info.page_blob, info.cluster_blob);
+			const uint32_t cluster_bytes = uint32_t(info.cluster_blob.size());
+			const uint32_t cluster_offset = cluster_bytes > 0 ? _alloc_clusters(cluster_bytes) : UINT32_MAX;
+			if (cluster_offset != UINT32_MAX) {
+				info.page_offset = page_offset;
+				info.page_size = page_blob_bytes;
+				info.cluster_table_offset = cluster_offset;
+				info.cluster_table_size = cluster_bytes;
+				_upload_pages(info.page_offset, info.page_blob.ptr(), info.page_size);
+				_upload_clusters(info.cluster_table_offset, info.cluster_blob.ptr(), info.cluster_table_size);
+				info.record.page_table_offset = info.cluster_table_offset / sizeof(ClusterGPUDesc);
+				info.record.page_count = valid_pages;
+				if (info.record.cluster_count == 0) {
+					info.record.cluster_count = cluster_bytes / sizeof(ClusterGPUDesc);
+				}
+			} else {
+				_free_pages(page_offset, page_blob_bytes);
+				info.page_blob.clear();
+				info.cluster_blob.clear();
+			}
 		}
 	}
 	if (old_info != nullptr) {
@@ -291,6 +620,8 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 	MeshInfo *info = meshes.getptr(p_mesh);
 	if (info != nullptr) {
 		_free_dag(info->dag_offset, info->dag_size);
+		_free_pages(info->page_offset, info->page_size);
+		_free_clusters(info->cluster_table_offset, info->cluster_table_size);
 	}
 	meshes.erase(p_mesh);
 	for (uint32_t slot = 0; slot < used_slots; slot++) {

@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
@@ -1018,7 +1019,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 	// the whole view, and nothing is virtual until #80 sets draw-ready.
 	bool nextgeo_virtual_view = false;
 	RendererRD::NextGeoFallback nextgeo_view_reason = RendererRD::NEXTGEO_FALLBACK_NONE;
-	if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->is_nextgeo_draw_ready()) {
+	if (RSG::virtual_mesh_storage != nullptr && (RSG::virtual_mesh_storage->is_nextgeo_draw_ready() || bool(GLOBAL_GET("rendering/nextgeo/visibility_only")))) {
 		bool view_msaa = false;
 		if (p_render_data->render_buffers.is_valid()) {
 			RenderSceneBuffersRD *scene_buffers = Object::cast_to<RenderSceneBuffersRD>(*p_render_data->render_buffers);
@@ -1975,6 +1976,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	if (RSG::virtual_mesh_storage != nullptr) {
 		// GodotNext: nextgeo_exclusive_dispatch (#79). These must stay 0.
 		RSG::virtual_mesh_storage->nextgeo_reset_counters();
+		// GodotNext: nextgeo_instance_records (#75). Upload dirty records
+		// before this frame's views inspect record buffers; idempotent after
+		// the first view.
+		RSG::virtual_mesh_storage->flush();
 	}
 
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
@@ -2134,6 +2139,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool using_voxelgi = false;
 	// GodotNext: nextgi_frame_block
 	bool using_nextgi = false;
+	// GodotNext: nextgeo_visibility_raster (#83)
+	bool using_nextgeo = false;
+	bool nextgeo_drew = false;
+	NextGIVelocityMode velocity_mode = NEXTGI_VELOCITY_NONE;
+	NextGIVelocityScale velocity_scale = NEXTGI_VELOCITY_SCALE_NONE;
 	NextGIVelocityPlan velocity_plan;
 	bool reverse_cull = p_render_data->scene_data->cam_transform.basis.determinant() < 0;
 	bool using_ssil = !is_reflection_probe && p_render_data->environment.is_valid() && environment_get_ssil_enabled(p_render_data->environment);
@@ -2159,6 +2169,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		global_pipeline_data_required.use_reflection_probes = true;
 	} else {
 		screen_size = rb->get_internal_size();
+
+		if (rb_data.is_valid() && p_render_data->scene_data != nullptr && RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_live_record_count() > 0 && RSG::virtual_mesh_storage->get_record_count() > 0 && RSG::virtual_mesh_storage->get_record_buffer().is_valid() && RSG::virtual_mesh_storage->get_max_bvh_levels() > 0) {
+			bool unsupported_debug_draw = false;
+#ifdef DEBUG_ENABLED
+			unsupported_debug_draw = get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
+#endif
+			const bool view_msaa = rb->get_texture_samples() != RD::TEXTURE_SAMPLES_1;
+			using_nextgeo = RendererRD::nextgeo_view_fallback(view_msaa, p_render_data->scene_data->view_count > 1, unsupported_debug_draw) == RendererRD::NEXTGEO_FALLBACK_NONE;
+		}
 
 		if (p_render_data->scene_data->calculate_motion_vectors) {
 			color_pass_flags |= COLOR_PASS_FLAG_MOTION_VECTORS;
@@ -2194,27 +2213,31 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 				using_ssil = false;
 			}
-			NextGIVelocityMode velocity_mode = NEXTGI_VELOCITY_NONE;
-			NextGIVelocityScale velocity_scale = NEXTGI_VELOCITY_SCALE_NONE;
-			if (scale_type == SCALE_FSR2) {
-				velocity_mode = NEXTGI_VELOCITY_SENTINEL;
-				velocity_scale = NEXTGI_VELOCITY_SCALE_FSR2;
-			} else if (scale_type == SCALE_MFX) {
+		}
+
+		if (scale_type == SCALE_FSR2) {
+			velocity_mode = NEXTGI_VELOCITY_SENTINEL;
+			velocity_scale = NEXTGI_VELOCITY_SCALE_FSR2;
+		} else if (scale_type == SCALE_MFX) {
+			velocity_mode = NEXTGI_VELOCITY_DENSE;
+			velocity_scale = NEXTGI_VELOCITY_SCALE_MFX;
+		} else if (scale_type == SCALE_EXTERNAL) {
+			if (external_upscaler == nullptr || external_upscaler->velocity_mode() == TemporalUpscaler::VELOCITY_DENSE) {
 				velocity_mode = NEXTGI_VELOCITY_DENSE;
-				velocity_scale = NEXTGI_VELOCITY_SCALE_MFX;
-			} else if (scale_type == SCALE_EXTERNAL) {
-				velocity_mode = NEXTGI_VELOCITY_DENSE;
-				velocity_scale = NEXTGI_VELOCITY_SCALE_EXTERNAL;
-			} else if (using_taa) {
-				velocity_mode = NEXTGI_VELOCITY_TAA;
 			}
-			velocity_plan = nextgi_velocity_plan(velocity_scale, velocity_mode, using_taa, using_nextgi);
-			if (velocity_plan.prepass_writes) {
-				scene_shader.enable_advanced_shader_group(is_multiview);
-				global_pipeline_data_required.use_motion_vectors = true;
-				rb->ensure_velocity();
-				p_render_data->scene_data->calculate_motion_vectors = true;
+			velocity_scale = NEXTGI_VELOCITY_SCALE_EXTERNAL;
+		} else if (using_taa || ce_needs_motion_vectors) {
+			velocity_mode = NEXTGI_VELOCITY_TAA;
+		}
+		velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, using_nextgi, using_nextgeo);
+		if (velocity_plan.prepass_writes) {
+			if (!p_render_data->scene_data->calculate_motion_vectors) {
+				color_pass_flags |= COLOR_PASS_FLAG_MOTION_VECTORS;
 			}
+			scene_shader.enable_advanced_shader_group(is_multiview);
+			global_pipeline_data_required.use_motion_vectors = true;
+			rb->ensure_velocity();
+			p_render_data->scene_data->calculate_motion_vectors = true;
 		}
 
 		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) {
@@ -2248,7 +2271,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, velocity_plan.prepass_writes, using_nextgi);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -2268,6 +2291,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					using_sdfgi ||
 					// GodotNext: nextgi_frame_block
 					using_nextgi ||
+					// GodotNext: nextgeo_visibility_raster (#83)
+					using_nextgeo ||
 					environment_get_ssao_enabled(p_render_data->environment) ||
 					using_ssil ||
 					using_sscs ||
@@ -2276,7 +2301,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					scene_state.used_normal_texture) {
 				depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 			}
-		} else if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || scene_state.used_normal_texture) {
+		} else if (using_nextgeo || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || scene_state.used_normal_texture) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -2285,7 +2310,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				depth_framebuffer = rb_data->get_depth_fb();
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
-				if (velocity_plan.prepass_writes) {
+				if (using_nextgi && velocity_plan.prepass_writes) {
 					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VELOCITY);
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
@@ -2295,7 +2320,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
-				if (velocity_plan.prepass_writes) {
+				if (using_nextgi && velocity_plan.prepass_writes) {
 					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY);
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
@@ -2464,8 +2489,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool debug_voxelgis = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_LIGHTING || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_VOXEL_GI_EMISSION;
 	bool debug_sdfgi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES;
 	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
-	// GodotNext: nextgi_frame_block
-	force_depth_pre_pass = force_depth_pre_pass || using_nextgi;
+	// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
+	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -2491,33 +2516,50 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index);
 
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
-		// GodotNext: nextgi_frame_block
-		finish_depth = finish_depth || using_nextgi;
+		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
+		finish_depth = finish_depth || using_nextgi || using_nextgeo;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-		render_list_params.prepass_motion = velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
+		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
 
-		// GodotNext: nextgeo_gpu_cull (#76). Cull the persistent NextGeo
-		// records after the depth pre-pass, before the opaque pass.
-		if (RSG::virtual_mesh_storage != nullptr) {
-			// GodotNext: nextgeo_instance_records (#75). Upload the dirty records
-			// before this frame's cut; idempotent after the first view.
-			RSG::virtual_mesh_storage->flush();
-		}
-		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_record_buffer().is_valid() && RSG::virtual_mesh_storage->get_record_count() > 0 && p_render_data->scene_data != nullptr) {
-			RENDER_TIMESTAMP("NextGeo HiZ");
-			// scene_data->view_projection is the raw camera projection; the scene
-			// shaders use the depth-corrected projection times the view matrix,
-			// which is the matrix the depth buffer and reverse-Z Hi-Z are in.
+		// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_visibility_raster (#83).
+		// Two-phase cull + draw path (c) visibility raster after the pre-pass
+		// draw, before MSAA resolve and PRE_OPAQUE.
+		if (using_nextgeo) {
+			rb->ensure_nextgeo_targets();
 			const RenderSceneDataRD *scene_data = p_render_data->scene_data;
-			const Projection view_projection = scene_data->get_view_projection(0) * scene_data->cam_transform.affine_inverse();
+			const Transform3D cur_view = scene_data->cam_transform.affine_inverse();
+			const Transform3D prev_view = scene_data->prev_cam_transform.affine_inverse();
+			const Projection view_projection = scene_data->get_view_projection(0) * cur_view;
 			Projection prev_correction;
 			prev_correction.set_depth_correction(scene_data->flip_y);
-			const Projection prev_view_projection = (prev_correction * scene_data->prev_view_projection[0]) * scene_data->prev_cam_transform.affine_inverse();
-			nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")));
-			RENDER_TIMESTAMP("NextGeo Phase2 Cull");
+			const Projection prev_view_projection = (prev_correction * scene_data->prev_view_projection[0]) * prev_view;
+
+			Projection prev_proj_jittered;
+			prev_proj_jittered.set_depth_correction(scene_data->flip_y);
+			prev_proj_jittered.add_jitter_offset(scene_data->prev_taa_jitter);
+			prev_proj_jittered = prev_proj_jittered * scene_data->prev_cam_projection;
+
+			NextGeoRasterInputs raster_inputs;
+			raster_inputs.visibility = rb->get_nextgeo_visibility();
+			raster_inputs.instance_id = rb->get_nextgeo_instance_id();
+			raster_inputs.velocity = velocity_plan.prepass_writes ? rb->get_velocity_buffer(false) : RID();
+			raster_inputs.depth = rb->get_depth_texture();
+			raster_inputs.proj = scene_data->get_cam_projection();
+			raster_inputs.view = cur_view;
+			raster_inputs.prev_proj = prev_proj_jittered;
+			raster_inputs.prev_view = prev_view;
+			raster_inputs.taa_jitter = scene_data->taa_jitter;
+			raster_inputs.prev_taa_jitter = scene_data->prev_taa_jitter;
+			raster_inputs.velocity_clear = Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0.0f, 0.0f);
+			raster_inputs.clear_velocity = !using_nextgi && velocity_plan.prepass_writes;
+			raster_inputs.reset_velocity = reset_temporal_history;
+			raster_inputs.reverse_cull = reverse_cull;
+			raster_inputs.debug_backface = bool(GLOBAL_GET("rendering/nextgeo/debug_backface"));
+
+			nextgeo_drew = nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")), &raster_inputs);
 		}
 
 		if (use_msaa) {
@@ -2526,7 +2568,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			if (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
 				for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 					resolve_effects->resolve_gi(rb->get_depth_msaa(v), rb_data->get_normal_roughness_msaa(v), using_voxelgi ? rb_data->get_voxelgi_msaa(v) : RID(), rb->get_depth_texture(v), rb_data->get_normal_roughness(v), using_voxelgi ? rb_data->get_voxelgi(v) : RID(), rb->get_internal_size(), texture_multisamples[msaa]);
-					if (velocity_plan.prepass_writes) {
+					if (using_nextgi && velocity_plan.prepass_writes) {
 						RD::get_singleton()->texture_resolve_multisample(rb->get_velocity_buffer(true, v), rb->get_velocity_buffer(false, v));
 					}
 				}
@@ -2538,6 +2580,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RD::get_singleton()->draw_command_end_label();
 		}
 	}
+	velocity_plan = RendererRD::nextgeo_velocity_plan(velocity_scale, velocity_mode, using_taa, using_nextgi, nextgeo_drew);
 
 	{
 		if (ce_pre_opaque_resolved_color) {
@@ -2597,6 +2640,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		bool render_motion_pass = !render_list[RENDER_LIST_MOTION].elements.is_empty();
 
 		{
+			// GodotNext: nextgeo_visibility_raster (#83). Stage B (#80) sets stage_b_wrote.
+			const bool stage_b_wrote = false;
+			load_color = RendererRD::nextgeo_should_load_color(load_color, nextgeo_drew, stage_b_wrote);
+
 			Vector<Color> c;
 			if (!load_color) {
 				if (using_separate_specular || rb_data.is_valid()) {
@@ -2614,19 +2661,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
 			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
 			RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, opaque_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-			BitField<RD::DrawFlags> opaque_draw_flags = load_color ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_COLOR_ALL;
-			if (velocity_plan.color_pass_loads && !load_color) {
-				// Load the velocity attachment so the prepass write survives. Never DRAW_IGNORE_ALL.
-				opaque_draw_flags = RD::DRAW_CLEAR_COLOR_0 | RD::DRAW_CLEAR_COLOR_1;
-			}
-			opaque_draw_flags = opaque_draw_flags | (depth_pre_pass ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_DEPTH);
+			// Load the velocity attachment on TAA when prepass/NextGeo wrote it; never DRAW_IGNORE_ALL (§6.1).
+			BitField<RD::DrawFlags> opaque_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
 			_render_list_with_draw_list(&render_list_params, opaque_framebuffer, opaque_draw_flags, c, 0.0f, 0u, p_render_data->render_region);
 		}
 
 		RD::get_singleton()->draw_command_end_label();
 
 		if (using_motion_pass) {
-			if (scale_type == SCALE_MFX || scale_type == SCALE_EXTERNAL) {
+			if (velocity_mode == NEXTGI_VELOCITY_DENSE) {
 				motion_vectors_store->process(rb,
 						p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform,
 						p_render_data->scene_data->prev_cam_projection, p_render_data->scene_data->prev_cam_transform,

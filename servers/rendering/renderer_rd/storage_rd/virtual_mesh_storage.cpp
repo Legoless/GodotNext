@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -57,6 +57,8 @@ void VirtualMeshStorage::free_resources() {
 	buffer_capacity = 0;
 	mesh_buffer_capacity = 0;
 	_reset_dag();
+	_reset_pages();
+	_reset_clusters();
 }
 
 bool VirtualMeshStorage::_resize_dag(uint32_t p_bytes) {
@@ -92,6 +94,76 @@ void VirtualMeshStorage::_reset_dag() {
 	}
 	dag_buffer = RID();
 	dag_bytes = 0;
+}
+
+bool VirtualMeshStorage::_resize_pages(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	if (page_buffer.is_valid()) {
+		rd->free_rid(page_buffer);
+		page_buffer = RID();
+	}
+	page_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	page_buffer = rd->storage_buffer_create(p_bytes);
+	return page_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_pages(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || page_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > page_bytes);
+	rd->buffer_update(page_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_pages() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && page_buffer.is_valid()) {
+		rd->free_rid(page_buffer);
+	}
+	page_buffer = RID();
+	page_bytes = 0;
+}
+
+bool VirtualMeshStorage::_resize_clusters(uint32_t p_bytes) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	if (cluster_buffer.is_valid()) {
+		rd->free_rid(cluster_buffer);
+		cluster_buffer = RID();
+	}
+	cluster_bytes = p_bytes;
+	if (p_bytes == 0) {
+		return true;
+	}
+	cluster_buffer = rd->storage_buffer_create(p_bytes);
+	return cluster_buffer.is_valid();
+}
+
+void VirtualMeshStorage::_upload_clusters(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || cluster_buffer.is_null() || p_size == 0) {
+		return;
+	}
+	ERR_FAIL_COND(p_offset + p_size > cluster_bytes);
+	rd->buffer_update(cluster_buffer, p_offset, p_size, p_data);
+}
+
+void VirtualMeshStorage::_reset_clusters() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr && cluster_buffer.is_valid()) {
+		rd->free_rid(cluster_buffer);
+	}
+	cluster_buffer = RID();
+	cluster_bytes = 0;
 }
 
 void VirtualMeshStorage::_upload_records(uint32_t p_first, uint32_t p_count) {

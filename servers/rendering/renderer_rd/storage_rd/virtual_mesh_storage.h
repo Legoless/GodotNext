@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -44,6 +44,11 @@ class VirtualMeshStorage : public RendererVirtualMeshStorage {
 	// GodotNext: nextgeo_gpu_cull (#76). Per-mesh DAG blobs (groups + BVH8).
 	RID dag_buffer;
 	uint32_t dag_bytes = 0;
+	// GodotNext: nextgeo_visibility_raster (#83). Page arena + cluster lookup.
+	RID page_buffer;
+	uint32_t page_bytes = 0;
+	RID cluster_buffer;
+	uint32_t cluster_bytes = 0;
 	uint32_t buffer_capacity = 0;
 	uint32_t mesh_buffer_capacity = 0;
 
@@ -53,12 +58,20 @@ protected:
 	bool _resize_dag(uint32_t p_bytes) override;
 	void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
 	void _reset_dag() override;
+	bool _resize_pages(uint32_t p_bytes) override;
+	void _upload_pages(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_pages() override;
+	bool _resize_clusters(uint32_t p_bytes) override;
+	void _upload_clusters(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) override;
+	void _reset_clusters() override;
 
 public:
 	VirtualMeshStorage();
 	virtual ~VirtualMeshStorage() override;
 
 	RID get_dag_buffer() const override { return dag_buffer; }
+	RID get_page_buffer() const override { return page_buffer; }
+	RID get_cluster_buffer() const override { return cluster_buffer; }
 	RID get_record_buffer() const override { return record_buffer; }
 	RID get_mesh_record_buffer() const override { return mesh_record_buffer; }
 

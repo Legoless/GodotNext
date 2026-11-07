@@ -3365,8 +3365,11 @@
 			[b]Note:[/b] [member rendering/mesh_lod/lod_change/threshold_pixels] does not affect [GeometryInstance3D] visibility ranges (also known as "manual" LOD or hierarchical LOD).
 			[b]Note:[/b] This property is only read when the project starts. To adjust the automatic LOD threshold at runtime, set [member Viewport.mesh_lod_threshold] on the root [Viewport].
 		</member>
+		<member name="rendering/nextgeo/debug_backface" type="bool" setter="" getter="" default="false">
+			Disable backface culling in the NextGeo visibility raster so interior and crack diagnostics (Q5) render both sides of virtual clusters.
+		</member>
 		<member name="rendering/nextgeo/debug_stats" type="bool" setter="" getter="" default="false">
-			Publish the NextGeo cut counters and the GPU/CPU cut hash comparison through [method RenderingServer.virtual_geometry_get_debug_stats]. The 76-byte counter read is taken at the start of the following frame, before the counters reset, so it does not add a per-frame GPU stall. Leave it off outside tests.
+			Publish the NextGeo cut counters and the GPU/CPU cut hash comparison through [method RenderingServer.virtual_geometry_get_debug_stats]. The counter read is taken at the start of the following frame, before the counters reset, so it does not add a per-frame GPU stall. Leave it off outside tests.
 		</member>
 		<member name="rendering/nextgeo/debug_stats_interval" type="int" setter="" getter="" default="1">
 			Read the NextGeo cut debug stats every N frames instead of every frame, to limit the GPU stall during long sweeps.
@@ -3379,6 +3382,9 @@
 		</member>
 		<member name="rendering/nextgeo/occlusion" type="bool" setter="" getter="" default="true">
 			Enable the NextGeo two-phase Hi-Z occlusion test. Phase 1 tests the previous frame's Hi-Z chain; phase 2 re-tests the instances it occluded against the chain built from the current depth, so moving occluders disocclude in the same frame. Off gives the CPU-reference parity cut (the debug comparison).
+		</member>
+		<member name="rendering/nextgeo/visibility_only" type="bool" setter="" getter="" default="false">
+			Skip virtual surfaces in the legacy opaque and motion render lists before Stage A/B resolve is enabled, isolating NextGeo visibility-buffer, depth, and motion-vector output for diagnostics and tests.
 		</member>
 		<member name="rendering/occlusion_culling/bvh_build_quality" type="int" setter="" getter="" default="2">
 			The [url=https://en.wikipedia.org/wiki/Bounding_volume_hierarchy]Bounding Volume Hierarchy[/url] quality to use when rendering the occlusion culling buffer. Higher values will result in more accurate occlusion culling, at the cost of higher CPU usage. See also [member rendering/occlusion_culling/occlusion_rays_per_thread].

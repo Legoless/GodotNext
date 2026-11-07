@@ -3882,6 +3882,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/nextgeo/occlusion", true);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/debug_stats_interval", PROPERTY_HINT_RANGE, "1,64,1"), 1);
 	GLOBAL_DEF("rendering/nextgeo/hiz_debug", false);
+	// GodotNext: nextgeo_visibility_raster (#83).
+	GLOBAL_DEF("rendering/nextgeo/debug_backface", false);
+	GLOBAL_DEF("rendering/nextgeo/visibility_only", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

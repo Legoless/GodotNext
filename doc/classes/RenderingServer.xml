@@ -4712,7 +4712,7 @@
 			<return type="Dictionary" />
 			<param index="0" name="viewport" type="RID" />
 			<description>
-				Returns the NextGeo cut counters and hashes for the main view: [code]phase1_instances[/code], [code]phase2_instances[/code], [code]hiz_tested[/code], [code]hiz_hit[/code], [code]bvh_levels[/code], [code]groups[/code], [code]clusters[/code], [code]overflow[/code], the GPU [code]cut_hash[/code] and, when [code]rendering/nextgeo/debug_stats[/code] is on, the CPU reference [code]cpu_cut_hash[/code], [code]cpu_clusters[/code] and [code]cut_match[/code]. [code]tick[/code] identifies each published sample; the sample describes the frame before the one the readback happens in.
+				Returns the NextGeo cut counters and hashes for the main view: [code]phase1_instances[/code], [code]phase2_instances[/code], [code]hiz_tested[/code], [code]hiz_hit[/code], [code]bvh_levels[/code], [code]groups[/code], [code]clusters[/code], [code]phase1_clusters[/code], [code]phase2_clusters[/code], [code]raster_indirect_draws[/code], [code]overflow[/code], the GPU [code]cut_hash[/code] and, when [code]rendering/nextgeo/debug_stats[/code] is on, the CPU reference [code]cpu_cut_hash[/code], [code]cpu_clusters[/code] and [code]cut_match[/code]. [code]tick[/code] identifies each published sample; the sample describes the frame before the one the readback happens in.
 			</description>
 		</method>
 		<method name="visibility_notifier_create">

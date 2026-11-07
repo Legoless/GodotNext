@@ -40,7 +40,7 @@ layout(set = 0, binding = 8, std430) buffer restrict Phase2Nodes {
 }
 phase2_nodes;
 
-bool hiz_occluded(vec4 world_min, vec4 world_max) {
+bool hiz_occluded(vec4 world_min, vec4 world_max, mat4 proj_mat) {
 	if (cull.cull.w == 0u) {
 		return false; // Occlusion off (the CPU parity reference).
 	}
@@ -54,7 +54,7 @@ bool hiz_occluded(vec4 world_min, vec4 world_max) {
 	bool any_front = false;
 	for (int corner = 0; corner < 8; corner++) {
 		vec3 world = vec3((corner & 1) != 0 ? hi.x : lo.x, (corner & 2) != 0 ? hi.y : lo.y, (corner & 4) != 0 ? hi.z : lo.z);
-		vec4 clip = cull.prev_view_proj * vec4(world, 1.0);
+		vec4 clip = proj_mat * vec4(world, 1.0);
 		if (clip.w <= 0.0) {
 			continue;
 		}
@@ -103,11 +103,12 @@ void main() {
 	if (!aabb_visible(record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
 		return;
 	}
-	if (hiz_occluded(record.world_aabb_min, record.world_aabb_max)) {
+	if (hiz_occluded(record.world_aabb_min, record.world_aabb_max, cull.view_proj)) {
 		return;
 	}
-	uint slot = atomicAdd(counters.phase1_count, 1u);
-	atomicMax(bvh_args.data[0].x, (slot + 64u) / 64u);
+	atomicAdd(counters.phase1_count, 1u);
+	uint slot = atomicAdd(counters.phase2_visible_count, 1u);
+	atomicMax(bvh_args.data[9].x, (slot + 64u) / 64u);
 	nodes.data[slot] = uvec2(entry.x, 0u);
 }
 #else
@@ -127,7 +128,7 @@ void main() {
 		return;
 	}
 	atomicAdd(counters.pad[0], 1u); // hiz_tested
-	if (hiz_occluded(record.prev_world_aabb_min, record.prev_world_aabb_max)) {
+	if (hiz_occluded(record.prev_world_aabb_min, record.prev_world_aabb_max, cull.prev_view_proj)) {
 		atomicAdd(counters.pad[1], 1u); // hiz_hit
 		uint slot = atomicAdd(counters.phase2_count, 1u);
 		phase2_nodes.data[slot] = uvec2(index, record.virtual_mesh);

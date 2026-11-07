@@ -44,6 +44,7 @@
 
 #define RB_SCOPE_BUFFERS SNAME("render_buffers")
 #define RB_SCOPE_VRS SNAME("VRS")
+#define RB_SCOPE_NEXTGEO SNAME("nextgeo")
 
 #define RB_TEXTURE SNAME("texture")
 #define RB_TEX_COLOR SNAME("color")
@@ -63,6 +64,9 @@
 
 #define RB_TEX_BACK_COLOR SNAME("back_color")
 #define RB_TEX_BACK_DEPTH SNAME("back_depth")
+
+#define RB_TEX_NEXTGEO_VISIBILITY SNAME("visibility")
+#define RB_TEX_NEXTGEO_INSTANCE_ID SNAME("instance_id")
 
 class RenderSceneBuffersRD : public RenderSceneBuffers {
 	GDCLASS(RenderSceneBuffersRD, RenderSceneBuffers);
@@ -331,6 +335,13 @@ public:
 	RID get_velocity_buffer(bool p_get_msaa, uint32_t p_layer);
 
 	RID get_velocity_depth_buffer();
+
+	// GodotNext: nextgeo_visibility_raster (#83). Single-sample, single-view
+	// R32_UINT visibility ID and record-slot instance ID targets.
+	void ensure_nextgeo_targets();
+	bool has_nextgeo_targets() const;
+	RID get_nextgeo_visibility() const;
+	RID get_nextgeo_instance_id() const;
 
 	// Samplers adjusted with the mipmap bias that is best fit for the configuration of these render buffers.
 

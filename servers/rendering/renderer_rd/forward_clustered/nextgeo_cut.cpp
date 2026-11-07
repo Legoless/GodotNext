@@ -32,6 +32,10 @@
 
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
 
@@ -58,8 +62,27 @@ struct CutCounters {
 	uint32_t hash_lo;
 	uint32_t hash_hi;
 	uint32_t pad[2];
+	uint32_t phase1_clusters;
+	uint32_t phase2_clusters;
+	uint32_t phase2_visible_count;
+	uint32_t phase2_group_count;
+	uint32_t phase2_level_counts[8];
 };
-static_assert(sizeof(CutCounters) == 76, "CutCounters must stay 76 bytes.");
+static_assert(sizeof(CutCounters) == 124, "CutCounters must stay 124 bytes.");
+
+struct RasterParams {
+	float proj[16];
+	float view[16];
+	float prev_proj[16];
+	float prev_view[16];
+	float taa_jitter[2];
+	float prev_taa_jitter[2];
+	uint32_t visible_capacity;
+	uint32_t reset_velocity;
+	float cull_sign;
+	uint32_t pad0;
+};
+static_assert(sizeof(RasterParams) == 288, "RasterParams must stay 288 bytes.");
 
 Dictionary s_last_stats;
 
@@ -203,9 +226,16 @@ bool NextGeoCut::_ensure() {
 	instance_version = instance_shader.version_create();
 	cluster_shader.initialize(Vector<String>({ "", "\n#define CLUSTER_CULL\n", "\n#define CUT_HASH\n" }));
 	cluster_version = cluster_shader.version_create();
-	hiz_shader.initialize(Vector<String>({ "" }));
+	hiz_shader.initialize(Vector<String>({ "", "\n#define CLEAR_VISIBILITY\n" }));
 	hiz_version = hiz_shader.version_create();
-	if (!instance_version.is_valid() || !cluster_version.is_valid() || !hiz_version.is_valid()) {
+	raster_shader.initialize(Vector<String>({
+			"",
+			"\n#define WITH_VELOCITY\n",
+			"\n#define DEBUG_BACKFACE\n",
+			"\n#define WITH_VELOCITY\n#define DEBUG_BACKFACE\n",
+	}));
+	raster_version = raster_shader.version_create();
+	if (!instance_version.is_valid() || !cluster_version.is_valid() || !hiz_version.is_valid() || !raster_version.is_valid()) {
 		failed = true;
 		return false;
 	}
@@ -215,12 +245,25 @@ bool NextGeoCut::_ensure() {
 	cluster_leaf = rd->compute_pipeline_create(cluster_shader.version_get_shader(cluster_version, 1));
 	cluster_hash = rd->compute_pipeline_create(cluster_shader.version_get_shader(cluster_version, 2));
 	hiz_pipeline = rd->compute_pipeline_create(hiz_shader.version_get_shader(hiz_version, 0));
-	if (!instance_pipeline.is_valid() || !instance_phase2.is_valid() || !cluster_bvh.is_valid() || !cluster_leaf.is_valid() || !cluster_hash.is_valid() || !hiz_pipeline.is_valid()) {
+	clear_vis_pipeline = rd->compute_pipeline_create(hiz_shader.version_get_shader(hiz_version, 1));
+	if (!instance_pipeline.is_valid() || !instance_phase2.is_valid() || !cluster_bvh.is_valid() || !cluster_leaf.is_valid() || !cluster_hash.is_valid() || !hiz_pipeline.is_valid() || !clear_vis_pipeline.is_valid()) {
 		failed = true;
 		return false;
 	}
+	for (int variant = 0; variant < 4; variant++) {
+		RD::PipelineRasterizationState raster_state;
+		raster_state.cull_mode = (variant & 2) != 0 ? RD::POLYGON_CULL_DISABLED : RD::POLYGON_CULL_BACK;
+		RD::PipelineMultisampleState multisample_state;
+		RD::PipelineDepthStencilState depth_state;
+		depth_state.enable_depth_test = true;
+		depth_state.enable_depth_write = true;
+		depth_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+		RD::PipelineColorBlendState blend_state = RD::PipelineColorBlendState::create_disabled((variant & 1) != 0 ? 3 : 2);
+		raster_pipelines[variant].setup(raster_shader.version_get_shader(raster_version, variant), RD::RENDER_PRIMITIVE_TRIANGLES, raster_state, multisample_state, depth_state, blend_state);
+	}
 
 	params = _storage(sizeof(CutParams));
+	raster_params = _storage(sizeof(RasterParams));
 	counters = _storage(sizeof(CutCounters));
 	nodes = _storage(NODE_CAPACITY * 8);
 	phase2_nodes = _storage(NODE_CAPACITY * 8);
@@ -228,7 +271,13 @@ bool NextGeoCut::_ensure() {
 	clusters = _storage(CLUSTER_CAPACITY * 8);
 	level_a = _storage(NODE_CAPACITY * 8);
 	level_b = _storage(NODE_CAPACITY * 8);
-	bvh_args = rd->storage_buffer_create(9 * 4 * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	bvh_args[0] = rd->storage_buffer_create(18 * 4 * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	bvh_args[1] = rd->storage_buffer_create(18 * 4 * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	draw_args = rd->storage_buffer_create(2 * sizeof(RendererRD::NextGeoDrawIndirectCommand), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	Vector<uint8_t> dummy_zero;
+	dummy_zero.resize(16);
+	dummy_zero.fill(0);
+	dummy_page_buf = rd->storage_buffer_create(16, dummy_zero);
 
 	RD::TextureFormat format;
 	format.format = RD::DATA_FORMAT_R32_SFLOAT;
@@ -249,7 +298,7 @@ bool NextGeoCut::_ensure() {
 	sampler_state.repeat_v = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	sampler_state.repeat_w = RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE;
 	dummy_sampler = rd->sampler_create(sampler_state);
-	initialized = params.is_valid() && counters.is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && bvh_args.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
+	initialized = params.is_valid() && raster_params.is_valid() && counters.is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && bvh_args[0].is_valid() && bvh_args[1].is_valid() && draw_args.is_valid() && dummy_page_buf.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
 	if (!initialized) {
 		failed = true;
 	}
@@ -321,15 +370,15 @@ void NextGeoCut::_ensure_hiz(const Size2i &p_internal_size) {
 
 void NextGeoCut::_build_hiz(RID p_depth, const Size2i &p_internal_size) {
 	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	RID shader = hiz_shader.version_get_shader(hiz_version, 0);
 	Size2i source_size = p_internal_size;
 	for (uint32_t mip = 0; mip < hiz_mips; mip++) {
 		const Size2i target_size(MAX(source_size.x / 2, 1), MAX(source_size.y / 2, 1));
 		const RID source = mip == 0 ? p_depth : hiz_views[1][mip - 1];
-		Vector<RD::Uniform> uniforms = {
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ dummy_sampler, source })),
-			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, hiz_views[1][mip]),
-		};
-		RID set = rd->uniform_set_create(uniforms, hiz_shader.version_get_shader(hiz_version, 0), 0);
+		RD::Uniform u_src(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ dummy_sampler, source }));
+		RD::Uniform u_dst(RD::UNIFORM_TYPE_IMAGE, 1, hiz_views[1][mip]);
+		RID set = uniform_set_cache->get_cache(shader, 0, u_src, u_dst);
 		if (!set.is_valid()) {
 			return;
 		}
@@ -344,6 +393,79 @@ void NextGeoCut::_build_hiz(RID p_depth, const Size2i &p_internal_size) {
 	}
 }
 
+void NextGeoCut::_clear_visibility_targets(RID p_visibility, RID p_instance_id, const Size2i &p_internal_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	RID shader = hiz_shader.version_get_shader(hiz_version, 1);
+	RD::Uniform u_vis(RD::UNIFORM_TYPE_IMAGE, 0, p_visibility);
+	RD::Uniform u_inst(RD::UNIFORM_TYPE_IMAGE, 1, p_instance_id);
+	RID set = uniform_set_cache->get_cache(shader, 0, u_vis, u_inst);
+	if (!set.is_valid()) {
+		return;
+	}
+	const uint32_t width = uint32_t(MAX(p_internal_size.x, 1));
+	const uint32_t height = uint32_t(MAX(p_internal_size.y, 1));
+	const uint32_t push[4] = { width, height, 0u, 0u };
+	RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, clear_vis_pipeline);
+	rd->compute_list_bind_uniform_set(list, set, 0);
+	rd->compute_list_set_push_constant(list, push, sizeof(push));
+	rd->compute_list_dispatch(list, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
+	rd->compute_list_end();
+}
+
+bool NextGeoCut::_draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster) {
+	RenderingDevice *rd = RD::get_singleton();
+	FramebufferCacheRD *fb_cache = FramebufferCacheRD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || fb_cache == nullptr || uniform_set_cache == nullptr) {
+		return false;
+	}
+	const bool with_velocity = p_raster.velocity.is_valid();
+	const int variant = (with_velocity ? 1 : 0) | (p_raster.debug_backface ? 2 : 0);
+	RID fb = with_velocity ? fb_cache->get_cache(p_raster.visibility, p_raster.instance_id, p_raster.velocity, p_raster.depth) : fb_cache->get_cache(p_raster.visibility, p_raster.instance_id, p_raster.depth);
+	if (!fb.is_valid()) {
+		return false;
+	}
+	RID pipeline = raster_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
+	if (!pipeline.is_valid()) {
+		return false;
+	}
+	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
+	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
+	RID shader = raster_shader.version_get_shader(raster_version, variant);
+	RD::Uniform u0(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
+	RD::Uniform u1(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
+	RD::Uniform u2(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf);
+	RD::Uniform u3(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf);
+	RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters);
+	RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params);
+	RID set = uniform_set_cache->get_cache(shader, 0, u0, u1, u2, u3, u4, u5);
+	if (!set.is_valid()) {
+		return false;
+	}
+
+	// Load visibility, instance_id and depth; clear velocity in Phase 1 only
+	// when the legacy prepass did not already pre-clear it. Never DRAW_IGNORE_ALL.
+	BitField<RD::DrawFlags> draw_flags = RD::DRAW_DEFAULT_ALL;
+	Vector<Color> clear_colors;
+	if (p_phase == 0 && p_raster.clear_velocity && with_velocity) {
+		draw_flags = RD::DRAW_CLEAR_COLOR_2;
+		clear_colors.push_back(Color(0, 0, 0, 0));
+		clear_colors.push_back(Color(0, 0, 0, 0));
+		clear_colors.push_back(p_raster.velocity_clear);
+	}
+
+	RD::DrawListID dl = rd->draw_list_begin(fb, draw_flags, clear_colors, 0.0f);
+	rd->draw_list_bind_render_pipeline(dl, pipeline);
+	rd->draw_list_bind_uniform_set(dl, set, 0);
+	const uint32_t push[4] = { p_list_base, 0u, 0u, 0u };
+	rd->draw_list_set_push_constant(dl, push, sizeof(push));
+	rd->draw_list_draw_indirect(dl, false, draw_args, p_phase * sizeof(RendererRD::NextGeoDrawIndirectCommand), 1, 0);
+	rd->draw_list_end();
+	return true;
+}
+
 void NextGeoCut::_swap_hiz() {
 	SWAP(hiz_texture[0], hiz_texture[1]);
 	for (uint32_t mip = 0; mip < HIZ_MAX_MIPS; mip++) {
@@ -351,11 +473,11 @@ void NextGeoCut::_swap_hiz() {
 	}
 }
 
-RID NextGeoCut::_uniform_set(const Vector<RD::Uniform> &p_uniforms, int p_variant) {
-	return RD::get_singleton()->uniform_set_create(p_uniforms, cluster_shader.version_get_shader(cluster_version, p_variant), 0);
+RID NextGeoCut::_uniform_set(const LocalVector<RD::Uniform> &p_uniforms, int p_variant) {
+	return UniformSetCacheRD::get_singleton()->get_cache_vec(cluster_shader.version_get_shader(cluster_version, p_variant), 0, p_uniforms);
 }
 
-void NextGeoCut::_set_common_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_input, RID p_output, RID p_groups, RID p_clusters) {
+void NextGeoCut::_set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out) {
 	RID records = RSG::virtual_mesh_storage->get_record_buffer();
 	RID mesh_records = RSG::virtual_mesh_storage->get_mesh_record_buffer();
 	RID dag = RSG::virtual_mesh_storage->get_dag_buffer();
@@ -363,18 +485,19 @@ void NextGeoCut::_set_common_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_inp
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, mesh_records));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, dag));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, params));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, nodes));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, dummy_page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, counters));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, dummy_page_buf));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, hiz_texture[0].is_valid() ? hiz_texture[0] : dummy_hiz })));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_input));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_output));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, p_groups));
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, p_clusters));
-	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, bvh_args));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, p_bvh_args_out));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, draw_args));
 }
 
-void NextGeoCut::_request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev) {
+void NextGeoCut::_request_stats(uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev, uint32_t p_raster_draws) {
 	RenderingDevice *rd = RD::get_singleton();
 	if (rd == nullptr) {
 		return;
@@ -386,6 +509,7 @@ void NextGeoCut::_request_stats(uint32_t p_record_count, uint32_t p_max_levels, 
 	stats_info["hiz"] = p_have_prev;
 	stats_info["hiz_mips"] = int64_t(hiz_mips);
 	stats_info["cluster_capacity"] = int64_t(CLUSTER_CAPACITY);
+	stats_info["raster_indirect_draws"] = int64_t(p_raster_draws);
 	stats_info["nextgeo_double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
 	stats_info["nextgeo_missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
 
@@ -424,6 +548,8 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data) {
 	info["phase2_instances"] = int64_t(stats->phase2);
 	info["groups"] = int64_t(stats->group_count);
 	info["clusters"] = int64_t(stats->cluster_count);
+	info["phase1_clusters"] = int64_t(stats->phase1_clusters);
+	info["phase2_clusters"] = int64_t(stats->phase2_clusters);
 	info["overflow"] = int64_t(stats->overflow);
 	info["hiz_tested"] = int64_t(stats->pad[0]);
 	info["hiz_hit"] = int64_t(stats->pad[1]);
@@ -439,19 +565,39 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data) {
 	stats_info.clear();
 }
 
-void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats) {
+bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster) {
 	(void)p_storage;
 	if (!_ensure()) {
-		return;
+		return false;
 	}
 	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
 	if (record_count == 0 || !RSG::virtual_mesh_storage->get_record_buffer().is_valid() || !RSG::virtual_mesh_storage->get_mesh_record_buffer().is_valid() || !RSG::virtual_mesh_storage->get_dag_buffer().is_valid()) {
-		return;
+		return false;
 	}
 	uint32_t max_levels = RSG::virtual_mesh_storage->get_max_bvh_levels();
 	if (max_levels == 0) {
-		return;
+		return false;
+	}
+
+	const bool can_raster = p_raster != nullptr && p_raster->visibility.is_valid() && p_raster->instance_id.is_valid() && p_raster->depth.is_valid();
+	if (can_raster) {
+		RasterParams rp = {};
+		RendererRD::MaterialStorage::store_camera(p_raster->proj, rp.proj);
+		RendererRD::MaterialStorage::store_transform(p_raster->view, rp.view);
+		RendererRD::MaterialStorage::store_camera(p_raster->prev_proj, rp.prev_proj);
+		RendererRD::MaterialStorage::store_transform(p_raster->prev_view, rp.prev_view);
+		rp.taa_jitter[0] = p_raster->taa_jitter.x;
+		rp.taa_jitter[1] = p_raster->taa_jitter.y;
+		rp.prev_taa_jitter[0] = p_raster->prev_taa_jitter.x;
+		rp.prev_taa_jitter[1] = p_raster->prev_taa_jitter.y;
+		rp.visible_capacity = CLUSTER_CAPACITY;
+		rp.reset_velocity = p_raster->reset_velocity ? 1u : 0u;
+		rp.cull_sign = p_raster->reverse_cull ? -1.0f : 1.0f;
+		rp.pad0 = 0u;
+		rd->buffer_update(raster_params, 0, sizeof(RasterParams), &rp);
+		_clear_visibility_targets(p_raster->visibility, p_raster->instance_id, p_internal_size);
 	}
 
 	CutParams cut;
@@ -504,85 +650,61 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	CutCounters zero;
 	memset(&zero, 0, sizeof(CutCounters));
 	rd->buffer_update(counters, 0, sizeof(CutCounters), &zero);
-	uint32_t args_zero[9 * 4];
-	for (uint32_t level = 0; level < 9; level++) {
-		args_zero[level * 4] = 0;
-		args_zero[level * 4 + 1] = 1;
-		args_zero[level * 4 + 2] = 1;
+	uint32_t args_zero[18 * 4] = {};
+	for (uint32_t slot = 0; slot < 18; slot++) {
+		args_zero[slot * 4] = 0;
+		args_zero[slot * 4 + 1] = 1;
+		args_zero[slot * 4 + 2] = 1;
 	}
-	rd->buffer_update(bvh_args, 0, sizeof(args_zero), args_zero);
+	rd->buffer_update(bvh_args[0], 0, sizeof(args_zero), args_zero);
+	rd->buffer_update(bvh_args[1], 0, sizeof(args_zero), args_zero);
+	const RendererRD::NextGeoDrawIndirectCommand draw_zero[2] = {
+		RendererRD::nextgeo_make_draw_indirect(0),
+		RendererRD::nextgeo_make_draw_indirect(0),
+	};
+	rd->buffer_update(draw_args, 0, sizeof(draw_zero), draw_zero);
 
-	// Hi-Z for this frame, built from the depth pre-pass. Phase 1 tests the
-	// previous frame's chain, phase 2 the current one; they swap afterwards.
 	const bool build_hiz = p_occlusion && p_depth.is_valid();
 	if (build_hiz) {
 		_ensure_hiz(p_internal_size);
-		if (hiz_texture[1].is_valid()) {
-			_build_hiz(p_depth, p_internal_size);
-		}
 	}
 	const bool have_prev = hiz_texture[0].is_valid() && hiz_primed;
 
-	// Instance cull: level 0 seed.
+	// Phase 1 instance cull against previous frame's Hi-Z: level 0 seed.
 	RENDER_TIMESTAMP("NextGeo Instance Cull");
 	RD::ComputeListID list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(list, instance_pipeline);
 	{
-		Vector<RD::Uniform> uniforms = {
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, RSG::virtual_mesh_storage->get_dag_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, params),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, nodes),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, counters),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, have_prev ? hiz_texture[0] : dummy_hiz })),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args),
-		};
-		RID set = rd->uniform_set_create(uniforms, instance_shader.version_get_shader(instance_version, 0), 0);
+		LocalVector<RD::Uniform> uniforms;
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, RSG::virtual_mesh_storage->get_dag_buffer()));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, params));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, dummy_page_buf));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, counters));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, have_prev ? hiz_texture[0] : dummy_hiz })));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args[0]));
+		RID set = uniform_set_cache->get_cache_vec(instance_shader.version_get_shader(instance_version, 0), 0, uniforms);
 		if (!set.is_valid()) {
 			rd->compute_list_end();
-			return;
+			return false;
 		}
 		rd->compute_list_bind_uniform_set(list, set, 0);
 		rd->compute_list_dispatch(list, (record_count + 63) / 64, 1, 1);
 	}
 	rd->compute_list_end();
 
-	// Phase 2: retest the instances the previous Hi-Z occluded against the
-	// current Hi-Z, so moving occluders disocclude within the frame.
-	RENDER_TIMESTAMP("NextGeo Phase2 Cull");
-	if (build_hiz && hiz_texture[1].is_valid()) {
-		Vector<RD::Uniform> uniforms = {
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, RSG::virtual_mesh_storage->get_dag_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, params),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, nodes),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, counters),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes),
-			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, hiz_texture[1] })),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args),
-		};
-		RID set = rd->uniform_set_create(uniforms, instance_shader.version_get_shader(instance_version, 1), 0);
-		if (set.is_valid()) {
-			list = rd->compute_list_begin();
-			rd->compute_list_bind_compute_pipeline(list, instance_phase2);
-			rd->compute_list_bind_uniform_set(list, set, 0);
-			rd->compute_list_dispatch(list, (NODE_CAPACITY + 63) / 64, 1, 1);
-			rd->compute_list_end();
-		}
-	}
-
-	// BVH levels: one dispatch per level, ping-ponging the node lists.
+	// Phase 1 BVH levels: one dispatch per level, ping-ponging node and indirect-arg buffers.
 	RENDER_TIMESTAMP("NextGeo BVH");
 	RID input = nodes;
 	for (uint32_t level = 0; level < max_levels; level++) {
 		const RID output = (level % 2 == 0) ? level_a : level_b;
-		Vector<RD::Uniform> uniforms;
-		_set_common_uniforms(uniforms, input, output, groups, clusters);
+		const RID args_in = bvh_args[level & 1u];
+		const RID args_out = bvh_args[(level + 1u) & 1u];
+		LocalVector<RD::Uniform> uniforms;
+		_set_common_uniforms(uniforms, input, output, groups, clusters, args_out);
 		RID set = _uniform_set(uniforms, 0);
 		if (!set.is_valid()) {
 			break;
@@ -590,54 +712,139 @@ void NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, cluster_bvh);
 		rd->compute_list_bind_uniform_set(list, set, 0);
-		const uint32_t push[4] = { level, NODE_CAPACITY, 0, 0 };
+		const uint32_t push[4] = { level, NODE_CAPACITY, 0u, 0u };
 		rd->compute_list_set_push_constant(list, push, sizeof(push));
-		rd->compute_list_dispatch_indirect(list, bvh_args, level * 4 * sizeof(uint32_t));
+		rd->compute_list_dispatch_indirect(list, args_in, level * 4 * sizeof(uint32_t));
 		rd->compute_list_end();
 		input = output;
 	}
 
-	// Leaf groups to compacted clusters.
+	// Phase 1 leaf groups to compacted clusters [0, PHASE2_CLUSTER_BASE).
 	RENDER_TIMESTAMP("NextGeo Cluster Cull");
 	{
-		Vector<RD::Uniform> uniforms;
-		_set_common_uniforms(uniforms, groups, level_a, groups, clusters);
+		LocalVector<RD::Uniform> uniforms;
+		_set_common_uniforms(uniforms, groups, level_a, dummy_page_buf, clusters, bvh_args[0]);
 		RID set = _uniform_set(uniforms, 1);
 		if (set.is_valid()) {
 			list = rd->compute_list_begin();
 			rd->compute_list_bind_compute_pipeline(list, cluster_leaf);
 			rd->compute_list_bind_uniform_set(list, set, 0);
-			const uint32_t push[4] = { 0, GROUP_CAPACITY, 0, 0 };
+			const uint32_t push[4] = { 0u, PHASE2_CLUSTER_BASE, 0u, 0u };
 			rd->compute_list_set_push_constant(list, push, sizeof(push));
 			rd->compute_list_dispatch(list, (GROUP_CAPACITY + 63) / 64, 1, 1);
 			rd->compute_list_end();
 		}
 	}
 
+	uint32_t raster_draws = 0;
+	if (can_raster) {
+		RENDER_TIMESTAMP("NextGeo Raster P1");
+		if (_draw_raster_phase(0, 0u, *p_raster)) {
+			raster_draws++;
+		}
+	}
+
+	// Build Hi-Z from rendered depth (legacy pre-pass + Phase 1 virtual raster),
+	// then cull and rasterize newly disoccluded Phase 2 clusters (§7.3, §7.4).
+	RENDER_TIMESTAMP("NextGeo HiZ");
+	if (build_hiz && hiz_texture[1].is_valid()) {
+		_build_hiz(p_depth, p_internal_size);
+	}
+
+	RENDER_TIMESTAMP("NextGeo Phase2 Cull");
+	if (build_hiz && hiz_texture[1].is_valid()) {
+		LocalVector<RD::Uniform> inst_uniforms;
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, RSG::virtual_mesh_storage->get_dag_buffer()));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, params));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, dummy_page_buf));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, counters));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, nodes));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 7, Vector<RID>({ dummy_sampler, hiz_texture[1] })));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, phase2_nodes));
+		inst_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, bvh_args[0]));
+		RID inst_set = uniform_set_cache->get_cache_vec(instance_shader.version_get_shader(instance_version, 1), 0, inst_uniforms);
+		if (inst_set.is_valid()) {
+			list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, instance_phase2);
+			rd->compute_list_bind_uniform_set(list, inst_set, 0);
+			rd->compute_list_dispatch(list, (NODE_CAPACITY + 63) / 64, 1, 1);
+			rd->compute_list_end();
+		}
+
+		RID phase2_input = nodes;
+		for (uint32_t level = 0; level < max_levels; level++) {
+			const RID output = (level % 2 == 0) ? level_a : level_b;
+			const RID args_in = bvh_args[level & 1u];
+			const RID args_out = bvh_args[(level + 1u) & 1u];
+			LocalVector<RD::Uniform> uniforms;
+			_set_common_uniforms(uniforms, phase2_input, output, groups, clusters, args_out);
+			RID set = _uniform_set(uniforms, 0);
+			if (!set.is_valid()) {
+				break;
+			}
+			list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, cluster_bvh);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			const uint32_t push[4] = { level, NODE_CAPACITY, PHASE2_CLUSTER_BASE, 1u };
+			rd->compute_list_set_push_constant(list, push, sizeof(push));
+			rd->compute_list_dispatch_indirect(list, args_in, (9u + level) * 4 * sizeof(uint32_t));
+			rd->compute_list_end();
+			phase2_input = output;
+		}
+
+		LocalVector<RD::Uniform> leaf_uniforms;
+		_set_common_uniforms(leaf_uniforms, groups, level_a, dummy_page_buf, clusters, bvh_args[0]);
+		RID leaf_set = _uniform_set(leaf_uniforms, 1);
+		if (leaf_set.is_valid()) {
+			list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, cluster_leaf);
+			rd->compute_list_bind_uniform_set(list, leaf_set, 0);
+			const uint32_t push[4] = { 0u, PHASE2_CLUSTER_BASE, PHASE2_CLUSTER_BASE, 1u };
+			rd->compute_list_set_push_constant(list, push, sizeof(push));
+			rd->compute_list_dispatch(list, (GROUP_CAPACITY + 63) / 64, 1, 1);
+			rd->compute_list_end();
+		}
+	}
+
+	if (can_raster) {
+		RENDER_TIMESTAMP("NextGeo Raster P2");
+		if (_draw_raster_phase(1, PHASE2_CLUSTER_BASE, *p_raster)) {
+			raster_draws++;
+		}
+		if (build_hiz && hiz_texture[1].is_valid()) {
+			// Refresh the Hi-Z chain so next frame's Phase 1 includes newly
+			// disoccluded Phase 2 virtual depth.
+			_build_hiz(p_depth, p_internal_size);
+		}
+	}
+
 	// Order-independent cut hash on the GPU, so a readback only needs the
 	// counters instead of the whole cluster list.
 	{
-		Vector<RD::Uniform> uniforms;
-		_set_common_uniforms(uniforms, groups, level_a, groups, clusters);
+		LocalVector<RD::Uniform> uniforms;
+		_set_common_uniforms(uniforms, level_b, level_a, groups, clusters, bvh_args[0]);
 		RID set = _uniform_set(uniforms, 2);
 		if (set.is_valid()) {
 			list = rd->compute_list_begin();
 			rd->compute_list_bind_compute_pipeline(list, cluster_hash);
 			rd->compute_list_bind_uniform_set(list, set, 0);
-			rd->compute_list_dispatch(list, (CLUSTER_CAPACITY + 63) / 64, 1, 1);
+			rd->compute_list_dispatch(list, (PHASE2_CLUSTER_BASE + 63) / 64, 1, 1);
 			rd->compute_list_end();
 		}
 	}
 
 	const uint32_t stats_interval = MAX(uint32_t(GLOBAL_GET("rendering/nextgeo/debug_stats_interval")), 1u);
 	if (p_debug_stats && (stats_counter++ % stats_interval == 0)) {
-		_request_stats(record_count, max_levels, &cut, p_occlusion, have_prev);
+		_request_stats(record_count, max_levels, &cut, p_occlusion, have_prev, raster_draws);
 	}
 
 	if (build_hiz && hiz_texture[1].is_valid()) {
 		_swap_hiz();
 		hiz_primed = true;
 	}
+	return raster_draws > 0;
 }
 
 void NextGeoCut::free_resources() {
@@ -646,6 +853,13 @@ void NextGeoCut::free_resources() {
 		return;
 	}
 	_release_hiz();
+	for (int variant = 0; variant < 4; variant++) {
+		raster_pipelines[variant].clear();
+	}
+	if (raster_version.is_valid()) {
+		raster_shader.version_free(raster_version);
+		raster_version = RID();
+	}
 	if (instance_version.is_valid()) {
 		instance_shader.version_free(instance_version);
 		instance_version = RID();
@@ -664,7 +878,8 @@ void NextGeoCut::free_resources() {
 	cluster_leaf = RID();
 	cluster_hash = RID();
 	hiz_pipeline = RID();
-	for (RID *buffer : { &params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args, &counters }) {
+	clear_vis_pipeline = RID();
+	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &dummy_page_buf }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();

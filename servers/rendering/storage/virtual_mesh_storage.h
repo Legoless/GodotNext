@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -122,6 +122,15 @@ public:
 		uint32_t count = 0;
 	};
 
+	// GodotNext: nextgeo_visibility_raster (#83). 16 B per-cluster GPU lookup
+	// pointing into the global page arena for vertex-pulling hardware raster.
+	struct ClusterGPUDesc {
+		uint32_t pos_word_offset = 0;
+		uint32_t tri_byte_offset = 0;
+		uint32_t stride_and_counts = 0; // bits 0..7 = float stride, 8..15 = verts, 16..23 = tris.
+		uint32_t surface_and_page = 0; // bits 0..15 = surface_id, 16..31 = page_id.
+	};
+
 	struct MeshInfo {
 		RenderingServerTypes::VirtualGeometryDesc desc;
 		MeshRecord record;
@@ -132,6 +141,14 @@ public:
 		// DAG buffer; the mesh record's offsets are relative to its base.
 		uint32_t dag_offset = 0;
 		uint32_t dag_size = 0;
+		// GodotNext: nextgeo_visibility_raster (#83). Page arena and per-cluster
+		// lookup ranges in the global page/cluster storage buffers.
+		uint32_t page_offset = 0;
+		uint32_t page_size = 0;
+		uint32_t cluster_table_offset = 0;
+		uint32_t cluster_table_size = 0;
+		Vector<uint8_t> page_blob;
+		Vector<uint8_t> cluster_blob;
 	};
 
 	RendererVirtualMeshStorage();
@@ -187,6 +204,8 @@ public:
 	virtual RID get_record_buffer() const { return RID(); }
 	virtual RID get_mesh_record_buffer() const { return RID(); }
 	virtual RID get_dag_buffer() const { return RID(); }
+	virtual RID get_page_buffer() const { return RID(); }
+	virtual RID get_cluster_buffer() const { return RID(); }
 	uint32_t get_record_count() const { return used_slots; }
 	uint32_t get_max_bvh_levels() const;
 
@@ -197,6 +216,13 @@ protected:
 	virtual bool _resize_dag(uint32_t p_bytes) { return false; }
 	virtual void _upload_dag(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
 	virtual void _reset_dag() {}
+	// GodotNext: nextgeo_visibility_raster (#83). Page arena + cluster table.
+	virtual bool _resize_pages(uint32_t p_bytes) { return false; }
+	virtual void _upload_pages(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
+	virtual void _reset_pages() {}
+	virtual bool _resize_clusters(uint32_t p_bytes) { return false; }
+	virtual void _upload_clusters(uint32_t p_offset, const uint8_t *p_data, uint32_t p_size) {}
+	virtual void _reset_clusters() {}
 	// Renderer-specific bookkeeping after a record slot is reused.
 	virtual void _record_reused(uint32_t p_record) {}
 	// Renderer-specific refusal (for example an out-of-memory RD buffer).
@@ -216,6 +242,10 @@ protected:
 	void _mark_dirty(uint32_t p_record);
 	uint32_t _alloc_dag(uint32_t p_size);
 	void _free_dag(uint32_t p_offset, uint32_t p_size);
+	uint32_t _alloc_pages(uint32_t p_size);
+	void _free_pages(uint32_t p_offset, uint32_t p_size);
+	uint32_t _alloc_clusters(uint32_t p_size);
+	void _free_clusters(uint32_t p_offset, uint32_t p_size);
 	MeshRecord _parse_dag(const Vector<uint8_t> &p_dag, uint32_t p_base);
 	void _write_transform(Record &r_record, const Transform3D &p_transform, const AABB &p_world_aabb, float p_lod_bias);
 
@@ -239,14 +269,20 @@ protected:
 	uint32_t used_slots = 0;
 	uint32_t dag_used = 0;
 	uint32_t dag_capacity = 0;
+	uint32_t page_used = 0;
+	uint32_t page_capacity = 0;
+	uint32_t cluster_used = 0;
+	uint32_t cluster_capacity = 0;
 	struct DAGFree {
 		uint32_t offset = 0;
 		uint32_t size = 0;
 	};
 	LocalVector<DAGFree> dag_free;
+	LocalVector<DAGFree> page_free;
+	LocalVector<DAGFree> cluster_free;
 	uint32_t live_records = 0;
 	uint32_t frame = 0;
 	bool mesh_records_dirty = false;
-	// Teleport threshold, in metres. A move larger than this sets prev = cur.
+	// Teleport threshold, in meters. A move larger than this sets prev = cur.
 	float teleport_distance = 100.0f;
 };
