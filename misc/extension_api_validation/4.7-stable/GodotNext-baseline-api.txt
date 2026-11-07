@@ -1,0 +1,5 @@
+Validate extension JSON: API was removed: classes/TextServerFallback
+
+This API was already absent from the Godot 4.8-beta snapshot used by GodotNext.
+Record the baseline removal separately from the additive DLSS enum changes in
+GodotNext-DLSS-scaling-mode.txt; it is not part of #103.

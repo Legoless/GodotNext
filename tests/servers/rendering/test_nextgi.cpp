@@ -188,6 +188,20 @@ TEST_CASE("[NextGI][Editor] View Information tier readout") {
 	restore_setting(enabled_setting, had_enabled, previous_enabled);
 }
 
+TEST_CASE("[NextGI][Editor] Upscaler status readout") {
+	Dictionary fallback;
+	fallback["requested_mode"] = RSE::VIEWPORT_SCALING_3D_MODE_DLSS;
+	fallback["active_mode"] = RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+	fallback["reason"] = RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED;
+	fallback["effective_scale"] = 0.5f;
+	fallback["preset"] = 0;
+	CHECK_EQ(NextGIEditorPlugin::format_upscaler_readout(fallback), "Upscaler: DLSS → FSR2 (0, API_UNSUPPORTED)");
+	fallback["active_mode"] = RSE::VIEWPORT_SCALING_3D_MODE_DLSS;
+	fallback["reason"] = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+	fallback["effective_scale"] = 1.0f;
+	CHECK_EQ(NextGIEditorPlugin::format_upscaler_readout(fallback), "Upscaler: DLAA → DLAA (0, NONE)");
+}
+
 #ifdef RD_ENABLED
 // GodotNext: shader_baker_ray_query
 TEST_CASE("[NextGI][Editor] Shader baker keeps ray-query versions only for AS containers") {

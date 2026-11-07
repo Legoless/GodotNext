@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -82,6 +82,27 @@ TEST_CASE("[Upscalers] Registry and mode hint") {
 	TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS) == nullptr);
 	CHECK_FALSE(TemporalUpscalerRegistry::build_mode_hint(true).contains("DLSS"));
+}
+
+TEST_CASE("[Upscalers] Viewport status exposes the requested mode") {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	TemporalUpscalerRegistry::clear();
+	const RID camera = rs->camera_create();
+	const RID viewport = rs->viewport_create();
+	rs->viewport_attach_camera(viewport, camera);
+	rs->viewport_set_size(viewport, 640, 360, 1);
+	rs->viewport_set_active(viewport, true);
+	rs->viewport_set_scaling_3d_mode(viewport, RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+	rs->draw(false, 0.0);
+	const Dictionary status = rs->viewport_get_scaling_3d_status(viewport);
+	CHECK_EQ(int(status["requested_mode"]), int(RSE::VIEWPORT_SCALING_3D_MODE_DLSS));
+	CHECK(status.has("active_mode"));
+	CHECK(status.has("reason"));
+	CHECK(status.has("effective_scale"));
+	CHECK_EQ(int(status["preset"]), 0);
+	rs->free_rid(viewport);
+	rs->free_rid(camera);
 }
 
 TEST_CASE("[Upscalers] Reason precedence") {

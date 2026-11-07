@@ -3743,6 +3743,10 @@ void Node3DEditorViewport::_notification(int p_what) {
 				if (!nextgi_readout.is_empty()) {
 					text += "\n" + nextgi_readout;
 				}
+				const String upscaler_readout = NextGIEditorPlugin::get_upscaler_readout(viewport->get_viewport_rid());
+				if (!upscaler_readout.is_empty()) {
+					text += "\n" + upscaler_readout;
+				}
 
 				info_label->set_text(text);
 			}

@@ -88,6 +88,10 @@ public:
 	// The readout for RenderingServer.nextgi_get_tier_info(). Empty while nextgi/enabled is false.
 	static String get_tier_readout();
 
+	// Requested and active upscaler, preset and ViewportScaling3DReason (#103).
+	static String format_upscaler_readout(const Dictionary &p_status);
+	static String get_upscaler_readout(RID p_viewport);
+
 	virtual String get_plugin_name() const override { return "NextGI"; }
 
 	NextGIEditorPlugin();

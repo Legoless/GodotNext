@@ -204,6 +204,75 @@ String NextGIEditorPlugin::get_tier_readout() {
 	return format_tier_readout(rs->nextgi_get_tier_info());
 }
 
+static String _upscaler_mode_name(int p_mode, float p_scale) {
+	if (p_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+		return Math::is_equal_approx(p_scale, 1.0f) ? String("DLAA") : String("DLSS");
+	}
+	switch (p_mode) {
+		case RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR:
+			return "Bilinear";
+		case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
+			return "FSR1";
+		case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
+			return "FSR2";
+		case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL:
+			return "MetalFX Spatial";
+		case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL:
+			return "MetalFX Temporal";
+		case RSE::VIEWPORT_SCALING_3D_MODE_NEAREST:
+			return "Nearest";
+		default:
+			return "Off";
+	}
+}
+
+static const char *_upscaler_reason_name(int p_reason) {
+	switch (p_reason) {
+		case RSE::VIEWPORT_SCALING_3D_REASON_NONE:
+			return "NONE";
+		case RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED:
+			return "RENDERER_UNSUPPORTED";
+		case RSE::VIEWPORT_SCALING_3D_REASON_API_UNSUPPORTED:
+			return "API_UNSUPPORTED";
+		case RSE::VIEWPORT_SCALING_3D_REASON_MODULE_DISABLED:
+			return "MODULE_DISABLED";
+		case RSE::VIEWPORT_SCALING_3D_REASON_NOT_NVIDIA_RTX:
+			return "NOT_NVIDIA_RTX";
+		case RSE::VIEWPORT_SCALING_3D_REASON_DRIVER_TOO_OLD:
+			return "DRIVER_TOO_OLD";
+		case RSE::VIEWPORT_SCALING_3D_REASON_RUNTIME_MISSING:
+			return "RUNTIME_MISSING";
+		case RSE::VIEWPORT_SCALING_3D_REASON_EXTENSION_MISSING:
+			return "EXTENSION_MISSING";
+		case RSE::VIEWPORT_SCALING_3D_REASON_PROJECT_ID_MISSING:
+			return "PROJECT_ID_MISSING";
+		case RSE::VIEWPORT_SCALING_3D_REASON_FEATURE_CREATE_FAILED:
+			return "FEATURE_CREATE_FAILED";
+		case RSE::VIEWPORT_SCALING_3D_REASON_SCALE_UNSUPPORTED:
+			return "SCALE_UNSUPPORTED";
+		case RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED:
+			return "VIEW_UNSUPPORTED";
+		default:
+			return "UNKNOWN";
+	}
+}
+
+String NextGIEditorPlugin::format_upscaler_readout(const Dictionary &p_status) {
+	const int requested = int(p_status.get("requested_mode", RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR));
+	const int active = int(p_status.get("active_mode", RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR));
+	const float scale = p_status.get("effective_scale", 1.0f);
+	return vformat("Upscaler: %s → %s (%d, %s)", _upscaler_mode_name(requested, scale), _upscaler_mode_name(active, scale), int(p_status.get("preset", 0)), _upscaler_reason_name(int(p_status.get("reason", RSE::VIEWPORT_SCALING_3D_REASON_NONE))));
+}
+
+String NextGIEditorPlugin::get_upscaler_readout(RID p_viewport) {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	if (rs == nullptr || p_viewport.is_null()) {
+		return String();
+	}
+	const Dictionary status = rs->viewport_get_scaling_3d_status(p_viewport);
+	return status.is_empty() ? String() : format_upscaler_readout(status);
+}
+
 NextGIEditorPlugin::NextGIEditorPlugin() {
 	vulkan_switch_dialog = memnew(ConfirmationDialog);
 	vulkan_switch_dialog->set_title(get_vulkan_switch_dialog_title());

@@ -29,5 +29,8 @@ func _process(_delta: float) -> void:
 			status.get("effective_scale", -1.0),
 			status.get("preset", -1),
 		])
-		print("UPSCALER_API dlss_availability=%s" % RenderingServer.scaling_3d_mode_get_availability(RenderingServer.VIEWPORT_SCALING_3D_MODE_DLSS))
-		get_tree().quit(0)
+		var api_reason := RenderingServer.scaling_3d_mode_get_availability(RenderingServer.VIEWPORT_SCALING_3D_MODE_DLSS)
+		print("UPSCALER_API dlss_availability=%s" % api_reason)
+		var ok := int(status["requested_mode"]) == Viewport.SCALING_3D_MODE_DLSS and int(status["active_mode"]) == Viewport.SCALING_3D_MODE_METALFX_TEMPORAL and int(status["reason"]) == 2 and is_equal_approx(float(status["effective_scale"]), 0.75) and int(status["preset"]) == 0 and api_reason == 2
+		print("GODOTNEXT_RESULT " + JSON.stringify({"test": "upscaler_status", "pass": ok}))
+		get_tree().quit(0 if ok else 1)
