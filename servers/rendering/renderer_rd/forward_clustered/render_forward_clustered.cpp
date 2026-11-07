@@ -373,6 +373,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 			continue;
 		}
 
+		if (p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER && (surf->shader->unshaded || surf->shader->depth_draw == SceneShaderForwardClustered::ShaderData::DEPTH_DRAW_DISABLED || surf->shader->depth_test == SceneShaderForwardClustered::ShaderData::DEPTH_TEST_DISABLED)) {
+			continue;
+		}
+
 		if (surf->owner->instance_count == 0) {
 			continue;
 		}
@@ -493,6 +497,9 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				ERR_FAIL_COND_MSG(p_params->view_count > 1, "Multiview not supported for shadow DP pass");
 				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_DP;
 			} break;
+			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER:
+				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS;
+				break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
 				if (p_params->prepass_motion) {
 					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION;
@@ -702,6 +709,9 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 		} break;
 		case PASS_MODE_DEPTH: {
 			_render_list_template<PASS_MODE_DEPTH>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
+		} break;
+		case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER: {
+			_render_list_template<PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
 		} break;
 		case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
 			_render_list_template<PASS_MODE_DEPTH_NORMAL_ROUGHNESS>(p_draw_list, p_framebuffer_Format, p_params, p_from_element, p_to_element);
@@ -1145,7 +1155,7 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					inst->gi_offset_cache = 0xFFFFFFFF;
 				}
 			}
-			if (p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI || p_pass_mode == PASS_MODE_COLOR) {
+			if (p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI || p_pass_mode == PASS_MODE_COLOR) {
 				bool transform_changed = inst->transform_status == GeometryInstanceForwardClustered::TransformStatus::MOVED;
 				bool has_mesh_instance = inst->mesh_instance.is_valid();
 				bool uses_particles = inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES;
@@ -1891,6 +1901,39 @@ void RenderForwardClustered::_process_sss(Ref<RenderSceneBuffersRD> p_render_buf
 	}
 }
 
+void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {
+	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow")) || p_render_data->environment.is_null() || !environment_get_nextgi_translucency_front_layer_reflections(p_render_data->environment) || next_gi.get_tier_result().tier != RendererRD::NextGI::TIER_HWRT) {
+		return;
+	}
+	if (p_render_data->scene_data->view_count != 1 || render_list[RENDER_LIST_ALPHA].elements.is_empty()) {
+		return;
+	}
+	if (!front_layer.ensure_targets(p_screen_size)) {
+		return;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	const RSE::ViewportMSAA msaa = rb->get_msaa_3d();
+	if (msaa != RSE::VIEWPORT_MSAA_DISABLED) {
+		resolve_effects->resolve_depth(rb->get_depth_msaa(0), rb->get_depth_texture(0), p_screen_size, 1 << int(msaa));
+	}
+	if (!front_layer.copy_opaque_depth(rb->get_depth_texture(0), copy_effects)) {
+		return;
+	}
+
+	RENDER_TIMESTAMP("NextGI Front Layer");
+	RD::get_singleton()->draw_command_begin_label("NextGI Front Layer");
+	p_render_data->scene_data->nextgi_front_layer = true;
+	const uint32_t uniform_buffer_index = _setup_environment(p_render_data, false, p_screen_size, p_screen_size, Color(), false);
+	const RID uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, p_radiance_texture, p_samplers, uniform_buffer_index, true, true);
+	RenderListParameters params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), p_reverse_cull, PASS_MODE_DEPTH_NORMAL_ROUGHNESS_FRONT_LAYER, 0, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, 1, 0, p_base_specialization, false);
+	Vector<Color> clear;
+	clear.push_back(Color(0, 0, 0, 0));
+	_render_list_with_draw_list(&params, front_layer.get_framebuffer(), RD::DRAW_CLEAR_ALL, clear, 0.0f, 0u, p_render_data->render_region);
+	p_render_data->scene_data->nextgi_front_layer = false;
+	front_layer.trace(p_render_data);
+	RD::get_singleton()->draw_command_end_label();
+}
+
 void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
 	scene_state.used_uniform_buffer_count = 0;
 	if (RSG::virtual_mesh_storage != nullptr) {
@@ -2475,6 +2518,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 	// GodotNext: nextgi_frame_block
 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sscs, using_sdfgi || using_voxelgi, normal_roughness_views, voxel_gi_views, using_nextgi);
+	if (using_nextgi) {
+		_render_nextgi_front_layer(p_render_data, reverse_cull, screen_size, radiance_texture, samplers, base_specialization);
+	}
 
 	if (current_cluster_builder) {
 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
@@ -2713,6 +2759,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	RD::get_singleton()->draw_command_begin_label("Render 3D Transparent Pass");
 
+	p_render_data->scene_data->nextgi_front_layer = using_nextgi && front_layer.get_reflection().is_valid() && p_render_data->environment.is_valid() && environment_get_nextgi_translucency_front_layer_reflections(p_render_data->environment) && bool(GLOBAL_GET("rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow"));
 	uint32_t transparent_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, false);
 
 	rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, is_multiview, radiance_texture, samplers, transparent_pass_uniform_buffer_index, true);
@@ -2726,6 +2773,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 	}
+	p_render_data->scene_data->nextgi_front_layer = false;
 
 	RD::get_singleton()->draw_command_end_label();
 
@@ -3810,7 +3858,7 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
-RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas) {
+RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, bool p_front_layer_pass) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -4257,6 +4305,23 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 			volume_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			volume_uniform.append_id(volume_textures[i].is_valid() ? volume_textures[i] : black_3d);
 			uniforms.push_back(volume_uniform);
+		}
+	}
+	{
+		RID opaque_depth = front_layer.get_opaque_depth();
+		RID layer_depth = p_front_layer_pass ? RID() : front_layer.get_depth();
+		RID layer_reflection = front_layer.get_reflection();
+		for (uint32_t i = 0; i < 3; i++) {
+			RD::Uniform u;
+			u.binding = 46 + i;
+			u.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+			RID texture = i == 0 ? opaque_depth : (i == 1 ? layer_depth : layer_reflection);
+			if (texture.is_null()) {
+				texture = texture_storage->texture_rd_get_default(i == 2 ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH);
+			}
+			u.append_id(p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED));
+			u.append_id(texture);
+			uniforms.push_back(u);
 		}
 	}
 
@@ -5800,6 +5865,7 @@ RenderForwardClustered::RenderForwardClustered() {
 		RD::get_singleton()->compute_list_end();
 	}
 
+	front_layer.set_owner(&next_gi);
 	_update_shader_quality_settings();
 	_update_global_pipeline_data_requirements_from_project();
 

@@ -220,6 +220,9 @@
 		<member name="nextgi_scene_view_distance" type="float" setter="set_nextgi_scene_view_distance" getter="get_nextgi_scene_view_distance" default="200.0">
 			The farthest distance covered by the global distance-field clipmaps when NextGI is enabled, in meters. The default of [code]200.0[/code] uses six levels. Larger values add coarser levels, up to [code]800.0[/code].
 		</member>
+		<member name="nextgi_translucency_front_layer_reflections" type="bool" setter="set_nextgi_translucency_front_layer_reflections" getter="get_nextgi_translucency_front_layer_reflections" default="false">
+			Enables traced reflections on the nearest translucent layer when NextGI hardware ray tracing is active. The front-layer depth and normal/roughness targets are created lazily. Deeper layers keep the existing reflection path. Requires [member ProjectSettings.rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow] to be enabled.
+		</member>
 		<member name="reflected_light_source" type="int" setter="set_reflection_source" getter="get_reflection_source" enum="Environment.ReflectionSource" default="0">
 			The reflected (specular) light source.
 		</member>

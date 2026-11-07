@@ -163,6 +163,10 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	vec4 fog_light_color;
 	float far_distance;
 	uint far_occlusion_only;
+	uint front_layer;
+	uint front_pad0;
+	uint front_pad1;
+	uint front_pad2;
 }
 params;
 
@@ -838,6 +842,10 @@ void nextgi_reflect_main() {
 		vec3 screen_color;
 		vec3 march_end;
 		bool screen_hit = nextgi_screen_trace(origin, direction, tmax, screen_color, march_end);
+		if (params.front_layer != 0u) {
+			screen_hit = false;
+			march_end = origin;
+		}
 		float traveled = length(march_end - origin);
 		vec3 trace_origin = origin;
 		float trace_tmax = tmax;

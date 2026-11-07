@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -683,6 +684,9 @@ Dictionary NextGI::get_tier_info() const {
 	}
 	if (wrc != nullptr) {
 		wrc->fill_info(info);
+	}
+	if (front_layer != nullptr) {
+		front_layer->fill_info(info);
 	}
 	return info;
 }

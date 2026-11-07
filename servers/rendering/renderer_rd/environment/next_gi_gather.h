@@ -159,6 +159,11 @@ class NextGIGather {
 	uint32_t last_reflection_hits = 0;
 	uint32_t last_reflection_misses = 0;
 	bool hit_radiance_reference = false;
+	bool front_layer = false;
+	RID front_depth;
+	RID front_normal_roughness;
+	RID front_reflection;
+	RID front_hit_distance;
 
 	bool _ensure_shader();
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
@@ -176,6 +181,9 @@ public:
 	void init();
 	void free_resources();
 	void gather(RenderDataRD *p_render_data, bool p_diffuse = true);
+	void set_front_layer_inputs(RID p_depth, RID p_normal_roughness, RID p_reflection, RID p_hit_distance);
+	uint32_t get_shader_version_count() const;
+	RID get_specular_history() const { return specular_history; }
 	void integrate(RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;
 	// #53 debug views: 10 raw, 11 variance, 12 history, 13 rejected (NextGI::DebugViewId order).

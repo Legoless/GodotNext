@@ -1443,6 +1443,14 @@ void fragment_shader(in SceneData scene_data) {
 		discard;
 	}
 #endif // USE_OPAQUE_PREPASS || ALPHA_ANTIALIASING_EDGE_USED
+#ifdef MODE_RENDER_NORMAL_ROUGHNESS
+	if (bool(scene_data.flags & SCENE_DATA_FLAGS_NEXTGI_FRONT_LAYER)) {
+		float opaque_depth = texelFetch(nextgi_front_layer_opaque_depth, ivec2(gl_FragCoord.xy), 0).r;
+		if (alpha < 0.1 || gl_FragCoord.z < opaque_depth) {
+			discard;
+		}
+	}
+#endif
 #endif // MODE_RENDER_DEPTH
 
 #endif // !USE_SHADOW_TO_OPACITY
@@ -2218,6 +2226,15 @@ void fragment_shader(in SceneData scene_data) {
 		}
 		if (reflection_accum.a > 0.0) {
 			indirect_specular_light = reflection_accum.rgb;
+		}
+		if (bool(scene_data.flags & SCENE_DATA_FLAGS_NEXTGI_FRONT_LAYER)) {
+			float layer_depth = texelFetch(nextgi_front_layer_depth, ivec2(gl_FragCoord.xy), 0).r;
+			vec2 ndc = gl_FragCoord.xy / scene_data.viewport_size * 2.0 - 1.0;
+			vec4 view_position = inv_projection_matrix * vec4(ndc, layer_depth, 1.0);
+			float layer_view_z = view_position.z / view_position.w;
+			if (abs(vertex_interp.z - layer_view_z) <= 0.0001) {
+				indirect_specular_light = texelFetch(nextgi_front_layer_reflection, ivec2(gl_FragCoord.xy), 0).rgb;
+			}
 		}
 
 #ifdef LIGHT_CLEARCOAT_USED

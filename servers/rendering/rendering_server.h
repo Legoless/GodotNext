@@ -715,13 +715,14 @@ public:
 	// GodotNext: nextgi_tier
 	virtual void environment_set_nextgi_enabled(RID p_env, bool p_enabled) = 0;
 	// GodotNext: nextgi_user_surface
-	virtual void environment_set_nextgi(RID p_env, bool p_enable, float p_energy, bool p_read_sky, float p_max_roughness, bool p_fog_hits, float p_view_distance = 200.0f) = 0;
+	virtual void environment_set_nextgi(RID p_env, bool p_enable, float p_energy, bool p_read_sky, float p_max_roughness, bool p_fog_hits, float p_view_distance = 200.0f, bool p_front_layer_reflections = false) = 0;
 	virtual bool environment_get_nextgi_enabled(RID p_env) const = 0;
 	virtual float environment_get_nextgi_energy(RID p_env) const = 0;
 	virtual bool environment_get_nextgi_read_sky_light(RID p_env) const = 0;
 	// GodotNext: nextgi_reflection_behaviours (#132).
 	virtual float environment_get_nextgi_max_roughness_to_trace(RID p_env) const = 0;
 	virtual bool environment_get_nextgi_fog_on_reflection_hits(RID p_env) const = 0;
+	virtual bool environment_get_nextgi_translucency_front_layer_reflections(RID p_env) const = 0;
 	virtual Dictionary nextgi_get_status() const = 0;
 	virtual Dictionary nextgi_get_counters() const = 0;
 	virtual void nextgi_set_hardware_ray_tracing(int p_mode) = 0;

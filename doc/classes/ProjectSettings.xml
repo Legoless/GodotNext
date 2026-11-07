@@ -3175,6 +3175,9 @@
 		<member name="rendering/global_illumination/nextgi/rt_scene_radius" type="float" setter="" getter="" default="200.0">
 			The radius, in meters around the main camera, within which instances are added to the NextGI ray-tracing scene.
 		</member>
+		<member name="rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow" type="bool" setter="" getter="" default="true">
+			Allows NextGI to create front-layer reflection shaders and render targets when [member Environment.nextgi_translucency_front_layer_reflections] is enabled. If [code]false[/code], no front-layer shader variant or target is created and the existing translucent reflection path is unchanged.
+		</member>
 		<member name="rendering/global_illumination/sdfgi/frames_to_converge" type="int" setter="" getter="" default="5">
 			The number of frames to use for converging signed distance field global illumination. Higher values lead to a less noisy result, at the cost of taking a longer time to fully converge. This means the scene's global illumination will be too dark for a longer period of time, especially when the camera moves fast. The actual convergence speed depends on rendered framerate. For example, with the default setting of 30 frames, rendering at 60 FPS will make SDFGI fully converge after 0.5 seconds. See also [member rendering/global_illumination/sdfgi/frames_to_update_lights] and [member rendering/global_illumination/sdfgi/probe_ray_count].
 			[b]Note:[/b] This property is only read when the project starts. To control SDFGI convergence speed at runtime, call [method RenderingServer.environment_set_sdfgi_frames_to_converge] instead.

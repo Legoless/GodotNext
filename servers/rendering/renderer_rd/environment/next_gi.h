@@ -59,6 +59,7 @@ class NextGIRelight;
 
 // GodotNext: nextgi_gather
 class NextGIGather;
+class NextGIFrontLayer;
 class NextGIReference;
 class NextGIWRC;
 
@@ -280,6 +281,7 @@ private:
 
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;
+	NextGIFrontLayer *front_layer = nullptr;
 	NextGIReference *reference = nullptr;
 	NextGIWRC *wrc = nullptr;
 	void _gather(RenderDataRD *p_render_data);
@@ -479,6 +481,8 @@ public:
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }
+	void set_front_layer(NextGIFrontLayer *p_front_layer) { front_layer = p_front_layer; }
+	bool has_front_layer() const { return front_layer != nullptr; }
 	NextGIReference *get_reference() const { return reference; }
 	NextGIWRC *get_wrc() const { return wrc; }
 

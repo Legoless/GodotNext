@@ -595,8 +595,8 @@ bool RendererSceneRender::environment_get_nextgi_enabled(RID p_env) const {
 }
 
 // GodotNext: nextgi_user_surface
-void RendererSceneRender::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits, float p_view_distance) {
-	environment_storage.environment_set_nextgi(p_env, p_enabled, p_energy, p_read_sky_light, p_max_roughness, p_fog_hits, p_view_distance);
+void RendererSceneRender::environment_set_nextgi(RID p_env, bool p_enabled, float p_energy, bool p_read_sky_light, float p_max_roughness, bool p_fog_hits, float p_view_distance, bool p_front_layer_reflections) {
+	environment_storage.environment_set_nextgi(p_env, p_enabled, p_energy, p_read_sky_light, p_max_roughness, p_fog_hits, p_view_distance, p_front_layer_reflections);
 }
 
 float RendererSceneRender::environment_get_nextgi_scene_view_distance(RID p_env) const {
@@ -617,6 +617,10 @@ float RendererSceneRender::environment_get_nextgi_max_roughness_to_trace(RID p_e
 
 bool RendererSceneRender::environment_get_nextgi_fog_on_reflection_hits(RID p_env) const {
 	return environment_storage.environment_get_nextgi_fog_on_reflection_hits(p_env);
+}
+
+bool RendererSceneRender::environment_get_nextgi_translucency_front_layer_reflections(RID p_env) const {
+	return environment_storage.environment_get_nextgi_translucency_front_layer_reflections(p_env);
 }
 
 Dictionary RendererSceneRender::nextgi_get_tier_info() const {

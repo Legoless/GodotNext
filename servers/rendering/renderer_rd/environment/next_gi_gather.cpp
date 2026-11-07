@@ -106,8 +106,10 @@ struct GatherParamsGPU {
 	float fog_light_color[4];
 	float far_distance;
 	uint32_t far_occlusion_only;
+	uint32_t front_layer;
+	uint32_t front_pad[3];
 };
-static_assert(sizeof(GatherParamsGPU) == 336, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 352, "Gather params must match nextgi_gather.glsl.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -170,13 +172,13 @@ NextGIGather::~NextGIGather() {
 void NextGIGather::_free_uniform_set() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr) {
-		if (uniform_set.is_valid()) {
+		if (rd->uniform_set_is_valid(uniform_set)) {
 			rd->free_rid(uniform_set);
 		}
-		if (reflect_uniform_set.is_valid()) {
+		if (rd->uniform_set_is_valid(reflect_uniform_set)) {
 			rd->free_rid(reflect_uniform_set);
 		}
-		if (reflect_far_uniform_set.is_valid()) {
+		if (rd->uniform_set_is_valid(reflect_far_uniform_set)) {
 			rd->free_rid(reflect_far_uniform_set);
 		}
 	}
@@ -446,6 +448,18 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	return true;
 }
 
+void NextGIGather::set_front_layer_inputs(RID p_depth, RID p_normal_roughness, RID p_reflection, RID p_hit_distance) {
+	front_layer = p_depth.is_valid() && p_normal_roughness.is_valid() && p_reflection.is_valid() && p_hit_distance.is_valid();
+	front_depth = front_layer ? p_depth : RID();
+	front_normal_roughness = front_layer ? p_normal_roughness : RID();
+	front_reflection = front_layer ? p_reflection : RID();
+	front_hit_distance = front_layer ? p_hit_distance : RID();
+}
+
+uint32_t NextGIGather::get_shader_version_count() const {
+	return shader != nullptr && shader->version.is_valid() ? 1u : 0u;
+}
+
 void NextGIGather::init() {
 	denoise = memnew(NextGIDenoise);
 #ifdef DEBUG_ENABLED
@@ -483,7 +497,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		return false;
 	}
 	const RID tlas = next_gi->get_rt_scene()->get_tlas();
-	const RID depth = rb->get_depth_texture();
+	const RID depth = front_layer ? front_depth : rb->get_depth_texture();
 	// A frame that did not rebuild the TLAS still holds the previous build, which a freed mesh invalidates.
 	if (!tlas.is_valid() || !next_gi->get_rt_scene()->is_tlas_traceable() || !depth.is_valid() || !rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 		return false;
@@ -606,10 +620,10 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		params.pad0 = hiz_texture.is_valid() && last_frame_texture.is_valid() ? 1u : 0u;
 		params.pad1 = hiz_format.mipmaps > 0 ? hiz_format.mipmaps - 1 : 0;
 	}
-	RID normal_roughness = dummy_color;
+	RID normal_roughness = front_layer ? front_normal_roughness : dummy_color;
 	RID velocity = dummy_color;
-	last_normal_roughness = RID();
-	if (rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
+	last_normal_roughness = front_layer ? front_normal_roughness : RID();
+	if (!front_layer && rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) && rb->has_velocity_buffer(false)) {
 		normal_roughness = rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness"));
 		velocity = rb->get_velocity_buffer(false);
 		params.velocity_enabled = velocity.is_valid() && normal_roughness.is_valid() ? 1u : 0u;
@@ -619,7 +633,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	}
 	last_depth = depth;
 	last_inv_projection = scene_data->cam_projection.inverse();
-	last_velocity = velocity.is_valid() ? velocity : RID();
+	last_velocity = front_layer ? RID() : (velocity.is_valid() ? velocity : RID());
+	params.front_layer = front_layer ? 1u : 0u;
+	params.front_pad[0] = 0u;
+	params.front_pad[1] = 0u;
+	params.front_pad[2] = 0u;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	_free_uniform_set();
@@ -707,8 +725,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		noise_data.push_back(noise);
 		blue_noise_texture = rd->texture_create(noise_format, RD::TextureView(), noise_data);
 	}
-	last_reflection_output = rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : RID();
-	last_specular_hit = rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID();
+	last_reflection_output = front_layer ? front_reflection : (rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : RID());
+	last_specular_hit = front_layer ? front_hit_distance : (rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID());
 	if (last_screen_w > 0 && last_screen_h > 0) {
 		const uint32_t trace_w = MAX(last_screen_w / 2u, 1u);
 		const uint32_t trace_h = MAX(last_screen_h / 2u, 1u);

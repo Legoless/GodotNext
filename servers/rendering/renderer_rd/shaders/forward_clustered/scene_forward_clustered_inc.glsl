@@ -547,6 +547,9 @@ nextgi_wrc_fwd;
 layout(set = 1, binding = 43) uniform texture3D nextgi_translucency_r;
 layout(set = 1, binding = 44) uniform texture3D nextgi_translucency_g;
 layout(set = 1, binding = 45) uniform texture3D nextgi_translucency_b;
+layout(set = 1, binding = 46) uniform sampler2D nextgi_front_layer_opaque_depth;
+layout(set = 1, binding = 47) uniform sampler2D nextgi_front_layer_depth;
+layout(set = 1, binding = 48) uniform sampler2D nextgi_front_layer_reflection;
 
 vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth) {
 	const float near = nextgi_wrc_fwd.volume.z;

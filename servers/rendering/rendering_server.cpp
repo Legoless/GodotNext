@@ -3175,7 +3175,8 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: nextgi_tier
 	ClassDB::bind_method(D_METHOD("environment_set_nextgi_enabled", "env", "enable"), &RenderingServer::environment_set_nextgi_enabled);
 	// GodotNext: nextgi_user_surface
-	ClassDB::bind_method(D_METHOD("environment_set_nextgi", "env", "enable", "energy", "read_sky", "max_roughness", "fog_hits", "view_distance"), &RenderingServer::environment_set_nextgi);
+	ClassDB::bind_method(D_METHOD("environment_set_nextgi", "env", "enable", "energy", "read_sky", "max_roughness", "fog_hits", "view_distance", "front_layer_reflections"), &RenderingServer::environment_set_nextgi);
+	ClassDB::bind_method(D_METHOD("environment_get_nextgi_translucency_front_layer_reflections", "env"), &RenderingServer::environment_get_nextgi_translucency_front_layer_reflections);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_enabled", "env"), &RenderingServer::environment_get_nextgi_enabled);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_energy", "env"), &RenderingServer::environment_get_nextgi_energy);
 	ClassDB::bind_method(D_METHOD("environment_get_nextgi_read_sky_light", "env"), &RenderingServer::environment_get_nextgi_read_sky_light);
@@ -3923,6 +3924,7 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field", false);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/far_field_distance", PROPERTY_HINT_RANGE, "200,100000,1,or_greater,suffix:m"), 1000.0);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/far_field_occlusion_only", false);
+	GLOBAL_DEF("rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow", true);
 	// GodotNext: nextgi_src_cards
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/dump_material_atlas", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_page_radiance", false);
