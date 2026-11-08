@@ -960,12 +960,12 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		const uint32_t blocks_y = MAX((card_page.radiance_h + 7u) / 8u, 1u);
 		for (uint32_t by = 0; by < blocks_y; by++) {
 			for (uint32_t bx = 0; bx < blocks_x; bx++) {
-				ScheduledPage scheduled;
-				scheduled.indirect_x = (card_page.radiance_x / 8u) + bx;
-				scheduled.indirect_y = (card_page.radiance_y / 8u) + by;
-				scheduled.record_index = instance_pages.record_index;
-				scheduled.card_index = card_page.card_index;
-				scheduled_pages.push_back(scheduled);
+				ScheduledPage scheduled_page;
+				scheduled_page.indirect_x = (card_page.radiance_x / 8u) + bx;
+				scheduled_page.indirect_y = (card_page.radiance_y / 8u) + by;
+				scheduled_page.record_index = instance_pages.record_index;
+				scheduled_page.card_index = card_page.card_index;
+				scheduled_pages.push_back(scheduled_page);
 			}
 		}
 		last_texels += card_page.radiance_w * card_page.radiance_h;
@@ -1020,7 +1020,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	const float rt_radius = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
 	NextGIRelightParamsGPU params;
 	params.frame = frame;
-	params.ray_budget = NextGI::get_singleton() != nullptr ? NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).relight_shadow_rays : NEXTGI_SRC_RELIGHT_RAY_CAP;
+	params.ray_budget = NextGI::get_singleton() != nullptr ? NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).relight_shadow_rays : uint32_t(NEXTGI_SRC_RELIGHT_RAY_CAP);
 	params.page_count = gpu_pages.size() + far_gpu_pages.size();
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);

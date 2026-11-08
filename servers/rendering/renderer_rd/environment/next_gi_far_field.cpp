@@ -432,7 +432,7 @@ void NextGIFarField::update(const RenderDataRD *p_render_data, LocalVector<Rende
 	}
 	const float near_distance = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_scene_radius"));
 	const float far_distance = float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance"));
-	const Vector3 camera = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
+	const Vector3 cam_origin = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
 	struct Group {
 		Vector3i coordinate;
 		AABB bounds;
@@ -444,7 +444,7 @@ void NextGIFarField::update(const RenderDataRD *p_render_data, LocalVector<Rende
 	const uint32_t source_count = p_render_data->sdfgi_update_data->nextgi_far_source_count;
 	for (uint32_t index = 0; index < source_count; index++) {
 		const Source &source = sources[index];
-		if (!intersects_shell(source.bounds, camera, near_distance, far_distance)) {
+		if (!intersects_shell(source.bounds, cam_origin, near_distance, far_distance)) {
 			continue;
 		}
 		const Vector3i coordinate = cell_coordinate(source.bounds.get_center());
@@ -498,7 +498,7 @@ void NextGIFarField::update(const RenderDataRD *p_render_data, LocalVector<Rende
 		_release_cell(cells[key]);
 		cells.erase(key);
 	}
-	_update_tlas(camera, near_distance, far_distance, r_records, r_surfaces);
+	_update_tlas(cam_origin, near_distance, far_distance, r_records, r_surfaces);
 	stats.pending_count = pending_work.size();
 	stats.proxy_bytes = proxy_bytes;
 	stats.budget_exceeded = budget_exceeded;

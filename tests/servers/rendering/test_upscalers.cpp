@@ -201,10 +201,10 @@ TEST_CASE("[Upscalers] Temporal mip bias and jitter phases") {
 		CHECK(Math::is_equal_approx(nextgi_temporal_mip_bias(scale, 0.0f, -0.5f), Math::log2(scale) - 0.5f, 1e-6f));
 	}
 	for (const Size2i &target : { Size2i(2560, 1440), Size2i(3840, 2160) }) {
-		const float scales[] = { 1.0f, 2.0f / 3.0f, 0.58f, 0.5f, 1.0f / 3.0f };
+		const float phase_scales[] = { 1.0f, 2.0f / 3.0f, 0.58f, 0.5f, 1.0f / 3.0f };
 		const uint32_t expected[] = { 8, 18, 24, 32, 72 };
 		for (int i = 0; i < 5; i++) {
-			Size2i render = MockUpscaler().get_render_size(target, scales[i]);
+			Size2i render = MockUpscaler().get_render_size(target, phase_scales[i]);
 			CHECK_EQ(nextgi_temporal_jitter_phase_count(target, render, true), expected[i]);
 		}
 	}

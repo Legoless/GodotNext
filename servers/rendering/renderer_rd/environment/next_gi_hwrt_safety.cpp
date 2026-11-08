@@ -492,7 +492,7 @@ static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_
 	Vector<uint8_t> vertex_bytes;
 	vertex_bytes.resize(sizeof(vertices));
 	memcpy(vertex_bytes.ptrw(), vertices, sizeof(vertices));
-	BitField<RenderingDevice::BufferCreationBits> build_input_bits;
+	BitField<RenderingDevice::BufferCreationBits> build_input_bits = {};
 	build_input_bits.set_flag(RenderingDevice::BUFFER_CREATION_DEVICE_ADDRESS_BIT);
 	build_input_bits.set_flag(RenderingDevice::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	const RID vertex_buffer = p_device->vertex_buffer_create(vertex_bytes.size(), vertex_bytes, build_input_bits);
