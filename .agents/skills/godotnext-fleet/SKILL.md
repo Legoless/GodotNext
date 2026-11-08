@@ -12,7 +12,7 @@ description: Describes the GodotNext build and test hardware (Apple M5 Max, NVID
 | NVIDIA RTX 5090 | Windows 11 | Every NVIDIA line in PQ; multi frame generation | To be set up before PQ (#227) |
 | Linux x86_64 VM, no GPU | Linux, llvmpipe | CPU, doctest and software-Vulkan smoke runs; never DLSS-enabled builds | Available |
 
-The RTX 4080 SUPER machine also has an Intel UHD 770 (`--gpu-index 0`), which runs nothing in v1. Use `--gpu-index 1` for the RTX 4080 SUPER. Mid-range NVIDIA, AMD and Intel GPUs ship "enabled, unvalidated" (§23.2).
+The RTX 4080 SUPER machine also has an Intel UHD 770, which runs nothing in v1. In interactive Session 1 (where all rendered Godot runs happen), both Vulkan and D3D12 enumerate the NVIDIA GeForce RTX 4080 SUPER at `--gpu-index 0` and the Intel UHD 770 at `--gpu-index 1` (`nvidia-smi` also lists the RTX 4080 SUPER at `-i 0`, whereas SSH Session-0 `vulkaninfo` lists Intel first and uses `--json=1` for the RTX 4080 SUPER; resolve indices by device name from `docs/godotnext/fleet.md`). Mid-range NVIDIA, AMD and Intel GPUs ship "enabled, unvalidated" (§23.2).
 
 ## Using the RTX 4080 SUPER machine
 

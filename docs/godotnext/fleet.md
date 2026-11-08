@@ -28,22 +28,138 @@ GODOTNEXT_BACKGROUND=1 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 MTL_SHADER_VALI
 
 A pass is zero lines containing `Invalid Metal usage`, zero lines containing `Error detected in`, and zero lines starting with `ERROR:`. `useHeaps` marks placement-heap resources read-only. Argument-buffer writes need `useResource` with the shader's usage, or the log reports an invalid store (`resident:Read Only`) or a texture that is not resident.
 
-## Apple M5 Max environment (recorded 2026-11-04, #11)
+## Fleet editor builds and Vulkan capability archive (#11)
 
-| Item | Value |
+Recorded on 2026-11-08 at base commit `17dd0086` (`4.8.beta.custom_build.17dd00861`). The RTX 5090 machine gets its rows through #227 before PQ (§23).
+
+### Editor builds, doctests, and dev tools
+
+| Host | OS | GPU | Compiler | Build command | Editor binary | Wall time | `--headless --test --force-colors` | Vulkan SDK and SPIR-V dev tools |
+|---|---|---|---|---|---|---|---|---|
+| Apple M5 Max | macOS 27.0.1 (26A434) | Apple M5 Max, 40 GPU cores, Metal 4 (`system_profiler SPDisplaysDataType`); Vulkan RT compiled out (MoltenVK), Metal HWRT active | Apple clang 21.0.0 (`clang-2100.4.1.1`) | `scons platform=macos target=editor dev_mode=yes arch=arm64 use_volk=yes -j8` | `bin/godot.macos.editor.arm64` | 10.82 s incremental (warm 2.5 GB SCons cache) | 1735 passed, 0 failed (3 pre-existing platform skips) | No LunarG SDK (`use_volk=yes`); `spirv-val`: `SPIRV-Tools v2026.4` (2026-09-10); `spirv-cross`: built 2026-09-16 (`/opt/homebrew/bin`) |
+| the RTX 4080 SUPER machine | Windows 11 Pro (10.0.26100) | NVIDIA GeForce RTX 4080 SUPER (plus Intel UHD 770, unused in v1) | MSVC 19.44.35228 for x64 (VS 14.3, Windows SDK 10.0.26100.0) | `python misc/scripts/install_d3d12_sdk_windows.py`, then `scons platform=windows target=editor dev_mode=yes d3d12=yes -j16` | `bin\godot.windows.editor.x86_64.console.exe` | 9m 27s (567.2 s) cold; 34.20 s incremental | 1728 passed, 0 failed (3 pre-existing platform skips) | LunarG Vulkan SDK `1.4.363.0` (`VK_LAYER_KHRONOS_validation` 1.4.363); `spirv-val`: `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`; `spirv-cross`: `vulkan-sdk-1.4.357.0-39-gf11ba9f0` (2026-09-27) |
+| the Linux VM | Linux 7.2.5-3 x86_64 (Arch-based, 4 vCPU, 15 GiB RAM) | None (`llvmpipe`, LLVM 22.1.8, 256 bits, Mesa 26.2.2) | `g++ (GCC) 16.2.1 20260810` | `scons platform=linuxbsd target=editor dev_mode=yes -j4` | `bin/godot.linuxbsd.editor.x86_64` | 25m 39s (1538.7 s) cold; 11.67 s incremental | 1734 passed, 0 failed (3 pre-existing platform skips) | System Vulkan loader `1.4.357` (`VK_LAYER_KHRONOS_validation` 1.4.357); `spirv-val`: `SPIRV-Tools v2026.3 vulkan-sdk-1.4.357.0-0-g9a49b0883` |
+
+The dev tools (`spirv-val`, `spirv-cross`, LunarG Vulkan SDK) are local dependencies and are never vendored (§13.1).
+
+### Device mapping on the RTX 4080 SUPER machine (Session 1 vs Session 0)
+
+SSH Session 0 cannot create desktop swapchains. In the interactive desktop session (Session 1), `VK_LAYER_NV_optimus` on Vulkan and DXGI on D3D12 enumerate the discrete NVIDIA GPU first (`#0`), whereas headless Session-0 `vulkaninfo --summary` lists the integrated Intel UHD 770 at `GPU0` and the RTX 4080 SUPER at `GPU1`. Harnesses (#237) resolve indices by device name from this table rather than hardcoding an ordinal across tools:
+
+| Device name | v1 role | Godot Session-1 Vulkan `--gpu-index` | Godot Session-1 D3D12 `--gpu-index` | `nvidia-smi -i` | Session-0 `vulkaninfo --json=<n>` |
+|---|---|---|---|---|---|
+| `NVIDIA GeForce RTX 4080 SUPER` | Primary NVIDIA build & gate device | `0` | `0` | `0` | `1` |
+| `Intel(R) UHD Graphics 770` | Not a test device (§23) | `1` | `1` | n/a | `0` |
+| `Microsoft Basic Render Driver` | Software WARP adapter (unused) | n/a | `2` | n/a | n/a |
+
+Session-1 Vulkan `--verbose` excerpt (`bin\godot.windows.editor.x86_64.console.exe --verbose --rendering-driver vulkan --gpu-index 0 --quit-after 3`):
+
+```
+Devices:
+  #0: NVIDIA NVIDIA GeForce RTX 4080 SUPER - Supported, Discrete
+  #1: Intel Intel(R) UHD Graphics 770 - Supported, Integrated
+...
+- Vulkan Acceleration Structure supported
+  min acceleration structure scratch offset alignment: 128
+- Vulkan Raytracing supported
+  shader group handle size: 32
+  shader group handle alignment: 32
+  shader group handle size aligned: 32
+  shader group base alignment: 64
+Vulkan 1.4.357 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 4080 SUPER
+```
+
+Session-1 D3D12 `--verbose` excerpt (`bin\godot.windows.editor.x86_64.console.exe --verbose --rendering-driver d3d12 --gpu-index 0 --quit-after 3`):
+
+```
+Devices:
+  #0: NVIDIA NVIDIA GeForce RTX 4080 SUPER - Supported, Discrete
+  #1: Intel Intel(R) UHD Graphics 770 - Supported, Discrete
+  #2: Microsoft Microsoft Basic Render Driver - Supported, CPU
+...
+D3D12 12_0 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 4080 SUPER
+```
+
+### Vulkan capability archive (`docs/godotnext/fleet/vulkaninfo/g0/`)
+
+Raw `vulkaninfo` JSON snapshots (both well under 5 MB):
+
+- `docs/godotnext/fleet/vulkaninfo/g0/the RTX 4080 SUPER machine-rtx4080super.json` (441 KiB, captured via `vulkaninfo --json=1`)
+- `docs/godotnext/fleet/vulkaninfo/g0/the Linux VM-llvmpipe.json` (193 KiB, captured via `vulkaninfo --json=0`)
+
+| Field | `the RTX 4080 SUPER machine` (`rtx4080super`) | `the Linux VM` (`llvmpipe`) |
+|---|---|---|
+| `deviceName` | `NVIDIA GeForce RTX 4080 SUPER` | `llvmpipe (LLVM 22.1.8, 256 bits)` |
+| `vendorID` / `deviceID` | `0x10de` (`4318`) / `0x2702` (`9986`) | `0x10005` (`65541`) / `0x0000` (`0`) |
+| `deviceType` | `VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU` | `VK_PHYSICAL_DEVICE_TYPE_CPU` |
+| `driverName` / `driverInfo` | `NVIDIA` / `621.01` | `llvmpipe` / `Mesa 26.2.2-arch1.1 (LLVM 22.1.8)` |
+| `apiVersion` | `1.4.357` (`4211045`) | `1.4.354` (`4211042`) |
+| NVIDIA driver (`nvidia-smi`) | `621.01` | n/a |
+| `VK_KHR_acceleration_structure` | yes (rev `13`) | yes (rev `13`) |
+| `VK_KHR_ray_query` | yes (rev `1`) | yes (rev `1`) |
+| `VK_KHR_ray_tracing_pipeline` | yes (rev `1`) | yes (rev `1`) |
+| `VK_KHR_spirv_1_4` | yes (rev `1`) | yes (rev `1`) |
+| `VK_KHR_deferred_host_operations` | yes (rev `4`) | yes (rev `4`) |
+| `VK_NV_ray_tracing_validation` | no by default; yes (rev `1`) when `NV_ALLOW_RAYTRACING_VALIDATION=1` is set | no |
+| `VK_EXT_device_fault` | yes (rev `2`) | no |
+| `bufferDeviceAddress` | `true` | `true` |
+| `accelerationStructure` | `true` | `true` |
+| `rayQuery` | `true` | `true` |
+| `maxGeometryCount` | `16777215` | `16777215` |
+| `maxInstanceCount` | `16777215` (`>= 100000`) | `16777215` |
+| `maxPrimitiveCount` | `536870911` | `536870911` |
+| `maxPerStageDescriptorAccelerationStructures` | `1048576` | `1015808` |
+| `minAccelerationStructureScratchOffsetAlignment` | `128` | `8` |
+| `VK_FORMAT_R16G16B16A16_UNORM` `VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR` in `bufferFeatures` | yes | yes |
+
+`jq` paths used against `docs/godotnext/fleet/vulkaninfo/g0/<host>-<device>.json`:
+
+```
+.capabilities.device.properties.VkPhysicalDeviceProperties | {deviceName, vendorID, deviceID, deviceType, apiVersion}
+.capabilities.device.properties.VkPhysicalDeviceVulkan12Properties | {driverName, driverInfo}
+.capabilities.device.extensions["VK_KHR_acceleration_structure"]   # and the other extension names above
+.capabilities.device.features.VkPhysicalDeviceVulkan12Features.bufferDeviceAddress
+.capabilities.device.features.VkPhysicalDeviceAccelerationStructureFeaturesKHR.accelerationStructure
+.capabilities.device.features.VkPhysicalDeviceRayQueryFeaturesKHR.rayQuery
+.capabilities.device.properties.VkPhysicalDeviceAccelerationStructurePropertiesKHR | {maxGeometryCount, maxInstanceCount, maxPrimitiveCount, maxPerStageDescriptorAccelerationStructures, minAccelerationStructureScratchOffsetAlignment}
+.capabilities.device.formats.VK_FORMAT_R16G16B16A16_UNORM.VkFormatProperties.bufferFeatures | index("VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR") != null
+```
+
+### Expected NGX requirements (unverified) — the RTX 4080 SUPER
+
+Recorded per plan v2.4 without downloading any NVIDIA SDK; #100 logs the actual runtime NGX requirement list:
+
+| Requirement | Value | Query |
+|---|---|---|
+| Vulkan `apiVersion` (`>= 1.1`) | `1.4.357` — yes (`>= 1.1`) | `.capabilities.device.properties.VkPhysicalDeviceProperties.apiVersion` |
+| NVIDIA driver version | `621.01` | `nvidia-smi --query-gpu=driver_version --format=csv,noheader` |
+| `VK_NVX_binary_import` | yes (rev `2`) | `.capabilities.device.extensions["VK_NVX_binary_import"]` |
+| `VK_NVX_image_view_handle` | yes (rev `4`) | `.capabilities.device.extensions["VK_NVX_image_view_handle"]` |
+| `VK_KHR_push_descriptor` | yes (rev `2`) | `.capabilities.device.extensions["VK_KHR_push_descriptor"]` |
+
+### Timing clock locks — the RTX 4080 SUPER machine
+
+From `nvidia-smi -q -d CLOCK,SUPPORTED_CLOCKS` on `NVIDIA GeForce RTX 4080 SUPER` (`nvidia-smi` index `0`):
+
+| Setting | Value / Command |
 |---|---|
-| Host | Apple M5 Max |
-| GPU | Apple M5 Max, 40 cores, Metal 4 |
-| macOS | 27.0.1 (26A434) |
-| Compiler | Apple clang 21.0.0 (clang-2100.4.1.1) |
-| Build | `SCONS_CACHE=$HOME/.cache/godotnext-scons ~/.cache/godotnext-venv/bin/python -m SCons platform=macos target=editor dev_mode=yes arch=arm64 use_volk=yes -j8` |
-| Editor binary | `bin/godot.macos.editor.arm64` |
-| Vulkan | Built with `use_volk=yes` (no MoltenVK SDK); Vulkan RT stays compiled out, and Metal is the P0/P1 backend here |
-| Metal ray query | Active: the HWRT tier reports `NextGI: tier=HWRT reason=NONE` and the ray-query self-test passes |
-| Doctests | `--headless --test`: 1632 passed, 0 failed, 3 platform skips that predate this record |
-| SPIR-V tools | SPIRV-Tools v2026.4 (2026-09-10); SPIRV-Cross built 2026-09-16, both from `/opt/homebrew/bin` |
+| `nvidia-smi` GPU index | `0` (`NVIDIA GeForce RTX 4080 SUPER`) |
+| Base graphics clock | `2295` MHz (`nvidia-smi -i 0 --lock-gpu-clocks=2295,2295`) |
+| Base memory clock | `11501` MHz (`nvidia-smi -i 0 --lock-memory-clocks=11501,11501`) |
+| Reset after timing job | `nvidia-smi -i 0 -rgc` and `nvidia-smi -i 0 -rmc` |
 
-The dev tools are a local dependency, never vendored (§13.1). Wall time is not recorded yet: the scons cache is warm (2.5 GB), so the builds so far are 9–15 s incremental runs, not a cold full build. The RTX 4080 SUPER, RTX 5090 and Linux VM rows and the raw `vulkaninfo` JSON need those machines (§24.3).
+### Plan §18.2 capability answers
+
+- **Does the Linux VM's Mesa 26.2.2 lavapipe (`llvmpipe`) expose `VK_KHR_ray_query`?** **Yes** (`VK_KHR_ray_query` rev 1, `VK_KHR_acceleration_structure` rev 13, `rayQuery = true`, `accelerationStructure = true`, `bufferDeviceAddress = true`). Under `hardware_ray_tracing = Auto`, `VK_PHYSICAL_DEVICE_TYPE_CPU` selects the SDFGI fallback with `reason=CPU_DEVICE`; under `Force`, functional ray-query tests can run on the Linux VM.
+- **Is a GTX device available?** **No**; GTX ray-query exposure stays unverified.
+
+### Refresh at each gate (PQ checklist)
+
+In PQ (§22), before recording each gate report (`g0`, `g1`, `g2`, `g3`, `g4`, `gs`, `gm`, `gp`, `gt`, `gu`, `gu+`, `gd`) on the RTX 4080 SUPER machine, the Linux VM, and the RTX 5090 machine (#227):
+
+1. Capture fresh `vulkaninfo --json=<n>` files into `docs/godotnext/fleet/vulkaninfo/<gate>/` using the same `<host>-<device>.json` filenames (resolving `<n>` with `vulkaninfo --summary`).
+2. Re-run the `jq` queries above and `nvidia-smi --query-gpu=driver_version --format=csv,noheader`.
+3. Diff `driverInfo`, NVIDIA driver version, `apiVersion`, and the ray-tracing / expected NGX extension revisions against the previous gate directory, and attach the refreshed files to the gate report.
 
 ## Ray-query toolchain (G0)
 
