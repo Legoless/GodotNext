@@ -57,6 +57,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_voxel_lighting.h"
 
 using namespace RendererRD;
@@ -482,6 +483,14 @@ Dictionary NextGI::get_counters() const {
 		counters["voxel_lighting_stored_hits"] = int64_t(voxel_lighting->get_stored_hits());
 		counters["voxel_lighting_resampled_nonzero"] = int64_t(voxel_lighting->get_resampled_nonzero());
 	}
+	// GodotNext: ps_swrt_trace (#186)
+	if (swrt_trace != nullptr) {
+		counters["swrt_trace_steps"] = int64_t(swrt_trace->get_trace_steps());
+		counters["swrt_trace_hits"] = int64_t(swrt_trace->get_trace_hits());
+		counters["swrt_trace_misses"] = int64_t(swrt_trace->get_trace_misses());
+		counters["swrt_shadow_rays"] = int64_t(swrt_trace->get_shadow_rays());
+		counters["swrt_mode"] = int64_t(swrt_trace->get_mode());
+	}
 	return counters;
 }
 
@@ -819,6 +828,10 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 			memdelete(voxel_lighting);
 			voxel_lighting = nullptr;
 		}
+		if (swrt_trace != nullptr) {
+			memdelete(swrt_trace);
+			swrt_trace = nullptr;
+		}
 		voxel_lighting_frame = UINT64_MAX;
 	}
 	voxel_lighting_tier = result.tier;
@@ -852,6 +865,18 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 		voxel_lighting = memnew(NextGIVoxelLighting);
 	}
 	voxel_lighting->update_render(p_render_data, rt_scene, relight, src);
+	// GodotNext: ps_swrt_trace (#186). The ray-query builder marks a whole ShaderRD,
+	// so the software trace is a sibling of the HWRT gather and runs only while
+	// the fallback tier is active. #187 points the frame block at it.
+	if (result.tier == TIER_FALLBACK) {
+		if (swrt_trace == nullptr) {
+			swrt_trace = memnew(NextGISWRTTrace);
+		}
+		swrt_trace->update_frame(p_render_data, voxel_lighting);
+	} else if (swrt_trace != nullptr) {
+		memdelete(swrt_trace);
+		swrt_trace = nullptr;
+	}
 }
 
 bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
@@ -1090,6 +1115,11 @@ NextGI::~NextGI() {
 	if (voxel_lighting != nullptr) {
 		memdelete(voxel_lighting);
 		voxel_lighting = nullptr;
+	}
+	// GodotNext: ps_swrt_trace (#186)
+	if (swrt_trace != nullptr) {
+		memdelete(swrt_trace);
+		swrt_trace = nullptr;
 	}
 
 	// GodotNext: nextgi_rt_scene

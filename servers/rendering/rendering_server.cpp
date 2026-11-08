@@ -4081,6 +4081,8 @@ void RenderingServer::init() {
 	// GodotNext: nextgi_settings
 	GLOBAL_DEF_RST("rendering/global_illumination/nextgi/enabled", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing", PROPERTY_HINT_ENUM, "Auto,Off,Force"), 0);
+	// GodotNext: ps_swrt_trace (#186). Global is the default. Detail is deprecated.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/software_ray_tracing_mode", PROPERTY_HINT_ENUM, "Global,Detail (Deprecated)"), 0);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium (fast),High (60 FPS class),Epic (30 FPS class)"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/mode", PROPERTY_HINT_ENUM, "GI and reflections,Reflections only"), 0);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/reflections", true);

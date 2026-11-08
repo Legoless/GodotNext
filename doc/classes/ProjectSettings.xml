@@ -3181,6 +3181,8 @@
 		<member name="rendering/global_illumination/nextgi/rt_scene_radius" type="float" setter="" getter="" default="200.0">
 			The radius, in meters around the main camera, within which instances are added to the NextGI ray-tracing scene.
 		</member>
+		<member name="rendering/global_illumination/nextgi/software_ray_tracing_mode" type="int" setter="" getter="" default="0">
+		</member>
 		<member name="rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow" type="bool" setter="" getter="" default="true">
 			Allows NextGI to create front-layer reflection shaders and render targets when [member Environment.nextgi_translucency_front_layer_reflections] is enabled. If [code]false[/code], no front-layer shader variant or target is created and the existing translucent reflection path is unchanged.
 		</member>

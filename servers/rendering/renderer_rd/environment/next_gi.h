@@ -48,6 +48,9 @@ class RenderDataRD;
 // GodotNext: ps_voxel_lighting (#188)
 class NextGIVoxelLighting;
 
+// GodotNext: ps_swrt_trace (#186)
+class NextGISWRTTrace;
+
 namespace RendererRD {
 
 // GodotNext: nextgi_rt_scene
@@ -287,6 +290,9 @@ private:
 	uint64_t voxel_lighting_frame = UINT64_MAX;
 	bool voxel_lighting_tier_valid = false;
 	Tier voxel_lighting_tier = TIER_DISABLED;
+
+	// GodotNext: ps_swrt_trace (#186). Runs beside voxel lighting on the fallback tier.
+	NextGISWRTTrace *swrt_trace = nullptr;
 
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;

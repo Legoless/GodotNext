@@ -148,6 +148,12 @@ public:
 			"voxel_lighting_volume_bytes",
 			"voxel_lighting_stored_hits",
 			"voxel_lighting_resampled_nonzero",
+			// GodotNext: ps_swrt_trace (#186)
+			"swrt_trace_steps",
+			"swrt_trace_hits",
+			"swrt_trace_misses",
+			"swrt_shadow_rays",
+			"swrt_mode",
 		};
 		for (const char *key : keys) {
 			counters[key] = int64_t(0);

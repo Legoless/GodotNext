@@ -440,8 +440,13 @@ TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero"
 		"voxel_lighting_volume_bytes",
 		"voxel_lighting_stored_hits",
 		"voxel_lighting_resampled_nonzero",
+		"swrt_trace_steps",
+		"swrt_trace_hits",
+		"swrt_trace_misses",
+		"swrt_shadow_rays",
+		"swrt_mode",
 	};
-	CHECK_EQ(counters.size(), 31);
+	CHECK_EQ(counters.size(), 36);
 	for (const char *key : keys) {
 		CHECK(counters.has(key));
 		CHECK_EQ(int64_t(counters[key]), int64_t(0));
