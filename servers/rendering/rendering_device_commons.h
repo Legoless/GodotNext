@@ -1051,6 +1051,9 @@ public:
 		// GodotNext: metal_ray_query
 		// Driver knowledge only. Metal sets it for Apple9 and later. Vulkan's RT-core allowlist is #22.
 		SUPPORTS_RAY_QUERY_HARDWARE,
+		// GodotNext: async_compute (#174)
+		// The driver can run compute lists on a second queue, synchronized with the main one.
+		SUPPORTS_ASYNC_COMPUTE,
 	};
 
 	// GodotNext: metal_ray_query

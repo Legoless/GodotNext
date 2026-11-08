@@ -152,6 +152,16 @@ void RenderingDeviceDriverMetal::semaphore_free(SemaphoreID p_semaphore) {
 #pragma mark - Command Queues
 
 RDD::CommandQueueID RenderingDeviceDriverMetal::command_queue_create(CommandQueueFamilyID p_cmd_queue_family, bool p_identify_as_main_queue) {
+	// GodotNext: async_compute (#174). The compute family gets its own queue; every other request
+	// shares the main queue, as before.
+	if (p_cmd_queue_family.id == COMMAND_QUEUE_FAMILY_COMPUTE_BIT && !p_identify_as_main_queue && sync_mode == Barriers) {
+		if (!compute_queue) {
+			compute_queue = NS::TransferPtr(device->newCommandQueue());
+			ERR_FAIL_NULL_V(compute_queue.get(), CommandQueueID());
+			compute_queue->setLabel(MTLSTR("Godot Async Compute Queue"));
+		}
+		return CommandQueueID(2);
+	}
 	return CommandQueueID(1);
 }
 
@@ -161,8 +171,9 @@ Error RenderingDeviceDriverMetal::_execute_and_present_barriers(CommandQueueID p
 		return OK;
 	}
 
+	// GodotNext: async_compute (#174). Waits run on the queue the work is submitted to.
 	if (p_wait_sem.size() > 0) {
-		MTL::CommandBuffer *cb = device_queue->commandBuffer();
+		MTL::CommandBuffer *cb = _queue_for(p_cmd_queue)->commandBuffer();
 #ifdef DEV_ENABLED
 		cb->setLabel(MTLSTR("Wait Command Buffer"));
 #endif
@@ -187,6 +198,19 @@ Error RenderingDeviceDriverMetal::_execute_and_present_barriers(CommandQueueID p
 		fence->signal(cb);
 	}
 
+	// GodotNext: async_compute (#174). Signal the semaphores from the last work command buffer, so
+	// they fire only after its commands finish. A separate signal-only command buffer would not wait
+	// for them, which a waiter on another queue would observe.
+	if (p_cmd_sem.size() > 0) {
+		cmd_buffer->end();
+		MTL::CommandBuffer *cb = cmd_buffer->command_buffer();
+		for (uint32_t i = 0; i < p_cmd_sem.size(); i++) {
+			Semaphore *sem = (Semaphore *)p_cmd_sem[i].id;
+			sem->value++;
+			cb->encodeSignalEvent(sem->event.get(), sem->value);
+		}
+	}
+
 	for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 		SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
 		RenderingContextDriverMetal::Surface *metal_surface = (RenderingContextDriverMetal::Surface *)(swap_chain->surface);
@@ -194,16 +218,6 @@ Error RenderingDeviceDriverMetal::_execute_and_present_barriers(CommandQueueID p
 	}
 
 	cmd_buffer->commit();
-
-	if (p_cmd_sem.size() > 0) {
-		MTL::CommandBuffer *cb = device_queue->commandBuffer();
-		for (uint32_t i = 0; i < p_cmd_sem.size(); i++) {
-			Semaphore *sem = (Semaphore *)p_cmd_sem[i].id;
-			sem->value++;
-			cb->encodeSignalEvent(sem->event.get(), sem->value);
-		}
-		cb->commit();
-	}
 
 	return OK;
 }
@@ -259,12 +273,21 @@ Error RenderingDeviceDriverMetal::command_queue_execute_and_present(CommandQueue
 }
 
 void RenderingDeviceDriverMetal::command_queue_free(CommandQueueID p_cmd_queue) {
+	// GodotNext: async_compute (#174).
+	if (p_cmd_queue.id == 2) {
+		compute_queue.reset();
+	}
 }
 
 #pragma mark - Command Pools
 
 RDD::CommandPoolID RenderingDeviceDriverMetal::command_pool_create(CommandQueueFamilyID p_cmd_queue_family, CommandBufferType p_cmd_buffer_type) {
 	DEV_ASSERT(p_cmd_buffer_type == COMMAND_BUFFER_TYPE_PRIMARY);
+	// GodotNext: async_compute (#174). Command buffers from a compute-family pool commit to the
+	// async compute queue.
+	if (p_cmd_queue_family.id == COMMAND_QUEUE_FAMILY_COMPUTE_BIT && compute_queue) {
+		return CommandPoolID(reinterpret_cast<uint64_t>(compute_queue.get()));
+	}
 	return CommandPoolID(reinterpret_cast<uint64_t>(device_queue.get()));
 }
 

@@ -2876,6 +2876,10 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 			return RAY_QUERY_AS_READY && as_objects_ready && ray_query_caps.ray_query;
 		case SUPPORTS_RAY_QUERY_HARDWARE:
 			return RAY_QUERY_AS_READY && as_objects_ready && ray_query_caps.ray_query && ray_query_caps.hardware;
+		// GodotNext: async_compute (#174). Needs real semaphores, which hazard-tracking mode does not
+		// create.
+		case SUPPORTS_ASYNC_COMPUTE:
+			return sync_mode == Barriers;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return false;
 		default:

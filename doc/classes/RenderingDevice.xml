@@ -178,8 +178,10 @@
 		</method>
 		<method name="compute_list_begin">
 			<return type="int" />
+			<param index="0" name="queue" type="int" enum="RenderingDevice.ComputeQueue" default="0" />
 			<description>
 				Starts a list of compute commands created with the [code]compute_*[/code] methods. The returned value should be passed to other [code]compute_list_*[/code] functions.
+				[param queue] selects the queue. [constant COMPUTE_QUEUE_ASYNC] uses the async compute queue only when [member ProjectSettings.rendering/rendering_device/async_compute] is enabled and the device supports it. Otherwise the list runs on the main queue.
 				Multiple compute lists cannot be created at the same time; you must finish the previous compute list first using [method compute_list_end].
 				A simple compute operation might look like this (code is not a complete example):
 				[codeblock]
@@ -2911,6 +2913,15 @@
 		</constant>
 		<constant name="SUPPORTS_RAY_QUERY_HARDWARE" value="16" enum="Features">
 			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later.
+		</constant>
+		<constant name="SUPPORTS_ASYNC_COMPUTE" value="17" enum="Features">
+			The device can create a second compute queue. The Metal driver sets this only in barrier sync mode, which has real semaphores.
+		</constant>
+		<constant name="COMPUTE_QUEUE_MAIN" value="0" enum="ComputeQueue">
+			Records the compute list on the main queue.
+		</constant>
+		<constant name="COMPUTE_QUEUE_ASYNC" value="1" enum="ComputeQueue">
+			Requests the async compute queue. The list stays on the main queue when async compute is off or the device has no async queue.
 		</constant>
 		<constant name="SUPPORTS_RAYTRACING_PIPELINE" value="12" enum="Features">
 			Support for raytracing pipeline extension.

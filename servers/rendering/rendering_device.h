@@ -99,6 +99,8 @@ protected:
 	RID _shader_create_from_bytecode_bind_compat_79606(const Vector<uint8_t> &p_shader_binary);
 	RID _texture_create_from_extension_bind_compat_105570(TextureType p_type, DataFormat p_format, TextureSamples p_samples, BitField<RenderingDevice::TextureUsageBits> p_usage, uint64_t p_image, uint64_t p_width, uint64_t p_height, uint64_t p_depth, uint64_t p_layers);
 	RID _texture_create_shared_from_slice_bind_compat_121937(const Ref<RDTextureView> &p_view, RID p_with_texture, uint32_t p_layer, uint32_t p_mipmap, uint32_t p_mipmaps = 1, TextureSliceType p_slice_type = TEXTURE_SLICE_2D);
+	// GodotNext: async_compute (#174)
+	ComputeListID _compute_list_begin_bind_compat_gn174();
 	// GodotNext: as_build_modes
 	Error _blas_build_bind_compat_gn45(RID p_blas);
 	Error _tlas_build_bind_compat_gn45(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances);
@@ -1711,6 +1713,14 @@ public:
 	void raytracing_list_trace_rays(RaytracingListID p_list, uint32_t p_raygen_shader_index, RID p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth);
 	void raytracing_list_end();
 
+public:
+	// GodotNext: async_compute (#174)
+	enum ComputeQueue {
+		COMPUTE_QUEUE_MAIN,
+		COMPUTE_QUEUE_ASYNC,
+		COMPUTE_QUEUE_MAX,
+	};
+
 private:
 	/***********************/
 	/**** COMPUTE LISTS ****/
@@ -1718,6 +1728,9 @@ private:
 
 	struct ComputeList {
 		bool active = false;
+		// GodotNext: async_compute (#174). The queue the graph records this list for; MAIN unless
+		// async compute is active.
+		RDG::Queue graph_queue = RDG::QUEUE_MAIN;
 		struct SetState {
 			uint32_t pipeline_expected_format = 0;
 			uint32_t uniform_set_format = 0;
@@ -1737,6 +1750,8 @@ private:
 			uint8_t push_constant_data[MAX_PUSH_CONSTANT_SIZE] = {};
 			uint32_t push_constant_size = 0;
 			uint32_t dispatch_count = 0;
+			// GodotNext: async_compute (#174). The queue the list was begun with.
+			ComputeQueue queue = COMPUTE_QUEUE_MAIN;
 		} state;
 
 #ifdef DEBUG_ENABLED
@@ -1757,8 +1772,16 @@ private:
 	ComputeList compute_list;
 	ComputeList::State compute_list_barrier_state;
 
+	// GodotNext: async_compute (#174).
+	ComputeListID _compute_list_begin(ComputeQueue p_queue, RDG::Queue p_graph_queue);
+
 public:
-	ComputeListID compute_list_begin();
+	// GodotNext: async_compute (#174). p_queue requests the async compute queue; without it (or
+	// without SUPPORTS_ASYNC_COMPUTE and rendering/rendering_device/async_compute) the list runs on
+	// the main queue in the same order.
+	ComputeListID compute_list_begin(ComputeQueue p_queue = COMPUTE_QUEUE_MAIN);
+	// GodotNext: async_compute (#174). C++-only: the queue the active list was begun with.
+	ComputeQueue compute_list_get_queue(ComputeListID p_list) const;
 	void compute_list_bind_compute_pipeline(ComputeListID p_list, RID p_compute_pipeline);
 	void compute_list_bind_uniform_set(ComputeListID p_list, RID p_uniform_set, uint32_t p_index);
 	void compute_list_set_push_constant(ComputeListID p_list, const void *p_data, uint32_t p_data_size);
@@ -1852,6 +1875,18 @@ private:
 	RDD::CommandQueueID main_queue;
 	RDD::CommandQueueID transfer_queue;
 	RDD::CommandQueueID present_queue;
+	// GodotNext: async_compute (#174). The async compute queue exists only while
+	// async_compute_active; otherwise async lists record on the main queue.
+	RDD::CommandQueueFamilyID async_compute_queue_family;
+	RDD::CommandQueueID async_compute_queue;
+	bool async_compute_active = false;
+	uint64_t async_compute_submitted_frames = 0;
+	uint64_t async_compute_fallback_frames = 0;
+#ifdef DEBUG_ENABLED
+	// GODOT_RG_FORCE_ASYNC_COMPUTE=<n>: every n-th main compute list of a frame runs async.
+	uint32_t draw_graph_force_async_compute_stride = 0;
+	uint32_t draw_graph_force_async_compute_counter = 0;
+#endif
 
 	/**************************/
 	/**** FRAME MANAGEMENT ****/
@@ -1942,6 +1977,13 @@ private:
 		// Extra command buffer pool used for driver workarounds or to reduce GPU bubbles by
 		// splitting the final render pass to the swapchain into its own cmd buffer.
 		RDG::CommandBufferPool command_buffer_pool;
+
+		// GodotNext: async_compute (#174). Only created while async compute is active. The
+		// async command buffer waits on the fork semaphore and signals the join semaphore.
+		RDD::CommandPoolID async_command_pool;
+		RDD::CommandBufferID async_command_buffer;
+		RDD::SemaphoreID async_fork_semaphore;
+		RDD::SemaphoreID async_join_semaphore;
 
 		struct Timestamp {
 			String description;
@@ -2176,6 +2218,8 @@ VARIANT_ENUM_CAST(RenderingDevice::PipelineSpecializationConstantType)
 VARIANT_ENUM_CAST(RenderingDevice::Limit)
 VARIANT_ENUM_CAST(RenderingDevice::MemoryType)
 VARIANT_ENUM_CAST(RenderingDevice::Features)
+// GodotNext: async_compute (#174)
+VARIANT_ENUM_CAST(RenderingDevice::ComputeQueue)
 VARIANT_ENUM_CAST(RenderingDevice::BreadcrumbMarker)
 VARIANT_BITFIELD_CAST(RenderingDevice::DrawFlags);
 

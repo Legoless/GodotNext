@@ -100,6 +100,12 @@ public:
 		Type type = TYPE_NONE;
 	};
 
+	// GodotNext: async_compute (#174). The queue a recorded command runs on.
+	enum Queue : uint8_t {
+		QUEUE_MAIN,
+		QUEUE_ASYNC_COMPUTE,
+	};
+
 	struct RecordedCommand {
 		enum Type {
 			TYPE_NONE,
@@ -140,6 +146,8 @@ public:
 		int32_t acceleration_structure_barrier_index = -1;
 		int32_t acceleration_structure_barrier_count = 0;
 		int32_t label_index = -1;
+		// GodotNext: async_compute (#174).
+		uint8_t queue = QUEUE_MAIN;
 		BitField<RDD::PipelineStageBits> previous_stages = {};
 		BitField<RDD::PipelineStageBits> next_stages = {};
 		BitField<RDD::PipelineStageBits> self_stages = {};
@@ -259,6 +267,28 @@ public:
 		LocalVector<RDD::CommandBufferID> buffers;
 		LocalVector<RDD::SemaphoreID> semaphores;
 		uint32_t buffers_used = 0;
+
+		// GodotNext: async_compute (#174). Provided by RenderingDevice while async compute is
+		// active; null otherwise. end() records the frame's async work into it, and the indices
+		// (0 = the frame command buffer, k = buffers[k - 1]) of the main command buffer the async
+		// work waits for and of the one that waits for it. -1 when nothing ran async.
+		RDD::CommandBufferID async_command_buffer;
+		int32_t async_fork_index = -1;
+		int32_t async_join_index = -1;
+		// Set by end() when async lists were recorded but had to run on the main queue.
+		bool async_fallback = false;
+	};
+
+	// GodotNext: async_compute (#174). How end() splits a frame between the main and the async
+	// compute queue: async work starts after the main levels before fork_level and must finish
+	// before the main levels from join_level on. Inactive means everything runs on the main queue.
+	struct AsyncPlan {
+		bool active = false;
+		uint32_t fork_level = 0;
+		uint32_t join_level = 0;
+		uint32_t level_count = 0;
+		uint32_t main_count = 0;
+		uint32_t async_count = 0;
 	};
 
 	struct WorkaroundsState {
@@ -295,6 +325,8 @@ private:
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 		uint32_t breadcrumb;
 #endif
+		// GodotNext: async_compute (#174).
+		Queue queue = QUEUE_MAIN;
 	};
 
 	struct RaytracingInstructionList : InstructionList {
@@ -319,6 +351,9 @@ private:
 		uint32_t level = 0;
 		uint32_t priority = 0;
 		int32_t index = -1;
+		// GodotNext: async_compute (#174). Nonzero only while an async plan is active, so async
+		// commands sort to the end of their level.
+		uint8_t queue = QUEUE_MAIN;
 
 		RecordedCommandSort() = default;
 
@@ -326,6 +361,12 @@ private:
 			if (level < p_other.level) {
 				return true;
 			} else if (level > p_other.level) {
+				return false;
+			}
+
+			if (queue < p_other.queue) {
+				return true;
+			} else if (queue > p_other.queue) {
 				return false;
 			}
 
@@ -855,6 +896,8 @@ private:
 	ComputeInstructionList compute_instruction_list;
 	RaytracingInstructionList raytracing_instruction_list;
 	uint32_t command_count = 0;
+	// GodotNext: async_compute (#174). Compute lists recorded for the async queue this frame.
+	uint32_t async_command_count = 0;
 	uint32_t command_label_count = 0;
 	LocalVector<RecordedCommandListNode> command_list_nodes;
 	LocalVector<RecordedSliceListNode> read_slice_list_nodes;
@@ -904,7 +947,12 @@ private:
 	void _add_draw_list_begin(FramebufferCache *p_framebuffer_cache, RDD::RenderPassID p_render_pass, RDD::FramebufferID p_framebuffer, Rect2i p_region, VectorView<AttachmentOperation> p_attachment_operations, VectorView<RDD::RenderPassClearValue> p_attachment_clear_values, BitField<RDD::PipelineStageBits> p_stages, uint32_t p_breadcrumb, bool p_split_cmd_buffer);
 	void _run_secondary_command_buffer_task(const SecondaryCommandBuffer *p_secondary);
 	void _wait_for_secondary_command_buffer_tasks();
-	void _run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level);
+	void _run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, bool p_async = false);
+	// GodotNext: async_compute (#174).
+	void _compute_command_levels(LocalVector<RecordedCommandSort> &r_commands_sorted) const;
+	AsyncPlan _plan_async_partition(LocalVector<RecordedCommandSort> &r_commands_sorted) const;
+	void _split_main_command_buffer(RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level);
+	void _run_level(uint32_t p_level, RecordedCommandSort *p_level_commands, uint32_t p_level_command_count, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, uint32_t &r_boosted_priority);
 	void _run_label_command_change(RDD::CommandBufferID p_command_buffer, int32_t p_new_label_index, int32_t p_new_level, bool p_ignore_previous_value, bool p_use_label_for_empty, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, int32_t &r_current_label_index, int32_t &r_current_label_level);
 	void _boost_priority_for_render_commands(RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, uint32_t &r_boosted_priority);
 	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier);
@@ -943,7 +991,8 @@ public:
 	void add_raytracing_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage);
 	void add_raytracing_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
 	void add_raytracing_list_end();
-	void add_compute_list_begin(RDD::BreadcrumbMarker p_phase = RDD::BreadcrumbMarker::NONE, uint32_t p_breadcrumb_data = 0);
+	// GodotNext: async_compute (#174). p_queue tags the list for the async compute queue.
+	void add_compute_list_begin(RDD::BreadcrumbMarker p_phase = RDD::BreadcrumbMarker::NONE, uint32_t p_breadcrumb_data = 0, Queue p_queue = QUEUE_MAIN);
 	void add_compute_list_bind_pipeline(RDD::PipelineID p_pipeline);
 	void add_compute_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
 	void add_compute_list_bind_uniform_sets(RDD::ShaderID p_shader, VectorView<RDD::UniformSetID> p_uniform_set, uint32_t p_first_set_index, uint32_t p_set_count);
@@ -988,6 +1037,10 @@ public:
 	void begin_label(const Span<char> &p_label_name, const Color &p_color);
 	void end_label();
 	void end(bool p_reorder_commands, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool);
+	// GodotNext: async_compute (#174). C++-only, driver-free: the reordered command order and the
+	// async plan end() would use for the commands recorded so far. p_async_queue_available is false
+	// when the device has no async queue, which is the fallback end() uses. For the doctests.
+	void plan_for_test(LocalVector<int32_t> &r_order, AsyncPlan &r_plan, bool p_async_queue_available = true) const;
 	static ResourceTracker *resource_tracker_create();
 	static void resource_tracker_free(ResourceTracker *p_tracker);
 	static FramebufferCache *framebuffer_cache_create();

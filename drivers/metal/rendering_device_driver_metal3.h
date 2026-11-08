@@ -42,6 +42,10 @@ class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0)) RenderingDeviceDriverMet
 #pragma mark - Generic
 
 	NS::SharedPtr<MTL::CommandQueue> device_queue;
+	// GodotNext: async_compute (#174). A second queue for async compute lists (queue ID 2), created
+	// on request in barrier synchronization mode.
+	NS::SharedPtr<MTL::CommandQueue> compute_queue;
+	MTL::CommandQueue *_queue_for(CommandQueueID p_cmd_queue) const { return (p_cmd_queue.id == 2 && compute_queue) ? compute_queue.get() : device_queue.get(); }
 
 	struct Fence {
 		NS::SharedPtr<MTL::SharedEvent> event;

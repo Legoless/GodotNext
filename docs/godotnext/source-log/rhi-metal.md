@@ -65,3 +65,7 @@ How it was used: a bottom-level UPDATE calls the options overload with `Accelera
 | Copied files | None |
 
 How it was used: the size query writes one uint64 per structure into a shared buffer, then a later command buffer copies into an acceleration structure allocated at that size. Compaction does not use a Metal usage bit. `ALLOW_COMPACTION` stays a RenderingDevice flag. `useResource` with write usage is used on the size buffer because `useHeaps` is read-only for buffer writes.
+
+## Async compute queue (#174), Metal part 1
+
+No outside input. The second command queue reuses `newCommandQueue`, and the cross-queue wait reuses the driver's existing `SharedEvent` signal and wait. Vulkan compute-only families, D3D12 compute queues, and queue-family release/acquire barriers are not in this change.

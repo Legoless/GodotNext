@@ -174,6 +174,16 @@ void RenderingDevice::_configure_draw_graph_flags() {
 		draw_graph_full_barriers = (full_barriers == "1");
 	}
 
+#ifdef DEBUG_ENABLED
+	// GodotNext: async_compute (#174). Debug aid for the identity checks: run every n-th main
+	// compute list of a frame on the async queue while async compute is active.
+	String force_async_compute = OS::get_singleton()->get_environment("GODOT_RG_FORCE_ASYNC_COMPUTE");
+	draw_graph_force_async_compute_stride = force_async_compute.is_valid_int() ? uint32_t(MAX(0, force_async_compute.to_int())) : 0;
+	if (draw_graph_force_async_compute_stride > 0 && async_compute_active) {
+		print_line(vformat("RG: Forcing every %d compute list onto the async compute queue", draw_graph_force_async_compute_stride));
+	}
+#endif
+
 	if (!draw_graph_reorder_commands) {
 		print_line("RG: Disable reordering");
 	}
@@ -1779,6 +1789,9 @@ String RenderingDevice::get_perf_report() const {
 	perf_report_text += " bytes:" + String::num_int64(copy_bytes_count);
 
 	perf_report_text += " lazily alloc:" + String::num_int64(driver->get_lazily_memory_used());
+	// GodotNext: async_compute (#174). Frames whose async lists ran on the async queue / fell back
+	// to the main queue.
+	perf_report_text += " async:" + String::num_int64(async_compute_submitted_frames) + "/" + String::num_int64(async_compute_fallback_frames);
 	return perf_report_text;
 }
 
@@ -7260,17 +7273,47 @@ void RenderingDevice::raytracing_list_end() {
 /**** COMPUTE LISTS ****/
 /***********************/
 
-RenderingDevice::ComputeListID RenderingDevice::compute_list_begin() {
+RenderingDevice::ComputeListID RenderingDevice::compute_list_begin(ComputeQueue p_queue) {
 	ERR_RENDER_THREAD_GUARD_V(INVALID_ID);
+	// GodotNext: async_compute (#174). The list records for the async queue only while async
+	// compute is active; otherwise it runs on the main queue, in the same order.
+	ERR_FAIL_INDEX_V_MSG(p_queue, COMPUTE_QUEUE_MAX, INVALID_ID, "Invalid compute queue.");
+	RDG::Queue graph_queue = RDG::QUEUE_MAIN;
+	if (async_compute_active) {
+		if (p_queue == COMPUTE_QUEUE_ASYNC) {
+			graph_queue = RDG::QUEUE_ASYNC_COMPUTE;
+		}
+#ifdef DEBUG_ENABLED
+		else if (draw_graph_force_async_compute_stride > 0) {
+			draw_graph_force_async_compute_counter++;
+			if (draw_graph_force_async_compute_counter % draw_graph_force_async_compute_stride == 0) {
+				graph_queue = RDG::QUEUE_ASYNC_COMPUTE;
+			}
+		}
+#endif
+	}
+	return _compute_list_begin(p_queue, graph_queue);
+}
 
+// GodotNext: async_compute (#174).
+RenderingDevice::ComputeListID RenderingDevice::_compute_list_begin(ComputeQueue p_queue, RDG::Queue p_graph_queue) {
 	ERR_FAIL_COND_V_MSG(compute_list.active, INVALID_ID, "Only one compute list can be active at the same time.");
 	ERR_FAIL_COND_V_MSG(raytracing_list.active, INVALID_ID, "Only one raytracing list can be active at the same time.");
 
 	compute_list.active = true;
+	compute_list.state.queue = p_queue;
+	compute_list.graph_queue = p_graph_queue;
 
-	draw_graph.add_compute_list_begin();
+	draw_graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, p_graph_queue);
 
 	return ID_TYPE_COMPUTE_LIST;
+}
+
+// GodotNext: async_compute (#174).
+RenderingDevice::ComputeQueue RenderingDevice::compute_list_get_queue(ComputeListID p_list) const {
+	ERR_FAIL_COND_V(p_list != ID_TYPE_COMPUTE_LIST, COMPUTE_QUEUE_MAIN);
+	ERR_FAIL_COND_V(!compute_list.active, COMPUTE_QUEUE_MAIN);
+	return compute_list.state.queue;
 }
 
 void RenderingDevice::compute_list_bind_compute_pipeline(ComputeListID p_list, RID p_compute_pipeline) {
@@ -7689,8 +7732,10 @@ void RenderingDevice::compute_list_add_barrier(ComputeListID p_list) {
 	ERR_RENDER_THREAD_GUARD();
 
 	compute_list_barrier_state = compute_list.state;
+	// GodotNext: async_compute (#174). Continue on the queue the list runs on.
+	const RDG::Queue graph_queue = compute_list.graph_queue;
 	compute_list_end();
-	compute_list_begin();
+	_compute_list_begin(compute_list_barrier_state.queue, graph_queue);
 
 	if (compute_list_barrier_state.pipeline.is_valid()) {
 		compute_list_bind_compute_pipeline(p_list, compute_list_barrier_state.pipeline);
@@ -8819,7 +8864,17 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 		GodotProfileZoneGrouped(_profile_zone, "driver->command_pool_reset");
 		bool reset = driver->command_pool_reset(frames[frame].command_pool);
 		ERR_FAIL_COND(!reset);
+		// GodotNext: async_compute (#174).
+		if (frames[frame].async_command_pool) {
+			reset = driver->command_pool_reset(frames[frame].async_command_pool);
+			ERR_FAIL_COND(!reset);
+		}
 	}
+
+#ifdef DEBUG_ENABLED
+	// GodotNext: async_compute (#174).
+	draw_graph_force_async_compute_counter = 0;
+#endif
 
 	if (p_presented) {
 		GodotProfileZoneGrouped(_profile_zone, "update_perf_report");
@@ -8926,6 +8981,24 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 	thread_local LocalVector<RDD::SemaphoreID> wait_semaphores;
 	wait_semaphores = frames[frame].semaphores_to_wait_on;
 
+	// GodotNext: async_compute (#174). The graph recorded the frame's async work into the async
+	// command buffer and split the main ones around it: the fork buffer's completion starts the
+	// async work, and the join buffer waits for it. The join always precedes the last buffer, so the
+	// frame fence covers the async work. Signals are submitted before the waits on them.
+	const int32_t async_fork_index = buffer_pool.async_fork_index;
+	const int32_t async_join_index = buffer_pool.async_join_index;
+	buffer_pool.async_fork_index = -1;
+	buffer_pool.async_join_index = -1;
+	const bool async_submit = async_fork_index >= 0;
+	if (async_submit) {
+		DEV_ASSERT(async_compute_active);
+		DEV_ASSERT(async_fork_index < async_join_index && async_join_index < int32_t(command_buffer_count));
+		async_compute_submitted_frames++;
+	} else if (buffer_pool.async_fallback) {
+		async_compute_fallback_frames++;
+	}
+	buffer_pool.async_fallback = false;
+
 	for (uint32_t i = 0; i < command_buffer_count; i++) {
 		RDD::CommandBufferID command_buffer;
 		RDD::SemaphoreID signal_semaphore;
@@ -8950,9 +9023,22 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 			// Semaphores always need to be signaled if it's not the last command buffer.
 		}
 
-		driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
-				signal_semaphore ? signal_semaphore : VectorView<RDD::SemaphoreID>(), signal_fence,
-				swap_chains);
+		// GodotNext: async_compute (#174).
+		if (async_submit && int32_t(i) == async_join_index) {
+			wait_semaphores.push_back(frames[frame].async_join_semaphore);
+		}
+
+		if (async_submit && int32_t(i) == async_fork_index) {
+			const RDD::SemaphoreID fork_signal_semaphores[2] = { signal_semaphore, frames[frame].async_fork_semaphore };
+			driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
+					VectorView<RDD::SemaphoreID>(fork_signal_semaphores, 2), signal_fence, swap_chains);
+			driver->command_queue_execute_and_present(async_compute_queue, frames[frame].async_fork_semaphore, frames[frame].async_command_buffer,
+					frames[frame].async_join_semaphore, RDD::FenceID(), {});
+		} else {
+			driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
+					signal_semaphore ? signal_semaphore : VectorView<RDD::SemaphoreID>(), signal_fence,
+					swap_chains);
+		}
 
 		// Make the next command buffer wait on the semaphore signaled by this one.
 		wait_semaphores.resize(1);
@@ -9215,6 +9301,25 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		present_queue_family = main_queue_family;
 	}
 
+	// GodotNext: async_compute (#174). A separate compute queue, only when the project asks for it
+	// and the driver supports it. Otherwise async lists record on the main queue.
+	async_compute_queue = main_queue;
+	async_compute_queue_family = main_queue_family;
+	async_compute_active = false;
+	if (GLOBAL_GET("rendering/rendering_device/async_compute") && has_feature(SUPPORTS_ASYNC_COMPUTE)) {
+		RDD::CommandQueueFamilyID compute_family = driver->command_queue_family_get(RDD::COMMAND_QUEUE_FAMILY_COMPUTE_BIT);
+		if (compute_family) {
+			RDD::CommandQueueID compute_queue = driver->command_queue_create(compute_family);
+			// A queue aliased to the main one is not async, and is never freed separately.
+			if (compute_queue && compute_queue != main_queue) {
+				async_compute_queue = compute_queue;
+				async_compute_queue_family = compute_family;
+				async_compute_active = true;
+			}
+		}
+		print_verbose(async_compute_active ? "RD: Async compute queue enabled." : "RD: Async compute queue requested but unavailable.");
+	}
+
 	// Use the processor count as the max amount of transfer workers that can be created.
 	transfer_worker_pool_max_size = OS::get_singleton()->get_processor_count();
 
@@ -9265,6 +9370,19 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 		// Assign the main queue family and command pool to the command buffer pool.
 		frames[i].command_buffer_pool.pool = frames[i].command_pool;
 
+		// GodotNext: async_compute (#174).
+		if (async_compute_active) {
+			frames[i].async_command_pool = driver->command_pool_create(async_compute_queue_family, RDD::COMMAND_BUFFER_TYPE_PRIMARY);
+			frames[i].async_command_buffer = frames[i].async_command_pool ? driver->command_buffer_create(frames[i].async_command_pool) : RDD::CommandBufferID();
+			frames[i].async_fork_semaphore = driver->semaphore_create();
+			frames[i].async_join_semaphore = driver->semaphore_create();
+			if (!frames[i].async_command_buffer || !frames[i].async_fork_semaphore || !frames[i].async_join_semaphore) {
+				frame_failed = true;
+				break;
+			}
+			frames[i].command_buffer_pool.async_command_buffer = frames[i].async_command_buffer;
+		}
+
 		// Create the semaphores for the transfer workers.
 		frames[i].transfer_worker_semaphores.resize(transfer_worker_pool_max_size);
 		for (uint32_t j = 0; j < transfer_worker_pool_max_size; j++) {
@@ -9289,6 +9407,16 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 			}
 			if (frames[i].timestamp_pool) {
 				driver->timestamp_query_pool_free(frames[i].timestamp_pool);
+			}
+			// GodotNext: async_compute (#174).
+			if (frames[i].async_command_pool) {
+				driver->command_pool_free(frames[i].async_command_pool);
+			}
+			if (frames[i].async_fork_semaphore) {
+				driver->semaphore_free(frames[i].async_fork_semaphore);
+			}
+			if (frames[i].async_join_semaphore) {
+				driver->semaphore_free(frames[i].async_join_semaphore);
 			}
 			for (uint32_t j = 0; j < frames[i].transfer_worker_semaphores.size(); j++) {
 				if (frames[i].transfer_worker_semaphores[j]) {
@@ -9730,6 +9858,12 @@ void RenderingDevice::finalize() {
 		_free_blas_compaction_query_pools(i);
 		driver->semaphore_free(frames[i].semaphore);
 		driver->fence_free(frames[i].fence);
+		// GodotNext: async_compute (#174).
+		if (frames[i].async_command_pool) {
+			driver->command_pool_free(frames[i].async_command_pool);
+			driver->semaphore_free(frames[i].async_fork_semaphore);
+			driver->semaphore_free(frames[i].async_join_semaphore);
+		}
 
 		RDG::CommandBufferPool &buffer_pool = frames[i].command_buffer_pool;
 		for (uint32_t j = 0; j < buffer_pool.buffers.size(); j++) {
@@ -9793,6 +9927,16 @@ void RenderingDevice::finalize() {
 		}
 
 		transfer_queue = RDD::CommandQueueID();
+	}
+
+	// GodotNext: async_compute (#174).
+	if (async_compute_queue) {
+		if (async_compute_active) {
+			driver->command_queue_free(async_compute_queue);
+		}
+
+		async_compute_queue = RDD::CommandQueueID();
+		async_compute_active = false;
 	}
 
 	if (main_queue) {
@@ -9995,7 +10139,8 @@ void RenderingDevice::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("draw_list_end"), &RenderingDevice::draw_list_end);
 
-	ClassDB::bind_method(D_METHOD("compute_list_begin"), &RenderingDevice::compute_list_begin);
+	// GodotNext: async_compute (#174)
+	ClassDB::bind_method(D_METHOD("compute_list_begin", "queue"), &RenderingDevice::compute_list_begin, DEFVAL(COMPUTE_QUEUE_MAIN));
 	ClassDB::bind_method(D_METHOD("compute_list_bind_compute_pipeline", "compute_list", "compute_pipeline"), &RenderingDevice::compute_list_bind_compute_pipeline);
 	ClassDB::bind_method(D_METHOD("compute_list_set_push_constant", "compute_list", "buffer", "size_bytes"), &RenderingDevice::_compute_list_set_push_constant);
 	ClassDB::bind_method(D_METHOD("compute_list_bind_uniform_set", "compute_list", "uniform_set", "set_index"), &RenderingDevice::compute_list_bind_uniform_set);
@@ -10599,6 +10744,10 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_RAY_QUERY);
 	// GodotNext: metal_acceleration_structure
 	BIND_ENUM_CONSTANT(SUPPORTS_RAY_QUERY_HARDWARE);
+	// GodotNext: async_compute (#174)
+	BIND_ENUM_CONSTANT(SUPPORTS_ASYNC_COMPUTE);
+	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
+	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
 	BIND_ENUM_CONSTANT(SUPPORTS_HDR_OUTPUT);
 	BIND_ENUM_CONSTANT(SUPPORTS_RASTERIZATION_RATE_MAP);
