@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/math/math_funcs.h"
+#include "core/math/vector2i.h"
 #include "core/string/ustring.h"
 #include "servers/rendering/rendering_server_enums.h"
 
@@ -135,4 +136,19 @@ inline TSRScalingResolution nextgi_resolve_tsr_scaling(
 	}
 
 	return resolved;
+}
+
+// GodotNext: pt_tsr_core (#194). Step 4 jitter phase count = round(8 * (output/internal)^2), minimum 8.
+inline uint32_t nextgi_tsr_jitter_phase_count(const Size2i &p_target_size, const Size2i &p_render_size) {
+	if (p_render_size.width <= 0 || p_target_size.width <= 0) {
+		return 8u;
+	}
+	const float ratio = float(p_target_size.width) / float(p_render_size.width);
+	const uint32_t rounded = uint32_t(Math::floor(8.0f * ratio * ratio + 0.5f));
+	return MAX(8u, rounded);
+}
+
+// Provisional mip bias offset from {-1.0, -0.5, 0.0}; final value is selected by the GT-2 sweep in PQ (§22).
+inline constexpr float nextgi_tsr_mip_bias_offset() {
+	return -0.5f;
 }

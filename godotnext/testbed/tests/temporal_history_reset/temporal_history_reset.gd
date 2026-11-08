@@ -14,6 +14,8 @@ func _ready() -> void:
 		_requested_mode = Viewport.SCALING_3D_MODE_METALFX_TEMPORAL
 	elif _mode.begins_with("copy"):
 		_requested_mode = Viewport.SCALING_3D_MODE_DLSS
+	elif _mode.begins_with("tsr"):
+		_requested_mode = Viewport.SCALING_3D_MODE_TSR
 
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_COLOR
@@ -44,7 +46,7 @@ func _ready() -> void:
 	get_viewport().scaling_3d_scale = 0.75
 	get_viewport().scaling_3d_mode = _requested_mode
 
-	if _mode == "copy_second_viewport":
+	if _mode == "copy_second_viewport" or _mode == "tsr_second_viewport":
 		_second_viewport = SubViewport.new()
 		_second_viewport.size = Vector2i(1280, 720)
 		_second_viewport.world_3d = get_viewport().world_3d
@@ -55,7 +57,7 @@ func _ready() -> void:
 		_second_viewport.add_child(second_camera)
 		second_camera.current = true
 		_second_viewport.scaling_3d_scale = 0.75
-		_second_viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_DLSS
+		_second_viewport.scaling_3d_mode = _requested_mode
 
 
 func _center_is_visible(image: Image) -> bool:
@@ -79,7 +81,7 @@ func _process(_delta: float) -> void:
 	var ok := int(status["active_mode"]) == _requested_mode and _center_is_visible(get_viewport().get_texture().get_image())
 	if _second_viewport != null:
 		var second_status: Dictionary = RenderingServer.viewport_get_scaling_3d_status(_second_viewport.get_viewport_rid())
-		ok = ok and int(second_status["active_mode"]) == Viewport.SCALING_3D_MODE_DLSS
+		ok = ok and int(second_status["active_mode"]) == _requested_mode
 		ok = ok and _center_is_visible(_second_viewport.get_texture().get_image())
 	print("GODOTNEXT_RESULT " + JSON.stringify({
 		"test": "temporal_history_reset",

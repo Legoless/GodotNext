@@ -51,6 +51,7 @@ const VALID_UPSCALERS := {
 	"copy": true,
 	"dlss": true,
 	"metalfx": true,
+	"tsr": true,
 }
 
 
@@ -217,7 +218,7 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 		return result
 	if values.has(FLAG_UPSCALER) and not VALID_UPSCALERS.has(String(values[FLAG_UPSCALER])):
 		result.ok = false
-		result.error = "--upscaler must be taa, fsr2, copy, dlss, or metalfx"
+		result.error = "--upscaler must be taa, fsr2, copy, dlss, metalfx, or tsr"
 		return result
 	if values.has(FLAG_SCALE):
 		var scale_text := String(values[FLAG_SCALE])

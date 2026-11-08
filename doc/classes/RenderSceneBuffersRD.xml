@@ -73,6 +73,13 @@
 				If [param msaa] is [code]true[/code] and MSAA is enabled, this returns the MSAA variant of the buffer.
 			</description>
 		</method>
+		<method name="get_context_memory_bytes" qualifiers="const">
+			<return type="int" />
+			<param index="0" name="context" type="StringName" />
+			<description>
+				Returns the total byte footprint of all backing textures allocated in [param context], excluding shared texture views.
+			</description>
+		</method>
 		<method name="get_depth_layer">
 			<return type="RID" />
 			<param index="0" name="layer" type="int" />

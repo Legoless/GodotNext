@@ -81,6 +81,10 @@ func _apply_viewport(viewport: Viewport) -> void:
 			viewport.use_taa = false
 			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_METALFX_TEMPORAL
 			viewport.scaling_3d_scale = float(_args.get("scale", 0.5))
+		"tsr":
+			viewport.use_taa = false
+			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_TSR
+			viewport.scaling_3d_scale = float(_args.get("scale", 0.5))
 		_:
 			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
 			viewport.scaling_3d_scale = float(_args.get("scale", 1.0))

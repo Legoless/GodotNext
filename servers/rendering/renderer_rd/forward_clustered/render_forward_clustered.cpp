@@ -116,6 +116,34 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(Rende
 	}
 }
 
+void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_tsr(RendererRD::TSR *p_effect, uint32_t p_view) {
+	ERR_FAIL_NULL(render_buffers);
+	ERR_FAIL_NULL(p_effect);
+	ERR_FAIL_UNSIGNED_INDEX(p_view, RendererSceneRender::MAX_RENDER_VIEWS);
+	if (tsr_contexts[p_view] == nullptr) {
+		tsr_contexts[p_view] = p_effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size(), render_buffers->get_tsr_quality());
+	}
+}
+
+RendererRD::TSRContext *RenderForwardClustered::RenderBufferDataForwardClustered::ensure_tsr_context(uint32_t p_view, const Size2i &p_internal_size, const Size2i &p_output_size, RSE::ViewportTSRQuality p_quality) {
+	ERR_FAIL_UNSIGNED_INDEX_V(p_view, RendererSceneRender::MAX_RENDER_VIEWS, nullptr);
+	if (tsr_contexts[p_view] == nullptr) {
+		tsr_contexts[p_view] = memnew(RendererRD::TSRContext(p_internal_size, p_output_size, p_quality));
+	} else {
+		tsr_contexts[p_view]->sync_dimensions(p_internal_size, p_output_size, p_quality);
+	}
+	return tsr_contexts[p_view];
+}
+
+void RenderForwardClustered::RenderBufferDataForwardClustered::free_tsr_contexts() {
+	for (uint32_t v = 0; v < RendererSceneRender::MAX_RENDER_VIEWS; v++) {
+		if (tsr_contexts[v] != nullptr) {
+			memdelete(tsr_contexts[v]);
+			tsr_contexts[v] = nullptr;
+		}
+	}
+}
+
 #ifdef METAL_MFXTEMPORAL_ENABLED
 bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_mfx_temporal(RendererRD::MFXTemporalEffect *p_effect) {
 	if (mfx_temporal_context == nullptr) {
@@ -144,6 +172,7 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		render_buffers->clear_context(RB_SCOPE_SSAO);
 		render_buffers->clear_context(RB_SCOPE_SSR);
 		render_buffers->clear_context(RB_SCOPE_SSCS);
+		render_buffers->clear_context(RB_SCOPE_TSR);
 	}
 
 	if (cluster_builder) {
@@ -159,6 +188,8 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		memdelete(fsr2_context);
 		fsr2_context = nullptr;
 	}
+
+	free_tsr_contexts();
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	if (mfx_temporal_context) {
@@ -2506,6 +2537,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		SCALE_FSR2,
 		SCALE_MFX,
 		SCALE_EXTERNAL,
+		SCALE_TSR,
 	} scale_type = SCALE_NONE;
 
 	switch (rb->get_scaling_3d_mode()) {
@@ -2523,6 +2555,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			external_upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 			if (external_upscaler != nullptr) {
 				scale_type = SCALE_EXTERNAL;
+			}
+			break;
+		case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+			if (tsr_effect != nullptr) {
+				scale_type = SCALE_TSR;
 			}
 			break;
 		default:
@@ -2658,6 +2695,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				velocity_mode = NEXTGI_VELOCITY_DENSE;
 			}
 			velocity_scale = NEXTGI_VELOCITY_SCALE_EXTERNAL;
+		} else if (scale_type == SCALE_TSR) {
+			velocity_mode = NEXTGI_VELOCITY_DENSE;
+			velocity_scale = NEXTGI_VELOCITY_SCALE_TSR;
 		} else if (using_taa || ce_needs_motion_vectors) {
 			velocity_mode = NEXTGI_VELOCITY_TAA;
 		}
@@ -3555,6 +3595,44 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				inputs.reset = reset_temporal_history;
 				external_upscaler->process(rb, v, inputs);
 			}
+			RD::get_singleton()->draw_command_end_label();
+		} else if (scale_type == SCALE_TSR) {
+			RD::get_singleton()->draw_command_begin_label("TSR");
+			RENDER_TIMESTAMP("TSR");
+
+			Projection correction;
+			correction.set_depth_correction(true, true, false);
+			const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
+			const Projection &cur_proj = p_render_data->scene_data->cam_projection;
+			const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
+			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
+			const Projection reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
+			const Vector2 jitter_pixels = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+
+			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+				rb_data->ensure_tsr(tsr_effect, v);
+				RendererRD::TSR::Parameters params;
+				params.render_buffers = rb;
+				params.context = rb_data->get_tsr_context(v);
+				params.view = v;
+				params.color = rb->get_internal_texture(v);
+				params.depth = rb->get_depth_texture(v);
+				params.velocity = rb->get_velocity_buffer(false, v);
+				params.reactive = rb->get_internal_texture_reactive(v);
+				params.output = rb->get_upscaled_texture(v);
+				params.internal_size = rb->get_internal_size();
+				params.output_size = rb->get_target_size();
+				params.quality = rb->get_tsr_quality();
+				params.jitter_pixels = jitter_pixels;
+				params.reprojection = reprojection;
+				params.z_near = p_render_data->scene_data->z_near;
+				params.z_far = p_render_data->scene_data->z_far;
+				params.is_orthogonal = p_render_data->scene_data->cam_orthogonal;
+				params.reset = reset_temporal_history;
+
+				tsr_effect->process(params);
+			}
+
 			RD::get_singleton()->draw_command_end_label();
 		} else if (using_taa) {
 			RD::get_singleton()->draw_command_begin_label("TAA");
@@ -6877,6 +6955,7 @@ RenderForwardClustered::RenderForwardClustered() {
 
 	taa = memnew(RendererRD::TAA);
 	fsr2_effect = memnew(RendererRD::FSR2Effect);
+	tsr_effect = memnew(RendererRD::TSR);
 	ss_effects = memnew(RendererRD::SSEffects);
 	motion_vectors_store = memnew(RendererRD::MotionVectorsStore);
 	TemporalUpscalerRegistry::initialize_dev_copy_upscaler();
@@ -6907,6 +6986,11 @@ RenderForwardClustered::~RenderForwardClustered() {
 	if (fsr2_effect) {
 		memdelete(fsr2_effect);
 		fsr2_effect = nullptr;
+	}
+
+	if (tsr_effect) {
+		memdelete(tsr_effect);
+		tsr_effect = nullptr;
 	}
 
 #ifdef METAL_MFXTEMPORAL_ENABLED

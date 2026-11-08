@@ -404,6 +404,8 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 				ERR_FAIL_NULL(upscaler);
 				jitter_phase_count = upscaler->jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
+			} else if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR) {
+				jitter_phase_count = nextgi_tsr_jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
 			} else if (scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
 				jitter_phase_count = nextgi_temporal_jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height), false);
 			} else if (use_taa) {

@@ -45,6 +45,7 @@
 #define RB_SCOPE_BUFFERS SNAME("render_buffers")
 #define RB_SCOPE_VRS SNAME("VRS")
 #define RB_SCOPE_NEXTGEO SNAME("nextgeo")
+#define RB_SCOPE_TSR SNAME("tsr")
 
 #define RB_TEXTURE SNAME("texture")
 #define RB_TEX_COLOR SNAME("color")
@@ -169,6 +170,7 @@ private:
 		// Cache the data used to create our texture
 		RD::TextureFormat format;
 		bool is_unique; // If marked as unique, we return it into our pool
+		bool is_view = false;
 
 		// Our texture objects, slices are lazy (i.e. only created when requested).
 		RID texture;
@@ -235,6 +237,7 @@ public:
 	Size2i get_texture_slice_size(const StringName &p_context, const StringName &p_texture_name, const uint32_t p_mipmap);
 
 	void clear_context(const StringName &p_context);
+	uint64_t get_context_memory_bytes(const StringName &p_context) const;
 
 	// Allocate shared buffers
 	void allocate_blur_textures();

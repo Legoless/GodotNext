@@ -72,9 +72,9 @@ func _render_callback(_callback_type: int, render_data: RenderData) -> void:
 			return
 		_csv.store_line("frame,view,sentinel,nonfinite")
 	var mode := buffers.get_scaling_3d_mode()
-	# Dense paths (DLSS / copy upscaler) and MetalFX report (-1, -1) sentinels;
+	# Dense paths (TSR, DLSS / copy upscaler) and MetalFX report (-1, -1) sentinels;
 	# on FSR2 and TAA, (-1, -1) is the legitimate static/sky clear value.
-	var count_sentinel := 1 if (mode == Viewport.SCALING_3D_MODE_DLSS or mode == Viewport.SCALING_3D_MODE_METALFX_TEMPORAL) else 0
+	var count_sentinel := 1 if (mode == Viewport.SCALING_3D_MODE_TSR or mode == Viewport.SCALING_3D_MODE_DLSS or mode == Viewport.SCALING_3D_MODE_METALFX_TEMPORAL) else 0
 	var size := buffers.get_internal_size()
 	for view in buffers.get_view_count():
 		var velocity := buffers.get_velocity_layer(view, false)

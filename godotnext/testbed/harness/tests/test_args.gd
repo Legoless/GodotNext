@@ -176,6 +176,11 @@ func _test_parse() -> void:
 	_check(not bool(ArgsScript.parse(PackedStringArray([
 		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--upscaler=bicubic",
 	]))["ok"]), "invalid --upscaler fails")
+	var tsr_flags: Dictionary = ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://scenes/upscaler_torture/upscaler_torture.tscn", "--out=/tmp/out", "--frames=8",
+		"--upscaler=tsr", "--scale=0.667",
+	]))
+	_check(bool(tsr_flags["ok"]) and String(tsr_flags["args"]["upscaler"]) == "tsr", "--upscaler=tsr parses")
 
 	var ssaa_script = load("res://harness/ssaa_reference.gd")
 	_check(not ssaa_script._has_upscaler_or_reference_flags(captured["args"]), "plain capture leaves SSAAReference idle")

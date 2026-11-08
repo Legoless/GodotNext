@@ -35,7 +35,10 @@ TEST_FORCE_LINK(test_upscalers)
 #include "core/config/project_settings.h"
 #include "scene/main/viewport.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+#include "servers/rendering/renderer_rd/effects/tsr.h"
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
+#include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_enums.h"
@@ -411,4 +414,155 @@ TEST_CASE("[SceneTree][Upscalers][TSR] Viewport and RenderSceneBuffersConfigurat
 	CHECK_EQ(vp->get_scaling_3d_mode(), Viewport::SCALING_3D_MODE_CUSTOM);
 
 	memdelete(vp);
+}
+
+TEST_CASE("[Upscalers][TSR] Jitter phase count at scales 0.5, 0.667, 1.0 and 2.0 and mip bias") {
+	const Size2i target_2160p(3840, 2160);
+	const Size2i target_1440p(2560, 1440);
+	const Size2i target_1080p(1920, 1080);
+
+	// Scale 0.5 -> round(8 * 2.0^2) = 32.
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_2160p, Size2i(1920, 1080)), 32u);
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_1440p, Size2i(1280, 720)), 32u);
+
+	// Scale 0.667 -> round(8 * (1 / 0.667)^2) = 18.
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_2160p, Size2i(int(3840 * 0.667f), int(2160 * 0.667f))), 18u);
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_1440p, Size2i(int(2560 * 0.667f), int(1440 * 0.667f))), 18u);
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_1080p, Size2i(int(1920 * 0.667f), int(1080 * 0.667f))), 18u);
+
+	// Scale 1.0 -> round(8 * 1.0^2) = 8.
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_2160p, target_2160p), 8u);
+
+	// Scale 2.0 (supersampling) -> round(8 * 0.5^2) = 2, clamped to minimum 8.
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_2160p, Size2i(7680, 4320)), 8u);
+	CHECK_EQ(RendererRD::TSR::jitter_phase_count(target_1080p, Size2i(3840, 2160)), 8u);
+
+	// Provisional mip bias offset must come from {-1.0, -0.5, 0.0}.
+	const float bias = RendererRD::TSR::mip_bias_offset();
+	CHECK((bias == -1.0f || bias == -0.5f || bias == 0.0f));
+	CHECK(Math::is_equal_approx(nextgi_temporal_mip_bias(0.5f, 0.0f, bias), -1.0f + bias));
+	CHECK(Math::is_equal_approx(nextgi_temporal_mip_bias(2.0f, 0.0f, bias), bias));
+}
+
+TEST_CASE("[Upscalers][TSR] One-shot history reset on creation, explicit reset, and history resize") {
+	RendererRD::TSRContext ctx(Size2i(1280, 720), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	CHECK_EQ(ctx.get_history_size(), Size2i(2560, 1440));
+
+	// First frame after creation/configure clears history once.
+	CHECK(ctx.consume_reset());
+	CHECK_FALSE(ctx.consume_reset());
+
+	// Explicit viewport_reset_temporal_history clears history once.
+	ctx.request_reset();
+	CHECK(ctx.consume_reset());
+	CHECK_FALSE(ctx.consume_reset());
+
+	// Internal-only resolution change preserves 100%/200% history without forcing a reset.
+	CHECK_FALSE(ctx.sync_dimensions(Size2i(1600, 900), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_HIGH));
+	CHECK_EQ(ctx.get_internal_size(), Size2i(1600, 900));
+	CHECK_FALSE(ctx.consume_reset());
+
+	// Switching from High (100% history) to Epic (200% history) resizes history and resets once.
+	CHECK(ctx.sync_dimensions(Size2i(1600, 900), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_EPIC));
+	CHECK_EQ(ctx.get_history_size(), Size2i(5120, 2880));
+	CHECK(ctx.consume_reset());
+	CHECK_FALSE(ctx.consume_reset());
+
+	// Output target resize also resets history once.
+	CHECK(ctx.sync_dimensions(Size2i(1920, 1080), Size2i(3840, 2160), RSE::VIEWPORT_TSR_QUALITY_EPIC));
+	CHECK_EQ(ctx.get_history_size(), Size2i(7680, 4320));
+	CHECK(ctx.consume_reset());
+	CHECK_FALSE(ctx.consume_reset());
+}
+
+TEST_CASE("[Upscalers][TSR] Two viewports allocate two distinct TSRContexts and free cleanly") {
+	const uint32_t base_live = RendererRD::TSRContext::get_live_context_count();
+
+	Ref<RendererSceneRenderImplementation::RenderForwardClustered::RenderBufferDataForwardClustered> vp_a;
+	Ref<RendererSceneRenderImplementation::RenderForwardClustered::RenderBufferDataForwardClustered> vp_b;
+	vp_a.instantiate();
+	vp_b.instantiate();
+
+	RendererRD::TSRContext *ctx_a = vp_a->ensure_tsr_context(0, Size2i(960, 540), Size2i(1920, 1080), RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	RendererRD::TSRContext *ctx_b = vp_b->ensure_tsr_context(0, Size2i(1280, 720), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_EPIC);
+
+	REQUIRE(ctx_a != nullptr);
+	REQUIRE(ctx_b != nullptr);
+	CHECK(ctx_a != ctx_b);
+	CHECK_EQ(vp_a->get_tsr_context(0), ctx_a);
+	CHECK_EQ(vp_b->get_tsr_context(0), ctx_b);
+	CHECK_EQ(RendererRD::TSRContext::get_live_context_count(), base_live + 2u);
+
+	// Reset and ping-pong parity state are isolated per viewport context.
+	CHECK(ctx_a->consume_reset());
+	CHECK_FALSE(ctx_a->consume_reset());
+	CHECK(ctx_b->consume_reset());
+	ctx_a->advance_frame();
+	CHECK_EQ(ctx_a->get_read_index(), 1u);
+	CHECK_EQ(ctx_b->get_read_index(), 0u);
+
+	// Stereo view 1 on viewport A gets its own per-(viewport, view) TSRContext.
+	RendererRD::TSRContext *ctx_a_v1 = vp_a->ensure_tsr_context(1, Size2i(960, 540), Size2i(1920, 1080), RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	REQUIRE(ctx_a_v1 != nullptr);
+	CHECK(ctx_a_v1 != ctx_a);
+	CHECK_EQ(RendererRD::TSRContext::get_live_context_count(), base_live + 3u);
+
+	vp_a->free_data();
+	CHECK_EQ(vp_a->get_tsr_context(0), nullptr);
+	CHECK_EQ(vp_a->get_tsr_context(1), nullptr);
+	CHECK_EQ(RendererRD::TSRContext::get_live_context_count(), base_live + 1u);
+
+	vp_b->free_data();
+	CHECK_EQ(vp_b->get_tsr_context(0), nullptr);
+	CHECK_EQ(RendererRD::TSRContext::get_live_context_count(), base_live);
+}
+
+TEST_CASE("[Upscalers][TSR] Format table bytes per history pixel, T6 budgets, and DENSE velocity plan") {
+	for (const RendererRD::TSRTextureFormatEntry &entry : RendererRD::TSR_FORMAT_TABLE) {
+		CHECK_EQ(RD::get_image_format_pixel_size(entry.format), entry.bytes_per_pixel);
+	}
+
+	const uint32_t hist_bpp = RendererRD::TSR::history_bytes_per_pixel();
+	const uint32_t int_bpp = RendererRD::TSR::internal_bytes_per_pixel();
+	CHECK_EQ(hist_bpp, 10u);
+	CHECK_LE(hist_bpp, 14u);
+	CHECK_EQ(int_bpp, 8u);
+
+	// T6 <= 14 B per history pixel: <= 52 MB at 1440p High, <= 116 MB at 2160p High, <= 465 MB at 2160p Epic.
+	// Checked against conservative decimal MB (1,000,000 B), which also implies binary MiB (1,048,576 B).
+	const uint64_t MB_DEC = 1000ull * 1000ull;
+
+	const Size2i out_1440p(2560, 1440);
+	const Size2i int_1440p_q(int(2560 * 0.667f), int(1440 * 0.667f));
+	const uint64_t bytes_1440p_high = RendererRD::TSR::estimate_memory_bytes(int_1440p_q, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	const uint64_t hist_px_1440p_high = uint64_t(2560) * uint64_t(1440);
+	CHECK_LE(bytes_1440p_high, 52ull * MB_DEC);
+	CHECK_LE(double(bytes_1440p_high) / double(hist_px_1440p_high), 14.0);
+
+	const Size2i out_2160p(3840, 2160);
+	const Size2i int_2160p_p(1920, 1080);
+	const Size2i int_2160p_q(int(3840 * 0.667f), int(2160 * 0.667f));
+	const uint64_t bytes_2160p_high_p = RendererRD::TSR::estimate_memory_bytes(int_2160p_p, out_2160p, RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	const uint64_t bytes_2160p_high_q = RendererRD::TSR::estimate_memory_bytes(int_2160p_q, out_2160p, RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	const uint64_t hist_px_2160p_high = uint64_t(3840) * uint64_t(2160);
+	CHECK_LE(bytes_2160p_high_p, 116ull * MB_DEC);
+	CHECK_LE(bytes_2160p_high_q, 116ull * MB_DEC);
+	CHECK_LE(double(bytes_2160p_high_q) / double(hist_px_2160p_high), 14.0);
+
+	const uint64_t bytes_2160p_epic_p = RendererRD::TSR::estimate_memory_bytes(int_2160p_p, out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC);
+	const uint64_t bytes_2160p_epic_native = RendererRD::TSR::estimate_memory_bytes(out_2160p, out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC);
+	const uint64_t hist_px_2160p_epic = uint64_t(7680) * uint64_t(4320);
+	CHECK_LE(bytes_2160p_epic_p, 465ull * MB_DEC);
+	CHECK_LE(bytes_2160p_epic_native, 465ull * MB_DEC);
+	CHECK_LE(double(bytes_2160p_epic_native) / double(hist_px_2160p_epic), 14.0);
+
+	// Step 2: SCALE_TSR maps to the DENSE NextGI velocity row alongside SCALE_EXTERNAL.
+	const NextGIVelocityPlan tsr_vel = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_TSR, NEXTGI_VELOCITY_DENSE, false, true);
+	const NextGIVelocityPlan ext_vel = nextgi_velocity_plan(NEXTGI_VELOCITY_SCALE_EXTERNAL, NEXTGI_VELOCITY_DENSE, false, true);
+	CHECK(tsr_vel.active);
+	CHECK(tsr_vel.prepass_writes);
+	CHECK_EQ(tsr_vel.pre_clear_r, ext_vel.pre_clear_r);
+	CHECK_EQ(tsr_vel.pre_clear_g, ext_vel.pre_clear_g);
+	CHECK_EQ(tsr_vel.mfx_preserve, ext_vel.mfx_preserve);
+	CHECK_EQ(tsr_vel.skip_clear_pass, ext_vel.skip_clear_pass);
 }

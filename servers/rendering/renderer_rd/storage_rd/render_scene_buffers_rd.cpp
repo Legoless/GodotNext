@@ -32,6 +32,7 @@
 #include "render_scene_buffers_rd.compat.inc"
 
 #include "core/object/class_db.h"
+#include "servers/rendering/renderer_rd/effects/tsr_presets.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device_binds.h"
 #include "servers/rendering/rendering_server.h" // IWYU pragma: keep // Needed to bind RSE enums.
@@ -59,6 +60,7 @@ void RenderSceneBuffersRD::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_texture_slice_view", "context", "name", "layer", "mipmap", "layers", "mipmaps", "view"), &RenderSceneBuffersRD::_get_texture_slice_view);
 	ClassDB::bind_method(D_METHOD("get_texture_slice_size", "context", "name", "mipmap"), &RenderSceneBuffersRD::get_texture_slice_size);
 	ClassDB::bind_method(D_METHOD("clear_context", "context"), &RenderSceneBuffersRD::clear_context);
+	ClassDB::bind_method(D_METHOD("get_context_memory_bytes", "context"), &RenderSceneBuffersRD::get_context_memory_bytes);
 
 	// Access to some core buffers so users don't need to know their names.
 	ClassDB::bind_method(D_METHOD("get_color_texture", "msaa"), &RenderSceneBuffersRD::_get_color_texture, DEFVAL(false));
@@ -113,6 +115,8 @@ void RenderSceneBuffersRD::update_samplers() {
 			if (upscaler != nullptr) {
 				offset = upscaler->mip_bias_offset();
 			}
+		} else if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR) {
+			offset = nextgi_tsr_mip_bias_offset();
 		}
 		computed_mipmap_bias += offset;
 	}
@@ -384,6 +388,7 @@ RID RenderSceneBuffersRD::create_texture_view(const StringName &p_context, const
 
 	view_texture.format = named_texture.format;
 	view_texture.is_unique = named_texture.is_unique;
+	view_texture.is_view = true;
 
 	view_texture.texture = RD::get_singleton()->texture_create_shared(p_view, named_texture.texture);
 
@@ -515,6 +520,37 @@ void RenderSceneBuffersRD::clear_context(const StringName &p_context) {
 		free_named_texture(named_textures[key]);
 		named_textures.erase(key);
 	}
+}
+
+uint64_t RenderSceneBuffersRD::get_context_memory_bytes(const StringName &p_context) const {
+	uint64_t total_bytes = 0;
+
+	for (const KeyValue<NTKey, NamedTexture> &E : named_textures) {
+		if (E.key.context != p_context || E.value.is_view || E.value.texture.is_null()) {
+			continue;
+		}
+		const RD::TextureFormat &tf = E.value.format;
+		const uint32_t mipmaps = MAX(1u, tf.mipmaps);
+		const uint64_t layers = uint64_t(MAX(1u, tf.array_layers));
+		const uint64_t samples = uint64_t(1u) << uint32_t(tf.samples);
+		const uint64_t pixel_size = uint64_t(RD::get_image_format_pixel_size(tf.format));
+
+		uint32_t w = MAX(1u, tf.width);
+		uint32_t h = MAX(1u, tf.height);
+		uint32_t d = MAX(1u, tf.depth);
+		uint64_t mip_total = 0;
+
+		for (uint32_t i = 0; i < mipmaps; i++) {
+			mip_total += uint64_t(w) * uint64_t(h) * uint64_t(d) * pixel_size;
+			w = MAX(1u, w >> 1);
+			h = MAX(1u, h >> 1);
+			d = MAX(1u, d >> 1);
+		}
+
+		total_bytes += mip_total * layers * samples;
+	}
+
+	return total_bytes;
 }
 
 // Allocate shared buffers
