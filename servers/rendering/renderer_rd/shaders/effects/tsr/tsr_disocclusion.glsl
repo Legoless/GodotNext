@@ -56,14 +56,22 @@ void main() {
 	float z_c = s_lin_depth[ly][lx];
 
 	// Sample the 2x2 footprint in previous-frame linear depth around uv_prev.
-	vec2 prev_pos = uv_prev * vec2(params.internal_size) - 0.5;
+	ivec2 prev_size = textureSize(prev_depth_tex, 0);
+	vec2 prev_pos = uv_prev * vec2(prev_size) - 0.5;
 	ivec2 base_p = ivec2(floor(prev_pos));
-	ivec2 max_c = params.internal_size - ivec2(1);
+	ivec2 max_c = prev_size - ivec2(1);
 
 	float zp00 = texelFetch(prev_depth_tex, clamp(base_p + ivec2(0, 0), ivec2(0), max_c), 0).r;
 	float zp10 = texelFetch(prev_depth_tex, clamp(base_p + ivec2(1, 0), ivec2(0), max_c), 0).r;
 	float zp01 = texelFetch(prev_depth_tex, clamp(base_p + ivec2(0, 1), ivec2(0), max_c), 0).r;
 	float zp11 = texelFetch(prev_depth_tex, clamp(base_p + ivec2(1, 1), ivec2(0), max_c), 0).r;
+
+	// Freshly reallocated prev_depth after a dynamic-resolution step is cleared to 0.0
+	// without resetting history; defer rejection to Pass 3 YCoCg variance clamping for this frame.
+	if (zp00 <= 0.0 && zp10 <= 0.0 && zp01 <= 0.0 && zp11 <= 0.0) {
+		imageStore(disocclusion_out, px, vec4(0.0, 0.0, 0.0, 0.0));
+		return;
+	}
 
 	bool curr_sky = (raw_c <= 1e-7);
 	if (curr_sky) {

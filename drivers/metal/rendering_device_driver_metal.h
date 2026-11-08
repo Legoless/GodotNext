@@ -184,9 +184,18 @@ protected:
 	Mutex imported_textures_mutex;
 	LocalVector<MTL::Texture *> imported_textures;
 
+	struct DeferredRelease {
+		CFTypeRef resource = nullptr;
+		uint32_t retire_frame = 0;
+	};
+	Mutex deferred_releases_mutex;
+	LocalVector<DeferredRelease> deferred_releases;
+
 public:
 	void encode_imported_resources(MTL::RenderCommandEncoder *p_enc);
 	void encode_imported_resources(MTL::ComputeCommandEncoder *p_enc);
+	void defer_release(CFTypeRef p_resource);
+	void flush_deferred_releases();
 
 protected:
 	virtual Error _create_device();

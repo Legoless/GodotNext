@@ -40,11 +40,24 @@
 
 using namespace RendererRD;
 
+static void defer_metal_release(CFTypeRef p_obj) {
+	if (p_obj == nullptr) {
+		return;
+	}
+	if (RD::get_singleton() != nullptr && RD::get_singleton()->get_device_driver() != nullptr) {
+		RenderingDeviceDriverMetal *rdd = (RenderingDeviceDriverMetal *)RD::get_singleton()->get_device_driver();
+		rdd->defer_release(p_obj);
+	} else {
+		CFRelease(p_obj);
+	}
+}
+
 #pragma mark - Spatial Scaler
 
 MFXSpatialContext::~MFXSpatialContext() {
 	if (scaler) {
-		scaler->release();
+		defer_metal_release(scaler);
+		scaler = nullptr;
 	}
 }
 
@@ -122,8 +135,21 @@ MFXSpatialContext *MFXSpatialEffect::create_context(CreateParams p_params) const
 #pragma mark - Temporal Scaler
 
 MFXTemporalContext::~MFXTemporalContext() {
+	if (pad_src) {
+		defer_metal_release(pad_src);
+		pad_src = nullptr;
+	}
+	if (pad_depth) {
+		defer_metal_release(pad_depth);
+		pad_depth = nullptr;
+	}
+	if (pad_motion) {
+		defer_metal_release(pad_motion);
+		pad_motion = nullptr;
+	}
 	if (scaler) {
-		scaler->release();
+		defer_metal_release(scaler);
+		scaler = nullptr;
 	}
 }
 
@@ -151,8 +177,31 @@ MFXTemporalContext *MFXTemporalEffect::create_context(CreateParams p_params) con
 
 	desc->setOutputTextureFormat((MTL::PixelFormat)pf.getMTLPixelFormat(p_params.output_format));
 
+	const Vector2i min_in = (p_params.min_input_size != Vector2i()) ? p_params.min_input_size : p_params.input_size;
+	if (p_params.dynamic_resolution) {
+		const float hw_min_scale = MTLFX::TemporalScalerDescriptor::supportedInputContentMinScale(dev);
+		const float hw_max_scale = MTLFX::TemporalScalerDescriptor::supportedInputContentMaxScale(dev);
+		const float min_scale_x = float(p_params.output_size.width) / float(MAX(1, p_params.input_size.width));
+		const float min_scale_y = float(p_params.output_size.height) / float(MAX(1, p_params.input_size.height));
+		const float max_scale_x = float(p_params.output_size.width) / float(MAX(1, min_in.width));
+		const float max_scale_y = float(p_params.output_size.height) / float(MAX(1, min_in.height));
+		const float req_min = CLAMP(MIN(min_scale_x, min_scale_y) - 1e-4f, hw_min_scale, hw_max_scale);
+		const float req_max = CLAMP(MAX(max_scale_x, max_scale_y) + 1e-4f, req_min, hw_max_scale);
+		desc->setInputContentPropertiesEnabled(true);
+		desc->setInputContentMinScale(req_min);
+		desc->setInputContentMaxScale(req_max);
+	}
+
 	MFXTemporalContext *context = memnew(MFXTemporalContext);
+	context->max_input_size = p_params.input_size;
+	context->min_input_size = min_in;
+	context->output_size = p_params.output_size;
+	context->dynamic_resolution = p_params.dynamic_resolution;
 	context->scaler = desc->newTemporalScaler(dev);
+	if (context->scaler == nullptr) {
+		memdelete(context);
+		ERR_FAIL_V_MSG(nullptr, "MetalFX failed to create MTLFXTemporalScaler.");
+	}
 	context->scaler->setMotionVectorScaleX(p_params.motion_vector_scale.x);
 	context->scaler->setMotionVectorScaleY(p_params.motion_vector_scale.y);
 	context->scaler->setDepthReversed(true); // Godot uses reverse Z per https://github.com/godotengine/godot/pull/88328
@@ -161,6 +210,8 @@ MFXTemporalContext *MFXTemporalEffect::create_context(CreateParams p_params) con
 }
 
 void MFXTemporalEffect::process(RendererRD::MFXTemporalContext *p_ctx, RendererRD::MFXTemporalEffect::Params p_params) {
+	ERR_FAIL_NULL(p_ctx);
+	ERR_FAIL_NULL(p_ctx->scaler);
 	CallbackArgs *userdata = args_allocator.alloc(
 			this,
 			RDD::TextureID(RD::get_singleton()->get_driver_resource(RDC::DRIVER_RESOURCE_TEXTURE, p_params.src)),
@@ -168,8 +219,9 @@ void MFXTemporalEffect::process(RendererRD::MFXTemporalContext *p_ctx, RendererR
 			RDD::TextureID(RD::get_singleton()->get_driver_resource(RDC::DRIVER_RESOURCE_TEXTURE, p_params.motion)),
 			p_params.exposure.is_valid() ? RDD::TextureID(RD::get_singleton()->get_driver_resource(RDC::DRIVER_RESOURCE_TEXTURE, p_params.exposure)) : RDD::TextureID(),
 			p_params.jitter_offset,
+			p_params.content_size,
 			RDD::TextureID(RD::get_singleton()->get_driver_resource(RDC::DRIVER_RESOURCE_TEXTURE, p_params.dst)),
-			*p_ctx,
+			p_ctx,
 			p_params.reset);
 	RD::CallbackResource res[5] = {
 		{ .rid = p_params.src, .usage = RD::CALLBACK_RESOURCE_USAGE_TEXTURE_SAMPLE },
@@ -184,16 +236,71 @@ void MFXTemporalEffect::process(RendererRD::MFXTemporalContext *p_ctx, RendererR
 
 void MFXTemporalEffect::callback(RDD *p_driver, RDD::CommandBufferID p_command_buffer, CallbackArgs *p_userdata) {
 	MDCommandBufferBase *obj = (MDCommandBufferBase *)(p_command_buffer.id);
-	obj->end();
+	MTL3::MDCommandBuffer *cmd = (MTL3::MDCommandBuffer *)(p_command_buffer.id);
 
 	MTL::Texture *src_texture = reinterpret_cast<MTL::Texture *>(p_userdata->src.id);
 	MTL::Texture *depth = reinterpret_cast<MTL::Texture *>(p_userdata->depth.id);
 	MTL::Texture *motion = reinterpret_cast<MTL::Texture *>(p_userdata->motion.id);
 	MTL::Texture *exposure = reinterpret_cast<MTL::Texture *>(p_userdata->exposure.id);
-
 	MTL::Texture *dst_texture = reinterpret_cast<MTL::Texture *>(p_userdata->dst.id);
 
 	MTLFX::TemporalScalerBase *scaler = p_userdata->scaler;
+	MFXTemporalContext *ctx = p_userdata->ctx;
+	const NS::UInteger max_w = scaler->inputWidth();
+	const NS::UInteger max_h = scaler->inputHeight();
+	const NS::UInteger content_w = (p_userdata->content_size.width > 0) ? MIN((NS::UInteger)p_userdata->content_size.width, max_w) : MIN(src_texture->width(), max_w);
+	const NS::UInteger content_h = (p_userdata->content_size.height > 0) ? MIN((NS::UInteger)p_userdata->content_size.height, max_h) : MIN(src_texture->height(), max_h);
+
+	const bool needs_pad = (src_texture->width() != max_w || src_texture->height() != max_h ||
+			depth->width() != max_w || depth->height() != max_h ||
+			motion->width() != max_w || motion->height() != max_h);
+
+	if (needs_pad && ctx != nullptr) {
+		MTL::Device *dev = src_texture->device();
+		auto ensure_pad_tex = [&](MTL::Texture *&r_pad, MTL::Texture *p_like, MTL::TextureUsage p_usage) {
+			if (r_pad != nullptr && (r_pad->width() != max_w || r_pad->height() != max_h || r_pad->pixelFormat() != p_like->pixelFormat())) {
+				defer_metal_release(r_pad);
+				r_pad = nullptr;
+			}
+			if (r_pad == nullptr) {
+				NS::SharedPtr<MTL::TextureDescriptor> td = NS::TransferPtr(MTL::TextureDescriptor::alloc()->init());
+				td->setTextureType(MTL::TextureType2D);
+				td->setPixelFormat(p_like->pixelFormat());
+				td->setWidth(max_w);
+				td->setHeight(max_h);
+				td->setMipmapLevelCount(1);
+				td->setStorageMode(MTL::StorageModePrivate);
+				td->setHazardTrackingMode(p_like->hazardTrackingMode());
+				td->setUsage(p_usage);
+				r_pad = dev->newTexture(td.get());
+			}
+		};
+
+		ensure_pad_tex(ctx->pad_src, src_texture, scaler->colorTextureUsage());
+		ensure_pad_tex(ctx->pad_depth, depth, scaler->depthTextureUsage());
+		ensure_pad_tex(ctx->pad_motion, motion, scaler->motionTextureUsage());
+
+		cmd->encode_texture_subregion_copy(src_texture, ctx->pad_src, (uint32_t)content_w, (uint32_t)content_h);
+		cmd->encode_texture_subregion_copy(depth, ctx->pad_depth, (uint32_t)content_w, (uint32_t)content_h);
+		cmd->encode_texture_subregion_copy(motion, ctx->pad_motion, (uint32_t)content_w, (uint32_t)content_h);
+
+		obj->retain_resource(ctx->pad_src);
+		obj->retain_resource(ctx->pad_depth);
+		obj->retain_resource(ctx->pad_motion);
+
+		src_texture = ctx->pad_src;
+		depth = ctx->pad_depth;
+		motion = ctx->pad_motion;
+	}
+
+	obj->end();
+
+	if (ctx != nullptr && ctx->dynamic_resolution) {
+		scaler->setInputContentWidth(content_w);
+		scaler->setInputContentHeight(content_h);
+	}
+	scaler->setMotionVectorScaleX((float)content_w);
+	scaler->setMotionVectorScaleY((float)content_h);
 	scaler->setFence(obj->external_pass_fence());
 	scaler->setReset(p_userdata->reset);
 	scaler->setColorTexture(src_texture);
@@ -204,7 +311,6 @@ void MFXTemporalEffect::callback(RDD *p_driver, RDD::CommandBufferID p_command_b
 	scaler->setJitterOffsetY(p_userdata->jitter_offset.y);
 	scaler->setOutputTexture(dst_texture);
 	MTLFX::TemporalScaler *s = static_cast<MTLFX::TemporalScaler *>(scaler);
-	MTL3::MDCommandBuffer *cmd = (MTL3::MDCommandBuffer *)(p_command_buffer.id);
 	s->encodeToCommandBuffer(cmd->get_command_buffer());
 	obj->retain_resource(scaler);
 

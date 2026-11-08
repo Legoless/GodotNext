@@ -3588,6 +3588,18 @@
 		<member name="rendering/scaling_3d/dlss/project_id" type="String" setter="" getter="" default="&quot;&quot;">
 			The project ID passed to the DLSS runtime. Developer builds only; see the license packet.
 		</member>
+		<member name="rendering/scaling_3d/dynamic_resolution/enabled" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], enables the GPU-time dynamic resolution controller in the Forward+ renderer. Rendered 3D resolution steps across 16 evenly spaced buckets between [member rendering/scaling_3d/dynamic_resolution/min_scale] and [member rendering/scaling_3d/dynamic_resolution/max_scale] (intersected with the active upscaler's supported scale range), changing at most once every 30 frames without resetting temporal upscaler history.
+		</member>
+		<member name="rendering/scaling_3d/dynamic_resolution/max_scale" type="float" setter="" getter="" default="1.0">
+			Upper bound on the 3D resolution scale used when [member rendering/scaling_3d/dynamic_resolution/enabled] is [code]true[/code], intersected with the active upscaler's supported scale range. Temporal upscaler contexts allocate for this maximum fraction.
+		</member>
+		<member name="rendering/scaling_3d/dynamic_resolution/min_scale" type="float" setter="" getter="" default="0.5">
+			Lower bound on the 3D resolution scale used when [member rendering/scaling_3d/dynamic_resolution/enabled] is [code]true[/code], intersected with the active upscaler's supported scale range.
+		</member>
+		<member name="rendering/scaling_3d/dynamic_resolution/target_frame_rate" type="int" setter="" getter="" default="60">
+			Target frame rate in Hz used by the GPU-time dynamic resolution controller ([code]1000.0 / target_frame_rate[/code] ms GPU budget) when [member rendering/scaling_3d/dynamic_resolution/enabled] is [code]true[/code].
+		</member>
 		<member name="rendering/scaling_3d/fsr_sharpness" type="float" setter="" getter="" default="0.2">
 			Determines how sharp the upscaled image will be when using the FSR upscaling mode. Sharpness halves with every whole number. Values go from 0.0 (sharpest) to 2.0. Values above 2.0 won't make a visible difference.
 		</member>

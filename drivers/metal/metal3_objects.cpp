@@ -769,6 +769,11 @@ void MDCommandBuffer::copy_buffer(RDD::BufferID p_src_buffer, RDD::BufferID p_ds
 	}
 }
 
+void MDCommandBuffer::encode_texture_subregion_copy(MTL::Texture *p_src, MTL::Texture *p_dst, uint32_t p_width, uint32_t p_height) {
+	MTL::BlitCommandEncoder *enc = _ensure_blit_encoder();
+	enc->copyFromTexture(p_src, 0, 0, MTL::Origin::Make(0, 0, 0), MTL::Size::Make(p_width, p_height, 1), p_dst, 0, 0, MTL::Origin::Make(0, 0, 0));
+}
+
 void MDCommandBuffer::copy_texture(RDD::TextureID p_src_texture, RDD::TextureID p_dst_texture, VectorView<RDD::TextureCopyRegion> p_regions) {
 	MTL::Texture *src = rid::get<RDM::TextureInfo>(p_src_texture)->texture.get();
 	MTL::Texture *dst = rid::get<RDM::TextureInfo>(p_dst_texture)->texture.get();

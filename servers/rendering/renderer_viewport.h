@@ -32,6 +32,7 @@
 
 #include "core/templates/rid_owner.h"
 #include "servers/display/display_server_enums.h"
+#include "servers/rendering/dynamic_resolution.h"
 #include "servers/rendering/renderer_scene_render.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -61,6 +62,10 @@ public:
 		RSE::ViewportScaling3DReason scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
 		float effective_scaling_3d_scale = 1.0f;
 		float scaling_3d_scale = 1.0;
+		bool dynres_active = false;
+		float dynres_scale = 1.0f;
+		float dynres_min_scale = 1.0f;
+		float dynres_max_scale = 1.0f;
 		float fsr_sharpness = 0.2f;
 		RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
 		float texture_mipmap_bias = 0.0f;
@@ -209,6 +214,11 @@ public:
 
 private:
 	RID main_3d_render_target;
+	DynamicResolutionController dynres_controller;
+	uint64_t dynres_last_stamp_frame = UINT64_MAX;
+	uint64_t dynres_min_valid_stamp_frame = 0;
+	bool dynres_was_enabled = false;
+	Vector2 _get_upscaler_scale_range(const Viewport *p_viewport) const;
 	Vector<Viewport *> _sort_active_viewports();
 	void _viewport_set_size(Viewport *p_viewport, int p_width, int p_height, uint32_t p_view_count);
 	bool _viewport_requires_motion_vectors(Viewport *p_viewport);

@@ -109,6 +109,12 @@
 				Returns the internal size of the render buffer (size before upscaling) with which textures are created by default.
 			</description>
 		</method>
+		<method name="get_max_internal_size" qualifiers="const">
+			<return type="Vector2i" />
+			<description>
+				Returns the maximum internal render buffer size for which temporal upscaler contexts are allocated.
+			</description>
+		</method>
 		<method name="get_msaa_3d" qualifiers="const">
 			<return type="int" enum="RenderingServer.ViewportMSAA" />
 			<description>

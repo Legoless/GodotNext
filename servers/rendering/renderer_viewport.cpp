@@ -167,6 +167,75 @@ static const char *scaling_3d_reason_name(RSE::ViewportScaling3DReason p_reason)
 	return "unknown";
 }
 
+Vector2 RendererViewport::_get_upscaler_scale_range(const Viewport *p_viewport) const {
+	if (p_viewport == nullptr) {
+		return Vector2(1.0f, 1.0f);
+	}
+
+	RSE::ViewportScaling3DMode mode = p_viewport->requested_scaling_3d_mode;
+
+#ifdef RD_ENABLED
+	if (mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+		TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		Ref<RenderSceneBuffersRD> rb = p_viewport->render_buffers;
+		const bool api_ok = RD::get_singleton() != nullptr && upscaler != nullptr && upscaler->supports_api(RD::get_singleton()->get_device_api_name());
+		const bool view_ok = upscaler != nullptr && (p_viewport->view_count <= 1 || upscaler->supports_multiview());
+		const bool ctx_ok = upscaler != nullptr && upscaler->get_context_error(rb.ptr()) == RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+		if (api_ok && view_ok && ctx_ok && p_viewport->size.width >= 32 && p_viewport->size.height >= 32) {
+			return upscaler->get_scale_range();
+		}
+		mode = (RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL))
+				? RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL
+				: RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+	}
+
+	if (mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) {
+		if (RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL)) {
+			const double lo_d = (double)RD::get_singleton()->limit_get(RD::LIMIT_METALFX_TEMPORAL_SCALER_MIN_SCALE) / 1000'000.0;
+			const double hi_d = (double)RD::get_singleton()->limit_get(RD::LIMIT_METALFX_TEMPORAL_SCALER_MAX_SCALE) / 1000'000.0;
+			float lo_f = (float)lo_d;
+			float hi_f = (float)hi_d;
+			if ((double)lo_f < lo_d) {
+				lo_f = std::nextafter(lo_f, INFINITY);
+			}
+			if ((double)hi_f > hi_d) {
+				hi_f = std::nextafter(hi_f, 0.0f);
+			}
+			return Vector2(lo_f, hi_f);
+		}
+		mode = (RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_SPATIAL))
+				? RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL
+				: RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+	}
+
+	if (mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL && (RD::get_singleton() == nullptr || !RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_SPATIAL))) {
+		mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR;
+	}
+#else
+	if (mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL) {
+		mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR2;
+	} else if (mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL) {
+		mode = RSE::VIEWPORT_SCALING_3D_MODE_FSR;
+	}
+#endif
+
+	switch (mode) {
+		case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+			return Vector2(NEXTGI_TSR_MIN_SCALE, NEXTGI_TSR_MAX_SCALE);
+		case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
+		case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
+		case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL:
+		case RSE::VIEWPORT_SCALING_3D_MODE_NEAREST:
+			return p_viewport->fsr_enabled || mode == RSE::VIEWPORT_SCALING_3D_MODE_NEAREST ? Vector2(0.1f, 1.0f) : Vector2(0.1f, 2.0f);
+		case RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR:
+		case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
+			return Vector2(0.1f, 2.0f);
+		case RSE::VIEWPORT_SCALING_3D_MODE_OFF:
+		default:
+			return Vector2(1.0f, 1.0f);
+	}
+}
+
 void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 	if (p_viewport->render_buffers.is_valid()) {
 		if (p_viewport->size.width == 0 || p_viewport->size.height == 0) {
@@ -174,6 +243,15 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 		} else {
 			const float EPSILON = 0.0001;
 			float scaling_3d_scale = p_viewport->scaling_3d_scale;
+			float dynres_eff_min = scaling_3d_scale;
+			float dynres_eff_max = scaling_3d_scale;
+			if (p_viewport->dynres_active) {
+				const Vector2 vp_range = _get_upscaler_scale_range(p_viewport);
+				const Vector2 vp_bounds = DynamicResolutionController::intersect_scale_bounds(p_viewport->dynres_min_scale, p_viewport->dynres_max_scale, vp_range);
+				dynres_eff_min = vp_bounds.x;
+				dynres_eff_max = vp_bounds.y;
+				scaling_3d_scale = CLAMP(p_viewport->dynres_scale, dynres_eff_min, dynres_eff_max);
+			}
 			RSE::ViewportScaling3DMode scaling_3d_mode = p_viewport->requested_scaling_3d_mode;
 			// GodotNext: pu_dlss_scaling_mode (#103). The setter keeps the
 			// request; this records the reason and the effective scale.
@@ -341,63 +419,68 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				use_taa = false;
 			}
 
-			int target_width;
-			int target_height;
-			int render_width;
-			int render_height;
+			const int target_width = p_viewport->size.width;
+			const int target_height = p_viewport->size.height;
 
-			switch (scaling_3d_mode) {
-				case RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR:
-				case RSE::VIEWPORT_SCALING_3D_MODE_NEAREST:
-					// Clamp 3D rendering resolution to reasonable values supported on most hardware.
-					// This prevents freezing the engine or outright crashing on lower-end GPUs.
-					target_width = p_viewport->size.width;
-					target_height = p_viewport->size.height;
-					render_width = CLAMP(target_width * scaling_3d_scale, 1, 16384);
-					render_height = CLAMP(target_height * scaling_3d_scale, 1, 16384);
-					break;
-				case RSE::VIEWPORT_SCALING_3D_MODE_DLSS: {
-					target_width = p_viewport->size.width;
-					target_height = p_viewport->size.height;
-					TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
-					ERR_FAIL_NULL(upscaler);
-					const Size2i render_size = upscaler->get_render_size(p_viewport->size, scaling_3d_scale);
-					render_width = render_size.width;
-					render_height = render_size.height;
-				} break;
-				case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL:
-				case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL:
-				case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
-				case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
-					target_width = p_viewport->size.width;
-					target_height = p_viewport->size.height;
-					render_width = MAX(target_width * scaling_3d_scale, 1.0); // target_width / (target_width * scaling)
-					render_height = MAX(target_height * scaling_3d_scale, 1.0);
-					break;
-				case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
-				case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
-					target_width = p_viewport->size.width;
-					target_height = p_viewport->size.height;
-					render_width = CLAMP(target_width * scaling_3d_scale, 1, 16384);
-					render_height = CLAMP(target_height * scaling_3d_scale, 1, 16384);
-					break;
-				case RSE::VIEWPORT_SCALING_3D_MODE_OFF:
-					target_width = p_viewport->size.width;
-					target_height = p_viewport->size.height;
-					render_width = target_width;
-					render_height = target_height;
-					break;
-				default:
-					// This is an unknown mode.
-					WARN_PRINT_ONCE(vformat("Unknown scaling mode: %d. Disabling 3D resolution scaling.", scaling_3d_mode));
-					scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
-					scaling_3d_scale = 1.0;
-					target_width = p_viewport->size.width;
-					target_height = p_viewport->size.height;
-					render_width = target_width;
-					render_height = target_height;
-					break;
+			auto compute_render_size_for_scale = [&](RSE::ViewportScaling3DMode p_mode, float p_scale) -> Size2i {
+				switch (p_mode) {
+					case RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR:
+					case RSE::VIEWPORT_SCALING_3D_MODE_NEAREST:
+					case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+					case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
+						return Size2i(
+								CLAMP(int(target_width * p_scale), 1, 16384),
+								CLAMP(int(target_height * p_scale), 1, 16384));
+					case RSE::VIEWPORT_SCALING_3D_MODE_DLSS: {
+						TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+						ERR_FAIL_NULL_V(upscaler, Size2i(MAX(int(target_width * p_scale), 1), MAX(int(target_height * p_scale), 1)));
+						return upscaler->get_render_size(p_viewport->size, p_scale);
+					}
+					case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL: {
+						int rw = int(MAX(target_width * p_scale, 1.0f));
+						int rh = int(MAX(target_height * p_scale, 1.0f));
+#ifdef RD_ENABLED
+						if (RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_METALFX_TEMPORAL)) {
+							const double mfx_min = (double)RD::get_singleton()->limit_get(RD::LIMIT_METALFX_TEMPORAL_SCALER_MIN_SCALE) / 1000'000.0;
+							const double mfx_max = (double)RD::get_singleton()->limit_get(RD::LIMIT_METALFX_TEMPORAL_SCALER_MAX_SCALE) / 1000'000.0;
+							const int min_w = MAX(1, (int)std::ceil((double)target_width * mfx_min));
+							const int max_w = MAX(min_w, (int)std::floor((double)target_width * mfx_max));
+							const int min_h = MAX(1, (int)std::ceil((double)target_height * mfx_min));
+							const int max_h = MAX(min_h, (int)std::floor((double)target_height * mfx_max));
+							rw = CLAMP(rw, min_w, max_w);
+							rh = CLAMP(rh, min_h, max_h);
+						}
+#endif
+						return Size2i(rw, rh);
+					}
+					case RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL:
+					case RSE::VIEWPORT_SCALING_3D_MODE_FSR:
+					case RSE::VIEWPORT_SCALING_3D_MODE_FSR2:
+						return Size2i(int(MAX(target_width * p_scale, 1.0f)), int(MAX(target_height * p_scale, 1.0f)));
+					case RSE::VIEWPORT_SCALING_3D_MODE_OFF:
+					default:
+						return Size2i(target_width, target_height);
+				}
+			};
+
+			if (scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_NEAREST &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_DLSS &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_FSR &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_FSR2 &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_TSR &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM &&
+					scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF) {
+				WARN_PRINT_ONCE(vformat("Unknown scaling mode: %d. Disabling 3D resolution scaling.", scaling_3d_mode));
+				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
+				scaling_3d_scale = 1.0;
 			}
+
+			const Size2i render_size = compute_render_size_for_scale(scaling_3d_mode, scaling_3d_scale);
+			const int render_width = render_size.width;
+			const int render_height = render_size.height;
 
 			uint32_t jitter_phase_count = 0;
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
@@ -423,6 +506,12 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			RenderSceneBuffersConfiguration rb_config;
 			rb_config.set_render_target(p_viewport->render_target);
 			rb_config.set_internal_size(Size2i(render_width, render_height));
+			if (p_viewport->dynres_active && scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
+				const Size2i max_render_size = compute_render_size_for_scale(scaling_3d_mode, dynres_eff_max).max(Size2i(render_width, render_height));
+				const Size2i min_render_size = compute_render_size_for_scale(scaling_3d_mode, dynres_eff_min).min(Size2i(render_width, render_height));
+				rb_config.set_max_internal_size(max_render_size);
+				rb_config.set_min_internal_size(min_render_size);
+			}
 			rb_config.set_target_size(Size2(target_width, target_height));
 			rb_config.set_view_count(p_viewport->view_count);
 			rb_config.set_scaling_3d_mode(scaling_3d_mode);
@@ -999,6 +1088,7 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 	// Select the primary 3D viewport for NextGeo streaming (#78): prefer a screen-attached
 	// root 3D viewport, then an unparented root 3D viewport, then the largest active 3D viewport.
 	main_3d_render_target = RID();
+	Viewport *primary_3d_vp = nullptr;
 	int best_main_3d_tier = 0;
 	int64_t best_main_3d_area = -1;
 	for (int i = 0; i < sorted_active_viewports.size(); i++) {
@@ -1015,7 +1105,115 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			best_main_3d_tier = tier;
 			best_main_3d_area = area;
 			main_3d_render_target = vp->render_target;
+			primary_3d_vp = vp;
 		}
+	}
+
+	const bool dynres_enabled = !RSG::rasterizer->is_low_end() &&
+			OS::get_singleton()->get_current_rendering_method() == "forward_plus" &&
+			bool(GLOBAL_GET("rendering/scaling_3d/dynamic_resolution/enabled"));
+	bool emit_dynres_timestamps = false;
+
+	if (!dynres_enabled) {
+		if (dynres_was_enabled) {
+			dynres_controller.reset();
+			dynres_last_stamp_frame = UINT64_MAX;
+			dynres_min_valid_stamp_frame = 0;
+			dynres_was_enabled = false;
+			for (int i = 0; i < sorted_active_viewports.size(); i++) {
+				Viewport *vp = sorted_active_viewports[i];
+				if (vp->dynres_active) {
+					vp->dynres_active = false;
+					_configure_3d_render_buffers(vp);
+				}
+			}
+		}
+	} else {
+		const int target_fps = MAX(1, int(GLOBAL_GET("rendering/scaling_3d/dynamic_resolution/target_frame_rate")));
+		const float cfg_min_scale = float(GLOBAL_GET("rendering/scaling_3d/dynamic_resolution/min_scale"));
+		const float cfg_max_scale = float(GLOBAL_GET("rendering/scaling_3d/dynamic_resolution/max_scale"));
+
+		double harvested_gpu_ms = 0.0;
+		bool has_harvested_gpu_ms = false;
+#ifdef RD_ENABLED
+		RenderingDevice *rd = RD::get_singleton();
+		if (dynres_was_enabled && rd != nullptr) {
+			const uint32_t stamp_count = rd->get_captured_timestamps_count();
+			const uint64_t stamp_frame = rd->get_captured_timestamps_frame();
+			if (stamp_count >= 2 && stamp_frame != dynres_last_stamp_frame) {
+				dynres_last_stamp_frame = stamp_frame;
+				if (stamp_frame >= dynres_min_valid_stamp_frame) {
+					int begin_idx = -1;
+					int end_idx = -1;
+					for (uint32_t ti = 0; ti < stamp_count; ti++) {
+						const String &tname = rd->get_captured_timestamp_name(ti);
+						if (tname == "_dynres_begin") {
+							begin_idx = int(ti);
+						} else if (tname == "_dynres_end") {
+							end_idx = int(ti);
+						}
+					}
+					if (begin_idx < 0 || end_idx <= begin_idx) {
+						begin_idx = 0;
+						end_idx = int(stamp_count) - 1;
+					}
+					const uint64_t t0 = rd->get_captured_timestamp_gpu_time(uint32_t(begin_idx));
+					const uint64_t t1 = rd->get_captured_timestamp_gpu_time(uint32_t(end_idx));
+					if (t1 > t0) {
+						harvested_gpu_ms = double(t1 - t0) / 1000000.0;
+						has_harvested_gpu_ms = true;
+					}
+				}
+			}
+		}
+#endif
+
+		if (primary_3d_vp != nullptr && !primary_3d_vp->use_xr) {
+			const Vector2 primary_range = _get_upscaler_scale_range(primary_3d_vp);
+			const bool bounds_changed = dynres_controller.configure_bounds(cfg_min_scale, cfg_max_scale, primary_range, primary_3d_vp->scaling_3d_scale);
+			bool bucket_changed = false;
+			if (has_harvested_gpu_ms) {
+				bucket_changed = dynres_controller.push_gpu_frame_time_ms(harvested_gpu_ms, target_fps);
+			}
+#ifdef RD_ENABLED
+			if ((bounds_changed || bucket_changed) && RD::get_singleton() != nullptr) {
+				dynres_min_valid_stamp_frame = Engine::get_singleton()->get_frames_drawn() + RD::get_singleton()->get_frame_delay();
+			}
+#else
+			(void)bounds_changed;
+			(void)bucket_changed;
+#endif
+
+			const float controller_scale = dynres_controller.get_current_scale();
+			for (int i = 0; i < sorted_active_viewports.size(); i++) {
+				Viewport *vp = sorted_active_viewports[i];
+				if (vp->last_pass != draw_viewports_pass || vp->disable_3d || !vp->scenario.is_valid() || !vp->camera.is_valid() || vp->use_xr) {
+					continue;
+				}
+				const Vector2 vp_range = _get_upscaler_scale_range(vp);
+				const Vector2 vp_bounds = DynamicResolutionController::intersect_scale_bounds(cfg_min_scale, cfg_max_scale, vp_range);
+				const float vp_scale = CLAMP(controller_scale, vp_bounds.x, vp_bounds.y);
+				const bool needs_reconfig = !vp->dynres_active ||
+						!Math::is_equal_approx(vp->dynres_scale, vp_scale) ||
+						!Math::is_equal_approx(vp->dynres_min_scale, cfg_min_scale) ||
+						!Math::is_equal_approx(vp->dynres_max_scale, cfg_max_scale);
+				vp->dynres_active = true;
+				vp->dynres_scale = vp_scale;
+				vp->dynres_min_scale = cfg_min_scale;
+				vp->dynres_max_scale = cfg_max_scale;
+				if (needs_reconfig && vp->render_buffers.is_valid()) {
+					_configure_3d_render_buffers(vp);
+				}
+			}
+
+			emit_dynres_timestamps = !RSG::utilities->capturing_timestamps;
+		}
+
+		dynres_was_enabled = true;
+	}
+
+	if (emit_dynres_timestamps) {
+		RSG::utilities->capture_timestamp("_dynres_begin");
 	}
 
 	int vertices_drawn = 0;
@@ -1151,6 +1349,10 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 		objects_drawn += vp->render_info.info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_OBJECTS_IN_FRAME];
 		vertices_drawn += vp->render_info.info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_PRIMITIVES_IN_FRAME];
 		draw_calls_used += vp->render_info.info[RSE::VIEWPORT_RENDER_INFO_TYPE_CANVAS][RSE::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME];
+	}
+
+	if (emit_dynres_timestamps) {
+		RSG::utilities->capture_timestamp("_dynres_end");
 	}
 
 	RSG::scene->set_debug_draw_mode(RSE::VIEWPORT_DEBUG_DRAW_DISABLED);

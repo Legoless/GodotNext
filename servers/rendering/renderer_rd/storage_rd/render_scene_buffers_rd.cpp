@@ -46,7 +46,9 @@ RenderSceneBuffersRD::~RenderSceneBuffersRD() {
 
 	data_buffers.clear();
 
-	RendererRD::MaterialStorage::get_singleton()->samplers_rd_free(samplers);
+	if (RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton()) {
+		material_storage->samplers_rd_free(samplers);
+	}
 }
 
 void RenderSceneBuffersRD::_bind_methods() {
@@ -74,6 +76,7 @@ void RenderSceneBuffersRD::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_render_target"), &RenderSceneBuffersRD::get_render_target);
 	ClassDB::bind_method(D_METHOD("get_view_count"), &RenderSceneBuffersRD::get_view_count);
 	ClassDB::bind_method(D_METHOD("get_internal_size"), &RenderSceneBuffersRD::get_internal_size);
+	ClassDB::bind_method(D_METHOD("get_max_internal_size"), &RenderSceneBuffersRD::get_max_internal_size);
 	ClassDB::bind_method(D_METHOD("get_target_size"), &RenderSceneBuffersRD::get_target_size);
 	ClassDB::bind_method(D_METHOD("get_scaling_3d_mode"), &RenderSceneBuffersRD::get_scaling_3d_mode);
 	ClassDB::bind_method(D_METHOD("get_fsr_sharpness"), &RenderSceneBuffersRD::get_fsr_sharpness);
@@ -127,9 +130,10 @@ void RenderSceneBuffersRD::update_samplers() {
 		computed_mipmap_bias -= 0.25;
 	}
 
-	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
-	material_storage->samplers_rd_free(samplers);
-	samplers = material_storage->samplers_rd_allocate(computed_mipmap_bias, anisotropic_filtering_level);
+	if (RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton()) {
+		material_storage->samplers_rd_free(samplers);
+		samplers = material_storage->samplers_rd_allocate(computed_mipmap_bias, anisotropic_filtering_level);
+	}
 }
 
 void RenderSceneBuffersRD::cleanup() {
@@ -160,14 +164,163 @@ void RenderSceneBuffersRD::cleanup() {
 #endif
 }
 
+bool RenderSceneBuffersRD::is_output_sized_named_texture(const StringName &p_context, const StringName &p_texture_name) {
+	if (p_context == RB_SCOPE_BUFFERS) {
+		return p_texture_name == RB_TEX_COLOR_UPSCALED || p_texture_name == RB_TEX_BLUR_0 || p_texture_name == RB_TEX_BLUR_1;
+	}
+	if (p_context == RB_SCOPE_TSR) {
+		return p_texture_name == SNAME("history_color_0") ||
+				p_texture_name == SNAME("history_color_1") ||
+				p_texture_name == SNAME("history_meta_0") ||
+				p_texture_name == SNAME("history_meta_1");
+	}
+	if (p_context == SNAME("Tonemapper")) {
+		return p_texture_name == SNAME("destination");
+	}
+	if (p_context == SNAME("rb_smaa")) {
+		return p_texture_name == SNAME("edges_tex") ||
+				p_texture_name == SNAME("blend_tex") ||
+				p_texture_name == SNAME("stencil");
+	}
+	return false;
+}
+
+bool RenderSceneBuffersRD::can_configure_internal_only(const RenderSceneBuffersConfiguration *p_config) const {
+	if (p_config == nullptr) {
+		return false;
+	}
+	if (internal_size == Size2i(0, 0) || target_size == Size2i(0, 0) || max_internal_size == Size2i(0, 0)) {
+		return false;
+	}
+	const Size2i next_internal = p_config->get_internal_size();
+	if (next_internal.x <= 0 || next_internal.y <= 0) {
+		return false;
+	}
+	if (RSE::scaling_3d_mode_type(scaling_3d_mode) != RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
+		return false;
+	}
+	if (p_config->get_scaling_3d_mode() != scaling_3d_mode) {
+		return false;
+	}
+	if (p_config->get_render_target() != render_target) {
+		return false;
+	}
+	if (render_target.is_valid()) {
+		if (RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton()) {
+			if (texture_storage->render_target_is_using_hdr(render_target) != force_hdr) {
+				return false;
+			}
+			if (texture_storage->render_target_get_vrs_mode(render_target) != vrs_mode) {
+				return false;
+			}
+		}
+	}
+	if (p_config->get_target_size() != target_size ||
+			p_config->get_view_count() != view_count ||
+			view_count == 0 ||
+			p_config->get_msaa_3d() != msaa_3d ||
+			p_config->get_screen_space_aa() != screen_space_aa ||
+			p_config->get_fsr_sharpness() != fsr_sharpness ||
+			p_config->get_tsr_quality() != tsr_quality ||
+			p_config->get_anisotropic_filtering_level() != anisotropic_filtering_level ||
+			p_config->get_use_taa() != use_taa ||
+			p_config->get_use_debanding() != use_debanding) {
+		return false;
+	}
+
+	const bool next_has_explicit_max = p_config->get_max_internal_size() != Size2i(0, 0);
+	if (next_has_explicit_max != has_explicit_max_internal_size) {
+		return false;
+	}
+	if (next_has_explicit_max && p_config->get_max_internal_size().max(next_internal) != max_internal_size) {
+		return false;
+	}
+	if (p_config->get_min_internal_size() != Size2i(0, 0) && p_config->get_min_internal_size().min(next_internal) != min_internal_size) {
+		return false;
+	}
+	if (next_internal.x > max_internal_size.x || next_internal.y > max_internal_size.y) {
+		return false;
+	}
+	if (next_internal.x < min_internal_size.x || next_internal.y < min_internal_size.y) {
+		return false;
+	}
+
+	return true;
+}
+
 void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_config) {
+	ERR_FAIL_NULL(p_config);
+	ERR_FAIL_COND_MSG(p_config->get_view_count() == 0, "Must have at least 1 view");
+
+	if (can_configure_internal_only(p_config)) {
+		const Size2i prev_internal_size = internal_size;
+		const float prev_mipmap_bias = texture_mipmap_bias;
+		internal_size = p_config->get_internal_size();
+		texture_mipmap_bias = p_config->get_texture_mipmap_bias();
+		if (texture_mipmap_bias != prev_mipmap_bias) {
+			update_samplers();
+		}
+		if (internal_size == prev_internal_size) {
+			return;
+		}
+
+		Vector<NTKey> views_to_free;
+		Vector<NTKey> textures_to_free;
+		for (const KeyValue<NTKey, NamedTexture> &E : named_textures) {
+			if (is_output_sized_named_texture(E.key.context, E.key.buffer_name)) {
+				continue;
+			}
+			if (E.value.is_view) {
+				views_to_free.push_back(E.key);
+			} else {
+				textures_to_free.push_back(E.key);
+			}
+		}
+		for (const NTKey &key : views_to_free) {
+			free_named_texture(named_textures[key]);
+			named_textures.erase(key);
+		}
+		for (const NTKey &key : textures_to_free) {
+			free_named_texture(named_textures[key]);
+			named_textures.erase(key);
+		}
+
+		if (RD::get_singleton() != nullptr) {
+			const bool resolve_target = msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
+			create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR, get_base_data_format(), get_color_usage_bits(resolve_target, false, can_be_storage));
+			create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH, get_depth_format(resolve_target, false, can_be_storage), get_depth_usage_bits(resolve_target, false, can_be_storage));
+
+			if (msaa_3d == RSE::VIEWPORT_MSAA_DISABLED) {
+				texture_samples = RD::TEXTURE_SAMPLES_1;
+			} else {
+				texture_samples = msaa_to_samples(msaa_3d);
+				create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA, get_base_data_format(), get_color_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
+				create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA, get_depth_format(false, true, can_be_storage), get_depth_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
+			}
+
+			if (vrs && vrs_mode != RSE::VIEWPORT_VRS_DISABLED) {
+				create_texture(RB_SCOPE_VRS, RB_TEXTURE, get_vrs_format(), get_vrs_usage_bits(), RD::TEXTURE_SAMPLES_1, vrs->get_vrs_texture_size(internal_size));
+			}
+		} else {
+			texture_samples = (msaa_3d == RSE::VIEWPORT_MSAA_DISABLED) ? RD::TEXTURE_SAMPLES_1 : msaa_to_samples(msaa_3d);
+		}
+
+		for (KeyValue<StringName, Ref<RenderBufferCustomDataRD>> &E : data_buffers) {
+			E.value->configure_internal_size(this);
+		}
+		return;
+	}
+
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 
 	render_target = p_config->get_render_target();
-	force_hdr = texture_storage->render_target_is_using_hdr(render_target);
+	force_hdr = (texture_storage && render_target.is_valid()) ? texture_storage->render_target_is_using_hdr(render_target) : false;
 
 	target_size = p_config->get_target_size();
 	internal_size = p_config->get_internal_size();
+	has_explicit_max_internal_size = p_config->get_max_internal_size() != Size2i(0, 0);
+	max_internal_size = has_explicit_max_internal_size ? p_config->get_max_internal_size().max(internal_size) : internal_size;
+	min_internal_size = (p_config->get_min_internal_size() != Size2i(0, 0)) ? p_config->get_min_internal_size().min(internal_size) : Size2i(1, 1);
 	view_count = p_config->get_view_count();
 
 	scaling_3d_mode = p_config->get_scaling_3d_mode();
@@ -181,39 +334,41 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 	use_taa = p_config->get_use_taa();
 	use_debanding = p_config->get_use_debanding();
 
-	ERR_FAIL_COND_MSG(view_count == 0, "Must have at least 1 view");
-
 	temporal_history_reset.request();
-	vrs_mode = texture_storage->render_target_get_vrs_mode(render_target);
+	vrs_mode = (texture_storage && render_target.is_valid()) ? texture_storage->render_target_get_vrs_mode(render_target) : RSE::VIEWPORT_VRS_DISABLED;
 
 	update_samplers();
 
 	// cleanout any old buffers we had.
 	cleanup();
 
-	// Create our color buffer.
-	const bool resolve_target = msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
-	create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR, get_base_data_format(), get_color_usage_bits(resolve_target, false, can_be_storage));
+	if (RD::get_singleton() != nullptr) {
+		// Create our color buffer.
+		const bool resolve_target = msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
+		create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR, get_base_data_format(), get_color_usage_bits(resolve_target, false, can_be_storage));
 
-	// TODO: Detect when it is safe to use RD::TEXTURE_USAGE_TRANSIENT_BIT for RB_TEX_DEPTH, RB_TEX_COLOR_MSAA and/or RB_TEX_DEPTH_MSAA.
-	// (it means we cannot sample from it, we cannot copy from/to it) to save VRAM (and maybe performance too).
+		// TODO: Detect when it is safe to use RD::TEXTURE_USAGE_TRANSIENT_BIT for RB_TEX_DEPTH, RB_TEX_COLOR_MSAA and/or RB_TEX_DEPTH_MSAA.
+		// (it means we cannot sample from it, we cannot copy from/to it) to save VRAM (and maybe performance too).
 
-	// Create our depth buffer.
-	create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH, get_depth_format(resolve_target, false, can_be_storage), get_depth_usage_bits(resolve_target, false, can_be_storage));
+		// Create our depth buffer.
+		create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH, get_depth_format(resolve_target, false, can_be_storage), get_depth_usage_bits(resolve_target, false, can_be_storage));
 
-	// Create our MSAA buffers.
-	if (msaa_3d == RSE::VIEWPORT_MSAA_DISABLED) {
-		texture_samples = RD::TEXTURE_SAMPLES_1;
+		// Create our MSAA buffers.
+		if (msaa_3d == RSE::VIEWPORT_MSAA_DISABLED) {
+			texture_samples = RD::TEXTURE_SAMPLES_1;
+		} else {
+			texture_samples = msaa_to_samples(msaa_3d);
+			create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA, get_base_data_format(), get_color_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
+			create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA, get_depth_format(false, true, can_be_storage), get_depth_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
+		}
+
+		// VRS (note, our vrs object will only be set if VRS is supported)
+		RID vrs_texture;
+		if (vrs && vrs_mode != RSE::VIEWPORT_VRS_DISABLED) {
+			vrs_texture = create_texture(RB_SCOPE_VRS, RB_TEXTURE, get_vrs_format(), get_vrs_usage_bits(), RD::TEXTURE_SAMPLES_1, vrs->get_vrs_texture_size(internal_size));
+		}
 	} else {
-		texture_samples = msaa_to_samples(msaa_3d);
-		create_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_MSAA, get_base_data_format(), get_color_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
-		create_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA, get_depth_format(false, true, can_be_storage), get_depth_usage_bits(false, true, can_be_storage), texture_samples, Size2i(), 0, 1, true, true);
-	}
-
-	// VRS (note, our vrs object will only be set if VRS is supported)
-	RID vrs_texture;
-	if (vrs && vrs_mode != RSE::VIEWPORT_VRS_DISABLED) {
-		vrs_texture = create_texture(RB_SCOPE_VRS, RB_TEXTURE, get_vrs_format(), get_vrs_usage_bits(), RD::TEXTURE_SAMPLES_1, vrs->get_vrs_texture_size(internal_size));
+		texture_samples = (msaa_3d == RSE::VIEWPORT_MSAA_DISABLED) ? RD::TEXTURE_SAMPLES_1 : msaa_to_samples(msaa_3d);
 	}
 
 	// (re-)configure any named buffers
@@ -228,6 +383,9 @@ void RenderSceneBuffersRD::configure_for_reflections(const Size2i p_reflection_s
 
 	target_size = p_reflection_size;
 	internal_size = p_reflection_size;
+	max_internal_size = p_reflection_size;
+	min_internal_size = p_reflection_size;
+	has_explicit_max_internal_size = false;
 	render_target = RID();
 	scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
 	tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
@@ -520,6 +678,16 @@ void RenderSceneBuffersRD::clear_context(const StringName &p_context) {
 		free_named_texture(named_textures[key]);
 		named_textures.erase(key);
 	}
+}
+
+bool RenderSceneBuffersRD::free_texture(const StringName &p_context, const StringName &p_texture_name) {
+	NTKey key(p_context, p_texture_name);
+	if (!named_textures.has(key)) {
+		return false;
+	}
+	free_named_texture(named_textures[key]);
+	named_textures.erase(key);
+	return true;
 }
 
 uint64_t RenderSceneBuffersRD::get_context_memory_bytes(const StringName &p_context) const {

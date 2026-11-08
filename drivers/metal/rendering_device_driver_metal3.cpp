@@ -72,6 +72,7 @@ RenderingDeviceDriverMetal::~RenderingDeviceDriverMetal() {
 	for (MDCommandBuffer *cb : command_buffers) {
 		memdelete(cb);
 	}
+	flush_deferred_releases();
 }
 
 #pragma mark - Initialization

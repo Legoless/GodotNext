@@ -238,32 +238,43 @@ void TSR::ensure_textures(Ref<RenderSceneBuffersRD> p_render_buffers, const Size
 	const StringName history_color_0_name("history_color_0");
 	const StringName dilated_velocity_name("dilated_velocity");
 
-	bool need_recreate = !p_render_buffers->has_texture(RB_SCOPE_TSR, history_color_0_name) || !p_render_buffers->has_texture(RB_SCOPE_TSR, dilated_velocity_name);
-	if (!need_recreate) {
+	bool need_recreate_history = !p_render_buffers->has_texture(RB_SCOPE_TSR, history_color_0_name);
+	if (!need_recreate_history) {
 		const RD::TextureFormat hist_tf = p_render_buffers->get_texture_format(RB_SCOPE_TSR, history_color_0_name);
-		const RD::TextureFormat int_tf = p_render_buffers->get_texture_format(RB_SCOPE_TSR, dilated_velocity_name);
-		if (int(hist_tf.width) != p_history_size.width || int(hist_tf.height) != p_history_size.height ||
-				int(int_tf.width) != p_internal_size.width || int(int_tf.height) != p_internal_size.height) {
-			need_recreate = true;
+		if (int(hist_tf.width) != p_history_size.width || int(hist_tf.height) != p_history_size.height) {
+			need_recreate_history = true;
 		}
 	}
 
-	if (!need_recreate) {
-		return;
+	bool need_recreate_internal = !p_render_buffers->has_texture(RB_SCOPE_TSR, dilated_velocity_name);
+	if (!need_recreate_internal) {
+		const RD::TextureFormat int_tf = p_render_buffers->get_texture_format(RB_SCOPE_TSR, dilated_velocity_name);
+		if (int(int_tf.width) != p_internal_size.width || int(int_tf.height) != p_internal_size.height) {
+			need_recreate_internal = true;
+		}
 	}
 
-	p_render_buffers->clear_context(RB_SCOPE_TSR);
+	if (!need_recreate_history && !need_recreate_internal) {
+		return;
+	}
 
 	const uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	const uint32_t view_count = p_render_buffers->get_view_count();
 
 	for (const TSRTextureFormatEntry &entry : TSR_FORMAT_TABLE) {
+		const bool is_history = entry.domain == TSR_DOMAIN_HISTORY;
+		if ((is_history && !need_recreate_history) || (!is_history && !need_recreate_internal)) {
+			continue;
+		}
+		const StringName tex_name(entry.name);
+		p_render_buffers->free_texture(RB_SCOPE_TSR, tex_name);
+
 		RD::DataFormat fmt = entry.format;
 		if (history_use_rgba16f && fmt == RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32) {
 			fmt = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		}
-		const Size2i tex_size = (entry.domain == TSR_DOMAIN_HISTORY) ? p_history_size : p_internal_size;
-		const RID tex = p_render_buffers->create_texture(RB_SCOPE_TSR, StringName(entry.name), fmt, usage_bits, RD::TEXTURE_SAMPLES_1, tex_size);
+		const Size2i tex_size = is_history ? p_history_size : p_internal_size;
+		const RID tex = p_render_buffers->create_texture(RB_SCOPE_TSR, tex_name, fmt, usage_bits, RD::TEXTURE_SAMPLES_1, tex_size);
 		if (tex.is_valid()) {
 			rd->texture_clear(tex, Color(0, 0, 0, 0), 0, 1, 0, view_count);
 		}

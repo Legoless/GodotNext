@@ -60,8 +60,11 @@ inline constexpr TSRPreset TSR_PRESETS[5] = {
 
 static_assert(sizeof(TSR_PRESETS) / sizeof(TSR_PRESETS[0]) == RSE::VIEWPORT_TSR_QUALITY_MAX);
 
+inline constexpr float NEXTGI_TSR_MIN_SCALE = 0.25f;
+inline constexpr float NEXTGI_TSR_MAX_SCALE = 2.0f;
+
 inline constexpr float nextgi_clamp_tsr_scale(float p_scale, bool &r_clamped) {
-	const float clamped = CLAMP(p_scale, 0.25f, 2.0f);
+	const float clamped = CLAMP(p_scale, NEXTGI_TSR_MIN_SCALE, NEXTGI_TSR_MAX_SCALE);
 	r_clamped = clamped != p_scale;
 	return clamped;
 }

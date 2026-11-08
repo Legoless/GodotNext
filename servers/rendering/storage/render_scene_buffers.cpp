@@ -43,6 +43,10 @@ void RenderSceneBuffersConfiguration::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_internal_size", "internal_size"), &RenderSceneBuffersConfiguration::set_internal_size);
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "internal_size"), "set_internal_size", "get_internal_size");
 
+	ClassDB::bind_method(D_METHOD("get_max_internal_size"), &RenderSceneBuffersConfiguration::get_max_internal_size);
+	ClassDB::bind_method(D_METHOD("set_max_internal_size", "max_internal_size"), &RenderSceneBuffersConfiguration::set_max_internal_size);
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "max_internal_size"), "set_max_internal_size", "get_max_internal_size");
+
 	ClassDB::bind_method(D_METHOD("get_target_size"), &RenderSceneBuffersConfiguration::get_target_size);
 	ClassDB::bind_method(D_METHOD("set_target_size", "target_size"), &RenderSceneBuffersConfiguration::set_target_size);
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR2I, "target_size"), "set_target_size", "get_target_size");

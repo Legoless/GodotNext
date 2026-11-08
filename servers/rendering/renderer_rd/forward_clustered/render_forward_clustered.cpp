@@ -111,8 +111,18 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_voxelgi() 
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::ensure_fsr2(RendererRD::FSR2Effect *p_effect) {
+	const Size2i max_render_size = render_buffers->get_max_internal_size();
+	const Size2i display_size = render_buffers->get_target_size();
+	if (fsr2_context != nullptr &&
+			(int(fsr2_context->fsr_desc.maxRenderSize.width) != max_render_size.x ||
+					int(fsr2_context->fsr_desc.maxRenderSize.height) != max_render_size.y ||
+					int(fsr2_context->fsr_desc.displaySize.width) != display_size.x ||
+					int(fsr2_context->fsr_desc.displaySize.height) != display_size.y)) {
+		memdelete(fsr2_context);
+		fsr2_context = nullptr;
+	}
 	if (fsr2_context == nullptr) {
-		fsr2_context = p_effect->create_context(render_buffers->get_internal_size(), render_buffers->get_target_size());
+		fsr2_context = p_effect->create_context(max_render_size, display_size);
 	}
 }
 
@@ -146,16 +156,32 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_tsr_contexts
 
 #ifdef METAL_MFXTEMPORAL_ENABLED
 bool RenderForwardClustered::RenderBufferDataForwardClustered::ensure_mfx_temporal(RendererRD::MFXTemporalEffect *p_effect) {
+	const Size2i max_in = render_buffers->get_max_internal_size();
+	const Size2i cur_in = render_buffers->get_internal_size();
+	const bool dynres = render_buffers->is_dynamic_resolution_configured() || (cur_in != max_in);
+	const Size2i min_in = dynres ? render_buffers->get_min_internal_size() : max_in;
+	const Size2i out_size = render_buffers->get_target_size();
+
+	if (mfx_temporal_context != nullptr &&
+			(mfx_temporal_context->max_input_size != max_in ||
+					mfx_temporal_context->output_size != out_size ||
+					(!mfx_temporal_context->dynamic_resolution && dynres) ||
+					(dynres && (cur_in.x < mfx_temporal_context->min_input_size.x || cur_in.y < mfx_temporal_context->min_input_size.y)))) {
+		memdelete(mfx_temporal_context);
+		mfx_temporal_context = nullptr;
+	}
 	if (mfx_temporal_context == nullptr) {
 		RendererRD::MFXTemporalEffect::CreateParams params;
-		params.input_size = render_buffers->get_internal_size();
-		params.output_size = render_buffers->get_target_size();
+		params.input_size = max_in;
+		params.min_input_size = min_in;
+		params.output_size = out_size;
 		params.input_format = render_buffers->get_base_data_format();
 		params.depth_format = render_buffers->get_depth_format(false, false, render_buffers->get_can_be_storage());
 		params.motion_format = render_buffers->get_velocity_format();
 		params.reactive_format = render_buffers->get_base_data_format(); // Reactive is derived from input.
 		params.output_format = render_buffers->get_base_data_format();
-		params.motion_vector_scale = render_buffers->get_internal_size();
+		params.motion_vector_scale = cur_in;
+		params.dynamic_resolution = dynres;
 		mfx_temporal_context = p_effect->create_context(params);
 		return true;
 	}
@@ -198,9 +224,10 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 	}
 #endif
 
-	if (!render_sdfgi_uniform_set.is_null() && RD::get_singleton()->uniform_set_is_valid(render_sdfgi_uniform_set)) {
+	if (!render_sdfgi_uniform_set.is_null() && RD::get_singleton() != nullptr && RD::get_singleton()->uniform_set_is_valid(render_sdfgi_uniform_set)) {
 		RD::get_singleton()->free_rid(render_sdfgi_uniform_set);
 	}
+	render_sdfgi_uniform_set = RID();
 }
 
 void RenderForwardClustered::RenderBufferDataForwardClustered::configure(RenderSceneBuffersRD *p_render_buffers) {
@@ -212,14 +239,41 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::configure(RenderS
 	render_buffers = p_render_buffers;
 	ERR_FAIL_NULL(render_buffers);
 
-	if (cluster_builder == nullptr) {
-		cluster_builder = memnew(ClusterBuilderRD);
-	}
-	cluster_builder->set_shared(RenderForwardClustered::get_singleton()->get_cluster_builder_shared());
+	if (RenderForwardClustered::get_singleton() != nullptr && RD::get_singleton() != nullptr) {
+		if (cluster_builder == nullptr) {
+			cluster_builder = memnew(ClusterBuilderRD);
+		}
+		cluster_builder->set_shared(RenderForwardClustered::get_singleton()->get_cluster_builder_shared());
 
-	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
-	// Note: Color and depth buffer is only used for our debug mode, we don't support stereo rendering for this.
-	cluster_builder->setup(p_render_buffers->get_internal_size(), p_render_buffers->get_max_cluster_elements(), p_render_buffers->get_depth_texture(0), sampler, p_render_buffers->get_internal_texture(0));
+		RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+		// Note: Color and depth buffer is only used for our debug mode, we don't support stereo rendering for this.
+		cluster_builder->setup(p_render_buffers->get_internal_size(), p_render_buffers->get_max_cluster_elements(), p_render_buffers->get_depth_texture(0), sampler, p_render_buffers->get_internal_texture(0));
+	}
+}
+
+void RenderForwardClustered::RenderBufferDataForwardClustered::configure_internal_size(RenderSceneBuffersRD *p_render_buffers) {
+	render_buffers = p_render_buffers;
+	ERR_FAIL_NULL(render_buffers);
+
+	ss_effects_data.ssil = {};
+	ss_effects_data.ssao = {};
+	ss_effects_data.ssr = {};
+	ss_effects_data.sscs = {};
+
+	if (!render_sdfgi_uniform_set.is_null() && RD::get_singleton() != nullptr && RD::get_singleton()->uniform_set_is_valid(render_sdfgi_uniform_set)) {
+		RD::get_singleton()->free_rid(render_sdfgi_uniform_set);
+	}
+	render_sdfgi_uniform_set = RID();
+
+	if (RenderForwardClustered::get_singleton() != nullptr && RD::get_singleton() != nullptr) {
+		if (cluster_builder == nullptr) {
+			cluster_builder = memnew(ClusterBuilderRD);
+			cluster_builder->set_shared(RenderForwardClustered::get_singleton()->get_cluster_builder_shared());
+		}
+
+		RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+		cluster_builder->setup(p_render_buffers->get_internal_size(), p_render_buffers->get_max_cluster_elements(), p_render_buffers->get_depth_texture(0), sampler, p_render_buffers->get_internal_texture(0));
+	}
 }
 
 RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_only_fb() {
@@ -3559,6 +3613,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				params.exposure = exposure;
 				params.dst = rb->get_upscaled_texture(v);
 				params.jitter_offset = jitter;
+				params.content_size = rb->get_internal_size();
 				params.reset = reset || reset_temporal_history;
 
 				mfx_temporal_effect->process(rb_data->get_mfx_temporal_context(), params);

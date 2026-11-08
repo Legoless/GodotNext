@@ -120,6 +120,52 @@ void Luminance::LuminanceBuffers::configure(RenderSceneBuffersRD *p_render_buffe
 	}
 }
 
+void Luminance::LuminanceBuffers::configure_internal_size(RenderSceneBuffersRD *p_render_buffers) {
+	if (current.is_null()) {
+		free_data();
+		configure(p_render_buffers);
+		return;
+	}
+
+	for (int i = 0; i < reduce.size(); i++) {
+		RD::get_singleton()->free_rid(reduce[i]);
+	}
+	reduce.clear();
+
+	Size2i internal_size = p_render_buffers->get_internal_size();
+	int w = internal_size.x;
+	int h = internal_size.y;
+
+	while (true) {
+		w = MAX(w / 8, 1);
+		h = MAX(h / 8, 1);
+
+		RD::TextureFormat tf;
+		tf.format = RD::DATA_FORMAT_R32_SFLOAT;
+		tf.width = w;
+		tf.height = h;
+
+		bool final = w == 1 && h == 1;
+
+		if (prefer_raster_effects) {
+			tf.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+		} else {
+			tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT;
+		}
+
+		if (final) {
+			tf.usage_bits |= RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		}
+
+		RID texture = RD::get_singleton()->texture_create(tf, RD::TextureView());
+		reduce.push_back(texture);
+
+		if (final) {
+			break;
+		}
+	}
+}
+
 void Luminance::LuminanceBuffers::free_data() {
 	for (int i = 0; i < reduce.size(); i++) {
 		RD::get_singleton()->free_rid(reduce[i]);

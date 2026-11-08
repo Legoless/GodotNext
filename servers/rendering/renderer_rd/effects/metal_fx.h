@@ -41,6 +41,10 @@
 #include "servers/rendering/renderer_scene_render.h"
 #include "servers/rendering/rendering_device_driver.h"
 
+namespace MTL {
+class Texture;
+} //namespace MTL
+
 namespace MTLFX {
 class SpatialScalerBase;
 class TemporalScalerBase;
@@ -95,6 +99,13 @@ public:
 
 struct MFXTemporalContext {
 	MTLFX::TemporalScalerBase *scaler = nullptr;
+	Vector2i max_input_size;
+	Vector2i min_input_size;
+	Vector2i output_size;
+	bool dynamic_resolution = false;
+	MTL::Texture *pad_src = nullptr;
+	MTL::Texture *pad_depth = nullptr;
+	MTL::Texture *pad_motion = nullptr;
 	MFXTemporalContext() = default;
 	~MFXTemporalContext();
 };
@@ -102,12 +113,14 @@ struct MFXTemporalContext {
 class MFXTemporalEffect {
 	struct CallbackArgs {
 		MFXTemporalEffect *owner = nullptr;
+		MFXTemporalContext *ctx = nullptr;
 		MTLFX::TemporalScalerBase *scaler = nullptr;
 		RDD::TextureID src;
 		RDD::TextureID depth;
 		RDD::TextureID motion;
 		RDD::TextureID exposure;
 		Vector2 jitter_offset;
+		Vector2i content_size;
 		RDD::TextureID dst;
 		bool reset = false;
 
@@ -118,16 +131,19 @@ class MFXTemporalEffect {
 				RDD::TextureID p_motion,
 				RDD::TextureID p_exposure,
 				Vector2 p_jitter_offset,
+				Vector2i p_content_size,
 				RDD::TextureID p_dst,
-				const MFXTemporalContext &p_ctx,
+				MFXTemporalContext *p_ctx,
 				bool p_reset) :
 				owner(p_owner),
-				scaler(p_ctx.scaler),
+				ctx(p_ctx),
+				scaler(p_ctx->scaler),
 				src(p_src),
 				depth(p_depth),
 				motion(p_motion),
 				exposure(p_exposure),
 				jitter_offset(p_jitter_offset),
+				content_size(p_content_size),
 				dst(p_dst),
 				reset(p_reset) {}
 
@@ -147,6 +163,7 @@ public:
 
 	struct CreateParams {
 		Vector2i input_size;
+		Vector2i min_input_size;
 		Vector2i output_size;
 		RDD::DataFormat input_format;
 		RDD::DataFormat depth_format;
@@ -154,6 +171,7 @@ public:
 		RDD::DataFormat reactive_format;
 		RDD::DataFormat output_format;
 		Vector2 motion_vector_scale;
+		bool dynamic_resolution = false;
 	};
 
 	MFXTemporalContext *create_context(CreateParams p_params) const;
@@ -165,6 +183,7 @@ public:
 		RID exposure;
 		RID dst;
 		Vector2 jitter_offset;
+		Vector2i content_size;
 		bool reset = false;
 	};
 

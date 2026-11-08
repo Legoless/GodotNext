@@ -2484,6 +2484,52 @@ void RenderingDeviceDriverMetal::command_insert_breadcrumb(CommandBufferID p_cmd
 void RenderingDeviceDriverMetal::begin_segment(uint32_t p_frame_index, uint32_t p_frames_drawn) {
 	_frame_index = p_frame_index;
 	_frames_drawn = p_frames_drawn;
+
+	LocalVector<CFTypeRef> ready_to_release;
+	{
+		MutexLock lock(deferred_releases_mutex);
+		uint32_t write_idx = 0;
+		for (uint32_t i = 0; i < deferred_releases.size(); i++) {
+			const DeferredRelease &entry = deferred_releases[i];
+			if (int32_t(p_frames_drawn - entry.retire_frame) >= 0) {
+				ready_to_release.push_back(entry.resource);
+			} else {
+				if (write_idx != i) {
+					deferred_releases[write_idx] = entry;
+				}
+				write_idx++;
+			}
+		}
+		deferred_releases.resize(write_idx);
+	}
+	for (CFTypeRef r : ready_to_release) {
+		CFRelease(r);
+	}
+}
+
+void RenderingDeviceDriverMetal::defer_release(CFTypeRef p_resource) {
+	if (p_resource == nullptr) {
+		return;
+	}
+	MutexLock lock(deferred_releases_mutex);
+	DeferredRelease entry;
+	entry.resource = p_resource;
+	entry.retire_frame = _frames_drawn + _frame_count + 2;
+	deferred_releases.push_back(entry);
+}
+
+void RenderingDeviceDriverMetal::flush_deferred_releases() {
+	LocalVector<DeferredRelease> pending;
+	{
+		MutexLock lock(deferred_releases_mutex);
+		pending = std::move(deferred_releases);
+		deferred_releases.clear();
+	}
+	for (const DeferredRelease &entry : pending) {
+		if (entry.resource != nullptr) {
+			CFRelease(entry.resource);
+		}
+	}
 }
 
 void RenderingDeviceDriverMetal::end_segment() {
@@ -2900,6 +2946,8 @@ RenderingDeviceDriverMetal::RenderingDeviceDriverMetal(RenderingContextDriverMet
 }
 
 RenderingDeviceDriverMetal::~RenderingDeviceDriverMetal() {
+	flush_deferred_releases();
+
 	for (KeyValue<SHA256Digest, ShaderCacheEntry *> &kv : _shader_cache) {
 		memdelete(kv.value);
 	}

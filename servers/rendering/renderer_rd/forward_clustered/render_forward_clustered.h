@@ -191,6 +191,7 @@ public:
 		RID get_velocity_only_fb();
 
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override;
+		virtual void configure_internal_size(RenderSceneBuffersRD *p_render_buffers) override;
 		virtual void free_data() override;
 
 		static RD::DataFormat get_specular_format();

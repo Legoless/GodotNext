@@ -61,7 +61,7 @@ public:
 			return RSE::VIEWPORT_SCALING_3D_REASON_FEATURE_CREATE_FAILED;
 		}
 		Context &context = contexts[p_render_buffers][p_view];
-		context.internal_size = p_render_buffers->get_internal_size();
+		context.internal_size = p_render_buffers->get_max_internal_size();
 		return RSE::VIEWPORT_SCALING_3D_REASON_NONE;
 	}
 

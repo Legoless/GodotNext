@@ -34,6 +34,7 @@ TEST_FORCE_LINK(test_upscalers)
 
 #include "core/config/project_settings.h"
 #include "scene/main/viewport.h"
+#include "servers/rendering/dynamic_resolution.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_rd/effects/tsr.h"
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
@@ -565,4 +566,240 @@ TEST_CASE("[Upscalers][TSR] Format table bytes per history pixel, T6 budgets, an
 	CHECK_EQ(tsr_vel.pre_clear_g, ext_vel.pre_clear_g);
 	CHECK_EQ(tsr_vel.mfx_preserve, ext_vel.mfx_preserve);
 	CHECK_EQ(tsr_vel.skip_clear_pass, ext_vel.skip_clear_pass);
+}
+
+TEST_CASE("[Upscalers][DynRes] 16-bucket table, project settings defaults, and scale_range intersection") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	CHECK(ps->has_setting("rendering/scaling_3d/dynamic_resolution/enabled"));
+	CHECK(ps->has_setting("rendering/scaling_3d/dynamic_resolution/target_frame_rate"));
+	CHECK(ps->has_setting("rendering/scaling_3d/dynamic_resolution/min_scale"));
+	CHECK(ps->has_setting("rendering/scaling_3d/dynamic_resolution/max_scale"));
+	CHECK_FALSE(bool(ps->get_setting("rendering/scaling_3d/dynamic_resolution/enabled")));
+	CHECK_EQ(int(ps->get_setting("rendering/scaling_3d/dynamic_resolution/target_frame_rate")), 60);
+	CHECK(Math::is_equal_approx(float(ps->get_setting("rendering/scaling_3d/dynamic_resolution/min_scale")), 0.5f));
+	CHECK(Math::is_equal_approx(float(ps->get_setting("rendering/scaling_3d/dynamic_resolution/max_scale")), 1.0f));
+
+	CHECK_EQ(DynamicResolutionController::BUCKET_COUNT, 16);
+	CHECK_EQ(DynamicResolutionController::RING_SIZE, 30);
+	CHECK_EQ(DynamicResolutionController::MIN_FRAMES_BETWEEN_CHANGES, 30);
+
+	float buckets[DynamicResolutionController::BUCKET_COUNT] = {};
+	DynamicResolutionController::build_buckets(0.5f, 1.0f, Vector2(0.25f, 2.0f), buckets);
+	CHECK(Math::is_equal_approx(buckets[0], 0.5f));
+	CHECK(Math::is_equal_approx(buckets[15], 1.0f));
+	for (int i = 0; i < DynamicResolutionController::BUCKET_COUNT; i++) {
+		const float expected = 0.5f + (0.5f * float(i)) / 15.0f;
+		CHECK(Math::is_equal_approx(buckets[i], expected));
+		if (i > 0) {
+			CHECK_GT(buckets[i], buckets[i - 1]);
+		}
+	}
+
+	// Intersect [min_scale, max_scale] with each upscaler's scale_range.
+	const Vector2 dlss_bounds = DynamicResolutionController::intersect_scale_bounds(0.1f, 2.0f, Vector2(0.30f, 1.0f));
+	CHECK(Math::is_equal_approx(dlss_bounds.x, 0.30f));
+	CHECK(Math::is_equal_approx(dlss_bounds.y, 1.0f));
+
+	const Vector2 tsr_bounds = DynamicResolutionController::intersect_scale_bounds(0.2f, 1.5f, Vector2(NEXTGI_TSR_MIN_SCALE, NEXTGI_TSR_MAX_SCALE));
+	CHECK(Math::is_equal_approx(tsr_bounds.x, 0.25f));
+	CHECK(Math::is_equal_approx(tsr_bounds.y, 1.5f));
+
+	const Vector2 mfx_bounds = DynamicResolutionController::intersect_scale_bounds(0.2f, 1.2f, Vector2(1.0f / 3.0f, 1.0f));
+	CHECK(Math::is_equal_approx(mfx_bounds.x, 1.0f / 3.0f));
+	CHECK(Math::is_equal_approx(mfx_bounds.y, 1.0f));
+
+	// Inverted min > max and disjoint bounds normalize cleanly without NaN or inverted buckets.
+	const Vector2 inverted = DynamicResolutionController::intersect_scale_bounds(0.9f, 0.6f, Vector2(0.25f, 2.0f));
+	CHECK(Math::is_equal_approx(inverted.x, 0.6f));
+	CHECK(Math::is_equal_approx(inverted.y, 0.9f));
+
+	const Vector2 disjoint = DynamicResolutionController::intersect_scale_bounds(0.1f, 0.2f, Vector2(0.30f, 1.0f));
+	CHECK(Math::is_equal_approx(disjoint.x, 0.30f));
+	CHECK(Math::is_equal_approx(disjoint.y, 0.30f));
+}
+
+TEST_CASE("[Upscalers][DynRes] 30-frame rate limit and p95 single-spike rejection") {
+	DynamicResolutionController ctrl;
+	CHECK(ctrl.configure_bounds(0.5f, 1.0f, Vector2(0.25f, 2.0f)));
+	CHECK_EQ(ctrl.get_current_bucket(), 15);
+	CHECK(Math::is_equal_approx(ctrl.get_current_scale(), 1.0f));
+
+	// 29 frames at 10 ms + 1 single-frame spike at 40 ms: p95 of 30 samples (sorted[28]) is 10 ms <= 16.667 ms.
+	for (int i = 0; i < 29; i++) {
+		CHECK_FALSE(ctrl.push_gpu_frame_time_ms(10.0, 60));
+	}
+	CHECK_FALSE(ctrl.push_gpu_frame_time_ms(40.0, 60));
+	CHECK_EQ(ctrl.get_current_bucket(), 15);
+
+	// A second overloaded frame makes 2/30 samples > target_ms, so p95 (sorted[28]) > target_ms and triggers a drop.
+	CHECK(ctrl.push_gpu_frame_time_ms(33.333333, 60));
+	const int dropped_bucket = ctrl.get_current_bucket();
+	CHECK_LT(dropped_bucket, 15);
+	CHECK_EQ(ctrl.get_frames_since_change(), 0);
+
+	// Rate limit: at most 1 bucket change per 30 frames even under continuous heavy GPU overload.
+	for (int i = 0; i < 29; i++) {
+		CHECK_FALSE(ctrl.push_gpu_frame_time_ms(50.0, 60));
+		CHECK_EQ(ctrl.get_current_bucket(), dropped_bucket);
+	}
+	// On the 30th frame after the change, the controller may change bucket again.
+	CHECK(ctrl.push_gpu_frame_time_ms(50.0, 60));
+	const int second_drop = ctrl.get_current_bucket();
+	CHECK_LT(second_drop, dropped_bucket);
+
+	// Same 30-frame rate limit in the upward direction.
+	for (int i = 0; i < 29; i++) {
+		CHECK_FALSE(ctrl.push_gpu_frame_time_ms(5.0, 60));
+		CHECK_EQ(ctrl.get_current_bucket(), second_drop);
+	}
+	CHECK(ctrl.push_gpu_frame_time_ms(5.0, 60));
+	CHECK_EQ(ctrl.get_current_bucket(), second_drop + 1);
+}
+
+TEST_CASE("[Upscalers][DynRes] Down-jump formula and up-step hysteresis") {
+	DynamicResolutionController ctrl;
+	ctrl.configure_bounds(0.5f, 1.0f, Vector2(0.25f, 2.0f));
+	REQUIRE_EQ(ctrl.get_current_bucket(), 15);
+
+	// 2x frame-budget load step (33.3333 ms vs 16.6667 ms at 60 Hz):
+	// desired = 1.0 * sqrt(0.95 * 16.6667 / 33.3333) = sqrt(0.475) = 0.689202.
+	// Over [0.5, 1.0] in 16 buckets (step 1/30): bucket 5 = 0.666667 <= 0.689202 < bucket 6 = 0.70.
+	const double target_ms = 1000.0 / 60.0;
+	for (int i = 0; i < 29; i++) {
+		CHECK_FALSE(ctrl.push_gpu_frame_time_ms(2.0 * target_ms, 60));
+	}
+	CHECK(ctrl.push_gpu_frame_time_ms(2.0 * target_ms, 60));
+	CHECK_EQ(ctrl.get_current_bucket(), 5);
+	CHECK(Math::is_equal_approx(ctrl.get_current_scale(), 0.5f + 5.0f / 30.0f));
+
+	// Up-step rule requires ALL 30 frames < 0.85 * target_ms (~14.1667 ms).
+	// 29 light frames + 1 frame at 0.86 * target_ms must hold the current bucket.
+	for (int i = 0; i < 29; i++) {
+		CHECK_FALSE(ctrl.push_gpu_frame_time_ms(0.50 * target_ms, 60));
+	}
+	CHECK_FALSE(ctrl.push_gpu_frame_time_ms(0.86 * target_ms, 60));
+	CHECK_EQ(ctrl.get_current_bucket(), 5);
+
+	// Pushing 29 more light frames still has that one 0.86 * target_ms sample in the 30-entry ring.
+	for (int i = 0; i < 29; i++) {
+		CHECK_FALSE(ctrl.push_gpu_frame_time_ms(0.50 * target_ms, 60));
+		CHECK_EQ(ctrl.get_current_bucket(), 5);
+	}
+
+	// Pushing one more light frame evicts the 0.86 * target_ms sample -> all 30 < 0.85 * target_ms -> steps up by +1.
+	CHECK(ctrl.push_gpu_frame_time_ms(0.50 * target_ms, 60));
+	CHECK_EQ(ctrl.get_current_bucket(), 6);
+}
+
+TEST_CASE("[Upscalers][DynRes] RenderSceneBuffersRD internal-only fast path preserves contexts and history without reset") {
+	// Output/history-size named-texture allowlist vs internal-size render targets.
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR_UPSCALED));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_BLUR_0));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_BLUR_1));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_color_0")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_color_1")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_meta_0")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_meta_1")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(SNAME("Tonemapper"), SNAME("destination")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(SNAME("rb_smaa"), SNAME("edges_tex")));
+
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_COLOR));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_VELOCITY));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_BACK_COLOR));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_BUFFERS, RB_TEX_BACK_DEPTH));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("dilated_velocity")));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("prev_depth")));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("disocclusion")));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("rejection")));
+
+	Ref<RenderSceneBuffersRD> rb;
+	rb.instantiate();
+	Ref<RendererSceneRenderImplementation::RenderForwardClustered::RenderBufferDataForwardClustered> rb_data;
+	rb_data.instantiate();
+	rb->set_custom_data(RB_SCOPE_FORWARD_CLUSTERED, rb_data);
+
+	MockUpscaler mock_dlss;
+	TemporalUpscalerRegistry::register_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS, &mock_dlss);
+
+	RenderSceneBuffersConfiguration cfg;
+	cfg.set_internal_size(Size2i(1920, 1080));
+	cfg.set_max_internal_size(Size2i(1920, 1080));
+	cfg.set_min_internal_size(Size2i(960, 540));
+	cfg.set_target_size(Size2i(1920, 1080));
+	cfg.set_view_count(1);
+	cfg.set_scaling_3d_mode(RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	cfg.set_tsr_quality(RSE::VIEWPORT_TSR_QUALITY_EPIC);
+	cfg.set_texture_mipmap_bias(0.0f);
+
+	// Initial configure must run the full path and request a one-shot temporal history reset.
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	rb->configure(&cfg);
+	CHECK_EQ(rb->get_internal_size(), Size2i(1920, 1080));
+	CHECK_EQ(rb->get_max_internal_size(), Size2i(1920, 1080));
+	CHECK(rb->consume_temporal_history_reset());
+	CHECK_FALSE(rb->consume_temporal_history_reset());
+
+	RendererRD::TSRContext *tsr_ctx = rb_data->ensure_tsr_context(0, rb->get_internal_size(), rb->get_target_size(), rb->get_tsr_quality());
+	REQUIRE(tsr_ctx != nullptr);
+	CHECK(tsr_ctx->consume_reset());
+	CHECK_FALSE(tsr_ctx->consume_reset());
+	CHECK_EQ(mock_dlss.ensure_context(rb.ptr(), 0), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	CHECK(mock_dlss.contexts.has(rb.ptr()));
+
+	// Stepping internal_size down (1920x1080 -> 1280x720) with updated mipmap bias takes the fast path:
+	// keeps TSRContext and external upscaler context alive and does NOT request a temporal history reset.
+	cfg.set_internal_size(Size2i(1280, 720));
+	cfg.set_texture_mipmap_bias(-0.585f);
+	CHECK(rb->can_configure_internal_only(&cfg));
+	rb->configure(&cfg);
+	CHECK_EQ(rb->get_internal_size(), Size2i(1280, 720));
+	CHECK_EQ(rb->get_max_internal_size(), Size2i(1920, 1080));
+	CHECK_FALSE(rb->consume_temporal_history_reset());
+	CHECK_EQ(rb_data->get_tsr_context(0), tsr_ctx);
+	CHECK(mock_dlss.contexts.has(rb.ptr()));
+	CHECK_FALSE(tsr_ctx->sync_dimensions(rb->get_internal_size(), rb->get_target_size(), rb->get_tsr_quality()));
+	CHECK_FALSE(tsr_ctx->consume_reset());
+
+	// Stepping internal_size back up (1280x720 -> 1600x900 <= max_internal_size) also takes the fast path.
+	cfg.set_internal_size(Size2i(1600, 900));
+	cfg.set_texture_mipmap_bias(-0.263f);
+	CHECK(rb->can_configure_internal_only(&cfg));
+	rb->configure(&cfg);
+	CHECK_EQ(rb->get_internal_size(), Size2i(1600, 900));
+	CHECK_FALSE(rb->consume_temporal_history_reset());
+	CHECK_EQ(rb_data->get_tsr_context(0), tsr_ctx);
+	CHECK(mock_dlss.contexts.has(rb.ptr()));
+
+	// Exceeding max_internal_size or mutating non-internal-size properties rejects the fast path.
+	cfg.set_internal_size(Size2i(2048, 1152));
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	cfg.set_internal_size(Size2i(1600, 900));
+
+	cfg.set_target_size(Size2i(2560, 1440));
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	cfg.set_target_size(Size2i(1920, 1080));
+
+	cfg.set_tsr_quality(RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	cfg.set_tsr_quality(RSE::VIEWPORT_TSR_QUALITY_EPIC);
+
+	cfg.set_scaling_3d_mode(RSE::VIEWPORT_SCALING_3D_MODE_FSR2);
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	cfg.set_scaling_3d_mode(RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+
+	// Spatial modes keep full reallocation (no internal-only fast path).
+	cfg.set_scaling_3d_mode(RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR);
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	rb->configure(&cfg);
+	CHECK(rb->consume_temporal_history_reset());
+	CHECK_EQ(rb_data->get_tsr_context(0), nullptr);
+	CHECK_FALSE(mock_dlss.contexts.has(rb.ptr()));
+
+	cfg.set_internal_size(Size2i(1280, 720));
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+
+	rb->cleanup();
+	TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 }

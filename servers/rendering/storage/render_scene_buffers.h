@@ -40,6 +40,8 @@ private:
 	RID render_target;
 
 	Size2i internal_size;
+	Size2i max_internal_size;
+	Size2i min_internal_size;
 	Size2i target_size;
 	uint32_t view_count = 1;
 
@@ -63,6 +65,12 @@ public:
 
 	Size2i get_internal_size() const { return internal_size; }
 	void set_internal_size(Size2i p_internal_size) { internal_size = p_internal_size; }
+
+	Size2i get_max_internal_size() const { return max_internal_size; }
+	void set_max_internal_size(Size2i p_max_internal_size) { max_internal_size = p_max_internal_size; }
+
+	Size2i get_min_internal_size() const { return min_internal_size; }
+	void set_min_internal_size(Size2i p_min_internal_size) { min_internal_size = p_min_internal_size; }
 
 	Size2i get_target_size() const { return target_size; }
 	void set_target_size(Size2i p_target_size) { target_size = p_target_size; }

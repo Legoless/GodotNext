@@ -668,6 +668,7 @@ public:
 	void copy_texture(RDD::TextureID p_src_texture, RDD::TextureID p_dst_texture, VectorView<RDD::TextureCopyRegion> p_regions) override;
 	void copy_buffer_to_texture(RDD::BufferID p_src_buffer, RDD::TextureID p_dst_texture, VectorView<RDD::BufferTextureCopyRegion> p_regions) override;
 	void copy_texture_to_buffer(RDD::TextureID p_src_texture, RDD::BufferID p_dst_buffer, VectorView<RDD::BufferTextureCopyRegion> p_regions) override;
+	void encode_texture_subregion_copy(MTL::Texture *p_src, MTL::Texture *p_dst, uint32_t p_width, uint32_t p_height);
 
 #pragma mark - Timestamp
 

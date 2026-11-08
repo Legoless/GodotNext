@@ -88,6 +88,9 @@ private:
 
 	// The internal size of the textures we render 3D to in case we render at a lower resolution and upscale
 	Size2i internal_size = Size2i(0, 0);
+	Size2i max_internal_size = Size2i(0, 0);
+	Size2i min_internal_size = Size2i(0, 0);
+	bool has_explicit_max_internal_size = false;
 	RSE::ViewportScaling3DMode scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
 	RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
 	float fsr_sharpness = 0.2f;
@@ -210,6 +213,8 @@ public:
 	RSE::ViewportVRSMode get_vrs_mode() { return vrs_mode; }
 
 	void cleanup();
+	bool can_configure_internal_only(const RenderSceneBuffersConfiguration *p_config) const;
+	static bool is_output_sized_named_texture(const StringName &p_context, const StringName &p_texture_name);
 	virtual void configure(const RenderSceneBuffersConfiguration *p_config) override;
 	void configure_for_reflections(const Size2i p_reflection_size);
 	virtual void set_fsr_sharpness(float p_fsr_sharpness) override;
@@ -237,6 +242,7 @@ public:
 	Size2i get_texture_slice_size(const StringName &p_context, const StringName &p_texture_name, const uint32_t p_mipmap);
 
 	void clear_context(const StringName &p_context);
+	bool free_texture(const StringName &p_context, const StringName &p_texture_name);
 	uint64_t get_context_memory_bytes(const StringName &p_context) const;
 
 	// Allocate shared buffers
@@ -252,6 +258,9 @@ public:
 	_FORCE_INLINE_ RID get_render_target() const { return render_target; }
 	_FORCE_INLINE_ uint32_t get_view_count() const { return view_count; }
 	_FORCE_INLINE_ Size2i get_internal_size() const { return internal_size; }
+	_FORCE_INLINE_ Size2i get_max_internal_size() const { return max_internal_size; }
+	_FORCE_INLINE_ Size2i get_min_internal_size() const { return min_internal_size; }
+	_FORCE_INLINE_ bool is_dynamic_resolution_configured() const { return has_explicit_max_internal_size; }
 	_FORCE_INLINE_ Size2i get_target_size() const { return target_size; }
 	_FORCE_INLINE_ RSE::ViewportScaling3DMode get_scaling_3d_mode() const { return scaling_3d_mode; }
 	_FORCE_INLINE_ RSE::ViewportTSRQuality get_tsr_quality() const { return tsr_quality; }

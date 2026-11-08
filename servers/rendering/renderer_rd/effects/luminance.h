@@ -98,6 +98,7 @@ public:
 		RID current;
 
 		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override;
+		virtual void configure_internal_size(RenderSceneBuffersRD *p_render_buffers) override;
 		virtual void free_data() override;
 
 		void set_prefer_raster_effects(bool p_prefer_raster_effects);

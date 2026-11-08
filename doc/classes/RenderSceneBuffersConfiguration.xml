@@ -18,6 +18,9 @@
 		<member name="internal_size" type="Vector2i" setter="set_internal_size" getter="get_internal_size" default="Vector2i(0, 0)">
 			The size of the 3D render buffer used for rendering.
 		</member>
+		<member name="max_internal_size" type="Vector2i" setter="set_max_internal_size" getter="get_max_internal_size" default="Vector2i(0, 0)">
+			The maximum internal 3D render buffer size used to size temporal upscaler contexts when dynamic resolution is active. When set to [code]Vector2i(0, 0)[/code], [member internal_size] is used.
+		</member>
 		<member name="msaa_3d" type="int" setter="set_msaa_3d" getter="get_msaa_3d" enum="RenderingServer.ViewportMSAA" default="0">
 			The MSAA mode we're using for 3D rendering.
 		</member>

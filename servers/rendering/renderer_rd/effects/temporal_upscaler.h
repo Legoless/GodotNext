@@ -96,6 +96,7 @@ public:
 	virtual Size2i get_render_size(const Size2i &p_target_size, float p_scale) const {
 		return Size2i(MAX(p_target_size.width * p_scale, 1.0f), MAX(p_target_size.height * p_scale, 1.0f));
 	}
+	virtual Vector2 get_scale_range() const { return Vector2(0.30f, 1.0f); }
 	virtual VelocityMode velocity_mode() const { return VELOCITY_DENSE; }
 	virtual bool supports_api(const String &p_api_name) const { return p_api_name == "Vulkan"; }
 	virtual bool supports_multiview() const { return false; }

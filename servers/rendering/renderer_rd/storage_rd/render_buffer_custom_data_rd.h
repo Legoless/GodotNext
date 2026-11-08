@@ -39,6 +39,7 @@ class RenderBufferCustomDataRD : public RefCounted {
 
 public:
 	virtual void configure(RenderSceneBuffersRD *p_render_buffers) = 0;
+	virtual void configure_internal_size(RenderSceneBuffersRD *p_render_buffers) { configure(p_render_buffers); }
 	virtual void free_data() = 0; // called on cleanup
 
 private:
