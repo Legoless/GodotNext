@@ -117,7 +117,10 @@ inline TSRScalingResolution nextgi_resolve_tsr_scaling(
 	}
 
 	bool is_not_bilinear = resolved.mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF && resolved.mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
-	if (is_not_bilinear && resolved.mode != RSE::VIEWPORT_SCALING_3D_MODE_TSR && resolved.scale >= (1.0f + EPSILON)) {
+	// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM, like TSR, may
+	// supersample and disables 3D MSAA; nextgi_resolve_custom_upscaler() then
+	// applies the extension's range or the TSR fallback.
+	if (is_not_bilinear && resolved.mode != RSE::VIEWPORT_SCALING_3D_MODE_TSR && resolved.mode != RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && resolved.scale >= (1.0f + EPSILON)) {
 		resolved.mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 		scaling_type = RSE::scaling_3d_mode_type(resolved.mode);
 		is_not_bilinear = false;
@@ -128,7 +131,7 @@ inline TSRScalingResolution nextgi_resolve_tsr_scaling(
 		scaling_type = RSE::scaling_3d_mode_type(resolved.mode);
 	}
 
-	if (resolved.mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR && resolved.msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
+	if ((resolved.mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR || resolved.mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) && resolved.msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
 		resolved.msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
 		resolved.msaa_disabled = true;
 	}

@@ -95,6 +95,12 @@ private:
 	RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
 	float fsr_sharpness = 0.2f;
 	float texture_mipmap_bias = 0.0f;
+	// GodotNext: pt_temporal_upscaler_extension (#192). The sampler mip bias,
+	// including the upscaler's offset, and the CUSTOM adapter id and registry
+	// revision these buffers were configured for.
+	float computed_mipmap_bias = 0.0f;
+	uint64_t active_custom_upscaler_id = 0;
+	uint64_t active_custom_upscaler_revision = 0;
 	TemporalHistoryReset temporal_history_reset;
 	RSE::ViewportAnisotropicFiltering anisotropic_filtering_level = RSE::VIEWPORT_ANISOTROPY_4X;
 
@@ -265,6 +271,8 @@ public:
 	_FORCE_INLINE_ RSE::ViewportScaling3DMode get_scaling_3d_mode() const { return scaling_3d_mode; }
 	_FORCE_INLINE_ RSE::ViewportTSRQuality get_tsr_quality() const { return tsr_quality; }
 	_FORCE_INLINE_ float get_fsr_sharpness() const { return fsr_sharpness; }
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	_FORCE_INLINE_ float get_computed_mipmap_bias() const { return computed_mipmap_bias; }
 	_FORCE_INLINE_ RSE::ViewportMSAA get_msaa_3d() const { return msaa_3d; }
 	_FORCE_INLINE_ RD::TextureSamples get_texture_samples() const { return texture_samples; }
 	_FORCE_INLINE_ RSE::ViewportScreenSpaceAA get_screen_space_aa() const { return screen_space_aa; }

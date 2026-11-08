@@ -109,30 +109,35 @@ void RenderSceneBuffersRD::free_named_texture(NamedTexture &p_named_texture) {
 }
 
 void RenderSceneBuffersRD::update_samplers() {
-	float computed_mipmap_bias = texture_mipmap_bias;
+	// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM uses its
+	// extension's mip bias offset, and the result is kept in
+	// computed_mipmap_bias (the local is renamed so it does not shadow it).
+	float sampler_mipmap_bias = texture_mipmap_bias;
 
 	if (use_taa || (RSE::scaling_3d_mode_type(scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL)) {
 		float offset = -0.5f;
-		if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
-			TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
+			TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(scaling_3d_mode);
 			if (upscaler != nullptr) {
 				offset = upscaler->mip_bias_offset();
 			}
 		} else if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR) {
 			offset = nextgi_tsr_mip_bias_offset();
 		}
-		computed_mipmap_bias += offset;
+		sampler_mipmap_bias += offset;
 	}
 
 	if (screen_space_aa == RSE::VIEWPORT_SCREEN_SPACE_AA_FXAA) {
 		// Use negative mipmap LOD bias when FXAA is enabled to compensate for loss of sharpness.
 		// If both TAA and FXAA are enabled, combine their negative LOD biases together.
-		computed_mipmap_bias -= 0.25;
+		sampler_mipmap_bias -= 0.25;
 	}
+
+	computed_mipmap_bias = sampler_mipmap_bias;
 
 	if (RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton()) {
 		material_storage->samplers_rd_free(samplers);
-		samplers = material_storage->samplers_rd_allocate(computed_mipmap_bias, anisotropic_filtering_level);
+		samplers = material_storage->samplers_rd_allocate(sampler_mipmap_bias, anisotropic_filtering_level);
 	}
 }
 
@@ -200,6 +205,12 @@ bool RenderSceneBuffersRD::can_configure_internal_only(const RenderSceneBuffersC
 		return false;
 	}
 	if (p_config->get_scaling_3d_mode() != scaling_3d_mode) {
+		return false;
+	}
+	// GodotNext: pt_temporal_upscaler_extension (#192). A different CUSTOM
+	// adapter, or a re-registered one (whose mip bias offset may have changed),
+	// needs a full configure.
+	if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && (TemporalUpscalerRegistry::get_custom_upscaler_id() != active_custom_upscaler_id || TemporalUpscalerRegistry::get_custom_upscaler_revision() != active_custom_upscaler_revision)) {
 		return false;
 	}
 	if (p_config->get_render_target() != render_target) {
@@ -324,6 +335,9 @@ void RenderSceneBuffersRD::configure(const RenderSceneBuffersConfiguration *p_co
 	view_count = p_config->get_view_count();
 
 	scaling_3d_mode = p_config->get_scaling_3d_mode();
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	active_custom_upscaler_id = scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM ? TemporalUpscalerRegistry::get_custom_upscaler_id() : 0;
+	active_custom_upscaler_revision = scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM ? TemporalUpscalerRegistry::get_custom_upscaler_revision() : 0;
 	msaa_3d = p_config->get_msaa_3d();
 	screen_space_aa = p_config->get_screen_space_aa();
 

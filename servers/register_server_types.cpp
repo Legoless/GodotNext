@@ -78,6 +78,8 @@
 #include "servers/rendering/storage/render_data_extension.h"
 #include "servers/rendering/storage/render_scene_buffers.h"
 #include "servers/rendering/storage/render_scene_data.h"
+// GodotNext: pt_temporal_upscaler_extension (#192).
+#include "servers/rendering/storage/temporal_upscaler_extension.h"
 #include "servers/text/text_server.h"
 #include "servers/text/text_server_dummy.h"
 #include "servers/text/text_server_extension.h"
@@ -237,6 +239,10 @@ void register_server_types() {
 	GDREGISTER_CLASS(RenderSceneBuffersConfiguration);
 	GDREGISTER_ABSTRACT_CLASS(RenderSceneBuffers);
 	GDREGISTER_CLASS(RenderSceneBuffersExtension);
+
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	GDREGISTER_CLASS(TemporalUpscalerInputs);
+	GDREGISTER_CLASS(TemporalUpscalerExtension);
 
 	GDREGISTER_CLASS(ShaderIncludeDB);
 

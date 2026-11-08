@@ -80,6 +80,9 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
+// GodotNext: pt_temporal_upscaler_extension (#192).
+#include "core/object/callable_mp.h"
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/text/text_server.h"
 #include "servers/text/text_server_dummy.h"
 
@@ -5319,6 +5322,14 @@ void Main::cleanup(bool p_force) {
 	ResourceLoader::clear_translation_remaps();
 
 	WorkerThreadPool::get_singleton()->exit_languages_threads();
+
+	if (rendering_server) {
+		// GodotNext: pt_temporal_upscaler_extension (#192). Release registered
+		// TemporalUpscalerExtensions on the render thread while their scripts
+		// and GDExtensions can still run their destructors.
+		rendering_server->call_on_render_thread(callable_mp_static(&TemporalUpscalerRegistry::clear_extensions));
+		rendering_server->sync();
+	}
 
 	ScriptServer::finish_languages();
 

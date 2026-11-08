@@ -33,6 +33,8 @@
 TEST_FORCE_LINK(test_upscalers)
 
 #include "core/config/project_settings.h"
+#include "core/object/class_db.h"
+#include "core/object/script_instance.h"
 #include "scene/main/viewport.h"
 #include "servers/rendering/dynamic_resolution.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
@@ -44,6 +46,7 @@ TEST_FORCE_LINK(test_upscalers)
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/storage/render_scene_buffers.h"
+#include "servers/rendering/storage/temporal_upscaler_extension.h"
 
 namespace {
 
@@ -358,6 +361,14 @@ TEST_CASE("[Upscalers][TSR] Scale clamp, renderer fallbacks, MSAA and TAA rules"
 	const TSRScalingResolution custom_forward = nextgi_resolve_tsr_scaling(
 			RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM, 0.75f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
 	CHECK_EQ(custom_forward.mode, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM, like TSR, may
+	// supersample and disables 3D MSAA internally.
+	const TSRScalingResolution custom_supersample = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM, 1.5f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_4X);
+	CHECK_EQ(custom_supersample.mode, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	CHECK(Math::is_equal_approx(custom_supersample.scale, 1.5f));
+	CHECK_EQ(custom_supersample.msaa_3d, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK(custom_supersample.msaa_disabled);
 
 	// Mobile and Compatibility resolve TSR and CUSTOM to bilinear.
 	for (RSE::ViewportScaling3DMode mode : { RSE::VIEWPORT_SCALING_3D_MODE_TSR, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM }) {
@@ -802,4 +813,539 @@ TEST_CASE("[Upscalers][DynRes] RenderSceneBuffersRD internal-only fast path pres
 
 	rb->cleanup();
 	TemporalUpscalerRegistry::unregister_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+}
+
+// GodotNext: pt_temporal_upscaler_extension (#192), GT-1 subset.
+namespace {
+
+// Counts warnings, so tests can check "1 log line" for a fallback.
+struct WarningCounter {
+	ErrorHandlerList handler;
+	int warnings = 0;
+
+	static void _count(void *p_self, const char *p_func, const char *p_file, int p_line, const char *p_error, const char *p_errorexp, bool p_editor_notify, ErrorHandlerType p_type) {
+		if (p_type == ERR_HANDLER_WARNING) {
+			static_cast<WarningCounter *>(p_self)->warnings++;
+		}
+	}
+
+	WarningCounter() {
+		handler.errfunc = _count;
+		handler.userdata = this;
+		add_error_handler(&handler);
+	}
+	~WarningCounter() { remove_error_handler(&handler); }
+};
+
+struct TestCopyUpscalerState {
+	String name = "TestCopy";
+	bool available = true;
+	Vector2 scale_range = Vector2(0.5f, 1.0f);
+	float mip_bias_offset = -0.75f;
+	int jitter_phases = 13;
+	int process_calls = 0;
+	int reset_calls = 0;
+	Vector2i last_jitter_target;
+	Vector2i last_jitter_render;
+	Ref<TemporalUpscalerInputs> last_inputs;
+};
+
+// Answers the TemporalUpscalerExtension virtuals the way a script or
+// GDExtension would, so every call goes through the GDVIRTUAL path.
+class TestCopyUpscalerScriptInstance : public ScriptInstance {
+	TestCopyUpscalerState *state = nullptr;
+
+public:
+	explicit TestCopyUpscalerScriptInstance(TestCopyUpscalerState *p_state) :
+			state(p_state) {}
+
+	bool set(const StringName &p_name, const Variant &p_value) override { return false; }
+	bool get(const StringName &p_name, Variant &r_ret) const override { return false; }
+	void get_property_list(List<PropertyInfo> *r_properties) const override {}
+	Variant::Type get_property_type(const StringName &p_name, bool *r_is_valid) const override {
+		if (r_is_valid) {
+			*r_is_valid = false;
+		}
+		return Variant::NIL;
+	}
+	void validate_property(PropertyInfo &p_property) const override {}
+	bool property_can_revert(const StringName &p_name) const override { return false; }
+	bool property_get_revert(const StringName &p_name, Variant &r_ret) const override { return false; }
+	void get_method_list(List<MethodInfo> *r_list) const override {}
+	bool has_method(const StringName &p_method) const override {
+		return p_method == SNAME("_get_name") || p_method == SNAME("_is_available") || p_method == SNAME("_get_scale_range") ||
+				p_method == SNAME("_get_mip_bias_offset") || p_method == SNAME("_get_jitter_phase_count") || p_method == SNAME("_process") ||
+				p_method == SNAME("_reset_history");
+	}
+	int get_method_argument_count(const StringName &p_method, bool *r_is_valid = nullptr) const override {
+		if (r_is_valid) {
+			*r_is_valid = has_method(p_method);
+		}
+		if (p_method == SNAME("_get_jitter_phase_count")) {
+			return 2;
+		}
+		return p_method == SNAME("_process") ? 1 : 0;
+	}
+	Variant callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) override {
+		r_error.error = Callable::CallError::CALL_OK;
+		if (p_method == SNAME("_get_name")) {
+			return state->name;
+		}
+		if (p_method == SNAME("_is_available")) {
+			return state->available;
+		}
+		if (p_method == SNAME("_get_scale_range")) {
+			return state->scale_range;
+		}
+		if (p_method == SNAME("_get_mip_bias_offset")) {
+			return state->mip_bias_offset;
+		}
+		if (p_method == SNAME("_get_jitter_phase_count") && p_argcount == 2) {
+			state->last_jitter_target = *p_args[0];
+			state->last_jitter_render = *p_args[1];
+			return state->jitter_phases;
+		}
+		if (p_method == SNAME("_process") && p_argcount == 1) {
+			state->process_calls++;
+			state->last_inputs = *p_args[0];
+			return Variant();
+		}
+		if (p_method == SNAME("_reset_history")) {
+			state->reset_calls++;
+			return Variant();
+		}
+		r_error.error = Callable::CallError::CALL_ERROR_INVALID_METHOD;
+		return Variant();
+	}
+	void notification(int p_notification, bool p_reversed = false) override {}
+	Script *get_script() const override { return nullptr; }
+	const Variant get_rpc_config() const override { return Variant(); }
+	ScriptLanguage *get_language() override { return nullptr; }
+};
+
+// Test-only copy upscaler (#192 step 7). Its virtuals are answered through
+// the GDVIRTUAL path, like the testbed's SampleCopy script.
+class TestCopyUpscalerExtension : public TemporalUpscalerExtension {
+	GDSOFTCLASS(TestCopyUpscalerExtension, TemporalUpscalerExtension);
+
+public:
+	TestCopyUpscalerState state;
+
+	TestCopyUpscalerExtension() {
+		set_script_instance(memnew(TestCopyUpscalerScriptInstance(&state)));
+	}
+};
+
+const char *CUSTOM_UPSCALER_SETTING = "rendering/scaling_3d/custom_upscaler";
+
+// Restores the registry and the selection setting when a test ends.
+struct CustomUpscalerScope {
+	String previous;
+
+	explicit CustomUpscalerScope(const String &p_selected) {
+		previous = GLOBAL_GET(CUSTOM_UPSCALER_SETTING);
+		ProjectSettings::get_singleton()->set_setting(CUSTOM_UPSCALER_SETTING, p_selected);
+		TemporalUpscalerRegistry::clear_extensions();
+		TemporalUpscalerRegistry::reset_custom_warning_latches();
+	}
+	~CustomUpscalerScope() {
+		TemporalUpscalerRegistry::clear_extensions();
+		TemporalUpscalerRegistry::reset_custom_warning_latches();
+		ProjectSettings::get_singleton()->set_setting(CUSTOM_UPSCALER_SETTING, previous);
+	}
+};
+
+} // namespace
+
+TEST_CASE("[Upscalers][Custom] Enum values, mode type and project setting") {
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM), 8);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_CUSTOM), 8);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE), 12);
+	CHECK(RSE::scaling_3d_mode_type(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL);
+	CHECK(TemporalUpscalerRegistry::build_mode_hint(false).contains("Custom:8"));
+	REQUIRE(ProjectSettings::get_singleton()->has_setting(CUSTOM_UPSCALER_SETTING));
+	CHECK_EQ(String(ProjectSettings::get_singleton()->property_get_revert(CUSTOM_UPSCALER_SETTING)), String());
+}
+
+TEST_CASE("[Upscalers][Custom] Virtuals dispatch through the GDVIRTUAL path and fall back to defaults") {
+	Ref<TestCopyUpscalerExtension> ext;
+	ext.instantiate();
+	CHECK_EQ(ext->get_upscaler_name(), "TestCopy");
+	CHECK(ext->is_available());
+	CHECK(ext->get_scale_range().is_equal_approx(Vector2(0.5f, 1.0f)));
+	CHECK(Math::is_equal_approx(ext->get_mip_bias_offset(), -0.75f));
+	CHECK_EQ(ext->get_jitter_phase_count(Size2i(1920, 1080), Size2i(960, 540)), 13u);
+	CHECK_EQ(ext->state.last_jitter_target, Vector2i(1920, 1080));
+	CHECK_EQ(ext->state.last_jitter_render, Vector2i(960, 540));
+	Ref<TemporalUpscalerInputs> inputs;
+	inputs.instantiate();
+	ext->process(inputs);
+	ext->reset_history();
+	CHECK_EQ(ext->state.process_calls, 1);
+	CHECK_EQ(ext->state.reset_calls, 1);
+	CHECK(ext->state.last_inputs == inputs);
+
+	// A negative jitter phase count keeps the engine default.
+	ext->state.jitter_phases = -1;
+	CHECK_EQ(ext->get_jitter_phase_count(Size2i(2560, 1440), Size2i(1280, 720)), nextgi_temporal_jitter_phase_count(Size2i(2560, 1440), Size2i(1280, 720), true));
+
+	// Inverted bounds are swapped, and a non-positive minimum is raised to 0.01.
+	ext->state.scale_range = Vector2(1.0f, 0.5f);
+	CHECK(ext->get_scale_range().is_equal_approx(Vector2(0.5f, 1.0f)));
+	ext->state.scale_range = Vector2(-1.0f, 0.75f);
+	CHECK(ext->get_scale_range().is_equal_approx(Vector2(0.01f, 0.75f)));
+
+	// Without overrides: unavailable, TSR's range, -0.5 mip bias offset, default jitter.
+	Ref<TemporalUpscalerExtension> plain;
+	plain.instantiate();
+	CHECK(plain->get_upscaler_name().is_empty());
+	CHECK_FALSE(plain->is_available());
+	CHECK(plain->get_scale_range().is_equal_approx(Vector2(0.25f, 2.0f)));
+	CHECK(Math::is_equal_approx(plain->get_mip_bias_offset(), -0.5f));
+	CHECK_EQ(plain->get_jitter_phase_count(Size2i(2560, 1440), Size2i(1280, 720)), nextgi_temporal_jitter_phase_count(Size2i(2560, 1440), Size2i(1280, 720), true));
+}
+
+TEST_CASE("[Upscalers][Custom] Inputs carry the §6.1 fields") {
+	Ref<TemporalUpscalerInputs> inputs;
+	inputs.instantiate();
+	const RID color = RID::from_uint64(11);
+	const RID output = RID::from_uint64(12);
+	inputs->set_color(color);
+	inputs->set_output(output);
+	inputs->set_internal_size(Size2i(960, 540));
+	inputs->set_output_size(Size2i(1920, 1080));
+	inputs->set_jitter(Vector2(0.25f, -0.25f));
+	inputs->set_z_near(0.05f);
+	inputs->set_z_far(4000.0f);
+	inputs->set_reset(true);
+	inputs->set_view_index(1);
+	CHECK(inputs->get_color() == color);
+	CHECK(inputs->get_output() == output);
+	CHECK_EQ(Size2i(inputs->get("internal_size")), Size2i(960, 540));
+	CHECK_EQ(Size2i(inputs->get("output_size")), Size2i(1920, 1080));
+	CHECK(Vector2(inputs->get("jitter")).is_equal_approx(Vector2(0.25f, -0.25f)));
+	CHECK(Math::is_equal_approx(float(inputs->get("z_far")), 4000.0f));
+	CHECK(bool(inputs->get("reset")));
+	CHECK_EQ(int(inputs->get("view_index")), 1);
+	for (const char *property : { "color", "depth", "velocity", "reactive", "output", "internal_size", "max_internal_size", "output_size", "motion_vector_scale", "jitter",
+				 "world_to_view", "view_to_clip", "z_near", "z_far", "fovy", "delta_time", "reset", "view_index", "render_scene_buffers" }) {
+		CHECK_MESSAGE(ClassDB::has_property("TemporalUpscalerInputs", property), property);
+	}
+}
+
+TEST_CASE("[Upscalers][Custom] Register, select and unregister with a deferred free") {
+	CustomUpscalerScope scope("TestCopy");
+	Ref<TestCopyUpscalerExtension> ext;
+	ext.instantiate();
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == nullptr);
+	CHECK_FALSE(TemporalUpscalerRegistry::is_custom_upscaler_available());
+	const uint64_t revision = TemporalUpscalerRegistry::get_custom_upscaler_revision();
+
+	TemporalUpscalerRegistry::register_extension(ext);
+	CHECK(TemporalUpscalerRegistry::get_custom_upscaler_revision() > revision);
+	TemporalUpscaler *adapter = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	REQUIRE(adapter != nullptr);
+	CHECK(TemporalUpscalerRegistry::is_custom_upscaler_available());
+	CHECK(TemporalUpscalerRegistry::get_selected_extension() == ext);
+	CHECK_EQ(adapter->get_display_name(), "TestCopy");
+	CHECK(adapter->get_scale_range().is_equal_approx(Vector2(0.5f, 1.0f)));
+	CHECK(Math::is_equal_approx(adapter->mip_bias_offset(), -0.75f));
+	CHECK_EQ(adapter->jitter_phase_count(Size2i(1920, 1080), Size2i(960, 540)), 13u);
+	CHECK_FALSE(adapter->supports_multiview());
+
+	// The setting selects by name; another name leaves CUSTOM empty.
+	ProjectSettings::get_singleton()->set_setting(CUSTOM_UPSCALER_SETTING, "Other");
+	TemporalUpscalerRegistry::sync_custom_upscaler();
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == nullptr);
+	CHECK(TemporalUpscalerRegistry::get_selected_extension().is_null());
+	ProjectSettings::get_singleton()->set_setting(CUSTOM_UPSCALER_SETTING, "TestCopy");
+
+	// _is_available false empties CUSTOM until it reports true again.
+	ext->state.available = false;
+	TemporalUpscalerRegistry::sync_custom_upscaler();
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == nullptr);
+	CHECK_FALSE(TemporalUpscalerRegistry::is_custom_upscaler_available());
+	ext->state.available = true;
+	TemporalUpscalerRegistry::sync_custom_upscaler();
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == adapter);
+
+	// Unregistering empties CUSTOM at once but keeps the extension alive until frame end.
+	const int refs_registered = ext->get_reference_count();
+	TemporalUpscalerRegistry::unregister_extension(ext);
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == nullptr);
+	CHECK_FALSE(TemporalUpscalerRegistry::is_custom_upscaler_available());
+	CHECK_EQ(TemporalUpscalerRegistry::get_retired_extension_count(), 1u);
+	CHECK_EQ(ext->get_reference_count(), refs_registered);
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	CHECK_EQ(TemporalUpscalerRegistry::get_retired_extension_count(), 0u);
+	CHECK_EQ(ext->get_reference_count(), 1);
+
+	// Unregistering twice is a no-op; an unnamed extension is rejected.
+	TemporalUpscalerRegistry::unregister_extension(ext);
+	CHECK_EQ(TemporalUpscalerRegistry::get_retired_extension_count(), 0u);
+	Ref<TemporalUpscalerExtension> unnamed;
+	unnamed.instantiate();
+	ERR_PRINT_OFF;
+	TemporalUpscalerRegistry::register_extension(unnamed);
+	ERR_PRINT_ON;
+	CHECK_EQ(unnamed->get_reference_count(), 1);
+}
+
+TEST_CASE("[Upscalers][Custom] The CUSTOM slot only takes extensions") {
+	CustomUpscalerScope scope("TestCopy");
+	MockUpscaler mock;
+	ERR_PRINT_OFF;
+	TemporalUpscalerRegistry::register_upscaler(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM, &mock);
+	ERR_PRINT_ON;
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == nullptr);
+	CHECK_EQ(TemporalUpscalerRegistry::get_custom_upscaler_id(), 0u);
+
+	// Ids are never reused, even when an adapter address could be.
+	Ref<TestCopyUpscalerExtension> ext;
+	ext.instantiate();
+	TemporalUpscalerRegistry::register_extension(ext);
+	const uint64_t first_id = TemporalUpscalerRegistry::get_custom_upscaler_id();
+	CHECK(first_id != 0u);
+	TemporalUpscalerRegistry::unregister_extension(ext);
+	CHECK_EQ(TemporalUpscalerRegistry::get_custom_upscaler_id(), 0u);
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	TemporalUpscalerRegistry::register_extension(ext);
+	CHECK(TemporalUpscalerRegistry::get_custom_upscaler_id() > first_id);
+	uint64_t id = 0;
+	CHECK(TemporalUpscalerRegistry::get_custom_upscaler(&id) != nullptr);
+	CHECK_EQ(id, TemporalUpscalerRegistry::get_custom_upscaler_id());
+}
+
+TEST_CASE("[Upscalers][Custom] Re-registering a name retires the previous extension") {
+	CustomUpscalerScope scope("TestCopy");
+	Ref<TestCopyUpscalerExtension> first;
+	first.instantiate();
+	Ref<TestCopyUpscalerExtension> second;
+	second.instantiate();
+	TemporalUpscalerRegistry::register_extension(first);
+	TemporalUpscaler *first_adapter = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	REQUIRE(first_adapter != nullptr);
+	TemporalUpscalerRegistry::register_extension(second);
+	CHECK(TemporalUpscalerRegistry::get_selected_extension() == second);
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) != nullptr);
+	CHECK_EQ(TemporalUpscalerRegistry::get_retired_extension_count(), 1u);
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	CHECK_EQ(first->get_reference_count(), 1);
+	CHECK(second->get_reference_count() > 1);
+
+	// Re-registering an object under a new name replaces its old entry, so one
+	// unregister releases it.
+	second->state.name = "Renamed";
+	TemporalUpscalerRegistry::register_extension(second);
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	TemporalUpscalerRegistry::unregister_extension(second);
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	CHECK_EQ(second->get_reference_count(), 1);
+}
+
+TEST_CASE("[Upscalers][Custom] Adapter forwards inputs and runs _reset_history once per reset") {
+	CustomUpscalerScope scope("TestCopy");
+	Ref<TestCopyUpscalerExtension> ext;
+	ext.instantiate();
+	TemporalUpscalerRegistry::register_extension(ext);
+	TemporalUpscaler *adapter = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	REQUIRE(adapter != nullptr);
+
+	RenderSceneBuffersRD *buffers = reinterpret_cast<RenderSceneBuffersRD *>(uintptr_t(1));
+	CHECK_EQ(adapter->ensure_context(buffers, 0), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	// Multiview custom upscaling is out of scope for #192.
+	CHECK_EQ(adapter->ensure_context(buffers, 1), RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+
+	TemporalUpscaler::Inputs inputs;
+	inputs.color = RID::from_uint64(21);
+	inputs.depth = RID::from_uint64(22);
+	inputs.velocity = RID::from_uint64(23);
+	inputs.reactive = RID::from_uint64(24);
+	inputs.output = RID::from_uint64(25);
+	inputs.internal_size = Size2i(1280, 720);
+	inputs.max_internal_size = Size2i(1600, 900);
+	inputs.output_size = Size2i(1920, 1080);
+	inputs.motion_vector_scale = inputs.internal_size;
+	inputs.jitter = Vector2(0.25f, -0.5f);
+	inputs.z_near = 0.1f;
+	inputs.z_far = 500.0f;
+	inputs.fovy = 70.0f;
+	inputs.delta_time = 1.0f / 60.0f;
+	inputs.reset = true;
+	Ref<RenderSceneBuffersRD> render_buffers;
+	render_buffers.instantiate();
+	adapter->process(render_buffers, 0, inputs);
+	CHECK_EQ(ext->state.process_calls, 1);
+	CHECK_EQ(ext->state.reset_calls, 1);
+	const Ref<TemporalUpscalerInputs> seen = ext->state.last_inputs;
+	REQUIRE(seen.is_valid());
+	CHECK(seen->get_color() == inputs.color);
+	CHECK(seen->get_depth() == inputs.depth);
+	CHECK(seen->get_velocity() == inputs.velocity);
+	CHECK(seen->get_reactive() == inputs.reactive);
+	CHECK(seen->get_output() == inputs.output);
+	CHECK_EQ(seen->get_internal_size(), Size2i(1280, 720));
+	CHECK_EQ(seen->get_max_internal_size(), Size2i(1600, 900));
+	CHECK_EQ(seen->get_output_size(), Size2i(1920, 1080));
+	CHECK(seen->get_render_scene_buffers() == render_buffers);
+	CHECK(seen->get_motion_vector_scale().is_equal_approx(Vector2(1280, 720)));
+	CHECK(seen->get_jitter().is_equal_approx(Vector2(0.25f, -0.5f)));
+	CHECK(Math::is_equal_approx(seen->get_z_far(), 500.0f));
+	CHECK(Math::is_equal_approx(seen->get_fovy(), 70.0f));
+	CHECK(seen->get_reset());
+	CHECK_EQ(seen->get_view_index(), 0u);
+
+	inputs.reset = false;
+	adapter->process(Ref<RenderSceneBuffersRD>(), 0, inputs);
+	adapter->process(Ref<RenderSceneBuffersRD>(), 0, inputs);
+	CHECK_EQ(ext->state.process_calls, 3);
+	CHECK_EQ(ext->state.reset_calls, 1);
+	inputs.reset = true;
+	adapter->process(Ref<RenderSceneBuffersRD>(), 0, inputs);
+	CHECK_EQ(ext->state.reset_calls, 2);
+
+	adapter->free_contexts(buffers);
+}
+
+TEST_CASE("[Upscalers][Custom] Selection keeps CUSTOM in range and falls back to TSR with one log line") {
+	using R = RSE::ViewportScaling3DReason;
+	const Vector2 range(0.5f, 1.0f);
+	const CustomUpscalerResolution in_range = nextgi_resolve_custom_upscaler(true, 1, false, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 0.75f);
+	CHECK_EQ(in_range.mode, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	CHECK_EQ(in_range.reason, R::VIEWPORT_SCALING_3D_REASON_NONE);
+	CHECK(Math::is_equal_approx(in_range.scale, 0.75f));
+	CHECK_FALSE(in_range.scale_clamped);
+
+	const CustomUpscalerResolution low = nextgi_resolve_custom_upscaler(true, 1, false, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 0.25f);
+	CHECK_EQ(low.mode, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	CHECK(Math::is_equal_approx(low.scale, 0.5f));
+	CHECK(low.scale_clamped);
+	const CustomUpscalerResolution high = nextgi_resolve_custom_upscaler(true, 1, false, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 1.5f);
+	CHECK(Math::is_equal_approx(high.scale, 1.0f));
+	CHECK(high.scale_clamped);
+
+	// No available extension or a latched context error resolve to TSR with
+	// CUSTOM_UPSCALER_UNAVAILABLE; a stereo viewport the extension cannot run
+	// resolves to TSR with VIEW_UNSUPPORTED.
+	const CustomUpscalerResolution missing = nextgi_resolve_custom_upscaler(false, 1, false, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 0.75f);
+	CHECK_EQ(missing.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK_EQ(missing.reason, R::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+	CHECK(Math::is_equal_approx(missing.scale, 0.75f));
+	const CustomUpscalerResolution stereo = nextgi_resolve_custom_upscaler(true, 2, false, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 0.75f);
+	CHECK_EQ(stereo.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK_EQ(stereo.reason, R::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED);
+	CHECK_EQ(nextgi_resolve_custom_upscaler(false, 2, false, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 0.75f).reason, R::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+	CHECK_EQ(nextgi_resolve_custom_upscaler(true, 2, true, R::VIEWPORT_SCALING_3D_REASON_NONE, range, 0.75f).mode, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	const CustomUpscalerResolution latched = nextgi_resolve_custom_upscaler(true, 1, false, R::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE, range, 0.75f);
+	CHECK_EQ(latched.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK_EQ(latched.reason, R::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+
+	// One log line per fallback kind, however many viewports or frames hit it.
+	CustomUpscalerScope scope("TestCopy");
+	{
+		WarningCounter counter;
+		for (int i = 0; i < 3; i++) {
+			TemporalUpscalerRegistry::report_custom_unavailable();
+		}
+		CHECK_EQ(counter.warnings, 1);
+		for (int i = 0; i < 3; i++) {
+			TemporalUpscalerRegistry::report_custom_scale_clamped("TestCopy", range);
+		}
+		CHECK_EQ(counter.warnings, 2);
+	}
+}
+
+TEST_CASE("[Upscalers][Custom] RenderSceneBuffersRD applies the extension mip bias and drops the fast path after a swap") {
+	CustomUpscalerScope scope("TestCopy");
+	Ref<TestCopyUpscalerExtension> ext;
+	ext.instantiate();
+	TemporalUpscalerRegistry::register_extension(ext);
+
+	Ref<RenderSceneBuffersRD> rb;
+	rb.instantiate();
+	Ref<RendererSceneRenderImplementation::RenderForwardClustered::RenderBufferDataForwardClustered> rb_data;
+	rb_data.instantiate();
+	rb->set_custom_data(RB_SCOPE_FORWARD_CLUSTERED, rb_data);
+
+	const float scale_bias = Math::log2(0.75f);
+	RenderSceneBuffersConfiguration cfg;
+	cfg.set_internal_size(Size2i(1440, 810));
+	cfg.set_max_internal_size(Size2i(1440, 810));
+	cfg.set_min_internal_size(Size2i(960, 540));
+	cfg.set_target_size(Size2i(1920, 1080));
+	cfg.set_view_count(1);
+	cfg.set_scaling_3d_mode(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	cfg.set_texture_mipmap_bias(scale_bias);
+	rb->configure(&cfg);
+	CHECK(Math::is_equal_approx(rb->get_computed_mipmap_bias(), scale_bias - 0.75f));
+
+	// Re-registering the same extension re-reads its mip bias offset: the fast
+	// path is refused so the samplers get the new bias.
+	ext->state.mip_bias_offset = -0.25f;
+	TemporalUpscalerRegistry::register_extension(ext);
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	rb->configure(&cfg);
+	CHECK(Math::is_equal_approx(rb->get_computed_mipmap_bias(), scale_bias - 0.25f));
+
+	// The same extension keeps the internal-only fast path; a new adapter does not.
+	cfg.set_internal_size(Size2i(1200, 675));
+	CHECK(rb->can_configure_internal_only(&cfg));
+	Ref<TestCopyUpscalerExtension> replacement;
+	replacement.instantiate();
+	TemporalUpscalerRegistry::register_extension(replacement);
+	CHECK_FALSE(rb->can_configure_internal_only(&cfg));
+	rb->configure(&cfg);
+	CHECK(rb->can_configure_internal_only(&cfg));
+
+	rb->cleanup();
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	CHECK_EQ(ext->get_reference_count(), 1);
+}
+
+TEST_CASE("[Upscalers][Custom] RenderingServer API, availability and 100 register/unregister cycles") {
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	CustomUpscalerScope scope("TestCopy");
+	CHECK_EQ(rs->scaling_3d_mode_get_availability(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM), RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+
+	Ref<TestCopyUpscalerExtension> ext;
+	ext.instantiate();
+	rs->register_temporal_upscaler_extension(ext);
+	CHECK_EQ(rs->scaling_3d_mode_get_availability(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM), RSE::VIEWPORT_SCALING_3D_REASON_NONE);
+	ext->state.available = false;
+	CHECK_EQ(rs->scaling_3d_mode_get_availability(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM), RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+	ext->state.available = true;
+
+	const RID camera = rs->camera_create();
+	const RID viewport = rs->viewport_create();
+	rs->viewport_attach_camera(viewport, camera);
+	rs->viewport_set_size(viewport, 640, 360, 1);
+	rs->viewport_set_active(viewport, true);
+	rs->viewport_set_scaling_3d_mode(viewport, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+	rs->draw(false, 0.0);
+	const Dictionary status = rs->viewport_get_scaling_3d_status(viewport);
+	CHECK_EQ(int(status["requested_mode"]), int(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM));
+	// The dummy rasterizer creates no RD render buffers: nothing is configured
+	// and no sampler bias applies. The testbed scene checks the values on Metal.
+	CHECK_EQ(int(status["jitter_phase_count"]), 0);
+	CHECK(Math::is_zero_approx(float(status["mipmap_bias"])));
+
+	// Outside a frame, the server releases an unregistered extension at once.
+	const int registered_refs = ext->get_reference_count();
+	for (int i = 0; i < 100; i++) {
+		rs->unregister_temporal_upscaler_extension(ext);
+		CHECK_EQ(TemporalUpscalerRegistry::get_retired_extension_count(), 0u);
+		// Only this test's reference is left: the registry entry and its adapter are gone.
+		CHECK_EQ(ext->get_reference_count(), 1);
+		rs->register_temporal_upscaler_extension(ext);
+		rs->draw(false, 0.0);
+	}
+	CHECK_EQ(ext->get_reference_count(), registered_refs);
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) != nullptr);
+
+	rs->unregister_temporal_upscaler_extension(ext);
+	CHECK_EQ(ext->get_reference_count(), 1);
+	CHECK(TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) == nullptr);
+	rs->free_rid(viewport);
+	rs->free_rid(camera);
 }

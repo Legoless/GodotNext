@@ -65,6 +65,9 @@ class MeshDistanceField;
 
 class RenderingDevice;
 
+// GodotNext: pt_temporal_upscaler_extension (#192).
+class TemporalUpscalerExtension;
+
 class RenderingServer : public Object {
 	GDCLASS(RenderingServer, Object);
 
@@ -575,6 +578,9 @@ public:
 	virtual Dictionary viewport_get_scaling_3d_status(RID p_viewport) = 0;
 	virtual void viewport_reset_temporal_history(RID p_viewport) = 0;
 	RSE::ViewportScaling3DReason scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode);
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	virtual void register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) = 0;
+	virtual void unregister_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) = 0;
 	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80) / nextgeo_residency (#78).
 	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID());
 	virtual Dictionary virtual_geometry_get_memory_report();

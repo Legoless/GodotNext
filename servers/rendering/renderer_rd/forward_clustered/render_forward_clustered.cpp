@@ -2606,7 +2606,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 #endif
 			break;
 		case RSE::VIEWPORT_SCALING_3D_MODE_DLSS:
-			external_upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+		// GodotNext: pt_temporal_upscaler_extension (#192).
+		case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
+			external_upscaler = TemporalUpscalerRegistry::get(rb->get_scaling_3d_mode());
 			if (external_upscaler != nullptr) {
 				scale_type = SCALE_EXTERNAL;
 			}
@@ -3622,8 +3624,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RD::get_singleton()->draw_command_end_label();
 #endif
 		} else if (scale_type == SCALE_EXTERNAL) {
-			const String label = String::utf8(external_upscaler->get_label().ptr());
-			RD::get_singleton()->draw_command_begin_label(external_upscaler->get_label());
+			// GodotNext: pt_temporal_upscaler_extension (#192). Read the label with
+			// its span size rather than up to a NUL.
+			const Span<char> upscaler_label = external_upscaler->get_label();
+			const String label = String::utf8(upscaler_label.ptr(), upscaler_label.size());
+			RD::get_singleton()->draw_command_begin_label(upscaler_label);
 			RENDER_TIMESTAMP(label);
 			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 				const RSE::ViewportScaling3DReason reason = external_upscaler->ensure_context(rb.ptr(), v);
@@ -3637,8 +3642,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				inputs.color = rb->get_internal_texture(v);
 				inputs.depth = rb->get_depth_texture(v);
 				inputs.velocity = rb->get_velocity_buffer(false, v);
+				// GodotNext: pt_temporal_upscaler_extension (#192). Reactive mask and
+				// sizes for TemporalUpscalerInputs.
+				inputs.reactive = rb->get_internal_texture_reactive(v);
 				inputs.output = rb->get_upscaled_texture(v);
 				inputs.internal_size = rb->get_internal_size();
+				inputs.max_internal_size = rb->get_max_internal_size();
+				inputs.output_size = rb->get_target_size();
 				inputs.motion_vector_scale = rb->get_internal_size();
 				inputs.jitter = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
 				inputs.world_to_view = p_render_data->scene_data->cam_transform.affine_inverse();

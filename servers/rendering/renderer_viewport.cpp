@@ -163,8 +163,33 @@ static const char *scaling_3d_reason_name(RSE::ViewportScaling3DReason p_reason)
 			return "scale unsupported";
 		case RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED:
 			return "view count unsupported";
+		// GodotNext: pt_temporal_upscaler_extension (#192).
+		case RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE:
+			return "custom upscaler unavailable";
 	}
 	return "unknown";
+}
+
+// GodotNext: pt_temporal_upscaler_extension (#192). Resolves CUSTOM for one
+// viewport from the published adapter and its latched context error.
+static CustomUpscalerResolution _resolve_custom_upscaler(const RendererViewport::Viewport *p_viewport, TemporalUpscaler *p_upscaler, float p_scale, bool *r_context_failed = nullptr) {
+	if (r_context_failed != nullptr) {
+		*r_context_failed = false;
+	}
+	if (p_upscaler == nullptr) {
+		return nextgi_resolve_custom_upscaler(false, p_viewport->view_count, false, RSE::VIEWPORT_SCALING_3D_REASON_NONE, Vector2(), p_scale);
+	}
+	RSE::ViewportScaling3DReason context_error = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+#ifdef RD_ENABLED
+	Ref<RenderSceneBuffersRD> render_buffers = p_viewport->render_buffers;
+	if (render_buffers.is_valid()) {
+		context_error = p_upscaler->get_context_error(render_buffers.ptr());
+	}
+#endif
+	if (r_context_failed != nullptr) {
+		*r_context_failed = context_error != RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+	}
+	return nextgi_resolve_custom_upscaler(true, p_viewport->view_count, p_upscaler->supports_multiview(), context_error, p_upscaler->get_scale_range(), p_scale);
 }
 
 Vector2 RendererViewport::_get_upscaler_scale_range(const Viewport *p_viewport) const {
@@ -173,6 +198,18 @@ Vector2 RendererViewport::_get_upscaler_scale_range(const Viewport *p_viewport) 
 	}
 
 	RSE::ViewportScaling3DMode mode = p_viewport->requested_scaling_3d_mode;
+
+	// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM uses the
+	// extension's range, or TSR's when it falls back.
+	if (mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
+		TemporalUpscalerRegistry::sync_custom_upscaler();
+		TemporalUpscaler *custom_upscaler = TemporalUpscalerRegistry::get_custom_upscaler(nullptr);
+		const CustomUpscalerResolution custom = _resolve_custom_upscaler(p_viewport, custom_upscaler, 1.0f);
+		if (custom.mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
+			return custom_upscaler->get_scale_range();
+		}
+		mode = RSE::VIEWPORT_SCALING_3D_MODE_TSR;
+	}
 
 #ifdef RD_ENABLED
 	if (mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
@@ -259,6 +296,15 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			p_viewport->effective_scaling_3d_scale = scaling_3d_scale;
 			bool upscaler_available = p_viewport->fsr_enabled;
 			RSE::ViewportScaling3DType scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
+			// GodotNext: pt_temporal_upscaler_extension (#192). Read the CUSTOM
+			// adapter once, so a register or unregister on another thread cannot
+			// change it halfway through this configure.
+			TemporalUpscaler *custom_upscaler = nullptr;
+			uint64_t custom_upscaler_id = 0;
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
+				TemporalUpscalerRegistry::sync_custom_upscaler();
+				custom_upscaler = TemporalUpscalerRegistry::get_custom_upscaler(&custom_upscaler_id);
+			}
 
 			if ((!upscaler_available || (scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_SPATIAL)) && scaling_3d_scale >= (1.0 - EPSILON) && scaling_3d_scale <= (1.0 + EPSILON)) {
 				// No 3D scaling for spatial modes? Ignore scaling mode, this just introduces overhead.
@@ -270,7 +316,8 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			}
 
 			if (scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_NEAREST && OS::get_singleton()->get_current_rendering_method() == "gl_compatibility") {
-				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM reports the renderer reason too.
+				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
 					p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED;
 				}
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
@@ -279,12 +326,45 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			}
 
 			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
-				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
+				// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM reports the renderer reason too.
+				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
 					p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED;
 				}
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 				WARN_PRINT_ONCE("MetalFX temporal, FSR, DLSS and TSR upscaling are not supported in the Mobile renderer. Falling back to bilinear scaling.");
+			}
+
+			// GodotNext: pt_temporal_upscaler_extension (#192). GT-1: CUSTOM
+			// keeps an available extension within its scale range, else TSR
+			// with CUSTOM_UPSCALER_UNAVAILABLE and one log line.
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && upscaler_available) {
+				bool context_failed = false;
+				const CustomUpscalerResolution custom = _resolve_custom_upscaler(p_viewport, custom_upscaler, scaling_3d_scale, &context_failed);
+				if (custom.mode != RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
+					p_viewport->scaling_3d_reason = custom.reason;
+					if (custom.reason == RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED) {
+						WARN_PRINT_ONCE("The custom 3D temporal upscaler does not support multiple views. Falling back to TSR.");
+					} else {
+						TemporalUpscalerRegistry::report_custom_unavailable();
+					}
+#ifdef RD_ENABLED
+					Ref<RenderSceneBuffersRD> rb_rd = p_viewport->render_buffers;
+					if (rb_rd.is_valid()) {
+						TemporalUpscalerRegistry::free_extension_contexts(rb_rd.ptr());
+					}
+#endif
+					if (context_failed) {
+						// Retry the extension on the next frame instead of staying on TSR.
+						custom_upscaler_id = 0;
+					}
+					custom_upscaler = nullptr;
+				} else if (custom.scale_clamped) {
+					TemporalUpscalerRegistry::report_custom_scale_clamped(custom_upscaler->get_display_name(), custom_upscaler->get_scale_range());
+				}
+				scaling_3d_mode = custom.mode;
+				scaling_3d_scale = custom.scale;
+				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
 			}
 
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR && upscaler_available) {
@@ -381,7 +461,9 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			bool scaling_3d_is_not_bilinear = scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 			bool use_taa = p_viewport->use_taa;
 
-			if (scaling_3d_is_not_bilinear && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_TSR && scaling_3d_scale >= (1.0 + EPSILON)) {
+			// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM, like TSR,
+			// may supersample within its extension's scale range.
+			if (scaling_3d_is_not_bilinear && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_TSR && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && scaling_3d_scale >= (1.0 + EPSILON)) {
 				// FSR, MetalFX, and nearest-neighbor scaling are not designed for downsampling.
 				// Fall back to bilinear scaling.
 				WARN_PRINT_ONCE("FSR, MetalFX, and nearest-neighbor 3D resolution scaling are not designed for downsampling. Falling back to bilinear 3D resolution scaling.");
@@ -408,6 +490,12 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
 			}
 
+			// GodotNext: pt_temporal_upscaler_extension (#192).
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
+				WARN_PRINT_ONCE("Custom temporal upscaler does not support 3D MSAA. Disabling 3D MSAA internally.");
+				msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
+			}
+
 			p_viewport->effective_scaling_3d_scale = scaling_3d_scale;
 			// Store the resolved active mode for the status API.
 			p_viewport->scaling_3d_mode = scaling_3d_mode;
@@ -427,10 +515,14 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 					case RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR:
 					case RSE::VIEWPORT_SCALING_3D_MODE_NEAREST:
 					case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
-					case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
 						return Size2i(
 								CLAMP(int(target_width * p_scale), 1, 16384),
 								CLAMP(int(target_height * p_scale), 1, 16384));
+					// GodotNext: pt_temporal_upscaler_extension (#192).
+					case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM: {
+						const Size2i custom_size = custom_upscaler != nullptr ? custom_upscaler->get_render_size(p_viewport->size, p_scale) : Size2i(int(target_width * p_scale), int(target_height * p_scale));
+						return Size2i(CLAMP(custom_size.width, 1, 16384), CLAMP(custom_size.height, 1, 16384));
+					}
 					case RSE::VIEWPORT_SCALING_3D_MODE_DLSS: {
 						TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 						ERR_FAIL_NULL_V(upscaler, Size2i(MAX(int(target_width * p_scale), 1), MAX(int(target_height * p_scale), 1)));
@@ -487,6 +579,9 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
 				ERR_FAIL_NULL(upscaler);
 				jitter_phase_count = upscaler->jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
+			} else if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && custom_upscaler != nullptr) {
+				// GodotNext: pt_temporal_upscaler_extension (#192).
+				jitter_phase_count = custom_upscaler->jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
 			} else if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR) {
 				jitter_phase_count = nextgi_tsr_jitter_phase_count(Size2i(target_width, target_height), Size2i(render_width, render_height));
 			} else if (scaling_type == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL) {
@@ -502,6 +597,10 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			// At resolution scales lower than 1.0, use negative texture mipmap bias
 			// to compensate for the loss of sharpness.
 			const float texture_mipmap_bias = std::log2(MIN(scaling_3d_scale, 1.0)) + p_viewport->texture_mipmap_bias;
+			// GodotNext: pt_temporal_upscaler_extension (#192). The CUSTOM state
+			// these buffers match; draw_viewports() compares it every frame.
+			p_viewport->custom_upscaler_revision = TemporalUpscalerRegistry::get_custom_upscaler_revision();
+			p_viewport->custom_upscaler_id = custom_upscaler_id;
 
 			RenderSceneBuffersConfiguration rb_config;
 			rb_config.set_render_target(p_viewport->render_target);
@@ -1109,6 +1208,29 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 		}
 	}
 
+	// GodotNext: pt_temporal_upscaler_extension (#192). Register, unregister
+	// and _is_available changes reach CUSTOM viewports here, before any of them
+	// renders; register and unregister never reconfigure buffers themselves.
+	// Projects with no CUSTOM viewport skip the sync and its _is_available() call.
+	bool any_custom_viewport = false;
+	for (int i = 0; i < sorted_active_viewports.size() && !any_custom_viewport; i++) {
+		const Viewport *vp = sorted_active_viewports[i];
+		any_custom_viewport = vp->last_pass == draw_viewports_pass && vp->requested_scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && vp->render_buffers.is_valid();
+	}
+	if (any_custom_viewport) {
+		TemporalUpscalerRegistry::sync_custom_upscaler();
+		const uint64_t current_custom_revision = TemporalUpscalerRegistry::get_custom_upscaler_revision();
+		const uint64_t current_custom_id = TemporalUpscalerRegistry::get_custom_upscaler_id();
+		for (int i = 0; i < sorted_active_viewports.size(); i++) {
+			Viewport *vp = sorted_active_viewports[i];
+			if (vp->last_pass == draw_viewports_pass && vp->requested_scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM && vp->render_buffers.is_valid()) {
+				if (vp->custom_upscaler_revision != current_custom_revision || vp->custom_upscaler_id != current_custom_id) {
+					_configure_3d_render_buffers(vp);
+				}
+			}
+		}
+	}
+
 	const bool dynres_enabled = !RSG::rasterizer->is_low_end() &&
 			OS::get_singleton()->get_current_rendering_method() == "forward_plus" &&
 			bool(GLOBAL_GET("rendering/scaling_3d/dynamic_resolution/enabled"));
@@ -1327,13 +1449,17 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			}
 		}
 
-		if (vp->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS && vp->render_buffers.is_valid()) {
+#ifdef RD_ENABLED
+		// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM, like DLSS,
+		// falls back on the next configure once a context error is latched.
+		if ((vp->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || vp->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) && vp->render_buffers.is_valid()) {
 			Ref<RenderSceneBuffersRD> render_buffers = vp->render_buffers;
-			TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
-			if (upscaler != nullptr && upscaler->get_context_error(render_buffers.ptr()) != RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
+			TemporalUpscaler *upscaler = TemporalUpscalerRegistry::get(vp->scaling_3d_mode);
+			if (render_buffers.is_valid() && upscaler != nullptr && upscaler->get_context_error(render_buffers.ptr()) != RSE::VIEWPORT_SCALING_3D_REASON_NONE) {
 				_configure_3d_render_buffers(vp);
 			}
 		}
+#endif
 
 		if (vp->update_mode == RSE::VIEWPORT_UPDATE_ONCE) {
 			vp->update_mode = RSE::VIEWPORT_UPDATE_DISABLED;
@@ -1415,6 +1541,18 @@ Dictionary RendererViewport::viewport_get_scaling_3d_status(RID p_viewport) cons
 	status["active_mode"] = viewport->scaling_3d_mode;
 	status["reason"] = viewport->scaling_3d_reason;
 	status["effective_scale"] = viewport->effective_scaling_3d_scale;
+	// GodotNext: pt_temporal_upscaler_extension (#192). GT-1: the jitter phase
+	// count, and the mipmap bias the 3D samplers use (0 without RD buffers,
+	// for example in the Compatibility renderer, which applies none).
+	status["jitter_phase_count"] = int64_t(viewport->jitter_phase_count);
+	float mipmap_bias = 0.0f;
+#ifdef RD_ENABLED
+	const Ref<RenderSceneBuffersRD> render_buffers_rd = viewport->render_buffers;
+	if (render_buffers_rd.is_valid()) {
+		mipmap_bias = render_buffers_rd->get_computed_mipmap_bias();
+	}
+#endif
+	status["mipmap_bias"] = mipmap_bias;
 	if (viewport->requested_scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR || viewport->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR) {
 		status["preset"] = int(viewport->tsr_quality);
 	} else {

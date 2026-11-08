@@ -37,8 +37,10 @@
 #include "core/os/os.h"
 #include "core/variant/typed_array.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+// GodotNext: pt_temporal_upscaler_extension (#192).
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
+#include "servers/rendering/storage/temporal_upscaler_extension.h"
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
 #endif
@@ -2364,6 +2366,21 @@ Dictionary RenderingServer::virtual_geometry_get_routing_counters() {
 }
 
 RSE::ViewportScaling3DReason RenderingServer::scaling_3d_mode_get_availability(RSE::ViewportScaling3DMode p_mode) {
+	// GodotNext: pt_temporal_upscaler_extension (#192). CUSTOM needs Forward+
+	// and an available extension selected by rendering/scaling_3d/custom_upscaler.
+	if (p_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) {
+		if (!is_on_render_thread()) {
+			// Order the answer after any queued register or unregister.
+			sync();
+		}
+		const String rendering_method = OS::get_singleton()->get_current_rendering_method();
+		if (rendering_method == "gl_compatibility" || rendering_method == "mobile") {
+			return RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED;
+		}
+		return TemporalUpscalerRegistry::is_custom_upscaler_available()
+				? RSE::VIEWPORT_SCALING_3D_REASON_NONE
+				: RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE;
+	}
 	// GodotNext: pu_dlss_scaling_mode (#103). Non-DLSS modes keep their
 	// existing rules; DLSS reports the API/module reason.
 	if (p_mode != RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
@@ -3006,6 +3023,9 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_get_scaling_3d_status", "viewport"), &RenderingServer::viewport_get_scaling_3d_status);
 	ClassDB::bind_method(D_METHOD("viewport_reset_temporal_history", "viewport"), &RenderingServer::viewport_reset_temporal_history);
 	ClassDB::bind_method(D_METHOD("scaling_3d_mode_get_availability", "mode"), &RenderingServer::scaling_3d_mode_get_availability);
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	ClassDB::bind_method(D_METHOD("register_temporal_upscaler_extension", "extension"), &RenderingServer::register_temporal_upscaler_extension);
+	ClassDB::bind_method(D_METHOD("unregister_temporal_upscaler_extension", "extension"), &RenderingServer::unregister_temporal_upscaler_extension);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_memory_report"), &RenderingServer::virtual_geometry_get_memory_report);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_routing_counters"), &RenderingServer::virtual_geometry_get_routing_counters);
@@ -3094,6 +3114,8 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_FEATURE_CREATE_FAILED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_SCALE_UNSUPPORTED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED);
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_UPDATE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_UPDATE_ONCE); // Then goes to disabled, must be manually updated.
@@ -4025,6 +4047,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dynamic_resolution/target_frame_rate", PROPERTY_HINT_RANGE, "1,1000,1,or_greater"), 60);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/dynamic_resolution/min_scale", PROPERTY_HINT_RANGE, "0.1,2.0,0.0001"), 0.5f);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/dynamic_resolution/max_scale", PROPERTY_HINT_RANGE, "0.1,2.0,0.0001"), 1.0f);
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/scaling_3d/custom_upscaler", PROPERTY_HINT_NONE, ""), String());
 
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/textures/default_filters/texture_mipmap_bias", PROPERTY_HINT_RANGE, "-2,2,0.001"), 0.0f);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/decals/filter", PROPERTY_HINT_ENUM, "Nearest (Fast),Linear (Fast),Nearest Mipmap (Fast),Linear Mipmap (Fast),Nearest Mipmap Anisotropic (Average),Linear Mipmap Anisotropic (Average)"), RSE::DECAL_FILTER_LINEAR_MIPMAPS);

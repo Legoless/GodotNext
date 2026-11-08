@@ -3682,6 +3682,13 @@
 				Sets how often the reflection probe updates. Can either be once or every frame.
 			</description>
 		</method>
+		<method name="register_temporal_upscaler_extension">
+			<return type="void" />
+			<param index="0" name="extension" type="TemporalUpscalerExtension" />
+			<description>
+				Registers [param extension] as a custom temporal upscaler. Viewports using [constant VIEWPORT_SCALING_3D_MODE_CUSTOM] use it when [member ProjectSettings.rendering/scaling_3d/custom_upscaler] matches its [method TemporalUpscalerExtension._get_name] and [method TemporalUpscalerExtension._is_available] returns [code]true[/code]. Affected viewports are reconfigured before the next frame renders.
+			</description>
+		</method>
 		<method name="request_frame_drawn_callback">
 			<return type="void" />
 			<param index="0" name="callable" type="Callable" />
@@ -4230,6 +4237,13 @@
 				Sets the size at which the texture should be [i]displayed[/i] in 2D, ignoring its original size. This does not rescale the texture data itself, only how it is drawn in 2D. Set [param width] and [param height] to 0 to disable the size override.
 			</description>
 		</method>
+		<method name="unregister_temporal_upscaler_extension">
+			<return type="void" />
+			<param index="0" name="extension" type="TemporalUpscalerExtension" />
+			<description>
+				Unregisters [param extension]. Viewports that used it fall back to TSR from the next frame. The engine releases its reference to [param extension] at the end of the frame being drawn, or at once when no frame is being drawn.
+			</description>
+		</method>
 		<method name="viewport_attach_camera">
 			<return type="void" />
 			<param index="0" name="viewport" type="RID" />
@@ -4322,7 +4336,7 @@
 			<return type="Dictionary" />
 			<param index="0" name="viewport" type="RID" />
 			<description>
-				Returns the viewport's requested and active 3D scaling modes, the fallback reason, the effective scale and the DLSS preset as a [Dictionary].
+				Returns the viewport's 3D scaling status as a [Dictionary]: [code]requested_mode[/code] and [code]active_mode[/code] (see [enum ViewportScaling3DMode]), the fallback [code]reason[/code] (see [enum ViewportScaling3DReason]), [code]effective_scale[/code], the DLSS or TSR [code]preset[/code], [code]jitter_phase_count[/code], and the [code]mipmap_bias[/code] the 3D texture samplers use ([code]0.0[/code] in the Compatibility renderer, which applies none).
 			</description>
 		</method>
 		<method name="viewport_get_texture" qualifiers="const">
@@ -5594,7 +5608,7 @@
 			Use Temporal Super Resolution (TSR) for 3D resolution scaling and antialiasing. Supports scales between [code]0.25[/code] and [code]2.0[/code] (supersampling above [code]1.0[/code]). Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant VIEWPORT_SCALING_3D_MODE_BILINEAR].
 		</constant>
 		<constant name="VIEWPORT_SCALING_3D_MODE_CUSTOM" value="8" enum="ViewportScaling3DMode">
-			Use a registered custom temporal upscaler extension for 3D resolution scaling. Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant VIEWPORT_SCALING_3D_MODE_BILINEAR].
+			Use the [TemporalUpscalerExtension] selected by [member ProjectSettings.rendering/scaling_3d/custom_upscaler] for 3D resolution scaling. Without an available extension, the viewport falls back to [constant VIEWPORT_SCALING_3D_MODE_TSR]. Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant VIEWPORT_SCALING_3D_MODE_BILINEAR].
 		</constant>
 		<constant name="VIEWPORT_SCALING_3D_MODE_MAX" value="9" enum="ViewportScaling3DMode">
 			Represents the size of the [enum ViewportScaling3DMode] enum.
@@ -5652,6 +5666,9 @@
 		</constant>
 		<constant name="VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED" value="11" enum="ViewportScaling3DReason">
 			The mode does not support multiview.
+		</constant>
+		<constant name="VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE" value="12" enum="ViewportScaling3DReason">
+			No registered [TemporalUpscalerExtension] matches [member ProjectSettings.rendering/scaling_3d/custom_upscaler], or the matching one is unavailable. The viewport falls back to TSR.
 		</constant>
 		<constant name="VIEWPORT_UPDATE_DISABLED" value="0" enum="ViewportUpdateMode">
 			Do not update the viewport's render target.

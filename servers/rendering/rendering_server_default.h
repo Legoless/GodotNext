@@ -97,6 +97,10 @@ class RenderingServerDefault : public RenderingServer {
 	void _free(RID p_rid);
 
 	void _call_on_render_thread(const Callable &p_callable);
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	bool drawing_frame = false;
+	void _register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension);
+	void _unregister_temporal_upscaler_extension(ObjectID p_extension_id);
 	Dictionary _virtual_geometry_get_debug_stats(RID p_viewport) {
 		return RenderingServer::virtual_geometry_get_debug_stats(p_viewport);
 	}
@@ -1294,6 +1298,10 @@ public:
 			command_queue.push(this, &RenderingServerDefault::_call_on_render_thread, p_callable);
 		}
 	}
+
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	virtual void register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) override;
+	virtual void unregister_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) override;
 
 	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID()) override {
 		if (Thread::get_caller_id() == server_thread) {

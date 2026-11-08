@@ -9,6 +9,8 @@ const LAYERS := {
 var _active := false
 var _args: Dictionary = {}
 var _prepared_scene_id := 0
+## --upscaler=custom (#192): the test-only SampleCopy extension.
+var _sample_copy: TemporalUpscalerExtension
 
 
 func _ready() -> void:
@@ -85,10 +87,29 @@ func _apply_viewport(viewport: Viewport) -> void:
 			viewport.use_taa = false
 			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_TSR
 			viewport.scaling_3d_scale = float(_args.get("scale", 0.5))
+		"custom":
+			_register_sample_copy()
+			viewport.use_taa = false
+			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_CUSTOM
+			viewport.scaling_3d_scale = float(_args.get("scale", 0.75))
 		_:
 			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
 			viewport.scaling_3d_scale = float(_args.get("scale", 1.0))
 			viewport.use_taa = true
+
+
+func _register_sample_copy() -> void:
+	if _sample_copy != null:
+		return
+	_sample_copy = load("res://addons/sample_copy_upscaler/copy_upscaler.gd").new()
+	ProjectSettings.set_setting("rendering/scaling_3d/custom_upscaler", _sample_copy._get_name())
+	RenderingServer.register_temporal_upscaler_extension(_sample_copy)
+
+
+func _exit_tree() -> void:
+	if _sample_copy != null:
+		RenderingServer.unregister_temporal_upscaler_extension(_sample_copy)
+		_sample_copy = null
 
 
 func _prepare_alpha_to_coverage(scene: Node) -> void:

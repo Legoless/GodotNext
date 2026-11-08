@@ -31,11 +31,11 @@
 #include "temporal_upscaler.h"
 
 #include "core/os/os.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 
 #ifdef DEV_ENABLED
 #include "servers/rendering/renderer_rd/shaders/effects/temporal_copy_upscaler.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
-#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 
 class DevCopyTemporalUpscaler : public TemporalUpscaler {
@@ -121,16 +121,115 @@ public:
 static DevCopyTemporalUpscaler *dev_copy_upscaler = nullptr;
 #endif
 
+TemporalUpscalerExtensionAdapter::TemporalUpscalerExtensionAdapter(const Ref<TemporalUpscalerExtension> &p_extension) :
+		extension(p_extension) {
+	display_name = extension.is_valid() ? extension->get_upscaler_name() : String();
+	if (display_name.is_empty()) {
+		display_name = "Custom Temporal Upscaler";
+	}
+	label_utf8 = display_name.utf8();
+}
+
+Vector2 TemporalUpscalerExtensionAdapter::get_scale_range() const {
+	return extension.is_valid() ? extension->get_scale_range() : Vector2(0.25f, 2.0f);
+}
+
+bool TemporalUpscalerExtensionAdapter::supports_api(const String &p_api_name) const {
+	(void)p_api_name;
+	return extension.is_valid() && extension->is_available();
+}
+
+float TemporalUpscalerExtensionAdapter::mip_bias_offset() const {
+	return extension.is_valid() ? extension->get_mip_bias_offset() : -0.5f;
+}
+
+uint32_t TemporalUpscalerExtensionAdapter::jitter_phase_count(const Size2i &p_target_size, const Size2i &p_render_size) const {
+	if (extension.is_valid()) {
+		return extension->get_jitter_phase_count(p_target_size, p_render_size);
+	}
+	return nextgi_temporal_jitter_phase_count(p_target_size, p_render_size, true);
+}
+
+RSE::ViewportScaling3DReason TemporalUpscalerExtensionAdapter::ensure_context(RenderSceneBuffersRD *p_render_buffers, uint32_t p_view) {
+	ERR_FAIL_NULL_V(p_render_buffers, RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+	if (p_view > 0 || extension.is_null() || !extension->is_available()) {
+		return RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE;
+	}
+	contexts[p_render_buffers] |= (1u << p_view);
+	return RSE::VIEWPORT_SCALING_3D_REASON_NONE;
+}
+
+void TemporalUpscalerExtensionAdapter::process(Ref<RenderSceneBuffersRD> p_render_buffers, uint32_t p_view, const Inputs &p_inputs) {
+	if (extension.is_null() || !extension->is_available()) {
+		if (p_render_buffers.is_valid()) {
+			latch_context_error(p_render_buffers.ptr(), RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE);
+		}
+		return;
+	}
+
+	if (p_inputs.reset && p_view == 0) {
+		extension->reset_history();
+	}
+
+	Ref<TemporalUpscalerInputs> ext_inputs;
+	ext_inputs.instantiate();
+	ext_inputs->set_color(p_inputs.color);
+	ext_inputs->set_depth(p_inputs.depth);
+	ext_inputs->set_velocity(p_inputs.velocity);
+	ext_inputs->set_reactive(p_inputs.reactive);
+	ext_inputs->set_output(p_inputs.output);
+	ext_inputs->set_internal_size(p_inputs.internal_size);
+	ext_inputs->set_max_internal_size(p_inputs.max_internal_size != Size2i() ? p_inputs.max_internal_size : p_inputs.internal_size);
+	ext_inputs->set_output_size(p_inputs.output_size != Size2i() ? p_inputs.output_size : (p_render_buffers.is_valid() ? p_render_buffers->get_target_size() : Size2i()));
+	ext_inputs->set_motion_vector_scale(Vector2(p_inputs.motion_vector_scale));
+	ext_inputs->set_jitter(p_inputs.jitter);
+	ext_inputs->set_world_to_view(p_inputs.world_to_view);
+	ext_inputs->set_view_to_clip(p_inputs.view_to_clip);
+	ext_inputs->set_z_near(p_inputs.z_near);
+	ext_inputs->set_z_far(p_inputs.z_far);
+	ext_inputs->set_fovy(p_inputs.fovy);
+	ext_inputs->set_delta_time(p_inputs.delta_time);
+	ext_inputs->set_reset(p_inputs.reset);
+	ext_inputs->set_view_index(p_view);
+	ext_inputs->set_render_scene_buffers(p_render_buffers);
+
+	extension->process(ext_inputs);
+}
+
+void TemporalUpscalerExtensionAdapter::free_contexts(RenderSceneBuffersRD *p_render_buffers) {
+	contexts.erase(p_render_buffers);
+}
+
+void TemporalUpscalerExtensionAdapter::shutdown() {
+	contexts.clear();
+}
+
+TemporalUpscaler *TemporalUpscalerRegistry::create_extension_adapter(const Ref<TemporalUpscalerExtension> &p_extension) {
+	return memnew(TemporalUpscalerExtensionAdapter(p_extension));
+}
+
+void TemporalUpscalerRegistry::destroy_extension_adapter(TemporalUpscaler *p_adapter) {
+	if (p_adapter != nullptr) {
+		p_adapter->shutdown();
+		memdelete(p_adapter);
+	}
+}
+
 void TemporalUpscalerRegistry::free_contexts(RenderSceneBuffersRD *p_render_buffers) {
-	for (TemporalUpscaler *upscaler : upscalers) {
+	for (int mode = 0; mode < RSE::VIEWPORT_SCALING_3D_MODE_MAX; mode++) {
+		// GodotNext: pt_temporal_upscaler_extension (#192). The CUSTOM slot
+		// changes under the registry lock; free_extension_contexts() covers it.
+		TemporalUpscaler *upscaler = mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM ? nullptr : upscalers[mode];
 		if (upscaler != nullptr) {
 			upscaler->free_contexts(p_render_buffers);
 			upscaler->clear_context_error(p_render_buffers);
 		}
 	}
+	free_extension_contexts(p_render_buffers);
 }
 
 void TemporalUpscalerRegistry::shutdown() {
+	clear_extensions();
 	for (TemporalUpscaler *upscaler : upscalers) {
 		if (upscaler != nullptr) {
 			upscaler->shutdown();

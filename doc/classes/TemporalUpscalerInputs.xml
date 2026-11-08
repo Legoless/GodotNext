@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TemporalUpscalerInputs" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		The per-view inputs passed to [method TemporalUpscalerExtension._process].
+	</brief_description>
+	<description>
+		Holds the textures and camera values a temporal upscaler needs for one view of one frame. The engine creates a new instance for each [method TemporalUpscalerExtension._process] call; it is only valid during that call.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="color" type="RID" setter="set_color" getter="get_color" default="RID()">
+			The internal-resolution color texture to upscale.
+		</member>
+		<member name="delta_time" type="float" setter="set_delta_time" getter="get_delta_time" default="0.0">
+			The time since the previous frame, in seconds.
+		</member>
+		<member name="depth" type="RID" setter="set_depth" getter="get_depth" default="RID()">
+			The internal-resolution depth texture.
+		</member>
+		<member name="fovy" type="float" setter="set_fovy" getter="get_fovy" default="0.0">
+			The camera's vertical field of view, in degrees.
+		</member>
+		<member name="internal_size" type="Vector2i" setter="set_internal_size" getter="get_internal_size" default="Vector2i(0, 0)">
+			The size of the internal textures, in pixels. With dynamic resolution it can change from frame to frame, up to [member max_internal_size], and the internal textures are reallocated at each new size.
+		</member>
+		<member name="jitter" type="Vector2" setter="set_jitter" getter="get_jitter" default="Vector2(0, 0)">
+			The camera jitter for this frame, in internal pixels.
+		</member>
+		<member name="max_internal_size" type="Vector2i" setter="set_max_internal_size" getter="get_max_internal_size" default="Vector2i(0, 0)">
+			The largest [member internal_size] the viewport can use without a full reconfigure, in pixels. Size history and other per-viewport resources for it, so dynamic resolution changes do not need a reallocation.
+		</member>
+		<member name="motion_vector_scale" type="Vector2" setter="set_motion_vector_scale" getter="get_motion_vector_scale" default="Vector2(0, 0)">
+			The scale that converts the velocity texture's values to internal pixels.
+		</member>
+		<member name="output" type="RID" setter="set_output" getter="get_output" default="RID()">
+			The output-resolution texture to write the upscaled image to.
+		</member>
+		<member name="output_size" type="Vector2i" setter="set_output_size" getter="get_output_size" default="Vector2i(0, 0)">
+			The size of [member output], in pixels.
+		</member>
+		<member name="reactive" type="RID" setter="set_reactive" getter="get_reactive" default="RID()">
+			The internal-resolution reactive mask, the alpha channel of [member color].
+		</member>
+		<member name="render_scene_buffers" type="RenderSceneBuffers" setter="set_render_scene_buffers" getter="get_render_scene_buffers">
+			The render buffers of the viewport being upscaled. Store per-viewport history in it, for example with [method RenderSceneBuffersRD.create_texture] under your own context, so it is freed with the viewport. Do not keep a reference to it after [method TemporalUpscalerExtension._process] returns.
+		</member>
+		<member name="reset" type="bool" setter="set_reset" getter="get_reset" default="false">
+			If [code]true[/code], the temporal history must be discarded this frame. [method TemporalUpscalerExtension._reset_history] is called before the same [method TemporalUpscalerExtension._process] call.
+		</member>
+		<member name="velocity" type="RID" setter="set_velocity" getter="get_velocity" default="RID()">
+			The internal-resolution velocity (motion vector) texture.
+		</member>
+		<member name="view_index" type="int" setter="set_view_index" getter="get_view_index" default="0">
+			The index of the view being upscaled. It is always [code]0[/code], since custom upscalers support one view.
+		</member>
+		<member name="view_to_clip" type="Projection" setter="set_view_to_clip" getter="get_view_to_clip" default="Projection(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)">
+			The camera's projection for this view.
+		</member>
+		<member name="world_to_view" type="Transform3D" setter="set_world_to_view" getter="get_world_to_view" default="Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)">
+			The camera's world-to-view transform for this view.
+		</member>
+		<member name="z_far" type="float" setter="set_z_far" getter="get_z_far" default="0.0">
+			The camera's far clip distance.
+		</member>
+		<member name="z_near" type="float" setter="set_z_near" getter="get_z_near" default="0.0">
+			The camera's near clip distance.
+		</member>
+	</members>
+</class>

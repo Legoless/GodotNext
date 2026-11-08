@@ -35,6 +35,8 @@
 #include "core/profiling/profiling.h"
 #include "servers/display/display_server.h"
 #include "servers/rendering/renderer_canvas_cull.h"
+// GodotNext: pt_temporal_upscaler_extension (#192).
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -78,6 +80,8 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 }
 
 void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+	// GodotNext: pt_temporal_upscaler_extension (#192).
+	drawing_frame = true;
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -117,6 +121,10 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
 	RSG::rasterizer->end_frame(p_swap_buffers);
+	// GodotNext: pt_temporal_upscaler_extension (#192). Unregistered extensions
+	// are freed once the frame that may still use them is recorded.
+	TemporalUpscalerRegistry::flush_retired_extensions();
+	drawing_frame = false;
 
 #ifndef XR_DISABLED
 	if (xr_server != nullptr) {
@@ -265,6 +273,10 @@ void RenderingServerDefault::_init() {
 }
 
 void RenderingServerDefault::_finish() {
+	// GodotNext: pt_temporal_upscaler_extension (#192). Main::cleanup() releases
+	// the extensions before the script languages finish; this catches the rest.
+	TemporalUpscalerRegistry::clear_extensions();
+
 	if (test_cube.is_valid()) {
 		free_rid(test_cube);
 	}
@@ -481,6 +493,49 @@ void RenderingServerDefault::pre_draw(bool p_will_draw) {
 
 void RenderingServerDefault::_call_on_render_thread(const Callable &p_callable) {
 	p_callable.call();
+}
+
+// GodotNext: pt_temporal_upscaler_extension (#192). The registry changes on
+// the server thread between frames, like the other setters; draw_viewports()
+// then reconfigures CUSTOM viewports before they render. Retired extensions
+// are freed at the end of the frame being drawn, or at once when none is.
+void RenderingServerDefault::_register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) {
+	TemporalUpscalerRegistry::register_extension(p_extension);
+	if (!drawing_frame) {
+		TemporalUpscalerRegistry::flush_retired_extensions();
+	}
+	redraw_request();
+}
+
+void RenderingServerDefault::_unregister_temporal_upscaler_extension(ObjectID p_extension_id) {
+	TemporalUpscalerRegistry::unregister_extension(p_extension_id);
+	if (!drawing_frame) {
+		TemporalUpscalerRegistry::flush_retired_extensions();
+	}
+	redraw_request();
+}
+
+void RenderingServerDefault::register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) {
+	ERR_FAIL_COND(p_extension.is_null());
+	if (Thread::get_caller_id() != server_thread) {
+		command_queue.push(this, &RenderingServerDefault::_register_temporal_upscaler_extension, p_extension);
+	} else {
+		command_queue.flush_if_pending();
+		_register_temporal_upscaler_extension(p_extension);
+	}
+}
+
+void RenderingServerDefault::unregister_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) {
+	ERR_FAIL_COND(p_extension.is_null());
+	// The queued command carries only the id: it must never hold the last
+	// reference, which could outlive the extension's GDExtension class.
+	const ObjectID id = p_extension->get_instance_id();
+	if (Thread::get_caller_id() != server_thread) {
+		command_queue.push(this, &RenderingServerDefault::_unregister_temporal_upscaler_extension, id);
+	} else {
+		command_queue.flush_if_pending();
+		_unregister_temporal_upscaler_extension(id);
+	}
 }
 
 RenderingServerDefault::RenderingServerDefault(bool p_create_thread) {

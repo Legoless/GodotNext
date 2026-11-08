@@ -3576,6 +3576,9 @@
 			A larger number is more efficient up to a limit, after that it will only waste RAM (maximum efficiency is achieved when there is no more than 1 pool per frame). A small number could end up with one pool per descriptor, which negatively impacts performance.
 			[b]Note:[/b] Changing this property requires a restart to take effect.
 		</member>
+		<member name="rendering/scaling_3d/custom_upscaler" type="String" setter="" getter="" default="&quot;&quot;">
+			The name of the [TemporalUpscalerExtension] that [constant Viewport.SCALING_3D_MODE_CUSTOM] uses, as returned by its [method TemporalUpscalerExtension._get_name]. Register the extension with [method RenderingServer.register_temporal_upscaler_extension]. If no available extension has this name, viewports fall back to TSR.
+		</member>
 		<member name="rendering/scaling_3d/dlss/allow_ota_updates" type="bool" setter="" getter="" default="false">
 			Allow the NVIDIA runtime to apply over-the-air updates (DLSS SDK Supplement 6.1). Developer builds only.
 		</member>

@@ -72,6 +72,10 @@ public:
 		RSE::ViewportAnisotropicFiltering anisotropic_filtering_level = RSE::VIEWPORT_ANISOTROPY_4X;
 		bool fsr_enabled = false;
 		uint32_t jitter_phase_count = 0;
+		// GodotNext: pt_temporal_upscaler_extension (#192). The CUSTOM
+		// registry state the render buffers were configured for.
+		uint64_t custom_upscaler_revision = 0;
+		uint64_t custom_upscaler_id = 0;
 		RSE::ViewportUpdateMode update_mode = RSE::VIEWPORT_UPDATE_WHEN_VISIBLE;
 		RID render_target;
 		RID render_target_texture;

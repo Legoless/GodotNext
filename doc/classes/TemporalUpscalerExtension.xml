@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="TemporalUpscalerExtension" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Base class for a custom temporal upscaler used by [constant Viewport.SCALING_3D_MODE_CUSTOM].
+	</brief_description>
+	<description>
+		Extend this class in a script or a GDExtension to provide a temporal upscaler outside the engine, for example a vendor upscaler shipped as a plugin. Register an instance with [method RenderingServer.register_temporal_upscaler_extension], set [member ProjectSettings.rendering/scaling_3d/custom_upscaler] to the name returned by [method _get_name], then select [constant Viewport.SCALING_3D_MODE_CUSTOM] (or [member ProjectSettings.rendering/scaling_3d/mode] [code]8[/code]).
+		When no registered extension has that name, or the selected one returns [code]false[/code] from [method _is_available], viewports fall back to TSR ([constant Viewport.SCALING_3D_MODE_TSR]). [method RenderingServer.viewport_get_scaling_3d_status] then reports [constant RenderingServer.VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE], and one warning is printed.
+		[method _process] runs on the rendering thread once per frame for each viewport that uses the upscaler. Record GPU work through [method RenderingServer.get_rendering_device], as in [method CompositorEffect._render_callback]. To keep separate history for each viewport, store it in [member TemporalUpscalerInputs.render_scene_buffers], for example with [method RenderSceneBuffersRD.create_texture] under your own context, so it is freed with the viewport. Do not use the render buffers object as a [Dictionary] key: that keeps a freed viewport's buffers alive.
+		[b]Note:[/b] Custom upscalers are only supported by the Forward+ renderer. A viewport with more than one view (XR) falls back to TSR and reports [constant RenderingServer.VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED].
+		[b]Note:[/b] Call [method RenderingServer.unregister_temporal_upscaler_extension] before the script or library that implements the extension unloads. The engine releases an unregistered extension at the end of the frame being drawn (at once when no frame is being drawn), and releases any extension still registered when the engine shuts down.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_get_jitter_phase_count" qualifiers="virtual const">
+			<return type="int" />
+			<param index="0" name="target_size" type="Vector2i" />
+			<param index="1" name="render_size" type="Vector2i" />
+			<description>
+				Returns the number of camera jitter phases to use for a viewport of [param target_size] rendered at [param render_size]. Return a negative value to use the engine's default, [code]8 * (target_size.x / render_size.x)^2[/code] rounded to the nearest integer.
+			</description>
+		</method>
+		<method name="_get_mip_bias_offset" qualifiers="virtual const">
+			<return type="float" />
+			<description>
+				Returns the texture mipmap bias offset added to [code]log2(min(scale, 1.0))[/code] and [member Viewport.texture_mipmap_bias] while this upscaler is active. If not overridden, [code]-0.5[/code] is used.
+			</description>
+		</method>
+		<method name="_get_name" qualifiers="virtual const">
+			<return type="String" />
+			<description>
+				Returns the name that [member ProjectSettings.rendering/scaling_3d/custom_upscaler] selects this upscaler by. It must not be empty. Registering another extension with the same name replaces this one.
+			</description>
+		</method>
+		<method name="_get_scale_range" qualifiers="virtual const">
+			<return type="Vector2" />
+			<description>
+				Returns the minimum ([code]x[/code]) and maximum ([code]y[/code]) [member Viewport.scaling_3d_scale] this upscaler supports. Inverted bounds are swapped, and the minimum is at least [code]0.01[/code]. Scales outside the range are clamped, with one warning. If not overridden, [code]Vector2(0.25, 2.0)[/code] is used.
+			</description>
+		</method>
+		<method name="_is_available" qualifiers="virtual const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the upscaler can run on the current device and rendering driver. It is checked every frame while a viewport uses [constant Viewport.SCALING_3D_MODE_CUSTOM], so it should be fast. It is called on the rendering thread, and also on the calling thread by [method RenderingServer.scaling_3d_mode_get_availability]. If not overridden, the upscaler is unavailable.
+			</description>
+		</method>
+		<method name="_process" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="inputs" type="TemporalUpscalerInputs" />
+			<description>
+				Called on the rendering thread to upscale one view: read [member TemporalUpscalerInputs.color] and the other inputs, and write the upscaled image to [member TemporalUpscalerInputs.output]. Record the work through [method RenderingServer.get_rendering_device].
+				[b]Note:[/b] [param inputs] is only valid during this call. Do not keep it or a reference to its [member TemporalUpscalerInputs.render_scene_buffers] after [method _process] returns.
+			</description>
+		</method>
+		<method name="_reset_history" qualifiers="virtual">
+			<return type="void" />
+			<description>
+				Called right before [method _process] when the temporal history must be discarded, for example on the first frame, after the viewport is resized, or after [method RenderingServer.viewport_reset_temporal_history]. [member TemporalUpscalerInputs.reset] is [code]true[/code] for the same call.
+			</description>
+		</method>
+	</methods>
+</class>

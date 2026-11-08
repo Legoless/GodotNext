@@ -256,6 +256,8 @@ static const char *_upscaler_reason_name(int p_reason) {
 			return "SCALE_UNSUPPORTED";
 		case RSE::VIEWPORT_SCALING_3D_REASON_VIEW_UNSUPPORTED:
 			return "VIEW_UNSUPPORTED";
+		case RSE::VIEWPORT_SCALING_3D_REASON_CUSTOM_UPSCALER_UNAVAILABLE:
+			return "CUSTOM_UPSCALER_UNAVAILABLE";
 		default:
 			return "UNKNOWN";
 	}

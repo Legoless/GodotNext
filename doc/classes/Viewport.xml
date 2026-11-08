@@ -595,7 +595,7 @@
 			Use Temporal Super Resolution (TSR) for 3D resolution scaling and antialiasing. Supports [member scaling_3d_scale] values between [code]0.25[/code] and [code]2.0[/code] (values outside that range are clamped, and values above [code]1.0[/code] supersample). Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant SCALING_3D_MODE_BILINEAR].
 		</constant>
 		<constant name="SCALING_3D_MODE_CUSTOM" value="8" enum="Scaling3DMode">
-			Use a registered custom temporal upscaler extension for 3D resolution scaling. Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant SCALING_3D_MODE_BILINEAR].
+			Use the [TemporalUpscalerExtension] selected by [member ProjectSettings.rendering/scaling_3d/custom_upscaler] for 3D resolution scaling. Without an available extension, the viewport falls back to [constant SCALING_3D_MODE_TSR]. Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant SCALING_3D_MODE_BILINEAR].
 		</constant>
 		<constant name="SCALING_3D_MODE_MAX" value="9" enum="Scaling3DMode">
 			Represents the size of the [enum Scaling3DMode] enum.
