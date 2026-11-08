@@ -55,6 +55,7 @@
 
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
@@ -318,6 +319,8 @@ void NextGI::_select_swrt_auto_quality() {
 
 void NextGI::_append_swrt_info(Dictionary &r_info) const {
 	r_info["experimental_toggle"] = true;
+	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
+	r_info["lite_beta"] = active && is_lumen_lite(resolve_quality(quality_setting), get_medium_gather());
 	if (result.tier != TIER_SOFTWARE) {
 		return;
 	}
@@ -327,8 +330,78 @@ void NextGI::_append_swrt_info(Dictionary &r_info) const {
 		mode = int(GLOBAL_GET("rendering/global_illumination/nextgi/software_ray_tracing_mode"));
 	}
 	r_info["swrt_mode"] = mode == 1 ? String("Detail") : String("Global");
-	r_info["lite_beta"] = resolve_quality(quality_setting) == QUALITY_MEDIUM;
 	r_info["swrt_reduced"] = result.swrt_reduced;
+}
+
+NextGI::MediumGather NextGI::medium_gather_from_setting(int p_setting) {
+	return p_setting == MEDIUM_GATHER_SCREEN_PROBES ? MEDIUM_GATHER_SCREEN_PROBES : MEDIUM_GATHER_IRRADIANCE_FIELD;
+}
+
+NextGI::MediumGather NextGI::get_medium_gather() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (ps == nullptr || !ps->has_setting("rendering/global_illumination/nextgi/medium_gather")) {
+		return MEDIUM_GATHER_IRRADIANCE_FIELD;
+	}
+	return medium_gather_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/medium_gather")));
+}
+
+bool NextGI::is_lumen_lite(Quality p_resolved, MediumGather p_gather) {
+	return p_resolved == QUALITY_MEDIUM && p_gather == MEDIUM_GATHER_IRRADIANCE_FIELD;
+}
+
+bool NextGI::is_lumen_lite() {
+	Quality setting = QUALITY_AUTO;
+	if (singleton != nullptr) {
+		setting = singleton->quality_setting;
+	} else {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (ps != nullptr && ps->has_setting("rendering/global_illumination/nextgi/quality")) {
+			setting = Quality(CLAMP(int(GLOBAL_GET("rendering/global_illumination/nextgi/quality")), 0, QUALITY_MAX - 1));
+		}
+	}
+	return is_lumen_lite(resolve_quality(setting), get_medium_gather());
+}
+
+bool NextGI::lite_probe_inside(float p_fraction) {
+	return p_fraction > LITE_INSIDE_BACKFACE;
+}
+
+Vector3 NextGI::lite_push_probe(const Vector3 &p_probe, const Vector3 &p_normal, float p_spacing, bool p_behind) {
+	if (!p_behind || p_normal.length_squared() <= 1.0e-8f) {
+		return p_probe;
+	}
+	return p_probe + p_normal.normalized() * (LITE_PUSH_SPACING * p_spacing);
+}
+
+bool NextGI::lite_uses_ssr(float p_roughness) {
+	return p_roughness <= LITE_SSR_ROUGHNESS;
+}
+
+bool NextGI::lite_traces_skinned(bool p_lite) {
+	return !p_lite;
+}
+
+void NextGI::lite_dispatch_counts(bool p_lite, uint32_t &r_gather, uint32_t &r_reflection) {
+	if (p_lite) {
+		r_gather = 0;
+		r_reflection = 0;
+		return;
+	}
+	const QualityParams &medium = get_quality_params(QUALITY_MEDIUM);
+	r_gather = medium.diffuse_rays_per_probe;
+	r_reflection = medium.reflection_divisor == 0 ? medium.diffuse_rays_per_probe : medium.diffuse_rays_per_probe / medium.reflection_divisor;
+}
+
+uint32_t NextGI::lite_probe_index(uint32_t p_level, uint32_t p_x, uint32_t p_y, uint32_t p_z) {
+	return p_level * LITE_PROBES_PER_LEVEL + p_x + p_y * 16u + p_z * 256u;
+}
+
+float NextGI::lite_probe_spacing(uint32_t p_level) {
+	return float(1u << MIN(p_level, LITE_PROBE_LEVELS - 1));
+}
+
+bool NextGI::view_samples_lite_field(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
+	return p_tier == TIER_SOFTWARE && !p_reflection_probe && p_environment_enabled && !p_unshaded && is_lumen_lite() && !is_reflections_only();
 }
 
 NextGI::Quality NextGI::auto_quality = NextGI::QUALITY_AUTO;
@@ -604,6 +677,10 @@ Dictionary NextGI::get_counters() const {
 		counters["swrt_shadow_rays"] = int64_t(swrt_trace->get_shadow_rays());
 		counters["swrt_mode"] = int64_t(swrt_trace->get_mode());
 	}
+	// GodotNext: ps_lumen_lite (#183). Per-frame counts. Zero means the dispatch did not run.
+	counters["lite_gather_dispatches"] = int64_t(lite_gather_dispatches);
+	counters["lite_reflection_dispatches"] = int64_t(lite_reflection_dispatches);
+	counters["lite_probe_traces"] = int64_t(lite_probe_traces);
 	return counters;
 }
 
@@ -703,6 +780,8 @@ NextGI::DebugViewId NextGI::debug_view_from_viewport(int p_viewport_debug_draw) 
 			return DEBUG_VIEW_SPECULAR_REJECTED;
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_DENOISED:
 			return DEBUG_VIEW_SPECULAR_DENOISED;
+		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES:
+			return DEBUG_VIEW_LITE_PROBES;
 		default:
 			return DEBUG_VIEW_MAX;
 	}
@@ -755,6 +834,9 @@ NextGI::DebugView NextGI::resolve_debug_view(DebugViewId p_view, const TierResul
 	if (p_view == DEBUG_VIEW_FALLBACK_REASONS) {
 		// The per-instance reasons are the legend of this view. They are not tier reasons.
 		view.label = "no data: NOT_IN_RT_SCENE, RT_INSTANCE_CAP, RT_DYNAMIC_EXCLUDED";
+	}
+	if (p_view == DEBUG_VIEW_LITE_PROBES) {
+		view.label = "lite probes";
 	}
 	return view;
 }
@@ -898,6 +980,17 @@ RID NextGI::get_denoise_debug_texture(DebugViewId p_view) const {
 	return gather != nullptr ? gather->get_debug_texture(int(p_view)) : RID();
 }
 
+RID NextGI::get_lite_debug_texture() const {
+	return irradiance_field != nullptr ? irradiance_field->get_debug_texture() : RID();
+}
+
+NextGIIrradianceField *NextGI::ensure_irradiance_field() {
+	if (irradiance_field == nullptr) {
+		irradiance_field = memnew(NextGIIrradianceField);
+	}
+	return irradiance_field;
+}
+
 void NextGI::_gather(RenderDataRD *p_render_data) {
 	if (gather != nullptr) {
 		gather->gather(p_render_data, !is_reflections_only());
@@ -983,10 +1076,25 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 	// so the software trace is a sibling of the HWRT gather. The software tier
 	// stays out of the ray-query frame block (#187).
 	if (result.tier == TIER_SOFTWARE) {
+		const bool lite = is_lumen_lite();
+		if (lite) {
+			lite_gather_dispatches = 0;
+			lite_reflection_dispatches = 0;
+			lite_probe_traces = 0;
+			ensure_irradiance_field();
+		} else {
+			lite_gather_dispatches = 0;
+			lite_reflection_dispatches = 0;
+			lite_probe_traces = 0;
+		}
 		if (swrt_trace == nullptr) {
 			swrt_trace = memnew(NextGISWRTTrace);
 		}
 		swrt_trace->update_frame(p_render_data, voxel_lighting);
+		if (lite && irradiance_field != nullptr) {
+			irradiance_field->integrate(p_render_data, false, is_reflections_only());
+			print_line(vformat("LITE_DISPATCH gather_rays=%d reflection_rays=%d probe_traces=%d", lite_gather_dispatches, lite_reflection_dispatches, lite_probe_traces));
+		}
 	} else if (swrt_trace != nullptr) {
 		memdelete(swrt_trace);
 		swrt_trace = nullptr;
@@ -1117,6 +1225,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	}
 	const uint32_t view_index = view_ordinal++;
 	const bool multiview = view_index > 0 || rb->get_view_count() > 1;
+	const bool lite = is_lumen_lite();
+	if (view_index == 0) {
+		lite_gather_dispatches = 0;
+		lite_reflection_dispatches = 0;
+		lite_probe_traces = 0;
+	}
 
 	// Every slot emits its timestamp, also while it has no work yet.
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
@@ -1157,13 +1271,23 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			}
 		} else if (slot == PASS_SLOT_WRC_UPDATE) {
 			ensure_wrc()->update(p_render_data);
+			if (lite && view_index == 0) {
+				lite_probe_traces = NEXTGI_WRC_PROBES_PER_FRAME;
+			}
 		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
-			_clear_gi_reflection(rb.ptr());
-			_gather(p_render_data);
+			// GodotNext: ps_lumen_lite (#183). Lite records the empty gather and reflection slots.
+			if (!lite) {
+				_clear_gi_reflection(rb.ptr());
+				_gather(p_render_data);
+			}
 		} else if (slot == PASS_SLOT_INTEGRATION) {
 			// Integration (§2.1 line 7) writes RB_TEX_AMBIENT from the gather probes. Reflection stays cleared.
 			// Reflections-only keeps the ambient writer (LightmapGI/VoxelGI) untouched.
-			if (!is_reflections_only()) {
+			if (lite) {
+				if (!is_reflections_only()) {
+					ensure_irradiance_field()->integrate(p_render_data, true, false);
+				}
+			} else if (!is_reflections_only()) {
 				_clear_gi_buffers(rb.ptr());
 				_integrate(p_render_data);
 			}
@@ -1184,6 +1308,9 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	rd->draw_command_end_label();
 	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));
+	if (lite && view_index == 0) {
+		print_line(vformat("LITE_DISPATCH gather_rays=%d reflection_rays=%d probe_traces=%d", lite_gather_dispatches, lite_reflection_dispatches, lite_probe_traces));
+	}
 }
 
 NextGI::NextGI() {
@@ -1234,6 +1361,11 @@ NextGI::~NextGI() {
 	if (swrt_trace != nullptr) {
 		memdelete(swrt_trace);
 		swrt_trace = nullptr;
+	}
+	// GodotNext: ps_lumen_lite (#183)
+	if (irradiance_field != nullptr) {
+		memdelete(irradiance_field);
+		irradiance_field = nullptr;
 	}
 
 	// GodotNext: nextgi_rt_scene

@@ -210,6 +210,8 @@ TEST_CASE("[NextGeo][Routing] Debug-draw classification and view gate (#79)") {
 	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_TIER));
 	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SRC_CARDS));
 	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_WRC_PROBES));
+	CHECK_FALSE(nextgeo_is_debug_view(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES));
+	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES));
 	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER));
 	// GodotNext: megalights_inputs (#136). Buffer views keep virtual geometry active.
 	CHECK_FALSE(nextgeo_is_debug_view(RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO));
@@ -241,6 +243,7 @@ TEST_CASE("[NextGeo][Routing] Debug-draw classification and view gate (#79)") {
 	CHECK_EQ(int(Viewport::DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE), int(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE));
 	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_ALBEDO), int(RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO));
 	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_MATERIAL), int(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL));
+	CHECK_EQ(int(Viewport::DEBUG_DRAW_NEXTGI_LITE_PROBES), int(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES));
 #endif
 }
 

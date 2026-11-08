@@ -4686,6 +4686,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY:
 		case VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED:
 		case VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED:
+		case VIEW_DISPLAY_NEXTGI_LITE_PROBES:
 		// GodotNext: nextgeo_exclusive_dispatch (#79)
 		case VIEW_DISPLAY_NEXTGEO_CRACKS:
 		case VIEW_DISPLAY_NEXTGEO_RT_PROXY:
@@ -4743,6 +4744,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY,
 				VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED,
 				VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED,
+				VIEW_DISPLAY_NEXTGI_LITE_PROBES,
 				// GodotNext: nextgeo_exclusive_dispatch (#79)
 				VIEW_DISPLAY_NEXTGEO_CRACKS,
 				VIEW_DISPLAY_NEXTGEO_RT_PROXY,
@@ -4802,6 +4804,7 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_HISTORY,
 				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_REJECTED,
 				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_DENOISED,
+				Viewport::DEBUG_DRAW_NEXTGI_LITE_PROBES,
 				// GodotNext: nextgeo_exclusive_dispatch (#79)
 				Viewport::DEBUG_DRAW_NEXTGEO_CRACKS,
 				Viewport::DEBUG_DRAW_NEXTGEO_RT_PROXY,
@@ -7199,6 +7202,8 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Shows the probes whose history was rejected this frame. The GPU debug source is still pending, so the view draws a labeled tint."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Result"), VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows the denoised diffuse after the temporal pass and the stabilizer. The GPU debug source is still pending, so the view draws a labeled tint."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Lite Probes"), VIEW_DISPLAY_NEXTGI_LITE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows probe validity from the half-resolution irradiance field: valid, pushed out along the prepass normal, or inside geometry. The view draws a labeled tint when that texture is missing."));
 	// GodotNext: nextgeo_exclusive_dispatch (#79)
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Cracks"), VIEW_DISPLAY_NEXTGEO_CRACKS, SupportedRenderingMethods::FORWARD_PLUS,

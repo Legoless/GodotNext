@@ -3096,7 +3096,7 @@
 				- [code]quality[/code]: the resolved quality preset, or [code]"NONE"[/code] when NextGI is inactive.
 				- [code]quality_reason[/code]: [code]"auto selection pending"[/code] while automatic quality is unresolved, [code]"setting"[/code] when the user picked a preset, or [code]"NONE"[/code].
 				- [code]driver[/code]: the current rendering driver name.
-				On the dummy renderer the tier is [code]"SWRT"[/code] and the reason is [code]"SETTING_OFF"[/code]. The software tier may also report [code]swrt_mode[/code] ([code]"Global"[/code] or [code]"Detail"[/code]), [code]lite_beta[/code] when the resolved quality is Medium, and [code]swrt_reduced[/code] when global SDF levels were dropped. [code]experimental_toggle[/code] marks the runtime hardware-ray-tracing switch.
+				On the dummy renderer the tier is [code]"SWRT"[/code] and the reason is [code]"SETTING_OFF"[/code]. The software tier may also report [code]swrt_mode[/code] ([code]"Global"[/code] or [code]"Detail"[/code]) and [code]swrt_reduced[/code] when global SDF levels were dropped. [code]lite_beta[/code] is true on either active tier when Medium uses the irradiance-field gather. [code]experimental_toggle[/code] marks the runtime hardware-ray-tracing switch.
 			</description>
 		</method>
 		<method name="nextgi_get_tier_info" qualifiers="const">
@@ -6017,6 +6017,10 @@
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_ML_MATERIAL" value="59" enum="ViewportDebugDraw">
 			Shows the packed MegaLights material target. R is F0 luma, G is F0 tint with neutral gray on an exact nibble, B is the shading model and flags, and A is the layer group. The copy uses nearest filtering so the packed fields are not interpolated. The target is written only while MegaLights inputs are enabled with [code]GODOTNEXT_MEGALIGHTS_INPUTS=1[/code], read once at startup.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES" value="60" enum="ViewportDebugDraw">
+			Shows Lumen Lite probe validity from the half-resolution irradiance field. RGB is irradiance. Alpha is 1 for a valid sample, 0.5 when a probe was pushed out along the prepass normal, and 0 when the probe is inside geometry or was skipped. The view draws a labeled tint when the field texture is missing.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">

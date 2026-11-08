@@ -163,6 +163,7 @@ public:
 	// Places every size or none of them, tallest first. r_rects keeps the input order.
 	bool allocate_all(const LocalVector<Vector2i> &p_sizes, LocalVector<Rect2i> &r_rects);
 	void reset();
+	void set_extent(uint32_t p_width, uint32_t p_height);
 
 	uint64_t get_used_texels() const { return used_texels; }
 	uint32_t get_width() const { return width; }
@@ -178,7 +179,7 @@ struct NextGIAtlasBudget {
 	uint64_t material_bytes = 0;
 };
 
-NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic);
+NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite = false);
 
 // Ω ≈ π r²/d². Distance 0 is a full hemisphere.
 float nextgi_src_solid_angle(float p_radius, float p_distance);
@@ -275,6 +276,7 @@ private:
 	RID atlas_fb_depth;
 	RID atlas_fb;
 	uint64_t atlas_memory = 0;
+	uint32_t atlas_side = NEXTGI_SRC_ATLAS_SIZE;
 
 	RID card_buffer;
 	RID card_set_buffer;

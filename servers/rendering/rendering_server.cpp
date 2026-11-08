@@ -3237,6 +3237,7 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: megalights_inputs (#136)
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -4081,9 +4082,11 @@ void RenderingServer::init() {
 	// GodotNext: nextgi_settings
 	GLOBAL_DEF_RST("rendering/global_illumination/nextgi/enabled", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing", PROPERTY_HINT_ENUM, "Auto,Off,Force"), 0);
+	// GodotNext: ps_lumen_lite (#183). Live gather choice. Atlas size is fixed when the atlases are created.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/medium_gather", PROPERTY_HINT_ENUM, "Irradiance Field,Screen Probes"), 0);
 	// GodotNext: ps_swrt_trace (#186). Global is the default. Detail is deprecated.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/software_ray_tracing_mode", PROPERTY_HINT_ENUM, "Global,Detail (Deprecated)"), 0);
-	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium (fast),High (60 FPS class),Epic (30 FPS class)"), 0);
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/quality", PROPERTY_HINT_ENUM, "Auto,Medium (Lite Beta),High (60 FPS class),Epic (30 FPS class)"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/mode", PROPERTY_HINT_ENUM, "GI and reflections,Reflections only"), 0);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/reflections", true);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/global_illumination/nextgi/rt_scene_radius", PROPERTY_HINT_RANGE, "1,100000,0.1,or_greater,suffix:m"), 200.0);

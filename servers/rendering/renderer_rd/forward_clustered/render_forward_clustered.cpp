@@ -1054,9 +1054,10 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		uint32_t ss_flags = 0;
 		if (p_opaque_render_buffers) {
 			const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
+			const bool nextgi_lite = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
-			ss_flags |= (!nextgi_view && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
-			ss_flags |= nextgi_view ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
+			ss_flags |= (!nextgi_view && !nextgi_lite && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
+			ss_flags |= (nextgi_view || nextgi_lite) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
 			ss_flags |= nextgi_view && !RendererRD::NextGI::is_reflections_enabled() && !environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
@@ -2342,7 +2343,9 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	bool render_gi = rb.is_valid() && p_use_gi;
 	// GodotNext: nextgi_frame_block
 	// NextGI writes these buffers except when VoxelGI supplies diffuse lighting in reflections-only mode.
-	render_gi = render_gi && (!p_use_nextgi || RendererRD::NextGI::is_reflections_only());
+	// GodotNext: ps_lumen_lite (#183). Software Lite also owns the ambient buffer, without the ray-query frame block.
+	const bool nextgi_lite_ambient = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
+	render_gi = render_gi && (!(p_use_nextgi || nextgi_lite_ambient) || RendererRD::NextGI::is_reflections_only());
 
 	if (render_shadows && render_gi) {
 		RENDER_TIMESTAMP("Render GI + Render Directional/SpotLight Shadows (Parallel)");
@@ -2595,6 +2598,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: nextgi_forward — a NextGI view does not run SDFGI. VoxelGI
 	// supplies diffuse lighting only in reflections-only mode.
 	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
+	const bool nextgi_lite_field = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
 	const bool nextgi_voxel_gi = nextgi_view && RendererRD::NextGI::is_reflections_only();
 
 	// sdfgi first
@@ -2804,6 +2808,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					WARN_PRINT_ONCE("Screen-space indirect lighting is disabled for views that use NextGI.");
 				}
 				using_ssil = false;
+			} else if (nextgi_lite_field) {
+				using_sdfgi = false;
+				if (using_ssil) {
+					WARN_PRINT_ONCE("Screen-space indirect lighting is disabled for views that use NextGI.");
+				}
+				using_ssil = false;
 			}
 		}
 
@@ -2887,7 +2897,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi || nextgi_lite_field, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -4060,6 +4070,8 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 			nextgi_source = next_gi.get_specular_debug_texture();
 		} else if (nextgi_view >= RendererRD::NextGI::DEBUG_VIEW_SPECULAR_RAW && nextgi_view <= RendererRD::NextGI::DEBUG_VIEW_SPECULAR_DENOISED) {
 			nextgi_source = next_gi.get_specular_filter_debug_texture(nextgi_view);
+		} else if (nextgi_view == RendererRD::NextGI::DEBUG_VIEW_LITE_PROBES) {
+			nextgi_source = next_gi.get_lite_debug_texture();
 		} else {
 			nextgi_source = next_gi.get_denoise_debug_texture(nextgi_view);
 		}

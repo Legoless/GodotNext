@@ -3165,11 +3165,15 @@
 			Whether NextGI may use hardware ray tracing. [b]Auto[/b] uses it where the rendering device supports hardware-accelerated ray queries. [b]Off[/b] uses the software tier, with the reason [code]SETTING_OFF[/code]. [b]Force[/b] also uses ray queries on devices that are not known to be hardware accelerated, including CPU devices, and ignores a latched hardware ray-tracing fault. On a device without ray queries, [b]Force[/b] selects the software tier with one warning.
 			[b]Note:[/b] To change this at runtime, call [method RenderingServer.nextgi_set_hardware_ray_tracing]. The switch is EXPERIMENTAL and applies only while [member rendering/global_illumination/mesh_sdf/keep_when_hwrt] is [code]true[/code].
 		</member>
+		<member name="rendering/global_illumination/nextgi/medium_gather" type="int" setter="" getter="" default="0">
+			How Medium quality gathers indirect light. [b]Irradiance Field[/b] (Lumen Lite, Beta) interpolates world-radiance-cache levels 0 and 1 at half resolution and dispatches no screen-probe or reflection rays. [b]Screen Probes[/b] keeps the traced Medium path: 8 diffuse rays per probe, reflections at quarter resolution up to roughness 0.25.
+			The default is [b]Irradiance Field[/b]. Screen-space reflections still cover roughness at or below 0.25. Rougher surfaces sample the world radiance cache. Skinned meshes leave the ray-tracing scene while Lite is on and still receive the field.
+		</member>
 		<member name="rendering/global_illumination/nextgi/mode" type="int" setter="" getter="" default="0">
 			Selects what NextGI renders. [code]GI and reflections[/code] runs the diffuse gather, integration and reflections. [code]Reflections only[/code] skips the diffuse gather and integration, keeping the LightmapGI or VoxelGI ambient writer, while still tracing and denoising reflections from the lit SRC.
 		</member>
 		<member name="rendering/global_illumination/nextgi/quality" type="int" setter="" getter="" default="0">
-			The NextGI quality preset. [b]Auto[/b] runs the startup benchmark and picks [b]High[/b] at 5 ms or less, else [b]Medium[/b]. [b]Medium[/b] uses half the High diffuse ray budget with reflections at quarter resolution up to roughness 0.25; [b]High[/b] is the P1 budget with reflections at half resolution up to 0.4; [b]Epic[/b] traces four times the High diffuse rays with full-resolution reflections and doubled SRC atlases.
+			The NextGI quality preset. [b]Auto[/b] runs the startup benchmark and picks [b]High[/b] at 5 ms or less, else [b]Medium[/b]. [b]Medium[/b] is Lumen Lite (Beta) by default: an irradiance-field gather with no screen-probe or reflection rays. [member rendering/global_illumination/nextgi/medium_gather] set to Screen Probes keeps the traced Medium, half the High diffuse ray budget with reflections at quarter resolution up to roughness 0.25. [b]High[/b] is the P1 budget with reflections at half resolution up to 0.4; [b]Epic[/b] traces four times the High diffuse rays with full-resolution reflections and doubled SRC atlases.
 			[b]Note:[/b] This property is only read when the project starts.
 		</member>
 		<member name="rendering/global_illumination/nextgi/reflections" type="bool" setter="" getter="" default="true">

@@ -235,6 +235,8 @@ public:
 		// GodotNext: megalights_inputs (#136)
 		DEBUG_DRAW_ML_ALBEDO,
 		DEBUG_DRAW_ML_MATERIAL,
+		// GodotNext: ps_lumen_lite (#183)
+		DEBUG_DRAW_NEXTGI_LITE_PROBES,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

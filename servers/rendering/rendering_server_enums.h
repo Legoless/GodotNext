@@ -690,6 +690,8 @@ enum ViewportDebugDraw {
 	// GodotNext: megalights_inputs (#136)
 	VIEWPORT_DEBUG_DRAW_ML_ALBEDO,
 	VIEWPORT_DEBUG_DRAW_ML_MATERIAL,
+	// GodotNext: ps_lumen_lite (#183)
+	VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES,
 };
 
 enum ViewportVRSMode {

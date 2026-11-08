@@ -448,6 +448,12 @@ void NextGIShelfPacker::reset() {
 	free_rects.clear();
 }
 
+void NextGIShelfPacker::set_extent(uint32_t p_width, uint32_t p_height) {
+	width = p_width;
+	height = p_height;
+	reset();
+}
+
 // NextGI entry points (next_gi.h) for the cards.
 
 void nextgi_src_axis_cards(const AABB &p_bounds, NextGICardClusterResult &r_result) {
@@ -491,8 +497,15 @@ void NextGI::_capture_src_cards(RenderDataRD *p_render_data) {
 	src->capture(p_render_data, shadow_batch_open);
 }
 
-NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic) {
+NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite) {
 	NextGIAtlasBudget budget;
+	if (p_lite && !p_epic) {
+		budget.radiance_width = 2048;
+		budget.radiance_height = 2048;
+		budget.radiance_bytes = uint64_t(budget.radiance_width) * budget.radiance_height * 4;
+		budget.material_bytes = uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH) / 2;
+		return budget;
+	}
 	budget.radiance_width = 4096;
 	budget.radiance_height = p_epic ? 8192 : 4096;
 	budget.radiance_bytes = uint64_t(budget.radiance_width) * budget.radiance_height * 4;
@@ -782,9 +795,15 @@ void NextGISRC::_create_atlas() {
 		"NextGI SRC Atlas Depth",
 	};
 
+	const bool lite = NextGI::get_singleton() != nullptr && NextGI::is_lumen_lite();
+	const bool epic = !lite && NextGI::get_singleton() != nullptr && NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).src_material_mib > 128;
+	const uint32_t side = lite ? NEXTGI_SRC_ATLAS_SIZE / 2 : NEXTGI_SRC_ATLAS_SIZE;
+	atlas_side = side;
+	packer.set_extent(side, side);
+
 	RD::TextureFormat tf;
-	tf.width = NEXTGI_SRC_ATLAS_SIZE;
-	tf.height = NEXTGI_SRC_ATLAS_SIZE;
+	tf.width = side;
+	tf.height = side;
 	tf.texture_type = RD::TEXTURE_TYPE_2D;
 	tf.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	Vector<RID> fb_textures;
@@ -810,12 +829,13 @@ void NextGISRC::_create_atlas() {
 	atlas_fb = rd->framebuffer_create(fb_textures);
 	ERR_FAIL_COND(atlas_fb.is_null());
 
-	atlas_memory = nextgi_src_atlas_memory_bytes(NEXTGI_SRC_ATLAS_SIZE, d16 ? 2 : 4);
+	atlas_memory = nextgi_src_atlas_memory_bytes(side, d16 ? 2 : 4);
 	// GodotNext: nextgi_quality_presets (#55). The material budget follows the preset.
-	const bool epic = NextGI::get_singleton() != nullptr && NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).src_material_mib > 128;
-	const uint64_t material_budget = epic ? uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_EPIC) : uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH);
+	// GodotNext: ps_lumen_lite (#183). Lite halves the High material budget and the atlas side.
+	const uint64_t material_budget = nextgi_src_atlas_budget(epic, lite).material_bytes;
+	const char *budget_name = lite ? "Lite" : (epic ? "Epic" : "High");
 	// Worded without the "NextGI:" prefix, so the tier stays the only such line in the log.
-	print_line(vformat("NextGI SRC: material atlas %dx%d, %.1f MiB of the %d MiB %s budget (framebuffer depth %s).", NEXTGI_SRC_ATLAS_SIZE, NEXTGI_SRC_ATLAS_SIZE, double(atlas_memory) / (1024.0 * 1024.0), int(material_budget / (1024 * 1024)), epic ? "Epic" : "High", d16 ? "D16" : "X8_D24"));
+	print_line(vformat("NextGI SRC: material atlas %dx%d, %.1f MiB of the %d MiB %s budget (framebuffer depth %s).", side, side, double(atlas_memory) / (1024.0 * 1024.0), int(material_budget / (1024 * 1024)), budget_name, d16 ? "D16" : "X8_D24"));
 	ERR_FAIL_COND_MSG(atlas_memory > material_budget, "The NextGI SRC material atlas is over the preset budget.");
 }
 
@@ -1792,7 +1812,7 @@ void NextGISRC::_on_dump_data(const Vector<uint8_t> &p_data, int p_target) {
 		Image::FORMAT_RGBAH,
 		Image::FORMAT_RF,
 	};
-	const int size = NEXTGI_SRC_ATLAS_SIZE;
+	const int size = int(atlas_side);
 	ERR_FAIL_COND_MSG(p_data.size() != Image::get_image_data_size(size, size, formats[p_target], false), vformat("Unexpected NextGI SRC %s atlas download size %d.", _nextgi_src_target_names[p_target], p_data.size()));
 
 	const String path = vformat("user://nextgi_atlas_%s.exr", _nextgi_src_target_names[p_target]);

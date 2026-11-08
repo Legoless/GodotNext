@@ -36,6 +36,7 @@
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -244,6 +245,7 @@ struct NextGISWRTTrace::GpuState {
 	RID shadow_version;
 	RID gather_pipeline;
 	RID reflect_pipeline;
+	RID probe_pipeline;
 	RID shadow_pipeline;
 	RID sampler;
 	RID dummy_texture;
@@ -478,7 +480,7 @@ NextGISWRTTrace::~NextGISWRTTrace() {
 	if (gpu != nullptr) {
 		RenderingDevice *rd = RenderingDevice::get_singleton();
 		if (rd != nullptr) {
-			const RID rids[] = { gpu->gather_pipeline, gpu->reflect_pipeline, gpu->shadow_pipeline, gpu->sampler, gpu->dummy_texture, gpu->dummy_buffer, gpu->counter_buffer, gpu->params_buffer, gpu->shade_buffer, gpu->froxel_buffer };
+			const RID rids[] = { gpu->gather_pipeline, gpu->reflect_pipeline, gpu->probe_pipeline, gpu->shadow_pipeline, gpu->sampler, gpu->dummy_texture, gpu->dummy_buffer, gpu->counter_buffer, gpu->params_buffer, gpu->shade_buffer, gpu->froxel_buffer };
 			for (const RID &rid : rids) {
 				if (rid.is_valid()) {
 					rd->free_rid(rid);
@@ -511,11 +513,15 @@ bool NextGISWRTTrace::_ensure_gpu() {
 		gpu = memnew(GpuState);
 	}
 	if (!gpu->gather_version.is_valid()) {
-		gpu->gather_shader.initialize(Vector<String>({ "\n#define NEXTGI_SWRT_GATHER\n", "\n#define NEXTGI_SWRT_REFLECT\n" }));
+		gpu->gather_shader.initialize(Vector<String>({ "\n#define NEXTGI_SWRT_GATHER\n", "\n#define NEXTGI_SWRT_REFLECT\n", "\n#define NEXTGI_SWRT_LITE_PROBE\n" }));
 		gpu->gather_version = gpu->gather_shader.version_create(false);
 		if (gpu->gather_version.is_valid()) {
 			gpu->gather_pipeline = rd->compute_pipeline_create(gpu->gather_shader.version_get_shader(gpu->gather_version, 0));
 			gpu->reflect_pipeline = rd->compute_pipeline_create(gpu->gather_shader.version_get_shader(gpu->gather_version, 1));
+			const RID probe_shader = gpu->gather_shader.version_get_shader(gpu->gather_version, 2);
+			if (probe_shader.is_valid()) {
+				gpu->probe_pipeline = rd->compute_pipeline_create(probe_shader);
+			}
 		}
 	}
 	if (!gpu->shadow_version.is_valid()) {
@@ -957,22 +963,59 @@ void NextGISWRTTrace::update_frame(RenderDataRD *p_render_data, NextGIVoxelLight
 	const RID gather_shader = gpu->gather_shader.version_get_shader(gpu->gather_version, 0);
 	const RID reflect_shader = gpu->gather_shader.version_get_shader(gpu->gather_version, 1);
 	const RID shadow_shader = gpu->shadow_shader.version_get_shader(gpu->shadow_version, 0);
-	const RID gather_set = rd->uniform_set_create(uniforms, gather_shader, 0);
-	const RID reflect_set = rd->uniform_set_create(uniforms, reflect_shader, 0);
+	const bool lite = NextGI::is_lumen_lite();
+	RID probe_buffer;
+	uint32_t probe_base = 0;
+	if (lite) {
+		NextGI *next_gi = NextGI::get_singleton();
+		NextGIIrradianceField *lite_field = next_gi != nullptr ? next_gi->ensure_irradiance_field() : nullptr;
+		if (lite_field != nullptr && lite_field->ensure_probe_buffer()) {
+			probe_buffer = lite_field->get_probe_buffer();
+			probe_base = lite_field->consume_swrt_probe_base();
+		}
+	}
+	const RID gather_set = lite ? RID() : rd->uniform_set_create(uniforms, gather_shader, 0);
+	const RID reflect_set = lite ? RID() : rd->uniform_set_create(uniforms, reflect_shader, 0);
+	RID probe_set;
+	if (lite && gpu->probe_pipeline.is_valid() && probe_buffer.is_valid()) {
+		Vector<RD::Uniform> probe_uniforms = uniforms;
+		probe_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, probe_buffer));
+		const RID probe_shader = gpu->gather_shader.version_get_shader(gpu->gather_version, 2);
+		probe_set = rd->uniform_set_create(probe_uniforms, probe_shader, 0);
+	}
 	const RID shadow_set = rd->uniform_set_create(uniforms, shadow_shader, 0);
-	if (gather_set.is_valid() && reflect_set.is_valid() && shadow_set.is_valid()) {
-		RENDER_TIMESTAMP("NextGI SDF Trace");
-		const RD::ComputeListID gather_list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(gather_list, gpu->gather_pipeline);
-		rd->compute_list_bind_uniform_set(gather_list, gather_set, 0);
-		rd->compute_list_dispatch(gather_list, groups, groups, 1);
-		rd->compute_list_end();
-		if (NextGI::is_reflections_enabled()) {
-			const RD::ComputeListID reflect_list = rd->compute_list_begin();
-			rd->compute_list_bind_compute_pipeline(reflect_list, gpu->reflect_pipeline);
-			rd->compute_list_bind_uniform_set(reflect_list, reflect_set, 0);
-			rd->compute_list_dispatch(reflect_list, groups, groups, 1);
+	if (shadow_set.is_valid() && (lite || (gather_set.is_valid() && reflect_set.is_valid()))) {
+		if (lite && probe_set.is_valid()) {
+			RENDER_TIMESTAMP("NextGI SDF Lite Probes");
+			const RD::ComputeListID probe_list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(probe_list, gpu->probe_pipeline);
+			rd->compute_list_bind_uniform_set(probe_list, probe_set, 0);
+			struct ProbePush {
+				uint32_t probe_base;
+				uint32_t pad0;
+				uint32_t pad1;
+				uint32_t pad2;
+			} push = { probe_base, 0u, 0u, 0u };
+			rd->compute_list_set_push_constant(probe_list, &push, sizeof(push));
+			rd->compute_list_dispatch(probe_list, NextGI::LITE_PROBES_PER_FRAME, 1, 1);
 			rd->compute_list_end();
+			if (NextGI::get_singleton() != nullptr) {
+				NextGI::get_singleton()->note_lite_probe_traces(NextGI::LITE_PROBES_PER_FRAME);
+			}
+		} else if (!lite) {
+			RENDER_TIMESTAMP("NextGI SDF Trace");
+			const RD::ComputeListID gather_list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(gather_list, gpu->gather_pipeline);
+			rd->compute_list_bind_uniform_set(gather_list, gather_set, 0);
+			rd->compute_list_dispatch(gather_list, groups, groups, 1);
+			rd->compute_list_end();
+			if (NextGI::is_reflections_enabled()) {
+				const RD::ComputeListID reflect_list = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(reflect_list, gpu->reflect_pipeline);
+				rd->compute_list_bind_uniform_set(reflect_list, reflect_set, 0);
+				rd->compute_list_dispatch(reflect_list, groups, groups, 1);
+				rd->compute_list_end();
+			}
 		}
 		RENDER_TIMESTAMP("NextGI SDF Shadow");
 		const RD::ComputeListID shadow_list = rd->compute_list_begin();
@@ -990,7 +1033,7 @@ void NextGISWRTTrace::update_frame(RenderDataRD *p_render_data, NextGIVoxelLight
 			shadow_rays = values[3];
 		}
 	}
-	for (const RID &set : { gather_set, reflect_set, shadow_set }) {
+	for (const RID &set : { gather_set, reflect_set, probe_set, shadow_set }) {
 		if (set.is_valid()) {
 			rd->free_rid(set);
 		}

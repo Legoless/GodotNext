@@ -401,7 +401,8 @@ void nextgi_wrc_trace() {
 			float travel = min(length(escape_sum), 0.4 * spacing);
 			moved = probe_pos + normalize(escape_sum) * travel;
 		}
-		imageStore(offset_image, cell, vec4(moved - level_origin - (vec3(cell.xy, cell.z % 16) - vec3(7.5)) * spacing, 1.0));
+		// GodotNext: ps_lumen_lite (#183). w > 1.5 marks a probe inside geometry. 1.0 still counts as history.
+		imageStore(offset_image, cell, vec4(moved - level_origin - (vec3(cell.xy, cell.z % 16) - vec3(7.5)) * spacing, fraction > 0.30 ? 2.0 : 1.0));
 	}
 }
 

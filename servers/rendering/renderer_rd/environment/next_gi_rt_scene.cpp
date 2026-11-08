@@ -41,6 +41,7 @@
 
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_geometry_instance.h"
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
@@ -1207,6 +1208,11 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			const Transform3D sdf_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
 			const Vector3 sdf_scale = sdf_transform.basis.get_scale();
 			const bool sdf_skinned = geometry_instance->mesh_instance.is_valid();
+			// GodotNext: ps_lumen_lite (#183). Skinned meshes stay receivers. Both tracers skip them.
+			if (sdf_skinned && !NextGI::lite_traces_skinned(NextGI::is_lumen_lite())) {
+				stats.coverage.dynamic_excluded++;
+				continue;
+			}
 			const bool sdf_instance_uniforms = geometry_instance->data->material_override.is_valid() || geometry_instance->data->material_overlay.is_valid();
 			MeshStorage *sdf_mesh_storage = MeshStorage::get_singleton();
 			if (sdf_mesh_storage != nullptr) {

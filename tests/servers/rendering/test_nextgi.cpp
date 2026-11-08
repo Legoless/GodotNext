@@ -2904,6 +2904,85 @@ TEST_CASE("[NextGI][Quality] Preset budgets and atlas sizes") {
 	}
 }
 
+// GodotNext: ps_lumen_lite (#183).
+TEST_CASE("[NextGI][Lite] Irradiance field keeps the traced Medium path") {
+	using Q = RendererRD::NextGI::Quality;
+	using Gather = RendererRD::NextGI::MediumGather;
+	CHECK(RendererRD::NextGI::is_lumen_lite(Q::QUALITY_MEDIUM, Gather::MEDIUM_GATHER_IRRADIANCE_FIELD));
+	CHECK_FALSE(RendererRD::NextGI::is_lumen_lite(Q::QUALITY_MEDIUM, Gather::MEDIUM_GATHER_SCREEN_PROBES));
+	CHECK_FALSE(RendererRD::NextGI::is_lumen_lite(Q::QUALITY_HIGH, Gather::MEDIUM_GATHER_IRRADIANCE_FIELD));
+	CHECK_FALSE(RendererRD::NextGI::is_lumen_lite(Q::QUALITY_AUTO, Gather::MEDIUM_GATHER_IRRADIANCE_FIELD));
+	CHECK(RendererRD::NextGI::medium_gather_from_setting(0) == Gather::MEDIUM_GATHER_IRRADIANCE_FIELD);
+	CHECK(RendererRD::NextGI::medium_gather_from_setting(1) == Gather::MEDIUM_GATHER_SCREEN_PROBES);
+	CHECK(RendererRD::NextGI::medium_gather_from_setting(9) == Gather::MEDIUM_GATHER_IRRADIANCE_FIELD);
+
+	const RendererRD::NextGI::QualityParams &screen = RendererRD::NextGI::get_quality_params(Q::QUALITY_MEDIUM);
+	CHECK_EQ(screen.diffuse_rays_per_probe, 8u);
+	CHECK_EQ(screen.reflection_divisor, 4u);
+	CHECK(std::abs(screen.max_trace_roughness - 0.25f) < 1e-6f);
+	CHECK_EQ(screen.relight_texels, 128u * 1024u);
+	CHECK_EQ(screen.relight_shadow_rays, 128u * 1024u);
+	CHECK_EQ(screen.src_radiance_mib, 64u);
+	CHECK_EQ(screen.src_material_mib, 128u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_MEDIUM, false), 870u);
+	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_MEDIUM, true), 2175u);
+
+	uint32_t gather_rays = 1;
+	uint32_t reflection_rays = 1;
+	RendererRD::NextGI::lite_dispatch_counts(true, gather_rays, reflection_rays);
+	CHECK_EQ(gather_rays, 0u);
+	CHECK_EQ(reflection_rays, 0u);
+	RendererRD::NextGI::lite_dispatch_counts(false, gather_rays, reflection_rays);
+	CHECK_EQ(gather_rays, 8u);
+	CHECK(reflection_rays > 0u);
+
+	CHECK_FALSE(RendererRD::NextGI::lite_probe_inside(0.30f));
+	CHECK(RendererRD::NextGI::lite_probe_inside(0.31f));
+	const Vector3 probe(1.0f, 2.0f, 3.0f);
+	const Vector3 normal(0.0f, 1.0f, 0.0f);
+	CHECK(RendererRD::NextGI::lite_push_probe(probe, normal, 2.0f, false).is_equal_approx(probe));
+	CHECK(RendererRD::NextGI::lite_push_probe(probe, Vector3(), 2.0f, true).is_equal_approx(probe));
+	const Vector3 pushed = RendererRD::NextGI::lite_push_probe(probe, normal, 2.0f, true);
+	CHECK(pushed.is_equal_approx(probe + Vector3(0.0f, 0.8f, 0.0f)));
+	CHECK(RendererRD::NextGI::lite_uses_ssr(0.25f));
+	CHECK_FALSE(RendererRD::NextGI::lite_uses_ssr(0.26f));
+	CHECK_FALSE(RendererRD::NextGI::lite_traces_skinned(true));
+	CHECK(RendererRD::NextGI::lite_traces_skinned(false));
+	CHECK_EQ(RendererRD::NextGI::lite_probe_index(1, 2, 3, 4), 4096u + 2u + 3u * 16u + 4u * 256u);
+	CHECK(std::abs(RendererRD::NextGI::lite_probe_spacing(0) - 1.0f) < 1e-6f);
+	CHECK(std::abs(RendererRD::NextGI::lite_probe_spacing(1) - 2.0f) < 1e-6f);
+
+	const RendererRD::NextGIAtlasBudget lite_budget = RendererRD::nextgi_src_atlas_budget(false, true);
+	CHECK_EQ(lite_budget.radiance_width, 2048u);
+	CHECK_EQ(lite_budget.radiance_height, 2048u);
+	CHECK_EQ(lite_budget.material_bytes, 64ull * 1024ull * 1024ull);
+	const RendererRD::NextGIAtlasBudget high_budget = RendererRD::nextgi_src_atlas_budget(false);
+	CHECK_EQ(high_budget.radiance_width, 4096u);
+	CHECK_EQ(high_budget.radiance_height, 4096u);
+	CHECK_EQ(high_budget.material_bytes, 128ull * 1024ull * 1024ull);
+	const RendererRD::NextGIAtlasBudget epic_budget = RendererRD::nextgi_src_atlas_budget(true);
+	CHECK_EQ(epic_budget.radiance_height, 8192u);
+	CHECK_EQ(epic_budget.material_bytes, 256ull * 1024ull * 1024ull);
+
+	CHECK(RendererRD::NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES) == RendererRD::NextGI::DEBUG_VIEW_LITE_PROBES);
+	CHECK_EQ(int(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES), int(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL) + 1);
+	const RendererRD::NextGI::DebugView lite_view = RendererRD::NextGI::resolve_debug_view(RendererRD::NextGI::DEBUG_VIEW_LITE_PROBES, RendererRD::NextGI::TierResult());
+	CHECK(lite_view.label == "lite probes");
+
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const String gather_setting = "rendering/global_illumination/nextgi/medium_gather";
+	const bool had_gather = ps->has_setting(gather_setting);
+	const Variant previous_gather = had_gather ? ps->get_setting(gather_setting) : Variant();
+	ps->set_setting(gather_setting, 1);
+	CHECK(RendererRD::NextGI::get_medium_gather() == Gather::MEDIUM_GATHER_SCREEN_PROBES);
+	CHECK_FALSE(RendererRD::NextGI::is_lumen_lite(Q::QUALITY_MEDIUM, RendererRD::NextGI::get_medium_gather()));
+	ps->set_setting(gather_setting, 0);
+	CHECK(RendererRD::NextGI::get_medium_gather() == Gather::MEDIUM_GATHER_IRRADIANCE_FIELD);
+	if (had_gather) {
+		ps->set_setting(gather_setting, previous_gather);
+	}
+}
+
 // GodotNext: nextgi_multiview (#58).
 TEST_CASE("[NextGI][MultiView] Anchor selection and scenario scheduling") {
 	using Candidate = RendererRD::NextGI::ViewAnchorCandidate;

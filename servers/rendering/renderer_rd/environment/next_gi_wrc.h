@@ -161,6 +161,8 @@ public:
 
 	RID get_radiance() const { return radiance; }
 	RID get_visibility() const { return visibility; }
+	RID get_offsets() const { return offsets; }
+	RID get_mip2() const { return mip2; }
 	RID get_sh_r() const { return sh_r; }
 	RID get_sh_g() const { return sh_g; }
 	RID get_sh_b() const { return sh_b; }

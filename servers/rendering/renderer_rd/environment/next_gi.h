@@ -32,6 +32,7 @@
 
 #include "core/math/color.h"
 #include "core/math/vector2i.h"
+#include "core/math/vector3.h"
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
@@ -62,6 +63,9 @@ struct NextGICardClusterResult;
 
 // GodotNext: nextgi_src_relight
 class NextGIRelight;
+
+// GodotNext: ps_lumen_lite (#183)
+class NextGIIrradianceField;
 
 // GodotNext: nextgi_gather
 class NextGIGather;
@@ -131,6 +135,33 @@ public:
 		QUALITY_EPIC,
 		QUALITY_MAX,
 	};
+
+	// GodotNext: ps_lumen_lite (#183). Default Medium gathers the irradiance field.
+	// screen_probes keeps the traced Medium byte-for-byte.
+	enum MediumGather {
+		MEDIUM_GATHER_IRRADIANCE_FIELD = 0,
+		MEDIUM_GATHER_SCREEN_PROBES = 1,
+	};
+	static constexpr float LITE_INSIDE_BACKFACE = 0.30f;
+	static constexpr float LITE_PUSH_SPACING = 0.4f;
+	static constexpr float LITE_SSR_ROUGHNESS = 0.25f;
+	static constexpr uint32_t LITE_PROBE_LEVELS = 2;
+	static constexpr uint32_t LITE_PROBES_PER_LEVEL = 4096;
+	static constexpr uint32_t LITE_PROBE_COUNT = 8192;
+	static constexpr uint32_t LITE_PROBES_PER_FRAME = 512;
+	static MediumGather medium_gather_from_setting(int p_setting);
+	static MediumGather get_medium_gather();
+	static bool is_lumen_lite(Quality p_resolved, MediumGather p_gather);
+	static bool is_lumen_lite();
+	static bool lite_probe_inside(float p_fraction);
+	static Vector3 lite_push_probe(const Vector3 &p_probe, const Vector3 &p_normal, float p_spacing, bool p_behind);
+	static bool lite_uses_ssr(float p_roughness);
+	static bool lite_traces_skinned(bool p_lite);
+	static void lite_dispatch_counts(bool p_lite, uint32_t &r_gather, uint32_t &r_reflection);
+	static uint32_t lite_probe_index(uint32_t p_level, uint32_t p_x, uint32_t p_y, uint32_t p_z);
+	static float lite_probe_spacing(uint32_t p_level);
+	// Software-tier Lite writes the GI buffers without entering the ray-query frame block.
+	static bool view_samples_lite_field(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded);
 
 	struct TierInputs {
 		bool forward_plus = true;
@@ -297,6 +328,11 @@ private:
 
 	// GodotNext: ps_swrt_trace (#186). Runs beside voxel lighting on the software tier.
 	NextGISWRTTrace *swrt_trace = nullptr;
+	// GodotNext: ps_lumen_lite (#183)
+	NextGIIrradianceField *irradiance_field = nullptr;
+	uint32_t lite_gather_dispatches = 0;
+	uint32_t lite_reflection_dispatches = 0;
+	uint32_t lite_probe_traces = 0;
 	// GodotNext: ps_tier_rule (#187).
 	bool swrt_reduced = false;
 	bool swrt_reduced_logged = false;
@@ -461,6 +497,7 @@ public:
 		DEBUG_VIEW_SPECULAR_HISTORY,
 		DEBUG_VIEW_SPECULAR_REJECTED,
 		DEBUG_VIEW_SPECULAR_DENOISED,
+		DEBUG_VIEW_LITE_PROBES,
 		DEBUG_VIEW_MAX,
 	};
 
@@ -489,6 +526,9 @@ public:
 	DebugViewId get_active_debug_view() const { return active_debug_view; }
 	// Texture for DEBUG_VIEW_DENOISE_RAW/VARIANCE/HISTORY/REJECTED, or an invalid RID.
 	RID get_denoise_debug_texture(DebugViewId p_view) const;
+	RID get_lite_debug_texture() const;
+	NextGIIrradianceField *ensure_irradiance_field();
+	void note_lite_probe_traces(uint32_t p_count) { lite_probe_traces = p_count; }
 	// #60 hit-distance debug view (log-scaled), or an invalid RID.
 	RID get_specular_debug_texture() const;
 	// #54 specular filter debug views: 15 raw, 16 variance, 17 history, 18 rejected, 19 denoised.
