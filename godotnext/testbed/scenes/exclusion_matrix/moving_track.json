@@ -2,13 +2,13 @@
 	"aspect": 1.777778,
 	"camera_position": [0.000000, 0.800000, 2.200000],
 	"dlss": {
-		"available": false,
+		"available": true,
 		"dll_sha256": "",
-		"fallback": "FSR2",
+		"fallback": "",
 		"preset": "",
 		"requested": "DLSS Quality",
 		"scale": 0.667000,
-		"status": "N/A",
+		"status": "ready",
 		"tracks": ["TAA", "FSR2", "MetalFX", "DLSS Quality"]
 	},
 	"fov_deg": 50.000000,

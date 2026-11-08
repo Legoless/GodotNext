@@ -604,7 +604,27 @@ Dictionary RendererSceneCull::instance_get_virtual_geometry_debug_stats(RID p_in
 	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data != nullptr) {
 		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
 		if (geom->geometry_instance != nullptr) {
-			return scene_render->geometry_instance_get_nextgeo_debug_stats(geom->geometry_instance);
+			Dictionary d = scene_render->geometry_instance_get_nextgeo_debug_stats(geom->geometry_instance);
+			if (d.is_empty()) {
+				d["record_index"] = -1;
+				d["route"] = "legacy";
+				d["reason"] = "NONE";
+				d["surfaces"] = Array();
+			}
+			if (instance->base_type == RSE::INSTANCE_MULTIMESH && instance->object_id.is_null() && RSG::mesh_storage != nullptr && RSG::virtual_mesh_storage != nullptr) {
+				const RID mesh = RSG::mesh_storage->multimesh_get_mesh(instance->base);
+				if (mesh.is_valid() && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(mesh)) {
+					d["reason"] = "VGD_IGNORED";
+					Array surfaces = d.get("surfaces", Array());
+					for (int i = 0; i < surfaces.size(); i++) {
+						Dictionary sd = surfaces[i];
+						sd["reason"] = "VGD_IGNORED";
+						surfaces[i] = sd;
+					}
+					d["surfaces"] = surfaces;
+				}
+			}
+			return d;
 		}
 	}
 	if (instance->base_type == RSE::INSTANCE_LIGHT && instance->base_data != nullptr) {

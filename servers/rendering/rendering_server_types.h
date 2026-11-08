@@ -142,6 +142,7 @@ struct VirtualGeometryDesc {
 	uint32_t page_size = 0;
 	uint32_t page_count = 0;
 	bool stripped_to_coarse = false;
+	Vector<Array> coarse_surfaces;
 	// GodotNext: nextgeo_in_nextgi (#77). Fixed RT proxy and Stage-2 SRC card descriptors.
 	PackedFloat32Array rt_proxy_positions;
 	PackedByteArray rt_proxy_indices;

@@ -237,6 +237,16 @@ private:
 		uint32_t nextgi_rt_update_frames[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
 		bool nextgi_rt_dynamic = false;
 		bool nextgi_rt_allows_update = false;
+
+		// GodotNext: nextgeo_exclusive_dispatch (#79). Lazy coarse/RT proxy meshes for auxiliary and debug views.
+		RID virtual_proxy_mesh;
+		LocalVector<int32_t> virtual_proxy_surface_map;
+		bool virtual_proxy_built = false;
+		uint64_t virtual_proxy_generation = 0;
+		RID virtual_rt_proxy_mesh;
+		LocalVector<int32_t> virtual_rt_proxy_surface_map;
+		bool virtual_rt_proxy_built = false;
+		uint64_t virtual_rt_proxy_generation = 0;
 	};
 
 	mutable RID_Owner<Mesh, true> mesh_owner;
@@ -285,6 +295,7 @@ private:
 	RD::VertexFormatID _mesh_surface_generate_vertex_format(uint64_t p_surface_format, uint64_t p_input_mask, bool p_instanced_surface, bool p_input_motion_vectors, bool p_point_size_emulated, uint32_t &r_position_stride);
 	void _mesh_surface_generate_version_for_input_mask(Mesh::Surface::Version &v, Mesh::Surface *s, uint64_t p_input_mask, bool p_input_motion_vectors, bool p_point_size_emulated, MeshInstance::Surface *mis = nullptr, uint32_t p_current_buffer = 0, uint32_t p_previous_buffer = 0);
 	void _mesh_surface_clear(Mesh *p_mesh, int p_surface);
+	void _mesh_clear_virtual_proxies(Mesh *p_mesh);
 
 	// GodotNext: nextgi_rt_arena
 	bool nextgi_rt_enabled = false;
@@ -824,6 +835,11 @@ public:
 	}
 
 	Dependency *mesh_get_dependency(RID p_mesh) const;
+
+	// GodotNext: nextgeo_exclusive_dispatch (#79). Coarse proxy surface for auxiliary views and RT proxy surface/mesh for NEXTGEO_RT_PROXY.
+	void *mesh_get_virtual_proxy_surface(RID p_mesh, uint32_t p_surface);
+	void *mesh_get_virtual_rt_proxy_surface(RID p_mesh, uint32_t p_surface);
+	RID mesh_get_virtual_rt_proxy_mesh(RID p_mesh);
 
 	/* MESH INSTANCE API */
 

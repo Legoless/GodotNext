@@ -39,6 +39,9 @@
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
+#endif
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_method.h"
@@ -2259,7 +2262,7 @@ void RenderingServer::get_argument_options(const StringName &p_function, int p_i
 #endif
 
 Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
-	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80).
+	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80) / nextgeo_exclusive_dispatch (#79).
 	if (p_viewport.is_valid() && RSG::scene != nullptr && RSG::scene->is_instance(p_viewport)) {
 		return RSG::scene->instance_get_virtual_geometry_debug_stats(p_viewport);
 	}
@@ -2267,6 +2270,11 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 	if (RSG::virtual_mesh_storage != nullptr) {
 		stats["double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
 		stats["missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
+		stats["vgd_ignored_warnings"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_vgd_ignored_warnings());
+		stats["auxiliary_proxy_draws"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_auxiliary_proxy_draws());
+		stats["auxiliary_authored_virtual_draws"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_auxiliary_authored_virtual_draws());
+		stats["uv2_authored_draws"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_uv2_authored_draws());
+		stats["uv2_proxy_draws"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_uv2_proxy_draws());
 		stats["child_resident_without_parent"] = int64_t(RSG::virtual_mesh_storage->get_child_resident_without_parent_count());
 		stats["evictions_with_resident_child"] = int64_t(RSG::virtual_mesh_storage->get_evictions_with_resident_child_count());
 		stats["non_main_view_requests"] = int64_t(RSG::virtual_mesh_storage->get_non_main_view_request_count());
@@ -2276,12 +2284,15 @@ Dictionary RenderingServer::virtual_geometry_get_debug_stats(RID p_viewport) {
 		stats["pinned_pages"] = int64_t(RSG::virtual_mesh_storage->get_pinned_page_count());
 		stats["page_upload_ms"] = RSG::virtual_mesh_storage->get_last_page_upload_ms();
 	}
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	RendererRD::NextGeoDebug::fill_debug_stats(stats);
+#endif
 	if (p_viewport.is_valid() && RSG::viewport != nullptr) {
 		const RendererViewport::Viewport *vp = RSG::viewport->viewport_owner.get_or_null(p_viewport);
 		if (vp != nullptr) {
 			const bool view_msaa = vp->msaa_3d != RSE::VIEWPORT_MSAA_DISABLED;
 			const bool view_multiview = vp->use_xr || vp->view_count > 1;
-			const bool view_debug = vp->debug_draw != RSE::VIEWPORT_DEBUG_DRAW_DISABLED;
+			const bool view_debug = RendererRD::nextgeo_is_unsupported_debug_draw(vp->debug_draw);
 			const RendererRD::NextGeoFallback view_fb = RendererRD::nextgeo_view_fallback(view_msaa, view_multiview, view_debug);
 			stats["view_route"] = view_fb == RendererRD::NEXTGEO_FALLBACK_NONE ? "virtual" : "legacy";
 			stats["view_reason"] = RendererRD::nextgeo_fallback_name(view_fb);
@@ -3184,6 +3195,13 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_HISTORY);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_REJECTED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_SPECULAR_DENOISED);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_CRACKS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RT_PROXY);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_CLUSTER_ERROR);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_RESIDENCY);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VISIBILITY_ID);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_FALLBACK);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);

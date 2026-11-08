@@ -4682,7 +4682,15 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_NEXTGI_DENOISE_VARIANCE:
 		case VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY:
 		case VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED:
-		case VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED: {
+		case VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED:
+		// GodotNext: nextgeo_exclusive_dispatch (#79)
+		case VIEW_DISPLAY_NEXTGEO_CRACKS:
+		case VIEW_DISPLAY_NEXTGEO_RT_PROXY:
+		case VIEW_DISPLAY_NEXTGEO_CLUSTER_ERROR:
+		case VIEW_DISPLAY_NEXTGEO_RESIDENCY:
+		case VIEW_DISPLAY_NEXTGEO_VISIBILITY_ID:
+		case VIEW_DISPLAY_NEXTGEO_FALLBACK:
+		case VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4729,6 +4737,14 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_NEXTGI_DENOISE_HISTORY,
 				VIEW_DISPLAY_NEXTGI_DENOISE_REJECTED,
 				VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED,
+				// GodotNext: nextgeo_exclusive_dispatch (#79)
+				VIEW_DISPLAY_NEXTGEO_CRACKS,
+				VIEW_DISPLAY_NEXTGEO_RT_PROXY,
+				VIEW_DISPLAY_NEXTGEO_CLUSTER_ERROR,
+				VIEW_DISPLAY_NEXTGEO_RESIDENCY,
+				VIEW_DISPLAY_NEXTGEO_VISIBILITY_ID,
+				VIEW_DISPLAY_NEXTGEO_FALLBACK,
+				VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4777,6 +4793,14 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_HISTORY,
 				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_REJECTED,
 				Viewport::DEBUG_DRAW_NEXTGI_DENOISE_DENOISED,
+				// GodotNext: nextgeo_exclusive_dispatch (#79)
+				Viewport::DEBUG_DRAW_NEXTGEO_CRACKS,
+				Viewport::DEBUG_DRAW_NEXTGEO_RT_PROXY,
+				Viewport::DEBUG_DRAW_NEXTGEO_CLUSTER_ERROR,
+				Viewport::DEBUG_DRAW_NEXTGEO_RESIDENCY,
+				Viewport::DEBUG_DRAW_NEXTGEO_VISIBILITY_ID,
+				Viewport::DEBUG_DRAW_NEXTGEO_FALLBACK,
+				Viewport::DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7158,6 +7182,22 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Shows the probes whose history was rejected this frame. The GPU debug source is still pending, so the view draws a labeled tint."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Result"), VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows the denoised diffuse after the temporal pass and the stabilizer. The GPU debug source is still pending, so the view draws a labeled tint."));
+	// GodotNext: nextgeo_exclusive_dispatch (#79)
+	display_submenu->add_separator();
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Cracks"), VIEW_DISPLAY_NEXTGEO_CRACKS, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Highlights exposed back faces of closed virtual and legacy meshes in bright magenta over a neutral gray front-face view."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo RT Proxy"), VIEW_DISPLAY_NEXTGEO_RT_PROXY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Visualizes linear depth differences and silhouette mismatches between the rasterized scene and the NextGeo ray-tracing proxy."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Cluster Error"), VIEW_DISPLAY_NEXTGEO_CLUSTER_ERROR, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Heatmaps each visible NextGeo cluster's projected screen-space geometric error in pixels."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Residency"), VIEW_DISPLAY_NEXTGEO_RESIDENCY, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors visible NextGeo clusters by streaming residency state (pinned root, resident fine cut, or coarse parent fallback)."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Visibility ID"), VIEW_DISPLAY_NEXTGEO_VISIBILITY_ID, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors each visible NextGeo cluster and triangle with a deterministic hashed color."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Fallback"), VIEW_DISPLAY_NEXTGEO_FALLBACK, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors opaque surfaces by virtual vs legacy route, per-surface fallback reason, and ray-tracing exclusion reason, and updates fallback coverage."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Triangle Size"), VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors visible triangles by log2 screen-space pixel area and publishes the 16-bin triangle_size_histogram."));
 	view_display_menu->get_popup()->add_submenu_node_item(TTRC("Display Advanced..."), display_submenu, VIEW_DISPLAY_ADVANCED);
 
 	view_display_menu->get_popup()->add_separator();

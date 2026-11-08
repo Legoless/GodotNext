@@ -335,6 +335,8 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MATERIAL + ubershader_base;
 		case PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK:
 			return ShaderVersion::SHADER_VERSION_NEXTGI_TRANSLUCENCY_MARK + ubershader_base;
+		case PIPELINE_VERSION_NEXTGEO_FALLBACK:
+			return ShaderVersion::SHADER_VERSION_NEXTGEO_FALLBACK + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_SDF:
 			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_SDF + ubershader_base;
 		case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION:
@@ -434,6 +436,11 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 
 	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || is_visibility_resolve) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
+	} else if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGEO_FALLBACK) {
+		depth_stencil_state = RD::PipelineDepthStencilState();
+		depth_stencil_state.enable_depth_test = true;
+		depth_stencil_state.enable_depth_write = false;
+		depth_stencil_state.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
 	}
 	bool use_stencil = stencil_enabled && p_pipeline_key.version == PIPELINE_VERSION_COLOR_PASS;
 	depth_stencil_state.enable_stencil = use_stencil;
@@ -534,6 +541,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	} else {
 		switch (p_pipeline_key.version) {
 			case PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK:
+			case PIPELINE_VERSION_NEXTGEO_FALLBACK:
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS:
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW:
 				blend_state = blend_state_depth_normal_roughness;
@@ -762,6 +770,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n", false));
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_ADVANCED_MULTIVIEW, base_define + "\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n", false));
 			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_NEXTGI_TRANSLUCENCY_MARK\n", true));
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_BASE, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NEXTGEO_FALLBACK\n", true));
 		}
 
 		Vector<String> color_pass_flags = {

@@ -63,6 +63,17 @@ DebugEffects::DebugEffects() {
 
 		motion_vectors.pipeline.setup(motion_vectors.shader.version_get_shader(motion_vectors.shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_blend(), 0);
 	}
+
+	{
+		// GodotNext: nextgeo_exclusive_dispatch (#79). NextGeo RT proxy depth-difference overlay.
+		Vector<String> modes;
+		modes.push_back("");
+
+		nextgeo_rt_proxy.shader.initialize(modes);
+		nextgeo_rt_proxy.shader_version = nextgeo_rt_proxy.shader.version_create();
+
+		nextgeo_rt_proxy.pipeline.setup(nextgeo_rt_proxy.shader.version_get_shader(nextgeo_rt_proxy.shader_version, 0), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_blend(), 0);
+	}
 }
 
 void DebugEffects::_create_frustum_arrays() {
@@ -177,6 +188,7 @@ DebugEffects::~DebugEffects() {
 	}
 
 	motion_vectors.shader.version_free(motion_vectors.shader_version);
+	nextgeo_rt_proxy.shader.version_free(nextgeo_rt_proxy.shader_version);
 }
 
 void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_projection, const Transform3D &p_cam_transform, RID p_dest_fb, const Rect2 p_rect) {
@@ -376,5 +388,36 @@ void DebugEffects::draw_motion_vectors(RID p_velocity, RID p_depth, RID p_dest_f
 	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);
 #endif
 
+	RD::get_singleton()->draw_list_end();
+}
+
+void DebugEffects::draw_nextgeo_rt_proxy(RID p_raster_depth, RID p_proxy_depth, RID p_dest_fb, const Projection &p_projection, Size2i p_internal_size, Size2i p_output_size) {
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	ERR_FAIL_COND(p_raster_depth.is_null() || p_proxy_depth.is_null() || p_dest_fb.is_null());
+
+	RID default_sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_raster(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ default_sampler, p_raster_depth }));
+	RD::Uniform u_proxy(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ default_sampler, p_proxy_depth }));
+
+	NextGeoRTProxyPushConstant push;
+	push.internal_size[0] = float(MAX(p_internal_size.width, 1));
+	push.internal_size[1] = float(MAX(p_internal_size.height, 1));
+	push.output_size[0] = float(MAX(p_output_size.width, 1));
+	push.output_size[1] = float(MAX(p_output_size.height, 1));
+	push.z_near = float(MAX(p_projection.get_z_near(), 1e-4));
+	push.z_far = float(MAX(p_projection.get_z_far(), push.z_near + 1e-3f));
+	push.is_orthogonal = p_projection.is_orthogonal() ? 1u : 0u;
+	push.pad0 = 0u;
+
+	RID shader = nextgeo_rt_proxy.shader.version_get_shader(nextgeo_rt_proxy.shader_version, 0);
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_fb);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, nextgeo_rt_proxy.pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_fb), false, RD::get_singleton()->draw_list_get_current_pass()));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_raster, u_proxy), 0);
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &push, sizeof(NextGeoRTProxyPushConstant));
+	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);
 	RD::get_singleton()->draw_list_end();
 }

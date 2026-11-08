@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_resolve.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
@@ -66,12 +67,15 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	friend SceneShaderForwardClustered;
 	friend class NextGeoResolve;
 
-	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80) / nextgeo_shadow_cuts (#82).
+	// GodotNext: nextgeo_gpu_cull (#76) / nextgeo_resolve (#80) / nextgeo_shadow_cuts (#82) / nextgeo_exclusive_dispatch (#79).
 	NextGeoCut nextgeo_cut;
 	NextGeoResolve nextgeo_resolve;
+	RendererRD::NextGeoDebug nextgeo_debug;
 	bool nextgeo_virtual_active = false;
 	bool nextgeo_visibility_only_active = false;
 	bool nextgeo_shadow_pass_active = false;
+	bool nextgeo_proxy_active = false;
+	bool nextgeo_rt_proxy_active = false;
 	LocalVector<uint32_t> nextgeo_bucket_table;
 
 	enum {
@@ -259,6 +263,12 @@ private:
 		bool use_material_feedback = false;
 		bool prepass_motion = false;
 		bool nextgi_translucency_mark = false;
+		bool use_nextgeo_proxy = false;
+		bool use_nextgeo_rt_proxy = false;
+		bool is_uv2_bake = false;
+		bool nextgeo_fallback_mark = false;
+		bool nextgeo_cracks_backface = false;
+		const uint32_t *nextgeo_fallback_codes = nullptr;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -477,6 +487,7 @@ private:
 
 			uint32_t uniform_buffer_index;
 			int32_t nextgeo_shadow_view = -1;
+			bool use_nextgeo_proxy = false;
 		};
 
 		LocalVector<ShadowPass> shadow_passes;
@@ -520,6 +531,7 @@ private:
 	RendererRD::NextGIFrontLayer front_layer;
 	void _render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
 	void _render_nextgi_translucency_mark(RenderDataRD *p_render_data);
+	void _render_nextgeo_debug_scene_passes(RenderDataRD *p_render_data, bool p_using_nextgeo, bool p_nextgeo_drew, bool p_use_msaa, RSE::ViewportMSAA p_msaa, bool p_reverse_cull, const Size2i &p_screen_size, uint32_t p_depth_ubo_index, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
 	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false, bool p_nextgi_velocity = false, bool p_using_nextgi = false);
@@ -598,6 +610,9 @@ private:
 		void *surface_shadow = nullptr;
 		RID material_uniform_set_shadow;
 		SceneShaderForwardClustered::ShaderData *shader_shadow = nullptr;
+		void *surface_proxy = nullptr;
+		void *surface_rt_proxy = nullptr;
+		bool mesh_has_virtual_geometry = false;
 
 		GeometryInstanceSurfaceDataCache *next = nullptr;
 		GeometryInstanceForwardClustered *owner = nullptr;
@@ -636,6 +651,7 @@ private:
 		} transform_status = TransformStatus::MOVED;
 		Transform3D prev_transform;
 		RID voxel_gi_instances[MAX_VOXEL_GI_INSTANCESS_PER_INSTANCE];
+		RID warned_vgd_mesh;
 		GeometryInstanceSurfaceDataCache *surface_caches = nullptr;
 		SelfList<GeometryInstanceForwardClustered> dirty_list_element;
 

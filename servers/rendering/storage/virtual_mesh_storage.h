@@ -223,6 +223,16 @@ public:
 	void nextgeo_count_missing() { nextgeo_missing++; }
 	uint32_t nextgeo_get_double_dispatch() const { return nextgeo_double_dispatch; }
 	uint32_t nextgeo_get_missing() const { return nextgeo_missing; }
+	void nextgeo_count_vgd_ignored_warning() { nextgeo_vgd_ignored_warnings++; }
+	uint32_t nextgeo_get_vgd_ignored_warnings() const { return nextgeo_vgd_ignored_warnings; }
+	void nextgeo_count_auxiliary_proxy_draw() { nextgeo_auxiliary_proxy_draws++; }
+	void nextgeo_count_auxiliary_authored_virtual_draw() { nextgeo_auxiliary_authored_virtual_draws++; }
+	void nextgeo_count_uv2_authored_draw() { nextgeo_uv2_authored_draws++; }
+	void nextgeo_count_uv2_proxy_draw() { nextgeo_uv2_proxy_draws++; }
+	uint64_t nextgeo_get_auxiliary_proxy_draws() const { return nextgeo_auxiliary_proxy_draws; }
+	uint64_t nextgeo_get_auxiliary_authored_virtual_draws() const { return nextgeo_auxiliary_authored_virtual_draws; }
+	uint64_t nextgeo_get_uv2_authored_draws() const { return nextgeo_uv2_authored_draws; }
+	uint64_t nextgeo_get_uv2_proxy_draws() const { return nextgeo_uv2_proxy_draws; }
 
 	// Instance records.
 	uint32_t instance_record_allocate(RID p_instance, RID p_mesh);
@@ -309,6 +319,7 @@ public:
 	virtual RID get_cluster_buffer() const { return RID(); }
 	virtual RID get_residency_buffer() const { return RID(); }
 	uint32_t get_record_count() const { return used_slots; }
+	uint32_t get_mesh_record_count() const { return mesh_records.size(); }
 	uint32_t get_max_bvh_levels() const;
 
 protected:
@@ -475,6 +486,11 @@ protected:
 	bool nextgeo_draw_ready = false;
 	uint32_t nextgeo_double_dispatch = 0;
 	uint32_t nextgeo_missing = 0;
+	uint32_t nextgeo_vgd_ignored_warnings = 0;
+	uint64_t nextgeo_auxiliary_proxy_draws = 0;
+	uint64_t nextgeo_auxiliary_authored_virtual_draws = 0;
+	uint64_t nextgeo_uv2_authored_draws = 0;
+	uint64_t nextgeo_uv2_proxy_draws = 0;
 	LocalVector<RID> mesh_rids;
 	LocalVector<uint8_t> mesh_record_dirty;
 

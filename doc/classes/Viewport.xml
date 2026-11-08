@@ -840,6 +840,27 @@
 		</constant>
 		<constant name="DEBUG_DRAW_NEXTGI_SPECULAR_DENOISED" value="50" enum="DebugDraw">
 		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_CRACKS" value="51" enum="DebugDraw">
+			Highlights exposed back faces of closed virtual and legacy meshes in magenta over neutral gray front faces to detect DAG cracks.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_RT_PROXY" value="52" enum="DebugDraw">
+			Displays the linear depth difference between the rasterized scene and the NextGeo ray-tracing proxy meshes.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_CLUSTER_ERROR" value="53" enum="DebugDraw">
+			Displays a heatmap of projected screen-space cluster error in pixels for NextGeo virtual geometry.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_RESIDENCY" value="54" enum="DebugDraw">
+			Displays NextGeo page residency status per visible cluster (pinned root pages, resident fine pages, and coarse parent fallback).
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_VISIBILITY_ID" value="55" enum="DebugDraw">
+			Displays hashed cluster and triangle identifiers from the NextGeo visibility buffer.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_FALLBACK" value="56" enum="DebugDraw">
+			Colors opaque pixels by NextGeo virtual vs legacy routing and fallback reason, and computes the fallback coverage ratio.
+		</constant>
+		<constant name="DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE" value="57" enum="DebugDraw">
+			Colors visible triangles by [code]log2[/code] screen-space area and populates [code]triangle_size_histogram[/code] in the NextGeo debug stats.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

@@ -50,6 +50,7 @@ private:
 	mutable RID_Owner<DummyMesh, true> mesh_owner;
 
 	struct DummyMultiMesh {
+		RID mesh;
 		PackedFloat32Array buffer;
 	};
 
@@ -192,7 +193,11 @@ public:
 	virtual void _multimesh_allocate_data(RID p_multimesh, int p_instances, RSE::MultimeshTransformFormat p_transform_format, bool p_use_colors = false, bool p_use_custom_data = false, bool p_use_indirect = false) override {}
 	virtual int _multimesh_get_instance_count(RID p_multimesh) const override { return 0; }
 
-	virtual void _multimesh_set_mesh(RID p_multimesh, RID p_mesh) override {}
+	virtual void _multimesh_set_mesh(RID p_multimesh, RID p_mesh) override {
+		DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		ERR_FAIL_NULL(mm);
+		mm->mesh = p_mesh;
+	}
 	virtual void _multimesh_instance_set_transform(RID p_multimesh, int p_index, const Transform3D &p_transform) override {}
 	virtual void _multimesh_instance_set_transform_2d(RID p_multimesh, int p_index, const Transform2D &p_transform) override {}
 	virtual void _multimesh_instance_set_color(RID p_multimesh, int p_index, const Color &p_color) override {}
@@ -201,7 +206,10 @@ public:
 	virtual void _multimesh_set_custom_aabb(RID p_multimesh, const AABB &p_aabb) override {}
 	virtual AABB _multimesh_get_custom_aabb(RID p_multimesh) const override { return AABB(); }
 
-	virtual RID _multimesh_get_mesh(RID p_multimesh) const override { return RID(); }
+	virtual RID _multimesh_get_mesh(RID p_multimesh) const override {
+		const DummyMultiMesh *mm = multimesh_owner.get_or_null(p_multimesh);
+		return mm != nullptr ? mm->mesh : RID();
+	}
 	virtual AABB _multimesh_get_aabb(RID p_multimesh) override { return AABB(); }
 
 	virtual Transform3D _multimesh_instance_get_transform(RID p_multimesh, int p_index) const override { return Transform3D(); }

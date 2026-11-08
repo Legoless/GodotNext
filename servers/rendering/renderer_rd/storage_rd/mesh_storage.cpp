@@ -366,6 +366,9 @@ void MeshStorage::mesh_free(RID p_rid) {
 	if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_rid)) {
 		RSG::virtual_mesh_storage->mesh_clear_virtual_geometry(p_rid, RenderingServerTypes::VIRTUAL_GEOMETRY_CLEAR_NONE);
 	}
+	if (Mesh *m = mesh_owner.get_or_null(p_rid)) {
+		_mesh_clear_virtual_proxies(m);
+	}
 	mesh_clear(p_rid);
 	mesh_set_shadow_mesh(p_rid, RID());
 	Mesh *mesh = mesh_owner.get_or_null(p_rid);
@@ -972,6 +975,10 @@ void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
 	const bool has_vg = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 	if (has_vg) {
 		const RendererVirtualMeshStorage::MeshInfo *info = RSG::virtual_mesh_storage->get_meshes().getptr(p_mesh);
+		if (info != nullptr && info->generation != mesh->virtual_proxy_generation) {
+			_mesh_clear_virtual_proxies(mesh);
+			mesh->virtual_proxy_generation = info->generation;
+		}
 		if (info != nullptr && info->generation != mesh->nextgi_proxy_generation) {
 			_mesh_nextgi_rt_clear_parts(mesh);
 			mesh->nextgi_blas_dirty = false;
@@ -1007,9 +1014,512 @@ void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
 		}
 		_mesh_nextgi_release_empty_chunks();
 	} else {
+		_mesh_clear_virtual_proxies(mesh);
 		mesh->nextgi_proxy_generation = 0;
 	}
 	mesh_nextgi_sync_vgd_proxy(p_mesh);
+}
+
+void MeshStorage::_mesh_clear_virtual_proxies(Mesh *p_mesh) {
+	if (p_mesh == nullptr) {
+		return;
+	}
+	const RID proxy = p_mesh->virtual_proxy_mesh;
+	p_mesh->virtual_proxy_mesh = RID();
+	p_mesh->virtual_proxy_surface_map.clear();
+	p_mesh->virtual_proxy_built = false;
+	p_mesh->virtual_proxy_generation = 0;
+	if (proxy.is_valid() && mesh_owner.owns(proxy)) {
+		mesh_free(proxy);
+	}
+	const RID rt_proxy = p_mesh->virtual_rt_proxy_mesh;
+	p_mesh->virtual_rt_proxy_mesh = RID();
+	p_mesh->virtual_rt_proxy_surface_map.clear();
+	p_mesh->virtual_rt_proxy_built = false;
+	p_mesh->virtual_rt_proxy_generation = 0;
+	if (rt_proxy.is_valid() && mesh_owner.owns(rt_proxy)) {
+		mesh_free(rt_proxy);
+	}
+}
+
+static void _nextgeo_fill_flat_normals(const PackedVector3Array &p_positions, const PackedInt32Array &p_indices, PackedVector3Array &r_normals) {
+	const int vtx_count = p_positions.size();
+	r_normals.resize(vtx_count);
+	Vector3 *nrm_w = r_normals.ptrw();
+	for (int i = 0; i < vtx_count; i++) {
+		nrm_w[i] = Vector3(0.0f, 1.0f, 0.0f);
+	}
+	const Vector3 *pos_r = p_positions.ptr();
+	const int32_t *idx_r = p_indices.ptr();
+	const int tri_count = p_indices.size() / 3;
+	Vector<Vector3> accum;
+	accum.resize_initialized(vtx_count);
+	Vector3 *acc_w = accum.ptrw();
+	for (int t = 0; t < tri_count; t++) {
+		const int32_t ia = idx_r[t * 3 + 0];
+		const int32_t ib = idx_r[t * 3 + 1];
+		const int32_t ic = idx_r[t * 3 + 2];
+		if (ia < 0 || ib < 0 || ic < 0 || ia >= vtx_count || ib >= vtx_count || ic >= vtx_count) {
+			continue;
+		}
+		const Vector3 fn = (pos_r[ic] - pos_r[ia]).cross(pos_r[ib] - pos_r[ia]);
+		acc_w[ia] += fn;
+		acc_w[ib] += fn;
+		acc_w[ic] += fn;
+	}
+	for (int i = 0; i < vtx_count; i++) {
+		const real_t len = acc_w[i].length();
+		if (len > CMP_EPSILON2) {
+			nrm_w[i] = acc_w[i] / len;
+		}
+	}
+}
+
+static bool _nextgeo_unpack_root_pages_for_surface(const RenderingServerTypes::VirtualGeometryDesc &p_desc, uint32_t p_surface, Array &r_arrays) {
+	PackedVector3Array positions;
+	PackedVector3Array normals;
+	PackedFloat32Array tangents;
+	PackedVector2Array uv0;
+	PackedVector2Array uv2;
+	PackedColorArray colors;
+	PackedInt32Array indices;
+
+	const uint32_t declared_layout = p_desc.vertex_layout;
+	for (int p = 0; p < p_desc.root_pages.size(); p++) {
+		const Vector<uint8_t> &raw = p_desc.root_pages[p];
+		if (raw.size() < 16) {
+			continue;
+		}
+		uint32_t hdr[4] = { 0, 0, 0, 0 };
+		memcpy(hdr, raw.ptr(), sizeof(hdr));
+		const uint32_t page_clusters = hdr[0];
+		const uint32_t page_vertices = hdr[1];
+		const uint32_t page_triangles = hdr[2];
+		const uint32_t skin_bytes = hdr[3];
+		const uint64_t fixed_bytes = 16ull + uint64_t(page_clusters) * 80ull + uint64_t(page_triangles) * 3ull + uint64_t(skin_bytes);
+		if (page_vertices == 0 || page_triangles == 0 || fixed_bytes > uint64_t(raw.size())) {
+			continue;
+		}
+		const uint64_t vertex_bytes = uint64_t(raw.size()) - fixed_bytes;
+		if ((vertex_bytes % (uint64_t(page_vertices) * 4ull)) != 0ull) {
+			continue;
+		}
+		const uint32_t stride = uint32_t(vertex_bytes / (uint64_t(page_vertices) * 4ull));
+		if (stride < 3u) {
+			continue;
+		}
+		uint32_t layout = declared_layout;
+		if (layout == 0) {
+			switch (stride) {
+				case 3:
+					layout = 0x01u;
+					break;
+				case 5:
+					layout = 0x09u;
+					break;
+				case 6:
+					layout = 0x03u;
+					break;
+				case 7:
+					layout = 0x21u;
+					break;
+				case 8:
+					layout = 0x0Bu;
+					break;
+				case 10:
+					layout = 0x07u;
+					break;
+				case 12:
+					layout = 0x0Fu;
+					break;
+				case 14:
+					layout = 0x1Fu;
+					break;
+				case 16:
+					layout = 0x2Fu;
+					break;
+				default:
+					layout = stride >= 18u ? 0x3Fu : 0x01u;
+					break;
+			}
+		}
+		uint32_t off_cursor = 3u;
+		const bool has_nrm = (layout & (1u << 1)) != 0u && off_cursor + 3u <= stride;
+		const uint32_t off_nrm = off_cursor;
+		if (has_nrm) {
+			off_cursor += 3u;
+		}
+		const bool has_tan = (layout & (1u << 2)) != 0u && off_cursor + 4u <= stride;
+		const uint32_t off_tan = off_cursor;
+		if (has_tan) {
+			off_cursor += 4u;
+		}
+		const bool has_uv0 = (layout & (1u << 3)) != 0u && off_cursor + 2u <= stride;
+		const uint32_t off_uv0 = off_cursor;
+		if (has_uv0) {
+			off_cursor += 2u;
+		}
+		const bool has_uv2 = (layout & (1u << 4)) != 0u && off_cursor + 2u <= stride;
+		const uint32_t off_uv2 = off_cursor;
+		if (has_uv2) {
+			off_cursor += 2u;
+		}
+		const bool has_col = (layout & (1u << 5)) != 0u && off_cursor + 4u <= stride;
+		const uint32_t off_col = off_cursor;
+
+		const float *verts_base = reinterpret_cast<const float *>(raw.ptr() + 16u + page_clusters * 80u);
+		const uint8_t *tris_base = raw.ptr() + 16u + page_clusters * 80u + vertex_bytes;
+
+		for (uint32_t c = 0; c < page_clusters; c++) {
+			const uint8_t *rec = raw.ptr() + 16u + c * 80u;
+			uint32_t v_off = 0;
+			uint32_t t_off = 0;
+			uint16_t surface_id = 0;
+			memcpy(&v_off, rec + 68u, sizeof(uint32_t));
+			memcpy(&t_off, rec + 72u, sizeof(uint32_t));
+			const uint8_t v_cnt = rec[76];
+			const uint8_t t_cnt = rec[77];
+			memcpy(&surface_id, rec + 78u, sizeof(uint16_t));
+			if (surface_id != p_surface || v_cnt == 0 || t_cnt == 0) {
+				continue;
+			}
+			if (uint64_t(v_off) + v_cnt > page_vertices || uint64_t(t_off) + t_cnt > page_triangles) {
+				continue;
+			}
+			const int32_t base_vtx = positions.size();
+			for (uint32_t v = 0; v < v_cnt; v++) {
+				const float *vp = verts_base + uint64_t(v_off + v) * stride;
+				positions.push_back(Vector3(vp[0], vp[1], vp[2]));
+				if (has_nrm) {
+					normals.push_back(Vector3(vp[off_nrm + 0], vp[off_nrm + 1], vp[off_nrm + 2]));
+				}
+				if (has_tan) {
+					tangents.push_back(vp[off_tan + 0]);
+					tangents.push_back(vp[off_tan + 1]);
+					tangents.push_back(vp[off_tan + 2]);
+					tangents.push_back(vp[off_tan + 3]);
+				}
+				if (has_uv0) {
+					uv0.push_back(Vector2(vp[off_uv0 + 0], vp[off_uv0 + 1]));
+				}
+				if (has_uv2) {
+					uv2.push_back(Vector2(vp[off_uv2 + 0], vp[off_uv2 + 1]));
+				}
+				if (has_col) {
+					colors.push_back(Color(vp[off_col + 0], vp[off_col + 1], vp[off_col + 2], vp[off_col + 3]));
+				}
+			}
+			const uint8_t *tp = tris_base + uint64_t(t_off) * 3u;
+			for (uint32_t t = 0; t < t_cnt; t++) {
+				const uint8_t i0 = tp[t * 3u + 0];
+				const uint8_t i1 = tp[t * 3u + 1];
+				const uint8_t i2 = tp[t * 3u + 2];
+				if (i0 < v_cnt && i1 < v_cnt && i2 < v_cnt) {
+					indices.push_back(base_vtx + int32_t(i0));
+					indices.push_back(base_vtx + int32_t(i1));
+					indices.push_back(base_vtx + int32_t(i2));
+				}
+			}
+		}
+	}
+
+	if (positions.size() < 3 || indices.size() < 3) {
+		return false;
+	}
+	if (normals.size() != positions.size()) {
+		_nextgeo_fill_flat_normals(positions, indices, normals);
+	}
+	r_arrays.resize(RSE::ARRAY_MAX);
+	r_arrays[RSE::ARRAY_VERTEX] = positions;
+	r_arrays[RSE::ARRAY_NORMAL] = normals;
+	if (tangents.size() == positions.size() * 4) {
+		r_arrays[RSE::ARRAY_TANGENT] = tangents;
+	}
+	if (uv0.size() == positions.size()) {
+		r_arrays[RSE::ARRAY_TEX_UV] = uv0;
+	}
+	if (uv2.size() == positions.size()) {
+		r_arrays[RSE::ARRAY_TEX_UV2] = uv2;
+	}
+	if (colors.size() == positions.size()) {
+		r_arrays[RSE::ARRAY_COLOR] = colors;
+	}
+	r_arrays[RSE::ARRAY_INDEX] = indices;
+	return true;
+}
+
+static bool _nextgeo_unpack_rt_proxy_for_surface(const RenderingServerTypes::VirtualGeometryDesc &p_desc, uint32_t p_surface, bool p_allow_whole_proxy_fallback, Array &r_arrays) {
+	const uint32_t total_verts = uint32_t(p_desc.rt_proxy_positions.size() / 3);
+	const uint32_t total_indices = uint32_t(p_desc.rt_proxy_indices.size() / 4);
+	if (total_verts < 3u || total_indices < 3u) {
+		return false;
+	}
+	const float *pos_ptr = p_desc.rt_proxy_positions.ptr();
+	const uint32_t *idx_ptr = reinterpret_cast<const uint32_t *>(p_desc.rt_proxy_indices.ptr());
+	const uint32_t part_count = uint32_t(p_desc.rt_proxy_parts.size() / 4);
+	const uint32_t vgd_surface_count = part_count > 0 ? uint32_t(p_desc.rt_proxy_surface_ranges.size() / (part_count * 2)) : 0u;
+
+	PackedVector3Array positions;
+	PackedInt32Array indices;
+
+	if (part_count > 0 && p_surface < vgd_surface_count) {
+		for (uint32_t p = 0; p < part_count; p++) {
+			const int32_t raw_v_off = p_desc.rt_proxy_parts[p * 4 + 0];
+			const int32_t raw_v_cnt = p_desc.rt_proxy_parts[p * 4 + 1];
+			const int32_t raw_i_off = p_desc.rt_proxy_parts[p * 4 + 2];
+			const int32_t raw_i_cnt = p_desc.rt_proxy_parts[p * 4 + 3];
+			const int32_t raw_first = p_desc.rt_proxy_surface_ranges[(p * vgd_surface_count + p_surface) * 2 + 0];
+			const int32_t raw_cnt = p_desc.rt_proxy_surface_ranges[(p * vgd_surface_count + p_surface) * 2 + 1];
+			if (raw_v_off < 0 || raw_v_cnt <= 0 || raw_i_off < 0 || raw_i_cnt <= 0 || raw_first < 0 || raw_cnt < 3) {
+				continue;
+			}
+			const uint32_t v_off = uint32_t(raw_v_off);
+			const uint32_t v_cnt = uint32_t(raw_v_cnt);
+			const uint32_t i_off = uint32_t(raw_i_off);
+			const uint32_t i_cnt = uint32_t(raw_i_cnt);
+			const uint32_t first_idx = uint32_t(raw_first);
+			const uint32_t idx_cnt = uint32_t(raw_cnt);
+			if (uint64_t(v_off) + v_cnt > total_verts || uint64_t(i_off) + i_cnt > total_indices || uint64_t(first_idx) + idx_cnt > i_cnt) {
+				continue;
+			}
+			HashMap<uint32_t, int32_t> remap;
+			for (uint32_t k = 0; k < idx_cnt; k++) {
+				const uint32_t local_v = idx_ptr[i_off + first_idx + k];
+				if (local_v >= v_cnt) {
+					continue;
+				}
+				int32_t *mapped = remap.getptr(local_v);
+				int32_t out_idx = 0;
+				if (mapped != nullptr) {
+					out_idx = *mapped;
+				} else {
+					out_idx = positions.size();
+					const uint64_t pf = uint64_t(v_off + local_v) * 3u;
+					positions.push_back(Vector3(pos_ptr[pf + 0], pos_ptr[pf + 1], pos_ptr[pf + 2]));
+					remap.insert(local_v, out_idx);
+				}
+				indices.push_back(out_idx);
+			}
+		}
+	} else if (p_allow_whole_proxy_fallback) {
+		positions.resize(int(total_verts));
+		Vector3 *pw = positions.ptrw();
+		for (uint32_t v = 0; v < total_verts; v++) {
+			pw[v] = Vector3(pos_ptr[uint64_t(v) * 3u + 0], pos_ptr[uint64_t(v) * 3u + 1], pos_ptr[uint64_t(v) * 3u + 2]);
+		}
+		indices.resize(int(total_indices));
+		int32_t *iw = indices.ptrw();
+		for (uint32_t k = 0; k < total_indices; k++) {
+			iw[k] = int32_t(MIN(idx_ptr[k], total_verts - 1u));
+		}
+	}
+
+	if (positions.size() < 3 || indices.size() < 3) {
+		return false;
+	}
+	PackedVector3Array normals;
+	_nextgeo_fill_flat_normals(positions, indices, normals);
+	r_arrays.resize(RSE::ARRAY_MAX);
+	r_arrays[RSE::ARRAY_VERTEX] = positions;
+	r_arrays[RSE::ARRAY_NORMAL] = normals;
+	r_arrays[RSE::ARRAY_INDEX] = indices;
+	return true;
+}
+
+void *MeshStorage::mesh_get_virtual_proxy_surface(RID p_mesh, uint32_t p_surface) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	if (mesh == nullptr || mesh->nextgi_skip_rt_arena || p_surface >= mesh->surface_count) {
+		return nullptr;
+	}
+	if (RSG::virtual_mesh_storage == nullptr || !RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh) || !RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, p_surface)) {
+		return nullptr;
+	}
+	if (RSG::virtual_mesh_storage->mesh_is_stripped_to_coarse(p_mesh)) {
+		return mesh_get_surface(p_mesh, p_surface);
+	}
+
+	const RendererVirtualMeshStorage::MeshInfo *info = RSG::virtual_mesh_storage->get_meshes().getptr(p_mesh);
+	const uint64_t cur_gen = info != nullptr ? info->generation : 0;
+	if (mesh->virtual_proxy_built && mesh->virtual_proxy_generation != cur_gen) {
+		_mesh_clear_virtual_proxies(mesh);
+	}
+
+	if (!mesh->virtual_proxy_built) {
+		mesh->virtual_proxy_built = true;
+		mesh->virtual_proxy_generation = cur_gen;
+		mesh->virtual_proxy_surface_map.resize(mesh->surface_count);
+		for (uint32_t s = 0; s < mesh->surface_count; s++) {
+			mesh->virtual_proxy_surface_map[s] = -1;
+		}
+		const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh);
+		RenderingServer *server = RenderingServer::get_singleton();
+		if (desc != nullptr && server != nullptr) {
+			RID proxy_rid;
+			int32_t added_count = 0;
+			bool first_virtual = true;
+			for (uint32_t s = 0; s < mesh->surface_count; s++) {
+				if (!RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, s)) {
+					continue;
+				}
+				Array arrays;
+				bool have_arrays = false;
+				if (s < uint32_t(desc->coarse_surfaces.size()) && desc->coarse_surfaces[int(s)].size() == RSE::ARRAY_MAX) {
+					const PackedVector3Array verts = desc->coarse_surfaces[int(s)][RSE::ARRAY_VERTEX];
+					if (verts.size() >= 3) {
+						arrays = desc->coarse_surfaces[int(s)].duplicate();
+						const PackedVector3Array nrms = arrays[RSE::ARRAY_NORMAL];
+						const PackedInt32Array idxs = arrays[RSE::ARRAY_INDEX];
+						if (nrms.size() != verts.size() && idxs.size() >= 3) {
+							PackedVector3Array gen_nrm;
+							_nextgeo_fill_flat_normals(verts, idxs, gen_nrm);
+							arrays[RSE::ARRAY_NORMAL] = gen_nrm;
+						}
+						have_arrays = true;
+					}
+				}
+				if (!have_arrays) {
+					have_arrays = _nextgeo_unpack_root_pages_for_surface(*desc, s, arrays);
+				}
+				if (!have_arrays) {
+					have_arrays = _nextgeo_unpack_rt_proxy_for_surface(*desc, s, first_virtual, arrays);
+				}
+				first_virtual = false;
+				if (!have_arrays) {
+					continue;
+				}
+				RenderingServerTypes::SurfaceData sd;
+				if (server->mesh_create_surface_data_from_arrays(&sd, RSE::PRIMITIVE_TRIANGLES, arrays) == OK) {
+					if (proxy_rid.is_null()) {
+						proxy_rid = mesh_allocate();
+						mesh_initialize(proxy_rid);
+						mesh_nextgi_set_skip_rt_arena(proxy_rid, true);
+					}
+					sd.material = mesh_surface_get_material(p_mesh, s);
+					mesh_add_surface(proxy_rid, sd);
+					mesh->virtual_proxy_surface_map[s] = added_count++;
+				}
+			}
+			mesh->virtual_proxy_mesh = proxy_rid;
+		}
+	}
+
+	if (mesh->virtual_proxy_mesh.is_valid() && p_surface < mesh->virtual_proxy_surface_map.size()) {
+		const int32_t mapped = mesh->virtual_proxy_surface_map[p_surface];
+		if (mapped >= 0) {
+			return mesh_get_surface(mesh->virtual_proxy_mesh, uint32_t(mapped));
+		}
+	}
+	return nullptr;
+}
+
+RID MeshStorage::mesh_get_virtual_rt_proxy_mesh(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	if (mesh == nullptr || mesh->nextgi_skip_rt_arena) {
+		return RID();
+	}
+	if (RSG::virtual_mesh_storage == nullptr || !RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh)) {
+		return RID();
+	}
+	const RendererVirtualMeshStorage::MeshInfo *info = RSG::virtual_mesh_storage->get_meshes().getptr(p_mesh);
+	const uint64_t cur_gen = info != nullptr ? info->generation : 0;
+	if (mesh->virtual_rt_proxy_built && mesh->virtual_rt_proxy_generation != cur_gen) {
+		const RID old_rt = mesh->virtual_rt_proxy_mesh;
+		mesh->virtual_rt_proxy_mesh = RID();
+		mesh->virtual_rt_proxy_surface_map.clear();
+		mesh->virtual_rt_proxy_built = false;
+		if (old_rt.is_valid() && mesh_owner.owns(old_rt)) {
+			mesh_free(old_rt);
+		}
+	}
+	if (!mesh->virtual_rt_proxy_built) {
+		mesh->virtual_rt_proxy_built = true;
+		mesh->virtual_rt_proxy_generation = cur_gen;
+		mesh->virtual_rt_proxy_surface_map.resize(mesh->surface_count);
+		for (uint32_t s = 0; s < mesh->surface_count; s++) {
+			mesh->virtual_rt_proxy_surface_map[s] = -1;
+		}
+		const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh);
+		RenderingServer *server = RenderingServer::get_singleton();
+		MaterialStorage *material_storage = MaterialStorage::get_singleton();
+		if (desc != nullptr && server != nullptr) {
+			RID rt_rid;
+			int32_t added_count = 0;
+			bool first_virtual = true;
+			for (uint32_t s = 0; s < mesh->surface_count; s++) {
+				const Mesh::Surface *surface = mesh->surfaces[s];
+				if (surface != nullptr && surface->material.is_valid() && material_storage != nullptr) {
+					if (material_storage->material_get_nextgi_rt_class(surface->material) != MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE) {
+						continue;
+					}
+				}
+				Array arrays;
+				bool have_arrays = false;
+				if (RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, s)) {
+					have_arrays = _nextgeo_unpack_rt_proxy_for_surface(*desc, s, first_virtual, arrays);
+					if (!have_arrays) {
+						have_arrays = _nextgeo_unpack_root_pages_for_surface(*desc, s, arrays);
+					}
+					first_virtual = false;
+				} else if (surface != nullptr && !surface->rt_cpu_positions.is_empty() && !surface->rt_cpu_indices.is_empty()) {
+					const uint32_t vc = uint32_t(surface->rt_cpu_positions.size() / 3);
+					const uint32_t ic = uint32_t(surface->rt_cpu_indices.size());
+					if (vc >= 3u && ic >= 3u) {
+						PackedVector3Array pos;
+						PackedInt32Array idx;
+						pos.resize(int(vc));
+						idx.resize(int(ic));
+						Vector3 *pw = pos.ptrw();
+						int32_t *iw = idx.ptrw();
+						const float *pr = surface->rt_cpu_positions.ptr();
+						const uint32_t *ir = surface->rt_cpu_indices.ptr();
+						for (uint32_t v = 0; v < vc; v++) {
+							pw[v] = Vector3(pr[uint64_t(v) * 3u + 0], pr[uint64_t(v) * 3u + 1], pr[uint64_t(v) * 3u + 2]);
+						}
+						for (uint32_t k = 0; k < ic; k++) {
+							iw[k] = int32_t(ir[k]);
+						}
+						PackedVector3Array nrm;
+						_nextgeo_fill_flat_normals(pos, idx, nrm);
+						arrays.resize(RSE::ARRAY_MAX);
+						arrays[RSE::ARRAY_VERTEX] = pos;
+						arrays[RSE::ARRAY_NORMAL] = nrm;
+						arrays[RSE::ARRAY_INDEX] = idx;
+						have_arrays = true;
+					}
+				}
+				if (!have_arrays) {
+					continue;
+				}
+				RenderingServerTypes::SurfaceData sd;
+				if (server->mesh_create_surface_data_from_arrays(&sd, RSE::PRIMITIVE_TRIANGLES, arrays) == OK) {
+					if (rt_rid.is_null()) {
+						rt_rid = mesh_allocate();
+						mesh_initialize(rt_rid);
+						mesh_nextgi_set_skip_rt_arena(rt_rid, true);
+					}
+					mesh_add_surface(rt_rid, sd);
+					mesh->virtual_rt_proxy_surface_map[s] = added_count++;
+				}
+			}
+			mesh->virtual_rt_proxy_mesh = rt_rid;
+		}
+	}
+	return mesh->virtual_rt_proxy_mesh;
+}
+
+void *MeshStorage::mesh_get_virtual_rt_proxy_surface(RID p_mesh, uint32_t p_surface) {
+	const RID rt_rid = mesh_get_virtual_rt_proxy_mesh(p_mesh);
+	if (rt_rid.is_null()) {
+		return nullptr;
+	}
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	if (mesh != nullptr && p_surface < mesh->virtual_rt_proxy_surface_map.size()) {
+		const int32_t mapped = mesh->virtual_rt_proxy_surface_map[p_surface];
+		if (mapped >= 0) {
+			return mesh_get_surface(rt_rid, uint32_t(mapped));
+		}
+	}
+	return nullptr;
 }
 
 void MeshStorage::mesh_nextgi_sync_vgd_proxy(RID p_mesh) {
@@ -1592,6 +2102,9 @@ void MeshStorage::mesh_set_shadow_mesh(RID p_mesh, RID p_shadow_mesh) {
 void MeshStorage::mesh_clear(RID p_mesh) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
+	if (!mesh->nextgi_skip_rt_arena) {
+		_mesh_clear_virtual_proxies(mesh);
+	}
 	// GodotNext: ps_mesh_sdf_atlas (#185). No dangling pool slots.
 	sdf_atlas.unregister_mesh(p_mesh);
 
@@ -1735,6 +2248,17 @@ RendererMeshStorage::GeometryMemoryReport MeshStorage::get_geometry_memory_repor
 			} else {
 				report.authored_remainder += surf_bytes;
 				report.lods += lod_bytes;
+			}
+		}
+		if (has_vg && mesh->virtual_proxy_mesh.is_valid()) {
+			const Mesh *proxy_mesh = mesh_owner.get_or_null(mesh->virtual_proxy_mesh);
+			if (proxy_mesh != nullptr) {
+				for (uint32_t ps = 0; ps < proxy_mesh->surface_count; ps++) {
+					const Mesh::Surface *psurf = proxy_mesh->surfaces[ps];
+					if (psurf != nullptr) {
+						report.coarse_fallback += psurf->vertex_buffer_size + psurf->attribute_buffer_size + psurf->skin_buffer_size + uint64_t(psurf->index_buffer_size) + psurf->blend_shape_buffer_size;
+					}
+				}
 			}
 		}
 	}

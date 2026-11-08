@@ -2430,6 +2430,9 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 		}
 		if (desc.eligible_surface_mask != 0) {
 			const TypedArray<Array> coarse = virtual_geometry->get_coarse_fallback();
+			for (int index = 0; index < coarse.size(); index++) {
+				desc.coarse_surfaces.push_back(coarse[index]);
+			}
 			if (coarse.is_empty()) {
 				desc.stripped_to_coarse = true;
 			} else {

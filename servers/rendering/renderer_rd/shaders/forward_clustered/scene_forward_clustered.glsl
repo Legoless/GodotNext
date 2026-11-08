@@ -1117,6 +1117,10 @@ layout(location = 4) out float depth_output_buffer;
 
 #endif // MODE_RENDER_MATERIAL
 
+#ifdef MODE_RENDER_NEXTGEO_FALLBACK
+layout(location = 0) out uint nextgeo_fallback_out;
+#endif
+
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 layout(location = 0) out vec4 normal_roughness_output_buffer;
 
@@ -3559,6 +3563,10 @@ void fragment_shader(in SceneData scene_data) {
 
 	emission_output_buffer.rgb = emission;
 	emission_output_buffer.a = 0.0;
+#endif
+
+#ifdef MODE_RENDER_NEXTGEO_FALLBACK
+	nextgeo_fallback_out = draw_call.uv_offset;
 #endif
 
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
