@@ -131,6 +131,15 @@ PackedInt32Array VirtualGeometryData::get_rt_proxy_clusters() const {
 	return rt_proxy_clusters;
 }
 
+void VirtualGeometryData::set_rt_proxy_triangle_groups(const PackedByteArray &p_groups) {
+	rt_proxy_triangle_groups = p_groups;
+	emit_changed();
+}
+
+PackedByteArray VirtualGeometryData::get_rt_proxy_triangle_groups() const {
+	return rt_proxy_triangle_groups;
+}
+
 void VirtualGeometryData::set_rt_proxy_eps(float p_eps) {
 	rt_proxy_eps = p_eps;
 	emit_changed();
@@ -273,6 +282,7 @@ void VirtualGeometryData::reset_state() {
 	rt_proxy_parts.clear();
 	rt_proxy_surface_ranges.clear();
 	rt_proxy_clusters.clear();
+	rt_proxy_triangle_groups.clear();
 	rt_proxy_eps = 0.0f;
 	rt_proxy_error = 0.0f;
 	card_descriptors.clear();
@@ -313,6 +323,8 @@ void VirtualGeometryData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_rt_proxy_surface_ranges"), &VirtualGeometryData::get_rt_proxy_surface_ranges);
 	ClassDB::bind_method(D_METHOD("set_rt_proxy_clusters", "clusters"), &VirtualGeometryData::set_rt_proxy_clusters);
 	ClassDB::bind_method(D_METHOD("get_rt_proxy_clusters"), &VirtualGeometryData::get_rt_proxy_clusters);
+	ClassDB::bind_method(D_METHOD("set_rt_proxy_triangle_groups", "groups"), &VirtualGeometryData::set_rt_proxy_triangle_groups);
+	ClassDB::bind_method(D_METHOD("get_rt_proxy_triangle_groups"), &VirtualGeometryData::get_rt_proxy_triangle_groups);
 	ClassDB::bind_method(D_METHOD("set_rt_proxy_eps", "eps"), &VirtualGeometryData::set_rt_proxy_eps);
 	ClassDB::bind_method(D_METHOD("get_rt_proxy_eps"), &VirtualGeometryData::get_rt_proxy_eps);
 	ClassDB::bind_method(D_METHOD("set_rt_proxy_error", "error"), &VirtualGeometryData::set_rt_proxy_error);
@@ -351,6 +363,7 @@ void VirtualGeometryData::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "rt_proxy_parts", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_parts", "get_rt_proxy_parts");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "rt_proxy_surface_ranges", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_surface_ranges", "get_rt_proxy_surface_ranges");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_INT32_ARRAY, "rt_proxy_clusters", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_clusters", "get_rt_proxy_clusters");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "rt_proxy_triangle_groups", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_rt_proxy_triangle_groups", "get_rt_proxy_triangle_groups");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "rt_proxy_eps"), "set_rt_proxy_eps", "get_rt_proxy_eps");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "rt_proxy_error"), "set_rt_proxy_error", "get_rt_proxy_error");
 	ADD_PROPERTY(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "card_descriptors", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR), "set_card_descriptors", "get_card_descriptors");

@@ -4015,7 +4015,7 @@ uint32_t RenderForwardClustered::_render_nextgi_card_batch(const NextGICardCaptu
 			continue;
 		}
 		rd->draw_list_set_viewport(draw_list, pass.rect);
-		rd->draw_list_enable_scissor(draw_list, Rect2(pass.rect));
+		rd->draw_list_enable_scissor(draw_list, Rect2(Point2(), pass.rect.size));
 		RenderListParameters params(render_list[RENDER_LIST_SECONDARY].elements.ptr() + pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + pass.element_from, pass.element_count, true, PASS_MODE_DEPTH_MATERIAL, 0, true, false, pass.rp_uniform_set, false, Vector2(), 0.0f, 0.0f, 1, pass.element_from);
 		params.framebuffer_format = fb_format;
 		_render_list(draw_list, fb_format, &params, 0, pass.element_count);

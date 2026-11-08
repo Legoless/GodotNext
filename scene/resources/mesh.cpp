@@ -2415,6 +2415,13 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 		desc.ngm_path = virtual_geometry->get_ngm_path();
 		desc.page_size = uint32_t(MAX(virtual_geometry->get_page_size(), 0));
 		desc.page_count = uint32_t(MAX(virtual_geometry->get_page_count(), 0));
+		desc.rt_proxy_positions = virtual_geometry->get_rt_proxy_positions();
+		desc.rt_proxy_indices = virtual_geometry->get_rt_proxy_indices();
+		desc.rt_proxy_parts = virtual_geometry->get_rt_proxy_parts();
+		desc.rt_proxy_surface_ranges = virtual_geometry->get_rt_proxy_surface_ranges();
+		desc.rt_proxy_triangle_groups = virtual_geometry->get_rt_proxy_triangle_groups();
+		desc.card_descriptors = virtual_geometry->get_card_descriptors();
+		desc.rt_proxy_eps = virtual_geometry->get_rt_proxy_eps();
 		const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
 		for (int index = 0; index < eligibility.size() && index < 32; index++) {
 			if (eligibility[index] == 1) {

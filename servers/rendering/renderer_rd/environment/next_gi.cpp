@@ -376,9 +376,17 @@ void NextGI::_ensure_rt_scene() {
 	// The tier can be HWRT in doctests with mocked inputs and no live device; the RT scene
 	// exists only on a real ray-query device.
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (result.tier == TIER_HWRT && rt_scene == nullptr && rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)) {
+	const bool hwrt_live = result.tier == TIER_HWRT && rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY);
+	if (singleton == this && MeshStorage::get_singleton() != nullptr) {
+		MeshStorage::get_singleton()->mesh_nextgi_set_hwrt_active(hwrt_live);
+	}
+	if (hwrt_live && rt_scene == nullptr) {
 		rt_scene = memnew(NextGIRTScene);
 		rt_scene->init();
+	} else if (!hwrt_live && rt_scene != nullptr && singleton == this) {
+		rt_scene->free();
+		memdelete(rt_scene);
+		rt_scene = nullptr;
 	}
 }
 
@@ -434,6 +442,7 @@ Dictionary NextGI::get_counters() const {
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
 		counters["tlas_instances"] = int64_t(rt_scene->get_stats().instance_count);
+		counters["skinned_refit_triangles"] = int64_t(rt_scene->get_stats().skinned_refit_triangles);
 		const NextGIRTCoverage &coverage = rt_scene->get_stats().coverage;
 		const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 		counters["rt_coverage"] = frame >= 120 ? nextgi_rt_coverage_percent(coverage) : int64_t(0);
@@ -443,6 +452,20 @@ Dictionary NextGI::get_counters() const {
 		counters["rt_instance_cap"] = int64_t(coverage.instance_cap);
 		counters["rt_dynamic_excluded"] = int64_t(coverage.dynamic_excluded);
 		counters["rt_blas_pending"] = int64_t(coverage.blas_pending);
+	}
+	if (MeshStorage::get_singleton() != nullptr) {
+		const MeshStorage::NextGIRTStats ms_stats = MeshStorage::get_singleton()->mesh_nextgi_get_rt_stats();
+		counters["blas_bytes_compacted"] = int64_t(ms_stats.blas_bytes_compacted);
+		counters["blas_bytes_uncompacted"] = int64_t(ms_stats.blas_bytes_uncompacted);
+		counters["rt_arena_bytes"] = int64_t(ms_stats.rt_arena_bytes);
+		counters["proxy_blas_bytes_compacted"] = int64_t(ms_stats.proxy_blas_bytes_compacted);
+		counters["proxy_blas_bytes_uncompacted"] = int64_t(ms_stats.proxy_blas_bytes_uncompacted);
+		counters["proxy_triangles"] = int64_t(ms_stats.proxy_triangles);
+		counters["proxy_blas_parts"] = int64_t(ms_stats.proxy_blas_parts);
+	}
+	if (src != nullptr) {
+		counters["src_capture_texels"] = int64_t(src->get_stats().capture_texels);
+		counters["src_stage2_cards_captured"] = int64_t(src->get_stats().stage2_captured_card_count);
 	}
 	if (relight != nullptr) {
 		counters["src_relight_texels"] = int64_t(relight->get_last_texels());
@@ -678,6 +701,16 @@ Dictionary NextGI::get_tier_info() const {
 				info["sdf_no_field"] = int64_t(sdf_instances.get_reason_count(NEXTGI_SDF_NO_FIELD));
 			}
 		}
+	}
+	if (MeshStorage::get_singleton() != nullptr) {
+		const MeshStorage::NextGIRTStats ms_stats = MeshStorage::get_singleton()->mesh_nextgi_get_rt_stats();
+		info["blas_bytes_compacted"] = int64_t(ms_stats.blas_bytes_compacted);
+		info["blas_bytes_uncompacted"] = int64_t(ms_stats.blas_bytes_uncompacted);
+		info["rt_arena_bytes"] = int64_t(ms_stats.rt_arena_bytes);
+		info["proxy_blas_bytes_compacted"] = int64_t(ms_stats.proxy_blas_bytes_compacted);
+		info["proxy_blas_bytes_uncompacted"] = int64_t(ms_stats.proxy_blas_bytes_uncompacted);
+		info["proxy_triangles"] = int64_t(ms_stats.proxy_triangles);
+		info["proxy_blas_parts"] = int64_t(ms_stats.proxy_blas_parts);
 	}
 	// GodotNext: nextgi_src_cards
 	if (src != nullptr) {
@@ -943,6 +976,9 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	if (rt_scene != nullptr) {
 		rt_scene->compact_after_traces();
 	}
+	if (result.tier != TIER_HWRT) {
+		_ensure_rt_scene();
+	}
 
 	rd->draw_command_end_label();
 	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));
@@ -996,6 +1032,9 @@ NextGI::~NextGI() {
 	}
 
 	if (singleton == this) {
+		if (MeshStorage::get_singleton() != nullptr) {
+			MeshStorage::get_singleton()->mesh_nextgi_set_hwrt_active(false);
+		}
 		singleton = nullptr;
 	}
 }

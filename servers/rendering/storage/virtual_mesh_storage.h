@@ -204,6 +204,8 @@ public:
 	void mesh_set_virtual_geometry(RID p_mesh, const RenderingServerTypes::VirtualGeometryDesc &p_desc);
 	void mesh_clear_virtual_geometry(RID p_mesh, uint32_t p_reason);
 	bool mesh_has_virtual_geometry(RID p_mesh) const;
+	uint32_t mesh_get_live_instance_count(RID p_mesh) const;
+	const RenderingServerTypes::VirtualGeometryDesc *mesh_get_virtual_geometry_desc(RID p_mesh) const;
 	// GodotNext: nextgeo_exclusive_dispatch (#79). The surface is inside the
 	// mesh's eligible_surface_mask (index < 32).
 	bool mesh_surface_is_virtual(RID p_mesh, uint32_t p_surface) const;
@@ -234,6 +236,7 @@ public:
 	RID instance_record_get_instance(uint32_t p_record) const;
 	// tlas_instance_index, blas_handle, rt_arena_chunk, rt_arena_offset, src_page_table, card_set.
 	void instance_record_set_rt(uint32_t p_record, const uint32_t p_rt_fields[6]);
+	void instance_record_set_rt_flags(uint32_t p_record, uint32_t p_rt_flags);
 
 	// Per frame: advance the free list and the temporal history, process page
 	// streaming uploads under the per-frame KiB cap, then upload dirty records.

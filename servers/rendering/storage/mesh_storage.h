@@ -98,6 +98,7 @@ public:
 
 	virtual bool mesh_needs_instance(RID p_mesh, bool p_has_skeleton) = 0;
 	virtual void mesh_notify_dependency_changed(RID p_mesh) {}
+	virtual void mesh_on_virtual_geometry_changed(RID p_mesh) {}
 
 	/* MESH INSTANCE */
 

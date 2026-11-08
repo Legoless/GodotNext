@@ -45,6 +45,20 @@ class VirtualGeometryData;
 // than this is split into several parts; it is never coarsened to meet the cap.
 static constexpr uint32_t NEXTGEO_RT_PROXY_MAX_PART_TRIANGLES = 131072;
 
+// Stage-2 SRC card descriptor (plan §8.3 Stage 2, #77), 32 bytes little-endian.
+// Axis indices match NextGI Stage-1 axis seeds:
+//   0: +X, 1: -X, 2: +Y, 3: -Y, 4: +Z, 5: -Z.
+struct NextGeoCardDescriptor {
+	uint16_t group = 0;
+	uint8_t axis = 0;
+	uint8_t flags = 0;
+	float center[3] = {};
+	float half_extents[3] = {};
+	uint16_t res_u = 0;
+	uint16_t res_v = 0;
+};
+static_assert(sizeof(NextGeoCardDescriptor) == 32, "NextGeoCardDescriptor must stay 32 bytes (plan §8.3 Stage 2).");
+
 // One fixed, view-independent RT proxy of a mesh, in the exact layout of the
 // `VirtualGeometryData` RT proxy fields. Positions are float32 xyz (including
 // in double-precision builds) and indices are little-endian uint32, part-local.
@@ -61,13 +75,20 @@ struct NextGeoRTProxy {
 	// surfaces in every part) are [0, 0].
 	PackedInt32Array surface_ranges;
 	PackedInt32Array clusters; // The selected cluster IDs, in part-packing order.
+	// Little-endian uint16 proxy-cut group ID per proxy triangle, in final part/surface order.
+	PackedByteArray triangle_groups;
+	// Packed 32-byte little-endian NextGeoCardDescriptor records, sorted by (group, axis).
+	PackedByteArray card_descriptors;
 	float eps = 0.0f; // The eps_rt the cut was taken at, in mesh-local units.
 	float error = 0.0f; // Largest group_error of the selected clusters; never above eps.
 	uint32_t surface_count = 0; // Source surfaces the ranges cover, legacy ones included.
 	uint64_t triangle_count = 0;
 
 	uint32_t part_count() const { return uint32_t(parts.size() / 4); }
+	uint32_t card_count() const { return uint32_t(card_descriptors.size() / sizeof(NextGeoCardDescriptor)); }
 };
+
+void nextgeo_decode_card_descriptor(const uint8_t *p_bytes, NextGeoCardDescriptor &r_desc);
 
 // eps_rt = min(max_extent / 256, rt_max_error), in mesh-local units at import
 // scale. `/256` is half a card texel at 128-texel cards; the world-unit bound

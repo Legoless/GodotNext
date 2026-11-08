@@ -1,0 +1,1032 @@
+{
+	"count": 128,
+	"patches": [
+		{
+			"camera": "CovCam1",
+			"id": 0,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 0.300000, -3.238190],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 1,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 0.300000, 0.261620],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 2,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 0.300000, 2.374395],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 3,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 0.820753, 0.860435],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 4,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 0.837950, -0.705785],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 5,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.227846, -0.205564],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 6,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.269217, 3.303431],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 7,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.282827, 1.757534],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 8,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.323283, -2.699717],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 9,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.754629, 2.285744],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 10,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.830942, 2.865140],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 11,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 1.865793, 1.364675],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 12,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 2.334259, 2.321330],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 13,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 2.350200, -0.143713],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 14,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 2.744879, 2.801516],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 15,
+			"node": "CourtyardMesh",
+			"normal": [1.000000, 0.000000, 0.000000],
+			"pos": [-4.000000, 3.828076, 3.366478],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 16,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.700000, 0.000000, -2.258916],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 17,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.700000, 0.000000, 0.867260],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 18,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-3.700000, 0.801801, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 19,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-3.700000, 4.745254, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 20,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-3.679038, 4.289050, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 21,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.671958, 0.000000, -1.738081],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 22,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-3.653296, 1.855557, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 23,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.273211, 0.000000, -0.706981],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 24,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.247276, 0.000000, 1.808553],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 25,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-3.234658, 2.746526, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 26,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.227205, 0.000000, 3.247842],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 27,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-3.216080, 4.342847, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 28,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.195482, 0.000000, 0.762156],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 29,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [-3.188213, 3.000000, -2.760001],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 30,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-3.171045, 3.823923, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 31,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-3.130375, 0.000000, -3.700000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 32,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-2.772320, 0.000000, -1.632327],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 33,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-2.740311, 2.294137, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 34,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-2.717665, 0.300000, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 35,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-2.670051, 0.000000, 1.295971],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 36,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-2.648601, 0.000000, 2.350333],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 37,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-2.637384, 0.350159, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 38,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-2.243858, 1.229368, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 39,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-2.236132, 1.231243, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 40,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-2.235157, 0.000000, -0.657334],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 41,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-2.224096, 4.288622, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 42,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-2.159573, 0.000000, 1.245552],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 43,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [-2.142864, 3.000000, -3.222357],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 44,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-2.130742, 5.357695, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 45,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-1.733414, 0.000000, -0.686970],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 46,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-1.727109, 2.316494, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 47,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-1.687617, 1.757509, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 48,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-1.650545, 0.809096, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 49,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-1.267516, 0.000000, -0.170264],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 50,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-1.227077, 0.000000, -3.211317],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 51,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-1.217826, 0.000000, -0.770379],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 52,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-0.775873, 2.332127, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 53,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [-0.768447, 3.000000, -3.200052],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 54,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.763023, 0.000000, -1.650759],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 55,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-0.750471, 1.317474, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 56,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-0.746085, 4.330275, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 57,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.740451, 0.000000, 0.752450],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 58,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-0.717612, 4.865713, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 59,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.690845, 0.000000, 1.859942],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 60,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-0.684059, 1.338399, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 61,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [-0.658229, 2.843099, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 62,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.239842, 0.000000, -0.748625],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 63,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-0.211884, 1.830137, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 64,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.204411, 0.000000, 1.722439],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 65,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [-0.157022, 3.000000, 2.786520],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 66,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [-0.152105, 0.000000, -0.132133],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 67,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [-0.130651, 2.812567, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 68,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [0.249186, 0.865609, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 69,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [0.277121, 4.873466, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 70,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.313470, 0.000000, 3.248390],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 71,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.326867, 0.000000, 0.761384],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 72,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [0.346889, 1.847154, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 73,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [0.364676, 0.300000, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 74,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [0.723493, 1.821668, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 75,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.727349, 0.000000, -2.190927],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 76,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [0.769271, 3.790575, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 77,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [0.801113, 0.000000, 1.334904],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 78,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [0.835309, 2.799558, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 79,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [0.841875, 3.000000, 3.352058],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 80,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [1.332882, 3.000000, 2.300000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 81,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.344895, 0.000000, -0.760274],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 82,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.368028, 0.000000, -1.650970],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 83,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [1.372180, 5.292724, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 84,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [1.733315, 3.849214, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 85,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [1.756734, 2.775231, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 86,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [1.767812, 0.000000, 3.324815],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 87,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [1.817913, 4.791121, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 88,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [1.863657, 3.838970, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 89,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [2.287084, 3.000000, -3.236809],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 90,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.332337, 0.000000, 1.869686],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 91,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [2.352846, 3.000000, -2.704257],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 92,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [2.720195, 0.760662, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 93,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.762886, 0.000000, -3.208013],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 94,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [2.776515, 0.754273, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 95,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [2.790620, 2.236157, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 96,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.792260, 0.000000, -0.137580],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 97,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.799296, 0.000000, -0.653340],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 98,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [2.800254, 3.000000, 2.809067],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 99,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [2.810310, 3.369129, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 100,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [2.812943, 5.273427, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 101,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [2.837099, 0.000000, 1.877412],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 102,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, -1.000000, 0.000000],
+			"pos": [2.859205, 3.000000, -3.700000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 103,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 1.000000, 0.000000],
+			"pos": [3.253199, 0.000000, -3.639120],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam2",
+			"id": 104,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, 1.000000],
+			"pos": [3.275206, 2.338592, -4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 105,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [3.301935, 4.372926, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 106,
+			"node": "CourtyardMesh",
+			"normal": [0.000000, 0.000000, -1.000000],
+			"pos": [3.357391, 3.812483, 4.000000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 107,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 0.300000, -1.276433],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 108,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 0.330938, 2.355085],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 109,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 0.765841, -1.743149],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 110,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 1.253184, 2.347704],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 111,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 1.326294, 1.765699],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 112,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 1.749812, -3.700000],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 113,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 1.829743, 1.233350],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 114,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.221082, 2.733351],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 115,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.247227, 1.825178],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 116,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.344511, -1.621634],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 117,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.720857, -0.760385],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 118,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.747959, 1.843690],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 119,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.751002, 3.231858],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 120,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.809191, -2.159407],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam1",
+			"id": 121,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.812941, -0.134208],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 122,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 2.853763, -3.197345],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 123,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 3.329649, 3.268812],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam0",
+			"id": 124,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 3.860904, 2.841943],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CovCam3",
+			"id": 125,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 4.325241, -2.212742],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 126,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 4.373131, -0.223295],
+			"radius": 0.250000
+		},
+		{
+			"camera": "CaptureCam",
+			"id": 127,
+			"node": "CourtyardMesh",
+			"normal": [-1.000000, 0.000000, 0.000000],
+			"pos": [4.000000, 5.278193, 1.767947],
+			"radius": 0.250000
+		}
+	],
+	"scene": "courtyard_vg.tscn",
+	"seed": 1852143732,
+	"version": 1
+}

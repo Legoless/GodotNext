@@ -577,6 +577,7 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 	if (!fitted || pages.cards.is_empty()) {
 		for (const CardPage &page : pages.cards) {
 			radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+			mask_packer.free(Rect2i(int(page.mask_x), int(page.mask_y), int(page.mask_w), int(page.mask_h)));
 		}
 		alloc_failures++;
 		return 0x80000000u;

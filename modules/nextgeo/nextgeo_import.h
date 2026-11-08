@@ -43,5 +43,6 @@ class VirtualGeometryData;
 // The proxy is the DAG cut at eps_rt = min(max_extent / 256,
 // `rendering/global_illumination/nextgi/rt_max_error`) (plan §7.1). The mesh
 // AABB and the surface count cover every source surface, so an ineligible
-// surface gets a [0, 0] range in every part. Card descriptors stay empty until P5.
+// surface gets a [0, 0] range in every part. Stage-2 SRC card descriptors and
+// per-triangle group IDs are populated from the proxy cut's cluster groups (#77).
 Error nextgeo_import_build(const ImporterMesh *p_mesh, const PackedByteArray &p_eligible, Ref<VirtualGeometryData> &r_vgd, Vector<Vector<uint8_t>> &r_pages);

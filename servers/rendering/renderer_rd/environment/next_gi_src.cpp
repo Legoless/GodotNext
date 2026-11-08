@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/io/image.h"
+#include "core/io/marshalls.h"
 #include "core/math/aabb.h"
 #include "core/math/math_funcs.h"
 #include "core/math/projection.h"
@@ -46,7 +47,9 @@
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
 
 #include <algorithm>
 
@@ -823,7 +826,46 @@ void NextGISRC::init() {
 	dump_state = bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/dump_material_atlas")) ? DUMP_WAITING : DUMP_OFF;
 }
 
+void NextGISRC::_release_stage2_proxy_instances(CardSetState &r_state) {
+	if (!r_state.proxy_instances.is_empty()) {
+		RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+		for (RenderGeometryInstance *instance : r_state.proxy_instances) {
+			if (instance != nullptr && scene != nullptr) {
+				scene->geometry_instance_free(instance);
+			}
+		}
+		r_state.proxy_instances.clear();
+	}
+	if (!r_state.proxy_meshes.is_empty()) {
+		MeshStorage *mesh_storage = MeshStorage::get_singleton();
+		for (const RID &proxy_mesh : r_state.proxy_meshes) {
+			if (proxy_mesh.is_valid() && mesh_storage != nullptr) {
+				mesh_storage->free(proxy_mesh);
+			}
+		}
+		r_state.proxy_meshes.clear();
+	}
+}
+
 void NextGISRC::free() {
+	for (CardSetState &state : card_set_states) {
+		_release_stage2_proxy_instances(state);
+	}
+	card_set_states.clear();
+	card_sets.clear();
+	cards.clear();
+	card_descs.clear();
+	card_capture_counts.clear();
+	mesh_card_sets.clear();
+	key_card_sets.clear();
+	failed_meshes.clear();
+	emissive_warned_meshes.clear();
+	card_coverage.clear();
+	packer.reset();
+	stats = Stats();
+	gpu_dirty = false;
+	atlas_memory = 0;
+
 	RD *rd = RD::get_singleton();
 	if (rd == nullptr) {
 		return;
@@ -915,10 +957,453 @@ void NextGISRC::_check_emissive_contract(RenderGeometryInstance *p_instance, uin
 	}
 }
 
+bool NextGISRC::_build_stage2_card_set(RID p_mesh, uint64_t p_key) {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh) || RSG::virtual_mesh_storage == nullptr) {
+		return false;
+	}
+	const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh);
+	if (desc == nullptr || desc->card_descriptors.is_empty()) {
+		return false;
+	}
+	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	if (parts == nullptr) {
+		return false;
+	}
+	bool has_built_part = false;
+	for (const MeshStorage::NextGIRTPart &part : *parts) {
+		if (!part.geometries.is_empty()) {
+			has_built_part = true;
+			break;
+		}
+	}
+	if (!has_built_part) {
+		return false; // No parts yet: the RT scene has not built them; try again next frame.
+	}
+	if ((desc->card_descriptors.size() % 32) != 0) {
+		failed_meshes.insert(p_mesh);
+		stats.failed_mesh_count++;
+		return false;
+	}
+
+	const uint8_t *raw = desc->card_descriptors.ptr();
+	const uint32_t descriptor_count = uint32_t(desc->card_descriptors.size() / 32);
+	const float texel_size = MAX(2.0f * desc->rt_proxy_eps, 1e-6f);
+
+	LocalVector<NextGICardDesc> built_descs;
+	LocalVector<uint16_t> built_groups;
+	LocalVector<uint8_t> built_axes;
+	LocalVector<Vector2i> sizes;
+	built_descs.reserve(descriptor_count);
+	built_groups.reserve(descriptor_count);
+	built_axes.reserve(descriptor_count);
+	sizes.reserve(descriptor_count);
+
+	for (uint32_t i = 0; i < descriptor_count; i++) {
+		const uint8_t *rec = raw + i * 32;
+		const uint16_t group = decode_uint16(rec + 0);
+		const uint8_t axis = rec[2];
+		if (axis >= 6) {
+			failed_meshes.insert(p_mesh);
+			stats.failed_mesh_count++;
+			return false;
+		}
+		const Vector3 center(decode_float(rec + 4), decode_float(rec + 8), decode_float(rec + 12));
+		const Vector3 half_extents(decode_float(rec + 16), decode_float(rec + 20), decode_float(rec + 24));
+		const uint16_t res_u = decode_uint16(rec + 28);
+		const uint16_t res_v = decode_uint16(rec + 30);
+
+		const Vector3 axis_n = _nextgi_src_axis_seeds[axis];
+		const int normal_axis = int(axis / 2);
+		const int u_axis = (normal_axis + 1) % 3;
+		const int v_axis = (u_axis + 1) % 3;
+
+		NextGICardDesc card_desc;
+		card_desc.axis_n = axis_n;
+		card_desc.axis_u[u_axis] = 1.0f;
+		card_desc.axis_v = card_desc.axis_n.cross(card_desc.axis_u);
+		card_desc.half_u = MAX(half_extents[u_axis], texel_size * 0.5f);
+		card_desc.half_v = MAX(half_extents[v_axis], texel_size * 0.5f);
+		card_desc.origin = center + axis_n * (half_extents[normal_axis] + texel_size);
+		card_desc.depth_range = half_extents[normal_axis] * 2.0f + texel_size * 2.0f;
+		card_desc.texels_u = CLAMP(uint32_t(res_u), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+		card_desc.texels_v = CLAMP(uint32_t(res_v), uint32_t(NEXTGI_SRC_CARD_MIN_TEXELS), uint32_t(NEXTGI_SRC_CARD_MAX_TEXELS));
+		card_desc.area = card_desc.half_u * card_desc.half_v * 4.0f;
+
+		built_descs.push_back(card_desc);
+		built_groups.push_back(group);
+		built_axes.push_back(axis);
+		sizes.push_back(Vector2i(int(card_desc.texels_u), int(card_desc.texels_v)));
+	}
+	if (built_descs.is_empty()) {
+		failed_meshes.insert(p_mesh);
+		stats.failed_mesh_count++;
+		return false;
+	}
+
+	LocalVector<Rect2i> rects;
+	if (!packer.allocate_all(sizes, rects)) {
+		WARN_PRINT_ONCE("The NextGI SRC material atlas is full; meshes without space get no cards (the P1b LRU, #41, evicts).");
+		failed_meshes.insert(p_mesh);
+		stats.failed_mesh_count++;
+		return false;
+	}
+
+	HashMap<uint32_t, float> surface_extents;
+	const int mesh_surface_count = mesh_storage->mesh_get_surface_count(p_mesh);
+	const uint32_t part_count = uint32_t(desc->rt_proxy_parts.size() / 4);
+	const uint32_t vgd_surface_count = part_count > 0 ? uint32_t(desc->rt_proxy_surface_ranges.size() / (part_count * 2)) : 0u;
+	const float *pos_ptr = desc->rt_proxy_positions.ptr();
+	const uint32_t total_verts = uint32_t(desc->rt_proxy_positions.size() / 3);
+	const uint8_t *idx_bytes = desc->rt_proxy_indices.ptr();
+	const uint32_t total_indices = uint32_t(desc->rt_proxy_indices.size() / 4);
+	for (int s = 0; s < mesh_surface_count; s++) {
+		const bool is_virtual = s < 32 && ((desc->eligible_surface_mask & (1u << uint32_t(s))) != 0u);
+		if (is_virtual && uint32_t(s) < vgd_surface_count) {
+			Vector3 lo(Math::INF, Math::INF, Math::INF);
+			Vector3 hi(-Math::INF, -Math::INF, -Math::INF);
+			for (uint32_t p = 0; p < part_count; p++) {
+				const uint32_t v_off = uint32_t(MAX(desc->rt_proxy_parts[p * 4 + 0], 0));
+				const uint32_t i_off = uint32_t(MAX(desc->rt_proxy_parts[p * 4 + 2], 0));
+				const uint32_t first_idx = uint32_t(MAX(desc->rt_proxy_surface_ranges[(p * vgd_surface_count + uint32_t(s)) * 2 + 0], 0));
+				const uint32_t idx_cnt = uint32_t(MAX(desc->rt_proxy_surface_ranges[(p * vgd_surface_count + uint32_t(s)) * 2 + 1], 0));
+				if (uint64_t(i_off) + first_idx + idx_cnt > total_indices) {
+					continue;
+				}
+				for (uint32_t k = 0; k < idx_cnt; k++) {
+					const uint32_t local_idx = decode_uint32(idx_bytes + (i_off + first_idx + k) * 4u);
+					if (uint64_t(v_off) + local_idx >= total_verts) {
+						continue;
+					}
+					const uint64_t base = (uint64_t(v_off) + local_idx) * 3u;
+					const Vector3 vertex(pos_ptr[base + 0], pos_ptr[base + 1], pos_ptr[base + 2]);
+					lo = lo.min(vertex);
+					hi = hi.max(vertex);
+				}
+			}
+			if (lo.x <= hi.x) {
+				const Vector3 extent = hi - lo;
+				surface_extents.insert(uint32_t(s), MAX(extent.x, MAX(extent.y, extent.z)));
+			}
+		} else {
+			Vector<float> surface_positions;
+			Vector<uint32_t> surface_indices;
+			if (mesh_storage->mesh_nextgi_get_cpu_geometry(p_mesh, uint32_t(s), surface_positions, surface_indices)) {
+				Vector3 lo(Math::INF, Math::INF, Math::INF);
+				Vector3 hi(-Math::INF, -Math::INF, -Math::INF);
+				for (int i = 0; i + 2 < surface_positions.size(); i += 3) {
+					const Vector3 vertex(surface_positions[i], surface_positions[i + 1], surface_positions[i + 2]);
+					lo = lo.min(vertex);
+					hi = hi.max(vertex);
+				}
+				if (lo.x <= hi.x) {
+					const Vector3 extent = hi - lo;
+					surface_extents.insert(uint32_t(s), MAX(extent.x, MAX(extent.y, extent.z)));
+				}
+			}
+		}
+	}
+
+	const uint32_t set_index = card_sets.size();
+	NextGICardSet set;
+	set.first_card = cards.size();
+	set.card_count = built_descs.size();
+	set.texel_size = texel_size;
+	set.capture_scale = 1.0f;
+	for (uint32_t i = 0; i < built_descs.size(); i++) {
+		const NextGICardDesc &card_desc = built_descs[i];
+		NextGICard card;
+		card.origin[0] = card_desc.origin.x;
+		card.origin[1] = card_desc.origin.y;
+		card.origin[2] = card_desc.origin.z;
+		card.origin[3] = float(uint32_t(built_groups[i]) + 1u);
+		card.axis_u[0] = card_desc.axis_u.x;
+		card.axis_u[1] = card_desc.axis_u.y;
+		card.axis_u[2] = card_desc.axis_u.z;
+		card.axis_u[3] = card_desc.half_u;
+		card.axis_v[0] = card_desc.axis_v.x;
+		card.axis_v[1] = card_desc.axis_v.y;
+		card.axis_v[2] = card_desc.axis_v.z;
+		card.axis_v[3] = card_desc.half_v;
+		card.axis_n[0] = card_desc.axis_n.x;
+		card.axis_n[1] = card_desc.axis_n.y;
+		card.axis_n[2] = card_desc.axis_n.z;
+		card.axis_n[3] = card_desc.depth_range;
+		card.atlas_rect[0] = uint32_t(rects[i].position.x);
+		card.atlas_rect[1] = uint32_t(rects[i].position.y);
+		card.atlas_rect[2] = uint32_t(rects[i].size.x);
+		card.atlas_rect[3] = uint32_t(rects[i].size.y);
+		cards.push_back(card);
+		card_descs.push_back(card_desc);
+		card_capture_counts.push_back(0);
+	}
+	card_sets.push_back(set);
+	CardSetState state;
+	state.mesh = p_mesh;
+	state.surface_extents = surface_extents;
+	state.is_stage2 = true;
+	state.card_groups = built_groups;
+	state.card_axes = built_axes;
+	card_set_states.push_back(state);
+	if (!mesh_card_sets.has(p_mesh)) {
+		mesh_card_sets.insert(p_mesh, set_index);
+	}
+	key_card_sets.insert(p_key, set_index);
+	stats.material_capture_count = key_card_sets.size();
+	stats.card_set_count++;
+	stats.card_count += set.card_count;
+	gpu_dirty = true;
+	const float max_extent = float(mesh_storage->mesh_get_aabb(p_mesh).get_longest_axis_size());
+	print_line(vformat("NextGI SRC: Stage-2 card set %d: %d cards, texel %.4f, mesh extent %.3f.", set_index, set.card_count, set.texel_size, max_extent));
+	return true;
+}
+
+static bool _nextgi_stage2_dominant_face_axis(const Vector3 &p_a, const Vector3 &p_b, const Vector3 &p_c, uint8_t &r_axis) {
+	// Godot front-facing triangles wind clockwise, so the outward face normal is (c - a) x (b - a),
+	// matching nextgeo_rt_proxy.cpp:dominant_face_axis.
+	const double ux = double(p_c.x) - double(p_a.x);
+	const double uy = double(p_c.y) - double(p_a.y);
+	const double uz = double(p_c.z) - double(p_a.z);
+	const double vx = double(p_b.x) - double(p_a.x);
+	const double vy = double(p_b.y) - double(p_a.y);
+	const double vz = double(p_b.z) - double(p_a.z);
+	const double nx = uy * vz - uz * vy;
+	const double ny = uz * vx - ux * vz;
+	const double nz = ux * vy - uy * vx;
+	const double len2 = nx * nx + ny * ny + nz * nz;
+	if (!(len2 > 1e-24)) {
+		return false;
+	}
+	const double anx = Math::abs(nx);
+	const double any = Math::abs(ny);
+	const double anz = Math::abs(nz);
+	if (anx >= any && anx >= anz) {
+		r_axis = nx >= 0.0 ? 0 : 1;
+	} else if (any >= anz) {
+		r_axis = ny >= 0.0 ? 2 : 3;
+	} else {
+		r_axis = nz >= 0.0 ? 4 : 5;
+	}
+	return true;
+}
+
+bool NextGISRC::_ensure_stage2_proxy_instances(CardSetState &r_state) {
+	const uint32_t card_count = r_state.card_groups.size();
+	if (card_count == 0 || r_state.card_axes.size() != card_count) {
+		return false;
+	}
+	if (r_state.proxy_instances.size() == card_count) {
+		return true;
+	}
+	_release_stage2_proxy_instances(r_state);
+
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	RenderingServer *server = RenderingServer::get_singleton();
+	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+	if (mesh_storage == nullptr || server == nullptr || scene == nullptr || RSG::virtual_mesh_storage == nullptr || !mesh_storage->owns_mesh(r_state.mesh)) {
+		return false;
+	}
+	const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(r_state.mesh);
+	if (desc == nullptr) {
+		return false;
+	}
+	const int surface_count = mesh_storage->mesh_get_surface_count(r_state.mesh);
+	if (surface_count <= 0) {
+		return false;
+	}
+
+	HashMap<uint32_t, uint32_t> group_axis_to_card;
+	for (uint32_t c = 0; c < card_count; c++) {
+		const uint32_t ga_key = (uint32_t(r_state.card_groups[c]) << 8u) | uint32_t(r_state.card_axes[c]);
+		group_axis_to_card.insert(ga_key, c);
+	}
+
+	struct CardTri {
+		Vector3 pa;
+		Vector3 pb;
+		Vector3 pc;
+		Vector3 fn;
+	};
+	struct CardSurfaceBucket {
+		LocalVector<CardTri> tris;
+	};
+	LocalVector<CardSurfaceBucket> card_buckets;
+	card_buckets.resize(uint64_t(card_count) * uint32_t(surface_count));
+
+	const uint32_t part_count = uint32_t(desc->rt_proxy_parts.size() / 4);
+	const uint32_t vgd_surface_count = part_count > 0 ? uint32_t(desc->rt_proxy_surface_ranges.size() / (part_count * 2)) : 0u;
+	const float *pos_ptr = desc->rt_proxy_positions.ptr();
+	const uint32_t total_verts = uint32_t(desc->rt_proxy_positions.size() / 3);
+	const uint8_t *idx_bytes = desc->rt_proxy_indices.ptr();
+	const uint32_t total_indices = uint32_t(desc->rt_proxy_indices.size() / 4);
+	const uint8_t *grp_bytes = desc->rt_proxy_triangle_groups.ptr();
+	const uint32_t total_tri_groups = uint32_t(desc->rt_proxy_triangle_groups.size() / 2);
+
+	for (int s = 0; s < surface_count; s++) {
+		const bool is_virtual = s < 32 && ((desc->eligible_surface_mask & (1u << uint32_t(s))) != 0u);
+		if (!is_virtual || uint32_t(s) >= vgd_surface_count) {
+			continue;
+		}
+		for (uint32_t p = 0; p < part_count; p++) {
+			const uint32_t v_off = uint32_t(MAX(desc->rt_proxy_parts[p * 4 + 0], 0));
+			const uint32_t i_off = uint32_t(MAX(desc->rt_proxy_parts[p * 4 + 2], 0));
+			const uint32_t first_idx = uint32_t(MAX(desc->rt_proxy_surface_ranges[(p * vgd_surface_count + uint32_t(s)) * 2 + 0], 0));
+			const uint32_t idx_cnt = uint32_t(MAX(desc->rt_proxy_surface_ranges[(p * vgd_surface_count + uint32_t(s)) * 2 + 1], 0));
+			if (uint64_t(i_off) + first_idx + idx_cnt > total_indices) {
+				continue;
+			}
+			for (uint32_t k = 0; k + 2 < idx_cnt; k += 3) {
+				const uint32_t global_idx = i_off + first_idx + k;
+				const uint32_t global_tri = global_idx / 3u;
+				if (global_tri >= total_tri_groups) {
+					continue;
+				}
+				const uint16_t tri_group = decode_uint16(grp_bytes + global_tri * 2u);
+				const uint32_t ia = v_off + decode_uint32(idx_bytes + (global_idx + 0) * 4u);
+				const uint32_t ib = v_off + decode_uint32(idx_bytes + (global_idx + 1) * 4u);
+				const uint32_t ic = v_off + decode_uint32(idx_bytes + (global_idx + 2) * 4u);
+				if (ia >= total_verts || ib >= total_verts || ic >= total_verts) {
+					continue;
+				}
+				const Vector3 pa(pos_ptr[uint64_t(ia) * 3u + 0], pos_ptr[uint64_t(ia) * 3u + 1], pos_ptr[uint64_t(ia) * 3u + 2]);
+				const Vector3 pb(pos_ptr[uint64_t(ib) * 3u + 0], pos_ptr[uint64_t(ib) * 3u + 1], pos_ptr[uint64_t(ib) * 3u + 2]);
+				const Vector3 pc(pos_ptr[uint64_t(ic) * 3u + 0], pos_ptr[uint64_t(ic) * 3u + 1], pos_ptr[uint64_t(ic) * 3u + 2]);
+				uint8_t tri_axis = 0;
+				if (!_nextgi_stage2_dominant_face_axis(pa, pb, pc, tri_axis)) {
+					continue;
+				}
+				const uint32_t ga_key = (uint32_t(tri_group) << 8u) | uint32_t(tri_axis);
+				const uint32_t *card_slot = group_axis_to_card.getptr(ga_key);
+				if (card_slot == nullptr) {
+					continue;
+				}
+				const Vector3 cross = (pc - pa).cross(pb - pa);
+				const real_t len = cross.length();
+				const Vector3 fn = len > CMP_EPSILON2 ? (cross / len) : _nextgi_src_axis_seeds[tri_axis];
+				CardTri ct;
+				ct.pa = pa;
+				ct.pb = pb;
+				ct.pc = pc;
+				ct.fn = fn;
+				card_buckets[uint64_t(*card_slot) * uint32_t(surface_count) + uint32_t(s)].tris.push_back(ct);
+			}
+		}
+	}
+
+	r_state.proxy_meshes.reserve(card_count);
+	r_state.proxy_instances.reserve(card_count);
+
+	for (uint32_t c = 0; c < card_count; c++) {
+		const RID proxy_mesh = mesh_storage->mesh_allocate();
+		mesh_storage->mesh_initialize(proxy_mesh);
+		mesh_storage->mesh_nextgi_set_skip_rt_arena(proxy_mesh, true);
+
+		Vector<RID> card_surface_materials;
+		for (int s = 0; s < surface_count; s++) {
+			const LocalVector<CardTri> &tris = card_buckets[uint64_t(c) * uint32_t(surface_count) + uint32_t(s)].tris;
+			if (tris.is_empty()) {
+				continue;
+			}
+			const uint32_t vtx_count = tris.size() * 3u;
+			PackedVector3Array positions;
+			PackedVector3Array normals;
+			PackedVector2Array uvs;
+			PackedInt32Array indices;
+			positions.resize(int(vtx_count));
+			normals.resize(int(vtx_count));
+			uvs.resize(int(vtx_count));
+			indices.resize(int(vtx_count));
+			Vector3 *pos_w = positions.ptrw();
+			Vector3 *nrm_w = normals.ptrw();
+			Vector2 *uv_w = uvs.ptrw();
+			int32_t *idx_w = indices.ptrw();
+			for (uint32_t t = 0; t < tris.size(); t++) {
+				const CardTri &ct = tris[t];
+				const uint32_t base = t * 3u;
+				pos_w[base + 0] = ct.pa;
+				pos_w[base + 1] = ct.pb;
+				pos_w[base + 2] = ct.pc;
+				nrm_w[base + 0] = ct.fn;
+				nrm_w[base + 1] = ct.fn;
+				nrm_w[base + 2] = ct.fn;
+				uv_w[base + 0] = Vector2();
+				uv_w[base + 1] = Vector2();
+				uv_w[base + 2] = Vector2();
+				idx_w[base + 0] = int32_t(base + 0);
+				idx_w[base + 1] = int32_t(base + 1);
+				idx_w[base + 2] = int32_t(base + 2);
+			}
+			Array arrays;
+			arrays.resize(RSE::ARRAY_MAX);
+			arrays[RSE::ARRAY_VERTEX] = positions;
+			arrays[RSE::ARRAY_NORMAL] = normals;
+			arrays[RSE::ARRAY_TEX_UV] = uvs;
+			arrays[RSE::ARRAY_INDEX] = indices;
+			RenderingServerTypes::SurfaceData sd;
+			if (server->mesh_create_surface_data_from_arrays(&sd, RSE::PRIMITIVE_TRIANGLES, arrays) == OK) {
+				const RID override_mat = s < r_state.surface_materials.size() ? r_state.surface_materials[s] : RID();
+				sd.material = override_mat.is_valid() ? override_mat : mesh_storage->mesh_surface_get_material(r_state.mesh, s);
+				mesh_storage->mesh_add_surface(proxy_mesh, sd);
+				card_surface_materials.push_back(override_mat);
+			}
+		}
+
+		if (mesh_storage->mesh_get_surface_count(proxy_mesh) == 0) {
+			PackedVector3Array p_pos;
+			PackedVector3Array p_nrm;
+			PackedVector2Array p_uvs;
+			PackedInt32Array p_idx;
+			p_pos.resize(3);
+			p_nrm.resize(3);
+			p_uvs.resize(3);
+			p_idx.resize(3);
+			for (int k = 0; k < 3; k++) {
+				p_pos.set(k, Vector3());
+				p_nrm.set(k, Vector3(0, 1, 0));
+				p_uvs.set(k, Vector2());
+				p_idx.set(k, k);
+			}
+			Array arrays;
+			arrays.resize(RSE::ARRAY_MAX);
+			arrays[RSE::ARRAY_VERTEX] = p_pos;
+			arrays[RSE::ARRAY_NORMAL] = p_nrm;
+			arrays[RSE::ARRAY_TEX_UV] = p_uvs;
+			arrays[RSE::ARRAY_INDEX] = p_idx;
+			RenderingServerTypes::SurfaceData sd;
+			if (server->mesh_create_surface_data_from_arrays(&sd, RSE::PRIMITIVE_TRIANGLES, arrays) == OK) {
+				const RID override_mat = !r_state.surface_materials.is_empty() ? r_state.surface_materials[0] : RID();
+				sd.material = override_mat.is_valid() ? override_mat : mesh_storage->mesh_surface_get_material(r_state.mesh, 0);
+				mesh_storage->mesh_add_surface(proxy_mesh, sd);
+				card_surface_materials.push_back(override_mat);
+			}
+		}
+
+		RenderGeometryInstance *instance = scene->geometry_instance_create(proxy_mesh);
+		if (instance == nullptr) {
+			mesh_storage->free(proxy_mesh);
+			_release_stage2_proxy_instances(r_state);
+			return false;
+		}
+		const AABB local_bounds = mesh_storage->mesh_get_aabb(proxy_mesh);
+		instance->set_material_override(r_state.material_override);
+		instance->set_surface_materials(card_surface_materials);
+		instance->set_transform(Transform3D(), local_bounds, local_bounds);
+		r_state.proxy_meshes.push_back(proxy_mesh);
+		r_state.proxy_instances.push_back(instance);
+	}
+	return true;
+}
+
 bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
 		return false;
+	}
+	if (!p_axis_cards && RSG::virtual_mesh_storage != nullptr) {
+		const RenderingServerTypes::VirtualGeometryDesc *vgd_desc = RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh);
+		if (vgd_desc != nullptr && !vgd_desc->card_descriptors.is_empty()) {
+			return _build_stage2_card_set(p_mesh, p_key);
+		}
 	}
 	// The cards cover exactly the surfaces in the mesh's BLAS parts, so hits always find a card set.
 	// No parts yet means the RT scene has not built them; try again next frame.
@@ -1128,15 +1613,31 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 				ERR_CONTINUE(set_index == nullptr);
 				_check_emissive_contract(geometry_instance, *set_index);
 			}
+			CardSetState &state = card_set_states[*set_index];
+			RenderGeometryInstance *capture_instance = geometry_instance;
+			Transform3D capture_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+			if (state.is_stage2) {
+				state.material_override = geometry_instance->data->material_override;
+				state.surface_materials = geometry_instance->data->surface_materials;
+			}
 			const NextGICardSet &set = card_sets[*set_index];
 			for (uint32_t card = set.first_card; card < set.first_card + set.card_count; card++) {
 				if (card_capture_counts[card] != 0 || queued_cards.has(card)) {
 					continue;
 				}
+				if (state.is_stage2) {
+					if (!_ensure_stage2_proxy_instances(state)) {
+						break;
+					}
+					const uint32_t local_card = card - set.first_card;
+					ERR_CONTINUE(local_card >= state.proxy_instances.size());
+					capture_instance = state.proxy_instances[local_card];
+					capture_transform = Transform3D();
+				}
 				queued_cards.insert(card);
 				PendingCard item;
-				item.instance = geometry_instance;
-				item.instance_transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+				item.instance = capture_instance;
+				item.instance_transform = capture_transform;
 				item.card = card;
 				item.set_index = *set_index;
 				item.solid_angle = nextgi_src_solid_angle(Math::sin(fed.angular_radius), 1.0f);
@@ -1201,7 +1702,8 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 		RendererSceneRenderRD::NextGICardCapture capture_card;
 		capture_card.instance = item.instance;
 		capture_card.cam_transform = item.instance_transform * desc.get_transform();
-		capture_card.projection.set_orthogonal(-desc.half_u, desc.half_u, -desc.half_v, desc.half_v, 0.0001, desc.depth_range);
+		const double z_near = MIN(0.0001, double(desc.depth_range) * 0.01);
+		capture_card.projection.set_orthogonal(-desc.half_u, desc.half_u, -desc.half_v, desc.half_v, z_near, MAX(double(desc.depth_range), z_near * 2.0));
 		const NextGICard &card = cards[item.card];
 		capture_card.rect = Rect2i(int(card.atlas_rect[0]), int(card.atlas_rect[1]), int(card.atlas_rect[2]), int(card.atlas_rect[3]));
 		batch.push_back(capture_card);
@@ -1225,14 +1727,22 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 			card_capture_counts[item.card]++;
 			stats.capture_count++;
 			stats.max_captures_per_card = MAX(stats.max_captures_per_card, card_capture_counts[item.card]);
+			CardSetState &state = card_set_states[item.set_index];
 			if (card_capture_counts[item.card] == 1) {
 				stats.captured_card_count++;
+				if (state.is_stage2) {
+					stats.stage2_captured_card_count++;
+				}
 			}
-			CardSetState &state = card_set_states[item.set_index];
 			state.captured++;
-			if (!state.released && state.captured >= card_sets[item.set_index].card_count) {
-				mesh_storage->mesh_nextgi_release_cpu_geometry(item.mesh);
-				state.released = true;
+			if (state.captured >= card_sets[item.set_index].card_count) {
+				if (state.is_stage2) {
+					_release_stage2_proxy_instances(state);
+				}
+				if (!state.released) {
+					mesh_storage->mesh_nextgi_release_cpu_geometry(item.mesh);
+					state.released = true;
+				}
 			}
 		}
 		stats.capture_frames++;
@@ -1320,12 +1830,24 @@ void NextGISRC::invalidate_captures(uint32_t p_card_set) {
 		return;
 	}
 	const NextGICardSet &set = card_sets[p_card_set];
+	CardSetState &state = card_set_states[p_card_set];
 	for (uint32_t i = 0; i < set.card_count; i++) {
 		const uint32_t card = set.first_card + i;
-		if (card < card_capture_counts.size()) {
+		if (card < card_capture_counts.size() && card_capture_counts[card] > 0) {
+			if (stats.captured_card_count > 0) {
+				stats.captured_card_count--;
+			}
+			if (state.is_stage2 && stats.stage2_captured_card_count > 0) {
+				stats.stage2_captured_card_count--;
+			}
 			card_capture_counts[card] = 0;
 		}
 	}
+	if (state.is_stage2) {
+		_release_stage2_proxy_instances(state);
+	}
+	state.captured = 0;
+	state.released = false;
 }
 
 void NextGISRC::fill_info(Dictionary &r_info) const {
@@ -1333,6 +1855,7 @@ void NextGISRC::fill_info(Dictionary &r_info) const {
 	r_info["src_card_set_count"] = int64_t(stats.card_set_count);
 	r_info["src_card_count"] = int64_t(stats.card_count);
 	r_info["src_captured_card_count"] = int64_t(stats.captured_card_count);
+	r_info["src_stage2_cards_captured"] = int64_t(stats.stage2_captured_card_count);
 	r_info["src_capture_count"] = int64_t(stats.capture_count);
 	r_info["src_max_captures_per_card"] = int64_t(stats.max_captures_per_card);
 	r_info["src_capture_frames"] = int64_t(stats.capture_frames);

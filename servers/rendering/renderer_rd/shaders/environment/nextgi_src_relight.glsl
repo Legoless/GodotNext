@@ -184,7 +184,8 @@ void main() {
 	ivec2 radiance_coord = ivec2(radiance_origin + texel);
 
 	NextGICard card = cards.data[page.card_index];
-	ivec2 material = ivec2(card.atlas_rect.xy + texel);
+	vec2 card_size = max(vec2(card.atlas_rect.zw), vec2(1.0));
+	ivec2 material = ivec2(card.atlas_rect.xy) + ivec2(clamp(((vec2(texel) + 0.5) / vec2(size)) * card_size, vec2(0.0), card_size - 1.0));
 	float depth = texelFetch(depth_tex, material, 0).r;
 	if (depth <= 0.0) {
 		imageStore(radiance_image, radiance_coord, vec4(0.0));

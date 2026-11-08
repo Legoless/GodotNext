@@ -648,6 +648,7 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 		_mark_dirty(slot);
 	}
 	if (RSG::mesh_storage != nullptr) {
+		RSG::mesh_storage->mesh_on_virtual_geometry_changed(p_mesh);
 		RSG::mesh_storage->mesh_notify_dependency_changed(p_mesh);
 	}
 }
@@ -717,12 +718,23 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 		mesh_clear_reasons.erase(p_mesh);
 	}
 	if (RSG::mesh_storage != nullptr) {
+		RSG::mesh_storage->mesh_on_virtual_geometry_changed(p_mesh);
 		RSG::mesh_storage->mesh_notify_dependency_changed(p_mesh);
 	}
 }
 
 bool RendererVirtualMeshStorage::mesh_has_virtual_geometry(RID p_mesh) const {
 	return meshes.has(p_mesh);
+}
+
+uint32_t RendererVirtualMeshStorage::mesh_get_live_instance_count(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return info != nullptr ? info->live_instances : 0u;
+}
+
+const RenderingServerTypes::VirtualGeometryDesc *RendererVirtualMeshStorage::mesh_get_virtual_geometry_desc(RID p_mesh) const {
+	const MeshInfo *info = meshes.getptr(p_mesh);
+	return info != nullptr ? &info->desc : nullptr;
 }
 
 bool RendererVirtualMeshStorage::mesh_surface_is_virtual(RID p_mesh, uint32_t p_surface) const {
@@ -773,12 +785,17 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 
 	const uint32_t *index = mesh_indices.getptr(p_mesh);
 	MeshInfo *info = meshes.getptr(p_mesh);
+	bool notify_first_instance = false;
 	if (index != nullptr && info != nullptr) {
 		record.virtual_mesh = *index;
 		record.surface_mask = info->desc.eligible_surface_mask;
 		info->live_instances++;
+		notify_first_instance = info->live_instances == 1u;
 	}
 	record.flags = RECORD_VALID | RECORD_VISIBLE;
+	if (notify_first_instance && RSG::mesh_storage != nullptr) {
+		RSG::mesh_storage->mesh_on_virtual_geometry_changed(p_mesh);
+	}
 	return slot;
 }
 
@@ -795,15 +812,23 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 	records[p_record].flags = 0;
 	live_records--;
 	const uint32_t index = records[p_record].virtual_mesh;
+	RID notify_last_mesh;
 	if (index < mesh_rids.size()) {
-		MeshInfo *info = meshes.getptr(mesh_rids[index]);
+		const RID mesh_rid = mesh_rids[index];
+		MeshInfo *info = meshes.getptr(mesh_rid);
 		if (info != nullptr && info->live_instances > 0) {
 			info->live_instances--;
+			if (info->live_instances == 0u) {
+				notify_last_mesh = mesh_rid;
+			}
 		}
 	}
 	// Reusable on the next frame, not this one.
 	if (!free_next.has(p_record)) {
 		free_next.push_back(p_record);
+	}
+	if (notify_last_mesh.is_valid() && RSG::mesh_storage != nullptr) {
+		RSG::mesh_storage->mesh_on_virtual_geometry_changed(notify_last_mesh);
 	}
 }
 
@@ -862,11 +887,12 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	uint32_t keep = record.flags & (RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED);
+	constexpr uint32_t preserved_mask = RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED | RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR;
+	uint32_t keep = record.flags & preserved_mask;
 	if ((p_flags & RECORD_VISIBLE) == 0u) {
 		keep &= ~RECORD_VISIBLE;
 	}
-	record.flags = keep | (p_flags & ~(RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED));
+	record.flags = keep | (p_flags & ~preserved_mask);
 	_mark_dirty(p_record);
 }
 
@@ -922,12 +948,34 @@ void RendererVirtualMeshStorage::instance_record_set_rt(uint32_t p_record, const
 		return;
 	}
 	Record &record = records[p_record];
+	if (record.tlas_instance_index == p_rt_fields[0] &&
+			record.blas_handle == p_rt_fields[1] &&
+			record.rt_arena_chunk == p_rt_fields[2] &&
+			record.rt_arena_offset == p_rt_fields[3] &&
+			record.src_page_table == p_rt_fields[4] &&
+			record.card_set == p_rt_fields[5]) {
+		return;
+	}
 	record.tlas_instance_index = p_rt_fields[0];
 	record.blas_handle = p_rt_fields[1];
 	record.rt_arena_chunk = p_rt_fields[2];
 	record.rt_arena_offset = p_rt_fields[3];
 	record.src_page_table = p_rt_fields[4];
 	record.card_set = p_rt_fields[5];
+	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::instance_record_set_rt_flags(uint32_t p_record, uint32_t p_rt_flags) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	Record &record = records[p_record];
+	constexpr uint32_t rt_mask = RECORD_RT_STATIC | RECORD_RT_SKINNED | RECORD_RT_ALPHA_AS_OPAQUE | RECORD_RT_FAR;
+	const uint32_t next_flags = (record.flags & ~rt_mask) | (p_rt_flags & rt_mask);
+	if (record.flags == next_flags) {
+		return;
+	}
+	record.flags = next_flags;
 	_mark_dirty(p_record);
 }
 

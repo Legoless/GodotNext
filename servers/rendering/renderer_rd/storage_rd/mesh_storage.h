@@ -74,6 +74,12 @@ public:
 	// One BLAS part of a mesh (plan D13): whole surfaces first, split at the 128k triangle cap.
 	struct NextGIRTPart {
 		RID blas;
+		bool is_proxy = false;
+		bool compacted = false;
+		uint32_t chunk = UINT32_MAX;
+		uint32_t allocation_offset = 0;
+		uint32_t allocation_size = 0;
+		uint64_t uncompacted_bytes = 0;
 		uint32_t first_surface = 0;
 		uint32_t surface_count = 0;
 		uint32_t triangle_count = 0;
@@ -223,6 +229,10 @@ private:
 		// GodotNext: nextgi_rt_arena
 		LocalVector<NextGIRTPart> nextgi_parts;
 		bool nextgi_blas_dirty = false;
+		bool nextgi_proxy_uploaded = false;
+		bool nextgi_skip_rt_arena = false;
+		uint64_t nextgi_proxy_generation = 0;
+		uint32_t nextgi_proxy_alpha_excluded = 0;
 		// Newest frame is index 0. Four consecutive frames make the mesh dynamic (line 1a refit).
 		uint32_t nextgi_rt_update_frames[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
 		bool nextgi_rt_dynamic = false;
@@ -278,6 +288,7 @@ private:
 
 	// GodotNext: nextgi_rt_arena
 	bool nextgi_rt_enabled = false;
+	bool nextgi_hwrt_tier_active = false;
 	float nextgi_rt_max_error = 0.02f;
 	NextGIArenaAllocator nextgi_rt_allocator;
 	// GodotNext: ps_mesh_sdf_atlas (#185).
@@ -307,8 +318,9 @@ private:
 	LocalVector<NextGIRTChunk> nextgi_rt_chunks;
 	RID nextgi_rt_chunk_address_buffer;
 
-	void _mesh_nextgi_rt_add_surface(Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data);
+	void _mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface_index, Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data);
 	void _mesh_nextgi_rt_clear_parts(Mesh *p_mesh);
+	void _mesh_nextgi_release_empty_chunks();
 	RID _mesh_nextgi_rt_ensure_chunk(uint32_t p_chunk);
 	void _mesh_nextgi_rt_rebuild_chunk_address_buffer();
 
@@ -520,7 +532,23 @@ public:
 	virtual void mesh_surface_remove(RID p_mesh, int p_surface) override;
 
 	// GodotNext: nextgi_rt_arena
+	struct NextGIRTStats {
+		uint64_t blas_bytes_compacted = 0;
+		uint64_t blas_bytes_uncompacted = 0;
+		uint64_t rt_arena_bytes = 0;
+		uint64_t proxy_blas_bytes_compacted = 0;
+		uint64_t proxy_blas_bytes_uncompacted = 0;
+		uint64_t proxy_triangles = 0;
+		uint32_t proxy_blas_parts = 0;
+	};
 	bool mesh_nextgi_rt_is_enabled() const { return nextgi_rt_enabled; }
+	void mesh_nextgi_set_hwrt_active(bool p_active);
+	bool mesh_nextgi_is_hwrt_active() const { return nextgi_hwrt_tier_active; }
+	void mesh_nextgi_set_skip_rt_arena(RID p_mesh, bool p_skip);
+	void mesh_nextgi_sync_vgd_proxy(RID p_mesh);
+	uint32_t mesh_nextgi_get_proxy_alpha_excluded(RID p_mesh) const;
+	NextGIRTStats mesh_nextgi_get_rt_stats() const;
+	virtual void mesh_on_virtual_geometry_changed(RID p_mesh) override;
 	uint32_t mesh_nextgi_rt_get_chunk_count() const { return nextgi_rt_chunks.size(); }
 	RID mesh_nextgi_rt_get_chunk_buffer(uint32_t p_chunk) const;
 	RID mesh_nextgi_rt_get_chunk_address_buffer() const { return nextgi_rt_chunk_address_buffer; }

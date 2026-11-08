@@ -173,7 +173,72 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 		uncovered = true;
 		return false;
 	}
+	NextGISurfaceRecord surface = surfaces.data[rec.surface_base + hit.geometry_index];
+	if ((surface.flags & 4u) != 0u) {
+		// GodotNext: nextgi_nextgeo (#77). Outside-mask surface on a Stage-2 mesh falls back to WRC.
+		return false;
+	}
 	NextGICardSet card_set = card_sets.data[rec.card_set];
+	if ((surface.flags & 2u) != 0u) {
+		// GodotNext: nextgi_nextgeo (#77). Stage-2 cards keyed by proxy-cut cluster group + dominant axis.
+		uint group_byte = (surface.flags & ~15u) + hit.primitive * 2u;
+		uint word = nextgi_wrc_chunk_uint(rec.arena_chunk, group_byte & ~3u);
+		uint hit_group = ((group_byte & 2u) != 0u) ? (word >> 16u) : (word & 0xFFFFu);
+		uint target_tag = hit_group + 1u;
+		uint lo = 0u;
+		uint hi = card_set.card_count;
+		for (uint bstep = 0u; bstep < 20u && lo < hi; bstep++) {
+			uint mid = (lo + hi) >> 1u;
+			uint mid_tag = uint(cards.data[card_set.first_card + mid].origin.w + 0.5);
+			if (mid_tag < target_tag) {
+				lo = mid + 1u;
+			} else {
+				hi = mid;
+			}
+		}
+		float best_align = 0.0;
+		vec3 best = vec3(0.0);
+		bool found = false;
+		for (uint k = 0u; k < 6u && (lo + k) < card_set.card_count; k++) {
+			uint i = lo + k;
+			NextGICard card = cards.data[card_set.first_card + i];
+			if (uint(card.origin.w + 0.5) != target_tag) {
+				break;
+			}
+			float align = dot(face_normal, card.axis_n.xyz);
+			if (align <= best_align) {
+				continue;
+			}
+			vec3 rel = object_pos - card.origin.xyz;
+			float u = dot(rel, card.axis_u.xyz);
+			float v = dot(rel, card.axis_v.xyz);
+			if (abs(u) > card.axis_u.w + 1e-4 || abs(v) > card.axis_v.w + 1e-4) {
+				continue;
+			}
+			float depth = -dot(rel, card.axis_n.xyz);
+			vec2 card_size = max(vec2(card.atlas_rect.zw), vec2(1.0));
+			vec2 texel = vec2((u / card.axis_u.w) * 0.5 + 0.5, (v / card.axis_v.w) * 0.5 + 0.5) * card_size;
+			ivec2 material = ivec2(card.atlas_rect.xy) + ivec2(clamp(texel, vec2(0.0), card_size - 1.0));
+			float card_depth = texelFetch(material_depth_tex, material, 0).r;
+			float depth_tol = 2.0 * max(card_set.texel_size, max(2.0 * card.axis_u.w / card_size.x, 2.0 * card.axis_v.w / card_size.y));
+			if (!(card_depth > 0.0 && abs(card_depth - depth) <= depth_tol)) {
+				continue;
+			}
+			uint page_index = rec.page_table + i;
+			if (page_index >= params.page_rect_count) {
+				continue;
+			}
+			uvec2 page = page_rects.data[page_index];
+			uvec2 page_origin = uvec2(page.x & 0xFFFFu, page.x >> 16u);
+			uvec2 page_size = max(uvec2(page.y & 0xFFFFu, page.y >> 16u), uvec2(1u));
+			ivec2 radiance_coord = ivec2(page_origin) + ivec2(clamp(texel / card_size * vec2(page_size), vec2(0.0), vec2(page_size) - 1.0));
+			best_align = align;
+			best = texelFetch(src_radiance_tex, radiance_coord, 0).rgb;
+			found = true;
+		}
+		radiance = best;
+		return found;
+	}
 	float best_align = -2.0;
 	vec3 best = vec3(0.0);
 	bool found = false;

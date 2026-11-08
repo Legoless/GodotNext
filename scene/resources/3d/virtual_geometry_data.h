@@ -38,12 +38,12 @@
 // detaches this resource before the next frame (§6.3).
 //
 // `.ngm` is a sidecar, not a resource, so this stores a path and a SHA-256 and no UID.
-// The RT proxy fields are filled by the proxy builder; card descriptors stay empty until P5.
+// The RT proxy fields and Stage-2 card descriptors are filled by the proxy builder (#68, #77).
 class VirtualGeometryData : public Resource {
 	GDCLASS(VirtualGeometryData, Resource);
 
 public:
-	static constexpr int FORMAT_VERSION = 1;
+	static constexpr int FORMAT_VERSION = 2;
 
 private:
 	int format_version = FORMAT_VERSION;
@@ -57,6 +57,7 @@ private:
 	PackedInt32Array rt_proxy_parts;
 	PackedInt32Array rt_proxy_surface_ranges;
 	PackedInt32Array rt_proxy_clusters;
+	PackedByteArray rt_proxy_triangle_groups;
 	float rt_proxy_eps = 0.0f;
 	float rt_proxy_error = 0.0f;
 	PackedByteArray card_descriptors;
@@ -123,6 +124,10 @@ public:
 
 	void set_rt_proxy_clusters(const PackedInt32Array &p_clusters);
 	PackedInt32Array get_rt_proxy_clusters() const;
+
+	// Little-endian uint16 proxy-cut group ID per proxy triangle, in final part/surface order.
+	void set_rt_proxy_triangle_groups(const PackedByteArray &p_groups);
+	PackedByteArray get_rt_proxy_triangle_groups() const;
 
 	void set_rt_proxy_eps(float p_eps);
 	float get_rt_proxy_eps() const;

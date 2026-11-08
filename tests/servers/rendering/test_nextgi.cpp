@@ -430,8 +430,13 @@ TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero"
 		"dirty_aabb",
 		"src_page_updates",
 		"clamped_energy_fraction",
+		"proxy_blas_bytes_compacted",
+		"proxy_blas_bytes_uncompacted",
+		"proxy_triangles",
+		"proxy_blas_parts",
+		"src_stage2_cards_captured",
 	};
-	CHECK_EQ(counters.size(), 21);
+	CHECK_EQ(counters.size(), 26);
 	for (const char *key : keys) {
 		CHECK(counters.has(key));
 		CHECK_EQ(int64_t(counters[key]), int64_t(0));
@@ -2800,6 +2805,78 @@ TEST_CASE("[NextGI][Alpha] BaseMaterial3D nextgi_rt_treat_as_opaque round trip")
 	CHECK(material->get_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE));
 	material->set_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE, false);
 	CHECK_FALSE(material->get_flag(BaseMaterial3D::FLAG_NEXTGI_RT_OPAQUE));
+}
+
+TEST_CASE("[NextGI][NextGeo] VGD proxy planner packs Stage-2 group tables, outside-mask surfaces, and frees cleanly") {
+	using namespace RendererRD;
+
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	desc.eligible_surface_mask = 1u; // surface 0 virtualized, surface 1 outside mask, surface 2 alpha-excluded
+	desc.rt_proxy_positions = PackedFloat32Array({
+			0.0f,
+			0.0f,
+			0.0f,
+			1.0f,
+			0.0f,
+			0.0f,
+			0.0f,
+			1.0f,
+			0.0f,
+	});
+	desc.rt_proxy_indices = PackedByteArray({
+			0,
+			0,
+			0,
+			0,
+			1,
+			0,
+			0,
+			0,
+			2,
+			0,
+			0,
+			0,
+	});
+	desc.rt_proxy_parts = PackedInt32Array({ 0, 3, 0, 3 });
+	// 3 surfaces in VGD ranges: surface 0 has [0, 3], surface 1 has [0, 0], surface 2 has [0, 3] (alpha-excluded).
+	desc.rt_proxy_surface_ranges = PackedInt32Array({ 0, 3, 0, 0, 0, 3 });
+	desc.rt_proxy_triangle_groups = PackedByteArray({ 5, 0 });
+	desc.card_descriptors.resize(32);
+	desc.card_descriptors.fill(0);
+	desc.rt_proxy_eps = 0.01f;
+
+	const float leg_pos[9] = { 2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 2.0f, 1.0f, 0.0f };
+	const uint32_t leg_idx[3] = { 0, 1, 2 };
+	NextGIRTLegacySurfaceInput leg_surfaces[3];
+	leg_surfaces[1].positions = leg_pos;
+	leg_surfaces[1].vertex_count = 3;
+	leg_surfaces[1].indices = leg_idx;
+	leg_surfaces[1].index_count = 3;
+	leg_surfaces[1].eps = 0.02f;
+
+	const uint8_t alpha_flags[3] = { 0, 0, 1 };
+
+	NextGIArenaAllocator allocator(64 * 1024 * 1024);
+	LocalVector<NextGIRTProxyPartUpload> uploads;
+	uint32_t alpha_excluded = 0;
+
+	REQUIRE(nextgi_rt_plan_vgd_proxy(true, true, 1, desc, 3, alpha_flags, leg_surfaces, allocator, uploads, alpha_excluded));
+	CHECK_EQ(alpha_excluded, 1u);
+	REQUIRE_EQ(uploads.size(), 1u);
+	// Part 0 combines virtualized surface 0 (Stage-2 cards) and outside-mask legacy surface 1 (no cards).
+	REQUIRE_EQ(uploads[0].geometries.size(), 2u);
+	CHECK_EQ(uploads[0].geometries[0].surface, 0u);
+	CHECK(uploads[0].geometries[0].has_stage2_cards);
+	CHECK_EQ(uploads[0].geometries[0].group_offset & 15u, 0u);
+	CHECK_EQ(uploads[0].geometries[1].surface, 1u);
+	CHECK_FALSE(uploads[0].geometries[1].has_stage2_cards);
+	CHECK_EQ(uploads[0].triangle_count, 2u);
+	CHECK_GT(allocator.get_allocated_bytes(), uint64_t(0));
+
+	for (const NextGIRTProxyPartUpload &u : uploads) {
+		allocator.free_range(u.allocation);
+	}
+	CHECK_EQ(allocator.get_allocated_bytes(), uint64_t(0));
 }
 
 #endif // RD_ENABLED

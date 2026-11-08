@@ -310,6 +310,21 @@ TEST_CASE("[NextGeo][Records] Dirty runs and RT fields") {
 	CHECK_EQ(storage.get_record(record).card_set, uint32_t(12));
 	CHECK_EQ(storage.get_record(gap).transform[0][3], 0.0f);
 
+	// RECORD_RT_STATIC persists across instance_record_set_state and skips dirty uploads when unchanged (#77).
+	storage.instance_record_set_rt_flags(record, RendererVirtualMeshStorage::RECORD_RT_STATIC);
+	storage.instance_record_set_state(record, RendererVirtualMeshStorage::RECORD_CAST_SHADOW_ON);
+	CHECK_EQ(storage.get_record(record).flags & RendererVirtualMeshStorage::RECORD_RT_STATIC, uint32_t(RendererVirtualMeshStorage::RECORD_RT_STATIC));
+	CHECK_EQ(storage.get_record(record).flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_ON, uint32_t(RendererVirtualMeshStorage::RECORD_CAST_SHADOW_ON));
+	storage.flush();
+	storage.begin_frame();
+	storage.flush();
+	const int quiet_calls = storage.record_upload_calls;
+	storage.begin_frame();
+	storage.instance_record_set_rt(record, rt_fields);
+	storage.instance_record_set_rt_flags(record, RendererVirtualMeshStorage::RECORD_RT_STATIC);
+	storage.flush();
+	CHECK_EQ(storage.record_upload_calls, quiet_calls);
+
 	// Clearing removes the mesh but keeps its record slot stable for a re-set.
 	storage.mesh_clear_virtual_geometry(mesh, 0);
 	CHECK_FALSE(storage.mesh_has_virtual_geometry(mesh));

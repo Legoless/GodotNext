@@ -141,6 +141,7 @@ NextGIArenaAllocator::Allocation NextGIArenaAllocator::allocate(uint32_t p_size)
 			if (free_ranges[i].size == 0) {
 				free_ranges.remove_at(i);
 			}
+			allocated_bytes += aligned_size;
 			return allocation;
 		}
 	}
@@ -156,6 +157,7 @@ NextGIArenaAllocator::Allocation NextGIArenaAllocator::allocate(uint32_t p_size)
 		rest.size = chunk_size - aligned_size;
 		free_ranges.push_back(rest);
 	}
+	allocated_bytes += aligned_size;
 	return allocation;
 }
 
@@ -163,6 +165,7 @@ void NextGIArenaAllocator::free_range(const Allocation &p_allocation) {
 	if (!p_allocation.is_valid() || p_allocation.size == 0) {
 		return;
 	}
+	allocated_bytes = allocated_bytes >= p_allocation.size ? allocated_bytes - p_allocation.size : 0;
 	FreeRange freed;
 	freed.chunk = p_allocation.chunk;
 	freed.offset = p_allocation.offset;
@@ -187,7 +190,317 @@ void NextGIArenaAllocator::free_range(const Allocation &p_allocation) {
 
 void NextGIArenaAllocator::reset() {
 	chunk_count = 0;
+	allocated_bytes = 0;
 	free_ranges.clear();
+}
+
+static _FORCE_INLINE_ uint32_t _nextgi_align16(uint32_t p_bytes) {
+	return (p_bytes + NEXTGI_RT_ALIGNMENT - 1u) & ~uint32_t(NEXTGI_RT_ALIGNMENT - 1u);
+}
+
+bool nextgi_rt_plan_vgd_proxy(
+		bool p_hwrt_tier_active,
+		bool p_has_ray_query,
+		uint32_t p_live_instances,
+		const RenderingServerTypes::VirtualGeometryDesc &p_desc,
+		uint32_t p_mesh_surface_count,
+		const uint8_t *p_alpha_excluded_surfaces,
+		const NextGIRTLegacySurfaceInput *p_legacy_surfaces,
+		NextGIArenaAllocator &r_allocator,
+		LocalVector<NextGIRTProxyPartUpload> &r_uploads,
+		uint32_t &r_alpha_excluded_count) {
+	r_uploads.clear();
+	r_alpha_excluded_count = 0;
+	if (!p_hwrt_tier_active || !p_has_ray_query || p_live_instances == 0) {
+		return false;
+	}
+
+	const uint32_t part_count = uint32_t(p_desc.rt_proxy_parts.size() / 4);
+	const uint32_t vgd_surface_count = part_count > 0 ? uint32_t(p_desc.rt_proxy_surface_ranges.size() / (part_count * 2)) : 0u;
+	const uint32_t total_proxy_vertices = uint32_t(p_desc.rt_proxy_positions.size() / 3);
+	const uint32_t total_proxy_indices = uint32_t(p_desc.rt_proxy_indices.size() / 4);
+	const uint32_t total_proxy_triangles = total_proxy_indices / 3;
+	const bool has_cards = !p_desc.card_descriptors.is_empty();
+	const bool has_group_table = uint32_t(p_desc.rt_proxy_triangle_groups.size()) >= total_proxy_triangles * 2u;
+
+	struct LegacySlice {
+		uint32_t surface = 0;
+		uint32_t first_triangle = 0;
+		uint32_t triangle_count = 0;
+	};
+	LocalVector<LegacySlice> legacy_queue;
+	for (uint32_t s = 0; s < p_mesh_surface_count; s++) {
+		const bool is_alpha = p_alpha_excluded_surfaces != nullptr && p_alpha_excluded_surfaces[s] != 0;
+		const bool is_virtual = s < 32u && ((p_desc.eligible_surface_mask & (1u << s)) != 0u);
+		if (is_alpha) {
+			bool had_tris = false;
+			if (s < vgd_surface_count) {
+				for (uint32_t p = 0; p < part_count; p++) {
+					if (p_desc.rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 1] >= 3) {
+						had_tris = true;
+						break;
+					}
+				}
+			}
+			if (!is_virtual && p_legacy_surfaces != nullptr && p_legacy_surfaces[s].index_count >= 3) {
+				had_tris = true;
+			}
+			if (had_tris) {
+				r_alpha_excluded_count++;
+			}
+			continue;
+		}
+		if (!is_virtual && p_legacy_surfaces != nullptr) {
+			const NextGIRTLegacySurfaceInput &leg = p_legacy_surfaces[s];
+			const uint32_t leg_tris = leg.index_count / 3;
+			if (leg.positions != nullptr && leg.vertex_count > 0 && leg.indices != nullptr && leg_tris > 0) {
+				LegacySlice slice;
+				slice.surface = s;
+				slice.first_triangle = 0;
+				slice.triangle_count = leg_tris;
+				legacy_queue.push_back(slice);
+			}
+		}
+	}
+
+	uint32_t legacy_head = 0;
+	struct ProxyRange {
+		uint32_t surface = 0;
+		uint32_t first_triangle = 0;
+		uint32_t triangle_count = 0;
+		uint32_t group_rel = 0;
+	};
+
+	auto emit_part = [&](uint32_t p_v_off, uint32_t p_v_cnt, uint32_t p_i_off, uint32_t p_i_cnt, LocalVector<ProxyRange> &p_proxy_ranges, const LocalVector<LegacySlice> &p_legacy_slices) -> bool {
+		uint32_t cursor = 0;
+		uint32_t proxy_pos_rel = 0;
+		uint32_t proxy_idx_rel = 0;
+		if (!p_proxy_ranges.is_empty()) {
+			proxy_pos_rel = 0;
+			cursor = _nextgi_align16(p_v_cnt * sizeof(float) * 3u);
+			proxy_idx_rel = cursor;
+			cursor = _nextgi_align16(proxy_idx_rel + p_i_cnt * sizeof(uint32_t));
+			if (has_cards && has_group_table) {
+				for (ProxyRange &range : p_proxy_ranges) {
+					range.group_rel = cursor;
+					cursor = _nextgi_align16(cursor + range.triangle_count * sizeof(uint16_t));
+				}
+			}
+		}
+
+		struct LegacyLayout {
+			uint32_t pos_rel = 0;
+			uint32_t idx_rel = 0;
+		};
+		LocalVector<LegacyLayout> leg_layouts;
+		leg_layouts.resize(p_legacy_slices.size());
+		HashMap<uint32_t, uint32_t> surface_pos_rel;
+		for (uint32_t l = 0; l < p_legacy_slices.size(); l++) {
+			const LegacySlice &slice = p_legacy_slices[l];
+			const NextGIRTLegacySurfaceInput &leg = p_legacy_surfaces[slice.surface];
+			uint32_t pos_rel = 0;
+			if (const uint32_t *existing = surface_pos_rel.getptr(slice.surface)) {
+				pos_rel = *existing;
+			} else {
+				pos_rel = cursor;
+				surface_pos_rel.insert(slice.surface, pos_rel);
+				cursor = _nextgi_align16(pos_rel + leg.vertex_count * sizeof(float) * 3u);
+			}
+			const uint32_t idx_rel = cursor;
+			cursor = _nextgi_align16(idx_rel + slice.triangle_count * 3u * sizeof(uint32_t));
+			leg_layouts[l].pos_rel = pos_rel;
+			leg_layouts[l].idx_rel = idx_rel;
+		}
+
+		if (cursor == 0) {
+			return true;
+		}
+		const NextGIArenaAllocator::Allocation alloc = r_allocator.allocate(cursor);
+		if (!alloc.is_valid()) {
+			return false;
+		}
+
+		NextGIRTProxyPartUpload upload;
+		upload.allocation = alloc;
+		upload.payload.resize_initialized(cursor);
+		uint8_t *dst = upload.payload.ptrw();
+
+		uint32_t min_surf = UINT32_MAX;
+		uint32_t max_surf = 0;
+		if (!p_proxy_ranges.is_empty()) {
+			memcpy(dst + proxy_pos_rel, p_desc.rt_proxy_positions.ptr() + uint64_t(p_v_off) * 3u, uint64_t(p_v_cnt) * sizeof(float) * 3u);
+			memcpy(dst + proxy_idx_rel, p_desc.rt_proxy_indices.ptr() + uint64_t(p_i_off) * 4u, uint64_t(p_i_cnt) * sizeof(uint32_t));
+			const uint32_t part_first_tri_global = p_i_off / 3u;
+			for (const ProxyRange &range : p_proxy_ranges) {
+				if (has_cards && has_group_table) {
+					memcpy(dst + range.group_rel, p_desc.rt_proxy_triangle_groups.ptr() + uint64_t(part_first_tri_global + range.first_triangle) * sizeof(uint16_t), uint64_t(range.triangle_count) * sizeof(uint16_t));
+				}
+				NextGIRTPartGeometry geom;
+				geom.surface = range.surface;
+				geom.first_triangle = 0;
+				geom.triangle_count = range.triangle_count;
+				geom.is_proxy_surface = true;
+				geom.has_stage2_cards = has_cards && has_group_table;
+				geom.vertex_offset = alloc.offset + proxy_pos_rel;
+				geom.vertex_count = p_v_cnt;
+				geom.index_offset = alloc.offset + proxy_idx_rel + range.first_triangle * 3u * sizeof(uint32_t);
+				geom.group_offset = geom.has_stage2_cards ? (alloc.offset + range.group_rel) : 0u;
+				geom.eps = p_desc.rt_proxy_eps;
+				upload.geometries.push_back(geom);
+				upload.triangle_count += range.triangle_count;
+				min_surf = MIN(min_surf, range.surface);
+				max_surf = MAX(max_surf, range.surface);
+			}
+		}
+
+		HashMap<uint32_t, bool> pos_copied;
+		for (uint32_t l = 0; l < p_legacy_slices.size(); l++) {
+			const LegacySlice &slice = p_legacy_slices[l];
+			const NextGIRTLegacySurfaceInput &leg = p_legacy_surfaces[slice.surface];
+			if (!pos_copied.has(slice.surface)) {
+				memcpy(dst + leg_layouts[l].pos_rel, leg.positions, uint64_t(leg.vertex_count) * sizeof(float) * 3u);
+				pos_copied.insert(slice.surface, true);
+			}
+			memcpy(dst + leg_layouts[l].idx_rel, leg.indices + uint64_t(slice.first_triangle) * 3u, uint64_t(slice.triangle_count) * 3u * sizeof(uint32_t));
+			NextGIRTPartGeometry geom;
+			geom.surface = slice.surface;
+			geom.first_triangle = 0;
+			geom.triangle_count = slice.triangle_count;
+			geom.is_proxy_surface = true;
+			geom.has_stage2_cards = false;
+			geom.vertex_offset = alloc.offset + leg_layouts[l].pos_rel;
+			geom.vertex_count = leg.vertex_count;
+			geom.index_offset = alloc.offset + leg_layouts[l].idx_rel;
+			geom.group_offset = 0u;
+			geom.eps = leg.eps;
+			upload.geometries.push_back(geom);
+			upload.triangle_count += slice.triangle_count;
+			min_surf = MIN(min_surf, slice.surface);
+			max_surf = MAX(max_surf, slice.surface);
+		}
+
+		if (min_surf != UINT32_MAX) {
+			upload.first_surface = min_surf;
+			upload.surface_count = max_surf - min_surf + 1u;
+		}
+		r_uploads.push_back(upload);
+		return true;
+	};
+
+	auto rollback = [&]() {
+		for (const NextGIRTProxyPartUpload &u : r_uploads) {
+			r_allocator.free_range(u.allocation);
+		}
+		r_uploads.clear();
+		return false;
+	};
+
+	const uint32_t map_surfaces = MIN(vgd_surface_count, p_mesh_surface_count);
+	for (uint32_t p = 0; p < part_count; p++) {
+		const int32_t raw_v_off = p_desc.rt_proxy_parts[p * 4 + 0];
+		const int32_t raw_v_cnt = p_desc.rt_proxy_parts[p * 4 + 1];
+		const int32_t raw_i_off = p_desc.rt_proxy_parts[p * 4 + 2];
+		const int32_t raw_i_cnt = p_desc.rt_proxy_parts[p * 4 + 3];
+		if (raw_v_off < 0 || raw_v_cnt < 0 || raw_i_off < 0 || raw_i_cnt < 0) {
+			return rollback();
+		}
+		const uint32_t v_off = uint32_t(raw_v_off);
+		const uint32_t v_cnt = uint32_t(raw_v_cnt);
+		const uint32_t i_off = uint32_t(raw_i_off);
+		const uint32_t i_cnt = uint32_t(raw_i_cnt);
+		if (uint64_t(v_off) + v_cnt > total_proxy_vertices || uint64_t(i_off) + i_cnt > total_proxy_indices || (i_cnt % 3u) != 0u) {
+			return rollback();
+		}
+
+		LocalVector<ProxyRange> proxy_ranges;
+		uint32_t part_tris = 0;
+		for (uint32_t s = 0; s < map_surfaces; s++) {
+			if (p_alpha_excluded_surfaces != nullptr && p_alpha_excluded_surfaces[s] != 0) {
+				continue;
+			}
+			const int32_t raw_first = p_desc.rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 0];
+			const int32_t raw_cnt = p_desc.rt_proxy_surface_ranges[(p * vgd_surface_count + s) * 2 + 1];
+			if (raw_first < 0 || raw_cnt <= 0) {
+				continue;
+			}
+			const uint32_t first_idx = uint32_t(raw_first);
+			const uint32_t idx_cnt = uint32_t(raw_cnt);
+			if (uint64_t(first_idx) + idx_cnt > i_cnt || (first_idx % 3u) != 0u || (idx_cnt % 3u) != 0u) {
+				return rollback();
+			}
+			ProxyRange range;
+			range.surface = s;
+			range.first_triangle = first_idx / 3u;
+			range.triangle_count = idx_cnt / 3u;
+			proxy_ranges.push_back(range);
+			part_tris += range.triangle_count;
+		}
+		if (part_tris > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+			return rollback();
+		}
+
+		LocalVector<LegacySlice> part_legacy;
+		// Outside-mask surfaces append as extra geometries of the first part (#77 step 2),
+		// bounded by NEXTGI_RT_MAX_TRIANGLES_PER_BLAS.
+		if (r_uploads.is_empty()) {
+			while (legacy_head < legacy_queue.size() && part_tris < NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+				LegacySlice &front = legacy_queue[legacy_head];
+				// Keep a legacy surface whole if it fits a fresh part alone and would overflow part 0.
+				if (part_tris > 0 && front.first_triangle == 0 && front.triangle_count <= NEXTGI_RT_MAX_TRIANGLES_PER_BLAS && part_tris + front.triangle_count > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+					break;
+				}
+				const uint32_t take = MIN(front.triangle_count, uint32_t(NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) - part_tris);
+				LegacySlice slice;
+				slice.surface = front.surface;
+				slice.first_triangle = front.first_triangle;
+				slice.triangle_count = take;
+				part_legacy.push_back(slice);
+				part_tris += take;
+				front.first_triangle += take;
+				front.triangle_count -= take;
+				if (front.triangle_count == 0) {
+					legacy_head++;
+				}
+			}
+		}
+
+		if (proxy_ranges.is_empty() && part_legacy.is_empty()) {
+			continue;
+		}
+		if (!emit_part(v_off, v_cnt, i_off, i_cnt, proxy_ranges, part_legacy)) {
+			return rollback();
+		}
+	}
+
+	// Emit any remaining outside-mask legacy slices as trailing <= 128k parts.
+	while (legacy_head < legacy_queue.size()) {
+		LocalVector<ProxyRange> empty_proxy;
+		LocalVector<LegacySlice> part_legacy;
+		uint32_t part_tris = 0;
+		while (legacy_head < legacy_queue.size() && part_tris < NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+			LegacySlice &front = legacy_queue[legacy_head];
+			if (part_tris > 0 && front.first_triangle == 0 && front.triangle_count <= NEXTGI_RT_MAX_TRIANGLES_PER_BLAS && part_tris + front.triangle_count > NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) {
+				break;
+			}
+			const uint32_t take = MIN(front.triangle_count, uint32_t(NEXTGI_RT_MAX_TRIANGLES_PER_BLAS) - part_tris);
+			LegacySlice slice;
+			slice.surface = front.surface;
+			slice.first_triangle = front.first_triangle;
+			slice.triangle_count = take;
+			part_legacy.push_back(slice);
+			part_tris += take;
+			front.first_triangle += take;
+			front.triangle_count -= take;
+			if (front.triangle_count == 0) {
+				legacy_head++;
+			}
+		}
+		if (!emit_part(0, 0, 0, 0, empty_proxy, part_legacy)) {
+			return rollback();
+		}
+	}
+
+	return !r_uploads.is_empty();
 }
 
 void nextgi_rt_split_parts(const uint32_t *p_triangle_counts, const uint32_t *p_chunks, uint32_t p_surface_count, uint32_t p_max_triangles_per_part, LocalVector<NextGIRTPartPlan> &r_parts) {
@@ -626,11 +939,14 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 		part.blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(geometries.ptr(), geometries.size()), flags);
 		if (part.blas.is_valid()) {
 			RD::get_singleton()->blas_build(part.blas);
+			part.uncompacted_bytes = RD::get_singleton()->acceleration_structure_get_size_bytes(part.blas);
 			stats.blas_build_count++;
 			stats.blas_build_triangles += plan.triangle_count;
 			if (!dynamic) {
 				PendingCompact pending;
 				pending.blas = part.blas;
+				pending.mesh = p_mesh;
+				pending.part_index = uint32_t(parts->size());
 				pending.triangles = plan.triangle_count;
 				pending_compactions.push_back(pending);
 			}
@@ -639,6 +955,68 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	}
 	mesh_storage->mesh_nextgi_rt_set_allows_update(p_mesh, dynamic);
 	mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
+}
+
+void NextGIRTScene::_build_proxy_part(RID p_mesh, uint32_t p_part_index) {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh) || RD::get_singleton() == nullptr) {
+		return;
+	}
+	LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
+	if (parts == nullptr || p_part_index >= parts->size()) {
+		return;
+	}
+	MeshStorage::NextGIRTPart &part = (*parts)[p_part_index];
+	if (!part.is_proxy || part.blas.is_valid() || part.geometries.is_empty() || part.chunk == UINT32_MAX) {
+		return;
+	}
+	const RID chunk_buffer = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(part.chunk);
+	ERR_FAIL_COND(chunk_buffer.is_null());
+
+	LocalVector<RD::AccelerationStructureGeometry> geometries;
+	geometries.reserve(part.geometries.size());
+	for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+		RD::AccelerationStructureGeometry geometry;
+		geometry.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
+		geometry.vertex_buffer = chunk_buffer;
+		geometry.vertex_offset = part_geometry.vertex_offset;
+		geometry.vertex_stride = sizeof(float) * 3;
+		geometry.vertex_count = part_geometry.vertex_count;
+		geometry.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+		geometry.index_buffer = chunk_buffer;
+		geometry.index_offset = part_geometry.index_offset;
+		geometry.index_count = part_geometry.triangle_count * 3;
+		geometry.index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+		geometries.push_back(geometry);
+	}
+
+	const BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT | RD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT;
+	part.blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(geometries.ptr(), geometries.size()), flags);
+	if (part.blas.is_valid()) {
+		RD::get_singleton()->blas_build(part.blas);
+		part.uncompacted_bytes = RD::get_singleton()->acceleration_structure_get_size_bytes(part.blas);
+		part.compacted = false;
+		stats.blas_build_count++;
+		stats.blas_build_triangles += part.triangle_count;
+		PendingCompact pending;
+		pending.blas = part.blas;
+		pending.mesh = p_mesh;
+		pending.part_index = p_part_index;
+		pending.triangles = part.triangle_count;
+		pending_compactions.push_back(pending);
+	}
+
+	bool all_built = true;
+	for (const MeshStorage::NextGIRTPart &check : *parts) {
+		if (!check.geometries.is_empty() && check.blas.is_null()) {
+			all_built = false;
+			break;
+		}
+	}
+	if (all_built) {
+		mesh_storage->mesh_nextgi_rt_set_allows_update(p_mesh, false);
+		mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
+	}
 }
 
 RID NextGIRTScene::build_far_proxy_mesh(RID p_mesh) {
@@ -681,25 +1059,34 @@ bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_insta
 		return false;
 	}
 	record.tlas_index = r_records.size();
-	if (NextGIRelight::get_singleton() != nullptr) {
-		record.page_table = NextGIRelight::get_singleton()->assign_pages(p_instance, record);
-	}
 	float eps_rt = 0.0f;
 	for (const NextGIRTPartGeometry &geometry : part.geometries) {
-		MeshStorage::NextGIRTSurfaceInfo info;
-		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, geometry.surface, info)) {
-			return false;
-		}
-		record.arena_chunk = info.chunk;
-		eps_rt = MAX(eps_rt, info.eps);
 		NextGISurfaceRecord surface;
-		surface.vertex_offset = info.vertex_offset;
-		surface.index_offset = info.index_offset + geometry.first_triangle * 3 * sizeof(uint32_t);
-		surface.triangle_count = geometry.triangle_count;
+		if (geometry.is_proxy_surface) {
+			record.arena_chunk = part.chunk;
+			eps_rt = MAX(eps_rt, geometry.eps);
+			surface.vertex_offset = geometry.vertex_offset;
+			surface.index_offset = geometry.index_offset;
+			surface.triangle_count = geometry.triangle_count;
+			surface.flags = geometry.has_stage2_cards ? (NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | geometry.group_offset) : 0u;
+		} else {
+			MeshStorage::NextGIRTSurfaceInfo info;
+			if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, geometry.surface, info)) {
+				return false;
+			}
+			record.arena_chunk = info.chunk;
+			eps_rt = MAX(eps_rt, info.eps);
+			surface.vertex_offset = info.vertex_offset;
+			surface.index_offset = info.index_offset + geometry.first_triangle * 3 * sizeof(uint32_t);
+			surface.triangle_count = geometry.triangle_count;
+		}
 		r_surfaces.push_back(surface);
 	}
 	const Vector3 scale = p_transform.basis.get_scale_abs();
 	record.origin_offset = nextgi_rt_origin_offset(eps_rt, MAX(scale.x, MAX(scale.y, scale.z)));
+	if (NextGIRelight::get_singleton() != nullptr) {
+		record.page_table = NextGIRelight::get_singleton()->assign_pages(p_instance, record);
+	}
 	r_records.push_back(record);
 	r_tlas_instance.transform = p_transform;
 	r_tlas_instance.id = record.tlas_index;
@@ -989,6 +1376,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 
 		const Transform3D transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
 		bool entered_tlas = false;
+		uint32_t first_rt_fields[6] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, 0u, UINT32_MAX, UINT32_MAX };
+		const bool has_vgd_cards = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh) != nullptr && !RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh)->card_descriptors.is_empty();
 		const Vector3 scale = transform.basis.get_scale_abs();
 		const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
 		for (const MeshStorage::NextGIRTPart &part : *parts) {
@@ -1019,26 +1408,47 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			if (record.card_set == UINT32_MAX) {
 				record.card_set = NextGISRC::get_mesh_card_set(mesh);
 			}
-			if (NextGIRelight::get_singleton() != nullptr) {
-				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
-			}
 
 			float eps_rt = 0.0f;
+			uint32_t first_vertex_offset = 0;
+			bool have_first_vertex_offset = false;
 			for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
-				MeshStorage::NextGIRTSurfaceInfo info;
-				if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, part_geometry.surface, info)) {
-					continue;
-				}
-				record.arena_chunk = info.chunk;
-				eps_rt = MAX(eps_rt, info.eps);
 				NextGISurfaceRecord surface_record;
-				surface_record.vertex_offset = info.vertex_offset;
-				surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
-				surface_record.triangle_count = part_geometry.triangle_count;
-				surface_record.flags = 0;
+				if (part_geometry.is_proxy_surface) {
+					record.arena_chunk = part.chunk;
+					eps_rt = MAX(eps_rt, part_geometry.eps);
+					surface_record.vertex_offset = part_geometry.vertex_offset;
+					surface_record.index_offset = part_geometry.index_offset;
+					surface_record.triangle_count = part_geometry.triangle_count;
+					if (part_geometry.has_stage2_cards) {
+						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS | part_geometry.group_offset;
+					} else if (has_vgd_cards) {
+						surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
+					} else {
+						surface_record.flags = 0;
+					}
+				} else {
+					MeshStorage::NextGIRTSurfaceInfo info;
+					if (!mesh_storage->mesh_nextgi_rt_get_surface_info(mesh, part_geometry.surface, info)) {
+						continue;
+					}
+					record.arena_chunk = info.chunk;
+					eps_rt = MAX(eps_rt, info.eps);
+					surface_record.vertex_offset = info.vertex_offset;
+					surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
+					surface_record.triangle_count = part_geometry.triangle_count;
+					surface_record.flags = 0;
+				}
+				if (!have_first_vertex_offset) {
+					first_vertex_offset = surface_record.vertex_offset;
+					have_first_vertex_offset = true;
+				}
 				surface_records.push_back(surface_record);
 			}
 			record.origin_offset = nextgi_rt_origin_offset(eps_rt, max_scale);
+			if (NextGIRelight::get_singleton() != nullptr) {
+				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
+			}
 			instance_records.push_back(record);
 			if (RSG::rasterizer != nullptr) {
 				mesh_last_tlas_frame[mesh] = RSG::rasterizer->get_frame_number();
@@ -1056,10 +1466,24 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			if (geometry_instance->nextgi_record_index == UINT32_MAX) {
 				geometry_instance->nextgi_record_index = record_index;
 			}
+			if (!entered_tlas) {
+				first_rt_fields[0] = record_index;
+				first_rt_fields[1] = uint32_t(part.blas.get_local_index());
+				first_rt_fields[2] = record.arena_chunk;
+				first_rt_fields[3] = first_vertex_offset;
+				first_rt_fields[4] = record.page_table;
+				first_rt_fields[5] = record.card_set;
+			}
 			entered_tlas = true;
+		}
+		if (geometry_instance->nextgeo_record_index != UINT32_MAX && RSG::virtual_mesh_storage != nullptr && fed.element_index == 0) {
+			RSG::virtual_mesh_storage->instance_record_set_rt(geometry_instance->nextgeo_record_index, first_rt_fields);
+			RSG::virtual_mesh_storage->instance_record_set_rt_flags(geometry_instance->nextgeo_record_index, entered_tlas ? RendererVirtualMeshStorage::RECORD_RT_STATIC : 0u);
 		}
 		if (entered_tlas) {
 			stats.coverage.numerator++;
+		} else if (!blas_dirty && parts->is_empty() && mesh_storage->mesh_nextgi_get_proxy_alpha_excluded(mesh) > 0) {
+			stats.coverage.alpha_excluded += mesh_storage->mesh_nextgi_get_proxy_alpha_excluded(mesh);
 		} else {
 			stats.coverage.blas_pending++;
 		}
@@ -1274,33 +1698,75 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 	const uint64_t ticks_start = OS::get_singleton() != nullptr ? OS::get_singleton()->get_ticks_usec() : 0;
 	const uint32_t spent_triangles = compaction_triangles_this_frame;
 
-	// New BLASes first, then the largest angular radius. A mesh that does not fit stays dirty.
-	HashMap<RID, NextGIBuildItem> unique;
-	LocalVector<RID> meshes;
-	uint32_t next_id = 0;
+	// New BLASes first, then the largest angular radius. A mesh or proxy part that does not fit stays dirty.
+	struct BuildTarget {
+		RID mesh;
+		uint32_t part_index = UINT32_MAX; // UINT32_MAX = legacy whole-mesh build; else single VGD proxy part.
+	};
+	HashMap<RID, float> max_angular;
+	LocalVector<RID> dirty_meshes;
 	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
 		RenderGeometryInstanceBase *geometry_instance = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
 		if (geometry_instance == nullptr || geometry_instance->data == nullptr) {
 			continue;
 		}
 		const RID mesh = fed.mesh_override.is_valid() ? fed.mesh_override : geometry_instance->data->base;
-		if (!mesh_storage->owns_mesh(mesh) || !mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
+		if (!mesh_storage->owns_mesh(mesh)) {
+			continue;
+		}
+		if (RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(mesh)) {
+			mesh_storage->mesh_nextgi_sync_vgd_proxy(mesh);
+		}
+		if (!mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh)) {
 			continue;
 		}
 		if (mesh_storage->mesh_nextgi_rt_is_dynamic(mesh) && mesh_storage->mesh_nextgi_rt_allows_update(mesh)) {
 			// Line 1a already refit this mesh, or excluded it past the refit cap.
 			continue;
 		}
-		if (unique.has(mesh)) {
-			NextGIBuildItem &item = unique[mesh];
-			item.angular_radius = MAX(item.angular_radius, fed.angular_radius);
+		if (float *existing = max_angular.getptr(mesh)) {
+			*existing = MAX(*existing, fed.angular_radius);
+		} else {
+			max_angular.insert(mesh, fed.angular_radius);
+			dirty_meshes.push_back(mesh);
+		}
+	}
+
+	LocalVector<BuildTarget> targets;
+	LocalVector<NextGIBuildItem> items;
+	for (const RID &mesh : dirty_meshes) {
+		const float angular = max_angular[mesh];
+		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
+		const bool is_proxy_mesh = parts != nullptr && !parts->is_empty() && (*parts)[0].is_proxy;
+		if (is_proxy_mesh) {
+			bool any_pending_part = false;
+			for (uint32_t p = 0; p < parts->size(); p++) {
+				const MeshStorage::NextGIRTPart &part = (*parts)[p];
+				if (part.geometries.is_empty() || part.blas.is_valid()) {
+					continue;
+				}
+				any_pending_part = true;
+				NextGIBuildItem item;
+				item.id = targets.size();
+				item.triangles = part.triangle_count;
+				item.angular_radius = angular;
+				item.is_new = true;
+				BuildTarget target;
+				target.mesh = mesh;
+				target.part_index = p;
+				targets.push_back(target);
+				items.push_back(item);
+			}
+			if (!any_pending_part) {
+				mesh_storage->mesh_nextgi_rt_set_blas_dirty(mesh, false);
+			}
 			continue;
 		}
+
 		NextGIBuildItem item;
-		item.id = next_id++;
+		item.id = targets.size();
 		item.triangles = _mesh_triangle_count(mesh);
-		item.angular_radius = fed.angular_radius;
-		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
+		item.angular_radius = angular;
 		item.is_new = parts == nullptr || parts->is_empty();
 		if (!item.is_new) {
 			item.is_new = true;
@@ -1311,31 +1777,27 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 				}
 			}
 		}
-		unique.insert(mesh, item);
-		meshes.push_back(mesh);
+		BuildTarget target;
+		target.mesh = mesh;
+		target.part_index = UINT32_MAX;
+		targets.push_back(target);
+		items.push_back(item);
 	}
 
-	LocalVector<NextGIBuildItem> items;
-	items.resize(meshes.size());
-	for (uint32_t i = 0; i < meshes.size(); i++) {
-		items[unique[meshes[i]].id] = unique[meshes[i]];
-	}
 	LocalVector<uint32_t> accepted_ids;
 	accepted_ids.resize(items.size());
 	uint32_t scheduled_triangles = 0;
 	const uint32_t triangle_budget = spent_triangles >= uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP) ? 0 : uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP) - spent_triangles;
 	const uint32_t accepted_count = nextgi_rt_schedule_builds(items.ptr(), items.size(), triangle_budget, accepted_ids.ptr(), accepted_ids.size(), scheduled_triangles);
-	HashMap<uint32_t, bool> accepted;
 	for (uint32_t i = 0; i < accepted_count; i++) {
-		accepted.insert(accepted_ids[i], true);
-	}
-	for (const RID &mesh : meshes) {
-		if (!accepted.has(unique[mesh].id)) {
-			continue;
+		const BuildTarget &target = targets[accepted_ids[i]];
+		if (target.part_index != UINT32_MAX) {
+			_build_proxy_part(target.mesh, target.part_index);
+		} else {
+			_build_dirty_mesh_parts(target.mesh);
+			// Rebuilding a BLAS that this frame's TLAS already references invalidates that TLAS.
+			tlas_traceable = false;
 		}
-		_build_dirty_mesh_parts(mesh);
-		// Rebuilding a BLAS that this frame's TLAS already references invalidates that TLAS.
-		tlas_traceable = false;
 	}
 
 	uint64_t frame = 0;
@@ -1352,13 +1814,24 @@ void NextGIRTScene::compact_after_traces() {
 	if (tlas.is_null() || RD::get_singleton() == nullptr || pending_compactions.is_empty()) {
 		return;
 	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	LocalVector<PendingCompact> deferred;
 	for (const PendingCompact &pending : pending_compactions) {
+		LocalVector<MeshStorage::NextGIRTPart> *parts = nullptr;
+		if (pending.mesh.is_valid()) {
+			parts = (mesh_storage != nullptr && mesh_storage->owns_mesh(pending.mesh)) ? mesh_storage->mesh_nextgi_rt_get_parts(pending.mesh) : nullptr;
+			if (parts == nullptr || pending.part_index >= parts->size() || (*parts)[pending.part_index].blas != pending.blas) {
+				continue;
+			}
+		}
 		if (compaction_triangles_this_frame + pending.triangles > uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP)) {
 			deferred.push_back(pending);
 			continue;
 		}
 		if (RD::get_singleton()->blas_compact(pending.blas) == OK) {
+			if (parts != nullptr && pending.part_index < parts->size()) {
+				(*parts)[pending.part_index].compacted = true;
+			}
 			stats.compaction_copies++;
 			compaction_triangles_this_frame += pending.triangles;
 			// The copy completes on a later device frame and invalidates this TLAS.

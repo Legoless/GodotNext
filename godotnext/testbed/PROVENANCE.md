@@ -268,3 +268,23 @@ Every entry below is original content generated in this repository, with no thir
 | `scenes/upscaler_torture/emissive_stripes.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
 | `scenes/upscaler_torture/wire_2mm.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
 | `scenes/upscaler_torture/character_mesh.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
+
+
+## Virtualized G5-6 Scenes (#77)
+
+Every entry below is original procedural content generated in this repository for G5-6 (virtualized copies of Color Box Room A, B, off-screen light, ≥40 m single-mesh hall with 10 cm interior walls, and Concave Courtyard, imported with `meshes/generate_virtual_geometry=true`). License: MIT; date: 2026-11-08; host: the Apple M5 Max.
+
+| Path | Generator / author | License | Date | Host |
+|---|---|---|---|---|
+| `generators/build_g5_6_vg.gd` | hand-authored for #77 step 8 | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/color_box_room/vg_meshes/*.glb` (+ `.import`, 10 files) | `generators/build_g5_6_vg.gd --phase=assets` + `--headless --import` | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_single_40m_vg.glb` (+ `.import`) | `generators/build_g5_6_vg.gd --phase=assets` + `--headless --import` | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/concave_courtyard/courtyard_vg.glb` (+ `.import`) | `generators/build_g5_6_vg.gd --phase=assets` + `--headless --import` | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_a_vg.tscn` (+ `_patches_q1.json`, `_patches_q3.json`) | `generators/build_g5_6_vg.gd --phase=scenes`, seed `0x6E657874` stream 1 | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_b_vg.tscn` (+ `_patches_q1.json`, `_patches_q3.json`) | `generators/build_g5_6_vg.gd --phase=scenes`, seed `0x6E657874` stream 2 | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_offscreen_vg.tscn` (+ `_patches_q1.json`, `_patches_q3.json`) | `generators/build_g5_6_vg.gd --phase=scenes`, seed `0x6E657874` stream 3 | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/color_box_room/cbr_single_40m_vg.tscn` (+ `_patches_q1.json`, `_patches_q3.json`) | `generators/build_g5_6_vg.gd --phase=scenes`, seed `0x6E657874` stream 5 | MIT | 2026-11-08 | the Apple M5 Max |
+| `scenes/concave_courtyard/courtyard_vg.tscn` (+ `_patches_q1.json`) | `generators/build_g5_6_vg.gd --phase=scenes`, seed `0x6E657874` stream 6 | MIT | 2026-11-08 | the Apple M5 Max |
+| `tests/nextgeo_nextgi/nextgeo_nextgi_check.tscn` | hand-authored for #77 | MIT | 2026-11-08 | the Apple M5 Max |
+| `tests/nextgeo_nextgi/nextgeo_nextgi_check.gd` | hand-authored for #77 | MIT | 2026-11-08 | the Apple M5 Max |
+| `tests/nextgeo_nextgi/run_nextgeo_nextgi_check.sh` | hand-authored for #77 | MIT | 2026-11-08 | the Apple M5 Max |

@@ -11,7 +11,7 @@
 	</tutorials>
 	<members>
 		<member name="card_descriptors" type="PackedByteArray" setter="set_card_descriptors" getter="get_card_descriptors" default="PackedByteArray()">
-			Impostor card descriptors. Empty until cards are generated.
+			Packed 32-byte little-endian Stage-2 surface radiance cache card descriptors generated from the ray-tracing proxy cluster groups.
 		</member>
 		<member name="cluster_count" type="int" setter="set_cluster_count" getter="get_cluster_count" default="0">
 			Number of clusters in the DAG.
@@ -25,8 +25,8 @@
 		<member name="dag_header" type="PackedByteArray" setter="set_dag_header" getter="get_dag_header" default="PackedByteArray()">
 			Little-endian cluster groups followed by the bounding-volume hierarchy nodes.
 		</member>
-		<member name="format_version" type="int" setter="set_format_version" getter="get_format_version" default="1">
-			Resource layout version. The current version is [code]1[/code].
+		<member name="format_version" type="int" setter="set_format_version" getter="get_format_version" default="2">
+			Resource layout version. The current version is [code]2[/code].
 		</member>
 		<member name="group_count" type="int" setter="set_group_count" getter="get_group_count" default="0">
 			Number of cluster groups in the DAG.
@@ -66,6 +66,9 @@
 		</member>
 		<member name="rt_proxy_surface_ranges" type="PackedInt32Array" setter="set_rt_proxy_surface_ranges" getter="get_rt_proxy_surface_ranges" default="PackedInt32Array()">
 			Groups of two integers per part and surface, part-major and relative to that part: first index and index count. Legacy surfaces store a first index and a count of 0.
+		</member>
+		<member name="rt_proxy_triangle_groups" type="PackedByteArray" setter="set_rt_proxy_triangle_groups" getter="get_rt_proxy_triangle_groups" default="PackedByteArray()">
+			Little-endian unsigned 16-bit cluster-group identifiers for each triangle of the ray-tracing proxy, two bytes per triangle in part and surface order.
 		</member>
 		<member name="skin_influences" type="int" setter="set_skin_influences" getter="get_skin_influences" default="0">
 			Bone influences stored per vertex in the page file skinning section: 0 for an unskinned mesh, otherwise 4 or 8.

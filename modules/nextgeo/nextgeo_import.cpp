@@ -41,7 +41,7 @@
 #include "scene/resources/3d/virtual_geometry_data.h"
 #include "scene/resources/mesh.h"
 
-// Card descriptors stay empty until P5. The fixed RT proxy is filled below.
+// Stage-2 card descriptors and the fixed RT proxy are filled below.
 
 // Bounds of every source surface, ineligible and non-triangle surfaces included.
 // eps_rt uses this AABB, so a large legacy surface still bounds the proxy error.

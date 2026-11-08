@@ -38,6 +38,7 @@
 #include "core/templates/vector.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
+#include "servers/rendering/rendering_server_types.h"
 
 class RenderDataRD;
 class RenderGeometryInstance;
@@ -68,9 +69,12 @@ enum NextGIInstanceRTFlags {
 };
 
 // NextGISurfaceRecord::flags (plan §6.3 hit record). Bits 8-31 carry the bind-pose vertex
-// offset of a skinned slot in NEXTGI_RT_ALIGNMENT units, so the record stays 16 bytes.
+// offset of a skinned slot in NEXTGI_RT_ALIGNMENT units, or bits 4-31 carry the 16-byte-aligned
+// byte offset of a VGD Stage-2 triangle-group slice, so the record stays 16 bytes.
 enum NextGISurfaceRTFlags {
 	NEXTGI_RT_SURFACE_FLAG_SKINNED = 1 << 0,
+	NEXTGI_RT_SURFACE_FLAG_STAGE2_CARDS = 1 << 1,
+	NEXTGI_RT_SURFACE_FLAG_NO_CARDS = 1 << 2,
 };
 
 // std430 GPU records. The sizes are part of the §6.3 contract; do not repack them.
@@ -151,6 +155,7 @@ private:
 
 	uint32_t chunk_size = NEXTGI_RT_CHUNK_SIZE;
 	uint32_t chunk_count = 0;
+	uint64_t allocated_bytes = 0;
 	LocalVector<FreeRange> free_ranges;
 
 public:
@@ -163,6 +168,7 @@ public:
 
 	uint32_t get_chunk_size() const { return chunk_size; }
 	uint32_t get_chunk_count() const { return chunk_count; }
+	uint64_t get_allocated_bytes() const { return allocated_bytes; }
 };
 
 // One BLAS geometry: a whole surface, or a triangle slice of a surface over the BLAS cap.
@@ -170,7 +176,47 @@ struct NextGIRTPartGeometry {
 	uint32_t surface = 0;
 	uint32_t first_triangle = 0;
 	uint32_t triangle_count = 0;
+	// GodotNext: nextgeo_nextgi (#77). Self-contained arena offsets for VGD proxy parts and any
+	// outside-mask legacy surfaces packed into the proxy part allocation.
+	bool is_proxy_surface = false;
+	bool has_stage2_cards = false;
+	uint32_t vertex_offset = 0;
+	uint32_t vertex_count = 0;
+	uint32_t index_offset = 0;
+	uint32_t group_offset = 0;
+	float eps = 0.0f;
 };
+
+// GodotNext: nextgeo_nextgi (#77). Pure CPU planner for VGD proxy arena upload and BLAS part
+// splits, gated on HWRT tier active, SUPPORTS_RAY_QUERY, and live_instances > 0.
+struct NextGIRTLegacySurfaceInput {
+	const float *positions = nullptr;
+	uint32_t vertex_count = 0;
+	const uint32_t *indices = nullptr;
+	uint32_t index_count = 0;
+	float eps = 0.0f;
+};
+
+struct NextGIRTProxyPartUpload {
+	NextGIArenaAllocator::Allocation allocation;
+	uint32_t triangle_count = 0;
+	uint32_t first_surface = 0;
+	uint32_t surface_count = 0;
+	LocalVector<NextGIRTPartGeometry> geometries;
+	Vector<uint8_t> payload;
+};
+
+bool nextgi_rt_plan_vgd_proxy(
+		bool p_hwrt_tier_active,
+		bool p_has_ray_query,
+		uint32_t p_live_instances,
+		const RenderingServerTypes::VirtualGeometryDesc &p_desc,
+		uint32_t p_mesh_surface_count,
+		const uint8_t *p_alpha_excluded_surfaces,
+		const NextGIRTLegacySurfaceInput *p_legacy_surfaces,
+		NextGIArenaAllocator &r_allocator,
+		LocalVector<NextGIRTProxyPartUpload> &r_uploads,
+		uint32_t &r_alpha_excluded_count);
 
 // A planned BLAS part. Whole surfaces are packed first; a surface alone over the cap is split by
 // triangles, never coarsened (D13). A part never spans arena chunks, so its instance record can
@@ -410,6 +456,8 @@ public:
 private:
 	struct PendingCompact {
 		RID blas;
+		RID mesh;
+		uint32_t part_index = UINT32_MAX;
 		uint32_t triangles = 0;
 	};
 
@@ -449,6 +497,7 @@ private:
 	uint64_t as_budget_bytes = NEXTGI_RT_AS_BUDGET_BYTES;
 
 	void _build_dirty_mesh_parts(RID p_mesh);
+	void _build_proxy_part(RID p_mesh, uint32_t p_part_index);
 	void _ensure_record_buffers(uint32_t p_instance_count, uint32_t p_surface_count);
 	uint32_t _mesh_triangle_count(RID p_mesh) const;
 	void _apply_as_budget(uint64_t p_frame);

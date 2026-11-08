@@ -103,6 +103,7 @@ Ref<VirtualGeometryData> filled_data() {
 	data->set_surface_fallback_reasons(PackedInt32Array({ 0, 0 }));
 	data->set_rt_proxy_positions(PackedFloat32Array({ 1.0f, 2.0f, 3.0f }));
 	data->set_rt_proxy_indices(PackedByteArray({ 4, 0, 0, 0 }));
+	data->set_rt_proxy_triangle_groups(PackedByteArray({ 7, 0 }));
 	data->set_rt_proxy_eps(0.25f);
 	data->set_rt_proxy_error(1.5f);
 	data->set_ngm_path("res://mesh.ngm");
@@ -196,6 +197,7 @@ TEST_CASE("[NextGeo][VGD] Loading surfaces keeps the data, and a saved mesh relo
 		CHECK(loaded_data->get_surface_fallback_reasons()[0] == 0);
 		CHECK(loaded_data->get_rt_proxy_positions() == data->get_rt_proxy_positions());
 		CHECK(loaded_data->get_rt_proxy_indices() == data->get_rt_proxy_indices());
+		CHECK(loaded_data->get_rt_proxy_triangle_groups() == data->get_rt_proxy_triangle_groups());
 		CHECK(loaded_data->get_rt_proxy_eps() == doctest::Approx(0.25f));
 		CHECK(loaded_data->get_rt_proxy_error() == doctest::Approx(1.5f));
 		CHECK(loaded_data->get_ngm_path() == data->get_ngm_path());
@@ -248,7 +250,8 @@ TEST_CASE("[NextGeo][VGD] Build output fills the resource and a deterministic .n
 	Ref<VirtualGeometryData> data;
 	data.instantiate();
 	REQUIRE(nextgeo_fill_vgd(input, output, payloads, data) == OK);
-	CHECK(data->get_format_version() == 1);
+	CHECK(data->get_format_version() == VirtualGeometryData::FORMAT_VERSION);
+	CHECK(VirtualGeometryData::FORMAT_VERSION == 2);
 	CHECK(data->get_page_size() == NGM_PROVISIONAL_PAGE_SIZE);
 	CHECK(data->get_page_count() == int64_t(output.pages.size()));
 	CHECK(data->get_cluster_count() == int64_t(output.clusters.size()));

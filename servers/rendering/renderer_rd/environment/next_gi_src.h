@@ -265,6 +265,7 @@ public:
 		float capture_cpu_ms = 0.0f;
 		uint32_t material_capture_count = 0; // Distinct (mesh, material) keys.
 		uint32_t emissive_below_card_res = 0; // Emissive surfaces under 4 card texels (#60).
+		uint32_t stage2_captured_card_count = 0; // GodotNext: nextgi_nextgeo (#77).
 	};
 
 private:
@@ -287,6 +288,14 @@ private:
 		bool released = false;
 		// GodotNext: nextgi_emissive_contract (#60). Longest axis of each surface, keyed by surface.
 		HashMap<uint32_t, float> surface_extents;
+		// GodotNext: nextgi_nextgeo (#77). Per-card (group, axis) proxy meshes + instances for Stage-2 card capture.
+		bool is_stage2 = false;
+		LocalVector<uint16_t> card_groups;
+		LocalVector<uint8_t> card_axes;
+		LocalVector<RID> proxy_meshes;
+		LocalVector<RenderGeometryInstance *> proxy_instances;
+		RID material_override;
+		Vector<RID> surface_materials;
 	};
 
 	NextGIShelfPacker packer;
@@ -313,6 +322,9 @@ private:
 
 	void _create_atlas();
 	bool _build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards = false);
+	bool _build_stage2_card_set(RID p_mesh, uint64_t p_key);
+	bool _ensure_stage2_proxy_instances(CardSetState &r_state);
+	void _release_stage2_proxy_instances(CardSetState &r_state);
 	void _check_emissive_contract(RenderGeometryInstance *p_instance, uint32_t p_set_index);
 	void _upload_gpu_data();
 	void _request_dump();
