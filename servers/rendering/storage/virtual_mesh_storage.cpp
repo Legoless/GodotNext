@@ -744,7 +744,6 @@ uint32_t RendererVirtualMeshStorage::mesh_clear_reason(RID p_mesh) const {
 }
 
 uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RID p_mesh) {
-	(void)p_instance;
 	if (!_can_allocate_record()) {
 		return UINT32_MAX;
 	}
@@ -763,6 +762,7 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 	record = Record();
 	record.bucket_base = slot * 32u;
 	SlotState &state = slot_states[slot];
+	state.instance = p_instance;
 	state.allocated = true;
 	state.dirty = true;
 	state.dirty_last = false;
@@ -787,6 +787,7 @@ void RendererVirtualMeshStorage::instance_record_free(uint32_t p_record) {
 		return;
 	}
 	SlotState &state = slot_states[p_record];
+	state.instance = RID();
 	state.allocated = false;
 	state.dirty = true;
 	state.dirty_last = false;
@@ -861,7 +862,10 @@ void RendererVirtualMeshStorage::instance_record_set_state(uint32_t p_record, ui
 		return;
 	}
 	Record &record = records[p_record];
-	const uint32_t keep = record.flags & (RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED);
+	uint32_t keep = record.flags & (RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED);
+	if ((p_flags & RECORD_VISIBLE) == 0u) {
+		keep &= ~RECORD_VISIBLE;
+	}
 	record.flags = keep | (p_flags & ~(RECORD_VALID | RECORD_VISIBLE | RECORD_MOVED | RECORD_TELEPORTED));
 	_mark_dirty(p_record);
 }
@@ -891,6 +895,26 @@ void RendererVirtualMeshStorage::instance_record_set_surface_mask(uint32_t p_rec
 	}
 	records[p_record].surface_mask = p_surface_mask;
 	_mark_dirty(p_record);
+}
+
+void RendererVirtualMeshStorage::instance_record_set_surface_cull_masks(uint32_t p_record, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	Record &record = records[p_record];
+	if (record.pad1[0] == p_cull_disabled_mask && record.pad1[1] == p_cull_front_mask) {
+		return;
+	}
+	record.pad1[0] = p_cull_disabled_mask;
+	record.pad1[1] = p_cull_front_mask;
+	_mark_dirty(p_record);
+}
+
+RID RendererVirtualMeshStorage::instance_record_get_instance(uint32_t p_record) const {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return RID();
+	}
+	return slot_states[p_record].instance;
 }
 
 void RendererVirtualMeshStorage::instance_record_set_rt(uint32_t p_record, const uint32_t p_rt_fields[6]) {
@@ -939,13 +963,44 @@ void RendererVirtualMeshStorage::begin_frame() {
 	free_next.clear();
 }
 
-void RendererVirtualMeshStorage::flush() {
+void RendererVirtualMeshStorage::process_streaming() {
 	if (streamed_frame != frame) {
 		_process_streaming_frame();
 		streamed_frame = frame;
-	} else if (residency_layout_dirty) {
-		_rebuild_residency_gpu_table();
+		return;
 	}
+	if (residency_layout_dirty) {
+		_rebuild_residency_gpu_table();
+	} else if (residency_data_dirty) {
+		for (const uint32_t &mesh_idx : residency_changed_meshes) {
+			if (mesh_idx < mesh_order.size()) {
+				const MeshInfo *info = meshes.getptr(mesh_order[mesh_idx]);
+				if (info != nullptr) {
+					_sync_residency_gpu_mesh(*info);
+				}
+			}
+		}
+		residency_data_dirty = false;
+	}
+	if (!residency_changed_meshes.is_empty()) {
+		bool added = false;
+		for (uint32_t slot = 0; slot < used_slots; slot++) {
+			if (slot_states[slot].allocated && residency_changed_meshes.has(records[slot].virtual_mesh)) {
+				if (!residency_changed_records.has(slot)) {
+					residency_changed_records.push_back(slot);
+					added = true;
+				}
+			}
+		}
+		residency_changed_meshes.clear();
+		if (added) {
+			residency_event_epoch++;
+		}
+	}
+}
+
+void RendererVirtualMeshStorage::flush() {
+	process_streaming();
 
 	// A record that changed last frame and not this one needs one rewrite so
 	// prev holds last frame's cur, not the frame before the last change.
@@ -2236,7 +2291,6 @@ void RendererVirtualMeshStorage::_sync_residency_gpu_mesh(const MeshInfo &p_info
 }
 
 void RendererVirtualMeshStorage::_process_streaming_frame() {
-	residency_changed_meshes.clear();
 	residency_changed_records.clear();
 	last_frame_upload_bytes = 0;
 
@@ -2406,12 +2460,16 @@ void RendererVirtualMeshStorage::_process_streaming_frame() {
 		residency_data_dirty = false;
 	}
 
-	// Publish instance record slots whose virtual mesh changed its resident page set (#78 step 7).
+	// Publish instance record slots whose virtual mesh changed its resident page set (#78 step 7, #82).
 	if (!residency_changed_meshes.is_empty()) {
 		for (uint32_t slot = 0; slot < used_slots; slot++) {
 			if (slot_states[slot].allocated && residency_changed_meshes.has(records[slot].virtual_mesh)) {
 				residency_changed_records.push_back(slot);
 			}
+		}
+		residency_changed_meshes.clear();
+		if (!residency_changed_records.is_empty()) {
+			residency_event_epoch++;
 		}
 	}
 }

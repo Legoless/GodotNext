@@ -811,4 +811,90 @@ TEST_CASE("[NextGeo][Residency] Q15 memory report and routing counters surface")
 	CHECK_EQ(int64_t(routing["evictions_with_resident_child"]), 0);
 }
 
+TEST_CASE("[NextGeo][Residency][Shadow] Residency epoch, instance lookup, and surface cull masks") {
+	using namespace TestNextGeoResidency;
+
+	LocalVector<uint32_t> groups;
+	groups.push_back(0u);
+	groups.push_back(1u);
+	Vector<Vector<uint8_t>> pages;
+	pages.resize(2);
+	pages.write[0] = make_synthetic_raw_page(1);
+	pages.write[1] = make_synthetic_raw_page(-1, 0.0f);
+
+	RenderingServerTypes::VirtualGeometryDesc desc;
+	desc.dag_header = make_synthetic_dag_header(groups);
+	desc.root_pages.push_back(pages[0]);
+	desc.eligible_surface_mask = 1u;
+	desc.vertex_layout = 1u;
+	desc.page_size = 256u;
+	desc.page_count = 2u;
+
+	MockVirtualMeshStorage storage;
+	storage.set_page_arena_bytes_override(16u * 256u);
+	storage.set_page_upload_bytes_per_frame_override(200u);
+
+	const RID mesh = make_test_rid(8201);
+	const RID inst = make_test_rid(8202);
+	storage.mesh_set_in_memory_pages(mesh, pages);
+	storage.mesh_set_virtual_geometry(mesh, desc);
+
+	const uint32_t slot = storage.instance_record_allocate(inst, mesh);
+	REQUIRE_NE(slot, UINT32_MAX);
+	CHECK_EQ(storage.instance_record_get_instance(slot), inst);
+	CHECK_EQ(storage.instance_record_get_instance(9999u), RID());
+
+	storage.instance_record_set_surface_cull_masks(slot, 0x5u, 0x2u);
+	CHECK_EQ(storage.get_record(slot).pad1[0], 0x5u);
+	CHECK_EQ(storage.get_record(slot).pad1[1], 0x2u);
+
+	// instance_record_set_state clears RECORD_VISIBLE when hidden and preserves transform visibility when re-shown.
+	storage.instance_record_set_state(slot, RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_CAST_SHADOW_SHADOWS_ONLY);
+	CHECK_EQ(storage.get_record(slot).flags & RendererVirtualMeshStorage::RECORD_VISIBLE, 0u);
+	CHECK_EQ(storage.get_record(slot).flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK, RendererVirtualMeshStorage::RECORD_CAST_SHADOW_SHADOWS_ONLY);
+	storage.instance_record_set_transform(slot, Transform3D(), AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2)), true);
+	CHECK_NE(storage.get_record(slot).flags & RendererVirtualMeshStorage::RECORD_VISIBLE, 0u);
+	storage.instance_record_set_state(slot, RendererVirtualMeshStorage::RECORD_VALID | RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF);
+	CHECK_EQ(storage.get_record(slot).flags & RendererVirtualMeshStorage::RECORD_VISIBLE, 0u);
+	CHECK_EQ(storage.get_record(slot).flags & RendererVirtualMeshStorage::RECORD_CAST_SHADOW_MASK, RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF);
+	storage.instance_record_set_transform(slot, Transform3D(), AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2)), true);
+
+	const uint64_t epoch0 = storage.get_residency_event_epoch();
+
+	// Clean frame: process_streaming() does not bump epoch.
+	storage.begin_frame();
+	storage.process_streaming();
+	CHECK_EQ(storage.get_residency_event_epoch(), epoch0);
+	CHECK_EQ(storage.get_residency_changed_records().size(), 0u);
+
+	// Request page 1: kick worker on frame N, upload on frame N+1.
+	RendererVirtualMeshStorage::PageRequest req;
+	req.mesh_index = 0u;
+	req.page_id = 1u;
+	req.visible = true;
+	req.distance = 4.0f;
+	req.px_error = 12.0f;
+	storage.submit_page_requests(&req, 1u, true);
+	storage.begin_frame();
+	storage.process_streaming();
+	storage.wait_for_streaming_tasks();
+	CHECK_EQ(storage.get_residency_event_epoch(), epoch0);
+
+	// Upload frame: process_streaming() bumps epoch once and flush() within the same frame is idempotent.
+	storage.begin_frame();
+	storage.process_streaming();
+	const uint64_t epoch1 = storage.get_residency_event_epoch();
+	CHECK_EQ(epoch1, epoch0 + 1u);
+	REQUIRE_EQ(storage.get_residency_changed_records().size(), 1u);
+	CHECK_EQ(storage.get_residency_changed_records()[0], slot);
+	storage.flush();
+	CHECK_EQ(storage.get_residency_event_epoch(), epoch1);
+
+	// Subsequent clean frame: epoch stays steady and changed_records clears.
+	storage.begin_frame();
+	storage.process_streaming();
+	CHECK_EQ(storage.get_residency_event_epoch(), epoch1);
+	CHECK_EQ(storage.get_residency_changed_records().size(), 0u);
+}
+
 #endif // _3D_DISABLED

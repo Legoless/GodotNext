@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
+#include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -1222,12 +1223,13 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		}
 
 		while (surf) {
-			// A virtual surface is drawn by the NextGeo resolve, not by the
-			// legacy opaque/motion lists.
+			// A virtual surface is drawn by the NextGeo resolve (or NextGeo shadow
+			// raster in active shadow views), not by the legacy opaque/motion/shadow lists.
 			const bool surface_virtual = (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0;
-			const bool skip_virtual = nextgeo_virtual_view && surface_virtual && (p_render_list == RENDER_LIST_OPAQUE || p_render_list == RENDER_LIST_MOTION);
+			const bool shadow_virtual_view = nextgeo_shadow_pass_active && p_render_list == RENDER_LIST_SECONDARY && (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP);
+			const bool skip_virtual = ((nextgeo_virtual_view && (p_render_list == RENDER_LIST_OPAQUE || p_render_list == RENDER_LIST_MOTION)) || shadow_virtual_view) && surface_virtual;
 #ifdef DEBUG_ENABLED
-			if (nextgeo_virtual_view && p_pass_mode == PASS_MODE_COLOR && p_render_list == RENDER_LIST_OPAQUE) {
+			if ((nextgeo_virtual_view && p_pass_mode == PASS_MODE_COLOR && p_render_list == RENDER_LIST_OPAQUE) || shadow_virtual_view) {
 				if (surface_virtual && !skip_virtual) {
 					// The skip below must have caught it; an add here is a double dispatch.
 					RSG::virtual_mesh_storage->nextgeo_count_double_dispatch();
@@ -1819,6 +1821,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	p_render_data->contact_shadows.clear();
 
 	float lod_distance_multiplier = p_render_data->scene_data->cam_projection.get_lod_multiplier();
+	LocalVector<int32_t> render_shadow_to_view;
+	render_shadow_to_view.resize(p_render_data->render_shadow_count);
+	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
+		render_shadow_to_view[i] = -1;
+	}
 	{
 		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 			RID li = p_render_data->render_shadows[i].light;
@@ -1842,11 +1849,241 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 			}
 		}
 
+		// GodotNext: nextgeo_shadow_cuts (#82). Dispatch multi-view shadow BVH cuts
+		// before cube_shadows run (cube finalization overwrites shadow_transform).
+		if (nextgeo_virtual_active &&
+				!p_render_data->reflection_probe.is_valid() &&
+				RSG::virtual_mesh_storage != nullptr &&
+				RSG::virtual_mesh_storage->get_live_record_count() > 0 &&
+				RSG::virtual_mesh_storage->get_record_count() > 0 &&
+				RSG::virtual_mesh_storage->get_record_buffer().is_valid() &&
+				RSG::virtual_mesh_storage->get_max_bvh_levels() > 0 &&
+				(p_render_data->cube_shadows.size() > 0 || p_render_data->directional_shadows.size() > 0 || p_render_data->shadows.size() > 0)) {
+			if (p_render_data->directional_shadows.size() > 0) {
+				light_storage->update_directional_shadow_atlas();
+			}
+			if (p_render_data->shadow_atlas.is_valid() && light_storage->owns_shadow_atlas(p_render_data->shadow_atlas)) {
+				light_storage->shadow_atlas_update(p_render_data->shadow_atlas);
+			}
+
+			const uint32_t camera_layers = p_render_data->scene_data != nullptr ? p_render_data->scene_data->camera_visible_layers : 0xFFFFFFFFu;
+			LocalVector<NextGeoShadowViewDesc> shadow_views;
+			shadow_views.reserve(MIN(uint32_t(p_render_data->render_shadow_count), NextGeoCut::MAX_SHADOW_VIEWS));
+
+			auto append_shadow_view = [&](int p_shadow_index) {
+				if (shadow_views.size() >= NextGeoCut::MAX_SHADOW_VIEWS) {
+					return;
+				}
+				const RID li = p_render_data->render_shadows[p_shadow_index].light;
+				const int pass = p_render_data->render_shadows[p_shadow_index].pass;
+				if (!light_storage->owns_light_instance(li)) {
+					return;
+				}
+				const RID base = light_storage->light_instance_get_base_light(li);
+				const RSE::LightType ltype = light_storage->light_get_type(base);
+				const bool rev_cull = light_storage->light_get_reverse_cull_face_mode(base);
+
+				NextGeoShadowViewDesc vd;
+				vd.max_texel_error = 1.0f;
+				vd.lod_bias = 1.0f;
+				vd.cull_mask = camera_layers & light_storage->light_get_shadow_caster_mask(base);
+				vd.light_type = int32_t(ltype);
+				vd.pass = pass;
+
+				if (ltype == RSE::LIGHT_DIRECTIONAL) {
+					const uint64_t last_scene_shadow_pass = light_storage->light_instance_get_shadow_pass(li);
+					if (last_scene_shadow_pass != get_scene_pass()) {
+						light_storage->light_instance_set_directional_rect(li, light_storage->get_directional_shadow_rect());
+						light_storage->directional_shadow_increase_current_light();
+						light_storage->light_instance_set_shadow_pass(li, get_scene_pass());
+					}
+
+					Rect2i atlas_rect = light_storage->light_instance_get_directional_rect(li);
+					const RSE::LightDirectionalShadowMode dir_mode = light_storage->light_directional_get_shadow_mode(base);
+					if (dir_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_4_SPLITS) {
+						atlas_rect.size.width /= 2;
+						atlas_rect.size.height /= 2;
+					} else if (dir_mode == RSE::LIGHT_DIRECTIONAL_SHADOW_PARALLEL_2_SPLITS) {
+						atlas_rect.size.height /= 2;
+					}
+					if (atlas_rect.size.width <= 0 || atlas_rect.size.height <= 0) {
+						return;
+					}
+
+					vd.use_pancake = light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_PANCAKE_SIZE) > 0;
+					vd.projection = light_storage->light_instance_get_shadow_camera(li, pass);
+					vd.transform = light_storage->light_instance_get_shadow_transform(li, pass);
+					vd.light_position = vd.transform.origin;
+					vd.tile_size = atlas_rect.size;
+					vd.z_near = 0.001f;
+					vd.z_far = light_storage->light_get_param(base, RSE::LIGHT_PARAM_RANGE);
+					vd.cut_flags = RendererRD::NEXTGEO_CUT_FLAG_SHADOW_VIEW | RendererRD::NEXTGEO_CUT_FLAG_ORTHOGRAPHIC;
+					vd.dual_paraboloid = false;
+					vd.dual_paraboloid_flip = false;
+					vd.flip_y = true;
+					vd.flip_cull = (vd.dual_paraboloid_flip != vd.flip_y) != rev_cull;
+
+					Vector<Plane> planes = vd.projection.get_projection_planes(vd.transform);
+					if (planes.size() < 6) {
+						return;
+					}
+					if (vd.use_pancake) {
+						const Vector3 z_vec = vd.transform.basis.get_column(Vector3::AXIS_Z).normalized();
+						planes.write[Projection::PLANE_NEAR] = Plane(z_vec, vd.transform.origin.dot(z_vec) + 1e6f);
+					}
+					for (int p = 0; p < 6; p++) {
+						vd.frustum[p] = RendererRD::nextgeo_plane_to_frustum(planes[p]);
+					}
+				} else {
+					if (!light_storage->owns_shadow_atlas(p_render_data->shadow_atlas) ||
+							!light_storage->shadow_atlas_owns_light_instance(p_render_data->shadow_atlas, li)) {
+						return;
+					}
+					const uint32_t key = light_storage->shadow_atlas_get_light_instance_key(p_render_data->shadow_atlas, li);
+					const uint32_t quadrant = (key >> RendererRD::LightStorage::QUADRANT_SHIFT) & 0x3;
+					const uint32_t shadow = key & RendererRD::LightStorage::SHADOW_INDEX_MASK;
+					const uint32_t subdivision = light_storage->shadow_atlas_get_quadrant_subdivision(p_render_data->shadow_atlas, quadrant);
+					if (subdivision == 0 || int(shadow) >= light_storage->shadow_atlas_get_quadrant_shadow_size(p_render_data->shadow_atlas, quadrant)) {
+						return;
+					}
+					const uint32_t shadow_atlas_size = light_storage->shadow_atlas_get_size(p_render_data->shadow_atlas);
+					const uint32_t quadrant_size = shadow_atlas_size >> 1;
+					const uint32_t shadow_size = quadrant_size / subdivision;
+					if (shadow_size == 0) {
+						return;
+					}
+					const float range = light_storage->light_get_param(base, RSE::LIGHT_PARAM_RANGE);
+
+					if (ltype == RSE::LIGHT_OMNI && light_storage->light_omni_get_shadow_mode(base) == RSE::LIGHT_OMNI_SHADOW_CUBE) {
+						const int face_size = MAX(int(shadow_size / 2), 1);
+						vd.projection = light_storage->light_instance_get_shadow_camera(li, pass);
+						vd.transform = light_storage->light_instance_get_shadow_transform(li, pass);
+						vd.light_position = vd.transform.origin;
+						vd.tile_size = Size2i(face_size, face_size);
+						vd.z_near = MAX(0.001f, float(vd.projection.get_z_near()));
+						vd.z_far = range;
+						vd.cut_flags = RendererRD::NEXTGEO_CUT_FLAG_SHADOW_VIEW;
+						vd.dual_paraboloid = false;
+						vd.dual_paraboloid_flip = false;
+						vd.flip_y = false;
+						vd.flip_cull = (vd.dual_paraboloid_flip != vd.flip_y) != rev_cull;
+
+						const Vector<Plane> planes = vd.projection.get_projection_planes(vd.transform);
+						if (planes.size() < 6) {
+							return;
+						}
+						for (int p = 0; p < 6; p++) {
+							vd.frustum[p] = RendererRD::nextgeo_plane_to_frustum(planes[p]);
+						}
+					} else if (ltype == RSE::LIGHT_OMNI) {
+						const int dp_tile = int(shadow_size) - 2;
+						if (dp_tile <= 0) {
+							return;
+						}
+						vd.projection = light_storage->light_instance_get_shadow_camera(li, 0);
+						vd.transform = light_storage->light_instance_get_shadow_transform(li, 0);
+						vd.light_position = vd.transform.origin;
+						vd.tile_size = Size2i(dp_tile, dp_tile);
+						vd.z_near = MAX(0.001f, MIN(0.025f, range));
+						vd.z_far = range;
+						vd.cut_flags = RendererRD::NEXTGEO_CUT_FLAG_SHADOW_VIEW | RendererRD::NEXTGEO_CUT_FLAG_DUAL_PARABOLOID;
+						vd.dual_paraboloid = true;
+						vd.dual_paraboloid_flip = (pass == 1);
+						vd.flip_y = true;
+						vd.flip_cull = (vd.dual_paraboloid_flip != vd.flip_y) != rev_cull;
+
+						const real_t z_dir = vd.dual_paraboloid_flip ? 1.0 : -1.0;
+						const Plane planes[6] = {
+							vd.transform.xform(Plane(Vector3(0, 0, z_dir), range)),
+							vd.transform.xform(Plane(Vector3(1, 0, z_dir).normalized(), range)),
+							vd.transform.xform(Plane(Vector3(-1, 0, z_dir).normalized(), range)),
+							vd.transform.xform(Plane(Vector3(0, 1, z_dir).normalized(), range)),
+							vd.transform.xform(Plane(Vector3(0, -1, z_dir).normalized(), range)),
+							vd.transform.xform(Plane(Vector3(0, 0, -z_dir), 0.02f * range)),
+						};
+						for (int p = 0; p < 6; p++) {
+							vd.frustum[p] = RendererRD::nextgeo_plane_to_frustum(planes[p]);
+						}
+					} else if (ltype == RSE::LIGHT_SPOT) {
+						vd.projection = light_storage->light_instance_get_shadow_camera(li, 0);
+						vd.transform = light_storage->light_instance_get_shadow_transform(li, 0);
+						vd.light_position = vd.transform.origin;
+						vd.tile_size = Size2i(int(shadow_size), int(shadow_size));
+						vd.z_near = MAX(0.001f, float(vd.projection.get_z_near()));
+						vd.z_far = range;
+						vd.cut_flags = RendererRD::NEXTGEO_CUT_FLAG_SHADOW_VIEW;
+						vd.dual_paraboloid = false;
+						vd.dual_paraboloid_flip = false;
+						vd.flip_y = true;
+						vd.flip_cull = (vd.dual_paraboloid_flip != vd.flip_y) != rev_cull;
+
+						const Vector<Plane> planes = vd.projection.get_projection_planes(vd.transform);
+						if (planes.size() < 6) {
+							return;
+						}
+						for (int p = 0; p < 6; p++) {
+							vd.frustum[p] = RendererRD::nextgeo_plane_to_frustum(planes[p]);
+						}
+					} else if (ltype == RSE::LIGHT_AREA) {
+						const Vector2 area_size = light_storage->light_area_get_size(base);
+						const Vector2 half_size = area_size * 0.5f;
+						vd.projection = light_storage->light_instance_get_shadow_camera(li, 0);
+						vd.transform = light_storage->light_instance_get_shadow_transform(li, 0);
+						vd.light_position = vd.transform.origin;
+						vd.tile_size = Size2i(int(shadow_size), int(shadow_size));
+						vd.z_near = MAX(0.001f, MIN(0.025f, range));
+						vd.z_far = range + area_size.length() * 0.5f;
+						vd.cut_flags = RendererRD::NEXTGEO_CUT_FLAG_SHADOW_VIEW | RendererRD::NEXTGEO_CUT_FLAG_DUAL_PARABOLOID;
+						vd.dual_paraboloid = true;
+						vd.dual_paraboloid_flip = false;
+						vd.flip_y = true;
+						vd.flip_cull = (vd.dual_paraboloid_flip != vd.flip_y) != rev_cull;
+
+						const Plane planes[6] = {
+							vd.transform.xform(Plane(Vector3(0, 0, -1), range)),
+							vd.transform.xform(Plane(Vector3(1, 0, 0), range + half_size.x)),
+							vd.transform.xform(Plane(Vector3(-1, 0, 0), range + half_size.x)),
+							vd.transform.xform(Plane(Vector3(0, 1, 0), range + half_size.y)),
+							vd.transform.xform(Plane(Vector3(0, -1, 0), range + half_size.y)),
+							vd.transform.xform(Plane(Vector3(0, 0, 1), 0.02f * range)),
+						};
+						for (int p = 0; p < 6; p++) {
+							vd.frustum[p] = RendererRD::nextgeo_plane_to_frustum(planes[p]);
+						}
+					} else {
+						return;
+					}
+				}
+
+				render_shadow_to_view[p_shadow_index] = int32_t(shadow_views.size());
+				shadow_views.push_back(vd);
+			};
+
+			for (const int &index : p_render_data->cube_shadows) {
+				append_shadow_view(index);
+			}
+			for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
+				append_shadow_view(p_render_data->directional_shadows[i]);
+			}
+			for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
+				append_shadow_view(p_render_data->shadows[i]);
+			}
+
+			if (!shadow_views.is_empty()) {
+				RSG::virtual_mesh_storage->flush();
+				if (!nextgeo_cut.dispatch_shadows(RSG::virtual_mesh_storage, shadow_views.ptr(), shadow_views.size(), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")))) {
+					for (uint32_t i = 0; i < render_shadow_to_view.size(); i++) {
+						render_shadow_to_view[i] = -1;
+					}
+				}
+			}
+		}
+
 		if (p_render_data->cube_shadows.size()) {
 			RENDER_TIMESTAMP("Render OmniLight Shadows");
 			// Cube shadows are rendered in their own way.
 			for (const int &index : p_render_data->cube_shadows) {
-				_render_shadow_pass(p_render_data->render_shadows[index].light, p_render_data->shadow_atlas, p_render_data->render_shadows[index].pass, p_render_data->render_shadows[index].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, true, true, true, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
+				_render_shadow_pass(p_render_data->render_shadows[index].light, p_render_data->shadow_atlas, p_render_data->render_shadows[index].pass, p_render_data->render_shadows[index].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, true, true, true, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform, render_shadow_to_view[index]);
 			}
 		}
 
@@ -1880,11 +2117,13 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 		//render directional shadows
 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
-			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
+			const int shadow_index = p_render_data->directional_shadows[i];
+			_render_shadow_pass(p_render_data->render_shadows[shadow_index].light, p_render_data->shadow_atlas, p_render_data->render_shadows[shadow_index].pass, p_render_data->render_shadows[shadow_index].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform, render_shadow_to_view[shadow_index]);
 		}
 		//render positional shadows
 		for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
-			_render_shadow_pass(p_render_data->render_shadows[p_render_data->shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->shadows[i]].pass, p_render_data->render_shadows[p_render_data->shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, i == 0, i == p_render_data->shadows.size() - 1, true, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
+			const int shadow_index = p_render_data->shadows[i];
+			_render_shadow_pass(p_render_data->render_shadows[shadow_index].light, p_render_data->shadow_atlas, p_render_data->render_shadows[shadow_index].pass, p_render_data->render_shadows[shadow_index].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, i == 0, i == p_render_data->shadows.size() - 1, true, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform, render_shadow_to_view[shadow_index]);
 		}
 
 		_render_shadow_process();
@@ -3262,6 +3501,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	nextgeo_virtual_active = false;
 	nextgeo_visibility_only_active = false;
+	nextgeo_shadow_pass_active = false;
 }
 
 void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_render_data) {
@@ -3330,7 +3570,7 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 	}
 }
 
-void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas, int p_pass, const PagedArray<RenderGeometryInstance *> &p_instances, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, bool p_open_pass, bool p_close_pass, bool p_clear_region, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform, int32_t p_nextgeo_shadow_view) {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
 	ERR_FAIL_COND(!light_storage->owns_light_instance(p_light));
@@ -3499,7 +3739,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 	if (render_cubemap) {
 		//rendering to cubemap
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_viewport_size, p_main_cam_transform);
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, false, false, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, Rect2(), false, true, true, true, p_render_info, p_viewport_size, p_main_cam_transform, p_nextgeo_shadow_view);
 		if (finalize_cubemap) {
 			_render_shadow_process();
 			_render_shadow_end();
@@ -3517,7 +3757,7 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
 
 	} else {
 		//render shadow
-		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
+		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform, p_nextgeo_shadow_view);
 	}
 }
 
@@ -3533,7 +3773,7 @@ void RenderForwardClustered::_render_shadow_begin() {
 	// because _fill_instance_data will do that if it detects p_offset == 0u.
 }
 
-void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform) {
+void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const PagedArray<RenderGeometryInstance *> &p_instances, const Projection &p_projection, const Transform3D &p_transform, float p_zfar, float p_bias, float p_normal_bias, bool p_reverse_cull_face, bool p_use_dp, bool p_use_dp_flip, bool p_use_pancake, float p_lod_distance_multiplier, float p_screen_mesh_lod_threshold, const Rect2i &p_rect, bool p_flip_y, bool p_clear_region, bool p_begin, bool p_end, RenderingServerTypes::RenderInfo *p_render_info, const Size2i &p_viewport_size, const Transform3D &p_main_cam_transform, int32_t p_nextgeo_shadow_view) {
 	SceneState::ShadowPass shadow_pass;
 
 	RenderSceneDataRD scene_data;
@@ -3574,7 +3814,9 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 	PassMode pass_mode = p_use_dp ? PASS_MODE_SHADOW_DP : PASS_MODE_SHADOW;
 
 	uint32_t render_list_from = render_list[RENDER_LIST_SECONDARY].elements.size();
+	nextgeo_shadow_pass_active = p_nextgeo_shadow_view >= 0;
 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, false, false, false, true);
+	nextgeo_shadow_pass_active = false;
 	uint32_t render_list_size = render_list[RENDER_LIST_SECONDARY].elements.size() - render_list_from;
 	render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
 	_fill_instance_data(RENDER_LIST_SECONDARY, p_render_info ? p_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW] : (int *)nullptr, render_list_from, render_list_size, false);
@@ -3604,6 +3846,7 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
 		shadow_pass.rect = p_rect;
 
 		shadow_pass.uniform_buffer_index = uniform_buffer_index;
+		shadow_pass.nextgeo_shadow_view = p_nextgeo_shadow_view;
 
 		scene_state.shadow_passes.push_back(shadow_pass);
 	}
@@ -3628,9 +3871,25 @@ void RenderForwardClustered::_render_shadow_process() {
 void RenderForwardClustered::_render_shadow_end() {
 	RD::get_singleton()->draw_command_begin_label("Shadow Render");
 
+	bool has_nextgeo_shadows = false;
 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
 		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
+		if (shadow_pass.nextgeo_shadow_view >= 0) {
+			has_nextgeo_shadows = true;
+		}
+	}
+
+	if (has_nextgeo_shadows) {
+		RD::get_singleton()->draw_command_begin_label("NextGeo Shadow Raster");
+		nextgeo_cut.begin_shadow_raster_timestamps();
+		for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+			if (shadow_pass.nextgeo_shadow_view >= 0) {
+				nextgeo_cut.draw_shadow_view(uint32_t(shadow_pass.nextgeo_shadow_view), shadow_pass.framebuffer, shadow_pass.rect, shadow_pass.pass_mode == PASS_MODE_SHADOW_DP);
+			}
+		}
+		nextgeo_cut.end_shadow_raster_timestamps();
+		RD::get_singleton()->draw_command_end_label();
 	}
 
 	RD::get_singleton()->draw_command_end_label();
@@ -5499,12 +5758,22 @@ void RenderForwardClustered::_geometry_instance_update(RenderGeometryInstance *p
 
 	if (RSG::virtual_mesh_storage != nullptr && ginstance->nextgeo_record_index != UINT32_MAX) {
 		uint32_t virtual_surface_mask = 0u;
+		uint32_t cull_disabled_mask = 0u;
+		uint32_t cull_front_mask = 0u;
 		for (GeometryInstanceSurfaceDataCache *s = ginstance->surface_caches; s != nullptr; s = s->next) {
 			if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) && s->surface_index < 32) {
-				virtual_surface_mask |= (1u << s->surface_index);
+				const uint32_t bit = 1u << s->surface_index;
+				virtual_surface_mask |= bit;
+				if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) ||
+						(s->shader != nullptr && s->shader->cull_mode == RSE::CULL_MODE_DISABLED)) {
+					cull_disabled_mask |= bit;
+				} else if (s->shader != nullptr && s->shader->cull_mode == RSE::CULL_MODE_FRONT) {
+					cull_front_mask |= bit;
+				}
 			}
 		}
 		RSG::virtual_mesh_storage->instance_record_set_surface_mask(ginstance->nextgeo_record_index, virtual_surface_mask);
+		RSG::virtual_mesh_storage->instance_record_set_surface_cull_masks(ginstance->nextgeo_record_index, cull_disabled_mask, cull_front_mask);
 	}
 
 	ginstance->dirty_list_element.remove_from_list();

@@ -55,6 +55,7 @@ public:
 		RECORD_CAST_SHADOW_OFF = 0u << 2,
 		RECORD_CAST_SHADOW_ON = 1u << 2,
 		RECORD_CAST_SHADOW_DOUBLE_SIDED = 2u << 2,
+		RECORD_CAST_SHADOW_SHADOWS_ONLY = 3u << 2,
 		RECORD_CAST_SHADOW_MASK = 3u << 2,
 		RECORD_MOVED = 1u << 4,
 		RECORD_TELEPORTED = 1u << 5,
@@ -96,7 +97,7 @@ public:
 		uint32_t rt_arena_offset = 0;
 		uint32_t src_page_table = UINT32_MAX;
 		uint32_t card_set = UINT32_MAX;
-		uint32_t pad1[2] = { 0, 0 };
+		uint32_t pad1[2] = { 0, 0 }; // [0] = per-surface cull_disabled_mask, [1] = per-surface cull_front_mask (#82).
 #ifdef REAL_T_IS_DOUBLE
 		float model_precision[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		float prev_model_precision[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -229,12 +230,15 @@ public:
 	void instance_record_set_layer_mask(uint32_t p_record, uint32_t p_layer_mask);
 	void instance_record_set_gi_flags(uint32_t p_record, uint32_t p_gi_flags);
 	void instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask);
+	void instance_record_set_surface_cull_masks(uint32_t p_record, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask);
+	RID instance_record_get_instance(uint32_t p_record) const;
 	// tlas_instance_index, blas_handle, rt_arena_chunk, rt_arena_offset, src_page_table, card_set.
 	void instance_record_set_rt(uint32_t p_record, const uint32_t p_rt_fields[6]);
 
 	// Per frame: advance the free list and the temporal history, process page
 	// streaming uploads under the per-frame KiB cap, then upload dirty records.
 	void begin_frame();
+	void process_streaming();
 	void flush();
 
 	// --- Residency & Streaming (#78) ---
@@ -265,8 +269,9 @@ public:
 	// page holding a cluster whose parent_lod is group g is resident.
 	static void compute_refine_ok_bits(uint32_t p_group_count, const LocalVector<LocalVector<uint32_t>> &p_group_pages, uint32_t p_root_page_count, const uint8_t *p_page_resident, uint32_t p_page_count, LocalVector<uint32_t> &r_refine_ok_bits);
 
-	// Residency events (#78 step 7): record slots whose virtual mesh changed residency this frame (#82 consumes them).
+	// Residency events (#78 step 7, #82): record slots whose virtual mesh changed residency this frame.
 	const LocalVector<uint32_t> &get_residency_changed_records() const { return residency_changed_records; }
+	uint64_t get_residency_event_epoch() const { return residency_event_epoch; }
 
 	// Residency & streaming counters / diagnostics.
 	uint64_t get_child_resident_without_parent_count() const { return child_resident_without_parent; }
@@ -328,6 +333,7 @@ protected:
 
 	// One CPU-side slot. A freed slot is reusable on the next frame.
 	struct SlotState {
+		RID instance;
 		bool allocated = false;
 		bool dirty = false;
 		bool dirty_last = false;
@@ -514,6 +520,7 @@ protected:
 
 	HashSet<uint32_t> residency_changed_meshes;
 	LocalVector<uint32_t> residency_changed_records;
+	uint64_t residency_event_epoch = 0;
 
 	uint64_t io_delay_seed = DEFAULT_IO_DELAY_SEED;
 	uint64_t next_io_request_index = 0;

@@ -416,6 +416,8 @@ public:
 	void _instance_record_release(Instance *p_instance) const;
 	void _instance_record_update_state(Instance *p_instance) const;
 	void _instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const;
+	void _process_nextgeo_residency_shadow_dirty();
+	uint64_t last_nextgeo_residency_epoch = 0;
 
 	virtual RID scenario_allocate();
 	virtual void scenario_initialize(RID p_rid);

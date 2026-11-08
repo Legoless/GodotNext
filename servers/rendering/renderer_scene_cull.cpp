@@ -607,6 +607,19 @@ Dictionary RendererSceneCull::instance_get_virtual_geometry_debug_stats(RID p_in
 			return scene_render->geometry_instance_get_nextgeo_debug_stats(geom->geometry_instance);
 		}
 	}
+	if (instance->base_type == RSE::INSTANCE_LIGHT && instance->base_data != nullptr) {
+		const InstanceLightData *light = static_cast<const InstanceLightData *>(instance->base_data);
+		Dictionary d;
+		d["record_index"] = -1;
+		d["route"] = "light";
+		d["reason"] = "NONE";
+		d["surfaces"] = Array();
+		d["shadow_version"] = int64_t(light->last_version);
+		d["shadow_dirty"] = light->is_shadow_dirty();
+		d["shadow_update_full"] = light->is_shadow_update_full();
+		d["light_instance_rid"] = light->instance;
+		return d;
+	}
 	Dictionary d;
 	d["record_index"] = -1;
 	d["route"] = "legacy";
@@ -1389,6 +1402,7 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 	Instance *instance = instance_owner.get_or_null(p_instance);
 	ERR_FAIL_NULL(instance);
 
+	const bool changed = instance->cast_shadows != p_shadow_casting_setting;
 	instance->cast_shadows = p_shadow_casting_setting;
 
 	if (instance->scenario && instance->array_index >= 0) {
@@ -1412,8 +1426,15 @@ void RendererSceneCull::instance_geometry_set_cast_shadows_setting(RID p_instanc
 		ERR_FAIL_NULL(geom->geometry_instance);
 
 		geom->geometry_instance->set_cast_double_sided_shadows(instance->cast_shadows == RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED);
+		if (changed && geom->can_cast_shadows) {
+			for (Instance *E : geom->lights) {
+				InstanceLightData *light = static_cast<InstanceLightData *>(E->base_data);
+				light->make_shadow_dirty();
+			}
+		}
 	}
 
+	_instance_record_update_state(instance);
 	_instance_queue_update(instance, false, true);
 }
 
@@ -1785,7 +1806,7 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 		return;
 	}
 	uint32_t flags = RendererVirtualMeshStorage::RECORD_VALID;
-	if (p_instance->visible) {
+	if (p_instance->visible && p_instance->scenario != nullptr) {
 		flags |= RendererVirtualMeshStorage::RECORD_VISIBLE;
 	}
 	switch (p_instance->cast_shadows) {
@@ -1795,8 +1816,10 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 		case RSE::SHADOW_CASTING_SETTING_DOUBLE_SIDED:
 			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_DOUBLE_SIDED;
 			break;
-		case RSE::SHADOW_CASTING_SETTING_OFF:
 		case RSE::SHADOW_CASTING_SETTING_SHADOWS_ONLY:
+			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_SHADOWS_ONLY;
+			break;
+		case RSE::SHADOW_CASTING_SETTING_OFF:
 			flags |= RendererVirtualMeshStorage::RECORD_CAST_SHADOW_OFF;
 			break;
 	}
@@ -1819,6 +1842,50 @@ void RendererSceneCull::_instance_record_update_state(Instance *p_instance) cons
 		gi_flags |= RendererVirtualMeshStorage::GI_LIGHTMAPPED;
 	}
 	RSG::virtual_mesh_storage->instance_record_set_gi_flags(p_instance->virtual_record, gi_flags);
+}
+
+void RendererSceneCull::_process_nextgeo_residency_shadow_dirty() {
+	if (RSG::virtual_mesh_storage == nullptr) {
+		return;
+	}
+	RSG::virtual_mesh_storage->process_streaming();
+	const uint64_t epoch = RSG::virtual_mesh_storage->get_residency_event_epoch();
+	if (epoch == last_nextgeo_residency_epoch) {
+		return;
+	}
+	last_nextgeo_residency_epoch = epoch;
+
+	const LocalVector<uint32_t> &changed = RSG::virtual_mesh_storage->get_residency_changed_records();
+	for (const uint32_t &slot : changed) {
+		const RID inst_rid = RSG::virtual_mesh_storage->instance_record_get_instance(slot);
+		if (inst_rid.is_null()) {
+			continue;
+		}
+		Instance *inst = instance_owner.get_or_null(inst_rid);
+		if (inst == nullptr || !inst->visible || !((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || inst->base_data == nullptr) {
+			continue;
+		}
+		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(inst->base_data);
+		if (!geom->can_cast_shadows) {
+			continue;
+		}
+		for (Instance *light_inst : geom->lights) {
+			if (light_inst == nullptr || light_inst->base_type != RSE::INSTANCE_LIGHT || light_inst->base_data == nullptr) {
+				continue;
+			}
+			if (RSG::light_storage->light_get_type(light_inst->base) == RSE::LIGHT_DIRECTIONAL) {
+				continue;
+			}
+			if (!RSG::light_storage->light_has_shadow(light_inst->base)) {
+				continue;
+			}
+			if ((inst->layer_mask & RSG::light_storage->light_get_shadow_caster_mask(light_inst->base)) == 0) {
+				continue;
+			}
+			InstanceLightData *light = static_cast<InstanceLightData *>(light_inst->base_data);
+			light->make_shadow_dirty();
+		}
+	}
 }
 
 void RendererSceneCull::_instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const {
@@ -3567,6 +3634,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	// GodotNext: ps_mesh_sdf_atlas (#185). Poll runtime SDF jobs once per view;
 	// a scene without skinned instances never reaches update_mesh_instances().
 	RSG::mesh_storage->mesh_update_sdf();
+	// GodotNext: nextgeo_shadow_cuts (#82). Process streaming residency changes
+	// before positional shadow dirty evaluation so newly resident/evicted pages
+	// dirty intersecting positional lights within 1 frame.
+	_process_nextgeo_residency_shadow_dirty();
 
 	render_pass++;
 
@@ -4951,6 +5022,7 @@ void RendererSceneCull::update() {
 	}
 	scene_render->update();
 	update_dirty_instances();
+	_process_nextgeo_residency_shadow_dirty();
 	render_particle_colliders();
 }
 

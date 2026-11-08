@@ -37,21 +37,61 @@ layout(set = 0, binding = 2, std430) buffer restrict readonly Dag {
 }
 dag;
 
+struct NextGeoCullParamsData {
+	mat4 view_proj;
+	mat4 prev_view_proj;
+	vec4 frustum[6];
+	vec4 camera; // xyz, w = max pixel error
+	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view)
+};
+
+struct NextGeoCountersData {
+	uint phase1_count;
+	uint phase2_count;
+	uint overflow;
+	uint cluster_count;
+	uint cut_lo;
+	uint cut_hi;
+	uint group_count;
+	uint level_counts[8];
+	uint cut_hash[2];
+	uint pad[2];
+	uint phase1_clusters;
+	uint phase2_clusters;
+	uint phase2_visible_count;
+	uint phase2_group_count;
+	uint phase2_level_counts[8];
+};
+
+#ifdef SHADOW_VIEW
+layout(set = 0, binding = 3, std430) buffer restrict readonly ShadowCullParams {
+	NextGeoCullParamsData data[];
+}
+shadow_culls;
+#else
 layout(set = 0, binding = 3, std430) buffer restrict readonly CullParams {
 	mat4 view_proj;
 	mat4 prev_view_proj;
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
-	vec4 view; // x = internal width, y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view)
+	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view)
 }
 cull;
+#endif
 
 layout(set = 0, binding = 4, std430) buffer restrict readonly Residency {
 	uint data[];
 }
 residency;
 
+#ifdef SHADOW_VIEW
+layout(set = 0, binding = 5, std430) buffer restrict ShadowCounters {
+	NextGeoCountersData data[];
+}
+shadow_counters;
+#else
 layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint phase1_count;
 	uint phase2_count;
@@ -70,6 +110,7 @@ layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint phase2_level_counts[8];
 }
 counters;
+#endif
 
 layout(set = 0, binding = 6, std430) buffer restrict Nodes {
 	uvec2 data[];

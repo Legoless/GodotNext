@@ -46,6 +46,31 @@ uint mix32(uint x) {
 	return x;
 }
 
+#ifdef SHADOW_VIEW
+layout(push_constant, std430) uniform HashParams {
+	uint cluster_capacity;
+	uint view_count;
+	uint pad0;
+	uint pad1;
+}
+hash_params;
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	uint view_idx = gl_GlobalInvocationID.y;
+	if (view_idx >= hash_params.view_count) {
+		return;
+	}
+	uint count = min(shadow_counters.data[view_idx].phase1_clusters, hash_params.cluster_capacity);
+	if (index < count) {
+		uvec2 pair = clusters_out.data[view_idx * hash_params.cluster_capacity + index];
+		uint lo = mix32(pair.x ^ mix32(pair.y ^ 0x9e3779b9u));
+		uint hi = mix32(pair.x ^ 0x85ebca6bu) ^ mix32(pair.y ^ 0xc2b2ae35u);
+		atomicXor(shadow_counters.data[view_idx].cut_hash[0], lo);
+		atomicXor(shadow_counters.data[view_idx].cut_hash[1], hi);
+	}
+}
+#else
 void hash_pair(uvec2 pair) {
 	uint lo = mix32(pair.x ^ mix32(pair.y ^ 0x9e3779b9u));
 	uint hi = mix32(pair.x ^ 0x85ebca6bu) ^ mix32(pair.y ^ 0xc2b2ae35u);
@@ -62,6 +87,7 @@ void main() {
 		hash_pair(clusters_out.data[PHASE2_CLUSTER_BASE + index]);
 	}
 }
+#endif
 #else
 layout(push_constant, std430) uniform Params {
 	uint level;
@@ -98,18 +124,31 @@ vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 			dot(p_record.transform[2].xyz, p_local) + p_record.transform[2].w);
 }
 
-// Plan §7.3 step 3: the projected error of a mesh-space sphere with the
-// node's maximum parent error as the geometric error term.
-float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error) {
+// Plan §7.3 step 3 & §7.5: projected error in pixels / shadow texels for
+// perspective, orthographic directional splits (bit 2), and dual-paraboloid
+// hemispheres (bit 3).
+float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error, vec4 p_camera, vec4 p_view, mat4 p_view_proj, uint p_flags) {
 	if (p_max_parent_error >= 3.4e38) {
-		return cull.camera.w + 1.0;
+		return p_camera.w + 1.0;
 	}
 	float scale = p_record.world_aabb_min.w;
+	if ((p_flags & 4u) != 0u) {
+		return p_max_parent_error * scale * p_view.x * p_view.w;
+	}
 	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
 	float radius = p_lod_sphere.w * scale;
-	float distance = max(length(center - cull.camera.xyz) - radius, cull.view.z);
-	return p_max_parent_error * scale * 0.5 * cull.view.y * abs(cull.view_proj[1][1]) / distance * cull.view.w;
+	float distance = max(length(center - p_camera.xyz) - radius, p_view.z);
+	if ((p_flags & 8u) != 0u) {
+		return p_max_parent_error * scale * 0.5 * p_view.y / distance * p_view.w;
+	}
+	return p_max_parent_error * scale * 0.5 * p_view.y * abs(p_view_proj[1][1]) / distance * p_view.w;
 }
+
+#ifndef SHADOW_VIEW
+float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p_max_parent_error) {
+	return projected_error_params(p_record, p_lod_sphere, p_max_parent_error, cull.camera, cull.view, cull.view_proj, cull.cull.w);
+}
+#endif
 
 uint dag_uint(uint p_byte_offset) {
 	return dag.data[p_byte_offset >> 2u];
@@ -134,6 +173,96 @@ bool mesh_group_refine_ok(uint p_mesh_idx, uint p_group_idx) {
 }
 
 #ifdef CLUSTER_CULL
+#ifdef SHADOW_VIEW
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	uint view_idx = gl_GlobalInvocationID.y;
+	if (view_idx >= params.phase) {
+		return;
+	}
+	uint group_cap = params.list_base;
+	uint cluster_cap = params.output_capacity;
+	uint input_count = min(shadow_counters.data[view_idx].group_count, group_cap);
+	if (index >= input_count) {
+		return;
+	}
+	NextGeoCullParamsData sc = shadow_culls.data[view_idx];
+	uvec2 entry = level_input.data[view_idx * group_cap + index];
+	NextGeoInstanceRecord record = instances.data[entry.x];
+	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || record.virtual_mesh == 0xFFFFFFFFu) {
+		return;
+	}
+	uint mesh_idx = record.virtual_mesh;
+	NextGeoMeshRecord mesh = meshes.data[mesh_idx];
+	if (mesh.bvh_node_offset <= mesh.group_offset) {
+		return;
+	}
+	uint group_count = (mesh.bvh_node_offset - mesh.group_offset) / 60u;
+	if (entry.y >= group_count || !mesh_group_refine_ok(mesh_idx, entry.y)) {
+		return;
+	}
+	const uint base = mesh.group_offset + entry.y * 60u;
+	uint cluster_offset = dag_uint(base);
+	uint cluster_count = dag_uint(base + 4u);
+	uint group_page_id = dag_uint(base + 8u);
+	vec4 parent_lod = vec4(dag_float(base + 16u), dag_float(base + 20u), dag_float(base + 24u), dag_float(base + 28u));
+	float parent_error = dag_float(base + 32u);
+	if (projected_error_params(record, parent_lod, parent_error, sc.camera, sc.view, sc.view_proj, sc.cull.w) <= sc.camera.w) {
+		return;
+	}
+
+	uint page_slot = 0xFFFFFFFFu;
+	uint page_first_cluster = 0u;
+	uint slot_page_size = residency.data[0];
+	if (mesh_idx < residency.data[1]) {
+		uint hdr = 2u + mesh_idx * 4u;
+		uint page_table_off = residency.data[hdr + 1u];
+		uint res_pages = residency.data[hdr + 3u];
+		if (group_page_id < res_pages) {
+			page_slot = residency.data[page_table_off + group_page_id * 2u + 0u];
+			page_first_cluster = residency.data[page_table_off + group_page_id * 2u + 1u];
+		}
+	}
+	uint page_cluster_hdr = (page_slot != 0xFFFFFFFFu && slot_page_size >= 96u) ? pages.data[(page_slot * slot_page_size) >> 2u] : 0u;
+
+	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
+		uint global_cluster = cluster_offset + cluster;
+		if (page_cluster_hdr > 0u && global_cluster >= mesh.cluster_offset) {
+			uint local_cluster = global_cluster - mesh.cluster_offset;
+			if (local_cluster >= page_first_cluster && (local_cluster - page_first_cluster) < page_cluster_hdr) {
+				uint in_page = local_cluster - page_first_cluster;
+				uint rec_word = ((page_slot * slot_page_size) >> 2u) + 4u + in_page * 20u;
+				int refined_group = int(pages.data[rec_word + 15u]);
+				if (refined_group >= 0 && uint(refined_group) < group_count) {
+					vec4 own_lod = vec4(
+							uintBitsToFloat(pages.data[rec_word + 5u]),
+							uintBitsToFloat(pages.data[rec_word + 6u]),
+							uintBitsToFloat(pages.data[rec_word + 7u]),
+							uintBitsToFloat(pages.data[rec_word + 8u]));
+					float own_error = uintBitsToFloat(pages.data[rec_word + 9u]);
+					float child_px_err = projected_error_params(record, own_lod, own_error, sc.camera, sc.view, sc.view_proj, sc.cull.w);
+					if (child_px_err > sc.camera.w) {
+						uint child_g = uint(refined_group);
+						if (mesh_group_refine_ok(mesh_idx, child_g)) {
+							continue;
+						}
+						// Shadow views never request pages (plan §7.5): fall back to resident cut.
+					}
+				}
+			}
+		}
+
+		uint slot = atomicAdd(shadow_counters.data[view_idx].phase1_clusters, 1u);
+		if (slot >= cluster_cap) {
+			atomicAdd(shadow_counters.data[view_idx].overflow, 1u);
+			break;
+		}
+		atomicAdd(shadow_counters.data[view_idx].cluster_count, 1u);
+		atomicAdd(draw_args.data[view_idx].y, 1u);
+		clusters_out.data[view_idx * cluster_cap + slot] = uvec2(entry.x, global_cluster);
+	}
+}
+#else
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	uint input_count = params.phase == 0u ? counters.group_count : counters.phase2_group_count;
@@ -243,6 +372,57 @@ void main() {
 		}
 	}
 }
+#endif
+#else
+#ifdef SHADOW_VIEW
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	uint view_idx = params.phase;
+	uint node_cap = params.output_capacity;
+	uint group_cap = params.list_base;
+	uint input_count = params.level == 0u ? shadow_counters.data[view_idx].phase1_count : shadow_counters.data[view_idx].level_counts[params.level - 1u];
+	input_count = min(input_count, node_cap);
+	if (index >= input_count) {
+		return;
+	}
+	NextGeoCullParamsData sc = shadow_culls.data[view_idx];
+	uvec2 entry = level_input.data[view_idx * node_cap + index];
+	NextGeoInstanceRecord record = instances.data[entry.x];
+	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || record.virtual_mesh == 0xFFFFFFFFu) {
+		return;
+	}
+	NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+	if (mesh.bvh_level_count == 0u || mesh.bvh_node_offset == 0u) {
+		return;
+	}
+	const uint base = mesh.bvh_node_offset + entry.y * 80u;
+	vec4 lod_sphere = vec4(dag_float(base), dag_float(base + 4u), dag_float(base + 8u), dag_float(base + 12u));
+	float max_parent_error = dag_float(base + 16u);
+	uint child_count = min(dag_uint(base + 44u), 8u);
+	if (projected_error_params(record, lod_sphere, max_parent_error, sc.camera, sc.view, sc.view_proj, sc.cull.w) <= sc.camera.w) {
+		return;
+	}
+	for (uint child = 0u; child < child_count; child++) {
+		uint value = dag_uint(base + 48u + child * 4u);
+		if ((value & NEXTGEO_BVH_LEAF_BIT) != 0u) {
+			uint slot = atomicAdd(shadow_counters.data[view_idx].group_count, 1u);
+			if (slot >= group_cap) {
+				atomicAdd(shadow_counters.data[view_idx].overflow, 1u);
+				continue;
+			}
+			groups_out.data[view_idx * group_cap + slot] = uvec2(entry.x, value & ~NEXTGEO_BVH_LEAF_BIT);
+		} else {
+			uint slot = atomicAdd(shadow_counters.data[view_idx].level_counts[params.level], 1u);
+			if (slot >= node_cap) {
+				atomicAdd(shadow_counters.data[view_idx].overflow, 1u);
+				continue;
+			}
+			uint groups = (slot + 64u) / 64u;
+			atomicMax(bvh_args.data[view_idx * 9u + 1u + min(params.level, 7u)].x, groups);
+			level_output.data[view_idx * node_cap + slot] = uvec2(entry.x, value);
+		}
+	}
+}
 #else
 void main() {
 	uint index = gl_GlobalInvocationID.x;
@@ -299,5 +479,6 @@ void main() {
 		}
 	}
 }
+#endif
 #endif
 #endif

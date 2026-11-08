@@ -12,11 +12,17 @@
 #include "nextgeo_records_inc.glsl"
 // clang-format on
 
+#ifdef MODE_SHADOW
+#ifdef MODE_DUAL_PARABOLOID
+layout(location = 0) out float dp_clip_out;
+#endif
+#else
 layout(location = 0) out flat uint vis_id_out;
 layout(location = 1) out flat uint instance_id_out;
 #ifdef WITH_VELOCITY
 layout(location = 2) out vec4 screen_position;
 layout(location = 3) out vec4 prev_screen_position;
+#endif
 #endif
 
 layout(push_constant, std430) uniform PushParams {
@@ -52,6 +58,25 @@ layout(set = 0, binding = 4, std430) buffer restrict readonly VisibleClusters {
 }
 visible_clusters;
 
+#ifdef MODE_SHADOW
+struct ShadowRasterViewParams {
+	mat4 proj;
+	mat4 view;
+	float z_far;
+	float dp_side;
+	float cull_sign;
+	uint use_pancake;
+	uint visible_capacity;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+};
+
+layout(set = 0, binding = 5, std430) buffer restrict readonly ShadowRasterParams {
+	ShadowRasterViewParams data[];
+}
+shadow_raster;
+#else
 layout(set = 0, binding = 5, std430) buffer restrict readonly RasterParams {
 	mat4 proj;
 	mat4 view;
@@ -65,6 +90,7 @@ layout(set = 0, binding = 5, std430) buffer restrict readonly RasterParams {
 	uint bucket_table_words;
 }
 raster;
+#endif
 
 layout(set = 0, binding = 6, std430) buffer restrict readonly BucketTable {
 	uint data[];
@@ -73,14 +99,141 @@ bucket_table;
 
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
+#ifdef MODE_SHADOW
+#ifdef MODE_DUAL_PARABOLOID
+	dp_clip_out = 1.0;
+#endif
+#else
 	vis_id_out = 0xFFFFFFFFu;
 	instance_id_out = 0xFFFFFFFFu;
 #ifdef WITH_VELOCITY
 	screen_position = vec4(0.0, 0.0, 0.0, 1.0);
 	prev_screen_position = vec4(0.0, 0.0, 0.0, 1.0);
 #endif
+#endif
 }
 
+#ifdef MODE_SHADOW
+vec4 project_shadow_pos(ShadowRasterViewParams sr, vec3 wp, out float r_dp_clip) {
+	vec3 view_pos = (sr.view * vec4(wp, 1.0)).xyz;
+#ifdef MODE_DUAL_PARABOLOID
+	vec3 vtx = view_pos;
+	vtx.z *= sr.dp_side;
+	r_dp_clip = vtx.z;
+	float dist = max(length(vtx), 1e-6);
+	vtx /= dist;
+	vtx.xy /= max(1.0 - vtx.z, 1e-6);
+	vtx.z = (dist / max(sr.z_far, 1e-6)) * 2.0 - 1.0;
+	return sr.proj * vec4(vtx, 1.0);
+#else
+	r_dp_clip = 0.0;
+	vec4 clip = sr.proj * vec4(view_pos, 1.0);
+	if (sr.use_pancake != 0u && clip.z >= 0.9999) {
+		clip.z = 0.9999;
+	}
+	return clip;
+#endif
+}
+
+void main() {
+	uint view_idx = push_params.pad0;
+	ShadowRasterViewParams sr = shadow_raster.data[view_idx];
+	uint local_vis = uint(gl_InstanceIndex);
+	uint t = uint(gl_VertexIndex) / 3u;
+	uint corner = uint(gl_VertexIndex) - t * 3u;
+
+	if (local_vis >= sr.visible_capacity) {
+		collapse_triangle();
+		return;
+	}
+	uint vis_cluster = push_params.list_base + local_vis;
+
+	uvec2 entry = visible_clusters.data[vis_cluster];
+	NextGeoInstanceRecord record = instances.data[entry.x];
+	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || (record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_OFF) {
+		collapse_triangle();
+		return;
+	}
+
+	NextGeoMeshRecord mesh = meshes.data[record.virtual_mesh];
+	if (mesh.page_count == 0u || entry.y < mesh.cluster_offset) {
+		collapse_triangle();
+		return;
+	}
+	uint local_cluster = entry.y - mesh.cluster_offset;
+	if (local_cluster >= mesh.cluster_count) {
+		collapse_triangle();
+		return;
+	}
+
+	uvec4 desc = cluster_table.data[mesh.page_table_offset + local_cluster];
+	uint stride = desc.z & 0xFFu;
+	uint vert_count = (desc.z >> 8u) & 0xFFu;
+	uint tri_count = (desc.z >> 16u) & 0xFFu;
+	uint surface_id = desc.w & 0xFFFFu;
+	if (t >= tri_count || stride < 3u || vert_count == 0u || surface_id >= 32u || (record.surface_mask & (1u << surface_id)) == 0u) {
+		collapse_triangle();
+		return;
+	}
+
+	bool cull_disabled = ((record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_DOUBLE_SIDED) || ((record.pad1[0] & (1u << surface_id)) != 0u);
+	bool cull_front = (record.pad1[1] & (1u << surface_id)) != 0u;
+	if (cull_disabled) {
+		vec4 tri_clip[3];
+		for (uint c = 0u; c < 3u; c++) {
+			uint ib = desc.y + t * 3u + c;
+			uint vi = (pages.data[ib >> 2u] >> ((ib & 3u) * 8u)) & 0xFFu;
+			if (vi >= vert_count) {
+				collapse_triangle();
+				return;
+			}
+			uint pw = desc.x + vi * stride;
+			vec3 lp = vec3(
+					uintBitsToFloat(pages.data[pw + 0u]),
+					uintBitsToFloat(pages.data[pw + 1u]),
+					uintBitsToFloat(pages.data[pw + 2u]));
+			vec3 wp = vec3(
+					dot(record.transform[0].xyz, lp) + record.transform[0].w,
+					dot(record.transform[1].xyz, lp) + record.transform[1].w,
+					dot(record.transform[2].xyz, lp) + record.transform[2].w);
+			float dummy_dp = 0.0;
+			tri_clip[c] = project_shadow_pos(sr, wp, dummy_dp);
+		}
+		if (determinant(mat3(tri_clip[0].xyw, tri_clip[1].xyw, tri_clip[2].xyw)) < 0.0 && corner != 0u) {
+			corner = 3u - corner;
+		}
+	} else {
+		float effective_cull_sign = cull_front ? -sr.cull_sign : sr.cull_sign;
+		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
+		if (determinant(basis) * effective_cull_sign < 0.0 && corner != 0u) {
+			corner = 3u - corner;
+		}
+	}
+
+	uint idx_byte = desc.y + t * 3u + corner;
+	uint v_idx = (pages.data[idx_byte >> 2u] >> ((idx_byte & 3u) * 8u)) & 0xFFu;
+	if (v_idx >= vert_count) {
+		collapse_triangle();
+		return;
+	}
+
+	uint pos_word = desc.x + v_idx * stride;
+	vec3 local_pos = vec3(
+			uintBitsToFloat(pages.data[pos_word + 0u]),
+			uintBitsToFloat(pages.data[pos_word + 1u]),
+			uintBitsToFloat(pages.data[pos_word + 2u]));
+
+	vec3 world_pos = vec3(
+			dot(record.transform[0].xyz, local_pos) + record.transform[0].w,
+			dot(record.transform[1].xyz, local_pos) + record.transform[1].w,
+			dot(record.transform[2].xyz, local_pos) + record.transform[2].w);
+	float dp_clip = 0.0;
+	gl_Position = project_shadow_pos(sr, world_pos, dp_clip);
+#ifdef MODE_DUAL_PARABOLOID
+	dp_clip_out = dp_clip;
+#endif
+}
+#else
 void main() {
 	uint vis_cluster = push_params.list_base + uint(gl_InstanceIndex);
 	uint t = uint(gl_VertexIndex) / 3u;
@@ -202,6 +355,7 @@ void main() {
 	prev_screen_position = raster.prev_proj * vec4(prev_view_pos, 1.0);
 #endif
 }
+#endif
 
 #[fragment]
 
@@ -209,6 +363,19 @@ void main() {
 
 #VERSION_DEFINES
 
+#ifdef MODE_SHADOW
+#ifdef MODE_DUAL_PARABOLOID
+layout(location = 0) in float dp_clip_in;
+#endif
+
+void main() {
+#ifdef MODE_DUAL_PARABOLOID
+	if (dp_clip_in > 0.0) {
+		discard;
+	}
+#endif
+}
+#else
 layout(location = 0) in flat uint vis_id_in;
 layout(location = 1) in flat uint instance_id_in;
 #ifdef WITH_VELOCITY
@@ -259,3 +426,4 @@ void main() {
 	}
 #endif
 }
+#endif

@@ -115,3 +115,84 @@ TEST_CASE("[NextGeo][Cull] Order-independent cut hash") {
 	twice.push_back(a[0]);
 	CHECK_NE(nextgeo_cut_hash(twice), nextgeo_cut_hash(a));
 }
+
+TEST_CASE("[NextGeo][Cull][Shadow] Main vs shadow cast-shadow predicates") {
+	using V = RendererVirtualMeshStorage;
+	const uint32_t base = V::RECORD_VALID | V::RECORD_VISIBLE;
+
+	// CAST_SHADOW_OFF: drawn in main view, skipped in shadow views.
+	CHECK(nextgeo_instance_cullable(base | V::RECORD_CAST_SHADOW_OFF, 1u, 1u));
+	CHECK_FALSE(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_OFF, 1u, 1u));
+
+	// CAST_SHADOW_ON and DOUBLE_SIDED: drawn in both main and shadow views.
+	CHECK(nextgeo_instance_cullable(base | V::RECORD_CAST_SHADOW_ON, 1u, 1u));
+	CHECK(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_ON, 1u, 1u));
+	CHECK(nextgeo_instance_cullable(base | V::RECORD_CAST_SHADOW_DOUBLE_SIDED, 1u, 1u));
+	CHECK(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_DOUBLE_SIDED, 1u, 1u));
+
+	// CAST_SHADOW_SHADOWS_ONLY: excluded from main view, included in shadow views.
+	CHECK_FALSE(nextgeo_instance_cullable(base | V::RECORD_CAST_SHADOW_SHADOWS_ONLY, 1u, 1u));
+	CHECK(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_SHADOWS_ONLY, 1u, 1u));
+
+	// Disqualifying flags and layer masks still exclude shadow instances.
+	CHECK_FALSE(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_ON | V::RECORD_HAS_SKELETON, 1u, 1u));
+	CHECK_FALSE(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_ON | V::RECORD_HAS_INSTANCE_UNIFORMS, 1u, 1u));
+	CHECK_FALSE(nextgeo_shadow_instance_cullable(V::RECORD_VALID | V::RECORD_CAST_SHADOW_ON, 1u, 1u));
+	CHECK_FALSE(nextgeo_shadow_instance_cullable(V::RECORD_VISIBLE | V::RECORD_CAST_SHADOW_ON, 1u, 1u));
+	CHECK_FALSE(nextgeo_shadow_instance_cullable(base | V::RECORD_CAST_SHADOW_ON, 0x2u, 0x1u));
+}
+
+TEST_CASE("[NextGeo][Cull][Shadow] Plane conversion and orthographic texel size") {
+	// Outward plane x <= 10 (normal=(2,0,0), d=20 before normalization).
+	const Plane outward(Vector3(2.0f, 0.0f, 0.0f), 20.0f);
+	const Vector4 fp = nextgeo_plane_to_frustum(outward);
+	CHECK(Math::is_equal_approx(Vector3(fp.x, fp.y, fp.z).length(), 1.0f));
+	const auto eval = [&](const Vector3 &p) {
+		return fp.x * p.x + fp.y * p.y + fp.z * p.z + fp.w;
+	};
+	CHECK_GT(eval(Vector3(9.5f, 3.0f, -4.0f)), 0.0f); // inside
+	CHECK(Math::is_zero_approx(eval(Vector3(10.0f, 0.0f, 0.0f)))); // on plane
+	CHECK_LT(eval(Vector3(10.5f, 0.0f, 0.0f)), 0.0f); // outside
+
+	// Square 4-split directional tile: 2048x2048 over 100m x 100m -> 1 texel = 100/2048 m.
+	const Projection ortho_sq = Projection::create_orthogonal(-50.0f, 50.0f, -50.0f, 50.0f, 0.0f, 500.0f);
+	CHECK(Math::is_equal_approx(nextgeo_ortho_inv_texel_size(Size2i(2048, 2048), ortho_sq), 2048.0f / 100.0f));
+
+	// Non-square 2-split directional tile: 4096x2048 over 100m x 100m -> conservative MIN(inv_tx, inv_ty).
+	CHECK(Math::is_equal_approx(nextgeo_ortho_inv_texel_size(Size2i(4096, 2048), ortho_sq), 2048.0f / 100.0f));
+}
+
+TEST_CASE("[NextGeo][Cull][Shadow] Shadow projected error across light types at 1.0 texel") {
+	// 1. Orthographic directional split: distance-invariant.
+	const Projection ortho = Projection::create_orthogonal(-50.0f, 50.0f, -50.0f, 50.0f, 0.0f, 500.0f);
+	const uint32_t ortho_flags = NEXTGEO_CUT_FLAG_SHADOW_VIEW | NEXTGEO_CUT_FLAG_ORTHOGRAPHIC;
+	const float one_texel_world = 100.0f / 2048.0f;
+	const float err_near = nextgeo_shadow_projected_error(Vector3(0.0f, 0.0f, -5.0f), 1.0f, one_texel_world, Transform3D(), Vector3(), 1.0f, Size2i(2048, 2048), ortho, ortho_flags);
+	const float err_far = nextgeo_shadow_projected_error(Vector3(0.0f, 0.0f, -350.0f), 1.0f, one_texel_world, Transform3D(), Vector3(), 1.0f, Size2i(2048, 2048), ortho, ortho_flags);
+	CHECK(Math::is_equal_approx(err_near, 1.0f));
+	CHECK(Math::is_equal_approx(err_far, 1.0f));
+	CHECK(nextgeo_cut_passes(err_near, 1.0f));
+	const Transform3D scaled2(Basis().scaled(Vector3(2.0f, 2.0f, 2.0f)), Vector3());
+	const float err_scaled = nextgeo_shadow_projected_error(Vector3(0.0f, 0.0f, -5.0f), 1.0f, one_texel_world, scaled2, Vector3(), 1.0f, Size2i(2048, 2048), ortho, ortho_flags);
+	CHECK(Math::is_equal_approx(err_scaled, 2.0f));
+	CHECK_FALSE(nextgeo_cut_passes(err_scaled, 1.0f));
+
+	// 2. Perspective spot / cubemap face (90 deg FOV -> abs(P[1][1]) == 1.0), including negative Y-flipped P[1][1].
+	Projection cube_proj = Projection::create_perspective(90.0f, 1.0f, 0.025f, 50.0f);
+	cube_proj.columns[1][1] = -cube_proj.columns[1][1];
+	const uint32_t persp_flags = NEXTGEO_CUT_FLAG_SHADOW_VIEW;
+	// At center z = -10.5 with sphere radius 0.5 -> d = 10.0, tile = 512 -> inv_texel = 256 / 10 = 25.6.
+	const float persp_err = nextgeo_shadow_projected_error(Vector3(0.0f, 0.0f, -10.5f), 0.5f, 10.0f / 256.0f, Transform3D(), Vector3(), 1.0f, Size2i(512, 512), cube_proj, persp_flags, 0.025f);
+	CHECK(Math::is_equal_approx(persp_err, 1.0f));
+	CHECK(nextgeo_cut_passes(persp_err, 1.0f));
+
+	// 3. Dual-paraboloid omni / area hemisphere (identity Projection(), conservative 0.5 * H / d).
+	const uint32_t dp_flags = NEXTGEO_CUT_FLAG_SHADOW_VIEW | NEXTGEO_CUT_FLAG_DUAL_PARABOLOID;
+	const float dp_err = nextgeo_shadow_projected_error(Vector3(10.5f, 0.0f, 0.0f), 0.5f, 10.0f / 255.0f, Transform3D(), Vector3(), 1.0f, Size2i(510, 510), Projection(), dp_flags, 0.025f);
+	CHECK(Math::is_equal_approx(dp_err, 1.0f));
+	CHECK(nextgeo_cut_passes(dp_err, 1.0f));
+
+	// 4. Sentinel parent error (>= 3.4e38) never passes the 1.0-texel cut budget.
+	const float sentinel_err = nextgeo_shadow_projected_error(Vector3(0.0f, 0.0f, -10.0f), 1.0f, 3.4e38f, Transform3D(), Vector3(), 1.0f, Size2i(512, 512), cube_proj, persp_flags, 0.025f);
+	CHECK_FALSE(nextgeo_cut_passes(sentinel_err, 1.0f));
+}

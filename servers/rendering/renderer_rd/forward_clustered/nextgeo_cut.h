@@ -32,8 +32,12 @@
 
 #include "core/math/color.h"
 #include "core/math/projection.h"
+#include "core/math/rect2i.h"
 #include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
+#include "core/math/vector2i.h"
+#include "core/math/vector4.h"
+#include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
@@ -43,6 +47,27 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
+
+struct NextGeoShadowViewDesc {
+	Projection projection;
+	Transform3D transform;
+	Vector4 frustum[6];
+	Vector3 light_position;
+	Size2i tile_size = Size2i(1, 1);
+	float z_near = 0.001f;
+	float z_far = 1.0f;
+	float max_texel_error = 1.0f;
+	float lod_bias = 1.0f;
+	uint32_t cull_mask = 0xFFFFFFFFu;
+	uint32_t cut_flags = 0u;
+	int32_t light_type = 0;
+	int32_t pass = 0;
+	bool use_pancake = false;
+	bool dual_paraboloid = false;
+	bool dual_paraboloid_flip = false;
+	bool flip_y = false;
+	bool flip_cull = false;
+};
 
 struct NextGeoRasterInputs {
 	RID visibility;
@@ -77,8 +102,16 @@ public:
 	static constexpr uint32_t HIZ_MAX_MIPS = 16;
 	static constexpr uint32_t REQUEST_CAPACITY = 4096;
 	static constexpr uint32_t REQUEST_USED_WORDS = 2048;
+	static constexpr uint32_t MAX_SHADOW_VIEWS = 80;
+	static constexpr uint32_t SHADOW_NODES_PER_VIEW = 8192;
+	static constexpr uint32_t SHADOW_GROUPS_PER_VIEW = 8192;
+	static constexpr uint32_t SHADOW_CLUSTERS_PER_VIEW = 32768;
 
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
+	bool dispatch_shadows(RendererVirtualMeshStorage *p_storage, const NextGeoShadowViewDesc *p_views, uint32_t p_view_count, bool p_debug_stats);
+	bool draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, const Rect2i &p_rect, bool p_dual_paraboloid);
+	void begin_shadow_raster_timestamps();
+	void end_shadow_raster_timestamps();
 	void free_resources();
 
 	RID get_clusters_buffer() const { return clusters; }
@@ -96,9 +129,14 @@ private:
 	RID _storage(uint32_t p_bytes);
 	RID _uniform_set(const LocalVector<RD::Uniform> &p_uniforms, int p_variant);
 	void _set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_hiz_tex, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out, RID p_request_buf);
+	void _set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out);
+	void _harvest_shadow_timestamps();
 	void _request_stats(uint32_t p_ring_slot, RID p_counters_buf, uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev, uint32_t p_raster_draws);
 	void _publish_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
+	void _request_shadow_stats(uint32_t p_ring_slot, RID p_counters_buf, uint32_t p_view_count, uint32_t p_record_count, uint32_t p_max_levels, const void *p_cuts, const NextGeoShadowViewDesc *p_views);
+	void _publish_shadow_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
 	static void _readback_cut_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
+	static void _readback_shadow_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
 	static void _readback_page_requests_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
 	void _on_page_requests_readback(const PackedByteArray &p_data, uint32_t p_ring_slot);
 
@@ -106,11 +144,15 @@ private:
 	RID instance_version;
 	RID instance_pipeline;
 	RID instance_phase2;
+	RID instance_shadow_pipeline;
 	ClusterCullShaderRD cluster_shader;
 	RID cluster_version;
 	RID cluster_bvh;
 	RID cluster_leaf;
 	RID cluster_hash;
+	RID cluster_shadow_bvh;
+	RID cluster_shadow_leaf;
+	RID cluster_shadow_hash;
 	HizPyramidShaderRD hiz_shader;
 	RID hiz_version;
 	RID hiz_pipeline;
@@ -118,6 +160,7 @@ private:
 	VisibilityRasterShaderRD raster_shader;
 	RID raster_version;
 	PipelineCacheRD raster_pipelines[4];
+	PipelineCacheRD shadow_raster_pipelines[2];
 
 	RID params;
 	RID raster_params;
@@ -134,6 +177,19 @@ private:
 	RID counters_ring[3];
 	uint32_t counters_ring_cursor = 0;
 	bool counters_ring_pending[3] = { false, false, false };
+	RID shadow_params;
+	RID shadow_raster_params;
+	RID shadow_nodes;
+	RID shadow_level_a;
+	RID shadow_level_b;
+	RID shadow_groups;
+	RID shadow_clusters;
+	RID shadow_bvh_args[2];
+	RID shadow_draw_args;
+	RID shadow_counters;
+	RID shadow_counters_ring[3];
+	uint32_t shadow_counters_ring_cursor = 0;
+	bool shadow_counters_ring_pending[3] = { false, false, false };
 	RID request_ring[3];
 	uint32_t request_ring_cursor = 0;
 	bool request_ring_pending[3] = { false, false, false };
@@ -156,4 +212,24 @@ private:
 	uint32_t stats_counter = 0;
 	uint64_t stats_ring_cpu_hash[3] = { 0, 0, 0 };
 	Dictionary stats_ring_info[3];
+
+	struct ShadowStatsMeta {
+		uint32_t view_count = 0;
+		int64_t render_frame = 0;
+		LocalVector<uint64_t> cpu_hashes;
+		LocalVector<uint32_t> cpu_instances;
+		LocalVector<uint32_t> cpu_groups;
+		LocalVector<uint32_t> cpu_clusters;
+		LocalVector<float> max_cut_errors;
+		LocalVector<int32_t> light_types;
+		LocalVector<int32_t> passes;
+		LocalVector<uint32_t> cut_flags;
+		LocalVector<Size2i> tile_sizes;
+	};
+	ShadowStatsMeta shadow_stats_ring_meta[3];
+	uint32_t shadow_stats_tick = 0;
+	uint32_t shadow_stats_counter = 0;
+	uint32_t shadow_active_view_count = 0;
+	bool shadow_capture_timestamps = false;
+	uint64_t last_harvested_ts_frame = UINT64_MAX;
 };

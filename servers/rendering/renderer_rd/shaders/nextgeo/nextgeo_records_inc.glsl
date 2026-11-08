@@ -24,7 +24,7 @@ struct NextGeoInstanceRecord {
 	uint rt_arena_offset; // 204
 	uint src_page_table; // 208
 	uint card_set; // 212
-	uint pad1[2]; // 216
+	uint pad1[2]; // 216: [0] = per-surface cull_disabled_mask, [1] = per-surface cull_front_mask (#82)
 #if defined(REAL_T_IS_DOUBLE) || defined(USE_DOUBLE_PRECISION)
 	vec4 model_precision; // 224
 	vec4 prev_model_precision; // 240
@@ -49,6 +49,7 @@ const uint NEXTGEO_RECORD_CAST_SHADOW_MASK = 3u << 2;
 const uint NEXTGEO_RECORD_CAST_SHADOW_OFF = 0u << 2;
 const uint NEXTGEO_RECORD_CAST_SHADOW_ON = 1u << 2;
 const uint NEXTGEO_RECORD_CAST_SHADOW_DOUBLE_SIDED = 2u << 2;
+const uint NEXTGEO_RECORD_CAST_SHADOW_SHADOWS_ONLY = 3u << 2;
 const uint NEXTGEO_RECORD_MOVED = 1u << 4;
 const uint NEXTGEO_RECORD_TELEPORTED = 1u << 5;
 const uint NEXTGEO_RECORD_HAS_SKELETON = 1u << 6;

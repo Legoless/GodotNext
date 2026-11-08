@@ -13,9 +13,9 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #include "nextgeo_cull_inc.glsl"
 // clang-format on
 
-bool aabb_visible(vec3 lo, vec3 hi) {
+bool aabb_visible_planes(vec4 frustum[6], vec3 lo, vec3 hi) {
 	for (uint plane = 0u; plane < 6u; plane++) {
-		vec3 normal = cull.frustum[plane].xyz;
+		vec3 normal = frustum[plane].xyz;
 		// Positive vertex test: the AABB is outside when its farthest corner
 		// along the plane normal is behind the plane.
 		vec3 farthest = lo;
@@ -28,7 +28,7 @@ bool aabb_visible(vec3 lo, vec3 hi) {
 		if (normal.z >= 0.0) {
 			farthest.z = hi.z;
 		}
-		if (dot(normal, farthest) + cull.frustum[plane].w < 0.0) {
+		if (dot(normal, farthest) + frustum[plane].w < 0.0) {
 			return false;
 		}
 	}
@@ -39,6 +39,47 @@ layout(set = 0, binding = 8, std430) buffer restrict Phase2Nodes {
 	uvec2 data[];
 }
 phase2_nodes;
+
+layout(set = 0, binding = 9, std430) buffer restrict BVHArgs {
+	uvec4 data[];
+}
+bvh_args;
+
+#ifdef SHADOW_VIEW
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	uint view_idx = gl_GlobalInvocationID.y;
+	NextGeoCullParamsData sc = shadow_culls.data[view_idx];
+	uint count = sc.cull.y;
+	if (index >= count) {
+		return;
+	}
+	NextGeoInstanceRecord record = instances.data[index];
+	if ((record.flags & (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE)) != (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE) ||
+			(record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_OFF ||
+			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS)) != 0u ||
+			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
+			record.virtual_mesh == 0xFFFFFFFFu ||
+			record.surface_mask == 0u ||
+			(record.layer_mask & sc.cull.x) == 0u) {
+		return;
+	}
+	if (!aabb_visible_planes(sc.frustum, record.world_aabb_min.xyz, record.world_aabb_max.xyz)) {
+		return;
+	}
+	uint cap = sc.cull.z;
+	uint slot = atomicAdd(shadow_counters.data[view_idx].phase1_count, 1u);
+	if (slot >= cap) {
+		atomicAdd(shadow_counters.data[view_idx].overflow, 1u);
+		return;
+	}
+	atomicMax(bvh_args.data[view_idx * 9u].x, (slot + 64u) / 64u);
+	nodes.data[view_idx * cap + slot] = uvec2(index, 0u);
+}
+#else
+bool aabb_visible(vec3 lo, vec3 hi) {
+	return aabb_visible_planes(cull.frustum, lo, hi);
+}
 
 bool hiz_occluded(vec4 world_min, vec4 world_max, mat4 proj_mat) {
 	if ((cull.cull.w & 1u) == 0u) {
@@ -87,11 +128,6 @@ bool hiz_occluded(vec4 world_min, vec4 world_max, mat4 proj_mat) {
 	return nearest_depth < occlusion;
 }
 
-layout(set = 0, binding = 9, std430) buffer restrict BVHArgs {
-	uvec4 data[];
-}
-bvh_args;
-
 #ifdef PHASE2
 void main() {
 	uint index = gl_GlobalInvocationID.x;
@@ -123,6 +159,7 @@ void main() {
 	}
 	NextGeoInstanceRecord record = instances.data[index];
 	if ((record.flags & (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE)) != (NEXTGEO_RECORD_VALID | NEXTGEO_RECORD_VISIBLE) ||
+			(record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_SHADOWS_ONLY ||
 			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS)) != 0u ||
 			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
 			record.virtual_mesh == 0xFFFFFFFFu ||
@@ -145,4 +182,5 @@ void main() {
 	// Level 0 always starts at the mesh's BVH root (node 0).
 	nodes.data[slot] = uvec2(index, 0u);
 }
+#endif
 #endif
