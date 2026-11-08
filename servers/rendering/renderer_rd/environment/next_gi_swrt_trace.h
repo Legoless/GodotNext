@@ -46,8 +46,7 @@ class RenderDataRD;
 // then the global SDF, then the WRC at 1.5x probe spacing, then the sky.
 // Global hits shade from voxel lighting. Detail hits use the D6 card lookup.
 // The ray-query builder marks a whole ShaderRD, so these variants are sibling
-// shaders. #187 owns the tier switch; this runs beside voxel lighting while
-// the fallback tier is active.
+// shaders. The software tier runs this beside voxel lighting (#187).
 class NextGISWRTTrace {
 public:
 	enum Mode {
@@ -111,6 +110,8 @@ public:
 	static void build_froxel(const DetailInstance *p_instances, uint32_t p_count, const Vector3 &p_volume_origin, FroxelGrid &r_grid);
 
 	static Hit trace_global(const NextGIGlobalSDF &p_field, const Vector3i *p_origins, uint32_t p_level_count, const Vector3 &p_camera, const Vector3 &p_origin, const Vector3 &p_direction, float p_tmax, const NextGIGlobalSDF::Instance *p_instances, uint32_t p_instance_count);
+	// One empty global march. Returns at least 1 microsecond for the auto-quality rule.
+	static uint64_t probe_usec();
 	static Hit trace_detail(const NextGIGlobalSDF &p_field, const Vector3i *p_origins, uint32_t p_level_count, const Vector3 &p_camera, const Vector3 &p_origin, const Vector3 &p_direction, float p_tmax, const DetailInstance *p_instances, uint32_t p_instance_count, const FroxelGrid *p_froxel, const NextGIGlobalSDF::Instance *p_global_instances, uint32_t p_global_count);
 
 	static ShadeResult shade_global(float p_weight, const Color &p_voxel, const Color &p_wrc, const Color &p_sky, bool p_allow_wrc);
@@ -121,7 +122,7 @@ public:
 	NextGISWRTTrace(const NextGISWRTTrace &) = delete;
 	NextGISWRTTrace &operator=(const NextGISWRTTrace &) = delete;
 
-	// Fallback tier only. The caller already rejected probes, unshaded views and a disabled Environment.
+	// Software tier only. The caller already rejected probes, unshaded views and a disabled Environment.
 	void update_frame(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting);
 
 	uint32_t get_trace_steps() const { return trace_steps; }
@@ -143,5 +144,6 @@ private:
 	uint32_t trace_misses = 0;
 	uint32_t shadow_rays = 0;
 	uint32_t mode = MODE_GLOBAL;
+	uint32_t active_levels = NextGIGlobalSDF::BASE_LEVELS;
 	bool pipelines_failed = false;
 };

@@ -3109,7 +3109,7 @@
 			If [code]true[/code], scene imports generate a [MeshDistanceField] for each mesh by default. This is the default value of the [code]meshes/generate_distance_fields[/code] import option; it can be overridden per file and per mesh. New projects set this to [code]true[/code]. The fields are used by NextGI's software ray tracing tier.
 		</member>
 		<member name="rendering/global_illumination/mesh_sdf/keep_when_hwrt" type="bool" setter="" getter="" default="true">
-			Keep the mesh SDF pool resident while hardware ray tracing is active, so the tier can switch at runtime. When disabled the pool is freed in the HWRT tier.
+			EXPERIMENTAL. When [code]true[/code], [member rendering/global_illumination/nextgi/hardware_ray_tracing] can switch between HWRT and the software tier at runtime. When [code]false[/code], the change waits for a restart and the mesh SDF pool is freed while hardware ray tracing is active.
 		</member>
 		<member name="rendering/global_illumination/mesh_sdf/pool_size_mb" type="int" setter="" getter="" default="256">
 			Size of the mesh SDF brick pool in MiB.
@@ -3148,8 +3148,8 @@
 			Seed for the reference path tracer. The same seed and scene produce the same accumulation.
 		</member>
 		<member name="rendering/global_illumination/nextgi/enabled" type="bool" setter="" getter="" default="false">
-			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use SDFGI instead. See [method RenderingServer.nextgi_get_tier_info].
-			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed and rendering is unchanged.
+			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use the software tier (SWRT) instead of SDFGI. See [method RenderingServer.nextgi_get_tier_info].
+			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed, and an environment's own SDFGI settings are unchanged.
 			[b]Note:[/b] This property is only read when the project starts.
 		</member>
 		<member name="rendering/global_illumination/nextgi/far_field" type="bool" setter="" getter="" default="false">
@@ -3162,8 +3162,8 @@
 			If [code]true[/code], far-field reflection hits return zero sky visibility and misses return full sky visibility, instead of shaded radiance. Has no effect when [member rendering/global_illumination/nextgi/far_field] is disabled.
 		</member>
 		<member name="rendering/global_illumination/nextgi/hardware_ray_tracing" type="int" setter="" getter="" default="0">
-			Whether NextGI may use hardware ray tracing. [b]Auto[/b] uses it where the rendering device supports hardware-accelerated ray queries. [b]Off[/b] always uses the fallback, with the reason [code]SETTING_OFF[/code]. [b]Force[/b] also uses ray queries on devices that are not known to be hardware accelerated, including CPU devices, and ignores a latched hardware ray-tracing fault. On a device without ray queries, [b]Force[/b] falls back with one warning.
-			[b]Note:[/b] To change this at runtime, call [method RenderingServer.nextgi_set_hardware_ray_tracing].
+			Whether NextGI may use hardware ray tracing. [b]Auto[/b] uses it where the rendering device supports hardware-accelerated ray queries. [b]Off[/b] uses the software tier, with the reason [code]SETTING_OFF[/code]. [b]Force[/b] also uses ray queries on devices that are not known to be hardware accelerated, including CPU devices, and ignores a latched hardware ray-tracing fault. On a device without ray queries, [b]Force[/b] selects the software tier with one warning.
+			[b]Note:[/b] To change this at runtime, call [method RenderingServer.nextgi_set_hardware_ray_tracing]. The switch is EXPERIMENTAL and applies only while [member rendering/global_illumination/mesh_sdf/keep_when_hwrt] is [code]true[/code].
 		</member>
 		<member name="rendering/global_illumination/nextgi/mode" type="int" setter="" getter="" default="0">
 			Selects what NextGI renders. [code]GI and reflections[/code] runs the diffuse gather, integration and reflections. [code]Reflections only[/code] skips the diffuse gather and integration, keeping the LightmapGI or VoxelGI ambient writer, while still tracing and denoising reflections from the lit SRC.
@@ -3182,6 +3182,7 @@
 			The radius, in meters around the main camera, within which instances are added to the NextGI ray-tracing scene.
 		</member>
 		<member name="rendering/global_illumination/nextgi/software_ray_tracing_mode" type="int" setter="" getter="" default="0">
+			How the software tier traces distance fields. [b]Global[/b] traces the global SDF. [b]Detail[/b] traces mesh SDFs for the first 2 m, then the global SDF. Detail is deprecated.
 		</member>
 		<member name="rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow" type="bool" setter="" getter="" default="true">
 			Allows NextGI to create front-layer reflection shaders and render targets when [member Environment.nextgi_translucency_front_layer_reflections] is enabled. If [code]false[/code], no front-layer shader variant or target is created and the existing translucent reflection path is unchanged.

@@ -32,6 +32,7 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
+#include "core/os/os.h"
 #include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
@@ -352,6 +353,22 @@ NextGISWRTTrace::Hit NextGISWRTTrace::trace_global(const NextGIGlobalSDF &p_fiel
 	return _finish_miss(march);
 }
 
+uint64_t NextGISWRTTrace::probe_usec() {
+	NextGIGlobalSDF field;
+	Vector3i origins[NextGIGlobalSDF::BASE_LEVELS];
+	const Vector3 camera;
+	for (uint32_t level = 0; level < NextGIGlobalSDF::BASE_LEVELS; level++) {
+		origins[level] = NextGIGlobalSDF::scrolled_origin(camera, level);
+	}
+	const uint64_t started = OS::get_singleton() != nullptr ? OS::get_singleton()->get_ticks_usec() : 0;
+	trace_global(field, origins, NextGIGlobalSDF::BASE_LEVELS, camera, Vector3(), Vector3(0.0f, 0.0f, -1.0f), 8.0f, nullptr, 0);
+	if (OS::get_singleton() == nullptr) {
+		return 1;
+	}
+	const uint64_t elapsed = OS::get_singleton()->get_ticks_usec() - started;
+	return elapsed == 0 ? 1 : elapsed;
+}
+
 NextGISWRTTrace::Hit NextGISWRTTrace::trace_detail(const NextGIGlobalSDF &p_field, const Vector3i *p_origins, uint32_t p_level_count, const Vector3 &p_camera, const Vector3 &p_origin, const Vector3 &p_direction, float p_tmax, const DetailInstance *p_instances, uint32_t p_instance_count, const FroxelGrid *p_froxel, const NextGIGlobalSDF::Instance *p_global_instances, uint32_t p_global_count) {
 	Hit hit;
 	if (p_direction.length_squared() <= 1.0e-8f || !(p_tmax > 0.0f)) {
@@ -640,7 +657,23 @@ void NextGISWRTTrace::update_frame(RenderDataRD *p_render_data, NextGIVoxelLight
 	}
 
 	field.ensure_buffers();
-	const uint32_t levels = NextGIGlobalSDF::BASE_LEVELS;
+	const bool pool_ok = field.get_pool_buffer().is_valid();
+	// The live allocator does not report a short pool. An invalid pool is the degrade signal.
+	const NextGI::SWRTLevelBudget budget = pool_ok ? NextGI::resolve_swrt_levels(NextGIGlobalSDF::BASE_LEVELS, 0, 0) : NextGI::resolve_swrt_levels(NextGIGlobalSDF::BASE_LEVELS, 1, 0);
+	active_levels = budget.levels;
+	if (budget.reduced) {
+		NextGI *next_gi = NextGI::get_singleton();
+		if (next_gi != nullptr) {
+			next_gi->note_swrt_reduced(budget.levels);
+		}
+	}
+	for (uint32_t level = active_levels; level < NextGIGlobalSDF::BASE_LEVELS; level++) {
+		if (level_origin_valid[level]) {
+			field.release_level(level);
+			level_origin_valid[level] = false;
+		}
+	}
+	const uint32_t levels = active_levels;
 	for (uint32_t level = 0; level < levels; level++) {
 		if (level_origin_valid[level] && !NextGIGlobalSDF::level_updates_on_frame(level, frame)) {
 			continue;

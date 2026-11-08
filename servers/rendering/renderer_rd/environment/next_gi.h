@@ -74,11 +74,11 @@ class NextGIWRC;
 // 64-ray self-test and the device-loss crash latch.
 class NextGI {
 public:
-	// The NextGI tier (plan §3.1). P0 falls back to SDFGI; #187 replaces the fallback with TIER_SOFTWARE.
+	// The NextGI tier (plan §3.1, §21.2 L1). With NextGI on, HWRT failure selects the software tier.
 	enum Tier {
-		TIER_DISABLED, // rendering/global_illumination/nextgi/enabled is false.
+		TIER_DISABLED, // rendering/global_illumination/nextgi/enabled is false. SDFGI-legacy in the overlay.
 		TIER_HWRT,
-		TIER_FALLBACK, // SDFGI for every Environment with nextgi_enabled.
+		TIER_SOFTWARE, // SWRT. The HWRT reason that sent it here is kept. SDFGI does not run.
 		TIER_UNSUPPORTED_RENDERER, // Mobile, Compatibility and the dummy renderer.
 		TIER_MAX,
 	};
@@ -97,6 +97,7 @@ public:
 		AS_MEMORY,
 		SELFTEST_FAILED,
 		HWRT_FAULTED,
+		SWRT_REDUCED, // Clipmap levels were dropped. Additional to the HWRT reason, not a replacement.
 		TIER_REASON_MAX,
 	};
 
@@ -149,8 +150,9 @@ public:
 		Tier tier = TIER_DISABLED;
 		TierReason reason = TIER_REASON_NONE;
 		bool warn_force = false; // Force was requested on a device without ray query.
+		bool swrt_reduced = false; // Global-SDF levels were dropped. The HWRT reason stays.
 
-		bool operator==(const TierResult &p_other) const { return tier == p_other.tier && reason == p_other.reason && warn_force == p_other.warn_force; }
+		bool operator==(const TierResult &p_other) const { return tier == p_other.tier && reason == p_other.reason && warn_force == p_other.warn_force && swrt_reduced == p_other.swrt_reduced; }
 		bool operator!=(const TierResult &p_other) const { return !(*this == p_other); }
 	};
 
@@ -267,6 +269,8 @@ private:
 	// #60: the specular first-hit distance (R16F, 65504 on a miss), for the RR guides (#206).
 	RID get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const;
 	void _apply_safety_net(TierInputs &r_inputs);
+	void _select_swrt_auto_quality();
+	void _append_swrt_info(Dictionary &r_info) const;
 	void _sync_device_lost_callback();
 	void _unregister_device_lost_callback();
 	void _maybe_simulate_device_lost();
@@ -291,8 +295,12 @@ private:
 	bool voxel_lighting_tier_valid = false;
 	Tier voxel_lighting_tier = TIER_DISABLED;
 
-	// GodotNext: ps_swrt_trace (#186). Runs beside voxel lighting on the fallback tier.
+	// GodotNext: ps_swrt_trace (#186). Runs beside voxel lighting on the software tier.
 	NextGISWRTTrace *swrt_trace = nullptr;
+	// GodotNext: ps_tier_rule (#187).
+	bool swrt_reduced = false;
+	bool swrt_reduced_logged = false;
+	bool restart_toggle_warned = false;
 
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;
@@ -335,6 +343,24 @@ public:
 	static uint32_t nextgi_quality_total_us(Quality p_quality, bool p_apple);
 	Quality get_quality_setting() const { return quality_setting; }
 	static Quality nextgi_auto_quality_from_usec(uint64_t p_usec);
+	// GodotNext: ps_tier_rule (#187). Under 16 compute units, Medium. Unknown devices pass 16.
+	// Video memory under 4 GiB with no reported unit count passes 8.
+	static constexpr uint32_t SWRT_BASE_LEVELS = 6;
+	static constexpr uint32_t SWRT_MIN_LEVELS = 3;
+	static constexpr uint32_t SWRT_AUTO_COMPUTE_UNITS = 16;
+	static constexpr uint64_t SWRT_AUTO_MEMORY_FLOOR = 4ull * 1024ull * 1024ull * 1024ull;
+	// The runtime switch applies on the next evaluation, which is inside this many frames.
+	static constexpr int RUNTIME_TOGGLE_MAX_FRAMES = 2;
+	struct SWRTLevelBudget {
+		uint32_t levels = SWRT_BASE_LEVELS;
+		bool reduced = false;
+	};
+	static SWRTLevelBudget resolve_swrt_levels(uint32_t p_requested, uint64_t p_bytes_per_level, uint64_t p_pool_bytes);
+	static uint32_t swrt_compute_unit_class(uint32_t p_reported_units, uint64_t p_video_memory_bytes);
+	static Quality swrt_auto_quality(uint64_t p_usec, uint32_t p_compute_units);
+	static String format_swrt_auto_reason(uint64_t p_usec, uint32_t p_compute_units, Quality p_quality);
+	static bool runtime_toggle_applies(bool p_keep_when_hwrt) { return p_keep_when_hwrt; }
+	void note_swrt_reduced(uint32_t p_levels);
 	// #55 cut item 2: when Epic is cut it resolves to High.
 	static bool nextgi_epic_cut() { return false; }
 
@@ -372,7 +398,7 @@ public:
 	static String get_tier_name(Tier p_tier);
 	static String get_reason_name(TierReason p_reason);
 	static String get_quality_name(Quality p_quality);
-	// The one printed line, e.g. "NextGI: tier=FALLBACK reason=D3D12_NO_DXR (SDFGI fallback) quality=HIGH (auto selection pending)".
+	// The one printed line, e.g. "NextGI: tier=SWRT reason=D3D12_NO_DXR quality=HIGH (auto selection pending)".
 	static String format_tier_line(const TierResult &p_result, Quality p_quality_setting);
 	// Prints that line. Appends " selftest=<ms>ms" when this selection ran the startup self-test.
 	void log_tier_selection(const String &p_line);
@@ -398,8 +424,8 @@ public:
 	// Counts ray-query ShaderRD versions created under the HWRT tier, for nextgi_get_tier_info().
 	void notify_ray_query_shader_initialized();
 	int get_ray_query_shaders_initialized() const { return ray_query_shaders_initialized; }
-	// True when Environments with nextgi_enabled run SDFGI instead.
-	bool is_sdfgi_fallback() const { return result.tier == TIER_FALLBACK; }
+	// SDFGI is not selected while NextGI is on (#187). Kept so older callers stay source-compatible.
+	bool is_sdfgi_fallback() const { return false; }
 	// {tier, reason, quality, ray_query_shaders_initialized}, the names as in the printed line.
 	Dictionary get_tier_info() const;
 
@@ -409,7 +435,7 @@ public:
 	// Counters whose producer has not merged are 0. TLAS instances come from the RT scene.
 	Dictionary get_counters() const;
 
-	// GodotNext: ps_voxel_lighting (#188). Line 2b on HWRT, and the fallback-tier hook.
+	// GodotNext: ps_voxel_lighting (#188). Line 2b on HWRT, and the software-tier hook.
 	void update_voxel_lighting(RenderDataRD *p_render_data);
 
 	enum DebugViewId {

@@ -545,8 +545,8 @@ void RendererSceneRender::environment_set_sdfgi(RID p_env, bool p_enable, int p_
 }
 
 bool RendererSceneRender::environment_get_sdfgi_enabled(RID p_env) const {
-	// GodotNext: nextgi_fallback
-	return environment_storage.environment_get_sdfgi_enabled(p_env) || (environment_storage.environment_get_nextgi_enabled(p_env) && _nextgi_sdfgi_fallback());
+	// GodotNext: ps_tier_rule (#187). SDFGI runs only while NextGI is off.
+	return environment_storage.environment_get_sdfgi_enabled(p_env) && !environment_storage.environment_get_nextgi_enabled(p_env);
 }
 
 int RendererSceneRender::environment_get_sdfgi_cascades(RID p_env) const {

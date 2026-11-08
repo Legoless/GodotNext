@@ -3096,15 +3096,15 @@
 				- [code]quality[/code]: the resolved quality preset, or [code]"NONE"[/code] when NextGI is inactive.
 				- [code]quality_reason[/code]: [code]"auto selection pending"[/code] while automatic quality is unresolved, [code]"setting"[/code] when the user picked a preset, or [code]"NONE"[/code].
 				- [code]driver[/code]: the current rendering driver name.
-				On the dummy renderer the tier is [code]"FALLBACK"[/code] and the reason is [code]"SETTING_OFF"[/code].
+				On the dummy renderer the tier is [code]"SWRT"[/code] and the reason is [code]"SETTING_OFF"[/code]. The software tier may also report [code]swrt_mode[/code] ([code]"Global"[/code] or [code]"Detail"[/code]), [code]lite_beta[/code] when the resolved quality is Medium, and [code]swrt_reduced[/code] when global SDF levels were dropped. [code]experimental_toggle[/code] marks the runtime hardware-ray-tracing switch.
 			</description>
 		</method>
 		<method name="nextgi_get_tier_info" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
 				Returns the NextGI tier selected for the rendering device, as a [Dictionary] with these keys:
-				- [code]tier[/code]: [code]"HWRT"[/code] (hardware ray tracing), [code]"FALLBACK"[/code] (environments with [member Environment.nextgi_enabled] run SDFGI), [code]"DISABLED"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/enabled] is [code]false[/code]) or [code]"UNSUPPORTED_RENDERER"[/code] (any rendering method other than Forward+).
-				- [code]reason[/code]: why hardware ray tracing was not selected, or [code]"NONE"[/code]. One of [code]"NO_RAY_QUERY"[/code], [code]"NOT_HW_ACCELERATED"[/code], [code]"CPU_DEVICE"[/code], [code]"D3D12_NO_DXR"[/code], [code]"METAL_SYNC_MODE"[/code], [code]"METAL_NO_ARGUMENT_BUFFERS"[/code], [code]"SETTING_OFF"[/code], [code]"AS_MEMORY"[/code], [code]"SELFTEST_FAILED"[/code] or [code]"HWRT_FAULTED"[/code].
+				- [code]tier[/code]: [code]"HWRT"[/code] (hardware ray tracing), [code]"SWRT"[/code] (the software tier; SDFGI stays off while NextGI is on), [code]"DISABLED"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/enabled] is [code]false[/code]; the overlay calls this SDFGI-legacy) or [code]"UNSUPPORTED_RENDERER"[/code] (any rendering method other than Forward+).
+				- [code]reason[/code]: why hardware ray tracing was not selected, or [code]"NONE"[/code]. One of [code]"NO_RAY_QUERY"[/code], [code]"NOT_HW_ACCELERATED"[/code], [code]"CPU_DEVICE"[/code], [code]"D3D12_NO_DXR"[/code], [code]"METAL_SYNC_MODE"[/code], [code]"METAL_NO_ARGUMENT_BUFFERS"[/code], [code]"SETTING_OFF"[/code], [code]"AS_MEMORY"[/code], [code]"SELFTEST_FAILED"[/code], [code]"HWRT_FAULTED"[/code] or [code]"SWRT_REDUCED"[/code]. [code]SWRT_REDUCED[/code] is additional: the original hardware reason stays, and global SDF levels were dropped to a minimum of 3.
 				- [code]quality[/code]: the resolved quality preset ([code]"MEDIUM"[/code], [code]"HIGH"[/code] or [code]"EPIC"[/code]), or [code]"NONE"[/code] when NextGI is disabled or unsupported.
 				- [code]ray_query_shaders_initialized[/code]: the number of ray-query shader versions NextGI has created. They are only created on the [code]HWRT[/code] tier.
 			</description>
@@ -3113,7 +3113,7 @@
 			<return type="void" />
 			<param index="0" name="mode" type="int" />
 			<description>
-				Sets [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing] at runtime ([code]0[/code] Auto, [code]1[/code] Off, [code]2[/code] Force) and selects the NextGI tier again. A changed tier is printed as a new [code]NextGI:[/code] line.
+				Sets [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing] at runtime ([code]0[/code] Auto, [code]1[/code] Off, [code]2[/code] Force) and selects the NextGI tier again. A changed tier is printed as a new [code]NextGI:[/code] line. The switch is EXPERIMENTAL. It applies on the next evaluation when [member ProjectSettings.rendering/global_illumination/mesh_sdf/keep_when_hwrt] is [code]true[/code]. Otherwise one warning is printed and the tier waits for a restart.
 			</description>
 		</method>
 		<method name="occluder_create">

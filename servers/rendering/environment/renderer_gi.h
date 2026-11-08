@@ -94,14 +94,14 @@ public:
 	virtual void sdfgi_reset() = 0;
 
 	// GodotNext: nextgi_user_surface
-	// The dummy renderer reports the fallback tier with reason SETTING_OFF and zero counters.
+	// The dummy renderer reports the software tier name with reason SETTING_OFF and zero counters.
 	virtual Dictionary nextgi_get_status() const = 0;
 	virtual Dictionary nextgi_get_counters() const = 0;
 
 	// Non-RD renderers share this pair. Producers that have not merged stay at zero.
 	static Dictionary nextgi_unavailable_status() {
 		Dictionary status;
-		status["tier"] = "FALLBACK";
+		status["tier"] = "SWRT";
 		status["reason"] = "SETTING_OFF";
 		status["quality"] = "NONE";
 		status["quality_reason"] = "NONE";

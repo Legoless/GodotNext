@@ -108,7 +108,7 @@ const NextGI::PassSlotInfo NextGI::PASS_SLOTS[NextGI::PASS_SLOT_MAX] = {
 static const char *_nextgi_tier_names[NextGI::TIER_MAX] = {
 	"DISABLED",
 	"HWRT",
-	"FALLBACK",
+	"SWRT",
 	"UNSUPPORTED_RENDERER",
 };
 
@@ -124,6 +124,7 @@ static const char *_nextgi_reason_names[NextGI::TIER_REASON_MAX] = {
 	"AS_MEMORY",
 	"SELFTEST_FAILED",
 	"HWRT_FAULTED",
+	"SWRT_REDUCED",
 };
 
 static const char *_nextgi_quality_names[NextGI::QUALITY_MAX] = {
@@ -174,7 +175,7 @@ NextGI::TierResult NextGI::evaluate_tier(const TierInputs &p_inputs) {
 		return r;
 	}
 
-	r.tier = TIER_FALLBACK;
+	r.tier = TIER_SOFTWARE;
 	if (p_inputs.hwrt_setting == HARDWARE_RAY_TRACING_OFF) {
 		r.reason = SETTING_OFF;
 		return r;
@@ -238,6 +239,98 @@ NextGI::Quality NextGI::nextgi_auto_quality_from_usec(uint64_t p_usec) {
 	return p_usec > 0 && p_usec <= 5000 ? QUALITY_HIGH : QUALITY_MEDIUM;
 }
 
+// GodotNext: ps_tier_rule (#187).
+static_assert(NextGI::SWRT_BASE_LEVELS == NextGIGlobalSDF::BASE_LEVELS, "SWRT level budget starts from the global SDF clipmap count.");
+
+NextGI::SWRTLevelBudget NextGI::resolve_swrt_levels(uint32_t p_requested, uint64_t p_bytes_per_level, uint64_t p_pool_bytes) {
+	SWRTLevelBudget budget;
+	const uint32_t requested = CLAMP(p_requested == 0 ? 1u : p_requested, 1u, SWRT_BASE_LEVELS);
+	const auto fits = [p_bytes_per_level, p_pool_bytes](uint32_t p_levels) -> bool {
+		if (p_bytes_per_level == 0) {
+			return true;
+		}
+		return p_pool_bytes / p_bytes_per_level >= uint64_t(p_levels);
+	};
+	if (fits(requested)) {
+		budget.levels = requested;
+		budget.reduced = false;
+		return budget;
+	}
+	uint32_t levels = requested;
+	while (levels > SWRT_MIN_LEVELS && !fits(levels)) {
+		levels--;
+	}
+	if (levels < SWRT_MIN_LEVELS) {
+		levels = SWRT_MIN_LEVELS;
+	}
+	budget.levels = levels;
+	budget.reduced = true;
+	return budget;
+}
+
+uint32_t NextGI::swrt_compute_unit_class(uint32_t p_reported_units, uint64_t p_video_memory_bytes) {
+	if (p_reported_units > 0) {
+		return p_reported_units;
+	}
+	if (p_video_memory_bytes > 0 && p_video_memory_bytes < SWRT_AUTO_MEMORY_FLOOR) {
+		return 8;
+	}
+	return SWRT_AUTO_COMPUTE_UNITS;
+}
+
+NextGI::Quality NextGI::swrt_auto_quality(uint64_t p_usec, uint32_t p_compute_units) {
+	if (p_compute_units < SWRT_AUTO_COMPUTE_UNITS) {
+		return QUALITY_MEDIUM;
+	}
+	return nextgi_auto_quality_from_usec(p_usec);
+}
+
+String NextGI::format_swrt_auto_reason(uint64_t p_usec, uint32_t p_compute_units, Quality p_quality) {
+	return vformat("auto: sdf benchmark %.2f ms, %d compute units, %s", double(p_usec) / 1000.0, p_compute_units, get_quality_name(p_quality));
+}
+
+void NextGI::note_swrt_reduced(uint32_t p_levels) {
+	swrt_reduced = true;
+	result.swrt_reduced = true;
+	if (swrt_reduced_logged) {
+		return;
+	}
+	swrt_reduced_logged = true;
+	print_line(vformat("NextGI: tier=SWRT reason=SWRT_REDUCED levels=%d", p_levels));
+}
+
+void NextGI::_select_swrt_auto_quality() {
+	if (result.tier != TIER_SOFTWARE || quality_setting != QUALITY_AUTO || auto_quality != QUALITY_AUTO) {
+		return;
+	}
+	const uint64_t usec = NextGISWRTTrace::probe_usec();
+	uint64_t memory = 0;
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd != nullptr) {
+		memory = rd->get_device_total_memory();
+	}
+	const uint32_t units = swrt_compute_unit_class(0, memory);
+	const Quality picked = swrt_auto_quality(usec, units);
+	auto_quality = picked;
+	auto_reason = format_swrt_auto_reason(usec, units, picked);
+	print_line(vformat("NextGI: %s", auto_reason));
+}
+
+void NextGI::_append_swrt_info(Dictionary &r_info) const {
+	r_info["experimental_toggle"] = true;
+	if (result.tier != TIER_SOFTWARE) {
+		return;
+	}
+	int mode = 0;
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (ps != nullptr && ps->has_setting("rendering/global_illumination/nextgi/software_ray_tracing_mode")) {
+		mode = int(GLOBAL_GET("rendering/global_illumination/nextgi/software_ray_tracing_mode"));
+	}
+	r_info["swrt_mode"] = mode == 1 ? String("Detail") : String("Global");
+	r_info["lite_beta"] = resolve_quality(quality_setting) == QUALITY_MEDIUM;
+	r_info["swrt_reduced"] = result.swrt_reduced;
+}
+
 NextGI::Quality NextGI::auto_quality = NextGI::QUALITY_AUTO;
 String NextGI::auto_reason;
 
@@ -282,10 +375,10 @@ String NextGI::get_quality_name(Quality p_quality) {
 
 String NextGI::format_tier_line(const TierResult &p_result, Quality p_quality_setting) {
 	String line = vformat("NextGI: tier=%s reason=%s", get_tier_name(p_result.tier), get_reason_name(p_result.reason));
-	if (p_result.tier == TIER_FALLBACK) {
-		line += " (SDFGI fallback)";
+	if (p_result.swrt_reduced) {
+		line += " SWRT_REDUCED";
 	}
-	if (p_result.tier == TIER_HWRT || p_result.tier == TIER_FALLBACK) {
+	if (p_result.tier == TIER_HWRT || p_result.tier == TIER_SOFTWARE) {
 		line += " quality=" + get_quality_name(resolve_quality(p_quality_setting));
 		if (p_quality_setting == QUALITY_AUTO) {
 			line += auto_reason.is_empty() ? " (auto selection pending)" : " (" + auto_reason + ")";
@@ -297,7 +390,9 @@ String NextGI::format_tier_line(const TierResult &p_result, Quality p_quality_se
 bool NextGI::update_tier(const TierInputs &p_inputs, Quality p_quality_setting, String &r_line) {
 	inputs = p_inputs;
 	quality_setting = p_quality_setting;
+	const bool reduced = swrt_reduced;
 	result = evaluate_tier(inputs);
+	result.swrt_reduced = reduced;
 
 	// GodotNext: ps_mesh_sdf_atlas (#185). keep_when_hwrt=false releases the
 	// brick pool while HWRT is active; the runtime tier switch is then disabled.
@@ -326,7 +421,7 @@ void NextGI::_report(const String &p_line, const TierResult &p_result) const {
 	print_line(p_line);
 	if (p_result.warn_force) {
 		// Worded without the "NextGI:" prefix, so the tier stays the only such line in the log.
-		WARN_PRINT(vformat("hardware_ray_tracing is Force, but the device has no ray query (%s). NextGI uses the SDFGI fallback.", get_reason_name(p_result.reason)));
+		WARN_PRINT(vformat("hardware_ray_tracing is Force, but the device has no ray query (%s). NextGI uses the software tier.", get_reason_name(p_result.reason)));
 	}
 }
 
@@ -344,8 +439,10 @@ void NextGI::init(bool p_forward_plus) {
 	_apply_safety_net(new_inputs);
 
 	String line;
-	if (update_tier(new_inputs, new_quality, line)) {
-		log_tier_selection(line);
+	const bool due = update_tier(new_inputs, new_quality, line);
+	_select_swrt_auto_quality();
+	if (due) {
+		log_tier_selection(format_tier_line(result, quality_setting));
 	}
 	_sync_device_lost_callback();
 
@@ -355,8 +452,23 @@ void NextGI::init(bool p_forward_plus) {
 
 void NextGI::set_hardware_ray_tracing(int p_mode) {
 	ERR_FAIL_INDEX(p_mode, HARDWARE_RAY_TRACING_MAX);
+	const HardwareRayTracing mode = HardwareRayTracing(p_mode);
+	bool keep = true;
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (ps != nullptr && ps->has_setting("rendering/global_illumination/mesh_sdf/keep_when_hwrt")) {
+		keep = bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/keep_when_hwrt"));
+	}
+	// Applying now is inside RUNTIME_TOGGLE_MAX_FRAMES. GS-8 times the switch.
+	static_assert(RUNTIME_TOGGLE_MAX_FRAMES == 2, "GS-8 measures the runtime toggle inside two frames.");
+	if (!runtime_toggle_applies(keep) && mode != inputs.hwrt_setting) {
+		if (!restart_toggle_warned) {
+			restart_toggle_warned = true;
+			WARN_PRINT("NextGI runtime tier toggle is EXPERIMENTAL and mesh_sdf/keep_when_hwrt is false, so hardware_ray_tracing waits for a restart.");
+		}
+		return;
+	}
 	TierInputs new_inputs = inputs;
-	new_inputs.hwrt_setting = HardwareRayTracing(p_mode);
+	new_inputs.hwrt_setting = mode;
 	// Doctests build their own NextGI. Only the renderer instance talks to the live device.
 	if (singleton == this) {
 		_apply_safety_net(new_inputs);
@@ -420,7 +532,7 @@ Dictionary NextGI::get_status() const {
 	Dictionary status;
 	status["mode"] = get_mode_name(nextgi_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/mode"))));
 	status["reflections"] = is_reflections_enabled();
-	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
+	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
 	status["tier"] = get_tier_name(result.tier);
 	status["reason"] = get_reason_name(result.reason);
 	status["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
@@ -436,6 +548,7 @@ Dictionary NextGI::get_status() const {
 		driver = OS::get_singleton()->get_current_rendering_driver_name();
 	}
 	status["driver"] = driver;
+	_append_swrt_info(status);
 	return status;
 }
 
@@ -668,7 +781,7 @@ Dictionary NextGI::get_tier_info() const {
 	Dictionary info;
 	info["tier"] = get_tier_name(result.tier);
 	info["reason"] = get_reason_name(result.reason);
-	const bool active = result.tier == TIER_HWRT || result.tier == TIER_FALLBACK;
+	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
 	info["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
 	info["ray_query_shaders_initialized"] = ray_query_shaders_initialized;
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
@@ -758,6 +871,7 @@ Dictionary NextGI::get_tier_info() const {
 		info["voxel_lighting_stored_hits"] = int64_t(voxel_lighting->get_stored_hits());
 		info["voxel_lighting_resampled_nonzero"] = int64_t(voxel_lighting->get_resampled_nonzero());
 	}
+	_append_swrt_info(info);
 	return info;
 }
 
@@ -836,7 +950,7 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 	}
 	voxel_lighting_tier = result.tier;
 	voxel_lighting_tier_valid = true;
-	if (result.tier != TIER_HWRT && result.tier != TIER_FALLBACK) {
+	if (result.tier != TIER_HWRT && result.tier != TIER_SOFTWARE) {
 		return;
 	}
 	// Empty scenes and reflection probes are not the scenario view. Stamp the
@@ -866,9 +980,9 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 	}
 	voxel_lighting->update_render(p_render_data, rt_scene, relight, src);
 	// GodotNext: ps_swrt_trace (#186). The ray-query builder marks a whole ShaderRD,
-	// so the software trace is a sibling of the HWRT gather and runs only while
-	// the fallback tier is active. #187 points the frame block at it.
-	if (result.tier == TIER_FALLBACK) {
+	// so the software trace is a sibling of the HWRT gather. The software tier
+	// stays out of the ray-query frame block (#187).
+	if (result.tier == TIER_SOFTWARE) {
 		if (swrt_trace == nullptr) {
 			swrt_trace = memnew(NextGISWRTTrace);
 		}
@@ -1174,7 +1288,7 @@ bool RendererRD::NextGI::run_toolchain_selftest(String &r_report) {
 		String reason = "DISABLED";
 		if (next_gi != nullptr) {
 			const TierResult tier = next_gi->get_tier_result();
-			reason = tier.tier == TIER_FALLBACK ? get_reason_name(tier.reason) : get_tier_name(tier.tier);
+			reason = tier.tier == TIER_SOFTWARE ? get_reason_name(tier.reason) : get_tier_name(tier.tier);
 		}
 		r_report = vformat("{\"pass\":false,\"reason\":\"%s\"}", reason);
 		return false;

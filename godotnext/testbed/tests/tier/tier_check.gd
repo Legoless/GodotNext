@@ -12,12 +12,12 @@ extends Node
 ##   [rendering]
 ##   global_illumination/nextgi/enabled=true
 ##
-## --expect=<NAME> names a tier (HWRT, FALLBACK, DISABLED, UNSUPPORTED_RENDERER) or a tier reason
+## --expect=<NAME> names a tier (HWRT, SWRT, DISABLED, UNSUPPORTED_RENDERER) or a tier reason
 ## (NO_RAY_QUERY, D3D12_NO_DXR, CPU_DEVICE, ...). Outside the HWRT tier the check also requires
 ## ray_query_shaders_initialized == 0. It prints one "GODOTNEXT_RESULT <json>" line and exits 0
 ## when every check passes, 1 otherwise.
 
-const TIERS: Array[String] = ["DISABLED", "HWRT", "FALLBACK", "UNSUPPORTED_RENDERER"]
+const TIERS: Array[String] = ["DISABLED", "HWRT", "SWRT", "UNSUPPORTED_RENDERER"]
 
 
 func _ready() -> void:

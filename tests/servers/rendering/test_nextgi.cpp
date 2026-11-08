@@ -160,7 +160,7 @@ TEST_CASE("[NextGI][Editor] Vulkan switch dialog names the HDR and DComp cost") 
 	const String text = NextGIEditorPlugin::get_vulkan_switch_dialog_text();
 
 	CHECK_EQ(title, "Use Vulkan on Windows for hardware RT");
-	CHECK(text.contains("SDFGI"));
+	CHECK(text.contains("software tier"));
 	CHECK(text.contains("Direct3D 12 fallback"));
 	CHECK(text.contains("HDR output"));
 	CHECK(text.contains("DComp transparency"));
@@ -168,15 +168,40 @@ TEST_CASE("[NextGI][Editor] Vulkan switch dialog names the HDR and DComp cost") 
 }
 
 TEST_CASE("[NextGI][Editor] View Information tier readout") {
-	Dictionary fallback;
-	fallback["tier"] = "FALLBACK";
-	fallback["reason"] = "NO_RAY_QUERY";
-	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(fallback), "NextGI: FALLBACK (NO_RAY_QUERY)");
+	Dictionary swrt;
+	swrt["tier"] = "SWRT";
+	swrt["reason"] = "NO_RAY_QUERY";
+	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(swrt), "NextGI: SWRT (NO_RAY_QUERY)");
 
 	Dictionary hwrt;
 	hwrt["tier"] = "HWRT";
 	hwrt["reason"] = "NONE";
 	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(hwrt), "NextGI: HWRT");
+
+	Dictionary disabled;
+	disabled["tier"] = "DISABLED";
+	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(disabled), "NextGI: SDFGI-legacy");
+
+	Dictionary lite;
+	lite["tier"] = "SWRT";
+	lite["reason"] = "SETTING_OFF";
+	lite["swrt_mode"] = "Global";
+	lite["lite_beta"] = true;
+	lite["swrt_reduced"] = true;
+	lite["experimental_toggle"] = true;
+	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(lite), "NextGI: SWRT (SETTING_OFF) mode=Global SWRT_REDUCED Lite Beta EXPERIMENTAL");
+	CHECK_FALSE(NextGIEditorPlugin::format_status_panel(lite).contains("SDFGI-legacy"));
+	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("SWRT"));
+	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("mode=Global"));
+	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("Lite Beta"));
+	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("EXPERIMENTAL"));
+	Dictionary legacy;
+	legacy["tier"] = "DISABLED";
+	legacy["reason"] = "NONE";
+	legacy["quality"] = "NONE";
+	legacy["quality_reason"] = "NONE";
+	legacy["driver"] = "metal";
+	CHECK(NextGIEditorPlugin::format_status_panel(legacy).begins_with("NextGI SDFGI-legacy"));
 
 	// The readout is off while nextgi/enabled is false (the default).
 	ProjectSettings *ps = ProjectSettings::get_singleton();
@@ -305,7 +330,7 @@ TEST_CASE("[NextGI][Denoise] RR hook override parses the documented keys") {
 
 #endif // TOOLS_ENABLED
 
-// Renderer-independent cases: the SDFGI fallback hook and the default (GLES3 and dummy) tier info.
+// Renderer-independent cases: SDFGI stays off while NextGI is on, and the dummy tier info.
 
 #include "scene/3d/world_environment.h"
 #include "scene/resources/environment.h"
@@ -314,37 +339,31 @@ TEST_CASE("[NextGI][Denoise] RR hook override parses the documented keys") {
 
 namespace TestNextGI {
 
-class FallbackSceneRender : public RasterizerSceneDummy {
-public:
-	bool fallback = false;
-
-protected:
-	virtual bool _nextgi_sdfgi_fallback() const override { return fallback; }
-};
-
-TEST_CASE("[NextGI] SDFGI runs for nextgi_enabled Environments only on the fallback tier") {
-	FallbackSceneRender scene_render;
+TEST_CASE("[NextGI] SDFGI stays off while NextGI is on and returns with its cascades when NextGI is off") {
+	RasterizerSceneDummy scene_render;
 	const RID env = scene_render.environment_allocate();
 	scene_render.environment_initialize(env);
 
-	// Neither SDFGI nor NextGI.
-	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
-	scene_render.fallback = true;
 	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
 
-	// NextGI on: SDFGI only while the tier is the fallback.
 	scene_render.environment_set_nextgi_enabled(env, true);
 	CHECK(scene_render.environment_get_nextgi_enabled(env));
-	CHECK(scene_render.environment_get_sdfgi_enabled(env));
-	scene_render.fallback = false;
 	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
 
-	// The Environment's own SDFGI is unchanged by the hook.
 	scene_render.environment_set_nextgi_enabled(env, false);
 	ERR_PRINT_OFF; // SDFGI warns once outside Forward+.
 	scene_render.environment_set_sdfgi(env, true, 4, 0.2, RSE::ENV_SDFGI_Y_SCALE_75_PERCENT, false, 0.5, true, 1.0, 1.1, 1.1);
 	ERR_PRINT_ON;
 	CHECK(scene_render.environment_get_sdfgi_enabled(env));
+	CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
+
+	scene_render.environment_set_nextgi_enabled(env, true);
+	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
+	CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
+
+	scene_render.environment_set_nextgi_enabled(env, false);
+	CHECK(scene_render.environment_get_sdfgi_enabled(env));
+	CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
 
 	scene_render.environment_free(env);
 }
@@ -394,10 +413,10 @@ TEST_CASE("[NextGI] RenderingServer round-trips nextgi energy and sky light on t
 	rs->free_rid(env);
 }
 
-TEST_CASE("[NextGI] Dummy status is fallback SETTING_OFF and counters stay zero") {
+TEST_CASE("[NextGI] Dummy status is SWRT with SETTING_OFF and counters stay zero") {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	const Dictionary status = rs->nextgi_get_status();
-	CHECK_EQ(String(status["tier"]), "FALLBACK");
+	CHECK_EQ(String(status["tier"]), "SWRT");
 	CHECK_EQ(String(status["reason"]), "SETTING_OFF");
 	CHECK_EQ(String(status["quality"]), "NONE");
 	CHECK_EQ(String(status["quality_reason"]), "NONE");
@@ -462,7 +481,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 	const PackedStringArray warnings = world->get_configuration_warnings();
 	bool found = false;
 	for (const String &warning : warnings) {
-		if (warning.contains("FALLBACK") && warning.contains("SETTING_OFF")) {
+		if (warning.contains("SWRT") && warning.contains("SETTING_OFF")) {
 			found = true;
 		}
 	}
@@ -556,7 +575,7 @@ TEST_CASE("[NextGI] Tier rule: an RTX GPU selects HWRT") {
 TEST_CASE("[NextGI] Tier rule: a GTX GPU off the RT-core allowlist gives NOT_HW_ACCELERATED") {
 	NextGI::TierInputs gtx = hwrt_inputs();
 	gtx.ray_query_hw = false; // Driver-emulated RT exposes ray query without RT cores.
-	check_tier(gtx, NextGI::TIER_FALLBACK, NextGI::NOT_HW_ACCELERATED);
+	check_tier(gtx, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
 }
 
 TEST_CASE("[NextGI] Tier rule: Force puts a GTX GPU on HWRT") {
@@ -569,82 +588,82 @@ TEST_CASE("[NextGI] Tier rule: Force puts a GTX GPU on HWRT") {
 TEST_CASE("[NextGI] Tier rule: RADV emulated RT gives NOT_HW_ACCELERATED") {
 	NextGI::TierInputs radv = hwrt_inputs();
 	radv.ray_query_hw = false; // RADV_PERFTEST=emulate_rt on a pre-RDNA2 GPU.
-	check_tier(radv, NextGI::TIER_FALLBACK, NextGI::NOT_HW_ACCELERATED);
+	check_tier(radv, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
 }
 
 TEST_CASE("[NextGI] Tier rule: lavapipe gives CPU_DEVICE, or NO_RAY_QUERY without ray query") {
 	NextGI::TierInputs lavapipe = hwrt_inputs();
 	lavapipe.cpu_device = true;
 	lavapipe.ray_query_hw = false;
-	check_tier(lavapipe, NextGI::TIER_FALLBACK, NextGI::CPU_DEVICE);
+	check_tier(lavapipe, NextGI::TIER_SOFTWARE, NextGI::CPU_DEVICE);
 
 	// The CPU check comes before the hardware flag, so a CPU device never reads as hardware.
 	lavapipe.ray_query_hw = true;
-	check_tier(lavapipe, NextGI::TIER_FALLBACK, NextGI::CPU_DEVICE);
+	check_tier(lavapipe, NextGI::TIER_SOFTWARE, NextGI::CPU_DEVICE);
 
 	NextGI::TierInputs lavapipe_no_rq = no_ray_query_inputs(NextGI::NO_RAY_QUERY);
 	lavapipe_no_rq.cpu_device = true;
-	check_tier(lavapipe_no_rq, NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+	check_tier(lavapipe_no_rq, NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
 TEST_CASE("[NextGI] Tier rule: Apple7 and Apple8 give NOT_HW_ACCELERATED") {
 	// The Metal ray-tracing API exists on M1 and M2, but there is no RT hardware (#48 feeds this).
 	NextGI::TierInputs apple = hwrt_inputs();
 	apple.ray_query_hw = false;
-	check_tier(apple, NextGI::TIER_FALLBACK, NextGI::NOT_HW_ACCELERATED);
+	check_tier(apple, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
 }
 
 TEST_CASE("[NextGI] Tier rule: D3D12 without DXR gives D3D12_NO_DXR") {
-	check_tier(no_ray_query_inputs(NextGI::D3D12_NO_DXR), NextGI::TIER_FALLBACK, NextGI::D3D12_NO_DXR);
+	check_tier(no_ray_query_inputs(NextGI::D3D12_NO_DXR), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
 }
 
 TEST_CASE("[NextGI] Tier rule: D3D12 under Force stays D3D12_NO_DXR, with the Force warning") {
 	NextGI::TierInputs d3d12 = no_ray_query_inputs(NextGI::D3D12_NO_DXR);
 	d3d12.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
-	check_tier(d3d12, NextGI::TIER_FALLBACK, NextGI::D3D12_NO_DXR, true);
+	check_tier(d3d12, NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR, true);
 }
 
 TEST_CASE("[NextGI] Tier rule: Intel UHD gives NO_RAY_QUERY") {
-	check_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+	check_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
 TEST_CASE("[NextGI] Tier rule: Metal without Barriers sync mode gives METAL_SYNC_MODE") {
-	check_tier(no_ray_query_inputs(NextGI::METAL_SYNC_MODE), NextGI::TIER_FALLBACK, NextGI::METAL_SYNC_MODE);
+	check_tier(no_ray_query_inputs(NextGI::METAL_SYNC_MODE), NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
 }
 
 TEST_CASE("[NextGI] Tier rule: Metal without argument buffers gives METAL_NO_ARGUMENT_BUFFERS") {
-	check_tier(no_ray_query_inputs(NextGI::METAL_NO_ARGUMENT_BUFFERS), NextGI::TIER_FALLBACK, NextGI::METAL_NO_ARGUMENT_BUFFERS);
+	check_tier(no_ray_query_inputs(NextGI::METAL_NO_ARGUMENT_BUFFERS), NextGI::TIER_SOFTWARE, NextGI::METAL_NO_ARGUMENT_BUFFERS);
 }
 
 TEST_CASE("[NextGI] Tier rule: a driver without a reason code gives NO_RAY_QUERY") {
-	check_tier(no_ray_query_inputs(NextGI::TIER_REASON_NONE), NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+	check_tier(no_ray_query_inputs(NextGI::TIER_REASON_NONE), NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 	// Only driver reason codes pass through.
-	check_tier(no_ray_query_inputs(NextGI::AS_MEMORY), NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+	check_tier(no_ray_query_inputs(NextGI::AS_MEMORY), NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
 TEST_CASE("[NextGI] Tier rule: hardware_ray_tracing Off gives SETTING_OFF") {
 	NextGI::TierInputs off = hwrt_inputs();
 	off.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_OFF;
-	check_tier(off, NextGI::TIER_FALLBACK, NextGI::SETTING_OFF);
+	check_tier(off, NextGI::TIER_SOFTWARE, NextGI::SETTING_OFF);
 
 	// Off is checked before the device.
 	NextGI::TierInputs off_no_rq = no_ray_query_inputs(NextGI::D3D12_NO_DXR);
 	off_no_rq.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_OFF;
-	check_tier(off_no_rq, NextGI::TIER_FALLBACK, NextGI::SETTING_OFF);
+	check_tier(off_no_rq, NextGI::TIER_SOFTWARE, NextGI::SETTING_OFF);
 }
 
 TEST_CASE("[NextGI] Tier rule: a failed self-test gives SELFTEST_FAILED, also under Force") {
 	NextGI::TierInputs failed = hwrt_inputs();
 	failed.selftest_passed = false;
-	check_tier(failed, NextGI::TIER_FALLBACK, NextGI::SELFTEST_FAILED);
+	check_tier(failed, NextGI::TIER_SOFTWARE, NextGI::SELFTEST_FAILED);
 	failed.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
-	check_tier(failed, NextGI::TIER_FALLBACK, NextGI::SELFTEST_FAILED);
+	check_tier(failed, NextGI::TIER_SOFTWARE, NextGI::SELFTEST_FAILED);
 }
 
 TEST_CASE("[NextGI] Tier rule: a latched HWRT fault gives HWRT_FAULTED") {
 	NextGI::TierInputs faulted = hwrt_inputs();
 	faulted.fault_latched = true;
-	check_tier(faulted, NextGI::TIER_FALLBACK, NextGI::HWRT_FAULTED);
+	check_tier(faulted, NextGI::TIER_SOFTWARE, NextGI::HWRT_FAULTED);
 }
 
 TEST_CASE("[NextGI] Tier rule: Force clears HWRT_FAULTED") {
@@ -657,9 +676,9 @@ TEST_CASE("[NextGI] Tier rule: Force clears HWRT_FAULTED") {
 TEST_CASE("[NextGI] Tier rule: an unmet AS memory budget gives AS_MEMORY") {
 	NextGI::TierInputs as_memory = hwrt_inputs();
 	as_memory.as_memory_ok = false;
-	check_tier(as_memory, NextGI::TIER_FALLBACK, NextGI::AS_MEMORY);
+	check_tier(as_memory, NextGI::TIER_SOFTWARE, NextGI::AS_MEMORY);
 	as_memory.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
-	check_tier(as_memory, NextGI::TIER_FALLBACK, NextGI::AS_MEMORY);
+	check_tier(as_memory, NextGI::TIER_SOFTWARE, NextGI::AS_MEMORY);
 }
 
 TEST_CASE("[NextGI] Tier rule: Mobile gives UNSUPPORTED_RENDERER") {
@@ -687,18 +706,18 @@ TEST_CASE("[NextGI] Tier rule: the first failing check wins") {
 	inputs.selftest_passed = false;
 	inputs.fault_latched = true;
 	inputs.as_memory_ok = false;
-	check_tier(inputs, NextGI::TIER_FALLBACK, NextGI::NOT_HW_ACCELERATED);
+	check_tier(inputs, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
 	inputs.ray_query_hw = true;
-	check_tier(inputs, NextGI::TIER_FALLBACK, NextGI::SELFTEST_FAILED);
+	check_tier(inputs, NextGI::TIER_SOFTWARE, NextGI::SELFTEST_FAILED);
 	inputs.selftest_passed = true;
-	check_tier(inputs, NextGI::TIER_FALLBACK, NextGI::HWRT_FAULTED);
+	check_tier(inputs, NextGI::TIER_SOFTWARE, NextGI::HWRT_FAULTED);
 	inputs.fault_latched = false;
-	check_tier(inputs, NextGI::TIER_FALLBACK, NextGI::AS_MEMORY);
+	check_tier(inputs, NextGI::TIER_SOFTWARE, NextGI::AS_MEMORY);
 	inputs.as_memory_ok = true;
 	check_tier(inputs, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
 }
 
-TEST_CASE("[NextGI] Tier and reason names are unique and cover all 10 reasons") {
+TEST_CASE("[NextGI] Tier and reason names are unique and cover the tier reasons") {
 	HashSet<String> names;
 	for (int i = 0; i < NextGI::TIER_MAX; i++) {
 		const String name = NextGI::get_tier_name(NextGI::Tier(i));
@@ -713,9 +732,10 @@ TEST_CASE("[NextGI] Tier and reason names are unique and cover all 10 reasons") 
 		CHECK_FALSE(name.is_empty());
 		names.insert(name);
 	}
-	// NONE plus the 10 reasons of plan §6.3.
-	CHECK_EQ(names.size(), 11u);
-	for (const char *reason : { "NO_RAY_QUERY", "NOT_HW_ACCELERATED", "CPU_DEVICE", "D3D12_NO_DXR", "METAL_SYNC_MODE", "METAL_NO_ARGUMENT_BUFFERS", "SETTING_OFF", "AS_MEMORY", "SELFTEST_FAILED", "HWRT_FAULTED" }) {
+	// NONE plus the §6.3 reasons and SWRT_REDUCED.
+	CHECK_EQ(names.size(), 12u);
+	CHECK_EQ(NextGI::get_tier_name(NextGI::TIER_SOFTWARE), "SWRT");
+	for (const char *reason : { "NO_RAY_QUERY", "NOT_HW_ACCELERATED", "CPU_DEVICE", "D3D12_NO_DXR", "METAL_SYNC_MODE", "METAL_NO_ARGUMENT_BUFFERS", "SETTING_OFF", "AS_MEMORY", "SELFTEST_FAILED", "HWRT_FAULTED", "SWRT_REDUCED" }) {
 		CHECK(names.has(reason));
 	}
 }
@@ -728,12 +748,12 @@ TEST_CASE("[NextGI] Device inputs: the G0-2 configurations with mocked device fe
 
 	// --gpu-index 0 on the RTX 4080 SUPER machine: the integrated UHD 770, no ray query.
 	result = evaluate_mocked_device(false, "Vulkan", RenderingDeviceEnums::DEVICE_TYPE_INTEGRATED_GPU);
-	CHECK_EQ(result.tier, NextGI::TIER_FALLBACK);
+	CHECK_EQ(result.tier, NextGI::TIER_SOFTWARE);
 	CHECK_EQ(result.reason, NextGI::NO_RAY_QUERY);
 
 	// --rendering-driver d3d12: no DXR until PD.
 	result = evaluate_mocked_device(false, "D3D12", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU);
-	CHECK_EQ(result.tier, NextGI::TIER_FALLBACK);
+	CHECK_EQ(result.tier, NextGI::TIER_SOFTWARE);
 	CHECK_EQ(result.reason, NextGI::D3D12_NO_DXR);
 	CHECK_FALSE(result.warn_force);
 
@@ -745,7 +765,7 @@ TEST_CASE("[NextGI] Device inputs: the G0-2 configurations with mocked device fe
 	// A mocked Metal device without ray query. The live M5 Max reports the same until #47
 	// flips the acceleration-structure gate. The [NextGI][Metal] cases feed the helper.
 	result = evaluate_mocked_device(false, "Metal", RenderingDeviceEnums::DEVICE_TYPE_INTEGRATED_GPU);
-	CHECK_EQ(result.tier, NextGI::TIER_FALLBACK);
+	CHECK_EQ(result.tier, NextGI::TIER_SOFTWARE);
 	CHECK_EQ(result.reason, NextGI::NO_RAY_QUERY);
 
 	// The Linux VM: lavapipe gives CPU_DEVICE with ray query, NO_RAY_QUERY without.
@@ -767,7 +787,7 @@ TEST_CASE("[NextGI] One tier line per change, and none while NextGI is disabled"
 
 	const NextGI::TierInputs d3d12 = no_ray_query_inputs(NextGI::D3D12_NO_DXR);
 	REQUIRE(next_gi.update_tier(d3d12, NextGI::QUALITY_AUTO, line));
-	CHECK_EQ(line, "NextGI: tier=FALLBACK reason=D3D12_NO_DXR (SDFGI fallback) quality=HIGH (auto selection pending)");
+	CHECK_EQ(line, "NextGI: tier=SWRT reason=D3D12_NO_DXR quality=HIGH (auto selection pending)");
 	CHECK_EQ(line.count("NextGI:"), 1);
 
 	// Re-evaluating the same inputs prints nothing.
@@ -779,14 +799,14 @@ TEST_CASE("[NextGI] One tier line per change, and none while NextGI is disabled"
 	NextGI::TierInputs off = d3d12;
 	off.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_OFF;
 	REQUIRE(next_gi.update_tier(off, NextGI::QUALITY_EPIC, line));
-	CHECK_EQ(line, "NextGI: tier=FALLBACK reason=SETTING_OFF (SDFGI fallback) quality=EPIC");
+	CHECK_EQ(line, "NextGI: tier=SWRT reason=SETTING_OFF quality=EPIC");
 
 	// Disabling prints nothing. Enabling again is a new selection, so it prints.
 	line = String();
 	CHECK_FALSE(next_gi.update_tier(disabled, NextGI::QUALITY_AUTO, line));
 	CHECK(line.is_empty());
 	REQUIRE(next_gi.update_tier(d3d12, NextGI::QUALITY_AUTO, line));
-	CHECK_EQ(line, "NextGI: tier=FALLBACK reason=D3D12_NO_DXR (SDFGI fallback) quality=HIGH (auto selection pending)");
+	CHECK_EQ(line, "NextGI: tier=SWRT reason=D3D12_NO_DXR quality=HIGH (auto selection pending)");
 }
 
 TEST_CASE("[NextGI] Tier line formats") {
@@ -806,19 +826,142 @@ TEST_CASE("[NextGI] Auto quality resolves to High until the microbenchmark lands
 	CHECK_EQ(NextGI::resolve_quality(NextGI::QUALITY_EPIC), NextGI::QUALITY_EPIC);
 }
 
+TEST_CASE("[NextGI] SWRT auto quality maps the mocked benchmark and the compute-unit class") {
+	CHECK_EQ(NextGI::swrt_auto_quality(1200, 16), NextGI::QUALITY_HIGH);
+	CHECK_EQ(NextGI::swrt_auto_quality(5000, 40), NextGI::QUALITY_HIGH);
+	CHECK_EQ(NextGI::swrt_auto_quality(5001, 40), NextGI::QUALITY_MEDIUM);
+	CHECK_EQ(NextGI::swrt_auto_quality(0, 40), NextGI::QUALITY_MEDIUM);
+	// A fast trace on a small GPU stays Medium.
+	CHECK_EQ(NextGI::swrt_auto_quality(1000, 8), NextGI::QUALITY_MEDIUM);
+	CHECK_EQ(NextGI::swrt_auto_quality(1000, 15), NextGI::QUALITY_MEDIUM);
+
+	CHECK_EQ(NextGI::swrt_compute_unit_class(24, 0), 24u);
+	CHECK_EQ(NextGI::swrt_compute_unit_class(0, 0), NextGI::SWRT_AUTO_COMPUTE_UNITS);
+	CHECK_EQ(NextGI::swrt_compute_unit_class(0, NextGI::SWRT_AUTO_MEMORY_FLOOR), NextGI::SWRT_AUTO_COMPUTE_UNITS);
+	CHECK_EQ(NextGI::swrt_compute_unit_class(0, NextGI::SWRT_AUTO_MEMORY_FLOOR - 1), 8u);
+
+	const String high = NextGI::format_swrt_auto_reason(2500, 16, NextGI::QUALITY_HIGH);
+	CHECK(high.begins_with("auto: sdf benchmark 2.50 ms, 16 compute units, HIGH"));
+	const String medium = NextGI::format_swrt_auto_reason(800, 8, NextGI::QUALITY_MEDIUM);
+	CHECK(medium.contains("MEDIUM"));
+	CHECK(medium.contains("8 compute units"));
+}
+
+TEST_CASE("[NextGI] SWRT drops global SDF levels to a floor of 3") {
+	const NextGI::SWRTLevelBudget full = NextGI::resolve_swrt_levels(6, 100, 600);
+	CHECK_EQ(full.levels, 6u);
+	CHECK_FALSE(full.reduced);
+
+	const NextGI::SWRTLevelBudget unknown = NextGI::resolve_swrt_levels(6, 0, 0);
+	CHECK_EQ(unknown.levels, 6u);
+	CHECK_FALSE(unknown.reduced);
+
+	const NextGI::SWRTLevelBudget dropped = NextGI::resolve_swrt_levels(6, 100, 450);
+	CHECK_EQ(dropped.levels, 4u);
+	CHECK(dropped.reduced);
+
+	const NextGI::SWRTLevelBudget floor = NextGI::resolve_swrt_levels(6, 100, 50);
+	CHECK_EQ(floor.levels, NextGI::SWRT_MIN_LEVELS);
+	CHECK(floor.reduced);
+
+	const NextGI::SWRTLevelBudget clamped = NextGI::resolve_swrt_levels(0, 0, 0);
+	CHECK_EQ(clamped.levels, 1u);
+	CHECK_FALSE(clamped.reduced);
+
+	NextGI::TierResult reduced_line;
+	reduced_line.tier = NextGI::TIER_SOFTWARE;
+	reduced_line.reason = NextGI::NO_RAY_QUERY;
+	reduced_line.swrt_reduced = true;
+	const String line = NextGI::format_tier_line(reduced_line, NextGI::QUALITY_HIGH);
+	CHECK(line.contains("reason=NO_RAY_QUERY"));
+	CHECK(line.contains("SWRT_REDUCED"));
+	CHECK_FALSE(line.contains("reason=SWRT_REDUCED"));
+	CHECK_EQ(NextGI::get_reason_name(NextGI::SWRT_REDUCED), "SWRT_REDUCED");
+}
+
+struct NextGIWarningCapture {
+	ErrorHandlerList handler;
+	int matches = 0;
+	NextGIWarningCapture() {
+		handler.errfunc = _capture;
+		handler.userdata = this;
+		add_error_handler(&handler);
+	}
+	~NextGIWarningCapture() {
+		remove_error_handler(&handler);
+	}
+	static void _capture(void *p_self, const char *p_function, const char *p_file, int p_line, const char *p_error, const char *p_message, bool p_editor_notify, ErrorHandlerType p_type) {
+		(void)p_function;
+		(void)p_file;
+		(void)p_line;
+		(void)p_editor_notify;
+		if (p_type != ERR_HANDLER_WARNING) {
+			return;
+		}
+		const char *text = (p_message != nullptr && *p_message != 0) ? p_message : p_error;
+		const String message = String::utf8(text != nullptr ? text : "");
+		if (message.contains("EXPERIMENTAL") && message.contains("restart")) {
+			static_cast<NextGIWarningCapture *>(p_self)->matches++;
+		}
+	}
+};
+
+TEST_CASE("[NextGI] Runtime toggle waits for a restart when keep_when_hwrt is false") {
+	CHECK(NextGI::runtime_toggle_applies(true));
+	CHECK_FALSE(NextGI::runtime_toggle_applies(false));
+	CHECK_EQ(NextGI::RUNTIME_TOGGLE_MAX_FRAMES, 2);
+
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const String keep_setting = "rendering/global_illumination/mesh_sdf/keep_when_hwrt";
+	const Variant previous_keep = ps->has_setting(keep_setting) ? ps->get_setting(keep_setting) : Variant(true);
+	struct KeepRestore {
+		ProjectSettings *ps = nullptr;
+		String setting;
+		Variant previous;
+		KeepRestore(ProjectSettings *p_ps, const String &p_setting, const Variant &p_previous) :
+				ps(p_ps), setting(p_setting), previous(p_previous) {}
+		~KeepRestore() {
+			if (ps != nullptr) {
+				ps->set_setting(setting, previous);
+			}
+		}
+	} restore(ps, keep_setting, previous_keep);
+	ps->set_setting(keep_setting, false);
+
+	NextGI next_gi;
+	String line;
+	next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_HIGH, line);
+	REQUIRE_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+
+	NextGIWarningCapture warnings;
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	CHECK_EQ(next_gi.get_tier_inputs().hwrt_setting, NextGI::HARDWARE_RAY_TRACING_AUTO);
+	CHECK_EQ(warnings.matches, 1);
+
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
+	CHECK_EQ(warnings.matches, 1);
+
+	ps->set_setting(keep_setting, true);
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_SOFTWARE);
+	CHECK_EQ(next_gi.get_tier_result().reason, NextGI::SETTING_OFF);
+	CHECK_EQ(warnings.matches, 1);
+}
+
 TEST_CASE("[NextGI] Ray-query ShaderRDs initialize only under the HWRT tier") {
 	NextGI next_gi;
 	String line;
 
-	// The M5 Max today: fallback, so no ray-query ShaderRD may initialize.
+	// The M5 Max today: software tier, so no ray-query ShaderRD may initialize.
 	next_gi.update_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::QUALITY_AUTO, line);
 	CHECK_FALSE(next_gi.can_initialize_ray_query_shaders());
-	CHECK(next_gi.is_sdfgi_fallback());
+	CHECK_FALSE(next_gi.is_sdfgi_fallback());
 	ERR_PRINT_OFF;
 	next_gi.notify_ray_query_shader_initialized();
 	ERR_PRINT_ON;
 	Dictionary info = next_gi.get_tier_info();
-	CHECK_EQ(String(info["tier"]), "FALLBACK");
+	CHECK_EQ(String(info["tier"]), "SWRT");
 	CHECK_EQ(String(info["reason"]), "NO_RAY_QUERY");
 	CHECK_EQ(String(info["quality"]), "HIGH");
 	CHECK_EQ(int(info["ray_query_shaders_initialized"]), 0);
@@ -832,7 +975,7 @@ TEST_CASE("[NextGI] Ray-query ShaderRDs initialize only under the HWRT tier") {
 	CHECK_EQ(String(info["tier"]), "HWRT");
 	CHECK_EQ(int(info["ray_query_shaders_initialized"]), 1);
 
-	// Disabled: neither ray-query shaders nor the SDFGI fallback.
+	// Disabled: neither ray-query shaders nor SDFGI.
 	NextGI::TierInputs disabled = hwrt_inputs();
 	disabled.project_enabled = false;
 	next_gi.update_tier(disabled, NextGI::QUALITY_AUTO, line);
@@ -847,7 +990,7 @@ TEST_CASE("[NextGI] Status reason stays a tier reason, and the tier view tints N
 	next_gi.update_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::QUALITY_AUTO, line);
 
 	const Dictionary status = next_gi.get_status();
-	CHECK_EQ(String(status["tier"]), "FALLBACK");
+	CHECK_EQ(String(status["tier"]), "SWRT");
 	CHECK_EQ(String(status["reason"]), "NO_RAY_QUERY");
 	CHECK_EQ(String(status["quality"]), "HIGH");
 	CHECK_EQ(String(status["quality_reason"]), "auto selection pending");
@@ -861,7 +1004,7 @@ TEST_CASE("[NextGI] Status reason stays a tier reason, and the tier view tints N
 	CHECK(tier_view.has_data);
 	CHECK(tier_view.tint.is_equal_approx(NextGI::debug_tint_fallback()));
 	CHECK(tier_view.label.contains("NO_RAY_QUERY"));
-	CHECK(tier_view.label.contains("FALLBACK"));
+	CHECK(tier_view.label.contains("SWRT"));
 
 	NextGI::TierResult hwrt;
 	hwrt.tier = NextGI::TIER_HWRT;
@@ -969,7 +1112,7 @@ TEST_CASE("[NextGI][Metal] Apple7 and Apple8 give NOT_HW_ACCELERATED, and HWRT u
 		CHECK(caps.ray_query);
 		CHECK_FALSE(caps.hardware);
 		CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
-		check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::NOT_HW_ACCELERATED);
+		check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
 		check_metal_tier(caps, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE, NextGI::HARDWARE_RAY_TRACING_FORCE);
 	}
 }
@@ -989,19 +1132,19 @@ TEST_CASE("[NextGI][Metal] No Barriers sync gives METAL_SYNC_MODE") {
 	CHECK_FALSE(caps.ray_query);
 	CHECK_FALSE(caps.hardware);
 	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE);
-	check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::METAL_SYNC_MODE);
+	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
 
 	// Barriers is checked before argument buffers.
 	const RenderingDeviceDriver::MetalRayQueryCaps both = metal_family(1010, false, false);
 	CHECK_EQ(both.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_SYNC_MODE);
-	check_metal_tier(both, NextGI::TIER_FALLBACK, NextGI::METAL_SYNC_MODE);
+	check_metal_tier(both, NextGI::TIER_SOFTWARE, NextGI::METAL_SYNC_MODE);
 }
 
 TEST_CASE("[NextGI][Metal] Argument buffers off gives METAL_NO_ARGUMENT_BUFFERS") {
 	const RenderingDeviceDriver::MetalRayQueryCaps caps = metal_family(1010, true, false);
 	CHECK_FALSE(caps.ray_query);
 	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS);
-	check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::METAL_NO_ARGUMENT_BUFFERS);
+	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::METAL_NO_ARGUMENT_BUFFERS);
 }
 
 TEST_CASE("[NextGI][Metal] macOS 13 gives NO_RAY_QUERY") {
@@ -1009,7 +1152,7 @@ TEST_CASE("[NextGI][Metal] macOS 13 gives NO_RAY_QUERY") {
 	CHECK_FALSE(caps.ray_query);
 	CHECK_FALSE(caps.hardware);
 	CHECK_EQ(caps.reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
-	check_metal_tier(caps, NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+	check_metal_tier(caps, NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
 TEST_CASE("[NextGI][Metal] A missing ray-query capability gives NO_RAY_QUERY") {
@@ -1017,7 +1160,7 @@ TEST_CASE("[NextGI][Metal] A missing ray-query capability gives NO_RAY_QUERY") {
 	CHECK_EQ(metal_family(1010, true, true, true, 14, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
 	CHECK_EQ(metal_family(1010, true, true, true, 14, true, 20300).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
 	CHECK_EQ(metal_family(1010, true, true, true, 14, true, RenderingDeviceDriver::METAL_RAY_QUERY_MIN_MSL, false).reason, RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
-	check_metal_tier(metal_family(1009, true, true, false), NextGI::TIER_FALLBACK, NextGI::NO_RAY_QUERY);
+	check_metal_tier(metal_family(1009, true, true, false), NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
 }
 
 TEST_CASE("[NextGI][Metal] The acceleration structure instance size is 72") {
@@ -1080,7 +1223,7 @@ TEST_CASE("[NextGI] Frame block: HWRT views with nextgi_enabled only, never refl
 	// The unshaded debug draw.
 	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, true));
 
-	// No other tier runs the block. The fallback tier keeps SDFGI and process_gi.
+	// No other tier runs the ray-query block. The software tier traces SDF beside voxel lighting.
 	for (int tier = 0; tier < NextGI::TIER_MAX; tier++) {
 		if (tier == NextGI::TIER_HWRT) {
 			continue;

@@ -47,7 +47,7 @@ private:
 
 	// GodotNext: nextgi_fallback
 protected:
-	// True when the NextGI tier is the SDFGI fallback. The RD renderer overrides it.
+	// Retained for ABI. NextGI no longer selects SDFGI (#187). The RD override stays false.
 	virtual bool _nextgi_sdfgi_fallback() const { return false; }
 
 public:
@@ -272,7 +272,7 @@ public:
 	bool environment_get_nextgi_fog_on_reflection_hits(RID p_env) const;
 	bool environment_get_nextgi_translucency_front_layer_reflections(RID p_env) const;
 	float environment_get_nextgi_scene_view_distance(RID p_env) const;
-	// GLES3 and the dummy renderer keep these defaults: no NextGI tier and no SDFGI fallback.
+	// GLES3 and the dummy renderer keep these defaults: no NextGI tier and no software trace.
 	virtual void nextgi_set_hardware_ray_tracing(int p_mode) {}
 	virtual Dictionary nextgi_get_tier_info() const;
 

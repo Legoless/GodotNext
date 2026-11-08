@@ -27,7 +27,7 @@ extends Node
 ## The block's DEV_ASSERT traps a dev_build binary. Other builds print an error and skip the block,
 ## which fails the timestamp check.
 ##
-## --expect=inactive (DISABLED or FALLBACK): no NextGI timestamp on any frame.
+## --expect=inactive (DISABLED or SWRT): no NextGI timestamp on any frame.
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 

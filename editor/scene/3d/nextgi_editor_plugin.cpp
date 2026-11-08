@@ -177,22 +177,51 @@ bool NextGIEditorPlugin::should_show_inspector_vulkan_button(const String &p_hos
 	return p_host_os == "Windows" && p_driver_windows == "d3d12";
 }
 
+static String _nextgi_overlay_tier_name(const String &p_tier) {
+	return p_tier == "DISABLED" ? String("SDFGI-legacy") : p_tier;
+}
+
+static String _nextgi_overlay_suffix(const Dictionary &p_info) {
+	String suffix;
+	const String mode = p_info.get("swrt_mode", String());
+	if (!mode.is_empty()) {
+		suffix += " mode=" + mode;
+	}
+	if (bool(p_info.get("swrt_reduced", false))) {
+		suffix += " SWRT_REDUCED";
+	}
+	if (bool(p_info.get("lite_beta", false))) {
+		suffix += " Lite Beta";
+	}
+	if (bool(p_info.get("experimental_toggle", false))) {
+		suffix += " EXPERIMENTAL";
+	}
+	return suffix;
+}
+
 String NextGIEditorPlugin::format_status_panel(const Dictionary &p_status) {
-	return vformat("NextGI %s (%s), quality %s (%s), driver %s", String(p_status.get("tier", String())), String(p_status.get("reason", String())), String(p_status.get("quality", String())), String(p_status.get("quality_reason", String())), String(p_status.get("driver", String())));
+	const String tier = _nextgi_overlay_tier_name(p_status.get("tier", String()));
+	String line = vformat("NextGI %s (%s), quality %s (%s), driver %s", tier, String(p_status.get("reason", String())), String(p_status.get("quality", String())), String(p_status.get("quality_reason", String())), String(p_status.get("driver", String())));
+	line += _nextgi_overlay_suffix(p_status);
+	return line;
 }
 
 String NextGIEditorPlugin::get_vulkan_switch_dialog_text() {
-	// P0 copy. Until the software tier lands, a d3d12 project with NextGI on still runs SDFGI.
-	return TTR("NextGI hardware RT is not yet available on Direct3D 12, so SDFGI is used; switching sets the Windows driver to Vulkan and keeps the Direct3D 12 fallback; Windows builds lose HDR output and DComp transparency; a restart is required.");
+	// A d3d12 project with NextGI on runs the software tier (#187).
+	return TTR("NextGI hardware RT is not yet available on Direct3D 12, so the software tier is used; switching sets the Windows driver to Vulkan and keeps the Direct3D 12 fallback; Windows builds lose HDR output and DComp transparency; a restart is required.");
 }
 
 String NextGIEditorPlugin::format_tier_readout(const Dictionary &p_tier_info) {
-	const String tier = p_tier_info.get("tier", String());
+	const String tier = _nextgi_overlay_tier_name(p_tier_info.get("tier", String()));
 	const String reason = p_tier_info.get("reason", String());
+	String line;
 	if (reason.is_empty() || reason == "NONE") {
-		return vformat("NextGI: %s", tier);
+		line = vformat("NextGI: %s", tier);
+	} else {
+		line = vformat("NextGI: %s (%s)", tier, reason);
 	}
-	return vformat("NextGI: %s (%s)", tier, reason);
+	line += _nextgi_overlay_suffix(p_tier_info);
+	return line;
 }
 
 String NextGIEditorPlugin::get_tier_readout() {

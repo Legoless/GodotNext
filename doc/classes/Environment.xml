@@ -201,7 +201,7 @@
 			[b]Note:[/b] [member glow_strength] has no effect when using the Compatibility rendering method, due to this rendering method using a simpler glow implementation optimized for low-end devices.
 		</member>
 		<member name="nextgi_enabled" type="bool" setter="set_nextgi_enabled" getter="is_nextgi_enabled" default="false">
-			If [code]true[/code], this environment uses NextGI global illumination when [member ProjectSettings.rendering/global_illumination/nextgi/enabled] is also [code]true[/code]. The project-wide NextGI tier decides what runs; see [method RenderingServer.nextgi_get_tier_info]. On the [code]FALLBACK[/code] tier, the environment runs SDFGI with its [code]sdfgi_*[/code] properties, as if [member sdfgi_enabled] were [code]true[/code].
+			If [code]true[/code], this environment uses NextGI global illumination when [member ProjectSettings.rendering/global_illumination/nextgi/enabled] is also [code]true[/code]. The project-wide NextGI tier decides what runs; see [method RenderingServer.nextgi_get_tier_info]. On the [code]SWRT[/code] tier the environment traces distance fields and does not run SDFGI. SDFGI uses this environment's [code]sdfgi_*[/code] properties only while NextGI is off.
 			[b]Note:[/b] NextGI is only available when using the Forward+ rendering method.
 			Emissive surfaces smaller than four card texels (4 cm) are not resolved by the radiance cache; author them as lights instead. NextGI warns once per mesh when it finds one, and counts it in [code]src_emissive_below_card_res[/code].
 		</member>

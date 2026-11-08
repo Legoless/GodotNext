@@ -380,13 +380,13 @@ TEST_CASE("[NextGeo][Cards] Mocked device without ray tracing allocates zero pro
 	d3d12_inputs.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_AUTO;
 	NextGI::collect_device_inputs(mock_rd, "D3D12", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU, d3d12_inputs);
 	const NextGI::TierResult d3d12_tier = NextGI::evaluate_tier(d3d12_inputs);
-	CHECK(d3d12_tier.tier == NextGI::TIER_FALLBACK);
+	CHECK(d3d12_tier.tier == NextGI::TIER_SOFTWARE);
 	CHECK(d3d12_tier.reason == NextGI::D3D12_NO_DXR);
 
 	NextGI::TierInputs vk_no_rq_inputs = d3d12_inputs;
 	NextGI::collect_device_inputs(mock_rd, "Vulkan", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU, vk_no_rq_inputs);
 	const NextGI::TierResult vk_no_rq_tier = NextGI::evaluate_tier(vk_no_rq_inputs);
-	CHECK(vk_no_rq_tier.tier == NextGI::TIER_FALLBACK);
+	CHECK(vk_no_rq_tier.tier == NextGI::TIER_SOFTWARE);
 	CHECK(vk_no_rq_tier.reason == NextGI::NO_RAY_QUERY);
 	memdelete(mock_rd);
 
