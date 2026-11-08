@@ -468,6 +468,9 @@
 			If [code]true[/code], the viewport should render its background as transparent.
 			[b]Note:[/b] Due to technical limitations, certain rendering features are disabled when a viewport has a transparent background. This currently applies to screen-space reflections, subsurface scattering, and depth of field.
 		</member>
+		<member name="tsr_quality" type="int" setter="set_tsr_quality" getter="get_tsr_quality" enum="Viewport.TSRQuality" default="3">
+			Determines the Temporal Super Resolution (TSR) quality preset used when [member scaling_3d_mode] is set to [constant SCALING_3D_MODE_TSR]. Initialized from [member ProjectSettings.rendering/anti_aliasing/tsr/quality].
+		</member>
 		<member name="use_debanding" type="bool" setter="set_use_debanding" getter="is_using_debanding" default="false">
 			When using the Mobile or Forward+ renderers, set [member use_debanding] to enable or disable the debanding feature of this [Viewport]. If [member use_hdr_2d] is [code]false[/code], 2D rendering is [i]not[/i] affected by debanding unless the [member Environment.background_mode] is [constant Environment.BG_CANVAS]. If [member use_hdr_2d] is [code]true[/code], debanding will only be applied if this is the root [Viewport] and will affect all 2D and 3D rendering, including canvas items.
 			[member use_debanding] has no effect when using the Compatibility rendering method. The Mobile renderer can also use material debanding, which can be set with [method RenderingServer.material_set_use_debanding] or configured with [member ProjectSettings.rendering/anti_aliasing/quality/use_debanding].
@@ -588,8 +591,32 @@
 		<constant name="SCALING_3D_MODE_DLSS" value="6" enum="Scaling3DMode">
 			Use NVIDIA DLSS for 3D resolution scaling when it is available; otherwise the viewport falls back to MetalFX temporal or FSR 2.
 		</constant>
-		<constant name="SCALING_3D_MODE_MAX" value="7" enum="Scaling3DMode">
+		<constant name="SCALING_3D_MODE_TSR" value="7" enum="Scaling3DMode">
+			Use Temporal Super Resolution (TSR) for 3D resolution scaling and antialiasing. Supports [member scaling_3d_scale] values between [code]0.25[/code] and [code]2.0[/code] (values outside that range are clamped, and values above [code]1.0[/code] supersample). Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant SCALING_3D_MODE_BILINEAR].
+		</constant>
+		<constant name="SCALING_3D_MODE_CUSTOM" value="8" enum="Scaling3DMode">
+			Use a registered custom temporal upscaler extension for 3D resolution scaling. Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant SCALING_3D_MODE_BILINEAR].
+		</constant>
+		<constant name="SCALING_3D_MODE_MAX" value="9" enum="Scaling3DMode">
 			Represents the size of the [enum Scaling3DMode] enum.
+		</constant>
+		<constant name="TSR_QUALITY_LOW" value="0" enum="TSRQuality">
+			Lowest TSR cost preset: 100% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing disabled.
+		</constant>
+		<constant name="TSR_QUALITY_MEDIUM" value="1" enum="TSRQuality">
+			Medium TSR preset: 100% history resolution with history resurrection and rejection antialiasing enabled.
+		</constant>
+		<constant name="TSR_QUALITY_HIGH" value="2" enum="TSRQuality">
+			High TSR preset: 100% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing enabled.
+		</constant>
+		<constant name="TSR_QUALITY_EPIC" value="3" enum="TSRQuality">
+			Default Epic TSR preset: 200% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing enabled.
+		</constant>
+		<constant name="TSR_QUALITY_CINEMATIC" value="4" enum="TSRQuality">
+			Highest quality Cinematic TSR preset: 200% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing enabled.
+		</constant>
+		<constant name="TSR_QUALITY_MAX" value="5" enum="TSRQuality">
+			Represents the size of the [enum TSRQuality] enum.
 		</constant>
 		<constant name="MSAA_DISABLED" value="0" enum="MSAA">
 			Multisample antialiasing mode disabled. This is the default value, and is also the fastest setting.

@@ -44,6 +44,7 @@ private:
 	uint32_t view_count = 1;
 
 	RSE::ViewportScaling3DMode scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
+	RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
 	RSE::ViewportMSAA msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
 	RSE::ViewportScreenSpaceAA screen_space_aa = RSE::VIEWPORT_SCREEN_SPACE_AA_DISABLED;
 	RSE::ViewportAnisotropicFiltering anisotropic_filtering_level = RSE::VIEWPORT_ANISOTROPY_4X;
@@ -80,6 +81,9 @@ public:
 
 	float get_fsr_sharpness() const { return fsr_sharpness; }
 	void set_fsr_sharpness(float p_fsr_sharpness) { fsr_sharpness = p_fsr_sharpness; }
+
+	RSE::ViewportTSRQuality get_tsr_quality() const { return tsr_quality; }
+	void set_tsr_quality(RSE::ViewportTSRQuality p_tsr_quality) { tsr_quality = p_tsr_quality; }
 
 	float get_texture_mipmap_bias() const { return texture_mipmap_bias; }
 	void set_texture_mipmap_bias(float p_texture_mipmap_bias) { texture_mipmap_bias = p_texture_mipmap_bias; }

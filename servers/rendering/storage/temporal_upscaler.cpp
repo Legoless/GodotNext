@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -62,5 +62,7 @@ String TemporalUpscalerRegistry::build_mode_hint(bool p_metal) {
 	if (get(RSE::VIEWPORT_SCALING_3D_MODE_DLSS) != nullptr) {
 		hints.push_back("DLSS (Slow):6");
 	}
+	hints.push_back("TSR:7");
+	hints.push_back("Custom:8");
 	return String(",").join(hints);
 }

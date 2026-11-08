@@ -40,6 +40,7 @@
 #include "servers/rendering/renderer_canvas_cull.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+#include "servers/rendering/renderer_rd/effects/tsr_presets.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 #include "servers/rendering/renderer_scene_occlusion_cull.h"
 #include "servers/rendering/rendering_device.h"
@@ -173,7 +174,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 		} else {
 			const float EPSILON = 0.0001;
 			float scaling_3d_scale = p_viewport->scaling_3d_scale;
-			RSE::ViewportScaling3DMode scaling_3d_mode = p_viewport->scaling_3d_mode;
+			RSE::ViewportScaling3DMode scaling_3d_mode = p_viewport->requested_scaling_3d_mode;
 			// GodotNext: pu_dlss_scaling_mode (#103). The setter keeps the
 			// request; this records the reason and the effective scale.
 			p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_NONE;
@@ -196,16 +197,24 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				}
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
-				WARN_PRINT_ONCE("MetalFX, FSR and DLSS upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
+				WARN_PRINT_ONCE("MetalFX, FSR, DLSS and TSR upscaling are not supported in the Compatibility renderer. Falling back to bilinear scaling.");
 			}
 
-			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
+			if ((scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_FSR2 || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR || scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM) && OS::get_singleton()->get_current_rendering_method() == "mobile") {
 				if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS) {
 					p_viewport->scaling_3d_reason = RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED;
 				}
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
-				WARN_PRINT_ONCE("MetalFX temporal and FSR upscaling are not supported in the Mobile renderer. Falling back to bilinear scaling.");
+				WARN_PRINT_ONCE("MetalFX temporal, FSR, DLSS and TSR upscaling are not supported in the Mobile renderer. Falling back to bilinear scaling.");
+			}
+
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR && upscaler_available) {
+				bool tsr_scale_clamped = false;
+				scaling_3d_scale = nextgi_clamp_tsr_scale(scaling_3d_scale, tsr_scale_clamped);
+				if (tsr_scale_clamped) {
+					WARN_PRINT_ONCE("TSR 3D resolution scale must be between 0.25 and 2.0. Clamping scale to [0.25, 2.0].");
+				}
 			}
 
 			RenderingServerEnums::ViewportMSAA msaa_3d = p_viewport->msaa_3d;
@@ -294,12 +303,13 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			bool scaling_3d_is_not_bilinear = scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_OFF && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 			bool use_taa = p_viewport->use_taa;
 
-			if (scaling_3d_is_not_bilinear && scaling_3d_scale >= (1.0 + EPSILON)) {
+			if (scaling_3d_is_not_bilinear && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_TSR && scaling_3d_scale >= (1.0 + EPSILON)) {
 				// FSR, MetalFX, and nearest-neighbor scaling are not designed for downsampling.
 				// Fall back to bilinear scaling.
 				WARN_PRINT_ONCE("FSR, MetalFX, and nearest-neighbor 3D resolution scaling are not designed for downsampling. Falling back to bilinear 3D resolution scaling.");
 				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR;
 				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
+				scaling_3d_is_not_bilinear = false;
 			}
 
 			if (scaling_3d_is_not_bilinear && scaling_3d_mode != RSE::VIEWPORT_SCALING_3D_MODE_NEAREST && !upscaler_available) {
@@ -312,6 +322,11 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 
 			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_DLSS && msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
 				WARN_PRINT_ONCE("DLSS does not support 3D MSAA. Disabling 3D MSAA internally.");
+				msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
+			}
+
+			if (scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR && msaa_3d != RSE::VIEWPORT_MSAA_DISABLED) {
+				WARN_PRINT_ONCE("TSR does not support 3D MSAA. Disabling 3D MSAA internally.");
 				msaa_3d = RSE::VIEWPORT_MSAA_DISABLED;
 			}
 
@@ -359,6 +374,13 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 					render_width = MAX(target_width * scaling_3d_scale, 1.0); // target_width / (target_width * scaling)
 					render_height = MAX(target_height * scaling_3d_scale, 1.0);
 					break;
+				case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+				case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
+					target_width = p_viewport->size.width;
+					target_height = p_viewport->size.height;
+					render_width = CLAMP(target_width * scaling_3d_scale, 1, 16384);
+					render_height = CLAMP(target_height * scaling_3d_scale, 1, 16384);
+					break;
 				case RSE::VIEWPORT_SCALING_3D_MODE_OFF:
 					target_width = p_viewport->size.width;
 					target_height = p_viewport->size.height;
@@ -405,6 +427,7 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 			rb_config.set_msaa_3d(msaa_3d);
 			rb_config.set_screen_space_aa(p_viewport->screen_space_aa);
 			rb_config.set_fsr_sharpness(p_viewport->fsr_sharpness);
+			rb_config.set_tsr_quality(p_viewport->tsr_quality);
 			rb_config.set_texture_mipmap_bias(texture_mipmap_bias);
 			rb_config.set_anisotropic_filtering_level(p_viewport->anisotropic_filtering_level);
 			rb_config.set_use_taa(use_taa);
@@ -1188,7 +1211,11 @@ Dictionary RendererViewport::viewport_get_scaling_3d_status(RID p_viewport) cons
 	status["active_mode"] = viewport->scaling_3d_mode;
 	status["reason"] = viewport->scaling_3d_reason;
 	status["effective_scale"] = viewport->effective_scaling_3d_scale;
-	status["preset"] = int(GLOBAL_GET("rendering/scaling_3d/dlss/preset"));
+	if (viewport->requested_scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR || viewport->scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR) {
+		status["preset"] = int(viewport->tsr_quality);
+	} else {
+		status["preset"] = int(GLOBAL_GET("rendering/scaling_3d/dlss/preset"));
+	}
 	return status;
 }
 
@@ -1223,7 +1250,7 @@ void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::Viewpor
 		return;
 	}
 
-	if (viewport->scaling_3d_mode == p_mode) {
+	if (viewport->requested_scaling_3d_mode == p_mode) {
 		return;
 	}
 
@@ -1247,6 +1274,19 @@ void RendererViewport::viewport_set_fsr_sharpness(RID p_viewport, float p_sharpn
 	_configure_3d_render_buffers(viewport);
 }
 
+void RendererViewport::viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) {
+	ERR_FAIL_INDEX(p_quality, RSE::VIEWPORT_TSR_QUALITY_MAX);
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+
+	if (viewport->tsr_quality == p_quality) {
+		return;
+	}
+
+	viewport->tsr_quality = p_quality;
+	_configure_3d_render_buffers(viewport);
+}
+
 void RendererViewport::viewport_set_texture_mipmap_bias(RID p_viewport, float p_mipmap_bias) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
@@ -1266,6 +1306,14 @@ void RendererViewport::viewport_set_anisotropic_filtering_level(RID p_viewport, 
 void RendererViewport::viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
+
+	if (viewport->requested_scaling_3d_mode == RSE::VIEWPORT_SCALING_3D_MODE_TSR && viewport->fsr_enabled && OS::get_singleton()->get_current_rendering_method() == "forward_plus") {
+		bool tsr_scale_clamped = false;
+		nextgi_clamp_tsr_scale(p_scaling_3d_scale, tsr_scale_clamped);
+		if (tsr_scale_clamped) {
+			WARN_PRINT_ONCE("TSR 3D resolution scale must be between 0.25 and 2.0. Clamping scale to [0.25, 2.0].");
+		}
+	}
 
 	// Clamp to reasonable values that are actually useful.
 	// Values above 2.0 don't serve a practical purpose since the viewport
@@ -1302,7 +1350,7 @@ void RendererViewport::_viewport_set_size(Viewport *p_viewport, int p_width, int
 
 bool RendererViewport::_viewport_requires_motion_vectors(Viewport *p_viewport) {
 	return p_viewport->use_taa ||
-			RSE::scaling_3d_mode_type(p_viewport->scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL ||
+			RSE::scaling_3d_mode_type(p_viewport->requested_scaling_3d_mode) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL ||
 			p_viewport->debug_draw == RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS || p_viewport->force_motion_vectors;
 }
 

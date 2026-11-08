@@ -4634,6 +4634,14 @@
 				If [code]true[/code], the viewport renders its background as transparent.
 			</description>
 		</method>
+		<method name="viewport_set_tsr_quality">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="quality" type="int" enum="RenderingServer.ViewportTSRQuality" />
+			<description>
+				Sets the Temporal Super Resolution (TSR) quality preset used by the viewport when [constant VIEWPORT_SCALING_3D_MODE_TSR] is active. Equivalent to [member Viewport.tsr_quality].
+			</description>
+		</method>
 		<method name="viewport_set_update_mode">
 			<return type="void" />
 			<param index="0" name="viewport" type="RID" />
@@ -5582,8 +5590,32 @@
 		<constant name="VIEWPORT_SCALING_3D_MODE_DLSS" value="6" enum="ViewportScaling3DMode">
 			Use NVIDIA DLSS for 3D resolution scaling. DLSS is only usable on an NVIDIA RTX device with Vulkan and a developer-built module; otherwise the viewport falls back to MetalFX temporal or FSR 2 and reports a [enum ViewportScaling3DReason].
 		</constant>
-		<constant name="VIEWPORT_SCALING_3D_MODE_MAX" value="7" enum="ViewportScaling3DMode">
+		<constant name="VIEWPORT_SCALING_3D_MODE_TSR" value="7" enum="ViewportScaling3DMode">
+			Use Temporal Super Resolution (TSR) for 3D resolution scaling and antialiasing. Supports scales between [code]0.25[/code] and [code]2.0[/code] (supersampling above [code]1.0[/code]). Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant VIEWPORT_SCALING_3D_MODE_BILINEAR].
+		</constant>
+		<constant name="VIEWPORT_SCALING_3D_MODE_CUSTOM" value="8" enum="ViewportScaling3DMode">
+			Use a registered custom temporal upscaler extension for 3D resolution scaling. Only supported in the Forward+ renderer; Mobile and Compatibility fall back to [constant VIEWPORT_SCALING_3D_MODE_BILINEAR].
+		</constant>
+		<constant name="VIEWPORT_SCALING_3D_MODE_MAX" value="9" enum="ViewportScaling3DMode">
 			Represents the size of the [enum ViewportScaling3DMode] enum.
+		</constant>
+		<constant name="VIEWPORT_TSR_QUALITY_LOW" value="0" enum="ViewportTSRQuality">
+			Lowest TSR cost preset: 100% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing disabled.
+		</constant>
+		<constant name="VIEWPORT_TSR_QUALITY_MEDIUM" value="1" enum="ViewportTSRQuality">
+			Medium TSR preset: 100% history resolution with history resurrection and rejection antialiasing enabled.
+		</constant>
+		<constant name="VIEWPORT_TSR_QUALITY_HIGH" value="2" enum="ViewportTSRQuality">
+			High TSR preset: 100% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing enabled.
+		</constant>
+		<constant name="VIEWPORT_TSR_QUALITY_EPIC" value="3" enum="ViewportTSRQuality">
+			Default Epic TSR preset: 200% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing enabled.
+		</constant>
+		<constant name="VIEWPORT_TSR_QUALITY_CINEMATIC" value="4" enum="ViewportTSRQuality">
+			Highest quality Cinematic TSR preset: 200% history resolution with history resurrection, reprojection field, flicker analysis, and rejection antialiasing enabled.
+		</constant>
+		<constant name="VIEWPORT_TSR_QUALITY_MAX" value="5" enum="ViewportTSRQuality">
+			Represents the size of the [enum ViewportTSRQuality] enum.
 		</constant>
 		<constant name="VIEWPORT_SCALING_3D_REASON_NONE" value="0" enum="ViewportScaling3DReason">
 			The requested mode is active.

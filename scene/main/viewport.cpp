@@ -5149,6 +5149,22 @@ float Viewport::get_fsr_sharpness() const {
 	return fsr_sharpness;
 }
 
+void Viewport::set_tsr_quality(TSRQuality p_tsr_quality) {
+	ERR_MAIN_THREAD_GUARD;
+	ERR_FAIL_INDEX(p_tsr_quality, TSR_QUALITY_MAX);
+	if (tsr_quality == p_tsr_quality) {
+		return;
+	}
+
+	tsr_quality = p_tsr_quality;
+	RS::get_singleton()->viewport_set_tsr_quality(viewport, (RSE::ViewportTSRQuality)(int)p_tsr_quality);
+}
+
+Viewport::TSRQuality Viewport::get_tsr_quality() const {
+	ERR_READ_THREAD_GUARD_V(TSR_QUALITY_EPIC);
+	return tsr_quality;
+}
+
 void Viewport::set_texture_mipmap_bias(float p_texture_mipmap_bias) {
 	ERR_MAIN_THREAD_GUARD;
 	if (texture_mipmap_bias == p_texture_mipmap_bias) {
@@ -5385,6 +5401,9 @@ void Viewport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_fsr_sharpness", "fsr_sharpness"), &Viewport::set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("get_fsr_sharpness"), &Viewport::get_fsr_sharpness);
 
+	ClassDB::bind_method(D_METHOD("set_tsr_quality", "tsr_quality"), &Viewport::set_tsr_quality);
+	ClassDB::bind_method(D_METHOD("get_tsr_quality"), &Viewport::get_tsr_quality);
+
 	ClassDB::bind_method(D_METHOD("set_texture_mipmap_bias", "texture_mipmap_bias"), &Viewport::set_texture_mipmap_bias);
 	ClassDB::bind_method(D_METHOD("get_texture_mipmap_bias"), &Viewport::get_texture_mipmap_bias);
 
@@ -5425,11 +5444,12 @@ void Viewport::_bind_methods() {
 
 #ifndef _3D_DISABLED
 	ADD_GROUP("Scaling 3D", "");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "scaling_3d_mode", PROPERTY_HINT_ENUM, "Nearest (Fastest):5,Bilinear (Fastest):0,FSR 1.0 (Fast):1,FSR 2.2 (Slow):2,MetalFX (Spatial - Fast):3,MetalFX (Temporal - Slow):4"), "set_scaling_3d_mode", "get_scaling_3d_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "scaling_3d_mode", PROPERTY_HINT_ENUM, "Nearest (Fastest):5,Bilinear (Fastest):0,FSR 1.0 (Fast):1,FSR 2.2 (Slow):2,MetalFX (Spatial - Fast):3,MetalFX (Temporal - Slow):4,TSR:7,Custom:8"), "set_scaling_3d_mode", "get_scaling_3d_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "scaling_3d_scale", PROPERTY_HINT_RANGE, "0.1,2.0,0.0001"), "set_scaling_3d_scale", "get_scaling_3d_scale");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "texture_mipmap_bias", PROPERTY_HINT_RANGE, "-2,2,0.001"), "set_texture_mipmap_bias", "get_texture_mipmap_bias");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "anisotropic_filtering_level", PROPERTY_HINT_ENUM, String::utf8("Disabled (Fastest),2× (Faster),4× (Fast),8× (Average),16x (Slow)")), "set_anisotropic_filtering_level", "get_anisotropic_filtering_level");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), "set_fsr_sharpness", "get_fsr_sharpness");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "tsr_quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Epic,Cinematic"), "set_tsr_quality", "get_tsr_quality");
 	ADD_GROUP("Variable Rate Shading", "vrs_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "vrs_mode", PROPERTY_HINT_ENUM, "Disabled,Texture,XR"), "set_vrs_mode", "get_vrs_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "vrs_update_mode", PROPERTY_HINT_ENUM, "Disabled,Once,Always"), "set_vrs_update_mode", "get_vrs_update_mode");
@@ -5492,7 +5512,16 @@ void Viewport::_bind_methods() {
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_METALFX_TEMPORAL);
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_NEAREST);
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_DLSS);
+	BIND_ENUM_CONSTANT(SCALING_3D_MODE_TSR);
+	BIND_ENUM_CONSTANT(SCALING_3D_MODE_CUSTOM);
 	BIND_ENUM_CONSTANT(SCALING_3D_MODE_MAX);
+
+	BIND_ENUM_CONSTANT(TSR_QUALITY_LOW);
+	BIND_ENUM_CONSTANT(TSR_QUALITY_MEDIUM);
+	BIND_ENUM_CONSTANT(TSR_QUALITY_HIGH);
+	BIND_ENUM_CONSTANT(TSR_QUALITY_EPIC);
+	BIND_ENUM_CONSTANT(TSR_QUALITY_CINEMATIC);
+	BIND_ENUM_CONSTANT(TSR_QUALITY_MAX);
 
 	BIND_ENUM_CONSTANT(MSAA_DISABLED);
 	BIND_ENUM_CONSTANT(MSAA_2X);
@@ -5668,6 +5697,7 @@ Viewport::Viewport() {
 	set_scaling_3d_mode((Viewport::Scaling3DMode)(int)GLOBAL_GET("rendering/scaling_3d/mode"));
 	set_scaling_3d_scale(GLOBAL_GET("rendering/scaling_3d/scale"));
 	set_fsr_sharpness((float)GLOBAL_GET("rendering/scaling_3d/fsr_sharpness"));
+	set_tsr_quality((Viewport::TSRQuality)(int)GLOBAL_GET("rendering/anti_aliasing/tsr/quality"));
 	set_texture_mipmap_bias((float)GLOBAL_GET("rendering/textures/default_filters/texture_mipmap_bias"));
 	set_anisotropic_filtering_level((Viewport::AnisotropicFiltering)(int)GLOBAL_GET("rendering/textures/default_filters/anisotropic_filtering_level"));
 #endif // _3D_DISABLED

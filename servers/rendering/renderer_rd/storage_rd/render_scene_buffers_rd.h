@@ -88,6 +88,7 @@ private:
 	// The internal size of the textures we render 3D to in case we render at a lower resolution and upscale
 	Size2i internal_size = Size2i(0, 0);
 	RSE::ViewportScaling3DMode scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
+	RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
 	float fsr_sharpness = 0.2f;
 	float texture_mipmap_bias = 0.0f;
 	TemporalHistoryReset temporal_history_reset;
@@ -250,6 +251,7 @@ public:
 	_FORCE_INLINE_ Size2i get_internal_size() const { return internal_size; }
 	_FORCE_INLINE_ Size2i get_target_size() const { return target_size; }
 	_FORCE_INLINE_ RSE::ViewportScaling3DMode get_scaling_3d_mode() const { return scaling_3d_mode; }
+	_FORCE_INLINE_ RSE::ViewportTSRQuality get_tsr_quality() const { return tsr_quality; }
 	_FORCE_INLINE_ float get_fsr_sharpness() const { return fsr_sharpness; }
 	_FORCE_INLINE_ RSE::ViewportMSAA get_msaa_3d() const { return msaa_3d; }
 	_FORCE_INLINE_ RD::TextureSamples get_texture_samples() const { return texture_samples; }

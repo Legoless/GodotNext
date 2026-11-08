@@ -32,11 +32,14 @@
 
 TEST_FORCE_LINK(test_upscalers)
 
+#include "core/config/project_settings.h"
 #include "scene/main/viewport.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+#include "servers/rendering/renderer_rd/effects/tsr_presets.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_enums.h"
+#include "servers/rendering/storage/render_scene_buffers.h"
 
 namespace {
 
@@ -78,12 +81,12 @@ public:
 } // namespace
 
 TEST_CASE("[Upscalers] DLSS enum values and type") {
-	// GodotNext: pu_dlss_scaling_mode (#103), GU-1.
+	// GodotNext: pu_dlss_scaling_mode (#103), pt_tsr_mode_presets (#197), GU-1.
 	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_NEAREST), 5);
 	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_DLSS), 6);
-	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_MAX), 7);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_MAX), 9);
 	CHECK_EQ(int(Viewport::SCALING_3D_MODE_DLSS), 6);
-	CHECK_EQ(int(Viewport::SCALING_3D_MODE_MAX), 7);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_MAX), 9);
 	CHECK(RSE::scaling_3d_mode_type(RSE::VIEWPORT_SCALING_3D_MODE_DLSS) == RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL);
 }
 
@@ -214,4 +217,198 @@ TEST_CASE("[Upscalers] Temporal history reset is one-shot") {
 	reset.request();
 	CHECK(reset.consume());
 	CHECK_FALSE(reset.consume());
+}
+
+TEST_CASE("[Upscalers][TSR] Enum values, types, and mode hints") {
+	// GodotNext: pt_tsr_mode_presets (#197), GT-1 subset.
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR), 0);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_FSR), 1);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_FSR2), 2);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_METALFX_SPATIAL), 3);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL), 4);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_NEAREST), 5);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_DLSS), 6);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_TSR), 7);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM), 8);
+	CHECK_EQ(int(RSE::VIEWPORT_SCALING_3D_MODE_MAX), 9);
+
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_BILINEAR), 0);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_FSR), 1);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_FSR2), 2);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_METALFX_SPATIAL), 3);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_METALFX_TEMPORAL), 4);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_NEAREST), 5);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_DLSS), 6);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_TSR), 7);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_CUSTOM), 8);
+	CHECK_EQ(int(Viewport::SCALING_3D_MODE_MAX), 9);
+
+	CHECK_EQ(RSE::scaling_3d_mode_type(RSE::VIEWPORT_SCALING_3D_MODE_TSR), RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL);
+	CHECK_EQ(RSE::scaling_3d_mode_type(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM), RSE::VIEWPORT_SCALING_3D_TYPE_TEMPORAL);
+
+	CHECK_EQ(int(RSE::VIEWPORT_TSR_QUALITY_LOW), 0);
+	CHECK_EQ(int(RSE::VIEWPORT_TSR_QUALITY_MEDIUM), 1);
+	CHECK_EQ(int(RSE::VIEWPORT_TSR_QUALITY_HIGH), 2);
+	CHECK_EQ(int(RSE::VIEWPORT_TSR_QUALITY_EPIC), 3);
+	CHECK_EQ(int(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC), 4);
+	CHECK_EQ(int(RSE::VIEWPORT_TSR_QUALITY_MAX), 5);
+
+	CHECK_EQ(int(Viewport::TSR_QUALITY_LOW), 0);
+	CHECK_EQ(int(Viewport::TSR_QUALITY_MEDIUM), 1);
+	CHECK_EQ(int(Viewport::TSR_QUALITY_HIGH), 2);
+	CHECK_EQ(int(Viewport::TSR_QUALITY_EPIC), 3);
+	CHECK_EQ(int(Viewport::TSR_QUALITY_CINEMATIC), 4);
+	CHECK_EQ(int(Viewport::TSR_QUALITY_MAX), 5);
+
+	TemporalUpscalerRegistry::clear();
+	const String non_metal_hint = TemporalUpscalerRegistry::build_mode_hint(false);
+	const String metal_hint = TemporalUpscalerRegistry::build_mode_hint(true);
+	CHECK(non_metal_hint.contains("TSR:7"));
+	CHECK(non_metal_hint.contains("Custom:8"));
+	CHECK(metal_hint.contains("TSR:7"));
+	CHECK(metal_hint.contains("Custom:8"));
+}
+
+TEST_CASE("[Upscalers][TSR] Preset table and project settings") {
+	// Low: 1.0, off, off, off, off.
+	CHECK_EQ(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_LOW].history_scale, 1.0f);
+	CHECK_FALSE(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_LOW].resurrection);
+	CHECK_FALSE(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_LOW].reprojection_field);
+	CHECK_FALSE(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_LOW].flicker_analysis);
+	CHECK_FALSE(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_LOW].rejection_aa);
+
+	// Medium: 1.0, on, off, off, on.
+	CHECK_EQ(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_MEDIUM].history_scale, 1.0f);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_MEDIUM].resurrection);
+	CHECK_FALSE(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_MEDIUM].reprojection_field);
+	CHECK_FALSE(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_MEDIUM].flicker_analysis);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_MEDIUM].rejection_aa);
+
+	// High: 1.0, on, on, on, on.
+	CHECK_EQ(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_HIGH].history_scale, 1.0f);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_HIGH].resurrection);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_HIGH].reprojection_field);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_HIGH].flicker_analysis);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_HIGH].rejection_aa);
+
+	// Epic: 2.0, on, on, on, on.
+	CHECK_EQ(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_EPIC].history_scale, 2.0f);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_EPIC].resurrection);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_EPIC].reprojection_field);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_EPIC].flicker_analysis);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_EPIC].rejection_aa);
+
+	// Cinematic: 2.0, on, on, on, on.
+	CHECK_EQ(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_CINEMATIC].history_scale, 2.0f);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_CINEMATIC].resurrection);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_CINEMATIC].reprojection_field);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_CINEMATIC].flicker_analysis);
+	CHECK(TSR_PRESETS[RSE::VIEWPORT_TSR_QUALITY_CINEMATIC].rejection_aa);
+
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	CHECK(ps->has_setting("rendering/anti_aliasing/tsr/quality"));
+	CHECK_EQ(int(ps->get_setting("rendering/anti_aliasing/tsr/quality")), int(RSE::VIEWPORT_TSR_QUALITY_EPIC));
+	CHECK(ps->has_setting("rendering/anti_aliasing/tsr/thin_geometry_detection"));
+	CHECK_FALSE(bool(ps->get_setting("rendering/anti_aliasing/tsr/thin_geometry_detection")));
+}
+
+TEST_CASE("[Upscalers][TSR] Scale clamp, renderer fallbacks, MSAA and TAA rules") {
+	// Scale 0.2 -> 0.25, 2.5 -> 2.0, 1.5 stays TSR (supersampling).
+	const TSRScalingResolution low_scale = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_TSR, 0.2f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(low_scale.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK(Math::is_equal_approx(low_scale.scale, 0.25f));
+	CHECK(low_scale.scale_clamped);
+
+	const TSRScalingResolution high_scale = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_TSR, 2.5f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(high_scale.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK(Math::is_equal_approx(high_scale.scale, 2.0f));
+	CHECK(high_scale.scale_clamped);
+
+	const TSRScalingResolution supersample = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_TSR, 1.5f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(supersample.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK(Math::is_equal_approx(supersample.scale, 1.5f));
+	CHECK_FALSE(supersample.scale_clamped);
+
+	const TSRScalingResolution min_edge = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_TSR, 0.25f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(min_edge.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK(Math::is_equal_approx(min_edge.scale, 0.25f));
+	CHECK_FALSE(min_edge.scale_clamped);
+
+	const TSRScalingResolution max_edge = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_TSR, 2.0f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(max_edge.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK(Math::is_equal_approx(max_edge.scale, 2.0f));
+	CHECK_FALSE(max_edge.scale_clamped);
+
+	// Non-TSR modes still fall back to bilinear when scale > 1.0.
+	const TSRScalingResolution fsr2_downsample = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_FSR2, 1.5f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(fsr2_downsample.mode, RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR);
+
+	// CUSTOM stays CUSTOM on Forward+ when scale <= 1.0 and upscalers are available.
+	const TSRScalingResolution custom_forward = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM, 0.75f, "forward_plus", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK_EQ(custom_forward.mode, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
+
+	// Mobile and Compatibility resolve TSR and CUSTOM to bilinear.
+	for (RSE::ViewportScaling3DMode mode : { RSE::VIEWPORT_SCALING_3D_MODE_TSR, RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM }) {
+		const TSRScalingResolution mobile = nextgi_resolve_tsr_scaling(
+				mode, 0.75f, "mobile", true, false, RSE::VIEWPORT_MSAA_DISABLED);
+		CHECK_EQ(mobile.mode, RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR);
+
+		const TSRScalingResolution compat = nextgi_resolve_tsr_scaling(
+				mode, 0.75f, "gl_compatibility", false, false, RSE::VIEWPORT_MSAA_DISABLED);
+		CHECK_EQ(compat.mode, RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR);
+
+		const TSRScalingResolution unavailable = nextgi_resolve_tsr_scaling(
+				mode, 0.75f, "forward_plus", false, false, RSE::VIEWPORT_MSAA_DISABLED);
+		CHECK_EQ(unavailable.mode, RSE::VIEWPORT_SCALING_3D_MODE_BILINEAR);
+	}
+
+	// use_taa is forced off and 3D MSAA is disabled internally under TSR.
+	const TSRScalingResolution taa_and_msaa = nextgi_resolve_tsr_scaling(
+			RSE::VIEWPORT_SCALING_3D_MODE_TSR, 0.75f, "forward_plus", true, true, RSE::VIEWPORT_MSAA_4X);
+	CHECK_EQ(taa_and_msaa.mode, RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	CHECK_FALSE(taa_and_msaa.use_taa);
+	CHECK(taa_and_msaa.taa_disabled);
+	CHECK_EQ(taa_and_msaa.msaa_3d, RSE::VIEWPORT_MSAA_DISABLED);
+	CHECK(taa_and_msaa.msaa_disabled);
+}
+
+TEST_CASE("[SceneTree][Upscalers][TSR] Viewport and RenderSceneBuffersConfiguration plumbing") {
+	Ref<RenderSceneBuffersConfiguration> config;
+	config.instantiate();
+	CHECK_EQ(config->get_tsr_quality(), RSE::VIEWPORT_TSR_QUALITY_EPIC);
+	for (int q = 0; q < RSE::VIEWPORT_TSR_QUALITY_MAX; q++) {
+		config->set("tsr_quality", q);
+		CHECK_EQ(int(config->get("tsr_quality")), q);
+		CHECK_EQ(int(config->get_tsr_quality()), q);
+	}
+
+	SubViewport *vp = memnew(SubViewport);
+	CHECK_EQ(vp->get_tsr_quality(), Viewport::TSR_QUALITY_EPIC);
+	vp->set_scaling_3d_mode(Viewport::SCALING_3D_MODE_TSR);
+	CHECK_EQ(vp->get_scaling_3d_mode(), Viewport::SCALING_3D_MODE_TSR);
+	vp->set_tsr_quality(Viewport::TSR_QUALITY_HIGH);
+	CHECK_EQ(vp->get_tsr_quality(), Viewport::TSR_QUALITY_HIGH);
+
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	Dictionary status = rs->viewport_get_scaling_3d_status(vp->get_viewport_rid());
+	CHECK_EQ(int(status["requested_mode"]), int(RSE::VIEWPORT_SCALING_3D_MODE_TSR));
+	CHECK_EQ(int(status["preset"]), int(RSE::VIEWPORT_TSR_QUALITY_HIGH));
+
+	rs->viewport_set_tsr_quality(vp->get_viewport_rid(), RSE::VIEWPORT_TSR_QUALITY_CINEMATIC);
+	status = rs->viewport_get_scaling_3d_status(vp->get_viewport_rid());
+	CHECK_EQ(int(status["preset"]), int(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC));
+
+	vp->set_scaling_3d_mode(Viewport::SCALING_3D_MODE_CUSTOM);
+	CHECK_EQ(vp->get_scaling_3d_mode(), Viewport::SCALING_3D_MODE_CUSTOM);
+
+	memdelete(vp);
 }

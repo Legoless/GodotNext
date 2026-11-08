@@ -107,7 +107,18 @@ public:
 		SCALING_3D_MODE_METALFX_TEMPORAL,
 		SCALING_3D_MODE_NEAREST,
 		SCALING_3D_MODE_DLSS,
+		SCALING_3D_MODE_TSR,
+		SCALING_3D_MODE_CUSTOM,
 		SCALING_3D_MODE_MAX
+	};
+
+	enum TSRQuality {
+		TSR_QUALITY_LOW,
+		TSR_QUALITY_MEDIUM,
+		TSR_QUALITY_HIGH,
+		TSR_QUALITY_EPIC,
+		TSR_QUALITY_CINEMATIC,
+		TSR_QUALITY_MAX
 	};
 
 	enum PositionalShadowAtlasQuadrantSubdiv {
@@ -357,6 +368,7 @@ private:
 	Scaling3DMode scaling_3d_mode = SCALING_3D_MODE_BILINEAR;
 	float scaling_3d_scale = 1.0;
 	float fsr_sharpness = 0.2f;
+	TSRQuality tsr_quality = TSR_QUALITY_EPIC;
 	float texture_mipmap_bias = 0.0f;
 	AnisotropicFiltering anisotropic_filtering_level = ANISOTROPY_4X;
 	bool use_debanding = false;
@@ -644,6 +656,9 @@ public:
 
 	void set_fsr_sharpness(float p_fsr_sharpness);
 	float get_fsr_sharpness() const;
+
+	void set_tsr_quality(TSRQuality p_tsr_quality);
+	TSRQuality get_tsr_quality() const;
 
 	void set_texture_mipmap_bias(float p_texture_mipmap_bias);
 	float get_texture_mipmap_bias() const;
@@ -996,6 +1011,7 @@ public:
 	SubViewport();
 };
 VARIANT_ENUM_CAST(Viewport::Scaling3DMode);
+VARIANT_ENUM_CAST(Viewport::TSRQuality);
 VARIANT_ENUM_CAST(SubViewport::UpdateMode);
 VARIANT_ENUM_CAST(Viewport::PositionalShadowAtlasQuadrantSubdiv);
 VARIANT_ENUM_CAST(Viewport::MSAA);

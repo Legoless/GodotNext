@@ -62,6 +62,7 @@ public:
 		float effective_scaling_3d_scale = 1.0f;
 		float scaling_3d_scale = 1.0;
 		float fsr_sharpness = 0.2f;
+		RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
 		float texture_mipmap_bias = 0.0f;
 		RSE::ViewportAnisotropicFiltering anisotropic_filtering_level = RSE::VIEWPORT_ANISOTROPY_4X;
 		bool fsr_enabled = false;
@@ -242,6 +243,7 @@ public:
 	void viewport_reset_temporal_history(RID p_viewport);
 	void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale);
 	void viewport_set_fsr_sharpness(RID p_viewport, float p_sharpness);
+	void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality);
 	void viewport_set_texture_mipmap_bias(RID p_viewport, float p_mipmap_bias);
 	void viewport_set_anisotropic_filtering_level(RID p_viewport, RSE::ViewportAnisotropicFiltering p_anisotropic_filtering_level);
 

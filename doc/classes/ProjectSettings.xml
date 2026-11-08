@@ -2933,6 +2933,12 @@
 		<member name="rendering/anti_aliasing/screen_space_roughness_limiter/limit" type="float" setter="" getter="" default="0.18">
 			[b]Note:[/b] This property is only read when the project starts. To control the screen-space roughness limiter at runtime, call [method RenderingServer.screen_space_roughness_limiter_set_active] instead.
 		</member>
+		<member name="rendering/anti_aliasing/tsr/quality" type="int" setter="" getter="" default="3">
+			Default quality preset for Temporal Super Resolution (TSR) when [member rendering/scaling_3d/mode] or [member Viewport.scaling_3d_mode] is set to TSR. Higher presets enable history resurrection, reprojection fields, flicker analysis, rejection antialiasing, and 200% history buffers. See [enum Viewport.TSRQuality] and [member Viewport.tsr_quality].
+		</member>
+		<member name="rendering/anti_aliasing/tsr/thin_geometry_detection" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], enables thin-geometry detection in Temporal Super Resolution (TSR) to preserve sub-pixel wires, foliage, and fences at the cost of extra GPU work.
+		</member>
 		<member name="rendering/camera/depth_of_field/depth_of_field_bokeh_quality" type="int" setter="" getter="" default="1">
 			Sets the quality of the depth of field effect. Higher quality takes more samples, which is slower but looks smoother.
 		</member>

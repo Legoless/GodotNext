@@ -805,6 +805,7 @@ public:
 	FUNC1(viewport_reset_temporal_history, RID)
 	FUNC2(viewport_set_scaling_3d_scale, RID, float)
 	FUNC2(viewport_set_fsr_sharpness, RID, float)
+	FUNC2(viewport_set_tsr_quality, RID, RSE::ViewportTSRQuality)
 	FUNC2(viewport_set_texture_mipmap_bias, RID, float)
 	FUNC2(viewport_set_anisotropic_filtering_level, RID, RSE::ViewportAnisotropicFiltering)
 

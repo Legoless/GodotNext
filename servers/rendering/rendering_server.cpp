@@ -3011,6 +3011,7 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_routing_counters"), &RenderingServer::virtual_geometry_get_routing_counters);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
+	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);
 	ClassDB::bind_method(D_METHOD("viewport_set_anisotropic_filtering_level", "viewport", "anisotropic_filtering_level"), &RenderingServer::viewport_set_anisotropic_filtering_level);
 	ClassDB::bind_method(D_METHOD("viewport_set_update_mode", "viewport", "update_mode"), &RenderingServer::viewport_set_update_mode);
@@ -3070,7 +3071,16 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_METALFX_TEMPORAL);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_NEAREST);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_DLSS);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_TSR);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_MODE_MAX);
+
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_LOW);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_MEDIUM);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_EPIC);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_TSR_QUALITY_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_NONE);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_SCALING_3D_REASON_RENDERER_UNSUPPORTED);
@@ -3974,6 +3984,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF_RST(PropertyInfo(Variant::FLOAT, "rendering/anti_aliasing/quality/smaa_edge_detection_threshold", PROPERTY_HINT_RANGE, "0.01,0.2,0.01"), 0.05);
 
 	GLOBAL_DEF("rendering/anti_aliasing/quality/use_debanding", false);
+	// GodotNext: pt_tsr_mode_presets (#197).
+	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "rendering/anti_aliasing/tsr/quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Epic,Cinematic"), RSE::VIEWPORT_TSR_QUALITY_EPIC);
+	GLOBAL_DEF("rendering/anti_aliasing/tsr/thin_geometry_detection", false);
 
 	{
 		// GodotNext: pu_dlss_scaling_mode (#103). DLSS is only listed while an

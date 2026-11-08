@@ -30,9 +30,8 @@
 
 #include "render_scene_buffers.h"
 
-#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
-
 #include "core/object/class_db.h"
+#include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/rendering_server.h" // IWYU pragma: keep // Needed to bind RSE enums.
 
 void RenderSceneBuffersConfiguration::_bind_methods() {
@@ -68,6 +67,10 @@ void RenderSceneBuffersConfiguration::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_fsr_sharpness"), &RenderSceneBuffersConfiguration::get_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("set_fsr_sharpness", "fsr_sharpness"), &RenderSceneBuffersConfiguration::set_fsr_sharpness);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "fsr_sharpness"), "set_fsr_sharpness", "get_fsr_sharpness");
+
+	ClassDB::bind_method(D_METHOD("get_tsr_quality"), &RenderSceneBuffersConfiguration::get_tsr_quality);
+	ClassDB::bind_method(D_METHOD("set_tsr_quality", "tsr_quality"), &RenderSceneBuffersConfiguration::set_tsr_quality);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "tsr_quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Epic,Cinematic"), "set_tsr_quality", "get_tsr_quality");
 
 	ClassDB::bind_method(D_METHOD("get_texture_mipmap_bias"), &RenderSceneBuffersConfiguration::get_texture_mipmap_bias);
 	ClassDB::bind_method(D_METHOD("set_texture_mipmap_bias", "texture_mipmap_bias"), &RenderSceneBuffersConfiguration::set_texture_mipmap_bias);

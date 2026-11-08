@@ -37,6 +37,9 @@
 			Bias applied to mipmaps.
 			[b]Note:[/b] This property is only supported in the Forward+ and Mobile renderers, not Compatibility. In Compatibility, this property is always treated as if it was set to [code]0.0[/code].
 		</member>
+		<member name="tsr_quality" type="int" setter="set_tsr_quality" getter="get_tsr_quality" enum="RenderingServer.ViewportTSRQuality" default="3">
+			Quality preset applied when [member scaling_3d_mode] is [constant RenderingServer.VIEWPORT_SCALING_3D_MODE_TSR].
+		</member>
 		<member name="view_count" type="int" setter="set_view_count" getter="get_view_count" default="1">
 			The number of views we're rendering.
 		</member>

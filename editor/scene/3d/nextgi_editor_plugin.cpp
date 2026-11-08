@@ -221,6 +221,10 @@ static String _upscaler_mode_name(int p_mode, float p_scale) {
 			return "MetalFX Temporal";
 		case RSE::VIEWPORT_SCALING_3D_MODE_NEAREST:
 			return "Nearest";
+		case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+			return "TSR";
+		case RSE::VIEWPORT_SCALING_3D_MODE_CUSTOM:
+			return "Custom";
 		default:
 			return "Off";
 	}
