@@ -69,6 +69,11 @@
 #define RB_TEX_NEXTGEO_VISIBILITY SNAME("visibility")
 #define RB_TEX_NEXTGEO_INSTANCE_ID SNAME("instance_id")
 
+// GodotNext: megalights_inputs (#136)
+#define RB_SCOPE_MEGALIGHTS SNAME("megalights")
+#define RB_TEX_ML_ALBEDO SNAME("ml_albedo")
+#define RB_TEX_ML_MATERIAL SNAME("ml_material")
+
 class RenderSceneBuffersRD : public RenderSceneBuffers {
 	GDCLASS(RenderSceneBuffersRD, RenderSceneBuffers);
 
@@ -364,6 +369,16 @@ public:
 	bool has_nextgeo_targets() const;
 	RID get_nextgeo_visibility() const;
 	RID get_nextgeo_instance_id() const;
+
+	// GodotNext: megalights_inputs (#136). RGBA8 direct-light inputs, allocated
+	// only while MegaLights inputs are requested for a view without MSAA.
+	void ensure_megalights_inputs();
+	void free_megalights_inputs();
+	bool has_megalights_inputs() const;
+	RID get_ml_albedo() const;
+	RID get_ml_material() const;
+	RID get_ml_albedo(uint32_t p_layer);
+	RID get_ml_material(uint32_t p_layer);
 
 	// Samplers adjusted with the mipmap bias that is best fit for the configuration of these render buffers.
 

@@ -50,6 +50,10 @@ public:
 		SHADER_GROUP_MULTIVIEW,
 		SHADER_GROUP_ADVANCED_MULTIVIEW,
 		SHADER_GROUP_NEXTGEO,
+		// GodotNext: megalights_inputs (#136). Off unless this view writes inputs.
+		SHADER_GROUP_MEGALIGHTS,
+		SHADER_GROUP_MEGALIGHTS_MULTIVIEW,
+		SHADER_GROUP_NEXTGEO_MEGALIGHTS,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -79,6 +83,39 @@ public:
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_MOTION_VECTORS = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 4;
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 5;
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COUNT = 6;
+		// GodotNext: megalights_inputs (#136). Appended after the visibility-resolve
+		// block so SHADER_VERSION_COLOR_PASS and its flag indices stay put.
+		constexpr static uint16_t SHADER_VERSION_MEGALIGHTS_INPUTS_BASE = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + SHADER_VERSION_VISIBILITY_RESOLVE_COUNT;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 0;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 1;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 2;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 3;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_MULTIVIEW = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 4;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_MULTIVIEW = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 5;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 6;
+		constexpr static uint16_t SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 7;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_ML = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 8;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 9;
+		constexpr static uint16_t SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT = 10;
+		// Ubershader twins of the eight depth variants. The render list falls back to these
+		// while the specialized pipeline compiles, and that path supplies the 32-byte push constant.
+		constexpr static uint16_t SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT = 8;
+		// GodotNext: megalights_inputs (#136). init() pushes these groups, default off.
+		static constexpr bool MEGALIGHTS_VARIANTS_DEFAULT_ENABLED = false;
+		static constexpr ShaderGroup megalights_variant_group(uint16_t p_relative) {
+			uint16_t index = p_relative;
+			if (index >= SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT) {
+				index = uint16_t(index - SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT);
+			}
+			if (index >= 8) {
+				return SHADER_GROUP_NEXTGEO_MEGALIGHTS;
+			}
+			if (index >= 4) {
+				return SHADER_GROUP_MEGALIGHTS_MULTIVIEW;
+			}
+			return SHADER_GROUP_MEGALIGHTS;
+		}
+		static const char *megalights_variant_defines(uint16_t p_relative);
 	};
 
 	enum ShaderColorPassFlags {
@@ -110,6 +147,17 @@ public:
 		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES,
 		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI,
 		PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR,
+		// GodotNext: megalights_inputs (#136)
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_MULTIVIEW,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_MULTIVIEW,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW,
+		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML,
+		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML,
 		PIPELINE_VERSION_MAX
 	};
 
@@ -249,7 +297,8 @@ public:
 
 		RID version;
 
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT;
+		// GodotNext: megalights_inputs (#136)
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -285,6 +334,8 @@ public:
 		bool wireframe = false;
 
 		bool unshaded = false;
+		// GodotNext: megalights_inputs (#136). One editor warning per shader.
+		bool megalights_fallback_warned = false;
 		bool uses_vertex = false;
 		bool uses_position = false;
 		bool uses_sss = false;
@@ -424,9 +475,15 @@ public:
 	void enable_multiview_shader_group();
 	void enable_advanced_shader_group(bool p_needs_multiview = false);
 	void enable_nextgeo_shader_group();
+	// GodotNext: megalights_inputs (#136)
+	void enable_megalights_shader_group(bool p_needs_multiview = false);
+	void enable_nextgeo_megalights_shader_group();
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	bool is_nextgeo_shader_group_enabled() const;
+	bool is_megalights_shader_group_enabled(bool p_multiview) const;
+	bool is_nextgeo_megalights_shader_group_enabled() const;
+	static SceneShaderForwardClustered *get_singleton() { return singleton; }
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 	RID get_default_shader_rd(bool p_is_multiview = false);
 };

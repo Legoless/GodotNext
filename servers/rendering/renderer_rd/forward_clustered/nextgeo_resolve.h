@@ -107,7 +107,7 @@ public:
 
 	bool classify(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, const Size2i &p_viewport_size);
 
-	uint32_t draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw);
+	uint32_t draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool p_megalights_inputs, bool &r_request_redraw);
 
 	bool draw_stage_b(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_colors, RID p_render_base_uniform_set, RID p_rp_uniform_set, uint32_t p_pipeline_color_pass_flags, bool p_zero_velocity_write, bool p_use_directional_soft_shadow, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw, uint32_t &r_draws);
 

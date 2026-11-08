@@ -4693,7 +4693,10 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_NEXTGEO_RESIDENCY:
 		case VIEW_DISPLAY_NEXTGEO_VISIBILITY_ID:
 		case VIEW_DISPLAY_NEXTGEO_FALLBACK:
-		case VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE: {
+		case VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE:
+		// GodotNext: megalights_inputs (#136)
+		case VIEW_DISPLAY_ML_ALBEDO:
+		case VIEW_DISPLAY_ML_MATERIAL: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4748,6 +4751,9 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_NEXTGEO_VISIBILITY_ID,
 				VIEW_DISPLAY_NEXTGEO_FALLBACK,
 				VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE,
+				// GodotNext: megalights_inputs (#136)
+				VIEW_DISPLAY_ML_ALBEDO,
+				VIEW_DISPLAY_ML_MATERIAL,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4804,6 +4810,9 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_NEXTGEO_VISIBILITY_ID,
 				Viewport::DEBUG_DRAW_NEXTGEO_FALLBACK,
 				Viewport::DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE,
+				// GodotNext: megalights_inputs (#136)
+				Viewport::DEBUG_DRAW_ML_ALBEDO,
+				Viewport::DEBUG_DRAW_ML_MATERIAL,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7102,6 +7111,11 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	display_submenu->add_separator();
 	// TRANSLATORS: "Normal" as in "normal vector", not "normal life".
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Normal Buffer"), VIEW_DISPLAY_NORMAL_BUFFER, SupportedRenderingMethods::FORWARD_PLUS);
+	// GodotNext: megalights_inputs (#136)
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("MegaLights Albedo"), VIEW_DISPLAY_ML_ALBEDO, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the MegaLights albedo target. RGB is the diffuse albedo, albedo times (1 - metallic). A is the direct-light occlusion the clustered loop applies, mix of 1, ambient occlusion, and ambient-occlusion light affect. The view stays on the color image until MegaLights inputs are enabled with GODOTNEXT_MEGALIGHTS_INPUTS=1."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("MegaLights Material"), VIEW_DISPLAY_ML_MATERIAL, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows the packed MegaLights material target: F0 luma, F0 tint, shading model, and layer group. The copy uses nearest filtering so packed fields are not interpolated."));
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Shadow Atlas"), VIEW_DISPLAY_DEBUG_SHADOW_ATLAS, SupportedRenderingMethods::ALL,
 			TTRC("Displays the shadow atlas used for positional (omni/spot) shadow mapping.\nRequires a visible OmniLight3D or SpotLight3D node with shadows enabled to have a visible effect."));

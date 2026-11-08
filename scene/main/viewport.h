@@ -232,6 +232,9 @@ public:
 		DEBUG_DRAW_NEXTGEO_VISIBILITY_ID,
 		DEBUG_DRAW_NEXTGEO_FALLBACK,
 		DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE,
+		// GodotNext: megalights_inputs (#136)
+		DEBUG_DRAW_ML_ALBEDO,
+		DEBUG_DRAW_ML_MATERIAL,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

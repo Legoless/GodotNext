@@ -353,7 +353,7 @@ RID NextGeoResolve::_build_resolve_uniform_set(RID p_shader_rid, RendererVirtual
 	return uniform_set_cache->get_cache_vec(p_shader_rid, RenderForwardClustered::TRANSFORMS_UNIFORM_SET, uniforms);
 }
 
-uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool &r_request_redraw) {
+uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, RID p_framebuffer, RID p_render_base_uniform_set, RID p_rp_uniform_set, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, bool p_using_voxelgi, bool p_reverse_cull, const Rect2 &p_region, bool p_megalights_inputs, bool &r_request_redraw) {
 	if (buckets.is_empty() || current_max_tiles == 0 || !p_framebuffer.is_valid() || !indirect_args_buffer.is_valid()) {
 		return 0;
 	}
@@ -363,7 +363,13 @@ uint32_t NextGeoResolve::draw_stage_a(RendererVirtualMeshStorage *p_storage, RID
 	}
 
 	const RD::FramebufferFormatID fb_format = rd->framebuffer_get_format(p_framebuffer);
-	const SceneShaderForwardClustered::PipelineVersion version = p_using_voxelgi ? SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI : SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES;
+	// GodotNext: megalights_inputs (#136)
+	SceneShaderForwardClustered::PipelineVersion version = SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES;
+	if (p_megalights_inputs) {
+		version = p_using_voxelgi ? SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML : SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML;
+	} else if (p_using_voxelgi) {
+		version = SceneShaderForwardClustered::PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI;
+	}
 
 	SceneShaderForwardClustered::ShaderSpecialization stage_a_spec = p_base_specialization;
 	stage_a_spec.multimesh = 0;

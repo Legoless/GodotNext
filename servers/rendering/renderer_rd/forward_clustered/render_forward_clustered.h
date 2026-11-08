@@ -74,6 +74,8 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	RendererRD::NextGeoDebug nextgeo_debug;
 	bool nextgeo_virtual_active = false;
 	bool nextgeo_visibility_only_active = false;
+	// GodotNext: megalights_inputs (#136). True only when this view writes the input targets.
+	bool megalights_inputs_active = false;
 	bool nextgeo_shadow_pass_active = false;
 	bool nextgeo_proxy_active = false;
 	bool nextgeo_rt_proxy_active = false;
@@ -142,6 +144,11 @@ public:
 			DEPTH_FB_ROUGHNESS_VOXELGI,
 			DEPTH_FB_ROUGHNESS_VELOCITY,
 			DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY,
+			// GodotNext: megalights_inputs (#136)
+			DEPTH_FB_ROUGHNESS_ML,
+			DEPTH_FB_ROUGHNESS_VOXELGI_ML,
+			DEPTH_FB_ROUGHNESS_VELOCITY_ML,
+			DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY_ML,
 		};
 
 		RID render_sdfgi_uniform_set;
@@ -186,7 +193,8 @@ public:
 		RID get_color_only_fb();
 		RID get_color_pass_fb(uint32_t p_color_pass_flags);
 		RID get_depth_fb(DepthFrameBufferType p_type = DEPTH_FB);
-		RID get_nextgeo_stage_a_fb(bool p_voxel_gi);
+		// GodotNext: megalights_inputs (#136)
+		RID get_nextgeo_stage_a_fb(bool p_voxel_gi, bool p_megalights_inputs);
 		RID get_specular_only_fb();
 		RID get_velocity_only_fb();
 
@@ -275,6 +283,8 @@ private:
 		SceneShaderForwardClustered::ShaderSpecialization base_specialization = {};
 		bool use_material_feedback = false;
 		bool prepass_motion = false;
+		// GodotNext: megalights_inputs (#136). Shadow and front-layer passes leave this false.
+		bool megalights_inputs = false;
 		bool nextgi_translucency_mark = false;
 		bool use_nextgeo_proxy = false;
 		bool use_nextgeo_rt_proxy = false;
@@ -435,6 +445,11 @@ private:
 				*compressed_aabb_position_vec3 = p_aabb.position;
 				*compressed_aabb_size_vec3 = p_aabb.size;
 #endif
+			}
+
+			// GodotNext: megalights_inputs (#136). .w stays 0 unless this view writes MegaLights inputs.
+			inline void set_megalights_layer_group(uint8_t p_index) {
+				compressed_aabb_position[3] = float(p_index);
 			}
 
 			inline void set_uv_scale(const Vector4 &p_uv_scale) {

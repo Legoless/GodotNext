@@ -229,6 +229,9 @@ class Node3DEditorViewport : public Control {
 		VIEW_DISPLAY_NEXTGEO_VISIBILITY_ID,
 		VIEW_DISPLAY_NEXTGEO_FALLBACK,
 		VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE,
+		// GodotNext: megalights_inputs (#136)
+		VIEW_DISPLAY_ML_ALBEDO,
+		VIEW_DISPLAY_ML_MATERIAL,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 

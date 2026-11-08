@@ -1040,6 +1040,42 @@ RID RenderSceneBuffersRD::get_nextgeo_instance_id() const {
 	return has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID) ? get_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID) : RID();
 }
 
+// GodotNext: megalights_inputs (#136)
+void RenderSceneBuffersRD::ensure_megalights_inputs() {
+	const uint32_t usage_bits = get_color_usage_bits(false, false, can_be_storage);
+	if (!has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO)) {
+		create_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO, RD::DATA_FORMAT_R8G8B8A8_UNORM, usage_bits);
+	}
+	if (!has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL)) {
+		create_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL, RD::DATA_FORMAT_R8G8B8A8_UNORM, usage_bits);
+	}
+}
+
+void RenderSceneBuffersRD::free_megalights_inputs() {
+	free_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO);
+	free_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL);
+}
+
+bool RenderSceneBuffersRD::has_megalights_inputs() const {
+	return has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO) && has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL);
+}
+
+RID RenderSceneBuffersRD::get_ml_albedo() const {
+	return has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO) ? get_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO) : RID();
+}
+
+RID RenderSceneBuffersRD::get_ml_material() const {
+	return has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL) ? get_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL) : RID();
+}
+
+RID RenderSceneBuffersRD::get_ml_albedo(uint32_t p_layer) {
+	return has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO) ? get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_ALBEDO, p_layer, 0) : RID();
+}
+
+RID RenderSceneBuffersRD::get_ml_material(uint32_t p_layer) {
+	return has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL) ? get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL, p_layer, 0) : RID();
+}
+
 uint32_t RenderSceneBuffersRD::get_color_usage_bits(bool p_resolve, bool p_msaa, bool p_storage) {
 	DEV_ASSERT((!p_resolve && !p_msaa) || (p_resolve != p_msaa));
 

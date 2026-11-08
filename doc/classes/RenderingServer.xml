@@ -6011,6 +6011,14 @@
 		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE" value="57" enum="ViewportDebugDraw">
 			Colors visible triangles by [code]log2[/code] screen-space area and populates [code]triangle_size_histogram[/code] in the NextGeo debug stats.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_ML_ALBEDO" value="58" enum="ViewportDebugDraw">
+			Shows the MegaLights albedo target. RGB is the diffuse albedo, albedo times [code](1 - metallic)[/code]. A is the direct-light occlusion the clustered loop applies, [code]mix(1.0, ao, ao_light_affect)[/code]. The bent-normal cone is not stored. The target is written only while MegaLights inputs are enabled with the [code]GODOTNEXT_MEGALIGHTS_INPUTS=1[/code] environment variable, read once at startup. The view stays on the color image until then. The copy uses nearest filtering.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_ML_MATERIAL" value="59" enum="ViewportDebugDraw">
+			Shows the packed MegaLights material target. R is F0 luma, G is F0 tint with neutral gray on an exact nibble, B is the shading model and flags, and A is the layer group. The copy uses nearest filtering so the packed fields are not interpolated. The target is written only while MegaLights inputs are enabled with [code]GODOTNEXT_MEGALIGHTS_INPUTS=1[/code], read once at startup.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

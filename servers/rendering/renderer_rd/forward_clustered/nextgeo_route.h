@@ -194,6 +194,9 @@ inline bool nextgeo_is_unsupported_debug_draw(RSE::ViewportDebugDraw p_mode) {
 	switch (p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_DISABLED:
 		case RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER:
+		// GodotNext: megalights_inputs (#136)
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL:
 		case RSE::VIEWPORT_DEBUG_DRAW_SHADOW_ATLAS:
 		case RSE::VIEWPORT_DEBUG_DRAW_DIRECTIONAL_SHADOW_ATLAS:
 		case RSE::VIEWPORT_DEBUG_DRAW_SCENE_LUMINANCE:

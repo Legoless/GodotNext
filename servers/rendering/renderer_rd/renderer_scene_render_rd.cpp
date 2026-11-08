@@ -1062,6 +1062,9 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		case RSE::VIEWPORT_DEBUG_DRAW_MOTION_VECTORS:
 		// Modes that draws a buffer over viewport needs camera effects because if the buffer is not available it will be equivalent to normal draw mode.
 		case RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER:
+		// GodotNext: megalights_inputs (#136)
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO:
+		case RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL:
 		case RSE::VIEWPORT_DEBUG_DRAW_SSAO:
 		case RSE::VIEWPORT_DEBUG_DRAW_SSIL:
 		case RSE::VIEWPORT_DEBUG_DRAW_SDFGI:
@@ -1187,6 +1190,16 @@ void RendererSceneRenderRD::_render_buffers_debug_draw(const RenderDataRD *p_ren
 	if (debug_draw == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER && _render_buffers_get_normal_texture(rb).is_valid()) {
 		Size2 rtsize = texture_storage->render_target_get_size(render_target);
 		copy_effects->copy_to_fb_rect(_render_buffers_get_normal_texture(rb), texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, false, RID(), false, false, false, true);
+	}
+
+	// GodotNext: megalights_inputs (#136). Nearest RGBA8 copy so packed fields are not interpolated.
+	// p_normal stays false: that remap would re-encode the color. alpha_to_one stays false so A survives.
+	if ((debug_draw == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || debug_draw == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL) && rb->has_megalights_inputs()) {
+		RID ml_tex = debug_draw == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO ? rb->get_ml_albedo(0) : rb->get_ml_material(0);
+		if (ml_tex.is_valid()) {
+			Size2 rtsize = texture_storage->render_target_get_size(render_target);
+			copy_effects->copy_to_fb_rect(ml_tex, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, false, RID(), false, false, false, false, Rect2(), 1.0f, false);
+		}
 	}
 
 	if (debug_draw == RSE::VIEWPORT_DEBUG_DRAW_OCCLUDERS) {

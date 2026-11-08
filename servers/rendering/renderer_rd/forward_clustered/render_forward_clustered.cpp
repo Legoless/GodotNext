@@ -34,6 +34,8 @@
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
+// GodotNext: megalights_inputs (#136)
+#include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
@@ -363,19 +365,65 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_depth_fb(Depth
 			RID velocity_buffer = render_buffers->get_velocity_buffer(use_msaa);
 			return FramebufferCacheRD::get_singleton()->get_cache_multiview(render_buffers->get_view_count(), depth, normal_roughness_buffer, voxelgi_buffer, velocity_buffer);
 		} break;
+		// GodotNext: megalights_inputs (#136). Single-sample only. Order is normal, albedo, material, voxel, velocity.
+		case DEPTH_FB_ROUGHNESS_ML:
+		case DEPTH_FB_ROUGHNESS_VOXELGI_ML:
+		case DEPTH_FB_ROUGHNESS_VELOCITY_ML:
+		case DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY_ML: {
+			ERR_FAIL_COND_V_MSG(use_msaa, RID(), "MegaLights input targets are not allocated when MSAA is enabled.");
+			ensure_normal_roughness_texture();
+			render_buffers->ensure_megalights_inputs();
+			RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS);
+			RID ml_albedo = render_buffers->get_ml_albedo();
+			RID ml_material = render_buffers->get_ml_material();
+			const bool voxel = p_type == DEPTH_FB_ROUGHNESS_VOXELGI_ML || p_type == DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY_ML;
+			const bool velocity = p_type == DEPTH_FB_ROUGHNESS_VELOCITY_ML || p_type == DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY_ML;
+			if (voxel) {
+				ensure_voxelgi();
+			}
+			if (velocity) {
+				render_buffers->ensure_velocity();
+			}
+			RID voxelgi_buffer = voxel ? render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI) : RID();
+			RID velocity_buffer = velocity ? render_buffers->get_velocity_buffer(false) : RID();
+			FramebufferCacheRD *cache = FramebufferCacheRD::get_singleton();
+			const uint32_t views = render_buffers->get_view_count();
+			if (voxel && velocity) {
+				return cache->get_cache_multiview(views, depth, normal_roughness_buffer, ml_albedo, ml_material, voxelgi_buffer, velocity_buffer);
+			} else if (voxel) {
+				return cache->get_cache_multiview(views, depth, normal_roughness_buffer, ml_albedo, ml_material, voxelgi_buffer);
+			} else if (velocity) {
+				return cache->get_cache_multiview(views, depth, normal_roughness_buffer, ml_albedo, ml_material, velocity_buffer);
+			}
+			return cache->get_cache_multiview(views, depth, normal_roughness_buffer, ml_albedo, ml_material);
+		} break;
 		default: {
 			ERR_FAIL_V(RID());
 		} break;
 	}
 }
 
-RID RenderForwardClustered::RenderBufferDataForwardClustered::get_nextgeo_stage_a_fb(bool p_voxel_gi) {
+// GodotNext: megalights_inputs (#136)
+RID RenderForwardClustered::RenderBufferDataForwardClustered::get_nextgeo_stage_a_fb(bool p_voxel_gi, bool p_megalights_inputs) {
 	ERR_FAIL_NULL_V(render_buffers, RID());
 	ensure_normal_roughness_texture();
 	render_buffers->ensure_nextgeo_targets();
 
 	RID normal_roughness_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_NORMAL_ROUGHNESS);
 	RID instance_id_buffer = render_buffers->get_nextgeo_instance_id();
+	// GodotNext: megalights_inputs (#136). Stage A writes the same targets as the depth prepass.
+	if (p_megalights_inputs) {
+		ERR_FAIL_COND_V_MSG(render_buffers->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, RID(), "MegaLights input targets are not allocated when MSAA is enabled.");
+		render_buffers->ensure_megalights_inputs();
+		RID ml_albedo = render_buffers->get_ml_albedo();
+		RID ml_material = render_buffers->get_ml_material();
+		if (p_voxel_gi) {
+			ensure_voxelgi();
+			RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI);
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, ml_albedo, ml_material, voxelgi_buffer, instance_id_buffer);
+		}
+		return FramebufferCacheRD::get_singleton()->get_cache_multiview(1, normal_roughness_buffer, ml_albedo, ml_material, instance_id_buffer);
+	}
 	if (p_voxel_gi) {
 		ensure_voxelgi();
 		RID voxelgi_buffer = render_buffers->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_VOXEL_GI);
@@ -673,14 +721,28 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS;
 				break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
-				if (p_params->prepass_motion) {
+				// GodotNext: megalights_inputs (#136)
+				if (p_params->megalights_inputs) {
+					if (p_params->prepass_motion) {
+						pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION;
+					} else {
+						pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS;
+					}
+				} else if (p_params->prepass_motion) {
 					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_MOTION;
 				} else {
 					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS;
 				}
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
-				if (p_params->prepass_motion) {
+				// GodotNext: megalights_inputs (#136)
+				if (p_params->megalights_inputs) {
+					if (p_params->prepass_motion) {
+						pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION;
+					} else {
+						pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI;
+					}
+				} else if (p_params->prepass_motion) {
 					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_AND_MOTION;
 				} else {
 					pipeline_key.version = p_params->view_count > 1 ? SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI_MULTIVIEW : SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_NORMAL_AND_ROUGHNESS_AND_VOXEL_GI;
@@ -1127,6 +1189,9 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
 #endif
 
 		instance_data.set_compressed_aabb(surface_aabb);
+		// GodotNext: megalights_inputs (#136). Only the opaque prepass writes ml_material.
+		const bool ml_assign = megalights_inputs_active && p_render_list == RENDER_LIST_OPAQUE;
+		instance_data.set_megalights_layer_group(ml_assign ? RendererRD::MegaLightsInputs::assign_layer_group(inst->layer_mask) : 0);
 		instance_data.material_feedback_index = material_feedback_index;
 		instance_data.set_uv_scale(uv_scale);
 
@@ -1437,6 +1502,8 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 					idata.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
 					idata.set_lightmap_uv_scale(inst->lightmap_uv_scale);
 					idata.set_compressed_aabb(AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0)));
+					// GodotNext: megalights_inputs (#136)
+					idata.set_megalights_layer_group(megalights_inputs_active ? RendererRD::MegaLightsInputs::assign_layer_group(inst->layer_mask) : 0);
 					idata.material_feedback_index = UINT32_MAX;
 					idata.set_uv_scale(Vector4(0.0, 0.0, 0.0, 0.0));
 
@@ -2800,6 +2867,24 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	nextgeo_virtual_active = using_nextgeo;
 	nextgeo_visibility_only_active = visibility_only;
 
+	// GodotNext: megalights_inputs (#136). #143 takes over MegaLightsInputs::is_requested().
+	// Reflection probes leave the main view's targets alone.
+	if (!is_reflection_probe && rb.is_valid()) {
+		megalights_inputs_active = RendererRD::MegaLightsInputs::view_writes_inputs(rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED);
+		if (megalights_inputs_active) {
+			rb->ensure_megalights_inputs();
+			scene_shader.enable_megalights_shader_group(p_render_data->scene_data->view_count > 1);
+			if (using_nextgeo) {
+				scene_shader.enable_nextgeo_megalights_shader_group();
+			}
+		} else {
+			rb->free_megalights_inputs();
+		}
+	} else {
+		megalights_inputs_active = false;
+	}
+	RendererRD::MegaLightsInputs::begin_layer_groups();
+
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
@@ -2829,10 +2914,19 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					using_sscs ||
 					ce_needs_normal_roughness ||
 					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER ||
+					// GodotNext: megalights_inputs (#136)
+					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO ||
+					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL ||
 					scene_state.used_normal_texture) {
 				depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 			}
-		} else if (using_nextgeo || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || scene_state.used_normal_texture) {
+		} else if (using_nextgeo || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL || scene_state.used_normal_texture) {
+			// GodotNext: megalights_inputs (#136) adds the ML debug modes next to the normal buffer.
+			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
+		}
+
+		// GodotNext: megalights_inputs (#136). Do not downgrade a voxel GI prepass.
+		if (megalights_inputs_active && depth_pass_mode == PASS_MODE_DEPTH) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -2841,7 +2935,21 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				depth_framebuffer = rb_data->get_depth_fb();
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS: {
-				if (using_nextgi && velocity_plan.prepass_writes) {
+				// GodotNext: megalights_inputs (#136). Two clears sit between normal-roughness and velocity.
+				if (megalights_inputs_active) {
+					if (using_nextgi && velocity_plan.prepass_writes) {
+						depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VELOCITY_ML);
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
+					} else {
+						depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_ML);
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+					}
+				} else if (using_nextgi && velocity_plan.prepass_writes) {
 					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VELOCITY);
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
@@ -2851,7 +2959,23 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 			} break;
 			case PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI: {
-				if (using_nextgi && velocity_plan.prepass_writes) {
+				// GodotNext: megalights_inputs (#136)
+				if (megalights_inputs_active) {
+					if (using_nextgi && velocity_plan.prepass_writes) {
+						depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY_ML);
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(velocity_plan.pre_clear_r, velocity_plan.pre_clear_g, 0, 0));
+					} else {
+						depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_ML);
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+						depth_pass_clear.push_back(Color(0, 0, 0, 0));
+					}
+				} else if (using_nextgi && velocity_plan.prepass_writes) {
 					depth_framebuffer = rb_data->get_depth_fb(RenderBufferDataForwardClustered::DEPTH_FB_ROUGHNESS_VOXELGI_VELOCITY);
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
 					depth_pass_clear.push_back(Color(0, 0, 0, 0));
@@ -3021,7 +3145,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool debug_sdfgi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES;
 	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
 	// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83) / nextgeo_residency (#78)
-	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo;
+	// GodotNext: megalights_inputs (#136)
+	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo || megalights_inputs_active;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
@@ -3053,6 +3178,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		render_list_params.use_nextgeo_proxy = is_reflection_probe;
 		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
+		// GodotNext: megalights_inputs (#136)
+		render_list_params.megalights_inputs = megalights_inputs_active && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
@@ -3115,13 +3242,16 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							RSG::virtual_mesh_storage,
 							rb->get_nextgeo_visibility(),
 							nextgeo_cut.get_clusters_buffer(),
-							rb_data->get_nextgeo_stage_a_fb(using_voxelgi),
+							// GodotNext: megalights_inputs (#136)
+							rb_data->get_nextgeo_stage_a_fb(using_voxelgi, megalights_inputs_active),
 							render_base_uniform_set,
 							rp_uniform_set,
 							base_specialization,
 							using_voxelgi,
 							reverse_cull,
 							p_render_data->render_region,
+							// GodotNext: megalights_inputs (#136)
+							megalights_inputs_active,
 							stage_a_redraw);
 					if (stage_a_redraw) {
 						RenderingServerDefault::redraw_request();
@@ -3740,6 +3870,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	nextgeo_virtual_active = false;
 	nextgeo_visibility_only_active = false;
 	nextgeo_shadow_pass_active = false;
+	// GodotNext: megalights_inputs (#136)
+	megalights_inputs_active = false;
 }
 
 void RenderForwardClustered::_render_nextgeo_debug_scene_passes(RenderDataRD *p_render_data, bool p_using_nextgeo, bool p_nextgeo_drew, bool p_use_msaa, RSE::ViewportMSAA p_msaa, bool p_reverse_cull, const Size2i &p_screen_size, uint32_t p_depth_ubo_index, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {

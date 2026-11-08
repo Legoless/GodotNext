@@ -32,6 +32,9 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/math_defs.h"
+// GodotNext: megalights_inputs (#136)
+#include "core/config/engine.h"
+#include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -243,6 +246,31 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	print_line("\n**vertex_globals:\n" + gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX]);
 	print_line("\n**fragment_globals:\n" + gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT]);
 #endif
+	// GodotNext: megalights_inputs (#136). Classify before version_set_code so every variant sees the defines.
+	{
+		RendererRD::MegaLightsInputs::FallbackQuery ml_query;
+		ml_query.unshaded = unshaded;
+		ml_query.custom_light = gen_code.code.has("light");
+		ml_query.diffuse_toon = gen_code.defines.has("#define DIFFUSE_TOON\n");
+		ml_query.diffuse_lambert_wrap = gen_code.defines.has("#define DIFFUSE_LAMBERT_WRAP\n");
+		ml_query.specular_toon = gen_code.defines.has("#define SPECULAR_TOON\n");
+		ml_query.specular_disabled = gen_code.defines.has("#define SPECULAR_DISABLED\n");
+		ml_query.rim = gen_code.defines.has("#define LIGHT_RIM_USED\n");
+		ml_query.backlight = gen_code.defines.has("#define LIGHT_BACKLIGHT_USED\n");
+		ml_query.anisotropy = gen_code.defines.has("#define LIGHT_ANISOTROPY_USED\n");
+		ml_query.diffuse_lambert = RendererRD::MegaLightsInputs::is_diffuse_lambert(unshaded, gen_code.defines.has("#define DIFFUSE_LAMBERT\n"), gen_code.defines.has("#define DIFFUSE_BURLEY\n"), ml_query.diffuse_toon, ml_query.diffuse_lambert_wrap);
+		if (RendererRD::MegaLightsInputs::is_fallback(ml_query)) {
+			gen_code.defines.push_back("#define MEGALIGHTS_FALLBACK\n");
+			if (!megalights_fallback_warned && RendererRD::MegaLightsInputs::is_requested() && Engine::get_singleton() && Engine::get_singleton()->is_editor_hint()) {
+				megalights_fallback_warned = true;
+				const String ml_name = path.is_empty() ? vformat("<built-in>:%d", code.hash()) : path;
+				WARN_PRINT_ED(vformat("MegaLights fallback material \"%s\": custom light(), unshaded, Lambert, toon, wrap, rim, backlight, anisotropy, or disabled specular keeps clustered shading.", ml_name));
+			}
+		}
+		if (!gen_code.code.has("fragment")) {
+			gen_code.defines.push_back("#define MEGALIGHTS_UNIFORM_INPUTS\n");
+		}
+	}
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
 
 	ubo_size = gen_code.uniform_total_size;
@@ -388,6 +416,28 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 			}
 			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COLOR;
 		} break;
+		// GodotNext: megalights_inputs (#136). These variants are appended outside the ubershader loop.
+		// The depth variants have ubershader twins so the 32-byte fallback push constant matches.
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_MULTIVIEW:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_MULTIVIEW + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_MULTIVIEW:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_MULTIVIEW + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW:
+			return ShaderVersion::SHADER_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW + (p_ubershader ? ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT : 0);
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_ML;
+		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML:
+			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML;
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -432,7 +482,10 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 
 	const bool is_visibility_resolve = p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES ||
 			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI ||
-			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR;
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR ||
+			// GodotNext: megalights_inputs (#136)
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML ||
+			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML;
 
 	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || is_visibility_resolve) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
@@ -567,6 +620,23 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 				break;
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI:
 				blend_state = RD::PipelineColorBlendState::create_disabled(3);
+				break;
+			// GodotNext: megalights_inputs (#136). Velocity stays the last color attachment.
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS:
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_MULTIVIEW:
+				blend_state = RD::PipelineColorBlendState::create_disabled(3);
+				break;
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI:
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_MULTIVIEW:
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION:
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_MOTION_MULTIVIEW:
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML:
+				blend_state = RD::PipelineColorBlendState::create_disabled(4);
+				break;
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION:
+			case PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW:
+			case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML:
+				blend_state = RD::PipelineColorBlendState::create_disabled(5);
 				break;
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR:
 				blend_state = blend_state_color_opaque;
@@ -812,9 +882,16 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_MOTION_VECTORS
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n", false)); // SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS
 
+		// GodotNext: megalights_inputs (#136). Dedicated groups, off until inputs are active.
+		// Ubershader twins start at SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT. Stage A has no twin.
+		const uint16_t ml_variant_count = ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT;
+		for (uint16_t ml_i = 0; ml_i < ml_variant_count; ml_i++) {
+			shader_versions.push_back(ShaderRD::VariantDefine(ShaderVersion::megalights_variant_group(ml_i), ShaderVersion::megalights_variant_defines(ml_i), ShaderVersion::MEGALIGHTS_VARIANTS_DEFAULT_ENABLED));
+		}
+
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
-		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
+		shader.initialize(shader_versions, p_defines + String("\n") + RendererRD::MegaLightsInputs::glsl_pack_prelude(), Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
 			shader.enable_group(SHADER_GROUP_MULTIVIEW);
@@ -1011,6 +1088,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		}
 
 		actions.render_mode_defines["diffuse_lambert_wrap"] = "#define DIFFUSE_LAMBERT_WRAP\n";
+		// GodotNext: megalights_inputs (#136). Names the lights-inc Lambert #else for fallback classification.
+		actions.render_mode_defines["diffuse_lambert"] = "#define DIFFUSE_LAMBERT\n";
 		actions.render_mode_defines["diffuse_toon"] = "#define DIFFUSE_TOON\n";
 
 		actions.render_mode_defines["sss_mode_skin"] = "#define SSS_MODE_SKIN\n";
@@ -1226,6 +1305,56 @@ bool SceneShaderForwardClustered::is_advanced_shader_group_enabled(bool p_multiv
 
 bool SceneShaderForwardClustered::is_nextgeo_shader_group_enabled() const {
 	return shader.is_group_enabled(SHADER_GROUP_NEXTGEO);
+}
+
+// GodotNext: megalights_inputs (#136)
+void SceneShaderForwardClustered::enable_megalights_shader_group(bool p_needs_multiview) {
+	if (p_needs_multiview || RendererCompositorRD::get_singleton()->is_xr_enabled()) {
+		shader.enable_group(SHADER_GROUP_MEGALIGHTS_MULTIVIEW);
+	}
+	shader.enable_group(SHADER_GROUP_MEGALIGHTS);
+}
+
+void SceneShaderForwardClustered::enable_nextgeo_megalights_shader_group() {
+	shader.enable_group(SHADER_GROUP_NEXTGEO_MEGALIGHTS);
+}
+
+bool SceneShaderForwardClustered::is_megalights_shader_group_enabled(bool p_multiview) const {
+	if (p_multiview) {
+		return shader.is_group_enabled(SHADER_GROUP_MEGALIGHTS_MULTIVIEW);
+	}
+	return shader.is_group_enabled(SHADER_GROUP_MEGALIGHTS);
+}
+
+bool SceneShaderForwardClustered::is_nextgeo_megalights_shader_group_enabled() const {
+	return shader.is_group_enabled(SHADER_GROUP_NEXTGEO_MEGALIGHTS);
+}
+
+const char *SceneShaderForwardClustered::ShaderVersion::megalights_variant_defines(uint16_t p_relative) {
+	static const char *defines[SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT] = {
+		"\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+		"\n#define UBERSHADER\n#define USE_MULTIVIEW\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MOTION_VECTORS\n#define MODE_MEGALIGHTS_INPUTS\n",
+	};
+	if (p_relative >= SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT) {
+		return "";
+	}
+	return defines[p_relative];
 }
 
 uint32_t SceneShaderForwardClustered::get_pipeline_compilations(RSE::PipelineSource p_source) {

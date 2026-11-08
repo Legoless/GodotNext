@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://b136megalightsinputs"]
+
+[ext_resource type="Script" path="res://tests/megalights_inputs/megalights_inputs_check.gd" id="1_check"]
+
+[node name="MegaLightsInputsCheck" type="Node3D"]
+script = ExtResource("1_check")

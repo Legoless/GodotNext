@@ -1124,6 +1124,31 @@ layout(location = 0) out uint nextgeo_fallback_out;
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 layout(location = 0) out vec4 normal_roughness_output_buffer;
 
+// GodotNext: megalights_inputs (#136). Albedo and material sit between normal-roughness and voxel or velocity.
+#ifdef MODE_MEGALIGHTS_INPUTS
+layout(location = 1) out vec4 ml_albedo_buffer;
+layout(location = 2) out vec4 ml_material_buffer;
+
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 3) out uvec2 voxel_gi_buffer;
+#endif
+
+#ifdef MODE_VISIBILITY_RESOLVE
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 4) out uint nextgeo_instance_id;
+#else
+layout(location = 3) out uint nextgeo_instance_id;
+#endif
+#elif defined(MOTION_VECTORS)
+#ifdef MODE_RENDER_VOXEL_GI
+layout(location = 4) out vec2 motion_vector;
+#else
+layout(location = 3) out vec2 motion_vector;
+#endif
+#endif
+
+#else
+
 #ifdef MODE_RENDER_VOXEL_GI
 layout(location = 1) out uvec2 voxel_gi_buffer;
 #endif
@@ -1141,6 +1166,8 @@ layout(location = 2) out vec2 motion_vector;
 layout(location = 1) out vec2 motion_vector;
 #endif
 #endif
+
+#endif // MODE_MEGALIGHTS_INPUTS
 
 #endif //MODE_RENDER_NORMAL
 #else // RENDER DEPTH
@@ -3579,6 +3606,59 @@ void fragment_shader(in SceneData scene_data) {
 		normal_roughness_output_buffer.w = 1.0 - normal_roughness_output_buffer.w;
 	}
 	normal_roughness_output_buffer.w = normal_roughness_output_buffer.w;
+
+	// GodotNext: megalights_inputs (#136).
+	// RGB is diffuse albedo: albedo * (1 - metallic). A is the direct-light occlusion
+	// the clustered loop applies, mix(1, ao, ao_light_affect). The bent-normal cone
+	// affects indirect specular only, so it is not stored. F0 uses the base albedo.
+	// Pack constants and ML_QUANTIZE_CHROMA come from MegaLightsInputs::glsl_pack_prelude().
+#ifdef MODE_MEGALIGHTS_INPUTS
+	{
+#ifdef MEGALIGHTS_UNIFORM_INPUTS
+		vec3 ml_base_albedo = vec3(1.0);
+		float ml_metallic = 0.0;
+		float ml_specular = 0.5;
+		float ml_direct_occ = 1.0;
+#else
+		vec3 ml_base_albedo = albedo;
+		float ml_metallic = metallic;
+		float ml_specular = specular;
+		float ml_direct_occ = mix(1.0, ao, ao_light_affect);
+#endif
+		ml_albedo_buffer = vec4(ml_base_albedo * (1.0 - ml_metallic), ml_direct_occ);
+
+		float ml_dielectric = ML_DIELECTRIC_SCALE * ml_specular * ml_specular;
+		vec3 ml_f0 = mix(vec3(ml_dielectric), ml_base_albedo, vec3(ml_metallic));
+		float ml_luma = dot(ml_f0, vec3(ML_LUMA_R, ML_LUMA_G, ML_LUMA_B));
+		float ml_cb = (ml_f0.b - ml_luma) / ML_CB_SCALE;
+		float ml_cr = (ml_f0.r - ml_luma) / ML_CR_SCALE;
+		float ml_cb4 = ML_QUANTIZE_CHROMA(ml_cb);
+		float ml_cr4 = ML_QUANTIZE_CHROMA(ml_cr);
+		float ml_tint = (ml_cb4 * 16.0 + ml_cr4) / 255.0;
+
+		uint ml_model = 0u;
+#ifdef MEGALIGHTS_FALLBACK
+		ml_model = uint(ML_MODEL_FALLBACK);
+#else
+		uint ml_flags = 0u;
+#ifdef LIGHT_CLEARCOAT_USED
+		ml_flags |= uint(ML_FLAG_CLEARCOAT);
+#endif
+#ifdef LIGHT_TRANSMITTANCE_USED
+		ml_flags |= uint(ML_FLAG_TRANSMISSION);
+#endif
+#ifdef ENABLE_SSS
+		ml_flags |= uint(ML_FLAG_SSS);
+		ml_model = uint(ML_MODEL_SSS);
+#elif defined(LIGHT_CLEARCOAT_USED)
+		ml_model = uint(ML_MODEL_CLEARCOAT);
+#endif
+		ml_model |= ml_flags;
+#endif
+		uint ml_layer_group = uint(instances.data[instance_index].compressed_aabb_position_pad.w + 0.5);
+		ml_material_buffer = vec4(ml_luma, ml_tint, float(ml_model) / 255.0, float(ml_layer_group) / 255.0);
+	}
+#endif
 
 #ifdef MODE_RENDER_VOXEL_GI
 	if (bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_VOXEL_GI)) { // process voxel_gi_instances
