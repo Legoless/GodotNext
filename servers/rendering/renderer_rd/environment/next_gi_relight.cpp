@@ -485,6 +485,17 @@ static uint64_t _nextgi_page_key(RenderGeometryInstance *p_instance, uint32_t p_
 	return uint64_t(uintptr_t(p_instance)) ^ (uint64_t(p_element) * 0x9E3779B97F4A7C15ULL);
 }
 
+uint32_t NextGIRelight::get_instance_page_table(RenderGeometryInstance *p_instance, uint32_t p_element) const {
+	if (p_instance == nullptr) {
+		return UINT32_MAX;
+	}
+	const uint32_t *existing = instance_index.getptr(_nextgi_page_key(p_instance, p_element));
+	if (existing == nullptr || *existing >= instances.size()) {
+		return UINT32_MAX;
+	}
+	return instances[*existing].page_table;
+}
+
 void NextGIRelight::release_instance(RenderGeometryInstance *p_instance) {
 	if (p_instance == nullptr) {
 		return;

@@ -57,6 +57,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_voxel_lighting.h"
 
 using namespace RendererRD;
 
@@ -473,6 +474,14 @@ Dictionary NextGI::get_counters() const {
 		counters["src_dirty_pages"] = int64_t(relight->get_dirty_pages());
 		counters["src_max_relight_age_frames"] = int64_t(relight->get_max_relight_age());
 	}
+	// GodotNext: ps_voxel_lighting (#188)
+	if (voxel_lighting != nullptr) {
+		counters["voxel_lighting_retrace"] = int64_t(voxel_lighting->get_retrace_rays());
+		counters["voxel_lighting_coverage_ppm"] = voxel_lighting->get_coverage_ppm();
+		counters["voxel_lighting_volume_bytes"] = int64_t(voxel_lighting->get_allocated_bytes());
+		counters["voxel_lighting_stored_hits"] = int64_t(voxel_lighting->get_stored_hits());
+		counters["voxel_lighting_resampled_nonzero"] = int64_t(voxel_lighting->get_resampled_nonzero());
+	}
 	return counters;
 }
 
@@ -731,6 +740,15 @@ Dictionary NextGI::get_tier_info() const {
 	if (front_layer != nullptr) {
 		front_layer->fill_info(info);
 	}
+	// GodotNext: ps_voxel_lighting (#188)
+	if (voxel_lighting != nullptr) {
+		info["voxel_lighting_retrace"] = int64_t(voxel_lighting->get_retrace_rays());
+		info["voxel_lighting_coverage"] = voxel_lighting->get_coverage();
+		info["voxel_lighting_coverage_ppm"] = voxel_lighting->get_coverage_ppm();
+		info["voxel_lighting_volume_bytes"] = int64_t(voxel_lighting->get_allocated_bytes());
+		info["voxel_lighting_stored_hits"] = int64_t(voxel_lighting->get_stored_hits());
+		info["voxel_lighting_resampled_nonzero"] = int64_t(voxel_lighting->get_resampled_nonzero());
+	}
 	return info;
 }
 
@@ -789,6 +807,51 @@ void NextGI::_relight_src(RenderDataRD *p_render_data) {
 	if (relight != nullptr) {
 		relight->relight(p_render_data);
 	}
+	// GodotNext: ps_voxel_lighting (#188). Same slot as SRC relight, after capture.
+	update_voxel_lighting(p_render_data);
+}
+
+// GodotNext: ps_voxel_lighting (#188)
+void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
+	// A tier change drops the volume before any early-out, including probe frames.
+	if (voxel_lighting_tier_valid && voxel_lighting_tier != result.tier) {
+		if (voxel_lighting != nullptr) {
+			memdelete(voxel_lighting);
+			voxel_lighting = nullptr;
+		}
+		voxel_lighting_frame = UINT64_MAX;
+	}
+	voxel_lighting_tier = result.tier;
+	voxel_lighting_tier_valid = true;
+	if (result.tier != TIER_HWRT && result.tier != TIER_FALLBACK) {
+		return;
+	}
+	// Empty scenes and reflection probes are not the scenario view. Stamp the
+	// frame only after this check, so they cannot consume the frame.
+	if (p_render_data == nullptr || p_render_data->scene_data == nullptr || p_render_data->reflection_probe.is_valid() || p_render_data->sdfgi_update_data == nullptr) {
+		return;
+	}
+	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+	if (scene == nullptr) {
+		return;
+	}
+	const RSE::ViewportDebugDraw debug_draw = scene->get_debug_draw_mode();
+	if (debug_draw == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED || debug_draw == RSE::VIEWPORT_DEBUG_DRAW_OVERDRAW) {
+		return;
+	}
+	// Nothing is allocated until the Environment actually enables NextGI.
+	if (!p_render_data->environment.is_valid() || !scene->environment_get_nextgi_enabled(p_render_data->environment)) {
+		return;
+	}
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	if (frame == voxel_lighting_frame) {
+		return;
+	}
+	voxel_lighting_frame = frame;
+	if (voxel_lighting == nullptr) {
+		voxel_lighting = memnew(NextGIVoxelLighting);
+	}
+	voxel_lighting->update_render(p_render_data, rt_scene, relight, src);
 }
 
 bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
@@ -1022,6 +1085,11 @@ NextGI::~NextGI() {
 	if (relight != nullptr) {
 		memdelete(relight);
 		relight = nullptr;
+	}
+	// GodotNext: ps_voxel_lighting (#188)
+	if (voxel_lighting != nullptr) {
+		memdelete(voxel_lighting);
+		voxel_lighting = nullptr;
 	}
 
 	// GodotNext: nextgi_rt_scene

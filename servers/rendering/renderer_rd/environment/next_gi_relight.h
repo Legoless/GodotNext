@@ -172,6 +172,8 @@ public:
 
 	RID get_page_rect_buffer() const { return page_rect_buffer; }
 	uint32_t get_page_rect_count() const { return page_table_count; }
+	// UINT32_MAX when this instance has no relight pages. Bit 31 is the evicted mark.
+	uint32_t get_instance_page_table(RenderGeometryInstance *p_instance, uint32_t p_element = UINT32_MAX) const;
 	RID get_indirect_texture() const { return indirect_texture; }
 	RID get_radiance_texture() const { return radiance; }
 	const LocalVector<ScheduledPage> &get_scheduled_pages() const { return scheduled_pages; }

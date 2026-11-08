@@ -1569,6 +1569,13 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 		clear_color = RSG::texture_storage->get_default_clear_color();
 	}
 
+	// GodotNext: ps_voxel_lighting (#188)
+	// Line 2b owns this on the HWRT tier. Off that tier the same update still
+	// has to run, or hardware_ray_tracing=off never shades a volume.
+	if (next_gi.get_tier_result().tier != RendererRD::NextGI::TIER_HWRT) {
+		next_gi.update_voxel_lighting(&render_data);
+	}
+
 	//calls _pre_opaque_render between depth pre-pass and opaque pass
 	_render_scene(&render_data, clear_color);
 }

@@ -142,6 +142,12 @@ public:
 			"dirty_aabb",
 			"src_page_updates",
 			"clamped_energy_fraction",
+			// GodotNext: ps_voxel_lighting (#188)
+			"voxel_lighting_retrace",
+			"voxel_lighting_coverage_ppm",
+			"voxel_lighting_volume_bytes",
+			"voxel_lighting_stored_hits",
+			"voxel_lighting_resampled_nonzero",
 		};
 		for (const char *key : keys) {
 			counters[key] = int64_t(0);

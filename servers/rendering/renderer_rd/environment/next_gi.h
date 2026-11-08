@@ -45,6 +45,9 @@ class RenderSceneBuffersRD;
 // GodotNext: nextgi_rt_scene
 class RenderDataRD;
 
+// GodotNext: ps_voxel_lighting (#188)
+class NextGIVoxelLighting;
+
 namespace RendererRD {
 
 // GodotNext: nextgi_rt_scene
@@ -279,6 +282,12 @@ private:
 	NextGIRelight *relight = nullptr;
 	void _relight_src(RenderDataRD *p_render_data);
 
+	// GodotNext: ps_voxel_lighting (#188)
+	NextGIVoxelLighting *voxel_lighting = nullptr;
+	uint64_t voxel_lighting_frame = UINT64_MAX;
+	bool voxel_lighting_tier_valid = false;
+	Tier voxel_lighting_tier = TIER_DISABLED;
+
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;
 	NextGIFrontLayer *front_layer = nullptr;
@@ -393,6 +402,9 @@ public:
 	Dictionary get_status() const;
 	// Counters whose producer has not merged are 0. TLAS instances come from the RT scene.
 	Dictionary get_counters() const;
+
+	// GodotNext: ps_voxel_lighting (#188). Line 2b on HWRT, and the fallback-tier hook.
+	void update_voxel_lighting(RenderDataRD *p_render_data);
 
 	enum DebugViewId {
 		DEBUG_VIEW_TIER,
