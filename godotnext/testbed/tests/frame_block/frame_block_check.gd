@@ -33,9 +33,10 @@ extends Node
 ## - SWRT: none of the 12 frame-block timestamps, and the software tracer's own stamp (#186 step 7):
 ##   "NextGI SDF Trace", or "NextGI SDF Lite Probes" under Lumen Lite. Until the software tier feeds
 ##   the frame block (plan §21.2.4), it traces outside it;
-## after the run: no ray-query ShaderRD was initialized and the RT scene neither holds TLAS
-## instances nor rebuilt the TLAS (only the block's AS slots drive it, #243), so a profile that lost
-## the block's stamps cannot pass; on DISABLED without --sdfgi, nothing allocated RB_TEX_AMBIENT.
+## after the run, from nextgi_get_tier_info() rather than the timestamps: the block never ran. Only
+## the block creates the SRC relight, so src_relight_max_texels must be absent, and a run whose
+## profile lost the block's stamps still fails. On DISABLED without --sdfgi, nothing allocated
+## RB_TEX_AMBIENT.
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
@@ -260,10 +261,11 @@ func _final_failures() -> PackedStringArray:
 		var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
 		if tier != "DISABLED" and tier != "SWRT":
 			result.append("the tier is %s, expected DISABLED or SWRT" % [tier])
-		if int(tier_info.get("ray_query_shaders_initialized", 0)) != 0:
-			result.append("%d ray-query ShaderRDs were initialized on an inactive tier" % [int(tier_info.get("ray_query_shaders_initialized", 0))])
-		if int(tier_info.get("rt_instance_count", 0)) != 0 or int(tier_info.get("rt_tlas_build_count", 0)) != 0:
-			result.append("the frame block's AS slots ran on an inactive tier (RT scene: %d TLAS instances, %d TLAS builds)" % [int(tier_info.get("rt_instance_count", 0)), int(tier_info.get("rt_tlas_build_count", 0))])
+		# NextGI::render_frame() is the only place that creates the SRC relight, which then reports
+		# its keys for the rest of the run. The tier cannot reach the RT scene or ray-query shaders
+		# here, so their counters would stay 0 even if the block ran.
+		if tier_info.has("src_relight_max_texels"):
+			result.append("the frame block ran on the %s tier (the SRC relight it creates reports src_relight_max_texels=%d)" % [tier, int(tier_info.get("src_relight_max_texels", 0))])
 		# Lumen Lite's irradiance field writes the ambient buffer on SWRT, outside the block.
 		if tier == "DISABLED" and not sdfgi and probe.ambient_size != Vector2i.ZERO:
 			result.append("RB_TEX_AMBIENT is %s on the DISABLED tier, expected none" % [probe.ambient_size])
