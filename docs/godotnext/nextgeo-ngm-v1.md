@@ -18,7 +18,7 @@ This is the on-disk contract for NextGeo virtual geometry, as the code implement
 - Every multi-byte field is little-endian. `f32` is IEEE 754 binary32, also in double-precision builds.
 - `u8`, `u16`, `u32`, `u64`, `i32` and `snorm8` are unsigned, signed and normalized integers of that width.
 - Offsets are in bytes from the start of the structure they belong to.
-- `NGMWriter` and the payload writer encode byte by byte, so the bytes do not depend on the host. Some readers outside `core/io` (`NGMFile::read_page_cluster_records` for the cluster count, and the runtime in `servers/rendering/storage/virtual_mesh_storage.cpp`) decode with `memcpy` and assume a little-endian host.
+- `NGMWriter` and the payload writer encode byte by byte, so the bytes do not depend on the host. Some readers decode with `memcpy` and assume a little-endian host: `NGMFile::read_page_cluster_records` in `core/io/resource_format_ngm.cpp` for the cluster count, and, outside `core/io`, the runtime in `servers/rendering/storage/virtual_mesh_storage.cpp`.
 
 ## The `.ngm` file
 
