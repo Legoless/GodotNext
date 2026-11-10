@@ -41,8 +41,11 @@
 //
 // The R16F brick pool and per-level 16^3 page tables. Bricks are 8^3 half
 // floats (1 KiB); the CPU mirror keeps the packed bytes for tests and the
-// RD buffers are mirrored on upload. A page table entry is a pool slot or
-// PAGE_UNALLOCATED. The compositing compute writes through the same tables.
+// RD buffers are mirrored on upload. A page table entry is a pool slot,
+// PAGE_UNALLOCATED (no instance's mesh SDF comes near the brick: empty space)
+// or PAGE_MISSING (GodotNext: ps_swrt_trace (#186): the brick holds geometry
+// but the pool had no slot for it; the trace reads the next level there). The
+// compositing compute writes through the same tables.
 class NextGIGlobalSDFGPU {
 public:
 	static constexpr uint32_t BRICKS_PER_LEVEL = NextGIGlobalSDF::BRICKS_PER_LEVEL;
@@ -50,6 +53,7 @@ public:
 	static constexpr uint32_t COVERAGE_BYTES = NextGIGlobalSDF::BRICK_VOXELS / 8;
 	static constexpr uint32_t DEFAULT_POOL_BRICKS = 16384; // 16 MiB.
 	static constexpr int32_t PAGE_UNALLOCATED = -1;
+	static constexpr int32_t PAGE_MISSING = -2; // GodotNext: ps_swrt_trace (#186)
 
 	explicit NextGIGlobalSDFGPU(uint32_t p_pool_bricks = DEFAULT_POOL_BRICKS);
 	~NextGIGlobalSDFGPU();
@@ -86,6 +90,11 @@ public:
 	uint32_t get_used_bricks() const { return used; }
 	// GodotNext: ps_swrt_trace (#186). The last update_bricks() ran out of pool slots.
 	bool is_allocation_failed() const { return last_allocation_failed; }
+	// Marks a brick that holds geometry but got no pool slot (PAGE_MISSING). A brick
+	// with a slot keeps it.
+	void mark_missing(uint32_t p_level, const Vector3i &p_brick);
+	// The PAGE_MISSING bricks of a level: a level with any is partial.
+	uint32_t get_missing_bricks(uint32_t p_level) const { return p_level < NextGIGlobalSDF::MAX_LEVELS ? missing_bricks[p_level] : 0; }
 	// The pool buffers exist (ensure_buffers() succeeded on a device).
 	bool has_buffers() const { return pool_buffer.is_valid() && dynamic_pool_buffer.is_valid() && coverage_buffer.is_valid(); }
 	uint32_t get_capacity() const { return capacity; }
@@ -106,10 +115,12 @@ private:
 	bool _update_coarse(uint32_t p_level, const Vector3i &p_origin);
 	uint32_t _allocate_brick(uint32_t p_level, const Vector3i &p_brick);
 	void _release_brick(uint32_t p_level, const Vector3i &p_brick);
+	void _recount_missing(uint32_t p_level);
 
 	uint32_t capacity = 0;
 	uint32_t used = 0;
 	bool last_allocation_failed = false; // GodotNext: ps_swrt_trace (#186)
+	uint32_t missing_bricks[NextGIGlobalSDF::MAX_LEVELS] = {}; // GodotNext: ps_swrt_trace (#186)
 	mutable PackedByteArray pool_data;
 	Vector<PackedInt32Array> page_tables;
 	Vector<uint8_t> slot_used;

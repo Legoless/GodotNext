@@ -989,6 +989,78 @@ TEST_CASE("[NextGI][SWRT] A brick a scroll keeps holds the composite of its new 
 	CHECK_EQ(differ, 0u);
 }
 
+TEST_CASE("[NextGI][GlobalSDF] A full level build plans the bricks nearest the camera first") {
+	// A level that runs out of pool slots keeps the bricks it allocated first: the ones near
+	// the camera (the level's center), not a corner of the level.
+	NextGIGlobalSDFClipmaps clipmaps;
+	NextGIGlobalSDFClipmaps::Plan plan;
+	clipmaps.plan_level(1, Vector3(3.0f, 1.0f, -2.0f), 0, plan);
+	REQUIRE(plan.full);
+	REQUIRE_EQ(plan.bricks.size(), NextGIGlobalSDF::BRICKS_PER_LEVEL);
+	const int page = int(NextGIGlobalSDF::PAGE_SIZE);
+	// Twice the offset of a brick's center from the page's center, squared.
+	auto distance = [](const Vector3i &p_brick) {
+		const int size = int(NextGIGlobalSDF::PAGE_SIZE);
+		return Vector3i(2 * p_brick.x + 1 - size, 2 * p_brick.y + 1 - size, 2 * p_brick.z + 1 - size).length_squared();
+	};
+	LocalVector<uint8_t> seen;
+	seen.resize(NextGIGlobalSDF::BRICKS_PER_LEVEL);
+	memset(seen.ptr(), 0, seen.size());
+	uint32_t unique = 0;
+	uint32_t out_of_order = 0;
+	for (uint32_t index = 0; index < plan.bricks.size(); index++) {
+		const Vector3i &brick = plan.bricks[index];
+		const uint32_t key = uint32_t(brick.x + page * (brick.y + page * brick.z));
+		unique += seen[key] == 0 ? 1 : 0;
+		seen[key] = 1;
+		out_of_order += index > 0 && distance(plan.bricks[index - 1]) > distance(brick) ? 1 : 0;
+	}
+	CHECK_EQ(unique, NextGIGlobalSDF::BRICKS_PER_LEVEL);
+	CHECK_EQ(out_of_order, 0u);
+	// One of the eight bricks around the center comes first, a corner last.
+	CHECK_EQ(distance(plan.bricks[0]), 3);
+	CHECK_EQ(distance(plan.bricks[plan.bricks.size() - 1]), 3 * (page - 1) * (page - 1));
+}
+
+TEST_CASE("[NextGI][GlobalSDF] A partial level marks its missing bricks until they get a slot") {
+	// A brick that holds geometry but got no pool slot is PAGE_MISSING, not empty: the trace
+	// reads a coarser level there (swrt_level_missing() in nextgi_sdf_trace_inc.glsl).
+	NextGIGlobalSDFGPU gpu(2);
+	float voxels[NextGIGlobalSDF::BRICK_VOXELS] = {};
+	REQUIRE(gpu.upload_brick(0, Vector3i(1, 1, 1), voxels));
+	gpu.mark_missing(0, Vector3i(1, 1, 1)); // A brick with a slot keeps it.
+	CHECK(gpu.has_brick(0, Vector3i(1, 1, 1)));
+	gpu.mark_missing(0, Vector3i(2, 1, 1));
+	gpu.mark_missing(0, Vector3i(3, 1, 1));
+	gpu.mark_missing(0, Vector3i(3, 1, 1));
+	CHECK_EQ(gpu.get_slot(0, Vector3i(2, 1, 1)), NextGIGlobalSDFGPU::PAGE_MISSING);
+	CHECK_FALSE(gpu.has_brick(0, Vector3i(2, 1, 1)));
+	CHECK_EQ(gpu.get_missing_bricks(0), 2u);
+	CHECK_EQ(gpu.get_missing_bricks(1), 0u);
+	// A scroll moves them with the level; it never turns them into empty space.
+	gpu.scroll_level(0, Vector3i(1, 0, 0));
+	CHECK(gpu.has_brick(0, Vector3i(0, 1, 1)));
+	CHECK_EQ(gpu.get_slot(0, Vector3i(1, 1, 1)), NextGIGlobalSDFGPU::PAGE_MISSING);
+	CHECK_EQ(gpu.get_slot(0, Vector3i(2, 1, 1)), NextGIGlobalSDFGPU::PAGE_MISSING);
+	CHECK_EQ(gpu.get_slot(0, Vector3i(3, 1, 1)), NextGIGlobalSDFGPU::PAGE_UNALLOCATED);
+	CHECK_EQ(gpu.get_missing_bricks(0), 2u);
+	// A brick that gets a slot is no longer missing; one that cannot stays missing.
+	REQUIRE(gpu.upload_brick(0, Vector3i(1, 1, 1), voxels));
+	CHECK_EQ(gpu.get_missing_bricks(0), 1u);
+	CHECK_FALSE(gpu.upload_brick(0, Vector3i(2, 1, 1), voxels));
+	CHECK_EQ(gpu.get_slot(0, Vector3i(2, 1, 1)), NextGIGlobalSDFGPU::PAGE_MISSING);
+	// A scroll that moves a missing brick out of the level drops it.
+	gpu.scroll_level(0, Vector3i(3, 0, 0));
+	CHECK_EQ(gpu.get_missing_bricks(0), 0u);
+	gpu.mark_missing(0, Vector3i(5, 5, 5));
+	CHECK_EQ(gpu.get_missing_bricks(0), 1u);
+	// A full rebuild starts over.
+	gpu.release_level(0);
+	CHECK_EQ(gpu.get_missing_bricks(0), 0u);
+	CHECK_EQ(gpu.get_slot(0, Vector3i(5, 5, 5)), NextGIGlobalSDFGPU::PAGE_UNALLOCATED);
+	CHECK_EQ(gpu.get_used_bricks(), 0u);
+}
+
 TEST_CASE("[NextGI][SWRT] SWRT_REDUCED drops the top level and frees its slots") {
 	NextGIGlobalSDFGPU gpu(NextGISWRTTrace::pool_bricks_for_levels(NextGIGlobalSDF::BASE_LEVELS));
 	NextGIGlobalSDFClipmaps clipmaps;

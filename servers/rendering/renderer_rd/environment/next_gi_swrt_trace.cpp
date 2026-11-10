@@ -165,7 +165,7 @@ bool _readback_enabled() {
 
 // The scene fields every kernel reads (levels, origins, step budget, pool, instance
 // counts). The view fields (matrices, screen, grid) stay zero unless a view sets them.
-void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps &p_clipmaps, uint32_t p_levels, uint32_t p_steps, uint32_t p_instances, uint32_t p_two_sided, uint32_t p_capacity) {
+void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps &p_clipmaps, const NextGIGlobalSDFGPU *p_field, uint32_t p_levels, uint32_t p_steps, uint32_t p_instances, uint32_t p_two_sided, uint32_t p_capacity) {
 	r_params.camera[3] = float(p_levels);
 	r_params.trace[1] = float(p_steps);
 	for (uint32_t level = 0; level < 6; level++) {
@@ -173,7 +173,9 @@ void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps 
 		r_params.origins[level * 4] = origin.x;
 		r_params.origins[level * 4 + 1] = origin.y;
 		r_params.origins[level * 4 + 2] = origin.z;
-		r_params.origins[level * 4 + 3] = level < p_levels && p_clipmaps.is_level_valid(level) ? 1 : 0;
+		// 2: a partial level, whose missing bricks the trace reads from a coarser level.
+		const bool partial = p_field != nullptr && p_field->get_missing_bricks(level) > 0;
+		r_params.origins[level * 4 + 3] = level < p_levels && p_clipmaps.is_level_valid(level) ? (partial ? 2 : 1) : 0;
 		r_params.voxel_size[level] = NextGIGlobalSDF::level_voxel_size(level);
 	}
 	r_params.flags[3] = float(p_instances);
@@ -691,8 +693,9 @@ void NextGISWRTTrace::update_scene(RenderDataRD *p_render_data) {
 	_note_reduced(levels_before);
 	if (stats.allocation_failed) {
 		// At the floor the level stays resident with the bricks it got (NextGIGlobalSDFClipmaps
-		// keeps it); its missing bricks are rebuilt when a scroll or a dirty volume reaches them.
-		WARN_PRINT_ONCE(vformat("NextGI software ray tracing: the global SDF pool is full at %d levels; level %d misses the bricks that did not fit.", active_levels, stats.failed_level));
+		// keeps it). The coarser levels were built first, and the trace reads the missing bricks
+		// from them. They are rebuilt when a scroll or a dirty volume reaches them.
+		WARN_PRINT_ONCE(vformat("NextGI software ray tracing: the global SDF pool is full at %d levels; level %d is partial, and the trace reads the bricks that did not fit from a coarser level.", active_levels, stats.failed_level));
 	}
 	if (mode == MODE_DETAIL) {
 		_upload_detail_meshes();
@@ -708,7 +711,7 @@ void NextGISWRTTrace::_fill_params(RenderDataRD *p_render_data, NextGIVoxelLight
 	NextGIViewMath::store(view_projection.inverse(), params.inv_view_proj);
 	NextGIViewMath::store(view_projection, params.view_proj);
 	const Vector3 camera = scene_data->cam_transform.origin;
-	_fill_scene_fields(params, clipmaps, active_levels, _max_steps(), instances.size(), two_sided.size(), field != nullptr ? field->get_capacity() : 0);
+	_fill_scene_fields(params, clipmaps, field, active_levels, _max_steps(), instances.size(), two_sided.size(), field != nullptr ? field->get_capacity() : 0);
 	params.camera[0] = camera.x;
 	params.camera[1] = camera.y;
 	params.camera[2] = camera.z;
@@ -1045,7 +1048,7 @@ bool NextGISWRTTrace::trace_shadow_rays(RID p_requests, uint32_t p_count, RID p_
 	// current clipmaps: it does not depend on a trace_view() of this frame.
 	TraceParamsGPU params = {};
 	// The microbenchmark's tracer keeps the default budget: the debug override is for the views.
-	_fill_scene_fields(params, clipmaps, active_levels, benchmark ? MAX_STEPS : _max_steps(), instances.size(), two_sided.size(), field->get_capacity());
+	_fill_scene_fields(params, clipmaps, field, active_levels, benchmark ? MAX_STEPS : _max_steps(), instances.size(), two_sided.size(), field->get_capacity());
 	rd->buffer_update(gpu->shadow_params_buffer, 0, sizeof(params), &params);
 	Vector<RD::Uniform> uniforms;
 	_append_trace_uniforms(uniforms, gpu->shadow_params_buffer, nullptr, RID(), false, false);
@@ -1281,7 +1284,7 @@ bool NextGISWRTTrace::run_microbenchmark(uint64_t &r_usec, String &r_failure) {
 	bench.clipmaps.update(*bench.field, bench.instances, camera, 0, bench.active_levels);
 	bench._upload_instances();
 	TraceParamsGPU params = {};
-	_fill_scene_fields(params, bench.clipmaps, bench.active_levels, MAX_STEPS, bench.instances.size(), bench.two_sided.size(), bench.field->get_capacity());
+	_fill_scene_fields(params, bench.clipmaps, bench.field, bench.active_levels, MAX_STEPS, bench.instances.size(), bench.two_sided.size(), bench.field->get_capacity());
 	NextGIViewMath::store(Projection(), params.inv_view_proj);
 	NextGIViewMath::store(Projection(), params.view_proj);
 	params.camera[0] = camera.x;

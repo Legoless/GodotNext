@@ -84,7 +84,9 @@ public:
 	void reset();
 	void invalidate_level(uint32_t p_level);
 
-	// Plans and rebuilds the first p_levels levels into p_field.
+	// Plans and rebuilds the first p_levels levels into p_field, coarsest first: a pool that
+	// runs out leaves a finer level partial, and the trace reads its missing bricks
+	// (NextGIGlobalSDFGPU::PAGE_MISSING) from the complete level above.
 	Stats update(NextGIGlobalSDFGPU &r_field, const Vector<NextGIGlobalSDF::Instance> &p_instances, const Vector3 &p_camera, uint64_t p_frame, uint32_t p_levels);
 
 	// SWRT_REDUCED: frees the top level's slots and returns the new level count,

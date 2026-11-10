@@ -313,6 +313,9 @@ uint32_t NextGIGlobalSDFGPU::_allocate_brick(uint32_t p_level, const Vector3i &p
 	if (!_allocate_slot(slot)) {
 		return UINT32_MAX;
 	}
+	if (table[index] == PAGE_MISSING) { // GodotNext: ps_swrt_trace (#186)
+		missing_bricks[p_level]--;
+	}
 	table.set(index, int32_t(slot));
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
@@ -323,16 +326,47 @@ uint32_t NextGIGlobalSDFGPU::_allocate_brick(uint32_t p_level, const Vector3i &p
 
 void NextGIGlobalSDFGPU::_release_brick(uint32_t p_level, const Vector3i &p_brick) {
 	const int32_t slot = get_slot(p_level, p_brick);
-	if (slot < 0) {
+	// GodotNext: ps_swrt_trace (#186). A missing brick that lost its instances is empty.
+	if (slot < 0 && slot != PAGE_MISSING) {
 		return;
 	}
 	const uint32_t index = _table_index(p_brick);
-	_free_slot(uint32_t(slot));
+	if (slot >= 0) {
+		_free_slot(uint32_t(slot));
+	} else {
+		missing_bricks[p_level]--;
+	}
 	page_tables.write[p_level].set(index, PAGE_UNALLOCATED);
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], index * sizeof(int32_t), sizeof(int32_t), page_tables[p_level].ptr() + index);
 	}
+}
+
+// GodotNext: ps_swrt_trace (#186)
+void NextGIGlobalSDFGPU::mark_missing(uint32_t p_level, const Vector3i &p_brick) {
+	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || p_brick.x < 0 || p_brick.y < 0 || p_brick.z < 0 ||
+			p_brick.x >= int(NextGIGlobalSDF::PAGE_SIZE) || p_brick.y >= int(NextGIGlobalSDF::PAGE_SIZE) || p_brick.z >= int(NextGIGlobalSDF::PAGE_SIZE)) {
+		return;
+	}
+	const uint32_t index = _table_index(p_brick);
+	if (page_tables[p_level][index] != PAGE_UNALLOCATED) {
+		return;
+	}
+	page_tables.write[p_level].set(index, PAGE_MISSING);
+	missing_bricks[p_level]++;
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd != nullptr && page_buffers[p_level].is_valid()) {
+		rd->buffer_update(page_buffers[p_level], index * sizeof(int32_t), sizeof(int32_t), page_tables[p_level].ptr() + index);
+	}
+}
+
+void NextGIGlobalSDFGPU::_recount_missing(uint32_t p_level) {
+	uint32_t count = 0;
+	for (const int32_t entry : page_tables[p_level]) {
+		count += entry == PAGE_MISSING ? 1 : 0;
+	}
+	missing_bricks[p_level] = count;
 }
 
 bool NextGIGlobalSDFGPU::upload_brick(uint32_t p_level, const Vector3i &p_brick, const float *p_voxels) {
@@ -409,6 +443,7 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		const uint32_t slot = _allocate_brick(p_level, brick);
 		if (slot == UINT32_MAX) {
 			allocation_failed = true;
+			mark_missing(p_level, brick); // GodotNext: ps_swrt_trace (#186)
 			continue;
 		}
 		BrickWork item = {};
@@ -623,6 +658,9 @@ bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instan
 		const Vector3 point = NextGIGlobalSDF::voxel_center(p_level, p_origin, voxel);
 		const Vector3i brick = voxel / int(NextGIGlobalSDF::BRICK_SIZE);
 		const int32_t slot = get_slot(p_level, brick);
+		if (slot == PAGE_MISSING) {
+			continue; // GodotNext: ps_swrt_trace (#186). No composite: the trace reads a coarser level.
+		}
 		float distance = 65504.0f;
 		if (slot >= 0) {
 			const Vector3i local = voxel - brick * int(NextGIGlobalSDF::BRICK_SIZE);
@@ -763,6 +801,10 @@ void NextGIGlobalSDFGPU::scroll_level(uint32_t p_level, const Vector3i &p_delta_
 				}
 				const uint32_t old_index = _table_index(old);
 				const int32_t slot = old_table[old_index];
+				// GodotNext: ps_swrt_trace (#186). A missing brick stays missing where it moves.
+				if (slot == PAGE_MISSING) {
+					new_table.set(_table_index(Vector3i(x, y, z)), PAGE_MISSING);
+				}
 				if (slot < 0) {
 					continue;
 				}
@@ -777,6 +819,7 @@ void NextGIGlobalSDFGPU::scroll_level(uint32_t p_level, const Vector3i &p_delta_
 		}
 	}
 	page_tables.write[p_level] = new_table;
+	_recount_missing(p_level); // GodotNext: ps_swrt_trace (#186)
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], 0, new_table.size() * sizeof(int32_t), new_table.ptr());
@@ -791,9 +834,12 @@ void NextGIGlobalSDFGPU::release_level(uint32_t p_level) {
 	for (int index = 0; index < table.size(); index++) {
 		if (table[index] >= 0) {
 			_free_slot(uint32_t(table[index]));
+		}
+		if (table[index] != PAGE_UNALLOCATED) { // GodotNext: ps_swrt_trace (#186). PAGE_MISSING too.
 			table.set(index, PAGE_UNALLOCATED);
 		}
 	}
+	missing_bricks[p_level] = 0;
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], 0, table.size() * sizeof(int32_t), table.ptr());

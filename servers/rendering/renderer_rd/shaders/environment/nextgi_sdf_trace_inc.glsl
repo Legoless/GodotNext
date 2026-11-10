@@ -64,7 +64,7 @@ struct SWRTParams {
 	vec4 screen; // xy internal size, z: depth valid, w: Hi-Z max mip.
 	vec4 trace; // x: gather tmax, y: max steps, z: detail mode, w: max roughness to trace.
 	vec4 ambient; // rgb: ambient light, w: sky radiance texture valid.
-	ivec4 origins[6]; // xyz: level origin in voxels, w: 1 when the level is resident.
+	ivec4 origins[6]; // xyz: level origin in voxels, w: 1 when the level is resident, 2 when it is partial.
 	vec4 voxel_size0;
 	vec4 voxel_size1;
 	ivec4 clipmap[4]; // Voxel-lighting clipmap (NextGIVoxelLighting::ClipmapLevelGPU).
@@ -250,9 +250,33 @@ int swrt_page_slot(uint level, uint index) {
 	return swrt_page5.data[index];
 }
 
+// NextGIGlobalSDFGPU::PAGE_UNALLOCATED and PAGE_MISSING.
+#define SWRT_PAGE_UNALLOCATED -1
+#define SWRT_PAGE_MISSING -2
+
+// A partial level (the pool ran out at the level floor) marks the bricks that
+// hold geometry but got no slot. True when the trilinear corners or the normal
+// taps at p (voxels floor(f) - 1 to floor(f) + 2) reach one of them.
+bool swrt_level_missing(uint level, vec3 p) {
+	ivec3 base = ivec3(floor(p / swrt_level_voxel(level) - vec3(SWRT_P.origins[level].xyz) - vec3(0.5)));
+	ivec3 lo = clamp(base - ivec3(1), ivec3(0), ivec3(127)) >> 3;
+	ivec3 hi = clamp(base + ivec3(2), ivec3(0), ivec3(127)) >> 3;
+	for (int z = lo.z; z <= hi.z; z++) {
+		for (int y = lo.y; y <= hi.y; y++) {
+			for (int x = lo.x; x <= hi.x; x++) {
+				if (swrt_page_slot(level, uint(x + 16 * (y + 16 * z))) == SWRT_PAGE_MISSING) {
+					return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 // The finest resident level whose clipmap holds p two voxels inside its edge,
 // so the trilinear corners and the normal taps stay in the level. Loops the
-// levels from 0 (#186 step 2).
+// levels from 0 (#186 step 2). Where a partial level misses a brick, the next
+// level holds p (the levels are built coarsest first).
 uint swrt_level_at(vec3 p) {
 	uint levels = swrt_active_levels();
 	for (uint level = 0u; level < levels; level++) {
@@ -262,6 +286,9 @@ uint swrt_level_at(vec3 p) {
 		}
 		vec3 local = p / swrt_level_voxel(level) - vec3(origin.xyz);
 		if (all(greaterThanEqual(local, vec3(2.0))) && all(lessThan(local, vec3(126.0)))) {
+			if (origin.w == 2 && swrt_level_missing(level, p)) {
+				continue;
+			}
 			return level;
 		}
 	}
@@ -339,7 +366,8 @@ float swrt_brick_exit(uint level, vec3 p, vec3 direction) {
 }
 
 // True when the brick that holds p at this level is resident in the page
-// table but unallocated: no instance's mesh SDF comes within a voxel of it.
+// table but unallocated: no instance's mesh SDF comes within a voxel of it. A
+// missing brick of a partial level is not empty.
 bool swrt_brick_empty(uint level, vec3 p) {
 	ivec4 origin = SWRT_P.origins[level];
 	if (origin.w == 0) {
@@ -350,7 +378,7 @@ bool swrt_brick_empty(uint level, vec3 p) {
 		return false;
 	}
 	ivec3 brick = voxel >> 3;
-	return swrt_page_slot(level, uint(brick.x + 16 * (brick.y + 16 * brick.z))) < 0;
+	return swrt_page_slot(level, uint(brick.x + 16 * (brick.y + 16 * brick.z))) == SWRT_PAGE_UNALLOCATED;
 }
 
 // Gradient from six taps one voxel out. A tap without all eight corners is

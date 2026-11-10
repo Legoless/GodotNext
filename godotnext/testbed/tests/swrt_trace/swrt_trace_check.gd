@@ -32,9 +32,10 @@ extends Node3D
 ## that holds only some of its six levels: it drops levels from the top until the
 ## rest fit (#187 SWRT_REDUCED), reports it, and still passes every check above.
 ## Pass --starved for a pool too small even for three levels: the tracer stops at
-## three, keeps the level that ran out of slots resident with the bricks it got,
-## builds no level in full again, and level 0 still traces (no low-sun pass: the levels
-## past level 0 are partial).
+## three, builds the levels coarsest first so only level 0 runs out of slots, keeps it
+## resident with the bricks nearest the camera, and builds no level in full again. The
+## trace reads level 0's missing bricks from level 1 and still passes every check above
+## but the low-sun pass.
 ## --reduced and --starved are sized for the plain scene: do not combine them with
 ## --dense, --scaled or --sheared. Nor --dense with --sheared: the poles keep clear of the
 ## upright boxes only.
@@ -76,10 +77,11 @@ const CAMERA_POSITION := Vector3(0.3, 3.2, 4.2)
 const DETAIL_METERS := 2.0
 const FROXEL_CAP := 8
 ## Pool sizes in bricks, for the plain scene (no --dense, no --scaled). Its six levels
-## hold 1086, 700, 309, 128, 40 and 12 bricks (level_bricks in the result). Levels 0 to 3
-## take 2223 bricks and levels 0 to 4 take 2263, so REDUCED_POOL_BRICKS keeps four levels.
-## STARVED_POOL_BRICKS holds level 0 and half of level 1. If the scene or the mesh SDF
-## builder changes these counts, pick new sizes from level_bricks.
+## hold PLAIN_LEVEL_BRICKS (level_bricks in the result). Levels 0 to 3 take 2223 bricks and
+## levels 0 to 4 take 2263, so REDUCED_POOL_BRICKS keeps four levels. STARVED_POOL_BRICKS
+## holds levels 1 and 2 and 427 of level 0's bricks. If the scene or the mesh SDF builder
+## changes these counts, pick new sizes from level_bricks.
+const PLAIN_LEVEL_BRICKS := [1086, 700, 309, 128, 40, 12]
 const REDUCED_POOL_BRICKS := 2243
 const REDUCED_LEVELS := 4
 const STARVED_POOL_BRICKS := 1436
@@ -334,7 +336,8 @@ func _process(_delta: float) -> void:
 		return
 	_space = get_world_3d().direct_space_state
 	if _stage == 0 and _starved:
-		_verify_starved(info, readback)
+		_verify(info, readback)
+		_verify_starved(info)
 		_starved_full_builds = int(info.get("swrt_trace_full_builds", -1))
 		_stage = 2
 		_stage_frame = _frames
@@ -398,8 +401,8 @@ func _verify_reduced(p_info: Dictionary, p_pool: int, p_levels: int) -> void:
 		_reasons.append("a pool of %d bricks keeps %d levels, not %d" % [p_pool, _summary["levels"], p_levels])
 
 
-## --starved: three levels, the pool full, and level 0 still traced.
-func _verify_starved(p_info: Dictionary, p_readback: Dictionary) -> void:
+## --starved: three levels, the pool full, and only level 0 partial (_verify checks the trace).
+func _verify_starved(p_info: Dictionary) -> void:
 	_summary["starved"] = true
 	if str(p_info.get("tier", "")) != "SWRT":
 		_reasons.append("tier is %s, not SWRT" % str(p_info.get("tier", "")))
@@ -412,12 +415,9 @@ func _verify_starved(p_info: Dictionary, p_readback: Dictionary) -> void:
 		resident += int(bricks)
 	if level_bricks.size() != MIN_LEVELS or resident != STARVED_POOL_BRICKS or int(level_bricks[0]) <= 0:
 		_reasons.append("starved pool: the levels hold %s bricks of %d" % [str(level_bricks), STARVED_POOL_BRICKS])
-	var camera: Transform3D = p_readback["camera"]
-	var gather := _decode_rays(p_readback["gather"])
-	var stats := _check_hits(gather, camera.origin)
-	_summary["gather"] = stats
-	if stats["near"] < 30 or stats["near_ok"] < int(0.9 * stats["near"]):
-		_reasons.append("starved pool: %d of %d rays with a hit within %.0f m hit it in time" % [stats["near_ok"], stats["near"], DETAIL_METERS])
+	elif int(level_bricks[1]) != PLAIN_LEVEL_BRICKS[1] or int(level_bricks[2]) != PLAIN_LEVEL_BRICKS[2]:
+		# The levels are built coarsest first: the trace reads level 0's missing bricks from level 1.
+		_reasons.append("starved pool: levels 1 and 2 hold %s bricks, not all of %s" % [str(level_bricks.slice(1)), str(PLAIN_LEVEL_BRICKS.slice(1, 3))])
 
 
 func _verify_exhausted(p_readback: Dictionary) -> void:

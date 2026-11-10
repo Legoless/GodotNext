@@ -46,6 +46,40 @@ int _floor_div_brick(int p_value) {
 	return quotient;
 }
 
+// Every brick of a page, nearest the camera (the level's center) first, so a level that
+// runs out of pool slots keeps its bricks near the camera and misses the far ones.
+LocalVector<Vector3i> _nearest_first_bricks() {
+	struct Ordered {
+		Vector3i brick;
+		int64_t distance = 0;
+		bool operator<(const Ordered &p_other) const {
+			if (distance != p_other.distance) {
+				return distance < p_other.distance;
+			}
+			return brick < p_other.brick;
+		}
+	};
+	const int page = int(NextGIGlobalSDF::PAGE_SIZE);
+	LocalVector<Ordered> ordered;
+	ordered.reserve(NextGIGlobalSDF::BRICKS_PER_LEVEL);
+	for (int z = 0; z < page; z++) {
+		for (int y = 0; y < page; y++) {
+			for (int x = 0; x < page; x++) {
+				// Twice the offset of the brick's center from the page's center.
+				const Vector3i offset(2 * x + 1 - page, 2 * y + 1 - page, 2 * z + 1 - page);
+				ordered.push_back({ Vector3i(x, y, z), offset.length_squared() });
+			}
+		}
+	}
+	ordered.sort();
+	LocalVector<Vector3i> bricks;
+	bricks.reserve(ordered.size());
+	for (const Ordered &entry : ordered) {
+		bricks.push_back(entry.brick);
+	}
+	return bricks;
+}
+
 } // namespace
 
 float NextGIGlobalSDFClipmaps::dirty_margin(uint32_t p_level) {
@@ -67,15 +101,8 @@ void NextGIGlobalSDFClipmaps::plan_level(uint32_t p_level, const Vector3 &p_came
 	if (!level.valid) {
 		r_plan.update = true;
 		r_plan.full = true;
-		r_plan.bricks.resize(NextGIGlobalSDF::BRICKS_PER_LEVEL);
-		uint32_t count = 0;
-		for (int z = 0; z < int(NextGIGlobalSDF::PAGE_SIZE); z++) {
-			for (int y = 0; y < int(NextGIGlobalSDF::PAGE_SIZE); y++) {
-				for (int x = 0; x < int(NextGIGlobalSDF::PAGE_SIZE); x++) {
-					r_plan.bricks[count++] = Vector3i(x, y, z);
-				}
-			}
-		}
+		static const LocalVector<Vector3i> nearest_first = _nearest_first_bricks();
+		r_plan.bricks = nearest_first;
 		return;
 	}
 	if (!NextGIGlobalSDF::level_updates_on_frame(p_level, p_frame)) {
@@ -168,7 +195,9 @@ NextGIGlobalSDFClipmaps::Stats NextGIGlobalSDFClipmaps::update(NextGIGlobalSDFGP
 	Stats stats;
 	const uint32_t count = MIN(p_levels, NextGIGlobalSDF::MAX_LEVELS);
 	Plan plan;
-	for (uint32_t level = 0; level < count; level++) {
+	// Coarsest first: the coarse levels take few bricks and hold the fallback for a finer
+	// level's missing bricks.
+	for (uint32_t level = count; level-- > 0;) {
 		plan_level(level, p_camera, p_frame, plan);
 		if (!plan.update) {
 			continue;
@@ -180,9 +209,10 @@ NextGIGlobalSDFClipmaps::Stats NextGIGlobalSDFClipmaps::update(NextGIGlobalSDFGP
 			r_field.scroll_level(level, plan.scroll);
 		}
 		const bool built = r_field.update_bricks(p_instances, level, plan.origin, plan.bricks.ptr(), plan.bricks.size());
-		// A level that ran out of pool slots stays resident with the bricks it got. The
-		// caller either frees slots (drops a level) and rebuilds it, or keeps it partial at
-		// its level floor; a full rebuild on every update would fail the same way.
+		// A level that ran out of pool slots stays resident with the bricks it got and marks
+		// the others missing. The caller either frees slots (drops a level) and rebuilds it,
+		// or keeps it partial at its level floor; a full rebuild on every update would fail
+		// the same way.
 		const bool out_of_slots = !built && r_field.is_allocation_failed();
 		commit_level(level, plan, built || out_of_slots);
 		stats.levels_updated++;
