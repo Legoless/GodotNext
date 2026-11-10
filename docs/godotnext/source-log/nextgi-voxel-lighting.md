@@ -19,3 +19,11 @@ records every outside input used for voxel lighting of global-SDF hits.
 | Copied files | None |
 
 How it was used: each 11-bit channel is 6 mantissa bits plus a 5-bit exponent, and the 10-bit channel is 5 mantissa bits plus a 5-bit exponent. The exponent bias is 15. There is no sign bit and no NaN or infinity encoding. The pack clamps when the stored exponent is greater than 30, which is the largest finite value (the 11-bit channel's maximum is 65024). A stored exponent of 30 itself is 32768 and is encoded. Denormals (stored exponent at or below 0) are scaled by 2^(1−15−mantissa bits), rounded half up, and clamped to the maximum mantissa instead of being promoted. A rounding carry that pushes the stored exponent above 30 clamps the same way. The CPU pack and the GLSL pack in the include take the exponent and mantissa from the IEEE bits and follow those rules. The doctest checks the edge values on the CPU pack, which is a line-for-line twin of the GLSL pack; the GPU pack is exercised by `godotnext/testbed/tests/voxel_lighting/voxel_slot_check.gd`, which reads lookups of the shaded volume back.
+
+## Notes without an outside input
+
+### Direction slots across thin walls
+
+The direction-slot rule for a voxel center inside a solid is the project's own; the #188 thin-wall fixer consulted no outside source for it. Such a voxel keeps, on each axis, only the face its center is nearer to, and the slot the far face would fill stays empty, because lookups blend voxels from both sides of a wall.
+
+The limit, with one slot per direction and no side test in the lookup, for a flat wall facing an axis: no voxel light crosses a wall at least two lighting voxels thick (0.4 m at level 0, doubling per level). For a wall T thick and a lighting voxel V, a surface that faces the wall from the other room, g from the wall's face, can still read the near room's wall face with a trilinear weight of at most max(0, 1 - (T/2 + g)/V). The wall's own faces read only their own room when the wall is at least one lighting voxel thick (0.2 m at level 0). Walls thinner than one lighting voxel can also pass light through voxels whose centers lie outside them. The doctest "keeps the far room out of voxels inside a thin wall" asserts this limit.

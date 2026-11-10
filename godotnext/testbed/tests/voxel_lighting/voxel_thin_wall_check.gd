@@ -1,26 +1,42 @@
 extends Node3D
-## #188: GPU check that a thin wall keeps the next room's light out of voxel lighting.
+## #188: GPU check that a thin wall keeps each room's light out of the other in voxel lighting.
 ##
-## Two 0.2 m walls stand side by side, 4 m apart. At the default 10 mesh-SDF voxels per meter,
-## a 0.2 m wall's field never drops much below -eps, so the level-0 voxel centers at z = 0.1
-## inside each wall are within eps of a face: 3 cm from the +Z face of the left wall and 7 cm
-## from the +Z face of the right one. Room A (z below the walls) has no light. In room B an
-## unshadowed omni light lights each wall's +Z face and a box face 0.37 m beyond the wall, which
-## also faces -Z. A lookup on a wall's room-A face blends slot +Z of the voxels at z = -0.1 and
-## z = 0.1, so a voxel inside the wall that files the box face there lights room A.
+## Four 0.2 m walls stand side by side. At the default 10 mesh-SDF voxels per meter, a 0.2 m
+## wall's field never drops much below -eps, so the level-0 voxel centers at z = 0.1 inside
+## each wall are within eps of a face: 3 cm from the +Z face (room-A face at z = -0.07) or 7 cm
+## (-0.03). Room A lies at z below a wall, room B past it, where box B's -Z face faces the wall.
+## Lookups blend two voxels along z, so a voxel inside a wall is read from both rooms.
+## - Room B lit (box B 0.37 m past the wall): an unshadowed omni light in room B lights the
+##   wall's +Z face and box B's face. A voxel inside the wall that files box B in the slot the
+##   wall's room-A face reads lights room A.
+## - Room A lit (box B 3 cm past the wall): an omni light in room A, whose range ends short of
+##   box B, lights the wall's room-A face. A voxel inside the wall that files that face in the
+##   slot box B's face reads lights room B.
 ## Run with run_voxel_lighting_check.sh (hardware ray tracing tier, quality High).
 ##
-## With debug/voxel_lighting_readback on, the engine probes the GLSL lookup at stored hits. For
-## each wall: the room-B face and the box face are lit and covered, and the room-A face is
-## covered (both voxels hold that face) and dark.
+## With debug/voxel_lighting_readback on, the engine probes the GLSL lookup at stored hits.
+## Room B lit: the room-B face and box B are lit and covered, and the room-A face is dark and
+## read from its room-A voxel only (its weight is that voxel's trilinear share). Room A lit: the
+## room-A face is lit, and box B's face is dark.
 
 const READBACK := "rendering/global_illumination/nextgi/debug/voxel_lighting_readback"
 const WALL_THICKNESS := 0.2
 const WALL_WIDTH := 2.4
 const WALL_HEIGHT := 3.0
-const GAP := 0.37
-# Left: room-A face at z = -0.07 (centers 3 cm from the +Z face). Right: -0.03 (7 cm).
-const SETUPS := [Vector2(-2.0, -0.07), Vector2(2.0, -0.03)]
+const LIGHTING_VOXEL := 0.2
+# low: the room-A face's z. gap: from the room-B face to box B's -Z face.
+const SETUPS := [
+	{"x": -2.0, "low": -0.07, "gap": 0.37, "lit": "B"},
+	{"x": 2.0, "low": -0.03, "gap": 0.37, "lit": "B"},
+	{"x": -5.0, "low": -0.07, "gap": 0.03, "lit": "A"},
+	{"x": 5.0, "low": -0.03, "gap": 0.03, "lit": "A"},
+]
+# Room A's light: this far in front of the room-A face, with a range that ends 3 cm short of
+# box B (light to box B is ROOM_A_LIGHT_DISTANCE + WALL_THICKNESS + gap).
+const ROOM_A_LIGHT_DISTANCE := 0.6
+const ROOM_A_LIGHT_RANGE := 0.8
+# Box B probes this close to the light's axis (in x and y) sit behind the lit part of the wall.
+const LIT_RADIUS := 0.5
 const PROBE_UNTIL_FRAME := 900
 
 var _frames := 0
@@ -43,16 +59,22 @@ func _ready() -> void:
 
 	var material := StandardMaterial3D.new()
 	material.albedo_color = Color(0.8, 0.8, 0.8)
-	for setup: Vector2 in SETUPS:
-		var x := setup.x
-		var low := setup.y
+	for setup: Dictionary in SETUPS:
+		var x: float = setup["x"]
+		var low: float = setup["low"]
+		var gap: float = setup["gap"]
 		var high := low + WALL_THICKNESS
 		_add_box("Wall", Vector3(x, WALL_HEIGHT * 0.5, low + WALL_THICKNESS * 0.5), Vector3(WALL_WIDTH, WALL_HEIGHT, WALL_THICKNESS), material)
-		_add_box("BoxB", Vector3(x, WALL_HEIGHT * 0.5, high + GAP + 0.2), Vector3(WALL_WIDTH, WALL_HEIGHT, 0.4), material)
+		_add_box("BoxB", Vector3(x, WALL_HEIGHT * 0.5, high + gap + 0.2), Vector3(WALL_WIDTH, WALL_HEIGHT, 0.4), material)
 		var light := OmniLight3D.new()
-		light.position = Vector3(x, WALL_HEIGHT * 0.5, high + GAP * 0.5)
-		# Reaches neither the other setup nor around its own wall's edges.
-		light.omni_range = 1.5
+		if setup["lit"] == "B":
+			light.position = Vector3(x, WALL_HEIGHT * 0.5, high + gap * 0.5)
+			# Reaches neither another setup nor around its own wall's edges.
+			light.omni_range = 1.5
+		else:
+			light.position = Vector3(x, WALL_HEIGHT * 0.5, low - ROOM_A_LIGHT_DISTANCE)
+			# Ends short of box B and of every other setup.
+			light.omni_range = ROOM_A_LIGHT_RANGE
 		light.light_energy = 8.0
 		light.shadow_enabled = false
 		add_child(light)
@@ -107,10 +129,10 @@ func _process(_delta: float) -> void:
 	if positions.size() != normals.size() or positions.size() != results.size():
 		_fail("probe arrays differ in size")
 		return
-	# Per setup: [count, luminance sum, covered count, weight sum] for room A, room B, box.
+	# Per setup: [count, luminance sum, covered count, weight sum, luminance max] per bucket.
 	var buckets := []
-	for setup: Vector2 in SETUPS:
-		buckets.append({"room_a": [0, 0.0, 0, 0.0], "room_b": [0, 0.0, 0, 0.0], "box": [0, 0.0, 0, 0.0]})
+	for setup: Dictionary in SETUPS:
+		buckets.append({"room_a": [0, 0.0, 0, 0.0, 0.0], "room_b": [0, 0.0, 0, 0.0, 0.0], "box": [0, 0.0, 0, 0.0, 0.0], "box_lit": [0, 0.0, 0, 0.0, 0.0]})
 	for index in positions.size():
 		var p := positions[index]
 		var n := normals[index]
@@ -118,26 +140,30 @@ func _process(_delta: float) -> void:
 		if p.y < 0.5 or p.y > WALL_HEIGHT - 0.5:
 			continue
 		for setup_index in SETUPS.size():
-			var setup: Vector2 = SETUPS[setup_index]
-			if absf(p.x - setup.x) > WALL_WIDTH * 0.5 - 0.4:
+			var setup: Dictionary = SETUPS[setup_index]
+			var x: float = setup["x"]
+			if absf(p.x - x) > WALL_WIDTH * 0.5 - 0.4:
 				continue
-			var low := setup.y
+			var low: float = setup["low"]
 			var high := low + WALL_THICKNESS
-			var key := ""
+			var keys := []
 			if absf(p.z - low) < 0.03 and n.z < -0.9:
-				key = "room_a"
+				keys.append("room_a")
 			elif absf(p.z - high) < 0.03 and n.z > 0.9:
-				key = "room_b"
-			elif absf(p.z - (high + GAP)) < 0.03 and n.z < -0.9:
-				key = "box"
-			if key == "":
-				continue
-			var bucket: Array = buckets[setup_index][key]
-			bucket[0] += 1
-			bucket[1] += _luminance(r)
-			if r.a >= 0.5:
-				bucket[2] += 1
-			bucket[3] += r.a
+				keys.append("room_b")
+			elif absf(p.z - (high + float(setup["gap"]))) < 0.03 and n.z < -0.9:
+				keys.append("box")
+				if Vector2(p.x - x, p.y - WALL_HEIGHT * 0.5).length() < LIT_RADIUS:
+					keys.append("box_lit")
+			for key: String in keys:
+				var bucket: Array = buckets[setup_index][key]
+				var luminance := _luminance(r)
+				bucket[0] += 1
+				bucket[1] += luminance
+				if r.a >= 0.5:
+					bucket[2] += 1
+				bucket[3] += r.a
+				bucket[4] = maxf(bucket[4], luminance)
 	_last_stats = {"frame": _frames, "probes": positions.size(), "setups": buckets}
 	var failure := _probe_failure(buckets)
 	if failure != "":
@@ -151,26 +177,54 @@ func _process(_delta: float) -> void:
 	get_tree().quit(0)
 
 
+# Every failing condition of every setup, joined; empty when all hold.
 func _probe_failure(p_buckets: Array) -> String:
+	var failures := PackedStringArray()
 	for setup_index in SETUPS.size():
-		var name := "wall at z %.2f" % SETUPS[setup_index].y
-		var setup: Dictionary = p_buckets[setup_index]
-		for key in ["room_a", "room_b", "box"]:
-			if int(setup[key][0]) < 8:
-				return "%s: only %d %s probes" % [name, int(setup[key][0]), key]
-		var room_a: Array = setup["room_a"]
-		var room_b: Array = setup["room_b"]
-		var box: Array = setup["box"]
-		var box_mean := float(box[1]) / float(box[0])
-		var room_b_mean := float(room_b[1]) / float(room_b[0])
-		var room_a_mean := float(room_a[1]) / float(room_a[0])
+		var failure := _setup_failure(SETUPS[setup_index], p_buckets[setup_index])
+		if failure != "":
+			failures.append(failure)
+	return "; ".join(failures)
+
+
+func _setup_failure(p_setup: Dictionary, p_buckets: Dictionary) -> String:
+	var name := "wall at z %.2f, room %s lit" % [p_setup["low"], p_setup["lit"]]
+	for key in ["room_a", "room_b", "box"]:
+		if int(p_buckets[key][0]) < 8:
+			return "%s: only %d %s probes" % [name, int(p_buckets[key][0]), key]
+	var room_a: Array = p_buckets["room_a"]
+	var room_b: Array = p_buckets["room_b"]
+	var box: Array = p_buckets["box"]
+	var box_mean := float(box[1]) / float(box[0])
+	var room_b_mean := float(room_b[1]) / float(room_b[0])
+	var room_a_mean := float(room_a[1]) / float(room_a[0])
+	var failures := PackedStringArray()
+	if p_setup["lit"] == "B":
 		if box_mean <= 0.5 or room_b_mean <= 0.5:
-			return "%s: room B is not lit (box %.4f, wall %.4f)" % [name, box_mean, room_b_mean]
+			failures.append("room B is not lit (box %.4f, wall %.4f)" % [box_mean, room_b_mean])
 		if float(box[2]) / float(box[0]) < 0.8 or float(room_b[2]) / float(room_b[0]) < 0.8:
-			return "%s: room B coverage below 0.8" % name
-		# Both voxels around the room-A face hold that face: full weight, not a WRC fallback.
-		if float(room_a[3]) / float(room_a[0]) < 0.95:
-			return "%s: room-A face mean weight %.3f below 0.95 (a voxel inside the wall lost that face)" % [name, float(room_a[3]) / float(room_a[0])]
+			failures.append("room B coverage below 0.8")
+		# The room-A face reads the voxel in room A (z = -0.1) and the one inside the wall
+		# (z = 0.1). Only the first may hold anything in the slot the face reads, so the weight is
+		# that voxel's trilinear share: neither the share of both (the voxel in the wall holds a
+		# surface that box B's face would read too) nor a WRC fallback.
+		var share := 1.0 - absf(float(p_setup["low"]) + 0.1) / LIGHTING_VOXEL
+		var room_a_weight := float(room_a[3]) / float(room_a[0])
+		if absf(room_a_weight - share) > 0.05:
+			failures.append("room-A face mean weight %.3f, its room-A voxel's share is %.3f" % [room_a_weight, share])
 		if room_a_mean > 0.05 * box_mean:
-			return "%s: room-A face %.4f leaks room B's box %.4f through the wall (direction slots)" % [name, room_a_mean, box_mean]
-	return ""
+			failures.append("room-A face %.4f leaks room B's box %.4f through the wall (direction slots)" % [room_a_mean, box_mean])
+	else:
+		var box_lit: Array = p_buckets["box_lit"]
+		if int(box_lit[0]) < 4:
+			failures.append("only %d box probes behind the lit part of the wall" % int(box_lit[0]))
+		var room_a_max := float(room_a[4])
+		if room_a_max <= 0.2:
+			failures.append("room A is not lit (wall face max %.4f)" % room_a_max)
+		if float(box[4]) > 0.05 * room_a_max:
+			failures.append("box B's face %.4f (max) leaks room A's wall face %.4f through the wall (direction slots)" % [float(box[4]), room_a_max])
+		if room_b_mean > 0.05 * room_a_max:
+			failures.append("room-B face %.4f leaks room A's wall face %.4f through the wall" % [room_b_mean, room_a_max])
+	if failures.is_empty():
+		return ""
+	return "%s: %s" % [name, ", ".join(failures)]

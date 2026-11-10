@@ -575,6 +575,26 @@ void _voxel_keep(NextGIVoxelLighting::AxisHit &r_slot, uint32_t p_slot, const Vo
 	r_slot.normal = world_normal;
 }
 
+// From inside a solid, the exit found along the ray faces along it and goes to the opposite
+// slot. Lookups read a voxel from both sides of its center, so inside a wall that slot is read
+// from both rooms. The exit is kept only when the solid's exit along the opposite ray is not
+// nearer: the voxel serves the side its center is nearer to. The far face would light the near
+// room, because a surface just past the near face that faces the wall reads that slot.
+void _voxel_keep_exit(NextGIVoxelLighting::AxisHit *r_slots, uint32_t p_direction, const VoxelInstanceRay &p_ray, float p_d, float p_max_distance, const Vector3 &p_world_direction) {
+	const VoxelMarchEvent leave = _voxel_march_exit(p_ray, p_d, p_max_distance, p_world_direction);
+	if (!leave.found) {
+		return;
+	}
+	VoxelInstanceRay back = p_ray;
+	back.direction = -p_ray.direction;
+	const VoxelMarchEvent other = _voxel_march_exit(back, p_d, p_max_distance, -p_world_direction);
+	if (other.found && other.t < leave.t) {
+		return;
+	}
+	const uint32_t slot = NextGIVoxelLighting::opposite_direction(p_direction);
+	_voxel_keep(r_slots[slot], slot, p_ray, leave, p_max_distance);
+}
+
 } // namespace
 
 uint32_t NextGIVoxelLighting::trace_voxel(const TraceInstance *p_instances, uint32_t p_count, const Vector3 &p_center, float p_max_distance, AxisHit r_slots[DIRECTIONS]) {
@@ -616,7 +636,8 @@ uint32_t NextGIVoxelLighting::trace_voxel(const TraceInstance *p_instances, uint
 	// mesh-SDF density that is every center in a 10-25 cm wall: its field never drops below -eps.
 	// Along an axis the touched surface faces, the ray leaves the solid at once, and what it meets
 	// next lies on the far side of that surface (the next room). Nothing found along such an axis
-	// goes to its slot; that slot keeps the solid's exit found along the opposite axis.
+	// goes to its slot. The solid's far face, the exit along the opposite axis, does not either: it
+	// is farther than the touched face, and that slot is read from both rooms. The slot stays empty.
 	uint32_t blocked = 0;
 	if (!inside) {
 		for (uint32_t index = 0; index < p_count; index++) {
@@ -648,11 +669,7 @@ uint32_t NextGIVoxelLighting::trace_voxel(const TraceInstance *p_instances, uint
 			const float d0 = start[index];
 			if (inside) {
 				if (ray.is_signed && d0 < -ray.eps) {
-					const VoxelMarchEvent leave = _voxel_march_exit(ray, d0, p_max_distance, world_direction);
-					if (leave.found) {
-						const uint32_t slot = opposite_direction(direction);
-						_voxel_keep(r_slots[slot], slot, ray, leave, p_max_distance);
-					}
+					_voxel_keep_exit(r_slots, direction, ray, d0, p_max_distance, world_direction);
 				}
 				continue;
 			}
@@ -666,16 +683,13 @@ uint32_t NextGIVoxelLighting::trace_voxel(const TraceInstance *p_instances, uint
 				if (ray.is_signed && d0 < 0.0f) {
 					// The center is inside this solid, so its surfaces are exits, refined to the
 					// crossing. Along an axis the touched surface faces, the ray leaves through
-					// it or crosses the solid to its far side, and the exit, which faces d, goes
-					// to slot -d. A lookup on either face of a thin wall then reads that face.
-					// Along the surface no exit is near enough to matter, and a shallow one would
-					// file the surface in a slot it hardly faces.
+					// it, and that exit, which faces d, goes to slot -d. The opposite ray
+					// crosses the solid to its far face, which stays out of slot d: the touched
+					// face is nearer (_voxel_keep_exit). Along the surface no exit is near enough
+					// to matter, and a shallow one would file the surface in a slot it hardly
+					// faces.
 					if (Math::abs(facing) > SLOT_FACING_MIN) {
-						const VoxelMarchEvent leave = _voxel_march_exit(ray, d0, p_max_distance, world_direction);
-						if (leave.found) {
-							const uint32_t slot = opposite_direction(direction);
-							_voxel_keep(r_slots[slot], slot, ray, leave, p_max_distance);
-						}
+						_voxel_keep_exit(r_slots, direction, ray, d0, p_max_distance, world_direction);
 					}
 					continue;
 				}

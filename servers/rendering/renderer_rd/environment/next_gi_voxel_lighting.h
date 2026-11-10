@@ -57,7 +57,10 @@ class NextGIRelight;
 // global-SDF voxel. A voxel stores radiance for six axis directions plus a
 // coverage weight. Slot d holds the nearest surface on the voxel's axis line
 // that faces -d: an entry found tracing along +d from outside, or, for a
-// voxel center inside a solid, the exit found tracing along -d. A surface the
+// voxel center inside a solid, the exit found tracing along -d when the
+// solid's exit along +d is not nearer. Lookups read a voxel from both sides of
+// its center, so a voxel inside a wall serves only the face it is nearer to on
+// each axis; the far face's slot stays empty. A surface the
 // center touches goes only to the slots of the axes it faces. A center just
 // inside a solid (within eps of its surface, as in any thin wall) takes no
 // surface found past the solid along the axes that surface faces. Lookup reads

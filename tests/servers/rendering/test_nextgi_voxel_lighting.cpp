@@ -112,6 +112,37 @@ static Vector3i _local_voxel(uint32_t p_level, const Vector3i &p_sdf_origin, con
 	return Vector3i(int(Math::floor(local.x)), int(Math::floor(local.y)), int(Math::floor(local.z)));
 }
 
+// What a level-0 lookup at a surface point with an axis normal reads, as
+// nextgi_voxel_lighting_lookup blends it: per instance id, the summed trilinear weight of the
+// corners whose facing slot holds that instance. A corner with an empty slot adds nothing.
+struct VoxelLookupShare {
+	static constexpr uint32_t MAX_ID = 16;
+	float by_instance[MAX_ID] = {};
+	float total = 0.0f;
+};
+
+static VoxelLookupShare _lookup_share(const NextGIVoxelLighting &p_lighting, const Vector3i &p_sdf_origin, const Vector3 &p_world, uint32_t p_axis, bool p_positive) {
+	VoxelLookupShare share;
+	const float size = NextGIVoxelLighting::level_voxel_size(0);
+	const Vector3 origin_world = Vector3(p_sdf_origin) * NextGIGlobalSDF::level_voxel_size(0);
+	const Vector3 coord = (p_world - origin_world) / size - Vector3(0.5f, 0.5f, 0.5f);
+	const Vector3i base(int(Math::floor(coord.x)), int(Math::floor(coord.y)), int(Math::floor(coord.z)));
+	const Vector3 fraction = coord - Vector3(base);
+	const uint32_t slot = NextGIVoxelLighting::facing_direction(p_axis, p_positive);
+	for (uint32_t corner = 0; corner < 8; corner++) {
+		const Vector3i delta(int(corner & 1u), int((corner >> 1u) & 1u), int((corner >> 2u) & 1u));
+		const float weight = (delta.x == 1 ? fraction.x : 1.0f - fraction.x) * (delta.y == 1 ? fraction.y : 1.0f - fraction.y) * (delta.z == 1 ? fraction.z : 1.0f - fraction.z);
+		NextGIVoxelLighting::AxisHit hit;
+		if (!(weight > 0.0f) || !p_lighting.get_stored_hit(0, base + delta, slot, hit)) {
+			continue;
+		}
+		REQUIRE(hit.instance < VoxelLookupShare::MAX_ID);
+		share.by_instance[hit.instance] += weight;
+		share.total += weight;
+	}
+	return share;
+}
+
 static void _fill_axis(NextGIVoxelLighting::DirectionSample *r_samples, uint32_t p_direction, const Color &p_radiance, float p_weight) {
 	r_samples[p_direction].radiance = p_radiance;
 	r_samples[p_direction].weight = p_weight;
@@ -469,20 +500,25 @@ TEST_CASE("[NextGI] Voxel lighting stores a wall's faces in their own slots from
 	_drain(lighting, &instance, 1, first);
 	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
 
+	// From inside, a voxel holds the face it is nearer to on each axis. The other face, 0.3 m
+	// away, stays out of its slot: surfaces just past the near face that face the wall read it.
+	// Slot 5 (-Z) holds the surface facing +Z, slot 2 (+Z) the one facing -Z.
 	const Vector3i inside = _local_voxel(0, origin, Vector3(0.05f, 0.05f, 0.05f));
 	const Vector3 inside_center = NextGIVoxelLighting::voxel_center(0, origin, inside);
 	CHECK(Math::is_equal_approx(inside_center.z, 0.1f));
 	NextGIVoxelLighting::AxisHit front;
 	NextGIVoxelLighting::AxisHit back;
-	// Slot 5 (-Z) holds the surface facing +Z, slot 2 (+Z) the one facing -Z.
 	REQUIRE(lighting.get_stored_hit(0, inside, 5, front));
-	REQUIRE(lighting.get_stored_hit(0, inside, 2, back));
 	CHECK(front.exit);
 	CHECK(Math::abs(front.position.z - 0.2f) < 0.01f);
 	CHECK(front.normal.z > 0.9f);
+	CHECK_FALSE(lighting.get_stored_hit(0, inside, 2, back));
+	const Vector3i mirrored = inside - Vector3i(0, 0, 1);
+	REQUIRE(lighting.get_stored_hit(0, mirrored, 2, back));
 	CHECK(back.exit);
 	CHECK(Math::abs(back.position.z + 0.2f) < 0.01f);
 	CHECK(back.normal.z < -0.9f);
+	CHECK_FALSE(lighting.get_stored_hit(0, mirrored, 5, front));
 
 	const Vector3i outside = _local_voxel(0, origin, Vector3(0.05f, 0.05f, 0.25f));
 	NextGIVoxelLighting::AxisHit entry;
@@ -493,8 +529,8 @@ TEST_CASE("[NextGI] Voxel lighting stores a wall's faces in their own slots from
 	NextGIVoxelLighting::AxisHit beyond;
 	CHECK_FALSE(lighting.get_stored_hit(0, outside, 2, beyond));
 
-	// No slot anywhere near the wall holds a surface that faces the wrong way. A lookup on the
-	// +Z face blends the voxels at z = 0.1 and 0.3 from slot 5, so both must hold the +Z face.
+	// No slot anywhere near the wall holds a surface that faces the wrong way, and a lookup on
+	// either face reads that face at full weight.
 	uint32_t checked = 0;
 	for (int z = -2; z <= 2; z++) {
 		for (int y = -2; y <= 2; y++) {
@@ -512,20 +548,44 @@ TEST_CASE("[NextGI] Voxel lighting stores a wall's faces in their own slots from
 		}
 	}
 	CHECK_GT(checked, 0u);
+	const VoxelLookupShare plus_face = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, 0.2f), 2, true);
+	CHECK(Math::abs(plus_face.by_instance[3] - 1.0f) < 1e-3f);
+	const VoxelLookupShare minus_face = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, -0.2f), 2, false);
+	CHECK(Math::abs(minus_face.by_instance[3] - 1.0f) < 1e-3f);
+
+	// A box in the next room whose -Z face faces the wall 3 cm past it. A lookup on that face
+	// blends slot 2 of the voxel inside the wall (z = 0.1) and the one inside the box (z = 0.3).
+	// It must read the box, never the wall's -Z face across the wall.
+	const MeshSDFData box_field = _box_sdf(Vector3(3.0f, 3.0f, 0.4f), 10.0f, 128);
+	const NextGIVoxelLighting::TraceInstance with_box[2] = {
+		instance,
+		_instance(&box_field, 8, Transform3D(Basis(), Vector3(0.0f, 0.0f, 0.43f))),
+	};
+	NextGIVoxelLighting next_room;
+	next_room.set_clipmap_origins_from_camera(Vector3());
+	const AABB rooms(Vector3(-0.5f, -0.5f, -0.5f), Vector3(1.0f, 1.0f, 1.2f));
+	next_room.enqueue_dirty_volumes(&rooms, 1);
+	_drain(next_room, with_box, 2, first);
+	const VoxelLookupShare box_face = _lookup_share(next_room, origin, Vector3(0.1f, 0.1f, 0.23f), 2, false);
+	CHECK(box_face.by_instance[3] == 0.0f);
+	CHECK(Math::abs(box_face.by_instance[8] - 0.65f) < 1e-3f);
 }
 
 TEST_CASE("[NextGI] Voxel lighting keeps the far room out of voxels inside a thin wall") {
 	// A 0.2 m wall at the default 10 mesh-SDF voxels per meter. Its field never drops much
-	// below -eps, so the level-0 voxel center at z = 0.1 inside it is within eps of a face.
-	// Room A (z < low) is dark; room B holds a lit box whose -Z face also faces -Z. A lookup on
-	// the wall's room-A face blends slot 2 (+Z) of the voxels at z = -0.1 and 0.1: both must
-	// hold that face, never the box beyond the wall.
+	// below -eps, so the level-0 voxel center at z = 0.1 inside it is within eps of a face: 3 cm
+	// from the +Z face (wall at -0.07..0.13) or 7 cm (-0.03..0.17). Room A lies at z < low, room
+	// B past the wall, where box B's -Z face faces the wall 0.37 m or 0.03 m beyond it.
+	// A lookup on a surface blends two voxels along z. Whichever room is lit, no surface may read
+	// one in the other room: the wall's room-A face reads slot 2 (+Z) of the voxels at z = -0.1
+	// and 0.1, box B's -Z face slot 2 of the voxels at 0.1 and 0.3, and the wall's room-B face
+	// slot 5 (-Z) of the voxels at 0.1 and 0.3.
 	const MeshSDFData wall_field = _box_sdf(Vector3(3.0f, 3.0f, 0.2f), 10.0f, 128);
 	const MeshSDFData box_field = _box_sdf(Vector3(3.0f, 3.0f, 0.4f), 10.0f, 128);
 	const float eps = wall_field.voxel_size * 0.5f;
+	const float voxel = NextGIVoxelLighting::level_voxel_size(0);
 	const Vector3 center(0.1f, 0.1f, 0.1f);
-	// Wall at low..low + 0.2. The box's -Z face 0.37 m beyond it, or 0.03 m beyond it, nearer
-	// the center than the wall's room-A face.
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
 	const float lows[2] = { -0.07f, -0.03f };
 	const float gaps[2] = { 0.37f, 0.03f };
 	for (float low : lows) {
@@ -542,54 +602,74 @@ TEST_CASE("[NextGI] Voxel lighting keeps the far room out of voxels inside a thi
 				// 3 cm from the +Z face: within eps, the case that used to leak.
 				REQUIRE(start >= -eps);
 			}
+			// The voxel inside the wall holds the room-B face, the exit found along +Z, in slot 5.
+			// Slot 2 stays empty: the room-A face is the farther exit, and box B lies past the
+			// face the center touches.
 			NextGIVoxelLighting::AxisHit slots[NextGIVoxelLighting::DIRECTIONS];
 			NextGIVoxelLighting::trace_voxel(instances, 2, center, 0.8f, slots);
-			// Slot 2 (+Z) holds the room-A face, the exit found along -Z.
-			REQUIRE(slots[2].hit);
-			CHECK_EQ(slots[2].instance, 3u);
-			CHECK(slots[2].exit);
-			CHECK(Math::abs(slots[2].position.z - low) < 0.02f);
-			CHECK(slots[2].normal.z < -0.9f);
-			// Slot 5 (-Z) holds the room-B face, the exit found along +Z.
 			REQUIRE(slots[5].hit);
 			CHECK_EQ(slots[5].instance, 3u);
 			CHECK(slots[5].exit);
 			CHECK(Math::abs(slots[5].position.z - high) < 0.02f);
 			CHECK(slots[5].normal.z > 0.9f);
+			CHECK_FALSE(slots[2].hit);
 			for (uint32_t direction = 0; direction < NextGIVoxelLighting::DIRECTIONS; direction++) {
 				CHECK_FALSE((slots[direction].hit && slots[direction].instance == 8u));
 			}
+
+			NextGIVoxelLighting lighting;
+			lighting.set_clipmap_origins_from_camera(Vector3());
+			const AABB rooms(Vector3(-0.5f, -0.5f, -0.5f), Vector3(1.0f, 1.0f, 1.4f));
+			lighting.enqueue_dirty_volumes(&rooms, 1);
+			uint32_t first = 0;
+			_drain(lighting, instances, 2, first);
+			// Room B lit: the room-A face reads only its room-A voxel. The voxel inside the wall
+			// adds nothing, so the face keeps that voxel's trilinear share (0.85 or 0.65).
+			const VoxelLookupShare room_a = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, low), 2, false);
+			CHECK(room_a.by_instance[8] == 0.0f);
+			CHECK(Math::abs(room_a.by_instance[3] - (1.0f - (low + 0.1f) / voxel)) < 1e-3f);
+			CHECK(room_a.total >= NextGIVoxelLighting::WEIGHT_FALLBACK);
+			// Room A lit: box B's face never reads the wall's room-A face across the wall. It
+			// reads its own voxel only, at that voxel's share (below 0.5 falls back to the WRC).
+			const VoxelLookupShare box = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, box_face), 2, false);
+			CHECK(box.by_instance[3] == 0.0f);
+			CHECK(box.by_instance[8] > 0.0f);
+			CHECK(Math::abs(box.total - box.by_instance[8]) < 1e-6f);
+			// The room-B face reads the face itself from the voxel inside the wall, never box B's
+			// far side from a voxel inside the box.
+			const VoxelLookupShare room_b = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, high), 2, true);
+			CHECK(room_b.by_instance[8] == 0.0f);
+			CHECK(room_b.by_instance[3] >= NextGIVoxelLighting::WEIGHT_FALLBACK);
 		}
 	}
 
-	// Through the volume, for the 3 cm case with the box 0.37 m beyond the wall.
-	const NextGIVoxelLighting::TraceInstance instances[2] = {
-		_instance(&wall_field, 3, Transform3D(Basis(), Vector3(0.0f, 0.0f, 0.03f))),
-		_instance(&box_field, 8, Transform3D(Basis(), Vector3(0.0f, 0.0f, 0.7f))),
-	};
-	NextGIVoxelLighting lighting;
-	lighting.set_clipmap_origins_from_camera(Vector3());
-	const AABB core(Vector3(-0.5f, -0.5f, -0.3f), Vector3(1.0f, 1.0f, 0.6f));
-	lighting.enqueue_dirty_volumes(&core, 1);
-	uint32_t first = 0;
-	_drain(lighting, instances, 2, first);
-	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
-	const Vector3i in_wall = _local_voxel(0, origin, Vector3(0.05f, 0.05f, 0.05f));
-	REQUIRE(Math::is_equal_approx(NextGIVoxelLighting::voxel_center(0, origin, in_wall).z, 0.1f));
-	const Vector3i room_a = in_wall - Vector3i(0, 0, 1);
-	uint32_t checked = 0;
-	for (int y = -2; y <= 2; y++) {
-		for (int x = -2; x <= 2; x++) {
-			for (const Vector3i &voxel : { room_a, in_wall }) {
-				NextGIVoxelLighting::AxisHit stored;
-				REQUIRE(lighting.get_stored_hit(0, voxel + Vector3i(x, y, 0), 2, stored));
-				CHECK_EQ(stored.instance, 3u);
-				CHECK(Math::abs(stored.position.z + 0.07f) < 0.02f);
-				checked++;
-			}
-		}
+	// The limit of one slot per direction. Box A stands in room A, its +Z face 3 cm before the
+	// wall's room-A face, facing the wall. A lookup on it reads slot 5 of the voxel inside the
+	// wall, which holds the room-B face. The voxel serves the side its center is nearer to, so
+	// box A reaches the room-B face only within one lighting voxel of that center: with the
+	// trilinear weight 1 - (d + gap) / voxel, d the center's distance to the room-A face. That is
+	// 0 at 3 cm from the +Z face (d = 0.17) and 0.2 at 7 cm (d = 0.13). No other voxel holds the
+	// room-B face for box A, and a wall two lighting voxels thick passes nothing.
+	for (float low : lows) {
+		const float box_a_face = low - 0.03f;
+		const NextGIVoxelLighting::TraceInstance instances[2] = {
+			_instance(&wall_field, 3, Transform3D(Basis(), Vector3(0.0f, 0.0f, low + 0.1f))),
+			_instance(&box_field, 9, Transform3D(Basis(), Vector3(0.0f, 0.0f, box_a_face - 0.2f))),
+		};
+		NextGIVoxelLighting lighting;
+		lighting.set_clipmap_origins_from_camera(Vector3());
+		const AABB rooms(Vector3(-0.5f, -0.5f, -0.7f), Vector3(1.0f, 1.0f, 1.2f));
+		lighting.enqueue_dirty_volumes(&rooms, 1);
+		uint32_t first = 0;
+		_drain(lighting, instances, 2, first);
+		const float reach = MAX(0.0f, 1.0f - ((0.1f - low) + 0.03f) / voxel);
+		const VoxelLookupShare box_a = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, box_a_face), 2, true);
+		CHECK(box_a.by_instance[9] > 0.0f);
+		CHECK(Math::abs(box_a.by_instance[3] - reach) < 1e-3f);
+		// The room-B face itself is still read from the voxel inside the wall.
+		const VoxelLookupShare room_b = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, low + 0.2f), 2, true);
+		CHECK(room_b.by_instance[3] >= NextGIVoxelLighting::WEIGHT_FALLBACK);
 	}
-	CHECK_EQ(checked, 50u);
 }
 
 TEST_CASE("[NextGI] Voxel lighting files a touched floor only in the slot that faces it") {
@@ -627,15 +707,10 @@ TEST_CASE("[NextGI] Voxel lighting files a touched floor only in the slot that f
 		for (uint32_t direction : along_floor) {
 			CHECK_FALSE(slots[direction].hit);
 		}
-		// A center inside the slab (its top 0.6 eps above) is inside a solid: slot 1 (+Y) holds
-		// the slab's bottom, the exit found along -Y, 0.37 m down. Outside the slab it is empty.
-		CHECK(slots[1].hit == (start < 0.0f));
-		if (slots[1].hit) {
-			CHECK_EQ(slots[1].instance, 5u);
-			CHECK(slots[1].exit);
-			CHECK(slots[1].normal.y < -0.9f);
-			CHECK(Math::abs(slots[1].position.y - (top - 0.4f)) < 0.02f);
-		}
+		// Slot 1 (+Y) stays empty. From inside the slab (its top 0.6 eps above) the bottom, the
+		// exit found along -Y 0.37 m down, is farther than the top: surfaces above the floor that
+		// face down read that slot, and the bottom lights the room below.
+		CHECK_FALSE(slots[1].hit);
 	}
 
 	// Through the volume: no slot near the touched row holds a surface that does not face it.

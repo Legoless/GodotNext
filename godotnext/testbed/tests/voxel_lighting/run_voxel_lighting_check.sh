@@ -2,8 +2,9 @@
 # Runs the #188 voxel lighting checks on the hardware ray tracing tier:
 #   res://tests/voxel_lighting/voxel_slot_check.tscn (GPU texture space, direction slots, D6,
 #   readback gating, refill after a tier switch) at quality High,
-#   res://tests/voxel_lighting/voxel_thin_wall_check.tscn (no light through 0.2 m walls whose
-#   inside voxel centers lie within the mesh SDF's eps of a face) at quality High, and
+#   res://tests/voxel_lighting/voxel_thin_wall_check.tscn (no light through 0.2 m walls, from
+#   either room, whose inside voxel centers lie within the mesh SDF's eps of a face) at quality
+#   High, and
 #   res://tests/voxel_lighting/voxel_lighting_check.tscn (kitbash stores hits and covers some)
 #   at quality Auto.
 # The slot and thin-wall checks pin High: at Medium (Lumen Lite) the SRC relight allocates
