@@ -1713,8 +1713,8 @@ public:
 	void raytracing_list_trace_rays(RaytracingListID p_list, uint32_t p_raygen_shader_index, RID p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth);
 	void raytracing_list_end();
 
-public:
 	// GodotNext: async_compute (#174)
+public:
 	enum ComputeQueue {
 		COMPUTE_QUEUE_MAIN,
 		COMPUTE_QUEUE_ASYNC,
@@ -1780,8 +1780,12 @@ public:
 	// without SUPPORTS_ASYNC_COMPUTE and rendering/rendering_device/async_compute) the list runs on
 	// the main queue in the same order.
 	ComputeListID compute_list_begin(ComputeQueue p_queue = COMPUTE_QUEUE_MAIN);
-	// GodotNext: async_compute (#174). C++-only: the queue the active list was begun with.
+	// GodotNext: async_compute (#174). C++-only: the queue the active list records for, which is
+	// COMPUTE_QUEUE_MAIN unless async compute is active. compute_list_add_barrier() keeps it.
 	ComputeQueue compute_list_get_queue(ComputeListID p_list) const;
+	// Unit tests: route compute lists as a device with an active async compute queue does. Fails on a
+	// device with a driver.
+	void set_async_compute_mock(bool p_active);
 	void compute_list_bind_compute_pipeline(ComputeListID p_list, RID p_compute_pipeline);
 	void compute_list_bind_uniform_set(ComputeListID p_list, RID p_uniform_set, uint32_t p_index);
 	void compute_list_set_push_constant(ComputeListID p_list, const void *p_data, uint32_t p_data_size);

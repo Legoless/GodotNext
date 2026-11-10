@@ -219,10 +219,11 @@ void RenderingDevice::_bind_compatibility_methods() {
 	ClassDB::bind_compatibility_method(D_METHOD("texture_create_from_extension", "type", "format", "samples", "usage_flags", "image", "width", "height", "depth", "layers"), &RenderingDevice::_texture_create_from_extension_bind_compat_105570);
 
 	// GodotNext: as_build_modes
-	// GodotNext: async_compute (#174)
-	ClassDB::bind_compatibility_method(D_METHOD("compute_list_begin"), &RenderingDevice::_compute_list_begin_bind_compat_gn174);
 	ClassDB::bind_compatibility_method(D_METHOD("blas_build", "blas"), &RenderingDevice::_blas_build_bind_compat_gn45);
 	ClassDB::bind_compatibility_method(D_METHOD("tlas_build", "tlas", "instances"), &RenderingDevice::_tlas_build_bind_compat_gn45);
+
+	// GodotNext: async_compute (#174)
+	ClassDB::bind_compatibility_method(D_METHOD("compute_list_begin"), &RenderingDevice::_compute_list_begin_bind_compat_gn174);
 }
 
 #endif // DISABLE_DEPRECATED

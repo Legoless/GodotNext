@@ -1,0 +1,9 @@
+Validate extension JSON: JSON file: Field was added in a way that breaks compatibility 'classes/RenderingDevice/methods/compute_list_begin': arguments
+Validate extension JSON: Error: Field 'classes/RenderingDevice/methods/compute_list_begin/arguments/0': default_value changed value in new API, from "false" to "0".
+Validate extension JSON: Error: Field 'classes/RenderingDevice/methods/compute_list_begin/arguments/0': type changed value in new API, from "bool" to "enum::RenderingDevice.ComputeQueue".
+
+Added an optional ComputeQueue argument to RenderingDevice.compute_list_begin (GodotNext #174).
+The default is COMPUTE_QUEUE_MAIN, so existing calls keep their behavior. A compatibility method
+is registered for the zero-argument form. The first line is the break against 4.3-stable and
+later; the other two appear only against 4.0 to 4.2-stable, whose compute_list_begin still took
+the bool allow_draw_overlap argument (its compatibility method from GH-84976 is unchanged).

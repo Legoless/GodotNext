@@ -1111,6 +1111,7 @@ void RenderingDeviceGraph::_wait_for_secondary_command_buffer_tasks() {
 	}
 }
 
+// GodotNext: async_compute (#174). p_async records into the async compute command buffer.
 void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, bool p_async) {
 	driver->command_group_begin(r_command_buffer);
 	for (uint32_t i = 0; i < p_sorted_commands_count; i++) {
@@ -2144,6 +2145,7 @@ void RenderingDeviceGraph::add_raytracing_list_end() {
 	_add_command_to_graph(raytracing_instruction_list.command_trackers.ptr(), raytracing_instruction_list.command_tracker_usages.ptr(), raytracing_instruction_list.command_trackers.size(), command_index, command);
 }
 
+// GodotNext: async_compute (#174). p_queue tags the list for the async compute queue.
 void RenderingDeviceGraph::add_compute_list_begin(RDD::BreadcrumbMarker p_phase, uint32_t p_breadcrumb_data, Queue p_queue) {
 	compute_instruction_list.clear();
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
@@ -2831,112 +2833,6 @@ void RenderingDeviceGraph::_compute_command_levels(LocalVector<RecordedCommandSo
 	}
 }
 
-// GodotNext: async_compute (#174). Decides whether this frame's async compute lists can run on
-// the async queue with one fork and one join. Main commands that feed async commands must all run
-// before fork_level, and main commands that consume async results must all run from join_level on.
-// When fork_level < join_level both hold, because the main commands in between have no edge to or
-// from an async command. Otherwise every command goes back to the main queue, which gives exactly
-// the order end() used before async compute existed.
-RenderingDeviceGraph::AsyncPlan RenderingDeviceGraph::_plan_async_partition(LocalVector<RecordedCommandSort> &r_commands_sorted) const {
-	AsyncPlan plan;
-	uint32_t max_level = 0;
-	for (const RecordedCommandSort &command_sort : r_commands_sorted) {
-		max_level = MAX(max_level, command_sort.level);
-	}
-	plan.level_count = r_commands_sorted.is_empty() ? 0 : max_level + 1;
-
-	int64_t max_producer_level = -1;
-	uint32_t min_consumer_level = plan.level_count;
-	for (uint32_t i = 0; i < command_count; i++) {
-		const RecordedCommand &recorded_command = *reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[i]]);
-		if (recorded_command.queue == QUEUE_ASYNC_COMPUTE) {
-			plan.async_count++;
-		} else {
-			plan.main_count++;
-		}
-
-		int32_t adjacency_list_index = recorded_command.adjacent_command_list_index;
-		while (adjacency_list_index >= 0) {
-			const RecordedCommandListNode &command_list_node = command_list_nodes[adjacency_list_index];
-			const RecordedCommand &next_command = *reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[command_list_node.command_index]]);
-			if (recorded_command.queue == QUEUE_MAIN && next_command.queue == QUEUE_ASYNC_COMPUTE) {
-				max_producer_level = MAX(max_producer_level, int64_t(r_commands_sorted[i].level));
-			} else if (recorded_command.queue == QUEUE_ASYNC_COMPUTE && next_command.queue == QUEUE_MAIN) {
-				min_consumer_level = MIN(min_consumer_level, r_commands_sorted[command_list_node.command_index].level);
-			}
-			adjacency_list_index = command_list_node.next_list_index;
-		}
-	}
-
-	plan.fork_level = uint32_t(max_producer_level + 1);
-	plan.join_level = min_consumer_level;
-	plan.active = plan.async_count > 0 && plan.fork_level < plan.join_level;
-	if (!plan.active) {
-		for (RecordedCommandSort &command_sort : r_commands_sorted) {
-			command_sort.queue = QUEUE_MAIN;
-		}
-	}
-	return plan;
-}
-
-// GodotNext: async_compute (#174). Ends the main command buffer and continues on the next one from
-// the pool, so RenderingDevice can submit the async work between the two. While end() records with
-// labels, exactly one label is open on the main command buffer; it is closed here and a generic one
-// reopened, so every command buffer balances its debug groups.
-void RenderingDeviceGraph::_split_main_command_buffer(RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level) {
-	if (command_label_count > 0) {
-		driver->command_end_label(r_command_buffer);
-	}
-	driver->command_buffer_end(r_command_buffer);
-
-	while (r_command_buffer_pool.buffers_used >= r_command_buffer_pool.buffers.size()) {
-		RDD::CommandBufferID command_buffer = driver->command_buffer_create(r_command_buffer_pool.pool);
-		RDD::SemaphoreID command_semaphore = driver->semaphore_create();
-		r_command_buffer_pool.buffers.push_back(command_buffer);
-		r_command_buffer_pool.semaphores.push_back(command_semaphore);
-	}
-
-	uint32_t command_buffer_index = r_command_buffer_pool.buffers_used++;
-	r_command_buffer = r_command_buffer_pool.buffers[command_buffer_index];
-	driver->command_buffer_begin(r_command_buffer);
-	r_current_label_index = -1;
-	r_current_label_level = -1;
-	_run_label_command_change(r_command_buffer, -1, -1, true, true, nullptr, 0, r_current_label_index, r_current_label_level);
-}
-
-// GodotNext: async_compute (#174). Boosts, groups the barriers of and records one level's commands.
-void RenderingDeviceGraph::_run_level(uint32_t p_level, RecordedCommandSort *p_level_commands, uint32_t p_level_command_count, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, uint32_t &r_boosted_priority) {
-	_boost_priority_for_render_commands(p_level_commands, p_level_command_count, r_boosted_priority);
-	_group_barriers_for_render_commands(r_command_buffer, p_level_commands, p_level_command_count, p_full_barriers);
-	_run_render_commands(p_level, p_level_commands, p_level_command_count, r_command_buffer, r_command_buffer_pool, r_current_label_index, r_current_label_level);
-}
-
-void RenderingDeviceGraph::plan_for_test(LocalVector<int32_t> &r_order, AsyncPlan &r_plan, bool p_async_queue_available) const {
-	LocalVector<RecordedCommandSort> commands_sorted;
-	_compute_command_levels(commands_sorted);
-	r_plan = AsyncPlan();
-	// GodotNext: async_compute (#174). Match end(): no async command buffer means every command
-	// stays on the main queue, in the order the graph used before async compute existed.
-	if (p_async_queue_available && async_command_count > 0) {
-		r_plan = _plan_async_partition(commands_sorted);
-	} else {
-		for (RecordedCommandSort &command_sort : commands_sorted) {
-			command_sort.queue = QUEUE_MAIN;
-		}
-		uint32_t max_level = 0;
-		for (const RecordedCommandSort &command_sort : commands_sorted) {
-			max_level = MAX(max_level, command_sort.level);
-		}
-		r_plan.level_count = commands_sorted.is_empty() ? 0 : max_level + 1;
-		r_plan.main_count = command_count;
-	}
-	commands_sorted.sort();
-	r_order.clear();
-	for (const RecordedCommandSort &command_sort : commands_sorted) {
-		r_order.push_back(command_sort.index);
-	}
-}
-
 void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool) {
 	if (command_count == 0) {
 		// No commands have been logged, do nothing.
@@ -2944,23 +2840,14 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 	}
 
 	thread_local LocalVector<RecordedCommandSort> commands_sorted;
-	// GodotNext: async_compute (#174). The level computation moved to _compute_command_levels() so
-	// the planner and the doctests share it.
+	// GodotNext: async_compute (#174). The level computation moved to _compute_command_levels(), and
+	// _plan_async_frame() decides whether the async lists run on the async queue; plan_for_test()
+	// and emit_for_test() share both. Without reordering, everything runs on the main queue.
 	AsyncPlan async_plan;
 	if (p_reorder_commands) {
 		_compute_command_levels(commands_sorted);
-		if (async_command_count > 0 && r_command_buffer_pool.async_command_buffer) {
-			async_plan = _plan_async_partition(commands_sorted);
-			r_command_buffer_pool.async_fallback = !async_plan.active;
-		} else {
-			r_command_buffer_pool.async_fallback = async_command_count > 0;
-			for (RecordedCommandSort &command_sort : commands_sorted) {
-				command_sort.queue = QUEUE_MAIN;
-			}
-		}
+		async_plan = _plan_async_frame(commands_sorted, bool(r_command_buffer_pool.async_command_buffer));
 	} else {
-		// GodotNext: async_compute (#174). Without reordering, everything runs on the main queue.
-		r_command_buffer_pool.async_fallback = async_command_count > 0;
 		commands_sorted.clear();
 		commands_sorted.resize(command_count);
 
@@ -2968,6 +2855,8 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 			commands_sorted[i].index = i;
 		}
 	}
+	// GodotNext: async_compute (#174).
+	r_command_buffer_pool.async_fallback = async_command_count > 0 && !async_plan.active;
 
 	_wait_for_secondary_command_buffer_tasks();
 
@@ -3003,7 +2892,11 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 #endif
 
 			uint32_t boosted_priority = 0;
-			if (!async_plan.active) {
+			// GodotNext: async_compute (#174). An active plan splits the frame between the main and the
+			// async compute queue (_run_async_frame()); otherwise the levels run as before.
+			if (async_plan.active) {
+				_run_async_frame(commands_sorted.ptr(), async_plan, p_full_barriers, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, boosted_priority);
+			} else {
 				uint32_t current_level = commands_sorted[0].level;
 				uint32_t current_level_start = 0;
 				for (uint32_t i = 0; i < command_count; i++) {
@@ -3015,93 +2908,11 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 				}
 
 				_run_level(current_level, &commands_sorted[current_level_start], command_count - current_level_start, p_full_barriers, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, boosted_priority);
-			} else {
-				// GodotNext: async_compute (#174). Each level's async commands sort after its main
-				// commands. The main ones keep today's order on the main command buffer, which is split
-				// once before fork_level (the buffer the async work waits for) and once before
-				// join_level (the buffer that waits for the async work). The async ones are recorded
-				// level by level into the async command buffer.
-				RDD::CommandBufferID async_command_buffer = r_command_buffer_pool.async_command_buffer;
-				int32_t async_label_index = -1;
-				int32_t async_label_level = -1;
-				bool async_begun = false;
-				bool forked = false;
-				bool joined = false;
-				uint32_t level_start = 0;
-				while (level_start < command_count) {
-					const uint32_t level = commands_sorted[level_start].level;
-					uint32_t level_end = level_start;
-					uint32_t async_start = UINT32_MAX;
-					while (level_end < command_count && commands_sorted[level_end].level == level) {
-						if (async_start == UINT32_MAX && commands_sorted[level_end].queue == QUEUE_ASYNC_COMPUTE) {
-							async_start = level_end;
-						}
-						level_end++;
-					}
-					if (async_start == UINT32_MAX) {
-						async_start = level_end;
-					}
-
-					if (!forked && level >= async_plan.fork_level) {
-						r_command_buffer_pool.async_fork_index = int32_t(r_command_buffer_pool.buffers_used);
-						_split_main_command_buffer(r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-						forked = true;
-					}
-					if (!joined && level >= async_plan.join_level) {
-						_split_main_command_buffer(r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-						r_command_buffer_pool.async_join_index = int32_t(r_command_buffer_pool.buffers_used);
-						joined = true;
-					}
-
-					if (async_start > level_start) {
-						_run_level(level, &commands_sorted[level_start], async_start - level_start, p_full_barriers, r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level, boosted_priority);
-					}
-
-					if (level_end > async_start) {
-						if (!async_begun) {
-							driver->command_buffer_begin(async_command_buffer);
-							_run_label_command_change(async_command_buffer, -1, -1, true, true, nullptr, 0, async_label_index, async_label_level);
-							async_begun = true;
-						}
-						_group_barriers_for_render_commands(async_command_buffer, &commands_sorted[async_start], level_end - async_start, p_full_barriers);
-						_run_render_commands(level, &commands_sorted[async_start], level_end - async_start, async_command_buffer, r_command_buffer_pool, async_label_index, async_label_level, true);
-					}
-
-					level_start = level_end;
-				}
-
-				if (!forked) {
-					// Every async command sorted before the fork level cannot happen; keep the
-					// submission valid anyway.
-					r_command_buffer_pool.async_fork_index = int32_t(r_command_buffer_pool.buffers_used);
-					_split_main_command_buffer(r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-				}
-				if (!joined) {
-					// Nothing on the main queue consumes the async work: join in a trailing command
-					// buffer, so the frame fence still covers it.
-					_split_main_command_buffer(r_command_buffer, r_command_buffer_pool, current_label_index, current_label_level);
-					r_command_buffer_pool.async_join_index = int32_t(r_command_buffer_pool.buffers_used);
-				}
-
-				if (command_label_count > 0 && current_label_index < 0 && current_label_level < 0) {
-					// Only the generic label reopened by the last split is open, which the closing call
-					// below does not end.
-					driver->command_end_label(r_command_buffer);
-				}
-
-				if (async_begun) {
-					_run_label_command_change(async_command_buffer, -1, -1, false, false, nullptr, 0, async_label_index, async_label_level);
-					driver->command_buffer_end(async_command_buffer);
-				} else {
-					// The plan had async commands, so this cannot happen; never leave a fork without work.
-					DEV_ASSERT(false && "Async plan without async commands.");
-					r_command_buffer_pool.async_fork_index = -1;
-					r_command_buffer_pool.async_join_index = -1;
-				}
 			}
 
 #if PRINT_RENDER_GRAPH
-			print_line("COMMANDS", command_count, "LEVELS", current_level + 1);
+			// GodotNext: async_compute (#174). The sort puts the deepest level last.
+			print_line("COMMANDS", command_count, "LEVELS", commands_sorted[command_count - 1].level + 1);
 #endif
 		} else {
 			for (uint32_t i = 0; i < command_count; i++) {

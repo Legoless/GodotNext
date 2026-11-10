@@ -7273,10 +7273,10 @@ void RenderingDevice::raytracing_list_end() {
 /**** COMPUTE LISTS ****/
 /***********************/
 
+// GodotNext: async_compute (#174). p_queue requests the async compute queue. The list records for
+// it only while async compute is active; otherwise it runs on the main queue, in the same order.
 RenderingDevice::ComputeListID RenderingDevice::compute_list_begin(ComputeQueue p_queue) {
 	ERR_RENDER_THREAD_GUARD_V(INVALID_ID);
-	// GodotNext: async_compute (#174). The list records for the async queue only while async
-	// compute is active; otherwise it runs on the main queue, in the same order.
 	ERR_FAIL_INDEX_V_MSG(p_queue, COMPUTE_QUEUE_MAX, INVALID_ID, "Invalid compute queue.");
 	RDG::Queue graph_queue = RDG::QUEUE_MAIN;
 	if (async_compute_active) {
@@ -7313,7 +7313,12 @@ RenderingDevice::ComputeListID RenderingDevice::_compute_list_begin(ComputeQueue
 RenderingDevice::ComputeQueue RenderingDevice::compute_list_get_queue(ComputeListID p_list) const {
 	ERR_FAIL_COND_V(p_list != ID_TYPE_COMPUTE_LIST, COMPUTE_QUEUE_MAIN);
 	ERR_FAIL_COND_V(!compute_list.active, COMPUTE_QUEUE_MAIN);
-	return compute_list.state.queue;
+	return compute_list.graph_queue == RDG::QUEUE_ASYNC_COMPUTE ? COMPUTE_QUEUE_ASYNC : COMPUTE_QUEUE_MAIN;
+}
+
+void RenderingDevice::set_async_compute_mock(bool p_active) {
+	ERR_FAIL_COND_MSG(driver != nullptr, "Async compute can only be mocked on a RenderingDevice without a driver.");
+	async_compute_active = p_active;
 }
 
 void RenderingDevice::compute_list_bind_compute_pipeline(ComputeListID p_list, RID p_compute_pipeline) {
@@ -8960,6 +8965,11 @@ void RenderingDevice::_end_frame() {
 	driver->end_segment();
 }
 
+// GodotNext: async_compute (#174). Submits one command buffer for RDG::submit_chained_command_buffers().
+static void _execute_chained_command_buffer(void *p_driver, RDD::CommandQueueID p_queue, VectorView<RDD::SemaphoreID> p_wait_semaphores, RDD::CommandBufferID p_command_buffer, VectorView<RDD::SemaphoreID> p_signal_semaphores, RDD::FenceID p_signal_fence, VectorView<RDD::SwapChainID> p_swap_chains) {
+	static_cast<RenderingDeviceDriver *>(p_driver)->command_queue_execute_and_present(p_queue, p_wait_semaphores, p_command_buffer, p_signal_semaphores, p_signal_fence, p_swap_chains);
+}
+
 void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingDeviceDriver::FenceID p_draw_fence,
 		RenderingDeviceDriver::SemaphoreID p_dst_draw_semaphore_to_signal) {
 	// Execute command buffers and use semaphores to wait on the execution of the previous one.
@@ -8972,19 +8982,11 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 		buffer_pool.buffers_used = 0;
 	}
 
-	thread_local LocalVector<RDD::SwapChainID> swap_chains;
-	swap_chains.clear();
-
-	// Instead of having just one command; we have potentially many (which had to be split due to an
-	// Adreno workaround on mobile, only if the workaround is active). Thus we must execute all of them
-	// and chain them together via semaphores as dependent executions.
-	thread_local LocalVector<RDD::SemaphoreID> wait_semaphores;
-	wait_semaphores = frames[frame].semaphores_to_wait_on;
-
 	// GodotNext: async_compute (#174). The graph recorded the frame's async work into the async
 	// command buffer and split the main ones around it: the fork buffer's completion starts the
 	// async work, and the join buffer waits for it. The join always precedes the last buffer, so the
-	// frame fence covers the async work. Signals are submitted before the waits on them.
+	// frame fence covers the async work. The submission loop moved to
+	// RDG::submit_chained_command_buffers(), which the doctests drive without a driver.
 	const int32_t async_fork_index = buffer_pool.async_fork_index;
 	const int32_t async_join_index = buffer_pool.async_join_index;
 	buffer_pool.async_fork_index = -1;
@@ -8992,58 +8994,31 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 	const bool async_submit = async_fork_index >= 0;
 	if (async_submit) {
 		DEV_ASSERT(async_compute_active);
-		DEV_ASSERT(async_fork_index < async_join_index && async_join_index < int32_t(command_buffer_count));
 		async_compute_submitted_frames++;
 	} else if (buffer_pool.async_fallback) {
 		async_compute_fallback_frames++;
 	}
 	buffer_pool.async_fallback = false;
 
-	for (uint32_t i = 0; i < command_buffer_count; i++) {
-		RDD::CommandBufferID command_buffer;
-		RDD::SemaphoreID signal_semaphore;
-		RDD::FenceID signal_fence;
-		if (i > 0) {
-			command_buffer = buffer_pool.buffers[i - 1];
-		} else {
-			command_buffer = frames[frame].command_buffer;
-		}
-
-		if (i == (command_buffer_count - 1)) {
-			// This is the last command buffer, it should signal the semaphore & fence.
-			signal_semaphore = p_dst_draw_semaphore_to_signal;
-			signal_fence = p_draw_fence;
-
-			if (p_present_swap_chain) {
-				// Just present the swap chains as part of the last command execution.
-				swap_chains = frames[frame].swap_chains_to_present;
-			}
-		} else {
-			signal_semaphore = buffer_pool.semaphores[i];
-			// Semaphores always need to be signaled if it's not the last command buffer.
-		}
-
-		// GodotNext: async_compute (#174).
-		if (async_submit && int32_t(i) == async_join_index) {
-			wait_semaphores.push_back(frames[frame].async_join_semaphore);
-		}
-
-		if (async_submit && int32_t(i) == async_fork_index) {
-			const RDD::SemaphoreID fork_signal_semaphores[2] = { signal_semaphore, frames[frame].async_fork_semaphore };
-			driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
-					VectorView<RDD::SemaphoreID>(fork_signal_semaphores, 2), signal_fence, swap_chains);
-			driver->command_queue_execute_and_present(async_compute_queue, frames[frame].async_fork_semaphore, frames[frame].async_command_buffer,
-					frames[frame].async_join_semaphore, RDD::FenceID(), {});
-		} else {
-			driver->command_queue_execute_and_present(main_queue, wait_semaphores, command_buffer,
-					signal_semaphore ? signal_semaphore : VectorView<RDD::SemaphoreID>(), signal_fence,
-					swap_chains);
-		}
-
-		// Make the next command buffer wait on the semaphore signaled by this one.
-		wait_semaphores.resize(1);
-		wait_semaphores[0] = signal_semaphore;
+	RDG::ChainedSubmission submission;
+	submission.main_queue = main_queue;
+	submission.async_queue = async_compute_queue;
+	submission.frame_command_buffer = frames[frame].command_buffer;
+	submission.pool = &buffer_pool;
+	submission.command_buffer_count = command_buffer_count;
+	submission.frame_wait_semaphores = frames[frame].semaphores_to_wait_on;
+	submission.last_signal_semaphore = p_dst_draw_semaphore_to_signal;
+	submission.last_signal_fence = p_draw_fence;
+	if (p_present_swap_chain) {
+		// Just present the swap chains as part of the last command execution.
+		submission.last_swap_chains = frames[frame].swap_chains_to_present;
 	}
+	submission.async_fork_index = async_fork_index;
+	submission.async_join_index = async_join_index;
+	submission.async_command_buffer = frames[frame].async_command_buffer;
+	submission.async_fork_semaphore = frames[frame].async_fork_semaphore;
+	submission.async_join_semaphore = frames[frame].async_join_semaphore;
+	RDG::submit_chained_command_buffers(submission, &_execute_chained_command_buffer, driver);
 
 	frames[frame].semaphores_to_wait_on.clear();
 }

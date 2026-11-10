@@ -68,4 +68,19 @@ How it was used: the size query writes one uint64 per structure into a shared bu
 
 ## Async compute queue (#174), Metal part 1
 
-No outside input. The second command queue reuses `newCommandQueue`, and the cross-queue wait reuses the driver's existing `SharedEvent` signal and wait. Vulkan compute-only families, D3D12 compute queues, and queue-family release/acquire barriers are not in this change.
+The second command queue reuses `newCommandQueue`. The cross-queue fork and join reuse the driver's existing semaphores, which are `MTL::Event` objects (`device->newEvent()`), with `encodeSignalEvent` and `encodeWait`. They are not `MTL::SharedEvent`: only the frame fence is a shared event, because the CPU waits on it. Issue step 5 asked for `MTL::SharedEvent`. A plain event is enough because both queues belong to the same device and the CPU never waits on these semaphores. Vulkan compute-only families, D3D12 compute queues, and queue-family release/acquire barriers are not in this change.
+
+### Apple Metal event documentation
+
+| Field | Value |
+|---|---|
+| What | `MTLEvent`: a nonshareable event that synchronizes work within a single Metal device; signal and wait commands may go to any command buffers of that device. `MTLSharedEvent` is the variant for CPUs, other devices and other processes. |
+| Upstream | https://developer.apple.com/documentation/metal/mtlevent and https://developer.apple.com/documentation/metal/mtlsharedevent |
+| Version | Apple Developer Documentation as published on 2026-11-09 |
+| License | Apple Developer Documentation. Consulted, not copied. No sample code was copied. metal-cpp already wraps the selectors (Apache-2.0, vendored). |
+| Read on | 2026-11-09, for issue #174 |
+| Consulted by | The #174 fixer |
+| Used in | `drivers/metal/rendering_device_driver_metal3.cpp` (unchanged semaphore type; confirms the choice) |
+| Copied files | None |
+
+How it was used: it confirms that the existing `MTL::Event` semaphores can order the main and the async compute queue, since both are on one device, so the semaphores stay `MTL::Event` instead of switching to `MTL::SharedEvent`.

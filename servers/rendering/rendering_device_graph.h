@@ -291,6 +291,53 @@ public:
 		uint32_t async_count = 0;
 	};
 
+	// What end() records for a frame with an active async plan, for the doctests. Buffer indices
+	// count as in CommandBufferPool (0 = the frame command buffer, k = buffers[k - 1]).
+	struct AsyncEmission {
+		enum StepType : uint8_t {
+			STEP_SPLIT, // The main command buffer ends and `buffer` begins.
+			STEP_MAIN, // Main commands of `level`, recorded into main command buffer `buffer`.
+			STEP_ASYNC, // Async commands of `level`, recorded into the async command buffer.
+		};
+
+		struct Step {
+			StepType type = STEP_SPLIT;
+			uint32_t level = 0;
+			uint32_t buffer = 0;
+			LocalVector<int32_t> commands;
+		};
+
+		LocalVector<Step> steps;
+		int32_t fork_index = -1;
+		int32_t join_index = -1;
+		uint32_t buffers_used = 0;
+	};
+
+	// Everything RenderingDevice::execute_chained_cmds() submits for a frame, as driver IDs, so
+	// submit_chained_command_buffers() can order the submissions without a driver.
+	struct ChainedSubmission {
+		RDD::CommandQueueID main_queue;
+		RDD::CommandQueueID async_queue;
+		// The frame command buffer (index 0), then pool->buffers, each signaling pool->semaphores.
+		RDD::CommandBufferID frame_command_buffer;
+		const CommandBufferPool *pool = nullptr;
+		uint32_t command_buffer_count = 1;
+		// The first command buffer waits on these.
+		VectorView<RDD::SemaphoreID> frame_wait_semaphores;
+		// The last command buffer signals these and presents the swap chains.
+		RDD::SemaphoreID last_signal_semaphore;
+		RDD::FenceID last_signal_fence;
+		VectorView<RDD::SwapChainID> last_swap_chains;
+		// From CommandBufferPool; -1 when nothing runs async.
+		int32_t async_fork_index = -1;
+		int32_t async_join_index = -1;
+		RDD::CommandBufferID async_command_buffer;
+		RDD::SemaphoreID async_fork_semaphore;
+		RDD::SemaphoreID async_join_semaphore;
+	};
+
+	typedef void (*ChainedSubmitFunction)(void *p_userdata, RDD::CommandQueueID p_queue, VectorView<RDD::SemaphoreID> p_wait_semaphores, RDD::CommandBufferID p_command_buffer, VectorView<RDD::SemaphoreID> p_signal_semaphores, RDD::FenceID p_signal_fence, VectorView<RDD::SwapChainID> p_swap_chains);
+
 	struct WorkaroundsState {
 		bool draw_list_found = false;
 		bool bound_any_draw_list_pipeline = false;
@@ -364,6 +411,7 @@ private:
 				return false;
 			}
 
+			// GodotNext: async_compute (#174). Within a level, async commands sort after the main ones.
 			if (queue < p_other.queue) {
 				return true;
 			} else if (queue > p_other.queue) {
@@ -947,12 +995,17 @@ private:
 	void _add_draw_list_begin(FramebufferCache *p_framebuffer_cache, RDD::RenderPassID p_render_pass, RDD::FramebufferID p_framebuffer, Rect2i p_region, VectorView<AttachmentOperation> p_attachment_operations, VectorView<RDD::RenderPassClearValue> p_attachment_clear_values, BitField<RDD::PipelineStageBits> p_stages, uint32_t p_breadcrumb, bool p_split_cmd_buffer);
 	void _run_secondary_command_buffer_task(const SecondaryCommandBuffer *p_secondary);
 	void _wait_for_secondary_command_buffer_tasks();
+	// GodotNext: async_compute (#174). p_async records into the async compute command buffer. The
+	// helpers after it are in rendering_device_graph_async.cpp, except _compute_command_levels().
 	void _run_render_commands(int32_t p_level, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, bool p_async = false);
-	// GodotNext: async_compute (#174).
 	void _compute_command_levels(LocalVector<RecordedCommandSort> &r_commands_sorted) const;
 	AsyncPlan _plan_async_partition(LocalVector<RecordedCommandSort> &r_commands_sorted) const;
+	AsyncPlan _plan_async_frame(LocalVector<RecordedCommandSort> &r_commands_sorted, bool p_async_queue_available) const;
 	void _split_main_command_buffer(RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level);
 	void _run_level(uint32_t p_level, RecordedCommandSort *p_level_commands, uint32_t p_level_command_count, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, uint32_t &r_boosted_priority);
+	template <typename T>
+	static void _walk_async_frame(RecordedCommandSort *p_commands_sorted, uint32_t p_command_count, const AsyncPlan &p_plan, CommandBufferPool &r_command_buffer_pool, T &r_emitter);
+	void _run_async_frame(RecordedCommandSort *p_commands_sorted, const AsyncPlan &p_plan, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, uint32_t &r_boosted_priority);
 	void _run_label_command_change(RDD::CommandBufferID p_command_buffer, int32_t p_new_label_index, int32_t p_new_level, bool p_ignore_previous_value, bool p_use_label_for_empty, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, int32_t &r_current_label_index, int32_t &r_current_label_level);
 	void _boost_priority_for_render_commands(RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, uint32_t &r_boosted_priority);
 	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier);
@@ -1037,10 +1090,20 @@ public:
 	void begin_label(const Span<char> &p_label_name, const Color &p_color);
 	void end_label();
 	void end(bool p_reorder_commands, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool);
-	// GodotNext: async_compute (#174). C++-only, driver-free: the reordered command order and the
-	// async plan end() would use for the commands recorded so far. p_async_queue_available is false
-	// when the device has no async queue, which is the fallback end() uses. For the doctests.
+	// GodotNext: async_compute (#174). C++-only and driver-free, for the doctests.
+	// plan_for_test(): the reordered command order and the async plan end() would use for the
+	// commands recorded so far. p_async_queue_available is false when the device has no async
+	// queue, which makes end() fall back to the main queue.
 	void plan_for_test(LocalVector<int32_t> &r_order, AsyncPlan &r_plan, bool p_async_queue_available = true) const;
+	// emit_for_test(): plans as end() does with an async command buffer and, when the plan is active,
+	// walks the frame the way end() records it, from an empty command buffer pool. The main commands
+	// of p_split_main_level begin a new command buffer first, as a draw list with split_cmd_buffer
+	// (the swap chain pass) does.
+	void emit_for_test(AsyncPlan &r_plan, AsyncEmission &r_emission, uint32_t p_split_main_level = UINT32_MAX) const;
+	// submit_chained_command_buffers(): the frame's queue submissions in order. The fork command
+	// buffer signals the async work, which runs on the async queue, and the join command buffer
+	// waits for it: one wait on each side of the async queue.
+	static void submit_chained_command_buffers(const ChainedSubmission &p_submission, ChainedSubmitFunction p_submit, void *p_userdata);
 	static ResourceTracker *resource_tracker_create();
 	static void resource_tracker_free(ResourceTracker *p_tracker);
 	static FramebufferCache *framebuffer_cache_create();
