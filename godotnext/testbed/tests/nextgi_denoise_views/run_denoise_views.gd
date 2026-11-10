@@ -74,7 +74,9 @@ func _run() -> void:
 	for i in VIEW_FRAMES:
 		await RenderingServer.frame_post_draw
 	var still := get_viewport().get_texture().get_image()
-	if still != null and not still.is_empty():
+	if still == null or still.is_empty():
+		_failures.append("the rejected-history view produced no image with the camera still")
+	else:
 		var rejected := 0
 		for y in range(0, still.get_height(), 16):
 			for x in range(0, still.get_width(), 16):
@@ -83,8 +85,11 @@ func _run() -> void:
 		if rejected > 0:
 			_failures.append("a still camera rejected the history of %d sampled pixels" % rejected)
 
+	# The sliding box and the pan need the scene's camera; without one the check fails, not skips.
 	var camera := get_viewport().get_camera_3d()
-	if camera != null:
+	if camera == null:
+		_failures.append("the scene has no current Camera3D, so the sliding-box stage and the pan cannot run")
+	else:
 		await _check_sliding_box(camera)
 
 	var hashes := {}
