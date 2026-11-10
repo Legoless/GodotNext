@@ -291,8 +291,9 @@ public:
 		uint32_t async_count = 0;
 	};
 
-	// What end() records for a frame with an active async plan, for the doctests. Buffer indices
-	// count as in CommandBufferPool (0 = the frame command buffer, k = buffers[k - 1]).
+	// GodotNext: async_compute (#174). What end() records for a frame with an active async plan,
+	// for the doctests. Buffer indices count as in CommandBufferPool (0 = the frame command
+	// buffer, k = buffers[k - 1]).
 	struct AsyncEmission {
 		enum StepType : uint8_t {
 			STEP_SPLIT, // The main command buffer ends and `buffer` begins.
@@ -313,8 +314,9 @@ public:
 		uint32_t buffers_used = 0;
 	};
 
-	// Everything RenderingDevice::execute_chained_cmds() submits for a frame, as driver IDs, so
-	// submit_chained_command_buffers() can order the submissions without a driver.
+	// GodotNext: async_compute (#174). Everything RenderingDevice::execute_chained_cmds() submits
+	// for a frame, as driver IDs, so submit_chained_command_buffers() can order the submissions
+	// without a driver.
 	struct ChainedSubmission {
 		RDD::CommandQueueID main_queue;
 		RDD::CommandQueueID async_queue;
@@ -336,6 +338,8 @@ public:
 		RDD::SemaphoreID async_join_semaphore;
 	};
 
+	// GodotNext: async_compute (#174). Submits one command buffer: RenderingDevice passes the
+	// driver, the doctests a recorder.
 	typedef void (*ChainedSubmitFunction)(void *p_userdata, RDD::CommandQueueID p_queue, VectorView<RDD::SemaphoreID> p_wait_semaphores, RDD::CommandBufferID p_command_buffer, VectorView<RDD::SemaphoreID> p_signal_semaphores, RDD::FenceID p_signal_fence, VectorView<RDD::SwapChainID> p_swap_chains);
 
 	struct WorkaroundsState {
