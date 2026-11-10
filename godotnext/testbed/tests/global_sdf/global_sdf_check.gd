@@ -2,6 +2,11 @@ extends Node3D
 ## #182: compare the live global-SDF GPU data with the CPU reference.
 ## The slice and coarse ray-step heatmap are both displayed and saved.
 
+## The slice row against the CPU twin of the composite (NextGIGlobalSDF::composite_distance):
+## half-float storage rounds the stored distances by well under a millimeter (0.25 mm measured).
+## Reading the wrong brick row of the slice was off by about one 0.1 m voxel.
+const SLICE_TOLERANCE := 0.005
+
 var _frames := 0
 var _sprite: Sprite3D
 var _step_sprite: Sprite3D
@@ -66,8 +71,10 @@ func _process(_delta: float) -> void:
 	var random_checked := int(info.get("global_sdf_random_checked", 0))
 	var random_error := float(info.get("global_sdf_random_max_error", 1e30))
 	var sign_mismatches := int(info.get("global_sdf_sign_mismatches", -1))
-	var passed := bool(info.get("global_sdf_random_valid", false)) and random_checked == 10000 and random_error <= 0.1 and sign_mismatches == 0 and bool(info.get("global_sdf_coarse_valid", false)) and nonzero_steps > 0 and slice_error == OK and step_error == OK
-	print("GLOBAL_SDF_SUMMARY random_checked=%d random_max_error=%.6f sign_mismatches=%d slice_checked=%d slice_max_error=%.6f levels=%d bricks=%d steps=%d instances=%d origin=%s slice_y=%d" % [random_checked, random_error, sign_mismatches, int(info.get("global_sdf_checked", 0)), float(info.get("global_sdf_max_error", 0.0)), int(info.get("global_sdf_levels", 0)), int(info.get("global_sdf_used_bricks", 0)), nonzero_steps, int(info.get("global_sdf_instances", 0)), str(info.get("global_sdf_origin", Vector3i())), int(info.get("global_sdf_slice_y", -1))])
+	var slice_checked := int(info.get("global_sdf_checked", 0))
+	var slice_max_error := float(info.get("global_sdf_max_error", 1e30))
+	var passed := bool(info.get("global_sdf_random_valid", false)) and random_checked == 10000 and random_error <= 0.1 and sign_mismatches == 0 and slice_checked > 0 and slice_max_error <= SLICE_TOLERANCE and bool(info.get("global_sdf_coarse_valid", false)) and nonzero_steps > 0 and slice_error == OK and step_error == OK
+	print("GLOBAL_SDF_SUMMARY random_checked=%d random_max_error=%.6f sign_mismatches=%d slice_checked=%d slice_max_error=%.6f levels=%d bricks=%d steps=%d instances=%d origin=%s slice_y=%d" % [random_checked, random_error, sign_mismatches, slice_checked, slice_max_error, int(info.get("global_sdf_levels", 0)), int(info.get("global_sdf_used_bricks", 0)), nonzero_steps, int(info.get("global_sdf_instances", 0)), str(info.get("global_sdf_origin", Vector3i())), int(info.get("global_sdf_slice_y", -1))])
 	var voxel_counters: Dictionary = RenderingServer.nextgi_get_counters()
 	print("VOXEL_LIGHTING retrace=%d coverage_ppm=%d volume_bytes=%d" % [int(voxel_counters.get("voxel_lighting_retrace", 0)), int(voxel_counters.get("voxel_lighting_coverage_ppm", 0)), int(voxel_counters.get("voxel_lighting_volume_bytes", 0))])
 	print("GLOBAL_SDF_IMAGES dir=%s slice_error=%d step_error=%d" % [OS.get_user_data_dir(), slice_error, step_error])
