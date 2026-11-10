@@ -27,7 +27,15 @@ extends Node
 ## The block's DEV_ASSERT traps a dev_build binary. Other builds print an error and skip the block,
 ## which fails the timestamp check.
 ##
-## --expect=inactive (DISABLED or SWRT): no NextGI timestamp on any frame.
+## --expect=inactive (DISABLED or SWRT): the frame block never runs. The tier comes from
+## RenderingServer.nextgi_get_tier_info(); HWRT fails the run. On every checked frame:
+## - DISABLED: no NextGI timestamp;
+## - SWRT: none of the 12 frame-block timestamps, and the software tracer's own stamp (#186 step 7):
+##   "NextGI SDF Trace", or "NextGI SDF Lite Probes" under Lumen Lite. Until the software tier feeds
+##   the frame block (plan §21.2.4), it traces outside it;
+## after the run: no ray-query ShaderRD was initialized and the RT scene neither holds TLAS
+## instances nor rebuilt the TLAS (only the block's AS slots drive it, #243), so a profile that lost
+## the block's stamps cannot pass; on DISABLED without --sdfgi, nothing allocated RB_TEX_AMBIENT.
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
@@ -53,6 +61,8 @@ const SLOT_NAMES: Array[String] = [
 var expect := ""
 var frames := 600
 var sdfgi := false
+var tier := ""
+var tracer_stamp := ""
 var probe: CompositorEffect
 var process_frames := 0
 var checked_frames := 0
@@ -77,6 +87,11 @@ func _ready() -> void:
 	if expect != "active" and expect != "inactive":
 		_finish(["--expect=active or --expect=inactive is required"])
 		return
+	# The tier is chosen at RenderingDevice init, before the scene loads.
+	var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	tier = String(tier_info.get("tier", ""))
+	if expect == "inactive" and tier == "SWRT":
+		tracer_stamp = "NextGI SDF Lite Probes" if bool(tier_info.get("lite_beta", false)) else "NextGI SDF Trace"
 	_build_scene()
 	RenderingServer.frame_post_draw.connect(_on_frame_post_draw)
 
@@ -186,8 +201,17 @@ func _check_frame(names: PackedStringArray) -> void:
 		nextgi_frames += 1
 
 	if expect == "inactive":
-		if nextgi_stamps > 0:
-			_fail("NextGI timestamps on an inactive tier: %s" % [_nextgi_names(names)])
+		if tier != "SWRT":
+			if nextgi_stamps > 0:
+				_fail("NextGI timestamps on the %s tier: %s" % [tier, _nextgi_names(names)])
+			return
+		# The software tier traces outside the frame block, with its own stamps.
+		for name in names:
+			if _is_frame_block_stamp(name):
+				_fail("frame-block timestamps on the SWRT tier: %s" % [_nextgi_names(names)])
+				break
+		if not names.has(tracer_stamp):
+			_fail("no \"%s\" timestamp in a SWRT frame: %s" % [tracer_stamp, _nextgi_names(names)])
 		return
 
 	# One main view, so exactly one block, also in frames that render reflection-probe faces.
@@ -204,6 +228,11 @@ func _check_frame(names: PackedStringArray) -> void:
 		_fail("%d NextGI timestamps in a frame, expected %d" % [nextgi_stamps, SLOT_NAMES.size()])
 	if render_gi:
 		_fail("\"Render GI\" is in the frame profile of a NextGI view")
+
+
+# The 12 PASS_SLOTS names, and their "NextGI:View<n>:" multiview forms.
+func _is_frame_block_stamp(name: String) -> bool:
+	return SLOT_NAMES.has(name) or name.begins_with("NextGI:")
 
 
 func _nextgi_names(names: PackedStringArray) -> String:
@@ -227,6 +256,17 @@ func _expected_ambient_size() -> Vector2i:
 
 func _final_failures() -> PackedStringArray:
 	var result := failures.duplicate()
+	if expect == "inactive":
+		var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
+		if tier != "DISABLED" and tier != "SWRT":
+			result.append("the tier is %s, expected DISABLED or SWRT" % [tier])
+		if int(tier_info.get("ray_query_shaders_initialized", 0)) != 0:
+			result.append("%d ray-query ShaderRDs were initialized on an inactive tier" % [int(tier_info.get("ray_query_shaders_initialized", 0))])
+		if int(tier_info.get("rt_instance_count", 0)) != 0 or int(tier_info.get("rt_tlas_build_count", 0)) != 0:
+			result.append("the frame block's AS slots ran on an inactive tier (RT scene: %d TLAS instances, %d TLAS builds)" % [int(tier_info.get("rt_instance_count", 0)), int(tier_info.get("rt_tlas_build_count", 0))])
+		# Lumen Lite's irradiance field writes the ambient buffer on SWRT, outside the block.
+		if tier == "DISABLED" and not sdfgi and probe.ambient_size != Vector2i.ZERO:
+			result.append("RB_TEX_AMBIENT is %s on the DISABLED tier, expected none" % [probe.ambient_size])
 	if expect == "active":
 		if probe_frames == 0:
 			result.append("no frame rendered a reflection-probe face")
