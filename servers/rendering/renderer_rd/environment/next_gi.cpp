@@ -313,12 +313,13 @@ void NextGI::_select_swrt_auto_quality() {
 	const uint32_t units = swrt_compute_unit_class(0, memory);
 	const Quality picked = swrt_auto_quality(usec, units);
 	auto_quality = picked;
+	// Logged inside the one tier line, which init() prints next (plan §3.1: printed once).
 	auto_reason = format_swrt_auto_reason(usec, units, picked);
-	print_line(vformat("NextGI: %s", auto_reason));
 }
 
 void NextGI::_append_swrt_info(Dictionary &r_info) const {
-	r_info["experimental_toggle"] = true;
+	// The EXPERIMENTAL label marks the runtime HWRT/SWRT switch (§21.2.1), so only where it is live.
+	r_info["experimental_toggle"] = is_active() && keep_when_hwrt();
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
 	r_info["lite_beta"] = active && is_lumen_lite(resolve_quality(quality_setting), get_medium_gather());
 	if (result.tier != TIER_SOFTWARE) {
@@ -523,23 +524,32 @@ void NextGI::init(bool p_forward_plus) {
 	_ensure_rt_scene();
 }
 
+bool NextGI::keep_when_hwrt() {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	if (ps == nullptr || !ps->has_setting("rendering/global_illumination/mesh_sdf/keep_when_hwrt")) {
+		return true;
+	}
+	return bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/keep_when_hwrt"));
+}
+
 void NextGI::set_hardware_ray_tracing(int p_mode) {
 	ERR_FAIL_INDEX(p_mode, HARDWARE_RAY_TRACING_MAX);
 	const HardwareRayTracing mode = HardwareRayTracing(p_mode);
-	bool keep = true;
-	ProjectSettings *ps = ProjectSettings::get_singleton();
-	if (ps != nullptr && ps->has_setting("rendering/global_illumination/mesh_sdf/keep_when_hwrt")) {
-		keep = bool(GLOBAL_GET("rendering/global_illumination/mesh_sdf/keep_when_hwrt"));
-	}
 	// Applying now is inside RUNTIME_TOGGLE_MAX_FRAMES. GS-8 times the switch.
 	static_assert(RUNTIME_TOGGLE_MAX_FRAMES == 2, "GS-8 measures the runtime toggle inside two frames.");
-	if (!runtime_toggle_applies(keep) && mode != inputs.hwrt_setting) {
+	if (mode != inputs.hwrt_setting && !keep_when_hwrt()) {
+		// Without the resident SDF pool the switch needs a restart (#187 step 4). The request is
+		// kept as pending and reported; the tier keeps its mode until the next start.
+		hwrt_setting_pending = true;
+		pending_hwrt_setting = mode;
 		if (!restart_toggle_warned) {
 			restart_toggle_warned = true;
-			WARN_PRINT("NextGI runtime tier toggle is EXPERIMENTAL and mesh_sdf/keep_when_hwrt is false, so hardware_ray_tracing waits for a restart.");
+			WARN_PRINT("The EXPERIMENTAL runtime hardware_ray_tracing switch needs mesh_sdf/keep_when_hwrt. It is false, so the request is pending a restart: the tier changes when the project starts with that hardware_ray_tracing value.");
 		}
 		return;
 	}
+	// Requesting the active mode again, or a switch that applies, ends a pending request.
+	hwrt_setting_pending = false;
 	TierInputs new_inputs = inputs;
 	new_inputs.hwrt_setting = mode;
 	// Doctests build their own NextGI. Only the renderer instance talks to the live device.
@@ -954,6 +964,10 @@ Dictionary NextGI::get_tier_info() const {
 		info["voxel_lighting_resampled_nonzero"] = int64_t(voxel_lighting->get_resampled_nonzero());
 	}
 	_append_swrt_info(info);
+	// GodotNext: ps_tier_rule (#187). A runtime request held until the next start.
+	if (hwrt_setting_pending) {
+		info["hardware_ray_tracing_pending"] = int(pending_hwrt_setting);
+	}
 	return info;
 }
 

@@ -6,13 +6,21 @@
 #
 # Writes godotnext/testbed/override.cfg (git ignores it) with the nextgi settings, runs Godot and
 # removes the file again. It refuses to overwrite an existing override.cfg. On top of the scene's
-# own checks it counts the "NextGI:" tier lines in the log: exactly 1 with --nextgi=on, none with
-# --nextgi=off. Exits non-zero if Godot fails or the count is wrong.
+# own checks it counts the lines that start with "NextGI:" in the log: none with --nextgi=off, and
+# with --nextgi=on exactly 1, the tier line. Plan §3.1 prints the tier and its reason once, and
+# logs the auto quality choice with its reason, so the startup line carries all of it:
+#   NextGI: tier=<TIER> reason=<REASON> quality=<QUALITY> (auto: <benchmark reason>)
+# HWRT and SWRT alike. Other NextGI output is worded without the "NextGI:" prefix. A later tier
+# change (runtime switch, AS_MEMORY, SWRT_REDUCED) prints a new line; the check scene makes none.
+# Exits non-zero if Godot fails, the count is wrong or the line is not the tier line.
 #
-# Example on the Apple M5 Max (Metal has no ray query until #48 and #47):
+# Examples on the Apple M5 Max, which selects HWRT under Auto and the software tier under Off:
 #   godotnext/testbed/tests/tier/run_tier_check.sh -- ./bin/godot.macos.editor.arm64 \
 #     --path godotnext/testbed --rendering-driver metal res://tests/tier/tier_check.tscn \
-#     -- --expect=NO_RAY_QUERY
+#     -- --expect=HWRT
+#   godotnext/testbed/tests/tier/run_tier_check.sh --hwrt=off -- ./bin/godot.macos.editor.arm64 \
+#     --path godotnext/testbed --rendering-driver metal res://tests/tier/tier_check.tscn \
+#     -- --expect=SWRT
 
 set -euo pipefail
 
@@ -81,9 +89,16 @@ status=$?
 set -e
 
 lines=$(grep -c '^NextGI:' "$log" || true)
-echo "GODOTNEXT_TIER_LINES {\"nextgi\":\"$nextgi\",\"hwrt\":\"$hwrt\",\"lines\":$lines,\"expected\":$expected_lines}"
+tier_lines=$(grep -c '^NextGI: tier=' "$log" || true)
+echo "GODOTNEXT_TIER_LINES {\"nextgi\":\"$nextgi\",\"hwrt\":\"$hwrt\",\"lines\":$lines,\"tier_lines\":$tier_lines,\"expected\":$expected_lines}"
 if [[ "$lines" -ne "$expected_lines" ]]; then
 	echo "run_tier_check.sh: expected $expected_lines NextGI: line(s), found $lines" >&2
+	grep '^NextGI:' "$log" >&2 || true
+	exit 1
+fi
+if [[ "$tier_lines" -ne "$expected_lines" ]]; then
+	echo "run_tier_check.sh: the NextGI: line is not the tier line (NextGI: tier=...)" >&2
+	grep '^NextGI:' "$log" >&2 || true
 	exit 1
 fi
 exit "$status"

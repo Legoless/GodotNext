@@ -34,6 +34,7 @@ TEST_FORCE_LINK(test_nextgi_hwrt_safety)
 
 #ifdef RD_ENABLED
 
+#include "core/config/project_settings.h"
 #include "core/io/file_access.h"
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
@@ -342,6 +343,56 @@ TEST_CASE("[NextGI] Each tier reason prints exactly one NextGI line") {
 		CHECK_FALSE(next_gi.update_tier(TestNextGIHWRTSafety::inputs_for_reason(reason), NextGI::QUALITY_AUTO, again));
 		CHECK_EQ(capture.nextgi_lines(), 1);
 	}
+}
+
+// GodotNext: ps_tier_rule (#187). The auto quality choice and its reason ride in the one tier
+// line (plan §3.1), so startup on the software tier prints exactly one NextGI line.
+TEST_CASE("[NextGI] Software-tier startup prints one NextGI line that carries the auto reason") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	struct Override {
+		ProjectSettings *ps = nullptr;
+		String name;
+		Variant previous;
+		Override(ProjectSettings *p_ps, const String &p_name, const Variant &p_value) :
+				ps(p_ps), name(p_name), previous(p_ps->get_setting(p_name)) {
+			ps->set_setting(name, p_value);
+		}
+		~Override() {
+			ps->set_setting(name, previous);
+		}
+	};
+	// auto_quality and auto_reason are process-wide; other cases expect them unresolved.
+	struct AutoRestore {
+		NextGI::Quality quality = NextGI::auto_quality;
+		String reason = NextGI::auto_reason;
+		~AutoRestore() {
+			NextGI::auto_quality = quality;
+			NextGI::auto_reason = reason;
+		}
+	} auto_restore;
+	NextGI::auto_quality = NextGI::QUALITY_AUTO;
+	NextGI::auto_reason = String();
+
+	Override enabled(ps, "rendering/global_illumination/nextgi/enabled", true);
+	Override hwrt(ps, "rendering/global_illumination/nextgi/hardware_ray_tracing", int(NextGI::HARDWARE_RAY_TRACING_OFF));
+	Override quality(ps, "rendering/global_illumination/nextgi/quality", int(NextGI::QUALITY_AUTO));
+
+	NextGI next_gi;
+	TestNextGIHWRTSafety::PrintCapture capture;
+	next_gi.init(true);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_SOFTWARE);
+	CHECK_EQ(next_gi.get_tier_result().reason, NextGI::SETTING_OFF);
+	REQUIRE_FALSE(NextGI::auto_reason.is_empty());
+	CHECK_NE(NextGI::auto_quality, NextGI::QUALITY_AUTO);
+	CHECK_EQ(capture.nextgi_lines(), 1);
+	String tier_line;
+	for (const String &line : capture.lines) {
+		if (line.begins_with("NextGI:")) {
+			tier_line = line;
+		}
+	}
+	CHECK(tier_line.begins_with("NextGI: tier=SWRT reason=SETTING_OFF quality="));
+	CHECK(tier_line.ends_with("(" + NextGI::auto_reason + ")"));
 }
 
 TEST_CASE("[NextGI] HWRT self-test source follows the ray-query rules") {

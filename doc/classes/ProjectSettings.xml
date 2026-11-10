@@ -3109,7 +3109,7 @@
 			If [code]true[/code], scene imports generate a [MeshDistanceField] for each mesh by default. This is the default value of the [code]meshes/generate_distance_fields[/code] import option; it can be overridden per file and per mesh. New projects set this to [code]true[/code]. The fields are used by NextGI's software ray tracing tier.
 		</member>
 		<member name="rendering/global_illumination/mesh_sdf/keep_when_hwrt" type="bool" setter="" getter="" default="true">
-			EXPERIMENTAL. When [code]true[/code], [member rendering/global_illumination/nextgi/hardware_ray_tracing] can switch between HWRT and the software tier at runtime. When [code]false[/code], the change waits for a restart and the mesh SDF pool is freed while hardware ray tracing is active.
+			EXPERIMENTAL. When [code]true[/code], [member rendering/global_illumination/nextgi/hardware_ray_tracing] can switch between HWRT and the software tier at runtime. When [code]false[/code], a runtime change is held as pending until the project restarts with the new [member rendering/global_illumination/nextgi/hardware_ray_tracing] value, and the mesh SDF pool is freed while hardware ray tracing is active.
 		</member>
 		<member name="rendering/global_illumination/mesh_sdf/pool_size_mb" type="int" setter="" getter="" default="256">
 			Size of the mesh SDF brick pool in MiB.

@@ -150,7 +150,7 @@ From `nvidia-smi -q -d CLOCK,SUPPORTED_CLOCKS` on `NVIDIA GeForce RTX 4080 SUPER
 
 ### Plan §18.2 capability answers
 
-- **Does the Linux VM's Mesa 26.2.2 lavapipe (`llvmpipe`) expose `VK_KHR_ray_query`?** **Yes** (`VK_KHR_ray_query` rev 1, `VK_KHR_acceleration_structure` rev 13, `rayQuery = true`, `accelerationStructure = true`, `bufferDeviceAddress = true`). Under `hardware_ray_tracing = Auto`, `VK_PHYSICAL_DEVICE_TYPE_CPU` selects the SDFGI fallback with `reason=CPU_DEVICE`; under `Force`, functional ray-query tests can run on the Linux VM.
+- **Does the Linux VM's Mesa 26.2.2 lavapipe (`llvmpipe`) expose `VK_KHR_ray_query`?** **Yes** (`VK_KHR_ray_query` rev 1, `VK_KHR_acceleration_structure` rev 13, `rayQuery = true`, `accelerationStructure = true`, `bufferDeviceAddress = true`). Under `hardware_ray_tracing = Auto`, `VK_PHYSICAL_DEVICE_TYPE_CPU` selects the software tier (SWRT) with `reason=CPU_DEVICE`; under `Force`, functional ray-query tests can run on the Linux VM.
 - **Is a GTX device available?** **No**; GTX ray-query exposure stays unverified.
 
 ### Refresh at each gate (PQ checklist)

@@ -7173,7 +7173,7 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	// GodotNext: nextgi_user_surface
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Tier"), VIEW_DISPLAY_NEXTGI_TIER, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Tints the view green when NextGI hardware ray tracing is active, or amber on the fallback tier, and labels the tier and reason."));
+			TTRC("Tints the view green when NextGI hardware ray tracing is active, or amber on any other tier. View Information lists the tier and its reason."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI TLAS Heat"), VIEW_DISPLAY_NEXTGI_TLAS_HEAT, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows a no data tint until the TLAS heat producer is merged."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI BLAS Cost"), VIEW_DISPLAY_NEXTGI_BLAS_COST, SupportedRenderingMethods::FORWARD_PLUS,

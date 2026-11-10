@@ -336,10 +336,8 @@ void NextGI::_apply_safety_net(TierInputs &r_inputs) {
 		selftest_report_time = true;
 		if (auto_quality == QUALITY_AUTO && selftest_usec > 0) {
 			auto_quality = nextgi_auto_quality_from_usec(selftest_usec);
+			// GodotNext: ps_tier_rule (#187). The tier line carries this reason; no line of its own.
 			auto_reason = vformat("auto: benchmark %.2f ms, %s", double(selftest_usec) / 1000.0, get_quality_name(auto_quality));
-			if (quality_setting == QUALITY_AUTO) {
-				print_line("NextGI: " + auto_reason);
-			}
 		}
 		return;
 	}
@@ -355,10 +353,8 @@ void NextGI::_apply_safety_net(TierInputs &r_inputs) {
 	selftest_report_time = true;
 	if (auto_quality == QUALITY_AUTO && selftest_usec > 0) {
 		auto_quality = nextgi_auto_quality_from_usec(selftest_usec);
+		// GodotNext: ps_tier_rule (#187). The tier line carries this reason; no line of its own.
 		auto_reason = vformat("auto: benchmark %.2f ms, %s", double(selftest_usec) / 1000.0, get_quality_name(auto_quality));
-		if (quality_setting == QUALITY_AUTO) {
-			print_line("NextGI: " + auto_reason);
-		}
 	}
 }
 

@@ -337,6 +337,10 @@ private:
 	bool swrt_reduced = false;
 	bool swrt_reduced_logged = false;
 	bool restart_toggle_warned = false;
+	// A runtime hardware_ray_tracing request held while keep_when_hwrt is false. The tier keeps
+	// its mode until the next start, which reads the project setting.
+	bool hwrt_setting_pending = false;
+	HardwareRayTracing pending_hwrt_setting = HARDWARE_RAY_TRACING_AUTO;
 
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;
@@ -395,7 +399,9 @@ public:
 	static uint32_t swrt_compute_unit_class(uint32_t p_reported_units, uint64_t p_video_memory_bytes);
 	static Quality swrt_auto_quality(uint64_t p_usec, uint32_t p_compute_units);
 	static String format_swrt_auto_reason(uint64_t p_usec, uint32_t p_compute_units, Quality p_quality);
-	static bool runtime_toggle_applies(bool p_keep_when_hwrt) { return p_keep_when_hwrt; }
+	// rendering/global_illumination/mesh_sdf/keep_when_hwrt (default true). While it is true the
+	// EXPERIMENTAL runtime HWRT/SWRT switch applies; otherwise a request waits for a restart.
+	static bool keep_when_hwrt();
 	void note_swrt_reduced(uint32_t p_levels);
 	// #55 cut item 2: when Epic is cut it resolves to High.
 	static bool nextgi_epic_cut() { return false; }
@@ -460,8 +466,8 @@ public:
 	// Counts ray-query ShaderRD versions created under the HWRT tier, for nextgi_get_tier_info().
 	void notify_ray_query_shader_initialized();
 	int get_ray_query_shaders_initialized() const { return ray_query_shaders_initialized; }
-	// SDFGI is not selected while NextGI is on (#187). Kept so older callers stay source-compatible.
-	bool is_sdfgi_fallback() const { return false; }
+	// HWRT or SWRT (#187): Environments with nextgi_enabled run NextGI and not SDFGI (§21.2 L1).
+	bool is_active() const { return result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE; }
 	// {tier, reason, quality, ray_query_shaders_initialized}, the names as in the printed line.
 	Dictionary get_tier_info() const;
 

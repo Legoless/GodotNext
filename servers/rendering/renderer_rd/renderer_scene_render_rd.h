@@ -140,7 +140,7 @@ protected:
 	RendererRD::GI gi;
 	// GodotNext: nextgi_tier
 	RendererRD::NextGI next_gi;
-	virtual bool _nextgi_sdfgi_fallback() const override { return next_gi.is_sdfgi_fallback(); }
+	virtual bool _nextgi_active() const override { return next_gi.is_active(); }
 
 	virtual void _update_shader_quality_settings() {}
 	static bool _debug_draw_can_use_effects(RSE::ViewportDebugDraw p_debug_draw);

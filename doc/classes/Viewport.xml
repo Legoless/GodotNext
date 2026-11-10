@@ -804,7 +804,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
 		<constant name="DEBUG_DRAW_NEXTGI_TIER" value="29" enum="DebugDraw">
-			Fills the viewport with a green tint when the NextGI tier is hardware ray tracing, or an amber tint on the fallback tier, labeled with the tier and its reason.
+			Fills the viewport with a green tint when the NextGI tier is hardware ray tracing, or an amber tint on any other tier. [method RenderingServer.nextgi_get_tier_info] returns the tier and its reason.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="DEBUG_DRAW_NEXTGI_TLAS_HEAT" value="30" enum="DebugDraw">

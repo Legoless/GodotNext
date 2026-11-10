@@ -3096,24 +3096,25 @@
 				- [code]quality[/code]: the resolved quality preset, or [code]"NONE"[/code] when NextGI is inactive.
 				- [code]quality_reason[/code]: [code]"auto selection pending"[/code] while automatic quality is unresolved, [code]"setting"[/code] when the user picked a preset, or [code]"NONE"[/code].
 				- [code]driver[/code]: the current rendering driver name.
-				On the dummy renderer the tier is [code]"SWRT"[/code] and the reason is [code]"SETTING_OFF"[/code]. The software tier may also report [code]swrt_mode[/code] ([code]"Global"[/code] or [code]"Detail"[/code]) and [code]swrt_reduced[/code] when global SDF levels were dropped. [code]lite_beta[/code] is true on either active tier when Medium uses the irradiance-field gather. [code]experimental_toggle[/code] marks the runtime hardware-ray-tracing switch.
+				On renderers without NextGI (Compatibility and the dummy renderer) the tier is [code]"UNSUPPORTED_RENDERER"[/code] and the reason is [code]"NONE"[/code], as in [method nextgi_get_tier_info]. The software tier may also report [code]swrt_mode[/code] ([code]"Global"[/code] or [code]"Detail"[/code]) and [code]swrt_reduced[/code] when global SDF levels were dropped. [code]lite_beta[/code] is true on either active tier when Medium uses the irradiance-field gather. [code]experimental_toggle[/code] is [code]true[/code] where the EXPERIMENTAL runtime hardware-ray-tracing switch applies: on the [code]HWRT[/code] or [code]SWRT[/code] tier while [member ProjectSettings.rendering/global_illumination/mesh_sdf/keep_when_hwrt] is [code]true[/code].
 			</description>
 		</method>
 		<method name="nextgi_get_tier_info" qualifiers="const">
 			<return type="Dictionary" />
 			<description>
 				Returns the NextGI tier selected for the rendering device, as a [Dictionary] with these keys:
-				- [code]tier[/code]: [code]"HWRT"[/code] (hardware ray tracing), [code]"SWRT"[/code] (the software tier; SDFGI stays off while NextGI is on), [code]"DISABLED"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/enabled] is [code]false[/code]; the overlay calls this SDFGI-legacy) or [code]"UNSUPPORTED_RENDERER"[/code] (any rendering method other than Forward+).
+				- [code]tier[/code]: [code]"HWRT"[/code] (hardware ray tracing), [code]"SWRT"[/code] (the software tier). On both tiers, environments with [member Environment.nextgi_enabled] do not run SDFGI, [code]"DISABLED"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/enabled] is [code]false[/code]; the overlay calls this SDFGI-legacy) or [code]"UNSUPPORTED_RENDERER"[/code] (any rendering method other than Forward+).
 				- [code]reason[/code]: why hardware ray tracing was not selected, or [code]"NONE"[/code]. One of [code]"NO_RAY_QUERY"[/code], [code]"NOT_HW_ACCELERATED"[/code], [code]"CPU_DEVICE"[/code], [code]"D3D12_NO_DXR"[/code], [code]"METAL_SYNC_MODE"[/code], [code]"METAL_NO_ARGUMENT_BUFFERS"[/code], [code]"SETTING_OFF"[/code], [code]"AS_MEMORY"[/code], [code]"SELFTEST_FAILED"[/code], [code]"HWRT_FAULTED"[/code] or [code]"SWRT_REDUCED"[/code]. [code]SWRT_REDUCED[/code] is additional: the original hardware reason stays, and global SDF levels were dropped to a minimum of 3.
 				- [code]quality[/code]: the resolved quality preset ([code]"MEDIUM"[/code], [code]"HIGH"[/code] or [code]"EPIC"[/code]), or [code]"NONE"[/code] when NextGI is disabled or unsupported.
 				- [code]ray_query_shaders_initialized[/code]: the number of ray-query shader versions NextGI has created. They are only created on the [code]HWRT[/code] tier.
+				- [code]hardware_ray_tracing_pending[/code]: only present while a [method nextgi_set_hardware_ray_tracing] request waits for a restart; the requested mode.
 			</description>
 		</method>
 		<method name="nextgi_set_hardware_ray_tracing">
 			<return type="void" />
 			<param index="0" name="mode" type="int" />
 			<description>
-				Sets [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing] at runtime ([code]0[/code] Auto, [code]1[/code] Off, [code]2[/code] Force) and selects the NextGI tier again. A changed tier is printed as a new [code]NextGI:[/code] line. The switch is EXPERIMENTAL. It applies on the next evaluation when [member ProjectSettings.rendering/global_illumination/mesh_sdf/keep_when_hwrt] is [code]true[/code]. Otherwise one warning is printed and the tier waits for a restart.
+				Selects the NextGI tier again with this hardware ray tracing mode ([code]0[/code] Auto, [code]1[/code] Off, [code]2[/code] Force), as [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing] does at startup. The project setting itself is not changed. A changed tier is printed as a new [code]NextGI:[/code] line. The switch is EXPERIMENTAL. It applies on the next evaluation while [member ProjectSettings.rendering/global_illumination/mesh_sdf/keep_when_hwrt] is [code]true[/code]. Otherwise the tier does not change: one warning is printed, and [method nextgi_get_tier_info] reports the request as [code]hardware_ray_tracing_pending[/code] until the project restarts, when the project setting selects the tier.
 			</description>
 		</method>
 		<method name="occluder_create">
@@ -5927,7 +5928,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ or Mobile rendering method.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_TIER" value="29" enum="ViewportDebugDraw">
-			Fills the viewport with a green tint when the NextGI tier is hardware ray tracing, or an amber tint on the fallback tier, labeled with the tier and its reason.
+			Fills the viewport with a green tint when the NextGI tier is hardware ray tracing, or an amber tint on any other tier. [method nextgi_get_tier_info] returns the tier and its reason.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_TLAS_HEAT" value="30" enum="ViewportDebugDraw">

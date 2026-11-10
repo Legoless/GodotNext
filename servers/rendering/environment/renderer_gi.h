@@ -94,15 +94,16 @@ public:
 	virtual void sdfgi_reset() = 0;
 
 	// GodotNext: nextgi_user_surface
-	// The dummy renderer reports the software tier name with reason SETTING_OFF and zero counters.
+	// Renderers without NextGI (Compatibility, dummy) report UNSUPPORTED_RENDERER with reason NONE,
+	// as their nextgi_get_tier_info does, and zero counters.
 	virtual Dictionary nextgi_get_status() const = 0;
 	virtual Dictionary nextgi_get_counters() const = 0;
 
 	// Non-RD renderers share this pair. Producers that have not merged stay at zero.
 	static Dictionary nextgi_unavailable_status() {
 		Dictionary status;
-		status["tier"] = "SWRT";
-		status["reason"] = "SETTING_OFF";
+		status["tier"] = "UNSUPPORTED_RENDERER";
+		status["reason"] = "NONE";
 		status["quality"] = "NONE";
 		status["quality_reason"] = "NONE";
 		String driver;

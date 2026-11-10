@@ -193,8 +193,9 @@ static String _nextgi_overlay_suffix(const Dictionary &p_info) {
 	if (bool(p_info.get("lite_beta", false))) {
 		suffix += " Lite Beta";
 	}
+	// The runtime HWRT/SWRT switch is EXPERIMENTAL (§21.2.1), not the tier itself.
 	if (bool(p_info.get("experimental_toggle", false))) {
-		suffix += " EXPERIMENTAL";
+		suffix += " toggle=EXPERIMENTAL";
 	}
 	return suffix;
 }

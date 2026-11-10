@@ -189,12 +189,18 @@ TEST_CASE("[NextGI][Editor] View Information tier readout") {
 	lite["lite_beta"] = true;
 	lite["swrt_reduced"] = true;
 	lite["experimental_toggle"] = true;
-	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(lite), "NextGI: SWRT (SETTING_OFF) mode=Global SWRT_REDUCED Lite Beta EXPERIMENTAL");
+	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(lite), "NextGI: SWRT (SETTING_OFF) mode=Global SWRT_REDUCED Lite Beta toggle=EXPERIMENTAL");
 	CHECK_FALSE(NextGIEditorPlugin::format_status_panel(lite).contains("SDFGI-legacy"));
 	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("SWRT"));
 	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("mode=Global"));
 	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("Lite Beta"));
-	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("EXPERIMENTAL"));
+	CHECK(NextGIEditorPlugin::format_status_panel(lite).contains("toggle=EXPERIMENTAL"));
+	// The label names the switch, so a live HWRT readout never reads as "HWRT EXPERIMENTAL".
+	Dictionary hwrt_toggle;
+	hwrt_toggle["tier"] = "HWRT";
+	hwrt_toggle["reason"] = "NONE";
+	hwrt_toggle["experimental_toggle"] = true;
+	CHECK_EQ(NextGIEditorPlugin::format_tier_readout(hwrt_toggle), "NextGI: HWRT toggle=EXPERIMENTAL");
 	Dictionary legacy;
 	legacy["tier"] = "DISABLED";
 	legacy["reason"] = "NONE";
@@ -330,7 +336,7 @@ TEST_CASE("[NextGI][Denoise] RR hook override parses the documented keys") {
 
 #endif // TOOLS_ENABLED
 
-// Renderer-independent cases: SDFGI stays off while NextGI is on, and the dummy tier info.
+// Renderer-independent cases: renderers without NextGI keep SDFGI, and the dummy tier info.
 
 #include "scene/3d/world_environment.h"
 #include "scene/resources/environment.h"
@@ -339,26 +345,22 @@ TEST_CASE("[NextGI][Denoise] RR hook override parses the documented keys") {
 
 namespace TestNextGI {
 
-TEST_CASE("[NextGI] SDFGI stays off while NextGI is on and returns with its cascades when NextGI is off") {
+// GodotNext: ps_tier_rule (#187). A renderer without NextGI never replaces SDFGI, so an
+// Environment with nextgi_enabled keeps its own SDFGI setting (§21.2 L1: NextGI is fully off).
+TEST_CASE("[NextGI] Without NextGI, an Environment with nextgi_enabled keeps its own SDFGI") {
 	RasterizerSceneDummy scene_render;
 	const RID env = scene_render.environment_allocate();
 	scene_render.environment_initialize(env);
 
 	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
-
 	scene_render.environment_set_nextgi_enabled(env, true);
-	CHECK(scene_render.environment_get_nextgi_enabled(env));
 	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
 
-	scene_render.environment_set_nextgi_enabled(env, false);
 	ERR_PRINT_OFF; // SDFGI warns once outside Forward+.
 	scene_render.environment_set_sdfgi(env, true, 4, 0.2, RSE::ENV_SDFGI_Y_SCALE_75_PERCENT, false, 0.5, true, 1.0, 1.1, 1.1);
 	ERR_PRINT_ON;
+	CHECK(scene_render.environment_get_nextgi_enabled(env));
 	CHECK(scene_render.environment_get_sdfgi_enabled(env));
-	CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
-
-	scene_render.environment_set_nextgi_enabled(env, true);
-	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
 	CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
 
 	scene_render.environment_set_nextgi_enabled(env, false);
@@ -413,11 +415,14 @@ TEST_CASE("[NextGI] RenderingServer round-trips nextgi energy and sky light on t
 	rs->free_rid(env);
 }
 
-TEST_CASE("[NextGI] Dummy status is SWRT with SETTING_OFF and counters stay zero") {
+TEST_CASE("[NextGI] Dummy status agrees with the tier info, and counters stay zero") {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	const Dictionary status = rs->nextgi_get_status();
-	CHECK_EQ(String(status["tier"]), "SWRT");
-	CHECK_EQ(String(status["reason"]), "SETTING_OFF");
+	const Dictionary tier_info = rs->nextgi_get_tier_info();
+	CHECK_EQ(String(status["tier"]), String(tier_info["tier"]));
+	CHECK_EQ(String(status["reason"]), String(tier_info["reason"]));
+	CHECK_EQ(String(status["tier"]), "UNSUPPORTED_RENDERER");
+	CHECK_EQ(String(status["reason"]), "NONE");
 	CHECK_EQ(String(status["quality"]), "NONE");
 	CHECK_EQ(String(status["quality_reason"]), "NONE");
 	CHECK(status.has("driver"));
@@ -481,7 +486,7 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 	const PackedStringArray warnings = world->get_configuration_warnings();
 	bool found = false;
 	for (const String &warning : warnings) {
-		if (warning.contains("SWRT") && warning.contains("SETTING_OFF")) {
+		if (warning.contains("UNSUPPORTED_RENDERER") && warning.contains("NONE")) {
 			found = true;
 		}
 	}
@@ -906,47 +911,186 @@ struct NextGIWarningCapture {
 	}
 };
 
-TEST_CASE("[NextGI] Runtime toggle waits for a restart when keep_when_hwrt is false") {
-	CHECK(NextGI::runtime_toggle_applies(true));
-	CHECK_FALSE(NextGI::runtime_toggle_applies(false));
-	CHECK_EQ(NextGI::RUNTIME_TOGGLE_MAX_FRAMES, 2);
-
-	ProjectSettings *ps = ProjectSettings::get_singleton();
-	const String keep_setting = "rendering/global_illumination/mesh_sdf/keep_when_hwrt";
-	const Variant previous_keep = ps->has_setting(keep_setting) ? ps->get_setting(keep_setting) : Variant(true);
-	struct KeepRestore {
-		ProjectSettings *ps = nullptr;
-		String setting;
-		Variant previous;
-		KeepRestore(ProjectSettings *p_ps, const String &p_setting, const Variant &p_previous) :
-				ps(p_ps), setting(p_setting), previous(p_previous) {}
-		~KeepRestore() {
-			if (ps != nullptr) {
-				ps->set_setting(setting, previous);
-			}
+// Sets a project setting for one test and restores it, also when a CHECK fails.
+struct NextGISettingOverride {
+	String name;
+	bool existed = false;
+	Variant previous;
+	NextGISettingOverride(const String &p_name, const Variant &p_value) :
+			name(p_name) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		existed = ps->has_setting(p_name);
+		previous = existed ? ps->get_setting(p_name) : Variant();
+		ps->set_setting(p_name, p_value);
+	}
+	~NextGISettingOverride() {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (existed) {
+			ps->set_setting(name, previous);
+		} else if (ps->has_setting(name)) {
+			ps->clear(name);
 		}
-	} restore(ps, keep_setting, previous_keep);
-	ps->set_setting(keep_setting, false);
+	}
+};
 
+static const char *NEXTGI_KEEP_WHEN_HWRT = "rendering/global_illumination/mesh_sdf/keep_when_hwrt";
+
+TEST_CASE("[NextGI] Runtime toggle round-trips HWRT, SWRT and HWRT while keep_when_hwrt is true") {
+	NextGISettingOverride keep(NEXTGI_KEEP_WHEN_HWRT, true);
 	NextGI next_gi;
 	String line;
-	next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_HIGH, line);
+	REQUIRE(next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_HIGH, line));
 	REQUIRE_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	CHECK(bool(next_gi.get_tier_info()["experimental_toggle"]));
+
+	NextGIWarningCapture warnings;
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_SOFTWARE);
+	CHECK_EQ(next_gi.get_tier_result().reason, NextGI::SETTING_OFF);
+	CHECK_EQ(next_gi.get_tier_inputs().hwrt_setting, NextGI::HARDWARE_RAY_TRACING_OFF);
+	CHECK(bool(next_gi.get_tier_info()["experimental_toggle"]));
+
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_AUTO);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	CHECK_EQ(next_gi.get_tier_result().reason, NextGI::TIER_REASON_NONE);
+	CHECK_FALSE(next_gi.get_tier_info().has("hardware_ray_tracing_pending"));
+	CHECK_EQ(warnings.matches, 0);
+}
+
+TEST_CASE("[NextGI] Runtime toggle stays pending until a restart when keep_when_hwrt is false") {
+	NextGISettingOverride keep(NEXTGI_KEEP_WHEN_HWRT, false);
+	NextGI next_gi;
+	String line;
+	REQUIRE(next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_HIGH, line));
+	REQUIRE_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	// No runtime switch applies, so nothing carries its EXPERIMENTAL label.
+	CHECK_FALSE(bool(next_gi.get_tier_info()["experimental_toggle"]));
+	CHECK_FALSE(next_gi.get_tier_info().has("hardware_ray_tracing_pending"));
 
 	NextGIWarningCapture warnings;
 	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
 	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
 	CHECK_EQ(next_gi.get_tier_inputs().hwrt_setting, NextGI::HARDWARE_RAY_TRACING_AUTO);
 	CHECK_EQ(warnings.matches, 1);
+	Dictionary info = next_gi.get_tier_info();
+	REQUIRE(info.has("hardware_ray_tracing_pending"));
+	CHECK_EQ(int(info["hardware_ray_tracing_pending"]), int(NextGI::HARDWARE_RAY_TRACING_OFF));
 
-	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
+	// A second request replaces the pending mode, with no second warning.
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_FORCE);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	CHECK_EQ(int(next_gi.get_tier_info()["hardware_ray_tracing_pending"]), int(NextGI::HARDWARE_RAY_TRACING_FORCE));
 	CHECK_EQ(warnings.matches, 1);
 
-	ps->set_setting(keep_setting, true);
-	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_OFF);
-	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_SOFTWARE);
-	CHECK_EQ(next_gi.get_tier_result().reason, NextGI::SETTING_OFF);
+	// Asking for the running mode again ends the pending request.
+	next_gi.set_hardware_ray_tracing(NextGI::HARDWARE_RAY_TRACING_AUTO);
+	CHECK_EQ(next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	CHECK_FALSE(next_gi.get_tier_info().has("hardware_ray_tracing_pending"));
 	CHECK_EQ(warnings.matches, 1);
+}
+
+// The EXPERIMENTAL label comes from the live status, not only from hand-built dictionaries.
+TEST_CASE("[NextGI] Status labels the runtime toggle EXPERIMENTAL only on an active tier with keep_when_hwrt") {
+	NextGI next_gi;
+	String line;
+	{
+		NextGISettingOverride keep(NEXTGI_KEEP_WHEN_HWRT, true);
+		NextGI::TierInputs disabled = hwrt_inputs();
+		disabled.project_enabled = false;
+		next_gi.update_tier(disabled, NextGI::QUALITY_AUTO, line);
+		CHECK_FALSE(bool(next_gi.get_status()["experimental_toggle"]));
+#ifdef TOOLS_ENABLED
+		const String panel = NextGIEditorPlugin::format_status_panel(next_gi.get_status());
+		CHECK(panel.begins_with("NextGI SDFGI-legacy (NONE)"));
+		CHECK_FALSE(panel.contains("EXPERIMENTAL"));
+#endif // TOOLS_ENABLED
+
+		NextGI::TierInputs mobile = hwrt_inputs();
+		mobile.forward_plus = false;
+		next_gi.update_tier(mobile, NextGI::QUALITY_AUTO, line);
+		CHECK_FALSE(bool(next_gi.get_status()["experimental_toggle"]));
+
+		next_gi.update_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::QUALITY_AUTO, line);
+		CHECK(bool(next_gi.get_status()["experimental_toggle"]));
+		next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_AUTO, line);
+		CHECK(bool(next_gi.get_tier_info()["experimental_toggle"]));
+#ifdef TOOLS_ENABLED
+		CHECK(NextGIEditorPlugin::format_status_panel(next_gi.get_status()).ends_with(" toggle=EXPERIMENTAL"));
+#endif // TOOLS_ENABLED
+	}
+	{
+		NextGISettingOverride keep(NEXTGI_KEEP_WHEN_HWRT, false);
+		CHECK_FALSE(bool(next_gi.get_status()["experimental_toggle"]));
+		next_gi.update_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::QUALITY_AUTO, line);
+		CHECK_FALSE(bool(next_gi.get_tier_info()["experimental_toggle"]));
+	}
+}
+
+// The dummy scene renderer with RendererSceneRenderRD's override: the SDFGI gate reads a real
+// NextGI tier, selected from the project settings by init() where no device is needed.
+class NextGIGateSceneRender : public RasterizerSceneDummy {
+public:
+	NextGI next_gi;
+
+protected:
+	virtual bool _nextgi_active() const override { return next_gi.is_active(); }
+};
+
+TEST_CASE("[NextGI] NextGI replaces SDFGI only where the project and the Environment both enable it") {
+	NextGIGateSceneRender scene_render;
+	const RID env = scene_render.environment_allocate();
+	scene_render.environment_initialize(env);
+	ERR_PRINT_OFF; // SDFGI warns once outside Forward+.
+	scene_render.environment_set_sdfgi(env, true, 4, 0.2, RSE::ENV_SDFGI_Y_SCALE_75_PERCENT, false, 0.5, true, 1.0, 1.1, 1.1);
+	ERR_PRINT_ON;
+	scene_render.environment_set_nextgi_enabled(env, true);
+	const RID plain_env = scene_render.environment_allocate();
+	scene_render.environment_initialize(plain_env);
+	ERR_PRINT_OFF;
+	scene_render.environment_set_sdfgi(plain_env, true, 4, 0.2, RSE::ENV_SDFGI_Y_SCALE_75_PERCENT, false, 0.5, true, 1.0, 1.1, 1.1);
+	ERR_PRINT_ON;
+
+	const char *enabled_setting = "rendering/global_illumination/nextgi/enabled";
+	const char *hwrt_setting = "rendering/global_illumination/nextgi/hardware_ray_tracing";
+	const char *quality_setting = "rendering/global_illumination/nextgi/quality";
+	{
+		// nextgi/enabled=false, the default: NextGI is fully off, so SDFGI runs as upstream (L1).
+		NextGISettingOverride enabled(enabled_setting, false);
+		scene_render.next_gi.init(true);
+		REQUIRE_EQ(scene_render.next_gi.get_tier_result().tier, NextGI::TIER_DISABLED);
+		CHECK(scene_render.environment_get_sdfgi_enabled(env));
+		CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
+		CHECK(scene_render.environment_get_sdfgi_enabled(plain_env));
+
+		// Mobile and other non-Forward+ RD renderers never run NextGI either.
+		scene_render.next_gi.init(false);
+		REQUIRE_EQ(scene_render.next_gi.get_tier_result().tier, NextGI::TIER_UNSUPPORTED_RENDERER);
+		CHECK(scene_render.environment_get_sdfgi_enabled(env));
+	}
+	{
+		// NextGI on with hardware_ray_tracing=Off: the software tier replaces SDFGI for that
+		// Environment only. A preset quality keeps the auto benchmark out of this test.
+		NextGISettingOverride enabled(enabled_setting, true);
+		NextGISettingOverride hwrt(hwrt_setting, int(NextGI::HARDWARE_RAY_TRACING_OFF));
+		NextGISettingOverride quality(quality_setting, int(NextGI::QUALITY_HIGH));
+		scene_render.next_gi.init(true);
+		REQUIRE_EQ(scene_render.next_gi.get_tier_result().tier, NextGI::TIER_SOFTWARE);
+		CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
+		CHECK(scene_render.environment_get_sdfgi_enabled(plain_env));
+	}
+	String line;
+	scene_render.next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_HIGH, line);
+	REQUIRE_EQ(scene_render.next_gi.get_tier_result().tier, NextGI::TIER_HWRT);
+	CHECK_FALSE(scene_render.environment_get_sdfgi_enabled(env));
+	CHECK(scene_render.environment_get_sdfgi_enabled(plain_env));
+
+	// Turning the Environment's NextGI off brings its SDFGI back with its cascades.
+	scene_render.environment_set_nextgi_enabled(env, false);
+	CHECK(scene_render.environment_get_sdfgi_enabled(env));
+	CHECK_EQ(scene_render.environment_get_sdfgi_cascades(env), 4);
+
+	scene_render.environment_free(plain_env);
+	scene_render.environment_free(env);
 }
 
 TEST_CASE("[NextGI] Ray-query ShaderRDs initialize only under the HWRT tier") {
@@ -956,7 +1100,7 @@ TEST_CASE("[NextGI] Ray-query ShaderRDs initialize only under the HWRT tier") {
 	// The M5 Max today: software tier, so no ray-query ShaderRD may initialize.
 	next_gi.update_tier(no_ray_query_inputs(NextGI::NO_RAY_QUERY), NextGI::QUALITY_AUTO, line);
 	CHECK_FALSE(next_gi.can_initialize_ray_query_shaders());
-	CHECK_FALSE(next_gi.is_sdfgi_fallback());
+	CHECK(next_gi.is_active());
 	ERR_PRINT_OFF;
 	next_gi.notify_ray_query_shader_initialized();
 	ERR_PRINT_ON;
@@ -969,18 +1113,18 @@ TEST_CASE("[NextGI] Ray-query ShaderRDs initialize only under the HWRT tier") {
 	// HWRT: ray-query ShaderRDs may initialize, and the count is reported.
 	next_gi.update_tier(hwrt_inputs(), NextGI::QUALITY_AUTO, line);
 	CHECK(next_gi.can_initialize_ray_query_shaders());
-	CHECK_FALSE(next_gi.is_sdfgi_fallback());
+	CHECK(next_gi.is_active());
 	next_gi.notify_ray_query_shader_initialized();
 	info = next_gi.get_tier_info();
 	CHECK_EQ(String(info["tier"]), "HWRT");
 	CHECK_EQ(int(info["ray_query_shaders_initialized"]), 1);
 
-	// Disabled: neither ray-query shaders nor SDFGI.
+	// Disabled: no ray-query shaders, and NextGI is inactive, so SDFGI follows the Environment.
 	NextGI::TierInputs disabled = hwrt_inputs();
 	disabled.project_enabled = false;
 	next_gi.update_tier(disabled, NextGI::QUALITY_AUTO, line);
 	CHECK_FALSE(next_gi.can_initialize_ray_query_shaders());
-	CHECK_FALSE(next_gi.is_sdfgi_fallback());
+	CHECK_FALSE(next_gi.is_active());
 	CHECK_EQ(String(next_gi.get_tier_info()["quality"]), "NONE");
 }
 

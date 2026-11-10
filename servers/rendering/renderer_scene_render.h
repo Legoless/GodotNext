@@ -45,10 +45,12 @@ private:
 	RendererEnvironmentStorage environment_storage;
 	RendererCompositorStorage compositor_storage;
 
-	// GodotNext: nextgi_fallback
+	// GodotNext: ps_tier_rule (#187)
 protected:
-	// Retained for ABI. NextGI no longer selects SDFGI (#187). The RD override stays false.
-	virtual bool _nextgi_sdfgi_fallback() const { return false; }
+	// True while the NextGI tier is HWRT or SWRT, i.e. the project enables NextGI on Forward+.
+	// An Environment with nextgi_enabled then runs NextGI instead of SDFGI (plan §21.2 L1).
+	// The RD renderer overrides it; other renderers never run NextGI.
+	virtual bool _nextgi_active() const { return false; }
 
 public:
 	enum {
