@@ -359,6 +359,8 @@ private:
 		SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS = (1 << 4),
 		SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI = (1 << 5),
 		SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION = (1 << 6),
+		// GodotNext: ps_lumen_lite (#183). Lite leaves smooth specular to the forward pass and SSR.
+		SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE = (1 << 7),
 	};
 
 	struct SceneState {

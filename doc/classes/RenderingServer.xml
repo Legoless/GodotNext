@@ -3085,6 +3085,8 @@
 				- [code]dirty_aabb[/code]: dirty-region updates.
 				- [code]src_page_updates[/code]: surface-cache page updates.
 				- [code]clamped_energy_fraction[/code]: fraction of energy removed by the firefly clamp.
+				- [code]gather_dispatches[/code] and [code]reflection_dispatches[/code]: diffuse-gather and reflection-trace dispatches recorded in the last rendered frame, on either tier. Lumen Lite records none.
+				- [code]lite_probe_traces[/code]: Lumen Lite probes refreshed in the last rendered frame.
 				The dummy renderer returns [code]0[/code] for every key.
 			</description>
 		</method>
@@ -6021,7 +6023,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES" value="60" enum="ViewportDebugDraw">
-			Shows Lumen Lite probe validity from the half-resolution irradiance field. RGB is irradiance. Alpha is 1 for a valid sample, 0.5 when a probe was pushed out along the prepass normal, and 0 when the probe is inside geometry or was skipped. The view draws a labeled tint when the field texture is missing.
+			Shows the half-resolution irradiance that Lumen Lite interpolates from the valid probes around each pixel. Pixels with no valid probe, such as those beyond the second probe level, are black. The view draws a labeled tint when the field texture is missing.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">

@@ -42,14 +42,6 @@ using namespace RendererRD;
 
 namespace {
 
-struct LiteParamsGPU {
-	float inv_view_proj[16];
-	float camera[4];
-	float screen[4];
-	float depth_info[4];
-	float rules[4];
-};
-
 struct LitePushGPU {
 	uint32_t mode = 0;
 	uint32_t probe_base = 0;
@@ -57,18 +49,47 @@ struct LitePushGPU {
 	uint32_t pad1 = 0;
 };
 
-static_assert(sizeof(LiteParamsGPU) == 128, "Lite params stay 128 bytes so the shader std430 layout matches.");
+static_assert(sizeof(NextGIIrradianceField::Params) == 208, "Lite params stay 208 bytes so the shader std430 layout matches.");
 static_assert(sizeof(LitePushGPU) == 16, "Lite push constants stay 16 bytes.");
-
-void _store_projection(const Projection &p_projection, float r_matrix[16]) {
-	for (int column = 0; column < 4; column++) {
-		for (int row = 0; row < 4; row++) {
-			r_matrix[column * 4 + row] = p_projection.columns[column][row];
-		}
-	}
-}
+static_assert(NextGIIrradianceField::PROBE_COUNT == NextGI::LITE_PROBE_COUNT && NextGIIrradianceField::PROBE_VEC4S == NextGI::LITE_PROBE_VEC4S, "The Lite probe layout is shared with the software tier's probe trace.");
 
 } // namespace
+
+NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_hwrt) {
+	Params params = {};
+	// The depth buffer holds reverse-Z depth in [0, 1] drawn with this corrected projection, so
+	// the shader unprojects vec4(uv * 2 - 1, depth, 1) with its inverse.
+	const Projection view_proj = NextGIViewMath::view_projection(p_cam_projection, p_cam_transform, p_flip_y, p_taa_jitter);
+	NextGIViewMath::store(view_proj.inverse(), params.inv_view_proj);
+	const Vector3 camera = p_cam_transform.origin;
+	params.camera[0] = camera.x;
+	params.camera[1] = camera.y;
+	params.camera[2] = camera.z;
+	params.camera[3] = p_hwrt ? 1.0f : 0.0f;
+	params.screen[0] = float(MAX(p_gi_size.x, 1));
+	params.screen[1] = float(MAX(p_gi_size.y, 1));
+	params.screen[2] = float(MAX(p_half_size.x, 1));
+	params.screen[3] = float(MAX(p_half_size.y, 1));
+	params.depth_info[0] = float(MAX(p_internal_size.x, 1));
+	params.depth_info[1] = float(MAX(p_internal_size.y, 1));
+	params.depth_info[2] = p_depth_valid ? 1.0f : 0.0f;
+	params.depth_info[3] = p_normal_valid ? 1.0f : 0.0f;
+	params.rules[0] = NextGI::LITE_INSIDE_BACKFACE;
+	params.rules[1] = NextGI::LITE_PUSH_SPACING;
+	params.rules[2] = NextGI::LITE_SSR_ROUGHNESS;
+	params.rules[3] = NextGI::LITE_MIP2_ROUGHNESS;
+	// The probes are the WRC's own level 0 and 1 probes, on the grid the WRC update snaps.
+	for (uint32_t level = 0; level < NextGI::LITE_PROBE_LEVELS; level++) {
+		const float spacing = nextgi_wrc_spacing(level);
+		const Vector3 origin = nextgi_wrc_snap_origin(camera, spacing);
+		params.level_origin[level][0] = origin.x;
+		params.level_origin[level][1] = origin.y;
+		params.level_origin[level][2] = origin.z;
+		params.level_origin[level][3] = spacing;
+	}
+	NextGIViewMath::store_basis(p_cam_transform.basis, params.view_to_world);
+	return params;
+}
 
 struct NextGIIrradianceField::GpuState {
 	NextgiIrradianceFieldShaderRD shader;
@@ -119,10 +140,12 @@ bool NextGIIrradianceField::ensure_probe_buffer() {
 	if (rd == nullptr) {
 		return false;
 	}
+	// Every probe starts not traced: validity 1 is above the inside threshold, so nothing reads it.
 	Vector<float> cleared;
-	cleared.resize(PROBE_COUNT * 4);
+	cleared.resize(PROBE_COUNT * PROBE_VEC4S * 4);
+	cleared.fill(0.0f);
 	for (uint32_t probe = 0; probe < PROBE_COUNT; probe++) {
-		cleared.write[probe * 4 + 3] = 1.0f;
+		cleared.write[probe * PROBE_VEC4S * 4 + 3] = 1.0f;
 	}
 	probe_buffer = rd->storage_buffer_create(cleared.size() * sizeof(float), Span<uint8_t>((const uint8_t *)cleared.ptr(), cleared.size() * sizeof(float)));
 	return probe_buffer.is_valid();
@@ -198,7 +221,7 @@ bool NextGIIrradianceField::_ensure_gpu() {
 		}
 	}
 	if (!gpu->params_buffer.is_valid()) {
-		gpu->params_buffer = rd->storage_buffer_create(sizeof(LiteParamsGPU));
+		gpu->params_buffer = rd->storage_buffer_create(sizeof(Params));
 	}
 	gpu->ready = gpu->sampler.is_valid() && gpu->dummy_2d.is_valid() && gpu->dummy_3d.is_valid() && gpu->params_buffer.is_valid();
 	if (!gpu->ready) {
@@ -265,44 +288,22 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, 
 	RID visibility = gpu->dummy_2d;
 	RID offsets = gpu->dummy_3d;
 	RID mip2 = gpu->dummy_2d;
+	RID mip4 = gpu->dummy_2d;
+	bool wrc_bound = false;
 	if (p_hwrt) {
 		NextGIWRC *wrc = next_gi->get_wrc();
-		if (wrc != nullptr) {
-			if (wrc->get_radiance().is_valid()) {
-				radiance = wrc->get_radiance();
-			}
-			if (wrc->get_visibility().is_valid()) {
-				visibility = wrc->get_visibility();
-			}
-			if (wrc->get_offsets().is_valid()) {
-				offsets = wrc->get_offsets();
-			}
-			if (wrc->get_mip2().is_valid()) {
-				mip2 = wrc->get_mip2();
-			}
+		if (wrc != nullptr && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_offsets().is_valid() && wrc->get_mip2().is_valid() && wrc->get_mip4().is_valid()) {
+			radiance = wrc->get_radiance();
+			visibility = wrc->get_visibility();
+			offsets = wrc->get_offsets();
+			mip2 = wrc->get_mip2();
+			mip4 = wrc->get_mip4();
+			wrc_bound = true;
 		}
 	}
 
-	const Size2i internal = buffers->get_internal_size();
-	const Projection view_proj = NextGIView::view_projection(*p_render_data->scene_data); // GodotNext: nextgi_view_math
-	LiteParamsGPU params = {};
-	_store_projection(view_proj.inverse(), params.inv_view_proj);
-	const Vector3 camera = p_render_data->scene_data->cam_transform.origin;
-	params.camera[0] = camera.x;
-	params.camera[1] = camera.y;
-	params.camera[2] = camera.z;
-	params.camera[3] = p_hwrt ? 1.0f : 0.0f;
-	params.screen[0] = float(MAX(gi_size.x, 1));
-	params.screen[1] = float(MAX(gi_size.y, 1));
-	params.screen[2] = float(wanted_half.x);
-	params.screen[3] = float(wanted_half.y);
-	params.depth_info[0] = float(MAX(internal.x, 1));
-	params.depth_info[1] = float(MAX(internal.y, 1));
-	params.depth_info[2] = depth_valid;
-	params.depth_info[3] = normal_valid;
-	params.rules[0] = NextGI::LITE_INSIDE_BACKFACE;
-	params.rules[1] = NextGI::LITE_PUSH_SPACING;
-	params.rules[2] = NextGI::LITE_SSR_ROUGHNESS;
+	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	const Params params = build_params(scene_data->cam_projection, scene_data->cam_transform, scene_data->flip_y, scene_data->taa_jitter, gi_size, wanted_half, buffers->get_internal_size(), depth_valid > 0.5f, normal_valid > 0.5f, wrc_bound);
 	rd->buffer_update(gpu->params_buffer, 0, sizeof(params), &params);
 
 	const RID ambient = buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_AMBIENT, 0, 0);
@@ -362,6 +363,14 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, 
 		mip_uniform.append_id(mip2);
 		uniforms.push_back(mip_uniform);
 	}
+	{
+		RD::Uniform mip_uniform;
+		mip_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+		mip_uniform.binding = 11;
+		mip_uniform.append_id(gpu->sampler);
+		mip_uniform.append_id(mip4);
+		uniforms.push_back(mip_uniform);
+	}
 	const RID uniform_set = rd->uniform_set_create(uniforms, shader, 0);
 	if (!uniform_set.is_valid()) {
 		return;
@@ -373,13 +382,14 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, 
 	const RD::ComputeListID list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(list, gpu->pipeline);
 	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
-	if (p_hwrt && radiance != gpu->dummy_2d && offsets != gpu->dummy_3d) {
+	if (wrc_bound) {
 		LitePushGPU pack_push;
 		pack_push.mode = 0;
 		pack_push.probe_base = consume_hwrt_probe_base();
 		rd->compute_list_set_push_constant(list, &pack_push, sizeof(pack_push));
 		rd->compute_list_dispatch(list, PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_add_barrier(list);
+		next_gi->note_lite_probe_traces(PROBES_PER_FRAME);
 	}
 	LitePushGPU interpolate_push;
 	interpolate_push.mode = 1;

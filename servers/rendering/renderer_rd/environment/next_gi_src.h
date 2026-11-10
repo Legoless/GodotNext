@@ -133,6 +133,8 @@ void nextgi_src_axis_cards(const AABB &p_bounds, NextGICardClusterResult &r_resu
 // The material atlas: albedo, normal and orm RGBA8, emission RGBA16F, depth R32F, plus the
 // framebuffer depth (D16 when supported, else X8_D24).
 uint64_t nextgi_src_atlas_memory_bytes(uint32_t p_size, uint32_t p_fb_depth_bytes_per_texel);
+// GodotNext: ps_lumen_lite (#183). The Lite material atlas is not square.
+uint64_t nextgi_src_atlas_memory_bytes(uint32_t p_width, uint32_t p_height, uint32_t p_fb_depth_bytes_per_texel);
 
 // Coverage = the fraction of a card's texels with depth > 0 (the clear value is 0).
 float nextgi_src_card_coverage(const float *p_depth, uint32_t p_atlas_width, uint32_t p_atlas_height, const Rect2i &p_rect);
@@ -172,14 +174,21 @@ public:
 
 // High is 4096² radiance (64 MiB at 4 bytes) and a 128 MiB material budget. Epic doubles both:
 // radiance becomes 4096×8192.
+// GodotNext: ps_lumen_lite (#183). Lite halves both: 4096×2048 radiance (32 MiB) and a
+// 2048×1024 material atlas inside a 64 MiB budget. The textures and their allocators take
+// their extents from here.
 struct NextGIAtlasBudget {
 	uint32_t radiance_width = 4096;
 	uint32_t radiance_height = 4096;
 	uint64_t radiance_bytes = 0;
 	uint64_t material_bytes = 0;
+	uint32_t material_width = NEXTGI_SRC_ATLAS_SIZE;
+	uint32_t material_height = NEXTGI_SRC_ATLAS_SIZE;
 };
 
 NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite = false);
+// The budget for the running preset. Both atlases are sized once, when they are created.
+NextGIAtlasBudget nextgi_src_current_atlas_budget();
 
 // Ω ≈ π r²/d². Distance 0 is a full hemisphere.
 float nextgi_src_solid_angle(float p_radius, float p_distance);
@@ -223,6 +232,9 @@ uint32_t nextgi_src_lru_evict(const NextGIPageUse *p_pages, uint32_t p_count, ui
 class NextGIBuddyAllocator {
 	uint32_t size = 4096;
 	uint32_t min_block = NEXTGI_SRC_PAGE_MIN;
+	// GodotNext: ps_lumen_lite (#183). Root blocks of side `size` tile width x height.
+	uint32_t width = 4096;
+	uint32_t height = 4096;
 	static constexpr uint32_t LEVELS = 16;
 	LocalVector<Rect2i> free_lists[LEVELS];
 
@@ -236,6 +248,11 @@ public:
 	bool allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_rect);
 	bool free_block(const Rect2i &p_rect);
 	void reset();
+	// GodotNext: ps_lumen_lite (#183). Matches the allocator to a texture extent and frees every block.
+	// Roots are squares of the shorter side, so 4096x8192 and 4096x2048 use their whole area.
+	void set_extent(uint32_t p_width, uint32_t p_height);
+	uint32_t get_width() const { return width; }
+	uint32_t get_height() const { return height; }
 };
 
 // The SRC card sets and material atlas, owned by NextGI and created by the frame block's first run
@@ -276,7 +293,9 @@ private:
 	RID atlas_fb_depth;
 	RID atlas_fb;
 	uint64_t atlas_memory = 0;
-	uint32_t atlas_side = NEXTGI_SRC_ATLAS_SIZE;
+	// GodotNext: ps_lumen_lite (#183). Lite's material atlas is 2048x1024.
+	uint32_t atlas_width = NEXTGI_SRC_ATLAS_SIZE;
+	uint32_t atlas_height = NEXTGI_SRC_ATLAS_SIZE;
 
 	RID card_buffer;
 	RID card_set_buffer;

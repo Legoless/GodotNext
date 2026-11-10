@@ -3176,7 +3176,7 @@
 		</member>
 		<member name="rendering/global_illumination/nextgi/medium_gather" type="int" setter="" getter="" default="0">
 			How Medium quality gathers indirect light. [b]Irradiance Field[/b] (Lumen Lite, Beta) interpolates world-radiance-cache levels 0 and 1 at half resolution and dispatches no screen-probe or reflection rays. [b]Screen Probes[/b] keeps the traced Medium path: 8 diffuse rays per probe, reflections at quarter resolution up to roughness 0.25.
-			The default is [b]Irradiance Field[/b]. Screen-space reflections still cover roughness at or below 0.25. Rougher surfaces sample the world radiance cache. Skinned meshes leave the ray-tracing scene while Lite is on and still receive the field.
+			The default is [b]Irradiance Field[/b]. Each probe stores directional radiance, so the gather evaluates irradiance at the pixel normal. At roughness 0.25 or below, specular comes from reflection probes, the sky and screen-space reflections when the [Environment] enables them. Rougher surfaces sample the world radiance cache mips of the surrounding probes at the reflection vector. Skinned meshes leave the ray-tracing scene while Lite is on and still receive the field. Lite's surface-cache atlases hold half of High's texels, and their size is fixed when they are created.
 		</member>
 		<member name="rendering/global_illumination/nextgi/mode" type="int" setter="" getter="" default="0">
 			Selects what NextGI renders. [code]GI and reflections[/code] runs the diffuse gather, integration and reflections. [code]Reflections only[/code] skips the diffuse gather and integration, keeping the LightmapGI or VoxelGI ambient writer, while still tracing and denoising reflections from the lit SRC.

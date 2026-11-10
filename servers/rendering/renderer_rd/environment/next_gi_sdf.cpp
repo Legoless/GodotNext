@@ -389,6 +389,15 @@ uint32_t NextGISDFInstances::add(const NextGISDFAtlas &p_atlas, RID p_mesh, cons
 	return uint32_t(records.size() - 1);
 }
 
+uint32_t NextGISDFInstances::grown_capacity(uint32_t p_capacity, uint32_t p_required) {
+	if (p_required <= p_capacity) {
+		return p_capacity;
+	}
+	// GodotNext: ps_lumen_lite (#183). Grow geometrically: a scene that streams in a few
+	// instances per frame past the first quarter must not reallocate (and rebind) every frame.
+	return MAX(p_required, MIN(MAX(p_capacity * 2, MAX_INSTANCES / 4), MAX_INSTANCES));
+}
+
 void NextGISDFInstances::upload() {
 	RD *rd = RD::get_singleton();
 	if (rd == nullptr || records.is_empty()) {
@@ -399,7 +408,7 @@ void NextGISDFInstances::upload() {
 		if (buffer.is_valid()) {
 			rd->free_rid(buffer);
 		}
-		buffer_capacity = MAX(required, MAX_INSTANCES / 4);
+		buffer_capacity = grown_capacity(buffer_capacity, required);
 		buffer = rd->storage_buffer_create(buffer_capacity * RECORD_BYTES);
 	}
 	ERR_FAIL_COND(buffer.is_null());

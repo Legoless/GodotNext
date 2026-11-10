@@ -533,14 +533,24 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.volume[2] = 0.05f;
 	params.volume[3] = 64.0f;
 	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+	// GodotNext: ps_lumen_lite (#183). A miss reads the sky radiance, as the gather's misses do;
+	// the background color is only the fallback without a sky. Lite gets all of its GI from here.
+	RID sky_radiance;
 	if (scene != nullptr && p_render_data->environment.is_valid()) {
 		const Color bg = scene->environment_get_bg_color(p_render_data->environment);
 		const float energy = scene->environment_get_bg_energy_multiplier(p_render_data->environment);
 		params.sky[0] = bg.r * energy;
 		params.sky[1] = bg.g * energy;
 		params.sky[2] = bg.b * energy;
+		const RID sky = scene->environment_get_sky(p_render_data->environment);
+		if (sky.is_valid() && scene->get_sky() != nullptr) {
+			sky_radiance = scene->get_sky()->sky_get_radiance_texture_2d(sky);
+		}
 	}
 	const bool sky_read = scene != nullptr && p_render_data->environment.is_valid() && scene->environment_get_nextgi_read_sky_light(p_render_data->environment);
+	// Environment.nextgi_read_sky_light off keeps the sky out of the cache: misses read the
+	// background color, as they did before the sky term.
+	params.sky[3] = sky_radiance.is_valid() && sky_read ? 1.0f : 0.0f;
 	const Vector3 forward = -p_render_data->scene_data->cam_transform.basis.get_column(2).normalized();
 	if (!has_previous_camera || camera.distance_to(previous_camera_position) > 16.0f || forward.dot(previous_camera_forward) < 0.5f || previous_sky_read != sky_read) {
 		volume_history_valid = false;
@@ -592,7 +602,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		return p_texture.is_valid() ? p_texture : dummy_tex;
 	};
 	_free_uniform_set();
-	RD::Uniform uniforms[35] = {
+	RD::Uniform uniforms[36] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, visibility),
@@ -628,17 +638,24 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 32, translucency_history_g),
 		RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 33, translucency_history_b),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, 34, sampler),
+		// GodotNext: ps_lumen_lite (#183). Every variant declares the sky.
+		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 35, Vector<RID>({ sampler, valid_tex(sky_radiance) })),
 	};
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 22), shader->shader.version_get_shader(shader->version, 0), 0);
-	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader->shader.version_get_shader(shader->version, 2), 0);
-	translucency_mark_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader->shader.version_get_shader(shader->version, 3), 0);
+	Vector<RD::Uniform> trace_uniforms;
+	for (int i = 0; i < 22; i++) {
+		trace_uniforms.push_back(uniforms[i]);
+	}
+	trace_uniforms.push_back(uniforms[35]);
+	uniform_set = rd->uniform_set_create(trace_uniforms, shader->shader.version_get_shader(shader->version, 0), 0);
+	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader->shader.version_get_shader(shader->version, 2), 0);
+	translucency_mark_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader->shader.version_get_shader(shader->version, 3), 0);
 	rd->set_resource_name(translucency_mark_uniform_set, "NextGI Translucency Mark Uniforms");
 	uniforms[1] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, translucency_radiance);
 	uniforms[2] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, translucency_visibility);
 	uniforms[6] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, translucency_offsets);
 	uniforms[7] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, translucency_mip4);
 	uniforms[8] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, translucency_mip2);
-	translucency_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 35), shader->shader.version_get_shader(shader->version, 4), 0);
+	translucency_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader->shader.version_get_shader(shader->version, 4), 0);
 	if (uniform_set.is_valid()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->trace);

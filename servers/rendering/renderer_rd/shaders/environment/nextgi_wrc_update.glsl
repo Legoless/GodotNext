@@ -67,10 +67,13 @@ layout(set = 0, binding = 17, std430) restrict readonly buffer NextGIWRCPageRect
 page_rects;
 layout(set = 0, binding = 18) uniform sampler2D src_radiance_tex;
 layout(set = 0, binding = 19) uniform sampler2D material_depth_tex;
+// GodotNext: ps_lumen_lite (#183). Sky radiance for misses; params.sky.w = 1 when bound and the
+// Environment reads sky light.
+layout(set = 0, binding = 35) uniform sampler2D sky_radiance_tex;
 
 layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIWRCParams {
 	vec4 camera; // xyz, w = 1 when the cache is valid
-	vec4 sky;
+	vec4 sky; // Background color; w = 1 when misses read sky_radiance_tex.
 	vec4 origin_spacing; // xyz snapped level-0 origin, w = 1 m spacing
 	uvec4 dispatch; // probe_base, probe_count, frame, record_count
 	uint page_rect_count;
@@ -275,6 +278,18 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 	return found;
 }
 
+// GodotNext: ps_lumen_lite (#183). The gather's miss term (nextgi_miss_radiance), octahedral sky.
+vec3 nextgi_wrc_miss_radiance(vec3 direction) {
+	if (params.sky.w < 0.5) {
+		return params.sky.rgb;
+	}
+	vec3 n = direction / max(abs(direction.x) + abs(direction.y) + abs(direction.z), 1e-6);
+	if (n.z < 0.0) {
+		n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+	}
+	return textureLod(sky_radiance_tex, n.xy * 0.5 + 0.5, 0.0).rgb;
+}
+
 vec3 nextgi_wrc_oct_dir(ivec2 texel) {
 	vec2 uv = (vec2(texel) + 0.5) / 8.0 * 2.0 - 1.0;
 	vec3 direction = vec3(uv.x, uv.y, 1.0 - abs(uv.x) - abs(uv.y));
@@ -356,7 +371,7 @@ void nextgi_wrc_trace() {
 #else
 	atomicAdd(counters.rays, 1u);
 #endif
-	vec3 sample_radiance = params.sky.rgb;
+	vec3 sample_radiance = nextgi_wrc_miss_radiance(direction);
 	bool back_face = false;
 	if (nextgi_trace(probe_pos, direction, 1.0e6, hit)) {
 #ifdef MODE_TRANSLUCENCY_TRACE
@@ -454,18 +469,23 @@ void nextgi_wrc_project() {
 	imageStore(sh_b_image, cell, vec4(sum.b, 0.0, 0.0, 0.0));
 #endif
 	uvec2 tile = uvec2(probe % 128u, probe / 128u);
+	// GodotNext: ps_lumen_lite (#183). Each mip texel averages the four texels it covers, so
+	// mip 2 is a box filter of mip 4 (Lite's rough specular reads both).
+	vec3 mip4_texels[16];
 	for (uint y = 0u; y < 4u; y++) {
 		for (uint x = 0u; x < 4u; x++) {
 			vec3 block = imageLoad(radiance_image, nextgi_wrc_radiance_texel(probe, ivec2(x * 2u, y * 2u))).rgb;
 			block += imageLoad(radiance_image, nextgi_wrc_radiance_texel(probe, ivec2(x * 2u + 1u, y * 2u))).rgb;
 			block += imageLoad(radiance_image, nextgi_wrc_radiance_texel(probe, ivec2(x * 2u, y * 2u + 1u))).rgb;
 			block += imageLoad(radiance_image, nextgi_wrc_radiance_texel(probe, ivec2(x * 2u + 1u, y * 2u + 1u))).rgb;
+			mip4_texels[y * 4u + x] = block * 0.25;
 			imageStore(mip4_image, ivec2(tile) * 6 + ivec2(1, 1) + ivec2(x, y), vec4(block * 0.25, 1.0));
 		}
 	}
 	for (uint y = 0u; y < 2u; y++) {
 		for (uint x = 0u; x < 2u; x++) {
-			vec3 block = imageLoad(mip4_image, ivec2(tile) * 6 + ivec2(1, 1) + ivec2(x * 2u, y * 2u)).rgb;
+			uint corner = y * 8u + x * 2u;
+			vec3 block = (mip4_texels[corner] + mip4_texels[corner + 1u] + mip4_texels[corner + 4u] + mip4_texels[corner + 5u]) * 0.25;
 			imageStore(mip2_image, ivec2(tile) * 4 + ivec2(1, 1) + ivec2(x, y), vec4(block, 1.0));
 		}
 	}

@@ -19,7 +19,7 @@
 /* The above copyright notice and this permission notice shall be         */
 /* included in all copies or substantial portions of the Software.        */
 /*                                                                        */
-/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,         */
+/* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,        */
 /* EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF     */
 /* MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. */
 /* IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY   */
@@ -89,10 +89,12 @@ void NextGISDFStream::dispatch(RID p_instance_buffer, uint32_t p_count, const Ve
 		return;
 	}
 	if (uniform_buffer != p_instance_buffer) {
-		if (uniform_set.is_valid()) {
+		// GodotNext: ps_lumen_lite (#183). Freeing the old instance buffer already freed this set
+		// through its dependency; a second free is an invalid-ID error.
+		if (uniform_set.is_valid() && rd->uniform_set_is_valid(uniform_set)) {
 			rd->free_rid(uniform_set);
-			uniform_set = RID();
 		}
+		uniform_set = RID();
 		RD::Uniform uniform;
 		uniform.binding = 0;
 		uniform.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
@@ -195,10 +197,10 @@ void NextGISDFStream::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	if (uniform_set.is_valid()) {
+	if (uniform_set.is_valid() && rd->uniform_set_is_valid(uniform_set)) {
 		rd->free_rid(uniform_set);
-		uniform_set = RID();
 	}
+	uniform_set = RID();
 	uniform_buffer = RID();
 	if (pipeline.is_valid()) {
 		rd->free_rid(pipeline);

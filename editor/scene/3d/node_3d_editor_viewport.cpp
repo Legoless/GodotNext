@@ -7202,8 +7202,9 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Shows the probes whose history was rejected this frame. The GPU debug source is still pending, so the view draws a labeled tint."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Denoise Result"), VIEW_DISPLAY_NEXTGI_DENOISE_DENOISED, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows the denoised diffuse after the temporal pass and the stabilizer. The GPU debug source is still pending, so the view draws a labeled tint."));
+	// GodotNext: ps_lumen_lite (#183)
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Lite Probes"), VIEW_DISPLAY_NEXTGI_LITE_PROBES, SupportedRenderingMethods::FORWARD_PLUS,
-			TTRC("Shows probe validity from the half-resolution irradiance field: valid, pushed out along the prepass normal, or inside geometry. The view draws a labeled tint when that texture is missing."));
+			TTRC("Shows the half-resolution irradiance that Lumen Lite interpolates from the valid probes around each pixel. Pixels with no valid probe, such as those beyond the second probe level, are black. The view draws a labeled tint when that texture is missing."));
 	// GodotNext: nextgeo_exclusive_dispatch (#79)
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Cracks"), VIEW_DISPLAY_NEXTGEO_CRACKS, SupportedRenderingMethods::FORWARD_PLUS,

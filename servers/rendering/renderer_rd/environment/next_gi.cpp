@@ -366,42 +366,34 @@ bool NextGI::is_lumen_lite() {
 	return is_lumen_lite(resolve_quality(setting), get_medium_gather());
 }
 
-bool NextGI::lite_probe_inside(float p_fraction) {
-	return p_fraction > LITE_INSIDE_BACKFACE;
-}
-
-Vector3 NextGI::lite_push_probe(const Vector3 &p_probe, const Vector3 &p_normal, float p_spacing, bool p_behind) {
-	if (!p_behind || p_normal.length_squared() <= 1.0e-8f) {
-		return p_probe;
-	}
-	return p_probe + p_normal.normalized() * (LITE_PUSH_SPACING * p_spacing);
-}
-
-bool NextGI::lite_uses_ssr(float p_roughness) {
-	return p_roughness <= LITE_SSR_ROUGHNESS;
-}
-
 bool NextGI::lite_traces_skinned(bool p_lite) {
 	return !p_lite;
 }
 
-void NextGI::lite_dispatch_counts(bool p_lite, uint32_t &r_gather, uint32_t &r_reflection) {
-	if (p_lite) {
-		r_gather = 0;
-		r_reflection = 0;
+void NextGI::_begin_dispatch_frame() {
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	if (frame == dispatch_frame) {
 		return;
 	}
-	const QualityParams &medium = get_quality_params(QUALITY_MEDIUM);
-	r_gather = medium.diffuse_rays_per_probe;
-	r_reflection = medium.reflection_divisor == 0 ? medium.diffuse_rays_per_probe : medium.diffuse_rays_per_probe / medium.reflection_divisor;
+	dispatch_frame = frame;
+	gather_dispatches = 0;
+	reflection_dispatches = 0;
+	lite_probe_traces = 0;
 }
 
-uint32_t NextGI::lite_probe_index(uint32_t p_level, uint32_t p_x, uint32_t p_y, uint32_t p_z) {
-	return p_level * LITE_PROBES_PER_LEVEL + p_x + p_y * 16u + p_z * 256u;
+void NextGI::note_gather_dispatch() {
+	_begin_dispatch_frame();
+	gather_dispatches++;
 }
 
-float NextGI::lite_probe_spacing(uint32_t p_level) {
-	return float(1u << MIN(p_level, LITE_PROBE_LEVELS - 1));
+void NextGI::note_reflection_dispatch() {
+	_begin_dispatch_frame();
+	reflection_dispatches++;
+}
+
+void NextGI::note_lite_probe_traces(uint32_t p_count) {
+	_begin_dispatch_frame();
+	lite_probe_traces += p_count;
 }
 
 bool NextGI::view_samples_lite_field(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
@@ -699,9 +691,10 @@ Dictionary NextGI::get_counters() const {
 		counters["swrt_shadow_rays"] = int64_t(swrt.shadow_rays);
 		counters["swrt_mode"] = int64_t(swrt_trace->get_mode());
 	}
-	// GodotNext: ps_lumen_lite (#183). Per-frame counts. Zero means the dispatch did not run.
-	counters["lite_gather_dispatches"] = int64_t(lite_gather_dispatches);
-	counters["lite_reflection_dispatches"] = int64_t(lite_reflection_dispatches);
+	// GodotNext: ps_lumen_lite (#183). Dispatches recorded in the last rendered frame, on either
+	// tier. Lite records no gather and no reflection dispatch, only probe traces.
+	counters["gather_dispatches"] = int64_t(gather_dispatches);
+	counters["reflection_dispatches"] = int64_t(reflection_dispatches);
 	counters["lite_probe_traces"] = int64_t(lite_probe_traces);
 	return counters;
 }
@@ -1107,15 +1100,9 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 	// stays out of the ray-query frame block (#187).
 	if (result.tier == TIER_SOFTWARE) {
 		const bool lite = is_lumen_lite();
+		_begin_dispatch_frame();
 		if (lite) {
-			lite_gather_dispatches = 0;
-			lite_reflection_dispatches = 0;
-			lite_probe_traces = 0;
 			ensure_irradiance_field();
-		} else {
-			lite_gather_dispatches = 0;
-			lite_reflection_dispatches = 0;
-			lite_probe_traces = 0;
 		}
 		if (swrt_trace == nullptr) {
 			swrt_trace = memnew(NextGISWRTTrace);
@@ -1128,7 +1115,6 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 		}
 		if (lite && irradiance_field != nullptr) {
 			irradiance_field->integrate(p_render_data, false, is_reflections_only());
-			print_line(vformat("LITE_DISPATCH gather_rays=%d reflection_rays=%d probe_traces=%d", lite_gather_dispatches, lite_reflection_dispatches, lite_probe_traces));
 		}
 	} else if (swrt_trace != nullptr) {
 		memdelete(swrt_trace);
@@ -1283,11 +1269,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	const uint32_t view_index = view_ordinal++;
 	const bool multiview = view_index > 0 || rb->get_view_count() > 1;
 	const bool lite = is_lumen_lite();
-	if (view_index == 0) {
-		lite_gather_dispatches = 0;
-		lite_reflection_dispatches = 0;
-		lite_probe_traces = 0;
-	}
+	_begin_dispatch_frame();
 
 	// Every slot emits its timestamp, also while it has no work yet.
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
@@ -1328,9 +1310,6 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			}
 		} else if (slot == PASS_SLOT_WRC_UPDATE) {
 			ensure_wrc()->update(p_render_data);
-			if (lite && view_index == 0) {
-				lite_probe_traces = NEXTGI_WRC_PROBES_PER_FRAME;
-			}
 		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
 			// GodotNext: ps_lumen_lite (#183). Lite records the empty gather and reflection slots.
 			if (!lite) {
@@ -1365,9 +1344,6 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	rd->draw_command_end_label();
 	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));
-	if (lite && view_index == 0) {
-		print_line(vformat("LITE_DISPATCH gather_rays=%d reflection_rays=%d probe_traces=%d", lite_gather_dispatches, lite_reflection_dispatches, lite_probe_traces));
-	}
 }
 
 NextGI::NextGI() {

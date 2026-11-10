@@ -56,12 +56,15 @@ layout(push_constant, std430) uniform LiteProbePush {
 }
 lite_probe_push;
 
+// Four vec4 per probe (nextgi_irradiance_field.glsl): L0 and the back-face fraction, then L1
+// along x, y and z.
 layout(set = 0, binding = 28, std430) buffer LiteProbeOut {
-	vec4 data[8192];
+	vec4 data[32768];
 }
 lite_probe_out;
 
 shared vec3 lite_radiance_samples[64];
+shared vec3 lite_direction_samples[64];
 shared uint lite_backfaces;
 
 void main() {
@@ -96,14 +99,24 @@ void main() {
 	}
 	vec3 shaded = swrt_shade(hit, probe_pos, direction, true, 32.0);
 	lite_radiance_samples[local] = shaded;
+	lite_direction_samples[local] = direction;
 	barrier();
 	if (local == 0u) {
 		vec3 average = vec3(0.0);
+		vec3 l1x = vec3(0.0);
+		vec3 l1y = vec3(0.0);
+		vec3 l1z = vec3(0.0);
 		for (uint i = 0u; i < 64u; i++) {
 			average += lite_radiance_samples[i];
+			l1x += lite_radiance_samples[i] * lite_direction_samples[i].x;
+			l1y += lite_radiance_samples[i] * lite_direction_samples[i].y;
+			l1z += lite_radiance_samples[i] * lite_direction_samples[i].z;
 		}
 		average *= 1.0 / 64.0;
-		lite_probe_out.data[probe] = vec4(average, float(lite_backfaces) / 64.0);
+		lite_probe_out.data[probe * 4u] = vec4(average, float(lite_backfaces) / 64.0);
+		lite_probe_out.data[probe * 4u + 1u] = vec4(l1x * (3.0 / 64.0), 0.0);
+		lite_probe_out.data[probe * 4u + 2u] = vec4(l1y * (3.0 / 64.0), 0.0);
+		lite_probe_out.data[probe * 4u + 3u] = vec4(l1z * (3.0 / 64.0), 0.0);
 	}
 }
 #endif

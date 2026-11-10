@@ -167,6 +167,8 @@ public:
 	uint32_t add(const NextGISDFAtlas &p_atlas, RID p_mesh, const Transform3D &p_transform, bool p_skinned, bool p_has_instance_uniforms, float p_scale_bound, bool p_visible, bool p_dynamic = false);
 	void upload();
 	void clear();
+	// GodotNext: ps_lumen_lite (#183). The buffer capacity upload() allocates for p_required records.
+	static uint32_t grown_capacity(uint32_t p_capacity, uint32_t p_required);
 
 	uint32_t get_count() const { return uint32_t(records.size()); }
 	const Record &get_record(uint32_t p_index) const { return records[p_index]; }

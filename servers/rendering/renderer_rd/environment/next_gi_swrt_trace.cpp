@@ -974,6 +974,10 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 		rd->compute_list_bind_uniform_set(list, gather_set, 0);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
+		// GodotNext: ps_lumen_lite (#183). Lite's dispatch check counts this site.
+		if (NextGI::get_singleton() != nullptr) {
+			NextGI::get_singleton()->note_gather_dispatch();
+		}
 	}
 	if (NextGI::is_reflections_enabled()) {
 		const RID reflect_set = make_set(VARIANT_REFLECT, ray_buffers[RAY_REFLECT]);
@@ -983,6 +987,9 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 			rd->compute_list_bind_uniform_set(list, reflect_set, 0);
 			rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 			rd->compute_list_end();
+			if (NextGI::get_singleton() != nullptr) {
+				NextGI::get_singleton()->note_reflection_dispatch();
+			}
 		}
 	}
 	readback_meta.clear();
@@ -1283,7 +1290,8 @@ bool NextGISWRTTrace::run_microbenchmark(uint64_t &r_usec, String &r_failure) {
 	params.ambient[1] = 0.1f;
 	params.ambient[2] = 0.1f;
 	rd->buffer_update(bench.gpu->params_buffer, 0, sizeof(params), &params);
-	const RID probes = rd->storage_buffer_create(8192 * 4 * sizeof(float));
+	// GodotNext: ps_lumen_lite (#183). The Lite probe layout: L0 and L1, four vec4 per probe.
+	const RID probes = rd->storage_buffer_create(NextGI::LITE_PROBE_COUNT * NextGI::LITE_PROBE_VEC4S * 4 * sizeof(float));
 	Vector<RD::Uniform> uniforms;
 	bench._append_trace_uniforms(uniforms, bench.gpu->params_buffer, nullptr, RID(), false, false);
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, bench.gpu->dummy_buffer));

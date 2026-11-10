@@ -1053,12 +1053,19 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		scene_state.ubo.ssao_light_affect = environment_get_ssao_direct_light_affect(p_render_data->environment);
 		uint32_t ss_flags = 0;
 		if (p_opaque_render_buffers) {
+			// GodotNext: nextgi_frame_block. A NextGI view reads the GI buffers instead of SSIL.
 			const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
+			// GodotNext: ps_lumen_lite (#183). Software-tier Lite writes the GI buffers too.
 			const bool nextgi_lite = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
+			// GodotNext: nextgi_frame_block, ps_lumen_lite (#183). SSIL only runs without NextGI.
 			ss_flags |= (!nextgi_view && !nextgi_lite && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
 			ss_flags |= (nextgi_view || nextgi_lite) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
+			// GodotNext: nextgi_reflection_behaviours (#132)
 			ss_flags |= nextgi_view && !RendererRD::NextGI::is_reflections_enabled() && !environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION : 0;
+			// GodotNext: ps_lumen_lite (#183). Lite traces no reflections: below its SSR roughness
+			// the forward specular (probes, sky, SSR) stays instead of the ambient fallback.
+			ss_flags |= ((nextgi_view && RendererRD::NextGI::is_lumen_lite()) || nextgi_lite) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
 

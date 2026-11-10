@@ -220,6 +220,8 @@ layout(set = 0, binding = 2) uniform sampler shadow_sampler;
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS (1 << 4)
 #define SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI (1 << 5)
 #define SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION (1 << 6)
+// GodotNext: ps_lumen_lite (#183)
+#define SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE (1 << 7)
 
 layout(set = 0, binding = 3, std430) restrict readonly buffer OmniLights {
 	LightData data[];

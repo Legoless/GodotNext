@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include "core/math/projection.h"
+#include "core/math/transform_3d.h"
 #include "servers/rendering/rendering_device.h"
 
 class RenderDataRD;
@@ -39,10 +41,31 @@ namespace RendererRD {
 // GodotNext: ps_lumen_lite (#183). Half-resolution irradiance field over WRC levels 0-1.
 // The software tier writes the probe buffer from its SDF tracer. The hardware tier packs
 // the WRC radiance image. Neither path dispatches screen-probe or reflection rays.
+// Each probe holds L0 and L1 radiance, so the gather evaluates irradiance at the pixel normal
+// and the rough specular at the reflection vector.
 class NextGIIrradianceField {
 public:
 	static constexpr uint32_t PROBE_COUNT = 8192;
 	static constexpr uint32_t PROBES_PER_FRAME = 512;
+	static constexpr uint32_t PROBE_VEC4S = 4;
+
+	// The std430 block nextgi_irradiance_field.glsl reads (LiteParams).
+	struct Params {
+		float inv_view_proj[16]; // Inverse of the projection the depth buffer was drawn with.
+		float camera[4]; // xyz; w = 1 when the WRC textures are bound (hardware tier).
+		float screen[4]; // GI buffer width and height, half-resolution width and height.
+		float depth_info[4]; // Internal width and height, depth valid, normal valid.
+		float rules[4]; // Inside back-face fraction, push spacing, SSR roughness, mip-2 roughness.
+		float level_origin[2][4]; // WRC level 0 and 1 grid origin (xyz) and spacing (w).
+		// Camera basis as three vec4 columns. The prepass normals are in view space; the shader
+		// rotates them into world space, where the probes and the WRC live.
+		float view_to_world[12];
+	};
+
+	// Everything the shader needs from the camera and the buffers. p_cam_projection is the
+	// uncorrected camera projection; the depth correction and TAA jitter are applied here,
+	// as RenderSceneDataRD does for the scene UBO.
+	static Params build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_hwrt);
 
 	NextGIIrradianceField();
 	~NextGIIrradianceField();

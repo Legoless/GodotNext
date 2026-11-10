@@ -897,7 +897,7 @@
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="DEBUG_DRAW_NEXTGI_LITE_PROBES" value="60" enum="DebugDraw">
-			Shows Lumen Lite probe validity from the half-resolution irradiance field. RGB is irradiance. Alpha is 1 for a valid sample, 0.5 when a probe was pushed out along the prepass normal, and 0 when the probe is inside geometry or was skipped. The view draws a labeled tint when the field texture is missing.
+			Shows the half-resolution irradiance that Lumen Lite interpolates from the valid probes around each pixel. Pixels with no valid probe, such as those beyond the second probe level, are black. The view draws a labeled tint when the field texture is missing.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">

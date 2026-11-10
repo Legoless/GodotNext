@@ -142,24 +142,23 @@ public:
 		MEDIUM_GATHER_IRRADIANCE_FIELD = 0,
 		MEDIUM_GATHER_SCREEN_PROBES = 1,
 	};
+	// The shader reads these rules from NextGIIrradianceField::build_params().
 	static constexpr float LITE_INSIDE_BACKFACE = 0.30f;
 	static constexpr float LITE_PUSH_SPACING = 0.4f;
 	static constexpr float LITE_SSR_ROUGHNESS = 0.25f;
+	// Above this roughness the rough reflection reads only WRC mip 2 (2x2 per probe).
+	static constexpr float LITE_MIP2_ROUGHNESS = 0.75f;
+	// The field is WRC levels 0 and 1. Each probe stores L0 and L1 radiance (four vec4).
 	static constexpr uint32_t LITE_PROBE_LEVELS = 2;
 	static constexpr uint32_t LITE_PROBES_PER_LEVEL = 4096;
 	static constexpr uint32_t LITE_PROBE_COUNT = 8192;
 	static constexpr uint32_t LITE_PROBES_PER_FRAME = 512;
+	static constexpr uint32_t LITE_PROBE_VEC4S = 4;
 	static MediumGather medium_gather_from_setting(int p_setting);
 	static MediumGather get_medium_gather();
 	static bool is_lumen_lite(Quality p_resolved, MediumGather p_gather);
 	static bool is_lumen_lite();
-	static bool lite_probe_inside(float p_fraction);
-	static Vector3 lite_push_probe(const Vector3 &p_probe, const Vector3 &p_normal, float p_spacing, bool p_behind);
-	static bool lite_uses_ssr(float p_roughness);
 	static bool lite_traces_skinned(bool p_lite);
-	static void lite_dispatch_counts(bool p_lite, uint32_t &r_gather, uint32_t &r_reflection);
-	static uint32_t lite_probe_index(uint32_t p_level, uint32_t p_x, uint32_t p_y, uint32_t p_z);
-	static float lite_probe_spacing(uint32_t p_level);
 	// Software-tier Lite writes the GI buffers without entering the ray-query frame block.
 	static bool view_samples_lite_field(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded);
 
@@ -330,9 +329,12 @@ private:
 	NextGISWRTTrace *swrt_trace = nullptr;
 	// GodotNext: ps_lumen_lite (#183)
 	NextGIIrradianceField *irradiance_field = nullptr;
-	uint32_t lite_gather_dispatches = 0;
-	uint32_t lite_reflection_dispatches = 0;
+	// Dispatches recorded in the current frame, counted where each one is recorded.
+	uint32_t gather_dispatches = 0;
+	uint32_t reflection_dispatches = 0;
 	uint32_t lite_probe_traces = 0;
+	uint64_t dispatch_frame = UINT64_MAX;
+	void _begin_dispatch_frame();
 	// GodotNext: ps_tier_rule (#187).
 	bool swrt_reduced = false;
 	bool swrt_reduced_logged = false;
@@ -534,7 +536,10 @@ public:
 	RID get_denoise_debug_texture(DebugViewId p_view) const;
 	RID get_lite_debug_texture() const;
 	NextGIIrradianceField *ensure_irradiance_field();
-	void note_lite_probe_traces(uint32_t p_count) { lite_probe_traces = p_count; }
+	// GodotNext: ps_lumen_lite (#183). Called next to the compute_list_dispatch they count.
+	void note_gather_dispatch();
+	void note_reflection_dispatch();
+	void note_lite_probe_traces(uint32_t p_count);
 	// #60 hit-distance debug view (log-scaled), or an invalid RID.
 	RID get_specular_debug_texture() const;
 	// #54 specular filter debug views: 15 raw, 16 variance, 17 history, 18 rejected, 19 denoised.

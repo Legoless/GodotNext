@@ -9,6 +9,7 @@ extends Node
 ##    drops all proxy and RT arena bytes back to `0`.
 ## 3. Slow IO Flight (`slow_io_flight.tscn`) under a tight 2 MiB (16-slot) page cache and
 ##    wall-time IO delay triggers `page_evictions > 0` while rebuilding `0` BLASes.
+## At Medium the scenes render Lumen Lite (#183); the coverage frames switch to the traced gather.
 
 const Flight := preload("res://scenes/slow_io_flight/flight.gd")
 
@@ -189,12 +190,18 @@ func _check_virtualized_scene(p_scene_path: String, p_test_hwrt_toggle: bool) ->
 	var max_luma := _max_image_luma(get_viewport())
 	_check(max_luma > 0.01, "%s: rendered non-black lit output (max_luma=%.4f)" % [label, max_luma])
 
+	# Stage-2 card coverage is counted by the traced gather. Lumen Lite (the Medium default, #183)
+	# dispatches no gather, so the coverage frames run Medium with Screen Probes, then Lite resumes.
+	var gather_setting := "rendering/global_illumination/nextgi/medium_gather"
+	var previous_gather: Variant = ProjectSettings.get_setting(gather_setting, 0)
+	ProjectSettings.set_setting(gather_setting, 1)
 	var cov_cam := root.get_node_or_null("CovCam0") as Camera3D
 	if cov_cam != null:
 		cov_cam.current = true
-		for _i in range(6):
-			await RenderingServer.frame_post_draw
-		info = RenderingServer.nextgi_get_tier_info()
+	for _i in range(6):
+		await RenderingServer.frame_post_draw
+	info = RenderingServer.nextgi_get_tier_info()
+	ProjectSettings.set_setting(gather_setting, previous_gather)
 
 	var cov_rays := int(info.get("src_coverage_rays", 0))
 	var cov_hits := int(info.get("src_coverage_hits", 0))

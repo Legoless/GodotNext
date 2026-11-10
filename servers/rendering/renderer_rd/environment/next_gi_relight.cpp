@@ -359,10 +359,9 @@ bool NextGIRelight::_ensure_atlases() {
 	storage.set_flag(RD::TEXTURE_USAGE_CAN_COPY_TO_BIT);
 	radiance_is_packed = rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, storage);
 	// GodotNext: nextgi_quality_presets (#55). The radiance atlas doubles in height at Epic.
-	// GodotNext: nextgi_quality_presets (#55). The radiance atlas doubles in height at Epic.
-	const bool lite = NextGI::get_singleton() != nullptr && NextGI::is_lumen_lite();
-	const bool epic = !lite && NextGI::get_singleton() != nullptr && NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).src_radiance_mib > 64;
-	const NextGIAtlasBudget atlas_budget = nextgi_src_atlas_budget(epic, lite);
+	// GodotNext: ps_lumen_lite (#183). Lite halves it. The page allocator takes the same extent.
+	const NextGIAtlasBudget atlas_budget = nextgi_src_current_atlas_budget();
+	set_page_extent(atlas_budget);
 	RD::TextureFormat tf;
 	tf.width = atlas_budget.radiance_width;
 	tf.height = atlas_budget.radiance_height;
@@ -459,27 +458,82 @@ RID NextGIRelight::_storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t
 	return r_buffer;
 }
 
+void NextGIRelight::_free_page_set(uint32_t p_index) {
+	ERR_FAIL_UNSIGNED_INDEX(p_index, instances.size());
+	for (const CardPage &page : instances[p_index].cards) {
+		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+		mask_packer.free(Rect2i(int(page.mask_x), int(page.mask_y), int(page.mask_w), int(page.mask_h)));
+	}
+	instance_index.erase(instances[p_index].page_key);
+	instances.remove_at(p_index);
+	for (uint32_t i = p_index; i < instances.size(); i++) {
+		instance_index[instances[i].page_key] = i;
+	}
+}
+
 bool NextGIRelight::_evict_oldest_pages() {
 	if (instances.is_empty()) {
 		return false;
 	}
+	// Least recently claimed first: sets outside the current records go before any set this
+	// pass claimed. GodotNext: ps_lumen_lite (#183). An evicted set of this pass already wrote
+	// its page table into a record; finish_record_pass() marks that record evicted.
 	uint32_t oldest = 0;
 	for (uint32_t i = 1; i < instances.size(); i++) {
 		if (instances[i].last_used < instances[oldest].last_used) {
 			oldest = i;
 		}
 	}
-	for (const CardPage &page : instances[oldest].cards) {
-		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
-		mask_packer.free(Rect2i(int(page.mask_x), int(page.mask_y), int(page.mask_w), int(page.mask_h)));
-	}
-	instance_index.erase(instances[oldest].page_key);
-	instances.remove_at(oldest);
-	for (uint32_t i = oldest; i < instances.size(); i++) {
-		instance_index[instances[i].page_key] = i;
-	}
+	_free_page_set(oldest);
 	page_evictions++;
 	return true;
+}
+
+void NextGIRelight::begin_record_pass() {
+	record_pass++;
+	pass_record_keys.clear();
+}
+
+void NextGIRelight::finish_record_pass(LocalVector<NextGIInstanceRecord> &r_records) const {
+	for (uint32_t i = 0; i < r_records.size() && i < pass_record_keys.size(); i++) {
+		NextGIInstanceRecord &record = r_records[i];
+		if (pass_record_keys[i] == 0 || record.page_table == UINT32_MAX || (record.page_table & 0x80000000u) != 0) {
+			continue;
+		}
+		const uint32_t *set = instance_index.getptr(pass_record_keys[i]);
+		record.page_table = set != nullptr && instances[*set].record_pass == record_pass ? instances[*set].page_table : 0x80000000u;
+	}
+}
+
+void NextGIRelight::set_page_extent(const NextGIAtlasBudget &p_budget) {
+	radiance_buddy.set_extent(p_budget.radiance_width, p_budget.radiance_height);
+	mask_packer.reset();
+	instances.clear();
+	instance_index.clear();
+	pass_record_keys.clear();
+	page_table_count = 0;
+}
+
+void NextGIRelight::collect_current_page_sets(LocalVector<uint32_t> &r_sets) const {
+	r_sets.clear();
+	for (uint32_t i = 0; i < instances.size(); i++) {
+		if (instances[i].record_pass == record_pass) {
+			r_sets.push_back(i);
+		}
+	}
+}
+
+NextGIRelight::PageSetInfo NextGIRelight::get_page_set_info(uint32_t p_set) const {
+	PageSetInfo info;
+	ERR_FAIL_UNSIGNED_INDEX_V(p_set, instances.size(), info);
+	const InstancePages &pages = instances[p_set];
+	info.record_index = pages.record_index;
+	info.card_set = pages.card_set;
+	info.page_table = pages.page_table;
+	for (const CardPage &page : pages.cards) {
+		info.radiance_rects.push_back(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
+	}
+	return info;
 }
 
 static uint64_t _nextgi_page_key(RenderGeometryInstance *p_instance, uint32_t p_element) {
@@ -506,23 +560,13 @@ void NextGIRelight::release_instance(RenderGeometryInstance *p_instance) {
 	if (existing == nullptr) {
 		return;
 	}
-	const uint32_t index = *existing;
-	for (const CardPage &page : instances[index].cards) {
-		radiance_buddy.free_block(Rect2i(int(page.radiance_x), int(page.radiance_y), int(page.radiance_w), int(page.radiance_h)));
-		mask_packer.free(Rect2i(int(page.mask_x), int(page.mask_y), int(page.mask_w), int(page.mask_h)));
-	}
-	instance_index.erase(page_key);
-	instances.remove_at(index);
-	for (uint32_t i = index; i < instances.size(); i++) {
-		instance_index[instances[i].page_key] = i;
-	}
+	_free_page_set(*existing);
 }
 
 uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element) {
 	if (p_instance == nullptr || r_record.card_set == UINT32_MAX) {
 		return UINT32_MAX;
 	}
-	const uint64_t page_key = _nextgi_page_key(p_instance, p_element);
 	if (!_ensure_atlases()) {
 		return UINT32_MAX;
 	}
@@ -530,17 +574,61 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 	if (src == nullptr) {
 		return UINT32_MAX;
 	}
-	const uint32_t *existing = instance_index.getptr(page_key);
-	if (existing != nullptr) {
-		InstancePages &pages = instances[*existing];
-		pages.record = r_record;
-		pages.record_index = r_record.tlas_index;
-		pages.last_used = page_clock++;
-		r_record.page_table = pages.page_table;
-		return pages.page_table;
+	// GodotNext: ps_lumen_lite (#183). A set cut for the same card set is reused without the cards.
+	const uint32_t *existing = instance_index.getptr(_nextgi_page_key(p_instance, p_element));
+	if (existing != nullptr && instances[*existing].card_set == r_record.card_set) {
+		return assign_card_pages(p_instance, r_record, p_element, 0, nullptr, 0);
 	}
 	NextGICardSet card_set;
 	if (!src->copy_card_set(r_record.card_set, card_set) || card_set.card_count == 0) {
+		return UINT32_MAX;
+	}
+	LocalVector<NextGICard> cards;
+	cards.resize(card_set.card_count);
+	for (uint32_t i = 0; i < card_set.card_count; i++) {
+		if (!src->copy_card(card_set.first_card + i, cards[i])) {
+			alloc_failures++;
+			return 0x80000000u;
+		}
+	}
+	return assign_card_pages(p_instance, r_record, p_element, card_set.first_card, cards.ptr(), cards.size());
+}
+
+uint32_t NextGIRelight::assign_card_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element, uint32_t p_first_card, const NextGICard *p_cards, uint32_t p_card_count) {
+	if (p_instance == nullptr || r_record.card_set == UINT32_MAX) {
+		return UINT32_MAX;
+	}
+	const uint64_t page_key = _nextgi_page_key(p_instance, p_element);
+	if (r_record.tlas_index >= pass_record_keys.size()) {
+		const uint32_t old_size = pass_record_keys.size();
+		pass_record_keys.resize(r_record.tlas_index + 1);
+		for (uint32_t i = old_size; i < pass_record_keys.size(); i++) {
+			pass_record_keys[i] = 0;
+		}
+	}
+	pass_record_keys[r_record.tlas_index] = page_key;
+	const uint32_t *existing = instance_index.getptr(page_key);
+	if (existing != nullptr) {
+		if (instances[*existing].card_set == r_record.card_set) {
+			InstancePages &pages = instances[*existing];
+			if (pages.record_pass + 1 < record_pass) {
+				// Back after a pass outside the records: the pages missed every light change since.
+				for (CardPage &card_page : pages.cards) {
+					card_page.dirty_direct = true;
+				}
+			}
+			pages.record = r_record;
+			pages.record_index = r_record.tlas_index;
+			pages.record_pass = record_pass;
+			pages.last_used = page_clock++;
+			r_record.page_table = pages.page_table;
+			return pages.page_table;
+		}
+		// The key now names another card set (a new material key, or a freed instance's address
+		// reused). Its pages are cut for the old cards, so they go.
+		_free_page_set(*existing);
+	}
+	if (p_cards == nullptr || p_card_count == 0) {
 		return UINT32_MAX;
 	}
 
@@ -551,13 +639,11 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 	pages.record = r_record;
 	pages.record_index = r_record.tlas_index;
 	pages.page_table = page_table_count;
+	pages.card_set = r_record.card_set;
+	pages.record_pass = record_pass;
 	bool fitted = true;
-	for (uint32_t i = 0; i < card_set.card_count; i++) {
-		NextGICard card;
-		if (!src->copy_card(card_set.first_card + i, card)) {
-			fitted = false;
-			break;
-		}
+	for (uint32_t i = 0; i < p_card_count; i++) {
+		const NextGICard &card = p_cards[i];
 		const uint32_t card_w = MAX(card.atlas_rect[2], 1u);
 		const uint32_t card_h = MAX(card.atlas_rect[3], 1u);
 		Rect2i radiance_rect;
@@ -574,7 +660,7 @@ uint32_t NextGIRelight::assign_pages(RenderGeometryInstance *p_instance, NextGII
 			break;
 		}
 		CardPage page;
-		page.card_index = card_set.first_card + i;
+		page.card_index = p_first_card + i;
 		page.radiance_x = radiance_rect.position.x;
 		page.radiance_y = radiance_rect.position.y;
 		page.radiance_w = radiance_rect.size.x;
@@ -788,7 +874,11 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	LocalVector<NextGISrcSchedulePage> work;
 	last_dirty_pages = 0;
 	last_max_age = 0;
-	for (uint32_t i = 0; i < instances.size(); i++) {
+	// GodotNext: ps_lumen_lite (#183). Only sets in this frame's records: another set's
+	// record_index now names some other instance, which may have no card set at all.
+	LocalVector<uint32_t> current_sets;
+	collect_current_page_sets(current_sets);
+	for (uint32_t i : current_sets) {
 		InstancePages &instance_pages = instances[i];
 		float max_scale = 0.0f;
 		for (int row = 0; row < 3; row++) {
@@ -1197,6 +1287,22 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	_reset_uniform_set();
 }
 
+void NextGIRelight::build_page_rect_words(LocalVector<uint32_t> &r_words) const {
+	r_words.resize(page_table_count * 2);
+	for (uint32_t i = 0; i < r_words.size(); i++) {
+		r_words[i] = 0;
+	}
+	for (const InstancePages &instance_pages : instances) {
+		for (const CardPage &card : instance_pages.cards) {
+			if (card.stable_id >= page_table_count) {
+				continue;
+			}
+			r_words[card.stable_id * 2] = _pack_xy(card.radiance_x, card.radiance_y);
+			r_words[card.stable_id * 2 + 1] = _pack_xy(card.radiance_w, card.radiance_h);
+		}
+	}
+}
+
 void NextGIRelight::_upload_page_rects() {
 	if (page_table_count == 0) {
 		return;
@@ -1211,19 +1317,7 @@ void NextGIRelight::_upload_page_rects() {
 		page_rect_buffer = rd->storage_buffer_create(page_rect_capacity * sizeof(uint32_t) * 2);
 	}
 	LocalVector<uint32_t> words;
-	words.resize(page_table_count * 2);
-	for (uint32_t i = 0; i < words.size(); i++) {
-		words[i] = 0;
-	}
-	for (const InstancePages &instance_pages : instances) {
-		for (const CardPage &card : instance_pages.cards) {
-			if (card.stable_id >= page_table_count) {
-				continue;
-			}
-			words[card.stable_id * 2] = _pack_xy(card.radiance_x, card.radiance_y);
-			words[card.stable_id * 2 + 1] = _pack_xy(card.radiance_w, card.radiance_h);
-		}
-	}
+	build_page_rect_words(words);
 	rd->buffer_update(page_rect_buffer, 0, words.size() * sizeof(uint32_t), words.ptr());
 }
 

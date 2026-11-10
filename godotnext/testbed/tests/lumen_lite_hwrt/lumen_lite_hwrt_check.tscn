@@ -1,0 +1,9 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/lumen_lite/lumen_lite_check.gd" id="1"]
+
+[node name="LumenLiteHwrtCheck" type="Node3D"]
+script = ExtResource("1")
+expected_tier = "HWRT"
+scene_path = "res://scenes/roughness_corridor/roughness_corridor.tscn"
+camera_name = "CaptureCam"

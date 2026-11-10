@@ -309,9 +309,13 @@ void nextgi_src_cluster_cards(const float *p_positions, uint32_t p_vertex_count,
 }
 
 uint64_t nextgi_src_atlas_memory_bytes(uint32_t p_size, uint32_t p_fb_depth_bytes_per_texel) {
+	return nextgi_src_atlas_memory_bytes(p_size, p_size, p_fb_depth_bytes_per_texel);
+}
+
+uint64_t nextgi_src_atlas_memory_bytes(uint32_t p_width, uint32_t p_height, uint32_t p_fb_depth_bytes_per_texel) {
 	// albedo, normal and orm (4 B each), emission (8 B), depth (4 B), framebuffer depth.
 	const uint64_t bytes_per_texel = 4 + 4 + 4 + 8 + 4 + uint64_t(p_fb_depth_bytes_per_texel);
-	return uint64_t(p_size) * uint64_t(p_size) * bytes_per_texel;
+	return uint64_t(p_width) * uint64_t(p_height) * bytes_per_texel;
 }
 
 float nextgi_src_card_coverage(const float *p_depth, uint32_t p_atlas_width, uint32_t p_atlas_height, const Rect2i &p_rect) {
@@ -500,9 +504,13 @@ void NextGI::_capture_src_cards(RenderDataRD *p_render_data) {
 NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite) {
 	NextGIAtlasBudget budget;
 	if (p_lite && !p_epic) {
-		budget.radiance_width = 2048;
+		// GodotNext: ps_lumen_lite (#183). "½ size" (plan §21.2 L6) is half of High's texels and
+		// bytes for both atlases: 4096x2048 radiance and 2048x1024 material.
+		budget.radiance_width = 4096;
 		budget.radiance_height = 2048;
 		budget.radiance_bytes = uint64_t(budget.radiance_width) * budget.radiance_height * 4;
+		budget.material_width = NEXTGI_SRC_ATLAS_SIZE;
+		budget.material_height = NEXTGI_SRC_ATLAS_SIZE / 2;
 		budget.material_bytes = uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH) / 2;
 		return budget;
 	}
@@ -511,6 +519,16 @@ NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite) {
 	budget.radiance_bytes = uint64_t(budget.radiance_width) * budget.radiance_height * 4;
 	budget.material_bytes = p_epic ? uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_EPIC) : uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH);
 	return budget;
+}
+
+NextGIAtlasBudget nextgi_src_current_atlas_budget() {
+	NextGI *next_gi = NextGI::get_singleton();
+	if (next_gi == nullptr) {
+		return nextgi_src_atlas_budget(false);
+	}
+	const bool lite = NextGI::is_lumen_lite();
+	const bool epic = !lite && NextGI::get_quality_params(next_gi->get_quality_setting()).src_material_mib > 128;
+	return nextgi_src_atlas_budget(epic, lite);
 }
 
 float nextgi_src_solid_angle(float p_radius, float p_distance) {
@@ -612,7 +630,18 @@ uint32_t nextgi_src_lru_evict(const NextGIPageUse *p_pages, uint32_t p_count, ui
 }
 
 NextGIBuddyAllocator::NextGIBuddyAllocator(uint32_t p_size, uint32_t p_min) :
-		size(p_size), min_block(MAX(p_min, 1u)) {
+		size(p_size), min_block(MAX(p_min, 1u)), width(p_size), height(p_size) {
+	reset();
+}
+
+void NextGIBuddyAllocator::set_extent(uint32_t p_width, uint32_t p_height) {
+	width = p_width;
+	height = p_height;
+	const uint32_t shorter = MIN(p_width, p_height);
+	size = min_block;
+	while ((size << 1) <= shorter && _level(size << 1) > _level(size)) {
+		size <<= 1;
+	}
 	reset();
 }
 
@@ -639,8 +668,15 @@ void NextGIBuddyAllocator::reset() {
 	for (uint32_t i = 0; i < LEVELS; i++) {
 		free_lists[i].clear();
 	}
-	if (size >= min_block) {
-		free_lists[_level(size)].push_back(Rect2i(0, 0, int(size), int(size)));
+	if (size < min_block || width < size || height < size) {
+		return;
+	}
+	// allocate() takes the last free block, so the roots go in reverse and (0, 0) is used first.
+	const uint32_t columns = width / size;
+	const uint32_t rows = height / size;
+	for (uint32_t i = columns * rows; i > 0; i--) {
+		const uint32_t root = i - 1;
+		free_lists[_level(size)].push_back(Rect2i(int((root % columns) * size), int((root / columns) * size), int(size), int(size)));
 	}
 }
 
@@ -795,15 +831,17 @@ void NextGISRC::_create_atlas() {
 		"NextGI SRC Atlas Depth",
 	};
 
+	// GodotNext: ps_lumen_lite (#183). The texture and the packer share the preset's extent.
+	const NextGIAtlasBudget budget = nextgi_src_current_atlas_budget();
 	const bool lite = NextGI::get_singleton() != nullptr && NextGI::is_lumen_lite();
-	const bool epic = !lite && NextGI::get_singleton() != nullptr && NextGI::get_quality_params(NextGI::get_singleton()->get_quality_setting()).src_material_mib > 128;
-	const uint32_t side = lite ? NEXTGI_SRC_ATLAS_SIZE / 2 : NEXTGI_SRC_ATLAS_SIZE;
-	atlas_side = side;
-	packer.set_extent(side, side);
+	const bool epic = !lite && budget.material_bytes > uint64_t(NEXTGI_SRC_MATERIAL_BUDGET_HIGH);
+	atlas_width = budget.material_width;
+	atlas_height = budget.material_height;
+	packer.set_extent(atlas_width, atlas_height);
 
 	RD::TextureFormat tf;
-	tf.width = side;
-	tf.height = side;
+	tf.width = atlas_width;
+	tf.height = atlas_height;
 	tf.texture_type = RD::TEXTURE_TYPE_2D;
 	tf.usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
 	Vector<RID> fb_textures;
@@ -829,13 +867,13 @@ void NextGISRC::_create_atlas() {
 	atlas_fb = rd->framebuffer_create(fb_textures);
 	ERR_FAIL_COND(atlas_fb.is_null());
 
-	atlas_memory = nextgi_src_atlas_memory_bytes(side, d16 ? 2 : 4);
+	atlas_memory = nextgi_src_atlas_memory_bytes(atlas_width, atlas_height, d16 ? 2 : 4);
 	// GodotNext: nextgi_quality_presets (#55). The material budget follows the preset.
-	// GodotNext: ps_lumen_lite (#183). Lite halves the High material budget and the atlas side.
-	const uint64_t material_budget = nextgi_src_atlas_budget(epic, lite).material_bytes;
+	// GodotNext: ps_lumen_lite (#183). Lite halves the High material budget and the atlas area.
+	const uint64_t material_budget = budget.material_bytes;
 	const char *budget_name = lite ? "Lite" : (epic ? "Epic" : "High");
 	// Worded without the "NextGI:" prefix, so the tier stays the only such line in the log.
-	print_line(vformat("NextGI SRC: material atlas %dx%d, %.1f MiB of the %d MiB %s budget (framebuffer depth %s).", side, side, double(atlas_memory) / (1024.0 * 1024.0), int(material_budget / (1024 * 1024)), budget_name, d16 ? "D16" : "X8_D24"));
+	print_line(vformat("NextGI SRC: material atlas %dx%d, %.1f MiB of the %d MiB %s budget (framebuffer depth %s).", atlas_width, atlas_height, double(atlas_memory) / (1024.0 * 1024.0), int(material_budget / (1024 * 1024)), budget_name, d16 ? "D16" : "X8_D24"));
 	ERR_FAIL_COND_MSG(atlas_memory > material_budget, "The NextGI SRC material atlas is over the preset budget.");
 }
 
@@ -1812,11 +1850,12 @@ void NextGISRC::_on_dump_data(const Vector<uint8_t> &p_data, int p_target) {
 		Image::FORMAT_RGBAH,
 		Image::FORMAT_RF,
 	};
-	const int size = int(atlas_side);
-	ERR_FAIL_COND_MSG(p_data.size() != Image::get_image_data_size(size, size, formats[p_target], false), vformat("Unexpected NextGI SRC %s atlas download size %d.", _nextgi_src_target_names[p_target], p_data.size()));
+	const int width = int(atlas_width);
+	const int height = int(atlas_height);
+	ERR_FAIL_COND_MSG(p_data.size() != Image::get_image_data_size(width, height, formats[p_target], false), vformat("Unexpected NextGI SRC %s atlas download size %d.", _nextgi_src_target_names[p_target], p_data.size()));
 
 	const String path = vformat("user://nextgi_atlas_%s.exr", _nextgi_src_target_names[p_target]);
-	const Ref<Image> image = Image::create_from_data(size, size, false, formats[p_target], p_data);
+	const Ref<Image> image = Image::create_from_data(width, height, false, formats[p_target], p_data);
 	const Error err = image.is_valid() ? image->save_exr(path) : ERR_CANT_CREATE;
 	if (err == OK) {
 		print_line(vformat("NextGI SRC: saved %s.", path));
@@ -1832,7 +1871,7 @@ void NextGISRC::_on_dump_data(const Vector<uint8_t> &p_data, int p_target) {
 	float coverage_min = 1.0f;
 	for (uint32_t i = 0; i < cards.size(); i++) {
 		const Rect2i rect(int(cards[i].atlas_rect[0]), int(cards[i].atlas_rect[1]), int(cards[i].atlas_rect[2]), int(cards[i].atlas_rect[3]));
-		card_coverage[i] = nextgi_src_card_coverage(depth, size, size, rect);
+		card_coverage[i] = nextgi_src_card_coverage(depth, width, height, rect);
 		coverage_min = MIN(coverage_min, card_coverage[i]);
 	}
 	for (uint32_t s = 0; s < card_sets.size(); s++) {

@@ -2693,7 +2693,8 @@ void fragment_shader(in SceneData scene_data) {
 				ambient_light = mix(ambient_light, nextgi_buffer_ambient.rgb, nextgi_buffer_ambient.a);
 			}
 			vec4 nextgi_rough_reflection = nextgi_buffer_reflection;
-			if (nextgi_rough_reflection.a <= 0.0) {
+			// GodotNext: ps_lumen_lite (#183). Lite's alpha 0 keeps the forward specular.
+			if (nextgi_rough_reflection.a <= 0.0 && !bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE)) {
 				nextgi_rough_reflection = nextgi_buffer_ambient;
 			}
 			indirect_specular_light = mix(indirect_specular_light, nextgi_rough_reflection.rgb, nextgi_rough_reflection.a);

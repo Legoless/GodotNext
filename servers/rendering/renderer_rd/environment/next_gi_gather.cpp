@@ -915,6 +915,8 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
 		diffuse_dispatches++;
+		// GodotNext: ps_lumen_lite (#183). The per-frame count Lite's dispatch check reads.
+		NextGI::get_singleton()->note_gather_dispatch();
 	}
 	if (p_diffuse && feedback_count > 0) {
 		const uint32_t feedback_groups_y = MAX((feedback_count + 63u) / 64u, 1u);
@@ -950,6 +952,8 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
 		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
 		rd->compute_list_end();
+		// GodotNext: ps_lumen_lite (#183)
+		NextGI::get_singleton()->note_reflection_dispatch();
 	}
 	const NextGIFarField *far_field = NextGI::get_singleton()->get_rt_scene()->get_far_field();
 	if (far_field != nullptr && far_field->is_trace_ready() && reflect_far_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
@@ -960,6 +964,8 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		rd->compute_list_bind_uniform_set(list, reflect_far_uniform_set, 0);
 		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
 		rd->compute_list_end();
+		// GodotNext: ps_lumen_lite (#183)
+		NextGI::get_singleton()->note_reflection_dispatch();
 	}
 	// GodotNext: nextgi_denoise_specular (#54). Temporal accumulation, then a three-pass a-trous
 	// spatial filter, then the joint-bilateral upsample into RB_TEX_REFLECTION.

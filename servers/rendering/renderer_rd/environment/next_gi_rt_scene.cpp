@@ -1141,6 +1141,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	stats.skinned_build_triangles = 0;
 	tlas_traceable = false;
 	compaction_triangles_this_frame = 0;
+	// GodotNext: ps_lumen_lite (#183). New instance records: relight pages claim them again.
+	if (NextGIRelight::get_singleton() != nullptr) {
+		NextGIRelight::get_singleton()->begin_record_pass();
+	}
 	ERR_FAIL_NULL(p_render_data);
 	if (tlas.is_null()) {
 		return;
@@ -1150,6 +1154,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		LocalVector<NextGIInstanceRecord> records;
 		LocalVector<NextGISurfaceRecord> surfaces;
 		_update_far_records(p_render_data, records, surfaces);
+		// GodotNext: ps_lumen_lite (#183)
+		if (NextGIRelight::get_singleton() != nullptr) {
+			NextGIRelight::get_singleton()->finish_record_pass(records);
+		}
 		_ensure_record_buffers(records.size(), surfaces.size());
 		if (instance_record_buffer.is_valid() && !records.is_empty()) {
 			RD::get_singleton()->buffer_update(instance_record_buffer, 0, records.size() * sizeof(NextGIInstanceRecord), records.ptr());
@@ -1315,12 +1323,13 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					// Bind-pose cards shade the posed hit; without a card set the hit shades from the WRC.
 					record.card_set = skinned_card_set;
 					record.page_table = 0x80000000u;
+					// GodotNext: ps_lumen_lite (#183). The pages remember this record's index, so it is set first.
+					record.tlas_index = instance_records.size();
 					if (skinned_card_set != UINT32_MAX && NextGIRelight::get_singleton() != nullptr) {
 						record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
 					}
 					record.rt_flags = NEXTGI_RT_FLAG_SKINNED;
 					record.origin_offset = nextgi_rt_origin_offset(info.eps, max_scale);
-					record.tlas_index = instance_records.size();
 					record.arena_chunk = slot.chunk;
 					NextGISurfaceRecord surface_record;
 					surface_record.vertex_offset = slot.vertex_offset;
@@ -1608,6 +1617,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	}
 	if (instance_records.is_empty() && gpu_sources.is_empty()) {
 		_update_far_records(p_render_data, instance_records, surface_records);
+		// GodotNext: ps_lumen_lite (#183)
+		if (NextGIRelight::get_singleton() != nullptr) {
+			NextGIRelight::get_singleton()->finish_record_pass(instance_records);
+		}
 		_ensure_record_buffers(instance_records.size(), surface_records.size());
 		if (instance_record_buffer.is_valid() && !instance_records.is_empty()) {
 			RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());
@@ -1618,6 +1631,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		return;
 	}
 	_update_far_records(p_render_data, instance_records, surface_records);
+	// GodotNext: ps_lumen_lite (#183). Records whose pages a later instance of this pass evicted.
+	if (NextGIRelight::get_singleton() != nullptr) {
+		NextGIRelight::get_singleton()->finish_record_pass(instance_records);
+	}
 	_ensure_record_buffers(instance_records.size(), surface_records.size());
 	if (instance_record_buffer.is_valid()) {
 		RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());

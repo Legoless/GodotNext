@@ -519,6 +519,9 @@ TEST_CASE("[NextGI] WorldEnvironment warns when NextGI is enabled off the HWRT t
 #include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
+// GodotNext: ps_lumen_lite (#183)
+#include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 
 // The §3.1 tier rule (#15). Device capabilities are mocked: the rule is pure, and the device inputs
 // come from a driverless RenderingDevice through the rd_feature_mock hook (#17).
@@ -3071,40 +3074,23 @@ TEST_CASE("[NextGI][Lite] Irradiance field keeps the traced Medium path") {
 	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_MEDIUM, false), 870u);
 	CHECK_EQ(RendererRD::NextGI::nextgi_quality_total_us(Q::QUALITY_MEDIUM, true), 2175u);
 
-	uint32_t gather_rays = 1;
-	uint32_t reflection_rays = 1;
-	RendererRD::NextGI::lite_dispatch_counts(true, gather_rays, reflection_rays);
-	CHECK_EQ(gather_rays, 0u);
-	CHECK_EQ(reflection_rays, 0u);
-	RendererRD::NextGI::lite_dispatch_counts(false, gather_rays, reflection_rays);
-	CHECK_EQ(gather_rays, 8u);
-	CHECK(reflection_rays > 0u);
-
-	CHECK_FALSE(RendererRD::NextGI::lite_probe_inside(0.30f));
-	CHECK(RendererRD::NextGI::lite_probe_inside(0.31f));
-	const Vector3 probe(1.0f, 2.0f, 3.0f);
-	const Vector3 normal(0.0f, 1.0f, 0.0f);
-	CHECK(RendererRD::NextGI::lite_push_probe(probe, normal, 2.0f, false).is_equal_approx(probe));
-	CHECK(RendererRD::NextGI::lite_push_probe(probe, Vector3(), 2.0f, true).is_equal_approx(probe));
-	const Vector3 pushed = RendererRD::NextGI::lite_push_probe(probe, normal, 2.0f, true);
-	CHECK(pushed.is_equal_approx(probe + Vector3(0.0f, 0.8f, 0.0f)));
-	CHECK(RendererRD::NextGI::lite_uses_ssr(0.25f));
-	CHECK_FALSE(RendererRD::NextGI::lite_uses_ssr(0.26f));
 	CHECK_FALSE(RendererRD::NextGI::lite_traces_skinned(true));
 	CHECK(RendererRD::NextGI::lite_traces_skinned(false));
-	CHECK_EQ(RendererRD::NextGI::lite_probe_index(1, 2, 3, 4), 4096u + 2u + 3u * 16u + 4u * 256u);
-	CHECK(std::abs(RendererRD::NextGI::lite_probe_spacing(0) - 1.0f) < 1e-6f);
-	CHECK(std::abs(RendererRD::NextGI::lite_probe_spacing(1) - 2.0f) < 1e-6f);
 
+	// "½ size" SRC atlases: half of High's texels and bytes, inside the 64 MiB Lite budget.
 	const RendererRD::NextGIAtlasBudget lite_budget = RendererRD::nextgi_src_atlas_budget(false, true);
-	CHECK_EQ(lite_budget.radiance_width, 2048u);
-	CHECK_EQ(lite_budget.radiance_height, 2048u);
-	CHECK_EQ(lite_budget.material_bytes, 64ull * 1024ull * 1024ull);
 	const RendererRD::NextGIAtlasBudget high_budget = RendererRD::nextgi_src_atlas_budget(false);
+	const RendererRD::NextGIAtlasBudget epic_budget = RendererRD::nextgi_src_atlas_budget(true);
+	CHECK_EQ(lite_budget.radiance_width, 4096u);
+	CHECK_EQ(lite_budget.radiance_height, 2048u);
+	CHECK_EQ(lite_budget.radiance_bytes * 2, high_budget.radiance_bytes);
+	CHECK_EQ(uint64_t(lite_budget.material_width) * lite_budget.material_height * 2, uint64_t(high_budget.material_width) * high_budget.material_height);
+	CHECK_EQ(lite_budget.material_bytes, 64ull * 1024ull * 1024ull);
+	CHECK(RendererRD::nextgi_src_atlas_memory_bytes(lite_budget.material_width, lite_budget.material_height, 4) <= lite_budget.material_bytes);
 	CHECK_EQ(high_budget.radiance_width, 4096u);
 	CHECK_EQ(high_budget.radiance_height, 4096u);
+	CHECK_EQ(high_budget.material_width, uint32_t(RendererRD::NEXTGI_SRC_ATLAS_SIZE));
 	CHECK_EQ(high_budget.material_bytes, 128ull * 1024ull * 1024ull);
-	const RendererRD::NextGIAtlasBudget epic_budget = RendererRD::nextgi_src_atlas_budget(true);
 	CHECK_EQ(epic_budget.radiance_height, 8192u);
 	CHECK_EQ(epic_budget.material_bytes, 256ull * 1024ull * 1024ull);
 
@@ -3125,6 +3111,248 @@ TEST_CASE("[NextGI][Lite] Irradiance field keeps the traced Medium path") {
 	if (had_gather) {
 		ps->set_setting(gather_setting, previous_gather);
 	}
+}
+
+// GodotNext: ps_lumen_lite (#183). Fake instance keys: the page table never dereferences them.
+static RenderGeometryInstance *lite_test_instance(uint32_t p_index) {
+	return reinterpret_cast<RenderGeometryInstance *>(uintptr_t(0x10000u + p_index * 64u));
+}
+
+static RendererRD::NextGICard lite_test_card(uint32_t p_side) {
+	RendererRD::NextGICard card = {};
+	card.atlas_rect[2] = p_side;
+	card.atlas_rect[3] = p_side;
+	return card;
+}
+
+TEST_CASE("[NextGI][Lite] SRC radiance pages stay inside the preset's radiance atlas") {
+	struct Preset {
+		bool epic;
+		bool lite;
+	};
+	const Preset presets[] = { { false, false }, { true, false }, { false, true } };
+	for (const Preset &preset : presets) {
+		const RendererRD::NextGIAtlasBudget budget = RendererRD::nextgi_src_atlas_budget(preset.epic, preset.lite);
+		const Rect2i texture(0, 0, int(budget.radiance_width), int(budget.radiance_height));
+
+		// The allocator covers exactly the texture: 4096x8192 and 4096x2048 use their whole area.
+		RendererRD::NextGIBuddyAllocator buddy;
+		buddy.set_extent(budget.radiance_width, budget.radiance_height);
+		uint64_t texels = 0;
+		bool blocks_inside = true;
+		Rect2i block;
+		while (buddy.allocate(256, 256, block)) {
+			blocks_inside = blocks_inside && texture.encloses(block);
+			texels += uint64_t(block.size.x) * uint64_t(block.size.y);
+		}
+		CHECK(blocks_inside);
+		CHECK_EQ(texels, uint64_t(budget.radiance_width) * budget.radiance_height);
+
+		// Relight sizes its page allocator from the same budget as its radiance texture. Cards
+		// are placed until the radiance or shadow-mask atlas is full; every page must fit.
+		RendererRD::NextGIRelight relight;
+		relight.set_page_extent(budget);
+		relight.begin_record_pass();
+		const RendererRD::NextGICard cards[4] = { lite_test_card(128), lite_test_card(64), lite_test_card(128), lite_test_card(32) };
+		uint32_t instance = 0;
+		while (instance < 4096) {
+			RendererRD::NextGIInstanceRecord record;
+			record.card_set = instance;
+			record.tlas_index = instance;
+			const uint32_t page_table = relight.assign_card_pages(lite_test_instance(instance), record, UINT32_MAX, instance * 4, cards, 4);
+			if (page_table == 0x80000000u) {
+				break;
+			}
+			instance++;
+		}
+		CHECK(instance > 64u);
+		LocalVector<uint32_t> words;
+		relight.build_page_rect_words(words);
+		REQUIRE_EQ(words.size(), instance * 4 * 2);
+		bool pages_inside = true;
+		for (uint32_t page = 0; page < words.size() / 2; page++) {
+			const Rect2i rect(int(words[page * 2] & 0xFFFFu), int(words[page * 2] >> 16), int(words[page * 2 + 1] & 0xFFFFu), int(words[page * 2 + 1] >> 16));
+			pages_inside = pages_inside && texture.encloses(rect);
+		}
+		CHECK_MESSAGE(pages_inside, vformat("Every relight page fits the %dx%d radiance texture.", budget.radiance_width, budget.radiance_height));
+	}
+}
+
+TEST_CASE("[NextGI][Lite] Relight schedules only page sets from the current records") {
+	RendererRD::NextGIRelight relight;
+	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false, true));
+	const RendererRD::NextGICard cards[3] = { lite_test_card(64), lite_test_card(32), lite_test_card(16) };
+
+	relight.begin_record_pass();
+	RendererRD::NextGIInstanceRecord a;
+	a.card_set = 0;
+	a.tlas_index = 3;
+	RendererRD::NextGIInstanceRecord b;
+	b.card_set = 1;
+	b.tlas_index = 4;
+	CHECK_EQ(relight.assign_card_pages(lite_test_instance(0), a, UINT32_MAX, 0, cards, 2), 0u);
+	CHECK_EQ(relight.assign_card_pages(lite_test_instance(1), b, UINT32_MAX, 2, cards, 1), 2u);
+	CHECK_EQ(a.page_table, 0u);
+	CHECK_EQ(b.page_table, 2u);
+	LocalVector<uint32_t> current;
+	relight.collect_current_page_sets(current);
+	CHECK_EQ(current.size(), 2u);
+
+	// Next frame's records hold only B, at another index. A's record_index (3) now names some
+	// other instance, which may have no card set, so A must not be relit.
+	relight.begin_record_pass();
+	b.tlas_index = 0;
+	CHECK_EQ(relight.assign_card_pages(lite_test_instance(1), b, UINT32_MAX, 2, cards, 1), 2u);
+	relight.collect_current_page_sets(current);
+	REQUIRE_EQ(current.size(), 1u);
+	const RendererRD::NextGIRelight::PageSetInfo b_info = relight.get_page_set_info(current[0]);
+	CHECK_EQ(b_info.record_index, 0u);
+	CHECK_EQ(b_info.card_set, 1u);
+	CHECK_EQ(relight.get_page_set_count(), 2u);
+
+	// The same key with another card set (a reused instance address, a new material key) gets
+	// pages cut for the new cards instead of the old set's pages.
+	relight.begin_record_pass();
+	RendererRD::NextGIInstanceRecord a2;
+	a2.card_set = 5;
+	a2.tlas_index = 1;
+	const uint32_t a2_table = relight.assign_card_pages(lite_test_instance(0), a2, UINT32_MAX, 9, cards, 3);
+	CHECK_EQ(a2_table, 3u);
+	relight.collect_current_page_sets(current);
+	REQUIRE_EQ(current.size(), 1u);
+	const RendererRD::NextGIRelight::PageSetInfo a2_info = relight.get_page_set_info(current[0]);
+	CHECK_EQ(a2_info.card_set, 5u);
+	CHECK_EQ(a2_info.page_table, 3u);
+	CHECK_EQ(a2_info.radiance_rects.size(), 3u);
+	CHECK_EQ(relight.get_page_set_count(), 2u);
+}
+
+TEST_CASE("[NextGI][Lite] A record whose pages are evicted later in the same pass is marked evicted") {
+	RendererRD::NextGIRelight relight;
+	// One 4096x2048 Lite atlas holds 128 sets of four 128-texel cards.
+	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false, true));
+	const RendererRD::NextGICard cards[4] = { lite_test_card(128), lite_test_card(128), lite_test_card(128), lite_test_card(128) };
+	relight.begin_record_pass();
+	LocalVector<RendererRD::NextGIInstanceRecord> records;
+	for (uint32_t i = 0; i < 130; i++) {
+		RendererRD::NextGIInstanceRecord record;
+		record.card_set = i;
+		record.tlas_index = i;
+		record.page_table = relight.assign_card_pages(lite_test_instance(i), record, UINT32_MAX, i * 4, cards, 4);
+		CHECK((record.page_table & 0x80000000u) == 0);
+		records.push_back(record);
+	}
+	// The atlas is full after 128 sets, so sets 128 and 129 evicted the two least recently
+	// claimed sets, 0 and 1, whose records already hold page tables.
+	LocalVector<uint32_t> current;
+	relight.collect_current_page_sets(current);
+	CHECK_EQ(current.size(), 128u);
+	CHECK((records[0].page_table & 0x80000000u) == 0);
+	relight.finish_record_pass(records);
+	CHECK_EQ(records[0].page_table, 0x80000000u);
+	CHECK_EQ(records[1].page_table, 0x80000000u);
+	CHECK((records[2].page_table & 0x80000000u) == 0);
+	CHECK((records[129].page_table & 0x80000000u) == 0);
+	// The surviving records still name their own pages: the WRC reads them through page_table.
+	LocalVector<uint32_t> words;
+	relight.build_page_rect_words(words);
+	CHECK_EQ(words[records[2].page_table * 2 + 1], 128u | (128u << 16));
+	// Set 0 owned stable ids 0-3; their rects are now empty.
+	CHECK_EQ(words[0], 0u);
+	CHECK_EQ(words[1], 0u);
+}
+
+TEST_CASE("[NextGI][SDF] The SDF instance buffer grows geometrically") {
+	// NextGI Perf streams in about 70 instances per frame past the first 25000. Growing to the
+	// exact count reallocated the buffer every frame, and the SDF stream then freed the uniform
+	// set its old buffer had already freed (an "Attempted to free invalid ID" error per frame).
+	using Instances = NextGISDFInstances;
+	uint32_t capacity = 0;
+	uint32_t reallocations = 0;
+	for (uint32_t required = 1; required <= Instances::MAX_INSTANCES; required += 72) {
+		const uint32_t grown = Instances::grown_capacity(capacity, required);
+		CHECK(grown >= required);
+		if (grown != capacity) {
+			reallocations++;
+			capacity = grown;
+		}
+	}
+	CHECK(reallocations <= 4u);
+	CHECK_EQ(Instances::grown_capacity(0, 10), Instances::MAX_INSTANCES / 4);
+	CHECK_EQ(Instances::grown_capacity(Instances::MAX_INSTANCES / 4, Instances::MAX_INSTANCES / 4 + 1), Instances::MAX_INSTANCES / 2);
+	CHECK_EQ(Instances::grown_capacity(Instances::MAX_INSTANCES, Instances::MAX_INSTANCES), Instances::MAX_INSTANCES);
+	CHECK_EQ(Instances::grown_capacity(Instances::MAX_INSTANCES / 2 + 1, Instances::MAX_INSTANCES), Instances::MAX_INSTANCES);
+}
+
+TEST_CASE("[NextGI][Lite] Params reconstruct world positions and snap to the WRC grid") {
+	Projection projection;
+	projection.set_perspective(70.0, 16.0 / 9.0, 0.05, 400.0);
+	// Pitch, yaw and roll: no axis of the camera lines up with a world axis.
+	const Transform3D camera = Transform3D(Basis::from_euler(Vector3(-0.3, 0.7, 0.4)), Vector3(3.4, 1.7, -12.6));
+	const Size2i gi_size(1280, 720);
+	const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, true, true);
+
+	// The scene UBO draws depth with this projection (RenderSceneDataRD::update_ubo).
+	Projection correction;
+	correction.set_depth_correction(true);
+	const Projection drawn = correction * projection * Projection(camera.affine_inverse());
+	Projection inverse;
+	for (int column = 0; column < 4; column++) {
+		for (int row = 0; row < 4; row++) {
+			inverse.columns[column][row] = params.inv_view_proj[column * 4 + row];
+		}
+	}
+	const Vector3 forward = -camera.basis.get_column(2);
+	const Vector3 right = camera.basis.get_column(0);
+	const Vector3 up = camera.basis.get_column(1);
+	const Vector3 points[] = { camera.origin + forward * 2.0f, camera.origin + forward * 5.0f + right * 1.0f, camera.origin + forward * 20.0f - up * 3.0f + right * 4.0f };
+	for (const Vector3 &point : points) {
+		const Vector4 clip = drawn.xform(Vector4(point.x, point.y, point.z, 1.0f));
+		const Vector3 ndc = Vector3(clip.x, clip.y, clip.z) / clip.w;
+		// Reverse-Z: a visible point has depth in (0, 1], larger when closer.
+		CHECK(ndc.z > 0.0f);
+		CHECK(ndc.z <= 1.0f);
+		// nextgi_irradiance_field.glsl lite_unproject(): vec4(uv * 2 - 1, depth, 1) with uv = ndc * 0.5 + 0.5.
+		const Vector4 world_h = inverse.xform(Vector4(ndc.x, ndc.y, ndc.z, 1.0f));
+		const Vector3 world = Vector3(world_h.x, world_h.y, world_h.z) / world_h.w;
+		CHECK_MESSAGE(world.distance_to(point) < 1e-3f * MAX(1.0f, point.distance_to(camera.origin)), vformat("%s reconstructs as %s.", point, world));
+	}
+	// The top of the image (uv.y = 0) is the camera's up side: flip_y matches the GI buffers.
+	const Vector4 top = drawn.xform(Vector4(points[0].x + up.x, points[0].y + up.y, points[0].z + up.z, 1.0f));
+	CHECK(top.y / top.w < 0.0f);
+
+	for (uint32_t level = 0; level < RendererRD::NextGI::LITE_PROBE_LEVELS; level++) {
+		const float spacing = RendererRD::nextgi_wrc_spacing(level);
+		const Vector3 origin = RendererRD::nextgi_wrc_snap_origin(camera.origin, spacing);
+		CHECK(Vector3(params.level_origin[level][0], params.level_origin[level][1], params.level_origin[level][2]).is_equal_approx(origin));
+		CHECK(params.level_origin[level][3] == doctest::Approx(spacing));
+	}
+	CHECK(params.level_origin[1][3] == doctest::Approx(2.0f));
+	CHECK(params.rules[0] == doctest::Approx(RendererRD::NextGI::LITE_INSIDE_BACKFACE));
+	CHECK(params.rules[1] == doctest::Approx(RendererRD::NextGI::LITE_PUSH_SPACING));
+	CHECK(params.rules[2] == doctest::Approx(RendererRD::NextGI::LITE_SSR_ROUGHNESS));
+	CHECK(params.rules[3] == doctest::Approx(RendererRD::NextGI::LITE_MIP2_ROUGHNESS));
+	CHECK(params.camera[3] == doctest::Approx(1.0f));
+	CHECK(params.screen[2] == doctest::Approx(640.0f));
+
+	// The prepass writes view-space normals (the forward shader encodes modelview_normal, the
+	// world normal times the view matrix). The shader's nextgi_view_world_normal() multiplies
+	// them by the view_to_world columns, which must give the world normal back for any camera
+	// rotation.
+	const Basis view_to_world(Vector3(params.view_to_world[0], params.view_to_world[1], params.view_to_world[2]),
+			Vector3(params.view_to_world[4], params.view_to_world[5], params.view_to_world[6]),
+			Vector3(params.view_to_world[8], params.view_to_world[9], params.view_to_world[10]));
+	const Basis view_matrix = camera.affine_inverse().basis;
+	const Vector3 world_normals[] = { Vector3(0.0f, 1.0f, 0.0f), Vector3(1.0f, 0.0f, 0.0f), Vector3(0.3f, -0.5f, 0.81f).normalized() };
+	for (const Vector3 &world_normal : world_normals) {
+		const Vector3 view_normal = view_matrix.xform(world_normal);
+		// A view-space normal is not a world-space one for this camera.
+		CHECK(view_normal.dot(world_normal) < 0.99f);
+		CHECK_MESSAGE(view_to_world.xform(view_normal).is_equal_approx(world_normal), vformat("%s decodes as %s.", world_normal, view_to_world.xform(view_normal)));
+	}
+	const RendererRD::NextGIIrradianceField::Params software = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, false, false);
+	CHECK(software.camera[3] == doctest::Approx(0.0f));
+	CHECK(software.depth_info[3] == doctest::Approx(0.0f));
 }
 
 // GodotNext: nextgi_multiview (#58).

@@ -163,6 +163,8 @@ public:
 	RID get_visibility() const { return visibility; }
 	RID get_offsets() const { return offsets; }
 	RID get_mip2() const { return mip2; }
+	// GodotNext: ps_lumen_lite (#183). Lite's rough specular reads mip 4 and mip 2.
+	RID get_mip4() const { return mip4; }
 	RID get_sh_r() const { return sh_r; }
 	RID get_sh_g() const { return sh_g; }
 	RID get_sh_b() const { return sh_b; }
