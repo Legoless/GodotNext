@@ -6,10 +6,12 @@
 #   either room, whose inside voxel centers lie within the mesh SDF's eps of a face) at quality
 #   High, and
 #   res://tests/voxel_lighting/voxel_lighting_check.tscn (kitbash stores hits and covers some)
-#   at quality Auto.
-# The slot and thin-wall checks pin High: at Medium (Lumen Lite) the SRC relight allocates
-# radiance pages in a 4096 space while the Lite radiance atlas is 2048, so pages can sit outside
-# the atlas and read black for every consumer. That is a Lite defect, not a voxel lighting one.
+#   at quality High, where it must print VOXEL_LIGHTING_ASSERTED, and again at quality Medium
+#   (Lumen Lite), where it must print its coverage on a VOXEL_LIGHTING_LITE line for information.
+# Voxel lighting asserts at High, never at the device's auto pick (lead decision 2026-11-10,
+# plan §21.2.5): Lite's half-size surface cache keeps radiance pages for few of the kitbash's
+# 2,400 rocks, and voxel lighting resamples only paged instances. The Lite run still fails on a
+# missing counter, zero stored hits or a validation error.
 #
 # Usage:
 #   run_voxel_lighting_check.sh -- <godot> <godot arguments without a scene>
@@ -53,12 +55,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Scene, quality (1 Medium, 2 High) and the line the run must print ("-" for none).
+runs=(
+	"res://tests/voxel_lighting/voxel_slot_check.tscn 2 -"
+	"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 -"
+	"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 VOXEL_LIGHTING_ASSERTED"
+	"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 VOXEL_LIGHTING_LITE"
+)
+
 failed=0
-for scene in res://tests/voxel_lighting/voxel_slot_check.tscn res://tests/voxel_lighting/voxel_thin_wall_check.tscn res://tests/voxel_lighting/voxel_lighting_check.tscn; do
-	quality=0
-	if [[ "$scene" == *voxel_slot_check* || "$scene" == *voxel_thin_wall_check* ]]; then
-		quality=2
-	fi
+for run in "${runs[@]}"; do
+	read -r scene quality expected <<<"$run"
 	cat >"$override" <<CFG
 [rendering]
 
@@ -73,8 +80,12 @@ CFG
 	errors=$(grep -c 'ERROR:' "$log" || true)
 	metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
 	metal_shader=$(grep -c 'Error detected in' "$log" || true)
-	echo "GODOTNEXT_VOXEL_LIGHTING_LOG {\"scene\":\"$scene\",\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
-	if [[ $status -ne 0 || $errors -ne 0 || $metal_usage -ne 0 || $metal_shader -ne 0 ]]; then
+	expected_found=true
+	if [[ "$expected" != "-" ]] && ! grep -q "^$expected " "$log"; then
+		expected_found=false
+	fi
+	echo "GODOTNEXT_VOXEL_LIGHTING_LOG {\"scene\":\"$scene\",\"quality\":$quality,\"expected_line\":\"$expected\",\"expected_found\":$expected_found,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
+	if [[ $status -ne 0 || $errors -ne 0 || $metal_usage -ne 0 || $metal_shader -ne 0 || $expected_found != true ]]; then
 		failed=1
 	fi
 done
