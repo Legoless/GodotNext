@@ -70,7 +70,7 @@ struct NextGIWRCParamsGPU {
 	float volume[4] = {}; // x width, y height, z near, w far.
 	// GodotNext: nextgi_view_math. nextgi_wrc_update.glsl declares this vec4; before it was
 	// C++-only padding and the shader read previous_view_proj and history 16 bytes off. The
-	// forward shader's NextGIWRCForward mirror reads only up to volume.
+	// forward shader's NextGIWRCForward copy declares it too.
 	float depth_coefficients[4] = {};
 	float previous_view_proj[16] = {};
 	float history[4] = {}; // blend, Lite, valid, sky lighting enabled.

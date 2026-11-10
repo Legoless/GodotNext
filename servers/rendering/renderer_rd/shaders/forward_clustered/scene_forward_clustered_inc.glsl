@@ -565,9 +565,9 @@ layout(set = 1, binding = 42, std430) restrict readonly buffer NextGIWRCForward 
 	uint pad2;
 	mat4 inv_view_proj;
 	vec4 volume; // x width, y height, z near, w far.
-	// GodotNext: nextgi_view_math. Read here only up to volume. The real layout
-	// (nextgi_wrc_update.glsl, NextGIWRCParamsGPU) has vec4 depth_coefficients
-	// next, so the two fields below are 16 bytes early: do not read them as is.
+	// GodotNext: nextgi_view_math. The same layout as NextGIWRCParams in
+	// nextgi_wrc_update.glsl and NextGIWRCParamsGPU (a doctest compares them).
+	vec4 depth_coefficients;
 	mat4 previous_view_proj;
 	vec4 history;
 }

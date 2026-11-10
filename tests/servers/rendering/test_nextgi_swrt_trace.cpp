@@ -52,6 +52,7 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_sdf.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_sdf.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #ifdef MODULE_GLSLANG_ENABLED
 #include "servers/rendering/rendering_device_commons.h"
 
@@ -320,6 +321,61 @@ TEST_CASE("[NextGI][View] The WRC update shader reads its params where the rende
 	// The froxels turn linear depth into the depth texture's value and back with them.
 	CHECK(source.contains("nextgi_view_depth_from_linear(params.depth_coefficients,"));
 	CHECK(source.contains("nextgi_view_linear_depth(params.depth_coefficients,"));
+}
+
+TEST_CASE("[NextGI][View] The forward pass's copy of the WRC params matches the update shader") {
+	// The forward pass binds the WRC params buffer as NextGIWRCForward (binding 42). Its copy
+	// once lacked depth_coefficients, so previous_view_proj and history sat 16 bytes early.
+	String error;
+	const String update_source = RendererRD::NextGIWRC::build_update_shader_source();
+	REQUIRE_FALSE(update_source.is_empty());
+	const Vector<uint8_t> update_spirv = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_COMPUTE, update_source, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3, &error);
+	REQUIRE_MESSAGE(!update_spirv.is_empty(), ("glslang failed to compile the WRC update shader:\n" + error));
+	const HashMap<String, uint32_t> update_offsets = _spirv_struct_offsets(update_spirv, "previous_view_proj");
+	REQUIRE_EQ(update_offsets.size(), 13u);
+
+	// The block as the forward shader declares it, cut out of its expanded source and compiled
+	// on its own: the forward shader needs a material to compile.
+	SceneForwardClusteredShaderRD forward_shader;
+	Vector<String> defines;
+	defines.push_back("");
+	forward_shader.initialize(defines);
+	const RID version = forward_shader.version_create(false);
+	REQUIRE(version.is_valid());
+	const Vector<String> stages = forward_shader.version_build_variant_stage_sources(version, 0);
+	forward_shader.version_free(version);
+	String block;
+	for (const String &stage : stages) {
+		const int name = stage.find("buffer NextGIWRCForward {");
+		if (name < 0) {
+			continue;
+		}
+		const int begin = stage.rfind("layout(", name);
+		const int end = stage.find("nextgi_wrc_fwd;", name);
+		REQUIRE(begin >= 0);
+		REQUIRE(end > name);
+		block = stage.substr(begin, end + int(strlen("nextgi_wrc_fwd;")) - begin);
+		break;
+	}
+	REQUIRE_FALSE(block.is_empty());
+	const String stub = "#version 450\nlayout(local_size_x = 1) in;\n" + block.replace_first("set = 1,", "set = 0,") + "\nvoid main() {\n\tif (nextgi_wrc_fwd.history.x < 0.0) {\n\t\treturn;\n\t}\n}\n";
+	const Vector<uint8_t> forward_spirv = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_COMPUTE, stub, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3, &error);
+	REQUIRE_MESSAGE(!forward_spirv.is_empty(), ("glslang failed to compile the forward WRC params block:\n" + error));
+	const HashMap<String, uint32_t> forward_offsets = _spirv_struct_offsets(forward_spirv, "volume");
+
+	// Every member the forward copy declares sits where the update shader has it, and the copy
+	// runs through history, the last member.
+	REQUIRE_FALSE(forward_offsets.is_empty());
+	for (const KeyValue<String, uint32_t> &member : forward_offsets) {
+		const uint32_t *update_offset = update_offsets.getptr(member.key);
+		CHECK_MESSAGE(update_offset != nullptr, ("NextGIWRCForward declares " + member.key + ", which NextGIWRCParams does not have."));
+		if (update_offset != nullptr) {
+			CHECK_MESSAGE(member.value == *update_offset, vformat("NextGIWRCForward.%s is at offset %d, NextGIWRCParams has it at %d.", member.key, member.value, *update_offset));
+		}
+	}
+	CHECK_EQ(forward_offsets.size(), update_offsets.size());
+	const uint32_t *history = forward_offsets.getptr("history");
+	CHECK_EQ(history != nullptr ? *history : UINT32_MAX, 240u);
 }
 #endif
 
