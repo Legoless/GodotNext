@@ -1,10 +1,19 @@
 # UE comparison settings map
 
-This is the settings record for every UE comparison (`pq-ue-settings-map`, #228). The comparison target stays UE 5.9 final (§25.4). Public UE 5.9 documentation and a UE 5.9 install were not available on 2026-11-08. The values below are the public UE 5.8 basis that §23 and §25 say stands until the §25.3 re-check.
+This is the settings record for every UE comparison (`pq-ue-settings-map`, #228). The comparison target stays UE 5.9 final (§25.4).
 
-No `Engine/Source`, `Engine/Shaders`, plugin `Source`, or `Engine/Config/BaseScalability.ini` was read. No editor UI was observed, and no packaged Test build was run. A setting below is either a value printed on a public Epic page or an explicit report-only reason. Where a page names a `stat gpu` pass and does not name a CSV column, the pass is the confirmed stat and #229 copies the CSV header the Test build actually prints.
+**Status: interim UE 5.8 record. It does not complete #228.** Public UE 5.9 documentation and a UE 5.9 install were not available on 2026-11-08. The values below are the public UE 5.8 basis that §23 and §25 say stands until the §25.3 re-check. Two parts are outstanding:
 
-Scalability integers on the [5.8 console-variable reference](https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-console-variables-reference) use one scale for the quality groups below: 0 low, 1 medium, 2 high, 3 epic, 4 cinematic. That scale matches the [Lumen performance guide](https://dev.epicgames.com/documentation/unreal-engine/lumen-performance-guide-for-unreal-engine), which prints High as `=2` and Medium as `1`. Low disables Lumen. Cinematic targets Movie Render Queue. The guide's default per-preset tables live in `BaseScalability.ini`, which this record does not read.
+- **The UE 5.9 pass (#228, open).** Every setting below is re-checked against public UE 5.9 documentation or an observed UE 5.9 editor setting. On 2026-11-09 Epic's documentation site serves UE 5.9 pages: the console-variable reference is titled UE 5.9, and the UE 5.9 Preview release notes are published. That pass can start on the Preview (§25.4).
+- **The stat columns (#229).** No packaged Test build has run. The "Stat or CSV" column names the UE stat group, and the `stat gpu` pass where a public page prints one. `pq-ue-bench-harness` (#229) names the exact GPU-stat or CSV-profiler column of each stat group from a packaged Test build and writes it into this record. #229 also records which Experimental and Beta features run in that Test build, and the DLSS plugin's mode and preset from its editor UI.
+
+A stat group whose column is not named yet keeps the UE bar. If the Test build reports no column for a stat group, the affected lines follow §23.3. A line that §23.6 lists with the UE bar becomes report-only only through a plan revision that updates §23.3, §23.6 and the gate issues together (plan v3.6.1).
+
+No `Engine/Source`, `Engine/Shaders`, plugin `Source`, or `Engine/Config/BaseScalability.ini` was read. No editor UI was observed. A setting below is either a value printed on a public Epic page or an explicit report-only reason.
+
+Since 2026-11-09 an Epic documentation link without `?application_version=5.8` opens the UE 5.9 page. The values in this record were read on the 5.8 pages.
+
+Scalability integers on the [5.8 console-variable reference](https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-console-variables-reference?application_version=5.8) use one scale for the quality groups below: 0 low, 1 medium, 2 high, 3 epic, 4 cinematic. That scale matches the [Lumen performance guide](https://dev.epicgames.com/documentation/unreal-engine/lumen-performance-guide-for-unreal-engine), which prints High as `=2` and Medium as `1`. Low disables Lumen. Cinematic targets Movie Render Queue. The guide's default per-preset tables live in `BaseScalability.ini`, which this record does not read.
 
 ## Platform and frame
 
@@ -28,7 +37,7 @@ The Lumen total, where a row names it, is the sum of the three `stat gpu` passes
 |---|---|---|---|
 | `quality = high`, HWRT | `sg.GlobalIlluminationQuality=2` and `sg.ReflectionQuality=2`. HWRT project settings enabled, as above. | Lumen total, as defined above. | G3-1 High; G5-1 NextGI sub-line; the parent totals of G3-4 and G3-5 |
 | `quality = epic`, HWRT | `sg.GlobalIlluminationQuality=3` and `sg.ReflectionQuality=3` (the published epic integer). Same HWRT project settings. | Lumen total. | G3-1 Epic |
-| Diffuse path at High | Same settings as G3-1 High. | `stat gpu` pass **Lumen Screen Probe Gather**. The guide defines it as diffuse GI, rough reflections and translucency GI, and names **Lumen Reflections** as the separate pass. The CSV header is not named. #229 records it. G1-3 and G2-4 use this pass. | G1-3, G2-4 |
+| Diffuse path at High (lines 1a + 2 + 3 + 4 + 5 + 7) | Same settings as G3-1 High. | Lumen GI alone, if UE reports it apart from Lumen reflections over the same work as the diffuse path. The public 5.8 pages name no such stat. **Lumen Screen Probe Gather** alone is not like-for-like: the guide says it evaluates "diffuse global illumination and rough reflections, and translucency global illumination". Surface-cache lighting, which is the diffuse path's line 2, is the separate **Lumen Scene Lighting** pass and also serves reflections. The TLAS rebuild in line 1a is a hardware ray tracing cost, not a Lumen pass. #229 checks the packaged Test build's columns for a stat that covers the same work. | G1-3, G2-4. If no such stat exists, both are report-only and G3-1 High carries the bar (plan §23.5). |
 | `quality = medium`, `medium_gather = irradiance_field` (default), HWRT and SWRT | Medium GI: `sg.GlobalIlluminationQuality=1` with `r.Lumen.FinalGatherMethod=0` (Irradiance Field Gather). Medium reflections: `sg.ReflectionQuality=1`, which disables Lumen reflections and uses SSR on smooth surfaces plus rough specular from Lumen GI. HWRT project settings follow the tier: on for the HWRT Lite row, and `r.Lumen.HardwareRayTracing=0` for the SWRT row. Lumen Lite is Beta in the [5.8 release notes](https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-5-8-release-notes). | Lumen total. | GS-7 Lite total on HWRT; GS-2 Medium (Lite) on SWRT |
 | `medium_gather = screen_probes` | No equivalent. UE 5.8 Medium is Lumen Lite. | No timing stat. | G3-1 Medium: report-only |
 | `TIER_SOFTWARE`, forced (`hardware_ray_tracing = off`) | Software ray tracing, **Global Tracing** (the Global Distance Field). `r.Lumen.HardwareRayTracing=0`. `r.Lumen.TraceMeshSDFs` stays at its published default 0. | Lumen total. | GS-2 at High, Epic and Medium (Lite); GS-4 (M5 Max); GS-9's parent total |
@@ -49,24 +58,24 @@ The Lumen total, where a row names it, is the sum of the three `stat gpu` passes
 
 ## NextGeo (Nanite)
 
-Nanite is enabled per mesh with **Enable Nanite Support** ([Nanite overview](https://dev.epicgames.com/documentation/unreal-engine/nanite-virtualized-geometry-in-unreal-engine)). Public pages name **Raster Bins** and **Shading Bins** as visualization modes, not as GPU timings. No page read names a GPU stat or CSV column that is only Nanite raster and cull, only Nanite shading, or a Nanite total.
+Nanite is enabled per mesh with **Enable Nanite Support** ([Nanite overview](https://dev.epicgames.com/documentation/unreal-engine/nanite-virtualized-geometry-in-unreal-engine)). Public pages name **Raster Bins** and **Shading Bins** as visualization modes, not as GPU timings. No page read names a GPU stat or CSV column that is only Nanite raster and cull, only Nanite shading, or a Nanite total. These lines keep the UE bar (plan §23.3, §23.6): the stat groups below stand, and #229 names their columns from the packaged Test build.
 
 | GodotNext | UE 5.8 setting | Stat or CSV | Gate lines |
 |---|---|---|---|
-| `nextgeo/raster_mode = hybrid` (cull, Hi-Z, visibility) | Nanite on for every Nanite mesh. | Report-only. No raster-and-cull column is named. G5-1's whole frame carries the parent bar. | G5-1 cull sub-line; GN-2 Dense City, M5 Max included |
-| Stage A+B resolve with compute shading bins | Nanite material shading bins, the default shading path, as §23.5 already states. | Report-only. No shading column is named. | G5-1 resolve sub-line; GN-11 |
+| `nextgeo/raster_mode = hybrid` (cull, Hi-Z, visibility) | Nanite on for every Nanite mesh. | Nanite raster and cull. No column is named on the pages read. #229 names it. | G5-1 cull sub-line; GN-2 Dense City, M5 Max included |
+| Stage A+B resolve with compute shading bins | Nanite material shading bins, the default shading path, as §23.5 already states. | Nanite shading. No column is named on the pages read. #229 names it. | G5-1 resolve sub-line; GN-11 |
 | Draw identity (G4-5) | No equivalent. Nanite has no separate step. | No timing stat. | G4-5: report-only. The NextGeo cull total carries the bar. |
-| Mesh-shader HW raster (GN-10) | Nanite hardware raster with mesh shaders where the RHI supports it. The 5.8 default is still unverified. No page read states it. | The raster-and-cull column is report-only, as above. | Settings match. GN-10's relative lines keep their form. |
-| Programmable raster, WPO, pixel programmable distance | As §23.5 already states: programmable raster is automatic; Evaluate WPO on; Max WPO Displacement; WPO disable distance 0; Pixel Programmable Distance default unverified. This pass did not add a cvar. | Nanite total is report-only, as above. | GN-4 overhead: report-only. Foliage Field's total carries the bar. |
-| Foliage, assemblies, voxels, wind, Preserve Area | As §23.5 already states: ISM/HISM per-instance culling; Nanite Assemblies, Nanite Voxels and foliage wind are Experimental since 5.7, on where the scene uses them; Preserve Area. | Nanite total is report-only. | GN-7 Foliage Field total |
-| Skinned NextGeo, opted in per asset | Skinned Nanite, opted in per asset. The 5.9 label stays for the §25.3 re-check. | Nanite total is report-only. | GN-5 Character Crowd total. N4 stays report-only. |
-| Tessellation and displacement (Experimental) | `r.Nanite.AllowTessellation=1` (read-only, set in config) and `r.Nanite.Tessellation=1` (runtime), plus the material checkbox **Enable Tessellation** and a Displacement input ([working with Nanite](https://dev.epicgames.com/documentation/unreal-engine/working-with-naniteenabled-content)). The console-variable reference publishes both cvars at default 0. Experimental. | Nanite total is report-only. | GN-6 Displacement Cliff total. N5 stays report-only. |
-| `SplineMeshInstance3D` | Spline meshes on Nanite. The product label stays UNVERIFIED, as §23.5 states. The console-variable reference publishes `r.Nanite.AllowSplineMeshes` default 1. That default is not a label. | Nanite total is report-only. | N8: report-only |
+| Mesh-shader HW raster (GN-10) | Nanite hardware raster with mesh shaders where the RHI supports it. The [5.8 console-variable reference](https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-console-variables-reference?application_version=5.8) publishes `r.Nanite.MeshShaderRasterization` with default 1: "If available, use mesh shaders for hardware rasterization." The comparison leaves it at that default. | Nanite raster and cull, as above. | Settings match. GN-10's relative lines keep their form. |
+| Programmable raster, WPO, pixel programmable distance | As §23.5 already states: programmable raster is automatic; Evaluate WPO on; Max WPO Displacement; WPO disable distance 0; Pixel Programmable Distance default unverified. This pass did not add a cvar. | Nanite total. No column is named on the pages read. #229 names it. | GN-4 overhead: report-only. Foliage Field's total carries the bar. |
+| Foliage, assemblies, voxels, wind, Preserve Area | As §23.5 already states: ISM/HISM per-instance culling; Nanite Assemblies, Nanite Voxels and foliage wind are Experimental since 5.7, on where the scene uses them; Preserve Area. | Nanite total, as above. | GN-7 Foliage Field total |
+| Skinned NextGeo, opted in per asset | Skinned Nanite, opted in per asset. The 5.9 label stays for the §25.3 re-check. | Nanite total, as above. | GN-5 Character Crowd total. N4 stays report-only. |
+| Tessellation and displacement (Experimental) | `r.Nanite.AllowTessellation=1` (read-only, set in config) and `r.Nanite.Tessellation=1` (runtime), plus the material checkbox **Enable Tessellation** and a Displacement input ([working with Nanite](https://dev.epicgames.com/documentation/unreal-engine/working-with-naniteenabled-content)). The console-variable reference publishes both cvars at default 0. Experimental. | Nanite total, as above. | GN-6 Displacement Cliff total. N5 stays report-only. |
+| `SplineMeshInstance3D` | Spline meshes on Nanite. The product label stays UNVERIFIED, as §23.5 states. The console-variable reference publishes `r.Nanite.AllowSplineMeshes` default 1. That default is not a label. | Nanite total, as above. | N8: report-only |
 | `nextgeo/ray_tracing_mode = fallback` / `native` | Nanite ray tracing mode 0 (fallback mesh) / mode 1 (native, Experimental), as §23.5 already states. | No timing stat. | Fallback in every NextGI run. GN-9's native rebuild stays report-only. |
-| Nanite tier on the M5 Max | Nanite on Mac, Beta on M2+, as §23.5 already states. | The raster-and-cull column is report-only. | GN-2's M5 Max line |
+| Nanite tier on the M5 Max | Nanite on Mac, Beta on M2+, as §23.5 already states. | Nanite raster and cull, as above. | GN-2's M5 Max line |
 | Dense City sweep (10M / 100M / 1B) | The same sweep in the port. | Whole-frame GPU time, same row as the frame table. | G5-9: report-only, with the UE ratio |
 
-Whether an Experimental or Beta Nanite feature runs in a packaged Test build was not observed. #229 records that.
+Whether an Experimental or Beta Nanite feature runs in a packaged Test build was not observed. #229 records that (plan §23.3).
 
 ## Shadows, lights and fog
 
@@ -79,8 +88,8 @@ Whether an Experimental or Beta Nanite feature runs in a packaged Test build was
 | `shadow_method = atlas` | No equivalent. The comparison uses VSM. | No timing stat. | G5-1's atlas-path run: report-only |
 | Distance-field far shadows | Distance-field shadows, as §23.5 already states. | No timing stat. | GV-10 (quality only) |
 | MegaLights: project opt-in, per light, directional lights off | Project Settings, Rendering, Direct Lighting ([MegaLights, 5.8](https://dev.epicgames.com/documentation/unreal-engine/megalights-in-unreal-engine?application_version=5.8)). Off until enabled. The page recommends Support Hardware Ray Tracing. Once on, local lights use MegaLights; **Allow MegaLights** is per light. `r.MegaLights.Allow 0` disables it per scalability level or device profile. Directional lights stay off unless `r.MegaLights.DirectionalLights 1`. Shadow method is Ray Tracing (default) or Virtual Shadow Maps. Production on Windows in the 5.8 release notes. | The stat group name stays MegaLights. No CSV column is named on the page read. #229 records the header. | GM-2 total at 1,024 lights |
-| MegaLights on the M5 Max | MegaLights on Apple M2+, Experimental, as §23.5 already states. Recorded only. | Same report-only column reason. | Recorded only, with the UE ratio |
-| `Light3D.shadow_method = RAY_TRACED`, off at project level | The `r.RayTracing.Shadows.*` family exists on the console-variable reference. The project default is not stated on the pages read. "Off in templates" is not confirmed. GodotNext stays off at project level. | Report-only. No ray-traced-shadow column is named. #229 records the header. The per-light slope stays report-only. | GM-3 at sun + 8 local lights and at 64 lights |
+| MegaLights on the M5 Max | MegaLights on Apple M2+, Experimental, as §23.5 already states. Recorded only. | MegaLights, as above. #229 names the column. | Recorded only, with the UE ratio |
+| `Light3D.shadow_method = RAY_TRACED`, off at project level | Per-light ray-traced shadows ("Use Project Setting"). The [5.8 console-variable reference](https://dev.epicgames.com/documentation/unreal-engine/unreal-engine-console-variables-reference?application_version=5.8) publishes `r.RayTracing.Shadows` with default 0: "0: use traditional rasterized shadow map (default) 1: use ray tracing shadows". GodotNext's off-at-project-level default matches it. Which project setting writes that cvar, and "off in templates", are not stated on the pages read. | Ray-traced shadows. No column is named on the pages read. #229 names it. The per-light slope stays report-only. | GM-3 at sun + 8 local lights and at 64 lights |
 | Light functions, IES, barn doors, contact shadows | The same production features, as §23.5 already states. No extra cvar was confirmed. | No timing stat. | Settings match only. M-9 stays report-only. |
 | Volumetric fog fed by the NextGI ambient volume | Exponential Height Fog, with its Volumetric Fog section ([volumetric fog](https://dev.epicgames.com/documentation/unreal-engine/volumetric-fog-in-unreal-engine)). The Lumen performance guide includes volumetric fog in Lumen's budget. No further cvar was confirmed. | No timing stat. | Settings match only. No fog-only line has a port. |
 
@@ -92,8 +101,8 @@ Whether an Experimental or Beta Nanite feature runs in a packaged Test build was
 | TSR presets Low through Cinematic | `sg.AntiAliasingQuality` 0–4. History screen percentage is 200 at Epic and Cinematic and 100 below, on the TSR console-variable description. | The stat group name stays TSR. No CSV column is named on the pages read. #229 records the header. | GT-4 T1 and T2 (both cards), T4 (M5 Max) |
 | TSR async compute on | `r.TSR.AsyncCompute 2` where the RHI has async compute. The TSR page describes 2 as the default: passes that are independent, or that depend only on depth and velocity, run on async compute. | Same TSR column reason. | Settings match. GT-7 keeps its form. |
 | Dynamic resolution (opt-in) | Dynamic resolution on PC, new in 5.8, as §23.5 already states. No extra cvar was confirmed in this pass. | No timing stat. | GT-6 keeps its form. T7 stays report-only. |
-| DLSS SR (presets K, M and L) and DLAA | Report-only. The Epic pages read do not name the plugin's console variables. NVIDIA's UE plugin source was not opened (§19). #229 records the mode and preset from the installed plugin's editor UI on the RTX machine. | Report-only. No DLSS pass column is named on the pages read. | GU-5 U1, U1M, U1A and U1Q |
-| DLSS Ray Reconstruction at Epic | The plugin's Ray Reconstruction with Lumen at Epic, as §23.5 already states. Same report-only reason for the plugin settings. | Report-only. No DLSS-RR column is named. U3 stays report-only. | GU+-4 U2 |
+| DLSS SR (presets K, M and L) and DLAA | NVIDIA's UE DLSS plugin at the same mode and preset. The Epic pages read do not name the plugin's settings. NVIDIA's UE plugin source is a forbidden input and was not opened (§19, §23.7). #229 records the mode and preset from the installed plugin's editor UI on the RTX machine. | DLSS pass. No column is named on the pages read. #229 names it. | GU-5 U1, U1M, U1A and U1Q |
+| DLSS Ray Reconstruction at Epic | The plugin's Ray Reconstruction with Lumen at Epic, as §23.5 already states. #229 records the plugin's setting from its editor UI, as for DLSS SR. | DLSS-RR pass. No column is named on the pages read. #229 names it. U3 stays report-only. | GU+-4 U2 |
 | DLSS FG 2x, MFG 4x, Dynamic MFG | The plugin's Frame Generation, MFG and Dynamic MFG, as §23.5 already states (DX12, Streamline, off). The plugin API was not confirmed from an Epic page, and the plugin source was not read. | Not a GPU-stat column. F1 uses the Nsight Systems method. Displayed frame time uses PresentMon. | F1; GU+-5; GU+-9 (RTX 5090 only) |
 | Reflex Off, On, On + Boost | The plugin's Reflex, as §23.5 already states. Same report-only reason for the plugin API. | PC latency, by the PresentMon method. | GU+-5 |
 
@@ -103,12 +112,17 @@ These sentences elsewhere in the plan pointed at this record. The public pages r
 
 - Mac HWRT default. Not stated. GodotNext's `hardware_ray_tracing.macos = off` is unchanged.
 - "Hit lighting and MegaLights use RT pipelines." Hit lighting evaluates lighting at the hit, and MegaLights recommends Support Hardware Ray Tracing. Neither page says both use RT pipelines.
-- Nanite mesh-shader hardware-raster default. Still unverified.
 - Streamline and DLSS RHI list, and the FG plugin API. Not confirmed from an Epic page. The plugin source was not read. §23.5 still says FG is DX12 and Streamline, which is the plan's existing text.
-- Ray-traced shadows project default, including "off in templates." Not stated.
+- Which ray-traced-shadow project setting writes `r.RayTracing.Shadows`, and "off in templates." Not stated.
 - Per-preset SMRT counts other than Epic's 8 rays, and per-preset VSM page-pool sizes. Not on the public page. `BaseScalability.ini` was not read.
 - A 512-page VSM invalidation budget. Not named.
-- CSV column headers for the frame, the render thread, the Lumen passes, Nanite, MegaLights, TSR, the path tracer, ray-traced shadows and DLSS. #229's dry run on one ported scene records the headers a packaged Test build prints.
+- CSV column headers for the frame, the render thread, the Lumen passes, Nanite, MegaLights, TSR, the path tracer, ray-traced shadows and DLSS. #229 names them from a packaged Test build. Each of these stat groups keeps the UE bar until then.
+- A Lumen GI stat apart from Lumen reflections that covers the diffuse path's work (G1-3, G2-4). Not named on the pages read. #229 checks the Test build.
+
+Answered on 2026-11-09 from the console-variable reference this record already cites (the 5.8 page; on 2026-11-09 the page titled UE 5.9 prints the same two rows):
+
+- Nanite mesh-shader hardware raster: `r.Nanite.MeshShaderRasterization` default 1 (the GN-10 row).
+- Ray-traced shadows: `r.RayTracing.Shadows` default 0, rasterized shadow maps (the GM-3 row).
 
 ## Experimental and Beta in a packaged Test build
 
@@ -121,3 +135,7 @@ This pass did not package a Test build, so it does not say which of these run th
 - MegaLights on Apple M2+: Experimental, as §23.5 already states. MegaLights on Windows is Production in the 5.8 release notes.
 - Native Nanite ray tracing (mode 1): Experimental, as §23.5 already states.
 - Hit lighting for GI: label UNVERIFIED. GL-4 stays report-only.
+
+## Corrections
+
+- 2026-11-09 (plan v3.6.1). The first version of this record (55b95936) made the Nanite raster-and-cull, shading and total rows, the ray-traced-shadow total and the DLSS SR, DLAA and RR rows report-only because no public page names their column. §23.3, §23.6 and the gate issues keep those lines on the UE bar, and no lead decision changed that, so the rows name their stat groups again. The diffuse-path row had mapped G1-3 and G2-4 to Lumen Screen Probe Gather alone; it now carries the plan's condition and fallback again. The mesh-shader raster and ray-traced-shadow cvar defaults come from the console-variable reference this record already cited. The status note at the top replaces the earlier wording, which read as a finished record.

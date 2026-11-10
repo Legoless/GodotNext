@@ -43,3 +43,8 @@ Don't use the Claude in Chrome browser tools for this.
 - **DLSS:** DLSS-enabled builds run only on the owned NVIDIA cards (§19). The NVIDIA SDK never enters the repository.
 - **Timing:** don't run timing or quality measurements during the build. They belong to PQ (§22).
 - **Background runs on the M5 Max:** set `GODOTNEXT_BACKGROUND=1` for every rendered (non-headless) Godot run, so it never takes the desktop's focus (`docs/godotnext/fleet.md`).
+- **The UE install is a clean-room boundary (§19, §23.7).** Find it without walking it:
+  - Locate the version folders one level deep only: `ls -d "<Epic Games folder>"/UE_*`, where the folder is the install location the Epic Games Launcher shows. On Windows, `Get-Item "<Epic Games folder>\UE_*"`.
+  - Then name exact paths inside one version folder: `Engine/Binaries/Mac/UnrealEditor.app` and `Engine/Build/BatchFiles/RunUAT.sh` on macOS, `Engine\Binaries\Win64\UnrealEditor.exe` and `Engine\Build\BatchFiles\RunUAT.bat` on Windows.
+  - Never list, walk, `find`, `grep` or `tree` the install root or a version folder recursively, and never point an agent's recursive directory-listing tool at them. Never open, list or search `Engine/Source`, `Engine/Shaders` or any plugin `Source` folder, including NVIDIA's DLSS plugin.
+  - Read UE settings from Epic's public documentation and the editor's own settings UI only, not from the install's `.ini` files.
