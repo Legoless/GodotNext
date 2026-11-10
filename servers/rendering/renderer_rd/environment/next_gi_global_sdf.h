@@ -106,13 +106,40 @@ public:
 	// GodotNext: ps_swrt_trace (#186). The cull box of a brick: the brick grown by one
 	// voxel. cull_instances_for_brick() keeps the instances whose world bounds overlap it.
 	static AABB brick_cull_box(uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick);
-	// Every instance a brick does not list lies outside its cull box, so the distance from
-	// a point of the box to the box's exterior bounds their distance. The composite caps
-	// each voxel with it (nextgi_global_sdf.glsl): the minimum over the listed instances
-	// alone overestimates next to an unlisted one, and rays stepped through it.
-	static float brick_cap(const AABB &p_cull_box, const Vector3 &p_world);
+	// Every instance a brick does not list lies outside its cull box, at least
+	// brick_clearance() from it. A segment from a point of the box to such an instance
+	// leaves the box first, so the point's distance to the box's exterior plus the clearance
+	// bounds their distance. The composite caps each voxel with it (nextgi_global_sdf.glsl):
+	// the minimum over the listed instances alone overestimates next to an unlisted one,
+	// and rays stepped through it. Without the clearance the cap held every voxel to
+	// 1.5-4.5 voxels, and rays near large surfaces ran out of trace steps.
+	static float brick_cap(const AABB &p_cull_box, float p_clearance, const Vector3 &p_world);
+	// How far each level's brick_clearance() searches: CLEARANCE_BRICKS bricks around the
+	// brick, less the cull box's own voxel. Dirty volumes reach this much farther
+	// (NextGIGlobalSDFClipmaps::dirty_margin()), so a moved instance updates every brick
+	// whose clearance it shrinks.
+	static constexpr uint32_t CLEARANCE_BRICKS = 1;
+	static float clearance_radius(uint32_t p_level);
+	// What brick_clearance() searches instead of every instance, for one level and origin:
+	// the bins of bin_instances() for the same instances, each instance's world bounds, and
+	// the instances that reach out of the level within clearance_radius() of it (the bins
+	// hold only their parts inside the level).
+	struct ClearanceIndex {
+		const LocalVector<uint32_t> *offsets = nullptr;
+		const LocalVector<uint32_t> *indices = nullptr;
+		LocalVector<AABB> bounds;
+		LocalVector<uint32_t> outside;
+	};
+	static void build_clearance_index(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const LocalVector<uint32_t> &p_offsets, const LocalVector<uint32_t> &p_indices, ClearanceIndex &r_index);
+	// The world gap from the brick's cull box to the nearest instance it does not list, at
+	// most clearance_radius(). It depends on the brick's place in the world, not in the
+	// level, so a brick a scroll keeps (shifted, never rebuilt) stays exact. With p_index
+	// only the bins of the bricks within CLEARANCE_BRICKS and the instances that reach out
+	// of the level are searched; every instance nearer than the limit is among them, so
+	// the result is the same.
+	static float brick_clearance(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, const ClearanceIndex *p_index = nullptr);
 	// One composite voxel on the CPU: the culled instances' minimum, capped by brick_cap().
-	static float composite_distance(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, const AABB &p_cull_box, const Vector3 &p_world);
+	static float composite_distance(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, const AABB &p_cull_box, float p_clearance, const Vector3 &p_world);
 	// GodotNext: ps_swrt_trace (#186). The same test for every brick of a level at
 	// once: r_offsets has BRICKS_PER_LEVEL + 1 entries and brick b's instances are
 	// r_indices[r_offsets[b] .. r_offsets[b + 1]), in instance order. A full level
@@ -124,7 +151,8 @@ public:
 	// dynamic bricks only dynamic ones and composite over static at lookup;
 	// a voxel whose winning sample is two-sided sets its coverage bit.
 	// GodotNext: ps_swrt_trace (#186). The static distance carries the brick_cap() of the
-	// voxel center, so min(static, dynamic) never exceeds it.
+	// voxel center (with the brick's brick_clearance()), so min(static, dynamic) never
+	// exceeds it.
 	struct BrickSplit {
 		LocalVector<float> static_distance;
 		LocalVector<float> dynamic_distance;

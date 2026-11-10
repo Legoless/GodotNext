@@ -35,7 +35,7 @@ struct BrickWork {
 	uint slot;
 	uint instance_offset;
 	uint instance_count;
-	uint pad;
+	float clearance; // NextGIGlobalSDF::brick_clearance().
 };
 
 layout(set = 0, binding = 0, std430) readonly buffer Instances {
@@ -184,10 +184,11 @@ void main() {
 	}
 
 	// GodotNext: ps_swrt_trace (#186). NextGIGlobalSDF::brick_cap(): every instance this brick
-	// does not list lies outside its cull box. The listed instances' distances keep growing
-	// past their bounds, so without the cap a voxel next to an unlisted instance read past it.
+	// does not list lies outside its cull box, at least the brick's clearance from it. The
+	// listed instances' distances keep growing past their bounds, so without the cap a voxel
+	// next to an unlisted instance read past it.
 	vec3 inside = min(world - lo, hi - world);
-	float cap = max(min(inside.x, min(inside.y, inside.z)), 0.0);
+	float cap = max(min(inside.x, min(inside.y, inside.z)), 0.0) + brick_work.clearance;
 	if (cap < static_distance) {
 		static_distance = cap;
 		static_two_sided = false;

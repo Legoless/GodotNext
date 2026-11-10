@@ -13,7 +13,13 @@ extends Node3D
 ##   rough cube (above max_roughness_to_trace) is skipped,
 ## - SDF shadow rays toward the sun agree with physics,
 ## - the #182 coverage words of the two-sided panel match the CPU rule,
-## - rays whose physics hit lies within the 2 m detail range hit it in time.
+## - rays whose physics hit lies within the 2 m detail range hit it in time,
+## - few rays run out of trace steps (a ray out of steps reports a hit).
+## Then the sun drops to LOW_SUN_DEGREES above the horizon, so the shadow rays of the open
+## floor graze it for tens of meters through its resident bricks: no open-floor receiver
+## that physics sees lit reads shadowed, and no grazing gather ray over the open floor
+## reports a hit where physics finds nothing (the brick cap without its clearance made these
+## rays run out of steps: 248 of 875 lit open-floor receivers read shadowed).
 ## Pass --detail to run with software_ray_tracing_mode = detail (deprecated).
 ## Pass --dense to add a forest of thin poles, so the detail froxels find more
 ## instances than they can list (the trace must still see every pole).
@@ -24,18 +30,44 @@ extends Node3D
 ## rest fit (#187 SWRT_REDUCED), reports it, and still passes every check above.
 ## Pass --starved for a pool too small even for three levels: the tracer stops at
 ## three, keeps the level that ran out of slots resident with the bricks it got,
-## builds no level in full again, and level 0 still traces.
+## builds no level in full again, and level 0 still traces (no low-sun pass: the levels
+## past level 0 are partial).
 ## --reduced and --starved are sized for the plain scene: do not combine them with
 ## --dense or --scaled.
 ## Every run also compares the GPU composite of the global SDF with its CPU twin
 ## (NextGIGlobalSDF::composite_distance), checks that no resident voxel reads
 ## past the nearest instance, and checks that the #187 microbenchmark's trace
 ## agrees with its own fixture.
+## Except with --reduced and --starved, the camera starts CAMERA_TRAVEL away and moves into
+## place first, so the clipmaps scroll and every check runs on bricks a scroll kept (shifted,
+## never rebuilt): a brick's composite must not depend on its place in its level.
 
 const WAIT_FRAMES := 300
 const MAX_FRAMES := 900
 const EXHAUST_STEPS := 6
 const EXHAUST_FRAMES := 30
+## Gather or reflection rays that may run out of the 64-step budget, as a fraction of the
+## traced rays. Every mode here measures at most 9 of 2738 (0.33%, --scaled); the brick cap
+## without its clearance made it 2.2-4.4%.
+const MAX_EXHAUSTED_FRACTION := 0.005
+## The GPU composite against its CPU twin: half-float storage rounds about 0.001 m at the
+## level-0 cap. A whole voxel (0.1 m) hid a 0.06 m mismatch.
+const COMPOSITE_TOLERANCE := 0.005
+## The low-sun pass: the sun's elevation, and the frames it gets to reach the readback.
+const LOW_SUN_DEGREES := 8.0
+const LOW_SUN_FRAMES := 30
+## An open-floor ray stays this far from every box but the floor (a swept sphere), so a
+## surface band or a trilinear blend of a coarse level cannot reach one.
+const LOW_SUN_CLEARANCE := 0.4
+## Gather rays that graze the open floor: elevations in this range, in degrees.
+const GRAZING_DEGREES := Vector2(4.0, 16.0)
+## cast_motion() resolves a long motion coarsely (one 200 m cast missed a wall 0.5 m from its
+## start), so open paths are swept in steps this long.
+const OPEN_PATH_STEP := 1.0
+## The camera's start offset and the frames it moves in (more than a 6.4 m level-3 brick on x).
+const CAMERA_TRAVEL := Vector3(-7.0, 0.0, 3.0)
+const CAMERA_MOVE_FRAMES := Vector2i(30, 150)
+const CAMERA_POSITION := Vector3(0.3, 3.2, 4.2)
 ## The detail range of software_ray_tracing_mode = detail (SWRT_DETAIL_METERS in nextgi_sdf_trace_inc.glsl).
 const DETAIL_METERS := 2.0
 const FROXEL_CAP := 8
@@ -57,6 +89,10 @@ var _reasons := PackedStringArray()
 var _summary := {}
 var _space: PhysicsDirectSpaceState3D
 var _camera: Camera3D
+var _sun: DirectionalLight3D
+var _floor_body: StaticBody3D
+var _boxes_top := 0.0
+var _camera_moves := false
 var _roughness_of := {}
 var _panel: MeshInstance3D
 var _detail := false
@@ -100,14 +136,16 @@ func _ready() -> void:
 		_add_poles()
 
 	# Low behind the wall, so the wall, the pillar and the cube cast shadows toward the camera.
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-35.0, 165.0, 0.0)
-	add_child(sun)
+	_sun = DirectionalLight3D.new()
+	_sun.rotation_degrees = Vector3(-35.0, 165.0, 0.0)
+	add_child(_sun)
 
 	_camera = Camera3D.new()
 	add_child(_camera)
-	_camera.position = Vector3(0.3, 3.2, 4.2)
-	_camera.look_at(Vector3(0.0, 0.3, -3.0))
+	_camera_moves = not (_reduced or _starved)
+	var travel := CAMERA_TRAVEL if _camera_moves else Vector3.ZERO
+	_camera.position = CAMERA_POSITION + travel
+	_camera.look_at(Vector3(0.0, 0.3, -3.0) + travel)
 	_camera.current = true
 
 
@@ -135,6 +173,10 @@ func _add_box(p_name: String, p_size: Vector3, p_position: Vector3, p_roughness:
 	body.add_child(shape)
 	add_child(body)
 	_roughness_of[body.get_instance_id()] = p_roughness
+	if p_name == "Floor":
+		_floor_body = body
+	else:
+		_boxes_top = maxf(_boxes_top, p_position.y + 0.5 * p_size.y)
 
 
 ## Poles 1.2 m apart over the visible floor, clear of the other boxes. They are
@@ -185,6 +227,7 @@ func _add_two_sided_panel(p_size: Vector3, p_position: Vector3) -> MeshInstance3
 	body.add_child(shape)
 	add_child(body)
 	_roughness_of[body.get_instance_id()] = 0.5
+	_boxes_top = maxf(_boxes_top, p_position.y + 0.5 * p_size.y)
 	return instance
 
 
@@ -264,6 +307,9 @@ func _finish(p_pass: bool, p_reasons: PackedStringArray, p_summary: Dictionary) 
 
 func _process(_delta: float) -> void:
 	_frames += 1
+	if _camera_moves and _frames <= CAMERA_MOVE_FRAMES.y:
+		var weight := clampf(float(_frames - CAMERA_MOVE_FRAMES.x) / float(CAMERA_MOVE_FRAMES.y - CAMERA_MOVE_FRAMES.x), 0.0, 1.0)
+		_camera.position = CAMERA_POSITION + CAMERA_TRAVEL * (1.0 - weight)
 	if _frames < WAIT_FRAMES:
 		return
 	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
@@ -294,7 +340,21 @@ func _process(_delta: float) -> void:
 		_verify(info, readback)
 		if _reduced:
 			_verify_reduced(info, REDUCED_POOL_BRICKS, REDUCED_LEVELS)
-		# Stage 2: a tiny step budget. Rays that run out report a hit at the current t (#186 step 2).
+		# Stage 3: the low sun.
+		_sun.rotation_degrees = Vector3(-LOW_SUN_DEGREES, 165.0, 0.0)
+		_stage = 3
+		_stage_frame = _frames
+		return
+	if _stage == 3:
+		var travel: Vector3 = readback.get("light_direction", Vector3())
+		var expected_travel := -_sun.global_transform.basis.z.normalized()
+		if _frames - _stage_frame < LOW_SUN_FRAMES or travel.normalized().dot(expected_travel) < 0.9999:
+			if _frames >= MAX_FRAMES:
+				_reasons.append("the low sun never reached the SWRT readback")
+				_finish(false, _reasons, _summary)
+			return
+		_verify_low_sun(readback)
+		# Stage 1: a tiny step budget. Rays that run out report a hit at the current t (#186 step 2).
 		ProjectSettings.set_setting("rendering/global_illumination/nextgi/debug/swrt_trace_max_steps", EXHAUST_STEPS)
 		_stage = 1
 		_stage_frame = _frames
@@ -362,6 +422,92 @@ func _verify_exhausted(p_readback: Dictionary) -> void:
 		_reasons.append("only %d rays ran out of %d steps" % [exhausted, EXHAUST_STEPS])
 	if as_hits != exhausted:
 		_reasons.append("%d of %d rays that ran out of steps were not reported as hits at their t" % [exhausted - as_hits, exhausted])
+
+
+## The low-sun pass (stage 3): shadow rays toward a sun LOW_SUN_DEGREES above the horizon, and
+## the gather rays that graze the open floor.
+func _verify_low_sun(p_readback: Dictionary) -> void:
+	var gather := _decode_rays(p_readback["gather"])
+	var results: PackedByteArray = p_readback["shadow"]
+	var to_light := -(p_readback["light_direction"] as Vector3).normalized()
+	var compared := 0
+	var agree := 0
+	var open_lit := 0
+	var false_shadows := 0
+	var grazing := 0
+	var false_hits := 0
+	var grazing_exhausted := 0
+	for index in gather.size():
+		var ray: Dictionary = gather[index]
+		var flags: int = ray["flags"]
+		if flags & 128:
+			continue
+		var origin: Vector3 = ray["surface"] + ray["surface_normal"] * ray["offset"]
+		var on_floor := (ray["surface_normal"] as Vector3).y > 0.99 and absf((ray["surface"] as Vector3).y) < 0.02
+		var result := results.decode_u32(index * 4)
+		if result != 2:
+			var occluded := not _ray(origin, origin + to_light * 200.0).is_empty()
+			compared += 1
+			if (result == 0) == occluded:
+				agree += 1
+			# Lit open floor: nothing but the floor within LOW_SUN_CLEARANCE of the path to the sun.
+			if on_floor and _open_path(origin, to_light, 200.0):
+				open_lit += 1
+				if result == 0:
+					false_shadows += 1
+		# Gather rays that graze the open floor: no hit (surface or out of steps) where physics
+		# finds nothing near the path.
+		var direction: Vector3 = ray["direction"]
+		var elevation := rad_to_deg(asin(clampf(direction.y, -1.0, 1.0)))
+		if on_floor and not (flags & 4) and elevation >= GRAZING_DEGREES.x and elevation <= GRAZING_DEGREES.y and _open_path(origin, direction, float(ray["tmax"])):
+			grazing += 1
+			if flags & 1:
+				false_hits += 1
+			if flags & 2:
+				grazing_exhausted += 1
+	_summary["low_sun"] = {
+		"degrees": LOW_SUN_DEGREES,
+		"shadow_compared": compared,
+		"shadow_agree": agree,
+		"open_floor_lit": open_lit,
+		"false_shadows": false_shadows,
+		"grazing_rays": grazing,
+		"grazing_false_hits": false_hits,
+		"grazing_exhausted": grazing_exhausted,
+	}
+	if compared < 1000 or agree < int(0.95 * compared):
+		_reasons.append("low sun: %d of %d shadow rays agree with physics" % [agree, compared])
+	if open_lit < 200 or false_shadows != 0:
+		_reasons.append("low sun: %d of %d lit open-floor receivers read shadowed" % [false_shadows, open_lit])
+	if grazing < 30 or false_hits != 0:
+		_reasons.append("low sun: %d of %d gather rays grazing the open floor report a hit physics does not have" % [false_hits, grazing])
+
+
+## True when no box but the floor lies within LOW_SUN_CLEARANCE of the segment, up to where
+## it rises past every box.
+func _open_path(p_from: Vector3, p_direction: Vector3, p_length: float) -> bool:
+	var sphere := SphereShape3D.new()
+	sphere.radius = LOW_SUN_CLEARANCE
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = sphere
+	query.transform = Transform3D(Basis(), p_from)
+	query.exclude = [_floor_body.get_rid()]
+	# cast_motion() ignores the shapes the sphere starts in.
+	if not _space.intersect_shape(query, 1).is_empty():
+		return false
+	var travelled := 0.0
+	while travelled < p_length:
+		var start := p_from + p_direction * travelled
+		if p_direction.y > 0.0 and start.y > _boxes_top + LOW_SUN_CLEARANCE:
+			return true
+		var step := minf(OPEN_PATH_STEP, p_length - travelled)
+		query.transform = Transform3D(Basis(), start)
+		query.motion = p_direction * step
+		var fractions := _space.cast_motion(query)
+		if fractions.size() != 2 or fractions[0] < 1.0:
+			return false
+		travelled += step
+	return true
 
 
 ## True when geometry lies within p_radius of p_point.
@@ -636,7 +782,7 @@ func _verify(p_info: Dictionary, p_readback: Dictionary) -> void:
 	summary["composite_checked"] = int(p_readback.get("composite_checked", 0))
 	summary["composite_max_error"] = float(p_readback.get("composite_max_error", 1e30))
 	summary["composite_sign_mismatches"] = int(p_readback.get("composite_sign_mismatches", -1))
-	if summary["composite_checked"] < 1000 or summary["composite_max_error"] > 0.1 or summary["composite_sign_mismatches"] != 0:
+	if summary["composite_checked"] < 1000 or summary["composite_max_error"] > COMPOSITE_TOLERANCE or summary["composite_sign_mismatches"] != 0:
 		reasons.append("global SDF composite vs CPU: %d checked, max error %.3f m, %d sign mismatches" % [summary["composite_checked"], summary["composite_max_error"], summary["composite_sign_mismatches"]])
 	# Every mesh here is a box, whose CPU distance is exact: a resident voxel that reads more
 	# than a quarter voxel past the nearest instance (listed in its brick or not) lets rays
@@ -688,7 +834,7 @@ func _require_hits(p_kind: String, p_stats: Dictionary, r_reasons: PackedStringA
 	# near and far depths at silhouettes into phantom surfaces (76% on geometry here).
 	if p_stats["screen"] > 0 and p_stats["screen_on_geometry"] < int(0.85 * p_stats["screen"]):
 		r_reasons.append("%s: %d of %d screen-trace hits are on geometry" % [p_kind, p_stats["screen_on_geometry"], p_stats["screen"]])
-	if p_stats["exhausted"] > int(0.05 * traced):
+	if p_stats["exhausted"] > int(MAX_EXHAUSTED_FRACTION * traced):
 		r_reasons.append("%s: %d of %d rays ran out of steps" % [p_kind, p_stats["exhausted"], traced])
 	if p_stats["near"] < 30 or p_stats["near_ok"] < int(0.9 * p_stats["near"]):
 		r_reasons.append("%s: %d of %d rays with a hit within %.0f m hit it in time" % [p_kind, p_stats["near_ok"], p_stats["near"], DETAIL_METERS])

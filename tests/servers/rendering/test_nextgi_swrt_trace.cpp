@@ -262,6 +262,12 @@ TEST_CASE("[NextGI][GlobalSDF] A brick never reads past an instance it does not 
 	const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, brick, culled, 2);
 	REQUIRE_EQ(culled_count, 1u);
 	REQUIRE_EQ(culled[0], 0u);
+	// The cap's clearance is the gap to the unlisted instance's bounds, here on +x only.
+	const AABB beside_bounds = beside.transform.xform(box.bounds);
+	const float clearance = NextGIGlobalSDF::brick_clearance(instances, 0, origin, brick);
+	CHECK(clearance > 0.0f);
+	CHECK(clearance < NextGIGlobalSDF::clearance_radius(0));
+	CHECK(Math::is_equal_approx(clearance, beside_bounds.position.x - cull_box.get_end().x));
 	NextGIGlobalSDF::BrickSplit split;
 	NextGIGlobalSDF::compose_brick_split(instances, culled, culled_count, 0, origin, brick, split);
 
@@ -277,7 +283,7 @@ TEST_CASE("[NextGI][GlobalSDF] A brick never reads past an instance it does not 
 		// Never past the nearest instance, listed or not.
 		CHECK(stored <= nearest + 0.25f * voxel);
 		// The CPU twin the GPU composite is validated against.
-		CHECK(Math::is_equal_approx(stored, NextGIGlobalSDF::composite_distance(instances, culled, culled_count, cull_box, world)));
+		CHECK(Math::is_equal_approx(stored, NextGIGlobalSDF::composite_distance(instances, culled, culled_count, cull_box, clearance, world)));
 		// The cap is at least 1.5 voxels at a voxel center, so it never makes a surface (the hit
 		// band is half a voxel, a voxel for two-sided coverage).
 		if (nearest >= 1.5f * voxel) {
@@ -286,6 +292,44 @@ TEST_CASE("[NextGI][GlobalSDF] A brick never reads past an instance it does not 
 	}
 	// The listed instance alone reads well past the unlisted one somewhere in the brick.
 	CHECK(worst_listed_excess > 0.3f);
+}
+
+TEST_CASE("[NextGI][GlobalSDF] A brick beside open space keeps its listed distances") {
+	// The cap once held every voxel to 1.5-4.5 voxels of its level, wherever the nearest
+	// unlisted instance was. Rays near a large surface then crept through its resident bricks
+	// about 3 voxels a step and ran out of the 64-step budget after 25-50 m; a ray out of
+	// steps reports a hit, so the low sun cast false shadows on the open floor. With nothing
+	// else within the clearance radius, the cap stays above the floor's own distance.
+	const MeshSDFData slab = _box_sdf(Vector3(6.0f, 0.2f, 6.0f));
+	Vector<NextGIGlobalSDF::Instance> instances;
+	NextGIGlobalSDF::Instance ground;
+	ground.field = &slab;
+	ground.transform.origin = Vector3(0.4f, -0.1f, 0.4f); // Its top is the brick's bottom face.
+	instances.push_back(ground);
+
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
+	const Vector3i brick(8, 8, 8);
+	const float voxel = NextGIGlobalSDF::level_voxel_size(0);
+	uint32_t culled[1] = {};
+	const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, brick, culled, 1);
+	REQUIRE_EQ(culled_count, 1u);
+	const float clearance = NextGIGlobalSDF::brick_clearance(instances, 0, origin, brick);
+	CHECK(Math::is_equal_approx(clearance, NextGIGlobalSDF::clearance_radius(0)));
+	CHECK(clearance >= 7.0f * voxel - 1.0e-4f);
+	NextGIGlobalSDF::BrickSplit split;
+	NextGIGlobalSDF::compose_brick_split(instances, culled, culled_count, 0, origin, brick, split);
+	uint32_t past_old_cap = 0;
+	for (uint32_t index = 0; index < NextGIGlobalSDF::BRICK_VOXELS; index++) {
+		const Vector3i local(int(index % 8), int((index / 8) % 8), int(index / 64));
+		const Vector3 world = NextGIGlobalSDF::voxel_center(0, origin, brick * 8 + local);
+		const float listed = NextGIGlobalSDF::sample_instance(instances[0], world);
+		const float stored = MIN(split.static_distance[index], split.dynamic_distance[index]);
+		// Every voxel steps the floor's full distance.
+		CHECK(Math::is_equal_approx(stored, listed));
+		// Where the cull box alone capped it (1.5 voxels at its faces, 4.5 at its center).
+		past_old_cap += listed > NextGIGlobalSDF::brick_cap(NextGIGlobalSDF::brick_cull_box(0, origin, brick), 0.0f, world) + 1.0e-4f ? 1 : 0;
+	}
+	CHECK(past_old_cap > 100u);
 }
 
 TEST_CASE("[NextGI][GlobalSDF] Non-uniformly scaled instances read world distances") {
@@ -570,7 +614,11 @@ TEST_CASE("[NextGI][GlobalSDF] Instance bins match the per-brick cull") {
 		LocalVector<uint32_t> indices;
 		NextGIGlobalSDF::bin_instances(instances, level, origin, offsets, indices);
 		REQUIRE_EQ(offsets.size(), NextGIGlobalSDF::BRICKS_PER_LEVEL + 1);
+		NextGIGlobalSDF::ClearanceIndex clearance_index;
+		NextGIGlobalSDF::build_clearance_index(instances, level, origin, offsets, indices, clearance_index);
 		uint32_t occupied = 0;
+		uint32_t near_unlisted = 0;
+		uint32_t near_outside = 0;
 		for (uint32_t brick = 0; brick < NextGIGlobalSDF::BRICKS_PER_LEVEL; brick++) {
 			const Vector3i coordinate(int(brick % 16), int((brick / 16) % 16), int(brick / 256));
 			const uint32_t count = NextGIGlobalSDF::cull_instances_for_brick(instances, level, origin, coordinate, culled.ptr(), culled.size());
@@ -579,9 +627,61 @@ TEST_CASE("[NextGI][GlobalSDF] Instance bins match the per-brick cull") {
 				CHECK_EQ(indices[offsets[brick] + i], culled[i]);
 			}
 			occupied += count > 0 ? 1 : 0;
+			// GodotNext: ps_swrt_trace (#186). The composite's clearance searches only the bins
+			// around the brick (update_bricks()); its CPU twin searches every instance.
+			const float binned = NextGIGlobalSDF::brick_clearance(instances, level, origin, coordinate, &clearance_index);
+			const float every = NextGIGlobalSDF::brick_clearance(instances, level, origin, coordinate);
+			CHECK_EQ(binned, every);
+			const bool inner = coordinate.x > 0 && coordinate.y > 0 && coordinate.z > 0 && coordinate.x < 15 && coordinate.y < 15 && coordinate.z < 15;
+			const bool limited = every < NextGIGlobalSDF::clearance_radius(level);
+			near_unlisted += inner && limited ? 1 : 0;
+			near_outside += !inner && limited ? 1 : 0;
 		}
 		CHECK(occupied > 0);
+		// Bricks whose clearance an unlisted instance sets, inside the level and on its shell
+		// (where instances reaching out of the level count too), so every search path is used.
+		CHECK(near_unlisted > 20);
+		CHECK(near_outside > 20);
+		CHECK(clearance_index.outside.size() > 0);
 	}
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Instance bins keep bounds that end at a cull box face") {
+	// Bounds that end within float rounding of a brick's cull box face: the per-brick cull
+	// keeps the instance, and the bins must too. The bins' brick range once floored past the
+	// brick, so the GPU composite missed a pillar its CPU twin listed and, with the cap's
+	// clearance, read 0.25 m past it.
+	const MeshSDFData pillar = _box_sdf(Vector3(0.6f, 2.4f, 0.6f));
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(0.3f, 3.2f, 4.2f), 0);
+	Vector<NextGIGlobalSDF::Instance> instances;
+	instances.resize(1);
+	instances.write[0].field = &pillar;
+	LocalVector<uint32_t> offsets;
+	LocalVector<uint32_t> indices;
+	uint32_t touching = 0;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int brick = 1; brick < 15; brick++) {
+			Vector3i coordinate(7, 5, 3);
+			coordinate[axis] = brick;
+			const AABB cull_box = NextGIGlobalSDF::brick_cull_box(0, origin, coordinate);
+			// Put the bounds' low face on the cull box's high face, then step it by single ulps.
+			Transform3D transform;
+			transform.origin = NextGIGlobalSDF::voxel_center(0, origin, coordinate * 8 + Vector3i(4, 4, 4)) - pillar.bounds.get_center();
+			transform.origin[axis] = cull_box.get_end()[axis] - pillar.bounds.position[axis];
+			for (int step = 0; step < 12; step++) {
+				instances.write[0].transform = transform;
+				const AABB bounds = transform.xform(pillar.bounds);
+				if (bounds.intersects(cull_box) && bounds.position[axis] > cull_box.get_end()[axis] - 1.0e-4f) {
+					touching++;
+					NextGIGlobalSDF::bin_instances(instances, 0, origin, offsets, indices);
+					const uint32_t index = uint32_t(coordinate.x) + 16u * (uint32_t(coordinate.y) + 16u * uint32_t(coordinate.z));
+					CHECK_EQ(offsets[index + 1] - offsets[index], 1u);
+				}
+				transform.origin[axis] = std::nextafter(transform.origin[axis], -1.0e30f);
+			}
+		}
+	}
+	CHECK(touching > 50u);
 }
 
 TEST_CASE("[NextGI][SWRT] Clipmaps build every brick once, then only scroll edges and dirty volumes") {
@@ -660,6 +760,151 @@ TEST_CASE("[NextGI][SWRT] Clipmaps build every brick once, then only scroll edge
 	clipmaps.reset();
 	clipmaps.plan_level(0, moved, 10, plan);
 	CHECK(plan.full);
+}
+
+TEST_CASE("[NextGI][SWRT] An instance moved beside a brick it does not list rebuilds the brick's cap") {
+	// A brick's cap depends on the instances within its clearance radius, past its cull box.
+	// When one moves there, the dirty volume must reach the brick, or the brick keeps a cap
+	// from before and reads past the instance (rays would step through it).
+	const MeshSDFData slab = _box_sdf(Vector3(6.0f, 0.2f, 6.0f));
+	const MeshSDFData rock = _box_sdf(Vector3(1.0f, 0.6f, 1.4f));
+	const uint32_t level = 2; // 0.4 m voxels: the clearance radius (2.8 m) passes the 1 m band margin.
+	const float voxel = NextGIGlobalSDF::level_voxel_size(level);
+	const Vector3 camera;
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(camera, level);
+	const Vector3i brick(8, 8, 8); // World [0, 3.2]^3, on the slab.
+
+	Vector<NextGIGlobalSDF::Instance> before;
+	NextGIGlobalSDF::Instance ground;
+	ground.field = &slab;
+	ground.transform.origin = Vector3(1.6f, -0.1f, 1.6f);
+	before.push_back(ground);
+	NextGIGlobalSDF::Instance stone;
+	stone.field = &rock;
+	stone.dynamic = true;
+	stone.transform.origin = Vector3(18.0f, 3.0f, 18.0f);
+	before.push_back(stone);
+	Vector<NextGIGlobalSDF::Instance> after = before;
+	// Beside the brick's top on +x: its bounds stay 1.2 m past the cull box.
+	after.write[1].transform.origin = Vector3(5.8f, 3.0f, 1.6f);
+	const AABB cull_box = NextGIGlobalSDF::brick_cull_box(level, origin, brick);
+	const AABB moved = after[1].transform.xform(rock.bounds);
+	REQUIRE_FALSE(moved.intersects(cull_box));
+	REQUIRE(NextGIGlobalSDF::brick_clearance(after, level, origin, brick) < NextGIGlobalSDF::brick_clearance(before, level, origin, brick));
+
+	// The level as built before the move: one composite per resident brick.
+	HashMap<uint32_t, NextGIGlobalSDF::BrickSplit> stored;
+	LocalVector<uint32_t> culled;
+	culled.resize(2);
+	auto compose = [&](const Vector<NextGIGlobalSDF::Instance> &p_instances, const Vector3i &p_brick) {
+		const uint32_t key = uint32_t(p_brick.x) + 16u * (uint32_t(p_brick.y) + 16u * uint32_t(p_brick.z));
+		const uint32_t count = NextGIGlobalSDF::cull_instances_for_brick(p_instances, level, origin, p_brick, culled.ptr(), culled.size());
+		if (count == 0) {
+			stored.erase(key);
+			return;
+		}
+		NextGIGlobalSDF::BrickSplit split;
+		NextGIGlobalSDF::compose_brick_split(p_instances, culled.ptr(), count, level, origin, p_brick, split);
+		stored[key] = split;
+	};
+	NextGIGlobalSDFClipmaps clipmaps;
+	NextGIGlobalSDFClipmaps::Plan plan;
+	clipmaps.plan_level(level, camera, 0, plan);
+	REQUIRE(plan.full);
+	for (const Vector3i &rebuilt : plan.bricks) {
+		compose(before, rebuilt);
+	}
+	clipmaps.commit_level(level, plan, true);
+	REQUIRE(stored.has(8u + 16u * (8u + 16u * 8u)));
+
+	// The move dirties the rock's old and new mesh-SDF bounds, as the SWRT feed does.
+	const AABB volumes[2] = { before[1].transform.xform(rock.bounds), moved };
+	clipmaps.add_dirty_volumes(volumes, 2);
+	clipmaps.plan_level(level, camera, 4, plan);
+	REQUIRE(plan.update);
+	REQUIRE_FALSE(plan.full);
+	for (const Vector3i &rebuilt : plan.bricks) {
+		compose(after, rebuilt);
+	}
+	clipmaps.commit_level(level, plan, true);
+
+	// No resident voxel reads past the moved rock (or anything else).
+	uint32_t checked = 0;
+	uint32_t overestimates = 0;
+	for (const KeyValue<uint32_t, NextGIGlobalSDF::BrickSplit> &entry : stored) {
+		const Vector3i coordinate(int(entry.key % 16), int((entry.key / 16) % 16), int(entry.key / 256));
+		for (uint32_t index = 0; index < NextGIGlobalSDF::BRICK_VOXELS; index++) {
+			const Vector3i local(int(index % 8), int((index / 8) % 8), int(index / 64));
+			const Vector3 world = NextGIGlobalSDF::voxel_center(level, origin, coordinate * 8 + local);
+			const float value = MIN(entry.value.static_distance[index], entry.value.dynamic_distance[index]);
+			overestimates += value > NextGIGlobalSDF::reference_distance(after, world) + 0.25f * voxel ? 1 : 0;
+			checked++;
+		}
+	}
+	CHECK(checked > 0u);
+	CHECK_EQ(overestimates, 0u);
+}
+
+TEST_CASE("[NextGI][SWRT] A brick a scroll keeps holds the composite of its new place") {
+	// A scroll shifts the resident bricks and rebuilds only the new edge, so a brick's
+	// composite may depend only on its place in the world. The cap's clearance once stopped
+	// at the level's edge: a brick that scrolled in kept the bare cull-box cap after it
+	// moved inward, and the whole level lost the clearance as the camera travelled.
+	const MeshSDFData slab = _box_sdf(Vector3(14.0f, 0.2f, 14.0f));
+	Vector<NextGIGlobalSDF::Instance> instances;
+	NextGIGlobalSDF::Instance ground;
+	ground.field = &slab;
+	ground.transform.origin = Vector3(0.0f, -0.1f, 0.0f);
+	instances.push_back(ground);
+	const float brick = NextGIGlobalSDF::level_voxel_size(0) * float(NextGIGlobalSDF::BRICK_SIZE);
+	Vector3 camera(0.05f, 0.4f, 0.05f);
+	NextGIGlobalSDFClipmaps clipmaps;
+	NextGIGlobalSDFClipmaps::Plan plan;
+	clipmaps.plan_level(0, camera, 0, plan);
+	REQUIRE(plan.full);
+	clipmaps.commit_level(0, plan, true);
+
+	// One brick of travel on +x builds the new slab at x = 15, the floor's row among it.
+	camera.x += brick;
+	clipmaps.plan_level(0, camera, 1, plan);
+	REQUIRE_EQ(plan.scroll, Vector3i(1, 0, 0));
+	clipmaps.commit_level(0, plan, true);
+	const Vector3i entered_origin = clipmaps.get_origin(0);
+	const Vector3i entered(15, 8, 8);
+	bool rebuilt_entered = false;
+	for (const Vector3i &rebuilt : plan.bricks) {
+		rebuilt_entered = rebuilt_entered || rebuilt == entered;
+	}
+	REQUIRE(rebuilt_entered);
+	uint32_t culled[1] = {};
+	REQUIRE_EQ(NextGIGlobalSDF::cull_instances_for_brick(instances, 0, entered_origin, entered, culled, 1), 1u);
+	NextGIGlobalSDF::BrickSplit stored;
+	NextGIGlobalSDF::compose_brick_split(instances, culled, 1, 0, entered_origin, entered, stored);
+	const Vector3i world_brick = entered_origin / int(NextGIGlobalSDF::BRICK_SIZE) + entered;
+
+	// Three more bricks of travel: the brick is shifted, never rebuilt.
+	for (uint64_t frame = 2; frame <= 4; frame++) {
+		camera.x += brick;
+		clipmaps.plan_level(0, camera, frame, plan);
+		REQUIRE_EQ(plan.scroll, Vector3i(1, 0, 0));
+		const Vector3i kept = world_brick - plan.origin / int(NextGIGlobalSDF::BRICK_SIZE);
+		for (const Vector3i &rebuilt : plan.bricks) {
+			CHECK(rebuilt != kept);
+		}
+		clipmaps.commit_level(0, plan, true);
+	}
+	const Vector3i origin = clipmaps.get_origin(0);
+	const Vector3i now = world_brick - origin / int(NextGIGlobalSDF::BRICK_SIZE);
+	REQUIRE_EQ(now, Vector3i(12, 8, 8));
+	CHECK_EQ(NextGIGlobalSDF::brick_clearance(instances, 0, origin, now), NextGIGlobalSDF::brick_clearance(instances, 0, entered_origin, entered));
+	REQUIRE_EQ(NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, now, culled, 1), 1u);
+	NextGIGlobalSDF::BrickSplit fresh;
+	NextGIGlobalSDF::compose_brick_split(instances, culled, 1, 0, origin, now, fresh);
+	uint32_t differ = 0;
+	for (uint32_t index = 0; index < NextGIGlobalSDF::BRICK_VOXELS; index++) {
+		differ += Math::is_equal_approx(stored.static_distance[index], fresh.static_distance[index]) ? 0 : 1;
+	}
+	CHECK_EQ(differ, 0u);
 }
 
 TEST_CASE("[NextGI][SWRT] SWRT_REDUCED drops the top level and frees its slots") {

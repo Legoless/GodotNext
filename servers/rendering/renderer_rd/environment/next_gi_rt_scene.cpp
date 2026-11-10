@@ -2158,6 +2158,8 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 			if (!global_sdf.download_brick(0, brick, split)) {
 				continue;
 			}
+			// GodotNext: ps_swrt_trace (#186). The cap's clearance (NextGIGlobalSDF::brick_cap()).
+			const float clearance = NextGIGlobalSDF::brick_clearance(instances, 0, global_sdf_origin, brick);
 			for (int local_z = 0; local_z < int(NextGIGlobalSDF::BRICK_SIZE); local_z++) {
 				for (int local_x = 0; local_x < int(NextGIGlobalSDF::BRICK_SIZE); local_x++) {
 					const int x = brick_x * int(NextGIGlobalSDF::BRICK_SIZE) + local_x;
@@ -2169,7 +2171,7 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 					coverage.set(index, NextGIGlobalSDF::get_coverage_bit(split, Vector3i(local_x, 0, local_z)) ? 1 : 0);
 					const Vector3 world = NextGIGlobalSDF::voxel_center(0, global_sdf_origin, Vector3i(x, slice_y, z));
 					// GodotNext: ps_swrt_trace (#186). The CPU twin of the composite, cap included.
-					const float reference = culled_count > 0 ? NextGIGlobalSDF::composite_distance(instances, culled.ptr(), culled_count, NextGIGlobalSDF::brick_cull_box(0, global_sdf_origin, brick), world) : 65504.0f;
+					const float reference = culled_count > 0 ? NextGIGlobalSDF::composite_distance(instances, culled.ptr(), culled_count, NextGIGlobalSDF::brick_cull_box(0, global_sdf_origin, brick), clearance, world) : 65504.0f;
 					max_error = MAX(max_error, Math::abs(distance - reference));
 					checked++;
 				}

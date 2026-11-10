@@ -274,13 +274,15 @@ void NextGIGlobalSDF::compose_brick_split(const Vector<Instance> &p_instances, c
 			}
 		}
 	}
-	// GodotNext: ps_swrt_trace (#186). Unlisted instances lie outside the cull box (brick_cap()).
+	// GodotNext: ps_swrt_trace (#186). Unlisted instances lie outside the cull box, at least
+	// the brick's clearance from it (brick_cap()).
 	const AABB cull_box = brick_cull_box(p_level, p_origin, p_brick);
+	const float clearance = brick_clearance(p_instances, p_level, p_origin, p_brick);
 	for (int z = 0; z < int(BRICK_SIZE); z++) {
 		for (int y = 0; y < int(BRICK_SIZE); y++) {
 			for (int x = 0; x < int(BRICK_SIZE); x++) {
 				const uint32_t voxel = _voxel_index(Vector3i(x, y, z));
-				r_split.static_distance[voxel] = MIN(r_split.static_distance[voxel], brick_cap(cull_box, voxel_center(p_level, p_origin, base + Vector3i(x, y, z))));
+				r_split.static_distance[voxel] = MIN(r_split.static_distance[voxel], brick_cap(cull_box, clearance, voxel_center(p_level, p_origin, base + Vector3i(x, y, z))));
 			}
 		}
 	}
@@ -345,13 +347,93 @@ AABB NextGIGlobalSDF::brick_cull_box(uint32_t p_level, const Vector3i &p_origin,
 	return box;
 }
 
-float NextGIGlobalSDF::brick_cap(const AABB &p_cull_box, const Vector3 &p_world) {
+float NextGIGlobalSDF::brick_cap(const AABB &p_cull_box, float p_clearance, const Vector3 &p_world) {
 	const Vector3 inside = (p_world - p_cull_box.position).min(p_cull_box.get_end() - p_world);
-	return MAX(MIN(inside.x, MIN(inside.y, inside.z)), 0.0f);
+	return MAX(MIN(inside.x, MIN(inside.y, inside.z)), 0.0f) + p_clearance;
 }
 
-float NextGIGlobalSDF::composite_distance(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, const AABB &p_cull_box, const Vector3 &p_world) {
-	float distance = brick_cap(p_cull_box, p_world);
+float NextGIGlobalSDF::clearance_radius(uint32_t p_level) {
+	const float voxel = level_voxel_size(p_level);
+	return float(CLEARANCE_BRICKS * BRICK_SIZE) * voxel - voxel;
+}
+
+// GodotNext: ps_swrt_trace (#186). The Euclidean gap between two boxes, 0 when they overlap.
+static float _box_gap(const AABB &p_a, const AABB &p_b) {
+	return (p_a.position - p_b.get_end()).max(p_b.position - p_a.get_end()).max(Vector3()).length();
+}
+
+void NextGIGlobalSDF::build_clearance_index(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const LocalVector<uint32_t> &p_offsets, const LocalVector<uint32_t> &p_indices, ClearanceIndex &r_index) {
+	r_index.offsets = &p_offsets;
+	r_index.indices = &p_indices;
+	r_index.bounds.resize(p_instances.size());
+	r_index.outside.clear();
+	const float voxel = level_voxel_size(p_level);
+	const Vector3 level_min = Vector3(p_origin) * voxel;
+	const Vector3 level_max = level_min + Vector3(level_extent(p_level), level_extent(p_level), level_extent(p_level));
+	// Every brick's cull box lies in the level grown by one voxel.
+	const AABB reach(level_min - Vector3(voxel, voxel, voxel), level_max - level_min + Vector3(2.0f * voxel, 2.0f * voxel, 2.0f * voxel));
+	const float radius = clearance_radius(p_level);
+	for (uint32_t index = 0; index < uint32_t(p_instances.size()); index++) {
+		const Instance &instance = p_instances[index];
+		if (instance.field == nullptr || !instance.field->is_valid()) {
+			r_index.bounds[index] = AABB();
+			continue;
+		}
+		const AABB bounds = instance.transform.xform(instance.field->bounds);
+		r_index.bounds[index] = bounds;
+		const Vector3 end = bounds.get_end();
+		const bool inside = bounds.position.x > level_min.x && bounds.position.y > level_min.y && bounds.position.z > level_min.z && end.x < level_max.x && end.y < level_max.y && end.z < level_max.z;
+		if (!inside && _box_gap(reach, bounds) < radius) {
+			r_index.outside.push_back(index);
+		}
+	}
+}
+
+float NextGIGlobalSDF::brick_clearance(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, const ClearanceIndex *p_index) {
+	const AABB cull_box = brick_cull_box(p_level, p_origin, p_brick);
+	const bool indexed = p_index != nullptr && p_index->offsets != nullptr && p_index->indices != nullptr && p_index->offsets->size() == BRICKS_PER_LEVEL + 1 && p_index->bounds.size() == uint32_t(p_instances.size());
+	float clearance = clearance_radius(p_level);
+	auto consider = [&](uint32_t p_instance) {
+		const Instance &instance = p_instances[p_instance];
+		if (instance.field == nullptr || !instance.field->is_valid()) {
+			return;
+		}
+		const AABB bounds = indexed ? p_index->bounds[p_instance] : instance.transform.xform(instance.field->bounds);
+		if (bounds.intersects(cull_box)) {
+			return; // Listed: the composite samples it.
+		}
+		clearance = MIN(clearance, _box_gap(cull_box, bounds));
+	};
+	if (!indexed) {
+		for (uint32_t index = 0; index < uint32_t(p_instances.size()); index++) {
+			consider(index);
+		}
+		return clearance;
+	}
+	// An unlisted instance nearer than clearance_radius() has its nearest point within
+	// CLEARANCE_BRICKS bricks of this one. Inside the level that point lies in a brick whose
+	// cull box the instance overlaps, so the instance is in that brick's bin; outside the
+	// level the instance is in p_index->outside.
+	const int reach = int(CLEARANCE_BRICKS);
+	const int page = int(PAGE_SIZE);
+	for (int z = MAX(p_brick.z - reach, 0); z <= MIN(p_brick.z + reach, page - 1); z++) {
+		for (int y = MAX(p_brick.y - reach, 0); y <= MIN(p_brick.y + reach, page - 1); y++) {
+			for (int x = MAX(p_brick.x - reach, 0); x <= MIN(p_brick.x + reach, page - 1); x++) {
+				const uint32_t brick = uint32_t(x) + PAGE_SIZE * (uint32_t(y) + PAGE_SIZE * uint32_t(z));
+				for (uint32_t slot = (*p_index->offsets)[brick]; slot < (*p_index->offsets)[brick + 1]; slot++) {
+					consider((*p_index->indices)[slot]);
+				}
+			}
+		}
+	}
+	for (const uint32_t index : p_index->outside) {
+		consider(index);
+	}
+	return clearance;
+}
+
+float NextGIGlobalSDF::composite_distance(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, const AABB &p_cull_box, float p_clearance, const Vector3 &p_world) {
+	float distance = brick_cap(p_cull_box, p_clearance, p_world);
 	for (uint32_t index = 0; index < p_culled_count; index++) {
 		if (p_culled[index] < uint32_t(p_instances.size())) {
 			distance = MIN(distance, sample_instance(p_instances[p_culled[index]], p_world));
@@ -391,8 +473,12 @@ void NextGIGlobalSDF::bin_instances(const Vector<Instance> &p_instances, uint32_
 		const Vector3 lo = (world_bounds.position - Vector3(voxel, voxel, voxel) - level_min) / brick_size;
 		const Vector3 hi = (world_bounds.position + world_bounds.size + Vector3(voxel, voxel, voxel) - level_min) / brick_size;
 		for (int axis = 0; axis < 3; axis++) {
-			range[axis] = CLAMP(int(Math::floor(lo[axis])), 0, page);
-			range[axis + 3] = CLAMP(int(Math::floor(hi[axis])), -1, page - 1);
+			// GodotNext: ps_swrt_trace (#186). One brick wider on each side: bounds that end
+			// within float rounding of a cull box's face can floor to the next brick here while
+			// the exact test below keeps them, and the composite then missed an instance its CPU
+			// twin and brick_clearance() count as listed.
+			range[axis] = CLAMP(int(Math::floor(lo[axis])) - 1, 0, page);
+			range[axis + 3] = CLAMP(int(Math::floor(hi[axis])) + 1, -1, page - 1);
 		}
 		for (int z = range[2]; z <= range[5]; z++) {
 			for (int y = range[1]; y <= range[4]; y++) {

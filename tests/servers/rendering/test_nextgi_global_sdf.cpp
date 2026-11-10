@@ -387,7 +387,7 @@ TEST_CASE("[NextGI][GlobalSDF] Static/dynamic brick split and coverage bit") {
 				const uint32_t index = uint32_t(x + y * 8 + z * 64);
 				// The static slot never sees the dynamic instance. GodotNext: ps_swrt_trace (#186):
 				// it carries the brick cap (NextGIGlobalSDF::brick_cap()).
-				const float cap = NextGIGlobalSDF::brick_cap(NextGIGlobalSDF::brick_cull_box(0, origin, brick), world);
+				const float cap = NextGIGlobalSDF::brick_cap(NextGIGlobalSDF::brick_cull_box(0, origin, brick), NextGIGlobalSDF::brick_clearance(instances, 0, origin, brick), world);
 				CHECK(Math::is_equal_approx(split.static_distance[index], MIN(NextGIGlobalSDF::reference_distance(static_only, world), cap)));
 				const float combined = MIN(split.static_distance[index], split.dynamic_distance[index]);
 				CHECK(Math::is_equal_approx(combined, MIN(NextGIGlobalSDF::reference_distance(both, world), cap)));

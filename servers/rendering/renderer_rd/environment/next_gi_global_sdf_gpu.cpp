@@ -64,7 +64,8 @@ struct BrickWork {
 	uint32_t slot;
 	uint32_t instance_offset;
 	uint32_t instance_count;
-	uint32_t pad;
+	// GodotNext: ps_swrt_trace (#186). NextGIGlobalSDF::brick_clearance() for the cap.
+	float clearance;
 };
 static_assert(sizeof(BrickWork) == 32, "BrickWork must stay 32 bytes.");
 
@@ -381,6 +382,8 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 	LocalVector<uint32_t> bin_offsets;
 	LocalVector<uint32_t> bin_indices;
 	NextGIGlobalSDF::bin_instances(instances, p_level, p_origin, bin_offsets, bin_indices);
+	NextGIGlobalSDF::ClearanceIndex clearance_index;
+	NextGIGlobalSDF::build_clearance_index(instances, p_level, p_origin, bin_offsets, bin_indices, clearance_index);
 
 	Vector<BrickWork> work;
 	Vector<uint32_t> work_indices;
@@ -415,6 +418,7 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		item.slot = slot;
 		item.instance_offset = work_indices.size();
 		item.instance_count = end - begin;
+		item.clearance = NextGIGlobalSDF::brick_clearance(instances, p_level, p_origin, brick, &clearance_index);
 		for (uint32_t i = begin; i < end; i++) {
 			const uint32_t source = bin_indices[i];
 			if (remap[source] < 0) {
@@ -628,7 +632,7 @@ bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instan
 		}
 		const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(p_instances, p_level, p_origin, brick, culled.ptr(), culled.size());
 		// The CPU twin of the composite (an unallocated brick lists no instance).
-		const float reference = culled_count > 0 ? NextGIGlobalSDF::composite_distance(p_instances, culled.ptr(), culled_count, NextGIGlobalSDF::brick_cull_box(p_level, p_origin, brick), point) : 65504.0f;
+		const float reference = culled_count > 0 ? NextGIGlobalSDF::composite_distance(p_instances, culled.ptr(), culled_count, NextGIGlobalSDF::brick_cull_box(p_level, p_origin, brick), NextGIGlobalSDF::brick_clearance(p_instances, p_level, p_origin, brick), point) : 65504.0f;
 		// A resident voxel never reads farther than the nearest of every instance, listed or not.
 		if (r_overestimates != nullptr && slot >= 0 && distance > NextGIGlobalSDF::reference_distance(p_instances, point) + 0.25f * voxel_size) {
 			(*r_overestimates)++;
@@ -686,6 +690,7 @@ bool NextGIGlobalSDFGPU::validate_coverage(const Vector<NextGIGlobalSDF::Instanc
 		// Bricks without a two-sided instance must have no bit set; only the others, which
 		// need CPU samples, count toward p_max_bricks.
 		bricks += any_two_sided ? 1 : 0;
+		const float clearance = any_two_sided ? NextGIGlobalSDF::brick_clearance(p_instances, p_level, p_origin, brick) : 0.0f;
 		for (uint32_t voxel = 0; voxel < NextGIGlobalSDF::BRICK_VOXELS; voxel++) {
 			const bool actual = (words[coverage_word(uint32_t(slot), voxel)] & coverage_bit(voxel)) != 0;
 			bool expected = false;
@@ -695,7 +700,7 @@ bool NextGIGlobalSDFGPU::validate_coverage(const Vector<NextGIGlobalSDF::Instanc
 				const Vector3 world = NextGIGlobalSDF::voxel_center(p_level, p_origin, brick * int(NextGIGlobalSDF::BRICK_SIZE) + local);
 				// The static class carries the brick cap (NextGIGlobalSDF::brick_cap()); a two-sided
 				// instance farther than the cap does not win the voxel.
-				const float cap = NextGIGlobalSDF::brick_cap(NextGIGlobalSDF::brick_cull_box(p_level, p_origin, brick), world);
+				const float cap = NextGIGlobalSDF::brick_cap(NextGIGlobalSDF::brick_cull_box(p_level, p_origin, brick), clearance, world);
 				for (int dynamic_class = 0; dynamic_class < 2; dynamic_class++) {
 					float two_sided = 1e30f;
 					float other = dynamic_class == 0 ? cap : 1e30f;

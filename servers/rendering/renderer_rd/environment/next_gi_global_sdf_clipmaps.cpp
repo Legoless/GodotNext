@@ -51,8 +51,9 @@ int _floor_div_brick(int p_value) {
 float NextGIGlobalSDFClipmaps::dirty_margin(uint32_t p_level) {
 	// The mesh SDF builder pads its bounds by its narrow band (4 voxels at
 	// 10 voxels/m, more for large meshes). Two level voxels cover the brick
-	// cull's own one-voxel growth.
-	return MAX(2.0f * NextGIGlobalSDF::level_voxel_size(p_level), 1.0f);
+	// cull's own one-voxel growth. A brick's cap also depends on the instances up to
+	// its clearance radius past its cull box (NextGIGlobalSDF::brick_clearance()).
+	return MAX(2.0f * NextGIGlobalSDF::level_voxel_size(p_level), 1.0f) + NextGIGlobalSDF::clearance_radius(p_level);
 }
 
 void NextGIGlobalSDFClipmaps::plan_level(uint32_t p_level, const Vector3 &p_camera, uint64_t p_frame, Plan &r_plan) {

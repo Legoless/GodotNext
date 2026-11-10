@@ -68,7 +68,9 @@ public:
 	};
 
 	// Registry dirty volumes are instance AABBs. A mesh SDF reaches further than
-	// its mesh by its narrow band, so bricks are dirtied this far around them.
+	// its mesh by its narrow band, and a brick's cap depends on the instances within
+	// its clearance radius (NextGIGlobalSDF::brick_clearance()), so bricks are dirtied
+	// this far around them.
 	static float dirty_margin(uint32_t p_level);
 
 	// CPU planning for one level. Consumes the level's pending dirty volumes when
