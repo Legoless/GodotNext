@@ -73,8 +73,9 @@ void main() {
 	if (push.velocity_enabled != 0u && guide.a > 0.5) {
 		// Dynamic instances follow the prepass velocity; smooth surfaces blend toward the virtual
 		// motion of the hit point, which the depth and hit distance define.
+		// Forward+ writes motion = previous uv - current uv, as TAA and the diffuse filter read it.
 		vec2 motion = textureLod(velocity_tex, uv, 0.0).xy;
-		vec2 surface_uv = uv - motion;
+		vec2 surface_uv = uv + motion;
 		const float hit_distance = textureLod(hit_distance_tex, uv, 0.0).r;
 		vec3 view_dir = normalize(world - params.camera_pos.xyz);
 		vec3 virtual_uv_depth = nextgi_view_project(params.prev_view_proj, world + view_dir * hit_distance);
