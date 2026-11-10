@@ -33,10 +33,13 @@ extends Node
 ## - SWRT: none of the 12 frame-block timestamps, and the software tracer's own stamp (#186 step 7):
 ##   "NextGI SDF Trace", or "NextGI SDF Lite Probes" under Lumen Lite. Until the software tier feeds
 ##   the frame block (plan §21.2.4), it traces outside it;
+## - SWRT: no "Render SDFGI" or "Render GI" timestamp. NextGI replaces SDFGI for an Environment with
+##   nextgi_enabled on an active tier (#187), through RendererSceneRenderRD::_nextgi_active();
+##   meaningful with --sdfgi at High, where the forward pass does not turn SDFGI off by itself;
 ## after the run, from nextgi_get_tier_info() rather than the timestamps: the block never ran. Only
 ## the block creates the SRC relight, so src_relight_max_texels must be absent, and a run whose
 ## profile lost the block's stamps still fails. On DISABLED without --sdfgi, nothing allocated
-## RB_TEX_AMBIENT.
+## RB_TEX_AMBIENT; on DISABLED with --sdfgi, SDFGI ran ("Render SDFGI"), as upstream.
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
@@ -69,6 +72,7 @@ var process_frames := 0
 var checked_frames := 0
 var probe_frames := 0
 var render_gi_frames := 0
+var sdfgi_frames := 0
 var nextgi_frames := 0
 var as_updates_max_gpu_ns := 0
 var as_builds_max_gpu_ns := 0
@@ -185,6 +189,7 @@ func _check_frame(names: PackedStringArray) -> void:
 	var nextgi_stamps := 0
 	var probe_faces := 0
 	var render_gi := false
+	var render_sdfgi := false
 	for name in names:
 		if name == "> NextGI":
 			begins += 1
@@ -194,10 +199,14 @@ func _check_frame(names: PackedStringArray) -> void:
 			probe_faces += 1
 		if name.contains("Render GI"):
 			render_gi = true
+		if name.begins_with("Render SDFGI"):
+			render_sdfgi = true
 	if probe_faces > 0:
 		probe_frames += 1
 	if render_gi:
 		render_gi_frames += 1
+	if render_sdfgi:
+		sdfgi_frames += 1
 	if nextgi_stamps > 0:
 		nextgi_frames += 1
 
@@ -213,6 +222,8 @@ func _check_frame(names: PackedStringArray) -> void:
 				break
 		if not names.has(tracer_stamp):
 			_fail("no \"%s\" timestamp in a SWRT frame: %s" % [tracer_stamp, _nextgi_names(names)])
+		if render_sdfgi or render_gi:
+			_fail("SDFGI ran on the SWRT tier for an Environment with nextgi_enabled (\"Render SDFGI\": %s, \"Render GI\": %s)" % [render_sdfgi, render_gi])
 		return
 
 	# One main view, so exactly one block, also in frames that render reflection-probe faces.
@@ -269,6 +280,9 @@ func _final_failures() -> PackedStringArray:
 		# Lumen Lite's irradiance field writes the ambient buffer on SWRT, outside the block.
 		if tier == "DISABLED" and not sdfgi and probe.ambient_size != Vector2i.ZERO:
 			result.append("RB_TEX_AMBIENT is %s on the DISABLED tier, expected none" % [probe.ambient_size])
+		# With the project setting off, SDFGI follows the Environment as upstream.
+		if tier == "DISABLED" and sdfgi and sdfgi_frames == 0:
+			result.append("SDFGI never ran on the DISABLED tier with --sdfgi (no \"Render SDFGI\" timestamp)")
 	if expect == "active":
 		if probe_frames == 0:
 			result.append("no frame rendered a reflection-probe face")
@@ -305,6 +319,7 @@ func _finish(final_failures: PackedStringArray) -> void:
 		"as_builds_max_gpu_ns": as_builds_max_gpu_ns,
 		"reflection_probe_frames": probe_frames,
 		"render_gi_frames": render_gi_frames,
+		"sdfgi_frames": sdfgi_frames,
 		"internal_size": probe.internal_size if probe != null else Vector2i.ZERO,
 		"normal_roughness": probe.normal_roughness if probe != null else false,
 		"ambient_size": probe.ambient_size if probe != null else Vector2i.ZERO,
