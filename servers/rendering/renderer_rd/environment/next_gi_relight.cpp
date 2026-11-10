@@ -327,6 +327,7 @@ void NextGIRelight::free_resources() {
 	}
 	indirect_texture = RID();
 	page_rect_buffer = RID();
+	page_rect_uploaded = 0;
 	radiance = RID();
 	mask = RID();
 	dummy_depth = RID();
@@ -512,6 +513,7 @@ void NextGIRelight::set_page_extent(const NextGIAtlasBudget &p_budget) {
 	instance_index.clear();
 	pass_record_keys.clear();
 	page_table_count = 0;
+	page_rect_uploaded = 0;
 }
 
 void NextGIRelight::collect_current_page_sets(LocalVector<uint32_t> &r_sets) const {
@@ -1305,6 +1307,7 @@ void NextGIRelight::build_page_rect_words(LocalVector<uint32_t> &r_words) const 
 
 void NextGIRelight::_upload_page_rects() {
 	if (page_table_count == 0) {
+		page_rect_uploaded = 0;
 		return;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -1319,6 +1322,7 @@ void NextGIRelight::_upload_page_rects() {
 	LocalVector<uint32_t> words;
 	build_page_rect_words(words);
 	rd->buffer_update(page_rect_buffer, 0, words.size() * sizeof(uint32_t), words.ptr());
+	page_rect_uploaded = page_table_count;
 }
 
 float NextGIRelight::get_max_origin_offset() const {

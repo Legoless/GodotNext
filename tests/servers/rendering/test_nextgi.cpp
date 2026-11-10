@@ -3227,6 +3227,29 @@ TEST_CASE("[NextGI][Lite] Relight schedules only page sets from the current reco
 	CHECK_EQ(relight.get_page_set_count(), 2u);
 }
 
+TEST_CASE("[NextGI][Lite] The page rect count covers only uploaded rects") {
+	// The record pass assigns page tables before relight() uploads their rects, and relight() can
+	// return before the upload (for example while the scene is not traceable). The gather, the WRC and voxel
+	// lighting bound their page rect reads by get_page_rect_count(), so it must not count page
+	// tables whose rects are not in the buffer yet (a read past the buffer on the GPU).
+	RendererRD::NextGIRelight relight;
+	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false, true));
+	const RendererRD::NextGICard cards[2] = { lite_test_card(64), lite_test_card(32) };
+	relight.begin_record_pass();
+	RendererRD::NextGIInstanceRecord record;
+	record.card_set = 0;
+	record.tlas_index = 0;
+	CHECK_EQ(relight.assign_card_pages(lite_test_instance(0), record, UINT32_MAX, 0, cards, 2), 0u);
+	LocalVector<uint32_t> words;
+	relight.build_page_rect_words(words);
+	CHECK_EQ(words.size(), 4u);
+	CHECK_FALSE(relight.get_page_rect_buffer().is_valid());
+	CHECK_EQ(relight.get_page_rect_count(), 0u);
+	// A new extent drops every page table; the count stays empty until the next upload.
+	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false, false));
+	CHECK_EQ(relight.get_page_rect_count(), 0u);
+}
+
 TEST_CASE("[NextGI][Lite] A record whose pages are evicted later in the same pass is marked evicted") {
 	RendererRD::NextGIRelight relight;
 	// One 4096x2048 Lite atlas holds 128 sets of four 128-texel cards.

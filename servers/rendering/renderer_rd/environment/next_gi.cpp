@@ -965,12 +965,7 @@ Dictionary NextGI::get_tier_info() const {
 	}
 	// GodotNext: ps_voxel_lighting (#188)
 	if (voxel_lighting != nullptr) {
-		info["voxel_lighting_retrace"] = int64_t(voxel_lighting->get_retrace_rays());
-		info["voxel_lighting_coverage"] = voxel_lighting->get_coverage();
-		info["voxel_lighting_coverage_ppm"] = voxel_lighting->get_coverage_ppm();
-		info["voxel_lighting_volume_bytes"] = int64_t(voxel_lighting->get_allocated_bytes());
-		info["voxel_lighting_stored_hits"] = int64_t(voxel_lighting->get_stored_hits());
-		info["voxel_lighting_resampled_nonzero"] = int64_t(voxel_lighting->get_resampled_nonzero());
+		voxel_lighting->fill_info(info);
 	}
 	_append_swrt_info(info);
 	// GodotNext: ps_tier_rule (#187). A runtime request held until the next start.
@@ -1094,7 +1089,7 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 	if (voxel_lighting == nullptr) {
 		voxel_lighting = memnew(NextGIVoxelLighting);
 	}
-	voxel_lighting->update_render(p_render_data, rt_scene, relight, src);
+	voxel_lighting->update_render(p_render_data, relight, src);
 	// GodotNext: ps_swrt_trace (#186). The ray-query builder marks a whole ShaderRD,
 	// so the software trace is a sibling of the HWRT gather. The software tier
 	// stays out of the ray-query frame block (#187).

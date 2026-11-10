@@ -7,9 +7,10 @@
 // layout(set = S, binding = W) buffer NextGIVoxelWeights { uint data[]; } voxel_weights;
 //
 // Clipmap origins are NextGIVoxelClipmap: each ivec4 is the global-SDF origin
-// in xyz and the lighting voxel size as floatBits in w. Direction d stores the
-// surface found by tracing along +d (that surface faces -d). The lookup reads
-// the slot whose stored surface faces the gradient.
+// in xyz and the lighting voxel size as floatBits in w. Slot d stores the
+// nearest surface on the voxel's axis line that faces -d (an entry found
+// tracing along +d, or the exit along -d from a voxel inside a solid). The
+// lookup reads the slot whose stored surface faces the gradient.
 
 #ifndef NEXTGI_VOXEL_LIGHTING_INC_GLSL
 #define NEXTGI_VOXEL_LIGHTING_INC_GLSL

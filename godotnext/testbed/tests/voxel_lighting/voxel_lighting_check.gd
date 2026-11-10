@@ -1,14 +1,18 @@
 extends Node3D
 ## #188: the kitbash must store voxel-lighting hits. A missing counter fails the run.
-## Hardware ray tracing also requires coverage and resampled radiance.
+## Hardware ray tracing also requires coverage and resampled radiance. Those are GPU
+## counters, so the check turns on debug/voxel_lighting_readback.
 ## Set rendering/global_illumination/nextgi/enabled before launch. The tier stays
 ## disabled while that project setting is off.
 ## hardware_ray_tracing Off (1) is the software tier and only requires stored hits.
+
+const READBACK := "rendering/global_illumination/nextgi/debug/voxel_lighting_readback"
 
 var _frames := 0
 
 
 func _ready() -> void:
+	ProjectSettings.set_setting(READBACK, true)
 	var kitbash: PackedScene = load("res://scenes/swrt_kitbash/swrt_kitbash.tscn")
 	var root := kitbash.instantiate()
 	var world := root.get_node_or_null("WorldEnvironment") as WorldEnvironment
@@ -23,6 +27,7 @@ func _ready() -> void:
 
 
 func _fail(reason: String) -> void:
+	ProjectSettings.set_setting(READBACK, false)
 	push_error(reason)
 	print("VOXEL_LIGHTING_FAIL %s" % reason)
 	get_tree().quit(1)
@@ -54,7 +59,8 @@ func _process(_delta: float) -> void:
 	var stored := int(counters["voxel_lighting_stored_hits"])
 	var resampled := int(counters["voxel_lighting_resampled_nonzero"])
 	var tier := str(info["tier"])
-	print("VOXEL_LIGHTING retrace=%d coverage_ppm=%d volume_bytes=%d stored_hits=%d resampled_nonzero=%d tier=%s" % [retrace, coverage_ppm, volume_bytes, stored, resampled, tier])
+	var unpaged := int(info.get("voxel_lighting_unpaged_hits", -1))
+	print("VOXEL_LIGHTING retrace=%d coverage_ppm=%d volume_bytes=%d stored_hits=%d unpaged_hits=%d resampled_nonzero=%d tier=%s" % [retrace, coverage_ppm, volume_bytes, stored, unpaged, resampled, tier])
 	if stored <= 0:
 		_fail("stored hits are 0")
 		return
@@ -66,4 +72,5 @@ func _process(_delta: float) -> void:
 		if resampled <= 0:
 			_fail("resampled radiance is 0")
 			return
+	ProjectSettings.set_setting(READBACK, false)
 	get_tree().quit(0)

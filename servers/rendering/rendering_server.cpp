@@ -4106,6 +4106,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/swrt_trace_readback", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_max_steps", PROPERTY_HINT_RANGE, "0,256,1"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_pool_bricks", PROPERTY_HINT_RANGE, "0,65536,1"), 0);
+	// GodotNext: ps_voxel_lighting (#188). Off keeps the voxel shade free of GPU readbacks.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/voxel_lighting_readback", false);
 	// GodotNext: nextgi_reference
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_mode", PROPERTY_HINT_ENUM, "Off,Full,Direct Only,Reflections Only"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_seed", PROPERTY_HINT_RANGE, "1,4096,1"), 1);

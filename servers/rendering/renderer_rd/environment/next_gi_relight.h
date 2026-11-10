@@ -156,6 +156,10 @@ private:
 	LocalVector<ScheduledPage> scheduled_pages;
 	RID page_rect_buffer;
 	uint32_t page_rect_capacity = 0;
+	// Page table entries the page rect buffer holds. The record pass assigns page tables before
+	// relight() uploads their rects, and relight() can return before the upload (for example while
+	// the scene is not traceable), so page_table_count can run past the buffer.
+	uint32_t page_rect_uploaded = 0;
 	RID indirect_texture;
 
 	bool _ensure_atlases();
@@ -205,7 +209,9 @@ public:
 	void relight(RenderDataRD *p_render_data);
 
 	RID get_page_rect_buffer() const { return page_rect_buffer; }
-	uint32_t get_page_rect_count() const { return page_table_count; }
+	// Entries in get_page_rect_buffer(). A page table at or past this count has no rect yet, and
+	// the gather, the WRC and voxel lighting treat it as unpaged.
+	uint32_t get_page_rect_count() const { return page_rect_uploaded; }
 	// UINT32_MAX when this instance has no relight pages. Bit 31 is the evicted mark.
 	uint32_t get_instance_page_table(RenderGeometryInstance *p_instance, uint32_t p_element = UINT32_MAX) const;
 	RID get_indirect_texture() const { return indirect_texture; }
