@@ -92,6 +92,8 @@ public:
 		String name = "Unknown";
 		uint32_t vendor = Vendor::VENDOR_UNKNOWN;
 		DeviceType type = DEVICE_TYPE_OTHER;
+		// GodotNext: ps_tier_rule (#187). GPU cores or compute units; 0 when the driver does not know.
+		uint32_t compute_units = 0;
 	};
 
 	virtual ~RenderingContextDriver();

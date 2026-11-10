@@ -63,7 +63,20 @@ public:
 	// Reads one static/dynamic/coverage brick back from the GPU.
 	bool download_brick(uint32_t p_level, const Vector3i &p_brick, NextGIGlobalSDF::BrickSplit &r_split) const;
 	bool download_coarse(uint32_t p_level, LocalVector<float> &r_coarse) const;
-	bool validate_reference(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float &r_max_error, uint32_t &r_sign_mismatches, uint32_t &r_checked) const;
+	// Compares p_count random voxels of a level with the CPU composite
+	// (NextGIGlobalSDF::composite_distance()). GodotNext: ps_swrt_trace (#186): r_overestimates
+	// counts resident voxels that read more than a quarter voxel past the minimum over every
+	// instance; for box-like meshes, whose CPU distance is exact, that is a step past a surface.
+	bool validate_reference(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float &r_max_error, uint32_t &r_sign_mismatches, uint32_t &r_checked, uint32_t *r_overestimates = nullptr) const;
+	// GodotNext: ps_swrt_trace (#186). Reads the coverage words of a level's resident
+	// bricks and compares every bit with the CPU rule (a voxel is covered when a two-sided
+	// instance wins its static/dynamic class, the static class's brick cap included).
+	// Bricks without a two-sided instance must be empty; up to p_max_bricks bricks with one
+	// are sampled. Voxels where the winner is within p_tie of another distance are skipped.
+	bool validate_coverage(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_max_bricks, float p_tie, uint32_t &r_checked, uint32_t &r_expected_set, uint32_t &r_mismatches) const;
+	// The coverage word and bit of a voxel (brick-local index x + 8y + 64z) in a slot.
+	static uint32_t coverage_word(uint32_t p_slot, uint32_t p_voxel_index) { return p_slot * (COVERAGE_BYTES / 4) + p_voxel_index / 32; }
+	static uint32_t coverage_bit(uint32_t p_voxel_index) { return 1u << (p_voxel_index & 31u); }
 	void release_level(uint32_t p_level);
 	void scroll_level(uint32_t p_level, const Vector3i &p_delta_bricks);
 	void free_all();
@@ -71,6 +84,10 @@ public:
 	int32_t get_slot(uint32_t p_level, const Vector3i &p_brick) const;
 	bool has_brick(uint32_t p_level, const Vector3i &p_brick) const;
 	uint32_t get_used_bricks() const { return used; }
+	// GodotNext: ps_swrt_trace (#186). The last update_bricks() ran out of pool slots.
+	bool is_allocation_failed() const { return last_allocation_failed; }
+	// The pool buffers exist (ensure_buffers() succeeded on a device).
+	bool has_buffers() const { return pool_buffer.is_valid() && dynamic_pool_buffer.is_valid() && coverage_buffer.is_valid(); }
 	uint32_t get_capacity() const { return capacity; }
 	const PackedInt32Array &get_page_table(uint32_t p_level) const { return page_tables[p_level]; }
 	RID get_pool_buffer() const { return pool_buffer; }
@@ -92,6 +109,7 @@ private:
 
 	uint32_t capacity = 0;
 	uint32_t used = 0;
+	bool last_allocation_failed = false; // GodotNext: ps_swrt_trace (#186)
 	mutable PackedByteArray pool_data;
 	Vector<PackedInt32Array> page_tables;
 	Vector<uint8_t> slot_used;

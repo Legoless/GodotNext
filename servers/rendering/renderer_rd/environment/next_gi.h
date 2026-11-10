@@ -572,6 +572,11 @@ public:
 	// PASS_SLOTS timestamp, empty slots included. Until the gather lands both buffers are cleared to
 	// (0, 0, 0, 0), so the opaque pass keeps its own ambient and specular through the buffer alpha.
 	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution);
+	// GodotNext: ps_swrt_trace (#186). A software-tier view traces after its depth prepass.
+	// Not multiview: the trace binds one depth and one normal-roughness layer.
+	static bool view_traces_swrt(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count);
+	void render_swrt_view(RenderDataRD *p_render_data, RID p_normal_roughness);
+	NextGISWRTTrace *get_swrt_trace() const { return swrt_trace; }
 	// Writes the reference mean into the HDR color when reference_mode is on.
 	void composite_reference(RID p_color);
 

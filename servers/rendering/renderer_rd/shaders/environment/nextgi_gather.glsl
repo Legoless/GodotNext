@@ -62,6 +62,8 @@ layout(set = 0, binding = 39) uniform accelerationStructureEXT far_tlas;
 #endif
 #define NEXTGI_WRC
 #include "nextgi_rt_inc.glsl"
+// GodotNext: nextgi_view_math. One reconstruction for every NextGI pass.
+#include "nextgi_view_inc.glsl"
 
 // GodotNext: nextgi_blue_noise (#54). R2-rotated 64x64 tile lookup, wrapping by bitmask.
 vec2 nextgi_blue_noise_sample(ivec2 p_pixel, uint p_frame) {
@@ -160,13 +162,14 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	float fog_depth_begin;
 	float fog_depth_end;
 	float fog_depth_curve;
+	uint fog_pad0; // GodotNext: nextgi_view_math. Explicit std430 padding, as in GatherParamsGPU.
+	uint fog_pad1;
 	vec4 fog_light_color;
 	float far_distance;
 	uint far_occlusion_only;
 	uint front_layer;
 	uint front_pad0;
-	uint front_pad1;
-	uint front_pad2;
+	vec4 view_to_world[3]; // GodotNext: nextgi_view_math. The normal-roughness buffer is in view space.
 }
 params;
 
@@ -448,9 +451,7 @@ float nextgi_radical_inverse(uint bits) {
 
 vec3 nextgi_unproject(vec2 pixel, float depth) {
 	vec2 uv = (pixel + 0.5) / params.screen_jitter.xy;
-	vec4 ndc = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-	vec4 world = params.inv_view_proj * ndc;
-	return world.xyz / world.w;
+	return nextgi_view_reconstruct(params.inv_view_proj, uv, depth);
 }
 
 vec3 nextgi_geometric_normal(ivec2 pixel, float depth, vec3 world) {
@@ -530,49 +531,18 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 #endif
 }
 
-// Hi-Z march, at most 24 steps. A hit samples the last frame. A miss leaves march_end on the ray.
+// GodotNext: nextgi_view_math. The Hi-Z march is shared with the software tier (#186).
+#define NEXTGI_SCREEN_HIZ_TEX hiz_tex
+#define NEXTGI_SCREEN_LAST_FRAME_TEX last_frame_tex
+#include "nextgi_screen_trace_inc.glsl"
+
 bool nextgi_screen_trace(vec3 origin, vec3 direction, float tmax, out vec3 color, out vec3 march_end) {
 	color = vec3(0.0);
 	march_end = origin;
 	if (params.pad0 == 0u) {
 		return false;
 	}
-	mat4 view_proj = inverse(params.inv_view_proj);
-	vec3 far_pos = origin + direction * tmax;
-	vec4 clip0 = view_proj * vec4(origin, 1.0);
-	vec4 clip1 = view_proj * vec4(far_pos, 1.0);
-	if (clip0.w <= 0.001) {
-		return false;
-	}
-	vec3 ndc0 = clip0.xyz / clip0.w;
-	vec3 ndc1 = clip1.w > 0.001 ? clip1.xyz / clip1.w : ndc0;
-	vec2 uv0 = ndc0.xy * 0.5 + 0.5;
-	vec2 uv1 = ndc1.xy * 0.5 + 0.5;
-	vec2 screen = max(params.screen_jitter.xy, vec2(1.0));
-	float mip = clamp(log2(max(length((uv1 - uv0) * screen) / 24.0, 1.0)), 0.0, float(params.pad1));
-	bool left_screen = false;
-	for (int step = 0; step < 24; step++) {
-		float t = (float(step) + 0.5) / 24.0;
-		vec2 uv = mix(uv0, uv1, t);
-		march_end = mix(origin, far_pos, t);
-		if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
-			left_screen = true;
-			break;
-		}
-		float scene_z = textureLod(hiz_tex, uv, mip).r;
-		ivec2 pixel = ivec2(clamp(uv * screen, vec2(0.0), screen - 1.0));
-		vec3 scene_pos = nextgi_unproject(vec2(pixel), scene_z);
-		float scene_dist = max(length(scene_pos - params.camera_pos.xyz), 0.001);
-		float ray_dist = length(march_end - params.camera_pos.xyz);
-		if (ray_dist > scene_dist && ray_dist < scene_dist + 0.1 * scene_dist) {
-			color = textureLod(last_frame_tex, uv, 0.0).rgb;
-			return true;
-		}
-	}
-	if (!left_screen) {
-		march_end = origin;
-	}
-	return false;
+	return nextgi_screen_trace_hiz(inverse(params.inv_view_proj), params.inv_view_proj, params.camera_pos.xyz, params.screen_jitter.xy, float(params.pad1), origin, direction, tmax, color, march_end);
 }
 
 void nextgi_gather_main() {
@@ -822,14 +792,8 @@ void nextgi_coverage_main() {
 }
 
 // GodotNext: nextgi_reflect (#60). One GGX VNDF reflection ray per trace pixel.
-uint nextgi_reflect_hash(uint p_x) {
-	p_x ^= p_x >> 16;
-	p_x *= 0x7feb352du;
-	p_x ^= p_x >> 15;
-	p_x *= 0x846ca68bu;
-	p_x ^= p_x >> 16;
-	return p_x;
-}
+// GodotNext: ps_swrt_trace (#186). The hash and the GGX sample are shared with the software tier.
+#include "nextgi_reflect_inc.glsl"
 
 // GodotNext: nextgi_reflection_behaviours (#132). Mirrors the forward fog
 // formula for a hit at p_distance/p_world; sky misses keep their radiance.
@@ -851,20 +815,6 @@ vec3 nextgi_reflection_fog(vec3 p_radiance, vec3 p_world, float p_distance) {
 	return mix(p_radiance, params.fog_light_color.rgb * params.fog_light_color.a, clamp(amount, 0.0, 1.0));
 }
 
-vec3 nextgi_reflect_sample_ggx(vec3 p_normal, vec3 p_view, float p_roughness, vec2 p_u) {
-	float alpha = max(p_roughness * p_roughness, 1e-3);
-	vec3 up = abs(p_normal.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-	vec3 t1 = normalize(cross(up, p_normal));
-	vec3 t2 = cross(p_normal, t1);
-	vec3 v_local = vec3(dot(p_view, t1), dot(p_view, t2), dot(p_view, p_normal));
-	float phi = 6.2831853 * p_u.x;
-	float cos_theta = sqrt((1.0 - p_u.y) / (1.0 + (alpha * alpha - 1.0) * p_u.y));
-	float sin_theta = sqrt(max(1.0 - cos_theta * cos_theta, 0.0));
-	vec3 h_local = vec3(sin_theta * cos(phi), sin_theta * sin(phi), cos_theta);
-	vec3 h = normalize(t1 * h_local.x + t2 * h_local.y + p_normal * h_local.z);
-	return reflect(-p_view, h);
-}
-
 void nextgi_reflect_main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	ivec2 full_size = ivec2(params.screen_jitter.xy);
@@ -882,12 +832,8 @@ void nextgi_reflect_main() {
 	}
 	atomicAdd(reflect_counters.traced, 1u);
 	vec4 guide = texelFetch(normal_roughness_tex, full, 0);
-	float roughness = guide.a;
-	if (roughness > 0.5) {
-		roughness = 1.0 - roughness;
-	}
-	roughness /= (127.0 / 255.0);
-	vec3 normal = normalize(guide.xyz * 2.0 - 1.0);
+	float roughness = nextgi_reflect_decode_roughness(guide.a);
+	vec3 normal = nextgi_view_world_normal(mat3(params.view_to_world[0].xyz, params.view_to_world[1].xyz, params.view_to_world[2].xyz), guide.xyz);
 	vec3 world = nextgi_unproject(vec2(full), depth);
 	vec3 view_dir = normalize(params.camera_pos.xyz - world);
 	vec3 origin = world + normal * params.max_origin_offset;

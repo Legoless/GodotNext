@@ -281,7 +281,7 @@ void NextGIDenoise::process_temporal(const TemporalParams &p_params) {
 	TemporalParamsGPU gpu_params;
 	for (int i = 0; i < 16; i++) {
 		gpu_params.prev_view_proj[i] = p_params.prev_view_proj.columns[i / 4][i % 4];
-		gpu_params.inv_projection[i] = p_params.inv_projection.columns[i / 4][i % 4];
+		gpu_params.inv_view_proj[i] = p_params.inv_view_proj.columns[i / 4][i % 4];
 	}
 	gpu_params.camera_pos[0] = p_params.camera_pos.x;
 	gpu_params.camera_pos[1] = p_params.camera_pos.y;

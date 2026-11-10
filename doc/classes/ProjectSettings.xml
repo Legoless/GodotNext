@@ -3147,6 +3147,15 @@
 		<member name="rendering/global_illumination/nextgi/debug/reference_seed" type="int" setter="" getter="" default="1">
 			Seed for the reference path tracer. The same seed and scene produce the same accumulation.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/swrt_trace_max_steps" type="int" setter="" getter="" default="0">
+			Overrides the software ray tracer's step budget per ray. [code]0[/code] keeps the default of 64 steps. A ray that runs out of steps reports a hit where it stopped. Used by the software trace check to exercise that rule.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/swrt_trace_pool_bricks" type="int" setter="" getter="" default="0">
+			Overrides the size of the software ray tracer's global SDF brick pool, in 8×8×8 bricks. [code]0[/code] keeps the default pool for 6 clipmap levels. A pool too small for the scene makes the tracer drop levels from the top (down to 3, reported as [code]SWRT_REDUCED[/code]). Read when the tracer is created. Used by the software trace check to exercise that rule.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/swrt_trace_readback" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the software tier reads back every ray of its verification grid (gather, reflection and shadow rays toward the first directional light) and the global SDF's coverage check, and [method RenderingServer.nextgi_get_tier_info] returns them as [code]swrt_trace_readback[/code]. Reading them stalls the GPU; use it for testing only.
+		</member>
 		<member name="rendering/global_illumination/nextgi/enabled" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use the software tier (SWRT) instead of SDFGI. See [method RenderingServer.nextgi_get_tier_info].
 			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed, and an environment's own SDFGI settings are unchanged.

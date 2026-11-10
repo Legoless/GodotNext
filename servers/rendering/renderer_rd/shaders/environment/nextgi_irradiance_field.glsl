@@ -9,6 +9,9 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// GodotNext: nextgi_view_math. One reconstruction for every NextGI pass.
+#include "nextgi_view_inc.glsl"
+
 layout(push_constant, std430) uniform LitePush {
 	uint mode;
 	uint probe_base;
@@ -55,9 +58,7 @@ LiteParams lite_params() {
 vec3 lite_unproject(ivec2 pixel, float depth, vec2 internal_size) {
 	LiteParams params = lite_params();
 	vec2 uv = (vec2(pixel) + vec2(0.5)) / max(internal_size, vec2(1.0));
-	vec4 clip = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
-	vec4 world_h = params.inv_view_proj * clip;
-	return world_h.xyz / max(abs(world_h.w), 1e-6) * sign(world_h.w);
+	return nextgi_view_reconstruct(params.inv_view_proj, uv, depth);
 }
 
 ivec2 lite_oct_texel(vec3 direction) {

@@ -73,6 +73,17 @@ public:
 	// Camera-centred level origin in voxels, snapped to the brick size.
 	static Vector3i scrolled_origin(const Vector3 &p_camera, uint32_t p_level);
 	static float sample_instance(const Instance &p_instance, const Vector3 &p_world);
+	// GodotNext: ps_swrt_trace (#186). The CPU twin of nextgi_mesh_sdf_distance_inc.glsl,
+	// which the composite and the SWRT detail trace share (the comments there give the
+	// math). sample_instance() is mesh_world_distance() of the mip-0 sample.
+	// The world length of one local unit along each local axis: the column lengths of an
+	// orthogonal basis, the smallest singular value on every axis of a sheared one.
+	static Vector3 instance_axis_scale(const Basis &p_basis);
+	// The mesh's own bounds: the SDF bounds less the mip-0 band the builder pads them by.
+	static AABB mesh_surface_bounds(const MeshSDFData &p_field);
+	// A lower bound of the world distance from a local sample (p_sampled at p_local,
+	// clamped to p_bounds) of an instance with p_axis_scale.
+	static float mesh_world_distance(const Vector3 &p_local, const AABB &p_bounds, const AABB &p_surface, float p_sampled, const Vector3 &p_axis_scale);
 	// Level i updates every 2^i frames (plan §21.2 step 3).
 	static bool level_updates_on_frame(uint32_t p_level, uint64_t p_frame);
 	// The brick-space shift from the old level origin to the new one.
@@ -92,11 +103,28 @@ public:
 	// min-composites only these into the brick; dynamic and two-sided instances
 	// keep their flags for the static/dynamic split and the coverage bit.
 	static uint32_t cull_instances_for_brick(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick, uint32_t *r_indices, uint32_t p_max_indices);
+	// GodotNext: ps_swrt_trace (#186). The cull box of a brick: the brick grown by one
+	// voxel. cull_instances_for_brick() keeps the instances whose world bounds overlap it.
+	static AABB brick_cull_box(uint32_t p_level, const Vector3i &p_origin, const Vector3i &p_brick);
+	// Every instance a brick does not list lies outside its cull box, so the distance from
+	// a point of the box to the box's exterior bounds their distance. The composite caps
+	// each voxel with it (nextgi_global_sdf.glsl): the minimum over the listed instances
+	// alone overestimates next to an unlisted one, and rays stepped through it.
+	static float brick_cap(const AABB &p_cull_box, const Vector3 &p_world);
+	// One composite voxel on the CPU: the culled instances' minimum, capped by brick_cap().
+	static float composite_distance(const Vector<Instance> &p_instances, const uint32_t *p_culled, uint32_t p_culled_count, const AABB &p_cull_box, const Vector3 &p_world);
+	// GodotNext: ps_swrt_trace (#186). The same test for every brick of a level at
+	// once: r_offsets has BRICKS_PER_LEVEL + 1 entries and brick b's instances are
+	// r_indices[r_offsets[b] .. r_offsets[b + 1]), in instance order. A full level
+	// costs one pass over the instances instead of one per brick.
+	static void bin_instances(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, LocalVector<uint32_t> &r_offsets, LocalVector<uint32_t> &r_indices);
 
 	// Static/dynamic split and the two-sided coverage bit, the layout the
 	// compositing compute writes: static bricks hold only static instances,
 	// dynamic bricks only dynamic ones and composite over static at lookup;
 	// a voxel whose winning sample is two-sided sets its coverage bit.
+	// GodotNext: ps_swrt_trace (#186). The static distance carries the brick_cap() of the
+	// voxel center, so min(static, dynamic) never exceeds it.
 	struct BrickSplit {
 		LocalVector<float> static_distance;
 		LocalVector<float> dynamic_distance;

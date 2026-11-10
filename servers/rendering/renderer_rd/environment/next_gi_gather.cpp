@@ -38,6 +38,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/nextgi_blue_noise.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
@@ -103,13 +104,20 @@ struct GatherParamsGPU {
 	float fog_depth_begin;
 	float fog_depth_end;
 	float fog_depth_curve;
+	// GodotNext: nextgi_view_math. std430 aligns the vec4 below to 16 bytes; without these
+	// the shader read fog_light_color, far_distance and front_layer 8 bytes off.
+	uint32_t fog_pad[2];
 	float fog_light_color[4];
 	float far_distance;
 	uint32_t far_occlusion_only;
 	uint32_t front_layer;
-	uint32_t front_pad[3];
+	uint32_t front_pad;
+	// GodotNext: nextgi_view_math. The camera basis: the normal-roughness buffer is in view space.
+	float view_to_world[12];
 };
-static_assert(sizeof(GatherParamsGPU) == 352, "Gather params must match nextgi_gather.glsl.");
+static_assert(sizeof(GatherParamsGPU) == 400, "Gather params must match nextgi_gather.glsl.");
+static_assert(offsetof(GatherParamsGPU, fog_light_color) == 320, "std430 aligns fog_light_color to 16 bytes.");
+static_assert(offsetof(GatherParamsGPU, view_to_world) == 352, "view_to_world must follow front_pad.");
 static_assert(offsetof(GatherParamsGPU, record_count) == 224, "record_count must follow feedback_stride.");
 static_assert(offsetof(GatherParamsGPU, page_rect_count) == 232, "page_rect_count must follow velocity_enabled.");
 
@@ -531,10 +539,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	}
 	RenderSceneDataRD *scene_data = p_render_data->scene_data;
 	ERR_FAIL_NULL_V(scene_data, false);
-	const Projection view_proj = scene_data->cam_projection * Projection(scene_data->cam_transform.affine_inverse());
+	// GodotNext: nextgi_view_math. The depth texture holds the corrected projection's
+	// clip z (reverse Z, flip_y), so every reconstruction and reprojection uses it.
+	const Projection view_proj = NextGIView::view_projection(*scene_data);
 	last_inv_view_proj = view_proj.inverse();
-	// prev_view_projection is the projection only. Match the current matrix, including the previous camera.
-	const Projection prev_view_proj = scene_data->prev_cam_projection * Projection(scene_data->prev_cam_transform.affine_inverse());
+	const Projection prev_view_proj = NextGIView::prev_view_projection(*scene_data);
 	GatherParamsGPU params;
 	_store_projection(view_proj.inverse(), params.inv_view_proj);
 	_store_projection(prev_view_proj, params.prev_view_proj);
@@ -632,12 +641,13 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		params.velocity_enabled = 0;
 	}
 	last_depth = depth;
-	last_inv_projection = scene_data->cam_projection.inverse();
+	last_inv_projection = NextGIView::inv_projection(*scene_data); // GodotNext: nextgi_view_math
 	last_velocity = front_layer ? RID() : (velocity.is_valid() ? velocity : RID());
 	params.front_layer = front_layer ? 1u : 0u;
-	params.front_pad[0] = 0u;
-	params.front_pad[1] = 0u;
-	params.front_pad[2] = 0u;
+	params.fog_pad[0] = 0u;
+	params.fog_pad[1] = 0u;
+	params.front_pad = 0u;
+	NextGIViewMath::store_basis(scene_data->cam_transform.basis, params.view_to_world); // GodotNext: nextgi_view_math
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	_free_uniform_set();
@@ -1016,7 +1026,7 @@ void NextGIGather::_denoise_probes() {
 	temporal.probe_size = Size2i(probe_extent.x, probe_extent.y);
 	temporal.screen_size = Size2i(last_screen_w, last_screen_h);
 	temporal.prev_view_proj = last_prev_view_proj;
-	temporal.inv_projection = last_inv_projection;
+	temporal.inv_view_proj = last_inv_view_proj; // GodotNext: nextgi_view_math
 	temporal.camera_pos = last_camera_pos;
 	temporal.prev_camera_pos = last_prev_camera_pos;
 	temporal.probe_stride = ray_stride;

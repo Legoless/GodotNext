@@ -32,6 +32,7 @@
 
 #include "core/math/math_funcs.h"
 #include "core/math/random_number_generator.h"
+#include "core/templates/hash_map.h"
 #include "servers/rendering/rendering_device.h"
 
 namespace {
@@ -53,7 +54,8 @@ struct GPUInstance {
 	float world_min[4];
 	float world_max[4];
 	uint32_t flags;
-	uint32_t pad[3];
+	// GodotNext: ps_swrt_trace (#186). NextGIGlobalSDF::instance_axis_scale().
+	float axis_scale[3];
 };
 static_assert(sizeof(GPUInstance) == 96, "GPUInstance must stay 96 bytes.");
 
@@ -354,6 +356,7 @@ bool NextGIGlobalSDFGPU::upload_brick(uint32_t p_level, const Vector3i &p_brick,
 }
 
 bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, const Vector3i *p_bricks, uint32_t p_count) {
+	last_allocation_failed = false; // GodotNext: ps_swrt_trace (#186). Only this call's slots count.
 	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || (p_count > 0 && p_bricks == nullptr)) {
 		return false;
 	}
@@ -365,60 +368,38 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		return false;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
+	// GodotNext: ps_swrt_trace (#186). The trace composites the whole scene, so the
+	// per-brick cull is binned once per call and only the instances a brick uses
+	// are uploaded, each mesh's pages and bricks once.
 	Vector<NextGIGlobalSDF::Instance> instances;
-	Vector<GPUInstance> gpu_instances;
-	Vector<GPUMeshInfo> mesh_infos;
-	PackedInt32Array page_data;
-	PackedByteArray brick_data;
 	for (const NextGIGlobalSDF::Instance &instance : p_instances) {
 		if (instance.field == nullptr || !instance.field->is_valid() || instance.field->page_tables.is_empty() || instance.field->brick_data.is_empty()) {
 			continue;
 		}
 		instances.push_back(instance);
-		const MeshSDFData *field = instance.field;
-		GPUMeshInfo mesh = {};
-		mesh.voxel_size = field->voxel_size;
-		mesh.flags = field->flags;
-		mesh.band = field->mip_bands[0];
-		for (int axis = 0; axis < 3; axis++) {
-			mesh.bounds_position[axis] = field->bounds.position[axis];
-			mesh.dimensions[axis] = field->mip_dimensions[0][axis];
-			mesh.brick_grid[axis] = field->mip_brick_grid_dimensions[0][axis];
-		}
-		mesh.page_offset = page_data.size();
-		page_data.append_array(field->page_tables[0]);
-		mesh.brick_offset = brick_data.size() / sizeof(uint32_t);
-		brick_data.append_array(field->brick_data[0]);
-		mesh_infos.push_back(mesh);
-
-		GPUInstance gpu = {};
-		const Transform3D inverse = instance.transform.affine_inverse();
-		for (int row = 0; row < 3; row++) {
-			gpu.inverse[row * 4] = inverse.basis.rows[row].x;
-			gpu.inverse[row * 4 + 1] = inverse.basis.rows[row].y;
-			gpu.inverse[row * 4 + 2] = inverse.basis.rows[row].z;
-			gpu.inverse[row * 4 + 3] = inverse.origin[row];
-		}
-		const AABB world_bounds = instance.transform.xform(field->bounds);
-		const Vector3 scale = instance.transform.basis.get_scale();
-		for (int axis = 0; axis < 3; axis++) {
-			gpu.world_min[axis] = world_bounds.position[axis];
-			gpu.world_max[axis] = world_bounds.position[axis] + world_bounds.size[axis];
-		}
-		gpu.world_min[3] = MAX(scale.x, MAX(scale.y, scale.z));
-		gpu.flags = (instance.dynamic ? 1u : 0u) | (instance.two_sided ? 2u : 0u);
-		gpu_instances.push_back(gpu);
 	}
+	LocalVector<uint32_t> bin_offsets;
+	LocalVector<uint32_t> bin_indices;
+	NextGIGlobalSDF::bin_instances(instances, p_level, p_origin, bin_offsets, bin_indices);
 
 	Vector<BrickWork> work;
 	Vector<uint32_t> work_indices;
-	LocalVector<uint32_t> culled;
-	culled.resize(instances.size());
+	LocalVector<int32_t> remap;
+	remap.resize(instances.size());
+	for (uint32_t index = 0; index < remap.size(); index++) {
+		remap[index] = -1;
+	}
+	LocalVector<uint32_t> used_instances;
 	bool allocation_failed = false;
 	for (uint32_t index = 0; index < p_count; index++) {
 		const Vector3i &brick = p_bricks[index];
-		const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(instances, p_level, p_origin, brick, culled.ptr(), culled.size());
-		if (culled_count == 0) {
+		if (brick.x < 0 || brick.y < 0 || brick.z < 0 || brick.x >= int(NextGIGlobalSDF::PAGE_SIZE) || brick.y >= int(NextGIGlobalSDF::PAGE_SIZE) || brick.z >= int(NextGIGlobalSDF::PAGE_SIZE)) {
+			continue;
+		}
+		const uint32_t table_index = _table_index(brick);
+		const uint32_t begin = bin_offsets[table_index];
+		const uint32_t end = bin_offsets[table_index + 1];
+		if (begin == end) {
 			_release_brick(p_level, brick);
 			continue;
 		}
@@ -433,16 +414,76 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		}
 		item.slot = slot;
 		item.instance_offset = work_indices.size();
-		item.instance_count = culled_count;
-		for (uint32_t i = 0; i < culled_count; i++) {
-			work_indices.push_back(culled[i]);
+		item.instance_count = end - begin;
+		for (uint32_t i = begin; i < end; i++) {
+			const uint32_t source = bin_indices[i];
+			if (remap[source] < 0) {
+				remap[source] = int32_t(used_instances.size());
+				used_instances.push_back(source);
+			}
+			work_indices.push_back(uint32_t(remap[source]));
 		}
 		work.push_back(item);
 		uint32_t coverage_zero[16] = {};
 		rd->buffer_update(coverage_buffer, slot * COVERAGE_BYTES, COVERAGE_BYTES, coverage_zero);
 	}
+	last_allocation_failed = allocation_failed;
 	if (work.is_empty()) {
-		return _update_coarse(p_level, p_origin);
+		const bool coarse = _update_coarse(p_level, p_origin);
+		return coarse && !allocation_failed;
+	}
+
+	Vector<GPUInstance> gpu_instances;
+	Vector<GPUMeshInfo> mesh_infos;
+	PackedInt32Array page_data;
+	PackedByteArray brick_data;
+	HashMap<const MeshSDFData *, GPUMeshInfo> uploaded;
+	for (const uint32_t source : used_instances) {
+		const NextGIGlobalSDF::Instance &instance = instances[source];
+		const MeshSDFData *field = instance.field;
+		GPUMeshInfo *known = uploaded.getptr(field);
+		GPUMeshInfo mesh = {};
+		if (known != nullptr) {
+			mesh = *known;
+		} else {
+			mesh.voxel_size = field->voxel_size;
+			mesh.flags = field->flags;
+			mesh.band = field->mip_bands[0];
+			for (int axis = 0; axis < 3; axis++) {
+				mesh.bounds_position[axis] = field->bounds.position[axis];
+				mesh.dimensions[axis] = field->mip_dimensions[0][axis];
+				mesh.brick_grid[axis] = field->mip_brick_grid_dimensions[0][axis];
+			}
+			mesh.page_offset = page_data.size();
+			page_data.append_array(field->page_tables[0]);
+			mesh.brick_offset = brick_data.size() / sizeof(uint32_t);
+			brick_data.append_array(field->brick_data[0]);
+			while (brick_data.size() % sizeof(uint32_t) != 0) {
+				brick_data.push_back(0);
+			}
+			uploaded.insert(field, mesh);
+		}
+		mesh_infos.push_back(mesh);
+
+		GPUInstance gpu = {};
+		const Transform3D inverse = instance.transform.affine_inverse();
+		for (int row = 0; row < 3; row++) {
+			gpu.inverse[row * 4] = inverse.basis.rows[row].x;
+			gpu.inverse[row * 4 + 1] = inverse.basis.rows[row].y;
+			gpu.inverse[row * 4 + 2] = inverse.basis.rows[row].z;
+			gpu.inverse[row * 4 + 3] = inverse.origin[row];
+		}
+		const AABB world_bounds = instance.transform.xform(field->bounds);
+		// GodotNext: ps_swrt_trace (#186). Per-axis scale: the largest one overestimated
+		// distances on non-uniformly scaled instances (nextgi_mesh_sdf_distance_inc.glsl).
+		const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(instance.transform.basis);
+		for (int axis = 0; axis < 3; axis++) {
+			gpu.world_min[axis] = world_bounds.position[axis];
+			gpu.world_max[axis] = world_bounds.position[axis] + world_bounds.size[axis];
+			gpu.axis_scale[axis] = axis_scale[axis];
+		}
+		gpu.flags = (instance.dynamic ? 1u : 0u) | (instance.two_sided ? 2u : 0u);
+		gpu_instances.push_back(gpu);
 	}
 
 	const RID instance_buffer = rd->storage_buffer_create(gpu_instances.size() * sizeof(GPUInstance), Span<uint8_t>((const uint8_t *)gpu_instances.ptr(), gpu_instances.size() * sizeof(GPUInstance)));
@@ -495,7 +536,8 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 	for (RID buffer : { instance_buffer, mesh_buffer, page_buffer, brick_buffer, work_buffer, indices_buffer }) {
 		rd->free_rid(buffer);
 	}
-	return !allocation_failed && _update_coarse(p_level, p_origin);
+	const bool coarse = _update_coarse(p_level, p_origin);
+	return coarse && !allocation_failed;
 }
 
 bool NextGIGlobalSDFGPU::download_brick(uint32_t p_level, const Vector3i &p_brick, NextGIGlobalSDF::BrickSplit &r_split) const {
@@ -539,10 +581,13 @@ bool NextGIGlobalSDFGPU::download_coarse(uint32_t p_level, LocalVector<float> &r
 	return true;
 }
 
-bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float &r_max_error, uint32_t &r_sign_mismatches, uint32_t &r_checked) const {
+bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float &r_max_error, uint32_t &r_sign_mismatches, uint32_t &r_checked, uint32_t *r_overestimates) const {
 	r_max_error = 0.0f;
 	r_sign_mismatches = 0;
 	r_checked = 0;
+	if (r_overestimates != nullptr) {
+		*r_overestimates = 0;
+	}
 	if (p_level >= NextGIGlobalSDF::MAX_LEVELS) {
 		return false;
 	}
@@ -567,8 +612,10 @@ bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instan
 	LocalVector<uint32_t> culled;
 	culled.resize(p_instances.size());
 	for (uint32_t sample = 0; sample < p_count; sample++) {
-		const Vector3 point = minimum + Vector3(rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent));
-		const Vector3i voxel = NextGIGlobalSDF::world_to_voxel(p_level, p_origin, point);
+		const Vector3 random_point = minimum + Vector3(rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent));
+		const Vector3i voxel = NextGIGlobalSDF::world_to_voxel(p_level, p_origin, random_point);
+		// GodotNext: ps_swrt_trace (#186). The composite stores voxel centers; compare there.
+		const Vector3 point = NextGIGlobalSDF::voxel_center(p_level, p_origin, voxel);
 		const Vector3i brick = voxel / int(NextGIGlobalSDF::BRICK_SIZE);
 		const int32_t slot = get_slot(p_level, brick);
 		float distance = 65504.0f;
@@ -579,10 +626,12 @@ bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instan
 			const uint16_t *dynamic_half = reinterpret_cast<const uint16_t *>(dynamic_data.ptr());
 			distance = MIN(Math::half_to_float(static_half[index]), Math::half_to_float(dynamic_half[index]));
 		}
-		float reference = 65504.0f;
 		const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(p_instances, p_level, p_origin, brick, culled.ptr(), culled.size());
-		for (uint32_t index = 0; index < culled_count; index++) {
-			reference = MIN(reference, NextGIGlobalSDF::sample_instance(p_instances[culled[index]], point));
+		// The CPU twin of the composite (an unallocated brick lists no instance).
+		const float reference = culled_count > 0 ? NextGIGlobalSDF::composite_distance(p_instances, culled.ptr(), culled_count, NextGIGlobalSDF::brick_cull_box(p_level, p_origin, brick), point) : 65504.0f;
+		// A resident voxel never reads farther than the nearest of every instance, listed or not.
+		if (r_overestimates != nullptr && slot >= 0 && distance > NextGIGlobalSDF::reference_distance(p_instances, point) + 0.25f * voxel_size) {
+			(*r_overestimates)++;
 		}
 		const float error = Math::abs(distance - reference);
 		if (error > worst_error) {
@@ -604,6 +653,84 @@ bool NextGIGlobalSDFGPU::validate_reference(const Vector<NextGIGlobalSDF::Instan
 	return true;
 }
 
+// GodotNext: ps_swrt_trace (#186)
+bool NextGIGlobalSDFGPU::validate_coverage(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_max_bricks, float p_tie, uint32_t &r_checked, uint32_t &r_expected_set, uint32_t &r_mismatches) const {
+	r_checked = 0;
+	r_expected_set = 0;
+	r_mismatches = 0;
+	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || !coverage_buffer.is_valid()) {
+		return false;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	const Vector<uint8_t> data = rd->buffer_get_data(coverage_buffer);
+	if (data.size() != int(capacity * COVERAGE_BYTES)) {
+		return false;
+	}
+	const uint32_t *words = reinterpret_cast<const uint32_t *>(data.ptr());
+	LocalVector<uint32_t> culled;
+	culled.resize(p_instances.size());
+	uint32_t bricks = 0;
+	const PackedInt32Array &table = page_tables[p_level];
+	for (uint32_t index = 0; index < BRICKS_PER_LEVEL && bricks < p_max_bricks; index++) {
+		const int32_t slot = table[index];
+		if (slot < 0) {
+			continue;
+		}
+		const Vector3i brick(int(index % NextGIGlobalSDF::PAGE_SIZE), int((index / NextGIGlobalSDF::PAGE_SIZE) % NextGIGlobalSDF::PAGE_SIZE), int(index / (NextGIGlobalSDF::PAGE_SIZE * NextGIGlobalSDF::PAGE_SIZE)));
+		const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(p_instances, p_level, p_origin, brick, culled.ptr(), culled.size());
+		bool any_two_sided = false;
+		for (uint32_t i = 0; i < culled_count; i++) {
+			any_two_sided = any_two_sided || p_instances[culled[i]].two_sided;
+		}
+		// Bricks without a two-sided instance must have no bit set; only the others, which
+		// need CPU samples, count toward p_max_bricks.
+		bricks += any_two_sided ? 1 : 0;
+		for (uint32_t voxel = 0; voxel < NextGIGlobalSDF::BRICK_VOXELS; voxel++) {
+			const bool actual = (words[coverage_word(uint32_t(slot), voxel)] & coverage_bit(voxel)) != 0;
+			bool expected = false;
+			bool ambiguous = false;
+			if (any_two_sided) {
+				const Vector3i local(int(voxel % 8), int((voxel / 8) % 8), int(voxel / 64));
+				const Vector3 world = NextGIGlobalSDF::voxel_center(p_level, p_origin, brick * int(NextGIGlobalSDF::BRICK_SIZE) + local);
+				// The static class carries the brick cap (NextGIGlobalSDF::brick_cap()); a two-sided
+				// instance farther than the cap does not win the voxel.
+				const float cap = NextGIGlobalSDF::brick_cap(NextGIGlobalSDF::brick_cull_box(p_level, p_origin, brick), world);
+				for (int dynamic_class = 0; dynamic_class < 2; dynamic_class++) {
+					float two_sided = 1e30f;
+					float other = dynamic_class == 0 ? cap : 1e30f;
+					for (uint32_t i = 0; i < culled_count; i++) {
+						const NextGIGlobalSDF::Instance &instance = p_instances[culled[i]];
+						if (int(instance.dynamic) != dynamic_class) {
+							continue;
+						}
+						const float distance = NextGIGlobalSDF::sample_instance(instance, world);
+						if (instance.two_sided) {
+							two_sided = MIN(two_sided, distance);
+						} else {
+							other = MIN(other, distance);
+						}
+					}
+					if (two_sided >= 65504.0f) {
+						continue;
+					}
+					if (Math::abs(two_sided - other) <= p_tie) {
+						ambiguous = true;
+					}
+					expected = expected || two_sided <= other;
+				}
+			}
+			if (ambiguous) {
+				continue;
+			}
+			r_checked++;
+			r_expected_set += expected ? 1 : 0;
+			r_mismatches += expected != actual ? 1 : 0;
+		}
+	}
+	return true;
+}
+
 void NextGIGlobalSDFGPU::scroll_level(uint32_t p_level, const Vector3i &p_delta_bricks) {
 	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || p_delta_bricks == Vector3i()) {
 		return;
@@ -612,15 +739,15 @@ void NextGIGlobalSDFGPU::scroll_level(uint32_t p_level, const Vector3i &p_delta_
 		release_level(p_level);
 		return;
 	}
+	// GodotNext: ps_swrt_trace (#186). Only this level's bricks that leave the
+	// clipmap give their slots back; the other levels keep theirs.
 	const PackedInt32Array old_table = page_tables[p_level];
 	PackedInt32Array new_table;
 	new_table.resize(BRICKS_PER_LEVEL);
 	new_table.fill(PAGE_UNALLOCATED);
-	for (uint32_t index = 0; index < capacity; index++) {
-		slot_used.set(index, 0);
-	}
-	free_slots.clear();
-	used = 0;
+	Vector<uint8_t> kept;
+	kept.resize(BRICKS_PER_LEVEL);
+	kept.fill(0);
 	for (int z = 0; z < int(NextGIGlobalSDF::PAGE_SIZE); z++) {
 		for (int y = 0; y < int(NextGIGlobalSDF::PAGE_SIZE); y++) {
 			for (int x = 0; x < int(NextGIGlobalSDF::PAGE_SIZE); x++) {
@@ -628,19 +755,19 @@ void NextGIGlobalSDFGPU::scroll_level(uint32_t p_level, const Vector3i &p_delta_
 				if (old.x < 0 || old.y < 0 || old.z < 0 || old.x >= int(NextGIGlobalSDF::PAGE_SIZE) || old.y >= int(NextGIGlobalSDF::PAGE_SIZE) || old.z >= int(NextGIGlobalSDF::PAGE_SIZE)) {
 					continue;
 				}
-				const int32_t slot = old_table[_table_index(old)];
+				const uint32_t old_index = _table_index(old);
+				const int32_t slot = old_table[old_index];
 				if (slot < 0) {
 					continue;
 				}
 				new_table.set(_table_index(Vector3i(x, y, z)), slot);
-				slot_used.set(slot, 1);
-				used++;
+				kept.set(old_index, 1);
 			}
 		}
 	}
-	for (uint32_t index = 0; index < capacity; index++) {
-		if (slot_used[index] == 0) {
-			free_slots.push_back(capacity - 1 - index);
+	for (uint32_t index = 0; index < BRICKS_PER_LEVEL; index++) {
+		if (old_table[index] >= 0 && kept[index] == 0) {
+			_free_slot(uint32_t(old_table[index]));
 		}
 	}
 	page_tables.write[p_level] = new_table;

@@ -34,11 +34,14 @@
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
+
+#include <cstddef>
 
 using namespace RendererRD;
 
@@ -65,11 +68,19 @@ struct NextGIWRCParamsGPU {
 	uint32_t pad[3] = {};
 	float inv_view_proj[16] = {};
 	float volume[4] = {}; // x width, y height, z near, w far.
-	uint32_t previous_view_padding[4] = {};
+	// GodotNext: nextgi_view_math. nextgi_wrc_update.glsl declares this vec4; before it was
+	// C++-only padding and the shader read previous_view_proj and history 16 bytes off. The
+	// forward shader's NextGIWRCForward mirror reads only up to volume.
+	float depth_coefficients[4] = {};
 	float previous_view_proj[16] = {};
 	float history[4] = {}; // blend, Lite, valid, sky lighting enabled.
 };
 static_assert(sizeof(NextGIWRCParamsGPU) == 256, "WRC params must match nextgi_wrc_update.glsl.");
+// GodotNext: nextgi_view_math. The std430 offsets nextgi_wrc_update.glsl reads them at.
+static_assert(offsetof(NextGIWRCParamsGPU, volume) == 144, "WRC params: volume must sit at std430 offset 144.");
+static_assert(offsetof(NextGIWRCParamsGPU, depth_coefficients) == 160, "WRC params: depth_coefficients must sit at std430 offset 160.");
+static_assert(offsetof(NextGIWRCParamsGPU, previous_view_proj) == 176, "WRC params: previous_view_proj must sit at std430 offset 176.");
+static_assert(offsetof(NextGIWRCParamsGPU, history) == 240, "WRC params: history must sit at std430 offset 240.");
 
 struct NextGIWRCCountersGPU {
 	uint32_t rays = 0;
@@ -507,10 +518,15 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	params.page_rect_count = relight != nullptr ? relight->get_page_rect_count() : 0;
-	const Projection view_proj = p_render_data->scene_data->cam_projection * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+	// GodotNext: nextgi_view_math. The froxels and the history use the depth texture's clip space.
+	const Projection view_proj = NextGIView::view_projection(*p_render_data->scene_data);
 	const Projection inv_view_proj = view_proj.inverse();
 	for (int i = 0; i < 16; i++) {
 		params.inv_view_proj[i] = inv_view_proj.columns[i / 4][i % 4];
+	}
+	const Vector4 depth_coefficients = NextGIViewMath::depth_coefficients(NextGIView::depth_projection(*p_render_data->scene_data));
+	for (int i = 0; i < 4; i++) {
+		params.depth_coefficients[i] = depth_coefficients[i];
 	}
 	params.volume[0] = float(volume_size.x);
 	params.volume[1] = float(volume_size.y);

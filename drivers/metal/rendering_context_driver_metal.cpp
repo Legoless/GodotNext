@@ -39,6 +39,10 @@
 #include "modules/modules_enabled.gen.h"
 
 #include <objc/message.h>
+#if TARGET_OS_OSX
+// GodotNext: ps_tier_rule (#187)
+#include <IOKit/IOKitLib.h>
+#endif
 #include <os/log.h>
 #include <os/signpost.h>
 
@@ -63,6 +67,30 @@ RenderingContextDriverMetal::RenderingContextDriverMetal() {
 
 RenderingContextDriverMetal::~RenderingContextDriverMetal() {
 }
+
+#if TARGET_OS_OSX
+// GodotNext: ps_tier_rule (#187). Apple GPUs publish "gpu-core-count" on their
+// accelerator entry; 0 when the property is missing.
+static uint32_t _metal_gpu_core_count(uint64_t p_registry_id) {
+	io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, IORegistryEntryIDMatching(p_registry_id));
+	if (service == IO_OBJECT_NULL) {
+		return 0;
+	}
+	uint32_t cores = 0;
+	CFTypeRef value = IORegistryEntrySearchCFProperty(service, kIOServicePlane, CFSTR("gpu-core-count"), kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents);
+	if (value != nullptr) {
+		if (CFGetTypeID(value) == CFNumberGetTypeID()) {
+			int64_t count = 0;
+			if (CFNumberGetValue((CFNumberRef)value, kCFNumberSInt64Type, &count) && count > 0) {
+				cores = uint32_t(count);
+			}
+		}
+		CFRelease(value);
+	}
+	IOObjectRelease(service);
+	return cores;
+}
+#endif
 
 Error RenderingContextDriverMetal::initialize() {
 	if (OS::get_singleton()->get_environment("MTL_CAPTURE_ENABLED") == "1" || OS::get_singleton()->get_environment("MTLCAPTURE_DESTINATION_DEVELOPER_TOOLS_ENABLE") == "1") {
@@ -92,6 +120,11 @@ Error RenderingContextDriverMetal::initialize() {
 	MetalDeviceProperties props(metal_device);
 	int version = (int)props.features.highestFamily - (int)MTL::GPUFamilyApple1 + 1;
 	device.name = vformat("%s (Apple%d)", metal_device->name()->utf8String(), version);
+#if TARGET_OS_OSX
+	// GodotNext: ps_tier_rule (#187). The GPU core count from the IORegistry, for the
+	// software tier's auto-quality class.
+	device.compute_units = _metal_gpu_core_count(metal_device->registryID());
+#endif
 
 	return OK;
 }

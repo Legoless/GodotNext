@@ -18,6 +18,9 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// GodotNext: nextgi_view_math. One reconstruction for every NextGI pass.
+#include "nextgi_view_inc.glsl"
+
 #ifdef MODE_PROBE_SPATIAL
 
 layout(set = 0, binding = 0) uniform sampler2D probe_radiance;
@@ -37,8 +40,7 @@ layout(push_constant, std430) uniform Params {
 params;
 
 vec3 nextgi_denoise_view_position(vec2 p_uv, float p_depth) {
-	vec4 view = params.inv_projection * vec4(p_uv * 2.0 - 1.0, p_depth, 1.0);
-	return view.xyz / view.w;
+	return nextgi_view_reconstruct(params.inv_projection, p_uv, p_depth);
 }
 
 // Screen pixel whose guide describes a probe. Matches the gather's anchor for the same tile.
@@ -121,7 +123,7 @@ layout(rgba16f, set = 0, binding = 11) uniform image2D debug_rejected_image;
 
 layout(set = 0, binding = 8, std430) restrict readonly buffer NextGIDenoiseTemporalParams {
 	mat4 prev_view_proj;
-	mat4 inv_projection;
+	mat4 inv_view_proj;
 	vec4 camera_pos;
 	vec4 prev_camera_pos;
 }
@@ -140,9 +142,8 @@ layout(push_constant, std430) uniform Params {
 }
 params;
 
-vec3 nextgi_denoise_view_position(vec2 p_uv, float p_depth) {
-	vec4 view = temporal.inv_projection * vec4(p_uv * 2.0 - 1.0, p_depth, 1.0);
-	return view.xyz / view.w;
+vec3 nextgi_denoise_world_position(vec2 p_uv, float p_depth) {
+	return nextgi_view_reconstruct(temporal.inv_view_proj, p_uv, p_depth);
 }
 
 vec2 nextgi_denoise_probe_uv(ivec2 p_probe) {
@@ -165,7 +166,7 @@ void main() {
 	vec2 uv = nextgi_denoise_probe_uv(probe);
 	float depth = textureLod(depth_tex, uv, 0.0).r;
 	vec3 normal = normalize(textureLod(normal_roughness_tex, uv, 0.0).xyz * 2.0 - 1.0);
-	vec3 world = nextgi_denoise_view_position(uv, depth);
+	vec3 world = nextgi_denoise_world_position(uv, depth);
 	float distance_to_camera = length(world - temporal.camera_pos.xyz);
 
 	vec4 current = textureLod(probe_radiance, (vec2(texel) + 0.5) / vec2(params.probe_size), 0.0);
@@ -179,10 +180,9 @@ void main() {
 		prev_probe = ivec2((vec2(anchor) + motion * vec2(params.screen_size)) / float(params.probe_extent));
 		have_prev = true;
 	} else {
-		vec4 prev_clip = temporal.prev_view_proj * vec4(world, 1.0);
-		if (prev_clip.w != 0.0) {
-			vec2 prev_ndc = prev_clip.xy / prev_clip.w;
-			vec2 prev_pixel = (prev_ndc * 0.5 + 0.5) * vec2(params.screen_size);
+		vec3 prev_uv_depth = nextgi_view_project(temporal.prev_view_proj, world);
+		if (prev_uv_depth.z >= 0.0) {
+			vec2 prev_pixel = prev_uv_depth.xy * vec2(params.screen_size);
 			prev_probe = ivec2(prev_pixel / float(params.probe_extent));
 			have_prev = true;
 		}

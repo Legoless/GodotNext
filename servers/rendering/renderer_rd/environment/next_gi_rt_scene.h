@@ -36,6 +36,7 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_clipmaps.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/rendering_server_types.h"
@@ -478,9 +479,8 @@ private:
 	NextGIFarField *far_field = nullptr;
 	uint32_t total_record_count = 0;
 	NextGIGlobalSDFGPU global_sdf;
-	HashSet<uint32_t> global_sdf_initialized_levels;
+	NextGIGlobalSDFClipmaps global_sdf_clipmaps; // GodotNext: ps_swrt_trace (#186)
 	Vector3i global_sdf_origin;
-	Vector3i global_sdf_origins[NextGIGlobalSDF::MAX_LEVELS];
 	uint64_t global_sdf_generation = 0;
 	// GodotNext: nextgi_skinned_actors (#59). Per-instance posed BLASes keyed by (instance, surface).
 	struct SkinnedPart {

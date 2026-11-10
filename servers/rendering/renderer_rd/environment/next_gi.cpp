@@ -304,17 +304,20 @@ void NextGI::_select_swrt_auto_quality() {
 	if (result.tier != TIER_SOFTWARE || quality_setting != QUALITY_AUTO || auto_quality != QUALITY_AUTO) {
 		return;
 	}
-	const uint64_t usec = NextGISWRTTrace::probe_usec();
-	uint64_t memory = 0;
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd != nullptr) {
-		memory = rd->get_device_total_memory();
+	// GodotNext: ps_swrt_trace (#186). A timed GPU trace over the fixture global SDF, and the
+	// driver's GPU-core count. get_device_total_memory() counts allocations, not VRAM.
+	uint64_t usec = 0;
+	String failure;
+	const bool measured = NextGISWRTTrace::run_microbenchmark(usec, failure);
+	if (!measured) {
+		usec = 0; // swrt_auto_quality() maps an unmeasured trace to Medium.
 	}
-	const uint32_t units = swrt_compute_unit_class(0, memory);
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const uint32_t units = swrt_compute_unit_class(rd != nullptr ? rd->get_device_compute_units() : 0, 0);
 	const Quality picked = swrt_auto_quality(usec, units);
 	auto_quality = picked;
 	// Logged inside the one tier line, which init() prints next (plan §3.1: printed once).
-	auto_reason = format_swrt_auto_reason(usec, units, picked);
+	auto_reason = measured ? format_swrt_auto_reason(usec, units, picked) : vformat("auto: sdf benchmark failed (%s), %d compute units, %s", failure, units, get_quality_name(picked));
 }
 
 void NextGI::_append_swrt_info(Dictionary &r_info) const {
@@ -467,6 +470,13 @@ bool NextGI::update_tier(const TierInputs &p_inputs, Quality p_quality_setting, 
 	const bool reduced = swrt_reduced;
 	result = evaluate_tier(inputs);
 	result.swrt_reduced = reduced;
+	// GodotNext: ps_swrt_trace (#187). SWRT_REDUCED belongs to the software tier's tracer,
+	// which goes when the tier leaves SOFTWARE and comes back with every level.
+	if (result.tier != TIER_SOFTWARE) {
+		swrt_reduced = false;
+		swrt_reduced_logged = false;
+		result.swrt_reduced = false;
+	}
 
 	// GodotNext: ps_mesh_sdf_atlas (#185). keep_when_hwrt=false releases the
 	// brick pool while HWRT is active; the runtime tier switch is then disabled.
@@ -681,10 +691,12 @@ Dictionary NextGI::get_counters() const {
 	}
 	// GodotNext: ps_swrt_trace (#186)
 	if (swrt_trace != nullptr) {
-		counters["swrt_trace_steps"] = int64_t(swrt_trace->get_trace_steps());
-		counters["swrt_trace_hits"] = int64_t(swrt_trace->get_trace_hits());
-		counters["swrt_trace_misses"] = int64_t(swrt_trace->get_trace_misses());
-		counters["swrt_shadow_rays"] = int64_t(swrt_trace->get_shadow_rays());
+		// Gather and reflection rays; shadow rays are counted apart (one frame old).
+		const NextGISWRTTrace::Counters swrt = swrt_trace->get_counters();
+		counters["swrt_trace_steps"] = int64_t(swrt.steps);
+		counters["swrt_trace_hits"] = int64_t(swrt.gather_hits + swrt.reflect_hits);
+		counters["swrt_trace_misses"] = int64_t(swrt.gather_rays + swrt.reflect_rays) - int64_t(swrt.gather_hits + swrt.reflect_hits);
+		counters["swrt_shadow_rays"] = int64_t(swrt.shadow_rays);
 		counters["swrt_mode"] = int64_t(swrt_trace->get_mode());
 	}
 	// GodotNext: ps_lumen_lite (#183). Per-frame counts. Zero means the dispatch did not run.
@@ -948,6 +960,10 @@ Dictionary NextGI::get_tier_info() const {
 	if (reference != nullptr) {
 		reference->fill_info(info);
 	}
+	// GodotNext: ps_swrt_trace (#186)
+	if (swrt_trace != nullptr) {
+		swrt_trace->fill_info(info);
+	}
 	if (wrc != nullptr) {
 		wrc->fill_info(info);
 	}
@@ -1104,7 +1120,12 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 		if (swrt_trace == nullptr) {
 			swrt_trace = memnew(NextGISWRTTrace);
 		}
-		swrt_trace->update_frame(p_render_data, voxel_lighting);
+		// The scene upkeep needs no depth; the gather and reflection rays run after the
+		// depth prepass (render_swrt_view()), so they read this frame's depth.
+		swrt_trace->update_scene(p_render_data);
+		if (lite) {
+			swrt_trace->trace_lite_probes(p_render_data, voxel_lighting);
+		}
 		if (lite && irradiance_field != nullptr) {
 			irradiance_field->integrate(p_render_data, false, is_reflections_only());
 			print_line(vformat("LITE_DISPATCH gather_rays=%d reflection_rays=%d probe_traces=%d", lite_gather_dispatches, lite_reflection_dispatches, lite_probe_traces));
@@ -1113,6 +1134,28 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 		memdelete(swrt_trace);
 		swrt_trace = nullptr;
 	}
+}
+
+// GodotNext: ps_swrt_trace (#186). After the depth prepass of a software-tier
+// view: the gather and reflection rays read this frame's depth.
+// Multiview (XR) depth and normal-roughness are 2D arrays and the trace binds sampler2D,
+// so the software tier skips those views until it traces per-view slices.
+bool NextGI::view_traces_swrt(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count) {
+	return p_tier == TIER_SOFTWARE && !p_reflection_probe && p_environment_enabled && !p_unshaded && p_view_count == 1;
+}
+
+void NextGI::render_swrt_view(RenderDataRD *p_render_data, RID p_normal_roughness) {
+	if (swrt_trace == nullptr || p_render_data == nullptr || result.tier != TIER_SOFTWARE || is_lumen_lite()) {
+		return;
+	}
+	// The screen trace reads the same Hi-Z pyramid and last frame as the hardware tier.
+	Ref<RenderSceneBuffersRD> buffers = p_render_data->render_buffers;
+	SSEffects *ss_effects = SSEffects::get_singleton();
+	if (buffers.is_valid() && ss_effects != nullptr) {
+		ss_effects->allocate_last_frame_buffer(buffers, false, false, true);
+		ss_effects->build_hiz(buffers);
+	}
+	swrt_trace->trace_view(p_render_data, voxel_lighting, p_normal_roughness);
 }
 
 bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {

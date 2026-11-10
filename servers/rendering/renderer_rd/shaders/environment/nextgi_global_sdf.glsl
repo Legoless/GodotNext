@@ -8,6 +8,7 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 #include "../half_inc.glsl"
+#include "nextgi_mesh_sdf_distance_inc.glsl"
 
 struct MeshInfo {
 	vec3 bounds_position;
@@ -26,7 +27,7 @@ struct Instance {
 	vec4 world_min;
 	vec4 world_max;
 	uint flags;
-	uint pad[3];
+	float axis_scale[3]; // NextGIGlobalSDF::instance_axis_scale().
 };
 
 struct BrickWork {
@@ -128,9 +129,15 @@ vec3 instance_point(Instance instance, vec3 world) {
 			dot(instance.inverse[2].xyz, world) + instance.inverse[2].w);
 }
 
+// GodotNext: ps_swrt_trace (#186). A lower bound in world meters under any instance
+// scale, outside the mesh SDF's bounds included (nextgi_mesh_sdf_distance_inc.glsl).
 float sample_instance(Instance instance, MeshInfo mesh, vec3 world) {
 	vec3 local = instance_point(instance, world);
-	return sample_mesh(mesh, local) * instance.world_min.w;
+	vec3 bounds_max = mesh.bounds_position + vec3(mesh.dimensions) * mesh.voxel_size;
+	vec3 surface_min;
+	vec3 surface_max;
+	nextgi_mesh_sdf_surface_bounds(mesh.bounds_position, bounds_max, mesh.band, surface_min, surface_max);
+	return nextgi_mesh_sdf_world_distance(local, mesh.bounds_position, bounds_max, surface_min, surface_max, sample_mesh(mesh, local), vec3(instance.axis_scale[0], instance.axis_scale[1], instance.axis_scale[2]));
 }
 
 void main() {
@@ -142,12 +149,18 @@ void main() {
 	vec3 world = brick_min + (vec3(voxel) + 0.5) * voxel_size;
 	float static_distance = 65504.0;
 	float dynamic_distance = 65504.0;
+	// GodotNext: ps_swrt_trace (#186). Each class remembers whether its winning sample is
+	// two-sided (a two-sided instance wins a tie), instead of comparing a second sample
+	// with the stored minimum for equality.
+	bool static_two_sided = false;
+	bool dynamic_two_sided = false;
+	// The brick's cull box (NextGIGlobalSDF::brick_cull_box()): the brick grown by one voxel.
+	vec3 lo = brick_min - vec3(voxel_size);
+	vec3 hi = brick_min + vec3(voxel_size * 9.0);
 
 	for (uint index = 0; index < brick_work.instance_count; index++) {
 		uint source_index = work_indices.data[brick_work.instance_offset + index];
 		Instance instance = instances.data[source_index];
-		vec3 lo = brick_min - vec3(voxel_size);
-		vec3 hi = brick_min + vec3(voxel_size * 9.0);
 		if (any(greaterThan(instance.world_min.xyz, hi)) || any(lessThan(instance.world_max.xyz, lo))) {
 			continue;
 		}
@@ -156,28 +169,37 @@ void main() {
 		if (distance >= 65504.0) {
 			continue;
 		}
+		bool two_sided = (instance.flags & 2u) != 0u;
 		if ((instance.flags & 1u) != 0u) {
+			if (distance < dynamic_distance || (two_sided && distance == dynamic_distance)) {
+				dynamic_two_sided = two_sided;
+			}
 			dynamic_distance = min(dynamic_distance, distance);
 		} else {
+			if (distance < static_distance || (two_sided && distance == static_distance)) {
+				static_two_sided = two_sided;
+			}
 			static_distance = min(static_distance, distance);
 		}
+	}
+
+	// GodotNext: ps_swrt_trace (#186). NextGIGlobalSDF::brick_cap(): every instance this brick
+	// does not list lies outside its cull box. The listed instances' distances keep growing
+	// past their bounds, so without the cap a voxel next to an unlisted instance read past it.
+	vec3 inside = min(world - lo, hi - world);
+	float cap = max(min(inside.x, min(inside.y, inside.z)), 0.0);
+	if (cap < static_distance) {
+		static_distance = cap;
+		static_two_sided = false;
 	}
 
 	uint pool_index = brick_work.slot * 512u + voxel_index;
 	static_pool.data[pool_index] = float16_t(static_distance);
 	dynamic_pool.data[pool_index] = float16_t(dynamic_distance);
 
-	for (uint index = 0; index < brick_work.instance_count; index++) {
-		uint source_index = work_indices.data[brick_work.instance_offset + index];
-		Instance instance = instances.data[source_index];
-		if ((instance.flags & 2u) == 0u) {
-			continue;
-		}
-		MeshInfo mesh = meshes.data[source_index];
-		float distance = sample_instance(instance, mesh, world);
-		float target = (instance.flags & 1u) != 0u ? dynamic_distance : static_distance;
-		if (distance == target && distance < 65504.0) {
-			atomicOr(coverage.data[brick_work.slot * 16u + voxel_index / 8u], 1u << (voxel_index & 7u));
-		}
+	if (static_two_sided || dynamic_two_sided) {
+		// GodotNext: ps_swrt_trace (#186). 512 bits in 16 words per slot: word voxel / 32,
+		// bit voxel % 32. Byte-for-byte this is the CPU BrickSplit::coverage layout.
+		atomicOr(coverage.data[brick_work.slot * 16u + voxel_index / 32u], 1u << (voxel_index & 31u));
 	}
 }

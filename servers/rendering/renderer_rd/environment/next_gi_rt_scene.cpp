@@ -825,7 +825,7 @@ void NextGIRTScene::free() {
 	}
 	sdf_instances.clear();
 	global_sdf.free_all();
-	global_sdf_initialized_levels.clear();
+	global_sdf_clipmaps.reset();
 	if (tlas.is_valid()) {
 		RD::get_singleton()->free_rid(tlas);
 		tlas = RID();
@@ -2071,16 +2071,17 @@ void NextGIRTScene::update_global_sdf(const ::RenderDataRD *p_render_data) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	ERR_FAIL_NULL(mesh_storage);
 	const uint64_t generation = mesh_storage->get_sdf_atlas().get_generation();
+	// GodotNext: ps_swrt_trace (#186). The clipmap upkeep is shared with the SWRT tier.
 	if (generation != global_sdf_generation) {
 		global_sdf.free_all();
-		global_sdf_initialized_levels.clear();
+		global_sdf_clipmaps.reset();
 		global_sdf_generation = generation;
 	}
 	const Vector<NextGIGlobalSDF::Instance> instances = nextgi_global_sdf_instances(sdf_instances);
 	if (instances.is_empty()) {
-		if (!global_sdf_initialized_levels.is_empty()) {
+		if (global_sdf_clipmaps.is_level_valid(0)) {
 			global_sdf.free_all();
-			global_sdf_initialized_levels.clear();
+			global_sdf_clipmaps.reset();
 		}
 		return;
 	}
@@ -2088,49 +2089,18 @@ void NextGIRTScene::update_global_sdf(const ::RenderDataRD *p_render_data) {
 	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 	const float view_distance = p_render_data != nullptr ? RendererEnvironmentStorage::get_singleton()->environment_get_nextgi_scene_view_distance(p_render_data->environment) : 200.0f;
 	const uint32_t levels = NextGIGlobalSDF::level_count(view_distance);
-	for (uint32_t level = 0; level < levels; level++) {
-		if (global_sdf_initialized_levels.has(level) && !NextGIGlobalSDF::level_updates_on_frame(level, frame)) {
-			continue;
-		}
-		const Vector3i origin = NextGIGlobalSDF::scrolled_origin(camera, level);
-		if (level == 0) {
-			global_sdf_origin = origin;
-		}
-		Vector3i bricks[NextGIGlobalSDF::BRICKS_PER_LEVEL];
-		uint32_t count = 0;
-		if (!global_sdf_initialized_levels.has(level)) {
-			for (int z = 0; z < int(NextGIGlobalSDF::PAGE_SIZE); z++) {
-				for (int y = 0; y < int(NextGIGlobalSDF::PAGE_SIZE); y++) {
-					for (int x = 0; x < int(NextGIGlobalSDF::PAGE_SIZE); x++) {
-						bricks[count++] = Vector3i(x, y, z);
-					}
-				}
-			}
-		} else {
-			if (origin != global_sdf_origins[level]) {
-				const Vector3i delta = NextGIGlobalSDF::scroll_brick_delta(global_sdf_origins[level], origin);
-				global_sdf.scroll_level(level, delta);
-				count = NextGIGlobalSDF::scrolled_edge_bricks(delta, bricks, NextGIGlobalSDF::BRICKS_PER_LEVEL);
-			}
-			if (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) {
-				for (uint32_t index = 0; index < p_render_data->sdfgi_update_data->nextgi_dirty_volume_count; index++) {
-					const AABB &volume = p_render_data->sdfgi_update_data->nextgi_dirty_volumes[index];
-					NextGIGlobalSDF::dirty_bricks(volume, volume, origin, bricks + count, NextGIGlobalSDF::BRICKS_PER_LEVEL - count, count, level);
-				}
-			}
-		}
-		global_sdf_origins[level] = origin;
-		if (global_sdf.update_bricks(instances, level, origin, bricks, count)) {
-			global_sdf_initialized_levels.insert(level);
-		}
+	if (p_render_data != nullptr && p_render_data->sdfgi_update_data != nullptr) {
+		global_sdf_clipmaps.add_dirty_volumes(p_render_data->sdfgi_update_data->nextgi_dirty_volumes, p_render_data->sdfgi_update_data->nextgi_dirty_volume_count);
 	}
+	global_sdf_clipmaps.update(global_sdf, instances, camera, frame, levels);
+	global_sdf_origin = global_sdf_clipmaps.get_origin(0);
 }
 
 Dictionary NextGIRTScene::get_global_sdf_debug() const {
 	Dictionary info;
 	info["global_sdf_checked"] = 0;
 	info["global_sdf_max_error"] = 0.0;
-	if (!global_sdf_initialized_levels.has(0)) {
+	if (!global_sdf_clipmaps.is_level_valid(0)) {
 		return info;
 	}
 	const Vector<NextGIGlobalSDF::Instance> instances = nextgi_global_sdf_instances(sdf_instances);
@@ -2181,10 +2151,8 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 					slice.set(index, distance);
 					coverage.set(index, NextGIGlobalSDF::get_coverage_bit(split, Vector3i(local_x, 0, local_z)) ? 1 : 0);
 					const Vector3 world = NextGIGlobalSDF::voxel_center(0, global_sdf_origin, Vector3i(x, slice_y, z));
-					float reference = 65504.0f;
-					for (uint32_t i = 0; i < culled_count; i++) {
-						reference = MIN(reference, NextGIGlobalSDF::sample_instance(instances[culled[i]], world));
-					}
+					// GodotNext: ps_swrt_trace (#186). The CPU twin of the composite, cap included.
+					const float reference = culled_count > 0 ? NextGIGlobalSDF::composite_distance(instances, culled.ptr(), culled_count, NextGIGlobalSDF::brick_cull_box(0, global_sdf_origin, brick), world) : 65504.0f;
 					max_error = MAX(max_error, Math::abs(distance - reference));
 					checked++;
 				}
@@ -2218,7 +2186,11 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 	info["global_sdf_random_max_error"] = random_max_error;
 	info["global_sdf_sign_mismatches"] = sign_mismatches;
 	info["global_sdf_used_bricks"] = global_sdf.get_used_bricks();
-	info["global_sdf_levels"] = global_sdf_initialized_levels.size();
+	uint32_t valid_levels = 0;
+	for (uint32_t level = 0; level < NextGIGlobalSDF::MAX_LEVELS; level++) {
+		valid_levels += global_sdf_clipmaps.is_level_valid(level) ? 1 : 0;
+	}
+	info["global_sdf_levels"] = valid_levels;
 	return info;
 }
 

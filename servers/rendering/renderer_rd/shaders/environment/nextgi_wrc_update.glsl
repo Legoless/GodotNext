@@ -13,6 +13,8 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform accelerationStructureEXT nextgi_tlas;
 #define NEXTGI_TLAS nextgi_tlas
 #include "nextgi_rt_inc.glsl"
+// GodotNext: nextgi_view_math. One reconstruction for every NextGI pass.
+#include "nextgi_view_inc.glsl"
 
 #if defined(MODE_TRANSLUCENCY_TRACE) || defined(MODE_TRANSLUCENCY_PROJECT)
 layout(rgba16f, set = 0, binding = 1) uniform image2D radiance_image;
@@ -77,6 +79,7 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIWRCParams {
 	uint pad2;
 	mat4 inv_view_proj; // GodotNext: nextgi_translucency_volume (#61).
 	vec4 volume; // x width, y height, z near, w far.
+	vec4 depth_coefficients; // GodotNext: nextgi_view_math. NextGIViewMath::depth_coefficients().
 	mat4 previous_view_proj;
 	vec4 history; // blend, Lite, valid, sky lighting enabled.
 }
@@ -523,8 +526,8 @@ void nextgi_translucency_volume_main() {
 	vec2 uv = (vec2(froxel.xy) + 0.5) / vec2(size);
 	float slice = (float(froxel.z) + 0.5) / 32.0;
 	float depth = params.volume.z * pow(params.volume.w / params.volume.z, slice);
-	vec4 clip = params.inv_view_proj * vec4(uv * 2.0 - 1.0, depth, 1.0);
-	vec3 world = clip.xyz / clip.w;
+	// GodotNext: nextgi_view_math. The slice is a view distance; reconstruct through its stored depth.
+	vec3 world = nextgi_view_reconstruct(params.inv_view_proj, uv, nextgi_view_depth_from_linear(params.depth_coefficients, depth));
 	float cam_distance = length(world - params.camera.xyz);
 	float base_level = clamp(floor(log2(max(cam_distance / 8.0, 1.0))), 0.0, 3.0);
 	float level = min(base_level + (params.history.y > 0.5 ? 1.0 : 0.0), 3.0);
@@ -548,11 +551,11 @@ void nextgi_translucency_volume_main() {
 		green = vec4(imageLoad(sh_g_image, cell).r, 0.0, 0.0, 0.0);
 		blue = vec4(imageLoad(sh_b_image, cell).r, 0.0, 0.0, 0.0);
 	}
-	vec4 previous_clip = params.previous_view_proj * vec4(world, 1.0);
+	vec3 previous_screen = nextgi_view_project(params.previous_view_proj, world);
 	vec3 history_coord = vec3(0.0);
-	if (previous_clip.w > 0.0) {
-		vec2 previous_uv = previous_clip.xy / previous_clip.w * 0.5 + 0.5;
-		float previous_depth = previous_clip.z / previous_clip.w;
+	if (previous_screen.z >= 0.0) {
+		vec2 previous_uv = previous_screen.xy;
+		float previous_depth = nextgi_view_linear_depth(params.depth_coefficients, previous_screen.z);
 		float previous_slice = clamp(log(max(previous_depth, params.volume.z) / params.volume.z) / log(params.volume.w / params.volume.z), 0.0, 1.0);
 		history_coord = vec3(previous_uv, previous_slice);
 	}

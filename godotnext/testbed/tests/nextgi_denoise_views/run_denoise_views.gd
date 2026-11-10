@@ -5,7 +5,10 @@ extends Node3D
 ## Loads the G1 static scene, turns NextGI on, and renders each of the five
 ## denoise views (raw, variance, history, rejected history, denoised) in turn.
 ## The HWRT tier must be active, every view must present a non-uniform image,
-## and the five views must not collapse to the same image.
+## and the five views must not collapse to the same image. The camera pans while
+## the views render, so history and rejection vary at disocclusions.
+## First, with the camera still, no probe may reject its history: the temporal
+## pass reprojects a still view onto itself (#186 world reconstruction).
 ##
 ## Run with the NextGI project setting on, e.g.:
 ##   GODOTNEXT_BACKGROUND=1 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 \
@@ -53,10 +56,27 @@ func _run() -> void:
 	if tier != "HWRT":
 		_failures.append("tier is %s, expected HWRT" % tier)
 
+	# A still camera reprojects every probe onto itself and rejects nothing.
+	get_viewport().debug_draw = Viewport.DEBUG_DRAW_NEXTGI_DENOISE_REJECTED
+	for i in VIEW_FRAMES:
+		await RenderingServer.frame_post_draw
+	var still := get_viewport().get_texture().get_image()
+	if still != null and not still.is_empty():
+		var rejected := 0
+		for y in range(0, still.get_height(), 16):
+			for x in range(0, still.get_width(), 16):
+				if still.get_pixel(x, y).r > 0.0:
+					rejected += 1
+		if rejected > 0:
+			_failures.append("a still camera rejected the history of %d sampled pixels" % rejected)
+
 	var hashes := {}
+	var camera := get_viewport().get_camera_3d()
 	for view in VIEWS:
 		get_viewport().debug_draw = int(view[0])
 		for i in VIEW_FRAMES:
+			if camera != null:
+				camera.position.x += 0.05
 			await RenderingServer.frame_post_draw
 		var image := get_viewport().get_texture().get_image()
 		if image == null or image.is_empty():

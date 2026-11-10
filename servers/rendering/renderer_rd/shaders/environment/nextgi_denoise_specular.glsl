@@ -12,6 +12,9 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+// GodotNext: nextgi_view_math. One reconstruction for every NextGI pass.
+#include "nextgi_view_inc.glsl"
+
 #if defined(MODE_TEMPORAL)
 
 layout(set = 0, binding = 0) uniform sampler2D raw_texture;
@@ -65,8 +68,7 @@ void main() {
 
 	// World position, then reproject: velocity for dynamic instances, the previous view-projection
 	// for static geometry (virtual motion at the hit distance comes from the depth).
-	vec4 world_clip = params.inv_view_proj * vec4(uv * 2.0 - 1.0, depth, 1.0);
-	vec3 world = world_clip.xyz / world_clip.w;
+	vec3 world = nextgi_view_reconstruct(params.inv_view_proj, uv, depth);
 	vec2 prev_uv = uv;
 	if (push.velocity_enabled != 0u && guide.a > 0.5) {
 		// Dynamic instances follow the prepass velocity; smooth surfaces blend toward the virtual
@@ -75,16 +77,13 @@ void main() {
 		vec2 surface_uv = uv - motion;
 		const float hit_distance = textureLod(hit_distance_tex, uv, 0.0).r;
 		vec3 view_dir = normalize(world - params.camera_pos.xyz);
-		vec4 virtual_clip = params.prev_view_proj * vec4(world + view_dir * hit_distance, 1.0);
-		vec2 virtual_uv = surface_uv;
-		if (virtual_clip.w != 0.0) {
-			virtual_uv = virtual_clip.xy / virtual_clip.w * 0.5 + 0.5;
-		}
+		vec3 virtual_uv_depth = nextgi_view_project(params.prev_view_proj, world + view_dir * hit_distance);
+		vec2 virtual_uv = virtual_uv_depth.z >= 0.0 ? virtual_uv_depth.xy : surface_uv;
 		prev_uv = mix(surface_uv, virtual_uv, smoothstep(0.4, 0.0, roughness));
 	} else {
-		vec4 prev_clip = params.prev_view_proj * vec4(world, 1.0);
-		if (prev_clip.w != 0.0) {
-			prev_uv = prev_clip.xy / prev_clip.w * 0.5 + 0.5;
+		vec3 prev_uv_depth = nextgi_view_project(params.prev_view_proj, world);
+		if (prev_uv_depth.z >= 0.0) {
+			prev_uv = prev_uv_depth.xy;
 		}
 	}
 	const bool valid = all(greaterThanEqual(prev_uv, vec2(0.0))) && all(lessThan(prev_uv, vec2(1.0)));

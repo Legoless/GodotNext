@@ -2392,6 +2392,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		_render_nextgi_translucency_mark(p_render_data);
 		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution());
 	}
+	// GodotNext: ps_swrt_trace (#186). The software tier traces after the depth prepass, from this frame's depth.
+	if (!p_use_nextgi && rb.is_valid() && p_render_data->environment.is_valid() && RendererRD::NextGI::view_traces_swrt(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED, p_render_data->scene_data->view_count)) {
+		next_gi.render_swrt_view(p_render_data, rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) ? rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) : RID());
+	}
 
 	if (rb_data.is_valid() && ss_effects) {
 		// Note, in multiview we're allocating buffers for each eye/view we're rendering.
@@ -2600,6 +2604,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
 	const bool nextgi_lite_field = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
 	const bool nextgi_voxel_gi = nextgi_view && RendererRD::NextGI::is_reflections_only();
+	// GodotNext: ps_swrt_trace (#186). Reflection rays read the prepass roughness; the screen trace the last frame.
+	const bool nextgi_swrt_view = !nextgi_lite_field && p_render_data->environment.is_valid() && RendererRD::NextGI::view_traces_swrt(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED, p_render_data->scene_data->view_count);
 
 	// sdfgi first
 	if (!nextgi_view) {
@@ -2914,6 +2920,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					using_sdfgi ||
 					// GodotNext: nextgi_frame_block
 					using_nextgi ||
+					// GodotNext: ps_swrt_trace (#186)
+					nextgi_swrt_view ||
 					// GodotNext: nextgeo_visibility_raster (#83)
 					using_nextgeo ||
 					environment_get_ssao_enabled(p_render_data->environment) ||
@@ -3684,7 +3692,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
-	if (using_ssil || using_ssr || using_nextgi) {
+	// GodotNext: ps_swrt_trace (#186). nextgi_swrt_view keeps the last frame for the software screen
+	// trace, once NextGI::render_swrt_view() allocated it (it does not on Lite or without a tracer).
+	if (using_ssil || using_ssr || using_nextgi || (nextgi_swrt_view && rb.is_valid() && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME))) {
 		RENDER_TIMESTAMP("Copy Final Framebuffer (SSIL/SSR)");
 		_copy_framebuffer_to_ss_effects(rb, using_ssil, using_ssr);
 	}

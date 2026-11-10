@@ -61,7 +61,7 @@ public:
 		RID normal_roughness; // Full-resolution normal (xyz, encoded) and roughness (w) guide.
 		Size2i probe_size; // Ray-texel grid, four texels per axis per probe.
 		Size2i screen_size;
-		Projection inv_projection;
+		Projection inv_projection; // GodotNext: nextgi_view_math. NextGIView::inv_projection(): depth texture to view space.
 		float depth_threshold = 0.05f; // Plane-distance falloff as a fraction of probe depth.
 		float normal_power = 8.0f;
 		uint32_t probe_stride = 4;
@@ -81,8 +81,10 @@ public:
 		RID reset_mask; // Storage buffer of one uint per probe; non-zero resets the probe.
 		Size2i probe_size;
 		Size2i screen_size;
+		// GodotNext: nextgi_view_math. Both are NextGIView matrices: the depth texture's clip
+		// space (reverse Z, flip_y). inv_view_proj reconstructs world positions from depth.
 		Projection prev_view_proj;
-		Projection inv_projection;
+		Projection inv_view_proj;
 		Vector3 camera_pos;
 		Vector3 prev_camera_pos;
 		float depth_tolerance = 0.1f; // Fraction of the stored distance.
@@ -197,7 +199,7 @@ private:
 	// The matrices do not fit the 128-byte push-constant limit, so they travel in a storage buffer.
 	struct TemporalParamsGPU {
 		float prev_view_proj[16];
-		float inv_projection[16];
+		float inv_view_proj[16];
 		float camera_pos[4];
 		float prev_camera_pos[4];
 	};

@@ -4101,6 +4101,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/read_shadow_mask", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/coverage_counter", false);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/global_sdf", false);
+	// GodotNext: ps_swrt_trace (#186). Verification readback of the software trace.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/swrt_trace_readback", false);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_max_steps", PROPERTY_HINT_RANGE, "0,256,1"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_pool_bricks", PROPERTY_HINT_RANGE, "0,65536,1"), 0);
 	// GodotNext: nextgi_reference
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_mode", PROPERTY_HINT_ENUM, "Off,Full,Direct Only,Reflections Only"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_seed", PROPERTY_HINT_RANGE, "1,4096,1"), 1);

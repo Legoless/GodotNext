@@ -33,8 +33,15 @@
 TEST_FORCE_LINK(test_nextgi_swrt_trace)
 
 #include "core/math/mesh_sdf_builder.h"
+#include "core/math/random_number_generator.h"
 #include "scene/resources/3d/primitive_meshes.h"
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_clipmaps.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.h"
 
 #ifdef RD_ENABLED
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
@@ -44,17 +51,14 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 
 namespace {
 
-constexpr uint32_t LEVELS = 6;
-
-MeshSDFData _unit_box_sdf(bool p_two_sided) {
+MeshSDFData _box_sdf(const Vector3 &p_size) {
 	Ref<BoxMesh> box;
 	box.instantiate();
-	box->set_size(Vector3(1.0f, 1.0f, 1.0f));
+	box->set_size(p_size);
 	MeshSDFSettings settings;
 	settings.voxels_per_meter = 8.0f;
 	settings.max_voxels_per_axis = 32;
 	settings.prefer_static_raycaster = false;
-	settings.two_sided = p_two_sided;
 	MeshSDFData data;
 	const Error err = MeshSDFBuilder::build(box->get_faces(), settings, data);
 	CHECK(err == OK);
@@ -62,18 +66,36 @@ MeshSDFData _unit_box_sdf(bool p_two_sided) {
 	return data;
 }
 
-void _fill_origins(const Vector3 &p_camera, Vector3i r_origins[LEVELS]) {
-	for (uint32_t level = 0; level < LEVELS; level++) {
-		r_origins[level] = NextGIGlobalSDF::scrolled_origin(p_camera, level);
+// Signed distance from a world point to the image of the unit cube [-0.5, 0.5]^3
+// under a transform whose basis columns are orthogonal (a rotated, scaled box).
+float _oriented_box_distance(const Transform3D &p_transform, const Vector3 &p_world) {
+	const Vector3 offset = p_world - p_transform.origin;
+	Vector3 q;
+	for (int axis = 0; axis < 3; axis++) {
+		const Vector3 column = p_transform.basis.get_column(axis);
+		const float length = column.length();
+		q[axis] = Math::abs(offset.dot(column / length)) - 0.5f * length;
 	}
+	const float outside = Vector3(MAX(q.x, 0.0f), MAX(q.y, 0.0f), MAX(q.z, 0.0f)).length();
+	return outside + MIN(MAX(q.x, MAX(q.y, q.z)), 0.0f);
 }
 
-NextGIGlobalSDF::Instance _instance(const MeshSDFData *p_field, const Vector3 &p_origin, bool p_two_sided) {
-	NextGIGlobalSDF::Instance instance;
-	instance.transform = Transform3D(Basis(), p_origin);
-	instance.field = p_field;
-	instance.two_sided = p_two_sided;
-	return instance;
+// The world error one 8-bit step of a mesh SDF can make along a local axis.
+float _quantum(const MeshSDFData &p_field, float p_axis_scale) {
+	return 2.0f * p_field.mip_bands[0] / 255.0f * p_axis_scale;
+}
+
+// The renderer's prepass setup: Godot's default perspective camera.
+RenderSceneDataRD *_scene_data(bool p_flip_y, const Vector2 &p_jitter) {
+	RenderSceneDataRD *scene_data = memnew(RenderSceneDataRD);
+	scene_data->cam_projection.set_perspective(75.0f, 16.0f / 9.0f, 0.05f, 4000.0f);
+	scene_data->cam_transform = Transform3D(Basis::from_euler(Vector3(-0.3f, 0.7f, 0.0f)), Vector3(1.0f, 2.0f, 8.0f));
+	scene_data->flip_y = p_flip_y;
+	scene_data->taa_jitter = p_jitter;
+	scene_data->prev_cam_projection = scene_data->cam_projection;
+	scene_data->prev_cam_transform = Transform3D(Basis::from_euler(Vector3(-0.25f, 0.65f, 0.0f)), Vector3(1.2f, 2.0f, 7.9f));
+	scene_data->prev_taa_jitter = -p_jitter;
+	return scene_data;
 }
 
 } // namespace
@@ -86,132 +108,601 @@ TEST_CASE("[NextGI][SWRT] Software trace shaders do not require ray query") {
 }
 #endif
 
-TEST_CASE("[NextGI][SWRT] Global march hits a one-sided box and misses empty space") {
-	const MeshSDFData box = _unit_box_sdf(false);
+TEST_CASE("[NextGI][View] Depth reconstruction inverts the prepass projection") {
+	// What the depth prepass stores for a world point, with the projection the
+	// renderer builds for the scene UBO (RenderSceneDataRD::get_cam_projection),
+	// reconstructed with the matrix every NextGI pass now uploads.
+	for (int flip = 0; flip < 2; flip++) {
+		RenderSceneDataRD *scene_data = _scene_data(flip == 1, Vector2(0.4f / 1920.0f, -0.3f / 1080.0f));
+		const Projection prepass = scene_data->get_cam_projection() * Projection(scene_data->cam_transform.affine_inverse());
+		const Projection view_projection = NextGIView::view_projection(*scene_data);
+		for (int column = 0; column < 4; column++) {
+			for (int row = 0; row < 4; row++) {
+				CHECK(Math::is_equal_approx(view_projection.columns[column][row], prepass.columns[column][row]));
+			}
+		}
+		const Projection inv_view_projection = NextGIView::inv_view_projection(*scene_data);
+		const Vector3 forward = -scene_data->cam_transform.basis.get_column(2);
+		const Vector3 right = scene_data->cam_transform.basis.get_column(0);
+		const Vector3 up = scene_data->cam_transform.basis.get_column(1);
+		const float distances[] = { 0.2f, 0.5f, 2.0f, 8.0f, 20.0f, 100.0f, 500.0f };
+		for (const float distance : distances) {
+			const Vector3 world = scene_data->cam_transform.origin + forward * distance + right * (0.3f * distance) - up * (0.2f * distance);
+			const Vector4 clip = prepass.xform(Vector4(world.x, world.y, world.z, 1.0f));
+			const Vector2 uv(clip.x / clip.w * 0.5f + 0.5f, clip.y / clip.w * 0.5f + 0.5f);
+			const float depth = clip.z / clip.w;
+			// Reverse Z with a [0, 1] remap: in front of the camera, never the cleared 0.
+			CHECK(depth > 0.0f);
+			CHECK(depth < 1.0f);
+			CHECK_FALSE(NextGIViewMath::is_background(depth));
+			const Vector3 reconstructed = NextGIViewMath::reconstruct(inv_view_projection, uv, depth);
+			CHECK(reconstructed.distance_to(world) <= 1.0e-3f * distance + 1.0e-4f);
+			const Vector3 projected = NextGIViewMath::project(view_projection, world);
+			CHECK(Math::is_equal_approx(projected.x, uv.x));
+			CHECK(Math::is_equal_approx(projected.y, uv.y));
+			CHECK(Math::is_equal_approx(projected.z, depth));
+			if (distance == 8.0f) {
+				// The convention the passes used before: the raw OpenGL-style projection
+				// fed depth * 2 - 1. Every surface lands on the near plane.
+				const Projection raw = (scene_data->cam_projection * Projection(scene_data->cam_transform.affine_inverse())).inverse();
+				const Vector4 old_clip(uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, depth * 2.0f - 1.0f, 1.0f);
+				const Vector4 old_world = raw.xform(old_clip);
+				const Vector3 old_position = Vector3(old_world.x, old_world.y, old_world.z) / old_world.w;
+				CHECK(old_position.distance_to(scene_data->cam_transform.origin) < 0.1f);
+				CHECK(old_position.distance_to(world) > 7.0f);
+			}
+		}
+		// The previous view uses the previous camera and jitter, as the scene UBO's previous projection does.
+		Projection prev_correction;
+		prev_correction.set_depth_correction(scene_data->flip_y);
+		prev_correction.add_jitter_offset(scene_data->prev_taa_jitter);
+		const Projection prev_prepass = prev_correction * scene_data->prev_cam_projection * Projection(scene_data->prev_cam_transform.affine_inverse());
+		const Projection prev_view_projection = NextGIView::prev_view_projection(*scene_data);
+		for (int column = 0; column < 4; column++) {
+			for (int row = 0; row < 4; row++) {
+				CHECK(Math::is_equal_approx(prev_view_projection.columns[column][row], prev_prepass.columns[column][row]));
+			}
+		}
+		// View space (the diffuse denoiser's spatial filter) uses the same depth projection.
+		const Vector3 view_point(0.5f, -0.25f, -6.0f);
+		const Vector4 view_clip = scene_data->get_cam_projection().xform(Vector4(view_point.x, view_point.y, view_point.z, 1.0f));
+		const Vector3 view_reconstructed = NextGIViewMath::reconstruct(NextGIView::inv_projection(*scene_data), Vector2(view_clip.x / view_clip.w * 0.5f + 0.5f, view_clip.y / view_clip.w * 0.5f + 0.5f), view_clip.z / view_clip.w);
+		CHECK(view_reconstructed.distance_to(view_point) < 1.0e-3f);
+		memdelete(scene_data);
+	}
+}
+
+TEST_CASE("[NextGI][View] Linear depth slices round-trip through the stored depth") {
+	RenderSceneDataRD *scene_data = _scene_data(true, Vector2());
+	const Projection depth_projection = NextGIView::depth_projection(*scene_data);
+	const Vector4 coefficients = NextGIViewMath::depth_coefficients(depth_projection);
+	const float distances[] = { 0.05f, 0.5f, 3.0f, 64.0f, 1000.0f };
+	for (const float distance : distances) {
+		const Vector4 clip = depth_projection.xform(Vector4(0.1f, 0.2f, -distance, 1.0f));
+		const float depth = clip.z / clip.w;
+		CHECK(Math::is_equal_approx(NextGIViewMath::depth_from_linear(coefficients, distance), depth, 1.0e-6f));
+		CHECK(Math::is_equal_approx(NextGIViewMath::linear_depth(coefficients, depth), distance, 1.0e-3f * distance));
+	}
+	// Reverse Z: nearer is larger.
+	CHECK(NextGIViewMath::depth_from_linear(coefficients, 1.0f) > NextGIViewMath::depth_from_linear(coefficients, 2.0f));
+	memdelete(scene_data);
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Coverage words read the CPU coverage layout") {
+	// One bit per voxel, 16 words per slot: a bit set through the CPU BrickSplit
+	// layout is the word and bit the trace and the compositing shader use, and
+	// no other voxel's bit, also in the next slot.
+	for (uint32_t voxel = 0; voxel < NextGIGlobalSDF::BRICK_VOXELS; voxel++) {
+		NextGIGlobalSDF::BrickSplit split;
+		NextGIGlobalSDF::set_coverage_bit(split, Vector3i(int(voxel % 8), int((voxel / 8) % 8), int(voxel / 64)), true);
+		uint32_t words[2 * NextGIGlobalSDFGPU::COVERAGE_BYTES / 4] = {};
+		memcpy(words + NextGIGlobalSDFGPU::COVERAGE_BYTES / 4, split.coverage, NextGIGlobalSDFGPU::COVERAGE_BYTES);
+		const uint32_t word = NextGIGlobalSDFGPU::coverage_word(1, voxel);
+		CHECK(word < 2 * NextGIGlobalSDFGPU::COVERAGE_BYTES / 4);
+		CHECK(word >= NextGIGlobalSDFGPU::COVERAGE_BYTES / 4);
+		CHECK_EQ(words[word], NextGIGlobalSDFGPU::coverage_bit(voxel));
+		uint32_t set_bits = 0;
+		for (const uint32_t value : words) {
+			for (uint32_t bit = 0; bit < 32; bit++) {
+				set_bits += (value >> bit) & 1u;
+			}
+		}
+		CHECK_EQ(set_bits, 1u);
+	}
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Distances past a mesh SDF's bounds keep growing") {
+	// The mesh SDF stores a narrow band and clamps outside its bounds. The global
+	// field extends it with a continuous lower bound, so coarse levels do not read
+	// "near a surface" a voxel or more away from every mesh.
+	const MeshSDFData box = _box_sdf(Vector3(1.0f, 1.0f, 1.0f));
+	NextGIGlobalSDF::Instance instance;
+	instance.field = &box;
+	instance.transform = Transform3D(Basis(), Vector3(2.0f, 0.0f, -1.0f));
+	const float band = box.mip_bands[0];
+	const float distances[] = { 0.8f, 1.5f, 3.0f, 6.0f };
+	float previous = 0.0f;
+	for (const float distance : distances) {
+		// Straight out of the +x face: the true distance is `distance`.
+		const float sampled = NextGIGlobalSDF::sample_instance(instance, instance.transform.origin + Vector3(0.5f + distance, 0.0f, 0.0f));
+		CHECK(sampled <= distance + 0.02f);
+		CHECK(sampled >= distance - band - 0.02f);
+		CHECK(sampled > previous);
+		previous = sampled;
+	}
+	CHECK(previous > 4.0f * band);
+	// Continuous across the bounds: just inside and just outside agree.
+	const Vector3 local_edge = box.bounds.position + box.bounds.size * Vector3(1.0f, 0.5f, 0.5f);
+	const float inner = NextGIGlobalSDF::sample_instance(instance, instance.transform.xform(local_edge - Vector3(1.0e-3f, 0.0f, 0.0f)));
+	const float outer = NextGIGlobalSDF::sample_instance(instance, instance.transform.xform(local_edge + Vector3(1.0e-3f, 0.0f, 0.0f)));
+	CHECK(Math::abs(outer - inner) < 0.01f);
+}
+
+TEST_CASE("[NextGI][GlobalSDF] A brick never reads past an instance it does not list") {
+	// A brick composites only the instances whose bounds overlap its cull box. Past their
+	// bounds their distances keep growing, so a voxel far from them read their distance even
+	// where an unlisted instance just outside the cull box was nearer (the composite check
+	// found 0.90 m stored beside a pillar 0.64 m away), and rays stepped into it.
+	const MeshSDFData box = _box_sdf(Vector3(1.0f, 1.0f, 1.0f));
 	Vector<NextGIGlobalSDF::Instance> instances;
-	instances.push_back(_instance(&box, Vector3(), false));
-	NextGIGlobalSDF field;
-	Vector3i origins[LEVELS];
-	_fill_origins(Vector3(), origins);
-	const uint32_t bricks = field.update_region(0, origins[0], AABB(Vector3(-1.5f, -1.5f, -1.5f), Vector3(3.0f, 3.0f, 3.0f)), instances);
-	CHECK(bricks > 0);
+	NextGIGlobalSDF::Instance below; // Its bounds reach into the cull box from below.
+	below.field = &box;
+	below.transform.origin = Vector3(0.4f, -0.9f, 0.4f);
+	instances.push_back(below);
+	NextGIGlobalSDF::Instance beside; // Its bounds stop just past the cull box on +x.
+	beside.field = &box;
+	beside.transform.origin = Vector3(2.0f, 0.4f, 0.4f);
+	instances.push_back(beside);
 
-	const NextGISWRTTrace::Hit hit = NextGISWRTTrace::trace_global(field, origins, LEVELS, Vector3(), Vector3(0.0f, 0.0f, -2.0f), Vector3(0.0f, 0.0f, 1.0f), 4.0f, instances.ptr(), instances.size());
-	CHECK(hit.hit);
-	CHECK_FALSE(hit.detail);
-	CHECK(hit.t > 0.5f);
-	CHECK(hit.t < 2.0f);
-	CHECK(hit.steps > 0);
-	CHECK(hit.steps <= NextGISWRTTrace::MAX_STEPS);
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
+	const Vector3i brick(8, 8, 8);
+	const AABB cull_box = NextGIGlobalSDF::brick_cull_box(0, origin, brick);
+	CHECK(cull_box.is_equal_approx(AABB(Vector3(-0.1f, -0.1f, -0.1f), Vector3(1.0f, 1.0f, 1.0f))));
+	uint32_t culled[2] = {};
+	const uint32_t culled_count = NextGIGlobalSDF::cull_instances_for_brick(instances, 0, origin, brick, culled, 2);
+	REQUIRE_EQ(culled_count, 1u);
+	REQUIRE_EQ(culled[0], 0u);
+	NextGIGlobalSDF::BrickSplit split;
+	NextGIGlobalSDF::compose_brick_split(instances, culled, culled_count, 0, origin, brick, split);
 
-	const NextGISWRTTrace::Hit miss = NextGISWRTTrace::trace_global(field, origins, LEVELS, Vector3(), Vector3(0.0f, 2.0f, 0.0f), Vector3(0.0f, 1.0f, 0.0f), 4.0f, instances.ptr(), instances.size());
-	CHECK_FALSE(miss.hit);
-	CHECK(miss.steps > 0);
-	CHECK(miss.steps <= NextGISWRTTrace::MAX_STEPS);
+	const float voxel = NextGIGlobalSDF::level_voxel_size(0);
+	float worst_listed_excess = 0.0f;
+	for (uint32_t index = 0; index < NextGIGlobalSDF::BRICK_VOXELS; index++) {
+		const Vector3i local(int(index % 8), int((index / 8) % 8), int(index / 64));
+		const Vector3 world = NextGIGlobalSDF::voxel_center(0, origin, brick * 8 + local);
+		const float stored = MIN(split.static_distance[index], split.dynamic_distance[index]);
+		const float nearest = NextGIGlobalSDF::reference_distance(instances, world);
+		const float listed = NextGIGlobalSDF::sample_instance(instances[0], world);
+		worst_listed_excess = MAX(worst_listed_excess, listed - nearest);
+		// Never past the nearest instance, listed or not.
+		CHECK(stored <= nearest + 0.25f * voxel);
+		// The CPU twin the GPU composite is validated against.
+		CHECK(Math::is_equal_approx(stored, NextGIGlobalSDF::composite_distance(instances, culled, culled_count, cull_box, world)));
+		// The cap is at least 1.5 voxels at a voxel center, so it never makes a surface (the hit
+		// band is half a voxel, a voxel for two-sided coverage).
+		if (nearest >= 1.5f * voxel) {
+			CHECK(stored >= 1.5f * voxel - 1.0e-4f);
+		}
+	}
+	// The listed instance alone reads well past the unlisted one somewhere in the brick.
+	CHECK(worst_listed_excess > 0.3f);
 }
 
-TEST_CASE("[NextGI][SWRT] Two-sided coverage hits only a back-facing approach") {
-	const MeshSDFData box = _unit_box_sdf(true);
+TEST_CASE("[NextGI][GlobalSDF] Non-uniformly scaled instances read world distances") {
+	// A scaled unit box is the common way to build floors and walls. The largest axis
+	// scale overestimated distances (0.3 m above a 40 x 0.2 x 40 floor read about 28 m,
+	// so rays tunneled), and the smallest one alone reads a stretched box's ends meters
+	// too close. With the oriented-bounds bound (plan L4) a box reads its true distance.
+	const MeshSDFData box = _box_sdf(Vector3(1.0f, 1.0f, 1.0f));
+	const Basis bases[] = {
+		Basis().scaled(Vector3(40.0f, 0.2f, 40.0f)),
+		Basis().scaled(Vector3(0.3f, 2.0f, 4.0f)),
+		Basis::from_euler(Vector3(0.3f, 0.8f, -0.2f)) * Basis().scaled(Vector3(6.0f, 0.25f, 1.5f)),
+	};
+	for (const Basis &basis : bases) {
+		NextGIGlobalSDF::Instance instance;
+		instance.field = &box;
+		instance.transform = Transform3D(basis, Vector3(1.0f, 2.0f, -3.0f));
+		const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(basis);
+		const float smallest = MIN(axis_scale.x, MIN(axis_scale.y, axis_scale.z));
+		const float tolerance = 0.01f + 2.0f * _quantum(box, smallest);
+		// Straight out of every face, inside and past the mesh SDF's bounds: the true distance.
+		const float heights[] = { 0.05f, 0.3f, 1.0f, 2.5f };
+		for (int axis = 0; axis < 3; axis++) {
+			const Vector3 normal = basis.get_column(axis).normalized();
+			const Vector3 face = instance.transform.origin + basis.get_column(axis) * 0.5f;
+			for (const float height : heights) {
+				const float sampled = NextGIGlobalSDF::sample_instance(instance, face + normal * height);
+				CHECK(Math::abs(sampled - height) <= tolerance);
+			}
+			// Inside, half way to the center: negative.
+			CHECK(NextGIGlobalSDF::sample_instance(instance, instance.transform.origin + basis.get_column(axis) * 0.25f) < 0.0f);
+		}
+		// Around the box, near and far: never farther than the true distance, and outside the
+		// box (its oriented bounds) the true distance.
+		RandomNumberGenerator rng;
+		rng.set_seed(186);
+		uint32_t outside = 0;
+		for (int sample = 0; sample < 400; sample++) {
+			const Vector3 local(rng.randf_range(-1.5f, 1.5f), rng.randf_range(-1.5f, 1.5f), rng.randf_range(-1.5f, 1.5f));
+			const Vector3 world = instance.transform.xform(local);
+			const float truth = _oriented_box_distance(instance.transform, world);
+			const float sampled = NextGIGlobalSDF::sample_instance(instance, world);
+			if (truth <= 0.0f) {
+				CHECK(sampled <= tolerance);
+				continue;
+			}
+			outside++;
+			CHECK(Math::abs(sampled - truth) <= tolerance);
+		}
+		CHECK(outside > 200);
+	}
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Non-uniformly scaled curved meshes keep a lower bound") {
+	// An ellipsoid from a scaled sphere: inside its bounds the distance may read closer
+	// than it is, never farther (brute force over points on the ellipsoid).
+	Ref<SphereMesh> sphere;
+	sphere.instantiate();
+	sphere->set_radius(0.5f);
+	sphere->set_height(1.0f);
+	MeshSDFSettings settings;
+	settings.voxels_per_meter = 16.0f;
+	settings.max_voxels_per_axis = 32;
+	settings.prefer_static_raycaster = false;
+	MeshSDFData field;
+	REQUIRE(MeshSDFBuilder::build(sphere->get_faces(), settings, field) == OK);
+	NextGIGlobalSDF::Instance instance;
+	instance.field = &field;
+	instance.transform = Transform3D(Basis::from_euler(Vector3(0.0f, 0.5f, 0.0f)) * Basis().scaled(Vector3(3.0f, 1.0f, 0.5f)), Vector3(0.0f, 1.0f, 0.0f));
+	LocalVector<Vector3> surface;
+	for (int u = 0; u <= 120; u++) {
+		for (int v = 0; v <= 60; v++) {
+			const float azimuth = float(u) / 120.0f * Math::TAU;
+			const float polar = float(v) / 60.0f * Math::PI;
+			surface.push_back(instance.transform.xform(0.5f * Vector3(Math::sin(polar) * Math::cos(azimuth), Math::cos(polar), Math::sin(polar) * Math::sin(azimuth))));
+		}
+	}
+	RandomNumberGenerator rng;
+	rng.set_seed(188);
+	uint32_t checked = 0;
+	for (int sample = 0; sample < 150; sample++) {
+		const Vector3 local(rng.randf_range(-1.2f, 1.2f), rng.randf_range(-1.2f, 1.2f), rng.randf_range(-1.2f, 1.2f));
+		if (local.length() <= 0.55f) {
+			continue;
+		}
+		const Vector3 world = instance.transform.xform(local);
+		float truth = 1e30f;
+		for (const Vector3 &point : surface) {
+			truth = MIN(truth, world.distance_to(point));
+		}
+		checked++;
+		// The sphere's faceting and the field's voxels: a few centimeters.
+		CHECK(NextGIGlobalSDF::sample_instance(instance, world) <= truth + 0.04f);
+	}
+	CHECK(checked > 100);
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Instance axis scales, sheared bases included") {
+	const Basis rotated_scaled = Basis::from_euler(Vector3(0.4f, -1.1f, 0.25f)) * Basis().scaled(Vector3(2.0f, 0.5f, 3.0f));
+	const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(rotated_scaled);
+	CHECK(axis_scale.is_equal_approx(Vector3(2.0f, 0.5f, 3.0f)));
+	// A sheared basis has no per-axis scale: its smallest singular value bounds every
+	// direction. The brute-force minimum of |B v| over unit vectors finds the same value.
+	Basis sheared;
+	sheared.set_column(0, Vector3(1.0f, 0.0f, 0.0f));
+	sheared.set_column(1, Vector3(0.8f, 1.0f, 0.0f));
+	sheared.set_column(2, Vector3(0.0f, 0.3f, 2.0f));
+	const Vector3 sheared_scale = NextGIGlobalSDF::instance_axis_scale(sheared);
+	CHECK(Math::is_equal_approx(sheared_scale.x, sheared_scale.y));
+	CHECK(Math::is_equal_approx(sheared_scale.x, sheared_scale.z));
+	float smallest = 1e30f;
+	const int count = 20000;
+	for (int index = 0; index < count; index++) {
+		// Fibonacci sphere.
+		const float y = 1.0f - 2.0f * (float(index) + 0.5f) / float(count);
+		const float radius = Math::sqrt(MAX(1.0f - y * y, 0.0f));
+		const float angle = float(index) * 2.39996323f;
+		smallest = MIN(smallest, sheared.xform(Vector3(Math::cos(angle) * radius, y, Math::sin(angle) * radius)).length());
+	}
+	CHECK(sheared_scale.x <= smallest + 1.0e-4f);
+	CHECK(sheared_scale.x >= smallest - 0.02f);
+
+	// A sheared instance's distance stays a lower bound of the distance to its
+	// parallelepiped (brute force over points on its six faces).
+	const MeshSDFData box = _box_sdf(Vector3(1.0f, 1.0f, 1.0f));
+	NextGIGlobalSDF::Instance instance;
+	instance.field = &box;
+	instance.transform = Transform3D(sheared, Vector3(0.0f, 1.0f, 0.0f));
+	LocalVector<Vector3> surface;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = 0; side < 2; side++) {
+			for (int u = 0; u <= 40; u++) {
+				for (int v = 0; v <= 40; v++) {
+					Vector3 local;
+					local[axis] = side == 0 ? -0.5f : 0.5f;
+					local[(axis + 1) % 3] = float(u) / 40.0f - 0.5f;
+					local[(axis + 2) % 3] = float(v) / 40.0f - 0.5f;
+					surface.push_back(instance.transform.xform(local));
+				}
+			}
+		}
+	}
+	RandomNumberGenerator rng;
+	rng.set_seed(187);
+	for (int sample = 0; sample < 60; sample++) {
+		const Vector3 local(rng.randf_range(-1.6f, 1.6f), rng.randf_range(-1.6f, 1.6f), rng.randf_range(-1.6f, 1.6f));
+		if (MAX(Math::abs(local.x), MAX(Math::abs(local.y), Math::abs(local.z))) <= 0.5f) {
+			continue;
+		}
+		const Vector3 world = instance.transform.xform(local);
+		float truth = 1e30f;
+		for (const Vector3 &point : surface) {
+			truth = MIN(truth, world.distance_to(point));
+		}
+		CHECK(NextGIGlobalSDF::sample_instance(instance, world) <= truth + 0.05f);
+	}
+}
+
+TEST_CASE("[NextGI][SWRT] Microbenchmark fixture segments are lit or cross a box core") {
+	// The microbenchmark checks its trace against these. Checked here by sampling along each
+	// segment against the boxes' analytic distance, not by the generator's own box tests.
+	LocalVector<AABB> boxes;
+	boxes.push_back(AABB(Vector3(-12.0f, -0.2f, -12.0f), Vector3(24.0f, 0.2f, 24.0f)));
+	boxes.push_back(AABB(Vector3(11.9f, 0.0f, -12.0f), Vector3(0.2f, 6.0f, 24.0f)));
+	boxes.push_back(AABB(Vector3(-0.5f, 0.0f, -0.5f), Vector3(1.0f, 1.0f, 1.0f)));
+	LocalVector<NextGISWRTTrace::ShadowRequest> requests;
+	LocalVector<RendererRD::NextGILight> lights;
+	LocalVector<uint8_t> occluded;
+	NextGISWRTTrace::fixture_segments(boxes, 32, requests, lights, occluded);
+	REQUIRE_EQ(requests.size(), 64u);
+	REQUIRE_EQ(lights.size(), 64u);
+	REQUIRE_EQ(occluded.size(), 64u);
+	auto distance_to_boxes = [&](const Vector3 &p_point) {
+		float nearest = 1e30f;
+		for (const AABB &box : boxes) {
+			const Vector3 center = box.get_center();
+			nearest = MIN(nearest, _oriented_box_distance(Transform3D(Basis().scaled(box.size), center), p_point));
+		}
+		return nearest;
+	};
+	uint32_t occluded_count = 0;
+	for (uint32_t index = 0; index < requests.size(); index++) {
+		const Vector3 from(requests[index].position_offset[0], requests[index].position_offset[1], requests[index].position_offset[2]);
+		CHECK_EQ(int(requests[index].normal_light[3]), int(index));
+		CHECK(Math::is_equal_approx(lights[index].direction_type[3], 1.0f));
+		const Vector3 to(lights[index].position_inv_range[0], lights[index].position_inv_range[1], lights[index].position_inv_range[2]);
+		CHECK(distance_to_boxes(from) >= NextGISWRTTrace::FIXTURE_CLEARANCE);
+		CHECK(distance_to_boxes(to) >= NextGISWRTTrace::FIXTURE_CLEARANCE);
+		float nearest = 1e30f;
+		for (int step = 0; step <= 400; step++) {
+			nearest = MIN(nearest, distance_to_boxes(from.lerp(to, float(step) / 400.0f)));
+		}
+		if (occluded[index]) {
+			occluded_count++;
+			CHECK(nearest <= -NextGISWRTTrace::FIXTURE_CORE_INSET + 0.05f);
+		} else {
+			CHECK(nearest >= NextGISWRTTrace::FIXTURE_CLEARANCE - 0.05f);
+		}
+	}
+	CHECK_EQ(occluded_count, 32u);
+}
+
+TEST_CASE("[NextGI][SWRT] Software views trace once per single-view render") {
+	CHECK(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_SOFTWARE, false, true, false, 1));
+	// XR: depth and normal-roughness are arrays the trace does not bind.
+	CHECK_FALSE(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_SOFTWARE, false, true, false, 2));
+	CHECK_FALSE(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_HWRT, false, true, false, 1));
+	CHECK_FALSE(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_SOFTWARE, true, true, false, 1));
+}
+
+TEST_CASE("[NextGI][SWRT] SWRT_REDUCED ends when the tier leaves SOFTWARE") {
+	RendererRD::NextGI next_gi;
+	RendererRD::NextGI::TierInputs software;
+	software.project_enabled = true;
+	software.ray_query = false;
+	software.driver_reason = RendererRD::NextGI::NO_RAY_QUERY;
+	RendererRD::NextGI::TierInputs hardware = software;
+	hardware.ray_query = true;
+	hardware.ray_query_hw = true;
+	hardware.driver_reason = RendererRD::NextGI::TIER_REASON_NONE;
+	String line;
+	REQUIRE(next_gi.update_tier(software, RendererRD::NextGI::QUALITY_HIGH, line));
+	next_gi.note_swrt_reduced(4);
+	CHECK(next_gi.get_tier_result().swrt_reduced);
+	REQUIRE(next_gi.update_tier(software, RendererRD::NextGI::QUALITY_HIGH, line));
+	CHECK(line.contains("SWRT_REDUCED"));
+	// The software tracer goes with the tier; the hardware line does not carry its flag.
+	REQUIRE(next_gi.update_tier(hardware, RendererRD::NextGI::QUALITY_HIGH, line));
+	CHECK(line.begins_with("NextGI: tier=HWRT"));
+	CHECK_FALSE(line.contains("SWRT_REDUCED"));
+	CHECK_FALSE(next_gi.get_tier_result().swrt_reduced);
+	// Back on SWRT the new tracer starts with every level.
+	REQUIRE(next_gi.update_tier(software, RendererRD::NextGI::QUALITY_HIGH, line));
+	CHECK_FALSE(line.contains("SWRT_REDUCED"));
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Scrolling one level keeps every other level's slots") {
+	NextGIGlobalSDFGPU gpu(6);
+	float voxels[NextGIGlobalSDF::BRICK_VOXELS] = {};
+	REQUIRE(gpu.upload_brick(0, Vector3i(0, 0, 0), voxels));
+	REQUIRE(gpu.upload_brick(0, Vector3i(5, 5, 5), voxels));
+	REQUIRE(gpu.upload_brick(1, Vector3i(2, 2, 2), voxels));
+	REQUIRE(gpu.upload_brick(2, Vector3i(3, 3, 3), voxels));
+	const int32_t slot_1 = gpu.get_slot(1, Vector3i(2, 2, 2));
+	const int32_t slot_2 = gpu.get_slot(2, Vector3i(3, 3, 3));
+	const int32_t kept = gpu.get_slot(0, Vector3i(5, 5, 5));
+	// Level 0 scrolls one brick on +x: brick 0 leaves, brick 5 shifts to 4.
+	gpu.scroll_level(0, Vector3i(1, 0, 0));
+	CHECK_EQ(gpu.get_used_bricks(), 3u);
+	CHECK_EQ(gpu.get_slot(0, Vector3i(4, 5, 5)), kept);
+	CHECK_EQ(gpu.get_slot(1, Vector3i(2, 2, 2)), slot_1);
+	CHECK_EQ(gpu.get_slot(2, Vector3i(3, 3, 3)), slot_2);
+	// The three free slots stay distinct from the resident ones.
+	for (int index = 0; index < 3; index++) {
+		REQUIRE(gpu.upload_brick(3, Vector3i(index, 0, 0), voxels));
+		const int32_t slot = gpu.get_slot(3, Vector3i(index, 0, 0));
+		CHECK(slot != kept);
+		CHECK(slot != slot_1);
+		CHECK(slot != slot_2);
+	}
+	CHECK_EQ(gpu.get_used_bricks(), 6u);
+	CHECK_FALSE(gpu.upload_brick(3, Vector3i(9, 0, 0), voxels));
+}
+
+TEST_CASE("[NextGI][GlobalSDF] Instance bins match the per-brick cull") {
+	const MeshSDFData rock = _box_sdf(Vector3(1.0f, 0.6f, 1.4f));
+	const MeshSDFData slab = _box_sdf(Vector3(6.0f, 0.2f, 6.0f));
+	RandomNumberGenerator rng;
+	rng.set_seed(186);
 	Vector<NextGIGlobalSDF::Instance> instances;
-	instances.push_back(_instance(&box, Vector3(), true));
-	NextGIGlobalSDF field;
-	Vector3i origins[LEVELS];
-	_fill_origins(Vector3(), origins);
-	CHECK(field.update_region(0, origins[0], AABB(Vector3(-1.5f, -1.5f, -1.5f), Vector3(3.0f, 3.0f, 3.0f)), instances) > 0);
-
-	// The front face is an outward approach. 1.7 m reaches that face and not the exit.
-	const NextGISWRTTrace::Hit front = NextGISWRTTrace::trace_global(field, origins, LEVELS, Vector3(), Vector3(0.0f, 0.0f, -2.0f), Vector3(0.0f, 0.0f, 1.0f), 1.7f, instances.ptr(), instances.size());
-	CHECK_FALSE(front.hit);
-
-	const NextGISWRTTrace::Hit exit_face = NextGISWRTTrace::trace_global(field, origins, LEVELS, Vector3(), Vector3(), Vector3(0.0f, 0.0f, 1.0f), 2.0f, instances.ptr(), instances.size());
-	CHECK(exit_face.hit);
-	CHECK(exit_face.t > 0.2f);
-	CHECK(exit_face.t < 1.2f);
+	for (int index = 0; index < 120; index++) {
+		NextGIGlobalSDF::Instance instance;
+		instance.field = index % 7 == 0 ? &slab : &rock;
+		instance.transform = Transform3D(Basis::from_euler(Vector3(0.0f, rng.randf_range(0.0f, 6.28f), 0.0f)).scaled(Vector3(1.0f, 1.0f, 1.0f) * rng.randf_range(0.5f, 2.0f)), Vector3(rng.randf_range(-40.0f, 40.0f), rng.randf_range(-2.0f, 6.0f), rng.randf_range(-40.0f, 40.0f)));
+		instances.push_back(instance);
+	}
+	LocalVector<uint32_t> culled;
+	culled.resize(instances.size());
+	for (uint32_t level = 0; level < 3; level++) {
+		const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(3.0f, 1.0f, -2.0f), level);
+		LocalVector<uint32_t> offsets;
+		LocalVector<uint32_t> indices;
+		NextGIGlobalSDF::bin_instances(instances, level, origin, offsets, indices);
+		REQUIRE_EQ(offsets.size(), NextGIGlobalSDF::BRICKS_PER_LEVEL + 1);
+		uint32_t occupied = 0;
+		for (uint32_t brick = 0; brick < NextGIGlobalSDF::BRICKS_PER_LEVEL; brick++) {
+			const Vector3i coordinate(int(brick % 16), int((brick / 16) % 16), int(brick / 256));
+			const uint32_t count = NextGIGlobalSDF::cull_instances_for_brick(instances, level, origin, coordinate, culled.ptr(), culled.size());
+			CHECK_EQ(offsets[brick + 1] - offsets[brick], count);
+			for (uint32_t i = 0; i < count && offsets[brick] + i < indices.size(); i++) {
+				CHECK_EQ(indices[offsets[brick] + i], culled[i]);
+			}
+			occupied += count > 0 ? 1 : 0;
+		}
+		CHECK(occupied > 0);
+	}
 }
 
-TEST_CASE("[NextGI][SWRT] Detail mesh SDF hands off to the global field") {
-	const MeshSDFData box = _unit_box_sdf(false);
-	NextGIGlobalSDF::Instance near_box = _instance(&box, Vector3(), false);
-	NextGISWRTTrace::DetailInstance detail;
-	detail.instance = near_box;
-	detail.id = 42;
-	NextGIGlobalSDF empty;
-	Vector3i origins[LEVELS];
-	_fill_origins(Vector3(), origins);
-	const NextGISWRTTrace::Hit near_hit = NextGISWRTTrace::trace_detail(empty, origins, LEVELS, Vector3(), Vector3(0.0f, 0.0f, -1.2f), Vector3(0.0f, 0.0f, 1.0f), 4.0f, &detail, 1, nullptr, nullptr, 0);
-	CHECK(near_hit.hit);
-	CHECK(near_hit.detail);
-	CHECK_EQ(near_hit.instance_id, 42u);
-	CHECK(near_hit.t < NextGISWRTTrace::DETAIL_METERS);
+TEST_CASE("[NextGI][SWRT] Clipmaps build every brick once, then only scroll edges and dirty volumes") {
+	NextGIGlobalSDFClipmaps clipmaps;
+	NextGIGlobalSDFClipmaps::Plan plan;
+	const Vector3 camera(0.05f, 1.0f, 0.05f);
+	clipmaps.plan_level(0, camera, 0, plan);
+	CHECK(plan.update);
+	CHECK(plan.full);
+	CHECK_EQ(plan.bricks.size(), NextGIGlobalSDF::BRICKS_PER_LEVEL);
+	clipmaps.commit_level(0, plan, true);
+	CHECK(clipmaps.is_level_valid(0));
 
-	Vector<NextGIGlobalSDF::Instance> far_instances;
-	far_instances.push_back(_instance(&box, Vector3(0.0f, 0.0f, 3.0f), false));
-	NextGIGlobalSDF far_field;
-	CHECK(far_field.update_region(0, origins[0], AABB(Vector3(-1.0f, -1.0f, 2.0f), Vector3(2.0f, 2.0f, 2.0f)), far_instances) > 0);
-	const NextGISWRTTrace::Hit far_hit = NextGISWRTTrace::trace_detail(far_field, origins, LEVELS, Vector3(), Vector3(), Vector3(0.0f, 0.0f, 1.0f), 8.0f, nullptr, 0, nullptr, far_instances.ptr(), far_instances.size());
-	CHECK(far_hit.hit);
-	CHECK_FALSE(far_hit.detail);
-	CHECK(far_hit.t >= NextGISWRTTrace::DETAIL_METERS);
-	CHECK(far_hit.t < 4.0f);
+	// A still camera rebuilds nothing.
+	clipmaps.plan_level(0, camera, 1, plan);
+	CHECK(plan.update);
+	CHECK_FALSE(plan.full);
+	CHECK_EQ(plan.bricks.size(), 0u);
+	clipmaps.commit_level(0, plan, true);
+
+	// One brick of camera travel on +x shifts the table and rebuilds only the new slab.
+	const float brick = NextGIGlobalSDF::level_voxel_size(0) * float(NextGIGlobalSDF::BRICK_SIZE);
+	const Vector3 moved = camera + Vector3(brick, 0.0f, 0.0f);
+	clipmaps.plan_level(0, moved, 2, plan);
+	CHECK_EQ(plan.scroll, Vector3i(1, 0, 0));
+	CHECK_EQ(plan.bricks.size(), NextGIGlobalSDF::PAGE_SIZE * NextGIGlobalSDF::PAGE_SIZE);
+	for (const Vector3i &edge : plan.bricks) {
+		CHECK_EQ(edge.x, int(NextGIGlobalSDF::PAGE_SIZE) - 1);
+	}
+	clipmaps.commit_level(0, plan, true);
+	CHECK_EQ(clipmaps.get_origin(0), NextGIGlobalSDF::scrolled_origin(moved, 0));
+
+	// A dirty volume rebuilds the bricks around it, grown by the mesh-SDF band.
+	const AABB rock(Vector3(1.0f, 0.5f, 1.0f), Vector3(0.4f, 0.4f, 0.4f));
+	clipmaps.add_dirty_volumes(&rock, 1);
+	clipmaps.plan_level(0, moved, 3, plan);
+	CHECK_FALSE(plan.full);
+	CHECK(plan.bricks.size() > 0);
+	const Vector3i origin = clipmaps.get_origin(0);
+	const AABB grown = rock.grow(NextGIGlobalSDFClipmaps::dirty_margin(0));
+	for (const Vector3i &dirty : plan.bricks) {
+		const AABB brick_bounds(Vector3(origin + dirty * int(NextGIGlobalSDF::BRICK_SIZE)) * NextGIGlobalSDF::level_voxel_size(0), Vector3(brick, brick, brick));
+		CHECK(brick_bounds.intersects(grown.grow(1.0e-3f)));
+	}
+	// The brick that holds the rock is among them.
+	const Vector3i rock_brick = NextGIGlobalSDF::world_to_voxel(0, origin, rock.get_center()) / int(NextGIGlobalSDF::BRICK_SIZE);
+	bool found = false;
+	for (const Vector3i &dirty : plan.bricks) {
+		found = found || dirty == rock_brick;
+	}
+	CHECK(found);
+	clipmaps.commit_level(0, plan, true);
+	CHECK_EQ(clipmaps.get_pending_dirty(0), 0u);
+
+	// Level 1 updates every second frame; a dirty volume waits for it.
+	clipmaps.plan_level(1, moved, 0, plan);
+	clipmaps.commit_level(1, plan, true);
+	clipmaps.add_dirty_volumes(&rock, 1);
+	clipmaps.plan_level(1, moved, 5, plan);
+	CHECK_FALSE(plan.update);
+	clipmaps.commit_level(1, plan, true);
+	CHECK_EQ(clipmaps.get_pending_dirty(1), 1u);
+	clipmaps.plan_level(1, moved, 6, plan);
+	CHECK(plan.update);
+	CHECK(plan.bricks.size() > 0);
+	clipmaps.commit_level(1, plan, true);
+	CHECK_EQ(clipmaps.get_pending_dirty(1), 0u);
+
+	// A failed rebuild and a reset start the level over in full.
+	clipmaps.plan_level(0, moved, 8, plan);
+	clipmaps.commit_level(0, plan, false);
+	CHECK_FALSE(clipmaps.is_level_valid(0));
+	clipmaps.plan_level(0, moved, 9, plan);
+	CHECK(plan.full);
+	clipmaps.commit_level(0, plan, true);
+	clipmaps.reset();
+	clipmaps.plan_level(0, moved, 10, plan);
+	CHECK(plan.full);
 }
 
-TEST_CASE("[NextGI][SWRT] Offset, handoff and shade follow the trace contract") {
-	CHECK(NextGISWRTTrace::offset_origin(Vector3(), Vector3(0.0f, 1.0f, 0.0f), 0.1f).is_equal_approx(Vector3(0.0f, 0.15f, 0.0f)));
-	CHECK(Math::is_equal_approx(NextGISWRTTrace::wrc_handoff(2.0f), 3.0f));
-	CHECK(Math::is_equal_approx(NextGISWRTTrace::trace_limit(0.0f, 100.0f, false), 1.5f));
-	CHECK(Math::is_equal_approx(NextGISWRTTrace::trace_limit(0.0f, 100.0f, true), 100.0f));
-	const Vector3 cap_camera(0.0f, 2.0f, 8.0f);
-	const Vector3 cap_forward(0.0f, 0.0f, -1.0f);
-	CHECK(NextGISWRTTrace::instance_in_front(cap_camera, cap_forward, Vector3(0.0f, 1.0f, 0.0f)));
-	CHECK_FALSE(NextGISWRTTrace::instance_in_front(cap_camera, cap_forward, Vector3(0.0f, 2.0f, 14.0f)));
-	// A rock 8 m ahead stays ahead of a nearer rock behind the camera.
-	CHECK(NextGISWRTTrace::instance_before(true, 64.0f, false, 1.0f));
-	CHECK_FALSE(NextGISWRTTrace::instance_before(false, 1.0f, true, 64.0f));
-	CHECK(NextGISWRTTrace::instance_before(true, 4.0f, true, 9.0f));
-	CHECK_FALSE(NextGISWRTTrace::instance_before(true, 9.0f, true, 4.0f));
+TEST_CASE("[NextGI][SWRT] SWRT_REDUCED drops the top level and frees its slots") {
+	NextGIGlobalSDFGPU gpu(NextGISWRTTrace::pool_bricks_for_levels(NextGIGlobalSDF::BASE_LEVELS));
+	NextGIGlobalSDFClipmaps clipmaps;
+	float voxels[NextGIGlobalSDF::BRICK_VOXELS] = {};
+	for (uint32_t level = 0; level < NextGIGlobalSDF::BASE_LEVELS; level++) {
+		for (int brick = 0; brick < 10; brick++) {
+			REQUIRE(gpu.upload_brick(level, Vector3i(brick, 0, 0), voxels));
+		}
+		NextGIGlobalSDFClipmaps::Plan plan;
+		clipmaps.plan_level(level, Vector3(), 0, plan);
+		clipmaps.commit_level(level, plan, true);
+	}
+	CHECK_EQ(gpu.get_used_bricks(), 60u);
+	uint32_t levels = NextGIGlobalSDF::BASE_LEVELS;
+	levels = NextGIGlobalSDFClipmaps::drop_top_level(gpu, clipmaps, levels, NextGISWRTTrace::MIN_LEVELS);
+	CHECK_EQ(levels, 5u);
+	CHECK_EQ(gpu.get_used_bricks(), 50u);
+	CHECK_FALSE(gpu.has_brick(5, Vector3i(0, 0, 0)));
+	CHECK(gpu.has_brick(4, Vector3i(0, 0, 0)));
+	CHECK_FALSE(clipmaps.is_level_valid(5));
+	CHECK(clipmaps.is_level_valid(4));
+	levels = NextGIGlobalSDFClipmaps::drop_top_level(gpu, clipmaps, levels, NextGISWRTTrace::MIN_LEVELS);
+	levels = NextGIGlobalSDFClipmaps::drop_top_level(gpu, clipmaps, levels, NextGISWRTTrace::MIN_LEVELS);
+	CHECK_EQ(levels, NextGISWRTTrace::MIN_LEVELS);
+	CHECK_EQ(gpu.get_used_bricks(), 30u);
+	// The floor holds (#187 step 2: min 3 levels).
+	CHECK_EQ(NextGIGlobalSDFClipmaps::drop_top_level(gpu, clipmaps, levels, NextGISWRTTrace::MIN_LEVELS), NextGISWRTTrace::MIN_LEVELS);
+	CHECK_EQ(gpu.get_used_bricks(), 30u);
 
-	const Color voxel(0.2f, 0.4f, 0.6f);
-	const Color wrc(0.9f, 0.1f, 0.1f);
-	const Color sky(0.05f, 0.07f, 0.1f);
-	const NextGISWRTTrace::ShadeResult covered = NextGISWRTTrace::shade_global(0.5f, voxel, wrc, sky, true);
-	CHECK(covered.used_voxel);
-	CHECK(covered.color.is_equal_approx(voxel));
-	const NextGISWRTTrace::ShadeResult from_wrc = NextGISWRTTrace::shade_global(0.49f, voxel, wrc, sky, true);
-	CHECK(from_wrc.used_wrc);
-	CHECK(from_wrc.color.is_equal_approx(wrc));
-	const NextGISWRTTrace::ShadeResult from_sky = NextGISWRTTrace::shade_global(0.49f, voxel, wrc, sky, false);
-	CHECK_FALSE(from_sky.used_voxel);
-	CHECK_FALSE(from_sky.used_wrc);
-	CHECK(from_sky.color.is_equal_approx(sky));
-	const Color empty_wrc(0.9f, 0.1f, 0.1f, 0.0f);
-	const NextGISWRTTrace::ShadeResult uncovered = NextGISWRTTrace::shade_global(0.49f, voxel, empty_wrc, sky, true);
-	CHECK_FALSE(uncovered.used_wrc);
-	CHECK(uncovered.color.is_equal_approx(sky));
-
-	NextGIVoxelLighting::CardQuery card;
-	card.origin = Vector3();
-	card.axis_u = Vector3(1.0f, 0.0f, 0.0f);
-	card.axis_v = Vector3(0.0f, 1.0f, 0.0f);
-	card.axis_n = Vector3(0.0f, 0.0f, 1.0f);
-	card.half_u = 0.6f;
-	card.half_v = 0.6f;
-	card.texel_size = 0.1f;
-	const Color card_color(0.3f, 0.8f, 0.2f);
-	const NextGISWRTTrace::ShadeResult from_card = NextGISWRTTrace::shade_detail(&card, &card_color, 1, Vector3(), Vector3(0.0f, 0.0f, 1.0f), 0.0f, voxel, wrc, sky, false);
-	CHECK(from_card.used_card);
-	CHECK_EQ(from_card.card, 0u);
-	CHECK(from_card.color.is_equal_approx(card_color));
+	// A retried allocation sizes the pool for the levels it keeps.
+	CHECK_EQ(NextGISWRTTrace::pool_bricks_for_levels(NextGIGlobalSDF::BASE_LEVELS), NextGIGlobalSDFGPU::DEFAULT_POOL_BRICKS);
+	CHECK(NextGISWRTTrace::pool_bricks_for_levels(5) < NextGISWRTTrace::pool_bricks_for_levels(6));
+	CHECK(NextGISWRTTrace::pool_bricks_for_levels(3) < NextGISWRTTrace::pool_bricks_for_levels(5));
+	CHECK_EQ(NextGISWRTTrace::pool_bricks_for_levels(3), NextGIGlobalSDFGPU::DEFAULT_POOL_BRICKS / NextGIGlobalSDF::BASE_LEVELS * 3);
 }
 
-TEST_CASE("[NextGI][SWRT] Froxel grid keeps the box in the cell that contains it") {
-	const MeshSDFData box = _unit_box_sdf(false);
-	NextGISWRTTrace::DetailInstance detail;
-	detail.instance = _instance(&box, Vector3(), false);
-	detail.id = 7;
-	NextGISWRTTrace::FroxelGrid grid;
-	NextGISWRTTrace::build_froxel(&detail, 1, Vector3(-1.0f, -1.0f, -1.0f), grid);
-	const uint32_t cell = NextGISWRTTrace::froxel_index(grid, Vector3());
-	CHECK(cell < NextGISWRTTrace::FROXEL_CELLS);
-	CHECK(grid.counts[cell] > 0);
-	CHECK_EQ(grid.indices[cell * NextGISWRTTrace::FROXEL_CAP], 0u);
+TEST_CASE("[NextGI][SWRT] Ray and froxel grids cover the view") {
+	CHECK_EQ(NextGISWRTTrace::ray_grid(Vector2i(1920, 1080)), Vector2i(64, 64));
+	CHECK_EQ(NextGISWRTTrace::ray_grid(Vector2i(32, 16)), Vector2i(32, 16));
+	CHECK_EQ(NextGISWRTTrace::ray_grid(Vector2i(0, 0)), Vector2i(1, 1));
+	const Vector3i froxels = NextGISWRTTrace::froxel_cells(Vector2i(1920, 1080));
+	CHECK_EQ(froxels, Vector3i(30, 17, int(NextGISWRTTrace::FROXEL_SLICES)));
+	CHECK_EQ(NextGISWRTTrace::froxel_cells(Vector2i(1, 1)), Vector3i(1, 1, int(NextGISWRTTrace::FROXEL_SLICES)));
 }

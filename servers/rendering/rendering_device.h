@@ -2105,6 +2105,8 @@ public:
 
 	String get_device_vendor_name() const;
 	String get_device_name() const;
+	// GodotNext: ps_tier_rule (#187). GPU cores or compute units; 0 when unknown.
+	uint32_t get_device_compute_units() const { return device.compute_units; }
 	RenderingDeviceEnums::DeviceType get_device_type() const;
 	String get_device_api_name() const;
 	String get_device_api_version() const;

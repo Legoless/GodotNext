@@ -32,6 +32,7 @@
 
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_irradiance_field.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -283,7 +284,7 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, 
 	}
 
 	const Size2i internal = buffers->get_internal_size();
-	const Projection view_proj = p_render_data->scene_data->cam_projection * Projection(p_render_data->scene_data->cam_transform.affine_inverse());
+	const Projection view_proj = NextGIView::view_projection(*p_render_data->scene_data); // GodotNext: nextgi_view_math
 	LiteParamsGPU params = {};
 	_store_projection(view_proj.inverse(), params.inv_view_proj);
 	const Vector3 camera = p_render_data->scene_data->cam_transform.origin;
