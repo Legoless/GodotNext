@@ -2878,15 +2878,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	nextgeo_visibility_only_active = visibility_only;
 
 	// GodotNext: megalights_inputs (#136). #143 takes over MegaLightsInputs::is_requested().
-	// Reflection probes leave the main view's targets alone.
+	// Reflection probes leave the main view's targets alone. enable_view_shader_groups() is
+	// the only place the MegaLights shader groups are enabled; the doctest checks its gate.
 	if (!is_reflection_probe && rb.is_valid()) {
-		megalights_inputs_active = RendererRD::MegaLightsInputs::view_writes_inputs(rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED);
+		megalights_inputs_active = RendererRD::MegaLightsInputs::enable_view_shader_groups(scene_shader, rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, p_render_data->scene_data->view_count > 1, using_nextgeo);
 		if (megalights_inputs_active) {
 			rb->ensure_megalights_inputs();
-			scene_shader.enable_megalights_shader_group(p_render_data->scene_data->view_count > 1);
-			if (using_nextgeo) {
-				scene_shader.enable_nextgeo_megalights_shader_group();
-			}
 		} else {
 			rb->free_megalights_inputs();
 		}
@@ -2924,19 +2921,17 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					using_sscs ||
 					ce_needs_normal_roughness ||
 					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER ||
-					// GodotNext: megalights_inputs (#136)
-					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO ||
-					get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL ||
 					scene_state.used_normal_texture) {
 				depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 			}
-		} else if (using_nextgeo || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL || scene_state.used_normal_texture) {
-			// GodotNext: megalights_inputs (#136) adds the ML debug modes next to the normal buffer.
+		} else if (using_nextgeo || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_NORMAL_BUFFER || scene_state.used_normal_texture) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
-		// GodotNext: megalights_inputs (#136). Do not downgrade a voxel GI prepass.
-		if (megalights_inputs_active && depth_pass_mode == PASS_MODE_DEPTH) {
+		// GodotNext: megalights_inputs (#136). The input targets and the ML_ALBEDO / ML_MATERIAL
+		// debug draws need the normal-roughness prepass. Do not downgrade a voxel GI prepass.
+		const bool ml_debug_draw = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL;
+		if ((megalights_inputs_active || ml_debug_draw) && depth_pass_mode == PASS_MODE_DEPTH) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -3164,6 +3159,19 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
 
 	if (depth_pre_pass) { //depth pre pass
+		// GodotNext: megalights_decals (#136). The MegaLights input prepass runs the decal loop, but
+		// the light cluster is baked in _pre_opaque_render, after this pass. Bake a decal-only
+		// cluster now and bind it to the prepass; _pre_opaque_render rebuilds the full cluster.
+		const bool ml_prepass = megalights_inputs_active && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
+		RID ml_prepass_cluster_buffer;
+		if (ml_prepass && current_cluster_builder != nullptr) {
+			RENDER_TIMESTAMP("MegaLights Decal Cluster");
+			current_cluster_builder->begin(p_render_data->scene_data->cam_transform, p_render_data->scene_data->cam_projection, !p_render_data->reflection_probe.is_valid());
+			RendererRD::TextureStorage::get_singleton()->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
+			current_cluster_builder->bake_cluster();
+			ml_prepass_cluster_buffer = p_render_data->cluster_buffer;
+		}
+
 		bool needs_pre_resolve = _needs_post_prepass_render(p_render_data, using_sdfgi || using_voxelgi);
 		if (needs_pre_resolve) {
 			RENDER_TIMESTAMP("GI + Render Depth Pre-Pass (Parallel)");
@@ -3180,7 +3188,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		RD::get_singleton()->draw_command_begin_label("Render Depth Pre-Pass");
 
-		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index);
+		// GodotNext: megalights_decals (#136). Only the MegaLights prepass binds the cluster.
+		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index, false, false, ml_prepass_cluster_buffer);
 
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
@@ -3189,7 +3198,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		render_list_params.use_nextgeo_proxy = is_reflection_probe;
 		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
 		// GodotNext: megalights_inputs (#136)
-		render_list_params.megalights_inputs = megalights_inputs_active && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
+		render_list_params.megalights_inputs = ml_prepass;
 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
 
 		RD::get_singleton()->draw_command_end_label();
@@ -4995,7 +5004,8 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 	}
 }
 
-RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, bool p_front_layer_pass) {
+// GodotNext: megalights_decals (#136). p_cluster_buffer binds the cluster to a pass that has no render data.
+RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, bool p_front_layer_pass, RID p_cluster_buffer) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -5152,6 +5162,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		u.binding = 9;
 		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 		RID cb = (p_render_data && p_render_data->cluster_buffer.is_valid()) ? p_render_data->cluster_buffer : scene_shader.default_vec4_xform_buffer;
+		// GodotNext: megalights_decals (#136)
+		if (p_render_data == nullptr && p_cluster_buffer.is_valid()) {
+			cb = p_cluster_buffer;
+		}
 		u.append_id(cb);
 		uniforms.push_back(u);
 	}

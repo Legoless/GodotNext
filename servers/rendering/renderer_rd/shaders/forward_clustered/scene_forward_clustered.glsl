@@ -1288,6 +1288,11 @@ vec4 fog_process(vec3 vertex) {
 	return vec4(fog_color, fog_amount);
 }
 
+// GodotNext: megalights_decals (#136). The MegaLights input prepass runs the decal loop,
+// so the two cluster helpers below are compiled for it as well.
+#endif //!MODE_RENDER DEPTH
+#if !defined(MODE_RENDER_DEPTH) || defined(MODE_MEGALIGHTS_INPUTS)
+
 void cluster_get_item_range(uint p_offset, out uint item_min, out uint item_max, out uint item_from, out uint item_to) {
 	uint item_min_max = cluster_buffer.data[p_offset];
 	item_min = item_min_max & 0xFFFFu;
@@ -1935,7 +1940,14 @@ void fragment_shader(in SceneData scene_data) {
 
 	/////////////////////// DECALS ////////////////////////////////
 
-#ifndef MODE_RENDER_DEPTH
+// GodotNext: megalights_decals (#136). The MegaLights input prepass applies decal albedo and
+// ORM, so ml_albedo and ml_material hold what the clustered loop shades. Normal-roughness
+// keeps its upstream prepass value: the decal normal and roughness are restored below.
+#if !defined(MODE_RENDER_DEPTH) || defined(MODE_MEGALIGHTS_INPUTS)
+#ifdef MODE_MEGALIGHTS_INPUTS
+	vec3 ml_pre_decal_normal = normal;
+	float ml_pre_decal_roughness = roughness;
+#endif
 
 #ifdef USE_MULTIVIEW
 	uvec2 cluster_pos = uvec2(combined_uv.xy / scene_data.screen_pixel_size) >> implementation_data.cluster_shift;
@@ -2057,6 +2069,11 @@ void fragment_shader(in SceneData scene_data) {
 
 	//pack albedo until needed again, saves 2 VGPRs in the meantime
 
+	// GodotNext: megalights_decals (#136)
+#ifdef MODE_MEGALIGHTS_INPUTS
+	normal = ml_pre_decal_normal;
+	roughness = ml_pre_decal_roughness;
+#endif
 #endif //not render depth
 	/////////////////////// LIGHTING //////////////////////////////
 
@@ -3611,20 +3628,16 @@ void fragment_shader(in SceneData scene_data) {
 	// RGB is diffuse albedo: albedo * (1 - metallic). A is the direct-light occlusion
 	// the clustered loop applies, mix(1, ao, ao_light_affect). The bent-normal cone
 	// affects indirect specular only, so it is not stored. F0 uses the base albedo.
+	// albedo, metallic and ao already include the decals (megalights_decals above).
+	// A material without fragment() reads the shader defaults here, which fold to
+	// constants, so it needs no separate path that would skip the decals.
 	// Pack constants and ML_QUANTIZE_CHROMA come from MegaLightsInputs::glsl_pack_prelude().
 #ifdef MODE_MEGALIGHTS_INPUTS
 	{
-#ifdef MEGALIGHTS_UNIFORM_INPUTS
-		vec3 ml_base_albedo = vec3(1.0);
-		float ml_metallic = 0.0;
-		float ml_specular = 0.5;
-		float ml_direct_occ = 1.0;
-#else
 		vec3 ml_base_albedo = albedo;
 		float ml_metallic = metallic;
 		float ml_specular = specular;
 		float ml_direct_occ = mix(1.0, ao, ao_light_affect);
-#endif
 		ml_albedo_buffer = vec4(ml_base_albedo * (1.0 - ml_metallic), ml_direct_occ);
 
 		float ml_dielectric = ML_DIELECTRIC_SCALE * ml_specular * ml_specular;

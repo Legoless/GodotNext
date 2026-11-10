@@ -79,6 +79,8 @@ check_albedo() {
 	local name="$1"
 	local albedo="$2"
 	local metallic="${3:-0}"
+	# AO texture byte; -1 leaves AO off, so ml_albedo.a must be 1.
+	local ao="${4:--1}"
 	local out="$work_root/albedo_$name"
 	local log="$work_root/albedo_$name.log"
 	rm -rf "$out"
@@ -86,9 +88,9 @@ check_albedo() {
 	GODOTNEXT_MEGALIGHTS_INPUTS=1 run_godot "$log" \
 		"$godot_bin" --path "$testbed" --rendering-driver metal \
 		--resolution 128x128 "$scene" -- \
-		--scene="$scene" --out="$out" --ml-check=albedo --albedo="$albedo" --metallic="$metallic"
+		--scene="$scene" --out="$out" --ml-check=albedo --albedo="$albedo" --metallic="$metallic" --ao="$ao"
 	result_field "$log" "mode" >/dev/null
-	printf 'albedo %s metallic %s passed\n' "$albedo" "$metallic"
+	printf 'albedo %s metallic %s ao %s passed\n' "$albedo" "$metallic" "$ao"
 }
 
 check_albedo "red" "1,0,0" "0"
@@ -96,6 +98,8 @@ check_albedo "green" "0,1,0" "0"
 check_albedo "blue" "0.2,0.4,0.8" "0"
 check_albedo "blue_metal_half" "0.2,0.4,0.8" "0.5"
 check_albedo "blue_metal" "0.2,0.4,0.8" "1"
+# ml_albedo.a = mix(1, ao, ao_light_affect) with ao 64/255 and ao_light_affect 0.6.
+check_albedo "blue_ao" "0.2,0.4,0.8" "0.5" "64"
 
 if [[ -e "$override_cfg" ]]; then
 	die "override.cfg already exists: $override_cfg"
@@ -149,11 +153,13 @@ if [[ -z "$off_left" || "$off_left" != "$on_left" ]]; then
 	die "fallback region is not byte-identical"
 fi
 printf 'fallback region matches\n'
-if [[ "$off_full" == "$on_full" ]]; then
-	printf 'full fallback frame matches\n'
-else
-	printf 'full fallback frame differs outside the fallback region\n'
+# Nothing in #136 reads the input targets, so turning them on must not change any pixel.
+# #143 adds MegaLights shading; from then on only the fallback region must match, and
+# #143 and GM-9 carry the fallback-identity check.
+if [[ -z "$off_full" || "$off_full" != "$on_full" ]]; then
+	die "full fallback frame differs with MegaLights inputs on"
 fi
+printf 'full fallback frame matches\n'
 
 smoke_scene() {
 	local label="$1"
@@ -192,6 +198,20 @@ check_material() {
 	printf 'material bytes passed\n'
 }
 
+check_decal() {
+	local out="$work_root/decal"
+	local log="$work_root/decal.log"
+	rm -rf "$out"
+	mkdir -p "$out"
+	GODOTNEXT_MEGALIGHTS_INPUTS=1 run_godot "$log" \
+		"$godot_bin" --path "$testbed" --rendering-driver metal \
+		--resolution 128x128 "$scene" -- \
+		--scene="$scene" --out="$out" --ml-check=decal
+	result_field "$log" "mode" >/dev/null
+	printf '%s\n' "$(grep -m1 '^GODOTNEXT_RESULT ' "$log")"
+	printf 'decal albedo, AO and metallic reach the inputs\n'
+}
+
 check_msaa() {
 	local out="$work_root/msaa"
 	local log="$work_root/msaa.log"
@@ -206,6 +226,7 @@ check_msaa() {
 }
 
 check_material
+check_decal
 check_msaa
 
 smoke_scene cbr_off "res://scenes/color_box_room/cbr_a.tscn"

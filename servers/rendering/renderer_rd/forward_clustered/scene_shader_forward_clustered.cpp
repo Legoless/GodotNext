@@ -259,16 +259,17 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		ml_query.backlight = gen_code.defines.has("#define LIGHT_BACKLIGHT_USED\n");
 		ml_query.anisotropy = gen_code.defines.has("#define LIGHT_ANISOTROPY_USED\n");
 		ml_query.diffuse_lambert = RendererRD::MegaLightsInputs::is_diffuse_lambert(unshaded, gen_code.defines.has("#define DIFFUSE_LAMBERT\n"), gen_code.defines.has("#define DIFFUSE_BURLEY\n"), ml_query.diffuse_toon, ml_query.diffuse_lambert_wrap);
+		// uses_alpha_pass() reads uses_blend_alpha, which upstream assigns after version_set_code
+		// below. Assign the same value here; the later assignment leaves it unchanged.
+		uses_blend_alpha = blend_mode_uses_blend_alpha(alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF ? BLEND_MODE_ALPHA_TO_COVERAGE : BlendMode(blend_mode));
+		ml_query.alpha_pass = uses_alpha_pass() && uses_depth_in_alpha_pass();
 		if (RendererRD::MegaLightsInputs::is_fallback(ml_query)) {
 			gen_code.defines.push_back("#define MEGALIGHTS_FALLBACK\n");
 			if (!megalights_fallback_warned && RendererRD::MegaLightsInputs::is_requested() && Engine::get_singleton() && Engine::get_singleton()->is_editor_hint()) {
 				megalights_fallback_warned = true;
 				const String ml_name = path.is_empty() ? vformat("<built-in>:%d", code.hash()) : path;
-				WARN_PRINT_ED(vformat("MegaLights fallback material \"%s\": custom light(), unshaded, Lambert, toon, wrap, rim, backlight, anisotropy, or disabled specular keeps clustered shading.", ml_name));
+				WARN_PRINT_ED(vformat("MegaLights fallback material \"%s\": custom light(), unshaded, Lambert, toon, wrap, rim, backlight, anisotropy, disabled specular, or an alpha-pass surface with a depth prepass keeps clustered shading.", ml_name));
 			}
-		}
-		if (!gen_code.code.has("fragment")) {
-			gen_code.defines.push_back("#define MEGALIGHTS_UNIFORM_INPUTS\n");
 		}
 	}
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
@@ -891,6 +892,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
+		// GodotNext: megalights_inputs (#136). The F0 pack constants and ML_QUANTIZE_CHROMA reach every
+		// variant through the general defines; the MegaLights input variants use them.
 		shader.initialize(shader_versions, p_defines + String("\n") + RendererRD::MegaLightsInputs::glsl_pack_prelude(), Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
@@ -1317,17 +1320,6 @@ void SceneShaderForwardClustered::enable_megalights_shader_group(bool p_needs_mu
 
 void SceneShaderForwardClustered::enable_nextgeo_megalights_shader_group() {
 	shader.enable_group(SHADER_GROUP_NEXTGEO_MEGALIGHTS);
-}
-
-bool SceneShaderForwardClustered::is_megalights_shader_group_enabled(bool p_multiview) const {
-	if (p_multiview) {
-		return shader.is_group_enabled(SHADER_GROUP_MEGALIGHTS_MULTIVIEW);
-	}
-	return shader.is_group_enabled(SHADER_GROUP_MEGALIGHTS);
-}
-
-bool SceneShaderForwardClustered::is_nextgeo_megalights_shader_group_enabled() const {
-	return shader.is_group_enabled(SHADER_GROUP_NEXTGEO_MEGALIGHTS);
 }
 
 const char *SceneShaderForwardClustered::ShaderVersion::megalights_variant_defines(uint16_t p_relative) {

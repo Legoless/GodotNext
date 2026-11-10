@@ -8,7 +8,8 @@ that the plan and the issues leave open.
 
 None so far. The direct-light inputs (#136) were written from the plan (§21.3, contract
 M1), the issue and Godot's own Forward+ shaders. No paper, article or outside code was
-consulted.
+consulted. The same holds for the 2026-11-09 follow-up below (decals, alpha-pass fallback),
+which reuses Godot's own decal loop.
 
 ## Contract decisions
 
@@ -34,3 +35,33 @@ loop exactly:
 Issue #136's acceptance line is reworded to compare against `ALBEDO * (1 - METALLIC)`
 when the change lands. The decision does not change the plan's M1 text; if #143 or the
 spike #144 needs a different packing, revise it with the lead and record the change here.
+
+### M1 follow-up (#136), 2026-11-09
+
+These changes apply the approved contract above; they do not change the packing.
+
+- **Decals.** The contract defines `ml_albedo` and the F0 in `ml_material` as what the
+  clustered loop applies. Forward+ decals change the albedo, AO and metallic the clustered
+  loop uses, so the MegaLights input prepass now runs the same decal loop as the color
+  pass. The light cluster is baked after the depth prepass, so the frame bakes a
+  decal-only cluster before a MegaLights input prepass; the full cluster is rebuilt later
+  in the frame as before. A material without `fragment()` takes the same path, so decals
+  reach it as well.
+- **Normal-roughness stays as upstream.** The issue reuses the existing normal-roughness
+  target, and SSR, SSAO and NextGI read it, so the decal normal and the decal roughness
+  are not written to it. #143 has to account for that on decal pixels.
+- **Screen-space AO is not in `ml_albedo.a`.** The color pass also folds SSAO (with its
+  light-affect amount) into the direct-light occlusion. SSAO runs after the prepass, so
+  `ml_albedo.a` holds the material and decal occlusion only; #143's composite applies SSAO.
+- **Alpha-pass surfaces with a depth prepass are fallback.** Materials with
+  `depth_prepass_alpha` or alpha antialiasing are drawn by the depth prepass but shaded by
+  the alpha pass, which keeps the clustered loop; the opaque color pass never shades
+  them. They now write shading model 3, as the fallback rule says.
+
+**Open for the lead.** By the fallback rule above, a material `ml_material` cannot express
+stays on the clustered loop. Clearcoat (model 2) needs the clearcoat amount and roughness,
+and SSS transmission (model 1) needs the transmittance color, depth and boost; the targets
+store only flag bits for them. Marking them fallback would contradict the issue's models
+1 and 2 and plan M7 ("SSS pixels evaluate transmission per sample"); carrying their
+parameters changes the approved packing. Until the lead decides, models 1 and 2 are
+written as before, and #143 cannot reproduce those two lobes from the targets alone.

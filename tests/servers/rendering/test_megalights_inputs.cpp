@@ -43,6 +43,22 @@ void _restore_switch() {
 	RendererRD::MegaLightsInputs::set_requested(false);
 }
 
+// Stands in for SceneShaderForwardClustered in MegaLightsInputs::enable_view_shader_groups().
+struct GroupRecorder {
+	int megalights_calls = 0;
+	int nextgeo_calls = 0;
+	bool multiview = false;
+
+	void enable_megalights_shader_group(bool p_needs_multiview) {
+		megalights_calls++;
+		multiview = multiview || p_needs_multiview;
+	}
+
+	void enable_nextgeo_megalights_shader_group() {
+		nextgeo_calls++;
+	}
+};
+
 } // namespace
 
 TEST_CASE("[Renderer][MegaLights] F0 pack and shading model (#136)") {
@@ -80,6 +96,9 @@ TEST_CASE("[Renderer][MegaLights] F0 pack and shading model (#136)") {
 	const int cr4 = ML::quantize_nibble((1.0f - 0.30f) / ML::CR_SCALE);
 	CHECK_EQ(tint, uint8_t((cb4 << 4) | cr4));
 	CHECK_EQ(cr4, ML::CHROMA_LEVELS);
+	// Cb is the high nibble. The GPU material check reads this byte back from the shader.
+	CHECK_EQ(cb4, 5);
+	CHECK_EQ(tint, 0x5E);
 
 	CHECK_EQ(ML::pack_shading_model(false, false, false, false), ML::MODEL_STANDARD);
 	CHECK_EQ(ML::pack_shading_model(false, true, false, false), uint8_t(ML::MODEL_SSS | ML::FLAG_SSS));
@@ -149,6 +168,10 @@ TEST_CASE("[Renderer][MegaLights] Fallback classification (#136)") {
 	query.diffuse_lambert = true;
 	CHECK(ML::is_fallback(query));
 	query = ML::FallbackQuery();
+	query.alpha_pass = true;
+	CHECK(ML::is_fallback(query));
+	CHECK_EQ(ML::fallback_bits(query), ML::FALLBACK_ALPHA_PASS);
+	query = ML::FallbackQuery();
 	query.custom_light = true;
 	query.diffuse_lambert_wrap = true;
 	CHECK_EQ(ML::fallback_bits(query), ML::FALLBACK_CUSTOM_LIGHT | ML::FALLBACK_DIFFUSE_LAMBERT_WRAP);
@@ -193,6 +216,44 @@ TEST_CASE("[Renderer][MegaLights] Switch and MSAA gate (#136)") {
 	CHECK_FALSE(ML::view_writes_inputs(true));
 	_restore_switch();
 	CHECK_FALSE(ML::view_writes_inputs(false));
+}
+
+TEST_CASE("[Renderer][MegaLights] Shader groups stay off while inputs are off (#136)") {
+	using ML = RendererRD::MegaLightsInputs;
+	// MegaLights off: no group is enabled for any view shape.
+	ML::set_requested(false);
+	for (int shape = 0; shape < 8; shape++) {
+		GroupRecorder recorder;
+		CHECK_FALSE(ML::enable_view_shader_groups(recorder, (shape & 1) != 0, (shape & 2) != 0, (shape & 4) != 0));
+		CHECK_EQ(recorder.megalights_calls, 0);
+		CHECK_EQ(recorder.nextgeo_calls, 0);
+	}
+
+	// Requested, but MSAA disables MegaLights for the view.
+	ML::set_requested(true);
+	{
+		GroupRecorder recorder;
+		CHECK_FALSE(ML::enable_view_shader_groups(recorder, true, true, true));
+		CHECK_EQ(recorder.megalights_calls, 0);
+		CHECK_EQ(recorder.nextgeo_calls, 0);
+	}
+
+	// Active: the forward group always, the NextGeo group only with virtual meshes.
+	{
+		GroupRecorder recorder;
+		CHECK(ML::enable_view_shader_groups(recorder, false, false, false));
+		CHECK_EQ(recorder.megalights_calls, 1);
+		CHECK_FALSE(recorder.multiview);
+		CHECK_EQ(recorder.nextgeo_calls, 0);
+	}
+	{
+		GroupRecorder recorder;
+		CHECK(ML::enable_view_shader_groups(recorder, false, true, true));
+		CHECK_EQ(recorder.megalights_calls, 1);
+		CHECK(recorder.multiview);
+		CHECK_EQ(recorder.nextgeo_calls, 1);
+	}
+	_restore_switch();
 }
 
 TEST_CASE("[Renderer][MegaLights] Shader version layout (#136)") {
@@ -241,15 +302,6 @@ TEST_CASE("[Renderer][MegaLights] Shader version layout (#136)") {
 	CHECK_EQ(Version::megalights_variant_group(10), Shader::SHADER_GROUP_MEGALIGHTS);
 	CHECK_EQ(Version::megalights_variant_group(14), Shader::SHADER_GROUP_MEGALIGHTS_MULTIVIEW);
 	CHECK_EQ(Version::megalights_variant_group(17), Shader::SHADER_GROUP_MEGALIGHTS_MULTIVIEW);
-
-	// Headless doctest may not construct the RD scene shader. The table above is what init() pushes.
-	// When the renderer exists and nothing has rendered with inputs on, the groups are still off.
-	Shader *ml_shader = Shader::get_singleton();
-	if (ml_shader != nullptr) {
-		CHECK_FALSE(ml_shader->is_megalights_shader_group_enabled(false));
-		CHECK_FALSE(ml_shader->is_megalights_shader_group_enabled(true));
-		CHECK_FALSE(ml_shader->is_nextgeo_megalights_shader_group_enabled());
-	}
 }
 
 TEST_CASE("[Renderer][MegaLights] Debug draw bindings (#136)") {

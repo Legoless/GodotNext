@@ -481,9 +481,6 @@ public:
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	bool is_nextgeo_shader_group_enabled() const;
-	bool is_megalights_shader_group_enabled(bool p_multiview) const;
-	bool is_nextgeo_megalights_shader_group_enabled() const;
-	static SceneShaderForwardClustered *get_singleton() { return singleton; }
 	uint32_t get_pipeline_compilations(RSE::PipelineSource p_source);
 	RID get_default_shader_rd(bool p_is_multiview = false);
 };

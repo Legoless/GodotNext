@@ -78,6 +78,7 @@ public:
 	static constexpr uint32_t FALLBACK_BACKLIGHT = 1u << 7;
 	static constexpr uint32_t FALLBACK_ANISOTROPY = 1u << 8;
 	static constexpr uint32_t FALLBACK_DIFFUSE_LAMBERT = 1u << 9;
+	static constexpr uint32_t FALLBACK_ALPHA_PASS = 1u << 10;
 
 	// Hundredths are the source for both the C++ pack and the GLSL defines.
 	static constexpr int LUMA_R_CENTI = 30;
@@ -137,6 +138,21 @@ public:
 		return true;
 	}
 
+	// The per-view gate for the MegaLights shader groups. They are enabled only for a
+	// view that writes the inputs; with MegaLights off or MSAA on nothing is enabled.
+	// The renderer passes SceneShaderForwardClustered; the doctest passes a recorder.
+	template <typename T>
+	static bool enable_view_shader_groups(T &r_shader, bool p_msaa, bool p_multiview, bool p_nextgeo) {
+		if (!view_writes_inputs(p_msaa)) {
+			return false;
+		}
+		r_shader.enable_megalights_shader_group(p_multiview);
+		if (p_nextgeo) {
+			r_shader.enable_nextgeo_megalights_shader_group();
+		}
+		return true;
+	}
+
 	static void begin_layer_groups() {
 		State &state = _state();
 		state.masks.clear();
@@ -181,6 +197,9 @@ public:
 		bool backlight = false;
 		bool anisotropy = false;
 		bool diffuse_lambert = false;
+		// Drawn by the depth prepass (depth_prepass_alpha or alpha antialiasing) but shaded
+		// by the alpha pass, so the opaque color pass never applies its inputs.
+		bool alpha_pass = false;
 	};
 
 	// Lambert is the lights-inc #else: explicit DIFFUSE_LAMBERT, or a shaded
@@ -223,6 +242,9 @@ public:
 		}
 		if (p_query.diffuse_lambert) {
 			bits |= FALLBACK_DIFFUSE_LAMBERT;
+		}
+		if (p_query.alpha_pass) {
+			bits |= FALLBACK_ALPHA_PASS;
 		}
 		return bits;
 	}
