@@ -6,21 +6,29 @@
 // NextGIGlobalSDF::mesh_world_distance(); NextGIGlobalSDF::instance_axis_scale()
 // computes axis_scale.
 //
-// axis_scale is the world length of one local unit along each local axis: the
-// basis column lengths, or, for a sheared basis, its smallest singular value on
-// every axis. A local distance times the largest axis scale overestimates the
-// world distance of a non-uniformly scaled instance (rays tunnel through
-// stretched boxes). Every term below is a lower bound instead:
-// - The local distance times the smallest axis scale (the field's Lipschitz
-//   bound in world space).
-// - Outside the SDF bounds, the clamp offset in world length joins that bound
-//   at the clamped point: sqrt(e^2 + d(q)^2). The world projection onto the
-//   (oriented) bounds is the clamp, so the sum of squares still holds.
+// axis_scale.xyz is the world distance between the face planes of each local
+// axis per local unit: the basis column lengths when the basis is orthogonal
+// (a rotation times a scale). axis_scale.w is the basis's smallest singular
+// value, negative when the basis is sheared (a rotated node under a
+// non-uniformly scaled parent). A local distance times the largest axis scale
+// overestimates the world distance of a non-uniformly scaled instance (rays
+// tunnel through stretched boxes). Every term below is a lower bound instead:
+// - The local distance times the smallest singular value (the field's
+//   Lipschitz bound in world space).
+// - Outside the SDF bounds, the clamp offset joins that bound at the clamped
+//   point: sqrt(e^2 + d(q)^2). For an orthogonal basis the clamp is the world
+//   projection onto the (oriented) bounds, so e is the offset in world length.
+//   For a sheared one the clamp is only the projection in local space, so both
+//   terms are local lengths times the smallest singular value.
 // - Plan L4: "Non-uniform scale is bounded by the distance to the oriented
 //   bounds." The mesh lies inside surface_min..surface_max (the SDF bounds less
 //   the band the builder pads them by), so the world distance to that oriented
-//   box bounds the distance to the mesh. It is exact for a box, the common way
-//   to build stretched floors and walls.
+//   box bounds the distance to the mesh. For an orthogonal basis it is the
+//   length of the per-axis offsets, exact for a box, the common way to build
+//   stretched floors and walls. A sheared box is a parallelepiped: the
+//   distance to the slab between the face planes of one axis is that axis's
+//   offset times axis_scale, and the largest of the three bounds the distance
+//   to their intersection without collapsing to the smallest singular value.
 // The result is the largest of them. Inside its bounds a non-box mesh under a
 // non-uniform scale reads closer than it is along its stretched axes, never
 // farther.
@@ -28,20 +36,22 @@
 #ifndef NEXTGI_MESH_SDF_DISTANCE_INC_GLSL
 #define NEXTGI_MESH_SDF_DISTANCE_INC_GLSL
 
-float nextgi_mesh_sdf_min_scale(vec3 axis_scale) {
-	return max(min(axis_scale.x, min(axis_scale.y, axis_scale.z)), 1e-6);
+float nextgi_mesh_sdf_min_scale(vec4 axis_scale) {
+	return max(abs(axis_scale.w), 1e-6);
 }
 
-float nextgi_mesh_sdf_world_distance(vec3 local, vec3 bounds_min, vec3 bounds_max, vec3 surface_min, vec3 surface_max, float sampled, vec3 axis_scale) {
-	float distance = sampled * nextgi_mesh_sdf_min_scale(axis_scale);
-	vec3 excess = (local - clamp(local, bounds_min, bounds_max)) * axis_scale;
+float nextgi_mesh_sdf_world_distance(vec3 local, vec3 bounds_min, vec3 bounds_max, vec3 surface_min, vec3 surface_max, float sampled, vec4 axis_scale) {
+	bool sheared = axis_scale.w < 0.0;
+	float min_scale = nextgi_mesh_sdf_min_scale(axis_scale);
+	float distance = sampled * min_scale;
+	vec3 excess = (local - clamp(local, bounds_min, bounds_max)) * (sheared ? vec3(min_scale) : axis_scale.xyz);
 	float excess_squared = dot(excess, excess);
 	if (excess_squared > 0.0) {
 		float boundary = max(distance, 0.0);
 		distance = sqrt(excess_squared + boundary * boundary);
 	}
-	vec3 outside = (local - clamp(local, surface_min, surface_max)) * axis_scale;
-	float oriented = length(outside);
+	vec3 outside = abs(local - clamp(local, surface_min, surface_max)) * axis_scale.xyz;
+	float oriented = sheared ? max(outside.x, max(outside.y, outside.z)) : length(outside);
 	if (oriented > 0.0) {
 		distance = max(distance, oriented);
 	}

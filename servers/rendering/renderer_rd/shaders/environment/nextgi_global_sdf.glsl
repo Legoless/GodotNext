@@ -24,10 +24,10 @@ struct MeshInfo {
 
 struct Instance {
 	vec4 inverse[3];
-	vec4 world_min;
+	vec4 world_min; // w: NextGIGlobalSDF::instance_axis_scale().w.
 	vec4 world_max;
 	uint flags;
-	float axis_scale[3]; // NextGIGlobalSDF::instance_axis_scale().
+	float axis_scale[3]; // NextGIGlobalSDF::instance_axis_scale().xyz.
 };
 
 struct BrickWork {
@@ -137,7 +137,7 @@ float sample_instance(Instance instance, MeshInfo mesh, vec3 world) {
 	vec3 surface_min;
 	vec3 surface_max;
 	nextgi_mesh_sdf_surface_bounds(mesh.bounds_position, bounds_max, mesh.band, surface_min, surface_max);
-	return nextgi_mesh_sdf_world_distance(local, mesh.bounds_position, bounds_max, surface_min, surface_max, sample_mesh(mesh, local), vec3(instance.axis_scale[0], instance.axis_scale[1], instance.axis_scale[2]));
+	return nextgi_mesh_sdf_world_distance(local, mesh.bounds_position, bounds_max, surface_min, surface_max, sample_mesh(mesh, local), vec4(instance.axis_scale[0], instance.axis_scale[1], instance.axis_scale[2], instance.world_min.w));
 }
 
 void main() {

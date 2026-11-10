@@ -51,10 +51,10 @@ static_assert(sizeof(GPUMeshInfo) == 64, "GPUMeshInfo must stay 64 bytes.");
 
 struct GPUInstance {
 	float inverse[12];
-	float world_min[4];
+	float world_min[4]; // GodotNext: ps_swrt_trace (#186). w: NextGIGlobalSDF::instance_axis_scale().w.
 	float world_max[4];
 	uint32_t flags;
-	// GodotNext: ps_swrt_trace (#186). NextGIGlobalSDF::instance_axis_scale().
+	// GodotNext: ps_swrt_trace (#186). NextGIGlobalSDF::instance_axis_scale().xyz.
 	float axis_scale[3];
 };
 static_assert(sizeof(GPUInstance) == 96, "GPUInstance must stay 96 bytes.");
@@ -480,12 +480,13 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		const AABB world_bounds = instance.transform.xform(field->bounds);
 		// GodotNext: ps_swrt_trace (#186). Per-axis scale: the largest one overestimated
 		// distances on non-uniformly scaled instances (nextgi_mesh_sdf_distance_inc.glsl).
-		const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(instance.transform.basis);
+		const Vector4 axis_scale = NextGIGlobalSDF::instance_axis_scale(instance.transform.basis);
 		for (int axis = 0; axis < 3; axis++) {
 			gpu.world_min[axis] = world_bounds.position[axis];
 			gpu.world_max[axis] = world_bounds.position[axis] + world_bounds.size[axis];
 			gpu.axis_scale[axis] = axis_scale[axis];
 		}
+		gpu.world_min[3] = axis_scale.w;
 		gpu.flags = (instance.dynamic ? 1u : 0u) | (instance.two_sided ? 2u : 0u);
 		gpu_instances.push_back(gpu);
 	}

@@ -161,7 +161,7 @@ float NextGIGlobalSDF::sample_instance(const Instance &p_instance, const Vector3
 }
 
 // GodotNext: ps_swrt_trace (#186)
-Vector3 NextGIGlobalSDF::instance_axis_scale(const Basis &p_basis) {
+Vector4 NextGIGlobalSDF::instance_axis_scale(const Basis &p_basis) {
 	const Vector3 columns[3] = { p_basis.get_column(0), p_basis.get_column(1), p_basis.get_column(2) };
 	const Vector3 lengths(columns[0].length(), columns[1].length(), columns[2].length());
 	bool orthogonal = true;
@@ -171,15 +171,26 @@ Vector3 NextGIGlobalSDF::instance_axis_scale(const Basis &p_basis) {
 		}
 	}
 	if (orthogonal) {
-		// A rotation times a scale: a local axis keeps its own scale.
-		return lengths;
+		// A rotation times a scale: a local axis keeps its own scale, and the smallest one
+		// is the smallest singular value.
+		return Vector4(lengths.x, lengths.y, lengths.z, MIN(lengths.x, MIN(lengths.y, lengths.z)));
 	}
-	// Sheared: the smallest singular value, the square root of the smallest eigenvalue of B^T B.
+	// Sheared: the face planes of a local axis lie the parallelepiped's volume over the area of
+	// that face apart per local unit, |c_i . (c_j x c_k)| / |c_j x c_k| (one over the length of
+	// row i of the inverse basis).
+	const float volume = Math::abs(columns[0].dot(columns[1].cross(columns[2])));
+	Vector3 heights;
+	for (int axis = 0; axis < 3; axis++) {
+		const float area = columns[(axis + 1) % 3].cross(columns[(axis + 2) % 3]).length();
+		heights[axis] = area > 0.0f ? volume / area : 0.0f;
+	}
+	// The smallest singular value, the square root of the smallest eigenvalue of B^T B. It is
+	// negative to mark the basis sheared.
 	Basis gram = p_basis.transposed() * p_basis;
 	const Basis eigenvectors = gram.diagonalize(); // gram becomes the diagonal of eigenvalues.
 	(void)eigenvectors;
 	const float smallest = Math::sqrt(MAX(MIN(gram.rows[0][0], MIN(gram.rows[1][1], gram.rows[2][2])), 0.0f));
-	return Vector3(smallest, smallest, smallest);
+	return Vector4(heights.x, heights.y, heights.z, -MAX(smallest, 1.0e-6f));
 }
 
 AABB NextGIGlobalSDF::mesh_surface_bounds(const MeshSDFData &p_field) {
@@ -190,14 +201,18 @@ AABB NextGIGlobalSDF::mesh_surface_bounds(const MeshSDFData &p_field) {
 	return AABB(minimum, maximum - minimum);
 }
 
-float NextGIGlobalSDF::mesh_world_distance(const Vector3 &p_local, const AABB &p_bounds, const AABB &p_surface, float p_sampled, const Vector3 &p_axis_scale) {
-	float distance = p_sampled * MAX(MIN(p_axis_scale.x, MIN(p_axis_scale.y, p_axis_scale.z)), 1.0e-6f);
-	const Vector3 excess = (p_local - p_local.clamp(p_bounds.position, p_bounds.get_end())) * p_axis_scale;
+float NextGIGlobalSDF::mesh_world_distance(const Vector3 &p_local, const AABB &p_bounds, const AABB &p_surface, float p_sampled, const Vector4 &p_axis_scale) {
+	const bool sheared = p_axis_scale.w < 0.0f;
+	const float smallest = MAX(Math::abs(p_axis_scale.w), 1.0e-6f);
+	const Vector3 axis_scale(p_axis_scale.x, p_axis_scale.y, p_axis_scale.z);
+	float distance = p_sampled * smallest;
+	const Vector3 excess = (p_local - p_local.clamp(p_bounds.position, p_bounds.get_end())) * (sheared ? Vector3(smallest, smallest, smallest) : axis_scale);
 	if (excess.length_squared() > 0.0f) {
 		const float boundary = MAX(distance, 0.0f);
 		distance = Math::sqrt(excess.length_squared() + boundary * boundary);
 	}
-	const float oriented = ((p_local - p_local.clamp(p_surface.position, p_surface.get_end())) * p_axis_scale).length();
+	const Vector3 outside = (p_local - p_local.clamp(p_surface.position, p_surface.get_end())).abs() * axis_scale;
+	const float oriented = sheared ? MAX(outside.x, MAX(outside.y, outside.z)) : outside.length();
 	if (oriented > 0.0f) {
 		distance = MAX(distance, oriented);
 	}

@@ -632,10 +632,12 @@ void NextGISWRTTrace::_upload_instances() {
 		}
 		const AABB world = instance.transform.xform(instance.field->bounds);
 		// Per-axis scale: the largest one let rays tunnel through non-uniformly scaled instances.
-		const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(instance.transform.basis);
+		const Vector4 axis_scale = NextGIGlobalSDF::instance_axis_scale(instance.transform.basis);
 		for (int axis = 0; axis < 3; axis++) {
 			out.world_min[axis] = world.position[axis];
 			out.world_max[axis] = world.position[axis] + world.size[axis];
+		}
+		for (int axis = 0; axis < 4; axis++) {
 			out.axis_scale[axis] = axis_scale[axis];
 		}
 		out.flags[0] = instance.two_sided ? 2u : 0u;

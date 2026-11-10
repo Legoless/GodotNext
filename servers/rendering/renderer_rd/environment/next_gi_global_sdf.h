@@ -33,6 +33,7 @@
 #include "core/math/aabb.h"
 #include "core/math/mesh_sdf_builder.h"
 #include "core/math/transform_3d.h"
+#include "core/math/vector4.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/vector.h"
@@ -76,14 +77,15 @@ public:
 	// GodotNext: ps_swrt_trace (#186). The CPU twin of nextgi_mesh_sdf_distance_inc.glsl,
 	// which the composite and the SWRT detail trace share (the comments there give the
 	// math). sample_instance() is mesh_world_distance() of the mip-0 sample.
-	// The world length of one local unit along each local axis: the column lengths of an
-	// orthogonal basis, the smallest singular value on every axis of a sheared one.
-	static Vector3 instance_axis_scale(const Basis &p_basis);
+	// xyz: the world distance between the face planes of each local axis per local unit (the
+	// column lengths of an orthogonal basis). w: the smallest singular value, negative when
+	// the basis is sheared (a rotated node under a non-uniformly scaled parent).
+	static Vector4 instance_axis_scale(const Basis &p_basis);
 	// The mesh's own bounds: the SDF bounds less the mip-0 band the builder pads them by.
 	static AABB mesh_surface_bounds(const MeshSDFData &p_field);
 	// A lower bound of the world distance from a local sample (p_sampled at p_local,
 	// clamped to p_bounds) of an instance with p_axis_scale.
-	static float mesh_world_distance(const Vector3 &p_local, const AABB &p_bounds, const AABB &p_surface, float p_sampled, const Vector3 &p_axis_scale);
+	static float mesh_world_distance(const Vector3 &p_local, const AABB &p_bounds, const AABB &p_surface, float p_sampled, const Vector4 &p_axis_scale);
 	// Level i updates every 2^i frames (plan §21.2 step 3).
 	static bool level_updates_on_frame(uint32_t p_level, uint64_t p_frame);
 	// The brick-space shift from the old level origin to the new one.

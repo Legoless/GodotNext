@@ -46,7 +46,7 @@ struct SWRTInstance {
 	vec4 world_min; // xyz: world bounds of the mesh SDF.
 	vec4 world_max;
 	uvec4 flags; // x: 2 = two-sided, y: first mesh-info (mip 0), z: mip count, w: SRC card set or 0xffffffff.
-	vec4 axis_scale; // xyz: NextGIGlobalSDF::instance_axis_scale(), w: unused.
+	vec4 axis_scale; // NextGIGlobalSDF::instance_axis_scale().
 };
 
 // One mip of one mesh SDF (detail mode).
@@ -576,11 +576,11 @@ vec3 swrt_instance_local(SWRTInstance instance, vec3 world) {
 // the march refines to the finest mip. Returns a lower bound in world meters
 // under any instance scale (nextgi_mesh_sdf_distance_inc.glsl, shared with the
 // global SDF composite); voxel_size is the sampled mip's voxel in world meters
-// at the smallest axis scale.
+// at the smallest singular value.
 float swrt_instance_distance(uint index, vec3 world, out float voxel_size) {
 	SWRTInstance instance = swrt_instances.data[index];
 	vec3 local = swrt_instance_local(instance, world);
-	float min_scale = nextgi_mesh_sdf_min_scale(instance.axis_scale.xyz);
+	float min_scale = nextgi_mesh_sdf_min_scale(instance.axis_scale);
 	uint first = instance.flags.y;
 	uint mips = max(instance.flags.z, 1u);
 	// The mesh's own bounds come from mip 0: a coarser mip pads by a wider band.
@@ -594,7 +594,7 @@ float swrt_instance_distance(uint index, vec3 world, out float voxel_size) {
 	for (int mip = int(mips) - 1; mip >= 0; mip--) {
 		SWRTMeshInfo mesh = swrt_meshes.data[first + uint(mip)];
 		vec3 bounds_max = mesh.bounds_voxel.xyz + vec3(max(mesh.dimensions.xyz, ivec3(1))) * mesh.bounds_voxel.w;
-		distance = nextgi_mesh_sdf_world_distance(local, mesh.bounds_voxel.xyz, bounds_max, surface_min, surface_max, swrt_mesh_sample(mesh, local), instance.axis_scale.xyz);
+		distance = nextgi_mesh_sdf_world_distance(local, mesh.bounds_voxel.xyz, bounds_max, surface_min, surface_max, swrt_mesh_sample(mesh, local), instance.axis_scale);
 		voxel_size = mesh.bounds_voxel.w * min_scale;
 		if (abs(distance) > 2.0 * voxel_size) {
 			break;

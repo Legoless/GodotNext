@@ -32,6 +32,7 @@
 
 TEST_FORCE_LINK(test_nextgi_swrt_trace)
 
+#include "core/math/face3.h"
 #include "core/math/mesh_sdf_builder.h"
 #include "core/math/random_number_generator.h"
 #include "scene/resources/3d/primitive_meshes.h"
@@ -78,6 +79,30 @@ float _oriented_box_distance(const Transform3D &p_transform, const Vector3 &p_wo
 	}
 	const float outside = Vector3(MAX(q.x, 0.0f), MAX(q.y, 0.0f), MAX(q.z, 0.0f)).length();
 	return outside + MIN(MAX(q.x, MAX(q.y, q.z)), 0.0f);
+}
+
+// The distance from a world point to the image of the unit cube [-0.5, 0.5]^3 under any
+// transform (a parallelepiped when the basis is sheared): 0 inside, else the nearest of its
+// twelve triangles.
+float _parallelepiped_distance(const Transform3D &p_transform, const Vector3 &p_world) {
+	const Vector3 local = p_transform.affine_inverse().xform(p_world);
+	if (MAX(Math::abs(local.x), MAX(Math::abs(local.y), Math::abs(local.z))) <= 0.5f) {
+		return 0.0f;
+	}
+	Vector3 corners[8];
+	for (int corner = 0; corner < 8; corner++) {
+		corners[corner] = p_transform.xform(Vector3((corner & 1) ? 0.5f : -0.5f, (corner & 2) ? 0.5f : -0.5f, (corner & 4) ? 0.5f : -0.5f));
+	}
+	// The six faces, each a quad of the corners with one bit fixed.
+	const int faces[6][4] = { { 0, 2, 6, 4 }, { 1, 3, 7, 5 }, { 0, 1, 5, 4 }, { 2, 3, 7, 6 }, { 0, 1, 3, 2 }, { 4, 5, 7, 6 } };
+	float nearest = 1e30f;
+	for (const auto &face : faces) {
+		const Face3 first(corners[face[0]], corners[face[1]], corners[face[2]]);
+		const Face3 second(corners[face[0]], corners[face[2]], corners[face[3]]);
+		nearest = MIN(nearest, first.get_closest_point_to(p_world).distance_to(p_world));
+		nearest = MIN(nearest, second.get_closest_point_to(p_world).distance_to(p_world));
+	}
+	return nearest;
 }
 
 // The world error one 8-bit step of a mesh SDF can make along a local axis.
@@ -347,8 +372,9 @@ TEST_CASE("[NextGI][GlobalSDF] Non-uniformly scaled instances read world distanc
 		NextGIGlobalSDF::Instance instance;
 		instance.field = &box;
 		instance.transform = Transform3D(basis, Vector3(1.0f, 2.0f, -3.0f));
-		const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(basis);
-		const float smallest = MIN(axis_scale.x, MIN(axis_scale.y, axis_scale.z));
+		const Vector4 axis_scale = NextGIGlobalSDF::instance_axis_scale(basis);
+		const float smallest = axis_scale.w;
+		CHECK(Math::is_equal_approx(smallest, MIN(axis_scale.x, MIN(axis_scale.y, axis_scale.z))));
 		const float tolerance = 0.01f + 2.0f * _quantum(box, smallest);
 		// Straight out of every face, inside and past the mesh SDF's bounds: the true distance.
 		const float heights[] = { 0.05f, 0.3f, 1.0f, 2.5f };
@@ -429,17 +455,23 @@ TEST_CASE("[NextGI][GlobalSDF] Non-uniformly scaled curved meshes keep a lower b
 
 TEST_CASE("[NextGI][GlobalSDF] Instance axis scales, sheared bases included") {
 	const Basis rotated_scaled = Basis::from_euler(Vector3(0.4f, -1.1f, 0.25f)) * Basis().scaled(Vector3(2.0f, 0.5f, 3.0f));
-	const Vector3 axis_scale = NextGIGlobalSDF::instance_axis_scale(rotated_scaled);
-	CHECK(axis_scale.is_equal_approx(Vector3(2.0f, 0.5f, 3.0f)));
-	// A sheared basis has no per-axis scale: its smallest singular value bounds every
-	// direction. The brute-force minimum of |B v| over unit vectors finds the same value.
+	const Vector4 axis_scale = NextGIGlobalSDF::instance_axis_scale(rotated_scaled);
+	CHECK(axis_scale.is_equal_approx(Vector4(2.0f, 0.5f, 3.0f, 0.5f)));
+	// A sheared basis: w is its smallest singular value, negative to mark it sheared. The
+	// brute-force minimum of |B v| over unit vectors finds the same value.
 	Basis sheared;
 	sheared.set_column(0, Vector3(1.0f, 0.0f, 0.0f));
 	sheared.set_column(1, Vector3(0.8f, 1.0f, 0.0f));
 	sheared.set_column(2, Vector3(0.0f, 0.3f, 2.0f));
-	const Vector3 sheared_scale = NextGIGlobalSDF::instance_axis_scale(sheared);
-	CHECK(Math::is_equal_approx(sheared_scale.x, sheared_scale.y));
-	CHECK(Math::is_equal_approx(sheared_scale.x, sheared_scale.z));
+	const Vector4 sheared_scale = NextGIGlobalSDF::instance_axis_scale(sheared);
+	REQUIRE(sheared_scale.w < 0.0f);
+	// xyz: the distance between each local axis's face planes per local unit, one over the
+	// length of that axis's row of the inverse basis (the row is the face normal over it).
+	const Basis inverse = sheared.inverse();
+	for (int axis = 0; axis < 3; axis++) {
+		CHECK(Math::is_equal_approx(sheared_scale[axis], 1.0f / inverse.rows[axis].length()));
+		CHECK(sheared_scale[axis] >= -sheared_scale.w);
+	}
 	float smallest = 1e30f;
 	const int count = 20000;
 	for (int index = 0; index < count; index++) {
@@ -449,8 +481,8 @@ TEST_CASE("[NextGI][GlobalSDF] Instance axis scales, sheared bases included") {
 		const float angle = float(index) * 2.39996323f;
 		smallest = MIN(smallest, sheared.xform(Vector3(Math::cos(angle) * radius, y, Math::sin(angle) * radius)).length());
 	}
-	CHECK(sheared_scale.x <= smallest + 1.0e-4f);
-	CHECK(sheared_scale.x >= smallest - 0.02f);
+	CHECK(-sheared_scale.w <= smallest + 1.0e-4f);
+	CHECK(-sheared_scale.w >= smallest - 0.02f);
 
 	// A sheared instance's distance stays a lower bound of the distance to its
 	// parallelepiped (brute force over points on its six faces).
@@ -486,6 +518,56 @@ TEST_CASE("[NextGI][GlobalSDF] Instance axis scales, sheared bases included") {
 		}
 		CHECK(NextGIGlobalSDF::sample_instance(instance, world) <= truth + 0.05f);
 	}
+}
+
+TEST_CASE("[NextGI][GlobalSDF] A sheared instance reads close to its true distance") {
+	// A rotated node under a non-uniformly scaled parent has a sheared basis: here a unit box
+	// scaled (7, 1.5, 0.3), turned 30 degrees about Y, under a parent scaled (1.5, 1, 1). Its
+	// column lengths are 9.74, 1.5 and 0.34 and its smallest singular value 0.32. That value on
+	// every axis read a median of 7% of the true distance outside the box, so the trace stopped
+	// in the air around it. Each axis's face planes bound the distance to the box (plan L4's
+	// oriented bounds) without that collapse.
+	const MeshSDFData box = _box_sdf(Vector3(1.0f, 1.0f, 1.0f));
+	const Basis basis = Basis().scaled(Vector3(1.5f, 1.0f, 1.0f)) * Basis::from_euler(Vector3(0.0f, Math::PI / 6.0f, 0.0f)) * Basis().scaled(Vector3(7.0f, 1.5f, 0.3f));
+	NextGIGlobalSDF::Instance instance;
+	instance.field = &box;
+	instance.transform = Transform3D(basis, Vector3(0.0f, 0.75f, -4.2f));
+	const Vector4 axis_scale = NextGIGlobalSDF::instance_axis_scale(basis);
+	REQUIRE(axis_scale.w < 0.0f);
+	const float tolerance = 0.01f + 2.0f * _quantum(box, -axis_scale.w);
+	// Straight out of the middle of each face, inside and past the mesh SDF's bounds: the
+	// nearest point is the face's center, so the face plane's distance is the true distance.
+	const Basis inverse = basis.inverse();
+	const float heights[] = { 0.05f, 0.3f, 1.0f, 2.5f };
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			Vector3 center_local;
+			center_local[axis] = 0.5f * float(side);
+			const Vector3 normal = inverse.rows[axis].normalized() * float(side);
+			for (const float height : heights) {
+				const Vector3 world = instance.transform.xform(center_local) + normal * height;
+				CHECK(_parallelepiped_distance(instance.transform, world) == doctest::Approx(height).epsilon(0.001));
+				CHECK(Math::abs(NextGIGlobalSDF::sample_instance(instance, world) - height) <= tolerance);
+			}
+		}
+	}
+	// Around the box, near and far: never farther than the true distance, and most of it.
+	RandomNumberGenerator rng;
+	rng.set_seed(186);
+	LocalVector<float> ratios;
+	for (int sample = 0; sample < 600; sample++) {
+		const Vector3 local(rng.randf_range(-1.5f, 1.5f), rng.randf_range(-1.5f, 1.5f), rng.randf_range(-1.5f, 1.5f));
+		const Vector3 world = instance.transform.xform(local);
+		const float truth = _parallelepiped_distance(instance.transform, world);
+		const float sampled = NextGIGlobalSDF::sample_instance(instance, world);
+		CHECK(sampled <= truth + tolerance);
+		if (truth > 0.05f) {
+			ratios.push_back(sampled / truth);
+		}
+	}
+	REQUIRE(ratios.size() > 300u);
+	ratios.sort();
+	CHECK(ratios[ratios.size() / 2] >= 0.85f);
 }
 
 TEST_CASE("[NextGI][SWRT] Microbenchmark fixture segments are lit or cross a box core") {

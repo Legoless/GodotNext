@@ -25,6 +25,9 @@ extends Node3D
 ## instances than they can list (the trace must still see every pole).
 ## Pass --scaled to build every box as a unit BoxMesh scaled to its size (the
 ## physics shapes stay the same), so the mesh SDFs are non-uniformly scaled.
+## Pass --sheared to turn every box but the floor 30 degrees about Y under a parent scaled
+## (1.5, 1, 1), so the boxes are parallelepipeds (physics gets the same corners). With
+## --scaled their mesh SDFs are unit boxes under a sheared basis.
 ## Pass --reduced to give the tracer a global SDF pool (debug/swrt_trace_pool_bricks)
 ## that holds only some of its six levels: it drops levels from the top until the
 ## rest fit (#187 SWRT_REDUCED), reports it, and still passes every check above.
@@ -33,7 +36,8 @@ extends Node3D
 ## builds no level in full again, and level 0 still traces (no low-sun pass: the levels
 ## past level 0 are partial).
 ## --reduced and --starved are sized for the plain scene: do not combine them with
-## --dense or --scaled.
+## --dense, --scaled or --sheared. Nor --dense with --sheared: the poles keep clear of the
+## upright boxes only.
 ## Every run also compares the GPU composite of the global SDF with its CPU twin
 ## (NextGIGlobalSDF::composite_distance), checks that no resident voxel reads
 ## past the nearest instance, and checks that the #187 microbenchmark's trace
@@ -98,6 +102,7 @@ var _panel: MeshInstance3D
 var _detail := false
 var _dense := false
 var _scaled := false
+var _sheared := false
 var _reduced := false
 var _starved := false
 var _starved_full_builds := -1
@@ -107,6 +112,7 @@ func _ready() -> void:
 	_detail = OS.get_cmdline_user_args().has("--detail")
 	_dense = OS.get_cmdline_user_args().has("--dense")
 	_scaled = OS.get_cmdline_user_args().has("--scaled")
+	_sheared = OS.get_cmdline_user_args().has("--sheared")
 	_reduced = OS.get_cmdline_user_args().has("--reduced")
 	_starved = OS.get_cmdline_user_args().has("--starved")
 	if _reduced or _starved:
@@ -159,17 +165,25 @@ func _add_box(p_name: String, p_size: Vector3, p_position: Vector3, p_roughness:
 	var instance := MeshInstance3D.new()
 	instance.name = p_name
 	instance.mesh = mesh
-	instance.position = p_position
-	if _scaled:
-		instance.scale = p_size
+	# The global transform a node turned 30 degrees about Y gets under a parent scaled (1.5, 1, 1).
+	var basis := Basis.from_scale(Vector3(1.5, 1.0, 1.0)) * Basis.from_euler(Vector3(0.0, PI / 6.0, 0.0)) if _sheared and p_name != "Floor" else Basis()
+	instance.transform = Transform3D(basis * Basis.from_scale(p_size) if _scaled else basis, p_position)
 	add_child(instance)
 	var body := StaticBody3D.new()
 	body.name = p_name + "Body"
 	body.position = p_position
 	var shape := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = p_size
-	shape.shape = box
+	if basis == Basis():
+		var box := BoxShape3D.new()
+		box.size = p_size
+		shape.shape = box
+	else:
+		var convex := ConvexPolygonShape3D.new()
+		var points := PackedVector3Array()
+		for corner in 8:
+			points.append(basis * (Vector3(0.5 if corner & 1 else -0.5, 0.5 if corner & 2 else -0.5, 0.5 if corner & 4 else -0.5) * p_size))
+		convex.points = points
+		shape.shape = convex
 	body.add_child(shape)
 	add_child(body)
 	_roughness_of[body.get_instance_id()] = p_roughness
@@ -779,6 +793,7 @@ func _verify(p_info: Dictionary, p_readback: Dictionary) -> void:
 
 	# 8. The global SDF composite (GPU) against the CPU reference, at random points of level 0.
 	summary["scaled"] = _scaled
+	summary["sheared"] = _sheared
 	summary["composite_checked"] = int(p_readback.get("composite_checked", 0))
 	summary["composite_max_error"] = float(p_readback.get("composite_max_error", 1e30))
 	summary["composite_sign_mismatches"] = int(p_readback.get("composite_sign_mismatches", -1))
