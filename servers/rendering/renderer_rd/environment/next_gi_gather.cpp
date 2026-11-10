@@ -541,13 +541,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	ERR_FAIL_NULL_V(scene_data, false);
 	// GodotNext: nextgi_view_math. The depth texture holds the corrected projection's
 	// clip z (reverse Z, flip_y), so every reconstruction and reprojection uses it.
-	const Projection view_proj = NextGIView::view_projection(*scene_data);
-	last_inv_view_proj = view_proj.inverse();
-	const Projection prev_view_proj = NextGIView::prev_view_projection(*scene_data);
+	const ViewMatrices view = view_matrices(*scene_data);
+	last_inv_view_proj = view.inv_view_proj;
 	GatherParamsGPU params;
-	_store_projection(view_proj.inverse(), params.inv_view_proj);
-	_store_projection(prev_view_proj, params.prev_view_proj);
-	last_prev_view_proj = prev_view_proj;
+	_store_projection(view.inv_view_proj, params.inv_view_proj);
+	_store_projection(view.prev_view_proj, params.prev_view_proj);
+	last_prev_view_proj = view.prev_view_proj;
 	last_camera_pos = scene_data->cam_transform.origin;
 	last_prev_camera_pos = scene_data->prev_cam_transform.origin;
 	params.camera_pos[0] = scene_data->cam_transform.origin.x;
@@ -641,13 +640,13 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		params.velocity_enabled = 0;
 	}
 	last_depth = depth;
-	last_inv_projection = NextGIView::inv_projection(*scene_data); // GodotNext: nextgi_view_math
+	last_inv_projection = view.inv_projection; // GodotNext: nextgi_view_math
 	last_velocity = front_layer ? RID() : (velocity.is_valid() ? velocity : RID());
 	params.front_layer = front_layer ? 1u : 0u;
 	params.fog_pad[0] = 0u;
 	params.fog_pad[1] = 0u;
 	params.front_pad = 0u;
-	NextGIViewMath::store_basis(scene_data->cam_transform.basis, params.view_to_world); // GodotNext: nextgi_view_math
+	NextGIViewMath::store_basis(view.view_to_world, params.view_to_world); // GodotNext: nextgi_view_math
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
 	_free_uniform_set();
@@ -1240,6 +1239,16 @@ void NextGIGather::_stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers
 
 	SWAP(ambient_scratch, prev_ambient);
 	ambient_history_valid = true;
+}
+
+// GodotNext: nextgi_view_math
+NextGIGather::ViewMatrices NextGIGather::view_matrices(const RenderSceneDataRD &p_scene_data) {
+	ViewMatrices matrices;
+	matrices.inv_view_proj = NextGIView::inv_view_projection(p_scene_data);
+	matrices.prev_view_proj = NextGIView::prev_view_projection(p_scene_data);
+	matrices.inv_projection = NextGIView::inv_projection(p_scene_data);
+	matrices.view_to_world = p_scene_data.cam_transform.basis;
+	return matrices;
 }
 
 String NextGIGather::build_shader_source(int p_variant) {

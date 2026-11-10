@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/math/basis.h"
 #include "core/math/math_funcs.h"
 #include "core/math/projection.h"
 #include "core/string/ustring.h"
@@ -39,6 +40,7 @@
 
 class RenderDataRD;
 class RenderSceneBuffersRD;
+class RenderSceneDataRD;
 
 namespace RendererRD {
 
@@ -194,6 +196,18 @@ public:
 
 	// Expanded gather source (variant 0) for the kernel-rule doctest. No GPU compile.
 	static String build_shader_source(int p_variant = 0);
+
+	// GodotNext: nextgi_view_math. The view matrices the gather uploads, all from NextGIView:
+	// the inverse of the depth prepass's view-projection, the previous frame's view-projection,
+	// the depth-to-view inverse projection, and the camera basis that turns the prepass's
+	// view-space normals into world space (nextgi_view_world_normal()).
+	struct ViewMatrices {
+		Projection inv_view_proj;
+		Projection prev_view_proj;
+		Projection inv_projection;
+		Basis view_to_world;
+	};
+	static ViewMatrices view_matrices(const RenderSceneDataRD &p_scene_data);
 
 	NextGIGather();
 	~NextGIGather();

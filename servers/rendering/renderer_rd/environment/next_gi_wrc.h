@@ -34,10 +34,12 @@
 #include "core/math/vector2i.h"
 #include "core/math/vector3.h"
 #include "core/math/vector3i.h"
+#include "core/math/vector4.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
 
 class RenderDataRD;
+class RenderSceneDataRD;
 
 namespace RendererRD {
 
@@ -155,6 +157,19 @@ class NextGIWRC {
 
 public:
 	static NextGIWRC *get_singleton() { return singleton; }
+
+	// GodotNext: nextgi_view_math. The view the froxels and the history use, from NextGIView:
+	// the depth prepass's view-projection, its inverse, and the depth coefficients
+	// (NextGIViewMath::depth_coefficients()) that turn a froxel's linear depth into the
+	// depth texture's value.
+	struct ViewParams {
+		Projection view_proj;
+		Projection inv_view_proj;
+		Vector4 depth_coefficients;
+	};
+	static ViewParams view_params(const RenderSceneDataRD &p_scene_data);
+	// The expanded update shader source of one variant, for the layout doctest. No GPU compile.
+	static String build_update_shader_source(int p_variant = 0);
 
 	void update(const RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;

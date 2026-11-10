@@ -403,6 +403,30 @@ bool NextGIWRC::_ensure_translucency_cache() {
 	return translucency_marks.is_valid() && translucency_indices.is_valid();
 }
 
+// GodotNext: nextgi_view_math
+NextGIWRC::ViewParams NextGIWRC::view_params(const RenderSceneDataRD &p_scene_data) {
+	ViewParams view;
+	view.view_proj = NextGIView::view_projection(p_scene_data);
+	view.inv_view_proj = view.view_proj.inverse();
+	view.depth_coefficients = NextGIViewMath::depth_coefficients(NextGIView::depth_projection(p_scene_data));
+	return view;
+}
+
+String NextGIWRC::build_update_shader_source(int p_variant) {
+	NextgiWrcUpdateShaderRD update_shader;
+	Vector<String> defines;
+	defines.push_back("");
+	update_shader.initialize(defines);
+	const RID version = update_shader.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = update_shader.version_build_variant_stage_sources(version, p_variant);
+	update_shader.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
 bool NextGIWRC::_ensure_shader() {
 	if (shader != nullptr && shader->version.is_valid()) {
 		return true;
@@ -519,14 +543,13 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	params.page_rect_count = relight != nullptr ? relight->get_page_rect_count() : 0;
 	// GodotNext: nextgi_view_math. The froxels and the history use the depth texture's clip space.
-	const Projection view_proj = NextGIView::view_projection(*p_render_data->scene_data);
-	const Projection inv_view_proj = view_proj.inverse();
+	const ViewParams view = view_params(*p_render_data->scene_data);
+	const Projection &view_proj = view.view_proj;
 	for (int i = 0; i < 16; i++) {
-		params.inv_view_proj[i] = inv_view_proj.columns[i / 4][i % 4];
+		params.inv_view_proj[i] = view.inv_view_proj.columns[i / 4][i % 4];
 	}
-	const Vector4 depth_coefficients = NextGIViewMath::depth_coefficients(NextGIView::depth_projection(*p_render_data->scene_data));
 	for (int i = 0; i < 4; i++) {
-		params.depth_coefficients[i] = depth_coefficients[i];
+		params.depth_coefficients[i] = view.depth_coefficients[i];
 	}
 	params.volume[0] = float(volume_size.x);
 	params.volume[1] = float(volume_size.y);

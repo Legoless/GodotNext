@@ -37,17 +37,26 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 #include "core/math/random_number_generator.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_clipmaps.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_data_rd.h"
+
+#include "modules/modules_enabled.gen.h"
 
 #ifdef RD_ENABLED
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_sdf.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_sdf.glsl.gen.h"
+#ifdef MODULE_GLSLANG_ENABLED
+#include "servers/rendering/rendering_device_commons.h"
+
+#include "modules/glslang/shader_compile.h"
+#endif
 #endif
 
 namespace {
@@ -196,6 +205,123 @@ TEST_CASE("[NextGI][View] Depth reconstruction inverts the prepass projection") 
 		memdelete(scene_data);
 	}
 }
+
+TEST_CASE("[NextGI][View] The hardware tier's gather and WRC upload the prepass's matrices") {
+	// The HWRT gather (its diffuse and reflect kernels) and the WRC froxels reconstruct from the
+	// depth texture, so they must upload the projection the prepass drew with, not the raw
+	// OpenGL-style cam_projection (which puts every surface on the near plane).
+	for (int flip = 0; flip < 2; flip++) {
+		RenderSceneDataRD *scene_data = _scene_data(flip == 1, Vector2(0.4f / 1920.0f, -0.3f / 1080.0f));
+		const Projection prepass = scene_data->get_cam_projection() * Projection(scene_data->cam_transform.affine_inverse());
+		const RendererRD::NextGIGather::ViewMatrices gather = RendererRD::NextGIGather::view_matrices(*scene_data);
+		const RendererRD::NextGIWRC::ViewParams wrc = RendererRD::NextGIWRC::view_params(*scene_data);
+		const Transform3D world_to_view = scene_data->cam_transform.affine_inverse();
+		const Vector3 forward = -scene_data->cam_transform.basis.get_column(2);
+		const Vector3 right = scene_data->cam_transform.basis.get_column(0);
+		const Vector3 up = scene_data->cam_transform.basis.get_column(1);
+		const float distances[] = { 0.5f, 8.0f, 120.0f };
+		for (const float distance : distances) {
+			const Vector3 world = scene_data->cam_transform.origin + forward * distance + right * (0.2f * distance) + up * (0.1f * distance);
+			const Vector4 clip = prepass.xform(Vector4(world.x, world.y, world.z, 1.0f));
+			const Vector2 uv(clip.x / clip.w * 0.5f + 0.5f, clip.y / clip.w * 0.5f + 0.5f);
+			const float depth = clip.z / clip.w;
+			const float tolerance = 1.0e-3f * distance + 1.0e-4f;
+			CHECK(NextGIViewMath::reconstruct(gather.inv_view_proj, uv, depth).distance_to(world) <= tolerance);
+			CHECK(NextGIViewMath::reconstruct(wrc.inv_view_proj, uv, depth).distance_to(world) <= tolerance);
+			// The WRC history projects into the same uv and depth.
+			const Vector3 projected = NextGIViewMath::project(wrc.view_proj, world);
+			CHECK(Vector2(projected.x, projected.y).distance_to(uv) <= 1.0e-4f);
+			CHECK(Math::is_equal_approx(projected.z, depth, 1.0e-5f));
+			// The froxels step in linear depth (view-space -z) and store the depth texture's value.
+			const float linear = -world_to_view.xform(world).z;
+			CHECK(Math::is_equal_approx(NextGIViewMath::depth_from_linear(wrc.depth_coefficients, linear), depth, 1.0e-5f));
+			// The gather's denoiser works in view space.
+			const Vector3 view_point = world_to_view.xform(world);
+			CHECK(NextGIViewMath::reconstruct(gather.inv_projection, uv, depth).distance_to(view_point) <= tolerance);
+		}
+		// The gather's history reprojects with the previous camera and jitter.
+		Projection prev_correction;
+		prev_correction.set_depth_correction(scene_data->flip_y);
+		prev_correction.add_jitter_offset(scene_data->prev_taa_jitter);
+		const Projection prev_prepass = prev_correction * scene_data->prev_cam_projection * Projection(scene_data->prev_cam_transform.affine_inverse());
+		const Vector3 point = scene_data->cam_transform.origin + forward * 6.0f;
+		const Vector3 previous = NextGIViewMath::project(gather.prev_view_proj, point);
+		const Vector4 prev_clip = prev_prepass.xform(Vector4(point.x, point.y, point.z, 1.0f));
+		CHECK(Vector2(previous.x, previous.y).distance_to(Vector2(prev_clip.x / prev_clip.w * 0.5f + 0.5f, prev_clip.y / prev_clip.w * 0.5f + 0.5f)) <= 1.0e-4f);
+		CHECK(Math::is_equal_approx(previous.z, prev_clip.z / prev_clip.w, 1.0e-5f));
+		// The prepass stores view-space normals; the reflect kernel turns them into world space.
+		const Vector3 world_normal = Vector3(0.3f, 0.8f, -0.52f).normalized();
+		const Vector3 view_normal = world_to_view.basis.xform(world_normal);
+		const Vector3 encoded = view_normal * 0.5f + Vector3(0.5f, 0.5f, 0.5f);
+		CHECK(NextGIViewMath::world_normal(gather.view_to_world, encoded).distance_to(world_normal) <= 1.0e-5f);
+		memdelete(scene_data);
+	}
+}
+
+#if defined(RD_ENABLED) && defined(MODULE_GLSLANG_ENABLED)
+// The Offset decorations of the members of the struct that declares p_member, by member name.
+static HashMap<String, uint32_t> _spirv_struct_offsets(const Vector<uint8_t> &p_spirv, const String &p_member) {
+	const int count = p_spirv.size() / 4;
+	auto word = [&](int p_index) {
+		const uint8_t *bytes = p_spirv.ptr() + p_index * 4;
+		return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) | (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
+	};
+	HashMap<uint64_t, String> names;
+	HashMap<uint64_t, uint32_t> offsets;
+	uint32_t owner = UINT32_MAX;
+	for (int index = 5; index < count;) {
+		const uint32_t word_count = word(index) >> 16;
+		const uint32_t opcode = word(index) & 0xffffu;
+		if (word_count == 0 || index + int(word_count) > count) {
+			break;
+		}
+		const uint64_t key = word_count >= 3 ? (uint64_t(word(index + 1)) << 32) | word(index + 2) : 0;
+		if (opcode == 6 && word_count >= 4) { // OpMemberName: struct, member, literal string.
+			const String name = String::utf8((const char *)(p_spirv.ptr() + (index + 3) * 4));
+			names.insert(key, name);
+			if (name == p_member) {
+				owner = word(index + 1);
+			}
+		} else if (opcode == 72 && word_count >= 5 && word(index + 3) == 35) { // OpMemberDecorate ... Offset.
+			offsets.insert(key, word(index + 4));
+		}
+		index += int(word_count);
+	}
+	HashMap<String, uint32_t> result;
+	for (const KeyValue<uint64_t, String> &name : names) {
+		if (uint32_t(name.key >> 32) == owner && offsets.has(name.key)) {
+			result.insert(name.value, offsets[name.key]);
+		}
+	}
+	return result;
+}
+
+TEST_CASE("[NextGI][View] The WRC update shader reads its params where the renderer writes them") {
+	// NextGIWRCParamsGPU (next_gi_wrc.cpp) pins these std430 offsets with static_asserts. The
+	// shader dropped depth_coefficients once, and read previous_view_proj and history 16 bytes off.
+	const String source = RendererRD::NextGIWRC::build_update_shader_source();
+	REQUIRE_FALSE(source.is_empty());
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_COMPUTE, source, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3, &error);
+	if (spirv.is_empty()) {
+		FAIL_CHECK(("glslang failed to compile the WRC update shader:\n" + error).utf8().get_data());
+	}
+	REQUIRE_GE(spirv.size(), 20);
+	const HashMap<String, uint32_t> offsets = _spirv_struct_offsets(spirv, "previous_view_proj");
+	auto offset_of = [&offsets](const String &p_name) {
+		const uint32_t *offset = offsets.getptr(p_name);
+		return offset != nullptr ? *offset : UINT32_MAX;
+	};
+	CHECK_EQ(offset_of("inv_view_proj"), 80u);
+	CHECK_EQ(offset_of("volume"), 144u);
+	CHECK_EQ(offset_of("depth_coefficients"), 160u);
+	CHECK_EQ(offset_of("previous_view_proj"), 176u);
+	CHECK_EQ(offset_of("history"), 240u);
+	// The froxels turn linear depth into the depth texture's value and back with them.
+	CHECK(source.contains("nextgi_view_depth_from_linear(params.depth_coefficients,"));
+	CHECK(source.contains("nextgi_view_linear_depth(params.depth_coefficients,"));
+}
+#endif
 
 TEST_CASE("[NextGI][View] Linear depth slices round-trip through the stored depth") {
 	RenderSceneDataRD *scene_data = _scene_data(true, Vector2());
