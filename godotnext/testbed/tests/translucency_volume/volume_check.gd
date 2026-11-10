@@ -68,8 +68,13 @@ func _run() -> void:
 		failures.append("volumetric fog did not read the shared volume")
 	if not bool(info.get("translucency_history_valid", false)):
 		failures.append("temporal history is not valid")
-	if int(info.get("translucency_volume_bytes", 0)) != 80 * 45 * 32 * 6 * 8:
-		failures.append("current and history volume allocation is incorrect")
+	# 1/16 of the main view's internal size x 32 slices; SH-L1 in three RGBA16F textures, current
+	# and history (plan D17: about 261k froxels at 1080p).
+	var internal := Vector2i((Vector2(get_viewport().get_texture().get_size()) * get_viewport().scaling_3d_scale).floor())
+	var expected_bytes := ceili(internal.x / 16.0) * ceili(internal.y / 16.0) * 32 * 6 * 8
+	var volume_bytes := int(info.get("translucency_volume_bytes", 0))
+	if volume_bytes != expected_bytes:
+		failures.append("current and history volume allocation is %d bytes, expected %d for a %dx%d internal size" % [volume_bytes, expected_bytes, internal.x, internal.y])
 	print("GODOTNEXT_RESULT " + JSON.stringify({
 		"test": "translucency_volume",
 		"pass": failures.is_empty(),
@@ -79,6 +84,8 @@ func _run() -> void:
 		"rays": rays,
 		"hits": hits,
 		"history": info.get("translucency_history_valid", false),
+		"volume_bytes": volume_bytes,
+		"expected_bytes": expected_bytes,
 		"failures": failures,
 	}))
 	print("GL7_PQ_DEFERRED sh_l1_error=not_run sealed_sky_ratio=not_run timing=not_run")
