@@ -15,6 +15,8 @@ extends Node3D
 ## all fit the Lite radiance atlas; the kitbash's 2,400 rocks do not, which is #41's eviction.
 ## Under debug/deny_ray_query (a device without ray query) every dispatch check also asserts
 ## NO_RAY_QUERY, no RT arena, no ray-query ShaderRD and SWRT instances.
+## Run it through harness/runners/macos_local.sh --fail-on-validation, which fails the run on any
+## "ERROR:", "Invalid Metal usage" or "Error detected in" line.
 
 const WARMUP_FRAMES := 240
 const SKY_FRAMES := 240

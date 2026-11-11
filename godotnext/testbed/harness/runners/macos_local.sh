@@ -18,9 +18,11 @@ HOST_NAME="Apple M5 Max"
 usage() {
 	cat <<'EOF'
 Usage: macos_local.sh --check
-       macos_local.sh -- <godot arguments>
+       macos_local.sh [--fail-on-validation] -- <godot arguments>
 
 --check prints AC power, powermode, and thermal state, then exits.
+--fail-on-validation exits 1 when Godot's output has any "ERROR:",
+"Invalid Metal usage" or "Error detected in" line, even when Godot exits 0.
 The godot arguments must include an absolute --out directory.
 This script only reads `pmset -g`, `pmset -g batt`, and `pmset -g therm`.
 EOF
@@ -178,11 +180,16 @@ find_out_dir() {
 }
 
 check_only=0
+fail_on_validation=0
 godot_args=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--check)
 		check_only=1
+		shift
+		;;
+	--fail-on-validation)
+		fail_on_validation=1
 		shift
 		;;
 	--help|-h)
@@ -253,9 +260,28 @@ trap scene_override_remove EXIT
 write_job
 
 set +e
-"${godot_args[@]}"
-status=$?
+if [[ $fail_on_validation -eq 1 ]]; then
+	# Opt-in, because captures of the legacy scenes share this runner and some of them log a
+	# known intermittent validation report.
+	validation_log=$(mktemp)
+	"${godot_args[@]}" 2>&1 | tee "$validation_log"
+	status=${PIPESTATUS[0]}
+else
+	"${godot_args[@]}"
+	status=$?
+fi
 set -e
+if [[ $fail_on_validation -eq 1 ]]; then
+	errors=$(grep -c 'ERROR:' "$validation_log" || true)
+	metal_usage=$(grep -c 'Invalid Metal usage' "$validation_log" || true)
+	metal_shader=$(grep -c 'Error detected in' "$validation_log" || true)
+	rm -f "$validation_log"
+	printf 'GODOTNEXT_RUNNER_VALIDATION {"errors":%d,"invalid_metal_usage":%d,"shader_validation":%d,"status":%d}\n' "$errors" "$metal_usage" "$metal_shader" "$status"
+	if [[ $status -eq 0 && ($errors -ne 0 || $metal_usage -ne 0 || $metal_shader -ne 0) ]]; then
+		echo "macos_local.sh: the run logged validation lines; the bar is 0" >&2
+		status=1
+	fi
+fi
 
 read_power
 print_state

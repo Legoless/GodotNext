@@ -137,7 +137,7 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 
 ## Runners
 
-`runners/macos_local.sh` records power state, writes `runner_job.json`, launches the command after `--`, then patches `runner.power.after` into `manifest.json`. `--check` prints `on_ac`, `powermode`, `powermode_name`, and `thermal`, and exits without launching. Exit code 1 means the machine is not on AC power in High Power mode.
+`runners/macos_local.sh` records power state, writes `runner_job.json`, launches the command after `--`, then patches `runner.power.after` into `manifest.json`. `--check` prints `on_ac`, `powermode`, `powermode_name`, and `thermal`, and exits without launching. Exit code 1 means the machine is not on AC power in High Power mode. `--fail-on-validation` (before `--`) also exits 1 when the run's output has any `ERROR:`, `Invalid Metal usage` or `Error detected in` line, and prints their counts on a `GODOTNEXT_RUNNER_VALIDATION` line. It is opt-in because the legacy captures share the runner; the checks that run through it, such as `tests/lumen_lite` and `tests/swrt_trace`, pass it.
 
 `run_selftest.sh` and `runners/macos_local.sh` export `GODOTNEXT_BACKGROUND=1` unless it is already set, so harness runs on the M5 Max draw on Metal without taking the desktop's focus (`docs/godotnext/fleet.md`). Set `GODOTNEXT_BACKGROUND=0` to watch a run in a normal window.
 

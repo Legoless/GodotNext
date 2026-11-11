@@ -50,6 +50,8 @@ extends Node3D
 ## Except with --reduced and --starved, the camera starts CAMERA_TRAVEL away and moves into
 ## place first, so the clipmaps scroll and every check runs on bricks a scroll kept (shifted,
 ## never rebuilt): a brick's composite must not depend on its place in its level.
+## Run it through harness/runners/macos_local.sh --fail-on-validation, which fails the run on any
+## "ERROR:", "Invalid Metal usage" or "Error detected in" line.
 
 const WAIT_FRAMES := 300
 const MAX_FRAMES := 900
