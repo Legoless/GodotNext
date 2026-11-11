@@ -2465,6 +2465,14 @@ void RenderingDeviceDriverMetal::command_end_label(CommandBufferID p_cmd_buffer)
 	cb->end_label();
 }
 
+// GodotNext: metal_level_fences (#186). Untracked resources are not ordered across command
+// buffers, so the one that continues waits on the fences of the one the graph ended.
+void RenderingDeviceDriverMetal::command_buffer_continue(CommandBufferID p_cmd_buffer, CommandBufferID p_from) {
+	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
+	const MDCommandBufferBase *from = (const MDCommandBufferBase *)(p_from.id);
+	cb->continue_from(*from);
+}
+
 void RenderingDeviceDriverMetal::command_group_end(CommandBufferID p_cmd_buffer) {
 	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
 	// Closing the encoder here is what guarantees no encoder straddles a level

@@ -108,6 +108,8 @@ void RenderingDeviceGraph::_split_main_command_buffer(RDD::CommandBufferID &r_co
 		driver->command_end_label(r_command_buffer);
 	}
 	driver->command_buffer_end(r_command_buffer);
+	// GodotNext: metal_level_fences (#186). The next main command buffer continues this one.
+	const RDD::CommandBufferID continued_command_buffer = r_command_buffer;
 
 	while (r_command_buffer_pool.buffers_used >= r_command_buffer_pool.buffers.size()) {
 		RDD::CommandBufferID command_buffer = driver->command_buffer_create(r_command_buffer_pool.pool);
@@ -119,6 +121,7 @@ void RenderingDeviceGraph::_split_main_command_buffer(RDD::CommandBufferID &r_co
 	uint32_t command_buffer_index = r_command_buffer_pool.buffers_used++;
 	r_command_buffer = r_command_buffer_pool.buffers[command_buffer_index];
 	driver->command_buffer_begin(r_command_buffer);
+	driver->command_buffer_continue(r_command_buffer, continued_command_buffer);
 	r_current_label_index = -1;
 	r_current_label_level = -1;
 	_run_label_command_change(r_command_buffer, -1, -1, true, true, nullptr, 0, r_current_label_index, r_current_label_level);

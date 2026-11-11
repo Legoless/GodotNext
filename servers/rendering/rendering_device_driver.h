@@ -881,6 +881,11 @@ public:
 	// housekeeping copies) so subsequent commands start fresh. Default no-op.
 	virtual void command_group_begin(CommandBufferID p_cmd_buffer) {}
 	virtual void command_group_end(CommandBufferID p_cmd_buffer) {}
+	// GodotNext: metal_level_fences (#186). p_cmd_buffer was just begun and continues p_from, which
+	// is submitted before it on the same queue: the previous frame's last command buffer, or one the
+	// graph ended in the middle of a frame. A driver that orders commands itself (Metal's level
+	// fences) carries that order across. Default no-op.
+	virtual void command_buffer_continue(CommandBufferID p_cmd_buffer, CommandBufferID p_from) {}
 
 	/****************/
 	/**** DEBUG *****/

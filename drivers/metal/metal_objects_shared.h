@@ -621,6 +621,13 @@ protected:
 	// therefore wait F_cur rather than F_prev. Metal does not order encoders, so
 	// subpasses split across encoders require an explicit dependency.
 	bool _fence_wait_current_level = false;
+	// GodotNext: metal_level_fences (#186). Untracked resources are not ordered across
+	// command buffers either. A command buffer that continues another one on the same
+	// queue (the next frame, or the graph's mid-frame split) waits on that one's last
+	// fence until a level of its own has updated a fence. _fence_updated is per use.
+	MTL::Fence *_fence_carried = nullptr;
+	MTL::Fence *_fence_prev();
+	MTL::Fence *_fence_frontier() const;
 #ifdef DEV_ENABLED
 	// Set by _fence_to_wait(), consumed by _fence_to_update(): every encoder
 	// that updates F_cur must have waited F_prev, or the level chain breaks.
@@ -665,6 +672,10 @@ public:
 
 	/// Closes the current level (command group) and opens the next one.
 	void advance_sync_level();
+
+	// GodotNext: metal_level_fences (#186). This command buffer was just begun to continue
+	// p_from, which was ended and is committed before it on the same queue.
+	void continue_from(const MDCommandBufferBase &p_from);
 
 	/// Returns the fence an externally encoded pass (MetalFX) must wait for and
 	/// update, or nullptr under hazard tracking.

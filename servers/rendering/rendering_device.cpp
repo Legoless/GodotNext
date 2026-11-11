@@ -8892,6 +8892,10 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 	driver->begin_segment(frame, frames_drawn++);
 	GodotProfileZoneGrouped(_profile_zone, "driver->command_buffer_begin");
 	driver->command_buffer_begin(frames[frame].command_buffer);
+	// GodotNext: metal_level_fences (#186). The frame's work follows the previous frame's on the queue.
+	if (last_frame_command_buffer) {
+		driver->command_buffer_continue(frames[frame].command_buffer, last_frame_command_buffer);
+	}
 
 	// Reset the graph.
 	GodotProfileZoneGrouped(_profile_zone, "draw_graph.begin");
@@ -8977,6 +8981,8 @@ void RenderingDevice::execute_chained_cmds(bool p_present_swap_chain, RenderingD
 	// there'll be more.
 	uint32_t command_buffer_count = 1;
 	RDG::CommandBufferPool &buffer_pool = frames[frame].command_buffer_pool;
+	// GodotNext: metal_level_fences (#186). The main chain ends with the last pool buffer used.
+	last_frame_command_buffer = buffer_pool.buffers_used > 0 ? buffer_pool.buffers[buffer_pool.buffers_used - 1] : frames[frame].command_buffer;
 	if (buffer_pool.buffers_used > 0) {
 		command_buffer_count += buffer_pool.buffers_used;
 		buffer_pool.buffers_used = 0;
@@ -9856,6 +9862,7 @@ void RenderingDevice::finalize() {
 	}
 
 	frames.clear();
+	last_frame_command_buffer = RDD::CommandBufferID(); // GodotNext: metal_level_fences (#186)
 
 	for (int i = 0; i < upload_staging_buffers.blocks.size(); i++) {
 		driver->buffer_unmap(upload_staging_buffers.blocks[i].driver_id);

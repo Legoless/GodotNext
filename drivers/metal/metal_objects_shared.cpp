@@ -441,12 +441,45 @@ MTL::Fence *MDCommandBufferBase::_fence_to_wait() {
 	if (!_fences[0]) {
 		return nullptr;
 	}
-	uint32_t i = _fence_wait_current_level ? (_fence_level & 1) : ((_fence_level + 1) & 1);
+	// GodotNext: metal_level_fences (#186). F_prev falls back to the carried fence.
+	const bool current_level = _fence_wait_current_level;
 	_fence_wait_current_level = false;
 #ifdef DEV_ENABLED
 	_fence_wait_issued = true;
 #endif
-	return _fence_updated[i] ? _fences[i].get() : nullptr;
+	if (current_level) {
+		uint32_t i = _fence_level & 1;
+		return _fence_updated[i] ? _fences[i].get() : nullptr;
+	}
+	return _fence_prev();
+}
+
+// GodotNext: metal_level_fences (#186)
+MTL::Fence *MDCommandBufferBase::_fence_prev() {
+	uint32_t i = (_fence_level + 1) & 1;
+	return _fence_updated[i] ? _fences[i].get() : _fence_carried;
+}
+
+// GodotNext: metal_level_fences (#186). The fence the next level of this command buffer
+// would wait on, which covers all of its work.
+MTL::Fence *MDCommandBufferBase::_fence_frontier() const {
+	if (_fence_level_dirty) {
+		return _fences[_fence_level & 1].get();
+	}
+	uint32_t i = (_fence_level + 1) & 1;
+	return _fence_updated[i] ? _fences[i].get() : _fence_carried;
+}
+
+void MDCommandBufferBase::continue_from(const MDCommandBufferBase &p_from) {
+	DEV_ASSERT(type == MDCommandBufferStateType::None);
+	DEV_ASSERT(p_from.type == MDCommandBufferStateType::None);
+	if (!_fences[0] || &p_from == this) {
+		return;
+	}
+	// Nothing of this use has updated a fence yet, so every wait of its first level
+	// falls back to the carried fence.
+	DEV_ASSERT(!_fence_updated[0] && !_fence_updated[1] && !_fence_level_dirty);
+	_fence_carried = p_from._fence_frontier();
 }
 
 MTL::Fence *MDCommandBufferBase::_fence_to_update() {
@@ -499,11 +532,23 @@ MTL::Fence *MDCommandBufferBase::external_pass_fence() {
 	// pass; if the level stays clean, the next level is still this one and
 	// waits F_prev too.
 	uint32_t i = (_fence_level + 1) & 1;
+	// GodotNext: metal_level_fences (#186). Before this command buffer's first fence
+	// update, F_prev is the carried fence: the pass waits and updates that one.
+	if (!_fence_updated[i] && _fence_carried != nullptr) {
+		return _fence_carried;
+	}
 	_fence_updated[i] = true;
 	return _fences[i].get();
 }
 
 void MDCommandBufferBase::begin() {
+	// GodotNext: metal_level_fences (#186). The previous use of this command buffer completed
+	// before it is begun again, so its fences need no wait; a continued one is carried instead.
+	_fence_updated[0] = false;
+	_fence_updated[1] = false;
+	_fence_level_dirty = false;
+	_fence_wait_current_level = false;
+	_fence_carried = nullptr;
 	_begin();
 }
 

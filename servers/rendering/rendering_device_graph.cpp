@@ -1167,6 +1167,8 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 
 					// Create or reuse a command buffer and finish recording the current one.
 					driver->command_buffer_end(r_command_buffer);
+					// GodotNext: metal_level_fences (#186)
+					const RDD::CommandBufferID continued_command_buffer = r_command_buffer;
 
 					while (r_command_buffer_pool.buffers_used >= r_command_buffer_pool.buffers.size()) {
 						RDD::CommandBufferID command_buffer = driver->command_buffer_create(r_command_buffer_pool.pool);
@@ -1179,6 +1181,7 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 					uint32_t command_buffer_index = r_command_buffer_pool.buffers_used++;
 					r_command_buffer = r_command_buffer_pool.buffers[command_buffer_index];
 					driver->command_buffer_begin(r_command_buffer);
+					driver->command_buffer_continue(r_command_buffer, continued_command_buffer); // GodotNext: metal_level_fences (#186)
 				}
 
 				const RecordedComputeListCommand *compute_list_command = reinterpret_cast<const RecordedComputeListCommand *>(command);
@@ -1197,6 +1200,8 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				if (draw_list_command->split_cmd_buffer) {
 					// Create or reuse a command buffer and finish recording the current one.
 					driver->command_buffer_end(r_command_buffer);
+					// GodotNext: metal_level_fences (#186)
+					const RDD::CommandBufferID continued_command_buffer = r_command_buffer;
 
 					while (r_command_buffer_pool.buffers_used >= r_command_buffer_pool.buffers.size()) {
 						RDD::CommandBufferID command_buffer = driver->command_buffer_create(r_command_buffer_pool.pool);
@@ -1209,6 +1214,7 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 					uint32_t command_buffer_index = r_command_buffer_pool.buffers_used++;
 					r_command_buffer = r_command_buffer_pool.buffers[command_buffer_index];
 					driver->command_buffer_begin(r_command_buffer);
+					driver->command_buffer_continue(r_command_buffer, continued_command_buffer); // GodotNext: metal_level_fences (#186)
 				}
 
 				const VectorView clear_values(draw_list_command->clear_values(), draw_list_command->clear_values_count);

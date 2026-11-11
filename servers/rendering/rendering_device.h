@@ -1886,6 +1886,10 @@ private:
 	bool async_compute_active = false;
 	uint64_t async_compute_submitted_frames = 0;
 	uint64_t async_compute_fallback_frames = 0;
+	// GodotNext: metal_level_fences (#186). The last main-queue command buffer of the last
+	// submitted frame, which the next frame's command buffer continues
+	// (RDD::command_buffer_continue()).
+	RDD::CommandBufferID last_frame_command_buffer;
 #ifdef DEBUG_ENABLED
 	// GODOT_RG_FORCE_ASYNC_COMPUTE=<n>: every n-th main compute list of a frame runs async.
 	uint32_t draw_graph_force_async_compute_stride = 0;

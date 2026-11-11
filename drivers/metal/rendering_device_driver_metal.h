@@ -596,6 +596,8 @@ public:
 	virtual void command_begin_label(CommandBufferID p_cmd_buffer, const char *p_label_name, const Color &p_color) override final;
 	virtual void command_end_label(CommandBufferID p_cmd_buffer) override final;
 	virtual void command_group_end(CommandBufferID p_cmd_buffer) override final;
+	// GodotNext: metal_level_fences (#186)
+	virtual void command_buffer_continue(CommandBufferID p_cmd_buffer, CommandBufferID p_from) override final;
 
 #pragma mark - Debug
 

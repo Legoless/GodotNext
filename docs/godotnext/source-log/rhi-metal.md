@@ -84,3 +84,22 @@ The second command queue reuses `newCommandQueue`. The cross-queue fork and join
 | Copied files | None |
 
 How it was used: it confirms that the existing `MTL::Event` semaphores can order the main and the async compute queue, since both are on one device, so the semaphores stay `MTL::Event` instead of switching to `MTL::SharedEvent`.
+
+## Level fences across command buffers (#186)
+
+The driver orders the render graph's levels with two alternating `MTL::Fence` objects per command buffer, and its resources are untracked. A command buffer's first level waited on nothing, so the GPU could start the next frame's first commands (or the commands after the graph's mid-frame split for the swap chain pass) while the previous command buffer's last commands still ran. A command buffer that continues another one on the same queue now waits on that one's last level fence until a level of its own has updated a fence.
+
+### Apple Metal fence documentation
+
+| Field | Value |
+|---|---|
+| What | `MTLFence`: producing passes update a fence and consuming passes wait for it; when they are in different command buffers, commit the command buffers with the producing passes first. `updateFence:` captures the work of the encoder that updates the fence, and fences are evaluated at submission. |
+| Upstream | https://developer.apple.com/documentation/metal/mtlfence and the macOS SDK header `Metal.framework/Headers/MTLComputeCommandEncoder.h` (`updateFence:`, `waitForFence:`) |
+| Version | Apple Developer Documentation as published on 2026-11-11; MacOSX27.2.sdk |
+| License | Apple Developer Documentation and SDK headers. Consulted, not copied. No sample code was copied. metal-cpp already wraps the selectors (Apache-2.0, vendored). |
+| Read on | 2026-11-11, for issue #186 |
+| Consulted by | The #186 fixer |
+| Used in | `drivers/metal/metal_objects_shared.cpp` (`MDCommandBufferBase::continue_from()`), `drivers/metal/rendering_device_driver_metal.cpp` |
+| Copied files | None |
+
+How it was used: it confirms that a fence updated in one command buffer orders a later command buffer on the same queue when the updating one is committed first, which the frame's and the graph's command buffers are. Neither source states what a wait observes when several encoders update one fence; that question is not relied on here.
