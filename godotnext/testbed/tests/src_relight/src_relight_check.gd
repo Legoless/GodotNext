@@ -21,7 +21,10 @@ extends Node
 ##                     every texel of the floor card's mask must be lit, near the light and beyond
 ##                     5 m alike: the software tier's origin offset (1.5 voxels of the texel's level,
 ##                     0.6 m at level 2, #186 step 6) must not carry the ray past the light into the
-##                     ceiling.
+##                     ceiling. The light itself sits in clipmap level 0 (0.1 m voxels), 0.12 m from
+##                     the ceiling: outside that level's surface band. The fixture does not cover a
+##                     light inside the band of its own, coarser level (a 5 cm gap at level 1, a
+##                     12 cm gap at level 2), which still shadows itself on the software tier.
 ##   --light-lists     STATIC / DYNAMIC / DISABLED tracking for visibility, scenario and bake mode
 ## --expected-tier=HWRT (default) or SWRT: the tier the run must report (run_src_relight_check.sh
 ## passes it from --hwrt). Under debug/deny_ray_query (a device without ray query) the run also
