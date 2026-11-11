@@ -22,9 +22,9 @@ extends Node3D
 ## of its image (the floor patch) after the voxel-lighting volume has finished filling. Alone, it
 ## prints "LITE_TWO_VIEWS_SOLO view=<view> luma=<value>". With --lit-solo=L and --dark-solo=D
 ## (fresh processes of the solo runs) each view of a pair must be within ROOM_TOLERANCE x L of its
-## own solo value. When the second view read the first view's grid (2e1b0f2e), the dark view read
-## 0.87 of the lit room's solo value with the lit view first, and the lit view 0.077 of its own with
-## the dark view first, on both tiers. The solo runs assert the scene separates the rooms:
+## own solo value. When the second view snapped the probe grid to its own camera (2e1b0f2e), the
+## dark view read 0.87 of the lit room's solo value with the lit view first, and the lit view 0.077
+## of its own with the dark view first, on both tiers. The solo runs assert the scene separates the rooms:
 ## L >= MIN_ROOM_LIT and D <= MAX_DARK_RATIO x L.
 ##
 ## --expected-tier=HWRT, SWRT or device (HWRT when the rendering device reports
