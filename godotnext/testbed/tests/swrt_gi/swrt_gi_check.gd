@@ -4,12 +4,15 @@ extends Node
 ##
 ## --check=smoke: the overlap-heavy kitbash (the PS smoke scene) in a 1920x1080 SubViewport, the
 ## camera at (0, 2, 8) looking at (0, 1, 0), NextGI on in its Environment. After WARMUP_FRAMES
-## it samples RenderingServer.nextgi_get_tier_info() every frame for SAMPLE_FRAMES frames (the
-## counters arrive asynchronously, one snapshot per frame). It keeps the median snapshot by gather
-## rays, and the WRC snapshot with the most clean WRC SDF hits (its update traces a different probe
-## set each frame). On either tier, no snapshot may hold more gather rays than its probes trace
-## (src_gather_expected_rays): one run held exactly twice a frame's counters, and the check had
-## picked that snapshot. The sampled ray counts are printed.
+## it samples RenderingServer.nextgi_get_tier_info() every frame for SAMPLE_FRAMES frames. The
+## counters arrive asynchronously: each snapshot holds one gather frame and stays published until
+## the next one arrives, and which frames get published depends on the readback timing. World hits
+## vary strongly from frame to frame (the ray rotation), so the gather counters are the mean over
+## the distinct snapshots of the window rather than one frame against one frame. The WRC snapshot
+## with the most clean WRC SDF hits is kept (its update traces a different probe set each frame).
+## On either tier, no snapshot may hold more gather rays than its probes trace
+## (src_gather_expected_rays): one run held exactly twice a frame's counters. The sampled ray
+## counts are printed.
 ##
 ## With --expected-tier=SWRT it asserts:
 ## - the tier is SWRT, the gather ran the software sibling (gather_tier SWRT) and traced rays, and
@@ -18,12 +21,15 @@ extends Node
 ##   self-test);
 ## - clean SDF hits (gather_sdf_hits minus the step-limit and near-origin ones) are at least
 ##   CLEAN_HIT_SHARE of the hardware tier's world hits on the same view (--hwrt-world-hits, from
-##   the hardware pass that run_swrt_gi_check.sh runs first: rays - misses - screen hits);
+##   the hardware pass that run_swrt_gi_check.sh runs first: rays - misses - screen hits), both
+##   window means;
 ## - step-limit (exhausted) hits are at most MAX_EXHAUSTED_SHARE of the SDF hits, and hits within
 ##   two voxels of the origin's level (self-intersection candidates) at most MAX_NEAR_SHARE. The
 ##   shares are printed. MAX_NEAR_SHARE is 0.30 rather than the 0.10 start value, pending a lead
-##   decision (#186): on the M5 Max the software tier measures 0.21 at High and 0.22 at Epic, and
-##   0.72 with the gather origin offset removed. The 0.30 comes from another metric, not this one:
+##   decision (#186): on the M5 Max the software tier measures 0.23 at High and at Epic, and 0.80
+##   and 0.77 with the gather origin offset removed. That build still passes the clean-hit bound
+##   (0.26 and 0.30 of the hardware tier's world hits), so only this bound catches it. The 0.30
+##   comes from another metric, not this one:
 ##   a temporary counting build found 30% of the hardware tier's world hits within 0.35 m of the
 ##   gather's surface point (the kitbash's overlapping rocks put real surfaces that close), where
 ##   the software tier scored 17%. The hardware tier has no counter for the two-voxel metric;
@@ -151,10 +157,34 @@ func _process(_delta: float) -> void:
 		wrc_best = info
 	if frames < WARMUP_FRAMES + SAMPLE_FRAMES:
 		return
-	var by_rays := gather_samples.duplicate()
-	by_rays.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a.get("src_gather_rays", 0)) < int(b.get("src_gather_rays", 0)))
-	gather_best = by_rays[by_rays.size() / 2]
+	gather_best = _window_mean(gather_samples)
 	_finish(_checks(info))
+
+
+# The gather counters averaged over the window's distinct snapshots (a snapshot stays published
+# for every frame until the next one arrives); the other keys are the last sample's.
+func _window_mean(p_samples: Array[Dictionary]) -> Dictionary:
+	const KEYS := ["src_gather_rays", "src_gather_misses", "screen_trace_hits", "gather_sdf_hits", "gather_sdf_exhausted", "gather_sdf_near", "gather_sdf_hit_cm_sum", "wrc_gather_samples"]
+	var sums := {}
+	for key in KEYS:
+		sums[key] = 0
+	var distinct := 0
+	var previous := []
+	for sample in p_samples:
+		var counters := []
+		for key in KEYS:
+			counters.append(int(sample.get(key, 0)))
+		if counters == previous:
+			continue
+		previous = counters
+		distinct += 1
+		for i in KEYS.size():
+			sums[KEYS[i]] += counters[i]
+	var result: Dictionary = p_samples[p_samples.size() - 1].duplicate()
+	for key in KEYS:
+		result[key] = int(round(float(sums[key]) / float(maxi(distinct, 1))))
+	result["snapshots"] = distinct
+	return result
 
 
 func _process_toggle() -> void:
@@ -301,7 +331,7 @@ func _checks(p_last: Dictionary) -> PackedStringArray:
 	var misses := int(gather_best.get("src_gather_misses", 0))
 	var screen_hits := int(gather_best.get("screen_trace_hits", 0))
 	if expected_tier == "HWRT":
-		print("SWRT_GI_REFERENCE world_hits=%d rays=%d" % [rays - misses - screen_hits, rays])
+		print("SWRT_GI_REFERENCE world_hits=%d rays=%d snapshots=%d" % [rays - misses - screen_hits, rays, int(gather_best.get("snapshots", 0))])
 		return result
 	var sdf_hits := int(gather_best.get("gather_sdf_hits", 0))
 	var exhausted := int(gather_best.get("gather_sdf_exhausted", 0))
@@ -309,8 +339,8 @@ func _checks(p_last: Dictionary) -> PackedStringArray:
 	var clean := sdf_hits - exhausted - near
 	var wrc_hits := int(wrc_best.get("wrc_sdf_hits", 0))
 	var spread := _spread()
-	print("SWRT_GI_SMOKE quality=%s rays=%d sdf_hits=%d clean=%d (HWRT world hits %d, ratio %.3f, report-only) exhausted=%d (%.4f) near=%d (%.4f) screen_hits=%d mean_hit_m=%.3f wrc_rays=%d wrc_gather_samples=%d wrc_sdf_hits=%d wrc_clean=%d wrc_exhausted_share=%.4f wrc_near_share=%.4f spread=%.3f" % [
-		String(p_last.get("quality", "")), rays, sdf_hits, clean, hwrt_world_hits, float(clean) / float(maxi(hwrt_world_hits, 1)),
+	print("SWRT_GI_SMOKE quality=%s snapshots=%d rays=%d sdf_hits=%d clean=%d (HWRT world hits %d, ratio %.3f, report-only) exhausted=%d (%.4f) near=%d (%.4f) screen_hits=%d mean_hit_m=%.3f wrc_rays=%d wrc_gather_samples=%d wrc_sdf_hits=%d wrc_clean=%d wrc_exhausted_share=%.4f wrc_near_share=%.4f spread=%.3f" % [
+		String(p_last.get("quality", "")), int(gather_best.get("snapshots", 0)), rays, sdf_hits, clean, hwrt_world_hits, float(clean) / float(maxi(hwrt_world_hits, 1)),
 		exhausted, float(exhausted) / float(maxi(sdf_hits, 1)), near, float(near) / float(maxi(sdf_hits, 1)), screen_hits,
 		float(int(gather_best.get("gather_sdf_hit_cm_sum", 0))) / 100.0 / float(maxi(sdf_hits, 1)),
 		int(wrc_best.get("wrc_rays", 0)), int(gather_best.get("wrc_gather_samples", 0)), wrc_hits, wrc_clean_best,

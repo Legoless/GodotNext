@@ -37,12 +37,13 @@ testbed_dir=$(cd "$script_dir/../.." && pwd)
 override="$testbed_dir/override.cfg"
 
 # The hardware tier's references recorded on the Apple M5 Max: the kitbash smoke view's world hits
-# (rays - misses - screen hits) of the median snapshot at High and Epic, measured by this check
-# with the asynchronous gather counters (#186), which publish every other frame; and the Roughness
-# Corridor's reflection hits at High, measured with b0098c6b. World hits vary with the frame's ray
-# rotation: b0098c6b's median frame gives 2548 and 10431.
-RECORDED_WORLD_HITS_HIGH=1570
-RECORDED_WORLD_HITS_EPIC=6725
+# (rays - misses - screen hits) at High and Epic, the mean over the sample window's distinct
+# snapshots of the asynchronous gather counters (#186); and the Roughness Corridor's reflection
+# hits at High, measured with b0098c6b. Single frames vary strongly with the ray rotation (1570
+# to 2548 at High); the window mean moves between 1718 and 1782 when the window starts 1-3 frames
+# later.
+RECORDED_WORLD_HITS_HIGH=1770
+RECORDED_WORLD_HITS_EPIC=7462
 RECORDED_REFLECTION_HITS_HIGH=30409
 
 mode=smoke
