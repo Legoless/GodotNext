@@ -43,6 +43,7 @@
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -499,6 +500,32 @@ void NextGI::_capture_src_cards(RenderDataRD *p_render_data) {
 		src->init();
 	}
 	src->capture(p_render_data, shadow_batch_open);
+}
+
+// GodotNext: ps_swrt_trace (#186, #188)
+void nextgi_src_card_surfaces(const uint32_t *p_part_surfaces, uint32_t p_part_surface_count, bool p_software, bool p_skinned, const NextGISRCSurface *p_surfaces, uint32_t p_surface_count, LocalVector<uint32_t> &r_surfaces) {
+	r_surfaces.clear();
+	for (uint32_t i = 0; i < p_part_surface_count; i++) {
+		if (!r_surfaces.has(p_part_surfaces[i])) {
+			r_surfaces.push_back(p_part_surfaces[i]);
+		}
+	}
+	if (!r_surfaces.is_empty()) {
+		return;
+	}
+	if (p_software) {
+		for (uint32_t surface = 0; surface < p_surface_count; surface++) {
+			if (p_surfaces[surface].cpu_geometry && !p_surfaces[surface].alpha) {
+				r_surfaces.push_back(surface);
+			}
+		}
+		return;
+	}
+	if (p_skinned) {
+		for (uint32_t surface = 0; surface < p_surface_count; surface++) {
+			r_surfaces.push_back(surface);
+		}
+	}
 }
 
 NextGIAtlasBudget nextgi_src_atlas_budget(bool p_epic, bool p_lite) {
@@ -1466,27 +1493,38 @@ bool NextGISRC::_build_card_set(RID p_mesh, uint64_t p_key, bool p_axis_cards) {
 	// The cards cover exactly the surfaces in the mesh's BLAS parts, so hits always find a card set.
 	// No parts yet means the RT scene has not built them; try again next frame.
 	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
-	if (parts == nullptr) {
+	// GodotNext: ps_swrt_trace (#186, #188). The software tier has no RT scene, so no parts: its
+	// cards cover the surfaces the TLAS would take (nextgi_src_card_surfaces()).
+	const NextGI *next_gi = NextGI::get_singleton();
+	const bool software = next_gi != nullptr && next_gi->get_tier_result().tier == NextGI::TIER_SOFTWARE;
+	if (parts == nullptr && !software) {
 		return false;
 	}
-	LocalVector<uint32_t> surfaces;
-	for (const MeshStorage::NextGIRTPart &part : *parts) {
-		for (const NextGIRTPartGeometry &geometry : part.geometries) {
-			if (!surfaces.has(geometry.surface)) {
-				surfaces.push_back(geometry.surface);
+	LocalVector<uint32_t> part_surfaces;
+	if (parts != nullptr) {
+		for (const MeshStorage::NextGIRTPart &part : *parts) {
+			for (const NextGIRTPartGeometry &geometry : part.geometries) {
+				part_surfaces.push_back(geometry.surface);
 			}
 		}
 	}
-	if (surfaces.is_empty()) {
-		// GodotNext: nextgi_skinned_actors (#59). A skinned mesh has no static BLAS parts; its
-		// bind-pose cards come from the mesh's CPU geometry instead.
-		if (!mesh_storage->mesh_nextgi_rt_is_skinned(p_mesh)) {
-			return false; // No parts yet: the RT scene has not built them; try again next frame.
-		}
-		const int surface_count = mesh_storage->mesh_get_surface_count(p_mesh);
+	const int surface_count = mesh_storage->mesh_get_surface_count(p_mesh);
+	LocalVector<NextGISRCSurface> surface_infos;
+	surface_infos.resize(uint32_t(MAX(surface_count, 0)));
+	if (software && part_surfaces.is_empty()) {
 		for (int surface = 0; surface < surface_count; surface++) {
-			surfaces.push_back(uint32_t(surface));
+			Vector<float> cpu_positions;
+			Vector<uint32_t> cpu_indices;
+			surface_infos[surface].cpu_geometry = mesh_storage->mesh_nextgi_get_cpu_geometry(p_mesh, uint32_t(surface), cpu_positions, cpu_indices);
+			surface_infos[surface].alpha = nextgi_rt_material_is_alpha(mesh_storage->mesh_surface_get_material(p_mesh, surface));
 		}
+	}
+	LocalVector<uint32_t> surfaces;
+	// GodotNext: nextgi_skinned_actors (#59). A skinned mesh has no static BLAS parts; its
+	// bind-pose cards come from the mesh's CPU geometry instead.
+	nextgi_src_card_surfaces(part_surfaces.ptr(), part_surfaces.size(), software, mesh_storage->mesh_nextgi_rt_is_skinned(p_mesh), surface_infos.ptr(), surface_infos.size(), surfaces);
+	if (surfaces.is_empty()) {
+		return false; // No parts yet: the RT scene has not built them; try again next frame.
 	}
 
 	LocalVector<float> positions;
@@ -1651,7 +1689,9 @@ void NextGISRC::capture(RenderDataRD *p_render_data, bool p_shadow_batch_open) {
 	};
 	LocalVector<PendingCard> pending;
 	HashSet<uint32_t> queued_cards;
-	if (update_data != nullptr && update_data->nextgi_rt_instances != nullptr && mesh_storage->mesh_nextgi_rt_is_enabled()) {
+	// GodotNext: ps_swrt_trace (#186, #188). The cards come from the CPU copies, which a device
+	// without ray query keeps too.
+	if (update_data != nullptr && update_data->nextgi_rt_instances != nullptr && mesh_storage->mesh_nextgi_cpu_geometry_is_enabled()) {
 		for (const RendererSceneRender::NextGIRTInstance &fed : *update_data->nextgi_rt_instances) {
 			RenderGeometryInstanceBase *geometry_instance = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
 			if (geometry_instance == nullptr || geometry_instance->data == nullptr) {

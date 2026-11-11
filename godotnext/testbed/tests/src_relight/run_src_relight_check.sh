@@ -2,10 +2,15 @@
 # Runs res://tests/src_relight/src_relight_check.tscn with NextGI enabled (#31).
 #
 # Usage:
-#   run_src_relight_check.sh [--probes] [--shadow-mask] [--hwrt=auto|off|force] -- <godot> <godot arguments>
+#   run_src_relight_check.sh [--probes] [--shadow-mask] [--hwrt=auto|off|force] [--quality=0|1|2|3]
+#     [--deny-ray-query] -- <godot> <godot arguments>
 #
 # --probes turns on nextgi/debug/read_page_radiance. --shadow-mask turns on read_shadow_mask.
-# Refuses to overwrite an existing override.cfg. Prints Metal validation counts and exits with Godot's status.
+# --quality pins nextgi/quality (the default keeps the project's Auto). GodotNext: ps_swrt_trace
+# (#186, #188): the scene is told the tier to expect (--expected-tier, appended to its arguments):
+# SWRT for --hwrt=off or --deny-ray-query (debug/deny_ray_query: a device without ray query), else
+# HWRT. Refuses to overwrite an existing override.cfg. Prints Metal validation counts and exits with
+# Godot's status.
 
 set -euo pipefail
 
@@ -18,11 +23,15 @@ override="$testbed_dir/override.cfg"
 probes=false
 shadow_mask=false
 hwrt=auto
+quality_line=""
+deny=false
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--probes) probes=true ;;
 	--shadow-mask) shadow_mask=true ;;
 	--hwrt=auto | --hwrt=off | --hwrt=force) hwrt="${1#--hwrt=}" ;;
+	--quality=0 | --quality=1 | --quality=2 | --quality=3) quality_line="global_illumination/nextgi/quality=${1#--quality=}" ;;
+	--deny-ray-query) deny=true ;;
 	--)
 		shift
 		break
@@ -62,15 +71,32 @@ global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
 global_illumination/nextgi/debug/read_page_radiance=$probes
 global_illumination/nextgi/debug/read_shadow_mask=$shadow_mask
+global_illumination/nextgi/debug/deny_ray_query=$deny
+$quality_line
 EOF
 
+expected_tier=HWRT
+if [[ "$hwrt" == off || "$deny" == true ]]; then
+	expected_tier=SWRT
+fi
+command=("$@")
+separator=false
+for argument in "${command[@]}"; do
+	[[ "$argument" == "--" ]] && separator=true
+done
+if [[ "$separator" == true ]]; then
+	command+=("--expected-tier=$expected_tier")
+else
+	command+=("--" "--expected-tier=$expected_tier")
+fi
+
 set +e
-"$@" 2>&1 | tee "$log"
-status=$?
+"${command[@]}" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
 set -e
 
 errors=$(grep -c 'ERROR:' "$log" || true)
 metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
 metal_shader=$(grep -c 'Error detected in' "$log" || true)
-echo "GODOTNEXT_SRC_RELIGHT_LOG {\"probes\":$probes,\"shadow_mask\":$shadow_mask,\"hwrt\":\"$hwrt\",\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
+echo "GODOTNEXT_SRC_RELIGHT_LOG {\"probes\":$probes,\"shadow_mask\":$shadow_mask,\"hwrt\":\"$hwrt\",\"deny_ray_query\":$deny,\"expected_tier\":\"$expected_tier\",\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
 exit "$status"

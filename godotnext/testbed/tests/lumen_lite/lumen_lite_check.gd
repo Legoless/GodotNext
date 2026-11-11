@@ -3,13 +3,18 @@ extends Node3D
 ## - Lite records 0 gather and 0 reflection dispatches and refreshes probes every frame.
 ## - The dispatch counters are live: switching medium_gather to Screen Probes at runtime must
 ##   record gather dispatches, and switching back must return them to 0.
-## - Hardware tier: the field is not empty. The "NextGI Lite Probes" view shows irradiance from
+## - field_checks: the field is not empty. The "NextGI Lite Probes" view shows irradiance from
 ##   the surface cache alone (no sky, sun-lit cards), and turning the sky back on brightens it
 ##   (the WRC's misses read the sky). Environment.nextgi_read_sky_light off takes the sky out
 ##   of the field again.
-## tests/lumen_lite runs the software tier on the kitbash (the PS smoke scene).
+## tests/lumen_lite runs the software tier on the kitbash (the PS smoke scene), without the field
+## checks, and on the Roughness Corridor with them (lumen_lite_corridor_check.tscn): GodotNext:
+## ps_swrt_trace (#186, #188), the software tier captures and relights the SRC, and its WRC probes
+## shade their SDF hits from voxel lighting resampled from it.
 ## tests/lumen_lite_hwrt runs the hardware tier on the Roughness Corridor, whose few instances
 ## all fit the Lite radiance atlas; the kitbash's 2,400 rocks do not, which is #41's eviction.
+## Under debug/deny_ray_query (a device without ray query) every dispatch check also asserts
+## NO_RAY_QUERY, no RT arena, no ray-query ShaderRD and SWRT instances.
 
 const WARMUP_FRAMES := 240
 const SKY_FRAMES := 240
@@ -26,6 +31,9 @@ const MIN_SKY_LIT_FRACTION := 0.3
 @export var camera_name := ""
 
 @export var expected_tier := "SWRT"
+## The field phases (card radiance only, sky, sky light off). They need a scene whose instances fit
+## the Lite radiance atlas.
+@export var field_checks := false
 
 var _frames := 0
 var _phase := 0
@@ -52,7 +60,7 @@ func _ready() -> void:
 		world.environment = _environment
 		_sky_background = _environment.background_mode
 		_sky = _environment.sky
-		if expected_tier == "HWRT":
+		if field_checks:
 			# Start with only the sun on the surface cache: no sky term reaches the field.
 			_environment.background_mode = Environment.BG_COLOR
 			_environment.background_color = Color.BLACK
@@ -148,7 +156,7 @@ func _process(_delta: float) -> void:
 				return
 			if not _check_lite_dispatches("lite"):
 				return
-			if expected_tier == "HWRT":
+			if field_checks:
 				get_viewport().debug_draw = Viewport.DEBUG_DRAW_NEXTGI_LITE_PROBES
 				_next_phase(1)
 			else:
@@ -252,4 +260,10 @@ func _check_lite_dispatches(label: String) -> bool:
 	if probe_traces <= 0:
 		_fail("lite probe traces are 0")
 		return false
+	# GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: a device without ray query.
+	if bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false)):
+		print("LITE_DENY reason=%s rt_arena_bytes=%d ray_query_shader_versions=%d swrt_trace_instances=%d" % [str(info.get("reason", "")), int(info.get("rt_arena_bytes", -1)), int(info.get("ray_query_shader_versions", -1)), int(info.get("swrt_trace_instances", 0))])
+		if str(info.get("reason", "")) != "NO_RAY_QUERY" or int(info.get("rt_arena_bytes", -1)) != 0 or int(info.get("ray_query_shader_versions", -1)) != 0 or int(info.get("swrt_trace_instances", 0)) <= 0:
+			_fail("deny_ray_query: expected NO_RAY_QUERY, no RT arena, no ray-query ShaderRD and SWRT instances")
+			return false
 	return true

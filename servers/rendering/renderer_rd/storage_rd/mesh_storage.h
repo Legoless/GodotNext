@@ -299,6 +299,10 @@ private:
 
 	// GodotNext: nextgi_rt_arena
 	bool nextgi_rt_enabled = false;
+	// GodotNext: ps_swrt_trace (#186, #188). CPU copies without the arena on a device without ray
+	// query, and the device's ray query after debug/deny_ray_query.
+	bool nextgi_cpu_geometry_enabled = false;
+	bool nextgi_has_ray_query = false;
 	bool nextgi_hwrt_tier_active = false;
 	float nextgi_rt_max_error = 0.02f;
 	NextGIArenaAllocator nextgi_rt_allocator;
@@ -553,6 +557,9 @@ public:
 		uint32_t proxy_blas_parts = 0;
 	};
 	bool mesh_nextgi_rt_is_enabled() const { return nextgi_rt_enabled; }
+	// GodotNext: ps_swrt_trace (#186, #188). The CPU copies of mesh triangles are kept (the SRC
+	// card work and runtime mesh SDFs), with or without the RT arena.
+	bool mesh_nextgi_cpu_geometry_is_enabled() const { return nextgi_cpu_geometry_enabled; }
 	void mesh_nextgi_set_hwrt_active(bool p_active);
 	bool mesh_nextgi_is_hwrt_active() const { return nextgi_hwrt_tier_active; }
 	void mesh_nextgi_set_skip_rt_arena(RID p_mesh, bool p_skip);

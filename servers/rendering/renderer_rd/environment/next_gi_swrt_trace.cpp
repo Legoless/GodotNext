@@ -41,6 +41,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
@@ -245,6 +246,9 @@ struct NextGISWRTTrace::GpuState {
 	RID view_params_buffer;
 	RID instance_buffer;
 	uint32_t instance_capacity = 0;
+	// GodotNext: ps_swrt_trace (#186, #188). The record pass's NextGIInstanceRecord per instance.
+	RID record_buffer;
+	uint32_t record_capacity = 0;
 	RID two_sided_buffer;
 	uint32_t two_sided_capacity = 0;
 	RID mesh_info_buffer;
@@ -299,7 +303,7 @@ NextGISWRTTrace::~NextGISWRTTrace() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (gpu != nullptr && rd != nullptr) {
-		RID *rids[] = { &gpu->shadow_pipeline, &gpu->nearest_sampler, &gpu->linear_sampler, &gpu->dummy_depth, &gpu->dummy_color, &gpu->dummy_buffer, &gpu->counter_buffer, &gpu->params_buffer, &gpu->shadow_params_buffer, &gpu->scene_params_buffer, &gpu->view_params_buffer, &gpu->instance_buffer, &gpu->two_sided_buffer, &gpu->mesh_info_buffer, &gpu->mesh_page_buffer, &gpu->mesh_brick_buffer, &gpu->froxel_buffer, &gpu->requests_buffer, &gpu->results_buffer, &gpu->lights_buffer };
+		RID *rids[] = { &gpu->shadow_pipeline, &gpu->nearest_sampler, &gpu->linear_sampler, &gpu->dummy_depth, &gpu->dummy_color, &gpu->dummy_buffer, &gpu->counter_buffer, &gpu->params_buffer, &gpu->shadow_params_buffer, &gpu->scene_params_buffer, &gpu->view_params_buffer, &gpu->instance_buffer, &gpu->record_buffer, &gpu->two_sided_buffer, &gpu->mesh_info_buffer, &gpu->mesh_page_buffer, &gpu->mesh_brick_buffer, &gpu->froxel_buffer, &gpu->requests_buffer, &gpu->results_buffer, &gpu->lights_buffer };
 		for (RID *rid : rids) {
 			_free_rid(rd, *rid);
 		}
@@ -479,6 +483,7 @@ void NextGISWRTTrace::_collect_instances(RenderDataRD *p_render_data) {
 	}
 	instances.clear();
 	instance_card_sets.clear();
+	record_sources.clear();
 	two_sided.clear();
 	const LocalVector<RendererSceneRender::NextGIRTInstance> *feed = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->nextgi_rt_instances : nullptr;
 	HashMap<InstanceKey, FedInstance, InstanceKeyHasher> current;
@@ -527,7 +532,17 @@ void NextGISWRTTrace::_collect_instances(RenderDataRD *p_render_data) {
 				two_sided.push_back(instances.size());
 			}
 			instances.push_back(instance);
-			instance_card_sets.push_back(src_ready ? NextGISRC::get_instance_card_set(source.geometry_instance) : UINT32_MAX);
+			// GodotNext: ps_swrt_trace (#186, #188). The record pass's source; assign_src_pages()
+			// replaces the card set below with the record's (with the mesh fallback).
+			RecordSource record_source;
+			record_source.geometry = source.geometry_instance;
+			record_source.element = source.element_index;
+			record_source.lightmapped = source.lightmapped;
+			record_source.transform = transform;
+			record_source.instance_card_set = src_ready ? NextGISRC::get_instance_card_set(source.geometry_instance) : UINT32_MAX;
+			record_source.mesh_card_set = src_ready ? NextGISRC::get_mesh_card_set(mesh) : UINT32_MAX;
+			record_sources.push_back(record_source);
+			instance_card_sets.push_back(record_source.instance_card_set != UINT32_MAX ? record_source.instance_card_set : record_source.mesh_card_set);
 
 			// Instances that moved, appeared or changed mesh dirty their old and new bounds.
 			InstanceKey key;
@@ -709,7 +724,93 @@ void NextGISWRTTrace::update_scene(RenderDataRD *p_render_data) {
 	if (mode == MODE_DETAIL) {
 		_upload_detail_meshes();
 	}
+	// GodotNext: ps_swrt_trace (#186, #188). assign_src_pages() uploads the instances, together
+	// with their records.
+}
+
+uint64_t NextGISWRTTrace::instance_order_hash(const RecordSource *p_sources, uint32_t p_count) {
+	uint32_t hash = hash_murmur3_one_64(uint64_t(p_count));
+	for (uint32_t i = 0; i < p_count; i++) {
+		hash = hash_murmur3_one_64(uint64_t(uintptr_t(p_sources[i].geometry)), hash);
+		hash = hash_murmur3_one_64(uint64_t(p_sources[i].element), hash);
+	}
+	return hash_fmix32(hash);
+}
+
+bool NextGISWRTTrace::upload_due(const UploadState &p_state, uint64_t p_order_hash, bool p_instances_changed, const LocalVector<NextGIInstanceRecord> &p_records) {
+	if (!p_state.uploaded || p_instances_changed || p_state.order_hash != p_order_hash || p_state.records.size() != p_records.size()) {
+		return true;
+	}
+	return p_records.size() > 0 && memcmp(p_state.records.ptr(), p_records.ptr(), p_records.size() * sizeof(NextGIInstanceRecord)) != 0;
+}
+
+void NextGISWRTTrace::build_records(const RecordSource *p_sources, uint32_t p_count, NextGIRelight *p_relight, PageAssigner p_assign, void *p_userdata, LocalVector<NextGIInstanceRecord> &r_records) {
+	r_records.resize(p_count);
+	if (p_relight != nullptr) {
+		p_relight->begin_record_pass();
+	}
+	for (uint32_t i = 0; i < p_count; i++) {
+		const RecordSource &source = p_sources[i];
+		NextGIInstanceRecord record;
+		for (int row = 0; row < 3; row++) {
+			record.object_to_world[row * 4 + 0] = source.transform.basis.rows[row][0];
+			record.object_to_world[row * 4 + 1] = source.transform.basis.rows[row][1];
+			record.object_to_world[row * 4 + 2] = source.transform.basis.rows[row][2];
+			record.object_to_world[row * 4 + 3] = source.transform.origin[row];
+		}
+		// The RT scene's static-record rule (next_gi_rt_scene.cpp): every fed instance is STATIC,
+		// and a lightmapped one also LIGHTMAPPED, so nextgi_light_reaches_receiver() keeps STATIC
+		// lights off it.
+		record.rt_flags = NEXTGI_RT_FLAG_STATIC | (source.lightmapped ? uint32_t(NEXTGI_RT_FLAG_LIGHTMAPPED) : 0u);
+		record.card_set = source.instance_card_set != UINT32_MAX ? source.instance_card_set : source.mesh_card_set;
+		record.tlas_index = i;
+		if (p_relight != nullptr && p_assign != nullptr) {
+			record.page_table = p_assign(p_userdata, source.geometry, record, source.element);
+		}
+		r_records[i] = record;
+	}
+	if (p_relight != nullptr) {
+		p_relight->finish_record_pass(r_records);
+	}
+}
+
+static uint32_t _nextgi_swrt_assign_relight_pages(void *p_relight, RenderGeometryInstance *p_geometry, NextGIInstanceRecord &r_record, uint32_t p_element) {
+	return static_cast<NextGIRelight *>(p_relight)->assign_pages(p_geometry, r_record, p_element);
+}
+
+void NextGISWRTTrace::assign_src_pages(NextGIRelight *p_relight) {
+	if (!is_ready()) {
+		return;
+	}
+	last_record_slot = NextGI::get_singleton() != nullptr ? NextGI::get_singleton()->get_active_slot_name() : String("none");
+	build_records(record_sources.ptr(), record_sources.size(), p_relight, &_nextgi_swrt_assign_relight_pages, p_relight, records);
+	for (uint32_t i = 0; i < records.size() && i < instance_card_sets.size(); i++) {
+		instance_card_sets[i] = records[i].card_set;
+	}
+	const uint64_t order_hash = instance_order_hash(record_sources.ptr(), record_sources.size());
+	if (!upload_due(upload_state, order_hash, instances_dirty, records)) {
+		return;
+	}
+	instances_dirty = true;
 	_upload_instances();
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	uploaded_record_count = records.size();
+	if (!records.is_empty()) {
+		const uint32_t record_bytes = records.size() * sizeof(NextGIInstanceRecord);
+		_ensure_storage(rd, gpu->record_buffer, gpu->record_capacity, record_bytes);
+		rd->buffer_update(gpu->record_buffer, 0, record_bytes, records.ptr());
+	}
+	upload_state.uploaded = true;
+	upload_state.order_hash = order_hash;
+	upload_state.records = records;
+}
+
+RID NextGISWRTTrace::get_record_buffer() const {
+	return gpu != nullptr && uploaded_record_count > 0 ? gpu->record_buffer : RID();
+}
+
+uint32_t NextGISWRTTrace::get_record_count() const {
+	return get_record_buffer().is_valid() ? uploaded_record_count : 0u;
 }
 
 void NextGISWRTTrace::_fill_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_screen_trace, bool p_wrc, bool p_readback, RID p_target) {
@@ -1259,6 +1360,16 @@ void NextGISWRTTrace::fill_info(Dictionary &r_info) const {
 	r_info["swrt_trace_grid"] = grid;
 	// GodotNext: ps_swrt_trace (#186). The frame-block slot the global SDF was last updated in.
 	r_info["swrt_update_slot"] = last_update_slot;
+	// GodotNext: ps_swrt_trace (#186, #188). The record pass: its slot, records and paged ones.
+	r_info["swrt_record_slot"] = last_record_slot;
+	r_info["swrt_record_count"] = int64_t(get_record_count());
+	uint32_t paged = 0;
+	for (const NextGIInstanceRecord &record : records) {
+		if (record.page_table != UINT32_MAX && (record.page_table & 0x80000000u) == 0) {
+			paged++;
+		}
+	}
+	r_info["swrt_record_paged"] = int64_t(paged);
 	r_info["swrt_gather_rays"] = snapshot.gather_rays;
 	r_info["swrt_gather_hits"] = snapshot.gather_hits;
 	r_info["swrt_reflect_rays"] = snapshot.reflect_rays;

@@ -10,7 +10,7 @@ extends Node
 ## run_frame_block_check.sh writes res://override.cfg (git ignores it) with nextgi/enabled=true for
 ## the run and removes it afterwards:
 ##   godotnext/testbed/tests/frame_block/run_frame_block_check.sh [--half-resolution] [--hwrt=auto|off|force] \
-##     [--quality=0|1|2|3] [--disabled] -- <godot> --path godotnext/testbed --rendering-driver <driver> \
+##     [--quality=0|1|2|3] [--disabled] [--deny-ray-query] -- <godot> --path godotnext/testbed --rendering-driver <driver> \
 ##     --gpu-profile res://tests/frame_block/frame_block_check.tscn -- --expect=active|inactive [--frames=600] [--sdfgi]
 ##
 ## --expect=active (an active tier: HWRT, or SWRT since #186 feeds the block on the software
@@ -30,10 +30,13 @@ extends Node
 ##   between its timestamp and the next one (tracked on warmup frames too, when the static
 ##   scene's BLASes build);
 ## - SWRT: the software tracer holds at least 3 global-SDF levels and the room's instances, its
-##   global SDF was updated in the "NextGI: AS updates" slot (line 1a), no ray-query ShaderRD was
-##   created since the tier was selected (and none in the whole process when hardware_ray_tracing
-##   was Off at launch, which skips the startup self-test), and outside Lumen Lite the gather ran
-##   the software sibling (gather_tier SWRT).
+##   global SDF was updated and its record pass (the relight pages of its instances, #188) ran in
+##   the "NextGI: AS updates" slot (line 1a) and recorded every instance, no ray-query ShaderRD
+##   was created since the tier was selected (and none in the whole process when
+##   hardware_ray_tracing was Off at launch, which skips the startup self-test, or under
+##   debug/deny_ray_query), and outside Lumen Lite the gather ran the software sibling
+##   (gather_tier SWRT). Under debug/deny_ray_query (a device without ray query) the reason is
+##   NO_RAY_QUERY and the RT arena holds no bytes.
 ## The block's DEV_ASSERT traps a dev_build binary. Other builds print an error and skip the block,
 ## which fails the timestamp check.
 ##
@@ -82,6 +85,7 @@ var seen_stamp_frames := {}
 var failures := PackedStringArray()
 var done := false
 var hwrt_off_at_launch := false
+var deny_ray_query := false
 
 
 func _ready() -> void:
@@ -97,6 +101,7 @@ func _ready() -> void:
 		return
 	# The tier is chosen at RenderingDevice init, before the scene loads.
 	hwrt_off_at_launch = int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1
+	deny_ray_query = bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false))
 	var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
 	tier = String(tier_info.get("tier", ""))
 	_build_scene()
@@ -301,10 +306,19 @@ func _final_failures() -> PackedStringArray:
 				result.append("the software tracer holds no instances")
 			if String(tier_info.get("swrt_update_slot", "none")) != "NextGI: AS updates":
 				result.append("the global SDF was updated in slot \"%s\", expected \"NextGI: AS updates\"" % [String(tier_info.get("swrt_update_slot", "none"))])
+			if String(tier_info.get("swrt_record_slot", "none")) != "NextGI: AS updates":
+				result.append("the SWRT record pass ran in slot \"%s\", expected \"NextGI: AS updates\"" % [String(tier_info.get("swrt_record_slot", "none"))])
+			if int(tier_info.get("swrt_record_count", 0)) != int(tier_info.get("swrt_trace_instances", -1)):
+				result.append("the SWRT record pass recorded %d of %d instances" % [int(tier_info.get("swrt_record_count", 0)), int(tier_info.get("swrt_trace_instances", -1))])
 			if int(tier_info.get("ray_query_shader_versions_since_tier", -1)) != 0:
 				result.append("%d ray-query ShaderRD versions were created on the SWRT tier" % [int(tier_info.get("ray_query_shader_versions_since_tier", -1))])
-			if hwrt_off_at_launch and int(tier_info.get("ray_query_shader_versions", -1)) != 0:
-				result.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off" % [int(tier_info.get("ray_query_shader_versions", -1))])
+			if (hwrt_off_at_launch or deny_ray_query) and int(tier_info.get("ray_query_shader_versions", -1)) != 0:
+				result.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off or debug/deny_ray_query" % [int(tier_info.get("ray_query_shader_versions", -1))])
+			if deny_ray_query:
+				if String(tier_info.get("reason", "")) != "NO_RAY_QUERY":
+					result.append("deny_ray_query: the tier's reason is %s, expected NO_RAY_QUERY" % [String(tier_info.get("reason", ""))])
+				if int(tier_info.get("rt_arena_bytes", -1)) != 0:
+					result.append("deny_ray_query: the RT arena holds %d bytes" % [int(tier_info.get("rt_arena_bytes", -1))])
 			if not bool(tier_info.get("lite_beta", false)) and String(tier_info.get("gather_tier", "")) != "SWRT":
 				result.append("the gather ran the %s shader on the SWRT tier" % [String(tier_info.get("gather_tier", ""))])
 		else:

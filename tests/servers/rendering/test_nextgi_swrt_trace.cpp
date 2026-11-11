@@ -41,6 +41,9 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_clipmaps.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
@@ -55,6 +58,7 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_sdf.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
@@ -151,6 +155,8 @@ TEST_CASE("[NextGI][SWRT] Software trace shaders do not require ray query") {
 	CHECK_FALSE(NextgiWrcUpdateSwrtShaderRD().requires_ray_query());
 	CHECK(NextgiWrcUpdateShaderRD().requires_ray_query());
 	CHECK(NextgiSrcRelightShaderRD().requires_ray_query());
+	// GodotNext: ps_swrt_trace (#186, #188). The SRC relight's sibling marches SDF shadow rays.
+	CHECK_FALSE(NextgiSrcRelightSwrtShaderRD().requires_ray_query());
 }
 
 static Vector<String> _swrt_test_gather_defines() {
@@ -506,6 +512,12 @@ TEST_CASE("[NextGI][SWRT] The software siblings keep the hardware twins' set-0 b
 	REQUIRE_GE(wrc_hardware.size(), 20);
 	REQUIRE_GE(wrc_sibling.size(), 20);
 	_check_sibling_bindings(_spirv_bindings(wrc_hardware), _spirv_bindings(wrc_sibling), { 0, 9, 10, 11, 12, 13, 14, 15, 16, 17 }, "WRC update v0");
+	// GodotNext: ps_swrt_trace (#186, #188). The relight sibling drops only the TLAS.
+	const Vector<uint8_t> relight_hardware = _swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(false), "the hardware SRC relight");
+	const Vector<uint8_t> relight_sibling = _swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(true), "the software SRC relight");
+	REQUIRE_GE(relight_hardware.size(), 20);
+	REQUIRE_GE(relight_sibling.size(), 20);
+	_check_sibling_bindings(_spirv_bindings(relight_hardware), _spirv_bindings(relight_sibling), { 0 }, "SRC relight v0");
 }
 
 // The built source is not preprocessed, so it is the same text for every variant apart from the
@@ -543,6 +555,21 @@ TEST_CASE("[NextGI][SWRT] The software siblings trace the SDF and carry no ray q
 		REQUIRE_GE(spirv.size(), 20);
 		CHECK_FALSE_MESSAGE(_spirv_declares_ray_query(spirv), ("software WRC update v" + itos(variant) + " declares ray query").utf8().get_data());
 	}
+
+	// GodotNext: ps_swrt_trace (#186, #188). The SRC relight's sibling: its shadow rays march the
+	// global SDF, and its detail-hit twin in the gather resolves D6 from the instance's record.
+	const String relight_source = RendererRD::NextGIRelight::build_shader_source(true);
+	REQUIRE_FALSE(relight_source.is_empty());
+	CHECK_FALSE(relight_source.contains("GL_EXT_ray_query"));
+	CHECK_FALSE(relight_source.contains("rayQuery"));
+	CHECK_FALSE(relight_source.contains("accelerationStructureEXT"));
+	CHECK(relight_source.contains("return swrt_shadow_ray(origin, direction, tmax);"));
+	CHECK(relight_source.contains("vec3 origin = swrt_offset_origin(world, normal);"));
+	CHECK(gather_source.contains("resample_src(local, normalize(local_normal), rec.page_table, rec.card_set, resolved, projection)"));
+	CHECK(_spirv_declares_ray_query(_swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(false), "the hardware SRC relight")));
+	const Vector<uint8_t> relight_spirv = _swrt_test_compile(relight_source, "the software SRC relight");
+	REQUIRE_GE(relight_spirv.size(), 20);
+	CHECK_FALSE_MESSAGE(_spirv_declares_ray_query(relight_spirv), "the software SRC relight declares ray query");
 }
 
 TEST_CASE("[NextGI][View] The forward pass's copy of the WRC params matches the update shader") {
@@ -1500,4 +1527,180 @@ TEST_CASE("[NextGI][SWRT] Ray and froxel grids cover the view") {
 	const Vector3i froxels = NextGISWRTTrace::froxel_cells(Vector2i(1920, 1080));
 	CHECK_EQ(froxels, Vector3i(30, 17, int(NextGISWRTTrace::FROXEL_SLICES)));
 	CHECK_EQ(NextGISWRTTrace::froxel_cells(Vector2i(1, 1)), Vector3i(1, 1, int(NextGISWRTTrace::FROXEL_SLICES)));
+}
+
+// GodotNext: ps_swrt_trace (#186, #188). The SRC on the software tier.
+static bool _swrt_test_same(const LocalVector<uint32_t> &p_values, const Vector<uint32_t> &p_expected) {
+	if (p_values.size() != uint32_t(p_expected.size())) {
+		return false;
+	}
+	for (uint32_t i = 0; i < p_values.size(); i++) {
+		if (p_values[i] != p_expected[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+TEST_CASE("[NextGI][SWRT] SRC card sets cover the surfaces the TLAS would take on the software tier") {
+	using RendererRD::NextGISRCSurface;
+	// Surfaces 0 (opaque), 1 (alpha), 2 (no CPU copy), 3 (opaque).
+	const NextGISRCSurface surfaces[4] = { { true, false }, { true, true }, { false, false }, { true, false } };
+	LocalVector<uint32_t> chosen;
+	// Without BLAS parts the software tier takes every surface with a CPU copy that is not alpha.
+	RendererRD::nextgi_src_card_surfaces(nullptr, 0, true, false, surfaces, 4, chosen);
+	CHECK(_swrt_test_same(chosen, { 0, 3 }));
+	// The hardware tier waits for its parts, except for a skinned mesh's bind-pose cards (#59).
+	RendererRD::nextgi_src_card_surfaces(nullptr, 0, false, false, surfaces, 4, chosen);
+	CHECK(chosen.is_empty());
+	RendererRD::nextgi_src_card_surfaces(nullptr, 0, false, true, surfaces, 4, chosen);
+	CHECK(_swrt_test_same(chosen, { 0, 1, 2, 3 }));
+	// With parts both tiers take the parts' surfaces, once each, in order, so a set built on one
+	// tier serves the other.
+	const uint32_t parts[4] = { 3, 1, 3, 1 };
+	RendererRD::nextgi_src_card_surfaces(parts, 4, true, false, surfaces, 4, chosen);
+	CHECK(_swrt_test_same(chosen, { 3, 1 }));
+	RendererRD::nextgi_src_card_surfaces(parts, 4, false, false, surfaces, 4, chosen);
+	CHECK(_swrt_test_same(chosen, { 3, 1 }));
+}
+
+TEST_CASE("[NextGI][SWRT] CPU mesh copies stay without ray query, the RT arena does not") {
+	CHECK(RendererRD::nextgi_rt_keep_cpu_geometry(true, false));
+	CHECK(RendererRD::nextgi_rt_keep_cpu_geometry(true, true));
+	CHECK_FALSE(RendererRD::nextgi_rt_keep_cpu_geometry(false, true));
+	CHECK_FALSE(RendererRD::nextgi_rt_should_enable(true, false));
+	CHECK(RendererRD::nextgi_rt_should_enable(true, true));
+	// debug/deny_ray_query takes the device's ray query away.
+	CHECK(RendererRD::nextgi_device_has_ray_query(true, false));
+	CHECK_FALSE(RendererRD::nextgi_device_has_ray_query(true, true));
+	CHECK_FALSE(RendererRD::nextgi_device_has_ray_query(false, false));
+}
+
+TEST_CASE("[NextGI][SWRT] debug/deny_ray_query selects the software tier for NO_RAY_QUERY") {
+	using RendererRD::NextGI;
+	NextGI::TierInputs inputs;
+	inputs.project_enabled = true;
+	inputs.ray_query = true;
+	inputs.ray_query_hw = true;
+	inputs.driver_reason = NextGI::TIER_REASON_NONE;
+	REQUIRE_EQ(NextGI::evaluate_tier(inputs).tier, NextGI::TIER_HWRT);
+	NextGI::apply_ray_query_denial(inputs, false);
+	CHECK_EQ(NextGI::evaluate_tier(inputs).tier, NextGI::TIER_HWRT);
+	NextGI::apply_ray_query_denial(inputs, true);
+	const NextGI::TierResult denied = NextGI::evaluate_tier(inputs);
+	CHECK_EQ(denied.tier, NextGI::TIER_SOFTWARE);
+	CHECK_EQ(denied.reason, NextGI::NO_RAY_QUERY);
+	// Force cannot bring the hardware tier back: the device is treated as one without ray query.
+	inputs.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
+	const NextGI::TierResult forced = NextGI::evaluate_tier(inputs);
+	CHECK_EQ(forced.tier, NextGI::TIER_SOFTWARE);
+	CHECK_EQ(forced.reason, NextGI::NO_RAY_QUERY);
+	CHECK(forced.warn_force);
+}
+
+namespace {
+
+// Fake geometry instances: the record pass and the relight's page keys never dereference them.
+RenderGeometryInstance *_swrt_test_instance(uint32_t p_index) {
+	return reinterpret_cast<RenderGeometryInstance *>(uintptr_t(0x20000u + p_index * 64u));
+}
+
+// The page assigner the doctest injects: the production pass calls NextGIRelight::assign_pages(),
+// which copies the card set's cards from the SRC; here every card set has two 64-texel cards.
+uint32_t _swrt_test_assign(void *p_relight, RenderGeometryInstance *p_geometry, RendererRD::NextGIInstanceRecord &r_record, uint32_t p_element) {
+	if (r_record.card_set == UINT32_MAX) {
+		return UINT32_MAX;
+	}
+	RendererRD::NextGICard cards[2] = {};
+	for (RendererRD::NextGICard &card : cards) {
+		card.atlas_rect[2] = 64;
+		card.atlas_rect[3] = 64;
+	}
+	return static_cast<RendererRD::NextGIRelight *>(p_relight)->assign_card_pages(p_geometry, r_record, p_element, r_record.card_set * 2, cards, 2);
+}
+
+} // namespace
+
+TEST_CASE("[NextGI][SWRT] The software record pass gives SWRT instance i record i with its relight pages") {
+	using RendererRD::NextGIInstanceRecord;
+	RendererRD::NextGIRelight relight;
+	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false));
+	NextGISWRTTrace::RecordSource sources[3];
+	// A lightmapped instance with its own card set; one whose card set is its mesh's; a plain one.
+	sources[0].geometry = _swrt_test_instance(0);
+	sources[0].lightmapped = true;
+	sources[0].instance_card_set = 0;
+	sources[0].mesh_card_set = 7;
+	sources[0].transform = Transform3D(Basis::from_euler(Vector3(0.3f, 0.7f, 0.0f)).scaled(Vector3(1.0f, 2.0f, 0.5f)), Vector3(1.0f, 2.0f, 3.0f));
+	sources[1].geometry = _swrt_test_instance(1);
+	sources[1].element = 4;
+	sources[1].mesh_card_set = 1;
+	sources[2].geometry = _swrt_test_instance(2);
+	sources[2].instance_card_set = 2;
+	LocalVector<NextGIInstanceRecord> records;
+	NextGISWRTTrace::build_records(sources, 3, &relight, &_swrt_test_assign, &relight, records);
+	REQUIRE_EQ(records.size(), 3u);
+	for (uint32_t i = 0; i < 3; i++) {
+		CHECK_EQ(records[i].tlas_index, i);
+		CHECK_NE(records[i].page_table, UINT32_MAX);
+		CHECK_EQ(records[i].page_table, relight.get_instance_page_table(sources[i].geometry, sources[i].element));
+		CHECK_EQ(records[i].surface_count, 0u);
+	}
+	// The instance's own card set wins; without one the mesh's is the fallback (the RT scene's rule).
+	CHECK_EQ(records[0].card_set, 0u);
+	CHECK_EQ(records[1].card_set, 1u);
+	CHECK_EQ(records[2].card_set, 2u);
+	// The RT scene's flag rule: STATIC, plus LIGHTMAPPED for a lightmapped instance, so a STATIC
+	// light skips only that one.
+	CHECK_EQ(records[0].rt_flags, uint32_t(RendererRD::NEXTGI_RT_FLAG_STATIC | RendererRD::NEXTGI_RT_FLAG_LIGHTMAPPED));
+	CHECK_EQ(records[1].rt_flags, uint32_t(RendererRD::NEXTGI_RT_FLAG_STATIC));
+	CHECK_FALSE(RendererRD::nextgi_light_reaches_receiver(true, records[0].rt_flags));
+	CHECK(RendererRD::nextgi_light_reaches_receiver(true, records[1].rt_flags));
+	CHECK(RendererRD::nextgi_light_reaches_receiver(false, records[0].rt_flags));
+	// object_to_world holds the transform's 3x4 rows.
+	const Transform3D &transform = sources[0].transform;
+	for (int row = 0; row < 3; row++) {
+		for (int column = 0; column < 3; column++) {
+			CHECK_EQ(records[0].object_to_world[row * 4 + column], transform.basis.rows[row][column]);
+		}
+		CHECK_EQ(records[0].object_to_world[row * 4 + 3], transform.origin[row]);
+	}
+	// The relight schedules exactly these page sets, each found again at its record index.
+	LocalVector<uint32_t> current;
+	relight.collect_current_page_sets(current);
+	REQUIRE_EQ(current.size(), 3u);
+	for (uint32_t set : current) {
+		const RendererRD::NextGIRelight::PageSetInfo info = relight.get_page_set_info(set);
+		REQUIRE_LT(info.record_index, 3u);
+		CHECK_EQ(info.page_table, records[info.record_index].page_table);
+	}
+
+	// One flag uploads the instance and record buffers together.
+	NextGISWRTTrace::UploadState state;
+	const uint64_t order = NextGISWRTTrace::instance_order_hash(sources, 3);
+	CHECK(NextGISWRTTrace::upload_due(state, order, false, records));
+	state.uploaded = true;
+	state.order_hash = order;
+	state.records = records;
+	// The next frame's pass over the same instances changes nothing.
+	LocalVector<NextGIInstanceRecord> again;
+	NextGISWRTTrace::build_records(sources, 3, &relight, &_swrt_test_assign, &relight, again);
+	CHECK_FALSE(NextGISWRTTrace::upload_due(state, order, false, again));
+	CHECK(NextGISWRTTrace::upload_due(state, order, true, again));
+	// A card set captured later (the instance's own replaces the mesh's) re-dirties both uploads.
+	sources[1].instance_card_set = 3;
+	NextGISWRTTrace::build_records(sources, 3, &relight, &_swrt_test_assign, &relight, again);
+	CHECK_EQ(again[1].card_set, 3u);
+	CHECK(NextGISWRTTrace::upload_due(state, order, false, again));
+	sources[1].instance_card_set = UINT32_MAX;
+	// Two instances swapped in the feed: GPU instance i and record i must follow.
+	NextGISWRTTrace::RecordSource swapped[3] = { sources[2], sources[1], sources[0] };
+	const uint64_t swapped_order = NextGISWRTTrace::instance_order_hash(swapped, 3);
+	CHECK_NE(swapped_order, order);
+	NextGISWRTTrace::build_records(swapped, 3, &relight, &_swrt_test_assign, &relight, again);
+	CHECK_EQ(again[0].page_table, records[2].page_table);
+	CHECK_EQ(again[2].page_table, records[0].page_table);
+	CHECK(NextGISWRTTrace::upload_due(state, swapped_order, false, again));
+	// Swapped instances with identical records still re-upload: the order hash catches them.
+	CHECK(NextGISWRTTrace::upload_due(state, swapped_order, false, records));
 }

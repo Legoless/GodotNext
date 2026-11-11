@@ -55,7 +55,12 @@ MeshStorage::MeshStorage() :
 
 	// GodotNext: nextgi_rt_arena
 	nextgi_rt_max_error = float(GLOBAL_GET("rendering/global_illumination/nextgi/rt_max_error"));
-	nextgi_rt_enabled = nextgi_rt_should_enable(bool(GLOBAL_GET("rendering/global_illumination/nextgi/enabled")), RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY));
+	// GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query takes ray query away, as on a GPU
+	// without it: no RT arena, but the CPU copies stay for the SRC and runtime mesh SDFs.
+	const bool nextgi_project_enabled = bool(GLOBAL_GET("rendering/global_illumination/nextgi/enabled"));
+	nextgi_has_ray_query = nextgi_device_has_ray_query(RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY), bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/deny_ray_query")));
+	nextgi_rt_enabled = nextgi_rt_should_enable(nextgi_project_enabled, nextgi_has_ray_query);
+	nextgi_cpu_geometry_enabled = nextgi_rt_keep_cpu_geometry(nextgi_project_enabled, nextgi_has_ray_query);
 
 	default_rd_storage_buffer = RD::get_singleton()->storage_buffer_create(sizeof(uint32_t) * 4);
 	default_rt_arena_buffer = RD::get_singleton()->storage_buffer_create(sizeof(uint32_t) * 4);
@@ -740,7 +745,9 @@ void MeshStorage::_mesh_nextgi_rt_rebuild_chunk_address_buffer() {
 }
 
 void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface_index, Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data) {
-	if (!nextgi_rt_enabled || p_mesh->nextgi_skip_rt_arena) {
+	// GodotNext: ps_swrt_trace (#186, #188). The CPU copy is decoded whenever it is kept; the arena
+	// upload below needs nextgi_rt_enabled.
+	if (!nextgi_cpu_geometry_enabled || p_mesh->nextgi_skip_rt_arena) {
 		return;
 	}
 	// GodotNext: nextgeo_nextgi (#77). Surfaces covered by a VirtualGeometryData use the VGD RT
@@ -786,6 +793,11 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface
 	}
 	p_surface->rt_eps = eps_rt;
 	p_surface->rt_edge_length = edge_length;
+	// GodotNext: ps_swrt_trace (#186, #188). Without ray query only the CPU copy is kept.
+	if (!nextgi_rt_enabled) {
+		p_surface->rt_eligible = false;
+		return;
+	}
 	if (!arena_eligible) {
 		// GodotNext: nextgi_skinned_actors (#59). Deforming surfaces stay out of the static
 		// arena; the bind-pose CPU copy serves the cards and the per-instance posed slots.
@@ -1527,7 +1539,8 @@ void MeshStorage::mesh_nextgi_sync_vgd_proxy(RID p_mesh) {
 	if (mesh == nullptr || mesh->nextgi_skip_rt_arena) {
 		return;
 	}
-	const bool has_ray_query = RD::get_singleton() != nullptr && RD::get_singleton()->has_feature(RD::SUPPORTS_RAY_QUERY);
+	// GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query counts as a device without ray query.
+	const bool has_ray_query = nextgi_has_ray_query;
 	const bool has_vg = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 	const uint32_t live_instances = has_vg ? RSG::virtual_mesh_storage->mesh_get_live_instance_count(p_mesh) : 0u;
 	const bool want_proxy = nextgi_rt_enabled && nextgi_hwrt_tier_active && has_ray_query && has_vg && live_instances > 0;

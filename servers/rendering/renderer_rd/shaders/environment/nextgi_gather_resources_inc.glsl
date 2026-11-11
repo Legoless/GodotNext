@@ -91,13 +91,23 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint page_rect_count;
 	uint pad0;
 	uint pad1;
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186). The SRC card-set and card counts the detail hits' D6
+	// lookup checks its indices against (pad2 and pad4 in the hardware shader).
+	uint card_set_count;
+#else
 	uint pad2;
+#endif
 	float max_trace_roughness;
 	float reflect_divisor;
 	uint reflect_enabled;
 	uint reflect_debug;
 	uint sampling_mode;
+#ifdef NEXTGI_TRACE_SDF
+	uint card_count;
+#else
 	uint pad4;
+#endif
 	uint ray_stride;
 	uint ray_count;
 	// GodotNext: nextgi_reflection_behaviours (#132). Fog at reflection hits.

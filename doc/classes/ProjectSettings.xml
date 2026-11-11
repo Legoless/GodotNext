@@ -3126,6 +3126,9 @@
 		<member name="rendering/global_illumination/nextgi/debug/coverage_counter" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI traces one coverage ray per half-resolution pixel and reports the hit and ray counts through [method RenderingServer.get_rendering_info].
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/deny_ray_query" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], NextGI treats the device as one without ray query: it keeps no ray-tracing arena, creates no ray-query shader and selects the software tier ([code]NO_RAY_QUERY[/code]), while meshes keep the CPU copies the surface cache and runtime mesh distance fields are built from. Used by the software tier's checks on a device that has ray query. Requires a restart.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/dump_material_atlas" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI saves its surface cache material atlas once every known card has been captured: the albedo, normal, ORM, emission and depth targets go to [code]user://nextgi_atlas_*.exr[/code], and the log gets the coverage of each card (the fraction of its texels with a depth above 0). This is a debugging aid; it reads the atlas back from the GPU. It is read when NextGI creates the atlas, so changes take effect after a restart.
 		</member>

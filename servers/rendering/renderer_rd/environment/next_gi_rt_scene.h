@@ -105,6 +105,25 @@ _FORCE_INLINE_ bool nextgi_rt_should_enable(bool p_project_enabled, bool p_has_r
 	return p_project_enabled && p_has_ray_query;
 }
 
+// GodotNext: ps_swrt_trace (#186, #188). The CPU copies of mesh triangles are kept with
+// nextgi/enabled on any device: the SRC builds card sets from them on both tiers, and runtime
+// mesh SDFs (the software tier's global SDF) are built from them. A device without ray query
+// gets no RT arena (nextgi_rt_should_enable) but keeps the copies.
+_FORCE_INLINE_ bool nextgi_rt_keep_cpu_geometry(bool p_project_enabled, bool p_has_ray_query) {
+	return p_project_enabled;
+}
+
+// GodotNext: ps_swrt_trace (#186, #188). A surface material that keeps the surface out of the TLAS
+// (alpha-tested without nextgi_rt_opaque, or blended; #61). The SRC's software-tier card rule
+// leaves the same surfaces out.
+bool nextgi_rt_material_is_alpha(RID p_material);
+
+// GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query simulates a device without ray query
+// on one that has it, so the software tier's checks run as they would on such a GPU.
+_FORCE_INLINE_ bool nextgi_device_has_ray_query(bool p_device_ray_query, bool p_deny_ray_query) {
+	return p_device_ray_query && !p_deny_ray_query;
+}
+
 // GodotNext: nextgi_as_slots
 // An instance enters the TLAS only once its BLAS exists (plan §8.2). In the frame block
 // "AS updates" (line 1a) runs before "AS builds" (line 1b), so the TLAS phase admits only

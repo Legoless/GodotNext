@@ -199,6 +199,19 @@ uint32_t nextgi_src_page_level(float p_solid_angle, uint32_t p_full_texels);
 // FNV-1a of the mesh, the override and the surface materials. Equal keys share one material capture.
 uint64_t nextgi_src_material_key(uint64_t p_mesh_id, uint64_t p_override_id, const uint64_t *p_surface_ids, uint32_t p_surface_count);
 
+// GodotNext: ps_swrt_trace (#186, #188). One mesh surface, for the card-set surface rule.
+struct NextGISRCSurface {
+	bool cpu_geometry = false; // MeshStorage keeps its CPU copy (mesh_nextgi_get_cpu_geometry()).
+	bool alpha = false; // nextgi_rt_material_is_alpha(): the TLAS leaves it out.
+};
+
+// The surfaces an SRC card set covers, in order. With BLAS parts: the surfaces in them, so a
+// hardware hit always finds a card set. Without parts on the hardware tier: none (the RT scene has
+// not built them; try again next frame), except a skinned mesh's surfaces, all of them (#59
+// bind-pose cards). The software tier has no RT scene and so no parts: every surface with a CPU
+// copy whose material is not alpha, the surfaces the TLAS would take.
+void nextgi_src_card_surfaces(const uint32_t *p_part_surfaces, uint32_t p_part_surface_count, bool p_software, bool p_skinned, const NextGISRCSurface *p_surfaces, uint32_t p_surface_count, LocalVector<uint32_t> &r_surfaces);
+
 // One capture id per distinct material key.
 class NextGIMaterialCaptures {
 	HashMap<uint64_t, uint32_t> ids;

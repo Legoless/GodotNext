@@ -268,13 +268,31 @@ vec3 nextgi_miss_radiance(vec3 direction) {
 }
 
 #ifdef NEXTGI_TRACE_SDF
-// GodotNext: ps_swrt_trace (#186). The software tier's hit shading: the hit sits on the global
-// SDF (nextgi_sdf_hit_inc.glsl keeps the trace's origin and normal). Voxel lighting first, then
-// the WRC at the hit, then the miss radiance: the hardware tier's D6-miss chain.
+// GodotNext: ps_swrt_trace (#186). The software tier's hit shading (nextgi_sdf_hit_inc.glsl keeps
+// the trace's origin and normal). A detail (mesh-SDF) hit knows its instance, whose record (the
+// SWRT record pass: record i is SWRT instance i) holds its page table and card set: D6 in the
+// instance's local space first (#186 step 3). Then voxel lighting, then the WRC at the hit, then
+// the miss radiance: the hardware tier's D6-miss chain.
 vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, out float confidence) {
 	confidence = 0.0;
 	vec3 world = nextgi_sdf_origin + ray_dir * hit.t;
 	vec3 normal = nextgi_sdf_last.normal;
+	if (hit.custom_index < params.record_count) {
+		NextGIInstanceRecord rec = records.data[hit.custom_index];
+		vec3 local = swrt_instance_local(swrt_instances.data[hit.custom_index], world);
+		// A normal goes to object space through the transpose of the object-to-world basis.
+		vec3 local_normal = vec3(
+				rec.object_to_world[0] * normal.x + rec.object_to_world[4] * normal.y + rec.object_to_world[8] * normal.z,
+				rec.object_to_world[1] * normal.x + rec.object_to_world[5] * normal.y + rec.object_to_world[9] * normal.z,
+				rec.object_to_world[2] * normal.x + rec.object_to_world[6] * normal.y + rec.object_to_world[10] * normal.z);
+		vec3 resolved;
+		float projection;
+		if (dot(local_normal, local_normal) > 1e-12 && resample_src(local, normalize(local_normal), rec.page_table, rec.card_set, resolved, projection)) {
+			confidence = 1.0;
+			nextgi_sdf_note_d6();
+			return max(resolved, vec3(0.0));
+		}
+	}
 	vec3 cached = nextgi_wrc_sample(world, -ray_dir);
 	bool wrc_hit = nextgi_wrc_hit_cache;
 	float wrc_confidence = nextgi_wrc_confidence;

@@ -1,7 +1,9 @@
 extends Node3D
 ## #188: the kitbash must store voxel-lighting hits. A missing counter fails the run.
-## Hardware ray tracing also requires coverage and resampled radiance and then prints
-## VOXEL_LIGHTING_ASSERTED. Under Lumen Lite (lite_beta: Medium with the irradiance field) both
+## Both tiers also require coverage and resampled radiance and then print
+## VOXEL_LIGHTING_ASSERTED: the software tier captures and relights the SRC too (its relight's
+## shadow rays march the global SDF), so its voxels shade from live pages. Under Lumen Lite
+## (lite_beta: Medium with the irradiance field) both
 ## are informational: the run prints them on a VOXEL_LIGHTING_LITE line and does not fail on them.
 ## Lite's half-size surface cache keeps radiance pages for few of the kitbash's 2,400 rocks, and
 ## voxel lighting resamples only paged instances (lead decision 2026-11-10, plan §21.2.5).
@@ -10,7 +12,9 @@ extends Node3D
 ## debug/voxel_lighting_readback.
 ## Set rendering/global_illumination/nextgi/enabled before launch. The tier stays
 ## disabled while that project setting is off.
-## hardware_ray_tracing Off (1) is the software tier and only requires stored hits.
+## GodotNext: ps_swrt_trace (#186, #188). With debug/deny_ray_query (a device without ray query)
+## the run must also be on the software tier for NO_RAY_QUERY, with no RT arena, no ray-query
+## ShaderRD created in the process and SWRT instances (runtime mesh SDFs from the CPU copies).
 
 const READBACK := "rendering/global_illumination/nextgi/debug/voxel_lighting_readback"
 
@@ -71,18 +75,36 @@ func _process(_delta: float) -> void:
 	if stored <= 0:
 		_fail("stored hits are 0")
 		return
-	var ray_tracing := int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing"))
-	if ray_tracing != 1:
-		if bool(info.get("lite_beta", false)):
-			var pages := int(info.get("src_page_count", -1))
-			print("VOXEL_LIGHTING_LITE coverage_ppm=%d resampled_nonzero=%d unpaged_hits=%d src_page_count=%d (informational; coverage is asserted at High)" % [coverage_ppm, resampled, unpaged, pages])
-		else:
-			if coverage_ppm <= 0:
-				_fail("coverage is 0")
-				return
-			if resampled <= 0:
-				_fail("resampled radiance is 0")
-				return
-			print("VOXEL_LIGHTING_ASSERTED quality=%s coverage_ppm=%d resampled_nonzero=%d" % [quality, coverage_ppm, resampled])
+	if bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false)):
+		var deny_failure := _deny_failure(info, counters)
+		if not deny_failure.is_empty():
+			_fail(deny_failure)
+			return
+	if bool(info.get("lite_beta", false)):
+		var pages := int(info.get("src_page_count", -1))
+		print("VOXEL_LIGHTING_LITE tier=%s coverage_ppm=%d resampled_nonzero=%d unpaged_hits=%d src_page_count=%d (informational; coverage is asserted at High)" % [tier, coverage_ppm, resampled, unpaged, pages])
+	else:
+		if coverage_ppm <= 0:
+			_fail("coverage is 0 on the %s tier" % tier)
+			return
+		if resampled <= 0:
+			_fail("resampled radiance is 0 on the %s tier" % tier)
+			return
+		print("VOXEL_LIGHTING_ASSERTED tier=%s quality=%s coverage_ppm=%d resampled_nonzero=%d" % [tier, quality, coverage_ppm, resampled])
 	ProjectSettings.set_setting(READBACK, false)
 	get_tree().quit(0)
+
+
+# GodotNext: ps_swrt_trace (#186, #188). A device without ray query (debug/deny_ray_query): the
+# software tier for NO_RAY_QUERY, no RT arena, no ray-query ShaderRD in the process, and SWRT
+# instances, whose runtime mesh SDFs come from the CPU copies kept without ray query.
+func _deny_failure(p_info: Dictionary, p_counters: Dictionary) -> String:
+	if str(p_info.get("tier", "")) != "SWRT" or str(p_info.get("reason", "")) != "NO_RAY_QUERY":
+		return "deny_ray_query: tier %s/%s, expected SWRT/NO_RAY_QUERY" % [str(p_info.get("tier", "")), str(p_info.get("reason", ""))]
+	if int(p_counters.get("rt_arena_bytes", -1)) != 0:
+		return "deny_ray_query: %d RT arena bytes" % int(p_counters.get("rt_arena_bytes", -1))
+	if int(p_info.get("ray_query_shader_versions", -1)) != 0:
+		return "deny_ray_query: %d ray-query ShaderRD versions" % int(p_info.get("ray_query_shader_versions", -1))
+	if int(p_info.get("swrt_trace_instances", 0)) <= 0:
+		return "deny_ray_query: no SWRT instances (no runtime mesh SDFs)"
+	return ""

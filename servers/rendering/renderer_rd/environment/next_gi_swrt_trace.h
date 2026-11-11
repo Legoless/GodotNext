@@ -31,6 +31,7 @@
 #pragma once
 
 #include "core/math/aabb.h"
+#include "core/math/transform_3d.h"
 #include "core/math/vector3.h"
 #include "core/math/vector3i.h"
 #include "core/os/mutex.h"
@@ -41,12 +42,15 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_clipmaps.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/rendering_device.h"
 
 class RenderDataRD;
+class RenderGeometryInstance;
 class NextGIVoxelLighting;
 namespace RendererRD {
 class NextGI;
+class NextGIRelight;
 struct NextGILight;
 } // namespace RendererRD
 
@@ -65,7 +69,11 @@ struct NextGILight;
 //   frame block's slots, from the current frame's depth.
 // - trace_lite_probes() traced the Lumen Lite probes before Lite ran in the
 //   frame block; nothing calls it now.
-// - trace_shadow_rays() is the SDF shadow-ray kernel for the SRC relight.
+// - trace_shadow_rays() is the SDF shadow-ray kernel the verification checks run; the SRC
+//   relight's own sibling (nextgi_src_relight_swrt.glsl) marches the same swrt_shadow_ray().
+// - assign_src_pages() (#188) runs after update_scene() in the same slot: the record pass that
+//   gives SWRT instance i its NextGIInstanceRecord i (card set, relight page table, HWRT's flag
+//   rule) and uploads the instance and record buffers together.
 //
 // Trace order (L5): Hi-Z screen trace, detail mesh SDFs for the first 2 m
 // (software_ray_tracing_mode = detail), global SDF, then the WRC (at the
@@ -193,6 +201,43 @@ public:
 	bool is_detail_active() const;
 	// The frame-block slot the last update_scene() ran in ("none" outside the block).
 	const String &get_update_slot() const { return last_update_slot; }
+
+	// GodotNext: ps_swrt_trace (#186, #188). The record pass: one NextGIInstanceRecord per SWRT
+	// instance, in instance order, so a detail hit's instance index is its record index and the
+	// relight's page record_index is the instance index (plan §6.3 records on the software tier).
+	struct RecordSource {
+		RenderGeometryInstance *geometry = nullptr;
+		uint32_t element = UINT32_MAX;
+		bool lightmapped = false;
+		Transform3D transform;
+		uint32_t instance_card_set = UINT32_MAX; // NextGISRC::get_instance_card_set().
+		uint32_t mesh_card_set = UINT32_MAX; // NextGISRC::get_mesh_card_set(), the fallback.
+	};
+	// Assigns relight pages to r_record and returns its page table (NextGIRelight::assign_pages()).
+	typedef uint32_t (*PageAssigner)(void *p_userdata, RenderGeometryInstance *p_geometry, RendererRD::NextGIInstanceRecord &r_record, uint32_t p_element);
+	// One record pass of p_relight over the sources. Record i: the transform, STATIC, plus
+	// LIGHTMAPPED for a lightmapped source (the RT scene's rule, so a STATIC light skips it), the
+	// instance's card set or else its mesh's, tlas_index i, and the page table p_assign gives it.
+	// p_relight null leaves every page table UINT32_MAX.
+	static void build_records(const RecordSource *p_sources, uint32_t p_count, RendererRD::NextGIRelight *p_relight, PageAssigner p_assign, void *p_userdata, LocalVector<RendererRD::NextGIInstanceRecord> &r_records);
+	// The instance and record buffers upload together, so GPU instance i, froxel list entry i and
+	// record i always agree. They are due when the instances changed (bounds, meshes, membership),
+	// their feed order changed, or a record differs from the uploaded one (a new card set or page
+	// table).
+	struct UploadState {
+		bool uploaded = false;
+		uint64_t order_hash = 0;
+		LocalVector<RendererRD::NextGIInstanceRecord> records;
+	};
+	static uint64_t instance_order_hash(const RecordSource *p_sources, uint32_t p_count);
+	static bool upload_due(const UploadState &p_state, uint64_t p_order_hash, bool p_instances_changed, const LocalVector<RendererRD::NextGIInstanceRecord> &p_records);
+	// In the AS-updates slot after update_scene(): the record pass, then both uploads when due.
+	void assign_src_pages(RendererRD::NextGIRelight *p_relight);
+	// The records the gather, the SRC feedback and the relight read on the software tier.
+	RID get_record_buffer() const;
+	uint32_t get_record_count() const;
+	// The frame-block slot the last assign_src_pages() ran in ("none" outside the block).
+	const String &get_record_slot() const { return last_record_slot; }
 	// The verification trace (debug/swrt_trace_readback) runs after the frame block's slots.
 	static bool readback_enabled();
 
@@ -274,6 +319,12 @@ private:
 	HashMap<RID, MeshSDFData> field_cache;
 	Vector<NextGIGlobalSDF::Instance> instances;
 	LocalVector<uint32_t> instance_card_sets;
+	// GodotNext: ps_swrt_trace (#186, #188). Parallel to instances: the record pass's sources, this
+	// frame's records, and the last upload of both buffers.
+	LocalVector<RecordSource> record_sources;
+	LocalVector<RendererRD::NextGIInstanceRecord> records;
+	UploadState upload_state;
+	uint32_t uploaded_record_count = 0;
 	LocalVector<uint32_t> two_sided;
 	HashMap<InstanceKey, FedInstance, InstanceKeyHasher> fed;
 	bool instances_dirty = true;
@@ -303,6 +354,7 @@ private:
 	// Verification readback (debug/swrt_trace_readback).
 	Dictionary readback_meta;
 	String last_update_slot = "none";
+	String last_record_slot = "none";
 	static uint64_t last_benchmark_usec;
 	static uint32_t last_fixture_checked;
 	static uint32_t last_fixture_agreed;

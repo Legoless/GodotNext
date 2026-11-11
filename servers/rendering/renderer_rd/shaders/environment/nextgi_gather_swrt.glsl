@@ -48,8 +48,34 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 // The gather's set-0 resources (bindings 1-8, 14-20).
 #include "nextgi_gather_resources_inc.glsl"
 
+// D6 for detail (mesh-SDF) hits, which know their instance (#186 step 3): the lookup voxel
+// lighting shades its stored hits with, in instance-local space, on the gather's SRC resources.
+const uint PAGE_EVICTED_BIT = 0x80000000u;
+const float CARD_DEPTH_TEXELS = 2.0;
+#define NEXTGI_D6_CARDS cards
+#define NEXTGI_D6_CARD_SETS card_sets
+#define NEXTGI_D6_PAGE_RECTS page_rects
+#define NEXTGI_D6_CARD_T NextGICard
+#define NEXTGI_D6_CARD_SET_T NextGICardSet
+#define NEXTGI_D6_MATERIAL_DEPTH material_depth_tex
+#define NEXTGI_D6_RADIANCE radiance_tex
+#define NEXTGI_D6_CARD_COUNT params.card_count
+#define NEXTGI_D6_CARD_SET_COUNT params.card_set_count
+#define NEXTGI_D6_PAGE_RECT_COUNT params.page_rect_count
+#include "nextgi_src_d6_local_inc.glsl"
+
+// The last trace was a gather ray (nextgi_sdf_trace_noted): its D6 resolves are counted beside
+// gather_sdf_detail_hits, which counts gather rays only.
+bool nextgi_sdf_gather_ray = false;
+
+void nextgi_sdf_note_d6() {
+	if (nextgi_sdf_gather_ray) {
+		atomicAdd(counters.sdf_d6_resolved, 1u);
+	}
+}
+
 // The SWRT-only counters, after a gather or reflection trace: SDF hits, the step-limit
-// (exhausted) and near-origin ones among them, clean detail hits and the hit distance (cm).
+// (exhausted) and near-origin ones among them, detail hits and the hit distance (cm).
 void nextgi_sdf_note_gather(bool p_reflect) {
 	if ((nextgi_sdf_last.flags & SWRT_HIT_SURFACE) == 0u) {
 		return;
@@ -85,6 +111,7 @@ bool nextgi_sdf_trace_noted(vec3 p_origin, vec3 p_direction, float p_tmax, vec3 
 	nextgi_sdf_detail_ray = true;
 	bool hit = nextgi_trace(p_origin, p_direction, p_tmax, r_hit);
 	nextgi_sdf_detail_ray = false;
+	nextgi_sdf_gather_ray = !p_reflect;
 	nextgi_sdf_note_gather(p_reflect);
 	return hit;
 }

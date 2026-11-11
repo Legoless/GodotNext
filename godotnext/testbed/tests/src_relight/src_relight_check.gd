@@ -6,12 +6,29 @@ extends Node
 ## relit texels and 256k traced shadow rays per frame, at most 8 shadowed lights per page and at
 ## most 2 mask evaluations. Extra modes:
 ##   --probes          compare page radiance with the camera aimed toward and away from the light
-##   --shadow-fixture  plane, box and a downward sun; the mask matches the analytic footprint
+##   --shadow-fixture  a 20 m ground plate, a 2 m block on it and a 4 x 1 x 4 m slab floating 1 m
+##                     above it at z -7.25, under a downward sun; the ground card's mask matches
+##                     both analytic footprints. The block's sits in the sun's shadow map
+##                     (directional_shadow_max_distance 4), where relight reuses the map; the
+##                     slab's lies beyond it, more than 6 m from the camera, so only relight's own
+##                     shadow rays can shadow it (#186 step 5 on the software tier). At least
+##                     FAR_INSIDE_MIN traced texels inside the slab's footprint must be checked.
+##                     The edge band (two mask texels around each footprint's edge) is skipped.
 ##   --light-lists     STATIC / DYNAMIC / DISABLED tracking for visibility, scenario and bake mode
-## Prints one "GODOTNEXT_RESULT <json>" line.
+## --expected-tier=HWRT (default) or SWRT: the tier the run must report (run_src_relight_check.sh
+## passes it from --hwrt). Under debug/deny_ray_query (a device without ray query) the run also
+## asserts NO_RAY_QUERY, no RT arena, no ray-query ShaderRD and SWRT instances. Prints one
+## "GODOTNEXT_RESULT <json>" line.
 
 const TEXEL_CAP := 256 * 1024
 const RAY_CAP := 256 * 1024
+## Traced mask texels inside the floating slab's footprint (the hardware tier checks 81 at High).
+const FAR_INSIDE_MIN := 40
+## The shadow fixture's floating slab: center and size.
+const SLAB_CENTER := Vector3(0, 1.5, -7.25)
+const SLAB_SIZE := Vector3(4, 1, 4)
+
+var _expected_tier := "HWRT"
 
 var _failures := PackedStringArray()
 
@@ -44,6 +61,8 @@ func run(args: PackedStringArray) -> Dictionary:
 			shadow_fixture = true
 		elif arg == "--light-lists":
 			light_lists = true
+		elif arg.begins_with("--expected-tier="):
+			_expected_tier = arg.trim_prefix("--expected-tier=")
 
 	var enabled: bool = ProjectSettings.get_setting("rendering/global_illumination/nextgi/enabled", false)
 	var root := Node3D.new()
@@ -75,13 +94,13 @@ func run(args: PackedStringArray) -> Dictionary:
 	for frame in frames:
 		await get_tree().process_frame
 		info = RenderingServer.nextgi_get_tier_info()
-		if info.get("tier", "") != "HWRT":
+		if info.get("tier", "") != _expected_tier:
 			continue
 		max_texels = maxi(max_texels, int(info.get("src_relight_texels", 0)))
 		max_rays = maxi(max_rays, int(info.get("src_relight_rays", 0)))
 		max_shadowed = maxi(max_shadowed, int(info.get("src_max_shadowed_lights", 0)))
 		max_evals = maxi(max_evals, int(info.get("src_max_mask_evals", 0)))
-	_check(info.get("tier", "") == "HWRT", "HWRT tier")
+	_check(info.get("tier", "") == _expected_tier, "%s tier, got %s" % [_expected_tier, str(info.get("tier", ""))])
 	_check(max_texels > 0, "at least one relit texel")
 	_check(max_texels <= TEXEL_CAP, "relit texels %d stay within 256k" % max_texels)
 	_check(max_rays <= RAY_CAP, "traced rays %d stay within 256k" % max_rays)
@@ -89,6 +108,13 @@ func run(args: PackedStringArray) -> Dictionary:
 	_check(max_evals <= 2, "mask evaluations %d" % max_evals)
 	if shadow_fixture:
 		_check_shadow_mask(info)
+	# GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: a device without ray query.
+	if bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false)):
+		print("SRC_RELIGHT_DENY reason=%s rt_arena_bytes=%d ray_query_shader_versions=%d swrt_trace_instances=%d" % [str(info.get("reason", "")), int(info.get("rt_arena_bytes", -1)), int(info.get("ray_query_shader_versions", -1)), int(info.get("swrt_trace_instances", 0))])
+		_check(str(info.get("reason", "")) == "NO_RAY_QUERY", "deny_ray_query: the tier's reason is %s, expected NO_RAY_QUERY" % str(info.get("reason", "")))
+		_check(int(info.get("rt_arena_bytes", -1)) == 0, "deny_ray_query: the RT arena holds %d bytes" % int(info.get("rt_arena_bytes", -1)))
+		_check(int(info.get("ray_query_shader_versions", -1)) == 0, "deny_ray_query: %d ray-query ShaderRD versions were created" % int(info.get("ray_query_shader_versions", -1)))
+		_check(int(info.get("swrt_trace_instances", 0)) > 0, "deny_ray_query: no SWRT instances (no runtime mesh SDFs from the CPU copies)")
 	var result := _result(scene_path, enabled, info)
 	result["max_texels"] = max_texels
 	result["max_rays"] = max_rays
@@ -195,12 +221,17 @@ func _check_shadow_mask(info: Dictionary) -> void:
 	# One mask texel of the shadow edge, plus the texel center, is the allowed band.
 	var margin := maxf(absf(texel_u), absf(texel_v)) * 2.0
 	var camera := Vector3(0, 3, 3)
+	# The footprints on the ground: the block's (center, half extents) and the slab's.
+	var footprints := [[Vector2(0, 0), Vector2(1, 1)], [Vector2(SLAB_CENTER.x, SLAB_CENTER.z), Vector2(SLAB_SIZE.x, SLAB_SIZE.z) * 0.5]]
 	var near_checked := 0
 	var far_checked := 0
+	var far_inside := 0
 	var near_bad := 0
 	var far_bad := 0
+	var far_bad_inside := 0
 	var nonzero := 0
 	var sample := Vector3.ZERO
+	var bad_samples := PackedStringArray()
 	for y in mask_h:
 		for x in mask_w:
 			var world := _mask_world(page, x, y)
@@ -208,8 +239,16 @@ func _check_shadow_mask(info: Dictionary) -> void:
 				sample = world
 			if (mask[y * mask_w + x] & 1) != 0:
 				nonzero += 1
-			var inside := absf(world.x) <= 1.0 and absf(world.z) <= 1.0
-			var edge := absf(absf(world.x) - 1.0) <= margin or absf(absf(world.z) - 1.0) <= margin
+			var inside := false
+			var edge := false
+			for footprint in footprints:
+				var offset := Vector2(world.x, world.z) - (footprint[0] as Vector2)
+				var half: Vector2 = footprint[1]
+				inside = inside or (absf(offset.x) <= half.x and absf(offset.y) <= half.y)
+				# The band around this footprint's edge, two mask texels wide on either side.
+				var near_x := absf(absf(offset.x) - half.x) <= margin and absf(offset.y) <= half.y + margin
+				var near_z := absf(absf(offset.y) - half.y) <= margin and absf(offset.x) <= half.x + margin
+				edge = edge or near_x or near_z
 			if edge:
 				continue
 			var lit := (mask[y * mask_w + x] & 1) != 0
@@ -220,12 +259,20 @@ func _check_shadow_mask(info: Dictionary) -> void:
 					near_bad += 1
 			elif distance > 6.0:
 				far_checked += 1
+				if inside:
+					far_inside += 1
 				if lit == inside:
 					far_bad += 1
+					if inside:
+						far_bad_inside += 1
+					if bad_samples.size() < 8:
+						bad_samples.append("(%.2f, %.2f) lit=%s inside=%s" % [world.x, world.z, lit, inside])
+	print("SRC_RELIGHT_SHADOW tier=%s mask=%dx%d margin=%.3f near_checked=%d near_bad=%d far_checked=%d far_inside=%d far_bad=%d far_bad_inside=%d lit=%d bad=%s" % [str(info.get("tier", "")), mask_w, mask_h, margin, near_checked, near_bad, far_checked, far_inside, far_bad, far_bad_inside, nonzero, bad_samples])
 	_check(near_checked > 0, "shadow-map texels were checked (near %d far %d lit %d sample %s)" % [near_checked, far_checked, nonzero, sample])
 	_check(far_checked > 0, "traced texels beyond the shadow distance were checked")
+	_check(far_inside >= FAR_INSIDE_MIN, "%d traced texels inside the slab's footprint were checked, expected at least %d" % [far_inside, FAR_INSIDE_MIN])
 	_check(near_bad == 0, "%d shadow-map texels disagree with the analytic footprint" % near_bad)
-	_check(far_bad == 0, "%d traced texels disagree with the analytic footprint" % far_bad)
+	_check(far_bad == 0, "%d traced texels disagree with the analytic footprints (%d inside one)" % [far_bad, far_bad_inside])
 
 
 func _mask_world(page: Dictionary, x: int, y: int) -> Vector3:
@@ -297,6 +344,14 @@ func _build_shadow_fixture(root: Node3D) -> void:
 	block.mesh = block_mesh
 	block.position = Vector3(0, 1, 0)
 	root.add_child(block)
+	# Beyond the shadow map's reach (and its reuse region), so only traced shadow rays shadow its
+	# footprint.
+	var slab := MeshInstance3D.new()
+	var slab_mesh := BoxMesh.new()
+	slab_mesh.size = SLAB_SIZE
+	slab.mesh = slab_mesh
+	slab.position = SLAB_CENTER
+	root.add_child(slab)
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-90, 0, 0)
 	sun.shadow_enabled = true

@@ -91,13 +91,16 @@ struct GatherParamsGPU {
 	uint32_t page_rect_count;
 	uint32_t pad0;
 	uint32_t pad1;
-	uint32_t pad2;
+	// GodotNext: ps_swrt_trace (#186). Read only by the software sibling (NEXTGI_TRACE_SDF), whose
+	// detail hits' D6 lookup checks its indices against the SRC counts; pad2 and pad4 in the
+	// hardware shader.
+	uint32_t card_set_count;
 	float max_trace_roughness;
 	float reflect_divisor;
 	uint32_t reflect_enabled;
 	uint32_t reflect_debug;
 	uint32_t sampling_mode;
-	uint32_t pad4;
+	uint32_t card_count;
 	uint32_t ray_stride;
 	uint32_t ray_count;
 	// GodotNext: nextgi_reflection_behaviours (#132). Fog at reflection hits.
@@ -727,7 +730,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.sky_enabled = sky_enabled;
 	params.feedback_count = p_feedback_count;
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
-	params.record_count = swrt ? 0u : next_gi->get_rt_scene()->get_total_record_count();
+	// GodotNext: ps_swrt_trace (#186). On the software tier record i is SWRT instance i (the record
+	// pass in the AS-updates slot): detail hits and the SRC feedback read it.
+	params.record_count = swrt ? swrt_tracer->get_record_count() : next_gi->get_rt_scene()->get_total_record_count();
 	params.far_distance = MAX(float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance")), params.rt_radius);
 	params.far_occlusion_only = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_occlusion_only")) ? 1u : 0u;
 	params.page_rect_count = relight->get_page_rect_count();
@@ -740,7 +745,9 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.reflect_enabled = NextGI::is_reflections_enabled() ? 1u : 0u;
 	params.reflect_debug = next_gi->get_active_debug_view() == NextGI::DEBUG_VIEW_SPECULAR_HIT ? 1u : 0u;
 	params.sampling_mode = rr_sampling_mode;
-	params.pad4 = 0u;
+	// GodotNext: ps_swrt_trace (#186)
+	params.card_set_count = swrt ? src->get_card_set_count() : 0u;
+	params.card_count = swrt ? src->get_card_count() : 0u;
 	params.ray_stride = ray_stride;
 	params.ray_count = ray_count;
 	params.fog_enabled = 0u;
@@ -813,7 +820,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!surfaces.is_valid()) {
 		surfaces = dummy_buffer;
 	}
-	RID records = swrt ? RID() : next_gi->get_rt_scene()->get_instance_record_buffer();
+	RID records = swrt ? swrt_tracer->get_record_buffer() : next_gi->get_rt_scene()->get_instance_record_buffer();
 	if (!records.is_valid()) {
 		records = dummy_buffer;
 	}

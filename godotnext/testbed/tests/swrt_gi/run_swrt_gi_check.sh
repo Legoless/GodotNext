@@ -3,7 +3,8 @@
 # the same view, then the software-tier pass against it.
 #
 # Usage:
-#   run_swrt_gi_check.sh [--mode=smoke|reflect|toggle|budget] -- <godot> <godot arguments without a scene>
+#   run_swrt_gi_check.sh [--mode=smoke|reflect|toggle|budget|bleed|detail] [--deny-ray-query] --
+#     <godot> <godot arguments without a scene>
 #
 # --mode=smoke (default): res://tests/swrt_gi/swrt_gi_check.tscn on the kitbash at High and at
 #   Epic (quality 2 and 3).
@@ -14,6 +15,15 @@
 # --mode=budget: swrt_gi_check.tscn --check=budget at High, started with hardware_ray_tracing Auto:
 #   HWRT until debug/as_budget_bytes drops to 1 byte at runtime, then SWRT (AS_MEMORY) from the next
 #   frame on. It needs a device with the HWRT tier; elsewhere it fails.
+# --mode=bleed (#188): swrt_gi_check.tscn --check=bleed on Color Box Room A seen from above, at High:
+#   the floor's red and green bleed from the off-screen walls, against the hardware tier's.
+# --mode=detail (#186 step 3): swrt_gi_check.tscn --check=detail, the bleed view on the software
+#   tier at High with software_ray_tracing_mode Detail (1): detail hits resolve through D6. The
+#   hardware tier has no detail mode, so there is no reference pass.
+# --deny-ray-query (smoke, bleed and detail): the software passes run with hardware_ray_tracing
+#   Auto and debug/deny_ray_query, the software tier as on a device without ray query
+#   (NO_RAY_QUERY); the check then also asserts no RT arena and SWRT instances. The reference
+#   passes run without it.
 #
 # Each pass writes godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true, the
 # pass's hardware_ray_tracing (0 Auto for the reference, 1 Off for the software tier) and the
@@ -45,12 +55,21 @@ override="$testbed_dir/override.cfg"
 RECORDED_WORLD_HITS_HIGH=1770
 RECORDED_WORLD_HITS_EPIC=7462
 RECORDED_REFLECTION_HITS_HIGH=30409
+# The hardware tier's floor bleed on the bleed view at High once voxel lighting has filled,
+# measured by this check with b0098c6b.
+RECORDED_RED_BLEED_HIGH=0.007472
+RECORDED_GREEN_BLEED_HIGH=0.005414
 
 mode=smoke
+deny=false
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--mode=smoke | --mode=reflect | --mode=toggle | --mode=budget)
+	--mode=smoke | --mode=reflect | --mode=toggle | --mode=budget | --mode=bleed | --mode=detail)
 		mode="${1#--mode=}"
+		shift
+		;;
+	--deny-ray-query)
+		deny=true
 		shift
 		;;
 	--)
@@ -74,7 +93,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# run_pass <hardware_ray_tracing> <quality> <scene> <scene arguments...>
+# run_pass <hardware_ray_tracing> <quality> <scene> <scene arguments...>. pass_deny=true adds
+# debug/deny_ray_query and pass_detail=true software_ray_tracing_mode Detail.
+pass_deny=false
+pass_detail=false
 run_pass() {
 	local hwrt=$1 quality=$2 scene=$3
 	shift 3
@@ -82,12 +104,16 @@ run_pass() {
 		echo "run_swrt_gi_check.sh: $override already exists; not overwriting it" >&2
 		exit 2
 	fi
+	local swrt_mode=0
+	[[ "$pass_detail" == true ]] && swrt_mode=1
 	cat >"$override" <<CFG
 [rendering]
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt
 global_illumination/nextgi/quality=$quality
+global_illumination/nextgi/debug/deny_ray_query=$pass_deny
+global_illumination/nextgi/software_ray_tracing_mode=$swrt_mode
 CFG
 	set +e
 	"${godot[@]}" "$scene" -- "$@" >"$log" 2>&1
@@ -95,7 +121,7 @@ CFG
 	set -e
 	rm -f "$override"
 	cat "$log"
-	echo "GODOTNEXT_SWRT_GI_LOG {\"hwrt\":$hwrt,\"quality\":$quality,\"errors\":$(grep -c 'ERROR:' "$log" || true),\"invalid_metal_usage\":$(grep -c 'Invalid Metal usage' "$log" || true),\"shader_validation\":$(grep -c 'Error detected in' "$log" || true),\"status\":$pass_status}"
+	echo "GODOTNEXT_SWRT_GI_LOG {\"hwrt\":$hwrt,\"quality\":$quality,\"deny_ray_query\":$pass_deny,\"software_ray_tracing_mode\":$swrt_mode,\"errors\":$(grep -c 'ERROR:' "$log" || true),\"invalid_metal_usage\":$(grep -c 'Invalid Metal usage' "$log" || true),\"shader_validation\":$(grep -c 'Error detected in' "$log" || true),\"status\":$pass_status}"
 }
 
 # reference <key> <recorded> <scene> <scene arguments...>: prints the reference value.
@@ -112,16 +138,54 @@ reference() {
 	echo "$value"
 }
 
+# software_pass <quality> <scene> <scene arguments...>: hardware_ray_tracing Off, or Auto under
+# debug/deny_ray_query with --deny-ray-query.
+software_pass() {
+	local hwrt=1
+	if [[ "$deny" == true ]]; then
+		hwrt=0
+		pass_deny=true
+	fi
+	run_pass "$hwrt" "$@"
+	pass_deny=false
+}
+
+# bleed_reference <name> <recorded>: the hardware tier's bleed value from the reference pass's log.
+bleed_reference() {
+	local key=$1 recorded=$2 value
+	value=$(grep -m1 "^SWRT_GI_REFERENCE " "$log" | sed -n "s/.*$key=\([0-9.]*\).*/\1/p" || true)
+	if [[ "$pass_status" -ne 0 || -z "$value" ]] || ! awk -v v="$value" 'BEGIN { exit !(v > 0) }'; then
+		echo "run_swrt_gi_check.sh: no hardware-tier $key on this machine; using the value recorded on the Apple M5 Max, $key=$recorded" >&2
+		value=$recorded
+	fi
+	echo "$value"
+}
+
 godot=("$@")
 failed=0
+if [[ "$deny" == true && "$mode" != "smoke" && "$mode" != "bleed" && "$mode" != "detail" ]]; then
+	echo "run_swrt_gi_check.sh: --deny-ray-query runs with --mode=smoke, bleed or detail" >&2
+	exit 2
+fi
 if [[ "$mode" == "smoke" ]]; then
 	for quality in 2 3; do
 		recorded=$RECORDED_WORLD_HITS_HIGH
 		[[ "$quality" == 3 ]] && recorded=$RECORDED_WORLD_HITS_EPIC
 		hits=$(reference world_hits "$recorded" "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=HWRT)
-		run_pass 1 "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=SWRT --hwrt-world-hits="$hits"
+		software_pass "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=SWRT --hwrt-world-hits="$hits"
 		[[ "$pass_status" -ne 0 ]] && failed=1
 	done
+elif [[ "$mode" == "bleed" ]]; then
+	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=bleed --expected-tier=HWRT >&2
+	red=$(bleed_reference red_bleed "$RECORDED_RED_BLEED_HIGH")
+	green=$(bleed_reference green_bleed "$RECORDED_GREEN_BLEED_HIGH")
+	software_pass 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=bleed --expected-tier=SWRT --hwrt-red-bleed="$red" --hwrt-green-bleed="$green"
+	[[ "$pass_status" -ne 0 ]] && failed=1
+elif [[ "$mode" == "detail" ]]; then
+	pass_detail=true
+	software_pass 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=detail --expected-tier=SWRT
+	pass_detail=false
+	[[ "$pass_status" -ne 0 ]] && failed=1
 elif [[ "$mode" == "toggle" || "$mode" == "budget" ]]; then
 	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check="$mode"
 	[[ "$pass_status" -ne 0 ]] && failed=1

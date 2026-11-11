@@ -235,6 +235,16 @@ void NextGI::collect_device_inputs(const RenderingDevice *p_device, const String
 	r_inputs.ray_query_hw = r_inputs.ray_query;
 }
 
+// GodotNext: ps_swrt_trace (#186, #188)
+void NextGI::apply_ray_query_denial(TierInputs &r_inputs, bool p_deny) {
+	if (!p_deny) {
+		return;
+	}
+	r_inputs.ray_query = false;
+	r_inputs.ray_query_hw = false;
+	r_inputs.driver_reason = NO_RAY_QUERY;
+}
+
 // GodotNext: nextgi_quality_presets (#55). Startup benchmark rule: <= 5 ms picks High, else Medium.
 NextGI::Quality NextGI::nextgi_auto_quality_from_usec(uint64_t p_usec) {
 	return p_usec > 0 && p_usec <= 5000 ? QUALITY_HIGH : QUALITY_MEDIUM;
@@ -497,6 +507,12 @@ void NextGI::_report(const String &p_line, const TierResult &p_result) const {
 	}
 }
 
+// GodotNext: ps_swrt_trace (#186, #188)
+bool NextGI::_deny_ray_query() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	return settings != nullptr && settings->has_setting("rendering/global_illumination/nextgi/debug/deny_ray_query") && bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/deny_ray_query"));
+}
+
 void NextGI::init(bool p_forward_plus) {
 	TierInputs new_inputs;
 	new_inputs.forward_plus = p_forward_plus;
@@ -508,6 +524,8 @@ void NextGI::init(bool p_forward_plus) {
 	if (rd != nullptr) {
 		collect_device_inputs(rd, rd->get_device_api_name(), rd->get_device_type(), new_inputs);
 	}
+	// GodotNext: ps_swrt_trace (#186, #188). Before the safety net, so no self-test runs.
+	apply_ray_query_denial(new_inputs, _deny_ray_query());
 	_apply_safety_net(new_inputs);
 
 	String line;
@@ -552,6 +570,8 @@ void NextGI::set_hardware_ray_tracing(int p_mode) {
 	new_inputs.hwrt_setting = mode;
 	// Doctests build their own NextGI. Only the renderer instance talks to the live device.
 	if (singleton == this) {
+		// GodotNext: ps_swrt_trace (#186, #188). init() applied it already; idempotent.
+		apply_ray_query_denial(new_inputs, _deny_ray_query());
 		_apply_safety_net(new_inputs);
 	}
 	String line;
@@ -1302,12 +1322,15 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			rt_scene->rebuild_tlas(p_render_data);
 		} else if (slot == PASS_SLOT_AS_UPDATES && swrt_frame) {
 			// GodotNext: ps_swrt_trace (#186, plan §21.2.4). Line 1a on the software tier: the
-			// global SDF update, then the scene params every later slot of the frame traces with
-			// (this frame's level origins, and the voxel volume the pre-render hook updated).
+			// global SDF update, the record pass that assigns the instances' relight pages (as the
+			// TLAS phase does on the hardware tier; #188), then the scene params every later slot
+			// of the frame traces with (this frame's level origins, and the voxel volume the
+			// pre-render hook updated).
 			if (swrt_trace == nullptr) {
 				swrt_trace = memnew(NextGISWRTTrace);
 			}
 			swrt_trace->update_scene(p_render_data);
+			swrt_trace->assign_src_pages(relight);
 			swrt_trace->prepare_scene_params(voxel_lighting);
 		} else if (slot == PASS_SLOT_AS_BUILDS && rt_scene != nullptr) {
 			// GodotNext: nextgi_frame_tier (#186). debug/as_budget_bytes lowers the AS memory budget,

@@ -5,5 +5,6 @@
 [node name="LumenLiteHwrtCheck" type="Node3D"]
 script = ExtResource("1")
 expected_tier = "HWRT"
+field_checks = true
 scene_path = "res://scenes/roughness_corridor/roughness_corridor.tscn"
 camera_name = "CaptureCam"

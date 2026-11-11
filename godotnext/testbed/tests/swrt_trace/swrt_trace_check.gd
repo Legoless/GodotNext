@@ -16,7 +16,9 @@ extends Node3D
 ## - rays whose physics hit lies within the 2 m detail range hit it in time,
 ## - few rays run out of trace steps (a ray out of steps reports a hit),
 ## - no ray-query ShaderRD was created in the process (override.cfg starts it with
-##   hardware_ray_tracing Off, which skips the startup self-test) (#186).
+##   hardware_ray_tracing Off, which skips the startup self-test) (#186); under
+##   debug/deny_ray_query (a device without ray query) also the reason NO_RAY_QUERY, no RT
+##   arena and SWRT instances.
 ## Then the sun drops to LOW_SUN_DEGREES above the horizon, so the shadow rays of the open
 ## floor graze it for tens of meters through its resident bricks: no open-floor receiver
 ## that physics sees lit reads shadowed, and no grazing gather ray over the open floor
@@ -648,6 +650,18 @@ func _verify(p_info: Dictionary, p_readback: Dictionary) -> void:
 	summary["ray_query_shader_versions"] = int(p_info.get("ray_query_shader_versions", -1))
 	if int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1 and int(p_info.get("ray_query_shader_versions", -1)) != 0:
 		reasons.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off" % int(p_info.get("ray_query_shader_versions", -1)))
+	# GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: a device without ray query.
+	if bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false)):
+		summary["reason"] = str(p_info.get("reason", ""))
+		summary["rt_arena_bytes"] = int(p_info.get("rt_arena_bytes", -1))
+		if str(p_info.get("reason", "")) != "NO_RAY_QUERY":
+			reasons.append("deny_ray_query: the tier's reason is %s, expected NO_RAY_QUERY" % str(p_info.get("reason", "")))
+		if int(p_info.get("rt_arena_bytes", -1)) != 0:
+			reasons.append("deny_ray_query: the RT arena holds %d bytes" % int(p_info.get("rt_arena_bytes", -1)))
+		if int(p_info.get("ray_query_shader_versions", -1)) != 0:
+			reasons.append("deny_ray_query: %d ray-query ShaderRD versions were created" % int(p_info.get("ray_query_shader_versions", -1)))
+		if int(p_info.get("swrt_trace_instances", 0)) <= 0:
+			reasons.append("deny_ray_query: no SWRT instances (no runtime mesh SDFs from the CPU copies)")
 	var grid: Vector2i = p_readback["grid"]
 	var screen: Vector2i = p_readback["screen"]
 	var camera: Transform3D = p_readback["camera"]

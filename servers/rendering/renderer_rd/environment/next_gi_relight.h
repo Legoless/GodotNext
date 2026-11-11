@@ -49,6 +49,11 @@ class NextGIRelight {
 
 	struct ShaderState;
 	ShaderState *shader = nullptr;
+	// GodotNext: ps_swrt_trace (#186, #188). The software tier's sibling
+	// (nextgi_src_relight_swrt.glsl): the same kernel, whose shadow rays march the global SDF. The
+	// software tier never constructs the ray-query ShaderRD.
+	struct SWRTShaderState;
+	SWRTShaderState *swrt_shader = nullptr;
 
 	struct CardPage {
 		uint32_t card_index = 0;
@@ -174,6 +179,7 @@ private:
 
 	bool _ensure_atlases();
 	bool _ensure_shader();
+	bool _ensure_swrt_shader(); // GodotNext: ps_swrt_trace (#186, #188)
 	RID _storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t p_count, uint32_t p_stride);
 	void _reset_uniform_set();
 	void _upload_page_rects();
@@ -241,6 +247,9 @@ public:
 	uint32_t get_max_relight_age() const { return last_max_age; }
 
 	void fill_info(Dictionary &r_info) const;
+	// GodotNext: ps_swrt_trace (#186, #188). The compute source of the hardware relight or of its
+	// software sibling (nextgi_src_relight_swrt.glsl), for the doctests.
+	static String build_shader_source(bool p_software);
 
 	NextGIRelight();
 	~NextGIRelight();

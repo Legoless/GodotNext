@@ -297,6 +297,7 @@ private:
 	// #60: the specular first-hit distance (R16F, 65504 on a miss), for the RR guides (#206).
 	RID get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const;
 	void _apply_safety_net(TierInputs &r_inputs);
+	static bool _deny_ray_query(); // GodotNext: ps_swrt_trace (#186, #188)
 	void _select_swrt_auto_quality();
 	void _append_swrt_info(Dictionary &r_info) const;
 	void _sync_device_lost_callback();
@@ -445,6 +446,10 @@ public:
 	// take the reason from the API name (D3D12 -> D3D12_NO_DXR, else NO_RAY_QUERY) and every ray-query
 	// device counts as hardware accelerated.
 	static void collect_device_inputs(const RenderingDevice *p_device, const String &p_api_name, RenderingDeviceEnums::DeviceType p_device_type, TierInputs &r_inputs);
+	// GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: the inputs of a device without
+	// ray query (NO_RAY_QUERY). Applied after collect_device_inputs() and before the startup
+	// self-test, which then never runs.
+	static void apply_ray_query_denial(TierInputs &r_inputs, bool p_deny);
 
 	// Auto resolves to High until the startup microbenchmark lands (#55).
 	static Quality resolve_quality(Quality p_setting);

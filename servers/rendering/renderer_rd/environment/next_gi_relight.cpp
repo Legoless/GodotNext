@@ -37,8 +37,10 @@
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -190,6 +192,13 @@ struct NextGIRelight::ShaderState {
 	RID pipeline;
 };
 
+// GodotNext: ps_swrt_trace (#186, #188)
+struct NextGIRelight::SWRTShaderState {
+	NextgiSrcRelightSwrtShaderRD shader;
+	RID version;
+	RID pipeline;
+};
+
 static uint32_t _pack_xy(uint32_t p_x, uint32_t p_y) {
 	return p_x | (p_y << 16);
 }
@@ -316,6 +325,17 @@ void NextGIRelight::free_resources() {
 		}
 		memdelete(shader);
 		shader = nullptr;
+	}
+	// GodotNext: ps_swrt_trace (#186, #188)
+	if (swrt_shader != nullptr) {
+		if (rd != nullptr && swrt_shader->pipeline.is_valid()) {
+			rd->free_rid(swrt_shader->pipeline);
+		}
+		if (swrt_shader->version.is_valid()) {
+			swrt_shader->shader.version_free(swrt_shader->version);
+		}
+		memdelete(swrt_shader);
+		swrt_shader = nullptr;
 	}
 	if (rd == nullptr) {
 		return;
@@ -465,6 +485,31 @@ bool NextGIRelight::_ensure_shader() {
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
 	shader->pipeline = rd->compute_pipeline_create(shader_rid);
 	ERR_FAIL_COND_V(shader->pipeline.is_null(), false);
+	return true;
+}
+
+// GodotNext: ps_swrt_trace (#186, #188). No can_initialize_ray_query_shaders() check and no
+// notify: the sibling has no ray query.
+bool NextGIRelight::_ensure_swrt_shader() {
+	if (swrt_shader != nullptr && swrt_shader->pipeline.is_valid()) {
+		return true;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	if (swrt_shader == nullptr) {
+		swrt_shader = memnew(SWRTShaderState);
+		Vector<String> defines;
+		defines.push_back(radiance_is_packed ? "" : "#define NEXTGI_RADIANCE_RGBA16F\n");
+		swrt_shader->shader.initialize(defines);
+		swrt_shader->version = swrt_shader->shader.version_create(false);
+		if (!swrt_shader->version.is_valid()) {
+			memdelete(swrt_shader);
+			swrt_shader = nullptr;
+			ERR_FAIL_V_MSG(false, "The NextGI SRC relight software shader failed to compile.");
+		}
+	}
+	swrt_shader->pipeline = rd->compute_pipeline_create(swrt_shader->shader.version_get_shader(swrt_shader->version, 0));
+	ERR_FAIL_COND_V(swrt_shader->pipeline.is_null(), false);
 	return true;
 }
 
@@ -732,22 +777,23 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	scheduled_pages.clear();
 	probe_rgb.clear();
 	mask_pages.clear();
-	// GodotNext: ps_swrt_trace (#186). The relight's shadow rays are ray-query rays; the software
-	// tier's SDF shadow rays are #188's. Return before the ray-query ShaderRD is created.
-	if (NextGI::get_singleton() != nullptr && NextGI::get_singleton()->get_tier_result().tier == NextGI::TIER_SOFTWARE) {
-		return;
-	}
-	if (p_render_data->sdfgi_update_data == nullptr || !_ensure_atlases() || !_ensure_shader()) {
-		return;
-	}
+	// GodotNext: ps_swrt_trace (#186, #188). The software tier runs the same kernel through its
+	// sibling, whose shadow rays march the global SDF; its records come from the SWRT record pass.
+	// The tier branch comes first: the ray-query ShaderRD is never created on that tier.
 	NextGI *next_gi = NextGI::get_singleton();
-	NextGISRC *src = NextGISRC::get_singleton();
-	if (next_gi == nullptr || next_gi->get_rt_scene() == nullptr || src == nullptr || src->get_card_buffer().is_null()) {
+	const bool swrt = next_gi != nullptr && next_gi->get_tier_result().tier == NextGI::TIER_SOFTWARE;
+	if (p_render_data->sdfgi_update_data == nullptr || !_ensure_atlases() || !(swrt ? _ensure_swrt_shader() : _ensure_shader())) {
 		return;
 	}
-	const RID tlas = next_gi->get_rt_scene()->get_tlas();
-	const NextGIFarField *far_field = next_gi->get_rt_scene()->get_far_field();
-	const bool near_ready = tlas.is_valid() && next_gi->get_rt_scene()->is_tlas_traceable();
+	NextGISRC *src = NextGISRC::get_singleton();
+	NextGISWRTTrace *swrt_trace = swrt ? next_gi->get_swrt_trace() : nullptr;
+	if (next_gi == nullptr || (swrt ? swrt_trace == nullptr : next_gi->get_rt_scene() == nullptr) || src == nullptr || src->get_card_buffer().is_null()) {
+		return;
+	}
+	const RID tlas = swrt ? RID() : next_gi->get_rt_scene()->get_tlas();
+	const NextGIFarField *far_field = swrt ? nullptr : next_gi->get_rt_scene()->get_far_field();
+	const RID record_buffer = swrt ? swrt_trace->get_record_buffer() : next_gi->get_rt_scene()->get_instance_record_buffer();
+	const bool near_ready = swrt ? swrt_trace->is_ready() && record_buffer.is_valid() : tlas.is_valid() && next_gi->get_rt_scene()->is_tlas_traceable();
 	const bool far_ready = far_field != nullptr && far_field->is_trace_ready();
 	if (instances.is_empty() || (!near_ready && !far_ready)) {
 		return;
@@ -1163,7 +1209,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
-	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
+	const RID shader_rid = swrt ? swrt_shader->shader.version_get_shader(swrt_shader->version, 0) : shader->shader.version_get_shader(shader->version, 0);
+	const RID pipeline = swrt ? swrt_shader->pipeline : shader->pipeline;
 	RID directional_tex = light_storage->directional_shadow_get_texture();
 	if (!directional_tex.is_valid()) {
 		directional_tex = dummy_depth;
@@ -1182,14 +1229,16 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	static RID cached_records;
 	static RID cached_near_tlas;
 	static RID cached_far_tlas;
-	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != next_gi->get_rt_scene()->get_instance_record_buffer() || cached_near_tlas != tlas || cached_far_tlas != far_tlas) {
+	static bool cached_swrt = false;
+	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != record_buffer || cached_near_tlas != tlas || cached_far_tlas != far_tlas || cached_swrt != swrt) {
 		_reset_uniform_set();
 		cached_directional = directional_tex;
 		cached_positional = positional_tex;
 		cached_cards = src->get_card_buffer();
-		cached_records = next_gi->get_rt_scene()->get_instance_record_buffer();
+		cached_records = record_buffer;
 		cached_near_tlas = tlas;
 		cached_far_tlas = far_tlas;
+		cached_swrt = swrt;
 	}
 	if (!uniform_set.is_valid()) {
 		RD::Uniform uniforms[20] = {
@@ -1204,7 +1253,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 8, Vector<RID>({ shadow_sampler, positional_tex })),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, src->get_card_buffer()),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, src->get_card_set_buffer()),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, next_gi->get_rt_scene()->get_instance_record_buffer()),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, record_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, light_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, reuse_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buffer),
@@ -1214,29 +1263,44 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ material_sampler, indirect_texture })),
 		};
-		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
-		uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
-		far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
+		if (swrt) {
+			// GodotNext: ps_swrt_trace (#186, #188). The sibling's set 0 has no TLAS, and there is no
+			// far field (HWRT only, plan L8).
+			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms + 1, 19), shader_rid, 0);
+		} else {
+			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
+			uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
+			far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
+		}
 	}
+	// GodotNext: ps_swrt_trace (#186, #188). Set 1: the global-SDF trace with this frame's scene
+	// params (the AS-updates slot filled them); freed after the dispatch.
+	const RID trace_set = swrt ? swrt_trace->create_trace_uniform_set(shader_rid, 1, false, next_gi->get_voxel_lighting()) : RID();
 	const uint32_t total_pages = gpu_pages.size() + far_gpu_pages.size();
 	const uint32_t near_budget = total_pages > 0 ? uint32_t(uint64_t(params.ray_budget) * gpu_pages.size() / total_pages) : 0;
 	const uint32_t far_budget = params.ray_budget - near_budget;
 	params.ray_budget = near_budget;
 	params.page_offset = 0;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
-	if (near_ready && uniform_set.is_valid() && !gpu_pages.is_empty()) {
+	if (near_ready && uniform_set.is_valid() && (!swrt || trace_set.is_valid()) && !gpu_pages.is_empty()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipeline);
+		rd->compute_list_bind_compute_pipeline(list, pipeline);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		if (swrt) {
+			rd->compute_list_bind_uniform_set(list, trace_set, 1);
+		}
 		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, gpu_pages.size());
 		rd->compute_list_end();
+	}
+	if (trace_set.is_valid()) {
+		rd->free_rid(trace_set);
 	}
 	params.ray_budget = far_budget;
 	params.page_offset = gpu_pages.size();
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 	if (far_ready && far_uniform_set.is_valid() && !far_gpu_pages.is_empty()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipeline);
+		rd->compute_list_bind_compute_pipeline(list, pipeline);
 		rd->compute_list_bind_uniform_set(list, far_uniform_set, 0);
 		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, far_gpu_pages.size());
 		rd->compute_list_end();
@@ -1444,6 +1508,25 @@ float NextGIRelight::get_max_origin_offset() const {
 		max_offset = MAX(max_offset, instance_pages.record.origin_offset);
 	}
 	return max_offset;
+}
+
+// GodotNext: ps_swrt_trace (#186, #188)
+template <typename T>
+static String _nextgi_relight_source() {
+	T shader;
+	shader.initialize(Vector<String>({ "" }));
+	const RID version = shader.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = shader.version_build_variant_stage_sources(version, 0);
+	shader.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
+String NextGIRelight::build_shader_source(bool p_software) {
+	return p_software ? _nextgi_relight_source<NextgiSrcRelightSwrtShaderRD>() : _nextgi_relight_source<NextgiSrcRelightShaderRD>();
 }
 
 void NextGIRelight::fill_info(Dictionary &r_info) const {

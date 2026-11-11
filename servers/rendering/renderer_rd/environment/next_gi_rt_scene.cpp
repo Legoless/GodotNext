@@ -744,12 +744,17 @@ void nextgi_rt_patch_positions(Vector<float> &r_positions, uint32_t p_byte_offse
 // GodotNext: nextgi_alpha_policy (#61). Only effective-opaque surfaces enter the TLAS. Alpha-tested
 // materials join it only with the `nextgi_rt_opaque` render mode (the BaseMaterial3D override);
 // blended surfaces never do.
-static bool _nextgi_rt_material_is_alpha(RID p_material) {
+// GodotNext: ps_swrt_trace (#186, #188). Shared with the SRC's software-tier card rule.
+bool nextgi_rt_material_is_alpha(RID p_material) {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	if (p_material.is_null() || material_storage == nullptr) {
 		return false;
 	}
 	return material_storage->material_get_nextgi_rt_class(p_material) != MaterialStorage::ShaderData::NEXTGI_RT_OPAQUE;
+}
+
+static bool _nextgi_rt_material_is_alpha(RID p_material) {
+	return nextgi_rt_material_is_alpha(p_material);
 }
 
 struct NextGIRTScene::InstanceEncoder {
