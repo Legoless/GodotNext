@@ -60,7 +60,7 @@ public:
 	class ViewField : public RenderBufferCustomDataRD {
 		GDCLASS(ViewField, RenderBufferCustomDataRD);
 
-		static inline SafeNumeric<uint32_t> alive;
+		static inline SafeNumeric<uint32_t> alive{ 0 };
 
 	public:
 		RID probe_buffer;
