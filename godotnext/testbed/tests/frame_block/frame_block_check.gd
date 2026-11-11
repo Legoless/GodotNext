@@ -31,8 +31,9 @@ extends Node
 ##   scene's BLASes build);
 ## - SWRT: the software tracer holds at least 3 global-SDF levels and the room's instances, its
 ##   global SDF was updated in the "NextGI: AS updates" slot (line 1a), no ray-query ShaderRD was
-##   created since the tier was selected, and outside Lumen Lite the gather ran the software
-##   sibling (gather_tier SWRT).
+##   created since the tier was selected (and none in the whole process when hardware_ray_tracing
+##   was Off at launch, which skips the startup self-test), and outside Lumen Lite the gather ran
+##   the software sibling (gather_tier SWRT).
 ## The block's DEV_ASSERT traps a dev_build binary. Other builds print an error and skip the block,
 ## which fails the timestamp check.
 ##
@@ -80,6 +81,7 @@ var as_builds_max_gpu_ns := 0
 var seen_stamp_frames := {}
 var failures := PackedStringArray()
 var done := false
+var hwrt_off_at_launch := false
 
 
 func _ready() -> void:
@@ -94,6 +96,7 @@ func _ready() -> void:
 		_finish(["--expect=active or --expect=inactive is required"])
 		return
 	# The tier is chosen at RenderingDevice init, before the scene loads.
+	hwrt_off_at_launch = int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1
 	var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
 	tier = String(tier_info.get("tier", ""))
 	_build_scene()
@@ -300,6 +303,8 @@ func _final_failures() -> PackedStringArray:
 				result.append("the global SDF was updated in slot \"%s\", expected \"NextGI: AS updates\"" % [String(tier_info.get("swrt_update_slot", "none"))])
 			if int(tier_info.get("ray_query_shader_versions_since_tier", -1)) != 0:
 				result.append("%d ray-query ShaderRD versions were created on the SWRT tier" % [int(tier_info.get("ray_query_shader_versions_since_tier", -1))])
+			if hwrt_off_at_launch and int(tier_info.get("ray_query_shader_versions", -1)) != 0:
+				result.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off" % [int(tier_info.get("ray_query_shader_versions", -1))])
 			if not bool(tier_info.get("lite_beta", false)) and String(tier_info.get("gather_tier", "")) != "SWRT":
 				result.append("the gather ran the %s shader on the SWRT tier" % [String(tier_info.get("gather_tier", ""))])
 		else:

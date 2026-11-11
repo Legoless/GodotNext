@@ -14,7 +14,9 @@ extends Node3D
 ## - SDF shadow rays toward the sun agree with physics,
 ## - the #182 coverage words of the two-sided panel match the CPU rule,
 ## - rays whose physics hit lies within the 2 m detail range hit it in time,
-## - few rays run out of trace steps (a ray out of steps reports a hit).
+## - few rays run out of trace steps (a ray out of steps reports a hit),
+## - no ray-query ShaderRD was created in the process (override.cfg starts it with
+##   hardware_ray_tracing Off, which skips the startup self-test) (#186).
 ## Then the sun drops to LOW_SUN_DEGREES above the horizon, so the shadow rays of the open
 ## floor graze it for tens of meters through its resident bricks: no open-floor receiver
 ## that physics sees lit reads shadowed, and no grazing gather ray over the open floor
@@ -643,6 +645,9 @@ func _verify(p_info: Dictionary, p_readback: Dictionary) -> void:
 	summary["instances"] = int(p_info.get("swrt_trace_instances", 0))
 	if tier != "SWRT":
 		reasons.append("tier is %s, not SWRT" % tier)
+	summary["ray_query_shader_versions"] = int(p_info.get("ray_query_shader_versions", -1))
+	if int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1 and int(p_info.get("ray_query_shader_versions", -1)) != 0:
+		reasons.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off" % int(p_info.get("ray_query_shader_versions", -1)))
 	var grid: Vector2i = p_readback["grid"]
 	var screen: Vector2i = p_readback["screen"]
 	var camera: Transform3D = p_readback["camera"]

@@ -9,8 +9,10 @@ extends Node3D
 ## GodotNext: ps_swrt_trace (#186). With --expected-tier=SWRT the reflections run the shared
 ## reflect kernel in the software sibling: its clean SDF hits (reflect_sdf_hits minus the
 ## step-limit and near-origin ones) must be at least CLEAN_HIT_SHARE of the hardware tier's
-## reflection hits on the same view (--hwrt-reflection-hits=N, from a hardware pass). A hardware
-## pass prints "SWRT_GI_REFERENCE reflection_hits=N".
+## reflection hits on the same view (--hwrt-reflection-hits=N, from a hardware pass). No ray-query
+## ShaderRD may be created since the tier was selected, nor in the whole process when
+## hardware_ray_tracing was Off at launch (Off skips the startup self-test). A hardware pass
+## prints "SWRT_GI_REFERENCE reflection_hits=N".
 ##
 ## Run with the NextGI project setting on, e.g.:
 ##   nextgi_reflect/run_reflect.sh [--hwrt=auto|off] -- godot --path godotnext/testbed \
@@ -72,6 +74,10 @@ func _run() -> void:
 		print("SWRT_GI_REFLECT rays=%d hits=%d sdf_hits=%d clean=%d exhausted=%d near=%d hwrt_hits=%d ratio=%.3f (report-only)" % [rays, hits, sdf_hits, clean, int(status.get("reflect_sdf_exhausted", 0)), int(status.get("reflect_sdf_near", 0)), _hwrt_reflection_hits, float(clean) / float(maxi(_hwrt_reflection_hits, 1))])
 		if String(status.get("gather_tier", "")) != "SWRT":
 			_failures.append("the reflections ran the %s shader, expected the software sibling" % [String(status.get("gather_tier", ""))])
+		if int(status.get("ray_query_shader_versions_since_tier", -1)) != 0:
+			_failures.append("%d ray-query ShaderRD versions were created on the SWRT tier" % [int(status.get("ray_query_shader_versions_since_tier", -1))])
+		if int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1 and int(status.get("ray_query_shader_versions", -1)) != 0:
+			_failures.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off" % [int(status.get("ray_query_shader_versions", -1))])
 		if _hwrt_reflection_hits <= 0:
 			_failures.append("--hwrt-reflection-hits=N (the hardware tier's reflection hits) is required with --expected-tier=SWRT")
 		elif clean <= 0 or float(clean) < CLEAN_HIT_SHARE * float(_hwrt_reflection_hits):

@@ -2,7 +2,9 @@ extends Node
 
 ## Volumetric fog samples the world radiance cache in Color Box Room A (#44).
 ## GodotNext: ps_swrt_trace (#186). --expected-tier=HWRT (default) or SWRT: the tier the run must
-## report. The software tier has its own WRC producer, and fog reads it there too (L9b).
+## report. The software tier has its own WRC producer, and fog reads it there too (L9b). On the
+## software tier no ray-query ShaderRD may be created since the tier was selected, nor in the
+## whole process when hardware_ray_tracing was Off at launch (Off skips the startup self-test).
 
 
 func _ready() -> void:
@@ -55,9 +57,15 @@ func run() -> Dictionary:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--expected-tier="):
 			expected_tier = arg.trim_prefix("--expected-tier=")
-	var tier := String(RenderingServer.nextgi_get_tier_info().get("tier", ""))
+	var final_info := RenderingServer.nextgi_get_tier_info()
+	var tier := String(final_info.get("tier", ""))
 	if tier != expected_tier:
 		failures.append("tier %s, expected %s" % [tier, expected_tier])
+	if expected_tier == "SWRT":
+		if int(final_info.get("ray_query_shader_versions_since_tier", -1)) != 0:
+			failures.append("%d ray-query ShaderRD versions created on the SWRT tier" % int(final_info.get("ray_query_shader_versions_since_tier", -1)))
+		if int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1 and int(final_info.get("ray_query_shader_versions", -1)) != 0:
+			failures.append("%d ray-query ShaderRD versions created in a process started with hardware_ray_tracing Off" % int(final_info.get("ray_query_shader_versions", -1)))
 	if bytes != 14680064:
 		failures.append("bytes %d" % bytes)
 	if rays < 1:

@@ -10,7 +10,9 @@ extends Node
 ##
 ## With --expected-tier=SWRT it asserts:
 ## - the tier is SWRT, the gather ran the software sibling (gather_tier SWRT) and traced rays, and
-##   no ray-query ShaderRD was created since the tier was selected;
+##   no ray-query ShaderRD was created since the tier was selected, nor in the whole process when
+##   hardware_ray_tracing was Off at launch (the runner's software passes; Off skips the startup
+##   self-test);
 ## - clean SDF hits (gather_sdf_hits minus the step-limit and near-origin ones) are at least
 ##   CLEAN_HIT_SHARE of the hardware tier's world hits on the same view (--hwrt-world-hits, from
 ##   the hardware pass that run_swrt_gi_check.sh runs first: rays - misses - screen hits);
@@ -79,9 +81,11 @@ var toggle_log := []
 var budget_phase := 0
 var budget_frame := 0
 var budget_dispatches := -1
+var hwrt_off_at_launch := false
 
 
 func _ready() -> void:
+	hwrt_off_at_launch = int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/hardware_ray_tracing", 0)) == 1
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--check="):
 			mode = arg.trim_prefix("--check=")
@@ -293,6 +297,8 @@ func _checks(p_last: Dictionary) -> PackedStringArray:
 		result.append("the gather traced no rays")
 	if int(p_last.get("ray_query_shader_versions_since_tier", -1)) != 0:
 		result.append("%d ray-query ShaderRD versions were created on the SWRT tier" % [int(p_last.get("ray_query_shader_versions_since_tier", -1))])
+	if hwrt_off_at_launch and int(p_last.get("ray_query_shader_versions", -1)) != 0:
+		result.append("%d ray-query ShaderRD versions were created in a process started with hardware_ray_tracing Off" % [int(p_last.get("ray_query_shader_versions", -1))])
 	if float(clean) < CLEAN_HIT_SHARE * float(hwrt_world_hits):
 		result.append("%d clean SDF hits, expected at least %.2f x the hardware tier's %d world hits" % [clean, CLEAN_HIT_SHARE, hwrt_world_hits])
 	if float(exhausted) > MAX_EXHAUSTED_SHARE * float(sdf_hits):
