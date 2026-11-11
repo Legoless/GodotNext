@@ -1066,7 +1066,7 @@ void NextGI::_relight_src(RenderDataRD *p_render_data) {
 		relight->relight(p_render_data);
 	}
 	// GodotNext: ps_voxel_lighting (#188). Same slot as SRC relight, after capture, on HWRT. The
-	// software tier keeps its push-1 place, the pre-render hook (renderer_scene_render_rd.cpp),
+	// software tier keeps its earlier place, the pre-render hook (renderer_scene_render_rd.cpp),
 	// until the lead places it (#188 step 3).
 	if (result.tier == TIER_HWRT) {
 		update_voxel_lighting(p_render_data);
