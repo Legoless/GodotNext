@@ -40,7 +40,6 @@
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
-#include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
@@ -1058,43 +1057,6 @@ void NextGISWRTTrace::build_detail_froxels(RenderDataRD *p_render_data, NextGIVo
 	if (cull_set.is_valid()) {
 		rd->free_rid(cull_set);
 	}
-}
-
-void NextGISWRTTrace::trace_lite_probes(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting) {
-	if (p_render_data == nullptr || p_render_data->scene_data == nullptr || gpu == nullptr || !gpu->ready || field == nullptr) {
-		return;
-	}
-	NextGI *next_gi = NextGI::get_singleton();
-	NextGIIrradianceField *lite_field = next_gi != nullptr ? next_gi->ensure_irradiance_field() : nullptr;
-	if (lite_field == nullptr || !lite_field->ensure_probe_buffer()) {
-		return;
-	}
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	const RID probe_buffer = lite_field->get_probe_buffer();
-	const uint32_t probe_base = lite_field->consume_swrt_probe_base();
-	screen_size = Vector2i();
-	screen_depth = RID();
-	_bind_wrc(next_gi);
-	_fill_params(p_render_data, p_lighting, RID(), false, wrc_params.is_valid(), false, gpu->params_buffer);
-	Vector<RD::Uniform> uniforms;
-	_append_trace_uniforms(uniforms, gpu->params_buffer, p_lighting, RID(), true, false);
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, gpu->dummy_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, probe_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, gpu->dummy_buffer));
-	const RID set = rd->uniform_set_create(uniforms, gpu->gather_shader.version_get_shader(gpu->gather_version, VARIANT_LITE_PROBE), 0);
-	if (!set.is_valid()) {
-		return;
-	}
-	RENDER_TIMESTAMP("NextGI SDF Lite Probes");
-	LiteProbePushGPU push = { probe_base, { 0u, 0u, 0u } };
-	const RD::ComputeListID list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(list, gpu->pipelines[VARIANT_LITE_PROBE]);
-	rd->compute_list_bind_uniform_set(list, set, 0);
-	rd->compute_list_set_push_constant(list, &push, sizeof(push));
-	rd->compute_list_dispatch(list, NextGI::LITE_PROBES_PER_FRAME, 1, 1);
-	rd->compute_list_end();
-	rd->free_rid(set);
-	next_gi->note_lite_probe_traces(NextGI::LITE_PROBES_PER_FRAME);
 }
 
 void NextGISWRTTrace::_bind_wrc(NextGI *p_next_gi) {

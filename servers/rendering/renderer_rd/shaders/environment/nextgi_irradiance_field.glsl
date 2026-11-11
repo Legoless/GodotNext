@@ -3,7 +3,7 @@
 #version 450
 
 // GodotNext: ps_lumen_lite (#183). Irradiance-field gather for Lumen Lite (plan §21.2 L6).
-// Mode 0 packs WRC levels 0-1 into the probe buffer (hardware tier).
+// Mode 0 packs WRC levels 0-1 into the probe buffer (both tiers: the software WRC traces the SDF).
 // Mode 1 interpolates irradiance at half resolution. Mode 2 upsamples it into the GI buffers
 // and writes the rough specular from the WRC mips.
 // No ray query and no SSBO length: this shader stays valid on the software tier.
@@ -179,7 +179,7 @@ void lite_pack() {
 }
 
 // The 8 probes around world on the finest level whose grid contains it, with trilinear
-// weights times probe validity and, on the hardware tier, the depth-moment visibility.
+// weights times probe validity and, once the WRC is bound, its depth-moment visibility.
 // False when world is outside level 1 (no probe covers it).
 bool lite_probe_weights(vec3 world, vec3 normal, out uint corner_probe[8], out float corner_weight[8]) {
 	LiteParams params = lite_params();
@@ -353,7 +353,7 @@ void lite_upsample() {
 
 	// Specular: no reflection rays. At or below the SSR roughness the forward pass keeps its own
 	// specular (alpha 0, SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE). Rougher surfaces read the WRC
-	// mips of the surrounding probes at the reflection vector (software tier: the probes' L1).
+	// mips of the surrounding probes at the reflection vector (the probes' L1 until the WRC is bound).
 	vec4 reflection = vec4(0.0);
 	uint corner_probe[8];
 	float corner_weight[8];

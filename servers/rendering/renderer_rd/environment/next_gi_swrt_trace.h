@@ -67,8 +67,8 @@ struct NextGILight;
 // - trace_view() is the verification kernel: with debug/swrt_trace_readback it
 //   traces one gather and one reflection ray per cell of the ray grid after the
 //   frame block's slots, from the current frame's depth.
-// - trace_lite_probes() traced the Lumen Lite probes before Lite ran in the
-//   frame block; nothing calls it now.
+// - The Lite probe kernel (NEXTGI_SWRT_LITE_PROBE) is what run_microbenchmark()
+//   times for the auto quality; Lumen Lite itself reads the WRC in the frame block.
 // - trace_shadow_rays() is the SDF shadow-ray kernel the verification checks run; the SRC
 //   relight's own sibling (nextgi_src_relight_swrt.glsl) marches the same swrt_shadow_ray().
 // - assign_src_pages() (#188) runs after update_scene() in the same slot: the record pass that
@@ -89,7 +89,8 @@ struct NextGILight;
 //   21 instances, 22/23/24 detail mesh SDF info/pages/bricks, 25 froxel grid,
 //   26 two-sided instance list.
 // Kernel bindings: 27 rays (gather kernels) or shadow requests (shadow
-// kernel), 28 Lite probes or shadow results, 29 shadow requests out or lights.
+// kernel), 28 Lite probes (the microbenchmark) or shadow results, 29 shadow
+// requests out or lights.
 class NextGISWRTTrace {
 public:
 	enum Mode {
@@ -178,8 +179,6 @@ public:
 
 	// Software tier, once per frame before the depth prepass.
 	void update_scene(RenderDataRD *p_render_data);
-	// Lumen Lite (#183): the WRC probes traced this frame into the irradiance field.
-	void trace_lite_probes(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting);
 	// After the depth prepass of a scenario view: gather and reflection rays
 	// from this frame's depth. p_normal_roughness is optional; reflections need it.
 	void trace_view(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness);

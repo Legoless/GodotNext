@@ -39,8 +39,8 @@ class RenderDataRD;
 namespace RendererRD {
 
 // GodotNext: ps_lumen_lite (#183). Half-resolution irradiance field over WRC levels 0-1.
-// The software tier writes the probe buffer from its SDF tracer. The hardware tier packs
-// the WRC radiance image. Neither path dispatches screen-probe or reflection rays.
+// Both tiers pack the WRC radiance image into the probe buffer (the software tier's WRC
+// traces the SDF). Neither dispatches screen-probe or reflection rays.
 // Each probe holds L0 and L1 radiance, so the gather evaluates irradiance at the pixel normal
 // and the rough specular at the reflection vector.
 class NextGIIrradianceField {
@@ -77,11 +77,11 @@ public:
 	RID get_probe_buffer() const { return probe_buffer; }
 	RID get_debug_texture() const { return half_image; }
 
-	uint32_t consume_swrt_probe_base();
-	uint32_t consume_hwrt_probe_base();
+	uint32_t consume_probe_base();
 
-	// p_hwrt packs the WRC before interpolation. Reflections-only skips the write.
-	void integrate(RenderDataRD *p_render_data, bool p_hwrt, bool p_reflections_only);
+	// Packs the WRC (when it is bound) and writes the GI buffers. The frame block calls it
+	// outside reflections-only mode, where LightmapGI or VoxelGI writes the ambient.
+	void integrate(RenderDataRD *p_render_data);
 
 private:
 	struct GpuState;
@@ -89,12 +89,10 @@ private:
 	RID probe_buffer;
 	RID half_image;
 	Size2i half_size;
-	uint32_t swrt_cursor = 0;
-	uint32_t hwrt_cursor = 0;
+	uint32_t cursor = 0;
 	bool shader_failed = false;
 
 	bool _ensure_gpu();
-	uint32_t _consume(uint32_t &r_cursor);
 };
 
 } // namespace RendererRD

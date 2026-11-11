@@ -51,7 +51,7 @@ struct LitePushGPU {
 
 static_assert(sizeof(NextGIIrradianceField::Params) == 208, "Lite params stay 208 bytes so the shader std430 layout matches.");
 static_assert(sizeof(LitePushGPU) == 16, "Lite push constants stay 16 bytes.");
-static_assert(NextGIIrradianceField::PROBE_COUNT == NextGI::LITE_PROBE_COUNT && NextGIIrradianceField::PROBE_VEC4S == NextGI::LITE_PROBE_VEC4S, "The Lite probe layout is shared with the software tier's probe trace.");
+static_assert(NextGIIrradianceField::PROBE_COUNT == NextGI::LITE_PROBE_COUNT && NextGIIrradianceField::PROBE_VEC4S == NextGI::LITE_PROBE_VEC4S, "The Lite probe layout is shared with the software tier's probe kernel (the auto-quality microbenchmark).");
 
 } // namespace
 
@@ -151,18 +151,10 @@ bool NextGIIrradianceField::ensure_probe_buffer() {
 	return probe_buffer.is_valid();
 }
 
-uint32_t NextGIIrradianceField::_consume(uint32_t &r_cursor) {
-	const uint32_t base = r_cursor;
-	r_cursor = (r_cursor + PROBES_PER_FRAME) % PROBE_COUNT;
+uint32_t NextGIIrradianceField::consume_probe_base() {
+	const uint32_t base = cursor;
+	cursor = (cursor + PROBES_PER_FRAME) % PROBE_COUNT;
 	return base;
-}
-
-uint32_t NextGIIrradianceField::consume_swrt_probe_base() {
-	return _consume(swrt_cursor);
-}
-
-uint32_t NextGIIrradianceField::consume_hwrt_probe_base() {
-	return _consume(hwrt_cursor);
 }
 
 bool NextGIIrradianceField::_ensure_gpu() {
@@ -230,8 +222,8 @@ bool NextGIIrradianceField::_ensure_gpu() {
 	return gpu->ready;
 }
 
-void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, bool p_reflections_only) {
-	if (p_reflections_only || p_render_data == nullptr || p_render_data->scene_data == nullptr) {
+void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
+	if (p_render_data == nullptr || p_render_data->scene_data == nullptr) {
 		return;
 	}
 	Ref<RenderSceneBuffersRD> buffers = p_render_data->render_buffers;
@@ -290,16 +282,16 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, 
 	RID mip2 = gpu->dummy_2d;
 	RID mip4 = gpu->dummy_2d;
 	bool wrc_bound = false;
-	if (p_hwrt) {
-		NextGIWRC *wrc = next_gi->get_wrc();
-		if (wrc != nullptr && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_offsets().is_valid() && wrc->get_mip2().is_valid() && wrc->get_mip4().is_valid()) {
-			radiance = wrc->get_radiance();
-			visibility = wrc->get_visibility();
-			offsets = wrc->get_offsets();
-			mip2 = wrc->get_mip2();
-			mip4 = wrc->get_mip4();
-			wrc_bound = true;
-		}
+	// Both tiers update the WRC in the frame block's "WRC update" slot; it is unbound only until
+	// its first update.
+	NextGIWRC *wrc = next_gi->get_wrc();
+	if (wrc != nullptr && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_offsets().is_valid() && wrc->get_mip2().is_valid() && wrc->get_mip4().is_valid()) {
+		radiance = wrc->get_radiance();
+		visibility = wrc->get_visibility();
+		offsets = wrc->get_offsets();
+		mip2 = wrc->get_mip2();
+		mip4 = wrc->get_mip4();
+		wrc_bound = true;
 	}
 
 	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
@@ -385,7 +377,7 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data, bool p_hwrt, 
 	if (wrc_bound) {
 		LitePushGPU pack_push;
 		pack_push.mode = 0;
-		pack_push.probe_base = consume_hwrt_probe_base();
+		pack_push.probe_base = consume_probe_base();
 		rd->compute_list_set_push_constant(list, &pack_push, sizeof(pack_push));
 		rd->compute_list_dispatch(list, PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_add_barrier(list);

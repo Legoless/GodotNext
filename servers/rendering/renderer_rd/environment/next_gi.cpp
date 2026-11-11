@@ -1366,7 +1366,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			// Reflections-only keeps the ambient writer (LightmapGI/VoxelGI) untouched.
 			if (lite) {
 				if (!is_reflections_only()) {
-					ensure_irradiance_field()->integrate(p_render_data, true, false);
+					ensure_irradiance_field()->integrate(p_render_data);
 				}
 			} else if (!is_reflections_only()) {
 				_clear_gi_buffers(rb.ptr());
