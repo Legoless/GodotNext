@@ -1782,15 +1782,23 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->vertex_buffer, p_offset, data_size, r);
 	// GodotNext: nextgi_rt_registry
-	if (nextgi_rt_enabled) {
-		Mesh::Surface *surface = mesh->surfaces[p_surface];
-		const uint32_t pos_bytes = uint32_t(surface->rt_cpu_positions.size()) * sizeof(float);
-		if (uint32_t(p_offset) < pos_bytes && surface->rt_chunk != UINT32_MAX && surface->rt_chunk < nextgi_rt_chunks.size()) {
-			const uint32_t count = MIN(uint32_t(data_size), pos_bytes - uint32_t(p_offset));
-			nextgi_rt_patch_positions(surface->rt_cpu_positions, uint32_t(p_offset), r, count);
+	// GodotNext: ps_swrt_trace (#186, #188). The CPU copy and the update note follow the kept CPU
+	// copies, also without ray query; the arena upload and the BLAS flag need the RT arena.
+	Mesh::Surface *surface = mesh->surfaces[p_surface];
+	const uint32_t pos_bytes = uint32_t(surface->rt_cpu_positions.size()) * sizeof(float);
+	const bool in_arena = surface->rt_chunk != UINT32_MAX && surface->rt_chunk < nextgi_rt_chunks.size();
+	const NextGIRTVertexUpdate plan = nextgi_rt_plan_vertex_update(nextgi_rt_enabled, nextgi_cpu_geometry_enabled, uint32_t(p_offset) < pos_bytes, in_arena);
+	if (plan.patch_cpu_copy) {
+		const uint32_t count = MIN(uint32_t(data_size), pos_bytes - uint32_t(p_offset));
+		nextgi_rt_patch_positions(surface->rt_cpu_positions, uint32_t(p_offset), r, count);
+		if (plan.upload_arena) {
 			RD::get_singleton()->buffer_update(nextgi_rt_chunks[surface->rt_chunk].buffer, surface->rt_vertex_offset + uint32_t(p_offset), count, r);
 		}
+	}
+	if (plan.mark_blas_dirty) {
 		mesh->nextgi_blas_dirty = true;
+	}
+	if (plan.note_update) {
 		mesh_nextgi_rt_note_vertex_update(p_mesh);
 	}
 }

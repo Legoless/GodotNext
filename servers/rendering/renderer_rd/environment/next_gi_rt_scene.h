@@ -113,6 +113,28 @@ _FORCE_INLINE_ bool nextgi_rt_keep_cpu_geometry(bool p_project_enabled, bool p_h
 	return p_project_enabled;
 }
 
+// GodotNext: ps_swrt_trace (#186, #188). What mesh_surface_update_vertex_region() does to the
+// NextGI copies. The CPU copy follows the vertex buffer wherever it is kept, on a device without
+// ray query too (the card sets and runtime mesh SDFs read it), and the update is noted there, so
+// a mesh updated every frame counts as dynamic on both kinds of device (the BLAS refit rule and
+// the global SDF's dynamic split). The arena copy and the BLAS flag exist only with the RT arena.
+// p_touches_cpu_copy: the update starts inside the copied positions.
+struct NextGIRTVertexUpdate {
+	bool patch_cpu_copy = false;
+	bool upload_arena = false;
+	bool mark_blas_dirty = false;
+	bool note_update = false;
+};
+
+_FORCE_INLINE_ NextGIRTVertexUpdate nextgi_rt_plan_vertex_update(bool p_rt_enabled, bool p_cpu_geometry_enabled, bool p_touches_cpu_copy, bool p_in_arena) {
+	NextGIRTVertexUpdate plan;
+	plan.patch_cpu_copy = p_cpu_geometry_enabled && p_touches_cpu_copy;
+	plan.upload_arena = p_rt_enabled && p_touches_cpu_copy && p_in_arena;
+	plan.mark_blas_dirty = p_rt_enabled;
+	plan.note_update = p_cpu_geometry_enabled;
+	return plan;
+}
+
 // GodotNext: ps_swrt_trace (#186, #188). A surface material that keeps the surface out of the TLAS
 // (alpha-tested without nextgi_rt_opaque, or blended; #61). The SRC's software-tier card rule
 // leaves the same surfaces out.

@@ -1578,6 +1578,40 @@ TEST_CASE("[NextGI][SWRT] CPU mesh copies stay without ray query, the RT arena d
 	CHECK_FALSE(RendererRD::nextgi_device_has_ray_query(false, false));
 }
 
+TEST_CASE("[NextGI][SWRT] Vertex-region updates patch the kept CPU copy and count without ray query") {
+	using RendererRD::nextgi_rt_plan_vertex_update;
+	using RendererRD::NextGIRTVertexUpdate;
+	// A device without ray query keeps the CPU copy but has no arena: the copy follows the vertex
+	// buffer and the update is noted, so the mesh can become dynamic in the global SDF's split.
+	const NextGIRTVertexUpdate software = nextgi_rt_plan_vertex_update(false, true, true, false);
+	CHECK(software.patch_cpu_copy);
+	CHECK(software.note_update);
+	CHECK_FALSE(software.upload_arena);
+	CHECK_FALSE(software.mark_blas_dirty);
+	// A surface in the RT arena gets the CPU patch, the arena upload and the BLAS flag.
+	const NextGIRTVertexUpdate arena = nextgi_rt_plan_vertex_update(true, true, true, true);
+	CHECK(arena.patch_cpu_copy);
+	CHECK(arena.upload_arena);
+	CHECK(arena.mark_blas_dirty);
+	CHECK(arena.note_update);
+	// A CPU copy outside the arena (a deforming surface's bind pose) still follows the buffer.
+	const NextGIRTVertexUpdate bind_pose = nextgi_rt_plan_vertex_update(true, true, true, false);
+	CHECK(bind_pose.patch_cpu_copy);
+	CHECK_FALSE(bind_pose.upload_arena);
+	CHECK(bind_pose.mark_blas_dirty);
+	CHECK(bind_pose.note_update);
+	// An update past the copied positions patches nothing but is still an update.
+	const NextGIRTVertexUpdate past = nextgi_rt_plan_vertex_update(false, true, false, false);
+	CHECK_FALSE(past.patch_cpu_copy);
+	CHECK(past.note_update);
+	// NextGI off: no copies, nothing to do.
+	const NextGIRTVertexUpdate off = nextgi_rt_plan_vertex_update(false, false, false, false);
+	CHECK_FALSE(off.patch_cpu_copy);
+	CHECK_FALSE(off.upload_arena);
+	CHECK_FALSE(off.mark_blas_dirty);
+	CHECK_FALSE(off.note_update);
+}
+
 TEST_CASE("[NextGI][SWRT] debug/deny_ray_query selects the software tier for NO_RAY_QUERY") {
 	using RendererRD::NextGI;
 	NextGI::TierInputs inputs;
