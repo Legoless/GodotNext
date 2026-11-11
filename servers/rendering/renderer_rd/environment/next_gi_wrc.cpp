@@ -331,6 +331,7 @@ void NextGIWRC::free_resources() {
 	volume_history_valid = false;
 	has_previous_camera = false;
 	previous_sky_read = false;
+	grid_camera_valid = false;
 	translucency_marked = 0;
 	translucency_rays = 0;
 	translucency_hits = 0;
@@ -745,6 +746,9 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		params.previous_view_proj[i] = history_projection.columns[i / 4][i % 4];
 	}
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
+	// GodotNext: ps_lumen_lite (#183). The grid the probes are read on from here on.
+	grid_camera = camera;
+	grid_camera_valid = true;
 	// GodotNext: nextgi_async_counters (#186). The previous frame's totals, read before the zeroing.
 	_request_counters();
 	NextGIWRCCountersGPU zero;

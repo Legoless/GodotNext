@@ -152,6 +152,10 @@ class NextGIWRC {
 	bool volume_history_valid = false;
 	bool has_previous_camera = false;
 	bool previous_sky_read = false;
+	// GodotNext: ps_lumen_lite (#183). The camera the probe grid snapped to at the last params
+	// upload: the frame's first view, since secondary views reuse the scenario's update.
+	Vector3 grid_camera;
+	bool grid_camera_valid = false;
 	Projection previous_view_projection;
 	Vector3 previous_camera_position;
 	Vector3 previous_camera_forward;
@@ -197,6 +201,10 @@ public:
 	RID get_mip2() const { return mip2; }
 	// GodotNext: ps_lumen_lite (#183). Lite's rough specular reads mip 4 and mip 2.
 	RID get_mip4() const { return mip4; }
+	// Every level's origin is nextgi_wrc_snap_origin() of this camera. Lite views other than the
+	// first one of a frame read the probes on this grid, not on one snapped to their own camera.
+	bool has_grid_camera() const { return grid_camera_valid; }
+	Vector3 get_grid_camera() const { return grid_camera; }
 	RID get_sh_r() const { return sh_r; }
 	RID get_sh_g() const { return sh_g; }
 	RID get_sh_b() const { return sh_b; }

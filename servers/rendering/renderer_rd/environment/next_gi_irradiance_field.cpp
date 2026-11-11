@@ -55,7 +55,7 @@ static_assert(NextGIIrradianceField::PROBE_COUNT == NextGI::LITE_PROBE_COUNT && 
 
 } // namespace
 
-NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_wrc_field) {
+NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_wrc_field, const Vector3 &p_grid_camera) {
 	Params params = {};
 	// The depth buffer holds reverse-Z depth in [0, 1] drawn with this corrected projection, so
 	// the shader unprojects vec4(uv * 2 - 1, depth, 1) with its inverse.
@@ -81,7 +81,7 @@ NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projecti
 	// The probes are the WRC's own level 0 and 1 probes, on the grid the WRC update snaps.
 	for (uint32_t level = 0; level < NextGI::LITE_PROBE_LEVELS; level++) {
 		const float spacing = nextgi_wrc_spacing(level);
-		const Vector3 origin = nextgi_wrc_snap_origin(camera, spacing);
+		const Vector3 origin = nextgi_wrc_snap_origin(p_grid_camera, spacing);
 		params.level_origin[level][0] = origin.x;
 		params.level_origin[level][1] = origin.y;
 		params.level_origin[level][2] = origin.z;
@@ -285,7 +285,7 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	// Both tiers update the WRC in the frame block's "WRC update" slot; it is unbound only until
 	// its first update.
 	NextGIWRC *wrc = next_gi->get_wrc();
-	if (wrc != nullptr && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_offsets().is_valid() && wrc->get_mip2().is_valid() && wrc->get_mip4().is_valid()) {
+	if (wrc != nullptr && wrc->has_grid_camera() && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_offsets().is_valid() && wrc->get_mip2().is_valid() && wrc->get_mip4().is_valid()) {
 		radiance = wrc->get_radiance();
 		visibility = wrc->get_visibility();
 		offsets = wrc->get_offsets();
@@ -295,7 +295,10 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	}
 
 	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
-	const Params params = build_params(scene_data->cam_projection, scene_data->cam_transform, scene_data->flip_y, scene_data->taa_jitter, gi_size, wanted_half, buffers->get_internal_size(), depth_valid > 0.5f, normal_valid > 0.5f, wrc_bound);
+	// A secondary view reads the probes on the grid of the frame's first view, which updated
+	// the WRC; snapping them to its own camera would shift every probe by the cameras' offset.
+	const Vector3 grid_camera = wrc_bound ? wrc->get_grid_camera() : scene_data->cam_transform.origin;
+	const Params params = build_params(scene_data->cam_projection, scene_data->cam_transform, scene_data->flip_y, scene_data->taa_jitter, gi_size, wanted_half, buffers->get_internal_size(), depth_valid > 0.5f, normal_valid > 0.5f, wrc_bound, grid_camera);
 	rd->buffer_update(gpu->params_buffer, 0, sizeof(params), &params);
 
 	const RID ambient = buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_AMBIENT, 0, 0);

@@ -3413,7 +3413,7 @@ TEST_CASE("[NextGI][Lite] Params reconstruct world positions and snap to the WRC
 	const Transform3D camera = Transform3D(Basis::from_euler(Vector3(-0.3, 0.7, 0.4)), Vector3(3.4, 1.7, -12.6));
 	const Size2i gi_size(1280, 720);
 	const bool wrc_field = true;
-	const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, true, wrc_field);
+	const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, true, wrc_field, camera.origin);
 
 	// The scene UBO draws depth with this projection (RenderSceneDataRD::update_ubo).
 	Projection correction;
@@ -3482,12 +3482,38 @@ TEST_CASE("[NextGI][Lite] p_wrc_field sets camera.w exactly when the WRC field i
 	// nextgi_irradiance_field.glsl reads the WRC moments, offsets and mips only when camera.w > 0.5.
 	for (const bool wrc_field : { true, false }) {
 		for (const bool normal_valid : { true, false }) {
-			const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, normal_valid, wrc_field);
+			const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, normal_valid, wrc_field, camera.origin);
 			CHECK_MESSAGE(params.camera[3] == doctest::Approx(wrc_field ? 1.0f : 0.0f), vformat("wrc_field %s, normal_valid %s: camera.w is %f.", wrc_field, normal_valid, params.camera[3]));
 			// The flag is camera.w alone: the normal flag and the camera position stay as given.
 			CHECK(params.depth_info[3] == doctest::Approx(normal_valid ? 1.0f : 0.0f));
 			CHECK(Vector3(params.camera[0], params.camera[1], params.camera[2]).is_equal_approx(camera.origin));
 		}
+	}
+}
+
+TEST_CASE("[NextGI][Lite] A secondary view reads the probes on the WRC's grid") {
+	// The WRC updates once per frame, from the frame's first view, and the Lite pack copies its
+	// probes by grid cell. A second view 1.4 m away snaps to other level origins, so it must
+	// take the WRC's grid camera or every probe it reads sits one cell off.
+	Projection projection;
+	projection.set_perspective(60.0, 16.0 / 9.0, 0.05, 400.0);
+	const Vector3 first_view(-0.7f, 1.2f, 0.3f);
+	const Transform3D second_view(Basis::from_euler(Vector3(-1.2, 0.4, 0.0)), Vector3(0.7f, 1.2f, 0.3f));
+	const Size2i gi_size(960, 540);
+	const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, second_view, true, Vector2(), gi_size, gi_size / 2, gi_size, true, true, true, first_view);
+	CHECK(Vector3(params.camera[0], params.camera[1], params.camera[2]).is_equal_approx(second_view.origin));
+	for (uint32_t level = 0; level < RendererRD::NextGI::LITE_PROBE_LEVELS; level++) {
+		const float spacing = RendererRD::nextgi_wrc_spacing(level);
+		// Precondition: the two cameras snap to different origins on this level.
+		CHECK_FALSE(RendererRD::nextgi_wrc_snap_origin(first_view, spacing).is_equal_approx(RendererRD::nextgi_wrc_snap_origin(second_view.origin, spacing)));
+		const Vector3 origin(params.level_origin[level][0], params.level_origin[level][1], params.level_origin[level][2]);
+		// nextgi_wrc_update_inc.glsl: the level-0 origin snaps the camera to 1 m, each level
+		// snaps that origin to its own spacing, and probe (x, y, z) sits at
+		// origin + (cell - 7.5) * spacing. Lite's lite_probe_position() uses the same formula.
+		const Vector3 origin0 = RendererRD::nextgi_wrc_snap_origin(first_view, 1.0f);
+		const Vector3 wrc_origin = Vector3(Math::floor(origin0.x / spacing), Math::floor(origin0.y / spacing), Math::floor(origin0.z / spacing)) * spacing;
+		CHECK_MESSAGE(origin.is_equal_approx(wrc_origin), vformat("level %d: Lite's grid origin %s, the WRC's %s.", level, origin, wrc_origin));
+		CHECK(params.level_origin[level][3] == doctest::Approx(spacing));
 	}
 }
 

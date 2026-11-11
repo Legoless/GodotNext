@@ -230,7 +230,7 @@ TEST_CASE("[NextGI][View] With flip_y off the camera's up side is at uv.y = 1") 
 #ifdef RD_ENABLED
 			// The Lumen Lite field takes flip_y from the scene data as an argument.
 			const bool wrc_field = true;
-			const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(scene_data->cam_projection, camera, scene_data->flip_y, Vector2(), Size2i(512, 512), Size2i(256, 256), Size2i(512, 512), true, true, wrc_field);
+			const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(scene_data->cam_projection, camera, scene_data->flip_y, Vector2(), Size2i(512, 512), Size2i(256, 256), Size2i(512, 512), true, true, wrc_field, camera.origin);
 			Projection inverse;
 			for (int column = 0; column < 4; column++) {
 				for (int row = 0; row < 4; row++) {
