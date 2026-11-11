@@ -12,7 +12,8 @@
 # The reference pass must report the HWRT tier; on a machine without it the script says so and
 # uses the ratio recorded on the Apple M5 Max (it never skips the software pass). Prints the
 # counts of "ERROR:" lines and Metal validation reports of every pass. Exits non-zero when the
-# software pass fails.
+# software pass fails or logs any "ERROR:", "Invalid Metal usage" or "Error detected in" line (the
+# reference pass only prints its counts: on a machine without the HWRT tier it is expected to fail).
 
 set -euo pipefail
 
@@ -71,7 +72,15 @@ CFG
 	set -e
 	rm -f "$override"
 	cat "$log"
-	echo "GODOTNEXT_LITE_LEAK_LOG {\"hwrt\":$hwrt,\"errors\":$(grep -c 'ERROR:' "$log" || true),\"invalid_metal_usage\":$(grep -c 'Invalid Metal usage' "$log" || true),\"shader_validation\":$(grep -c 'Error detected in' "$log" || true),\"status\":$pass_status}"
+	local errors metal_usage metal_shader
+	errors=$(grep -c 'ERROR:' "$log" || true)
+	metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
+	metal_shader=$(grep -c 'Error detected in' "$log" || true)
+	pass_validation=0
+	if [[ "$errors" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
+		pass_validation=1
+	fi
+	echo "GODOTNEXT_LITE_LEAK_LOG {\"hwrt\":$hwrt,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$pass_status}"
 }
 
 pass_args=(--expected-tier=HWRT)
@@ -83,4 +92,10 @@ if [[ "$pass_status" -ne 0 || -z "$ratio" ]]; then
 fi
 pass_args=(--expected-tier=SWRT --hwrt-ratio="$ratio")
 run_pass 1 "$@"
-exit "$pass_status"
+if [[ "$pass_status" -ne 0 ]]; then
+	exit "$pass_status"
+fi
+if [[ "$pass_validation" -ne 0 ]]; then
+	echo "run_lite_leak_check.sh: the software pass logged validation lines; the bar is 0" >&2
+	exit 1
+fi

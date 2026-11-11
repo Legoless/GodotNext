@@ -31,7 +31,9 @@
 # reference pass must report the HWRT tier. On a machine without it the script says so and uses
 # the reference recorded on the Apple M5 Max (it never skips the software pass). The SWRT/HWRT
 # ratios are printed report-only (§22). Prints the counts of "ERROR:" lines and Metal validation
-# reports of every pass. Exits non-zero when a software-tier pass fails.
+# reports of every pass. Exits non-zero when a software-tier pass (or the toggle or budget pass)
+# fails or logs any "ERROR:", "Invalid Metal usage" or "Error detected in" line. A hardware
+# reference pass only prints its counts: on a machine without the HWRT tier it is expected to fail.
 #
 # Example on the Apple M5 Max:
 #   godotnext/testbed/tests/swrt_gi/run_swrt_gi_check.sh --mode=smoke -- \
@@ -97,6 +99,7 @@ trap cleanup EXIT
 # debug/deny_ray_query and pass_detail=true software_ray_tracing_mode Detail.
 pass_deny=false
 pass_detail=false
+pass_validation=0
 run_pass() {
 	local hwrt=$1 quality=$2 scene=$3
 	shift 3
@@ -121,7 +124,20 @@ CFG
 	set -e
 	rm -f "$override"
 	cat "$log"
-	echo "GODOTNEXT_SWRT_GI_LOG {\"hwrt\":$hwrt,\"quality\":$quality,\"deny_ray_query\":$pass_deny,\"software_ray_tracing_mode\":$swrt_mode,\"errors\":$(grep -c 'ERROR:' "$log" || true),\"invalid_metal_usage\":$(grep -c 'Invalid Metal usage' "$log" || true),\"shader_validation\":$(grep -c 'Error detected in' "$log" || true),\"status\":$pass_status}"
+	local errors metal_usage metal_shader
+	errors=$(grep -c 'ERROR:' "$log" || true)
+	metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
+	metal_shader=$(grep -c 'Error detected in' "$log" || true)
+	pass_validation=0
+	if [[ "$errors" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
+		pass_validation=1
+	fi
+	echo "GODOTNEXT_SWRT_GI_LOG {\"hwrt\":$hwrt,\"quality\":$quality,\"deny_ray_query\":$pass_deny,\"software_ray_tracing_mode\":$swrt_mode,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$pass_status}"
+}
+
+# pass_failed: the last pass failed its check or logged a validation line (the bar is 0).
+pass_failed() {
+	[[ "$pass_status" -ne 0 || "$pass_validation" -ne 0 ]]
 }
 
 # reference <key> <recorded> <scene> <scene arguments...>: prints the reference value.
@@ -173,25 +189,25 @@ if [[ "$mode" == "smoke" ]]; then
 		[[ "$quality" == 3 ]] && recorded=$RECORDED_WORLD_HITS_EPIC
 		hits=$(reference world_hits "$recorded" "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=HWRT)
 		software_pass "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=SWRT --hwrt-world-hits="$hits"
-		[[ "$pass_status" -ne 0 ]] && failed=1
+		pass_failed && failed=1
 	done
 elif [[ "$mode" == "bleed" ]]; then
 	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=bleed --expected-tier=HWRT >&2
 	red=$(bleed_reference red_bleed "$RECORDED_RED_BLEED_HIGH")
 	green=$(bleed_reference green_bleed "$RECORDED_GREEN_BLEED_HIGH")
 	software_pass 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=bleed --expected-tier=SWRT --hwrt-red-bleed="$red" --hwrt-green-bleed="$green"
-	[[ "$pass_status" -ne 0 ]] && failed=1
+	pass_failed && failed=1
 elif [[ "$mode" == "detail" ]]; then
 	pass_detail=true
 	software_pass 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=detail --expected-tier=SWRT
 	pass_detail=false
-	[[ "$pass_status" -ne 0 ]] && failed=1
+	pass_failed && failed=1
 elif [[ "$mode" == "toggle" || "$mode" == "budget" ]]; then
 	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check="$mode"
-	[[ "$pass_status" -ne 0 ]] && failed=1
+	pass_failed && failed=1
 else
 	hits=$(reference reflection_hits "$RECORDED_REFLECTION_HITS_HIGH" 2 res://tests/nextgi_reflect/run_reflect.tscn --expected-tier=HWRT)
 	run_pass 1 2 res://tests/nextgi_reflect/run_reflect.tscn --expected-tier=SWRT --hwrt-reflection-hits="$hits"
-	[[ "$pass_status" -ne 0 ]] && failed=1
+	pass_failed && failed=1
 fi
 exit "$failed"
