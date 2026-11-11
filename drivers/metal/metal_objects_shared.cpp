@@ -447,6 +447,8 @@ MTL::Fence *MDCommandBufferBase::_fence_to_wait() {
 #ifdef DEV_ENABLED
 	_fence_wait_issued = true;
 #endif
+	// GodotNext: metal_level_fences (#186). The current level's fence for a continued encoder,
+	// else F_prev.
 	if (current_level) {
 		uint32_t i = _fence_level & 1;
 		return _fence_updated[i] ? _fences[i].get() : nullptr;
@@ -470,6 +472,7 @@ MTL::Fence *MDCommandBufferBase::_fence_frontier() const {
 	return _fence_updated[i] ? _fences[i].get() : _fence_carried;
 }
 
+// GodotNext: metal_level_fences (#186)
 void MDCommandBufferBase::continue_from(const MDCommandBufferBase &p_from) {
 	DEV_ASSERT(type == MDCommandBufferStateType::None);
 	DEV_ASSERT(p_from.type == MDCommandBufferStateType::None);
