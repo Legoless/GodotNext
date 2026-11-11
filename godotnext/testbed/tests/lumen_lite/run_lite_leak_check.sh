@@ -10,10 +10,11 @@
 # quality 1 and medium_gather 0 (Lumen Lite), and hardware_ray_tracing 0 (Auto, the reference) or
 # 1 (Off, the software tier); it refuses to overwrite an existing one and removes it afterwards.
 # The reference pass must report the HWRT tier; on a machine without it the script says so and
-# uses the ratio recorded on the Apple M5 Max (it never skips the software pass). Prints the
-# counts of "ERROR:" lines and Metal validation reports of every pass. Exits non-zero when the
-# software pass fails or logs any "ERROR:", "Invalid Metal usage" or "Error detected in" line (the
-# reference pass only prints its counts: on a machine without the HWRT tier it is expected to fail).
+# uses the ratio recorded on the Apple M5 Max (it never skips the software pass). A reference pass
+# that ran on the HWRT tier and still failed, or logged a validation line, fails the script after
+# the software pass. Prints the counts of "ERROR:" lines and Metal validation reports of every
+# pass. Exits non-zero when the software pass fails or logs any "ERROR:", "Invalid Metal usage"
+# or "Error detected in" line (the bar is 0), or when the reference pass failed on the HWRT tier.
 
 set -euo pipefail
 
@@ -86,8 +87,14 @@ CFG
 pass_args=(--expected-tier=HWRT)
 run_pass 0 "$@" >&2
 ratio=$(grep -m1 "^LITE_LEAK_REFERENCE " "$log" | sed -n 's/.*ratio=\([0-9.]*\).*/\1/p' || true)
-if [[ "$pass_status" -ne 0 || -z "$ratio" ]]; then
-	echo "run_lite_leak_check.sh: no hardware-tier reference on this machine; using the ratio recorded on the Apple M5 Max, $RECORDED_RATIO" >&2
+reference_tier=$(grep -m1 '^GODOTNEXT_RESULT ' "$log" | sed -n 's/.*"tier":"\([A-Z_]*\)".*/\1/p' || true)
+reference_failed=0
+if [[ "$reference_tier" == HWRT && ("$pass_status" -ne 0 || -z "$ratio" || "$pass_validation" -ne 0) ]]; then
+	echo "run_lite_leak_check.sh: the reference pass ran on the HWRT tier and failed or logged validation lines (status $pass_status); the software pass uses the ratio recorded on the Apple M5 Max, $RECORDED_RATIO" >&2
+	reference_failed=1
+	ratio=$RECORDED_RATIO
+elif [[ "$pass_status" -ne 0 || -z "$ratio" ]]; then
+	echo "run_lite_leak_check.sh: no hardware-tier reference on this machine (the reference pass ran on '${reference_tier:-no tier}'); using the ratio recorded on the Apple M5 Max, $RECORDED_RATIO" >&2
 	ratio=$RECORDED_RATIO
 fi
 pass_args=(--expected-tier=SWRT --hwrt-ratio="$ratio")
@@ -97,5 +104,9 @@ if [[ "$pass_status" -ne 0 ]]; then
 fi
 if [[ "$pass_validation" -ne 0 ]]; then
 	echo "run_lite_leak_check.sh: the software pass logged validation lines; the bar is 0" >&2
+	exit 1
+fi
+if [[ "$reference_failed" -ne 0 ]]; then
+	echo "run_lite_leak_check.sh: the hardware-tier reference pass failed" >&2
 	exit 1
 fi
