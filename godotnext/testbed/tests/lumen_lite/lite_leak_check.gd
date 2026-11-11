@@ -8,8 +8,10 @@ extends Node
 ## the lit room. The field keeps its history for hundreds of frames after a camera cut, so the
 ## dark room is measured before the camera has ever seen the lit room, and the lit room after
 ## LIT_FRAMES more frames, still converging: its value is a lower bound, which makes the ratio
-## an upper bound. A view per room at once did not separate them: the dark view read 0.96 of the
-## lit one on both tiers. Both tiers first wait until the voxel-lighting volume has finished filling
+## an upper bound. A view per room at once did not separate them while the second view read the
+## probes on a grid snapped to its own camera instead of the WRC's (the dark view read 0.96 of the
+## lit one); tests/lite_two_views now checks two views at once, and one view keeps this check's
+## numbers comparable. Both tiers first wait until the voxel-lighting volume has finished filling
 ## (voxel_lighting_retrace 0 for SETTLE_FRAMES frames, within MAX_FRAMES): the software tier's WRC
 ## probes shade their SDF hits from it. Each room is sampled MEASURE_SAMPLES times and averaged.
 ## With --expected-tier=HWRT it prints the reference ("LITE_LEAK_REFERENCE ratio=R"). With
