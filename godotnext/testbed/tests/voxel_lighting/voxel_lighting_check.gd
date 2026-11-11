@@ -15,13 +15,22 @@ extends Node3D
 ## GodotNext: ps_swrt_trace (#186, #188). With debug/deny_ray_query (a device without ray query)
 ## the run must also be on the software tier for NO_RAY_QUERY, with no RT arena, no ray-query
 ## ShaderRD created in the process and SWRT instances (runtime mesh SDFs from the CPU copies).
+## With the user argument --expected-tier=HWRT or --expected-tier=SWRT the run fails on any other
+## tier; run_voxel_lighting_check.sh passes SWRT for its hardware_ray_tracing Off and deny rows.
 
 const READBACK := "rendering/global_illumination/nextgi/debug/voxel_lighting_readback"
 
 var _frames := 0
+var _expected_tier := ""
 
 
 func _ready() -> void:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--expected-tier="):
+			_expected_tier = arg.trim_prefix("--expected-tier=")
+	if not _expected_tier.is_empty() and _expected_tier != "HWRT" and _expected_tier != "SWRT":
+		_fail("--expected-tier must be HWRT or SWRT, got %s" % _expected_tier)
+		return
 	ProjectSettings.set_setting(READBACK, true)
 	var kitbash: PackedScene = load("res://scenes/swrt_kitbash/swrt_kitbash.tscn")
 	var root := kitbash.instantiate()
@@ -72,6 +81,9 @@ func _process(_delta: float) -> void:
 	var quality := str(info.get("quality", "NONE"))
 	var unpaged := int(info.get("voxel_lighting_unpaged_hits", -1))
 	print("VOXEL_LIGHTING retrace=%d coverage_ppm=%d volume_bytes=%d stored_hits=%d unpaged_hits=%d resampled_nonzero=%d tier=%s quality=%s" % [retrace, coverage_ppm, volume_bytes, stored, unpaged, resampled, tier, quality])
+	if not _expected_tier.is_empty() and tier != _expected_tier:
+		_fail("ran on the %s tier, expected %s" % [tier, _expected_tier])
+		return
 	if stored <= 0:
 		_fail("stored hits are 0")
 		return

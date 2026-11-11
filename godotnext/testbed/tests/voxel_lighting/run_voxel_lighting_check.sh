@@ -12,7 +12,8 @@
 #   Auto (0, the hardware tier here), Off (1, the software tier, whose SRC is captured and relit
 #   too) and, with --deny-ray-query, Auto under debug/deny_ray_query (the software tier as on a
 #   device without ray query; the check then also asserts NO_RAY_QUERY, no RT arena, no ray-query
-#   ShaderRD and SWRT instances).
+#   ShaderRD and SWRT instances). The Off and deny rows pass --expected-tier=SWRT, so they fail
+#   when the kitbash runs on another tier; the Auto rows take the device's pick.
 # Voxel lighting asserts at High, never at the device's auto pick (lead decision 2026-11-10,
 # plan §21.2.5): Lite's half-size surface cache keeps radiance pages for few of the kitbash's
 # 2,400 rocks, and voxel lighting resamples only paged instances. The Lite run still fails on a
@@ -62,27 +63,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Scene, quality (1 Medium, 2 High), hardware_ray_tracing (0 Auto, 1 Off), and the line the run
-# must print ("-" for none).
+# Scene, quality (1 Medium, 2 High), hardware_ray_tracing (0 Auto, 1 Off), the line the run
+# must print ("-" for none) and the tier voxel_lighting_check.tscn must run on ("-" for any).
 if [[ "$deny" == true ]]; then
 	runs=(
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED SWRT"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE SWRT"
 	)
 else
 	runs=(
-		"res://tests/voxel_lighting/voxel_slot_check.tscn 2 0 -"
-		"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 0 -"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 1 VOXEL_LIGHTING_ASSERTED"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 1 VOXEL_LIGHTING_LITE"
+		"res://tests/voxel_lighting/voxel_slot_check.tscn 2 0 - -"
+		"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 0 - -"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED -"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE -"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 1 VOXEL_LIGHTING_ASSERTED SWRT"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 1 VOXEL_LIGHTING_LITE SWRT"
 	)
 fi
 
 failed=0
 for run in "${runs[@]}"; do
-	read -r scene quality hwrt expected <<<"$run"
+	read -r scene quality hwrt expected tier <<<"$run"
+	scene_args=()
+	if [[ "$tier" != "-" ]]; then
+		scene_args=(-- "--expected-tier=$tier")
+	fi
 	cat >"$override" <<CFG
 [rendering]
 
@@ -92,7 +97,7 @@ global_illumination/nextgi/quality=$quality
 global_illumination/nextgi/debug/deny_ray_query=$deny
 CFG
 	set +e
-	"$@" "$scene" 2>&1 | tee "$log"
+	"$@" "$scene" ${scene_args[@]+"${scene_args[@]}"} 2>&1 | tee "$log"
 	status=${PIPESTATUS[0]}
 	set -e
 	errors=$(grep -c 'ERROR:' "$log" || true)
@@ -102,7 +107,7 @@ CFG
 	if [[ "$expected" != "-" ]] && ! grep -q "^$expected " "$log"; then
 		expected_found=false
 	fi
-	echo "GODOTNEXT_VOXEL_LIGHTING_LOG {\"scene\":\"$scene\",\"quality\":$quality,\"hwrt\":$hwrt,\"deny_ray_query\":$deny,\"expected_line\":\"$expected\",\"expected_found\":$expected_found,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
+	echo "GODOTNEXT_VOXEL_LIGHTING_LOG {\"scene\":\"$scene\",\"quality\":$quality,\"hwrt\":$hwrt,\"deny_ray_query\":$deny,\"expected_tier\":\"$tier\",\"expected_line\":\"$expected\",\"expected_found\":$expected_found,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
 	if [[ $status -ne 0 || $errors -ne 0 || $metal_usage -ne 0 || $metal_shader -ne 0 || $expected_found != true ]]; then
 		failed=1
 	fi
