@@ -1,7 +1,8 @@
 // GodotNext: ps_swrt_trace (#186). Not a standalone shader: the SRC world-space relight kernel
 // (#31, D14, §2.1 line 2b), shared by the hardware relight (nextgi_src_relight.glsl) and the
 // software sibling (nextgi_src_relight_swrt.glsl). The includer defines nextgi_shadow_ray()
-// first; only the shadow ray and its origin offset differ between the tiers.
+// first; only the shadow ray, its origin offset and, on the software tier, the positional rays'
+// aim from that offset origin differ between the tiers.
 
 #ifndef NEXTGI_SRC_RELIGHT_INC_GLSL
 #define NEXTGI_SRC_RELIGHT_INC_GLSL
@@ -233,6 +234,17 @@ void main() {
 #ifdef NEXTGI_TRACE_SDF
 					// GodotNext: ps_swrt_trace (#186 step 6). 1.5 voxels of the level that holds the texel.
 					vec3 origin = swrt_offset_origin(world, normal);
+					// That offset grows with the level (0.15 m at level 0, 0.6 m at level 2), so a
+					// positional light is aimed at from the offset origin: a ray parallel to the texel's
+					// would end up to the offset beyond the light, inside the ceiling or wall the light
+					// is mounted on.
+					if (light_type != 0u) {
+						to_light = light.position_inv_range.xyz - origin;
+						tmax = length(to_light);
+						if (tmax > 0.0) {
+							to_light /= tmax;
+						}
+					}
 #else
 					vec3 origin = world + normal * rec.origin_offset;
 #endif

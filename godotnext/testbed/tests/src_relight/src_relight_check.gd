@@ -14,6 +14,14 @@ extends Node
 ##                     shadow rays can shadow it (#186 step 5 on the software tier). At least
 ##                     FAR_INSIDE_MIN traced texels inside the slab's footprint must be checked.
 ##                     The edge band (two mask texels around each footprint's edge) is skipped.
+##   --ceiling-fixture a 20 m floor under a 20 m ceiling plate whose underside is at y 3, a shadowed
+##                     omni light CEILING_LIGHT_GAP below the ceiling and the camera at (0, 1.5, 4).
+##                     The viewport has no positional shadow atlas, so no shadow map is reused and
+##                     relight traces every texel. Nothing lies between the floor and the light, so
+##                     every texel of the floor card's mask must be lit, near the light and beyond
+##                     5 m alike: the software tier's origin offset (1.5 voxels of the texel's level,
+##                     0.6 m at level 2, #186 step 6) must not carry the ray past the light into the
+##                     ceiling.
 ##   --light-lists     STATIC / DYNAMIC / DISABLED tracking for visibility, scenario and bake mode
 ## --expected-tier=HWRT (default) or SWRT: the tier the run must report (run_src_relight_check.sh
 ## passes it from --hwrt). Under debug/deny_ray_query (a device without ray query) the run also
@@ -27,6 +35,9 @@ const FAR_INSIDE_MIN := 40
 ## The shadow fixture's floating slab: center and size.
 const SLAB_CENTER := Vector3(0, 1.5, -7.25)
 const SLAB_SIZE := Vector3(4, 1, 4)
+## The ceiling fixture: the ceiling plate's underside and the omni light's distance below it.
+const CEILING_Y := 3.0
+const CEILING_LIGHT_GAP := 0.12
 
 var _expected_tier := "HWRT"
 
@@ -49,6 +60,7 @@ func run(args: PackedStringArray) -> Dictionary:
 	var frames := 600
 	var probes := false
 	var shadow_fixture := false
+	var ceiling_fixture := false
 	var light_lists := false
 	for arg in args:
 		if arg.begins_with("--scene="):
@@ -59,6 +71,8 @@ func run(args: PackedStringArray) -> Dictionary:
 			probes = true
 		elif arg == "--shadow-fixture":
 			shadow_fixture = true
+		elif arg == "--ceiling-fixture":
+			ceiling_fixture = true
 		elif arg == "--light-lists":
 			light_lists = true
 		elif arg.begins_with("--expected-tier="):
@@ -70,6 +84,9 @@ func run(args: PackedStringArray) -> Dictionary:
 	if shadow_fixture:
 		_build_shadow_fixture(root)
 		scene_path = "shadow-fixture"
+	elif ceiling_fixture:
+		_build_ceiling_fixture(root)
+		scene_path = "ceiling-fixture"
 	elif light_lists:
 		_build_light_list_scene(root)
 		scene_path = "light-lists"
@@ -108,6 +125,8 @@ func run(args: PackedStringArray) -> Dictionary:
 	_check(max_evals <= 2, "mask evaluations %d" % max_evals)
 	if shadow_fixture:
 		_check_shadow_mask(info)
+	if ceiling_fixture:
+		_check_ceiling_mask(info)
 	# GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: a device without ray query.
 	if bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false)):
 		print("SRC_RELIGHT_DENY reason=%s rt_arena_bytes=%d ray_query_shader_versions=%d swrt_trace_instances=%d" % [str(info.get("reason", "")), int(info.get("rt_arena_bytes", -1)), int(info.get("ray_query_shader_versions", -1)), int(info.get("swrt_trace_instances", 0))])
@@ -275,6 +294,44 @@ func _check_shadow_mask(info: Dictionary) -> void:
 	_check(far_bad == 0, "%d traced texels disagree with the analytic footprints (%d inside one)" % [far_bad, far_bad_inside])
 
 
+func _check_ceiling_mask(info: Dictionary) -> void:
+	var pages: Array = info.get("src_mask_pages", [])
+	_check(not pages.is_empty(), "shadow mask readback")
+	var page: Dictionary = {}
+	var best_y := 1000.0
+	for candidate in pages:
+		if _world_normal(candidate).y < 0.5:
+			continue
+		var center := _mask_world(candidate, int(candidate["mask_w"]) / 2, int(candidate["mask_h"]) / 2)
+		if center.y < best_y:
+			best_y = center.y
+			page = candidate
+	_check(best_y < 0.5, "the floor card faces up at y %.2f" % best_y)
+	if page.is_empty():
+		return
+	var mask: PackedByteArray = page["mask"]
+	var mask_w := int(page["mask_w"])
+	var mask_h := int(page["mask_h"])
+	# Texels by their horizontal distance from the light: under 2 m, 2 to 5 m and beyond 5 m.
+	var lit := [0, 0, 0]
+	var total := [0, 0, 0]
+	var bad_samples := PackedStringArray()
+	for y in mask_h:
+		for x in mask_w:
+			var world := _mask_world(page, x, y)
+			var r := Vector2(world.x, world.z).length()
+			var bucket := 0 if r < 2.0 else (1 if r < 5.0 else 2)
+			total[bucket] += 1
+			if (mask[y * mask_w + x] & 1) != 0:
+				lit[bucket] += 1
+			elif bad_samples.size() < 8:
+				bad_samples.append("(%.2f, %.2f)" % [world.x, world.z])
+	print("SRC_RELIGHT_CEILING tier=%s mask=%dx%d floor_y=%.2f lit r<2 %d/%d, 2-5 %d/%d, >5 %d/%d unlit=%s" % [str(info.get("tier", "")), mask_w, mask_h, best_y, lit[0], total[0], lit[1], total[1], lit[2], total[2], bad_samples])
+	for bucket in 3:
+		_check(total[bucket] > 0, "floor texels in distance band %d were checked" % bucket)
+		_check(lit[bucket] == total[bucket], "%d of %d floor texels in distance band %d are lit; nothing lies between them and the light" % [lit[bucket], total[bucket], bucket])
+
+
 func _mask_world(page: Dictionary, x: int, y: int) -> Vector3:
 	var radiance_w := float(maxi(int(page["radiance_w"]), 1))
 	var radiance_h := float(maxi(int(page["radiance_h"]), 1))
@@ -361,6 +418,36 @@ func _build_shadow_fixture(root: Node3D) -> void:
 	var camera := Camera3D.new()
 	camera.position = Vector3(0, 3, 3)
 	camera.look_at_from_position(camera.position, Vector3(0, 0, 1), Vector3.UP)
+	camera.current = true
+	root.add_child(camera)
+
+
+func _build_ceiling_fixture(root: Node3D) -> void:
+	# No positional shadow atlas: relight cannot reuse the omni light's shadow map and traces.
+	get_viewport().positional_shadow_atlas_size = 0
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_COLOR
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	environment.nextgi_enabled = true
+	var world := WorldEnvironment.new()
+	world.environment = environment
+	root.add_child(world)
+	for plate_y in [-0.1, CEILING_Y + 0.1]:
+		var plate := MeshInstance3D.new()
+		var plate_mesh := BoxMesh.new()
+		plate_mesh.size = Vector3(20, 0.2, 20)
+		plate.mesh = plate_mesh
+		plate.position = Vector3(0, plate_y, 0)
+		root.add_child(plate)
+	var light := OmniLight3D.new()
+	light.position = Vector3(0, CEILING_Y - CEILING_LIGHT_GAP, 0)
+	light.omni_range = 12.0
+	light.shadow_enabled = true
+	light.light_bake_mode = Light3D.BAKE_DYNAMIC
+	root.add_child(light)
+	var camera := Camera3D.new()
+	camera.position = Vector3(0, 1.5, 4)
+	camera.look_at_from_position(camera.position, Vector3.ZERO, Vector3.UP)
 	camera.current = true
 	root.add_child(camera)
 

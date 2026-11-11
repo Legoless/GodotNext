@@ -565,6 +565,8 @@ TEST_CASE("[NextGI][SWRT] The software siblings trace the SDF and carry no ray q
 	CHECK_FALSE(relight_source.contains("accelerationStructureEXT"));
 	CHECK(relight_source.contains("return swrt_shadow_ray(origin, direction, tmax);"));
 	CHECK(relight_source.contains("vec3 origin = swrt_offset_origin(world, normal);"));
+	// Positional lights are aimed at from the offset origin (the ceiling-fixture GPU row checks it).
+	CHECK(relight_source.contains("to_light = light.position_inv_range.xyz - origin;"));
 	CHECK(gather_source.contains("resample_src(local, normalize(local_normal), rec.page_table, rec.card_set, resolved, projection)"));
 	CHECK(_spirv_declares_ray_query(_swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(false), "the hardware SRC relight")));
 	const Vector<uint8_t> relight_spirv = _swrt_test_compile(relight_source, "the software SRC relight");
