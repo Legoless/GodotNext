@@ -10,7 +10,8 @@
 # (#186, #188): the scene is told the tier to expect (--expected-tier, appended to its arguments):
 # SWRT for --hwrt=off or --deny-ray-query (debug/deny_ray_query: a device without ray query), else
 # HWRT. Refuses to overwrite an existing override.cfg. Prints Metal validation counts and exits with
-# Godot's status.
+# Godot's status, or 1 when the run logged any "ERROR:", "Invalid Metal usage" or "Error detected
+# in" line (the bar is 0).
 
 set -euo pipefail
 
@@ -99,4 +100,10 @@ errors=$(grep -c 'ERROR:' "$log" || true)
 metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
 metal_shader=$(grep -c 'Error detected in' "$log" || true)
 echo "GODOTNEXT_SRC_RELIGHT_LOG {\"probes\":$probes,\"shadow_mask\":$shadow_mask,\"hwrt\":\"$hwrt\",\"deny_ray_query\":$deny,\"expected_tier\":\"$expected_tier\",\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
-exit "$status"
+if [[ "$status" -ne 0 ]]; then
+	exit "$status"
+fi
+if [[ "$errors" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
+	echo "run_src_relight_check.sh: the run logged validation lines; the bar is 0" >&2
+	exit 1
+fi
