@@ -13,7 +13,8 @@
 #   too) and, with --deny-ray-query, Auto under debug/deny_ray_query (the software tier as on a
 #   device without ray query; the check then also asserts NO_RAY_QUERY, no RT arena, no ray-query
 #   ShaderRD and SWRT instances). The Off and deny rows pass --expected-tier=SWRT, so they fail
-#   when the kitbash runs on another tier; the Auto rows take the device's pick.
+#   when the kitbash runs on another tier; the Auto rows pass --expected-tier=device, so on a
+#   device that reports SUPPORTS_RAY_QUERY_HARDWARE they fail unless the kitbash runs on HWRT.
 # Voxel lighting asserts at High, never at the device's auto pick (lead decision 2026-11-10,
 # plan §21.2.5): Lite's half-size surface cache keeps radiance pages for few of the kitbash's
 # 2,400 rocks, and voxel lighting resamples only paged instances. The Lite run still fails on a
@@ -64,7 +65,8 @@ cleanup() {
 trap cleanup EXIT
 
 # Scene, quality (1 Medium, 2 High), hardware_ray_tracing (0 Auto, 1 Off), the line the run
-# must print ("-" for none) and the tier voxel_lighting_check.tscn must run on ("-" for any).
+# must print ("-" for none) and the tier voxel_lighting_check.tscn must run on ("-" for any,
+# "device" for the device's Auto pick).
 if [[ "$deny" == true ]]; then
 	runs=(
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED SWRT"
@@ -74,8 +76,8 @@ else
 	runs=(
 		"res://tests/voxel_lighting/voxel_slot_check.tscn 2 0 - -"
 		"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 0 - -"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED -"
-		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE -"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED device"
+		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE device"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 1 VOXEL_LIGHTING_ASSERTED SWRT"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 1 VOXEL_LIGHTING_LITE SWRT"
 	)

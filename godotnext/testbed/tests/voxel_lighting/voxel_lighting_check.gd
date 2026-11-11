@@ -17,6 +17,9 @@ extends Node3D
 ## ShaderRD created in the process and SWRT instances (runtime mesh SDFs from the CPU copies).
 ## With the user argument --expected-tier=HWRT or --expected-tier=SWRT the run fails on any other
 ## tier; run_voxel_lighting_check.sh passes SWRT for its hardware_ray_tracing Off and deny rows.
+## --expected-tier=device expects the device's Auto pick: HWRT when the rendering device reports
+## SUPPORTS_RAY_QUERY_HARDWARE (and debug/deny_ray_query is off), else SWRT. The runner passes it
+## for its Auto rows.
 
 const READBACK := "rendering/global_illumination/nextgi/debug/voxel_lighting_readback"
 
@@ -28,8 +31,13 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--expected-tier="):
 			_expected_tier = arg.trim_prefix("--expected-tier=")
+	if _expected_tier == "device":
+		var device := RenderingServer.get_rendering_device()
+		var hardware := device != null and device.has_feature(RenderingDevice.SUPPORTS_RAY_QUERY_HARDWARE)
+		var denied := bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false))
+		_expected_tier = "HWRT" if hardware and not denied else "SWRT"
 	if not _expected_tier.is_empty() and _expected_tier != "HWRT" and _expected_tier != "SWRT":
-		_fail("--expected-tier must be HWRT or SWRT, got %s" % _expected_tier)
+		_fail("--expected-tier must be HWRT, SWRT or device, got %s" % _expected_tier)
 		return
 	ProjectSettings.set_setting(READBACK, true)
 	var kitbash: PackedScene = load("res://scenes/swrt_kitbash/swrt_kitbash.tscn")
