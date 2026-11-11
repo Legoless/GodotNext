@@ -1583,29 +1583,36 @@ TEST_CASE("[NextGI][SWRT] Vertex-region updates patch the kept CPU copy and coun
 	using RendererRD::NextGIRTVertexUpdate;
 	// A device without ray query keeps the CPU copy but has no arena: the copy follows the vertex
 	// buffer and the update is noted, so the mesh can become dynamic in the global SDF's split.
-	const NextGIRTVertexUpdate software = nextgi_rt_plan_vertex_update(false, true, true, false);
+	const NextGIRTVertexUpdate software = nextgi_rt_plan_vertex_update(false, true, true, false, true);
 	CHECK(software.patch_cpu_copy);
 	CHECK(software.note_update);
 	CHECK_FALSE(software.upload_arena);
 	CHECK_FALSE(software.mark_blas_dirty);
 	// A surface in the RT arena gets the CPU patch, the arena upload and the BLAS flag.
-	const NextGIRTVertexUpdate arena = nextgi_rt_plan_vertex_update(true, true, true, true);
+	const NextGIRTVertexUpdate arena = nextgi_rt_plan_vertex_update(true, true, true, true, true);
 	CHECK(arena.patch_cpu_copy);
 	CHECK(arena.upload_arena);
 	CHECK(arena.mark_blas_dirty);
 	CHECK(arena.note_update);
 	// A CPU copy outside the arena (a deforming surface's bind pose) still follows the buffer.
-	const NextGIRTVertexUpdate bind_pose = nextgi_rt_plan_vertex_update(true, true, true, false);
+	const NextGIRTVertexUpdate bind_pose = nextgi_rt_plan_vertex_update(true, true, true, false, true);
 	CHECK(bind_pose.patch_cpu_copy);
 	CHECK_FALSE(bind_pose.upload_arena);
 	CHECK(bind_pose.mark_blas_dirty);
 	CHECK(bind_pose.note_update);
 	// An update past the copied positions patches nothing but is still an update.
-	const NextGIRTVertexUpdate past = nextgi_rt_plan_vertex_update(false, true, false, false);
+	const NextGIRTVertexUpdate past = nextgi_rt_plan_vertex_update(false, true, false, false, true);
 	CHECK_FALSE(past.patch_cpu_copy);
 	CHECK(past.note_update);
 	// NextGI off: no copies, nothing to do.
-	const NextGIRTVertexUpdate off = nextgi_rt_plan_vertex_update(false, false, false, false);
+	// Compressed positions (16-bit, not the copy's floats) patch neither copy, on either device.
+	const NextGIRTVertexUpdate compressed = nextgi_rt_plan_vertex_update(true, true, true, true, false);
+	CHECK_FALSE(compressed.patch_cpu_copy);
+	CHECK_FALSE(compressed.upload_arena);
+	CHECK(compressed.mark_blas_dirty);
+	CHECK(compressed.note_update);
+	CHECK_FALSE(nextgi_rt_plan_vertex_update(false, true, true, false, false).patch_cpu_copy);
+	const NextGIRTVertexUpdate off = nextgi_rt_plan_vertex_update(false, false, false, false, true);
 	CHECK_FALSE(off.patch_cpu_copy);
 	CHECK_FALSE(off.upload_arena);
 	CHECK_FALSE(off.mark_blas_dirty);

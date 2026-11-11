@@ -1787,7 +1787,8 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 	Mesh::Surface *surface = mesh->surfaces[p_surface];
 	const uint32_t pos_bytes = uint32_t(surface->rt_cpu_positions.size()) * sizeof(float);
 	const bool in_arena = surface->rt_chunk != UINT32_MAX && surface->rt_chunk < nextgi_rt_chunks.size();
-	const NextGIRTVertexUpdate plan = nextgi_rt_plan_vertex_update(nextgi_rt_enabled, nextgi_cpu_geometry_enabled, uint32_t(p_offset) < pos_bytes, in_arena);
+	const bool float_positions = !(surface->format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES);
+	const NextGIRTVertexUpdate plan = nextgi_rt_plan_vertex_update(nextgi_rt_enabled, nextgi_cpu_geometry_enabled, uint32_t(p_offset) < pos_bytes, in_arena, float_positions);
 	if (plan.patch_cpu_copy) {
 		const uint32_t count = MIN(uint32_t(data_size), pos_bytes - uint32_t(p_offset));
 		nextgi_rt_patch_positions(surface->rt_cpu_positions, uint32_t(p_offset), r, count);

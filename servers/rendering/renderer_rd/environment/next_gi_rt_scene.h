@@ -118,7 +118,10 @@ _FORCE_INLINE_ bool nextgi_rt_keep_cpu_geometry(bool p_project_enabled, bool p_h
 // ray query too (the card sets and runtime mesh SDFs read it), and the update is noted there, so
 // a mesh updated every frame counts as dynamic on both kinds of device (the BLAS refit rule and
 // the global SDF's dynamic split). The arena copy and the BLAS flag exist only with the RT arena.
-// p_touches_cpu_copy: the update starts inside the copied positions.
+// p_touches_cpu_copy: the update starts inside the copied positions. p_float_positions: the vertex
+// buffer stores float positions, the copy's layout. A compressed buffer's 16-bit positions are not
+// copied byte for byte, so neither copy is patched there (it stays stale until the surface is set
+// again).
 struct NextGIRTVertexUpdate {
 	bool patch_cpu_copy = false;
 	bool upload_arena = false;
@@ -126,10 +129,10 @@ struct NextGIRTVertexUpdate {
 	bool note_update = false;
 };
 
-_FORCE_INLINE_ NextGIRTVertexUpdate nextgi_rt_plan_vertex_update(bool p_rt_enabled, bool p_cpu_geometry_enabled, bool p_touches_cpu_copy, bool p_in_arena) {
+_FORCE_INLINE_ NextGIRTVertexUpdate nextgi_rt_plan_vertex_update(bool p_rt_enabled, bool p_cpu_geometry_enabled, bool p_touches_cpu_copy, bool p_in_arena, bool p_float_positions) {
 	NextGIRTVertexUpdate plan;
-	plan.patch_cpu_copy = p_cpu_geometry_enabled && p_touches_cpu_copy;
-	plan.upload_arena = p_rt_enabled && p_touches_cpu_copy && p_in_arena;
+	plan.patch_cpu_copy = p_cpu_geometry_enabled && p_touches_cpu_copy && p_float_positions;
+	plan.upload_arena = p_rt_enabled && p_touches_cpu_copy && p_in_arena && p_float_positions;
 	plan.mark_blas_dirty = p_rt_enabled;
 	plan.note_update = p_cpu_geometry_enabled;
 	return plan;
