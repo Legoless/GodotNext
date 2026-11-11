@@ -12,9 +12,10 @@
 # repository.
 #
 # A pass fails unless the scene passes (the gather runs for both views every frame, see
-# two_sizes_check.gd) and the run logs 0 "ERROR:", "Invalid Metal usage" and "Error detected in"
-# lines. GPU work of one frame overlapping the next frame's makes the small view read past the end
-# of its own buffers, which only shader validation reports. Exits 0 when every pass passes.
+# two_sizes_check.gd), the gather ran on the pass's tier and the run logs 0 "ERROR:", "Invalid Metal
+# usage" and "Error detected in" lines. GPU work of one frame overlapping the next frame's makes the
+# small view read past the end of its own buffers, which only shader validation reports. Exits 0
+# when every pass passes.
 #
 # Example on the Apple M5 Max:
 #   godotnext/testbed/tests/multiview/run_two_sizes_check.sh -- ./bin/godot.macos.editor.arm64
@@ -72,8 +73,14 @@ for pass in $passes; do
 	tier="${pass%%:*}"
 	quality="${pass##*:}"
 	case "$tier" in
-	swrt) hwrt=1 ;;
-	hwrt) hwrt=0 ;;
+	swrt)
+		hwrt=1
+		expected_tier=SWRT
+		;;
+	hwrt)
+		hwrt=0
+		expected_tier=HWRT
+		;;
 	*)
 		echo "run_two_sizes_check.sh: unknown tier in pass '$pass'" >&2
 		exit 2
@@ -104,6 +111,10 @@ CFG
 	fi
 	if [[ "$errors" != 0 ]]; then
 		grep 'ERROR:' "$log" | sort | uniq -c | head -n 10 || true
+	fi
+	if [[ "$result" != *"\"gather_tier\":\"$expected_tier\""* ]]; then
+		echo "run_two_sizes_check.sh: pass $pass did not run the gather on the $expected_tier tier" >&2
+		status=1
 	fi
 	if [[ "$status" != 0 || "$errors" != 0 || "$invalid" != 0 || "$detected" != 0 || "$result" != *'"pass":true'* ]]; then
 		echo "run_two_sizes_check.sh: pass $pass failed" >&2
