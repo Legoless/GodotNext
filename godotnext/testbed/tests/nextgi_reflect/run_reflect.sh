@@ -8,7 +8,9 @@
 # hardware_ray_tracing mode; auto by default), runs Godot and
 # removes the file again. It refuses to overwrite an existing override.cfg. The scene prints one
 # "GODOTNEXT_RESULT" line; this script counts the denoise views that rendered and fails unless the
-# scene passed. Exits non-zero when Godot fails or the result is a failure.
+# scene passed. Prints the counts of "ERROR:" lines and Metal validation reports. Exits non-zero
+# when Godot fails, the result is a failure or the run logged any "ERROR:", "Invalid Metal usage"
+# or "Error detected in" line (the bar is 0).
 #
 # Example on the Apple M5 Max:
 #   godotnext/testbed/tests/nextgi_reflect/run_reflect.sh -- ./bin/godot.macos.editor.arm64 \
@@ -75,9 +77,19 @@ status=$?
 set -e
 
 result=$(grep -m1 '^GODOTNEXT_RESULT ' "$log" || true)
+errors=$(grep -c 'ERROR:' "$log" || true)
+metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
+metal_shader=$(grep -c 'Error detected in' "$log" || true)
 echo "GODOTNEXT_REFLECT $result"
+echo "GODOTNEXT_REFLECT_LOG {\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
 if [[ "$result" != *'"pass":true'* ]]; then
 	echo "run_reflect.sh: the specular trace check did not pass" >&2
 	exit 1
 fi
-exit "$status"
+if [[ "$status" -ne 0 ]]; then
+	exit "$status"
+fi
+if [[ "$errors" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
+	echo "run_reflect.sh: the run logged validation lines; the bar is 0" >&2
+	exit 1
+fi

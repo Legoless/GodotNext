@@ -11,7 +11,8 @@
 # debug/deny_ray_query (a device without ray query: the software tier, NO_RAY_QUERY, with Auto).
 # Runs Godot, removes
 # the file again and refuses to overwrite an existing override.cfg. Prints the counts of "ERROR:"
-# lines and Metal validation reports in the log. Exits with Godot's status.
+# lines and Metal validation reports in the log. Exits with Godot's status, or 1 when the run
+# logged any "ERROR:", "Invalid Metal usage" or "Error detected in" line (the bar is 0).
 #
 # Example on the Apple M5 Max once it has the HWRT tier (#47):
 #   godotnext/testbed/tests/frame_block/run_frame_block_check.sh -- ./bin/godot.macos.editor.arm64 \
@@ -91,4 +92,10 @@ errors=$(grep -c 'ERROR:' "$log" || true)
 metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
 metal_shader=$(grep -c 'Error detected in' "$log" || true)
 echo "GODOTNEXT_FRAME_BLOCK_LOG {\"half_resolution\":$half,\"hwrt\":\"$hwrt\",\"deny_ray_query\":$deny,\"quality\":$quality,\"enabled\":$enabled,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
-exit "$status"
+if [[ "$status" -ne 0 ]]; then
+	exit "$status"
+fi
+if [[ "$errors" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
+	echo "run_frame_block_check.sh: the run logged validation lines; the bar is 0" >&2
+	exit 1
+fi

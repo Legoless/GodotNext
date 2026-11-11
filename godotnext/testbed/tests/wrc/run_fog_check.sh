@@ -3,7 +3,8 @@
 # Usage: run_fog_check.sh [--hwrt=auto|off|force] [--quality=0|1|2|3] -- <godot> <godot arguments>
 # GodotNext: ps_swrt_trace (#186). --hwrt=off runs the software tier, whose WRC producer traces
 # the SDF (plan §21.2 L9b); pass the scene --expected-tier=SWRT then. The default keeps the
-# project's quality (Auto) and hardware_ray_tracing Auto.
+# project's quality (Auto) and hardware_ray_tracing Auto. Exits with Godot's status, or 1 when the
+# run logged any "ERROR:", "Invalid Metal usage" or "Error detected in" line (the bar is 0).
 
 set -euo pipefail
 
@@ -64,4 +65,10 @@ errors=$(grep -c 'ERROR:' "$log" || true)
 metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
 metal_shader=$(grep -c 'Error detected in' "$log" || true)
 echo "GODOTNEXT_WRC_LOG {\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
-exit "$status"
+if [[ "$status" -ne 0 ]]; then
+	exit "$status"
+fi
+if [[ "$errors" -ne 0 || "$metal_usage" -ne 0 || "$metal_shader" -ne 0 ]]; then
+	echo "run_fog_check.sh: the run logged validation lines; the bar is 0" >&2
+	exit 1
+fi
