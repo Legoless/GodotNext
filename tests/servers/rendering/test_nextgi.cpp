@@ -3517,6 +3517,32 @@ TEST_CASE("[NextGI][Lite] A secondary view reads the probes on the WRC's grid") 
 	}
 }
 
+TEST_CASE("[NextGI][Lite] Each view keeps its own field until its render buffers go") {
+	using ViewField = RendererRD::NextGIIrradianceField::ViewField;
+	const uint32_t before = ViewField::get_alive_count();
+	{
+		Ref<ViewField> first;
+		first.instantiate();
+		Ref<ViewField> second;
+		second.instantiate();
+		CHECK_EQ(ViewField::get_alive_count(), before + 2);
+		// Each field packs its own probes: PROBES_PER_FRAME a frame, wrapping after 16 frames, and
+		// another view's packs do not move its cursor.
+		for (uint32_t frame = 0; frame < RendererRD::NextGIIrradianceField::PROBE_COUNT / RendererRD::NextGIIrradianceField::PROBES_PER_FRAME; frame++) {
+			CHECK_EQ(first->consume_probe_base(), frame * RendererRD::NextGIIrradianceField::PROBES_PER_FRAME);
+		}
+		CHECK_EQ(first->consume_probe_base(), 0u);
+		CHECK_EQ(second->consume_probe_base(), 0u);
+		CHECK_EQ(first->consume_probe_base(), RendererRD::NextGIIrradianceField::PROBES_PER_FRAME);
+		// RenderSceneBuffersRD::cleanup() calls free_data() on every reconfigure and keeps the field.
+		first->free_data();
+		CHECK_EQ(ViewField::get_alive_count(), before + 2);
+		CHECK_EQ(first->consume_probe_base(), 2 * RendererRD::NextGIIrradianceField::PROBES_PER_FRAME);
+	}
+	// Dropping the render buffers' reference frees the field.
+	CHECK_EQ(ViewField::get_alive_count(), before);
+}
+
 // GodotNext: nextgi_multiview (#58).
 TEST_CASE("[NextGI][MultiView] Anchor selection and scenario scheduling") {
 	using Candidate = RendererRD::NextGI::ViewAnchorCandidate;

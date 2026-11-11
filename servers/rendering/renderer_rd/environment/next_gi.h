@@ -570,7 +570,7 @@ public:
 	DebugViewId get_active_debug_view() const { return active_debug_view; }
 	// Texture for DEBUG_VIEW_DENOISE_RAW/VARIANCE/HISTORY/REJECTED, or an invalid RID.
 	RID get_denoise_debug_texture(DebugViewId p_view) const;
-	RID get_lite_debug_texture() const;
+	RID get_lite_debug_texture(RenderSceneBuffersRD *p_render_buffers) const;
 	NextGIIrradianceField *ensure_irradiance_field();
 	// GodotNext: ps_lumen_lite (#183). Called next to the compute_list_dispatch they count.
 	void note_gather_dispatch();

@@ -992,6 +992,8 @@ Dictionary NextGI::get_tier_info() const {
 		voxel_lighting->fill_info(info);
 	}
 	_append_swrt_info(info);
+	// GodotNext: ps_lumen_lite (#183, #186). Per-view Lite fields alive; each is freed with its view.
+	info["lite_view_fields"] = int64_t(NextGIIrradianceField::ViewField::get_alive_count());
 	// GodotNext: ps_tier_rule (#187). A runtime request held until the next start.
 	if (hwrt_setting_pending) {
 		info["hardware_ray_tracing_pending"] = int(pending_hwrt_setting);
@@ -1022,8 +1024,9 @@ RID NextGI::get_denoise_debug_texture(DebugViewId p_view) const {
 	return gather != nullptr ? gather->get_debug_texture(int(p_view)) : RID();
 }
 
-RID NextGI::get_lite_debug_texture() const {
-	return irradiance_field != nullptr ? irradiance_field->get_debug_texture() : RID();
+RID NextGI::get_lite_debug_texture(RenderSceneBuffersRD *p_render_buffers) const {
+	// GodotNext: ps_lumen_lite (#183, #186). Each view's own field.
+	return NextGIIrradianceField::get_debug_texture(p_render_buffers);
 }
 
 NextGIIrradianceField *NextGI::ensure_irradiance_field() {

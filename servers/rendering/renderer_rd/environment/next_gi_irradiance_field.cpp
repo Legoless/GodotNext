@@ -98,41 +98,38 @@ struct NextGIIrradianceField::GpuState {
 	RID sampler;
 	RID dummy_2d;
 	RID dummy_3d;
-	RID params_buffer;
 	bool ready = false;
 };
 
-NextGIIrradianceField::NextGIIrradianceField() {
+NextGIIrradianceField::ViewField::ViewField() {
+	alive.increment();
 }
 
-NextGIIrradianceField::~NextGIIrradianceField() {
+NextGIIrradianceField::ViewField::~ViewField() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr) {
-		const RID rids[] = { probe_buffer, half_image };
+		const RID rids[] = { probe_buffer, half_image, params_buffer };
 		for (const RID &rid : rids) {
 			if (rid.is_valid()) {
 				rd->free_rid(rid);
 			}
 		}
-		if (gpu != nullptr) {
-			const RID gpu_rids[] = { gpu->pipeline, gpu->sampler, gpu->dummy_2d, gpu->dummy_3d, gpu->params_buffer };
-			for (const RID &rid : gpu_rids) {
-				if (rid.is_valid()) {
-					rd->free_rid(rid);
-				}
-			}
-			if (gpu->version.is_valid()) {
-				gpu->shader.version_free(gpu->version);
-			}
-		}
 	}
-	if (gpu != nullptr) {
-		memdelete(gpu);
-		gpu = nullptr;
-	}
+	alive.decrement();
 }
 
-bool NextGIIrradianceField::ensure_probe_buffer() {
+void NextGIIrradianceField::ViewField::free_data() {
+	// RenderSceneBuffersRD::cleanup() runs on every reconfigure, and the half-resolution image
+	// follows the view's size. The probes do not, so a resize keeps them; ~ViewField() frees them
+	// with the render buffers.
+	if (half_image.is_valid() && RenderingDevice::get_singleton() != nullptr) {
+		RenderingDevice::get_singleton()->free_rid(half_image);
+	}
+	half_image = RID();
+	half_size = Size2i();
+}
+
+bool NextGIIrradianceField::ViewField::ensure_probe_buffer() {
 	if (probe_buffer.is_valid()) {
 		return true;
 	}
@@ -148,13 +145,59 @@ bool NextGIIrradianceField::ensure_probe_buffer() {
 		cleared.write[probe * PROBE_VEC4S * 4 + 3] = 1.0f;
 	}
 	probe_buffer = rd->storage_buffer_create(cleared.size() * sizeof(float), Span<uint8_t>((const uint8_t *)cleared.ptr(), cleared.size() * sizeof(float)));
+	cursor = 0;
 	return probe_buffer.is_valid();
 }
 
-uint32_t NextGIIrradianceField::consume_probe_base() {
+uint32_t NextGIIrradianceField::ViewField::consume_probe_base() {
 	const uint32_t base = cursor;
 	cursor = (cursor + PROBES_PER_FRAME) % PROBE_COUNT;
 	return base;
+}
+
+Ref<NextGIIrradianceField::ViewField> NextGIIrradianceField::get_view_field(RenderSceneBuffersRD *p_render_buffers) {
+	if (p_render_buffers == nullptr || !p_render_buffers->has_custom_data(SNAME("nextgi_lite_field"))) {
+		return Ref<ViewField>();
+	}
+	return p_render_buffers->get_custom_data(SNAME("nextgi_lite_field"));
+}
+
+Ref<NextGIIrradianceField::ViewField> NextGIIrradianceField::_ensure_view_field(RenderSceneBuffersRD *p_render_buffers) {
+	Ref<ViewField> field = get_view_field(p_render_buffers);
+	if (field.is_null() && p_render_buffers != nullptr) {
+		field.instantiate();
+		p_render_buffers->set_custom_data(SNAME("nextgi_lite_field"), field);
+	}
+	return field;
+}
+
+RID NextGIIrradianceField::get_debug_texture(RenderSceneBuffersRD *p_render_buffers) {
+	const Ref<ViewField> field = get_view_field(p_render_buffers);
+	return field.is_valid() ? field->half_image : RID();
+}
+
+NextGIIrradianceField::NextGIIrradianceField() {
+}
+
+NextGIIrradianceField::~NextGIIrradianceField() {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd != nullptr) {
+		if (gpu != nullptr) {
+			const RID gpu_rids[] = { gpu->pipeline, gpu->sampler, gpu->dummy_2d, gpu->dummy_3d };
+			for (const RID &rid : gpu_rids) {
+				if (rid.is_valid()) {
+					rd->free_rid(rid);
+				}
+			}
+			if (gpu->version.is_valid()) {
+				gpu->shader.version_free(gpu->version);
+			}
+		}
+	}
+	if (gpu != nullptr) {
+		memdelete(gpu);
+		gpu = nullptr;
+	}
 }
 
 bool NextGIIrradianceField::_ensure_gpu() {
@@ -212,10 +255,7 @@ bool NextGIIrradianceField::_ensure_gpu() {
 			rd->texture_clear(gpu->dummy_3d, Color(0, 0, 0, 1), 0, 1, 0, 1);
 		}
 	}
-	if (!gpu->params_buffer.is_valid()) {
-		gpu->params_buffer = rd->storage_buffer_create(sizeof(Params));
-	}
-	gpu->ready = gpu->sampler.is_valid() && gpu->dummy_2d.is_valid() && gpu->dummy_3d.is_valid() && gpu->params_buffer.is_valid();
+	gpu->ready = gpu->sampler.is_valid() && gpu->dummy_2d.is_valid() && gpu->dummy_3d.is_valid();
 	if (!gpu->ready) {
 		shader_failed = true;
 	}
@@ -231,8 +271,18 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 		return;
 	}
 	NextGI *next_gi = NextGI::get_singleton();
-	if (next_gi == nullptr || !_ensure_gpu() || !ensure_probe_buffer()) {
+	if (next_gi == nullptr || !_ensure_gpu()) {
 		return;
+	}
+	const Ref<ViewField> field = _ensure_view_field(buffers.ptr());
+	if (field.is_null() || !field->ensure_probe_buffer()) {
+		return;
+	}
+	if (!field->params_buffer.is_valid()) {
+		field->params_buffer = RenderingDevice::get_singleton()->storage_buffer_create(sizeof(Params));
+		if (!field->params_buffer.is_valid()) {
+			return;
+		}
 	}
 	const bool half_resolution = GI::get_singleton() != nullptr && GI::get_singleton()->is_half_resolution();
 	next_gi->ensure_gi_buffers(buffers.ptr(), half_resolution);
@@ -242,23 +292,23 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	const Size2i gi_size = next_gi->get_gi_buffer_size(buffers->get_internal_size(), half_resolution);
 	const Size2i wanted_half(MAX(gi_size.x / 2, 1), MAX(gi_size.y / 2, 1));
-	if (!half_image.is_valid() || half_size != wanted_half) {
-		if (half_image.is_valid()) {
-			rd->free_rid(half_image);
-			half_image = RID();
+	if (!field->half_image.is_valid() || field->half_size != wanted_half) {
+		if (field->half_image.is_valid()) {
+			rd->free_rid(field->half_image);
+			field->half_image = RID();
 		}
 		RD::TextureFormat format;
 		format.width = wanted_half.x;
 		format.height = wanted_half.y;
 		format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
-		half_image = rd->texture_create(format, RD::TextureView());
-		half_size = wanted_half;
-		if (half_image.is_valid()) {
-			rd->texture_clear(half_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		field->half_image = rd->texture_create(format, RD::TextureView());
+		field->half_size = wanted_half;
+		if (field->half_image.is_valid()) {
+			rd->texture_clear(field->half_image, Color(0, 0, 0, 0), 0, 1, 0, 1);
 		}
 	}
-	if (!half_image.is_valid()) {
+	if (!field->half_image.is_valid()) {
 		return;
 	}
 
@@ -299,13 +349,13 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	// the WRC; snapping them to its own camera would shift every probe by the cameras' offset.
 	const Vector3 grid_camera = wrc_bound ? wrc->get_grid_camera() : scene_data->cam_transform.origin;
 	const Params params = build_params(scene_data->cam_projection, scene_data->cam_transform, scene_data->flip_y, scene_data->taa_jitter, gi_size, wanted_half, buffers->get_internal_size(), depth_valid > 0.5f, normal_valid > 0.5f, wrc_bound, grid_camera);
-	rd->buffer_update(gpu->params_buffer, 0, sizeof(params), &params);
+	rd->buffer_update(field->params_buffer, 0, sizeof(params), &params);
 
 	const RID ambient = buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_AMBIENT, 0, 0);
 	const RID reflection = buffers->get_texture_slice(RB_SCOPE_GI, RB_TEX_REFLECTION, 0, 0);
 	const RID shader = gpu->shader.version_get_shader(gpu->version, 0);
 	Vector<RD::Uniform> uniforms;
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, probe_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, field->probe_buffer));
 	{
 		RD::Uniform depth_uniform;
 		depth_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
@@ -322,10 +372,10 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 		normal_uniform.append_id(normal);
 		uniforms.push_back(normal_uniform);
 	}
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, half_image));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, field->half_image));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 4, ambient));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 5, reflection));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, gpu->params_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, field->params_buffer));
 	{
 		RD::Uniform radiance_uniform;
 		radiance_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
@@ -380,7 +430,7 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	if (wrc_bound) {
 		LitePushGPU pack_push;
 		pack_push.mode = 0;
-		pack_push.probe_base = consume_probe_base();
+		pack_push.probe_base = field->consume_probe_base();
 		rd->compute_list_set_push_constant(list, &pack_push, sizeof(pack_push));
 		rd->compute_list_dispatch(list, PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_add_barrier(list);

@@ -32,9 +32,12 @@
 
 #include "core/math/projection.h"
 #include "core/math/transform_3d.h"
+#include "core/templates/safe_refcount.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 #include "servers/rendering/rendering_device.h"
 
 class RenderDataRD;
+class RenderSceneBuffersRD;
 
 namespace RendererRD {
 
@@ -42,12 +45,43 @@ namespace RendererRD {
 // Both tiers pack the WRC radiance image into the probe buffer (the software tier's WRC
 // traces the SDF). Neither dispatches screen-probe or reflection rays.
 // Each probe holds L0 and L1 radiance, so the gather evaluates irradiance at the pixel normal
-// and the rough specular at the reflection vector.
+// and the rough specular at the reflection vector. The shader and pipeline are shared; every
+// view keeps its own field (ViewField) on its render buffers.
 class NextGIIrradianceField {
 public:
 	static constexpr uint32_t PROBE_COUNT = 8192;
 	static constexpr uint32_t PROBES_PER_FRAME = 512;
 	static constexpr uint32_t PROBE_VEC4S = 4;
+
+	// One view's field: the probes packed from the WRC, the half-resolution irradiance, the
+	// params and the pack cursor. It lives on the view's render buffers (custom data
+	// "nextgi_lite_field") and is freed with them. A reconfigure (a resize) drops only the
+	// half-resolution image; the probes keep their packed radiance.
+	class ViewField : public RenderBufferCustomDataRD {
+		GDCLASS(ViewField, RenderBufferCustomDataRD);
+
+		static inline SafeNumeric<uint32_t> alive;
+
+	public:
+		RID probe_buffer;
+		RID half_image;
+		RID params_buffer;
+		Size2i half_size;
+		uint32_t cursor = 0;
+
+		// Every probe starts not traced (validity 1, above the inside threshold).
+		bool ensure_probe_buffer();
+		// The first probe of this frame's pack; PROBES_PER_FRAME per call, wrapping at PROBE_COUNT.
+		uint32_t consume_probe_base();
+		// Fields alive across all views (tier info "lite_view_fields").
+		static uint32_t get_alive_count() { return alive.get(); }
+
+		virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
+		virtual void free_data() override;
+
+		ViewField();
+		~ViewField();
+	};
 
 	// The std430 block nextgi_irradiance_field.glsl reads (LiteParams).
 	struct Params {
@@ -77,26 +111,23 @@ public:
 	NextGIIrradianceField(const NextGIIrradianceField &) = delete;
 	NextGIIrradianceField &operator=(const NextGIIrradianceField &) = delete;
 
-	bool ensure_probe_buffer();
-	RID get_probe_buffer() const { return probe_buffer; }
-	RID get_debug_texture() const { return half_image; }
+	// The view's field, or null before Lite first integrated it.
+	static Ref<ViewField> get_view_field(RenderSceneBuffersRD *p_render_buffers);
+	// The view's half-resolution irradiance (DEBUG_DRAW_NEXTGI_LITE_PROBES), or an invalid RID.
+	static RID get_debug_texture(RenderSceneBuffersRD *p_render_buffers);
 
-	uint32_t consume_probe_base();
-
-	// Packs the WRC (when it is bound) and writes the GI buffers. The frame block calls it
-	// outside reflections-only mode, where LightmapGI or VoxelGI writes the ambient.
+	// Packs the WRC (when it is bound) into the view's field and writes its GI buffers. The frame
+	// block calls it per view, outside reflections-only mode, where LightmapGI or VoxelGI writes
+	// the ambient.
 	void integrate(RenderDataRD *p_render_data);
 
 private:
 	struct GpuState;
 	GpuState *gpu = nullptr;
-	RID probe_buffer;
-	RID half_image;
-	Size2i half_size;
-	uint32_t cursor = 0;
 	bool shader_failed = false;
 
 	bool _ensure_gpu();
+	static Ref<ViewField> _ensure_view_field(RenderSceneBuffersRD *p_render_buffers);
 };
 
 } // namespace RendererRD
