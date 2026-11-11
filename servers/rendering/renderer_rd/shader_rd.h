@@ -152,7 +152,7 @@ private:
 	bool ray_query_required = false;
 	// GodotNext: nextgi_ray_query_census (#186). Versions created by ray-query ShaderRDs in this
 	// process, so the software tier can prove it never creates one.
-	static inline SafeNumeric<uint64_t> ray_query_versions_created;
+	static inline SafeNumeric<uint64_t> ray_query_versions_created{ 0 };
 
 	String name;
 
