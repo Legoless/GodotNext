@@ -90,6 +90,10 @@ class NextGIWRC {
 
 	struct ShaderState;
 	ShaderState *shader = nullptr;
+	// GodotNext: ps_swrt_trace (#186). The software tier's sibling (nextgi_wrc_update_swrt.glsl).
+	struct SWRTShaderState;
+	SWRTShaderState *swrt_shader = nullptr;
+	RID swrt_trace_set;
 
 	RID radiance;
 	RID mip4;
@@ -142,6 +146,9 @@ class NextGIWRC {
 	uint32_t translucency_rays = 0;
 	uint32_t translucency_hits = 0;
 	float translucency_sky_energy = 0.0f;
+	uint32_t last_sdf_hits = 0;
+	uint32_t last_sdf_exhausted = 0;
+	uint32_t last_sdf_near = 0;
 	bool volume_history_valid = false;
 	bool has_previous_camera = false;
 	bool previous_sky_read = false;
@@ -152,8 +159,16 @@ class NextGIWRC {
 	bool _ensure_textures();
 	bool _ensure_translucency_cache();
 	bool _ensure_shader();
+	bool _ensure_swrt_shader();
 	void _free_uniform_set();
-	void _read_counters();
+	// GodotNext: nextgi_async_counters (#186). One asynchronous read of the previous frame's
+	// counters (fog included) before the slot zeroes them; a synchronous read inside the frame
+	// block restarts the device frame and drops the block's timestamps.
+	void _request_counters();
+	static void _counters_received(const Vector<uint8_t> &p_data, uint64_t p_token);
+	RID readback_buffer;
+	uint64_t counter_token = 0;
+	bool counters_pending = false;
 
 public:
 	static NextGIWRC *get_singleton() { return singleton; }
@@ -170,6 +185,8 @@ public:
 	static ViewParams view_params(const RenderSceneDataRD &p_scene_data);
 	// The expanded update shader source of one variant, for the layout doctest. No GPU compile.
 	static String build_update_shader_source(int p_variant = 0);
+	// GodotNext: ps_swrt_trace (#186). The software sibling's expanded source, for the doctests.
+	static String build_update_swrt_shader_source(int p_variant = 0);
 
 	void update(const RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;

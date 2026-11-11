@@ -2,12 +2,14 @@
 # Runs res://tests/frame_block/frame_block_check.tscn with NextGI enabled for the run (#26).
 #
 # Usage:
-#   run_frame_block_check.sh [--half-resolution] [--hwrt=auto|off|force] -- <godot> <godot arguments>
+#   run_frame_block_check.sh [--half-resolution] [--hwrt=auto|off|force] [--quality=0|1|2|3] [--disabled] \
+#     -- <godot> <godot arguments>
 #
-# Writes godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true, the
-# hardware_ray_tracing mode and, with --half-resolution, gi/use_half_resolution=true. Runs Godot,
-# removes the file again and refuses to overwrite an existing override.cfg. Prints the counts of
-# "ERROR:" lines and Metal validation reports in the log. Exits with Godot's status.
+# Writes godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true (false with
+# --disabled), the hardware_ray_tracing mode, nextgi/quality (0 Auto by default, 1 Medium,
+# 2 High, 3 Epic) and, with --half-resolution, gi/use_half_resolution=true. Runs Godot, removes
+# the file again and refuses to overwrite an existing override.cfg. Prints the counts of "ERROR:"
+# lines and Metal validation reports in the log. Exits with Godot's status.
 #
 # Example on the Apple M5 Max once it has the HWRT tier (#47):
 #   godotnext/testbed/tests/frame_block/run_frame_block_check.sh -- ./bin/godot.macos.editor.arm64 \
@@ -25,10 +27,14 @@ override="$testbed_dir/override.cfg"
 
 half=false
 hwrt=auto
+quality=0
+enabled=true
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--half-resolution) half=true ;;
 	--hwrt=auto | --hwrt=off | --hwrt=force) hwrt="${1#--hwrt=}" ;;
+	--quality=0 | --quality=1 | --quality=2 | --quality=3) quality="${1#--quality=}" ;;
+	--disabled) enabled=false ;;
 	--)
 		shift
 		break
@@ -64,8 +70,9 @@ trap cleanup EXIT
 cat >"$override" <<EOF
 [rendering]
 
-global_illumination/nextgi/enabled=true
+global_illumination/nextgi/enabled=$enabled
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+global_illumination/nextgi/quality=$quality
 global_illumination/gi/use_half_resolution=$half
 EOF
 
@@ -78,5 +85,5 @@ set -e
 errors=$(grep -c 'ERROR:' "$log" || true)
 metal_usage=$(grep -c 'Invalid Metal usage' "$log" || true)
 metal_shader=$(grep -c 'Error detected in' "$log" || true)
-echo "GODOTNEXT_FRAME_BLOCK_LOG {\"half_resolution\":$half,\"hwrt\":\"$hwrt\",\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
+echo "GODOTNEXT_FRAME_BLOCK_LOG {\"half_resolution\":$half,\"hwrt\":\"$hwrt\",\"quality\":$quality,\"enabled\":$enabled,\"errors\":$errors,\"invalid_metal_usage\":$metal_usage,\"shader_validation\":$metal_shader,\"status\":$status}"
 exit "$status"

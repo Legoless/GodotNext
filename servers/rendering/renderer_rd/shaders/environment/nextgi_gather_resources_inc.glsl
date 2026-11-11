@@ -37,6 +37,8 @@ layout(set = 0, binding = 8, std430) restrict readonly buffer NextGIGatherRecord
 }
 records;
 
+// GodotNext: ps_swrt_trace (#186). The triangle records and the arena are the hardware tier's.
+#ifndef NEXTGI_TRACE_SDF
 layout(set = 0, binding = 9, std430) restrict readonly buffer NextGIGatherSurfaces {
 	NextGISurfaceRecord data[];
 }
@@ -58,6 +60,7 @@ layout(set = 0, binding = 13, std430) restrict readonly buffer NextGIChunk3 {
 	uint data[];
 }
 chunk3;
+#endif // !NEXTGI_TRACE_SDF
 
 layout(set = 0, binding = 14, std430) restrict readonly buffer NextGIPageRects {
 	uvec2 data[];
@@ -128,6 +131,16 @@ layout(set = 0, binding = 19, std430) buffer NextGIGatherCounters {
 	uint wrc_samples;
 	uint sky_samples;
 	uint screen_hits;
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186). The software tier's SDF hits, the step-limit and
+	// near-origin ones among them, detail hits, D6-resolved detail hits and the hit distance sum (cm).
+	uint sdf_hits;
+	uint sdf_exhausted;
+	uint sdf_near;
+	uint sdf_detail_hits;
+	uint sdf_d6_resolved;
+	uint sdf_hit_cm_sum;
+#endif
 }
 counters;
 
@@ -136,6 +149,8 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIFeedbackPag
 }
 feedback_pages;
 
+// GodotNext: ps_swrt_trace (#186). The hit-radiance reference is the hardware tier's.
+#ifndef NEXTGI_TRACE_SDF
 struct NextGIRefMaterial {
 	vec4 albedo_metal;
 	vec4 emission_roughness;
@@ -163,5 +178,6 @@ layout(set = 0, binding = 25, std430) restrict readonly buffer NextGIGatherRefPa
 	vec4 exposure_clear;
 }
 ref_params;
+#endif // !NEXTGI_TRACE_SDF
 
 #endif // NEXTGI_GATHER_RESOURCES_INC_GLSL

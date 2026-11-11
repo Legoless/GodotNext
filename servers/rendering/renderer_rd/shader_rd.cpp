@@ -269,6 +269,11 @@ RID ShaderRD::version_create(bool p_embedded) {
 		shader_versions_embedded_set.insert({ this, rid });
 	}
 
+	// GodotNext: nextgi_ray_query_census (#186)
+	if (ray_query_required) {
+		ray_query_versions_created.increment();
+	}
+
 	return rid;
 }
 

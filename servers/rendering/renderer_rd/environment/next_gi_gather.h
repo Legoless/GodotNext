@@ -80,6 +80,13 @@ class NextGIGather {
 
 	struct ShaderState;
 	ShaderState *shader = nullptr;
+	// GodotNext: ps_swrt_trace (#186). The software tier's sibling (nextgi_gather_swrt.glsl): no
+	// ray query, so SWRT never constructs the hardware ShaderRD. Set 1 holds the SDF trace.
+	struct SWRTShaderState;
+	SWRTShaderState *swrt_shader = nullptr;
+	RID swrt_trace_set;
+	bool bound_swrt = false;
+	String bound_tier = "NONE";
 
 	RID probe_image;
 	RID probe_scratch;
@@ -160,6 +167,22 @@ class NextGIGather {
 	uint32_t last_reflection_traced = 0;
 	uint32_t last_reflection_hits = 0;
 	uint32_t last_reflection_misses = 0;
+	// GodotNext: ps_swrt_trace (#186). Software-tier trace counters (0 on the hardware tier).
+	uint32_t last_sdf_hits = 0;
+	uint32_t last_sdf_exhausted = 0;
+	uint32_t last_sdf_near = 0;
+	uint32_t last_sdf_detail_hits = 0;
+	uint32_t last_sdf_d6_resolved = 0;
+	uint32_t last_sdf_hit_cm_sum = 0;
+	uint32_t last_reflect_sdf_hits = 0;
+	uint32_t last_reflect_sdf_exhausted = 0;
+	uint32_t last_reflect_sdf_near = 0;
+	// GodotNext: nextgi_async_counters (#186). One asynchronous readback of the counter, clamp
+	// and reflect buffers; a synchronous read inside the frame block restarts the device frame
+	// and drops the block's timestamps.
+	RID readback_buffer;
+	uint64_t counter_token = 0;
+	bool counters_pending = false;
 	bool hit_radiance_reference = false;
 	bool front_layer = false;
 	RID front_depth;
@@ -168,13 +191,19 @@ class NextGIGather {
 	RID front_hit_distance;
 
 	bool _ensure_shader();
+	bool _ensure_swrt_shader();
+	// The bound tier's pipeline for a variant (0 gather, 1 integrate, 2 feedback, 3 coverage,
+	// 4 hit-radiance reference, 5 reflect, 6 far field).
+	RID _pipeline(int p_variant) const;
+	void _bind_trace_set(int64_t p_list) const;
 	bool _ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h);
 	bool _bind(RenderDataRD *p_render_data, uint32_t p_feedback_count, uint32_t p_feedback_stride);
 	void _denoise_probes();
 	void _denoise_specular();
 	bool _ensure_debug_textures();
 	void _stabilize_ambient(Ref<RenderSceneBuffersRD> p_render_buffers);
-	void _read_counters();
+	void _request_counters();
+	static void _counters_received(const Vector<uint8_t> &p_data, uint64_t p_token);
 	void _free_uniform_set();
 
 public:
@@ -196,6 +225,8 @@ public:
 
 	// Expanded gather source (variant 0) for the kernel-rule doctest. No GPU compile.
 	static String build_shader_source(int p_variant = 0);
+	// GodotNext: ps_swrt_trace (#186). The software sibling's expanded source, for the doctests.
+	static String build_swrt_shader_source(int p_variant = 0);
 
 	// GodotNext: nextgi_view_math. The view matrices the gather uploads, all from NextGIView:
 	// the inverse of the depth prepass's view-projection, the previous frame's view-projection,

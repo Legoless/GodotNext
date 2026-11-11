@@ -1,6 +1,8 @@
 extends Node
 
 ## Volumetric fog samples the world radiance cache in Color Box Room A (#44).
+## GodotNext: ps_swrt_trace (#186). --expected-tier=HWRT (default) or SWRT: the tier the run must
+## report. The software tier has its own WRC producer, and fog reads it there too (L9b).
 
 
 func _ready() -> void:
@@ -49,6 +51,13 @@ func run() -> Dictionary:
 		wrc_hits = maxi(wrc_hits, int(info.get("wrc_gather_samples", 0)))
 		uncovered = maxi(uncovered, int(info.get("src_gather_uncovered", 0)))
 	var failures := PackedStringArray()
+	var expected_tier := "HWRT"
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--expected-tier="):
+			expected_tier = arg.trim_prefix("--expected-tier=")
+	var tier := String(RenderingServer.nextgi_get_tier_info().get("tier", ""))
+	if tier != expected_tier:
+		failures.append("tier %s, expected %s" % [tier, expected_tier])
 	if bytes != 14680064:
 		failures.append("bytes %d" % bytes)
 	if rays < 1:
@@ -60,6 +69,7 @@ func run() -> Dictionary:
 	return {
 		"pass": failures.is_empty(),
 		"failures": " | ".join(failures),
+		"tier": tier,
 		"bytes": bytes,
 		"rays": rays,
 		"fog_samples": fog_samples,

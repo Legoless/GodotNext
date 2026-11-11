@@ -150,6 +150,9 @@ private:
 	RD::PipelineType pipeline_type = RD::PIPELINE_TYPE_RASTERIZATION;
 
 	bool ray_query_required = false;
+	// GodotNext: nextgi_ray_query_census (#186). Versions created by ray-query ShaderRDs in this
+	// process, so the software tier can prove it never creates one.
+	static inline SafeNumeric<uint64_t> ray_query_versions_created;
 
 	String name;
 
@@ -209,6 +212,8 @@ public:
 	// GodotNext: shader_baker_ray_query
 	void set_requires_ray_query(bool p_enabled) { ray_query_required = p_enabled; }
 	bool requires_ray_query() const { return ray_query_required; }
+	// GodotNext: nextgi_ray_query_census (#186)
+	static uint64_t get_ray_query_versions_created() { return ray_query_versions_created.get(); }
 
 	RID version_create(bool p_embedded = true);
 

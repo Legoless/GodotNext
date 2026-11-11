@@ -396,10 +396,6 @@ void NextGI::note_lite_probe_traces(uint32_t p_count) {
 	lite_probe_traces += p_count;
 }
 
-bool NextGI::view_samples_lite_field(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
-	return p_tier == TIER_SOFTWARE && !p_reflection_probe && p_environment_enabled && !p_unshaded && is_lumen_lite() && !is_reflections_only();
-}
-
 NextGI::Quality NextGI::auto_quality = NextGI::QUALITY_AUTO;
 String NextGI::auto_reason;
 
@@ -881,6 +877,10 @@ Dictionary NextGI::get_tier_info() const {
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
 	info["quality"] = active ? get_quality_name(resolve_quality(quality_setting)) : String("NONE");
 	info["ray_query_shaders_initialized"] = ray_query_shaders_initialized;
+	// GodotNext: nextgi_ray_query_census (#186). Ray-query ShaderRD versions created by this
+	// process, and since begin_frame() last saw a tier change.
+	info["ray_query_shader_versions"] = int64_t(ShaderRD::get_ray_query_versions_created());
+	info["ray_query_shader_versions_since_tier"] = int64_t(get_ray_query_versions_since_tier());
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
@@ -1041,26 +1041,75 @@ void NextGI::_relight_src(RenderDataRD *p_render_data) {
 	if (relight != nullptr) {
 		relight->relight(p_render_data);
 	}
-	// GodotNext: ps_voxel_lighting (#188). Same slot as SRC relight, after capture.
-	update_voxel_lighting(p_render_data);
+	// GodotNext: ps_voxel_lighting (#188). Same slot as SRC relight, after capture, on HWRT. The
+	// software tier keeps its push-1 place, the pre-render hook (renderer_scene_render_rd.cpp),
+	// until the lead places it (#188 step 3).
+	if (result.tier == TIER_HWRT) {
+		update_voxel_lighting(p_render_data);
+	}
+}
+
+// GodotNext: nextgi_frame_tier (#186)
+void NextGI::begin_frame(uint64_t p_frame) {
+	if (frame_tier_valid && p_frame == frame_tier_frame) {
+		return;
+	}
+	frame_tier_frame = p_frame;
+	if (budget_pending && p_frame > budget_frame) {
+		budget_pending = false;
+		// Only the budget comes from the noted frame; a later hardware_ray_tracing change stays.
+		TierInputs applied = inputs;
+		applied.as_memory_ok = pending_inputs.as_memory_ok;
+		String line;
+		if (update_tier(applied, quality_setting, line)) {
+			log_tier_selection(line);
+		}
+	}
+	if (frame_tier_valid && frame_tier == result.tier) {
+		return;
+	}
+	// A tier change drops the previous tier's volume and tracer before any consumer of the frame.
+	if (voxel_lighting != nullptr) {
+		memdelete(voxel_lighting);
+		voxel_lighting = nullptr;
+	}
+	if (swrt_trace != nullptr) {
+		memdelete(swrt_trace);
+		swrt_trace = nullptr;
+	}
+	voxel_lighting_frame = UINT64_MAX;
+	ray_query_versions_at_tier = ShaderRD::get_ray_query_versions_created();
+	_ensure_rt_scene();
+	frame_tier = result.tier;
+	frame_tier_valid = true;
+	frame_tier_changes++;
+}
+
+void NextGI::note_as_memory_budget(bool p_ok, uint64_t p_frame) {
+	if (p_ok == inputs.as_memory_ok) {
+		budget_pending = false; // Back within the budget before the change applied.
+		return;
+	}
+	if (budget_pending && pending_inputs.as_memory_ok == p_ok) {
+		return; // Already noted on an earlier frame.
+	}
+	pending_inputs = inputs;
+	pending_inputs.as_memory_ok = p_ok;
+	budget_pending = true;
+	budget_frame = p_frame;
+}
+
+uint64_t NextGI::get_ray_query_versions_since_tier() const {
+	return ShaderRD::get_ray_query_versions_created() - ray_query_versions_at_tier;
+}
+
+String NextGI::get_active_slot_name() const {
+	return active_slot > PASS_SLOT_BEGIN && active_slot < PASS_SLOT_END ? String(PASS_SLOTS[active_slot].name) : String("none");
 }
 
 // GodotNext: ps_voxel_lighting (#188)
 void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
-	// A tier change drops the volume before any early-out, including probe frames.
-	if (voxel_lighting_tier_valid && voxel_lighting_tier != result.tier) {
-		if (voxel_lighting != nullptr) {
-			memdelete(voxel_lighting);
-			voxel_lighting = nullptr;
-		}
-		if (swrt_trace != nullptr) {
-			memdelete(swrt_trace);
-			swrt_trace = nullptr;
-		}
-		voxel_lighting_frame = UINT64_MAX;
-	}
-	voxel_lighting_tier = result.tier;
-	voxel_lighting_tier_valid = true;
+	// GodotNext: nextgi_frame_tier (#186). begin_frame() drops the volume on a tier change.
 	if (result.tier != TIER_HWRT && result.tier != TIER_SOFTWARE) {
 		return;
 	}
@@ -1090,58 +1139,14 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 		voxel_lighting = memnew(NextGIVoxelLighting);
 	}
 	voxel_lighting->update_render(p_render_data, relight, src);
-	// GodotNext: ps_swrt_trace (#186). The ray-query builder marks a whole ShaderRD,
-	// so the software trace is a sibling of the HWRT gather. The software tier
-	// stays out of the ray-query frame block (#187).
-	if (result.tier == TIER_SOFTWARE) {
-		const bool lite = is_lumen_lite();
-		_begin_dispatch_frame();
-		if (lite) {
-			ensure_irradiance_field();
-		}
-		if (swrt_trace == nullptr) {
-			swrt_trace = memnew(NextGISWRTTrace);
-		}
-		// The scene upkeep needs no depth; the gather and reflection rays run after the
-		// depth prepass (render_swrt_view()), so they read this frame's depth.
-		swrt_trace->update_scene(p_render_data);
-		if (lite) {
-			swrt_trace->trace_lite_probes(p_render_data, voxel_lighting);
-		}
-		if (lite && irradiance_field != nullptr) {
-			irradiance_field->integrate(p_render_data, false, is_reflections_only());
-		}
-	} else if (swrt_trace != nullptr) {
-		memdelete(swrt_trace);
-		swrt_trace = nullptr;
-	}
 }
 
-// GodotNext: ps_swrt_trace (#186). After the depth prepass of a software-tier
-// view: the gather and reflection rays read this frame's depth.
-// Multiview (XR) depth and normal-roughness are 2D arrays and the trace binds sampler2D,
-// so the software tier skips those views until it traces per-view slices.
-bool NextGI::view_traces_swrt(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count) {
-	return p_tier == TIER_SOFTWARE && !p_reflection_probe && p_environment_enabled && !p_unshaded && p_view_count == 1;
-}
-
-void NextGI::render_swrt_view(RenderDataRD *p_render_data, RID p_normal_roughness) {
-	if (swrt_trace == nullptr || p_render_data == nullptr || result.tier != TIER_SOFTWARE || is_lumen_lite()) {
-		return;
-	}
-	// The screen trace reads the same Hi-Z pyramid and last frame as the hardware tier.
-	Ref<RenderSceneBuffersRD> buffers = p_render_data->render_buffers;
-	SSEffects *ss_effects = SSEffects::get_singleton();
-	if (buffers.is_valid() && ss_effects != nullptr) {
-		ss_effects->allocate_last_frame_buffer(buffers, false, false, true);
-		ss_effects->build_hiz(buffers);
-	}
-	swrt_trace->trace_view(p_render_data, voxel_lighting, p_normal_roughness);
-}
-
-bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded) {
+bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count) {
 	// Reflection probes sample the WRC and the sky only (plan §6.1, multiple views).
-	return p_tier == TIER_HWRT && !p_reflection_probe && p_environment_enabled && !p_unshaded;
+	// GodotNext: ps_swrt_trace (#186). The software tier runs the same block (plan §21.2.4), one
+	// view at a time: its trace binds one depth and one normal-roughness layer.
+	const bool tier_runs_block = p_tier == TIER_HWRT || (p_tier == TIER_SOFTWARE && p_view_count == 1);
+	return tier_runs_block && !p_reflection_probe && p_environment_enabled && !p_unshaded;
 }
 
 Size2i NextGI::get_gi_buffer_size(const Size2i &p_internal_size, bool p_half_resolution) {
@@ -1231,6 +1236,8 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	_maybe_simulate_device_lost();
 	// GodotNext: nextgi_quality_presets (#55). Poll the preset so a runtime change reallocates.
 	_settings_changed();
+	// GodotNext: nextgi_frame_tier (#186). Idempotent: render_scene() already ran it for this frame.
+	begin_frame(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 
 	// GodotNext: nextgi_src_relight
 	// Pages are assigned during the TLAS phase, which runs after card capture and before relight.
@@ -1242,10 +1249,15 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		gather = memnew(NextGIGather);
 		gather->init();
 	}
-	if (reference == nullptr) {
-		reference = memnew(NextGIReference);
+	// GodotNext: ps_swrt_trace (#186). The path-traced reference traces the TLAS: HWRT only.
+	const bool hwrt_frame = result.tier == TIER_HWRT;
+	const bool swrt_frame = result.tier == TIER_SOFTWARE;
+	if (hwrt_frame) {
+		if (reference == nullptr) {
+			reference = memnew(NextGIReference);
+		}
+		reference->invalidate_tables();
 	}
-	reference->invalidate_tables();
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RENDER_TIMESTAMP(PASS_SLOTS[PASS_SLOT_BEGIN].name);
@@ -1275,6 +1287,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		}
 		RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[slot].name, view_index, multiview));
 		rd->draw_command_begin_label(Span<char>(PASS_SLOTS[slot].name, strlen(PASS_SLOTS[slot].name)));
+		active_slot = slot; // GodotNext: ps_swrt_trace (#186)
 		// GodotNext: nextgi_as_slots
 		// The RT scene runs inside its two slots (#243): the TLAS rebuild in "AS updates"
 		// (line 1a) and the BLAS builds in "AS builds" (line 1b), so the slot timestamps
@@ -1285,14 +1298,20 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		// GodotNext: nextgi_src_cards — card capture is the "SRC capture" slot (line 2a).
 		if (slot == PASS_SLOT_AS_UPDATES && rt_scene != nullptr) {
 			rt_scene->rebuild_tlas(p_render_data);
+		} else if (slot == PASS_SLOT_AS_UPDATES && swrt_frame) {
+			// GodotNext: ps_swrt_trace (#186, plan §21.2.4). Line 1a on the software tier: the
+			// global SDF update, then the scene params every later slot of the frame traces with
+			// (this frame's level origins, and the voxel volume the pre-render hook updated).
+			if (swrt_trace == nullptr) {
+				swrt_trace = memnew(NextGISWRTTrace);
+			}
+			swrt_trace->update_scene(p_render_data);
+			swrt_trace->prepare_scene_params(voxel_lighting);
 		} else if (slot == PASS_SLOT_AS_BUILDS && rt_scene != nullptr) {
 			rt_scene->build_dirty_blas(p_render_data);
-			TierInputs budget_inputs = inputs;
-			budget_inputs.as_memory_ok = !rt_scene->is_as_memory_exceeded();
-			String budget_line;
-			if (update_tier(budget_inputs, quality_setting, budget_line)) {
-				log_tier_selection(budget_line);
-			}
+			// GodotNext: nextgi_frame_tier (#186). The rest of this frame keeps its tier; a budget
+			// change applies at the next frame's begin_frame().
+			note_as_memory_budget(!rt_scene->is_as_memory_exceeded(), render_frame_number);
 		} else if (slot == PASS_SLOT_SRC_CAPTURE) {
 			_capture_src_cards(p_render_data);
 		} else if (slot == PASS_SLOT_SRC_RELIGHT) {
@@ -1323,19 +1342,25 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 				_integrate(p_render_data);
 			}
 		}
+		active_slot = -1;
 		rd->draw_command_end_label();
 	}
 
 	// The reference sample uses the TLAS built earlier in this frame, before compaction.
-	reference->render(p_render_data);
+	if (hwrt_frame && reference != nullptr) {
+		reference->render(p_render_data);
+	}
+	// GodotNext: ps_swrt_trace (#186). The verification trace (debug/swrt_trace_readback) reads
+	// this view's depth, Hi-Z and last frame after the slots; it adds no dispatch note.
+	if (swrt_frame && swrt_trace != nullptr && NextGISWRTTrace::readback_enabled() && rb->get_view_count() == 1) {
+		swrt_trace->trace_view(p_render_data, voxel_lighting, p_normal_roughness_slices[0]);
+	}
 	// Compaction copies invalidate the TLAS when the device frame restarts. Card capture can
 	// force that restart with a readback, so the copy is queued only after this frame's traces.
 	if (rt_scene != nullptr) {
 		rt_scene->compact_after_traces();
 	}
-	if (result.tier != TIER_HWRT) {
-		_ensure_rt_scene();
-	}
+	// GodotNext: nextgi_frame_tier (#186). begin_frame() owns _ensure_rt_scene() on a tier change.
 
 	rd->draw_command_end_label();
 	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));

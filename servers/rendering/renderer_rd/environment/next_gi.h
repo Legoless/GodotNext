@@ -159,8 +159,6 @@ public:
 	static bool is_lumen_lite(Quality p_resolved, MediumGather p_gather);
 	static bool is_lumen_lite();
 	static bool lite_traces_skinned(bool p_lite);
-	// Software-tier Lite writes the GI buffers without entering the ray-query frame block.
-	static bool view_samples_lite_field(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded);
 
 	struct TierInputs {
 		bool forward_plus = true;
@@ -322,8 +320,19 @@ private:
 	// GodotNext: ps_voxel_lighting (#188)
 	NextGIVoxelLighting *voxel_lighting = nullptr;
 	uint64_t voxel_lighting_frame = UINT64_MAX;
-	bool voxel_lighting_tier_valid = false;
-	Tier voxel_lighting_tier = TIER_DISABLED;
+
+	// GodotNext: nextgi_frame_tier (#186). The tier is fixed for a render frame: begin_frame()
+	// applies a budget change noted by an earlier frame and drops the previous tier's state.
+	uint64_t frame_tier_frame = UINT64_MAX;
+	bool frame_tier_valid = false;
+	Tier frame_tier = TIER_DISABLED;
+	uint32_t frame_tier_changes = 0;
+	bool budget_pending = false;
+	uint64_t budget_frame = 0;
+	TierInputs pending_inputs;
+	uint64_t ray_query_versions_at_tier = 0;
+	// The frame-block slot being recorded, for the software tracer's slot report.
+	int active_slot = -1;
 
 	// GodotNext: ps_swrt_trace (#186). Runs beside voxel lighting on the software tier.
 	NextGISWRTTrace *swrt_trace = nullptr;
@@ -482,6 +491,21 @@ public:
 	// GodotNext: ps_voxel_lighting (#188). Line 2b on HWRT, and the software-tier hook.
 	void update_voxel_lighting(RenderDataRD *p_render_data);
 
+	// GodotNext: nextgi_frame_tier (#186). Runs once per render frame number before the first NextGI
+	// consumer of the frame (idempotent): a budget change noted on an earlier frame is applied, and
+	// a tier change drops the voxel volume and the software tracer and resets the since-tier census.
+	void begin_frame(uint64_t p_frame);
+	// The AS-builds slot reports the AS memory budget here. A change is applied by the first
+	// begin_frame() of a later frame, so the tier never changes inside a frame.
+	void note_as_memory_budget(bool p_ok, uint64_t p_frame);
+	bool is_budget_change_pending() const { return budget_pending; }
+	// Tier changes begin_frame() has handled (the first frame counts as one).
+	uint32_t get_frame_tier_changes() const { return frame_tier_changes; }
+	// Ray-query ShaderRD versions created since begin_frame() last saw a tier change.
+	uint64_t get_ray_query_versions_since_tier() const;
+	// The frame-block slot being recorded ("none" outside the slot loop).
+	String get_active_slot_name() const;
+
 	enum DebugViewId {
 		DEBUG_VIEW_TIER,
 		DEBUG_VIEW_TLAS_HEAT,
@@ -549,11 +573,14 @@ public:
 	static bool is_tier_reason_name(const String &p_name);
 	static Vector<String> get_instance_fallback_reason_names();
 
-	// Whether a view runs the frame block (plan §6.1): the HWRT tier, an Environment with
-	// nextgi_enabled, and neither a reflection-probe render nor the unshaded debug draw.
-	// Such a view forces the depth + normal-roughness prepass. VoxelGI still
+	// Whether a view runs the frame block (plan §6.1, §21.2.4): an active tier (HWRT or SWRT), an
+	// Environment with nextgi_enabled, and neither a reflection-probe render nor the unshaded
+	// debug draw. Such a view forces the depth + normal-roughness prepass. VoxelGI still
 	// runs through GI::process_gi when reflections-only mode supplies the diffuse lighting.
-	static bool view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded);
+	// GodotNext: ps_swrt_trace (#186). The software tier binds one depth and one normal-roughness
+	// layer (sampler2D), so multiview (XR) views stay outside the block there; the hardware gather
+	// binds them the same way without that guard, a known gap of both tiers.
+	static bool view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count);
 
 	// RB_TEX_AMBIENT and RB_TEX_REFLECTION have the size GI::process_gi allocates: the internal
 	// size, halved per axis under gi/use_half_resolution.
@@ -577,11 +604,10 @@ public:
 	// PASS_SLOTS timestamp, empty slots included. Until the gather lands both buffers are cleared to
 	// (0, 0, 0, 0), so the opaque pass keeps its own ambient and specular through the buffer alpha.
 	void render_frame(RenderDataRD *p_render_data, const RID *p_normal_roughness_slices, bool p_half_resolution);
-	// GodotNext: ps_swrt_trace (#186). A software-tier view traces after its depth prepass.
-	// Not multiview: the trace binds one depth and one normal-roughness layer.
-	static bool view_traces_swrt(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count);
-	void render_swrt_view(RenderDataRD *p_render_data, RID p_normal_roughness);
+	// GodotNext: ps_swrt_trace (#186). The software tier's tracer (SOFTWARE only), and the voxel
+	// lighting that shades its global-SDF hits. begin_frame() drops both on a tier change.
 	NextGISWRTTrace *get_swrt_trace() const { return swrt_trace; }
+	NextGIVoxelLighting *get_voxel_lighting() const { return voxel_lighting; }
 	// Writes the reference mean into the HDR color when reference_mode is on.
 	void composite_reference(RID p_color);
 

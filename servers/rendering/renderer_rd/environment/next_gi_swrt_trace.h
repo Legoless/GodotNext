@@ -53,12 +53,18 @@ struct NextGILight;
 // GodotNext: ps_swrt_trace (#186, plan §21.2 L5)
 //
 // The software ray tracer. NextGI drives it on the software tier:
-// - update_scene() before the depth prepass keeps the global SDF clipmaps of
-//   the whole scene resident (NextGIGlobalSDFClipmaps; every fed instance
-//   with a mesh SDF, no instance or brick cap) and uploads the instance table.
-// - trace_lite_probes() traces the Lumen Lite probes (#183) right after it.
-// - trace_view() after the depth prepass traces one gather and one
-//   reflection ray per cell of the ray grid from the current frame's depth.
+// - update_scene() in the frame block's "AS updates" slot keeps the global SDF
+//   clipmaps of the whole scene resident (NextGIGlobalSDFClipmaps; every fed
+//   instance with a mesh SDF, no instance or brick cap) and uploads the instance
+//   table; prepare_scene_params() then fills the params every later slot traces with.
+// - The frame block's software siblings (nextgi_gather_swrt.glsl,
+//   nextgi_wrc_update_swrt.glsl) bind the trace in set 1 through
+//   create_trace_uniform_set(); the gather refills prepare_view_params() per view.
+// - trace_view() is the verification kernel: with debug/swrt_trace_readback it
+//   traces one gather and one reflection ray per cell of the ray grid after the
+//   frame block's slots, from the current frame's depth.
+// - trace_lite_probes() traced the Lumen Lite probes before Lite ran in the
+//   frame block; nothing calls it now.
 // - trace_shadow_rays() is the SDF shadow-ray kernel for the SRC relight.
 //
 // Trace order (L5): Hi-Z screen trace, detail mesh SDFs for the first 2 m
@@ -169,6 +175,27 @@ public:
 	// After the depth prepass of a scenario view: gather and reflection rays
 	// from this frame's depth. p_normal_roughness is optional; reflections need it.
 	void trace_view(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness);
+	// GodotNext: ps_swrt_trace (#186). The production siblings of the hardware shaders
+	// (nextgi_gather_swrt.glsl, nextgi_wrc_update_swrt.glsl) bind the trace's resources in set 1
+	// (bindings 1-12, 21-26). The scene params (levels, origins, step budget, pool, instance
+	// counts, the voxel-lighting clipmap) are filled once per frame in the AS-updates slot right
+	// after update_scene(); the view params add one view's matrices, screen and detail froxels and
+	// are refilled before that view's gather.
+	bool is_ready() const;
+	void prepare_scene_params(NextGIVoxelLighting *p_lighting);
+	void prepare_view_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting);
+	// A uniform set for p_set of p_shader with the trace's resources and the scene or view params.
+	// The caller frees it after its dispatches.
+	RID create_trace_uniform_set(RID p_shader, uint32_t p_set, bool p_view, NextGIVoxelLighting *p_lighting) const;
+	// Detail mode: the froxel object grid of this view, marked from the gather's screen-probe
+	// positions (one per 16 px tile) and culled with mesh-SDF samples. Needs prepare_view_params().
+	void build_detail_froxels(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting);
+	bool is_detail_active() const;
+	// The frame-block slot the last update_scene() ran in ("none" outside the block).
+	const String &get_update_slot() const { return last_update_slot; }
+	// The verification trace (debug/swrt_trace_readback) runs after the frame block's slots.
+	static bool readback_enabled();
+
 	// The SRC relight's SDF shadow rays. Results get one ShadowResult per request.
 	// Needs update_scene() of this frame, not trace_view(): the kernel reads the
 	// current clipmaps through its own params and binds no view input.
@@ -222,10 +249,14 @@ private:
 	void _collect_instances(RenderDataRD *p_render_data);
 	void _upload_instances();
 	void _upload_detail_meshes();
-	void _fill_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_screen_trace, bool p_wrc, bool p_readback);
+	void _fill_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_screen_trace, bool p_wrc, bool p_readback, RID p_target);
 	// p_view_inputs false (the shadow kernel) binds dummies for the depth, normal-roughness,
 	// screen, sky and WRC inputs.
 	void _append_trace_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_params, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_view_inputs, bool p_screen_trace) const;
+	// GodotNext: ps_swrt_trace (#186). The trace's own resources (0-12, 21-26) and the view inputs
+	// (13-20) that _append_trace_uniforms() binds together.
+	void _append_core_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_params, NextGIVoxelLighting *p_lighting, bool p_counters) const;
+	void _append_view_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_normal_roughness, bool p_view_inputs, bool p_screen_trace) const;
 	void _bind_wrc(RendererRD::NextGI *p_next_gi);
 	void _request_counters();
 	static void _counters_received(const Vector<uint8_t> &p_data, uint64_t p_token);
@@ -271,6 +302,7 @@ private:
 
 	// Verification readback (debug/swrt_trace_readback).
 	Dictionary readback_meta;
+	String last_update_slot = "none";
 	static uint64_t last_benchmark_usec;
 	static uint32_t last_fixture_checked;
 	static uint32_t last_fixture_agreed;

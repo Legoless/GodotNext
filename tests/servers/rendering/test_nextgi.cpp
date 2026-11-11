@@ -1363,30 +1363,42 @@ TEST_CASE("[NextGI] Frame block: 12 timestamp slots in plan §6.1 step 5 order, 
 	CHECK_EQ(String(NextGI::PASS_SLOTS[NextGI::PASS_SLOT_END].name), "< NextGI");
 }
 
-TEST_CASE("[NextGI] Frame block: HWRT views with nextgi_enabled only, never reflection probes") {
-	CHECK(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, false));
+TEST_CASE("[NextGI] Frame block: active-tier views with nextgi_enabled only, never reflection probes") {
+	// GodotNext: ps_swrt_trace (#186). Both active tiers run the block (plan §21.2.4).
+	CHECK(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, false, 1));
+	CHECK(NextGI::view_uses_frame_block(NextGI::TIER_SOFTWARE, false, true, false, 1));
 
-	// Reflection-probe renders never enter the block.
-	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, true, true, false));
-	// The Environment has nextgi_enabled off, or there is no Environment.
-	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, false, false));
-	// The unshaded debug draw.
-	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, true));
-
-	// No other tier runs the ray-query block. The software tier traces SDF beside voxel lighting.
-	for (int tier = 0; tier < NextGI::TIER_MAX; tier++) {
-		if (tier == NextGI::TIER_HWRT) {
-			continue;
-		}
-		CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::Tier(tier), false, true, false));
-		CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::Tier(tier), true, true, false));
+	for (const NextGI::Tier tier : { NextGI::TIER_HWRT, NextGI::TIER_SOFTWARE }) {
+		// Reflection-probe renders never enter the block.
+		CHECK_FALSE(NextGI::view_uses_frame_block(tier, true, true, false, 1));
+		// The Environment has nextgi_enabled off, or there is no Environment.
+		CHECK_FALSE(NextGI::view_uses_frame_block(tier, false, false, false, 1));
+		// The unshaded debug draw.
+		CHECK_FALSE(NextGI::view_uses_frame_block(tier, false, true, true, 1));
 	}
 
-	// Mocked devices: an RTX GPU on Vulkan runs the block, Metal without ray query (the M5 Max
-	// until #47) and D3D12 without DXR do not.
-	CHECK(NextGI::view_uses_frame_block(evaluate_mocked_device(true, "Vulkan", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU).tier, false, true, false));
-	CHECK_FALSE(NextGI::view_uses_frame_block(evaluate_mocked_device(false, "Metal", RenderingDeviceEnums::DEVICE_TYPE_INTEGRATED_GPU).tier, false, true, false));
-	CHECK_FALSE(NextGI::view_uses_frame_block(evaluate_mocked_device(false, "D3D12", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU).tier, false, true, false));
+	// Multiview (XR): the software trace binds one depth and one normal-roughness layer, so its
+	// views stay outside the block. The hardware gather has no such guard (a known gap).
+	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_SOFTWARE, false, true, false, 2));
+	CHECK(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, false, 2));
+
+	// No inactive tier runs it.
+	for (const NextGI::Tier tier : { NextGI::TIER_DISABLED, NextGI::TIER_UNSUPPORTED_RENDERER }) {
+		CHECK_FALSE(NextGI::view_uses_frame_block(tier, false, true, false, 1));
+		CHECK_FALSE(NextGI::view_uses_frame_block(tier, true, true, false, 1));
+	}
+
+	// Mocked devices: an RTX GPU on Vulkan runs the block on HWRT, Metal without ray query and
+	// D3D12 without DXR run it on the software tier.
+	const NextGI::TierResult vulkan = evaluate_mocked_device(true, "Vulkan", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU);
+	const NextGI::TierResult metal = evaluate_mocked_device(false, "Metal", RenderingDeviceEnums::DEVICE_TYPE_INTEGRATED_GPU);
+	const NextGI::TierResult d3d12 = evaluate_mocked_device(false, "D3D12", RenderingDeviceEnums::DEVICE_TYPE_DISCRETE_GPU);
+	CHECK_EQ(vulkan.tier, NextGI::TIER_HWRT);
+	CHECK_EQ(metal.tier, NextGI::TIER_SOFTWARE);
+	CHECK_EQ(d3d12.tier, NextGI::TIER_SOFTWARE);
+	CHECK(NextGI::view_uses_frame_block(vulkan.tier, false, true, false, 1));
+	CHECK(NextGI::view_uses_frame_block(metal.tier, false, true, false, 1));
+	CHECK(NextGI::view_uses_frame_block(d3d12.tier, false, true, false, 1));
 }
 
 TEST_CASE("[NextGI] Frame block: RB_TEX_AMBIENT has the internal size, halved under half resolution") {
@@ -3228,6 +3240,88 @@ TEST_CASE("[NextGI][Lite] Relight schedules only page sets from the current reco
 	CHECK_EQ(a2_info.page_table, 3u);
 	CHECK_EQ(a2_info.radiance_rects.size(), 3u);
 	CHECK_EQ(relight.get_page_set_count(), 2u);
+}
+
+// GodotNext: nextgi_async_counters (#186)
+TEST_CASE("[NextGI] Relight ray fractions land on the scheduled cards by page key") {
+	// The traced-ray count arrives frames after the schedule. Meanwhile an earlier page set can be
+	// freed, which shifts every later set's index: the fraction must follow the page key.
+	RendererRD::NextGIRelight relight;
+	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false, true));
+	const RendererRD::NextGICard cards[3] = { lite_test_card(64), lite_test_card(32), lite_test_card(16) };
+	relight.begin_record_pass();
+	RendererRD::NextGIInstanceRecord a;
+	a.card_set = 0;
+	a.tlas_index = 0;
+	RendererRD::NextGIInstanceRecord b;
+	b.card_set = 1;
+	b.tlas_index = 1;
+	REQUIRE_EQ(relight.assign_card_pages(lite_test_instance(0), a, UINT32_MAX, 0, cards, 2), 0u);
+	REQUIRE_EQ(relight.assign_card_pages(lite_test_instance(1), b, UINT32_MAX, 2, cards, 1), 2u);
+
+	LocalVector<RendererRD::NextGIRelightRayRequest> schedule;
+	RendererRD::NextGIRelightRayRequest request;
+	request.page_key = RendererRD::NextGIRelight::get_page_key(lite_test_instance(1));
+	request.card = 0;
+	request.ray_estimate = 300;
+	schedule.push_back(request);
+	request.page_key = RendererRD::NextGIRelight::get_page_key(lite_test_instance(0));
+	request.card = 1;
+	request.ray_estimate = 100;
+	schedule.push_back(request);
+
+	// A's set leaves before the count arrives; B's set moves from index 1 to index 0.
+	relight.release_instance(lite_test_instance(0));
+	REQUIRE_EQ(relight.get_page_set_count(), 1u);
+	CHECK_EQ(relight.get_page_set_info(0).card_set, 1u);
+	relight.apply_ray_fraction(schedule, 200);
+	CHECK(relight.get_card_ray_fraction(lite_test_instance(1), UINT32_MAX, 0) == doctest::Approx(0.5f));
+	CHECK(relight.get_card_ray_fraction(lite_test_instance(0), UINT32_MAX, 1) < 0.0f);
+
+	// The pure rule: traced / estimated, clamped, and nothing applied without an estimate.
+	CHECK(RendererRD::nextgi_relight_ray_fraction(schedule.ptr(), schedule.size(), 1000) == doctest::Approx(1.0f));
+	CHECK(RendererRD::nextgi_relight_ray_fraction(schedule.ptr(), schedule.size(), 0) == doctest::Approx(0.0f));
+	CHECK(RendererRD::nextgi_relight_ray_fraction(schedule.ptr(), 0, 50) < 0.0f);
+	relight.apply_ray_fraction(LocalVector<RendererRD::NextGIRelightRayRequest>(), 50);
+	CHECK(relight.get_card_ray_fraction(lite_test_instance(1), UINT32_MAX, 0) == doctest::Approx(0.5f));
+}
+
+// GodotNext: nextgi_frame_tier (#186)
+TEST_CASE("[NextGI] Frame tier: an AS budget change applies at the next frame") {
+	RendererRD::NextGI next_gi;
+	String line;
+	next_gi.update_tier(TestNextGI::hwrt_inputs(), RendererRD::NextGI::QUALITY_HIGH, line);
+	REQUIRE_EQ(next_gi.get_tier_result().tier, RendererRD::NextGI::TIER_HWRT);
+	next_gi.begin_frame(4);
+	const uint32_t changes = next_gi.get_frame_tier_changes();
+	CHECK_EQ(changes, 1u);
+
+	// Frame 5's AS-builds slot finds AS memory exceeded: the rest of frame 5 stays HWRT.
+	next_gi.begin_frame(5);
+	next_gi.note_as_memory_budget(false, 5);
+	CHECK(next_gi.is_budget_change_pending());
+	CHECK_EQ(next_gi.get_tier_result().tier, RendererRD::NextGI::TIER_HWRT);
+	next_gi.begin_frame(5);
+	CHECK_EQ(next_gi.get_tier_result().tier, RendererRD::NextGI::TIER_HWRT);
+	CHECK_EQ(next_gi.get_frame_tier_changes(), changes);
+
+	// Frame 6 starts on the software tier, and the tier-change cleanup runs once.
+	next_gi.begin_frame(6);
+	CHECK_EQ(next_gi.get_tier_result().tier, RendererRD::NextGI::TIER_SOFTWARE);
+	CHECK_EQ(next_gi.get_tier_result().reason, RendererRD::NextGI::AS_MEMORY);
+	CHECK_FALSE(next_gi.is_budget_change_pending());
+	CHECK_EQ(next_gi.get_frame_tier_changes(), changes + 1);
+	next_gi.begin_frame(6);
+	CHECK_EQ(next_gi.get_frame_tier_changes(), changes + 1);
+
+	// A budget that recovers before the next frame cancels the pending change.
+	RendererRD::NextGI recovering;
+	recovering.update_tier(TestNextGI::hwrt_inputs(), RendererRD::NextGI::QUALITY_HIGH, line);
+	recovering.begin_frame(10);
+	recovering.note_as_memory_budget(false, 10);
+	recovering.note_as_memory_budget(true, 10);
+	recovering.begin_frame(11);
+	CHECK_EQ(recovering.get_tier_result().tier, RendererRD::NextGI::TIER_HWRT);
 }
 
 TEST_CASE("[NextGI][Lite] The page rect count covers only uploaded rects") {

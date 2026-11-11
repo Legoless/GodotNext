@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Volumetric fog reads the world radiance cache on Color Box Room A (#44).
-# Usage: run_fog_check.sh -- <godot> <godot arguments>
+# Usage: run_fog_check.sh [--hwrt=auto|off|force] [--quality=0|1|2|3] -- <godot> <godot arguments>
+# GodotNext: ps_swrt_trace (#186). --hwrt=off runs the software tier, whose WRC producer traces
+# the SDF (plan §21.2 L9b); pass the scene --expected-tier=SWRT then. The default keeps the
+# project's quality (Auto) and hardware_ray_tracing Auto.
 
 set -euo pipefail
 
@@ -10,8 +13,14 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 testbed_dir=$(cd "$script_dir/../.." && pwd)
 override="$testbed_dir/override.cfg"
 
+hwrt_value=0
+quality_line=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--hwrt=auto) hwrt_value=0 ;;
+	--hwrt=off) hwrt_value=1 ;;
+	--hwrt=force) hwrt_value=2 ;;
+	--quality=0 | --quality=1 | --quality=2 | --quality=3) quality_line="global_illumination/nextgi/quality=${1#--quality=}" ;;
 	--)
 		shift
 		break
@@ -42,7 +51,8 @@ cat >"$override" <<EOF
 [rendering]
 
 global_illumination/nextgi/enabled=true
-global_illumination/nextgi/hardware_ray_tracing=0
+global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
+$quality_line
 EOF
 
 set +e

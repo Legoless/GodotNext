@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_irradiance_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
@@ -238,6 +239,10 @@ struct NextGISWRTTrace::GpuState {
 	RID params_buffer;
 	// The shadow kernel's own params: the scene fields only, so it never reads a view's.
 	RID shadow_params_buffer;
+	// GodotNext: ps_swrt_trace (#186). The siblings' set-1 params: the frame's scene fields, and
+	// one view's.
+	RID scene_params_buffer;
+	RID view_params_buffer;
 	RID instance_buffer;
 	uint32_t instance_capacity = 0;
 	RID two_sided_buffer;
@@ -294,7 +299,7 @@ NextGISWRTTrace::~NextGISWRTTrace() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (gpu != nullptr && rd != nullptr) {
-		RID *rids[] = { &gpu->shadow_pipeline, &gpu->nearest_sampler, &gpu->linear_sampler, &gpu->dummy_depth, &gpu->dummy_color, &gpu->dummy_buffer, &gpu->counter_buffer, &gpu->params_buffer, &gpu->shadow_params_buffer, &gpu->instance_buffer, &gpu->two_sided_buffer, &gpu->mesh_info_buffer, &gpu->mesh_page_buffer, &gpu->mesh_brick_buffer, &gpu->froxel_buffer, &gpu->requests_buffer, &gpu->results_buffer, &gpu->lights_buffer };
+		RID *rids[] = { &gpu->shadow_pipeline, &gpu->nearest_sampler, &gpu->linear_sampler, &gpu->dummy_depth, &gpu->dummy_color, &gpu->dummy_buffer, &gpu->counter_buffer, &gpu->params_buffer, &gpu->shadow_params_buffer, &gpu->scene_params_buffer, &gpu->view_params_buffer, &gpu->instance_buffer, &gpu->two_sided_buffer, &gpu->mesh_info_buffer, &gpu->mesh_page_buffer, &gpu->mesh_brick_buffer, &gpu->froxel_buffer, &gpu->requests_buffer, &gpu->results_buffer, &gpu->lights_buffer };
 		for (RID *rid : rids) {
 			_free_rid(rd, *rid);
 		}
@@ -406,7 +411,9 @@ bool NextGISWRTTrace::_ensure_gpu() {
 	gpu->counter_buffer = rd->storage_buffer_create(sizeof(Counters));
 	gpu->params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
 	gpu->shadow_params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
-	gpu->ready = gpu->nearest_sampler.is_valid() && gpu->linear_sampler.is_valid() && gpu->dummy_depth.is_valid() && gpu->dummy_color.is_valid() && gpu->dummy_buffer.is_valid() && gpu->counter_buffer.is_valid() && gpu->params_buffer.is_valid() && gpu->shadow_params_buffer.is_valid();
+	gpu->scene_params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
+	gpu->view_params_buffer = rd->storage_buffer_create(sizeof(TraceParamsGPU));
+	gpu->ready = gpu->nearest_sampler.is_valid() && gpu->linear_sampler.is_valid() && gpu->dummy_depth.is_valid() && gpu->dummy_color.is_valid() && gpu->dummy_buffer.is_valid() && gpu->counter_buffer.is_valid() && gpu->params_buffer.is_valid() && gpu->shadow_params_buffer.is_valid() && gpu->scene_params_buffer.is_valid() && gpu->view_params_buffer.is_valid();
 	if (!gpu->ready) {
 		pipelines_failed = true;
 		ERR_PRINT("NextGI software ray tracing failed to allocate its buffers.");
@@ -673,6 +680,8 @@ void NextGISWRTTrace::update_scene(RenderDataRD *p_render_data) {
 	if (!_ensure_gpu() || !_ensure_field()) {
 		return;
 	}
+	// GodotNext: ps_swrt_trace (#186). The frame block's "AS updates" slot (plan §21.2.4, line 1a).
+	last_update_slot = NextGI::get_singleton() != nullptr ? NextGI::get_singleton()->get_active_slot_name() : String("none");
 	_collect_instances(p_render_data);
 	if (p_render_data->sdfgi_update_data != nullptr) {
 		clipmaps.add_dirty_volumes(p_render_data->sdfgi_update_data->nextgi_dirty_volumes, p_render_data->sdfgi_update_data->nextgi_dirty_volume_count);
@@ -703,7 +712,7 @@ void NextGISWRTTrace::update_scene(RenderDataRD *p_render_data) {
 	_upload_instances();
 }
 
-void NextGISWRTTrace::_fill_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_screen_trace, bool p_wrc, bool p_readback) {
+void NextGISWRTTrace::_fill_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_screen_trace, bool p_wrc, bool p_readback, RID p_target) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	RenderSceneDataRD *scene_data = p_render_data->scene_data;
 	TraceParamsGPU params = {};
@@ -780,10 +789,40 @@ void NextGISWRTTrace::_fill_params(RenderDataRD *p_render_data, NextGIVoxelLight
 	params.extra[1] = mode == MODE_DETAIL && gpu->mesh_info_buffer.is_valid() ? 1.0f : 0.0f;
 	params.extra[2] = p_readback ? 1.0f : 0.0f;
 	NextGIViewMath::store_basis(scene_data->cam_transform.basis, params.view_to_world);
-	rd->buffer_update(gpu->params_buffer, 0, sizeof(params), &params);
+	rd->buffer_update(p_target, 0, sizeof(params), &params);
 }
 
 void NextGISWRTTrace::_append_trace_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_params, NextGIVoxelLighting *p_lighting, RID p_normal_roughness, bool p_view_inputs, bool p_screen_trace) const {
+	_append_core_uniforms(r_uniforms, p_params, p_lighting, true);
+	_append_view_uniforms(r_uniforms, p_normal_roughness, p_view_inputs, p_screen_trace);
+}
+
+void NextGISWRTTrace::_append_core_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_params, NextGIVoxelLighting *p_lighting, bool p_counters) const {
+	auto buffer = [&](uint32_t p_binding, RID p_rid) {
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, p_binding, p_rid.is_valid() ? p_rid : gpu->dummy_buffer));
+	};
+	if (p_counters) {
+		buffer(0, gpu->counter_buffer);
+	}
+	buffer(1, p_params);
+	buffer(2, field != nullptr ? field->get_pool_buffer() : RID());
+	buffer(3, field != nullptr ? field->get_dynamic_pool_buffer() : RID());
+	buffer(4, field != nullptr ? field->get_coverage_buffer() : RID());
+	for (uint32_t level = 0; level < 6; level++) {
+		buffer(5 + level, field != nullptr ? field->get_page_buffer(level) : RID());
+	}
+	const bool voxel_valid = p_lighting != nullptr && p_lighting->get_radiance_buffer().is_valid() && p_lighting->get_weight_buffer().is_valid();
+	buffer(11, voxel_valid ? p_lighting->get_radiance_buffer() : RID());
+	buffer(12, voxel_valid ? p_lighting->get_weight_buffer() : RID());
+	buffer(21, gpu->instance_buffer);
+	buffer(22, gpu->mesh_info_buffer);
+	buffer(23, gpu->mesh_page_buffer);
+	buffer(24, gpu->mesh_brick_buffer);
+	buffer(25, gpu->froxel_buffer);
+	buffer(26, gpu->two_sided_buffer);
+}
+
+void NextGISWRTTrace::_append_view_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_normal_roughness, bool p_view_inputs, bool p_screen_trace) const {
 	auto buffer = [&](uint32_t p_binding, RID p_rid) {
 		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, p_binding, p_rid.is_valid() ? p_rid : gpu->dummy_buffer));
 	};
@@ -795,17 +834,6 @@ void NextGISWRTTrace::_append_trace_uniforms(Vector<RD::Uniform> &r_uniforms, RI
 		uniform.append_id(p_texture.is_valid() ? p_texture : p_dummy);
 		r_uniforms.push_back(uniform);
 	};
-	buffer(0, gpu->counter_buffer);
-	buffer(1, p_params);
-	buffer(2, field != nullptr ? field->get_pool_buffer() : RID());
-	buffer(3, field != nullptr ? field->get_dynamic_pool_buffer() : RID());
-	buffer(4, field != nullptr ? field->get_coverage_buffer() : RID());
-	for (uint32_t level = 0; level < 6; level++) {
-		buffer(5 + level, field != nullptr ? field->get_page_buffer(level) : RID());
-	}
-	const bool voxel_valid = p_lighting != nullptr && p_lighting->get_radiance_buffer().is_valid() && p_lighting->get_weight_buffer().is_valid();
-	buffer(11, voxel_valid ? p_lighting->get_radiance_buffer() : RID());
-	buffer(12, voxel_valid ? p_lighting->get_weight_buffer() : RID());
 	// Without view inputs (the shadow kernel) every screen, sky and WRC input is a dummy,
 	// so no RID of an earlier view (freed on a resize) is bound.
 	const bool screen = p_view_inputs && p_screen_trace;
@@ -818,12 +846,117 @@ void NextGISWRTTrace::_append_trace_uniforms(Vector<RD::Uniform> &r_uniforms, RI
 	texture(18, gpu->linear_sampler, p_view_inputs ? wrc_radiance : RID(), gpu->dummy_color);
 	texture(19, gpu->linear_sampler, p_view_inputs ? wrc_visibility : RID(), gpu->dummy_color);
 	buffer(20, p_view_inputs ? wrc_params : RID());
-	buffer(21, gpu->instance_buffer);
-	buffer(22, gpu->mesh_info_buffer);
-	buffer(23, gpu->mesh_page_buffer);
-	buffer(24, gpu->mesh_brick_buffer);
-	buffer(25, gpu->froxel_buffer);
-	buffer(26, gpu->two_sided_buffer);
+}
+
+// GodotNext: ps_swrt_trace (#186). The production siblings' set 1.
+bool NextGISWRTTrace::is_ready() const {
+	return gpu != nullptr && gpu->ready && field != nullptr;
+}
+
+bool NextGISWRTTrace::readback_enabled() {
+	return _readback_enabled();
+}
+
+bool NextGISWRTTrace::is_detail_active() const {
+	return mode == MODE_DETAIL && gpu != nullptr && gpu->mesh_info_buffer.is_valid() && !instances.is_empty();
+}
+
+void NextGISWRTTrace::prepare_scene_params(NextGIVoxelLighting *p_lighting) {
+	if (!is_ready()) {
+		return;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	TraceParamsGPU params = {};
+	_fill_scene_fields(params, clipmaps, field, active_levels, _max_steps(), instances.size(), two_sided.size(), field->get_capacity());
+	params.trace[0] = _rt_radius();
+	const bool voxel_valid = p_lighting != nullptr && p_lighting->get_radiance_buffer().is_valid() && p_lighting->get_weight_buffer().is_valid();
+	if (voxel_valid) {
+		NextGIVoxelLighting::ClipmapLevelGPU clipmap[NextGIVoxelLighting::LEVELS];
+		p_lighting->copy_clipmap(clipmap, NextGIVoxelLighting::LEVELS);
+		for (uint32_t level = 0; level < NextGIVoxelLighting::LEVELS; level++) {
+			params.clipmap[level * 4] = clipmap[level].origin_x;
+			params.clipmap[level * 4 + 1] = clipmap[level].origin_y;
+			params.clipmap[level * 4 + 2] = clipmap[level].origin_z;
+			params.clipmap[level * 4 + 3] = int32_t(clipmap[level].voxel_size_bits);
+		}
+	}
+	params.flags[0] = voxel_valid ? 1.0f : 0.0f;
+	rd->buffer_update(gpu->scene_params_buffer, 0, sizeof(params), &params);
+}
+
+void NextGISWRTTrace::prepare_view_params(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting) {
+	if (!is_ready() || p_render_data == nullptr || p_render_data->scene_data == nullptr) {
+		return;
+	}
+	Ref<RenderSceneBuffersRD> buffers = p_render_data->render_buffers;
+	if (buffers.is_null()) {
+		return;
+	}
+	// The siblings bind their own depth, screen-trace, sky and WRC inputs; the view params carry
+	// this view's matrices, its internal size and the detail froxel grid. The froxel mark runs
+	// over the gather's screen probes (one per 16 px tile).
+	screen_size = buffers->get_internal_size();
+	screen_depth = buffers->get_depth_texture();
+	// Only the depth is a view input of the froxel mark; no earlier view's RID stays bound.
+	screen_hiz = RID();
+	screen_last_frame = RID();
+	sky_radiance = RID();
+	wrc_radiance = RID();
+	wrc_visibility = RID();
+	wrc_params = RID();
+	grid = Vector2i(int(nextgi_gather_probe_count_axis(uint32_t(MAX(screen_size.x, 1)))), int(nextgi_gather_probe_count_axis(uint32_t(MAX(screen_size.y, 1)))));
+	_fill_params(p_render_data, p_lighting, RID(), false, false, false, gpu->view_params_buffer);
+}
+
+RID NextGISWRTTrace::create_trace_uniform_set(RID p_shader, uint32_t p_set, bool p_view, NextGIVoxelLighting *p_lighting) const {
+	if (!is_ready() || !p_shader.is_valid()) {
+		return RID();
+	}
+	Vector<RD::Uniform> uniforms;
+	_append_core_uniforms(uniforms, p_view ? gpu->view_params_buffer : gpu->scene_params_buffer, p_lighting, false);
+	return RenderingDevice::get_singleton()->uniform_set_create(uniforms, p_shader, p_set);
+}
+
+void NextGISWRTTrace::build_detail_froxels(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting) {
+	if (!is_detail_active() || p_render_data == nullptr || !screen_depth.is_valid()) {
+		return;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const Vector3i froxel = froxel_cells(screen_size);
+	const uint32_t froxel_count = uint32_t(froxel.x * froxel.y * froxel.z);
+	if (_ensure_storage(rd, gpu->froxel_buffer, gpu->froxel_capacity, froxel_count * (FROXEL_CAP + 1) * sizeof(uint32_t))) {
+		// A new buffer: the caller's set 1 is created after this call, so it binds the new one.
+	}
+	rd->buffer_clear(gpu->froxel_buffer, 0, gpu->froxel_capacity);
+	Vector<RD::Uniform> common;
+	_append_core_uniforms(common, gpu->view_params_buffer, p_lighting, true);
+	_append_view_uniforms(common, RID(), true, false);
+	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, gpu->dummy_buffer));
+	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, gpu->dummy_buffer));
+	common.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, gpu->dummy_buffer));
+	const RID mark_set = rd->uniform_set_create(common, gpu->gather_shader.version_get_shader(gpu->gather_version, VARIANT_FROXEL_MARK), 0);
+	const RID cull_set = rd->uniform_set_create(common, gpu->gather_shader.version_get_shader(gpu->gather_version, VARIANT_FROXEL_CULL), 0);
+	if (mark_set.is_valid() && cull_set.is_valid()) {
+		rd->draw_command_begin_label("NextGI SDF Detail Froxels");
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, gpu->pipelines[VARIANT_FROXEL_MARK]);
+		rd->compute_list_bind_uniform_set(list, mark_set, 0);
+		rd->compute_list_dispatch(list, (uint32_t(grid.x) + 7u) / 8u, (uint32_t(grid.y) + 7u) / 8u, 1);
+		rd->compute_list_add_barrier(list);
+		rd->compute_list_bind_compute_pipeline(list, gpu->pipelines[VARIANT_FROXEL_CULL]);
+		rd->compute_list_bind_uniform_set(list, cull_set, 0);
+		const uint32_t cell_groups = (froxel_count + 7u) / 8u;
+		const uint32_t groups_z = (cell_groups + 1023u) / 1024u;
+		rd->compute_list_dispatch(list, (uint32_t(instances.size()) + 7u) / 8u, MIN(cell_groups, 1024u), groups_z);
+		rd->compute_list_end();
+		rd->draw_command_end_label();
+	}
+	if (mark_set.is_valid()) {
+		rd->free_rid(mark_set);
+	}
+	if (cull_set.is_valid()) {
+		rd->free_rid(cull_set);
+	}
 }
 
 void NextGISWRTTrace::trace_lite_probes(RenderDataRD *p_render_data, NextGIVoxelLighting *p_lighting) {
@@ -841,7 +974,7 @@ void NextGISWRTTrace::trace_lite_probes(RenderDataRD *p_render_data, NextGIVoxel
 	screen_size = Vector2i();
 	screen_depth = RID();
 	_bind_wrc(next_gi);
-	_fill_params(p_render_data, p_lighting, RID(), false, wrc_params.is_valid(), false);
+	_fill_params(p_render_data, p_lighting, RID(), false, wrc_params.is_valid(), false, gpu->params_buffer);
 	Vector<RD::Uniform> uniforms;
 	_append_trace_uniforms(uniforms, gpu->params_buffer, p_lighting, RID(), true, false);
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, gpu->dummy_buffer));
@@ -914,7 +1047,12 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 	}
 	_bind_wrc(next_gi);
 	const bool readback = _readback_enabled();
-	_fill_params(p_render_data, p_lighting, p_normal_roughness, screen_trace, wrc_params.is_valid(), readback);
+	// GodotNext: ps_swrt_trace (#186). This is the verification kernel (readback runs); the frame
+	// block's software gather does the production rays with the WRC handoff. Since the software
+	// tier has its own WRC producer, the verification rays keep the full trace range (no handoff,
+	// the sky on a miss), so the ray-by-ray check covers the trace beyond the 1.5 m handoff.
+	const bool verification_wrc = false;
+	_fill_params(p_render_data, p_lighting, p_normal_roughness, screen_trace, verification_wrc, readback, gpu->params_buffer);
 	if (screen_trace) {
 		// The last mip index, as the hardware gather passes it.
 		const float max_mip = float(hiz_mips > 0 ? hiz_mips - 1 : 0);
@@ -979,10 +1117,8 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 		rd->compute_list_bind_uniform_set(list, gather_set, 0);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
-		// GodotNext: ps_lumen_lite (#183). Lite's dispatch check counts this site.
-		if (NextGI::get_singleton() != nullptr) {
-			NextGI::get_singleton()->note_gather_dispatch();
-		}
+		// GodotNext: ps_swrt_trace (#186). The verification kernel: the frame block's gather
+		// counts the production dispatches, so this one is not noted.
 	}
 	if (NextGI::is_reflections_enabled()) {
 		const RID reflect_set = make_set(VARIANT_REFLECT, ray_buffers[RAY_REFLECT]);
@@ -992,9 +1128,6 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 			rd->compute_list_bind_uniform_set(list, reflect_set, 0);
 			rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 			rd->compute_list_end();
-			if (NextGI::get_singleton() != nullptr) {
-				NextGI::get_singleton()->note_reflection_dispatch();
-			}
 		}
 	}
 	readback_meta.clear();
@@ -1027,7 +1160,7 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 		readback_meta["screen"] = screen_size;
 		readback_meta["light_count"] = light_count;
 		readback_meta["screen_trace"] = screen_trace;
-		readback_meta["wrc"] = wrc_params.is_valid();
+		readback_meta["wrc"] = verification_wrc;
 		readback_meta["normal_roughness"] = p_normal_roughness.is_valid();
 		readback_meta["levels"] = active_levels;
 		readback_meta["max_steps"] = _max_steps();
@@ -1124,6 +1257,8 @@ void NextGISWRTTrace::fill_info(Dictionary &r_info) const {
 	r_info["swrt_trace_pool_bricks"] = field != nullptr ? field->get_capacity() : 0;
 	r_info["swrt_trace_full_builds"] = clipmaps.get_full_builds();
 	r_info["swrt_trace_grid"] = grid;
+	// GodotNext: ps_swrt_trace (#186). The frame-block slot the global SDF was last updated in.
+	r_info["swrt_update_slot"] = last_update_slot;
 	r_info["swrt_gather_rays"] = snapshot.gather_rays;
 	r_info["swrt_gather_hits"] = snapshot.gather_hits;
 	r_info["swrt_reflect_rays"] = snapshot.reflect_rays;

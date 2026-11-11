@@ -2,9 +2,10 @@
 # Runs res://tests/nextgi_reflect/run_reflect.tscn with NextGI enabled (#53).
 #
 # Usage:
-#   run_reflect.sh -- <godot> <godot arguments>
+#   run_reflect.sh [--hwrt=auto|off|force] -- <godot> <godot arguments>
 #
-# Writes godotnext/testbed/override.cfg (git ignores it) with the NextGI settings, runs Godot and
+# Writes godotnext/testbed/override.cfg (git ignores it) with the NextGI settings (High, the
+# hardware_ray_tracing mode; auto by default), runs Godot and
 # removes the file again. It refuses to overwrite an existing override.cfg. The scene prints one
 # "GODOTNEXT_RESULT" line; this script counts the denoise views that rendered and fails unless the
 # scene passed. Exits non-zero when Godot fails or the result is a failure.
@@ -23,8 +24,17 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 testbed_dir=$(cd "$script_dir/../.." && pwd)
 override="$testbed_dir/override.cfg"
 
+hwrt_value=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
+	--hwrt=auto | --hwrt=off | --hwrt=force)
+		case "$1" in
+		--hwrt=auto) hwrt_value=0 ;;
+		--hwrt=off) hwrt_value=1 ;;
+		--hwrt=force) hwrt_value=2 ;;
+		esac
+		shift
+		;;
 	--)
 		shift
 		break
@@ -54,7 +64,7 @@ cat >"$override" <<EOF
 [rendering]
 
 global_illumination/nextgi/enabled=true
-global_illumination/nextgi/hardware_ray_tracing=0
+global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
 global_illumination/nextgi/quality=2
 EOF
 

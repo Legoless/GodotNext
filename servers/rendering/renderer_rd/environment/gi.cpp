@@ -3988,7 +3988,8 @@ void GI::RenderBuffersGI::free_data() {
 void GI::process_gi(Ref<RenderSceneBuffersRD> p_render_buffers, const RID *p_normal_roughness_slices, const RID *p_voxel_gi_buffer_slices, RID p_environment, uint32_t p_view_count, const Projection *p_projections, const Vector3 *p_eye_offsets, const Transform3D &p_cam_transform, const PagedArray<RID> &p_voxel_gi_instances) {
 	RendererSceneRenderRD *scene_render = RendererSceneRenderRD::get_singleton();
 	NextGI *next_gi = NextGI::get_singleton();
-	const bool nextgi_view = scene_render != nullptr && next_gi != nullptr && p_environment.is_valid() && scene_render->environment_get_nextgi_enabled(p_environment) && next_gi->get_tier_result().tier == NextGI::TIER_HWRT && !NextGI::is_reflections_only();
+	// GodotNext: ps_swrt_trace (#186). The frame block's view rule, on either active tier.
+	const bool nextgi_view = scene_render != nullptr && next_gi != nullptr && p_environment.is_valid() && NextGI::view_uses_frame_block(next_gi->get_tier_result().tier, false, scene_render->environment_get_nextgi_enabled(p_environment), false, p_view_count) && !NextGI::is_reflections_only();
 	DEV_ASSERT(!nextgi_view);
 	ERR_FAIL_COND_MSG(nextgi_view, "GI::process_gi must not run for a NextGI view.");
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();

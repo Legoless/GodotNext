@@ -33,6 +33,12 @@ layout(set = 0, binding = 34, std430) buffer NextGIReflectCounters {
 	uint hits;
 	uint misses;
 	uint pad;
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186). Reflection SDF hits, step-limit and near-origin ones.
+	uint sdf_hits;
+	uint sdf_exhausted;
+	uint sdf_near;
+#endif
 }
 reflect_counters;
 layout(set = 0, binding = 28, std430) restrict readonly buffer NextGIGatherWRCParams {

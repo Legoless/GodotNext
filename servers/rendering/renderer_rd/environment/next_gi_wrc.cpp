@@ -31,12 +31,17 @@
 #include "next_gi_wrc.h"
 
 #include "core/math/math_funcs.h"
+#include "core/object/callable_mp.h"
+#include "core/os/mutex.h"
+#include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/rendering_device.h"
@@ -45,8 +50,9 @@
 
 using namespace RendererRD;
 
-struct NextGIWRC::ShaderState {
-	NextgiWrcUpdateShaderRD shader;
+// GodotNext: ps_swrt_trace (#186). The six update pipelines, shared by the hardware update and
+// its software sibling.
+struct NextGIWRCPipelines {
 	RID version;
 	RID trace;
 	RID project;
@@ -55,6 +61,37 @@ struct NextGIWRC::ShaderState {
 	RID translucency_trace;
 	RID translucency_project;
 };
+
+struct NextGIWRC::ShaderState : NextGIWRCPipelines {
+	NextgiWrcUpdateShaderRD shader;
+};
+
+// GodotNext: ps_swrt_trace (#186). No ray query: the software tier's WRC producer (L9b).
+struct NextGIWRC::SWRTShaderState : NextGIWRCPipelines {
+	NextgiWrcUpdateSwrtShaderRD shader;
+};
+
+static Vector<String> _nextgi_wrc_variant_defines() {
+	Vector<String> defines;
+	defines.push_back("");
+	defines.push_back("\n#define MODE_SH\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_VOLUME\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_MARK\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_TRACE\n");
+	defines.push_back("\n#define MODE_TRANSLUCENCY_PROJECT\n");
+	return defines;
+}
+
+static bool _nextgi_wrc_create_pipelines(ShaderRD &p_shader, NextGIWRCPipelines &r_pipelines) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	RID *pipelines[6] = { &r_pipelines.trace, &r_pipelines.project, &r_pipelines.translucency, &r_pipelines.translucency_mark, &r_pipelines.translucency_trace, &r_pipelines.translucency_project };
+	bool valid = true;
+	for (int i = 0; i < 6; i++) {
+		*pipelines[i] = rd->compute_pipeline_create(p_shader.version_get_shader(r_pipelines.version, i));
+		valid = valid && pipelines[i]->is_valid();
+	}
+	return valid;
+}
 
 struct NextGIWRCParamsGPU {
 	float camera[4] = {};
@@ -96,7 +133,17 @@ struct NextGIWRCCountersGPU {
 	uint32_t translucent_hits = 0;
 	uint32_t translucent_sky_misses = 0;
 	uint32_t translucent_sky_energy = 0;
+	// GodotNext: ps_swrt_trace (#186). Written only by the software sibling (NEXTGI_TRACE_SDF):
+	// probe-ray SDF hits, and the step-limit and near-origin ones among them.
+	uint32_t sdf_hits = 0;
+	uint32_t sdf_exhausted = 0;
+	uint32_t sdf_near = 0;
 };
+static_assert(sizeof(NextGIWRCCountersGPU) == 64, "WRC counters must match NextGIWRCCounters.");
+
+static Mutex nextgi_wrc_counter_mutex;
+static HashMap<uint64_t, NextGIWRC *> nextgi_wrc_counter_registry;
+static uint64_t nextgi_wrc_counter_next_token = 1;
 
 NextGIWRC *NextGIWRC::singleton = nullptr;
 
@@ -169,6 +216,14 @@ NextGIWRC::NextGIWRC() {
 }
 
 NextGIWRC::~NextGIWRC() {
+	{
+		MutexLock lock(nextgi_wrc_counter_mutex);
+		if (counter_token != 0) {
+			nextgi_wrc_counter_registry.erase(counter_token);
+			counter_token = 0;
+		}
+		counters_pending = false;
+	}
 	if (singleton == this) {
 		singleton = nullptr;
 	}
@@ -190,6 +245,11 @@ void NextGIWRC::_free_uniform_set() {
 			rd->free_rid(translucency_mark_uniform_set);
 		}
 	}
+	// GodotNext: ps_swrt_trace (#186)
+	if (rd != nullptr && swrt_trace_set.is_valid() && rd->uniform_set_is_valid(swrt_trace_set)) {
+		rd->free_rid(swrt_trace_set);
+	}
+	swrt_trace_set = RID();
 	uniform_set = RID();
 	volume_uniform_set = RID();
 	translucency_uniform_set = RID();
@@ -198,6 +258,22 @@ void NextGIWRC::_free_uniform_set() {
 
 void NextGIWRC::free_resources() {
 	_free_uniform_set();
+	// GodotNext: ps_swrt_trace (#186)
+	if (swrt_shader != nullptr) {
+		if (swrt_shader->version.is_valid()) {
+			swrt_shader->shader.version_free(swrt_shader->version);
+		}
+		memdelete(swrt_shader);
+		swrt_shader = nullptr;
+	}
+	{
+		MutexLock lock(nextgi_wrc_counter_mutex);
+		if (counter_token != 0) {
+			nextgi_wrc_counter_registry.erase(counter_token);
+			counter_token = 0;
+		}
+		counters_pending = false;
+	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (shader != nullptr) {
 		if (shader->version.is_valid()) {
@@ -208,6 +284,10 @@ void NextGIWRC::free_resources() {
 	}
 	if (rd == nullptr) {
 		return;
+	}
+	if (readback_buffer.is_valid()) {
+		rd->free_rid(readback_buffer);
+		readback_buffer = RID();
 	}
 	RID resources[31] = { radiance, mip4, mip2, visibility, sh_r, sh_g, sh_b, offsets, translucency_r, translucency_g, translucency_b, translucency_history_r, translucency_history_g, translucency_history_b, translucency_radiance, translucency_mip4, translucency_mip2, translucency_visibility, translucency_sh_r, translucency_sh_g, translucency_sh_b, translucency_offsets, translucency_mark_framebuffer, translucency_mark_texture, translucency_marks, translucency_indices, params_buffer, counter_buffer, sampler, dummy_tex, dummy_buffer };
 	for (RID resource : resources) {
@@ -427,6 +507,20 @@ String NextGIWRC::build_update_shader_source(int p_variant) {
 	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
 }
 
+// GodotNext: ps_swrt_trace (#186)
+String NextGIWRC::build_update_swrt_shader_source(int p_variant) {
+	NextgiWrcUpdateSwrtShaderRD update_shader;
+	update_shader.initialize(_nextgi_wrc_variant_defines());
+	const RID version = update_shader.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = update_shader.version_build_variant_stage_sources(version, p_variant);
+	update_shader.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
 bool NextGIWRC::_ensure_shader() {
 	if (shader != nullptr && shader->version.is_valid()) {
 		return true;
@@ -435,14 +529,7 @@ bool NextGIWRC::_ensure_shader() {
 	ERR_FAIL_NULL_V(next_gi, false);
 	ERR_FAIL_COND_V(!next_gi->can_initialize_ray_query_shaders(), false);
 	shader = memnew(ShaderState);
-	Vector<String> defines;
-	defines.push_back("");
-	defines.push_back("\n#define MODE_SH\n");
-	defines.push_back("\n#define MODE_TRANSLUCENCY_VOLUME\n");
-	defines.push_back("\n#define MODE_TRANSLUCENCY_MARK\n");
-	defines.push_back("\n#define MODE_TRANSLUCENCY_TRACE\n");
-	defines.push_back("\n#define MODE_TRANSLUCENCY_PROJECT\n");
-	shader->shader.initialize(defines);
+	shader->shader.initialize(_nextgi_wrc_variant_defines());
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
 	shader->version = shader->shader.version_create(true);
@@ -451,14 +538,7 @@ bool NextGIWRC::_ensure_shader() {
 		shader = nullptr;
 		ERR_FAIL_V_MSG(false, "The NextGI WRC shader failed to compile.");
 	}
-	RenderingDevice *rd = RenderingDevice::get_singleton();
-	shader->trace = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 0));
-	shader->project = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 1));
-	shader->translucency = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 2));
-	shader->translucency_mark = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 3));
-	shader->translucency_trace = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 4));
-	shader->translucency_project = rd->compute_pipeline_create(shader->shader.version_get_shader(shader->version, 5));
-	if (!shader->trace.is_valid() || !shader->project.is_valid() || !shader->translucency.is_valid() || !shader->translucency_mark.is_valid() || !shader->translucency_trace.is_valid() || !shader->translucency_project.is_valid()) {
+	if (!_nextgi_wrc_create_pipelines(shader->shader, *shader)) {
 		shader->shader.version_free(shader->version);
 		memdelete(shader);
 		shader = nullptr;
@@ -468,27 +548,92 @@ bool NextGIWRC::_ensure_shader() {
 	return true;
 }
 
-void NextGIWRC::_read_counters() {
+// GodotNext: ps_swrt_trace (#186)
+bool NextGIWRC::_ensure_swrt_shader() {
+	if (swrt_shader != nullptr && swrt_shader->version.is_valid()) {
+		return true;
+	}
+	swrt_shader = memnew(SWRTShaderState);
+	swrt_shader->shader.initialize(_nextgi_wrc_variant_defines());
+	swrt_shader->version = swrt_shader->shader.version_create(false);
+	if (!swrt_shader->version.is_valid()) {
+		memdelete(swrt_shader);
+		swrt_shader = nullptr;
+		ERR_FAIL_V_MSG(false, "The NextGI software WRC shader failed to compile.");
+	}
+	if (!_nextgi_wrc_create_pipelines(swrt_shader->shader, *swrt_shader)) {
+		swrt_shader->shader.version_free(swrt_shader->version);
+		memdelete(swrt_shader);
+		swrt_shader = nullptr;
+		ERR_FAIL_V_MSG(false, "The NextGI software WRC pipeline failed to compile.");
+	}
+	return true;
+}
+
+// GodotNext: nextgi_async_counters (#186). The counters reach fill_info() one or more frames late.
+void NextGIWRC::_request_counters() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd == nullptr || !counter_buffer.is_valid()) {
 		return;
 	}
-	const Vector<uint8_t> data = rd->buffer_get_data(counter_buffer);
-	if (data.size() < int(sizeof(NextGIWRCCountersGPU))) {
+	uint64_t token = 0;
+	{
+		MutexLock lock(nextgi_wrc_counter_mutex);
+		if (counters_pending) {
+			return;
+		}
+		counters_pending = true;
+		token = nextgi_wrc_counter_next_token++;
+		counter_token = token;
+		nextgi_wrc_counter_registry.insert(token, this);
+	}
+	if (!readback_buffer.is_valid()) {
+		readback_buffer = rd->storage_buffer_create(sizeof(NextGIWRCCountersGPU));
+	}
+	Error err = readback_buffer.is_valid() ? OK : FAILED;
+	if (err == OK) {
+		// A copy, so the zeroing below cannot race the read.
+		rd->buffer_copy(counter_buffer, readback_buffer, 0, 0, sizeof(NextGIWRCCountersGPU));
+		err = rd->buffer_get_data_async(readback_buffer, callable_mp_static(&NextGIWRC::_counters_received).bind(token), 0, sizeof(NextGIWRCCountersGPU));
+	}
+	if (err != OK) {
+		MutexLock lock(nextgi_wrc_counter_mutex);
+		nextgi_wrc_counter_registry.erase(token);
+		counter_token = 0;
+		counters_pending = false;
+	}
+}
+
+void NextGIWRC::_counters_received(const Vector<uint8_t> &p_data, uint64_t p_token) {
+	MutexLock lock(nextgi_wrc_counter_mutex);
+	NextGIWRC **owner = nextgi_wrc_counter_registry.getptr(p_token);
+	if (owner == nullptr) {
+		return;
+	}
+	NextGIWRC *self = *owner;
+	nextgi_wrc_counter_registry.erase(p_token);
+	self->counter_token = 0;
+	self->counters_pending = false;
+	if (p_data.size() < int(sizeof(NextGIWRCCountersGPU))) {
 		return;
 	}
 	NextGIWRCCountersGPU got;
-	memcpy(&got, data.ptr(), sizeof(got));
-	last_rays = got.rays;
-	last_hits = got.hits;
-	last_sky = got.sky_misses;
-	last_energy_bits = got.energy_bits;
-	fog_samples = got.fog_samples;
-	fog_ambient_bits = got.fog_ambient_bits;
-	translucency_marked = MIN(got.translucent_probes, NEXTGI_TRANSLUCENCY_PROBE_CAP);
-	translucency_rays = got.translucent_rays;
-	translucency_hits = got.translucent_hits;
-	translucency_sky_energy = float(got.translucent_sky_energy) / 64.0f;
+	memcpy(&got, p_data.ptr(), sizeof(got));
+	// One frame's totals: the update's probe and translucency rays, and the fog that read the
+	// cache after the slot.
+	self->last_rays = got.rays;
+	self->last_hits = got.hits;
+	self->last_sky = got.sky_misses;
+	self->last_energy_bits = got.energy_bits;
+	self->fog_samples = got.fog_samples;
+	self->fog_ambient_bits = got.fog_ambient_bits;
+	self->translucency_marked = MIN(got.translucent_probes, uint32_t(NEXTGI_TRANSLUCENCY_PROBE_CAP));
+	self->translucency_rays = got.translucent_rays;
+	self->translucency_hits = got.translucent_hits;
+	self->translucency_sky_energy = float(got.translucent_sky_energy) / 64.0f;
+	self->last_sdf_hits = got.sdf_hits;
+	self->last_sdf_exhausted = got.sdf_exhausted;
+	self->last_sdf_near = got.sdf_near;
 }
 
 void NextGIWRC::update(const RenderDataRD *p_render_data) {
@@ -496,12 +641,25 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		return;
 	}
 	NextGI *next_gi = NextGI::get_singleton();
-	if (next_gi == nullptr || !next_gi->can_initialize_ray_query_shaders() || next_gi->get_rt_scene() == nullptr || !next_gi->get_rt_scene()->is_tlas_traceable()) {
+	if (next_gi == nullptr) {
 		return;
 	}
-	if (!_ensure_textures() || !_ensure_translucency_cache() || !_ensure_shader()) {
+	// GodotNext: ps_swrt_trace (#186, plan §21.2 L9b). The software tier updates the cache with
+	// the SDF trace through the sibling ShaderRD; no ray-query shader is created there.
+	const bool swrt = next_gi->get_tier_result().tier == NextGI::TIER_SOFTWARE;
+	NextGISWRTTrace *swrt_tracer = swrt ? next_gi->get_swrt_trace() : nullptr;
+	if (swrt) {
+		if (swrt_tracer == nullptr || !swrt_tracer->is_ready()) {
+			return;
+		}
+	} else if (!next_gi->can_initialize_ray_query_shaders() || next_gi->get_rt_scene() == nullptr || !next_gi->get_rt_scene()->is_tlas_traceable()) {
 		return;
 	}
+	if (!_ensure_textures() || !_ensure_translucency_cache() || !(swrt ? _ensure_swrt_shader() : _ensure_shader())) {
+		return;
+	}
+	ShaderRD &active_shader = swrt ? static_cast<ShaderRD &>(swrt_shader->shader) : static_cast<ShaderRD &>(shader->shader);
+	const NextGIWRCPipelines &active = swrt ? static_cast<const NextGIWRCPipelines &>(*swrt_shader) : static_cast<const NextGIWRCPipelines &>(*shader);
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	const Vector3 camera = p_render_data->scene_data->cam_transform.origin;
 	// GodotNext: nextgi_translucency_volume (#61). 1/16-screen x 32 slice irradiance volume.
@@ -539,7 +697,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.probe_base = cursor;
 	params.probe_count = NEXTGI_WRC_PROBES_PER_FRAME;
 	params.frame = frame;
-	params.record_count = next_gi->get_rt_scene()->get_stats().instance_count;
+	params.record_count = swrt ? 0u : next_gi->get_rt_scene()->get_stats().instance_count;
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	params.page_rect_count = relight != nullptr ? relight->get_page_rect_count() : 0;
 	// GodotNext: nextgi_view_math. The froxels and the history use the depth texture's clip space.
@@ -587,18 +745,14 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		params.previous_view_proj[i] = history_projection.columns[i / 4][i % 4];
 	}
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
-	_read_counters();
-	const uint32_t previous_fog_samples = fog_samples;
-	const uint32_t previous_fog_bits = fog_ambient_bits;
+	// GodotNext: nextgi_async_counters (#186). The previous frame's totals, read before the zeroing.
+	_request_counters();
 	NextGIWRCCountersGPU zero;
 	rd->buffer_update(counter_buffer, 0, sizeof(zero), &zero);
 	uint32_t mark_zero[256] = {};
 	rd->buffer_update(translucency_marks, 0, sizeof(mark_zero), mark_zero);
 	uint32_t index_zero = 0;
 	rd->buffer_update(translucency_indices, 0, sizeof(index_zero), &index_zero);
-	translucency_marked = 0;
-	translucency_rays = 0;
-	translucency_hits = 0;
 
 	NextGISRC *src = NextGISRC::get_singleton();
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
@@ -611,8 +765,8 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 			}
 		}
 	}
-	RID records = next_gi->get_rt_scene()->get_instance_record_buffer();
-	RID surfaces = next_gi->get_rt_scene()->get_surface_record_buffer();
+	RID records = swrt ? RID() : next_gi->get_rt_scene()->get_instance_record_buffer();
+	RID surfaces = swrt ? RID() : next_gi->get_rt_scene()->get_surface_record_buffer();
 	RID cards = src != nullptr ? src->get_card_buffer() : RID();
 	RID card_sets = src != nullptr ? src->get_card_set_buffer() : RID();
 	RID page_rects = relight != nullptr ? relight->get_page_rect_buffer() : RID();
@@ -626,7 +780,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	};
 	_free_uniform_set();
 	RD::Uniform uniforms[36] = {
-		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, next_gi->get_rt_scene()->get_tlas()),
+		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, swrt ? RID() : next_gi->get_rt_scene()->get_tlas()),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, visibility),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, sh_r),
@@ -669,51 +823,71 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		trace_uniforms.push_back(uniforms[i]);
 	}
 	trace_uniforms.push_back(uniforms[35]);
-	uniform_set = rd->uniform_set_create(trace_uniforms, shader->shader.version_get_shader(shader->version, 0), 0);
-	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader->shader.version_get_shader(shader->version, 2), 0);
-	translucency_mark_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader->shader.version_get_shader(shader->version, 3), 0);
+	uniform_set = rd->uniform_set_create(trace_uniforms, active_shader.version_get_shader(active.version, 0), 0);
+	volume_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), active_shader.version_get_shader(active.version, 2), 0);
+	translucency_mark_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), active_shader.version_get_shader(active.version, 3), 0);
 	rd->set_resource_name(translucency_mark_uniform_set, "NextGI Translucency Mark Uniforms");
 	uniforms[1] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, translucency_radiance);
 	uniforms[2] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, translucency_visibility);
 	uniforms[6] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 6, translucency_offsets);
 	uniforms[7] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 7, translucency_mip4);
 	uniforms[8] = RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, translucency_mip2);
-	translucency_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader->shader.version_get_shader(shader->version, 4), 0);
+	translucency_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), active_shader.version_get_shader(active.version, 4), 0);
+	// GodotNext: ps_swrt_trace (#186). Set 1 is the SDF trace with the frame's scene params
+	// (NextGISWRTTrace::prepare_scene_params() in the AS-updates slot); every variant declares it.
+	if (swrt) {
+		swrt_trace_set = swrt_tracer->create_trace_uniform_set(active_shader.version_get_shader(active.version, 0), 1, false, next_gi->get_voxel_lighting());
+		if (!swrt_trace_set.is_valid()) {
+			_free_uniform_set();
+			return;
+		}
+	}
+	auto bind_trace_set = [&](RD::ComputeListID p_list) {
+		if (swrt) {
+			rd->compute_list_bind_uniform_set(p_list, swrt_trace_set, 1);
+		}
+	};
 	if (uniform_set.is_valid()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->trace);
+		rd->compute_list_bind_compute_pipeline(list, active.trace);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		bind_trace_set(list);
 		rd->compute_list_dispatch(list, NEXTGI_WRC_PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_add_barrier(list);
-		rd->compute_list_bind_compute_pipeline(list, shader->project);
+		rd->compute_list_bind_compute_pipeline(list, active.project);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		bind_trace_set(list);
 		rd->compute_list_dispatch(list, NEXTGI_WRC_PROBES_PER_FRAME, 1, 1);
 		rd->compute_list_end();
 	}
 	if (uses_translucency_probes() && translucency_mark_texture.is_valid() && translucency_mark_uniform_set.is_valid() && translucency_uniform_set.is_valid()) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->translucency_mark);
+		rd->compute_list_bind_compute_pipeline(list, active.translucency_mark);
 		rd->compute_list_bind_uniform_set(list, translucency_mark_uniform_set, 0);
+		bind_trace_set(list);
 		rd->compute_list_dispatch(list, (translucency_size.x + 7) / 8, (translucency_size.y + 7) / 8, 1);
 		rd->compute_list_add_barrier(list);
-		rd->compute_list_bind_compute_pipeline(list, shader->translucency_trace);
+		rd->compute_list_bind_compute_pipeline(list, active.translucency_trace);
 		rd->compute_list_bind_uniform_set(list, translucency_uniform_set, 0);
+		bind_trace_set(list);
 		rd->compute_list_dispatch(list, 8192, 1, 1);
 		rd->compute_list_end();
-		_read_counters();
-	}
-	if (translucency_marked > 0 && translucency_uniform_set.is_valid()) {
-		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->translucency_project);
-		rd->compute_list_bind_uniform_set(list, translucency_uniform_set, 0);
-		rd->compute_list_dispatch(list, translucency_marked, 1, 1);
+		// GodotNext: nextgi_async_counters (#186). The project pass runs the probe cap instead of
+		// reading the marked count back: each group past min(count, cap) returns at once
+		// (nextgi_wrc_project), so the output is the same without a synchronous readback.
+		const RD::ComputeListID project_list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(project_list, active.translucency_project);
+		rd->compute_list_bind_uniform_set(project_list, translucency_uniform_set, 0);
+		bind_trace_set(project_list);
+		rd->compute_list_dispatch(project_list, NEXTGI_TRANSLUCENCY_PROBE_CAP, 1, 1);
 		rd->compute_list_end();
 	}
 	// One shared volume feeds forward translucency and volumetric fog.
 	if (volume_uniform_set.is_valid() && translucency_r.is_valid()) {
 		const RD::ComputeListID volume_list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(volume_list, shader->translucency);
+		rd->compute_list_bind_compute_pipeline(volume_list, active.translucency);
 		rd->compute_list_bind_uniform_set(volume_list, volume_uniform_set, 0);
+		bind_trace_set(volume_list);
 		rd->compute_list_dispatch(volume_list, (translucency_size.x + 7) / 8, (translucency_size.y + 7) / 8, 32);
 		rd->compute_list_end();
 		rd->texture_copy(translucency_r, translucency_history_r, Vector3(), Vector3(), Vector3(translucency_size), 0, 0, 0, 0);
@@ -721,10 +895,6 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		rd->texture_copy(translucency_b, translucency_history_b, Vector3(), Vector3(), Vector3(translucency_size), 0, 0, 0, 0);
 		volume_history_valid = true;
 	}
-	_read_counters();
-	// Fog runs after this slot and adds into the same buffer. Keep the previous frame's fog totals.
-	fog_samples = previous_fog_samples;
-	fog_ambient_bits = previous_fog_bits;
 	previous_view_projection = view_proj;
 	previous_camera_position = camera;
 	previous_camera_forward = forward;
@@ -735,6 +905,8 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 }
 
 void NextGIWRC::fill_info(Dictionary &r_info) const {
+	// GodotNext: nextgi_async_counters (#186). The readback callback writes the counters.
+	MutexLock lock(nextgi_wrc_counter_mutex);
 	r_info["wrc_bytes"] = int64_t(nextgi_wrc_bytes());
 	r_info["wrc_probes"] = int64_t(NEXTGI_WRC_PROBE_COUNT);
 	r_info["wrc_rays"] = int64_t(last_rays);
@@ -750,4 +922,8 @@ void NextGIWRC::fill_info(Dictionary &r_info) const {
 	r_info["translucency_history_valid"] = volume_history_valid;
 	r_info["translucency_lite"] = !uses_translucency_probes();
 	r_info["translucency_sky_energy"] = translucency_sky_energy;
+	// GodotNext: ps_swrt_trace (#186). The software sibling's probe-ray SDF counters.
+	r_info["wrc_sdf_hits"] = int64_t(last_sdf_hits);
+	r_info["wrc_sdf_exhausted"] = int64_t(last_sdf_exhausted);
+	r_info["wrc_sdf_near"] = int64_t(last_sdf_near);
 }

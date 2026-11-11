@@ -162,6 +162,16 @@ private:
 	uint32_t page_rect_uploaded = 0;
 	RID indirect_texture;
 
+	// GodotNext: nextgi_async_counters (#186). The traced-ray counter is read asynchronously: a
+	// synchronous read inside the frame block restarts the device frame and drops the block's
+	// timestamps. The request keeps the schedule of the frame that issued it.
+	RID readback_buffer;
+	uint64_t counter_token = 0;
+	bool counters_pending = false;
+	LocalVector<NextGIRelightRayRequest> pending_schedule;
+	void _request_counters(LocalVector<NextGIRelightRayRequest> &r_schedule);
+	static void _counters_received(const Vector<uint8_t> &p_data, uint64_t p_token);
+
 	bool _ensure_atlases();
 	bool _ensure_shader();
 	RID _storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t p_count, uint32_t p_stride);
@@ -214,6 +224,13 @@ public:
 	uint32_t get_page_rect_count() const { return page_rect_uploaded; }
 	// UINT32_MAX when this instance has no relight pages. Bit 31 is the evicted mark.
 	uint32_t get_instance_page_table(RenderGeometryInstance *p_instance, uint32_t p_element = UINT32_MAX) const;
+	// GodotNext: nextgi_async_counters (#186). The key a page set is found by.
+	static uint64_t get_page_key(RenderGeometryInstance *p_instance, uint32_t p_element = UINT32_MAX);
+	// Sets ray_fraction = traced / sum(estimates) on each scheduled card, finding its page set by
+	// key; cards whose set left since the schedule are skipped.
+	void apply_ray_fraction(const LocalVector<NextGIRelightRayRequest> &p_schedule, uint32_t p_traced);
+	// A card's ray_fraction, or -1 when the instance has no page set or no such card.
+	float get_card_ray_fraction(RenderGeometryInstance *p_instance, uint32_t p_element, uint32_t p_card) const;
 	RID get_indirect_texture() const { return indirect_texture; }
 	RID get_radiance_texture() const { return radiance; }
 	const LocalVector<ScheduledPage> &get_scheduled_pages() const { return scheduled_pages; }

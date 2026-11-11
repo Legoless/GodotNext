@@ -35,6 +35,7 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 #include "core/math/face3.h"
 #include "core/math/mesh_sdf_builder.h"
 #include "core/math/random_number_generator.h"
+#include "core/templates/hash_set.h"
 #include "scene/resources/3d/primitive_meshes.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
@@ -51,7 +52,11 @@ TEST_FORCE_LINK(test_nextgi_swrt_trace)
 #ifdef RD_ENABLED
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_sdf.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_sdf.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #ifdef MODULE_GLSLANG_ENABLED
 #include "servers/rendering/rendering_device_commons.h"
@@ -140,6 +145,62 @@ TEST_CASE("[NextGI][SWRT] Software trace shaders do not require ray query") {
 	CHECK_FALSE(NextgiGatherSdfShaderRD().requires_ray_query());
 	CHECK_FALSE(NextgiSrcRelightSdfShaderRD().requires_ray_query());
 	CHECK(NextgiGatherShaderRD().requires_ray_query());
+	// GodotNext: ps_swrt_trace (#186). The production siblings carry no GL_EXT_ray_query line, so
+	// the shader baker and the census treat them as plain compute shaders; their twins stay marked.
+	CHECK_FALSE(NextgiGatherSwrtShaderRD().requires_ray_query());
+	CHECK_FALSE(NextgiWrcUpdateSwrtShaderRD().requires_ray_query());
+	CHECK(NextgiWrcUpdateShaderRD().requires_ray_query());
+	CHECK(NextgiSrcRelightShaderRD().requires_ray_query());
+}
+
+static Vector<String> _swrt_test_gather_defines() {
+	return Vector<String>({ "", "#define MODE_INTEGRATE\n", "#define MODE_SRC_FEEDBACK\n", "#define MODE_COVERAGE\n", "#define MODE_HIT_RADIANCE_REFERENCE\n", "#define MODE_REFLECT\n", "#define MODE_FAR_FIELD\n" });
+}
+
+TEST_CASE("[NextGI][SWRT] The census counts ray-query ShaderRD versions only") {
+	const uint64_t before = ShaderRD::get_ray_query_versions_created();
+	{
+		NextgiGatherSwrtShaderRD sibling;
+		sibling.initialize(_swrt_test_gather_defines());
+		const RID version = sibling.version_create(false);
+		CHECK(version.is_valid());
+		sibling.version_free(version);
+	}
+	CHECK_EQ(ShaderRD::get_ray_query_versions_created(), before);
+	{
+		NextgiGatherShaderRD hardware;
+		hardware.initialize(_swrt_test_gather_defines());
+		const RID version = hardware.version_create(false);
+		CHECK(version.is_valid());
+		hardware.version_free(version);
+	}
+	CHECK_EQ(ShaderRD::get_ray_query_versions_created(), before + 1);
+
+	// Since the tier last changed: begin_frame() takes the snapshot when it sees the change.
+	RendererRD::NextGI next_gi;
+	RendererRD::NextGI::TierInputs hwrt;
+	hwrt.project_enabled = true;
+	hwrt.ray_query = true;
+	hwrt.ray_query_hw = true;
+	String line;
+	next_gi.update_tier(hwrt, RendererRD::NextGI::QUALITY_HIGH, line);
+	REQUIRE_EQ(next_gi.get_tier_result().tier, RendererRD::NextGI::TIER_HWRT);
+	next_gi.begin_frame(1);
+	CHECK_EQ(next_gi.get_ray_query_versions_since_tier(), 0u);
+	{
+		NextgiWrcUpdateShaderRD hardware;
+		hardware.initialize(Vector<String>({ "" }));
+		const RID version = hardware.version_create(false);
+		hardware.version_free(version);
+	}
+	next_gi.begin_frame(2);
+	CHECK_EQ(next_gi.get_ray_query_versions_since_tier(), 1u);
+	RendererRD::NextGI::TierInputs software = hwrt;
+	software.hwrt_setting = RendererRD::NextGI::HARDWARE_RAY_TRACING_OFF;
+	next_gi.update_tier(software, RendererRD::NextGI::QUALITY_HIGH, line);
+	REQUIRE_EQ(next_gi.get_tier_result().tier, RendererRD::NextGI::TIER_SOFTWARE);
+	next_gi.begin_frame(3);
+	CHECK_EQ(next_gi.get_ray_query_versions_since_tier(), 0u);
 }
 #endif
 
@@ -321,6 +382,131 @@ TEST_CASE("[NextGI][View] The WRC update shader reads its params where the rende
 	// The froxels turn linear depth into the depth texture's value and back with them.
 	CHECK(source.contains("nextgi_view_depth_from_linear(params.depth_coefficients,"));
 	CHECK(source.contains("nextgi_view_linear_depth(params.depth_coefficients,"));
+}
+
+// GodotNext: ps_swrt_trace (#186). Set and binding of every resource variable, by OpName.
+struct SpirvBinding {
+	uint32_t set = UINT32_MAX;
+	uint32_t binding = UINT32_MAX;
+};
+
+static HashMap<String, SpirvBinding> _spirv_bindings(const Vector<uint8_t> &p_spirv) {
+	const int count = p_spirv.size() / 4;
+	auto word = [&](int p_index) {
+		const uint8_t *bytes = p_spirv.ptr() + p_index * 4;
+		return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) | (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
+	};
+	HashMap<uint32_t, String> names;
+	HashMap<uint32_t, SpirvBinding> decorations;
+	for (int index = 5; index < count;) {
+		const uint32_t word_count = word(index) >> 16;
+		const uint32_t opcode = word(index) & 0xffffu;
+		if (word_count == 0 || index + int(word_count) > count) {
+			break;
+		}
+		if (opcode == 5 && word_count >= 3) { // OpName: target, literal string.
+			names.insert(word(index + 1), String::utf8((const char *)(p_spirv.ptr() + (index + 2) * 4)));
+		} else if (opcode == 71 && word_count >= 4) { // OpDecorate: target, decoration, literal.
+			const uint32_t decoration = word(index + 2);
+			if (decoration == 34) { // DescriptorSet
+				decorations[word(index + 1)].set = word(index + 3);
+			} else if (decoration == 33) { // Binding
+				decorations[word(index + 1)].binding = word(index + 3);
+			}
+		}
+		index += int(word_count);
+	}
+	HashMap<String, SpirvBinding> result;
+	for (const KeyValue<uint32_t, SpirvBinding> &entry : decorations) {
+		if (entry.value.set != UINT32_MAX && entry.value.binding != UINT32_MAX && names.has(entry.key)) {
+			result.insert(names[entry.key], entry.value);
+		}
+	}
+	return result;
+}
+
+static Vector<uint8_t> _swrt_test_compile(const String &p_source, const String &p_what) {
+	String error;
+	const Vector<uint8_t> spirv = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_COMPUTE, p_source, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3, &error);
+	if (spirv.is_empty()) {
+		FAIL_CHECK(("glslang failed to compile " + p_what + ":\n" + error).utf8().get_data());
+	}
+	return spirv;
+}
+
+// Every set-0 resource of the software sibling sits at the hardware twin's binding, the twin's
+// only extra set-0 bindings are p_hardware_only, and the sibling's set 1 is the SDF trace.
+static void _check_sibling_bindings(const HashMap<String, SpirvBinding> &p_hardware, const HashMap<String, SpirvBinding> &p_sibling, const Vector<uint32_t> &p_hardware_only, const String &p_what) {
+	HashSet<uint32_t> sibling_set0;
+	Vector<uint32_t> sibling_set1;
+	for (const KeyValue<String, SpirvBinding> &entry : p_sibling) {
+		if (entry.value.set == 0) {
+			sibling_set0.insert(entry.value.binding);
+			const SpirvBinding *hardware = p_hardware.getptr(entry.key);
+			CHECK_MESSAGE(hardware != nullptr, (p_what + ": " + entry.key + " is not in the hardware shader").utf8().get_data());
+			if (hardware != nullptr) {
+				CHECK_MESSAGE(hardware->set == 0, (p_what + ": " + entry.key + " moved set").utf8().get_data());
+				CHECK_MESSAGE(hardware->binding == entry.value.binding, (p_what + ": " + entry.key + " moved binding").utf8().get_data());
+			}
+		} else {
+			CHECK_MESSAGE(entry.value.set == 1, (p_what + ": " + entry.key + " is in set " + itos(entry.value.set)).utf8().get_data());
+			sibling_set1.push_back(entry.value.binding);
+		}
+	}
+	Vector<uint32_t> hardware_only;
+	for (const KeyValue<String, SpirvBinding> &entry : p_hardware) {
+		CHECK_MESSAGE(entry.value.set == 0, (p_what + ": the hardware shader uses set " + itos(entry.value.set)).utf8().get_data());
+		if (!sibling_set0.has(entry.value.binding)) {
+			hardware_only.push_back(entry.value.binding);
+		}
+	}
+	hardware_only.sort();
+	CHECK_MESSAGE(hardware_only == p_hardware_only, (p_what + ": hardware-only bindings differ").utf8().get_data());
+	sibling_set1.sort();
+	const Vector<uint32_t> expected_set1 = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23, 24, 25, 26 };
+	CHECK_MESSAGE(sibling_set1 == expected_set1, (p_what + ": set 1 is not the SDF trace's bindings").utf8().get_data());
+}
+
+TEST_CASE("[NextGI][SWRT] The software siblings keep the hardware twins' set-0 bindings") {
+	const Vector<uint32_t> gather_only = { 0, 9, 10, 11, 12, 13, 23, 24, 25 };
+	for (const int variant : { 0, 5 }) {
+		const Vector<uint8_t> hardware = _swrt_test_compile(RendererRD::NextGIGather::build_shader_source(variant), "the hardware gather");
+		const Vector<uint8_t> sibling = _swrt_test_compile(RendererRD::NextGIGather::build_swrt_shader_source(variant), "the software gather");
+		REQUIRE_GE(hardware.size(), 20);
+		REQUIRE_GE(sibling.size(), 20);
+		_check_sibling_bindings(_spirv_bindings(hardware), _spirv_bindings(sibling), gather_only, "gather v" + itos(variant));
+	}
+	const Vector<uint8_t> wrc_hardware = _swrt_test_compile(RendererRD::NextGIWRC::build_update_shader_source(0), "the hardware WRC update");
+	const Vector<uint8_t> wrc_sibling = _swrt_test_compile(RendererRD::NextGIWRC::build_update_swrt_shader_source(0), "the software WRC update");
+	REQUIRE_GE(wrc_hardware.size(), 20);
+	REQUIRE_GE(wrc_sibling.size(), 20);
+	_check_sibling_bindings(_spirv_bindings(wrc_hardware), _spirv_bindings(wrc_sibling), { 0, 9, 10, 11, 12, 13, 14, 15, 16, 17 }, "WRC update v0");
+}
+
+TEST_CASE("[NextGI][SWRT] The software siblings trace the SDF and carry no ray query") {
+	for (int variant = 0; variant < 6; variant++) {
+		if (variant == 4) {
+			continue; // The hit-radiance reference is hardware-only; the sibling disables it.
+		}
+		const String source = RendererRD::NextGIGather::build_swrt_shader_source(variant);
+		REQUIRE_FALSE(source.is_empty());
+		CHECK_FALSE(source.contains("GL_EXT_ray_query"));
+		CHECK_FALSE(source.contains("rayQuery"));
+		CHECK_FALSE(source.contains("accelerationStructureEXT"));
+		CHECK(source.contains("swrt_trace("));
+		CHECK(source.contains("nextgi_sdf_note_gather("));
+		CHECK(_swrt_test_compile(source, "software gather v" + itos(variant)).size() >= 20);
+	}
+	for (int variant = 0; variant < 6; variant++) {
+		const String source = RendererRD::NextGIWRC::build_update_swrt_shader_source(variant);
+		REQUIRE_FALSE(source.is_empty());
+		CHECK_FALSE(source.contains("GL_EXT_ray_query"));
+		CHECK_FALSE(source.contains("rayQuery"));
+		CHECK_FALSE(source.contains("accelerationStructureEXT"));
+		CHECK(source.contains("swrt_trace("));
+		CHECK(source.contains("nextgi_sdf_note_wrc("));
+		CHECK(_swrt_test_compile(source, "software WRC update v" + itos(variant)).size() >= 20);
+	}
 }
 
 TEST_CASE("[NextGI][View] The forward pass's copy of the WRC params matches the update shader") {
@@ -794,14 +980,6 @@ TEST_CASE("[NextGI][SWRT] Microbenchmark fixture segments are lit or cross a box
 		}
 	}
 	CHECK_EQ(occluded_count, 32u);
-}
-
-TEST_CASE("[NextGI][SWRT] Software views trace once per single-view render") {
-	CHECK(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_SOFTWARE, false, true, false, 1));
-	// XR: depth and normal-roughness are arrays the trace does not bind.
-	CHECK_FALSE(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_SOFTWARE, false, true, false, 2));
-	CHECK_FALSE(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_HWRT, false, true, false, 1));
-	CHECK_FALSE(RendererRD::NextGI::view_traces_swrt(RendererRD::NextGI::TIER_SOFTWARE, true, true, false, 1));
 }
 
 TEST_CASE("[NextGI][SWRT] SWRT_REDUCED ends when the tier leaves SOFTWARE") {

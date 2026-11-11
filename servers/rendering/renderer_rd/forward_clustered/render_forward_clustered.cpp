@@ -1054,18 +1054,17 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
 		uint32_t ss_flags = 0;
 		if (p_opaque_render_buffers) {
 			// GodotNext: nextgi_frame_block. A NextGI view reads the GI buffers instead of SSIL.
-			const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
-			// GodotNext: ps_lumen_lite (#183). Software-tier Lite writes the GI buffers too.
-			const bool nextgi_lite = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false);
+			// GodotNext: ps_swrt_trace (#186). Both active tiers run the frame block (SWRT one view at a time).
+			const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), false, p_render_data->scene_data->view_count);
 			ss_flags |= environment_get_ssao_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSAO : 0;
 			// GodotNext: nextgi_frame_block, ps_lumen_lite (#183). SSIL only runs without NextGI.
-			ss_flags |= (!nextgi_view && !nextgi_lite && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
-			ss_flags |= (nextgi_view || nextgi_lite) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
+			ss_flags |= (!nextgi_view && environment_get_ssil_enabled(p_render_data->environment)) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSIL : 0;
+			ss_flags |= nextgi_view ? SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI : 0;
 			// GodotNext: nextgi_reflection_behaviours (#132)
 			ss_flags |= nextgi_view && !RendererRD::NextGI::is_reflections_enabled() && !environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_ROUGH_REFLECTION : 0;
 			// GodotNext: ps_lumen_lite (#183). Lite traces no reflections: below its SSR roughness
 			// the forward specular (probes, sky, SSR) stays instead of the ambient fallback.
-			ss_flags |= ((nextgi_view && RendererRD::NextGI::is_lumen_lite()) || nextgi_lite) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE : 0;
+			ss_flags |= (nextgi_view && RendererRD::NextGI::is_lumen_lite()) ? SCREEN_SPACE_EFFECTS_FLAGS_NEXTGI_LITE : 0;
 			ss_flags |= environment_get_ssr_enabled(p_render_data->environment) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSR : 0;
 			ss_flags |= bool(GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/contact_shadow/enabled")) ? SCREEN_SPACE_EFFECTS_FLAGS_USE_SSCS : 0;
 
@@ -1860,7 +1859,9 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.rbgi = rbgi;
 		settings.sdfgi = sdfgi;
 		RendererRD::NextGIWRC *wrc = next_gi.get_wrc();
-		settings.use_nextgi = environment_get_nextgi_enabled(p_environment) && next_gi.get_tier_result().tier == RendererRD::NextGI::TIER_HWRT && wrc != nullptr && wrc->is_ready();
+		// GodotNext: ps_swrt_trace (#186, plan §21.2 L9b). Fog reads the WRC volume on both active tiers.
+		const RendererRD::NextGI::Tier fog_tier = next_gi.get_tier_result().tier;
+		settings.use_nextgi = environment_get_nextgi_enabled(p_environment) && (fog_tier == RendererRD::NextGI::TIER_HWRT || fog_tier == RendererRD::NextGI::TIER_SOFTWARE) && wrc != nullptr && wrc->is_ready();
 		if (settings.use_nextgi) {
 			settings.nextgi_sh_r = wrc->get_translucency_r();
 			settings.nextgi_sh_g = wrc->get_translucency_g();
@@ -2350,9 +2351,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	bool render_gi = rb.is_valid() && p_use_gi;
 	// GodotNext: nextgi_frame_block
 	// NextGI writes these buffers except when VoxelGI supplies diffuse lighting in reflections-only mode.
-	// GodotNext: ps_lumen_lite (#183). Software Lite also owns the ambient buffer, without the ray-query frame block.
-	const bool nextgi_lite_ambient = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
-	render_gi = render_gi && (!(p_use_nextgi || nextgi_lite_ambient) || RendererRD::NextGI::is_reflections_only());
+	render_gi = render_gi && (!p_use_nextgi || RendererRD::NextGI::is_reflections_only());
 
 	if (render_shadows && render_gi) {
 		RENDER_TIMESTAMP("Render GI + Render Directional/SpotLight Shadows (Parallel)");
@@ -2398,10 +2397,6 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		next_gi.set_active_debug_view(RendererRD::NextGI::debug_view_from_viewport(get_debug_draw_mode()));
 		_render_nextgi_translucency_mark(p_render_data);
 		next_gi.render_frame(p_render_data, p_normal_roughness_slices, gi.is_half_resolution());
-	}
-	// GodotNext: ps_swrt_trace (#186). The software tier traces after the depth prepass, from this frame's depth.
-	if (!p_use_nextgi && rb.is_valid() && p_render_data->environment.is_valid() && RendererRD::NextGI::view_traces_swrt(next_gi.get_tier_result().tier, p_render_data->reflection_probe.is_valid(), environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED, p_render_data->scene_data->view_count)) {
-		next_gi.render_swrt_view(p_render_data, rb->has_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) ? rb->get_texture(SNAME("forward_clustered"), SNAME("normal_roughness")) : RID());
 	}
 
 	if (rb_data.is_valid() && ss_effects) {
@@ -2608,11 +2603,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// GodotNext: nextgi_forward — a NextGI view does not run SDFGI. VoxelGI
 	// supplies diffuse lighting only in reflections-only mode.
-	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
-	const bool nextgi_lite_field = p_render_data->environment.is_valid() && RendererRD::NextGI::view_samples_lite_field(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED);
+	// GodotNext: ps_swrt_trace (#186). The software tier enters the same frame block (one view at a time).
+	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED, p_render_data->scene_data->view_count);
 	const bool nextgi_voxel_gi = nextgi_view && RendererRD::NextGI::is_reflections_only();
-	// GodotNext: ps_swrt_trace (#186). Reflection rays read the prepass roughness; the screen trace the last frame.
-	const bool nextgi_swrt_view = !nextgi_lite_field && p_render_data->environment.is_valid() && RendererRD::NextGI::view_traces_swrt(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED, p_render_data->scene_data->view_count);
 
 	// sdfgi first
 	if (!nextgi_view) {
@@ -2821,12 +2814,6 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					WARN_PRINT_ONCE("Screen-space indirect lighting is disabled for views that use NextGI.");
 				}
 				using_ssil = false;
-			} else if (nextgi_lite_field) {
-				using_sdfgi = false;
-				if (using_ssil) {
-					WARN_PRINT_ONCE("Screen-space indirect lighting is disabled for views that use NextGI.");
-				}
-				using_ssil = false;
 			}
 		}
 
@@ -2907,7 +2894,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	// GodotNext: nextgi_frame_block
 	// NextGI instances get INSTANCE_DATA_FLAG_USE_GI_BUFFERS, so the opaque pass reads RB_TEX_AMBIENT.
-	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi || nextgi_lite_field, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
+	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi || using_nextgi, using_motion_pass, false, using_nextgi && velocity_plan.prepass_writes, using_nextgi);
 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
 	render_list[RENDER_LIST_MOTION].sort_by_key();
 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
@@ -2927,8 +2914,6 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					using_sdfgi ||
 					// GodotNext: nextgi_frame_block
 					using_nextgi ||
-					// GodotNext: ps_swrt_trace (#186)
-					nextgi_swrt_view ||
 					// GodotNext: nextgeo_visibility_raster (#83)
 					using_nextgeo ||
 					environment_get_ssao_enabled(p_render_data->environment) ||
@@ -3699,9 +3684,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	}
 
 	RD::get_singleton()->draw_command_begin_label("Copy Framebuffer for SSIL/SSR");
-	// GodotNext: ps_swrt_trace (#186). nextgi_swrt_view keeps the last frame for the software screen
-	// trace, once NextGI::render_swrt_view() allocated it (it does not on Lite or without a tracer).
-	if (using_ssil || using_ssr || using_nextgi || (nextgi_swrt_view && rb.is_valid() && rb->has_texture(RB_SCOPE_SSLF, RB_LAST_FRAME))) {
+	if (using_ssil || using_ssr || using_nextgi) {
 		RENDER_TIMESTAMP("Copy Final Framebuffer (SSIL/SSR)");
 		_copy_framebuffer_to_ss_effects(rb, using_ssil, using_ssr);
 	}

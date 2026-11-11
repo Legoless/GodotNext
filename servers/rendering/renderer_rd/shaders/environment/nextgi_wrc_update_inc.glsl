@@ -99,6 +99,12 @@ layout(set = 0, binding = 21, std430) buffer NextGIWRCCounters {
 	uint translucent_hits;
 	uint translucent_sky_misses;
 	uint translucent_sky_energy;
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186). Probe-ray SDF hits, and the step-limit and near-origin ones.
+	uint sdf_hits;
+	uint sdf_exhausted;
+	uint sdf_near;
+#endif
 }
 counters;
 
@@ -119,6 +125,22 @@ layout(set = 0, binding = 34) uniform sampler translucency_sampler;
 shared uint wrc_backfaces;
 shared uint wrc_probe;
 shared vec3 wrc_escape_samples[64];
+
+#if defined(NEXTGI_TRACE_SDF) && !defined(MODE_TRANSLUCENCY_TRACE)
+// GodotNext: ps_swrt_trace (#186). The software tier's probe-ray counters (nextgi_sdf_hit_inc.glsl).
+void nextgi_sdf_note_wrc() {
+	if ((nextgi_sdf_last.flags & SWRT_HIT_SURFACE) == 0u) {
+		return;
+	}
+	atomicAdd(counters.sdf_hits, 1u);
+	if ((nextgi_sdf_last.flags & SWRT_HIT_EXHAUSTED) != 0u) {
+		atomicAdd(counters.sdf_exhausted, 1u);
+	}
+	if (nextgi_sdf_last_near()) {
+		atomicAdd(counters.sdf_near, 1u);
+	}
+}
+#endif
 
 #ifndef NEXTGI_TRACE_SDF
 uint nextgi_wrc_chunk_uint(uint chunk, uint byte_offset) {
@@ -372,7 +394,13 @@ void nextgi_wrc_trace() {
 #endif
 	vec3 sample_radiance = nextgi_wrc_miss_radiance(direction);
 	bool back_face = false;
+#if defined(NEXTGI_TRACE_SDF) && !defined(MODE_TRANSLUCENCY_TRACE)
+	bool probe_hit = nextgi_trace(probe_pos, direction, 1.0e6, hit);
+	nextgi_sdf_note_wrc();
+	if (probe_hit) {
+#else
 	if (nextgi_trace(probe_pos, direction, 1.0e6, hit)) {
+#endif
 #ifdef MODE_TRANSLUCENCY_TRACE
 		atomicAdd(counters.translucent_hits, 1u);
 #else

@@ -32,18 +32,23 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/projection.h"
+#include "core/object/callable_mp.h"
+#include "core/os/mutex.h"
+#include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/nextgi_blue_noise.h"
 #include "servers/rendering/renderer_rd/environment/sky.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
@@ -126,7 +131,13 @@ struct ReflectCountersGPU {
 	uint32_t hits = 0;
 	uint32_t misses = 0;
 	uint32_t pad = 0;
+	// GodotNext: ps_swrt_trace (#186). Written only by the software sibling (NEXTGI_TRACE_SDF).
+	uint32_t sdf_hits = 0;
+	uint32_t sdf_exhausted = 0;
+	uint32_t sdf_near = 0;
+	uint32_t sdf_pad = 0;
 };
+static_assert(sizeof(ReflectCountersGPU) == 32, "Reflect counters must match NextGIReflectCounters.");
 
 struct GatherCountersGPU {
 	uint32_t rays = 0;
@@ -139,13 +150,59 @@ struct GatherCountersGPU {
 	uint32_t wrc_samples = 0;
 	uint32_t sky_samples = 0;
 	uint32_t screen_hits = 0;
+	// GodotNext: ps_swrt_trace (#186). Written only by the software sibling (NEXTGI_TRACE_SDF):
+	// SDF hits, the step-limit and near-origin ones among them, detail (mesh-SDF) hits, detail
+	// hits the D6 lookup resolved, and the summed hit distance in cm (each hit at most 100 m).
+	uint32_t sdf_hits = 0;
+	uint32_t sdf_exhausted = 0;
+	uint32_t sdf_near = 0;
+	uint32_t sdf_detail_hits = 0;
+	uint32_t sdf_d6_resolved = 0;
+	uint32_t sdf_hit_cm_sum = 0;
 };
+static_assert(sizeof(GatherCountersGPU) == 64, "Gather counters must match NextGIGatherCounters.");
+
+// GodotNext: nextgi_async_counters (#186). The one readback buffer the three counter buffers are
+// copied into, so every published field comes from the same frame.
+struct GatherReadbackGPU {
+	GatherCountersGPU gather;
+	uint32_t clamp_removed = 0;
+	uint32_t clamp_total = 0;
+	uint32_t pad[2] = {};
+	ReflectCountersGPU reflect;
+};
+static_assert(offsetof(GatherReadbackGPU, clamp_removed) == 64, "The clamp totals follow the gather counters.");
+static_assert(offsetof(GatherReadbackGPU, reflect) == 80, "The reflect counters follow the clamp totals.");
+
+static Mutex nextgi_gather_counter_mutex;
+static HashMap<uint64_t, NextGIGather *> nextgi_gather_counter_registry;
+static uint64_t nextgi_gather_counter_next_token = 1;
 
 struct NextGIGather::ShaderState {
 	NextgiGatherShaderRD shader;
 	RID version;
 	RID pipelines[7];
 };
+
+// GodotNext: ps_swrt_trace (#186). Same variants and pipeline indices as the hardware gather;
+// the hit-radiance reference (4) and the far field (6) are hardware-only and stay disabled.
+struct NextGIGather::SWRTShaderState {
+	NextgiGatherSwrtShaderRD shader;
+	RID version;
+	RID pipelines[7];
+};
+
+static Vector<String> _nextgi_gather_variant_defines() {
+	Vector<String> defines;
+	defines.push_back("");
+	defines.push_back("#define MODE_INTEGRATE\n");
+	defines.push_back("#define MODE_SRC_FEEDBACK\n");
+	defines.push_back("#define MODE_COVERAGE\n");
+	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
+	defines.push_back("#define MODE_REFLECT\n");
+	defines.push_back("#define MODE_FAR_FIELD\n");
+	return defines;
+}
 
 static void _store_projection(const Projection &p_projection, float r_matrix[16]) {
 	for (int column = 0; column < 4; column++) {
@@ -171,6 +228,14 @@ NextGIGather::NextGIGather() {
 }
 
 NextGIGather::~NextGIGather() {
+	{
+		MutexLock lock(nextgi_gather_counter_mutex);
+		if (counter_token != 0) {
+			nextgi_gather_counter_registry.erase(counter_token);
+			counter_token = 0;
+		}
+		counters_pending = false;
+	}
 	free_resources();
 	if (singleton == this) {
 		singleton = nullptr;
@@ -190,6 +255,11 @@ void NextGIGather::_free_uniform_set() {
 			rd->free_rid(reflect_far_uniform_set);
 		}
 	}
+	// GodotNext: ps_swrt_trace (#186)
+	if (rd != nullptr && swrt_trace_set.is_valid() && rd->uniform_set_is_valid(swrt_trace_set)) {
+		rd->free_rid(swrt_trace_set);
+	}
+	swrt_trace_set = RID();
 	uniform_set = RID();
 	reflect_uniform_set = RID();
 	reflect_far_uniform_set = RID();
@@ -216,8 +286,36 @@ void NextGIGather::free_resources() {
 		memdelete(shader);
 		shader = nullptr;
 	}
+	// GodotNext: ps_swrt_trace (#186)
+	if (swrt_shader != nullptr) {
+		if (rd != nullptr) {
+			for (int i = 0; i < 7; i++) {
+				if (swrt_shader->pipelines[i].is_valid()) {
+					rd->free_rid(swrt_shader->pipelines[i]);
+				}
+			}
+		}
+		if (swrt_shader->version.is_valid()) {
+			swrt_shader->shader.version_free(swrt_shader->version);
+		}
+		memdelete(swrt_shader);
+		swrt_shader = nullptr;
+	}
 	if (rd == nullptr) {
 		return;
+	}
+	{
+		// A callback for a freed readback buffer must not publish into this object.
+		MutexLock lock(nextgi_gather_counter_mutex);
+		if (counter_token != 0) {
+			nextgi_gather_counter_registry.erase(counter_token);
+			counter_token = 0;
+		}
+		counters_pending = false;
+	}
+	if (readback_buffer.is_valid()) {
+		rd->free_rid(readback_buffer);
+		readback_buffer = RID();
 	}
 	RID resources[29] = { blue_noise_texture, specular_debug_variance, specular_debug_rejected, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
@@ -260,22 +358,18 @@ void NextGIGather::free_resources() {
 }
 
 bool NextGIGather::_ensure_shader() {
+	NextGI *next_gi = NextGI::get_singleton();
+	ERR_FAIL_NULL_V(next_gi, false);
+	// GodotNext: ps_swrt_trace (#186). The software tier never constructs the ray-query ShaderRD.
+	if (next_gi->get_tier_result().tier == NextGI::TIER_SOFTWARE) {
+		return _ensure_swrt_shader();
+	}
 	if (shader != nullptr && shader->version.is_valid()) {
 		return true;
 	}
-	NextGI *next_gi = NextGI::get_singleton();
-	ERR_FAIL_NULL_V(next_gi, false);
 	ERR_FAIL_COND_V(!next_gi->can_initialize_ray_query_shaders(), false);
 	shader = memnew(ShaderState);
-	Vector<String> defines;
-	defines.push_back("");
-	defines.push_back("#define MODE_INTEGRATE\n");
-	defines.push_back("#define MODE_SRC_FEEDBACK\n");
-	defines.push_back("#define MODE_COVERAGE\n");
-	defines.push_back("#define MODE_HIT_RADIANCE_REFERENCE\n");
-	defines.push_back("#define MODE_REFLECT\n");
-	defines.push_back("#define MODE_FAR_FIELD\n");
-	shader->shader.initialize(defines);
+	shader->shader.initialize(_nextgi_gather_variant_defines());
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
 	shader->version = shader->shader.version_create(true);
@@ -297,6 +391,56 @@ bool NextGIGather::_ensure_shader() {
 	}
 	next_gi->notify_ray_query_shader_initialized();
 	return true;
+}
+
+// GodotNext: ps_swrt_trace (#186)
+bool NextGIGather::_ensure_swrt_shader() {
+	if (swrt_shader != nullptr && swrt_shader->version.is_valid()) {
+		return true;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	swrt_shader = memnew(SWRTShaderState);
+	swrt_shader->shader.initialize(_nextgi_gather_variant_defines());
+	swrt_shader->shader.set_variant_enabled(4, false);
+	swrt_shader->shader.set_variant_enabled(6, false);
+	swrt_shader->version = swrt_shader->shader.version_create(false);
+	if (!swrt_shader->version.is_valid()) {
+		memdelete(swrt_shader);
+		swrt_shader = nullptr;
+		ERR_FAIL_V_MSG(false, "The NextGI software gather shader failed to compile.");
+	}
+	for (int i = 0; i < 7; i++) {
+		if (!swrt_shader->shader.is_variant_enabled(i)) {
+			continue;
+		}
+		swrt_shader->pipelines[i] = rd->compute_pipeline_create(swrt_shader->shader.version_get_shader(swrt_shader->version, i));
+		if (!swrt_shader->pipelines[i].is_valid()) {
+			for (int j = 0; j < i; j++) {
+				if (swrt_shader->pipelines[j].is_valid()) {
+					rd->free_rid(swrt_shader->pipelines[j]);
+				}
+			}
+			swrt_shader->shader.version_free(swrt_shader->version);
+			memdelete(swrt_shader);
+			swrt_shader = nullptr;
+			ERR_FAIL_V_MSG(false, "The NextGI software gather pipeline failed to compile.");
+		}
+	}
+	return true;
+}
+
+RID NextGIGather::_pipeline(int p_variant) const {
+	if (bound_swrt) {
+		return swrt_shader != nullptr ? swrt_shader->pipelines[p_variant] : RID();
+	}
+	return shader != nullptr ? shader->pipelines[p_variant] : RID();
+}
+
+void NextGIGather::_bind_trace_set(int64_t p_list) const {
+	if (bound_swrt && swrt_trace_set.is_valid()) {
+		RenderingDevice::get_singleton()->compute_list_bind_uniform_set(p_list, swrt_trace_set, 1);
+	}
 }
 
 bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
@@ -492,7 +636,18 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	ERR_FAIL_NULL_V(rd, false);
 	ERR_FAIL_NULL_V(p_render_data, false);
 	ERR_FAIL_NULL_V(next_gi, false);
-	ERR_FAIL_NULL_V(next_gi->get_rt_scene(), false);
+	// GodotNext: ps_swrt_trace (#186). The software tier traces the global SDF through the
+	// sibling ShaderRD: no TLAS, no arena records, no far field and no hit-radiance reference.
+	const bool swrt = next_gi->get_tier_result().tier == NextGI::TIER_SOFTWARE;
+	NextGISWRTTrace *swrt_tracer = swrt ? next_gi->get_swrt_trace() : nullptr;
+	if (swrt) {
+		if (swrt_tracer == nullptr || !swrt_tracer->is_ready()) {
+			return false;
+		}
+	} else {
+		ERR_FAIL_NULL_V(next_gi->get_rt_scene(), false);
+	}
+	bound_swrt = swrt;
 	ERR_FAIL_NULL_V(relight, false);
 	ERR_FAIL_NULL_V(src, false);
 	ERR_FAIL_NULL_V(scene, false);
@@ -504,10 +659,10 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!_ensure_shader() || !_ensure_targets(screen.x, screen.y)) {
 		return false;
 	}
-	const RID tlas = next_gi->get_rt_scene()->get_tlas();
+	const RID tlas = swrt ? RID() : next_gi->get_rt_scene()->get_tlas();
 	const RID depth = front_layer ? front_depth : rb->get_depth_texture();
 	// A frame that did not rebuild the TLAS still holds the previous build, which a freed mesh invalidates.
-	if (!tlas.is_valid() || !next_gi->get_rt_scene()->is_tlas_traceable() || !depth.is_valid() || !rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
+	if ((!swrt && (!tlas.is_valid() || !next_gi->get_rt_scene()->is_tlas_traceable())) || !depth.is_valid() || !rb->has_texture(RB_SCOPE_GI, RB_TEX_AMBIENT)) {
 		return false;
 	}
 
@@ -572,7 +727,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	params.sky_enabled = sky_enabled;
 	params.feedback_count = p_feedback_count;
 	params.feedback_stride = MAX(p_feedback_stride, 1u);
-	params.record_count = next_gi->get_rt_scene()->get_total_record_count();
+	params.record_count = swrt ? 0u : next_gi->get_rt_scene()->get_total_record_count();
 	params.far_distance = MAX(float(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_distance")), params.rt_radius);
 	params.far_occlusion_only = bool(GLOBAL_GET("rendering/global_illumination/nextgi/far_field_occlusion_only")) ? 1u : 0u;
 	params.page_rect_count = relight->get_page_rect_count();
@@ -654,11 +809,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	if (!page_rects.is_valid()) {
 		page_rects = dummy_buffer;
 	}
-	RID surfaces = next_gi->get_rt_scene()->get_surface_record_buffer();
+	RID surfaces = swrt ? RID() : next_gi->get_rt_scene()->get_surface_record_buffer();
 	if (!surfaces.is_valid()) {
 		surfaces = dummy_buffer;
 	}
-	RID records = next_gi->get_rt_scene()->get_instance_record_buffer();
+	RID records = swrt ? RID() : next_gi->get_rt_scene()->get_instance_record_buffer();
 	if (!records.is_valid()) {
 		records = dummy_buffer;
 	}
@@ -689,7 +844,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	RID ref_materials = dummy_buffer;
 	RID ref_lights = dummy_buffer;
 	RID ref_params = dummy_buffer;
-	if (int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/gather_hit_radiance")) == 1 && next_gi->get_reference() != nullptr) {
+	if (!swrt && int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/gather_hit_radiance")) == 1 && next_gi->get_reference() != nullptr) {
 		RID materials;
 		RID lights;
 		RID estimator;
@@ -767,7 +922,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
 	}
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
-	const NextGIFarField *far_field = next_gi->get_rt_scene()->get_far_field();
+	const NextGIFarField *far_field = swrt ? nullptr : next_gi->get_rt_scene()->get_far_field();
 	const RID far_tlas = far_field != nullptr && far_field->is_trace_ready() ? far_field->get_tlas() : tlas;
 	RD::Uniform uniforms[40] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
@@ -810,6 +965,20 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 38, Vector<RID>({ sampler_nearest, blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color })),
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 39, far_tlas),
 	};
+	if (swrt) {
+		// GodotNext: ps_swrt_trace (#186). The sibling declares neither the TLAS, the arena nor the
+		// reference bindings, so uniform_set_create() skips them. Set 1 is the SDF trace with this
+		// view's params; detail mode builds the froxel object grid first.
+		NextGIVoxelLighting *voxel_lighting = next_gi->get_voxel_lighting();
+		const RID swrt_rid = swrt_shader->shader.version_get_shader(swrt_shader->version, 0);
+		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), swrt_rid, 0);
+		reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), swrt_shader->shader.version_get_shader(swrt_shader->version, 5), 0);
+		swrt_tracer->prepare_view_params(p_render_data, voxel_lighting);
+		swrt_tracer->build_detail_froxels(p_render_data, voxel_lighting);
+		swrt_trace_set = swrt_tracer->create_trace_uniform_set(swrt_rid, 1, true, voxel_lighting);
+		bound_tier = "SWRT";
+		return uniform_set.is_valid() && swrt_trace_set.is_valid();
+	}
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
 	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
@@ -817,63 +986,96 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), reflect_shader_rid, 0);
 	const RID reflect_far_shader_rid = shader->shader.version_get_shader(shader->version, 6);
 	reflect_far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 40), reflect_far_shader_rid, 0);
+	bound_tier = "HWRT";
 	return uniform_set.is_valid();
 }
 
-void NextGIGather::_read_counters() {
+// GodotNext: nextgi_async_counters (#186). The counters reach fill_info() one or more frames late.
+void NextGIGather::_request_counters() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (rd == nullptr || !counter_buffer.is_valid()) {
+	if (rd == nullptr || !counter_buffer.is_valid() || !clamp_totals_buffer.is_valid() || !reflect_counter_buffer.is_valid()) {
 		return;
 	}
-	if (clamp_totals_buffer.is_valid()) {
-		const Vector<uint8_t> clamp_data = rd->buffer_get_data(clamp_totals_buffer);
-		if (clamp_data.size() >= 8) {
-			uint32_t values[2] = { 0u, 0u };
-			memcpy(values, clamp_data.ptr(), sizeof(values));
-			last_clamp_removed = values[0];
-			last_clamp_total = values[1];
+	uint64_t token = 0;
+	{
+		MutexLock lock(nextgi_gather_counter_mutex);
+		if (counters_pending) {
+			return;
 		}
+		counters_pending = true;
+		token = nextgi_gather_counter_next_token++;
+		counter_token = token;
+		nextgi_gather_counter_registry.insert(token, this);
 	}
-	if (reflect_counter_buffer.is_valid()) {
-		const Vector<uint8_t> reflect_data = rd->buffer_get_data(reflect_counter_buffer);
-		if (reflect_data.size() >= int(sizeof(ReflectCountersGPU))) {
-			ReflectCountersGPU reflect_got;
-			memcpy(&reflect_got, reflect_data.ptr(), sizeof(ReflectCountersGPU));
-			last_reflection_traced = reflect_got.traced;
-			last_reflection_hits = reflect_got.hits;
-			last_reflection_misses = reflect_got.misses;
-		}
+	if (!readback_buffer.is_valid()) {
+		readback_buffer = rd->storage_buffer_create(sizeof(GatherReadbackGPU));
 	}
-	const Vector<uint8_t> data = rd->buffer_get_data(counter_buffer);
-	if (data.size() < int(sizeof(GatherCountersGPU))) {
+	Error err = readback_buffer.is_valid() ? OK : FAILED;
+	if (err == OK) {
+		rd->buffer_copy(counter_buffer, readback_buffer, 0, offsetof(GatherReadbackGPU, gather), sizeof(GatherCountersGPU));
+		rd->buffer_copy(clamp_totals_buffer, readback_buffer, 0, offsetof(GatherReadbackGPU, clamp_removed), sizeof(uint32_t) * 2);
+		rd->buffer_copy(reflect_counter_buffer, readback_buffer, 0, offsetof(GatherReadbackGPU, reflect), sizeof(ReflectCountersGPU));
+		err = rd->buffer_get_data_async(readback_buffer, callable_mp_static(&NextGIGather::_counters_received).bind(token), 0, sizeof(GatherReadbackGPU));
+	}
+	if (err != OK) {
+		MutexLock lock(nextgi_gather_counter_mutex);
+		nextgi_gather_counter_registry.erase(token);
+		counter_token = 0;
+		counters_pending = false;
+	}
+}
+
+void NextGIGather::_counters_received(const Vector<uint8_t> &p_data, uint64_t p_token) {
+	MutexLock lock(nextgi_gather_counter_mutex);
+	NextGIGather **owner = nextgi_gather_counter_registry.getptr(p_token);
+	if (owner == nullptr) {
 		return;
 	}
-	GatherCountersGPU got;
-	memcpy(&got, data.ptr(), sizeof(got));
-	last_rays = got.rays;
-	last_misses = got.misses;
-	last_resets = got.history_resets;
-	last_uncovered = got.uncovered;
-	last_coverage_hits = got.coverage_hits;
-	last_coverage_rays = got.coverage_rays;
-	last_miss_luminance = float(got.miss_radiance_bits) / 64.0f;
-	last_wrc_samples = got.wrc_samples;
-	last_sky_samples = got.sky_samples;
-	last_screen_hits = got.screen_hits;
-	nextgi_coverage_hits = got.coverage_hits;
-	nextgi_coverage_rays = got.coverage_rays;
+	NextGIGather *self = *owner;
+	nextgi_gather_counter_registry.erase(p_token);
+	self->counter_token = 0;
+	self->counters_pending = false;
+	if (p_data.size() < int(sizeof(GatherReadbackGPU))) {
+		return;
+	}
+	GatherReadbackGPU got;
+	memcpy(&got, p_data.ptr(), sizeof(got));
+	self->last_clamp_removed = got.clamp_removed;
+	self->last_clamp_total = got.clamp_total;
+	self->last_reflection_traced = got.reflect.traced;
+	self->last_reflection_hits = got.reflect.hits;
+	self->last_reflection_misses = got.reflect.misses;
+	self->last_reflect_sdf_hits = got.reflect.sdf_hits;
+	self->last_reflect_sdf_exhausted = got.reflect.sdf_exhausted;
+	self->last_reflect_sdf_near = got.reflect.sdf_near;
+	self->last_rays = got.gather.rays;
+	self->last_misses = got.gather.misses;
+	self->last_resets = got.gather.history_resets;
+	self->last_uncovered = got.gather.uncovered;
+	self->last_coverage_hits = got.gather.coverage_hits;
+	self->last_coverage_rays = got.gather.coverage_rays;
+	self->last_miss_luminance = float(got.gather.miss_radiance_bits) / 64.0f;
+	self->last_wrc_samples = got.gather.wrc_samples;
+	self->last_sky_samples = got.gather.sky_samples;
+	self->last_screen_hits = got.gather.screen_hits;
+	self->last_sdf_hits = got.gather.sdf_hits;
+	self->last_sdf_exhausted = got.gather.sdf_exhausted;
+	self->last_sdf_near = got.gather.sdf_near;
+	self->last_sdf_detail_hits = got.gather.sdf_detail_hits;
+	self->last_sdf_d6_resolved = got.gather.sdf_d6_resolved;
+	self->last_sdf_hit_cm_sum = got.gather.sdf_hit_cm_sum;
+	nextgi_coverage_hits = got.gather.coverage_hits;
+	nextgi_coverage_rays = got.gather.coverage_rays;
 }
 
 void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
-	last_rays = 0;
+	// GodotNext: nextgi_async_counters (#186). The last_* counters are published by the
+	// asynchronous readback, one snapshot per frame, so they are not cleared here.
 	if (NextGI *next_gi = NextGI::get_singleton()) {
 		const NextGI::QualityParams &quality = NextGI::get_quality_params(next_gi->get_quality_setting());
 		ray_stride = quality.diffuse_rays_per_probe >= 64 ? 8u : 4u;
 		ray_count = quality.diffuse_rays_per_probe;
 	}
-	last_misses = 0;
-	last_resets = 0;
-	last_uncovered = 0;
 	NextGIRelight *relight = NextGIRelight::get_singleton();
 	LocalVector<uint32_t> feedback;
 	if (p_diffuse && relight != nullptr) {
@@ -909,8 +1111,9 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	const uint32_t groups_y = MAX((nextgi_gather_probe_count_axis(last_screen_h) + 7u) / 8u, 1u);
 	if (p_diffuse) {
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[hit_radiance_reference ? 4 : 0]);
+		rd->compute_list_bind_compute_pipeline(list, _pipeline(hit_radiance_reference ? 4 : 0));
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 		rd->compute_list_end();
 		diffuse_dispatches++;
@@ -920,8 +1123,9 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	if (p_diffuse && feedback_count > 0) {
 		const uint32_t feedback_groups_y = MAX((feedback_count + 63u) / 64u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[2]);
+		rd->compute_list_bind_compute_pipeline(list, _pipeline(2));
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, 1, feedback_groups_y, 1);
 		rd->compute_list_end();
 	}
@@ -929,8 +1133,9 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		const uint32_t half_x = MAX((last_screen_w / 2u + 7u) / 8u, 1u);
 		const uint32_t half_y = MAX((last_screen_h / 2u + 7u) / 8u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[3]);
+		rd->compute_list_bind_compute_pipeline(list, _pipeline(3));
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, half_x, half_y, 1);
 		rd->compute_list_end();
 	}
@@ -947,14 +1152,17 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 		const uint32_t width = MAX((last_screen_w + 1u) / 2u, 1u);
 		const uint32_t height = MAX((last_screen_h + 1u) / 2u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[5]);
+		rd->compute_list_bind_compute_pipeline(list, _pipeline(5));
 		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
+		_bind_trace_set(list);
 		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
 		rd->compute_list_end();
 		// GodotNext: ps_lumen_lite (#183)
 		NextGI::get_singleton()->note_reflection_dispatch();
 	}
-	const NextGIFarField *far_field = NextGI::get_singleton()->get_rt_scene()->get_far_field();
+	// GodotNext: ps_swrt_trace (#186). The far field is the hardware tier's (plan L8).
+	NextGIRTScene *far_rt_scene = bound_swrt ? nullptr : NextGI::get_singleton()->get_rt_scene();
+	const NextGIFarField *far_field = far_rt_scene != nullptr ? far_rt_scene->get_far_field() : nullptr;
 	if (far_field != nullptr && far_field->is_trace_ready() && reflect_far_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
 		const uint32_t width = MAX((last_screen_w + 1u) / 2u, 1u);
 		const uint32_t height = MAX((last_screen_h + 1u) / 2u, 1u);
@@ -969,7 +1177,7 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	// GodotNext: nextgi_denoise_specular (#54). Temporal accumulation, then a three-pass a-trous
 	// spatial filter, then the joint-bilateral upsample into RB_TEX_REFLECTION.
 	_denoise_specular();
-	_read_counters();
+	_request_counters();
 	frame++;
 }
 
@@ -1197,7 +1405,11 @@ RID NextGIGather::get_specular_filter_debug_texture(int p_view) const {
 void NextGIGather::integrate(RenderDataRD *p_render_data) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	NextGI *next_gi = NextGI::get_singleton();
-	if (rd == nullptr || shader == nullptr || !uniform_set.is_valid() || next_gi == nullptr || next_gi->get_rt_scene() == nullptr || !next_gi->get_rt_scene()->is_tlas_traceable()) {
+	if (rd == nullptr || !uniform_set.is_valid() || next_gi == nullptr) {
+		return;
+	}
+	// GodotNext: ps_swrt_trace (#186). Readiness by the tier the gather was bound for.
+	if (bound_swrt ? (swrt_shader == nullptr || !swrt_trace_set.is_valid()) : (shader == nullptr || next_gi->get_rt_scene() == nullptr || !next_gi->get_rt_scene()->is_tlas_traceable())) {
 		return;
 	}
 	uint32_t width = last_screen_w;
@@ -1210,8 +1422,9 @@ void NextGIGather::integrate(RenderDataRD *p_render_data) {
 	const uint32_t groups_x = MAX((width + 7u) / 8u, 1u);
 	const uint32_t groups_y = MAX((height + 7u) / 8u, 1u);
 	const RD::ComputeListID list = rd->compute_list_begin();
-	rd->compute_list_bind_compute_pipeline(list, shader->pipelines[1]);
+	rd->compute_list_bind_compute_pipeline(list, _pipeline(1));
 	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
+	_bind_trace_set(list);
 	rd->compute_list_dispatch(list, groups_x, groups_y, 1);
 	rd->compute_list_end();
 	_stabilize_ambient(p_render_data->render_buffers);
@@ -1251,6 +1464,20 @@ NextGIGather::ViewMatrices NextGIGather::view_matrices(const RenderSceneDataRD &
 	return matrices;
 }
 
+// GodotNext: ps_swrt_trace (#186)
+String NextGIGather::build_swrt_shader_source(int p_variant) {
+	NextgiGatherSwrtShaderRD swrt;
+	swrt.initialize(_nextgi_gather_variant_defines());
+	const RID version = swrt.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = swrt.version_build_variant_stage_sources(version, p_variant);
+	swrt.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
 String NextGIGather::build_shader_source(int p_variant) {
 	NextgiGatherShaderRD shader;
 	Vector<String> defines;
@@ -1272,7 +1499,11 @@ String NextGIGather::build_shader_source(int p_variant) {
 }
 
 void NextGIGather::fill_info(Dictionary &r_info) const {
+	// GodotNext: nextgi_async_counters (#186). The readback callback writes the counters.
+	MutexLock lock(nextgi_gather_counter_mutex);
 	r_info["gather_mode"] = NextGI::is_reflections_only() ? "reflections_only" : "gi_and_reflections";
+	// GodotNext: ps_swrt_trace (#186). The tier of the shader the last gather bound.
+	r_info["gather_tier"] = bound_tier;
 	r_info["gather_diffuse_dispatches"] = int64_t(diffuse_dispatches);
 	r_info["src_gather_rays"] = int64_t(last_rays);
 	r_info["src_gather_misses"] = int64_t(last_misses);
@@ -1294,4 +1525,14 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["reflection_rays"] = int64_t(last_reflection_traced);
 	r_info["reflection_hits"] = int64_t(last_reflection_hits);
 	r_info["reflection_misses"] = int64_t(last_reflection_misses);
+	// GodotNext: ps_swrt_trace (#186). The software sibling's SDF counters; 0 on the hardware tier.
+	r_info["gather_sdf_hits"] = int64_t(last_sdf_hits);
+	r_info["gather_sdf_exhausted"] = int64_t(last_sdf_exhausted);
+	r_info["gather_sdf_near"] = int64_t(last_sdf_near);
+	r_info["gather_sdf_detail_hits"] = int64_t(last_sdf_detail_hits);
+	r_info["gather_sdf_d6_resolved"] = int64_t(last_sdf_d6_resolved);
+	r_info["gather_sdf_hit_cm_sum"] = int64_t(last_sdf_hit_cm_sum);
+	r_info["reflect_sdf_hits"] = int64_t(last_reflect_sdf_hits);
+	r_info["reflect_sdf_exhausted"] = int64_t(last_reflect_sdf_exhausted);
+	r_info["reflect_sdf_near"] = int64_t(last_reflect_sdf_near);
 }

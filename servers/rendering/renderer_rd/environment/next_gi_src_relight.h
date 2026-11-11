@@ -301,6 +301,28 @@ inline bool nextgi_src_local_light_dirties_page(const AABB &p_page, const AABB &
 	return p_page.intersects(p_swept.merge(shifted));
 }
 
+// GodotNext: nextgi_async_counters (#186). One scheduled card of a relight frame, kept until that
+// frame's traced-ray count arrives. page_key names the page set, because the set's index moves
+// when an earlier set is freed.
+struct NextGIRelightRayRequest {
+	uint64_t page_key = 0;
+	uint32_t card = 0;
+	uint32_t ray_estimate = 0;
+};
+
+// The fraction of the estimated rays the relight traced, clamped to [0, 1]; negative when the
+// schedule estimated no rays.
+inline float nextgi_relight_ray_fraction(const NextGIRelightRayRequest *p_schedule, uint32_t p_count, uint32_t p_traced) {
+	uint64_t estimated = 0;
+	for (uint32_t i = 0; i < p_count; i++) {
+		estimated += p_schedule[i].ray_estimate;
+	}
+	if (estimated == 0) {
+		return -1.0f;
+	}
+	return CLAMP(float(double(p_traced) / double(estimated)), 0.0f, 1.0f);
+}
+
 struct NextGISrcSchedulePage {
 	uint32_t texels = 0;
 	uint32_t ray_estimate = 0;

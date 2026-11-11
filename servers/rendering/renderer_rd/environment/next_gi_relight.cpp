@@ -32,6 +32,8 @@
 
 #include "core/config/project_settings.h"
 #include "core/math/projection.h"
+#include "core/object/callable_mp.h"
+#include "core/os/mutex.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
@@ -177,6 +179,11 @@ struct NextGIRelightCountersGPU {
 	uint32_t pad = 0;
 };
 
+// GodotNext: nextgi_async_counters (#186)
+static Mutex nextgi_relight_counter_mutex;
+static HashMap<uint64_t, NextGIRelight *> nextgi_relight_counter_registry;
+static uint64_t nextgi_relight_counter_next_token = 1;
+
 struct NextGIRelight::ShaderState {
 	NextgiSrcRelightShaderRD shader;
 	RID version;
@@ -255,6 +262,14 @@ NextGIRelight::NextGIRelight() {
 }
 
 NextGIRelight::~NextGIRelight() {
+	{
+		MutexLock lock(nextgi_relight_counter_mutex);
+		if (counter_token != 0) {
+			nextgi_relight_counter_registry.erase(counter_token);
+			counter_token = 0;
+		}
+		counters_pending = false;
+	}
 	free_resources();
 	if (singleton == this) {
 		singleton = nullptr;
@@ -278,6 +293,20 @@ void NextGIRelight::_reset_uniform_set() {
 void NextGIRelight::free_resources() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	_reset_uniform_set();
+	{
+		// GodotNext: nextgi_async_counters (#186). A late callback must not reach freed buffers.
+		MutexLock lock(nextgi_relight_counter_mutex);
+		if (counter_token != 0) {
+			nextgi_relight_counter_registry.erase(counter_token);
+			counter_token = 0;
+		}
+		counters_pending = false;
+		pending_schedule.clear();
+	}
+	if (rd != nullptr && readback_buffer.is_valid()) {
+		rd->free_rid(readback_buffer);
+	}
+	readback_buffer = RID();
 	if (shader != nullptr) {
 		if (rd != nullptr && shader->pipeline.is_valid()) {
 			rd->free_rid(shader->pipeline);
@@ -693,8 +722,8 @@ uint32_t NextGIRelight::assign_card_pages(RenderGeometryInstance *p_instance, Ne
 void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	ERR_FAIL_NULL(p_render_data);
 	last_texels = 0;
-	last_rays = 0;
-	last_rays_skipped = 0;
+	// GodotNext: nextgi_async_counters (#186). last_rays and last_rays_skipped come from the
+	// asynchronous readback of an earlier frame, so they are not cleared here.
 	last_unshadowed = 0;
 	last_light_count = 0;
 	last_directional = 0;
@@ -703,6 +732,11 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	scheduled_pages.clear();
 	probe_rgb.clear();
 	mask_pages.clear();
+	// GodotNext: ps_swrt_trace (#186). The relight's shadow rays are ray-query rays; the software
+	// tier's SDF shadow rays are #188's. Return before the ray-query ShaderRD is created.
+	if (NextGI::get_singleton() != nullptr && NextGI::get_singleton()->get_tier_result().tier == NextGI::TIER_SOFTWARE) {
+		return;
+	}
 	if (p_render_data->sdfgi_update_data == nullptr || !_ensure_atlases() || !_ensure_shader()) {
 		return;
 	}
@@ -1207,25 +1241,19 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, far_gpu_pages.size());
 		rd->compute_list_end();
 	}
-	const Vector<uint8_t> counters = rd->buffer_get_data(counter_buffer);
-	if (counters.size() >= int(sizeof(NextGIRelightCountersGPU))) {
-		NextGIRelightCountersGPU got;
-		memcpy(&got, counters.ptr(), sizeof(got));
-		last_rays = got.traced;
-		last_rays_skipped = got.skipped;
-		max_rays = MAX(max_rays, last_rays);
-		uint32_t estimated = 0;
-		for (uint32_t s = 0; s < scheduled_count && s < work.size(); s++) {
-			estimated += work[scheduled[s]].ray_estimate;
-		}
-		if (estimated > 0) {
-			const float fraction = CLAMP(float(last_rays) / float(estimated), 0.0f, 1.0f);
-			for (uint32_t s = 0; s < scheduled_count; s++) {
-				const FlatPage &flat_page = flat[scheduled[s]];
-				instances[flat_page.instance].cards[flat_page.card].ray_fraction = fraction;
-			}
-		}
+	// GodotNext: nextgi_async_counters (#186). The traced count arrives one or more frames later;
+	// its ray_fraction lands on this frame's scheduled cards, found again by page key.
+	LocalVector<NextGIRelightRayRequest> ray_schedule;
+	ray_schedule.reserve(scheduled_count);
+	for (uint32_t s = 0; s < scheduled_count && s < work.size(); s++) {
+		const FlatPage &flat_page = flat[scheduled[s]];
+		NextGIRelightRayRequest request;
+		request.page_key = instances[flat_page.instance].page_key;
+		request.card = flat_page.card;
+		request.ray_estimate = work[scheduled[s]].ray_estimate;
+		ray_schedule.push_back(request);
 	}
+	_request_counters(ray_schedule);
 	frame++;
 
 	const bool read_probes = bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/read_page_radiance"));
@@ -1289,6 +1317,91 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	_reset_uniform_set();
 }
 
+// GodotNext: nextgi_async_counters (#186)
+void NextGIRelight::_request_counters(LocalVector<NextGIRelightRayRequest> &r_schedule) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr || !counter_buffer.is_valid()) {
+		return;
+	}
+	uint64_t token = 0;
+	{
+		MutexLock lock(nextgi_relight_counter_mutex);
+		if (counters_pending) {
+			return;
+		}
+		counters_pending = true;
+		token = nextgi_relight_counter_next_token++;
+		counter_token = token;
+		nextgi_relight_counter_registry.insert(token, this);
+		pending_schedule = r_schedule;
+	}
+	if (!readback_buffer.is_valid()) {
+		readback_buffer = rd->storage_buffer_create(sizeof(NextGIRelightCountersGPU));
+	}
+	Error err = readback_buffer.is_valid() ? OK : FAILED;
+	if (err == OK) {
+		// A copy, so the next frame's zeroing cannot race the read.
+		rd->buffer_copy(counter_buffer, readback_buffer, 0, 0, sizeof(NextGIRelightCountersGPU));
+		err = rd->buffer_get_data_async(readback_buffer, callable_mp_static(&NextGIRelight::_counters_received).bind(token), 0, sizeof(NextGIRelightCountersGPU));
+	}
+	if (err != OK) {
+		MutexLock lock(nextgi_relight_counter_mutex);
+		nextgi_relight_counter_registry.erase(token);
+		counter_token = 0;
+		counters_pending = false;
+		pending_schedule.clear();
+	}
+}
+
+void NextGIRelight::_counters_received(const Vector<uint8_t> &p_data, uint64_t p_token) {
+	MutexLock lock(nextgi_relight_counter_mutex);
+	NextGIRelight **owner = nextgi_relight_counter_registry.getptr(p_token);
+	if (owner == nullptr) {
+		return;
+	}
+	NextGIRelight *self = *owner;
+	nextgi_relight_counter_registry.erase(p_token);
+	self->counter_token = 0;
+	self->counters_pending = false;
+	LocalVector<NextGIRelightRayRequest> schedule;
+	SWAP(schedule, self->pending_schedule);
+	if (p_data.size() < int(sizeof(NextGIRelightCountersGPU))) {
+		return;
+	}
+	NextGIRelightCountersGPU got;
+	memcpy(&got, p_data.ptr(), sizeof(got));
+	self->last_rays = got.traced;
+	self->last_rays_skipped = got.skipped;
+	self->max_rays = MAX(self->max_rays, self->last_rays);
+	self->apply_ray_fraction(schedule, got.traced);
+}
+
+uint64_t NextGIRelight::get_page_key(RenderGeometryInstance *p_instance, uint32_t p_element) {
+	return _nextgi_page_key(p_instance, p_element);
+}
+
+void NextGIRelight::apply_ray_fraction(const LocalVector<NextGIRelightRayRequest> &p_schedule, uint32_t p_traced) {
+	const float fraction = nextgi_relight_ray_fraction(p_schedule.ptr(), p_schedule.size(), p_traced);
+	if (fraction < 0.0f) {
+		return;
+	}
+	for (const NextGIRelightRayRequest &request : p_schedule) {
+		const uint32_t *index = instance_index.getptr(request.page_key);
+		if (index == nullptr || *index >= instances.size() || request.card >= instances[*index].cards.size()) {
+			continue; // The page set left (freed or evicted) since the schedule.
+		}
+		instances[*index].cards[request.card].ray_fraction = fraction;
+	}
+}
+
+float NextGIRelight::get_card_ray_fraction(RenderGeometryInstance *p_instance, uint32_t p_element, uint32_t p_card) const {
+	const uint32_t *index = instance_index.getptr(_nextgi_page_key(p_instance, p_element));
+	if (index == nullptr || *index >= instances.size() || p_card >= instances[*index].cards.size()) {
+		return -1.0f;
+	}
+	return instances[*index].cards[p_card].ray_fraction;
+}
+
 void NextGIRelight::build_page_rect_words(LocalVector<uint32_t> &r_words) const {
 	r_words.resize(page_table_count * 2);
 	for (uint32_t i = 0; i < r_words.size(); i++) {
@@ -1334,6 +1447,8 @@ float NextGIRelight::get_max_origin_offset() const {
 }
 
 void NextGIRelight::fill_info(Dictionary &r_info) const {
+	// GodotNext: nextgi_async_counters (#186). The readback callback writes the ray counters.
+	MutexLock lock(nextgi_relight_counter_mutex);
 	r_info["src_resident_pages"] = int64_t(page_table_count);
 	r_info["src_page_evictions"] = int64_t(page_evictions);
 	r_info["src_radiance_bytes"] = int64_t(radiance_bytes);

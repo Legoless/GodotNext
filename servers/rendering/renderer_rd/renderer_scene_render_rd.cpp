@@ -1570,6 +1570,10 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 		clear_color = RSG::texture_storage->get_default_clear_color();
 	}
 
+	// GodotNext: nextgi_frame_tier (#186)
+	// The tier is fixed for the frame before its first NextGI consumer (the voxel hook below).
+	next_gi.begin_frame(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
+
 	// GodotNext: ps_voxel_lighting (#188)
 	// Line 2b owns this on the HWRT tier. Off that tier the same update still
 	// has to run, or hardware_ray_tracing=off never shades a volume.

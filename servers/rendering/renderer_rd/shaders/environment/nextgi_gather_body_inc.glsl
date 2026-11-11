@@ -9,6 +9,8 @@
 
 // D6 helpers. They stay in this shader: the RD header builder pastes an include once, and these
 // functions need the buffers declared above. nextgi_trace stays in nextgi_rt_inc.glsl.
+// GodotNext: ps_swrt_trace (#186). The arena and the D6 triangle lookup are the hardware tier's.
+#ifndef NEXTGI_TRACE_SDF
 uint nextgi_chunk_uint(uint chunk, uint byte_offset) {
 	uint word = byte_offset >> 2u;
 	if (chunk == 0u) {
@@ -218,6 +220,7 @@ bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 	}
 	return false;
 }
+#endif // !NEXTGI_TRACE_SDF
 
 const float PI = 3.14159265;
 
@@ -264,6 +267,38 @@ vec3 nextgi_miss_radiance(vec3 direction) {
 	return params.ambient_color.rgb;
 }
 
+#ifdef NEXTGI_TRACE_SDF
+// GodotNext: ps_swrt_trace (#186). The software tier's hit shading: the hit sits on the global
+// SDF (nextgi_sdf_hit_inc.glsl keeps the trace's origin and normal). Voxel lighting first, then
+// the WRC at the hit, then the miss radiance: the hardware tier's D6-miss chain.
+vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, out float confidence) {
+	confidence = 0.0;
+	vec3 world = nextgi_sdf_origin + ray_dir * hit.t;
+	vec3 normal = nextgi_sdf_last.normal;
+	vec3 cached = nextgi_wrc_sample(world, -ray_dir);
+	bool wrc_hit = nextgi_wrc_hit_cache;
+	float wrc_confidence = nextgi_wrc_confidence;
+	if (SWRT_P.flags.x > 0.5) {
+		NextGIVoxelClipmap clipmap;
+		clipmap.origin_size[0] = SWRT_P.clipmap[0];
+		clipmap.origin_size[1] = SWRT_P.clipmap[1];
+		clipmap.origin_size[2] = SWRT_P.clipmap[2];
+		clipmap.origin_size[3] = SWRT_P.clipmap[3];
+		float weight;
+		vec3 voxel = nextgi_voxel_lighting_lookup(world, normal, cached, clipmap, weight);
+		if (weight >= NEXTGI_VOXEL_WEIGHT_FALLBACK) {
+			confidence = 1.0;
+			return max(voxel, vec3(0.0));
+		}
+	}
+	if (wrc_hit) {
+		confidence = wrc_confidence;
+		uncovered_count++;
+		return cached;
+	}
+	return nextgi_miss_radiance(ray_dir);
+}
+#else
 vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, out float confidence) {
 	confidence = 0.0;
 #ifdef MODE_HIT_RADIANCE_REFERENCE
@@ -311,10 +346,13 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 	return radiance;
 #endif
 }
+#endif // NEXTGI_TRACE_SDF
 
 // GodotNext: nextgi_view_math. The Hi-Z march is shared with the software tier (#186).
+#ifndef NEXTGI_SCREEN_HIZ_TEX
 #define NEXTGI_SCREEN_HIZ_TEX hiz_tex
 #define NEXTGI_SCREEN_LAST_FRAME_TEX last_frame_tex
+#endif
 #include "nextgi_screen_trace_inc.glsl"
 
 bool nextgi_screen_trace(vec3 origin, vec3 direction, float tmax, out vec3 color, out vec3 march_end) {
@@ -341,6 +379,10 @@ void nextgi_gather_main() {
 	vec3 world = nextgi_unproject(vec2(ipixel), depth);
 	vec3 normal = nextgi_geometric_normal(ipixel, depth, world);
 	vec3 to_camera = normalize(params.camera_pos.xyz - world);
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186 step 6). 1.5 voxels of the level that holds the surface.
+	vec3 origin = swrt_offset_origin(world, normal);
+#else
 	float anchor_t = length(params.camera_pos.xyz - world);
 	NextGIHit anchor;
 	float origin_offset = params.max_origin_offset;
@@ -348,6 +390,7 @@ void nextgi_gather_main() {
 		origin_offset = records.data[anchor.custom_index].origin_offset;
 	}
 	vec3 origin = world + normal * origin_offset;
+#endif
 
 	vec3 raw_radiance[64];
 	float angle = float(params.frame) * 2.3999632;
@@ -380,15 +423,23 @@ void nextgi_gather_main() {
 		float traveled = length(march_end - origin);
 		vec3 trace_origin = origin;
 		float trace_tmax = tmax;
+#ifndef NEXTGI_TRACE_SDF
+		// GodotNext: ps_swrt_trace (#186). The software trace restarts from the origin: the
+		// screen march's samples do not prove the stretch between them empty.
 		if (traveled > 0.001 && traveled + 0.001 < tmax) {
 			trace_origin = march_end;
 			trace_tmax = tmax - traveled;
 		}
+#endif
 		if (screen_hit) {
 			radiance = screen_color;
 			ray_confidence = 1.0;
 			atomicAdd(counters.screen_hits, 1u);
+#ifdef NEXTGI_TRACE_SDF
+		} else if (nextgi_sdf_trace_noted(trace_origin, dir, trace_tmax, world, false, hit)) {
+#else
 		} else if (nextgi_trace(trace_origin, dir, trace_tmax, hit)) {
+#endif
 			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ray_confidence);
 		} else {
 			radiance = nextgi_wrc_sample(trace_origin + dir * trace_tmax, dir);
@@ -508,11 +559,20 @@ void nextgi_feedback_main() {
 			dot(vec3(rec.object_to_world[0], rec.object_to_world[4], rec.object_to_world[8]), card_n),
 			dot(vec3(rec.object_to_world[1], rec.object_to_world[5], rec.object_to_world[9]), card_n),
 			dot(vec3(rec.object_to_world[2], rec.object_to_world[6], rec.object_to_world[10]), card_n)));
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186 step 6). The card's world origin, offset 1.5 voxels of its level.
+	vec3 card_origin = vec3(
+			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), card.origin.xyz) + rec.object_to_world[3],
+			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), card.origin.xyz) + rec.object_to_world[7],
+			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), card.origin.xyz) + rec.object_to_world[11]);
+	vec3 origin = swrt_offset_origin(card_origin, normal);
+#else
 	vec3 object_origin = card.origin.xyz + card.axis_n.xyz * rec.origin_offset;
 	vec3 origin = vec3(
 			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), object_origin) + rec.object_to_world[3],
 			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), object_origin) + rec.object_to_world[7],
 			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), object_origin) + rec.object_to_world[11]);
+#endif
 	vec3 accum = vec3(0.0);
 	uint uncovered_count = 0u;
 	for (uint i = 0u; i < 16u; i++) {
@@ -558,6 +618,14 @@ void nextgi_coverage_main() {
 	vec3 normal = nextgi_geometric_normal(full, depth, world);
 	vec3 dir = normal;
 	NextGIHit hit;
+#ifdef NEXTGI_TRACE_SDF
+	// GodotNext: ps_swrt_trace (#186). A global-SDF hit is covered when voxel lighting resolves it.
+	if (!nextgi_trace(swrt_offset_origin(world, normal), dir, params.rt_radius, hit) || hit.t > 10.0) {
+		return;
+	}
+	atomicAdd(counters.coverage_rays, 1u);
+	if (nextgi_sdf_covered()) {
+#else
 	if (!nextgi_trace(world + normal * params.max_origin_offset, dir, params.rt_radius, hit) || hit.t > 10.0) {
 		return;
 	}
@@ -565,6 +633,7 @@ void nextgi_coverage_main() {
 	vec3 radiance;
 	bool uncovered = false;
 	if (nextgi_src_lookup(hit, radiance, uncovered) && !uncovered) {
+#endif
 		atomicAdd(counters.coverage_hits, 1u);
 	} else {
 		// A WRC sample, or an SRC miss, is uncovered for Q2.
@@ -617,7 +686,11 @@ void nextgi_reflect_main() {
 	vec3 normal = nextgi_view_world_normal(mat3(params.view_to_world[0].xyz, params.view_to_world[1].xyz, params.view_to_world[2].xyz), guide.xyz);
 	vec3 world = nextgi_unproject(vec2(full), depth);
 	vec3 view_dir = normalize(params.camera_pos.xyz - world);
+#ifdef NEXTGI_TRACE_SDF
+	vec3 origin = swrt_offset_origin(world, normal);
+#else
 	vec3 origin = world + normal * params.max_origin_offset;
+#endif
 
 	uint hash = nextgi_reflect_hash(uint(uv.x * 65535.0) ^ (uint(uv.y * 65535.0) << 16) ^ params.frame);
 	vec2 seed = vec2(float(hash & 0xFFFFu), float(hash >> 16)) / 65535.0;
@@ -633,11 +706,20 @@ void nextgi_reflect_main() {
 		if (dot(direction, normal) <= 0.0) {
 			direction = reflect(-view_dir, normal);
 		}
+#ifdef NEXTGI_TRACE_SDF
+		// GodotNext: ps_swrt_trace (#186 step 4). Reflections trace to rt_scene_radius without the
+		// WRC handoff; the screen trace covers the hardware tier's screen range.
+		float tmax = params.rt_radius;
+		vec3 screen_color;
+		vec3 march_end;
+		bool screen_hit = nextgi_screen_trace(origin, direction, min(params.rt_radius, swrt_screen_range(origin)), screen_color, march_end);
+#else
 		float handoff = nextgi_wrc_handoff(origin);
 		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
 		vec3 screen_color;
 		vec3 march_end;
 		bool screen_hit = nextgi_screen_trace(origin, direction, tmax, screen_color, march_end);
+#endif
 		if (params.front_layer != 0u) {
 			screen_hit = false;
 			march_end = origin;
@@ -645,10 +727,12 @@ void nextgi_reflect_main() {
 		float traveled = length(march_end - origin);
 		vec3 trace_origin = origin;
 		float trace_tmax = tmax;
+#ifndef NEXTGI_TRACE_SDF
 		if (traveled > 0.001 && traveled + 0.001 < tmax) {
 			trace_origin = march_end;
 			trace_tmax = tmax - traveled;
 		}
+#endif
 		NextGIHit hit;
 #ifdef MODE_FAR_FIELD
 		bool visibility_only = false;
@@ -673,6 +757,10 @@ void nextgi_reflect_main() {
 			} else {
 				hit_distance = traveled + hit.t;
 			}
+#elif defined(NEXTGI_TRACE_SDF)
+			// The software trace restarted from the origin.
+			hit_result = nextgi_sdf_trace_noted(trace_origin, direction, trace_tmax, world, true, hit);
+			hit_distance = hit.t;
 #else
 			hit_result = nextgi_trace(trace_origin, direction, trace_tmax, hit);
 			hit_distance = traveled + hit.t;
