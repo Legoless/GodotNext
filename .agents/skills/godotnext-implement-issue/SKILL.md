@@ -93,6 +93,8 @@ These are the only tests during the build:
 
 ## 5. Land it
 
+Land only finished issue work. If the task was only to investigate, review or draft, stop here and report what you found.
+
 The lead chose this on 2026-11-03: land work as a commit straight to master, with no branch or PR unless the lead asks for one.
 
 ```

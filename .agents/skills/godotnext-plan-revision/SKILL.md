@@ -50,7 +50,7 @@ The head (before `goal`) holds the version chip, the one-page summary, the miles
    python3 .agents/skills/godotnext-plan-revision/scripts/check_html.py docs/godotnext/nextgi-nextgeo-plan.html
    ```
    It must print `no tag errors` and `unclosed: []`. Then search once more for the old terms.
-6. **Carry it through.**
+6. **Carry it through.** Do steps 6 and 7 only when the task is to land the revision. If you were asked to investigate, review or draft, stop after step 5 and report.
    - Issues: titles, bodies, phases, milestones, epics and links, with `godotnext-issues`.
    - Tracker: the page's `AREAS`, `MILESTONES` and `GATE_ORDER` constants and the snapshot, with `godotnext-update-tracker`.
 7. **Commit to master and push.** Use the subject "Update NextGI and NextGeo implementation plan to vX.Y", with a short body listing what changed and what didn't.

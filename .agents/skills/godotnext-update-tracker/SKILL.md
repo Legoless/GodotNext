@@ -22,7 +22,7 @@ Opening the page also reads the current issue states from GitHub's public API (a
 
 ## Refresh the data
 
-The lead's choice: the tracker is updated by hand on master once progress lands.
+The lead's choice: the tracker is updated by hand on master once progress lands. Commit and push only when the task is to land finished work. If you were asked to investigate, review or draft, stop before the commit and report.
 
 ```
 python3 docs/godotnext/tracker/export.py
@@ -74,4 +74,4 @@ node --check /tmp/tracker-check.js
   --window-size=1240,2300 --virtual-time-budget=9000 --screenshot=/tmp/tracker.png \
   "file://$PWD/docs/godotnext/tracker/index.html"
 ```
-Look at the screenshot once, fix what it shows, then commit to master and push.
+Look at the screenshot once and fix what it shows. Then commit to master and push, unless the task was only to investigate, review or draft; in that case stop and report.
