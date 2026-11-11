@@ -69,7 +69,7 @@ extends Node
 ## voxel-lighting volume has finished filling (voxel_lighting_retrace 0 for VOXEL_SETTLE_FRAMES
 ## frames in a row, within BLEED_MAX_FRAMES): a new volume traces its bricks at #188's 1536 CPU
 ## rays per frame, so on the software tier global-SDF hits in this room have no voxel radiance for
-## roughly the first 1000 frames. Both tiers wait the same way. It then measures the
+## the first 1456 frames (measured on the M5 Max). Both tiers wait the same way. It then measures the
 ## denoised ambient (DEBUG_DRAW_NEXTGI_DENOISE_DENOISED, HDR) every BLEED_STEP frames for
 ## BLEED_SAMPLES samples: 15x15-pixel means on the floor at x -3.6 and -0.6, z -1 (the red side)
 ## and z +1 (the green side). red_bleed is the mean R - G on the red side, green_bleed the mean
