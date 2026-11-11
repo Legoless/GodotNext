@@ -15,9 +15,22 @@
 //   vec3 swrt_offset_origin(surface, normal)        // 1.5 voxels of the level
 //   vec3 swrt_shade(hit, origin, direction, allow_wrc)
 //   vec3 swrt_reconstruct(pixel, depth)             // nextgi_view_math
+//
+// GodotNext: ps_swrt_trace (#186). The production siblings of the hardware shaders
+// (nextgi_gather_swrt.glsl, nextgi_wrc_update_swrt.glsl) bind the trace's resources in set
+// SWRT_SET (default 0) and define SWRT_EXTERNAL_VIEW_INPUTS: their own set 0 declares the depth,
+// screen, sky and WRC inputs, so this file leaves out its counters, its view bindings (13-20),
+// the WRC and screen-trace includes and the functions that read them (swrt_miss_radiance,
+// swrt_shade, swrt_reconstruct, swrt_surface_normal). Such an includer includes
+// nextgi_wrc_sample_inc.glsl (and, when it traces the screen, nextgi_screen_trace_inc.glsl)
+// before this file: the RD header builder pastes an include once, at its first occurrence.
 
 #ifndef NEXTGI_SDF_TRACE_INC_GLSL
 #define NEXTGI_SDF_TRACE_INC_GLSL
+
+#ifndef SWRT_SET
+#define SWRT_SET 0
+#endif
 
 #include "../oct_inc.glsl"
 #include "nextgi_mesh_sdf_distance_inc.glsl"
@@ -79,7 +92,8 @@ struct SWRTParams {
 	vec4 view_to_world[3]; // Camera basis columns: the normal-roughness buffer is in view space.
 };
 
-layout(set = 0, binding = 0, std430) buffer SWRTCounters {
+#ifndef SWRT_EXTERNAL_VIEW_INPUTS
+layout(set = SWRT_SET, binding = 0, std430) buffer SWRTCounters {
 	uint steps;
 	uint gather_rays;
 	uint gather_hits;
@@ -94,96 +108,99 @@ layout(set = 0, binding = 0, std430) buffer SWRTCounters {
 	uint skipped;
 }
 swrt_counters;
+#endif // !SWRT_EXTERNAL_VIEW_INPUTS
 
-layout(set = 0, binding = 1, std430) readonly buffer SWRTParamsBuffer {
+layout(set = SWRT_SET, binding = 1, std430) readonly buffer SWRTParamsBuffer {
 	SWRTParams data;
 }
 swrt_params_buffer;
 
-layout(set = 0, binding = 2, std430) readonly buffer SWRTStaticPool {
+layout(set = SWRT_SET, binding = 2, std430) readonly buffer SWRTStaticPool {
 	float16_t data[];
 }
 swrt_static_pool;
 
-layout(set = 0, binding = 3, std430) readonly buffer SWRTDynamicPool {
+layout(set = SWRT_SET, binding = 3, std430) readonly buffer SWRTDynamicPool {
 	float16_t data[];
 }
 swrt_dynamic_pool;
 
 // 512 bits per slot in 16 words: word voxel / 32, bit voxel % 32 (#182 writer).
-layout(set = 0, binding = 4, std430) readonly buffer SWRTCoverage {
+layout(set = SWRT_SET, binding = 4, std430) readonly buffer SWRTCoverage {
 	uint data[];
 }
 swrt_coverage;
 
-layout(set = 0, binding = 5, std430) readonly buffer SWRTPage0 {
+layout(set = SWRT_SET, binding = 5, std430) readonly buffer SWRTPage0 {
 	int data[];
 }
 swrt_page0;
-layout(set = 0, binding = 6, std430) readonly buffer SWRTPage1 {
+layout(set = SWRT_SET, binding = 6, std430) readonly buffer SWRTPage1 {
 	int data[];
 }
 swrt_page1;
-layout(set = 0, binding = 7, std430) readonly buffer SWRTPage2 {
+layout(set = SWRT_SET, binding = 7, std430) readonly buffer SWRTPage2 {
 	int data[];
 }
 swrt_page2;
-layout(set = 0, binding = 8, std430) readonly buffer SWRTPage3 {
+layout(set = SWRT_SET, binding = 8, std430) readonly buffer SWRTPage3 {
 	int data[];
 }
 swrt_page3;
-layout(set = 0, binding = 9, std430) readonly buffer SWRTPage4 {
+layout(set = SWRT_SET, binding = 9, std430) readonly buffer SWRTPage4 {
 	int data[];
 }
 swrt_page4;
-layout(set = 0, binding = 10, std430) readonly buffer SWRTPage5 {
+layout(set = SWRT_SET, binding = 10, std430) readonly buffer SWRTPage5 {
 	int data[];
 }
 swrt_page5;
 
-layout(set = 0, binding = 11, std430) readonly buffer NextGIVoxelRadiance {
+layout(set = SWRT_SET, binding = 11, std430) readonly buffer NextGIVoxelRadiance {
 	uint data[];
 }
 voxel_radiance;
 
-layout(set = 0, binding = 12, std430) readonly buffer NextGIVoxelWeights {
+layout(set = SWRT_SET, binding = 12, std430) readonly buffer NextGIVoxelWeights {
 	uint data[];
 }
 voxel_weights;
 
 #include "nextgi_voxel_lighting_inc.glsl"
 
-layout(set = 0, binding = 13) uniform sampler2D swrt_depth;
-layout(set = 0, binding = 14) uniform sampler2D swrt_normal_roughness;
-layout(set = 0, binding = 15) uniform sampler2D swrt_hiz;
-layout(set = 0, binding = 16) uniform sampler2D swrt_last_frame;
-layout(set = 0, binding = 17) uniform sampler2D swrt_sky;
-layout(set = 0, binding = 18) uniform sampler2D nextgi_wrc_radiance;
-layout(set = 0, binding = 19) uniform sampler2D nextgi_wrc_visibility;
-layout(set = 0, binding = 20, std430) restrict readonly buffer SWRTWRCParams {
+#ifndef SWRT_EXTERNAL_VIEW_INPUTS
+layout(set = SWRT_SET, binding = 13) uniform sampler2D swrt_depth;
+layout(set = SWRT_SET, binding = 14) uniform sampler2D swrt_normal_roughness;
+layout(set = SWRT_SET, binding = 15) uniform sampler2D swrt_hiz;
+layout(set = SWRT_SET, binding = 16) uniform sampler2D swrt_last_frame;
+layout(set = SWRT_SET, binding = 17) uniform sampler2D swrt_sky;
+layout(set = SWRT_SET, binding = 18) uniform sampler2D nextgi_wrc_radiance;
+layout(set = SWRT_SET, binding = 19) uniform sampler2D nextgi_wrc_visibility;
+layout(set = SWRT_SET, binding = 20, std430) restrict readonly buffer SWRTWRCParams {
 	vec4 camera;
 	vec4 sky;
 	vec4 origin_spacing;
 	uvec4 dispatch;
 }
 nextgi_wrc;
+#endif // !SWRT_EXTERNAL_VIEW_INPUTS
 
-layout(set = 0, binding = 21, std430) readonly buffer SWRTInstances {
+layout(set = SWRT_SET, binding = 21, std430) readonly buffer SWRTInstances {
 	SWRTInstance data[];
 }
 swrt_instances;
 
-layout(set = 0, binding = 22, std430) readonly buffer SWRTMeshes {
+layout(set = SWRT_SET, binding = 22, std430) readonly buffer SWRTMeshes {
 	SWRTMeshInfo data[];
 }
 swrt_meshes;
 
-layout(set = 0, binding = 23, std430) readonly buffer SWRTMeshPages {
+layout(set = SWRT_SET, binding = 23, std430) readonly buffer SWRTMeshPages {
 	int data[];
 }
 swrt_mesh_pages;
 
-layout(set = 0, binding = 24, std430) readonly buffer SWRTMeshBricks {
+layout(set = SWRT_SET, binding = 24, std430) readonly buffer SWRTMeshBricks {
 	uint data[];
 }
 swrt_mesh_bricks;
@@ -195,21 +212,23 @@ swrt_mesh_bricks;
 #define SWRT_FROXEL_MARKED 0x80000000u
 #define SWRT_FROXEL_COUNT_MASK 0x7fffffffu
 #define SWRT_DETAIL_METERS 2.0
-layout(set = 0, binding = 25, std430) buffer SWRTFroxel {
+layout(set = SWRT_SET, binding = 25, std430) buffer SWRTFroxel {
 	uint data[];
 }
 swrt_froxel;
 
-layout(set = 0, binding = 26, std430) readonly buffer SWRTTwoSided {
+layout(set = SWRT_SET, binding = 26, std430) readonly buffer SWRTTwoSided {
 	uint data[];
 }
 swrt_two_sided;
 
+#ifndef SWRT_EXTERNAL_VIEW_INPUTS
 #define NEXTGI_WRC
 #include "nextgi_wrc_sample_inc.glsl"
 #define NEXTGI_SCREEN_HIZ_TEX swrt_hiz
 #define NEXTGI_SCREEN_LAST_FRAME_TEX swrt_last_frame
 #include "nextgi_screen_trace_inc.glsl"
+#endif // !SWRT_EXTERNAL_VIEW_INPUTS
 
 SWRTParams swrt_params() {
 	return swrt_params_buffer.data;
@@ -778,6 +797,7 @@ bool swrt_shadow_ray(vec3 origin, vec3 direction, float tmax) {
 
 // --- Shading -----------------------------------------------------------------
 
+#ifndef SWRT_EXTERNAL_VIEW_INPUTS
 vec3 swrt_miss_radiance(vec3 direction) {
 	SWRTParams params = swrt_params();
 	if (params.ambient.w > 0.5) {
@@ -827,6 +847,7 @@ vec3 swrt_shade(inout SWRTHit hit, vec3 origin, vec3 direction, bool allow_wrc, 
 	hit.flags |= SWRT_HIT_SKY;
 	return max(swrt_miss_radiance(direction), vec3(0.0));
 }
+#endif // !SWRT_EXTERNAL_VIEW_INPUTS
 
 // The hardware tier's handoff distance, 1.5x the WRC probe spacing at p
 // (nextgi_wrc_handoff), whether or not the WRC holds data: the screen trace
@@ -839,6 +860,7 @@ float swrt_screen_range(vec3 p) {
 
 // --- View ----------------------------------------------------------------------
 
+#ifndef SWRT_EXTERNAL_VIEW_INPUTS
 vec3 swrt_reconstruct(ivec2 pixel, float depth) {
 	vec2 screen = max(swrt_params().screen.xy, vec2(1.0));
 	return nextgi_view_reconstruct(swrt_params().inv_view_proj, (vec2(pixel) + vec2(0.5)) / screen, depth);
@@ -873,6 +895,7 @@ vec3 swrt_surface_normal(ivec2 pixel, vec3 world, bool has_normal_roughness) {
 	normal = normalize(normal);
 	return dot(normal, to_camera) < 0.0 ? -normal : normal;
 }
+#endif // !SWRT_EXTERNAL_VIEW_INPUTS
 
 // --- Detail froxel grid ---------------------------------------------------------
 

@@ -13,15 +13,8 @@
 #ifndef NEXTGI_RT_INC_GLSL
 #define NEXTGI_RT_INC_GLSL
 
-struct NextGIHit {
-	float t;
-	uint custom_index;
-	uint geometry_index;
-	uint primitive;
-	vec2 bary;
-	bool front_face;
-	bool hit;
-};
+// GodotNext: ps_swrt_trace (#186). The hit record and the records are tier-neutral includes.
+#include "nextgi_hit_inc.glsl"
 
 NextGIHit nextgi_trace_opaque(vec3 origin, float tmin, vec3 dir, float tmax, uint mask) {
 	rayQueryEXT rq;
@@ -53,53 +46,7 @@ NextGIHit nextgi_trace_near_opaque(vec3 origin, vec3 dir, float tmax) {
 #undef NEXTGI_NEAR_TRACE_RESTORE
 #endif
 
-// Mirrors of the §6.3 records, the §8.3 cards and the D14 light (#31). std430, same layout as the C++ structs.
-struct NextGIInstanceRecord {
-	float object_to_world[12];
-	uint surface_base;
-	uint surface_count;
-	uint card_set;
-	uint page_table;
-	uint rt_flags;
-	float origin_offset;
-	uint tlas_index;
-	uint arena_chunk;
-};
-
-struct NextGICard {
-	vec4 origin;
-	vec4 axis_u;
-	vec4 axis_v;
-	vec4 axis_n;
-	uvec4 atlas_rect;
-};
-
-struct NextGICardSet {
-	uint first_card;
-	uint card_count;
-	float texel_size;
-	float capture_scale;
-};
-
-struct NextGILight {
-	vec4 color_energy;
-	vec4 position_inv_range;
-	vec4 direction_type;
-	float attenuation;
-	float cos_spot;
-	float inv_spot_atten;
-	uint flags;
-};
-
-// nextgi_shadow_ray is defined by the relight shader, not here. This include is pulled into the
-// self-test, whose source is required to contain exactly one rayQueryProceedEXT.
-
-struct NextGISurfaceRecord {
-	uint vertex_offset;
-	uint index_offset;
-	uint triangle_count;
-	uint flags;
-};
+#include "nextgi_records_inc.glsl"
 
 // Same query as nextgi_trace_opaque. The proceed stays in that one function.
 bool nextgi_trace(vec3 origin, vec3 direction, float tmax, out NextGIHit hit) {
