@@ -55,7 +55,7 @@ static_assert(NextGIIrradianceField::PROBE_COUNT == NextGI::LITE_PROBE_COUNT && 
 
 } // namespace
 
-NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_hwrt) {
+NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_wrc_field) {
 	Params params = {};
 	// The depth buffer holds reverse-Z depth in [0, 1] drawn with this corrected projection, so
 	// the shader unprojects vec4(uv * 2 - 1, depth, 1) with its inverse.
@@ -65,7 +65,7 @@ NextGIIrradianceField::Params NextGIIrradianceField::build_params(const Projecti
 	params.camera[0] = camera.x;
 	params.camera[1] = camera.y;
 	params.camera[2] = camera.z;
-	params.camera[3] = p_hwrt ? 1.0f : 0.0f;
+	params.camera[3] = p_wrc_field ? 1.0f : 0.0f;
 	params.screen[0] = float(MAX(p_gi_size.x, 1));
 	params.screen[1] = float(MAX(p_gi_size.y, 1));
 	params.screen[2] = float(MAX(p_half_size.x, 1));

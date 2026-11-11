@@ -3412,7 +3412,8 @@ TEST_CASE("[NextGI][Lite] Params reconstruct world positions and snap to the WRC
 	// Pitch, yaw and roll: no axis of the camera lines up with a world axis.
 	const Transform3D camera = Transform3D(Basis::from_euler(Vector3(-0.3, 0.7, 0.4)), Vector3(3.4, 1.7, -12.6));
 	const Size2i gi_size(1280, 720);
-	const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, true, true);
+	const bool wrc_field = true;
+	const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, true, wrc_field);
 
 	// The scene UBO draws depth with this projection (RenderSceneDataRD::update_ubo).
 	Projection correction;
@@ -3454,7 +3455,6 @@ TEST_CASE("[NextGI][Lite] Params reconstruct world positions and snap to the WRC
 	CHECK(params.rules[1] == doctest::Approx(RendererRD::NextGI::LITE_PUSH_SPACING));
 	CHECK(params.rules[2] == doctest::Approx(RendererRD::NextGI::LITE_SSR_ROUGHNESS));
 	CHECK(params.rules[3] == doctest::Approx(RendererRD::NextGI::LITE_MIP2_ROUGHNESS));
-	CHECK(params.camera[3] == doctest::Approx(1.0f));
 	CHECK(params.screen[2] == doctest::Approx(640.0f));
 
 	// The prepass writes view-space normals (the forward shader encodes modelview_normal, the
@@ -3472,9 +3472,23 @@ TEST_CASE("[NextGI][Lite] Params reconstruct world positions and snap to the WRC
 		CHECK(view_normal.dot(world_normal) < 0.99f);
 		CHECK_MESSAGE(view_to_world.xform(view_normal).is_equal_approx(world_normal), vformat("%s decodes as %s.", world_normal, view_to_world.xform(view_normal)));
 	}
-	const RendererRD::NextGIIrradianceField::Params software = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, false, false);
-	CHECK(software.camera[3] == doctest::Approx(0.0f));
-	CHECK(software.depth_info[3] == doctest::Approx(0.0f));
+}
+
+TEST_CASE("[NextGI][Lite] p_wrc_field sets camera.w exactly when the WRC field is bound") {
+	Projection projection;
+	projection.set_perspective(70.0, 16.0 / 9.0, 0.05, 400.0);
+	const Transform3D camera = Transform3D(Basis::from_euler(Vector3(-0.3, 0.7, 0.4)), Vector3(3.4, 1.7, -12.6));
+	const Size2i gi_size(1280, 720);
+	// nextgi_irradiance_field.glsl reads the WRC moments, offsets and mips only when camera.w > 0.5.
+	for (const bool wrc_field : { true, false }) {
+		for (const bool normal_valid : { true, false }) {
+			const RendererRD::NextGIIrradianceField::Params params = RendererRD::NextGIIrradianceField::build_params(projection, camera, true, Vector2(), gi_size, gi_size / 2, gi_size, true, normal_valid, wrc_field);
+			CHECK_MESSAGE(params.camera[3] == doctest::Approx(wrc_field ? 1.0f : 0.0f), vformat("wrc_field %s, normal_valid %s: camera.w is %f.", wrc_field, normal_valid, params.camera[3]));
+			// The flag is camera.w alone: the normal flag and the camera position stay as given.
+			CHECK(params.depth_info[3] == doctest::Approx(normal_valid ? 1.0f : 0.0f));
+			CHECK(Vector3(params.camera[0], params.camera[1], params.camera[2]).is_equal_approx(camera.origin));
+		}
+	}
 }
 
 // GodotNext: nextgi_multiview (#58).

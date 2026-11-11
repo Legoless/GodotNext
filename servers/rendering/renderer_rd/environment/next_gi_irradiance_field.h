@@ -52,7 +52,7 @@ public:
 	// The std430 block nextgi_irradiance_field.glsl reads (LiteParams).
 	struct Params {
 		float inv_view_proj[16]; // Inverse of the projection the depth buffer was drawn with.
-		float camera[4]; // xyz; w = 1 when the WRC textures are bound (hardware tier).
+		float camera[4]; // xyz; w = 1 when the WRC field is bound (p_wrc_field).
 		float screen[4]; // GI buffer width and height, half-resolution width and height.
 		float depth_info[4]; // Internal width and height, depth valid, normal valid.
 		float rules[4]; // Inside back-face fraction, push spacing, SSR roughness, mip-2 roughness.
@@ -64,8 +64,9 @@ public:
 
 	// Everything the shader needs from the camera and the buffers. p_cam_projection is the
 	// uncorrected camera projection; the depth correction and TAA jitter are applied here,
-	// as RenderSceneDataRD does for the scene UBO.
-	static Params build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_hwrt);
+	// as RenderSceneDataRD does for the scene UBO. p_wrc_field: the WRC textures are bound,
+	// so the probes take the WRC's depth-moment visibility and its mips (camera.w = 1).
+	static Params build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_wrc_field);
 
 	NextGIIrradianceField();
 	~NextGIIrradianceField();
