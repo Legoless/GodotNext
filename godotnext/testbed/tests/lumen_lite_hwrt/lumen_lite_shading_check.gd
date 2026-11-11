@@ -28,7 +28,9 @@ extends Node3D
 ## swapped (the inverse rotation).
 ##
 ## Prints LITE_SHADING lines and LITE_SHADING_PASS, or LITE_SHADING_FAIL with every failed
-## assertion, and exits 0 or 1.
+## assertion, and exits 0 or 1. Run it through harness/runners/macos_local.sh
+## --fail-on-validation, which fails the run on any "ERROR:", "Invalid Metal usage" or
+## "Error detected in" line.
 
 const WARMUP_FRAMES := 240
 const VIEW_FRAMES := 12

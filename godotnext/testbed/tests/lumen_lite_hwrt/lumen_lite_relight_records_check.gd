@@ -15,7 +15,9 @@ extends Node3D
 ## - boxes shown again: the larger count is back, so the sets return with their instances.
 ##
 ## Prints LITE_RELIGHT lines and LITE_RELIGHT_PASS, or LITE_RELIGHT_FAIL with every failed
-## assertion, and exits 0 or 1.
+## assertion, and exits 0 or 1. Run it through harness/runners/macos_local.sh
+## --fail-on-validation, which fails the run on any "ERROR:", "Invalid Metal usage" or
+## "Error detected in" line.
 
 const WARMUP_FRAMES := 150
 const SETTLE_FRAMES := 20
