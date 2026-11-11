@@ -1032,8 +1032,8 @@ TEST_CASE("[NextGI] Status labels the runtime toggle EXPERIMENTAL only on an act
 // The dummy scene renderer with a copy of RendererSceneRenderRD's one-line override: the SDFGI
 // gate (RendererSceneRender::environment_get_sdfgi_enabled()) reads a real NextGI tier, selected
 // from the project settings by init() where no device is needed. The RD renderer's own override
-// needs a device; frame_block_check --expect=inactive --sdfgi covers it on the GPU (no SDFGI on
-// SWRT, SDFGI on DISABLED).
+// needs a device; frame_block_check --sdfgi covers it on the GPU: no "Render SDFGI" under
+// --expect=active (HWRT or SWRT), and SDFGI runs under --expect=inactive (DISABLED).
 class NextGIGateSceneRender : public RasterizerSceneDummy {
 public:
 	NextGI next_gi;

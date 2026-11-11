@@ -425,6 +425,31 @@ static HashMap<String, SpirvBinding> _spirv_bindings(const Vector<uint8_t> &p_sp
 	return result;
 }
 
+// Whether a SPIR-V module declares ray query: the RayQueryKHR capability or an acceleration
+// structure type.
+static bool _spirv_declares_ray_query(const Vector<uint8_t> &p_spirv) {
+	const int count = p_spirv.size() / 4;
+	auto word = [&](int p_index) {
+		const uint8_t *bytes = p_spirv.ptr() + p_index * 4;
+		return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) | (uint32_t(bytes[2]) << 16) | (uint32_t(bytes[3]) << 24);
+	};
+	for (int index = 5; index < count;) {
+		const uint32_t word_count = word(index) >> 16;
+		const uint32_t opcode = word(index) & 0xffffu;
+		if (word_count == 0 || index + int(word_count) > count) {
+			break;
+		}
+		if (opcode == 17 && word_count >= 2 && word(index + 1) == 4472) { // OpCapability RayQueryKHR.
+			return true;
+		}
+		if (opcode == 5341) { // OpTypeAccelerationStructureKHR.
+			return true;
+		}
+		index += int(word_count);
+	}
+	return false;
+}
+
 static Vector<uint8_t> _swrt_test_compile(const String &p_source, const String &p_what) {
 	String error;
 	const Vector<uint8_t> spirv = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_COMPUTE, p_source, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_3, &error);
@@ -483,29 +508,40 @@ TEST_CASE("[NextGI][SWRT] The software siblings keep the hardware twins' set-0 b
 	_check_sibling_bindings(_spirv_bindings(wrc_hardware), _spirv_bindings(wrc_sibling), { 0, 9, 10, 11, 12, 13, 14, 15, 16, 17 }, "WRC update v0");
 }
 
+// The built source is not preprocessed, so it is the same text for every variant apart from the
+// variant's define line: the token checks run once per sibling. The per-variant check is on the
+// compiled SPIR-V, where each variant's own code remains; the hardware twins declare ray query
+// there, so that check can fail.
 TEST_CASE("[NextGI][SWRT] The software siblings trace the SDF and carry no ray query") {
+	const String gather_source = RendererRD::NextGIGather::build_swrt_shader_source(0);
+	REQUIRE_FALSE(gather_source.is_empty());
+	CHECK_FALSE(gather_source.contains("GL_EXT_ray_query"));
+	CHECK_FALSE(gather_source.contains("rayQuery"));
+	CHECK_FALSE(gather_source.contains("accelerationStructureEXT"));
+	CHECK(gather_source.contains("swrt_trace("));
+	CHECK(gather_source.contains("nextgi_sdf_note_gather("));
+	const String wrc_source = RendererRD::NextGIWRC::build_update_swrt_shader_source(0);
+	REQUIRE_FALSE(wrc_source.is_empty());
+	CHECK_FALSE(wrc_source.contains("GL_EXT_ray_query"));
+	CHECK_FALSE(wrc_source.contains("rayQuery"));
+	CHECK_FALSE(wrc_source.contains("accelerationStructureEXT"));
+	CHECK(wrc_source.contains("swrt_trace("));
+	CHECK(wrc_source.contains("nextgi_sdf_note_wrc("));
+
+	CHECK(_spirv_declares_ray_query(_swrt_test_compile(RendererRD::NextGIGather::build_shader_source(0), "the hardware gather")));
+	CHECK(_spirv_declares_ray_query(_swrt_test_compile(RendererRD::NextGIWRC::build_update_shader_source(0), "the hardware WRC update")));
 	for (int variant = 0; variant < 6; variant++) {
 		if (variant == 4) {
 			continue; // The hit-radiance reference is hardware-only; the sibling disables it.
 		}
-		const String source = RendererRD::NextGIGather::build_swrt_shader_source(variant);
-		REQUIRE_FALSE(source.is_empty());
-		CHECK_FALSE(source.contains("GL_EXT_ray_query"));
-		CHECK_FALSE(source.contains("rayQuery"));
-		CHECK_FALSE(source.contains("accelerationStructureEXT"));
-		CHECK(source.contains("swrt_trace("));
-		CHECK(source.contains("nextgi_sdf_note_gather("));
-		CHECK(_swrt_test_compile(source, "software gather v" + itos(variant)).size() >= 20);
+		const Vector<uint8_t> spirv = _swrt_test_compile(RendererRD::NextGIGather::build_swrt_shader_source(variant), "software gather v" + itos(variant));
+		REQUIRE_GE(spirv.size(), 20);
+		CHECK_FALSE_MESSAGE(_spirv_declares_ray_query(spirv), ("software gather v" + itos(variant) + " declares ray query").utf8().get_data());
 	}
 	for (int variant = 0; variant < 6; variant++) {
-		const String source = RendererRD::NextGIWRC::build_update_swrt_shader_source(variant);
-		REQUIRE_FALSE(source.is_empty());
-		CHECK_FALSE(source.contains("GL_EXT_ray_query"));
-		CHECK_FALSE(source.contains("rayQuery"));
-		CHECK_FALSE(source.contains("accelerationStructureEXT"));
-		CHECK(source.contains("swrt_trace("));
-		CHECK(source.contains("nextgi_sdf_note_wrc("));
-		CHECK(_swrt_test_compile(source, "software WRC update v" + itos(variant)).size() >= 20);
+		const Vector<uint8_t> spirv = _swrt_test_compile(RendererRD::NextGIWRC::build_update_swrt_shader_source(variant), "software WRC update v" + itos(variant));
+		REQUIRE_GE(spirv.size(), 20);
+		CHECK_FALSE_MESSAGE(_spirv_declares_ray_query(spirv), ("software WRC update v" + itos(variant) + " declares ray query").utf8().get_data());
 	}
 }
 
