@@ -525,7 +525,8 @@ void NextGI::init(bool p_forward_plus) {
 		collect_device_inputs(rd, rd->get_device_api_name(), rd->get_device_type(), new_inputs);
 	}
 	// GodotNext: ps_swrt_trace (#186, #188). Before the safety net, so no self-test runs.
-	apply_ray_query_denial(new_inputs, _deny_ray_query());
+	deny_ray_query = _deny_ray_query();
+	apply_ray_query_denial(new_inputs, deny_ray_query);
 	_apply_safety_net(new_inputs);
 
 	String line;
@@ -570,8 +571,9 @@ void NextGI::set_hardware_ray_tracing(int p_mode) {
 	new_inputs.hwrt_setting = mode;
 	// Doctests build their own NextGI. Only the renderer instance talks to the live device.
 	if (singleton == this) {
-		// GodotNext: ps_swrt_trace (#186, #188). init() applied it already; idempotent.
-		apply_ray_query_denial(new_inputs, _deny_ray_query());
+		// GodotNext: ps_swrt_trace (#186, #188). The startup value, which init() applied already: a
+		// runtime change of the setting would deny ray query to shaders and an RT arena that exist.
+		apply_ray_query_denial(new_inputs, deny_ray_query);
 		_apply_safety_net(new_inputs);
 	}
 	String line;

@@ -355,6 +355,10 @@ private:
 	// its mode until the next start, which reads the project setting.
 	bool hwrt_setting_pending = false;
 	HardwareRayTracing pending_hwrt_setting = HARDWARE_RAY_TRACING_AUTO;
+	// GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query as init() read it. The setting
+	// needs a restart (MeshStorage chose the RT arena from it at startup), so the runtime switch
+	// keeps this value.
+	bool deny_ray_query = false;
 
 	// GodotNext: nextgi_gather
 	NextGIGather *gather = nullptr;

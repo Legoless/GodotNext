@@ -48,7 +48,9 @@ extends Node
 ## frames each. On the software tier the gather runs the software sibling and no ray-query
 ## ShaderRD is created since the switch (the hardware tier's shader states stay alive, so the
 ## census counts since the tier change); back on the hardware tier the gather runs the hardware
-## shader again. No frame block changes tier inside its frame (mid_frame_tier_changes 0).
+## shader again. No frame block changes tier inside its frame (mid_frame_tier_changes 0). Just before
+## the switch back it turns debug/deny_ray_query on at runtime: the setting needs a restart (the RT
+## arena and the ray-query shaders were chosen at startup), so the hardware tier must come back.
 ##
 ## --check=budget (start on the hardware tier, hardware_ray_tracing Auto): the tier is fixed for a
 ## render frame, and an AS-memory change applies at the next frame's start (#186). After
@@ -419,6 +421,8 @@ func _process_toggle() -> void:
 	if toggle_phase == 1:
 		RenderingServer.nextgi_set_hardware_ray_tracing(1)
 	elif toggle_phase == 2:
+		# GodotNext: ps_swrt_trace (#186, #188). Read at startup only, so the switch ignores it.
+		ProjectSettings.set_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", true)
 		RenderingServer.nextgi_set_hardware_ray_tracing(0)
 	else:
 		_finish(failures)
