@@ -4,9 +4,12 @@ extends Node
 ##
 ## --check=smoke: the overlap-heavy kitbash (the PS smoke scene) in a 1920x1080 SubViewport, the
 ## camera at (0, 2, 8) looking at (0, 1, 0), NextGI on in its Environment. After WARMUP_FRAMES
-## it samples RenderingServer.nextgi_get_tier_info() every frame for SAMPLE_FRAMES frames and
-## keeps the frame with the most gather rays (the counters arrive asynchronously, one snapshot
-## per frame) and the one with the most WRC rays.
+## it samples RenderingServer.nextgi_get_tier_info() every frame for SAMPLE_FRAMES frames (the
+## counters arrive asynchronously, one snapshot per frame). It keeps the median snapshot by gather
+## rays, and the WRC snapshot with the most clean WRC SDF hits (its update traces a different probe
+## set each frame). On either tier, no snapshot may hold more gather rays than its probes trace
+## (src_gather_expected_rays): one run held exactly twice a frame's counters, and the check had
+## picked that snapshot. The sampled ray counts are printed.
 ##
 ## With --expected-tier=SWRT it asserts:
 ## - the tier is SWRT, the gather ran the software sibling (gather_tier SWRT) and traced rays, and
@@ -18,10 +21,13 @@ extends Node
 ##   the hardware pass that run_swrt_gi_check.sh runs first: rays - misses - screen hits);
 ## - step-limit (exhausted) hits are at most MAX_EXHAUSTED_SHARE of the SDF hits, and hits within
 ##   two voxels of the origin's level (self-intersection candidates) at most MAX_NEAR_SHARE. The
-##   kitbash's overlapping rocks put real surfaces that close: on this view the hardware tier finds
-##   30% of its world hits within 0.35 m of the gather's surface point (measured on the M5 Max with
-##   a temporary counting build), so MAX_NEAR_SHARE is that hardware share, not a software one.
-##   The shares are printed;
+##   shares are printed. MAX_NEAR_SHARE is 0.30 rather than the 0.10 start value, pending a lead
+##   decision (#186): on the M5 Max the software tier measures 0.21 at High and 0.22 at Epic, and
+##   0.72 with the gather origin offset removed. The 0.30 comes from another metric, not this one:
+##   a temporary counting build found 30% of the hardware tier's world hits within 0.35 m of the
+##   gather's surface point (the kitbash's overlapping rocks put real surfaces that close), where
+##   the software tier scored 17%. The hardware tier has no counter for the two-voxel metric;
+##   adding one would change its shaders;
 ## - the Hi-Z screen trace found hits;
 ## - the software WRC producer ran (O2): WRC rays, gather samples from the WRC and clean WRC
 ##   SDF hits;
@@ -71,6 +77,7 @@ var hwrt_world_hits := -1
 var viewport: SubViewport
 var frames := 0
 var gather_best := {}
+var gather_samples: Array[Dictionary] = []
 var wrc_best := {}
 var wrc_clean_best := -1
 var failures := PackedStringArray()
@@ -136,8 +143,7 @@ func _process(_delta: float) -> void:
 	if frames <= WARMUP_FRAMES:
 		return
 	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
-	if int(info.get("src_gather_rays", 0)) > int(gather_best.get("src_gather_rays", -1)):
-		gather_best = info
+	gather_samples.append(info)
 	# The WRC frame with the most clean SDF hits (its update traces a different probe set each frame).
 	var wrc_clean := int(info.get("wrc_sdf_hits", 0)) - int(info.get("wrc_sdf_exhausted", 0)) - int(info.get("wrc_sdf_near", 0))
 	if wrc_clean > wrc_clean_best:
@@ -145,6 +151,9 @@ func _process(_delta: float) -> void:
 		wrc_best = info
 	if frames < WARMUP_FRAMES + SAMPLE_FRAMES:
 		return
+	var by_rays := gather_samples.duplicate()
+	by_rays.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return int(a.get("src_gather_rays", 0)) < int(b.get("src_gather_rays", 0)))
+	gather_best = by_rays[by_rays.size() / 2]
 	_finish(_checks(info))
 
 
@@ -273,6 +282,21 @@ func _checks(p_last: Dictionary) -> PackedStringArray:
 	if tier != expected_tier:
 		result.append("tier is %s, expected %s" % [tier, expected_tier])
 		return result
+	# A snapshot holds one frame's gather, so its rays never exceed the probes times the rays per
+	# probe. A snapshot above that counted a frame twice: the run fails rather than pick or drop it.
+	var sample_rays := PackedInt64Array()
+	var over_cap := 0
+	var over_cap_max := 0
+	for sample in gather_samples:
+		var sample_count := int(sample.get("src_gather_rays", 0))
+		sample_rays.append(sample_count)
+		if sample_count > int(sample.get("src_gather_expected_rays", 0)):
+			over_cap += 1
+			over_cap_max = maxi(over_cap_max, sample_count)
+	var cap := int(gather_best.get("src_gather_expected_rays", 0))
+	print("SWRT_GI_SAMPLES src_gather_rays=%s cap=%d (report-only)" % [sample_rays, cap])
+	if over_cap > 0:
+		result.append("%d of %d snapshots hold more gather rays than the probes trace (up to %d, cap %d): a frame was counted twice" % [over_cap, gather_samples.size(), over_cap_max, cap])
 	var rays := int(gather_best.get("src_gather_rays", 0))
 	var misses := int(gather_best.get("src_gather_misses", 0))
 	var screen_hits := int(gather_best.get("screen_trace_hits", 0))
