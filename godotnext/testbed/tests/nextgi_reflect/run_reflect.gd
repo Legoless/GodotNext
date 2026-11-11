@@ -9,9 +9,14 @@ extends Node3D
 ## GodotNext: ps_swrt_trace (#186). With --expected-tier=SWRT the reflections run the shared
 ## reflect kernel in the software sibling: its clean SDF hits (reflect_sdf_hits minus the
 ## step-limit and near-origin ones) must be at least CLEAN_HIT_SHARE of the hardware tier's
-## reflection hits on the same view (--hwrt-reflection-hits=N, from a hardware pass). No ray-query
-## ShaderRD may be created since the tier was selected, nor in the whole process when
-## hardware_ray_tracing was Off at launch (Off skips the startup self-test). A hardware pass
+## reflection hits on the same view (--hwrt-reflection-hits=N, from a hardware pass), and at most
+## MAX_EXHAUSTED_SHARE of the SDF hits may be rays that ran out of trace steps (a ray out of steps
+## reports a hit where it stopped). The step-limit and near-origin shares are printed. There is
+## no near-origin bound: with the reflection origin offset removed, the Hi-Z screen trace takes
+## the self-hits (reflection hits rise from 75582 to 114202 on the M5 Max) and the near share
+## stays 0.003, while clean SDF hits fall to 0.238 of the hardware tier's, below CLEAN_HIT_SHARE.
+## No ray-query ShaderRD may be created since the tier was selected, nor in the whole process
+## when hardware_ray_tracing was Off at launch (Off skips the startup self-test). A hardware pass
 ## prints "SWRT_GI_REFERENCE reflection_hits=N".
 ##
 ## Run with the NextGI project setting on, e.g.:
@@ -22,6 +27,7 @@ extends Node3D
 
 const FRAMES := 24
 const CLEAN_HIT_SHARE := 0.25
+const MAX_EXHAUSTED_SHARE := 0.10
 
 var _failures := PackedStringArray()
 var _expected_tier := "HWRT"
@@ -71,7 +77,11 @@ func _run() -> void:
 	if _expected_tier == "HWRT":
 		print("SWRT_GI_REFERENCE reflection_hits=%d" % hits)
 	elif _expected_tier == "SWRT":
-		print("SWRT_GI_REFLECT rays=%d hits=%d sdf_hits=%d clean=%d exhausted=%d near=%d hwrt_hits=%d ratio=%.3f (report-only)" % [rays, hits, sdf_hits, clean, int(status.get("reflect_sdf_exhausted", 0)), int(status.get("reflect_sdf_near", 0)), _hwrt_reflection_hits, float(clean) / float(maxi(_hwrt_reflection_hits, 1))])
+		var exhausted := int(status.get("reflect_sdf_exhausted", 0))
+		var near := int(status.get("reflect_sdf_near", 0))
+		print("SWRT_GI_REFLECT rays=%d hits=%d sdf_hits=%d clean=%d exhausted=%d (%.4f) near=%d (%.4f) hwrt_hits=%d ratio=%.3f (report-only)" % [rays, hits, sdf_hits, clean, exhausted, float(exhausted) / float(maxi(sdf_hits, 1)), near, float(near) / float(maxi(sdf_hits, 1)), _hwrt_reflection_hits, float(clean) / float(maxi(_hwrt_reflection_hits, 1))])
+		if float(exhausted) > MAX_EXHAUSTED_SHARE * float(sdf_hits):
+			_failures.append("%d of %d SDF reflection hits ran out of trace steps (more than %.2f)" % [exhausted, sdf_hits, MAX_EXHAUSTED_SHARE])
 		if String(status.get("gather_tier", "")) != "SWRT":
 			_failures.append("the reflections ran the %s shader, expected the software sibling" % [String(status.get("gather_tier", ""))])
 		if int(status.get("ray_query_shader_versions_since_tier", -1)) != 0:
