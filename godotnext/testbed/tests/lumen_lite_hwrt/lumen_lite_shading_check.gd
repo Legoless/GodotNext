@@ -1,5 +1,9 @@
 extends Node3D
 ## #183: Lumen Lite shading on the hardware tier (the M5 Max auto default).
+## GodotNext: ps_swrt_trace (#186). tests/lumen_lite/lumen_lite_shading_check.tscn runs the same
+## checks on the software tier (expected_tier SWRT; the folder's override.cfg turns hardware ray
+## tracing off). SSR, SSAO, SSIL and contact shadows stay off, so only the prepass that Lite
+## views force writes the normals and roughness the field and the rough specular read.
 ##
 ## A procedural scene the checks can reason about: spheres float under a panorama sky whose
 ## upper half is bright with vertical stripes and whose lower half is dim. There is no light,
@@ -43,6 +47,9 @@ const MIRROR_TOLERANCE := 0.02
 const MIRROR_MIN_SPREAD := 0.15
 ## A quarter-turn roll: view-space up is world-space left.
 const CAMERA_ROLL := PI * 0.5
+const CONTACT_SHADOWS := "rendering/lights_and_shadows/contact_shadow/enabled"
+
+@export var expected_tier := "HWRT"
 
 var _camera: Camera3D
 var _environment: Environment
@@ -69,6 +76,10 @@ func _ready() -> void:
 	sky.sky_material = sky_material
 	_environment.sky = sky
 	_environment.nextgi_enabled = true
+	# None of the screen-space effects that would also request the normal-roughness prepass.
+	_environment.ssr_enabled = false
+	_environment.ssao_enabled = false
+	_environment.ssil_enabled = false
 	var world := WorldEnvironment.new()
 	world.environment = _environment
 	add_child(world)
@@ -208,7 +219,8 @@ func _process(_delta: float) -> void:
 				return
 			var info: Dictionary = RenderingServer.nextgi_get_tier_info()
 			var counters: Dictionary = RenderingServer.nextgi_get_counters()
-			_check(str(info.get("tier", "")) == "HWRT", "tier is %s, expected HWRT" % str(info.get("tier", "")))
+			_check(str(info.get("tier", "")) == expected_tier, "tier is %s, expected %s" % [str(info.get("tier", "")), expected_tier])
+			_check(not bool(ProjectSettings.get_setting(CONTACT_SHADOWS, false)), "%s is on: the check needs every screen-space effect off" % CONTACT_SHADOWS)
 			_check(bool(info.get("lite_beta", false)), "Lite is not active (quality %s)" % str(info.get("quality", "")))
 			_check(int(counters.get("gather_dispatches", -1)) == 0, "Lite recorded gather dispatches")
 			_check(int(counters.get("reflection_dispatches", -1)) == 0, "Lite recorded reflection dispatches")
