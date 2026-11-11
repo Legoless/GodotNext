@@ -4106,6 +4106,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/swrt_trace_readback", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_max_steps", PROPERTY_HINT_RANGE, "0,256,1"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_pool_bricks", PROPERTY_HINT_RANGE, "0,65536,1"), 0);
+	// GodotNext: nextgi_frame_tier (#186). Lowers the AS memory budget so a check can exceed it.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/as_budget_bytes", PROPERTY_HINT_RANGE, "0,1073741824,1,or_greater"), 0);
 	// GodotNext: ps_voxel_lighting (#188). Off keeps the voxel shade free of GPU readbacks.
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/voxel_lighting_readback", false);
 	// GodotNext: nextgi_reference

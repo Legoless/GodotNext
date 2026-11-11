@@ -327,6 +327,8 @@ private:
 	bool frame_tier_valid = false;
 	Tier frame_tier = TIER_DISABLED;
 	uint32_t frame_tier_changes = 0;
+	// Frame-block runs that ended on another tier than their frame began on (a check tripwire).
+	uint32_t mid_frame_tier_changes = 0;
 	bool budget_pending = false;
 	uint64_t budget_frame = 0;
 	TierInputs pending_inputs;
@@ -501,6 +503,7 @@ public:
 	bool is_budget_change_pending() const { return budget_pending; }
 	// Tier changes begin_frame() has handled (the first frame counts as one).
 	uint32_t get_frame_tier_changes() const { return frame_tier_changes; }
+	uint32_t get_mid_frame_tier_changes() const { return mid_frame_tier_changes; }
 	// Ray-query ShaderRD versions created since begin_frame() last saw a tier change.
 	uint64_t get_ray_query_versions_since_tier() const;
 	// The frame-block slot being recorded ("none" outside the slot loop).

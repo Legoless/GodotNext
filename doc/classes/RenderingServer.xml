@@ -3110,6 +3110,7 @@
 				- [code]quality[/code]: the resolved quality preset ([code]"MEDIUM"[/code], [code]"HIGH"[/code] or [code]"EPIC"[/code]), or [code]"NONE"[/code] when NextGI is disabled or unsupported.
 				- [code]ray_query_shaders_initialized[/code]: the number of ray-query shader versions NextGI has created. They are only created on the [code]HWRT[/code] tier.
 				- [code]ray_query_shader_versions[/code]: the number of ray-query shader versions the renderer has created in this process (the startup self-test included), and [code]ray_query_shader_versions_since_tier[/code]: those created since the tier last changed. The software tier creates none: it renders through shaders without ray query.
+				- [code]mid_frame_tier_changes[/code]: the number of frames whose NextGI work ended on another tier than the frame began on. A tier change, including the switch to the software tier when acceleration structures exceed their memory budget ([code]AS_MEMORY[/code]), applies at the start of the next frame, so this stays [code]0[/code].
 				- [code]hardware_ray_tracing_pending[/code]: only present while a [method nextgi_set_hardware_ray_tracing] request waits for a restart; the requested mode.
 			</description>
 		</method>

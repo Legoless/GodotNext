@@ -34,7 +34,18 @@ extends Node
 ## frames each. On the software tier the gather runs the software sibling and no ray-query
 ## ShaderRD is created since the switch (the hardware tier's shader states stay alive, so the
 ## census counts since the tier change); back on the hardware tier the gather runs the hardware
-## shader again.
+## shader again. No frame block changes tier inside its frame (mid_frame_tier_changes 0).
+##
+## --check=budget (start on the hardware tier, hardware_ray_tracing Auto): the tier is fixed for a
+## render frame, and an AS-memory change applies at the next frame's start (#186). After
+## BUDGET_WARMUP_FRAMES frames on the hardware tier it sets debug/as_budget_bytes to 1 byte, so the
+## next AS-builds slot finds AS memory exceeded, and it samples nextgi_get_tier_info() every frame:
+## - the first frame that reports AS memory exceeded (rt_as_memory_exceeded) ended on the hardware
+##   tier, and its gather dispatched (gather_diffuse_dispatches grew). The slot timestamps are
+##   recorded on either tier, so they cannot show the change;
+## - the next frame is SWRT with reason AS_MEMORY, and the tier stays SWRT for BUDGET_FRAMES frames;
+## - then the gather runs the software sibling, no ray-query ShaderRD was created since the switch,
+##   and no frame block changed tier inside its frame (mid_frame_tier_changes 0).
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
@@ -47,6 +58,10 @@ const MAX_EXHAUSTED_SHARE := 0.10
 const MAX_NEAR_SHARE := 0.30
 const MIN_SPREAD := 0.05
 const TOGGLE_FRAMES := 60
+const AS_BUDGET_SETTING := "rendering/global_illumination/nextgi/debug/as_budget_bytes"
+const BUDGET_WARMUP_FRAMES := 60
+const BUDGET_WAIT_FRAMES := 30
+const BUDGET_FRAMES := 60
 
 var mode := "smoke"
 var expected_tier := "SWRT"
@@ -61,6 +76,9 @@ var done := false
 var toggle_phase := 0
 var toggle_frame := 0
 var toggle_log := []
+var budget_phase := 0
+var budget_frame := 0
+var budget_dispatches := -1
 
 
 func _ready() -> void:
@@ -71,8 +89,8 @@ func _ready() -> void:
 			expected_tier = arg.trim_prefix("--expected-tier=")
 		elif arg.begins_with("--hwrt-world-hits="):
 			hwrt_world_hits = int(arg.trim_prefix("--hwrt-world-hits="))
-	if mode != "smoke" and mode != "toggle":
-		_finish(["unknown --check=%s (smoke or toggle)" % mode])
+	if mode != "smoke" and mode != "toggle" and mode != "budget":
+		_finish(["unknown --check=%s (smoke, toggle or budget)" % mode])
 		return
 	if expected_tier != "SWRT" and expected_tier != "HWRT":
 		_finish(["--expected-tier must be SWRT or HWRT"])
@@ -107,6 +125,9 @@ func _process(_delta: float) -> void:
 	frames += 1
 	if mode == "toggle":
 		_process_toggle()
+		return
+	if mode == "budget":
+		_process_budget()
 		return
 	if frames <= WARMUP_FRAMES:
 		return
@@ -144,6 +165,8 @@ func _process_toggle() -> void:
 		failures.append("phase %d: the gather ran the %s shader on the %s tier" % [toggle_phase, String(info.get("gather_tier", "")), expected])
 	if toggle_phase == 1 and int(info.get("ray_query_shader_versions_since_tier", -1)) != 0:
 		failures.append("%d ray-query ShaderRD versions were created after the switch to the software tier" % [int(info.get("ray_query_shader_versions_since_tier", -1))])
+	if int(info.get("mid_frame_tier_changes", -1)) != 0:
+		failures.append("phase %d: %d frame blocks changed tier inside their frame" % [toggle_phase, int(info.get("mid_frame_tier_changes", -1))])
 	toggle_frame = 0
 	toggle_phase += 1
 	if toggle_phase == 1:
@@ -152,6 +175,74 @@ func _process_toggle() -> void:
 		RenderingServer.nextgi_set_hardware_ray_tracing(0)
 	else:
 		_finish(failures)
+
+
+func _process_budget() -> void:
+	budget_frame += 1
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	var tier := String(info.get("tier", ""))
+	var exceeded := bool(info.get("rt_as_memory_exceeded", false))
+	var dispatches := int(info.get("gather_diffuse_dispatches", 0))
+	if budget_phase == 0:
+		# Steady frames on the hardware tier, then the 1-byte budget.
+		if budget_frame < BUDGET_WARMUP_FRAMES:
+			return
+		if tier != "HWRT" or String(info.get("gather_tier", "")) != "HWRT" or exceeded:
+			_finish(["the run did not settle on the hardware tier (tier %s, gather %s, AS memory exceeded %s)" % [tier, String(info.get("gather_tier", "")), exceeded]])
+			return
+		budget_dispatches = dispatches
+		ProjectSettings.set_setting(AS_BUDGET_SETTING, 1)
+		budget_phase = 1
+		budget_frame = 0
+		return
+	var entry := {
+		"phase": budget_phase,
+		"frame": budget_frame,
+		"tier": tier,
+		"reason": info.get("reason", ""),
+		"as_memory_exceeded": exceeded,
+		"gather_tier": info.get("gather_tier", ""),
+		"gather_diffuse_dispatches": dispatches,
+		"mid_frame_tier_changes": info.get("mid_frame_tier_changes", -1),
+	}
+	if budget_phase == 1:
+		# The frame that first exceeds the budget keeps its tier to the end.
+		if tier == "HWRT" and not exceeded:
+			if budget_frame >= BUDGET_WAIT_FRAMES:
+				_finish(["AS memory was not reported exceeded within %d frames of a 1-byte budget" % BUDGET_WAIT_FRAMES])
+				return
+			budget_dispatches = dispatches
+			return
+		print("SWRT_GI_BUDGET %s" % [entry])
+		if tier != "HWRT":
+			failures.append("the frame that exceeded AS memory ended on the %s tier, not the HWRT tier it began on" % tier)
+		if dispatches <= budget_dispatches:
+			failures.append("the gather did not dispatch in the frame that exceeded AS memory (%d dispatches, %d before)" % [dispatches, budget_dispatches])
+		budget_phase = 2
+		budget_frame = 0
+		return
+	if budget_phase == 2:
+		# The next frame starts on the software tier.
+		print("SWRT_GI_BUDGET %s" % [entry])
+		if tier != "SWRT" or String(info.get("reason", "")) != "AS_MEMORY":
+			failures.append("the frame after AS memory was exceeded is %s/%s, expected SWRT/AS_MEMORY" % [tier, String(info.get("reason", ""))])
+		budget_phase = 3
+		budget_frame = 0
+		return
+	if tier != "SWRT":
+		failures.append("the tier went back to %s %d frames after the budget switch" % [tier, budget_frame])
+		_finish(failures)
+		return
+	if budget_frame < BUDGET_FRAMES:
+		return
+	print("SWRT_GI_BUDGET %s" % [entry])
+	if String(info.get("gather_tier", "")) != "SWRT":
+		failures.append("the gather ran the %s shader after the budget switch" % [String(info.get("gather_tier", ""))])
+	if int(info.get("ray_query_shader_versions_since_tier", -1)) != 0:
+		failures.append("%d ray-query ShaderRD versions were created after the budget switch" % [int(info.get("ray_query_shader_versions_since_tier", -1))])
+	if int(info.get("mid_frame_tier_changes", -1)) != 0:
+		failures.append("%d frame blocks changed tier inside their frame" % [int(info.get("mid_frame_tier_changes", -1))])
+	_finish(failures)
 
 
 func _spread() -> float:

@@ -3286,7 +3286,9 @@ TEST_CASE("[NextGI] Relight ray fractions land on the scheduled cards by page ke
 	CHECK(relight.get_card_ray_fraction(lite_test_instance(1), UINT32_MAX, 0) == doctest::Approx(0.5f));
 }
 
-// GodotNext: nextgi_frame_tier (#186)
+// GodotNext: nextgi_frame_tier (#186). The helpers' rule only: render_frame()'s AS-builds slot,
+// which must report the budget through note_as_memory_budget() rather than change the tier, needs
+// a device. swrt_gi_check --check=budget covers that call site on the GPU.
 TEST_CASE("[NextGI] Frame tier: an AS budget change applies at the next frame") {
 	RendererRD::NextGI next_gi;
 	String line;

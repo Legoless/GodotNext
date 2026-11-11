@@ -23,7 +23,8 @@ extends Node
 ## - reflection-probe faces render in some frames and never add a NextGI block;
 ## after the run: the normal-roughness prepass texture exists (the forced prepass with SSAO, SSR,
 ## SSIL and SDFGI off) and RB_TEX_AMBIENT is 1920x1080, or 960x540 under gi/use_half_resolution.
-## Per tier, from RenderingServer.nextgi_get_tier_info():
+## No frame block changed tier inside its frame (mid_frame_tier_changes 0). Per tier, from
+## RenderingServer.nextgi_get_tier_info():
 ## - HWRT: the RT scene runs inside the block's AS slots (#243): by the end it holds TLAS instances
 ##   and has rebuilt the TLAS, and the result reports the widest GPU time each AS slot took
 ##   between its timestamp and the next one (tracked on warmup frames too, when the static
@@ -280,6 +281,8 @@ func _final_failures() -> PackedStringArray:
 		if probe.ambient_size != _expected_ambient_size():
 			result.append("RB_TEX_AMBIENT is %s, expected %s" % [probe.ambient_size, _expected_ambient_size()])
 		var tier_info: Dictionary = RenderingServer.nextgi_get_tier_info()
+		if int(tier_info.get("mid_frame_tier_changes", -1)) != 0:
+			result.append("%d frame blocks changed tier inside their frame" % [int(tier_info.get("mid_frame_tier_changes", -1))])
 		if tier == "HWRT":
 			# The RT scene's only caller is the frame block's AS slots (#243), so its
 			# counters prove the AS work ran inside them.

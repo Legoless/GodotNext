@@ -3,7 +3,7 @@
 # the same view, then the software-tier pass against it.
 #
 # Usage:
-#   run_swrt_gi_check.sh [--mode=smoke|reflect|toggle] -- <godot> <godot arguments without a scene>
+#   run_swrt_gi_check.sh [--mode=smoke|reflect|toggle|budget] -- <godot> <godot arguments without a scene>
 #
 # --mode=smoke (default): res://tests/swrt_gi/swrt_gi_check.tscn on the kitbash at High and at
 #   Epic (quality 2 and 3).
@@ -11,6 +11,9 @@
 # --mode=toggle: swrt_gi_check.tscn --check=toggle at High, started with hardware_ray_tracing Auto:
 #   HWRT, then SWRT, then HWRT again through the runtime switch. It needs a device with the HWRT
 #   tier; elsewhere it fails.
+# --mode=budget: swrt_gi_check.tscn --check=budget at High, started with hardware_ray_tracing Auto:
+#   HWRT until debug/as_budget_bytes drops to 1 byte at runtime, then SWRT (AS_MEMORY) from the next
+#   frame on. It needs a device with the HWRT tier; elsewhere it fails.
 #
 # Each pass writes godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true, the
 # pass's hardware_ray_tracing (0 Auto for the reference, 1 Off for the software tier) and the
@@ -43,7 +46,7 @@ RECORDED_REFLECTION_HITS_HIGH=30409
 mode=smoke
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--mode=smoke | --mode=reflect | --mode=toggle)
+	--mode=smoke | --mode=reflect | --mode=toggle | --mode=budget)
 		mode="${1#--mode=}"
 		shift
 		;;
@@ -116,8 +119,8 @@ if [[ "$mode" == "smoke" ]]; then
 		run_pass 1 "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=SWRT --hwrt-world-hits="$hits"
 		[[ "$pass_status" -ne 0 ]] && failed=1
 	done
-elif [[ "$mode" == "toggle" ]]; then
-	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=toggle
+elif [[ "$mode" == "toggle" || "$mode" == "budget" ]]; then
+	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check="$mode"
 	[[ "$pass_status" -ne 0 ]] && failed=1
 else
 	hits=$(reference reflection_hits "$RECORDED_REFLECTION_HITS_HIGH" 2 res://tests/nextgi_reflect/run_reflect.tscn --expected-tier=HWRT)

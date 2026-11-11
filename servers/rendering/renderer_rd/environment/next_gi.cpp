@@ -881,6 +881,8 @@ Dictionary NextGI::get_tier_info() const {
 	// process, and since begin_frame() last saw a tier change.
 	info["ray_query_shader_versions"] = int64_t(ShaderRD::get_ray_query_versions_created());
 	info["ray_query_shader_versions_since_tier"] = int64_t(get_ray_query_versions_since_tier());
+	// GodotNext: nextgi_frame_tier (#186). Stays 0: a tier change applies at a frame's start.
+	info["mid_frame_tier_changes"] = int64_t(mid_frame_tier_changes);
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
@@ -1308,6 +1310,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 			swrt_trace->update_scene(p_render_data);
 			swrt_trace->prepare_scene_params(voxel_lighting);
 		} else if (slot == PASS_SLOT_AS_BUILDS && rt_scene != nullptr) {
+			// GodotNext: nextgi_frame_tier (#186). debug/as_budget_bytes lowers the AS memory budget,
+			// so a check can exceed it at runtime (swrt_gi_check --check=budget).
+			const int64_t budget_override = GLOBAL_GET_CACHED(int64_t, "rendering/global_illumination/nextgi/debug/as_budget_bytes");
+			rt_scene->set_as_budget_bytes(budget_override > 0 ? uint64_t(budget_override) : NEXTGI_RT_AS_BUDGET_BYTES);
 			rt_scene->build_dirty_blas(p_render_data);
 			// GodotNext: nextgi_frame_tier (#186). The rest of this frame keeps its tier; a budget
 			// change applies at the next frame's begin_frame().
@@ -1361,6 +1367,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		rt_scene->compact_after_traces();
 	}
 	// GodotNext: nextgi_frame_tier (#186). begin_frame() owns _ensure_rt_scene() on a tier change.
+	// The block ran on the tier its frame began on; a change applied inside it is counted.
+	if (frame_tier_valid && result.tier != frame_tier) {
+		mid_frame_tier_changes++;
+	}
 
 	rd->draw_command_end_label();
 	RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[PASS_SLOT_END].name, view_index, multiview));
