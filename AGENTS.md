@@ -13,6 +13,7 @@ GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.9 ren
   - §19: the clean room.
 - **The work breakdown:** issues on `Legoless/GodotNext`. The roadmap tracker is #2, the phase epics are its sub-issues, and the final test phase is #224.
 - **The build tracker:** `docs/godotnext/tracker/index.html`, the project-manager view of progress.
+- **Local working files:** the git-ignored `local/` folder holds pages and exports that are not committed, such as the lead-decisions page `local/decisions/index.html`.
 
 ## Rules
 

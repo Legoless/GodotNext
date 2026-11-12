@@ -410,3 +410,6 @@ libsdk_nvngx.a
 nvngx_*.dll
 libnvidia-ngx*.so*
 sl_nvperf.*
+
+# Local working files (pages, exports), never committed.
+/local/
