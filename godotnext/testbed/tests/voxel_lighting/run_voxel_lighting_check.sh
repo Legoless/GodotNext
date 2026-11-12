@@ -3,8 +3,9 @@
 #   res://tests/voxel_lighting/voxel_slot_check.tscn (GPU texture space, direction slots, D6,
 #   readback gating, refill after a tier switch) at quality High on the hardware tier,
 #   res://tests/voxel_lighting/voxel_thin_wall_check.tscn (no light through 0.2 m walls, from
-#   either room, whose inside voxel centers lie within the mesh SDF's eps of a face) at quality
-#   High on the hardware tier, and
+#   either room, whose inside voxel centers lie within the mesh SDF's eps of a face, and no
+#   light through a 10 cm or 20 cm wall into the dark room beside it) at quality High on the
+#   hardware tier, on the software tier and under debug/deny_ray_query, and
 #   res://tests/voxel_lighting/voxel_lighting_check.tscn (kitbash stores hits and covers some)
 #   at quality High, where it must print VOXEL_LIGHTING_ASSERTED, and again at quality Medium
 #   (Lumen Lite), where it must print its coverage on a VOXEL_LIGHTING_LITE line for information.
@@ -72,6 +73,7 @@ trap cleanup EXIT
 # "device" for the device's Auto pick).
 if [[ "$deny" == true ]]; then
 	runs=(
+		"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 0 - -"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED SWRT"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE SWRT"
 		"res://tests/voxel_lighting/voxel_relight_frame_check.tscn 2 0 VOXEL_RELIGHT_FRAME_OK SWRT"
@@ -80,6 +82,7 @@ else
 	runs=(
 		"res://tests/voxel_lighting/voxel_slot_check.tscn 2 0 - -"
 		"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 0 - -"
+		"res://tests/voxel_lighting/voxel_thin_wall_check.tscn 2 1 - -"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED device"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE device"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 1 VOXEL_LIGHTING_ASSERTED SWRT"

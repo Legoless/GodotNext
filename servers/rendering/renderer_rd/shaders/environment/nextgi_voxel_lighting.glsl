@@ -166,7 +166,9 @@ void main() {
 		return;
 	}
 	uint item = 1u + id * SHADE_STRIDE;
-	uint sample_index = voxel_staging.data[item];
+	// Bits 28-31 are the side-offset code. The sample index fits in the low bits.
+	uint sample_index = voxel_staging.data[item] & 0x0fffffffu;
+	uint side_code = voxel_staging.data[item] >> 28u;
 	uint page_table = voxel_staging.data[item + 1u];
 	uint card_set_index = voxel_staging.data[item + 2u];
 	vec3 position = uintBitsToFloat(uvec3(voxel_staging.data[item + 3u], voxel_staging.data[item + 4u], voxel_staging.data[item + 5u]));
@@ -178,7 +180,7 @@ void main() {
 	bool covered = resample_src(position, normal, page_table, card_set_index, radiance, projection);
 	// The weight counts a missing card as 0 and otherwise the projection cosine.
 	uint weight = covered ? uint(projection * 255.0 + 0.5) : 0u;
-	uint packed = covered ? nextgi_voxel_pack_r11g11b10(radiance) : 0u;
+	uint packed = covered ? (nextgi_voxel_pack_slot_color(radiance) | (side_code << 28u)) : 0u;
 	voxel_radiance.data[sample_index] = packed;
 	store_weight(voxel, direction, weight);
 	if ((params.flags & FLAG_COUNT) != 0u) {

@@ -18,6 +18,10 @@ extends Node3D
 ## Room B lit: the room-B face and box B are lit and covered, and the room-A face is dark and
 ## read from its room-A voxel only (its weight is that voxel's trilinear share). Room A lit: the
 ## room-A face is lit, and box B's face is dark.
+##
+## Side setups add a 10 cm wall and a 20 cm wall, lit from room B. A box in room A faces the
+## wall from 3 cm away. Its face must read no light from the lit face. The lookup drops a slot
+## whose surface is on the far side of the sample. The same scene runs on the software tier.
 
 const READBACK := "rendering/global_illumination/nextgi/debug/voxel_lighting_readback"
 const WALL_THICKNESS := 0.2
@@ -30,6 +34,15 @@ const SETUPS := [
 	{"x": 2.0, "low": -0.03, "gap": 0.37, "lit": "B"},
 	{"x": -5.0, "low": -0.07, "gap": 0.03, "lit": "A"},
 	{"x": 5.0, "low": -0.03, "gap": 0.03, "lit": "A"},
+]
+# Lit from room B. The dark box faces the wall from room A, 3 cm off the room-A face.
+# Narrow, and stacked along z inside the level-0 clipmap (the camera sits at z = -4),
+# above the four walls so these lights do not reach them. The 20 cm wall at z = -3.63
+# puts a voxel center 7 cm from the lit face, the alignment that used to leak. The 10 cm
+# wall at z = 0.05 has a voxel center in the middle of the wall.
+const SIDE_SETUPS := [
+	{"x": 0.0, "y": 4.8, "low": -3.63, "thickness": 0.2, "gap": 0.03, "width": 2.0},
+	{"x": 0.0, "y": 4.8, "low": 0.05, "thickness": 0.1, "gap": 0.03, "width": 2.0},
 ]
 # Room A's light: this far in front of the room-A face, with a range that ends 3 cm short of
 # box B (light to box B is ROOM_A_LIGHT_DISTANCE + WALL_THICKNESS + gap).
@@ -78,6 +91,27 @@ func _ready() -> void:
 		light.light_energy = 8.0
 		light.shadow_enabled = false
 		add_child(light)
+	for setup: Dictionary in SIDE_SETUPS:
+		var x: float = setup["x"]
+		var y: float = setup["y"]
+		var low: float = setup["low"]
+		var thickness: float = setup["thickness"]
+		var gap: float = setup["gap"]
+		var side_width: float = setup["width"]
+		var high := low + thickness
+		_add_box("SideWall", Vector3(x, y, low + thickness * 0.5), Vector3(side_width, 2.2, thickness), material)
+		# Black, so a lit lookup on this face is the wall's light coming through the side test.
+		var black := StandardMaterial3D.new()
+		black.albedo_color = Color(0.0, 0.0, 0.0)
+		_add_box("SideBoxA", Vector3(x, y, low - gap - 0.2), Vector3(side_width, 2.2, 0.4), black)
+		var light := OmniLight3D.new()
+		# 1.5 m past the lit face, range 1.60 m: the lit face's center is inside the sphere and
+		# the dark face (at least 13 cm past the lit face) is outside it.
+		light.position = Vector3(x, y, high + 1.50)
+		light.omni_range = 1.60
+		light.light_energy = 64.0
+		light.shadow_enabled = false
+		add_child(light)
 
 	var camera := Camera3D.new()
 	add_child(camera)
@@ -115,8 +149,9 @@ func _process(_delta: float) -> void:
 		if _frames > PROBE_UNTIL_FRAME:
 			_fail("no probes with %s on (tier %s)" % [READBACK, str(info.get("tier", ""))])
 		return
-	if str(info.get("tier", "")) != "HWRT":
-		_fail("needs the HWRT tier for SRC relight, got %s" % str(info.get("tier", "")))
+	var tier := str(info.get("tier", ""))
+	if tier != "HWRT" and tier != "SWRT":
+		_fail("needs the HWRT or SWRT tier for SRC relight, got %s" % tier)
 		return
 	# Judge a fully traced volume: in this static scene the re-trace stops once the fill is done.
 	if int(info.get("voxel_lighting_retrace", -1)) != 0:
@@ -133,39 +168,74 @@ func _process(_delta: float) -> void:
 	var buckets := []
 	for setup: Dictionary in SETUPS:
 		buckets.append({"room_a": [0, 0.0, 0, 0.0, 0.0], "room_b": [0, 0.0, 0, 0.0, 0.0], "box": [0, 0.0, 0, 0.0, 0.0], "box_lit": [0, 0.0, 0, 0.0, 0.0]})
+	var side_buckets := []
+	for setup: Dictionary in SIDE_SETUPS:
+		side_buckets.append({"lit": [0, 0.0, 0, 0.0, 0.0], "dark": [0, 0.0, 0, 0.0, 0.0], "back": [0, 0.0, 0, 0.0, 0.0]})
 	for index in positions.size():
 		var p := positions[index]
 		var n := normals[index]
 		var r := results[index]
-		if p.y < 0.5 or p.y > WALL_HEIGHT - 0.5:
-			continue
-		for setup_index in SETUPS.size():
-			var setup: Dictionary = SETUPS[setup_index]
-			var x: float = setup["x"]
-			if absf(p.x - x) > WALL_WIDTH * 0.5 - 0.4:
+		if p.y >= 0.5 and p.y <= WALL_HEIGHT - 0.5:
+			for setup_index in SETUPS.size():
+				var setup: Dictionary = SETUPS[setup_index]
+				var x: float = setup["x"]
+				if absf(p.x - x) > WALL_WIDTH * 0.5 - 0.4:
+					continue
+				var low: float = setup["low"]
+				var high := low + WALL_THICKNESS
+				var keys := []
+				if absf(p.z - low) < 0.03 and n.z < -0.9:
+					keys.append("room_a")
+				elif absf(p.z - high) < 0.03 and n.z > 0.9:
+					keys.append("room_b")
+				elif absf(p.z - (high + float(setup["gap"]))) < 0.03 and n.z < -0.9:
+					keys.append("box")
+					if Vector2(p.x - x, p.y - WALL_HEIGHT * 0.5).length() < LIT_RADIUS:
+						keys.append("box_lit")
+				for key: String in keys:
+					var bucket: Array = buckets[setup_index][key]
+					var luminance := _luminance(r)
+					bucket[0] += 1
+					bucket[1] += luminance
+					if r.a >= 0.5:
+						bucket[2] += 1
+					bucket[3] += r.a
+					bucket[4] = maxf(bucket[4], luminance)
+		for setup_index in SIDE_SETUPS.size():
+			var side: Dictionary = SIDE_SETUPS[setup_index]
+			var x: float = side["x"]
+			var side_width: float = side["width"]
+			if absf(p.x - x) > side_width * 0.5 - 0.2:
 				continue
-			var low: float = setup["low"]
-			var high := low + WALL_THICKNESS
-			var keys := []
-			if absf(p.z - low) < 0.03 and n.z < -0.9:
-				keys.append("room_a")
-			elif absf(p.z - high) < 0.03 and n.z > 0.9:
-				keys.append("room_b")
-			elif absf(p.z - (high + float(setup["gap"]))) < 0.03 and n.z < -0.9:
-				keys.append("box")
-				if Vector2(p.x - x, p.y - WALL_HEIGHT * 0.5).length() < LIT_RADIUS:
-					keys.append("box_lit")
-			for key: String in keys:
-				var bucket: Array = buckets[setup_index][key]
-				var luminance := _luminance(r)
-				bucket[0] += 1
-				bucket[1] += luminance
-				if r.a >= 0.5:
-					bucket[2] += 1
-				bucket[3] += r.a
-				bucket[4] = maxf(bucket[4], luminance)
-	_last_stats = {"frame": _frames, "probes": positions.size(), "setups": buckets}
+			var low: float = side["low"]
+			var thickness: float = side["thickness"]
+			var high := low + thickness
+			var dark_z := low - float(side["gap"])
+			var in_lit := Vector2(p.x - x, p.y - float(side["y"])).length() < 0.5
+			var key := ""
+			# The dark face is outside the light's range across the whole wall, so it is not
+			# limited to the lit disk. The lit face is, because only that disk is in range.
+			if absf(p.z - high) < 0.05 and n.z > 0.9 and in_lit:
+				key = "lit"
+			elif absf(p.z - dark_z) < 0.05 and n.z > 0.9:
+				key = "dark"
+			elif absf(p.z - low) < 0.05 and n.z < -0.9:
+				key = "back"
+			if key == "":
+				continue
+			var side_bucket: Array = side_buckets[setup_index][key]
+			var side_luminance := _luminance(r)
+			side_bucket[0] += 1
+			side_bucket[1] += side_luminance
+			if r.a >= 0.5:
+				side_bucket[2] += 1
+			side_bucket[3] += r.a
+			side_bucket[4] = maxf(side_bucket[4], side_luminance)
+	_last_stats = {"frame": _frames, "probes": positions.size(), "setups": buckets, "sides": side_buckets}
 	var failure := _probe_failure(buckets)
+	var side_failure := _side_failure(side_buckets)
+	if side_failure != "":
+		failure = side_failure if failure == "" else "%s; %s" % [failure, side_failure]
 	if failure != "":
 		# SRC capture and relight can still be converging. Give them until PROBE_UNTIL_FRAME.
 		if _frames > PROBE_UNTIL_FRAME:
@@ -228,3 +298,26 @@ func _setup_failure(p_setup: Dictionary, p_buckets: Dictionary) -> String:
 	if failures.is_empty():
 		return ""
 	return "%s: %s" % [name, ", ".join(failures)]
+
+
+func _side_failure(p_buckets: Array) -> String:
+	var failures := PackedStringArray()
+	for setup_index in SIDE_SETUPS.size():
+		var setup: Dictionary = SIDE_SETUPS[setup_index]
+		var name := "%.0f cm wall at z %.2f" % [float(setup["thickness"]) * 100.0, float(setup["low"])]
+		var lit: Array = p_buckets[setup_index]["lit"]
+		var dark: Array = p_buckets[setup_index]["dark"]
+		if int(lit[0]) < 8:
+			failures.append("%s: only %d lit probes" % [name, int(lit[0])])
+			continue
+		if int(dark[0]) < 8:
+			failures.append("%s: only %d dark probes" % [name, int(dark[0])])
+			continue
+		var lit_max := float(lit[4])
+		var dark_max := float(dark[4])
+		if lit_max <= 0.25:
+			failures.append("%s: lit face is dark (max %.4f)" % [name, lit_max])
+		# The dark face's brightest probe. A mean hides a leak that only some probes read.
+		if dark_max > 0.02:
+			failures.append("%s: dark face max %.4f leaks the lit face %.4f through the wall" % [name, dark_max, lit_max])
+	return "; ".join(failures)

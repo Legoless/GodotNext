@@ -64,17 +64,23 @@ class NextGIRelight;
 // center touches goes only to the slots of the axes it faces. A center just
 // inside a solid (within eps of its surface, as in any thin wall) takes no
 // surface found past the solid along the axes that surface faces. Lookup reads
-// the slot whose stored surface faces the query. Only geometry dirty bricks
-// are re-traced, plus every instance's bricks when a level is created and an
-// instance's bricks when its mesh SDF arrives. Dirty bricks go before those
-// fill bricks. A new or refilled volume traces its fill bricks nearest the
-// camera first, then outward, still within the per-frame ray budget. A lookup
-// weight below 0.5 falls back to the WRC.
+// the slot whose stored surface faces the query, then rejects that slot when
+// the sample lies behind the stored surface. The surface is a plane through
+// the hit, perpendicular to the slot axis, so a wall of 10 cm or more does not
+// leak a face into the room on its far side (plan §21.2 L5, §21.2.6). Only
+// geometry dirty bricks are re-traced, plus every instance's bricks when a
+// level is created and an instance's bricks when its mesh SDF arrives. Dirty
+// bricks go before those fill bricks. A new or refilled volume traces its fill
+// bricks nearest the camera first, then outward, still within the per-frame
+// ray budget. A lookup weight below 0.5 falls back to the WRC.
 //
 // Hits are stored in instance-local space. Every frame the GPU resamples the
 // SRC with the D6 rule: the best-aligned card whose captured material depth
 // matches the hit within 2 card texels. The GPU volume is radiance plus
-// weights. There is no visibility buffer: the per-voxel hits live on the CPU.
+// weights. Each radiance word keeps a 4-bit signed offset of its surface along
+// the slot axis (in voxel units, clamped to [-1, 1]) in its top bits, and the
+// color in the low 28 bits, so the volume stays within 32 MiB. There is no
+// visibility buffer: the per-voxel hits live on the CPU.
 class NextGIVoxelLighting {
 public:
 	static constexpr uint32_t LEVELS = 4;
@@ -104,6 +110,14 @@ public:
 	static constexpr int R11G11B10_BIAS = 15;
 	static constexpr int R11G11B10_MAX_STORED = 30;
 	static constexpr float R11G11B10_MAX_11 = 65024.0f;
+	// Top bits of a stored radiance word. The offset is in voxel units along the
+	// surface normal (-direction), clamped to [-1, 1]. One voxel of reach is all
+	// a trilinear lookup can see, so a farther surface clamps to the same side.
+	static constexpr uint32_t SIDE_OFFSET_BITS = 4;
+	static constexpr uint32_t SIDE_OFFSET_MAX = (1u << SIDE_OFFSET_BITS) - 1u;
+	static constexpr uint32_t SIDE_OFFSET_SHIFT = 28;
+	// Accept a sample this far behind the quantized plane. Shared with the GLSL lookup.
+	static constexpr float SIDE_ACCEPT_EPSILON = 1.0e-4f;
 
 	// Bytes passed to storage_buffer_create. Visibility is not allocated.
 	static constexpr uint64_t radiance_buffer_bytes() { return uint64_t(VOXEL_COUNT) * DIRECTIONS * 4u; }
@@ -136,6 +150,17 @@ public:
 
 	static uint32_t pack_r11g11b10(const Color &p_color);
 	static Color unpack_r11g11b10(uint32_t p_packed);
+	// Signed axis offset, in voxel units, rounded toward -1 so the stored plane
+	// is never in front of the true surface. Code 0 is -1, code 15 is +1.
+	static uint32_t pack_side_offset(float p_voxels);
+	static float unpack_side_offset(uint32_t p_code);
+	// Radiance word: reduced positive floats in bits 0-27 (R and G with 5
+	// mantissa bits, B with 3) and the side-offset code in bits 28-31.
+	static uint32_t pack_slot_word(const Color &p_color, uint32_t p_side_code);
+	static void unpack_slot_word(uint32_t p_packed, Color &r_color, float &r_side_offset);
+	// True when p_sample is on the front of the plane, or on it. The plane sits
+	// p_offset_voxels along p_face_normal from p_center. p_face_normal is -direction.
+	static bool accepts_surface(const Vector3 &p_sample, const Vector3 &p_center, const Vector3 &p_face_normal, float p_offset_voxels, float p_voxel_size);
 	// Unit normal to two unorm16 octahedral components, as the GPU decodes it.
 	static uint32_t pack_normal(const Vector3 &p_normal);
 	static Vector3 unpack_normal(uint32_t p_packed);
@@ -185,6 +210,10 @@ public:
 	};
 	// Three axis directions whose stored surfaces face the gradient, blended by |normal|.
 	static LookupResult lookup(const Vector3 &p_gradient, const DirectionSample p_samples[DIRECTIONS], const Color &p_wrc);
+	// lookup() after the side test. p_offsets[d] is the stored offset in voxel units
+	// along -direction(d). A rejected slot adds nothing, and the weight is the blend
+	// of the slots that remain. Below 0.5 the result is p_wrc.
+	static LookupResult lookup_accepted(const Vector3 &p_sample, const Vector3 &p_center, float p_voxel_size, const Vector3 &p_gradient, const DirectionSample p_samples[DIRECTIONS], const float p_offsets[DIRECTIONS], const Color &p_wrc);
 
 	struct TraceInstance {
 		uint32_t id = 0;

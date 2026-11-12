@@ -51,6 +51,7 @@
 static_assert(NextGIVoxelLighting::allocated_volume_bytes() == 33554432ull, "Voxel lighting buffers must stay within 32 MiB.");
 static_assert(NextGIVoxelLighting::visibility_buffer_bytes() == 0, "Voxel lighting does not allocate a visibility buffer.");
 static_assert(NextGIVoxelLighting::radiance_buffer_bytes() + NextGIVoxelLighting::weight_buffer_bytes() + NextGIVoxelLighting::staging_buffer_bytes() == NextGIVoxelLighting::allocated_volume_bytes(), "volume_bytes must be the sum of the real buffers.");
+static_assert(NextGIVoxelLighting::VOXEL_COUNT * NextGIVoxelLighting::DIRECTIONS <= (1u << NextGIVoxelLighting::SIDE_OFFSET_SHIFT), "The shade key must leave the top bits free for the side offset.");
 
 static constexpr float VOXEL_LIGHTING_HUGE = 1.0e20f;
 // Same values as nextgi_voxel_lighting.glsl.
@@ -261,6 +262,43 @@ Color NextGIVoxelLighting::unpack_r11g11b10(uint32_t p_packed) {
 	return color;
 }
 
+uint32_t NextGIVoxelLighting::pack_side_offset(float p_voxels) {
+	const float clamped = CLAMP(p_voxels, -1.0f, 1.0f);
+	// 16 codes over [-1, 1]. floor keeps the plane on the back side of the surface.
+	const float code = Math::floor((clamped + 1.0f) * (float(SIDE_OFFSET_MAX) * 0.5f));
+	if (!(code > 0.0f)) {
+		return 0;
+	}
+	return MIN(uint32_t(code), SIDE_OFFSET_MAX);
+}
+
+float NextGIVoxelLighting::unpack_side_offset(uint32_t p_code) {
+	return float(p_code & SIDE_OFFSET_MAX) * (2.0f / float(SIDE_OFFSET_MAX)) - 1.0f;
+}
+
+uint32_t NextGIVoxelLighting::pack_slot_word(const Color &p_color, uint32_t p_side_code) {
+	const uint32_t red = _pack_positive_float(p_color.r, 5);
+	const uint32_t green = _pack_positive_float(p_color.g, 5);
+	const uint32_t blue = _pack_positive_float(p_color.b, 3);
+	return red | (green << 10) | (blue << 20) | ((p_side_code & SIDE_OFFSET_MAX) << SIDE_OFFSET_SHIFT);
+}
+
+void NextGIVoxelLighting::unpack_slot_word(uint32_t p_packed, Color &r_color, float &r_side_offset) {
+	r_color.r = _unpack_positive_float(p_packed & 0x3FFu, 5);
+	r_color.g = _unpack_positive_float((p_packed >> 10) & 0x3FFu, 5);
+	r_color.b = _unpack_positive_float((p_packed >> 20) & 0xFFu, 3);
+	r_color.a = 1.0f;
+	r_side_offset = unpack_side_offset(p_packed >> SIDE_OFFSET_SHIFT);
+}
+
+bool NextGIVoxelLighting::accepts_surface(const Vector3 &p_sample, const Vector3 &p_center, const Vector3 &p_face_normal, float p_offset_voxels, float p_voxel_size) {
+	if (!(p_voxel_size > 0.0f) || p_face_normal.length_squared() <= 1.0e-12f) {
+		return false;
+	}
+	const float along = p_face_normal.dot(p_sample - p_center) / p_voxel_size;
+	return along + SIDE_ACCEPT_EPSILON >= p_offset_voxels;
+}
+
 uint32_t NextGIVoxelLighting::pack_normal(const Vector3 &p_normal) {
 	const Vector3 normal = p_normal.length_squared() > 1e-12f ? p_normal.normalized() : Vector3(0.0f, 0.0f, 1.0f);
 	const Vector2 oct = normal.octahedron_encode();
@@ -386,6 +424,21 @@ NextGIVoxelLighting::LookupResult NextGIVoxelLighting::lookup(const Vector3 &p_g
 	result.radiance = blend.preweighted / blend.weight;
 	result.used_wrc = false;
 	return result;
+}
+
+NextGIVoxelLighting::LookupResult NextGIVoxelLighting::lookup_accepted(const Vector3 &p_sample, const Vector3 &p_center, float p_voxel_size, const Vector3 &p_gradient, const DirectionSample p_samples[DIRECTIONS], const float p_offsets[DIRECTIONS], const Color &p_wrc) {
+	DirectionSample accepted[DIRECTIONS];
+	if (p_samples != nullptr) {
+		for (uint32_t direction = 0; direction < DIRECTIONS; direction++) {
+			accepted[direction] = p_samples[direction];
+			const float offset = p_offsets != nullptr ? p_offsets[direction] : unpack_side_offset(0);
+			if (!accepts_surface(p_sample, p_center, -direction_vector(direction), offset, p_voxel_size)) {
+				accepted[direction].weight = 0.0f;
+				accepted[direction].radiance = Color(0.0f, 0.0f, 0.0f, 1.0f);
+			}
+		}
+	}
+	return lookup(p_gradient, p_samples != nullptr ? accepted : nullptr, p_wrc);
 }
 
 namespace {
@@ -1375,7 +1428,21 @@ void NextGIVoxelLighting::shade(const TraceInstance *p_instances, uint32_t p_cou
 		if (instance == nullptr || instance->card_set == UINT32_MAX || instance->page_table == EMPTY_VISIBILITY || (instance->page_table & PAGE_EVICTED_BIT) != 0) {
 			unpaged_hits++;
 		}
-		gpu_shade_words.push_back(entry.key);
+		// The top 4 bits of the key carry the surface's axis offset. The index fits below them.
+		uint32_t side_code = 0;
+		const uint32_t direction = entry.key % DIRECTIONS;
+		const uint32_t voxel_key = entry.key / DIRECTIONS;
+		const uint32_t level = voxel_key / VOXELS_PER_LEVEL;
+		if (level < LEVELS && origin_set[level]) {
+			const Vector3i physical = voxel_coord(voxel_key % VOXELS_PER_LEVEL);
+			const Vector3i lighting_origin = _lighting_origin(origins[level]);
+			const Vector3i local(wrap_coord(physical.x - lighting_origin.x), wrap_coord(physical.y - lighting_origin.y), wrap_coord(physical.z - lighting_origin.z));
+			const float voxel_size = level_voxel_size(level);
+			const Vector3 center = voxel_center(level, origins[level], local);
+			const float offset = voxel_size > 0.0f ? (-direction_vector(direction)).dot(entry.value.position - center) / voxel_size : 0.0f;
+			side_code = pack_side_offset(offset);
+		}
+		gpu_shade_words.push_back(entry.key | (side_code << SIDE_OFFSET_SHIFT));
 		gpu_shade_words.push_back(instance != nullptr ? instance->page_table : EMPTY_VISIBILITY);
 		gpu_shade_words.push_back(instance != nullptr ? instance->card_set : UINT32_MAX);
 		uint32_t bits[3];

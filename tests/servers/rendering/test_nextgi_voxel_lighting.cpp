@@ -121,7 +121,9 @@ struct VoxelLookupShare {
 	float total = 0.0f;
 };
 
-static VoxelLookupShare _lookup_share(const NextGIVoxelLighting &p_lighting, const Vector3i &p_sdf_origin, const Vector3 &p_world, uint32_t p_axis, bool p_positive) {
+// p_side applies the quantized axis-plane test the GPU lookup uses. Without it the share is
+// the trilinear weight of every corner that stored the slot, which is how a thin wall leaks.
+static VoxelLookupShare _lookup_share(const NextGIVoxelLighting &p_lighting, const Vector3i &p_sdf_origin, const Vector3 &p_world, uint32_t p_axis, bool p_positive, bool p_side = true) {
 	VoxelLookupShare share;
 	const float size = NextGIVoxelLighting::level_voxel_size(0);
 	const Vector3 origin_world = Vector3(p_sdf_origin) * NextGIGlobalSDF::level_voxel_size(0);
@@ -129,12 +131,21 @@ static VoxelLookupShare _lookup_share(const NextGIVoxelLighting &p_lighting, con
 	const Vector3i base(int(Math::floor(coord.x)), int(Math::floor(coord.y)), int(Math::floor(coord.z)));
 	const Vector3 fraction = coord - Vector3(base);
 	const uint32_t slot = NextGIVoxelLighting::facing_direction(p_axis, p_positive);
+	const Vector3 face = -NextGIVoxelLighting::direction_vector(slot);
 	for (uint32_t corner = 0; corner < 8; corner++) {
 		const Vector3i delta(int(corner & 1u), int((corner >> 1u) & 1u), int((corner >> 2u) & 1u));
 		const float weight = (delta.x == 1 ? fraction.x : 1.0f - fraction.x) * (delta.y == 1 ? fraction.y : 1.0f - fraction.y) * (delta.z == 1 ? fraction.z : 1.0f - fraction.z);
 		NextGIVoxelLighting::AxisHit hit;
 		if (!(weight > 0.0f) || !p_lighting.get_stored_hit(0, base + delta, slot, hit)) {
 			continue;
+		}
+		if (p_side) {
+			const Vector3 center = NextGIVoxelLighting::voxel_center(0, p_sdf_origin, base + delta);
+			const float true_offset = face.dot(hit.position - center) / size;
+			const float stored = NextGIVoxelLighting::unpack_side_offset(NextGIVoxelLighting::pack_side_offset(true_offset));
+			if (!NextGIVoxelLighting::accepts_surface(p_world, center, face, stored, size)) {
+				continue;
+			}
 		}
 		REQUIRE(hit.instance < VoxelLookupShare::MAX_ID);
 		share.by_instance[hit.instance] += weight;
@@ -277,6 +288,7 @@ TEST_CASE("[NextGI] Voxel lighting volume stays within 32 MiB") {
 	CHECK_EQ(NextGIVoxelLighting::allocated_volume_bytes(), radiance + weights + staging);
 	CHECK_EQ(NextGIVoxelLighting::allocated_volume_bytes(), 33554432ull);
 	CHECK(NextGIVoxelLighting::allocated_volume_bytes() <= 32ull * 1024ull * 1024ull);
+	// The side offset lives in the top 4 bits of each radiance word, so the buffers do not grow.
 	NextGIVoxelLighting lighting;
 	CHECK_EQ(lighting.get_allocated_bytes(), 0ull);
 	CHECK(Math::is_equal_approx(NextGIVoxelLighting::level_voxel_size(0), 0.2f));
@@ -643,13 +655,11 @@ TEST_CASE("[NextGI] Voxel lighting keeps the far room out of voxels inside a thi
 		}
 	}
 
-	// The limit of one slot per direction. Box A stands in room A, its +Z face 3 cm before the
-	// wall's room-A face, facing the wall. A lookup on it reads slot 5 of the voxel inside the
-	// wall, which holds the room-B face. The voxel serves the side its center is nearer to, so
-	// box A reaches the room-B face only within one lighting voxel of that center: with the
-	// trilinear weight 1 - (d + gap) / voxel, d the center's distance to the room-A face. That is
-	// 0 at 3 cm from the +Z face (d = 0.17) and 0.2 at 7 cm (d = 0.13). No other voxel holds the
-	// room-B face for box A, and a wall two lighting voxels thick passes nothing.
+	// Box A stands in room A, its +Z face 3 cm before the wall's room-A face, facing the wall.
+	// A lookup on it reads slot 5 of the voxel inside the wall, which holds the room-B face.
+	// Without the side test that face reaches box A at trilinear weight 1 - (d + gap) / voxel,
+	// 0 when the center is 3 cm from the +Z face and 0.2 when it is 7 cm away. The side test
+	// drops it: box A is behind the room-B face. The room-B face itself is still read.
 	for (float low : lows) {
 		const float box_a_face = low - 0.03f;
 		const NextGIVoxelLighting::TraceInstance instances[2] = {
@@ -663,13 +673,168 @@ TEST_CASE("[NextGI] Voxel lighting keeps the far room out of voxels inside a thi
 		uint32_t first = 0;
 		_drain(lighting, instances, 2, first);
 		const float reach = MAX(0.0f, 1.0f - ((0.1f - low) + 0.03f) / voxel);
+		const VoxelLookupShare leaked = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, box_a_face), 2, true, false);
 		const VoxelLookupShare box_a = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, box_a_face), 2, true);
 		CHECK(box_a.by_instance[9] > 0.0f);
-		CHECK(Math::abs(box_a.by_instance[3] - reach) < 1e-3f);
+		CHECK(Math::abs(leaked.by_instance[3] - reach) < 1e-3f);
+		CHECK(box_a.by_instance[3] == 0.0f);
 		// The room-B face itself is still read from the voxel inside the wall.
 		const VoxelLookupShare room_b = _lookup_share(lighting, origin, Vector3(0.1f, 0.1f, low + 0.2f), 2, true);
 		CHECK(room_b.by_instance[3] >= NextGIVoxelLighting::WEIGHT_FALLBACK);
 	}
+}
+
+TEST_CASE("[NextGI] Voxel lighting packs a side offset into the radiance word") {
+	CHECK_EQ(NextGIVoxelLighting::pack_side_offset(0.0f), 7u);
+	CHECK_EQ(NextGIVoxelLighting::pack_side_offset(-1.0f), 0u);
+	CHECK_EQ(NextGIVoxelLighting::pack_side_offset(1.0f), NextGIVoxelLighting::SIDE_OFFSET_MAX);
+	CHECK_EQ(NextGIVoxelLighting::pack_side_offset(2.0f), NextGIVoxelLighting::SIDE_OFFSET_MAX);
+	CHECK_EQ(NextGIVoxelLighting::pack_side_offset(-2.0f), 0u);
+	const float at_center = NextGIVoxelLighting::unpack_side_offset(NextGIVoxelLighting::pack_side_offset(0.0f));
+	CHECK(at_center < 0.0f);
+	CHECK(at_center > -0.1f);
+	// The stored plane is never in front of the true surface.
+	const float samples[5] = { -1.0f, -0.25f, 0.0f, 0.5f, 1.0f };
+	for (float voxels : samples) {
+		const float stored = NextGIVoxelLighting::unpack_side_offset(NextGIVoxelLighting::pack_side_offset(voxels));
+		CHECK(stored <= voxels + 1.0e-5f);
+	}
+
+	Color color;
+	float side = 0.0f;
+	const uint32_t word = NextGIVoxelLighting::pack_slot_word(Color(1.0f, 1.0f, 1.0f), 0xAu);
+	NextGIVoxelLighting::unpack_slot_word(word, color, side);
+	CHECK_EQ(word >> NextGIVoxelLighting::SIDE_OFFSET_SHIFT, 0xAu);
+	CHECK(Math::is_equal_approx(color.r, 1.0f));
+	CHECK(Math::is_equal_approx(color.g, 1.0f));
+	CHECK(Math::is_equal_approx(color.b, 1.0f));
+	CHECK(Math::is_equal_approx(side, NextGIVoxelLighting::unpack_side_offset(0xAu)));
+	// 5 mantissa bits round 1 + 1/64 up to 1 + 1/32. A 6-bit channel would keep 1 + 1/64,
+	// so this fails if the side code is stored by widening the word instead of shortening it.
+	const float fine = 1.0f + (1.0f / 64.0f);
+	Color shortened;
+	float ignored = 0.0f;
+	NextGIVoxelLighting::unpack_slot_word(NextGIVoxelLighting::pack_slot_word(Color(fine, fine, 0.25f), 0), shortened, ignored);
+	CHECK(Math::is_equal_approx(shortened.r, 1.0f + (1.0f / 32.0f)));
+	CHECK(Math::is_equal_approx(shortened.g, 1.0f + (1.0f / 32.0f)));
+	CHECK(shortened.b > 0.2f);
+	CHECK(shortened.b < 0.3f);
+	const Color full = NextGIVoxelLighting::unpack_r11g11b10(NextGIVoxelLighting::pack_r11g11b10(Color(fine, fine, fine)));
+	CHECK(Math::is_equal_approx(full.r, fine));
+}
+
+TEST_CASE("[NextGI] Voxel lighting side test rejects the far side of a surface") {
+	const float voxel = NextGIVoxelLighting::level_voxel_size(0);
+	const Vector3 center(1.0f, 2.0f, 3.0f);
+	const Vector3 face(0.0f, 0.0f, 1.0f);
+	// A surface exactly at the voxel center. The front is +Z, the back is -Z.
+	CHECK(NextGIVoxelLighting::accepts_surface(center, center, face, 0.0f, voxel));
+	CHECK(NextGIVoxelLighting::accepts_surface(center + face * 0.01f, center, face, 0.0f, voxel));
+	CHECK_FALSE(NextGIVoxelLighting::accepts_surface(center - face * 0.01f, center, face, 0.0f, voxel));
+	// Quantized, the plane sits one partial bin behind the center. The center stays accepted
+	// and a full bin behind the stored plane is rejected.
+	const float quantized = NextGIVoxelLighting::unpack_side_offset(NextGIVoxelLighting::pack_side_offset(0.0f));
+	CHECK(NextGIVoxelLighting::accepts_surface(center, center, face, quantized, voxel));
+	const Vector3 bin_behind = center + face * (quantized * voxel) - face * (voxel * (2.0f / 15.0f));
+	CHECK_FALSE(NextGIVoxelLighting::accepts_surface(bin_behind, center, face, quantized, voxel));
+
+	// A grazing surface: its normal faces -X by exactly the slot cosine, so the trace would
+	// store it in slot 0, and the side test uses the axis plane through the hit.
+	const Vector3 axis_face(-1.0f, 0.0f, 0.0f);
+	const Vector3 grazing(-0.25f, std::sqrt(1.0f - 0.0625f), 0.0f);
+	CHECK(Math::is_equal_approx(grazing.dot(axis_face), NextGIVoxelLighting::SLOT_FACING_MIN));
+	const Vector3 hit = center + axis_face * 0.05f;
+	const float offset = axis_face.dot(hit - center) / voxel;
+	CHECK(Math::is_equal_approx(offset, 0.25f));
+	CHECK(NextGIVoxelLighting::accepts_surface(hit, center, axis_face, offset, voxel));
+	CHECK_FALSE(NextGIVoxelLighting::accepts_surface(hit - axis_face * 0.04f, center, axis_face, offset, voxel));
+	const Vector3 beside = hit + Vector3(0.0f, -0.2f, 0.0f);
+	CHECK(grazing.dot(beside - hit) < 0.0f);
+	CHECK(NextGIVoxelLighting::accepts_surface(beside, center, axis_face, offset, voxel));
+
+	// The accepted slots alone supply the weight. +Z and +X are equal; the +X surface is in
+	// front of the center and the sample is at the center, so that slot is rejected.
+	NextGIVoxelLighting::DirectionSample samples[NextGIVoxelLighting::DIRECTIONS];
+	_fill_axis(samples, 5, Color(1.0f, 0.0f, 0.0f), 1.0f);
+	_fill_axis(samples, 3, Color(0.0f, 0.0f, 1.0f), 1.0f);
+	float offsets[NextGIVoxelLighting::DIRECTIONS] = {};
+	for (uint32_t direction = 0; direction < NextGIVoxelLighting::DIRECTIONS; direction++) {
+		offsets[direction] = -1.0f;
+	}
+	offsets[5] = 0.0f;
+	offsets[3] = 0.5f;
+	const Color wrc(0.2f, 0.2f, 0.2f);
+	const NextGIVoxelLighting::LookupResult kept = NextGIVoxelLighting::lookup_accepted(center, center, voxel, Vector3(1.0f, 0.0f, 1.0f), samples, offsets, wrc);
+	CHECK_FALSE(kept.used_wrc);
+	CHECK(Math::is_equal_approx(kept.weight, 0.5f));
+	CHECK(kept.radiance.is_equal_approx(Color(1.0f, 0.0f, 0.0f)));
+	const NextGIVoxelLighting::LookupResult behind = NextGIVoxelLighting::lookup_accepted(center - face * 0.05f, center, voxel, Vector3(0.0f, 0.0f, 1.0f), samples, offsets, wrc);
+	CHECK(behind.used_wrc);
+	CHECK(behind.weight < NextGIVoxelLighting::WEIGHT_FALLBACK);
+	CHECK(behind.radiance.is_equal_approx(wrc));
+}
+
+TEST_CASE("[NextGI] Voxel lighting side test keeps 10 cm and 20 cm walls from leaking") {
+	// A flat wall of thickness T and a box 3 cm past one face, facing the wall. Without the
+	// side test the box reads the far face out of a voxel the wall fills. With it, that face
+	// is behind the box and contributes nothing. Both rooms, and several alignments against
+	// the 0.2 m level-0 grid, so a wall that merely misses one center still has to be sealed.
+	const MeshSDFData box_field = _box_sdf(Vector3(3.0f, 3.0f, 0.4f), 10.0f, 128);
+	const float voxel = NextGIVoxelLighting::level_voxel_size(0);
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
+	const float thicknesses[2] = { 0.1f, 0.2f };
+	const float lows[4] = { -0.07f, -0.03f, 0.0f, 0.05f };
+	float raw_leak[2] = { 0.0f, 0.0f };
+	for (uint32_t thickness_index = 0; thickness_index < 2; thickness_index++) {
+		const float thickness = thicknesses[thickness_index];
+		const MeshSDFData wall_field = _box_sdf(Vector3(3.0f, 3.0f, thickness), 10.0f, 128);
+		for (float low : lows) {
+			const float high = low + thickness;
+			const float gap = 0.03f;
+			const float box_a_face = low - gap;
+			const float box_b_face = high + gap;
+			const NextGIVoxelLighting::TraceInstance room_a_side[2] = {
+				_instance(&wall_field, 3, Transform3D(Basis(), Vector3(0.0f, 0.0f, low + thickness * 0.5f))),
+				_instance(&box_field, 9, Transform3D(Basis(), Vector3(0.0f, 0.0f, box_a_face - 0.2f))),
+			};
+			const NextGIVoxelLighting::TraceInstance room_b_side[2] = {
+				_instance(&wall_field, 3, Transform3D(Basis(), Vector3(0.0f, 0.0f, low + thickness * 0.5f))),
+				_instance(&box_field, 8, Transform3D(Basis(), Vector3(0.0f, 0.0f, box_b_face + 0.2f))),
+			};
+			const AABB rooms(Vector3(-0.5f, -0.5f, -0.8f), Vector3(1.0f, 1.0f, 1.8f));
+			NextGIVoxelLighting lighting_a;
+			lighting_a.set_clipmap_origins_from_camera(Vector3());
+			lighting_a.enqueue_dirty_volumes(&rooms, 1);
+			uint32_t first = 0;
+			_drain(lighting_a, room_a_side, 2, first);
+			const Vector3 sample_a(0.1f, 0.1f, box_a_face);
+			const VoxelLookupShare raw_a = _lookup_share(lighting_a, origin, sample_a, 2, true, false);
+			const VoxelLookupShare sided_a = _lookup_share(lighting_a, origin, sample_a, 2, true);
+			raw_leak[thickness_index] = MAX(raw_leak[thickness_index], raw_a.by_instance[3]);
+			CHECK(sided_a.by_instance[9] > 0.0f);
+			CHECK(sided_a.by_instance[3] == 0.0f);
+			const VoxelLookupShare far_face = _lookup_share(lighting_a, origin, Vector3(0.1f, 0.1f, high), 2, true);
+			CHECK(far_face.by_instance[3] > 0.0f);
+
+			NextGIVoxelLighting lighting_b;
+			lighting_b.set_clipmap_origins_from_camera(Vector3());
+			lighting_b.enqueue_dirty_volumes(&rooms, 1);
+			_drain(lighting_b, room_b_side, 2, first);
+			const Vector3 sample_b(0.1f, 0.1f, box_b_face);
+			const VoxelLookupShare raw_b = _lookup_share(lighting_b, origin, sample_b, 2, false, false);
+			const VoxelLookupShare sided_b = _lookup_share(lighting_b, origin, sample_b, 2, false);
+			raw_leak[thickness_index] = MAX(raw_leak[thickness_index], raw_b.by_instance[3]);
+			CHECK(sided_b.by_instance[8] > 0.0f);
+			CHECK(sided_b.by_instance[3] == 0.0f);
+			const VoxelLookupShare near_face = _lookup_share(lighting_b, origin, Vector3(0.1f, 0.1f, low), 2, false);
+			CHECK(near_face.by_instance[3] > 0.0f);
+		}
+	}
+	// Both thicknesses leak on at least one alignment when the side test is off. A wall two
+	// voxels thick does not, which is why 0.4 m is absent here.
+	CHECK(raw_leak[0] > 0.05f);
+	CHECK(raw_leak[1] > 0.05f);
+	CHECK(voxel > 0.1f);
 }
 
 TEST_CASE("[NextGI] Voxel lighting files a touched floor only in the slot that faces it") {

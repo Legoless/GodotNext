@@ -10,7 +10,12 @@
 // in xyz and the lighting voxel size as floatBits in w. Slot d stores the
 // nearest surface on the voxel's axis line that faces -d (an entry found
 // tracing along +d, or the exit along -d from a voxel inside a solid). The
-// lookup reads the slot whose stored surface faces the gradient.
+// lookup reads the slot whose stored surface faces the gradient, then drops
+// the slot when the sample is behind that surface. The plane is perpendicular
+// to the slot axis and sits at the hit. Its offset, in voxel units along the
+// surface normal and clamped to [-1, 1], is the top 4 bits of the radiance
+// word. The color uses the low 28 bits (R and G with 5 mantissa bits, B with
+// 3), so the volume stays the same size. A rejected slot adds no weight.
 
 #ifndef NEXTGI_VOXEL_LIGHTING_INC_GLSL
 #define NEXTGI_VOXEL_LIGHTING_INC_GLSL
@@ -87,6 +92,51 @@ vec3 nextgi_voxel_unpack_r11g11b10(uint packed) {
 			nextgi_voxel_unpack_positive((packed >> 22u) & 0x3ffu, 5u));
 }
 
+// Stored slot color: R and G keep 5 mantissa bits, B keeps 3. Bits 28-31 are the side code.
+uint nextgi_voxel_pack_slot_color(vec3 color) {
+	uint red = nextgi_voxel_pack_positive(color.r, 5u);
+	uint green = nextgi_voxel_pack_positive(color.g, 5u);
+	uint blue = nextgi_voxel_pack_positive(color.b, 3u);
+	return red | (green << 10u) | (blue << 20u);
+}
+
+vec3 nextgi_voxel_unpack_slot_color(uint packed) {
+	return vec3(
+			nextgi_voxel_unpack_positive(packed & 0x3ffu, 5u),
+			nextgi_voxel_unpack_positive((packed >> 10u) & 0x3ffu, 5u),
+			nextgi_voxel_unpack_positive((packed >> 20u) & 0xffu, 3u));
+}
+
+// Code 0 is -1 voxel, code 15 is +1. Rounded toward -1 on the CPU.
+float nextgi_voxel_unpack_side(uint packed) {
+	return float(packed >> 28u) * (2.0 / 15.0) - 1.0;
+}
+
+vec3 nextgi_voxel_direction(uint direction) {
+	if (direction == 0u) {
+		return vec3(1.0, 0.0, 0.0);
+	}
+	if (direction == 1u) {
+		return vec3(0.0, 1.0, 0.0);
+	}
+	if (direction == 2u) {
+		return vec3(0.0, 0.0, 1.0);
+	}
+	if (direction == 3u) {
+		return vec3(-1.0, 0.0, 0.0);
+	}
+	if (direction == 4u) {
+		return vec3(0.0, -1.0, 0.0);
+	}
+	return vec3(0.0, 0.0, -1.0);
+}
+
+// The sample is in front of the plane, or on it. face_normal is -direction.
+bool nextgi_voxel_side_accepts(vec3 world, vec3 center, vec3 face_normal, float offset_voxels, float voxel_size) {
+	float along = dot(world - center, face_normal) / voxel_size;
+	return along + 1e-4 >= offset_voxels;
+}
+
 int nextgi_voxel_wrap(int value) {
 	int size = int(NEXTGI_VOXEL_SIZE);
 	int wrapped = value % size;
@@ -106,9 +156,17 @@ vec4 nextgi_voxel_sample(uint level, ivec3 physical, uint direction) {
 	uint voxel = uint(physical.x) + uint(physical.y) * NEXTGI_VOXEL_SIZE + uint(physical.z) * NEXTGI_VOXEL_SIZE * NEXTGI_VOXEL_SIZE;
 	uint voxel_key = level * NEXTGI_VOXEL_SIZE * NEXTGI_VOXEL_SIZE * NEXTGI_VOXEL_SIZE + voxel;
 	uint sample_index = voxel_key * NEXTGI_VOXEL_DIRECTIONS + direction;
-	vec3 radiance = nextgi_voxel_unpack_r11g11b10(voxel_radiance.data[sample_index]);
+	uint packed = voxel_radiance.data[sample_index];
+	vec3 radiance = nextgi_voxel_unpack_slot_color(packed);
 	float weight = float(nextgi_voxel_weight_byte(voxel_key, direction)) / 255.0;
 	return vec4(radiance, weight);
+}
+
+float nextgi_voxel_sample_side(uint level, ivec3 physical, uint direction) {
+	uint voxel = uint(physical.x) + uint(physical.y) * NEXTGI_VOXEL_SIZE + uint(physical.z) * NEXTGI_VOXEL_SIZE * NEXTGI_VOXEL_SIZE;
+	uint voxel_key = level * NEXTGI_VOXEL_SIZE * NEXTGI_VOXEL_SIZE * NEXTGI_VOXEL_SIZE + voxel;
+	uint sample_index = voxel_key * NEXTGI_VOXEL_DIRECTIONS + direction;
+	return nextgi_voxel_unpack_side(voxel_radiance.data[sample_index]);
 }
 
 // p_positive: the stored surface that faces the +axis (traced along -axis).
@@ -158,13 +216,23 @@ ivec3 nextgi_voxel_physical(ivec3 origin, ivec3 local) {
 	return ivec3(nextgi_voxel_wrap(world.x), nextgi_voxel_wrap(world.y), nextgi_voxel_wrap(world.z));
 }
 
-vec4 nextgi_voxel_resolve_at(uint level, ivec3 physical, vec3 gradient) {
-	vec4 samples_px = nextgi_voxel_sample(level, physical, 0u);
-	vec4 samples_nx = nextgi_voxel_sample(level, physical, 3u);
-	vec4 samples_py = nextgi_voxel_sample(level, physical, 1u);
-	vec4 samples_ny = nextgi_voxel_sample(level, physical, 4u);
-	vec4 samples_pz = nextgi_voxel_sample(level, physical, 2u);
-	vec4 samples_nz = nextgi_voxel_sample(level, physical, 5u);
+vec4 nextgi_voxel_gate_side(vec4 slot_sample, uint direction, vec3 world, vec3 center, float voxel_size, float side_offset) {
+	if (!(slot_sample.w > 0.0)) {
+		return vec4(0.0);
+	}
+	if (!nextgi_voxel_side_accepts(world, center, -nextgi_voxel_direction(direction), side_offset, voxel_size)) {
+		return vec4(0.0);
+	}
+	return slot_sample;
+}
+
+vec4 nextgi_voxel_resolve_at(uint level, ivec3 physical, vec3 gradient, vec3 world, vec3 center, float voxel_size) {
+	vec4 samples_px = nextgi_voxel_gate_side(nextgi_voxel_sample(level, physical, 0u), 0u, world, center, voxel_size, nextgi_voxel_sample_side(level, physical, 0u));
+	vec4 samples_nx = nextgi_voxel_gate_side(nextgi_voxel_sample(level, physical, 3u), 3u, world, center, voxel_size, nextgi_voxel_sample_side(level, physical, 3u));
+	vec4 samples_py = nextgi_voxel_gate_side(nextgi_voxel_sample(level, physical, 1u), 1u, world, center, voxel_size, nextgi_voxel_sample_side(level, physical, 1u));
+	vec4 samples_ny = nextgi_voxel_gate_side(nextgi_voxel_sample(level, physical, 4u), 4u, world, center, voxel_size, nextgi_voxel_sample_side(level, physical, 4u));
+	vec4 samples_pz = nextgi_voxel_gate_side(nextgi_voxel_sample(level, physical, 2u), 2u, world, center, voxel_size, nextgi_voxel_sample_side(level, physical, 2u));
+	vec4 samples_nz = nextgi_voxel_gate_side(nextgi_voxel_sample(level, physical, 5u), 5u, world, center, voxel_size, nextgi_voxel_sample_side(level, physical, 5u));
 	return nextgi_voxel_resolve(gradient, samples_px, samples_nx, samples_py, samples_ny, samples_pz, samples_nz);
 }
 
@@ -188,13 +256,16 @@ vec3 nextgi_voxel_lighting_lookup(vec3 world, vec3 gradient, vec3 wrc, NextGIVox
 	}
 	ivec3 base = ivec3(floor(coord));
 	vec3 fract_coord = coord - vec3(base);
+	float lighting = uintBitsToFloat(uint(clipmap.origin_size[selected].w));
+	vec3 origin_world = vec3(clipmap.origin_size[selected].xyz) * (lighting * 0.5);
 	vec3 accum = vec3(0.0);
 	float blend = 0.0;
 	for (uint corner = 0u; corner < 8u; corner++) {
 		ivec3 delta = ivec3(corner & 1u, (corner >> 1u) & 1u, (corner >> 2u) & 1u);
 		ivec3 local = base + delta;
 		ivec3 physical = nextgi_voxel_physical(clipmap.origin_size[selected].xyz, local);
-		vec4 resolved = nextgi_voxel_resolve_at(uint(selected), physical, gradient);
+		vec3 center = origin_world + (vec3(local) + vec3(0.5)) * lighting;
+		vec4 resolved = nextgi_voxel_resolve_at(uint(selected), physical, gradient, world, center, lighting);
 		float corner_weight = (delta.x == 1 ? fract_coord.x : 1.0 - fract_coord.x);
 		corner_weight *= (delta.y == 1 ? fract_coord.y : 1.0 - fract_coord.y);
 		corner_weight *= (delta.z == 1 ? fract_coord.z : 1.0 - fract_coord.z);
