@@ -17,7 +17,7 @@ extends Node3D
 ## Their first frame packs every probe of their new fields (lite_probe_traces 512 + 2 x 8192,
 ## lite_view_fields 3), and the image of that frame, the one-shot view's only one, must pass the
 ## same lit and spread bounds. The frame after, the one-shot view does not render (1024). When a
-## new field packed only its first 512 probes (3c26e8e2), that frame was lit on 0.07 and 0.05 of
+## new field packed only its first 512 probes (4448434a), that frame was lit on 0.07 and 0.05 of
 ## the samples, against 0.70 and 0.69 with one field for every view (2e1b0f2e) and with the fix.
 ##
 ## --case=rooms: two closed 6 x 3 x 6 m rooms share a 0.4 m wall, and an omni light (shadows on)
