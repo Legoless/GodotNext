@@ -245,10 +245,13 @@ void main() {
 							to_light /= tmax;
 						}
 					}
+					// #186 step 5: a positional light's ray marches the mesh SDFs of the instances
+					// inside that light's range (nextgi_src_relight_swrt.glsl).
+					lit = !nextgi_shadow_ray_to_light(origin, to_light, tmax, light_type, page_lights.data[page.light_offset + light_slot]);
 #else
 					vec3 origin = world + normal * rec.origin_offset;
-#endif
 					lit = !nextgi_shadow_ray(origin, to_light, tmax);
+#endif
 				} else {
 					atomicAdd(counters.skipped, 1u);
 					lit = (mask & (1u << light_slot)) != 0u;

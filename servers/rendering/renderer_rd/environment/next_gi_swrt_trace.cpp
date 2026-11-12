@@ -627,11 +627,21 @@ void NextGISWRTTrace::_upload_detail_meshes() {
 	gpu->mesh_brick_buffer = rd->storage_buffer_create(bricks.size(), Span<uint8_t>(bricks.ptr(), bricks.size()));
 }
 
+// GodotNext: ps_swrt_trace (#186 step 5)
+void NextGISWRTTrace::get_instance_bounds(LocalVector<AABB> &r_bounds) const {
+	r_bounds.resize(instances.size());
+	for (uint32_t index = 0; index < uint32_t(instances.size()); index++) {
+		const NextGIGlobalSDF::Instance &instance = instances[index];
+		r_bounds[index] = instance.field != nullptr ? instance.transform.xform(instance.field->bounds) : AABB();
+	}
+}
+
 void NextGISWRTTrace::_upload_instances() {
 	if (!instances_dirty) {
 		return;
 	}
 	instances_dirty = false;
+	instance_generation++;
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	HashMap<const MeshSDFData *, uint32_t> first_info;
 	uint32_t info = 0;
@@ -720,9 +730,9 @@ void NextGISWRTTrace::update_scene(RenderDataRD *p_render_data) {
 		// from them. They are rebuilt when a scroll or a dirty volume reaches them.
 		WARN_PRINT_ONCE(vformat("NextGI software ray tracing: the global SDF pool is full at %d levels; level %d is partial, and the trace reads the bricks that did not fit from a coarser level.", active_levels, stats.failed_level));
 	}
-	if (mode == MODE_DETAIL) {
-		_upload_detail_meshes();
-	}
+	// GodotNext: ps_swrt_trace (#186 step 5). The SRC relight's positional shadow rays march mesh
+	// SDFs in every software-tracing mode, so the mesh tables are uploaded in global mode too.
+	_upload_detail_meshes();
 	// GodotNext: ps_swrt_trace (#186, #188). assign_src_pages() uploads the instances, together
 	// with their records.
 }

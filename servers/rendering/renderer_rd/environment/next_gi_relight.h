@@ -122,6 +122,12 @@ class NextGIRelight {
 	RID uniform_set;
 	RID far_uniform_set;
 	uint32_t light_capacity = 0;
+	// GodotNext: ps_swrt_trace (#186 step 5). Per-light SWRT candidate lists (build_light_candidates),
+	// rebuilt when the lights or the software instances change.
+	RID candidate_buffer;
+	uint32_t candidate_capacity = 0;
+	uint64_t candidate_key = 0;
+	LocalVector<uint32_t> candidate_data;
 	uint32_t reuse_capacity = 0;
 	uint32_t page_capacity = 0;
 	uint32_t index_capacity = 0;
@@ -250,6 +256,16 @@ public:
 	// GodotNext: ps_swrt_trace (#186, #188). The compute source of the hardware relight or of its
 	// software sibling (nextgi_src_relight_swrt.glsl), for the doctests.
 	static String build_shader_source(bool p_software);
+
+	// GodotNext: ps_swrt_trace (#186 step 5, plan §21.2.6). The software relight's shadow rays
+	// toward a positional light march the mesh SDFs of the instances whose world bounds overlap
+	// that light's range sphere. r_data holds, per light, its list's offset and length
+	// (data[2 * light], data[2 * light + 1]) and then the lists. A directional light, a light with
+	// no range, or a light whose range overlaps more than p_cap instances gets
+	// SWRT_LIGHT_CANDIDATES_OVERFLOW as its length; its rays march the global SDF.
+	static constexpr uint32_t SWRT_LIGHT_CANDIDATE_CAP = 64; // Start value.
+	static constexpr uint32_t SWRT_LIGHT_CANDIDATES_OVERFLOW = 0xffffffffu;
+	static void build_light_candidates(const AABB *p_bounds, uint32_t p_bound_count, const NextGILight *p_lights, uint32_t p_light_count, uint32_t p_cap, LocalVector<uint32_t> &r_data);
 
 	NextGIRelight();
 	~NextGIRelight();

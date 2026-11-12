@@ -15,16 +15,21 @@ extends Node
 ##                     FAR_INSIDE_MIN traced texels inside the slab's footprint must be checked.
 ##                     The edge band (two mask texels around each footprint's edge) is skipped.
 ##   --ceiling-fixture a 20 m floor under a 20 m ceiling plate whose underside is at y 3, a shadowed
-##                     omni light CEILING_LIGHT_GAP below the ceiling and the camera at (0, 1.5, 4).
-##                     The viewport has no positional shadow atlas, so no shadow map is reused and
-##                     relight traces every texel. Nothing lies between the floor and the light, so
-##                     every texel of the floor card's mask must be lit, near the light and beyond
-##                     5 m alike: the software tier's origin offset (1.5 voxels of the texel's level,
-##                     0.6 m at level 2, #186 step 6) must not carry the ray past the light into the
-##                     ceiling. The light itself sits in clipmap level 0 (0.1 m voxels), 0.12 m from
-##                     the ceiling: outside that level's surface band. The fixture does not cover a
-##                     light inside the band of its own, coarser level (a 5 cm gap at level 1, a
-##                     12 cm gap at level 2), which still shadows itself on the software tier.
+##                     omni light below the ceiling and no positional shadow atlas, so relight traces
+##                     every texel. Nothing lies between the floor and the light, so every texel of
+##                     the floor card's mask must be lit, near the light and beyond 5 m alike. Three
+##                     rows, each running --frames frames:
+##                       gap 0.12 m, camera at (0, 1.5, 4)  — the light is in clipmap level 0
+##                       gap 0.05 m, camera at (0, 1.5, 12) — level 1's 10 cm band
+##                       gap 0.12 m, camera at (0, 1.5, 20) — level 2's 20 cm band
+##                       gap 0.12 m, camera at (0, 1.5, 4), a 2 x 1 x 2 m box under the light —
+##                       its footprint unlit, the floor around it lit
+##                     On the software tier a positional light's shadow rays march the mesh SDFs
+##                     of the instances inside its range (#186 step 5), so every floor texel must
+##                     be lit on every row, whatever clipmap level holds the light. The hardware tier
+##                     must light every texel on the 12 cm rows. Its parallel ray is offset by at
+##                     most 5 cm and is not re-aimed, so the 5 cm row is not required on HWRT.
+##                     Pass --ceiling-gap and --ceiling-camera-z together to run one row.
 ##   --light-lists     STATIC / DYNAMIC / DISABLED tracking for visibility, scenario and bake mode
 ## --expected-tier=HWRT (default) or SWRT: the tier the run must report (run_src_relight_check.sh
 ## passes it from --hwrt). Under debug/deny_ray_query (a device without ray query) the run also
@@ -38,11 +43,28 @@ const FAR_INSIDE_MIN := 40
 ## The shadow fixture's floating slab: center and size.
 const SLAB_CENTER := Vector3(0, 1.5, -7.25)
 const SLAB_SIZE := Vector3(4, 1, 4)
-## The ceiling fixture: the ceiling plate's underside and the omni light's distance below it.
+## The ceiling fixture: the ceiling plate's underside and the level-0 row's gap.
 const CEILING_Y := 3.0
 const CEILING_LIGHT_GAP := 0.12
+## The occluder row: a 2 x 1 x 2 m box hanging under the light (y 1.3 to 2.3). Its shadow on the
+## floor is the square max(|x|, |z|) < 1 / (1 - 2.3 / (CEILING_Y - CEILING_LIGHT_GAP)) = 4.97 m
+## (its top face's silhouette). Texels inside CEILING_SHADOW_INNER must be unlit, texels between
+## CEILING_SHADOW_OUTER and CEILING_LIT_RADIUS lit; the band between is not checked. The box is a
+## meter thick because a mesh SDF rounds corners by about a voxel (UE documents the same for its
+## mesh distance fields): a 20 cm slab's rounded top edge let steep rays through 0.8 m inside its
+## footprint, which measures SDF resolution rather than whether the path occludes.
+const CEILING_OCCLUDER_CENTER := Vector3(0, 1.8, 0)
+const CEILING_OCCLUDER_SIZE := Vector3(2, 1, 2)
+const CEILING_SHADOW_INNER := 4.0
+const CEILING_SHADOW_OUTER := 5.8
+const CEILING_LIT_RADIUS := 10.0
 
 var _expected_tier := "HWRT"
+var _ceiling_gap := -1.0
+var _ceiling_camera_z := -1.0
+var _ceiling_row_gap := CEILING_LIGHT_GAP
+var _ceiling_row_z := 4.0
+var _ceiling_row_occluder := false
 
 var _failures := PackedStringArray()
 
@@ -76,6 +98,10 @@ func run(args: PackedStringArray) -> Dictionary:
 			shadow_fixture = true
 		elif arg == "--ceiling-fixture":
 			ceiling_fixture = true
+		elif arg.begins_with("--ceiling-gap="):
+			_ceiling_gap = float(arg.trim_prefix("--ceiling-gap="))
+		elif arg.begins_with("--ceiling-camera-z="):
+			_ceiling_camera_z = float(arg.trim_prefix("--ceiling-camera-z="))
 		elif arg == "--light-lists":
 			light_lists = true
 		elif arg.begins_with("--expected-tier="):
@@ -88,7 +114,6 @@ func run(args: PackedStringArray) -> Dictionary:
 		_build_shadow_fixture(root)
 		scene_path = "shadow-fixture"
 	elif ceiling_fixture:
-		_build_ceiling_fixture(root)
 		scene_path = "ceiling-fixture"
 	elif light_lists:
 		_build_light_list_scene(root)
@@ -111,25 +136,44 @@ func run(args: PackedStringArray) -> Dictionary:
 	if light_lists:
 		return await _run_light_lists(root, scene_path, enabled)
 
-	for frame in frames:
-		await get_tree().process_frame
-		info = RenderingServer.nextgi_get_tier_info()
-		if info.get("tier", "") != _expected_tier:
-			continue
-		max_texels = maxi(max_texels, int(info.get("src_relight_texels", 0)))
-		max_rays = maxi(max_rays, int(info.get("src_relight_rays", 0)))
-		max_shadowed = maxi(max_shadowed, int(info.get("src_max_shadowed_lights", 0)))
-		max_evals = maxi(max_evals, int(info.get("src_max_mask_evals", 0)))
-	_check(info.get("tier", "") == _expected_tier, "%s tier, got %s" % [_expected_tier, str(info.get("tier", ""))])
+	if ceiling_fixture:
+		for row in _ceiling_rows():
+			_clear_children(root)
+			_ceiling_row_gap = float(row["gap"])
+			_ceiling_row_z = float(row["z"])
+			_ceiling_row_occluder = bool(row.get("occluder", false))
+			_build_ceiling_fixture(root, _ceiling_row_gap, _ceiling_row_z, _ceiling_row_occluder)
+			_prepare(root)
+			info = {}
+			for frame in frames:
+				await get_tree().process_frame
+				info = RenderingServer.nextgi_get_tier_info()
+				if info.get("tier", "") != _expected_tier:
+					continue
+				max_texels = maxi(max_texels, int(info.get("src_relight_texels", 0)))
+				max_rays = maxi(max_rays, int(info.get("src_relight_rays", 0)))
+				max_shadowed = maxi(max_shadowed, int(info.get("src_max_shadowed_lights", 0)))
+				max_evals = maxi(max_evals, int(info.get("src_max_mask_evals", 0)))
+			_check(info.get("tier", "") == _expected_tier, "ceiling gap %.3f camera z %.1f: %s tier, got %s" % [_ceiling_row_gap, _ceiling_row_z, _expected_tier, str(info.get("tier", ""))])
+			_check_ceiling_mask(info)
+	else:
+		for frame in frames:
+			await get_tree().process_frame
+			info = RenderingServer.nextgi_get_tier_info()
+			if info.get("tier", "") != _expected_tier:
+				continue
+			max_texels = maxi(max_texels, int(info.get("src_relight_texels", 0)))
+			max_rays = maxi(max_rays, int(info.get("src_relight_rays", 0)))
+			max_shadowed = maxi(max_shadowed, int(info.get("src_max_shadowed_lights", 0)))
+			max_evals = maxi(max_evals, int(info.get("src_max_mask_evals", 0)))
+		_check(info.get("tier", "") == _expected_tier, "%s tier, got %s" % [_expected_tier, str(info.get("tier", ""))])
+		if shadow_fixture:
+			_check_shadow_mask(info)
 	_check(max_texels > 0, "at least one relit texel")
 	_check(max_texels <= TEXEL_CAP, "relit texels %d stay within 256k" % max_texels)
 	_check(max_rays <= RAY_CAP, "traced rays %d stay within 256k" % max_rays)
 	_check(max_shadowed <= 8, "shadowed lights per page %d" % max_shadowed)
 	_check(max_evals <= 2, "mask evaluations %d" % max_evals)
-	if shadow_fixture:
-		_check_shadow_mask(info)
-	if ceiling_fixture:
-		_check_ceiling_mask(info)
 	# GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: a device without ray query.
 	if bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false)):
 		print("SRC_RELIGHT_DENY reason=%s rt_arena_bytes=%d ray_query_shader_versions=%d swrt_trace_instances=%d" % [str(info.get("reason", "")), int(info.get("rt_arena_bytes", -1)), int(info.get("ray_query_shader_versions", -1)), int(info.get("swrt_trace_instances", 0))])
@@ -315,10 +359,15 @@ func _check_ceiling_mask(info: Dictionary) -> void:
 	var mask: PackedByteArray = page["mask"]
 	var mask_w := int(page["mask_w"])
 	var mask_h := int(page["mask_h"])
+	if _ceiling_row_occluder:
+		_check_ceiling_occluder(info, page, mask, mask_w, mask_h)
+		return
 	# Texels by their horizontal distance from the light: under 2 m, 2 to 5 m and beyond 5 m.
 	var lit := [0, 0, 0]
 	var total := [0, 0, 0]
 	var bad_samples := PackedStringArray()
+	var unlit_near := 1.0e9
+	var unlit_far := -1.0
 	for y in mask_h:
 		for x in mask_w:
 			var world := _mask_world(page, x, y)
@@ -327,12 +376,57 @@ func _check_ceiling_mask(info: Dictionary) -> void:
 			total[bucket] += 1
 			if (mask[y * mask_w + x] & 1) != 0:
 				lit[bucket] += 1
-			elif bad_samples.size() < 8:
-				bad_samples.append("(%.2f, %.2f)" % [world.x, world.z])
-	print("SRC_RELIGHT_CEILING tier=%s mask=%dx%d floor_y=%.2f lit r<2 %d/%d, 2-5 %d/%d, >5 %d/%d unlit=%s" % [str(info.get("tier", "")), mask_w, mask_h, best_y, lit[0], total[0], lit[1], total[1], lit[2], total[2], bad_samples])
+			else:
+				unlit_near = minf(unlit_near, r)
+				unlit_far = maxf(unlit_far, r)
+				if bad_samples.size() < 8:
+					bad_samples.append("(%.2f, %.2f) r=%.2f" % [world.x, world.z, r])
+	var lit_sum := int(lit[0]) + int(lit[1]) + int(lit[2])
+	var total_sum := int(total[0]) + int(total[1]) + int(total[2])
+	var unlit_span := ""
+	if unlit_far >= 0.0:
+		unlit_span = " unlit_r=%.2f..%.2f" % [unlit_near, unlit_far]
+	print("SRC_RELIGHT_CEILING tier=%s gap=%.3f camera_z=%.1f mask=%dx%d floor_y=%.2f lit %d/%d (r<2 %d/%d, 2-5 %d/%d, >5 %d/%d)%s unlit=%s" % [str(info.get("tier", "")), _ceiling_row_gap, _ceiling_row_z, mask_w, mask_h, best_y, lit_sum, total_sum, lit[0], total[0], lit[1], total[1], lit[2], total[2], unlit_span, bad_samples])
+	# The hardware relight keeps a parallel ray from an origin offset of at most 0.05 m and
+	# does not re-aim it, so a 5 cm gap lets that ray enter the ceiling. Full lighting is
+	# required on the software tier for every row, and on the hardware tier for the 12 cm rows.
+	var require_full := _expected_tier != "HWRT" or _ceiling_row_gap > 0.05
 	for bucket in 3:
-		_check(total[bucket] > 0, "floor texels in distance band %d were checked" % bucket)
-		_check(lit[bucket] == total[bucket], "%d of %d floor texels in distance band %d are lit; nothing lies between them and the light" % [lit[bucket], total[bucket], bucket])
+		_check(total[bucket] > 0, "floor texels in distance band %d were checked (gap %.3f, camera z %.1f)" % [bucket, _ceiling_row_gap, _ceiling_row_z])
+		if require_full:
+			_check(lit[bucket] == total[bucket], "%d of %d floor texels in distance band %d are lit at gap %.3f m with the camera %.1f m away" % [lit[bucket], total[bucket], bucket, _ceiling_row_gap, _ceiling_row_z])
+
+
+# The occluder row: the box's footprint is unlit and the floor around it lit, on both tiers. On
+# the software tier the omni's rays march the mesh SDFs of the instances inside its range (#186
+# step 5), so this row shows that path still occludes.
+func _check_ceiling_occluder(info: Dictionary, page: Dictionary, mask: PackedByteArray, mask_w: int, mask_h: int) -> void:
+	var inside_unlit := 0
+	var inside_total := 0
+	var outside_lit := 0
+	var outside_total := 0
+	var bad_samples := PackedStringArray()
+	for y in mask_h:
+		for x in mask_w:
+			var world := _mask_world(page, x, y)
+			var square := maxf(absf(world.x), absf(world.z))
+			var lit := (mask[y * mask_w + x] & 1) != 0
+			if square < CEILING_SHADOW_INNER:
+				inside_total += 1
+				if not lit:
+					inside_unlit += 1
+				elif bad_samples.size() < 8:
+					bad_samples.append("lit inside (%.2f, %.2f)" % [world.x, world.z])
+			elif square > CEILING_SHADOW_OUTER and Vector2(world.x, world.z).length() < CEILING_LIT_RADIUS:
+				outside_total += 1
+				if lit:
+					outside_lit += 1
+				elif bad_samples.size() < 8:
+					bad_samples.append("unlit outside (%.2f, %.2f)" % [world.x, world.z])
+	print("SRC_RELIGHT_CEILING_OCCLUDER tier=%s footprint unlit %d/%d, around lit %d/%d bad=%s" % [str(info.get("tier", "")), inside_unlit, inside_total, outside_lit, outside_total, bad_samples])
+	_check(inside_total > 0 and outside_total > 0, "occluder row checked texels inside (%d) and around (%d) the footprint" % [inside_total, outside_total])
+	_check(inside_unlit == inside_total, "%d of %d floor texels in the occluder's footprint are unlit" % [inside_unlit, inside_total])
+	_check(outside_lit == outside_total, "%d of %d floor texels around the occluder's footprint are lit" % [outside_lit, outside_total])
 
 
 func _mask_world(page: Dictionary, x: int, y: int) -> Vector3:
@@ -425,7 +519,27 @@ func _build_shadow_fixture(root: Node3D) -> void:
 	root.add_child(camera)
 
 
-func _build_ceiling_fixture(root: Node3D) -> void:
+func _ceiling_rows() -> Array:
+	if _ceiling_gap >= 0.0 or _ceiling_camera_z >= 0.0:
+		return [{
+			"gap": _ceiling_gap if _ceiling_gap >= 0.0 else CEILING_LIGHT_GAP,
+			"z": _ceiling_camera_z if _ceiling_camera_z >= 0.0 else 4.0,
+		}]
+	return [
+		{"gap": CEILING_LIGHT_GAP, "z": 4.0},
+		{"gap": 0.05, "z": 12.0},
+		{"gap": 0.12, "z": 20.0},
+		{"gap": CEILING_LIGHT_GAP, "z": 4.0, "occluder": true},
+	]
+
+
+func _clear_children(node: Node) -> void:
+	for child in node.get_children():
+		node.remove_child(child)
+		child.free()
+
+
+func _build_ceiling_fixture(root: Node3D, gap: float, camera_z: float, occluder := false) -> void:
 	# No positional shadow atlas: relight cannot reuse the omni light's shadow map and traces.
 	get_viewport().positional_shadow_atlas_size = 0
 	var environment := Environment.new()
@@ -442,14 +556,21 @@ func _build_ceiling_fixture(root: Node3D) -> void:
 		plate.mesh = plate_mesh
 		plate.position = Vector3(0, plate_y, 0)
 		root.add_child(plate)
+	if occluder:
+		var box := MeshInstance3D.new()
+		var box_mesh := BoxMesh.new()
+		box_mesh.size = CEILING_OCCLUDER_SIZE
+		box.mesh = box_mesh
+		box.position = CEILING_OCCLUDER_CENTER
+		root.add_child(box)
 	var light := OmniLight3D.new()
-	light.position = Vector3(0, CEILING_Y - CEILING_LIGHT_GAP, 0)
+	light.position = Vector3(0, CEILING_Y - gap, 0)
 	light.omni_range = 12.0
 	light.shadow_enabled = true
 	light.light_bake_mode = Light3D.BAKE_DYNAMIC
 	root.add_child(light)
 	var camera := Camera3D.new()
-	camera.position = Vector3(0, 1.5, 4)
+	camera.position = Vector3(0, 1.5, camera_z)
 	camera.look_at_from_position(camera.position, Vector3.ZERO, Vector3.UP)
 	camera.current = true
 	root.add_child(camera)

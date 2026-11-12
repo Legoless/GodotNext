@@ -340,13 +340,16 @@ void NextGIRelight::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID buffers[7] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer };
-	for (int i = 0; i < 7; i++) {
+	RID buffers[8] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer };
+	for (int i = 0; i < 8; i++) {
 		if (buffers[i].is_valid()) {
 			rd->free_rid(buffers[i]);
 		}
 	}
 	light_buffer = RID();
+	candidate_buffer = RID();
+	candidate_capacity = 0;
+	candidate_key = 0;
 	reuse_buffer = RID();
 	page_buffer = RID();
 	index_buffer = RID();
@@ -511,6 +514,52 @@ bool NextGIRelight::_ensure_swrt_shader() {
 	swrt_shader->pipeline = rd->compute_pipeline_create(swrt_shader->shader.version_get_shader(swrt_shader->version, 0));
 	ERR_FAIL_COND_V(swrt_shader->pipeline.is_null(), false);
 	return true;
+}
+
+// GodotNext: ps_swrt_trace (#186 step 5)
+void NextGIRelight::build_light_candidates(const AABB *p_bounds, uint32_t p_bound_count, const NextGILight *p_lights, uint32_t p_light_count, uint32_t p_cap, LocalVector<uint32_t> &r_data) {
+	r_data.resize(2 * p_light_count);
+	LocalVector<uint32_t> list;
+	for (uint32_t light = 0; light < p_light_count; light++) {
+		const NextGILight &source = p_lights[light];
+		const int type = int(source.direction_type[3] + 0.5f);
+		const float inv_range = source.position_inv_range[3];
+		r_data[2 * light] = r_data.size();
+		r_data[2 * light + 1] = SWRT_LIGHT_CANDIDATES_OVERFLOW;
+		if (type == 0 || !(inv_range > 0.0f)) {
+			continue;
+		}
+		const Vector3 center(source.position_inv_range[0], source.position_inv_range[1], source.position_inv_range[2]);
+		const float range = 1.0f / inv_range;
+		const float range_sq = range * range;
+		list.clear();
+		bool overflow = false;
+		for (uint32_t index = 0; index < p_bound_count; index++) {
+			const AABB &box = p_bounds[index];
+			if (box.size == Vector3()) {
+				continue;
+			}
+			const Vector3 closest = center.clamp(box.position, box.position + box.size);
+			if ((closest - center).length_squared() > range_sq) {
+				continue;
+			}
+			if (list.size() == p_cap) {
+				overflow = true;
+				break;
+			}
+			list.push_back(index);
+		}
+		if (overflow) {
+			continue;
+		}
+		r_data[2 * light + 1] = list.size();
+		for (const uint32_t index : list) {
+			r_data.push_back(index);
+		}
+	}
+	if (r_data.is_empty()) {
+		r_data.push_back(0);
+	}
 }
 
 void NextGIRelight::init() {
@@ -1209,6 +1258,21 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	params.rt_radius = rt_radius > 0.0f ? rt_radius : 1.0f;
 	rd->buffer_update(params_buffer, 0, sizeof(params), &params);
 
+	// GodotNext: ps_swrt_trace (#186 step 5). The software relight's per-light candidate lists,
+	// rebuilt when the lights or the software instances change (set 0, binding 0).
+	if (swrt) {
+		const uint32_t generation_hash = hash_murmur3_one_64(swrt_trace->get_instance_generation());
+		const uint32_t lights_hash = gpu_lights.is_empty() ? 0u : hash_murmur3_buffer(gpu_lights.ptr(), int(gpu_lights.size() * sizeof(NextGILight)), generation_hash);
+		const uint64_t key = (uint64_t(generation_hash) << 32) | lights_hash;
+		if (key != candidate_key || !candidate_buffer.is_valid()) {
+			LocalVector<AABB> bounds;
+			swrt_trace->get_instance_bounds(bounds);
+			build_light_candidates(bounds.ptr(), bounds.size(), gpu_lights.ptr(), gpu_lights.size(), SWRT_LIGHT_CANDIDATE_CAP, candidate_data);
+			_storage_buffer(candidate_buffer, candidate_capacity, candidate_data.size(), sizeof(uint32_t));
+			rd->buffer_update(candidate_buffer, 0, candidate_data.size() * sizeof(uint32_t), candidate_data.ptr());
+			candidate_key = key;
+		}
+	}
 	const RID shader_rid = swrt ? swrt_shader->shader.version_get_shader(swrt_shader->version, 0) : shader->shader.version_get_shader(shader->version, 0);
 	const RID pipeline = swrt ? swrt_shader->pipeline : shader->pipeline;
 	RID directional_tex = light_storage->directional_shadow_get_texture();
@@ -1264,9 +1328,10 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ material_sampler, indirect_texture })),
 		};
 		if (swrt) {
-			// GodotNext: ps_swrt_trace (#186, #188). The sibling's set 0 has no TLAS, and there is no
-			// far field (HWRT only, plan L8).
-			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms + 1, 19), shader_rid, 0);
+			// GodotNext: ps_swrt_trace (#186, #188). The sibling's set 0 holds the per-light candidate
+			// lists in place of the TLAS (#186 step 5), and there is no far field (HWRT only, plan L8).
+			uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, candidate_buffer);
+			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
 		} else {
 			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
 			uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);

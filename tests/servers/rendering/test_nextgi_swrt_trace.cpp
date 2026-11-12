@@ -465,14 +465,21 @@ static Vector<uint8_t> _swrt_test_compile(const String &p_source, const String &
 	return spirv;
 }
 
-// Every set-0 resource of the software sibling sits at the hardware twin's binding, the twin's
+// Every set-0 resource of the software sibling sits at the hardware twin's binding (apart from
+// p_sibling_only, a sibling resource in a binding the twin gives to something else), the twin's
 // only extra set-0 bindings are p_hardware_only, and the sibling's set 1 is the SDF trace.
-static void _check_sibling_bindings(const HashMap<String, SpirvBinding> &p_hardware, const HashMap<String, SpirvBinding> &p_sibling, const Vector<uint32_t> &p_hardware_only, const String &p_what) {
+static void _check_sibling_bindings(const HashMap<String, SpirvBinding> &p_hardware, const HashMap<String, SpirvBinding> &p_sibling, const Vector<uint32_t> &p_hardware_only, const String &p_what, const HashMap<String, uint32_t> &p_sibling_only = HashMap<String, uint32_t>()) {
 	HashSet<uint32_t> sibling_set0;
 	Vector<uint32_t> sibling_set1;
 	for (const KeyValue<String, SpirvBinding> &entry : p_sibling) {
 		if (entry.value.set == 0) {
 			sibling_set0.insert(entry.value.binding);
+			const uint32_t *own = p_sibling_only.getptr(entry.key);
+			if (own != nullptr) {
+				CHECK_MESSAGE(*own == entry.value.binding, (p_what + ": " + entry.key + " moved binding").utf8().get_data());
+				CHECK_MESSAGE(p_hardware.getptr(entry.key) == nullptr, (p_what + ": " + entry.key + " is in the hardware shader").utf8().get_data());
+				continue;
+			}
 			const SpirvBinding *hardware = p_hardware.getptr(entry.key);
 			CHECK_MESSAGE(hardware != nullptr, (p_what + ": " + entry.key + " is not in the hardware shader").utf8().get_data());
 			if (hardware != nullptr) {
@@ -512,12 +519,17 @@ TEST_CASE("[NextGI][SWRT] The software siblings keep the hardware twins' set-0 b
 	REQUIRE_GE(wrc_hardware.size(), 20);
 	REQUIRE_GE(wrc_sibling.size(), 20);
 	_check_sibling_bindings(_spirv_bindings(wrc_hardware), _spirv_bindings(wrc_sibling), { 0, 9, 10, 11, 12, 13, 14, 15, 16, 17 }, "WRC update v0");
-	// GodotNext: ps_swrt_trace (#186, #188). The relight sibling drops only the TLAS.
+	// GodotNext: ps_swrt_trace (#186, #188). The relight sibling replaces only the TLAS (0), with
+	// the per-light candidate lists of its positional shadow rays (#186 step 5).
 	const Vector<uint8_t> relight_hardware = _swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(false), "the hardware SRC relight");
 	const Vector<uint8_t> relight_sibling = _swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(true), "the software SRC relight");
 	REQUIRE_GE(relight_hardware.size(), 20);
 	REQUIRE_GE(relight_sibling.size(), 20);
-	_check_sibling_bindings(_spirv_bindings(relight_hardware), _spirv_bindings(relight_sibling), { 0 }, "SRC relight v0");
+	HashMap<String, uint32_t> relight_sibling_only;
+	relight_sibling_only.insert("light_candidates", 0);
+	const HashMap<String, SpirvBinding> relight_sibling_bindings = _spirv_bindings(relight_sibling);
+	CHECK(relight_sibling_bindings.has("light_candidates"));
+	_check_sibling_bindings(_spirv_bindings(relight_hardware), relight_sibling_bindings, {}, "SRC relight v0", relight_sibling_only);
 }
 
 // The built source is not preprocessed, so it is the same text for every variant apart from the
@@ -564,6 +576,15 @@ TEST_CASE("[NextGI][SWRT] The software siblings trace the SDF and carry no ray q
 	CHECK_FALSE(relight_source.contains("rayQuery"));
 	CHECK_FALSE(relight_source.contains("accelerationStructureEXT"));
 	CHECK(relight_source.contains("return swrt_shadow_ray(origin, direction, tmax);"));
+	// #186 step 5: positional rays march the mesh SDFs of the light's candidates (set 0, binding 0),
+	// directional rays the global SDF; the hardware relight has neither.
+	CHECK(relight_source.contains("lit = !nextgi_shadow_ray_to_light(origin, to_light, tmax, light_type, page_lights.data[page.light_offset + light_slot]);"));
+	CHECK(relight_source.contains("int mesh = swrt_shadow_mesh_list(origin, direction, tmax, light_index, from_t);"));
+	CHECK(relight_source.contains("layout(set = 0, binding = 0, std430) readonly buffer SWRTLightCandidates"));
+	// The shared kernel's text holds both branches; the candidate buffer is the sibling's own.
+	const String relight_hardware_source = RendererRD::NextGIRelight::build_shader_source(false);
+	CHECK_FALSE(relight_hardware_source.contains("SWRTLightCandidates"));
+	CHECK(relight_hardware_source.contains("lit = !nextgi_shadow_ray(origin, to_light, tmax);"));
 	CHECK(relight_source.contains("vec3 origin = swrt_offset_origin(world, normal);"));
 	// Positional lights are aimed at from the offset origin (the ceiling-fixture GPU row checks it).
 	CHECK(relight_source.contains("to_light = light.position_inv_range.xyz - origin;"));
@@ -1746,4 +1767,51 @@ TEST_CASE("[NextGI][SWRT] The software record pass gives SWRT instance i record 
 	CHECK(NextGISWRTTrace::upload_due(state, swapped_order, false, again));
 	// Swapped instances with identical records still re-upload: the order hash catches them.
 	CHECK(NextGISWRTTrace::upload_due(state, swapped_order, false, records));
+}
+
+TEST_CASE("[NextGI][SWRT] Positional lights list the instances inside their range for mesh-SDF shadow rays") {
+	using RendererRD::NextGILight;
+	using RendererRD::NextGIRelight;
+	// #186 step 5: a light's list holds every instance whose world bounds overlap its range sphere.
+	const AABB bounds[5] = {
+		AABB(Vector3(-0.5, -0.5, -0.5), Vector3(1, 1, 1)), // 0: around the light.
+		AABB(Vector3(4.5, -0.5, -0.5), Vector3(2, 1, 1)), // 1: crosses the 5 m range on +x.
+		AABB(Vector3(6, -0.5, -0.5), Vector3(1, 1, 1)), // 2: beyond it.
+		AABB(), // 3: no mesh SDF (zero size): never listed.
+		AABB(Vector3(3.6, 3.6, -0.1), Vector3(1, 1, 0.2)), // 4: corner 5.09 m away: outside.
+	};
+	NextGILight omni;
+	omni.position_inv_range[3] = 1.0f / 5.0f;
+	omni.direction_type[3] = 1.0f;
+	NextGILight sun;
+	sun.direction_type[3] = 0.0f;
+	NextGILight rangeless = omni;
+	rangeless.position_inv_range[3] = 0.0f;
+	NextGILight spot = omni;
+	spot.direction_type[3] = 2.0f;
+	spot.position_inv_range[0] = 6.5f;
+	const NextGILight lights[4] = { omni, sun, rangeless, spot };
+	LocalVector<uint32_t> data;
+	NextGIRelight::build_light_candidates(bounds, 5, lights, 4, NextGIRelight::SWRT_LIGHT_CANDIDATE_CAP, data);
+	REQUIRE_GE(data.size(), 8u);
+	// The omni at the origin: instances 0 and 1.
+	REQUIRE_EQ(data[1], 2u);
+	CHECK_EQ(data[data[0]], 0u);
+	CHECK_EQ(data[data[0] + 1], 1u);
+	// The sun and the rangeless light cannot be culled: their rays march the global SDF.
+	CHECK_EQ(data[3], NextGIRelight::SWRT_LIGHT_CANDIDATES_OVERFLOW);
+	CHECK_EQ(data[5], NextGIRelight::SWRT_LIGHT_CANDIDATES_OVERFLOW);
+	// The spot at x 6.5 reaches instances 1, 2 and 4 (4.07 m away) but not 0 (6 m away).
+	REQUIRE_EQ(data[7], 3u);
+	CHECK_EQ(data[data[6]], 1u);
+	CHECK_EQ(data[data[6] + 1], 2u);
+	CHECK_EQ(data[data[6] + 2], 4u);
+	// More overlapping instances than the cap: the light falls back to the global SDF.
+	LocalVector<uint32_t> capped;
+	NextGIRelight::build_light_candidates(bounds, 5, lights, 1, 1, capped);
+	CHECK_EQ(capped[1], NextGIRelight::SWRT_LIGHT_CANDIDATES_OVERFLOW);
+	// No lights still gives a bindable buffer.
+	LocalVector<uint32_t> empty;
+	NextGIRelight::build_light_candidates(bounds, 5, lights, 0, NextGIRelight::SWRT_LIGHT_CANDIDATE_CAP, empty);
+	CHECK_EQ(empty.size(), 1u);
 }

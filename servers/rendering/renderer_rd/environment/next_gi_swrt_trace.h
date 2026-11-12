@@ -72,7 +72,9 @@ struct NextGILight;
 // - The Lite probe kernel (NEXTGI_SWRT_LITE_PROBE) is what run_microbenchmark()
 //   times for the auto quality; Lumen Lite itself reads the WRC in the frame block.
 // - trace_shadow_rays() is the SDF shadow-ray kernel the verification checks run; the SRC
-//   relight's own sibling (nextgi_src_relight_swrt.glsl) marches the same swrt_shadow_ray().
+//   relight's own sibling (nextgi_src_relight_swrt.glsl) marches it for directional lights;
+//   positional lights' rays march the mesh SDFs of the instances inside the light's range
+//   (NextGIRelight::build_light_candidates, #186 step 5).
 // - assign_src_pages() (#188) runs after update_scene() in the same slot: the record pass that
 //   gives SWRT instance i its NextGIInstanceRecord i (card set, relight page table, HWRT's flag
 //   rule) and uploads the instance and record buffers together.
@@ -237,6 +239,10 @@ public:
 	// The records the gather, the SRC feedback and the relight read on the software tier.
 	RID get_record_buffer() const;
 	uint32_t get_record_count() const;
+	// GodotNext: ps_swrt_trace (#186 step 5). The world bounds of each instance's mesh SDF, in the
+	// order of the GPU instance buffer, and a counter that changes whenever that buffer is rebuilt.
+	void get_instance_bounds(LocalVector<AABB> &r_bounds) const;
+	uint64_t get_instance_generation() const { return instance_generation; }
 	// The frame-block slot the last assign_src_pages() ran in ("none" outside the block).
 	const String &get_record_slot() const { return last_record_slot; }
 	// The verification trace (debug/swrt_trace_readback) runs after the frame block's slots.
@@ -329,6 +335,7 @@ private:
 	LocalVector<uint32_t> two_sided;
 	HashMap<InstanceKey, FedInstance, InstanceKeyHasher> fed;
 	bool instances_dirty = true;
+	uint64_t instance_generation = 0;
 	bool detail_meshes_dirty = true;
 	LocalVector<const MeshSDFData *> detail_mesh_order;
 
