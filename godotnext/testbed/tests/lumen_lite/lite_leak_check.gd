@@ -51,6 +51,11 @@ var done := false
 
 
 func _ready() -> void:
+	# run_lite_leak_check.sh takes the recorded ratio only when the device has no hardware ray
+	# query; on any other device a reference pass that ends without a result is a failure.
+	var device := RenderingServer.get_rendering_device()
+	var hardware := device != null and device.has_feature(RenderingDevice.SUPPORTS_RAY_QUERY_HARDWARE)
+	print("LITE_LEAK_DEVICE ray_query_hardware=%s" % ("true" if hardware else "false"))
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--expected-tier="):
 			expected_tier = arg.trim_prefix("--expected-tier=")
