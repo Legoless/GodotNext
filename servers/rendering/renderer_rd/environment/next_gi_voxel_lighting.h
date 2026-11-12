@@ -66,8 +66,10 @@ class NextGIRelight;
 // surface found past the solid along the axes that surface faces. Lookup reads
 // the slot whose stored surface faces the query. Only geometry dirty bricks
 // are re-traced, plus every instance's bricks when a level is created and an
-// instance's bricks when its mesh SDF arrives; dirty bricks go before those
-// fill bricks. A lookup weight below 0.5 falls back to the WRC.
+// instance's bricks when its mesh SDF arrives. Dirty bricks go before those
+// fill bricks. A new or refilled volume traces its fill bricks nearest the
+// camera first, then outward, still within the per-frame ray budget. A lookup
+// weight below 0.5 falls back to the WRC.
 //
 // Hits are stored in instance-local space. Every frame the GPU resamples the
 // SRC with the D6 rule: the best-aligned card whose captured material depth
@@ -240,7 +242,7 @@ public:
 	uint32_t get_levels_to_fill() const { return levels_to_fill; }
 	// Queues the bricks of every instance for the levels to fill, and on every level the
 	// bricks of instances whose mesh SDF arrived or changed since the last call. They queue as
-	// fill bricks, behind every dirty or scrolled-in brick.
+	// fill bricks, behind every dirty or scrolled-in brick, nearest the camera first.
 	void refresh_instances(const InstanceBounds *p_instances, uint32_t p_count);
 	// update_render calls this once a frame with the mesh-SDF atlas generation, which changes
 	// when a mesh SDF is built, rebuilt or freed (a late SDF has no registry event), and passes
@@ -249,6 +251,11 @@ public:
 	bool begin_frame(uint64_t p_field_generation);
 	uint32_t pending_bricks() const { return queue.size(); }
 	uint32_t pending_bricks_at_level(uint32_t p_level) const;
+	// The brick retrace will take at p_index. False when p_index is past the queue.
+	bool get_pending_brick(uint32_t p_index, uint32_t &r_level, Vector3i &r_brick, bool &r_fill) const;
+	// Squared distance from the camera to the closest point of that brick's voxels.
+	// Negative when p_index is past the queue. The trace-reach margin is not part of it.
+	float get_pending_brick_distance_sq(uint32_t p_index) const;
 	// Traces a budget of axis rays. Returns the rays traced this call.
 	uint32_t retrace(const TraceInstance *p_instances, uint32_t p_count);
 	// Packs every stored hit for the GPU shade.
@@ -279,7 +286,7 @@ public:
 	// Adds the voxel_lighting_* entries to nextgi_get_tier_info().
 	void fill_info(Dictionary &r_info) const;
 
-	// Line 2b, and the software-tier hook.
+	// Line 2b, after the SRC relight, on both tiers.
 	void update_render(RenderDataRD *p_render_data, RendererRD::NextGIRelight *p_relight, RendererRD::NextGISRC *p_src);
 	void reset();
 
@@ -321,6 +328,9 @@ private:
 	void _enqueue_aabb(const AABB &p_aabb, uint32_t p_level_mask = (1u << LEVELS) - 1u, bool p_fill = false);
 	void _enqueue_brick(uint32_t p_level, const Vector3i &p_brick, bool p_fill = false);
 	void _count_fill_begin();
+	// Fill bricks only, nearest the camera first. Dirty bricks stay in front of them.
+	void _order_fill_bricks();
+	float _fill_distance_sq(const DirtyBrick &p_brick) const;
 	void _scroll_level(uint32_t p_level, const Vector3i &p_new_origin);
 	void _drop_level(uint32_t p_level);
 	void _clear_voxel(uint32_t p_level, const Vector3i &p_physical);
@@ -334,9 +344,11 @@ private:
 	void _collect_debug_probes();
 
 	HashMap<uint32_t, AxisHit> hits;
-	// Dirty and scrolled-in bricks first, in arrival order, then fill bricks from fill_begin on.
+	// Dirty and scrolled-in bricks first, in arrival order, then fill bricks from fill_begin on,
+	// those nearest the camera first.
 	LocalVector<DirtyBrick> queue;
 	uint32_t fill_begin = 0;
+	Vector3 camera_position;
 	// Queued brick key to its fill flag.
 	HashMap<uint32_t, bool> queued;
 	Vector3i origins[LEVELS];

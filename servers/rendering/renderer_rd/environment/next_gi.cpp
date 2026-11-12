@@ -991,6 +991,8 @@ Dictionary NextGI::get_tier_info() const {
 	if (voxel_lighting != nullptr) {
 		voxel_lighting->fill_info(info);
 	}
+	// The pre-render hook used to report "none". The frame block's relight slot reports its name.
+	info["voxel_lighting_slot"] = voxel_lighting_slot;
 	_append_swrt_info(info);
 	// GodotNext: ps_lumen_lite (#183, #186). Per-view Lite fields alive; each is freed with its view.
 	info["lite_view_fields"] = int64_t(NextGIIrradianceField::ViewField::get_alive_count());
@@ -1068,11 +1070,15 @@ void NextGI::_relight_src(RenderDataRD *p_render_data) {
 	if (relight != nullptr) {
 		relight->relight(p_render_data);
 	}
-	// GodotNext: ps_voxel_lighting (#188). Same slot as SRC relight, after capture, on HWRT. The
-	// software tier keeps its earlier place, the pre-render hook (renderer_scene_render_rd.cpp),
-	// until the lead places it (#188 step 3).
-	if (result.tier == TIER_HWRT) {
-		update_voxel_lighting(p_render_data);
+	// GodotNext: ps_voxel_lighting (#188). Line 2b on both tiers, after this frame's relight, so the
+	// shade reads the pages just written. The software tier used to shade in the pre-render hook,
+	// outside every timestamp and one frame behind those pages.
+	update_voxel_lighting(p_render_data);
+	// GodotNext: ps_voxel_lighting (#188). AS updates filled the scene params before this shade.
+	// Rewrite them so the WRC and the gather trace this frame's clipmaps and volume. The relight's
+	// shadow rays were recorded first and march the global SDF; they do not sample the volume.
+	if (result.tier == TIER_SOFTWARE && swrt_trace != nullptr) {
+		swrt_trace->prepare_scene_params(voxel_lighting);
 	}
 }
 
@@ -1105,6 +1111,7 @@ void NextGI::begin_frame(uint64_t p_frame) {
 		swrt_trace = nullptr;
 	}
 	voxel_lighting_frame = UINT64_MAX;
+	voxel_lighting_slot = "none";
 	ray_query_versions_at_tier = ShaderRD::get_ray_query_versions_created();
 	_ensure_rt_scene();
 	frame_tier = result.tier;
@@ -1162,6 +1169,8 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 		return;
 	}
 	voxel_lighting_frame = frame;
+	// Inside the relight slot this is "NextGI: SRC relight". The old pre-render hook left "none".
+	voxel_lighting_slot = get_active_slot_name();
 	if (voxel_lighting == nullptr) {
 		voxel_lighting = memnew(NextGIVoxelLighting);
 	}
@@ -1328,9 +1337,9 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		} else if (slot == PASS_SLOT_AS_UPDATES && swrt_frame) {
 			// GodotNext: ps_swrt_trace (#186, plan §21.2.4). Line 1a on the software tier: the
 			// global SDF update, the record pass that assigns the instances' relight pages (as the
-			// TLAS phase does on the hardware tier; #188), then the scene params every later slot
-			// of the frame traces with (this frame's level origins, and the voxel volume the
-			// pre-render hook updated).
+			// TLAS phase does on the hardware tier; #188), then the scene params. The voxel volume
+			// is shaded later in this frame, after the SRC relight (#188); that slot rewrites the
+			// params so later traces read this frame's clipmaps.
 			if (swrt_trace == nullptr) {
 				swrt_trace = memnew(NextGISWRTTrace);
 			}

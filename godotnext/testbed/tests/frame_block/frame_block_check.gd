@@ -31,7 +31,9 @@ extends Node
 ##   scene's BLASes build);
 ## - SWRT: the software tracer holds at least 3 global-SDF levels and the room's instances, its
 ##   global SDF was updated and its record pass (the relight pages of its instances, #188) ran in
-##   the "NextGI: AS updates" slot (line 1a) and recorded every instance, no ray-query ShaderRD
+##   the "NextGI: AS updates" slot (line 1a) and recorded every instance, voxel lighting ran in
+##   the "NextGI: SRC relight" slot (line 2b, after the relight; the pre-render hook reported
+##   "none"), no ray-query ShaderRD
 ##   was created since the tier was selected (and none in the whole process when
 ##   hardware_ray_tracing was Off at launch, which skips the startup self-test, or under
 ##   debug/deny_ray_query), and outside Lumen Lite the gather ran the software sibling
@@ -310,6 +312,8 @@ func _final_failures() -> PackedStringArray:
 				result.append("the SWRT record pass ran in slot \"%s\", expected \"NextGI: AS updates\"" % [String(tier_info.get("swrt_record_slot", "none"))])
 			if int(tier_info.get("swrt_record_count", 0)) != int(tier_info.get("swrt_trace_instances", -1)):
 				result.append("the SWRT record pass recorded %d of %d instances" % [int(tier_info.get("swrt_record_count", 0)), int(tier_info.get("swrt_trace_instances", -1))])
+			if String(tier_info.get("voxel_lighting_slot", "none")) != "NextGI: SRC relight":
+				result.append("voxel lighting ran in slot \"%s\", expected \"NextGI: SRC relight\"" % [String(tier_info.get("voxel_lighting_slot", "none"))])
 			if int(tier_info.get("ray_query_shader_versions_since_tier", -1)) != 0:
 				result.append("%d ray-query ShaderRD versions were created on the SWRT tier" % [int(tier_info.get("ray_query_shader_versions_since_tier", -1))])
 			if (hwrt_off_at_launch or deny_ray_query) and int(tier_info.get("ray_query_shader_versions", -1)) != 0:

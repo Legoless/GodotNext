@@ -797,6 +797,7 @@ void NextGIVoxelLighting::reset() {
 	hits.clear();
 	queue.clear();
 	fill_begin = 0;
+	camera_position = Vector3();
 	queued.clear();
 	for (uint32_t level = 0; level < LEVELS; level++) {
 		origins[level] = Vector3i();
@@ -907,6 +908,7 @@ void NextGIVoxelLighting::set_clipmap_origins(const Vector3i *p_origins, uint32_
 }
 
 void NextGIVoxelLighting::set_clipmap_origins_from_camera(const Vector3 &p_camera) {
+	camera_position = p_camera;
 	Vector3i level_origins[LEVELS];
 	for (uint32_t level = 0; level < LEVELS; level++) {
 		level_origins[level] = NextGIGlobalSDF::scrolled_origin(p_camera, level);
@@ -954,6 +956,79 @@ void NextGIVoxelLighting::_count_fill_begin() {
 	fill_begin = 0;
 	while (fill_begin < queue.size() && !queue[fill_begin].fill) {
 		fill_begin++;
+	}
+}
+
+float NextGIVoxelLighting::_fill_distance_sq(const DirtyBrick &p_brick) const {
+	if (p_brick.level >= LEVELS || !origin_set[p_brick.level]) {
+		return 1.0e20f;
+	}
+	// The trace-reach margin in _brick_aabb pulls distant bricks onto the camera. The fill
+	// priority is the brick's own voxels, nearest the camera first.
+	const float reach = level_voxel_size(p_brick.level) * float(TRACE_REACH_VOXELS);
+	AABB box = _brick_aabb(p_brick.level, p_brick.brick);
+	box.grow_by(-reach);
+	const Vector3 low = box.position;
+	const Vector3 high = low + box.size;
+	const Vector3 closest(
+			CLAMP(camera_position.x, low.x, high.x),
+			CLAMP(camera_position.y, low.y, high.y),
+			CLAMP(camera_position.z, low.z, high.z));
+	return camera_position.distance_squared_to(closest);
+}
+
+void NextGIVoxelLighting::_order_fill_bricks() {
+	if (fill_begin >= queue.size()) {
+		return;
+	}
+	// Nearest the camera, then the finer level, then brick coordinates. Dirty bricks are not here.
+	struct Order {
+		float distance = 0.0f;
+		uint32_t level = 0;
+		int32_t x = 0;
+		int32_t y = 0;
+		int32_t z = 0;
+		uint32_t index = 0;
+		bool operator<(const Order &p_other) const {
+			if (distance != p_other.distance) {
+				return distance < p_other.distance;
+			}
+			if (level != p_other.level) {
+				return level < p_other.level;
+			}
+			if (x != p_other.x) {
+				return x < p_other.x;
+			}
+			if (y != p_other.y) {
+				return y < p_other.y;
+			}
+			if (z != p_other.z) {
+				return z < p_other.z;
+			}
+			return index < p_other.index;
+		}
+	};
+	const uint32_t count = queue.size() - fill_begin;
+	LocalVector<Order> order;
+	order.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		const DirtyBrick &brick = queue[fill_begin + i];
+		Order &key = order[i];
+		key.distance = _fill_distance_sq(brick);
+		key.level = brick.level;
+		key.x = brick.brick.x;
+		key.y = brick.brick.y;
+		key.z = brick.brick.z;
+		key.index = i;
+	}
+	order.sort();
+	LocalVector<DirtyBrick> ordered;
+	ordered.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		ordered[i] = queue[fill_begin + order[i].index];
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		queue[fill_begin + i] = ordered[i];
 	}
 }
 
@@ -1043,6 +1118,7 @@ void NextGIVoxelLighting::refresh_instances(const InstanceBounds *p_instances, u
 	for (uint32_t index = 0; index < p_count; index++) {
 		seen_fields[p_instances[index].mesh] = p_instances[index].field;
 	}
+	_order_fill_bricks();
 }
 
 bool NextGIVoxelLighting::begin_frame(uint64_t p_field_generation) {
@@ -1062,6 +1138,23 @@ uint32_t NextGIVoxelLighting::pending_bricks_at_level(uint32_t p_level) const {
 		}
 	}
 	return count;
+}
+
+bool NextGIVoxelLighting::get_pending_brick(uint32_t p_index, uint32_t &r_level, Vector3i &r_brick, bool &r_fill) const {
+	if (p_index >= queue.size()) {
+		return false;
+	}
+	r_level = queue[p_index].level;
+	r_brick = queue[p_index].brick;
+	r_fill = queue[p_index].fill;
+	return true;
+}
+
+float NextGIVoxelLighting::get_pending_brick_distance_sq(uint32_t p_index) const {
+	if (p_index >= queue.size()) {
+		return -1.0f;
+	}
+	return _fill_distance_sq(queue[p_index]);
 }
 
 void NextGIVoxelLighting::_drop_level(uint32_t p_level) {
@@ -1223,6 +1316,8 @@ void NextGIVoxelLighting::_trace_brick(const DirtyBrick &p_brick, const TraceIns
 
 uint32_t NextGIVoxelLighting::retrace(const TraceInstance *p_instances, uint32_t p_count) {
 	retrace_rays = 0;
+	// The camera may have moved since the bricks were queued. Dirty bricks stay in front.
+	_order_fill_bricks();
 	bool one_brick = false;
 	uint32_t bricks_done = 0;
 	const uint32_t brick_rays = SDF_BRICK_VOXELS * SDF_BRICK_VOXELS * SDF_BRICK_VOXELS * DIRECTIONS;
@@ -1750,6 +1845,8 @@ void NextGIVoxelLighting::update_render(RenderDataRD *p_render_data, RendererRD:
 		}
 		refresh_instances(bounds.ptr(), bounds.size());
 	}
+	// A camera move that does not create a level still reorders the fill that is left.
+	_order_fill_bricks();
 
 	const uint32_t brick_rays = SDF_BRICK_VOXELS * SDF_BRICK_VOXELS * SDF_BRICK_VOXELS * DIRECTIONS;
 	LocalVector<DirtyBrick> planned;

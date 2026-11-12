@@ -1154,3 +1154,110 @@ TEST_CASE("[NextGI] Voxel lighting drops ghost hits when the instance leaves") {
 	CHECK_EQ(lighting.get_shaded_hits(), 0u);
 	CHECK_FALSE(lighting.get_stored_hit(0, above, 4, top));
 }
+
+static float _brick_center_distance(const Vector3 &p_camera, uint32_t p_level, const Vector3i &p_brick) {
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(p_camera, p_level);
+	const Vector3i local = p_brick * int(NextGIVoxelLighting::SDF_BRICK_VOXELS) + Vector3i(2, 2, 2);
+	return NextGIVoxelLighting::voxel_center(p_level, origin, local).distance_to(p_camera);
+}
+
+static uint32_t _count_instance_hits(const NextGIVoxelLighting &p_lighting, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world, int p_radius, uint32_t p_instance) {
+	const Vector3i base = _local_voxel(p_level, p_origin, p_world);
+	uint32_t count = 0;
+	for (int z = -p_radius; z <= p_radius; z++) {
+		for (int y = -p_radius; y <= p_radius; y++) {
+			for (int x = -p_radius; x <= p_radius; x++) {
+				for (uint32_t direction = 0; direction < NextGIVoxelLighting::DIRECTIONS; direction++) {
+					NextGIVoxelLighting::AxisHit hit;
+					if (p_lighting.get_stored_hit(p_level, base + Vector3i(x, y, z), direction, hit) && hit.instance == p_instance) {
+						count++;
+					}
+				}
+			}
+		}
+	}
+	return count;
+}
+
+TEST_CASE("[NextGI] Voxel lighting fills a new volume nearest the camera first") {
+	const MeshSDFData box = _unit_box_sdf();
+	const Vector3 camera;
+	// Listed far first, which is the instance order the queue used to keep.
+	const NextGIVoxelLighting::TraceInstance far = _instance(&box, 1, Transform3D(Basis(), Vector3(40.0f, 0.0f, 0.0f)));
+	const NextGIVoxelLighting::TraceInstance near = _instance(&box, 2, Transform3D());
+	NextGIVoxelLighting::InstanceBounds bounds[2];
+	bounds[0].mesh = 1;
+	bounds[0].field = &box;
+	bounds[0].world_aabb = far.world_aabb;
+	bounds[1].mesh = 2;
+	bounds[1].field = &box;
+	bounds[1].world_aabb = near.world_aabb;
+
+	NextGIVoxelLighting lighting;
+	lighting.set_clipmap_origins_from_camera(camera);
+	lighting.refresh_instances(bounds, 2);
+	const uint32_t pending = lighting.pending_bricks();
+	REQUIRE(pending > 8u);
+
+	float previous_distance = -1.0f;
+	int last_near = -1;
+	int first_far = -1;
+	for (uint32_t index = 0; index < pending; index++) {
+		uint32_t level = 0;
+		Vector3i brick;
+		bool fill = false;
+		REQUIRE(lighting.get_pending_brick(index, level, brick, fill));
+		CHECK(fill);
+		const float distance_sq = lighting.get_pending_brick_distance_sq(index);
+		CHECK(distance_sq >= 0.0f);
+		if (previous_distance >= 0.0f) {
+			CHECK(distance_sq + 1.0e-4f >= previous_distance);
+		}
+		previous_distance = distance_sq;
+		const float center = _brick_center_distance(camera, level, brick);
+		if (center < 2.0f) {
+			last_near = int(index);
+		}
+		if (center > 20.0f && first_far < 0) {
+			first_far = int(index);
+		}
+	}
+	REQUIRE(last_near >= 0);
+	REQUIRE(first_far > last_near);
+
+	NextGIVoxelLighting::TraceInstance traces[2] = { far, near };
+	const uint32_t rays = lighting.retrace(traces, 2);
+	const uint32_t brick_rays = NextGIVoxelLighting::SDF_BRICK_VOXELS * NextGIVoxelLighting::SDF_BRICK_VOXELS * NextGIVoxelLighting::SDF_BRICK_VOXELS * NextGIVoxelLighting::DIRECTIONS;
+	CHECK_EQ(rays, NextGIVoxelLighting::RAYS_PER_FRAME);
+	CHECK_EQ(rays % brick_rays, 0u);
+	CHECK_LT(lighting.pending_bricks(), pending);
+	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(camera, 0);
+	const Vector3i origin3 = NextGIGlobalSDF::scrolled_origin(camera, 3);
+	CHECK_GT(lighting.get_stored_hits(), 0u);
+	CHECK_GT(_count_instance_hits(lighting, 0, origin, Vector3(0.0f, 0.2f, 0.0f), 8, 2u), 0u);
+	CHECK_EQ(_count_instance_hits(lighting, 3, origin3, Vector3(40.0f, 0.2f, 0.0f), 4, 1u), 0u);
+
+	// A dirty brick far from the camera still leads the remaining fill.
+	const AABB dirty(Vector3(39.6f, -0.2f, -0.2f), Vector3(0.4f, 0.4f, 0.4f));
+	lighting.enqueue_dirty_volumes(&dirty, 1);
+	uint32_t level = 0;
+	Vector3i brick;
+	bool fill = true;
+	REQUIRE(lighting.get_pending_brick(0, level, brick, fill));
+	CHECK_FALSE(fill);
+	CHECK_GT(_brick_center_distance(camera, level, brick), 20.0f);
+	uint32_t fill_index = 0;
+	while (fill_index < lighting.pending_bricks()) {
+		REQUIRE(lighting.get_pending_brick(fill_index, level, brick, fill));
+		if (fill) {
+			break;
+		}
+		fill_index++;
+	}
+	REQUIRE(fill_index > 0u);
+	REQUIRE(fill_index < lighting.pending_bricks());
+	CHECK_LT(_brick_center_distance(camera, level, brick), 8.0f);
+	const uint32_t more = lighting.retrace(traces, 2);
+	CHECK_LE(more, NextGIVoxelLighting::RAYS_PER_FRAME);
+	CHECK_GT(more, 0u);
+}

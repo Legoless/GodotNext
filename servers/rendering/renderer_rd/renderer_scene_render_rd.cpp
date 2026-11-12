@@ -1571,15 +1571,9 @@ void RendererSceneRenderRD::render_scene(const Ref<RenderSceneBuffers> &p_render
 	}
 
 	// GodotNext: nextgi_frame_tier (#186)
-	// The tier is fixed for the frame before its first NextGI consumer (the voxel hook below).
+	// The tier is fixed for the frame before the scene render. Voxel lighting runs later, inside
+	// the frame block's SRC relight slot, on both tiers (#188).
 	next_gi.begin_frame(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
-
-	// GodotNext: ps_voxel_lighting (#188)
-	// Line 2b owns this on the HWRT tier. Off that tier the same update still
-	// has to run, or hardware_ray_tracing=off never shades a volume.
-	if (next_gi.get_tier_result().tier != RendererRD::NextGI::TIER_HWRT) {
-		next_gi.update_voxel_lighting(&render_data);
-	}
 
 	//calls _pre_opaque_render between depth pre-pass and opaque pass
 	_render_scene(&render_data, clear_color);

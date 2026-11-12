@@ -65,20 +65,23 @@ extends Node
 ##
 ## --check=bleed (#188, #186): Color Box Room A seen from above, the camera at (-2.05, 2.95, 0)
 ## looking straight down (up -Z, fov 50), so the red (-Z) and green (+Z) walls stay off-screen and
-## their light reaches the floor only through NextGI. After BLEED_WARMUP_FRAMES it waits until the
-## voxel-lighting volume has finished filling (voxel_lighting_retrace 0 for VOXEL_SETTLE_FRAMES
-## frames in a row, within BLEED_MAX_FRAMES): a new volume traces its bricks at #188's 1536 CPU
-## rays per frame, so on the software tier global-SDF hits in this room have no voxel radiance for
-## the first 1456 frames (measured on the M5 Max). Both tiers wait the same way. It then measures the
-## denoised ambient (DEBUG_DRAW_NEXTGI_DENOISE_DENOISED, HDR) every BLEED_STEP frames for
-## BLEED_SAMPLES samples: 15x15-pixel means on the floor at x -3.6 and -0.6, z -1 (the red side)
-## and z +1 (the green side). red_bleed is the mean R - G on the red side, green_bleed the mean
-## G - R on the green side, each averaged over the samples. With --expected-tier=SWRT both must be
-## positive and at least BLEED_SHARE of the hardware tier's (--hwrt-red-bleed, --hwrt-green-bleed,
-## from the reference pass run_swrt_gi_check.sh runs first); the ratios are printed report-only.
-## The software tier gets its floor bleed from the walls' surface cache: SRC capture and relight
-## on that tier, voxel lighting shaded from it and the WRC it feeds. With --expected-tier=HWRT it
-## prints the reference ("SWRT_GI_REFERENCE red_bleed=R green_bleed=G").
+## their light reaches the floor only through NextGI. It measures the denoised ambient
+## (DEBUG_DRAW_NEXTGI_DENOISE_DENOISED, HDR): 15x15-pixel means on the floor at x -3.6 and -0.6,
+## z -1 (the red side) and z +1 (the green side). red_bleed is the mean R - G on the red side,
+## green_bleed the mean G - R on the green side.
+## With --expected-tier=HWRT it waits until the volume has finished filling (voxel_lighting_retrace
+## 0 for VOXEL_SETTLE_FRAMES frames in a row, after BLEED_WARMUP_FRAMES, within BLEED_MAX_FRAMES)
+## and then takes BLEED_SAMPLES samples every BLEED_STEP frames. It prints the reference
+## ("SWRT_GI_REFERENCE red_bleed=R green_bleed=G settled_frame=N").
+## With --expected-tier=SWRT the colored bounce is on the floor while distant bricks are still
+## queued. From BLEED_EARLY_FROM it samples every BLEED_STEP frames and records bounce_frame, the
+## first run of BLEED_SAMPLES samples that are each at least BLEED_SHARE of the hardware tier
+## (--hwrt-red-bleed, --hwrt-green-bleed); on this room that is about 780 with either brick order,
+## while 1456 is the frame the trace queue goes empty. It then waits for the empty queue like the
+## reference pass and measures the steady state: both channels' means must be positive and at least
+## BLEED_SHARE of the hardware tier; the ratios are printed report-only. Without a bounce by
+## BLEED_MAX_FRAMES it fails. The software tier gets its floor bleed from the walls' surface cache: SRC
+## capture and relight on that tier, voxel lighting shaded from it.
 ##
 ## --check=detail (#186 step 3): the bleed view with software_ray_tracing_mode Detail (the runner
 ## sets it). Gather rays hit mesh SDFs (gather_sdf_detail_hits > 0), those hits know their
@@ -96,6 +99,7 @@ extends Node
 const KITBASH_SCENE := "res://scenes/swrt_kitbash/swrt_kitbash.tscn"
 const BLEED_SCENE := "res://scenes/color_box_room/cbr_a.tscn"
 const BLEED_WARMUP_FRAMES := 300
+const BLEED_EARLY_FROM := 45
 const VOXEL_SETTLE_FRAMES := 30
 const BLEED_MAX_FRAMES := 4000
 const BLEED_SAMPLES := 10
@@ -142,6 +146,8 @@ var bleed_red := PackedFloat32Array()
 var bleed_green := PackedFloat32Array()
 var settle_count := 0
 var settled_frame := -1
+# Software tier: the first frame of a run of BLEED_SAMPLES samples at BLEED_SHARE of the hardware tier.
+var bounce_frame := -1
 
 
 func _ready() -> void:
@@ -255,7 +261,39 @@ func _mean(p_values: PackedFloat32Array) -> float:
 	return sum / float(maxi(p_values.size(), 1))
 
 
+# Software tier: the colored bounce, not an empty trace queue, is the settle signal.
+func _process_bleed_early() -> void:
+	if frames < BLEED_EARLY_FROM:
+		return
+	if (frames - BLEED_EARLY_FROM) % BLEED_STEP != 0:
+		return
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	var bleed := _sample_bleed()
+	var red_ok := bleed[0] >= BLEED_SHARE * hwrt_red_bleed and bleed[0] > 0.0
+	var green_ok := bleed[1] >= BLEED_SHARE * hwrt_green_bleed and bleed[1] > 0.0
+	if red_ok and green_ok:
+		bleed_red.append(bleed[0])
+		bleed_green.append(bleed[1])
+		gather_samples.append(info)
+	else:
+		bleed_red.clear()
+		bleed_green.clear()
+		gather_samples.clear()
+	if bleed_red.size() >= BLEED_SAMPLES:
+		# Recorded only; the steady state after the volume has filled is still measured and asserted.
+		bounce_frame = frames
+		bleed_red.clear()
+		bleed_green.clear()
+		gather_samples.clear()
+		return
+	if frames >= BLEED_MAX_FRAMES:
+		_finish(["colored bounce had not settled by frame %d (red %.6f green %.6f, need %.6f and %.6f)" % [frames, bleed[0], bleed[1], BLEED_SHARE * hwrt_red_bleed, BLEED_SHARE * hwrt_green_bleed]])
+
+
 func _process_bleed() -> void:
+	if mode == "bleed" and expected_tier == "SWRT" and bounce_frame < 0:
+		_process_bleed_early()
+		return
 	if frames <= BLEED_WARMUP_FRAMES:
 		return
 	if settled_frame < 0:
@@ -292,8 +330,8 @@ func _bleed_checks(p_last: Dictionary) -> PackedStringArray:
 	result.append_array(_software_tier_checks(p_last))
 	var detail_hits := int(gather_best.get("gather_sdf_detail_hits", 0))
 	var resolved := int(gather_best.get("gather_sdf_d6_resolved", 0))
-	print("SWRT_GI_BLEED mode=%s settled_frame=%d quality=%s red_bleed=%.6f green_bleed=%.6f hwrt_red=%.6f hwrt_green=%.6f ratio_red=%.3f ratio_green=%.3f (report-only) samples_red=%s samples_green=%s snapshots=%d rays=%d sdf_hits=%d detail_hits=%d d6_resolved=%d swrt_records=%d paged=%d" % [
-		mode, settled_frame, String(p_last.get("quality", "")), red, green, hwrt_red_bleed, hwrt_green_bleed,
+	print("SWRT_GI_BLEED mode=%s bounce_frame=%d settled_frame=%d quality=%s red_bleed=%.6f green_bleed=%.6f hwrt_red=%.6f hwrt_green=%.6f ratio_red=%.3f ratio_green=%.3f (report-only) samples_red=%s samples_green=%s snapshots=%d rays=%d sdf_hits=%d detail_hits=%d d6_resolved=%d swrt_records=%d paged=%d" % [
+		mode, bounce_frame, settled_frame, String(p_last.get("quality", "")), red, green, hwrt_red_bleed, hwrt_green_bleed,
 		red / hwrt_red_bleed if hwrt_red_bleed > 0.0 else 0.0, green / hwrt_green_bleed if hwrt_green_bleed > 0.0 else 0.0,
 		bleed_red, bleed_green, int(gather_best.get("snapshots", 0)), int(gather_best.get("src_gather_rays", 0)), int(gather_best.get("gather_sdf_hits", 0)),
 		detail_hits, resolved, int(p_last.get("swrt_record_count", -1)), int(p_last.get("swrt_record_paged", -1))])

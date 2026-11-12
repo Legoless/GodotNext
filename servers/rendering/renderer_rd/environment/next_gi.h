@@ -321,6 +321,8 @@ private:
 	// GodotNext: ps_voxel_lighting (#188)
 	NextGIVoxelLighting *voxel_lighting = nullptr;
 	uint64_t voxel_lighting_frame = UINT64_MAX;
+	// Frame-block slot the update last ran in. "none" until it runs inside a slot.
+	String voxel_lighting_slot = "none";
 
 	// GodotNext: nextgi_frame_tier (#186). The tier is fixed for a render frame: begin_frame()
 	// applies a budget change noted by an earlier frame and drops the previous tier's state.
@@ -499,7 +501,7 @@ public:
 	// Counters whose producer has not merged are 0. TLAS instances come from the RT scene.
 	Dictionary get_counters() const;
 
-	// GodotNext: ps_voxel_lighting (#188). Line 2b on HWRT, and the software-tier hook.
+	// GodotNext: ps_voxel_lighting (#188). Line 2b, after the SRC relight, on both tiers.
 	void update_voxel_lighting(RenderDataRD *p_render_data);
 
 	// GodotNext: nextgi_frame_tier (#186). Runs once per render frame number before the first NextGI

@@ -61,6 +61,8 @@ struct NextGILight;
 //   clipmaps of the whole scene resident (NextGIGlobalSDFClipmaps; every fed
 //   instance with a mesh SDF, no instance or brick cap) and uploads the instance
 //   table; prepare_scene_params() then fills the params every later slot traces with.
+//   The SRC relight slot rewrites them after the voxel shade (#188), so the WRC and the
+//   gather read this frame's clipmaps.
 // - The frame block's software siblings (nextgi_gather_swrt.glsl,
 //   nextgi_wrc_update_swrt.glsl) bind the trace in set 1 through
 //   create_trace_uniform_set(); the gather refills prepare_view_params() per view.

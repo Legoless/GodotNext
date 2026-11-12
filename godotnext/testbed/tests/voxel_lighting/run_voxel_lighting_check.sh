@@ -8,6 +8,9 @@
 #   res://tests/voxel_lighting/voxel_lighting_check.tscn (kitbash stores hits and covers some)
 #   at quality High, where it must print VOXEL_LIGHTING_ASSERTED, and again at quality Medium
 #   (Lumen Lite), where it must print its coverage on a VOXEL_LIGHTING_LITE line for information.
+#   res://tests/voxel_lighting/voxel_relight_frame_check.tscn (software tier at quality High: a
+#   light switched on this frame shades the wall's voxels this frame, from the SRC relight slot)
+#   must print VOXEL_RELIGHT_FRAME_OK.
 #   GodotNext: ps_swrt_trace (#186, #188). The kitbash runs on both tiers: hardware_ray_tracing
 #   Auto (0, the hardware tier here), Off (1, the software tier, whose SRC is captured and relit
 #   too) and, with --deny-ray-query, Auto under debug/deny_ray_query (the software tier as on a
@@ -71,6 +74,7 @@ if [[ "$deny" == true ]]; then
 	runs=(
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 0 VOXEL_LIGHTING_ASSERTED SWRT"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE SWRT"
+		"res://tests/voxel_lighting/voxel_relight_frame_check.tscn 2 0 VOXEL_RELIGHT_FRAME_OK SWRT"
 	)
 else
 	runs=(
@@ -80,6 +84,7 @@ else
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 0 VOXEL_LIGHTING_LITE device"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 2 1 VOXEL_LIGHTING_ASSERTED SWRT"
 		"res://tests/voxel_lighting/voxel_lighting_check.tscn 1 1 VOXEL_LIGHTING_LITE SWRT"
+		"res://tests/voxel_lighting/voxel_relight_frame_check.tscn 2 1 VOXEL_RELIGHT_FRAME_OK SWRT"
 	)
 fi
 

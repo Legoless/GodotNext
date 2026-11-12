@@ -16,7 +16,9 @@
 #   HWRT until debug/as_budget_bytes drops to 1 byte at runtime, then SWRT (AS_MEMORY) from the next
 #   frame on. It needs a device with the HWRT tier; elsewhere it fails.
 # --mode=bleed (#188): swrt_gi_check.tscn --check=bleed on Color Box Room A seen from above, at High:
-#   the floor's red and green bleed from the off-screen walls, against the hardware tier's.
+#   the floor's red and green bleed from the off-screen walls, against the hardware tier's. The
+#   software tier records the frame the bounce settles. On this room that is about 780 either way;
+#   frame 1456 is when the trace queue goes empty.
 # --mode=detail (#186 step 3): swrt_gi_check.tscn --check=detail, the bleed view on the software
 #   tier at High with software_ray_tracing_mode Detail (1): detail hits resolve through D6. The
 #   hardware tier has no detail mode, so there is no reference pass.
