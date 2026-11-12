@@ -3519,6 +3519,7 @@ TEST_CASE("[NextGI][Lite] A secondary view reads the probes on the WRC's grid") 
 
 TEST_CASE("[NextGI][Lite] Each view keeps its own field until its render buffers go") {
 	using ViewField = RendererRD::NextGIIrradianceField::ViewField;
+	constexpr uint32_t per_frame = RendererRD::NextGIIrradianceField::PROBES_PER_FRAME;
 	const uint32_t before = ViewField::get_alive_count();
 	{
 		Ref<ViewField> first;
@@ -3526,21 +3527,61 @@ TEST_CASE("[NextGI][Lite] Each view keeps its own field until its render buffers
 		Ref<ViewField> second;
 		second.instantiate();
 		CHECK_EQ(ViewField::get_alive_count(), before + 2);
-		// Each field packs its own probes: PROBES_PER_FRAME a frame, wrapping after 16 frames, and
-		// another view's packs do not move its cursor.
-		for (uint32_t frame = 0; frame < RendererRD::NextGIIrradianceField::PROBE_COUNT / RendererRD::NextGIIrradianceField::PROBES_PER_FRAME; frame++) {
-			CHECK_EQ(first->consume_probe_base(), frame * RendererRD::NextGIIrradianceField::PROBES_PER_FRAME);
+		// Each field packs its own probes: after its first full pack, PROBES_PER_FRAME a frame,
+		// wrapping after 16 frames, and another view's packs do not move its cursor.
+		uint64_t frame = 100;
+		CHECK_EQ(first->consume_pack(frame).count, RendererRD::NextGIIrradianceField::PROBE_COUNT);
+		for (uint32_t step = 0; step < RendererRD::NextGIIrradianceField::PROBE_COUNT / per_frame; step++) {
+			const ViewField::Pack pack = first->consume_pack(++frame);
+			CHECK_EQ(pack.base, step * per_frame);
+			CHECK_EQ(pack.count, per_frame);
 		}
-		CHECK_EQ(first->consume_probe_base(), 0u);
-		CHECK_EQ(second->consume_probe_base(), 0u);
-		CHECK_EQ(first->consume_probe_base(), RendererRD::NextGIIrradianceField::PROBES_PER_FRAME);
+		frame++;
+		CHECK_EQ(first->consume_pack(frame).base, 0u);
+		CHECK_EQ(second->consume_pack(frame).count, RendererRD::NextGIIrradianceField::PROBE_COUNT);
+		frame++;
+		CHECK_EQ(first->consume_pack(frame).base, per_frame);
+		CHECK_EQ(second->consume_pack(frame).base, 0u);
 		// RenderSceneBuffersRD::cleanup() calls free_data() on every reconfigure and keeps the field.
 		first->free_data();
 		CHECK_EQ(ViewField::get_alive_count(), before + 2);
-		CHECK_EQ(first->consume_probe_base(), 2 * RendererRD::NextGIIrradianceField::PROBES_PER_FRAME);
+		const ViewField::Pack resized = first->consume_pack(++frame);
+		CHECK_EQ(resized.base, 2 * per_frame);
+		CHECK_EQ(resized.count, per_frame);
 	}
 	// Dropping the render buffers' reference frees the field.
 	CHECK_EQ(ViewField::get_alive_count(), before);
+}
+
+TEST_CASE("[NextGI][Lite] A view's first pack, and its first after a skipped frame, fills every probe") {
+	using ViewField = RendererRD::NextGIIrradianceField::ViewField;
+	constexpr uint32_t probe_count = RendererRD::NextGIIrradianceField::PROBE_COUNT;
+	constexpr uint32_t per_frame = RendererRD::NextGIIrradianceField::PROBES_PER_FRAME;
+	Ref<ViewField> field;
+	field.instantiate();
+	// A new view, or a one-shot render, reads its field on the frame it packs it, so that pack
+	// covers every probe instead of the first PROBES_PER_FRAME.
+	ViewField::Pack pack = field->consume_pack(40);
+	CHECK_EQ(pack.base, 0u);
+	CHECK_EQ(pack.count, probe_count);
+	pack = field->consume_pack(41);
+	CHECK_EQ(pack.base, 0u);
+	CHECK_EQ(pack.count, per_frame);
+	pack = field->consume_pack(42);
+	CHECK_EQ(pack.base, per_frame);
+	CHECK_EQ(pack.count, per_frame);
+	// A view that skipped a frame (hidden, or a one-shot view rendered again) missed the WRC's
+	// updates since, so it refreshes every probe and keeps its cursor for the frames after.
+	pack = field->consume_pack(44);
+	CHECK_EQ(pack.base, 0u);
+	CHECK_EQ(pack.count, probe_count);
+	pack = field->consume_pack(45);
+	CHECK_EQ(pack.base, 2 * per_frame);
+	CHECK_EQ(pack.count, per_frame);
+	// A second integration within one frame continues the round.
+	pack = field->consume_pack(45);
+	CHECK_EQ(pack.base, 3 * per_frame);
+	CHECK_EQ(pack.count, per_frame);
 }
 
 // GodotNext: nextgi_multiview (#58).

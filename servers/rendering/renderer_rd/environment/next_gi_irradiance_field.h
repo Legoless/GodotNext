@@ -63,16 +63,27 @@ public:
 		static inline SafeNumeric<uint32_t> alive{ 0 };
 
 	public:
+		// The probes one frame's pack copies from the WRC: count probes from base, wrapping at
+		// PROBE_COUNT.
+		struct Pack {
+			uint32_t base = 0;
+			uint32_t count = 0;
+		};
+
 		RID probe_buffer;
 		RID half_image;
 		RID params_buffer;
 		Size2i half_size;
 		uint32_t cursor = 0;
+		bool packed = false;
+		uint64_t last_pack_frame = 0;
 
 		// Every probe starts not traced (validity 1, above the inside threshold).
 		bool ensure_probe_buffer();
-		// The first probe of this frame's pack; PROBES_PER_FRAME per call, wrapping at PROBE_COUNT.
-		uint32_t consume_probe_base();
+		// This frame's pack. A field that did not pack in the previous frame (a new view, a
+		// one-shot render, or a view that was not drawn) packs all PROBE_COUNT probes, so its
+		// first frame reads a complete field; otherwise PROBES_PER_FRAME from the cursor.
+		Pack consume_pack(uint64_t p_frame);
 		// Fields alive across all views (tier info "lite_view_fields").
 		static uint32_t get_alive_count() { return alive.get(); }
 

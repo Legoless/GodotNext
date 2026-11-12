@@ -37,6 +37,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_irradiance_field.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
+#include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
 
@@ -146,13 +147,25 @@ bool NextGIIrradianceField::ViewField::ensure_probe_buffer() {
 	}
 	probe_buffer = rd->storage_buffer_create(cleared.size() * sizeof(float), Span<uint8_t>((const uint8_t *)cleared.ptr(), cleared.size() * sizeof(float)));
 	cursor = 0;
+	packed = false;
 	return probe_buffer.is_valid();
 }
 
-uint32_t NextGIIrradianceField::ViewField::consume_probe_base() {
-	const uint32_t base = cursor;
-	cursor = (cursor + PROBES_PER_FRAME) % PROBE_COUNT;
-	return base;
+NextGIIrradianceField::ViewField::Pack NextGIIrradianceField::ViewField::consume_pack(uint64_t p_frame) {
+	Pack pack;
+	if (!packed || p_frame > last_pack_frame + 1) {
+		// The probes are missing or stale by more than one frame's pack: refresh them all. The
+		// cursor stays, so the frames after continue the round where it was.
+		pack.base = 0;
+		pack.count = PROBE_COUNT;
+	} else {
+		pack.base = cursor;
+		pack.count = PROBES_PER_FRAME;
+		cursor = (cursor + PROBES_PER_FRAME) % PROBE_COUNT;
+	}
+	packed = true;
+	last_pack_frame = p_frame;
+	return pack;
 }
 
 Ref<NextGIIrradianceField::ViewField> NextGIIrradianceField::get_view_field(RenderSceneBuffersRD *p_render_buffers) {
@@ -428,13 +441,15 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	rd->compute_list_bind_compute_pipeline(list, gpu->pipeline);
 	rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 	if (wrc_bound) {
+		// One workgroup per probe; the shader wraps the probe index at PROBE_COUNT.
+		const ViewField::Pack pack = field->consume_pack(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 		LitePushGPU pack_push;
 		pack_push.mode = 0;
-		pack_push.probe_base = field->consume_probe_base();
+		pack_push.probe_base = pack.base;
 		rd->compute_list_set_push_constant(list, &pack_push, sizeof(pack_push));
-		rd->compute_list_dispatch(list, PROBES_PER_FRAME, 1, 1);
+		rd->compute_list_dispatch(list, pack.count, 1, 1);
 		rd->compute_list_add_barrier(list);
-		next_gi->note_lite_probe_traces(PROBES_PER_FRAME);
+		next_gi->note_lite_probe_traces(pack.count);
 	}
 	LitePushGPU interpolate_push;
 	interpolate_push.mode = 1;

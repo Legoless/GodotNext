@@ -12,7 +12,13 @@ extends Node3D
 ## record no gather or reflection dispatch, both views must pack their WRC probes every frame
 ## (lite_probe_traces = 2 x 512: the pack runs only while the WRC field is bound) and hold a field
 ## each (lite_view_fields 2). Then the SubViewport is freed: its field goes with it
-## (lite_view_fields 1, lite_probe_traces 512).
+## (lite_view_fields 1, lite_probe_traces 512). Last, two views are added at the root camera's
+## position: a SubViewport that renders every frame and a one-shot SubViewport (UPDATE_ONCE).
+## Their first frame packs every probe of their new fields (lite_probe_traces 512 + 2 x 8192,
+## lite_view_fields 3), and the image of that frame, the one-shot view's only one, must pass the
+## same lit and spread bounds. The frame after, the one-shot view does not render (1024). When a
+## new field packed only its first 512 probes (3c26e8e2), that frame was lit on 0.07 and 0.05 of
+## the samples, against 0.70 and 0.69 with one field for every view (2e1b0f2e) and with the fix.
 ##
 ## --case=rooms: two closed 6 x 3 x 6 m rooms share a 0.4 m wall, and an omni light (shadows on)
 ## lights only the west room (the lite_leak_check scene). One SubViewport per room looks down at
@@ -53,6 +59,7 @@ const ROOM_TOLERANCE := 0.1
 const MIN_ROOM_LIT := 0.01
 const MAX_DARK_RATIO := 0.05
 const PROBES_PER_FRAME := 512
+const PROBE_COUNT := 8192
 const WALL := 0.4
 const FLOOR_OFFSET := 0.5
 
@@ -65,6 +72,8 @@ var deny_ray_query := false
 
 var _views := {}
 var _sub_view: SubViewport
+var _camera_position := Vector3.ZERO
+var _camera_rotation := Vector3.ZERO
 var _environment: Environment
 var _frames := 0
 var _phase := 0
@@ -114,10 +123,10 @@ func _ready() -> void:
 		_finish_with("--case must be kitbash or rooms")
 
 
-func _make_sub_view(p_size: Vector2i) -> SubViewport:
+func _make_sub_view(p_size: Vector2i, p_update_mode := SubViewport.UPDATE_ALWAYS) -> SubViewport:
 	var viewport := SubViewport.new()
 	viewport.size = p_size
-	viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	viewport.render_target_update_mode = p_update_mode
 	viewport.use_hdr_2d = true
 	viewport.msaa_3d = Viewport.MSAA_DISABLED
 	viewport.use_taa = false
@@ -151,6 +160,8 @@ func _build_kitbash() -> void:
 	camera.position = Vector3(6.0, 2.5, 10.0)
 	camera.rotation_degrees = Vector3(-12.0, 30.0, 0.0)
 	camera.current = true
+	_camera_position = camera.position
+	_camera_rotation = camera.rotation_degrees
 	get_viewport().debug_draw = Viewport.DEBUG_DRAW_NEXTGI_DENOISE_DENOISED
 	_views["root"] = get_viewport()
 	_views["sub"] = _sub_view
@@ -258,8 +269,10 @@ func _check(p_condition: bool, p_message: String) -> void:
 		_failures.append(p_message)
 
 
-# The tier, Lite and no screen or reflection rays, and the per-frame probe packs of p_views views.
-func _check_lite(p_label: String, p_views: int) -> void:
+# The tier, Lite and no screen or reflection rays, the fields of p_views views, and the probes
+# packed in the last frame: p_traces, or PROBES_PER_FRAME per view when it is negative.
+func _check_lite(p_label: String, p_views: int, p_traces := -1) -> void:
+	var expected_traces := p_traces if p_traces >= 0 else p_views * PROBES_PER_FRAME
 	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
 	var counters: Dictionary = RenderingServer.nextgi_get_counters()
 	var tier := str(info.get("tier", ""))
@@ -271,7 +284,7 @@ func _check_lite(p_label: String, p_views: int) -> void:
 	_check(bool(info.get("lite_beta", false)), "%s: Lumen Lite is not active (quality %s)" % [p_label, str(info.get("quality", ""))])
 	_check(int(counters.get("gather_dispatches", -1)) == 0 and int(counters.get("reflection_dispatches", -1)) == 0, "%s: Lite dispatched screen-probe or reflection rays" % p_label)
 	_check(fields == p_views, "%s: %d views hold a Lite field, expected %d" % [p_label, fields, p_views])
-	_check(traces == p_views * PROBES_PER_FRAME, "%s: %d Lite probes packed in the last frame, expected %d (%d per view, packed only while the WRC field is bound)" % [p_label, traces, p_views * PROBES_PER_FRAME, PROBES_PER_FRAME])
+	_check(traces == expected_traces, "%s: %d Lite probes packed in the last frame, expected %d (%d per view a frame, all %d on a new field's first frame, packed only while the WRC field is bound)" % [p_label, traces, expected_traces, PROBES_PER_FRAME, PROBE_COUNT])
 	if deny_ray_query:
 		_check(str(info.get("reason", "")) == "NO_RAY_QUERY", "%s: deny_ray_query: the reason is %s, expected NO_RAY_QUERY" % [p_label, str(info.get("reason", ""))])
 		_check(int(info.get("ray_query_shader_versions", -1)) == 0, "%s: deny_ray_query: %d ray-query ShaderRD versions were created" % [p_label, int(info.get("ray_query_shader_versions", -1))])
@@ -313,7 +326,37 @@ func _process_kitbash() -> void:
 			if _phase_frame < FREE_FRAMES:
 				return
 			_check_lite("one_view", 1)
+			# At the root camera's position: the new views render before the root view, so the WRC
+			# updates from the first one's camera that frame, and the same position keeps its grid.
+			_views["new"] = _make_kitbash_view(SubViewport.UPDATE_ALWAYS, -15.0)
+			_views["one_shot"] = _make_kitbash_view(SubViewport.UPDATE_ONCE, -30.0)
+			_next_phase()
+		2:
+			# The first _process after the new views were added reads the frame they first drew.
+			if _phase_frame == 1:
+				_check_lite("new_views_first_frame", 3, PROBES_PER_FRAME + 2 * PROBE_COUNT)
+				for key in ["new", "one_shot"]:
+					var stats := _field_stats(_views[key])
+					_summary["ambient_first_frame_" + key] = stats
+					print("LITE_TWO_VIEWS ambient_first_frame view=%s lit=%.3f luma=%.4f spread=%.3f" % [key, stats["lit_fraction"], stats["mean_luma"], stats["spread_fraction"]])
+					_check(float(stats["lit_fraction"]) >= MIN_LIT_FRACTION, "the %s view's first frame is lit on %.3f of its samples, below %.2f: its first pack did not fill its field" % [key, stats["lit_fraction"], MIN_LIT_FRACTION])
+					_check(float(stats["spread_fraction"]) >= MIN_SPREAD, "the %s view's first frame is flat (spread %.3f, below %.2f)" % [key, stats["spread_fraction"], MIN_SPREAD])
+				return
+			# The one-shot view keeps its field but no longer renders.
+			_check_lite("new_views_next_frame", 3, 2 * PROBES_PER_FRAME)
 			_finish()
+
+
+# A SubViewport at the root camera's position, turned p_yaw degrees from it.
+func _make_kitbash_view(p_update_mode: SubViewport.UpdateMode, p_yaw: float) -> SubViewport:
+	var viewport := _make_sub_view(SUB_VIEW_SIZE, p_update_mode)
+	var camera := Camera3D.new()
+	camera.fov = 70.0
+	viewport.add_child(camera)
+	camera.position = _camera_position
+	camera.rotation_degrees = _camera_rotation + Vector3(0.0, p_yaw, 0.0)
+	camera.current = true
+	return viewport
 
 
 func _process_rooms() -> void:
