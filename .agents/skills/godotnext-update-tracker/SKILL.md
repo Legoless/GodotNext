@@ -36,7 +36,7 @@ Do this when issues close, as part of landing the work (see `godotnext-implement
 
 These rules live in `export.py` and the page script; keep them the same in both:
 
-- **done:** closed as completed. Issues closed as not planned are left out.
+- **done:** closed, unless closed as not planned (those are left out).
 - **in progress:** open and assigned, or labeled `status:in-progress`.
 - **ready:** open, with every "blocked by" issue closed.
 - **blocked:** open, waiting on at least one open issue.
@@ -44,7 +44,8 @@ These rules live in `export.py` and the page script; keep them the same in both:
   - `post-v1` is phase PX.
   - `test` covers gates, spikes, #225 and anything that waits on #225.
   - `build` is everything else.
-- **"Unlocks":** how many open issues wait on an issue, directly or further down the chain. An epic counts as all of its children.
+- **"Unlocks":** how many open v1 issues (tasks and tests; post-v1 left out) wait on an issue, directly or further down the chain. An epic counts as all of its children.
+- **Road to v1:** M0–M8, then "Test prep" (the build tasks in milestone MQ: the second test machine and the UE 5.9 comparison set), then the final test. "Phases finished" counts the build phases only, without PQ.
 
 ## Editing the page
 
