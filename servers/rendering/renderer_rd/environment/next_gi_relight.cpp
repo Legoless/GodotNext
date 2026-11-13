@@ -984,6 +984,14 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			const RID base = light_storage->light_instance_get_base_light(cpu.instance);
 			entry.bias = RSG::light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_BIAS) / 100.0f * bias_scale;
 			entry.source = p_source;
+			// GodotNext: nextgi_relight_shadow_range (#258)
+			if (p_source == NEXTGI_REUSE_DIRECTIONAL && p_render_data->scene_data != nullptr) {
+				const Vector3 camera_origin = p_render_data->scene_data->cam_transform.origin;
+				entry.range_origin[0] = camera_origin.x;
+				entry.range_origin[1] = camera_origin.y;
+				entry.range_origin[2] = camera_origin.z;
+				entry.range_origin[3] = nextgi_directional_shadow_range(RSG::light_storage->light_get_param(base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE), p_render_data->scene_data->z_far, p_render_data->scene_data->cam_orthogonal);
+			}
 			reuses.push_back(entry);
 			written++;
 		};

@@ -84,8 +84,19 @@ struct NextGIShadowReuse {
 	uint32_t source = NEXTGI_REUSE_NONE;
 	uint32_t pad0 = 0;
 	uint32_t pad1 = 0;
+	// GodotNext: nextgi_relight_shadow_range (#258). xyz is the camera position and w the
+	// directional shadow distance; a receiver farther than w from xyz is traced, not reused, since
+	// the shadow pass culls occluders outside the split slices. w is 0 (no range) for omni and spot.
+	float range_origin[4] = {};
 };
-static_assert(sizeof(NextGIShadowReuse) == 96, "NextGIShadowReuse must stay 96 bytes.");
+static_assert(sizeof(NextGIShadowReuse) == 112, "NextGIShadowReuse must stay 112 bytes.");
+
+// GodotNext: nextgi_relight_shadow_range (#258). The distance the directional shadow map covers:
+// the light's shadow_max_distance clamped to the camera's far plane, as the scene cull computes it.
+// An orthogonal camera ignores shadow_max_distance there.
+_FORCE_INLINE_ float nextgi_directional_shadow_range(float p_shadow_max_distance, float p_z_far, bool p_orthogonal) {
+	return (p_shadow_max_distance > 0.0f && !p_orthogonal) ? MIN(p_shadow_max_distance, p_z_far) : p_z_far;
+}
 
 enum NextGIPositionalLightList {
 	NEXTGI_POSITIONAL_LIGHT_NONE = 0,

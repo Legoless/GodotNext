@@ -49,6 +49,7 @@ struct NextGIShadowReuse {
 	uint source;
 	uint pad0;
 	uint pad1;
+	vec4 range_origin; // GodotNext: #258. xyz camera, w directional shadow distance (0: no range).
 };
 
 layout(set = 0, binding = 13, std430) restrict readonly buffer NextGIReuses {
@@ -134,6 +135,11 @@ int nextgi_reuse_state(uint reuse_index, vec3 world) {
 		NextGIShadowReuse entry = reuses.data[reuse_index + j];
 		if (entry.source == REUSE_NONE) {
 			break;
+		}
+		// GodotNext: nextgi_relight_shadow_range (#258). Beyond the directional shadow distance
+		// the shadow pass culled the occluders, so the map cannot shadow this receiver: trace it.
+		if (entry.range_origin.w > 0.0 && distance(world, entry.range_origin.xyz) > entry.range_origin.w) {
+			continue;
 		}
 		vec4 clip = entry.matrix * vec4(world, 1.0);
 		if (clip.w == 0.0) {

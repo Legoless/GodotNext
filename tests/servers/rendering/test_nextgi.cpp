@@ -2189,6 +2189,19 @@ TEST_CASE("[NextGI] SRC relight: DISABLED never enters and STATIC is dropped onl
 	CHECK(nextgi_light_reaches_receiver(false, NEXTGI_RT_FLAG_LIGHTMAPPED));
 }
 
+// GodotNext: nextgi_relight_shadow_range (#258)
+TEST_CASE("[NextGI] SRC relight: the directional shadow map is reused only within its distance") {
+	// shadow_max_distance clamped to the camera's far plane, as the scene cull does.
+	CHECK_EQ(RendererRD::nextgi_directional_shadow_range(4.0f, 100.0f, false), 4.0f);
+	CHECK_EQ(RendererRD::nextgi_directional_shadow_range(400.0f, 100.0f, false), 100.0f);
+	// 0 (no limit) and an orthogonal camera leave the far plane.
+	CHECK_EQ(RendererRD::nextgi_directional_shadow_range(0.0f, 100.0f, false), 100.0f);
+	CHECK_EQ(RendererRD::nextgi_directional_shadow_range(4.0f, 100.0f, true), 100.0f);
+	// The entry carries the range after the original 96 bytes; omni and spot entries keep 0.
+	CHECK_EQ(offsetof(RendererRD::NextGIShadowReuse, range_origin), size_t(96));
+	CHECK_EQ(RendererRD::NextGIShadowReuse().range_origin[3], 0.0f);
+}
+
 TEST_CASE("[NextGI] SRC relight: page lights, the High schedule and the two mask slots") {
 	using namespace RendererRD;
 	NextGIPageLightCandidate lights[10];

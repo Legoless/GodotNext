@@ -13,6 +13,8 @@ extends Node
 ##                     slab's lies beyond it, more than 6 m from the camera, so only relight's own
 ##                     shadow rays can shadow it (#186 step 5 on the software tier). At least
 ##                     FAR_INSIDE_MIN traced texels inside the slab's footprint must be checked.
+##                     A second slab's footprint lies 4.5 to 6 m away (#258): beyond the shadow
+##                     distance but inside its last split's reach, so relight must trace it too.
 ##                     The edge band (two mask texels around each footprint's edge) is skipped.
 ##   --ceiling-fixture a 20 m floor under a 20 m ceiling plate whose underside is at y 3, a shadowed
 ##                     omni light below the ceiling and no positional shadow atlas, so relight traces
@@ -43,6 +45,13 @@ const FAR_INSIDE_MIN := 40
 ## The shadow fixture's floating slab: center and size.
 const SLAB_CENTER := Vector3(0, 1.5, -7.25)
 const SLAB_SIZE := Vector3(4, 1, 4)
+## A second slab whose footprint lies 4.5 to 6 m from the camera (#258): beyond the sun's 4 m
+## shadow distance, but inside the reach of its last split's shadow camera, whose shadow pass culls
+## occluders outside the split's slice. Relight must trace these texels, not reuse the map.
+const MID_SLAB_CENTER := Vector3(2.4, 1.0, -0.4)
+const MID_SLAB_SIZE := Vector3(2.4, 0.5, 2.4)
+## Traced mask texels inside the mid slab's footprint that must be checked.
+const MID_INSIDE_MIN := 8
 ## The ceiling fixture: the ceiling plate's underside and the level-0 row's gap.
 const CEILING_Y := 3.0
 const CEILING_LIGHT_GAP := 0.12
@@ -288,13 +297,17 @@ func _check_shadow_mask(info: Dictionary) -> void:
 	var margin := maxf(absf(texel_u), absf(texel_v)) * 2.0
 	var camera := Vector3(0, 3, 3)
 	# The footprints on the ground: the block's (center, half extents) and the slab's.
-	var footprints := [[Vector2(0, 0), Vector2(1, 1)], [Vector2(SLAB_CENTER.x, SLAB_CENTER.z), Vector2(SLAB_SIZE.x, SLAB_SIZE.z) * 0.5]]
+	var footprints := [[Vector2(0, 0), Vector2(1, 1)], [Vector2(SLAB_CENTER.x, SLAB_CENTER.z), Vector2(SLAB_SIZE.x, SLAB_SIZE.z) * 0.5], [Vector2(MID_SLAB_CENTER.x, MID_SLAB_CENTER.z), Vector2(MID_SLAB_SIZE.x, MID_SLAB_SIZE.z) * 0.5]]
 	var near_checked := 0
 	var far_checked := 0
 	var far_inside := 0
 	var near_bad := 0
 	var far_bad := 0
 	var far_bad_inside := 0
+	# GodotNext: #258. Beyond the 4 m shadow distance but nearer than the far band.
+	var mid_checked := 0
+	var mid_inside := 0
+	var mid_bad := 0
 	var nonzero := 0
 	var sample := Vector3.ZERO
 	var bad_samples := PackedStringArray()
@@ -323,6 +336,14 @@ func _check_shadow_mask(info: Dictionary) -> void:
 				near_checked += 1
 				if lit == inside:
 					near_bad += 1
+			elif distance > 4.2 and distance <= 6.0:
+				mid_checked += 1
+				if inside:
+					mid_inside += 1
+				if lit == inside:
+					mid_bad += 1
+					if bad_samples.size() < 8:
+						bad_samples.append("mid (%.2f, %.2f) lit=%s inside=%s" % [world.x, world.z, lit, inside])
 			elif distance > 6.0:
 				far_checked += 1
 				if inside:
@@ -333,12 +354,14 @@ func _check_shadow_mask(info: Dictionary) -> void:
 						far_bad_inside += 1
 					if bad_samples.size() < 8:
 						bad_samples.append("(%.2f, %.2f) lit=%s inside=%s" % [world.x, world.z, lit, inside])
-	print("SRC_RELIGHT_SHADOW tier=%s mask=%dx%d margin=%.3f near_checked=%d near_bad=%d far_checked=%d far_inside=%d far_bad=%d far_bad_inside=%d lit=%d bad=%s" % [str(info.get("tier", "")), mask_w, mask_h, margin, near_checked, near_bad, far_checked, far_inside, far_bad, far_bad_inside, nonzero, bad_samples])
+	print("SRC_RELIGHT_SHADOW tier=%s mask=%dx%d margin=%.3f near_checked=%d near_bad=%d far_checked=%d far_inside=%d far_bad=%d far_bad_inside=%d mid_checked=%d mid_inside=%d mid_bad=%d lit=%d bad=%s" % [str(info.get("tier", "")), mask_w, mask_h, margin, near_checked, near_bad, far_checked, far_inside, far_bad, far_bad_inside, mid_checked, mid_inside, mid_bad, nonzero, bad_samples])
 	_check(near_checked > 0, "shadow-map texels were checked (near %d far %d lit %d sample %s)" % [near_checked, far_checked, nonzero, sample])
 	_check(far_checked > 0, "traced texels beyond the shadow distance were checked")
 	_check(far_inside >= FAR_INSIDE_MIN, "%d traced texels inside the slab's footprint were checked, expected at least %d" % [far_inside, FAR_INSIDE_MIN])
 	_check(near_bad == 0, "%d shadow-map texels disagree with the analytic footprint" % near_bad)
 	_check(far_bad == 0, "%d traced texels disagree with the analytic footprints (%d inside one)" % [far_bad, far_bad_inside])
+	_check(mid_inside >= MID_INSIDE_MIN, "%d texels inside the mid slab's footprint were checked, expected at least %d" % [mid_inside, MID_INSIDE_MIN])
+	_check(mid_bad == 0, "%d texels beyond the shadow distance disagree with the analytic footprints" % mid_bad)
 
 
 func _check_ceiling_mask(info: Dictionary) -> void:
@@ -506,6 +529,12 @@ func _build_shadow_fixture(root: Node3D) -> void:
 	slab.mesh = slab_mesh
 	slab.position = SLAB_CENTER
 	root.add_child(slab)
+	var mid_slab := MeshInstance3D.new()
+	var mid_mesh := BoxMesh.new()
+	mid_mesh.size = MID_SLAB_SIZE
+	mid_slab.mesh = mid_mesh
+	mid_slab.position = MID_SLAB_CENTER
+	root.add_child(mid_slab)
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-90, 0, 0)
 	sun.shadow_enabled = true
