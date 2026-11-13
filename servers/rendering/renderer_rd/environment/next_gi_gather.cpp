@@ -407,9 +407,7 @@ bool NextGIGather::_ensure_swrt_shader() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
 	swrt_shader = memnew(SWRTShaderState);
-	swrt_shader->shader.initialize(_nextgi_gather_variant_defines());
-	swrt_shader->shader.set_variant_enabled(4, false);
-	swrt_shader->shader.set_variant_enabled(6, false);
+	initialize_swrt_shader(swrt_shader->shader);
 	swrt_shader->version = swrt_shader->shader.version_create(false);
 	if (!swrt_shader->version.is_valid()) {
 		memdelete(swrt_shader);
@@ -1491,6 +1489,14 @@ String NextGIGather::build_swrt_shader_source(int p_variant) {
 
 Vector<String> NextGIGather::get_shader_variant_defines() {
 	return _nextgi_gather_variant_defines();
+}
+
+// GodotNext: nextgi_bake_swrt (#261). The software sibling has no hit-radiance reference (4) and
+// no far field (6), whose sources need ray query; the shader baker's instance uses this too.
+void NextGIGather::initialize_swrt_shader(ShaderRD &r_shader) {
+	r_shader.initialize(_nextgi_gather_variant_defines());
+	r_shader.set_variant_enabled(4, false);
+	r_shader.set_variant_enabled(6, false);
 }
 
 String NextGIGather::build_shader_source(int p_variant) {

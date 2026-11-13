@@ -233,6 +233,8 @@ public:
 	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
 	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
 	static Vector<String> get_shader_variant_defines();
+	// GodotNext: nextgi_bake_swrt (#261). Initializes the software sibling with its variants.
+	static void initialize_swrt_shader(ShaderRD &r_shader);
 
 	// GodotNext: nextgi_view_math. The view matrices the gather uploads, all from NextGIView:
 	// the inverse of the depth prepass's view-projection, the previous frame's view-projection,

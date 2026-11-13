@@ -255,29 +255,40 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 }
 
 // GodotNext: nextgi_vulkan (#50)
-TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every runtime ray-query ShaderRD") {
+TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	REQUIRE(versions.size() == 5);
+	REQUIRE(versions.size() == 10);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
-		CHECK(pair.first->requires_ray_query());
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	CHECK_EQ(names[0], "NextgiGatherShaderRD");
-	CHECK_EQ(names[1], "NextgiSrcRelightShaderRD");
-	CHECK_EQ(names[2], "NextgiSrcRelightShaderRD");
-	CHECK_EQ(names[3], "NextgiWrcUpdateShaderRD");
-	CHECK_EQ(names[4], "NextgiReferenceShaderRD");
+	const char *expected[10] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD" };
+	for (int i = 0; i < 10; i++) {
+		CHECK_EQ(names[i], String(expected[i]));
+	}
+	// The hardware instances and the self-test need ray query; the software siblings bake everywhere (#261).
+	for (int i = 0; i < 10; i++) {
+		const bool software = i >= 5 && i <= 8;
+		CHECK_EQ(versions[i].first->requires_ray_query(), !software);
+	}
 
-	// Gather bakes every runtime variant, the far-field one included.
+	// Gather bakes every runtime variant, the far-field one included; the software sibling has the
+	// runtime's variants, without the reference (4) and the far field (6), which need ray query.
 	CHECK_EQ(versions[0].first->get_variant_count(), RendererRD::NextGIGather::get_shader_variant_defines().size());
-	// Relight bakes both radiance formats; the runtime picks one from the device.
-	const String packed = versions[1].first->version_build_variant_stage_sources(versions[1].second, 0)[RD::SHADER_STAGE_COMPUTE];
-	const String rgba16f = versions[2].first->version_build_variant_stage_sources(versions[2].second, 0)[RD::SHADER_STAGE_COMPUTE];
-	CHECK(packed.find("#define NEXTGI_RADIANCE_RGBA16F") == -1);
-	CHECK(rgba16f.find("#define NEXTGI_RADIANCE_RGBA16F") != -1);
+	for (int variant = 0; variant < versions[0].first->get_variant_count(); variant++) {
+		CHECK(versions[0].first->is_variant_enabled(variant));
+		CHECK_EQ(versions[5].first->is_variant_enabled(variant), variant != 4 && variant != 6);
+	}
+	// Relight bakes both radiance formats on both tiers; the runtime picks one from the device.
+	for (int base : { 1, 6 }) {
+		const String packed = versions[base].first->version_build_variant_stage_sources(versions[base].second, 0)[RD::SHADER_STAGE_COMPUTE];
+		const String rgba16f = versions[base + 1].first->version_build_variant_stage_sources(versions[base + 1].second, 0)[RD::SHADER_STAGE_COMPUTE];
+		CHECK(packed.find("#define NEXTGI_RADIANCE_RGBA16F") == -1);
+		CHECK(rgba16f.find("#define NEXTGI_RADIANCE_RGBA16F") != -1);
+	}
 }
 
 #if defined(METAL_ENABLED) && defined(MODULE_GLSLANG_ENABLED)

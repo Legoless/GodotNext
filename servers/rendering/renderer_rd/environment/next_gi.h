@@ -407,6 +407,9 @@ public:
 	// GodotNext: auto_quality_trace (#260). The HWRT Auto benchmark: the self-test's warm second
 	// dispatch (trace and readback only) when it ran, else the whole self-test as before.
 	static uint64_t nextgi_auto_benchmark_usec(uint64_t p_selftest_usec, uint64_t p_trace_usec) { return p_trace_usec > 0 ? p_trace_usec : p_selftest_usec; }
+	// GodotNext: nextgi_bake_swrt (#261). The startup self-test's one variant, shared with the
+	// shader baker's bake-only instance.
+	static Vector<String> get_selftest_variant_defines() { return Vector<String>({ "" }); }
 	// GodotNext: ps_tier_rule (#187). Under 16 compute units, Medium. Unknown devices pass 16.
 	// Video memory under 4 GiB with no reported unit count passes 8.
 	static constexpr uint32_t SWRT_BASE_LEVELS = 6;

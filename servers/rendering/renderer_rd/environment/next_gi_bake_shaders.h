@@ -40,8 +40,9 @@ namespace RendererRD {
 
 // GodotNext: nextgi_vulkan (#50). NextGI creates its ray-query ShaderRDs on first use on the HWRT tier,
 // which an export never reaches, so the shader baker saw none of them. This holds bake-only instances
-// (gather, both SRC relight radiance formats, WRC update and the reference tracer), each initialized
-// with its runtime twin's variant defines so the baked cache path is the one the runtime looks up.
+// (gather, both SRC relight radiance formats, WRC update and the reference tracer; since #261 also
+// their software-tier siblings and the startup self-test), each initialized with its runtime twin's
+// variant defines so the baked cache path is the one the runtime looks up.
 // Creating them compiles nothing; the versions are freed with this object.
 class NextGIBakeShaders {
 	struct Instances;
@@ -49,6 +50,7 @@ class NextGIBakeShaders {
 	LocalVector<Pair<ShaderRD *, RID>> versions;
 
 	void _add(ShaderRD &p_shader, const Vector<String> &p_variant_defines);
+	void _add_initialized(ShaderRD &p_shader);
 
 public:
 	const LocalVector<Pair<ShaderRD *, RID>> &get_versions() const { return versions; }

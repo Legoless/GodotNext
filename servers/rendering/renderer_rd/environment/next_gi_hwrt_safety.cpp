@@ -276,7 +276,7 @@ bool NextGI::hwrt_selftest_records_match(const HWRTSelfTestRecord *p_got, const 
 
 String NextGI::build_hwrt_selftest_source() {
 	NextgiSelftestShaderRD shader;
-	shader.initialize({ "" });
+	shader.initialize(NextGI::get_selftest_variant_defines());
 	RID version = shader.version_create(false);
 	ERR_FAIL_COND_V(!version.is_valid(), String());
 
@@ -435,7 +435,7 @@ static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_
 	// The shader is created before the tier decision and freed before this function returns.
 	// It does not call notify_ray_query_shader_initialized, so it is not counted as an HWRT ShaderRD.
 	NextgiSelftestShaderRD shader;
-	shader.initialize({ "" });
+	shader.initialize(NextGI::get_selftest_variant_defines());
 
 	struct VersionGuard {
 		NextgiSelftestShaderRD &shader_rd;

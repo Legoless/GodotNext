@@ -514,9 +514,8 @@ bool NextGIRelight::_ensure_swrt_shader() {
 	ERR_FAIL_NULL_V(rd, false);
 	if (swrt_shader == nullptr) {
 		swrt_shader = memnew(SWRTShaderState);
-		Vector<String> defines;
-		defines.push_back(radiance_is_packed ? "" : "#define NEXTGI_RADIANCE_RGBA16F\n");
-		swrt_shader->shader.initialize(defines);
+		// GodotNext: nextgi_bake_swrt (#261). The same defines as the hardware relight.
+		swrt_shader->shader.initialize(get_shader_variant_defines(radiance_is_packed));
 		swrt_shader->version = swrt_shader->shader.version_create(false);
 		if (!swrt_shader->version.is_valid()) {
 			memdelete(swrt_shader);

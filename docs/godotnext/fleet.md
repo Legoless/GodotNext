@@ -329,6 +329,8 @@ Each is initialized with its runtime twin's `get_shader_variant_defines()` and c
 
 On the RTX 4080 SUPER machine, the baked paths for the gather, relight and WRC update match the ones the runtime wrote to the user shader cache during the survey. The reference tracer ran with the cache off, so it left nothing to compare.
 
+Since #261 the bake also holds the software-tier siblings (the gather without its reference and far-field variants, both relight formats, the WRC update) and the startup self-test: 10 NextGI cache files on Windows Vulkan, 0 errors. After NextGI Perf ran on both tiers on the RTX 4080 SUPER, every NextGI path the runtime wrote (gather, relight and WRC on both tiers, and the self-test) is one the pack stores.
+
 A Windows editor has no Metal baker platform, because `METAL_ENABLED` is Apple-only. Exporting macOS (baker) there therefore bakes nothing and prints no baker line.
 
 `godotnext/testbed/captures/` now has a tracked `.gdignore`. Before it, an `all_resources` export imported harness output left in the folder, and the self-test's `timing.csv` files failed to load as translations, which logged 9 errors.

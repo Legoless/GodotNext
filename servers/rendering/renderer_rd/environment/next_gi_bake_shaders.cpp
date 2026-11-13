@@ -30,14 +30,19 @@
 
 #include "next_gi_bake_shaders.h"
 
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
 
 using namespace RendererRD;
 
@@ -47,10 +52,21 @@ struct NextGIBakeShaders::Instances {
 	NextgiSrcRelightShaderRD relight_rgba16f;
 	NextgiWrcUpdateShaderRD wrc_update;
 	NextgiReferenceShaderRD reference;
+	// GodotNext: nextgi_bake_swrt (#261). The software tier's siblings (no ray query, so every
+	// container bakes them) and the startup self-test.
+	NextgiGatherSwrtShaderRD gather_swrt;
+	NextgiSrcRelightSwrtShaderRD relight_swrt_packed;
+	NextgiSrcRelightSwrtShaderRD relight_swrt_rgba16f;
+	NextgiWrcUpdateSwrtShaderRD wrc_update_swrt;
+	NextgiSelftestShaderRD selftest;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
 	p_shader.initialize(p_variant_defines);
+	_add_initialized(p_shader);
+}
+
+void NextGIBakeShaders::_add_initialized(ShaderRD &p_shader) {
 	const RID version = p_shader.version_create(false);
 	ERR_FAIL_COND(!version.is_valid());
 	versions.push_back({ &p_shader, version });
@@ -63,6 +79,12 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->relight_rgba16f, NextGIRelight::get_shader_variant_defines(false));
 	_add(instances->wrc_update, NextGIWRC::get_shader_variant_defines());
 	_add(instances->reference, NextGIReference::get_shader_variant_defines());
+	NextGIGather::initialize_swrt_shader(instances->gather_swrt);
+	_add_initialized(instances->gather_swrt);
+	_add(instances->relight_swrt_packed, NextGIRelight::get_shader_variant_defines(true));
+	_add(instances->relight_swrt_rgba16f, NextGIRelight::get_shader_variant_defines(false));
+	_add(instances->wrc_update_swrt, NextGIWRC::get_shader_variant_defines());
+	_add(instances->selftest, NextGI::get_selftest_variant_defines());
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {
