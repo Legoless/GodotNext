@@ -92,10 +92,10 @@
  {
   "day": "2026-11-13",
   "build_total": 195,
-  "build_done": 93,
-  "in_progress": 3,
-  "ready": 20,
-  "blocked": 79,
+  "build_done": 94,
+  "in_progress": 2,
+  "ready": 23,
+  "blocked": 76,
   "gates_passed": 0,
   "gates_total": 18
  }
