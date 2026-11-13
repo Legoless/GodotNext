@@ -3168,6 +3168,7 @@
 		<member name="rendering/global_illumination/nextgi/enabled" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI global illumination is available to environments with [member Environment.nextgi_enabled]. At startup, the Forward+ renderer selects the NextGI tier from this setting, [member rendering/global_illumination/nextgi/hardware_ray_tracing] and the rendering device, and prints it once as a [code]NextGI:[/code] line. Where hardware ray tracing is not selected, those environments use the software tier (SWRT) instead of SDFGI. See [method RenderingServer.nextgi_get_tier_info].
 			If [code]false[/code], the tier is [code]DISABLED[/code], no line is printed, and an environment's own SDFGI settings are unchanged.
+			XR viewports (several views at once) never use NextGI, on either tier. See [member Environment.nextgi_enabled].
 			[b]Note:[/b] This property is only read when the project starts.
 		</member>
 		<member name="rendering/global_illumination/nextgi/far_field" type="bool" setter="" getter="" default="false">

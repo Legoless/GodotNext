@@ -2605,6 +2605,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// supplies diffuse lighting only in reflections-only mode.
 	// GodotNext: ps_swrt_trace (#186). The software tier enters the same frame block (one view at a time).
 	const bool nextgi_view = p_render_data->environment.is_valid() && RendererRD::NextGI::view_uses_frame_block(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_UNSHADED, p_render_data->scene_data->view_count);
+	// GodotNext: nextgi_xr_off (#255). Count XR views that NextGI leaves to the non-NextGI ambient.
+	if (p_render_data->environment.is_valid() && RendererRD::NextGI::view_skipped_for_multiview(next_gi.get_tier_result().tier, is_reflection_probe, environment_get_nextgi_enabled(p_render_data->environment), p_render_data->scene_data->view_count)) {
+		RendererRD::NextGI::note_multiview_view_skipped();
+	}
 	const bool nextgi_voxel_gi = nextgi_view && RendererRD::NextGI::is_reflections_only();
 
 	// sdfgi first

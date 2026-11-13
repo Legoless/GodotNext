@@ -203,6 +203,7 @@
 		<member name="nextgi_enabled" type="bool" setter="set_nextgi_enabled" getter="is_nextgi_enabled" default="false">
 			If [code]true[/code], this environment uses NextGI global illumination when [member ProjectSettings.rendering/global_illumination/nextgi/enabled] is also [code]true[/code]. The project-wide NextGI tier decides what runs; see [method RenderingServer.nextgi_get_tier_info]. On the [code]HWRT[/code] and [code]SWRT[/code] tiers this environment does not run SDFGI. When NextGI is disabled for the project or not supported by the rendering method, [member sdfgi_enabled] works as usual.
 			[b]Note:[/b] NextGI is only available when using the Forward+ rendering method.
+			[b]Note:[/b] Views that render several eyes at once (XR) do not use NextGI on either tier, as Unreal Engine's Lumen does not support VR. They use the non-NextGI ambient lighting, including this environment's SDFGI when [member sdfgi_enabled] is set, and [method RenderingServer.nextgi_get_tier_info] counts them in [code]xr_views_skipped[/code].
 			Emissive surfaces smaller than four card texels (4 cm) are not resolved by the radiance cache; author them as lights instead. NextGI warns once per mesh when it finds one, and counts it in [code]src_emissive_below_card_res[/code].
 		</member>
 		<member name="nextgi_energy" type="float" setter="set_nextgi_energy" getter="get_nextgi_energy" default="1.0">

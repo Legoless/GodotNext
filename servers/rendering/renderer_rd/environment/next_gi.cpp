@@ -38,6 +38,7 @@
 #include "core/io/image.h"
 #include "core/os/os.h"
 #include "core/string/print_string.h"
+#include "core/templates/safe_refcount.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
@@ -52,6 +53,9 @@
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_globals.h"
+
+// GodotNext: nextgi_xr_off (#255). XR views that rendered without NextGI.
+static SafeNumeric<uint64_t> nextgi_multiview_views_skipped;
 
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
@@ -336,6 +340,9 @@ void NextGI::_append_swrt_info(Dictionary &r_info) const {
 	r_info["experimental_toggle"] = is_active() && keep_when_hwrt();
 	const bool active = result.tier == TIER_HWRT || result.tier == TIER_SOFTWARE;
 	r_info["lite_beta"] = active && is_lumen_lite(resolve_quality(quality_setting), get_medium_gather());
+	// GodotNext: nextgi_xr_off (#255). XR views that rendered with the non-NextGI ambient.
+	r_info["xr_views_skipped"] = int64_t(nextgi_multiview_views_skipped.get());
+	r_info["xr_reason"] = String("XR_UNSUPPORTED");
 	if (result.tier != TIER_SOFTWARE) {
 		return;
 	}
@@ -1180,10 +1187,18 @@ void NextGI::update_voxel_lighting(RenderDataRD *p_render_data) {
 
 bool NextGI::view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count) {
 	// Reflection probes sample the WRC and the sky only (plan §6.1, multiple views).
-	// GodotNext: ps_swrt_trace (#186). The software tier runs the same block (plan §21.2.4), one
-	// view at a time: its trace binds one depth and one normal-roughness layer.
-	const bool tier_runs_block = p_tier == TIER_HWRT || (p_tier == TIER_SOFTWARE && p_view_count == 1);
+	// GodotNext: ps_swrt_trace (#186). The software tier runs the same block (plan §21.2.4).
+	// GodotNext: nextgi_xr_off (#255). One view at a time on both tiers: XR keeps NextGI off.
+	const bool tier_runs_block = (p_tier == TIER_HWRT || p_tier == TIER_SOFTWARE) && p_view_count == 1;
 	return tier_runs_block && !p_reflection_probe && p_environment_enabled && !p_unshaded;
+}
+
+bool NextGI::view_skipped_for_multiview(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, uint32_t p_view_count) {
+	return (p_tier == TIER_HWRT || p_tier == TIER_SOFTWARE) && p_view_count > 1 && !p_reflection_probe && p_environment_enabled;
+}
+
+void NextGI::note_multiview_view_skipped() {
+	nextgi_multiview_views_skipped.increment();
 }
 
 Size2i NextGI::get_gi_buffer_size(const Size2i &p_internal_size, bool p_half_resolution) {

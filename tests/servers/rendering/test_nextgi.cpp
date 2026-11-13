@@ -1406,10 +1406,16 @@ TEST_CASE("[NextGI] Frame block: active-tier views with nextgi_enabled only, nev
 		CHECK_FALSE(NextGI::view_uses_frame_block(tier, false, true, true, 1));
 	}
 
-	// Multiview (XR): the software trace binds one depth and one normal-roughness layer, so its
-	// views stay outside the block. The hardware gather has no such guard (a known gap).
-	CHECK_FALSE(NextGI::view_uses_frame_block(NextGI::TIER_SOFTWARE, false, true, false, 2));
-	CHECK(NextGI::view_uses_frame_block(NextGI::TIER_HWRT, false, true, false, 2));
+	// Multiview (XR, #255): no NextGI on either tier, as UE's Lumen does not support VR. Such a
+	// view counts as skipped; a reflection probe or a view without NextGI does not.
+	for (const NextGI::Tier tier : { NextGI::TIER_HWRT, NextGI::TIER_SOFTWARE }) {
+		CHECK_FALSE(NextGI::view_uses_frame_block(tier, false, true, false, 2));
+		CHECK(NextGI::view_skipped_for_multiview(tier, false, true, 2));
+		CHECK_FALSE(NextGI::view_skipped_for_multiview(tier, false, true, 1));
+		CHECK_FALSE(NextGI::view_skipped_for_multiview(tier, true, true, 2));
+		CHECK_FALSE(NextGI::view_skipped_for_multiview(tier, false, false, 2));
+	}
+	CHECK_FALSE(NextGI::view_skipped_for_multiview(NextGI::TIER_DISABLED, false, true, 2));
 
 	// No inactive tier runs it.
 	for (const NextGI::Tier tier : { NextGI::TIER_DISABLED, NextGI::TIER_UNSUPPORTED_RENDERER }) {

@@ -591,10 +591,14 @@ public:
 	// Environment with nextgi_enabled, and neither a reflection-probe render nor the unshaded
 	// debug draw. Such a view forces the depth + normal-roughness prepass. VoxelGI still
 	// runs through GI::process_gi when reflections-only mode supplies the diffuse lighting.
-	// GodotNext: ps_swrt_trace (#186). The software tier binds one depth and one normal-roughness
-	// layer (sampler2D), so multiview (XR) views stay outside the block there; the hardware gather
-	// binds them the same way without that guard, a known gap of both tiers.
+	// GodotNext: nextgi_xr_off (#255). Multiview (XR) views stay outside the block on both tiers, as
+	// UE's Lumen does not support VR (§21.2.6): the traces bind one depth and one normal-roughness
+	// layer. They render with the non-NextGI ambient instead.
 	static bool view_uses_frame_block(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, bool p_unshaded, uint32_t p_view_count);
+	// Whether a view is a NextGI view that the multiview rule above keeps out of the block, for
+	// the xr_views_skipped count in the tier info.
+	static bool view_skipped_for_multiview(Tier p_tier, bool p_reflection_probe, bool p_environment_enabled, uint32_t p_view_count);
+	static void note_multiview_view_skipped();
 
 	// RB_TEX_AMBIENT and RB_TEX_REFLECTION have the size GI::process_gi allocates: the internal
 	// size, halved per axis under gi/use_half_resolution.
