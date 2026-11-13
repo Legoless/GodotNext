@@ -1590,6 +1590,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			device_functions.DestroyAccelerationStructureKHR = PFN_vkDestroyAccelerationStructureKHR(functions.GetDeviceProcAddr(vk_device, "vkDestroyAccelerationStructureKHR"));
 			device_functions.GetAccelerationStructureBuildSizesKHR = PFN_vkGetAccelerationStructureBuildSizesKHR(functions.GetDeviceProcAddr(vk_device, "vkGetAccelerationStructureBuildSizesKHR"));
 			device_functions.CmdBuildAccelerationStructuresKHR = PFN_vkCmdBuildAccelerationStructuresKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdBuildAccelerationStructuresKHR"));
+			// GodotNext: rq_substrate (#22)
+			device_functions.GetAccelerationStructureDeviceAddressKHR = PFN_vkGetAccelerationStructureDeviceAddressKHR(functions.GetDeviceProcAddr(vk_device, "vkGetAccelerationStructureDeviceAddressKHR"));
+			device_functions.CmdWriteAccelerationStructuresPropertiesKHR = PFN_vkCmdWriteAccelerationStructuresPropertiesKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdWriteAccelerationStructuresPropertiesKHR"));
+			device_functions.CmdCopyAccelerationStructureKHR = PFN_vkCmdCopyAccelerationStructureKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdCopyAccelerationStructureKHR"));
 		}
 
 		if (enabled_device_extension_names.has(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
@@ -6516,8 +6520,10 @@ void RenderingDeviceDriverVulkan::acceleration_structure_instance_write(uint8_t 
 	vk_instance.flags = p_instance.flags;
 
 	if (p_instance.blas) {
+		// GodotNext: rq_substrate (#22). The acceleration structure's own device address, as the
+		// spec requires, not its backing buffer's.
 		const AccelerationStructureInfo *blas_info = (const AccelerationStructureInfo *)p_instance.blas.id;
-		vk_instance.accelerationStructureReference = buffer_get_device_address(blas_info->buffer);
+		vk_instance.accelerationStructureReference = blas_info->device_address;
 	} else {
 		vk_instance.accelerationStructureReference = 0;
 	}
@@ -6532,12 +6538,125 @@ void RenderingDeviceDriverVulkan::acceleration_structure_instance_write(uint8_t 
 uint64_t RenderingDeviceDriverVulkan::acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) {
 #if VULKAN_RAYTRACING_ENABLED
 	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
-	if (info == nullptr || !info->buffer) {
+	if (info == nullptr) {
 		return 0;
 	}
-	return buffer_get_device_address(info->buffer);
+	return info->device_address;
 #else
 	return 0;
+#endif
+}
+
+// GodotNext: rq_substrate (#22)
+uint64_t RenderingDeviceDriverVulkan::acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) {
+	const AccelerationStructureInfo *info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	return info != nullptr ? info->size_bytes : 0;
+}
+
+bool RenderingDeviceDriverVulkan::acceleration_structure_compaction_supported() const {
+#if VULKAN_RAYTRACING_ENABLED
+	return acceleration_structure_capabilities.acceleration_structure_support && device_functions.CmdWriteAccelerationStructuresPropertiesKHR != nullptr && device_functions.CmdCopyAccelerationStructureKHR != nullptr;
+#else
+	return false;
+#endif
+}
+
+RDD::QueryPoolID RenderingDeviceDriverVulkan::acceleration_structure_size_query_pool_create(uint32_t p_count) {
+#if VULKAN_RAYTRACING_ENABLED
+	VkQueryPoolCreateInfo query_pool_create_info = {};
+	query_pool_create_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+	query_pool_create_info.queryType = VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR;
+	query_pool_create_info.queryCount = p_count;
+	VkQueryPool vk_query_pool = VK_NULL_HANDLE;
+	VkResult err = vkCreateQueryPool(vk_device, &query_pool_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_QUERY_POOL), &vk_query_pool);
+	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, QueryPoolID(), vformat("vkCreateQueryPool failed for compacted-size queries (VkResult %d).", err));
+	return QueryPoolID(vk_query_pool);
+#else
+	return QueryPoolID();
+#endif
+}
+
+void RenderingDeviceDriverVulkan::acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) {
+	vkDestroyQueryPool(vk_device, (VkQueryPool)p_pool_id.id, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_QUERY_POOL));
+}
+
+void RenderingDeviceDriverVulkan::acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
+	// RenderingDevice reads the pool once its frame has completed, so every written query is available.
+	VkResult err = vkGetQueryPoolResults(vk_device, (VkQueryPool)p_pool_id.id, 0, p_query_count, sizeof(uint64_t) * p_query_count, r_results, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT);
+	if (err != VK_SUCCESS) {
+		memset(r_results, 0, sizeof(uint64_t) * p_query_count);
+		ERR_FAIL_MSG(vformat("vkGetQueryPoolResults failed for compacted-size queries (VkResult %d).", err));
+	}
+}
+
+void RenderingDeviceDriverVulkan::command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) {
+#if VULKAN_RAYTRACING_ENABLED
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const uint32_t count = p_acceleration_structures.size();
+	thread_local LocalVector<VkAccelerationStructureKHR> handles;
+	handles.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		handles[i] = ((const AccelerationStructureInfo *)p_acceleration_structures[i].id)->vk_acceleration_structure;
+	}
+	// The queries must be unavailable before they are written.
+	vkCmdResetQueryPool(command_buffer->vk_command_buffer, (VkQueryPool)p_pool_id.id, p_first, count);
+	device_functions.CmdWriteAccelerationStructuresPropertiesKHR(command_buffer->vk_command_buffer, count, handles.ptr(), VK_QUERY_TYPE_ACCELERATION_STRUCTURE_COMPACTED_SIZE_KHR, (VkQueryPool)p_pool_id.id, p_first);
+#endif
+}
+
+RDD::AccelerationStructureID RenderingDeviceDriverVulkan::acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) {
+#if VULKAN_RAYTRACING_ENABLED
+	const AccelerationStructureInfo *src = (const AccelerationStructureInfo *)p_src.id;
+	ERR_FAIL_NULL_V(src, AccelerationStructureID());
+	ERR_FAIL_COND_V(p_size == 0, AccelerationStructureID());
+	AccelerationStructureInfo *info = VersatileResource::allocate<AccelerationStructureInfo>(resources_allocator);
+	// Later builds (updates) of the compacted copy use the source's inputs.
+	info->scratch_alignment = src->scratch_alignment;
+	info->scratch_size = src->scratch_size;
+	info->geometries = src->geometries;
+	info->build_info = src->build_info;
+	info->range_infos = src->range_infos;
+	info->build_info.pGeometries = info->geometries.ptr();
+
+	RDD::BufferID buffer = buffer_create(p_size, RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT | RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, UINT64_MAX);
+	if (!buffer) {
+		VersatileResource::free(resources_allocator, info);
+		ERR_FAIL_V_MSG(AccelerationStructureID(), "Couldn't create the buffer of a compacted acceleration structure.");
+	}
+	info->buffer = buffer;
+	VkAccelerationStructureCreateInfoKHR create_info = {};
+	create_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR;
+	create_info.type = src->build_info.type;
+	create_info.size = p_size;
+	create_info.buffer = ((const BufferInfo *)buffer.id)->vk_buffer;
+	VkResult err = device_functions.CreateAccelerationStructureKHR(vk_device, &create_info, nullptr, &info->vk_acceleration_structure);
+	if (err != VK_SUCCESS) {
+		buffer_free(buffer);
+		VersatileResource::free(resources_allocator, info);
+		ERR_FAIL_V_MSG(AccelerationStructureID(), vformat("Couldn't create a compacted Vulkan acceleration structure (VkResult error %d).", err));
+	}
+	info->build_info.srcAccelerationStructure = VK_NULL_HANDLE;
+	info->build_info.dstAccelerationStructure = info->vk_acceleration_structure;
+	info->size_bytes = p_size;
+	VkAccelerationStructureDeviceAddressInfoKHR address_info = {};
+	address_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	address_info.accelerationStructure = info->vk_acceleration_structure;
+	info->device_address = device_functions.GetAccelerationStructureDeviceAddressKHR(vk_device, &address_info);
+	return AccelerationStructureID(info);
+#else
+	return AccelerationStructureID();
+#endif
+}
+
+void RenderingDeviceDriverVulkan::command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) {
+#if VULKAN_RAYTRACING_ENABLED
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	VkCopyAccelerationStructureInfoKHR copy_info = {};
+	copy_info.sType = VK_STRUCTURE_TYPE_COPY_ACCELERATION_STRUCTURE_INFO_KHR;
+	copy_info.src = ((const AccelerationStructureInfo *)p_src.id)->vk_acceleration_structure;
+	copy_info.dst = ((const AccelerationStructureInfo *)p_dst.id)->vk_acceleration_structure;
+	copy_info.mode = VK_COPY_ACCELERATION_STRUCTURE_MODE_COMPACT_KHR;
+	device_functions.CmdCopyAccelerationStructureKHR(command_buffer->vk_command_buffer, &copy_info);
 #endif
 }
 
@@ -6564,6 +6683,12 @@ void RenderingDeviceDriverVulkan::_acceleration_structure_create(VkAccelerationS
 	VkResult err = device_functions.CreateAccelerationStructureKHR(vk_device, &accel_create_info, nullptr, &r_accel_info->vk_acceleration_structure);
 	ERR_FAIL_COND_MSG(err, vformat("Couldn't create Vulkan raytracing acceleration structure (VkResult error %d).", err));
 	r_accel_info->build_info.dstAccelerationStructure = r_accel_info->vk_acceleration_structure;
+	// GodotNext: rq_substrate (#22)
+	r_accel_info->size_bytes = p_size_info.accelerationStructureSize;
+	VkAccelerationStructureDeviceAddressInfoKHR address_info = {};
+	address_info.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+	address_info.accelerationStructure = r_accel_info->vk_acceleration_structure;
+	r_accel_info->device_address = device_functions.GetAccelerationStructureDeviceAddressKHR(vk_device, &address_info);
 #endif
 }
 

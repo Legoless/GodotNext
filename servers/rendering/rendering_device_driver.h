@@ -786,8 +786,9 @@ public:
 	// GodotNext: as_build_modes
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) = 0;
 	// GodotNext: metal_acceleration_structure
-	// Bytes of the acceleration structure object itself. 0 when that storage is already
-	// a buffer counted in buffer_memory, so Vulkan and D3D12 are not counted twice.
+	// Bytes of the acceleration structure object itself. RenderingDevice adds them to
+	// MEMORY_BUFFERS and MEMORY_ACCELERATION_STRUCTURES: Vulkan reports accelerationStructureSize
+	// (#22), Metal the object's allocated size; D3D12 has no acceleration structures yet.
 	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) { return 0; }
 
 	// GodotNext: blas_compact

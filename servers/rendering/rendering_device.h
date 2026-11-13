@@ -2034,6 +2034,8 @@ private:
 
 	SafeNumeric<uint64_t> texture_memory;
 	SafeNumeric<uint64_t> buffer_memory;
+	// GodotNext: rq_substrate (#22)
+	SafeNumeric<uint64_t> acceleration_structure_memory;
 
 protected:
 	void execute_chained_cmds(bool p_present_swap_chain,
@@ -2097,7 +2099,10 @@ public:
 	enum MemoryType {
 		MEMORY_TEXTURES,
 		MEMORY_BUFFERS,
-		MEMORY_TOTAL
+		MEMORY_TOTAL,
+		// GodotNext: rq_substrate (#22). The acceleration-structure objects alone, also counted in
+		// MEMORY_BUFFERS; scratch and instance buffers are not included.
+		MEMORY_ACCELERATION_STRUCTURES
 	};
 
 	uint64_t get_memory_usage(MemoryType p_type) const;

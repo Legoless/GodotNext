@@ -132,6 +132,10 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		PFN_vkDestroyAccelerationStructureKHR DestroyAccelerationStructureKHR = nullptr;
 		PFN_vkGetAccelerationStructureBuildSizesKHR GetAccelerationStructureBuildSizesKHR = nullptr;
 		PFN_vkCmdBuildAccelerationStructuresKHR CmdBuildAccelerationStructuresKHR = nullptr;
+		// GodotNext: rq_substrate (#22)
+		PFN_vkGetAccelerationStructureDeviceAddressKHR GetAccelerationStructureDeviceAddressKHR = nullptr;
+		PFN_vkCmdWriteAccelerationStructuresPropertiesKHR CmdWriteAccelerationStructuresPropertiesKHR = nullptr;
+		PFN_vkCmdCopyAccelerationStructureKHR CmdCopyAccelerationStructureKHR = nullptr;
 		PFN_vkCreateRayTracingPipelinesKHR CreateRaytracingPipelinesKHR = nullptr;
 		PFN_vkGetRayTracingShaderGroupHandlesKHR GetRayTracingShaderGroupHandlesKHR = nullptr;
 		PFN_vkCmdTraceRaysKHR CmdTraceRaysKHR = nullptr;
@@ -712,6 +716,10 @@ public:
 		VkAccelerationStructureKHR vk_acceleration_structure = VK_NULL_HANDLE;
 		// Buffer used for the structure
 		RDD::BufferID buffer;
+		// GodotNext: rq_substrate (#22). vkGetAccelerationStructureDeviceAddressKHR, the address TLAS
+		// instances reference, and accelerationStructureSize, the bytes RenderingDevice counts.
+		VkDeviceAddress device_address = 0;
+		uint64_t size_bytes = 0;
 
 		// Alignment of the scratch buffer for building the structure
 		uint32_t scratch_alignment;
@@ -729,6 +737,15 @@ public:
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) override final;
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
 	virtual uint64_t acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) override final;
+	// GodotNext: rq_substrate (#22)
+	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
+	virtual bool acceleration_structure_compaction_supported() const override final;
+	virtual QueryPoolID acceleration_structure_size_query_pool_create(uint32_t p_count) override final;
+	virtual void acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) override final;
+	virtual void acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override final;
+	virtual void command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) override final;
+	virtual AccelerationStructureID acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) override final;
+	virtual void command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) override final;
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) override final;
 	// GodotNext: as_build_modes
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) override final;

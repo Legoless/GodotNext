@@ -15,6 +15,10 @@ extends Node
 ##   --reason=NAME                 the expected reason (default RAY_QUERY_SUPPORTED with ray query,
 ##                                 RAY_QUERY_REASON_NO_RAY_QUERY without)
 ##
+## With ray query it also builds 1000 BLAS over 100 frames on a local RenderingDevice: the
+## MEMORY_ACCELERATION_STRUCTURES delta must equal the sum of their sizes exactly, and the counter
+## must return to its baseline once they are freed. Without ray query the counter must stay 0.
+##
 ##   godot --path godotnext/testbed --rendering-driver vulkan --gpu-index 0 --gpu-validation \
 ##     res://tests/rd_substrate/rd_substrate.tscn -- --expect=ray-query-hardware \
 ##     --limits=16777215,16777215,536870911,1048576,128
@@ -38,6 +42,10 @@ const REASON_NAMES := {
 }
 ## The plan's floor for the TLAS instance count (§9).
 const MIN_INSTANCES := 100000
+const ACCOUNTING_FRAMES := 100
+const ACCOUNTING_PER_FRAME := 10
+## Frames to let deferred frees run on the local device.
+const DISPOSE_FRAMES := 4
 
 var _failures := PackedStringArray()
 
@@ -87,6 +95,7 @@ func _ready() -> void:
 			elif limits.size() != 0:
 				_failures.append("--limits needs %d values" % AS_LIMITS.size())
 			_expect(vertex_float3, "R32G32B32_SFLOAT is not a supported BLAS vertex format")
+			result["accounting"] = _check_accounting()
 		"no-ray-query":
 			_expect(not ray_query, "SUPPORTS_RAY_QUERY is true")
 			_expect(not hardware, "SUPPORTS_RAY_QUERY_HARDWARE is true")
@@ -94,9 +103,63 @@ func _ready() -> void:
 			for name in LIMIT_NAMES:
 				_expect(int(values[name]) == 0, "%s limit is %d, expected 0" % [name, values[name]])
 			_expect(not vertex_float3, "a device without ray query reports a BLAS vertex format")
+			var memory := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
+			result["acceleration_structure_memory"] = memory
+			_expect(memory == 0, "MEMORY_ACCELERATION_STRUCTURES is %d without ray query" % memory)
 		_:
 			_failures.append("--expect must be ray-query-hardware or no-ray-query")
 	_finish(result)
+
+
+## 1000 BLAS over 100 frames on a local device; returns what it measured.
+func _check_accounting() -> Dictionary:
+	var rd := RenderingServer.create_local_rendering_device()
+	if rd == null:
+		_failures.append("no local RenderingDevice for the accounting check")
+		return {}
+	var vertices := PackedFloat32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]).to_byte_array()
+	var input_bits := RenderingDevice.BUFFER_CREATION_DEVICE_ADDRESS_BIT | RenderingDevice.BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT
+	var vertex_buffer := rd.vertex_buffer_create(vertices.size(), vertices, input_bits)
+	var geometry := RDAccelerationStructureGeometry.new()
+	geometry.flags = RenderingDevice.ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT
+	geometry.vertex_buffer = vertex_buffer
+	geometry.vertex_stride = 12
+	geometry.vertex_format = RenderingDevice.DATA_FORMAT_R32G32B32_SFLOAT
+	geometry.vertex_count = 3
+	_settle(rd)
+	var baseline := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
+	var blases: Array[RID] = []
+	var sizes := 0
+	var build_failures := 0
+	for frame in ACCOUNTING_FRAMES:
+		for _i in ACCOUNTING_PER_FRAME:
+			var blas := rd.blas_create([geometry], 0)
+			if not blas.is_valid() or rd.blas_build(blas) != OK:
+				build_failures += 1
+				continue
+			blases.append(blas)
+			sizes += rd.acceleration_structure_get_size_bytes(blas)
+		_settle(rd)
+	var delta := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - baseline
+	_expect(build_failures == 0, "%d BLAS failed to create or build" % build_failures)
+	_expect(blases.size() == ACCOUNTING_FRAMES * ACCOUNTING_PER_FRAME, "built %d BLAS, expected %d" % [blases.size(), ACCOUNTING_FRAMES * ACCOUNTING_PER_FRAME])
+	_expect(sizes > 0, "the BLAS sizes add up to 0")
+	_expect(delta == sizes, "MEMORY_ACCELERATION_STRUCTURES grew by %d, the BLAS sizes add up to %d" % [delta, sizes])
+	for blas in blases:
+		rd.free_rid(blas)
+	for _i in DISPOSE_FRAMES:
+		_settle(rd)
+	var after := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
+	_expect(after == baseline, "MEMORY_ACCELERATION_STRUCTURES is %d after freeing, the baseline was %d" % [after, baseline])
+	rd.free_rid(vertex_buffer)
+	_settle(rd)
+	rd.free()
+	return {"blas": blases.size(), "bytes": sizes, "delta": delta, "baseline": baseline, "after": after}
+
+
+func _settle(p_rd: RenderingDevice) -> void:
+	p_rd.submit()
+	p_rd.sync()
 
 
 func _expect(p_condition: bool, p_message: String) -> void:

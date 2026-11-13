@@ -3105,6 +3105,9 @@
 		<constant name="MEMORY_TOTAL" value="2" enum="MemoryType">
 			Total memory taken. This is greater than the sum of [constant MEMORY_TEXTURES] and [constant MEMORY_BUFFERS], as it also includes miscellaneous memory usage.
 		</constant>
+		<constant name="MEMORY_ACCELERATION_STRUCTURES" value="3" enum="MemoryType">
+			Memory taken by acceleration-structure objects, also counted in [constant MEMORY_BUFFERS]. Their build scratch and instance buffers are not included. [code]0[/code] on D3D12 until its acceleration-structure support lands.
+		</constant>
 		<constant name="INVALID_ID" value="-1">
 			Returned by functions that return an ID if a value is invalid.
 		</constant>

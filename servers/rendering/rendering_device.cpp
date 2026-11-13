@@ -458,6 +458,7 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 	// GodotNext: metal_acceleration_structure
 	acceleration_structure.size_bytes = driver->acceleration_structure_get_size_bytes(acceleration_structure.driver_id);
 	buffer_memory.add(acceleration_structure.size_bytes);
+	acceleration_structure_memory.add(acceleration_structure.size_bytes);
 	// GodotNext: blas_compact
 	acceleration_structure.allow_compaction = p_flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT);
 
@@ -524,6 +525,7 @@ RID RenderingDevice::tlas_create(uint32_t p_max_instance_count, BitField<Acceler
 	// GodotNext: metal_acceleration_structure
 	acceleration_structure.size_bytes = driver->acceleration_structure_get_size_bytes(acceleration_structure.driver_id);
 	buffer_memory.add(acceleration_structure.size_bytes);
+	acceleration_structure_memory.add(acceleration_structure.size_bytes);
 
 	acceleration_structure.draw_tracker = RDG::resource_tracker_create();
 	acceleration_structure.draw_tracker->acceleration_structure_driver_id = acceleration_structure.driver_id;
@@ -664,6 +666,7 @@ void RenderingDevice::_compact_blas_from_query(AccelerationStructure *p_blas, RI
 	p_blas->size_bytes = new_size;
 	p_blas->compaction_state = BLAS_COMPACTION_COMPACTED;
 	buffer_memory.add(new_size);
+	acceleration_structure_memory.add(new_size);
 
 	draw_graph.add_acceleration_structure_copy(source_id, source_tracker, destination_id, destination_tracker);
 
@@ -8744,6 +8747,7 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 	while (frames[p_frame].compacted_acceleration_structures_to_dispose_of.front()) {
 		Frame::CompactedAccelerationStructureDisposal &disposal = frames[p_frame].compacted_acceleration_structures_to_dispose_of.front()->get();
 		buffer_memory.sub(disposal.size_bytes);
+		acceleration_structure_memory.sub(disposal.size_bytes);
 		if (disposal.driver_id) {
 			driver->acceleration_structure_free(disposal.driver_id);
 		}
@@ -8757,6 +8761,7 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 
 		// GodotNext: metal_acceleration_structure
 		buffer_memory.sub(acceleration_structure.size_bytes);
+		acceleration_structure_memory.sub(acceleration_structure.size_bytes);
 		driver->acceleration_structure_free(acceleration_structure.driver_id);
 
 		if (acceleration_structure.scratch_buffer) {
@@ -8854,6 +8859,10 @@ uint64_t RenderingDevice::get_memory_usage(MemoryType p_type) const {
 		}
 		case MEMORY_TOTAL: {
 			return driver->get_total_memory_used();
+		}
+		// GodotNext: rq_substrate (#22)
+		case MEMORY_ACCELERATION_STRUCTURES: {
+			return acceleration_structure_memory.get();
 		}
 		default: {
 			DEV_ASSERT(false);
@@ -10806,6 +10815,8 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);
 	BIND_ENUM_CONSTANT(MEMORY_TOTAL);
+	// GodotNext: rq_substrate (#22)
+	BIND_ENUM_CONSTANT(MEMORY_ACCELERATION_STRUCTURES);
 
 	BIND_CONSTANT(INVALID_ID);
 	BIND_CONSTANT(INVALID_FORMAT_ID);
