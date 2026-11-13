@@ -447,6 +447,8 @@ private:
 	struct RecordedBottomLevelAccelerationStructureBuildCommand : RecordedCommand {
 		RDD::AccelerationStructureID acceleration_structure;
 		RDD::BufferID scratch_buffer;
+		// GodotNext: rq_substrate (#22). The build's region of the frame's scratch ring.
+		uint64_t scratch_offset = 0;
 		// GodotNext: as_build_modes
 		// UPDATE refits this structure in place, so playback passes the mode to the driver.
 		RDD::AccelerationStructureBuildMode mode = RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD;
@@ -455,6 +457,8 @@ private:
 	struct RecordedTopLevelAccelerationStructureBuildCommand : RecordedCommand {
 		RDD::AccelerationStructureID acceleration_structure;
 		RDD::BufferID scratch_buffer;
+		// GodotNext: rq_substrate (#22). The build's region of the frame's scratch ring.
+		uint64_t scratch_offset = 0;
 		RDD::BufferID instance_buffer;
 		uint32_t instance_offset = 0;
 		uint32_t instance_count = 0;
@@ -1028,9 +1032,9 @@ public:
 	// declared and the stages it inherited from its neighbors. Add-time data, no driver call.
 	void command_get_stages(int32_t p_command_index, BitField<RDD::PipelineStageBits> &r_self, BitField<RDD::PipelineStageBits> &r_previous, BitField<RDD::PipelineStageBits> &r_next) const;
 	// GodotNext: as_build_modes
-	void add_blas_build(RDD::AccelerationStructureID p_blas, RDD::BufferID p_scratch_buffer, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode);
+	void add_blas_build(RDD::AccelerationStructureID p_blas, RDD::BufferID p_scratch_buffer, uint64_t p_scratch_offset, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode);
 	// GodotNext: tlas_from_buffer — p_instance_tracker is the GPU-written instance buffer, null on the CPU path.
-	void add_tlas_build(RDD::AccelerationStructureID p_tlas, RDD::BufferID p_scratch_buffer, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode, ResourceTracker *p_instance_tracker = nullptr);
+	void add_tlas_build(RDD::AccelerationStructureID p_tlas, RDD::BufferID p_scratch_buffer, uint64_t p_scratch_offset, RDD::BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, ResourceTracker *p_dst_tracker, VectorView<ResourceTracker *> p_src_trackers, RDD::AccelerationStructureBuildMode p_mode, ResourceTracker *p_instance_tracker = nullptr);
 	// GodotNext: blas_compact
 	void add_acceleration_structure_query_size(RDD::AccelerationStructureID p_acceleration_structure, RDD::QueryPoolID p_pool, uint32_t p_index, ResourceTracker *p_tracker);
 	void add_acceleration_structure_copy(RDD::AccelerationStructureID p_source, ResourceTracker *p_source_tracker, RDD::AccelerationStructureID p_destination, ResourceTracker *p_destination_tracker);

@@ -191,6 +191,12 @@ func _memory(rd: RenderingDevice) -> int:
 	return rd.get_memory_usage(RenderingDevice.MEMORY_BUFFERS)
 
 
+## The acceleration-structure objects alone (#22). Build scratch lives in per-frame rings that
+## persist and only grow, so buffer memory keeps them after the BLAS are freed.
+func _as_memory(rd: RenderingDevice) -> int:
+	return rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
+
+
 func _near_rel(got: float, expected: float) -> bool:
 	return absf(got - expected) <= T_REL * maxf(absf(expected), 1e-20)
 
@@ -462,7 +468,8 @@ func _check_churn(rd: RenderingDevice) -> void:
 	var vertex_buffer := _triangle_buffer(rd)
 	var geometry := _geometry_from(vertex_buffer, 3)
 	_settle(rd)
-	var baseline := _memory(rd)
+	var baseline := _as_memory(rd)
+	var scratch_after_first := -1
 	var started := Time.get_ticks_msec()
 	var built := 0
 	var not_compacted := 0
@@ -493,10 +500,17 @@ func _check_churn(rd: RenderingDevice) -> void:
 					failed = true
 		_free_all(rd, batch)
 		_settle(rd)
-		var now := _memory(rd)
+		var now := _as_memory(rd)
 		if now != baseline:
 			failed = true
-			_check(false, "churn memory %d != baseline %d at %d" % [now, baseline, built + batch.size()])
+			_check(false, "churn acceleration-structure memory %d != baseline %d at %d" % [now, baseline, built + batch.size()])
+		# The scratch rings may grow during the first batch and must not grow after it.
+		var scratch := _memory(rd) - now
+		if scratch_after_first < 0:
+			scratch_after_first = scratch
+		elif scratch != scratch_after_first:
+			failed = true
+			_check(false, "churn scratch %d != %d after the first batch, at %d" % [scratch, scratch_after_first, built + batch.size()])
 		built += batch.size()
 		if built % 2500 == 0 or built >= CHURN_COUNT or failed:
 			print("blas_compact churn %d/%d" % [built, CHURN_COUNT])
@@ -505,7 +519,7 @@ func _check_churn(rd: RenderingDevice) -> void:
 	_check(built == CHURN_COUNT, "10k BLAS churn built %d" % built)
 	_check(not_compacted == 0, "churn left %d BLASes uncompacted" % not_compacted)
 	_check(oversized == 0, "churn compacted size exceeded the original on %d BLASes" % oversized)
-	var after := _memory(rd)
-	_check(after == baseline, "10k BLAS churn left buffer memory at %d (baseline %d)" % [after, baseline])
+	var after := _as_memory(rd)
+	_check(after == baseline, "10k BLAS churn left acceleration-structure memory at %d (baseline %d)" % [after, baseline])
 	rd.free_rid(vertex_buffer)
 	_settle(rd)

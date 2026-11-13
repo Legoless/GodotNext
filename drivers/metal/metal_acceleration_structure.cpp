@@ -274,7 +274,7 @@ uint64_t RenderingDeviceDriverMetal::acceleration_structure_get_size_bytes(Accel
 	return info->size_bytes;
 }
 
-void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, AccelerationStructureBuildMode p_mode) {
+void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, AccelerationStructureBuildMode p_mode) {
 	AccelerationStructureInfo *info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	BufferInfo *scratch = (BufferInfo *)p_scratch_buffer.id;
 	ERR_FAIL_NULL(info);
@@ -289,13 +289,13 @@ void RenderingDeviceDriverMetal::command_build_blas(CommandBufferID p_cmd_buffer
 	// GodotNext: as_build_modes
 	if (p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE) {
 		ERR_FAIL_COND_MSG(!info->allow_update, "command_build_blas UPDATE requires ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.");
-		cb->encode_acceleration_structure_refit(info->as.get(), info->descriptor.get(), info->as.get(), scratch->buffer.get(), false, true);
+		cb->encode_acceleration_structure_refit(info->as.get(), info->descriptor.get(), info->as.get(), scratch->buffer.get(), p_scratch_offset, false, true);
 	} else {
-		cb->encode_acceleration_structure_build(info->as.get(), info->descriptor.get(), scratch->buffer.get(), false);
+		cb->encode_acceleration_structure_build(info->as.get(), info->descriptor.get(), scratch->buffer.get(), p_scratch_offset, false);
 	}
 }
 
-void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) {
+void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) {
 	AccelerationStructureInfo *info = (AccelerationStructureInfo *)p_acceleration_structure.id;
 	BufferInfo *scratch = (BufferInfo *)p_scratch_buffer.id;
 	BufferInfo *instances = (BufferInfo *)p_instance_buffer.id;
@@ -349,9 +349,9 @@ void RenderingDeviceDriverMetal::command_build_tlas(CommandBufferID p_cmd_buffer
 	// GodotNext: as_build_modes
 	if (p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE) {
 		ERR_FAIL_COND_MSG(!info->allow_update, "command_build_tlas UPDATE requires ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT.");
-		cb->encode_acceleration_structure_refit(info->as.get(), build_desc.get(), info->as.get(), scratch->buffer.get(), true, false);
+		cb->encode_acceleration_structure_refit(info->as.get(), build_desc.get(), info->as.get(), scratch->buffer.get(), p_scratch_offset, true, false);
 	} else {
-		cb->encode_acceleration_structure_build(info->as.get(), build_desc.get(), scratch->buffer.get(), true);
+		cb->encode_acceleration_structure_build(info->as.get(), build_desc.get(), scratch->buffer.get(), p_scratch_offset, true);
 	}
 }
 

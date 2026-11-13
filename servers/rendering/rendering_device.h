@@ -1389,9 +1389,6 @@ private:
 		BitField<AccelerationStructureFlagBits> flags = {};
 		uint32_t last_build_instance_count = 0;
 
-		// Scratch buffer used during build, owned by the AS.
-		RDD::BufferID scratch_buffer;
-
 		// --- Bottom Level ---
 		Vector<RDG::ResourceTracker *> draw_trackers;
 		HashSet<RID> untracked_buffers;
@@ -1412,7 +1409,9 @@ private:
 		LocalVector<InstanceBuffer> instance_buffers;
 	};
 
-	Error _acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure, RDD::AccelerationStructureBuildMode p_mode);
+	// GodotNext: rq_substrate (#22). Sub-allocates p_size bytes of build scratch from this frame
+	// slot's scratch ring.
+	Error _scratch_ring_allocate(uint64_t p_size, RDD::BufferID &r_buffer, uint64_t &r_offset);
 	void _blas_remove_tlas_dependencies(AccelerationStructure *p_blas, RID p_blas_id);
 	// GodotNext: blas_compact
 	Error _blas_compaction_reserve(RDD::QueryPoolID &r_pool, uint32_t &r_index);
@@ -1918,6 +1917,14 @@ private:
 	// when the frame is cycled.
 
 	struct Frame {
+		// GodotNext: rq_substrate (#22). One build-scratch buffer per frame slot, shared by every
+		// acceleration-structure build of the frame at aligned offsets; no region is reused within a
+		// frame. It grows to the next power of two on overflow (the old buffer is freed after the
+		// frame) and never shrinks.
+		RDD::BufferID scratch_ring;
+		uint64_t scratch_ring_size = 0;
+		uint64_t scratch_ring_used = 0;
+
 		// List in usage order, from last to free to first to free.
 		List<Buffer> buffers_to_dispose_of;
 		List<Texture> textures_to_dispose_of;
@@ -1930,7 +1937,7 @@ private:
 		List<AccelerationStructure> acceleration_structures_to_dispose_of;
 		// GodotNext: blas_compact
 		// The pre-compaction object stays alive until the copy's submission has retired.
-		// It is not a normal AccelerationStructure disposal: that path also frees the live scratch buffer.
+		// It is not a normal AccelerationStructure disposal: that path also updates the dependencies.
 		struct CompactedAccelerationStructureDisposal {
 			RDD::AccelerationStructureID driver_id;
 			uint64_t size_bytes = 0;

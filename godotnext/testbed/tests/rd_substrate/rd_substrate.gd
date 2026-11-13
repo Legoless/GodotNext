@@ -17,7 +17,9 @@ extends Node
 ##
 ## With ray query it also builds 1000 BLAS over 100 frames on a local RenderingDevice: the
 ## MEMORY_ACCELERATION_STRUCTURES delta must equal the sum of their sizes exactly, and the counter
-## must return to its baseline once they are freed. Without ray query the counter must stay 0.
+## must return to its baseline once they are freed. The build scratch, the rest of the
+## MEMORY_BUFFERS growth, is the frame slots' scratch rings: it must be above 0 and the same from
+## frame 10 on. Without ray query the counter must stay 0.
 ##
 ##   godot --path godotnext/testbed --rendering-driver vulkan --gpu-index 0 --gpu-validation \
 ##     res://tests/rd_substrate/rd_substrate.tscn -- --expect=ray-query-hardware \
@@ -46,6 +48,8 @@ const ACCOUNTING_FRAMES := 100
 const ACCOUNTING_PER_FRAME := 10
 ## Frames to let deferred frees run on the local device.
 const DISPOSE_FRAMES := 4
+## The scratch rings may grow until this frame and must stay the same size after it.
+const RING_STABLE_FRAME := 10
 
 var _failures := PackedStringArray()
 
@@ -128,6 +132,8 @@ func _check_accounting() -> Dictionary:
 	geometry.vertex_count = 3
 	_settle(rd)
 	var baseline := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
+	var buffers_baseline := rd.get_memory_usage(RenderingDevice.MEMORY_BUFFERS)
+	var ring_bytes := PackedInt64Array()
 	var blases: Array[RID] = []
 	var sizes := 0
 	var build_failures := 0
@@ -140,11 +146,20 @@ func _check_accounting() -> Dictionary:
 			blases.append(blas)
 			sizes += rd.acceleration_structure_get_size_bytes(blas)
 		_settle(rd)
+		var buffers := rd.get_memory_usage(RenderingDevice.MEMORY_BUFFERS) - buffers_baseline
+		var structures := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - baseline
+		ring_bytes.append(buffers - structures)
 	var delta := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - baseline
 	_expect(build_failures == 0, "%d BLAS failed to create or build" % build_failures)
 	_expect(blases.size() == ACCOUNTING_FRAMES * ACCOUNTING_PER_FRAME, "built %d BLAS, expected %d" % [blases.size(), ACCOUNTING_FRAMES * ACCOUNTING_PER_FRAME])
 	_expect(sizes > 0, "the BLAS sizes add up to 0")
 	_expect(delta == sizes, "MEMORY_ACCELERATION_STRUCTURES grew by %d, the BLAS sizes add up to %d" % [delta, sizes])
+	var ring_stable := ring_bytes[RING_STABLE_FRAME]
+	_expect(ring_stable > 0, "the build scratch is %d bytes at frame %d" % [ring_stable, RING_STABLE_FRAME])
+	for frame in range(RING_STABLE_FRAME, ring_bytes.size()):
+		if ring_bytes[frame] != ring_stable:
+			_failures.append("the build scratch is %d bytes at frame %d, %d at frame %d" % [ring_bytes[frame], frame, ring_stable, RING_STABLE_FRAME])
+			break
 	for blas in blases:
 		rd.free_rid(blas)
 	for _i in DISPOSE_FRAMES:
@@ -154,7 +169,7 @@ func _check_accounting() -> Dictionary:
 	rd.free_rid(vertex_buffer)
 	_settle(rd)
 	rd.free()
-	return {"blas": blases.size(), "bytes": sizes, "delta": delta, "baseline": baseline, "after": after}
+	return {"blas": blases.size(), "bytes": sizes, "delta": delta, "baseline": baseline, "after": after, "scratch_first": ring_bytes[0], "scratch_frame_10": ring_stable, "scratch_last": ring_bytes[ring_bytes.size() - 1]}
 
 
 func _settle(p_rd: RenderingDevice) -> void:

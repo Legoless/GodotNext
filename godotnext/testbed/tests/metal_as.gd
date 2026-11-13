@@ -238,7 +238,8 @@ func _check_churn(rd: RenderingDevice) -> void:
 	var vertex_buffer := _triangle_buffer(rd)
 	var geometry := _geometry(vertex_buffer)
 	_settle(rd)
-	var baseline := rd.get_memory_usage(RenderingDevice.MEMORY_BUFFERS)
+	# Acceleration-structure objects only (#22): build scratch lives in per-frame rings that persist.
+	var baseline := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
 	var built := 0
 	while built < CHURN_COUNT:
 		var batch: Array[RID] = []
@@ -259,8 +260,8 @@ func _check_churn(rd: RenderingDevice) -> void:
 		if not ok:
 			_check(false, "10k BLAS churn failed at %d" % built)
 			break
-	var after := rd.get_memory_usage(RenderingDevice.MEMORY_BUFFERS)
-	_check(after == baseline, "10k BLAS churn left buffer memory at %d (baseline %d)" % [after, baseline])
+	var after := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
+	_check(after == baseline, "10k BLAS churn left acceleration-structure memory at %d (baseline %d)" % [after, baseline])
 	rd.free_rid(vertex_buffer)
 	_settle(rd)
 

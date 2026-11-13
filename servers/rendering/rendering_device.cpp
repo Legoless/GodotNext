@@ -311,34 +311,40 @@ RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData>
 /**** ACCELERATION STRUCTURE ****/
 /********************************/
 
-Error RenderingDevice::_acceleration_structure_scratch_buffer_create(AccelerationStructure *p_acceleration_structure, RDD::AccelerationStructureBuildMode p_mode) {
-	uint64_t scratch_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id, p_mode);
-
-	if (p_acceleration_structure->scratch_buffer) {
-		uint64_t scratch_buffer_size = driver->buffer_get_allocation_size(p_acceleration_structure->scratch_buffer);
-		if (scratch_buffer_size < scratch_size) {
-			Buffer to_dispose = Buffer();
-			to_dispose.driver_id = p_acceleration_structure->scratch_buffer;
-			DEV_ASSERT(scratch_buffer_size <= UINT32_MAX);
-			to_dispose.size = scratch_buffer_size;
-			frames[frame].buffers_to_dispose_of.push_back(to_dispose);
-			p_acceleration_structure->scratch_buffer = RDD::BufferID();
+// GodotNext: rq_substrate (#22)
+Error RenderingDevice::_scratch_ring_allocate(uint64_t p_size, RDD::BufferID &r_buffer, uint64_t &r_offset) {
+	ERR_FAIL_COND_V(p_size == 0, ERR_INVALID_PARAMETER);
+	Frame &slot = frames[frame];
+	// Vulkan reports its scratch alignment; Metal and the minimum use 256 bytes.
+	const uint64_t alignment = MAX(driver->limit_get(LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT), uint64_t(256));
+	uint64_t offset = slot.scratch_ring ? (slot.scratch_ring_used + alignment - 1) / alignment * alignment : 0;
+	if (!slot.scratch_ring || offset + p_size > slot.scratch_ring_size) {
+		// Big enough for the whole frame's demand so far, so the next frame fits without growing.
+		const uint64_t need = offset + p_size;
+		uint64_t size = 64 * 1024;
+		while (size < need) {
+			size <<= 1;
 		}
+		if (slot.scratch_ring) {
+			// Earlier builds of this frame still use it.
+			Buffer to_dispose;
+			to_dispose.driver_id = slot.scratch_ring;
+			DEV_ASSERT(slot.scratch_ring_size <= UINT32_MAX);
+			to_dispose.size = slot.scratch_ring_size;
+			slot.buffers_to_dispose_of.push_back(to_dispose);
+			slot.scratch_ring = RDD::BufferID();
+			slot.scratch_ring_size = 0;
+		}
+		ERR_FAIL_COND_V_MSG(size > UINT32_MAX, ERR_OUT_OF_MEMORY, "Acceleration-structure build scratch for one frame exceeds 4 GiB.");
+		slot.scratch_ring = driver->buffer_create(size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
+		ERR_FAIL_COND_V(!slot.scratch_ring, ERR_CANT_CREATE);
+		slot.scratch_ring_size = size;
+		buffer_memory.add(size);
+		offset = 0;
 	}
-
-	if (!p_acceleration_structure->scratch_buffer) {
-		// GodotNext: as_build_modes
-		// The first scratch buffer covers both modes, so alternating BUILD and UPDATE does not reallocate.
-		const uint64_t build_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id, RDD::ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
-		const uint64_t update_size = driver->acceleration_structure_get_scratch_size_bytes(p_acceleration_structure->driver_id, RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
-		scratch_size = MAX(scratch_size, MAX(build_size, update_size));
-
-		p_acceleration_structure->scratch_buffer = driver->buffer_create(scratch_size, RDD::BUFFER_USAGE_STORAGE_BIT | RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT, RDD::MEMORY_ALLOCATION_TYPE_GPU, frames_drawn);
-		ERR_FAIL_COND_V(!p_acceleration_structure->scratch_buffer, ERR_CANT_CREATE);
-
-		buffer_memory.add(scratch_size);
-	}
-
+	r_buffer = slot.scratch_ring;
+	r_offset = offset;
+	slot.scratch_ring_used = offset + p_size;
 	return OK;
 }
 
@@ -561,10 +567,12 @@ Error RenderingDevice::blas_build(RID p_blas, AccelerationStructureBuildMode p_m
 	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, blas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), blas->invalidated, false, 0, 0);
 	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));
 
-	Error err = _acceleration_structure_scratch_buffer_create(blas, p_mode);
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	Error err = _scratch_ring_allocate(driver->acceleration_structure_get_scratch_size_bytes(blas->driver_id, p_mode), scratch_buffer, scratch_offset);
 	ERR_FAIL_COND_V(err != OK, err);
 
-	draw_graph.add_blas_build(blas->driver_id, blas->scratch_buffer, blas->draw_tracker, blas->draw_trackers, p_mode);
+	draw_graph.add_blas_build(blas->driver_id, scratch_buffer, scratch_offset, blas->draw_tracker, blas->draw_trackers, p_mode);
 
 	blas->invalidated = false;
 	// GodotNext: as_build_modes — a refit still invalidates dependent top-level structures.
@@ -809,9 +817,10 @@ void RenderingDevice::get_acceleration_structure_memory(uint64_t &r_blas_bytes, 
 				}
 			}
 		}
-		if (as->scratch_buffer) {
-			r_scratch_bytes += driver->buffer_get_allocation_size(as->scratch_buffer);
-		}
+	}
+	// GodotNext: rq_substrate (#22). Build scratch is the frame slots' rings.
+	for (const Frame &slot : frames) {
+		r_scratch_bytes += slot.scratch_ring_size;
 	}
 }
 
@@ -831,7 +840,9 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, tlas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), tlas->invalidated, true, tlas->last_build_instance_count, p_instances.size());
 	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));
 
-	Error err = _acceleration_structure_scratch_buffer_create(tlas, p_mode);
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	Error err = _scratch_ring_allocate(driver->acceleration_structure_get_scratch_size_bytes(tlas->driver_id, p_mode), scratch_buffer, scratch_offset);
 	ERR_FAIL_COND_V(err != OK, err);
 
 	uint32_t instance_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
@@ -925,7 +936,7 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		driver->acceleration_structure_instance_write(instance_buffer.data_ptr + instance_buffer_offset + (instance_size * i), rdd_instance);
 	}
 
-	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer.driver_id, instance_buffer_offset, p_instances.size(), tlas->draw_tracker, draw_trackers, p_mode);
+	draw_graph.add_tlas_build(tlas->driver_id, scratch_buffer, scratch_offset, instance_buffer.driver_id, instance_buffer_offset, p_instances.size(), tlas->draw_tracker, draw_trackers, p_mode);
 
 	tlas->invalidated = false;
 	// GodotNext: as_build_modes
@@ -954,7 +965,9 @@ Error RenderingDevice::tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer,
 	const RDRayQuery::UpdateStatus update_status = RDRayQuery::get_update_status(p_mode, tlas->flags.has_flag(ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT), tlas->invalidated, true, tlas->last_build_instance_count, p_count);
 	ERR_FAIL_COND_V_MSG(update_status != RDRayQuery::UPDATE_OK, ERR_INVALID_PARAMETER, RDRayQuery::get_update_error(update_status));
 
-	Error err = _acceleration_structure_scratch_buffer_create(tlas, p_mode);
+	RDD::BufferID scratch_buffer;
+	uint64_t scratch_offset = 0;
+	Error err = _scratch_ring_allocate(driver->acceleration_structure_get_scratch_size_bytes(tlas->driver_id, p_mode), scratch_buffer, scratch_offset);
 	ERR_FAIL_COND_V(err != OK, err);
 
 	_tlas_remove_blas_dependencies(tlas, p_tlas);
@@ -980,7 +993,7 @@ Error RenderingDevice::tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer,
 		}
 	}
 
-	draw_graph.add_tlas_build(tlas->driver_id, tlas->scratch_buffer, instance_buffer->driver_id, p_offset, p_count, tlas->draw_tracker, draw_trackers, p_mode, instance_buffer->draw_tracker);
+	draw_graph.add_tlas_build(tlas->driver_id, scratch_buffer, scratch_offset, instance_buffer->driver_id, p_offset, p_count, tlas->draw_tracker, draw_trackers, p_mode, instance_buffer->draw_tracker);
 
 	tlas->invalidated = false;
 	tlas->last_build_instance_count = p_count;
@@ -8764,11 +8777,6 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 		acceleration_structure_memory.sub(acceleration_structure.size_bytes);
 		driver->acceleration_structure_free(acceleration_structure.driver_id);
 
-		if (acceleration_structure.scratch_buffer) {
-			buffer_memory.sub(driver->buffer_get_allocation_size(acceleration_structure.scratch_buffer));
-			driver->buffer_free(acceleration_structure.scratch_buffer);
-		}
-
 		if (!acceleration_structure.instance_buffers.is_empty()) {
 			uint32_t instance_buffer_size = driver->api_trait_get(RDD::API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE) * acceleration_structure.max_instance_count;
 			for (AccelerationStructure::InstanceBuffer &instance_buffer : acceleration_structure.instance_buffers) {
@@ -8915,6 +8923,8 @@ void RenderingDevice::_begin_frame(bool p_presented) {
 	// Erase pending resources.
 	GodotProfileZoneGrouped(_profile_zone, "_free_pending_resources");
 	_free_pending_resources(frame);
+	// GodotNext: rq_substrate (#22). This slot's previous frame has finished; its scratch is free.
+	frames[frame].scratch_ring_used = 0;
 
 	// GodotNext: blas_compact
 	// The size-query fence has passed (the stall above) and this slot's deferred frees have run.
@@ -9841,6 +9851,13 @@ void RenderingDevice::finalize() {
 	for (uint32_t i = 0; i < frames.size(); i++) {
 		int f = (frame + i) % frames.size();
 		_free_pending_resources(f);
+		// GodotNext: rq_substrate (#22)
+		if (frames[i].scratch_ring) {
+			driver->buffer_free(frames[i].scratch_ring);
+			buffer_memory.sub(frames[i].scratch_ring_size);
+			frames[i].scratch_ring = RDD::BufferID();
+			frames[i].scratch_ring_size = 0;
+		}
 		driver->command_pool_free(frames[i].command_pool);
 		driver->timestamp_query_pool_free(frames[i].timestamp_pool);
 		// GodotNext: blas_compact

@@ -689,10 +689,10 @@ public:
 	void end_label() override;
 
 	// GodotNext: metal_acceleration_structure
-	void encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, bool p_top_level);
+	void encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, NS::UInteger p_scratch_offset, bool p_top_level);
 	// GodotNext: as_build_modes
 	// p_vertex_data selects AccelerationStructureRefitOptionVertexData. Top-level refits pass false.
-	void encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, bool p_top_level, bool p_vertex_data);
+	void encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, NS::UInteger p_scratch_offset, bool p_top_level, bool p_vertex_data);
 	// GodotNext: blas_compact
 	void encode_acceleration_structure_write_compacted_size(MTL::AccelerationStructure *p_structure, MTL::Buffer *p_buffer, NS::UInteger p_offset);
 	void encode_acceleration_structure_copy_compact(MTL::AccelerationStructure *p_src, MTL::AccelerationStructure *p_dst);

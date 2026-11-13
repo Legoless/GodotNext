@@ -1973,23 +1973,23 @@ MTL::AccelerationStructureCommandEncoder *MDCommandBuffer::_ensure_as_encoder(bo
 }
 
 // GodotNext: metal_acceleration_structure
-void MDCommandBuffer::encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, bool p_top_level) {
+void MDCommandBuffer::encode_acceleration_structure_build(MTL::AccelerationStructure *p_structure, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::Buffer *p_scratch, NS::UInteger p_scratch_offset, bool p_top_level) {
 	MTL::AccelerationStructureCommandEncoder *enc = _ensure_as_encoder(p_top_level);
 	ERR_FAIL_NULL(enc);
-	enc->buildAccelerationStructure(p_structure, p_descriptor, p_scratch, 0);
+	enc->buildAccelerationStructure(p_structure, p_descriptor, p_scratch, p_scratch_offset);
 }
 
 // GodotNext: as_build_modes
 // In-place refit: source and destination are the same acceleration structure. Bottom-level refit
 // passes VertexData; without it Metal ignores the vertex buffers and copies the previously
 // encoded vertices. Top-level refit uses the no-options overload so the instance descriptor is read.
-void MDCommandBuffer::encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, bool p_top_level, bool p_vertex_data) {
+void MDCommandBuffer::encode_acceleration_structure_refit(MTL::AccelerationStructure *p_source, MTL::AccelerationStructureDescriptor *p_descriptor, MTL::AccelerationStructure *p_destination, MTL::Buffer *p_scratch, NS::UInteger p_scratch_offset, bool p_top_level, bool p_vertex_data) {
 	MTL::AccelerationStructureCommandEncoder *enc = _ensure_as_encoder(p_top_level);
 	ERR_FAIL_NULL(enc);
 	if (p_vertex_data) {
-		enc->refitAccelerationStructure(p_source, p_descriptor, p_destination, p_scratch, 0, MTL::AccelerationStructureRefitOptionVertexData);
+		enc->refitAccelerationStructure(p_source, p_descriptor, p_destination, p_scratch, p_scratch_offset, MTL::AccelerationStructureRefitOptionVertexData);
 	} else {
-		enc->refitAccelerationStructure(p_source, p_descriptor, p_destination, p_scratch, 0);
+		enc->refitAccelerationStructure(p_source, p_descriptor, p_destination, p_scratch, p_scratch_offset);
 	}
 }
 
