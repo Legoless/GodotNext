@@ -98,6 +98,9 @@ public:
 	// Writes sum/count times exposure into the internal HDR color. No-op when the mode is off.
 	void composite(RID p_color);
 	void fill_info(Dictionary &r_info) const;
+	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
+	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
+	static Vector<String> get_shader_variant_defines();
 	uint32_t get_samples() const { return samples; }
 	// Mean first-hit distance (r) and hit fraction (g) of the reflection-only reference.
 	RID get_reflection_distance() const { return reflection_distance; }

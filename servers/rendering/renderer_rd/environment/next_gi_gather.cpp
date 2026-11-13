@@ -931,13 +931,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 	RID confidence = confidence_buffer.is_valid() ? confidence_buffer : dummy_buffer;
 	const NextGIFarField *far_field = swrt ? nullptr : next_gi->get_rt_scene()->get_far_field();
 	const RID far_tlas = far_field != nullptr && far_field->is_trace_ready() ? far_field->get_tlas() : tlas;
-	RD::Uniform uniforms[40] = {
+	RD::Uniform uniforms[39] = {
 		RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, Vector<RID>({ sampler_nearest, depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, Vector<RID>({ sampler, radiance })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 3, Vector<RID>({ sampler_nearest, material_depth })),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 4, Vector<RID>({ sampler, sky_tex })),
-		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 5, Vector<RID>({ sampler, indirect })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, cards),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, card_sets),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, records),
@@ -978,8 +977,8 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		// view's params; detail mode builds the froxel object grid first.
 		NextGIVoxelLighting *voxel_lighting = next_gi->get_voxel_lighting();
 		const RID swrt_rid = swrt_shader->shader.version_get_shader(swrt_shader->version, 0);
-		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), swrt_rid, 0);
-		reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), swrt_shader->shader.version_get_shader(swrt_shader->version, 5), 0);
+		uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), swrt_rid, 0);
+		reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), swrt_shader->shader.version_get_shader(swrt_shader->version, 5), 0);
 		swrt_tracer->prepare_view_params(p_render_data, voxel_lighting);
 		swrt_tracer->build_detail_froxels(p_render_data, voxel_lighting);
 		swrt_trace_set = swrt_tracer->create_trace_uniform_set(swrt_rid, 1, true, voxel_lighting);
@@ -987,12 +986,12 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		return uniform_set.is_valid() && swrt_trace_set.is_valid();
 	}
 	const RID shader_rid = shader->shader.version_get_shader(shader->version, 0);
-	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), shader_rid, 0);
+	uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), shader_rid, 0);
 	// GodotNext: nextgi_reflect (#60). The reflect variant takes the same set plus the reflection image.
 	const RID reflect_shader_rid = shader->shader.version_get_shader(shader->version, 5);
-	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 37), reflect_shader_rid, 0);
+	reflect_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 36), reflect_shader_rid, 0);
 	const RID reflect_far_shader_rid = shader->shader.version_get_shader(shader->version, 6);
-	reflect_far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 40), reflect_far_shader_rid, 0);
+	reflect_far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 39), reflect_far_shader_rid, 0);
 	bound_tier = "HWRT";
 	return uniform_set.is_valid();
 }
@@ -1483,6 +1482,10 @@ String NextGIGather::build_swrt_shader_source(int p_variant) {
 		return String();
 	}
 	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
+Vector<String> NextGIGather::get_shader_variant_defines() {
+	return _nextgi_gather_variant_defines();
 }
 
 String NextGIGather::build_shader_source(int p_variant) {

@@ -56,6 +56,8 @@ TEST_FORCE_LINK(test_nextgi)
 #ifdef MODULE_GLSLANG_ENABLED
 #include "modules/glslang/shader_compile.h"
 #endif // MODULE_GLSLANG_ENABLED
+#include "servers/rendering/renderer_rd/environment/next_gi_bake_shaders.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -250,6 +252,32 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 	CHECK(NextgiReferenceShaderRD().requires_ray_query());
 	CHECK(NextgiSelftestShaderRD().requires_ray_query());
 	CHECK(NextgiRqSelftestShaderRD().requires_ray_query());
+}
+
+// GodotNext: nextgi_vulkan (#50)
+TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every runtime ray-query ShaderRD") {
+	const RendererRD::NextGIBakeShaders bake;
+	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
+	REQUIRE(versions.size() == 5);
+	Vector<String> names;
+	for (const Pair<ShaderRD *, RID> &pair : versions) {
+		CHECK(pair.first->requires_ray_query());
+		CHECK(pair.second.is_valid());
+		names.push_back(pair.first->get_name());
+	}
+	CHECK_EQ(names[0], "NextgiGatherShaderRD");
+	CHECK_EQ(names[1], "NextgiSrcRelightShaderRD");
+	CHECK_EQ(names[2], "NextgiSrcRelightShaderRD");
+	CHECK_EQ(names[3], "NextgiWrcUpdateShaderRD");
+	CHECK_EQ(names[4], "NextgiReferenceShaderRD");
+
+	// Gather bakes every runtime variant, the far-field one included.
+	CHECK_EQ(versions[0].first->get_variant_count(), RendererRD::NextGIGather::get_shader_variant_defines().size());
+	// Relight bakes both radiance formats; the runtime picks one from the device.
+	const String packed = versions[1].first->version_build_variant_stage_sources(versions[1].second, 0)[RD::SHADER_STAGE_COMPUTE];
+	const String rgba16f = versions[2].first->version_build_variant_stage_sources(versions[2].second, 0)[RD::SHADER_STAGE_COMPUTE];
+	CHECK(packed.find("#define NEXTGI_RADIANCE_RGBA16F") == -1);
+	CHECK(rgba16f.find("#define NEXTGI_RADIANCE_RGBA16F") != -1);
 }
 
 #if defined(METAL_ENABLED) && defined(MODULE_GLSLANG_ENABLED)

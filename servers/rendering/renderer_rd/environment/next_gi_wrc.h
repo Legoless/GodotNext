@@ -191,6 +191,9 @@ public:
 	static String build_update_shader_source(int p_variant = 0);
 	// GodotNext: ps_swrt_trace (#186). The software sibling's expanded source, for the doctests.
 	static String build_update_swrt_shader_source(int p_variant = 0);
+	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
+	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
+	static Vector<String> get_shader_variant_defines();
 
 	void update(const RenderDataRD *p_render_data);
 	void fill_info(Dictionary &r_info) const;

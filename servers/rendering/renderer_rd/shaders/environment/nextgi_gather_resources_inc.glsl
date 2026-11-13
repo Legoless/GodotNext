@@ -20,7 +20,8 @@ layout(set = 0, binding = 1) uniform sampler2D depth_tex;
 layout(set = 0, binding = 2) uniform sampler2D radiance_tex;
 layout(set = 0, binding = 3) uniform sampler2D material_depth_tex;
 layout(set = 0, binding = 4) uniform sampler2D sky_tex;
-layout(set = 0, binding = 5) uniform sampler2D src_indirect_tex;
+// Binding 5 stays free: the gather only writes the SRC indirect texture (binding 17). Sampling it in
+// the same set would leave it in a read-only layout on Vulkan while the store runs.
 
 layout(set = 0, binding = 6, std430) restrict readonly buffer NextGIGatherCards {
 	NextGICard data[];

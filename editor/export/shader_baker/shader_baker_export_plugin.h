@@ -85,6 +85,8 @@ protected:
 	uint32_t tasks_processed = 0;
 	uint32_t tasks_total = 0;
 	uint32_t skipped_ray_query_versions = 0;
+	// GodotNext: nextgi_vulkan (#50). Ray-query versions handed to the bake, so an export log shows they were baked.
+	uint32_t baked_ray_query_versions = 0;
 	std::atomic<bool> tasks_cancelled;
 	BinaryMutex tasks_mutex;
 	ConditionVariable tasks_condition;

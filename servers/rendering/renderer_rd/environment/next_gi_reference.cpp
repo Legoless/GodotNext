@@ -160,6 +160,13 @@ void NextGIReference::free() {
 	_nextgi_reference_samples = 0;
 }
 
+Vector<String> NextGIReference::get_shader_variant_defines() {
+	Vector<String> defines;
+	defines.push_back("");
+	defines.push_back("#define MODE_COMPOSITE\n");
+	return defines;
+}
+
 bool NextGIReference::_ensure_shader() {
 	if (shader != nullptr && shader->version.is_valid()) {
 		return true;
@@ -168,10 +175,7 @@ bool NextGIReference::_ensure_shader() {
 	ERR_FAIL_NULL_V(next_gi, false);
 	ERR_FAIL_COND_V(!nextgi_reference_shader_allowed(next_gi->can_initialize_ray_query_shaders()), false);
 	shader = memnew(ShaderState);
-	Vector<String> defines;
-	defines.push_back("");
-	defines.push_back("#define MODE_COMPOSITE\n");
-	shader->shader.initialize(defines);
+	shader->shader.initialize(get_shader_variant_defines());
 	// GodotNext: shader_baker_ray_query
 	// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
 	shader->version = shader->shader.version_create(true);

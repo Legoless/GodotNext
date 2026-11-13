@@ -256,6 +256,9 @@ public:
 	// GodotNext: ps_swrt_trace (#186, #188). The compute source of the hardware relight or of its
 	// software sibling (nextgi_src_relight_swrt.glsl), for the doctests.
 	static String build_shader_source(bool p_software);
+	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
+	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
+	static Vector<String> get_shader_variant_defines(bool p_radiance_packed);
 
 	// GodotNext: ps_swrt_trace (#186 step 5, plan §21.2.6). The software relight's shadow rays
 	// toward a positional light march the mesh SDFs of the instances whose world bounds overlap

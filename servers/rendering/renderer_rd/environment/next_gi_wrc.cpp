@@ -493,6 +493,10 @@ NextGIWRC::ViewParams NextGIWRC::view_params(const RenderSceneDataRD &p_scene_da
 	return view;
 }
 
+Vector<String> NextGIWRC::get_shader_variant_defines() {
+	return _nextgi_wrc_variant_defines();
+}
+
 String NextGIWRC::build_update_shader_source(int p_variant) {
 	NextgiWrcUpdateShaderRD update_shader;
 	Vector<String> defines;

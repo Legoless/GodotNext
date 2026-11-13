@@ -69,6 +69,29 @@
 // Disable dead code elimination when using re-spirv.
 #define RESPV_DONT_REMOVE_DEAD_CODE 0
 
+// GodotNext: nextgi_vulkan (#50). re-spirv cannot parse ray-query modules: it prints
+// "OpTypeRayQueryKHR is not supported yet." to stderr and keeps the original module. This finds
+// them so the driver skips re-spirv for them.
+static bool _spirv_declares_ray_query(const PackedByteArray &p_spirv) {
+	const uint32_t OP_CAPABILITY = 17;
+	const uint32_t CAPABILITY_RAY_QUERY_KHR = 4472;
+	const uint32_t *words = reinterpret_cast<const uint32_t *>(p_spirv.ptr());
+	const int64_t count = p_spirv.size() / int64_t(sizeof(uint32_t));
+	int64_t i = 5; // After the header: magic, version, generator, bound and schema.
+	while (i + 1 < count) {
+		const uint32_t opcode = words[i] & 0xFFFFu;
+		const uint32_t length = words[i] >> 16u;
+		if (opcode != OP_CAPABILITY || length < 2) {
+			return false; // Capabilities come first, so the first other instruction ends the search.
+		}
+		if (words[i + 1] == CAPABILITY_RAY_QUERY_KHR) {
+			return true;
+		}
+		i += length;
+	}
+	return false;
+}
+
 // Record numerous statistics about pipeline creation such as time and shader sizes. When combined with enabling
 // and disabling re-spirv, this can be used to measure its effects.
 #define RECORD_PIPELINE_STATISTICS 0
@@ -937,6 +960,8 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
 		VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
 		VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
+		// GodotNext: nextgi_vulkan (#50). The extension alone does not enable fault reports.
+		VkPhysicalDeviceFaultFeaturesEXT device_fault_query = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -995,6 +1020,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			pipeline_cache_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES;
 			pipeline_cache_control_features.pNext = next_features;
 			next_features = &pipeline_cache_control_features;
+		}
+
+		if (enabled_device_extension_names.has(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+			device_fault_query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+			device_fault_query.pNext = next_features;
+			next_features = &device_fault_query;
 		}
 
 		if (enabled_device_extension_names.has(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
@@ -1104,8 +1135,9 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			pipeline_cache_control_support = pipeline_cache_control_features.pipelineCreationCacheControl;
 		}
 
+		// GodotNext: nextgi_vulkan (#50). Fault reports need the deviceFault feature, not only the extension.
 		if (enabled_device_extension_names.has(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
-			device_fault_support = true;
+			device_fault_support = device_fault_query.deviceFault;
 		}
 #if defined(VK_TRACK_DEVICE_MEMORY)
 		if (enabled_device_extension_names.has(VK_EXT_DEVICE_MEMORY_REPORT_EXTENSION_NAME)) {
@@ -1445,6 +1477,9 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	if (device_fault_support) {
 		device_fault_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
 		device_fault_features.pNext = create_info_next;
+		// GodotNext: nextgi_vulkan (#50). Chaining the struct without the flag left the feature off,
+		// so vkGetDeviceFaultInfoEXT was called on a device without it.
+		device_fault_features.deviceFault = VK_TRUE;
 		create_info_next = &device_fault_features;
 	}
 
@@ -4468,7 +4503,12 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 
 		shader_info.original_stage_size.push_back(decoded_spirv.size());
 
-		if (use_respv) {
+		// GodotNext: nextgi_vulkan (#50). Ray-query modules skip re-spirv (see _spirv_declares_ray_query).
+		if (use_respv && _spirv_declares_ray_query(decoded_spirv)) {
+			if (store_respv) {
+				shader_info.respv_stage_shaders.push_back(respv::Shader());
+			}
+		} else if (use_respv) {
 			const bool inline_data = store_respv || (RESPV_ONLY_INLINE_SHADERS_WITH_SPEC_CONSTANTS == 0);
 			respv::Shader respv_shader(decoded_spirv.ptr(), decoded_spirv.size(), inline_data);
 			if (respv_shader.empty()) {

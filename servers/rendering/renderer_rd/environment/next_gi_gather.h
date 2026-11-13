@@ -227,6 +227,9 @@ public:
 	static String build_shader_source(int p_variant = 0);
 	// GodotNext: ps_swrt_trace (#186). The software sibling's expanded source, for the doctests.
 	static String build_swrt_shader_source(int p_variant = 0);
+	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
+	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
+	static Vector<String> get_shader_variant_defines();
 
 	// GodotNext: nextgi_view_math. The view matrices the gather uploads, all from NextGIView:
 	// the inverse of the depth prepass's view-projection, the previous frame's view-projection,

@@ -38,6 +38,7 @@
 #include "editor/editor_node.h"
 #include "scene/3d/label_3d.h"
 #include "scene/3d/sprite_3d.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_bake_shaders.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_shader_container.h"
@@ -122,6 +123,7 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	tasks_processed = 0;
 	tasks_total = 0;
 	skipped_ray_query_versions = 0;
+	baked_ray_query_versions = 0;
 	tasks_cancelled = false;
 
 	StringBuilder to_hash;
@@ -162,6 +164,16 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 
 	ShaderRD::shaders_embedded_set_unlock();
 
+	// GodotNext: nextgi_vulkan (#50). NextGI's ray-query ShaderRDs only exist after a NextGI frame on the
+	// HWRT tier, which an export never renders, so bake them from bake-only instances. Cache paths dedup
+	// against live versions; the work items copy their sources, so the instances can go right after.
+	{
+		const RendererRD::NextGIBakeShaders nextgi_shaders;
+		for (const Pair<ShaderRD *, RID> &pair : nextgi_shaders.get_versions()) {
+			_customize_shader_version(pair.first, pair.second);
+		}
+	}
+
 	// Include all shaders created by embedded materials.
 	RendererRD::MaterialStorage *material_storage = RendererRD::MaterialStorage::get_singleton();
 	material_storage->shader_embedded_set_lock();
@@ -197,7 +209,7 @@ bool ShaderBakerExportPlugin::_begin_customize_scenes(const Ref<EditorExportPlat
 void ShaderBakerExportPlugin::_end_customize_resources() {
 	// GodotNext: shader_baker_ray_query
 	if (!shader_container_driver.is_empty()) {
-		print_line(vformat("Shader baker: driver '%s', skipped %d ray-query shader version(s).", shader_container_driver, skipped_ray_query_versions));
+		print_line(vformat("Shader baker: driver '%s', baked %d and skipped %d ray-query shader version(s).", shader_container_driver, baked_ray_query_versions, skipped_ray_query_versions));
 	}
 
 	if (!_initialize_cache_directory()) {
@@ -447,6 +459,11 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 
 	for (uint32_t i : groups_to_compile) {
 		shader_group_items.push_back(group_items[i]);
+	}
+
+	// GodotNext: nextgi_vulkan (#50). Counted once its groups are queued, after the cache-path dedup.
+	if (p_shader->requires_ray_query() && !groups_to_compile.is_empty()) {
+		baked_ray_query_versions++;
 	}
 }
 

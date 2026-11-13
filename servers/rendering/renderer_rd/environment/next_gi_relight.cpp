@@ -447,9 +447,18 @@ bool NextGIRelight::_ensure_atlases() {
 	tf.width = 1;
 	tf.height = 1;
 	tf.format = RD::DATA_FORMAT_D32_SFLOAT;
-	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	// The attachment bit gives the view a depth aspect; without it Vulkan makes a colour view of a depth format.
+	tf.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT | RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 	dummy_depth = rd->texture_create(tf, RD::TextureView());
 	ERR_FAIL_COND_V(dummy_depth.is_null(), false);
+	{
+		// Reverse-Z far (0), so the GREATER shadow compare against the fallback reads as lit.
+		const float far_depth = 0.0f;
+		Vector<uint8_t> far_data;
+		far_data.resize(sizeof(float));
+		memcpy(far_data.ptrw(), &far_depth, sizeof(float));
+		rd->texture_update(dummy_depth, 0, far_data);
+	}
 
 	atlases_ready = true;
 	if (!logged_atlas) {
@@ -458,6 +467,12 @@ bool NextGIRelight::_ensure_atlases() {
 		print_line(vformat("NextGI SRC: radiance atlas %dx%d %s, %.1f MiB; shadow mask %dx%d R8, %.1f MiB.", atlas_budget.radiance_width, atlas_budget.radiance_height, radiance_is_packed ? "B10G11R11" : "RGBA16F", double(radiance_bytes) / (1024.0 * 1024.0), NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE, mask_bytes / (1024.0 * 1024.0)));
 	}
 	return true;
+}
+
+Vector<String> NextGIRelight::get_shader_variant_defines(bool p_radiance_packed) {
+	Vector<String> defines;
+	defines.push_back(p_radiance_packed ? "" : "#define NEXTGI_RADIANCE_RGBA16F\n");
+	return defines;
 }
 
 bool NextGIRelight::_ensure_shader() {
@@ -472,9 +487,7 @@ bool NextGIRelight::_ensure_shader() {
 
 	if (shader == nullptr) {
 		shader = memnew(ShaderState);
-		Vector<String> defines;
-		defines.push_back(radiance_is_packed ? "" : "#define NEXTGI_RADIANCE_RGBA16F\n");
-		shader->shader.initialize(defines);
+		shader->shader.initialize(get_shader_variant_defines(radiance_is_packed));
 		// GodotNext: shader_baker_ray_query
 		// Embedded so the shader baker bakes or skips the ray-query version per target (#40).
 		shader->version = shader->shader.version_create(true);
