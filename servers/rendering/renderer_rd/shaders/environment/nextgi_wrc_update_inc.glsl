@@ -74,7 +74,7 @@ layout(set = 0, binding = 20, std430) restrict readonly buffer NextGIWRCParams {
 	vec4 origin_spacing; // xyz snapped level-0 origin, w = 1 m spacing
 	uvec4 dispatch; // probe_base, probe_count, frame, record_count
 	uint page_rect_count;
-	uint pad0;
+	uint fresh_levels; // GodotNext: nextgi_wrc_shift (#254). Bit L: level L takes its trace without history.
 	uint pad1;
 	uint pad2;
 	mat4 inv_view_proj; // GodotNext: nextgi_translucency_volume (#61).
@@ -382,10 +382,13 @@ void nextgi_wrc_trace() {
 	float spacing = params.origin_spacing.w * float(1u << level);
 	vec3 level_origin = floor(params.origin_spacing.xyz / spacing) * spacing;
 	vec3 probe_pos = level_origin + (vec3(cell.xy, cell.z % 16) - vec3(7.5)) * spacing;
-	vec4 previous_offset = imageLoad(offset_image, cell);
+	// GodotNext: nextgi_wrc_shift (#254). Since the level's origin moved, this cell's offset and
+	// radiance belong to another position: no relocation, no blend and no stale fallback.
+	bool fresh = (params.fresh_levels & (1u << level)) != 0u;
+	vec4 previous_offset = fresh ? vec4(0.0) : imageLoad(offset_image, cell);
 	probe_pos += previous_offset.xyz;
 	ivec2 radiance_texel = nextgi_wrc_radiance_texel(probe, local);
-	vec3 previous = imageLoad(radiance_image, radiance_texel).rgb;
+	vec3 previous = fresh ? vec3(0.0) : imageLoad(radiance_image, radiance_texel).rgb;
 	NextGIHit hit;
 #ifdef MODE_TRANSLUCENCY_TRACE
 	atomicAdd(counters.translucent_rays, 1u);

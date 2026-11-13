@@ -3,7 +3,7 @@
 # irradiance-field gather) with two views rendering at once, on one tier.
 #
 # Usage:
-#   run_lite_two_views_check.sh [--hwrt=auto|off] [--deny-ray-query] [--case=kitbash|rooms|all] \
+#   run_lite_two_views_check.sh [--hwrt=auto|off] [--deny-ray-query] [--case=kitbash|rooms|handoff|all] \
 #     -- <godot> <godot arguments without a scene>
 #
 # --hwrt=off (the default) runs the software tier, --hwrt=auto the device's pick: the hardware tier
@@ -11,8 +11,9 @@
 # sets debug/deny_ray_query with Auto (a device without ray query: the software tier, NO_RAY_QUERY).
 # The kitbash case is one run. The rooms case is four fresh runs: the lit room's view alone, the
 # dark room's view alone, then both views with the lit one first and with the dark one first,
-# which compare each view with its solo value. Solo values come from separate processes, because
-# a view that stops rendering moves the WRC's grid and the WRC keeps the old cells' history.
+# which compare each view with its solo value. Solo values come from separate processes. The
+# handoff case (#254) is one run: the lit view stops, and the dark view must read dark again
+# within a few dozen frames, as the WRC's moved levels drop the old cells' history.
 #
 # Each run writes godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true,
 # quality 1, medium_gather 0, the hardware_ray_tracing mode and debug/deny_ray_query; it refuses
@@ -41,7 +42,7 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--hwrt=auto | --hwrt=off) hwrt="${1#--hwrt=}" ;;
 	--deny-ray-query) deny=true ;;
-	--case=kitbash | --case=rooms | --case=all) case_name="${1#--case=}" ;;
+	--case=kitbash | --case=rooms | --case=handoff | --case=all) case_name="${1#--case=}" ;;
 	--)
 		shift
 		break
@@ -128,6 +129,10 @@ if [[ "$case_name" == rooms || "$case_name" == all ]]; then
 	fi
 	run_scene rooms_lit_first --case=rooms --views=lit,dark --lit-solo="$lit_solo" --dark-solo="$dark_solo"
 	run_scene rooms_dark_first --case=rooms --views=dark,lit --lit-solo="$lit_solo" --dark-solo="$dark_solo"
+fi
+
+if [[ "$case_name" == handoff || "$case_name" == all ]]; then
+	run_scene rooms_handoff --case=handoff
 fi
 
 exit "$failed"

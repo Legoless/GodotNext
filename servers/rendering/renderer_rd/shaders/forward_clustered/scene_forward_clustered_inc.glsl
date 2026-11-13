@@ -560,7 +560,7 @@ layout(set = 1, binding = 42, std430) restrict readonly buffer NextGIWRCForward 
 	vec4 origin_spacing;
 	uvec4 dispatch;
 	uint page_rect_count;
-	uint pad0;
+	uint fresh_levels; // GodotNext: nextgi_wrc_shift (#254). Unused here.
 	uint pad1;
 	uint pad2;
 	mat4 inv_view_proj;

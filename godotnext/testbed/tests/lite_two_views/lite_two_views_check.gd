@@ -33,6 +33,13 @@ extends Node3D
 ## of its own with the dark view first, on both tiers. The solo runs assert the scene separates the rooms:
 ## L >= MIN_ROOM_LIT and D <= MAX_DARK_RATIO x L.
 ##
+## --case=handoff (#254): the same rooms with the lit view first and the dark view second, so the
+## WRC's grid follows the lit camera. After the rooms settle, the lit view's patch is sampled and
+## the lit view is freed; the grid snaps to the dark camera a cell away. Within HANDOFF_FRAMES the
+## dark view's patch must read at most MAX_DARK_RATIO of the lit one: the moved levels re-trace
+## without the history their cells held at the old position. Before #254 the dark room still read
+## 0.26 of the lit room 400 frames later.
+##
 ## --expected-tier=HWRT, SWRT or device (HWRT when the rendering device reports
 ## SUPPORTS_RAY_QUERY_HARDWARE, else SWRT). Under debug/deny_ray_query (a device without ray
 ## query) the tier must also report NO_RAY_QUERY and no ray-query ShaderRD.
@@ -58,6 +65,9 @@ const LIT_LUMA := 0.002
 const ROOM_TOLERANCE := 0.1
 const MIN_ROOM_LIT := 0.01
 const MAX_DARK_RATIO := 0.05
+## Frames after the handoff before the dark view is sampled: one fresh WRC cycle (32 frames) and
+## the Lite fields' packing after it.
+const HANDOFF_FRAMES := 64
 const PROBES_PER_FRAME := 512
 const PROBE_COUNT := 8192
 const WALL := 0.4
@@ -107,6 +117,9 @@ func _ready() -> void:
 		return
 	if case_name == "kitbash":
 		_build_kitbash()
+	elif case_name == "handoff":
+		room_views = PackedStringArray(["lit", "dark"])
+		_build_rooms()
 	elif case_name == "rooms":
 		if room_views.is_empty() or room_views.size() > 2:
 			_finish_with("--views must list one or two of lit and dark")
@@ -120,7 +133,7 @@ func _ready() -> void:
 			return
 		_build_rooms()
 	else:
-		_finish_with("--case must be kitbash or rooms")
+		_finish_with("--case must be kitbash, rooms or handoff")
 
 
 func _make_sub_view(p_size: Vector2i, p_update_mode := SubViewport.UPDATE_ALWAYS) -> SubViewport:
@@ -374,6 +387,9 @@ func _process_rooms() -> void:
 		1:
 			if _phase_frame <= ROOM_MEASURE_FRAMES:
 				return
+			if case_name == "handoff":
+				_process_handoff_lit()
+				return
 			if _phase_frame == ROOM_MEASURE_FRAMES + 1:
 				_check_lite("rooms", room_views.size())
 			if (_phase_frame - ROOM_MEASURE_FRAMES) % ROOM_SAMPLE_STRIDE != 0:
@@ -388,6 +404,40 @@ func _process_rooms() -> void:
 			if taken.size() >= ROOM_SAMPLES:
 				_room_checks()
 				_finish()
+		2:
+			_process_handoff_dark()
+
+
+# GodotNext: #254. The lit view's patch, then the handoff to the dark view alone.
+func _process_handoff_lit() -> void:
+	if (_phase_frame - ROOM_MEASURE_FRAMES) % ROOM_SAMPLE_STRIDE != 0:
+		return
+	var values: PackedFloat32Array = _samples.get("lit", PackedFloat32Array())
+	values.append(_patch_luma(_views["lit"]))
+	_samples["lit"] = values
+	if values.size() < ROOM_SAMPLES:
+		return
+	_summary["lit_luma"] = _mean(values)
+	(_views["lit"] as SubViewport).queue_free()
+	_views.erase("lit")
+	_next_phase()
+
+
+func _process_handoff_dark() -> void:
+	if _phase_frame <= HANDOFF_FRAMES or (_phase_frame - HANDOFF_FRAMES) % ROOM_SAMPLE_STRIDE != 0:
+		return
+	var values: PackedFloat32Array = _samples.get("dark", PackedFloat32Array())
+	values.append(_patch_luma(_views["dark"]))
+	_samples["dark"] = values
+	if values.size() < ROOM_SAMPLES:
+		return
+	var lit := float(_summary["lit_luma"])
+	var dark := _mean(values)
+	_summary["dark_luma_after_handoff"] = dark
+	print("LITE_TWO_VIEWS_HANDOFF lit=%.6f dark=%.6f ratio=%.4f frames_after=%d" % [lit, dark, dark / maxf(lit, 1e-9), _phase_frame])
+	_check(lit >= MIN_ROOM_LIT, "the lit room's ambient (%.6f) is below %.3f: the comparison would see nothing" % [lit, MIN_ROOM_LIT])
+	_check(dark <= MAX_DARK_RATIO * lit, "%d frames after the lit view stopped, the dark room reads %.6f, %.3f of the lit room's %.6f (at most %.2f)" % [HANDOFF_FRAMES, dark, dark / maxf(lit, 1e-9), lit, MAX_DARK_RATIO])
+	_finish()
 
 
 func _room_checks() -> void:

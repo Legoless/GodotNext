@@ -75,6 +75,18 @@ _FORCE_INLINE_ float nextgi_wrc_handoff_distance(float p_distance) {
 // Each level origin snaps to its spacing.
 Vector3 nextgi_wrc_snap_origin(const Vector3 &p_camera, float p_spacing);
 
+// GodotNext: nextgi_wrc_shift (#254). Probes are addressed by cell from each level's snapped
+// origin, so a level whose origin moved holds history traced at other positions. Its probes take
+// their next trace without blending ("fresh") for one full update cycle (FRESH_FRAMES), in which
+// the update cursor reaches every probe once; the cursor is not moved, so continuous motion cannot
+// starve the coarser levels.
+static constexpr uint32_t NEXTGI_WRC_FRESH_FRAMES = 16384 / 512;
+// Bit L is set when level L's snapped origin (level 0's origin snapped to 2^L m) moved.
+uint32_t nextgi_wrc_shifted_levels(const Vector3 &p_previous_origin, const Vector3 &p_origin, bool p_had_previous);
+void nextgi_wrc_mark_fresh(uint32_t p_shifted_levels, uint32_t r_fresh_frames[4]);
+uint32_t nextgi_wrc_fresh_mask(const uint32_t p_fresh_frames[4]);
+void nextgi_wrc_age_fresh(uint32_t r_fresh_frames[4]);
+
 // A probe with more than 25% back-face hits moves along the mean escape direction, at most 0.4x spacing.
 Vector3 nextgi_wrc_relocate(const Vector3 &p_probe, const Vector3 &p_mean_escape, float p_backface_fraction, float p_spacing);
 
@@ -135,6 +147,11 @@ class NextGIWRC {
 	RID dummy_buffer;
 	bool packed_radiance = true;
 	uint32_t cursor = 0;
+	// GodotNext: nextgi_wrc_shift (#254). The level-0 origin of the last update, and the frames each
+	// level stays fresh after its origin moved.
+	Vector3 previous_origin;
+	bool has_previous_origin = false;
+	uint32_t fresh_frames[4] = {};
 	uint32_t frame = 0;
 	uint32_t last_rays = 0;
 	uint32_t last_hits = 0;

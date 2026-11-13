@@ -2566,6 +2566,40 @@ TEST_CASE("[NextGI] SRC production: atlas budget, material sharing, capture cap,
 	CHECK_EQ(evict[1], 6u);
 }
 
+// GodotNext: nextgi_wrc_shift (#254)
+TEST_CASE("[NextGI] WRC: a level whose origin moved re-traces every probe without history") {
+	using namespace RendererRD;
+	// No previous update: nothing moved.
+	CHECK_EQ(nextgi_wrc_shifted_levels(Vector3(), Vector3(0.5f, 0, 0), false), 0u);
+	// The same cell at every level.
+	CHECK_EQ(nextgi_wrc_shifted_levels(Vector3(0, 0, 0), Vector3(0, 0, 0), true), 0u);
+	// Crossing one 1 m cell from 0 to 1 moves level 0 only (2, 4 and 8 m cells keep 0).
+	CHECK_EQ(nextgi_wrc_shifted_levels(Vector3(0, 0, 0), Vector3(1, 0, 0), true), 1u);
+	// From 1 to 2 crosses the 2 m boundary as well, and 7 to 8 every level.
+	CHECK_EQ(nextgi_wrc_shifted_levels(Vector3(1, 0, 0), Vector3(2, 0, 0), true), 3u);
+	CHECK_EQ(nextgi_wrc_shifted_levels(Vector3(0, 0, 7), Vector3(0, 0, 8), true), 15u);
+	// Negative coordinates snap down: -1 to 0 moves levels 0 to 3.
+	CHECK_EQ(nextgi_wrc_shifted_levels(Vector3(0, -1, 0), Vector3(0, 0, 0), true), 15u);
+
+	// A shifted level stays fresh for one full update cycle, in which the cursor reaches every probe.
+	CHECK_EQ(NEXTGI_WRC_FRESH_FRAMES, uint32_t(NEXTGI_WRC_PROBE_COUNT / NEXTGI_WRC_PROBES_PER_FRAME));
+	uint32_t fresh[4] = {};
+	CHECK_EQ(nextgi_wrc_fresh_mask(fresh), 0u);
+	nextgi_wrc_mark_fresh(1u, fresh);
+	for (uint32_t frame = 0; frame < NEXTGI_WRC_FRESH_FRAMES; frame++) {
+		CHECK_EQ(nextgi_wrc_fresh_mask(fresh), 1u);
+		nextgi_wrc_age_fresh(fresh);
+	}
+	CHECK_EQ(nextgi_wrc_fresh_mask(fresh), 0u);
+	// A new shift during a window restarts it; other levels keep their own.
+	nextgi_wrc_mark_fresh(3u, fresh);
+	nextgi_wrc_age_fresh(fresh);
+	nextgi_wrc_mark_fresh(1u, fresh);
+	CHECK_EQ(fresh[0], NEXTGI_WRC_FRESH_FRAMES);
+	CHECK_EQ(fresh[1], NEXTGI_WRC_FRESH_FRAMES - 1);
+	CHECK_EQ(nextgi_wrc_fresh_mask(fresh), 3u);
+}
+
 TEST_CASE("[NextGI] WRC layout, relocation and diffuse handoff") {
 	CHECK_EQ(RendererRD::nextgi_wrc_bytes(), 14ull * 1024ull * 1024ull);
 	CHECK_EQ(RendererRD::NEXTGI_WRC_PROBE_COUNT, 16384u);

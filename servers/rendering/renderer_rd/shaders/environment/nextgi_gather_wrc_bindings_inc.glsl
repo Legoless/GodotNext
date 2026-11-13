@@ -47,7 +47,7 @@ layout(set = 0, binding = 28, std430) restrict readonly buffer NextGIGatherWRCPa
 	vec4 origin_spacing;
 	uvec4 dispatch;
 	uint page_rect_count;
-	uint pad0;
+	uint fresh_levels; // GodotNext: nextgi_wrc_shift (#254). Unused here.
 	uint pad1;
 	uint pad2;
 }

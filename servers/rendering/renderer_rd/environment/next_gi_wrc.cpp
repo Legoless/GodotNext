@@ -102,7 +102,9 @@ struct NextGIWRCParamsGPU {
 	uint32_t frame = 0;
 	uint32_t record_count = 0;
 	uint32_t page_rect_count = 0;
-	uint32_t pad[3] = {};
+	// GodotNext: nextgi_wrc_shift (#254). Bit L: level L's probes take their trace without history.
+	uint32_t fresh_levels = 0;
+	uint32_t pad[2] = {};
 	float inv_view_proj[16] = {};
 	float volume[4] = {}; // x width, y height, z near, w far.
 	// GodotNext: nextgi_view_math. nextgi_wrc_update.glsl declares this vec4; before it was
@@ -161,6 +163,50 @@ uint32_t nextgi_wrc_level_for_distance(float p_distance) {
 		return 2;
 	}
 	return 3;
+}
+
+// GodotNext: nextgi_wrc_shift (#254)
+static_assert(NEXTGI_WRC_FRESH_FRAMES == NEXTGI_WRC_PROBE_COUNT / NEXTGI_WRC_PROBES_PER_FRAME, "A fresh window is one full update cycle.");
+static_assert(NEXTGI_WRC_LEVELS == 4, "The fresh bookkeeping covers four levels.");
+
+uint32_t nextgi_wrc_shifted_levels(const Vector3 &p_previous_origin, const Vector3 &p_origin, bool p_had_previous) {
+	if (!p_had_previous) {
+		return 0u;
+	}
+	uint32_t shifted = 0u;
+	for (uint32_t level = 0; level < NEXTGI_WRC_LEVELS; level++) {
+		const float spacing = float(1u << level);
+		if (!nextgi_wrc_snap_origin(p_previous_origin, spacing).is_equal_approx(nextgi_wrc_snap_origin(p_origin, spacing))) {
+			shifted |= 1u << level;
+		}
+	}
+	return shifted;
+}
+
+void nextgi_wrc_mark_fresh(uint32_t p_shifted_levels, uint32_t r_fresh_frames[4]) {
+	for (uint32_t level = 0; level < NEXTGI_WRC_LEVELS; level++) {
+		if ((p_shifted_levels & (1u << level)) != 0u) {
+			r_fresh_frames[level] = NEXTGI_WRC_FRESH_FRAMES;
+		}
+	}
+}
+
+uint32_t nextgi_wrc_fresh_mask(const uint32_t p_fresh_frames[4]) {
+	uint32_t mask = 0u;
+	for (uint32_t level = 0; level < NEXTGI_WRC_LEVELS; level++) {
+		if (p_fresh_frames[level] > 0u) {
+			mask |= 1u << level;
+		}
+	}
+	return mask;
+}
+
+void nextgi_wrc_age_fresh(uint32_t r_fresh_frames[4]) {
+	for (uint32_t level = 0; level < NEXTGI_WRC_LEVELS; level++) {
+		if (r_fresh_frames[level] > 0u) {
+			r_fresh_frames[level]--;
+		}
+	}
 }
 
 Vector3 nextgi_wrc_snap_origin(const Vector3 &p_camera, float p_spacing) {
@@ -701,6 +747,11 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.origin_spacing[3] = 1.0f;
 	params.probe_base = cursor;
 	params.probe_count = NEXTGI_WRC_PROBES_PER_FRAME;
+	// GodotNext: nextgi_wrc_shift (#254)
+	nextgi_wrc_mark_fresh(nextgi_wrc_shifted_levels(previous_origin, origin, has_previous_origin), fresh_frames);
+	params.fresh_levels = nextgi_wrc_fresh_mask(fresh_frames);
+	previous_origin = origin;
+	has_previous_origin = true;
 	params.frame = frame;
 	params.record_count = swrt ? 0u : next_gi->get_rt_scene()->get_stats().instance_count;
 	NextGIRelight *relight = NextGIRelight::get_singleton();
@@ -909,6 +960,8 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	previous_sky_read = sky_read;
 	has_previous_camera = true;
 	cursor = (cursor + NEXTGI_WRC_PROBES_PER_FRAME) % NEXTGI_WRC_PROBE_COUNT;
+	// GodotNext: nextgi_wrc_shift (#254)
+	nextgi_wrc_age_fresh(fresh_frames);
 	frame++;
 }
 
