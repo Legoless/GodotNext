@@ -71,7 +71,8 @@ struct NextGILight {
 	float attenuation = 0.0f;
 	float cos_spot = 0.0f;
 	float inv_spot_atten = 1.0f;
-	uint32_t flags = NEXTGI_LIGHT_REUSE_NONE << NEXTGI_LIGHT_REUSE_SHIFT;
+	// Shifted as uint32_t: the enum promotes to int, where 0xFFFFFF << 8 overflows.
+	uint32_t flags = uint32_t(NEXTGI_LIGHT_REUSE_NONE) << NEXTGI_LIGHT_REUSE_SHIFT;
 };
 static_assert(sizeof(NextGILight) == 64, "NextGILight must stay 64 bytes (plan D14).");
 

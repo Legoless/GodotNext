@@ -917,7 +917,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cpu.gpu.attenuation = RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION);
 		cpu.gpu.cos_spot = Math::cos(Math::deg_to_rad(RSG::light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPOT_ANGLE)));
 		cpu.gpu.inv_spot_atten = spot_atten > 0.0f ? 1.0f / spot_atten : 1.0f;
-		cpu.gpu.flags = (NEXTGI_LIGHT_REUSE_NONE << NEXTGI_LIGHT_REUSE_SHIFT);
+		cpu.gpu.flags = uint32_t(NEXTGI_LIGHT_REUSE_NONE) << NEXTGI_LIGHT_REUSE_SHIFT;
 		if (cpu.has_shadow) {
 			cpu.gpu.flags |= NEXTGI_LIGHT_FLAG_SHADOW;
 		}
