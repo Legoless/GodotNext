@@ -174,6 +174,9 @@ class NextGIGather {
 	uint32_t last_sdf_detail_hits = 0;
 	uint32_t last_sdf_d6_resolved = 0;
 	uint32_t last_sdf_hit_cm_sum = 0;
+	// GodotNext: nextgi_card_normal (#251)
+	uint32_t last_feedback_rays = 0;
+	uint32_t last_feedback_escapes = 0;
 	uint32_t last_reflect_sdf_hits = 0;
 	uint32_t last_reflect_sdf_exhausted = 0;
 	uint32_t last_reflect_sdf_near = 0;

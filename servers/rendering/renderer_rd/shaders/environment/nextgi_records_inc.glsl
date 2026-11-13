@@ -53,3 +53,16 @@ struct NextGISurfaceRecord {
 };
 
 #endif // NEXTGI_RECORDS_INC_GLSL
+
+// GodotNext: nextgi_card_normal (#251). An object-space normal to world space through the
+// inverse transpose of the record's row-major object-to-world basis, so it is exact for
+// rotation, mirroring and non-uniform scale. With rows r0, r1 and r2, the rows of that inverse
+// transpose are (r1 x r2, r2 x r0, r0 x r1) divided by the determinant; only its sign matters
+// before the caller normalizes.
+vec3 nextgi_record_normal_to_world(NextGIInstanceRecord rec, vec3 n) {
+	vec3 r0 = vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]);
+	vec3 r1 = vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]);
+	vec3 r2 = vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]);
+	vec3 world = vec3(dot(cross(r1, r2), n), dot(cross(r2, r0), n), dot(cross(r0, r1), n));
+	return dot(r0, cross(r1, r2)) < 0.0 ? -world : world;
+}

@@ -584,10 +584,9 @@ void nextgi_feedback_main() {
 	NextGIInstanceRecord rec = records.data[record_index];
 	NextGICard card = cards.data[block.z];
 	vec3 card_n = normalize(card.axis_n.xyz);
-	vec3 normal = normalize(vec3(
-			dot(vec3(rec.object_to_world[0], rec.object_to_world[4], rec.object_to_world[8]), card_n),
-			dot(vec3(rec.object_to_world[1], rec.object_to_world[5], rec.object_to_world[9]), card_n),
-			dot(vec3(rec.object_to_world[2], rec.object_to_world[6], rec.object_to_world[10]), card_n)));
+	// GodotNext: nextgi_card_normal (#251). The columns of the basis (its transpose) turned a
+	// rotated instance's card hemisphere the wrong way.
+	vec3 normal = normalize(nextgi_record_normal_to_world(rec, card_n));
 #ifdef NEXTGI_TRACE_SDF
 	// GodotNext: ps_swrt_trace (#186 step 6). The card's world origin, offset 1.5 voxels of its level.
 	vec3 card_origin = vec3(
@@ -604,6 +603,8 @@ void nextgi_feedback_main() {
 #endif
 	vec3 accum = vec3(0.0);
 	uint uncovered_count = 0u;
+	uint traced = 0u;
+	uint escaped = 0u;
 	for (uint i = 0u; i < 16u; i++) {
 		vec2 uv = vec2(float(i) / 16.0, nextgi_radical_inverse(i + params.frame));
 		float radius = sqrt(uv.x);
@@ -617,9 +618,12 @@ void nextgi_feedback_main() {
 		if ((rec.rt_flags & 8u) != 0u) {
 			radiance = nextgi_miss_radiance(dir);
 		} else if (nextgi_trace(origin, dir, tmax, hit)) {
+			traced++;
 			float ignored_confidence = 0.0;
 			radiance = nextgi_shade_hit(hit, dir, uncovered_count, ignored_confidence);
 		} else {
+			traced++;
+			escaped++;
 			radiance = nextgi_wrc_sample(origin + dir * tmax, dir);
 			if (!nextgi_wrc_hit_cache) {
 				radiance = nextgi_miss_radiance(dir);
@@ -630,6 +634,9 @@ void nextgi_feedback_main() {
 		accum += radiance;
 	}
 	imageStore(indirect_image, ivec2(block.x & 0xFFFFu, block.x >> 16u), vec4(accum / 16.0 * PI, 1.0));
+	// GodotNext: nextgi_card_normal (#251). Feedback rays and those that left the scene unhit.
+	atomicAdd(counters.feedback_rays, traced);
+	atomicAdd(counters.feedback_escapes, escaped);
 }
 
 void nextgi_coverage_main() {

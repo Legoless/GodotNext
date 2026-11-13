@@ -122,11 +122,10 @@ vec3 nextgi_xform(NextGIInstanceRecord rec, vec3 p) {
 			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), p) + rec.object_to_world[11]);
 }
 
+// GodotNext: nextgi_card_normal (#251). The rows were exact for rotation and uniform scale only;
+// the shared inverse transpose also holds for non-uniform scale and mirroring.
 vec3 nextgi_xform_n(NextGIInstanceRecord rec, vec3 n) {
-	return vec3(
-			dot(vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]), n),
-			dot(vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]), n),
-			dot(vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]), n));
+	return nextgi_record_normal_to_world(rec, n);
 }
 
 // 1 lit, 0 occluded, -1 not inside a reused shadow map (the caller traces).

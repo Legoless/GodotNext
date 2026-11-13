@@ -162,8 +162,11 @@ struct GatherCountersGPU {
 	uint32_t sdf_detail_hits = 0;
 	uint32_t sdf_d6_resolved = 0;
 	uint32_t sdf_hit_cm_sum = 0;
+	// GodotNext: nextgi_card_normal (#251). SRC feedback rays traced, and those that hit nothing.
+	uint32_t feedback_rays = 0;
+	uint32_t feedback_escapes = 0;
 };
-static_assert(sizeof(GatherCountersGPU) == 64, "Gather counters must match NextGIGatherCounters.");
+static_assert(sizeof(GatherCountersGPU) == 72, "Gather counters must match NextGIGatherCounters.");
 
 // GodotNext: nextgi_async_counters (#186). The one readback buffer the three counter buffers are
 // copied into, so every published field comes from the same frame.
@@ -174,8 +177,8 @@ struct GatherReadbackGPU {
 	uint32_t pad[2] = {};
 	ReflectCountersGPU reflect;
 };
-static_assert(offsetof(GatherReadbackGPU, clamp_removed) == 64, "The clamp totals follow the gather counters.");
-static_assert(offsetof(GatherReadbackGPU, reflect) == 80, "The reflect counters follow the clamp totals.");
+static_assert(offsetof(GatherReadbackGPU, clamp_removed) == 72, "The clamp totals follow the gather counters.");
+static_assert(offsetof(GatherReadbackGPU, reflect) == 88, "The reflect counters follow the clamp totals.");
 
 static Mutex nextgi_gather_counter_mutex;
 static HashMap<uint64_t, NextGIGather *> nextgi_gather_counter_registry;
@@ -1070,6 +1073,8 @@ void NextGIGather::_counters_received(const Vector<uint8_t> &p_data, uint64_t p_
 	self->last_sdf_detail_hits = got.gather.sdf_detail_hits;
 	self->last_sdf_d6_resolved = got.gather.sdf_d6_resolved;
 	self->last_sdf_hit_cm_sum = got.gather.sdf_hit_cm_sum;
+	self->last_feedback_rays = got.gather.feedback_rays;
+	self->last_feedback_escapes = got.gather.feedback_escapes;
 	nextgi_coverage_hits = got.gather.coverage_hits;
 	nextgi_coverage_rays = got.gather.coverage_rays;
 }
@@ -1542,6 +1547,9 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["gather_sdf_detail_hits"] = int64_t(last_sdf_detail_hits);
 	r_info["gather_sdf_d6_resolved"] = int64_t(last_sdf_d6_resolved);
 	r_info["gather_sdf_hit_cm_sum"] = int64_t(last_sdf_hit_cm_sum);
+	// GodotNext: nextgi_card_normal (#251)
+	r_info["src_feedback_rays"] = int64_t(last_feedback_rays);
+	r_info["src_feedback_escapes"] = int64_t(last_feedback_escapes);
 	r_info["reflect_sdf_hits"] = int64_t(last_reflect_sdf_hits);
 	r_info["reflect_sdf_exhausted"] = int64_t(last_reflect_sdf_exhausted);
 	r_info["reflect_sdf_near"] = int64_t(last_reflect_sdf_near);

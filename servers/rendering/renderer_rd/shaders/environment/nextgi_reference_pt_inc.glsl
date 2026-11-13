@@ -105,11 +105,9 @@ vec3 nextgi_pt_mul_point(NextGIInstanceRecord rec, vec3 p) {
 	return vec3(dot(r0, p), dot(r1, p), dot(r2, p)) + origin;
 }
 
+// GodotNext: nextgi_card_normal (#251). The same inverse transpose as the gather and the relight.
 vec3 nextgi_pt_mul_normal(NextGIInstanceRecord rec, vec3 n) {
-	vec3 r0 = vec3(rec.object_to_world[0], rec.object_to_world[1], rec.object_to_world[2]);
-	vec3 r1 = vec3(rec.object_to_world[4], rec.object_to_world[5], rec.object_to_world[6]);
-	vec3 r2 = vec3(rec.object_to_world[8], rec.object_to_world[9], rec.object_to_world[10]);
-	return normalize(vec3(dot(r0, n), dot(r1, n), dot(r2, n)));
+	return normalize(nextgi_record_normal_to_world(rec, n));
 }
 
 uint nextgi_pt_chunk_uint(uint chunk, uint byte_offset) {

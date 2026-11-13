@@ -142,16 +142,18 @@ layout(set = 0, binding = 19, std430) buffer NextGIGatherCounters {
 	uint wrc_samples;
 	uint sky_samples;
 	uint screen_hits;
-#ifdef NEXTGI_TRACE_SDF
 	// GodotNext: ps_swrt_trace (#186). The software tier's SDF hits, the step-limit and
-	// near-origin ones among them, detail hits, D6-resolved detail hits and the hit distance sum (cm).
+	// near-origin ones among them, detail hits, D6-resolved detail hits and the hit distance sum
+	// (cm). Only the software sibling writes them.
 	uint sdf_hits;
 	uint sdf_exhausted;
 	uint sdf_near;
 	uint sdf_detail_hits;
 	uint sdf_d6_resolved;
 	uint sdf_hit_cm_sum;
-#endif
+	// GodotNext: nextgi_card_normal (#251). SRC feedback rays traced, and those that hit nothing.
+	uint feedback_rays;
+	uint feedback_escapes;
 }
 counters;
 
