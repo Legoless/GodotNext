@@ -92,8 +92,13 @@ if [[ $# -eq 0 ]]; then
 fi
 
 log=$(mktemp)
+# The override is removed only while this run owns it: one that was there before stays.
+own_override=false
 cleanup() {
-	rm -f "$override" "$log"
+	if [[ "$own_override" == true ]]; then
+		rm -f "$override"
+	fi
+	rm -f "$log"
 }
 trap cleanup EXIT
 
@@ -109,6 +114,7 @@ run_pass() {
 		echo "run_swrt_gi_check.sh: $override already exists; not overwriting it" >&2
 		exit 2
 	fi
+	own_override=true
 	local swrt_mode=0
 	[[ "$pass_detail" == true ]] && swrt_mode=1
 	cat >"$override" <<CFG
@@ -125,6 +131,7 @@ CFG
 	pass_status=$?
 	set -e
 	rm -f "$override"
+	own_override=false
 	cat "$log"
 	local errors metal_usage metal_shader
 	errors=$(grep -c 'ERROR:' "$log" || true)
@@ -142,18 +149,18 @@ pass_failed() {
 	[[ "$pass_status" -ne 0 || "$pass_validation" -ne 0 ]]
 }
 
-# reference <key> <recorded> <scene> <scene arguments...>: prints the reference value.
+# reference <key> <recorded> <scene> <scene arguments...>: sets reference_value. It runs in this
+# shell, not in a $(...) subshell, so the cleanup trap knows when its pass owns the override.
+reference_value=""
 reference() {
 	local key=$1 recorded=$2 quality=$3 scene=$4
 	shift 4
 	run_pass 0 "$quality" "$scene" "$@" >&2
-	local value
-	value=$(grep -m1 "^SWRT_GI_REFERENCE " "$log" | sed -n "s/.*$key=\([0-9]*\).*/\1/p" || true)
-	if [[ "$pass_status" -ne 0 || -z "$value" || "$value" -le 0 ]]; then
+	reference_value=$(grep -m1 "^SWRT_GI_REFERENCE " "$log" | sed -n "s/.*$key=\([0-9]*\).*/\1/p" || true)
+	if [[ "$pass_status" -ne 0 || -z "$reference_value" || "$reference_value" -le 0 ]]; then
 		echo "run_swrt_gi_check.sh: no hardware-tier reference on this machine (the HWRT pass did not report one); using the value recorded on the Apple M5 Max, $key=$recorded" >&2
-		value=$recorded
+		reference_value=$recorded
 	fi
-	echo "$value"
 }
 
 # software_pass <quality> <scene> <scene arguments...>: hardware_ray_tracing Off, or Auto under
@@ -189,7 +196,8 @@ if [[ "$mode" == "smoke" ]]; then
 	for quality in 2 3; do
 		recorded=$RECORDED_WORLD_HITS_HIGH
 		[[ "$quality" == 3 ]] && recorded=$RECORDED_WORLD_HITS_EPIC
-		hits=$(reference world_hits "$recorded" "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=HWRT)
+		reference world_hits "$recorded" "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=HWRT
+		hits=$reference_value
 		software_pass "$quality" res://tests/swrt_gi/swrt_gi_check.tscn --check=smoke --expected-tier=SWRT --hwrt-world-hits="$hits"
 		pass_failed && failed=1
 	done
@@ -208,7 +216,8 @@ elif [[ "$mode" == "toggle" || "$mode" == "budget" ]]; then
 	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check="$mode"
 	pass_failed && failed=1
 else
-	hits=$(reference reflection_hits "$RECORDED_REFLECTION_HITS_HIGH" 2 res://tests/nextgi_reflect/run_reflect.tscn --expected-tier=HWRT)
+	reference reflection_hits "$RECORDED_REFLECTION_HITS_HIGH" 2 res://tests/nextgi_reflect/run_reflect.tscn --expected-tier=HWRT
+	hits=$reference_value
 	run_pass 1 2 res://tests/nextgi_reflect/run_reflect.tscn --expected-tier=SWRT --hwrt-reflection-hits="$hits"
 	pass_failed && failed=1
 fi

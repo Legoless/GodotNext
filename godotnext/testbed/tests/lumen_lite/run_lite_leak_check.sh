@@ -48,8 +48,13 @@ if [[ $# -eq 0 ]]; then
 fi
 
 log=$(mktemp)
+# The override is removed only while this run owns it: one that was there before stays.
+own_override=false
 cleanup() {
-	rm -f "$override" "$log"
+	if [[ "$own_override" == true ]]; then
+		rm -f "$override"
+	fi
+	rm -f "$log"
 }
 trap cleanup EXIT
 
@@ -61,6 +66,7 @@ run_pass() {
 		echo "run_lite_leak_check.sh: $override already exists; not overwriting it" >&2
 		exit 2
 	fi
+	own_override=true
 	cat >"$override" <<CFG
 [rendering]
 
@@ -74,6 +80,7 @@ CFG
 	pass_status=$?
 	set -e
 	rm -f "$override"
+	own_override=false
 	cat "$log"
 	local errors metal_usage metal_shader
 	errors=$(grep -c 'ERROR:' "$log" || true)
