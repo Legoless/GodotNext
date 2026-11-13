@@ -1,5 +1,7 @@
 .godot/
-captures/
+# Harness output. Its .gdignore keeps it out of the editor's import and of exports (#50).
+captures/*
+!captures/.gdignore
 generated/
 /override.cfg
 tests/roundtrip/bake_out/

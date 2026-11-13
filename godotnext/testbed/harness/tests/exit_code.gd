@@ -15,7 +15,7 @@ func _initialize() -> void:
 		if arg.begins_with("--code="):
 			_code = int(arg.trim_prefix("--code="))
 	print("exit_code: adapter=%s driver=%s display=%s" % [RenderingServer.get_video_adapter_name(), RenderingServer.get_current_rendering_driver_name(), DisplayServer.get_name()])
-	for variable in ["GODOTNEXT_HARNESS_JOB", "NV_ALLOW_RAYTRACING_VALIDATION", "VK_KHRONOS_VALIDATION_VALIDATE_SYNC"]:
+	for variable in ["GODOTNEXT_HARNESS_JOB", "NV_ALLOW_RAYTRACING_VALIDATION", "VK_KHRONOS_VALIDATION_VALIDATE_SYNC", "GODOTNEXT_JOB_ENV_PROBE"]:
 		print("exit_code: %s=%s" % [variable, OS.get_environment(variable)])
 
 

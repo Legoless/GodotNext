@@ -209,7 +209,7 @@ rg -n "rayQueryGetIntersectionTriangleVertexPositionsEXT|accelerationStructureEX
 | Device | Driver | SPIR-V | spirv-val | Pipeline | Validation-layer errors |
 | --- | --- | --- | --- | --- | --- |
 | Apple M5 Max (40-core GPU, macOS 27.0.1) | Metal 4.0, device 0: Apple M5 Max (Apple9). `--gpu-index 0`, Forward+. | Offline module is 1.3, version word `0x00010300` (magic `0x07230203`). The runtime path does not compile the kernel. | SPIRV-Tools v2026.4, 2026-09-10. PR check `misc/scripts/godotnext_rq_toolchain_check.sh`: `spirv-val --target-env vulkan1.1` from `PATH`, exit 0, empty output. No `NextgiRqSelftest*.spv` was dumped (280 other engine shaders were), so there is no runtime dump to validate. | Not created. `GODOTNEXT_RESULT {"pass":false,"reason":"NO_RAY_QUERY"}`. Process exit 0. | Not run. The kernel is not submitted. Metal ray query is #48 and #47. |
-| RTX 4080 SUPER machine | pending (#22) | pending (#22) | pending (#22) | pending (#22) | pending (#22) |
+| RTX 4080 SUPER machine | Recorded on 2026-11-13 under #50; see [NextGI on Vulkan/NVIDIA (#50)](#nextgi-on-vulkannvidia-50). | 1.3, version word `0x00010300` on all 18 ray-query modules. | 0 failures. | Created; `GODOTNEXT_RESULT` `pass:true`. | 0 in every G1 scene. |
 | Linux VM | pending (#22) | pending (#22) | pending (#22) | pending (#22) | pending (#22) |
 
 Apple M5 Max MSL line from the PR check script, SPIRV-Cross 1.4.363.0 (timestamp 2026-09-16), `spirv-cross --msl --msl-version 30000 --stage comp`, exit 0. On this machine `PATH` resolves `spirv-val` and `spirv-cross` to `/opt/homebrew/bin`.
@@ -221,3 +221,96 @@ NextGIHit nextgi_trace_opaque(thread const float3& origin, thread const float& t
 The headless doctest saw the same `NO_RAY_QUERY` JSON, because `--headless --test` has no `RenderingDevice`. The windowed Metal run is the device-0 result in the table. Both paths return before `NextgiRqSelftestShaderRD` is constructed.
 
 G0-1 (0 `spirv-val` errors on every dumped ray-query module, on this machine and on the RTX 4080 SUPER machine) is a PQ measurement under #24. The offline module on this machine was clean. The RTX 4080 SUPER dump, driver 621.01, `--gpu-validation`, and the Linux VM row move to #22.
+
+## NextGI on Vulkan/NVIDIA (#50)
+
+Recorded on 2026-11-13 on the RTX 4080 SUPER machine, with:
+
+- NVIDIA driver 621.14, which is newer than the 621.01 in the G0 archive;
+- Vulkan 1.4.357 and `VK_LAYER_KHRONOS_validation` 1.4.363;
+- the Windows editor built with `dev_mode=yes d3d12=yes`;
+- `--gpu-index 0` in Session 1, run through `runners/win_session1.ps1`.
+
+The operator scripts are git-ignored local copies. Every run below goes through `run_remote.sh job`.
+
+### G1 scenes under the validation layers
+
+Each G1 scene runs for 300 frames as a kind `validation` job. That means `--gpu-validation`, `NV_ALLOW_RAYTRACING_VALIDATION=1` and `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1`.
+
+The NextGI scenes run with a temporary root `override.cfg`:
+
+- `nextgi/enabled=true`;
+- `hardware_ray_tracing=0` (Auto);
+- `quality` set to the column's value.
+
+Every NextGI launch printed `tier=HWRT reason=NONE`. The legacy scenes run with NextGI off.
+
+Each cell gives the run's `ERROR:` lines, then its `Validation Error` lines.
+
+The High column comes from the final build. The Medium and Epic columns come from the build just before it. That build lacked only two changes: the relight fallback fill value and the shared variant-define helpers.
+
+| Scene | Medium | High | Epic |
+| --- | --- | --- | --- |
+| `color_box_room/cbr_a` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `color_box_room/cbr_b` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `color_box_room/cbr_offscreen` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `color_box_room/cbr_single_40m` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `concave_courtyard/courtyard` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `moving_light_door/moving_light_door` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `time_of_day/time_of_day` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `nextgi_perf/nextgi_perf` | 0 / 0 | 0 / 0 | 0 / 0 |
+| `legacy/legacy_lightmap` (NextGI off) | 0 / 0 | 0 / 0 | 0 / 0 |
+| `legacy/legacy_sdfgi` (NextGI off) | 0 / 0 | 0 / 0 | 0 / 0 |
+| `legacy/legacy_voxelgi` (NextGI off) | 0 / 0 | 0 / 0 | 0 / 0 |
+
+The first pass found the following, and #50 fixed each one:
+
+- **`nextgi_perf`, Auto (Medium), 23 errors.** NextGI relight's fallback shadow texture is `D32_SFLOAT`, but it had no depth-stencil usage, so Vulkan gave it a colour-aspect view. It is now a depth attachment filled with 0, the reverse-Z far value. Against 0, relight's `GREATER` shadow compare reads as lit.
+- **`nextgi_perf`, High, 10 errors.** Gather set 0 bound the SRC indirect texture twice: as a sampled texture at binding 5, which nothing read, and as the storage image it writes at binding 17. The render graph keeps a texture's first usage in a compute list, so the store ran with the image in `SHADER_READ_ONLY_OPTIMAL`. Binding 5 is removed.
+- **`legacy_voxelgi`, 10 errors.** `GI::process_gi`, upstream code, had its sampler test inverted. It paired the linear sampler with the `R8G8_UINT` VoxelGI buffer, which no driver can filter linearly. The fix is a named hook.
+- **`VK_EXT_device_fault`.** The driver enabled the extension but never queried or enabled the `deviceFault` feature, so a crash-latch report would call `vkGetDeviceFaultInfoEXT` on a device without it. The feature is now queried and enabled. The G0 archive shows the 4080 SUPER reports `deviceFault` and `deviceFaultVendorBinary`. No device loss was forced.
+- **re-spirv noise.** re-spirv, the driver's spec-constant optimizer, cannot parse ray-query modules. It printed `OpTypeRayQueryKHR is not supported yet.` for each one, then kept the original module. The driver now skips it for modules that declare `RayQueryKHR`.
+
+The startup 64-ray self-test passed on every NextGI launch (`tier=HWRT`).
+
+Auto picked Medium on this card. Its benchmark is the whole self-test, about 11 to 125 ms, which includes first-dispatch setup. The rule in `nextgi_auto_quality_from_usec` picks High only at 5 ms or less. That calibration belongs to PQ.
+
+### spirv-val on every ray-query module
+
+The modules come from `GODOTNEXT_SPIRV_DUMP_DIR` runs of `nextgi_perf`, each 30 frames with `shader_compiler/shader_cache/enabled=false`:
+
+- one run each at Medium, High and Epic;
+- one more at High with `debug/reference_mode=1` and `GODOTNEXT_RQ_SELFTEST=1`.
+
+The dumps hold 1541 modules, 390 of them distinct. 18 distinct modules declare `RayQueryKHR`:
+
+- `NextgiGatherShaderRD` v0–v6;
+- `NextgiWrcUpdateShaderRD` v0–v5;
+- `NextgiReferenceShaderRD` v0–v1;
+- `NextgiSrcRelightShaderRD`, `NextgiSelftestShaderRD` and `NextgiRqSelftestShaderRD`.
+
+`spirv-val --target-env vulkan1.1` (SPIRV-Tools v2026.4) reports 0 failures on all 1541 modules. Every ray-query module carries version word `0x00010300`. Medium runs the irradiance field rather than the per-pixel gather, so the gather modules come from the High and Epic runs. The toolchain self-test printed `GODOTNEXT_RESULT {"pass":true,"spirv":"1.3","spirv_word":"0x00010300","pipeline":true,"shader":"NextgiRqSelftestShaderRD"}`.
+
+### Shader baker
+
+Before #50, the shader baker baked none of NextGI's ray-query versions. Its log still read `skipped 0`, because it only counted skips. The baker walks the ShaderRD versions that already exist in the editor process, and NextGI creates its ray-query ShaderRDs only after a NextGI frame on the HWRT tier. An export never renders one.
+
+The baker now also walks `RendererRD::NextGIBakeShaders`. Those are bake-only instances of:
+
+- the gather;
+- the SRC relight, in both radiance formats;
+- the WRC update;
+- the reference tracer.
+
+Each is initialized with its runtime twin's `get_shader_variant_defines()` and compiles nothing locally. The log line now reads `baked N and skipped M ray-query shader version(s)`.
+
+| Preset | Exported on | Errors | Baker line | NextGI files in the pack |
+| --- | --- | --- | --- | --- |
+| Windows Vulkan (baker) | RTX 4080 SUPER machine, NextGI on | 0 | `driver 'vulkan', baked 5 and skipped 0` | 5 `.vulkan.cache` |
+| macOS (baker) | Apple M5 Max, NextGI off | 0 | `driver 'metal', baked 5 and skipped 0` | 5 `.metal.cache` |
+
+On the RTX 4080 SUPER machine, the baked paths for the gather, relight and WRC update match the ones the runtime wrote to the user shader cache during the survey. The reference tracer ran with the cache off, so it left nothing to compare.
+
+A Windows editor has no Metal baker platform, because `METAL_ENABLED` is Apple-only. Exporting macOS (baker) there therefore bakes nothing and prints no baker line.
+
+`godotnext/testbed/captures/` now has a tracked `.gdignore`. Before it, an `all_resources` export imported harness output left in the folder, and the self-test's `timing.csv` files failed to load as translations, which logged 9 errors.

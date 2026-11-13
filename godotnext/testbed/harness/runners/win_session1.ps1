@@ -23,6 +23,8 @@
 #                        "Validation Error" line (default true for kind "validation")
 #   lock_clocks          true: lock the GPU and memory clocks to the fleet.md values for the run
 #                        and reset them afterwards (default true for kind "timing")
+#   env                  extra environment variables for the launch, as {"NAME": "value"};
+#                        "{out}" in a value becomes the absolute output directory
 #
 # Kind "timing" requires the High performance (or Ultimate Performance) power plan. Kind
 # "validation" sets NV_ALLOW_RAYTRACING_VALIDATION=1 and VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1.
@@ -265,6 +267,19 @@ if ($kind -eq 'timing' -and $power.powermode -ne 2) {
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $outDir = (Resolve-Path $outDir).Path
 $userArgs = @($userArgs | ForEach-Object { $_.Replace('{out}', $outDir) })
+$extraEnv = [ordered]@{}
+$envField = Get-Field $job 'env' $null
+if ($null -ne $envField) {
+	if ($envField -isnot [System.Management.Automation.PSCustomObject]) {
+		Fail 2 'env must be an object of "NAME": "value" pairs'
+	}
+	foreach ($property in $envField.PSObject.Properties) {
+		if ($property.Name -notmatch '^[A-Za-z_][A-Za-z0-9_]{0,127}$') {
+			Fail 2 "env name '$($property.Name)' must be letters, digits and _, not starting with a digit"
+		}
+		$extraEnv[$property.Name] = ([string]$property.Value).Replace('{out}', $outDir)
+	}
+}
 $godotArgs = @('--rendering-driver', $driver, '--gpu-index', [string]$device.GpuIndex) + $userArgs
 
 # ---------- per-scene override.cfg (#240)
@@ -309,6 +324,7 @@ $runnerJob = [ordered]@{
 	clock = $clockRecord
 	power = $power
 	override = $overrideRecord
+	env = $extraEnv
 }
 $runnerJobPath = Join-Path $outDir 'runner_job.json'
 Write-Utf8 $runnerJobPath ($runnerJob | ConvertTo-Json -Depth 6)
@@ -336,6 +352,9 @@ $env_lines = @("`$env:GODOTNEXT_HARNESS_JOB = $(Format-PsString $runnerJobPath)"
 if ($kind -eq 'validation') {
 	$env_lines += '$env:NV_ALLOW_RAYTRACING_VALIDATION = ''1'''
 	$env_lines += '$env:VK_KHRONOS_VALIDATION_VALIDATE_SYNC = ''1'''
+}
+foreach ($key in $extraEnv.Keys) {
+	$env_lines += "`$env:$key = $(Format-PsString $extraEnv[$key])"
 }
 $lockLines = ''
 $unlockLines = ''
