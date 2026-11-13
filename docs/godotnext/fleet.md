@@ -220,7 +220,7 @@ NextGIHit nextgi_trace_opaque(thread const float3& origin, thread const float& t
 
 The headless doctest saw the same `NO_RAY_QUERY` JSON, because `--headless --test` has no `RenderingDevice`. The windowed Metal run is the device-0 result in the table. Both paths return before `NextgiRqSelftestShaderRD` is constructed.
 
-G0-1 (0 `spirv-val` errors on every dumped ray-query module, on this machine and on the RTX 4080 SUPER machine) is a PQ measurement under #24. The offline module on this machine was clean. The RTX 4080 SUPER dump, driver 621.01, `--gpu-validation`, and the Linux VM row move to #22.
+G0-1 (0 `spirv-val` errors on every dumped ray-query module, on this machine and on the RTX 4080 SUPER machine) is a PQ measurement under #24. The offline module on this machine was clean. The RTX 4080 SUPER row was recorded under #50, with driver 621.14 and `--gpu-validation` (see [NextGI on Vulkan/NVIDIA (#50)](#nextgi-on-vulkannvidia-50)). The Linux VM row is still pending.
 
 ## NextGI on Vulkan/NVIDIA (#50)
 
@@ -274,6 +274,22 @@ The first pass found the following, and #50 fixed each one:
 The startup 64-ray self-test passed on every NextGI launch (`tier=HWRT`).
 
 Auto picked Medium on this card. Its benchmark is the whole self-test, about 11 to 125 ms, which includes first-dispatch setup. The rule in `nextgi_auto_quality_from_usec` picks High only at 5 ms or less. That calibration belongs to PQ.
+
+### Velocity under TAA and FSR2, and the HWRT fault latch
+
+**Prepass velocity (#37).** NextGI Perf (spline camera) and Moving Light Door (moving instance) ran at High as `validation` jobs, once with `anti_aliasing/quality/use_taa=true` and once with FSR2 (`scaling_3d/mode=2`, scale 0.77). All four runs had 0 `ERROR:` and 0 `Validation Error` lines. The velocity values themselves are covered by #37's doctests.
+
+**Fault latch (#36).** The seven steps of `tests/tier/run_hwrt_safety.sh` ran as runner jobs on Vulkan, with a private user directory:
+
+1. Auto selects HWRT and logs the self-test.
+2. Off reports `SETTING_OFF` and runs no self-test.
+3. `GODOTNEXT_NEXTGI_SELFTEST_CORRUPT=1` gives `SELFTEST_FAILED` without writing the latch.
+4. `GODOTNEXT_NEXTGI_SIMULATE_DEVICE_LOST=1` crashes with the simulated-loss message and writes the latch.
+5. The next launch reports `HWRT_FAULTED` and runs no self-test.
+6. Force runs HWRT and keeps the file.
+7. A changed `driver_key` deletes the latch and selects HWRT again.
+
+Every step passed, and every launch except the crash had 0 errors. The simulated loss calls NextGI's latch callback directly, so the `VK_EXT_device_fault` report only runs on a real device loss, which was not forced.
 
 ### spirv-val on every ray-query module
 
