@@ -80,7 +80,7 @@ On the RTX 4080 SUPER machine the same scenes run under Vulkan, which is
 deferred to #49:
 
 ```
-godot --path godotnext/testbed --rendering-driver vulkan --gpu-index 1 --gpu-validation \
+godot --path godotnext/testbed --rendering-driver vulkan --gpu-index 0 --gpu-validation \
   res://tests/reference/reference.tscn -- --fixture=furnace --spp=131072 --seed=1
 ```
 

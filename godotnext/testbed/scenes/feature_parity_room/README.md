@@ -68,7 +68,7 @@ content, so captures are deterministic.
 On the RTX 4080 SUPER machine (Vulkan), one camera:
 
 ```
-<godot> --path godotnext/testbed --rendering-driver vulkan --gpu-index 1 --gpu-validation --resolution 1920x1080 --write-movie /tmp/parity/cam0.png --fixed-fps 60 --quit-after 130 res://scenes/feature_parity_room/feature_parity_room.tscn -- --camera=cam_0
+<godot> --path godotnext/testbed --rendering-driver vulkan --gpu-index 0 --gpu-validation --resolution 1920x1080 --write-movie /tmp/parity/cam0.png --fixed-fps 60 --quit-after 130 res://scenes/feature_parity_room/feature_parity_room.tscn -- --camera=cam_0
 ```
 
 Repeat per camera and at `--resolution 2560x1440`. On the Apple M5 Max

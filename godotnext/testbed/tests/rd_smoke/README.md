@@ -81,7 +81,7 @@ once it lands, with `NV_ALLOW_RAYTRACING_VALIDATION=1` and
 
 ```bat
 godot.windows.editor.x86_64.console.exe --path godotnext/testbed ^
-  --rendering-driver vulkan --gpu-index 1 --gpu-validation --gpu-abort ^
+  --rendering-driver vulkan --gpu-index 0 --gpu-validation --gpu-abort ^
   res://tests/rd_smoke/rd_smoke.tscn
 ```
 
