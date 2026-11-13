@@ -16,12 +16,13 @@ extends Node
 ## probes shade their SDF hits from it. Each room is sampled MEASURE_SAMPLES times and averaged.
 ## With --expected-tier=HWRT it prints the reference ("LITE_LEAK_REFERENCE ratio=R"). With
 ## --expected-tier=SWRT and --hwrt-ratio=R it asserts the software tier's dark/lit ratio is at
-## most max(LEAK_FACTOR x R, LEAK_FLOOR), and that the lit floor is lit (MIN_LIT_LUMA). On the
-## M5 Max both tiers measure about 0.0002. Light that crosses the wall fails it: with the software
-## relight's SDF shadow rays never occluded the ratio was 0.053. The software Lite field without
-## the WRC moments' visibility and the push-out (camera.w = 0) measured 0.008, under the 0.05
-## floor, so this check does not cover that path. run_lite_leak_check.sh runs the hardware pass
-## first. Prints one "GODOTNEXT_RESULT <json>" line.
+## most LEAK_FACTOR x R, and that the lit floor is lit (MIN_LIT_LUMA). On the
+## M5 Max both tiers measure about 0.0002, so the bound is about 0.002. Light that crosses the
+## wall fails it: with the software relight's SDF shadow rays never occluded the ratio was 0.053.
+## The software Lite field without the WRC moments' visibility and the push-out (camera.w = 0)
+## measured 0.008, above that bound. run_lite_leak_check.sh runs the hardware pass
+## first and passes its ratio; on a device without hardware ray query it passes the ratio recorded
+## on the M5 Max instead. Prints one "GODOTNEXT_RESULT <json>" line.
 
 const VIEW := Vector2i(960, 540)
 const WARMUP_FRAMES := 240
@@ -30,8 +31,7 @@ const MAX_FRAMES := 5000
 const MEASURE_FRAMES := 120
 const LIT_FRAMES := 600
 const MEASURE_SAMPLES := 8
-const LEAK_FACTOR := 2.0
-const LEAK_FLOOR := 0.05
+const LEAK_FACTOR := 10.0
 const MIN_LIT_LUMA := 0.002
 const WALL_THICKNESS := 0.4
 ## The measured floor patch's distance from the shared wall's face.
@@ -64,8 +64,8 @@ func _ready() -> void:
 	if expected_tier != "SWRT" and expected_tier != "HWRT":
 		_finish(["--expected-tier must be SWRT or HWRT"])
 		return
-	if expected_tier == "SWRT" and hwrt_ratio < 0.0:
-		_finish(["--hwrt-ratio=R (the hardware tier's dark/lit ratio) is required with --expected-tier=SWRT"])
+	if expected_tier == "SWRT" and hwrt_ratio <= 0.0:
+		_finish(["--hwrt-ratio=R (the hardware tier's dark/lit ratio, above 0) is required with --expected-tier=SWRT"])
 		return
 	viewport = SubViewport.new()
 	viewport.size = VIEW
@@ -198,12 +198,12 @@ func _checks() -> PackedStringArray:
 		if lit < MIN_LIT_LUMA:
 			result.append("the lit floor's field is dark (%.6f)" % lit)
 		return result
-	var bound := maxf(LEAK_FACTOR * hwrt_ratio, LEAK_FLOOR)
+	var bound := LEAK_FACTOR * hwrt_ratio
 	print("LITE_LEAK tier=%s ratio=%.6f lit=%.6f dark=%.6f hwrt_ratio=%.6f bound=%.6f frames=%d" % [tier, ratio, lit, dark, hwrt_ratio, bound, frames])
 	if lit < MIN_LIT_LUMA:
 		result.append("the lit floor's field is dark (%.6f)" % lit)
 	if ratio > bound:
-		result.append("the dark room's field is %.4f of the lit room's, above %.4f (max(%.1f x the hardware tier's %.4f, %.2f))" % [ratio, bound, LEAK_FACTOR, hwrt_ratio, LEAK_FLOOR])
+		result.append("the dark room's field is %.4f of the lit room's, above %.4f (%.1f x the hardware tier's %.4f)" % [ratio, bound, LEAK_FACTOR, hwrt_ratio])
 	return result
 
 
