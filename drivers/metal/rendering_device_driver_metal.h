@@ -543,6 +543,8 @@ public:
 	// ----- ACCELERATION STRUCTURE -----
 
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) override final;
+	// GodotNext: rq_substrate (#22). The formats blas_create() maps to an MTL vertex format.
+	virtual bool acceleration_structure_vertex_format_is_supported(DataFormat p_format) override final { return pixel_formats->isVertexFormatSupported(p_format); }
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) override final;
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
 	virtual uint64_t acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) override final;

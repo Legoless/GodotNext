@@ -38,6 +38,13 @@
 			<description>
 			</description>
 		</method>
+		<method name="acceleration_structure_is_vertex_format_supported" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="format" type="int" enum="RenderingDevice.DataFormat" />
+			<description>
+				Returns [code]true[/code] if [method blas_create] accepts [param format] as a vertex format on this device, which rejects geometry in any other format. Vulkan reports the formats with [code]VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR[/code], and Metal the formats it maps to a Metal vertex format. Always [code]false[/code] on D3D12 until its acceleration-structure support lands.
+			</description>
+		</method>
 		<method name="barrier" deprecated="Barriers are automatically inserted by RenderingDevice.">
 			<return type="void" />
 			<param index="0" name="from" type="int" enum="RenderingDevice.BarrierMask" is_bitfield="true" default="32767" />
@@ -733,6 +740,12 @@
 			<return type="String" />
 			<description>
 				Returns a string with a performance report from the past frame. Updates every frame.
+			</description>
+		</method>
+		<method name="get_ray_query_unsupported_reason" qualifiers="const">
+			<return type="int" enum="RenderingDevice.RayQueryUnsupportedReason" />
+			<description>
+				Returns why the device has no ray query, or [constant RAY_QUERY_SUPPORTED] when [constant SUPPORTS_RAY_QUERY] is set.
 			</description>
 		</method>
 		<method name="get_tracked_object_name" qualifiers="const">
@@ -2909,10 +2922,10 @@
 		<constant name="SUPPORTS_RAY_QUERY" value="11" enum="Features">
 			Support for ray query extension.
 
-			[b]Note:[/b] Vulkan reports this when the device exposes ray query. The Metal driver reports it on Apple9 and later once an acceleration structure can be built.
+			[b]Note:[/b] Vulkan reports this when the device exposes acceleration structures, ray query and buffer device addresses. The Metal driver reports it on Apple9 and later once an acceleration structure can be built. D3D12 reports [code]false[/code] until DXR support lands.
 		</constant>
 		<constant name="SUPPORTS_RAY_QUERY_HARDWARE" value="16" enum="Features">
-			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later.
+			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later. The Vulkan driver sets it for devices in its RT-core allowlist: NVIDIA Turing and later RTX parts, AMD RDNA2 and later, and Intel Arc A-series, Battlemage and Lunar Lake. Other devices with ray query, such as software implementations, leave it unset. D3D12 reports [code]false[/code] until DXR support lands.
 		</constant>
 		<constant name="SUPPORTS_ASYNC_COMPUTE" value="17" enum="Features">
 			The device can create a second compute queue. The Metal driver sets this only in barrier sync mode, which has real semaphores.
@@ -2933,6 +2946,21 @@
 		</constant>
 		<constant name="SUPPORTS_RASTERIZATION_RATE_MAP" value="14" enum="Features">
 			Support for rasterization rate maps. The current implementation targets Metal on Apple platforms. This allows for foveated rendering, which is used by the visionOS XR module.
+		</constant>
+		<constant name="RAY_QUERY_SUPPORTED" value="0" enum="RayQueryUnsupportedReason">
+			The device supports ray query.
+		</constant>
+		<constant name="RAY_QUERY_REASON_NO_RAY_QUERY" value="1" enum="RayQueryUnsupportedReason">
+			The device or driver has no ray query: on Vulkan, acceleration structures, the ray query feature or buffer device addresses are missing.
+		</constant>
+		<constant name="RAY_QUERY_REASON_D3D12_NO_DXR" value="2" enum="RayQueryUnsupportedReason">
+			The D3D12 driver has no DXR support yet.
+		</constant>
+		<constant name="RAY_QUERY_REASON_METAL_SYNC_MODE" value="3" enum="RayQueryUnsupportedReason">
+			The Metal driver runs in a synchronization mode without the barriers ray query needs.
+		</constant>
+		<constant name="RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS" value="4" enum="RayQueryUnsupportedReason">
+			The Metal driver runs without the argument buffers ray query needs.
 		</constant>
 		<constant name="LIMIT_MAX_BOUND_UNIFORM_SETS" value="0" enum="Limit">
 			Maximum number of uniform sets that can be bound at a given time.
@@ -3054,7 +3082,19 @@
 			[b]Note:[/b] The returned value is multiplied by a factor of [code]1000000[/code] to preserve 6 digits of precision. It must be divided by [code]1000000.0[/code] to convert the value to a floating point number.
 		</constant>
 		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES" value="49" enum="Limit">
-			Maximum number of instances in one top-level acceleration structure.
+			Maximum number of instances in one top-level acceleration structure. [code]0[/code] on a device without ray query and on D3D12.
+		</constant>
+		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES" value="50" enum="Limit">
+			Maximum number of geometries in one bottom-level acceleration structure. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+		</constant>
+		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES" value="51" enum="Limit">
+			Maximum number of triangles in one bottom-level acceleration structure. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+		</constant>
+		<constant name="LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES" value="52" enum="Limit">
+			Maximum number of acceleration structures one shader stage can access. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+		</constant>
+		<constant name="LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT" value="53" enum="Limit">
+			Required alignment, in bytes, of an acceleration-structure build's scratch memory. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
 		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.

@@ -43,6 +43,7 @@ TEST_FORCE_LINK(test_nextgi)
 #include "core/string/translation_server.h"
 #include "editor/editor_node.h"
 #include "editor/scene/3d/nextgi_editor_plugin.h"
+#include "servers/rendering/rendering_context_driver.h"
 #include "tests/test_utils.h"
 
 #ifdef RD_ENABLED
@@ -2730,6 +2731,97 @@ TEST_CASE("[NextGI][Denoise] The five denoise views map and label") {
 	CHECK_EQ(int(NextGI::DEBUG_VIEW_DENOISE_DENOISED) - int(NextGI::DEBUG_VIEW_DENOISE_RAW), 4);
 	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_FALLBACK_REASONS), NextGI::DEBUG_VIEW_FALLBACK_REASONS);
 	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_DISABLED), NextGI::DEBUG_VIEW_MAX);
+}
+
+// GodotNext: rq_substrate (#22). ID checks only: mid-range NVIDIA, AMD and Intel ship enabled,
+// unvalidated (plan §23.2).
+TEST_CASE("[NextGI][RT] Ray query hardware allowlist") {
+	const uint32_t nvidia = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
+	const uint32_t amd = RenderingContextDriver::Vendor::VENDOR_AMD;
+	const uint32_t intel = RenderingContextDriver::Vendor::VENDOR_INTEL;
+	// The test fleet: the RTX 4080 SUPER (docs/godotnext/fleet/vulkaninfo/g0) and the RTX 5090.
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2702));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2B85));
+	// RT parts: RTX 20 (2080 Ti, 2060), RTX 3060, Navi 21 (RX 6800/6900), Arc DG2 (A770, A380),
+	// Battlemage (B580), RDNA3 (RX 7900), a Rembrandt APU.
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1E04));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1F08));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2503));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x73BF));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x744C));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x1681));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x56A0));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x56A5));
+	CHECK(RenderingContextDriver::is_ray_query_hardware_device(intel, 0xE20B));
+	// No RT units: GTX 16 (1660 Ti on TU116, and the 1660 SUPER and 1650 inside the TU106 block),
+	// MX570, CMP 70HX, A100, Navi 10 (RX 5700), Iris Xe, UHD 770 (Alder and Raptor Lake).
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2182));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1F09));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1F0A));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x25A6));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x248A));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x20B1));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x731F));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x9A49));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x4680));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(intel, 0xA780));
+	// lavapipe reports Mesa's vendor ID 0x10005, and a vendor's row never matches another vendor.
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(0x10005, 0x0000));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x2702));
+	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(RenderingContextDriver::Vendor::VENDOR_APPLE, 0x2702));
+}
+
+// GodotNext: rq_substrate (#22). A Vulkan device without ray query, with mocked capabilities.
+TEST_CASE("[NextGI][RT] Vulkan ray-query capabilities and acceleration-structure limits") {
+	const uint32_t nvidia = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
+	// Every input missing in turn: no ray query, not hardware, NO_RAY_QUERY.
+	for (int missing = 0; missing < 3; missing++) {
+		const RenderingDeviceDriver::VulkanRayQueryCaps caps = RenderingDeviceDriver::vulkan_ray_query_caps(missing != 0, missing != 1, missing != 2, nvidia, 0x2702);
+		CHECK_FALSE(caps.ray_query);
+		CHECK_FALSE(caps.hardware);
+		CHECK(caps.reason == RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
+	}
+	// All inputs: ray query; hardware only for an allowlisted device (lavapipe is software).
+	const RenderingDeviceDriver::VulkanRayQueryCaps rtx = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, nvidia, 0x2702);
+	CHECK(rtx.ray_query);
+	CHECK(rtx.hardware);
+	CHECK(rtx.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+	const RenderingDeviceDriver::VulkanRayQueryCaps lavapipe = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, 0x10005, 0x0000);
+	CHECK(lavapipe.ray_query);
+	CHECK_FALSE(lavapipe.hardware);
+	CHECK(lavapipe.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+
+	// The five AS limits: 0 without ray query (the default limits), and passed through otherwise.
+	const RenderingDeviceDriver::Limit as_limits[] = {
+		RenderingDeviceDriver::LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES,
+		RenderingDeviceDriver::LIMIT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES,
+		RenderingDeviceDriver::LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES,
+		RenderingDeviceDriver::LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES,
+		RenderingDeviceDriver::LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT,
+	};
+	for (const RenderingDeviceDriver::Limit limit : as_limits) {
+		uint64_t value = 1;
+		CHECK(RenderingDeviceDriver::acceleration_structure_limit_get(limit, RenderingDeviceDriver::AccelerationStructureLimits(), value));
+		CHECK(value == 0);
+	}
+	// The RTX 4080 SUPER's VkPhysicalDeviceAccelerationStructurePropertiesKHR (vulkaninfo, g0).
+	RenderingDeviceDriver::AccelerationStructureLimits rtx_limits;
+	rtx_limits.max_instances = 16777215;
+	rtx_limits.max_geometries = 16777215;
+	rtx_limits.max_primitives = 536870911;
+	rtx_limits.max_per_stage = 1048576;
+	rtx_limits.min_scratch_offset_alignment = 128;
+	const uint64_t expected[] = { 16777215, 16777215, 536870911, 1048576, 128 };
+	for (int i = 0; i < 5; i++) {
+		uint64_t value = 0;
+		CHECK(RenderingDeviceDriver::acceleration_structure_limit_get(as_limits[i], rtx_limits, value));
+		CHECK(value == expected[i]);
+	}
+	CHECK(rtx_limits.max_instances >= 100000);
+	// Any other limit is not an AS limit.
+	uint64_t untouched = 7;
+	CHECK_FALSE(RenderingDeviceDriver::acceleration_structure_limit_get(RenderingDeviceDriver::LIMIT_MAX_TEXTURE_SIZE_2D, rtx_limits, untouched));
+	CHECK(untouched == 7);
 }
 
 TEST_CASE("[NextGI][RT] The GPU instance encoder compiles for both API layouts") {

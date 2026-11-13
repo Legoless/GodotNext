@@ -387,6 +387,8 @@ public:
 	 * DataFormat as used as a vertex attribute format.
 	 */
 	MTL::VertexFormat getMTLVertexFormat(DataFormat p_format);
+	// GodotNext: rq_substrate (#22). Whether getMTLVertexFormat() maps p_format, without logging.
+	bool isVertexFormatSupported(DataFormat p_format) { return p_format < RDC::DATA_FORMAT_MAX && getDataFormatDesc(p_format).vertexIsSupportedOrSubstitutable(); }
 
 #pragma mark Construction
 

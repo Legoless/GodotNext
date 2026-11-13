@@ -30,6 +30,8 @@
 
 #include "rendering_device_driver.h"
 
+#include "servers/rendering/rendering_context_driver.h"
+
 /**************/
 /**** MISC ****/
 /**************/
@@ -92,6 +94,41 @@ RenderingDeviceDriver::MetalRayQueryCaps RenderingDeviceDriver::metal_ray_query_
 	caps.hardware = p_apple_family >= METAL_RAY_QUERY_HARDWARE_FAMILY;
 	caps.reason = RAY_QUERY_SUPPORTED;
 	return caps;
+}
+
+// GodotNext: rq_substrate (#22)
+RenderingDeviceDriver::VulkanRayQueryCaps RenderingDeviceDriver::vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id) {
+	VulkanRayQueryCaps caps;
+	if (!p_acceleration_structure || !p_ray_query || !p_buffer_device_address) {
+		caps.reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+		return caps;
+	}
+	caps.ray_query = true;
+	caps.hardware = RenderingContextDriver::is_ray_query_hardware_device(p_vendor_id, p_device_id);
+	caps.reason = RAY_QUERY_SUPPORTED;
+	return caps;
+}
+
+bool RenderingDeviceDriver::acceleration_structure_limit_get(Limit p_limit, const AccelerationStructureLimits &p_limits, uint64_t &r_value) {
+	switch (p_limit) {
+		case LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES:
+			r_value = p_limits.max_instances;
+			return true;
+		case LIMIT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES:
+			r_value = p_limits.max_geometries;
+			return true;
+		case LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES:
+			r_value = p_limits.max_primitives;
+			return true;
+		case LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES:
+			r_value = p_limits.max_per_stage;
+			return true;
+		case LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT:
+			r_value = p_limits.min_scratch_offset_alignment;
+			return true;
+		default:
+			return false;
+	}
 }
 
 /******************/

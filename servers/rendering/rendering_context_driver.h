@@ -96,6 +96,13 @@ public:
 		uint32_t compute_units = 0;
 	};
 
+	// GodotNext: rq_substrate (#22). True when the vendor and device IDs fall in a row of the
+	// RT-core allowlist (rendering_context_driver.cpp): NVIDIA Turing and later RTX parts, AMD
+	// RDNA2 and later, Intel Xe-HPG (Arc A-series) and Xe2 (Battlemage, Lunar Lake). Unknown IDs
+	// are false, so new devices fall back until a row covers them. Drivers report it as
+	// SUPPORTS_RAY_QUERY_HARDWARE; the device-type check lives in the tier rule.
+	static bool is_ray_query_hardware_device(uint32_t p_vendor_id, uint32_t p_device_id);
+
 	virtual ~RenderingContextDriver();
 	virtual Error initialize() = 0;
 	virtual const Device &device_get(uint32_t p_device_index) const = 0;

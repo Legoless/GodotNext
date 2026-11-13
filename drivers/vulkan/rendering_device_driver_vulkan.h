@@ -164,6 +164,9 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool vulkan_memory_model_device_scope_support = false;
 	AccelerationStructureCapabilities acceleration_structure_capabilities;
 	bool ray_query_support = false;
+	// GodotNext: rq_substrate (#22). Set once the device's features and properties are known.
+	VulkanRayQueryCaps ray_query_caps;
+	AccelerationStructureLimits acceleration_structure_limits;
 	RaytracingCapabilities raytracing_capabilities;
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
@@ -722,6 +725,7 @@ public:
 	};
 
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) override final;
+	virtual bool acceleration_structure_vertex_format_is_supported(DataFormat p_format) override final;
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) override final;
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
 	virtual uint64_t acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) override final;
@@ -804,6 +808,7 @@ public:
 	virtual uint64_t limit_get(Limit p_limit) override final;
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override final;
 	virtual bool has_feature(Features p_feature) override final;
+	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const override final { return ray_query_caps.reason; }
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;

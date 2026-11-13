@@ -763,6 +763,8 @@ public:
 	};
 
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) = 0;
+	// GodotNext: rq_substrate (#22). Whether blas_create() accepts p_format as a vertex format.
+	virtual bool acceleration_structure_vertex_format_is_supported(DataFormat p_format) { return false; }
 
 	struct AccelerationStructureInstance {
 		Transform3D transform;
@@ -1024,7 +1026,32 @@ public:
 	static constexpr uint32_t METAL_MAX_ACCELERATION_STRUCTURE_INSTANCES = 1u << 24;
 
 	static MetalRayQueryCaps metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers);
-	// NO_RAY_QUERY until a driver overrides it. Metal does; Vulkan and D3D12 stay on this until #22.
+
+	// GodotNext: rq_substrate (#22)
+	// Pure Vulkan ray-query capability check, always compiled so the doctests run without a GPU.
+	// Ray query needs acceleration structures, the rayQuery feature and buffer device addresses;
+	// hardware also needs an RT-core allowlist row for the device
+	// (RenderingContextDriver::is_ray_query_hardware_device).
+	struct VulkanRayQueryCaps {
+		bool ray_query = false;
+		bool hardware = false;
+		RayQueryUnsupportedReason reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+	};
+	static VulkanRayQueryCaps vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id);
+
+	// The acceleration-structure limits a driver reports through limit_get(). Every field is 0 on
+	// a device without ray query and wherever the API does not report the limit.
+	struct AccelerationStructureLimits {
+		uint64_t max_instances = 0;
+		uint64_t max_geometries = 0;
+		uint64_t max_primitives = 0;
+		uint64_t max_per_stage = 0;
+		uint64_t min_scratch_offset_alignment = 0;
+	};
+	// Writes r_value and returns true when p_limit is one of the five AS limits.
+	static bool acceleration_structure_limit_get(Limit p_limit, const AccelerationStructureLimits &p_limits, uint64_t &r_value);
+
+	// NO_RAY_QUERY until a driver overrides it. Metal, Vulkan and D3D12 do.
 	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const { return RAY_QUERY_REASON_NO_RAY_QUERY; }
 
 	virtual bool has_feature(Features p_feature) = 0;

@@ -1298,6 +1298,19 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			print_verbose("- Vulkan Acceleration Structure not supported");
 		}
 
+		// GodotNext: rq_substrate (#22). Ray query also needs buffer device addresses; the hardware
+		// flag needs an RT-core allowlist row. The AS limits stay 0 without ray query.
+		ray_query_caps = vulkan_ray_query_caps(acceleration_structure_capabilities.acceleration_structure_support, ray_query_support, buffer_device_address_support, physical_device_properties.vendorID, physical_device_properties.deviceID);
+		acceleration_structure_limits = AccelerationStructureLimits();
+		if (ray_query_caps.ray_query) {
+			acceleration_structure_limits.max_instances = acceleration_structure_properties.maxInstanceCount;
+			acceleration_structure_limits.max_geometries = acceleration_structure_properties.maxGeometryCount;
+			acceleration_structure_limits.max_primitives = acceleration_structure_properties.maxPrimitiveCount;
+			acceleration_structure_limits.max_per_stage = acceleration_structure_properties.maxPerStageDescriptorAccelerationStructures;
+			acceleration_structure_limits.min_scratch_offset_alignment = acceleration_structure_properties.minAccelerationStructureScratchOffsetAlignment;
+		}
+		print_verbose(vformat("- Vulkan ray query %s, hardware %s (vendor 0x%04X device 0x%04X)", ray_query_caps.ray_query ? "supported" : "not supported", ray_query_caps.hardware ? "allowlisted" : "not allowlisted", physical_device_properties.vendorID, physical_device_properties.deviceID));
+
 		if (raytracing_capabilities.raytracing_pipeline_support) {
 			raytracing_capabilities.shader_group_handle_size = raytracing_properties.shaderGroupHandleSize;
 			raytracing_capabilities.shader_group_handle_alignment = raytracing_properties.shaderGroupHandleAlignment;
@@ -6369,6 +6382,19 @@ static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE, 
 static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT, VK_GEOMETRY_OPAQUE_BIT_KHR));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT, VK_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT_KHR));
 
+// GodotNext: rq_substrate (#22)
+bool RenderingDeviceDriverVulkan::acceleration_structure_vertex_format_is_supported(DataFormat p_format) {
+	if (!acceleration_structure_capabilities.acceleration_structure_support || p_format >= DATA_FORMAT_MAX) {
+		return false;
+	}
+	if (p_format >= DATA_FORMAT_ASTC_4x4_SFLOAT_BLOCK && p_format <= DATA_FORMAT_ASTC_12x12_SFLOAT_BLOCK && !enabled_device_extension_names.has(VK_EXT_TEXTURE_COMPRESSION_ASTC_HDR_EXTENSION_NAME)) {
+		return false; // Extension formats must not reach vkGetPhysicalDeviceFormatProperties.
+	}
+	VkFormatProperties properties = {};
+	vkGetPhysicalDeviceFormatProperties(physical_device, RD_TO_VK_FORMAT[p_format], &properties);
+	return (properties.bufferFeatures & VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR) != 0;
+}
+
 RDD::AccelerationStructureID RenderingDeviceDriverVulkan::blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) {
 #if VULKAN_RAYTRACING_ENABLED
 	AccelerationStructureInfo *accel_info = VersatileResource::allocate<AccelerationStructureInfo>(resources_allocator);
@@ -7429,6 +7455,11 @@ uint64_t RenderingDeviceDriverVulkan::get_lazily_memory_used() {
 uint64_t RenderingDeviceDriverVulkan::limit_get(Limit p_limit) {
 	const VkPhysicalDeviceLimits &limits = physical_device_properties.limits;
 	uint64_t safe_unbounded = ((uint64_t)1 << 30);
+	// GodotNext: rq_substrate (#22)
+	uint64_t acceleration_structure_value = 0;
+	if (acceleration_structure_limit_get(p_limit, acceleration_structure_limits, acceleration_structure_value)) {
+		return acceleration_structure_value;
+	}
 	switch (p_limit) {
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return limits.maxBoundDescriptorSets;
@@ -7568,7 +7599,10 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 		case SUPPORTS_POINT_SIZE:
 			return true;
 		case SUPPORTS_RAY_QUERY:
-			return acceleration_structure_capabilities.acceleration_structure_support && ray_query_support;
+			// GodotNext: rq_substrate (#22). Also requires buffer device addresses.
+			return ray_query_caps.ray_query;
+		case SUPPORTS_RAY_QUERY_HARDWARE:
+			return ray_query_caps.hardware;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return acceleration_structure_capabilities.acceleration_structure_support && raytracing_capabilities.raytracing_pipeline_support;
 		case SUPPORTS_HDR_OUTPUT:

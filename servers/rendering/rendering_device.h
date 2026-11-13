@@ -1058,6 +1058,9 @@ public:
 	const RDD::Capabilities &get_device_capabilities() const { return driver->get_capabilities(); }
 
 	bool has_feature(const Features p_feature) const;
+	// GodotNext: rq_substrate (#22)
+	bool acceleration_structure_is_vertex_format_supported(DataFormat p_format) const;
+	RayQueryUnsupportedReason get_ray_query_unsupported_reason() const;
 	// GodotNext: rd_feature_mock
 	// Unit tests mock the device capabilities of a RenderingDevice that has no driver: has_feature()
 	// then reports bit (1 << feature) of p_supported_features. Fails on a device with a driver.
@@ -2228,6 +2231,7 @@ VARIANT_ENUM_CAST(RenderingDevice::PipelineSpecializationConstantType)
 VARIANT_ENUM_CAST(RenderingDevice::Limit)
 VARIANT_ENUM_CAST(RenderingDevice::MemoryType)
 VARIANT_ENUM_CAST(RenderingDevice::Features)
+VARIANT_ENUM_CAST(RenderingDevice::RayQueryUnsupportedReason)
 // GodotNext: async_compute (#174)
 VARIANT_ENUM_CAST(RenderingDevice::ComputeQueue)
 VARIANT_ENUM_CAST(RenderingDevice::BreadcrumbMarker)

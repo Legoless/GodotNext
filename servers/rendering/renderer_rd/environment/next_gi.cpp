@@ -219,10 +219,11 @@ void NextGI::collect_device_inputs(const RenderingDevice *p_device, const String
 	r_inputs.ray_query = p_device != nullptr && p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY);
 	r_inputs.cpu_device = p_device_type == RenderingDeviceEnums::DEVICE_TYPE_CPU;
 
-	// Metal reports the helper's reason and the hardware flag. Other drivers keep the interim
-	// mapping until #22.
+	// Every driver reports its reason and the hardware flag: Metal from its capability helper,
+	// Vulkan from the RT-core allowlist and D3D12 as D3D12_NO_DXR (#22). Without a driver (the
+	// mocked devices of the doctests) the API name decides, as before.
 	RenderingDeviceDriver *driver = p_device != nullptr ? p_device->get_device_driver() : nullptr;
-	if (driver != nullptr && p_api_name == "Metal") {
+	if (driver != nullptr) {
 		r_inputs.ray_query_hw = p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY_HARDWARE);
 		r_inputs.driver_reason = _nextgi_reason_from_driver(driver->get_ray_query_unsupported_reason());
 		if (r_inputs.ray_query) {

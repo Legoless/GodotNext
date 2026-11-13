@@ -6032,6 +6032,12 @@ uint64_t RenderingDeviceDriverD3D12::get_lazily_memory_used() {
 
 uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 	uint64_t safe_unbounded = ((uint64_t)1 << 30);
+	// GodotNext: rq_substrate (#22). No acceleration structures on D3D12 until DXR (#118): the AS
+	// limits are 0 rather than the default's 1 << 30.
+	uint64_t acceleration_structure_value = 0;
+	if (acceleration_structure_limit_get(p_limit, AccelerationStructureLimits(), acceleration_structure_value)) {
+		return acceleration_structure_value;
+	}
 	switch (p_limit) {
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return safe_unbounded;

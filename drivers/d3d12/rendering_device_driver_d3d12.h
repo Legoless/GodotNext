@@ -949,6 +949,8 @@ public:
 	virtual uint64_t limit_get(Limit p_limit) override final;
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override final;
 	virtual bool has_feature(Features p_feature) override final;
+	// GodotNext: rq_substrate (#22). No DXR yet (#118).
+	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const override final { return RAY_QUERY_REASON_D3D12_NO_DXR; }
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;

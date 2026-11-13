@@ -2814,9 +2814,22 @@ uint64_t RenderingDeviceDriverMetal::limit_get(Limit p_limit) {
 			return (uint64_t)((1.0 / limits.temporalScalerInputContentMinScale) * 1000'000);
 		case LIMIT_MAX_SHADER_VARYINGS:
 			return limits.maxShaderVaryings;
-		// GodotNext: metal_acceleration_structure
+		// GodotNext: metal_acceleration_structure, rq_substrate (#22). Metal reports the instance
+		// cap tlas_create() enforces; its API has no geometry, primitive, per-stage or scratch
+		// alignment limit to report, so those are 0.
 		case LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES:
-			return has_feature(SUPPORTS_RAY_QUERY) ? METAL_MAX_ACCELERATION_STRUCTURE_INSTANCES : 0;
+		case LIMIT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES:
+		case LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES:
+		case LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES:
+		case LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT: {
+			AccelerationStructureLimits acceleration_structure_limits;
+			if (has_feature(SUPPORTS_RAY_QUERY)) {
+				acceleration_structure_limits.max_instances = METAL_MAX_ACCELERATION_STRUCTURE_INSTANCES;
+			}
+			uint64_t value = 0;
+			acceleration_structure_limit_get(p_limit, acceleration_structure_limits, value);
+			return value;
+		}
 		default: {
 #ifdef DEV_ENABLED
 			WARN_PRINT("Returning maximum value for unknown limit " + itos(p_limit) + ".");

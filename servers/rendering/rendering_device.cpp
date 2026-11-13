@@ -397,6 +397,8 @@ RID RenderingDevice::blas_create(Span<AccelerationStructureGeometry> p_geometrie
 
 		ERR_FAIL_COND_V_MSG((rd_geometry.vertex_offset + rd_geometry.vertex_count * rd_geometry.vertex_stride) > vertex_buffer->size, RID(), "The specified vertex offset and count are outside the range of the vertex buffer.");
 		ERR_FAIL_COND_V_MSG(rd_geometry.vertex_format >= DataFormat::DATA_FORMAT_MAX, RID(), "An invalid vertex format was specified.");
+		// GodotNext: rq_substrate (#22)
+		ERR_FAIL_COND_V_MSG(!driver->acceleration_structure_vertex_format_is_supported(rd_geometry.vertex_format), RID(), vformat("The vertex format of geometry %d is not supported for acceleration structures on this device (see acceleration_structure_is_vertex_format_supported()).", i));
 
 		rdd_geometry.vertex_buffer = vertex_buffer->driver_id;
 		rdd_geometry.vertex_offset = rd_geometry.vertex_offset;
@@ -9952,6 +9954,16 @@ RenderingDevice *RenderingDevice::create_local_device() {
 	return rd;
 }
 
+// GodotNext: rq_substrate (#22)
+bool RenderingDevice::acceleration_structure_is_vertex_format_supported(DataFormat p_format) const {
+	ERR_FAIL_INDEX_V(p_format, DATA_FORMAT_MAX, false);
+	return driver->acceleration_structure_vertex_format_is_supported(p_format);
+}
+
+RenderingDevice::RayQueryUnsupportedReason RenderingDevice::get_ray_query_unsupported_reason() const {
+	return driver->get_ray_query_unsupported_reason();
+}
+
 bool RenderingDevice::has_feature(const Features p_feature) const {
 	// GodotNext: rd_feature_mock
 	if (unlikely(feature_mock_enabled)) {
@@ -10068,6 +10080,9 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("raytracing_pipeline_is_valid", "raytracing_pipeline"), &RenderingDevice::raytracing_pipeline_is_valid);
 
 	ClassDB::bind_method(D_METHOD("blas_create", "geometries", "flags"), &RenderingDevice::_blas_create);
+	// GodotNext: rq_substrate (#22)
+	ClassDB::bind_method(D_METHOD("acceleration_structure_is_vertex_format_supported", "format"), &RenderingDevice::acceleration_structure_is_vertex_format_supported);
+	ClassDB::bind_method(D_METHOD("get_ray_query_unsupported_reason"), &RenderingDevice::get_ray_query_unsupported_reason);
 	ClassDB::bind_method(D_METHOD("tlas_create", "max_instance_count", "flags"), &RenderingDevice::tlas_create);
 	// GodotNext: as_build_modes
 	ClassDB::bind_method(D_METHOD("blas_build", "blas", "mode"), &RenderingDevice::blas_build, DEFVAL(ACCELERATION_STRUCTURE_BUILD_MODE_BUILD));
@@ -10734,6 +10749,13 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_HDR_OUTPUT);
 	BIND_ENUM_CONSTANT(SUPPORTS_RASTERIZATION_RATE_MAP);
 
+	// GodotNext: rq_substrate (#22)
+	BIND_ENUM_CONSTANT(RAY_QUERY_SUPPORTED);
+	BIND_ENUM_CONSTANT(RAY_QUERY_REASON_NO_RAY_QUERY);
+	BIND_ENUM_CONSTANT(RAY_QUERY_REASON_D3D12_NO_DXR);
+	BIND_ENUM_CONSTANT(RAY_QUERY_REASON_METAL_SYNC_MODE);
+	BIND_ENUM_CONSTANT(RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS);
+
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BOUND_UNIFORM_SETS);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_TEXTURES_PER_UNIFORM_SET);
@@ -10775,6 +10797,11 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIMIT_METALFX_TEMPORAL_SCALER_MAX_SCALE);
 	// GodotNext: metal_acceleration_structure
 	BIND_ENUM_CONSTANT(LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES);
+	// GodotNext: rq_substrate (#22)
+	BIND_ENUM_CONSTANT(LIMIT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES);
+	BIND_ENUM_CONSTANT(LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT);
 
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);
