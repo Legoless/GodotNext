@@ -1815,3 +1815,40 @@ TEST_CASE("[NextGI][SWRT] Positional lights list the instances inside their rang
 	NextGIRelight::build_light_candidates(bounds, 5, lights, 0, NextGIRelight::SWRT_LIGHT_CANDIDATE_CAP, empty);
 	CHECK_EQ(empty.size(), 1u);
 }
+
+TEST_CASE("[NextGI][SWRT] Both tiers resume after the screen march with a pull-back, and two-sided shells hit from either side") {
+	// #186 step 4 (plan §21.2.6): the screen march stops where the ray leaves the screen or passes
+	// behind the depth buffer, and the world trace resumes at the last sample before that, pulled
+	// back, on both tiers (gather and reflect).
+	for (const bool software : { false, true }) {
+		const String gather = software ? RendererRD::NextGIGather::build_swrt_shader_source(0) : RendererRD::NextGIGather::build_shader_source(0);
+		REQUIRE_FALSE(gather.is_empty());
+		const String what = software ? "software gather" : "hardware gather";
+		CHECK_MESSAGE(gather.contains("if (ray_dist >= scene_dist + 0.1 * scene_dist) {\n\t\t\tstopped = true;"), (what + ": the screen march stops behind a surface").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("vec3 sample_pos = mix(origin, far_pos, t * clip0.w / mix(far_w, clip0.w, t));"), (what + ": the sample is the point that projects to the sampled pixel").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("if (stopped) {\n\t\tmarch_end = last_clear;"), (what + ": a stopped miss ends on the last sample in front of the depth buffer").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("float resume = marched - nextgi_screen_pullback(clearance);"), (what + ": the resume pulls back").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("resume = nextgi_screen_resume_tier(origin, dir, traveled, tmax, trace_origin, trace_tmax);"), (what + ": the gather resumes").utf8().get_data());
+		CHECK_MESSAGE(gather.contains("resume = nextgi_screen_resume_tier(origin, direction, traveled, world_tmax, trace_origin, trace_tmax);"), (what + ": reflections resume").utf8().get_data());
+		CHECK_FALSE_MESSAGE(gather.contains("trace_origin = march_end;"), (what + ": a resume without the pull-back is left").utf8().get_data());
+	}
+	const String software = RendererRD::NextGIGather::build_swrt_shader_source(0);
+	// A resumed ray is in flight: no escape rule in the global or the detail march, and the detail
+	// range ends 2 m from the surface the ray left, where its froxel list ends.
+	CHECK(software.contains("return swrt_trace_global(origin, d, 0.0, tmax, 0u, resume > 0.0);"));
+	CHECK(software.contains("SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax, uint steps, bool in_flight) {\n\tuint max_steps = uint(max(SWRT_P.trace.y, 1.0));\n\tfloat t = t_start;\n\tfloat cleared = in_flight ? SWRT_FAR : 0.0;"));
+	// A ray has left its surface once a sample was outside the band of the level it is in.
+	CHECK(software.contains("cleared = max(cleared, distance);\n\t\tif (cleared < band && (coverage || distance >= 0.0)) {"));
+	CHECK(software.contains("bool in_flight = resume > 0.0;\n\tuint found_instances = swrt_froxel_found(froxel_cell);\n\tfloat limit = min(tmax, SWRT_DETAIL_METERS - resume);"));
+	CHECK(software.contains("SWRTHit traced = swrt_trace(origin, direction, tmax, detail, detail ? swrt_froxel_cell(nextgi_sdf_surface) : 0xffffffffu, nextgi_sdf_resume);"));
+	// #186 step 6: no back-facing-only rule. The instance that was hit resolves the card, and only
+	// a flat mesh has a card normal.
+	CHECK_FALSE(software.contains("swrt_two_sided_accepts"));
+	CHECK(software.contains("swrt_cover_two_sided(p, direction, best_instance, 0.0, normal, flags);"));
+	CHECK(software.contains("swrt_cover_two_sided(p, direction, SWRT_NO_INSTANCE, band, normal, flags);"));
+	CHECK(software.contains("if (extent[axis] > flat_limit || next_extent <= flat_limit) {"));
+	CHECK(software.contains("hit.front_face = (traced.flags & SWRT_HIT_BACKFACE) == 0u;"));
+	// A resumed ray's near-origin count and hit distance are measured from the surface it left.
+	CHECK(software.contains("return nextgi_sdf_last_clean() && nextgi_sdf_resume + nextgi_sdf_last.t < 2.0 * nextgi_sdf_voxel_at(surface_origin);"));
+	CHECK(software.contains("atomicAdd(counters.sdf_hit_cm_sum, uint(min(nextgi_sdf_resume + nextgi_sdf_last.t, 100.0) * 100.0));"));
+}

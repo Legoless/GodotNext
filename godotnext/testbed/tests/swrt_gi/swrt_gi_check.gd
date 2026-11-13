@@ -25,15 +25,19 @@ extends Node
 ##   window means;
 ## - step-limit (exhausted) hits are at most MAX_EXHAUSTED_SHARE of the SDF hits, and hits within
 ##   two voxels of the origin's level (self-intersection candidates) at most MAX_NEAR_SHARE. The
-##   shares are printed. MAX_NEAR_SHARE is 0.30 rather than the 0.10 start value, pending a lead
-##   decision (#186): on the M5 Max the software tier measures 0.23 at High and at Epic, and 0.80
-##   and 0.77 with the gather origin offset removed. That build still passes the clean-hit bound
-##   (0.26 and 0.30 of the hardware tier's world hits), so only this bound catches it. The 0.30
-##   comes from another metric, not this one:
-##   a temporary counting build found 30% of the hardware tier's world hits within 0.35 m of the
-##   gather's surface point (the kitbash's overlapping rocks put real surfaces that close), where
-##   the software tier scored 17%. The hardware tier has no counter for the two-voxel metric;
-##   adding one would change its shaders;
+##   shares are printed. MAX_NEAR_SHARE is 0.37 rather than the 0.10 start value (lead decision,
+##   2026-11-13, #186): on the M5 Max the software tier measures 0.29 at High and 0.30 at Epic,
+##   and 0.75 and 0.73 with the gather origin offset removed. That build still passes the
+##   clean-hit bound (0.29 and 0.32 of the hardware tier's world hits), so only this bound catches
+##   it. The 0.37 comes from another metric, not this one: a temporary counting build found 37% of
+##   the hardware tier's world hits within 0.35 m of the gather's surface point when the bound was
+##   decided (36% at High and 34% at Epic in the build that landed; the kitbash's overlapping
+##   rocks put real surfaces that close), where the software tier scored 25% and counted as many
+##   hits there (876 against 879 a frame at High). The bound was 0.30 until the screen march
+##   stopped behind surfaces (#186 step 4): the rays that used to pass through a nearby rock as
+##   screen hits are world hits now, on both tiers (the hardware share was 30%, the software
+##   tier's two-voxel share 0.23). The hardware tier has no counter for the two-voxel metric, so
+##   the bound is a fixed number;
 ## - the Hi-Z screen trace found hits;
 ## - the software WRC producer ran (O2): WRC rays, gather samples from the WRC and clean WRC
 ##   SDF hits;
@@ -112,7 +116,7 @@ const WARMUP_FRAMES := 240
 const SAMPLE_FRAMES := 30
 const CLEAN_HIT_SHARE := 0.25
 const MAX_EXHAUSTED_SHARE := 0.10
-const MAX_NEAR_SHARE := 0.30
+const MAX_NEAR_SHARE := 0.37
 const MIN_SPREAD := 0.05
 const TOGGLE_FRAMES := 60
 const AS_BUDGET_SETTING := "rendering/global_illumination/nextgi/debug/as_budget_bytes"

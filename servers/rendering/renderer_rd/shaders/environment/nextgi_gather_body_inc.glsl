@@ -382,6 +382,19 @@ bool nextgi_screen_trace(vec3 origin, vec3 direction, float tmax, out vec3 color
 	return nextgi_screen_trace_hiz(inverse(params.inv_view_proj), params.inv_view_proj, params.camera_pos.xyz, params.screen_jitter.xy, float(params.pad1), origin, direction, tmax, color, march_end);
 }
 
+// GodotNext: ps_swrt_trace (#186 step 4). A screen miss that left the screen or passed
+// behind a surface resumes at march_end (the last sample before it), pulled back toward
+// the origin, on both tiers. Any other miss leaves march_end on the origin, so the world
+// trace starts there. On the software tier the pull-back is at least one voxel of the
+// SDF level at march_end.
+float nextgi_screen_resume_tier(vec3 origin, vec3 direction, float marched, float world_tmax, out vec3 trace_origin, out float trace_tmax) {
+	float clearance = 0.0;
+#ifdef NEXTGI_TRACE_SDF
+	clearance = nextgi_sdf_voxel_at(origin + direction * marched);
+#endif
+	return nextgi_screen_resume(origin, direction, marched, world_tmax, clearance, trace_origin, trace_tmax);
+}
+
 void nextgi_gather_main() {
 	uvec2 probe = gl_GlobalInvocationID.xy;
 	if (probe.x >= params.probes_x || probe.y >= params.probes_y) {
@@ -441,20 +454,18 @@ void nextgi_gather_main() {
 		float traveled = length(march_end - origin);
 		vec3 trace_origin = origin;
 		float trace_tmax = tmax;
-#ifndef NEXTGI_TRACE_SDF
-		// GodotNext: ps_swrt_trace (#186). The software trace restarts from the origin: the
-		// screen march's samples do not prove the stretch between them empty.
-		if (traveled > 0.001 && traveled + 0.001 < tmax) {
-			trace_origin = march_end;
-			trace_tmax = tmax - traveled;
+		// GodotNext: ps_swrt_trace (#186 step 4). Both tiers resume after the screen march
+		// with the pull-back. A hit keeps the screen color and does not continue.
+		float resume = 0.0;
+		if (!screen_hit) {
+			resume = nextgi_screen_resume_tier(origin, dir, traveled, tmax, trace_origin, trace_tmax);
 		}
-#endif
 		if (screen_hit) {
 			radiance = screen_color;
 			ray_confidence = 1.0;
 			atomicAdd(counters.screen_hits, 1u);
 #ifdef NEXTGI_TRACE_SDF
-		} else if (nextgi_sdf_trace_noted(trace_origin, dir, trace_tmax, world, false, hit)) {
+		} else if (nextgi_sdf_trace_noted(trace_origin, dir, trace_tmax, world, false, resume, hit)) {
 #else
 		} else if (nextgi_trace(trace_origin, dir, trace_tmax, hit)) {
 #endif
@@ -727,30 +738,27 @@ void nextgi_reflect_main() {
 #ifdef NEXTGI_TRACE_SDF
 		// GodotNext: ps_swrt_trace (#186 step 4). Reflections trace to rt_scene_radius without the
 		// WRC handoff; the screen trace covers the hardware tier's screen range.
-		float tmax = params.rt_radius;
-		vec3 screen_color;
-		vec3 march_end;
-		bool screen_hit = nextgi_screen_trace(origin, direction, min(params.rt_radius, swrt_screen_range(origin)), screen_color, march_end);
+		float world_tmax = params.rt_radius;
+		float screen_tmax = min(params.rt_radius, swrt_screen_range(origin));
 #else
 		float handoff = nextgi_wrc_handoff(origin);
-		float tmax = handoff > 0.0 ? handoff : params.rt_radius;
+		float world_tmax = handoff > 0.0 ? handoff : params.rt_radius;
+		float screen_tmax = world_tmax;
+#endif
 		vec3 screen_color;
 		vec3 march_end;
-		bool screen_hit = nextgi_screen_trace(origin, direction, tmax, screen_color, march_end);
-#endif
+		bool screen_hit = nextgi_screen_trace(origin, direction, screen_tmax, screen_color, march_end);
 		if (params.front_layer != 0u) {
 			screen_hit = false;
 			march_end = origin;
 		}
 		float traveled = length(march_end - origin);
 		vec3 trace_origin = origin;
-		float trace_tmax = tmax;
-#ifndef NEXTGI_TRACE_SDF
-		if (traveled > 0.001 && traveled + 0.001 < tmax) {
-			trace_origin = march_end;
-			trace_tmax = tmax - traveled;
+		float trace_tmax = world_tmax;
+		float resume = 0.0;
+		if (!screen_hit) {
+			resume = nextgi_screen_resume_tier(origin, direction, traveled, world_tmax, trace_origin, trace_tmax);
 		}
-#endif
 		NextGIHit hit;
 #ifdef MODE_FAR_FIELD
 		bool visibility_only = false;
@@ -773,15 +781,14 @@ void nextgi_reflect_main() {
 					hit_distance = params.rt_radius + hit.t;
 				}
 			} else {
-				hit_distance = traveled + hit.t;
+				hit_distance = resume + hit.t;
 			}
 #elif defined(NEXTGI_TRACE_SDF)
-			// The software trace restarted from the origin.
-			hit_result = nextgi_sdf_trace_noted(trace_origin, direction, trace_tmax, world, true, hit);
-			hit_distance = hit.t;
+			hit_result = nextgi_sdf_trace_noted(trace_origin, direction, trace_tmax, world, true, resume, hit);
+			hit_distance = resume + hit.t;
 #else
 			hit_result = nextgi_trace(trace_origin, direction, trace_tmax, hit);
-			hit_distance = traveled + hit.t;
+			hit_distance = resume + hit.t;
 #endif
 			if (hit_result) {
 				atomicAdd(reflect_counters.hits, 1u);

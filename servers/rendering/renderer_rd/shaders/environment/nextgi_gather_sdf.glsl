@@ -294,11 +294,12 @@ void main() {
 #endif
 
 	// Screen trace first, over the hardware tier's screen range (the handoff
-	// distance, 1.5x the WRC probe spacing at the origin). On a screen miss the
-	// SDF trace starts over from the origin: 24 screen samples cannot prove the
-	// stretch between them empty.
+	// distance, 1.5x the WRC probe spacing at the origin). On a screen miss that
+	// stopped, the SDF trace resumes at the last sample before the stop, pulled
+	// back as on the hardware tier (#186 step 4).
 	vec3 trace_origin = origin;
 	float trace_tmax = tmax;
+	float resume = 0.0;
 	if (params.flags.y > 0.5) {
 		vec3 screen_color;
 		vec3 march_end;
@@ -317,10 +318,16 @@ void main() {
 #endif
 			return;
 		}
+		float marched = length(march_end - origin);
+		uint level = swrt_level_at(march_end);
+		if (level == SWRT_NO_LEVEL) {
+			level = max(swrt_active_levels(), 1u) - 1u;
+		}
+		resume = nextgi_screen_resume(origin, direction, marched, tmax, swrt_level_voxel(level), trace_origin, trace_tmax);
 	}
 	bool detail = params.trace.z > 0.5 && params.extra.y > 0.5;
 	uint froxel = detail ? swrt_froxel_cell(surface) : 0xffffffffu;
-	SWRTHit hit = swrt_trace(trace_origin, direction, trace_tmax, detail, froxel);
+	SWRTHit hit = swrt_trace(trace_origin, direction, trace_tmax, detail, froxel, resume);
 	atomicAdd(swrt_counters.steps, hit.steps);
 	vec3 radiance = swrt_shade(hit, trace_origin, direction, true, trace_tmax);
 	if ((hit.flags & SWRT_HIT_SURFACE) != 0u) {
@@ -344,6 +351,9 @@ void main() {
 		if ((hit.flags & SWRT_HIT_WRC) != 0u) {
 			atomicAdd(swrt_counters.wrc_samples, 1u);
 		}
+	}
+	if ((hit.flags & SWRT_HIT_SURFACE) != 0u && hit.t >= 0.0) {
+		hit.t += resume;
 	}
 	swrt_write(ray_index, surface, offset, normal, roughness, direction, tmax, hit, radiance);
 }

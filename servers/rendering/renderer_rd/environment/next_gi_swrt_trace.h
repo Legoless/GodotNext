@@ -120,6 +120,8 @@ public:
 		HIT_SKIPPED = 1u << 7, // No ray: background pixel or above the roughness gate.
 		HIT_HANDOFF = 1u << 8, // A gather ray reached the WRC handoff distance.
 		HIT_VOXEL = 1u << 9, // Shaded from voxel lighting.
+		HIT_CARD = 1u << 10, // A two-sided instance resolved this coverage hit (#186 step 6).
+		HIT_BACKFACE = 1u << 11, // The ray meets the back of that instance's card.
 	};
 
 	static constexpr uint32_t MAX_STEPS = 64; // Start value (#186 step 2).

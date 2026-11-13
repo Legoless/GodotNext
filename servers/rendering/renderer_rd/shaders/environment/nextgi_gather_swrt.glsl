@@ -102,17 +102,21 @@ void nextgi_sdf_note_gather(bool p_reflect) {
 	if ((nextgi_sdf_last.flags & SWRT_HIT_DETAIL) != 0u && nextgi_sdf_last.instance != SWRT_NO_INSTANCE) {
 		atomicAdd(counters.sdf_detail_hits, 1u);
 	}
-	atomicAdd(counters.sdf_hit_cm_sum, uint(min(nextgi_sdf_last.t, 100.0) * 100.0));
+	atomicAdd(counters.sdf_hit_cm_sum, uint(min(nextgi_sdf_resume + nextgi_sdf_last.t, 100.0) * 100.0));
 }
 
 // A gather or reflection ray: the detail froxel of its surface, the trace and its counters.
-bool nextgi_sdf_trace_noted(vec3 p_origin, vec3 p_direction, float p_tmax, vec3 p_surface, bool p_reflect, out NextGIHit r_hit) {
+// p_resume is how far p_origin sits past the surface the ray left (the screen march's resume
+// distance, #186 step 4; 0 for a ray that starts there). It holds only for this trace.
+bool nextgi_sdf_trace_noted(vec3 p_origin, vec3 p_direction, float p_tmax, vec3 p_surface, bool p_reflect, float p_resume, out NextGIHit r_hit) {
 	nextgi_sdf_surface = p_surface;
 	nextgi_sdf_detail_ray = true;
+	nextgi_sdf_resume = p_resume;
 	bool hit = nextgi_trace(p_origin, p_direction, p_tmax, r_hit);
 	nextgi_sdf_detail_ray = false;
 	nextgi_sdf_gather_ray = !p_reflect;
 	nextgi_sdf_note_gather(p_reflect);
+	nextgi_sdf_resume = 0.0;
 	return hit;
 }
 

@@ -10,7 +10,7 @@
 // SDF -> WRC at the handoff distance or on a miss -> sky.
 //
 // Functions a consumer calls (NextGISWRTTrace documents the bindings):
-//   SWRTHit swrt_trace(origin, direction, tmax, detail, froxel_cell)
+//   SWRTHit swrt_trace(origin, direction, tmax, detail, froxel_cell[, resume])
 //   bool swrt_shadow_ray(origin, direction, tmax)   // true when occluded
 //   vec3 swrt_offset_origin(surface, normal)        // 1.5 voxels of the level
 //   vec3 swrt_shade(hit, origin, direction, allow_wrc)
@@ -47,6 +47,8 @@
 #define SWRT_HIT_SKIPPED 128u // No ray: background pixel, or above the roughness gate.
 #define SWRT_HIT_HANDOFF 256u // A gather ray reached the WRC handoff distance.
 #define SWRT_HIT_VOXEL 512u // Shaded from voxel lighting.
+#define SWRT_HIT_CARD 1024u // A two-sided instance resolved this coverage hit (#186 step 6).
+#define SWRT_HIT_BACKFACE 2048u // The ray meets the back of that instance's card.
 
 #define SWRT_NO_LEVEL 0xffffffffu
 #define SWRT_NO_INSTANCE 0xffffffffu
@@ -443,30 +445,78 @@ vec3 swrt_offset_origin(vec3 surface, vec3 normal) {
 	return surface + normal * swrt_self_offset(surface);
 }
 
-// The two-sided rule (#186 step 6): two-sided coverage is a hit only for a
-// back-facing approach, with the outward direction taken from the nearest
-// containing two-sided instance's bounds center. A coverage voxel no
-// two-sided instance contains is a plain hit.
-bool swrt_two_sided_accepts(vec3 p, vec3 direction, out vec3 outward) {
-	outward = -direction;
-	uint count = uint(max(SWRT_P.view_forward.w, 0.0));
-	float best = 1e30;
-	bool found = false;
-	for (uint i = 0u; i < count; i++) {
-		SWRTInstance instance = swrt_instances.data[swrt_two_sided.data[i]];
-		if (any(lessThan(p, instance.world_min.xyz)) || any(greaterThan(p, instance.world_max.xyz))) {
-			continue;
+float swrt_instance_distance(uint index, vec3 world, out float voxel_size);
+
+// GodotNext: ps_swrt_trace (#186 step 6, plan §21.2.6). A two-sided coverage voxel is a hit
+// from either side of the shell, as UE traces two-sided distance fields from either side. The
+// instance whose shell was hit resolves it: hit_instance from the detail march, else the
+// two-sided instance whose bounds, grown by pad (the hit band), contain p and whose mesh SDF is
+// nearest there. When that mesh is a flat card (its own bounds are thinner than two of its
+// finest voxels along one local axis and no other: a quad, a leaf card), the card normal is that
+// axis taken to world space. front is false when the ray meets the card from behind that normal, so the
+// WRC probe relocation fires there as it does on a cull_disabled triangle's back face. outward
+// is the card normal turned toward the ray, the shading normal. Any other two-sided mesh, and a
+// coverage voxel no two-sided instance contains, keeps the gradient normal, which faces the ray.
+bool swrt_two_sided_outward(vec3 p, vec3 direction, uint hit_instance, float pad, out vec3 outward, out bool front) {
+	outward = vec3(0.0);
+	front = true;
+	uint best_index = hit_instance;
+	if (best_index == SWRT_NO_INSTANCE) {
+		uint count = uint(max(SWRT_P.view_forward.w, 0.0));
+		float best = 1e30;
+		for (uint i = 0u; i < count; i++) {
+			uint index = swrt_two_sided.data[i];
+			SWRTInstance instance = swrt_instances.data[index];
+			if (any(lessThan(p, instance.world_min.xyz - vec3(pad))) || any(greaterThan(p, instance.world_max.xyz + vec3(pad)))) {
+				continue;
+			}
+			float unused;
+			float distance = abs(swrt_instance_distance(index, p, unused));
+			if (distance < best) {
+				best = distance;
+				best_index = index;
+			}
 		}
-		vec3 center = (instance.world_min.xyz + instance.world_max.xyz) * 0.5;
-		vec3 away = p - center;
-		float distance = dot(away, away);
-		if (distance < best && distance > 1e-8) {
-			best = distance;
-			outward = normalize(away);
-			found = true;
+		if (best_index == SWRT_NO_INSTANCE) {
+			return false;
 		}
 	}
-	return !found || dot(direction, outward) > 0.0;
+	SWRTInstance card_instance = swrt_instances.data[best_index];
+	SWRTMeshInfo finest = swrt_meshes.data[card_instance.flags.y];
+	vec3 finest_max = finest.bounds_voxel.xyz + vec3(max(finest.dimensions.xyz, ivec3(1))) * finest.bounds_voxel.w;
+	vec3 surface_min;
+	vec3 surface_max;
+	nextgi_mesh_sdf_surface_bounds(finest.bounds_voxel.xyz, finest_max, uintBitsToFloat(finest.offsets.w), surface_min, surface_max);
+	vec3 extent = surface_max - surface_min;
+	uint axis = extent.x <= extent.y && extent.x <= extent.z ? 0u : (extent.y <= extent.z ? 1u : 2u);
+	float next_extent = axis == 0u ? min(extent.y, extent.z) : (axis == 1u ? min(extent.x, extent.z) : min(extent.x, extent.y));
+	float flat_limit = 2.0 * finest.bounds_voxel.w;
+	if (extent[axis] > flat_limit || next_extent <= flat_limit) {
+		return false; // Not a flat card: too thick, or thin along two axes.
+	}
+	// A local normal goes to world space with the transpose of the world-to-local basis, so the
+	// card normal is row axis of the inverse (normalized, which also covers non-uniform scale).
+	vec3 card = axis == 0u ? card_instance.inverse_row0.xyz : (axis == 1u ? card_instance.inverse_row1.xyz : card_instance.inverse_row2.xyz);
+	if (!(dot(card, card) > 1e-12)) {
+		return false;
+	}
+	card = normalize(card);
+	front = dot(card, direction) <= 0.0;
+	outward = front ? card : -card;
+	return true;
+}
+
+void swrt_cover_two_sided(vec3 p, vec3 direction, uint hit_instance, float pad, inout vec3 normal, inout uint flags) {
+	vec3 outward;
+	bool front;
+	if (!swrt_two_sided_outward(p, direction, hit_instance, pad, outward, front)) {
+		return;
+	}
+	normal = outward;
+	flags |= SWRT_HIT_CARD;
+	if (!front) {
+		flags |= SWRT_HIT_BACKFACE;
+	}
 }
 
 struct SWRTHit {
@@ -492,15 +542,19 @@ SWRTHit swrt_no_hit(uint steps) {
 // Sphere-traces the global SDF from t_start. Unallocated bricks are skipped
 // to their exit (no surface is within a voxel of them). The step limit
 // reports a hit at the current t (#186 step 2).
-// A ray that starts at its origin (t_start 0) inside a surface band (an origin
-// offset into a concave corner) is escaping: until a sample leaves the band it
-// reports only a penetration (a negative distance), not the band of the
-// surface it left. A ray continued past the detail range is not escaping.
-SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax, uint steps) {
+// A ray that starts on the surface it leaves has not cleared that surface until
+// a sample lies outside the band (an origin offset into a concave corner starts
+// inside one, and a coarser level's band is wider than the offset a finer level
+// gave the origin). cleared is the largest distance sampled so far: while it is
+// below the band of the sample's level, a sample in that band is still the
+// surface the ray left, and only a penetration (a negative distance) is a hit.
+// A ray in flight (in_flight: continued past the detail range, or resumed after
+// the screen march, #186 step 4) starts cleared: a band it starts in belongs to
+// a surface in its way.
+SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax, uint steps, bool in_flight) {
 	uint max_steps = uint(max(SWRT_P.trace.y, 1.0));
 	float t = t_start;
-	bool first = t_start <= 0.0;
-	bool escaping = false;
+	float cleared = in_flight ? SWRT_FAR : 0.0;
 	while (steps < max_steps && t < tmax) {
 		vec3 p = origin + direction * t;
 		uint level = swrt_level_at(p);
@@ -523,37 +577,28 @@ SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax
 				}
 				skip = swrt_brick_exit(coarse, p, direction);
 			}
+			// No surface is within a voxel of an unallocated brick.
+			cleared = max(cleared, voxel_size);
 			t += skip + 0.01 * voxel_size;
 			continue;
 		}
 		// An unsigned two-sided shell is one voxel thick; a signed surface is its zero crossing.
 		float band = (coverage ? 1.0 : 0.5) * voxel_size;
-		if (first) {
-			escaping = distance < band;
-			first = false;
-		}
-		if (escaping) {
-			if (distance >= band) {
-				escaping = false;
-			} else if (coverage || distance >= 0.0) {
-				t += max(band - distance, 0.25 * voxel_size);
-				continue;
-			}
+		cleared = max(cleared, distance);
+		if (cleared < band && (coverage || distance >= 0.0)) {
+			t += max(band - distance, 0.25 * voxel_size);
+			continue;
 		}
 		if (distance < band) {
 			vec3 normal = swrt_normal(level, p, distance, -direction);
+			uint flags = SWRT_HIT_SURFACE | (coverage ? SWRT_HIT_COVERAGE : 0u);
 			if (coverage) {
-				vec3 outward;
-				if (!swrt_two_sided_accepts(p, direction, outward)) {
-					t += voxel_size;
-					continue;
-				}
-				normal = outward;
+				swrt_cover_two_sided(p, direction, SWRT_NO_INSTANCE, band, normal, flags);
 			}
 			SWRTHit hit;
 			hit.t = t;
 			hit.normal = normal;
-			hit.flags = SWRT_HIT_SURFACE | (coverage ? SWRT_HIT_COVERAGE : 0u);
+			hit.flags = flags;
 			hit.instance = SWRT_NO_INSTANCE;
 			hit.steps = steps;
 			hit.level = level;
@@ -572,6 +617,11 @@ SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax
 		return hit;
 	}
 	return swrt_no_hit(steps);
+}
+
+// A ray from t_start: at its origin when t_start is 0, in flight otherwise.
+SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax, uint steps) {
+	return swrt_trace_global(origin, direction, t_start, tmax, steps, t_start > 0.0);
 }
 
 // --- Detail mode: mesh SDFs for the first 2 m --------------------------------
@@ -677,18 +727,23 @@ uint swrt_froxel_found(uint froxel_cell) {
 // the global SDF also traces it from t = 0, and a global hit more than one
 // voxel of its level before the detail hit is geometry the list left out and
 // wins. A global hit that ran out of steps does not override a detail hit.
-SWRTHit swrt_trace_detail(vec3 origin, vec3 direction, float tmax, uint froxel_cell) {
+// resume is how far origin sits past the surface the ray left (the screen
+// march's resume distance, #186 step 4; 0 for a ray that starts there). The
+// cell lists the instances near that surface, so the detail range ends 2 m
+// from it, not from origin, and a resumed ray is in flight (no escape rule).
+SWRTHit swrt_trace_detail(vec3 origin, vec3 direction, float tmax, uint froxel_cell, float resume) {
+	bool in_flight = resume > 0.0;
 	uint found_instances = swrt_froxel_found(froxel_cell);
-	if (found_instances == 0u) {
-		return swrt_trace_global(origin, direction, 0.0, tmax, 0u);
+	float limit = min(tmax, SWRT_DETAIL_METERS - resume);
+	if (found_instances == 0u || !(limit > 0.0)) {
+		return swrt_trace_global(origin, direction, 0.0, tmax, 0u, in_flight);
 	}
 	uint count = min(found_instances, SWRT_FROXEL_CAP);
 	bool overflow = found_instances > SWRT_FROXEL_CAP;
 	uint max_steps = uint(max(SWRT_P.trace.y, 1.0));
-	float limit = min(tmax, SWRT_DETAIL_METERS);
 	uint steps = 0u;
 	float t = 0.0;
-	bool first = true;
+	bool first = !in_flight;
 	bool escaping = false;
 	bool detail_found = false;
 	SWRTHit detail_hit = swrt_no_hit(0u);
@@ -726,17 +781,13 @@ SWRTHit swrt_trace_detail(vec3 origin, vec3 direction, float tmax, uint froxel_c
 		}
 		if (best < band) {
 			vec3 normal = swrt_instance_normal(best_instance, p, best_voxel, -direction);
+			uint flags = SWRT_HIT_SURFACE | SWRT_HIT_DETAIL | (two_sided ? SWRT_HIT_COVERAGE : 0u);
 			if (two_sided) {
-				vec3 outward;
-				if (!swrt_two_sided_accepts(p, direction, outward)) {
-					t += best_voxel;
-					continue;
-				}
-				normal = outward;
+				swrt_cover_two_sided(p, direction, best_instance, 0.0, normal, flags);
 			}
 			detail_hit.t = t;
 			detail_hit.normal = normal;
-			detail_hit.flags = SWRT_HIT_SURFACE | SWRT_HIT_DETAIL | (two_sided ? SWRT_HIT_COVERAGE : 0u);
+			detail_hit.flags = flags;
 			detail_hit.instance = best_instance;
 			detail_hit.steps = steps;
 			detail_hit.level = SWRT_NO_LEVEL;
@@ -752,7 +803,7 @@ SWRTHit swrt_trace_detail(vec3 origin, vec3 direction, float tmax, uint froxel_c
 			uint level = swrt_level_at(origin + direction * detail_hit.t);
 			global_tmax = detail_hit.t - (level == SWRT_NO_LEVEL ? 0.0 : swrt_level_voxel(level));
 		}
-		SWRTHit global_hit = swrt_trace_global(origin, direction, 0.0, global_tmax, 0u);
+		SWRTHit global_hit = swrt_trace_global(origin, direction, 0.0, global_tmax, 0u, in_flight);
 		if (!detail_found || ((global_hit.flags & SWRT_HIT_SURFACE) != 0u && (global_hit.flags & SWRT_HIT_EXHAUSTED) == 0u)) {
 			global_hit.steps += steps;
 			return global_hit;
@@ -774,18 +825,24 @@ SWRTHit swrt_trace_detail(vec3 origin, vec3 direction, float tmax, uint froxel_c
 		return hit;
 	}
 	// Every instance near the cell is listed: the global trace continues past the detail range.
-	return swrt_trace_global(origin, direction, min(t, limit), tmax, steps);
+	return swrt_trace_global(origin, direction, min(t, limit), tmax, steps, true);
 }
 
-SWRTHit swrt_trace(vec3 origin, vec3 direction, float tmax, bool detail, uint froxel_cell) {
+// resume is how far origin sits past the surface the ray left: 0 for a ray that starts on it,
+// the screen march's resume distance for one continued after it (#186 step 4).
+SWRTHit swrt_trace(vec3 origin, vec3 direction, float tmax, bool detail, uint froxel_cell, float resume) {
 	if (!(tmax > 0.0) || !(dot(direction, direction) > 1e-12)) {
 		return swrt_no_hit(0u);
 	}
 	vec3 d = normalize(direction);
 	if (detail) {
-		return swrt_trace_detail(origin, d, tmax, froxel_cell);
+		return swrt_trace_detail(origin, d, tmax, froxel_cell, resume);
 	}
-	return swrt_trace_global(origin, d, 0.0, tmax, 0u);
+	return swrt_trace_global(origin, d, 0.0, tmax, 0u, resume > 0.0);
+}
+
+SWRTHit swrt_trace(vec3 origin, vec3 direction, float tmax, bool detail, uint froxel_cell) {
+	return swrt_trace(origin, direction, tmax, detail, froxel_cell, 0.0);
 }
 
 // The software twin of nextgi_shadow_ray (nextgi_src_relight.glsl): true when
