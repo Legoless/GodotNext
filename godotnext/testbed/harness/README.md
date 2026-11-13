@@ -1,6 +1,6 @@
 # GodotNext testbed harness
 
-Capture mode and timing mode for the P0 testbed, plus the Apple M5 Max runner and the Linux VM runner. The RTX 4080 SUPER Session-1 runner, clock locks, `run_remote.sh`, `run_selftest.ps1`, and the G0-4 measurement live in issue 237.
+Capture mode and timing mode for the P0 testbed, plus the runners for the Apple M5 Max, the Linux VM and the RTX 4080 SUPER machine (Session 1, clock locks, #237). The G0-4 measurement runs in PQ.
 
 The harness autoload stays idle unless the arguments after `--` include `--mode`. Other testbed scenes are not affected.
 
@@ -46,6 +46,26 @@ VK_DRIVER_FILES=/path/to/lvp_icd.json \
   --mode=capture --scene=res://harness/selftest/selftest.tscn \
   --camera=CaptureCam --out="$OUT" --seed=1 --frames=8 --warmup=4 \
   --capture-frames=4,7
+```
+
+The RTX 4080 SUPER machine (Windows 11), from the M5 Max. `runners/run_remote.sh` reads the machine's SSH host alias and checkout path from `GODOTNEXT_RTX_HOST` and `GODOTNEXT_RTX_REPO`, or from the git-ignored `local/fleet.env`, and does not sync code: put the checkout there at the commit you mean to test first. Capture pair and timing (clocks locked) self-tests, with the results copied back:
+
+```bash
+godotnext/testbed/harness/runners/run_remote.sh selftest -Mode capture -Runs 2 --fetch "$OUT"
+godotnext/testbed/harness/runners/run_remote.sh selftest -Mode timing -Runs 3
+```
+
+Any scene as a job (see "Runners" for the job file):
+
+```bash
+godotnext/testbed/harness/runners/run_remote.sh job job.json "$OUT"
+```
+
+On the machine itself, from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File godotnext\testbed\harness\selftest\run_selftest.ps1 -Mode capture -Runs 2
+powershell -NoProfile -ExecutionPolicy Bypass -File godotnext\testbed\harness\runners\win_session1.ps1 -JobFile job.json
 ```
 
 Self-test. Capture defaults are warmup 4, frames 8, two runs. Timing defaults are warmup 120, frames 600, three runs. `-Frames` and `-Warmup` override both. On macOS every launch goes through `macos_local.sh`. `-Scene`, `-Camera`, and `-Label` point the same driver at another scene; output then lands in `captures/<label>` (the scene file name when no label is given).
@@ -129,7 +149,7 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 
 `output_size` is `[width, height]` from `get_viewport().get_visible_rect().size`. `scaling_3d_mode` and `scaling_3d_scale` come from the viewport after the first captured or measured frame.
 
-`runner.clock` is `locked` and `detail`. This runner always records `locked: false`. Clock locks are issue 237.
+`runner.clock` is `locked` and `detail`. The M5 Max and Linux VM runners record `locked: false`. The RTX 4080 SUPER runner locks the clocks for timing jobs and also records `gpu_mhz`, `memory_mhz` and `nvidia_smi_index`.
 
 `runner.power` is `on_ac`, `powermode` (`2` is High Power), `powermode_name`, `thermal`, `before`, and `after`. Each of `before` and `after` holds the filtered `pmset -g`, `pmset -g batt`, and `pmset -g therm` text. Lines that contain a filesystem path or a "prevented by" process list are dropped before anything is written. Host labels are `Apple M5 Max`, `Linux VM`, or the OS name when no job file is present. Machine host names are not recorded.
 
@@ -143,7 +163,16 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 
 `runners/linux_vm.sh` has `doctest` and `functional`. `functional` adds `--headless`, writes a job whose host is `Linux VM` when `--out` is set, and rejects timing mode. It does not install or vendor lavapipe.
 
-Both runners (and therefore `run_selftest.sh`) apply a per-scene `override.cfg` (#240, `runners/scene_override.sh`): when the folder holding `--scene` contains an `override.cfg`, the runner copies it to the testbed root before launching, records it in the runner job (and so in the manifest), and removes the root copy when the launch ends, including on failure. The testbed root is the `--path` argument when given, else `godotnext/testbed`. An existing root `override.cfg` is never overwritten: the runner refuses to launch, as `tests/tier/run_tier_check.sh` does. A scene at the testbed root already has its `override.cfg` in place, so nothing is copied or removed, but the record still names it. `linux_vm.sh doctest` runs no scene, so it never applies one.
+`runners/win_session1.ps1 -JobFile job.json` runs one Godot launch on the RTX 4080 SUPER machine in the logged-on console session (Session 1), where Godot can create a swapchain, through a one-time scheduled task (`schtasks /IT /RL HIGHEST`). It works from an SSH login (Session 0) and returns Godot's exit code, or 2 for a bad job, 3 for a timeout and 4 when the task could not start. The job file is JSON: `name`, `device` (a device name from the `docs/godotnext/fleet.md` device table), `driver` (`vulkan` or `d3d12`), `kind` (`run`, `capture`, `timing` or `validation`), `args` (Godot arguments without `--rendering-driver` and `--gpu-index`; `{out}` becomes the absolute output directory), `out` (absolute, or relative to the repository root), and optional `godot`, `timeout_minutes`, `fail_on_validation` and `lock_clocks`.
+- The runner adds `--rendering-driver` and `--gpu-index`, resolved by device name from `fleet.md`. A job that names an unknown device fails with the list of known names.
+- `timing` jobs need the High performance power plan and lock the GPU and memory clocks to the `fleet.md` values (`nvidia-smi --lock-gpu-clocks` and `--lock-memory-clocks`, read back until they hold), and always reset them (`-rgc`, `-rmc`) when the launch ends.
+- `validation` jobs set `NV_ALLOW_RAYTRACING_VALIDATION=1` and `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1`, and exit 1 when Godot exits 0 but logged an `ERROR:` or `Validation Error` line (`fail_on_validation`; case-sensitive, because the Vulkan loader logs lower-case "error:" lines that are not errors).
+- Every job gets `GODOTNEXT_HARNESS_JOB` (host, device, clock, power, override). `runner.power` records the active power plan (`powermode` 2 for High performance or Ultimate Performance) and the GPU temperature and throttle reasons; `after` is patched into `manifest.json` when the launch ends. JSON is written as UTF-8 without a byte-order mark.
+- The output directory gets `run.log` (stdout, then stderr), `done.json` (exit code, Session id, the locked clocks read back) and `runner_job.json`. The last line printed is `GODOTNEXT_RUNNER {...}` with the device, the Session id and the error counts.
+
+`selftest/run_selftest.ps1` is the Windows twin of `run_selftest.sh`, with the same parameters plus `-Device` and `-Driver`; every launch goes through `win_session1.ps1`, and the manifest check also requires `runner.clock.locked` (and the locked clocks) on timing runs. `runners/run_remote.sh` runs a job or the self-test there from the M5 Max and copies the output back; it needs PowerShell as the machine's OpenSSH default shell, and passes the remote exit code through.
+
+The three runners (and therefore both self-tests) apply a per-scene `override.cfg` (#240; `runners/scene_override.sh`, and the same rule in `win_session1.ps1`): when the folder holding `--scene` contains an `override.cfg`, the runner copies it to the testbed root before launching, records it in the runner job (and so in the manifest), and removes the root copy when the launch ends, including on failure. The testbed root is the `--path` argument when given, else `godotnext/testbed`. An existing root `override.cfg` is never overwritten: the runner refuses to launch, as `tests/tier/run_tier_check.sh` does. A scene at the testbed root already has its `override.cfg` in place, so nothing is copied or removed, but the record still names it. `linux_vm.sh doctest` runs no scene, so it never applies one.
 
 ## Self-test scene
 
@@ -165,4 +194,4 @@ Slow IO Flight records `rendering/nextgeo/streaming/debug_io_delay_ms` as a wall
 
 Per-pass spread stays a print from `run_selftest.sh`. Timing numbers from these runs are not measurements. Slow IO frame-time percentiles are filled when a `timing.csv` is present and are not a measurement.
 
-Issue 237: the RTX 4080 SUPER Session-1 runner, clock locks, `run_remote.sh`, `run_selftest.ps1`, and G0-4 as a measurement. G0-6 calibration scenes are not part of this harness. The timing file format is what those runs will use.
+G0-4 as a measurement runs in PQ, on the RTX 4080 SUPER machine through `run_selftest.ps1 -Mode timing -Runs 3` and the capture pair. G0-6 calibration scenes are not part of this harness. The timing file format is what those runs will use.

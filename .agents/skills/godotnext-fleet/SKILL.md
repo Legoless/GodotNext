@@ -25,7 +25,8 @@ The RTX 4080 SUPER machine also has an Intel UHD 770, which runs nothing in v1. 
    ```
    ssh -o BatchMode=yes <host> "powershell -NoProfile -Command -" < script.ps1
    ```
-3. GPU rendering needs the interactive Session-1 task runner from the harness (#12). A plain SSH session (Session 0) can't create a desktop swapchain. Use SSH for builds, file transfer and headless tests.
+3. GPU rendering needs the interactive Session-1 task runner, `godotnext/testbed/harness/runners/win_session1.ps1` (#237). A plain SSH session (Session 0) can't create a desktop swapchain. Use SSH for builds, file transfer and headless tests, and the runner for every rendered run: from the M5 Max, `godotnext/testbed/harness/runners/run_remote.sh job <job.json> <dir>` (host alias and checkout path in the git-ignored `local/fleet.env`). It resolves `--gpu-index` by device name from `docs/godotnext/fleet.md`, locks clocks for timing jobs and returns Godot's exit code. See `godotnext/testbed/harness/README.md`.
+4. The machine's OpenSSH default shell is PowerShell, which ends a session with exit code 1 whenever a child process fails. Append `; exit $LASTEXITCODE` to pass a child's code through. Piping a script into `powershell -Command -` drops multi-line blocks: copy a `.ps1` over and run it with `-File` instead.
 
 Build commands for each platform are in plan §13.1.
 
