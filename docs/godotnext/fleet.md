@@ -379,3 +379,7 @@ All three checks now pass on both backends:
 - the diagnostic, at High: Auto picks Medium on the RTX 4080 SUPER, and Medium does not run the per-pixel gather.
 
 On Vulkan the leak check also logs 2 sync-validation hazards when it switches scenes (#262). Nothing writes the scene references that G1 scores against yet (#263).
+
+## AS calibration on the RTX 4080 SUPER (#9, PR time)
+
+`tests/as_calibration` ran on the RTX 4080 SUPER (Vulkan) and the M5 Max (Metal) with `--warmup=2 --iters=5`. A `--gpu-validation` run on Vulkan logged 0 errors. `godotnext_metrics.as_calibration` found every field it needs in both results. These short runs only check the fields; G0-6 measures the values in PQ with clocks locked. The standalone Vulkan refit tool is still open.
