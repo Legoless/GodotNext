@@ -376,7 +376,7 @@ bool NextGIReference::prepare_estimator(const RenderDataRD *p_render_data, RID &
 	}
 	NextGI *next_gi = NextGI::get_singleton();
 	NextGIRefGPUParams params;
-	params.direct_only = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
+	params.direct_only = nextgi_reference_shader_mode(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
 	params.seed = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_seed")));
 	params.light_count = light_count;
 	params.surface_count = surface_count;
@@ -498,7 +498,7 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	params.width = width;
 	params.height = height;
 	params.sample_index = samples;
-	params.direct_only = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
+	params.direct_only = nextgi_reference_shader_mode(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
 	params.seed = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_seed")));
 	params.light_count = light_count;
 	params.surface_count = surface_count;

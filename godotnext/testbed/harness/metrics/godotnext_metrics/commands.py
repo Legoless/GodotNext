@@ -35,7 +35,7 @@ from godotnext_metrics.pixels import q5_crack_pixels, q6_hole_pixels
 from godotnext_metrics.q19_upscaler_flip import q19_upscaler_flip, select_q19_frames
 from godotnext_metrics.q20_final_indirect import q20_final_indirect
 from godotnext_metrics.q21_invalid_mv import q21_invalid_motion_vectors
-from godotnext_metrics.rays import load_analytic, q17_ray_query_parity, read_records
+from godotnext_metrics.rays import DumpInputError, q17_dump
 from godotnext_metrics.result import MetricInputError, MetricResult
 from godotnext_metrics.timing_metrics import (
     TimingRun,
@@ -261,23 +261,11 @@ def run_q16(in_dir: Path, ref_dir: Path | None) -> MetricResult:
 
 
 def run_q17(in_dir: Path, ref_dir: Path | None) -> MetricResult:
-    rays = in_dir / "rays.bin"
-    analytic_path = in_dir / "analytic.json"
-    if not rays.is_file() or not analytic_path.is_file():
-        raise MetricInputError("Q17", "rays.bin and analytic.json are required")
-    got = read_records(rays)
-    analytic = load_analytic(analytic_path)
-    rel_t = 1e-5
-    abs_bary = 1e-5
-    if ref_dir is not None and (ref_dir / "rays.bin").is_file():
-        # Across APIs the record under --ref is the other device's dump.
-        other = read_records(ref_dir / "rays.bin")
-        analytic = [_record_to_analytic(row) for row in other]
-        rel_t = 1e-4
-        abs_bary = 1e-4
-        if len(got) != len(analytic):
-            raise MetricInputError("Q17", "across-API record counts differ")
-    return q17_ray_query_parity(got, analytic, rel_t=rel_t, abs_bary=abs_bary)
+    # --in is one device's dump folder; --ref, when given, is the other device's (G2-1).
+    try:
+        return q17_dump(in_dir, ref_dir)
+    except DumpInputError as error:
+        raise MetricInputError("Q17", str(error)) from error
 
 
 def run_q18(in_dir: Path, ref_dir: Path | None) -> MetricResult:
@@ -628,10 +616,6 @@ def _average_indirect_image(directory: Path) -> NDArray[np.float64]:
     for index in chosen:
         acc += read_exr(full[index])[..., :3].astype(np.float64) - read_exr(direct[index])[..., :3].astype(np.float64)
     return acc / float(len(chosen))
-
-
-def _record_to_analytic(record: np.void) -> dict[str, object]:
-    return {name: record[name].item() for name in record.dtype.names or ()}
 
 
 def _clear_color(directory: Path) -> tuple[int, int, int]:

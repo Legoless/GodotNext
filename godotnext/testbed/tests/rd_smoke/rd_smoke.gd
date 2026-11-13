@@ -13,6 +13,11 @@ extends Node
 ##   within 1e-5 absolute.
 ## - Fixture C: 1024 rays aimed at shared edges. Each must report exactly
 ##   one candidate, one of the two adjacent triangles.
+## - Fixture D (winding, #49): one triangle in six instances (plain,
+##   FLIP_FACING, mirrored, mirrored + FLIP_FACING, turned 180 degrees and
+##   FACING_CULL_DISABLE), hit from both sides. The expected front face follows
+##   the Vulkan facing rule: facing is decided in the instance's space, so a
+##   mirrored instance transform inverts it and FLIP_FACING inverts it again.
 ##
 ## Every fixture runs twice, once with BLAS inputs in vertex/index buffers
 ## and once in storage buffers; the two result buffers must be bit-identical.
@@ -23,10 +28,17 @@ extends Node
 ##     MTL_SHADER_VALIDATION_REPORT_TO_STDERR=1 \
 ##     godot --path godotnext/testbed --rendering-driver metal res://tests/rd_smoke/rd_smoke.tscn
 ##
+## User arguments (after "--"):
+##   --out=<dir>            dump folder (default user://rd_smoke)
+##   --expect-reason=<name> the device must lack ray query with this reason
+##                          (NO_RAY_QUERY, D3D12_NO_DXR, METAL_SYNC_MODE or
+##                          METAL_NO_ARGUMENT_BUFFERS)
+##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure.
-## Writes user://rd_smoke_kernel.spv, user://rd_smoke_edges.spv,
-## user://rd_smoke_rays.bin (B records), user://rd_smoke_edges.bin (C records)
-## and user://rd_smoke_analytic.json (B analytic records for the Q17 tool).
+## The dump folder is the Q17 tool's input (harness/metrics, #49): meta.json,
+## and for each fixture (tri, rays, edges, winding) <name>.bin with the 32-byte
+## Q17 records and <name>_analytic.json with the analytic expectations, plus
+## kernel.spv and edges.spv.
 
 const SEED := 0x4E455854
 const RAYS_B := 4096
@@ -37,6 +49,17 @@ const GRID_SPACING := 10.0
 const REL_T_TOLERANCE := 1e-5
 const ABS_BARY_TOLERANCE := 1e-5
 const RECORD_SIZE := 32
+const DUMP_SCHEMA := 1
+const WINDING_ID_BASE := 2000
+const WINDING_DISTANCE := 5.0
+const WINDING_BARYS: Array[Vector2] = [Vector2(0.25, 0.25), Vector2(0.6, 0.2), Vector2(0.1, 0.7)]
+const REASON_NAMES := {
+	RenderingDevice.RAY_QUERY_SUPPORTED: "RAY_QUERY_SUPPORTED",
+	RenderingDevice.RAY_QUERY_REASON_NO_RAY_QUERY: "NO_RAY_QUERY",
+	RenderingDevice.RAY_QUERY_REASON_D3D12_NO_DXR: "D3D12_NO_DXR",
+	RenderingDevice.RAY_QUERY_REASON_METAL_SYNC_MODE: "METAL_SYNC_MODE",
+	RenderingDevice.RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS: "METAL_NO_ARGUMENT_BUFFERS",
+}
 
 # The expected front face follows the API default shared by Vulkan, Metal and DXR: a positive
 # Möller–Trumbore determinant (det > 0 below). FLIP_FACING is the only way to invert it.
@@ -51,6 +74,9 @@ var _failures := PackedStringArray()
 var _expected_errors := PackedStringArray()
 var _max_rel_t := 0.0
 var _max_abs_bary := 0.0
+var _out_dir := "user://rd_smoke"
+var _expect_reason := ""
+var _counts_by_fixture := {}
 
 
 func _ready() -> void:
@@ -60,39 +86,71 @@ func _ready() -> void:
 
 
 func _run() -> Dictionary:
+	_parse_args()
 	var rd := RenderingServer.create_local_rendering_device()
 	if rd == null:
 		return { "test": "rd_smoke", "pass": false, "reason": "NO_RENDERING_DEVICE" }
+	var device := { "driver": RenderingServer.get_current_rendering_driver_name(), "adapter": rd.get_device_name() }
 
 	if not rd.has_feature(RenderingDevice.SUPPORTS_RAY_QUERY):
 		var fallback := _run_fallback(rd)
+		fallback.merge(device)
 		rd.free()
 		return fallback
+	_check(_expect_reason.is_empty(), "expected the %s fallback, but the device supports ray query" % _expect_reason)
 
-	var kernel := _load_kernel(rd, "res://tests/rd_smoke/rq_kernel.glsl", "user://rd_smoke_kernel.spv")
-	var edges := _load_kernel(rd, "res://tests/rd_smoke/rq_edges.glsl", "user://rd_smoke_edges.spv")
-	var stats := { "id_exact": 0, "front_face_exact": 0, "edge_ok": 0 }
+	var kernel := _load_kernel(rd, "res://tests/rd_smoke/rq_kernel.glsl", _out_path("kernel.spv"))
+	var edges := _load_kernel(rd, "res://tests/rd_smoke/rq_edges.glsl", _out_path("edges.spv"))
+	var stats := { "id_exact": 0, "front_face_exact": 0, "edge_ok": 0, "winding_front_face_exact": 0 }
 	if kernel.is_valid():
 		_fixture_a(rd, kernel)
 		_fixture_b(rd, kernel, stats)
+		_fixture_d(rd, kernel, stats)
 	if edges.is_valid():
 		_fixture_c(rd, edges, stats)
 	_free_all(rd, [kernel, edges])
 	rd.free()
+	_write_text(_out_path("meta.json"), JSON.stringify({
+		"schema": DUMP_SCHEMA,
+		"test": "rd_smoke",
+		"driver": device["driver"],
+		"adapter": device["adapter"],
+		"seed": SEED,
+		"record_size": RECORD_SIZE,
+		"fixtures": _counts_by_fixture,
+	}, "\t"))
 
-	return {
+	var result := {
 		"test": "rd_smoke",
 		"rays_b": RAYS_B,
 		"edges": RAYS_C,
+		"winding": _winding_case_list().size() * WINDING_BARYS.size() * 2,
 		"id_exact": stats["id_exact"],
 		"front_face_exact": stats["front_face_exact"],
+		"winding_front_face_exact": stats["winding_front_face_exact"],
 		"max_rel_t": _max_rel_t,
 		"max_abs_bary": _max_abs_bary,
 		"edge_ok": stats["edge_ok"],
+		"out": ProjectSettings.globalize_path(_out_dir),
 		"pass": _failures.is_empty(),
 		"failures": _failures,
 		"expected_errors": _expected_errors,
 	}
+	result.merge(device)
+	return result
+
+
+func _parse_args() -> void:
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--out="):
+			_out_dir = arg.trim_prefix("--out=")
+		elif arg.begins_with("--expect-reason="):
+			_expect_reason = arg.trim_prefix("--expect-reason=")
+	DirAccess.make_dir_recursive_absolute(_out_dir)
+
+
+func _out_path(file: String) -> String:
+	return _out_dir.path_join(file)
 
 
 func _check(condition: bool, what: String) -> void:
@@ -100,20 +158,23 @@ func _check(condition: bool, what: String) -> void:
 		_failures.append(what)
 
 
+# A device without ray query must say why (#22's reason codes), and the RD
+# must refuse acceleration structures. --expect-reason pins the reason.
 func _run_fallback(rd: RenderingDevice) -> Dictionary:
-	# RenderingDevice does not bind get_ray_query_unsupported_reason() yet;
-	# assert it when present (enum: 0 NO_RAY_QUERY, 1 D3D12_NO_DXR).
-	var reason_ok := true
-	if rd.has_method("get_ray_query_unsupported_reason"):
-		var reason: int = rd.call("get_ray_query_unsupported_reason")
-		reason_ok = reason == 0 or reason == 1
+	var reason: int = rd.get_ray_query_unsupported_reason()
+	var reason_name: String = REASON_NAMES.get(reason, "UNKNOWN_%d" % reason)
+	_check(reason != RenderingDevice.RAY_QUERY_SUPPORTED, "a device without ray query reports an unsupported reason")
+	if not _expect_reason.is_empty():
+		_check(reason_name == _expect_reason, "fallback reason is %s, expected %s" % [reason_name, _expect_reason])
 	_expected_errors.append("blas_create: neither raytracing pipeline nor ray query support")
 	var blas := rd.blas_create([], 0)
-	var pass_fallback := reason_ok and not blas.is_valid()
+	_check(not blas.is_valid(), "blas_create returns an invalid RID without ray query")
 	return {
 		"test": "rd_smoke",
 		"fallback": true,
-		"pass": pass_fallback,
+		"reason": reason_name,
+		"pass": _failures.is_empty(),
+		"failures": _failures,
 		"expected_errors": _expected_errors,
 	}
 
@@ -180,13 +241,14 @@ func _triangle_count(verts: Array[float], indices: Array[int]) -> int:
 	return indices.size() / 3 if not indices.is_empty() else verts.size() / 9
 
 
-func _instance(blas: RID, id: int, transform: Transform3D) -> RDAccelerationStructureInstance:
+func _instance(blas: RID, id: int, transform: Transform3D, flags: int = 0) -> RDAccelerationStructureInstance:
 	var instance := RDAccelerationStructureInstance.new()
 	instance.blas = blas
 	instance.id = id
 	instance.mask = 0xFF
 	instance.hit_sbt_range = 0
 	instance.transform = transform
+	instance.flags = flags
 	return instance
 
 
@@ -314,6 +376,8 @@ func _instance_specs(rng: RandomNumberGenerator) -> Array:
 
 
 func _geometry_of(kind: int) -> Array:
+	if kind == 2:
+		return [TRI_VERTS, [0, 1, 2]] # Fixture D's triangle, for the CPU side.
 	return [QUAD_VERTS, QUAD_IDX] if kind == 0 else [BIPY_VERTS, BIPY_IDX]
 
 
@@ -461,6 +525,13 @@ func _fixture_a(rd: RenderingDevice, shader: RID) -> void:
 			_check(counts["id"] == 2 and counts["t_over"] == 0 and counts["bary_over"] == 0, "fixture A matches the analytic t, IDs and barycentrics (storage=%s)" % storage)
 			_check(counts["front_face"] == 2, "fixture A front face is counter-clockwise (storage=%s)" % storage)
 			_check(_record(data, 0)["front_face"] != _record(data, 1)["front_face"], "fixture A forward and reverse rays disagree on front face")
+			if not storage:
+				var rows: Array = []
+				for row in expected:
+					var full := row.duplicate()
+					full["candidate_count"] = 1
+					rows.append(full)
+				_dump("tri", data, rows)
 		variants.append(data)
 		_free_all(rd, [tlas] + Array(built))
 	if variants.size() == 2:
@@ -542,8 +613,7 @@ func _fixture_b(rd: RenderingDevice, shader: RID, stats: Dictionary) -> void:
 			if not storage:
 				stats["id_exact"] = counts["id"]
 				stats["front_face_exact"] = counts["front_face"]
-				_write_bytes("user://rd_smoke_rays.bin", data)
-				_write_text("user://rd_smoke_analytic.json", JSON.stringify({ "records": expected }))
+				_dump("rays", data, expected)
 		variants.append(data)
 		_free_all(rd, rids)
 	if variants.size() == 2:
@@ -634,11 +704,112 @@ func _fixture_c(rd: RenderingDevice, shader: RID, stats: Dictionary) -> void:
 			_check(ok == RAYS_C, "fixture C exactly one adjacent triangle %d/%d (storage=%s)" % [ok, RAYS_C, storage])
 			if not storage:
 				stats["edge_ok"] = ok
-				_write_bytes("user://rd_smoke_edges.bin", data)
+				var rows: Array = []
+				for row in expected:
+					rows.append({ "edge": true, "custom_index": row["custom_index"], "adjacent_primitives": row["adjacent"], "committed": 1, "candidate_count": 1 })
+				_dump("edges", data, rows)
 		variants.append(data)
 		_free_all(rd, rids)
 	if variants.size() == 2:
 		_check(variants[0] == variants[1], "fixture C vertex-buffer and storage-buffer results are bit-identical")
+
+
+# Fixture D's instances: one triangle (counter-clockwise from +Z) per case,
+# 3 m apart along X.
+func _winding_case_list() -> Array:
+	var flip := RenderingDevice.ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT
+	var mirror := Basis.from_scale(Vector3(-1, 1, 1))
+	return [
+		{ "name": "plain", "basis": Basis(), "flags": 0 },
+		{ "name": "flip_facing", "basis": Basis(), "flags": flip },
+		{ "name": "mirrored", "basis": mirror, "flags": 0 },
+		{ "name": "mirrored_flip_facing", "basis": mirror, "flags": flip },
+		{ "name": "turned", "basis": Basis(Vector3.UP, PI), "flags": 0 },
+		{ "name": "cull_disable", "basis": Basis(), "flags": RenderingDevice.ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT },
+	]
+
+
+# Rays from both sides of every case at WINDING_BARYS. The analytic front
+# face is the world-space winding (det > 0) inverted once for a mirrored
+# instance basis (facing is decided in the instance's space) and once more
+# for FLIP_FACING.
+func _generate_d(specs: Array) -> Dictionary:
+	var tris := _world_triangles(specs)
+	var rays := PackedByteArray()
+	var expected: Array = []
+	var dirs: Array = [_v_norm([0.08, -0.05, -1.0]), _v_norm([-0.06, 0.04, 1.0])]
+	for spec in specs:
+		var world := _world_vertices(spec)
+		var v0 := _v_at(world, 0)
+		var e1 := _v_sub(_v_at(world, 1), v0)
+		var e2 := _v_sub(_v_at(world, 2), v0)
+		var mirrored: bool = spec["transform"].basis.determinant() < 0.0
+		var flipped: bool = (spec["flags"] & RenderingDevice.ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT) != 0
+		for bary in WINDING_BARYS:
+			var target := [v0[0] + e1[0] * bary.x + e2[0] * bary.y, v0[1] + e1[1] * bary.x + e2[1] * bary.y, v0[2] + e1[2] * bary.x + e2[2] * bary.y]
+			for dir in dirs:
+				var origin := [target[0] - dir[0] * WINDING_DISTANCE, target[1] - dir[1] * WINDING_DISTANCE, target[2] - dir[2] * WINDING_DISTANCE]
+				var quantized := _append_ray(rays, origin, 0.001, dir, 100)
+				var hit := _intersect(tris, quantized[0], quantized[1], 0.001, 100)
+				_check(hit["hit"] and hit["custom_index"] == spec["id"], "fixture D ray hits its own case (%s)" % spec["name"])
+				var front: int = hit["front_face"]
+				if mirrored != flipped:
+					front = 1 - front
+				expected.append({
+					"t": hit["t"], "custom_index": spec["id"], "primitive": 0, "u": hit["u"], "v": hit["v"],
+					"front_face": front, "committed": 1, "candidate_count": 1, "case": spec["name"],
+				})
+	return { "rays": rays, "expected": expected }
+
+
+func _fixture_d(rd: RenderingDevice, shader: RID, stats: Dictionary) -> void:
+	var cases := _winding_case_list()
+	var specs: Array = []
+	for i in cases.size():
+		specs.append({
+			"kind": 2,
+			"id": WINDING_ID_BASE + i,
+			"name": cases[i]["name"],
+			"flags": cases[i]["flags"],
+			"transform": Transform3D(cases[i]["basis"], Vector3(i * 3.0, 0, -5)),
+		})
+	var generated := _generate_d(specs)
+	var rays: PackedByteArray = generated["rays"]
+	var expected: Array = generated["expected"]
+	var count := expected.size()
+	var variants: Array[PackedByteArray] = []
+	for storage in [false, true]:
+		var built := _build_blas(rd, TRI_VERTS, [], storage, false)
+		var instances: Array[RDAccelerationStructureInstance] = []
+		for spec in specs:
+			instances.append(_instance(built[0], spec["id"], spec["transform"], spec["flags"]))
+		var tlas := _build_tlas(rd, instances)
+		var data := _trace(rd, shader, tlas, rays, count)
+		_check(data.size() == count * RECORD_SIZE, "fixture D returns %d records (storage=%s)" % [count, storage])
+		if data.size() == count * RECORD_SIZE:
+			var counts := _counts()
+			var wrong_cases := {}
+			for i in count:
+				var record := _record(data, i)
+				_score(record, expected[i], counts)
+				if record["front_face"] != expected[i]["front_face"]:
+					wrong_cases[expected[i]["case"]] = true
+			_check(counts["id"] == count and counts["t_over"] == 0 and counts["bary_over"] == 0, "fixture D matches the analytic t, IDs and barycentrics (storage=%s)" % storage)
+			_check(counts["front_face"] == count, "fixture D front face follows the facing rule %d/%d, wrong cases: %s (storage=%s)" % [counts["front_face"], count, ", ".join(PackedStringArray(wrong_cases.keys())), storage])
+			if not storage:
+				stats["winding_front_face_exact"] = counts["front_face"]
+				_dump("winding", data, expected)
+		variants.append(data)
+		_free_all(rd, [tlas] + Array(built))
+	if variants.size() == 2:
+		_check(variants[0] == variants[1], "fixture D vertex-buffer and storage-buffer results are bit-identical")
+
+
+# Writes one fixture's Q17 records and analytic expectations to the dump folder.
+func _dump(fixture: String, data: PackedByteArray, analytic: Array) -> void:
+	_write_bytes(_out_path(fixture + ".bin"), data)
+	_write_text(_out_path(fixture + "_analytic.json"), JSON.stringify({ "records": analytic }))
+	_counts_by_fixture[fixture] = data.size() / RECORD_SIZE
 
 
 func _write_bytes(path: String, data: PackedByteArray) -> void:

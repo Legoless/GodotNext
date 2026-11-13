@@ -49,6 +49,14 @@ _FORCE_INLINE_ bool nextgi_reference_shader_allowed(bool p_hwrt) {
 	return p_hwrt;
 }
 
+// GodotNext: nextgi_vulkan (#49). The shader's mode word (dispatch.w): 0 full, 1 direct only,
+// 2 reflections only. The reference_mode setting puts Off first (0 Off, 1 Full, 2 Direct Only,
+// 3 Reflections Only), so it is one higher. Passing the setting through unchanged ran Full as
+// direct only, which the closed-box furnace caught on Vulkan.
+_FORCE_INLINE_ uint32_t nextgi_reference_shader_mode(int p_reference_mode) {
+	return p_reference_mode > 1 ? uint32_t(p_reference_mode - 1) : 0u;
+}
+
 // GodotNext: nextgi_reference
 // One sample per frame into an RGBA32F sum/count image, then a composite into the HDR color.
 class NextGIReference {

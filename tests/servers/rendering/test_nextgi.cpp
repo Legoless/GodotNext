@@ -2454,6 +2454,11 @@ TEST_CASE("[NextGI] reference path tracer furnace equilibrium and HWRT shader ga
 	CHECK(Math::is_equal_approx(RendererRD::nextgi_reference_furnace_equilibrium(1.0f, 0.8f), 5.0f));
 	CHECK(RendererRD::nextgi_reference_shader_allowed(true));
 	CHECK_FALSE(RendererRD::nextgi_reference_shader_allowed(false));
+	// The setting lists Off first; the shader's mode word starts at Full (#49).
+	CHECK_EQ(RendererRD::nextgi_reference_shader_mode(0), 0u);
+	CHECK_EQ(RendererRD::nextgi_reference_shader_mode(1), 0u);
+	CHECK_EQ(RendererRD::nextgi_reference_shader_mode(2), 1u);
+	CHECK_EQ(RendererRD::nextgi_reference_shader_mode(3), 2u);
 	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/reference_mode"));
 	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/reference_seed"));
 	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/gather_hit_radiance"));

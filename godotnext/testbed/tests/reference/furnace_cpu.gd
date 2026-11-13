@@ -53,6 +53,18 @@ func _check_fallback(failures: PackedStringArray) -> void:
 	var result: Dictionary = Reference.fallback_result("furnace")
 	if not bool(result["pass"]) or String(result["fallback"]) != "NO_RAY_QUERY":
 		failures.append("fallback result is not a passing NO_RAY_QUERY payload")
+	# The reason comes from the device (#49): each unsupported reason passes under its own name.
+	var reasons := {
+		RenderingDevice.RAY_QUERY_REASON_D3D12_NO_DXR: "D3D12_NO_DXR",
+		RenderingDevice.RAY_QUERY_REASON_METAL_SYNC_MODE: "METAL_SYNC_MODE",
+		RenderingDevice.RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS: "METAL_NO_ARGUMENT_BUFFERS",
+	}
+	for reason in reasons:
+		var named: Dictionary = Reference.fallback_result("furnace", reason)
+		if not bool(named["pass"]) or String(named["fallback"]) != reasons[reason]:
+			failures.append("fallback result for %s is wrong: %s" % [reasons[reason], JSON.stringify(named)])
+	if bool(Reference.fallback_result("furnace", RenderingDevice.RAY_QUERY_SUPPORTED)["pass"]):
+		failures.append("a fallback that reports RAY_QUERY_SUPPORTED must fail")
 
 
 func _check_soups(failures: PackedStringArray) -> void:

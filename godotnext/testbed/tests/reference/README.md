@@ -76,13 +76,35 @@ godot --path godotnext/testbed --rendering-driver metal \
   --fixture=sealed_b --spp=65536 --seed=1 --runs=2
 ```
 
-On the RTX 4080 SUPER machine the same scenes run under Vulkan, which is
-deferred to #49:
+The 256-spp determinism run reports `"pass": false`, because the 1 percent
+furnace gate is meant for 131072 spp. Its pass rule is the two identical
+`sha256` values.
 
+On the RTX 4080 SUPER machine the same fixtures run under Vulkan (#49), through
+the Session-1 runner from the M5 Max. The runner adds `--rendering-driver` and
+`--gpu-index`, and a `validation` job also sets the validation-layer environment:
+
+```json
+{"name": "ref-furnace", "device": "NVIDIA GeForce RTX 4080 SUPER", "driver": "vulkan", "kind": "run",
+ "args": ["--path", "godotnext/testbed", "res://tests/reference/reference.tscn", "--",
+          "--fixture=furnace", "--spp=131072", "--seed=1", "--out={out}/furnace"],
+ "out": "godotnext/testbed/captures/remote/ref-furnace", "timeout_minutes": 30}
 ```
-godot --path godotnext/testbed --rendering-driver vulkan --gpu-index 0 --gpu-validation \
-  res://tests/reference/reference.tscn -- --fixture=furnace --spp=131072 --seed=1
+
+```sh
+godotnext/testbed/harness/runners/run_remote.sh job ref_furnace.json /tmp/ref_remote
 ```
+
+The same form runs `sealed_a` and `sealed_b` at 65536 spp, the determinism runs,
+and a 256-spp furnace as a `validation` job with `--gpu-validation`.
 
 `--rendering-driver d3d12` has no ray query in this build, so it takes the
 fallback and exits 0.
+
+## Stored results
+
+`results/metal/` and `results/vulkan/` keep the outputs of the three gated
+fixtures under the same names (`furnace.exr`, `furnace.json`, `sealed_a.json`,
+`sealed_b.json`): seed 1, furnace at 131072 spp, sealed boxes at 65536 spp.
+`results/README.md` records where and when each set was rendered, and the
+Metal-versus-Vulkan deltas (#51 reports them in PQ).

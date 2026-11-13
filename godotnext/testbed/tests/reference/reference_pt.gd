@@ -19,10 +19,21 @@ const Q3_LIMIT := 0.001
 const LUMA := Vector3(0.2126, 0.7152, 0.0722)
 
 
-static func fallback_result(fixture: String) -> Dictionary:
+const REASON_NAMES := {
+	RenderingDevice.RAY_QUERY_SUPPORTED: "RAY_QUERY_SUPPORTED",
+	RenderingDevice.RAY_QUERY_REASON_NO_RAY_QUERY: "NO_RAY_QUERY",
+	RenderingDevice.RAY_QUERY_REASON_D3D12_NO_DXR: "D3D12_NO_DXR",
+	RenderingDevice.RAY_QUERY_REASON_METAL_SYNC_MODE: "METAL_SYNC_MODE",
+	RenderingDevice.RAY_QUERY_REASON_METAL_NO_ARGUMENT_BUFFERS: "METAL_NO_ARGUMENT_BUFFERS",
+}
+
+
+## The result on a device without ray query: the device's reason (#22), and a pass
+## unless the device claims ray query is supported after all (#49).
+static func fallback_result(fixture: String, reason: int = RenderingDevice.RAY_QUERY_REASON_NO_RAY_QUERY) -> Dictionary:
 	return {
-		"pass": true,
-		"fallback": "NO_RAY_QUERY",
+		"pass": reason != RenderingDevice.RAY_QUERY_SUPPORTED,
+		"fallback": REASON_NAMES.get(reason, "UNKNOWN_%d" % reason),
 		"fixture": fixture,
 		"reason": "SUPPORTS_RAY_QUERY is absent, so the reference path tracer leaves the device idle.",
 	}
@@ -43,9 +54,10 @@ func _main() -> int:
 		_report({"pass": false, "fixture": fixture, "reason": "NO_RENDERING_DEVICE"})
 		return 1
 	if not rd.has_feature(RenderingDevice.SUPPORTS_RAY_QUERY):
+		var fallback := fallback_result(fixture, rd.get_ray_query_unsupported_reason())
 		rd.free()
-		_report(fallback_result(fixture))
-		return 0
+		_report(fallback)
+		return 0 if bool(fallback["pass"]) else 1
 	var soup := _soup(fixture)
 	if soup.is_empty():
 		rd.free()

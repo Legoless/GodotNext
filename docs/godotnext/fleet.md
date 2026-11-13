@@ -263,6 +263,8 @@ The High column comes from the final build. The Medium and Epic columns come fro
 | `legacy/legacy_sdfgi` (NextGI off) | 0 / 0 | 0 / 0 | 0 / 0 |
 | `legacy/legacy_voxelgi` (NextGI off) | 0 / 0 | 0 / 0 | 0 / 0 |
 
+The software tier ran the same scenes on the final build with `hardware_ray_tracing=1` (Off), at High and at Medium (Lumen Lite). It reported `tier=SWRT reason=SETTING_OFF`, and all 22 runs had 0 `ERROR:` and 0 `Validation Error` lines.
+
 The first pass found the following, and #50 fixed each one:
 
 - **`nextgi_perf`, Auto (Medium), 23 errors.** NextGI relight's fallback shadow texture is `D32_SFLOAT`, but it had no depth-stencil usage, so Vulkan gave it a colour-aspect view. It is now a depth attachment filled with 0, the reverse-Z far value. Against 0, relight's `GREATER` shadow compare reads as lit.
@@ -330,3 +332,50 @@ On the RTX 4080 SUPER machine, the baked paths for the gather, relight and WRC u
 A Windows editor has no Metal baker platform, because `METAL_ENABLED` is Apple-only. Exporting macOS (baker) there therefore bakes nothing and prints no baker line.
 
 `godotnext/testbed/captures/` now has a tracked `.gdignore`. Before it, an `all_resources` export imported harness output left in the folder, and the self-test's `timing.csv` files failed to load as translations, which logged 9 errors.
+
+## Reference path tracer and ray-query parity on Vulkan (#49)
+
+Recorded on 2026-11-13. The RTX 4080 SUPER ran Vulkan, driver 621.14, as runner jobs. The Apple M5 Max ran Metal.
+
+**RD smoke test.** All four fixtures pass on both devices:
+
+- `tri`, 2 rays;
+- `rays`, 4096 rays;
+- `edges`, 1024 rays;
+- `winding`, 36 rays: the new `FLIP_FACING`, mirrored and cull-disable cases.
+
+On Vulkan the run used `--gpu-validation` and logged 0 errors. Each device's dump also passes the Q17 tool's analytic mode.
+
+Across APIs, `q17 --in <vulkan dump> --ref <metal dump>` gives:
+
+- 0 failures;
+- t at most 9.3e-6 relative;
+- barycentrics at most 8.1e-6 absolute;
+- front face equal on all 36 winding rays.
+
+This is a report on the tooling. G2-1 itself is measured in PQ.
+
+The Metal fallback modes assert their reasons and pass:
+
+- `GODOT_MTL_SYNC_MODE=none` gives `METAL_SYNC_MODE`;
+- `GODOT_MTL_DISABLE_ARGUMENT_BUFFERS=1` gives `METAL_NO_ARGUMENT_BUFFERS`.
+
+The D3D12 fallback did not run, because D3D12 work waits for a go-ahead.
+
+**v0 reference path tracer (#19).** Every gated v0 run passes on Vulkan:
+
+- the furnace at 131072 spp: mean 4.9999841, with every pixel within 1 percent of 5;
+- `sealed_a` and `sealed_b` at 65536 spp: Q3 is 0;
+- the same-seed runs: identical SHA-256.
+
+The runs used kind `run`. A 256-spp furnace under `--gpu-validation` logged 0 errors. `tests/reference/results/` keeps the Metal and Vulkan outputs under the same names. Its README records the deltas: the furnace differs by at most 4.3e-5 relative per pixel.
+
+**Scene path (#27).** On Vulkan the furnace check first returned 1.0 everywhere, not 5. Since the reflection-only mode (#60), `reference_mode` had reached the shader unmapped. Full ran as direct-only, Direct Only as reflections-only, and Reflections Only as direct-only. The setting is now mapped to the shader's mode word (`nextgi_reference_shader_mode`, with a doctest).
+
+All three checks now pass on both backends:
+
+- the furnace: mean 5.0382 on Metal and on Vulkan;
+- the leak check;
+- the diagnostic, at High: Auto picks Medium on the RTX 4080 SUPER, and Medium does not run the per-pixel gather.
+
+On Vulkan the leak check also logs 2 sync-validation hazards when it switches scenes (#262). Nothing writes the scene references that G1 scores against yet (#263).
