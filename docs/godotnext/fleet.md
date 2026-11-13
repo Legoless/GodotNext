@@ -275,7 +275,7 @@ The first pass found the following, and #50 fixed each one:
 
 The startup 64-ray self-test passed on every NextGI launch (`tier=HWRT`).
 
-Auto picked Medium on this card. Its benchmark is the whole self-test, about 11 to 125 ms, which includes first-dispatch setup. The rule in `nextgi_auto_quality_from_usec` picks High only at 5 ms or less. That calibration belongs to PQ.
+Auto picked Medium on this card. Its benchmark was the whole self-test, about 11 to 125 ms, which includes first-dispatch setup, and the rule in `nextgi_auto_quality_from_usec` picks High only at 5 ms or less. Since #260 the benchmark is a warm second run of the self-test's rays: 0.37 ms on this card and 0.41 ms on the M5 Max, so Auto picks High on both. PQ re-checks the threshold.
 
 ### Velocity under TAA and FSR2, and the HWRT fault latch
 

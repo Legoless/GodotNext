@@ -3235,6 +3235,11 @@ TEST_CASE("[NextGI][Quality] Preset budgets and atlas sizes") {
 	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(5000) == Q::QUALITY_HIGH);
 	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(5001) == Q::QUALITY_MEDIUM);
 	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(0) == Q::QUALITY_MEDIUM);
+	// GodotNext: auto_quality_trace (#260). The warm trace dispatch is the benchmark when it ran;
+	// the whole self-test (with its setup) is the fallback.
+	CHECK_EQ(RendererRD::NextGI::nextgi_auto_benchmark_usec(14000, 300), uint64_t(300));
+	CHECK_EQ(RendererRD::NextGI::nextgi_auto_benchmark_usec(14000, 0), uint64_t(14000));
+	CHECK(RendererRD::NextGI::nextgi_auto_quality_from_usec(RendererRD::NextGI::nextgi_auto_benchmark_usec(14000, 300)) == Q::QUALITY_HIGH);
 	// Medium is High x 0.5 except line 1a.
 	CHECK_EQ(medium.ada_lines_us[0], high.ada_lines_us[0]);
 	CHECK_EQ(medium.apple_lines_us[0], high.apple_lines_us[0]);

@@ -286,6 +286,7 @@ private:
 	// GodotNext: hwrt_safety_net
 	bool selftest_report_time = false;
 	uint64_t selftest_usec = 0;
+	uint64_t selftest_trace_usec = 0; // GodotNext: auto_quality_trace (#260)
 	int hwrt_frame_index = 0;
 	bool fault_callback_registered = false;
 	HWRTFaultCallbackState fault_callback_state;
@@ -303,7 +304,7 @@ private:
 	void _sync_device_lost_callback();
 	void _unregister_device_lost_callback();
 	void _maybe_simulate_device_lost();
-	bool _run_hwrt_selftest(RenderingDevice *p_device, uint64_t &r_usec);
+	bool _run_hwrt_selftest(RenderingDevice *p_device, uint64_t &r_usec, uint64_t &r_trace_usec);
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *rt_scene = nullptr;
@@ -403,6 +404,9 @@ public:
 	static uint32_t nextgi_quality_total_us(Quality p_quality, bool p_apple);
 	Quality get_quality_setting() const { return quality_setting; }
 	static Quality nextgi_auto_quality_from_usec(uint64_t p_usec);
+	// GodotNext: auto_quality_trace (#260). The HWRT Auto benchmark: the self-test's warm second
+	// dispatch (trace and readback only) when it ran, else the whole self-test as before.
+	static uint64_t nextgi_auto_benchmark_usec(uint64_t p_selftest_usec, uint64_t p_trace_usec) { return p_trace_usec > 0 ? p_trace_usec : p_selftest_usec; }
 	// GodotNext: ps_tier_rule (#187). Under 16 compute units, Medium. Unknown devices pass 16.
 	// Video memory under 4 GiB with no reported unit count passes 8.
 	static constexpr uint32_t SWRT_BASE_LEVELS = 6;

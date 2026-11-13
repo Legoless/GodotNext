@@ -56,6 +56,7 @@ struct NextGISelfTestCache {
 	RenderingDevice *device = nullptr;
 	bool passed = false;
 	uint64_t usec = 0;
+	uint64_t trace_usec = 0; // GodotNext: auto_quality_trace (#260)
 	bool valid = false;
 };
 
@@ -288,13 +289,15 @@ String NextGI::build_hwrt_selftest_source() {
 	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
 }
 
-static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_failure);
+static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_failure, uint64_t &r_trace_usec);
 
-bool NextGI::_run_hwrt_selftest(RenderingDevice *p_device, uint64_t &r_usec) {
+bool NextGI::_run_hwrt_selftest(RenderingDevice *p_device, uint64_t &r_usec, uint64_t &r_trace_usec) {
 	const uint64_t started_usec = OS::get_singleton()->get_ticks_usec();
 	String failure;
-	const bool passed = _nextgi_dispatch_hwrt_selftest(p_device, failure);
-	r_usec = OS::get_singleton()->get_ticks_usec() - started_usec;
+	r_trace_usec = 0;
+	const bool passed = _nextgi_dispatch_hwrt_selftest(p_device, failure, r_trace_usec);
+	// The self-test's own time (selftest= on the tier line) excludes the warm benchmark dispatch.
+	r_usec = OS::get_singleton()->get_ticks_usec() - started_usec - r_trace_usec;
 	if (!passed) {
 		print_verbose(vformat("NextGI startup self-test failed: %s", failure));
 	}
@@ -333,28 +336,36 @@ void NextGI::_apply_safety_net(TierInputs &r_inputs) {
 	if (nextgi_selftest_cache.valid && nextgi_selftest_cache.device == rd) {
 		r_inputs.selftest_passed = nextgi_selftest_cache.passed;
 		selftest_usec = nextgi_selftest_cache.usec;
+		selftest_trace_usec = nextgi_selftest_cache.trace_usec;
 		selftest_report_time = true;
-		if (auto_quality == QUALITY_AUTO && selftest_usec > 0) {
-			auto_quality = nextgi_auto_quality_from_usec(selftest_usec);
+		const uint64_t benchmark_usec = nextgi_auto_benchmark_usec(selftest_usec, selftest_trace_usec);
+		if (auto_quality == QUALITY_AUTO && benchmark_usec > 0) {
+			auto_quality = nextgi_auto_quality_from_usec(benchmark_usec);
 			// GodotNext: ps_tier_rule (#187). The tier line carries this reason; no line of its own.
-			auto_reason = vformat("auto: benchmark %.2f ms, %s", double(selftest_usec) / 1000.0, get_quality_name(auto_quality));
+			// GodotNext: auto_quality_trace (#260). The trace benchmark, not the self-test's setup.
+			auto_reason = vformat("auto: trace benchmark %.3f ms, %s", double(benchmark_usec) / 1000.0, get_quality_name(auto_quality));
 		}
 		return;
 	}
 
 	uint64_t usec = 0;
-	const bool passed = _run_hwrt_selftest(rd, usec);
+	uint64_t trace_usec = 0;
+	const bool passed = _run_hwrt_selftest(rd, usec, trace_usec);
 	nextgi_selftest_cache.device = rd;
 	nextgi_selftest_cache.passed = passed;
 	nextgi_selftest_cache.usec = usec;
+	nextgi_selftest_cache.trace_usec = trace_usec;
 	nextgi_selftest_cache.valid = true;
 	r_inputs.selftest_passed = passed;
 	selftest_usec = usec;
+	selftest_trace_usec = trace_usec;
 	selftest_report_time = true;
-	if (auto_quality == QUALITY_AUTO && selftest_usec > 0) {
-		auto_quality = nextgi_auto_quality_from_usec(selftest_usec);
+	const uint64_t benchmark_usec = nextgi_auto_benchmark_usec(selftest_usec, selftest_trace_usec);
+	if (auto_quality == QUALITY_AUTO && benchmark_usec > 0) {
+		auto_quality = nextgi_auto_quality_from_usec(benchmark_usec);
 		// GodotNext: ps_tier_rule (#187). The tier line carries this reason; no line of its own.
-		auto_reason = vformat("auto: benchmark %.2f ms, %s", double(selftest_usec) / 1000.0, get_quality_name(auto_quality));
+		// GodotNext: auto_quality_trace (#260). The trace benchmark, not the self-test's setup.
+		auto_reason = vformat("auto: trace benchmark %.3f ms, %s", double(benchmark_usec) / 1000.0, get_quality_name(auto_quality));
 	}
 }
 
@@ -411,7 +422,7 @@ void NextGI::_maybe_simulate_device_lost() {
 #endif
 }
 
-static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_failure) {
+static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_failure, uint64_t &r_trace_usec) {
 	if (p_device == nullptr || !p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)) {
 		r_failure = "the device has no ray query";
 		return false;
@@ -594,6 +605,19 @@ static bool _nextgi_dispatch_hwrt_selftest(RenderingDevice *p_device, String &r_
 #endif
 	if (!NextGI::hwrt_selftest_records_match(got, expected, NextGI::HWRT_SELFTEST_RAY_COUNT, corrupt, &r_failure)) {
 		return false;
+	}
+
+	// GodotNext: auto_quality_trace (#260). The Auto benchmark: the same 64 rays again, now that
+	// the shader, the pipeline and the acceleration structures exist, through the readback.
+	const uint64_t trace_started = OS::get_singleton()->get_ticks_usec();
+	const RenderingDevice::ComputeListID trace_list = p_device->compute_list_begin();
+	if (trace_list != RenderingDevice::INVALID_ID) {
+		p_device->compute_list_bind_compute_pipeline(trace_list, pipeline);
+		p_device->compute_list_bind_uniform_set(trace_list, uniform_set, 0);
+		p_device->compute_list_dispatch(trace_list, 1, 1, 1);
+		p_device->compute_list_end();
+		p_device->buffer_get_data(result_buffer);
+		r_trace_usec = MAX(OS::get_singleton()->get_ticks_usec() - trace_started, uint64_t(1));
 	}
 	return true;
 }
