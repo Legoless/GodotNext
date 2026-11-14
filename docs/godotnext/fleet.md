@@ -80,6 +80,23 @@ Devices:
 D3D12 12_0 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 4080 SUPER
 ```
 
+### Cloud L4 VMs (v3.8, build-time only)
+
+Two Compute Engine `g2-standard-16` VMs (16 vCPU, 64 GB) with one NVIDIA L4 each run PR basics during the build (plan §23.2, v3.8). They run no gate, timing or UE-comparison line and no DLSS-enabled build. Their project, names, addresses and SSH key are in the git-ignored `local/fleet.env`; the fleet skill says how to start, stop and reach them.
+
+| VM | System | GPU and driver | Compiler | Build |
+|---|---|---|---|---|
+| Cloud Linux VM | Ubuntu 24.04, kernel 7.0 (gcp) | NVIDIA L4, driver 580.178.04 (Vulkan 1.4.312), plus llvmpipe; headless Xorg on the L4 at `DISPLAY=:0` | GCC 13 | `scons platform=linuxbsd target=editor dev_mode=yes -j16`, 14 min cold |
+| Cloud Windows VM | Windows Server 2025 Datacenter | NVIDIA L4, GRID driver 621.14 in WDDM mode; Vulkan SDK 1.4.363.1 | MSVC 17.14 | `scons platform=windows target=editor dev_mode=yes d3d12=yes -j16`, 20 min cold |
+
+Neither VM has an audio device: pass `--audio-driver Dummy`, or ALSA (Linux) and WASAPI (Windows) log `ERROR:` lines that fail the validation bar. The Windows VM has the Graphics Tools optional feature for the D3D12 debug layer (`--gpu-validation` on D3D12); D3D12 HWRT reports `D3D12_NO_DXR` until PD lands, as on the RTX 4080 SUPER.
+
+On the Windows VM the user signs in automatically, so rendered runs go through `runners/win_session1.ps1` in Session 1 as on the RTX 4080 SUPER machine; its OpenSSH default shell is PowerShell. `run_remote.sh` reaches it with `GODOTNEXT_RTX_HOST`, `GODOTNEXT_RTX_REPO` and `GODOTNEXT_RTX_SSH_OPTS` (the key) set for the run. The L4 is its only GPU apart from the WARP software adapter:
+
+| Device name | v1 role | Godot Session-1 Vulkan `--gpu-index` | Godot Session-1 D3D12 `--gpu-index` | `nvidia-smi -i` | Session-0 `vulkaninfo --json=<n>` |
+|---|---|---|---|---|---|
+| `NVIDIA L4` | Cloud build-time device (no PQ lines) | `0` | `0` | `0` | `0` |
+
 ### Vulkan capability archive (`docs/godotnext/fleet/vulkaninfo/g0/`)
 
 Raw `vulkaninfo` JSON snapshots (both well under 5 MB):

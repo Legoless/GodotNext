@@ -16,6 +16,7 @@
 # The machine and its checkout come from the environment, or from the git-ignored local/fleet.env:
 #   GODOTNEXT_RTX_HOST  the SSH host alias of the RTX 4080 SUPER machine (your ~/.ssh/config)
 #   GODOTNEXT_RTX_REPO  the repository root there, for example C:/Users/<user>/Projects/GodotNext
+#   GODOTNEXT_RTX_SSH_OPTS  optional extra ssh/scp options, for example "-i <key>"
 # The checkout there must be at the commit you mean to test; this script does not sync code.
 # The machine's OpenSSH default shell must be PowerShell (it is on the RTX 4080 SUPER machine).
 
@@ -44,6 +45,12 @@ if [[ $# -lt 1 ]]; then
 fi
 remote_repo=${remote_repo//\\//}
 ssh_opts=(-o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30)
+# GODOTNEXT_RTX_SSH_OPTS: extra ssh and scp options, split on spaces (for example "-i <key>" for a
+# machine reached without a ~/.ssh/config alias, such as the cloud Windows VM).
+if [[ -n "${GODOTNEXT_RTX_SSH_OPTS:-}" ]]; then
+	read -r -a extra_ssh_opts <<<"$GODOTNEXT_RTX_SSH_OPTS"
+	ssh_opts+=("${extra_ssh_opts[@]}")
+fi
 
 # remote_command <one line of PowerShell>: runs it there through stdin and returns its exit code.
 # The machine's OpenSSH default shell is PowerShell, which ends a session with 1 whenever a child
