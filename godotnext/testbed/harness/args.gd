@@ -19,6 +19,7 @@ const FLAG_MSAA := "--msaa"
 const FLAG_MASK := "--mask"
 const FLAG_UPSCALER := "--upscaler"
 const FLAG_SCALE := "--scale"
+const FLAG_SPP := "--spp"
 
 const KNOWN_FLAGS := {
 	FLAG_MODE: true,
@@ -38,12 +39,24 @@ const KNOWN_FLAGS := {
 	FLAG_MASK: true,
 	FLAG_UPSCALER: true,
 	FLAG_SCALE: true,
+	FLAG_SPP: true,
 }
 
 const VALID_MASKS := {
 	"alpha_particles": true,
 	"scrolling_emissive": true,
 }
+
+const VALID_REFERENCES := {
+	"ssaa": true,
+	"pt": true,
+}
+
+## --reference=pt (#263): the path-traced reference accumulates in 16 equal sample batches
+## of whole 32-sample frames, so --spp is a multiple of 16 * 32.
+const PT_BATCHES := 16
+const PT_SPP_STEP := 512
+const PT_DEFAULT_SPP := 4096
 
 const VALID_UPSCALERS := {
 	"taa": true,
@@ -142,9 +155,17 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 		result.ok = false
 		result.error = "--out must be an absolute filesystem directory"
 		return result
+	var reference := String(values.get(FLAG_REFERENCE, ""))
+	if values.has(FLAG_REFERENCE) and not VALID_REFERENCES.has(reference):
+		result.ok = false
+		result.error = "--reference must be ssaa or pt"
+		return result
 	var frames := -1
 	if values.has(FLAG_FRAMES):
 		frames = _parse_non_negative_int(String(values[FLAG_FRAMES]))
+	elif reference == "pt":
+		# The path-traced reference runs until it reaches --spp; --frames does not apply.
+		frames = 1
 	elif mode == "capture" and _has_engine_quit_after(engine_args):
 		frames = 600
 	else:
@@ -203,9 +224,27 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 			result.ok = false
 			result.error = "--velocity-dump must be 0 or 1"
 			return result
-	if values.has(FLAG_REFERENCE) and String(values[FLAG_REFERENCE]) != "ssaa":
+	var spp := -1
+	if reference == "pt":
+		if mode != "capture":
+			result.ok = false
+			result.error = "--reference=pt requires --mode=capture"
+			return result
+		for key in [FLAG_UPSCALER, FLAG_MSAA, FLAG_SCALE, FLAG_MASK, FLAG_CAPTURE_FRAMES, FLAG_VELOCITY_DUMP]:
+			if values.has(key):
+				result.ok = false
+				result.error = "%s does not apply to --reference=pt" % key
+				return result
+		spp = PT_DEFAULT_SPP
+		if values.has(FLAG_SPP):
+			spp = _parse_non_negative_int(String(values[FLAG_SPP]))
+			if spp < PT_SPP_STEP or spp % PT_SPP_STEP != 0:
+				result.ok = false
+				result.error = "--spp must be a positive multiple of %d" % PT_SPP_STEP
+				return result
+	elif values.has(FLAG_SPP):
 		result.ok = false
-		result.error = "--reference must be ssaa"
+		result.error = "--spp requires --reference=pt"
 		return result
 	if values.has(FLAG_MSAA):
 		var msaa := String(values[FLAG_MSAA])
@@ -247,6 +286,8 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 		"instances": instances,
 		"output_resolution": _infer_engine_resolution(engine_args),
 	}
+	if spp > 0:
+		result["args"]["spp"] = spp
 	for key in [FLAG_VELOCITY_DUMP, FLAG_REFERENCE, FLAG_MSAA, FLAG_MASK, FLAG_UPSCALER, FLAG_SCALE]:
 		if values.has(key):
 			var normalized := String(key).trim_prefix("--").replace("-", "_")

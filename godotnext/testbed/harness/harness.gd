@@ -5,12 +5,13 @@ extends Node
 
 const ArgsScript = preload("res://harness/args.gd")
 const ManifestScript = preload("res://harness/manifest.gd")
+const ReferencePTScript = preload("res://harness/reference_pt.gd")
 
 const SETTLE_FLAT := 30
 const SETTLE_BUDGET := 900
 const SETTLE_HARD_STOP := 1020
 
-enum Phase { BOOT, WAIT_SCENE, SETTLE, RELOAD, CAPTURE, TIMING }
+enum Phase { BOOT, WAIT_SCENE, SETTLE, RELOAD, CAPTURE, TIMING, REFERENCE }
 enum WaitGoal { INITIAL, RELOAD }
 
 var _active := false
@@ -25,6 +26,10 @@ var _frames := 0
 var _warmup := 0
 var _capture_frames: Array = []
 var _output_resolution: Array = []
+var _hold_frame := -1
+var _camera_node: Camera3D
+## --reference=pt (#263): the path-traced reference capture, or null.
+var _reference_pt: ReferencePTScript
 
 var _phase := Phase.BOOT
 var _wait_goal := WaitGoal.INITIAL
@@ -72,6 +77,9 @@ func _ready() -> void:
 	_warmup = int(args["warmup"])
 	_capture_frames = args["capture_frames"]
 	_output_resolution = args.get("output_resolution", [])
+	_hold_frame = int(args.get("hold_frame", -1))
+	if String(args.get("reference", "")) == "pt":
+		_reference_pt = ReferencePTScript.new(self, _out, _scene, _seed_value, int(args["spp"]), maxi(_hold_frame, 0))
 	_load_job()
 	_job["velocity_dump"] = args.get("velocity_dump", "0")
 	if String(_job["velocity_dump"]) == "1" and _mode != "capture":
@@ -100,6 +108,10 @@ func _process(_delta: float) -> void:
 	if _phase == Phase.CAPTURE:
 		_driving = true
 		_animation_frame = _capture_index
+	elif _phase == Phase.REFERENCE:
+		# The reference accumulates one held frame (#263): the index never advances.
+		_driving = true
+		_animation_frame = maxi(_hold_frame, 0)
 	match _phase:
 		Phase.BOOT:
 			_boot()
@@ -117,7 +129,7 @@ func _exit_tree() -> void:
 	if not _active or _finalized:
 		return
 	_finalized = true
-	if _mode == "capture":
+	if _mode == "capture" and _reference_pt == null:
 		_trim_movie_frames()
 	_write_manifest()
 	if _mode == "timing":
@@ -200,6 +212,9 @@ func _poll_wait_scene() -> void:
 		return
 	if current.get_instance_id() == _reload_from_id:
 		return
+	if _wait_goal == WaitGoal.RELOAD and _reference_pt != null:
+		_begin_reference()
+		return
 	if _wait_goal == WaitGoal.RELOAD:
 		_phase = Phase.CAPTURE
 		_capture_index = 0
@@ -223,6 +238,42 @@ func _start_reload() -> void:
 		return
 	_phase = Phase.WAIT_SCENE
 	_wait_goal = WaitGoal.RELOAD
+
+
+## --reference=pt (#263). The reloaded instance accumulates the full pass, then the
+## direct-only pass. reference_pt.gd forces a fresh accumulation for each pass.
+func _begin_reference() -> void:
+	_phase = Phase.REFERENCE
+	_driving = true
+	_animation_frame = maxi(_hold_frame, 0)
+	_seed_window()
+	_apply_capture_view()
+	if _failed:
+		return
+	_reference_pt.begin()
+
+
+## Called by reference_pt.gd when both passes and the reference folder are written.
+func finish_reference() -> void:
+	_write_manifest()
+	var tree := get_tree()
+	if tree != null:
+		tree.quit(0 if not _failed else 1)
+
+
+## Called by reference_pt.gd. Fails the run with the harness's usual message.
+func fail_reference(message: String) -> void:
+	_fail(message)
+
+
+func get_host_label() -> String:
+	return String(_job.get("host", OS.get_name()))
+
+
+func get_reference_camera() -> Camera3D:
+	if _camera_node != null and is_instance_valid(_camera_node):
+		return _camera_node
+	return get_viewport().get_camera_3d()
 
 
 func _begin_timing() -> void:
@@ -262,6 +313,9 @@ func _on_frame_post_draw() -> void:
 		return
 	if _phase == Phase.CAPTURE:
 		_on_capture_presented()
+		return
+	if _phase == Phase.REFERENCE:
+		_reference_pt.poll()
 		return
 	if _pending_timing_row >= 0:
 		var row_index := _pending_timing_row
@@ -425,12 +479,24 @@ func _apply_capture_view() -> void:
 	var scene := get_tree().current_scene
 	if scene == null:
 		return
+	var environments := 0
 	for node in scene.find_children("*", "WorldEnvironment", true, true):
-		var environment := (node as WorldEnvironment).environment
+		var world := node as WorldEnvironment
+		var environment := world.environment
 		if environment == null:
 			continue
+		if _reference_pt != null:
+			# The reference path tracer runs inside NextGI (#27), as the reference_scene checks set it up.
+			environment = environment.duplicate() as Environment
+			environment.nextgi_enabled = true
+			environment.sdfgi_enabled = false
+			world.environment = environment
+		environments += 1
 		apply_capture_environment(environment)
 		print("harness: capture fog_enabled=%s volumetric_fog_enabled=%s" % [environment.fog_enabled, environment.volumetric_fog_enabled])
+	if _reference_pt != null and environments == 0:
+		_fail("--reference=pt needs a WorldEnvironment with an Environment to enable NextGI on")
+		return
 	_activate_camera(scene)
 	var ssaa := get_node_or_null("/root/SSAAReference")
 	if ssaa != null and ssaa.has_method("apply_if_active"):
@@ -469,7 +535,8 @@ func _activate_camera(scene: Node) -> void:
 			return
 		node = matches[0]
 	if node is Camera3D:
-		(node as Camera3D).current = true
+		_camera_node = node as Camera3D
+		_camera_node.current = true
 
 
 func _seed_window() -> void:
@@ -558,6 +625,9 @@ func _build_manifest() -> Dictionary:
 		"msaa_3d": int(viewport.msaa_3d) if viewport != null else 0,
 		"video_memory_used": int(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)),
 	}
+	if _reference_pt != null:
+		manifest["reference"] = "pt"
+		manifest["spp"] = _reference_pt.spp
 	if _job.has("dlss") and typeof(_job["dlss"]) == TYPE_DICTIONARY:
 		manifest["dlss"] = (_job["dlss"] as Dictionary).duplicate(true)
 	if _job.has("override") and typeof(_job["override"]) == TYPE_DICTIONARY:

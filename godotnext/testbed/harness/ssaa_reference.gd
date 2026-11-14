@@ -41,7 +41,9 @@ func apply_if_active(viewport: Viewport, scene: Node) -> void:
 		_apply_viewport(viewport)
 	if scene != null and scene.get_instance_id() != _prepared_scene_id:
 		_prepared_scene_id = scene.get_instance_id()
-		_prepare_alpha_to_coverage(scene)
+		# GodotNext: the path-traced reference (#263) ignores alpha scissor, so it keeps the scene's materials.
+		if String(_args.get("reference", "")) != "pt":
+			_prepare_alpha_to_coverage(scene)
 		_apply_mask(scene)
 
 
@@ -64,6 +66,7 @@ func _apply_viewport(viewport: Viewport) -> void:
 		return
 	if not _args.has("upscaler") and not _args.has("scale"):
 		# Mask-only run without an upscaler or SSAA reference keeps native 1x un-jittered output.
+		# So does the path-traced reference (#263): its composite fills the internal HDR color.
 		viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_BILINEAR
 		viewport.scaling_3d_scale = 1.0
 		viewport.use_taa = false

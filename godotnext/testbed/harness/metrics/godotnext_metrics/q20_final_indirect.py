@@ -10,7 +10,13 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from godotnext_metrics.image_metrics import ROUGHNESS_BINS
-from godotnext_metrics.indirect import Q1_MAX_RELATIVE_SE, Q1_MIN_SPP, Q1_THRESHOLD, q1_patch_error
+from godotnext_metrics.indirect import (
+    Q1_MAX_RELATIVE_SE,
+    Q1_MIN_SPP,
+    Q1_THRESHOLD,
+    q1_patch_error,
+    reference_rejection,
+)
 from godotnext_metrics.result import MetricResult
 
 
@@ -27,16 +33,8 @@ def q20_final_indirect(
     ref = np.asarray(l_ref, dtype=np.float64).reshape(-1)
     scene_mean = float(np.mean(ref)) if scene_mean_indirect is None else float(scene_mean_indirect)
     error = q1_patch_error(l_test, ref, scene_mean)
-    rejected = spp is None or spp < Q1_MIN_SPP
-    se_reason = ""
-    if per_patch_relative_se is None:
-        rejected = True
-        se_reason = "per-patch relative standard error is missing"
-    else:
-        worst = float(np.max(np.asarray(per_patch_relative_se, dtype=np.float64)))
-        if worst > Q1_MAX_RELATIVE_SE:
-            rejected = True
-            se_reason = f"per-patch relative standard error {worst} is above {Q1_MAX_RELATIVE_SE}"
+    # Q1's reference rule, with every reason named (#263).
+    rejected, se_reason = reference_rejection(spp, per_patch_relative_se, Q1_MIN_SPP, Q1_MAX_RELATIVE_SE, ref.size)
     bin_errors: dict[str, float] = {}
     if roughness_bins:
         for name, low, high, _gated in ROUGHNESS_BINS:

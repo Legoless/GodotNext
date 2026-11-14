@@ -2499,6 +2499,59 @@ TEST_CASE("[NextGI] reference path tracer furnace equilibrium and HWRT shader ga
 	CHECK_EQ(int(ProjectSettings::get_singleton()->get_setting("rendering/global_illumination/nextgi/debug/reference_mode")), 0);
 }
 
+// GodotNext: nextgi_reference_capture (#263).
+TEST_CASE("[NextGI] reference accumulation reset key") {
+	CHECK(ProjectSettings::get_singleton()->has_setting("rendering/global_illumination/nextgi/debug/reference_epoch"));
+	CHECK_EQ(int(ProjectSettings::get_singleton()->get_setting("rendering/global_illumination/nextgi/debug/reference_epoch")), 0);
+
+	RendererRD::NextGIReferenceResetKey base;
+	base.seed = 1;
+	base.mode = 1;
+	base.instance_count = 15;
+	base.camera = Transform3D(Basis(Vector3(0, 1, 0), 0.5), Vector3(-3.55, 2.5, -1.5));
+	base.projection.set_perspective(70.0, 16.0 / 9.0, 0.05, 15.0);
+	base.sky = Color(0.1, 0.2, 0.3);
+	base.tables = 0x1234;
+	const uint64_t hash = RendererRD::nextgi_reference_reset_hash(base);
+	// A reloaded scene with the same content gives the same key.
+	RendererRD::NextGIReferenceResetKey same = base;
+	CHECK_EQ(RendererRD::nextgi_reference_reset_hash(same), hash);
+
+	// The old key covered only the seed, the mode, the instance count and the camera origin.
+	// Each of these now restarts the accumulation on its own.
+	RendererRD::NextGIReferenceResetKey changed = base;
+	changed.epoch = 1;
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
+	changed.camera.basis = Basis(Vector3(0, 1, 0), 0.6);
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
+	changed.projection.set_perspective(60.0, 16.0 / 9.0, 0.05, 15.0);
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
+	changed.sky = Color(0.1, 0.2, 0.31);
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
+	changed.tables = 0x1235;
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	// Full to Direct Only restarts it, so the harness's direct pass starts from zero samples.
+	changed = base;
+	changed.mode = 2;
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
+	changed.seed = 2;
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+	changed = base;
+	changed.instance_count = 16;
+	CHECK_NE(RendererRD::nextgi_reference_reset_hash(changed), hash);
+
+	// Instance transforms enter through the tables hash.
+	const uint64_t seed = 1469598103934665603ull;
+	const Transform3D placed(Basis(), Vector3(1, 0, 0));
+	CHECK_EQ(RendererRD::nextgi_reference_hash_transform(seed, placed), RendererRD::nextgi_reference_hash_transform(seed, placed));
+	CHECK_NE(RendererRD::nextgi_reference_hash_transform(seed, placed), RendererRD::nextgi_reference_hash_transform(seed, Transform3D(Basis(), Vector3(1, 0, 0.001))));
+}
+
 TEST_CASE("[NextGI] SRC production: atlas budget, material sharing, capture cap, buddy and LRU") {
 	const RendererRD::NextGIAtlasBudget high = RendererRD::nextgi_src_atlas_budget(false);
 	const RendererRD::NextGIAtlasBudget epic = RendererRD::nextgi_src_atlas_budget(true);

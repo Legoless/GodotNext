@@ -3144,11 +3144,14 @@
 		<member name="rendering/global_illumination/nextgi/debug/read_shadow_mask" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_mask_pages[/code], the shadow-mask texels of each page. This reads the mask atlas back from the GPU.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/reference_epoch" type="int" setter="" getter="" default="0">
+			Changing this value restarts the reference path tracer's accumulation on the next frame. The accumulation also restarts when the seed, the mode, the camera transform or projection, the sky, the instance transforms, the materials, the lights or the viewport size change. The harness's [code]--reference=pt[/code] capture uses it to start each pass from zero samples.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/reference_mode" type="int" setter="" getter="" default="0">
 			Reference path tracer mode. [code]0[/code] is off. [code]1[/code] accumulates a full path-traced image and composites it into the HDR color before tonemapping. [code]2[/code] is direct lighting only. This requires the hardware ray tracing tier. When that tier is inactive, NextGI logs one error and does not create the shader.
 		</member>
 		<member name="rendering/global_illumination/nextgi/debug/reference_readback" type="bool" setter="" getter="" default="false">
-			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes the reference sample count, mean, min, max and hash. Viewports up to 64×64 also include per-pixel luminance. This reads the accumulation image back from the GPU.
+			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes the reference sample count, mean, min, max and hash. Viewports up to 64×64 also include per-pixel luminance. [code]reference_accumulation[/code] is the raw accumulation as a [PackedByteArray] of 32-bit floats, four per pixel in row order: the radiance sum (red, green, blue) and the sample count. Multiply the mean by [code]reference_exposure[/code] to get the composited value. [code]reference_resets[/code] counts the restarts of the accumulation and is reported without the readback. This reads the accumulation image back from the GPU.
 		</member>
 		<member name="rendering/global_illumination/nextgi/debug/reference_seed" type="int" setter="" getter="" default="1">
 			Seed for the reference path tracer. The same seed and scene produce the same accumulation.

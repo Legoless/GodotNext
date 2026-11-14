@@ -17,6 +17,7 @@ from godotnext_metrics.image_metrics import q7_flip, q9_reflection_error, q10_gh
 from godotnext_metrics.indirect import (
     q1_indirect_diffuse_error,
     q1_patch_error,
+    q1_reference_check,
     q3_leak_ratio,
     q4a_step_convergence,
     q4b_continuous_convergence,
@@ -79,6 +80,28 @@ def test_q1_fails_on_a_large_error_and_on_a_short_reference() -> None:
     short = q1_indirect_diffuse_error([1.0], [1.0], spp=100, per_patch_relative_se=[0.0])
     assert short.value == 0.0
     assert not short.passed
+
+
+def test_q1_reference_rule_names_each_rejection() -> None:
+    accepted = q1_reference_check([1.0, 0.5], spp=4096, per_patch_relative_se=[0.01, 0.002])
+    assert accepted.passed
+    assert accepted.details["reference_reason"] == ""
+    short = q1_reference_check([1.0], spp=4095, per_patch_relative_se=[0.0])
+    assert not short.passed
+    assert short.details["reference_reason"] == "reference spp 4095 is below 4096"
+    noisy = q1_reference_check([1.0], spp=8192, per_patch_relative_se=[0.0101])
+    assert not noisy.passed
+    assert noisy.details["reference_reason"] == "per-patch relative standard error 0.0101 is above 0.01"
+    assert not q1_reference_check([1.0, 1.0], spp=4096, per_patch_relative_se=[0.0]).passed
+    assert not q1_reference_check([1.0], spp=4096, per_patch_relative_se=[math.nan]).passed
+    assert not q1_reference_check([1.0], spp=None, per_patch_relative_se=[0.0]).passed
+    # The full Q1 result applies the same rule.
+    mismatched = q1_indirect_diffuse_error([1.0, 1.0], [1.0, 1.0], spp=4096, per_patch_relative_se=[0.0])
+    assert not mismatched.passed
+    assert mismatched.details["reference_reason"] == "per-patch relative standard error has 1 values for 2 patches"
+    q20 = q20_final_indirect([1.0], [1.0], spp=None, per_patch_relative_se=[0.0])
+    assert not q20.passed
+    assert q20.details["reference_reason"] == "reference spp is missing (need >= 4096)"
 
 
 def test_q2_pass_and_fail() -> None:

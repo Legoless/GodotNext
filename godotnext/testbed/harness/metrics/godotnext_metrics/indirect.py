@@ -53,7 +53,7 @@ def q1_indirect_diffuse_error(
     ref = np.asarray(l_ref, dtype=np.float64).reshape(-1)
     scene_mean = float(np.mean(ref)) if scene_mean_indirect is None else float(scene_mean_indirect)
     error = q1_patch_error(l_test, ref, scene_mean)
-    rejected, reason = _reference_rejection(spp, per_patch_relative_se, Q1_MIN_SPP, Q1_MAX_RELATIVE_SE)
+    rejected, reason = reference_rejection(spp, per_patch_relative_se, Q1_MIN_SPP, Q1_MAX_RELATIVE_SE, ref.size)
     return MetricResult(
         metric="Q1",
         value=error,
@@ -61,6 +61,35 @@ def q1_indirect_diffuse_error(
         passed=bool(error <= threshold and not rejected),
         values={"error": error, "scene_mean_indirect": scene_mean, "patches": int(ref.size)},
         details={"reference_rejected": rejected, "reference_reason": reason, "spp": spp},
+    )
+
+
+def q1_reference_check(
+    l_ref: ArrayLike,
+    *,
+    spp: int | None,
+    per_patch_relative_se: ArrayLike | None,
+) -> MetricResult:
+    """Q1's reference rule on its own (#263): at least 4096 spp, every per-patch relative SE at most 1%."""
+    ref = np.asarray(l_ref, dtype=np.float64).reshape(-1)
+    rejected, reason = reference_rejection(spp, per_patch_relative_se, Q1_MIN_SPP, Q1_MAX_RELATIVE_SE, ref.size)
+    worst: float | None = None
+    if per_patch_relative_se is not None:
+        errors = np.asarray(per_patch_relative_se, dtype=np.float64).reshape(-1)
+        if errors.size > 0:
+            worst = float(np.max(errors))
+    return MetricResult(
+        metric="Q1",
+        value=None,
+        threshold={"min_spp": Q1_MIN_SPP, "max_relative_se": Q1_MAX_RELATIVE_SE},
+        passed=not rejected,
+        values={
+            "patches": int(ref.size),
+            "spp": spp,
+            "max_relative_se": worst,
+            "scene_mean_indirect": float(np.mean(ref)) if ref.size else None,
+        },
+        details={"reference_only": True, "reference_rejected": rejected, "reference_reason": reason, "spp": spp},
     )
 
 
@@ -198,12 +227,14 @@ def _safe_ratio(numerator: NDArray[np.float64], denominator: NDArray[np.float64]
     return ratio
 
 
-def _reference_rejection(
+def reference_rejection(
     spp: int | None,
     per_patch_relative_se: ArrayLike | None,
     min_spp: int,
     max_se: float,
+    patch_count: int | None = None,
 ) -> tuple[bool, str]:
+    """Whether a reference fails Q1's rule, and the named reason. Q20 applies the same rule."""
     if spp is None:
         return True, f"reference spp is missing (need >= {min_spp})"
     if spp < min_spp:
@@ -213,6 +244,11 @@ def _reference_rejection(
     errors = np.asarray(per_patch_relative_se, dtype=np.float64).reshape(-1)
     if errors.size == 0:
         return True, "per-patch relative standard error is empty"
+    if patch_count is not None and errors.size != patch_count:
+        return True, f"per-patch relative standard error has {errors.size} values for {patch_count} patches"
+    if not bool(np.all(np.isfinite(errors))):
+        index = int(np.flatnonzero(~np.isfinite(errors))[0])
+        return True, f"per-patch relative standard error of patch {index} is not finite"
     worst = float(np.max(errors))
     if worst > max_se:
         return True, f"per-patch relative standard error {worst} is above {max_se}"

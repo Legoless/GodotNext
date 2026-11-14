@@ -18,14 +18,15 @@ from godotnext_metrics.result import MetricInputError, MetricResult
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python3 -m godotnext_metrics")
     parser.add_argument("metric", help="q1, q4a, q4b, … q21")
-    parser.add_argument("--in", dest="in_dir", required=True, help="capture directory")
+    parser.add_argument("--in", dest="in_dir", help="capture directory (q1 without it checks --ref alone)")
     parser.add_argument("--ref", dest="ref_dir", help="reference capture directory")
     parser.add_argument("--json", action="store_true", help="print the JSON result (this is also the default)")
     args = parser.parse_args(argv)
     _ = args.json
     reference = Path(args.ref_dir) if args.ref_dir else None
+    capture = Path(args.in_dir) if args.in_dir else None
     try:
-        result = run_metric(args.metric, Path(args.in_dir), reference)
+        result = run_metric(args.metric, capture, reference)
     except MetricInputError as exc:
         _emit(exc.to_result())
         return 2

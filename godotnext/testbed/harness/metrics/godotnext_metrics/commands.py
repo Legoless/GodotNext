@@ -9,6 +9,7 @@ files. ``docs/godotnext/metrics.md`` lists each one.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,7 @@ from godotnext_metrics.image_metrics import q7_flip, q9_reflection_error, q10_gh
 from godotnext_metrics.images import indexed_paths, read_exr, read_png
 from godotnext_metrics.indirect import (
     q1_indirect_diffuse_error,
+    q1_reference_check,
     q3_leak_ratio,
     q4a_step_convergence,
     q4b_continuous_convergence,
@@ -49,27 +51,32 @@ from godotnext_metrics.timing_metrics import (
 
 SETTLING = 120
 MEASURED = 64
+# q1 with --ref and no --in checks the reference folder alone (#263).
+REFERENCE_ONLY = frozenset({"q1"})
 
 
-def run_metric(metric: str, in_dir: Path, ref_dir: Path | None) -> MetricResult:
+def run_metric(metric: str, in_dir: Path | None, ref_dir: Path | None) -> MetricResult:
     key = metric.strip().lower()
     if key not in COMMANDS:
         known = ", ".join(sorted(COMMANDS))
         raise MetricInputError(metric, f"unknown metric {metric!r}; expected one of {known}")
-    return COMMANDS[key](in_dir, ref_dir)
+    if in_dir is None and key not in REFERENCE_ONLY:
+        raise MetricInputError(metric, "--in is required")
+    return COMMANDS[key](in_dir, ref_dir)  # type: ignore[arg-type]
 
 
-def run_q1(in_dir: Path, ref_dir: Path | None) -> MetricResult:
+def run_q1(in_dir: Path | None, ref_dir: Path | None) -> MetricResult:
     reference = _need_ref("Q1", ref_dir)
-    test_l = _average_window(_indirect_series(in_dir, "patches_q1.json", "Q1"), "Q1")
-    ref_l = _average_window(_indirect_series(reference, "patches_q1.json", "Q1"), "Q1")
+    ref_ids = _patch_ids(reference, "patches_q1.json", "Q1")
+    ref_l = _reference_average(_indirect_series(reference, "patches_q1.json", "Q1"))
     meta = _read_json(reference / "reference.json", "Q1")
-    return q1_indirect_diffuse_error(
-        test_l,
-        ref_l,
-        spp=_optional_int(meta.get("spp")),
-        per_patch_relative_se=_se_vector(meta, test_l.shape[0]),
-    )
+    spp = _optional_int(meta.get("spp"))
+    se = _se_vector(meta, len(ref_ids))
+    if in_dir is None:
+        return q1_reference_check(ref_l, spp=spp, per_patch_relative_se=se)
+    _same_patches(_patch_ids(in_dir, "patches_q1.json", "Q1"), ref_ids, "Q1")
+    test_l = _average_window(_indirect_series(in_dir, "patches_q1.json", "Q1"), "Q1")
+    return q1_indirect_diffuse_error(test_l, ref_l, spp=spp, per_patch_relative_se=se)
 
 
 def run_q2(in_dir: Path, ref_dir: Path | None) -> MetricResult:
@@ -301,8 +308,9 @@ def run_q19(in_dir: Path, ref_dir: Path | None) -> MetricResult:
 
 def run_q20(in_dir: Path, ref_dir: Path | None) -> MetricResult:
     reference = _need_ref("Q20", ref_dir)
+    _same_patches(_patch_ids(in_dir, "patches_q1.json", "Q20"), _patch_ids(reference, "patches_q1.json", "Q20"), "Q20")
     test_l = _average_window(_indirect_series(in_dir, "patches_q1.json", "Q20"), "Q20")
-    ref_l = _average_window(_indirect_series(reference, "patches_q1.json", "Q20"), "Q20")
+    ref_l = _reference_average(_indirect_series(reference, "patches_q1.json", "Q20"))
     meta = _read_json(reference / "reference.json", "Q20")
     bins = _roughness_bins(in_dir, reference)
     return q20_final_indirect(
@@ -483,6 +491,23 @@ def _average_window(series: dict[int, NDArray[np.float64]], metric: str) -> NDAr
     return np.mean(_window_matrix(series, metric), axis=0)
 
 
+def _reference_average(series: dict[int, NDArray[np.float64]]) -> NDArray[np.float64]:
+    """A reference with the 64-frame window averages it. A path-traced reference (#263)
+    holds one accumulated frame, so a reference without the window averages every frame."""
+    window = [series[index] for index in range(SETTLING, SETTLING + MEASURED) if index in series]
+    if len(window) == MEASURED:
+        return np.mean(np.stack(window, axis=0), axis=0)
+    return _mean_over_frames(series)
+
+
+def _same_patches(test_ids: list[int], ref_ids: list[int], metric: str) -> None:
+    # Patch values pair by position, so both folders must list the same patches in the same order.
+    if test_ids != ref_ids:
+        raise MetricInputError(
+            metric, f"test and reference patch lists differ ({len(test_ids)} and {len(ref_ids)} patches)"
+        )
+
+
 def _window_matrix(series: dict[int, NDArray[np.float64]], metric: str) -> NDArray[np.float64]:
     frames = [series[index] for index in range(SETTLING, SETTLING + MEASURED) if index in series]
     if len(frames) != MEASURED:
@@ -576,13 +601,15 @@ def _counters(directory: Path, metric: str) -> dict[str, object]:
 
 
 def _se_vector(meta: dict[str, object], count: int) -> list[float] | None:
+    # A null or missing entry is not finite, so the reference is rejected (#263).
     raw = meta.get("per_patch_relative_se")
     if raw is None:
         return None
     if isinstance(raw, list):
-        return [float(value) for value in raw]
+        return [math.nan if value is None else float(value) for value in raw]
     if isinstance(raw, dict):
-        return [float(raw[str(index)]) if str(index) in raw else float(raw.get(index, 0.0)) for index in range(count)]
+        values = [raw.get(str(index)) for index in range(count)]
+        return [math.nan if value is None else float(value) for value in values]
     raise MetricInputError("Q1", "per_patch_relative_se must be a list or an object")
 
 

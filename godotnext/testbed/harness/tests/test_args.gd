@@ -4,6 +4,7 @@ extends SceneTree
 
 const ArgsScript = preload("res://harness/args.gd")
 const ManifestScript = preload("res://harness/manifest.gd")
+const ReferencePTScript = preload("res://harness/reference_pt.gd")
 
 var _failures := 0
 
@@ -16,6 +17,8 @@ func _initialize() -> void:
 	_test_timing_fields()
 	_test_animation_frame()
 	_test_capture_environment()
+	_test_reference_pt_args()
+	_test_reference_pt_statistics()
 	if _failures == 0:
 		print("test_args: ok")
 		quit(0)
@@ -386,3 +389,82 @@ func _test_capture_environment() -> void:
 	harness_script.apply_capture_environment(fogless)
 	_check(not fogless.fog_enabled, "capture leaves fogless scenes fogless")
 	_check(not fogless.volumetric_fog_enabled, "capture leaves volumetric fogless scenes fogless")
+
+
+## --reference=pt (#263): the path-traced scene reference.
+func _test_reference_pt_args() -> void:
+	var base := ["--mode=capture", "--scene=res://scenes/color_box_room/cbr_a.tscn", "--out=/tmp/out", "--camera=CovCam0"]
+	var reference: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--reference=pt"]))
+	_check(bool(reference["ok"]), "--reference=pt parses without --frames: %s" % reference["error"])
+	if bool(reference["ok"]):
+		var args: Dictionary = reference["args"]
+		_check(String(args["reference"]) == "pt", "pt reference parsed")
+		_check(int(args["spp"]) == 4096, "--spp defaults to 4096")
+		_check(int(args["frames"]) == 1, "pt frames default to 1")
+	var short: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--reference=pt", "--spp=512", "--hold-frame=32"]))
+	_check(bool(short["ok"]) and int(short["args"]["spp"]) == 512, "--spp=512 parses")
+	if bool(short["ok"]):
+		_check(int(short["args"]["hold_frame"]) == 32, "pt keeps --hold-frame")
+	for bad_spp in ["--spp=0", "--spp=100", "--spp=4000", "--spp=-512", "--spp=many"]:
+		var parsed: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--reference=pt", bad_spp]))
+		_check(not bool(parsed["ok"]) and String(parsed["error"]) == "--spp must be a positive multiple of 512", "%s fails" % bad_spp)
+	var stray: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--frames=1", "--spp=4096"]))
+	_check(not bool(stray["ok"]) and String(stray["error"]) == "--spp requires --reference=pt", "--spp without pt fails")
+	var unknown: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--frames=1", "--reference=lightmap"]))
+	_check(not bool(unknown["ok"]) and String(unknown["error"]) == "--reference must be ssaa or pt", "unknown reference fails")
+	var timing: Dictionary = ArgsScript.parse(PackedStringArray([
+		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--reference=pt",
+	]))
+	_check(not bool(timing["ok"]) and String(timing["error"]) == "--reference=pt requires --mode=capture", "pt timing fails")
+	for flag in ["--upscaler=fsr2", "--msaa=8", "--scale=0.5", "--mask=alpha_particles", "--capture-frames=0", "--velocity-dump"]:
+		var parsed: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--reference=pt", flag]))
+		_check(not bool(parsed["ok"]) and String(parsed["error"]).ends_with("does not apply to --reference=pt"), "%s with pt fails" % flag)
+	var ssaa_script = load("res://harness/ssaa_reference.gd")
+	_check(ssaa_script._has_upscaler_or_reference_flags(reference["args"]), "pt keeps SSAAReference on for native 1x")
+	_check(ReferencePTScript.q1_patch_path("res://scenes/color_box_room/cbr_a.tscn") == "res://scenes/color_box_room/cbr_a_patches_q1.json", "patch file next to the scene")
+
+
+func _test_reference_pt_statistics() -> void:
+	# A disc of radius 0.25 at z = -2 facing the camera.
+	var center := Vector3(0, 0, -2)
+	var normal := Vector3(0, 0, 1)
+	_check(is_equal_approx(ReferencePTScript.disc_hit_distance(Vector3.ZERO, Vector3(0, 0, -1), center, normal, 0.25), 2.0), "disc hit at its center")
+	_check(ReferencePTScript.disc_hit_distance(Vector3.ZERO, Vector3(0.2, 0, -1).normalized(), center, normal, 0.25) < 0.0, "ray outside the radius misses")
+	_check(ReferencePTScript.disc_hit_distance(Vector3(0, 0, -4), Vector3(0, 0, 1), center, normal, 0.25) < 0.0, "the back of a disc is not a hit")
+	_check(ReferencePTScript.disc_hit_distance(Vector3(0, 0, -3), Vector3(0, 0, -1), center, normal, 0.25) < 0.0, "a disc behind the ray is not a hit")
+
+	var ids := PackedInt32Array([-1, 0, 255, 300])
+	var bytes := ReferencePTScript.encode_mask(ids)
+	_check(bytes.size() == 12, "mask has three bytes per pixel")
+	_check(bytes[0] == 0 and bytes[1] == 0, "no patch encodes 0")
+	_check(bytes[3] == 1 and bytes[4] == 0, "patch 0 encodes 1")
+	_check(bytes[6] == 0 and bytes[7] == 1, "patch 255 encodes 256")
+	_check(bytes[9] + 256 * bytes[10] == 301, "patch 300 encodes 301")
+
+	# Two pixels with sums (1, 1, 1) and (2, 2, 2) after 64 samples; luminance is linear.
+	var data := PackedFloat32Array([1, 1, 1, 64, 2, 2, 2, 64])
+	var sums := ReferencePTScript.patch_luminance_sums(data, [PackedInt32Array([0, 1])])
+	_check(is_equal_approx(sums[0], 3.0), "patch luminance sum is 3")
+	var image: Image = ReferencePTScript.mean_image(data, 2, 1, 2.0)
+	_check(image.get_format() == Image.FORMAT_RGBH, "reference image is half float")
+	_check(is_equal_approx(image.get_pixel(1, 0).r, 2.0 * 2.0 / 64.0), "mean times exposure")
+
+	# Checkpoint sums of one 2-pixel patch at 0, 32 and 64 samples of 32 each.
+	var checkpoints := [PackedFloat64Array([0.0]), PackedFloat64Array([64.0]), PackedFloat64Array([192.0])]
+	var means: Array = ReferencePTScript.batch_patch_means(checkpoints, [PackedInt32Array([0, 1])], 32, 1.0)
+	_check(means.size() == 2, "one mean per batch")
+	_check(is_equal_approx((means[0] as PackedFloat64Array)[0], 1.0), "batch 1 mean is 64 / (32 * 2)")
+	_check(is_equal_approx((means[1] as PackedFloat64Array)[0], 2.0), "batch 2 mean is 128 / (32 * 2)")
+
+	# Indirect batches 1.0 and 1.2 (direct 0.5): mean 1.1, SE = sqrt(0.02 / (2 - 1) / 2) = 0.1.
+	var full := [PackedFloat64Array([1.5, 0.5]), PackedFloat64Array([1.7, 0.5])]
+	var direct := [PackedFloat64Array([0.5, 0.5]), PackedFloat64Array([0.5, 0.5])]
+	var stats: Dictionary = ReferencePTScript.batch_statistics(full, direct)
+	var luminance: PackedFloat64Array = stats["luminance"]
+	var relative: Array = stats["relative_se"]
+	_check(is_equal_approx(luminance[0], 1.1), "indirect mean is full minus direct")
+	var expected := sqrt((0.01 + 0.01) / 1.0 / 2.0) / 1.1
+	_check(absf(float(relative[0]) - expected) < 1e-9, "relative SE is std / sqrt(batches) / mean")
+	_check(is_equal_approx(luminance[1], 0.0) and float(relative[1]) == 0.0, "zero indirect with no spread has zero SE")
+	var spread: Dictionary = ReferencePTScript.batch_statistics([PackedFloat64Array([0.6]), PackedFloat64Array([0.4])], [PackedFloat64Array([0.5]), PackedFloat64Array([0.5])])
+	_check((spread["relative_se"] as Array)[0] == null, "zero mean with spread has no finite relative SE")

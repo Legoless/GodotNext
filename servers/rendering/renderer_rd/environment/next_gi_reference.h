@@ -57,6 +57,60 @@ _FORCE_INLINE_ uint32_t nextgi_reference_shader_mode(int p_reference_mode) {
 	return p_reference_mode > 1 ? uint32_t(p_reference_mode - 1) : 0u;
 }
 
+// GodotNext: nextgi_reference_capture (#263). The accumulation restarts when this key changes. A scene
+// reload keeps the seed, the mode, the instance count and the camera origin, so the key also carries an
+// explicit epoch (debug/reference_epoch), the whole camera transform and projection, the sky, and a hash
+// of the instance transforms and the material and light tables the estimator reads.
+struct NextGIReferenceResetKey {
+	uint32_t seed = 1;
+	uint32_t mode = 0;
+	uint32_t epoch = 0;
+	uint32_t instance_count = 0;
+	Transform3D camera;
+	Projection projection;
+	Color sky;
+	uint64_t tables = 0;
+};
+
+// FNV-1a, one byte at a time.
+_FORCE_INLINE_ uint64_t nextgi_reference_hash_bytes(uint64_t p_hash, const void *p_data, size_t p_size) {
+	const uint8_t *bytes = static_cast<const uint8_t *>(p_data);
+	for (size_t i = 0; i < p_size; i++) {
+		p_hash = (p_hash ^ bytes[i]) * 1099511628211ull;
+	}
+	return p_hash;
+}
+
+_FORCE_INLINE_ uint64_t nextgi_reference_hash_real(uint64_t p_hash, double p_value) {
+	return nextgi_reference_hash_bytes(p_hash, &p_value, sizeof(p_value));
+}
+
+_FORCE_INLINE_ uint64_t nextgi_reference_hash_transform(uint64_t p_hash, const Transform3D &p_transform) {
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) {
+			p_hash = nextgi_reference_hash_real(p_hash, p_transform.basis.rows[i][j]);
+		}
+		p_hash = nextgi_reference_hash_real(p_hash, p_transform.origin[i]);
+	}
+	return p_hash;
+}
+
+_FORCE_INLINE_ uint64_t nextgi_reference_reset_hash(const NextGIReferenceResetKey &p_key) {
+	uint64_t hash = 1469598103934665603ull;
+	const uint32_t words[4] = { p_key.seed, p_key.mode, p_key.epoch, p_key.instance_count };
+	hash = nextgi_reference_hash_bytes(hash, words, sizeof(words));
+	hash = nextgi_reference_hash_transform(hash, p_key.camera);
+	for (int i = 0; i < 4; i++) {
+		for (int j = 0; j < 4; j++) {
+			hash = nextgi_reference_hash_real(hash, p_key.projection.columns[i][j]);
+		}
+	}
+	hash = nextgi_reference_hash_real(hash, p_key.sky.r);
+	hash = nextgi_reference_hash_real(hash, p_key.sky.g);
+	hash = nextgi_reference_hash_real(hash, p_key.sky.b);
+	return nextgi_reference_hash_bytes(hash, &p_key.tables, sizeof(p_key.tables));
+}
+
 // GodotNext: nextgi_reference
 // One sample per frame into an RGBA32F sum/count image, then a composite into the HDR color.
 class NextGIReference {
@@ -86,6 +140,13 @@ class NextGIReference {
 	uint32_t cached_surface_count = 0;
 	uint32_t cached_light_count = 0;
 	RID estimator_buffer;
+	// GodotNext: nextgi_reference_capture (#263). Accumulation restarts so far, the hash of the
+	// instance transforms and the material and light tables, the exposure the composite applies,
+	// and the raw RGBA32F accumulation (radiance sum, sample count) the last readback saw.
+	uint32_t resets = 0;
+	uint64_t tables_hash = 0;
+	float exposure = 1.0f;
+	PackedByteArray read_accumulation;
 
 	bool _ensure_shader();
 	void _free_uniform_set();

@@ -158,6 +158,7 @@ void NextGIReference::free() {
 	tables_current = false;
 	samples = 0;
 	_nextgi_reference_samples = 0;
+	read_accumulation.clear();
 }
 
 Vector<String> NextGIReference::get_shader_variant_defines() {
@@ -217,19 +218,25 @@ bool NextGIReference::_refuse_without_hwrt() {
 }
 
 uint64_t NextGIReference::_scene_hash(const RenderDataRD *p_render_data) const {
-	uint64_t hash = uint64_t(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_seed"));
-	hash = hash * 16777619u ^ uint64_t(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode"));
+	// GodotNext: nextgi_reference_capture (#263). See NextGIReferenceResetKey.
+	NextGIReferenceResetKey key;
+	key.seed = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_seed")));
+	key.mode = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode")));
+	key.epoch = uint32_t(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_epoch")));
 	NextGI *next_gi = NextGI::get_singleton();
 	if (next_gi != nullptr && next_gi->get_rt_scene() != nullptr) {
-		hash = hash * 16777619u ^ next_gi->get_rt_scene()->get_stats().instance_count;
+		key.instance_count = next_gi->get_rt_scene()->get_stats().instance_count;
 	}
 	if (p_render_data != nullptr && p_render_data->scene_data != nullptr) {
-		const Vector3 origin = p_render_data->scene_data->cam_transform.origin;
-		hash = hash * 16777619u ^ uint64_t(origin.x * 100.0);
-		hash = hash * 16777619u ^ uint64_t(origin.y * 100.0);
-		hash = hash * 16777619u ^ uint64_t(origin.z * 100.0);
+		key.camera = p_render_data->scene_data->cam_transform;
+		key.projection = p_render_data->scene_data->cam_projection;
 	}
-	return hash;
+	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
+	if (scene != nullptr && p_render_data != nullptr && p_render_data->environment.is_valid()) {
+		key.sky = scene->environment_get_bg_color(p_render_data->environment) * scene->environment_get_bg_energy_multiplier(p_render_data->environment);
+	}
+	key.tables = tables_hash;
+	return nextgi_reference_reset_hash(key);
 }
 
 bool NextGIReference::_build_tables(const RenderDataRD *p_render_data, uint32_t &r_surface_count, uint32_t &r_light_count) {
@@ -242,6 +249,8 @@ bool NextGIReference::_build_tables(const RenderDataRD *p_render_data, uint32_t 
 	r_light_count = 0;
 	scene_invalid = false;
 	LocalVector<NextGIRefGPUMaterial> materials;
+	// GodotNext: nextgi_reference_capture (#263). Instance transforms feed the reset key.
+	uint64_t hash = 1469598103934665603ull;
 	const RendererSceneRender::RenderSDFGIUpdateData *update = p_render_data->sdfgi_update_data;
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (update != nullptr && update->nextgi_rt_instances != nullptr && mesh_storage != nullptr) {
@@ -250,6 +259,7 @@ bool NextGIReference::_build_tables(const RenderDataRD *p_render_data, uint32_t 
 			if (geometry == nullptr || geometry->data == nullptr) {
 				continue;
 			}
+			hash = nextgi_reference_hash_transform(hash, fed.has_rt_transform ? fed.rt_transform : geometry->transform);
 			const RID mesh = geometry->data->base;
 			if (!mesh_storage->owns_mesh(mesh)) {
 				continue;
@@ -356,6 +366,8 @@ bool NextGIReference::_build_tables(const RenderDataRD *p_render_data, uint32_t 
 	light_bytes.resize(lights.size() * sizeof(float));
 	memcpy(light_bytes.ptrw(), lights.ptr(), light_bytes.size());
 	light_buffer = rd->storage_buffer_create(light_bytes.size(), light_bytes);
+	hash = nextgi_reference_hash_bytes(hash, material_bytes.ptr(), material_bytes.size());
+	tables_hash = nextgi_reference_hash_bytes(hash, light_bytes.ptr(), light_bytes.size());
 	tables_current = material_buffer.is_valid() && light_buffer.is_valid();
 	cached_surface_count = r_surface_count;
 	cached_light_count = r_light_count;
@@ -424,11 +436,19 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	if (screen.x <= 0 || screen.y <= 0) {
 		return;
 	}
+	// GodotNext: nextgi_reference_capture (#263). The tables come first: their hash is part of the reset key.
+	uint32_t surface_count = 0;
+	uint32_t light_count = 0;
+	if (!_build_tables(p_render_data, surface_count, light_count) || scene_invalid) {
+		_nextgi_reference_samples = samples;
+		return;
+	}
 	const uint64_t hash = _scene_hash(p_render_data);
 	const bool reset = hash != scene_hash || uint32_t(screen.x) != width || uint32_t(screen.y) != height || !accumulation.is_valid();
 	if (reset) {
 		scene_hash = hash;
 		samples = 0;
+		resets++;
 		width = screen.x;
 		height = screen.y;
 		if (accumulation.is_valid()) {
@@ -455,12 +475,6 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 		distance_format.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		reflection_distance = rd->texture_create(distance_format, RD::TextureView());
 		rd->texture_clear(reflection_distance, Color(0, 0, 0, 0), 0, 1, 0, 1);
-	}
-	uint32_t surface_count = 0;
-	uint32_t light_count = 0;
-	if (!_build_tables(p_render_data, surface_count, light_count) || scene_invalid) {
-		_nextgi_reference_samples = samples;
-		return;
 	}
 	if (!dummy_buffer.is_valid()) {
 		dummy_buffer = rd->storage_buffer_create(16);
@@ -507,6 +521,7 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	if (p_render_data->camera_attributes.is_valid() && RSG::camera_attributes != nullptr) {
 		params.exposure = RSG::camera_attributes->camera_attributes_get_exposure_normalization_factor(p_render_data->camera_attributes);
 	}
+	exposure = params.exposure;
 	params.clear = reset ? 1.0f : 0.0f;
 	params.samples_per_pixel = 32.0f;
 	RendererSceneRenderRD *scene = RendererSceneRenderRD::get_singleton();
@@ -574,6 +589,8 @@ void NextGIReference::_readback() {
 	if (data.size() < pixels * 16) {
 		return;
 	}
+	// GodotNext: nextgi_reference_capture (#263). The harness reads the float32 sums for its batch statistics.
+	read_accumulation = data;
 	const float *texels = reinterpret_cast<const float *>(data.ptr());
 	double sum = 0.0;
 	float lo = 1.0e30f;
@@ -624,6 +641,12 @@ void NextGIReference::fill_info(Dictionary &r_info) const {
 	r_info["reference_height"] = int64_t(height);
 	if (!read_luminance.is_empty()) {
 		r_info["reference_luminance"] = read_luminance;
+	}
+	// GodotNext: nextgi_reference_capture (#263).
+	r_info["reference_resets"] = int64_t(resets);
+	r_info["reference_exposure"] = exposure;
+	if (!read_accumulation.is_empty()) {
+		r_info["reference_accumulation"] = read_accumulation;
 	}
 }
 
