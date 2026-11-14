@@ -632,11 +632,13 @@ bool NextGI::is_reflections_enabled() {
 	return bool(GLOBAL_GET("rendering/global_illumination/nextgi/reflections"));
 }
 
-NextGIWRC *NextGI::ensure_wrc() {
-	if (wrc == nullptr) {
-		wrc = memnew(NextGIWRC);
-	}
-	return wrc;
+// GodotNext: nextgi_wrc_per_view (#253). The WRC lives in the view's render buffers.
+NextGIWRC *NextGI::ensure_wrc(RenderSceneBuffersRD *p_render_buffers) {
+	return NextGIWRC::ensure_view_wrc(p_render_buffers);
+}
+
+NextGIWRC *NextGI::get_wrc(RenderSceneBuffersRD *p_render_buffers) const {
+	return NextGIWRC::get_view_wrc(p_render_buffers);
 }
 
 Dictionary NextGI::get_status() const {
@@ -992,9 +994,8 @@ Dictionary NextGI::get_tier_info() const {
 	if (swrt_trace != nullptr) {
 		swrt_trace->fill_info(info);
 	}
-	if (wrc != nullptr) {
-		wrc->fill_info(info);
-	}
+	// GodotNext: nextgi_wrc_per_view (#253). The views' WRCs, and the counters of the last update.
+	NextGIWRC::fill_views_info(info);
 	if (front_layer != nullptr) {
 		front_layer->fill_info(info);
 	}
@@ -1339,9 +1340,11 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	// Every slot emits its timestamp, also while it has no work yet.
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
-		const bool scenario_slot = slot == PASS_SLOT_AS_UPDATES || slot == PASS_SLOT_AS_BUILDS || slot == PASS_SLOT_SRC_CAPTURE || slot == PASS_SLOT_SRC_RELIGHT || slot == PASS_SLOT_WRC_UPDATE;
+		// GodotNext: nextgi_wrc_per_view (#253). The WRC update is per view (G3-8): each view traces
+		// its own WRC around its own camera.
+		const bool scenario_slot = nextgi_is_scenario_slot(slot);
 		if (scenario_slot && !new_scenario) {
-			// Secondary views reuse this frame's AS, SRC and WRC work.
+			// Secondary views reuse this frame's AS and SRC work.
 			continue;
 		}
 		RENDER_TIMESTAMP(nextgi_multiview_pass_name(PASS_SLOTS[slot].name, view_index, multiview));
@@ -1389,7 +1392,7 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 				ss_effects->build_hiz(buffers);
 			}
 		} else if (slot == PASS_SLOT_WRC_UPDATE) {
-			ensure_wrc()->update(p_render_data);
+			ensure_wrc(rb.ptr())->update(p_render_data);
 		} else if (slot == PASS_SLOT_DIFFUSE_GATHER) {
 			// GodotNext: ps_lumen_lite (#183). Lite records the empty gather and reflection slots.
 			if (!lite) {
@@ -1466,11 +1469,8 @@ NextGI::~NextGI() {
 		memdelete(reference);
 		reference = nullptr;
 	}
-	if (wrc != nullptr) {
-		wrc->free_resources();
-		memdelete(wrc);
-		wrc = nullptr;
-	}
+	// GodotNext: nextgi_wrc_per_view (#253). Every view's WRC and the shared update shaders.
+	NextGIWRC::free_all_resources();
 	if (relight != nullptr) {
 		memdelete(relight);
 		relight = nullptr;

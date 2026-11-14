@@ -3,7 +3,7 @@
 # irradiance-field gather) with two views rendering at once, on one tier.
 #
 # Usage:
-#   run_lite_two_views_check.sh [--hwrt=auto|off] [--deny-ray-query] [--case=kitbash|rooms|handoff|switch|all] \
+#   run_lite_two_views_check.sh [--hwrt=auto|off] [--deny-ray-query] [--case=kitbash|rooms|handoff|switch|far|all] [--quality=1|2] \
 #     -- <godot> <godot arguments without a scene>
 #
 # --hwrt=off (the default) runs the software tier, --hwrt=auto the device's pick: the hardware tier
@@ -12,8 +12,13 @@
 # The kitbash case is one run. The rooms case is four fresh runs: the lit room's view alone, the
 # dark room's view alone, then both views with the lit one first and with the dark one first,
 # which compare each view with its solo value. Solo values come from separate processes. The
-# handoff case (#254) is one run: the lit view stops, and the dark view must read dark again
-# within a few dozen frames, as the WRC's moved levels drop the old cells' history.
+# handoff case (#254) is one run: the view's camera moves from the lit room to the dark room, and
+# it must read dark again within a few dozen frames, as the WRC's moved levels drop the old cells'
+# history.
+#
+# The far case (#253) is four fresh runs: a view near the kitbash alone, a view 40 m away alone,
+# then both in either order; each view of a pair must stay within 10% of its solo lit share, as
+# each view keeps its own WRC. --quality=2 runs it at High instead of Lite (the other cases need Lite).
 #
 # Each run writes godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true,
 # quality 1, medium_gather 0, the hardware_ray_tracing mode and debug/deny_ray_query; it refuses
@@ -38,11 +43,13 @@ scene=res://tests/lite_two_views/lite_two_views_check.tscn
 hwrt=off
 deny=false
 case_name=all
+quality=1
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--hwrt=auto | --hwrt=off) hwrt="${1#--hwrt=}" ;;
 	--deny-ray-query) deny=true ;;
-	--case=kitbash | --case=rooms | --case=handoff | --case=switch | --case=all) case_name="${1#--case=}" ;;
+	--case=kitbash | --case=rooms | --case=handoff | --case=switch | --case=far | --case=all) case_name="${1#--case=}" ;;
+	--quality=1 | --quality=2) quality="${1#--quality=}" ;;
 	--)
 		shift
 		break
@@ -56,6 +63,10 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ $# -eq 0 ]]; then
 	echo "run_lite_two_views_check.sh: pass the Godot command after --" >&2
+	exit 2
+fi
+if [[ "$quality" != 1 && "$case_name" != far ]]; then
+	echo "run_lite_two_views_check.sh: --quality=$quality runs only the far case (the others need Lite)" >&2
 	exit 2
 fi
 if [[ "$deny" == true && "$hwrt" != auto ]]; then
@@ -92,7 +103,7 @@ run_scene() {
 
 global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=$hwrt_value
-global_illumination/nextgi/quality=1
+global_illumination/nextgi/quality=$quality
 global_illumination/nextgi/medium_gather=0
 global_illumination/nextgi/debug/deny_ray_query=$deny
 CFG
@@ -137,6 +148,19 @@ fi
 
 if [[ "$case_name" == switch || "$case_name" == all ]]; then
 	run_scene quality_switch --case=switch
+fi
+
+if [[ "$case_name" == far || "$case_name" == all ]]; then
+	run_scene far_near --case=far --views=near
+	near_solo=$(sed -n 's/^LITE_TWO_VIEWS_FAR_SOLO view=near lit=\([0-9.]*\).*/\1/p' "$log" | head -n 1)
+	run_scene far_far --case=far --views=far
+	far_solo=$(sed -n 's/^LITE_TWO_VIEWS_FAR_SOLO view=far lit=\([0-9.]*\).*/\1/p' "$log" | head -n 1)
+	if [[ -z "$near_solo" || -z "$far_solo" ]]; then
+		echo "run_lite_two_views_check.sh: a far solo run printed no value; the pairs cannot run" >&2
+		exit 1
+	fi
+	run_scene far_near_first --case=far --views=near,far --near-solo="$near_solo" --far-solo="$far_solo"
+	run_scene far_far_first --case=far --views=far,near --near-solo="$near_solo" --far-solo="$far_solo"
 fi
 
 exit "$failed"

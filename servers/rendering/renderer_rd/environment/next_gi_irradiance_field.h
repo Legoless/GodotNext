@@ -112,9 +112,9 @@ public:
 	// as RenderSceneDataRD does for the scene UBO. p_wrc_field: the WRC textures are bound,
 	// so the probes take the WRC's depth-moment visibility and its mips (camera.w = 1).
 	// p_grid_camera is the camera the probe grid snaps to: the WRC's grid camera
-	// (NextGIWRC::get_grid_camera()) while the field is bound, since the WRC updates once per
-	// frame from the frame's first view and the pack copies its probes by grid cell. The
-	// camera position (camera.xyz) stays this view's.
+	// (NextGIWRC::get_grid_camera()) while the field is bound, since the pack copies the
+	// view's WRC probes by grid cell (#253). The camera position (camera.xyz) stays the
+	// unsnapped camera.
 	static Params build_params(const Projection &p_cam_projection, const Transform3D &p_cam_transform, bool p_flip_y, const Vector2 &p_taa_jitter, const Size2i &p_gi_size, const Size2i &p_half_size, const Size2i &p_internal_size, bool p_depth_valid, bool p_normal_valid, bool p_wrc_field, const Vector3 &p_grid_camera);
 
 	NextGIIrradianceField();

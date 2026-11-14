@@ -863,7 +863,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 			hit_radiance_reference = true;
 		}
 	}
-	NextGIWRC *wrc = next_gi->get_wrc();
+	NextGIWRC *wrc = next_gi->get_wrc(p_render_data->render_buffers.ptr());
 	RID wrc_radiance = dummy_color;
 	RID wrc_visibility = dummy_color;
 	RID wrc_params = dummy_buffer;

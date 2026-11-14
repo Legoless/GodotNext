@@ -1,9 +1,9 @@
 extends Node3D
 
-## #183, #186: Lumen Lite with two views rendering at once. Each view integrates its own field in
-## the frame block after its depth prepass, and reads the probes the scenario's WRC traced: the
-## WRC updates once per frame, from the frame's first view, so every other view must read them on
-## that view's grid. run_lite_two_views_check.sh runs both cases on one tier.
+## #183, #186, #253: Lumen Lite with two views rendering at once. Each view integrates its own field
+## in the frame block after its depth prepass, and reads the probes its own WRC traced: each view
+## keeps a WRC in its render buffers (#253), on a grid that follows its own camera.
+## run_lite_two_views_check.sh runs the cases on one tier.
 ##
 ## --case=kitbash: the root view and a SubViewport, 12 m apart (inside WRC level 1 of each other,
 ## outside level 0), at yaw +30 and -30 degrees, over the kitbash (the PS smoke scene). After
@@ -33,12 +33,21 @@ extends Node3D
 ## of its own with the dark view first, on both tiers. The solo runs assert the scene separates the rooms:
 ## L >= MIN_ROOM_LIT and D <= MAX_DARK_RATIO x L.
 ##
-## --case=handoff (#254): the same rooms with the lit view first and the dark view second, so the
-## WRC's grid follows the lit camera. After the rooms settle, the lit view's patch is sampled and
-## the lit view is freed; the grid snaps to the dark camera a cell away. Within HANDOFF_FRAMES the
-## dark view's patch must read at most MAX_DARK_RATIO of the lit one: the moved levels re-trace
-## without the history their cells held at the old position. Before #254 the dark room still read
-## 0.26 of the lit room 400 frames later.
+## --case=handoff (#254): the same rooms with one view, over the lit room. After the rooms settle,
+## its patch is sampled and its camera moves to the dark room's camera position; its WRC's grid
+## snaps a cell away. Within HANDOFF_FRAMES the patch must read at most MAX_DARK_RATIO of the lit
+## one: the moved levels re-trace without the history their cells held at the old position. Before
+## #254, when a second view over the dark room took the grid over, the dark room still read 0.26
+## of the lit room 400 frames later; since #253 that second view keeps its own WRC, so the move
+## comes from one camera.
+##
+## --case=far (#253): two views over the kitbash, FAR_DISTANCE apart: one where the kitbash case's
+## root view stands, one far west of it looking back. --views=near or --views=far renders one alone
+## and prints "LITE_TWO_VIEWS_FAR_SOLO view=<view> lit=<value>", the view's lit share of its
+## denoised ambient averaged over FAR_SAMPLES frames (at least MIN_FAR_LIT). --views=near,far or
+## far,near renders both with --near-solo and --far-solo, and each must stay within FAR_TOLERANCE
+## of its solo value; the tier info must count one WRC per view (wrc_views). With one WRC for the
+## scenario, the far view's grid left the near view's surroundings outside the probes.
 ##
 ## --case=switch (#256): the kitbash with its two views at Medium (Lite), then the project's
 ## quality switched to High: after SWITCH_FRAMES no view holds a Lite field (lite_view_fields 0).
@@ -70,12 +79,19 @@ const LIT_LUMA := 0.002
 const ROOM_TOLERANCE := 0.1
 const MIN_ROOM_LIT := 0.01
 const MAX_DARK_RATIO := 0.05
-## Frames after the handoff before the dark view is sampled: one fresh WRC cycle (32 frames) and
+## Frames after the camera move before the dark room is sampled: one fresh WRC cycle (32 frames) and
 ## the Lite fields' packing after it.
 const HANDOFF_FRAMES := 64
 ## Frames a quality switch is given before lite_view_fields is read (#256).
 const SWITCH_FRAMES := 8
 const QUALITY_SETTING := "rendering/global_illumination/nextgi/quality"
+## #253: the far case's views, 40 m apart over the kitbash, and how far a pair's view may move from
+## its solo value (a fraction of that value).
+const FAR_VIEW_SIZE := Vector2i(640, 360)
+const FAR_DISTANCE := 40.0
+const FAR_TOLERANCE := 0.1
+const FAR_SAMPLES := 30
+const MIN_FAR_LIT := 0.2
 const PROBES_PER_FRAME := 512
 const PROBE_COUNT := 8192
 const WALL := 0.4
@@ -86,6 +102,9 @@ var expected_tier := ""
 var room_views := PackedStringArray()
 var lit_solo := -1.0
 var dark_solo := -1.0
+var near_solo := -1.0
+var far_solo := -1.0
+var _far_lit := {}
 var deny_ray_query := false
 
 var _views := {}
@@ -115,6 +134,10 @@ func _ready() -> void:
 			lit_solo = float(arg.trim_prefix("--lit-solo="))
 		elif arg.begins_with("--dark-solo="):
 			dark_solo = float(arg.trim_prefix("--dark-solo="))
+		elif arg.begins_with("--near-solo="):
+			near_solo = float(arg.trim_prefix("--near-solo="))
+		elif arg.begins_with("--far-solo="):
+			far_solo = float(arg.trim_prefix("--far-solo="))
 	deny_ray_query = bool(ProjectSettings.get_setting("rendering/global_illumination/nextgi/debug/deny_ray_query", false))
 	if expected_tier == "device":
 		var device := RenderingServer.get_rendering_device()
@@ -128,7 +151,7 @@ func _ready() -> void:
 	elif case_name == "switch":
 		_build_kitbash()
 	elif case_name == "handoff":
-		room_views = PackedStringArray(["lit", "dark"])
+		room_views = PackedStringArray(["lit"])
 		_build_rooms()
 	elif case_name == "rooms":
 		if room_views.is_empty() or room_views.size() > 2:
@@ -142,8 +165,20 @@ func _ready() -> void:
 			_finish_with("a pair needs two different views and --lit-solo and --dark-solo")
 			return
 		_build_rooms()
+	elif case_name == "far":
+		if room_views.is_empty() or room_views.size() > 2:
+			_finish_with("--views must list one or two of near and far")
+			return
+		for view in room_views:
+			if view != "near" and view != "far":
+				_finish_with("--views must list one or two of near and far, got %s" % view)
+				return
+		if room_views.size() == 2 and (room_views[0] == room_views[1] or near_solo < 0.0 or far_solo < 0.0):
+			_finish_with("a pair needs two different views and --near-solo and --far-solo")
+			return
+		_build_far()
 	else:
-		_finish_with("--case must be kitbash, rooms, handoff or switch")
+		_finish_with("--case must be kitbash, rooms, handoff, switch or far")
 
 
 func _make_sub_view(p_size: Vector2i, p_update_mode := SubViewport.UPDATE_ALWAYS) -> SubViewport:
@@ -168,8 +203,7 @@ func _build_kitbash() -> void:
 		_environment = world.environment.duplicate()
 		_environment.nextgi_enabled = true
 		world.environment = _environment
-	# The SubViewport shares the root's World3D. SubViewports render before the root viewport,
-	# so it is the frame's first view and the root view reads the probes on its grid.
+	# The SubViewport shares the root's World3D; each view keeps its own WRC (#253).
 	_sub_view = _make_sub_view(SUB_VIEW_SIZE)
 	var sub_camera := Camera3D.new()
 	sub_camera.fov = 70.0
@@ -190,6 +224,64 @@ func _build_kitbash() -> void:
 	_views["sub"] = _sub_view
 
 
+# #253: the near view where the kitbash case's root view stands, the far one FAR_DISTANCE west of it
+# looking back at the kitbash. Each is a SubViewport; the root viewport renders no 3D (the kitbash
+# scene brings a camera), so the only views are the ones under test.
+func _build_far() -> void:
+	get_viewport().disable_3d = true
+	var packed: PackedScene = load(KITBASH_SCENE)
+	var root := packed.instantiate()
+	add_child(root)
+	var world := root.get_node_or_null("WorldEnvironment") as WorldEnvironment
+	if world != null and world.environment != null:
+		_environment = world.environment.duplicate()
+		_environment.nextgi_enabled = true
+		world.environment = _environment
+	for view in room_views:
+		var viewport := _make_sub_view(FAR_VIEW_SIZE)
+		var camera := Camera3D.new()
+		camera.fov = 70.0
+		viewport.add_child(camera)
+		if view == "near":
+			camera.position = Vector3(6.0, 2.5, 10.0)
+			camera.rotation_degrees = Vector3(-12.0, 30.0, 0.0)
+		else:
+			camera.position = Vector3(6.0 - FAR_DISTANCE, 4.0, 10.0)
+			camera.look_at(Vector3(0.0, 1.0, 0.0))
+		camera.current = true
+		_views[view] = viewport
+		_far_lit[view] = PackedFloat32Array()
+
+
+# Each view's lit share of its denoised ambient, averaged over FAR_SAMPLES frames after the warmup.
+# Alone, it prints its value; in a pair, each view must stay within FAR_TOLERANCE of its solo value.
+func _process_far() -> void:
+	if _frames <= WARMUP_FRAMES:
+		return
+	# Packed arrays are values: append to a copy and store it back.
+	for view in room_views:
+		var values: PackedFloat32Array = _far_lit[view]
+		values.append(float(_field_stats(_views[view])["lit_fraction"]))
+		_far_lit[view] = values
+	if (_far_lit[room_views[0]] as PackedFloat32Array).size() < FAR_SAMPLES:
+		return
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	_check(String(info.get("tier", "")) == expected_tier, "tier is %s, expected %s" % [String(info.get("tier", "")), expected_tier])
+	_summary["wrc_views"] = int(info.get("wrc_views", -1))
+	_check(int(info.get("wrc_views", -1)) == room_views.size(), "%d views keep %d WRCs, expected one each" % [room_views.size(), int(info.get("wrc_views", -1))])
+	for view in room_views:
+		var lit := _mean(_far_lit[view])
+		_summary[view] = lit
+		if room_views.size() == 1:
+			print("LITE_TWO_VIEWS_FAR_SOLO view=%s lit=%.6f quality=%s" % [view, lit, String(info.get("quality", ""))])
+			_check(lit >= MIN_FAR_LIT, "the %s view alone is lit on %.3f of its samples, below %.2f: the comparison would see nothing" % [view, lit, MIN_FAR_LIT])
+		else:
+			var solo := near_solo if view == "near" else far_solo
+			print("LITE_TWO_VIEWS_FAR_PAIR view=%s lit=%.6f solo=%.6f order=%s" % [view, lit, solo, ",".join(room_views)])
+			_check(absf(lit - solo) <= FAR_TOLERANCE * solo, "the %s view is lit on %.3f of its samples beside the other view, against %.3f alone (more than %.0f%% apart)" % [view, lit, solo, FAR_TOLERANCE * 100.0])
+	_finish()
+
+
 func _box(p_root: Node3D, p_center: Vector3, p_size: Vector3) -> void:
 	var mesh := BoxMesh.new()
 	mesh.size = p_size
@@ -201,15 +293,13 @@ func _box(p_root: Node3D, p_center: Vector3, p_size: Vector3) -> void:
 
 
 func _build_rooms() -> void:
-	# Created in render order: the first view renders first and updates the WRC.
+	# Created in render order.
 	for view in room_views:
 		var viewport := _make_sub_view(ROOM_VIEW_SIZE)
 		var camera := Camera3D.new()
 		camera.fov = 60.0
 		viewport.add_child(camera)
-		var side := -1.0 if view == "lit" else 1.0
-		var target := Vector3(side * (WALL * 0.5 + FLOOR_OFFSET), 0.0, 0.0)
-		camera.look_at_from_position(target + Vector3(0.0, 1.2, 0.0), target, Vector3(0.0, 0.0, -1.0))
+		_place_room_camera(camera, view)
 		camera.current = true
 		_views[view] = viewport
 	# Both SubViewports share the root's World3D; the root viewport has no camera.
@@ -327,6 +417,8 @@ func _process(_delta: float) -> void:
 		_process_kitbash()
 	elif case_name == "switch":
 		_process_switch()
+	elif case_name == "far":
+		_process_far()
 	else:
 		_process_rooms()
 
@@ -454,7 +546,14 @@ func _process_rooms() -> void:
 			_process_handoff_dark()
 
 
-# GodotNext: #254. The lit view's patch, then the handoff to the dark view alone.
+# A room view's camera looks down at its room's floor, FLOOR_OFFSET from the wall.
+func _place_room_camera(p_camera: Camera3D, p_view: String) -> void:
+	var side := -1.0 if p_view == "lit" else 1.0
+	var target := Vector3(side * (WALL * 0.5 + FLOOR_OFFSET), 0.0, 0.0)
+	p_camera.look_at_from_position(target + Vector3(0.0, 1.2, 0.0), target, Vector3(0.0, 0.0, -1.0))
+
+
+# GodotNext: #254. The lit room's patch, then the view's camera moves over the dark room.
 func _process_handoff_lit() -> void:
 	if (_phase_frame - ROOM_MEASURE_FRAMES) % ROOM_SAMPLE_STRIDE != 0:
 		return
@@ -464,7 +563,9 @@ func _process_handoff_lit() -> void:
 	if values.size() < ROOM_SAMPLES:
 		return
 	_summary["lit_luma"] = _mean(values)
-	(_views["lit"] as SubViewport).queue_free()
+	var viewport := _views["lit"] as SubViewport
+	_place_room_camera(viewport.get_camera_3d(), "dark")
+	_views["dark"] = viewport
 	_views.erase("lit")
 	_next_phase()
 
@@ -482,7 +583,7 @@ func _process_handoff_dark() -> void:
 	_summary["dark_luma_after_handoff"] = dark
 	print("LITE_TWO_VIEWS_HANDOFF lit=%.6f dark=%.6f ratio=%.4f frames_after=%d" % [lit, dark, dark / maxf(lit, 1e-9), _phase_frame])
 	_check(lit >= MIN_ROOM_LIT, "the lit room's ambient (%.6f) is below %.3f: the comparison would see nothing" % [lit, MIN_ROOM_LIT])
-	_check(dark <= MAX_DARK_RATIO * lit, "%d frames after the lit view stopped, the dark room reads %.6f, %.3f of the lit room's %.6f (at most %.2f)" % [HANDOFF_FRAMES, dark, dark / maxf(lit, 1e-9), lit, MAX_DARK_RATIO])
+	_check(dark <= MAX_DARK_RATIO * lit, "%d frames after the camera moved, the dark room reads %.6f, %.3f of the lit room's %.6f (at most %.2f)" % [HANDOFF_FRAMES, dark, dark / maxf(lit, 1e-9), lit, MAX_DARK_RATIO])
 	_finish()
 
 

@@ -149,6 +149,13 @@ static HashMap<uint64_t, NextGIWRC *> nextgi_wrc_counter_registry;
 static uint64_t nextgi_wrc_counter_next_token = 1;
 
 NextGIWRC *NextGIWRC::singleton = nullptr;
+NextGIWRC::ShaderState *NextGIWRC::shared_shader = nullptr;
+NextGIWRC::SWRTShaderState *NextGIWRC::shared_swrt_shader = nullptr;
+
+// GodotNext: nextgi_wrc_per_view (#253). Every live WRC (render thread), the shared update
+// shaders, and the WRC whose counters the tier info reports.
+static LocalVector<NextGIWRC *> nextgi_wrc_live;
+static NextGIWRC *nextgi_wrc_last_updated = nullptr;
 
 namespace RendererRD {
 
@@ -182,6 +189,12 @@ uint32_t nextgi_wrc_shifted_levels(const Vector3 &p_previous_origin, const Vecto
 		}
 	}
 	return shifted;
+}
+
+// GodotNext: nextgi_wrc_per_view (#253). A probe's first trace takes no history (its offset texel
+// is still clear), so one full pass leaves every probe complete.
+uint32_t nextgi_wrc_probes_to_trace(bool p_had_previous) {
+	return p_had_previous ? uint32_t(NEXTGI_WRC_PROBES_PER_FRAME) : uint32_t(NEXTGI_WRC_PROBE_COUNT);
 }
 
 void nextgi_wrc_mark_fresh(uint32_t p_shifted_levels, uint32_t r_fresh_frames[4]) {
@@ -260,6 +273,7 @@ NextGIWRC::NextGIWRC() {
 	if (singleton == nullptr) {
 		singleton = this;
 	}
+	nextgi_wrc_live.push_back(this);
 }
 
 NextGIWRC::~NextGIWRC() {
@@ -273,6 +287,10 @@ NextGIWRC::~NextGIWRC() {
 	}
 	if (singleton == this) {
 		singleton = nullptr;
+	}
+	nextgi_wrc_live.erase(this);
+	if (nextgi_wrc_last_updated == this) {
+		nextgi_wrc_last_updated = nullptr;
 	}
 }
 
@@ -305,14 +323,8 @@ void NextGIWRC::_free_uniform_set() {
 
 void NextGIWRC::free_resources() {
 	_free_uniform_set();
-	// GodotNext: ps_swrt_trace (#186)
-	if (swrt_shader != nullptr) {
-		if (swrt_shader->version.is_valid()) {
-			swrt_shader->shader.version_free(swrt_shader->version);
-		}
-		memdelete(swrt_shader);
-		swrt_shader = nullptr;
-	}
+	// GodotNext: nextgi_wrc_per_view (#253). The update shaders are shared: free_shared() frees them.
+	swrt_shader = nullptr;
 	{
 		MutexLock lock(nextgi_wrc_counter_mutex);
 		if (counter_token != 0) {
@@ -322,13 +334,7 @@ void NextGIWRC::free_resources() {
 		counters_pending = false;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
-	if (shader != nullptr) {
-		if (shader->version.is_valid()) {
-			shader->shader.version_free(shader->version);
-		}
-		memdelete(shader);
-		shader = nullptr;
-	}
+	shader = nullptr;
 	if (rd == nullptr) {
 		return;
 	}
@@ -377,6 +383,9 @@ void NextGIWRC::free_resources() {
 	dummy_buffer = RID();
 	volume_history_valid = false;
 	has_previous_camera = false;
+	// GodotNext: nextgi_wrc_per_view (#253). The textures come back cleared: the next update is a first one.
+	has_previous_origin = false;
+	cursor = 0;
 	previous_sky_read = false;
 	grid_camera_valid = false;
 	translucency_marked = 0;
@@ -577,6 +586,11 @@ bool NextGIWRC::_ensure_shader() {
 	if (shader != nullptr && shader->version.is_valid()) {
 		return true;
 	}
+	// GodotNext: nextgi_wrc_per_view (#253). One shared shader for every view's WRC.
+	if (shared_shader != nullptr && shared_shader->version.is_valid()) {
+		shader = shared_shader;
+		return true;
+	}
 	NextGI *next_gi = NextGI::get_singleton();
 	ERR_FAIL_NULL_V(next_gi, false);
 	ERR_FAIL_COND_V(!next_gi->can_initialize_ray_query_shaders(), false);
@@ -597,12 +611,18 @@ bool NextGIWRC::_ensure_shader() {
 		ERR_FAIL_V_MSG(false, "The NextGI WRC pipeline failed to compile.");
 	}
 	next_gi->notify_ray_query_shader_initialized();
+	shared_shader = shader;
 	return true;
 }
 
 // GodotNext: ps_swrt_trace (#186)
 bool NextGIWRC::_ensure_swrt_shader() {
 	if (swrt_shader != nullptr && swrt_shader->version.is_valid()) {
+		return true;
+	}
+	// GodotNext: nextgi_wrc_per_view (#253). One shared software sibling for every view's WRC.
+	if (shared_swrt_shader != nullptr && shared_swrt_shader->version.is_valid()) {
+		swrt_shader = shared_swrt_shader;
 		return true;
 	}
 	swrt_shader = memnew(SWRTShaderState);
@@ -619,6 +639,7 @@ bool NextGIWRC::_ensure_swrt_shader() {
 		swrt_shader = nullptr;
 		ERR_FAIL_V_MSG(false, "The NextGI software WRC pipeline failed to compile.");
 	}
+	shared_swrt_shader = swrt_shader;
 	return true;
 }
 
@@ -710,6 +731,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	if (!_ensure_textures() || !_ensure_translucency_cache() || !(swrt ? _ensure_swrt_shader() : _ensure_shader())) {
 		return;
 	}
+	nextgi_wrc_last_updated = this; // GodotNext: nextgi_wrc_per_view (#253). The tier info reports it.
 	ShaderRD &active_shader = swrt ? static_cast<ShaderRD &>(swrt_shader->shader) : static_cast<ShaderRD &>(shader->shader);
 	const NextGIWRCPipelines &active = swrt ? static_cast<const NextGIWRCPipelines &>(*swrt_shader) : static_cast<const NextGIWRCPipelines &>(*shader);
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -746,8 +768,10 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	params.origin_spacing[1] = origin.y;
 	params.origin_spacing[2] = origin.z;
 	params.origin_spacing[3] = 1.0f;
+	// GodotNext: nextgi_wrc_per_view (#253). A first update traces every probe.
+	const uint32_t trace_probes = nextgi_wrc_probes_to_trace(has_previous_origin);
 	params.probe_base = cursor;
-	params.probe_count = NEXTGI_WRC_PROBES_PER_FRAME;
+	params.probe_count = trace_probes;
 	// GodotNext: nextgi_wrc_shift (#254)
 	nextgi_wrc_mark_fresh(nextgi_wrc_shifted_levels(previous_origin, origin, has_previous_origin), fresh_frames);
 	params.fresh_levels = nextgi_wrc_fresh_mask(fresh_frames);
@@ -912,12 +936,12 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 		rd->compute_list_bind_compute_pipeline(list, active.trace);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		bind_trace_set(list);
-		rd->compute_list_dispatch(list, NEXTGI_WRC_PROBES_PER_FRAME, 1, 1);
+		rd->compute_list_dispatch(list, trace_probes, 1, 1);
 		rd->compute_list_add_barrier(list);
 		rd->compute_list_bind_compute_pipeline(list, active.project);
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		bind_trace_set(list);
-		rd->compute_list_dispatch(list, NEXTGI_WRC_PROBES_PER_FRAME, 1, 1);
+		rd->compute_list_dispatch(list, trace_probes, 1, 1);
 		rd->compute_list_end();
 	}
 	if (uses_translucency_probes() && translucency_mark_texture.is_valid() && translucency_mark_uniform_set.is_valid() && translucency_uniform_set.is_valid()) {
@@ -960,7 +984,7 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	previous_camera_forward = forward;
 	previous_sky_read = sky_read;
 	has_previous_camera = true;
-	cursor = (cursor + NEXTGI_WRC_PROBES_PER_FRAME) % NEXTGI_WRC_PROBE_COUNT;
+	cursor = (cursor + trace_probes) % NEXTGI_WRC_PROBE_COUNT;
 	// GodotNext: nextgi_wrc_shift (#254)
 	nextgi_wrc_age_fresh(fresh_frames);
 	frame++;
@@ -1068,6 +1092,96 @@ bool NextGIWRC::benchmark_swrt_update(const NextGISWRTTrace &p_tracer, const Vec
 		return false;
 	}
 	return true;
+}
+
+// GodotNext: nextgi_wrc_per_view (#253)
+NextGIWRC *NextGIWRC::get_view_wrc(RenderSceneBuffersRD *p_render_buffers) {
+	if (p_render_buffers == nullptr || !p_render_buffers->has_custom_data(SNAME("nextgi_wrc"))) {
+		return nullptr;
+	}
+	Ref<NextGIWRCView> view = p_render_buffers->get_custom_data(SNAME("nextgi_wrc"));
+	return view.is_valid() ? view->wrc : nullptr;
+}
+
+NextGIWRC *NextGIWRC::ensure_view_wrc(RenderSceneBuffersRD *p_render_buffers) {
+	ERR_FAIL_NULL_V(p_render_buffers, nullptr);
+	Ref<NextGIWRCView> view;
+	if (p_render_buffers->has_custom_data(SNAME("nextgi_wrc"))) {
+		view = p_render_buffers->get_custom_data(SNAME("nextgi_wrc"));
+	}
+	if (view.is_null()) {
+		view.instantiate();
+		p_render_buffers->set_custom_data(SNAME("nextgi_wrc"), view);
+	}
+	if (view->wrc == nullptr) {
+		view->wrc = memnew(NextGIWRC);
+	}
+	return view->wrc;
+}
+
+void NextGIWRC::free_all_resources() {
+	for (NextGIWRC *wrc : nextgi_wrc_live) {
+		wrc->free_resources();
+	}
+	nextgi_wrc_last_updated = nullptr;
+	free_shared();
+}
+
+void NextGIWRC::free_shared() {
+	for (NextGIWRC *wrc : nextgi_wrc_live) {
+		wrc->shader = nullptr;
+		wrc->swrt_shader = nullptr;
+		wrc->_free_uniform_set();
+	}
+	if (shared_shader != nullptr) {
+		if (shared_shader->version.is_valid()) {
+			shared_shader->shader.version_free(shared_shader->version);
+		}
+		memdelete(shared_shader);
+		shared_shader = nullptr;
+	}
+	if (shared_swrt_shader != nullptr) {
+		if (shared_swrt_shader->version.is_valid()) {
+			shared_swrt_shader->shader.version_free(shared_swrt_shader->version);
+		}
+		memdelete(shared_swrt_shader);
+		shared_swrt_shader = nullptr;
+	}
+}
+
+uint32_t NextGIWRC::get_live_count() {
+	return nextgi_wrc_live.size();
+}
+
+void NextGIWRC::fill_views_info(Dictionary &r_info) {
+	uint32_t views = 0;
+	uint64_t bytes = 0;
+	for (const NextGIWRC *wrc : nextgi_wrc_live) {
+		if (!wrc->is_ready()) {
+			continue;
+		}
+		views++;
+		bytes += nextgi_wrc_bytes() + uint64_t(wrc->translucency_size.x) * uint64_t(wrc->translucency_size.y) * 32 * 6 * 8;
+	}
+	r_info["wrc_views"] = int64_t(views);
+	r_info["wrc_views_bytes"] = int64_t(bytes);
+	if (nextgi_wrc_last_updated != nullptr) {
+		nextgi_wrc_last_updated->fill_info(r_info);
+	}
+}
+
+void NextGIWRCView::free_data() {
+	// The cache is world-space and does not depend on the view's size, MSAA or scaling, so a
+	// reconfigure keeps it; with a full first trace, dropping it would re-trace every probe on
+	// each frame of a window resize. It goes with the render buffers.
+}
+
+NextGIWRCView::~NextGIWRCView() {
+	if (wrc != nullptr) {
+		wrc->free_resources();
+		memdelete(wrc);
+		wrc = nullptr;
+	}
 }
 
 void NextGIWRC::fill_info(Dictionary &r_info) const {

@@ -1858,7 +1858,7 @@ void RenderForwardClustered::_update_volumetric_fog(Ref<RenderSceneBuffersRD> p_
 		settings.cluster_builder = rb_data->cluster_builder;
 		settings.rbgi = rbgi;
 		settings.sdfgi = sdfgi;
-		RendererRD::NextGIWRC *wrc = next_gi.get_wrc();
+		RendererRD::NextGIWRC *wrc = next_gi.get_wrc(p_render_buffers.ptr());
 		// GodotNext: ps_swrt_trace (#186, plan §21.2 L9b). Fog reads the WRC volume on both active tiers.
 		const RendererRD::NextGI::Tier fog_tier = next_gi.get_tier_result().tier;
 		settings.use_nextgi = environment_get_nextgi_enabled(p_environment) && (fog_tier == RendererRD::NextGI::TIER_HWRT || fog_tier == RendererRD::NextGI::TIER_SOFTWARE) && wrc != nullptr && wrc->is_ready();
@@ -2497,7 +2497,9 @@ void RenderForwardClustered::_render_nextgi_translucency_mark(RenderDataRD *p_re
 	if (p_render_data->scene_data->view_count != 1 || render_list[RENDER_LIST_ALPHA].elements.is_empty()) {
 		return;
 	}
-	RendererRD::NextGIWRC *wrc = next_gi.ensure_wrc();
+	Ref<RenderSceneBuffersRD> wrc_buffers = p_render_data->render_buffers;
+	ERR_FAIL_COND(wrc_buffers.is_null());
+	RendererRD::NextGIWRC *wrc = next_gi.ensure_wrc(wrc_buffers.ptr());
 	if (!wrc->uses_translucency_probes()) {
 		return;
 	}
@@ -5427,7 +5429,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
 	{
 		// GodotNext: nextgi_alpha_policy (#61). WRC SH clipmap for the translucency cut fallback.
-		RendererRD::NextGIWRC *wrc = next_gi.get_wrc();
+		RendererRD::NextGIWRC *wrc = next_gi.get_wrc(rb.ptr()); // #253: rb is null without render data.
 		RID sh_textures[3] = { RID(), RID(), RID() };
 		RID wrc_params;
 		if (wrc != nullptr && wrc->is_ready()) {

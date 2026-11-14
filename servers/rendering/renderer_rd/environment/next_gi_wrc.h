@@ -37,6 +37,7 @@
 #include "core/math/vector4.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_buffer_custom_data_rd.h"
 
 class RenderDataRD;
 class RenderSceneDataRD;
@@ -87,6 +88,10 @@ uint32_t nextgi_wrc_shifted_levels(const Vector3 &p_previous_origin, const Vecto
 void nextgi_wrc_mark_fresh(uint32_t p_shifted_levels, uint32_t r_fresh_frames[4]);
 uint32_t nextgi_wrc_fresh_mask(const uint32_t p_fresh_frames[4]);
 void nextgi_wrc_age_fresh(uint32_t r_fresh_frames[4]);
+// GodotNext: nextgi_wrc_per_view (#253). The probes an update traces: every probe on a cache's first
+// update, so a new view (or one rendered once) has its GI on its first frame, as a new Lite field
+// packs every probe on its first frame; then one budget (NEXTGI_WRC_PROBES_PER_FRAME) per frame.
+uint32_t nextgi_wrc_probes_to_trace(bool p_had_previous);
 
 // A probe with more than 25% back-face hits moves along the mean escape direction, at most 0.4x spacing.
 Vector3 nextgi_wrc_relocate(const Vector3 &p_probe, const Vector3 &p_mean_escape, float p_backface_fraction, float p_spacing);
@@ -97,7 +102,7 @@ int32_t nextgi_translucency_probe_index(const Vector3 &p_world, const Vector3 &p
 uint32_t nextgi_translucency_volume_level(float p_distance, bool p_lite);
 float nextgi_translucency_history_weight(bool p_valid, const Vector2 &p_previous_uv);
 
-// One cache per scenario. The frame block's "WRC update" slot traces a budget of probes.
+// One cache per view (#253). The frame block's "WRC update" slot traces a budget of probes.
 class NextGIWRC {
 	static NextGIWRC *singleton;
 
@@ -106,6 +111,9 @@ class NextGIWRC {
 	// GodotNext: ps_swrt_trace (#186). The software tier's sibling (nextgi_wrc_update_swrt.glsl).
 	struct SWRTShaderState;
 	SWRTShaderState *swrt_shader = nullptr;
+	// GodotNext: nextgi_wrc_per_view (#253). The states every view's WRC points at.
+	static ShaderState *shared_shader;
+	static SWRTShaderState *shared_swrt_shader;
 	RID swrt_trace_set;
 
 	RID radiance;
@@ -171,7 +179,7 @@ class NextGIWRC {
 	bool has_previous_camera = false;
 	bool previous_sky_read = false;
 	// GodotNext: ps_lumen_lite (#183). The camera the probe grid snapped to at the last params
-	// upload: the frame's first view, since secondary views reuse the scenario's update.
+	// upload: this view's camera, since each view keeps its own WRC (#253).
 	Vector3 grid_camera;
 	bool grid_camera_valid = false;
 	Projection previous_view_projection;
@@ -247,8 +255,32 @@ public:
 
 	void free_resources();
 
+	// GodotNext: nextgi_wrc_per_view (#253). Each view keeps its own WRC (UE keeps Lumen's state,
+	// the radiance cache included, per view), in its render buffers. The update shaders are shared
+	// by every WRC; free_shared() frees them once no WRC uses them.
+	static NextGIWRC *get_view_wrc(RenderSceneBuffersRD *p_render_buffers);
+	static NextGIWRC *ensure_view_wrc(RenderSceneBuffersRD *p_render_buffers);
+	// Every live WRC: their resources (on a tier change or shutdown), their count and bytes.
+	static void free_all_resources();
+	static void free_shared();
+	static uint32_t get_live_count();
+	// The tier info: the per-view count and bytes, and the counters of the WRC updated last.
+	static void fill_views_info(Dictionary &r_info);
+
 	NextGIWRC();
 	~NextGIWRC();
+};
+
+// GodotNext: nextgi_wrc_per_view (#253). A view's WRC, freed with its render buffers.
+class NextGIWRCView : public RenderBufferCustomDataRD {
+	GDCLASS(NextGIWRCView, RenderBufferCustomDataRD);
+
+public:
+	NextGIWRC *wrc = nullptr;
+
+	virtual void configure(RenderSceneBuffersRD *p_render_buffers) override {}
+	virtual void free_data() override;
+	~NextGIWRCView();
 };
 
 } // namespace RendererRD

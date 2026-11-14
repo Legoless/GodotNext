@@ -353,7 +353,7 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	bool wrc_bound = false;
 	// Both tiers update the WRC in the frame block's "WRC update" slot; it is unbound only until
 	// its first update.
-	NextGIWRC *wrc = next_gi->get_wrc();
+	NextGIWRC *wrc = next_gi->get_wrc(buffers.ptr());
 	if (wrc != nullptr && wrc->has_grid_camera() && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_offsets().is_valid() && wrc->get_mip2().is_valid() && wrc->get_mip4().is_valid()) {
 		radiance = wrc->get_radiance();
 		visibility = wrc->get_visibility();
@@ -364,8 +364,8 @@ void NextGIIrradianceField::integrate(RenderDataRD *p_render_data) {
 	}
 
 	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
-	// A secondary view reads the probes on the grid of the frame's first view, which updated
-	// the WRC; snapping them to its own camera would shift every probe by the cameras' offset.
+	// The probes sit on the grid this view's WRC snapped to at its update (#253); the pack
+	// copies them by grid cell, so it reads them on that grid rather than the raw camera.
 	const Vector3 grid_camera = wrc_bound ? wrc->get_grid_camera() : scene_data->cam_transform.origin;
 	const Params params = build_params(scene_data->cam_projection, scene_data->cam_transform, scene_data->flip_y, scene_data->taa_jitter, gi_size, wanted_half, buffers->get_internal_size(), depth_valid > 0.5f, normal_valid > 0.5f, wrc_bound, grid_camera);
 	rd->buffer_update(field->params_buffer, 0, sizeof(params), &params);

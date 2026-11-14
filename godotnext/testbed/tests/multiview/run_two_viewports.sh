@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs res://tests/multiview/run_two_viewports.tscn with NextGI enabled (#53).
+# Runs res://tests/multiview/two_viewports.tscn with NextGI enabled (#53) and RenderingDevice
+# timestamp capture (--gpu-profile), which the G3-8 pass check reads (#253).
 #
 # Usage:
 #   run_two_viewports.sh -- <godot> <godot arguments>
@@ -12,7 +13,7 @@
 # Example on the Apple M5 Max:
 #   godotnext/testbed/tests/multiview/run_two_viewports.sh -- ./bin/godot.macos.editor.arm64 \
 #     --path godotnext/testbed --rendering-driver metal \
-#     res://tests/multiview/run_two_viewports.tscn
+#     res://tests/multiview/two_viewports.tscn
 
 set -euo pipefail
 
@@ -60,7 +61,7 @@ EOF
 
 # pipefail makes the pipeline's status Godot's when Godot fails.
 set +e
-"$@" 2>&1 | tee "$log"
+"$@" --gpu-profile 2>&1 | tee "$log"
 status=$?
 set -e
 

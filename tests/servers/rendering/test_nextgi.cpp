@@ -2579,6 +2579,48 @@ TEST_CASE("[NextGI] SRC production: atlas budget, material sharing, capture cap,
 	CHECK_EQ(evict[1], 6u);
 }
 
+TEST_CASE("[NextGI] WRC: each view keeps its own cache, freed with its render buffers") {
+	// GodotNext: nextgi_wrc_per_view (#253). UE keeps Lumen's radiance cache per view: a view's WRC
+	// lives in its render buffers, a second view gets its own, and both go with their buffers.
+	const uint32_t before = RendererRD::NextGIWRC::get_live_count();
+	Ref<RenderSceneBuffersRD> first;
+	first.instantiate();
+	Ref<RenderSceneBuffersRD> second;
+	second.instantiate();
+	CHECK(RendererRD::NextGIWRC::get_view_wrc(first.ptr()) == nullptr);
+	// Passes without render buffers (shadows, the depth prepass, reflection probes) have no WRC.
+	CHECK(RendererRD::NextGIWRC::get_view_wrc(nullptr) == nullptr);
+	RendererRD::NextGIWRC *first_wrc = RendererRD::NextGIWRC::ensure_view_wrc(first.ptr());
+	REQUIRE(first_wrc != nullptr);
+	CHECK(RendererRD::NextGIWRC::ensure_view_wrc(first.ptr()) == first_wrc);
+	CHECK(RendererRD::NextGIWRC::get_view_wrc(first.ptr()) == first_wrc);
+	RendererRD::NextGIWRC *second_wrc = RendererRD::NextGIWRC::ensure_view_wrc(second.ptr());
+	CHECK(second_wrc != nullptr);
+	CHECK(second_wrc != first_wrc);
+	CHECK_EQ(RendererRD::NextGIWRC::get_live_count(), before + 2);
+	// A reconfigure (resize, MSAA) frees the buffers' data, but the world-space cache stays.
+	Ref<RendererRD::NextGIWRCView> second_view = second->get_custom_data(SNAME("nextgi_wrc"));
+	REQUIRE(second_view.is_valid());
+	second_view->free_data();
+	CHECK(RendererRD::NextGIWRC::get_view_wrc(second.ptr()) == second_wrc);
+	second_view.unref();
+	// A view's buffers going away take its WRC with them; the other view keeps its own.
+	second.unref();
+	CHECK_EQ(RendererRD::NextGIWRC::get_live_count(), before + 1);
+	CHECK(RendererRD::NextGIWRC::get_view_wrc(first.ptr()) == first_wrc);
+	first.unref();
+	CHECK_EQ(RendererRD::NextGIWRC::get_live_count(), before);
+	// AS and SRC work runs once per scenario; the WRC update runs for each view (G3-8).
+	CHECK(RendererRD::NextGI::nextgi_is_scenario_slot(RendererRD::NextGI::PASS_SLOT_AS_UPDATES));
+	CHECK(RendererRD::NextGI::nextgi_is_scenario_slot(RendererRD::NextGI::PASS_SLOT_SRC_RELIGHT));
+	CHECK_FALSE(RendererRD::NextGI::nextgi_is_scenario_slot(RendererRD::NextGI::PASS_SLOT_WRC_UPDATE));
+	CHECK_FALSE(RendererRD::NextGI::nextgi_is_scenario_slot(RendererRD::NextGI::PASS_SLOT_DIFFUSE_GATHER));
+	// A cache's first update traces every probe, so a new view has its GI on its first frame;
+	// after that, one budget per frame.
+	CHECK_EQ(RendererRD::nextgi_wrc_probes_to_trace(false), uint32_t(RendererRD::NEXTGI_WRC_PROBE_COUNT));
+	CHECK_EQ(RendererRD::nextgi_wrc_probes_to_trace(true), uint32_t(RendererRD::NEXTGI_WRC_PROBES_PER_FRAME));
+}
+
 // GodotNext: nextgi_wrc_shift (#254)
 TEST_CASE("[NextGI] WRC: a level whose origin moved re-traces every probe without history") {
 	using namespace RendererRD;

@@ -45,6 +45,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/rendering_device.h"
 
+class RenderSceneBuffersRD;
 class RenderDataRD;
 class RenderGeometryInstance;
 class NextGIVoxelLighting;
@@ -317,7 +318,7 @@ private:
 	// (13-20) that _append_trace_uniforms() binds together.
 	void _append_core_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_params, NextGIVoxelLighting *p_lighting, bool p_counters) const;
 	void _append_view_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_normal_roughness, bool p_view_inputs, bool p_screen_trace) const;
-	void _bind_wrc(RendererRD::NextGI *p_next_gi);
+	void _bind_wrc(RendererRD::NextGI *p_next_gi, RenderSceneBuffersRD *p_render_buffers);
 	void _request_counters();
 	static void _counters_received(const Vector<uint8_t> &p_data, uint64_t p_token);
 

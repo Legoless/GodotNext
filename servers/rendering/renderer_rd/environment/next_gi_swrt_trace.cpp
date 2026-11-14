@@ -1093,11 +1093,11 @@ void NextGISWRTTrace::build_detail_froxels(RenderDataRD *p_render_data, NextGIVo
 	}
 }
 
-void NextGISWRTTrace::_bind_wrc(NextGI *p_next_gi) {
+void NextGISWRTTrace::_bind_wrc(NextGI *p_next_gi, RenderSceneBuffersRD *p_render_buffers) {
 	wrc_radiance = RID();
 	wrc_visibility = RID();
 	wrc_params = RID();
-	NextGIWRC *wrc = p_next_gi != nullptr ? p_next_gi->get_wrc() : nullptr;
+	NextGIWRC *wrc = p_next_gi != nullptr ? p_next_gi->get_wrc(p_render_buffers) : nullptr;
 	if (wrc != nullptr && wrc->is_ready() && wrc->get_radiance().is_valid() && wrc->get_visibility().is_valid() && wrc->get_params_buffer().is_valid()) {
 		wrc_radiance = wrc->get_radiance();
 		wrc_visibility = wrc->get_visibility();
@@ -1142,7 +1142,7 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 			sky_radiance = scene->get_sky()->sky_get_radiance_texture_2d(sky);
 		}
 	}
-	_bind_wrc(next_gi);
+	_bind_wrc(next_gi, p_render_data->render_buffers.ptr());
 	const bool readback = _readback_enabled();
 	// GodotNext: ps_swrt_trace (#186). This is the verification kernel (readback runs); the frame
 	// block's software gather does the production rays with the WRC handoff. Since the software

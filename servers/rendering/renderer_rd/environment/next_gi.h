@@ -367,7 +367,6 @@ private:
 	NextGIGather *gather = nullptr;
 	NextGIFrontLayer *front_layer = nullptr;
 	NextGIReference *reference = nullptr;
-	NextGIWRC *wrc = nullptr;
 	uint32_t rough_reflection_mip_count = 1;
 	void _gather(RenderDataRD *p_render_data);
 	void _settings_changed();
@@ -644,8 +643,12 @@ public:
 	void set_front_layer(NextGIFrontLayer *p_front_layer) { front_layer = p_front_layer; }
 	bool has_front_layer() const { return front_layer != nullptr; }
 	NextGIReference *get_reference() const { return reference; }
-	NextGIWRC *get_wrc() const { return wrc; }
-	NextGIWRC *ensure_wrc();
+	// GodotNext: nextgi_wrc_per_view (#253). The view's own WRC (null before its first update).
+	NextGIWRC *get_wrc(RenderSceneBuffersRD *p_render_buffers) const;
+	NextGIWRC *ensure_wrc(RenderSceneBuffersRD *p_render_buffers);
+	// GodotNext: nextgi_wrc_per_view (#253). The frame block's slots a scenario runs once per frame
+	// (AS and SRC work); every other slot, the WRC update included, runs for each view.
+	static bool nextgi_is_scenario_slot(int p_slot) { return p_slot == PASS_SLOT_AS_UPDATES || p_slot == PASS_SLOT_AS_BUILDS || p_slot == PASS_SLOT_SRC_CAPTURE || p_slot == PASS_SLOT_SRC_RELIGHT; }
 
 	// GodotNext: nextgi_src_cards
 	// The §8.3 Stage-1 card clustering, nextgi_src_cluster_cards (next_gi_src.h). Pure, so doctests
