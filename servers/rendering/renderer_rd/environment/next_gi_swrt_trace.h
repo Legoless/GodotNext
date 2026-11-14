@@ -168,11 +168,17 @@ public:
 		uint32_t wrc_samples = 0;
 		uint32_t detail_hits = 0;
 		uint32_t skipped = 0;
+		uint32_t coarse_steps = 0; // GodotNext: global_sdf_coarse_bound (#257)
 	};
-	static_assert(sizeof(Counters) == 48, "SWRT counters must match SWRTCounters.");
+	static_assert(sizeof(Counters) == 52, "SWRT counters must match SWRTCounters.");
 
 	// Pool size for a level count: DEFAULT_POOL_BRICKS covers BASE_LEVELS.
 	static uint32_t pool_bricks_for_levels(uint32_t p_levels);
+	// GodotNext: global_sdf_coarse_bound (#257). The trace's fresh-level mask (its params' extra.w):
+	// bit L (0-5) lets it step by level L's coarse bound, bit 8 + L lets it climb through level L's
+	// empty bricks. A level is fresh while it is resident and has no dirty volume pending (it
+	// updates on every 2^L-th frame). p_coarse_skip false clears bits 0-5 only.
+	static uint32_t coarse_level_mask(const NextGIGlobalSDFClipmaps &p_clipmaps, uint32_t p_levels, bool p_coarse_skip);
 	// Cells of the ray grid for an internal size.
 	static Vector2i ray_grid(const Vector2i &p_internal_size, uint32_t p_cells_per_axis = DEFAULT_RAY_GRID);
 	// Cells of the detail froxel grid for an internal size.

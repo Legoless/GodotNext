@@ -158,6 +158,17 @@ bool _readback_enabled() {
 	return settings != nullptr && settings->has_setting("rendering/global_illumination/nextgi/debug/swrt_trace_readback") && bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/swrt_trace_readback"));
 }
 
+// GodotNext: global_sdf_coarse_bound (#257). debug/swrt_coarse_levels, AND-ed with the trace's
+// fresh-level mask (-1 keeps it).
+uint32_t nextgi_swrt_coarse_levels_setting() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings == nullptr || !settings->has_setting("rendering/global_illumination/nextgi/debug/swrt_coarse_levels")) {
+		return 0x3F3Fu;
+	}
+	const int value = int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/swrt_coarse_levels"));
+	return value < 0 ? 0x3F3Fu : uint32_t(value) & 0x3F3Fu;
+}
+
 // The scene fields every kernel reads (levels, origins, step budget, pool, instance
 // counts). The view fields (matrices, screen, grid) stay zero unless a view sets them.
 void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps &p_clipmaps, const NextGIGlobalSDFGPU *p_field, uint32_t p_levels, uint32_t p_steps, uint32_t p_instances, uint32_t p_two_sided, uint32_t p_capacity) {
@@ -178,6 +189,12 @@ void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps 
 	r_params.counts[0] = uint32_t(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 	r_params.counts[3] = p_capacity;
 	r_params.froxel_depth[2] = float(p_instances);
+	// GodotNext: global_sdf_coarse_bound (#257). Bit L: the trace may step by level L's coarse bound;
+	// bit 8 + L: it may climb through level L's empty bricks. Level L updates on every 2^L-th frame;
+	// while it still has dirty volumes pending, its page table and bound are older than the finer
+	// levels', and either could carry a ray past a moved or new instance they already hold. The debug
+	// setting masks bits off, for comparisons and the trace check.
+	r_params.extra[3] = float(NextGISWRTTrace::coarse_level_mask(p_clipmaps, p_levels, true) & nextgi_swrt_coarse_levels_setting());
 }
 
 void _free_rid(RenderingDevice *p_rd, RID &r_rid) {
@@ -267,6 +284,17 @@ uint32_t NextGISWRTTrace::last_fixture_agreed = 0;
 uint32_t NextGISWRTTrace::InstanceKeyHasher::hash(const InstanceKey &p_key) {
 	uint32_t h = hash_murmur3_one_64(uint64_t(uintptr_t(p_key.geometry)));
 	return hash_fmix32(hash_murmur3_one_32(p_key.element, h));
+}
+
+// GodotNext: global_sdf_coarse_bound (#257)
+uint32_t NextGISWRTTrace::coarse_level_mask(const NextGIGlobalSDFClipmaps &p_clipmaps, uint32_t p_levels, bool p_coarse_skip) {
+	uint32_t fresh = 0;
+	for (uint32_t level = 0; level < MIN(p_levels, 6u); level++) {
+		if (p_clipmaps.is_level_valid(level) && p_clipmaps.get_pending_dirty(level) == 0) {
+			fresh |= 1u << level;
+		}
+	}
+	return (p_coarse_skip ? fresh : 0u) | (fresh << 8);
 }
 
 uint32_t NextGISWRTTrace::pool_bricks_for_levels(uint32_t p_levels) {
@@ -924,6 +952,8 @@ void NextGISWRTTrace::_append_core_uniforms(Vector<RD::Uniform> &r_uniforms, RID
 	buffer(24, gpu->mesh_brick_buffer);
 	buffer(25, gpu->froxel_buffer);
 	buffer(26, gpu->two_sided_buffer);
+	// GodotNext: global_sdf_coarse_bound (#257). Every level's coarse bound.
+	buffer(30, field != nullptr ? field->get_coarse_buffer() : RID());
 }
 
 void NextGISWRTTrace::_append_view_uniforms(Vector<RD::Uniform> &r_uniforms, RID p_normal_roughness, bool p_view_inputs, bool p_screen_trace) const {
@@ -1347,6 +1377,10 @@ void NextGISWRTTrace::fill_info(Dictionary &r_info) const {
 	r_info["swrt_wrc_samples"] = snapshot.wrc_samples;
 	r_info["swrt_detail_hits"] = snapshot.detail_hits;
 	r_info["swrt_skipped"] = snapshot.skipped;
+	// GodotNext: global_sdf_coarse_bound (#257). The verification trace's steps, and how many of
+	// them stepped by the coarse bound.
+	r_info["swrt_steps"] = snapshot.steps;
+	r_info["swrt_coarse_steps"] = snapshot.coarse_steps;
 	if (!_readback_enabled() || readback_meta.is_empty() || gpu == nullptr || !gpu->ready) {
 		return;
 	}
@@ -1448,6 +1482,37 @@ void NextGISWRTTrace::fill_info(Dictionary &r_info) const {
 		readback["coverage_expected_set"] = coverage_expected_set;
 		readback["coverage_mismatches"] = coverage_mismatches;
 	}
+	// GodotNext: global_sdf_coarse_bound (#257). This field's coarse bound on every resident level:
+	// against its CPU twin over the same page table and pools, and against the nearest instance at
+	// random points (a quarter voxel of tolerance, as the composite's overestimate check).
+	uint32_t coarse_levels_checked = 0;
+	uint32_t coarse_checked = 0;
+	uint32_t coarse_overestimates = 0;
+	uint32_t coarse_twin_mismatches = 0;
+	// Only levels with no dirty volume pending: a stale level's bound describes the scene it last
+	// applied, and the trace does not use it (coarse_level_mask()).
+	uint32_t coarse_levels_fresh = 0;
+	for (uint32_t level = 0; field != nullptr && level < active_levels; level++) {
+		uint32_t checked = 0;
+		uint32_t overestimates = 0;
+		uint32_t twin_mismatches = 0;
+		if (!clipmaps.is_level_valid(level) || clipmaps.get_pending_dirty(level) != 0) {
+			continue;
+		}
+		coarse_levels_fresh++;
+		if (field->validate_coarse(instances, level, clipmaps.get_origin(level), 2048, 0.25f * NextGIGlobalSDF::level_voxel_size(level), checked, overestimates, twin_mismatches)) {
+			coarse_levels_checked++;
+			coarse_checked += checked;
+			coarse_overestimates += overestimates;
+			coarse_twin_mismatches += twin_mismatches;
+		}
+	}
+	readback["coarse_levels_fresh"] = coarse_levels_fresh;
+	readback["coarse_levels_checked"] = coarse_levels_checked;
+	readback["coarse_level_mask"] = int64_t(coarse_level_mask(clipmaps, active_levels, true) & nextgi_swrt_coarse_levels_setting());
+	readback["coarse_checked"] = coarse_checked;
+	readback["coarse_overestimates"] = coarse_overestimates;
+	readback["coarse_twin_mismatches"] = coarse_twin_mismatches;
 	r_info["swrt_trace_readback"] = readback;
 }
 

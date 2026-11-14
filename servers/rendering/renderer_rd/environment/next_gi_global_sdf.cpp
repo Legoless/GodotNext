@@ -587,88 +587,202 @@ void NextGIGlobalSDF::dirty_bricks(const AABB &p_old_world, const AABB &p_new_wo
 	add(p_new_world);
 }
 
-void NextGIGlobalSDF::build_coarse(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_iterations, LocalVector<float> &r_coarse) {
+// GodotNext: global_sdf_coarse_bound (#257). The CPU twin of nextgi_global_sdf_coarse.glsl.
+void NextGIGlobalSDF::build_coarse_bound(const int32_t *p_page_table, CoarseVoxelFetch p_fetch, const void *p_user, float p_voxel_size, LocalVector<float> &r_coarse) {
 	r_coarse.resize(COARSE_VOXELS);
-	const float step = coarse_voxel_size(p_level);
-	for (uint32_t z = 0; z < COARSE_SIZE; z++) {
-		for (uint32_t y = 0; y < COARSE_SIZE; y++) {
-			for (uint32_t x = 0; x < COARSE_SIZE; x++) {
-				// The coarse voxel sits at 4x the fine voxel stride.
-				const Vector3 world(
-						float(p_origin.x + int(x) * 4) * level_voxel_size(p_level) + step * 0.5f,
-						float(p_origin.y + int(y) * 4) * level_voxel_size(p_level) + step * 0.5f,
-						float(p_origin.z + int(z) * 4) * level_voxel_size(p_level) + step * 0.5f);
-				r_coarse[x + y * COARSE_SIZE + z * COARSE_SIZE * COARSE_SIZE] = reference_distance(p_instances, world);
-			}
-		}
-	}
-	// Fast-sweep relaxation: a neighbor that already holds a finite distance
-	// can only lower this voxel, so apply the six-neighbour rule in both
-	// directions p_iterations times.
-	auto relax = [&](uint32_t x, uint32_t y, uint32_t z) {
-		const uint32_t index = x + y * COARSE_SIZE + z * COARSE_SIZE * COARSE_SIZE;
-		float value = r_coarse[index];
-		if (x > 0) {
-			value = MIN(value, r_coarse[index - 1] + step);
-		}
-		if (y > 0) {
-			value = MIN(value, r_coarse[index - COARSE_SIZE] + step);
-		}
-		if (z > 0) {
-			value = MIN(value, r_coarse[index - COARSE_SIZE * COARSE_SIZE] + step);
-		}
-		if (x + 1 < COARSE_SIZE) {
-			value = MIN(value, r_coarse[index + 1] + step);
-		}
-		if (y + 1 < COARSE_SIZE) {
-			value = MIN(value, r_coarse[index + COARSE_SIZE] + step);
-		}
-		if (z + 1 < COARSE_SIZE) {
-			value = MIN(value, r_coarse[index + COARSE_SIZE * COARSE_SIZE] + step);
-		}
-		r_coarse[index] = value;
+	LocalVector<float> seed;
+	LocalVector<float> flood;
+	seed.resize(COARSE_VOXELS);
+	flood.resize(COARSE_VOXELS);
+	const float cell_size = 4.0f * p_voxel_size;
+	const int size = int(COARSE_SIZE);
+	const int level_size = int(LEVEL_SIZE);
+	auto cell_index = [](const Vector3i &p_cell) {
+		return uint32_t(p_cell.x + int(COARSE_SIZE) * (p_cell.y + int(COARSE_SIZE) * p_cell.z));
 	};
-	for (uint32_t iteration = 0; iteration < p_iterations; iteration++) {
-		for (uint32_t z = 0; z < COARSE_SIZE; z++) {
-			for (uint32_t y = 0; y < COARSE_SIZE; y++) {
-				for (uint32_t x = 0; x < COARSE_SIZE; x++) {
-					relax(x, y, z);
-				}
-			}
-		}
-		for (int z = int(COARSE_SIZE) - 1; z >= 0; z--) {
-			for (int y = int(COARSE_SIZE) - 1; y >= 0; y--) {
-				for (int x = int(COARSE_SIZE) - 1; x >= 0; x--) {
-					relax(uint32_t(x), uint32_t(y), uint32_t(z));
+	auto brick_slot = [p_page_table](const Vector3i &p_voxel) {
+		const Vector3i brick(p_voxel.x >> 3, p_voxel.y >> 3, p_voxel.z >> 3);
+		return p_page_table[brick.x + int(PAGE_SIZE) * (brick.y + int(PAGE_SIZE) * brick.z)];
+	};
+	for (int z = 0; z < size; z++) {
+		for (int y = 0; y < size; y++) {
+			for (int x = 0; x < size; x++) {
+				const Vector3i cell(x, y, z);
+				const uint32_t index = cell_index(cell);
+				const int32_t slot = brick_slot(cell * 4);
+				if (slot == COARSE_PAGE_MISSING) {
+					seed[index] = -65504.0f;
+					flood[index] = 0.0f;
+				} else if (slot < 0) {
+					seed[index] = 65504.0f;
+					flood[index] = float(COARSE_ITERATIONS + 1) * cell_size;
+				} else {
+					float lowest = 65504.0f;
+					for (int dz = -1; dz <= 4; dz++) {
+						for (int dy = -1; dy <= 4; dy++) {
+							for (int dx = -1; dx <= 4; dx++) {
+								const Vector3i voxel = cell * 4 + Vector3i(dx, dy, dz);
+								if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 || voxel.x >= level_size || voxel.y >= level_size || voxel.z >= level_size) {
+									continue;
+								}
+								const int32_t voxel_slot = brick_slot(voxel);
+								if (voxel_slot < 0) {
+									continue;
+								}
+								const uint32_t local = uint32_t((voxel.x & 7) + 8 * ((voxel.y & 7) + 8 * (voxel.z & 7)));
+								const float value = p_fetch(p_user, voxel_slot, local);
+								if (value < COARSE_ABSENT) {
+									lowest = MIN(lowest, value);
+								}
+							}
+						}
+					}
+					seed[index] = lowest < COARSE_ABSENT ? lowest - 0.8660254f * p_voxel_size : 0.0f;
+					flood[index] = 0.0f;
 				}
 			}
 		}
 	}
+	// A Chebyshev flood over the 26 neighbors; past the level's edge reads as a surface cell.
+	LocalVector<float> next;
+	next.resize(COARSE_VOXELS);
+	for (uint32_t iteration = 0; iteration < COARSE_ITERATIONS; iteration++) {
+		for (int z = 0; z < size; z++) {
+			for (int y = 0; y < size; y++) {
+				for (int x = 0; x < size; x++) {
+					const Vector3i cell(x, y, z);
+					float value = flood[cell_index(cell)];
+					for (int dz = -1; dz <= 1; dz++) {
+						for (int dy = -1; dy <= 1; dy++) {
+							for (int dx = -1; dx <= 1; dx++) {
+								const Vector3i neighbor = cell + Vector3i(dx, dy, dz);
+								const bool outside = neighbor.x < 0 || neighbor.y < 0 || neighbor.z < 0 || neighbor.x >= size || neighbor.y >= size || neighbor.z >= size;
+								value = MIN(value, (outside ? 0.0f : flood[cell_index(neighbor)]) + cell_size);
+							}
+						}
+					}
+					next[cell_index(cell)] = value;
+				}
+			}
+		}
+		SWAP(flood, next);
+	}
+	for (uint32_t index = 0; index < COARSE_VOXELS; index++) {
+		r_coarse[index] = seed[index] >= 65504.0f ? flood[index] - cell_size : seed[index];
+	}
+}
+
+namespace {
+struct CoarseCPUField {
+	LocalVector<const float *> slots;
+};
+
+float _coarse_cpu_fetch(const void *p_user, int32_t p_slot, uint32_t p_voxel_index) {
+	const CoarseCPUField *field = static_cast<const CoarseCPUField *>(p_user);
+	return field->slots[uint32_t(p_slot)][p_voxel_index];
+}
+} // namespace
+
+void NextGIGlobalSDF::build_coarse(uint32_t p_level, const Vector<Vector3i> &p_missing, LocalVector<float> &r_coarse) const {
+	ERR_FAIL_UNSIGNED_INDEX(p_level, MAX_LEVELS);
+	CoarseCPUField field;
+	LocalVector<int32_t> table;
+	table.resize(BRICKS_PER_LEVEL);
+	for (int z = 0; z < int(PAGE_SIZE); z++) {
+		for (int y = 0; y < int(PAGE_SIZE); y++) {
+			for (int x = 0; x < int(PAGE_SIZE); x++) {
+				const Vector3i brick(x, y, z);
+				int32_t slot = COARSE_PAGE_UNALLOCATED;
+				if (p_missing.has(brick)) {
+					slot = COARSE_PAGE_MISSING;
+				} else if (const float *voxels = get_brick(p_level, brick)) {
+					slot = int32_t(field.slots.size());
+					field.slots.push_back(voxels);
+				}
+				table[x + int(PAGE_SIZE) * (y + int(PAGE_SIZE) * z)] = slot;
+			}
+		}
+	}
+	build_coarse_bound(table.ptr(), &_coarse_cpu_fetch, &field, level_voxel_size(p_level), r_coarse);
+}
+
+float NextGIGlobalSDF::coarse_bound_at(const LocalVector<float> &p_coarse, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world) {
+	if (p_level >= MAX_LEVELS || p_coarse.size() != COARSE_VOXELS) {
+		return 0.0f;
+	}
+	const Vector3i voxel = world_to_voxel(p_level, p_origin, p_world);
+	if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 || voxel.x >= int(LEVEL_SIZE) || voxel.y >= int(LEVEL_SIZE) || voxel.z >= int(LEVEL_SIZE)) {
+		return 0.0f;
+	}
+	return p_coarse[uint32_t((voxel.x >> 2) + int(COARSE_SIZE) * ((voxel.y >> 2) + int(COARSE_SIZE) * (voxel.z >> 2)))];
+}
+
+float NextGIGlobalSDF::sample_trilinear(uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world, const Vector<Vector3i> &p_missing) const {
+	ERR_FAIL_UNSIGNED_INDEX_V(p_level, MAX_LEVELS, 1e30f);
+	const float voxel_size = level_voxel_size(p_level);
+	const Vector3 f = p_world / voxel_size - Vector3(float(p_origin.x), float(p_origin.y), float(p_origin.z)) - Vector3(0.5f, 0.5f, 0.5f);
+	const Vector3i base(int(Math::floor(f.x)), int(Math::floor(f.y)), int(Math::floor(f.z)));
+	const Vector3 w = f - Vector3(float(base.x), float(base.y), float(base.z));
+	float values[8];
+	bool have[8];
+	uint32_t present = 0;
+	float largest = -1e30f;
+	for (uint32_t corner = 0; corner < 8; corner++) {
+		const Vector3i voxel = base + Vector3i(corner & 1, (corner >> 1) & 1, (corner >> 2) & 1);
+		have[corner] = false;
+		values[corner] = 0.0f;
+		if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 || voxel.x >= int(LEVEL_SIZE) || voxel.y >= int(LEVEL_SIZE) || voxel.z >= int(LEVEL_SIZE)) {
+			continue;
+		}
+		const Vector3i brick(voxel.x >> 3, voxel.y >> 3, voxel.z >> 3);
+		const float *voxels = p_missing.has(brick) ? nullptr : get_brick(p_level, brick);
+		if (voxels == nullptr) {
+			continue;
+		}
+		const float value = voxels[(voxel.x & 7) + 8 * ((voxel.y & 7) + 8 * (voxel.z & 7))];
+		if (value >= COARSE_ABSENT) {
+			continue;
+		}
+		have[corner] = true;
+		values[corner] = value;
+		largest = MAX(largest, value);
+		present++;
+	}
+	if (present == 0) {
+		return 1e30f;
+	}
+	const float fill = MAX(largest, 0.0f) + voxel_size;
+	for (uint32_t corner = 0; corner < 8; corner++) {
+		if (!have[corner]) {
+			values[corner] = fill;
+		}
+	}
+	const float x00 = Math::lerp(values[0], values[1], w.x);
+	const float x10 = Math::lerp(values[2], values[3], w.x);
+	const float x01 = Math::lerp(values[4], values[5], w.x);
+	const float x11 = Math::lerp(values[6], values[7], w.x);
+	return Math::lerp(Math::lerp(x00, x10, w.y), Math::lerp(x01, x11, w.y), w.z);
 }
 
 uint32_t NextGIGlobalSDF::trace_coarse_steps(const LocalVector<float> &p_coarse, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_ray_origin, const Vector3 &p_ray_direction, uint32_t p_max_steps) {
 	if (p_level >= MAX_LEVELS || p_coarse.size() != COARSE_VOXELS || p_ray_direction.length_squared() < 1e-20f) {
 		return 0;
 	}
-	const float fine_step = level_voxel_size(p_level);
 	const float coarse_step = coarse_voxel_size(p_level);
 	const Vector3 direction = p_ray_direction.normalized();
 	Vector3 position = p_ray_origin;
 	for (uint32_t step = 0; step < p_max_steps; step++) {
-		const Vector3i voxel(
-				int(Math::floor(position.x / coarse_step)) - _floor_div(p_origin.x, 4),
-				int(Math::floor(position.y / coarse_step)) - _floor_div(p_origin.y, 4),
-				int(Math::floor(position.z / coarse_step)) - _floor_div(p_origin.z, 4));
-		if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 || voxel.x >= int(COARSE_SIZE) || voxel.y >= int(COARSE_SIZE) || voxel.z >= int(COARSE_SIZE)) {
+		const Vector3i voxel = world_to_voxel(p_level, p_origin, position);
+		if (voxel.x < 0 || voxel.y < 0 || voxel.z < 0 || voxel.x >= int(LEVEL_SIZE) || voxel.y >= int(LEVEL_SIZE) || voxel.z >= int(LEVEL_SIZE)) {
 			return MAX(step, 1u);
 		}
-		const uint32_t index = voxel.x + COARSE_SIZE * (voxel.y + COARSE_SIZE * voxel.z);
-		const float distance = Math::abs(p_coarse[index]);
-		if (distance <= fine_step) {
+		// GodotNext: global_sdf_coarse_bound (#257). The bound is a lower bound over its whole
+		// cell: under a cell, the trace samples the fine field.
+		const float distance = coarse_bound_at(p_coarse, p_level, p_origin, position);
+		if (distance < coarse_step) {
 			return step + 1;
 		}
-		const float advance = CLAMP(distance - coarse_step * Math::sqrt(0.75f), fine_step, level_extent(p_level));
-		position += direction * advance;
+		position += direction * MIN(distance, level_extent(p_level));
 	}
 	return p_max_steps;
 }

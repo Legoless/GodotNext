@@ -145,6 +145,47 @@ RenderSceneDataRD *_scene_data(bool p_flip_y, const Vector2 &p_jitter) {
 } // namespace
 
 #ifdef RD_ENABLED
+TEST_CASE("[NextGI][SWRT] The coarse bound and the empty-brick climb use fresh levels only") {
+	// GodotNext: global_sdf_coarse_bound (#257). Level L updates on every 2^L-th frame. A dirty
+	// volume reaches every resident level at once; until a level applies it, neither its coarse
+	// bound nor its empty bricks may carry a ray past the change a finer level already holds.
+	NextGIGlobalSDFClipmaps clipmaps;
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0)); // Nothing resident.
+	const Vector3 camera(0.0f, 1.0f, 0.0f);
+	NextGIGlobalSDFClipmaps::Plan plan;
+	for (uint32_t level = 0; level < 3; level++) {
+		clipmaps.plan_level(level, camera, 0, plan);
+		REQUIRE(plan.update);
+		clipmaps.commit_level(level, plan, true);
+	}
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0x0707));
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, false), uint32_t(0x0700));
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 2, true), uint32_t(0x0303));
+	// An instance moves: frame 1 updates level 0 only, so levels 1 and 2 are stale.
+	const AABB moved(Vector3(1.0f, 0.0f, 1.0f), Vector3(1.0f, 1.0f, 1.0f));
+	clipmaps.add_dirty_volumes(&moved, 1);
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0));
+	clipmaps.plan_level(0, camera, 1, plan);
+	REQUIRE(plan.update);
+	clipmaps.commit_level(0, plan, true);
+	for (uint32_t level = 1; level < 3; level++) {
+		clipmaps.plan_level(level, camera, 1, plan);
+		CHECK_FALSE(plan.update);
+	}
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0x0101));
+	// Frame 2 updates levels 0 and 1; frame 4 all three.
+	for (uint32_t level = 0; level < 2; level++) {
+		clipmaps.plan_level(level, camera, 2, plan);
+		REQUIRE(plan.update);
+		clipmaps.commit_level(level, plan, true);
+	}
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0x0303));
+	clipmaps.plan_level(2, camera, 4, plan);
+	REQUIRE(plan.update);
+	clipmaps.commit_level(2, plan, true);
+	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0x0707));
+}
+
 TEST_CASE("[NextGI][SWRT] Software trace shaders do not require ray query") {
 	CHECK_FALSE(NextgiGatherSdfShaderRD().requires_ray_query());
 	CHECK_FALSE(NextgiSrcRelightSdfShaderRD().requires_ray_query());
@@ -501,7 +542,8 @@ static void _check_sibling_bindings(const HashMap<String, SpirvBinding> &p_hardw
 	hardware_only.sort();
 	CHECK_MESSAGE(hardware_only == p_hardware_only, (p_what + ": hardware-only bindings differ").utf8().get_data());
 	sibling_set1.sort();
-	const Vector<uint32_t> expected_set1 = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23, 24, 25, 26 };
+	// GodotNext: global_sdf_coarse_bound (#257). 30: the global SDF's coarse bound.
+	const Vector<uint32_t> expected_set1 = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 21, 22, 23, 24, 25, 26, 30 };
 	CHECK_MESSAGE(sibling_set1 == expected_set1, (p_what + ": set 1 is not the SDF trace's bindings").utf8().get_data());
 }
 

@@ -3153,6 +3153,9 @@
 		<member name="rendering/global_illumination/nextgi/debug/reference_seed" type="int" setter="" getter="" default="1">
 			Seed for the reference path tracer. The same seed and scene produce the same accumulation.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/swrt_coarse_levels" type="int" setter="" getter="" default="-1">
+			A bit mask AND-ed with the software ray tracer's choice of global SDF clipmap levels it may skip empty space with. Bits 0 to 5: the trace may step by that level's coarse level, a lower bound of the distance to the nearest surface kept at a quarter of the level's resolution. Bits 8 to 13: it may skip through that level's empty bricks. The tracer itself sets a level's bits only while the level has applied every scene change (coarser levels update every second, fourth, ... frame). [code]-1[/code] keeps its choice; [code]16128[/code] traces without coarse levels; [code]0[/code] also stops the skip through coarser empty bricks. Used by the software trace check.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/swrt_trace_max_steps" type="int" setter="" getter="" default="0">
 			Overrides the software ray tracer's step budget per ray. [code]0[/code] keeps the default of 64 steps. A ray that runs out of steps reports a hit where it stopped. Used by the software trace check to exercise that rule.
 		</member>

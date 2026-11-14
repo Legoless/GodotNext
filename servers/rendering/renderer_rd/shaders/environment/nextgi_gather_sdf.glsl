@@ -253,6 +253,7 @@ void main() {
 	uint froxel = detail ? swrt_froxel_cell(surface) : 0xffffffffu;
 	SWRTHit hit = swrt_trace(trace_origin, direction, trace_tmax, detail, froxel, resume);
 	atomicAdd(swrt_counters.steps, hit.steps);
+	atomicAdd(swrt_counters.coarse_steps, swrt_coarse_steps); // GodotNext: global_sdf_coarse_bound (#257)
 	vec3 radiance = swrt_shade(hit, trace_origin, direction, true, trace_tmax);
 	if ((hit.flags & SWRT_HIT_SURFACE) != 0u) {
 #ifdef NEXTGI_SWRT_REFLECT

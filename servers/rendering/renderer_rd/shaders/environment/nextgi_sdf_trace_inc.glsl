@@ -90,7 +90,7 @@ struct SWRTParams {
 	vec4 froxel; // xy: detail froxel cells, z: depth slices, w: reflection tmax.
 	vec4 froxel_depth; // x: near, y: far (meters), z: detail instance count, w: unused.
 	vec4 depth_coefficients; // NextGIViewMath::depth_coefficients() of the depth projection.
-	vec4 extra; // x: normal-roughness valid, y: froxel grid valid, z: write shadow requests, w: unused.
+	vec4 extra; // x: normal-roughness valid, y: froxel grid valid, z: write shadow requests, w: fresh-level mask (#257).
 	vec4 view_to_world[3]; // Camera basis columns: the normal-roughness buffer is in view space.
 };
 
@@ -108,6 +108,7 @@ layout(set = SWRT_SET, binding = 0, std430) buffer SWRTCounters {
 	uint wrc_samples;
 	uint detail_hits;
 	uint skipped;
+	uint coarse_steps; // GodotNext: global_sdf_coarse_bound (#257)
 }
 swrt_counters;
 #endif // !SWRT_EXTERNAL_VIEW_INPUTS
@@ -223,6 +224,16 @@ layout(set = SWRT_SET, binding = 26, std430) readonly buffer SWRTTwoSided {
 	uint data[];
 }
 swrt_two_sided;
+
+// GodotNext: global_sdf_coarse_bound (#257). Each global-SDF level's coarse bound
+// (NextGIGlobalSDFGPU::get_coarse_buffer(), 32^3 floats per level). Binding 30: the set-0
+// kernels use 27 to 29 for their own buffers.
+layout(set = SWRT_SET, binding = 30, std430) readonly buffer SWRTCoarse {
+	float data[];
+}
+swrt_coarse;
+// Coarse steps this invocation's traces took (the verification kernel reports them).
+uint swrt_coarse_steps = 0u;
 
 #ifndef SWRT_EXTERNAL_VIEW_INPUTS
 #define NEXTGI_WRC
@@ -402,6 +413,24 @@ bool swrt_brick_empty(uint level, vec3 p) {
 	return swrt_page_slot(level, uint(brick.x + 16 * (brick.y + 16 * brick.z))) == SWRT_PAGE_UNALLOCATED;
 }
 
+// GodotNext: global_sdf_coarse_bound (#257). The coarse bound of the cell (4^3 voxels) that holds
+// p: a lower bound of the fine sample anywhere in the cell and of the distance to the nearest
+// brick that may hold a surface (nextgi_global_sdf_coarse.glsl). 0, so no step, outside the
+// level or with the coarse skip off.
+float swrt_coarse_bound(uint level, vec3 p) {
+	// Bits 0-5: levels with no dirty volume pending, while the coarse skip is on
+	// (NextGISWRTTrace's nextgi_swrt_coarse_levels()).
+	if ((uint(SWRT_P.extra.w + 0.5) & (1u << level)) == 0u) {
+		return 0.0;
+	}
+	ivec3 voxel = ivec3(floor(p / swrt_level_voxel(level))) - SWRT_P.origins[level].xyz;
+	if (any(lessThan(voxel, ivec3(0))) || any(greaterThanEqual(voxel, ivec3(128)))) {
+		return 0.0;
+	}
+	ivec3 cell = voxel >> 2;
+	return swrt_coarse.data[level * 32768u + uint(cell.x + 32 * (cell.y + 32 * cell.z))];
+}
+
 // Gradient from six taps one voxel out. A tap without all eight corners is
 // missing: the axis falls back to a one-sided difference with the center, and
 // an axis with both taps missing contributes nothing.
@@ -563,19 +592,35 @@ SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax
 		}
 		steps++;
 		float voxel_size = swrt_level_voxel(level);
-		uint present;
-		bool coverage;
-		float distance = swrt_sample(level, p, present, coverage);
+		// GodotNext: global_sdf_coarse_bound (#257). The coarse bound never exceeds the fine sample
+		// in its cell nor the distance to a brick that may hold a surface. In an unallocated brick,
+		// a bound of at least a cell puts every voxel the sample would read in empty bricks, so
+		// the sample is skipped: the step is the empty-space skip below without it. A bound only
+		// lengthens that skip, so no step is shorter than without the coarse level.
+		float bound = swrt_coarse_bound(level, p);
+		bool coarse_empty = bound >= 4.0 * voxel_size && swrt_brick_empty(level, p);
+		uint present = 0u;
+		bool coverage = false;
+		float distance = SWRT_FAR;
+		if (!coarse_empty) {
+			distance = swrt_sample(level, p, present, coverage);
+		}
 		if (present == 0u) {
 			// Empty space: skip to the exit of the largest empty brick around p,
 			// climbing the coarser levels while their brick is empty too.
-			float skip = swrt_brick_exit(level, p, direction);
+			float skip = max(swrt_brick_exit(level, p, direction), bound);
 			uint levels = swrt_active_levels();
 			for (uint coarse = level + 1u; coarse < levels; coarse++) {
-				if (!swrt_brick_empty(coarse, p)) {
+				// GodotNext: global_sdf_coarse_bound (#257). Only through a level with no dirty
+				// volume pending (bits 8-13): a level that has not applied a move yet may call
+				// empty a brick a finer level has filled.
+				if ((uint(SWRT_P.extra.w + 0.5) & (256u << coarse)) == 0u || !swrt_brick_empty(coarse, p)) {
 					break;
 				}
-				skip = swrt_brick_exit(coarse, p, direction);
+				skip = max(skip, max(swrt_brick_exit(coarse, p, direction), swrt_coarse_bound(coarse, p)));
+			}
+			if (coarse_empty) {
+				swrt_coarse_steps++;
 			}
 			// No surface is within a voxel of an unallocated brick.
 			cleared = max(cleared, voxel_size);

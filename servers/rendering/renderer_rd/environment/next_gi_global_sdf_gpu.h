@@ -67,6 +67,12 @@ public:
 	// Reads one static/dynamic/coverage brick back from the GPU.
 	bool download_brick(uint32_t p_level, const Vector3i &p_brick, NextGIGlobalSDF::BrickSplit &r_split) const;
 	bool download_coarse(uint32_t p_level, LocalVector<float> &r_coarse) const;
+	// GodotNext: global_sdf_coarse_bound (#257). Checks a level's GPU coarse bound against its CPU
+	// twin, built from the GPU page table and pools (r_twin_mismatches), and against the
+	// distance to the nearest instance at p_count random points of the level, unallocated
+	// cells and edges included (r_overestimates: points where the bound reads more than
+	// p_tolerance past it).
+	bool validate_coarse(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float p_tolerance, uint32_t &r_checked, uint32_t &r_overestimates, uint32_t &r_twin_mismatches) const;
 	// Compares p_count random voxels of a level with the CPU composite
 	// (NextGIGlobalSDF::composite_distance()). GodotNext: ps_swrt_trace (#186): r_overestimates
 	// counts resident voxels that read more than a quarter voxel past the minimum over every
@@ -103,7 +109,9 @@ public:
 	RID get_dynamic_pool_buffer() const { return dynamic_pool_buffer; }
 	RID get_coverage_buffer() const { return coverage_buffer; }
 	RID get_page_buffer(uint32_t p_level) const { return p_level < page_buffers.size() ? page_buffers[p_level] : RID(); }
-	RID get_coarse_buffer(uint32_t p_level) const { return p_level < coarse_buffers.size() ? coarse_buffers[p_level] : RID(); }
+	// GodotNext: global_sdf_coarse_bound (#257). Every level's coarse bound, COARSE_VOXELS floats
+	// per level (zeros, so no step, until a level's first update): the trace's binding 30.
+	RID get_coarse_buffer() const { return coarse_bound_buffer; }
 	// Reads back the packed half of one voxel from the CPU mirror.
 	float get_voxel(uint32_t p_level, const Vector3i &p_brick, const Vector3i &p_voxel) const;
 
@@ -112,7 +120,7 @@ private:
 	bool _allocate_slot(uint32_t &r_slot);
 	void _free_slot(uint32_t p_slot);
 	bool _ensure_pipeline();
-	bool _update_coarse(uint32_t p_level, const Vector3i &p_origin);
+	bool _update_coarse(uint32_t p_level);
 	uint32_t _allocate_brick(uint32_t p_level, const Vector3i &p_brick);
 	void _release_brick(uint32_t p_level, const Vector3i &p_brick);
 	void _recount_missing(uint32_t p_level);
@@ -129,9 +137,16 @@ private:
 	RID dynamic_pool_buffer;
 	RID coverage_buffer;
 	Vector<RID> page_buffers;
-	Vector<RID> coarse_buffers;
+	// GodotNext: global_sdf_coarse_bound (#257). The bound of every level, and the seed and
+	// flood scratch one level's update uses.
+	RID coarse_bound_buffer;
+	RID coarse_seed_buffer;
+	RID coarse_flood_a;
+	RID coarse_flood_b;
 	Vector<RID> coarse_uniforms;
-	RID coarse_scratch;
+	// A level's page table changed since its bound was built (a scroll or a release), so an
+	// update with no brick to build still rebuilds it.
+	bool coarse_dirty[NextGIGlobalSDF::MAX_LEVELS] = { true, true, true, true, true, true, true, true, true, true };
 
 	NextgiGlobalSdfShaderRD shader;
 	RID version;

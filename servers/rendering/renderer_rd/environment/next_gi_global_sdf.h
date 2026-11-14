@@ -171,10 +171,28 @@ public:
 	~NextGIGlobalSDF();
 
 	static constexpr uint32_t COARSE_VOXELS = COARSE_SIZE * COARSE_SIZE * COARSE_SIZE;
-	// 1/4-resolution coarse level: resample the field at the coarse centers,
-	// then relax with 4 forward/backward neighbor sweeps (plan §21.2 step 4).
-	static void build_coarse(const Vector<Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_iterations, LocalVector<float> &r_coarse);
+	// GodotNext: global_sdf_coarse_bound (#257). The 1/4-resolution coarse level is a lower bound
+	// of the fine field and of the distance to the nearest surface, which the software trace
+	// steps by (plan §21.2 L4). build_coarse_bound() is the CPU twin of
+	// nextgi_global_sdf_coarse.glsl (the rule is there): a level's page table (a pool slot,
+	// COARSE_PAGE_UNALLOCATED or COARSE_PAGE_MISSING per brick) and a voxel fetch (the smaller of
+	// a slot's static and dynamic value at a brick-local index x + 8y + 64z).
+	static constexpr uint32_t COARSE_ITERATIONS = 7; // Flood depth in cells.
+	static constexpr int32_t COARSE_PAGE_UNALLOCATED = -1;
+	static constexpr int32_t COARSE_PAGE_MISSING = -2;
+	static constexpr float COARSE_ABSENT = 60000.0f; // swrt_fetch() reads a voxel this far as absent.
+	typedef float (*CoarseVoxelFetch)(const void *p_user, int32_t p_slot, uint32_t p_voxel_index);
+	static void build_coarse_bound(const int32_t *p_page_table, CoarseVoxelFetch p_fetch, const void *p_user, float p_voxel_size, LocalVector<float> &r_coarse);
+	// The same over this CPU field's bricks of a level; p_missing bricks read as missing.
+	void build_coarse(uint32_t p_level, const Vector<Vector3i> &p_missing, LocalVector<float> &r_coarse) const;
+	// The bound of the cell that holds p_world (0 outside the level, as the trace reads it).
+	static float coarse_bound_at(const LocalVector<float> &p_coarse, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world);
+	// The CPU twin of the trace's swrt_sample() over this field's bricks: trilinear between voxel
+	// centers, an absent corner (no brick, a p_missing brick, or COARSE_ABSENT and more) reading
+	// one voxel past the largest present one; 1e30 when no corner is present.
+	float sample_trilinear(uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_world, const Vector<Vector3i> &p_missing) const;
 	static float coarse_voxel_size(uint32_t p_level) { return 4.0f * level_voxel_size(p_level); }
+	// The coarse ray-step heatmap: steps by the bound while it is at least a cell, as the trace does.
 	static uint32_t trace_coarse_steps(const LocalVector<float> &p_coarse, uint32_t p_level, const Vector3i &p_origin, const Vector3 &p_ray_origin, const Vector3 &p_ray_direction, uint32_t p_max_steps = 256);
 
 	// Rebuilds the bricks of one level overlapping p_world_bounds and returns

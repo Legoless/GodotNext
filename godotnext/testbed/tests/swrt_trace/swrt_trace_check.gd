@@ -15,6 +15,10 @@ extends Node3D
 ## - the #182 coverage words of the two-sided panel match the CPU rule,
 ## - rays whose physics hit lies within the 2 m detail range hit it in time,
 ## - few rays run out of trace steps (a ray out of steps reports a hit),
+## - some trace steps step by the global SDF's coarse bound (#257); the summary's counters report the
+##   steps and the coarse ones, and on every resident level the bound matches its CPU twin and reads
+##   past no instance. Then debug/swrt_coarse_levels masks the bound off (no coarse step, more steps)
+##   and the climb through coarser empty bricks too (more steps again),
 ## - no ray-query ShaderRD was created in the process (override.cfg starts it with
 ##   hardware_ray_tracing Off, which skips the startup self-test) (#186); under
 ##   debug/deny_ray_query (a device without ray query) also the reason NO_RAY_QUERY, no RT
@@ -78,6 +82,11 @@ const OPEN_PATH_STEP := 1.0
 ## The camera's start offset and the frames it moves in (more than a 6.4 m level-3 brick on x).
 const CAMERA_TRAVEL := Vector3(-7.0, 0.0, 3.0)
 const CAMERA_MOVE_FRAMES := Vector2i(30, 150)
+## #257: the coarse-level mask stages, and the frames each waits once the readback shows its mask
+## (the step counters arrive a frame or more late).
+const COARSE_LEVELS_SETTING := "rendering/global_illumination/nextgi/debug/swrt_coarse_levels"
+const COARSE_MASK_NO_BOUND := 0x3F00
+const COARSE_MASK_FRAMES := 8
 const CAMERA_POSITION := Vector3(0.3, 3.2, 4.2)
 ## The detail range of software_ray_tracing_mode = detail (SWRT_DETAIL_METERS in nextgi_sdf_trace_inc.glsl).
 const DETAIL_METERS := 2.0
@@ -96,6 +105,9 @@ const STARVED_SETTLE_FRAMES := 60
 
 var _frames := 0
 var _stage := 0
+var _coarse_steps_full := -1
+var _coarse_mask_full := -1
+var _coarse_steps_no_bound := -1
 var _stage_frame := 0
 var _reasons := PackedStringArray()
 var _summary := {}
@@ -363,6 +375,38 @@ func _process(_delta: float) -> void:
 		_verify(info, readback)
 		if _reduced:
 			_verify_reduced(info, REDUCED_POOL_BRICKS, REDUCED_LEVELS)
+		# Stage 4 (#257): without the coarse bound, then also without the climb through coarser
+		# empty bricks, through debug/swrt_coarse_levels. The trace must follow the mask it is given.
+		_coarse_steps_full = int(info.get("swrt_steps", -1))
+		# The tracer's own mask covers its resident levels only (four under --reduced).
+		_coarse_mask_full = int(readback.get("coarse_level_mask", -1))
+		ProjectSettings.set_setting(COARSE_LEVELS_SETTING, COARSE_MASK_NO_BOUND)
+		_stage = 4
+		_stage_frame = _frames
+		return
+	if _stage == 4 or _stage == 5:
+		var expected_mask := (_coarse_mask_full & COARSE_MASK_NO_BOUND) if _stage == 4 else 0
+		if int(readback.get("coarse_level_mask", -1)) != expected_mask or _frames - _stage_frame < COARSE_MASK_FRAMES:
+			if _frames >= MAX_FRAMES:
+				_reasons.append("debug/swrt_coarse_levels %d never reached the SWRT readback" % expected_mask)
+				_finish(false, _reasons, _summary)
+			return
+		var steps := int(info.get("swrt_steps", -1))
+		var coarse := int(info.get("swrt_coarse_steps", -1))
+		if coarse != 0:
+			_reasons.append("coarse mask %d: the trace took %d coarse-bound steps" % [expected_mask, coarse])
+		if _stage == 4:
+			_coarse_steps_no_bound = steps
+			if steps <= _coarse_steps_full:
+				_reasons.append("without the coarse bound the trace took %d steps, not more than the %d with it" % [steps, _coarse_steps_full])
+			ProjectSettings.set_setting(COARSE_LEVELS_SETTING, 0)
+			_stage = 5
+			_stage_frame = _frames
+			return
+		_summary["coarse_mask_steps"] = {"full": _coarse_steps_full, "no_bound": _coarse_steps_no_bound, "no_bound_no_climb": steps}
+		if steps <= _coarse_steps_no_bound:
+			_reasons.append("without the climb through coarser empty bricks the trace took %d steps, not more than the %d with it" % [steps, _coarse_steps_no_bound])
+		ProjectSettings.set_setting(COARSE_LEVELS_SETTING, -1)
 		# Stage 3: the low sun.
 		_sun.rotation_degrees = Vector3(-LOW_SUN_DEGREES, 165.0, 0.0)
 		_stage = 3
@@ -846,7 +890,24 @@ func _verify(p_info: Dictionary, p_readback: Dictionary) -> void:
 		"reflect_rays": int(p_info.get("swrt_reflect_rays", 0)),
 		"shadow_traced": int(p_info.get("swrt_shadow_traced", 0)),
 		"exhausted": int(p_info.get("swrt_exhausted", 0)),
+		# #257: the verification rays' steps, and the empty-space steps the global SDF's coarse
+		# bound took without a fine sample.
+		"steps": int(p_info.get("swrt_steps", -1)),
+		"coarse_steps": int(p_info.get("swrt_coarse_steps", -1)),
 	}
+	if int(ProjectSettings.get_setting(COARSE_LEVELS_SETTING, -1)) == -1 and summary["counters"]["coarse_steps"] <= 0:
+		reasons.append("the trace took no coarse-bound step (%d of %d steps)" % [summary["counters"]["coarse_steps"], summary["counters"]["steps"]])
+	# #257: the tracer's own coarse bound on every resident level, against its CPU twin and the
+	# nearest instance.
+	summary["coarse_levels_checked"] = int(p_readback.get("coarse_levels_checked", -1))
+	summary["coarse_checked"] = int(p_readback.get("coarse_checked", -1))
+	summary["coarse_overestimates"] = int(p_readback.get("coarse_overestimates", -1))
+	summary["coarse_twin_mismatches"] = int(p_readback.get("coarse_twin_mismatches", -1))
+	summary["coarse_levels_fresh"] = int(p_readback.get("coarse_levels_fresh", -1))
+	if summary["coarse_levels_checked"] != summary["coarse_levels_fresh"] or summary["coarse_levels_checked"] < int(p_info.get("swrt_trace_levels", 0)) or summary["coarse_levels_checked"] <= 0:
+		reasons.append("coarse bound: %d of %d levels checked (%d fresh)" % [summary["coarse_levels_checked"], int(p_info.get("swrt_trace_levels", 0)), summary["coarse_levels_fresh"]])
+	if summary["coarse_overestimates"] != 0 or summary["coarse_twin_mismatches"] != 0:
+		reasons.append("coarse bound: %d of %d points read past the nearest instance, %d cells differ from the CPU twin" % [summary["coarse_overestimates"], summary["coarse_checked"], summary["coarse_twin_mismatches"]])
 	_reasons.append_array(reasons)
 	_summary.merge(summary, true)
 

@@ -4106,6 +4106,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/swrt_trace_readback", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_max_steps", PROPERTY_HINT_RANGE, "0,256,1"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_trace_pool_bricks", PROPERTY_HINT_RANGE, "0,65536,1"), 0);
+	// GodotNext: global_sdf_coarse_bound (#257). AND-ed with the software trace's fresh-level mask:
+	// bits 0-5 let it step by a level's coarse bound, bits 8-13 climb through a level's empty bricks.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/swrt_coarse_levels", PROPERTY_HINT_RANGE, "-1,16191,1"), -1);
 	// GodotNext: nextgi_frame_tier (#186). Lowers the AS memory budget so a check can exceed it.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/as_budget_bytes", PROPERTY_HINT_RANGE, "0,1073741824,1,or_greater"), 0);
 	// GodotNext: ps_voxel_lighting (#188). Off keeps the voxel shade free of GPU readbacks.

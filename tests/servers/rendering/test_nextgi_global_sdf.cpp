@@ -258,53 +258,147 @@ TEST_CASE("[NextGI][GlobalSDF] Level cadence and scroll reuse") {
 	CHECK_EQ(SDF::scrolled_edge_bricks(Vector3i(), bricks, 4096), uint32_t(0));
 }
 
-TEST_CASE("[NextGI][GlobalSDF] Coarse level resample and propagation") {
-	const MeshSDFData wall = _wall_sdf();
-	Vector<NextGIGlobalSDF::Instance> instances;
-	NextGIGlobalSDF::Instance instance;
-	instance.field = &wall;
-	instances.push_back(instance);
-
+TEST_CASE("[NextGI][GlobalSDF] Coarse level is a lower bound of the fine field and the distance") {
+	// GodotNext: global_sdf_coarse_bound (#257). Three walls; bricks are allocated as the GPU
+	// allocates them (a non-empty bin), and one variant marks every fifth one missing (a full pool).
 	CHECK_EQ(NextGIGlobalSDF::COARSE_VOXELS, uint32_t(32 * 32 * 32));
 	CHECK(Math::is_equal_approx(NextGIGlobalSDF::coarse_voxel_size(0), 0.4f));
-
-	const Vector3i origin = NextGIGlobalSDF::scrolled_origin(Vector3(), 0);
-	LocalVector<float> raw;
-	LocalVector<float> relaxed;
-	NextGIGlobalSDF::build_coarse(instances, 0, origin, 0, raw);
-	NextGIGlobalSDF::build_coarse(instances, 0, origin, 4, relaxed);
-	CHECK_EQ(raw.size(), NextGIGlobalSDF::COARSE_VOXELS);
-	REQUIRE_EQ(relaxed.size(), NextGIGlobalSDF::COARSE_VOXELS);
-
-	// The raw resample matches the brute-force field wherever it has data.
-	float max_error = 0.0f;
-	uint32_t finite_samples = 0;
-	for (uint32_t z = 0; z < 32; z++) {
-		for (uint32_t y = 0; y < 32; y++) {
-			for (uint32_t x = 0; x < 32; x++) {
-				const Vector3 world(
-						float(origin.x + int(x) * 4) * 0.1f + 0.2f,
-						float(origin.y + int(y) * 4) * 0.1f + 0.2f,
-						float(origin.z + int(z) * 4) * 0.1f + 0.2f);
-				const uint32_t index = x + y * 32 + z * 32 * 32;
-				const float reference = NextGIGlobalSDF::reference_distance(instances, world);
-				if (reference >= 1e29f) {
-					CHECK(raw[index] >= 1e29f);
-					continue;
+	const MeshSDFData wall = _wall_sdf();
+	Vector<NextGIGlobalSDF::Instance> instances;
+	const Transform3D placements[3] = {
+		Transform3D(Basis(), Vector3(0.0f, 0.0f, 0.0f)),
+		Transform3D(Basis(Vector3(0.0f, 1.0f, 0.0f), Math::deg_to_rad(40.0f)), Vector3(3.0f, 0.5f, -2.0f)),
+		Transform3D(Basis(Vector3(0.0f, 0.0f, 1.0f), Math::deg_to_rad(90.0f)), Vector3(-9.0f, -1.0f, 4.0f)),
+	};
+	for (const Transform3D &placement : placements) {
+		NextGIGlobalSDF::Instance instance;
+		instance.field = &wall;
+		instance.transform = placement;
+		instances.push_back(instance);
+	}
+	const Vector3 camera(0.3f, 1.1f, -0.4f);
+	for (uint32_t level = 0; level < 4; level++) {
+		for (int variant = 0; variant < 2; variant++) {
+			CAPTURE(level);
+			CAPTURE(variant);
+			const Vector3i origin = NextGIGlobalSDF::scrolled_origin(camera, level);
+			const float voxel_size = NextGIGlobalSDF::level_voxel_size(level);
+			const float brick_size = voxel_size * float(NextGIGlobalSDF::BRICK_SIZE);
+			LocalVector<uint32_t> offsets;
+			LocalVector<uint32_t> indices;
+			NextGIGlobalSDF::bin_instances(instances, level, origin, offsets, indices);
+			NextGIGlobalSDF field;
+			Vector<Vector3i> missing;
+			uint32_t allocated = 0;
+			for (int z = 0; z < int(NextGIGlobalSDF::PAGE_SIZE); z++) {
+				for (int y = 0; y < int(NextGIGlobalSDF::PAGE_SIZE); y++) {
+					for (int x = 0; x < int(NextGIGlobalSDF::PAGE_SIZE); x++) {
+						const uint32_t table = uint32_t(x + int(NextGIGlobalSDF::PAGE_SIZE) * (y + int(NextGIGlobalSDF::PAGE_SIZE) * z));
+						if (offsets[table + 1] == offsets[table]) {
+							continue;
+						}
+						allocated++;
+						if (variant == 1 && allocated % 5 == 0) {
+							missing.push_back(Vector3i(x, y, z));
+							continue;
+						}
+						const Vector3 center = (Vector3(origin) * voxel_size) + (Vector3(x, y, z) + Vector3(0.5f, 0.5f, 0.5f)) * brick_size;
+						CHECK_EQ(field.update_region(level, origin, AABB(center, Vector3(0.001f, 0.001f, 0.001f)), instances), uint32_t(1));
+					}
 				}
-				max_error = MAX(max_error, Math::abs(raw[index] - reference));
-				finite_samples++;
+			}
+			REQUIRE(allocated > 0);
+			LocalVector<float> coarse;
+			field.build_coarse(level, missing, coarse);
+			REQUIRE_EQ(coarse.size(), NextGIGlobalSDF::COARSE_VOXELS);
+
+			RandomNumberGenerator rng;
+			rng.set_seed(2570 + level * 2 + uint32_t(variant));
+			const float extent = NextGIGlobalSDF::level_extent(level);
+			const float cell = NextGIGlobalSDF::coarse_voxel_size(level);
+			uint32_t over_fine = 0;
+			uint32_t over_distance = 0;
+			uint32_t empty_steps = 0;
+			uint32_t missing_samples = 0;
+			uint32_t missing_steps = 0;
+			float worst_fine = 0.0f;
+			float worst_distance = 0.0f;
+			for (uint32_t sample = 0; sample < 10000; sample++) {
+				const Vector3 point = Vector3(origin) * voxel_size + Vector3(rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent));
+				const float bound = NextGIGlobalSDF::coarse_bound_at(coarse, level, origin, point);
+				const float fine = field.sample_trilinear(level, origin, point, missing);
+				const float distance = NextGIGlobalSDF::reference_distance(instances, point);
+				if (bound > fine + 1.0e-4f) {
+					over_fine++;
+					worst_fine = MAX(worst_fine, bound - fine);
+				}
+				// The mesh SDF is sampled on its own grid: a hundredth of a voxel of slack.
+				if (bound > distance + 0.01f * voxel_size) {
+					over_distance++;
+					worst_distance = MAX(worst_distance, bound - distance);
+				}
+				const Vector3i voxel = NextGIGlobalSDF::world_to_voxel(level, origin, point);
+				const Vector3i brick(voxel.x >> 3, voxel.y >> 3, voxel.z >> 3);
+				if (missing.has(brick)) {
+					missing_samples++;
+					missing_steps += bound > 0.0f ? 1 : 0;
+				} else if (!field.has_brick(level, brick) && bound >= cell) {
+					empty_steps++;
+				}
+			}
+			CHECK_MESSAGE(over_fine == 0, vformat("%d samples over the fine field, worst by %f", over_fine, worst_fine));
+			CHECK_MESSAGE(over_distance == 0, vformat("%d samples over the distance, worst by %f", over_distance, worst_distance));
+			// Empty space far enough from every surface brick steps by whole cells.
+			CHECK(empty_steps > 0);
+			if (variant == 1) {
+				CHECK(missing_samples > 0);
+				CHECK_EQ(missing_steps, uint32_t(0));
 			}
 		}
 	}
-	CHECK(finite_samples > 0);
-	CHECK(max_error <= NextGIGlobalSDF::coarse_voxel_size(0));
+}
 
-	// Propagation only lowers values and remains finite.
-	for (uint32_t index = 0; index < NextGIGlobalSDF::COARSE_VOXELS; index++) {
-		CHECK(relaxed[index] <= raw[index] + 0.0001f);
-		CHECK(Math::is_finite(relaxed[index]));
+TEST_CASE("[NextGI][GlobalSDF] Coarse bound rules: seeds, flood depth and the level edge") {
+	// GodotNext: global_sdf_coarse_bound (#257). One allocated brick in the middle of level 0
+	// whose voxels all read 2 m; one missing brick; the rest unallocated.
+	const float voxel_size = 0.1f;
+	const float cell = 0.4f;
+	LocalVector<int32_t> table;
+	table.resize(NextGIGlobalSDF::BRICKS_PER_LEVEL);
+	for (int32_t &slot : table) {
+		slot = NextGIGlobalSDF::COARSE_PAGE_UNALLOCATED;
 	}
+	auto table_index = [](int x, int y, int z) { return uint32_t(x + 16 * (y + 16 * z)); };
+	table[table_index(8, 8, 8)] = 0;
+	table[table_index(2, 8, 8)] = NextGIGlobalSDF::COARSE_PAGE_MISSING;
+	struct Fetch {
+		static float two_meters(const void *, int32_t, uint32_t) { return 2.0f; }
+	};
+	LocalVector<float> coarse;
+	NextGIGlobalSDF::build_coarse_bound(table.ptr(), &Fetch::two_meters, nullptr, voxel_size, coarse);
+	REQUIRE_EQ(coarse.size(), NextGIGlobalSDF::COARSE_VOXELS);
+	auto at = [&](int x, int y, int z) { return coarse[uint32_t(x + 32 * (y + 32 * z))]; };
+	// The allocated brick's four cells per axis: its minimum less a voxel's half-diagonal.
+	CHECK(at(16, 16, 16) == doctest::Approx(2.0f - 0.8660254f * voxel_size));
+	CHECK(at(17, 17, 17) == doctest::Approx(2.0f - 0.8660254f * voxel_size));
+	// The missing brick never steps, and it stops the flood like an allocated one.
+	CHECK(at(4, 16, 16) < 0.0f);
+	CHECK(at(7, 16, 16) == doctest::Approx(1.0f * cell)); // Two cells from (5, *, *).
+	CHECK(at(10, 16, 16) == doctest::Approx(4.0f * cell)); // Five from the missing brick, six from the other.
+	// Empty cells: the Chebyshev distance to the nearest surface cell, less one cell.
+	CHECK(at(19, 16, 16) == doctest::Approx(1.0f * cell)); // Two cells from (17, *, *).
+	CHECK(at(20, 20, 16) == doctest::Approx(2.0f * cell)); // Diagonal: three cells either way.
+	CHECK(at(15, 16, 16) == doctest::Approx(0.0f)); // A neighbor of the brick.
+	// Exactly seven cells from the brick: six. One flood pass fewer would cap it at five.
+	CHECK(at(24, 16, 16) == doctest::Approx(6.0f * cell));
+	// Six cells from the edge (past x = 31), nine from the brick: five cells.
+	CHECK(at(26, 26, 26) == doctest::Approx(5.0f * cell));
+	// Eight cells from every surface cell and edge, past the flood depth: capped there.
+	CHECK(at(10, 8, 24) == doctest::Approx(float(NextGIGlobalSDF::COARSE_ITERATIONS) * cell));
+	// The level's edge reads as a surface past it: its cells never step.
+	CHECK(at(0, 16, 16) <= 0.0f);
+	CHECK(at(31, 20, 20) <= 0.0f);
+	CHECK(at(30, 20, 20) == doctest::Approx(1.0f * cell));
 }
 
 TEST_CASE("[NextGI][GlobalSDF] Brick instance culling and flags") {
@@ -416,15 +510,27 @@ TEST_CASE("[NextGI][GlobalSDF] Mesh samples clamp to the narrow-band grid") {
 }
 
 TEST_CASE("[NextGI][GlobalSDF] Coarse step-count debug view") {
+	// GodotNext: global_sdf_coarse_bound (#257). The heatmap steps by the bound while it is at least
+	// a cell (0.4 m on level 0) and stops under one, as the trace's coarse step does.
 	LocalVector<float> coarse;
 	coarse.resize(NextGIGlobalSDF::COARSE_VOXELS);
 	for (float &distance : coarse) {
-		distance = 65504.0f;
+		distance = 0.8f;
 	}
-	const Vector3 origin = NextGIGlobalSDF::voxel_center(0, Vector3i(), Vector3i(4, 4, 4));
+	// From z = 0.85 m in steps of 0.8 m: 15 samples before the ray leaves the 12.8 m level.
+	const Vector3 origin = NextGIGlobalSDF::voxel_center(0, Vector3i(), Vector3i(8, 8, 8));
+	CHECK_EQ(NextGIGlobalSDF::trace_coarse_steps(coarse, 0, Vector3i(), origin, Vector3(0.0f, 0.0f, 1.0f)), 15u);
+	// A cell under the bound on the ray (z in [4.0, 4.4)) stops it at its fifth sample (z = 4.05).
+	coarse[2 + 32 * (2 + 32 * 10)] = 0.0f;
+	CHECK_EQ(NextGIGlobalSDF::trace_coarse_steps(coarse, 0, Vector3i(), origin, Vector3(0.0f, 0.0f, 1.0f)), 5u);
+	// Between a voxel (0.1 m) and a cell (0.4 m): under a cell, so it stops at once.
+	for (float &distance : coarse) {
+		distance = 0.2f;
+	}
 	CHECK_EQ(NextGIGlobalSDF::trace_coarse_steps(coarse, 0, Vector3i(), origin, Vector3(0.0f, 0.0f, 1.0f)), 1u);
-
-	coarse[1 + 32 * (1 + 32)] = -0.1f;
+	for (float &distance : coarse) {
+		distance = 0.0f;
+	}
 	CHECK_EQ(NextGIGlobalSDF::trace_coarse_steps(coarse, 0, Vector3i(), origin, Vector3(0.0f, 0.0f, 1.0f)), 1u);
 	CHECK_EQ(NextGIGlobalSDF::trace_coarse_steps(coarse, 0, Vector3i(), origin, Vector3()), 0u);
 	coarse.clear();

@@ -80,13 +80,21 @@ struct CompositeParams {
 };
 static_assert(sizeof(CompositeParams) == 64, "CompositeParams must stay 64 bytes.");
 
+// GodotNext: global_sdf_coarse_bound (#257). nextgi_global_sdf_coarse.glsl's Params and modes.
 struct CoarseParams {
-	int32_t origin[4];
 	uint32_t level;
-	uint32_t propagate;
-	uint32_t pad[2];
+	uint32_t mode;
+	float voxel_size;
+	uint32_t iterations;
 };
-static_assert(sizeof(CoarseParams) == 32, "CoarseParams must stay 32 bytes.");
+static_assert(sizeof(CoarseParams) == 16, "CoarseParams must match the coarse shader's Params.");
+enum CoarseMode : uint32_t {
+	COARSE_MODE_SEED,
+	COARSE_MODE_PROPAGATE_A_TO_B,
+	COARSE_MODE_PROPAGATE_B_TO_A,
+	COARSE_MODE_FINALIZE_A,
+	COARSE_MODE_FINALIZE_B,
+};
 } // namespace
 
 NextGIGlobalSDFGPU::NextGIGlobalSDFGPU(uint32_t p_pool_bricks) {
@@ -106,8 +114,7 @@ NextGIGlobalSDFGPU::NextGIGlobalSDFGPU(uint32_t p_pool_bricks) {
 		table.fill(PAGE_UNALLOCATED);
 	}
 	page_buffers.resize(NextGIGlobalSDF::MAX_LEVELS);
-	coarse_buffers.resize(NextGIGlobalSDF::MAX_LEVELS);
-	coarse_uniforms.resize(NextGIGlobalSDF::MAX_LEVELS * 2);
+	coarse_uniforms.resize(NextGIGlobalSDF::MAX_LEVELS);
 }
 
 NextGIGlobalSDFGPU::~NextGIGlobalSDFGPU() {
@@ -139,22 +146,21 @@ NextGIGlobalSDFGPU::~NextGIGlobalSDFGPU() {
 				rd->free_rid(buffer);
 			}
 		}
-		for (const RID &buffer : coarse_buffers) {
+		for (RID buffer : { coarse_bound_buffer, coarse_seed_buffer, coarse_flood_a, coarse_flood_b }) {
 			if (buffer.is_valid()) {
 				rd->free_rid(buffer);
 			}
-		}
-		if (coarse_scratch.is_valid()) {
-			rd->free_rid(coarse_scratch);
 		}
 	}
 	pool_buffer = RID();
 	dynamic_pool_buffer = RID();
 	coverage_buffer = RID();
 	page_buffers.clear();
-	coarse_buffers.clear();
+	coarse_bound_buffer = RID();
+	coarse_seed_buffer = RID();
+	coarse_flood_a = RID();
+	coarse_flood_b = RID();
 	coarse_uniforms.clear();
-	coarse_scratch = RID();
 }
 
 uint32_t NextGIGlobalSDFGPU::_table_index(const Vector3i &p_brick) {
@@ -178,9 +184,6 @@ void NextGIGlobalSDFGPU::ensure_buffers() {
 	if (!coverage_buffer.is_valid()) {
 		coverage_buffer = rd->storage_buffer_create(capacity * COVERAGE_BYTES);
 	}
-	PackedByteArray empty_coarse;
-	empty_coarse.resize(NextGIGlobalSDF::COARSE_VOXELS * sizeof(float));
-	empty_coarse.fill(0);
 	for (uint32_t level = 0; level < NextGIGlobalSDF::MAX_LEVELS; level++) {
 		if (!page_buffers[level].is_valid()) {
 			page_buffers.write[level] = rd->storage_buffer_create(BRICKS_PER_LEVEL * sizeof(int32_t));
@@ -188,12 +191,19 @@ void NextGIGlobalSDFGPU::ensure_buffers() {
 				rd->buffer_update(page_buffers[level], 0, page_tables[level].size() * sizeof(int32_t), page_tables[level].ptr());
 			}
 		}
-		if (!coarse_buffers[level].is_valid()) {
-			coarse_buffers.write[level] = rd->storage_buffer_create(empty_coarse.size(), Span<uint8_t>(empty_coarse.ptr(), empty_coarse.size()));
-		}
 	}
-	if (!coarse_scratch.is_valid()) {
-		coarse_scratch = rd->storage_buffer_create(empty_coarse.size(), Span<uint8_t>(empty_coarse.ptr(), empty_coarse.size()));
+	// GodotNext: global_sdf_coarse_bound (#257). Zeros: no level steps by its bound before its
+	// first update.
+	if (!coarse_bound_buffer.is_valid()) {
+		PackedByteArray empty_coarse;
+		empty_coarse.resize(NextGIGlobalSDF::MAX_LEVELS * NextGIGlobalSDF::COARSE_VOXELS * sizeof(float));
+		empty_coarse.fill(0);
+		coarse_bound_buffer = rd->storage_buffer_create(empty_coarse.size(), Span<uint8_t>(empty_coarse.ptr(), empty_coarse.size()));
+	}
+	for (RID *scratch : { &coarse_seed_buffer, &coarse_flood_a, &coarse_flood_b }) {
+		if (!scratch->is_valid()) {
+			*scratch = rd->storage_buffer_create(NextGIGlobalSDF::COARSE_VOXELS * sizeof(float));
+		}
 	}
 }
 
@@ -222,7 +232,7 @@ bool NextGIGlobalSDFGPU::_ensure_pipeline() {
 	return true;
 }
 
-bool NextGIGlobalSDFGPU::_update_coarse(uint32_t p_level, const Vector3i &p_origin) {
+bool NextGIGlobalSDFGPU::_update_coarse(uint32_t p_level) {
 	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || coarse_pipeline_failed) {
 		return false;
 	}
@@ -244,38 +254,43 @@ bool NextGIGlobalSDFGPU::_update_coarse(uint32_t p_level, const Vector3i &p_orig
 			return false;
 		}
 	}
-	for (uint32_t phase = 0; phase < 2; phase++) {
-		const RID output = phase == 0 ? coarse_buffers[p_level] : coarse_scratch;
-		const RID input = phase == 0 ? coarse_scratch : coarse_buffers[p_level];
-		RID &set = coarse_uniforms.write[p_level * 2 + phase];
-		if (set.is_valid()) {
-			continue;
-		}
+	RID &set = coarse_uniforms.write[p_level];
+	if (!set.is_valid()) {
 		const Vector<RD::Uniform> uniforms = {
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, pool_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, dynamic_pool_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buffers[p_level]),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, output),
-			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, input),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, coarse_bound_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, coarse_seed_buffer),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, coarse_flood_a),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, coarse_flood_b),
 		};
 		set = rd->uniform_set_create(uniforms, coarse_shader.version_get_shader(coarse_version, 0), 0);
 		ERR_FAIL_COND_V(!set.is_valid(), false);
 	}
+	// GodotNext: global_sdf_coarse_bound (#257). Seed, COARSE_ITERATIONS flood passes between the
+	// two scratch buffers, then the bound into this level's part of the packed buffer.
 	CoarseParams push = {};
-	for (int axis = 0; axis < 3; axis++) {
-		push.origin[axis] = p_origin[axis];
-	}
 	push.level = p_level;
+	push.voxel_size = NextGIGlobalSDF::level_voxel_size(p_level);
+	push.iterations = NextGIGlobalSDF::COARSE_ITERATIONS;
+	const uint32_t groups = NextGIGlobalSDF::COARSE_SIZE / 8;
 	const RD::ComputeListID list = rd->compute_list_begin();
 	rd->compute_list_bind_compute_pipeline(list, coarse_pipeline);
-	for (uint32_t iteration = 0; iteration < 5; iteration++) {
-		push.propagate = iteration > 0 ? 1u : 0u;
-		rd->compute_list_bind_uniform_set(list, coarse_uniforms[p_level * 2 + (iteration % 2)], 0);
+	rd->compute_list_bind_uniform_set(list, set, 0);
+	auto pass = [&](uint32_t p_mode) {
+		push.mode = p_mode;
 		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch(list, 4, 4, 4);
+		rd->compute_list_dispatch(list, groups, groups, groups);
 		rd->compute_list_add_barrier(list);
+	};
+	pass(COARSE_MODE_SEED);
+	for (uint32_t iteration = 0; iteration < NextGIGlobalSDF::COARSE_ITERATIONS; iteration++) {
+		pass(iteration % 2 == 0 ? COARSE_MODE_PROPAGATE_A_TO_B : COARSE_MODE_PROPAGATE_B_TO_A);
 	}
+	pass(NextGIGlobalSDF::COARSE_ITERATIONS % 2 == 0 ? COARSE_MODE_FINALIZE_A : COARSE_MODE_FINALIZE_B);
 	rd->compute_list_end();
+	coarse_dirty[p_level] = false;
 	return true;
 }
 
@@ -317,6 +332,7 @@ uint32_t NextGIGlobalSDFGPU::_allocate_brick(uint32_t p_level, const Vector3i &p
 		missing_bricks[p_level]--;
 	}
 	table.set(index, int32_t(slot));
+	coarse_dirty[p_level] = true; // GodotNext: global_sdf_coarse_bound (#257)
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], index * sizeof(int32_t), sizeof(int32_t), table.ptr() + index);
@@ -337,6 +353,7 @@ void NextGIGlobalSDFGPU::_release_brick(uint32_t p_level, const Vector3i &p_bric
 		missing_bricks[p_level]--;
 	}
 	page_tables.write[p_level].set(index, PAGE_UNALLOCATED);
+	coarse_dirty[p_level] = true; // GodotNext: global_sdf_coarse_bound (#257)
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], index * sizeof(int32_t), sizeof(int32_t), page_tables[p_level].ptr() + index);
@@ -355,6 +372,7 @@ void NextGIGlobalSDFGPU::mark_missing(uint32_t p_level, const Vector3i &p_brick)
 	}
 	page_tables.write[p_level].set(index, PAGE_MISSING);
 	missing_bricks[p_level]++;
+	coarse_dirty[p_level] = true; // GodotNext: global_sdf_coarse_bound (#257)
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], index * sizeof(int32_t), sizeof(int32_t), page_tables[p_level].ptr() + index);
@@ -396,7 +414,9 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		return false;
 	}
 	if (p_count == 0) {
-		return true;
+		// GodotNext: global_sdf_coarse_bound (#257). A scroll or release with no brick to build
+		// still changed the page table the bound was built from.
+		return RenderingDevice::get_singleton() == nullptr || !coarse_dirty[p_level] || _update_coarse(p_level);
 	}
 	ensure_buffers();
 	if (!_ensure_pipeline()) {
@@ -468,7 +488,7 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 	}
 	last_allocation_failed = allocation_failed;
 	if (work.is_empty()) {
-		const bool coarse = _update_coarse(p_level, p_origin);
+		const bool coarse = _update_coarse(p_level);
 		return coarse && !allocation_failed;
 	}
 
@@ -538,6 +558,7 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 				rd->free_rid(buffer);
 			}
 		}
+		_update_coarse(p_level); // GodotNext: global_sdf_coarse_bound (#257). The page table changed above.
 		return false;
 	}
 	rd->set_resource_name(instance_buffer, "NextGI global SDF instances");
@@ -560,6 +581,7 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 		for (RID buffer : { instance_buffer, mesh_buffer, page_buffer, brick_buffer, work_buffer, indices_buffer }) {
 			rd->free_rid(buffer);
 		}
+		_update_coarse(p_level); // GodotNext: global_sdf_coarse_bound (#257). The page table changed above.
 		return false;
 	}
 	CompositeParams push = {};
@@ -576,7 +598,7 @@ bool NextGIGlobalSDFGPU::update_bricks(const Vector<NextGIGlobalSDF::Instance> &
 	for (RID buffer : { instance_buffer, mesh_buffer, page_buffer, brick_buffer, work_buffer, indices_buffer }) {
 		rd->free_rid(buffer);
 	}
-	const bool coarse = _update_coarse(p_level, p_origin);
+	const bool coarse = _update_coarse(p_level);
 	return coarse && !allocation_failed;
 }
 
@@ -607,17 +629,99 @@ bool NextGIGlobalSDFGPU::download_brick(uint32_t p_level, const Vector3i &p_bric
 }
 
 bool NextGIGlobalSDFGPU::download_coarse(uint32_t p_level, LocalVector<float> &r_coarse) const {
-	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || !coarse_buffers[p_level].is_valid()) {
+	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || !coarse_bound_buffer.is_valid()) {
 		return false;
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
-	const Vector<uint8_t> data = rd->buffer_get_data(coarse_buffers[p_level]);
+	const uint32_t bytes = NextGIGlobalSDF::COARSE_VOXELS * sizeof(float);
+	const Vector<uint8_t> data = rd->buffer_get_data(coarse_bound_buffer, p_level * bytes, bytes);
 	if (data.size() != int(NextGIGlobalSDF::COARSE_VOXELS * sizeof(float))) {
 		return false;
 	}
 	r_coarse.resize(NextGIGlobalSDF::COARSE_VOXELS);
 	memcpy(r_coarse.ptr(), data.ptr(), data.size());
+	return true;
+}
+
+// GodotNext: global_sdf_coarse_bound (#257).
+namespace {
+struct CoarsePoolView {
+	const uint16_t *static_half = nullptr;
+	const uint16_t *dynamic_half = nullptr;
+};
+
+float _coarse_pool_fetch(const void *p_user, int32_t p_slot, uint32_t p_voxel_index) {
+	const CoarsePoolView *view = static_cast<const CoarsePoolView *>(p_user);
+	const uint32_t index = uint32_t(p_slot) * NextGIGlobalSDF::BRICK_VOXELS + p_voxel_index;
+	return MIN(Math::half_to_float(view->static_half[index]), Math::half_to_float(view->dynamic_half[index]));
+}
+} // namespace
+
+bool NextGIGlobalSDFGPU::validate_coarse(const Vector<NextGIGlobalSDF::Instance> &p_instances, uint32_t p_level, const Vector3i &p_origin, uint32_t p_count, float p_tolerance, uint32_t &r_checked, uint32_t &r_overestimates, uint32_t &r_twin_mismatches) const {
+	r_checked = 0;
+	r_overestimates = 0;
+	r_twin_mismatches = 0;
+	if (p_level >= NextGIGlobalSDF::MAX_LEVELS || !has_buffers()) {
+		return false;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	LocalVector<float> bound;
+	if (!download_coarse(p_level, bound)) {
+		return false;
+	}
+	const Vector<uint8_t> static_data = rd->buffer_get_data(pool_buffer);
+	const Vector<uint8_t> dynamic_data = rd->buffer_get_data(dynamic_pool_buffer);
+	if (static_data.size() != int(capacity * BRICK_BYTES) || dynamic_data.size() != int(capacity * BRICK_BYTES)) {
+		return false;
+	}
+	CoarsePoolView view;
+	view.static_half = reinterpret_cast<const uint16_t *>(static_data.ptr());
+	view.dynamic_half = reinterpret_cast<const uint16_t *>(dynamic_data.ptr());
+	LocalVector<float> twin;
+	NextGIGlobalSDF::build_coarse_bound(page_tables[p_level].ptr(), &_coarse_pool_fetch, &view, NextGIGlobalSDF::level_voxel_size(p_level), twin);
+	for (uint32_t index = 0; index < NextGIGlobalSDF::COARSE_VOXELS; index++) {
+		if (Math::abs(bound[index] - twin[index]) > 1.0e-4f * MAX(1.0f, Math::abs(twin[index]))) {
+			r_twin_mismatches++;
+		}
+	}
+	// An instance can only be closer than a bound when its world bounds are: the others are skipped,
+	// which keeps the check fast on scenes with thousands of instances and gives the same answer.
+	LocalVector<AABB> world_bounds;
+	LocalVector<uint32_t> usable;
+	for (uint32_t index = 0; index < uint32_t(p_instances.size()); index++) {
+		const NextGIGlobalSDF::Instance &instance = p_instances[index];
+		if (instance.field == nullptr || !instance.field->is_valid()) {
+			continue;
+		}
+		world_bounds.push_back(instance.transform.xform(instance.field->bounds));
+		usable.push_back(index);
+	}
+	RandomNumberGenerator rng;
+	rng.set_seed(257257 + p_level);
+	const float extent = NextGIGlobalSDF::level_extent(p_level);
+	const Vector3 minimum = Vector3(p_origin) * NextGIGlobalSDF::level_voxel_size(p_level);
+	for (uint32_t sample = 0; sample < p_count; sample++) {
+		const Vector3 point = minimum + Vector3(rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent), rng.randf_range(0.0f, extent));
+		const float value = NextGIGlobalSDF::coarse_bound_at(bound, p_level, p_origin, point);
+		r_checked++;
+		if (value <= p_tolerance) {
+			continue; // No distance is negative past the tolerance's reach.
+		}
+		const float reach = value - p_tolerance;
+		for (uint32_t i = 0; i < usable.size(); i++) {
+			const AABB &box = world_bounds[i];
+			const Vector3 outside = (box.position - point).max(Vector3()) + (point - (box.position + box.size)).max(Vector3());
+			if (outside.length() >= reach) {
+				continue; // Every point of the instance is at least this far.
+			}
+			if (NextGIGlobalSDF::sample_instance(p_instances[usable[i]], point) < reach) {
+				r_overestimates++;
+				break;
+			}
+		}
+	}
 	return true;
 }
 
@@ -819,6 +923,7 @@ void NextGIGlobalSDFGPU::scroll_level(uint32_t p_level, const Vector3i &p_delta_
 		}
 	}
 	page_tables.write[p_level] = new_table;
+	coarse_dirty[p_level] = true; // GodotNext: global_sdf_coarse_bound (#257)
 	_recount_missing(p_level); // GodotNext: ps_swrt_trace (#186)
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
@@ -840,6 +945,7 @@ void NextGIGlobalSDFGPU::release_level(uint32_t p_level) {
 		}
 	}
 	missing_bricks[p_level] = 0;
+	coarse_dirty[p_level] = true; // GodotNext: global_sdf_coarse_bound (#257)
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr && page_buffers[p_level].is_valid()) {
 		rd->buffer_update(page_buffers[p_level], 0, table.size() * sizeof(int32_t), table.ptr());

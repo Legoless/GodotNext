@@ -2189,7 +2189,8 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 	const bool coarse_valid = global_sdf.download_coarse(0, coarse);
 	for (int z = 0; z < int(NextGIGlobalSDF::LEVEL_SIZE); z++) {
 		for (int x = 0; x < int(NextGIGlobalSDF::LEVEL_SIZE); x++) {
-			const Vector3 start = NextGIGlobalSDF::voxel_center(0, global_sdf_origin, Vector3i(x, slice_y, 0));
+			// GodotNext: global_sdf_coarse_bound (#257). Two cells in: the level's edge cells never step.
+			const Vector3 start = NextGIGlobalSDF::voxel_center(0, global_sdf_origin, Vector3i(x, slice_y, 8));
 			const uint32_t steps = coarse_valid ? NextGIGlobalSDF::trace_coarse_steps(coarse, 0, global_sdf_origin, start, Vector3(0.0f, 0.0f, 1.0f)) : 0;
 			step_counts.set(x + z * int(NextGIGlobalSDF::LEVEL_SIZE), MIN(steps, 255u));
 		}
@@ -2202,6 +2203,16 @@ Dictionary NextGIRTScene::get_global_sdf_debug() const {
 	info["global_sdf_coverage"] = coverage;
 	info["global_sdf_step_counts"] = step_counts;
 	info["global_sdf_coarse_valid"] = coarse_valid;
+	// GodotNext: global_sdf_coarse_bound (#257). The GPU bound against its CPU twin and against
+	// the nearest instance at random points of level 0 (a quarter voxel of tolerance, as the
+	// composite's overestimate check).
+	uint32_t coarse_checked = 0;
+	uint32_t coarse_overestimates = 0;
+	uint32_t coarse_twin_mismatches = 0;
+	const bool coarse_checks = global_sdf.validate_coarse(instances, 0, global_sdf_origin, 10000, 0.25f * NextGIGlobalSDF::level_voxel_size(0), coarse_checked, coarse_overestimates, coarse_twin_mismatches);
+	info["global_sdf_coarse_checked"] = coarse_checks ? int64_t(coarse_checked) : int64_t(-1);
+	info["global_sdf_coarse_overestimates"] = int64_t(coarse_overestimates);
+	info["global_sdf_coarse_twin_mismatches"] = int64_t(coarse_twin_mismatches);
 	info["global_sdf_slice_y"] = slice_y;
 	info["global_sdf_origin"] = global_sdf_origin;
 	info["global_sdf_instances"] = instances.size();
