@@ -12,7 +12,12 @@
 #    values. With the setting on, the device's "async:" frame counters must show the fork/join
 #    and barrier cases submitted to the async queue and the overlapping chain fell back; off, they
 #    must stay 0.
-# 2. Harness captures (capture mode, HDR slots 5 and 11) of each scene with the setting off, then
+# 2. The overlap fixture (tests/rd_parity/async_overlap.tscn, issue step 6) with the setting off,
+#    on, and on with --queue=main and GODOT_RG_FORCE_ASYNC_COMPUTE=1. Each launch must pass (CPU
+#    checks of its readbacks, and every frame forked exactly when it should); the on and forced
+#    launches must fork, and their compute and raster digests must equal the off launch's. The
+#    on/off frame-time ratio is printed, not gated.
+# 3. Harness captures (capture mode, HDR slots 5 and 11) of each scene with the setting off, then
 #    on with GODOT_RG_FORCE_ASYNC_COMPUTE=<stride>, which moves every n-th compute list of a frame
 #    to the async queue. Every capture must be byte-identical to the off run. The main device
 #    must report forked frames ("submitted" above 0) in every forced run and none in the off run.
@@ -139,6 +144,57 @@ for setting in false true; do
 		die "async compute is not active with the setting on; this check needs a device with SUPPORTS_ASYNC_COMPUTE"
 	fi
 done
+
+# json_field <line> <key>: the number, boolean or string of a key that occurs once in the line.
+json_field() {
+	printf '%s\n' "$1" | sed -n "s/.*\"$2\":\"\{0,1\}\([^\",}]*\).*/\1/p"
+}
+
+# overlap <name> <true|false> <fixture arguments...>: one launch of the overlap fixture; leaves its
+# GODOTNEXT_RESULT line in overlap_result.
+overlap() {
+	local name=$1 setting=$2
+	shift 2
+	write_override "$setting"
+	run_godot "$work_root/$name.log" --path "$testbed_dir" --rendering-driver metal --quit-after 600 res://tests/rd_parity/async_overlap.tscn -- "$@"
+	remove_override
+	overlap_result=$(grep -m1 '^GODOTNEXT_RESULT ' "$work_root/$name.log" || true)
+	echo "  $name: pass=$(json_field "$overlap_result" pass) active=$(json_field "$overlap_result" active) forked=$(json_field "$overlap_result" forked) submitted=$(json_field "$overlap_result" submitted) fell_back=$(json_field "$overlap_result" fell_back) compute_ms=$(json_field "$overlap_result" compute_ms) raster_ms=$(json_field "$overlap_result" raster_ms) frame_ms=$(json_field "$overlap_result" frame_ms)"
+	if [[ "$(json_field "$overlap_result" pass)" != true ]]; then
+		echo "  $overlap_result" >&2
+		die "the overlap fixture failed ($name)"
+	fi
+}
+
+echo "== Overlap fixture, async compute off, on, and forced onto the async queue"
+# Few frames: under shader validation the times are not measurements. The fixture itself checks
+# the readbacks and that every frame forked exactly when it should.
+overlap_args=(--frames=10 --warmup=2)
+overlap overlap_off false "${overlap_args[@]}"
+off_result=$overlap_result
+overlap overlap_on true "${overlap_args[@]}"
+on_result=$overlap_result
+if [[ "$(json_field "$on_result" forked)" != true ]]; then
+	die "the overlap frames did not fork to the async queue with the setting on"
+fi
+GODOT_RG_FORCE_ASYNC_COMPUTE=1 overlap overlap_forced true --queue=main "${overlap_args[@]}"
+forced_result=$overlap_result
+if ! grep -q "RG: Forcing every 1 compute list onto the async compute queue" "$work_root/overlap_forced.log"; then
+	die "overlap_forced: the force switch did not engage (not a debug build, or no async queue)"
+fi
+if [[ "$(json_field "$forced_result" forked)" != true ]]; then
+	die "the forced main-queue overlap frames did not fork to the async queue"
+fi
+for key in compute_digest raster_digest; do
+	reference=$(json_field "$off_result" "$key")
+	if [[ -z "$reference" || "$(json_field "$on_result" "$key")" != "$reference" || "$(json_field "$forced_result" "$key")" != "$reference" ]]; then
+		die "the overlap fixture's $key differs between async compute off, on and forced"
+	fi
+done
+echo "  compute and raster outputs match across async compute off, on and forced"
+# GR-4 compares these in PQ, without validation; here they are recorded only.
+awk -v on="$(json_field "$on_result" frame_ms)" -v off="$(json_field "$off_result" frame_ms)" \
+	'BEGIN { if (off > 0) printf "  frame on/off: %.3f / %.3f ms = %.3f (under validation; recorded, not gated)\n", on, off, on / off }'
 
 capture() { # capture <name> <scene>: the legacy identity capture, slots 5 and 11.
 	local name=$1 scene=$2

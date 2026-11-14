@@ -407,6 +407,17 @@ const RDD::TextureBarrier *find_texture_barrier(const LocalVector<RDD::TextureBa
 	return nullptr;
 }
 
+// The raster pass of godotnext/testbed/tests/rd_parity/async_overlap.gd: a draw list that clears
+// and blends into one color attachment and touches nothing else.
+void add_color_pass(RDG &p_graph, RDG::ResourceTracker *p_color) {
+	const RDG::AttachmentOperation operation = RDG::ATTACHMENT_OPERATION_CLEAR;
+	const RDD::RenderPassClearValue clear_value;
+	p_graph.add_draw_list_begin(RDD::RenderPassID(), RDD::FramebufferID(), Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(&operation, 1), VectorView<RDD::RenderPassClearValue>(&clear_value, 1), RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+	p_graph.add_draw_list_usage(p_color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+	p_graph.add_draw_list_draw(3, 16);
+	p_graph.add_draw_list_end();
+}
+
 } // namespace TestRDAsyncCompute
 
 using namespace TestRDAsyncCompute;
@@ -1060,6 +1071,109 @@ TEST_CASE("[RD][AsyncCompute] a fork barrier on a resource an earlier async list
 
 		free_trackers(trackers, 3);
 	}
+}
+
+TEST_CASE("[RD][AsyncCompute] the overlap fixture's draw list runs on the main queue between the fork and the join") {
+	// godotnext/testbed/tests/rd_parity/async_overlap.gd times frames of a timestamp, an async
+	// compute list, an independent draw list and a closing timestamp. The draw list must be recorded
+	// into a main command buffer after the fork and before the join, so the two passes can overlap.
+	RDG graph;
+	RDG::ResourceTracker *input = tracker();
+	RDG::ResourceTracker *output = tracker();
+	RDG::ResourceTracker *color = texture_tracker(10, 1);
+	RDG::ResourceTracker *trackers[] = { input, output, color };
+
+	graph.add_capture_timestamp(RDD::QueryPoolID(1), 0);
+	add_async_compute(graph, input, output);
+	add_color_pass(graph, color);
+	graph.add_capture_timestamp(RDD::QueryPoolID(1), 1);
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncEmission emission;
+	graph.emit_for_test(plan, emission);
+	REQUIRE(plan.active);
+	CHECK_EQ(plan.async_count, 1u);
+	CHECK_EQ(plan.main_count, 3u);
+	CHECK_EQ(plan.fork_level, 1u);
+	CHECK_EQ(plan.join_level, 2u);
+
+	const RDG::AsyncEmission::Step *opening = find_step(emission, RDG::AsyncEmission::STEP_MAIN, 0);
+	const RDG::AsyncEmission::Step *draw = find_step(emission, RDG::AsyncEmission::STEP_MAIN, 1);
+	const RDG::AsyncEmission::Step *async = find_step(emission, RDG::AsyncEmission::STEP_ASYNC, 1);
+	const RDG::AsyncEmission::Step *closing = find_step(emission, RDG::AsyncEmission::STEP_MAIN, 2);
+	REQUIRE(opening != nullptr);
+	REQUIRE(draw != nullptr);
+	REQUIRE(async != nullptr);
+	REQUIRE(closing != nullptr);
+	CHECK(same_commands(opening->commands, { 0 }));
+	CHECK(same_commands(draw->commands, { 2 }));
+	CHECK(same_commands(async->commands, { 1 }));
+	CHECK(same_commands(closing->commands, { 3 }));
+	CHECK_EQ(int32_t(opening->buffer), emission.fork_index);
+	CHECK(int32_t(draw->buffer) > emission.fork_index);
+	CHECK(int32_t(draw->buffer) < emission.join_index);
+	CHECK_EQ(int32_t(closing->buffer), emission.join_index);
+	check_emission_order(emission, plan);
+
+	const uint32_t command_buffer_count = emission.buffers_used + 1;
+	const LocalVector<Submit> submits = submit_frame(command_buffer_count, emission.fork_index, emission.join_index);
+	check_fork_join_submits(submits, command_buffer_count, emission.fork_index, emission.join_index);
+	// The draw list's command buffer does not wait for the async work.
+	CHECK_FALSE(submits[find_submit(submits, main_command_buffer(int32_t(draw->buffer)))].waits.has(JOIN_SEMAPHORE));
+
+	// With async compute off, the compute list records on the main queue. Both passes share level 1,
+	// where draw lists sort before compute lists.
+	RDG main_graph;
+	RDG::ResourceTracker *input_main = tracker();
+	RDG::ResourceTracker *output_main = tracker();
+	RDG::ResourceTracker *color_main = texture_tracker(10, 1);
+	RDG::ResourceTracker *main_trackers[] = { input_main, output_main, color_main };
+	main_graph.add_capture_timestamp(RDD::QueryPoolID(1), 0);
+	add_main_compute(main_graph, input_main, output_main);
+	add_color_pass(main_graph, color_main);
+	main_graph.add_capture_timestamp(RDD::QueryPoolID(1), 1);
+
+	LocalVector<int32_t> main_order;
+	RDG::AsyncPlan main_plan;
+	main_graph.plan_for_test(main_order, main_plan, true);
+	CHECK_FALSE(main_plan.active);
+	CHECK_EQ(main_plan.async_count, 0u);
+	CHECK(same_commands(main_order, { 0, 2, 1, 3 }));
+
+	free_trackers(trackers, 3);
+	free_trackers(main_trackers, 3);
+}
+
+TEST_CASE("[RD][AsyncCompute] a timestamp between the async list and the draw list puts the draw list after the join") {
+	// A timestamp depends on every command since the previous one, and every later command depends
+	// on it. Between the passes, it consumes the async work, so the draw list can no longer overlap
+	// it. This is why the overlap fixture brackets both passes with one pair of timestamps.
+	RDG graph;
+	RDG::ResourceTracker *input = tracker();
+	RDG::ResourceTracker *output = tracker();
+	RDG::ResourceTracker *color = texture_tracker(10, 1);
+	RDG::ResourceTracker *trackers[] = { input, output, color };
+
+	graph.add_capture_timestamp(RDD::QueryPoolID(1), 0);
+	add_async_compute(graph, input, output);
+	graph.add_capture_timestamp(RDD::QueryPoolID(1), 1);
+	add_color_pass(graph, color);
+	graph.add_capture_timestamp(RDD::QueryPoolID(1), 2);
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncEmission emission;
+	graph.emit_for_test(plan, emission);
+	REQUIRE(plan.active);
+	CHECK_EQ(plan.fork_level, 1u);
+	CHECK_EQ(plan.join_level, 2u);
+
+	const RDG::AsyncEmission::Step *draw = find_step(emission, RDG::AsyncEmission::STEP_MAIN, 3);
+	REQUIRE(draw != nullptr);
+	CHECK(same_commands(draw->commands, { 3 }));
+	CHECK(int32_t(draw->buffer) >= emission.join_index);
+	check_emission_order(emission, plan);
+
+	free_trackers(trackers, 3);
 }
 
 #endif // RD_ENABLED
