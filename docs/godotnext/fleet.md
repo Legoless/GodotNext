@@ -403,4 +403,13 @@ On Vulkan the leak check also logs 2 sync-validation hazards when it switches sc
 
 ## AS calibration on the RTX 4080 SUPER (#9, PR time)
 
-`tests/as_calibration` ran on the RTX 4080 SUPER (Vulkan) and the M5 Max (Metal) with `--warmup=2 --iters=5`. A `--gpu-validation` run on Vulkan logged 0 errors. `godotnext_metrics.as_calibration` found every field it needs in both results. These short runs only check the fields; G0-6 measures the values in PQ with clocks locked. The standalone Vulkan refit tool is still open.
+`tests/as_calibration` ran on the RTX 4080 SUPER (Vulkan) and the M5 Max (Metal) with `--warmup=2 --iters=5`. A `--gpu-validation` run on Vulkan logged 0 errors. `godotnext_metrics.as_calibration` found every field it needs in both results. These short runs only check the fields; G0-6 measures the values in PQ with clocks locked.
+
+The standalone Vulkan refit tool (`tools/as_refit_bench`) builds with MSVC and the Vulkan SDK on the RTX 4080 SUPER machine and the Windows L4 VM, and its CTest self-test passes on both. It runs over plain SSH. A `--validation` run, with synchronization validation and `VK_NV_ray_tracing_validation` on, logged 0 errors on both cards. A deliberately broken build of the tool (a missing barrier and a leaked buffer) logged both errors and exited 1, so the 0 is a real result. On the RTX 4080 SUPER machine, the issue's PQ command (`--device "RTX 4080 SUPER" --runs 3`, at the defaults) ran through and its JSON passed the derivation, a two-run validation run logged 0 errors, and `--device "UHD Graphics"` printed the fallback result (`NO_ACCELERATION_STRUCTURE`) and exited 0. The tool and the RD scene then ran on the same machine with `--warmup 2 --iters 5`, and the derivation took both. These are samples with unlocked clocks, not PQ figures:
+
+| Card | Tool vs RD, TLAS p95 at 100k instances | Tool vs RD, FAST_TRACE BLAS throughput | Refit, RD / tool (200k triangles) | Refit used for line 1a |
+|---|---|---|---|---|
+| RTX 4080 SUPER | +6.4% | +0.3% | 1.036 | tool |
+| L4 (build-time only) | +3.4% | +0.0% | 0.970 | tool |
+
+The BLAS-set and TLAS memory are byte-identical between the two. Getting that match needed a fix in the RD scene: it now reads `MEMORY_ACCELERATION_STRUCTURES` right after creating the structures. Before, the 10k-instance TLAS memory came out negative, because RD frees the FAST_BUILD BLAS set only when a frame slot cycles.

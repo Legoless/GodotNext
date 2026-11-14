@@ -7,19 +7,24 @@ and derives, per card:
   PREFER_FAST_BUILD (median of the per-run p95 values);
 - BLAS build throughput in triangles per GPU ms, per flag and size bucket;
 - refit throughput through RD's UPDATE mode, and through the standalone Vulkan
-  tool when its result is given;
+  tool (``tools/as_refit_bench``) when its result for the same adapter is given,
+  with the RD / tool ratio per refit size;
+- the tool's cross-check: its 100k-instance TLAS p95 and FAST_TRACE BLAS
+  throughput against RD's. Line 1a uses the tool's refit figure only when both
+  are within 15%; otherwise it uses RD's and says why (#9: investigate first);
 - line 1a = TLAS p95 at 50k instances + 200k triangles / refit throughput (also
   at the largest instance count), against the report-only target of 0.14 ms;
 - line 1b's triangle cap = FAST_TRACE BLAS throughput x 0.10 ms, rounded down
   to 10k triangles;
 - AS memory per configuration, and the p95 spread across runs per point.
 
-At PR time only the field check gates (``missing_fields``); the numbers are PQ's.
+At PR time only the field checks gate (``missing_fields``, ``tool_missing_fields``
+and a tool result without a matching card); the numbers and the 15% line are PQ's.
 
 Usage::
 
     python3 -m godotnext_metrics.as_calibration <as_calibration.json>... \\
-        [--refit-tool <tool.json>] [--out <dir>]
+        [--refit-tool <as_refit_bench.json>]... [--out <dir>]
 """
 
 from __future__ import annotations
@@ -39,6 +44,14 @@ LINE_1A_SKINNED_TRIANGLES = 200000
 CAP_ROUNDING = 10000
 TOOL_TOLERANCE = 0.15
 FLAGS = ("fast_trace", "fast_build")
+TOOL_FIELDS = (
+    "adapter",
+    "refit_sizes",
+    "refit",
+    "refit_triangles_per_ms",
+    "tlas_100k_p95_ms",
+    "blas_fast_trace_triangles_per_ms",
+)
 
 
 def missing_fields(result: dict[str, Any]) -> list[str]:
@@ -80,6 +93,17 @@ def missing_fields(result: dict[str, Any]) -> list[str]:
             entry = refit.get(str(count)) if isinstance(refit, dict) else None
             if not isinstance(entry, dict) or "triangles_per_ms" not in entry:
                 missing.append(f"{prefix}.refit_rd.{count}")
+    return missing
+
+
+def tool_missing_fields(tool: dict[str, Any]) -> list[str]:
+    """Fields the derivation needs that a refit tool result (as_refit_bench.json) lacks."""
+    missing = [key for key in TOOL_FIELDS if key not in tool]
+    refit = tool.get("refit")
+    for count in tool.get("refit_sizes", []) or []:
+        entry = refit.get(str(count)) if isinstance(refit, dict) else None
+        if not isinstance(entry, dict) or "triangles_per_ms" not in entry:
+            missing.append(f"refit.{count}")
     return missing
 
 
@@ -157,11 +181,40 @@ def derive_card(result: dict[str, Any], refit_tool: dict[str, Any] | None = None
         if str(LINE_1A_SKINNED_TRIANGLES) in refit_rd
         else (str(refit_sizes[-1]) if refit_sizes else "")
     )
-    refit_rd_tpm = refit_rd.get(refit_key, 0.0)
-    refit_tool_tpm = (
-        float(refit_tool["refit_triangles_per_ms"]) if refit_tool and "refit_triangles_per_ms" in refit_tool else None
-    )
-    refit_tpm = refit_tool_tpm if refit_tool_tpm is not None else refit_rd_tpm
+    derived: dict[str, Any] = {
+        "adapter": result.get("adapter"),
+        "driver": result.get("driver"),
+        "runs": len(runs),
+        "tlas": tlas,
+        "blas": blas,
+        "refit_rd_triangles_per_ms": refit_rd,
+        "refit_size": int(refit_key) if refit_key else None,
+    }
+    refit_tpm = refit_rd.get(refit_key, 0.0)
+    refit_source = "rd"
+    if refit_tool is not None:
+        derived["refit_tool"] = refit_tool
+        check = _tool_cross_check(derived, refit_tool)
+        derived["tool_cross_check"] = check
+        tool_refit = {
+            str(count): float(entry["triangles_per_ms"])
+            for count, entry in (refit_tool.get("refit") or {}).items()
+            if isinstance(entry, dict) and "triangles_per_ms" in entry
+        }
+        derived["refit_tool_triangles_per_ms"] = tool_refit
+        # RD's refit throughput over the tool's, at every size both measured.
+        derived["refit_rd_over_tool"] = {
+            count: refit_rd[count] / tool_refit[count] for count in refit_rd if tool_refit.get(count)
+        }
+        tool_tpm = float(refit_tool.get("refit_triangles_per_ms", 0.0))
+        if len(check) == 2 and all(entry["within_15_percent"] for entry in check.values()) and tool_tpm > 0.0:
+            refit_tpm = tool_tpm
+            refit_source = "tool"
+        else:
+            derived["refit_tool_withheld"] = (
+                "the cross-check is incomplete, or the tool's TLAS or FAST_TRACE BLAS figure "
+                "is not within 15% of RD's: investigate before its refit figure is used (#9)"
+            )
 
     tlas_counts = sorted(int(count) for count in tlas)
     line_1a: dict[str, Any] = {}
@@ -175,22 +228,14 @@ def derive_card(result: dict[str, Any], refit_tool: dict[str, Any] | None = None
             "within_target": None if value is None else value <= LINE_1A_TARGET_MS,
         }
 
-    derived: dict[str, Any] = {
-        "adapter": result.get("adapter"),
-        "driver": result.get("driver"),
-        "runs": len(runs),
-        "tlas": tlas,
-        "blas": blas,
-        "refit_rd_triangles_per_ms": refit_rd,
-        "refit_source": "tool" if refit_tool_tpm is not None else "rd",
+    derived.update({
+        "refit_source": refit_source,
+        "refit_triangles_per_ms": refit_tpm,
         "line_1a": line_1a,
         "line_1b_triangle_cap": triangle_cap(float(blas["fast_trace"]["triangles_per_ms"])),
         "spread_percent": spreads,
         "max_spread_percent": max(spreads.values()) if spreads else 0.0,
-    }
-    if refit_tool is not None:
-        derived["refit_tool"] = refit_tool
-        derived["tool_cross_check"] = _tool_cross_check(derived, refit_tool)
+    })
     return derived
 
 
@@ -246,10 +291,34 @@ def markdown_table(cards: list[dict[str, Any]]) -> str:
             f"BLAS build, {flag.upper()} (triangles/ms)",
             [cell(card["blas"][flag]["triangles_per_ms"], 0) for card in cards],
         ))
+
+    def refit_size(card: dict[str, Any]) -> str:
+        return str(card.get("refit_size"))
+
+    def percent(value: object) -> str:
+        return "n/a" if not isinstance(value, float) else f"{value * 100.0:.1f}"
+
     rows.append((
-        "Refit (triangles/ms)",
-        [cell(max(card["refit_rd_triangles_per_ms"].values(), default=None), 0) for card in cards],
+        "Refit through RD, line-1a size (triangles/ms)",
+        [cell(card["refit_rd_triangles_per_ms"].get(refit_size(card)), 0) for card in cards],
     ))
+    rows.append((
+        "Refit, standalone tool, line-1a size (triangles/ms)",
+        [cell(card.get("refit_tool_triangles_per_ms", {}).get(refit_size(card)), 0) for card in cards],
+    ))
+    rows.append((
+        "Refit, RD / tool",
+        [cell(card.get("refit_rd_over_tool", {}).get(refit_size(card))) for card in cards],
+    ))
+    rows.append(("Refit used for line 1a", [str(card.get("refit_source")) for card in cards]))
+    for name, label in (
+        ("tlas_100k_p95_ms", "Tool vs RD, TLAS p95 at 100000 instances (difference %)"),
+        ("blas_fast_trace_triangles_per_ms", "Tool vs RD, BLAS FAST_TRACE (difference %)"),
+    ):
+        rows.append((
+            label,
+            [percent(card.get("tool_cross_check", {}).get(name, {}).get("difference")) for card in cards],
+        ))
     for key in (str(LINE_1A_INSTANCES), str(counts[-1]) if counts else ""):
         if key:
             rows.append((
@@ -266,20 +335,46 @@ def markdown_table(cards: list[dict[str, Any]]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("results", nargs="+", type=Path, help="as_calibration.json, one per card")
-    parser.add_argument("--refit-tool", type=Path, help="the standalone refit tool's JSON")
+    parser.add_argument(
+        "--refit-tool",
+        type=Path,
+        action="append",
+        default=[],
+        help="the standalone refit tool's as_refit_bench.json; one per card, matched by adapter",
+    )
     parser.add_argument("--out", type=Path, help="write as_calibration.json and as_calibration.md here")
     args = parser.parse_args(argv)
-    tool = json.loads(args.refit_tool.read_text(encoding="utf-8")) if args.refit_tool else None
     cards: list[dict[str, Any]] = []
     missing: dict[str, list[str]] = {}
+    tools: dict[str, dict[str, Any]] = {}
+    for path in args.refit_tool:
+        tool = json.loads(path.read_text(encoding="utf-8"))
+        gaps = tool_missing_fields(tool)
+        if not gaps and str(tool["adapter"]) in tools:
+            gaps = [f"a second refit tool result for {tool['adapter']}"]
+        if gaps:
+            missing[str(path)] = gaps
+            continue
+        tools[str(tool["adapter"])] = tool
+    matched: set[str] = set()
     for path in args.results:
         result = json.loads(path.read_text(encoding="utf-8"))
         gaps = missing_fields(result)
         if gaps:
             missing[str(path)] = gaps
             continue
-        cards.append(derive_card(result, tool))
-    summary = {"cards": cards, "missing_fields": missing, "pass": not missing and bool(cards)}
+        adapter = str(result.get("adapter"))
+        if adapter in tools:
+            matched.add(adapter)
+        cards.append(derive_card(result, tools.get(adapter)))
+    # A tool result whose card is absent would silently drop its refit figure.
+    unmatched = sorted(set(tools) - matched)
+    summary = {
+        "cards": cards,
+        "missing_fields": missing,
+        "unmatched_refit_tools": unmatched,
+        "pass": not missing and not unmatched and bool(cards),
+    }
     if args.out is not None:
         args.out.mkdir(parents=True, exist_ok=True)
         (args.out / "as_calibration.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")

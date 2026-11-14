@@ -138,9 +138,13 @@ func _measure(rd: RenderingDevice, meshes: Array, inputs: Array, tlas_sizes: Arr
 		var flag := _flag(flag_name)
 		var before := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
 		var blases := _create_blases(rd, meshes, inputs, flag)
-		blas[flag_name] = _time_blases(rd, meshes, blases, warmup, iters)
 		# This flag's structures only: the FAST_TRACE set is still alive while FAST_BUILD is measured.
-		blas[flag_name]["memory_bytes"] = rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - before
+		# Read before any submit, because RD frees structures when a frame slot cycles: a later read
+		# would also subtract the structures an earlier step freed.
+		var memory := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - before
+		_check(memory > 0, "%s BLAS memory is positive" % flag_name)
+		blas[flag_name] = _time_blases(rd, meshes, blases, warmup, iters)
+		blas[flag_name]["memory_bytes"] = memory
 		if flag_name == "fast_trace":
 			fast_trace = blases
 		else:
@@ -357,9 +361,11 @@ func _time_tlas(rd: RenderingDevice, instances: Array[RDAccelerationStructureIns
 	var before := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES)
 	var tlas := rd.tlas_create(instances.size(), flags)
 	_check(tlas.is_valid(), "TLAS of %d instances is created" % instances.size())
+	# Read before any submit (see _measure): the previous point's structures are freed during this one.
+	var memory := rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - before
+	_check(not tlas.is_valid() or memory > 0, "TLAS memory of %d instances is positive" % instances.size())
 	var gpu := PackedFloat64Array()
 	var cpu := PackedFloat64Array()
-	var memory := 0
 	if tlas.is_valid():
 		for iteration in warmup + iters:
 			rd.capture_timestamp("tlas_start")
@@ -373,7 +379,6 @@ func _time_tlas(rd: RenderingDevice, instances: Array[RDAccelerationStructureIns
 				continue
 			gpu.append((times[1] - times[0]) / 1e6)
 			cpu.append(cpu_ms)
-		memory = rd.get_memory_usage(RenderingDevice.MEMORY_ACCELERATION_STRUCTURES) - before
 		rd.free_rid(tlas)
 	return {
 		"instances": instances.size(),
