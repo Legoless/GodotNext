@@ -1768,14 +1768,15 @@ RSE::BlendShapeMode MeshStorage::mesh_get_blend_shape_mode(RID p_mesh) const {
 }
 
 void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
-	// GodotNext: ps_mesh_sdf_atlas (#185). The baked field is stale and is
-	// released; runtime regeneration re-registers it.
-	sdf_atlas.unregister_mesh(p_mesh);
 	ERR_FAIL_COND(p_data.is_empty());
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
 	ERR_FAIL_UNSIGNED_INDEX((uint32_t)p_surface, mesh->surface_count);
 	ERR_FAIL_COND(mesh->surfaces[p_surface]->vertex_buffer.is_null());
+	// GodotNext: sdf_keep_on_edit (#252). The mesh keeps the field it has, as UE: a mesh
+	// distance field is never rebuilt for an edit, and runtime generation (plan §21.2 L2) is
+	// only for meshes that arrive without one.
+	sdf_atlas.note_vertex_region_update(p_mesh);
 
 	uint64_t data_size = p_data.size();
 	const uint8_t *r = p_data.ptr();

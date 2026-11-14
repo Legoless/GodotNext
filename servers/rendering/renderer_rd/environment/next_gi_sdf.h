@@ -103,6 +103,15 @@ public:
 	bool register_mesh(RID p_mesh, const Ref<MeshDistanceField> &p_field);
 	void unregister_mesh(RID p_mesh);
 	bool has_mesh(RID p_mesh) const;
+	// GodotNext: sdf_keep_on_edit (#252). A vertex-region update keeps the mesh's field, as UE: a
+	// mesh distance field is never rebuilt at runtime and does not follow later deformation.
+	// Counts the updates that kept a registered field.
+	void note_vertex_region_update(RID p_mesh) {
+		if (has_mesh(p_mesh)) {
+			kept_vertex_updates++;
+		}
+	}
+	uint64_t get_kept_vertex_updates() const { return kept_vertex_updates; }
 	const MeshPages *get_pages(RID p_mesh) const;
 
 	RID get_atlas_buffer() const { return atlas_buffer; }
@@ -130,6 +139,7 @@ private:
 	LocalVector<RID> mesh_order;
 	uint64_t resident_bytes = 0;
 	uint64_t generation = 1;
+	uint64_t kept_vertex_updates = 0;
 };
 
 // GodotNext: ps_mesh_sdf_atlas (#185)

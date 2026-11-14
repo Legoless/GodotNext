@@ -971,6 +971,9 @@ Dictionary NextGI::get_tier_info() const {
 		info["proxy_blas_bytes_uncompacted"] = int64_t(ms_stats.proxy_blas_bytes_uncompacted);
 		info["proxy_triangles"] = int64_t(ms_stats.proxy_triangles);
 		info["proxy_blas_parts"] = int64_t(ms_stats.proxy_blas_parts);
+		// GodotNext: sdf_keep_on_edit (#252). Vertex-region updates that kept a mesh's field, on
+		// either tier.
+		info["mesh_sdf_kept_after_update"] = int64_t(MeshStorage::get_singleton()->get_sdf_atlas().get_kept_vertex_updates());
 	}
 	// GodotNext: nextgi_src_cards
 	if (src != nullptr) {

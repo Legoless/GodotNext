@@ -3220,6 +3220,35 @@ TEST_CASE("[NextGI][SDF] Atlas churn leaves no resident bricks") {
 	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
 }
 
+TEST_CASE("[NextGI][SDF] A vertex-region update keeps the registered field") {
+	// GodotNext: sdf_keep_on_edit (#252). As UE: the field built before the edit stays, with its
+	// pages, id and generation, and only the kept update is counted.
+	NextGISDFAtlas atlas(64);
+	const Ref<MeshDistanceField> field = _make_test_sdf();
+	REQUIRE(field.is_valid());
+	const RID mesh = RID::from_uint64(11000);
+	REQUIRE(atlas.register_mesh(mesh, field));
+	const uint32_t id = atlas.get_mesh_id(mesh);
+	const uint32_t used = atlas.get_pool_used();
+	const uint64_t resident = atlas.get_resident_bytes();
+	const uint64_t generation = atlas.get_generation();
+
+	atlas.note_vertex_region_update(mesh);
+	CHECK(atlas.has_mesh(mesh));
+	CHECK(atlas.get_pages(mesh) != nullptr);
+	CHECK_EQ(atlas.get_mesh_id(mesh), id);
+	CHECK_EQ(atlas.get_pool_used(), used);
+	CHECK_EQ(atlas.get_resident_bytes(), resident);
+	CHECK_EQ(atlas.get_generation(), generation);
+	CHECK_EQ(atlas.get_kept_vertex_updates(), uint64_t(1));
+
+	// A mesh with no field (still pending runtime generation) has nothing to keep.
+	atlas.note_vertex_region_update(RID::from_uint64(11001));
+	CHECK_EQ(atlas.get_kept_vertex_updates(), uint64_t(1));
+	atlas.unregister_mesh(mesh);
+	CHECK_EQ(atlas.get_pool_used(), uint32_t(0));
+}
+
 // GodotNext: nextgi_quality_presets (#55).
 TEST_CASE("[NextGI][Quality] Preset budgets and atlas sizes") {
 	using Q = RendererRD::NextGI::Quality;
