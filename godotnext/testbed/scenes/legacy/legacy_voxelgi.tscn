@@ -208,3 +208,6 @@ data = SubResource("VoxelGIData_jcdmm")
 [node name="ReflectionProbe" type="ReflectionProbe" parent="." unique_id=1345398057]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
 size = Vector3(10, 4, 8)
+
+[node name="HallCam" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.9659258, 0.25881904, 0, -0.25881904, 0.9659258, 0, 2, 4.5)

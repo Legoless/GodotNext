@@ -2554,6 +2554,13 @@ void fragment_shader(in SceneData scene_data) {
 #else // USE_MULTIVIEW
 			indirect_specular_light = textureLod(sampler2D(ambient_buffer, SAMPLER_LINEAR_CLAMP), coord, rough_reflection_lod).rgb;
 #endif // USE_MULTIVIEW
+		} else if (!bool(implementation_data.ss_effects_flags & SCREEN_SPACE_EFFECTS_FLAGS_USE_NEXTGI)) {
+#ifndef USE_LIGHTMAP
+			// GodotNext: legacy_gi_buffers (#248). A view without NextGI mixes the SDFGI and VoxelGI
+			// buffers as upstream does; #132 had moved the mix behind NextGI's flags.
+			ambient_light = mix(ambient_light, buffer_ambient.rgb, buffer_ambient.a);
+			indirect_specular_light = mix(indirect_specular_light, buffer_reflection.rgb, buffer_reflection.a);
+#endif // !USE_LIGHTMAP
 		}
 	}
 
