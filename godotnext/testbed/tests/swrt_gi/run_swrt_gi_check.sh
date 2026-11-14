@@ -21,7 +21,8 @@
 #   frame 1456 is when the trace queue goes empty.
 # --mode=detail (#186 step 3): swrt_gi_check.tscn --check=detail, the bleed view on the software
 #   tier at High with software_ray_tracing_mode Detail (1): detail hits resolve through D6. The
-#   hardware tier has no detail mode, so there is no reference pass.
+#   hardware tier has no detail mode, so there is no reference pass. Then the small-prop row (#250):
+#   --check=props with --props=plain and --props=rotated.
 # --deny-ray-query (smoke, bleed and detail): the software passes run with hardware_ray_tracing
 #   Auto and debug/deny_ray_query, the software tier as on a device without ray query
 #   (NO_RAY_QUERY); the check then also asserts no RT arena and SWRT instances. The reference
@@ -210,8 +211,13 @@ elif [[ "$mode" == "bleed" ]]; then
 elif [[ "$mode" == "detail" ]]; then
 	pass_detail=true
 	software_pass 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=detail --expected-tier=SWRT
-	pass_detail=false
 	pass_failed && failed=1
+	# #250: the small-prop row, plain and rotated with non-uniform scale.
+	for props in plain rotated; do
+		software_pass 2 res://tests/swrt_gi/swrt_gi_check.tscn --check=props --props="$props" --expected-tier=SWRT
+		pass_failed && failed=1
+	done
+	pass_detail=false
 elif [[ "$mode" == "toggle" || "$mode" == "budget" ]]; then
 	run_pass 0 2 res://tests/swrt_gi/swrt_gi_check.tscn --check="$mode"
 	pass_failed && failed=1

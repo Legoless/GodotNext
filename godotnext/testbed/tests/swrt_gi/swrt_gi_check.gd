@@ -93,6 +93,12 @@ extends Node
 ## at least DETAIL_D6_SHARE of the detail hits; both are gather-ray counts, window means), and the
 ## floor bleed stays positive. Software tier only.
 ##
+## --check=props (#250): six 0.6 m boxes 0.3 m apart, the floor 6 m below them (outside the 2 m
+## detail range), in detail mode at the default mesh-SDF resolution. Their cards have millimeter
+## texels, so a detail hit resolves through D6 only at the surface: at least DETAIL_D6_SHARE of the
+## detail hits (window means after PROPS_WARMUP_FRAMES) must. --props=plain or --props=rotated (each
+## box turned about two axes and scaled non-uniformly, PROPS_SCALE). Software tier only.
+##
 ## GodotNext: ps_swrt_trace (#186, #188). With debug/deny_ray_query (a device without ray query)
 ## every software-tier mode also asserts the tier's reason NO_RAY_QUERY, no RT arena
 ## (rt_arena_bytes 0), no ray-query ShaderRD in the process and SWRT instances (their runtime mesh
@@ -110,6 +116,11 @@ const BLEED_SAMPLES := 10
 const BLEED_STEP := 3
 const BLEED_SHARE := 0.25
 const DETAIL_D6_SHARE := 0.5
+const PROPS_SIZE := 0.6
+const PROPS_GAP := 0.3
+const PROPS_FLOOR_Y := -6.0
+const PROPS_SCALE := Vector3(1.4, 0.7, 1.1)
+const PROPS_WARMUP_FRAMES := 300
 const DENY_SETTING := "rendering/global_illumination/nextgi/debug/deny_ray_query"
 const VIEW_SIZE := Vector2i(1920, 1080)
 const WARMUP_FRAMES := 240
@@ -152,6 +163,7 @@ var settle_count := 0
 var settled_frame := -1
 # Software tier: the first frame of a run of BLEED_SAMPLES samples at BLEED_SHARE of the hardware tier.
 var bounce_frame := -1
+var props_variant := "plain"
 
 
 func _ready() -> void:
@@ -168,8 +180,13 @@ func _ready() -> void:
 			hwrt_red_bleed = float(arg.trim_prefix("--hwrt-red-bleed="))
 		elif arg.begins_with("--hwrt-green-bleed="):
 			hwrt_green_bleed = float(arg.trim_prefix("--hwrt-green-bleed="))
-	if not mode in ["smoke", "toggle", "budget", "bleed", "detail"]:
-		_finish(["unknown --check=%s (smoke, toggle, budget, bleed or detail)" % mode])
+		elif arg.begins_with("--props="):
+			props_variant = arg.trim_prefix("--props=")
+	if not mode in ["smoke", "toggle", "budget", "bleed", "detail", "props"]:
+		_finish(["unknown --check=%s (smoke, toggle, budget, bleed, detail or props)" % mode])
+		return
+	if mode == "props" and not props_variant in ["plain", "rotated"]:
+		_finish(["unknown --props=%s (plain or rotated)" % props_variant])
 		return
 	if expected_tier != "SWRT" and expected_tier != "HWRT":
 		_finish(["--expected-tier must be SWRT or HWRT"])
@@ -180,8 +197,8 @@ func _ready() -> void:
 	if mode == "bleed" and expected_tier == "SWRT" and (hwrt_red_bleed <= 0.0 or hwrt_green_bleed <= 0.0):
 		_finish(["--hwrt-red-bleed and --hwrt-green-bleed (the hardware tier's positive floor bleed) are required with --expected-tier=SWRT"])
 		return
-	if mode == "detail" and (expected_tier != "SWRT" or int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/software_ray_tracing_mode", 0)) != 1):
-		_finish(["--check=detail runs the software tier with software_ray_tracing_mode Detail (1)"])
+	if (mode == "detail" or mode == "props") and (expected_tier != "SWRT" or int(ProjectSettings.get_setting("rendering/global_illumination/nextgi/software_ray_tracing_mode", 0)) != 1):
+		_finish(["--check=%s runs the software tier with software_ray_tracing_mode Detail (1)" % mode])
 		return
 	viewport = SubViewport.new()
 	viewport.size = VIEW_SIZE
@@ -191,6 +208,9 @@ func _ready() -> void:
 	add_child(viewport)
 	if mode == "bleed" or mode == "detail":
 		_build_bleed_view()
+		return
+	if mode == "props":
+		_build_props_view()
 		return
 	var root: Node3D = load(KITBASH_SCENE).instantiate()
 	viewport.add_child(root)
@@ -229,6 +249,85 @@ func _build_bleed_view() -> void:
 	room.add_child(camera)
 	camera.look_at_from_position(Vector3(-2.05, 2.95, 0.0), Vector3(-2.05, 0.0, 0.0), Vector3(0, 0, -1))
 	camera.current = true
+
+
+# Six small boxes in a 3 x 2 grid, the floor far below: gather rays from one box reach its neighbors
+# within the detail range, and none reaches the floor there.
+func _build_props_view() -> void:
+	viewport.msaa_3d = Viewport.MSAA_DISABLED
+	viewport.use_taa = false
+	var root := Node3D.new()
+	viewport.add_child(root)
+	var colors := [Color(0.8, 0.2, 0.2), Color(0.2, 0.8, 0.2), Color(0.2, 0.3, 0.9), Color(0.9, 0.8, 0.2), Color(0.8, 0.3, 0.8), Color(0.3, 0.8, 0.8)]
+	var pitch := PROPS_SIZE + PROPS_GAP
+	for index in 6:
+		var box := BoxMesh.new()
+		box.size = Vector3(PROPS_SIZE, PROPS_SIZE, PROPS_SIZE)
+		var material := StandardMaterial3D.new()
+		material.albedo_color = colors[index]
+		material.roughness = 0.8
+		box.material = material
+		var instance := MeshInstance3D.new()
+		instance.mesh = box
+		instance.position = Vector3((float(index % 3) - 1.0) * pitch, PROPS_SIZE * 0.5, (float(index / 3) - 0.5) * pitch)
+		if props_variant == "rotated":
+			var basis := Basis(Vector3.UP, deg_to_rad(25.0 + 10.0 * float(index))) * Basis(Vector3.RIGHT, deg_to_rad(15.0))
+			instance.basis = basis.scaled_local(PROPS_SCALE / maxf(PROPS_SCALE.x, maxf(PROPS_SCALE.y, PROPS_SCALE.z)))
+		root.add_child(instance)
+	var floor_mesh := PlaneMesh.new()
+	floor_mesh.size = Vector2(40.0, 40.0)
+	var floor_instance := MeshInstance3D.new()
+	floor_instance.mesh = floor_mesh
+	floor_instance.position = Vector3(0.0, PROPS_FLOOR_Y, 0.0)
+	root.add_child(floor_instance)
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-55.0, -35.0, 0.0)
+	sun.shadow_enabled = true
+	root.add_child(sun)
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_SKY
+	environment.sky = Sky.new()
+	environment.sky.sky_material = ProceduralSkyMaterial.new()
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	environment.nextgi_enabled = true
+	environment.ssao_enabled = false
+	environment.ssr_enabled = false
+	environment.ssil_enabled = false
+	var world := WorldEnvironment.new()
+	world.environment = environment
+	root.add_child(world)
+	camera = Camera3D.new()
+	camera.fov = 50.0
+	root.add_child(camera)
+	camera.look_at_from_position(Vector3(0.0, 1.2, 1.9), Vector3(0.0, PROPS_SIZE * 0.5, 0.0))
+	camera.current = true
+
+
+func _process_props() -> void:
+	if frames <= PROPS_WARMUP_FRAMES:
+		return
+	var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+	gather_samples.append(info)
+	if gather_samples.size() < SAMPLE_FRAMES:
+		return
+	gather_best = _window_mean(gather_samples)
+	var result := PackedStringArray()
+	if String(info.get("tier", "")) != expected_tier:
+		result.append("tier is %s, expected %s" % [String(info.get("tier", "")), expected_tier])
+		_finish(result)
+		return
+	result.append_array(_software_tier_checks(info))
+	var detail_hits := int(gather_best.get("gather_sdf_detail_hits", 0))
+	var resolved := int(gather_best.get("gather_sdf_d6_resolved", 0))
+	var share := float(resolved) / float(maxi(detail_hits, 1))
+	print("SWRT_GI_PROPS variant=%s snapshots=%d rays=%d sdf_hits=%d detail_hits=%d d6_resolved=%d share=%.3f swrt_records=%d paged=%d" % [
+		props_variant, int(gather_best.get("snapshots", 0)), int(gather_best.get("src_gather_rays", 0)), int(gather_best.get("gather_sdf_hits", 0)),
+		detail_hits, resolved, share, int(info.get("swrt_record_count", -1)), int(info.get("swrt_record_paged", -1))])
+	if detail_hits <= 0:
+		result.append("no gather ray hit a mesh SDF in detail mode")
+	elif share < DETAIL_D6_SHARE:
+		result.append("%d of %d detail hits (%.3f) resolved through the D6 card lookup, expected at least %.2f" % [resolved, detail_hits, share, DETAIL_D6_SHARE])
+	_finish(result)
 
 
 func _patch_mean(p_image: Image, p_world: Vector3) -> Color:
@@ -393,6 +492,9 @@ func _process(_delta: float) -> void:
 		return
 	if mode == "bleed" or mode == "detail":
 		_process_bleed()
+		return
+	if mode == "props":
+		_process_props()
 		return
 	if frames <= WARMUP_FRAMES:
 		return

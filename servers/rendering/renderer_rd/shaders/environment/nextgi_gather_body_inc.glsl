@@ -279,7 +279,20 @@ vec3 nextgi_shade_hit(NextGIHit hit, vec3 ray_dir, inout uint uncovered_count, o
 	vec3 normal = nextgi_sdf_last.normal;
 	if (hit.custom_index < params.record_count) {
 		NextGIInstanceRecord rec = records.data[hit.custom_index];
-		vec3 local = swrt_instance_local(swrt_instances.data[hit.custom_index], world);
+		// GodotNext: swrt_detail_refine (#250). The detail march stops anywhere in the surface band
+		// (half a mesh-SDF voxel, 5 cm at 10 voxels per meter), but D6 accepts a card texel only
+		// within CARD_DEPTH_TEXELS card texels of its captured depth: millimeters on a small prop.
+		// Two steps along the hit normal by the instance's own distance bring the lookup to the
+		// zero crossing; each is clamped to the hit mip's voxel. Voxel lighting, which shares the
+		// lookup, stores hits already at the crossing.
+		vec3 surface = world;
+		vec3 step_normal = dot(normal, normal) > 1e-12 ? normalize(normal) : -ray_dir;
+		for (uint refine = 0u; refine < 2u; refine++) {
+			float detail_voxel;
+			float crossing = swrt_instance_distance(hit.custom_index, surface, detail_voxel);
+			surface -= step_normal * clamp(crossing, -detail_voxel, detail_voxel);
+		}
+		vec3 local = swrt_instance_local(swrt_instances.data[hit.custom_index], surface);
 		// A normal goes to object space through the transpose of the object-to-world basis.
 		vec3 local_normal = vec3(
 				rec.object_to_world[0] * normal.x + rec.object_to_world[4] * normal.y + rec.object_to_world[8] * normal.z,
