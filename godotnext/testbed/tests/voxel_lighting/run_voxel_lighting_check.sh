@@ -20,9 +20,10 @@
 #   when the kitbash runs on another tier; the Auto rows pass --expected-tier=device, so on a
 #   device that reports SUPPORTS_RAY_QUERY_HARDWARE they fail unless the kitbash runs on HWRT.
 # Voxel lighting asserts at High, never at the device's auto pick (lead decision 2026-11-10,
-# plan §21.2.5): Lite's half-size surface cache keeps radiance pages for few of the kitbash's
-# 2,400 rocks, and voxel lighting resamples only paged instances. The Lite run still fails on a
-# missing counter, zero stored hits or a validation error.
+# plan §21.2.5): voxel lighting resamples only paged instances, and Lite's half-size surface
+# cache holds pages for fewer of the kitbash's 2,400 rocks (about 540 since #247, mostly at
+# coarser page levels). Whether Lite asserts coverage too is a lead decision. The Lite run still
+# fails on a missing counter, zero stored hits or a validation error.
 #
 # Usage:
 #   run_voxel_lighting_check.sh [--deny-ray-query] -- <godot> <godot arguments without a scene>

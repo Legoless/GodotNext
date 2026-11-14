@@ -5,8 +5,9 @@ extends Node3D
 ## shadow rays march the global SDF), so its voxels shade from live pages. Under Lumen Lite
 ## (lite_beta: Medium with the irradiance field) both
 ## are informational: the run prints them on a VOXEL_LIGHTING_LITE line and does not fail on them.
-## Lite's half-size surface cache keeps radiance pages for few of the kitbash's 2,400 rocks, and
-## voxel lighting resamples only paged instances (lead decision 2026-11-10, plan §21.2.5).
+## Voxel lighting resamples only paged instances, and Lite's half-size surface cache holds pages
+## for fewer of the kitbash's 2,400 rocks: about 540 since #247 (lead decision 2026-11-10, plan
+## §21.2.5; whether Lite asserts coverage too is a lead decision).
 ## run_voxel_lighting_check.sh requests quality High for the asserting run, not the device's
 ## auto pick. Coverage and resampled radiance are GPU counters, so the check turns on
 ## debug/voxel_lighting_readback.
