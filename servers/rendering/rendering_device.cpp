@@ -660,6 +660,7 @@ void RenderingDevice::_compact_blas_from_query(AccelerationStructure *p_blas, RI
 	destination_tracker->acceleration_structure_driver_id = destination_id;
 	destination_tracker->usage = RDG::RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE;
 	destination_tracker->usage_access = {};
+	destination_tracker->usage_stages.clear(); // GodotNext: rdg_access_stages (#267)
 	destination_tracker->current_frame_stages.clear();
 	destination_tracker->previous_frame_stages.clear();
 	destination_tracker->command_frame = -1;

@@ -336,6 +336,47 @@ struct ErrorCapture {
 	}
 };
 
+// GodotNext: rdg_access_stages (#267). A texture tracker with p_mipmaps mips and one layer, and a
+// one-mip slice of it, set up the way RenderingDevice::_texture_make_mutable() does.
+RDG::ResourceTracker *texture_tracker(uint64_t p_id, uint32_t p_mipmaps) {
+	RDG::ResourceTracker *texture = RDG::resource_tracker_create();
+	texture->texture_driver_id = RDD::TextureID(p_id);
+	texture->texture_subresources.aspect = RDD::TEXTURE_ASPECT_COLOR_BIT;
+	texture->texture_subresources.mipmap_count = p_mipmaps;
+	texture->texture_subresources.layer_count = 1;
+	return texture;
+}
+
+RDG::ResourceTracker *mip_slice_tracker(RDG::ResourceTracker *p_texture, uint64_t p_id, uint32_t p_mipmap) {
+	RDG::ResourceTracker *slice = texture_tracker(p_id, 1);
+	slice->parent = p_texture;
+	slice->texture_subresources.base_mipmap = p_mipmap;
+	slice->texture_slice_or_dirty_rect = Rect2i(p_mipmap, 0, 1, 1);
+	return slice;
+}
+
+// A compute list (compute stage) that samples p_read and writes p_write as a storage image.
+void add_texture_compute(RDG &p_graph, RDG::ResourceTracker *p_read, RDG::ResourceTracker *p_write) {
+	p_graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, RDG::QUEUE_MAIN);
+	p_graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+	if (p_read != nullptr) {
+		p_graph.add_compute_list_usage(p_read, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+	}
+	if (p_write != nullptr) {
+		p_graph.add_compute_list_usage(p_write, RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+	}
+	p_graph.add_compute_list_dispatch(1, 1, 1);
+	p_graph.add_compute_list_end();
+}
+
+BitField<RDD::PipelineStageBits> previous_stages(const RDG &p_graph, int32_t p_command_index) {
+	BitField<RDD::PipelineStageBits> self_stages;
+	BitField<RDD::PipelineStageBits> previous;
+	BitField<RDD::PipelineStageBits> next_stages;
+	p_graph.command_get_stages(p_command_index, self_stages, previous, next_stages);
+	return previous;
+}
+
 } // namespace TestRDAsyncCompute
 
 using namespace TestRDAsyncCompute;
@@ -720,6 +761,49 @@ TEST_CASE("[RD][Graph] a buffer written again in a later frame gets a barrier wi
 	// A buffer never used before, and textures (their layout transitions), are left as they were.
 	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_NONE, G::RESOURCE_USAGE_COPY_TO, true, true));
 	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_COPY_TO, G::RESOURCE_USAGE_COPY_TO, true, false));
+}
+
+TEST_CASE("[RD][Graph] a texture's barriers wait on the stages of an access from an earlier frame") {
+	// GodotNext: rdg_access_stages (#267). SSEffects clears its last-frame texture when it creates it
+	// and builds the mips at the end of the render. A flush between the two (a synchronous readback
+	// in the middle of the render, as in the voxel lighting check) puts the clear in one graph frame
+	// and the mips in the next.
+	RDG graph;
+	RDG::ResourceTracker *texture = texture_tracker(1, 3);
+	RDG::ResourceTracker *mips[3] = { mip_slice_tracker(texture, 2, 0), mip_slice_tracker(texture, 3, 1), mip_slice_tracker(texture, 4, 2) };
+
+	// Frame 1: a copy writes the whole texture.
+	graph.add_texture_update(texture->texture_driver_id, texture, VectorView<RDG::RecordedBufferToTextureCopy>());
+
+	// Frame 2: mip 0 is written, then each mip from the one above it. Every mip starts from the
+	// texture's copy write. Mip 0, the texture's first use in the frame, gets the stages of the
+	// texture's previous frame; mips 1 and 2 depend only on the compute list before them.
+	graph.begin();
+	add_texture_compute(graph, nullptr, mips[0]);
+	add_texture_compute(graph, mips[0], mips[1]);
+	add_texture_compute(graph, mips[1], mips[2]);
+	for (int32_t i = 0; i < 3; i++) {
+		INFO("mip ", i);
+		CHECK(previous_stages(graph, i).has_flag(RDD::PIPELINE_STAGE_COPY_BIT));
+	}
+
+	// Frame 3: the whole texture is sampled. Its barrier still names the copy write of frame 1,
+	// while the texture's previous frame used only the compute stage; the mips go back to the
+	// texture's layout from their compute writes.
+	graph.begin();
+	add_texture_compute(graph, texture, nullptr);
+	CHECK(previous_stages(graph, 0).has_flag(RDD::PIPELINE_STAGE_COPY_BIT));
+	CHECK(previous_stages(graph, 0).has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+
+	// Frame 4: the texture's last access is now the sample, so a copy into it no longer waits on the
+	// copy stage.
+	graph.begin();
+	graph.add_texture_update(texture->texture_driver_id, texture, VectorView<RDG::RecordedBufferToTextureCopy>());
+	CHECK(previous_stages(graph, 0).has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+	CHECK_FALSE(previous_stages(graph, 0).has_flag(RDD::PIPELINE_STAGE_COPY_BIT));
+
+	free_trackers(mips, 3);
+	free_trackers(&texture, 1);
 }
 
 TEST_CASE("[RD][AsyncCompute] an invalid queue is rejected") {

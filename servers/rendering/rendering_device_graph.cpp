@@ -476,6 +476,7 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 				// Also assign the usage to the slice and consider it a write operation. Consider the parent's current usage access as its own.
 				resource_tracker->usage = new_resource_usage;
 				resource_tracker->usage_access = resource_tracker->parent->usage_access;
+				resource_tracker->usage_stages = resource_tracker->parent->usage_stages; // GodotNext: rdg_access_stages (#267)
 				write_usage = true;
 
 				// Indicate the area that should be tracked is the entire resource.
@@ -530,6 +531,7 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 								// Delete the slice from the dirty list and revert it to the usage of the parent.
 								if (current_tracker->texture_driver_id.id != 0) {
 									_add_texture_barrier_to_command(current_tracker->texture_driver_id, current_tracker->usage_access, new_usage_access, current_tracker->usage, resource_tracker->parent->usage, current_tracker->texture_subresources, command_normalization_barriers, r_command->normalization_barrier_index, r_command->normalization_barrier_count);
+									r_command->previous_stages = r_command->previous_stages | current_tracker->usage_stages; // GodotNext: rdg_access_stages (#267)
 
 									// Merge the area of the slice with the current tracking area of the command and indicate it's a write usage as well.
 									search_tracker_rect = search_tracker_rect.merge(current_tracker->texture_slice_or_dirty_rect);
@@ -564,6 +566,7 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 				// If it wasn't in the list, assume the usage is the same as the parent. Consider the parent's current usage access as its own.
 				resource_tracker->usage = resource_tracker->parent->usage;
 				resource_tracker->usage_access = resource_tracker->parent->usage_access;
+				resource_tracker->usage_stages = resource_tracker->parent->usage_stages; // GodotNext: rdg_access_stages (#267)
 
 				if (resource_tracker->usage != new_resource_usage) {
 					// Insert to the dirty list if the requested usage is different.
@@ -590,6 +593,7 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 				if (current_tracker->texture_driver_id.id != 0) {
 					// Transition all slices to the layout of the parent resource.
 					_add_texture_barrier_to_command(current_tracker->texture_driver_id, current_tracker->usage_access, new_usage_access, current_tracker->usage, resource_tracker->usage, current_tracker->texture_subresources, command_normalization_barriers, r_command->normalization_barrier_index, r_command->normalization_barrier_count);
+					r_command->previous_stages = r_command->previous_stages | current_tracker->usage_stages; // GodotNext: rdg_access_stages (#267)
 				}
 
 				current_tracker->in_parent_dirty_list = false;
@@ -608,6 +612,11 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		write_usage_after_write = write_usage_after_write || cross_frame_write_after_write(resource_tracker->usage, new_resource_usage, !search_tracker->previous_frame_stages.is_empty(), resource_tracker->buffer_driver_id.id != 0);
 		if (different_usage || write_usage_after_write) {
 			// A barrier must be pushed if the usage is different of it's a write usage and there was already a command that wrote to this resource previously.
+			// GodotNext: rdg_access_stages (#267). The barrier waits on the access it names. That access
+			// can be older than this frame and than the command this one depends on: a slice that is
+			// first used after the parent's first use in a frame inherits the parent's access from an
+			// earlier frame (a texture cleared in one frame and given its mips in the next).
+			r_command->previous_stages = r_command->previous_stages | resource_tracker->usage_stages;
 			if (resource_tracker->texture_driver_id.id != 0) {
 				if (resource_tracker->usage_access.is_empty()) {
 					// FIXME: If the tracker does not know the previous type of usage, assume the generic memory write one.
@@ -635,6 +644,7 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 
 		// Always update the access of the tracker according to the latest usage.
 		resource_tracker->usage_access = new_usage_access;
+		resource_tracker->usage_stages = r_command->self_stages; // GodotNext: rdg_access_stages (#267)
 
 		// Always accumulate the stages of the tracker with the commands that use it.
 		search_tracker->current_frame_stages = search_tracker->current_frame_stages | r_command->self_stages;
@@ -1860,7 +1870,11 @@ void RenderingDeviceGraph::begin() {
 	command_synchronization_index = -1;
 	command_synchronization_pending = false;
 	command_label_index = -1;
-	frames[frame].secondary_command_buffers_used = 0;
+	// GodotNext: rdg_access_stages (#267). A bare graph (the doctests) has no frames; begin() still
+	// starts a new tracking frame for it.
+	if (!frames.is_empty()) {
+		frames[frame].secondary_command_buffers_used = 0;
+	}
 	draw_instruction_list.index = 0;
 	compute_instruction_list.index = 0;
 	tracking_frame++;
