@@ -1036,6 +1036,72 @@ RID NextGIRTScene::build_far_proxy_mesh(RID p_mesh) {
 	return (*parts)[0].blas;
 }
 
+// GodotNext: nextgi_src_page_levels (#247). The record waits unpaged until the pass's assignment.
+void NextGIRTScene::_queue_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element) {
+	if (NextGIRelight::get_singleton() == nullptr || p_instance == nullptr || r_record.card_set == UINT32_MAX) {
+		if (r_record.card_set == UINT32_MAX) {
+			r_record.page_table = UINT32_MAX;
+		}
+		return;
+	}
+	r_record.page_table = 0x80000000u;
+	PendingPages pending;
+	pending.instance = p_instance;
+	pending.record = r_record.tlas_index;
+	pending.element = p_element;
+	pending_pages.push_back(pending);
+}
+
+// Each record's solid angle (NextGIRelight::record_solid_angle()) is seen from the nearest of the
+// frame's NextGI view cameras (NextGI::get_page_cameras()), so a second view's surroundings keep
+// their pages. Every existing set is touched first; then the records are assigned from the
+// largest solid angle down.
+void NextGIRTScene::_assign_pending_pages(const ::RenderDataRD *p_render_data, LocalVector<NextGIInstanceRecord> &r_records) {
+	NextGIRelight *relight = NextGIRelight::get_singleton();
+	if (relight == nullptr || pending_pages.is_empty()) {
+		pending_pages.clear();
+		return;
+	}
+	LocalVector<Vector3> cameras;
+	if (NextGI::get_singleton() != nullptr) {
+		NextGI::get_singleton()->get_page_cameras(cameras);
+	}
+	if (cameras.is_empty() && p_render_data != nullptr && p_render_data->scene_data != nullptr) {
+		cameras.push_back(p_render_data->scene_data->cam_transform.origin);
+	}
+	HashMap<uint32_t, float> extents;
+	for (PendingPages &pending : pending_pages) {
+		if (pending.record >= r_records.size()) {
+			pending.solid_angle = 0.0f;
+			continue;
+		}
+		const NextGIInstanceRecord &record = r_records[pending.record];
+		const float *extent = extents.getptr(record.card_set);
+		if (extent == nullptr) {
+			extent = &extents.insert(record.card_set, NextGIRelight::card_set_extent(record.card_set))->value;
+		}
+		pending.solid_angle = NextGIRelight::record_solid_angle(record, *extent, cameras);
+	}
+	for (const PendingPages &pending : pending_pages) {
+		if (pending.record < r_records.size()) {
+			relight->touch_pages(pending.instance, pending.element, r_records[pending.record].card_set, pending.solid_angle);
+		}
+	}
+	struct ByDescendingSolidAngle {
+		bool operator()(const PendingPages &p_a, const PendingPages &p_b) const {
+			return p_a.solid_angle != p_b.solid_angle ? p_a.solid_angle > p_b.solid_angle : p_a.record < p_b.record;
+		}
+	};
+	pending_pages.sort_custom<ByDescendingSolidAngle>();
+	for (const PendingPages &pending : pending_pages) {
+		if (pending.record < r_records.size()) {
+			NextGIInstanceRecord &record = r_records[pending.record];
+			record.page_table = relight->assign_pages(pending.instance, record, pending.element, pending.solid_angle);
+		}
+	}
+	pending_pages.clear();
+}
+
 bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_instance, const Transform3D &p_transform, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces, RD::AccelerationStructureInstance &r_tlas_instance) {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	ERR_FAIL_NULL_V(mesh_storage, false);
@@ -1090,9 +1156,7 @@ bool NextGIRTScene::append_far_proxy(RID p_mesh, RenderGeometryInstance *p_insta
 	}
 	const Vector3 scale = p_transform.basis.get_scale_abs();
 	record.origin_offset = nextgi_rt_origin_offset(eps_rt, MAX(scale.x, MAX(scale.y, scale.z)));
-	if (NextGIRelight::get_singleton() != nullptr) {
-		record.page_table = NextGIRelight::get_singleton()->assign_pages(p_instance, record);
-	}
+	_queue_pages(p_instance, record, UINT32_MAX); // GodotNext: nextgi_src_page_levels (#247)
 	r_records.push_back(record);
 	r_tlas_instance.transform = p_transform;
 	r_tlas_instance.id = record.tlas_index;
@@ -1150,6 +1214,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (NextGIRelight::get_singleton() != nullptr) {
 		NextGIRelight::get_singleton()->begin_record_pass();
 	}
+	pending_pages.clear(); // GodotNext: nextgi_src_page_levels (#247)
 	ERR_FAIL_NULL(p_render_data);
 	if (tlas.is_null()) {
 		return;
@@ -1159,6 +1224,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		LocalVector<NextGIInstanceRecord> records;
 		LocalVector<NextGISurfaceRecord> surfaces;
 		_update_far_records(p_render_data, records, surfaces);
+		_assign_pending_pages(p_render_data, records); // GodotNext: nextgi_src_page_levels (#247)
 		// GodotNext: ps_lumen_lite (#183)
 		if (NextGIRelight::get_singleton() != nullptr) {
 			NextGIRelight::get_singleton()->finish_record_pass(records);
@@ -1330,8 +1396,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					record.page_table = 0x80000000u;
 					// GodotNext: ps_lumen_lite (#183). The pages remember this record's index, so it is set first.
 					record.tlas_index = instance_records.size();
-					if (skinned_card_set != UINT32_MAX && NextGIRelight::get_singleton() != nullptr) {
-						record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
+					if (skinned_card_set != UINT32_MAX) {
+						_queue_pages(geometry_instance, record, fed.element_index); // GodotNext: nextgi_src_page_levels (#247)
 					}
 					record.rt_flags = NEXTGI_RT_FLAG_SKINNED;
 					record.origin_offset = nextgi_rt_origin_offset(info.eps, max_scale);
@@ -1466,9 +1532,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				surface_records.push_back(surface_record);
 			}
 			record.origin_offset = nextgi_rt_origin_offset(eps_rt, max_scale);
-			if (NextGIRelight::get_singleton() != nullptr) {
-				record.page_table = NextGIRelight::get_singleton()->assign_pages(geometry_instance, record, fed.element_index);
-			}
+			_queue_pages(geometry_instance, record, fed.element_index); // GodotNext: nextgi_src_page_levels (#247)
 			instance_records.push_back(record);
 			if (RSG::rasterizer != nullptr) {
 				mesh_last_tlas_frame[mesh] = RSG::rasterizer->get_frame_number();
@@ -1622,6 +1686,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	}
 	if (instance_records.is_empty() && gpu_sources.is_empty()) {
 		_update_far_records(p_render_data, instance_records, surface_records);
+		_assign_pending_pages(p_render_data, instance_records); // GodotNext: nextgi_src_page_levels (#247)
 		// GodotNext: ps_lumen_lite (#183)
 		if (NextGIRelight::get_singleton() != nullptr) {
 			NextGIRelight::get_singleton()->finish_record_pass(instance_records);
@@ -1636,6 +1701,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		return;
 	}
 	_update_far_records(p_render_data, instance_records, surface_records);
+	_assign_pending_pages(p_render_data, instance_records); // GodotNext: nextgi_src_page_levels (#247)
 	// GodotNext: ps_lumen_lite (#183). Records whose pages a later instance of this pass evicted.
 	if (NextGIRelight::get_singleton() != nullptr) {
 		NextGIRelight::get_singleton()->finish_record_pass(instance_records);

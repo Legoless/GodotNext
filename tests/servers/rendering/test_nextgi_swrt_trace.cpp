@@ -1713,7 +1713,7 @@ RenderGeometryInstance *_swrt_test_instance(uint32_t p_index) {
 
 // The page assigner the doctest injects: the production pass calls NextGIRelight::assign_pages(),
 // which copies the card set's cards from the SRC; here every card set has two 64-texel cards.
-uint32_t _swrt_test_assign(void *p_relight, RenderGeometryInstance *p_geometry, RendererRD::NextGIInstanceRecord &r_record, uint32_t p_element) {
+uint32_t _swrt_test_assign(void *p_relight, RenderGeometryInstance *p_geometry, RendererRD::NextGIInstanceRecord &r_record, uint32_t p_element, float p_solid_angle) {
 	if (r_record.card_set == UINT32_MAX) {
 		return UINT32_MAX;
 	}
@@ -1722,7 +1722,7 @@ uint32_t _swrt_test_assign(void *p_relight, RenderGeometryInstance *p_geometry, 
 		card.atlas_rect[2] = 64;
 		card.atlas_rect[3] = 64;
 	}
-	return static_cast<RendererRD::NextGIRelight *>(p_relight)->assign_card_pages(p_geometry, r_record, p_element, r_record.card_set * 2, cards, 2);
+	return static_cast<RendererRD::NextGIRelight *>(p_relight)->assign_card_pages(p_geometry, r_record, p_element, r_record.card_set * 2, cards, 2, p_solid_angle);
 }
 
 } // namespace

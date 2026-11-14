@@ -195,6 +195,11 @@ float nextgi_src_solid_angle(float p_radius, float p_distance);
 
 // L = clamp(floor(log2(full / needed)), 0, 3). needed grows with solid angle; L = 0 is full resolution.
 uint32_t nextgi_src_page_level(float p_solid_angle, uint32_t p_full_texels);
+// GodotNext: nextgi_src_page_levels (#247). The level as a continuous value, -0.5 log2(Ω/π) (the
+// page side halves per level), floored and clamped to 0..NEXTGI_SRC_PAGE_LEVEL_MAX. A set at
+// p_current_level keeps it while the value stays in [L - 0.25, L + 1.25), so an instance near a
+// level boundary is not re-cut every frame; UINT32_MAX (a new set) takes the plain level.
+uint32_t nextgi_src_page_level_hysteresis(float p_solid_angle, uint32_t p_current_level);
 
 // FNV-1a of the mesh, the override and the surface materials. Equal keys share one material capture.
 uint64_t nextgi_src_material_key(uint64_t p_mesh_id, uint64_t p_override_id, const uint64_t *p_surface_ids, uint32_t p_surface_count);
@@ -258,8 +263,22 @@ class NextGIBuddyAllocator {
 
 public:
 	explicit NextGIBuddyAllocator(uint32_t p_size = 4096, uint32_t p_min = NEXTGI_SRC_PAGE_MIN);
+	// GodotNext: nextgi_src_page_levels (#247). Relight plans placements on a copy. LocalVector's
+	// copy constructor is explicit, so the free lists are copied one by one.
+	NextGIBuddyAllocator(const NextGIBuddyAllocator &p_other) { *this = p_other; }
+	NextGIBuddyAllocator &operator=(const NextGIBuddyAllocator &p_other) {
+		size = p_other.size;
+		min_block = p_other.min_block;
+		width = p_other.width;
+		height = p_other.height;
+		for (uint32_t i = 0; i < LEVELS; i++) {
+			free_lists[i] = p_other.free_lists[i];
+		}
+		return *this;
+	}
 	bool allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_rect);
 	bool free_block(const Rect2i &p_rect);
+	uint64_t get_free_texels() const; // GodotNext: nextgi_src_page_levels (#247)
 	void reset();
 	// GodotNext: ps_lumen_lite (#183). Matches the allocator to a texture extent and frees every block.
 	// Roots are squares of the shorter side, so 4096x8192 and 4096x2048 use their whole area.

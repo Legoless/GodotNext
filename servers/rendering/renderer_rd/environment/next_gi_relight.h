@@ -66,6 +66,12 @@ class NextGIRelight {
 		uint32_t mask_w = 0;
 		uint32_t mask_h = 0;
 		uint32_t stable_id = 0;
+		// GodotNext: nextgi_src_page_levels (#247). The card's level-0 side (its capture rounded up
+		// to a power of two); level L takes MAX(full_side >> L, NEXTGI_SRC_PAGE_MIN).
+		uint32_t full_side = 0;
+		// Relit since its rects last moved. Until then the block holds another card's radiance
+		// and mask, so its rect words stay empty and readers fall back to the WRC.
+		bool relit = false;
 		bool dirty_direct = true;
 		bool near_dirty = false;
 		uint32_t last_relit_frame = 0;
@@ -86,6 +92,14 @@ class NextGIRelight {
 		// pass that last saw the instance. record_index is only valid in that pass.
 		uint32_t card_set = UINT32_MAX;
 		uint64_t record_pass = 0;
+		// GodotNext: nextgi_src_page_levels (#247). The page level and the solid angle of the last
+		// pass that claimed or touched the set.
+		uint32_t level = 0;
+		float solid_angle = 0.0f;
+		// A promotion that found no room is retried only once the allocator changed (or the
+		// solid angle grew), not every pass.
+		uint64_t promote_failed_generation = UINT64_MAX;
+		float promote_failed_angle = 0.0f;
 	};
 
 	RID radiance;
@@ -106,11 +120,32 @@ class NextGIRelight {
 	LocalVector<uint64_t> pass_record_keys;
 	uint64_t page_clock = 1;
 	uint32_t page_evictions = 0;
-	NextGIShelfPacker mask_packer{ NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE };
+	// GodotNext: nextgi_src_page_levels (#247). A card's mask rect is its radiance block halved, in
+	// a mask atlas of half the radiance extent, so a card whose radiance fits always has a mask.
+	Size2i mask_extent = Size2i(NEXTGI_SRC_MASK_SIZE, NEXTGI_SRC_MASK_SIZE);
 	LocalVector<InstancePages> instances;
 	HashMap<uint64_t, uint32_t> instance_index;
 	uint32_t page_table_count = 0;
+	// Freed page-table runs by card count, reused before page_table_count grows; a reused run's
+	// probe entries are cleared at the next relight.
+	HashMap<uint32_t, LocalVector<uint32_t>> free_page_runs;
+	LocalVector<Vector2i> probe_resets;
 	uint32_t alloc_failures = 0;
+	// alloc_failures by cause: no radiance space, or a card the SRC could not copy.
+	uint32_t alloc_failures_radiance = 0;
+	uint32_t alloc_failures_card = 0;
+	// Sets left unpaged in the latest record pass because every set holding pages outranks them:
+	// the atlas is full of higher solid angles. Not an allocation failure.
+	uint32_t pass_unplaced = 0;
+	uint32_t page_demotions = 0;
+	uint32_t page_priority_evictions = 0;
+	uint32_t page_recuts = 0;
+	// The sets in eviction order (stale first, then by solid angle, then least recently claimed),
+	// rebuilt on the first slow placement after a change.
+	LocalVector<uint64_t> eviction_order;
+	bool eviction_order_valid = false;
+	// Bumped whenever blocks are freed or a placement commits.
+	uint64_t alloc_generation = 0;
 
 	RID light_buffer;
 	RID reuse_buffer;
@@ -189,8 +224,14 @@ private:
 	RID _storage_buffer(RID &r_buffer, uint32_t &r_capacity, uint32_t p_count, uint32_t p_stride);
 	void _reset_uniform_set();
 	void _upload_page_rects();
-	bool _evict_oldest_pages();
-	void _free_page_set(uint32_t p_index);
+	void _free_page_set(uint32_t p_index, bool p_free_blocks = true);
+	// GodotNext: nextgi_src_page_levels (#247)
+	uint32_t _take_page_run(uint32_t p_count);
+	void _set_card_rects(InstancePages &r_pages, const LocalVector<Rect2i> &p_rects);
+	void _free_set_blocks(NextGIBuddyAllocator &r_buddy, const InstancePages &p_pages) const;
+	void _build_eviction_order();
+	bool _place_cards(const LocalVector<uint32_t> &p_sides, float p_solid_angle, uint64_t p_self_key, LocalVector<Rect2i> &r_rects, bool *r_outranked = nullptr);
+	bool _recut(uint64_t p_key, uint32_t p_level);
 
 public:
 	static NextGIRelight *get_singleton() { return singleton; }
@@ -200,7 +241,20 @@ public:
 
 	// Allocates radiance and mask rects for the instance's cards. Writes page_table on the record.
 	// Later parts of the same instance share the allocation. Returns UINT32_MAX when the mesh has no cards.
-	uint32_t assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element = UINT32_MAX);
+	// GodotNext: nextgi_src_page_levels (#247). p_solid_angle sets the pages' level and priority:
+	// the RT scene assigns a pass's records in descending solid angle, and placing a set demotes,
+	// then evicts, only stale sets and sets of a lower solid angle, and only once the set fits.
+	uint32_t assign_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element = UINT32_MAX, float p_solid_angle = float(Math::PI));
+	// An instance record's solid angle for its pages: its bounding sphere (half the card set's
+	// object-space extent p_extent, sqrt(3) for the corners, times the record's largest scale)
+	// seen from the nearest camera. π inside the sphere, and π without a camera or an extent
+	// (full size, first in line).
+	static float record_solid_angle(const NextGIInstanceRecord &p_record, float p_extent, const LocalVector<Vector3> &p_cameras);
+	// The card set's object-space extent (texel_size * 128), or 0 when the SRC does not have it.
+	static float card_set_extent(uint32_t p_card_set);
+	// Before a pass's assign_pages() calls: marks an existing set of this card set as claimed by
+	// the pass with this solid angle, so placements earlier in the pass do not treat it as stale.
+	void touch_pages(RenderGeometryInstance *p_instance, uint32_t p_element, uint32_t p_card_set, float p_solid_angle);
 	void release_instance(RenderGeometryInstance *p_instance);
 
 	// GodotNext: ps_lumen_lite (#183). The RT scene calls this before it writes a new set of
@@ -211,7 +265,7 @@ public:
 	// pass evicted get the evicted mark instead of a page table that no longer exists.
 	void finish_record_pass(LocalVector<NextGIInstanceRecord> &r_records) const;
 	// The CPU half of assign_pages(), with the record's cards already copied from the SRC.
-	uint32_t assign_card_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element, uint32_t p_first_card, const NextGICard *p_cards, uint32_t p_card_count);
+	uint32_t assign_card_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element, uint32_t p_first_card, const NextGICard *p_cards, uint32_t p_card_count, float p_solid_angle = float(Math::PI));
 	// Sizes the page allocator to the radiance texture of this budget and drops every page.
 	void set_page_extent(const NextGIAtlasBudget &p_budget);
 	// Page sets claimed in the current record pass. Relight schedules only these.
@@ -220,12 +274,19 @@ public:
 		uint32_t record_index = 0;
 		uint32_t card_set = UINT32_MAX;
 		uint32_t page_table = UINT32_MAX;
+		uint32_t level = 0; // GodotNext: nextgi_src_page_levels (#247)
 		LocalVector<Rect2i> radiance_rects;
+		LocalVector<Rect2i> mask_rects;
 	};
 	PageSetInfo get_page_set_info(uint32_t p_set) const;
 	uint32_t get_page_set_count() const { return instances.size(); }
+	// GodotNext: nextgi_src_page_levels (#247)
+	uint32_t get_page_table_count() const { return page_table_count; }
+	Size2i get_mask_extent() const { return mask_extent; }
 	// The packed page rects the WRC and the gather read, two words per page table entry.
-	void build_page_rect_words(LocalVector<uint32_t> &r_words) const;
+	// GodotNext: nextgi_src_page_levels (#247). The upload passes p_relit_only: a card whose rects
+	// moved (placed, re-cut, demoted, or a reused block) reads as unpaged until relight writes it.
+	void build_page_rect_words(LocalVector<uint32_t> &r_words, bool p_relit_only = false) const;
 
 	// Line 2b. Builds the scenario light set, schedules pages under the High caps and dispatches the relight shader.
 	void relight(RenderDataRD *p_render_data);

@@ -36,6 +36,7 @@
 #include "core/math/random_number_generator.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
+#include "core/templates/sort_array.h"
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
@@ -795,18 +796,49 @@ void NextGISWRTTrace::build_records(const RecordSource *p_sources, uint32_t p_co
 		record.rt_flags = NEXTGI_RT_FLAG_STATIC | (source.lightmapped ? uint32_t(NEXTGI_RT_FLAG_LIGHTMAPPED) : 0u);
 		record.card_set = source.instance_card_set != UINT32_MAX ? source.instance_card_set : source.mesh_card_set;
 		record.tlas_index = i;
-		if (p_relight != nullptr && p_assign != nullptr) {
-			record.page_table = p_assign(p_userdata, source.geometry, record, source.element);
-		}
 		r_records[i] = record;
+	}
+	// GodotNext: nextgi_src_page_levels (#247). As the RT scene's pass: every existing set is
+	// touched, then the records are assigned from the largest solid angle down.
+	if (p_relight != nullptr && p_assign != nullptr) {
+		LocalVector<Vector3> cameras;
+		if (NextGI::get_singleton() != nullptr) {
+			NextGI::get_singleton()->get_page_cameras(cameras);
+		}
+		HashMap<uint32_t, float> extents;
+		LocalVector<float> angles;
+		angles.resize(p_count);
+		LocalVector<uint32_t> order;
+		order.resize(p_count);
+		for (uint32_t i = 0; i < p_count; i++) {
+			const float *extent = extents.getptr(r_records[i].card_set);
+			if (extent == nullptr) {
+				extent = &extents.insert(r_records[i].card_set, NextGIRelight::card_set_extent(r_records[i].card_set))->value;
+			}
+			angles[i] = NextGIRelight::record_solid_angle(r_records[i], *extent, cameras);
+			order[i] = i;
+			p_relight->touch_pages(p_sources[i].geometry, p_sources[i].element, r_records[i].card_set, angles[i]);
+		}
+		struct ByDescendingSolidAngle {
+			const float *angles = nullptr;
+			bool operator()(uint32_t p_a, uint32_t p_b) const {
+				return angles[p_a] != angles[p_b] ? angles[p_a] > angles[p_b] : p_a < p_b;
+			}
+		};
+		SortArray<uint32_t, ByDescendingSolidAngle> sorter;
+		sorter.compare.angles = angles.ptr();
+		sorter.sort(order.ptr(), order.size());
+		for (uint32_t i : order) {
+			r_records[i].page_table = p_assign(p_userdata, p_sources[i].geometry, r_records[i], p_sources[i].element, angles[i]);
+		}
 	}
 	if (p_relight != nullptr) {
 		p_relight->finish_record_pass(r_records);
 	}
 }
 
-static uint32_t _nextgi_swrt_assign_relight_pages(void *p_relight, RenderGeometryInstance *p_geometry, NextGIInstanceRecord &r_record, uint32_t p_element) {
-	return static_cast<NextGIRelight *>(p_relight)->assign_pages(p_geometry, r_record, p_element);
+static uint32_t _nextgi_swrt_assign_relight_pages(void *p_relight, RenderGeometryInstance *p_geometry, NextGIInstanceRecord &r_record, uint32_t p_element, float p_solid_angle) {
+	return static_cast<NextGIRelight *>(p_relight)->assign_pages(p_geometry, r_record, p_element, p_solid_angle);
 }
 
 void NextGISWRTTrace::assign_src_pages(NextGIRelight *p_relight) {

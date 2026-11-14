@@ -103,6 +103,7 @@ func _process(_delta: float) -> void:
 	if bool(info.get("lite_beta", false)):
 		var pages := int(info.get("src_page_count", -1))
 		print("VOXEL_LIGHTING_LITE tier=%s coverage_ppm=%d resampled_nonzero=%d unpaged_hits=%d src_page_count=%d (informational; coverage is asserted at High)" % [tier, coverage_ppm, resampled, unpaged, pages])
+		print("VOXEL_LIGHTING_PAGES sets=%d levels=%s unplaced=%d failures=%d radiance=%d card=%d evictions=%d priority_evictions=%d demotions=%d recuts=%d page_table_entries=%d" % [int(info.get("src_page_sets_current", -1)), str(info.get("src_page_level_sets", [])), int(info.get("src_page_unplaced", -1)), int(info.get("src_page_alloc_failures", -1)), int(info.get("src_page_failures_radiance", -1)), int(info.get("src_page_failures_card", -1)), int(info.get("src_page_evictions", -1)), int(info.get("src_page_priority_evictions", -1)), int(info.get("src_page_demotions", -1)), int(info.get("src_page_recuts", -1)), int(info.get("src_resident_pages", -1))])
 	else:
 		if coverage_ppm <= 0:
 			_fail("coverage is 0 on the %s tier" % tier)

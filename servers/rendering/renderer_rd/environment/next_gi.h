@@ -568,6 +568,10 @@ public:
 	// GodotNext: nextgi_multiview (#58). Scenario passes run once per scenario per frame.
 	uint64_t scenario_frame = UINT64_MAX;
 	uint32_t view_ordinal = 0;
+	// GodotNext: nextgi_src_page_levels (#247). This frame's NextGI view cameras so far, and the
+	// previous frame's, which the SRC pages are prioritized for.
+	LocalVector<Vector3> view_cameras;
+	LocalVector<Vector3> previous_view_cameras;
 
 	static Color debug_tint_hwrt() { return Color(0.15, 0.72, 0.28); }
 	static Color debug_tint_fallback() { return Color(0.90, 0.55, 0.08); }
@@ -645,6 +649,10 @@ public:
 	NextGIReference *get_reference() const { return reference; }
 	// GodotNext: nextgi_wrc_per_view (#253). The view's own WRC (null before its first update).
 	NextGIWRC *get_wrc(RenderSceneBuffersRD *p_render_buffers) const;
+	// GodotNext: nextgi_src_page_levels (#247). The cameras SRC page levels and priorities are taken
+	// from: this frame's NextGI views so far and the previous frame's. The record pass runs in the
+	// frame's first view, so the other views come from the previous frame.
+	void get_page_cameras(LocalVector<Vector3> &r_cameras) const;
 	NextGIWRC *ensure_wrc(RenderSceneBuffersRD *p_render_buffers);
 	// GodotNext: nextgi_wrc_per_view (#253). The frame block's slots a scenario runs once per frame
 	// (AS and SRC work); every other slot, the WRC update included, runs for each view.

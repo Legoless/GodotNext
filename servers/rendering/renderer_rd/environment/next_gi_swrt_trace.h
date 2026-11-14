@@ -226,7 +226,8 @@ public:
 		uint32_t mesh_card_set = UINT32_MAX; // NextGISRC::get_mesh_card_set(), the fallback.
 	};
 	// Assigns relight pages to r_record and returns its page table (NextGIRelight::assign_pages()).
-	typedef uint32_t (*PageAssigner)(void *p_userdata, RenderGeometryInstance *p_geometry, RendererRD::NextGIInstanceRecord &r_record, uint32_t p_element);
+	// GodotNext: nextgi_src_page_levels (#247). p_solid_angle: the record's priority and page level.
+	typedef uint32_t (*PageAssigner)(void *p_userdata, RenderGeometryInstance *p_geometry, RendererRD::NextGIInstanceRecord &r_record, uint32_t p_element, float p_solid_angle);
 	// One record pass of p_relight over the sources. Record i: the transform, STATIC, plus
 	// LIGHTMAPPED for a lightmapped source (the RT scene's rule, so a STATIC light skips it), the
 	// instance's card set or else its mesh's, tlas_index i, and the page table p_assign gives it.

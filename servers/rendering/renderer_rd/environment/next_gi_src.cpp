@@ -579,6 +579,15 @@ uint32_t nextgi_src_page_level(float p_solid_angle, uint32_t p_full_texels) {
 	return uint32_t(CLAMP(level, 0, int(NEXTGI_SRC_PAGE_LEVEL_MAX)));
 }
 
+uint32_t nextgi_src_page_level_hysteresis(float p_solid_angle, uint32_t p_current_level) {
+	const float fraction = CLAMP(p_solid_angle / float(Math::PI), 1.0e-12f, 1.0f);
+	const float value = -0.5f * Math::log(fraction) / Math::log(2.0f);
+	if (p_current_level <= uint32_t(NEXTGI_SRC_PAGE_LEVEL_MAX) && value >= float(p_current_level) - 0.25f && value < float(p_current_level) + 1.25f) {
+		return p_current_level;
+	}
+	return uint32_t(CLAMP(int(Math::floor(value)), 0, int(NEXTGI_SRC_PAGE_LEVEL_MAX)));
+}
+
 uint64_t nextgi_src_material_key(uint64_t p_mesh_id, uint64_t p_override_id, const uint64_t *p_surface_ids, uint32_t p_surface_count) {
 	uint64_t hash = 14695981039346656037ull;
 	auto mix = [&](uint64_t p_value) {
@@ -729,6 +738,17 @@ bool NextGIBuddyAllocator::_ensure(uint32_t p_side) {
 	free_lists[level].push_back(Rect2i(x, y + side, side, side));
 	free_lists[level].push_back(Rect2i(x + side, y + side, side, side));
 	return true;
+}
+
+// GodotNext: nextgi_src_page_levels (#247)
+uint64_t NextGIBuddyAllocator::get_free_texels() const {
+	uint64_t texels = 0;
+	for (uint32_t level = 0; level < LEVELS; level++) {
+		for (const Rect2i &block : free_lists[level]) {
+			texels += uint64_t(block.size.x) * uint64_t(block.size.y);
+		}
+	}
+	return texels;
 }
 
 bool NextGIBuddyAllocator::allocate(uint32_t p_width, uint32_t p_height, Rect2i &r_rect) {

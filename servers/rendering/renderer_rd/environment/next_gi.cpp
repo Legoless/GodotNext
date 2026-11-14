@@ -637,6 +637,14 @@ NextGIWRC *NextGI::ensure_wrc(RenderSceneBuffersRD *p_render_buffers) {
 	return NextGIWRC::ensure_view_wrc(p_render_buffers);
 }
 
+// GodotNext: nextgi_src_page_levels (#247)
+void NextGI::get_page_cameras(LocalVector<Vector3> &r_cameras) const {
+	r_cameras = view_cameras;
+	for (const Vector3 &camera : previous_view_cameras) {
+		r_cameras.push_back(camera);
+	}
+}
+
 NextGIWRC *NextGI::get_wrc(RenderSceneBuffersRD *p_render_buffers) const {
 	return NextGIWRC::get_view_wrc(p_render_buffers);
 }
@@ -1328,6 +1336,12 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	if (new_scenario) {
 		scenario_frame = render_frame_number;
 		view_ordinal = 0;
+		// GodotNext: nextgi_src_page_levels (#247)
+		previous_view_cameras = view_cameras;
+		view_cameras.clear();
+	}
+	if (p_render_data->scene_data != nullptr) {
+		view_cameras.push_back(p_render_data->scene_data->cam_transform.origin);
 	}
 	const uint32_t view_index = view_ordinal++;
 	const bool multiview = view_index > 0 || rb->get_view_count() > 1;

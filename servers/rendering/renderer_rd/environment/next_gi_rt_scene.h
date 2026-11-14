@@ -546,6 +546,17 @@ private:
 	uint32_t _mesh_triangle_count(RID p_mesh) const;
 	void _apply_as_budget(uint64_t p_frame);
 	void _update_far_records(const ::RenderDataRD *p_render_data, LocalVector<NextGIInstanceRecord> &r_records, LocalVector<NextGISurfaceRecord> &r_surfaces);
+	// GodotNext: nextgi_src_page_levels (#247). Records waiting for relight pages: the pass assigns
+	// them after its last record, in descending solid angle.
+	struct PendingPages {
+		RenderGeometryInstance *instance = nullptr;
+		uint32_t record = 0;
+		uint32_t element = UINT32_MAX;
+		float solid_angle = 0.0f;
+	};
+	LocalVector<PendingPages> pending_pages;
+	void _queue_pages(RenderGeometryInstance *p_instance, NextGIInstanceRecord &r_record, uint32_t p_element);
+	void _assign_pending_pages(const ::RenderDataRD *p_render_data, LocalVector<NextGIInstanceRecord> &r_records);
 
 public:
 	void init();

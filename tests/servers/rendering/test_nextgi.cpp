@@ -40,7 +40,9 @@ TEST_FORCE_LINK(test_nextgi)
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
 #include "core/io/file_access.h"
+#include "core/math/random_pcg.h"
 #include "core/string/translation_server.h"
+#include "core/templates/sort_array.h"
 #include "editor/editor_node.h"
 #include "editor/scene/3d/nextgi_editor_plugin.h"
 #include "servers/rendering/rendering_context_driver.h"
@@ -3618,21 +3620,34 @@ TEST_CASE("[NextGI][Lite] The page rect count covers only uploaded rects") {
 
 TEST_CASE("[NextGI][Lite] A record whose pages are evicted later in the same pass is marked evicted") {
 	RendererRD::NextGIRelight relight;
-	// One 4096x2048 Lite atlas holds 128 sets of four 128-texel cards.
+	// The 4096x2048 Lite atlas holds 512 blocks of 128x128.
 	relight.set_page_extent(RendererRD::nextgi_src_atlas_budget(false, true));
 	const RendererRD::NextGICard cards[4] = { lite_test_card(128), lite_test_card(128), lite_test_card(128), lite_test_card(128) };
+	const RendererRD::NextGICard big = lite_test_card(1024);
 	relight.begin_record_pass();
 	LocalVector<RendererRD::NextGIInstanceRecord> records;
-	for (uint32_t i = 0; i < 130; i++) {
+	// GodotNext: nextgi_src_page_levels (#247). Two far instances (a small solid angle: level 3, the
+	// coarsest, so they cannot be demoted) take one 128x128 block each.
+	for (uint32_t i = 0; i < 2; i++) {
 		RendererRD::NextGIInstanceRecord record;
 		record.card_set = i;
 		record.tlas_index = i;
-		record.page_table = relight.assign_card_pages(lite_test_instance(i), record, UINT32_MAX, i * 4, cards, 4);
+		record.page_table = relight.assign_card_pages(lite_test_instance(i), record, UINT32_MAX, i, &big, 1, float(Math::PI) * 0.01f);
+		CHECK_EQ(record.page_table, i);
+		records.push_back(record);
+	}
+	CHECK_EQ(relight.get_page_set_info(0).level, 3u);
+	CHECK_EQ(relight.get_page_set_info(0).radiance_rects[0].size, Size2i(128, 128));
+	// 127 near sets of four blocks fill all but two blocks. The 128th evicts the two far sets,
+	// whose records already hold page tables.
+	for (uint32_t i = 2; i < 130; i++) {
+		RendererRD::NextGIInstanceRecord record;
+		record.card_set = i;
+		record.tlas_index = i;
+		record.page_table = relight.assign_card_pages(lite_test_instance(i), record, UINT32_MAX, 2 + i * 4, cards, 4);
 		CHECK((record.page_table & 0x80000000u) == 0);
 		records.push_back(record);
 	}
-	// The atlas is full after 128 sets, so sets 128 and 129 evicted the two least recently
-	// claimed sets, 0 and 1, whose records already hold page tables.
 	LocalVector<uint32_t> current;
 	relight.collect_current_page_sets(current);
 	CHECK_EQ(current.size(), 128u);
@@ -3642,13 +3657,395 @@ TEST_CASE("[NextGI][Lite] A record whose pages are evicted later in the same pas
 	CHECK_EQ(records[1].page_table, 0x80000000u);
 	CHECK((records[2].page_table & 0x80000000u) == 0);
 	CHECK((records[129].page_table & 0x80000000u) == 0);
+	Dictionary info;
+	relight.fill_info(info);
+	CHECK_EQ(int64_t(info["src_page_priority_evictions"]), 2);
+	CHECK_EQ(int64_t(info["src_page_demotions"]), 0);
 	// The surviving records still name their own pages: the WRC reads them through page_table.
 	LocalVector<uint32_t> words;
 	relight.build_page_rect_words(words);
 	CHECK_EQ(words[records[2].page_table * 2 + 1], 128u | (128u << 16));
-	// Set 0 owned stable ids 0-3; their rects are now empty.
+	// The far sets owned stable ids 0 and 1; their rects are now empty.
 	CHECK_EQ(words[0], 0u);
 	CHECK_EQ(words[1], 0u);
+	CHECK_EQ(words[2], 0u);
+	CHECK_EQ(words[3], 0u);
+}
+
+// GodotNext: nextgi_src_page_levels (#247). One record pass as the RT scene runs it: every existing set touched, then the records assigned
+// from the largest solid angle down.
+static void lite_test_pass(RendererRD::NextGIRelight &r_relight, LocalVector<RendererRD::NextGIInstanceRecord> &r_records, const LocalVector<float> &p_solid_angles, const RendererRD::NextGICard *p_cards, uint32_t p_card_count) {
+	r_relight.begin_record_pass();
+	for (uint32_t i = 0; i < r_records.size(); i++) {
+		r_relight.touch_pages(lite_test_instance(i), UINT32_MAX, r_records[i].card_set, p_solid_angles[i]);
+	}
+	LocalVector<uint32_t> order;
+	for (uint32_t i = 0; i < r_records.size(); i++) {
+		order.push_back(i);
+	}
+	struct ByAngle {
+		const float *angles = nullptr;
+		bool operator()(uint32_t p_a, uint32_t p_b) const { return angles[p_a] != angles[p_b] ? angles[p_a] > angles[p_b] : p_a < p_b; }
+	};
+	SortArray<uint32_t, ByAngle> sorter;
+	sorter.compare.angles = p_solid_angles.ptr();
+	sorter.sort(order.ptr(), order.size());
+	for (uint32_t i : order) {
+		r_records[i].page_table = r_relight.assign_card_pages(lite_test_instance(i), r_records[i], UINT32_MAX, i * p_card_count, p_cards, p_card_count, p_solid_angles[i]);
+	}
+	r_relight.finish_record_pass(r_records);
+}
+
+TEST_CASE("[NextGI][Lite] SRC page levels follow the solid angle, with hysteresis") {
+	using namespace RendererRD;
+	const float pi = float(Math::PI);
+	// A unit-radius instance: inside or at 1.5 m full size, a quarter of the side at 5 m, the
+	// coarsest level from 8 m.
+	CHECK_EQ(nextgi_src_page_level_hysteresis(pi, UINT32_MAX), 0u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(nextgi_src_solid_angle(1.0f, 1.5f), UINT32_MAX), 0u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(nextgi_src_solid_angle(1.0f, 3.0f), UINT32_MAX), 1u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(nextgi_src_solid_angle(1.0f, 5.0f), UINT32_MAX), 2u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(nextgi_src_solid_angle(1.0f, 10.0f), UINT32_MAX), 3u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(nextgi_src_solid_angle(1.0f, 1000.0f), UINT32_MAX), 3u);
+	// A new set takes the #41 rule.
+	for (int i = 1; i <= 64; i++) {
+		const float angle = pi / float(i * i);
+		CHECK_EQ(nextgi_src_page_level_hysteresis(angle, UINT32_MAX), nextgi_src_page_level(angle, 128));
+	}
+	// A set at level 1 keeps it for continuous values in [0.75, 2.25).
+	auto angle_at = [&](float p_value) { return pi * Math::pow(2.0f, -2.0f * p_value); };
+	CHECK_EQ(nextgi_src_page_level_hysteresis(angle_at(0.8f), 1), 1u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(angle_at(0.7f), 1), 0u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(angle_at(2.2f), 1), 1u);
+	CHECK_EQ(nextgi_src_page_level_hysteresis(angle_at(2.3f), 1), 2u);
+
+	// A level-2 page of a 128-texel card is a 32x32 block, its mask that block halved inside the
+	// half-size mask atlas; relight maps the page's texels over the card's whole UV range.
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true));
+	CHECK_EQ(relight.get_mask_extent(), Size2i(2048, 1024));
+	const NextGICard card = lite_test_card(128);
+	relight.begin_record_pass();
+	NextGIInstanceRecord record;
+	record.card_set = 0;
+	record.tlas_index = 0;
+	REQUIRE_EQ(relight.assign_card_pages(lite_test_instance(0), record, UINT32_MAX, 0, &card, 1, nextgi_src_solid_angle(1.0f, 5.0f)), 0u);
+	const NextGIRelight::PageSetInfo info = relight.get_page_set_info(0);
+	CHECK_EQ(info.level, 2u);
+	REQUIRE_EQ(info.radiance_rects.size(), 1u);
+	const Rect2i page = info.radiance_rects[0];
+	CHECK_EQ(page.size, Size2i(32, 32));
+	CHECK_EQ(info.mask_rects[0], Rect2i(page.position / 2, page.size / 2));
+	// nextgi_src_relight_inc.glsl: material = card origin + clamp((texel + 0.5) / size * card_size, 0, card_size - 1).
+	const float first = (0.5f / float(page.size.x)) * 128.0f;
+	const float last = ((float(page.size.x) - 0.5f) / float(page.size.x)) * 128.0f;
+	CHECK(first < 4.0f);
+	CHECK(last > 124.0f);
+	CHECK(last <= 127.0f);
+}
+
+TEST_CASE("[NextGI][Lite] A set with no room at its level takes a coarser page in the free space") {
+	using namespace RendererRD;
+	const float pi = float(Math::PI);
+	// 127 near sets of four 128-texel cards leave four 128x128 blocks: room for one more set at
+	// level 0. Two more sets of the same solid angle arrive: the first fits at level 0, the second
+	// outranks nobody and the atlas is full, so it is unplaced. After freeing one near set, a far
+	// set too large for level 0 there (four 256-texel cards) takes level 1 instead of nothing.
+	const NextGICard cards[4] = { lite_test_card(128), lite_test_card(128), lite_test_card(128), lite_test_card(128) };
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true));
+	relight.begin_record_pass();
+	for (uint32_t i = 0; i < 129; i++) {
+		NextGIInstanceRecord record;
+		record.card_set = i;
+		record.tlas_index = i;
+		const uint32_t page_table = relight.assign_card_pages(lite_test_instance(i), record, UINT32_MAX, i * 4, cards, 4, pi);
+		CHECK_EQ((page_table & 0x80000000u) == 0, i < 128);
+	}
+	relight.release_instance(lite_test_instance(5));
+	const NextGICard big[4] = { lite_test_card(256), lite_test_card(256), lite_test_card(256), lite_test_card(256) };
+	NextGIInstanceRecord far;
+	far.card_set = 300;
+	far.tlas_index = 300;
+	REQUIRE((relight.assign_card_pages(lite_test_instance(300), far, UINT32_MAX, 1200, big, 4, pi * 0.5f) & 0x80000000u) == 0);
+	LocalVector<uint32_t> current;
+	relight.collect_current_page_sets(current);
+	bool found = false;
+	for (uint32_t set : current) {
+		const NextGIRelight::PageSetInfo info = relight.get_page_set_info(set);
+		if (info.card_set == 300) {
+			found = true;
+			CHECK_EQ(info.level, 1u);
+			CHECK_EQ(info.radiance_rects[0].size, Size2i(128, 128));
+		}
+	}
+	CHECK(found);
+	Dictionary info;
+	relight.fill_info(info);
+	CHECK_EQ(int64_t(info["src_page_alloc_failures"]), 0);
+}
+
+TEST_CASE("[NextGI][Lite] A record's SRC page solid angle: its bounding sphere from the nearest camera") {
+	using namespace RendererRD;
+	const float pi = float(Math::PI);
+	// A card set 2 m across: radius sqrt(3) m unscaled; the record scaled by 2 at (10, 0, 0).
+	NextGIInstanceRecord record;
+	const Transform3D transform(Basis().scaled(Vector3(2.0f, 1.0f, 1.0f)), Vector3(10.0f, 0.0f, 0.0f));
+	for (int row = 0; row < 3; row++) {
+		for (int column = 0; column < 3; column++) {
+			record.object_to_world[row * 4 + column] = transform.basis.rows[row][column];
+		}
+		record.object_to_world[row * 4 + 3] = transform.origin[row];
+	}
+	const float radius = 2.0f * float(Math::SQRT3);
+	LocalVector<Vector3> cameras;
+	cameras.push_back(Vector3(-30.0f, 0.0f, 0.0f));
+	cameras.push_back(Vector3(10.0f, 20.0f, 0.0f));
+	// The nearer of the two cameras, 20 m away, with the largest scale.
+	CHECK(NextGIRelight::record_solid_angle(record, 2.0f, cameras) == doctest::Approx(nextgi_src_solid_angle(radius, 20.0f)));
+	// A camera inside the sphere sees π; so do a record without an extent and a pass without cameras.
+	cameras.push_back(Vector3(11.0f, 1.0f, 0.0f));
+	CHECK(NextGIRelight::record_solid_angle(record, 2.0f, cameras) == doctest::Approx(pi));
+	CHECK(NextGIRelight::record_solid_angle(record, 0.0f, cameras) == doctest::Approx(pi));
+	CHECK(NextGIRelight::record_solid_angle(record, 2.0f, LocalVector<Vector3>()) == doctest::Approx(pi));
+}
+
+TEST_CASE("[NextGI][Lite] A page whose rects moved reads as unpaged until relit") {
+	using namespace RendererRD;
+	// A placed (or re-cut, demoted, reused) block holds another card's radiance until relight
+	// writes it. The upload's words leave it empty, so the gather, the WRC and voxel lighting
+	// fall back to the WRC; the unfiltered words still name the rect.
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true));
+	const NextGICard cards[2] = { lite_test_card(64), lite_test_card(32) };
+	relight.begin_record_pass();
+	NextGIInstanceRecord record;
+	record.card_set = 0;
+	record.tlas_index = 0;
+	REQUIRE_EQ(relight.assign_card_pages(lite_test_instance(0), record, UINT32_MAX, 0, cards, 2), 0u);
+	LocalVector<uint32_t> all_words;
+	relight.build_page_rect_words(all_words);
+	LocalVector<uint32_t> relit_words;
+	relight.build_page_rect_words(relit_words, true);
+	REQUIRE_EQ(all_words.size(), 4u);
+	REQUIRE_EQ(relit_words.size(), 4u);
+	CHECK_EQ(all_words[1], 64u | (64u << 16));
+	CHECK_EQ(relit_words[0], 0u);
+	CHECK_EQ(relit_words[1], 0u);
+	CHECK_EQ(relit_words[3], 0u);
+}
+
+TEST_CASE("[NextGI][Lite] SRC pages go to the highest solid angles whatever the record order") {
+	using namespace RendererRD;
+	// The Lite atlas fits 128 sets of four 128-texel cards at full size. 256 instances whose solid
+	// angles keep them at level 0, in shuffled record order.
+	const NextGICard cards[4] = { lite_test_card(128), lite_test_card(128), lite_test_card(128), lite_test_card(128) };
+	const uint32_t count = 256;
+	LocalVector<float> angles;
+	angles.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		// A permutation of 0..255, so record order and solid angle are unrelated.
+		const uint32_t rank = (i * 97u + 31u) % count;
+		angles[i] = float(Math::PI) * (0.3f + 0.6f * float(rank) / float(count));
+	}
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true));
+	LocalVector<NextGIInstanceRecord> records;
+	records.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		records[i].card_set = i;
+		records[i].tlas_index = i;
+	}
+	lite_test_pass(relight, records, angles, cards, 4);
+	uint32_t paged = 0;
+	for (uint32_t i = 0; i < count; i++) {
+		const uint32_t rank = (i * 97u + 31u) % count;
+		const bool has_pages = (records[i].page_table & 0x80000000u) == 0;
+		paged += has_pages ? 1 : 0;
+		CHECK_MESSAGE(has_pages == (rank >= count - 128), vformat("Instance %d (solid angle rank %d of %d) holds pages: %s.", i, rank, count, has_pages ? "yes" : "no"));
+	}
+	CHECK_EQ(paged, 128u);
+	// The same pass in plain record order: higher solid angles demote and then evict lower ones,
+	// so the 128 highest still hold pages.
+	NextGIRelight unsorted;
+	unsorted.set_page_extent(nextgi_src_atlas_budget(false, true));
+	unsorted.begin_record_pass();
+	for (uint32_t i = 0; i < count; i++) {
+		records[i].page_table = unsorted.assign_card_pages(lite_test_instance(i), records[i], UINT32_MAX, i * 4, cards, 4, angles[i]);
+	}
+	unsorted.finish_record_pass(records);
+	for (uint32_t i = 0; i < count; i++) {
+		const uint32_t rank = (i * 97u + 31u) % count;
+		if (rank >= count - 128) {
+			CHECK_MESSAGE((records[i].page_table & 0x80000000u) == 0, vformat("Instance %d (rank %d) holds pages in record order.", i, rank));
+		}
+	}
+}
+
+TEST_CASE("[NextGI][Lite] SRC placement demotes before it evicts, and a set that cannot fit evicts nothing") {
+	using namespace RendererRD;
+	const float pi = float(Math::PI);
+	const NextGICard cards[4] = { lite_test_card(128), lite_test_card(128), lite_test_card(128), lite_test_card(128) };
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true));
+	relight.begin_record_pass();
+	// 128 sets at half of π (still level 0) fill the atlas.
+	for (uint32_t i = 0; i < 128; i++) {
+		NextGIInstanceRecord record;
+		record.card_set = i;
+		record.tlas_index = i;
+		REQUIRE((relight.assign_card_pages(lite_test_instance(i), record, UINT32_MAX, i * 4, cards, 4, pi * 0.5f) & 0x80000000u) == 0);
+	}
+	// An equal solid angle may not take another set's room: nothing changes.
+	LocalVector<uint32_t> words_before;
+	relight.build_page_rect_words(words_before);
+	NextGIInstanceRecord equal;
+	equal.card_set = 200;
+	equal.tlas_index = 200;
+	CHECK_EQ(relight.assign_card_pages(lite_test_instance(200), equal, UINT32_MAX, 800, cards, 4, pi * 0.5f), 0x80000000u);
+	// Outranked is not an allocation failure: it is counted apart, per pass.
+	Dictionary outranked;
+	relight.fill_info(outranked);
+	CHECK_EQ(int64_t(outranked["src_page_unplaced"]), 1);
+	CHECK_EQ(int64_t(outranked["src_page_alloc_failures"]), 0);
+	LocalVector<uint32_t> words_after;
+	relight.build_page_rect_words(words_after);
+	bool unchanged = words_before.size() == words_after.size();
+	for (uint32_t i = 0; unchanged && i < words_before.size(); i++) {
+		unchanged = words_before[i] == words_after[i];
+	}
+	CHECK(unchanged);
+	CHECK_EQ(relight.get_page_set_count(), 128u);
+	// A nearer set: a demotion frees three quarters of a set, so two demotions make room and
+	// nothing is evicted.
+	NextGIInstanceRecord near;
+	near.card_set = 201;
+	near.tlas_index = 201;
+	CHECK((relight.assign_card_pages(lite_test_instance(201), near, UINT32_MAX, 804, cards, 4, pi) & 0x80000000u) == 0);
+	Dictionary info;
+	relight.fill_info(info);
+	CHECK_EQ(int64_t(info["src_page_demotions"]), 2);
+	CHECK_EQ(int64_t(info["src_page_priority_evictions"]), 0);
+	CHECK_EQ(relight.get_page_set_count(), 129u);
+	const PackedInt32Array levels = info["src_page_level_sets"];
+	CHECK_EQ(levels[0], 127);
+	CHECK_EQ(levels[1], 2);
+	// A set larger than the whole atlas fits nowhere, even after demoting and evicting everything
+	// below it, or at a coarser level: it evicts nothing, and with too few texels to win it is
+	// unplaced rather than a failed fit.
+	const NextGICard huge[3] = { lite_test_card(2048), lite_test_card(2048), lite_test_card(2048) };
+	NextGIInstanceRecord too_big;
+	too_big.card_set = 202;
+	too_big.tlas_index = 202;
+	CHECK_EQ(relight.assign_card_pages(lite_test_instance(202), too_big, UINT32_MAX, 808, huge, 3, pi), 0x80000000u);
+	relight.fill_info(info);
+	CHECK_EQ(int64_t(info["src_page_alloc_failures"]), 0);
+	CHECK_EQ(int64_t(info["src_page_unplaced"]), 2);
+	CHECK_EQ(int64_t(info["src_page_demotions"]), 2);
+	CHECK_EQ(int64_t(info["src_page_priority_evictions"]), 0);
+	CHECK_EQ(relight.get_page_set_count(), 129u);
+}
+
+TEST_CASE("[NextGI][Lite] SRC page rects never overlap through random placements and level changes") {
+	using namespace RendererRD;
+	NextGIRelight relight;
+	const NextGIAtlasBudget budget = nextgi_src_atlas_budget(false, true);
+	relight.set_page_extent(budget);
+	const Rect2i texture(0, 0, int(budget.radiance_width), int(budget.radiance_height));
+	const Rect2i mask_texture(Point2i(), relight.get_mask_extent());
+	RandomPCG rng(247);
+	const uint32_t pool = 300;
+	LocalVector<NextGIInstanceRecord> records;
+	records.resize(pool);
+	LocalVector<uint32_t> card_counts;
+	card_counts.resize(pool);
+	for (uint32_t i = 0; i < pool; i++) {
+		records[i].card_set = i;
+		records[i].tlas_index = i;
+		card_counts[i] = 1 + rng.rand() % 4;
+	}
+	auto check_rects = [&]() {
+		LocalVector<Rect2i> radiance;
+		LocalVector<Rect2i> masks;
+		for (uint32_t set = 0; set < relight.get_page_set_count(); set++) {
+			const NextGIRelight::PageSetInfo info = relight.get_page_set_info(set);
+			for (const Rect2i &rect : info.radiance_rects) {
+				radiance.push_back(rect);
+			}
+			for (const Rect2i &rect : info.mask_rects) {
+				masks.push_back(rect);
+			}
+		}
+		bool inside = true;
+		bool disjoint = true;
+		for (uint32_t i = 0; i < radiance.size(); i++) {
+			inside = inside && texture.encloses(radiance[i]) && mask_texture.encloses(masks[i]);
+			for (uint32_t j = i + 1; j < radiance.size(); j++) {
+				disjoint = disjoint && !radiance[i].intersects(radiance[j]) && !masks[i].intersects(masks[j]);
+			}
+		}
+		return inside && disjoint;
+	};
+	bool always_valid = true;
+	for (uint32_t step = 0; step < 10000; step++) {
+		if (step % 50 == 0) {
+			relight.begin_record_pass();
+		}
+		const uint32_t i = rng.rand() % pool;
+		if (rng.rand() % 10 == 0) {
+			relight.release_instance(lite_test_instance(i));
+		} else {
+			// 64 to 512 texels: the live sets outgrow the atlas, so placements demote and evict.
+			NextGICard cards[4];
+			for (uint32_t c = 0; c < 4; c++) {
+				cards[c] = lite_test_card(64u << ((i + c) % 4));
+			}
+			// Solid angles across all four levels; a repeat call may move the set to another level.
+			const float angle = float(Math::PI) * Math::pow(2.0f, -8.0f * rng.randf());
+			relight.assign_card_pages(lite_test_instance(i), records[i], UINT32_MAX, i * 4, cards, card_counts[i], angle);
+		}
+		if (step % 250 == 249) {
+			always_valid = always_valid && check_rects();
+		}
+	}
+	CHECK(always_valid);
+	Dictionary info;
+	relight.fill_info(info);
+	CHECK(int64_t(info["src_page_recuts"]) > 0);
+	CHECK(int64_t(info["src_page_demotions"]) > 0);
+}
+
+TEST_CASE("[NextGI][Lite] SRC page-table entries stay bounded as the camera moves") {
+	using namespace RendererRD;
+	// 400 unit rocks on a line 2 m apart and a camera moving along it: sets change level, are
+	// evicted and come back. Freed page-table runs are reused, so the entry count stays within
+	// the instances' cards instead of growing with every new set.
+	const NextGICard cards[4] = { lite_test_card(128), lite_test_card(64), lite_test_card(128), lite_test_card(32) };
+	const uint32_t count = 400;
+	NextGIRelight relight;
+	relight.set_page_extent(nextgi_src_atlas_budget(false, true));
+	LocalVector<NextGIInstanceRecord> records;
+	records.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		records[i].card_set = i;
+		records[i].tlas_index = i;
+	}
+	LocalVector<float> angles;
+	angles.resize(count);
+	uint32_t max_entries = 0;
+	for (uint32_t pass = 0; pass < 1000; pass++) {
+		const float camera = float(pass % 500) * 1.6f;
+		for (uint32_t i = 0; i < count; i++) {
+			const float distance = Math::abs(float(i) * 2.0f - camera) + 0.5f;
+			angles[i] = distance <= 1.0f ? float(Math::PI) : nextgi_src_solid_angle(1.0f, distance);
+		}
+		lite_test_pass(relight, records, angles, cards, 4);
+		max_entries = MAX(max_entries, relight.get_page_table_count());
+	}
+	CHECK(max_entries <= count * 4);
+	Dictionary info;
+	relight.fill_info(info);
+	CHECK(int64_t(info["src_page_recuts"]) > 0);
 }
 
 TEST_CASE("[NextGI][SDF] The SDF instance buffer grows geometrically") {
