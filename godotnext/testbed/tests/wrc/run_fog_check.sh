@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 # Volumetric fog reads the world radiance cache on Color Box Room A (#44).
-# Usage: run_fog_check.sh [--hwrt=auto|off|force] [--quality=0|1|2|3] -- <godot> <godot arguments>
+# Usage: run_fog_check.sh [--hwrt=auto|off|force] [--quality=0|1|2|3] -- <godot> <godot arguments without a scene>
 # GodotNext: ps_swrt_trace (#186). --hwrt=off runs the software tier, whose WRC producer traces
-# the SDF (plan §21.2 L9b); pass the scene --expected-tier=SWRT then. The default keeps the
-# project's quality (Auto) and hardware_ray_tracing Auto. Exits with Godot's status, or 1 when the
-# run logged any "ERROR:", "Invalid Metal usage" or "Error detected in" line (the bar is 0).
+# the SDF (plan §21.2 L9b). The default keeps the project's quality (Auto) and hardware_ray_tracing
+# Auto. The runner passes the scene and the tier it must report: SWRT for --hwrt=off, HWRT
+# otherwise. It refuses a scene or a "--" among the Godot arguments (#269): before, the caller
+# passed both, and a run without the scene rendered the project's main scene, the harness
+# self-test, which never quits. Exits with Godot's status, or 1 when the run logged any "ERROR:",
+# "Invalid Metal usage" or "Error detected in" line (the bar is 0). test_run_fog_check.sh checks
+# this runner against a fake Godot (no GPU).
+#
+# Example on the Linux L4 VM:
+#   godotnext/testbed/tests/wrc/run_fog_check.sh --hwrt=off -- ./bin/godot.linuxbsd.editor.x86_64 \
+#     --path godotnext/testbed --rendering-driver vulkan --audio-driver Dummy --gpu-validation
 
 set -euo pipefail
 
@@ -13,6 +21,7 @@ export GODOTNEXT_BACKGROUND="${GODOTNEXT_BACKGROUND:-1}"
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 testbed_dir=$(cd "$script_dir/../.." && pwd)
 override="$testbed_dir/override.cfg"
+scene=res://tests/wrc/fog_check.tscn
 
 hwrt_value=0
 quality_line=""
@@ -37,6 +46,22 @@ if [[ $# -eq 0 ]]; then
 	echo "run_fog_check.sh: pass the Godot command after --" >&2
 	exit 2
 fi
+for arg in "$@"; do
+	case "$arg" in
+	--)
+		echo "run_fog_check.sh: pass no '--' after the Godot command; the runner passes the scene's arguments" >&2
+		exit 2
+		;;
+	*.tscn | *.scn)
+		echo "run_fog_check.sh: pass no scene ('$arg'); the runner runs $scene" >&2
+		exit 2
+		;;
+	esac
+done
+expected_tier=HWRT
+if [[ "$hwrt_value" -eq 1 ]]; then
+	expected_tier=SWRT
+fi
 if [[ -e "$override" ]]; then
 	echo "run_fog_check.sh: $override already exists; not overwriting it" >&2
 	exit 2
@@ -57,7 +82,7 @@ $quality_line
 EOF
 
 set +e
-"$@" 2>&1 | tee "$log"
+"$@" "$scene" -- --expected-tier="$expected_tier" 2>&1 | tee "$log"
 status=$?
 set -e
 
