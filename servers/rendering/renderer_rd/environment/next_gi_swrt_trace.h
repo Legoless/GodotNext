@@ -179,6 +179,8 @@ public:
 	// bit L (0-5) lets it step by level L's coarse bound, bit 8 + L lets it climb through level L's
 	// empty bricks. A level is fresh while it is resident and has no dirty volume pending (it
 	// updates on every 2^L-th frame). p_coarse_skip false clears bits 0-5 only.
+	// GodotNext: global_sdf_stale_step (#264). A step marched at a level whose bit 8 + L is clear
+	// ends where a finer level whose bit is set takes the ray over.
 	static uint32_t coarse_level_mask(const NextGIGlobalSDFClipmaps &p_clipmaps, uint32_t p_levels, bool p_coarse_skip);
 	// Cells of the ray grid for an internal size.
 	static Vector2i ray_grid(const Vector2i &p_internal_size, uint32_t p_cells_per_axis = DEFAULT_RAY_GRID);

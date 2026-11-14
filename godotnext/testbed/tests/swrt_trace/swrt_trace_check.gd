@@ -44,9 +44,21 @@ extends Node3D
 ## resident with the bricks nearest the camera, and builds no level in full again. The
 ## trace reads level 0's missing bricks from level 1 and still passes every check above
 ## but the low-sun pass.
+## Pass --stale (#264) for a coarser level that marches past a change a finer level holds. Level L
+## updates on every 2^L-th frame, so after an instance moves, the coarser levels keep its old place
+## for a frame or more (a dirty volume pending). After the first readback's ray checks (the
+## coarse-mask, low-sun and step-budget passes do not run), the sun moves high behind the camera, so
+## the shadow rays of the wall's face and of the floor in front of it climb toward the camera through
+## level 1 and cross into level 0. A slab jumps into those rays just past level 0's edge
+## (STALE_SLAB_INSET inside the region the trace marches level 0 in), and back under the floor, once
+## every STALE_CYCLE frames: an odd cycle, so it lands on the frames level 1 skips and on those it
+## updates alike. On every frame the slab is in place, every shadow, gather and reflection ray that
+## physics sees cross it (STALE_EDGE_MARGIN inside its edges) must hit it, also on the frames level 1
+## still holds it under the floor (bit 9 clear in the readback's coarse_level_mask). A stale level's
+## empty-brick skip or distance step used to carry those rays up to one level-1 brick past the slab.
 ## --reduced and --starved are sized for the plain scene: do not combine them with
 ## --dense, --scaled or --sheared. Nor --dense with --sheared: the poles keep clear of the
-## upright boxes only.
+## upright boxes only. --stale runs on the plain scene alone.
 ## Every run also compares the GPU composite of the global SDF with its CPU twin
 ## (NextGIGlobalSDF::composite_distance), checks that no resident voxel reads
 ## past the nearest instance, and checks that the #187 microbenchmark's trace
@@ -102,6 +114,35 @@ const REDUCED_LEVELS := 4
 const STARVED_POOL_BRICKS := 1436
 const MIN_LEVELS := 3
 const STARVED_SETTLE_FRAMES := 60
+## #264 --stale. Level 0's voxel (NextGIGlobalSDF::level_voxel_size(0)); the trace marches level 0
+## from two voxels inside its clipmap's edge (swrt_level_at()).
+const LEVEL0_VOXEL := 0.1
+const LEVEL_MARGIN_VOXELS := 2
+const LEVEL_SIZE_VOXELS := 128
+## The sun of the stale stage: 60 degrees up, behind the camera (to the light: +z and up).
+const STALE_SUN_DEGREES := Vector3(-60.0, 0.0, 0.0)
+## The slab: wider than the wall, where the wall's shadow rays cross it, one level-1 voxel thick.
+## Its near face lies STALE_SLAB_INSET past level 0's edge.
+const STALE_SLAB_SIZE := Vector3(6.6, 2.0, 0.2)
+const STALE_SLAB_Y := 3.7
+const STALE_SLAB_INSET := 0.05
+## Under the floor slab, out of every ray's way.
+const STALE_PARKED := Vector3(0.0, -1.5, -2.0)
+## The slab is in place on one frame of every STALE_CYCLE (odd: both parities of the frame number).
+const STALE_CYCLE := 3
+## Frames verified once the stale sun reached the readback.
+const STALE_FRAMES := 60
+## A ray counts when physics sees it reach the slab first, through the slab's box shrunk by
+## STALE_EDGE_MARGIN across its face and for at least STALE_MIN_PATH (a corner graze is the
+## SDF's surface band, not a crossing). A gather or reflection hit counts up to two level-0 voxels
+## past where physics meets the slab.
+const STALE_EDGE_MARGIN := 0.15
+const STALE_MIN_PATH := 0.1
+const STALE_HIT_TOLERANCE := 2.0 * LEVEL0_VOXEL + 0.05
+## Coverage: frames with the slab in place while level 1 was stale, and the shadow rays that
+## crossed into level 0 on them.
+const STALE_MIN_HAZARD_FRAMES := 4
+const STALE_MIN_HAZARD_RAYS := 200
 
 var _frames := 0
 var _stage := 0
@@ -126,6 +167,15 @@ var _sheared := false
 var _reduced := false
 var _starved := false
 var _starved_full_builds := -1
+var _stale := false
+var _slab: MeshInstance3D
+var _slab_body: StaticBody3D
+var _stale_region := AABB()
+var _stale_place := Vector3()
+var _stale_step := 0
+var _stale_shown_in_place := false
+var _stale_last_frame := -1
+var _stale_stats := {}
 
 
 func _ready() -> void:
@@ -135,6 +185,7 @@ func _ready() -> void:
 	_sheared = OS.get_cmdline_user_args().has("--sheared")
 	_reduced = OS.get_cmdline_user_args().has("--reduced")
 	_starved = OS.get_cmdline_user_args().has("--starved")
+	_stale = OS.get_cmdline_user_args().has("--stale")
 	if _reduced or _starved:
 		# Read when the tracer is created, on the first software-tier frame.
 		ProjectSettings.set_setting("rendering/global_illumination/nextgi/debug/swrt_trace_pool_bricks", STARVED_POOL_BRICKS if _starved else REDUCED_POOL_BRICKS)
@@ -160,6 +211,8 @@ func _ready() -> void:
 	_panel = _add_two_sided_panel(Vector3(1.4, 1.0, 0.06), Vector3(2.4, 0.9, -2.6))
 	if _dense:
 		_add_poles()
+	if _stale:
+		_add_slab()
 
 	# Low behind the wall, so the wall, the pillar and the cube cast shadows toward the camera.
 	_sun = DirectionalLight3D.new()
@@ -233,6 +286,31 @@ func _add_poles() -> void:
 			if clear:
 				_add_box("Pole%d" % count, Vector3(0.4, 1.0, 0.4), Vector3(center.x, 0.5, center.y), 0.3)
 				count += 1
+
+
+## #264 --stale: the slab that jumps across level 0's edge, parked under the floor until the stale
+## stage. Created here so its mesh SDF is built before the checks start.
+func _add_slab() -> void:
+	var mesh := BoxMesh.new()
+	mesh.size = STALE_SLAB_SIZE
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.7, 0.7, 0.7)
+	mesh.material = material
+	_slab = MeshInstance3D.new()
+	_slab.name = "StaleSlab"
+	_slab.mesh = mesh
+	_slab.position = STALE_PARKED
+	add_child(_slab)
+	_slab_body = StaticBody3D.new()
+	_slab_body.name = "StaleSlabBody"
+	_slab_body.position = STALE_PARKED
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = STALE_SLAB_SIZE
+	shape.shape = box
+	_slab_body.add_child(shape)
+	add_child(_slab_body)
+	_roughness_of[_slab_body.get_instance_id()] = 0.5
 
 
 ## A thin two-sided box whose unsigned mesh SDF is encoded here (one mip, the
@@ -371,10 +449,17 @@ func _process(_delta: float) -> void:
 			_reasons.append("starved pool: %d full level builds in %d frames" % [full_builds - _starved_full_builds, STARVED_SETTLE_FRAMES])
 		_finish(_reasons.is_empty(), _reasons, _summary)
 		return
+	if _stage == 6:
+		_process_stale(info, readback)
+		return
 	if _stage == 0:
 		_verify(info, readback)
 		if _reduced:
 			_verify_reduced(info, REDUCED_POOL_BRICKS, REDUCED_LEVELS)
+		if _stale:
+			# Stage 6 (#264): the slab across level 0's edge.
+			_start_stale(readback)
+			return
 		# Stage 4 (#257): without the coarse bound, then also without the climb through coarser
 		# empty bricks, through debug/swrt_coarse_levels. The trace must follow the mask it is given.
 		_coarse_steps_full = int(info.get("swrt_steps", -1))
@@ -468,6 +553,190 @@ func _verify_starved(p_info: Dictionary) -> void:
 	elif int(level_bricks[1]) != PLAIN_LEVEL_BRICKS[1] or int(level_bricks[2]) != PLAIN_LEVEL_BRICKS[2]:
 		# The levels are built coarsest first: the trace reads level 0's missing bricks from level 1.
 		_reasons.append("starved pool: levels 1 and 2 hold %s bricks, not all of %s" % [str(level_bricks.slice(1)), str(PLAIN_LEVEL_BRICKS.slice(1, 3))])
+
+
+## #264 --stale (stage 6): the region the trace marches level 0 in, the slab's place inside its
+## edge that faces the wall, and the sun behind the camera.
+func _start_stale(p_readback: Dictionary) -> void:
+	var origins: Array = p_readback.get("level_origins", [])
+	if origins.is_empty():
+		_reasons.append("stale: the SWRT readback has no level origins")
+		_finish(false, _reasons, _summary)
+		return
+	var origin: Vector3i = origins[0]
+	_stale_region = AABB((Vector3(origin) + Vector3.ONE * LEVEL_MARGIN_VOXELS) * LEVEL0_VOXEL, Vector3.ONE * (LEVEL_SIZE_VOXELS - 2 * LEVEL_MARGIN_VOXELS) * LEVEL0_VOXEL)
+	# The wall lies past level 0's -z edge, its shadow rays climb across it toward the camera.
+	_stale_place = Vector3(0.0, STALE_SLAB_Y, _stale_region.position.z + STALE_SLAB_INSET + 0.5 * STALE_SLAB_SIZE.z)
+	_stale_stats = {
+		"frames": 0,
+		"in_place_frames": 0,
+		"hazard_frames": 0,
+		"frames_with_misses": 0,
+		"skipped_frames": 0,
+		"level0_edge_z": _stale_region.position.z,
+		"slab_place": str(_stale_place),
+		"steps_sum": 0,
+		"rays": {},
+		"misses": [],
+	}
+	for kind in ["shadow", "gather", "reflect"]:
+		_stale_stats["rays"][kind] = { "slab": 0, "crossing": 0, "crossing_on_stale": 0, "missed": 0, "missed_crossing": 0 }
+	_sun.rotation_degrees = STALE_SUN_DEGREES
+	_stage = 6
+	_stage_frame = _frames
+	_stale_step = 0
+	_move_slab(false)
+
+
+## Puts the slab (its mesh and its body) in place or under the floor. The next _process() reads the
+## readback of the frame drawn now, with the slab here.
+func _move_slab(p_in_place: bool) -> void:
+	var place := _stale_place if p_in_place else STALE_PARKED
+	_slab.position = place
+	_slab_body.position = place
+	_stale_shown_in_place = p_in_place
+
+
+func _process_stale(p_info: Dictionary, p_readback: Dictionary) -> void:
+	var travel: Vector3 = p_readback.get("light_direction", Vector3())
+	var expected_travel := -_sun.global_transform.basis.z.normalized()
+	if travel.normalized().dot(expected_travel) >= 0.9999:
+		# Each readback must be the next frame's, or the slab's place would not be the one traced.
+		var frame := int(p_readback.get("frame", -1))
+		if frame < 0 or (_stale_last_frame >= 0 and frame != _stale_last_frame + 1):
+			_stale_stats["skipped_frames"] += 1
+		_stale_last_frame = frame
+		_verify_stale(p_info, p_readback)
+	if _stale_stats["frames"] >= STALE_FRAMES:
+		_finish_stale()
+		return
+	if _frames >= MAX_FRAMES:
+		_reasons.append("stale: %d of %d frames verified by frame %d (the stale sun reached the readback: %s)" % [_stale_stats["frames"], STALE_FRAMES, _frames, str(travel.normalized().dot(expected_travel) >= 0.9999)])
+		_finish(false, _reasons, _summary)
+		return
+	_stale_step += 1
+	_move_slab(_stale_step % STALE_CYCLE == 0)
+
+
+## One frame of the stale stage: with the slab in place, every ray physics sees cross it must hit it.
+func _verify_stale(p_info: Dictionary, p_readback: Dictionary) -> void:
+	_stale_stats["frames"] += 1
+	# The step counters arrive a frame or more late: a report-only mean over the stage.
+	_stale_stats["steps_sum"] += int(p_info.get("swrt_steps", 0))
+	if not _stale_shown_in_place:
+		return
+	_stale_stats["in_place_frames"] += 1
+	# Bit 8 + 1 clear: level 1 still has the slab's move pending, so it holds the slab under the floor.
+	var mask := int(p_readback.get("coarse_level_mask", -1))
+	var level1_stale := mask >= 0 and (mask & (256 << 1)) == 0
+	if level1_stale:
+		_stale_stats["hazard_frames"] += 1
+	var slab := AABB(_slab_body.global_position - 0.5 * STALE_SLAB_SIZE, STALE_SLAB_SIZE)
+	var missed_before := _stale_missed()
+	var gather := _decode_rays(p_readback["gather"])
+	# Shadow rays toward the stale sun (result 0: occluded, 2: no request).
+	var results: PackedByteArray = p_readback.get("shadow", PackedByteArray())
+	var to_light := -(p_readback["light_direction"] as Vector3).normalized()
+	for index in mini(gather.size(), results.size() / 4):
+		var ray: Dictionary = gather[index]
+		if int(ray["flags"]) & 128:
+			continue
+		var result := results.decode_u32(index * 4)
+		if result == 2:
+			continue
+		var origin: Vector3 = ray["surface"] + ray["surface_normal"] * ray["offset"]
+		if _slab_t(origin, to_light, 200.0, slab) < 0.0:
+			continue
+		_stale_count("shadow", origin, to_light, level1_stale, result != 0)
+	# Gather and reflection rays the SDF traced (a screen-trace hit is the Hi-Z march's): a hit no
+	# farther than STALE_HIT_TOLERANCE past the slab.
+	var kinds := { "gather": gather }
+	if p_readback.has("reflect"):
+		kinds["reflect"] = _decode_rays(p_readback["reflect"])
+	for kind in kinds:
+		for ray in kinds[kind]:
+			var flags: int = ray["flags"]
+			if flags & (128 | 4):
+				continue
+			var origin: Vector3 = ray["surface"] + ray["surface_normal"] * ray["offset"]
+			var direction: Vector3 = ray["direction"]
+			var slab_t := _slab_t(origin, direction, float(ray["tmax"]), slab)
+			if slab_t < 0.0:
+				continue
+			var hit := (flags & 1) != 0 and float(ray["t"]) <= slab_t + STALE_HIT_TOLERANCE
+			_stale_count(kind, origin, direction, level1_stale, not hit)
+	if _stale_missed() > missed_before:
+		_stale_stats["frames_with_misses"] += 1
+
+
+## Where physics sees the ray meet the slab first, when it crosses the slab's core (its box shrunk by
+## STALE_EDGE_MARGIN across its face, the thin z axis kept) for at least STALE_MIN_PATH. -1 otherwise.
+func _slab_t(p_origin: Vector3, p_direction: Vector3, p_length: float, p_slab: AABB) -> float:
+	var hit := _ray(p_origin, p_origin + p_direction * p_length)
+	if hit.is_empty() or hit.get("collider") != _slab_body:
+		return -1.0
+	var core_min := p_slab.position + Vector3(STALE_EDGE_MARGIN, STALE_EDGE_MARGIN, 0.0)
+	var core_max := p_slab.end - Vector3(STALE_EDGE_MARGIN, STALE_EDGE_MARGIN, 0.0)
+	var enter := 0.0
+	var leave := p_length
+	for axis in 3:
+		var d := p_direction[axis]
+		if absf(d) < 1e-9:
+			if p_origin[axis] < core_min[axis] or p_origin[axis] > core_max[axis]:
+				return -1.0
+			continue
+		var t0 := (core_min[axis] - p_origin[axis]) / d
+		var t1 := (core_max[axis] - p_origin[axis]) / d
+		enter = maxf(enter, minf(t0, t1))
+		leave = minf(leave, maxf(t0, t1))
+	if leave - enter < STALE_MIN_PATH:
+		return -1.0
+	return p_origin.distance_to(hit["position"])
+
+
+## Counts a ray physics sees cross the slab. A crossing ray starts outside level 0's region, where a
+## coarser level marches it up to level 0's edge.
+func _stale_count(p_kind: String, p_origin: Vector3, p_direction: Vector3, p_level1_stale: bool, p_missed: bool) -> void:
+	var stats: Dictionary = _stale_stats["rays"][p_kind]
+	var crossing := not _stale_region.has_point(p_origin)
+	stats["slab"] += 1
+	if crossing:
+		stats["crossing"] += 1
+		if p_level1_stale:
+			stats["crossing_on_stale"] += 1
+	if not p_missed:
+		return
+	stats["missed"] += 1
+	if crossing:
+		stats["missed_crossing"] += 1
+	if _stale_stats["misses"].size() < 8:
+		_stale_stats["misses"].append({ "kind": p_kind, "frame": _stale_last_frame, "level1_stale": p_level1_stale, "origin": str(p_origin), "direction": str(p_direction) })
+
+
+func _stale_missed() -> int:
+	var missed := 0
+	for kind in _stale_stats["rays"]:
+		missed += int(_stale_stats["rays"][kind]["missed"])
+	return missed
+
+
+func _finish_stale() -> void:
+	_stale_stats["steps_mean"] = float(_stale_stats["steps_sum"]) / maxf(float(_stale_stats["frames"]), 1.0)
+	_summary["stale"] = _stale_stats
+	var missed := _stale_missed()
+	var slab_rays := 0
+	for kind in _stale_stats["rays"]:
+		slab_rays += int(_stale_stats["rays"][kind]["slab"])
+	if missed != 0:
+		_reasons.append("stale: %d of %d rays that physics sees cross the slab passed it, on %d of %d frames with the slab in place" % [missed, slab_rays, _stale_stats["frames_with_misses"], _stale_stats["in_place_frames"]])
+	if _stale_stats["skipped_frames"] != 0:
+		_reasons.append("stale: %d readbacks were not the next frame's" % _stale_stats["skipped_frames"])
+	if _stale_stats["hazard_frames"] < STALE_MIN_HAZARD_FRAMES:
+		_reasons.append("stale: the slab was in place on %d frames level 1 skipped, not %d" % [_stale_stats["hazard_frames"], STALE_MIN_HAZARD_FRAMES])
+	var crossing_on_stale := int(_stale_stats["rays"]["shadow"]["crossing_on_stale"])
+	if crossing_on_stale < STALE_MIN_HAZARD_RAYS:
+		_reasons.append("stale: %d shadow rays crossed into level 0 through the slab while level 1 was stale, not %d" % [crossing_on_stale, STALE_MIN_HAZARD_RAYS])
+	_finish(_reasons.is_empty(), _reasons, _summary)
 
 
 func _verify_exhausted(p_readback: Dictionary) -> void:

@@ -186,6 +186,38 @@ TEST_CASE("[NextGI][SWRT] The coarse bound and the empty-brick climb use fresh l
 	CHECK_EQ(NextGISWRTTrace::coarse_level_mask(clipmaps, 3, true), uint32_t(0x0707));
 }
 
+TEST_CASE("[NextGI][SWRT] A stale level's step ends where a fresh finer level takes the ray over") {
+	// GodotNext: global_sdf_stale_step (#264). Level L updates on every 2^L-th frame. While it has a
+	// dirty volume pending (bit 8 + L of the fresh-level mask clear), its empty-brick skip and its
+	// distance step could carry a ray past an instance a fresh finer level already moved, up to one
+	// of its bricks into that level's region. Every kernel that marches the global SDF bounds all
+	// three steps; a fresh level is not bounded (no cost while nothing moves).
+	const String sources[3] = {
+		RendererRD::NextGIGather::build_swrt_shader_source(0),
+		RendererRD::NextGIWRC::build_update_swrt_shader_source(0),
+		RendererRD::NextGIRelight::build_shader_source(true),
+	};
+	for (const String &source : sources) {
+		REQUIRE_FALSE(source.is_empty());
+		CHECK(source.contains("float limit = level > 0u && (uint(SWRT_P.extra.w + 0.5) & (256u << level)) == 0u ? swrt_stale_limit(level, p, direction) : SWRT_FAR;"));
+		CHECK(source.contains("t += min(skip + 0.01 * voxel_size, limit);"));
+		CHECK(source.contains("t += min(max(band - distance, 0.25 * voxel_size), limit);"));
+		CHECK(source.contains("t += min(distance, limit);"));
+		CHECK_FALSE(source.contains("\tt += distance;\n"));
+		CHECK_FALSE(source.contains("\tt += skip + 0.01 * voxel_size;\n"));
+		// Only fresh finer levels bound it, at the region swrt_level_at() picks them in (two voxels
+		// inside the clipmap's edge), or where a partial level's trilinear corners (voxels floor(f) - 1
+		// to floor(f) + 2, 1.5 voxels past a brick either way) clear its missing bricks.
+		CHECK(source.contains("if ((fresh & (256u << finer)) == 0u) {"));
+		CHECK(source.contains("if (all(greaterThanEqual(local, vec3(2.0))) && all(lessThan(local, vec3(126.0)))) {"));
+		CHECK(source.contains("vec3 region_min = (vec3(SWRT_P.origins[finer].xyz) + vec3(2.0)) * voxel_size;"));
+		CHECK(source.contains("vec3 region_max = (vec3(SWRT_P.origins[finer].xyz) + vec3(126.0)) * voxel_size;"));
+		CHECK(source.contains("ivec3 lo = clamp(base - ivec3(1), ivec3(0), ivec3(127)) >> 3;\n\tivec3 hi = clamp(base + ivec3(2), ivec3(0), ivec3(127)) >> 3;"));
+		CHECK(source.contains("vec3 held_min = vec3(ivec3(x, y, z) * 8) - vec3(1.5);"));
+		CHECK(source.contains("vec3 exits = (mix(held_min, held_min + vec3(11.0), greaterThan(safe, vec3(0.0))) - local) / safe;"));
+	}
+}
+
 TEST_CASE("[NextGI][SWRT] Software trace shaders do not require ray query") {
 	CHECK_FALSE(NextgiGatherSdfShaderRD().requires_ray_query());
 	CHECK_FALSE(NextgiSrcRelightSdfShaderRD().requires_ray_query());

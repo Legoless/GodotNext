@@ -195,6 +195,8 @@ void _fill_scene_fields(TraceParamsGPU &r_params, const NextGIGlobalSDFClipmaps 
 	// while it still has dirty volumes pending, its page table and bound are older than the finer
 	// levels', and either could carry a ray past a moved or new instance they already hold. The debug
 	// setting masks bits off, for comparisons and the trace check.
+	// GodotNext: global_sdf_stale_step (#264). Bits 8-13 also bound the steps of a stale level (bit
+	// clear) at the edge of the fresh finer levels (bit set) ahead of the ray.
 	r_params.extra[3] = float(NextGISWRTTrace::coarse_level_mask(p_clipmaps, p_levels, true) & nextgi_swrt_coarse_levels_setting());
 }
 
@@ -1293,6 +1295,9 @@ void NextGISWRTTrace::trace_view(RenderDataRD *p_render_data, NextGIVoxelLightin
 		readback_meta["normal_roughness"] = p_normal_roughness.is_valid();
 		readback_meta["levels"] = active_levels;
 		readback_meta["max_steps"] = _max_steps();
+		// GodotNext: global_sdf_stale_step (#264). The frame the clipmaps updated for (level L on
+		// every 2^L-th), so a check can tell the readbacks of consecutive frames apart.
+		readback_meta["frame"] = int64_t(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 		readback_meta["froxel_cells"] = detail ? froxel_count : 0u;
 	}
 	for (const RID &set : sets) {
@@ -1478,6 +1483,13 @@ void NextGISWRTTrace::fill_info(Dictionary &r_info) const {
 		level_bricks.push_back(resident);
 	}
 	readback["level_bricks"] = level_bricks;
+	// GodotNext: global_sdf_stale_step (#264). Each resident level's origin in voxels, so a check can
+	// place geometry against a level's edge.
+	Array level_origins;
+	for (uint32_t level = 0; level < active_levels; level++) {
+		level_origins.push_back(clipmaps.get_origin(level));
+	}
+	readback["level_origins"] = level_origins;
 	// The composite (GPU) against its CPU twin (NextGIGlobalSDF::composite_distance) on level 0,
 	// and against every instance: a resident voxel must not read past an unlisted one.
 	if (field != nullptr && clipmaps.is_level_valid(0)) {

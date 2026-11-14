@@ -431,6 +431,72 @@ float swrt_coarse_bound(uint level, vec3 p) {
 	return swrt_coarse.data[level * 32768u + uint(cell.x + 32 * (cell.y + 32 * cell.z))];
 }
 
+// GodotNext: global_sdf_stale_step (#264). For p inside a partial level's region: the distance along
+// the ray to where the level can march it again. Its trilinear corners and normal taps reach a
+// missing brick from up to 1.5 voxels outside it (swrt_level_missing()), so every missing brick they
+// reach at p keeps the level off inside that brick grown by 1.5 voxels. The ray stays in each of
+// those boxes until it leaves it, so the level takes over no sooner than the farthest of their
+// exits. 0 when no missing brick is in reach.
+float swrt_missing_exit(uint level, vec3 p, vec3 direction) {
+	float voxel_size = swrt_level_voxel(level);
+	vec3 local = p / voxel_size - vec3(SWRT_P.origins[level].xyz);
+	ivec3 base = ivec3(floor(local - vec3(0.5)));
+	ivec3 lo = clamp(base - ivec3(1), ivec3(0), ivec3(127)) >> 3;
+	ivec3 hi = clamp(base + ivec3(2), ivec3(0), ivec3(127)) >> 3;
+	vec3 safe = vec3(abs(direction.x) > 1e-6 ? direction.x : 1e-6, abs(direction.y) > 1e-6 ? direction.y : 1e-6, abs(direction.z) > 1e-6 ? direction.z : 1e-6);
+	float reach = 0.0;
+	for (int z = lo.z; z <= hi.z; z++) {
+		for (int y = lo.y; y <= hi.y; y++) {
+			for (int x = lo.x; x <= hi.x; x++) {
+				if (swrt_page_slot(level, uint(x + 16 * (y + 16 * z))) != SWRT_PAGE_MISSING) {
+					continue;
+				}
+				vec3 held_min = vec3(ivec3(x, y, z) * 8) - vec3(1.5);
+				vec3 exits = (mix(held_min, held_min + vec3(11.0), greaterThan(safe, vec3(0.0))) - local) / safe;
+				reach = max(reach, min(exits.x, min(exits.y, exits.z)) * voxel_size);
+			}
+		}
+	}
+	return reach;
+}
+
+// GodotNext: global_sdf_stale_step (#264). How far one step marched at a stale level (a dirty volume
+// still pending, bit 8 + level of the fresh-level mask clear) may carry the ray. Level L updates on
+// every 2^L-th frame, so its page table may not hold an instance a finer level already moved or
+// added; its empty-brick skip or its distance could carry the ray past it, up to one of its bricks
+// into the finer level's region. The step ends where a fresh finer level takes the ray over: its
+// region's edge two voxels inside its clipmap (swrt_level_at()), or, inside a partial level's
+// region, where its trilinear corners clear its missing bricks (swrt_missing_exit()). A hundredth
+// of that level's voxel more puts the next sample in it. SWRT_FAR when no fresh finer level lies
+// ahead.
+float swrt_stale_limit(uint level, vec3 p, vec3 direction) {
+	uint fresh = uint(SWRT_P.extra.w + 0.5);
+	vec3 safe = vec3(abs(direction.x) > 1e-6 ? direction.x : 1e-6, abs(direction.y) > 1e-6 ? direction.y : 1e-6, abs(direction.z) > 1e-6 ? direction.z : 1e-6);
+	float limit = SWRT_FAR;
+	for (uint finer = 0u; finer < level; finer++) {
+		if ((fresh & (256u << finer)) == 0u) {
+			continue; // Stale too, or not resident.
+		}
+		float voxel_size = swrt_level_voxel(finer);
+		vec3 region_min = (vec3(SWRT_P.origins[finer].xyz) + vec3(2.0)) * voxel_size;
+		vec3 region_max = (vec3(SWRT_P.origins[finer].xyz) + vec3(126.0)) * voxel_size;
+		vec3 t0 = (region_min - p) / safe;
+		vec3 t1 = (region_max - p) / safe;
+		vec3 slab_in = min(t0, t1);
+		vec3 slab_out = max(t0, t1);
+		float enter = max(slab_in.x, max(slab_in.y, slab_in.z));
+		float leave = min(slab_out.x, min(slab_out.y, slab_out.z));
+		if (!(leave > max(enter, 0.0))) {
+			continue; // The ray misses the region, or has left it.
+		}
+		// p is outside the region, or inside a partial level's region where it misses a brick (or on
+		// the region's edge, where the level takes over after the hundredth of a voxel).
+		float reach = enter > 0.0 ? enter : swrt_missing_exit(finer, p, direction);
+		limit = min(limit, reach + 0.01 * voxel_size);
+	}
+	return limit;
+}
+
 // Gradient from six taps one voxel out. A tap without all eight corners is
 // missing: the axis falls back to a one-sided difference with the center, and
 // an axis with both taps missing contributes nothing.
@@ -592,6 +658,10 @@ SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax
 		}
 		steps++;
 		float voxel_size = swrt_level_voxel(level);
+		// GodotNext: global_sdf_stale_step (#264). While this level has a dirty volume pending, no
+		// step carries the ray past where a fresh finer level takes it over. A fresh level steps as
+		// before.
+		float limit = level > 0u && (uint(SWRT_P.extra.w + 0.5) & (256u << level)) == 0u ? swrt_stale_limit(level, p, direction) : SWRT_FAR;
 		// GodotNext: global_sdf_coarse_bound (#257). The coarse bound never exceeds the fine sample
 		// in its cell nor the distance to a brick that may hold a surface. In an unallocated brick,
 		// a bound of at least a cell puts every voxel the sample would read in empty bricks, so
@@ -624,14 +694,14 @@ SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax
 			}
 			// No surface is within a voxel of an unallocated brick.
 			cleared = max(cleared, voxel_size);
-			t += skip + 0.01 * voxel_size;
+			t += min(skip + 0.01 * voxel_size, limit);
 			continue;
 		}
 		// An unsigned two-sided shell is one voxel thick; a signed surface is its zero crossing.
 		float band = (coverage ? 1.0 : 0.5) * voxel_size;
 		cleared = max(cleared, distance);
 		if (cleared < band && (coverage || distance >= 0.0)) {
-			t += max(band - distance, 0.25 * voxel_size);
+			t += min(max(band - distance, 0.25 * voxel_size), limit);
 			continue;
 		}
 		if (distance < band) {
@@ -649,7 +719,7 @@ SWRTHit swrt_trace_global(vec3 origin, vec3 direction, float t_start, float tmax
 			hit.level = level;
 			return hit;
 		}
-		t += distance;
+		t += min(distance, limit);
 	}
 	if (t < tmax) {
 		SWRTHit hit;
