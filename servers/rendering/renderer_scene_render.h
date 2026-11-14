@@ -346,7 +346,11 @@ public:
 		uint32_t positional_light_count;
 
 		// GodotNext: nextgi_src_relight
-		// Non-directional LIGHT_BAKE_STATIC lights, beside positional_light_instances (the DYNAMIC list).
+		// NextGI's non-directional LIGHT_BAKE_DYNAMIC and LIGHT_BAKE_STATIC lights. positional_light_instances is
+		// upstream's list, which SDFGI lights from: it can leave out a light that entered its scenario after its
+		// first update (#265).
+		const RID *nextgi_dynamic_light_instances = nullptr;
+		uint32_t nextgi_dynamic_light_count = 0;
 		const RID *nextgi_static_light_instances = nullptr;
 		uint32_t nextgi_static_light_count = 0;
 

@@ -1304,8 +1304,8 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			add_light(feed->directional_lights->get(i), true, false);
 		}
 	}
-	for (uint32_t i = 0; i < feed->positional_light_count; i++) {
-		add_light(feed->positional_light_instances[i], false, false);
+	for (uint32_t i = 0; i < feed->nextgi_dynamic_light_count; i++) {
+		add_light(feed->nextgi_dynamic_light_instances[i], false, false);
 	}
 	for (uint32_t i = 0; i < feed->nextgi_static_light_count; i++) {
 		add_light(feed->nextgi_static_light_instances[i], false, true);

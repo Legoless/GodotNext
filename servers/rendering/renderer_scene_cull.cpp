@@ -706,6 +706,9 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
 			case RSE::INSTANCE_LIGHT: {
 				InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
 
+				if (scenario && instance->visible && RSG::light_storage->light_get_type(instance->base) != RSE::LIGHT_DIRECTIONAL && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
+					scenario->dynamic_lights.erase(light->instance);
+				}
 				// GodotNext: nextgi_src_relight
 				_nextgi_sync_positional_light(scenario, light->instance, false, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 
@@ -937,6 +940,9 @@ void RendererSceneCull::instance_set_scenario(RID p_instance, RID p_scenario) {
 		switch (instance->base_type) {
 			case RSE::INSTANCE_LIGHT: {
 				InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
+				if (instance->visible && RSG::light_storage->light_get_type(instance->base) != RSE::LIGHT_DIRECTIONAL && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
+					instance->scenario->dynamic_lights.erase(light->instance);
+				}
 				// GodotNext: nextgi_src_relight
 				_nextgi_sync_positional_light(instance->scenario, light->instance, false, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 
@@ -1167,6 +1173,13 @@ void RendererSceneCull::instance_set_visible(RID p_instance, bool p_visible) {
 
 	if (instance->base_type == RSE::INSTANCE_LIGHT) {
 		InstanceLightData *light = static_cast<InstanceLightData *>(instance->base_data);
+		if (instance->scenario && RSG::light_storage->light_get_type(instance->base) != RSE::LIGHT_DIRECTIONAL && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
+			if (p_visible) {
+				instance->scenario->dynamic_lights.push_back(light->instance);
+			} else {
+				instance->scenario->dynamic_lights.erase(light->instance);
+			}
+		}
 		// GodotNext: nextgi_src_relight
 		_nextgi_sync_positional_light(instance->scenario, light->instance, p_visible, RSG::light_storage->light_get_type(instance->base) == RSE::LIGHT_DIRECTIONAL, light->bake_mode);
 	}
@@ -1772,9 +1785,9 @@ void RendererSceneCull::_nextgi_sync_positional_light(Scenario *p_scenario, RID 
 	if (p_scenario == nullptr || !p_light_instance.is_valid()) {
 		return;
 	}
-	const bool was_listed = _nextgi_rid_list_has(p_scenario->dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
-	RendererRD::nextgi_sync_positional_light(p_scenario->dynamic_lights, p_scenario->static_lights, p_light_instance, RendererRD::nextgi_positional_light_list(p_visible, true, p_directional, p_bake));
-	const bool now_listed = _nextgi_rid_list_has(p_scenario->dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
+	const bool was_listed = _nextgi_rid_list_has(p_scenario->nextgi_dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
+	RendererRD::nextgi_sync_positional_light(p_scenario->nextgi_dynamic_lights, p_scenario->static_lights, p_light_instance, RendererRD::nextgi_positional_light_list(p_visible, true, p_directional, p_bake));
+	const bool now_listed = _nextgi_rid_list_has(p_scenario->nextgi_dynamic_lights, p_light_instance) || _nextgi_rid_list_has(p_scenario->static_lights, p_light_instance);
 	const RendererRD::NextGILightBake bake = _nextgi_light_bake(p_bake);
 	if (was_listed && !now_listed) {
 		_nextgi_emit_light(p_scenario, p_light_instance, RendererRD::NEXTGI_LIGHT_REMOVE, bake, p_directional, AABB(), AABB());
@@ -1937,10 +1950,20 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
 		light->make_shadow_dirty();
 
 		RSE::LightBakeMode bake_mode = RSG::light_storage->light_get_bake_mode(p_instance->base);
-		if (bake_mode != light->bake_mode) {
+		if (RSG::light_storage->light_get_type(p_instance->base) != RSE::LIGHT_DIRECTIONAL && bake_mode != light->bake_mode) {
+			if (p_instance->visible && p_instance->scenario && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
+				p_instance->scenario->dynamic_lights.erase(light->instance);
+			}
+
 			light->bake_mode = bake_mode;
+
+			if (p_instance->visible && p_instance->scenario && light->bake_mode == RSE::LIGHT_BAKE_DYNAMIC) {
+				p_instance->scenario->dynamic_lights.push_back(light->instance);
+			}
 		}
 		// GodotNext: nextgi_src_relight
+		// NextGI's light events also read a directional light's bake mode, which upstream leaves unset.
+		light->bake_mode = bake_mode;
 		const bool directional = RSG::light_storage->light_get_type(p_instance->base) == RSE::LIGHT_DIRECTIONAL;
 		_nextgi_sync_positional_light(p_instance->scenario, light->instance, p_instance->visible, directional, light->bake_mode);
 		const RendererRD::NextGILightBake light_bake = _nextgi_light_bake(light->bake_mode);
@@ -4033,6 +4056,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.positional_light_instances = scenario->dynamic_lights.ptr();
 			sdfgi_update_data.positional_light_count = scenario->dynamic_lights.size();
 			// GodotNext: nextgi_src_relight
+			sdfgi_update_data.nextgi_dynamic_light_instances = scenario->nextgi_dynamic_lights.ptr();
+			sdfgi_update_data.nextgi_dynamic_light_count = scenario->nextgi_dynamic_lights.size();
 			sdfgi_update_data.nextgi_static_light_instances = scenario->static_lights.ptr();
 			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
 		}

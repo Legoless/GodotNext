@@ -376,7 +376,9 @@ public:
 
 		LocalVector<RID> dynamic_lights;
 		// GodotNext: nextgi_src_relight
-		// Non-directional LIGHT_BAKE_STATIC lights. NextGI's world-space set reads this beside dynamic_lights (D14).
+		// NextGI's world-space set (D14): every visible non-directional LIGHT_BAKE_DYNAMIC and LIGHT_BAKE_STATIC light
+		// in the scenario. dynamic_lights keeps upstream's bookkeeping, because SDFGI lights from it (#265).
+		LocalVector<RID> nextgi_dynamic_lights;
 		LocalVector<RID> static_lights;
 		// GodotNext: nextgi_rt_registry
 		// One selection per scenario per frame, shared by every view. The first view of the frame is the anchor.
