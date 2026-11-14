@@ -33,6 +33,7 @@
 #include "core/math/math_funcs.h"
 #include "core/object/callable_mp.h"
 #include "core/os/mutex.h"
+#include "core/os/os.h"
 #include "core/templates/hash_map.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
@@ -963,6 +964,107 @@ void NextGIWRC::update(const RenderDataRD *p_render_data) {
 	// GodotNext: nextgi_wrc_shift (#254)
 	nextgi_wrc_age_fresh(fresh_frames);
 	frame++;
+}
+
+// GodotNext: auto_quality_wrc (#259)
+bool NextGIWRC::benchmark_swrt_update(const NextGISWRTTrace &p_tracer, const Vector3 &p_camera, uint64_t &r_usec, String &r_failure) {
+	r_usec = 0;
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr) {
+		r_failure = "no rendering device";
+		return false;
+	}
+	NextGIWRC wrc;
+	if (!wrc._ensure_textures() || !wrc._ensure_swrt_shader()) {
+		r_failure = "the WRC update's software sibling is unavailable";
+		return false;
+	}
+	const Vector3 origin = nextgi_wrc_snap_origin(p_camera, 1.0f);
+	NextGIWRCParamsGPU params;
+	params.camera[0] = p_camera.x;
+	params.camera[1] = p_camera.y;
+	params.camera[2] = p_camera.z;
+	params.camera[3] = 1.0f;
+	params.sky[0] = 0.5f;
+	params.sky[1] = 0.6f;
+	params.sky[2] = 0.8f;
+	params.origin_spacing[0] = origin.x;
+	params.origin_spacing[1] = origin.y;
+	params.origin_spacing[2] = origin.z;
+	params.origin_spacing[3] = 1.0f;
+	params.probe_base = 0;
+	params.probe_count = NEXTGI_WRC_PROBES_PER_FRAME;
+	params.history[0] = 0.9f;
+	params.history[1] = 1.0f; // Lite: the probe trace without translucency probes.
+	rd->buffer_update(wrc.params_buffer, 0, sizeof(params), &params);
+	const RID shader = wrc.swrt_shader->shader.version_get_shader(wrc.swrt_shader->version, 0);
+	Vector<RD::Uniform> uniforms;
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, RID()));
+	const RID images[8] = { wrc.radiance, wrc.visibility, wrc.sh_r, wrc.sh_g, wrc.sh_b, wrc.offsets, wrc.mip4, wrc.mip2 };
+	for (int i = 0; i < 8; i++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, i + 1, images[i]));
+	}
+	for (int binding = 9; binding <= 17; binding++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, binding, wrc.dummy_buffer));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 18, Vector<RID>({ wrc.sampler, wrc.dummy_tex })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ wrc.sampler, wrc.dummy_tex })));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, wrc.params_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, wrc.counter_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 35, Vector<RID>({ wrc.sampler, wrc.dummy_tex })));
+	const RID set0 = rd->uniform_set_create(uniforms, shader, 0);
+	const RID set1 = p_tracer.create_trace_uniform_set(shader, 1, false, nullptr);
+	if (!set0.is_valid() || !set1.is_valid()) {
+		if (set0.is_valid()) {
+			rd->free_rid(set0);
+		}
+		if (set1.is_valid()) {
+			rd->free_rid(set1);
+		}
+		r_failure = "the benchmark uniform sets failed";
+		return false;
+	}
+	auto dispatch = [&](uint32_t p_probes) {
+		const RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, wrc.swrt_shader->trace);
+		rd->compute_list_bind_uniform_set(list, set0, 0);
+		rd->compute_list_bind_uniform_set(list, set1, 1);
+		rd->compute_list_dispatch(list, p_probes, 1, 1);
+		rd->compute_list_end();
+	};
+	// The warm-up pays for pipeline creation. Each timing is a submit, the dispatch and a
+	// blocking readback; the same round trip with one probe is subtracted, so the result is the
+	// trace. The fastest of three runs keeps a GPU that is still raising its clock from deciding.
+	dispatch(1);
+	rd->buffer_get_data(wrc.counter_buffer, 0, 16);
+	Vector<uint8_t> result;
+	auto fastest_of_three = [&](uint32_t p_probes) {
+		uint64_t fastest = UINT64_MAX;
+		for (int run = 0; run < 3; run++) {
+			const uint64_t started = OS::get_singleton()->get_ticks_usec();
+			dispatch(p_probes);
+			result = rd->buffer_get_data(wrc.counter_buffer, 0, 16);
+			fastest = MIN(fastest, OS::get_singleton()->get_ticks_usec() - started);
+		}
+		return fastest;
+	};
+	const uint64_t round_trip = fastest_of_three(1);
+	const uint64_t traced = fastest_of_three(NEXTGI_WRC_PROBES_PER_FRAME);
+	r_usec = traced > round_trip ? traced - round_trip : uint64_t(1);
+	rd->free_rid(set0);
+	rd->free_rid(set1);
+	if (result.size() != 16) {
+		r_failure = "the benchmark readback failed";
+		return false;
+	}
+	// The counters add up over every dispatch: a timing only counts for probe rays that ran and
+	// hit the fixture's room.
+	const uint32_t *counters = reinterpret_cast<const uint32_t *>(result.ptr());
+	if (counters[0] == 0 || counters[1] == 0) {
+		r_failure = vformat("the benchmark traced %d probe rays with %d hits", counters[0], counters[1]);
+		return false;
+	}
+	return true;
 }
 
 void NextGIWRC::fill_info(Dictionary &r_info) const {

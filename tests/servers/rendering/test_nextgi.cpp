@@ -875,9 +875,11 @@ TEST_CASE("[NextGI] Auto quality resolves to High until the microbenchmark lands
 }
 
 TEST_CASE("[NextGI] SWRT auto quality maps the mocked benchmark and the compute-unit class") {
+	// GodotNext: auto_quality_wrc (#259). The WRC-update benchmark's bar is 1.25 ms.
 	CHECK_EQ(NextGI::swrt_auto_quality(1200, 16), NextGI::QUALITY_HIGH);
-	CHECK_EQ(NextGI::swrt_auto_quality(5000, 40), NextGI::QUALITY_HIGH);
-	CHECK_EQ(NextGI::swrt_auto_quality(5001, 40), NextGI::QUALITY_MEDIUM);
+	CHECK_EQ(NextGI::swrt_auto_quality(NextGI::SWRT_AUTO_HIGH_USEC, 40), NextGI::QUALITY_HIGH);
+	CHECK_EQ(NextGI::swrt_auto_quality(NextGI::SWRT_AUTO_HIGH_USEC + 1, 40), NextGI::QUALITY_MEDIUM);
+	CHECK_EQ(NextGI::swrt_auto_quality(5000, 40), NextGI::QUALITY_MEDIUM);
 	CHECK_EQ(NextGI::swrt_auto_quality(0, 40), NextGI::QUALITY_MEDIUM);
 	// A fast trace on a small GPU stays Medium.
 	CHECK_EQ(NextGI::swrt_auto_quality(1000, 8), NextGI::QUALITY_MEDIUM);
@@ -888,8 +890,8 @@ TEST_CASE("[NextGI] SWRT auto quality maps the mocked benchmark and the compute-
 	CHECK_EQ(NextGI::swrt_compute_unit_class(0, NextGI::SWRT_AUTO_MEMORY_FLOOR), NextGI::SWRT_AUTO_COMPUTE_UNITS);
 	CHECK_EQ(NextGI::swrt_compute_unit_class(0, NextGI::SWRT_AUTO_MEMORY_FLOOR - 1), 8u);
 
-	const String high = NextGI::format_swrt_auto_reason(2500, 16, NextGI::QUALITY_HIGH);
-	CHECK(high.begins_with("auto: sdf benchmark 2.50 ms, 16 compute units, HIGH"));
+	const String high = NextGI::format_swrt_auto_reason(1250, 16, NextGI::QUALITY_HIGH);
+	CHECK(high.begins_with("auto: wrc benchmark 1.25 ms, 16 compute units, HIGH"));
 	const String medium = NextGI::format_swrt_auto_reason(800, 8, NextGI::QUALITY_MEDIUM);
 	CHECK(medium.contains("MEDIUM"));
 	CHECK(medium.contains("8 compute units"));

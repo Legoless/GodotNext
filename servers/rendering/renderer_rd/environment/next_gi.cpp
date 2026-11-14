@@ -298,11 +298,11 @@ NextGI::Quality NextGI::swrt_auto_quality(uint64_t p_usec, uint32_t p_compute_un
 	if (p_compute_units < SWRT_AUTO_COMPUTE_UNITS) {
 		return QUALITY_MEDIUM;
 	}
-	return nextgi_auto_quality_from_usec(p_usec);
+	return p_usec > 0 && p_usec <= SWRT_AUTO_HIGH_USEC ? QUALITY_HIGH : QUALITY_MEDIUM;
 }
 
 String NextGI::format_swrt_auto_reason(uint64_t p_usec, uint32_t p_compute_units, Quality p_quality) {
-	return vformat("auto: sdf benchmark %.2f ms, %d compute units, %s", double(p_usec) / 1000.0, p_compute_units, get_quality_name(p_quality));
+	return vformat("auto: wrc benchmark %.2f ms, %d compute units, %s", double(p_usec) / 1000.0, p_compute_units, get_quality_name(p_quality));
 }
 
 void NextGI::note_swrt_reduced(uint32_t p_levels) {
@@ -332,7 +332,7 @@ void NextGI::_select_swrt_auto_quality() {
 	const Quality picked = swrt_auto_quality(usec, units);
 	auto_quality = picked;
 	// Logged inside the one tier line, which init() prints next (plan §3.1: printed once).
-	auto_reason = measured ? format_swrt_auto_reason(usec, units, picked) : vformat("auto: sdf benchmark failed (%s), %d compute units, %s", failure, units, get_quality_name(picked));
+	auto_reason = measured ? format_swrt_auto_reason(usec, units, picked) : vformat("auto: wrc benchmark failed (%s), %d compute units, %s", failure, units, get_quality_name(picked));
 }
 
 void NextGI::_append_swrt_info(Dictionary &r_info) const {

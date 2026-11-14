@@ -277,6 +277,8 @@ The startup 64-ray self-test passed on every NextGI launch (`tier=HWRT`).
 
 Auto picked Medium on this card. Its benchmark was the whole self-test, about 11 to 125 ms, which includes first-dispatch setup, and the rule in `nextgi_auto_quality_from_usec` picks High only at 5 ms or less. Since #260 the benchmark is a warm second run of the self-test's rays: 0.37 ms on this card and 0.41 ms on the M5 Max, so Auto picks High on both. PQ re-checks the threshold.
 
+On the software tier (#259), Auto times one frame of the WRC update sibling, 512 probes of 64 rays in the benchmark's fixture room, and picks High at 1.25 ms or less. That is the 5 ms rule's ray rate, 26.2 rays per microsecond, carried from the earlier 2048-probe kernel. Start values: 0.11 to 0.21 ms over five runs on the M5 Max (40 compute units), with 47% of the probe rays hitting the room. PQ re-checks the threshold.
+
 ### Velocity under TAA and FSR2, and the HWRT fault latch
 
 **Prepass velocity (#37).** NextGI Perf (spline camera) and Moving Light Door (moving instance) ran at High as `validation` jobs, once with `anti_aliasing/quality/use_taa=true` and once with FSR2 (`scaling_3d/mode=2`, scale 0.77). All four runs had 0 `ERROR:` and 0 `Validation Error` lines. The velocity values themselves are covered by #37's doctests.

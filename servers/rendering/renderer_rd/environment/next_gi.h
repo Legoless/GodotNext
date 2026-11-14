@@ -416,6 +416,9 @@ public:
 	static constexpr uint32_t SWRT_MIN_LEVELS = 3;
 	static constexpr uint32_t SWRT_AUTO_COMPUTE_UNITS = 16;
 	static constexpr uint64_t SWRT_AUTO_MEMORY_FLOOR = 4ull * 1024ull * 1024ull * 1024ull;
+	// GodotNext: auto_quality_wrc (#259). High at this WRC-update benchmark or faster: the same
+	// 26.2 rays/us bar as the earlier 2048-probe x 64-ray kernel's 5 ms, for 512 probes x 64 rays.
+	static constexpr uint64_t SWRT_AUTO_HIGH_USEC = 1250;
 	// The runtime switch applies on the next evaluation, which is inside this many frames.
 	static constexpr int RUNTIME_TOGGLE_MAX_FRAMES = 2;
 	struct SWRTLevelBudget {

@@ -9,7 +9,7 @@
 
 // GodotNext: ps_swrt_trace (#186). Software-trace kernels. RD_GLSL variants
 // supply one of NEXTGI_SWRT_GATHER, NEXTGI_SWRT_REFLECT,
-// NEXTGI_SWRT_LITE_PROBE, NEXTGI_SWRT_FROXEL_MARK or NEXTGI_SWRT_FROXEL_CULL
+// NEXTGI_SWRT_FROXEL_MARK or NEXTGI_SWRT_FROXEL_CULL
 // through #VERSION_DEFINES. No ray query: this ShaderRD compiles on every
 // Forward+ driver.
 
@@ -44,82 +44,6 @@ layout(set = 0, binding = 29, std430) buffer SWRTShadowRequestsOut {
 	SWRTShadowRequest data[];
 }
 swrt_shadow_requests_out;
-
-#ifdef NEXTGI_SWRT_LITE_PROBE
-// GodotNext: ps_lumen_lite (#183). One workgroup traces one WRC probe. Binding 28 exists only on this variant.
-
-layout(push_constant, std430) uniform LiteProbePush {
-	uint probe_base;
-	uint pad0;
-	uint pad1;
-	uint pad2;
-}
-lite_probe_push;
-
-// Four vec4 per probe (nextgi_irradiance_field.glsl): L0 and the back-face fraction, then L1
-// along x, y and z.
-layout(set = 0, binding = 28, std430) buffer LiteProbeOut {
-	vec4 data[32768];
-}
-lite_probe_out;
-
-shared vec3 lite_radiance_samples[64];
-shared vec3 lite_direction_samples[64];
-shared uint lite_backfaces;
-
-void main() {
-	uint local = gl_LocalInvocationIndex;
-	if (local == 0u) {
-		lite_backfaces = 0u;
-	}
-	barrier();
-	uint probe = (lite_probe_push.probe_base + gl_WorkGroupID.x) % 8192u;
-	uint level = min(probe / 4096u, 1u);
-	float spacing = level == 0u ? 1.0 : 2.0;
-	uint in_level = probe % 4096u;
-	vec3 cell = vec3(float(in_level % 16u), float((in_level / 16u) % 16u), float(in_level / 256u));
-	SWRTParams params = swrt_params();
-	vec3 camera = params.camera.xyz;
-	vec3 origin_snap = floor(camera / spacing) * spacing;
-	vec3 probe_pos = origin_snap + (cell - vec3(7.5)) * spacing;
-	ivec2 texel = ivec2(int(local % 8u), int(local / 8u));
-	vec2 uv = (vec2(texel) + vec2(0.5)) / 8.0 * 2.0 - 1.0;
-	vec3 direction = vec3(uv.x, uv.y, 1.0 - abs(uv.x) - abs(uv.y));
-	if (direction.z < 0.0) {
-		float flipped_x = (1.0 - abs(direction.y)) * sign(direction.x);
-		float flipped_y = (1.0 - abs(direction.x)) * sign(direction.y);
-		direction.x = flipped_x;
-		direction.y = flipped_y;
-	}
-	direction = normalize(direction);
-	SWRTHit hit = swrt_trace(probe_pos, direction, 32.0, false, 0xffffffffu);
-	bool back_face = (hit.flags & SWRT_HIT_SURFACE) != 0u && dot(hit.normal, direction) > 0.0 && hit.t < 0.5 * spacing;
-	if (back_face) {
-		atomicAdd(lite_backfaces, 1u);
-	}
-	vec3 shaded = swrt_shade(hit, probe_pos, direction, true, 32.0);
-	lite_radiance_samples[local] = shaded;
-	lite_direction_samples[local] = direction;
-	barrier();
-	if (local == 0u) {
-		vec3 average = vec3(0.0);
-		vec3 l1x = vec3(0.0);
-		vec3 l1y = vec3(0.0);
-		vec3 l1z = vec3(0.0);
-		for (uint i = 0u; i < 64u; i++) {
-			average += lite_radiance_samples[i];
-			l1x += lite_radiance_samples[i] * lite_direction_samples[i].x;
-			l1y += lite_radiance_samples[i] * lite_direction_samples[i].y;
-			l1z += lite_radiance_samples[i] * lite_direction_samples[i].z;
-		}
-		average *= 1.0 / 64.0;
-		lite_probe_out.data[probe * 4u] = vec4(average, float(lite_backfaces) / 64.0);
-		lite_probe_out.data[probe * 4u + 1u] = vec4(l1x * (3.0 / 64.0), 0.0);
-		lite_probe_out.data[probe * 4u + 2u] = vec4(l1y * (3.0 / 64.0), 0.0);
-		lite_probe_out.data[probe * 4u + 3u] = vec4(l1z * (3.0 / 64.0), 0.0);
-	}
-}
-#endif
 
 #if defined(NEXTGI_SWRT_FROXEL_MARK) || defined(NEXTGI_SWRT_FROXEL_CULL)
 

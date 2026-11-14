@@ -68,7 +68,6 @@ namespace {
 enum TraceVariant {
 	VARIANT_GATHER,
 	VARIANT_REFLECT,
-	VARIANT_LITE_PROBE,
 	VARIANT_FROXEL_MARK,
 	VARIANT_FROXEL_CULL,
 	VARIANT_MAX,
@@ -120,11 +119,6 @@ struct ShadowPushGPU {
 	uint32_t light_count;
 	float rt_radius;
 	uint32_t pad;
-};
-
-struct LiteProbePushGPU {
-	uint32_t probe_base;
-	uint32_t pad[3];
 };
 
 Mutex s_counter_mutex;
@@ -344,7 +338,7 @@ bool NextGISWRTTrace::_ensure_gpu() {
 		gpu = memnew(GpuState);
 	}
 	if (!gpu->gather_version.is_valid()) {
-		gpu->gather_shader.initialize(Vector<String>({ "\n#define NEXTGI_SWRT_GATHER\n", "\n#define NEXTGI_SWRT_REFLECT\n", "\n#define NEXTGI_SWRT_LITE_PROBE\n", "\n#define NEXTGI_SWRT_FROXEL_MARK\n", "\n#define NEXTGI_SWRT_FROXEL_CULL\n" }));
+		gpu->gather_shader.initialize(Vector<String>({ "\n#define NEXTGI_SWRT_GATHER\n", "\n#define NEXTGI_SWRT_REFLECT\n", "\n#define NEXTGI_SWRT_FROXEL_MARK\n", "\n#define NEXTGI_SWRT_FROXEL_CULL\n" }));
 		gpu->gather_version = gpu->gather_shader.version_create(false);
 		if (gpu->gather_version.is_valid()) {
 			for (uint32_t variant = 0; variant < VARIANT_MAX; variant++) {
@@ -1513,57 +1507,12 @@ bool NextGISWRTTrace::run_microbenchmark(uint64_t &r_usec, String &r_failure) {
 	params.ambient[1] = 0.1f;
 	params.ambient[2] = 0.1f;
 	rd->buffer_update(bench.gpu->params_buffer, 0, sizeof(params), &params);
-	// GodotNext: ps_lumen_lite (#183). The Lite probe layout: L0 and L1, four vec4 per probe.
-	const RID probes = rd->storage_buffer_create(NextGI::LITE_PROBE_COUNT * NextGI::LITE_PROBE_VEC4S * 4 * sizeof(float));
-	Vector<RD::Uniform> uniforms;
-	bench._append_trace_uniforms(uniforms, bench.gpu->params_buffer, nullptr, RID(), false, false);
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, bench.gpu->dummy_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, probes));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, bench.gpu->dummy_buffer));
-	const RID set = rd->uniform_set_create(uniforms, bench.gpu->gather_shader.version_get_shader(bench.gpu->gather_version, VARIANT_LITE_PROBE), 0);
-	if (!set.is_valid()) {
-		rd->free_rid(probes);
-		r_failure = "the benchmark uniform set failed";
+	// GodotNext: auto_quality_wrc (#259). The WRC update Lite renders through, over this fixture.
+	rd->buffer_update(bench.gpu->scene_params_buffer, 0, sizeof(params), &params);
+	if (!NextGIWRC::benchmark_swrt_update(bench, camera, r_usec, r_failure)) {
 		return false;
 	}
-	// A High-size workload: 2048 probes x 64 rays, about one 1080p frame of High gather rays.
-	const uint32_t workgroups = 2048;
-	auto dispatch = [&](uint32_t p_groups) {
-		LiteProbePushGPU push = { 0u, { 0u, 0u, 0u } };
-		const RD::ComputeListID list = rd->compute_list_begin();
-		rd->compute_list_bind_compute_pipeline(list, bench.gpu->pipelines[VARIANT_LITE_PROBE]);
-		rd->compute_list_bind_uniform_set(list, set, 0);
-		rd->compute_list_set_push_constant(list, &push, sizeof(push));
-		rd->compute_list_dispatch(list, p_groups, 1, 1);
-		rd->compute_list_end();
-	};
-	// The warm-up pays for pipeline creation and the fixture upload. Each timing is a
-	// submit, the dispatch and a blocking readback; the same round trip with one
-	// workgroup is subtracted, so the result is the trace. The fastest of three runs
-	// keeps a GPU that is still raising its clock from deciding.
-	dispatch(1);
-	rd->buffer_get_data(probes, 0, 16);
-	Vector<uint8_t> result;
-	auto fastest_of_three = [&](uint32_t p_groups) {
-		uint64_t fastest = UINT64_MAX;
-		for (int run = 0; run < 3; run++) {
-			const uint64_t started = OS::get_singleton()->get_ticks_usec();
-			dispatch(p_groups);
-			result = rd->buffer_get_data(probes, 0, 16);
-			fastest = MIN(fastest, OS::get_singleton()->get_ticks_usec() - started);
-		}
-		return fastest;
-	};
-	const uint64_t round_trip = fastest_of_three(1);
-	const uint64_t traced = fastest_of_three(workgroups);
-	r_usec = traced > round_trip ? traced - round_trip : uint64_t(1);
 	last_benchmark_usec = r_usec;
-	rd->free_rid(set);
-	rd->free_rid(probes);
-	if (result.size() != 16) {
-		r_failure = "the benchmark readback failed";
-		return false;
-	}
 	// The timing only counts for a trace that sees its room: segments between free points
 	// of the fixture, traced with the SDF shadow kernel, against the fixture's own boxes.
 	LocalVector<AABB> boxes;

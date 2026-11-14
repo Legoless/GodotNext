@@ -40,6 +40,7 @@
 
 class RenderDataRD;
 class RenderSceneDataRD;
+class NextGISWRTTrace;
 
 namespace RendererRD {
 
@@ -204,6 +205,11 @@ public:
 		Vector4 depth_coefficients;
 	};
 	static ViewParams view_params(const RenderSceneDataRD &p_scene_data);
+	// GodotNext: auto_quality_wrc (#259). The software tier's Auto benchmark: one frame of the WRC
+	// update Lite renders through (the software sibling's trace pass, NEXTGI_WRC_PROBES_PER_FRAME
+	// probes x 64 rays) over p_tracer's fixture global SDF, in microseconds without the submit and
+	// readback round trip. Runs on a temporary WRC with no SRC (record_count 0).
+	static bool benchmark_swrt_update(const NextGISWRTTrace &p_tracer, const Vector3 &p_camera, uint64_t &r_usec, String &r_failure);
 	// The expanded update shader source of one variant, for the layout doctest. No GPU compile.
 	static String build_update_shader_source(int p_variant = 0);
 	// GodotNext: ps_swrt_trace (#186). The software sibling's expanded source, for the doctests.

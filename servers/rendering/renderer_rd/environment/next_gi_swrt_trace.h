@@ -69,8 +69,8 @@ struct NextGILight;
 // - trace_view() is the verification kernel: with debug/swrt_trace_readback it
 //   traces one gather and one reflection ray per cell of the ray grid after the
 //   frame block's slots, from the current frame's depth.
-// - The Lite probe kernel (NEXTGI_SWRT_LITE_PROBE) is what run_microbenchmark()
-//   times for the auto quality; Lumen Lite itself reads the WRC in the frame block.
+// - run_microbenchmark() times the WRC update's software sibling over the fixture for
+//   the auto quality (#259): the work Lumen Lite renders through each frame.
 // - trace_shadow_rays() is the SDF shadow-ray kernel the verification checks run; the SRC
 //   relight's own sibling (nextgi_src_relight_swrt.glsl) marches it for directional lights;
 //   positional lights' rays march the mesh SDFs of the instances inside the light's range
