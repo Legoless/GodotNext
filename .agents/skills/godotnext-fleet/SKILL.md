@@ -39,8 +39,9 @@ The two cloud VMs are Compute Engine `g2-standard-16` machines with one NVIDIA L
 1. They bill while they run. Start one for a task and stop it afterwards with `gcloud compute instances start|stop <name> --project <project> --zone <zone>`. An external IP can change across a stop and start: read it with `gcloud compute instances describe`.
 2. SSH in as `godotnext` with that key: `ssh -i <key> godotnext@<ip>`.
 3. **Linux:** the checkout is `~/GodotNext`. Build with `scons platform=linuxbsd target=editor dev_mode=yes -j16`. Rendered runs use the headless X server on the L4 (`godotnext-xorg` service): set `DISPLAY=:0`, and `vulkaninfo --summary` lists the NVIDIA L4 and llvmpipe.
-4. **Windows:** the SSH shell is `cmd`, not PowerShell as on the RTX 4080 SUPER machine, so don't append `; exit $LASTEXITCODE`; run a copied `.ps1` with `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`. `nvidia-smi` reports the L4 in WDDM mode, which D3D12 and Vulkan rendering need.
-5. **DLSS:** never on these VMs. NVIDIA's DLSS license (Supplement §3) leaves non-vGPU cloud use outside its scope, so DLSS-enabled builds run only on the owned cards.
+4. **Windows:** the SSH shell is PowerShell, as on the RTX 4080 SUPER machine (separate commands with `;`, not `&`); run a copied `.ps1` with `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`. `nvidia-smi` reports the L4 in WDDM mode, which D3D12 and Vulkan rendering need.
+5. **No L4 capacity:** a start can fail with a zone stockout. Retry later, or move the VM: snapshot its boot disk, create a `g2-standard-16` from the snapshot in a zone that has capacity (`--maintenance-policy TERMINATE`), copy the instance's `enable-windows-ssh` and `ssh-keys` metadata (Windows reads its SSH keys from them), and update `local/fleet.env`. The disk keeps the driver, the checkout and the autologon setup.
+6. **DLSS:** never on these VMs. NVIDIA's DLSS license (Supplement §3) leaves non-vGPU cloud use outside its scope, so DLSS-enabled builds run only on the owned cards.
 
 ## Checking an HTML page (the plan, the tracker)
 
