@@ -102,9 +102,9 @@
  {
   "day": "2026-11-14",
   "build_total": 201,
-  "build_done": 109,
+  "build_done": 110,
   "in_progress": 3,
-  "ready": 13,
+  "ready": 12,
   "blocked": 76,
   "gates_passed": 0,
   "gates_total": 18
