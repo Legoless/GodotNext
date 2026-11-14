@@ -992,8 +992,11 @@ bool NextGIWRC::benchmark_swrt_update(const NextGISWRTTrace &p_tracer, const Vec
 	params.origin_spacing[1] = origin.y;
 	params.origin_spacing[2] = origin.z;
 	params.origin_spacing[3] = 1.0f;
+	// Four frames of the update in one dispatch (2048 probes: the earlier kernel's 131072 rays), so
+	// the trace stands clear of the round trip's noise on a fast GPU; the result is per frame.
+	constexpr uint32_t frames = 4;
 	params.probe_base = 0;
-	params.probe_count = NEXTGI_WRC_PROBES_PER_FRAME;
+	params.probe_count = NEXTGI_WRC_PROBES_PER_FRAME * frames;
 	params.history[0] = 0.9f;
 	params.history[1] = 1.0f; // Lite: the probe trace without translucency probes.
 	rd->buffer_update(wrc.params_buffer, 0, sizeof(params), &params);
@@ -1049,8 +1052,8 @@ bool NextGIWRC::benchmark_swrt_update(const NextGISWRTTrace &p_tracer, const Vec
 		return fastest;
 	};
 	const uint64_t round_trip = fastest_of_three(1);
-	const uint64_t traced = fastest_of_three(NEXTGI_WRC_PROBES_PER_FRAME);
-	r_usec = traced > round_trip ? traced - round_trip : uint64_t(1);
+	const uint64_t traced = fastest_of_three(NEXTGI_WRC_PROBES_PER_FRAME * frames);
+	r_usec = MAX(traced > round_trip ? (traced - round_trip) / frames : uint64_t(0), uint64_t(1));
 	rd->free_rid(set0);
 	rd->free_rid(set1);
 	if (result.size() != 16) {

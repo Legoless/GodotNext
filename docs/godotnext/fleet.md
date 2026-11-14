@@ -277,7 +277,7 @@ The startup 64-ray self-test passed on every NextGI launch (`tier=HWRT`).
 
 Auto picked Medium on this card. Its benchmark was the whole self-test, about 11 to 125 ms, which includes first-dispatch setup, and the rule in `nextgi_auto_quality_from_usec` picks High only at 5 ms or less. Since #260 the benchmark is a warm second run of the self-test's rays: 0.37 ms on this card and 0.41 ms on the M5 Max, so Auto picks High on both. PQ re-checks the threshold.
 
-On the software tier (#259), Auto times one frame of the WRC update sibling, 512 probes of 64 rays in the benchmark's fixture room, and picks High at 1.25 ms or less. That is the 5 ms rule's ray rate, 26.2 rays per microsecond, carried from the earlier 2048-probe kernel. Start values: 0.11 to 0.21 ms over five runs on the M5 Max (40 compute units), with 47% of the probe rays hitting the room. PQ re-checks the threshold.
+On the software tier (#259), Auto times the WRC update sibling in the benchmark's fixture room, four frames of 512 probes of 64 rays in one dispatch, and picks High at 1.25 ms or less per frame. That is the 5 ms rule's ray rate, 26.2 rays per microsecond, carried from the earlier 2048-probe kernel. One frame alone (the first version) read 0.00 to 0.21 ms on the M5 Max, inside the submit-and-readback round trip's noise. Start values: 0.24 to 0.41 ms per frame over seven runs on the M5 Max (40 compute units), and 0.11 ms on the RTX 4080 SUPER in both of two runs, with 47% of the probe rays hitting the room. PQ re-checks the threshold.
 
 ### Velocity under TAA and FSR2, and the HWRT fault latch
 
