@@ -6147,6 +6147,12 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return true;
 		case SUPPORTS_GPU_MAPPABLE_BUFFER:
 			return misc_features_support.uma_supported || misc_features_support.gpu_upload_heap_supported;
+		// GodotNext: async_compute (#174). The async queue is a D3D12_COMMAND_LIST_TYPE_COMPUTE queue that
+		// waits on and signals the driver's fence semaphores. It needs enhanced barriers: the render
+		// graph places the async lists' barriers by queue, while the legacy resource-state path tracks
+		// states inside the driver per command list, which this does not cover yet.
+		case SUPPORTS_ASYNC_COMPUTE:
+			return barrier_capabilities.enhanced_barriers_supported;
 		default:
 			return false;
 	}

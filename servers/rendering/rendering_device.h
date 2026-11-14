@@ -1788,6 +1788,10 @@ public:
 	// Unit tests: route compute lists as a device with an active async compute queue does. Fails on a
 	// device with a driver.
 	void set_async_compute_mock(bool p_active);
+	// GodotNext: async_compute (#174). C++-only: whether the compute family the driver offers gives a
+	// queue of its own. On Vulkan a queue created on the main family is a virtual queue over the same
+	// VkQueue, so it would not run anything asynchronously.
+	static bool async_compute_queue_family_usable(RDD::CommandQueueFamilyID p_main_family, RDD::CommandQueueFamilyID p_compute_family);
 	void compute_list_bind_compute_pipeline(ComputeListID p_list, RID p_compute_pipeline);
 	void compute_list_bind_uniform_set(ComputeListID p_list, RID p_uniform_set, uint32_t p_index);
 	void compute_list_set_push_constant(ComputeListID p_list, const void *p_data, uint32_t p_data_size);

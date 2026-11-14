@@ -78,9 +78,10 @@ RenderingDeviceGraph::AsyncPlan RenderingDeviceGraph::_plan_async_partition(Loca
 }
 
 // The plan end() uses. A frame without async lists has nothing to plan. A frame whose async lists
-// cannot run on the async queue (no async command buffer, or a producer and a consumer that
-// overlap) puts every command back on the main queue, which gives exactly the order end() used
-// before async compute existed. level_count is filled only when the frame recorded async lists.
+// cannot run on the async queue (no async command buffer, a producer and a consumer that overlap,
+// or a fork barrier whose source may be async work: async_fork_barrier_conflict) puts every
+// command back on the main queue, which gives exactly the order end() used before async compute
+// existed. level_count is filled only when the frame recorded async lists.
 RenderingDeviceGraph::AsyncPlan RenderingDeviceGraph::_plan_async_frame(LocalVector<RecordedCommandSort> &r_commands_sorted, bool p_async_queue_available) const {
 	if (async_command_count == 0) {
 		// Every queue key is already QUEUE_MAIN.
@@ -90,7 +91,7 @@ RenderingDeviceGraph::AsyncPlan RenderingDeviceGraph::_plan_async_frame(LocalVec
 	}
 
 	AsyncPlan plan = _plan_async_partition(r_commands_sorted);
-	plan.active = plan.active && p_async_queue_available;
+	plan.active = plan.active && p_async_queue_available && !async_fork_barrier_conflict;
 	if (!plan.active) {
 		for (RecordedCommandSort &command_sort : r_commands_sorted) {
 			command_sort.queue = QUEUE_MAIN;
@@ -140,8 +141,10 @@ void RenderingDeviceGraph::_run_level(uint32_t p_level, RecordedCommandSort *p_l
 // before join_level (the command buffer that begins there waits for the async work). The async
 // ones go level by level to the async command buffer. The indices are read from the pool at the
 // split, so a split the main commands make themselves (the swap chain pass) keeps them right.
-// T provides split_main(), which must advance r_command_buffer_pool.buffers_used by one, and
-// run_main() and run_async(), which record a level's commands.
+// T provides split_main(), which must advance r_command_buffer_pool.buffers_used by one,
+// fork_main(), which records the fork barriers (BARRIER_SELECTION_ASYNC_FORK) on the main command
+// buffer and then splits it the same way, and run_main() and run_async(), which record a level's
+// commands.
 template <typename T>
 void RenderingDeviceGraph::_walk_async_frame(RecordedCommandSort *p_commands_sorted, uint32_t p_command_count, const AsyncPlan &p_plan, CommandBufferPool &r_command_buffer_pool, T &r_emitter) {
 	bool forked = false;
@@ -163,7 +166,7 @@ void RenderingDeviceGraph::_walk_async_frame(RecordedCommandSort *p_commands_sor
 
 		if (!forked && level >= p_plan.fork_level) {
 			r_command_buffer_pool.async_fork_index = int32_t(r_command_buffer_pool.buffers_used);
-			r_emitter.split_main();
+			r_emitter.fork_main();
 			forked = true;
 		}
 		if (!joined && level >= p_plan.join_level) {
@@ -186,7 +189,7 @@ void RenderingDeviceGraph::_walk_async_frame(RecordedCommandSort *p_commands_sor
 		// An active plan has fork_level < join_level <= level_count, so the loop always forks; keep
 		// the submission valid anyway.
 		r_command_buffer_pool.async_fork_index = int32_t(r_command_buffer_pool.buffers_used);
-		r_emitter.split_main();
+		r_emitter.fork_main();
 	}
 	if (!joined) {
 		// Nothing on the main queue consumes the async work: join in a trailing command buffer, so
@@ -206,12 +209,21 @@ void RenderingDeviceGraph::_run_async_frame(RecordedCommandSort *p_commands_sort
 		int32_t &label_level;
 		uint32_t &boosted_priority;
 		RDD::CommandBufferID async_command_buffer;
+		const RecordedCommandSort *frame_commands = nullptr;
+		uint32_t frame_command_count = 0;
 		int32_t async_label_index = -1;
 		int32_t async_label_level = -1;
 		bool async_begun = false;
 
 		void split_main() {
 			graph._split_main_command_buffer(command_buffer, pool, label_index, label_level);
+		}
+
+		// The texture barriers of every async command that the async queue cannot run, at the end of
+		// the command buffer the async work waits for.
+		void fork_main() {
+			graph._group_barriers_for_render_commands(command_buffer, frame_commands, frame_command_count, full_barriers, BARRIER_SELECTION_ASYNC_FORK);
+			split_main();
 		}
 
 		void run_main(uint32_t p_level, RecordedCommandSort *p_commands, uint32_t p_count) {
@@ -224,12 +236,12 @@ void RenderingDeviceGraph::_run_async_frame(RecordedCommandSort *p_commands_sort
 				graph._run_label_command_change(async_command_buffer, -1, -1, true, true, nullptr, 0, async_label_index, async_label_level);
 				async_begun = true;
 			}
-			graph._group_barriers_for_render_commands(async_command_buffer, p_commands, p_count, full_barriers);
+			graph._group_barriers_for_render_commands(async_command_buffer, p_commands, p_count, full_barriers, BARRIER_SELECTION_ASYNC_QUEUE);
 			graph._run_render_commands(p_level, p_commands, p_count, async_command_buffer, pool, async_label_index, async_label_level, true);
 		}
 	};
 
-	Emitter emitter = { *this, p_full_barriers, r_command_buffer, r_command_buffer_pool, r_current_label_index, r_current_label_level, r_boosted_priority, r_command_buffer_pool.async_command_buffer };
+	Emitter emitter = { *this, p_full_barriers, r_command_buffer, r_command_buffer_pool, r_current_label_index, r_current_label_level, r_boosted_priority, r_command_buffer_pool.async_command_buffer, p_commands_sorted, command_count };
 	_walk_async_frame(p_commands_sorted, command_count, p_plan, r_command_buffer_pool, emitter);
 
 	if (command_label_count > 0 && r_current_label_index < 0 && r_current_label_level < 0) {
@@ -290,6 +302,11 @@ void RenderingDeviceGraph::emit_for_test(AsyncPlan &r_plan, AsyncEmission &r_emi
 				record(AsyncEmission::STEP_SPLIT, 0, pool.buffers_used, nullptr, 0);
 			}
 
+			void fork_main() {
+				emission.fork_barrier_buffer = int32_t(pool.buffers_used);
+				split_main();
+			}
+
 			void run_main(uint32_t p_level, RecordedCommandSort *p_commands, uint32_t p_count) {
 				if (p_level == split_main_level) {
 					split_main();
@@ -308,6 +325,114 @@ void RenderingDeviceGraph::emit_for_test(AsyncPlan &r_plan, AsyncEmission &r_emi
 	r_emission.fork_index = pool.async_fork_index;
 	r_emission.join_index = pool.async_join_index;
 	r_emission.buffers_used = pool.buffers_used;
+}
+
+// The layouts both a Vulkan compute-only queue family and a D3D12 compute command list can use in a
+// barrier. D3D12 allows the render-target, depth-stencil, resolve and shading-rate layouts on direct
+// queues only; Vulkan restricts stages and accesses by queue but not layouts, so on Vulkan the rule
+// only moves those transitions to the main queue, where their graphics source stages are valid.
+bool RenderingDeviceGraph::async_queue_supports_texture_layout(RDD::TextureLayout p_layout) {
+	switch (p_layout) {
+		case RDD::TEXTURE_LAYOUT_UNDEFINED:
+		case RDD::TEXTURE_LAYOUT_GENERAL:
+		case RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL:
+		case RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+		case RDD::TEXTURE_LAYOUT_COPY_SRC_OPTIMAL:
+		case RDD::TEXTURE_LAYOUT_COPY_DST_OPTIMAL:
+			return true;
+		default:
+			return false;
+	}
+}
+
+BitField<RDD::PipelineStageBits> RenderingDeviceGraph::async_queue_stages(BitField<RDD::PipelineStageBits> p_stages) {
+	BitField<RDD::PipelineStageBits> supported = RDD::PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	supported.set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_COPY_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_CLEAR_STORAGE_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_RAY_TRACING_SHADER_BIT);
+	supported.set_flag(RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT);
+
+	BitField<RDD::PipelineStageBits> stages = p_stages.get_shared(supported);
+	if (uint64_t(stages) != uint64_t(p_stages)) {
+		stages.set_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+	}
+	return stages;
+}
+
+BitField<RDD::BarrierAccessBits> RenderingDeviceGraph::async_queue_access(BitField<RDD::BarrierAccessBits> p_access) {
+	BitField<RDD::BarrierAccessBits> supported = RDD::BARRIER_ACCESS_INDIRECT_COMMAND_READ_BIT;
+	supported.set_flag(RDD::BARRIER_ACCESS_UNIFORM_READ_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_SHADER_WRITE_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_COPY_READ_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_COPY_WRITE_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_HOST_READ_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_HOST_WRITE_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_MEMORY_READ_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT);
+	supported.set_flag(RDD::BARRIER_ACCESS_STORAGE_CLEAR_BIT);
+	return p_access.get_shared(supported);
+}
+
+void RenderingDeviceGraph::set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions) {
+	DEV_ASSERT(driver == nullptr);
+	driver_honors_barriers = p_honors_barriers;
+	driver_textures_require_layout_transitions = p_textures_require_layout_transitions;
+}
+
+void RenderingDeviceGraph::async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers) {
+	LocalVector<RecordedCommandSort> commands_sorted;
+	_compute_command_levels(commands_sorted);
+	r_plan = _plan_async_frame(commands_sorted, true);
+	commands_sorted.sort();
+
+	r_barriers = AsyncBarriers();
+	if (!r_plan.active) {
+		return;
+	}
+
+	// The async queue takes its barriers level by level, as run_async() does; the fork takes them
+	// from the whole frame at once.
+	LocalVector<RecordedCommandSort> async_commands;
+	for (const RecordedCommandSort &command_sort : commands_sorted) {
+		if (command_sort.queue == QUEUE_ASYNC_COMPUTE) {
+			async_commands.push_back(command_sort);
+		}
+	}
+	uint32_t level_start = 0;
+	while (level_start < async_commands.size()) {
+		uint32_t level_end = level_start;
+		while (level_end < async_commands.size() && async_commands[level_end].level == async_commands[level_start].level) {
+			level_end++;
+		}
+		const bool gathered = p_selection == BARRIER_SELECTION_ASYNC_FORK
+				? (level_start == 0 && _gather_barriers_for_render_commands(commands_sorted.ptr(), command_count, false, p_selection))
+				: _gather_barriers_for_render_commands(&async_commands[level_start], level_end - level_start, false, p_selection);
+		if (gathered) {
+			r_barriers.src_stages = r_barriers.src_stages.get_combined(barrier_group.src_stages);
+			r_barriers.dst_stages = r_barriers.dst_stages.get_combined(barrier_group.dst_stages);
+			r_barriers.memory_barrier.src_access = r_barriers.memory_barrier.src_access.get_combined(barrier_group.memory_barrier.src_access);
+			r_barriers.memory_barrier.dst_access = r_barriers.memory_barrier.dst_access.get_combined(barrier_group.memory_barrier.dst_access);
+			for (const RDD::TextureBarrier &barrier : barrier_group.normalization_barriers) {
+				r_barriers.texture_barriers.push_back(barrier);
+			}
+			for (const RDD::TextureBarrier &barrier : barrier_group.transition_barriers) {
+				r_barriers.texture_barriers.push_back(barrier);
+			}
+#if USE_BUFFER_BARRIERS
+			for (const RDD::BufferBarrier &barrier : barrier_group.buffer_barriers) {
+				r_barriers.buffer_barriers.push_back(barrier);
+			}
+#endif
+		}
+		level_start = level_end;
+	}
 }
 
 void RenderingDeviceGraph::submit_chained_command_buffers(const ChainedSubmission &p_submission, ChainedSubmitFunction p_submit, void *p_userdata) {

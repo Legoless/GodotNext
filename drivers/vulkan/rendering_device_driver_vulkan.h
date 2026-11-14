@@ -155,6 +155,12 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	HashSet<CharString> enabled_device_extension_names;
 	TightLocalVector<TightLocalVector<Queue>> queue_families;
 	TightLocalVector<VkQueueFamilyProperties> queue_family_properties;
+	// GodotNext: async_compute (#174). Empty until RenderingDevice creates the async compute queue
+	// (command_queue_set_async_compute()). From then on, buffers and images are created
+	// VK_SHARING_MODE_CONCURRENT across every family listed here: each family that has a queue.
+	bool async_compute_queue_created = false;
+	TightLocalVector<uint32_t> resource_sharing_queue_families;
+	void _update_resource_sharing_queue_families();
 	RDD::Capabilities device_capabilities;
 	SubgroupCapabilities subgroup_capabilities;
 	MultiviewCapabilities multiview_capabilities;
@@ -395,6 +401,8 @@ public:
 	virtual CommandQueueID command_queue_create(CommandQueueFamilyID p_cmd_queue_family, bool p_identify_as_main_queue = false) override final;
 	virtual Error command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) override final;
 	virtual void command_queue_free(CommandQueueID p_cmd_queue) override final;
+	// GodotNext: async_compute (#174).
+	virtual void command_queue_set_async_compute(CommandQueueID p_cmd_queue) override final;
 
 private:
 	// ----- POOL -----

@@ -437,6 +437,9 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 
 	for (uint32_t i = 0; i < p_resource_count; i++) {
 		ResourceTracker *resource_tracker = p_resource_trackers[i];
+		// GodotNext: async_compute (#174). The texture barriers this resource adds start here.
+		const int32_t async_normalization_start = r_command->normalization_barrier_count;
+		const int32_t async_transition_start = r_command->transition_barrier_count;
 
 		const RDD::TextureSubresourceRange &subresources = resource_tracker->texture_subresources;
 		const Rect2i resource_tracker_rect(subresources.base_mipmap, subresources.base_layer, subresources.mipmap_count, subresources.layer_count);
@@ -783,6 +786,20 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		} else {
 			// We add a read dependency to the tracker to indicate this command reads from the entire resource.
 			search_tracker->read_full_command_list_index = _add_to_command_list(p_command_index, search_tracker->read_full_command_list_index);
+		}
+
+		// GodotNext: async_compute (#174). A texture barrier the async queue cannot run moves before the
+		// fork (BARRIER_SELECTION_ASYNC_FORK). That keeps the order only while its source access is on
+		// the main queue, which holds the first time an async command of the frame uses the resource
+		// (or any slice of it). A later one, such as a slice normalized back to its parent's layout
+		// after an earlier async list used the slice, makes the frame run on the main queue.
+		if (r_command->queue == QUEUE_ASYNC_COMPUTE && driver_textures_require_layout_transitions) {
+			const bool used_by_earlier_async_command = search_tracker->async_command_frame == tracking_frame && search_tracker->async_command_index != p_command_index;
+			if (used_by_earlier_async_command && _async_fork_texture_barriers_added(r_command, async_normalization_start, async_transition_start)) {
+				async_fork_barrier_conflict = true;
+			}
+			search_tracker->async_command_frame = tracking_frame;
+			search_tracker->async_command_index = p_command_index;
 		}
 	}
 }
@@ -1436,9 +1453,65 @@ void RenderingDeviceGraph::_boost_priority_for_render_commands(RecordedCommandSo
 	}
 }
 
-void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier) {
-	if (!driver_honors_barriers) {
+// GodotNext: async_compute (#174). Gathering the barriers moved to
+// _gather_barriers_for_render_commands(), which the doctests call without a driver.
+void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection) {
+	if (!_gather_barriers_for_render_commands(p_sorted_commands, p_sorted_commands_count, p_full_memory_barrier, p_selection)) {
+		// Commands don't require synchronization.
 		return;
+	}
+
+	const bool is_memory_barrier_empty = barrier_group.memory_barrier.src_access.is_empty() && barrier_group.memory_barrier.dst_access.is_empty();
+#if USE_BUFFER_BARRIERS
+	const bool are_buffer_barriers_empty = barrier_group.buffer_barriers.is_empty();
+#endif
+	const bool are_acceleration_structure_barriers_empty = barrier_group.acceleration_structure_barriers.is_empty();
+	const VectorView<RDD::MemoryAccessBarrier> memory_barriers = !is_memory_barrier_empty ? barrier_group.memory_barrier : VectorView<RDD::MemoryAccessBarrier>();
+	const VectorView<RDD::TextureBarrier> texture_barriers = barrier_group.normalization_barriers.is_empty() ? barrier_group.transition_barriers : barrier_group.normalization_barriers;
+#if USE_BUFFER_BARRIERS
+	const VectorView<RDD::BufferBarrier> buffer_barriers = !are_buffer_barriers_empty ? barrier_group.buffer_barriers : VectorView<RDD::BufferBarrier>();
+#else
+	const VectorView<RDD::BufferBarrier> buffer_barriers = VectorView<RDD::BufferBarrier>();
+#endif
+	const VectorView<RDD::AccelerationStructureBarrier> acceleration_structure_barriers = !are_acceleration_structure_barriers_empty ? barrier_group.acceleration_structure_barriers : VectorView<RDD::AccelerationStructureBarrier>();
+
+	driver->command_pipeline_barrier(p_command_buffer, barrier_group.src_stages, barrier_group.dst_stages, memory_barriers, buffer_barriers, texture_barriers, acceleration_structure_barriers);
+
+	bool separate_texture_barriers = !barrier_group.normalization_barriers.is_empty() && !barrier_group.transition_barriers.is_empty();
+	if (separate_texture_barriers) {
+		driver->command_pipeline_barrier(p_command_buffer, barrier_group.src_stages, barrier_group.dst_stages, VectorView<RDD::MemoryAccessBarrier>(), VectorView<RDD::BufferBarrier>(), barrier_group.transition_barriers, VectorView<RDD::AccelerationStructureBarrier>());
+	}
+}
+
+// GodotNext: async_compute (#174). Whether the async compute queue can run a texture barrier.
+static bool _async_queue_supports_texture_barrier(const RDD::TextureBarrier &p_barrier) {
+	return RenderingDeviceGraph::async_queue_supports_texture_layout(p_barrier.prev_layout) && RenderingDeviceGraph::async_queue_supports_texture_layout(p_barrier.next_layout);
+}
+
+bool RenderingDeviceGraph::_async_fork_texture_barriers_added(const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const {
+	for (int32_t j = p_normalization_start; j < p_command->normalization_barrier_count; j++) {
+		if (!_async_queue_supports_texture_barrier(command_normalization_barriers[p_command->normalization_barrier_index + j])) {
+			return true;
+		}
+	}
+	for (int32_t j = p_transition_start; j < p_command->transition_barrier_count; j++) {
+		if (!_async_queue_supports_texture_barrier(command_transition_barriers[p_command->transition_barrier_index + j])) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool RenderingDeviceGraph::_gather_barriers_for_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection) {
+	if (!driver_honors_barriers) {
+		return false;
+	}
+
+	// GodotNext: async_compute (#174). Without image layouts (Metal) the async queue runs every
+	// barrier as recorded and nothing moves to the fork.
+	const bool async_rules = p_selection != BARRIER_SELECTION_ALL && driver_textures_require_layout_transitions;
+	if (p_selection == BARRIER_SELECTION_ASYNC_FORK && !async_rules) {
+		return false;
 	}
 
 	barrier_group.clear();
@@ -1454,6 +1527,35 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 		print_line(vformat("Grouping barriers for #%d", command_index));
 #endif
 
+		// GodotNext: async_compute (#174). The fork group takes only the async commands' texture
+		// barriers the async queue cannot run, with the stages of the commands that have one. All of
+		// those are valid on the main queue.
+		if (p_selection == BARRIER_SELECTION_ASYNC_FORK) {
+			if (p_sorted_commands[i].queue != QUEUE_ASYNC_COMPUTE) {
+				continue;
+			}
+			bool fork_barrier_found = false;
+			for (int32_t j = 0; j < command->normalization_barrier_count; j++) {
+				const RDD::TextureBarrier &recorded_barrier = command_normalization_barriers[command->normalization_barrier_index + j];
+				if (!_async_queue_supports_texture_barrier(recorded_barrier)) {
+					barrier_group.normalization_barriers.push_back(recorded_barrier);
+					fork_barrier_found = true;
+				}
+			}
+			for (int32_t j = 0; j < command->transition_barrier_count; j++) {
+				const RDD::TextureBarrier &recorded_barrier = command_transition_barriers[command->transition_barrier_index + j];
+				if (!_async_queue_supports_texture_barrier(recorded_barrier)) {
+					barrier_group.transition_barriers.push_back(recorded_barrier);
+					fork_barrier_found = true;
+				}
+			}
+			if (fork_barrier_found) {
+				barrier_group.src_stages = barrier_group.src_stages | command->previous_stages;
+				barrier_group.dst_stages = barrier_group.dst_stages | command->next_stages;
+			}
+			continue;
+		}
+
 		// Merge command's stage bits with the barrier group.
 		barrier_group.src_stages = barrier_group.src_stages | command->previous_stages;
 		barrier_group.dst_stages = barrier_group.dst_stages | command->next_stages;
@@ -1465,6 +1567,10 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 		// Gather texture barriers.
 		for (int32_t j = 0; j < command->normalization_barrier_count; j++) {
 			const RDD::TextureBarrier &recorded_barrier = command_normalization_barriers[command->normalization_barrier_index + j];
+			// GodotNext: async_compute (#174). The main queue ran it before the fork.
+			if (async_rules && !_async_queue_supports_texture_barrier(recorded_barrier)) {
+				continue;
+			}
 			barrier_group.normalization_barriers.push_back(recorded_barrier);
 #if PRINT_COMMAND_RECORDING
 			print_line(vformat("Normalization Barrier #%d", barrier_group.normalization_barriers.size() - 1));
@@ -1473,6 +1579,10 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 
 		for (int32_t j = 0; j < command->transition_barrier_count; j++) {
 			const RDD::TextureBarrier &recorded_barrier = command_transition_barriers[command->transition_barrier_index + j];
+			// GodotNext: async_compute (#174). The main queue ran it before the fork.
+			if (async_rules && !_async_queue_supports_texture_barrier(recorded_barrier)) {
+				continue;
+			}
 			barrier_group.transition_barriers.push_back(recorded_barrier);
 #if PRINT_COMMAND_RECORDING
 			print_line(vformat("Transition Barrier #%d", barrier_group.transition_barriers.size() - 1));
@@ -1494,6 +1604,35 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 		}
 	}
 
+	// GodotNext: async_compute (#174).
+	if (p_selection == BARRIER_SELECTION_ASYNC_FORK && barrier_group.normalization_barriers.is_empty() && barrier_group.transition_barriers.is_empty()) {
+		return false;
+	}
+	if (async_rules && p_selection == BARRIER_SELECTION_ASYNC_QUEUE) {
+		barrier_group.src_stages = async_queue_stages(barrier_group.src_stages);
+		barrier_group.dst_stages = async_queue_stages(barrier_group.dst_stages);
+		barrier_group.memory_barrier.src_access = async_queue_access(barrier_group.memory_barrier.src_access);
+		barrier_group.memory_barrier.dst_access = async_queue_access(barrier_group.memory_barrier.dst_access);
+		for (RDD::TextureBarrier &barrier : barrier_group.normalization_barriers) {
+			barrier.src_access = async_queue_access(barrier.src_access);
+			barrier.dst_access = async_queue_access(barrier.dst_access);
+		}
+		for (RDD::TextureBarrier &barrier : barrier_group.transition_barriers) {
+			barrier.src_access = async_queue_access(barrier.src_access);
+			barrier.dst_access = async_queue_access(barrier.dst_access);
+		}
+#if USE_BUFFER_BARRIERS
+		for (RDD::BufferBarrier &barrier : barrier_group.buffer_barriers) {
+			barrier.src_access = async_queue_access(barrier.src_access);
+			barrier.dst_access = async_queue_access(barrier.dst_access);
+		}
+#endif
+		for (RDD::AccelerationStructureBarrier &barrier : barrier_group.acceleration_structure_barriers) {
+			barrier.src_access = async_queue_access(barrier.src_access);
+			barrier.dst_access = async_queue_access(barrier.dst_access);
+		}
+	}
+
 	if (p_full_memory_barrier) {
 		barrier_group.src_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
 		barrier_group.dst_stages = RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -1509,26 +1648,7 @@ void RenderingDeviceGraph::_group_barriers_for_render_commands(RDD::CommandBuffe
 	const bool are_buffer_barriers_empty = true;
 #endif
 	const bool are_acceleration_structure_barriers_empty = barrier_group.acceleration_structure_barriers.is_empty();
-	if (is_memory_barrier_empty && are_texture_barriers_empty && are_buffer_barriers_empty && are_acceleration_structure_barriers_empty) {
-		// Commands don't require synchronization.
-		return;
-	}
-
-	const VectorView<RDD::MemoryAccessBarrier> memory_barriers = !is_memory_barrier_empty ? barrier_group.memory_barrier : VectorView<RDD::MemoryAccessBarrier>();
-	const VectorView<RDD::TextureBarrier> texture_barriers = barrier_group.normalization_barriers.is_empty() ? barrier_group.transition_barriers : barrier_group.normalization_barriers;
-#if USE_BUFFER_BARRIERS
-	const VectorView<RDD::BufferBarrier> buffer_barriers = !are_buffer_barriers_empty ? barrier_group.buffer_barriers : VectorView<RDD::BufferBarrier>();
-#else
-	const VectorView<RDD::BufferBarrier> buffer_barriers = VectorView<RDD::BufferBarrier>();
-#endif
-	const VectorView<RDD::AccelerationStructureBarrier> acceleration_structure_barriers = !are_acceleration_structure_barriers_empty ? barrier_group.acceleration_structure_barriers : VectorView<RDD::AccelerationStructureBarrier>();
-
-	driver->command_pipeline_barrier(p_command_buffer, barrier_group.src_stages, barrier_group.dst_stages, memory_barriers, buffer_barriers, texture_barriers, acceleration_structure_barriers);
-
-	bool separate_texture_barriers = !barrier_group.normalization_barriers.is_empty() && !barrier_group.transition_barriers.is_empty();
-	if (separate_texture_barriers) {
-		driver->command_pipeline_barrier(p_command_buffer, barrier_group.src_stages, barrier_group.dst_stages, VectorView<RDD::MemoryAccessBarrier>(), VectorView<RDD::BufferBarrier>(), barrier_group.transition_barriers, VectorView<RDD::AccelerationStructureBarrier>());
-	}
+	return !(is_memory_barrier_empty && are_texture_barriers_empty && are_buffer_barriers_empty && are_acceleration_structure_barriers_empty);
 }
 
 void RenderingDeviceGraph::_print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count) {
@@ -1865,6 +1985,7 @@ void RenderingDeviceGraph::begin() {
 	command_count = 0;
 	// GodotNext: async_compute (#174).
 	async_command_count = 0;
+	async_fork_barrier_conflict = false;
 	command_label_count = 0;
 	command_timestamp_index = -1;
 	command_synchronization_index = -1;

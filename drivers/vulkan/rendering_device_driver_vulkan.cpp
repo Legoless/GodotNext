@@ -2075,6 +2075,12 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 	create_info.size = p_size;
 	create_info.usage = p_usage & ~BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT;
 	create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	// GodotNext: async_compute (#174).
+	if (!resource_sharing_queue_families.is_empty()) {
+		create_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+		create_info.queueFamilyIndexCount = resource_sharing_queue_families.size();
+		create_info.pQueueFamilyIndices = resource_sharing_queue_families.ptr();
+	}
 
 	VmaMemoryUsage vma_usage = VMA_MEMORY_USAGE_UNKNOWN;
 	uint32_t vma_flags_to_remove = 0;
@@ -2439,6 +2445,12 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 	}
 
 	create_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	// GodotNext: async_compute (#174).
+	if (!resource_sharing_queue_families.is_empty()) {
+		create_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+		create_info.queueFamilyIndexCount = resource_sharing_queue_families.size();
+		create_info.pQueueFamilyIndices = resource_sharing_queue_families.ptr();
+	}
 	create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	// Allocate memory.
@@ -3298,12 +3310,49 @@ RDD::CommandQueueID RenderingDeviceDriverVulkan::command_queue_create(CommandQue
 	command_queue->queue_index = picked_queue_index;
 	queue_family[picked_queue_index].virtual_count++;
 
+	// GodotNext: async_compute (#174). A queue created after the async compute queue joins the
+	// families resources are shared across.
+	if (async_compute_queue_created) {
+		_update_resource_sharing_queue_families();
+	}
+
 	// If is was identified as the main queue and a hook is active, indicate it as such to the hook.
 	if (p_identify_as_main_queue && (VulkanHooks::get_singleton() != nullptr)) {
 		VulkanHooks::get_singleton()->set_direct_queue_family_and_index(family_index, picked_queue_index);
 	}
 
 	return CommandQueueID(command_queue);
+}
+
+// GodotNext: async_compute (#174). RenderingDevice creates the async compute queue right after the
+// main, transfer and present queues and before any resource a queue uses. (The breadcrumb buffer is
+// older, but only draw lists, which run on the main queue, write it.) Only this call turns sharing
+// on, so with the project setting off resources stay VK_SHARING_MODE_EXCLUSIVE, as before.
+void RenderingDeviceDriverVulkan::command_queue_set_async_compute(CommandQueueID p_cmd_queue) {
+	DEV_ASSERT(p_cmd_queue.id != 0);
+	async_compute_queue_created = true;
+	_update_resource_sharing_queue_families();
+}
+
+// GodotNext: async_compute (#174). Work on two queue families shares every buffer and image. With
+// VK_SHARING_MODE_CONCURRENT both families see defined contents without queue family ownership
+// transfers, which the render graph could not emit for resources it does not track (immutable
+// textures and buffers bound through uniform sets) or for a resource both queues read inside the
+// fork-join window. The list holds each family that has a queue, so the transfer family is in it too.
+void RenderingDeviceDriverVulkan::_update_resource_sharing_queue_families() {
+	resource_sharing_queue_families.clear();
+	for (uint32_t i = 0; i < queue_families.size(); i++) {
+		for (const Queue &queue : queue_families[i]) {
+			if (queue.virtual_count > 0) {
+				resource_sharing_queue_families.push_back(i);
+				break;
+			}
+		}
+	}
+	if (resource_sharing_queue_families.size() < 2) {
+		// One family needs no sharing.
+		resource_sharing_queue_families.clear();
+	}
 }
 
 Error RenderingDeviceDriverVulkan::command_queue_execute_and_present(CommandQueueID p_cmd_queue, VectorView<SemaphoreID> p_wait_semaphores, VectorView<CommandBufferID> p_cmd_buffers, VectorView<SemaphoreID> p_cmd_semaphores, FenceID p_cmd_fence, VectorView<SwapChainID> p_swap_chains) {
@@ -7791,6 +7840,13 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 #endif // defined(WINDOWS_ENABLED)
 		case SUPPORTS_GPU_MAPPABLE_BUFFER:
 			return device_local_host_visible_host_coherent_memory_support;
+		// GodotNext: async_compute (#174). The family RenderingDevice gets for compute work must have no
+		// graphics bit, so the async queue is a hardware queue of its own and not a virtual queue over
+		// the main one.
+		case SUPPORTS_ASYNC_COMPUTE: {
+			const CommandQueueFamilyID compute_family = command_queue_family_get(COMMAND_QUEUE_FAMILY_COMPUTE_BIT);
+			return compute_family && !(queue_family_properties[compute_family.id - 1].queueFlags & VK_QUEUE_GRAPHICS_BIT);
+		}
 		default:
 			return false;
 	}

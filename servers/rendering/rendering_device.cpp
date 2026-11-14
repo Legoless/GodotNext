@@ -7335,6 +7335,11 @@ RenderingDevice::ComputeQueue RenderingDevice::compute_list_get_queue(ComputeLis
 	return compute_list.graph_queue == RDG::QUEUE_ASYNC_COMPUTE ? COMPUTE_QUEUE_ASYNC : COMPUTE_QUEUE_MAIN;
 }
 
+// GodotNext: async_compute (#174).
+bool RenderingDevice::async_compute_queue_family_usable(RDD::CommandQueueFamilyID p_main_family, RDD::CommandQueueFamilyID p_compute_family) {
+	return p_compute_family && p_compute_family != p_main_family;
+}
+
 void RenderingDevice::set_async_compute_mock(bool p_active) {
 	ERR_FAIL_COND_MSG(driver != nullptr, "Async compute can only be mocked on a RenderingDevice without a driver.");
 	async_compute_active = p_active;
@@ -9311,13 +9316,14 @@ Error RenderingDevice::initialize(RenderingContextDriver *p_context, DisplayServ
 	async_compute_active = false;
 	if (GLOBAL_GET("rendering/rendering_device/async_compute") && has_feature(SUPPORTS_ASYNC_COMPUTE)) {
 		RDD::CommandQueueFamilyID compute_family = driver->command_queue_family_get(RDD::COMMAND_QUEUE_FAMILY_COMPUTE_BIT);
-		if (compute_family) {
+		if (async_compute_queue_family_usable(main_queue_family, compute_family)) {
 			RDD::CommandQueueID compute_queue = driver->command_queue_create(compute_family);
 			// A queue aliased to the main one is not async, and is never freed separately.
 			if (compute_queue && compute_queue != main_queue) {
 				async_compute_queue = compute_queue;
 				async_compute_queue_family = compute_family;
 				async_compute_active = true;
+				driver->command_queue_set_async_compute(compute_queue);
 			}
 		}
 		print_verbose(async_compute_active ? "RD: Async compute queue enabled." : "RD: Async compute queue requested but unavailable.");

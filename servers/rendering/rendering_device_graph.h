@@ -220,6 +220,10 @@ public:
 		Size2i texture_size;
 		uint32_t texture_usage = 0;
 		int32_t texture_slice_command_index = -1;
+		// GodotNext: async_compute (#174). The frame and command of the last async compute list that
+		// used the resource. A slice records it on its parent.
+		int64_t async_command_frame = -1;
+		int32_t async_command_index = -1;
 		ResourceTracker *parent = nullptr;
 		ResourceTracker *dirty_shared_list = nullptr;
 		ResourceTracker *next_shared = nullptr;
@@ -316,6 +320,9 @@ public:
 		int32_t fork_index = -1;
 		int32_t join_index = -1;
 		uint32_t buffers_used = 0;
+		// The main command buffer that records the BARRIER_SELECTION_ASYNC_FORK barriers, just before
+		// the fork split; -1 when the frame did not fork.
+		int32_t fork_barrier_buffer = -1;
 	};
 
 	// GodotNext: async_compute (#174). Everything RenderingDevice::execute_chained_cmds() submits
@@ -342,6 +349,34 @@ public:
 		RDD::SemaphoreID async_join_semaphore;
 	};
 
+	// GodotNext: async_compute (#174). Which barriers of a level's commands a barrier group takes.
+	// On drivers with image layouts (Vulkan, D3D12) a compute-only queue cannot run every barrier:
+	// it supports only compute and copy stages and accesses, and D3D12 does not allow render-target,
+	// depth or resolve layouts on a compute command list. The barriers of async commands therefore
+	// split in two. Each barrier runs whole on one queue; the fork semaphore orders the main-queue
+	// work before it. Metal, which has no layouts, keeps every barrier as recorded.
+	enum BarrierSelection : uint8_t {
+		// Every barrier as recorded, on the main queue.
+		BARRIER_SELECTION_ALL,
+		// What the async compute queue runs: the stages and accesses it supports, without the texture
+		// barriers of BARRIER_SELECTION_ASYNC_FORK.
+		BARRIER_SELECTION_ASYNC_QUEUE,
+		// The async commands' texture barriers from or to a layout the async queue cannot use. Their
+		// source access is on the main queue, before the fork, so the main queue runs them at the end
+		// of the fork command buffer.
+		BARRIER_SELECTION_ASYNC_FORK,
+	};
+
+	// GodotNext: async_compute (#174). The barriers a selection takes from the async commands of a
+	// frame, for the doctests.
+	struct AsyncBarriers {
+		BitField<RDD::PipelineStageBits> src_stages = {};
+		BitField<RDD::PipelineStageBits> dst_stages = {};
+		RDD::MemoryAccessBarrier memory_barrier;
+		LocalVector<RDD::TextureBarrier> texture_barriers;
+		LocalVector<RDD::BufferBarrier> buffer_barriers;
+	};
+
 	// GodotNext: async_compute (#174). Submits one command buffer: RenderingDevice passes the
 	// driver, the doctests a recorder.
 	typedef void (*ChainedSubmitFunction)(void *p_userdata, RDD::CommandQueueID p_queue, VectorView<RDD::SemaphoreID> p_wait_semaphores, RDD::CommandBufferID p_command_buffer, VectorView<RDD::SemaphoreID> p_signal_semaphores, RDD::FenceID p_signal_fence, VectorView<RDD::SwapChainID> p_swap_chains);
@@ -357,6 +392,15 @@ public:
 	// of a uniform buffer with no read between, as when a frame updates the canvas state and draws
 	// no canvas item) would otherwise get no barrier.
 	static bool cross_frame_write_after_write(ResourceUsage p_last_usage, ResourceUsage p_new_usage, bool p_first_use_this_frame, bool p_is_buffer);
+
+	// GodotNext: async_compute (#174). What a compute-only queue supports in a barrier, on drivers with
+	// image layouts. async_queue_stages() drops graphics stages and, when it drops any, adds the
+	// compute stage: the dropped stages belong to main-queue work that the fork semaphore already
+	// waited for, and the compute stage chains the barrier to that wait. async_queue_access() drops
+	// graphics accesses.
+	static bool async_queue_supports_texture_layout(RDD::TextureLayout p_layout);
+	static BitField<RDD::PipelineStageBits> async_queue_stages(BitField<RDD::PipelineStageBits> p_stages);
+	static BitField<RDD::BarrierAccessBits> async_queue_access(BitField<RDD::BarrierAccessBits> p_access);
 
 	enum AttachmentOperation {
 		// Loads or ignores if the attachment is discardable.
@@ -965,6 +1009,10 @@ private:
 	uint32_t command_count = 0;
 	// GodotNext: async_compute (#174). Compute lists recorded for the async queue this frame.
 	uint32_t async_command_count = 0;
+	// GodotNext: async_compute (#174). An async command has a BARRIER_SELECTION_ASYNC_FORK barrier on
+	// a resource an earlier async command of the frame already used, so its source access may be on
+	// the async queue and it cannot move before the fork. The frame then runs on the main queue.
+	bool async_fork_barrier_conflict = false;
 	uint32_t command_label_count = 0;
 	LocalVector<RecordedCommandListNode> command_list_nodes;
 	LocalVector<RecordedSliceListNode> read_slice_list_nodes;
@@ -1027,7 +1075,11 @@ private:
 	void _run_async_frame(RecordedCommandSort *p_commands_sorted, const AsyncPlan &p_plan, bool p_full_barriers, RDD::CommandBufferID &r_command_buffer, CommandBufferPool &r_command_buffer_pool, int32_t &r_current_label_index, int32_t &r_current_label_level, uint32_t &r_boosted_priority);
 	void _run_label_command_change(RDD::CommandBufferID p_command_buffer, int32_t p_new_label_index, int32_t p_new_level, bool p_ignore_previous_value, bool p_use_label_for_empty, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, int32_t &r_current_label_index, int32_t &r_current_label_level);
 	void _boost_priority_for_render_commands(RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, uint32_t &r_boosted_priority);
-	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier);
+	// GodotNext: async_compute (#174). p_selection picks the barriers for the async queue or the fork;
+	// _gather_barriers_for_render_commands() fills barrier_group and returns false when it is empty.
+	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection = BARRIER_SELECTION_ALL);
+	bool _gather_barriers_for_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection);
+	bool _async_fork_texture_barriers_added(const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const;
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
 	void _print_draw_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
 	void _print_compute_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
@@ -1119,6 +1171,11 @@ public:
 	// of p_split_main_level begin a new command buffer first, as a draw list with split_cmd_buffer
 	// (the swap chain pass) does.
 	void emit_for_test(AsyncPlan &r_plan, AsyncEmission &r_emission, uint32_t p_split_main_level = UINT32_MAX) const;
+	// set_driver_traits_for_test(): the driver traits initialize() reads, so a driverless graph records
+	// barriers. async_barriers_for_test(): plans as end() does with an async command buffer and, when
+	// the plan is active, gathers p_selection's barriers from every async command of the frame.
+	void set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions);
+	void async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers);
 	// submit_chained_command_buffers(): the frame's queue submissions in order. The fork command
 	// buffer signals the async work, which runs on the async queue, and the join command buffer
 	// waits for it: one wait on each side of the async queue.

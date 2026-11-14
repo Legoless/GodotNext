@@ -356,8 +356,8 @@ RDG::ResourceTracker *mip_slice_tracker(RDG::ResourceTracker *p_texture, uint64_
 }
 
 // A compute list (compute stage) that samples p_read and writes p_write as a storage image.
-void add_texture_compute(RDG &p_graph, RDG::ResourceTracker *p_read, RDG::ResourceTracker *p_write) {
-	p_graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, RDG::QUEUE_MAIN);
+void add_texture_compute(RDG &p_graph, RDG::ResourceTracker *p_read, RDG::ResourceTracker *p_write, RDG::Queue p_queue = RDG::QUEUE_MAIN) {
+	p_graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, p_queue);
 	p_graph.add_compute_list_bind_pipeline(RDD::PipelineID());
 	if (p_read != nullptr) {
 		p_graph.add_compute_list_usage(p_read, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
@@ -375,6 +375,36 @@ BitField<RDD::PipelineStageBits> previous_stages(const RDG &p_graph, int32_t p_c
 	BitField<RDD::PipelineStageBits> next_stages;
 	p_graph.command_get_stages(p_command_index, self_stages, previous, next_stages);
 	return previous;
+}
+
+// An async compute list that samples every texture of p_sampled and writes p_written as a storage
+// image.
+void add_async_sampling_compute(RDG &p_graph, std::initializer_list<RDG::ResourceTracker *> p_sampled, RDG::ResourceTracker *p_written) {
+	p_graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, RDG::QUEUE_ASYNC_COMPUTE);
+	p_graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+	for (RDG::ResourceTracker *sampled : p_sampled) {
+		p_graph.add_compute_list_usage(sampled, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+	}
+	p_graph.add_compute_list_usage(p_written, RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+	p_graph.add_compute_list_dispatch(1, 1, 1);
+	p_graph.add_compute_list_end();
+}
+
+uint32_t count_texture_barriers(const LocalVector<RDD::TextureBarrier> &p_barriers, uint64_t p_texture, RDD::TextureLayout p_prev_layout, RDD::TextureLayout p_next_layout) {
+	uint32_t count = 0;
+	for (const RDD::TextureBarrier &barrier : p_barriers) {
+		count += (barrier.texture.id == p_texture && barrier.prev_layout == p_prev_layout && barrier.next_layout == p_next_layout) ? 1 : 0;
+	}
+	return count;
+}
+
+const RDD::TextureBarrier *find_texture_barrier(const LocalVector<RDD::TextureBarrier> &p_barriers, uint64_t p_texture) {
+	for (const RDD::TextureBarrier &barrier : p_barriers) {
+		if (barrier.texture.id == p_texture) {
+			return &barrier;
+		}
+	}
+	return nullptr;
 }
 
 } // namespace TestRDAsyncCompute
@@ -826,6 +856,210 @@ TEST_CASE("[RD][AsyncCompute] an invalid queue is rejected") {
 
 	rd->set_async_compute_mock(false);
 	memdelete(rd);
+}
+
+TEST_CASE("[RD][AsyncCompute] the async queue needs a compute family of its own") {
+	// Vulkan queues are virtual: a compute queue created on the main family is the main VkQueue,
+	// which is what a device without a compute-only family offers.
+	CHECK(RenderingDevice::async_compute_queue_family_usable(RDD::CommandQueueFamilyID(1), RDD::CommandQueueFamilyID(3)));
+	CHECK_FALSE(RenderingDevice::async_compute_queue_family_usable(RDD::CommandQueueFamilyID(1), RDD::CommandQueueFamilyID(1)));
+	CHECK_FALSE(RenderingDevice::async_compute_queue_family_usable(RDD::CommandQueueFamilyID(1), RDD::CommandQueueFamilyID()));
+}
+
+TEST_CASE("[RD][AsyncCompute] the async queue's barriers keep only compute-queue stages, accesses and layouts") {
+	using G = RenderingDeviceGraph;
+
+	// Compute and copy stages stay as they are.
+	BitField<RDD::PipelineStageBits> compute_copy = RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+	compute_copy.set_flag(RDD::PIPELINE_STAGE_COPY_BIT);
+	CHECK_EQ(uint64_t(G::async_queue_stages(compute_copy)), uint64_t(compute_copy));
+	CHECK_EQ(uint64_t(G::async_queue_stages(RDD::PIPELINE_STAGE_TOP_OF_PIPE_BIT)), uint64_t(RDD::PIPELINE_STAGE_TOP_OF_PIPE_BIT));
+	CHECK_EQ(uint64_t(G::async_queue_stages(RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT)), uint64_t(RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT));
+
+	// Graphics stages go, and the compute stage takes their place so the barrier chains to the fork
+	// semaphore's wait.
+	BitField<RDD::PipelineStageBits> graphics = RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	graphics.set_flag(RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+	graphics.set_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+	graphics.set_flag(RDD::PIPELINE_STAGE_RESOLVE_BIT);
+	graphics.set_flag(RDD::PIPELINE_STAGE_ALL_GRAPHICS_BIT);
+	graphics.set_flag(RDD::PIPELINE_STAGE_COPY_BIT);
+	BitField<RDD::PipelineStageBits> masked = G::async_queue_stages(graphics);
+	CHECK(masked.has_flag(RDD::PIPELINE_STAGE_COPY_BIT));
+	CHECK(masked.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+	CHECK_FALSE(masked.has_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT));
+	CHECK_FALSE(masked.has_flag(RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT));
+	CHECK_FALSE(masked.has_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT));
+	CHECK_FALSE(masked.has_flag(RDD::PIPELINE_STAGE_RESOLVE_BIT));
+	CHECK_FALSE(masked.has_flag(RDD::PIPELINE_STAGE_ALL_GRAPHICS_BIT));
+
+	// Graphics accesses go; compute, copy and memory accesses stay.
+	BitField<RDD::BarrierAccessBits> access = RDD::BARRIER_ACCESS_SHADER_READ_BIT;
+	access.set_flag(RDD::BARRIER_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+	access.set_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+	access.set_flag(RDD::BARRIER_ACCESS_RESOLVE_WRITE_BIT);
+	access.set_flag(RDD::BARRIER_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+	access.set_flag(RDD::BARRIER_ACCESS_INDEX_READ_BIT);
+	access.set_flag(RDD::BARRIER_ACCESS_INPUT_ATTACHMENT_READ_BIT);
+	CHECK_EQ(uint64_t(G::async_queue_access(access)), uint64_t(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+	BitField<RDD::BarrierAccessBits> compute_access = RDD::BARRIER_ACCESS_UNIFORM_READ_BIT;
+	compute_access.set_flag(RDD::BARRIER_ACCESS_SHADER_WRITE_BIT);
+	compute_access.set_flag(RDD::BARRIER_ACCESS_INDIRECT_COMMAND_READ_BIT);
+	compute_access.set_flag(RDD::BARRIER_ACCESS_COPY_READ_BIT);
+	compute_access.set_flag(RDD::BARRIER_ACCESS_COPY_WRITE_BIT);
+	compute_access.set_flag(RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT);
+	compute_access.set_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT);
+	CHECK_EQ(uint64_t(G::async_queue_access(compute_access)), uint64_t(compute_access));
+
+	// The layouts a D3D12 compute command list accepts.
+	CHECK(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_UNDEFINED));
+	CHECK(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_GENERAL));
+	CHECK(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL));
+	CHECK(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+	CHECK(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_COPY_SRC_OPTIMAL));
+	CHECK(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_COPY_DST_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_RESOLVE_SRC_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL));
+	CHECK_FALSE(G::async_queue_supports_texture_layout(RDD::TEXTURE_LAYOUT_FRAGMENT_DENSITY_MAP_ATTACHMENT_OPTIMAL));
+}
+
+TEST_CASE("[RD][AsyncCompute] an async list's barrier from a graphics layout runs on the main queue before the fork") {
+	// A resolve writes one texture and a copy another; an async list samples both and writes a third,
+	// which a main readback consumes. The resolve destination's transition starts from a layout a
+	// compute queue cannot use, so it moves to the end of the fork command buffer; the others stay on
+	// the async queue without the resolve's graphics stage.
+	RDG graph;
+	graph.set_driver_traits_for_test(true, true);
+	RDG::ResourceTracker *msaa = texture_tracker(1, 1);
+	RDG::ResourceTracker *resolved = texture_tracker(2, 1);
+	RDG::ResourceTracker *copied = texture_tracker(3, 1);
+	RDG::ResourceTracker *written = texture_tracker(4, 1);
+	RDG::ResourceTracker *trackers[] = { msaa, resolved, copied, written };
+
+	graph.add_texture_resolve(msaa->texture_driver_id, msaa, resolved->texture_driver_id, resolved, 0, 0, 0, 0);
+	graph.add_texture_update(copied->texture_driver_id, copied, VectorView<RDG::RecordedBufferToTextureCopy>());
+	add_async_sampling_compute(graph, { resolved, copied }, written);
+	graph.add_texture_get_data(written->texture_driver_id, written, buffer_id(9), VectorView<RDD::BufferTextureCopyRegion>());
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncBarriers fork;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan, fork);
+	REQUIRE(plan.active);
+	CHECK_EQ(plan.fork_level, 1u);
+	CHECK_EQ(plan.join_level, 2u);
+
+	// The fork: only the resolve destination's transition, as recorded, with the resolve stage it
+	// waits on (valid on the main queue).
+	REQUIRE_EQ(fork.texture_barriers.size(), 1u);
+	CHECK_EQ(count_texture_barriers(fork.texture_barriers, 2, RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	CHECK(fork.texture_barriers[0].src_access.has_flag(RDD::BARRIER_ACCESS_RESOLVE_WRITE_BIT));
+	CHECK(fork.texture_barriers[0].dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+	CHECK(fork.src_stages.has_flag(RDD::PIPELINE_STAGE_RESOLVE_BIT));
+	CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+	CHECK(fork.buffer_barriers.is_empty());
+
+	// The async queue: the copy destination's and the written texture's transitions, and no resolve
+	// stage, access or layout.
+	RDG::AsyncBarriers async;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_QUEUE, plan, async);
+	REQUIRE(plan.active);
+	CHECK_EQ(async.texture_barriers.size(), 2u);
+	CHECK_EQ(count_texture_barriers(async.texture_barriers, 3, RDD::TEXTURE_LAYOUT_COPY_DST_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	CHECK_EQ(count_texture_barriers(async.texture_barriers, 4, RDD::TEXTURE_LAYOUT_UNDEFINED, RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL), 1u);
+	CHECK(find_texture_barrier(async.texture_barriers, 2) == nullptr);
+	const RDD::TextureBarrier *copied_barrier = find_texture_barrier(async.texture_barriers, 3);
+	REQUIRE(copied_barrier != nullptr);
+	CHECK(copied_barrier->src_access.has_flag(RDD::BARRIER_ACCESS_COPY_WRITE_BIT));
+	CHECK(async.src_stages.has_flag(RDD::PIPELINE_STAGE_COPY_BIT));
+	CHECK(async.src_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+	CHECK_FALSE(async.src_stages.has_flag(RDD::PIPELINE_STAGE_RESOLVE_BIT));
+
+	// end() records the fork barriers on the fork command buffer, before it ends.
+	RDG::AsyncPlan emission_plan;
+	RDG::AsyncEmission emission;
+	graph.emit_for_test(emission_plan, emission);
+	REQUIRE(emission_plan.active);
+	CHECK_EQ(emission.fork_barrier_buffer, emission.fork_index);
+
+	free_trackers(trackers, 4);
+}
+
+TEST_CASE("[RD][AsyncCompute] without image layouts every barrier stays on the async queue") {
+	// Metal has no layouts, and its async check passed with the barriers as recorded.
+	RDG graph;
+	graph.set_driver_traits_for_test(true, false);
+	RDG::ResourceTracker *msaa = texture_tracker(1, 1);
+	RDG::ResourceTracker *resolved = texture_tracker(2, 1);
+	RDG::ResourceTracker *written = texture_tracker(3, 1);
+	RDG::ResourceTracker *trackers[] = { msaa, resolved, written };
+
+	graph.add_texture_resolve(msaa->texture_driver_id, msaa, resolved->texture_driver_id, resolved, 0, 0, 0, 0);
+	add_async_sampling_compute(graph, { resolved }, written);
+	graph.add_texture_get_data(written->texture_driver_id, written, buffer_id(9), VectorView<RDD::BufferTextureCopyRegion>());
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncBarriers fork;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan, fork);
+	REQUIRE(plan.active);
+	CHECK(fork.texture_barriers.is_empty());
+
+	RDG::AsyncBarriers async;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_QUEUE, plan, async);
+	CHECK_EQ(count_texture_barriers(async.texture_barriers, 2, RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	CHECK(async.src_stages.has_flag(RDD::PIPELINE_STAGE_RESOLVE_BIT));
+
+	free_trackers(trackers, 3);
+}
+
+TEST_CASE("[RD][AsyncCompute] a fork barrier on a resource an earlier async list used makes the frame fall back") {
+	// An async list writes mip 1 of a resolved texture, so the slice's transition out of the resolve
+	// layout moves before the fork. A second async list then samples the whole texture: the slice
+	// goes back to the parent's resolve layout first, from the layout the first async list left it
+	// in. That source is on the async queue, so the normalization cannot run before the fork.
+	for (int pass = 0; pass < 3; pass++) {
+		const bool second_list = pass != 1;
+		const bool layouts = pass != 2;
+		CAPTURE(second_list);
+		CAPTURE(layouts);
+
+		RDG graph;
+		graph.set_driver_traits_for_test(true, layouts);
+		RDG::ResourceTracker *msaa = texture_tracker(1, 2);
+		RDG::ResourceTracker *texture = texture_tracker(2, 2);
+		RDG::ResourceTracker *mip1 = mip_slice_tracker(texture, 3, 1);
+		RDG::ResourceTracker *trackers[] = { mip1, msaa, texture };
+
+		graph.add_texture_resolve(msaa->texture_driver_id, msaa, texture->texture_driver_id, texture, 0, 0, 0, 0);
+		add_texture_compute(graph, nullptr, mip1, RDG::QUEUE_ASYNC_COMPUTE);
+		if (second_list) {
+			add_texture_compute(graph, texture, nullptr, RDG::QUEUE_ASYNC_COMPUTE);
+		}
+
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK_EQ(plan.async_count, second_list ? 2u : 1u);
+		// The partition alone allows a fork: the resolve feeds the async lists and nothing on the main
+		// queue consumes them.
+		CHECK_EQ(plan.fork_level, 1u);
+		// With layouts, the second list's normalization makes the frame fall back; one list, or no
+		// layouts (Metal), keeps the fork.
+		CHECK_EQ(plan.active, !(second_list && layouts));
+
+		if (!second_list) {
+			// The single list's transition out of the resolve layout is the fork barrier.
+			RDG::AsyncBarriers fork;
+			graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan, fork);
+			REQUIRE(plan.active);
+			CHECK_EQ(count_texture_barriers(fork.texture_barriers, 3, RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL, RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL), 1u);
+		}
+
+		free_trackers(trackers, 3);
+	}
 }
 
 #endif // RD_ENABLED
