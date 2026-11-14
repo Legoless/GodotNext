@@ -41,9 +41,10 @@
 #include <drivers/d3d12/godot_d3dx12.h>
 #include <wrl/client.h>
 
-#ifdef DEV_ENABLED
-#define CUSTOM_INFO_QUEUE_ENABLED 0
-#endif
+// GodotNext: d3d12_debug_messages (#268). The debug layer's messages go to Godot's log (warnings
+// and errors as WARNING: and ERROR: lines) wherever ID3D12InfoQueue1 exists, so validation runs
+// count them; without it they reach the debugger output only.
+#define CUSTOM_INFO_QUEUE_ENABLED 1
 
 class RenderingContextDriverD3D12;
 

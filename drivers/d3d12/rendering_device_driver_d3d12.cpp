@@ -6300,11 +6300,16 @@ Error RenderingDeviceDriverD3D12::_initialize_device() {
 			// argument is not optional and the function will fail if it's not specified.
 			DWORD callback_cookie;
 			info_queue_1->SetMuteDebugOutput(TRUE);
-			res = info_queue_1->RegisterMessageCallback(&_debug_message_func, D3D12_MESSAGE_CALLBACK_IGNORE_FILTERS, nullptr, &callback_cookie);
+			// GodotNext: d3d12_debug_messages (#268). The storage filter below applies, so the mute
+			// list (known false positives) stays quiet in the log as it was in the debugger.
+			res = info_queue_1->RegisterMessageCallback(&_debug_message_func, D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &callback_cookie);
 			ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_CANT_CREATE);
+			print_line("D3D12: Debug layer messages go to the log.");
 		} else
 #endif
 		{
+			// GodotNext: d3d12_debug_messages (#268). Say so, since a validation log then shows none.
+			print_line("D3D12: Debug layer messages go to the debugger output only (ID3D12InfoQueue1 is unavailable).");
 			// Rely on D3D12's own debug printing.
 			if (Engine::get_singleton()->is_abort_on_gpu_errors_enabled()) {
 				res = info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE);
