@@ -347,6 +347,13 @@ public:
 		bool bound_any_draw_list_pipeline = false;
 	};
 
+	// GodotNext: rdg_cross_frame_waw (#262). A buffer's first use in a frame needs a barrier with
+	// its last access when both write and the last use was in an earlier frame: the tracker keeps
+	// its usage across frames but not its write index, so the same usage written twice (two copies
+	// of a uniform buffer with no read between, as when a frame updates the canvas state and draws
+	// no canvas item) would otherwise get no barrier.
+	static bool cross_frame_write_after_write(ResourceUsage p_last_usage, ResourceUsage p_new_usage, bool p_first_use_this_frame, bool p_is_buffer);
+
 	enum AttachmentOperation {
 		// Loads or ignores if the attachment is discardable.
 		ATTACHMENT_OPERATION_DEFAULT,

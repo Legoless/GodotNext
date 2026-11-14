@@ -102,6 +102,11 @@ String RenderingDeviceGraph::_usage_to_string(ResourceUsage p_usage) {
 	}
 }
 
+// GodotNext: rdg_cross_frame_waw (#262)
+bool RenderingDeviceGraph::cross_frame_write_after_write(ResourceUsage p_last_usage, ResourceUsage p_new_usage, bool p_first_use_this_frame, bool p_is_buffer) {
+	return p_is_buffer && p_first_use_this_frame && p_last_usage != RESOURCE_USAGE_NONE && _is_write_usage(p_last_usage) && _is_write_usage(p_new_usage);
+}
+
 bool RenderingDeviceGraph::_is_write_usage(ResourceUsage p_usage) {
 	switch (p_usage) {
 		case RESOURCE_USAGE_COPY_FROM:
@@ -599,6 +604,8 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		ResourceTracker *search_tracker = resource_has_parent ? resource_tracker->parent : resource_tracker;
 		bool different_usage = resource_tracker->usage != new_resource_usage;
 		bool write_usage_after_write = (write_usage && search_tracker->write_command_or_list_index >= 0);
+		// GodotNext: rdg_cross_frame_waw (#262). Or the last write was in an earlier frame.
+		write_usage_after_write = write_usage_after_write || cross_frame_write_after_write(resource_tracker->usage, new_resource_usage, !search_tracker->previous_frame_stages.is_empty(), resource_tracker->buffer_driver_id.id != 0);
 		if (different_usage || write_usage_after_write) {
 			// A barrier must be pushed if the usage is different of it's a write usage and there was already a command that wrote to this resource previously.
 			if (resource_tracker->texture_driver_id.id != 0) {

@@ -706,6 +706,22 @@ TEST_CASE("[RD][AsyncCompute] compute lists record on the main queue unless asyn
 	memdelete(rd);
 }
 
+TEST_CASE("[RD][Graph] a buffer written again in a later frame gets a barrier with its last write") {
+	// GodotNext: rdg_cross_frame_waw (#262). The canvas state uniform buffer is copied to in one
+	// frame and copied to again in the next with no read between: same usage, so only this rule
+	// orders the two copies.
+	using G = RenderingDeviceGraph;
+	CHECK(G::cross_frame_write_after_write(G::RESOURCE_USAGE_COPY_TO, G::RESOURCE_USAGE_COPY_TO, true, true));
+	CHECK(G::cross_frame_write_after_write(G::RESOURCE_USAGE_STORAGE_BUFFER_READ_WRITE, G::RESOURCE_USAGE_COPY_TO, true, true));
+	// Within a frame the write index already orders them; a read in between changes the usage.
+	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_COPY_TO, G::RESOURCE_USAGE_COPY_TO, false, true));
+	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_UNIFORM_BUFFER_READ, G::RESOURCE_USAGE_COPY_TO, true, true));
+	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_COPY_TO, G::RESOURCE_USAGE_UNIFORM_BUFFER_READ, true, true));
+	// A buffer never used before, and textures (their layout transitions), are left as they were.
+	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_NONE, G::RESOURCE_USAGE_COPY_TO, true, true));
+	CHECK_FALSE(G::cross_frame_write_after_write(G::RESOURCE_USAGE_COPY_TO, G::RESOURCE_USAGE_COPY_TO, true, false));
+}
+
 TEST_CASE("[RD][AsyncCompute] an invalid queue is rejected") {
 	RenderingDevice *rd = memnew(RenderingDevice);
 	rd->set_feature_mock(true, 0);
