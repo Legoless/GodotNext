@@ -3747,6 +3747,34 @@ TEST_CASE("[NextGI][Lite] Each view keeps its own field until its render buffers
 	CHECK_EQ(ViewField::get_alive_count(), before);
 }
 
+// GodotNext: nextgi_lite_field_lifetime (#256)
+TEST_CASE("[NextGI][Lite] A view outside Lite releases its field; it comes back packed in full") {
+	using ViewField = RendererRD::NextGIIrradianceField::ViewField;
+	const uint32_t before = ViewField::get_alive_count();
+	Ref<RenderSceneBuffersRD> buffers;
+	buffers.instantiate();
+	{
+		Ref<ViewField> field;
+		field.instantiate();
+		buffers->set_custom_data(SNAME("nextgi_lite_field"), field);
+		CHECK(field->consume_pack(10).count == RendererRD::NextGIIrradianceField::PROBE_COUNT);
+	}
+	CHECK_EQ(ViewField::get_alive_count(), before + 1);
+	CHECK(RendererRD::NextGIIrradianceField::get_view_field(buffers.ptr()).is_valid());
+	// A frame without Lite (High or Epic) frees it: lite_view_fields drops back.
+	RendererRD::NextGIIrradianceField::release_view_field(buffers.ptr());
+	CHECK_EQ(ViewField::get_alive_count(), before);
+	CHECK(RendererRD::NextGIIrradianceField::get_view_field(buffers.ptr()).is_null());
+	// Releasing again, or a view that never had one, is a no-op.
+	RendererRD::NextGIIrradianceField::release_view_field(buffers.ptr());
+	RendererRD::NextGIIrradianceField::release_view_field(nullptr);
+	CHECK_EQ(ViewField::get_alive_count(), before);
+	// Back in Lite, the new field's first pack covers every probe, so its first frame is complete.
+	Ref<ViewField> again;
+	again.instantiate();
+	CHECK_EQ(again->consume_pack(20).count, RendererRD::NextGIIrradianceField::PROBE_COUNT);
+}
+
 TEST_CASE("[NextGI][Lite] A view's first pack, and its first after a skipped frame, fills every probe") {
 	using ViewField = RendererRD::NextGIIrradianceField::ViewField;
 	constexpr uint32_t probe_count = RendererRD::NextGIIrradianceField::PROBE_COUNT;

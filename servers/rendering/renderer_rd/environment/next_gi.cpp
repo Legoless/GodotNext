@@ -1328,6 +1328,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	const uint32_t view_index = view_ordinal++;
 	const bool multiview = view_index > 0 || rb->get_view_count() > 1;
 	const bool lite = is_lumen_lite();
+	// GodotNext: nextgi_lite_field_lifetime (#256). A view outside Lite frees its field.
+	if (!lite) {
+		NextGIIrradianceField::release_view_field(rb.ptr());
+	}
 	_begin_dispatch_frame();
 
 	// Every slot emits its timestamp, also while it has no work yet.

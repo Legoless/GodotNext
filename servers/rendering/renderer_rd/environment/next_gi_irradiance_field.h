@@ -126,6 +126,9 @@ public:
 	static Ref<ViewField> get_view_field(RenderSceneBuffersRD *p_render_buffers);
 	// The view's half-resolution irradiance (DEBUG_DRAW_NEXTGI_LITE_PROBES), or an invalid RID.
 	static RID get_debug_texture(RenderSceneBuffersRD *p_render_buffers);
+	// GodotNext: nextgi_lite_field_lifetime (#256). Drops a view's field when the view renders
+	// without Lite; the next Lite frame creates it again and packs every probe.
+	static void release_view_field(RenderSceneBuffersRD *p_render_buffers);
 
 	// Packs the WRC (when it is bound) into the view's field and writes its GI buffers. The frame
 	// block calls it per view, outside reflections-only mode, where LightmapGI or VoxelGI writes

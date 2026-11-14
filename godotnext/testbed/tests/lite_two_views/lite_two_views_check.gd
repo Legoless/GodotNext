@@ -40,6 +40,11 @@ extends Node3D
 ## without the history their cells held at the old position. Before #254 the dark room still read
 ## 0.26 of the lit room 400 frames later.
 ##
+## --case=switch (#256): the kitbash with its two views at Medium (Lite), then the project's
+## quality switched to High: after SWITCH_FRAMES no view holds a Lite field (lite_view_fields 0).
+## Back at Medium, both views hold a field again and the frame after the switch is lit and not
+## flat, as the kitbash bounds require, because a new field packs every probe on its first frame.
+##
 ## --expected-tier=HWRT, SWRT or device (HWRT when the rendering device reports
 ## SUPPORTS_RAY_QUERY_HARDWARE, else SWRT). Under debug/deny_ray_query (a device without ray
 ## query) the tier must also report NO_RAY_QUERY and no ray-query ShaderRD.
@@ -68,6 +73,9 @@ const MAX_DARK_RATIO := 0.05
 ## Frames after the handoff before the dark view is sampled: one fresh WRC cycle (32 frames) and
 ## the Lite fields' packing after it.
 const HANDOFF_FRAMES := 64
+## Frames a quality switch is given before lite_view_fields is read (#256).
+const SWITCH_FRAMES := 8
+const QUALITY_SETTING := "rendering/global_illumination/nextgi/quality"
 const PROBES_PER_FRAME := 512
 const PROBE_COUNT := 8192
 const WALL := 0.4
@@ -117,6 +125,8 @@ func _ready() -> void:
 		return
 	if case_name == "kitbash":
 		_build_kitbash()
+	elif case_name == "switch":
+		_build_kitbash()
 	elif case_name == "handoff":
 		room_views = PackedStringArray(["lit", "dark"])
 		_build_rooms()
@@ -133,7 +143,7 @@ func _ready() -> void:
 			return
 		_build_rooms()
 	else:
-		_finish_with("--case must be kitbash, rooms or handoff")
+		_finish_with("--case must be kitbash, rooms, handoff or switch")
 
 
 func _make_sub_view(p_size: Vector2i, p_update_mode := SubViewport.UPDATE_ALWAYS) -> SubViewport:
@@ -315,6 +325,8 @@ func _process(_delta: float) -> void:
 	_phase_frame += 1
 	if case_name == "kitbash":
 		_process_kitbash()
+	elif case_name == "switch":
+		_process_switch()
 	else:
 		_process_rooms()
 
@@ -361,6 +373,40 @@ func _process_kitbash() -> void:
 
 
 # A SubViewport at the root camera's position, turned p_yaw degrees from it.
+# GodotNext: #256. Medium -> High -> Medium on both kitbash views.
+func _process_switch() -> void:
+	match _phase:
+		0:
+			if _phase_frame < WARMUP_FRAMES:
+				return
+			_check_lite("switch_medium", 2)
+			ProjectSettings.set_setting(QUALITY_SETTING, 2)
+			_next_phase()
+		1:
+			if _phase_frame < SWITCH_FRAMES:
+				return
+			var info: Dictionary = RenderingServer.nextgi_get_tier_info()
+			var fields := int(info.get("lite_view_fields", -1))
+			print("LITE_TWO_VIEWS switch_high quality=%s lite=%s lite_view_fields=%d" % [str(info.get("quality", "")), str(info.get("lite_beta", "")), fields])
+			_summary["switch_high_fields"] = fields
+			_check(not bool(info.get("lite_beta", true)), "after the switch to High, Lite is still active")
+			_check(fields == 0, "after the switch to High, %d views still hold a Lite field" % fields)
+			ProjectSettings.set_setting(QUALITY_SETTING, 1)
+			_next_phase()
+		2:
+			# Two frames after the switch back: each view's new field packed every probe on its first
+			# Lite frame, and the steady 512 a frame since.
+			if _phase_frame < 2:
+				return
+			_check_lite("switch_back", 2)
+			for key in ["root", "sub"]:
+				var stats := _field_stats(_views[key])
+				print("LITE_TWO_VIEWS switch_back view=%s lit=%.3f spread=%.3f" % [key, stats["lit_fraction"], stats["spread_fraction"]])
+				_check(float(stats["lit_fraction"]) >= MIN_LIT_FRACTION, "back in Lite, the %s view is lit on %.3f of its samples, below %.2f" % [key, stats["lit_fraction"], MIN_LIT_FRACTION])
+				_check(float(stats["spread_fraction"]) >= MIN_SPREAD, "back in Lite, the %s view is flat (spread %.3f)" % [key, stats["spread_fraction"]])
+			_finish()
+
+
 func _make_kitbash_view(p_update_mode: SubViewport.UpdateMode, p_yaw: float) -> SubViewport:
 	var viewport := _make_sub_view(SUB_VIEW_SIZE, p_update_mode)
 	var camera := Camera3D.new()

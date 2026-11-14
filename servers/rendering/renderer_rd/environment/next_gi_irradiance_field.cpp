@@ -184,6 +184,12 @@ Ref<NextGIIrradianceField::ViewField> NextGIIrradianceField::_ensure_view_field(
 	return field;
 }
 
+void NextGIIrradianceField::release_view_field(RenderSceneBuffersRD *p_render_buffers) {
+	if (p_render_buffers != nullptr && p_render_buffers->has_custom_data(SNAME("nextgi_lite_field"))) {
+		p_render_buffers->set_custom_data(SNAME("nextgi_lite_field"), Ref<RenderBufferCustomDataRD>());
+	}
+}
+
 RID NextGIIrradianceField::get_debug_texture(RenderSceneBuffersRD *p_render_buffers) {
 	const Ref<ViewField> field = get_view_field(p_render_buffers);
 	return field.is_valid() ? field->half_image : RID();

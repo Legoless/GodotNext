@@ -3,7 +3,7 @@
 # irradiance-field gather) with two views rendering at once, on one tier.
 #
 # Usage:
-#   run_lite_two_views_check.sh [--hwrt=auto|off] [--deny-ray-query] [--case=kitbash|rooms|handoff|all] \
+#   run_lite_two_views_check.sh [--hwrt=auto|off] [--deny-ray-query] [--case=kitbash|rooms|handoff|switch|all] \
 #     -- <godot> <godot arguments without a scene>
 #
 # --hwrt=off (the default) runs the software tier, --hwrt=auto the device's pick: the hardware tier
@@ -42,7 +42,7 @@ while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--hwrt=auto | --hwrt=off) hwrt="${1#--hwrt=}" ;;
 	--deny-ray-query) deny=true ;;
-	--case=kitbash | --case=rooms | --case=handoff | --case=all) case_name="${1#--case=}" ;;
+	--case=kitbash | --case=rooms | --case=handoff | --case=switch | --case=all) case_name="${1#--case=}" ;;
 	--)
 		shift
 		break
@@ -133,6 +133,10 @@ fi
 
 if [[ "$case_name" == handoff || "$case_name" == all ]]; then
 	run_scene rooms_handoff --case=handoff
+fi
+
+if [[ "$case_name" == switch || "$case_name" == all ]]; then
+	run_scene quality_switch --case=switch
 fi
 
 exit "$failed"
