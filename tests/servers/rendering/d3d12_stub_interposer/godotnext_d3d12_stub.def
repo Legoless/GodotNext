@@ -1,0 +1,18 @@
+; GodotNext: d3d12_interposer_hook (#120). Exports of the stub D3D12 and DXGI interposer for the
+; D3D12Hooks tests: the entry points Godot resolves from D3D12.dll and DXGI.dll, and two test exports.
+EXPORTS
+	D3D12CreateDevice=stub_D3D12CreateDevice
+	D3D12GetDebugInterface=stub_D3D12GetDebugInterface
+	D3D12GetInterface=stub_D3D12GetInterface
+	D3D12EnableExperimentalFeatures=stub_D3D12EnableExperimentalFeatures
+	D3D12SerializeRootSignature=stub_D3D12SerializeRootSignature
+	D3D12SerializeVersionedRootSignature=stub_D3D12SerializeVersionedRootSignature
+	D3D12CreateRootSignatureDeserializer=stub_D3D12CreateRootSignatureDeserializer
+	D3D12CreateVersionedRootSignatureDeserializer=stub_D3D12CreateVersionedRootSignatureDeserializer
+	CreateDXGIFactory=stub_CreateDXGIFactory
+	CreateDXGIFactory1=stub_CreateDXGIFactory1
+	CreateDXGIFactory2=stub_CreateDXGIFactory2
+	DXGIGetDebugInterface1=stub_DXGIGetDebugInterface1
+	DXGIDeclareAdapterRemovalSupport=stub_DXGIDeclareAdapterRemovalSupport
+	godotnext_d3d12_stub_count=stub_count
+	godotnext_d3d12_stub_present=stub_present

@@ -30,7 +30,17 @@
 
 #include "d3d12_hooks.h"
 
+#include "core/error/error_macros.h"
+#include "core/os/memory.h"
+#include "core/variant/variant.h"
+
 D3D12Hooks *D3D12Hooks::singleton = nullptr;
+
+// GodotNext: d3d12_interposer_hook (#120).
+String D3D12Hooks::d3d12_library_override;
+String D3D12Hooks::dxgi_library_override;
+Callable *D3D12Hooks::present_callback = nullptr;
+SafeNumeric<uint32_t> D3D12Hooks::registration_locks;
 
 D3D12Hooks::D3D12Hooks() {
 	if (singleton == nullptr) {
@@ -42,4 +52,67 @@ D3D12Hooks::~D3D12Hooks() {
 	if (singleton == this) {
 		singleton = nullptr;
 	}
+}
+
+// GodotNext: d3d12_interposer_hook (#120).
+
+Error D3D12Hooks::set_library_override(const String &p_d3d12_path, const String &p_dxgi_path) {
+	ERR_FAIL_COND_V_MSG(is_registration_locked(), ERR_LOCKED, "D3D12Hooks::set_library_override() must be called before the D3D12 rendering context initializes (before RenderingServer init).");
+	d3d12_library_override = p_d3d12_path;
+	dxgi_library_override = p_dxgi_path;
+	return OK;
+}
+
+bool D3D12Hooks::has_library_override() {
+	return !d3d12_library_override.is_empty() || !dxgi_library_override.is_empty();
+}
+
+String D3D12Hooks::get_d3d12_library_path() {
+	return d3d12_library_override.is_empty() ? String("D3D12.dll") : d3d12_library_override;
+}
+
+String D3D12Hooks::get_dxgi_library_path() {
+	return dxgi_library_override.is_empty() ? String("DXGI.dll") : dxgi_library_override;
+}
+
+Error D3D12Hooks::set_present_callback(const Callable &p_callback) {
+	ERR_FAIL_COND_V_MSG(is_registration_locked(), ERR_LOCKED, "D3D12Hooks::set_present_callback() must be called before the D3D12 rendering context initializes (before RenderingServer init).");
+	// A pointer, not a static Callable: it must not be destroyed after the core types at exit.
+	if (present_callback != nullptr) {
+		memdelete(present_callback);
+		present_callback = nullptr;
+	}
+	if (!p_callback.is_null()) {
+		present_callback = memnew(Callable(p_callback));
+	}
+	return OK;
+}
+
+void D3D12Hooks::call_present_callback(IDXGISwapChain *p_swap_chain, uint64_t p_frame_index, PresentStage p_stage) {
+	if (present_callback == nullptr) {
+		return;
+	}
+	const Variant swap_chain = (uint64_t)(uintptr_t)p_swap_chain;
+	const Variant frame_index = p_frame_index;
+	const Variant stage = (int)p_stage;
+	const Variant *args[3] = { &swap_chain, &frame_index, &stage };
+	Variant ret;
+	Callable::CallError ce;
+	present_callback->callp(args, 3, ret, ce);
+	if (ce.error != Callable::CallError::CALL_OK) {
+		ERR_PRINT_ONCE("D3D12Hooks: the present callback failed: " + Variant::get_callable_error_text(*present_callback, args, 3, ce) + ".");
+	}
+}
+
+void D3D12Hooks::lock_registration() {
+	registration_locks.increment();
+}
+
+void D3D12Hooks::unlock_registration() {
+	ERR_FAIL_COND(registration_locks.get() == 0);
+	registration_locks.decrement();
+}
+
+bool D3D12Hooks::is_registration_locked() {
+	return registration_locks.get() > 0;
 }

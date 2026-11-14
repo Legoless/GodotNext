@@ -32,8 +32,10 @@
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
+#include "core/string/print_string.h" // GodotNext: d3d12_interposer_hook (#120).
 #include "core/string/ustring.h"
 #include "core/templates/local_vector.h"
+#include "drivers/d3d12/d3d12_hooks.h" // GodotNext: d3d12_interposer_hook (#120).
 
 GODOT_GCC_WARNING_PUSH_AND_IGNORE("-Wnon-virtual-dtor")
 GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wnon-virtual-dtor")
@@ -86,17 +88,31 @@ RenderingContextDriverD3D12::~RenderingContextDriverD3D12() {
 		FreeLibrary(lib_dcomp);
 	}
 #endif
+
+	// GodotNext: d3d12_interposer_hook (#120).
+	if (hooks_locked) {
+		D3D12Hooks::unlock_registration();
+	}
 }
 
 Error RenderingContextDriverD3D12::_init_device_factory() {
 	uint32_t agility_sdk_version = GLOBAL_GET("rendering/rendering_device/d3d12/agility_sdk_version");
 	String agility_sdk_path = String(".\\") + Engine::get_singleton()->get_architecture_name();
 
-	lib_d3d12 = LoadLibraryW(L"D3D12.dll");
-	ERR_FAIL_NULL_V(lib_d3d12, ERR_CANT_CREATE);
+	// GodotNext: d3d12_interposer_hook (#120). A module can point these at its own D3D12 and DXGI
+	// libraries; without an override they are the system's D3D12.dll and DXGI.dll.
+	const String d3d12_path = D3D12Hooks::get_d3d12_library_path();
+	const String dxgi_path = D3D12Hooks::get_dxgi_library_path();
+	if (D3D12Hooks::has_library_override()) {
+		print_line(vformat("D3D12: Library override: loading D3D12 from \"%s\" and DXGI from \"%s\".", d3d12_path, dxgi_path));
+	}
 
-	lib_dxgi = LoadLibraryW(L"DXGI.dll");
-	ERR_FAIL_NULL_V(lib_dxgi, ERR_CANT_CREATE);
+	// LoadLibraryW needs backslashes in a path.
+	lib_d3d12 = LoadLibraryW((LPCWSTR)(d3d12_path.replace_char('/', '\\').utf16().get_data()));
+	ERR_FAIL_NULL_V_MSG(lib_d3d12, ERR_CANT_CREATE, vformat("Failed to load the D3D12 library \"%s\".", d3d12_path));
+
+	lib_dxgi = LoadLibraryW((LPCWSTR)(dxgi_path.replace_char('/', '\\').utf16().get_data()));
+	ERR_FAIL_NULL_V_MSG(lib_dxgi, ERR_CANT_CREATE, vformat("Failed to load the DXGI library \"%s\".", dxgi_path));
 
 #ifdef DCOMP_ENABLED
 	lib_dcomp = LoadLibraryW(L"Dcomp.dll");
@@ -215,6 +231,13 @@ bool RenderingContextDriverD3D12::use_validation_layers() const {
 }
 
 Error RenderingContextDriverD3D12::initialize() {
+	// GodotNext: d3d12_interposer_hook (#120). From here on, D3D12Hooks registration fails until this
+	// context is destroyed.
+	if (!hooks_locked) {
+		D3D12Hooks::lock_registration();
+		hooks_locked = true;
+	}
+
 	Error err = _init_device_factory();
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 

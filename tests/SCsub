@@ -7,8 +7,15 @@ import test_builders
 
 Import("env")
 
+# GodotNext: d3d12_interposer_hook (#120). The stub interposer is a separate DLL, not part of the tests library.
+d3d12_stub_dir = "servers/rendering/d3d12_stub_interposer"
+
 # Sources with tests must be explicitly linked first.
-force_link_sources = glob.glob("*/**/*.cpp", recursive=True)
+force_link_sources = [
+    path
+    for path in glob.glob("*/**/*.cpp", recursive=True)
+    if not path.replace("\\", "/").startswith(d3d12_stub_dir + "/")
+]
 force_link_header = env.CommandNoCache(
     "force_link.gen.h", env.Value(force_link_sources), env.Run(test_builders.force_link_builder)
 )
@@ -23,3 +30,17 @@ else:
 
 lib = env.add_library("tests", tests_obj)
 env.Prepend(LIBS=[lib])
+
+# GodotNext: d3d12_interposer_hook (#120). A stub D3D12 and DXGI interposer DLL for the D3D12Hooks tests,
+# built next to the editor binary. It needs only kernel32 (in the MSVC link flags, and linked by default with
+# MinGW), so it drops the engine's libraries and entry point.
+if env["platform"] == "windows" and env["d3d12"]:
+    env_d3d12_stub = env.Clone()
+    env_d3d12_stub["LIBS"] = []
+    env_d3d12_stub["LINKFLAGS"] = [flag for flag in env_d3d12_stub["LINKFLAGS"] if "entry" not in str(flag).lower()]
+    env_d3d12_stub.add_shared_library(
+        "#bin/godotnext_d3d12_stub",
+        [d3d12_stub_dir + "/godotnext_d3d12_stub.cpp", d3d12_stub_dir + "/godotnext_d3d12_stub.def"],
+        SHLIBPREFIX="",
+        SHLIBSUFFIX="." + env["arch"] + ".dll",
+    )

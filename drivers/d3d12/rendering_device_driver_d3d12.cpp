@@ -2652,9 +2652,18 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 
 	HRESULT res;
 	bool any_present_failed = false;
+	// GodotNext: d3d12_interposer_hook (#120). A module's present callback sees each swap chain
+	// immediately before and after Present.
+	const bool call_present_hook = D3D12Hooks::has_present_callback();
 	for (uint32_t i = 0; i < p_swap_chains.size(); i++) {
 		SwapChain *swap_chain = (SwapChain *)(p_swap_chains[i].id);
+		if (call_present_hook) {
+			D3D12Hooks::call_present_callback(swap_chain->d3d_swap_chain.Get(), frames_drawn, D3D12Hooks::PRESENT_STAGE_BEFORE);
+		}
 		res = swap_chain->d3d_swap_chain->Present(swap_chain->sync_interval, swap_chain->present_flags);
+		if (call_present_hook) {
+			D3D12Hooks::call_present_callback(swap_chain->d3d_swap_chain.Get(), frames_drawn, D3D12Hooks::PRESENT_STAGE_AFTER);
+		}
 		if (!SUCCEEDED(res)) {
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
 			any_present_failed = true;

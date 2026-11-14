@@ -118,6 +118,10 @@
 #ifdef TESTS_ENABLED
 #include "servers/rendering/dummy/rasterizer_dummy.h"
 #include "tests/test_main.h"
+#ifdef D3D12_ENABLED
+// GodotNext: d3d12_interposer_hook (#120).
+#include "tests/servers/rendering/test_d3d12_hooks.h"
+#endif
 #endif
 
 #ifdef TOOLS_ENABLED
@@ -3319,6 +3323,12 @@ Error Main::setup2(bool p_show_boot_logo) {
 		initialize_modules(MODULE_INITIALIZATION_LEVEL_SERVERS);
 		GDExtensionManager::get_singleton()->initialize_extensions(GDExtension::INITIALIZATION_LEVEL_SERVERS);
 
+#if defined(TESTS_ENABLED) && defined(D3D12_ENABLED)
+		// GodotNext: d3d12_interposer_hook (#120). Test builds only: with GODOTNEXT_D3D12_HOOKS_STUB=1,
+		// register the stub interposer where a module would register its D3D12 hooks.
+		d3d12_hooks_stub_install();
+#endif
+
 		OS::get_singleton()->benchmark_end_measure("Servers", "Modules and Extensions");
 	}
 
@@ -5406,6 +5416,12 @@ void Main::cleanup(bool p_force) {
 	OS::get_singleton()->finalize();
 
 	finalize_display();
+
+#if defined(TESTS_ENABLED) && defined(D3D12_ENABLED)
+	// GodotNext: d3d12_interposer_hook (#120). Report the stub interposer's counts once the rendering
+	// context is gone.
+	d3d12_hooks_stub_finish();
+#endif
 
 	memdelete(input);
 	input = nullptr;
