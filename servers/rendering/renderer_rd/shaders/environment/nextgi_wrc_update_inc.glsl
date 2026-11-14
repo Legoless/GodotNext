@@ -185,7 +185,8 @@ bool nextgi_wrc_hit_pos_normal(NextGIHit hit, out vec3 object_pos, out vec3 face
 	return true;
 }
 
-// D6 card lookup. A failure falls through to the previous WRC sample.
+// D6 card lookup. A failure falls through to the previous WRC sample (black when the texel's
+// ray saw something else last time: nextgi_wrc_texel_keeps_history).
 bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 	radiance = vec3(0.0);
 	uncovered = false;
@@ -333,6 +334,18 @@ ivec2 nextgi_wrc_visibility_texel(uint probe, ivec2 local) {
 	return ivec2(tile) * 8 + local;
 }
 
+// GodotNext: nextgi_wrc_history (#266). nextgi_wrc_texel_keeps_history() in next_gi_wrc.cpp:
+// a texel's radiance belongs to what its ray saw last time (previous_t, its visibility distance,
+// 0 for a miss). A ray that turned from a miss into a hit or back, or whose hit moved by more
+// than both a quarter of its distance and half a probe spacing, sees something else: no history.
+bool nextgi_wrc_texel_keeps_history(float previous_t, bool hit, float t, float spacing) {
+	bool previous_hit = previous_t > 0.0;
+	if (previous_hit != hit) {
+		return false;
+	}
+	return !hit || abs(t - previous_t) <= max(0.25 * previous_t, 0.5 * spacing);
+}
+
 ivec3 nextgi_wrc_probe_cell(uint probe) {
 	uint in_level = probe % 4096u;
 	uint x = in_level % 16u;
@@ -389,6 +402,9 @@ void nextgi_wrc_trace() {
 	probe_pos += previous_offset.xyz;
 	ivec2 radiance_texel = nextgi_wrc_radiance_texel(probe, local);
 	vec3 previous = fresh ? vec3(0.0) : imageLoad(radiance_image, radiance_texel).rgb;
+	// GodotNext: nextgi_wrc_history (#266). The distance this texel's ray hit at last time.
+	ivec2 visibility_texel = nextgi_wrc_visibility_texel(probe, local);
+	float previous_t = fresh ? 0.0 : imageLoad(visibility_image, visibility_texel).r;
 	NextGIHit hit;
 #ifdef MODE_TRANSLUCENCY_TRACE
 	atomicAdd(counters.translucent_rays, 1u);
@@ -397,13 +413,18 @@ void nextgi_wrc_trace() {
 #endif
 	vec3 sample_radiance = nextgi_wrc_miss_radiance(direction);
 	bool back_face = false;
-#if defined(NEXTGI_TRACE_SDF) && !defined(MODE_TRANSLUCENCY_TRACE)
 	bool probe_hit = nextgi_trace(probe_pos, direction, 1.0e6, hit);
+#if defined(NEXTGI_TRACE_SDF) && !defined(MODE_TRANSLUCENCY_TRACE)
 	nextgi_sdf_note_wrc();
-	if (probe_hit) {
-#else
-	if (nextgi_trace(probe_pos, direction, 1.0e6, hit)) {
 #endif
+	// GodotNext: nextgi_wrc_history (#266). The texel blends with its previous radiance, and a
+	// failed lookup keeps that radiance, only while the ray sees what it saw last time. Otherwise
+	// the texel takes this trace alone, as a fresh one does, and a hit whose lookup fails is black.
+	// Before, the software tier's first trace (run while the mesh SDFs still stream into the
+	// global SDF) missed where later rays hit surfaces without voxel lighting, and every such
+	// texel kept that sky radiance for as long as the cache lived.
+	bool history = !fresh && nextgi_wrc_texel_keeps_history(previous_t, probe_hit, hit.t, spacing);
+	if (probe_hit) {
 #ifdef MODE_TRANSLUCENCY_TRACE
 		atomicAdd(counters.translucent_hits, 1u);
 #else
@@ -412,7 +433,7 @@ void nextgi_wrc_trace() {
 		bool uncovered = false;
 		vec3 looked_up = vec3(0.0);
 		if (!nextgi_src_lookup(hit, looked_up, uncovered)) {
-			looked_up = previous;
+			looked_up = history ? previous : vec3(0.0);
 		}
 		sample_radiance = looked_up;
 		back_face = !hit.front_face && hit.t < 0.5 * spacing;
@@ -427,10 +448,10 @@ void nextgi_wrc_trace() {
 		atomicAdd(counters.sky_misses, 1u);
 #endif
 	}
-	float blend = previous_offset.w > 0.5 ? 0.1 : 1.0;
+	float blend = history && previous_offset.w > 0.5 ? 0.1 : 1.0;
 	vec3 blended = mix(previous, sample_radiance, blend);
 	imageStore(radiance_image, radiance_texel, vec4(blended, 1.0));
-	imageStore(visibility_image, nextgi_wrc_visibility_texel(probe, local), vec4(hit.hit ? hit.t : 0.0, hit.hit ? hit.t * hit.t : 0.0, 0.0, 0.0));
+	imageStore(visibility_image, visibility_texel, vec4(hit.hit ? hit.t : 0.0, hit.hit ? hit.t * hit.t : 0.0, 0.0, 0.0));
 	uint energy = uint(clamp(dot(blended, vec3(0.2126, 0.7152, 0.0722)) * 64.0, 0.0, 4095.0));
 	atomicAdd(counters.energy_bits, energy);
 	if (back_face) {

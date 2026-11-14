@@ -93,6 +93,14 @@ void nextgi_wrc_age_fresh(uint32_t r_fresh_frames[4]);
 // packs every probe on its first frame; then one budget (NEXTGI_WRC_PROBES_PER_FRAME) per frame.
 uint32_t nextgi_wrc_probes_to_trace(bool p_had_previous);
 
+// GodotNext: nextgi_wrc_history (#266). A probe texel's radiance belongs to what its ray saw at its
+// last trace, p_previous_t (the visibility distance, 0 for a miss). The texel keeps that history
+// (blends with it, and keeps it when the hit's SRC or voxel lookup fails) only while the ray
+// sees the same thing: a miss again, or a hit within the larger of a quarter of the previous
+// distance and half the probe spacing. Otherwise the texel takes the new trace alone, and a
+// hit whose lookup fails is black, as on a fresh trace. nextgi_wrc_update_inc.glsl mirrors it.
+bool nextgi_wrc_texel_keeps_history(float p_previous_t, bool p_hit, float p_t, float p_spacing);
+
 // A probe with more than 25% back-face hits moves along the mean escape direction, at most 0.4x spacing.
 Vector3 nextgi_wrc_relocate(const Vector3 &p_probe, const Vector3 &p_mean_escape, float p_backface_fraction, float p_spacing);
 

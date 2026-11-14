@@ -223,6 +223,15 @@ void nextgi_wrc_age_fresh(uint32_t r_fresh_frames[4]) {
 	}
 }
 
+// GodotNext: nextgi_wrc_history (#266)
+bool nextgi_wrc_texel_keeps_history(float p_previous_t, bool p_hit, float p_t, float p_spacing) {
+	const bool previous_hit = p_previous_t > 0.0f;
+	if (previous_hit != p_hit) {
+		return false;
+	}
+	return !p_hit || Math::abs(p_t - p_previous_t) <= MAX(0.25f * p_previous_t, 0.5f * p_spacing);
+}
+
 Vector3 nextgi_wrc_snap_origin(const Vector3 &p_camera, float p_spacing) {
 	const float spacing = MAX(p_spacing, 0.001f);
 	return Vector3(

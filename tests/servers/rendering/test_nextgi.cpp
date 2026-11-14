@@ -2657,6 +2657,44 @@ TEST_CASE("[NextGI] WRC: a level whose origin moved re-traces every probe withou
 	CHECK_EQ(nextgi_wrc_fresh_mask(fresh), 3u);
 }
 
+// GodotNext: nextgi_wrc_history (#266)
+TEST_CASE("[NextGI] WRC: a probe texel keeps its history only while its ray sees the same thing") {
+	using namespace RendererRD;
+	// A miss after a miss keeps the sky history; a texel never traced reads 0 as a miss too.
+	CHECK(nextgi_wrc_texel_keeps_history(0.0f, false, 0.0f, 1.0f));
+	// A miss that turns into a hit (the software tier's first trace, before the mesh SDFs streamed
+	// into the global SDF) drops the sky radiance it held, and a hit that turns into a miss drops
+	// the surface's.
+	CHECK_FALSE(nextgi_wrc_texel_keeps_history(0.0f, true, 3.0f, 1.0f));
+	CHECK_FALSE(nextgi_wrc_texel_keeps_history(3.0f, false, 0.0f, 1.0f));
+	// The same hit, give or take the larger of 25% and half a probe spacing, keeps it.
+	CHECK(nextgi_wrc_texel_keeps_history(3.0f, true, 3.0f, 1.0f));
+	CHECK(nextgi_wrc_texel_keeps_history(10.0f, true, 12.5f, 1.0f));
+	CHECK(nextgi_wrc_texel_keeps_history(10.0f, true, 7.5f, 1.0f));
+	CHECK_FALSE(nextgi_wrc_texel_keeps_history(10.0f, true, 12.6f, 1.0f));
+	CHECK_FALSE(nextgi_wrc_texel_keeps_history(10.0f, true, 7.4f, 1.0f));
+	// Near the probe, half the spacing is the tolerance: a 1 m hit may move 0.5 m on level 0 and 4 m
+	// on level 3 (8 m spacing).
+	CHECK(nextgi_wrc_texel_keeps_history(1.0f, true, 1.5f, 1.0f));
+	CHECK_FALSE(nextgi_wrc_texel_keeps_history(1.0f, true, 1.6f, 1.0f));
+	CHECK(nextgi_wrc_texel_keeps_history(1.0f, true, 5.0f, 8.0f));
+	CHECK_FALSE(nextgi_wrc_texel_keeps_history(1.0f, true, 5.1f, 8.0f));
+
+	// Both tiers' update kernels share the rule: a texel without history takes the trace alone, and
+	// a failed SRC (hardware) or voxel (software) lookup is black instead of the stale radiance.
+	const String sources[2] = { NextGIWRC::build_update_shader_source(0), NextGIWRC::build_update_swrt_shader_source(0) };
+	for (const String &source : sources) {
+		REQUIRE_FALSE(source.is_empty());
+		CHECK(source.contains("bool nextgi_wrc_texel_keeps_history(float previous_t, bool hit, float t, float spacing) {"));
+		CHECK(source.contains("return !hit || abs(t - previous_t) <= max(0.25 * previous_t, 0.5 * spacing);"));
+		CHECK(source.contains("float previous_t = fresh ? 0.0 : imageLoad(visibility_image, visibility_texel).r;"));
+		CHECK(source.contains("bool history = !fresh && nextgi_wrc_texel_keeps_history(previous_t, probe_hit, hit.t, spacing);"));
+		CHECK(source.contains("looked_up = history ? previous : vec3(0.0);"));
+		CHECK(source.contains("float blend = history && previous_offset.w > 0.5 ? 0.1 : 1.0;"));
+		CHECK_FALSE(source.contains("looked_up = previous;"));
+	}
+}
+
 TEST_CASE("[NextGI] WRC layout, relocation and diffuse handoff") {
 	CHECK_EQ(RendererRD::nextgi_wrc_bytes(), 14ull * 1024ull * 1024ull);
 	CHECK_EQ(RendererRD::NEXTGI_WRC_PROBE_COUNT, 16384u);

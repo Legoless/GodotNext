@@ -36,7 +36,8 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #include "nextgi_sdf_hit_inc.glsl"
 
 // The probe ray's hit, shaded from voxel lighting. False below the fallback weight: the caller
-// keeps the probe's previous radiance, as the hardware tier does on a D6 miss.
+// keeps the probe's previous radiance, as the hardware tier does on a D6 miss (black when the
+// texel's ray saw something else last time, #266).
 bool nextgi_src_lookup(NextGIHit hit, out vec3 radiance, out bool uncovered) {
 	radiance = vec3(0.0);
 	uncovered = false;

@@ -8,13 +8,14 @@
 #   run_src_pages_check.sh [--hwrt=auto|off] -- <godot> <godot arguments without a scene>
 #
 # --hwrt=off (the default) runs the software tier, --hwrt=auto the device's pick (the hardware tier
-# on a device that reports SUPPORTS_RAY_QUERY_HARDWARE, which the scene asserts). Until #266 the
-# software tier fails the comparison after the flight: its ambient stays dark long after the
-# camera stops, as it does before #247. Each run writes
-# godotnext/testbed/override.cfg (git ignores it) with nextgi/enabled=true, quality 1 and
-# medium_gather 0; it refuses to overwrite an existing one and removes it afterwards. Prints one
-# GODOTNEXT_SRC_PAGES_LOG line per run with its "ERROR:", "Invalid Metal usage" and "Error
-# detected in" counts. Exits non-zero when a run fails or logs any of those lines.
+# on a device that reports SUPPORTS_RAY_QUERY_HARDWARE, which the scene asserts). Before #266 the
+# software tier failed the comparison: the still run's WRC kept the sky radiance of its first
+# trace, which ran while the mesh SDFs still streamed in, and read twice as bright as the flight
+# and the hardware tier. Each run writes godotnext/testbed/override.cfg (git ignores it) with
+# nextgi/enabled=true, quality 1 and medium_gather 0; it refuses to overwrite an existing one and
+# removes it afterwards. Prints one GODOTNEXT_SRC_PAGES_LOG line per run with its "ERROR:",
+# "Invalid Metal usage" and "Error detected in" counts. Exits non-zero when a run fails or logs
+# any of those lines.
 #
 # Example on the Apple M5 Max:
 #   godotnext/testbed/tests/src_pages/run_src_pages_check.sh --hwrt=auto -- \
