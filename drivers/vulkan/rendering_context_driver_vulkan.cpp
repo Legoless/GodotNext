@@ -36,6 +36,7 @@
 #include "core/config/project_settings.h"
 #include "core/version.h"
 #include "drivers/vulkan/rendering_device_driver_vulkan.h"
+#include "drivers/vulkan/vulkan_extension_provider.h" // GodotNext: pu_vk_extension_providers (#105).
 #include "drivers/vulkan/vulkan_hooks.h"
 
 #ifndef DEV_ENABLED
@@ -394,6 +395,11 @@ RenderingContextDriverVulkan::~RenderingContextDriverVulkan() {
 	if (instance != VK_NULL_HANDLE) {
 		vkDestroyInstance(instance, get_allocation_callbacks(VK_OBJECT_TYPE_INSTANCE));
 	}
+
+	// GodotNext: pu_vk_extension_providers (#105).
+	if (extension_providers_locked) {
+		VulkanExtensionProviders::unlock_registration();
+	}
 }
 
 Error RenderingContextDriverVulkan::_initialize_vulkan_version() {
@@ -459,6 +465,15 @@ Error RenderingContextDriverVulkan::_initialize_instance_extensions() {
 	if (want_debug_utils) {
 		_register_requested_instance_extension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME, false);
 	}
+
+	// GodotNext: pu_vk_extension_providers (#105). Providers add optional extensions after Godot's
+	// own, before the instance is created here or by the VulkanHooks owner. From here on the
+	// registry takes no new provider.
+	if (!extension_providers_locked) {
+		VulkanExtensionProviders::lock_registration();
+		extension_providers_locked = true;
+	}
+	VulkanExtensionProviders::merge_instance_extensions(requested_instance_extensions);
 
 	// Load instance extensions that are available.
 	uint32_t instance_extension_count = 0;
@@ -555,6 +570,13 @@ Error RenderingContextDriverVulkan::_find_validation_layers(TightLocalVector<con
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL RenderingContextDriverVulkan::_debug_messenger_callback(VkDebugUtilsMessageSeverityFlagBitsEXT p_message_severity, VkDebugUtilsMessageTypeFlagsEXT p_message_type, const VkDebugUtilsMessengerCallbackDataEXT *p_callback_data, void *p_user_data) {
+	// GodotNext: pu_vk_extension_providers (#105). The object-attributed rule: a message that
+	// references a handle GodotNext created reaches no provider and is handled as before. Any
+	// other message can be allowlisted by a provider. The created-handle registry is only filled
+	// with validation layers on, so without them no provider is asked.
+	String allowlisting_provider;
+	const bool allowlisted = Engine::get_singleton()->is_validation_layers_enabled() && VulkanExtensionProviders::filter_validation_message(p_callback_data, allowlisting_provider);
+
 	// This error needs to be ignored because the AMD allocator will mix up memory types on IGP processors.
 	if (strstr(p_callback_data->pMessage, "Mapping an image with layout") != nullptr && strstr(p_callback_data->pMessage, "can result in undefined behavior if this memory is used by the device") != nullptr) {
 		return VK_FALSE;
@@ -642,6 +664,12 @@ VKAPI_ATTR VkBool32 VKAPI_CALL RenderingContextDriverVulkan::_debug_messenger_ca
 			" | Message Id Name: " + p_callback_data->pMessageIdName +
 			"\n\t" + p_callback_data->pMessage +
 			objects_string + labels_string);
+
+	// GodotNext: pu_vk_extension_providers (#105).
+	if (allowlisted) {
+		WARN_PRINT("Allowlisted by the Vulkan extension provider \"" + allowlisting_provider + "\": " + error_message);
+		return VK_FALSE;
+	}
 
 	// Convert VK severity to our own log macros.
 	// Note: Which severity we receive depends on what's set in VkDebugUtilsMessengerCreateInfoEXT,
@@ -1063,6 +1091,11 @@ bool RenderingContextDriverVulkan::is_colorspace_supported() const {
 
 VkInstance RenderingContextDriverVulkan::instance_get() const {
 	return instance;
+}
+
+// GodotNext: pu_vk_extension_providers (#105).
+const HashSet<CharString> &RenderingContextDriverVulkan::enabled_instance_extensions_get() const {
+	return enabled_instance_extension_names;
 }
 
 VkPhysicalDevice RenderingContextDriverVulkan::physical_device_get(uint32_t p_device_index) const {

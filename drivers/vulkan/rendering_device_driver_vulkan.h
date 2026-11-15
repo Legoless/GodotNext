@@ -35,6 +35,7 @@
 #include "core/templates/rb_map.h"
 #include "drivers/vulkan/rendering_context_driver_vulkan.h"
 #include "drivers/vulkan/rendering_shader_container_vulkan.h"
+#include "drivers/vulkan/vulkan_extension_provider.h" // GodotNext: pu_vk_extension_providers (#105).
 #include "servers/rendering/rendering_device_driver.h"
 
 #ifdef DEBUG_ENABLED
@@ -192,6 +193,47 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 #endif
 	DeviceFunctions device_functions;
 
+	// GodotNext: pu_vk_extension_providers (#105). The device extensions each registered provider
+	// asked for, and whether the providers were told about this device.
+	VulkanExtensionProviders::DeviceRequests extension_provider_requests;
+	bool extension_providers_notified = false;
+
+	// GodotNext: pu_vk_extension_providers (#105). The created-handle registry: every Vulkan handle
+	// this driver creates is in it from when its create call returns until its destroy call has
+	// returned, so the validation messages raised inside those calls are attributed. It also holds
+	// the swap chains' images and the device memory VMA allocates. One gap: VMA reports a memory
+	// block it frees just before its vkFreeMemory call, so a message raised inside that call that
+	// names only the block is not attributed. Debug builds only (never in template_release), and
+	// filled only with validation layers on. Not in it: the device, its queues and command buffers,
+	// which the providers' own Vulkan calls share, and the image of a texture made by
+	// texture_create_from_extension().
+#ifdef DEBUG_ENABLED
+	VulkanCreatedHandles created_handles;
+	bool created_handles_tracked = false;
+	bool created_handles_check = false;
+	SafeNumeric<uint32_t> created_handles_checked_images;
+	SafeNumeric<uint32_t> created_handles_checked_views;
+	SafeNumeric<uint32_t> created_handles_check_missing;
+
+	template <typename T>
+	_FORCE_INLINE_ void _track_handle(T p_handle) {
+		if (created_handles_tracked) {
+			created_handles.add((uint64_t)p_handle);
+		}
+	}
+	template <typename T>
+	_FORCE_INLINE_ void _untrack_handle(T p_handle) {
+		if (created_handles_tracked) {
+			created_handles.remove((uint64_t)p_handle);
+		}
+	}
+#else
+	template <typename T>
+	_FORCE_INLINE_ void _track_handle(T p_handle) {}
+	template <typename T>
+	_FORCE_INLINE_ void _untrack_handle(T p_handle) {}
+#endif
+
 	struct PendingFlushes {
 		LocalVector<VmaAllocation> allocations;
 		LocalVector<VkDeviceSize> offsets;
@@ -306,6 +348,10 @@ public:
 	};
 
 	VkSampleCountFlagBits _ensure_supported_sample_count(TextureSamples p_requested_sample_count);
+#ifdef DEBUG_ENABLED
+	// GodotNext: pu_vk_extension_providers (#105).
+	void _check_texture_handles(const TextureInfo *p_tex_info);
+#endif
 
 public:
 	virtual TextureID texture_create(const TextureFormat &p_format, const TextureView &p_view) override final;

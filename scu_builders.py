@@ -437,7 +437,9 @@ def generate_scu_files(max_includes_per_scu):
             "/servers",
             "/servers/rendering",
         ],
-        ["test_macros", "test_main"],
+        # GodotNext: pu_vk_extension_providers (#105). The Vulkan headers declare Xlib's Window type on
+        # Linux, which cannot share a unit with the scene's Window class.
+        ["test_macros", "test_main", "test_vulkan_extension_providers"],
     )
 
     # Finally change back the path to the calling folder

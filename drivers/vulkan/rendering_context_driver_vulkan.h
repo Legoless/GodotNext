@@ -107,6 +107,8 @@ private:
 	VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
 	VkDebugReportCallbackEXT debug_report = VK_NULL_HANDLE;
 	Functions functions;
+	// GodotNext: pu_vk_extension_providers (#105). Set while this context keeps the provider registry closed.
+	bool extension_providers_locked = false;
 
 	Error _initialize_vulkan_version();
 	void _register_requested_instance_extension(const CharString &p_extension_name, bool p_required);
@@ -174,6 +176,8 @@ public:
 	};
 
 	VkInstance instance_get() const;
+	// GodotNext: pu_vk_extension_providers (#105).
+	const HashSet<CharString> &enabled_instance_extensions_get() const;
 	VkPhysicalDevice physical_device_get(uint32_t p_device_index) const;
 	uint32_t queue_family_get_count(uint32_t p_device_index) const;
 	VkQueueFamilyProperties queue_family_get(uint32_t p_device_index, uint32_t p_queue_family_index) const;

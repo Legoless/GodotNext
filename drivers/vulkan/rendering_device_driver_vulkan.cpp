@@ -34,6 +34,7 @@
 #include "core/config/project_settings.h"
 #include "core/os/os.h"
 #include "core/templates/fixed_vector.h"
+#include "drivers/vulkan/vulkan_extension_provider.h" // GodotNext: pu_vk_extension_providers (#105).
 #include "drivers/vulkan/vulkan_hooks.h"
 
 #include <thirdparty/misc/smolv.h>
@@ -652,6 +653,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 
 	_register_requested_device_extension(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME, false);
 
+	// GodotNext: pu_vk_extension_providers (#105). Providers add optional extensions after Godot's
+	// own, for the physical device Godot or the VulkanHooks owner chose.
+	VulkanExtensionProviders::merge_device_extensions(context_driver->instance_get(), physical_device, requested_device_extensions, extension_provider_requests);
+
 	uint32_t device_extension_count = 0;
 	VkResult err = vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &device_extension_count, nullptr);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't get Vulkan device extension count (VkResult error %d).", err));
@@ -716,6 +721,15 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 				print_verbose(String("Optional Vulkan device extension ") + String::utf8(requested_extension.key) + String(" not found"));
 			}
 		}
+	}
+
+	// GodotNext: pu_vk_extension_providers (#105). One line, in the device's enumeration order.
+	if (is_print_verbose_enabled()) {
+		String enabled_names;
+		for (const CharString &extension_name : enabled_device_extension_names) {
+			enabled_names += " " + String::utf8(extension_name.get_data());
+		}
+		print_verbose(vformat("Vulkan: Enabled device extensions (%d):%s", enabled_device_extension_names.size(), enabled_names));
 	}
 
 	return OK;
@@ -1570,6 +1584,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		}
 	}
 
+	// GodotNext: pu_vk_extension_providers (#105). Providers prepend their feature structures to
+	// Godot's chain.
+	VulkanExtensionProviders::chain_device_features(physical_device, extension_provider_requests, enabled_device_extension_names, create_info_next);
+
 	VkDeviceCreateInfo create_info = {};
 	create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	create_info.pNext = create_info_next;
@@ -1641,6 +1659,19 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	return OK;
 }
 
+#ifdef DEBUG_ENABLED
+// GodotNext: pu_vk_extension_providers (#105). VMA allocates the device memory, so it reports
+// those handles to the created-handle registry. It reports a freed block before its vkFreeMemory
+// call, not after (the gap the header describes).
+static void VKAPI_PTR _created_handles_memory_allocated(VmaAllocator p_allocator, uint32_t p_memory_type, VkDeviceMemory p_memory, VkDeviceSize p_size, void *p_user_data) {
+	((VulkanCreatedHandles *)p_user_data)->add((uint64_t)p_memory);
+}
+
+static void VKAPI_PTR _created_handles_memory_freed(VmaAllocator p_allocator, uint32_t p_memory_type, VkDeviceMemory p_memory, VkDeviceSize p_size, void *p_user_data) {
+	((VulkanCreatedHandles *)p_user_data)->remove((uint64_t)p_memory);
+}
+#endif
+
 Error RenderingDeviceDriverVulkan::_initialize_allocator() {
 	VmaAllocatorCreateInfo allocator_info = {};
 	allocator_info.physicalDevice = physical_device;
@@ -1653,6 +1684,16 @@ Error RenderingDeviceDriverVulkan::_initialize_allocator() {
 	if (buffer_device_address_support) {
 		allocator_info.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 	}
+#ifdef DEBUG_ENABLED
+	// GodotNext: pu_vk_extension_providers (#105).
+	VmaDeviceMemoryCallbacks memory_callbacks = {};
+	if (created_handles_tracked) {
+		memory_callbacks.pfnAllocate = _created_handles_memory_allocated;
+		memory_callbacks.pfnFree = _created_handles_memory_freed;
+		memory_callbacks.pUserData = &created_handles;
+		allocator_info.pDeviceMemoryCallbacks = &memory_callbacks;
+	}
+#endif
 	VkResult err = vmaCreateAllocator(&allocator_info, &allocator);
 	ERR_FAIL_COND_V_MSG(err, ERR_CANT_CREATE, vformat("Couldn't create Vulkan memory allocator (VkResult error %d).", err));
 
@@ -1818,9 +1859,11 @@ bool RenderingDeviceDriverVulkan::_recreate_image_semaphore(CommandQueue *p_comm
 	create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 	VkResult err = vkCreateSemaphore(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE), &semaphore);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, false, vformat("Couldn't create Vulkan semaphore (VkResult error %d).", err));
+	_track_handle(semaphore); // GodotNext: pu_vk_extension_providers (#105).
 
 	// Indicate the semaphore is free again and destroy the previous one before storing the new one.
 	vkDestroySemaphore(vk_device, p_command_queue->image_semaphores[p_semaphore_index], VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE));
+	_untrack_handle(p_command_queue->image_semaphores[p_semaphore_index]); // GodotNext: pu_vk_extension_providers (#105).
 
 	p_command_queue->image_semaphores[p_semaphore_index] = semaphore;
 	p_command_queue->free_image_semaphores.push_back(p_semaphore_index);
@@ -1941,6 +1984,19 @@ Error RenderingDeviceDriverVulkan::initialize(uint32_t p_device_index, uint32_t 
 	context_device = context_driver->device_get(p_device_index);
 	physical_device = context_driver->physical_device_get(p_device_index);
 	frame_count = p_frame_count;
+
+#ifdef DEBUG_ENABLED
+	// GodotNext: pu_vk_extension_providers (#105). The created-handle registry is filled only with
+	// validation layers on. GODOTNEXT_VK_HANDLE_REGISTRY_CHECK=1 checks it on every texture_free()
+	// and reports when the driver is destroyed.
+	created_handles_tracked = Engine::get_singleton()->is_validation_layers_enabled();
+	if (OS::get_singleton()->get_environment("GODOTNEXT_VK_HANDLE_REGISTRY_CHECK") == "1") {
+		created_handles_check = created_handles_tracked;
+		if (!created_handles_check) {
+			ERR_PRINT("GODOTNEXT_VK_HANDLE_REGISTRY_CHECK: the created-handle registry is filled only with validation layers on (--gpu-validation).");
+		}
+	}
+#endif
 
 	// Copy the queue family properties the context already retrieved.
 	uint32_t queue_family_count = context_driver->queue_family_get_count(p_device_index);
@@ -2141,9 +2197,11 @@ RDD::BufferID RenderingDeviceDriverVulkan::buffer_create(uint64_t p_size, BitFie
 		alloc_create_info.usage = vma_usage;
 		VkResult err = vmaCreateBuffer(allocator, &create_info, &alloc_create_info, &vk_buffer, &allocation, &alloc_info);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't create buffer of size: %d (VkResult error %d).", p_size, err));
+		_track_handle(vk_buffer); // GodotNext: pu_vk_extension_providers (#105).
 	} else {
 		VkResult err = vkCreateBuffer(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER), &vk_buffer);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't create buffer of size: %d (VkResult error %d).", p_size, err));
+		_track_handle(vk_buffer); // GodotNext: pu_vk_extension_providers (#105). Before its memory is bound.
 		err = vmaAllocateMemoryForBuffer(allocator, vk_buffer, &alloc_create_info, &allocation, &alloc_info);
 		ERR_FAIL_COND_V_MSG(err, BufferID(), vformat("Can't allocate memory for buffer of size: %d (VkResult error %d).", p_size, err));
 		err = vmaBindBufferMemory2(allocator, allocation, 0, vk_buffer, nullptr);
@@ -2188,6 +2246,7 @@ bool RenderingDeviceDriverVulkan::buffer_set_texel_format(BufferID p_buffer, Dat
 
 	VkResult res = vkCreateBufferView(vk_device, &view_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER_VIEW), &buf_info->vk_view);
 	ERR_FAIL_COND_V_MSG(res, false, vformat("Couldn't create Vulkan buffer view (VkResult error %d).", res));
+	_track_handle(buf_info->vk_view); // GodotNext: pu_vk_extension_providers (#105).
 
 	return true;
 }
@@ -2196,6 +2255,7 @@ void RenderingDeviceDriverVulkan::buffer_free(BufferID p_buffer) {
 	BufferInfo *buf_info = (BufferInfo *)p_buffer.id;
 	if (buf_info->vk_view) {
 		vkDestroyBufferView(vk_device, buf_info->vk_view, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER_VIEW));
+		_untrack_handle(buf_info->vk_view); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	if (buf_info->is_dynamic()) {
@@ -2208,6 +2268,7 @@ void RenderingDeviceDriverVulkan::buffer_free(BufferID p_buffer) {
 		vkDestroyBuffer(vk_device, buf_info->vk_buffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
 		vmaFreeMemory(allocator, buf_info->allocation.handle);
 	}
+	_untrack_handle(buf_info->vk_buffer); // GodotNext: pu_vk_extension_providers (#105).
 
 	if (buf_info->is_dynamic()) {
 		VersatileResource::free(resources_allocator, (BufferDynamicInfo *)buf_info);
@@ -2499,9 +2560,11 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 		alloc_create_info.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 		VkResult err = vmaCreateImage(allocator, &create_info, &alloc_create_info, &vk_image, &allocation, &alloc_info);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image in memory for use with extra GPU memory tracking (VkResult error %d).", err));
+		_track_handle(vk_image); // GodotNext: pu_vk_extension_providers (#105).
 	} else {
 		VkResult err = vkCreateImage(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE), &vk_image);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image (VkResult error %d).", err));
+		_track_handle(vk_image); // GodotNext: pu_vk_extension_providers (#105). Before its memory is bound.
 		err = vmaAllocateMemoryForImage(allocator, vk_image, &alloc_create_info, &allocation, &alloc_info);
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't allocate memory for Vulkan image (VkResult error %d).", err));
 		err = vmaBindImageMemory2(allocator, allocation, 0, vk_image, nullptr);
@@ -2546,6 +2609,7 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 			vkDestroyImage(vk_device, vk_image, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE));
 			vmaFreeMemory(allocator, allocation);
 		}
+		_untrack_handle(vk_image); // GodotNext: pu_vk_extension_providers (#105).
 
 		ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image view (VkResult error %d).", err));
 	}
@@ -2555,6 +2619,7 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create(const TextureFormat &
 	TextureInfo *tex_info = VersatileResource::allocate<TextureInfo>(resources_allocator);
 	tex_info->vk_image = vk_image;
 	tex_info->vk_view = vk_image_view;
+	_track_handle(vk_image_view); // GodotNext: pu_vk_extension_providers (#105).
 	tex_info->rd_format = p_format.format;
 	tex_info->vk_create_info = create_info;
 	tex_info->vk_view_create_info = image_view_create_info;
@@ -2601,6 +2666,7 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create_from_extension(uint64
 
 	TextureInfo *tex_info = VersatileResource::allocate<TextureInfo>(resources_allocator);
 	tex_info->vk_view = vk_image_view;
+	_track_handle(vk_image_view); // GodotNext: pu_vk_extension_providers (#105). The view is the driver's; the image is not.
 	tex_info->rd_format = p_format;
 	tex_info->vk_view_create_info = image_view_create_info;
 #ifdef DEBUG_ENABLED
@@ -2650,6 +2716,7 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create_shared(TextureID p_or
 	VkImageView new_vk_image_view = VK_NULL_HANDLE;
 	VkResult err = vkCreateImageView(vk_device, &image_view_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW), &new_vk_image_view);
 	ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image view for shared texture (VkResult error %d).", err));
+	_track_handle(new_vk_image_view); // GodotNext: pu_vk_extension_providers (#105).
 
 	// Bookkeep.
 
@@ -2703,6 +2770,7 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create_shared_from_slice(Tex
 	VkImageView new_vk_image_view = VK_NULL_HANDLE;
 	VkResult err = vkCreateImageView(vk_device, &image_view_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW), &new_vk_image_view);
 	ERR_FAIL_COND_V_MSG(err, TextureID(), vformat("Couldn't create Vulkan image view for shared texture from slice (VkResult error %d).", err));
+	_track_handle(new_vk_image_view); // GodotNext: pu_vk_extension_providers (#105).
 
 	// Bookkeep.
 
@@ -2721,7 +2789,14 @@ RDD::TextureID RenderingDeviceDriverVulkan::texture_create_shared_from_slice(Tex
 
 void RenderingDeviceDriverVulkan::texture_free(TextureID p_texture) {
 	TextureInfo *tex_info = (TextureInfo *)p_texture.id;
+	// GodotNext: pu_vk_extension_providers (#105).
+#ifdef DEBUG_ENABLED
+	if (created_handles_check) {
+		_check_texture_handles(tex_info);
+	}
+#endif
 	vkDestroyImageView(vk_device, tex_info->vk_view, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW));
+	_untrack_handle(tex_info->vk_view); // GodotNext: pu_vk_extension_providers (#105).
 	if (tex_info->allocation.handle) {
 		if (!Engine::get_singleton()->is_extra_gpu_memory_tracking_enabled()) {
 			vmaDestroyImage(allocator, tex_info->vk_view_create_info.image, tex_info->allocation.handle);
@@ -2729,9 +2804,29 @@ void RenderingDeviceDriverVulkan::texture_free(TextureID p_texture) {
 			vkDestroyImage(vk_device, tex_info->vk_image, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_BUFFER));
 			vmaFreeMemory(allocator, tex_info->allocation.handle);
 		}
+		_untrack_handle(tex_info->vk_view_create_info.image); // GodotNext: pu_vk_extension_providers (#105).
 	}
 	VersatileResource::free(resources_allocator, tex_info);
 }
+
+#ifdef DEBUG_ENABLED
+// GodotNext: pu_vk_extension_providers (#105). GODOTNEXT_VK_HANDLE_REGISTRY_CHECK=1: a texture's
+// view, and its image when the texture owns it, must be in the created-handle registry until the
+// texture is freed. Shared textures are views of an image their owner is checked for; the image of
+// a texture made by texture_create_from_extension() is not the driver's.
+void RenderingDeviceDriverVulkan::_check_texture_handles(const TextureInfo *p_tex_info) {
+	created_handles_checked_views.increment();
+	if (!created_handles.has((uint64_t)p_tex_info->vk_view)) {
+		created_handles_check_missing.increment();
+	}
+	if (p_tex_info->allocation.handle) {
+		created_handles_checked_images.increment();
+		if (!created_handles.has((uint64_t)p_tex_info->vk_view_create_info.image)) {
+			created_handles_check_missing.increment();
+		}
+	}
+}
+#endif
 
 uint64_t RenderingDeviceDriverVulkan::texture_get_allocation_size(TextureID p_texture) {
 	const TextureInfo *tex_info = (const TextureInfo *)p_texture.id;
@@ -2912,12 +3007,14 @@ RDD::SamplerID RenderingDeviceDriverVulkan::sampler_create(const SamplerState &p
 	VkSampler vk_sampler = VK_NULL_HANDLE;
 	VkResult res = vkCreateSampler(vk_device, &sampler_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SAMPLER), &vk_sampler);
 	ERR_FAIL_COND_V_MSG(res, SamplerID(), vformat("Couldn't create Vulkan sampler (VkResult error %d).", res));
+	_track_handle(vk_sampler); // GodotNext: pu_vk_extension_providers (#105).
 
 	return SamplerID(vk_sampler);
 }
 
 void RenderingDeviceDriverVulkan::sampler_free(SamplerID p_sampler) {
 	vkDestroySampler(vk_device, (VkSampler)p_sampler.id, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SAMPLER));
+	_untrack_handle((VkSampler)p_sampler.id); // GodotNext: pu_vk_extension_providers (#105).
 }
 
 bool RenderingDeviceDriverVulkan::sampler_is_format_supported_for_filter(DataFormat p_format, SamplerFilter p_filter) {
@@ -3170,6 +3267,7 @@ RDD::FenceID RenderingDeviceDriverVulkan::fence_create() {
 	create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	VkResult err = vkCreateFence(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FENCE), &vk_fence);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FenceID(), vformat("Couldn't create Vulkan fence (VkResult error %d).", err));
+	_track_handle(vk_fence); // GodotNext: pu_vk_extension_providers (#105).
 
 	Fence *fence = memnew(Fence);
 	fence->vk_fence = vk_fence;
@@ -3217,6 +3315,7 @@ Error RenderingDeviceDriverVulkan::fence_wait(FenceID p_fence) {
 void RenderingDeviceDriverVulkan::fence_free(FenceID p_fence) {
 	Fence *fence = (Fence *)(p_fence.id);
 	vkDestroyFence(vk_device, fence->vk_fence, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FENCE));
+	_untrack_handle(fence->vk_fence); // GodotNext: pu_vk_extension_providers (#105).
 	memdelete(fence);
 }
 
@@ -3230,12 +3329,14 @@ RDD::SemaphoreID RenderingDeviceDriverVulkan::semaphore_create() {
 	create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 	VkResult err = vkCreateSemaphore(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE), &semaphore);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, SemaphoreID(), vformat("Couldn't create Vulkan semaphore (VkResult error %d).", err));
+	_track_handle(semaphore); // GodotNext: pu_vk_extension_providers (#105).
 
 	return SemaphoreID(semaphore);
 }
 
 void RenderingDeviceDriverVulkan::semaphore_free(SemaphoreID p_semaphore) {
 	vkDestroySemaphore(vk_device, VkSemaphore(p_semaphore.id), VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE));
+	_untrack_handle(VkSemaphore(p_semaphore.id)); // GodotNext: pu_vk_extension_providers (#105).
 }
 
 /******************/
@@ -3319,6 +3420,21 @@ RDD::CommandQueueID RenderingDeviceDriverVulkan::command_queue_create(CommandQue
 	// If is was identified as the main queue and a hook is active, indicate it as such to the hook.
 	if (p_identify_as_main_queue && (VulkanHooks::get_singleton() != nullptr)) {
 		VulkanHooks::get_singleton()->set_direct_queue_family_and_index(family_index, picked_queue_index);
+	}
+
+	// GodotNext: pu_vk_extension_providers (#105). The device and its main queue exist: tell the
+	// providers, once per driver.
+	if (p_identify_as_main_queue && !extension_providers_notified && VulkanExtensionProviders::get_provider_count() > 0) {
+		extension_providers_notified = true;
+		VulkanExtensionProvider::DeviceInfo device_info;
+		device_info.instance = context_driver->instance_get();
+		device_info.physical_device = physical_device;
+		device_info.device = vk_device;
+		device_info.queue_family_index = family_index;
+		device_info.queue_index = picked_queue_index;
+		device_info.enabled_instance_extensions = context_driver->enabled_instance_extensions_get();
+		device_info.enabled_device_extensions = enabled_device_extension_names;
+		VulkanExtensionProviders::notify_device_created(device_info);
 	}
 
 	return CommandQueueID(command_queue);
@@ -3544,6 +3660,7 @@ void RenderingDeviceDriverVulkan::command_queue_free(CommandQueueID p_cmd_queue)
 	// Erase all the semaphores used for image acquisition.
 	for (VkSemaphore semaphore : command_queue->image_semaphores) {
 		vkDestroySemaphore(vk_device, semaphore, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE));
+		_untrack_handle(semaphore); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	// Retrieve the queue family corresponding to the virtual queue.
@@ -3576,6 +3693,7 @@ RDD::CommandPoolID RenderingDeviceDriverVulkan::command_pool_create(CommandQueue
 	VkCommandPool vk_command_pool = VK_NULL_HANDLE;
 	VkResult res = vkCreateCommandPool(vk_device, &cmd_pool_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_COMMAND_POOL), &vk_command_pool);
 	ERR_FAIL_COND_V_MSG(res, CommandPoolID(), vformat("Couldn't create Vulkan command pool (VkResult error %d).", res));
+	_track_handle(vk_command_pool); // GodotNext: pu_vk_extension_providers (#105).
 
 	CommandPool *command_pool = memnew(CommandPool);
 	command_pool->vk_command_pool = vk_command_pool;
@@ -3602,6 +3720,7 @@ void RenderingDeviceDriverVulkan::command_pool_free(CommandPoolID p_cmd_pool) {
 	}
 
 	vkDestroyCommandPool(vk_device, command_pool->vk_command_pool, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_COMMAND_POOL));
+	_untrack_handle(command_pool->vk_command_pool); // GodotNext: pu_vk_extension_providers (#105).
 	memdelete(command_pool);
 }
 
@@ -3794,10 +3913,12 @@ void RenderingDeviceDriverVulkan::_swap_chain_release(SwapChain *swap_chain) {
 
 	for (VkImageView view : swap_chain->image_views) {
 		vkDestroyImageView(vk_device, view, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW));
+		_untrack_handle(view); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	swap_chain->image_index = UINT_MAX;
-	swap_chain->images.clear();
+	// GodotNext: pu_vk_extension_providers (#105). The images are cleared below, once the swap chain
+	// that owns them is destroyed.
 	swap_chain->image_views.clear();
 	swap_chain->framebuffers.clear();
 
@@ -3811,8 +3932,15 @@ void RenderingDeviceDriverVulkan::_swap_chain_release(SwapChain *swap_chain) {
 		}
 #endif
 		device_functions.DestroySwapchainKHR(vk_device, swap_chain->vk_swapchain, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SWAPCHAIN_KHR));
+		_untrack_handle(swap_chain->vk_swapchain); // GodotNext: pu_vk_extension_providers (#105).
 		swap_chain->vk_swapchain = VK_NULL_HANDLE;
 	}
+
+	// GodotNext: pu_vk_extension_providers (#105). The swap chain's images went with it.
+	for (VkImage image : swap_chain->images) {
+		_untrack_handle(image);
+	}
+	swap_chain->images.clear();
 
 	if (swap_chain->render_pass.id != 0) {
 		render_pass_free(swap_chain->render_pass);
@@ -3828,6 +3956,7 @@ void RenderingDeviceDriverVulkan::_swap_chain_release(SwapChain *swap_chain) {
 
 	for (VkSemaphore semaphore : swap_chain->present_semaphores) {
 		vkDestroySemaphore(vk_device, semaphore, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE));
+		_untrack_handle(semaphore); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	swap_chain->present_semaphores.clear();
@@ -4018,6 +4147,7 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	swap_create_info.clipped = true;
 	err = device_functions.CreateSwapchainKHR(vk_device, &swap_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SWAPCHAIN_KHR), &swap_chain->vk_swapchain);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan swapchain (VkResult error %d).", err));
+	_track_handle(swap_chain->vk_swapchain); // GodotNext: pu_vk_extension_providers (#105).
 
 #if defined(SWAPPY_FRAME_PACING_ENABLED)
 	if (swappy_frame_pacer_enable) {
@@ -4056,6 +4186,10 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	swap_chain->images.resize(image_count);
 	err = device_functions.GetSwapchainImagesKHR(vk_device, swap_chain->vk_swapchain, &image_count, swap_chain->images.ptr());
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't get Vulkan swapchain images (VkResult error %d).", err));
+	// GodotNext: pu_vk_extension_providers (#105). The swap chain's images count as created here.
+	for (VkImage image : swap_chain->images) {
+		_track_handle(image);
+	}
 
 	VkImageViewCreateInfo view_create_info = {};
 	view_create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -4076,6 +4210,7 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 		view_create_info.image = swap_chain->images[i];
 		err = vkCreateImageView(vk_device, &view_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_IMAGE_VIEW), &image_view);
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan image view for swapchain image (VkResult error %d).", err));
+		_track_handle(image_view); // GodotNext: pu_vk_extension_providers (#105).
 
 		swap_chain->image_views.push_back(image_view);
 	}
@@ -4114,6 +4249,7 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 	VkRenderPass vk_render_pass = VK_NULL_HANDLE;
 	err = _create_render_pass(vk_device, &pass_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_RENDER_PASS), &vk_render_pass);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan render pass for swapchain (VkResult error %d).", err));
+	_track_handle(vk_render_pass); // GodotNext: pu_vk_extension_providers (#105).
 
 	RenderPassInfo *render_pass_info = VersatileResource::allocate<RenderPassInfo>(resources_allocator);
 	render_pass_info->vk_render_pass = vk_render_pass;
@@ -4134,6 +4270,7 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 		fb_create_info.pAttachments = &swap_chain->image_views[i];
 		err = vkCreateFramebuffer(vk_device, &fb_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FRAMEBUFFER), &vk_framebuffer);
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, ERR_CANT_CREATE, vformat("Couldn't create Vulkan framebuffer for swapchain image (VkResult error %d).", err));
+		_track_handle(vk_framebuffer); // GodotNext: pu_vk_extension_providers (#105).
 
 		Framebuffer *framebuffer = memnew(Framebuffer);
 		framebuffer->vk_framebuffer = vk_framebuffer;
@@ -4149,6 +4286,7 @@ Error RenderingDeviceDriverVulkan::swap_chain_resize(CommandQueueID p_cmd_queue,
 
 		err = vkCreateSemaphore(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE), &vk_semaphore);
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FAILED, vformat("Couldn't create Vulkan semaphore for swapchain image (VkResult error %d).", err));
+		_track_handle(vk_semaphore); // GodotNext: pu_vk_extension_providers (#105).
 
 		swap_chain->present_semaphores.push_back(vk_semaphore);
 	}
@@ -4180,6 +4318,7 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::swap_chain_acquire_framebuffer(C
 		create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 		err = vkCreateSemaphore(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SEMAPHORE), &semaphore);
 		ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, FramebufferID(), vformat("Couldn't create Vulkan semaphore for acquiring swapchain image (VkResult error %d).", err));
+		_track_handle(semaphore); // GodotNext: pu_vk_extension_providers (#105).
 
 		semaphore_index = command_queue->image_semaphores.size();
 		command_queue->image_semaphores.push_back(semaphore);
@@ -4372,6 +4511,7 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::framebuffer_create(RenderPassID 
 	VkFramebuffer vk_framebuffer = VK_NULL_HANDLE;
 	VkResult err = vkCreateFramebuffer(vk_device, &framebuffer_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FRAMEBUFFER), &vk_framebuffer);
 	ERR_FAIL_COND_V_MSG(err, FramebufferID(), vformat("Couldn't create Vulkan framebuffer (VkResult error %d).", err));
+	_track_handle(vk_framebuffer); // GodotNext: pu_vk_extension_providers (#105).
 
 #if PRINT_NATIVE_COMMANDS
 	print_line(vformat("vkCreateFramebuffer 0x%uX with %d attachments", uint64_t(vk_framebuffer), p_attachments.size()));
@@ -4390,6 +4530,7 @@ RDD::FramebufferID RenderingDeviceDriverVulkan::framebuffer_create(RenderPassID 
 void RenderingDeviceDriverVulkan::framebuffer_free(FramebufferID p_framebuffer) {
 	Framebuffer *framebuffer = (Framebuffer *)(p_framebuffer.id);
 	vkDestroyFramebuffer(vk_device, framebuffer->vk_framebuffer, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_FRAMEBUFFER));
+	_untrack_handle(framebuffer->vk_framebuffer); // GodotNext: pu_vk_extension_providers (#105).
 	memdelete(framebuffer);
 }
 
@@ -4609,6 +4750,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		create_info.module = vk_module;
 		create_info.pName = "main";
 		shader_info.vk_stages_create_info.push_back(create_info);
+		_track_handle(vk_module); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	// Descriptor sets.
@@ -4641,6 +4783,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 			}
 
 			shader_info.vk_descriptor_set_layouts.push_back(layout);
+			_track_handle(layout); // GodotNext: pu_vk_extension_providers (#105).
 		}
 	}
 
@@ -4670,13 +4813,16 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		// Clean up if failed.
 		for (uint32_t i = 0; i < shader_info.vk_stages_create_info.size(); i++) {
 			vkDestroyShaderModule(vk_device, shader_info.vk_stages_create_info[i].module, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE));
+			_untrack_handle(shader_info.vk_stages_create_info[i].module); // GodotNext: pu_vk_extension_providers (#105).
 		}
 		for (uint32_t i = 0; i < shader_info.vk_descriptor_set_layouts.size(); i++) {
 			vkDestroyDescriptorSetLayout(vk_device, shader_info.vk_descriptor_set_layouts[i], VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT));
+			_untrack_handle(shader_info.vk_descriptor_set_layouts[i]); // GodotNext: pu_vk_extension_providers (#105).
 		}
 
 		ERR_FAIL_V_MSG(ShaderID(), error_text);
 	}
+	_track_handle(shader_info.vk_pipeline_layout); // GodotNext: pu_vk_extension_providers (#105).
 
 	// Bookkeep.
 	ShaderInfo *shader_info_ptr = VersatileResource::allocate<ShaderInfo>(resources_allocator);
@@ -4689,9 +4835,11 @@ void RenderingDeviceDriverVulkan::shader_free(ShaderID p_shader) {
 
 	for (uint32_t i = 0; i < shader_info->vk_descriptor_set_layouts.size(); i++) {
 		vkDestroyDescriptorSetLayout(vk_device, shader_info->vk_descriptor_set_layouts[i], VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT));
+		_untrack_handle(shader_info->vk_descriptor_set_layouts[i]); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	vkDestroyPipelineLayout(vk_device, shader_info->vk_pipeline_layout, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE_LAYOUT));
+	_untrack_handle(shader_info->vk_pipeline_layout); // GodotNext: pu_vk_extension_providers (#105).
 
 	shader_destroy_modules(p_shader);
 
@@ -4705,6 +4853,7 @@ void RenderingDeviceDriverVulkan::shader_destroy_modules(ShaderID p_shader) {
 		if (si->vk_stages_create_info[i].module) {
 			vkDestroyShaderModule(vk_device, si->vk_stages_create_info[i].module,
 					VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE));
+			_untrack_handle(si->vk_stages_create_info[i].module); // GodotNext: pu_vk_extension_providers (#105).
 			si->vk_stages_create_info[i].module = VK_NULL_HANDLE;
 		}
 	}
@@ -4823,6 +4972,7 @@ VkDescriptorPool RenderingDeviceDriverVulkan::_descriptor_set_pool_create(const 
 	if (res) {
 		ERR_FAIL_COND_V_MSG(res, VK_NULL_HANDLE, vformat("Couldn't create Vulkan descriptor pool (VkResult error %d).", res));
 	}
+	_track_handle(vk_pool); // GodotNext: pu_vk_extension_providers (#105).
 
 	return vk_pool;
 }
@@ -4832,6 +4982,7 @@ void RenderingDeviceDriverVulkan::_descriptor_set_pool_unreference(DescriptorSet
 	pool_rcs_it->value--;
 	if (pool_rcs_it->value == 0) {
 		vkDestroyDescriptorPool(vk_device, p_vk_descriptor_pool, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL));
+		_untrack_handle(p_vk_descriptor_pool); // GodotNext: pu_vk_extension_providers (#105).
 		p_pool_sets_it->value.erase(p_vk_descriptor_pool);
 		if (p_pool_sets_it->value.is_empty()) {
 			if (linear_descriptor_pools_enabled && p_linear_pool_index >= 0) {
@@ -5124,11 +5275,13 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 		// All errors are unexpected at this stage.
 		if (res) {
 			vkDestroyDescriptorPool(vk_device, descriptor_set_allocate_info.descriptorPool, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL));
+			_untrack_handle(descriptor_set_allocate_info.descriptorPool); // GodotNext: pu_vk_extension_providers (#105).
 			ERR_FAIL_V_MSG(UniformSetID(), vformat("Couldn't allocate Vulkan descriptor sets (VkResult error %d).", res));
 		}
 	}
 
 	DEV_ASSERT(descriptor_set_allocate_info.descriptorPool != VK_NULL_HANDLE && vk_descriptor_set != VK_NULL_HANDLE);
+	_track_handle(vk_descriptor_set); // GodotNext: pu_vk_extension_providers (#105).
 	pool_sets_it->value[descriptor_set_allocate_info.descriptorPool]++;
 
 	for (uint32_t i = 0; i < writes_amount; i++) {
@@ -5168,6 +5321,10 @@ void RenderingDeviceDriverVulkan::uniform_set_free(UniformSetID p_uniform_set) {
 		vkFreeDescriptorSets(vk_device, usi->vk_descriptor_pool, 1, &usi->vk_descriptor_set);
 		_descriptor_set_pool_unreference(usi->pool_sets_it, usi->vk_descriptor_pool, -1);
 	}
+
+	// GodotNext: pu_vk_extension_providers (#105). After the set is freed, or, for a set of a
+	// linear pool, which Vulkan frees when the pool is reset, here.
+	_untrack_handle(usi->vk_descriptor_set);
 
 	VersatileResource::free(resources_allocator, usi);
 }
@@ -5434,6 +5591,7 @@ void RenderingDeviceDriverVulkan::command_copy_texture_to_buffer(CommandBufferID
 
 void RenderingDeviceDriverVulkan::pipeline_free(PipelineID p_pipeline) {
 	vkDestroyPipeline(vk_device, (VkPipeline)p_pipeline.id, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE));
+	_untrack_handle((VkPipeline)p_pipeline.id); // GodotNext: pu_vk_extension_providers (#105).
 }
 
 // ----- BINDING -----
@@ -5500,6 +5658,7 @@ bool RenderingDeviceDriverVulkan::pipeline_cache_create(const Vector<uint8_t> &p
 			WARN_PRINT("vkCreatePipelinecache failed with error " + itos(err) + ".");
 			return false;
 		}
+		_track_handle(pipelines_cache.vk_cache); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	return true;
@@ -5509,6 +5668,7 @@ void RenderingDeviceDriverVulkan::pipeline_cache_free() {
 	DEV_ASSERT(pipelines_cache.vk_cache);
 
 	vkDestroyPipelineCache(vk_device, pipelines_cache.vk_cache, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_PIPELINE_CACHE));
+	_untrack_handle(pipelines_cache.vk_cache); // GodotNext: pu_vk_extension_providers (#105).
 	pipelines_cache.vk_cache = VK_NULL_HANDLE;
 
 	DEV_ASSERT(caching_instance_count > 0);
@@ -5726,6 +5886,7 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Att
 	VkRenderPass vk_render_pass = VK_NULL_HANDLE;
 	VkResult res = _create_render_pass(vk_device, &create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_RENDER_PASS), &vk_render_pass);
 	ERR_FAIL_COND_V_MSG(res, RenderPassID(), vformat("Couldn't create Vulkan render pass (VkResult error %d).", res));
+	_track_handle(vk_render_pass); // GodotNext: pu_vk_extension_providers (#105).
 
 	RenderPassInfo *render_pass = VersatileResource::allocate<RenderPassInfo>(resources_allocator);
 	render_pass->vk_render_pass = vk_render_pass;
@@ -5736,6 +5897,7 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Att
 void RenderingDeviceDriverVulkan::render_pass_free(RenderPassID p_render_pass) {
 	RenderPassInfo *render_pass = (RenderPassInfo *)(p_render_pass.id);
 	vkDestroyRenderPass(vk_device, render_pass->vk_render_pass, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_RENDER_PASS));
+	_untrack_handle(render_pass->vk_render_pass); // GodotNext: pu_vk_extension_providers (#105).
 	VersatileResource::free<RenderPassInfo>(resources_allocator, render_pass);
 }
 
@@ -6355,6 +6517,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 						// Replace the module used in the creation info.
 						vk_pipeline_stages[i].module = shader_module;
 						respv_shader_modules.push_back(shader_module);
+						_track_handle(shader_module); // GodotNext: pu_vk_extension_providers (#105).
 						use_pipeline_spec_constants = false;
 					}
 
@@ -6424,6 +6587,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 	}
 
 	ERR_FAIL_COND_V_MSG(err, PipelineID(), vformat("Couldn't create Vulkan graphics pipelines (VkResult error %d).", err));
+	_track_handle(vk_pipeline); // GodotNext: pu_vk_extension_providers (#105).
 
 #if RECORD_PIPELINE_STATISTICS
 	{
@@ -6450,6 +6614,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 	// Destroy any modules created temporarily by re-spirv.
 	for (VkShaderModule vk_module : respv_shader_modules) {
 		vkDestroyShaderModule(vk_device, vk_module, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_SHADER_MODULE));
+		_untrack_handle(vk_module); // GodotNext: pu_vk_extension_providers (#105).
 	}
 
 	return PipelineID(vk_pipeline);
@@ -6659,6 +6824,7 @@ RDD::QueryPoolID RenderingDeviceDriverVulkan::acceleration_structure_size_query_
 	VkQueryPool vk_query_pool = VK_NULL_HANDLE;
 	VkResult err = vkCreateQueryPool(vk_device, &query_pool_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_QUERY_POOL), &vk_query_pool);
 	ERR_FAIL_COND_V_MSG(err != VK_SUCCESS, QueryPoolID(), vformat("vkCreateQueryPool failed for compacted-size queries (VkResult %d).", err));
+	_track_handle(vk_query_pool); // GodotNext: pu_vk_extension_providers (#105).
 	return QueryPoolID(vk_query_pool);
 #else
 	return QueryPoolID();
@@ -6667,6 +6833,7 @@ RDD::QueryPoolID RenderingDeviceDriverVulkan::acceleration_structure_size_query_
 
 void RenderingDeviceDriverVulkan::acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) {
 	vkDestroyQueryPool(vk_device, (VkQueryPool)p_pool_id.id, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_QUERY_POOL));
+	_untrack_handle((VkQueryPool)p_pool_id.id); // GodotNext: pu_vk_extension_providers (#105).
 }
 
 void RenderingDeviceDriverVulkan::acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
@@ -6725,6 +6892,7 @@ RDD::AccelerationStructureID RenderingDeviceDriverVulkan::acceleration_structure
 		VersatileResource::free(resources_allocator, info);
 		ERR_FAIL_V_MSG(AccelerationStructureID(), vformat("Couldn't create a compacted Vulkan acceleration structure (VkResult error %d).", err));
 	}
+	_track_handle(info->vk_acceleration_structure); // GodotNext: pu_vk_extension_providers (#105).
 	info->build_info.srcAccelerationStructure = VK_NULL_HANDLE;
 	info->build_info.dstAccelerationStructure = info->vk_acceleration_structure;
 	info->size_bytes = p_size;
@@ -6774,6 +6942,7 @@ void RenderingDeviceDriverVulkan::_acceleration_structure_create(VkAccelerationS
 	accel_create_info.buffer = ((const BufferInfo *)buffer.id)->vk_buffer;
 	VkResult err = device_functions.CreateAccelerationStructureKHR(vk_device, &accel_create_info, nullptr, &r_accel_info->vk_acceleration_structure);
 	ERR_FAIL_COND_MSG(err, vformat("Couldn't create Vulkan raytracing acceleration structure (VkResult error %d).", err));
+	_track_handle(r_accel_info->vk_acceleration_structure); // GodotNext: pu_vk_extension_providers (#105).
 	r_accel_info->build_info.dstAccelerationStructure = r_accel_info->vk_acceleration_structure;
 	// GodotNext: rq_substrate (#22)
 	r_accel_info->size_bytes = p_size_info.accelerationStructureSize;
@@ -6793,6 +6962,7 @@ void RenderingDeviceDriverVulkan::acceleration_structure_free(AccelerationStruct
 	}
 	if (accel_info->vk_acceleration_structure) {
 		device_functions.DestroyAccelerationStructureKHR(vk_device, accel_info->vk_acceleration_structure, nullptr);
+		_untrack_handle(accel_info->vk_acceleration_structure); // GodotNext: pu_vk_extension_providers (#105).
 	}
 	VersatileResource::free(resources_allocator, accel_info);
 #endif
@@ -6986,6 +7156,7 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_creat
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
 	VkResult err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &pipeline_create_info, nullptr, &vk_pipeline);
 	ERR_FAIL_COND_V_MSG(err, RaytracingPipelineID(), vformat("Couldn't create Vulkan raytracing pipelines (VkResult error %d).", err));
+	_track_handle(vk_pipeline); // GodotNext: pu_vk_extension_providers (#105).
 
 	return RaytracingPipelineID(vk_pipeline);
 #else
@@ -6996,6 +7167,7 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_creat
 void RenderingDeviceDriverVulkan::raytracing_pipeline_free(RaytracingPipelineID p_pipeline) {
 #if VULKAN_RAYTRACING_ENABLED
 	vkDestroyPipeline(vk_device, (VkPipeline)p_pipeline.id, nullptr);
+	_untrack_handle((VkPipeline)p_pipeline.id); // GodotNext: pu_vk_extension_providers (#105).
 #endif
 }
 
@@ -7109,6 +7281,7 @@ RDD::PipelineID RenderingDeviceDriverVulkan::compute_pipeline_create(ShaderID p_
 	POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
 	ERR_FAIL_COND_V_MSG(err, PipelineID(), vformat("Couldn't create Vulkan compute pipelines (VkResult error %d).", err));
+	_track_handle(vk_pipeline); // GodotNext: pu_vk_extension_providers (#105).
 
 	return PipelineID(vk_pipeline);
 }
@@ -7127,11 +7300,13 @@ RDD::QueryPoolID RenderingDeviceDriverVulkan::timestamp_query_pool_create(uint32
 
 	VkQueryPool vk_query_pool = VK_NULL_HANDLE;
 	vkCreateQueryPool(vk_device, &query_pool_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_QUERY_POOL), &vk_query_pool);
+	_track_handle(vk_query_pool); // GodotNext: pu_vk_extension_providers (#105).
 	return RDD::QueryPoolID(vk_query_pool);
 }
 
 void RenderingDeviceDriverVulkan::timestamp_query_pool_free(QueryPoolID p_pool_id) {
 	vkDestroyQueryPool(vk_device, (VkQueryPool)p_pool_id.id, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_QUERY_POOL));
+	_untrack_handle((VkQueryPool)p_pool_id.id); // GodotNext: pu_vk_extension_providers (#105).
 }
 
 void RenderingDeviceDriverVulkan::timestamp_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
@@ -7911,6 +8086,11 @@ RenderingDeviceDriverVulkan::RenderingDeviceDriverVulkan(RenderingContextDriverV
 }
 
 RenderingDeviceDriverVulkan::~RenderingDeviceDriverVulkan() {
+	// GodotNext: pu_vk_extension_providers (#105). While the device still works.
+	if (extension_providers_notified) {
+		VulkanExtensionProviders::notify_device_destroying(vk_device);
+	}
+
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
 	if (breadcrumb_buffer != BufferID()) {
 		buffer_free(breadcrumb_buffer);
@@ -7931,9 +8111,23 @@ RenderingDeviceDriverVulkan::~RenderingDeviceDriverVulkan() {
 		for (KeyValue<DescriptorSetPoolKey, HashMap<VkDescriptorPool, uint32_t>> pools : pool_map.value) {
 			for (KeyValue<VkDescriptorPool, uint32_t> descriptor_pool : pools.value) {
 				vkDestroyDescriptorPool(vk_device, descriptor_pool.key, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL));
+				_untrack_handle(descriptor_pool.key); // GodotNext: pu_vk_extension_providers (#105).
 			}
 		}
 	}
+
+#ifdef DEBUG_ENABLED
+	// GodotNext: pu_vk_extension_providers (#105). Everything the driver created is destroyed by
+	// now, so a handle still in the registry was not removed where it was destroyed.
+	if (created_handles_check) {
+		const uint32_t missing = created_handles_check_missing.get();
+		const uint32_t leaked = created_handles.get_count();
+		print_line(vformat("GODOTNEXT_RESULT {\"test\":\"vk_handle_registry\",\"images\":%d,\"views\":%d,\"missing\":%d,\"leaked\":%d}", created_handles_checked_images.get(), created_handles_checked_views.get(), missing, leaked));
+		if (missing > 0 || leaked > 0) {
+			ERR_PRINT("GODOTNEXT_VK_HANDLE_REGISTRY_CHECK: the created-handle registry missed or kept handles.");
+		}
+	}
+#endif
 
 	if (vk_device != VK_NULL_HANDLE) {
 		vkDestroyDevice(vk_device, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DEVICE));
