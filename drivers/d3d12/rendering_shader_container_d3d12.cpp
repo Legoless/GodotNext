@@ -337,6 +337,9 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 	dxil_spirv_runtime_conf dxil_runtime_conf = {};
 	dxil_runtime_conf.runtime_data_cbv.base_shader_register = RUNTIME_DATA_REGISTER;
 	dxil_runtime_conf.push_constant_cbv.base_shader_register = ROOT_CONSTANT_REGISTER;
+	// GodotNext: d3d12_gpu_based_validation (#272). Root constants sit in a register space of their own.
+	dxil_runtime_conf.runtime_data_cbv.register_space = ROOT_CONSTANT_SPACE;
+	dxil_runtime_conf.push_constant_cbv.register_space = ROOT_CONSTANT_SPACE;
 	dxil_runtime_conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
 	dxil_runtime_conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
 
@@ -385,6 +388,8 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 		dxil_spirv_nir_prep(shader);
 		dxil_spirv_metadata dxil_metadata = {};
 		dxil_spirv_nir_passes(shader, &dxil_runtime_conf, &dxil_metadata);
+		// GodotNext: d3d12_gpu_based_validation (#272).
+		_remap_dynamic_buffers(shader);
 
 		r_stages_nir_shaders[stage] = shader;
 	}
@@ -434,6 +439,52 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 	}
 
 	return true;
+}
+
+// GodotNext: d3d12_gpu_based_validation (#272). Mesa gives every resource register
+// set * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + binding * GODOT_NIR_BINDING_MULTIPLIER in space 0.
+// Dynamic buffers become root descriptors, so they move to register <binding> in space
+// DYNAMIC_BUFFER_SPACE_BASE + set (see ROOT_CONSTANT_SPACE). The variable and every
+// vulkan_resource_index that names it change together, which keeps nir_to_dxil's lookups intact.
+void RenderingShaderContainerD3D12::_remap_dynamic_buffers(nir_shader *p_shader) const {
+	if (!reflection_data.has_dynamic_buffers) {
+		return;
+	}
+
+	uint32_t binding_start = 0;
+	for (uint32_t i = 0; i < reflection_binding_set_uniforms_count.size(); i++) {
+		uint32_t uniform_count = reflection_binding_set_uniforms_count[i];
+		for (uint32_t j = 0; j < uniform_count; j++) {
+			const ReflectionBindingData &uniform = reflection_binding_set_uniforms_data[binding_start + j];
+			if (uniform.type != RDC::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC && uniform.type != RDC::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC) {
+				continue;
+			}
+
+			const uint32_t mesa_register = i * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + uniform.binding * GODOT_NIR_BINDING_MULTIPLIER;
+			const uint32_t space = DYNAMIC_BUFFER_SPACE_BASE + i;
+			nir_foreach_variable_with_modes(var, p_shader, nir_var_mem_ubo | nir_var_mem_ssbo) {
+				if (var->data.descriptor_set == 0 && var->data.binding == mesa_register) {
+					var->data.descriptor_set = space;
+					var->data.binding = uniform.binding;
+				}
+			}
+			nir_foreach_function_impl(impl, p_shader) {
+				nir_foreach_block(block, impl) {
+					nir_foreach_instr(instr, block) {
+						if (instr->type != nir_instr_type_intrinsic) {
+							continue;
+						}
+						nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+						if (intrinsic->intrinsic == nir_intrinsic_vulkan_resource_index && nir_intrinsic_desc_set(intrinsic) == 0 && nir_intrinsic_binding(intrinsic) == mesa_register) {
+							nir_intrinsic_set_desc_set(intrinsic, space);
+							nir_intrinsic_set_binding(intrinsic, uniform.binding);
+						}
+					}
+				}
+			}
+		}
+		binding_start += uniform_count;
+	}
 }
 
 struct GodotNirCallbackUserData {
@@ -536,7 +587,7 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 		push_constant.InitAsConstants(
 				reflection_data.push_constant_size / sizeof(uint32_t),
 				ROOT_CONSTANT_REGISTER,
-				0,
+				ROOT_CONSTANT_SPACE, // GodotNext: d3d12_gpu_based_validation (#272).
 				stages_to_d3d12_visibility(reflection_data_d3d12.dxil_push_constant_stages));
 
 		root_params.push_back(push_constant);
@@ -553,7 +604,7 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 		nir_runtime_data.InitAsConstants(
 				runtime_data_size / sizeof(uint32_t),
 				RUNTIME_DATA_REGISTER,
-				0,
+				ROOT_CONSTANT_SPACE, // GodotNext: d3d12_gpu_based_validation (#272).
 				visibility);
 		root_params.push_back(nir_runtime_data);
 	}
@@ -677,16 +728,19 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 				if (uniform.type == RDC::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC || uniform.type == RDC::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC) {
 					CD3DX12_ROOT_PARAMETER1 root_param = {};
 					D3D12_SHADER_VISIBILITY visibility = stages_to_d3d12_visibility(uniform.stages);
+					// GodotNext: d3d12_gpu_based_validation (#272). Where _remap_dynamic_buffers() moved it.
+					const uint32_t root_register = uniform.binding;
+					const uint32_t root_space = DYNAMIC_BUFFER_SPACE_BASE + i;
 
 					switch (range_type) {
 						case D3D12_DESCRIPTOR_RANGE_TYPE_CBV: {
-							root_param.InitAsConstantBufferView(dxil_register, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, visibility);
+							root_param.InitAsConstantBufferView(root_register, root_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, visibility);
 						} break;
 						case D3D12_DESCRIPTOR_RANGE_TYPE_SRV: {
-							root_param.InitAsShaderResourceView(dxil_register, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE, visibility);
+							root_param.InitAsShaderResourceView(root_register, root_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE, visibility);
 						} break;
 						case D3D12_DESCRIPTOR_RANGE_TYPE_UAV: {
-							root_param.InitAsUnorderedAccessView(dxil_register, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE, visibility);
+							root_param.InitAsUnorderedAccessView(root_register, root_space, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE, visibility);
 						} break;
 						default: {
 							DEV_ASSERT(false && "Unrecognized range type.");
@@ -812,17 +866,23 @@ void RenderingShaderContainerD3D12::_nir_report_resource(uint32_t p_register, ui
 	DEV_ASSERT(p_dxil_type < ARRAY_SIZE(DXIL_TYPE_TO_CLASS));
 	ResourceClass resource_class = DXIL_TYPE_TO_CLASS[p_dxil_type];
 
-	if (p_register == ROOT_CONSTANT_REGISTER && p_space == 0) {
+	// GodotNext: d3d12_gpu_based_validation (#272). Root constants are in ROOT_CONSTANT_SPACE, and dynamic
+	// buffers in spaces of their own (see _remap_dynamic_buffers()).
+	if (p_register == ROOT_CONSTANT_REGISTER && p_space == ROOT_CONSTANT_SPACE) {
 		DEV_ASSERT(resource_class == RES_CLASS_CBV);
 		user_data.container->reflection_data_d3d12.dxil_push_constant_stages |= (1 << user_data.stage);
-	} else if (p_register == RUNTIME_DATA_REGISTER && p_space == 0) {
+	} else if (p_register == RUNTIME_DATA_REGISTER && p_space == ROOT_CONSTANT_SPACE) {
 		DEV_ASSERT(resource_class == RES_CLASS_CBV);
 		user_data.container->reflection_data_d3d12.nir_runtime_data_root_param_idx = 1; // Temporary, to be determined later.
 	} else {
-		DEV_ASSERT(p_space == 0);
-
 		uint32_t set = p_register / GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER;
 		uint32_t binding = (p_register % GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER) / GODOT_NIR_BINDING_MULTIPLIER;
+		// GodotNext: d3d12_gpu_based_validation (#272). A dynamic buffer, moved by _remap_dynamic_buffers().
+		if (p_space != 0) {
+			DEV_ASSERT(p_space >= DYNAMIC_BUFFER_SPACE_BASE && p_space < DYNAMIC_BUFFER_SPACE_BASE + RenderingDeviceCommons::MAX_UNIFORM_SETS);
+			set = p_space - DYNAMIC_BUFFER_SPACE_BASE;
+			binding = p_register;
+		}
 
 		DEV_ASSERT(set < (uint32_t)user_data.container->reflection_binding_set_uniforms_count.size());
 

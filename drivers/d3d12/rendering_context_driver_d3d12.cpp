@@ -152,6 +152,18 @@ Error RenderingContextDriverD3D12::_initialize_debug_layers() {
 
 	ERR_FAIL_COND_V(!SUCCEEDED(res), ERR_QUERY_FAILED);
 	debug_controller->EnableDebugLayer();
+
+	// GodotNext: d3d12_gpu_based_validation (#272). Opt-in GPU-based validation on top of the
+	// debug layer: it checks resource states and descriptors as shaders run, at a large cost.
+	if (bool(GLOBAL_GET("rendering/rendering_device/d3d12/gpu_based_validation"))) {
+		ComPtr<ID3D12Debug1> debug_controller_1;
+		if (SUCCEEDED(debug_controller.As(&debug_controller_1))) {
+			debug_controller_1->SetEnableGPUBasedValidation(TRUE);
+			print_line("D3D12: GPU-based validation is on.");
+		} else {
+			WARN_PRINT("D3D12: GPU-based validation was requested, but ID3D12Debug1 is unavailable.");
+		}
+	}
 	return OK;
 }
 
