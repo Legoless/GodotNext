@@ -147,6 +147,9 @@ class NextGIReference {
 	uint64_t tables_hash = 0;
 	float exposure = 1.0f;
 	PackedByteArray read_accumulation;
+	// GodotNext: rr_guides (#205). The raw RGBA32F reflection guides of the reflections-only
+	// mode (hit distance sum, hit count, sample count) the last readback saw.
+	PackedByteArray read_reflection_guides;
 
 	bool _ensure_shader();
 	void _free_uniform_set();

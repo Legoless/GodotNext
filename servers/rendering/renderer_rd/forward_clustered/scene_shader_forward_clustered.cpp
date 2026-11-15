@@ -399,6 +399,11 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 				shader_flags |= SHADER_COLOR_PASS_FLAG_MULTIVIEW;
 			}
 
+			// GodotNext: rr_guides (#205)
+			if (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_RR_GUIDES) {
+				shader_flags |= SHADER_COLOR_PASS_FLAG_RR_GUIDES;
+			}
+
 			return ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + shader_flags;
 		} break;
 		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES:
@@ -408,6 +413,10 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 		case PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR: {
 			const bool sep_spec = (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_SEPARATE_SPECULAR) != 0;
 			const bool motion = (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS) != 0;
+			// GodotNext: rr_guides (#205). Same order as the four variants without the guides.
+			if (p_color_pass_flags & PIPELINE_COLOR_PASS_FLAG_RR_GUIDES) {
+				return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE + (sep_spec ? 1 : 0) + (motion ? 2 : 0);
+			}
 			if (sep_spec && motion) {
 				return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS;
 			} else if (motion) {
@@ -462,10 +471,12 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 #endif
 
 	// Color pass -> attachment 0: Color/Diffuse, attachment 1: Separate Specular, attachment 2: Motion Vectors
+	// GodotNext: rr_guides (#205). With the RR guides -> attachment 3: Diffuse Albedo, attachment 4: Specular Albedo.
+	const int color_pass_attachments = (p_pipeline_key.color_pass_flags & PIPELINE_COLOR_PASS_FLAG_RR_GUIDES) ? COLOR_PASS_ATTACHMENTS_RR_GUIDES : COLOR_PASS_ATTACHMENTS;
 	RD::PipelineColorBlendState::Attachment blend_attachment = blend_mode_to_blend_attachment(BlendMode(blend_mode));
 	RD::PipelineColorBlendState blend_state_color_blend;
 	blend_state_color_blend.attachments = { blend_attachment, RD::PipelineColorBlendState::Attachment(), RD::PipelineColorBlendState::Attachment() };
-	RD::PipelineColorBlendState blend_state_color_opaque = RD::PipelineColorBlendState::create_disabled(3);
+	RD::PipelineColorBlendState blend_state_color_opaque = RD::PipelineColorBlendState::create_disabled(color_pass_attachments);
 	RD::PipelineColorBlendState blend_state_depth_normal_roughness = RD::PipelineColorBlendState::create_disabled(1);
 	RD::PipelineColorBlendState blend_state_depth_normal_roughness_giprobe = RD::PipelineColorBlendState::create_disabled(2);
 
@@ -652,7 +663,10 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 	}
 
 	if (p_pipeline_key.zero_velocity_write && !blend_state.attachments.is_empty()) {
-		RD::PipelineColorBlendState::Attachment &velocity_attachment = blend_state.attachments.write[blend_state.attachments.size() - 1];
+		// GodotNext: rr_guides (#205). Velocity is the last attachment, except in a color pass
+		// that writes the RR guides after it.
+		const int velocity_index = (p_pipeline_key.color_pass_flags & PIPELINE_COLOR_PASS_FLAG_RR_GUIDES) ? int(COLOR_PASS_ATTACHMENT_VELOCITY) : blend_state.attachments.size() - 1;
+		RD::PipelineColorBlendState::Attachment &velocity_attachment = blend_state.attachments.write[velocity_index];
 		velocity_attachment.write_r = false;
 		velocity_attachment.write_g = false;
 		velocity_attachment.write_b = false;
@@ -850,6 +864,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			"\n#define USE_LIGHTMAP\n", // SHADER_COLOR_PASS_FLAG_LIGHTMAP
 			"\n#define USE_MULTIVIEW\n", // SHADER_COLOR_PASS_FLAG_MULTIVIEW
 			"\n#define MOTION_VECTORS\n", // SHADER_COLOR_PASS_FLAG_MOTION_VECTORS
+			"\n#define MODE_RR_GUIDES\n", // SHADER_COLOR_PASS_FLAG_RR_GUIDES
 		};
 
 		for (int i = 0; i < SHADER_COLOR_PASS_FLAG_COUNT; i++) {
@@ -871,6 +886,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 			} else if (multiview_group) {
 				group = SHADER_GROUP_MULTIVIEW;
 			}
+			// GodotNext: rr_guides (#205). Every variant with the guide outputs is compiled only
+			// while a view writes the guides, whatever else it combines with.
+			if (i & SHADER_COLOR_PASS_FLAG_RR_GUIDES) {
+				group = color_pass_variant_rr_guides_group(uint32_t(i));
+			}
 
 			shader_versions.push_back(ShaderRD::VariantDefine(group, version, false));
 		}
@@ -889,6 +909,13 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		for (uint16_t ml_i = 0; ml_i < ml_variant_count; ml_i++) {
 			shader_versions.push_back(ShaderRD::VariantDefine(ShaderVersion::megalights_variant_group(ml_i), ShaderVersion::megalights_variant_defines(ml_i), ShaderVersion::MEGALIGHTS_VARIANTS_DEFAULT_ENABLED));
 		}
+
+		// GodotNext: rr_guides (#205). Stage B with the RR guide outputs, in the order of the four
+		// Stage B color variants above. Off until a NextGeo view writes the guides.
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RR_GUIDES\n", false));
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MODE_RR_GUIDES\n", false));
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n#define MODE_RR_GUIDES\n", false));
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n#define MODE_RR_GUIDES\n", false));
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
@@ -1320,6 +1347,15 @@ void SceneShaderForwardClustered::enable_megalights_shader_group(bool p_needs_mu
 
 void SceneShaderForwardClustered::enable_nextgeo_megalights_shader_group() {
 	shader.enable_group(SHADER_GROUP_NEXTGEO_MEGALIGHTS);
+}
+
+// GodotNext: rr_guides (#205)
+void SceneShaderForwardClustered::enable_rr_guides_shader_group() {
+	shader.enable_group(SHADER_GROUP_RR_GUIDES);
+}
+
+void SceneShaderForwardClustered::enable_nextgeo_rr_guides_shader_group() {
+	shader.enable_group(SHADER_GROUP_NEXTGEO_RR_GUIDES);
 }
 
 const char *SceneShaderForwardClustered::ShaderVersion::megalights_variant_defines(uint16_t p_relative) {

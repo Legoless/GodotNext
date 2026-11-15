@@ -1082,6 +1082,27 @@ RID RenderSceneBuffersRD::get_ml_material(uint32_t p_layer) {
 	return has_texture(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL) ? get_texture_slice(RB_SCOPE_MEGALIGHTS, RB_TEX_ML_MATERIAL, p_layer, 0) : RID();
 }
 
+// GodotNext: rr_guides (#205)
+void RenderSceneBuffersRD::ensure_rr_guides() {
+	if (!has_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO)) {
+		// RRGuides::clear() clears the albedo guides with a transfer.
+		const uint32_t albedo_usage_bits = RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+		create_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO, RD::DATA_FORMAT_R8G8B8A8_UNORM, albedo_usage_bits);
+		create_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_SPECULAR_ALBEDO, RD::DATA_FORMAT_R8G8B8A8_UNORM, albedo_usage_bits);
+		create_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_NORMAL_ROUGHNESS, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT);
+	}
+}
+
+void RenderSceneBuffersRD::free_rr_guides() {
+	free_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO);
+	free_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_SPECULAR_ALBEDO);
+	free_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_NORMAL_ROUGHNESS);
+}
+
+bool RenderSceneBuffersRD::has_rr_guides() const {
+	return has_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO);
+}
+
 uint32_t RenderSceneBuffersRD::get_color_usage_bits(bool p_resolve, bool p_msaa, bool p_storage) {
 	DEV_ASSERT((!p_resolve && !p_msaa) || (p_resolve != p_msaa));
 

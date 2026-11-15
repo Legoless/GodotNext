@@ -35,6 +35,7 @@
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
+#include "servers/rendering/renderer_rd/effects/rr_guides.h"
 #include "servers/rendering/renderer_rd/effects/ss_effects.h"
 #include "servers/rendering/renderer_rd/effects/taa.h"
 #include "servers/rendering/renderer_rd/effects/tsr.h"
@@ -259,6 +260,8 @@ private:
 		COLOR_PASS_FLAG_SEPARATE_SPECULAR = 1 << 1,
 		COLOR_PASS_FLAG_MULTIVIEW = 1 << 2,
 		COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 3,
+		// GodotNext: rr_guides (#205). The opaque passes of a view that writes the DLSS-RR guides.
+		COLOR_PASS_FLAG_RR_GUIDES = 1 << 4,
 	};
 
 	struct GeometryInstanceSurfaceDataCache;
@@ -852,6 +855,8 @@ private:
 	RendererRD::MFXTemporalEffect *mfx_temporal_effect = nullptr;
 #endif
 	RendererRD::MotionVectorsStore *motion_vectors_store = nullptr;
+	// GodotNext: rr_guides (#205). Created by the first view that writes the guides.
+	RendererRD::RRGuides *rr_guides = nullptr;
 
 	/* Cluster builder */
 

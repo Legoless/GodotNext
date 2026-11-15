@@ -1187,6 +1187,12 @@ layout(location = 0) out vec4 frag_color;
 #ifdef MOTION_VECTORS
 layout(location = 2) out vec2 motion_vector;
 #endif
+// GodotNext: rr_guides (#205). DLSS-RR albedo guides of the opaque passes, linear RGBA8.
+// Pixels no surface covers keep the clear values: 0.5 diffuse, 0 specular, alpha 0.
+#ifdef MODE_RR_GUIDES
+layout(location = 3) out vec4 rr_diffuse_albedo_buffer;
+layout(location = 4) out vec4 rr_specular_albedo_buffer;
+#endif
 #endif
 
 #include "../scene_forward_aa_inc.glsl"
@@ -1564,6 +1570,10 @@ void fragment_shader(in SceneData scene_data) {
 	vec2 anisotropy_flow = vec2(1.0, 0.0);
 	vec3 energy_compensation = vec3(1.0);
 	vec4 fog = vec4(0.0, 0.0, 0.0, 1.0);
+#ifdef MODE_RR_GUIDES
+	// GodotNext: rr_guides (#205). The factor the indirect specular light is scaled by.
+	vec3 rr_specular_albedo = vec3(0.0);
+#endif
 #if defined(CUSTOM_RADIANCE_USED)
 	vec4 custom_radiance = vec4(0.0);
 #endif
@@ -2837,6 +2847,9 @@ void fragment_shader(in SceneData scene_data) {
 #if defined(DIFFUSE_TOON)
 		//simplify for toon, as
 		indirect_specular_light *= specular * metallic * albedo * 2.0;
+#ifdef MODE_RR_GUIDES
+		rr_specular_albedo = specular * metallic * albedo * 2.0;
+#endif
 #else
 		// Base Layer
 		float NdotV = clamp(dot(normal, view), 0.0001, 1.0);
@@ -2847,6 +2860,9 @@ void fragment_shader(in SceneData scene_data) {
 		// cheap luminance approximation
 		float f90 = clamp(50.0 * f0.g, metallic, 1.0);
 		indirect_specular_light *= energy_compensation * ((f90 - f0) * envBRDF.x + f0 * envBRDF.y);
+#ifdef MODE_RR_GUIDES
+		rr_specular_albedo = energy_compensation * ((f90 - f0) * envBRDF.x + f0 * envBRDF.y);
+#endif
 
 #ifdef LIGHT_CLEARCOAT_USED
 		float geo_NdotV = max(dot(geo_normal, view), 0.0001); // We want to use geometric normal, not normal_map
@@ -2858,6 +2874,9 @@ void fragment_shader(in SceneData scene_data) {
 
 		ambient_light *= cc_attenuation;
 		indirect_specular_light *= cc_attenuation;
+#ifdef MODE_RR_GUIDES
+		rr_specular_albedo *= cc_attenuation;
+#endif
 
 		// Clearcoat Layer
 		// We don't need DFG for clearcoat, so we can use the fresnel directly.
@@ -3758,6 +3777,12 @@ void fragment_shader(in SceneData scene_data) {
 #endif //PREMUL_ALPHA_USED
 
 #endif //MODE_SEPARATE_SPECULAR
+
+#ifdef MODE_RR_GUIDES
+	// GodotNext: rr_guides (#205). albedo and metallic already include the decals.
+	rr_diffuse_albedo_buffer = vec4(albedo * (1.0 - metallic), 1.0);
+	rr_specular_albedo_buffer = vec4(rr_specular_albedo, 1.0);
+#endif
 
 #endif //MODE_RENDER_DEPTH
 #ifdef MOTION_VECTORS

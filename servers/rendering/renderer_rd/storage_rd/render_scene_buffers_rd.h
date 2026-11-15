@@ -77,6 +77,12 @@
 #define RB_TEX_ML_ALBEDO SNAME("ml_albedo")
 #define RB_TEX_ML_MATERIAL SNAME("ml_material")
 
+// GodotNext: rr_guides (#205)
+#define RB_SCOPE_RR_GUIDES SNAME("rr_guides")
+#define RB_TEX_RR_DIFFUSE_ALBEDO SNAME("diffuse_albedo")
+#define RB_TEX_RR_SPECULAR_ALBEDO SNAME("specular_albedo")
+#define RB_TEX_RR_NORMAL_ROUGHNESS SNAME("normal_roughness")
+
 class RenderSceneBuffersRD : public RenderSceneBuffers {
 	GDCLASS(RenderSceneBuffersRD, RenderSceneBuffers);
 
@@ -382,6 +388,13 @@ public:
 	RID get_ml_material() const;
 	RID get_ml_albedo(uint32_t p_layer);
 	RID get_ml_material(uint32_t p_layer);
+
+	// GodotNext: rr_guides (#205). The DLSS-RR guides of each view at the internal size:
+	// diffuse and specular albedo (RGBA8) and the packed normal and roughness (RGBA16F).
+	// Allocated only while a view writes them.
+	void ensure_rr_guides();
+	void free_rr_guides();
+	bool has_rr_guides() const;
 
 	// Samplers adjusted with the mipmap bias that is best fit for the configuration of these render buffers.
 

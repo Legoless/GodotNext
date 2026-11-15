@@ -159,6 +159,7 @@ void NextGIReference::free() {
 	samples = 0;
 	_nextgi_reference_samples = 0;
 	read_accumulation.clear();
+	read_reflection_guides.clear();
 }
 
 Vector<String> NextGIReference::get_shader_variant_defines() {
@@ -591,6 +592,11 @@ void NextGIReference::_readback() {
 	}
 	// GodotNext: nextgi_reference_capture (#263). The harness reads the float32 sums for its batch statistics.
 	read_accumulation = data;
+	// GodotNext: rr_guides (#205). The RR guide check compares the specular hit distance with these.
+	read_reflection_guides.clear();
+	if (nextgi_reference_shader_mode(int(GLOBAL_GET("rendering/global_illumination/nextgi/debug/reference_mode"))) == 2 && reflection_guides.is_valid()) {
+		read_reflection_guides = rd->texture_get_data(reflection_guides, 0);
+	}
 	const float *texels = reinterpret_cast<const float *>(data.ptr());
 	double sum = 0.0;
 	float lo = 1.0e30f;
@@ -647,6 +653,9 @@ void NextGIReference::fill_info(Dictionary &r_info) const {
 	r_info["reference_exposure"] = exposure;
 	if (!read_accumulation.is_empty()) {
 		r_info["reference_accumulation"] = read_accumulation;
+	}
+	if (!read_reflection_guides.is_empty()) {
+		r_info["reference_reflection_guides"] = read_reflection_guides;
 	}
 }
 

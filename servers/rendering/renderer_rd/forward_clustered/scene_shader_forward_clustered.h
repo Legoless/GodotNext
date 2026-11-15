@@ -54,6 +54,12 @@ public:
 		SHADER_GROUP_MEGALIGHTS,
 		SHADER_GROUP_MEGALIGHTS_MULTIVIEW,
 		SHADER_GROUP_NEXTGEO_MEGALIGHTS,
+		// GodotNext: rr_guides (#205). Off unless this view writes the DLSS-RR guides.
+		// RR views are single-view (NextGI is), so nothing enables the multiview group;
+		// it only keeps the color pass flags a plain bit field.
+		SHADER_GROUP_RR_GUIDES,
+		SHADER_GROUP_RR_GUIDES_MULTIVIEW,
+		SHADER_GROUP_NEXTGEO_RR_GUIDES,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -75,7 +81,8 @@ public:
 		constexpr static uint16_t SHADER_VERSION_NEXTGI_TRANSLUCENCY_MARK = 13;
 		constexpr static uint16_t SHADER_VERSION_NEXTGEO_FALLBACK = 14;
 		constexpr static uint16_t SHADER_VERSION_COLOR_PASS = 15;
-		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_BASE = SHADER_VERSION_COLOR_PASS * 2 + (1 << 5);
+		// GodotNext: rr_guides (#205). The color pass block is SHADER_COLOR_PASS_FLAG_COUNT wide.
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_BASE = SHADER_VERSION_COLOR_PASS * 2 + (1 << 6);
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 0;
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 1;
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_COLOR = SHADER_VERSION_VISIBILITY_RESOLVE_BASE + 2;
@@ -100,6 +107,10 @@ public:
 		// Ubershader twins of the eight depth variants. The render list falls back to these
 		// while the specialized pipeline compiles, and that path supplies the 32-byte push constant.
 		constexpr static uint16_t SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT = 8;
+		// GodotNext: rr_guides (#205). The Stage B color variants with the RR guide outputs,
+		// appended last so no earlier index moves. Same order as the four above.
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT;
+		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT = 4;
 		// GodotNext: megalights_inputs (#136). init() pushes these groups, default off.
 		static constexpr bool MEGALIGHTS_VARIANTS_DEFAULT_ENABLED = false;
 		static constexpr ShaderGroup megalights_variant_group(uint16_t p_relative) {
@@ -124,7 +135,22 @@ public:
 		SHADER_COLOR_PASS_FLAG_LIGHTMAP = 1 << 2,
 		SHADER_COLOR_PASS_FLAG_MULTIVIEW = 1 << 3,
 		SHADER_COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 4,
-		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 5
+		// GodotNext: rr_guides (#205). Adds the diffuse and specular albedo outputs.
+		SHADER_COLOR_PASS_FLAG_RR_GUIDES = 1 << 5,
+		SHADER_COLOR_PASS_FLAG_COUNT = 1 << 6
+	};
+
+	// GodotNext: rr_guides (#205). The group of a color pass variant that has the RR guide outputs.
+	static constexpr ShaderGroup color_pass_variant_rr_guides_group(uint32_t p_shader_flags) {
+		return (p_shader_flags & SHADER_COLOR_PASS_FLAG_MULTIVIEW) ? SHADER_GROUP_RR_GUIDES_MULTIVIEW : SHADER_GROUP_RR_GUIDES;
+	}
+
+	// Color attachments of the color pass: color, separate specular, velocity, then the
+	// two RR guides (diffuse albedo, specular albedo) while a view writes them.
+	enum ColorPassAttachment {
+		COLOR_PASS_ATTACHMENT_VELOCITY = 2,
+		COLOR_PASS_ATTACHMENTS = 3,
+		COLOR_PASS_ATTACHMENTS_RR_GUIDES = 5,
 	};
 
 	enum PipelineVersion {
@@ -167,7 +193,9 @@ public:
 		PIPELINE_COLOR_PASS_FLAG_LIGHTMAP = 1 << 2,
 		PIPELINE_COLOR_PASS_FLAG_MULTIVIEW = 1 << 3,
 		PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS = 1 << 4,
-		PIPELINE_COLOR_PASS_FLAG_OPTIONS = 5,
+		// GodotNext: rr_guides (#205). Opaque passes only; can't combine with TRANSPARENT or MULTIVIEW.
+		PIPELINE_COLOR_PASS_FLAG_RR_GUIDES = 1 << 5,
+		PIPELINE_COLOR_PASS_FLAG_OPTIONS = 6,
 		PIPELINE_COLOR_PASS_FLAG_COMBINATIONS = 1 << PIPELINE_COLOR_PASS_FLAG_OPTIONS,
 	};
 
@@ -298,7 +326,8 @@ public:
 		RID version;
 
 		// GodotNext: megalights_inputs (#136)
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT;
+		// GodotNext: rr_guides (#205). One entry per shader variant, the Stage B RR variants included.
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -478,6 +507,9 @@ public:
 	// GodotNext: megalights_inputs (#136)
 	void enable_megalights_shader_group(bool p_needs_multiview = false);
 	void enable_nextgeo_megalights_shader_group();
+	// GodotNext: rr_guides (#205)
+	void enable_rr_guides_shader_group();
+	void enable_nextgeo_rr_guides_shader_group();
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	bool is_nextgeo_shader_group_enabled() const;

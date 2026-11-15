@@ -317,6 +317,20 @@ RID RenderForwardClustered::RenderBufferDataForwardClustered::get_color_pass_fb(
 
 	RID depth = use_msaa ? render_buffers->get_texture(RB_SCOPE_BUFFERS, RB_TEX_DEPTH_MSAA) : render_buffers->get_depth_texture();
 
+	// GodotNext: rr_guides (#205). The two albedo guides follow velocity, at locations 3 and 4.
+	if (p_color_pass_flags & COLOR_PASS_FLAG_RR_GUIDES) {
+		ERR_FAIL_COND_V_MSG(use_msaa, RID(), "The DLSS-RR guides are not allocated when MSAA is enabled.");
+		render_buffers->ensure_rr_guides();
+		RID diffuse_albedo = render_buffers->get_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO);
+		RID specular_albedo = render_buffers->get_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_SPECULAR_ALBEDO);
+		if (render_buffers->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
+			RID vrs_texture = render_buffers->get_texture(RB_SCOPE_VRS, RB_TEXTURE);
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(v_count, color, specular, velocity_buffer, diffuse_albedo, specular_albedo, depth, vrs_texture);
+		} else {
+			return FramebufferCacheRD::get_singleton()->get_cache_multiview(v_count, color, specular, velocity_buffer, diffuse_albedo, specular_albedo, depth);
+		}
+	}
+
 	if (render_buffers->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
 		RID vrs_texture = render_buffers->get_texture(RB_SCOPE_VRS, RB_TEXTURE);
 		return FramebufferCacheRD::get_singleton()->get_cache_multiview(v_count, color, specular, velocity_buffer, depth, vrs_texture);
@@ -709,6 +723,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MULTIVIEW;
 				}
 
+				// GodotNext: rr_guides (#205)
+				if constexpr ((p_color_pass_flags & COLOR_PASS_FLAG_RR_GUIDES) != 0) {
+					pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RR_GUIDES;
+				}
+
 				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_COLOR_PASS;
 			} break;
 			case PASS_MODE_SHADOW:
@@ -941,6 +960,11 @@ void RenderForwardClustered::_render_list(RenderingDevice::DrawListID p_draw_lis
 				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_MOTION_VECTORS);
 				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_SEPARATE_SPECULAR | COLOR_PASS_FLAG_MULTIVIEW | COLOR_PASS_FLAG_MOTION_VECTORS);
 				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_TRANSPARENT | COLOR_PASS_FLAG_MULTIVIEW | COLOR_PASS_FLAG_MOTION_VECTORS);
+				// GodotNext: rr_guides (#205). Opaque, single-view passes only.
+				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_RR_GUIDES);
+				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_RR_GUIDES | COLOR_PASS_FLAG_SEPARATE_SPECULAR);
+				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_RR_GUIDES | COLOR_PASS_FLAG_MOTION_VECTORS);
+				VALID_FLAG_COMBINATION(COLOR_PASS_FLAG_RR_GUIDES | COLOR_PASS_FLAG_SEPARATE_SPECULAR | COLOR_PASS_FLAG_MOTION_VECTORS);
 				default: {
 					ERR_FAIL_MSG("Invalid color pass flag combination " + itos(p_params->color_pass_flags));
 				}
@@ -2751,6 +2775,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: nextgeo_visibility_raster (#83)
 	bool using_nextgeo = false;
 	bool nextgeo_drew = false;
+	// GodotNext: rr_guides (#205). True only when this view writes the DLSS-RR guides.
+	bool rr_guides_active = false;
 	NextGIVelocityMode velocity_mode = NEXTGI_VELOCITY_NONE;
 	NextGIVelocityScale velocity_scale = NEXTGI_VELOCITY_SCALE_NONE;
 	NextGIVelocityPlan velocity_plan;
@@ -2866,6 +2892,17 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			global_pipeline_data_required.use_multiview = true;
 		}
 
+		// GodotNext: rr_guides (#205). The opaque passes of this view write the two albedo guides.
+		// enable_view_shader_groups() is the only place the RR shader groups are enabled; the
+		// doctest checks its gate.
+		rr_guides_active = RendererRD::RRGuides::enable_view_shader_groups(scene_shader, RendererRD::RRGuides::is_requested(), false, p_render_data->scene_data->view_count, rb->get_msaa_3d() != RSE::VIEWPORT_MSAA_DISABLED, using_nextgeo && !visibility_only);
+		if (rr_guides_active) {
+			rb->ensure_rr_guides();
+			color_pass_flags |= COLOR_PASS_FLAG_RR_GUIDES;
+		} else {
+			rb->free_rr_guides();
+		}
+
 		color_framebuffer = rb_data->get_color_pass_fb(color_pass_flags);
 		color_only_framebuffer = rb_data->get_color_only_fb();
 		samplers = rb->get_samplers();
@@ -2938,8 +2975,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 		// GodotNext: megalights_inputs (#136). The input targets and the ML_ALBEDO / ML_MATERIAL
 		// debug draws need the normal-roughness prepass. Do not downgrade a voxel GI prepass.
+		// GodotNext: rr_guides (#205). So does the RR guide pack.
 		const bool ml_debug_draw = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO || get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL;
-		if ((megalights_inputs_active || ml_debug_draw) && depth_pass_mode == PASS_MODE_DEPTH) {
+		if ((megalights_inputs_active || ml_debug_draw || rr_guides_active) && depth_pass_mode == PASS_MODE_DEPTH) {
 			depth_pass_mode = PASS_MODE_DEPTH_NORMAL_ROUGHNESS;
 		}
 
@@ -3158,8 +3196,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	bool debug_sdfgi_probes = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_SDFGI_PROBES;
 	bool force_depth_pre_pass = scene_state.used_opaque_stencil || using_ssao || using_ssr || using_sscs || using_ssil;
 	// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83) / nextgeo_residency (#78)
-	// GodotNext: megalights_inputs (#136)
-	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo || megalights_inputs_active;
+	// GodotNext: megalights_inputs (#136) / rr_guides (#205)
+	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo || megalights_inputs_active || rr_guides_active;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
@@ -3372,6 +3410,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
 			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
 
+			// GodotNext: rr_guides (#205). The two guides are cleared here every frame and the
+			// opaque passes load them (RRGuides::load_guides() says why).
+			const bool rr_has_specular = (opaque_color_pass_flags & COLOR_PASS_FLAG_SEPARATE_SPECULAR) != 0;
+			const bool rr_has_velocity = (opaque_color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS) != 0;
+			if (rr_guides_active) {
+				RendererRD::RRGuides::clear(rb->get_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO), rb->get_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_SPECULAR_ALBEDO));
+			}
+
 			auto build_opaque_clear_colors = [&](bool p_load_color) {
 				Vector<Color> colors;
 				if (!p_load_color) {
@@ -3399,8 +3445,15 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				if (opaque_color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS) {
 					stage_b_pipeline_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS;
 				}
+				// GodotNext: rr_guides (#205)
+				if (opaque_color_pass_flags & COLOR_PASS_FLAG_RR_GUIDES) {
+					stage_b_pipeline_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RR_GUIDES;
+				}
 				const bool zero_vel = velocity_plan.prepass_writes && (stage_b_pipeline_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS);
-				const BitField<RD::DrawFlags> stage_b_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
+				BitField<RD::DrawFlags> stage_b_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
+				if (rr_guides_active) {
+					stage_b_draw_flags = RendererRD::RRGuides::load_guides(stage_b_draw_flags, rr_has_specular, rr_has_velocity);
+				}
 				const Vector<Color> stage_b_clear = build_opaque_clear_colors(load_color);
 				bool stage_b_redraw = false;
 				const bool stage_b_opened = nextgeo_resolve.draw_stage_b(
@@ -3436,6 +3489,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			render_list_params.use_nextgeo_proxy = is_reflection_probe;
 			// Load the velocity attachment on TAA when prepass/NextGeo wrote it; never DRAW_IGNORE_ALL (§6.1).
 			BitField<RD::DrawFlags> opaque_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
+			if (rr_guides_active) {
+				opaque_draw_flags = RendererRD::RRGuides::load_guides(opaque_draw_flags, rr_has_specular, rr_has_velocity);
+			}
 			if (!stage_b_wrote || !render_list[RENDER_LIST_OPAQUE].elements.is_empty()) {
 				_render_list_with_draw_list(&render_list_params, opaque_framebuffer, opaque_draw_flags, c, 0.0f, 0u, p_render_data->render_region);
 			}
@@ -3481,6 +3537,20 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	if (!is_reflection_probe && !visibility_only && rb_data.is_valid() && RendererRD::nextgeo_is_debug_view(get_debug_draw_mode())) {
 		_render_nextgeo_debug_scene_passes(p_render_data, using_nextgeo, nextgeo_drew, use_msaa, msaa, reverse_cull, screen_size, depth_prepass_uniform_buffer_index, samplers, base_specialization);
+	}
+
+	// GodotNext: rr_guides (#205). The opaque passes wrote the two albedo guides; pack the
+	// normal and roughness guide from the prepass buffer where they drew a surface.
+	if (rr_guides_active) {
+		RENDER_TIMESTAMP("DLSS-RR guides");
+		RD::get_singleton()->draw_command_begin_label("DLSS-RR guides");
+		if (rr_guides == nullptr) {
+			rr_guides = memnew(RendererRD::RRGuides);
+		}
+		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+			rr_guides->pack(rb_data->get_normal_roughness(v), rb->get_texture_slice(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO, v, 0), rb->get_texture_slice(RB_SCOPE_RR_GUIDES, RB_TEX_RR_NORMAL_ROUGHNESS, v, 0), rb->get_internal_size(), p_render_data->scene_data->cam_transform.basis);
+		}
+		RD::get_singleton()->draw_command_end_label();
 	}
 
 	{
@@ -3651,6 +3721,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		uint32_t transparent_color_pass_flags = (color_pass_flags | uint32_t(COLOR_PASS_FLAG_TRANSPARENT)) & ~uint32_t(COLOR_PASS_FLAG_SEPARATE_SPECULAR);
 		// Motion vectors should not be overwritten by transparent objects.
 		transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS);
+		// GodotNext: rr_guides (#205). Transparent surfaces write no guides.
+		transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_RR_GUIDES);
 
 		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
@@ -7256,6 +7328,11 @@ RenderForwardClustered::~RenderForwardClustered() {
 	if (motion_vectors_store) {
 		memdelete(motion_vectors_store);
 		motion_vectors_store = nullptr;
+	}
+
+	if (rr_guides) {
+		memdelete(rr_guides);
+		rr_guides = nullptr;
 	}
 
 	RD::get_singleton()->free_rid(shadow_sampler);
