@@ -390,6 +390,12 @@ func _test_animation_frame() -> void:
 	_check(node.is_driving_animation(), "driving harness publishes a frame")
 	_check(int(node.get_animation_frame()) == 12, "animation frame is 12")
 	node._active = false
+	_check(not node.is_driving_animation(), "inactive harness does not drive")
+	node.drive_frame(7)
+	_check(node.is_driving_animation(), "drive_frame drives an idle harness")
+	_check(int(node.get_animation_frame()) == 7, "drive_frame publishes frame 7")
+	node.drive_frame(-1)
+	_check(not node.is_driving_animation(), "drive_frame(-1) stops driving")
 	node.free()
 
 

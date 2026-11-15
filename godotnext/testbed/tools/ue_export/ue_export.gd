@@ -1,0 +1,659 @@
+extends SceneTree
+## Exports a testbed scene for its UE 5.9 comparison port (#235, plan §23.7): every unique mesh
+## once as glTF, and every placement, material, light, the environment, the sky and the camera
+## path as JSON, CSV and a Radiance HDR panorama. ue_export_schema.md describes the files.
+##
+## Run it rendered, not with --headless: the dummy renderer keeps no MultiMesh instance
+## transforms, so a headless export would lose every MultiMesh placement.
+##
+##   godot --path godotnext/testbed --script res://tools/ue_export/ue_export.gd -- \
+##     --scene=res://scenes/swrt_kitbash/swrt_kitbash.tscn --camera=CaptureCam \
+##     --warmup=120 --frames=600 --out=/absolute/dir [--fps=60] [--source-commit=<sha>]
+##
+## Other user arguments (for example --instances) reach the scene as in a harness run. The scene
+## runs as in a timing run: every _ready runs, so seeded generators spawn their content, and the
+## camera is sampled while the harness publishes frame index N for row N (Harness.drive_frame),
+## the pose a timing run shows at measured row N. Content the format does not carry yet
+## (moving geometry, skinned meshes, textured or shader materials, other visual nodes) stops
+## the export instead of being left out.
+##
+## Exit codes: 0 written, 1 the scene has content the format does not carry, 2 bad arguments.
+
+const Lib := preload("res://tools/ue_export/ue_export_lib.gd")
+const SceneArgs := preload("res://scenes/scene_args.gd")
+
+const SETTLE_FRAMES := 2
+## Project settings written to scene.json "rendering.project".
+const PROJECT_PREFIXES: Array[String] = [
+	"rendering/global_illumination/",
+	"rendering/nextgeo/",
+	"rendering/anti_aliasing/",
+	"rendering/scaling_3d/",
+	"rendering/lights_and_shadows/",
+	"rendering/environment/",
+	"rendering/renderer/rendering_method",
+	"rendering/rendering_device/driver",
+	"display/window/size/viewport_",
+]
+## Project settings and the row of docs/godotnext/ue-bar/settings-map.md that maps them to UE.
+const RECORD_ROWS := {
+	"rendering/global_illumination/nextgi/quality": "`quality = high`, HWRT / `quality = epic`, HWRT / `quality = medium`",
+	"rendering/global_illumination/nextgi/hardware_ray_tracing": "`TIER_SOFTWARE`, forced (`hardware_ray_tracing = off`)",
+	"rendering/global_illumination/nextgi/software_ray_tracing_mode": "`software_ray_tracing_mode = detail`",
+	"rendering/global_illumination/nextgi/medium_gather": "`medium_gather = screen_probes`",
+	"rendering/global_illumination/nextgi/mode": "`nextgi/mode = reflections_only` over LightmapGI",
+	"rendering/global_illumination/nextgi/far_field": "Far field",
+	"rendering/global_illumination/mesh_sdf/keep_when_hwrt": "`meshes/generate_distance_fields`; `mesh_sdf/keep_when_hwrt`",
+	"rendering/scaling_3d/mode": "1080p internal, the line's output resolution, `scaling_3d_scale`",
+	"rendering/scaling_3d/scale": "1080p internal, the line's output resolution, `scaling_3d_scale`",
+}
+
+var _scene_path := ""
+var _camera_name := ""
+var _out := ""
+var _frames := 0
+var _warmup := 0
+var _fps := 60
+var _source_commit := ""
+var _scene: Node
+var _camera: Camera3D
+var _harness: Node
+var _ticks := 0
+var _row := -1
+var _done := false
+var _track := PackedStringArray()
+var _baseline := {}
+
+# Filled by _walk().
+var _mesh_ids := {}
+var _meshes: Array = []
+var _material_ids := {}
+var _materials: Array = []
+var _instances: Array = []
+var _lights: Array = []
+var _suns: Array = []
+var _environment_node: WorldEnvironment
+var _world_transforms: Array = []
+var _triangles_total := 0
+var _aabb := AABB()
+var _aabb_set := false
+var _node_instances := 0
+var _multimesh_instances := 0
+var _multimesh_nodes := 0
+var _unsupported: Array[String] = []
+
+
+func _initialize() -> void:
+	var error := _parse_args()
+	if not error.is_empty():
+		_fail(2, error)
+		return
+	if DisplayServer.get_name() == "headless":
+		_fail(2, "run it with a rendering driver, not --headless: the dummy renderer keeps no MultiMesh instance transforms")
+		return
+	var packed := load(_scene_path) as PackedScene
+	if packed == null:
+		_fail(2, "cannot load %s" % _scene_path)
+		return
+	_harness = get_root().get_node_or_null("Harness")
+	if _harness == null:
+		_harness = (load("res://harness/harness.gd") as GDScript).new()
+		_harness.name = "Harness"
+		get_root().add_child(_harness)
+	if not _harness.has_method("drive_frame"):
+		_fail(2, "the harness has no drive_frame(); this exporter needs the matching harness.gd")
+		return
+	_scene = packed.instantiate()
+	get_root().add_child(_scene)
+	current_scene = _scene
+	var found := _scene.get_node_or_null(NodePath(_camera_name))
+	if found == null:
+		found = _scene.find_child(_camera_name, true, false)
+	if not (found is Camera3D):
+		_fail(2, "no Camera3D named %s in %s" % [_camera_name, _scene_path])
+		return
+	_camera = found
+
+
+func _process(_delta: float) -> bool:
+	if _done:
+		return false
+	_ticks += 1
+	if _ticks < SETTLE_FRAMES:
+		return false
+	if _row < 0:
+		_publish(0)
+		return false
+	# The nodes processed frame _row in the previous tick.
+	_track.append(_camera_row(_row))
+	if _row == 0:
+		_baseline = _motion_state()
+	if _row + 1 < _frames:
+		_publish(_row + 1)
+		return false
+	_finish()
+	return false
+
+
+func _parse_args() -> String:
+	_scene_path = SceneArgs.value("--scene")
+	_camera_name = SceneArgs.value("--camera")
+	_out = SceneArgs.value("--out")
+	_frames = SceneArgs.int_value("--frames", 0)
+	_warmup = SceneArgs.int_value("--warmup", 0)
+	_fps = SceneArgs.int_value("--fps", 60)
+	_source_commit = SceneArgs.value("--source-commit")
+	if not _scene_path.begins_with("res://"):
+		return "--scene=res://... is required"
+	if _camera_name.is_empty():
+		return "--camera=<name or path> is required"
+	if _out.is_empty() or _out.begins_with("res://") or _out.begins_with("user://") or not _out.is_absolute_path():
+		return "--out has to be an absolute filesystem path"
+	if _frames < 1:
+		return "--frames has to be at least 1"
+	if _warmup < 0 or _fps < 1:
+		return "--warmup has to be at least 0 and --fps at least 1"
+	return ""
+
+
+func _publish(p_frame: int) -> void:
+	_row = p_frame
+	_harness.call("drive_frame", p_frame)
+
+
+func _finish() -> void:
+	_done = true
+	_harness.call("drive_frame", -1)
+	var moved := _motion_error(_baseline, _motion_state())
+	if not moved.is_empty():
+		_fail(1, moved)
+		return
+	var error := _export()
+	if not error.is_empty():
+		_fail(1, error)
+		return
+	quit(0)
+
+
+func _fail(p_code: int, p_message: String) -> void:
+	_done = true
+	printerr("ue_export: " + p_message)
+	quit(p_code)
+
+
+func _camera_row(p_frame: int) -> String:
+	var transform := _camera.global_transform.orthonormalized()
+	var q := transform.basis.get_rotation_quaternion()
+	var values := [transform.origin.x, transform.origin.y, transform.origin.z, q.x, q.y, q.z, q.w, _camera.fov, _camera.near, _camera.far]
+	var cells := PackedStringArray([str(p_frame)])
+	for value: float in values:
+		cells.append("%.9f" % value)
+	return ",".join(cells)
+
+
+## Transforms of every geometry node and light, every MultiMesh's instances, and light energies:
+## compared between the first and the last sampled frame.
+func _motion_state() -> Dictionary:
+	var state := {}
+	var stack: Array[Node] = [_scene]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node is GeometryInstance3D or node is Light3D:
+			var key := str(_scene.get_path_to(node))
+			var entry := [(node as Node3D).global_transform, (node as Node3D).is_visible_in_tree()]
+			if node is Light3D:
+				entry.append((node as Light3D).light_energy)
+			if node is MultiMeshInstance3D and (node as MultiMeshInstance3D).multimesh != null:
+				var multimesh := (node as MultiMeshInstance3D).multimesh
+				var transforms: Array = []
+				for index in multimesh.instance_count:
+					transforms.append(multimesh.get_instance_transform(index))
+				entry.append(Lib.transforms_sha256(transforms))
+			state[key] = entry
+		for child in node.get_children():
+			stack.append(child)
+	return state
+
+
+func _motion_error(p_first: Dictionary, p_last: Dictionary) -> String:
+	if p_first.size() != p_last.size():
+		return "the scene added or removed geometry or lights while the camera path ran; moving content is not exported yet"
+	for key: String in p_first:
+		if not p_last.has(key) or p_first[key] != p_last[key]:
+			return "%s moved or changed while the camera path ran; moving content is not exported yet" % key
+	return ""
+
+
+func _export() -> String:
+	_walk(_scene)
+	var environment_refusals := Lib.environment_refusals(_environment_node.environment if _environment_node != null else null, _camera)
+	for refusal in environment_refusals:
+		_unsupported.append(refusal)
+	if not _unsupported.is_empty():
+		return "not exported yet: " + "; ".join(_unsupported)
+	DirAccess.make_dir_recursive_absolute(_out)
+	var files: Array[String] = []
+
+	var library: Array = []
+	for mesh_entry: Dictionary in _meshes:
+		library.append({"name": mesh_entry["id"], "mesh": mesh_entry["library_mesh"]})
+	var error := _write_glb(_out.path_join("library.glb"), library)
+	if not error.is_empty():
+		return error
+	files.append("library.glb")
+	error = _write_glb(_out.path_join("axes.glb"), _axes_fixture())
+	if not error.is_empty():
+		return error
+	files.append("axes.glb")
+
+	var csv := "frame,px,py,pz,qx,qy,qz,qw,fov_deg,near,far\n" + "\n".join(_track) + "\n"
+	error = _write_text("camera_track.csv", csv)
+	if not error.is_empty():
+		return error
+	files.append("camera_track.csv")
+
+	var environment: Variant = null
+	if _environment_node != null and _environment_node.environment != null:
+		var sky_entry: Variant = null
+		var env := _environment_node.environment
+		if env.sky != null:
+			var material := env.sky.sky_material
+			sky_entry = {
+				"properties": Lib.storage_properties(env.sky),
+				"material": {"class": material.get_class() if material != null else "", "properties": Lib.storage_properties(material) if material != null else {}},
+			}
+			if material is ProceduralSkyMaterial:
+				var pixels := Lib.procedural_sky_panorama(material, _suns, Lib.SKY_WIDTH, Lib.SKY_HEIGHT)
+				error = _write_bytes("sky.hdr", Lib.encode_hdr(Lib.SKY_WIDTH, Lib.SKY_HEIGHT, pixels))
+				if not error.is_empty():
+					return error
+				files.append("sky.hdr")
+				sky_entry["panorama"] = "sky.hdr"
+				sky_entry["panorama_size"] = [Lib.SKY_WIDTH, Lib.SKY_HEIGHT]
+				sky_entry["panorama_projection"] = "godot_equirect"
+			elif material != null:
+				return "not exported yet: sky material %s (only ProceduralSkyMaterial is baked)" % material.get_class()
+		environment = {
+			"node": str(_scene.get_path_to(_environment_node)),
+			"properties": Lib.storage_properties(env),
+			"sky": sky_entry,
+			"camera_attributes": Lib.storage_properties(_environment_node.camera_attributes) if _environment_node.camera_attributes != null else null,
+		}
+
+	var aabb_end := _aabb.end
+	var mesh_entries: Array = []
+	for mesh_entry: Dictionary in _meshes:
+		var entry := mesh_entry.duplicate()
+		entry.erase("library_mesh")
+		mesh_entries.append(entry)
+	var scene := {
+		"schema": Lib.SCHEMA,
+		"scene": _scene_path,
+		"units": {"length": "m", "up": "+Y", "handedness": "right", "camera_forward": "-Z", "light_forward": "-Z"},
+		"fps": _fps,
+		"warmup": _warmup,
+		"frames": _frames,
+		"camera": {
+			"node": str(_scene.get_path_to(_camera)),
+			"track": "camera_track.csv",
+			"fov_deg": _camera.fov,
+			"fov_axis": "vertical" if _camera.keep_aspect == Camera3D.KEEP_HEIGHT else "horizontal",
+			"near": _camera.near,
+			"far": _camera.far,
+			"projection": "perspective" if _camera.projection == Camera3D.PROJECTION_PERSPECTIVE else "unsupported",
+			"attributes": Lib.storage_properties(_camera.attributes) if _camera.attributes != null else null,
+		},
+		"meshes": mesh_entries,
+		"materials": _materials,
+		"instances": _instances,
+		"lights": _lights,
+		"environment": environment,
+		"rendering": _rendering(),
+		"checks": {
+			"instances_total": _node_instances + _multimesh_instances,
+			"node_instances": _node_instances,
+			"multimesh_instances": _multimesh_instances,
+			"multimesh_nodes": _multimesh_nodes,
+			"meshes": _meshes.size(),
+			"materials": _materials.size(),
+			"lights": _lights.size(),
+			"triangles_total": _triangles_total,
+			"aabb": {"min": Lib.json_value(_aabb.position), "max": Lib.json_value(aabb_end)},
+			"instances_sha256": Lib.transforms_sha256(_world_transforms),
+			"positions_sha256": Lib.positions_sha256(_world_transforms),
+			"camera_rows": _track.size(),
+		},
+	}
+	if _camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
+		return "not exported yet: a camera projection other than perspective"
+	error = _write_text("scene.json", JSON.stringify(scene, "\t", true, true) + "\n")
+	if not error.is_empty():
+		return error
+	files.append("scene.json")
+
+	var checksums := {}
+	for file_name in files:
+		checksums[file_name] = FileAccess.get_sha256(_out.path_join(file_name))
+	var version := Engine.get_version_info()
+	var manifest := {
+		"schema": Lib.SCHEMA,
+		"tool": "res://tools/ue_export/ue_export.gd",
+		"engine": {"version": String(version["string"]), "hash": String(version["hash"])},
+		"source_commit": _source_commit,
+		"scene": _scene_path,
+		"scene_sha256": FileAccess.get_sha256(_scene_path),
+		"user_args": Array(OS.get_cmdline_user_args()),
+		"files": checksums,
+	}
+	error = _write_text("export_manifest.json", JSON.stringify(manifest, "\t", true, true) + "\n")
+	if not error.is_empty():
+		return error
+	print("GODOTNEXT_UE_EXPORT " + JSON.stringify({
+		"scene": _scene_path,
+		"instances": _node_instances + _multimesh_instances,
+		"meshes": _meshes.size(),
+		"materials": _materials.size(),
+		"lights": _lights.size(),
+		"camera_rows": _track.size(),
+		"files": files.size() + 1,
+	}, "", true))
+	return ""
+
+
+func _walk(p_node: Node) -> void:
+	if p_node is Node3D and not (p_node as Node3D).is_visible_in_tree():
+		return
+	if p_node is GeometryInstance3D and (p_node as GeometryInstance3D).material_overlay != null:
+		_unsupported.append("%s has a material overlay" % _scene.get_path_to(p_node))
+	elif p_node is MeshInstance3D:
+		_add_mesh_instance(p_node)
+	elif p_node is MultiMeshInstance3D:
+		_add_multimesh(p_node)
+	elif p_node is DirectionalLight3D or p_node is OmniLight3D or p_node is SpotLight3D:
+		_add_light(p_node)
+	elif p_node is VisualInstance3D:
+		_unsupported.append("%s (%s)" % [_scene.get_path_to(p_node), p_node.get_class()])
+	elif p_node is WorldEnvironment:
+		if _environment_node != null:
+			_unsupported.append("a second WorldEnvironment at %s" % _scene.get_path_to(p_node))
+		_environment_node = p_node
+	for child in p_node.get_children():
+		_walk(child)
+
+
+func _add_mesh_instance(p_node: MeshInstance3D) -> void:
+	var mesh := p_node.mesh
+	if mesh == null:
+		return
+	if p_node.skin != null:
+		_unsupported.append("skinned mesh %s" % _scene.get_path_to(p_node))
+		return
+	var id := _mesh_id(mesh)
+	if id.is_empty():
+		return
+	var materials: Array = []
+	for surface in mesh.get_surface_count():
+		materials.append(_material_id(p_node.get_active_material(surface)))
+	var transform := p_node.global_transform
+	_instances.append({
+		"kind": "node",
+		"node": str(_scene.get_path_to(p_node)),
+		"mesh": id,
+		"materials": materials,
+		"transform": Lib.transform_rows(transform),
+		"cast_shadow": p_node.cast_shadow,
+		"gi_mode": p_node.gi_mode,
+		"visibility_range": [p_node.visibility_range_begin, p_node.visibility_range_end],
+	})
+	_add_placement(transform, mesh)
+	_node_instances += 1
+
+
+func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
+	var multimesh := p_node.multimesh
+	if multimesh == null or multimesh.mesh == null:
+		return
+	var path := str(_scene.get_path_to(p_node))
+	if multimesh.transform_format != MultiMesh.TRANSFORM_3D:
+		_unsupported.append("2D MultiMesh %s" % path)
+		return
+	var id := _mesh_id(multimesh.mesh)
+	if id.is_empty():
+		return
+	var materials: Array = []
+	for surface in multimesh.mesh.get_surface_count():
+		var material := p_node.material_override if p_node.material_override != null else multimesh.mesh.surface_get_material(surface)
+		materials.append(_material_id(material))
+	var count := multimesh.instance_count
+	if multimesh.visible_instance_count >= 0:
+		count = mini(count, multimesh.visible_instance_count)
+	var rows: Array = []
+	var distinct := {}
+	for index in count:
+		var world := p_node.global_transform * multimesh.get_instance_transform(index)
+		rows.append(Lib.transform_rows(world))
+		distinct[world] = true
+		_add_placement(world, multimesh.mesh)
+	if count > 1 and distinct.size() == 1:
+		_unsupported.append("%s: every MultiMesh instance has the same transform (the renderer kept no instance data)" % path)
+		return
+	if multimesh.use_colors:
+		_unsupported.append("%s: per-instance MultiMesh colors (not exported yet)" % path)
+		return
+	_instances.append({
+		"kind": "multimesh",
+		"node": path,
+		"mesh": id,
+		"materials": materials,
+		"transform": Lib.transform_rows(p_node.global_transform),
+		"count": count,
+		"instances": rows,
+		"use_colors": multimesh.use_colors,
+		"use_custom_data": multimesh.use_custom_data,
+		"cast_shadow": p_node.cast_shadow,
+		"gi_mode": p_node.gi_mode,
+		"visibility_range": [p_node.visibility_range_begin, p_node.visibility_range_end],
+	})
+	_multimesh_instances += count
+	_multimesh_nodes += 1
+
+
+func _add_placement(p_world: Transform3D, p_mesh: Mesh) -> void:
+	_world_transforms.append(p_world)
+	_triangles_total += int(_meshes[_mesh_ids[p_mesh]["index"]]["triangles"])
+	var box := p_world * p_mesh.get_aabb()
+	if _aabb_set:
+		_aabb = _aabb.merge(box)
+	else:
+		_aabb = box
+		_aabb_set = true
+
+
+func _mesh_id(p_mesh: Mesh) -> String:
+	if _mesh_ids.has(p_mesh):
+		return String(_mesh_ids[p_mesh]["id"])
+	var id := "m%04d" % _meshes.size()
+	var library_mesh := ArrayMesh.new()
+	library_mesh.resource_name = id
+	var surfaces: Array = []
+	var triangles := 0
+	var vertices := 0
+	if not (p_mesh is ArrayMesh or p_mesh is PrimitiveMesh):
+		_unsupported.append("%s mesh %s" % [p_mesh.get_class(), id])
+		return ""
+	if p_mesh is ArrayMesh and (p_mesh as ArrayMesh).get_blend_shape_count() > 0:
+		_unsupported.append("blend shapes on mesh %s" % id)
+		return ""
+	for surface in p_mesh.get_surface_count():
+		if p_mesh is ArrayMesh and (p_mesh as ArrayMesh).surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+			_unsupported.append("a non-triangle surface on mesh %s" % id)
+			return ""
+		var arrays := p_mesh.surface_get_arrays(surface)
+		var surface_vertices := (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+		var indices: Variant = arrays[Mesh.ARRAY_INDEX]
+		var surface_triangles := (indices as PackedInt32Array).size() / 3 if indices != null else surface_vertices / 3
+		if arrays[Mesh.ARRAY_BONES] != null:
+			_unsupported.append("skinned surface on mesh %s" % id)
+			return ""
+		library_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		library_mesh.surface_set_material(surface, p_mesh.surface_get_material(surface))
+		surfaces.append({"triangles": surface_triangles, "vertices": surface_vertices})
+		triangles += surface_triangles
+		vertices += surface_vertices
+	var nextgeo := false
+	if p_mesh.has_method("get_virtual_geometry"):
+		nextgeo = p_mesh.call("get_virtual_geometry") != null
+	var source := p_mesh.resource_path if not p_mesh.resource_path.is_empty() and not p_mesh.resource_path.contains("::") else ""
+	_mesh_ids[p_mesh] = {"id": id, "index": _meshes.size()}
+	_meshes.append({
+		"id": id,
+		"gltf_node": id,
+		"class": p_mesh.get_class(),
+		"name": String(p_mesh.resource_name),
+		"source": source,
+		"surfaces": surfaces,
+		"triangles": triangles,
+		"vertices": vertices,
+		"aabb": Lib.json_value(p_mesh.get_aabb()),
+		"nextgeo": nextgeo,
+		"library_mesh": library_mesh,
+	})
+	return id
+
+
+func _material_id(p_material: Material) -> String:
+	var key: Variant = p_material if p_material != null else "default"
+	if _material_ids.has(key):
+		return String(_material_ids[key])
+	var material := p_material
+	var id := "default"
+	if material == null:
+		material = StandardMaterial3D.new()
+	else:
+		id = "mat%04d" % _materials.size()
+	if not (material is BaseMaterial3D):
+		_unsupported.append("%s material %s" % [material.get_class(), id])
+		return id
+	var base := material as BaseMaterial3D
+	for texture in BaseMaterial3D.TEXTURE_MAX:
+		if base.get_texture(texture) != null:
+			_unsupported.append("textured material %s (textures are not exported yet)" % id)
+			return id
+	if base.next_pass != null:
+		_unsupported.append("material %s has a next pass" % id)
+		return id
+	var refusals := Lib.material_refusals(base)
+	if not refusals.is_empty():
+		_unsupported.append("material %s: %s (not exported yet)" % [id, ", ".join(refusals)])
+		return id
+	var emission := base.emission.srgb_to_linear() * base.emission_energy_multiplier if base.emission_enabled else Color(0, 0, 0)
+	_material_ids[key] = id
+	_materials.append({
+		"id": id,
+		"name": String(base.resource_name),
+		"class": base.get_class(),
+		"albedo_linear": Lib.json_value(base.albedo_color.srgb_to_linear()),
+		"emission_linear": [emission.r, emission.g, emission.b],
+		"properties": Lib.storage_properties(base),
+	})
+	return id
+
+
+func _add_light(p_light: Light3D) -> void:
+	var path := str(_scene.get_path_to(p_light))
+	if p_light.light_projector != null:
+		_unsupported.append("light projector on %s" % path)
+		return
+	var type := "directional"
+	if p_light is OmniLight3D:
+		type = "omni"
+	elif p_light is SpotLight3D:
+		type = "spot"
+	var transform := p_light.global_transform
+	var color := p_light.light_color.srgb_to_linear()
+	_lights.append({
+		"node": path,
+		"type": type,
+		"transform": Lib.transform_rows(transform),
+		"direction": Lib.json_value(-transform.basis.z.normalized()),
+		"color_linear": [color.r, color.g, color.b],
+		"properties": Lib.storage_properties(p_light),
+	})
+	if p_light is DirectionalLight3D and (p_light as DirectionalLight3D).sky_mode != DirectionalLight3D.SKY_MODE_LIGHT_ONLY:
+		var energy := p_light.light_energy
+		if bool(ProjectSettings.get_setting("rendering/lights_and_shadows/use_physical_light_units", false)):
+			energy *= p_light.light_intensity_lux
+		_suns.append({
+			"direction": transform.basis.z.normalized(),
+			"color": color,
+			"energy": energy,
+			"size": deg_to_rad(p_light.light_angular_distance),
+		})
+
+
+func _rendering() -> Dictionary:
+	var project := {}
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var name := String(property["name"])
+		for prefix in PROJECT_PREFIXES:
+			if name.begins_with(prefix):
+				project[name] = Lib.json_value(ProjectSettings.get_setting(name))
+				break
+	var rows := {}
+	for key: String in RECORD_ROWS:
+		if project.has(key):
+			rows[key] = RECORD_ROWS[key]
+	return {"project": project, "record_rows": rows}
+
+
+## Calibration markers for the UE import: small boxes whose vertices sit at the origin and 1 m
+## along +X, +Y and +Z, so the importer's axis and unit conversion can be read from their bounds.
+func _axes_fixture() -> Array:
+	var markers := {"axis_o": Vector3.ZERO, "axis_x": Vector3.RIGHT, "axis_y": Vector3.UP, "axis_z": Vector3.BACK}
+	var entries: Array = []
+	for name: String in markers:
+		var box := BoxMesh.new()
+		box.size = Vector3(0.1, 0.1, 0.1)
+		var arrays := box.get_mesh_arrays()
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		for index in vertices.size():
+			vertices[index] += markers[name]
+		arrays[Mesh.ARRAY_VERTEX] = vertices
+		var mesh := ArrayMesh.new()
+		mesh.resource_name = name
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		entries.append({"name": name, "mesh": mesh})
+	return entries
+
+
+func _write_glb(p_path: String, p_entries: Array) -> String:
+	var root_node := Node3D.new()
+	root_node.name = "library"
+	for entry: Dictionary in p_entries:
+		var instance := MeshInstance3D.new()
+		instance.name = String(entry["name"])
+		instance.mesh = entry["mesh"]
+		root_node.add_child(instance)
+		instance.owner = root_node
+	var document := GLTFDocument.new()
+	var state := GLTFState.new()
+	var error := document.append_from_scene(root_node, state)
+	if error == OK:
+		error = document.write_to_filesystem(state, p_path)
+	root_node.free()
+	if error != OK:
+		return "glTF export of %s failed (%s)" % [p_path.get_file(), error_string(error)]
+	return ""
+
+
+func _write_text(p_name: String, p_text: String) -> String:
+	return _write_bytes(p_name, p_text.to_utf8_buffer())
+
+
+func _write_bytes(p_name: String, p_bytes: PackedByteArray) -> String:
+	var file := FileAccess.open(_out.path_join(p_name), FileAccess.WRITE)
+	if file == null:
+		return "cannot write %s (%s)" % [p_name, error_string(FileAccess.get_open_error())]
+	file.store_buffer(p_bytes)
+	file.close()
+	return ""

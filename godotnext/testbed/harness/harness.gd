@@ -61,6 +61,8 @@ var _job := {}
 var _driving := false
 var _animation_frame := 0
 var _nextgi_counters_present := false
+## A frame index published by drive_frame() outside a capture or timing run, or -1.
+var _external_frame := -1
 
 
 func _ready() -> void:
@@ -98,7 +100,7 @@ func _ready() -> void:
 
 
 func is_driving_animation() -> bool:
-	return _active and not _failed and _driving
+	return _external_frame >= 0 or (_active and not _failed and _driving)
 
 
 func is_settling() -> bool:
@@ -106,7 +108,14 @@ func is_settling() -> bool:
 
 
 func get_animation_frame() -> int:
-	return _animation_frame
+	return _external_frame if _external_frame >= 0 else _animation_frame
+
+
+## Publishes a frame index without a capture or timing run. The UE exporter (#235) steps a scene's
+## frame-indexed animation through it, so its row N is the pose a timing run shows at measured
+## row N. A negative frame stops it.
+func drive_frame(p_frame: int) -> void:
+	_external_frame = p_frame if p_frame >= 0 else -1
 
 
 func _process(_delta: float) -> void:

@@ -129,7 +129,7 @@ Scoped to G0-4 and G0-6. There is no settle window and no movie writer. After th
 
 `summary.json` stays schema 1. It holds `schema`, `frames`, `warmup`, and `columns`, plus the §2.1 fields below. Each column has `p50`, `p95`, `p99`, and `n`. Percentiles use linear interpolation: rank is `(percent / 100) * (n - 1)`. Empty input is 0. A single sample is that sample. Blank GPU cells are skipped, so a pass can have `n` below `frames`. `timing.csv` is unchanged: the new fields are not columns.
 
-While a capture or timing run is active, the harness publishes the frame index (`is_driving_animation`, `get_animation_frame`). Capture uses the window index, warmup included. Timing holds frame 0 through the entry frame and the warmup, then uses the measured row index. `--hold-frame` on the scene wins over that index. Scenes that are not in a harness run count frames themselves, still from the frame index, never from wall time.
+While a capture or timing run is active, the harness publishes the frame index (`is_driving_animation`, `get_animation_frame`). Capture uses the window index, warmup included. Timing holds frame 0 through the entry frame and the warmup, then uses the measured row index. `--hold-frame` on the scene wins over that index. Scenes that are not in a harness run count frames themselves, still from the frame index, never from wall time. Outside a run, `drive_frame(N)` publishes frame index N the same way, and `drive_frame(-1)` stops it; the UE comparison exporter (`tools/ue_export`, #235) samples a scene's camera path with it.
 
 The extra summary object:
 
