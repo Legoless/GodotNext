@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -30,9 +31,11 @@ from godotnext_metrics.indirect import (
     q3_leak_ratio,
     q4a_step_convergence,
     q4b_continuous_convergence,
+    q8_masked_temporal_sigma,
     q8_temporal_sigma,
 )
 from godotnext_metrics.jsonutil import as_dict, as_float, as_int, as_list
+from godotnext_metrics.masks import MaskError, load_mask_frames, union
 from godotnext_metrics.pixels import q5_crack_pixels, q6_hole_pixels
 from godotnext_metrics.q19_upscaler_flip import q19_upscaler_flip, select_q19_frames
 from godotnext_metrics.q20_final_indirect import q20_final_indirect
@@ -55,13 +58,18 @@ MEASURED = 64
 REFERENCE_ONLY = frozenset({"q1"})
 
 
-def run_metric(metric: str, in_dir: Path | None, ref_dir: Path | None) -> MetricResult:
+def run_metric(metric: str, in_dir: Path | None, ref_dir: Path | None, mask: str | None = None) -> MetricResult:
     key = metric.strip().lower()
     if key not in COMMANDS:
         known = ", ".join(sorted(COMMANDS))
         raise MetricInputError(metric, f"unknown metric {metric!r}; expected one of {known}")
     if in_dir is None and key not in REFERENCE_ONLY:
         raise MetricInputError(metric, "--in is required")
+    if mask is not None:
+        # The content-mask option (#190) leaves the unmasked commands untouched.
+        if key not in MASKED_COMMANDS:
+            raise MetricInputError(metric, f"--mask applies to {', '.join(sorted(MASKED_COMMANDS))}")
+        return MASKED_COMMANDS[key](in_dir, ref_dir, mask)  # type: ignore[arg-type]
     return COMMANDS[key](in_dir, ref_dir)  # type: ignore[arg-type]
 
 
@@ -184,6 +192,71 @@ def run_q8(in_dir: Path, ref_dir: Path | None) -> MetricResult:
     return q8_temporal_sigma(window)
 
 
+def run_q8_masked(in_dir: Path, ref_dir: Path | None, mask: str) -> MetricResult:
+    """Q8 over the pixels of a content mask, each pixel a patch, on the frozen 64-frame window.
+
+    The luminance is indirect (full minus direct-only) when the capture has direct-only renders, as
+    the unmasked Q8 reads it. An upscaler capture has none, so it is the final output's linear
+    luminance: from ``hdr_*.exr``, or from the display-referred ``frame*.png`` decoded to linear.
+    A per-frame mask run contributes the union of its window frames.
+    """
+    _ = ref_dir
+    indices = list(range(SETTLING, SETTLING + MEASURED))
+    planes, source = _luminance_planes(in_dir, indices, "Q8")
+    first = planes(indices[0])
+    try:
+        frames = load_mask_frames(in_dir, mask, indices, (int(first.shape[0]), int(first.shape[1])))
+    except MaskError as error:
+        raise MetricInputError("Q8", str(error)) from error
+    selected = union(frames)
+    samples = np.empty((len(indices), int(np.count_nonzero(selected))), dtype=np.float64)
+    samples[0] = first[selected]
+    for row, index in enumerate(indices[1:], start=1):
+        samples[row] = planes(index)[selected]
+    try:
+        result = q8_masked_temporal_sigma(samples, mask_name=mask)
+    except ValueError as error:
+        raise MetricInputError("Q8", str(error)) from error
+    result.details["luminance"] = source
+    result.details["mask_frames_identical"] = all(np.array_equal(frames[0], plane) for plane in frames[1:])
+    return result
+
+
+def _luminance_planes(
+    directory: Path, indices: list[int], metric: str
+) -> tuple[Callable[[int], NDArray[np.float64]], str]:
+    """A per-frame luminance reader for every index, and which input it reads."""
+    from godotnext_metrics.color import luminance, srgb_to_linear
+
+    full = indexed_paths(directory, "hdr_*.exr")
+    direct = indexed_paths(directory / "direct", "hdr_*.exr")
+    if direct and all(index in full and index in direct for index in indices):
+
+        def indirect(index: int) -> NDArray[np.float64]:
+            return luminance(
+                read_exr(full[index])[..., :3].astype(np.float64) - read_exr(direct[index])[..., :3].astype(np.float64)
+            )
+
+        return indirect, "indirect"
+    if all(index in full for index in indices):
+
+        def linear(index: int) -> NDArray[np.float64]:
+            return luminance(read_exr(full[index])[..., :3].astype(np.float64))
+
+        return linear, "hdr"
+    frames = indexed_paths(directory, "frame*.png")
+    if all(index in frames for index in indices):
+
+        def display(index: int) -> NDArray[np.float64]:
+            image = read_png(frames[index])
+            if image.ndim == 2:
+                image = np.repeat(image[..., None], 3, axis=-1)
+            return luminance(srgb_to_linear(image[..., :3].astype(np.float64) / 255.0))
+
+        return display, "png"
+    raise MetricInputError(metric, f"need {len(indices)} frames starting at {indices[0]} as hdr_*.exr or frame*.png")
+
+
 def run_q9(in_dir: Path, ref_dir: Path | None) -> MetricResult:
     reference = _need_ref("Q9", ref_dir)
     test = _single_color(in_dir, "Q9")
@@ -281,11 +354,11 @@ def run_q18(in_dir: Path, ref_dir: Path | None) -> MetricResult:
     return q18_rt_coverage(as_float(row["tlas_instances"]), as_float(row["gi_opaque_instances_in_radius"]))
 
 
-def run_q19(in_dir: Path, ref_dir: Path | None) -> MetricResult:
+def run_q19(in_dir: Path, ref_dir: Path | None, mask: str | None = None) -> MetricResult:
     reference = _need_ref("Q19", ref_dir)
     scenes = _q19_scene_dirs(in_dir, reference)
     if len(scenes) > 1:
-        results = [_run_q19_scene(test, ref) for test, ref in scenes]
+        results = [_run_q19_scene(test, ref, mask) for test, ref in scenes]
         accepted = [result for result in results if result.passed and result.values.get("mean") is not None]
         means = [as_float(result.values["mean"]) for result in accepted]
         cross = float(np.mean(np.asarray(means, dtype=np.float64))) if means else None
@@ -303,7 +376,12 @@ def run_q19(in_dir: Path, ref_dir: Path | None) -> MetricResult:
             },
             details={"scenes": len(results), "reference_accepted": all(result.passed for result in results)},
         )
-    return _run_q19_scene(in_dir, reference)
+    return _run_q19_scene(in_dir, reference, mask)
+
+
+def run_q19_masked(in_dir: Path, ref_dir: Path | None, mask: str) -> MetricResult:
+    """Q19 with only the named content mask (#190), frame by frame when it is a mask run."""
+    return run_q19(in_dir, ref_dir, mask)
 
 
 def run_q20(in_dir: Path, ref_dir: Path | None) -> MetricResult:
@@ -362,8 +440,13 @@ COMMANDS = {
     "q21": run_q21,
 }
 
+MASKED_COMMANDS = {
+    "q8": run_q8_masked,
+    "q19": run_q19_masked,
+}
 
-def _run_q19_scene(in_dir: Path, reference: Path) -> MetricResult:
+
+def _run_q19_scene(in_dir: Path, reference: Path, mask: str | None = None) -> MetricResult:
     config = _read_json(in_dir / "q19.json", "Q19") if (in_dir / "q19.json").is_file() else {"form": "static"}
     form = str(config.get("form", "static"))
     reset = _optional_int(config.get("reset_frame"))
@@ -380,7 +463,15 @@ def _run_q19_scene(in_dir: Path, reference: Path) -> MetricResult:
     test_frames = [_load_color(test_paths[index]) for index in indices]
     ref_frames = [_load_color(ref_paths[index]) for index in indices]
     msaa_frames = [_load_color(msaa_paths[index]) for index in indices]
-    masks = {path.stem.removeprefix("cmask_"): read_png(path) for path in sorted(in_dir.glob("cmask_*.png"))}
+    masks: dict[str, NDArray[np.generic] | list[NDArray[np.bool_]]]
+    if mask is None:
+        masks = {path.stem.removeprefix("cmask_"): read_png(path) for path in sorted(in_dir.glob("cmask_*.png"))}
+    else:
+        shape = np.asarray(test_frames[0]).shape
+        try:
+            masks = {mask: load_mask_frames(in_dir, mask, indices, (int(shape[0]), int(shape[1])))}
+        except MaskError as error:
+            raise MetricInputError("Q19", str(error)) from error
     manifest = _optional_json(reference / "manifest.json")
     resolution = None
     output_size = manifest.get("output_size") if manifest else None

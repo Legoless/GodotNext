@@ -178,6 +178,30 @@ The three runners (and therefore both self-tests) apply a per-scene `override.cf
 
 `selftest/selftest.tscn` builds 100 gray cubes from a fixed `RandomNumberGenerator` seed, one shadowed directional light, a camera named `CaptureCam`, and a WorldEnvironment with SDFGI, a procedural sky, and a linear tonemap. SDFGI bounce feedback is 0, convergence is 5 frames, and dynamic lights update every frame, so the probe history reaches a fixed point and two same-seed captures hash the same. Output goes under `godotnext/testbed/captures/`, which is gitignored. Do not commit captures. The raw power dumps are local run output.
 
+## GT-2 masks, the static segment and the GT-6 load step (#190)
+
+Upscaler Torture carries two GT-2 additions, sized from the static camera at 1440p internal and checked without a GPU by `scenes/upscaler_torture/check_gt_content.gd`: two grilles of vertical bars low on either side, receding at 21–37° to the view ray, with a projected period from 1 to 4 px (moiré layer, bit 17), and 12 cables of 0.3–1.0 px projected width, six against the sky and six against the checker backdrop (thin-wire layer, bit 18).
+
+- `--mask=moire` and `--mask=thin_wire` are capture runs like the #95 masks, but the rest of the scene is drawn black instead of hidden, so a mask pixel is one where that content is visible. The thin-wire mask grows each cable by one 1440p pixel a side in screen space (1.5 px at 2160p), where its anti-aliased footprint lies, so it covers the same share of the frame at both output sizes. Every mask run (#95's too) rewrites its kept frames as single-channel 8-bit PNGs, the R8 mask, beside the run's manifest.
+- `--tsr-quality=low|medium|high|epic|cinematic` sets `Viewport.tsr_quality` for `--upscaler=tsr`.
+- `--variant=static` holds the static camera and freezes the scene (fan, character, occluders, particles after their seeded preprocess, the scrolling emissive) for the whole run. It is captured as `--warmup=64 --frames=300`; Q8 and Q19's static form read their frozen 64-frame window inside it.
+- `runners/upscaler_jobs.sh` adds the `upscaler_torture_static` scene, FSR2 Quality (`fsr2_quality`), TSR Epic at 1.0 and High at 0.667 and 0.5, and the `mask_moire` and `mask_thin_wire` runs. `metrics/upscaler_compare.py` reads that tree.
+
+`tests/gpu_load_step.tscn` is GT-6's load step: the Dense City flight (the Slow IO Flight stand-in, or the generated city with `--with-city=1`) with a compute burner whose cost is calibrated at startup, back to back against the burner-off baseline while the camera sweeps the 30 flight frames before the switch, so the GPU time doubles; it switches on at flight frame 600. The burner's cost scales with the internal pixel count, so dynamic resolution can win it back. `--out=<dir>` writes `gpu_load_step.json` and `gpu_load_step.csv`. Calibration runs with dynamic resolution off; afterwards the project setting comes back, or `--dynamic-resolution=1` turns it on. `--with-city`, `--flight-frames` and `--dynamic-resolution` are standalone flags: the harness rejects flags it does not know, so a timing run takes dynamic resolution from the project settings (an `override.cfg`) and the upscaler from `--upscaler`. In a timing run the calibration has to finish inside `--warmup` (900 frames is enough), and timing runs lock the GPU clock. The doubling within ±5% is measured in PQ (`metrics/`, `python3 -m godotnext_metrics.load_step`, which takes the harness `timing.csv` when there is one).
+
+```bash
+./bin/godot.linuxbsd.editor.x86_64 --path godotnext/testbed --rendering-driver vulkan \
+  --resolution 2560x1440 --disable-vsync --gpu-profile --quit-after 2400 res://tests/gpu_load_step.tscn -- \
+  --mode=timing --scene=res://tests/gpu_load_step.tscn --out="$OUT" --warmup=900 --frames=700
+```
+
+Headless checks:
+
+```bash
+./bin/godot.macos.editor.arm64 --headless --path godotnext/testbed --script res://scenes/upscaler_torture/check_gt_content.gd
+./bin/godot.macos.editor.arm64 --headless --path godotnext/testbed --script res://harness/tests/test_load_step.gd
+```
+
 ## Streaming reports (#74)
 
 Exclusion Matrix, Slow IO Flight and the Feature Parity Room streaming variant are scenes, not harness modes. Their reports are a side CLI, schema 1, and they do not add keys that Q11 reads and do not add entries to the frozen q1–q21 command set:

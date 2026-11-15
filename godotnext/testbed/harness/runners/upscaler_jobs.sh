@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Runner job definitions and launcher for #95 (GU-4 / GU-5 upscaler & Q19/Q21 captures).
-# Covers TAA, FSR2, the DEV copy upscaler, SSAA 2x MSAA 8x/4x references, and
-# content masks at 2560x1440 and 3840x2160 across Upscaler Torture and the
-# three legacy baseline scenes.
+# Runner job definitions and launcher for #95 (GU-4 / GU-5 upscaler & Q19/Q21 captures)
+# and #190 (GT-2). Covers TAA, FSR2 Quality and Performance, TSR Epic at 1.0 and High at
+# 0.667 and 0.5, the DEV copy upscaler, SSAA 2x MSAA 8x/4x references, and content masks
+# at 2560x1440 and 3840x2160 across Upscaler Torture, its static segment
+# (upscaler_torture_static: --variant=static, a 64-frame warm-up and 300 static frames)
+# and the three legacy baseline scenes. DLSS captures come from a DLSS-enabled build in PQ;
+# upscaler_compare.py reads them as dlss_dlaa, dlss_quality and dlss_performance.
 
 set -euo pipefail
 
@@ -15,9 +18,9 @@ testbed="$repo_root/godotnext/testbed"
 GODOT="${GODOT:-$repo_root/bin/godot.macos.editor.arm64}"
 GODOT_DEV="${GODOT_DEV:-$repo_root/bin/godot.macos.editor.dev.arm64}"
 
-SCENES=(upscaler_torture legacy_sdfgi legacy_voxelgi legacy_lightmap)
+SCENES=(upscaler_torture upscaler_torture_static legacy_sdfgi legacy_voxelgi legacy_lightmap)
 RESOLUTIONS=(2560x1440 3840x2160)
-JOBS=(taa fsr2 copy ssaa_msaa8 ssaa_msaa4 mask_alpha_particles mask_scrolling_emissive)
+JOBS=(taa fsr2 fsr2_quality tsr_epic_native tsr_high_quality tsr_high_performance copy ssaa_msaa8 ssaa_msaa4 mask_alpha_particles mask_scrolling_emissive mask_moire mask_thin_wire)
 
 list_only=0
 dry_run=0
@@ -32,8 +35,9 @@ usage() {
 	cat <<'EOF'
 Usage: upscaler_jobs.sh [--list] [--dry-run] [--scene <id>] [--job <id>] [--resolution <WxH>] [--frames <N>] [--seed <N>] [--out-root <abs_dir>]
 
-Scenes:      upscaler_torture | legacy_sdfgi | legacy_voxelgi | legacy_lightmap
-Jobs:        taa | fsr2 | copy | ssaa_msaa8 | ssaa_msaa4 | mask_alpha_particles | mask_scrolling_emissive
+Scenes:      upscaler_torture | upscaler_torture_static | legacy_sdfgi | legacy_voxelgi | legacy_lightmap
+Jobs:        taa | fsr2 | fsr2_quality | tsr_epic_native | tsr_high_quality | tsr_high_performance | copy |
+             ssaa_msaa8 | ssaa_msaa4 | mask_alpha_particles | mask_scrolling_emissive | mask_moire | mask_thin_wire
 Resolutions: 2560x1440 | 3840x2160
 EOF
 }
@@ -118,7 +122,7 @@ esac
 
 scene_path_for() {
 	case "$1" in
-	upscaler_torture) printf '%s\n' "res://scenes/upscaler_torture/upscaler_torture.tscn" ;;
+	upscaler_torture | upscaler_torture_static) printf '%s\n' "res://scenes/upscaler_torture/upscaler_torture.tscn" ;;
 	legacy_sdfgi) printf '%s\n' "res://scenes/legacy/legacy_sdfgi.tscn" ;;
 	legacy_voxelgi) printf '%s\n' "res://scenes/legacy/legacy_voxelgi.tscn" ;;
 	legacy_lightmap) printf '%s\n' "res://scenes/legacy/legacy_lightmap.tscn" ;;
@@ -128,7 +132,7 @@ scene_path_for() {
 
 camera_for() {
 	case "$1" in
-	upscaler_torture) printf '%s\n' "Camera3D" ;;
+	upscaler_torture | upscaler_torture_static) printf '%s\n' "Camera3D" ;;
 	*) printf '%s\n' "CaptureCam" ;;
 	esac
 }
@@ -136,7 +140,16 @@ camera_for() {
 default_frames_for() {
 	case "$1" in
 	upscaler_torture) printf '%s\n' "600" ;;
+	upscaler_torture_static) printf '%s\n' "300" ;;
 	*) printf '%s\n' "184" ;;
+	esac
+}
+
+# The static segment (#190) warms up for 64 frames before its 300 static frames.
+warmup_for() {
+	case "$1" in
+	upscaler_torture_static) printf '%s\n' "64" ;;
+	*) printf '%s\n' "0" ;;
 	esac
 }
 
@@ -146,6 +159,12 @@ job_applies_to_scene() {
 	case "$job_id" in
 	mask_alpha_particles|mask_scrolling_emissive)
 		[[ "$scene_id" == "upscaler_torture" ]]
+		;;
+	mask_moire|mask_thin_wire)
+		[[ "$scene_id" == upscaler_torture* ]]
+		;;
+	copy)
+		[[ "$scene_id" != "upscaler_torture_static" ]]
 		;;
 	*)
 		return 0
@@ -164,7 +183,15 @@ for scene_id in "${SCENES[@]}"; do
 	if [[ $override_frames -gt 0 ]]; then
 		frames=$override_frames
 	fi
-	quit_after=$((900 + 30 + 120 + frames))
+	warmup=$(warmup_for "$scene_id")
+	quit_after=$((900 + 30 + 120 + warmup + frames))
+	scene_user_args=()
+	if [[ $warmup -gt 0 ]]; then
+		scene_user_args+=(--warmup="$warmup")
+	fi
+	if [[ "$scene_id" == "upscaler_torture_static" ]]; then
+		scene_user_args+=(--variant=static)
+	fi
 
 	for res in "${RESOLUTIONS[@]}"; do
 		if [[ -n "$filter_res" && "$res" != "$filter_res" ]]; then
@@ -189,6 +216,18 @@ for scene_id in "${SCENES[@]}"; do
 			fsr2)
 				extra_user_args+=(--upscaler=fsr2)
 				;;
+			fsr2_quality)
+				extra_user_args+=(--upscaler=fsr2 --scale=0.667)
+				;;
+			tsr_epic_native)
+				extra_user_args+=(--upscaler=tsr --scale=1.0 --tsr-quality=epic)
+				;;
+			tsr_high_quality)
+				extra_user_args+=(--upscaler=tsr --scale=0.667 --tsr-quality=high)
+				;;
+			tsr_high_performance)
+				extra_user_args+=(--upscaler=tsr --scale=0.5 --tsr-quality=high)
+				;;
 			copy)
 				bin_path="$GODOT_DEV"
 				use_copy_env=1
@@ -205,6 +244,12 @@ for scene_id in "${SCENES[@]}"; do
 				;;
 			mask_scrolling_emissive)
 				extra_user_args+=(--mask=scrolling_emissive)
+				;;
+			mask_moire)
+				extra_user_args+=(--mask=moire)
+				;;
+			mask_thin_wire)
+				extra_user_args+=(--mask=thin_wire)
 				;;
 			esac
 			if [[ "$scene_id" == "upscaler_torture" && "$job_id" != mask_* && "$job_id" != ssaa_* ]]; then
@@ -233,6 +278,7 @@ for scene_id in "${SCENES[@]}"; do
 				--out="$out_dir"
 				--seed="$seed_val"
 				--frames="$frames"
+				${scene_user_args[@]+"${scene_user_args[@]}"}
 				"${extra_user_args[@]}"
 			)
 

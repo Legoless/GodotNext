@@ -125,8 +125,32 @@ def test_upscaler_jobs_list_and_dry_run(tmp_path: Path) -> None:
         text=True,
     )
     rows = [line.split("\t") for line in listed.stdout.strip().splitlines()]
-    # upscaler_torture has 7 jobs x 2 resolutions = 14; 3 legacy scenes have 5 jobs x 2 = 30 -> 44 total.
-    assert len(rows) == 44
+    # Per resolution (2): upscaler_torture runs 13 jobs, its static segment 10 (no copy upscaler and no
+    # #95 masks), and each of the 3 legacy scenes 9 (no content masks): (13 + 10 + 27) x 2 = 100.
+    assert len(rows) == 100
+    static = {row[2] for row in rows if row[0] == "upscaler_torture_static"}
+    assert {"mask_moire", "mask_thin_wire", "tsr_epic_native", "fsr2_quality"} <= static
+    assert "copy" not in static and "mask_alpha_particles" not in static
+    assert {row[2] for row in rows if row[0] == "legacy_sdfgi"}.isdisjoint({"mask_moire", "mask_thin_wire"})
+    static_dry = subprocess.run(
+        [
+            "bash",
+            str(runner),
+            "--dry-run",
+            "--scene=upscaler_torture_static",
+            "--job=tsr_high_quality",
+            "--resolution=2560x1440",
+            f"--out-root={tmp_path}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for token in ("--variant=static", "--warmup=64", "--frames=300", "--tsr-quality=high", "--scale=0.667"):
+        assert token in static_dry.stdout
+    # The movie writer's safety cap counts the settle frames, the warm-up and the static frames.
+    assert "--quit-after 1414" in static_dry.stdout
+    assert "--velocity-dump" not in static_dry.stdout
     dry = subprocess.run(
         [
             "bash",

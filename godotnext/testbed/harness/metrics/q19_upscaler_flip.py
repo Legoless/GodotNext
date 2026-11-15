@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from godotnext_metrics.images import indexed_paths, read_exr, read_png
+from godotnext_metrics.masks import mask_bool
 from godotnext_metrics.q19_upscaler_flip import (
     BILINEAR_SCALING_MODE,
     REFERENCE_SCALE,
@@ -93,7 +94,9 @@ def _infer_mask_name(mask_dir: Path) -> str:
     return mask_dir.name.removeprefix("mask_")
 
 
-def _load_mask_entry(spec: str, indices: list[int], test_dir: Path, ref_dir: Path) -> tuple[str, NDArray[np.uint8]]:
+def _load_mask_entry(
+    spec: str, indices: list[int], test_dir: Path, ref_dir: Path
+) -> tuple[str, NDArray[np.generic] | list[NDArray[np.bool_]]]:
     candidate = Path(spec)
     if candidate.is_file():
         name = candidate.stem.removeprefix("cmask_")
@@ -102,6 +105,9 @@ def _load_mask_entry(spec: str, indices: list[int], test_dir: Path, ref_dir: Pat
         mask_paths = indexed_paths(candidate, "frame*.png") or indexed_paths(candidate, "*.png")
         if not mask_paths:
             raise ValueError(f"mask directory {candidate} has no indexed PNGs")
+        if all(idx in mask_paths for idx in indices):
+            # A mask run that covers every scored frame is applied frame by frame (#190).
+            return _infer_mask_name(candidate), [mask_bool(read_png(mask_paths[idx])) for idx in indices]
         chosen = [mask_paths[idx] for idx in indices if idx in mask_paths]
         if not chosen:
             chosen = [mask_paths[sorted(mask_paths)[0]]]
@@ -116,9 +122,9 @@ def _load_mask_entry(spec: str, indices: list[int], test_dir: Path, ref_dir: Pat
         cmask = base / f"cmask_{spec}.png"
         if cmask.is_file():
             return spec, read_png(cmask)
-    sibling = ref_dir.parent / f"mask_{spec}"
-    if sibling.is_dir():
-        return _load_mask_entry(str(sibling), indices, test_dir, ref_dir)
+    for sibling in (ref_dir.parent / f"mask_{spec}", test_dir.parent / f"mask_{spec}"):
+        if sibling.is_dir():
+            return _load_mask_entry(str(sibling), indices, test_dir, ref_dir)
     raise ValueError(f"cannot locate mask '{spec}'")
 
 
@@ -166,7 +172,7 @@ def main() -> int:
         )
         if args.form == "static" and len(indices) != 64:
             raise ValueError(f"static form needs 64 frames after settling, found {len(indices)}")
-        masks: dict[str, NDArray[np.generic]] = {}
+        masks: dict[str, NDArray[np.generic] | list[NDArray[np.bool_]]] = {}
         for mask_spec in args.mask:
             name, mask_img = _load_mask_entry(str(mask_spec), indices, args.test, args.reference)
             masks[name] = mask_img

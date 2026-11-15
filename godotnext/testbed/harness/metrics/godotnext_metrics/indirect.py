@@ -205,6 +205,26 @@ def q8_temporal_sigma(samples: ArrayLike, *, threshold: float = Q8_THRESHOLD) ->
     )
 
 
+def q8_masked_temporal_sigma(samples: ArrayLike, *, mask_name: str, threshold: float = Q8_THRESHOLD) -> MetricResult:
+    """Q8 inside a content mask (#190): ``samples`` is frames by masked pixels.
+
+    The value treats each masked pixel as a patch. ``mask_as_patch`` is the other reading: the
+    whole mask as one patch, the relative sigma of the masked mean luminance. The frozen
+    ``q8_temporal_sigma`` computes both, so a one-pixel mask gives that pixel's relative sigma
+    exactly as an unmasked one-pixel patch does, in either reading.
+    """
+    data = np.asarray(samples, dtype=np.float64)
+    if data.ndim != 2 or data.shape[1] == 0:
+        raise ValueError(f"Q8 mask {mask_name!r} selects no pixel")
+    result = q8_temporal_sigma(data, threshold=threshold)
+    whole = q8_temporal_sigma(np.mean(data, axis=1), threshold=threshold)
+    result.values["mask"] = mask_name
+    result.values["masked_pixels"] = int(data.shape[1])
+    result.values["mask_as_patch"] = whole.value
+    result.details["patches"] = "pixels"
+    return result
+
+
 def _endpoint_error(luminance_t: ArrayLike, luminance_end: ArrayLike) -> float:
     current = np.asarray(luminance_t, dtype=np.float64).reshape(-1)
     end = np.asarray(luminance_end, dtype=np.float64).reshape(-1)

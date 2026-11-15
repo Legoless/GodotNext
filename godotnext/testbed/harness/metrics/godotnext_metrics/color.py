@@ -33,6 +33,12 @@ def linear_to_srgb(linear: NDArray[np.floating]) -> NDArray[np.float32]:
     return np.clip(encoded, 0.0, 1.0).astype(np.float32)
 
 
+def srgb_to_linear(encoded: NDArray[np.floating]) -> NDArray[np.float64]:
+    """IEC 61966-2-1 decode of a display-referred value in [0, 1]."""
+    x = np.clip(np.asarray(encoded, dtype=np.float64), 0.0, 1.0)
+    return np.where(x <= 0.04045, x / 12.92, np.power((x + 0.055) / 1.055, 2.4))
+
+
 def prepare_ldr(image: NDArray[np.generic], *, exposure: float, already_display: bool) -> NDArray[np.float32]:
     """Return an sRGB image in [0, 1] for LDR FLIP (``inputsRGB=True``)."""
     array = np.asarray(image)

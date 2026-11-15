@@ -20,6 +20,7 @@ const FLAG_MASK := "--mask"
 const FLAG_UPSCALER := "--upscaler"
 const FLAG_SCALE := "--scale"
 const FLAG_SPP := "--spp"
+const FLAG_TSR_QUALITY := "--tsr-quality"
 
 const KNOWN_FLAGS := {
 	FLAG_MODE: true,
@@ -40,11 +41,23 @@ const KNOWN_FLAGS := {
 	FLAG_UPSCALER: true,
 	FLAG_SCALE: true,
 	FLAG_SPP: true,
+	FLAG_TSR_QUALITY: true,
 }
 
 const VALID_MASKS := {
 	"alpha_particles": true,
 	"scrolling_emissive": true,
+	"moire": true,
+	"thin_wire": true,
+}
+
+## --tsr-quality (#190): the Viewport.tsr_quality preset for --upscaler=tsr runs.
+const VALID_TSR_QUALITIES := {
+	"low": Viewport.TSR_QUALITY_LOW,
+	"medium": Viewport.TSR_QUALITY_MEDIUM,
+	"high": Viewport.TSR_QUALITY_HIGH,
+	"epic": Viewport.TSR_QUALITY_EPIC,
+	"cinematic": Viewport.TSR_QUALITY_CINEMATIC,
 }
 
 const VALID_REFERENCES := {
@@ -230,7 +243,7 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 			result.ok = false
 			result.error = "--reference=pt requires --mode=capture"
 			return result
-		for key in [FLAG_UPSCALER, FLAG_MSAA, FLAG_SCALE, FLAG_MASK, FLAG_CAPTURE_FRAMES, FLAG_VELOCITY_DUMP]:
+		for key in [FLAG_UPSCALER, FLAG_MSAA, FLAG_SCALE, FLAG_MASK, FLAG_CAPTURE_FRAMES, FLAG_VELOCITY_DUMP, FLAG_TSR_QUALITY]:
 			if values.has(key):
 				result.ok = false
 				result.error = "%s does not apply to --reference=pt" % key
@@ -254,12 +267,21 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 			return result
 	if values.has(FLAG_MASK) and not VALID_MASKS.has(String(values[FLAG_MASK])):
 		result.ok = false
-		result.error = "--mask must be alpha_particles or scrolling_emissive"
+		result.error = "--mask must be alpha_particles, scrolling_emissive, moire, or thin_wire"
 		return result
 	if values.has(FLAG_UPSCALER) and not VALID_UPSCALERS.has(String(values[FLAG_UPSCALER])):
 		result.ok = false
 		result.error = "--upscaler must be taa, fsr2, copy, dlss, metalfx, tsr, or custom"
 		return result
+	if values.has(FLAG_TSR_QUALITY):
+		if not VALID_TSR_QUALITIES.has(String(values[FLAG_TSR_QUALITY])):
+			result.ok = false
+			result.error = "--tsr-quality must be low, medium, high, epic, or cinematic"
+			return result
+		if String(values.get(FLAG_UPSCALER, "")) != "tsr":
+			result.ok = false
+			result.error = "--tsr-quality requires --upscaler=tsr"
+			return result
 	if values.has(FLAG_SCALE):
 		var scale_text := String(values[FLAG_SCALE])
 		if not scale_text.is_valid_float():
@@ -288,7 +310,7 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 	}
 	if spp > 0:
 		result["args"]["spp"] = spp
-	for key in [FLAG_VELOCITY_DUMP, FLAG_REFERENCE, FLAG_MSAA, FLAG_MASK, FLAG_UPSCALER, FLAG_SCALE]:
+	for key in [FLAG_VELOCITY_DUMP, FLAG_REFERENCE, FLAG_MSAA, FLAG_MASK, FLAG_UPSCALER, FLAG_SCALE, FLAG_TSR_QUALITY]:
 		if values.has(key):
 			var normalized := String(key).trim_prefix("--").replace("-", "_")
 			result["args"][normalized] = float(values[key]) if key == FLAG_SCALE else values[key]

@@ -27,6 +27,8 @@ var _warmup := 0
 var _capture_frames: Array = []
 var _output_resolution: Array = []
 var _hold_frame := -1
+## --mask (#95, #190): a content-mask run. Its kept frames are rewritten as single-channel PNGs.
+var _mask := ""
 var _camera_node: Camera3D
 ## --reference=pt (#263): the path-traced reference capture, or null.
 var _reference_pt: ReferencePTScript
@@ -78,6 +80,7 @@ func _ready() -> void:
 	_capture_frames = args["capture_frames"]
 	_output_resolution = args.get("output_resolution", [])
 	_hold_frame = int(args.get("hold_frame", -1))
+	_mask = String(args.get("mask", ""))
 	if String(args.get("reference", "")) == "pt":
 		_reference_pt = ReferencePTScript.new(self, _out, _scene, _seed_value, int(args["spp"]), maxi(_hold_frame, 0))
 	_load_job()
@@ -716,6 +719,8 @@ func _trim_movie_frames() -> void:
 	var wav_path := stem + ".wav"
 	if FileAccess.file_exists(wav_path):
 		DirAccess.remove_absolute(wav_path)
+	if not _mask.is_empty():
+		_write_single_channel_masks(stem, keep)
 	if not _failed:
 		var expected_exr := 0
 		for slot in _capture_frames:
@@ -727,6 +732,23 @@ func _trim_movie_frames() -> void:
 		print("harness: capture complete kept=%d exr=%d" % [keep, _exr_saved])
 		if _dropped_specialization:
 			print("harness: capture settled without the specialization counter")
+
+
+## --mask runs: each kept frame becomes a single-channel 8-bit PNG (the R8 mask), white where the
+## masked content is visible and black elsewhere, beside the run's manifest.
+func _write_single_channel_masks(stem: String, keep: int) -> void:
+	for index in keep:
+		var path := "%s%08d.png" % [stem, index]
+		var image := Image.load_from_file(path)
+		if image == null or image.is_empty():
+			_fail("cannot read mask frame %s" % path.get_file())
+			return
+		image.convert(Image.FORMAT_L8)
+		var err := image.save_png(path)
+		if err != OK:
+			_fail("cannot write mask frame %s (%s)" % [path.get_file(), error_string(err)])
+			return
+	print("harness: wrote %d single-channel %s mask frames" % [keep, _mask])
 
 
 func _delete_movie_pngs(stem: String) -> void:

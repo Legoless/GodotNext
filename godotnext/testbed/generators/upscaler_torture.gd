@@ -3,9 +3,52 @@ extends SceneTree
 const Scaffold := preload("res://generators/scaffold.gd")
 const SEED := 0x6E657874
 const SCENE_PATH := "res://scenes/upscaler_torture/upscaler_torture.tscn"
+## GT-2 content masks (#190): the moiré grilles and the thin cables.
+const MOIRE_LAYER := 1 << 17
+const THIN_WIRE_LAYER := 1 << 18
 const ALPHA_PARTICLES_LAYER := 1 << 19
 const SCROLLING_EMISSIVE_LAYER := 1 << 20
 const ALL_TORTURE_LAYERS := 0xFFFFF | SCROLLING_EMISSIVE_LAYER
+
+## The static camera (frames 0-199 and the static variant). The GT-2 grilles and cables
+## are sized for it at 1440p internal (#190).
+const STATIC_CAMERA_POSITION := Vector3(0.0, 1.75, 4.8)
+const CAMERA_TARGET := Vector3(0.0, 1.1, -0.4)
+const CAMERA_FOV := 58.0
+const GT_INTERNAL_SIZE := Vector2i(2560, 1440)
+const GRILLE_PERIOD_PX := Vector2(1.0, 4.0)
+const CABLE_WIDTH_PX := Vector2(0.3, 1.0)
+
+## Two low grilles of vertical bars on the floor at either side, receding from the camera at a
+## grazing angle, so their projected period runs from about 1 px (far) to 4 px (near). A dark
+## backing panel sits behind the bars, so the moiré mask covers the whole grille.
+const GRILLES: Array[Dictionary] = [
+	{"name": "MoireGrilleLeft", "x": -2.4, "outward": -1.0},
+	{"name": "MoireGrilleRight", "x": 2.4, "outward": 1.0},
+]
+const GRILLE_Z_NEAR := 1.7
+const GRILLE_Z_FAR := -1.3
+const GRILLE_Y := Vector2(0.02, 0.9)
+const GRILLE_PERIOD := 0.0129
+const GRILLE_BACKING_OFFSET := 0.03
+
+## Twelve cables, six against the background (sky) above the backdrop and six against the
+## checker backdrop. Each one is tilted slightly so it crosses pixel rows. Its diameter gives the
+## listed projected width at 1440p internal from the static camera.
+const CABLES: Array[Dictionary] = [
+	{"against": "sky", "y": 3.045, "z": 1.4, "length": 12.0, "tilt": 0.45, "width_px": 0.34},
+	{"against": "sky", "y": 3.057, "z": 1.1, "length": 12.0, "tilt": -0.55, "width_px": 0.453},
+	{"against": "sky", "y": 3.052, "z": 0.8, "length": 12.0, "tilt": 0.65, "width_px": 0.566},
+	{"against": "sky", "y": 3.029, "z": 0.5, "length": 12.0, "tilt": -0.45, "width_px": 0.679},
+	{"against": "sky", "y": 2.989, "z": 0.2, "length": 12.0, "tilt": 0.55, "width_px": 0.792},
+	{"against": "sky", "y": 2.93, "z": -0.1, "length": 12.0, "tilt": -0.65, "width_px": 0.904},
+	{"against": "geometry", "y": 2.75, "z": -1.9, "length": 5.6, "tilt": 0.9, "width_px": 0.396},
+	{"against": "geometry", "y": 2.35, "z": -1.9, "length": 5.6, "tilt": -1.1, "width_px": 0.509},
+	{"against": "geometry", "y": 1.95, "z": -1.9, "length": 5.6, "tilt": 1.0, "width_px": 0.622},
+	{"against": "geometry", "y": 1.55, "z": -1.9, "length": 5.6, "tilt": -0.9, "width_px": 0.735},
+	{"against": "geometry", "y": 1.15, "z": -1.9, "length": 5.6, "tilt": 1.1, "width_px": 0.848},
+	{"against": "geometry", "y": 0.75, "z": -1.9, "length": 5.6, "tilt": -1.0, "width_px": 0.96},
+]
 
 
 func _init() -> void:
@@ -35,6 +78,8 @@ static func build() -> Dictionary:
 	_add_occluders(root)
 	_add_emissive(root)
 	_add_camera(root)
+	_add_moire_grilles(root)
+	_add_cables(root)
 	return {"root": root}
 
 
@@ -345,7 +390,8 @@ static func _add_occluders(root: Node3D) -> void:
 
 static func _add_emissive(root: Node3D) -> void:
 	var shader := Shader.new()
-	shader.code = "shader_type spatial;\nrender_mode unshaded, cull_disabled;\nuniform sampler2D stripes : source_color, filter_linear, repeat_enable;\nuniform float time_offset = 0.0;\nvoid fragment() {\n\tvec3 color = texture(stripes, UV + vec2(TIME * 2.0 + time_offset, 0.0)).rgb;\n\tALBEDO = vec3(0.0);\n\tEMISSION = color * 3.0;\n}\n"
+	# scroll_speed is 2.0 except in the static variant (#190), which sets it to 0.
+	shader.code = "shader_type spatial;\nrender_mode unshaded, cull_disabled;\nuniform sampler2D stripes : source_color, filter_linear, repeat_enable;\nuniform float time_offset = 0.0;\nuniform float scroll_speed = 2.0;\nvoid fragment() {\n\tvec3 color = texture(stripes, UV + vec2(TIME * scroll_speed + time_offset, 0.0)).rgb;\n\tALBEDO = vec3(0.0);\n\tEMISSION = color * 3.0;\n}\n"
 	var material := ShaderMaterial.new()
 	material.shader = shader
 	material.set_shader_parameter("stripes", _texture("emissive_stripes", "stripes", false))
@@ -375,3 +421,112 @@ static func _add_camera(root: Node3D) -> void:
 	camera.fov = 58.0
 	camera.cull_mask = ALL_TORTURE_LAYERS
 	_add(follow, camera, root)
+
+
+static func _add_moire_grilles(root: Node3D) -> void:
+	var bar_mat := _material(Color(0.88, 0.88, 0.86))
+	bar_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var backing_mat := _material(Color(0.02, 0.022, 0.026))
+	backing_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	for spec in GRILLES:
+		var grille := Node3D.new()
+		grille.name = String(spec["name"])
+		_add(root, grille, root)
+		var x := float(spec["x"])
+		var bars := _mesh_node(grille, root, "Bars", _grille_bars_mesh(x, String(spec["name"]).to_snake_case()), bar_mat, Vector3.ZERO, MOIRE_LAYER)
+		bars.set_meta("period_m", GRILLE_PERIOD)
+		var backing_quad := QuadMesh.new()
+		backing_quad.size = Vector2(GRILLE_Z_NEAR - GRILLE_Z_FAR, GRILLE_Y.y - GRILLE_Y.x)
+		var backing_pos := Vector3(x + float(spec["outward"]) * GRILLE_BACKING_OFFSET, (GRILLE_Y.x + GRILLE_Y.y) * 0.5, (GRILLE_Z_NEAR + GRILLE_Z_FAR) * 0.5)
+		var backing := _mesh_node(grille, root, "Backing", backing_quad, backing_mat, backing_pos, MOIRE_LAYER)
+		backing.rotation_degrees = Vector3(0.0, 90.0, 0.0)
+
+
+## One flat quad per bar in the plane x = [param x], half a period wide along z.
+static func _grille_bars_mesh(x: float, res_name: String) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var normal := Vector3(-signf(x), 0.0, 0.0)
+	for index in grille_bar_count():
+		var z0 := GRILLE_Z_NEAR - float(index) * GRILLE_PERIOD
+		var z1 := z0 - GRILLE_PERIOD * 0.5
+		var corners: Array[Vector3] = [
+			Vector3(x, GRILLE_Y.x, z0),
+			Vector3(x, GRILLE_Y.x, z1),
+			Vector3(x, GRILLE_Y.y, z1),
+			Vector3(x, GRILLE_Y.y, z0),
+		]
+		for corner in [0, 1, 2, 0, 2, 3]:
+			st.set_normal(normal)
+			st.add_vertex(corners[corner])
+	var mesh := st.commit()
+	mesh.resource_name = res_name
+	mesh.resource_path = "res://scenes/upscaler_torture/%s.res" % res_name
+	var err := ResourceSaver.save(mesh, mesh.resource_path)
+	assert(err == OK)
+	return mesh
+
+
+static func grille_bar_count() -> int:
+	return int(floor((GRILLE_Z_NEAR - GRILLE_Z_FAR) / GRILLE_PERIOD))
+
+
+static func _add_cables(root: Node3D) -> void:
+	var parent := Node3D.new()
+	parent.name = "ThinCables"
+	_add(root, parent, root)
+	var cable_mat := _material(Color(0.86, 0.86, 0.84))
+	for index in CABLES.size():
+		var spec: Dictionary = CABLES[index]
+		var diameter := cable_diameter(spec)
+		var cylinder := CylinderMesh.new()
+		cylinder.top_radius = diameter * 0.5
+		cylinder.bottom_radius = diameter * 0.5
+		cylinder.height = float(spec["length"])
+		cylinder.radial_segments = 6
+		cylinder.rings = 1
+		var cable := _mesh_node(parent, root, "Cable%02d" % index, cylinder, cable_mat, Vector3(0.0, float(spec["y"]), float(spec["z"])), THIN_WIRE_LAYER)
+		# The cylinder's axis is +Y: -90 degrees about Z lays it along +X, plus the tilt.
+		cable.rotation_degrees = Vector3(0.0, 0.0, -90.0 + float(spec["tilt"]))
+		cable.set_meta("against", String(spec["against"]))
+		cable.set_meta("diameter_mm", snappedf(diameter * 1000.0, 0.001))
+
+
+## The diameter that projects to the cable's width_px at its center, from the static camera at
+## 1440p internal. It is snapped to 1 µm, so a last-bit difference in a platform's trigonometry
+## cannot change the generated scene.
+static func cable_diameter(spec: Dictionary) -> float:
+	var center := Vector3(0.0, float(spec["y"]), float(spec["z"]))
+	var per_meter := projected_width_px(center, cable_axis(spec), 1.0, GT_INTERNAL_SIZE)
+	return snappedf(float(spec["width_px"]) / per_meter, 0.000001)
+
+
+static func cable_axis(spec: Dictionary) -> Vector3:
+	var tilt := deg_to_rad(float(spec["tilt"]))
+	return Vector3(cos(tilt), sin(tilt), 0.0)
+
+
+static func static_camera_transform() -> Transform3D:
+	return Transform3D(Basis(), STATIC_CAMERA_POSITION).looking_at(CAMERA_TARGET, Vector3.UP)
+
+
+## Pixel position and view depth of [param world] from the static camera at [param size]
+## (vertical field of view: Camera3D keeps the height). A depth <= 0 is behind the camera.
+static func project_static(world: Vector3, size: Vector2i) -> Vector3:
+	var view := static_camera_transform().affine_inverse() * world
+	var depth := -view.z
+	if depth <= 0.0:
+		return Vector3(0.0, 0.0, depth)
+	var fy := 1.0 / tan(deg_to_rad(CAMERA_FOV) * 0.5)
+	var fx := fy * float(size.y) / float(size.x)
+	return Vector3((fx * view.x / depth + 1.0) * 0.5 * float(size.x), (1.0 - fy * view.y / depth) * 0.5 * float(size.y), depth)
+
+
+## Screen width of a cylinder of [param diameter] around [param point] with axis [param axis]:
+## its silhouette points lie half a diameter either side, perpendicular to the axis and to the
+## view ray.
+static func projected_width_px(point: Vector3, axis: Vector3, diameter: float, size: Vector2i) -> float:
+	var side := axis.cross(point - STATIC_CAMERA_POSITION).normalized()
+	var a := project_static(point + side * diameter * 0.5, size)
+	var b := project_static(point - side * diameter * 0.5, size)
+	return Vector2(a.x - b.x, a.y - b.y).length()

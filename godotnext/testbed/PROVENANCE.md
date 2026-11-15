@@ -269,6 +269,22 @@ Every entry below is original content generated in this repository, with no thir
 | `scenes/upscaler_torture/wire_2mm.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
 | `scenes/upscaler_torture/character_mesh.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-07 | the Apple M5 Max |
 
+### GT-2 additions and the GT-6 load step (#190)
+
+Original content generated or written in this repository, with no third-party assets: the moiré grilles and thin cables, their mask runs, the static segment, the load-step scene and the GT-2 report. The regenerated `upscaler_torture.tscn` keeps every earlier resource file byte-identical.
+
+| Path | Generator / author | License | Date | Host |
+|---|---|---|---|---|
+| `generators/upscaler_torture.gd` (grilles, cables, static-variant uniform) | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/upscaler_torture/upscaler_torture.tscn` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/upscaler_torture/moire_grille_left.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/upscaler_torture/moire_grille_right.res` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/upscaler_torture/check_gt_content.gd` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `tests/gpu_load_step.gd`, `tests/gpu_load_step.tscn`, `tests/gpu_load_step_burner.gd` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `harness/tests/test_load_step.gd` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/upscaler_compare.py`, `harness/metrics/godotnext_metrics/masks.py`, `harness/metrics/godotnext_metrics/load_step.py` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/tests/test_masked_metrics.py`, `test_load_step.py`, `test_upscaler_compare.py` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
+
 
 ## Virtualized G5-6 Scenes (#77)
 

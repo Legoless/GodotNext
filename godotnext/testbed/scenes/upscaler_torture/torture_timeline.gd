@@ -2,7 +2,15 @@ extends Node3D
 
 const SceneArgs := preload("res://scenes/scene_args.gd")
 
+## The static segment for Q8 (#190): `--variant=static` holds the static camera and freezes the
+## scene for the whole run (the fan, the character, the occluders, the particles and the
+## scrolling emissive). Captured as a 64-frame warm-up and 300 static frames.
+const STATIC_VARIANT := "static"
+const STATIC_WARMUP := 64
+const STATIC_FRAMES := 300
+
 var _hold := -1
+var _static := false
 var _local_frame := 0
 var _saw := false
 var _reset_fired := false
@@ -23,6 +31,9 @@ func _ready() -> void:
 		return
 	process_priority = 1
 	_hold = SceneArgs.int_value("--hold-frame", -1)
+	_static = SceneArgs.value("--variant", "") == STATIC_VARIANT
+	if _static:
+		_hold = 0
 	_camera = get_node("CameraPath/CameraFollow/Camera3D") as Camera3D
 	_path = get_node("CameraPath/CameraFollow") as PathFollow3D
 	_occluders = get_node("Occluders") as Node3D
@@ -32,7 +43,21 @@ func _ready() -> void:
 	if _player != null:
 		_player.play("swing")
 		_player.seek(0.0, true)
+	if _static:
+		_freeze()
 	_apply_frame(0, true)
+
+
+## Static variant: particles keep their seeded preprocess and then stop (the preprocess runs at
+## speed 1 whatever speed_scale is), and the emissive stops scrolling.
+func _freeze() -> void:
+	for node in find_children("*", "GPUParticles3D", true, false):
+		(node as GPUParticles3D).speed_scale = 0.0
+	if _emissive != null and _emissive.material_override is ShaderMaterial:
+		var material := _emissive.material_override as ShaderMaterial
+		material.set_shader_parameter("scroll_speed", 0.0)
+		material.set_shader_parameter("time_offset", 0.0)
+	print("UPSCALER_TORTURE_STATIC warmup=%d frames=%d" % [STATIC_WARMUP, STATIC_FRAMES])
 
 
 func _process(_delta: float) -> void:
@@ -41,7 +66,7 @@ func _process(_delta: float) -> void:
 	var harness := get_node_or_null("/root/Harness")
 	var settling := harness != null and harness.has_method("is_settling") and bool(harness.call("is_settling"))
 	var driving := harness != null and harness.has_method("is_driving_animation") and bool(harness.call("is_driving_animation"))
-	if driving and not _locked_time_offset:
+	if driving and not _locked_time_offset and not _static:
 		_locked_time_offset = true
 		if _emissive != null and _emissive.material_override is ShaderMaterial:
 			var shader_time := float(Engine.get_frames_drawn() + 1) / 60.0

@@ -4,7 +4,38 @@ const ArgsScript = preload("res://harness/args.gd")
 const LAYERS := {
 	"alpha_particles": 1 << 19,
 	"scrolling_emissive": 1 << 20,
+	"moire": 1 << 17,
+	"thin_wire": 1 << 18,
 }
+## The GT-2 masks (#190) are drawn with the rest of the scene as black occluders, so a mask pixel
+## is one where that content is visible. The #95 masks keep their layer-only form.
+const OCCLUDED_MASKS := {
+	"moire": true,
+	"thin_wire": true,
+}
+## Screen-space growth of each side of a dilated mask, in pixels of a 1440p frame (the GT-2 content
+## is sized at 1440p internal), so the mask covers the same share of the frame at any output size.
+## A thin-wire mask covers the 0.3-1.0 px cable plus one 1440p pixel either side (1.5 px at
+## 2160p), where its anti-aliased footprint lies.
+const DILATE_PX := {
+	"thin_wire": 1.0,
+}
+const DILATE_SHADER := """shader_type spatial;
+render_mode unshaded, cull_disabled;
+uniform float dilate_px = 1.0;
+uniform float reference_height = 1440.0;
+void vertex() {
+	vec4 view_pos = MODELVIEW_MATRIX * vec4(VERTEX, 1.0);
+	vec3 view_normal = normalize((MODELVIEW_MATRIX * vec4(NORMAL, 0.0)).xyz);
+	// One pixel of a reference_height frame at this depth, in view-space units.
+	float pixel = -view_pos.z * 2.0 / (PROJECTION_MATRIX[1][1] * reference_height);
+	view_pos.xyz += view_normal * pixel * dilate_px;
+	POSITION = PROJECTION_MATRIX * view_pos;
+}
+void fragment() {
+	ALBEDO = vec3(1.0);
+}
+"""
 
 var _active := false
 var _args: Dictionary = {}
@@ -24,7 +55,7 @@ func _ready() -> void:
 
 
 static func _has_upscaler_or_reference_flags(args: Dictionary) -> bool:
-	for key in ["reference", "upscaler", "msaa", "mask", "scale"]:
+	for key in ["reference", "upscaler", "msaa", "mask", "scale", "tsr_quality"]:
 		if args.has(key):
 			return true
 	return false
@@ -90,6 +121,8 @@ func _apply_viewport(viewport: Viewport) -> void:
 			viewport.use_taa = false
 			viewport.scaling_3d_mode = Viewport.SCALING_3D_MODE_TSR
 			viewport.scaling_3d_scale = float(_args.get("scale", 0.5))
+			if _args.has("tsr_quality"):
+				viewport.tsr_quality = ArgsScript.VALID_TSR_QUALITIES[String(_args["tsr_quality"])]
 		"custom":
 			_register_sample_copy()
 			viewport.use_taa = false
@@ -153,11 +186,23 @@ func _apply_mask(scene: Node) -> void:
 	white.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	white.albedo_color = Color.WHITE
 	white.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var keep_material: Material = white
+	if DILATE_PX.has(mask):
+		var shader := Shader.new()
+		shader.code = DILATE_SHADER
+		var dilate := ShaderMaterial.new()
+		dilate.shader = shader
+		dilate.set_shader_parameter("dilate_px", float(DILATE_PX[mask]))
+		keep_material = dilate
+	var occluded := OCCLUDED_MASKS.has(mask)
 	for node in scene.find_children("*", "Camera3D", true, true):
 		(node as Camera3D).cull_mask = selected
 	for node in scene.find_children("*", "VisualInstance3D", true, true):
 		var instance := node as VisualInstance3D
 		var keep: bool = (instance.layers & selected) != 0
+		if not keep and occluded and _make_occluder(instance):
+			instance.layers = selected
+			continue
 		instance.layers = selected if keep else 0
 		instance.visible = keep
 		if not keep:
@@ -175,7 +220,7 @@ func _apply_mask(scene: Node) -> void:
 				scissor.alpha_antialiasing_mode = BaseMaterial3D.ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE
 				mesh_instance.material_override = scissor
 			else:
-				mesh_instance.material_override = white
+				mesh_instance.material_override = keep_material
 		elif instance is GPUParticles3D:
 			var particles := instance as GPUParticles3D
 			if particles.draw_pass_1 != null:
@@ -205,3 +250,36 @@ func _apply_mask(scene: Node) -> void:
 		environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 		environment.tonemap_exposure = 1.0
 		world.environment = environment
+
+
+## GT-2 masks (#190): opaque geometry outside the mask is drawn black, so it still hides the mask
+## content behind it. Alpha-blended surfaces and particles do not occlude and stay hidden.
+func _make_occluder(instance: VisualInstance3D) -> bool:
+	if not (instance is MeshInstance3D) or not instance.is_visible_in_tree():
+		return false
+	var mesh_instance := instance as MeshInstance3D
+	if mesh_instance.mesh == null or mesh_instance.mesh.get_surface_count() == 0:
+		return false
+	var source := mesh_instance.material_override
+	if source == null:
+		source = mesh_instance.get_active_material(0)
+	var black := StandardMaterial3D.new()
+	black.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	black.albedo_color = Color.BLACK
+	if source is BaseMaterial3D:
+		var base := source as BaseMaterial3D
+		if base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA or base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS:
+			return false
+		black.cull_mode = base.cull_mode
+		if base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR or base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_HASH:
+			black.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+			black.alpha_scissor_threshold = base.alpha_scissor_threshold
+			black.albedo_texture = base.albedo_texture
+			black.uv1_scale = base.uv1_scale
+			black.uv1_offset = base.uv1_offset
+	elif source is ShaderMaterial:
+		var shader := (source as ShaderMaterial).shader
+		if shader != null and shader.code.contains("cull_disabled"):
+			black.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh_instance.material_override = black
+	return true

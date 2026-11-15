@@ -74,7 +74,8 @@ The harness files and the patch JSON are read as issues #12 and #10 defined them
 | `patches_q1.json`, `patches_q3.json` | Seeded patches. Q3 rows add `room` (`lit` or `dark`); dark rows may add `mirror_of`. |
 | `mask.png` or `mask_*.png` | Patch ids. Encoded id = R + 256·G, gray masks use the gray value, 0 means none, patch id = encoded − 1. |
 | `coverage.png` | Q5 and Q6 reference coverage. |
-| `cmask_<name>.png` | Q19 content mask. |
+| `cmask_<name>.png` | Q19 content mask; with `--mask <name>`, a Q8 or Q19 mask for every frame. |
+| `mask_<name>/frame*.png` | A per-frame content mask run (`--mask=<name>` capture, #190), inside or beside the capture folder. |
 | `roughness.exr` | Q9, and Q20's per-bin path. |
 | `disocclusion.png`, `q10.json` | Q10. |
 | `counters.json` | Q2, Q14, Q15, Q16, Q18. The renderer that fills it is later work. |
@@ -101,6 +102,16 @@ python3 -m godotnext_metrics <metric> --in <dir> [--ref <dir>] --json
 ```
 
 The process prints one JSON object with `metric`, `value`, `threshold` and `pass`, plus `values` when there is a breakdown. Exit 0 when that object is a computed result, including a failed gate, so a q11 or q13 pass line does not fail the PR. Exit 2, still with JSON, when the metric name is unknown or an input is missing.
+
+## Content masks (#190)
+
+`--mask <name>` is the content-mask option of Q8 and Q19 (GT-2's moiré-mask Q8 and thin-wire-mask Q19). It changes neither definition. A run with no mask (no `--mask` and, for Q19, no `cmask_*.png`) is byte-identical to the frozen metrics. Any other metric with `--mask` exits 2.
+
+- A mask is white on black: a pixel is in it when its first channel is non-zero. It is read from `cmask_<name>.png` in the capture folder (one image for every frame) or from a `mask_<name>/` mask run inside or beside it (one image per frame; the harness writes these as single-channel PNGs). `frame` selects every pixel.
+- **Q19.** The frozen FLIP error map is averaged inside the mask on each frame, then over the frames. Frames where the mask is empty do not count. The mask's own MSAA 4×/8× convergence rule is unchanged: above 0.01 it is excluded and reported, with no score. The result adds `mask_pixels` and `mask_convergence_flip` per mask. `q19_upscaler_flip.py --mask` applies a mask run frame by frame when it has every scored frame, and otherwise as the union of the frames it has, as before.
+- **Q8.** On the frozen 64-frame window, the value treats each masked pixel as a patch: the frozen per-patch relative σ, averaged. `mask_as_patch` is the other reading, the whole mask as one patch (the relative σ of the masked mean luminance). In both, a one-pixel mask gives exactly the value of an unmasked one-pixel patch. The luminance is indirect (full minus direct-only) when the capture has direct-only renders, as the unmasked Q8 reads it. An upscaler capture has none, so it is the final output's linear luminance, from `hdr_*.exr` or from `frame*.png` decoded from sRGB. A mask run contributes the union of its window frames (`mask_frames_identical` says whether they matched). The unmasked Q8 needs Q1 patches and direct-only renders, which no GT-2 scene has; `--mask frame` makes a whole-frame static Q8 available on them. Which reading GT-2's Q8 lines use is not fixed here.
+
+`python3 -m godotnext_metrics.masks coverage --in <mask run>` reports each frame's mask coverage against the 0.5% floor.
 
 ## Python
 

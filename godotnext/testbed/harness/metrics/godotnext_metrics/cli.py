@@ -21,12 +21,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--in", dest="in_dir", help="capture directory (q1 without it checks --ref alone)")
     parser.add_argument("--ref", dest="ref_dir", help="reference capture directory")
     parser.add_argument("--json", action="store_true", help="print the JSON result (this is also the default)")
+    parser.add_argument(
+        "--mask",
+        help="q8 and q19 only: a content mask name (cmask_<name>.png, a mask_<name>/ run, or frame for every pixel)",
+    )
     args = parser.parse_args(argv)
     _ = args.json
     reference = Path(args.ref_dir) if args.ref_dir else None
     capture = Path(args.in_dir) if args.in_dir else None
     try:
-        result = run_metric(args.metric, capture, reference)
+        result = run_metric(args.metric, capture, reference, args.mask)
     except MetricInputError as exc:
         _emit(exc.to_result())
         return 2

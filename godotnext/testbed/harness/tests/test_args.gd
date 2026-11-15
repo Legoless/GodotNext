@@ -184,10 +184,35 @@ func _test_parse() -> void:
 		"--upscaler=tsr", "--scale=0.667",
 	]))
 	_check(bool(tsr_flags["ok"]) and String(tsr_flags["args"]["upscaler"]) == "tsr", "--upscaler=tsr parses")
+	_test_gt_mask_args()
 
 	var ssaa_script = load("res://harness/ssaa_reference.gd")
 	_check(not ssaa_script._has_upscaler_or_reference_flags(captured["args"]), "plain capture leaves SSAAReference idle")
 	_check(ssaa_script._has_upscaler_or_reference_flags(torture_flags["args"]), "upscaler flags activate SSAAReference")
+
+
+## The GT-2 content masks and the TSR preset flag (#190).
+func _test_gt_mask_args() -> void:
+	var base := ["--mode=capture", "--scene=res://scenes/upscaler_torture/upscaler_torture.tscn", "--out=/tmp/out", "--frames=8"]
+	for mask in ["moire", "thin_wire"]:
+		var parsed: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--mask=" + mask, "--variant=static"]))
+		_check(bool(parsed["ok"]) and String(parsed["args"]["mask"]) == mask, "--mask=%s parses" % mask)
+		if bool(parsed["ok"]):
+			_check(String(parsed["args"]["variant"]) == "static", "--variant=static rides along with --mask=%s" % mask)
+	var preset: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--upscaler=tsr", "--scale=0.667", "--tsr-quality=high"]))
+	_check(bool(preset["ok"]) and String(preset["args"]["tsr_quality"]) == "high", "--tsr-quality=high parses")
+	_check(not bool(ArgsScript.parse(PackedStringArray(base + ["--upscaler=tsr", "--tsr-quality=ultra"]))["ok"]), "unknown --tsr-quality fails")
+	_check(not bool(ArgsScript.parse(PackedStringArray(base + ["--upscaler=fsr2", "--tsr-quality=high"]))["ok"]), "--tsr-quality without --upscaler=tsr fails")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--reference=pt", "--tsr-quality=high",
+	]))["ok"]), "--tsr-quality does not apply to --reference=pt")
+	var ssaa_script = load("res://harness/ssaa_reference.gd")
+	_check(ssaa_script.LAYERS.has("moire") and ssaa_script.LAYERS.has("thin_wire"), "SSAAReference knows the GT-2 mask layers")
+	var generator = load("res://generators/upscaler_torture.gd")
+	_check(int(ssaa_script.LAYERS["moire"]) == int(generator.MOIRE_LAYER), "moire mask layer matches the generator")
+	_check(int(ssaa_script.LAYERS["thin_wire"]) == int(generator.THIN_WIRE_LAYER), "thin_wire mask layer matches the generator")
+	_check(ssaa_script.OCCLUDED_MASKS.has("moire") and ssaa_script.OCCLUDED_MASKS.has("thin_wire"), "GT-2 masks are drawn with occluders")
+	_check(not ssaa_script.OCCLUDED_MASKS.has("alpha_particles"), "the #95 masks keep their layer-only form")
 
 
 func _sample_manifest() -> Dictionary:
