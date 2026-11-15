@@ -160,7 +160,8 @@ function Invoke-Capture([int]$Index) {
 	if (-not (Select-String -Quiet -Path (Join-Path $out 'run.log') -Pattern 'harness: capture complete')) {
 		Fail 1 "capture run $Index did not finish the captured window"
 	}
-	$pngs = @(Get-ChildItem $out -Filter '*.png').Count
+	# The kept movie frames. A scene may write PNG sidecars beside them (a cmask_<name>.png, #202).
+	$pngs = @(Get-ChildItem $out -Filter 'frame*.png').Count
 	$exrs = @(Get-ChildItem $out -Filter '*.exr').Count
 	$expected = $captureWarmup + $captureFrames
 	if ($pngs -ne $expected) {

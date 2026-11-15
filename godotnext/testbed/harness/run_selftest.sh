@@ -239,7 +239,8 @@ import sys
 
 root = os.environ["KEEP"]
 expected = int(os.environ["EXPECTED_PNG"])
-pngs = [name for name in os.listdir(root) if name.endswith(".png")]
+# The kept movie frames. A scene may write PNG sidecars beside them (a cmask_<name>.png, #202).
+pngs = [name for name in os.listdir(root) if name.startswith("frame") and name.endswith(".png")]
 exrs = [name for name in os.listdir(root) if name.endswith(".exr")]
 wavs = [name for name in os.listdir(root) if name.endswith(".wav")]
 if len(pngs) != expected:

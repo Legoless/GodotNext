@@ -1,0 +1,7 @@
+Application,ProcessID,SwapChainAddress,PresentRuntime,SyncInterval,PresentFlags,AllowsTearing,PresentMode,CPUStartTime,FrameTime,CPUBusy,CPUWait,GPULatency,GPUTime,GPUBusy,GPUWait,DisplayLatency,DisplayedTime,AnimationError,ClickToPhotonLatency,AllInputToPhotonLatency
+godot.windows.editor.x86_64.exe,4242,0x000001A2B3C4D5E0,DXGI,0,512,1,Hardware: Independent Flip,0.0000,8.4000,3.0000,5.4000,0.2000,8.0000,8.0000,0.1000,20.0000,8.0000,0.0000,NA,NA
+godot.windows.editor.x86_64.exe,4242,0x000001A2B3C4D5E0,DXGI,0,512,1,Hardware: Independent Flip,8.4000,8.4000,3.0000,5.4000,0.2000,8.0000,8.0000,0.1000,20.0000,8.2000,0.0000,NA,NA
+godot.windows.editor.x86_64.exe,4242,0x000001A2B3C4D5E0,DXGI,0,512,1,Hardware: Independent Flip,16.8000,8.4000,3.0000,5.4000,0.2000,8.0000,8.0000,0.1000,NA,NA,0.0000,NA,NA
+godot.windows.editor.x86_64.exe,4242,0x000001A2B3C4D5E0,DXGI,0,512,1,Hardware: Independent Flip,25.2000,8.4000,3.0000,5.4000,0.2000,8.0000,8.0000,0.1000,20.0000,8.4000,0.0000,NA,NA
+godot.windows.editor.x86_64.exe,4242,0x000001A2B3C4D5E0,DXGI,0,512,1,Hardware: Independent Flip,33.6000,8.4000,3.0000,5.4000,0.2000,8.0000,8.0000,0.1000,20.0000,8.1000,0.0000,NA,NA
+godot.windows.editor.x86_64.exe,4242,0x000001A2B3C4D5E0,DXGI,0,512,1,Hardware: Independent Flip,42.0000,8.4000,3.0000,5.4000,0.2000,8.0000,8.0000,0.1000,20.0000,8.3000,0.0000,NA,NA

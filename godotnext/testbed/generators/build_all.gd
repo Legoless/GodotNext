@@ -38,6 +38,7 @@ const SdfMeshes := preload("res://generators/sdf_mesh_library.gd")
 const P3Content := preload("res://generators/build_p3_content.gd")
 const PVContent := preload("res://generators/build_pv_content.gd")
 const UpscalerTorture := preload("res://generators/upscaler_torture.gd")
+const StaticUI := preload("res://generators/static_ui.gd")
 
 const Q1_PATCH_COUNT := 128
 
@@ -92,6 +93,9 @@ func _run() -> void:
 	for failure in await PVContent.save_all(self):
 		_fail(failure)
 	_save_upscaler_torture()
+	# The static-UI scene and its 3D-only twin (#202) instance the Upscaler Torture scene.
+	for failure in StaticUI.save_all():
+		_fail(failure)
 	if _failures.is_empty():
 		print("build_all: all scenes built and verified.")
 		quit(0)

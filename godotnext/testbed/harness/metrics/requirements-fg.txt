@@ -1,0 +1,5 @@
+# GU+ displayed-UI capture (#202, display_capture.py) on the Windows test host: Desktop Duplication
+# through dxcam 0.3.0 (MIT), which publishes Windows wheels for CPython 3.10 through 3.14 and needs no
+# OpenCV for BGRA frames. PresentMon 2.6.0 and Nsight Systems are installed on the host, not from here.
+-r requirements.txt
+dxcam==0.3.0; sys_platform == "win32"

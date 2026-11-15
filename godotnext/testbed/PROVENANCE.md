@@ -296,6 +296,23 @@ Original content generated or written in this repository, with no third-party as
 | `harness/metrics/godotnext_metrics/scrolling_emissive.py`, `harness/metrics/tests/test_scrolling_emissive.py` | hand-authored for #271 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
 
 
+## Static-UI scene and GU+ metrics (#202)
+
+Original content generated or written in this repository, with no third-party assets: the HUD's text uses Godot's built-in default font, and the minimap is drawn by the generator. No tool binary is in the tree: PresentMon, Nsight Systems and `dxcam` are installed on the test host. The fixture files are written by hand from their public documentation, except one CSV that PresentMon wrote.
+
+| Path | Generator / author | License | Date | Host |
+|---|---|---|---|---|
+| `generators/static_ui.gd` | hand-authored for #202 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/static_ui/static_ui.tscn` | `generators/static_ui.gd` (instances `scenes/upscaler_torture/upscaler_torture.tscn`) | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/static_ui/static_ui_3d_only.tscn` | `generators/static_ui.gd` (the same scene with the HUD hidden) | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/static_ui/minimap.res` | `generators/static_ui.gd`, seed `0x6E657874` | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/static_ui/static_ui.gd`, `scenes/static_ui/check_static_ui.gd` | hand-authored for #202 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `harness/fg_status_probe.gd`, `harness/fg_status_probe.tscn`, `harness/tests/test_fg_status_probe.gd` | hand-authored for #202 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/godotnext_metrics/presentmon_metrics.py`, `display_capture.py`, `nsys_dlssg.py`, `fallback_log_check.py` | hand-authored for #202 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/requirements-fg.txt`, `harness/metrics/tests/test_fg_metrics.py` | hand-authored for #202 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/tests/fixtures/fg/presentmon_2_6_0_fg_off.csv`, `presentmon_v2_metrics.csv`, `nsys_dx12_workload.sql`, `README.md` | hand-written for #202 from the tools' public documentation (`docs/godotnext/source-log/metrics.md`); not recorded from the tools | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/tests/fixtures/fg/presentmon_2_6_0_recorded.csv` | recorded for #202: PresentMon 2.6.0 output for the testbed's static-UI scene run by the master editor (D3D12), trimmed to 231 rows; timing data only, no third-party content | MIT | 2026-11-15 | the cloud Windows VM (NVIDIA L4) |
+
 ## Virtualized G5-6 Scenes (#77)
 
 Every entry below is original procedural content generated in this repository for G5-6 (virtualized copies of Color Box Room A, B, off-screen light, ≥40 m single-mesh hall with 10 cm interior walls, and Concave Courtyard, imported with `meshes/generate_virtual_geometry=true`). License: MIT; date: 2026-11-08; host: the Apple M5 Max.

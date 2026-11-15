@@ -216,6 +216,70 @@ $G --write-movie "$OUT/mask_scrolling_emissive/frame.png" $UT -- --mode=capture 
 python3 -m godotnext_metrics.scrolling_emissive --default "$OUT/default" --static "$OUT/static"
 ```
 
+## GU+ content and metrics (#202)
+
+The static-UI scene, the GPU-bound run and the displayed-frame tools for GU+ (plan §21.5). The measurements are PQ work (§22). PresentMon, Nsight Systems and `dxcam` are installed on the test host and never vendored; the parsers are tested on fixtures written from their documentation and on one recorded PresentMon 2.6.0 CSV (`metrics/tests/fixtures/fg`). Every command below runs from the repository root. The Python modules need `godotnext/testbed/harness/metrics` on the module path: `export PYTHONPATH=godotnext/testbed/harness/metrics` in bash, `set PYTHONPATH=godotnext\testbed\harness\metrics` in the Windows command prompt the `^` lines are written for.
+
+**Static-UI scene.** `scenes/static_ui/static_ui.tscn` instances Upscaler Torture (#95), so it has the same seeded camera spline and 600-frame timeline, under a fixed CanvasLayer HUD laid out in pixels from the viewport's edges and center: labels at 12, 18 and 32 px, a 50%-alpha panel carrying the 18 px label, a 1-px crosshair through the center pixel and a 256-px minimap. `static_ui_3d_only.tscn` is its 3D-only twin, the same file with the HUD hidden. `generators/static_ui.gd` writes both and `minimap.res`; `generators/build_all.gd` runs it after Upscaler Torture. It is the PU+ phase smoke scene (§22.3). With an absolute `--out` (a harness run, or `-- --out=<dir>` standalone) the HUD-visible scene writes the UI mask `cmask_ui.png` there once per scene instance: a single-channel PNG at the viewport's size, white where the HUD's own alpha is at least 0.99, drawn alone in a transparent SubViewport. A window the desktop clamps gives a smaller viewport than the movie frames (a 1920x1080 window on a smaller desktop gave a 1284x781 mask), and a harness capture fails then (#270). It is a content mask like #190's (`docs/godotnext/metrics.md`). The movie frames are unchanged, and the self-test drivers count only `frame*.png`.
+
+```bash
+mkdir -p "$OUT"
+./bin/godot.linuxbsd.editor.x86_64 --path godotnext/testbed --rendering-driver vulkan --audio-driver Dummy \
+  --resolution 1920x1080 --write-movie "$OUT/frame.png" --fixed-fps 60 --quit-after 1650 -- \
+  --mode=capture --scene=res://scenes/static_ui/static_ui.tscn --camera=Camera3D --out="$OUT" \
+  --seed=1 --frames=600 --warmup=0
+./bin/godot.linuxbsd.editor.x86_64 --headless --path godotnext/testbed --script res://scenes/static_ui/check_static_ui.gd
+```
+
+The build check (#202): two FG-off captures of each scene give FLIP 0 (`python3 -m godotnext_metrics q7 --in <run_b> --ref <run_a>`; byte-identical frames on Vulkan on the L4), and the scene and its twin differ only inside the HUD's rectangles. `run_selftest.sh` / `run_selftest.ps1 -Scene res://scenes/static_ui/static_ui.tscn -Camera Camera3D -Mode capture -Runs 2` makes and hashes such a pair. A 2160p capture on a 4K desktop needs a borderless window, which the testbed opens on Windows (#270).
+
+**GPU-bound run** (GU+-5, GU+-9 and F1; #236 ports it to UE 5.9). The generated Dense City (`res://generated/dense_city/dense_city.tscn`, from the #63 generator) on its street camera `cam_main`, 3840x2160 borderless fullscreen with VSync off, as a harness timing run on D3D12 through `runners/win_session1.ps1` (`kind` `timing` locks the clocks). The FG and Reflex settings of each configuration go in an `override.cfg` beside the scene, which the runner applies for the launch (#240). A run counts only when PresentMon's GPU busy is at least 95% of the application frame interval; in a comparison that rule is the baseline's (FG off, Reflex Off).
+
+```json
+{"name": "gu_plus_fg_off", "device": "NVIDIA GeForce RTX 4080 SUPER", "driver": "d3d12", "kind": "timing",
+ "out": "godotnext/testbed/captures/gu_plus/fg_off",
+ "args": ["--path", "godotnext/testbed", "--fullscreen", "--resolution", "3840x2160", "--disable-vsync",
+          "--gpu-profile", "--audio-driver", "Dummy", "--quit-after", "4650", "--",
+          "--mode=timing", "--scene=res://generated/dense_city/dense_city.tscn", "--camera=cam_main",
+          "--out={out}", "--seed=1", "--warmup=600", "--frames=3000"]}
+```
+
+`--quit-after` is the harness cap, `900 + 30 + 120 + warmup + frames`. PresentMon 2.6.0 (the release's `PresentMon-2.6.0-x64.exe`; `record` refuses any other file) records the testbed process around that job, from an elevated shell (ETW tracing works from an SSH login). `--delay` has to cover the city's load, so the 120 warm-up displayed frames are scene frames; the first PQ run confirms the value. `--process_name` records every process of that name: if another one presents meanwhile (the editor, another job), the CSV holds several process / swap chain pairs, and `--swap-chain` takes the run's `SwapChainAddress`, or `auto` for the pair with the most displayed frames. `metrics/godotnext_metrics/presentmon_metrics.py` then reports the displayed frame time (p50, p99, p99 / median), the displayed rate, PC latency and the GPU-bound check, and compares and spreads runs:
+
+```
+python -m godotnext_metrics.presentmon_metrics record --presentmon <PresentMon-2.6.0-x64.exe> ^
+  --process-name godot.windows.editor.x86_64.exe --out <dir> --delay 20 -- ^
+  powershell -NoProfile -ExecutionPolicy Bypass -File godotnext\testbed\harness\runners\win_session1.ps1 -JobFile <job.json>
+python -m godotnext_metrics.presentmon_metrics compare --kind fg --test <fg_2x>\presentmon.csv --base <fg_off>\presentmon.csv
+```
+
+**Displayed-UI capture** (GU+-6). `display_capture capture` grabs 240 displayed frames of the static-UI scene through Desktop Duplication (`dxcam`, `metrics/requirements-fg.txt`) and keeps only the pixels inside `cmask_ui.png` (from a capture of the scene at the same output size). Desktop Duplication needs the interactive desktop session, so it runs there, not from an SSH login. `compare` scores FG on against FG off (≤ 0.005):
+
+```
+python -m godotnext_metrics.display_capture capture --mask <capture>\cmask_ui.png --out <fg_off> --delay 15 -- ^
+  bin\godot.windows.editor.x86_64.exe --path godotnext\testbed --rendering-driver d3d12 --gpu-index 0 ^
+  --fullscreen --resolution 3840x2160 res://scenes/static_ui/static_ui.tscn
+python -m godotnext_metrics.display_capture compare --test <fg_on> --ref <fg_off>
+```
+
+**F1 trace method.** DLSS-G runs inside the Streamline Present on its own queue, so no RD timestamp brackets it. Record 600 frames after the warm-up at FG 2x and 2160p with Nsight Systems, export to SQLite, and read the p95 of the workloads Streamline names `nv.sl.dlss_g*`:
+
+```
+nsys profile --trace=dx12 --dx12-gpu-workload=individual --output=<report> <launch command>
+nsys export --type=sqlite --output=<report>.sqlite <report>.nsys-rep
+python -m godotnext_metrics.nsys_dlssg --sqlite <report>.sqlite
+```
+
+**Fallback checker** (GU+-7). `harness/fg_status_probe.tscn` shows the static-UI scene for 120 frames and prints `RenderingServer.get_frame_generation_status()` (#203) as one `GODOTNEXT_FG_STATUS` line. `fallback_log_check` runs each hardware configuration with its `override.cfg` (Vulkan or Metal FG, `API_UNSUPPORTED`; MFG 4x on Ada, `MFG_REQUIRES_RTX50` running FG 2x), checks the reason and exactly one log line naming it, and compares an all-PU+-off capture byte for byte with one from a build without `modules/dlss`. Until #203 lands the status method is absent and every configuration fails. The mocked cases are doctests (#200). The probe finds the reason's constant name in ClassDB on whichever class declares `FrameGenerationReason` (RenderingServer, FrameGenerationExtension or another); `harness/tests/test_fg_status_probe.gd` checks that lookup headless on enums the engine has today.
+
+```
+./bin/godot.linuxbsd.editor.x86_64 --headless --path godotnext/testbed --script res://harness/tests/test_fg_status_probe.gd
+python3 -m godotnext_metrics.fallback_log_check list
+python3 -m godotnext_metrics.fallback_log_check run --godot <editor> --testbed godotnext/testbed --config vulkan_fg --out <dir> -- --gpu-index 0
+python3 -m godotnext_metrics.fallback_log_check analyze --config mfg_on_ada --log <runner job>/run.log
+python3 -m godotnext_metrics.fallback_log_check identical --in <PU+ off capture> --ref <no-dlss build capture>
+```
+
 ## Streaming reports (#74)
 
 Exclusion Matrix, Slow IO Flight and the Feature Parity Room streaming variant are scenes, not harness modes. Their reports are a side CLI, schema 1, and they do not add keys that Q11 reads and do not add entries to the frozen q1–q21 command set:

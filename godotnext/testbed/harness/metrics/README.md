@@ -54,4 +54,15 @@ Upscaler Torture's scrolling emissive check (#271; `godotnext/testbed/harness/RE
 python3 -m godotnext_metrics.scrolling_emissive --default <capture> --static <capture>
 ```
 
+GU+'s provisional displayed-frame metrics (#202; `docs/godotnext/metrics.md`, "Displayed frames and latency") are side modules too. They read a PresentMon 2.6.0 CSV, a displayed-UI capture and an Nsight Systems SQLite export; `fallback_log_check` runs and reads the GU+-7 configurations. `requirements-fg.txt` adds the `dxcam` pin for the capture on Windows:
+
+```
+python3 -m godotnext_metrics.presentmon_metrics {summary,compare,spread,record} ...
+python3 -m godotnext_metrics.display_capture {capture,compare} ...
+python3 -m godotnext_metrics.nsys_dlssg --sqlite <report.sqlite>
+python3 -m godotnext_metrics.fallback_log_check {list,run,analyze,identical} ...
+```
+
+Their fixture tests also run from the repository root with the issue's selector: `python3 -m pytest godotnext/testbed/harness -k "fg or latency or capture"`.
+
 `hdr_*.exr`, `frame*.png`, `timing.csv`, `summary.json` and the patch JSON are the harness and scene formats. Direct-only renders, masks, counters, velocity and ray records are sidecar files named in `docs/godotnext/metrics.md`. The engine's doctests do not import this package.

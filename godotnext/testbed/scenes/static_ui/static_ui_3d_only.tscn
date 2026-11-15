@@ -1,0 +1,96 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://scenes/static_ui/static_ui.gd" id="1_bug4d"]
+[ext_resource type="PackedScene" path="res://scenes/upscaler_torture/upscaler_torture.tscn" id="2_emvm4"]
+[ext_resource type="Texture2D" path="res://scenes/static_ui/minimap.res" id="3_mggwg"]
+
+[node name="StaticUI" type="Node3D"]
+script = ExtResource("1_bug4d")
+
+[node name="UpscalerTorture" parent="." instance=ExtResource("2_emvm4")]
+
+[node name="HUD" type="CanvasLayer" parent="."]
+visible = false
+
+[node name="Layout" type="Control" parent="HUD"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="Panel" type="ColorRect" parent="HUD/Layout"]
+layout_mode = 0
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 32.0
+offset_top = -128.0
+offset_right = 672.0
+offset_bottom = -32.0
+mouse_filter = 2
+color = Color(0.04, 0.06, 0.09, 0.5)
+
+[node name="Label18" type="Label" parent="HUD/Layout/Panel"]
+layout_mode = 0
+offset_left = 24.0
+offset_top = 34.0
+offset_right = 24.0
+offset_bottom = 34.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 18
+text = "18 px  HP 100 / 100   AMMO 30   WAVE 07   00:42.195"
+
+[node name="Label12" type="Label" parent="HUD/Layout"]
+layout_mode = 0
+offset_left = 32.0
+offset_top = 32.0
+offset_right = 32.0
+offset_bottom = 32.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 12
+text = "12 px  The quick brown fox jumps over the lazy dog  0123456789"
+
+[node name="Label32" type="Label" parent="HUD/Layout"]
+layout_mode = 0
+offset_left = 32.0
+offset_top = 60.0
+offset_right = 32.0
+offset_bottom = 60.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_font_sizes/font_size = 32
+text = "32 px  STATIC UI  0123456789"
+
+[node name="CrosshairH" type="ColorRect" parent="HUD/Layout"]
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -16.0
+offset_right = 17.0
+offset_bottom = 1.0
+mouse_filter = 2
+
+[node name="CrosshairV" type="ColorRect" parent="HUD/Layout"]
+layout_mode = 0
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_top = -16.0
+offset_right = 1.0
+offset_bottom = 17.0
+mouse_filter = 2
+
+[node name="Minimap" type="TextureRect" parent="HUD/Layout"]
+texture_filter = 1
+layout_mode = 0
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -288.0
+offset_top = 32.0
+offset_right = -32.0
+offset_bottom = 288.0
+mouse_filter = 2
+texture = ExtResource("3_mggwg")
+stretch_mode = 2

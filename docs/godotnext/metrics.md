@@ -76,6 +76,8 @@ The harness files and the patch JSON are read as issues #12 and #10 defined them
 | `coverage.png` | Q5 and Q6 reference coverage. |
 | `cmask_<name>.png` | Q19 content mask; with `--mask <name>`, a Q8 or Q19 mask for every frame. |
 | `mask_<name>/frame*.png` | A per-frame content mask run (`--mask=<name>` capture, #190), inside or beside the capture folder. |
+| `cmask_ui.png` | The static-UI scene's UI mask (#202): HUD alpha ≥ 0.99 at the output size. A content mask like the others, so `--mask ui` reads it. |
+| `presentmon.csv`, `ui_pixels.npz`, `<report>.sqlite` | GU+ displayed-frame, UI-capture and F1 inputs (#202), read by the side modules below. |
 | `roughness.exr` | Q9, and Q20's per-bin path. |
 | `disocclusion.png`, `q10.json` | Q10. |
 | `counters.json` | Q2, Q14, Q15, Q16, Q18. The renderer that fills it is later work. |
@@ -112,6 +114,32 @@ The process prints one JSON object with `metric`, `value`, `threshold` and `pass
 - **Q8.** On the frozen 64-frame window, the value treats each masked pixel as a patch: the frozen per-patch relative σ, averaged. `mask_as_patch` is the other reading, the whole mask as one patch (the relative σ of the masked mean luminance). In both, a one-pixel mask gives exactly the value of an unmasked one-pixel patch. The luminance is indirect (full minus direct-only) when the capture has direct-only renders, as the unmasked Q8 reads it. An upscaler capture has none, so it is the final output's linear luminance, from `hdr_*.exr` or from `frame*.png` decoded from sRGB. A mask run contributes the union of its window frames (`mask_frames_identical` says whether they matched). The unmasked Q8 needs Q1 patches and direct-only renders, which no GT-2 scene has; `--mask frame` makes a whole-frame static Q8 available on them. Which reading GT-2's Q8 lines use is not fixed here.
 
 `python3 -m godotnext_metrics.masks coverage --in <mask run>` reports each frame's mask coverage against the 0.5% floor, and the pixel `levels` the frames hold. A mask run holds only 0 and 255. Any other level means the frames were resampled (#270), which blurs the mask and inflates the coverage, so the run fails: `pass` is false, `error` says why, and the exit code is 2. Coverage under the floor is still a computed result (exit 0, `pass` false).
+
+## Displayed frames and latency (#202, provisional)
+
+GU+ (plan §21.5) measures what reaches the display. These metrics are registered here as provisional, not as Q ids: the command set stays q1–q21, and the tools are side modules of this package. Whether they become Q ids is the lead's call. They are measured in PQ (§22); at PR time the tools only have to run.
+
+- **Displayed frame time**, from the pinned PresentMon 2.6.0 console CSV (default columns plus `--track_pc_latency`). A displayed frame is a row whose `MsBetweenDisplayChange` is a number and, in a CSV with a `DisplayedTime` column, whose `DisplayedTime` is not `NA` (the README lists that column; a CSV recorded with the 2.6.0 console has none); its displayed frame time is `MsBetweenDisplayChange`, the interval between display changes (`DisplayedTime` when a `--v2_metrics` CSV has no `MsBetweenDisplayChange`). The window skips 120 displayed frames and takes the next 600; dropped rows count for neither. The value is p50 and p99 with the harness percentile, and **p99 / median** (GU+-5 FG 2x and GU+-9: ≤ 1.5).
+- **Displayed rate**: the window's 600 frames over the sum of their displayed frame times, in Hz. The **displayed-rate ratio** is a test run's rate over its baseline's (GU+-5: FG 2x ≥ 1.6× FG off).
+- **PC latency**: `MsPCLatency` (sl.pcl markers; Reflex Off and On runs both load Streamline), the p50 over the window frames that report it, with the mean and p99 beside it. A run with no PC latency is an input error unless the build has no markers (`--no-latency`). GU+-5: Reflex On ≥ 10% lower than Off.
+- **GPU-bound rule**: GPU busy is the sum of `MsGPUBusy` over the sum of `MsBetweenAppStart` (the application frame interval; `GPUBusy` and `FrameTime` in a `--v2_metrics` CSV), over the rows from the first to the last window frame, dropped rows included. A run counts only at ≥ 0.95. In a comparison the rule applies to the baseline (FG off, Reflex Off), the configuration that makes the scene GPU-bound; the test run's fraction is reported.
+- One process and one swap chain per CSV. With more, the swap chain is chosen per CSV, by its `SwapChainAddress` or `auto` (the one with the most displayed frames; a tie is an input error): `--swap-chain` for `summary` and `record`, `--test-swap-chain` and `--base-swap-chain` for `compare`, and for `spread` one `--swap-chain` per CSV or a single `auto`.
+- **Spread** over runs of one configuration: (max − min) / min, as the harness timing spread. #202's PQ line: 3 runs × 600 frames, FG off, D3D12, displayed p99 and PC latency each ≤ 3%.
+- **UI integrity** (GU+-6 first line): 240 displayed frames captured through Desktop Duplication (`dxcam`), cropped to the static-UI scene's UI mask `cmask_ui.png` (HUD alpha ≥ 0.99). Each FG-on frame is compared with the same index of an FG-off capture: both are rebuilt on the mask's bounding box with zero outside the mask, so the 3D image behind the UI cannot reach a UI pixel through FLIP's filters, and LDR FLIP (Q7's call) is averaged over the mask pixels, then over the frames. Gate ≤ 0.005.
+- **F1 trace method**: the DLSS-G pass runs inside the Streamline Present on its own queue, outside any RD timestamp. Its time is read from an Nsight Systems trace (`--trace=dx12 --dx12-gpu-workload=individual`, exported with `nsys export --type=sqlite`): the `DX12_WORKLOAD` rows whose D3D12 object name or PIX marker text starts with `nv.sl.dlss_g` (Streamline names its D3D12 objects `nv.sl.*`), the union of their intervals per `frameId`, then p95 over 600 frames after 120. The PQ check of the method: it reproduces a reference trace's value within 5%.
+
+```
+python3 -m godotnext_metrics.presentmon_metrics summary --csv <presentmon.csv>
+python3 -m godotnext_metrics.presentmon_metrics compare --kind fg --test <fg_2x.csv> --base <fg_off.csv>
+python3 -m godotnext_metrics.presentmon_metrics compare --kind reflex --test <reflex_on.csv> --base <reflex_off.csv>
+python3 -m godotnext_metrics.presentmon_metrics spread --csv <run_1.csv> <run_2.csv> <run_3.csv>
+python3 -m godotnext_metrics.display_capture compare --test <fg_on capture> --ref <fg_off capture>
+python3 -m godotnext_metrics.nsys_dlssg --sqlite <report.sqlite> [--expect-ms <reference p95>]
+```
+
+Each prints one JSON object. Exit 0 when the object is a computed result, including a run that is not GPU-bound or a failed line; exit 2 with an `error` when an input is missing or unusable.
+
+The tools are pinned: `presentmon_metrics record` runs only the 2.6.0 release's `PresentMon-2.6.0-x64.exe`, checked by the SHA-256 GitHub publishes for it, and `display_capture capture` refuses an installed `dxcam` other than 0.3.0.
 
 ## Python
 

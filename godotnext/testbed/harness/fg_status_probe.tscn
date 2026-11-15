@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://harness/fg_status_probe.gd" id="1_fgprobe"]
+
+[node name="FgStatusProbe" type="Node"]
+script = ExtResource("1_fgprobe")
