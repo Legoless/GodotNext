@@ -388,6 +388,10 @@ bool NextGI::lite_traces_skinned(bool p_lite) {
 	return !p_lite;
 }
 
+bool NextGI::lite_traces_specular(bool p_lite) {
+	return !p_lite;
+}
+
 void NextGI::_begin_dispatch_frame() {
 	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 	if (frame == dispatch_frame) {
@@ -1254,10 +1258,25 @@ void NextGI::ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_ha
 		const uint32_t mipmaps = Image::get_image_required_mipmaps(size.x, size.y, Image::FORMAT_RGBAH);
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_AMBIENT, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size, 0, mipmaps);
 		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_REFLECTION, RenderingDevice::DATA_FORMAT_R16G16B16A16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
-		p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, RenderingDevice::DATA_FORMAT_R16_SFLOAT, usage, RenderingDevice::TEXTURE_SAMPLES_1, size);
 		rough_reflection_mip_count = mipmaps;
 		rbgi->using_half_size_gi = p_half_resolution;
 	}
+}
+
+void NextGI::ensure_specular_hit_buffer(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_trace_size) {
+	ERR_FAIL_NULL(p_render_buffers);
+	ERR_FAIL_COND(p_trace_size.x <= 0 || p_trace_size.y <= 0);
+	if (p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT)) {
+		if (p_render_buffers->get_texture_slice_size(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, 0) == p_trace_size) {
+			return;
+		}
+		// A preset or view-size change moved the trace size.
+		p_render_buffers->free_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT);
+	}
+	const RID texture = p_render_buffers->create_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT, RenderingDevice::DATA_FORMAT_R16_SFLOAT, get_gi_buffer_usage_bits(), RenderingDevice::TEXTURE_SAMPLES_1, p_trace_size);
+	ERR_FAIL_COND(texture.is_null());
+	// A texel the trace has not written yet reads as a miss.
+	RenderingDevice::get_singleton()->texture_clear(texture, Color(65504.0, 0, 0, 0), 0, 1, 0, p_render_buffers->get_view_count());
 }
 
 void NextGI::_clear_gi_buffers(RenderSceneBuffersRD *p_render_buffers) const {
@@ -1282,6 +1301,12 @@ void NextGI::_clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const 
 }
 
 RID NextGI::get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const {
+	// GodotNext: nextgi_reflect_divisor (#274). Lite frames skip the gather, so after a runtime
+	// switch from a traced preset the texture keeps the last traced frame's distances, and the
+	// front layer, which Lite does not turn off, still writes it.
+	if (!lite_traces_specular(is_lumen_lite())) {
+		return RID();
+	}
 	if (p_render_buffers == nullptr || !p_render_buffers->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT)) {
 		return RID();
 	}

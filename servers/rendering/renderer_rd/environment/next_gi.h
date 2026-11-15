@@ -159,6 +159,9 @@ public:
 	static bool is_lumen_lite(Quality p_resolved, MediumGather p_gather);
 	static bool is_lumen_lite();
 	static bool lite_traces_skinned(bool p_lite);
+	// GodotNext: nextgi_reflect_divisor (#274). Whether the view's specular trace runs, and so
+	// whether get_specular_hit_distance() has this frame's hit distances. Lite traces none.
+	static bool lite_traces_specular(bool p_lite);
 
 	struct TierInputs {
 		bool forward_plus = true;
@@ -296,6 +299,9 @@ private:
 	// #60: the specular trace writes RB_TEX_REFLECTION after the gather, so clear it up front.
 	void _clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const;
 	// #60: the specular first-hit distance (R16F, 65504 on a miss), for the RR guides (#206).
+	// GodotNext: nextgi_reflect_divisor (#274). It has the trace size,
+	// nextgi_reflect_trace_size(internal size, reflection_divisor), not the view's. Under Lite it is
+	// an empty RID: no specular trace runs there.
 	RID get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const;
 	void _apply_safety_net(TierInputs &r_inputs);
 	static bool _deny_ray_query(); // GodotNext: ps_swrt_trace (#186, #188)
@@ -623,6 +629,9 @@ public:
 	static bool gi_buffers_need_reset(bool p_has_buffers, uint32_t p_usage_bits, bool p_using_half_size, bool p_half_resolution);
 	// Mirrors the buffer setup of GI::process_gi with get_gi_buffer_usage_bits.
 	void ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_half_resolution);
+	// GodotNext: nextgi_reflect_divisor (#274). (Re)creates RB_TEX_SPECULAR_HIT at the specular trace
+	// size, cleared to the miss value; NextGIGather calls it when it sizes the trace.
+	static void ensure_specular_hit_buffer(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_trace_size);
 
 	// _render_shadow_begin and _render_shadow_end bracket a shadow batch, which fills
 	// RENDER_LIST_SECONDARY. The frame block never runs inside one.

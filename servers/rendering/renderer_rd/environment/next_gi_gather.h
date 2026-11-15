@@ -33,6 +33,7 @@
 #include "core/math/basis.h"
 #include "core/math/math_funcs.h"
 #include "core/math/projection.h"
+#include "core/math/vector2i.h"
 #include "core/string/ustring.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
@@ -51,6 +52,24 @@ _FORCE_INLINE_ uint32_t nextgi_gather_probe_count_axis(uint32_t p_pixels) {
 
 _FORCE_INLINE_ uint32_t nextgi_gather_ray_count(uint32_t p_width, uint32_t p_height) {
 	return nextgi_gather_probe_count_axis(p_width) * nextgi_gather_probe_count_axis(p_height) * 16u;
+}
+
+// GodotNext: nextgi_reflect_divisor (#274). The specular trace has one pixel per
+// reflection_divisor x reflection_divisor block of the internal size, rounded down and at least
+// 1x1: Epic (1) traces every pixel, High (2) halves each axis, Medium (4) quarters it. The trace
+// textures, RB_TEX_SPECULAR_HIT, the reflect dispatch and the specular denoiser all use this
+// size; the reflect kernel reads it back from its output image.
+_FORCE_INLINE_ uint32_t nextgi_reflect_trace_axis(uint32_t p_pixels, uint32_t p_divisor) {
+	return MAX(p_pixels / MAX(p_divisor, 1u), 1u);
+}
+
+_FORCE_INLINE_ Size2i nextgi_reflect_trace_size(const Size2i &p_internal_size, uint32_t p_divisor) {
+	return Size2i(int32_t(nextgi_reflect_trace_axis(uint32_t(MAX(p_internal_size.x, 0)), p_divisor)), int32_t(nextgi_reflect_trace_axis(uint32_t(MAX(p_internal_size.y, 0)), p_divisor)));
+}
+
+// 8x8 workgroups, one thread per trace pixel.
+_FORCE_INLINE_ uint32_t nextgi_reflect_dispatch_groups(uint32_t p_trace_pixels) {
+	return MAX((p_trace_pixels + 7u) / 8u, 1u);
 }
 
 // History resets when the reprojected depth disagrees by more than 10%.
@@ -159,6 +178,7 @@ class NextGIGather {
 	uint32_t last_screen_hits = 0;
 	uint32_t last_screen_w = 0;
 	uint32_t last_screen_h = 0;
+	Size2i last_trace_size; // GodotNext: nextgi_reflect_divisor (#274)
 	uint32_t target_stride = 0;
 	uint32_t ray_stride = 4;
 	uint32_t ray_count = 16;

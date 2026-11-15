@@ -100,6 +100,8 @@ layout(set = 0, binding = 18, std430) restrict readonly buffer NextGIGatherParam
 	uint pad2;
 #endif
 	float max_trace_roughness;
+	// GodotNext: nextgi_reflect_divisor (#274). Informational: the reflect kernel takes the trace size
+	// from its output image.
 	float reflect_divisor;
 	uint reflect_enabled;
 	uint reflect_debug;

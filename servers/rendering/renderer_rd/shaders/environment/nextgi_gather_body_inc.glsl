@@ -717,7 +717,9 @@ vec3 nextgi_reflection_fog(vec3 p_radiance, vec3 p_world, float p_distance) {
 void nextgi_reflect_main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	ivec2 full_size = ivec2(params.screen_jitter.xy);
-	ivec2 size = ivec2(vec2(full_size) / max(params.reflect_divisor, 1.0));
+	// GodotNext: nextgi_reflect_divisor (#274). The trace size is the output's: NextGIGather sizes the
+	// trace textures and the dispatch with nextgi_reflect_trace_size() from reflection_divisor.
+	ivec2 size = imageSize(reflection_image);
 	if (pixel.x >= size.x || pixel.y >= size.y) {
 		return;
 	}
@@ -750,6 +752,9 @@ void nextgi_reflect_main() {
 	vec3 radiance;
 	float confidence = 0.0;
 	float hit_distance = 65504.0;
+	// GodotNext: nextgi_reflect_divisor (#274). A traced ray without a hit (it ends at the WRC
+	// handoff or at rt_radius) writes the miss distance; its radiance and fog stay as they were.
+	bool missed = false;
 	if (roughness <= params.max_trace_roughness) {
 		vec3 direction = nextgi_reflect_sample_ggx(normal, view_dir, roughness, seed);
 		if (dot(direction, normal) <= 0.0) {
@@ -810,6 +815,7 @@ void nextgi_reflect_main() {
 			hit_result = nextgi_trace(trace_origin, direction, trace_tmax, hit);
 			hit_distance = resume + hit.t;
 #endif
+			missed = !hit_result;
 			if (hit_result) {
 				atomicAdd(reflect_counters.hits, 1u);
 #ifdef MODE_FAR_FIELD
@@ -848,6 +854,9 @@ void nextgi_reflect_main() {
 #else
 		radiance = nextgi_reflection_fog(radiance, origin + direction * hit_distance, hit_distance);
 #endif
+		if (missed) {
+			hit_distance = 65504.0;
+		}
 	} else {
 		vec3 direction = reflect(-view_dir, normal);
 		radiance = nextgi_wrc_sample(origin, direction);

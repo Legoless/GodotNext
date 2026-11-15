@@ -96,7 +96,7 @@ struct GatherParamsGPU {
 	// hardware shader.
 	uint32_t card_set_count;
 	float max_trace_roughness;
-	float reflect_divisor;
+	float reflect_divisor; // Informational (#274): the reflect kernel reads the trace size from its output.
 	uint32_t reflect_enabled;
 	uint32_t reflect_debug;
 	uint32_t sampling_mode;
@@ -898,10 +898,11 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		blue_noise_texture = rd->texture_create(noise_format, RD::TextureView(), noise_data);
 	}
 	last_reflection_output = front_layer ? front_reflection : (rb->has_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION) : RID());
-	last_specular_hit = front_layer ? front_hit_distance : (rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID());
+	// GodotNext: nextgi_reflect_divisor (#274). The trace follows the preset's reflection_divisor.
+	last_trace_size = nextgi_reflect_trace_size(screen, quality.reflection_divisor);
 	if (last_screen_w > 0 && last_screen_h > 0) {
-		const uint32_t trace_w = MAX(last_screen_w / 2u, 1u);
-		const uint32_t trace_h = MAX(last_screen_h / 2u, 1u);
+		const uint32_t trace_w = uint32_t(last_trace_size.width);
+		const uint32_t trace_h = uint32_t(last_trace_size.height);
 		const RD::TextureFormat specular_format = rd->texture_get_format(specular_raw.is_valid() ? specular_raw : probe_image);
 		if (!specular_raw.is_valid() || specular_format.width != trace_w || specular_format.height != trace_h) {
 			RID *textures[7] = { &specular_raw, &specular_history, &specular_scratch, &specular_denoised, &specular_history_length, &specular_debug_variance, &specular_debug_rejected };
@@ -920,11 +921,22 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 				rd->texture_clear(*texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
 			}
 		}
+		// The hit distance is written per trace pixel too (plan §8: at trace resolution). The front
+		// layer's gather writes the view's texture as well, at the same size.
+		NextGI::ensure_specular_hit_buffer(rb.ptr(), last_trace_size);
+	}
+	last_specular_hit = front_layer ? front_hit_distance : (rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID());
+	if (params.reflect_debug != 0u && specular_debug.is_valid()) {
+		const RD::TextureFormat debug_format = rd->texture_get_format(specular_debug);
+		if (int32_t(debug_format.width) != last_trace_size.width || int32_t(debug_format.height) != last_trace_size.height) {
+			rd->free_rid(specular_debug);
+			specular_debug = RID();
+		}
 	}
 	if (params.reflect_debug != 0u && !specular_debug.is_valid()) {
 		RD::TextureFormat debug_tf;
-		debug_tf.width = MAX(last_screen_w / 2u, 1u);
-		debug_tf.height = MAX(last_screen_h / 2u, 1u);
+		debug_tf.width = uint32_t(last_trace_size.width);
+		debug_tf.height = uint32_t(last_trace_size.height);
 		debug_tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
 		debug_tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
 		specular_debug = rd->texture_create(debug_tf, RD::TextureView());
@@ -1154,17 +1166,18 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	if (p_diffuse) {
 		_denoise_probes();
 	}
-	// GodotNext: nextgi_reflect (#60). One specular trace per half-resolution pixel.
+	// GodotNext: nextgi_reflect (#60). One specular trace per trace pixel.
+	// GodotNext: nextgi_reflect_divisor (#274). The trace size follows the preset's reflection_divisor.
+	const uint32_t reflect_groups_x = nextgi_reflect_dispatch_groups(uint32_t(last_trace_size.width));
+	const uint32_t reflect_groups_y = nextgi_reflect_dispatch_groups(uint32_t(last_trace_size.height));
 	if (reflect_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
 		ReflectCountersGPU zero_reflect;
 		rd->buffer_update(reflect_counter_buffer, 0, sizeof(zero_reflect), &zero_reflect);
-		const uint32_t width = MAX((last_screen_w + 1u) / 2u, 1u);
-		const uint32_t height = MAX((last_screen_h + 1u) / 2u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, _pipeline(5));
 		rd->compute_list_bind_uniform_set(list, reflect_uniform_set, 0);
 		_bind_trace_set(list);
-		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
+		rd->compute_list_dispatch(list, reflect_groups_x, reflect_groups_y, 1);
 		rd->compute_list_end();
 		// GodotNext: ps_lumen_lite (#183)
 		NextGI::get_singleton()->note_reflection_dispatch();
@@ -1173,12 +1186,10 @@ void NextGIGather::gather(RenderDataRD *p_render_data, bool p_diffuse) {
 	NextGIRTScene *far_rt_scene = bound_swrt ? nullptr : NextGI::get_singleton()->get_rt_scene();
 	const NextGIFarField *far_field = far_rt_scene != nullptr ? far_rt_scene->get_far_field() : nullptr;
 	if (far_field != nullptr && far_field->is_trace_ready() && reflect_far_uniform_set.is_valid() && last_screen_w > 0 && last_screen_h > 0) {
-		const uint32_t width = MAX((last_screen_w + 1u) / 2u, 1u);
-		const uint32_t height = MAX((last_screen_h + 1u) / 2u, 1u);
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, shader->pipelines[6]);
 		rd->compute_list_bind_uniform_set(list, reflect_far_uniform_set, 0);
-		rd->compute_list_dispatch(list, MAX((width + 7u) / 8u, 1u), MAX((height + 7u) / 8u, 1u), 1);
+		rd->compute_list_dispatch(list, reflect_groups_x, reflect_groups_y, 1);
 		rd->compute_list_end();
 		// GodotNext: ps_lumen_lite (#183)
 		NextGI::get_singleton()->note_reflection_dispatch();
@@ -1319,7 +1330,7 @@ void NextGIGather::_denoise_specular() {
 	if (!last_depth.is_valid() || !last_normal_roughness.is_valid() || !last_reflection_output.is_valid() || last_screen_w == 0 || last_screen_h == 0) {
 		return;
 	}
-	const Size2i trace_size(MAX(last_screen_w / 2u, 1u), MAX(last_screen_h / 2u, 1u));
+	const Size2i trace_size = last_trace_size; // GodotNext: nextgi_reflect_divisor (#274)
 	const Size2i screen_size(last_screen_w, last_screen_h);
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 
@@ -1544,6 +1555,16 @@ void NextGIGather::fill_info(Dictionary &r_info) const {
 	r_info["clamped_energy_removed"] = int64_t(last_clamp_removed);
 	r_info["clamped_energy_total"] = int64_t(last_clamp_total);
 	r_info["reflection_rays"] = int64_t(last_reflection_traced);
+	// GodotNext: nextgi_reflect_divisor (#274). The specular trace size the last gather bound.
+	r_info["reflection_trace_width"] = int64_t(last_trace_size.width);
+	r_info["reflection_trace_height"] = int64_t(last_trace_size.height);
+	// The specular debug view's texture as allocated (0 before a debug view first needs it), which
+	// must follow the trace size while a specular debug view is on.
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const bool has_debug = rd != nullptr && specular_debug.is_valid();
+	const RD::TextureFormat debug_format = has_debug ? rd->texture_get_format(specular_debug) : RD::TextureFormat();
+	r_info["reflection_debug_width"] = has_debug ? int64_t(debug_format.width) : int64_t(0);
+	r_info["reflection_debug_height"] = has_debug ? int64_t(debug_format.height) : int64_t(0);
 	r_info["reflection_hits"] = int64_t(last_reflection_hits);
 	r_info["reflection_misses"] = int64_t(last_reflection_misses);
 	// GodotNext: ps_swrt_trace (#186). The software sibling's SDF counters; 0 on the hardware tier.

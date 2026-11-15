@@ -3426,6 +3426,76 @@ TEST_CASE("[NextGI][Quality] Preset budgets and atlas sizes") {
 	}
 }
 
+// GodotNext: nextgi_reflect_divisor (#274).
+TEST_CASE("[NextGI][Reflect] The specular trace size and dispatch follow each preset's reflection divisor") {
+	using namespace RendererRD;
+	using Q = NextGI::Quality;
+	struct SizeCase {
+		Q quality;
+		Size2i internal;
+		Size2i trace;
+		Vector2i groups;
+	};
+	const SizeCase cases[] = {
+		// Epic traces every view pixel.
+		{ Q::QUALITY_EPIC, Size2i(640, 360), Size2i(640, 360), Vector2i(80, 45) },
+		{ Q::QUALITY_EPIC, Size2i(1920, 1080), Size2i(1920, 1080), Vector2i(240, 135) },
+		{ Q::QUALITY_EPIC, Size2i(429, 241), Size2i(429, 241), Vector2i(54, 31) },
+		// High, and Auto before its benchmark resolves it: half per axis, rounded down.
+		{ Q::QUALITY_HIGH, Size2i(640, 360), Size2i(320, 180), Vector2i(40, 23) },
+		{ Q::QUALITY_HIGH, Size2i(1920, 1080), Size2i(960, 540), Vector2i(120, 68) },
+		{ Q::QUALITY_HIGH, Size2i(429, 241), Size2i(214, 120), Vector2i(27, 15) },
+		{ Q::QUALITY_AUTO, Size2i(1920, 1080), Size2i(960, 540), Vector2i(120, 68) },
+		// Medium: a quarter per axis.
+		{ Q::QUALITY_MEDIUM, Size2i(640, 360), Size2i(160, 90), Vector2i(20, 12) },
+		{ Q::QUALITY_MEDIUM, Size2i(1920, 1080), Size2i(480, 270), Vector2i(60, 34) },
+		{ Q::QUALITY_MEDIUM, Size2i(429, 241), Size2i(107, 60), Vector2i(14, 8) },
+		// A view smaller than the divisor still traces one pixel.
+		{ Q::QUALITY_MEDIUM, Size2i(3, 2), Size2i(1, 1), Vector2i(1, 1) },
+		{ Q::QUALITY_HIGH, Size2i(1, 1), Size2i(1, 1), Vector2i(1, 1) },
+	};
+	for (const SizeCase &c : cases) {
+		const uint32_t divisor = NextGI::QUALITY_PARAMS[c.quality].reflection_divisor;
+		const Size2i trace = nextgi_reflect_trace_size(c.internal, divisor);
+		INFO(vformat("quality %d, internal %dx%d, divisor %d", int(c.quality), c.internal.x, c.internal.y, int(divisor)));
+		CHECK_EQ(trace, c.trace);
+		// High keeps the half-resolution trace it had before the divisor was honored.
+		if (divisor == 2u) {
+			CHECK_EQ(trace, Size2i(MAX(c.internal.x / 2, 1), MAX(c.internal.y / 2, 1)));
+		}
+		const Vector2i groups(int32_t(nextgi_reflect_dispatch_groups(uint32_t(trace.x))), int32_t(nextgi_reflect_dispatch_groups(uint32_t(trace.y))));
+		CHECK_EQ(groups, c.groups);
+		// The 8x8 groups cover the trace with less than one group to spare.
+		CHECK_GE(groups.x * 8, trace.x);
+		CHECK_GE(groups.y * 8, trace.y);
+		CHECK_LT((groups.x - 1) * 8, trace.x);
+		CHECK_LT((groups.y - 1) * 8, trace.y);
+		// The kernel samples view pixel (t + 0.5) / trace * view, so the last trace pixel lands in
+		// the view's last divisor block: the trace spans every quarter of the view.
+		const int last_x = int((float(trace.x - 1) + 0.5f) / float(trace.x) * float(c.internal.x));
+		const int last_y = int((float(trace.y - 1) + 0.5f) / float(trace.y) * float(c.internal.y));
+		CHECK_GE(last_x, c.internal.x - int(divisor) - 1);
+		CHECK_GE(last_y, c.internal.y - int(divisor) - 1);
+		CHECK_LT(last_x, c.internal.x);
+		CHECK_LT(last_y, c.internal.y);
+	}
+	CHECK_EQ(nextgi_reflect_trace_size(Size2i(640, 360), 0u), Size2i(640, 360));
+
+	// Lite traces no specular reflections, so get_specular_hit_distance() gives no texture there,
+	// not the distances a traced preset left behind before a runtime switch.
+	CHECK_FALSE(NextGI::lite_traces_specular(true));
+	CHECK(NextGI::lite_traces_specular(false));
+
+	// Both tiers' reflect kernels take the trace size from their output image, which NextGIGather
+	// allocates at nextgi_reflect_trace_size(), instead of recomputing it from the divisor.
+	const String sources[2] = { NextGIGather::build_shader_source(5), NextGIGather::build_swrt_shader_source(5) };
+	for (const String &source : sources) {
+		REQUIRE_FALSE(source.is_empty());
+		CHECK(source.contains("ivec2 size = imageSize(reflection_image);"));
+		CHECK_FALSE(source.contains("max(params.reflect_divisor"));
+	}
+}
+
 // GodotNext: ps_lumen_lite (#183).
 TEST_CASE("[NextGI][Lite] Irradiance field keeps the traced Medium path") {
 	using Q = RendererRD::NextGI::Quality;
