@@ -2933,11 +2933,21 @@
 		<member name="rendering/anti_aliasing/screen_space_roughness_limiter/limit" type="float" setter="" getter="" default="0.18">
 			[b]Note:[/b] This property is only read when the project starts. To control the screen-space roughness limiter at runtime, call [method RenderingServer.screen_space_roughness_limiter_set_active] instead.
 		</member>
+		<member name="rendering/anti_aliasing/tsr/debug_view" type="int" setter="" getter="" default="0">
+			The Temporal Super Resolution (TSR) pass that [constant Viewport.DEBUG_DRAW_TSR] (or [constant RenderingServer.VIEWPORT_DEBUG_DRAW_TSR]) shows. Each view is drawn over the scene's luma at 25%. Green helps the image, red or yellow costs it, blue is below a threshold, and magenta means the feature is off, for the pixel or for the whole view.
+			- [b]History Validity[/b]: the confidence of each history pixel, from a single frame (red) to converged (green).
+			- [b]Rejection[/b]: how much of the history each pixel rejects (red), after the flicker and thin-geometry relaxation.
+			- [b]Disocclusion[/b]: the parallax disocclusion weight (yellow): surfaces that were hidden in the previous frame.
+			- [b]Resurrection Hits[/b]: where a rejected pixel takes its color from an older persistent frame (green), and where resurrection is off for a rejected pixel (magenta): no persistent frame covers it, or it is translucent. All magenta at the Low preset, which has no history resurrection.
+			- [b]Flicker Period[/b]: the flicker analysis. Brightness follows the flicker score. The hue shows the time since the luma last reversed: green within 1/30 second, yellow at that limit, blue slower. Magenta where the analysis is off for the pixel (moving, disoccluded, translucent, or just in view). All magenta below the High preset, which has no flicker analysis.
+			- [b]Thin Coverage[/b]: where thin-geometry detection relaxes the rejection (green), and coverage still below its threshold (blue). All magenta while [member rendering/anti_aliasing/tsr/thin_geometry_detection] is off.
+			The setting is read every frame, so it can be changed while the view is shown.
+		</member>
 		<member name="rendering/anti_aliasing/tsr/quality" type="int" setter="" getter="" default="3">
-			Default quality preset for Temporal Super Resolution (TSR) when [member rendering/scaling_3d/mode] or [member Viewport.scaling_3d_mode] is set to TSR. Higher presets enable history resurrection, reprojection fields, flicker analysis, rejection antialiasing, and 200% history buffers. See [enum Viewport.TSRQuality] and [member Viewport.tsr_quality].
+			Default quality preset for Temporal Super Resolution (TSR) when [member rendering/scaling_3d/mode] or [member Viewport.scaling_3d_mode] is set to TSR. Low keeps a history at the output resolution and turns no stability feature on. Medium adds history resurrection (older frames that restore pixels coming out from behind a moving object) and spatial antialiasing of rejected pixels. High adds the reprojection field (sharper edges in motion) and flicker analysis (the history holds through fast periodic flicker). Epic and Cinematic keep the history at 200% of the output resolution. See [enum Viewport.TSRQuality] and [member Viewport.tsr_quality]. Thin-geometry detection is set separately with [member rendering/anti_aliasing/tsr/thin_geometry_detection].
 		</member>
 		<member name="rendering/anti_aliasing/tsr/thin_geometry_detection" type="bool" setter="" getter="" default="false">
-			If [code]true[/code], enables thin-geometry detection in Temporal Super Resolution (TSR) to preserve sub-pixel wires, foliage, and fences at the cost of extra GPU work.
+			If [code]true[/code], Temporal Super Resolution (TSR) detects thin features, such as wires, fences and foliage, from depth ridges and luma lines one pixel wide, averages where they appear over about one jitter cycle, and relaxes the history rejection there, so they stay in the history instead of flickering in and out. Fine, high-contrast texture detail one pixel wide also counts as a luma line. Translucent surfaces keep their rejection. It works at every [member rendering/anti_aliasing/tsr/quality] preset, costs one extra compute pass, and stores two one-byte textures at half the internal resolution (reduced where the TSR memory budget needs it). It is read every frame. To see where it acts, use [constant Viewport.DEBUG_DRAW_TSR] with [member rendering/anti_aliasing/tsr/debug_view] set to Thin Coverage.
 		</member>
 		<member name="rendering/camera/depth_of_field/depth_of_field_bokeh_quality" type="int" setter="" getter="" default="1">
 			Sets the quality of the depth of field effect. Higher quality takes more samples, which is slower but looks smoother.

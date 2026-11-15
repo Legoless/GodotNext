@@ -17,6 +17,16 @@ layout(set = 0, binding = 5) uniform sampler2D disocclusion_tex;
 layout(r8, set = 0, binding = 6) uniform restrict writeonly image2D rejection_out;
 layout(r16f, set = 0, binding = 7) uniform restrict writeonly image2D prev_depth_out;
 
+#ifdef TSR_STABILITY
+// Stability set (#198). Nothing outside these blocks changes: without TSR_STABILITY this
+// is the #194 shader.
+#define TSR_STABILITY_UBO_BINDING 8
+#include "tsr_stability_inc.glsl"
+
+layout(set = 0, binding = 9) uniform sampler2D flicker_tex;
+layout(set = 0, binding = 10) uniform sampler2D thin_tex;
+#endif
+
 shared vec3 s_ycocg[TSR_GROUP_SIZE + 2][TSR_GROUP_SIZE + 2];
 
 void main() {
@@ -88,6 +98,30 @@ void main() {
 
 	// Reactive mask from RB_TEX_COLOR.a (0 on opaque/sky, >0 on translucent surfaces).
 	float reactive = clamp(texelFetch(reactive_tex, px, 0).r, 0.0, 1.0);
+
+#ifdef TSR_STABILITY
+	// Flicker analysis: where the luma oscillates at 15 Hz or more, part of the shading
+	// rejection is removed so the history can hold.
+	float relax_shade = 0.0;
+	float relax_disocc = 0.0;
+	if ((stability.features & TSR_FEATURE_FLICKER) != 0u) {
+		relax_shade = tsr_flicker_weight(textureLod(flicker_tex, uv, 0.0).r) * TSR_FLICKER_MAX_RELAX;
+	}
+	// Thin geometry: where sub-pixel features were seen over the last jitter cycle, part of the
+	// shading and of the parallax disocclusion rejection is removed. Disocclusion must relax too:
+	// on the frame a wire is hit, its depth is nearer than all four previous-depth taps, which
+	// the disocclusion test reads as a disocclusion. A reprojection off the screen keeps its full
+	// rejection, and so does translucency (the reactive term).
+	if ((stability.features & TSR_FEATURE_THIN_GEOMETRY) != 0u) {
+		float thin_w = tsr_thin_weight(textureLod(thin_tex, uv, 0.0).r);
+		relax_shade = max(relax_shade, thin_w);
+		if (all(greaterThanEqual(uv_prev, vec2(0.0))) && all(lessThanEqual(uv_prev, vec2(1.0)))) {
+			relax_disocc = thin_w;
+		}
+	}
+	shade_rej *= 1.0 - relax_shade;
+	disocc *= 1.0 - relax_disocc;
+#endif
 
 	float rejection = clamp(max(disocc, max(reactive, shade_rej)), 0.0, 1.0);
 	imageStore(rejection_out, px, vec4(rejection, 0.0, 0.0, 0.0));

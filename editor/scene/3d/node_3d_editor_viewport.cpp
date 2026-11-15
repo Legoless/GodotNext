@@ -4697,7 +4697,9 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE:
 		// GodotNext: megalights_inputs (#136)
 		case VIEW_DISPLAY_ML_ALBEDO:
-		case VIEW_DISPLAY_ML_MATERIAL: {
+		case VIEW_DISPLAY_ML_MATERIAL:
+		// GodotNext: pt_tsr_stability (#198)
+		case VIEW_DISPLAY_TSR: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4756,6 +4758,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				// GodotNext: megalights_inputs (#136)
 				VIEW_DISPLAY_ML_ALBEDO,
 				VIEW_DISPLAY_ML_MATERIAL,
+				// GodotNext: pt_tsr_stability (#198)
+				VIEW_DISPLAY_TSR,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4816,6 +4820,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				// GodotNext: megalights_inputs (#136)
 				Viewport::DEBUG_DRAW_ML_ALBEDO,
 				Viewport::DEBUG_DRAW_ML_MATERIAL,
+				// GodotNext: pt_tsr_stability (#198)
+				Viewport::DEBUG_DRAW_TSR,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7170,6 +7176,9 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Represents motion vectors with colored lines in the direction of motion. Gray dots represent areas with no per-pixel motion."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Internal Buffer"), VIEW_DISPLAY_INTERNAL_BUFFER, SupportedRenderingMethods::FORWARD_PLUS_MOBILE,
 			TTRC("Shows the scene rendered in linear colorspace before any tonemapping or post-processing."));
+	// GodotNext: pt_tsr_stability (#198)
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("TSR Debug View"), VIEW_DISPLAY_TSR, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows one TSR pass, chosen by the project setting rendering/anti_aliasing/tsr/debug_view: history validity, rejection, disocclusion, resurrection hits, flicker period or thin coverage. Green helps the image, red or yellow costs it, and magenta means the feature is off. Shows the normal image when TSR is not the active 3D scaling mode."));
 	// GodotNext: nextgi_user_surface
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Tier"), VIEW_DISPLAY_NEXTGI_TIER, SupportedRenderingMethods::FORWARD_PLUS,

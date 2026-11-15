@@ -201,6 +201,8 @@ void RenderForwardClustered::RenderBufferDataForwardClustered::free_data() {
 		render_buffers->clear_context(RB_SCOPE_SSR);
 		render_buffers->clear_context(RB_SCOPE_SSCS);
 		render_buffers->clear_context(RB_SCOPE_TSR);
+		// GodotNext: pt_tsr_stability (#198). The TSR pass visualizer's texture.
+		render_buffers->clear_context(RB_SCOPE_TSR_DEBUG);
 	}
 
 	if (cluster_builder) {
@@ -3829,6 +3831,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
 			const Projection reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
 			const Vector2 jitter_pixels = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+			// GodotNext: pt_tsr_stability (#198). Thin-geometry detection is opt-in and read live.
+			const bool tsr_thin_geometry = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/tsr/thin_geometry_detection");
+			// The pass visualizer draws while the viewport's debug draw is DEBUG_DRAW_TSR; the setting picks the pass.
+			const int32_t tsr_debug_view = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_TSR ? int32_t(nextgi_tsr_debug_view_from_setting(GLOBAL_GET_CACHED(int64_t, "rendering/anti_aliasing/tsr/debug_view"))) : -1;
 
 			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 				rb_data->ensure_tsr(tsr_effect, v);
@@ -3850,6 +3856,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				params.z_far = p_render_data->scene_data->z_far;
 				params.is_orthogonal = p_render_data->scene_data->cam_orthogonal;
 				params.reset = reset_temporal_history;
+				// GodotNext: pt_tsr_stability (#198).
+				params.max_internal_size = rb->get_max_internal_size();
+				params.camera_projection = correction * cur_proj;
+				params.camera_transform = cur_transform;
+				// Wall-clock, not time_step: the flicker clock must advance while Engine.time_scale is 0.
+				params.delta_time = float(RSG::frame_step_unscaled);
+				params.thin_geometry = tsr_thin_geometry;
+				params.debug_view = tsr_debug_view;
 
 				tsr_effect->process(params);
 			}
@@ -4066,6 +4080,15 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 		RID ambient_texture = rb->get_texture(RB_SCOPE_GI, RB_TEX_AMBIENT);
 		RID reflection_texture = rb->get_texture(RB_SCOPE_GI, RB_TEX_REFLECTION);
 		copy_effects->copy_to_fb_rect(ambient_texture, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, true, reflection_texture, rb->get_view_count() > 1);
+	}
+
+	// GodotNext: pt_tsr_stability (#198). The TSR pass visualizer draws into RB_SCOPE_TSR_DEBUG while TSR
+	// is the active scaling mode; otherwise the texture does not exist and the view shows the normal image.
+	// Nearest copy, like the MegaLights views, so the legend's colors are not filtered.
+	if (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_TSR && rb->has_texture(RB_SCOPE_TSR_DEBUG, SNAME("debug_view"))) {
+		RID tsr_debug = rb->get_texture_slice(RB_SCOPE_TSR_DEBUG, SNAME("debug_view"), 0, 0);
+		Size2i rtsize = texture_storage->render_target_get_size(render_target);
+		copy_effects->copy_to_fb_rect(tsr_debug, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, false, RID(), false, false, false, false, Rect2(), 1.0f, false);
 	}
 
 	// GodotNext: nextgi_user_surface

@@ -237,6 +237,8 @@ inline bool nextgeo_is_unsupported_debug_draw(RSE::ViewportDebugDraw p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_VISIBILITY_ID:
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_FALLBACK:
 		case RSE::VIEWPORT_DEBUG_DRAW_NEXTGEO_TRIANGLE_SIZE:
+		// GodotNext: pt_tsr_stability (#198). Drawn after the resolve; virtual geometry stays active.
+		case RSE::VIEWPORT_DEBUG_DRAW_TSR:
 			return false;
 		default:
 			return true;

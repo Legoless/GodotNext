@@ -46,6 +46,9 @@
 #define RB_SCOPE_VRS SNAME("VRS")
 #define RB_SCOPE_NEXTGEO SNAME("nextgeo")
 #define RB_SCOPE_TSR SNAME("tsr")
+// GodotNext: pt_tsr_stability (#198). The TSR pass visualizer's texture, outside RB_SCOPE_TSR so that
+// the T6 accounting never counts it.
+#define RB_SCOPE_TSR_DEBUG SNAME("tsr_debug")
 
 #define RB_TEXTURE SNAME("texture")
 #define RB_TEX_COLOR SNAME("color")

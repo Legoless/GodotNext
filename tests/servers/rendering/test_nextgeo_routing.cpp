@@ -218,6 +218,9 @@ TEST_CASE("[NextGeo][Routing] Debug-draw classification and view gate (#79)") {
 	CHECK_FALSE(nextgeo_is_debug_view(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL));
 	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO));
 	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL));
+	// GodotNext: pt_tsr_stability (#198). The TSR pass visualizer is drawn after the resolve.
+	CHECK_FALSE(nextgeo_is_debug_view(RSE::VIEWPORT_DEBUG_DRAW_TSR));
+	CHECK_FALSE(nextgeo_is_unsupported_debug_draw(RSE::VIEWPORT_DEBUG_DRAW_TSR));
 
 	// Legacy Forward+ debug views force the whole view to legacy with DEBUG_DRAW.
 	const RSE::ViewportDebugDraw legacy_debug_modes[] = {
@@ -244,6 +247,7 @@ TEST_CASE("[NextGeo][Routing] Debug-draw classification and view gate (#79)") {
 	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_ALBEDO), int(RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO));
 	CHECK_EQ(int(Viewport::DEBUG_DRAW_ML_MATERIAL), int(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL));
 	CHECK_EQ(int(Viewport::DEBUG_DRAW_NEXTGI_LITE_PROBES), int(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES));
+	CHECK_EQ(int(Viewport::DEBUG_DRAW_TSR), int(RSE::VIEWPORT_DEBUG_DRAW_TSR));
 #endif
 }
 

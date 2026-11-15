@@ -6030,6 +6030,10 @@
 			Shows the half-resolution irradiance that Lumen Lite interpolates from the valid probes around each pixel. Pixels with no valid probe, such as those beyond the second probe level, are black. The view draws a labeled tint when the field texture is missing.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_TSR" value="61" enum="ViewportDebugDraw">
+			Shows one pass of Temporal Super Resolution (TSR), chosen by [member ProjectSettings.rendering/anti_aliasing/tsr/debug_view]: history validity, rejection, disocclusion, resurrection hits, flicker period or thin coverage. Each view is drawn over the scene's luma at 25%. Green helps the image, red or yellow costs it, and magenta means the feature is off, for the pixel or for the whole view. TSR keeps running while the view is shown. When TSR is not the active scaling mode ([constant VIEWPORT_SCALING_3D_MODE_TSR]), the view shows the normal image.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>

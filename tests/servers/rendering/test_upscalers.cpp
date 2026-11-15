@@ -40,6 +40,7 @@ TEST_FORCE_LINK(test_upscalers)
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_rd/effects/tsr.h"
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
+#include "servers/rendering/renderer_rd/effects/tsr_stability.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgi_velocity.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/rendering_device.h"
@@ -579,6 +580,659 @@ TEST_CASE("[Upscalers][TSR] Format table bytes per history pixel, T6 budgets, an
 	CHECK_EQ(tsr_vel.skip_clear_pass, ext_vel.skip_clear_pass);
 }
 
+// GodotNext: pt_tsr_stability (#198).
+TEST_CASE("[Upscalers][TSR] Stability feature mask follows TSR_PRESETS and the thin-geometry setting") {
+	for (int q = 0; q < RSE::VIEWPORT_TSR_QUALITY_MAX; q++) {
+		for (int thin = 0; thin < 2; thin++) {
+			const uint32_t mask = nextgi_tsr_feature_mask(RSE::ViewportTSRQuality(q), thin != 0);
+			// Each preset-driven feature reads TSR_PRESETS[q]; thin geometry reads only its setting.
+			CHECK_EQ((mask & TSR_FEATURE_RESURRECTION) != 0, TSR_PRESETS[q].resurrection);
+			CHECK_EQ((mask & TSR_FEATURE_REPROJECTION_FIELD) != 0, TSR_PRESETS[q].reprojection_field);
+			CHECK_EQ((mask & TSR_FEATURE_FLICKER) != 0, TSR_PRESETS[q].flicker_analysis);
+			CHECK_EQ((mask & TSR_FEATURE_THIN_GEOMETRY) != 0, thin != 0);
+			CHECK_EQ(mask & ~uint32_t(TSR_FEATURE_ALL), 0u);
+		}
+	}
+
+	const uint32_t preset_features = TSR_FEATURE_RESURRECTION | TSR_FEATURE_REPROJECTION_FIELD | TSR_FEATURE_FLICKER;
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_LOW, false), 0u);
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_LOW, true), uint32_t(TSR_FEATURE_THIN_GEOMETRY));
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_MEDIUM, false), uint32_t(TSR_FEATURE_RESURRECTION));
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_HIGH, false), preset_features);
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_EPIC, false), preset_features);
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC, false), preset_features);
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC, true), uint32_t(TSR_FEATURE_ALL));
+
+	// A quality above the table clamps to the last preset, as TSR::process does.
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_MAX, false), nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC, false));
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::ViewportTSRQuality(7), true), nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_CINEMATIC, true));
+
+	// The thin-geometry project setting is off by default, so by default Low adds nothing to #194.
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	REQUIRE(ps->has_setting("rendering/anti_aliasing/tsr/thin_geometry_detection"));
+	const bool thin_setting = bool(ps->get_setting("rendering/anti_aliasing/tsr/thin_geometry_detection"));
+	CHECK_FALSE(thin_setting);
+	CHECK_EQ(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_LOW, thin_setting), 0u);
+}
+
+TEST_CASE("[Upscalers][TSR] Stability pass plan leaves the core passes alone with no feature") {
+	// No feature: the #194 shader variants, no uniform buffer, no extra pass.
+	const TSRPassPlan none = nextgi_tsr_pass_plan(0);
+	CHECK_FALSE(none.stability_ubo);
+	CHECK_EQ(none.rejection_variant, 0u);
+	CHECK_EQ(none.history_variant, 0u);
+	CHECK_FALSE(none.analysis_flicker);
+	CHECK_FALSE(none.analysis_thin);
+	CHECK_FALSE(none.persistent_store);
+
+	// Low with the thin-geometry setting off is that plan.
+	const TSRPassPlan low = nextgi_tsr_pass_plan(nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_LOW, false));
+	CHECK_FALSE(low.stability_ubo);
+	CHECK_EQ(low.rejection_variant, 0u);
+	CHECK_EQ(low.history_variant, 0u);
+	CHECK_FALSE(low.analysis_flicker);
+	CHECK_FALSE(low.analysis_thin);
+	CHECK_FALSE(low.persistent_store);
+
+	const TSRPassPlan resurrection = nextgi_tsr_pass_plan(TSR_FEATURE_RESURRECTION);
+	CHECK(resurrection.stability_ubo);
+	CHECK_EQ(resurrection.rejection_variant, 0u);
+	CHECK_EQ(resurrection.history_variant, 1u);
+	CHECK_FALSE(resurrection.analysis_flicker);
+	CHECK_FALSE(resurrection.analysis_thin);
+	CHECK(resurrection.persistent_store);
+
+	const TSRPassPlan field = nextgi_tsr_pass_plan(TSR_FEATURE_REPROJECTION_FIELD);
+	CHECK(field.stability_ubo);
+	CHECK_EQ(field.rejection_variant, 0u);
+	CHECK_EQ(field.history_variant, 1u);
+	CHECK_FALSE(field.analysis_flicker);
+	CHECK_FALSE(field.analysis_thin);
+	CHECK_FALSE(field.persistent_store);
+
+	const TSRPassPlan flicker = nextgi_tsr_pass_plan(TSR_FEATURE_FLICKER);
+	CHECK(flicker.stability_ubo);
+	CHECK_EQ(flicker.rejection_variant, 1u);
+	CHECK_EQ(flicker.history_variant, 1u);
+	CHECK(flicker.analysis_flicker);
+	CHECK_FALSE(flicker.analysis_thin);
+	CHECK_FALSE(flicker.persistent_store);
+
+	const TSRPassPlan thin = nextgi_tsr_pass_plan(TSR_FEATURE_THIN_GEOMETRY);
+	CHECK(thin.stability_ubo);
+	CHECK_EQ(thin.rejection_variant, 1u);
+	CHECK_EQ(thin.history_variant, 1u);
+	CHECK_FALSE(thin.analysis_flicker);
+	CHECK(thin.analysis_thin);
+	CHECK_FALSE(thin.persistent_store);
+
+	const TSRPassPlan all = nextgi_tsr_pass_plan(TSR_FEATURE_ALL);
+	CHECK(all.stability_ubo);
+	CHECK_EQ(all.rejection_variant, 1u);
+	CHECK_EQ(all.history_variant, 1u);
+	CHECK(all.analysis_flicker);
+	CHECK(all.analysis_thin);
+	CHECK(all.persistent_store);
+
+	// Bits outside the feature set are ignored.
+	CHECK_FALSE(nextgi_tsr_pass_plan(~uint32_t(TSR_FEATURE_ALL)).stability_ubo);
+}
+
+TEST_CASE("[Upscalers][TSR] Stability layout holds T6 at every pinned cell") {
+	// T6: every RB_SCOPE_TSR texture together, resurrection and the other stability
+	// stores included, <= 14 B per history pixel; <= 52 MB at 1440p High, <= 116 MB at
+	// 2160p High, <= 465 MB at 2160p Epic (decimal MB, which also implies binary MiB).
+	const uint64_t MB_DEC = 1000ull * 1000ull;
+
+	struct Cell {
+		Size2i output;
+		Size2i internal;
+		bool full_fit_at_100_percent_history; // Scale 0.5: the stability stores are full size at every preset.
+		bool only_200_percent_history; // Scale 1.0 is pinned for Epic and Cinematic only.
+	};
+	const Size2i out_1440p(2560, 1440);
+	const Size2i out_2160p(3840, 2160);
+	const Cell cells[] = {
+		{ out_1440p, Size2i(1280, 720), true, false },
+		{ out_1440p, Size2i(int(2560 * 0.667f), int(1440 * 0.667f)), false, false },
+		{ out_2160p, Size2i(1920, 1080), true, false },
+		{ out_2160p, Size2i(int(3840 * 0.667f), int(2160 * 0.667f)), false, false },
+		{ out_2160p, out_2160p, false, true },
+	};
+
+	uint32_t cells_checked = 0;
+	for (const Cell &cell : cells) {
+		for (int q = 0; q < RSE::VIEWPORT_TSR_QUALITY_MAX; q++) {
+			const RSE::ViewportTSRQuality quality = RSE::ViewportTSRQuality(q);
+			const bool history_200 = TSR_PRESETS[q].history_scale > 1.0f;
+			if (cell.only_200_percent_history && !history_200) {
+				continue;
+			}
+			for (int thin = 0; thin < 2; thin++) {
+				// Every preset's own features on, whether or not their passes are built yet.
+				const uint32_t features = nextgi_tsr_feature_mask(quality, thin != 0);
+				const RendererRD::TSRStabilityLayout layout = RendererRD::TSR::stability_layout(cell.internal, cell.internal, cell.output, quality, features);
+				const Size2i history_size = RendererRD::TSR::compute_history_size(cell.output, quality);
+				const uint64_t history_pixels = uint64_t(history_size.width) * uint64_t(history_size.height);
+				INFO("output ", cell.output.width, "x", cell.output.height, " internal ", cell.internal.width, "x", cell.internal.height, " quality ", q, " thin ", thin);
+
+				CHECK_EQ(layout.features, features);
+				CHECK_EQ(layout.core_bytes, RendererRD::TSR::estimate_memory_bytes(cell.internal, cell.output, quality));
+				CHECK_LE(layout.total_bytes(), 14ull * history_pixels);
+				CHECK_LE(layout.total_bytes(), layout.budget_bytes);
+				CHECK_FALSE(layout.over_budget);
+				CHECK_EQ(layout.persistent_count > 0, TSR_PRESETS[q].resurrection);
+
+				if (!history_200 && cell.output == out_1440p) {
+					CHECK_LE(layout.total_bytes(), 52ull * MB_DEC);
+				}
+				if (!history_200 && cell.output == out_2160p) {
+					CHECK_LE(layout.total_bytes(), 116ull * MB_DEC);
+				}
+				if (history_200 && cell.output == out_2160p) {
+					CHECK_LE(layout.total_bytes(), 465ull * MB_DEC);
+				}
+
+				if (cell.full_fit_at_100_percent_history || history_200) {
+					CHECK_EQ(layout.persistent_fit_q16, TSR_FIT_FULL_Q16);
+					CHECK_EQ(layout.state_fit_q16, TSR_FIT_FULL_Q16);
+				}
+				CHECK_GE(layout.persistent_fit_q16, TSR_FIT_MIN_Q16);
+				CHECK_GE(layout.state_fit_q16, TSR_FIT_MIN_Q16);
+				cells_checked++;
+			}
+		}
+	}
+	// 4 cells x 5 presets x 2, plus scale 1.0 x 2 presets x 2.
+	CHECK_EQ(cells_checked, 44u);
+
+	// The tuning table stays inside the uniform buffer's slots, and Low keeps no frames.
+	for (int q = 0; q < RSE::VIEWPORT_TSR_QUALITY_MAX; q++) {
+		CHECK_LE(uint32_t(TSR_STABILITY_TUNING[q].persistent_frames), TSR_PERSISTENT_MAX_FRAMES);
+		CHECK_GE(uint32_t(TSR_STABILITY_TUNING[q].persistent_divisor), 1u);
+		CHECK_EQ(TSR_STABILITY_TUNING[q].persistent_frames > 0, TSR_PRESETS[q].resurrection);
+	}
+	CHECK_LE(TSR_STABILITY_BUDGET_X100, 1400u);
+}
+
+TEST_CASE("[Upscalers][TSR] Stability layout sizes, fit scale and store table") {
+	const Size2i out_1440p(2560, 1440);
+	const Size2i out_2160p(3840, 2160);
+	const Size2i int_1440p_q(int(2560 * 0.667f), int(1440 * 0.667f));
+	const Size2i int_2160p_q(int(3840 * 0.667f), int(2160 * 0.667f));
+	const uint32_t high_features = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_HIGH, false);
+	const uint32_t high_thin_features = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_HIGH, true);
+	const uint32_t medium_features = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_MEDIUM, false);
+	const uint32_t medium_thin_features = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_MEDIUM, true);
+	const uint32_t epic_features = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_EPIC, false);
+	const uint32_t epic_thin_features = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_EPIC, true);
+
+	// The store table matches the real formats.
+	for (const RendererRD::TSRStabilityStoreEntry &entry : RendererRD::TSR_STABILITY_STORE_TABLE) {
+		CHECK_EQ(RD::get_image_format_pixel_size(entry.format), entry.bytes_per_pixel);
+		CHECK_EQ(entry.feature & ~uint32_t(TSR_FEATURE_ALL), 0u);
+	}
+
+	// No feature: nothing is added to the #194 textures, at any preset.
+	for (int q = 0; q < RSE::VIEWPORT_TSR_QUALITY_MAX; q++) {
+		const RSE::ViewportTSRQuality quality = RSE::ViewportTSRQuality(q);
+		const RendererRD::TSRStabilityLayout off = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, quality, 0);
+		CHECK_EQ(off.stability_bytes, 0ull);
+		CHECK_EQ(off.total_bytes(), RendererRD::TSR::estimate_memory_bytes(Size2i(1920, 1080), out_2160p, quality));
+		CHECK_EQ(off.persistent_count, 0u);
+		CHECK_EQ(off.persistent_signature(), 0ull);
+		for (const RendererRD::TSRStabilityStoreEntry &entry : RendererRD::TSR_STABILITY_STORE_TABLE) {
+			CHECK_FALSE(off.has_store(entry));
+		}
+	}
+	// Low has no persistent frames even when asked for resurrection.
+	{
+		const RendererRD::TSRStabilityLayout low = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_LOW, TSR_FEATURE_RESURRECTION);
+		CHECK_EQ(low.persistent_count, 0u);
+		CHECK_EQ(low.stability_bytes, 0ull);
+		CHECK_FALSE(low.has_store(RendererRD::TSR_STABILITY_STORE_TABLE[0]));
+	}
+
+	struct Expected {
+		Size2i output;
+		Size2i internal;
+		RSE::ViewportTSRQuality quality;
+		uint32_t features;
+		Size2i persistent;
+		Size2i flicker;
+		Size2i thin;
+	};
+	const Expected expected[] = {
+		// Full fit.
+		{ out_2160p, Size2i(1920, 1080), RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features, Size2i(1280, 720), Size2i(1920, 1080), Size2i() },
+		{ out_2160p, Size2i(1920, 1080), RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features, Size2i(1280, 720), Size2i(1920, 1080), Size2i(960, 540) },
+		{ out_2160p, Size2i(1920, 1080), RSE::VIEWPORT_TSR_QUALITY_EPIC, epic_features, Size2i(1920, 1080), Size2i(1920, 1080), Size2i() },
+		{ out_2160p, Size2i(1920, 1080), RSE::VIEWPORT_TSR_QUALITY_EPIC, epic_thin_features, Size2i(1920, 1080), Size2i(1920, 1080), Size2i(960, 540) },
+		// Scale 0.667 at 100% history: the #194 textures leave 0.44 B per history pixel, so the stores shrink.
+		{ out_1440p, int_1440p_q, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features, Size2i(401, 225), Size2i(805, 452), Size2i() },
+		{ out_1440p, int_1440p_q, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features, Size2i(378, 212), Size2i(759, 427), Size2i(379, 213) },
+		{ out_1440p, int_1440p_q, RSE::VIEWPORT_TSR_QUALITY_MEDIUM, medium_features, Size2i(567, 319), Size2i(), Size2i() },
+		{ out_1440p, int_1440p_q, RSE::VIEWPORT_TSR_QUALITY_MEDIUM, medium_thin_features, Size2i(507, 285), Size2i(), Size2i(512, 288) },
+		{ out_2160p, int_2160p_q, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features, Size2i(601, 338), Size2i(1205, 677), Size2i() },
+		{ out_2160p, int_2160p_q, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features, Size2i(567, 319), Size2i(1135, 638), Size2i(567, 319) },
+	};
+	for (const Expected &e : expected) {
+		const RendererRD::TSRStabilityLayout layout = RendererRD::TSR::stability_layout(e.internal, e.internal, e.output, e.quality, e.features);
+		INFO("output ", e.output.width, "x", e.output.height, " internal ", e.internal.width, "x", e.internal.height, " quality ", int(e.quality), " features ", e.features);
+		CHECK_EQ(layout.persistent_count, 2u);
+		CHECK_EQ(layout.persistent_size, e.persistent);
+		CHECK_EQ(layout.flicker_size, e.flicker);
+		CHECK_EQ(layout.thin_size, e.thin);
+		CHECK_FALSE(layout.over_budget);
+
+		// stability_bytes is the sum over the store table at the layout's sizes.
+		uint64_t table_bytes = 0;
+		for (const RendererRD::TSRStabilityStoreEntry &entry : RendererRD::TSR_STABILITY_STORE_TABLE) {
+			CHECK_EQ(layout.has_store(entry), (e.features & entry.feature) != 0);
+			if (layout.has_store(entry)) {
+				const Size2i size = layout.store_size(entry.store);
+				CHECK_GE(size.width, 1);
+				CHECK_GE(size.height, 1);
+				CHECK_EQ(layout.store_bytes_per_pixel(entry), entry.bytes_per_pixel);
+				table_bytes += uint64_t(size.width) * uint64_t(size.height) * uint64_t(layout.store_layers(entry.store)) * uint64_t(entry.bytes_per_pixel);
+			}
+		}
+		CHECK_EQ(layout.stability_bytes, table_bytes);
+	}
+
+	// Totals of the three T6 megabyte lines with High's and Epic's features on.
+	CHECK_EQ(RendererRD::TSR::stability_layout(int_1440p_q, int_1440p_q, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features).total_bytes(), 51423280ull);
+	CHECK_EQ(RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features).total_bytes(), 111052800ull);
+	CHECK_EQ(RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC, epic_features).total_bytes(), 369100800ull);
+
+	// Dynamic resolution, 0.5 bucket of a 0.5 to 1.0 range at 1440p High: the persistent
+	// frames are sized for the largest bucket (the floor here, where #194 alone is over
+	// the line) so a resolution step never resizes them; the state stores follow the
+	// current bucket and are full size.
+	{
+		const RendererRD::TSRStabilityLayout bucket = RendererRD::TSR::stability_layout(Size2i(1280, 720), out_1440p, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features);
+		const RendererRD::TSRStabilityLayout top = RendererRD::TSR::stability_layout(out_1440p, out_1440p, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features);
+		CHECK_EQ(bucket.persistent_fit_q16, TSR_FIT_MIN_Q16);
+		CHECK_EQ(bucket.persistent_size, Size2i(213, 120));
+		CHECK_EQ(bucket.persistent_size, top.persistent_size);
+		CHECK_EQ(bucket.persistent_signature(), top.persistent_signature());
+		CHECK_EQ(bucket.state_fit_q16, TSR_FIT_FULL_Q16);
+		CHECK_EQ(bucket.flicker_size, Size2i(1280, 720));
+		CHECK_EQ(bucket.thin_size, Size2i(640, 360));
+		CHECK_FALSE(bucket.over_budget);
+		CHECK_LE(bucket.total_bytes(), bucket.budget_bytes);
+		CHECK_EQ(bucket.total_bytes(), 46745280ull);
+		// A missing maximum means the current internal size.
+		CHECK_EQ(RendererRD::TSR::stability_layout(Size2i(1280, 720), Size2i(), out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features).persistent_size, Size2i(853, 480));
+	}
+
+	// 100% history at scale 1.0: the #194 textures alone are over the line (18 B per
+	// history pixel). The stores sit at the floor and the features stay on.
+	{
+		const RendererRD::TSRStabilityLayout native = RendererRD::TSR::stability_layout(out_1440p, out_1440p, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features);
+		CHECK(native.over_budget);
+		CHECK_EQ(native.persistent_fit_q16, TSR_FIT_MIN_Q16);
+		CHECK_EQ(native.state_fit_q16, TSR_FIT_MIN_Q16);
+		CHECK_EQ(native.persistent_size, Size2i(213, 120));
+		CHECK_EQ(native.flicker_size, Size2i(640, 360));
+		CHECK_EQ(native.stability_bytes, 665280ull);
+	}
+
+	// RGBA16F history fallback: the persistent frames take 8 B per pixel, like the history colour.
+	{
+		const RendererRD::TSRStabilityLayout packed = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC, TSR_FEATURE_RESURRECTION, false);
+		const RendererRD::TSRStabilityLayout wide = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC, TSR_FEATURE_RESURRECTION, true);
+		CHECK_EQ(packed.persistent_size, Size2i(1920, 1080));
+		CHECK_EQ(packed.stability_bytes, 2ull * 4ull * 1920ull * 1080ull);
+		CHECK_EQ(packed.store_bytes_per_pixel(RendererRD::TSR_STABILITY_STORE_TABLE[0]), 4u);
+		CHECK_EQ(wide.store_bytes_per_pixel(RendererRD::TSR_STABILITY_STORE_TABLE[0]), 8u);
+		CHECK_EQ(wide.core_bytes, RendererRD::TSR::estimate_memory_bytes(Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC, 1, true));
+		CHECK_EQ(wide.stability_bytes, 2ull * 8ull * uint64_t(wide.persistent_size.width) * uint64_t(wide.persistent_size.height));
+		CHECK_NE(wide.persistent_signature(), packed.persistent_signature());
+	}
+
+	// The persistent signature follows the frames' size and count only.
+	{
+		const RendererRD::TSRStabilityLayout a = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features);
+		const RendererRD::TSRStabilityLayout b = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_thin_features);
+		const RendererRD::TSRStabilityLayout c = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_EPIC, epic_features);
+		CHECK_NE(a.persistent_signature(), 0ull);
+		CHECK_EQ(a.persistent_signature(), b.persistent_signature());
+		CHECK_NE(a.persistent_signature(), c.persistent_signature());
+	}
+
+	// A tighter budget shrinks the stores; the default one is TSR_STABILITY_BUDGET_X100.
+	{
+		const RendererRD::TSRStabilityLayout tight = RendererRD::TSR::stability_layout(Size2i(1920, 1080), Size2i(1920, 1080), out_2160p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high_features, false, 1250);
+		CHECK_LT(tight.persistent_fit_q16, TSR_FIT_FULL_Q16);
+		CHECK_FALSE(tight.over_budget);
+		CHECK_LE(tight.total_bytes(), uint64_t(3840) * uint64_t(2160) * 1250ull / 100ull);
+	}
+}
+
+TEST_CASE("[Upscalers][TSR] Persistent frame schedule") {
+	// No capture during the 16-frame warm-up; then one slot every 35 frames, in turn.
+	for (uint32_t frame = 0; frame < TSR_PERSISTENT_WARMUP_FRAMES; frame++) {
+		CHECK_EQ(nextgi_tsr_persistent_capture_slot(frame, 2), -1);
+	}
+	CHECK_EQ(TSR_PERSISTENT_WARMUP_FRAMES, 16u);
+	CHECK_EQ(TSR_PERSISTENT_INTERVAL_FRAMES, 35u);
+	CHECK_EQ(nextgi_tsr_persistent_capture_slot(16, 2), 0);
+	CHECK_EQ(nextgi_tsr_persistent_capture_slot(17, 2), -1);
+	CHECK_EQ(nextgi_tsr_persistent_capture_slot(50, 2), -1);
+	CHECK_EQ(nextgi_tsr_persistent_capture_slot(51, 2), 1);
+	CHECK_EQ(nextgi_tsr_persistent_capture_slot(86, 2), 0);
+	CHECK_EQ(nextgi_tsr_persistent_capture_slot(121, 2), 1);
+	uint32_t captures = 0;
+	for (uint32_t frame = 0; frame < 16 + 35 * 8; frame++) {
+		const int32_t slot = nextgi_tsr_persistent_capture_slot(frame, 4);
+		if (slot >= 0) {
+			CHECK_EQ(uint32_t(slot), captures % 4);
+			captures++;
+		}
+		// No frames, no capture.
+		CHECK_EQ(nextgi_tsr_persistent_capture_slot(frame, 0), -1);
+	}
+	CHECK_EQ(captures, 8u);
+
+	RendererRD::TSRContext ctx(Size2i(1280, 720), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_HIGH);
+	CHECK_EQ(ctx.get_frames_since_reset(), 0u);
+	for (uint32_t slot = 0; slot < TSR_PERSISTENT_MAX_FRAMES; slot++) {
+		CHECK_FALSE(ctx.get_persistent_frame(slot).valid);
+	}
+
+	// A frame advances the count; a stored frame is valid and keeps its camera.
+	for (int i = 0; i < 20; i++) {
+		ctx.advance_frame();
+	}
+	CHECK_EQ(ctx.get_frames_since_reset(), 20u);
+	Projection projection;
+	projection.set_perspective(70.0, 16.0 / 9.0, 0.05, 4000.0);
+	const Transform3D camera(Basis(), Vector3(1.0, 2.0, 3.0));
+	ctx.set_persistent_frame(0, projection, camera);
+	ctx.set_persistent_frame(1, projection, camera);
+	CHECK(ctx.get_persistent_frame(0).valid);
+	CHECK(ctx.get_persistent_frame(1).valid);
+	CHECK_FALSE(ctx.get_persistent_frame(2).valid);
+	CHECK_EQ(ctx.get_persistent_frame(1).projection, projection);
+	CHECK_EQ(ctx.get_persistent_frame(1).camera_transform, camera);
+
+	// invalidate_persistent() clears every slot and restarts the schedule.
+	ctx.invalidate_persistent();
+	CHECK_EQ(ctx.get_frames_since_reset(), 0u);
+	for (uint32_t slot = 0; slot < TSR_PERSISTENT_MAX_FRAMES; slot++) {
+		CHECK_FALSE(ctx.get_persistent_frame(slot).valid);
+	}
+
+	// An internal-only resolution change keeps the persistent frames, as it keeps the history.
+	for (int i = 0; i < 20; i++) {
+		ctx.advance_frame();
+	}
+	ctx.set_persistent_frame(0, projection, camera);
+	CHECK_FALSE(ctx.sync_dimensions(Size2i(1600, 900), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_HIGH));
+	CHECK(ctx.get_persistent_frame(0).valid);
+	CHECK_EQ(ctx.get_frames_since_reset(), 20u);
+
+	// A history resize through sync_dimensions invalidates them.
+	CHECK(ctx.sync_dimensions(Size2i(1600, 900), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_EPIC));
+	CHECK_FALSE(ctx.get_persistent_frame(0).valid);
+	CHECK_EQ(ctx.get_frames_since_reset(), 0u);
+
+	// So does a change of the persistent_frames texture or of its layout; the same
+	// texture and layout again does not.
+	const uint64_t signature = RendererRD::TSR::stability_layout(Size2i(1600, 900), Size2i(1600, 900), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_EPIC, TSR_FEATURE_RESURRECTION).persistent_signature();
+	ctx.sync_persistent_storage(RID(), signature);
+	ctx.advance_frame();
+	ctx.set_persistent_frame(0, projection, camera);
+	ctx.sync_persistent_storage(RID(), signature);
+	CHECK(ctx.get_persistent_frame(0).valid);
+	CHECK_EQ(ctx.get_frames_since_reset(), 1u);
+	ctx.sync_persistent_storage(RID(), signature + 1);
+	CHECK_FALSE(ctx.get_persistent_frame(0).valid);
+	CHECK_EQ(ctx.get_frames_since_reset(), 0u);
+	ctx.set_persistent_frame(0, projection, camera);
+	ctx.sync_persistent_storage(RID::from_uint64(1), signature + 1);
+	CHECK_FALSE(ctx.get_persistent_frame(0).valid);
+}
+
+TEST_CASE("[Upscalers][TSR] Flicker ticks and decay follow frame time") {
+	// Frame times as the renderer passes them (TSR::Parameters::delta_time is a float).
+	const int rates[] = { 30, 60, 120 };
+	const uint32_t ticks_per_frame[] = { 4, 2, 1 };
+	const uint32_t decay_per_frame[] = { 2, 1, 0 }; // 120 Hz: 0 and 1 in turn.
+	const float max_motion[] = { 0.5f, 0.25f, 0.125f };
+	for (int i = 0; i < 3; i++) {
+		const int hz = rates[i];
+		const double delta = double(1.0f / float(hz));
+		INFO("rate ", hz, " Hz");
+		double tick_remainder = 0.0;
+		double decay_remainder = 0.0;
+		uint32_t tick_sum = 0;
+		uint32_t decay_sum = 0;
+		for (int frame = 0; frame < hz; frame++) {
+			const uint32_t ticks = nextgi_tsr_flicker_ticks(tick_remainder, delta);
+			const uint32_t decay = nextgi_tsr_flicker_decay_steps(decay_remainder, delta);
+			CHECK_EQ(ticks, ticks_per_frame[i]);
+			if (hz == 120) {
+				CHECK_EQ(decay, uint32_t(frame & 1));
+			} else {
+				CHECK_EQ(decay, decay_per_frame[i]);
+			}
+			tick_sum += ticks;
+			decay_sum += decay;
+		}
+		// One second of frames is 120 ticks and 60 decay steps at every rate.
+		CHECK_EQ(tick_sum, TSR_FLICKER_TICK_HZ);
+		CHECK_EQ(decay_sum, TSR_FLICKER_DECAY_HZ);
+		// The motion limit is the same per second: 15 internal pixels.
+		CHECK(Math::is_equal_approx(nextgi_tsr_flicker_max_motion(delta), max_motion[i], 1e-6f));
+		CHECK(Math::is_equal_approx(nextgi_tsr_flicker_max_motion(delta) * float(hz), float(TSR_FLICKER_MAX_MOTION_PX_PER_S), 1e-4f));
+	}
+
+	// Above 120 Hz some frames carry no tick: 240 Hz alternates 0 and 1.
+	{
+		double remainder = 0.0;
+		const double delta = double(1.0f / 240.0f);
+		uint32_t sum = 0;
+		for (int frame = 0; frame < 240; frame++) {
+			const uint32_t ticks = nextgi_tsr_flicker_ticks(remainder, delta);
+			CHECK_EQ(ticks, uint32_t(frame & 1));
+			sum += ticks;
+		}
+		CHECK_EQ(sum, TSR_FLICKER_TICK_HZ);
+	}
+
+	// A hitch counts as at most TSR_FLICKER_MAX_FRAME_TIME and yields at most 6 steps;
+	// the remainder does not run away, so the next frames are normal again.
+	{
+		double tick_remainder = 0.0;
+		double decay_remainder = 0.0;
+		CHECK_EQ(nextgi_tsr_flicker_ticks(tick_remainder, 1.0), TSR_FLICKER_MAX_STEPS);
+		CHECK_EQ(nextgi_tsr_flicker_decay_steps(decay_remainder, 1.0), TSR_FLICKER_MAX_STEPS);
+		CHECK_LE(TSR_FLICKER_MAX_STEPS, 6u);
+		CHECK_EQ(nextgi_tsr_flicker_ticks(tick_remainder, double(1.0f / 60.0f)), 2u);
+		CHECK_EQ(nextgi_tsr_flicker_decay_steps(decay_remainder, double(1.0f / 60.0f)), 1u);
+		CHECK(Math::is_equal_approx(nextgi_tsr_flicker_max_motion(1.0), float(TSR_FLICKER_MAX_FRAME_TIME * TSR_FLICKER_MAX_MOTION_PX_PER_S)));
+	}
+
+	// No time, no steps; a bad frame time counts as none.
+	{
+		double remainder = 0.0;
+		CHECK_EQ(nextgi_tsr_flicker_ticks(remainder, 0.0), 0u);
+		CHECK_EQ(nextgi_tsr_flicker_ticks(remainder, -1.0), 0u);
+		CHECK_EQ(nextgi_tsr_flicker_ticks(remainder, Math::NaN), 0u);
+		CHECK_EQ(remainder, 0.0);
+		CHECK_EQ(nextgi_tsr_flicker_max_motion(0.0), 0.0f);
+	}
+
+	// Each TSR context carries its own remainders.
+	{
+		RendererRD::TSRContext ctx(Size2i(1280, 720), Size2i(2560, 1440), RSE::VIEWPORT_TSR_QUALITY_HIGH);
+		uint32_t tick_sum = 0;
+		uint32_t decay_sum = 0;
+		for (int frame = 0; frame < 120; frame++) {
+			uint32_t ticks = 0;
+			uint32_t decay = 0;
+			ctx.step_flicker_clock(double(1.0f / 120.0f), ticks, decay);
+			CHECK_EQ(ticks, 1u);
+			CHECK_EQ(decay, uint32_t(frame & 1));
+			tick_sum += ticks;
+			decay_sum += decay;
+		}
+		CHECK_EQ(tick_sum, TSR_FLICKER_TICK_HZ);
+		CHECK_EQ(decay_sum, TSR_FLICKER_DECAY_HZ);
+	}
+}
+
+TEST_CASE("[Upscalers][TSR] Flicker step classifies the same signals at 30, 60 and 120 Hz") {
+	// The state byte: score in bits 7..4, direction in bit 3, ticks since the last
+	// counted reversal in bits 2..0 (at most 6; 7 only as "disabled").
+	auto score_of = [](uint8_t p_state) { return int32_t(p_state >> 4); };
+	auto since_of = [](uint8_t p_state) { return int32_t(p_state & 7u); };
+
+	// Every state and input keeps the byte inside that layout.
+	for (uint32_t state = 0; state < 256; state++) {
+		for (uint32_t ticks = 0; ticks <= 7; ticks++) {
+			for (uint32_t decay = 0; decay <= 7; decay++) {
+				for (int inputs = 0; inputs < 4; inputs++) {
+					const uint8_t next = nextgi_tsr_flicker_step(uint8_t(state), (inputs & 1) != 0, (inputs & 2) != 0, ticks, decay);
+					CHECK_LE(since_of(next), TSR_FLICKER_SINCE_MAX);
+					CHECK_LE(score_of(next), TSR_FLICKER_SCORE_MAX);
+				}
+			}
+		}
+	}
+
+	// A texel just enabled (cleared or disabled) does not score on its first reversal.
+	CHECK_EQ(score_of(nextgi_tsr_flicker_step(TSR_FLICKER_STATE_DISABLED, true, true, 1, 0)), 0);
+	CHECK_EQ(score_of(nextgi_tsr_flicker_step(TSR_FLICKER_STATE_DISABLED, false, true, 1, 0)), 0);
+	CHECK_EQ(since_of(nextgi_tsr_flicker_step(TSR_FLICKER_STATE_DISABLED, true, true, 1, 0)), 0);
+	// Releases cannot wrap below 0.
+	CHECK_EQ(score_of(nextgi_tsr_flicker_step(uint8_t((1u << 4) | 6u), false, false, 1, 6)), 0);
+	CHECK_EQ(score_of(nextgi_tsr_flicker_step(uint8_t((1u << 4) | (1u << 3) | 6u), false, true, 1, 0)), 0);
+
+	// The signals are square waves in luma, built on the 1/120 s tick so they are exact at
+	// every rate: the direction flips every 4 ticks (15 Hz) or every 12 ticks (5 Hz).
+	struct Run {
+		int32_t peak_score = 0;
+		int32_t final_score = 0;
+		int32_t last_reversal_frame = -1;
+		int32_t release_frame = -1; // First frame with score 0 after the signal stopped.
+		bool layout_ok = true;
+	};
+	auto simulate = [&](int p_hz, int p_flip_ticks, int p_signal_frames, int p_total_frames) -> Run {
+		Run run;
+		double tick_remainder = 0.0;
+		double decay_remainder = 0.0;
+		const double delta = double(1.0f / float(p_hz));
+		const int ticks_per_frame = int(TSR_FLICKER_TICK_HZ) / p_hz;
+		uint8_t state = TSR_FLICKER_STATE_DISABLED;
+		bool previous_positive = false;
+		for (int frame = 0; frame < p_total_frames; frame++) {
+			const uint32_t ticks = nextgi_tsr_flicker_ticks(tick_remainder, delta);
+			const uint32_t decay = nextgi_tsr_flicker_decay_steps(decay_remainder, delta);
+			const bool signal = frame < p_signal_frames;
+			const bool positive = ((frame * ticks_per_frame) / p_flip_ticks) % 2 == 0;
+			// While the signal runs, the luma is always off the history mean; then it holds still.
+			state = nextgi_tsr_flicker_step(state, positive, signal, ticks, decay);
+			if (signal && frame > 0 && positive != previous_positive) {
+				run.last_reversal_frame = frame;
+			}
+			previous_positive = positive;
+			run.peak_score = MAX(run.peak_score, score_of(state));
+			if (!signal && run.release_frame < 0 && score_of(state) == 0) {
+				run.release_frame = frame;
+			}
+			run.layout_ok = run.layout_ok && since_of(state) <= TSR_FLICKER_SINCE_MAX;
+		}
+		run.final_score = score_of(state);
+		return run;
+	};
+
+	const int rates[] = { 30, 60, 120 };
+	for (const int hz : rates) {
+		INFO("rate ", hz, " Hz");
+		// 15 Hz flicker (a reversal every 1/30 s) for 1 s, then 0.5 s of still luma.
+		const Run fast = simulate(hz, 4, hz, hz + hz / 2);
+		CHECK(fast.layout_ok);
+		CHECK_EQ(fast.peak_score, TSR_FLICKER_SCORE_MAX);
+		CHECK_EQ(fast.final_score, 0);
+		REQUIRE(fast.last_reversal_frame > 0);
+		REQUIRE(fast.release_frame > fast.last_reversal_frame);
+		// Released 0.25 s to 0.32 s after the last reversal: the 1/30 s half period, then
+		// 15 levels at 60 per second.
+		const double release_s = double(fast.release_frame - fast.last_reversal_frame) / double(hz);
+		CHECK_GE(release_s, 0.25);
+		CHECK_LE(release_s, 0.32);
+
+		// 5 Hz (a reversal every 0.1 s) is animation at every rate: it never scores.
+		const Run slow = simulate(hz, 12, 2 * hz, 2 * hz);
+		CHECK(slow.layout_ok);
+		CHECK_EQ(slow.peak_score, 0);
+		CHECK_EQ(slow.final_score, 0);
+	}
+
+	// Detection takes a few frames at any rate: 5 qualifying reversals reach the full score.
+	{
+		uint8_t state = TSR_FLICKER_STATE_DISABLED;
+		bool positive = true;
+		state = nextgi_tsr_flicker_step(state, positive, true, 2, 1); // First reversal from disabled: no score.
+		int reversals = 0;
+		while (score_of(state) < TSR_FLICKER_SCORE_MAX && reversals < 16) {
+			positive = !positive;
+			state = nextgi_tsr_flicker_step(state, positive, true, 2, 1);
+			reversals++;
+		}
+		CHECK_EQ(reversals, 5);
+	}
+}
+
+// GodotNext: pt_tsr_stability (#198).
+TEST_CASE("[Upscalers][TSR] Debug draw value and debug view setting") {
+	// The TSR pass visualizer is the last debug-draw value, appended after the fork's others.
+	CHECK_EQ(int(RSE::VIEWPORT_DEBUG_DRAW_TSR), 61);
+	CHECK_EQ(int(RSE::VIEWPORT_DEBUG_DRAW_TSR), int(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES) + 1);
+	CHECK_EQ(int(Viewport::DEBUG_DRAW_TSR), int(RSE::VIEWPORT_DEBUG_DRAW_TSR));
+
+	// The setting picks the pass, defaults to history validity and lists the six views in TSRDebugView order.
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	const String setting = "rendering/anti_aliasing/tsr/debug_view";
+	REQUIRE(ps->has_setting(setting));
+	CHECK_EQ(int(ps->get_setting(setting)), int(TSR_DEBUG_VIEW_HISTORY_VALIDITY));
+	REQUIRE(ps->get_custom_property_info().has(StringName(setting)));
+	const PropertyInfo &info = ps->get_custom_property_info()[StringName(setting)];
+	CHECK_EQ(int(info.type), int(Variant::INT));
+	CHECK_EQ(int(info.hint), int(PROPERTY_HINT_ENUM));
+	const Vector<String> names = info.hint_string.split(",");
+	REQUIRE_EQ(names.size(), int(TSR_DEBUG_VIEW_MAX));
+	CHECK_EQ(names[TSR_DEBUG_VIEW_HISTORY_VALIDITY], "History Validity");
+	CHECK_EQ(names[TSR_DEBUG_VIEW_REJECTION], "Rejection");
+	CHECK_EQ(names[TSR_DEBUG_VIEW_DISOCCLUSION], "Disocclusion");
+	CHECK_EQ(names[TSR_DEBUG_VIEW_RESURRECTION_HITS], "Resurrection Hits");
+	CHECK_EQ(names[TSR_DEBUG_VIEW_FLICKER_PERIOD], "Flicker Period");
+	CHECK_EQ(names[TSR_DEBUG_VIEW_THIN_COVERAGE], "Thin Coverage");
+
+	CHECK_EQ(int(TSR_DEBUG_VIEW_MAX), 6);
+	CHECK_EQ(int(nextgi_tsr_debug_view_from_setting(0)), int(TSR_DEBUG_VIEW_HISTORY_VALIDITY));
+	CHECK_EQ(int(nextgi_tsr_debug_view_from_setting(3)), int(TSR_DEBUG_VIEW_RESURRECTION_HITS));
+	CHECK_EQ(int(nextgi_tsr_debug_view_from_setting(5)), int(TSR_DEBUG_VIEW_THIN_COVERAGE));
+	// Out-of-range values are clamped.
+	CHECK_EQ(int(nextgi_tsr_debug_view_from_setting(-4)), int(TSR_DEBUG_VIEW_HISTORY_VALIDITY));
+	CHECK_EQ(int(nextgi_tsr_debug_view_from_setting(6)), int(TSR_DEBUG_VIEW_THIN_COVERAGE));
+	CHECK_EQ(int(nextgi_tsr_debug_view_from_setting(1000)), int(TSR_DEBUG_VIEW_THIN_COVERAGE));
+
+	// The visualizer only reads: the parameters default to off, and its texture lives outside
+	// RB_SCOPE_TSR, so neither the feature mask, the pass plan nor the T6 accounting sees it.
+	RendererRD::TSR::Parameters params;
+	CHECK_EQ(params.debug_view, -1);
+	CHECK(RB_SCOPE_TSR_DEBUG != RB_SCOPE_TSR);
+	for (const RendererRD::TSRStabilityStoreEntry &entry : RendererRD::TSR_STABILITY_STORE_TABLE) {
+		CHECK(StringName(entry.name) != SNAME("debug_view"));
+	}
+}
+
 TEST_CASE("[Upscalers][DynRes] 16-bucket table, project settings defaults, and scale_range intersection") {
 	ProjectSettings *ps = ProjectSettings::get_singleton();
 	REQUIRE(ps != nullptr);
@@ -712,6 +1366,8 @@ TEST_CASE("[Upscalers][DynRes] RenderSceneBuffersRD internal-only fast path pres
 	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_color_1")));
 	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_meta_0")));
 	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("history_meta_1")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("persistent_frames")));
+	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR_DEBUG, SNAME("debug_view")));
 	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(SNAME("Tonemapper"), SNAME("destination")));
 	CHECK(RenderSceneBuffersRD::is_output_sized_named_texture(SNAME("rb_smaa"), SNAME("edges_tex")));
 
@@ -724,6 +1380,8 @@ TEST_CASE("[Upscalers][DynRes] RenderSceneBuffersRD internal-only fast path pres
 	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("prev_depth")));
 	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("disocclusion")));
 	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("rejection")));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("flicker_state_0")));
+	CHECK_FALSE(RenderSceneBuffersRD::is_output_sized_named_texture(RB_SCOPE_TSR, SNAME("thin_coverage_0")));
 
 	Ref<RenderSceneBuffersRD> rb;
 	rb.instantiate();

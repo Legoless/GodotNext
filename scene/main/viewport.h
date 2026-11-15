@@ -237,6 +237,8 @@ public:
 		DEBUG_DRAW_ML_MATERIAL,
 		// GodotNext: ps_lumen_lite (#183)
 		DEBUG_DRAW_NEXTGI_LITE_PROBES,
+		// GodotNext: pt_tsr_stability (#198)
+		DEBUG_DRAW_TSR,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

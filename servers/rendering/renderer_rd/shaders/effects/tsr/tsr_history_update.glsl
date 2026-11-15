@@ -20,6 +20,19 @@ layout(r11f_g11f_b10f, set = 0, binding = 5) uniform restrict writeonly image2D 
 #endif
 layout(r8, set = 0, binding = 6) uniform restrict writeonly image2D history_meta_curr_out;
 
+#ifdef TSR_STABILITY
+// Stability set (#198). Nothing outside these blocks changes: without TSR_STABILITY this
+// is the #194 shader.
+#define TSR_STABILITY_UBO_BINDING 7
+#include "tsr_stability_inc.glsl"
+
+layout(set = 0, binding = 8) uniform sampler2D depth_tex;
+layout(set = 0, binding = 9) uniform sampler2DArray persistent_tex;
+layout(set = 0, binding = 10) uniform sampler2D flicker_tex;
+layout(set = 0, binding = 11) uniform sampler2D thin_tex;
+layout(set = 0, binding = 12) uniform sampler2D reactive_tex;
+#endif
+
 void main() {
 	ivec2 hpx = ivec2(gl_GlobalInvocationID.xy);
 	if (any(greaterThanEqual(hpx, params.history_size))) {
@@ -74,6 +87,31 @@ void main() {
 	}
 
 	vec2 vel = sanitize_vec2(textureLod(dilated_velocity_tex, u, 0.0).rg);
+#ifdef TSR_STABILITY
+	// Reprojection field: the velocity of the nearest rendered pixel, carried inside it by the
+	// local 2x2 Jacobian of the dilated velocity (derived here from four neighbors, not
+	// stored). It is exact at rendered-pixel centers, linear inside a rendered pixel (rotation,
+	// zoom) and stays discontinuous at silhouettes instead of being blended across them by a
+	// bilinear tap. Worked in internal pixels; field_axis_* are the columns of the Jacobian of
+	// the current-to-previous mapping.
+	vec2 field_axis_x = vec2(1.0, 0.0);
+	vec2 field_axis_y = vec2(0.0, 1.0);
+	if ((stability.features & TSR_FEATURE_REPROJECTION_FIELD) != 0u) {
+		vec2 in_size = vec2(params.internal_size);
+		ivec2 c = clamp(base_in, ivec2(0), max_in);
+		vec2 v_c = sanitize_vec2(texelFetch(dilated_velocity_tex, c, 0).rg) * in_size;
+		vec2 v_l = sanitize_vec2(texelFetch(dilated_velocity_tex, clamp(c - ivec2(1, 0), ivec2(0), max_in), 0).rg) * in_size;
+		vec2 v_r = sanitize_vec2(texelFetch(dilated_velocity_tex, clamp(c + ivec2(1, 0), ivec2(0), max_in), 0).rg) * in_size;
+		vec2 v_t = sanitize_vec2(texelFetch(dilated_velocity_tex, clamp(c - ivec2(0, 1), ivec2(0), max_in), 0).rg) * in_size;
+		vec2 v_b = sanitize_vec2(texelFetch(dilated_velocity_tex, clamp(c + ivec2(0, 1), ivec2(0), max_in), 0).rg) * in_size;
+		vec2 dvdx = tsr_one_sided(v_c, v_l, v_r, TSR_FIELD_MAX_GRADIENT);
+		vec2 dvdy = tsr_one_sided(v_c, v_t, v_b, TSR_FIELD_MAX_GRADIENT);
+		// subpixel_delta is this history pixel's offset from the rendered pixel's sample, in internal pixels.
+		vel = (v_c + dvdx * subpixel_delta.x + dvdy * subpixel_delta.y) / in_size;
+		field_axis_x += dvdx;
+		field_axis_y += dvdy;
+	}
+#endif
 	vec2 uv_prev = u + vel;
 	if (any(lessThan(uv_prev, vec2(0.0))) || any(greaterThan(uv_prev, vec2(1.0)))) {
 		vec3 seed_rgb = perceptual_ycocg_to_rgb(wide_ycocg);
@@ -85,6 +123,31 @@ void main() {
 	float rej = clamp(textureLod(rejection_tex, u, 0.0).r, 0.0, 1.0);
 	float prev_conf = clamp(textureLod(history_meta_prev_tex, uv_prev, 0.0).r, 0.0, 1.0);
 
+#ifdef TSR_STABILITY
+	// History resurrection: where the previous history was rejected, look for a persistent
+	// frame that agrees with the current neighbourhood. The pixel is reprojected with its
+	// current depth and the cameras only, so a moving object lands in the wrong place, fails
+	// the match and is left alone. Translucency keeps its rejection: resurrection is off where
+	// the reactive mask is above TSR_RESURRECT_MAX_REACTIVE, and never lowers the rejection
+	// below the reactive mask.
+	vec3 res_ycocg = vec3(0.0);
+	float res_w = 0.0;
+	float reactive = clamp(textureLod(reactive_tex, u, 0.0).r, 0.0, 1.0);
+	if ((stability.features & TSR_FEATURE_RESURRECTION) != 0u && rej > TSR_RESURRECT_MIN_REJECTION && reactive <= TSR_RESURRECT_MAX_REACTIVE) {
+		vec3 r_mu = m1 * (1.0 / 9.0);
+		vec3 r_sigma = sqrt(max(m2 * (1.0 / 9.0) - r_mu * r_mu, vec3(1e-6)));
+		float raw_d = texelFetch(depth_tex, clamp(base_in, ivec2(0), max_in), 0).r;
+		uint covered;
+		float best = tsr_resurrection_match(persistent_tex, u, raw_d, r_mu, r_sigma, res_ycocg, covered);
+		// The better the match and the stronger the rejection, the more of the persistent
+		// frame is taken: the pixel keeps a converged colour and part of its confidence
+		// instead of restarting from one jittered sample.
+		res_w = (1.0 - best) * smoothstep(TSR_RESURRECT_MIN_REJECTION, 1.0, rej);
+		rej = max(rej * (1.0 - res_w), reactive);
+		prev_conf = mix(prev_conf, stability.persistent_confidence, res_w);
+	}
+#endif
+
 	vec3 curr_ycocg = mix(sharp_ycocg, wide_ycocg, rej);
 
 	vec3 mu = m1 * (1.0 / 9.0);
@@ -93,12 +156,40 @@ void main() {
 	float upscale_ratio = float(params.history_size.x) / max(float(params.internal_size.x), 1.0);
 	float upscale_boost = mix(1.0, 1.15, clamp((upscale_ratio - 1.0) * 0.5, 0.0, 1.0) * (1.0 - rej));
 	float gamma = mix(1.25, 0.50, rej) * upscale_boost;
+#ifdef TSR_STABILITY
+	// Where the flicker analysis found periodic flicker, or the thin-geometry analysis found
+	// sub-pixel features, a wider clip box lets the history hold instead of following every swing
+	// of the input. Without it, a frame whose samples missed a thin wire would clip the wire out
+	// of the history whatever the rejection says.
+	float relax = 0.0;
+	if ((stability.features & TSR_FEATURE_FLICKER) != 0u) {
+		relax = tsr_flicker_weight(textureLod(flicker_tex, u, 0.0).r) * TSR_FLICKER_MAX_RELAX;
+	}
+	if ((stability.features & TSR_FEATURE_THIN_GEOMETRY) != 0u) {
+		relax = max(relax, tsr_thin_weight(textureLod(thin_tex, u, 0.0).r));
+	}
+	gamma = mix(gamma, TSR_RELAX_GAMMA, relax);
+#endif
 
 	vec3 cmin = mu - gamma * sigma;
 	vec3 cmax = mu + gamma * sigma;
 
 	vec3 hist_rgb = sample_catmull_rom_5tap(history_color_prev_tex, uv_prev, vec2(params.history_size));
+#ifdef TSR_STABILITY
+	// Reprojection field: where the previous history is minified (one current pixel covers more
+	// than one previous texel), blend the Catmull-Rom fetch toward a box over the footprint.
+	if ((stability.features & TSR_FEATURE_REPROJECTION_FIELD) != 0u) {
+		float footprint = max(length(field_axis_x), length(field_axis_y));
+		float box_w = smoothstep(1.0, 1.5, footprint);
+		if (box_w > 0.0) {
+			hist_rgb = mix(hist_rgb, tsr_footprint_fetch(history_color_prev_tex, uv_prev, field_axis_x, field_axis_y, vec2(params.history_size)), box_w);
+		}
+	}
+#endif
 	vec3 hist_ycocg = rgb_to_perceptual_ycocg(hist_rgb);
+#ifdef TSR_STABILITY
+	hist_ycocg = mix(hist_ycocg, res_ycocg, res_w);
+#endif
 	vec3 clipped_hist = clip_aabb(cmin, cmax, hist_ycocg);
 
 	float eff_conf = prev_conf * (1.0 - rej);

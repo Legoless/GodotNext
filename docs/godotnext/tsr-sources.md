@@ -33,6 +33,118 @@ What was used from the public documentation:
   temporal jitter phase scaling `round(8 * (output / internal)^2)` with a minimum of `8`
   phases.
 
+### Epic Games public documentation for the stability set (#198)
+
+| Field | Value |
+|---|---|
+| Upstream | Upstream 1 above, sections "History Resurrection", "Reprojection Field", "TSR Flickering Temporal Analysis" (with "Effects of Frame Rate") and "Visualize TSR" |
+| Upstream 5 | https://dev.epicgames.com/documentation/unreal-engine/thin-geometry-detection-with-temporal-super-resolution ("Thin Geometry Detection with Temporal Super Resolution"). On 2026-11-15 the Upstream 2 URL above returned the documentation landing page; this is the page it pointed to. |
+| Type / License | As above: feature-level descriptions only; zero code or constants copied. |
+| Read on | 2026-11-15 (#198 design) |
+| Used in | `servers/rendering/renderer_rd/effects/tsr_stability.h`, `servers/rendering/renderer_rd/effects/tsr.h`, `servers/rendering/renderer_rd/effects/tsr.cpp`, `servers/rendering/renderer_rd/shaders/effects/tsr/tsr_stability_inc.glsl`, `servers/rendering/renderer_rd/shaders/effects/tsr/tsr_persistent_store.glsl`, `servers/rendering/renderer_rd/shaders/effects/tsr/tsr_history_update.glsl`, `servers/rendering/renderer_rd/shaders/effects/tsr/tsr_stability_analysis.glsl`, `servers/rendering/renderer_rd/shaders/effects/tsr/tsr_shading_rejection.glsl`, `servers/rendering/renderer_rd/shaders/effects/tsr/tsr_debug_view.glsl` |
+
+What was used (history resurrection):
+
+- Older persistent frames are kept in a texture array, like the previous-frame history.
+- A persistent frame is used in place of the previous frame where it matches the current
+  frame better.
+- Frames are recorded at an interval, and the oldest one is replaced.
+
+What was not used: every default count, interval and threshold the page lists for its
+console variables. GodotNext's values are its own and provisional until the PQ sweep (§22):
+
+- The persistent-frame count (2) and size (1/3 of the output per axis at 100% history,
+  1/2 at 200% history) come from the T6 budget. Two is the smallest count that always
+  holds one frame at least one capture interval old.
+- The capture interval (35 frames) is above two history convergence times (2 x 16 frames)
+  and shares no factor with the jitter phase counts at the T-line scales (8, 18 and 32).
+- The match test reuses GodotNext's own shading-rejection box measure
+  (`tsr_shading_rejection.glsl`).
+- Translucency keeps its rejection: no resurrection where the reactive mask is above 0.25,
+  and the rejection never drops below the reactive mask, as for flicker and thin geometry.
+
+The derived count of 2 happens to equal the default count the page lists. The derivation
+does not depend on it; the interval, the frame size and every other value differ.
+
+What was used (reprojection field):
+
+- Each rendered pixel carries a 2x2 Jacobian, so the displayed pixels inside one rendered
+  pixel are reprojected more precisely and geometry edges stay sharp in motion.
+- It costs extra dependent fetches at the start of the history update.
+
+What was used (flicker analysis):
+
+- Only the luminance is watched.
+- Where the luminance oscillates faster than a set period, shading rejection is relaxed so
+  the history can hold.
+- The period threshold follows the frame rate.
+- The analysis is off per pixel for moving objects and large parallax.
+- Detection takes a few frames.
+
+What was not used: every default period, frame-rate limit, weight and threshold the pages
+list for their console variables. GodotNext's own choices, provisional until PQ (§22):
+
+- No field texture: the Jacobian is derived in the history update from the dilated velocity
+  that the core passes already store, because a stored field does not fit T6. The gradient
+  is a one-sided difference (the smaller of the two), so a silhouette does not enter it,
+  clamped to 0.5 internal pixel of velocity per internal pixel. Where the Jacobian minifies
+  the previous history, the fetch blends toward a 4-tap box over the pixel's footprint.
+- No luma ring: one byte per texel counts time in ticks of 1/120 s since the luma last
+  reversed direction against the reprojected history, so the state is the same size at any
+  frame rate. A reversal within 1/30 s (an oscillation of 15 Hz or more, the fastest a
+  30 Hz stream can show) counts as flicker, so the same frequencies count at 30, 60 and
+  120 Hz. The clock runs on the main loop's wall-clock frame step, not the one scaled by
+  `Engine.time_scale`, so it keeps counting while game time is slowed or frozen. Scoring
+  (+3 per qualifying reversal, -2 per slow one, 15 levels), release (60 levels per second
+  after the window), the motion limit (15 internal pixels per second), the noise floor
+  (1/64 of perceptual luma), the most relaxation (75% of the rejection) and the widest clip
+  box (3 standard deviations) are GodotNext's own.
+- Stated deviations: the analysis reads the TSR input colour and is switched off where the
+  reactive (translucency) mask is set, instead of measuring opaque lighting before
+  translucency in a pass of its own; there is no per-material animation flag (out of scope
+  in #198).
+
+What was used (thin geometry, Upstream 5):
+
+- Thin-geometry detection estimates the sub-pixel coverage of thin features and relaxes the
+  history rejection there, so thin lines stay in the history; it is off by default.
+- The coverage is averaged over several frames.
+- Depth edges and luma lines are detected separately.
+- The relaxation is cut where translucency dominates.
+
+What was not used: the rest of the page's description of its internal passes (its
+shading-model classes, its diffusion and its line persistence), and every default value,
+weight and threshold it lists for its console variables. GodotNext's own choices,
+provisional until PQ (§22):
+
+- One byte of coverage per texel at half the internal resolution, read through a bilinear
+  tap, because it marks regions that hold thin features rather than single pixels.
+- A pixel holds a thin feature when, along the horizontal, the vertical or a diagonal, both
+  opposite neighbors are farther than it by more than 5% of its view depth (a depth ridge
+  one pixel wide), or both differ from it in perceptual luma, with the same sign, by more
+  than 0.08 (a luma line).
+- The coverage moves toward each frame's detection by 1/8 along the reprojection, because 8
+  is the smallest jitter phase count, so the average spans one jitter cycle; it restarts off
+  the screen.
+- The relax weight rises from a coverage of 1/32 to 1/8 (one detection in four jitter cycles
+  to one per cycle) and removes at most 75% of the shading and the parallax-disocclusion
+  rejection, as for flicker; the history clip box widens with it. Disocclusion relaxes too,
+  because a wire hit for the first time is nearer than all four previous-depth taps.
+- Translucency: no coverage where the reactive mask is above 0.25, and the reactive term of
+  the rejection is never relaxed.
+- The setting (`rendering/anti_aliasing/tsr/thin_geometry_detection`) works at every preset.
+  Turning it on automatically with virtual-geometry foliage (lead question LQ11) is not built.
+
+What was used (visualizer, "Visualize TSR"):
+
+- The user-facing colour legend: green helps image quality, red or yellow costs it, and
+  magenta means the feature is off or disabled for that pixel.
+
+The six views (history validity, rejection, disocclusion, resurrection hits, flicker period,
+thin coverage) are the ones issue #198 lists, each drawn from GodotNext's own textures over
+the scene's luma at 25%. The resurrection-hits view recomputes the history update's own test
+(`tsr_resurrection_match` in `tsr_stability_inc.glsl`).
+
 ### Standard academic / public graphics literature (general mathematical techniques)
 
 | Reference | Date / Venue | License / Status | What was used |

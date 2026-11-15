@@ -1066,6 +1066,8 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		// GodotNext: megalights_inputs (#136)
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_ALBEDO:
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL:
+		// GodotNext: pt_tsr_stability (#198)
+		case RSE::VIEWPORT_DEBUG_DRAW_TSR:
 		case RSE::VIEWPORT_DEBUG_DRAW_SSAO:
 		case RSE::VIEWPORT_DEBUG_DRAW_SSIL:
 		case RSE::VIEWPORT_DEBUG_DRAW_SDFGI:

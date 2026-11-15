@@ -30,6 +30,7 @@
 
 #include "rendering_server_default.h"
 
+#include "core/config/engine.h"
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "core/profiling/profiling.h"
@@ -79,9 +80,11 @@ void RenderingServerDefault::request_frame_drawn_callback(const Callable &p_call
 	frame_drawn_callbacks.push_back(p_callable);
 }
 
-void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step, double p_frame_step_unscaled) {
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	drawing_frame = true;
+	// GodotNext: pt_tsr_stability (#198).
+	RSG::frame_step_unscaled = p_frame_step_unscaled;
 	GodotProfileZoneGroupedFirst(_profile_zone, "rasterizer->begin_frame");
 	RSG::rasterizer->begin_frame(frame_step);
 
@@ -475,10 +478,14 @@ void RenderingServerDefault::draw(bool p_present, double frame_step) {
 	// Needs to be done before changes is reset to 0, to not force the editor to redraw.
 	RS::get_singleton()->emit_signal(SNAME("frame_pre_draw"));
 	changes = 0;
+	// GodotNext: pt_tsr_stability (#198). frame_step is scaled by Engine.time_scale (0 while
+	// time is frozen, and whatever RenderingServer.force_draw passes); passes that measure real
+	// time, such as the TSR flicker clock, take the main loop's unscaled step instead.
+	const double frame_step_unscaled = Engine::get_singleton()->get_process_step();
 	if (create_thread) {
-		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step);
+		command_queue.push(this, &RenderingServerDefault::_draw, p_present, frame_step, frame_step_unscaled);
 	} else {
-		_draw(p_present, frame_step);
+		_draw(p_present, frame_step, frame_step_unscaled);
 	}
 }
 

@@ -234,6 +234,8 @@ class Node3DEditorViewport : public Control {
 		// GodotNext: megalights_inputs (#136)
 		VIEW_DISPLAY_ML_ALBEDO,
 		VIEW_DISPLAY_ML_MATERIAL,
+		// GodotNext: pt_tsr_stability (#198)
+		VIEW_DISPLAY_TSR,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 

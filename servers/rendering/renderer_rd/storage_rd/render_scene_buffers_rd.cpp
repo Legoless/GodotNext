@@ -177,7 +177,13 @@ bool RenderSceneBuffersRD::is_output_sized_named_texture(const StringName &p_con
 		return p_texture_name == SNAME("history_color_0") ||
 				p_texture_name == SNAME("history_color_1") ||
 				p_texture_name == SNAME("history_meta_0") ||
-				p_texture_name == SNAME("history_meta_1");
+				p_texture_name == SNAME("history_meta_1") ||
+				// GodotNext: pt_tsr_stability (#198). Persistent frames survive a dynamic-resolution step.
+				p_texture_name == SNAME("persistent_frames");
+	}
+	// GodotNext: pt_tsr_stability (#198).
+	if (p_context == RB_SCOPE_TSR_DEBUG) {
+		return p_texture_name == SNAME("debug_view");
 	}
 	if (p_context == SNAME("Tonemapper")) {
 		return p_texture_name == SNAME("destination");

@@ -3239,6 +3239,8 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL);
 	// GodotNext: ps_lumen_lite (#183)
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES);
+	// GodotNext: pt_tsr_stability (#198)
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_TSR);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -4014,6 +4016,8 @@ void RenderingServer::init() {
 	// GodotNext: pt_tsr_mode_presets (#197).
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "rendering/anti_aliasing/tsr/quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Epic,Cinematic"), RSE::VIEWPORT_TSR_QUALITY_EPIC);
 	GLOBAL_DEF("rendering/anti_aliasing/tsr/thin_geometry_detection", false);
+	// GodotNext: pt_tsr_stability (#198). The pass Viewport.DEBUG_DRAW_TSR shows (TSRDebugView); read live.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/anti_aliasing/tsr/debug_view", PROPERTY_HINT_ENUM, "History Validity,Rejection,Disocclusion,Resurrection Hits,Flicker Period,Thin Coverage"), 0);
 
 	{
 		// GodotNext: pu_dlss_scaling_mode (#103). DLSS is only listed while an

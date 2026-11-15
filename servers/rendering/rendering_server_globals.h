@@ -50,6 +50,10 @@ class RenderingMethod;
 class RenderingServerGlobals {
 public:
 	static inline bool threaded = false;
+	// GodotNext: pt_tsr_stability (#198). This frame's wall-clock step in seconds, not scaled by
+	// Engine.time_scale (the step the renderer gets otherwise is the scaled one). Captured on the
+	// main thread by RenderingServerDefault::draw and set by _draw before the frame renders.
+	static inline double frame_step_unscaled = 0.0;
 
 	static inline RendererUtilities *utilities = nullptr;
 	static inline RendererLightStorage *light_storage = nullptr;
