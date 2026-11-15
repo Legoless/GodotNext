@@ -82,7 +82,7 @@ D3D12 12_0 - Forward+ - Using Device #0: NVIDIA - NVIDIA GeForce RTX 4080 SUPER
 
 ### Cloud L4 VMs (v3.8, build-time only)
 
-Two Compute Engine `g2-standard-16` VMs (16 vCPU, 64 GB) with one NVIDIA L4 each run PR basics during the build (plan §23.2, v3.8). They run no gate, timing or UE-comparison line and no DLSS-enabled build. Their project, names, addresses and SSH key are in the git-ignored `local/fleet.env`; the fleet skill says how to start, stop and reach them.
+Compute Engine `g2-standard-16` VMs (16 vCPU, 64 GB) with one NVIDIA L4 each run PR basics during the build (plan §23.2, v3.8). There are two images, Linux and Windows; since plan v3.9 the build runs as many VMs of each as it has parallel work for. They run no gate, timing or UE-comparison line and no DLSS-enabled build. Their project, names, addresses and SSH key are in the git-ignored `local/fleet.env`; the fleet skill says how to start, stop and reach them.
 
 | VM | System | GPU and driver | Compiler | Build |
 |---|---|---|---|---|

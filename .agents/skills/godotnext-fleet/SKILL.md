@@ -1,6 +1,6 @@
 ---
 name: godotnext-fleet
-description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, two cloud NVIDIA L4 VMs for Linux and Windows, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
+description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, cloud NVIDIA L4 VMs for Linux and Windows, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
 ---
 
 # Use the GodotNext hardware
@@ -34,13 +34,13 @@ Build commands for each platform are in plan §13.1.
 
 ## Using the cloud L4 VMs
 
-The two cloud VMs are Compute Engine `g2-standard-16` machines with one NVIDIA L4 each. Their project, names, zones, IPs and the SSH key path are in the git-ignored `local/fleet.env` (`GODOTNEXT_GCE_*`, `GODOTNEXT_LINUX_*`, `GODOTNEXT_WIN_*`); the key itself is in `local/gcloud/`.
+The cloud VMs are Compute Engine `g2-standard-16` machines with one NVIDIA L4 each, made from two images (Linux and Windows). The build runs as many of each as it has parallel work for (plan v3.9). Their project, names, zones, IPs and the SSH key path are in the git-ignored `local/fleet.env` (`GODOTNEXT_GCE_*`, `GODOTNEXT_LINUX_*`, `GODOTNEXT_WIN_*`); the key itself is in `local/gcloud/`. If `local/gce/` exists on this machine, use its helper scripts instead of raw ssh (`vm_ssh.sh`, `vm_build.sh` and `vm_tb_apply.sh` for the Linux VMs; `w_ps.sh`, `w_build.sh`, `w_job.sh` and `w_tb_apply.sh` for the Windows VMs); each one's header comment says how to call it.
 
 1. They bill while they run. Start one for a task and stop it afterwards with `gcloud compute instances start|stop <name> --project <project> --zone <zone>`. An external IP can change across a stop and start: read it with `gcloud compute instances describe`.
 2. SSH in as `godotnext` with that key: `ssh -i <key> godotnext@<ip>`.
 3. **Linux:** the checkout is `~/GodotNext`. Build with `scons platform=linuxbsd target=editor dev_mode=yes -j16`. Rendered runs use the headless X server on the L4 (`godotnext-xorg` service): set `DISPLAY=:0`, and `vulkaninfo --summary` lists the NVIDIA L4 and llvmpipe.
 4. **Windows:** the SSH shell is PowerShell, as on the RTX 4080 SUPER machine (separate commands with `;`, not `&`); run a copied `.ps1` with `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`. `nvidia-smi` reports the L4 in WDDM mode, which D3D12 and Vulkan rendering need.
-5. **No L4 capacity:** a start can fail with a zone stockout. Retry later, or move the VM: snapshot its boot disk, create a `g2-standard-16` from the snapshot in a zone that has capacity (`--maintenance-policy TERMINATE`), copy the instance's `enable-windows-ssh` and `ssh-keys` metadata (Windows reads its SSH keys from them), and update `local/fleet.env`. The disk keeps the driver, the checkout and the autologon setup.
+5. **No L4 capacity:** a start can fail with a zone stockout, and a new VM can sit in `STAGING` for minutes and then disappear for the same reason, so wait for `RUNNING` before giving up on a zone and never delete a `STAGING` instance. When Europe has no L4s, the US zones often do. Retry later, or move the VM: snapshot its boot disk, create a `g2-standard-16` from the snapshot in a zone that has capacity (`--maintenance-policy TERMINATE`), copy the instance's `enable-windows-ssh` and `ssh-keys` metadata (Windows reads its SSH keys from them), and update `local/fleet.env`. The disk keeps the driver, the checkout and the autologon setup.
 6. **DLSS:** never on these VMs. NVIDIA's DLSS license (Supplement §3) leaves non-vGPU cloud use outside its scope, so DLSS-enabled builds run only on the owned cards.
 
 ## Checking an HTML page (the plan, the tracker)
