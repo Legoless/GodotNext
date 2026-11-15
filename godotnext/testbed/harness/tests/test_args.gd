@@ -20,6 +20,7 @@ func _initialize() -> void:
 	_test_output_size()
 	_test_reference_pt_args()
 	_test_reference_pt_statistics()
+	_test_nextgi_flag()
 	if _failures == 0:
 		print("test_args: ok")
 		quit(0)
@@ -522,3 +523,34 @@ func _test_reference_pt_statistics() -> void:
 	_check(is_equal_approx(luminance[1], 0.0) and float(relative[1]) == 0.0, "zero indirect with no spread has zero SE")
 	var spread: Dictionary = ReferencePTScript.batch_statistics([PackedFloat64Array([0.6]), PackedFloat64Array([0.4])], [PackedFloat64Array([0.5]), PackedFloat64Array([0.5])])
 	_check((spread["relative_se"] as Array)[0] == null, "zero mean with spread has no finite relative SE")
+
+
+## --nextgi=on (#229): NextGI forced on in the scene's Environments for a UE comparison run.
+func _test_nextgi_flag() -> void:
+	var base := ["--mode=timing", "--scene=res://scenes/swrt_kitbash/swrt_kitbash.tscn", "--out=/tmp/out", "--frames=600", "--warmup=120"]
+	var parsed: Dictionary = ArgsScript.parse(PackedStringArray(base + ["--nextgi=on"]))
+	_check(bool(parsed["ok"]) and String(parsed["args"].get("nextgi", "")) == "on", "--nextgi=on parses")
+	var plain: Dictionary = ArgsScript.parse(PackedStringArray(base))
+	_check(bool(plain["ok"]) and not plain["args"].has("nextgi"), "no --nextgi leaves the scene's Environment as authored")
+	_check(not bool(ArgsScript.parse(PackedStringArray(base + ["--nextgi=off"]))["ok"]), "--nextgi takes only on")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=capture", "--scene=res://a.tscn", "--out=/tmp/out", "--reference=pt", "--nextgi=on",
+	]))["ok"]), "--nextgi does not apply to --reference=pt")
+
+	var harness_script = load("res://harness/harness.gd")
+	var scene := Node3D.new()
+	var world := WorldEnvironment.new()
+	var authored := Environment.new()
+	world.environment = authored
+	scene.add_child(world)
+	var nested := Node3D.new()
+	var empty_world := WorldEnvironment.new()
+	nested.add_child(empty_world)
+	scene.add_child(nested)
+	_check(int(harness_script.force_nextgi(scene)) == 1, "one Environment is forced on; a WorldEnvironment without one is skipped")
+	_check(world.environment != authored and world.environment.nextgi_enabled, "the run's Environment is a copy with NextGI on")
+	_check(not authored.nextgi_enabled, "the authored Environment is unchanged")
+	var bare := Node3D.new()
+	_check(int(harness_script.force_nextgi(bare)) == 0, "a scene without a WorldEnvironment has nothing to force")
+	bare.free()
+	scene.free()

@@ -1,0 +1,7 @@
+events,Synthetic/RenderThread/Work,Synthetic/GPU/PassA,Synthetic/GPU/PassB,Counters/Items
+,2.0,1.00,0.50,10
+Boot;Load,2.1,1.10,0.40,11
+,2.2,1.20,,12
+,2.3,1.30,0.60,13
+SyntheticEvent,2.4,1.40,0.70,14
+,2.5,1.50,0.80,15

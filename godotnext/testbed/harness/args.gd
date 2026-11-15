@@ -21,6 +21,9 @@ const FLAG_UPSCALER := "--upscaler"
 const FLAG_SCALE := "--scale"
 const FLAG_SPP := "--spp"
 const FLAG_TSR_QUALITY := "--tsr-quality"
+## --nextgi=on (#229): NextGI forced on in the scene's Environment for this run, for the UE
+## comparison of a scene whose committed Environment leaves it off.
+const FLAG_NEXTGI := "--nextgi"
 
 const KNOWN_FLAGS := {
 	FLAG_MODE: true,
@@ -42,6 +45,7 @@ const KNOWN_FLAGS := {
 	FLAG_SCALE: true,
 	FLAG_SPP: true,
 	FLAG_TSR_QUALITY: true,
+	FLAG_NEXTGI: true,
 }
 
 const VALID_MASKS := {
@@ -282,6 +286,15 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 			result.ok = false
 			result.error = "--tsr-quality requires --upscaler=tsr"
 			return result
+	if values.has(FLAG_NEXTGI):
+		if String(values[FLAG_NEXTGI]) != "on":
+			result.ok = false
+			result.error = "--nextgi must be on"
+			return result
+		if reference == "pt":
+			result.ok = false
+			result.error = "--nextgi does not apply to --reference=pt"
+			return result
 	if values.has(FLAG_SCALE):
 		var scale_text := String(values[FLAG_SCALE])
 		if not scale_text.is_valid_float():
@@ -310,7 +323,7 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 	}
 	if spp > 0:
 		result["args"]["spp"] = spp
-	for key in [FLAG_VELOCITY_DUMP, FLAG_REFERENCE, FLAG_MSAA, FLAG_MASK, FLAG_UPSCALER, FLAG_SCALE, FLAG_TSR_QUALITY]:
+	for key in [FLAG_VELOCITY_DUMP, FLAG_REFERENCE, FLAG_MSAA, FLAG_MASK, FLAG_UPSCALER, FLAG_SCALE, FLAG_TSR_QUALITY, FLAG_NEXTGI]:
 		if values.has(key):
 			var normalized := String(key).trim_prefix("--").replace("-", "_")
 			result["args"][normalized] = float(values[key]) if key == FLAG_SCALE else values[key]

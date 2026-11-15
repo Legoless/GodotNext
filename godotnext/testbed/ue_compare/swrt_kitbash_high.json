@@ -1,0 +1,81 @@
+{
+	"schema": 1,
+	"name": "swrt_kitbash_high",
+	"title": "Overlap-heavy kitbash, software tier forced, High (GS-9's parent total)",
+	"port_issue": 235,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://scenes/swrt_kitbash/swrt_kitbash.tscn",
+		"camera": "CaptureCam",
+		"seed": 1,
+		"override": "res://ue_compare/swrt_kitbash_high.override.cfg",
+		"nextgi": { "tier": "SWRT", "quality": "HIGH" },
+		"harness_args": [],
+		"timeout_minutes": 15
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/SwrtKitbash/SwrtKitbash.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 1,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"r.Lumen.HardwareRayTracing 0",
+			"r.Lumen.TraceMeshSDFs 0",
+			"r.Lumen.AsyncCompute 0"
+		],
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 15
+	},
+	"lines": [
+		{
+			"id": "gs9_swrt_total_high",
+			"name": "SWRT total at High",
+			"gates": ["GS-9"],
+			"status": "ue_bar",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },
+			"ue": { "group": "Lumen total", "columns": ["GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections"] }
+		},
+		{
+			"id": "gs9_swrt_gather_high",
+			"name": "SWRT gather at High (line 5)",
+			"gates": ["GS-9"],
+			"status": "report_only",
+			"reason": "GS-9: the SWRT gather (High line 5) is report-only (report-only target 0.30 ms, plan §21.2.4). The settings record names no UE stat for line 5 alone, so only the GodotNext number is reported.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "columns": ["nextgi_diffuse_gather_ms"] },
+			"ue": null
+		},
+		{
+			"id": "gpu_pass_sum",
+			"name": "GPU pass sum (pipeline check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line on this scene; recorded to check the comparison pipeline end to end.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		}
+	]
+}

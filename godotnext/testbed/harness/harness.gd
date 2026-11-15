@@ -33,6 +33,9 @@ var _mask := ""
 var _camera_node: Camera3D
 ## --reference=pt (#263): the path-traced reference capture, or null.
 var _reference_pt: ReferencePTScript
+## --nextgi=on (#229): NextGI is forced on in the scene's Environments, and how many were changed.
+var _force_nextgi := false
+var _nextgi_environments := 0
 
 var _phase := Phase.BOOT
 var _wait_goal := WaitGoal.INITIAL
@@ -81,6 +84,7 @@ func _ready() -> void:
 	_capture_frames = args["capture_frames"]
 	_hold_frame = int(args.get("hold_frame", -1))
 	_mask = String(args.get("mask", ""))
+	_force_nextgi = String(args.get("nextgi", "")) == "on"
 	if String(args.get("reference", "")) == "pt":
 		_reference_pt = ReferencePTScript.new(self, _out, _scene, _seed_value, int(args["spp"]), maxi(_hold_frame, 0))
 	_load_job()
@@ -275,6 +279,9 @@ func get_reference_camera() -> Camera3D:
 
 func _begin_timing() -> void:
 	_check_output_size()
+	if _failed:
+		return
+	_apply_nextgi_flag(get_tree().current_scene)
 	if _failed:
 		return
 	_phase = Phase.TIMING
@@ -562,10 +569,41 @@ func _apply_capture_view() -> void:
 	if _reference_pt != null and environments == 0:
 		_fail("--reference=pt needs a WorldEnvironment with an Environment to enable NextGI on")
 		return
+	_apply_nextgi_flag(scene)
+	if _failed:
+		return
 	_activate_camera(scene)
 	var ssaa := get_node_or_null("/root/SSAAReference")
 	if ssaa != null and ssaa.has_method("apply_if_active"):
 		ssaa.call("apply_if_active", viewport, scene)
+
+
+## --nextgi=on (#229): turns NextGI on in every Environment of the scene, on a copy, so the
+## committed scene is unchanged. The project settings still choose the tier and quality (an
+## override.cfg); the manifest records NextGI's status at the end of the run.
+func _apply_nextgi_flag(scene: Node) -> void:
+	if not _force_nextgi or scene == null:
+		return
+	_nextgi_environments = force_nextgi(scene)
+	if _nextgi_environments == 0:
+		_fail("--nextgi=on needs a WorldEnvironment with an Environment to enable NextGI on")
+		return
+	print("harness: nextgi forced on in %d environment(s)" % _nextgi_environments)
+
+
+## Sets nextgi_enabled on a copy of each WorldEnvironment's Environment, including those inside
+## instanced sub-scenes or added by a scene script. Returns how many.
+static func force_nextgi(scene: Node) -> int:
+	var count := 0
+	for node in scene.find_children("*", "WorldEnvironment", true, false):
+		var world := node as WorldEnvironment
+		if world.environment == null:
+			continue
+		var environment := world.environment.duplicate() as Environment
+		environment.nextgi_enabled = true
+		world.environment = environment
+		count += 1
+	return count
 
 
 ## Capture-mode environment (§13, #240): linear tonemap at exposure 1,
@@ -689,6 +727,8 @@ func _build_manifest() -> Dictionary:
 		"output_size": output_size,
 		"msaa_3d": int(viewport.msaa_3d) if viewport != null else 0,
 		"video_memory_used": int(RenderingServer.get_rendering_info(RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)),
+		# An editor binary, not a release export (§23.4 wants the export for the UE comparison).
+		"editor_binary": OS.has_feature("editor"),
 	}
 	if _reference_pt != null:
 		manifest["reference"] = "pt"
@@ -697,6 +737,14 @@ func _build_manifest() -> Dictionary:
 		manifest["dlss"] = (_job["dlss"] as Dictionary).duplicate(true)
 	if _job.has("override") and typeof(_job["override"]) == TYPE_DICTIONARY:
 		manifest["override"] = (_job["override"] as Dictionary).duplicate(true)
+	if _force_nextgi:
+		# The status is project-wide (tier, quality, mode); the UE comparison report also needs the
+		# NextGI pass columns in timing.csv to show that the scene's view ran it.
+		manifest["nextgi"] = {
+			"forced": true,
+			"environments": _nextgi_environments,
+			"status": RenderingServer.nextgi_get_status(),
+		}
 	return manifest
 
 

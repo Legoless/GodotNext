@@ -48,6 +48,13 @@ GT-6's load step check (`tests/gpu_load_step.tscn`, PQ) compares the GPU frame t
 python3 -m godotnext_metrics.load_step --in <run>
 ```
 
+The UE 5.9 comparison (#229; `godotnext/testbed/harness/README.md`, "UE 5.9 comparison") has its own modules: `ue_compare` (comparison configs and the interleaved run plan), `ue_csv` (UE CSV profiler captures), `ue_bar` (the ≤1.20× verdict, report-only and no-equivalent lines, the set checks) and `ue_report` (the set's report):
+
+```
+python3 -m godotnext_metrics.ue_compare check ../../ue_compare/swrt_kitbash_high.json
+python3 -m godotnext_metrics.ue_report --compare <set directory> --out <dir>
+```
+
 Upscaler Torture's scrolling emissive check (#271; `godotnext/testbed/harness/README.md` has the three captures it reads) tests that the strip is lit, scrolls on the default timeline and holds still in `--variant=static`:
 
 ```
