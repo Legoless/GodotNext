@@ -29,8 +29,9 @@
 # Kind "timing" requires the High performance (or Ultimate Performance) power plan. Kind
 # "validation" sets NV_ALLOW_RAYTRACING_VALIDATION=1 and VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1.
 # Every job gets GODOTNEXT_HARNESS_JOB, the runner record the harness copies into manifest.json
-# (host, clock, power, override). A per-scene override.cfg next to --scene is copied to the
-# testbed root for this launch only, as runners/scene_override.sh does on the M5 Max (#240).
+# (host, clock, power, override), plus "resolution" from a --resolution WxH argument, which the
+# harness checks the viewport against (#270). A per-scene override.cfg next to --scene is copied
+# to the testbed root for this launch only, as runners/scene_override.sh does on the M5 Max (#240).
 #
 # The output directory gets run.log (stdout, then stderr), done.json and runner_job.json.
 # Exit codes: Godot's, or 2 for a bad job, 3 for a timeout, 4 when the task could not start.
@@ -325,6 +326,11 @@ $runnerJob = [ordered]@{
 	power = $power
 	override = $overrideRecord
 	env = $extraEnv
+}
+# The engine consumes --resolution, so the harness learns the requested output size from here (#270).
+$resolutionArg = Find-Argument $userArgs 'resolution'
+if ($resolutionArg -match '^(\d+)x(\d+)$') {
+	$runnerJob['resolution'] = @([int]$Matches[1], [int]$Matches[2])
 }
 $runnerJobPath = Join-Path $outDir 'runner_job.json'
 Write-Utf8 $runnerJobPath ($runnerJob | ConvertTo-Json -Depth 6)

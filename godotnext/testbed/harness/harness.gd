@@ -25,7 +25,8 @@ var _seed_value := 1
 var _frames := 0
 var _warmup := 0
 var _capture_frames: Array = []
-var _output_resolution: Array = []
+## The output size check (#270) has run, or decided it cannot run.
+var _output_size_checked := false
 var _hold_frame := -1
 ## --mask (#95, #190): a content-mask run. Its kept frames are rewritten as single-channel PNGs.
 var _mask := ""
@@ -78,7 +79,6 @@ func _ready() -> void:
 	_frames = int(args["frames"])
 	_warmup = int(args["warmup"])
 	_capture_frames = args["capture_frames"]
-	_output_resolution = args.get("output_resolution", [])
 	_hold_frame = int(args.get("hold_frame", -1))
 	_mask = String(args.get("mask", ""))
 	if String(args.get("reference", "")) == "pt":
@@ -144,12 +144,6 @@ func _exit_tree() -> void:
 
 
 func _boot() -> void:
-	if _output_resolution.size() == 2:
-		var root := get_tree().root
-		if root != null:
-			root.content_scale_mode = Window.CONTENT_SCALE_MODE_VIEWPORT
-			root.content_scale_aspect = Window.CONTENT_SCALE_ASPECT_KEEP
-			root.content_scale_size = Vector2i(int(_output_resolution[0]), int(_output_resolution[1]))
 	_seed_window()
 	if _mode == "capture":
 		var viewport := get_viewport()
@@ -280,6 +274,9 @@ func get_reference_camera() -> Camera3D:
 
 
 func _begin_timing() -> void:
+	_check_output_size()
+	if _failed:
+		return
 	_phase = Phase.TIMING
 	_timing_seen = 0
 	_driving = true
@@ -330,6 +327,9 @@ func _on_frame_post_draw() -> void:
 
 
 func _poll_settle() -> void:
+	_check_output_size()
+	if _failed:
+		return
 	_settle_draws += 1
 	var canvas := _counter_streak(RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_CANVAS)
 	var mesh := _counter_streak(RenderingServer.RENDERING_INFO_PIPELINE_COMPILATIONS_MESH)
@@ -427,6 +427,68 @@ func _save_exr(slot: int) -> void:
 		_fail("failed to save %s (%s)" % [path, error_string(err)])
 		return
 	_exr_saved += 1
+
+
+## Fails the run when the viewport is not the output size the run asked for (#270), so a window
+## that the desktop clamped cannot pass as that size. The engine consumes --resolution, so it is
+## never among the harness's arguments. The size comes from the runner record, which the runners
+## fill from --resolution. A capture without one uses the size of the first PNG movie frame: the
+## engine writes every frame at --resolution (or at the project window size) and resamples the
+## viewport into it when the two differ. A timing run without a runner record is not checked.
+func _check_output_size() -> void:
+	if _output_size_checked:
+		return
+	var requested := requested_size_from_job(_job)
+	var source := "the runner record"
+	if requested == Vector2i.ZERO and _mode == "capture":
+		var stem := _movie_stem()
+		if not stem.is_empty() and Engine.get_write_movie_path().get_extension().to_lower() == "png":
+			# This process writes the first frame after its first draw. Before that, a file with
+			# the same name can be left over from an earlier run into the same folder.
+			if Engine.get_frames_drawn() < 1:
+				return
+			requested = movie_frame_size(stem)
+			source = "the first movie frame"
+	_output_size_checked = true
+	if requested == Vector2i.ZERO:
+		print("harness: output size not checked: no runner record of --resolution and no PNG movie frame")
+		return
+	var viewport := get_viewport()
+	var visible := Vector2i(viewport.get_visible_rect().size) if viewport != null else Vector2i.ZERO
+	var error := output_size_error(requested, visible)
+	if not error.is_empty():
+		_fail(error)
+		return
+	print("harness: output size %dx%d matches %s" % [visible.x, visible.y, source])
+
+
+## The runner record's "resolution" ([width, height], from --resolution), or zero without one.
+static func requested_size_from_job(job: Dictionary) -> Vector2i:
+	var value = job.get("resolution")
+	if typeof(value) != TYPE_ARRAY or (value as Array).size() != 2:
+		return Vector2i.ZERO
+	var size := Vector2i(int(value[0]), int(value[1]))
+	if size.x <= 0 or size.y <= 0:
+		return Vector2i.ZERO
+	return size
+
+
+## The size of the first movie frame (<stem>00000000.png), or zero when it is not readable.
+static func movie_frame_size(stem: String) -> Vector2i:
+	var path := "%s%08d.png" % [stem, 0]
+	if not FileAccess.file_exists(path):
+		return Vector2i.ZERO
+	var image := Image.load_from_file(path)
+	if image == null or image.is_empty():
+		return Vector2i.ZERO
+	return image.get_size()
+
+
+## Empty when the viewport has the requested output size, else the failure message naming both.
+static func output_size_error(requested: Vector2i, visible: Vector2i) -> String:
+	if requested == visible:
+		return ""
+	return "output size mismatch: the viewport is %dx%d but the run asked for %dx%d (--resolution), for example because the desktop clamped the window" % [visible.x, visible.y, requested.x, requested.y]
 
 
 func _read_passes() -> Array:
@@ -687,13 +749,10 @@ func _write_timing_files() -> void:
 func _trim_movie_frames() -> void:
 	if _failed and _movie_origin < 0:
 		return
-	var movie_path := Engine.get_write_movie_path()
-	if movie_path.is_empty():
+	var stem := _movie_stem()
+	if stem.is_empty():
 		print("harness: capture had no movie writer path; PNG trim skipped")
 		return
-	if movie_path.is_relative_path():
-		movie_path = ProjectSettings.globalize_path("res://".path_join(movie_path))
-	var stem := movie_path.get_basename()
 	var keep := _warmup + _frames
 	if _movie_origin < 0:
 		_fail("captured window never started")
@@ -732,6 +791,16 @@ func _trim_movie_frames() -> void:
 		print("harness: capture complete kept=%d exr=%d" % [keep, _exr_saved])
 		if _dropped_specialization:
 			print("harness: capture settled without the specialization counter")
+
+
+## The absolute --write-movie path without its extension, or empty when no movie is written.
+func _movie_stem() -> String:
+	var movie_path := Engine.get_write_movie_path()
+	if movie_path.is_empty():
+		return ""
+	if movie_path.is_relative_path():
+		movie_path = ProjectSettings.globalize_path("res://".path_join(movie_path))
+	return movie_path.get_basename()
 
 
 ## --mask runs: each kept frame becomes a single-channel 8-bit PNG (the R8 mask), white where the

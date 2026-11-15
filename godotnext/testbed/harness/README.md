@@ -107,7 +107,7 @@ After `--`:
 
 `--out` has to be an absolute filesystem path. `res://` and `user://` are rejected. Values can be `--flag=value` or `--flag value`.
 
-The runner passes a job file in `GODOTNEXT_HARNESS_JOB`. That is not a user argument. It carries the host label, the clock record, and the power record. The harness does not call `pmset` itself.
+The runner passes a job file in `GODOTNEXT_HARNESS_JOB`. That is not a user argument. It carries the host label, the clock record, and the power record, and `resolution` (`[width, height]`) when the Godot arguments include `--resolution WxH`. The harness does not call `pmset` itself.
 
 ## What a capture run does
 
@@ -147,7 +147,7 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 
 `override` is `applied` (bool), `source` (the `res://` path of the per-scene file that was copied to `res://override.cfg` for the launch), and `sha256` (hex digest of that file). A scene with no per-scene `override.cfg` records `applied: false` with empty `source` and `sha256`.
 
-`output_size` is `[width, height]` from `get_viewport().get_visible_rect().size`. `scaling_3d_mode` and `scaling_3d_scale` come from the viewport after the first captured or measured frame.
+`output_size` is `[width, height]` from `get_viewport().get_visible_rect().size`. A capture or timing run fails when it differs from the requested output size (#270), with a message that names both sizes, so a window the desktop clamped cannot pass as the size it asked for. The engine consumes `--resolution`, so the harness takes the requested size from the runner job's `resolution`. A capture without one uses the size of the first PNG movie frame: the movie writer writes every frame at `--resolution` (or at the project window size) and stretches the viewport into it when the two differ. A timing run without a runner job is not checked, and says so. `scaling_3d_mode` and `scaling_3d_scale` come from the viewport after the first captured or measured frame.
 
 `runner.clock` is `locked` and `detail`. The M5 Max and Linux VM runners record `locked: false`. The RTX 4080 SUPER runner locks the clocks for timing jobs and also records `gpu_mhz`, `memory_mhz` and `nvidia_smi_index`.
 
@@ -157,7 +157,7 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 
 ## Runners
 
-`runners/macos_local.sh` records power state, writes `runner_job.json`, launches the command after `--`, then patches `runner.power.after` into `manifest.json`. `--check` prints `on_ac`, `powermode`, `powermode_name`, and `thermal`, and exits without launching. Exit code 1 means the machine is not on AC power in High Power mode. `--fail-on-validation` (before `--`) also exits 1 when the run's output has any `ERROR:`, `Invalid Metal usage` or `Error detected in` line, and prints their counts on a `GODOTNEXT_RUNNER_VALIDATION` line. It is opt-in because the legacy captures share the runner. Run the checks that go through it, such as `tests/lumen_lite`, `tests/lumen_lite_hwrt` and `tests/swrt_trace`, with it.
+`runners/macos_local.sh` records power state, writes `runner_job.json` (with `resolution` from `--resolution`), launches the command after `--`, then patches `runner.power.after` into `manifest.json`. `--check` prints `on_ac`, `powermode`, `powermode_name`, and `thermal`, and exits without launching. Exit code 1 means the machine is not on AC power in High Power mode. `--fail-on-validation` (before `--`) also exits 1 when the run's output has any `ERROR:`, `Invalid Metal usage` or `Error detected in` line, and prints their counts on a `GODOTNEXT_RUNNER_VALIDATION` line. It is opt-in because the legacy captures share the runner. Run the checks that go through it, such as `tests/lumen_lite`, `tests/lumen_lite_hwrt` and `tests/swrt_trace`, with it.
 
 `run_selftest.sh` and `runners/macos_local.sh` export `GODOTNEXT_BACKGROUND=1` unless it is already set, so harness runs on the M5 Max draw on Metal without taking the desktop's focus (`docs/godotnext/fleet.md`). Set `GODOTNEXT_BACKGROUND=0` to watch a run in a normal window.
 
@@ -167,7 +167,8 @@ Top-level fields: `schema`, `host`, `adapter` (`name`, `api_version`), `commit` 
 - The runner adds `--rendering-driver` and `--gpu-index`, resolved by device name from `fleet.md`. A job that names an unknown device fails with the list of known names.
 - `timing` jobs need the High performance power plan and lock the GPU and memory clocks to the `fleet.md` values (`nvidia-smi --lock-gpu-clocks` and `--lock-memory-clocks`, read back until they hold), and always reset them (`-rgc`, `-rmc`) when the launch ends.
 - `validation` jobs set `NV_ALLOW_RAYTRACING_VALIDATION=1` and `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1`, and exit 1 when Godot exits 0 but logged an `ERROR:` or `Validation Error` line (`fail_on_validation`; case-sensitive, because the Vulkan loader logs lower-case "error:" lines that are not errors).
-- Every job gets `GODOTNEXT_HARNESS_JOB` (host, device, clock, power, override). `runner.power` records the active power plan (`powermode` 2 for High performance or Ultimate Performance) and the GPU temperature and throttle reasons; `after` is patched into `manifest.json` when the launch ends. JSON is written as UTF-8 without a byte-order mark.
+- Every job gets `GODOTNEXT_HARNESS_JOB` (host, device, clock, power, override, and `resolution` from a `--resolution WxH` argument). `runner.power` records the active power plan (`powermode` 2 for High performance or Ultimate Performance) and the GPU temperature and throttle reasons; `after` is patched into `manifest.json` when the launch ends. JSON is written as UTF-8 without a byte-order mark.
+- Every run of the testbed project on Windows, harness or not, opens a borderless window (`display/window/size/borderless.windows=true` in `project.godot`, #270); the editor's window is unaffected. A decorated window cannot have a client area as large as the desktop: on the RTX 4080 SUPER's 3840×2160 desktop, `--resolution 3840x2160` gave 3840×2135, which the movie writer stretched to 3840×2160.
 - The output directory gets `run.log` (stdout, then stderr), `done.json` (exit code, Session id, the locked clocks read back) and `runner_job.json`. The last line printed is `GODOTNEXT_RUNNER {...}` with the device, the Session id and the error counts.
 
 `selftest/run_selftest.ps1` is the Windows twin of `run_selftest.sh`, with the same parameters plus `-Device` and `-Driver`; every launch goes through `win_session1.ps1`, and the manifest check also requires `runner.clock.locked` (and the locked clocks) on timing runs. `runners/run_remote.sh` runs a job or the self-test there from the M5 Max and copies the output back; it needs PowerShell as the machine's OpenSSH default shell, and passes the remote exit code through. SSH carries only the low byte of that code, so a Windows crash status such as `0x80000003` arrives as 3, the same number as the runner's timeout. `done.json` and the `GODOTNEXT_RUNNER` line carry the full code.

@@ -84,11 +84,12 @@ write_job() {
 	export GODOTNEXT_HARNESS_JOB="$JOB_PATH"
 	PMSET_RAW="$pmset_raw" BATT_RAW="$batt_raw" THERM_RAW="$therm_raw" \
 		POWERMODE="$powermode" MODE_LABEL="$mode_label" THERMAL="$thermal" ON_AC="$on_ac" \
-		JOB_PATH="$JOB_PATH" HOST_NAME="$HOST_NAME" \
+		JOB_PATH="$JOB_PATH" HOST_NAME="$HOST_NAME" RESOLUTION="$resolution_arg" \
 		OVERRIDE_SOURCE="$SCENE_OVERRIDE_SOURCE" OVERRIDE_SHA256="$SCENE_OVERRIDE_SHA256" \
 		python3 - <<'PY'
 import json
 import os
+import re
 
 on_ac = os.environ["ON_AC"] == "true"
 powermode = os.environ.get("POWERMODE", "")
@@ -115,6 +116,10 @@ job = {
         },
     },
 }
+# The engine consumes --resolution, so the harness learns the requested output size from here (#270).
+size = re.fullmatch(r"(\d+)x(\d+)", os.environ["RESOLUTION"])
+if size:
+    job["resolution"] = [int(size.group(1)), int(size.group(2))]
 with open(os.environ["JOB_PATH"], "w", encoding="utf-8") as handle:
     json.dump(job, handle, indent="\t")
     handle.write("\n")
@@ -245,6 +250,7 @@ mkdir -p "$out_dir"
 # A per-scene override.cfg next to --scene applies to this launch only (#240).
 scene_arg=$(scene_override_find_arg scene "${godot_args[@]}")
 path_arg=$(scene_override_find_arg path "${godot_args[@]}")
+resolution_arg=$(scene_override_find_arg resolution "${godot_args[@]}")
 testbed_dir="$repo_root/godotnext/testbed"
 if [[ -n "$path_arg" ]]; then
 	case "$path_arg" in

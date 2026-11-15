@@ -25,6 +25,9 @@ from godotnext_metrics.q19_upscaler_flip import mask_bool
 
 FRAME_MASK = "frame"
 MIN_COVERAGE = 0.005
+# The only values a mask run's 8-bit frames hold. Anything else means the frames were resampled
+# (#270: a clamped window whose viewport the movie writer stretched to the requested size).
+MASK_LEVELS = frozenset((0, 255))
 
 
 class MaskError(ValueError):
@@ -70,30 +73,56 @@ def coverage(mask: NDArray[np.generic]) -> float:
     return float(np.count_nonzero(plane)) / float(plane.size)
 
 
+def levels(mask: NDArray[np.generic]) -> set[int]:
+    """The distinct values of a mask image's first channel, the channel ``mask_bool`` reads."""
+    array = np.asarray(mask)
+    if array.ndim == 3:
+        array = array[..., 0]
+    return {int(value) for value in np.unique(array)}
+
+
 def coverage_report(
     directory: Path, *, minimum: float = MIN_COVERAGE, first: int = 0, last: int | None = None
 ) -> dict[str, object]:
-    """Per-frame coverage of a mask run folder over ``[first, last]``, against ``minimum``."""
+    """Per-frame coverage of a mask run folder over ``[first, last]``, against ``minimum``.
+
+    ``levels`` lists the values the frames hold. A mask run holds only 0 and 255 (an empty or a
+    full frame holds one of them); any other level fails the run and sets ``error``.
+    """
     paths = indexed_paths(directory, "frame*.png")
     chosen = [index for index in sorted(paths) if index >= first and (last is None or index <= last)]
     if not chosen:
         raise MaskError(f"{directory} has no mask frames in the requested range")
-    values = [coverage(read_png(paths[index])) for index in chosen]
-    shape = read_png(paths[chosen[0]]).shape
+    values: list[float] = []
+    found: set[int] = set()
+    shape: tuple[int, ...] = ()
+    for index in chosen:
+        image = read_png(paths[index])
+        values.append(coverage(image))
+        found |= levels(image)
+        shape = shape or image.shape
     worst = int(np.argmin(np.asarray(values)))
-    return {
+    two_level = found <= MASK_LEVELS
+    report: dict[str, object] = {
         "mask": directory.name.removeprefix("mask_"),
         "frames": len(chosen),
         "first": chosen[0],
         "last": chosen[-1],
         "output_resolution": [int(shape[1]), int(shape[0])],
+        "levels": sorted(found),
         "min": values[worst],
         "min_frame": chosen[worst],
         "mean": float(np.mean(np.asarray(values))),
         "max": float(np.max(np.asarray(values))),
         "minimum": minimum,
-        "pass": bool(values[worst] >= minimum),
+        "pass": bool(values[worst] >= minimum and two_level),
     }
+    if not two_level:
+        report["error"] = (
+            f"the mask frames hold {len(found)} levels, not only 0 and 255: they were resampled, "
+            "so the coverage counts every non-zero pixel of a blurred mask"
+        )
+    return report
 
 
 def _checked(plane: NDArray[np.bool_], shape: tuple[int, int], path: Path) -> NDArray[np.bool_]:
@@ -118,7 +147,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     json.dump(report, sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
-    return 0
+    # Coverage under the floor is a computed result (exit 0, "pass": false); frames that are not
+    # a mask at all are a bad input (#270).
+    return 2 if "error" in report else 0
 
 
 if __name__ == "__main__":

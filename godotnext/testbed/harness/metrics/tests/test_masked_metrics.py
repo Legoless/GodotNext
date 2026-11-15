@@ -356,10 +356,51 @@ def test_mask_coverage_report(tmp_path: Path) -> None:
     assert report["mask"] == "thin_wire"
     assert report["min"] == 0.01 and report["min_frame"] == 0
     assert report["max"] == 0.04
-    assert report["pass"] is True
+    assert report["levels"] == [0, 255]
+    assert report["pass"] is True and "error" not in report
     assert coverage_report(run, minimum=0.02)["pass"] is False
     assert coverage_report(run, first=1, last=2)["frames"] == 2
     code, text = _run("-m", "godotnext_metrics.masks", "coverage", "--in", str(run))
     assert code == 0 and json.loads(text)["output_resolution"] == [100, 100]
+    code, text = _run("-m", "godotnext_metrics.masks", "coverage", "--in", str(run), "--minimum", "0.02")
+    assert code == 0 and json.loads(text)["pass"] is False
     code, text = _run("-m", "godotnext_metrics.masks", "coverage", "--in", str(tmp_path / "absent"))
     assert code == 2
+
+
+def test_mask_coverage_accepts_one_level_frames(tmp_path: Path) -> None:
+    run = tmp_path / "mask_moire"
+    write_png(run / "frame00000000.png", np.zeros((10, 10), dtype=np.uint8))
+    write_png(run / "frame00000001.png", np.full((10, 10), 255, dtype=np.uint8))
+    report = coverage_report(run)
+    assert report["levels"] == [0, 255] and "error" not in report
+    assert report["pass"] is False  # the empty frame is under the floor, a computed result
+    only_full = coverage_report(run, first=1)
+    assert only_full["levels"] == [255] and only_full["pass"] is True
+
+
+def test_mask_coverage_rejects_resampled_frames(tmp_path: Path) -> None:
+    # #270: a 1 px wire mask stretched by bilinear resampling, as the movie writer stretched a
+    # 3840x2135 viewport to 3840x2160, holds intermediate levels and covers more pixels.
+    run = tmp_path / "mask_thin_wire"
+    exact = np.zeros((100, 100), dtype=np.uint8)
+    exact[40, :] = 255
+    write_png(run / "frame00000000.png", exact)
+    source_rows = np.linspace(0.0, 99.0, 103)
+    below = np.floor(source_rows).astype(int)
+    above = np.minimum(below + 1, 99)
+    weight = (source_rows - below)[:, None]
+    stretched = (exact[below] * (1.0 - weight) + exact[above] * weight)[:100]
+    write_png(run / "frame00000001.png", np.round(stretched).astype(np.uint8))
+    report = coverage_report(run)
+    found = report["levels"]
+    assert isinstance(found, list) and len(found) > 2 and {0, 255} <= set(found)
+    peak = report["max"]
+    assert isinstance(peak, float) and peak > 0.01  # the blurred wire counts more pixels than the exact one
+    assert report["pass"] is False
+    assert "not only 0 and 255" in str(report["error"])
+    assert coverage_report(run, last=0)["pass"] is True
+    code, text = _run("-m", "godotnext_metrics.masks", "coverage", "--in", str(run))
+    payload = json.loads(text)
+    assert code == 2
+    assert payload["pass"] is False and payload["levels"] == report["levels"]

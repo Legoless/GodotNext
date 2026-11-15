@@ -34,6 +34,8 @@ python3 q19_upscaler_flip.py --test <capture> --reference <ssaa_msaa8> --msaa4 <
 python3 -m godotnext_metrics.masks coverage --in <mask_thin_wire run>
 ```
 
+`masks coverage` also lists the pixel `levels` of the frames and exits 2 when they hold anything but 0 and 255, as a resampled capture does (#270).
+
 GT-2's comparison report reads a `harness/runners/upscaler_jobs.sh` tree and writes Q19, thin-wire Q19, static and moiré Q8, and Q10 per scene, resolution and configuration (TAA, FSR2, TSR; DLSS report-only):
 
 ```

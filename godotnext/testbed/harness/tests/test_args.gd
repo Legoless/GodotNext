@@ -17,6 +17,7 @@ func _initialize() -> void:
 	_test_timing_fields()
 	_test_animation_frame()
 	_test_capture_environment()
+	_test_output_size()
 	_test_reference_pt_args()
 	_test_reference_pt_statistics()
 	if _failures == 0:
@@ -414,6 +415,34 @@ func _test_capture_environment() -> void:
 	harness_script.apply_capture_environment(fogless)
 	_check(not fogless.fog_enabled, "capture leaves fogless scenes fogless")
 	_check(not fogless.volumetric_fog_enabled, "capture leaves volumetric fogless scenes fogless")
+
+
+## The output size check (#270): where the requested size comes from, and the failure message.
+func _test_output_size() -> void:
+	var harness_script = load("res://harness/harness.gd")
+	_check(harness_script.requested_size_from_job({"resolution": [3840.0, 2160.0]}) == Vector2i(3840, 2160), "runner record resolution is the requested size")
+	_check(harness_script.requested_size_from_job({}) == Vector2i.ZERO, "no runner record resolution requests nothing")
+	_check(harness_script.requested_size_from_job({"resolution": [3840]}) == Vector2i.ZERO, "a short resolution requests nothing")
+	_check(harness_script.requested_size_from_job({"resolution": [0, 2160]}) == Vector2i.ZERO, "a zero width requests nothing")
+	_check(harness_script.requested_size_from_job({"resolution": "3840x2160"}) == Vector2i.ZERO, "a string resolution requests nothing")
+
+	var clamped: String = harness_script.output_size_error(Vector2i(3840, 2160), Vector2i(3840, 2135))
+	_check(not clamped.is_empty(), "a clamped viewport fails")
+	_check(clamped.contains("3840x2135") and clamped.contains("3840x2160"), "the mismatch message names both sizes: " + clamped)
+	_check(String(harness_script.output_size_error(Vector2i(2560, 1440), Vector2i(2560, 1440))).is_empty(), "a matching viewport passes")
+	_check(not String(harness_script.output_size_error(Vector2i(1920, 1080), Vector2i(1080, 1920))).is_empty(), "a transposed viewport fails")
+
+	var folder := ProjectSettings.globalize_path("user://test_args_output_size")
+	DirAccess.make_dir_recursive_absolute(folder)
+	var stem := folder.path_join("frame")
+	var frame_path := "%s%08d.png" % [stem, 0]
+	DirAccess.remove_absolute(frame_path)
+	_check(harness_script.movie_frame_size(stem) == Vector2i.ZERO, "a missing first movie frame has no size")
+	var frame := Image.create_empty(48, 27, false, Image.FORMAT_RGBA8)
+	_check(frame.save_png(frame_path) == OK, "the test movie frame is written")
+	_check(harness_script.movie_frame_size(stem) == Vector2i(48, 27), "the first movie frame's size is read")
+	DirAccess.remove_absolute(frame_path)
+	DirAccess.remove_absolute(folder)
 
 
 ## --reference=pt (#263): the path-traced scene reference.
