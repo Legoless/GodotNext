@@ -42,7 +42,9 @@ class RenderingShaderContainer : public RefCounted {
 
 public:
 	static const uint32_t CONTAINER_MAGIC_NUMBER = 0x43535247;
-	static const uint32_t CONTAINER_VERSION = 2;
+	// GodotNext: rd_atomics64 (#175). Version 3 adds ReflectionData::int64_atomics. constexpr, so it can be
+	// passed by reference without an out-of-class definition.
+	static constexpr uint32_t CONTAINER_VERSION = 3;
 
 protected:
 	using RDC = RenderingDeviceCommons;
@@ -69,7 +71,13 @@ protected:
 		uint32_t push_constant_stages_mask = 0;
 		uint32_t stage_count = 0;
 		uint32_t shader_name_len = 0;
+		// GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits. Appended so the fields above keep their
+		// offsets; the explicit padding keeps the struct free of uninitialized bytes when it is copied into
+		// a container.
+		uint32_t int64_atomics = 0;
+		uint32_t padding = 0;
 	};
+	static_assert(sizeof(ReflectionData) == 72, "ReflectionData must not contain implicit padding.");
 
 	struct ReflectionBindingData {
 		uint32_t type = 0;
@@ -232,6 +240,7 @@ protected:
 		bool has_multiview = false;
 		bool has_physical_storage_buffer_addresses = false;
 		bool has_dynamic_buffers = false;
+		uint32_t int64_atomics = 0; // GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits.
 		RDC::PipelineType pipeline_type = RDC::PIPELINE_TYPE_RASTERIZATION;
 
 		LocalVector<ReflectShaderStage> shader_stages;
@@ -296,6 +305,8 @@ public:
 
 	bool set_code_from_spirv(const String &p_shader_name, Span<RDC::ShaderStageSPIRVData> p_spirv);
 	RDC::ShaderReflection get_shader_reflection() const;
+	// GodotNext: rd_atomics64 (#175). The RDAtomics64::Usage bits, without building the whole reflection.
+	uint32_t get_int64_atomics_usage() const { return reflection_data.int64_atomics; }
 	bool from_bytes(const PackedByteArray &p_bytes);
 	PackedByteArray to_bytes() const;
 	bool compress_code(const uint8_t *p_decompressed_bytes, uint32_t p_decompressed_size, uint8_t *p_compressed_bytes, uint32_t *r_compressed_size, uint32_t *r_compressed_flags) const;

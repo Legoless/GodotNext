@@ -101,6 +101,14 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		uint32_t min_acceleration_structure_scratch_offset_alignment = 0;
 	};
 
+	// GodotNext: rd_atomics64 (#175)
+	struct Int64AtomicsCapabilities {
+		bool buffer_supported = false; // shaderBufferInt64Atomics.
+		bool shared_supported = false; // shaderSharedInt64Atomics: part of SUPPORTS_INT64_ATOMIC_ARITH.
+		bool image_supported = false; // shaderImageInt64Atomics.
+		bool r64_storage_atomic_supported = false; // VK_FORMAT_R64_UINT has STORAGE_IMAGE_ATOMIC with optimal tiling.
+	};
+
 	struct RaytracingCapabilities {
 		bool raytracing_pipeline_support = false;
 		uint32_t shader_group_handle_size = 0;
@@ -179,6 +187,7 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	VulkanRayQueryCaps ray_query_caps;
 	AccelerationStructureLimits acceleration_structure_limits;
 	RaytracingCapabilities raytracing_capabilities;
+	Int64AtomicsCapabilities int64_atomics_capabilities; // GodotNext: rd_atomics64 (#175).
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
 	bool framebuffer_depth_resolve = false;

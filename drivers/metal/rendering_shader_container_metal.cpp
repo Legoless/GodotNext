@@ -271,6 +271,16 @@ MetalDeviceProfile::MinimumRequirements RenderingShaderContainerMetal::inspect_s
 				}
 				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_24);
 			}
+			// GodotNext: rd_atomics64 (#175)
+			// SPIRV-Cross translates 64-bit atomics (buffer and image max and min) for MSL 3.1 only; they need
+			// Apple8 like the 64-bit image atomics below. A device without them gets the named error from
+			// RenderingDevice when the shader is created.
+			if (word_count >= 2 && opcode == spv::OpCapability && (words[1] == spv::CapabilityInt64Atomics || words[1] == spv::CapabilityInt64ImageEXT)) {
+				if (reqs.gpu < MetalDeviceProfile::GPU::Apple8) {
+					reqs.gpu = MetalDeviceProfile::GPU::Apple8;
+				}
+				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_31);
+			}
 			if (opcode == spv::OpImageTexelPointer) {
 				atomic_image_ids.insert(words[3]);
 			}

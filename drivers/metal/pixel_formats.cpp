@@ -431,7 +431,9 @@ void PixelFormats::initDataFormatCapabilities() {
 	addDataFormatDesc(R32G32B32A32_SINT, RGBA32Sint, Invalid, Int4, Invalid, 1, 1, 16, ColorInt32);
 	addDataFormatDesc(R32G32B32A32_SFLOAT, RGBA32Float, Invalid, Float4, Invalid, 1, 1, 16, ColorFloat);
 
-	addDataFormatDesc(R64_UINT, Invalid, Invalid, Invalid, Invalid, 1, 1, 8, ColorFloat);
+	// GodotNext: rd_atomics64 (#175). A ulong texture for 64-bit atomics (MSL 3.1). RG32Uint keeps mapping
+	// back to R32G32_UINT, which is registered first.
+	addDataFormatDesc(R64_UINT, RG32Uint, Invalid, Invalid, Invalid, 1, 1, 8, ColorUInt32);
 	addDataFormatDesc(R64_SINT, Invalid, Invalid, Invalid, Invalid, 1, 1, 8, ColorFloat);
 	addDataFormatDesc(R64_SFLOAT, Invalid, Invalid, Invalid, Invalid, 1, 1, 8, ColorFloat);
 

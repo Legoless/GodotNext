@@ -117,6 +117,15 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		bool aniso_filter_with_point_mip_supported = false;
 	};
 
+	// GodotNext: rd_atomics64 (#175). Read from the device; has_feature() does not report them until the
+	// DXIL toolchain can emit 64-bit atomics (#123).
+	struct Int64AtomicsCapabilities {
+		bool int64_shader_ops = false; // OPTIONS1.Int64ShaderOps.
+		bool typed_resource_supported = false; // OPTIONS9.AtomicInt64OnTypedResourceSupported.
+		bool group_shared_supported = false; // OPTIONS9.AtomicInt64OnGroupSharedSupported.
+		bool descriptor_heap_resource_supported = false; // OPTIONS11.AtomicInt64OnDescriptorHeapResourceSupported.
+	};
+
 	RenderingContextDriverD3D12 *context_driver = nullptr;
 	RenderingContextDriver::Device context_device;
 	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
@@ -132,6 +141,7 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	FormatCapabilities format_capabilities;
 	BarrierCapabilities barrier_capabilities;
 	MiscFeaturesSupport misc_features_support;
+	Int64AtomicsCapabilities int64_atomics_capabilities; // GodotNext: rd_atomics64 (#175).
 	SamplerCapabilities sampler_capabilities;
 	RenderingShaderContainerFormatD3D12 shader_container_format;
 	String pipeline_cache_id;

@@ -1075,6 +1075,8 @@ Patches:
 
 - `0001-msl-aabb-opaque.patch` (KhronosGroup/SPIRV-Cross df0828ca, AABB-opaque check)
 - `0002-msl-argument-buffer-padding-as.patch` (treat `AccelerationStructure` as a buffer in argument-buffer index lookup and padding)
+- `0003-msl-int64-atomic-min-max.patch` (GodotNext: 64-bit `OpAtomicUMax` and `OpAtomicUMin` on device buffers
+  and on `texture2d<ulong>` with MSL 3.1; every other 64-bit atomic still throws)
 
 
 ## spirv-headers

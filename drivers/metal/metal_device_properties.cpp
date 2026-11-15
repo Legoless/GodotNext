@@ -160,6 +160,9 @@ void MetalDeviceProperties::init_features(MTL::Device *p_device) {
 	features.argument_buffers_tier = p_device->argumentBuffersSupport();
 	features.supports_image_atomic_32_bit = p_device->supportsFamily(MTL::GPUFamilyApple6);
 	features.supports_image_atomic_64_bit = p_device->supportsFamily(GPUFamilyApple9) || (p_device->supportsFamily(MTL::GPUFamilyApple8) && p_device->supportsFamily(MTL::GPUFamilyMac2));
+	// GodotNext: rd_atomics64 (#175). The GPUs of the 64-bit texture atomics, and an MSL target the
+	// SPIRV-Cross 64-bit min and max path accepts (3.1). Apple8 is unvalidated (no M2 in the fleet, #171).
+	features.supports_buffer_atomic_64_bit = features.supports_image_atomic_64_bit && features.msl_target_version >= MSL_VERSION_31;
 	features.supports_msaa_depth_resolve = p_device->supportsFamily(MTL::GPUFamilyMetal3) || p_device->supportsFamily(MTL::GPUFamilyApple3) || p_device->supportsFamily(MTL::GPUFamilyMac2);
 
 	if (features.msl_target_version >= MSL_VERSION_31) {

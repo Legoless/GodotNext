@@ -1059,6 +1059,16 @@ public:
 		// GodotNext: async_compute (#174)
 		// The driver can run compute lists on a second queue, synchronized with the main one.
 		SUPPORTS_ASYNC_COMPUTE,
+		// GodotNext: rd_atomics64 (#175)
+		// uint64 atomicMax and atomicMin on storage buffers: the portable 64-bit atomics (plan §21.1 C3).
+		SUPPORTS_BUFFER_INT64_ATOMICS,
+		// uint64 atomicMax and atomicMin on 2D R64_UINT storage images. Drivers set it only together with
+		// SUPPORTS_BUFFER_INT64_ATOMICS.
+		SUPPORTS_IMAGE_INT64_ATOMICS,
+		// Every other 64-bit integer atomic: add, subtract, exchange, compare-exchange, increment,
+		// decrement, bitwise, signed min and max, load and store; and any 64-bit atomic on shared memory
+		// or on a 64-bit image that is arrayed, multisampled or not 2D.
+		SUPPORTS_INT64_ATOMIC_ARITH,
 	};
 
 	// GodotNext: metal_ray_query
@@ -1200,6 +1210,8 @@ public:
 		bool has_dynamic_buffers = false;
 		uint32_t compute_local_size[3] = {};
 		uint32_t push_constant_size = 0;
+		// GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits of every stage.
+		uint32_t int64_atomics = 0;
 
 		Vector<Vector<ShaderUniform>> uniform_sets;
 		Vector<ShaderSpecializationConstant> specialization_constants;

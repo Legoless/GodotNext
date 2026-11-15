@@ -32,6 +32,7 @@
 
 #include "core/io/compression.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
+#include "servers/rendering/rendering_device_atomics64.h"
 
 #include <thirdparty/spirv-reflect/spirv_reflect.h>
 
@@ -322,6 +323,9 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 			SpvReflectResult result = spvReflectCreateShaderModule2(SPV_REFLECT_MODULE_FLAG_NO_COPY, p_spirv[i].spirv.size(), spirv, &module);
 			ERR_FAIL_COND_V_MSG(result != SPV_REFLECT_RESULT_SUCCESS, FAILED,
 					"Reflection of SPIR-V shader stage '" + String(RDC::SHADER_STAGE_NAMES[p_spirv[i].shader_stage]) + "' failed parsing shader.");
+
+			// GodotNext: rd_atomics64 (#175). The same scan RenderingDevice runs before it creates a shader.
+			reflection.int64_atomics |= RDAtomics64::get_spirv_usage(spirv, p_spirv[i].spirv.size());
 
 			for (uint32_t j = 0; j < module.capability_count; j++) {
 				switch (module.capabilities[j].value) {
@@ -693,6 +697,7 @@ void RenderingShaderContainer::set_from_shader_reflection(const ReflectShader &p
 	reflection_data.has_multiview = p_reflection.has_multiview;
 	reflection_data.has_physical_storage_buffer_addresses = p_reflection.has_physical_storage_buffer_addresses;
 	reflection_data.has_dynamic_buffers = p_reflection.has_dynamic_buffers;
+	reflection_data.int64_atomics = p_reflection.int64_atomics; // GodotNext: rd_atomics64 (#175).
 	reflection_data.compute_local_size[0] = p_reflection.compute_local_size[0];
 	reflection_data.compute_local_size[1] = p_reflection.compute_local_size[1];
 	reflection_data.compute_local_size[2] = p_reflection.compute_local_size[2];
@@ -753,6 +758,7 @@ RenderingDeviceCommons::ShaderReflection RenderingShaderContainer::get_shader_re
 	shader_refl.has_multiview = reflection_data.has_multiview;
 	shader_refl.has_physical_storage_buffer_addresses = reflection_data.has_physical_storage_buffer_addresses;
 	shader_refl.has_dynamic_buffers = reflection_data.has_dynamic_buffers;
+	shader_refl.int64_atomics = reflection_data.int64_atomics; // GodotNext: rd_atomics64 (#175).
 	shader_refl.compute_local_size[0] = reflection_data.compute_local_size[0];
 	shader_refl.compute_local_size[1] = reflection_data.compute_local_size[1];
 	shader_refl.compute_local_size[2] = reflection_data.compute_local_size[2];
@@ -810,7 +816,9 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 	bytes_offset += _from_bytes_header_extra_data(&bytes_ptr[bytes_offset]);
 
 	ERR_FAIL_COND_V_MSG(container_header.magic_number != CONTAINER_MAGIC_NUMBER, false, "Incorrect magic number in shader container.");
-	ERR_FAIL_COND_V_MSG(container_header.version > CONTAINER_VERSION, false, "Unsupported version in shader container.");
+	// GodotNext: rd_atomics64 (#175). Older versions are rejected too: their reflection layout differs, so the
+	// container has to be rebuilt from SPIR-V.
+	ERR_FAIL_COND_V_MSG(container_header.version != CONTAINER_VERSION, false, vformat("Unsupported version in shader container (%d, expected %d); it must be rebuilt.", container_header.version, CONTAINER_VERSION));
 	ERR_FAIL_COND_V_MSG(container_header.format != _format(), false, "Incorrect format in shader container.");
 	ERR_FAIL_COND_V_MSG(container_header.format_version > _format_version(), false, "Unsupported format version in shader container.");
 

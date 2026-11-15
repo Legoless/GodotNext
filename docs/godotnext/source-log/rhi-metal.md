@@ -103,3 +103,22 @@ The driver orders the render graph's levels with two alternating `MTL::Fence` ob
 | Copied files | None |
 
 How it was used: it confirms that a fence updated in one command buffer orders a later command buffer on the same queue when the updating one is committed first, which the frame's and the graph's command buffers are. Neither source states what a wait observes when several encoders update one fence; that question is not relied on here.
+
+## 64-bit atomics (#175), Metal part
+
+The Metal driver reports `SUPPORTS_BUFFER_INT64_ATOMICS` and `SUPPORTS_IMAGE_INT64_ATOMICS`, never `SUPPORTS_INT64_ATOMIC_ARITH`, and creates `R64_UINT` textures as `RG32Uint` with shader atomic usage. Its GPU condition reuses the driver's existing `supports_image_atomic_64_bit` (Apple9, or Apple8 in a Mac), which is not an outside source. SPIRV-Cross threw on every 64-bit atomic. The local patch `0003-msl-int64-atomic-min-max.patch` translates 64-bit `OpAtomicUMax` and `OpAtomicUMin` on device memory and on 2D, non-arrayed images with MSL 3.1, and keeps throwing for everything else. Like 0002, it is not taken from upstream SPIRV-Cross. The Vulkan and D3D12 parts are in `rhi-atomics64.md`.
+
+### Apple Metal Shading Language specification, 64-bit atomics
+
+| Field | Value |
+|---|---|
+| What | `atomic_ulong` (MSL 2.4 and later, section 2.6); the 64-bit atomic modify functions `atomic_max_explicit` and `atomic_min_explicit`, which take a `device` pointer to `atomic_ulong`, allow only `memory_order_relaxed` and return `void` (section 6.16.4.6); texture `atomic_max` and `atomic_min` for the `ulong` color type in MSL 3.1 and later, on an `MTLPixelFormatRG32Uint` texture, returning `void` and taking a `ulong4` operand (section 6.13); implicit scalar-to-vector conversion, which replicates the scalar (section 2.24) |
+| Upstream | https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf |
+| Version | Metal Shading Language Specification version 4.1, dated 2026-06-04 |
+| License | Apple developer documentation, Copyright © 2026 Apple Inc., all rights reserved. Consulted, not copied. No sample code was copied |
+| Read on | 2026-11-15, for issue #175 |
+| Consulted by | The #175 implementer |
+| Used in | `thirdparty/spirv-cross/spirv_msl.cpp` and `spirv_msl.hpp` (recorded as `thirdparty/spirv-cross/patches/0003-msl-int64-atomic-min-max.patch`), `drivers/metal/pixel_formats.cpp`, `drivers/metal/rendering_device_driver_metal.cpp`, `drivers/metal/rendering_shader_container_metal.cpp` |
+| Copied files | None |
+
+How it was used: buffer max and min become `atomic_max_explicit` or `atomic_min_explicit` on `(device atomic_ulong*)` with relaxed order, and image max and min become `.atomic_max` or `.atomic_min` on `texture2d<ulong, access::read_write>`, passing a scalar `ulong` that converts to `ulong4`. Because these functions return nothing, a shader that reads the result fails. Because the buffer functions take only `device` pointers, threadgroup memory has no 64-bit atomics, so RenderingDevice files 64-bit atomics on shared memory under the arithmetic flag, which Metal does not report. MSL 3.1 also has 64-bit texture atomics on 1D, arrayed and 3D textures, but the patch translates 2D, non-arrayed images only, so the other kinds also go under the arithmetic flag. Export baking defers shaders with `Int64Atomics` or `Int64ImageEXT` to runtime unless the target profile has Apple8 and MSL 3.1. No Metal compiler has seen this MSL yet; the M5 Max run checks it.

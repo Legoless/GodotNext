@@ -41,6 +41,8 @@
 #include "core/templates/fixed_vector.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device_binds.h"
+// GodotNext: rd_atomics64 (#175)
+#include "servers/rendering/rendering_device_atomics64.h"
 // GodotNext: rd_ray_query_api
 #include "servers/rendering/rendering_device_ray_query.h"
 #include "servers/rendering/rendering_shader_container.h"
@@ -301,7 +303,25 @@ Vector<uint8_t> RenderingDevice::shader_compile_spirv_from_source(ShaderStage p_
 	}
 }
 
+// GodotNext: rd_atomics64 (#175). Checked before the driver sees the SPIR-V, so a missing feature gives this
+// one error and not a failure in the Metal or D3D12 shader translation.
+static bool _int64_atomics_supported(const RenderingDevice *p_device, const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	uint32_t usage = 0;
+	for (const RenderingDeviceCommons::ShaderStageSPIRVData &stage : p_spirv) {
+		usage |= RDAtomics64::get_spirv_usage(stage.spirv.ptr(), stage.spirv.size());
+	}
+	const uint32_t missing = p_device->get_missing_int64_atomics(usage);
+	ERR_FAIL_COND_V_MSG(missing != 0, false, RDAtomics64::get_missing_features_error(p_shader_name, missing));
+	return true;
+}
+
 RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	// GodotNext: rd_atomics64 (#175). shader_compile_binary_from_spirv() checks too; checking here as well
+	// keeps it to the one error, without the empty-bytecode error below.
+	if (!_int64_atomics_supported(this, p_spirv, p_shader_name)) {
+		return RID();
+	}
+
 	Vector<uint8_t> bytecode = shader_compile_binary_from_spirv(p_spirv, p_shader_name);
 	ERR_FAIL_COND_V(bytecode.is_empty(), RID());
 	return shader_create_from_bytecode(bytecode);
@@ -4762,6 +4782,11 @@ String RenderingDevice::_shader_uniform_debug(RID p_shader, int p_set) {
 }
 
 Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	// GodotNext: rd_atomics64 (#175). The path of ShaderRD and of the bound method.
+	if (!_int64_atomics_supported(this, p_spirv, p_shader_name)) {
+		return Vector<uint8_t>();
+	}
+
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
 	ERR_FAIL_COND_V(shader_container.is_null(), Vector<uint8_t>());
@@ -4787,6 +4812,11 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 
 	bool parsed_container = shader_container->from_bytes(p_shader_binary);
 	ERR_FAIL_COND_V_MSG(!parsed_container, RID(), "Failed to parse shader container from binary.");
+
+	// GodotNext: rd_atomics64 (#175). Binaries from a shader cache or shader_compile_binary_from_spirv() carry
+	// the usage scanned when they were compiled.
+	const uint32_t int64_atomics_missing = get_missing_int64_atomics(shader_container->get_int64_atomics_usage());
+	ERR_FAIL_COND_V_MSG(int64_atomics_missing != 0, RID(), RDAtomics64::get_missing_features_error(String::utf8(shader_container->shader_name.get_data()), int64_atomics_missing));
 
 	Vector<RDD::ImmutableSampler> driver_immutable_samplers;
 	for (const PipelineImmutableSampler &source_sampler : p_immutable_samplers) {
@@ -10028,6 +10058,21 @@ void RenderingDevice::set_feature_mock(bool p_enabled, uint64_t p_supported_feat
 	feature_mock_supported = p_enabled ? p_supported_features : 0;
 }
 
+// GodotNext: rd_atomics64 (#175)
+uint32_t RenderingDevice::get_missing_int64_atomics(uint32_t p_usage) const {
+	uint32_t missing = 0;
+	if ((p_usage & RDAtomics64::USAGE_INT64_ATOMICS) && !has_feature(SUPPORTS_BUFFER_INT64_ATOMICS)) {
+		missing |= RDAtomics64::USAGE_INT64_ATOMICS;
+	}
+	if ((p_usage & RDAtomics64::USAGE_INT64_IMAGE_ATOMICS) && !has_feature(SUPPORTS_IMAGE_INT64_ATOMICS)) {
+		missing |= RDAtomics64::USAGE_INT64_IMAGE_ATOMICS;
+	}
+	if ((p_usage & RDAtomics64::USAGE_INT64_ATOMIC_ARITH) && !has_feature(SUPPORTS_INT64_ATOMIC_ARITH)) {
+		missing |= RDAtomics64::USAGE_INT64_ATOMIC_ARITH;
+	}
+	return missing;
+}
+
 void RenderingDevice::_bind_methods() {
 #ifdef DEV_ENABLED
 	ClassDB::bind_method(D_METHOD("_dev_driver_callback_clear", "texture", "color", "force_zero_stages"), &RenderingDevice::_dev_driver_callback_clear);
@@ -10776,6 +10821,10 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_RAY_QUERY_HARDWARE);
 	// GodotNext: async_compute (#174)
 	BIND_ENUM_CONSTANT(SUPPORTS_ASYNC_COMPUTE);
+	// GodotNext: rd_atomics64 (#175)
+	BIND_ENUM_CONSTANT(SUPPORTS_BUFFER_INT64_ATOMICS);
+	BIND_ENUM_CONSTANT(SUPPORTS_IMAGE_INT64_ATOMICS);
+	BIND_ENUM_CONSTANT(SUPPORTS_INT64_ATOMIC_ARITH);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);

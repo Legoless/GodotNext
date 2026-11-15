@@ -1065,6 +1065,9 @@ public:
 	// Unit tests mock the device capabilities of a RenderingDevice that has no driver: has_feature()
 	// then reports bit (1 << feature) of p_supported_features. Fails on a device with a driver.
 	void set_feature_mock(bool p_enabled, uint64_t p_supported_features = 0);
+	// GodotNext: rd_atomics64 (#175)
+	// The RDAtomics64::Usage bits in p_usage whose feature this device lacks.
+	uint32_t get_missing_int64_atomics(uint32_t p_usage) const;
 
 	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true);
 	Vector<uint8_t> shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");

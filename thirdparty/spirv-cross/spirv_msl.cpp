@@ -11008,7 +11008,13 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id, 
 		use_native_image_atomic = false;
 
 	if (type.width == 64)
-		SPIRV_CROSS_THROW("MSL currently does not support 64-bit atomics.");
+	{
+		// GodotNext: only 64-bit unsigned max and min, with MSL 3.1.
+		if ((opcode != OpAtomicUMax && opcode != OpAtomicUMin) || !msl_options.supports_msl_version(3, 1))
+			SPIRV_CROSS_THROW("MSL currently does not support 64-bit atomics.");
+		emit_atomic_func_op_64(result_type, result_id, opcode, obj, op1, use_native_image_atomic);
+		return;
+	}
 
 	auto remapped_type = type;
 	remapped_type.basetype = expected_type;
@@ -11266,6 +11272,61 @@ void CompilerMSL::emit_atomic_func_op(uint32_t result_type, uint32_t result_id, 
 			statement(exp, ";");
 	}
 
+	flush_all_atomic_capable_variables();
+}
+
+// GodotNext: MSL 3.1 has 64-bit atomic min and max on device memory (atomic_max_explicit and
+// atomic_min_explicit on atomic_ulong) and on texture2d<ulong> (atomic_max and atomic_min). Both return
+// nothing, so the result of the SPIR-V instruction has no value: a shader that reads it fails here, or
+// in the Metal compiler when the read is a single forwarded use.
+void CompilerMSL::emit_atomic_func_op_64(uint32_t result_type, uint32_t result_id, Op opcode, uint32_t obj, uint32_t op1,
+                                         bool use_native_image_atomic)
+{
+	if (forced_temporaries.count(result_id))
+		SPIRV_CROSS_THROW("MSL 64-bit atomic min and max do not return the previous value.");
+
+	auto &ptr_type = expression_type(obj);
+	auto *var = maybe_get_backing_variable(obj);
+	const char *suffix = opcode == OpAtomicUMax ? "max" : "min";
+	string value = bitcast_expression(SPIRType::UInt64, op1);
+	string exp;
+
+	if (ptr_type.storage == StorageClassImage)
+	{
+		if (!use_native_image_atomic)
+			SPIRV_CROSS_THROW("MSL 64-bit image atomics need native texture atomics.");
+		const auto *res_type = var ? &get<SPIRType>(var->basetype) : nullptr;
+		if (!res_type || res_type->image.dim != Dim2D || res_type->image.arrayed)
+			SPIRV_CROSS_THROW("MSL 64-bit image atomics are only supported on 2D images that are not arrayed.");
+
+		auto obj_expression = to_expression(obj);
+		auto split_index = obj_expression.find_first_of('@');
+		// Without the split, this pass is thrown away ("force recompile later" mode).
+		if (split_index != string::npos)
+			exp = join(obj_expression.substr(0, split_index), ".atomic_", suffix, "(", obj_expression.substr(split_index + 1), ", ", value, ")");
+		else
+			exp = obj_expression;
+	}
+	else
+	{
+		string address_space = var && ptr_type.storage != StorageClassPhysicalStorageBuffer ? get_variable_address_space(*var) : "device";
+		if (address_space != "device")
+			SPIRV_CROSS_THROW("MSL 64-bit atomics are only supported on device memory.");
+		exp = join("atomic_", suffix, "_explicit((device atomic_ulong*)&", to_enclosed_expression(obj), ", ", value, ", memory_order_relaxed)");
+	}
+
+	// Vulkan: (section 9.29: ...  and values returned by atomic instructions in helper invocations are undefined)
+	if (needs_frag_discard_checks())
+	{
+		statement("if (!", builtin_to_glsl(BuiltInHelperInvocation, StorageClassInput), ")");
+		begin_scope();
+		statement(exp, ";");
+		end_scope();
+	}
+	else
+		statement(exp, ";");
+
+	emit_op(result_type, result_id, "spvUnavailable64BitAtomicResult()", true);
 	flush_all_atomic_capable_variables();
 }
 

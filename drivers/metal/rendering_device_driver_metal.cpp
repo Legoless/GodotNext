@@ -374,7 +374,10 @@ RDD::TextureID RenderingDeviceDriverMetal::texture_create(const TextureFormat &p
 	}
 
 	if (p_format.usage_bits & TEXTURE_USAGE_STORAGE_ATOMIC_BIT) {
-		ERR_FAIL_COND_V_MSG((format_caps & kMTLFmtCapsAtomic) == 0, RDD::TextureID(), "Atomic operations on this texture format are not supported.");
+		// GodotNext: rd_atomics64 (#175). RG32Uint has no atomic capability of its own: R64_UINT textures get
+		// shader atomic usage from the 64-bit image feature.
+		const bool atomic_format = (format_caps & kMTLFmtCapsAtomic) != 0 || (p_format.format == DATA_FORMAT_R64_UINT && has_feature(SUPPORTS_IMAGE_INT64_ATOMICS));
+		ERR_FAIL_COND_V_MSG(!atomic_format, RDD::TextureID(), "Atomic operations on this texture format are not supported.");
 		ERR_FAIL_COND_V_MSG(!device_properties->features.supports_native_image_atomics, RDD::TextureID(), "Atomic operations on textures are not supported on this OS version. Check SUPPORTS_IMAGE_ATOMIC_32_BIT.");
 		// If supports_native_image_atomics is true, this condition should always succeed, as it is set the same.
 		if (__builtin_available(macOS 14.0, iOS 17.0, tvOS 17.0, *)) {
@@ -706,6 +709,18 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverMetal::texture_get_usages_s
 	}
 	if (!flags::any(caps, kMTLFmtCapsAtomic)) {
 		supported.clear_flag(TEXTURE_USAGE_STORAGE_ATOMIC_BIT);
+	}
+
+	// GodotNext: rd_atomics64 (#175). Shaders see one 64-bit texel in an R64_UINT (RG32Uint) texture, so it
+	// serves storage images and copies only, and its atomic usage comes from the 64-bit image feature.
+	if (p_format == DATA_FORMAT_R64_UINT) {
+		supported.clear_flag(TEXTURE_USAGE_SAMPLING_BIT);
+		supported.clear_flag(TEXTURE_USAGE_COLOR_ATTACHMENT_BIT);
+		supported.clear_flag(TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+		supported.clear_flag(TEXTURE_USAGE_INPUT_ATTACHMENT_BIT);
+		if (has_feature(SUPPORTS_IMAGE_INT64_ATOMICS)) {
+			supported.set_flag(TEXTURE_USAGE_STORAGE_ATOMIC_BIT);
+		}
 	}
 
 	return supported;
@@ -2901,6 +2916,15 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 		// create.
 		case SUPPORTS_ASYNC_COMPUTE:
 			return sync_mode == Barriers;
+		// GodotNext: rd_atomics64 (#175). SPIRV-Cross translates only 64-bit OpAtomicUMax and OpAtomicUMin
+		// (atomic_max_explicit and atomic_min_explicit on atomic_ulong, texture2d<ulong> atomic_max and
+		// atomic_min). Metal has no 64-bit atomic add.
+		case SUPPORTS_BUFFER_INT64_ATOMICS:
+			return device_properties->features.supports_buffer_atomic_64_bit;
+		case SUPPORTS_IMAGE_INT64_ATOMICS:
+			return device_properties->features.supports_buffer_atomic_64_bit && device_properties->features.supports_image_atomic_64_bit && device_properties->features.supports_native_image_atomics;
+		case SUPPORTS_INT64_ATOMIC_ARITH:
+			return false;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return false;
 		default:

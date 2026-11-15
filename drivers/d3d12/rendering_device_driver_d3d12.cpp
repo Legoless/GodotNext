@@ -193,7 +193,9 @@ const RenderingDeviceDriverD3D12::D3D12Format RenderingDeviceDriverD3D12::RD_TO_
 	/* DATA_FORMAT_R32G32B32A32_UINT */ { DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_UINT },
 	/* DATA_FORMAT_R32G32B32A32_SINT */ { DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_SINT },
 	/* DATA_FORMAT_R32G32B32A32_SFLOAT */ { DXGI_FORMAT_R32G32B32A32_TYPELESS, DXGI_FORMAT_R32G32B32A32_FLOAT },
-	/* DATA_FORMAT_R64_UINT */ {},
+	// GodotNext: rd_atomics64 (#175). Storage-image UAVs only (see texture_get_usages_supported_by_format()):
+	// shader model 6.6 64-bit typed atomics run on an R32G32_UINT UAV.
+	/* DATA_FORMAT_R64_UINT */ { DXGI_FORMAT_R32G32_TYPELESS, DXGI_FORMAT_R32G32_UINT },
 	/* DATA_FORMAT_R64_SINT */ {},
 	/* DATA_FORMAT_R64_SFLOAT */ {},
 	/* DATA_FORMAT_R64G64_UINT */ {},
@@ -1973,6 +1975,21 @@ BitField<RDD::TextureUsageBits> RenderingDeviceDriverD3D12::texture_get_usages_s
 	}
 	if (RD_TO_D3D12_FORMAT[p_format].general_format != DXGI_FORMAT_R8_UINT) {
 		supported.clear_flag(TEXTURE_USAGE_VRS_ATTACHMENT_BIT);
+	}
+
+	// GodotNext: rd_atomics64 (#175). Shaders see one 64-bit texel in an R64_UINT texture, so its
+	// R32G32_UINT format serves storage images and copies only. Typed UAVs of that format have no
+	// 32-bit atomics, so the atomic usage comes from the 64-bit image feature alone.
+	if (p_format == DATA_FORMAT_R64_UINT) {
+		supported.clear_flag(TEXTURE_USAGE_SAMPLING_BIT);
+		supported.clear_flag(TEXTURE_USAGE_COLOR_ATTACHMENT_BIT);
+		supported.clear_flag(TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
+		supported.clear_flag(TEXTURE_USAGE_INPUT_ATTACHMENT_BIT);
+		if (has_feature(SUPPORTS_IMAGE_INT64_ATOMICS)) {
+			supported.set_flag(TEXTURE_USAGE_STORAGE_ATOMIC_BIT);
+		} else {
+			supported.clear_flag(TEXTURE_USAGE_STORAGE_ATOMIC_BIT);
+		}
 	}
 
 	return supported;
@@ -6153,6 +6170,13 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 		// states inside the driver per command list, which this does not cover yet.
 		case SUPPORTS_ASYNC_COMPUTE:
 			return barrier_capabilities.enhanced_barriers_supported;
+		// GodotNext: rd_atomics64 (#175). int64_atomics_capabilities holds what the device supports, but the
+		// Mesa NIR-to-DXIL library cannot emit 64-bit atomics, and the container does not ask for shader
+		// model 6.6 for them. Both come with the GodotNext DXIL toolchain (#123).
+		case SUPPORTS_BUFFER_INT64_ATOMICS:
+		case SUPPORTS_IMAGE_INT64_ATOMICS:
+		case SUPPORTS_INT64_ATOMIC_ARITH:
+			return false;
 		default:
 			return false;
 	}
@@ -6440,6 +6464,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	if (SUCCEEDED(res)) {
 		subgroup_capabilities.size = options1.WaveLaneCountMin;
 		subgroup_capabilities.wave_ops_supported = options1.WaveOps;
+		int64_atomics_capabilities.int64_shader_ops = options1.Int64ShaderOps; // GodotNext: rd_atomics64 (#175).
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS2 options2 = {};
@@ -6480,6 +6505,20 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 				fsr_capabilities.max_texel_size = Size2i(8, 8);
 			}
 		}
+	}
+
+	// GodotNext: rd_atomics64 (#175)
+	D3D12_FEATURE_DATA_D3D12_OPTIONS9 options9 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS9, &options9, sizeof(options9));
+	if (SUCCEEDED(res)) {
+		int64_atomics_capabilities.typed_resource_supported = options9.AtomicInt64OnTypedResourceSupported;
+		int64_atomics_capabilities.group_shared_supported = options9.AtomicInt64OnGroupSharedSupported;
+	}
+
+	D3D12_FEATURE_DATA_D3D12_OPTIONS11 options11 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS11, &options11, sizeof(options11));
+	if (SUCCEEDED(res)) {
+		int64_atomics_capabilities.descriptor_heap_resource_supported = options11.AtomicInt64OnDescriptorHeapResourceSupported;
 	}
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS12 options12 = {};
@@ -6533,6 +6572,12 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	}
 
 	print_verbose(String("- D3D12 16-bit ops supported: ") + (shader_capabilities.native_16bit_ops ? "yes" : "no"));
+	// GodotNext: rd_atomics64 (#175)
+	print_verbose(vformat("- D3D12 64-bit atomics (not used until the DXIL toolchain emits them): int64 shader ops %s, typed resources %s, group shared %s, descriptor heap resources %s",
+			int64_atomics_capabilities.int64_shader_ops ? "yes" : "no",
+			int64_atomics_capabilities.typed_resource_supported ? "yes" : "no",
+			int64_atomics_capabilities.group_shared_supported ? "yes" : "no",
+			int64_atomics_capabilities.descriptor_heap_resource_supported ? "yes" : "no"));
 
 	if (misc_features_support.depth_bounds_supported) {
 		print_verbose("- Depth bounds test supported");

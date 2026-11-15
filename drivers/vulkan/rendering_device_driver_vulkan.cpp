@@ -622,6 +622,9 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_SPIRV_1_4_EXTENSION_NAME, false);
+	// GodotNext: rd_atomics64 (#175)
+	_register_requested_device_extension(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -976,6 +979,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
 		// GodotNext: nextgi_vulkan (#50). The extension alone does not enable fault reports.
 		VkPhysicalDeviceFaultFeaturesEXT device_fault_query = {};
+		// GodotNext: rd_atomics64 (#175). The buffer and shared features are read from the Vulkan 1.2
+		// structure on 1.2 devices.
+		VkPhysicalDeviceShaderAtomicInt64FeaturesKHR shader_atomic_int64_features = {};
+		VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT shader_image_atomic_int64_features = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -998,6 +1005,19 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				vulkan_memory_model_features.pNext = next_features;
 				next_features = &vulkan_memory_model_features;
 			}
+			// GodotNext: rd_atomics64 (#175)
+			if (enabled_device_extension_names.has(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
+				shader_atomic_int64_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR;
+				shader_atomic_int64_features.pNext = next_features;
+				next_features = &shader_atomic_int64_features;
+			}
+		}
+
+		// GodotNext: rd_atomics64 (#175)
+		if (enabled_device_extension_names.has(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME)) {
+			shader_image_atomic_int64_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+			shader_image_atomic_int64_features.pNext = next_features;
+			next_features = &shader_image_atomic_int64_features;
 		}
 
 		if (enabled_device_extension_names.has(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME)) {
@@ -1098,6 +1118,11 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				vulkan_memory_model_support = device_features_vk_1_2.vulkanMemoryModel;
 				vulkan_memory_model_device_scope_support = device_features_vk_1_2.vulkanMemoryModelDeviceScope;
 			}
+			// GodotNext: rd_atomics64 (#175)
+			if (enabled_device_extension_names.has(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
+				int64_atomics_capabilities.buffer_supported = device_features_vk_1_2.shaderBufferInt64Atomics;
+				int64_atomics_capabilities.shared_supported = device_features_vk_1_2.shaderSharedInt64Atomics;
+			}
 		} else {
 			if (enabled_device_extension_names.has(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) {
 				shader_capabilities.shader_float16_is_supported = shader_features.shaderFloat16;
@@ -1110,6 +1135,19 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				vulkan_memory_model_support = vulkan_memory_model_features.vulkanMemoryModel;
 				vulkan_memory_model_device_scope_support = vulkan_memory_model_features.vulkanMemoryModelDeviceScope;
 			}
+			// GodotNext: rd_atomics64 (#175)
+			if (enabled_device_extension_names.has(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
+				int64_atomics_capabilities.buffer_supported = shader_atomic_int64_features.shaderBufferInt64Atomics;
+				int64_atomics_capabilities.shared_supported = shader_atomic_int64_features.shaderSharedInt64Atomics;
+			}
+		}
+
+		// GodotNext: rd_atomics64 (#175)
+		if (enabled_device_extension_names.has(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME)) {
+			int64_atomics_capabilities.image_supported = shader_image_atomic_int64_features.shaderImageInt64Atomics;
+			VkFormatProperties r64_properties = {};
+			vkGetPhysicalDeviceFormatProperties(physical_device, VK_FORMAT_R64_UINT, &r64_properties);
+			int64_atomics_capabilities.r64_storage_atomic_supported = (r64_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT) != 0;
 		}
 
 		if (enabled_device_extension_names.has(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME)) {
@@ -1582,6 +1620,26 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			multiview_features.multiviewTessellationShader = multiview_capabilities.tessellation_shader_is_supported;
 			create_info_next = &multiview_features;
 		}
+	}
+
+	// GodotNext: rd_atomics64 (#175). The individual structures, not VkPhysicalDeviceVulkan12Features:
+	// this chain already carries structures that VkPhysicalDeviceVulkan12Features aggregates (16-bit
+	// float and 8-bit int, buffer device address, memory model), and the two must not appear together.
+	VkPhysicalDeviceShaderAtomicInt64FeaturesKHR shader_atomic_int64_features = {};
+	if (int64_atomics_capabilities.buffer_supported || int64_atomics_capabilities.shared_supported) {
+		shader_atomic_int64_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR;
+		shader_atomic_int64_features.pNext = create_info_next;
+		shader_atomic_int64_features.shaderBufferInt64Atomics = int64_atomics_capabilities.buffer_supported;
+		shader_atomic_int64_features.shaderSharedInt64Atomics = int64_atomics_capabilities.shared_supported;
+		create_info_next = &shader_atomic_int64_features;
+	}
+
+	VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT shader_image_atomic_int64_features = {};
+	if (int64_atomics_capabilities.image_supported) {
+		shader_image_atomic_int64_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+		shader_image_atomic_int64_features.pNext = create_info_next;
+		shader_image_atomic_int64_features.shaderImageInt64Atomics = VK_TRUE;
+		create_info_next = &shader_image_atomic_int64_features;
 	}
 
 	// GodotNext: pu_vk_extension_providers (#105). Providers prepend their feature structures to
@@ -8022,6 +8080,20 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			const CommandQueueFamilyID compute_family = command_queue_family_get(COMMAND_QUEUE_FAMILY_COMPUTE_BIT);
 			return compute_family && !(queue_family_properties[compute_family.id - 1].queueFlags & VK_QUEUE_GRAPHICS_BIT);
 		}
+		// GodotNext: rd_atomics64 (#175). 64-bit integer types need shaderInt64, which device creation
+		// enables whenever the device has it.
+		case SUPPORTS_BUFFER_INT64_ATOMICS:
+			return int64_atomics_capabilities.buffer_supported && physical_device_features.shaderInt64;
+		case SUPPORTS_INT64_ATOMIC_ARITH:
+#if (defined(MACOS_ENABLED) || defined(APPLE_EMBEDDED_ENABLED))
+			// MoltenVK runs on Metal, which has only 64-bit atomic min and max.
+			return false;
+#else
+			// The non-portable bucket also holds 64-bit atomics on shared memory.
+			return int64_atomics_capabilities.buffer_supported && int64_atomics_capabilities.shared_supported && physical_device_features.shaderInt64;
+#endif
+		case SUPPORTS_IMAGE_INT64_ATOMICS:
+			return int64_atomics_capabilities.buffer_supported && physical_device_features.shaderInt64 && int64_atomics_capabilities.image_supported && int64_atomics_capabilities.r64_storage_atomic_supported;
 		default:
 			return false;
 	}

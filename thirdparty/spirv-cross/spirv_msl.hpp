@@ -1143,6 +1143,9 @@ protected:
 	void emit_atomic_func_op(uint32_t result_type, uint32_t result_id, const char *op, Op opcode,
 	                         uint32_t mem_order_1, uint32_t mem_order_2, bool has_mem_order_2, uint32_t op0, uint32_t op1 = 0,
 	                         bool op1_is_pointer = false, bool op1_is_literal = false, uint32_t op2 = 0);
+	// GodotNext: 64-bit unsigned atomic min and max (MSL 3.1).
+	void emit_atomic_func_op_64(uint32_t result_type, uint32_t result_id, Op opcode, uint32_t obj, uint32_t op1,
+	                            bool use_native_image_atomic);
 	const char *get_memory_order(uint32_t spv_mem_sem);
 	void add_pragma_line(const std::string &line, bool recompile_on_unique);
 	void add_typedef_line(const std::string &line);

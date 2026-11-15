@@ -676,7 +676,8 @@ String ShaderRD::_version_get_sha1(Version *p_version) const {
 }
 
 static const char *shader_file_header = "GDSC";
-static const uint32_t cache_file_version = 4;
+// GodotNext: rd_atomics64 (#175). 5: shader container version 3, so older cache files are a cache miss.
+static const uint32_t cache_file_version = 5;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {
 	String sha1 = _version_get_sha1(p_version);
