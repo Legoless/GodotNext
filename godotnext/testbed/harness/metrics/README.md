@@ -48,4 +48,10 @@ GT-6's load step check (`tests/gpu_load_step.tscn`, PQ) compares the GPU frame t
 python3 -m godotnext_metrics.load_step --in <run>
 ```
 
+Upscaler Torture's scrolling emissive check (#271; `godotnext/testbed/harness/README.md` has the three captures it reads) tests that the strip is lit, scrolls on the default timeline and holds still in `--variant=static`:
+
+```
+python3 -m godotnext_metrics.scrolling_emissive --default <capture> --static <capture>
+```
+
 `hdr_*.exr`, `frame*.png`, `timing.csv`, `summary.json` and the patch JSON are the harness and scene formats. Direct-only renders, masks, counters, velocity and ray records are sidecar files named in `docs/godotnext/metrics.md`. The engine's doctests do not import this package.

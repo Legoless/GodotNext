@@ -285,6 +285,16 @@ Original content generated or written in this repository, with no third-party as
 | `harness/metrics/upscaler_compare.py`, `harness/metrics/godotnext_metrics/masks.py`, `harness/metrics/godotnext_metrics/load_step.py` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
 | `harness/metrics/tests/test_masked_metrics.py`, `test_load_step.py`, `test_upscaler_compare.py` | hand-authored for #190 | MIT | 2026-11-14 | the cloud Linux VM (NVIDIA L4) |
 
+### The scrolling emissive strip (#271)
+
+Original content generated or written in this repository, with no third-party assets. The strip's shader writes its stripes to `ALBEDO`. The regenerated `upscaler_torture.tscn` changes only that shader; every other file in `scenes/upscaler_torture/` is byte-identical, and two generator runs give identical output.
+
+| Path | Generator / author | License | Date | Host |
+|---|---|---|---|---|
+| `generators/upscaler_torture.gd` (the strip's shader) | hand-authored for #271 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `scenes/upscaler_torture/upscaler_torture.tscn` | `generators/upscaler_torture.gd`, seed `0x6E657874` | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `harness/metrics/godotnext_metrics/scrolling_emissive.py`, `harness/metrics/tests/test_scrolling_emissive.py` | hand-authored for #271 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+
 
 ## Virtualized G5-6 Scenes (#77)
 

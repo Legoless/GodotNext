@@ -391,7 +391,9 @@ static func _add_occluders(root: Node3D) -> void:
 static func _add_emissive(root: Node3D) -> void:
 	var shader := Shader.new()
 	# scroll_speed is 2.0 except in the static variant (#190), which sets it to 0.
-	shader.code = "shader_type spatial;\nrender_mode unshaded, cull_disabled;\nuniform sampler2D stripes : source_color, filter_linear, repeat_enable;\nuniform float time_offset = 0.0;\nuniform float scroll_speed = 2.0;\nvoid fragment() {\n\tvec3 color = texture(stripes, UV + vec2(TIME * scroll_speed + time_offset, 0.0)).rgb;\n\tALBEDO = vec3(0.0);\n\tEMISSION = color * 3.0;\n}\n"
+	# An unshaded material outputs ALBEDO only, so the stripes go there at x3 (#271); EMISSION
+	# would never reach the frame.
+	shader.code = "shader_type spatial;\nrender_mode unshaded, cull_disabled;\nuniform sampler2D stripes : source_color, filter_linear, repeat_enable;\nuniform float time_offset = 0.0;\nuniform float scroll_speed = 2.0;\nvoid fragment() {\n\tvec3 color = texture(stripes, UV + vec2(TIME * scroll_speed + time_offset, 0.0)).rgb;\n\tALBEDO = color * 3.0;\n}\n"
 	var material := ShaderMaterial.new()
 	material.shader = shader
 	material.set_shader_parameter("stripes", _texture("emissive_stripes", "stripes", false))

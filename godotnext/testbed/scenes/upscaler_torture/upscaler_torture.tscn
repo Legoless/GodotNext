@@ -335,8 +335,7 @@ uniform float time_offset = 0.0;
 uniform float scroll_speed = 2.0;
 void fragment() {
 	vec3 color = texture(stripes, UV + vec2(TIME * scroll_speed + time_offset, 0.0)).rgb;
-	ALBEDO = vec3(0.0);
-	EMISSION = color * 3.0;
+	ALBEDO = color * 3.0;
 }
 "
 

@@ -203,6 +203,19 @@ Headless checks:
 ./bin/godot.macos.editor.arm64 --headless --path godotnext/testbed --script res://harness/tests/test_load_step.gd
 ```
 
+## The scrolling emissive strip (#271)
+
+Upscaler Torture's scrolling emissive strip is unshaded and writes its stripes to `ALBEDO` at ×3; an unshaded material ignores `EMISSION`, so until #271 it rendered black. On the default timeline the stripes scroll 1/30 UV a frame and look the same every 15 frames; `--variant=static` stops them. `python3 -m godotnext_metrics.scrolling_emissive` checks three captures from the static camera: inside the `scrolling_emissive` mask, the linear mean luminance of every frame is at least 0.6 (×1 brightness gives about 0.3), adjacent frames of the default timeline differ by at least 0.1 per pixel on average, and the static variant's frames are identical. The strip spans whole stripe periods, so its mean luminance barely moves as it scrolls; the check reports that change as `mean_change` but tests the per-pixel change. Exit 0 is a pass, 1 a fail and 2 a missing input.
+
+```bash
+UT=res://scenes/upscaler_torture/upscaler_torture.tscn
+G="./bin/godot.linuxbsd.editor.x86_64 --path godotnext/testbed --rendering-driver vulkan --resolution 2560x1440 --fixed-fps 60 --quit-after 1054"
+$G --write-movie "$OUT/default/frame.png" $UT -- --mode=capture --scene=$UT --camera=Camera3D --out="$OUT/default" --frames=4 --capture-frames=0,1,2,3
+$G --write-movie "$OUT/static/frame.png" $UT -- --mode=capture --scene=$UT --camera=Camera3D --out="$OUT/static" --frames=4 --capture-frames=0,1,2,3 --variant=static
+$G --write-movie "$OUT/mask_scrolling_emissive/frame.png" $UT -- --mode=capture --scene=$UT --camera=Camera3D --out="$OUT/mask_scrolling_emissive" --frames=4 --mask=scrolling_emissive
+python3 -m godotnext_metrics.scrolling_emissive --default "$OUT/default" --static "$OUT/static"
+```
+
 ## Streaming reports (#74)
 
 Exclusion Matrix, Slow IO Flight and the Feature Parity Room streaming variant are scenes, not harness modes. Their reports are a side CLI, schema 1, and they do not add keys that Q11 reads and do not add entries to the frozen q1–q21 command set:
