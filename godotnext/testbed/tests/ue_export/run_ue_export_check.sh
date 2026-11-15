@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Checks the UE comparison exporter (#235) on the overlap-heavy kitbash.
+# Checks the UE comparison exporter (#235, #233) on the overlap-heavy kitbash, RT Shadow Yard and
+# MegaLights Hall.
 #
 # Usage:
 #   run_ue_export_check.sh <godot> [godot arguments, for example --rendering-driver vulkan]
@@ -10,6 +11,12 @@
 #    600 frames) into a temporary folder. Each must exit 0 and log no "ERROR:" or "SCRIPT ERROR"
 #    line (a script error inside the exporter would otherwise drop content and still exit 0).
 # 3. check_ue_export.gd, headless, on the two exports (see that script for what it checks).
+# 4. RT Shadow Yard without --approximate must refuse (exit 1) and name the diffuse_mode and
+#    shadow_caster_mask approximations it needs; an unknown --approximate id must exit 2; a run
+#    the engine ends after 3 frames must exit 1 and write nothing.
+# 5. Two rendered exports each of RT Shadow Yard (cam_main, --approximate=diffuse_mode,
+#    shadow_caster_mask) and MegaLights Hall at --lights=1024 (cam_main, --approximate=diffuse_mode,
+#    light_projector), 60 frames, then check_ue_export.gd on each pair.
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -26,6 +33,7 @@ if [[ $# -lt 1 ]]; then
 fi
 godot=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 shift
+godot_args=("$@")
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 testbed_dir=$(cd "$script_dir/../.." && pwd)
@@ -64,17 +72,68 @@ fi
 
 for run in a b; do
 	status=0
-	"$godot" --audio-driver Dummy --path "$testbed_dir" "$@" --script res://tools/ue_export/ue_export.gd -- \
-		"${export_args[@]}" --out="$work/$run" >"$work/$run.log" 2>&1 || status=$?
-	report "export_$run" "$status" 0 "$work/$run.log"
-	grep '^GODOTNEXT_UE_EXPORT ' "$work/$run.log" || true
+	"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+		"${export_args[@]}" --out="$work/kitbash_$run" >"$work/kitbash_$run.log" 2>&1 || status=$?
+	report "export_kitbash_$run" "$status" 0 "$work/kitbash_$run.log"
+	grep '^GODOTNEXT_UE_EXPORT ' "$work/kitbash_$run.log" || true
 done
 
+check() {
+	local name=$1
+	status=0
+	"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://tests/ue_export/check_ue_export.gd -- \
+		"$name" "$work/${name}_a" "$work/${name}_b" >"$work/check_$name.log" 2>&1 || status=$?
+	report "check_$name" "$status" 0 "$work/check_$name.log"
+	grep '^GODOTNEXT_RESULT' "$work/check_$name.log" || true
+}
+
+# Two rendered exports of one scene into $work/<name>_a and _b.
+export_pair() {
+	local name=$1
+	shift
+	for run in a b; do
+		status=0
+		"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+			"$@" --out="$work/${name}_$run" >"$work/${name}_$run.log" 2>&1 || status=$?
+		report "export_${name}_$run" "$status" 0 "$work/${name}_$run.log"
+		grep '^GODOTNEXT_UE_EXPORT ' "$work/${name}_$run.log" || true
+	done
+}
+
+check kitbash
+
+yard_args=(--scene=res://scenes/rt_shadow_yard/rt_shadow_yard.tscn --camera=cam_main --warmup=0 --frames=60)
 status=0
-"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://tests/ue_export/check_ue_export.gd -- \
-	"$work/a" "$work/b" >"$work/check.log" 2>&1 || status=$?
-report check "$status" 0 "$work/check.log"
-grep '^GODOTNEXT_RESULT' "$work/check.log" || true
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${yard_args[@]}" --out="$work/yard_refused" >"$work/yard_refused.log" 2>&1 || status=$?
+report yard_refused "$status" 1 "$work/yard_refused.log"
+for id in diffuse_mode shadow_caster_mask; do
+	if ! grep -q -- "--approximate=$id" "$work/yard_refused.log"; then
+		echo "run_ue_export_check.sh: the refused yard export does not name --approximate=$id" >&2
+		failures=$((failures + 1))
+	fi
+done
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${yard_args[@]}" --approximate=no_such_id --out="$work/yard_bad" >"$work/yard_bad.log" 2>&1 || status=$?
+report yard_unknown_approximation "$status" 2 "$work/yard_bad.log"
+
+# A run that ends before the export is written (here the engine's --quit-after, as a scene's own
+# --frames limit would) must exit 1, say so and write nothing.
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --quit-after 3 --script res://tools/ue_export/ue_export.gd -- \
+	"${yard_args[@]}" --approximate=diffuse_mode,shadow_caster_mask --out="$work/yard_quit" >"$work/yard_quit.log" 2>&1 || status=$?
+report yard_ended_early "$status" 1 "$work/yard_quit.log"
+if ! grep -q 'tree quit at camera row' "$work/yard_quit.log" || [[ -e "$work/yard_quit/scene.json" ]]; then
+	echo "run_ue_export_check.sh: the run that ended early did not say so, or wrote scene.json" >&2
+	failures=$((failures + 1))
+fi
+
+export_pair yard "${yard_args[@]}" --approximate=diffuse_mode,shadow_caster_mask
+check yard
+export_pair hall --scene=res://scenes/mega_lights_hall/mega_lights_hall.tscn --camera=cam_main --lights=1024 \
+	--warmup=0 --frames=60 --approximate=diffuse_mode,light_projector
+check hall
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2

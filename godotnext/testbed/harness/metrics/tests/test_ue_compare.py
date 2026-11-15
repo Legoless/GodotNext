@@ -143,6 +143,38 @@ def test_the_kitbash_config_forces_nextgi_and_the_software_tier() -> None:
     assert set(gs9.godotnext.exclude) == {"nextgi_2_ms", "nextgi_as_builds_ms"}
 
 
+@pytest.mark.parametrize(
+    ("name", "line_id", "gate", "lights"),
+    [
+        ("rt_shadow_yard", "gm3_rt_shadow_total_64", "GM-3", None),
+        ("mega_lights_hall_1024", "gm2_megalights_total_1024", "GM-2", "1024"),
+        ("mega_lights_hall_4096", "gm5_render_thread_4096", "GM-5", "4096"),
+    ],
+)
+def test_the_lights_and_shadows_configs(name: str, line_id: str, gate: str, lights: str | None) -> None:
+    config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
+    assert config.raw["port_issue"] == 233
+    # The scenes as authored run no NextGI; the timing runs record every per-light pass.
+    assert config.godotnext.nextgi is None
+    assert "--nextgi=on" not in godotnext_args(config)
+    assert config.godotnext.camera == "cam_main"
+    override = (_TESTBED / "ue_compare" / "lights_shadows.override.cfg").read_text(encoding="utf-8")
+    assert config.godotnext.override == "res://ue_compare/lights_shadows.override.cfg"
+    assert "settings/profiler/max_timestamp_query_elements=65535" in override
+    assert [arg for arg in godotnext_args(config) if arg.startswith("--lights")] == (
+        [f"--lights={lights}"] if lights else []
+    )
+    line = next(line for line in config.lines if line.id == line_id)
+    assert line.status == "ue_bar"
+    assert line.gates == (gate,)
+    # GodotNext's ray-traced shadows and MegaLights are not built yet: no GodotNext group.
+    assert line.godotnext is None
+    cvars = config.ue.checked_cvars()
+    assert cvars["r.ScreenPercentage"] == "100"
+    # Epic's MegaLights page: Stat GPU timings are distorted by async compute until r.RDG.AsyncCompute 0.
+    assert ("r.RDG.AsyncCompute" in cvars) == (lights is not None)
+
+
 def test_godotnext_timing_arguments() -> None:
     config = parse_config(synthetic_config())
     assert godotnext_args(config) == [

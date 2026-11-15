@@ -3,7 +3,9 @@ extends RefCounted
 ## tests/ue_export/check_ue_export.gd reads an export back with them. The format is described
 ## in ue_export_schema.md.
 
-const SCHEMA := 1
+## 2 (#233): material blend modes and albedo textures, area lights, layers and light masks,
+## textures and approximations. An import written for schema 1 builds every material opaque.
+const SCHEMA := 2
 const SKY_WIDTH := 512
 const SKY_HEIGHT := 256
 
@@ -106,19 +108,120 @@ static func json_value(p_value: Variant) -> Variant:
 			return str(p_value)
 
 
+## Content the UE import builds only approximately (#233). The exporter refuses it unless the run
+## names the id in --approximate=<id>[,<id>]; scene.json then lists each one with the items it
+## touches, so the UE import and the settings record carry it as a known difference.
+const APPROXIMATIONS := {
+	"diffuse_mode": "A diffuse mode other than Lambert (Godot's Burley default): the UE import builds UE's default-lit diffuse.",
+	"shadow_caster_mask": "A light's shadow caster mask that leaves out placed layers: UE lights have no shadow caster mask, so every placed caster shadows the light.",
+	"light_projector": "A light projector texture: the UE import builds the light without it. Epic's light functions page (UE 5.9) does not say how a light function maps a texture onto a spot light's cone.",
+}
+
+## Texture slots the format carries, and what the UE import builds from them.
+const CARRIED_TEXTURES := [BaseMaterial3D.TEXTURE_ALBEDO]
+
+const FEATURE_NAMES := {
+	BaseMaterial3D.FEATURE_NORMAL_MAPPING: "normal mapping",
+	BaseMaterial3D.FEATURE_RIM: "rim",
+	BaseMaterial3D.FEATURE_CLEARCOAT: "clearcoat",
+	BaseMaterial3D.FEATURE_ANISOTROPY: "anisotropy",
+	BaseMaterial3D.FEATURE_AMBIENT_OCCLUSION: "ambient occlusion",
+	BaseMaterial3D.FEATURE_HEIGHT_MAPPING: "height mapping",
+	BaseMaterial3D.FEATURE_SUBSURFACE_SCATTERING: "subsurface scattering",
+	BaseMaterial3D.FEATURE_SUBSURFACE_TRANSMITTANCE: "subsurface transmittance",
+	BaseMaterial3D.FEATURE_BACKLIGHT: "backlight",
+	BaseMaterial3D.FEATURE_REFRACTION: "refraction",
+	BaseMaterial3D.FEATURE_DETAIL: "detail",
+	BaseMaterial3D.FEATURE_BENT_NORMAL_MAPPING: "bent normal mapping",
+	BaseMaterial3D.FEATURE_PARTICLES_ANIMATION: "particles animation",
+}
+
+
+## How a material is blended, as scene.json "blend": "opaque", "masked" (alpha scissor: the
+## UE import builds a Masked material clipped at alpha_scissor_threshold) or "translucent" (alpha
+## blending: a Translucent material whose opacity is the albedo alpha).
+static func material_blend(p_material: BaseMaterial3D) -> String:
+	match p_material.transparency:
+		BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR:
+			return "masked"
+		BaseMaterial3D.TRANSPARENCY_ALPHA:
+			return "translucent"
+	return "opaque"
+
+
 ## What the format cannot carry in a material yet, as messages (empty when it can). The UE import
-## builds opaque, default-lit constant materials from scene.json, so anything else would be dropped.
+## builds default-lit constant materials from scene.json: opaque, masked by the albedo alpha, or
+## alpha-blended, with an optional albedo texture. Anything else would be dropped.
 static func material_refusals(p_material: BaseMaterial3D) -> PackedStringArray:
 	var found := PackedStringArray()
 	if p_material.vertex_color_use_as_albedo:
 		found.append("vertex colors as albedo")
-	if p_material.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED:
-		found.append("transparency, alpha scissor or alpha hash")
-	if p_material.diffuse_mode != BaseMaterial3D.DIFFUSE_LAMBERT:
-		found.append("a diffuse mode other than Lambert")
+	if p_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_HASH:
+		found.append("alpha hash")
+	elif p_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS:
+		found.append("alpha with a depth pre-pass")
+	if p_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR and p_material.alpha_antialiasing_mode != BaseMaterial3D.ALPHA_ANTIALIASING_OFF:
+		found.append("alpha antialiasing")
+	if p_material.blend_mode != BaseMaterial3D.BLEND_MODE_MIX:
+		found.append("a blend mode other than mix")
+	if p_material.shading_mode != BaseMaterial3D.SHADING_MODE_PER_PIXEL:
+		found.append("a shading mode other than per-pixel")
+	if p_material.specular_mode != BaseMaterial3D.SPECULAR_SCHLICK_GGX:
+		found.append("a specular mode other than Schlick-GGX")
 	if p_material.cull_mode == BaseMaterial3D.CULL_FRONT:
 		found.append("front-face culling")
+	for feature: int in FEATURE_NAMES:
+		if p_material.get_feature(feature):
+			found.append(String(FEATURE_NAMES[feature]))
+	var textured := false
+	for slot in BaseMaterial3D.TEXTURE_MAX:
+		if p_material.get_texture(slot) == null:
+			continue
+		if slot in CARRIED_TEXTURES:
+			textured = true
+		else:
+			found.append("a texture in slot %d (only the albedo texture is exported)" % slot)
+	if textured:
+		if p_material.uv1_triplanar or not p_material.uv1_scale.is_equal_approx(Vector3.ONE) or not p_material.uv1_offset.is_zero_approx():
+			found.append("a UV1 transform or triplanar mapping")
+		if p_material.albedo_texture_msdf:
+			found.append("an MSDF albedo texture")
 	return found
+
+
+## The APPROXIMATIONS ids a material needs (empty when the UE import builds it as it is).
+static func material_approximations(p_material: BaseMaterial3D) -> PackedStringArray:
+	var found := PackedStringArray()
+	if p_material.diffuse_mode != BaseMaterial3D.DIFFUSE_LAMBERT:
+		found.append("diffuse_mode")
+	return found
+
+
+## How a light's layer mask treats the placed geometry: "all" when it keeps every layer the placed
+## instances use, "none" when it keeps none of them, "some" otherwise.
+static func mask_effect(p_mask: int, p_layers_in_use: int) -> String:
+	var kept := p_mask & p_layers_in_use
+	if kept == p_layers_in_use:
+		return "all"
+	if kept == 0:
+		return "none"
+	return "some"
+
+
+## A texture's pixels as PNG bytes (RGBA8), or an empty array when it has no image.
+static func texture_png(p_texture: Texture2D) -> PackedByteArray:
+	if p_texture == null:
+		return PackedByteArray()
+	var image := p_texture.get_image()
+	if image == null or image.is_empty():
+		return PackedByteArray()
+	image = image.duplicate() as Image
+	if image.is_compressed():
+		image.decompress()
+	if image.has_mipmaps():
+		image.clear_mipmaps()
+	image.convert(Image.FORMAT_RGBA8)
+	return image.save_png_to_buffer()
 
 
 ## What the format cannot carry in the environment or the camera yet, as messages.

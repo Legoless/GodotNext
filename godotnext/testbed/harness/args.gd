@@ -13,6 +13,8 @@ const FLAG_CAPTURE_FRAMES := "--capture-frames"
 const FLAG_VARIANT := "--variant"
 const FLAG_HOLD_FRAME := "--hold-frame"
 const FLAG_INSTANCES := "--instances"
+## --lights (#233): MegaLights Hall's light count (64, 1024 or 4096), read by the scene.
+const FLAG_LIGHTS := "--lights"
 const FLAG_VELOCITY_DUMP := "--velocity-dump"
 const FLAG_REFERENCE := "--reference"
 const FLAG_MSAA := "--msaa"
@@ -37,6 +39,7 @@ const KNOWN_FLAGS := {
 	FLAG_VARIANT: true,
 	FLAG_HOLD_FRAME: true,
 	FLAG_INSTANCES: true,
+	FLAG_LIGHTS: true,
 	FLAG_VELOCITY_DUMP: true,
 	FLAG_REFERENCE: true,
 	FLAG_MSAA: true,
@@ -235,6 +238,13 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 			result.ok = false
 			result.error = "--instances must be a positive integer"
 			return result
+	var lights := -1
+	if values.has(FLAG_LIGHTS):
+		lights = _parse_non_negative_int(String(values[FLAG_LIGHTS]))
+		if lights < 1:
+			result.ok = false
+			result.error = "--lights must be a positive integer"
+			return result
 	if values.has(FLAG_VELOCITY_DUMP):
 		var vd := String(values[FLAG_VELOCITY_DUMP])
 		if vd != "0" and vd != "1":
@@ -319,6 +329,7 @@ static func parse(user_args: PackedStringArray, engine_args: PackedStringArray =
 		"variant": variant,
 		"hold_frame": hold_frame,
 		"instances": instances,
+		"lights": lights,
 		"output_resolution": _infer_engine_resolution(engine_args),
 	}
 	if spp > 0:

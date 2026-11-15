@@ -1,7 +1,8 @@
 extends Node3D
 ## MegaLights Hall (#213). The committed scene carries the 64-light feature
 ## mix; `--lights=N` extends the count to the 1024 or 4096 variant with a
-## deterministic grid of extra shadowed omnis. `--frames=N` quits.
+## deterministic grid of extra shadowed omnis. `--frames=N` quits, unless the
+## harness drives the frames.
 
 const SceneArgs = preload("res://scenes/scene_args.gd")
 
@@ -27,6 +28,10 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	if bool(get_meta("skip_runtime", false)):
+		return
+	# A driving harness or the UE exporter (#233) owns the frame count, as in SceneArgs.step_frame.
+	var harness := get_node_or_null("/root/Harness")
+	if harness != null and harness.has_method("is_driving_animation") and bool(harness.call("is_driving_animation")):
 		return
 	_frame += 1
 	if _limit >= 0 and _frame >= _limit:

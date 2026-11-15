@@ -1,0 +1,62 @@
+{
+	"schema": 1,
+	"name": "rt_shadow_yard",
+	"title": "RT Shadow Yard, sun and 64 ray-traced-shadow local lights (GM-3)",
+	"port_issue": 233,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://scenes/rt_shadow_yard/rt_shadow_yard.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"override": "res://ue_compare/lights_shadows.override.cfg",
+		"nextgi": null,
+		"harness_args": [],
+		"timeout_minutes": 15
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/RtShadowYard/RtShadowYard.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 1,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100"],
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 15
+	},
+	"lines": [
+		{
+			"id": "gm3_rt_shadow_total_64",
+			"name": "RT-shadow total with denoise, sun and 64 local lights",
+			"gates": ["GM-3"],
+			"status": "ue_bar",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": { "group": "Ray-traced shadows", "columns": null }
+		},
+		{
+			"id": "gpu_pass_sum",
+			"name": "GPU pass sum (pipeline check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line; recorded to check the comparison pipeline end to end.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		}
+	]
+}

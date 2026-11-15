@@ -9,13 +9,15 @@ extends SceneTree
 ##   godot --path godotnext/testbed --script res://tools/ue_export/ue_export.gd -- \
 ##     --scene=res://scenes/swrt_kitbash/swrt_kitbash.tscn --camera=CaptureCam \
 ##     --warmup=120 --frames=600 --out=/absolute/dir [--fps=60] [--source-commit=<sha>]
+##     [--approximate=<id>[,<id>]]
 ##
 ## Other user arguments (for example --instances) reach the scene as in a harness run. The scene
 ## runs as in a timing run: every _ready runs, so seeded generators spawn their content, and the
 ## camera is sampled while the harness publishes frame index N for row N (Harness.drive_frame),
 ## the pose a timing run shows at measured row N. Content the format does not carry yet
 ## (moving geometry, skinned meshes, textured or shader materials, other visual nodes) stops
-## the export instead of being left out.
+## the export instead of being left out. Content the UE import builds only approximately
+## (Lib.APPROXIMATIONS) is refused too, unless --approximate names it: scene.json then lists it.
 ##
 ## Exit codes: 0 written, 1 the scene has content the format does not carry, 2 bad arguments.
 
@@ -55,6 +57,7 @@ var _frames := 0
 var _warmup := 0
 var _fps := 60
 var _source_commit := ""
+var _approximate: Array[String] = []
 var _scene: Node
 var _camera: Camera3D
 var _harness: Node
@@ -69,6 +72,9 @@ var _mesh_ids := {}
 var _meshes: Array = []
 var _material_ids := {}
 var _materials: Array = []
+var _material_count := 0
+var _texture_ids := {}
+var _textures: Array = []
 var _instances: Array = []
 var _lights: Array = []
 var _suns: Array = []
@@ -81,6 +87,11 @@ var _node_instances := 0
 var _multimesh_instances := 0
 var _multimesh_nodes := 0
 var _unsupported: Array[String] = []
+## Lib.APPROXIMATIONS id -> the items (material or node names) that need it.
+var _approximation_items := {}
+## Light entries and their nodes, for the mask effects resolved once every layer is known.
+var _light_nodes: Array = []
+var _layers_in_use := 0
 
 
 func _initialize() -> void:
@@ -143,6 +154,10 @@ func _parse_args() -> String:
 	_warmup = SceneArgs.int_value("--warmup", 0)
 	_fps = SceneArgs.int_value("--fps", 60)
 	_source_commit = SceneArgs.value("--source-commit")
+	for id in SceneArgs.value("--approximate").split(",", false):
+		if not Lib.APPROXIMATIONS.has(id):
+			return "--approximate takes %s, not %s" % [", ".join(PackedStringArray(Lib.APPROXIMATIONS.keys())), id]
+		_approximate.append(id)
 	if not _scene_path.begins_with("res://"):
 		return "--scene=res://... is required"
 	if _camera_name.is_empty():
@@ -173,6 +188,14 @@ func _finish() -> void:
 		_fail(1, error)
 		return
 	quit(0)
+
+
+## A run that ends before the export is written (a scene that quits the tree at its own --frames
+## limit, for example) is a failure, not an empty success.
+func _finalize() -> void:
+	if not _done:
+		printerr("ue_export: the tree quit at camera row %d of %d, before the export was written (a scene's own --frames limit, for example)" % [_row, _frames])
+		quit(1)
 
 
 func _fail(p_code: int, p_message: String) -> void:
@@ -226,9 +249,19 @@ func _motion_error(p_first: Dictionary, p_last: Dictionary) -> String:
 
 func _export() -> String:
 	_walk(_scene)
+	_resolve_light_masks()
 	var environment_refusals := Lib.environment_refusals(_environment_node.environment if _environment_node != null else null, _camera)
 	for refusal in environment_refusals:
 		_unsupported.append(refusal)
+	var approximations: Array = []
+	var ids: Array = _approximation_items.keys()
+	ids.sort()
+	for id: String in ids:
+		var items: Array = _approximation_items[id]
+		if id in _approximate:
+			approximations.append({"id": id, "description": Lib.APPROXIMATIONS[id], "items": items})
+		else:
+			_unsupported.append("%s on %s (pass --approximate=%s to export it as a recorded approximation)" % [id, ", ".join(PackedStringArray(items)), id])
 	if not _unsupported.is_empty():
 		return "not exported yet: " + "; ".join(_unsupported)
 	DirAccess.make_dir_recursive_absolute(_out)
@@ -245,6 +278,16 @@ func _export() -> String:
 	if not error.is_empty():
 		return error
 	files.append("axes.glb")
+	var texture_entries: Array = []
+	for texture_entry: Dictionary in _textures:
+		var entry := texture_entry.duplicate()
+		DirAccess.make_dir_recursive_absolute(_out.path_join("textures"))
+		error = _write_bytes(String(entry["file"]), entry["png"])
+		if not error.is_empty():
+			return error
+		files.append(String(entry["file"]))
+		entry.erase("png")
+		texture_entries.append(entry)
 
 	var csv := "frame,px,py,pz,qx,qy,qz,qw,fov_deg,near,far\n" + "\n".join(_track) + "\n"
 	error = _write_text("camera_track.csv", csv)
@@ -305,8 +348,10 @@ func _export() -> String:
 		},
 		"meshes": mesh_entries,
 		"materials": _materials,
+		"textures": texture_entries,
 		"instances": _instances,
 		"lights": _lights,
+		"approximations": approximations,
 		"environment": environment,
 		"rendering": _rendering(),
 		"checks": {
@@ -317,6 +362,8 @@ func _export() -> String:
 			"meshes": _meshes.size(),
 			"materials": _materials.size(),
 			"lights": _lights.size(),
+			"light_types": _light_types(),
+			"textures": _textures.size(),
 			"triangles_total": _triangles_total,
 			"aabb": {"min": Lib.json_value(_aabb.position), "max": Lib.json_value(aabb_end)},
 			"instances_sha256": Lib.transforms_sha256(_world_transforms),
@@ -354,6 +401,8 @@ func _export() -> String:
 		"meshes": _meshes.size(),
 		"materials": _materials.size(),
 		"lights": _lights.size(),
+		"textures": _textures.size(),
+		"approximations": approximations.map(func(entry: Dictionary) -> String: return String(entry["id"])),
 		"camera_rows": _track.size(),
 		"files": files.size() + 1,
 	}, "", true))
@@ -369,7 +418,7 @@ func _walk(p_node: Node) -> void:
 		_add_mesh_instance(p_node)
 	elif p_node is MultiMeshInstance3D:
 		_add_multimesh(p_node)
-	elif p_node is DirectionalLight3D or p_node is OmniLight3D or p_node is SpotLight3D:
+	elif p_node is DirectionalLight3D or p_node is OmniLight3D or p_node is SpotLight3D or p_node is AreaLight3D:
 		_add_light(p_node)
 	elif p_node is VisualInstance3D:
 		_unsupported.append("%s (%s)" % [_scene.get_path_to(p_node), p_node.get_class()])
@@ -404,7 +453,9 @@ func _add_mesh_instance(p_node: MeshInstance3D) -> void:
 		"cast_shadow": p_node.cast_shadow,
 		"gi_mode": p_node.gi_mode,
 		"visibility_range": [p_node.visibility_range_begin, p_node.visibility_range_end],
+		"layers": p_node.layers,
 	})
+	_layers_in_use |= p_node.layers
 	_add_placement(transform, mesh)
 	_node_instances += 1
 
@@ -453,7 +504,9 @@ func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
 		"cast_shadow": p_node.cast_shadow,
 		"gi_mode": p_node.gi_mode,
 		"visibility_range": [p_node.visibility_range_begin, p_node.visibility_range_end],
+		"layers": p_node.layers,
 	})
+	_layers_in_use |= p_node.layers
 	_multimesh_instances += count
 	_multimesh_nodes += 1
 
@@ -530,55 +583,105 @@ func _material_id(p_material: Material) -> String:
 	if material == null:
 		material = StandardMaterial3D.new()
 	else:
-		id = "mat%04d" % _materials.size()
+		id = "mat%04d" % _material_count
+		_material_count += 1
+	_material_ids[key] = id
+	var label := id if material.resource_name.is_empty() else "%s (%s)" % [id, material.resource_name]
 	if not (material is BaseMaterial3D):
-		_unsupported.append("%s material %s" % [material.get_class(), id])
+		_unsupported.append("%s material %s" % [material.get_class(), label])
 		return id
 	var base := material as BaseMaterial3D
-	for texture in BaseMaterial3D.TEXTURE_MAX:
-		if base.get_texture(texture) != null:
-			_unsupported.append("textured material %s (textures are not exported yet)" % id)
-			return id
 	if base.next_pass != null:
-		_unsupported.append("material %s has a next pass" % id)
+		_unsupported.append("material %s has a next pass" % label)
 		return id
 	var refusals := Lib.material_refusals(base)
 	if not refusals.is_empty():
-		_unsupported.append("material %s: %s (not exported yet)" % [id, ", ".join(refusals)])
+		_unsupported.append("material %s: %s (not exported yet)" % [label, ", ".join(refusals)])
 		return id
+	for approximation in Lib.material_approximations(base):
+		_need_approximation(approximation, label)
+	var albedo_texture: Variant = null
+	if base.albedo_texture != null:
+		albedo_texture = _texture_id(base.albedo_texture, "albedo")
 	var emission := base.emission.srgb_to_linear() * base.emission_energy_multiplier if base.emission_enabled else Color(0, 0, 0)
-	_material_ids[key] = id
 	_materials.append({
 		"id": id,
 		"name": String(base.resource_name),
 		"class": base.get_class(),
+		"blend": Lib.material_blend(base),
+		"alpha_scissor_threshold": base.alpha_scissor_threshold,
+		"two_sided": base.cull_mode == BaseMaterial3D.CULL_DISABLED,
 		"albedo_linear": Lib.json_value(base.albedo_color.srgb_to_linear()),
+		"albedo_texture": albedo_texture,
 		"emission_linear": [emission.r, emission.g, emission.b],
 		"properties": Lib.storage_properties(base),
 	})
 	return id
 
 
+## A texture written as textures/<id>.png (RGBA8, the pixels as stored).
+func _texture_id(p_texture: Texture2D, p_usage: String) -> Variant:
+	if _texture_ids.has(p_texture):
+		var known: Dictionary = _textures[int(_texture_ids[p_texture])]
+		if not (p_usage in known["usages"]):
+			(known["usages"] as Array).append(p_usage)
+		return known["id"]
+	var png := Lib.texture_png(p_texture)
+	if png.is_empty():
+		_unsupported.append("a %s texture (%s) without image data" % [p_usage, p_texture.get_class()])
+		return null
+	var id := "tex%04d" % _textures.size()
+	_texture_ids[p_texture] = _textures.size()
+	_textures.append({
+		"id": id,
+		"file": "textures/%s.png" % id,
+		"class": p_texture.get_class(),
+		"name": String(p_texture.resource_name),
+		"size": [p_texture.get_width(), p_texture.get_height()],
+		"usages": [p_usage],
+		"png": png,
+	})
+	return id
+
+
+func _need_approximation(p_id: String, p_item: String) -> void:
+	if not _approximation_items.has(p_id):
+		_approximation_items[p_id] = []
+	(_approximation_items[p_id] as Array).append(p_item)
+
+
 func _add_light(p_light: Light3D) -> void:
 	var path := str(_scene.get_path_to(p_light))
-	if p_light.light_projector != null:
-		_unsupported.append("light projector on %s" % path)
-		return
 	var type := "directional"
 	if p_light is OmniLight3D:
 		type = "omni"
 	elif p_light is SpotLight3D:
 		type = "spot"
+	elif p_light is AreaLight3D:
+		type = "area"
 	var transform := p_light.global_transform
 	var color := p_light.light_color.srgb_to_linear()
-	_lights.append({
+	var entry := {
 		"node": path,
 		"type": type,
 		"transform": Lib.transform_rows(transform),
 		"direction": Lib.json_value(-transform.basis.z.normalized()),
 		"color_linear": [color.r, color.g, color.b],
+		"projector": null,
 		"properties": Lib.storage_properties(p_light),
-	})
+	}
+	if p_light.light_projector != null:
+		_need_approximation("light_projector", path)
+		entry["projector"] = _texture_id(p_light.light_projector, "light_projector")
+	if p_light is AreaLight3D:
+		var area := p_light as AreaLight3D
+		entry["area"] = {
+			"size": Lib.json_value(area.area_size),
+			"texture": _texture_id(area.area_texture, "area_light") if area.area_texture != null else null,
+			"normalize_energy": area.area_normalize_energy,
+		}
+	_lights.append(entry)
+	_light_nodes.append([entry, p_light])
 	if p_light is DirectionalLight3D and (p_light as DirectionalLight3D).sky_mode != DirectionalLight3D.SKY_MODE_LIGHT_ONLY:
 		var energy := p_light.light_energy
 		if bool(ProjectSettings.get_setting("rendering/lights_and_shadows/use_physical_light_units", false)):
@@ -589,6 +692,31 @@ func _add_light(p_light: Light3D) -> void:
 			"energy": energy,
 			"size": deg_to_rad(p_light.light_angular_distance),
 		})
+
+
+## The light masks against the layers the placed instances use. A cull mask that lights every
+## placed layer or none of them is carried (the UE import gives a light that lights none its own
+## lighting channel); one that lights some of them is not exported yet. A shadow caster mask that
+## leaves out a placed layer has no UE equivalent (APPROXIMATIONS.shadow_caster_mask).
+func _resolve_light_masks() -> void:
+	for pair: Array in _light_nodes:
+		var entry: Dictionary = pair[0]
+		var light: Light3D = pair[1]
+		var cull := Lib.mask_effect(light.light_cull_mask, _layers_in_use)
+		entry["cull_mask_effect"] = cull
+		if cull == "some":
+			_unsupported.append("%s: a light cull mask that lights some of the placed layers but not all (not exported yet)" % entry["node"])
+		var caster := Lib.mask_effect(light.shadow_caster_mask, _layers_in_use) if light.shadow_enabled else "all"
+		entry["caster_mask_effect"] = caster
+		if caster != "all":
+			_need_approximation("shadow_caster_mask", String(entry["node"]))
+
+
+func _light_types() -> Dictionary:
+	var counts := {}
+	for light: Dictionary in _lights:
+		counts[light["type"]] = int(counts.get(light["type"], 0)) + 1
+	return counts
 
 
 func _rendering() -> Dictionary:

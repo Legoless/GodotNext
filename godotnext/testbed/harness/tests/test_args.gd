@@ -129,6 +129,7 @@ func _test_parse() -> void:
 		"--variant=door_open",
 		"--hold-frame=60",
 		"--instances=100000",
+		"--lights=1024",
 	]))
 	_check(bool(scene_flags["ok"]), "scene flags parse: %s" % scene_flags["error"])
 	if bool(scene_flags["ok"]):
@@ -136,12 +137,16 @@ func _test_parse() -> void:
 		_check(String(args["variant"]) == "door_open", "variant parsed")
 		_check(int(args["hold_frame"]) == 60, "hold-frame parsed")
 		_check(int(args["instances"]) == 100000, "instances parsed")
+		_check(int(args["lights"]) == 1024, "lights parsed")
 	_check(not bool(ArgsScript.parse(PackedStringArray([
 		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--hold-frame=-3",
 	]))["ok"]), "negative hold-frame fails")
 	_check(not bool(ArgsScript.parse(PackedStringArray([
 		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--instances=0",
 	]))["ok"]), "zero instances fails")
+	_check(not bool(ArgsScript.parse(PackedStringArray([
+		"--mode=timing", "--scene=res://a.tscn", "--out=/tmp/out", "--frames=1", "--lights=0",
+	]))["ok"]), "zero lights fails")
 
 	var torture_flags: Dictionary = ArgsScript.parse(PackedStringArray([
 		"--mode=capture", "--scene=res://scenes/upscaler_torture/upscaler_torture.tscn", "--out=/tmp/out", "--frames=410",
