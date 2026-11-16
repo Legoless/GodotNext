@@ -1705,7 +1705,7 @@ func _check_textures(p_dir: String, p_scene: Dictionary) -> void:
 ## Frees a scene instance that never entered the tree. Its surface override materials are dropped
 ## first: freeing Character Crowd's 100 walkers with their own override materials makes the headless
 ## dummy renderer log a "material is null" error (material_get_instance_shader_parameters) that the
-## run script would count as a failure; without the overrides it frees cleanly.
+## run script would count as a failure; without the overrides it frees cleanly. Remove this once #278 is fixed.
 func _free_shell(p_shell: Node) -> void:
 	for node in p_shell.find_children("*", "MeshInstance3D", true, false):
 		var mesh_instance := node as MeshInstance3D
