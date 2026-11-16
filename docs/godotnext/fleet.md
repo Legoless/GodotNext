@@ -99,6 +99,14 @@ On the Windows VM the user signs in automatically, so rendered runs go through `
 |---|---|---|---|---|---|
 | `NVIDIA L4` | Cloud build-time device (no PQ lines) | `0` | `0` | `0` | `0` |
 
+### Cloud test machine (plan v3.9.7, build-time only)
+
+Until the RTX 5090 machine exists (#227), a Compute Engine Windows VM with one NVIDIA RTX PRO 6000 (Blackwell, the RTX 5090's chip) is the second test machine (lead decision 2026-11-16, plan §23.2). It runs once its GPU quota is granted; until then, the Windows L4 VMs above stand in for it. When it is created it gets a build row and a device-mapping table like the L4 VM's, and its project, name, zone and address go in the git-ignored `local/fleet.env`, as for the L4 VMs.
+
+- A landing check that says it renders on the RTX 4080 SUPER may run on the RTX 4080 SUPER machine or on the cloud test machine. The issue comment that reports it names the machine.
+- Like the L4 VMs, it runs no gate line, gives no judged timing or UE-comparison verdict and never runs a DLSS-enabled build, and it is stopped when idle.
+- PQ still runs on the RTX 5090 machine (#227); the PQ fleet is unchanged.
+
 ### Vulkan capability archive (`docs/godotnext/fleet/vulkaninfo/g0/`)
 
 Raw `vulkaninfo` JSON snapshots (both well under 5 MB):

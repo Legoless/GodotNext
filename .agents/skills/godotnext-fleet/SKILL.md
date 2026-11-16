@@ -1,6 +1,6 @@
 ---
 name: godotnext-fleet
-description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, cloud NVIDIA L4 VMs for Linux and Windows, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
+description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, a cloud NVIDIA RTX PRO 6000 test machine standing in for the RTX 5090 during the build, cloud NVIDIA L4 VMs for Linux and Windows, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
 ---
 
 # Use the GodotNext hardware
@@ -10,6 +10,7 @@ description: Describes the GodotNext build and test hardware (Apple M5 Max, NVID
 | Apple M5 Max (Apple10) | macOS, Metal | Daily build loop; Metal-first P0 and P1 work; PR basics until the RTX 4080 SUPER is in use (§24); Metal lines in PQ | In use |
 | NVIDIA RTX 4080 SUPER | Windows 11, Vulkan and D3D12 | Vulkan and D3D12 work (P2, PD), DLSS builds with the lead's own SDK, the RTX 4080 SUPER PR run, NVIDIA lines in PQ | Remote |
 | NVIDIA RTX 5090 | Windows 11 | Every NVIDIA line in PQ; multi frame generation | To be set up before PQ (#227) |
+| Cloud test machine: Windows VM, NVIDIA RTX PRO 6000 (Blackwell) | Windows, Vulkan and D3D12 | The second test machine until the RTX 5090 machine exists (plan v3.9.7): PR basics and "renders on the RTX 4080 SUPER" landing checks; never DLSS-enabled builds; not a PQ machine | Not running until its GPU quota is granted; Windows L4 VMs stand in until then; stop when idle |
 | Linux x86_64 VM, no GPU | Linux, llvmpipe | CPU, doctest and software-Vulkan smoke runs; never DLSS-enabled builds | Available |
 | Cloud Linux VM, NVIDIA L4 (16 vCPU, 64 GB) | Ubuntu 24.04, Vulkan (NVIDIA 580 driver), headless X on the L4 | Linux builds and doctests, Linux Vulkan validation runs on a second NVIDIA (Ada) card; never DLSS-enabled builds | In use since 2026-11-14; stop when idle |
 | Cloud Windows VM, NVIDIA L4 (16 vCPU, 64 GB) | Windows Server 2025, Vulkan and D3D12 (NVIDIA GRID driver, WDDM) | Windows builds, Vulkan and D3D12 validation runs beside the RTX 4080 SUPER; never DLSS-enabled builds | In use since 2026-11-14; stop when idle |
@@ -42,6 +43,13 @@ The cloud VMs are Compute Engine `g2-standard-16` machines with one NVIDIA L4 ea
 4. **Windows:** the SSH shell is PowerShell, as on the RTX 4080 SUPER machine (separate commands with `;`, not `&`); run a copied `.ps1` with `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`. `nvidia-smi` reports the L4 in WDDM mode, which D3D12 and Vulkan rendering need.
 5. **No L4 capacity:** a start can fail with a zone stockout, and a new VM can sit in `STAGING` for minutes and then disappear for the same reason, so wait for `RUNNING` before giving up on a zone and never delete a `STAGING` instance. When Europe has no L4s, the US zones often do. Retry later, or move the VM: snapshot its boot disk, create a `g2-standard-16` from the snapshot in a zone that has capacity (`--maintenance-policy TERMINATE`), copy the instance's `enable-windows-ssh` and `ssh-keys` metadata (Windows reads its SSH keys from them), and update `local/fleet.env`. The disk keeps the driver, the checkout and the autologon setup.
 6. **DLSS:** never on these VMs. NVIDIA's DLSS license (Supplement §3) leaves non-vGPU cloud use outside its scope, so DLSS-enabled builds run only on the owned cards.
+
+## The cloud test machine
+
+Until the RTX 5090 machine exists (#227), a Compute Engine Windows VM with one NVIDIA RTX PRO 6000 is the second test machine (plan §23.2, v3.9.7). Until its GPU quota is granted and it runs, a Windows L4 VM stands in for it. It is reached and handled like the Windows L4 VMs: its settings go in `local/fleet.env` when it is created, it bills while it runs, and it never runs a DLSS-enabled build.
+
+- **Landing checks:** a check that says it renders on the RTX 4080 SUPER may run on the RTX 4080 SUPER machine or on the cloud test machine. The issue comment that reports it names the machine.
+- **Not PQ:** it runs no gate line and gives no judged timing or UE-comparison verdict. PQ still runs on the RTX 4080 SUPER, the RTX 5090 and the M5 Max.
 
 ## Checking an HTML page (the plan, the tracker)
 
