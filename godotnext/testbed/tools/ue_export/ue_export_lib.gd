@@ -8,7 +8,13 @@ extends RefCounted
 ## 3 (#232): per-frame transform tracks for moving mesh instances, camera cuts, UV1 scale and
 ## offset, texture filtering and mipmaps, skinned meshes as rigid per-bone parts, ShaderMaterials
 ## and particles (approximations). An import written for schema 2 places movers at frame 0 only.
-const SCHEMA := 3
+## 4 (#230): skinned meshes as skeletal meshes (skinned/<id>.glb with the skeleton, the skin and
+## one clip per instance keyed on every row, and a per-row bone pose track), GridMap cells, and
+## rigid parts only on request (--approximate=rigid_skin). An import written for schema 3 does not
+## place skeletal instances or GridMap cells.
+const SCHEMA := 4
+## Numbers per bone in a pose row (pose_row): position xyz, rotation quaternion xyzw, scale xyz.
+const POSE_STRIDE := 10
 const SKY_WIDTH := 512
 const SKY_HEIGHT := 256
 
@@ -121,7 +127,7 @@ const APPROXIMATIONS := {
 	"light_cull_mask": "A light whose cull mask lights none of the placed layers: the UE import puts it on its own lighting channel, but Epic's lighting channels page (UE 5.9) says channels do not work with Static-mobility mesh actors, and the import places its meshes Static, so in UE the light lights the placed geometry.",
 	"translucent_shadow": "An alpha-blended surface on an instance that casts shadows: Godot's alpha blending casts no shadow, while the UE import keeps the instance's Cast Shadow on, so in UE the surface shadows the lights.",
 	"alpha_antialiasing": "Alpha antialiasing (alpha to coverage) on an alpha-scissor material: the UE import builds a Masked material clipped at the threshold, without alpha to coverage.",
-	"rigid_skin": "A skinned mesh whose every vertex follows one bone at full weight: the export writes one mesh per bone (the triangles bound to it) with a per-frame transform track, and the UE import places them as rigid moving meshes instead of a skeletal mesh. The poses are the same; UE draws rigid meshes, not a skinned one.",
+	"rigid_skin": "A skinned mesh whose every vertex follows one bone at full weight, exported as rigid parts instead of the default skeletal mesh: the export writes one mesh per bone (the triangles bound to it) with a per-frame transform track, and the UE import places them as rigid moving meshes. The poses are the same; UE draws rigid meshes, not a skinned one.",
 	"shader_material": "A ShaderMaterial: scene.json carries its code, the code's SHA-256 and its uniform values, and the UE import builds a hand-written UE material only for a shader it knows by that SHA-256 (it refuses any other), so the UE surface is a port by hand, not a conversion.",
 	"particles": "GPU or CPU particles: no public UE import path carries a Godot particle system, so the UE import builds none and the UE scene draws no particles.",
 }
@@ -407,6 +413,88 @@ static func _gather(p_array: Variant, p_order: PackedInt32Array, p_vertices: int
 					out.append(p_array[index * stride + component])
 			return out
 	return null
+
+
+## What the format cannot carry in a skinned mesh exported as a skeletal mesh (#230), as messages:
+## it must be an ArrayMesh of triangle lists with bones and weights, at most 4 weights per vertex
+## and no blend shapes.
+static func skeletal_refusals(p_mesh: Mesh) -> PackedStringArray:
+	var found := PackedStringArray()
+	if not (p_mesh is ArrayMesh):
+		found.append("it is a %s, not an ArrayMesh" % p_mesh.get_class())
+		return found
+	var array_mesh := p_mesh as ArrayMesh
+	if array_mesh.get_blend_shape_count() > 0:
+		found.append("blend shapes")
+	for surface in array_mesh.get_surface_count():
+		if array_mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+			found.append("surface %d is not a triangle list" % surface)
+		var format := array_mesh.surface_get_format(surface)
+		if (format & Mesh.ARRAY_FORMAT_BONES) == 0 or (format & Mesh.ARRAY_FORMAT_WEIGHTS) == 0:
+			found.append("surface %d has no bones or weights" % surface)
+		if (format & Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS) != 0:
+			found.append("surface %d uses 8 bone weights" % surface)
+	return found
+
+
+## A skeleton's bones as scene.json writes them: name, parent index and rest transform (12 numbers).
+static func skeleton_bones(p_skeleton: Skeleton3D) -> Array:
+	var bones: Array = []
+	for bone in p_skeleton.get_bone_count():
+		bones.append({
+			"name": String(p_skeleton.get_bone_name(bone)),
+			"parent": p_skeleton.get_bone_parent(bone),
+			"rest": transform_rows(p_skeleton.get_bone_rest(bone)),
+		})
+	return bones
+
+
+## Every bone's local pose (position, rotation, scale; POSE_STRIDE numbers per bone).
+static func pose_row(p_skeleton: Skeleton3D) -> PackedFloat32Array:
+	var row := PackedFloat32Array()
+	for bone in p_skeleton.get_bone_count():
+		var position := p_skeleton.get_bone_pose_position(bone)
+		var rotation := p_skeleton.get_bone_pose_rotation(bone)
+		var scale := p_skeleton.get_bone_pose_scale(bone)
+		row.append_array(PackedFloat32Array([position.x, position.y, position.z, rotation.x, rotation.y, rotation.z, rotation.w, scale.x, scale.y, scale.z]))
+	return row
+
+
+## An animation that holds each row's bone poses at time row / fps (linear between rows, so a
+## player sampling the row times gets the rows exactly). Tracks target "Skeleton3D:<bone>".
+static func pose_clip(p_bones: Array, p_rows: Array, p_fps: int) -> Animation:
+	var animation := Animation.new()
+	animation.length = float(maxi(p_rows.size() - 1, 0)) / float(p_fps)
+	animation.loop_mode = Animation.LOOP_NONE
+	for bone in p_bones.size():
+		var path := NodePath("Skeleton3D:" + String(p_bones[bone]["name"]))
+		var position_track := animation.add_track(Animation.TYPE_POSITION_3D)
+		var rotation_track := animation.add_track(Animation.TYPE_ROTATION_3D)
+		var scale_track := animation.add_track(Animation.TYPE_SCALE_3D)
+		for track in [position_track, rotation_track, scale_track]:
+			animation.track_set_path(track, path)
+			animation.track_set_interpolation_type(track, Animation.INTERPOLATION_LINEAR)
+		for row in p_rows.size():
+			var values: PackedFloat32Array = p_rows[row]
+			var base := bone * POSE_STRIDE
+			var time := float(row) / float(p_fps)
+			animation.position_track_insert_key(position_track, time, Vector3(values[base], values[base + 1], values[base + 2]))
+			animation.rotation_track_insert_key(rotation_track, time, Quaternion(values[base + 3], values[base + 4], values[base + 5], values[base + 6]))
+			animation.scale_track_insert_key(scale_track, time, Vector3(values[base + 7], values[base + 8], values[base + 9]))
+	return animation
+
+
+## A GridMap's drawn cells (GridMap.get_meshes: the cell transform times the item's mesh
+## transform, relative to the GridMap), grouped by mesh: Mesh -> Array of Transform3D.
+static func gridmap_cells(p_grid: GridMap) -> Dictionary:
+	var groups := {}
+	var pairs := p_grid.get_meshes()
+	for index in range(0, pairs.size() - 1, 2):
+		var mesh: Mesh = pairs[index + 1]
+		if not groups.has(mesh):
+			groups[mesh] = []
+		(groups[mesh] as Array).append(pairs[index] as Transform3D)
+	return groups
 
 
 ## Whether a surface with this material on an instance with this cast_shadow setting needs the

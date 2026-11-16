@@ -15,7 +15,9 @@ extends SceneTree
 ## runs as in a timing run: every _ready runs, so seeded generators spawn their content, and the
 ## camera and every mesh instance are sampled while the harness publishes frame index N for row N
 ## (Harness.drive_frame), the pose a timing run shows at measured row N. A mesh instance that
-## moves gets a per-frame transform track. Content the format does not carry yet (moving lights,
+## moves gets a per-frame transform track. A skinned mesh becomes a skeletal mesh with a clip of the
+## bone poses it showed on every row (#230); GridMap cells are placed as drawn. Content the format
+## does not carry yet (moving lights,
 ## MultiMeshes or other nodes, unsupported materials, other visual nodes) stops the export
 ## instead of being left out. Content the UE import builds only approximately
 ## (Lib.APPROXIMATIONS) is refused too, unless --approximate names it: scene.json then lists it.
@@ -85,7 +87,8 @@ var _slot_moves := {}
 var _sampled_nodes: Array = []
 ## [node, path, global transform, visible, light energy or -1, MultiMesh state or null] per light
 ## and per other geometry node, and the visibility of every mesh instance: compared with row 0 on
-## every row. A MultiMesh's state is [its MultiMesh, its instance buffer, its visible instance count].
+## every row. A MultiMesh's state is [its MultiMesh, its instance buffer, its visible instance count],
+## a GridMap's [its mesh library, its drawn cells (GridMap.get_meshes)].
 var _watched: Array = []
 var _motion_errors: Array[String] = []
 ## The largest distance between a rigid part's vertex and the same vertex skinned by the renderer
@@ -98,6 +101,11 @@ var _pending_tracks: Array = []
 ## "<mesh instance id>:<bind>" -> the ArrayMesh of that rigid part.
 var _part_meshes := {}
 var _movers := 0
+## Skeletal export (#230): per skinned MeshInstance3D path, its skeleton's bone poses on every row
+## (Lib.pose_row).
+var _bone_rows := {}
+## Rigid-part splits (rigid_skin), made once per mesh: mesh instance id -> Lib.rigid_skin_parts.
+var _rigid_splits := {}
 
 # Filled by _walk().
 var _mesh_ids := {}
@@ -118,6 +126,15 @@ var _aabb_set := false
 var _node_instances := 0
 var _multimesh_instances := 0
 var _multimesh_nodes := 0
+var _gridmap_cells := 0
+var _gridmap_entries := 0
+var _skeletal_instances := 0
+## Skeletal mesh assets (#230): "<mesh id>:<skin id>:<bone layout>" -> index in _skeletal.
+var _skeletal_ids := {}
+## Per asset: its scene.json entry, plus "_mesh", "_skin" and "_clips" ([clip name, rows]) for the glb.
+var _skeletal: Array = []
+## Pose track files to write: [file name, bone count, rows].
+var _pending_poses: Array = []
 var _unsupported: Array[String] = []
 ## Lib.APPROXIMATIONS id -> the items (material or node names) that need it.
 var _approximation_items := {}
@@ -267,10 +284,16 @@ func _motion_state() -> Dictionary:
 	var stack: Array[Node] = [_scene]
 	while not stack.is_empty():
 		var node: Node = stack.pop_back()
-		if node is GeometryInstance3D or node is Light3D:
+		if node is GeometryInstance3D or node is Light3D or node is GridMap:
 			var key := str(_scene.get_path_to(node))
 			var placed: Variant = null if node is MeshInstance3D else (node as Node3D).global_transform
 			var entry := [placed, (node as Node3D).is_visible_in_tree()]
+			if node is GridMap:
+				var cells: Array = []
+				var pairs := (node as GridMap).get_meshes()
+				for index in range(0, pairs.size() - 1, 2):
+					cells.append(pairs[index])
+				entry.append(Lib.transforms_sha256(cells))
 			if node is Light3D:
 				entry.append((node as Light3D).light_energy)
 			if node is MultiMeshInstance3D and (node as MultiMeshInstance3D).multimesh != null:
@@ -301,10 +324,14 @@ func _start_sampling() -> void:
 		var node: Node = stack.pop_back()
 		for child in node.get_children():
 			stack.append(child)
-		if not (node is GeometryInstance3D or node is Light3D):
+		if not (node is GeometryInstance3D or node is Light3D or node is GridMap):
 			continue
 		var path := str(_scene.get_path_to(node))
 		var node_3d := node as Node3D
+		if node is GridMap:
+			var grid := node as GridMap
+			_watched.append([node_3d, path, node_3d.global_transform, node_3d.is_visible_in_tree(), -1.0, [grid.mesh_library, grid.get_meshes()]])
+			continue
 		if node is MeshInstance3D:
 			var instance := node as MeshInstance3D
 			var skeleton: Skeleton3D = null
@@ -313,6 +340,9 @@ func _start_sampling() -> void:
 			if instance.skin != null and instance.mesh != null:
 				skeleton = instance.get_node_or_null(instance.skeleton) as Skeleton3D
 				if skeleton != null:
+					_bone_rows[path] = []
+				# Rigid parts (rigid_skin) get a slot per skin bind; a skeletal mesh only its pose rows.
+				if skeleton != null and "rigid_skin" in _approximate:
 					for bind in instance.skin.get_bind_count():
 						var bone := instance.skin.get_bind_bone(bind)
 						if instance.skin.get_bind_name(bind) != StringName():
@@ -342,6 +372,9 @@ func _sample_row() -> void:
 		var skeleton: Skeleton3D = entry[2]
 		if skeleton == null:
 			continue
+		(_bone_rows[entry[1]] as Array).append(Lib.pose_row(skeleton))
+		if not ("rigid_skin" in _approximate):
+			continue
 		var skin: Skin = entry[3]
 		var part_transforms := {}
 		for pair: Array in entry[4]:
@@ -361,7 +394,12 @@ func _sample_row() -> void:
 			changed = true
 		if float(entry[4]) >= 0.0 and (node as Light3D).light_energy != float(entry[4]):
 			changed = true
-		if entry[5] != null:
+		if entry[5] != null and node is GridMap:
+			var grid_state: Array = entry[5]
+			var grid := node as GridMap
+			if grid.mesh_library != grid_state[0] or grid.get_meshes() != grid_state[1]:
+				changed = true
+		elif entry[5] != null:
 			var state: Array = entry[5]
 			var multimesh := (node as MultiMeshInstance3D).multimesh
 			if multimesh != state[0] or multimesh.visible_instance_count != int(state[2]) or multimesh.buffer != state[1]:
@@ -388,7 +426,10 @@ func _sample_slot(p_slot: int, p_transform: Transform3D) -> void:
 ## The rigid parts against the renderer's own skinning of the same pose (Lib.rigid_skin_error):
 ## every vertex of a part, moved by its part transform, must sit where the skinned mesh puts it.
 func _check_rigid_skin(p_instance: MeshInstance3D, p_world: Transform3D, p_parts: Dictionary) -> void:
-	var split := Lib.rigid_skin_parts(p_instance.mesh)
+	var key := p_instance.mesh.get_instance_id()
+	if not _rigid_splits.has(key):
+		_rigid_splits[key] = Lib.rigid_skin_parts(p_instance.mesh)
+	var split: Dictionary = _rigid_splits[key]
 	if split.has("error"):
 		return
 	var to_local := p_world.affine_inverse()
@@ -449,6 +490,24 @@ func _export() -> String:
 		if not error.is_empty():
 			return error
 		files.append(String(pending[0]))
+	for pending: Array in _pending_poses:
+		DirAccess.make_dir_recursive_absolute(_out.path_join("tracks"))
+		error = _write_text(String(pending[0]), _pose_csv(int(pending[1]), pending[2]))
+		if not error.is_empty():
+			return error
+		files.append(String(pending[0]))
+	var skeletal_entries: Array = []
+	for asset: Dictionary in _skeletal:
+		DirAccess.make_dir_recursive_absolute(_out.path_join("skinned"))
+		error = _write_skeletal_glb(asset)
+		if not error.is_empty():
+			return error
+		files.append(String(asset["file"]))
+		var entry := {}
+		for key: String in asset:
+			if not key.begins_with("_"):
+				entry[key] = asset[key]
+		skeletal_entries.append(entry)
 
 	var csv := "frame,px,py,pz,qx,qy,qz,qw,fov_deg,near,far\n" + "\n".join(_track) + "\n"
 	error = _write_text("camera_track.csv", csv)
@@ -509,6 +568,7 @@ func _export() -> String:
 			"cuts": _cuts,
 		},
 		"meshes": mesh_entries,
+		"skeletal_meshes": skeletal_entries,
 		"materials": _materials,
 		"textures": texture_entries,
 		"instances": _instances,
@@ -517,10 +577,14 @@ func _export() -> String:
 		"environment": environment,
 		"rendering": _rendering(),
 		"checks": {
-			"instances_total": _node_instances + _multimesh_instances,
+			"instances_total": _node_instances + _multimesh_instances + _gridmap_cells + _skeletal_instances,
 			"node_instances": _node_instances,
 			"multimesh_instances": _multimesh_instances,
 			"multimesh_nodes": _multimesh_nodes,
+			"gridmap_cells": _gridmap_cells,
+			"gridmap_entries": _gridmap_entries,
+			"skeletal_instances": _skeletal_instances,
+			"skeletal_meshes": _skeletal.size(),
 			"meshes": _meshes.size(),
 			"materials": _materials.size(),
 			"lights": _lights.size(),
@@ -562,7 +626,9 @@ func _export() -> String:
 		return error
 	print("GODOTNEXT_UE_EXPORT " + JSON.stringify({
 		"scene": _scene_path,
-		"instances": _node_instances + _multimesh_instances,
+		"instances": _node_instances + _multimesh_instances + _gridmap_cells + _skeletal_instances,
+		"gridmap_cells": _gridmap_cells,
+		"skeletal": _skeletal_instances,
 		"meshes": _meshes.size(),
 		"materials": _materials.size(),
 		"lights": _lights.size(),
@@ -584,6 +650,8 @@ func _walk(p_node: Node) -> void:
 		_add_mesh_instance(p_node)
 	elif p_node is MultiMeshInstance3D:
 		_add_multimesh(p_node)
+	elif p_node is GridMap:
+		_add_gridmap(p_node)
 	elif p_node is DirectionalLight3D or p_node is OmniLight3D or p_node is SpotLight3D or p_node is AreaLight3D:
 		_add_light(p_node)
 	elif p_node is GPUParticles3D or p_node is CPUParticles3D:
@@ -604,7 +672,10 @@ func _add_mesh_instance(p_node: MeshInstance3D) -> void:
 		return
 	var path := str(_scene.get_path_to(p_node))
 	if p_node.skin != null:
-		_add_skinned(p_node, path)
+		if "rigid_skin" in _approximate:
+			_add_skinned(p_node, path)
+		else:
+			_add_skeletal(p_node, path)
 		return
 	var id := _mesh_id(mesh)
 	if id.is_empty():
@@ -670,6 +741,71 @@ func _track_csv(p_rows: Array) -> String:
 	return "\n".join(lines) + "\n"
 
 
+## A pose track as CSV: frame, then per bone (by index in the asset's bones) its local position,
+## rotation quaternion and scale (Lib.pose_row).
+func _pose_csv(p_bones: int, p_rows: Array) -> String:
+	var header := PackedStringArray(["frame"])
+	for bone in p_bones:
+		for part in ["px", "py", "pz", "qx", "qy", "qz", "qw", "sx", "sy", "sz"]:
+			header.append("b%d_%s" % [bone, part])
+	var lines := PackedStringArray([",".join(header)])
+	for row in p_rows.size():
+		var cells := PackedStringArray([str(row)])
+		for value: float in (p_rows[row] as PackedFloat32Array):
+			cells.append("%.9f" % value)
+		lines.append(",".join(cells))
+	return "\n".join(lines) + "\n"
+
+
+## skinned/<id>.glb: the asset's skeleton at its rest pose, the skinned mesh under it, and an
+## AnimationPlayer with one clip per instance (Lib.pose_clip).
+func _write_skeletal_glb(p_asset: Dictionary) -> String:
+	var root_node := Node3D.new()
+	root_node.name = String(p_asset["id"])
+	var skeleton := Skeleton3D.new()
+	skeleton.name = "Skeleton3D"
+	var bones: Array = p_asset["bones"]
+	for bone: Dictionary in bones:
+		skeleton.add_bone(String(bone["name"]))
+	for index in bones.size():
+		var bone: Dictionary = bones[index]
+		if int(bone["parent"]) >= 0:
+			skeleton.set_bone_parent(index, int(bone["parent"]))
+		skeleton.set_bone_rest(index, Lib.rows_to_transform(bone["rest"]))
+	skeleton.reset_bone_poses()
+	root_node.add_child(skeleton)
+	skeleton.owner = root_node
+	var instance := MeshInstance3D.new()
+	instance.name = String(p_asset["id"]) + "_mesh"
+	instance.mesh = p_asset["_mesh"]
+	instance.skin = p_asset["_skin"]
+	# Informative materials (the UE import builds its own from scene.json): the first instance's.
+	var sources: Array = p_asset["_materials"]
+	for surface in instance.mesh.get_surface_count():
+		var material: Material = sources[surface] if surface < sources.size() else null
+		instance.set_surface_override_material(surface, material if material != null else StandardMaterial3D.new())
+	skeleton.add_child(instance)
+	instance.owner = root_node
+	instance.skeleton = NodePath("..")
+	var player := AnimationPlayer.new()
+	player.name = "AnimationPlayer"
+	var library := AnimationLibrary.new()
+	for clip: Array in p_asset["_clips"]:
+		library.add_animation(StringName(clip[0]), Lib.pose_clip(bones, clip[1], _fps))
+	player.add_animation_library(&"", library)
+	root_node.add_child(player)
+	player.owner = root_node
+	var document := GLTFDocument.new()
+	var state := GLTFState.new()
+	var error := document.append_from_scene(root_node, state)
+	if error == OK:
+		error = document.write_to_filesystem(state, _out.path_join(String(p_asset["file"])))
+	root_node.free()
+	if error != OK:
+		return "glTF export of %s failed (%s)" % [p_asset["file"], error_string(error)]
+	return ""
+
+
 ## A skinned mesh as rigid parts, one per skin bind (APPROXIMATIONS.rigid_skin): each part is the
 ## triangles bound to that bind, placed and tracked with the bone's per-frame transform.
 func _add_skinned(p_node: MeshInstance3D, p_path: String) -> void:
@@ -722,6 +858,171 @@ func _add_skinned(p_node: MeshInstance3D, p_path: String) -> void:
 			_unsupported.append("skinned mesh %s: skin bind %d has no bone" % [p_path, bind])
 			return
 		_add_node_instance(p_node, p_path, id, materials, "%s|%d" % [p_path, bind], mesh, skin_part)
+
+
+## A skinned mesh as a skeletal mesh (#230). The mesh, its skin and its skeleton's bones go once per
+## asset into skinned/<id>.glb; each instance adds a clip there that holds the bone poses it showed
+## on every row (keyed at every row, so sampling the row times gives the rows exactly), a pose track
+## with the same numbers, and its world transform as a mover track when it moves.
+func _add_skeletal(p_node: MeshInstance3D, p_path: String) -> void:
+	var skeleton := p_node.get_node_or_null(p_node.skeleton) as Skeleton3D
+	if skeleton == null:
+		_unsupported.append("skinned mesh %s without a Skeleton3D" % p_path)
+		return
+	if not skeleton.global_transform.is_equal_approx(p_node.global_transform):
+		_unsupported.append("skinned mesh %s whose Skeleton3D is not at the mesh instance's transform (not exported yet)" % p_path)
+		return
+	var refusals := Lib.skeletal_refusals(p_node.mesh)
+	if not refusals.is_empty():
+		_unsupported.append("skinned mesh %s: %s (not exported yet)" % [p_path, ", ".join(refusals)])
+		return
+	var rows: Array = _bone_rows.get(p_path, [])
+	if rows.size() != _frames:
+		_unsupported.append("skinned mesh %s: %d pose rows, not %d" % [p_path, rows.size(), _frames])
+		return
+	var bones := Lib.skeleton_bones(skeleton)
+	var key := "%d:%d:%s" % [p_node.mesh.get_instance_id(), p_node.skin.get_instance_id(), JSON.stringify(bones).sha256_text()]
+	if not _skeletal_ids.has(key):
+		var id := "s%04d" % _skeletal.size()
+		var mesh := p_node.mesh as ArrayMesh
+		var surfaces: Array = []
+		var triangles := 0
+		var vertices := 0
+		for surface in mesh.get_surface_count():
+			var arrays := mesh.surface_get_arrays(surface)
+			var surface_vertices := (arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size()
+			var indices: Variant = arrays[Mesh.ARRAY_INDEX]
+			var surface_triangles := (indices as PackedInt32Array).size() / 3 if indices != null else surface_vertices / 3
+			surfaces.append({"triangles": surface_triangles, "vertices": surface_vertices})
+			triangles += surface_triangles
+			vertices += surface_vertices
+		var binds: Array = []
+		for bind in p_node.skin.get_bind_count():
+			var bone := p_node.skin.get_bind_bone(bind)
+			if p_node.skin.get_bind_name(bind) != StringName():
+				bone = skeleton.find_bone(p_node.skin.get_bind_name(bind))
+			if bone < 0 or bone >= skeleton.get_bone_count():
+				_unsupported.append("skinned mesh %s: skin bind %d has no bone" % [p_path, bind])
+				return
+			binds.append({"bone": String(skeleton.get_bone_name(bone)), "pose": Lib.transform_rows(p_node.skin.get_bind_pose(bind))})
+		_skeletal_ids[key] = _skeletal.size()
+		_skeletal.append({
+			"id": id,
+			"file": "skinned/%s.glb" % id,
+			"name": String(mesh.resource_name),
+			"surfaces": surfaces,
+			"triangles": triangles,
+			"vertices": vertices,
+			"aabb": Lib.json_value(mesh.get_aabb()),
+			"bones": bones,
+			"binds": binds,
+			"clips": [],
+			"_mesh": mesh,
+			"_skin": p_node.skin,
+			"_clips": [],
+			"_materials": [],
+		})
+	var asset: Dictionary = _skeletal[int(_skeletal_ids[key])]
+	var clip := "c%04d" % _skeletal_instances
+	(asset["clips"] as Array).append(clip)
+	(asset["_clips"] as Array).append([clip, rows])
+	var pose_track := "tracks/p%04d.csv" % _pending_poses.size()
+	_pending_poses.append([pose_track, bones.size(), rows])
+	var materials: Array = []
+	var sources: Array = []
+	for surface in p_node.mesh.get_surface_count():
+		sources.append(p_node.get_active_material(surface))
+		materials.append(_material_id(sources[-1]))
+	_check_translucent_shadow(p_node, sources)
+	if (asset["_materials"] as Array).is_empty():
+		asset["_materials"] = sources
+	var slot := int(_slots.get("%s|-1" % p_path, -1))
+	var transform := p_node.global_transform
+	if slot >= 0 and slot < _slot_row0.size():
+		transform = _slot_row0[slot]
+	_instances.append({
+		"kind": "skeletal",
+		"node": p_path,
+		"skeletal": asset["id"],
+		"clip": clip,
+		"pose_track": pose_track,
+		"materials": materials,
+		"transform": Lib.transform_rows(transform),
+		"track": _track_for(slot),
+		"cast_shadow": p_node.cast_shadow,
+		"gi_mode": p_node.gi_mode,
+		"visibility_range": [p_node.visibility_range_begin, p_node.visibility_range_end],
+		"layers": p_node.layers,
+	})
+	_layers_in_use |= p_node.layers
+	_world_transforms.append(transform)
+	_triangles_total += int(asset["triangles"])
+	var box := transform * p_node.mesh.get_aabb()
+	_aabb = _aabb.merge(box) if _aabb_set else box
+	_aabb_set = true
+	_skeletal_instances += 1
+
+
+## A GridMap's cells as drawn (#230): one entry per mesh library mesh with every cell that shows it,
+## at the GridMap's transform times the cell's (GridMap.get_meshes). The renderer draws each octant's
+## cells of one item as a MultiMesh; the UE import places each entry as instanced meshes. (Baked
+## GridMap meshes draw the same cells merged; GridMap.get_bake_meshes would bake them, so they are
+## not probed. No testbed scene bakes its GridMap.)
+func _add_gridmap(p_node: GridMap) -> void:
+	var path := str(_scene.get_path_to(p_node))
+	var library := p_node.mesh_library
+	if library == null:
+		return
+	var groups := Lib.gridmap_cells(p_node)
+	var meshes: Array = groups.keys()
+	meshes.sort_custom(func(a: Mesh, b: Mesh) -> bool: return _gridmap_item(library, a) < _gridmap_item(library, b))
+	for mesh: Mesh in meshes:
+		var items := PackedInt32Array()
+		var shadows := {}
+		for item in library.get_item_list():
+			if library.get_item_mesh(item) == mesh:
+				items.append(item)
+				shadows[library.get_item_mesh_cast_shadow(item)] = true
+		if shadows.size() != 1:
+			_unsupported.append("GridMap %s: items %s share a mesh with different shadow settings (not exported yet)" % [path, items])
+			return
+		var id := _mesh_id(mesh)
+		if id.is_empty():
+			return
+		var materials: Array = []
+		for surface in mesh.get_surface_count():
+			materials.append(_material_id(mesh.surface_get_material(surface)))
+		var cast_shadow := int(shadows.keys()[0])
+		var rows: Array = []
+		for local: Transform3D in groups[mesh]:
+			var world := p_node.global_transform * local
+			rows.append(Lib.transform_rows(world))
+			_add_placement(world, mesh)
+		_instances.append({
+			"kind": "gridmap",
+			"node": path,
+			"items": Array(items),
+			"mesh": id,
+			"materials": materials,
+			"transform": Lib.transform_rows(p_node.global_transform),
+			"count": rows.size(),
+			"instances": rows,
+			"octant_size": p_node.cell_octant_size,
+			"cast_shadow": cast_shadow,
+			"gi_mode": GeometryInstance3D.GI_MODE_STATIC,
+			"visibility_range": [0.0, 0.0],
+			"layers": 1,
+		})
+		_layers_in_use |= 1
+		_gridmap_cells += rows.size()
+		_gridmap_entries += 1
+
+
+static func _gridmap_item(p_library: MeshLibrary, p_mesh: Mesh) -> int:
+	for item in p_library.get_item_list():
+		if p_library.get_item_mesh(item) == p_mesh:
+			return item
+	return -1
 
 
 func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
@@ -778,9 +1079,9 @@ func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
 	_multimesh_nodes += 1
 
 
-func _add_placement(p_world: Transform3D, p_mesh: Mesh) -> void:
+func _add_placement(p_world: Transform3D, p_mesh: Mesh, p_triangles: int = -1) -> void:
 	_world_transforms.append(p_world)
-	_triangles_total += int(_meshes[_mesh_ids[p_mesh]["index"]]["triangles"])
+	_triangles_total += p_triangles if p_triangles >= 0 else int(_meshes[_mesh_ids[p_mesh]["index"]]["triangles"])
 	var box := p_world * p_mesh.get_aabb()
 	if _aabb_set:
 		_aabb = _aabb.merge(box)

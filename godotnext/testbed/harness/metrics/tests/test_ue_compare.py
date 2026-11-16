@@ -225,6 +225,66 @@ def test_the_upscaler_torture_configs(name: str, line_id: str, level: str, histo
     assert line.ue is not None and line.ue.group == "TSR"
 
 
+_LUMEN_TOTAL = ("GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections")
+_LUMEN_LITE = ("GPU/LumenSceneLighting", "GPU/LumenIrradianceFieldGather")
+
+
+@pytest.mark.parametrize(
+    ("name", "line_id", "gate", "tier", "quality", "frames", "path_frames", "variant"),
+    [
+        ("nextgi_perf_hwrt_high", "g3_1_nextgi_total_high", "G3-1", "HWRT", "HIGH", 600, 600, "p3"),
+        ("nextgi_perf_hwrt_epic", "g3_1_nextgi_total_epic", "G3-1", "HWRT", "EPIC", 600, 600, "p3"),
+        ("nextgi_perf_hwrt_medium", "gs7_lite_total_hwrt", "GS-7", "HWRT", "MEDIUM", 600, 600, "p3"),
+        ("nextgi_perf_swrt_high", "gs2_swrt_total_high", "GS-2", "SWRT", "HIGH", 600, 600, "p3"),
+        ("nextgi_perf_swrt_epic", "gs2_swrt_total_epic", "GS-2", "SWRT", "EPIC", 600, 600, "p3"),
+        ("nextgi_perf_swrt_medium", "gs2_swrt_total_medium", "GS-2", "SWRT", "MEDIUM", 600, 600, "p3"),
+        ("character_walk_hwrt_high", "g3_4_parent_nextgi_total_high", "G3-4", "HWRT", "HIGH", 240, 240, "walk"),
+        ("glass_water_hwrt_high", "g3_5_parent_nextgi_total_high", "G3-5", "HWRT", "HIGH", 600, 1, "light_toggle"),
+    ],
+)
+def test_the_nextgi_scene_configs(
+    name: str, line_id: str, gate: str, tier: str, quality: str, frames: int, path_frames: int, variant: str
+) -> None:
+    config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
+    assert config.raw["port_issue"] == 230
+    # NextGI Perf with its 4 skinned characters (G3-1, plan §2.1), the walk's 240 frames (G3-4's
+    # parent), and Glass & Water's still camera (G3-5's parent).
+    assert (config.frames, config.ue.path_frames) == (frames, path_frames)
+    assert f"--variant={variant}" in godotnext_args(config)
+    assert config.godotnext.nextgi is not None
+    assert (config.godotnext.nextgi.tier, config.godotnext.nextgi.quality) == (tier, quality)
+    assert "--nextgi=on" in godotnext_args(config)
+    level = {"MEDIUM": "1", "HIGH": "2", "EPIC": "3"}[quality]
+    override = (_TESTBED / config.godotnext.override.removeprefix("res://")).read_text(encoding="utf-8")
+    assert "global_illumination/nextgi/enabled=true" in override
+    # Auto, the shipping default, takes the hardware tier where the device has it (the manifest's
+    # NextGI status confirms it); Off forces the software tier.
+    assert f"global_illumination/nextgi/hardware_ray_tracing={0 if tier == 'HWRT' else 1}" in override
+    assert f"global_illumination/nextgi/quality={level}" in override
+    assert ("global_illumination/nextgi/medium_gather=0" in override) == (quality == "MEDIUM")
+    cvars = config.ue.checked_cvars()
+    assert cvars["r.ScreenPercentage"] == "100"
+    assert cvars["sg.GlobalIlluminationQuality"] == level
+    assert cvars["sg.ReflectionQuality"] == level
+    assert cvars["sg.ShadowQuality"] == "2"
+    assert cvars["r.Lumen.AsyncCompute"] == "0"
+    # The shared comparison project keeps Use Hardware Ray Tracing when available off, so each set
+    # sets the tier at launch and the report checks the echo.
+    assert cvars["r.Lumen.HardwareRayTracing"] == ("1" if tier == "HWRT" else "0")
+    assert cvars.get("r.Lumen.TraceMeshSDFs") == (None if tier == "HWRT" else "0")
+    # The Lumen performance guide's Medium: Irradiance Field Gather, r.Lumen.FinalGatherMethod 0.
+    assert cvars.get("r.Lumen.FinalGatherMethod") == ("0" if quality == "MEDIUM" else None)
+    line = next(line for line in config.lines if line.id == line_id)
+    assert (line.status, line.gates, line.statistic) == ("ue_bar", (gate,), "p95")
+    assert line.godotnext is not None and line.godotnext.prefix == "nextgi_"
+    assert set(line.godotnext.exclude) == {"nextgi_2_ms", "nextgi_as_builds_ms"}
+    # The UE columns come from the ports' own game-mode captures; both groups are provisional.
+    assert line.ue is not None and line.ue.group == "Lumen total (provisional)"
+    assert line.ue.columns == (_LUMEN_LITE if quality == "MEDIUM" else _LUMEN_TOTAL)
+    assert "Provisional" in line.reason
+    assert ("Lumen Lite" in line.reason) == (quality == "MEDIUM")
+
+
 def test_the_ue_window_mode_comes_from_the_config() -> None:
     assert "-windowed" in ue_args(parse_config(synthetic_config()))
     fullscreen = ue_args(parse_config(_with("ue", window="fullscreen")))

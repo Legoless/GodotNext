@@ -1,11 +1,13 @@
 extends Node3D
 ## A small scene for the UE exporter's per-row refusals (run_ue_export_check.sh). It holds a box, a
-## MultiMesh of three boxes, an omni light and a one-bone skinned triangle in front of a camera, all
-## still, and exports with --approximate=rigid_skin. --case=<name> breaks one thing:
+## MultiMesh of three boxes, a GridMap of two boxes, an omni light and a one-bone skinned triangle in
+## front of a camera, all still; it exports with --approximate=rigid_skin (the triangle as a rigid
+## part) or without it (as a skeletal mesh). --case=<name> breaks one thing:
 ##
 ##   light_returns      the light moves away on frame 8 and is back on frame 9
 ##   mesh_blinks        the box is hidden on frame 8 only
 ##   multimesh_returns  one MultiMesh instance moves on frame 8 and is back on frame 9
+##   gridmap_returns    one GridMap cell moves on frame 8 and is back on frame 9
 ##   skeleton_offset    the skinned triangle's Skeleton3D sits 0.5 m beside the mesh instance
 ##   camera_cull        the camera's cull mask hides the box's layer
 ##
@@ -26,6 +28,7 @@ var _light: OmniLight3D
 var _box: MeshInstance3D
 var _rocks: MultiMeshInstance3D
 var _rock_transform := Transform3D()
+var _grid: GridMap
 
 
 func _init() -> void:
@@ -59,6 +62,18 @@ func _init() -> void:
 	_rocks.name = "Rocks"
 	_rocks.multimesh = multimesh
 	add_child(_rocks)
+
+	var library := MeshLibrary.new()
+	library.create_item(0)
+	library.set_item_mesh(0, box_mesh)
+	_grid = GridMap.new()
+	_grid.name = "Grid"
+	_grid.mesh_library = library
+	_grid.cell_size = Vector3(1.0, 1.0, 1.0)
+	_grid.position = Vector3(0.0, 2.5, -2.0)
+	_grid.set_cell_item(Vector3i(-1, 0, 0), 0)
+	_grid.set_cell_item(Vector3i(1, 0, 0), 0)
+	add_child(_grid)
 
 	_light = OmniLight3D.new()
 	_light.name = "Light"
@@ -104,3 +119,7 @@ func _process(_delta: float) -> void:
 		"multimesh_returns":
 			var moved := _rock_transform.translated(Vector3(0.0, 1.0, 0.0))
 			_rocks.multimesh.set_instance_transform(1, moved if perturb else _rock_transform)
+		"gridmap_returns":
+			# The same number of cells, one of them elsewhere for one frame.
+			_grid.set_cell_item(Vector3i(1, 0, 0), -1 if perturb else 0)
+			_grid.set_cell_item(Vector3i(1, 1, 0), 0 if perturb else -1)

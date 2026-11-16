@@ -1,10 +1,11 @@
 extends SceneTree
 ## Checks two exports of one scene made by tools/ue_export/ue_export.gd: the overlap-heavy kitbash
-## (#235), RT Shadow Yard or MegaLights Hall at 1,024 lights (#233), or Upscaler Torture (#232).
+## (#235), RT Shadow Yard or MegaLights Hall at 1,024 lights (#233), Upscaler Torture (#232), or
+## Glass & Water, Character Walk or NextGI Perf with its 4 skinned characters (#230).
 ## run_ue_export_check.sh makes them; this script runs headless:
 ##
 ##   godot --headless --path godotnext/testbed --script res://tests/ue_export/check_ue_export.gd -- \
-##     <kitbash|yard|hall|torture> <export A> <export B>
+##     <kitbash|yard|hall|torture|glass|walk|perf> <export A> <export B>
 ##
 ## It checks that the two exports are byte-identical apart from export_manifest.json, that the
 ## manifest checksums match, that scene.json follows ue_export_schema.md, that library.glb and
@@ -16,16 +17,26 @@ extends SceneTree
 ## masks and approximations; Upscaler Torture's camera path and cut, recomputed from the scene's
 ## curve, its moving fan and occluders and the rigid parts of its skinned character, recomputed from
 ## the scene's nodes and animation, its UV transforms, texture filters, ShaderMaterial and
-## approximations. Prints GODOTNEXT_RESULT and exits 1 on any failure.
+## approximations; Glass & Water's blends, its omni at its scripted energy and the hidden fence left
+## out; Character Walk's and NextGI Perf's skeletal characters (skinned/<id>.glb re-imports with the
+## scene's bones, binds, mesh and one clip per character whose every row is the pose track's, and
+## the pose and world tracks recomputed from the scene's walk cycle and paths); NextGI Perf's
+## seeded instances in all three feeds (MeshInstance3D, MultiMesh and GridMap cells as drawn) and
+## its camera spline. Prints GODOTNEXT_RESULT and exits 1 on any failure.
 
 const Lib := preload("res://tools/ue_export/ue_export_lib.gd")
 const Layout := preload("res://scenes/swrt_kitbash/layout.gd")
+const PerfLayout := preload("res://scenes/nextgi_perf/layout.gd")
+const Character := preload("res://scenes/character_walk/character.gd")
 
 const SCENES := {
 	"kitbash": {"scene": "res://scenes/swrt_kitbash/swrt_kitbash.tscn", "camera": "CaptureCam", "sky": true},
 	"yard": {"scene": "res://scenes/rt_shadow_yard/rt_shadow_yard.tscn", "camera": "cam_main", "sky": true},
 	"hall": {"scene": "res://scenes/mega_lights_hall/mega_lights_hall.tscn", "camera": "cam_main", "sky": true},
 	"torture": {"scene": "res://scenes/upscaler_torture/upscaler_torture.tscn", "camera": "CameraPath/CameraFollow/Camera3D", "sky": false},
+	"glass": {"scene": "res://scenes/glass_water/glass_water.tscn", "camera": "CaptureCam", "sky": true},
+	"walk": {"scene": "res://scenes/character_walk/character_walk.tscn", "camera": "CaptureCam", "sky": true},
+	"perf": {"scene": "res://scenes/nextgi_perf/nextgi_perf.tscn", "camera": "CaptureCam", "sky": true},
 }
 ## Upscaler Torture (#232): the frame the scene resets the temporal history at, and its timeline
 ## (torture_timeline.gd), restated here so the check recomputes the poses on its own.
@@ -40,12 +51,14 @@ var _has_sky := true
 
 var _failures: Array[String] = []
 var _checks := 0
+## The walker's bones as [name, rest origin] (_walk_pose), made once.
+var _walker_bones: Array = []
 
 
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.size() != 3 or not SCENES.has(String(args[0])):
-		printerr("check_ue_export.gd: pass <kitbash|yard|hall|torture> and two export directories after --")
+		printerr("check_ue_export.gd: pass <kitbash|yard|hall|torture|glass|walk|perf> and two export directories after --")
 		quit(2)
 		return
 	var which := String(args[0])
@@ -68,6 +81,13 @@ func _initialize() -> void:
 				_check_hall(scene)
 			"torture":
 				_check_torture(first, scene)
+			"glass":
+				_check_glass(scene)
+			"walk":
+				_check_walk(first, scene)
+			"perf":
+				_check_perf(first, scene)
+		_check_skeletal(first, scene)
 		_check_library(first, scene)
 		_check_axes(first)
 		_check_camera_track(first, scene)
@@ -304,6 +324,30 @@ func _test_rigid_skin() -> void:
 	var strip := st.commit()
 	_check(strip.surface_get_primitive_type(0) == Mesh.PRIMITIVE_TRIANGLE_STRIP and String(Lib.rigid_skin_parts(strip).get("error", "")).contains("triangle list"), "a skinned triangle strip is refused, not regrouped")
 	_check(String(Lib.rigid_skin_parts(BoxMesh.new()).get("error", "")).contains("ArrayMesh"), "a mesh other than an ArrayMesh is refused")
+	# The skeletal export (#230) takes the same meshes whole, and refuses what a skeletal mesh would drop.
+	_check(Lib.skeletal_refusals(mesh).is_empty(), "a skinned triangle list with 4 weights is exported as a skeletal mesh")
+	_check(Lib.skeletal_refusals(BoxMesh.new()) == PackedStringArray(["it is a BoxMesh, not an ArrayMesh"]), "a skeletal mesh other than an ArrayMesh is refused")
+	_check(Lib.skeletal_refusals(morphed) == PackedStringArray(["blend shapes"]), "a skeletal mesh with blend shapes is refused")
+	_check(Lib.skeletal_refusals(strip) == PackedStringArray(["surface 0 is not a triangle list"]), "a skeletal triangle strip is refused")
+	# 8 weights per vertex, made from arrays (SurfaceTool.begin() resets its weight count to 4).
+	var eight_arrays := []
+	eight_arrays.resize(Mesh.ARRAY_MAX)
+	eight_arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array([positions[0], positions[1], positions[2]])
+	var eight_bones := PackedInt32Array()
+	var eight_weights := PackedFloat32Array()
+	for index in 3:
+		eight_bones.append_array(PackedInt32Array([0, 1, 0, 0, 0, 0, 0, 0]))
+		eight_weights.append_array(PackedFloat32Array([0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+	eight_arrays[Mesh.ARRAY_BONES] = eight_bones
+	eight_arrays[Mesh.ARRAY_WEIGHTS] = eight_weights
+	var eight := ArrayMesh.new()
+	eight.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, eight_arrays, [], {}, Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS)
+	_check((eight.surface_get_format(0) & Mesh.ARRAY_FLAG_USE_8_BONE_WEIGHTS) != 0 and Lib.skeletal_refusals(eight) == PackedStringArray(["surface 0 uses 8 bone weights"]), "a skeletal mesh with 8 bone weights is refused")
+	st.clear()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for index in 3:
+		st.add_vertex(positions[index])
+	_check(Lib.skeletal_refusals(st.commit()) == PackedStringArray(["surface 0 has no bones or weights"]), "a skinned instance whose mesh has no bones or weights is refused")
 	if split.has("error"):
 		return
 	var part_a := Transform3D(Basis.from_euler(Vector3(0.1, 0.2, 0.3)), Vector3(0.5, 1.0, -2.0))
@@ -402,7 +446,7 @@ func _check_schema(p_scene: Dictionary) -> void:
 	var top := {
 		"schema": TYPE_FLOAT, "scene": TYPE_STRING, "units": TYPE_DICTIONARY, "fps": TYPE_FLOAT,
 		"warmup": TYPE_FLOAT, "frames": TYPE_FLOAT, "camera": TYPE_DICTIONARY, "meshes": TYPE_ARRAY,
-		"materials": TYPE_ARRAY, "textures": TYPE_ARRAY, "instances": TYPE_ARRAY, "lights": TYPE_ARRAY,
+		"skeletal_meshes": TYPE_ARRAY, "materials": TYPE_ARRAY, "textures": TYPE_ARRAY, "instances": TYPE_ARRAY, "lights": TYPE_ARRAY,
 		"approximations": TYPE_ARRAY, "environment": TYPE_DICTIONARY, "rendering": TYPE_DICTIONARY,
 		"checks": TYPE_DICTIONARY,
 	}
@@ -420,6 +464,12 @@ func _check_schema(p_scene: Dictionary) -> void:
 		for key in ["id", "gltf_node", "surfaces", "triangles", "vertices", "aabb", "nextgeo"]:
 			_check(mesh.has(key), "mesh has %s" % key)
 		mesh_ids[String(mesh["id"])] = mesh
+	var skeletal_ids := {}
+	for asset: Dictionary in p_scene["skeletal_meshes"]:
+		for key in ["id", "file", "surfaces", "triangles", "vertices", "aabb", "bones", "binds", "clips"]:
+			_check(asset.has(key), "skeletal mesh has %s" % key)
+		skeletal_ids[String(asset["id"])] = asset
+		_check(String(asset.get("file", "")) == "skinned/%s.glb" % asset.get("id", ""), "skeletal mesh %s lives in skinned/<id>.glb" % asset.get("id", ""))
 	var texture_ids := {}
 	for texture: Dictionary in p_scene["textures"]:
 		for key in ["id", "file", "class", "size", "mipmaps", "usages"]:
@@ -447,6 +497,9 @@ func _check_schema(p_scene: Dictionary) -> void:
 	var triangles := 0
 	var node_count := 0
 	var multimesh_count := 0
+	var gridmap_count := 0
+	var skeletal_count := 0
+	var clips := {}
 	var blends := {}
 	for material: Dictionary in p_scene["materials"]:
 		blends[String(material["id"])] = String(material.get("blend", ""))
@@ -459,24 +512,40 @@ func _check_schema(p_scene: Dictionary) -> void:
 					break
 	for instance: Dictionary in p_scene["instances"]:
 		var kind := String(instance["kind"])
-		_check(kind == "node" or kind == "multimesh", "instance kind is node or multimesh")
-		_check(mesh_ids.has(String(instance["mesh"])), "instance mesh %s exists" % instance["mesh"])
+		_check(kind in ["node", "multimesh", "gridmap", "skeletal"], "instance kind is node, multimesh, gridmap or skeletal")
+		if kind == "skeletal":
+			var asset: Dictionary = skeletal_ids.get(String(instance.get("skeletal", "")), {})
+			_check(not asset.is_empty(), "skeletal instance %s names an exported skeletal mesh" % instance["node"])
+			_check(String(instance.get("clip", "")) in (asset.get("clips", []) as Array), "skeletal instance %s names one of its asset's clips" % instance["node"])
+			_check(not clips.has(String(instance.get("clip", ""))), "each skeletal instance has its own clip")
+			clips[String(instance.get("clip", ""))] = true
+			_check(String(instance.get("pose_track", "")).begins_with("tracks/p"), "skeletal instance %s has a pose track" % instance["node"])
+			_check((instance["materials"] as Array).size() == (asset.get("surfaces", []) as Array).size(), "skeletal instance %s has one material per surface" % instance["node"])
+		else:
+			_check(mesh_ids.has(String(instance["mesh"])), "instance mesh %s exists" % instance["mesh"])
 		for material_id: Variant in instance["materials"]:
 			_check(material_ids.has(String(material_id)), "instance material %s exists" % material_id)
 		_check((instance["transform"] as Array).size() == 12, "instance transform has 12 numbers")
 		_check(instance.has("layers"), "instance has layers")
-		_check(kind == "multimesh" or instance.has("track"), "a node instance has a track entry")
-		var mesh_triangles := int(mesh_ids[String(instance["mesh"])]["triangles"]) if mesh_ids.has(String(instance["mesh"])) else 0
+		_check(kind in ["multimesh", "gridmap"] or instance.has("track"), "a node or skeletal instance has a track entry")
+		var mesh_triangles := int(mesh_ids[String(instance["mesh"])]["triangles"]) if mesh_ids.has(String(instance.get("mesh", ""))) else 0
 		if kind == "node":
 			placements.append(Lib.rows_to_transform(instance["transform"]))
 			triangles += mesh_triangles
 			node_count += 1
+		elif kind == "skeletal":
+			placements.append(Lib.rows_to_transform(instance["transform"]))
+			triangles += int(skeletal_ids.get(String(instance.get("skeletal", "")), {}).get("triangles", 0))
+			skeletal_count += 1
 		else:
-			_check((instance["instances"] as Array).size() == int(instance["count"]), "multimesh count matches its rows")
+			_check((instance["instances"] as Array).size() == int(instance["count"]), "%s count matches its rows" % kind)
 			for rows: Array in instance["instances"]:
 				placements.append(Lib.rows_to_transform(rows))
 				triangles += mesh_triangles
-				multimesh_count += 1
+				if kind == "multimesh":
+					multimesh_count += 1
+				else:
+					gridmap_count += 1
 	var light_types := {}
 	var unlit_lights := PackedStringArray()
 	for light: Dictionary in p_scene["lights"]:
@@ -499,6 +568,8 @@ func _check_schema(p_scene: Dictionary) -> void:
 	var checks: Dictionary = p_scene["checks"]
 	_check(int(checks["node_instances"]) == node_count, "checks.node_instances")
 	_check(int(checks["multimesh_instances"]) == multimesh_count, "checks.multimesh_instances")
+	_check(int(checks["gridmap_cells"]) == gridmap_count, "checks.gridmap_cells")
+	_check(int(checks["skeletal_instances"]) == skeletal_count and int(checks["skeletal_meshes"]) == skeletal_ids.size(), "checks.skeletal_instances and checks.skeletal_meshes")
 	_check(int(checks["instances_total"]) == placements.size(), "checks.instances_total")
 	_check(int(checks["triangles_total"]) == triangles, "checks.triangles_total")
 	_check(int(checks["meshes"]) == mesh_ids.size() and int(checks["materials"]) == material_ids.size(), "checks.meshes and checks.materials")
@@ -785,6 +856,403 @@ func _check_torture(p_dir: String, p_scene: Dictionary) -> void:
 	_check(approximations.get("shader_material", []) == ["%s" % _material_label(emissive)], "shader_material names the scrolling emissive's material")
 
 
+## Glass & Water (#52, #230), light_toggle: the plaster room (Lambert, like every material of the
+## three #230 scenes), two glass panes and the water (alpha-blended, opacity 0.35 and 0.6, each
+## casting shadows: translucent_shadow), the scissor
+## fence (5 bars clipped at 0.5) and not the hidden opaque fence, the sun and the omni at the
+## energy the script gives it from frame 0 (8; the scene stores 0) with shadows, a still camera and
+## nothing moving.
+func _check_glass(p_scene: Dictionary) -> void:
+	var checks: Dictionary = p_scene["checks"]
+	_check(int(checks["node_instances"]) == 13 and int(checks["multimesh_instances"]) == 0 and int(checks["gridmap_cells"]) == 0 and int(checks["skeletal_instances"]) == 0, "5 room boxes, 2 glass panes, the water and 5 fence bars (%d)" % int(checks["node_instances"]))
+	_check(int(checks["movers"]) == 0, "nothing moves")
+	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 1}, "the sun and the omni (%s)" % checks["light_types"])
+	for instance: Dictionary in p_scene["instances"]:
+		_check(not String(instance["node"]).begins_with("FenceOpaque"), "the hidden opaque fence is left out (%s)" % instance["node"])
+	for light: Dictionary in p_scene["lights"]:
+		if light["type"] == "omni":
+			_check(is_equal_approx(float(light["properties"]["light_energy"]), 8.0) and bool(light["properties"]["shadow_enabled"]), "the omni carries the energy the script sets (8, not the stored 0) and its shadow (%s)" % light["properties"]["light_energy"])
+	var blends := {}
+	for material: Dictionary in p_scene["materials"]:
+		blends[String(material["name"])] = material
+	_check(blends.keys().size() == 4, "plaster, glass, water and the scissor fence materials (%s)" % [blends.keys()])
+	_check(String(blends.get("Plaster", {}).get("blend", "")) == "opaque", "plaster is opaque")
+	_check(String(blends.get("Glass", {}).get("blend", "")) == "translucent" and is_equal_approx(float(blends["Glass"]["albedo_linear"][3]), 0.35), "glass blends at opacity 0.35")
+	_check(String(blends.get("Water", {}).get("blend", "")) == "translucent" and is_equal_approx(float(blends["Water"]["albedo_linear"][3]), 0.6), "water blends at opacity 0.6")
+	_check(String(blends.get("FenceScissorMat", {}).get("blend", "")) == "masked" and is_equal_approx(float(blends["FenceScissorMat"]["alpha_scissor_threshold"]), 0.5), "the fence is clipped at 0.5")
+	var approximations := _approximations(p_scene)
+	_check(approximations.keys() == ["translucent_shadow"], "Glass & Water needs translucent_shadow only (%s)" % [approximations.keys()])
+	_check(PackedStringArray(approximations.get("translucent_shadow", [])) == PackedStringArray(["GlassA", "GlassB", "Water"]), "translucent_shadow names the glass panes and the water")
+
+
+## Character Walk (#52, #230), walk: the floor, the wall, the sun, and the skinned walker as one
+## skeletal instance that crosses the wall from x 3.6 to 0.4 over the path's 240 frames while its
+## walk cycle plays (pose row r = the walk clip at r / 60 s, wrapped at 1 s).
+func _check_walk(p_dir: String, p_scene: Dictionary) -> void:
+	var checks: Dictionary = p_scene["checks"]
+	_check(int(checks["node_instances"]) == 2 and int(checks["skeletal_instances"]) == 1 and int(checks["skeletal_meshes"]) == 1, "the floor, the wall and one skeletal walker (%d, %d)" % [int(checks["node_instances"]), int(checks["skeletal_instances"])])
+	_check(int(checks["movers"]) == 1, "only the walker moves (%d)" % int(checks["movers"]))
+	_check(_int_counts(checks["light_types"]) == {"directional": 1}, "the sun (%s)" % checks["light_types"])
+	_check(_approximations(p_scene).is_empty(), "Character Walk needs no approximation (%s)" % [_approximations(p_scene).keys()])
+	for instance: Dictionary in p_scene["instances"]:
+		if instance["kind"] != "skeletal":
+			continue
+		_check(String(instance["node"]) == "Character/Visual", "the skeletal instance is Character/Visual (%s)" % instance["node"])
+		var frames := int(p_scene["frames"])
+		var expected_world: Array = []
+		var expected_poses: Array = []
+		for frame in frames:
+			expected_world.append(Transform3D(Basis(), Character.path_position(frame)))
+			expected_poses.append(_walk_pose(frame, 0))
+		_check_character_tracks(p_dir, instance, expected_world, expected_poses, false)
+
+
+## NextGI Perf (#33, #52, #230): the seeded instances in their three feeds (MeshInstance3D nodes,
+## 7 MultiMeshes, and GridMap cells as drawn, at the --instances count of the export), the 12
+## room boxes, the sun, 16 omnis and the off-screen spot; with --variant=p3 the 4 skinned
+## characters as skeletal instances following the spline (world and pose tracks recomputed).
+func _check_perf(p_dir: String, p_scene: Dictionary) -> void:
+	var manifest: Dictionary = _read_json(p_dir.path_join("export_manifest.json"))
+	var count := int(_user_arg(manifest, "--instances", str(PerfLayout.DEFAULT_INSTANCES)))
+	var p3 := _user_arg(manifest, "--variant", "") == "p3"
+	var plan: Dictionary = PerfLayout.plan(count, PerfLayout.SEED)
+	var positions: PackedVector3Array = plan["positions"]
+	var kinds: PackedInt32Array = plan["kind"]
+	var share := PerfLayout.shares(count)
+	var checks: Dictionary = p_scene["checks"]
+	_check(int(checks["node_instances"]) == int(share["mesh"]) + 12, "%d MeshInstance3D instances and the 12 room boxes (%d)" % [int(share["mesh"]), int(checks["node_instances"])])
+	_check(int(checks["multimesh_instances"]) == int(share["multimesh"]), "%d MultiMesh instances (%d)" % [int(share["multimesh"]), int(checks["multimesh_instances"])])
+	_check(int(checks["gridmap_cells"]) == int(share["gridmap"]), "%d GridMap cells (%d)" % [int(share["gridmap"]), int(checks["gridmap_cells"])])
+	_check(int(checks["skeletal_instances"]) == (Character.PERF_COUNT if p3 else 0), "the p3 variant's 4 characters (%d)" % int(checks["skeletal_instances"]))
+	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 16, "spot": 1}, "the sun, 16 omnis and the off-screen spot (%s)" % checks["light_types"])
+	_check(_approximations(p_scene).is_empty(), "NextGI Perf needs no approximation (%s)" % [_approximations(p_scene).keys()])
+	var mesh_size := {}
+	for mesh: Dictionary in p_scene["meshes"]:
+		mesh_size[String(mesh["id"])] = _vector(mesh["aabb"]["size"])
+	var by_bucket := {}
+	for index in positions.size():
+		var key := "%d:%d" % [kinds[index], index % PerfLayout.ROUGHNESS.size()]
+		if not by_bucket.has(key):
+			by_bucket[key] = []
+		(by_bucket[key] as Array).append(index)
+	var off := 0
+	var seen := 0
+	var first_off: Array[String] = []
+	var box := Vector3.ONE * PerfLayout.BOX
+	var grid_box := Vector3.ONE * (PerfLayout.BOX / PerfLayout.CELL)
+	for instance: Dictionary in p_scene["instances"]:
+		var node := String(instance["node"])
+		var kind := String(instance["kind"])
+		if kind == "node" and node.begins_with("Instances/Meshes/Mesh"):
+			var index := int(node.trim_prefix("Instances/Meshes/Mesh"))
+			seen += 1
+			if kinds[index] != 0 or not _transforms_close(Lib.rows_to_transform(instance["transform"]), Transform3D(Basis(), positions[index])) or not (mesh_size.get(String(instance["mesh"]), Vector3()) as Vector3).is_equal_approx(box):
+				off += 1
+				if first_off.size() < 3:
+					first_off.append(node)
+		elif kind == "multimesh":
+			var bucket := int(node.trim_prefix("Instances/MultiMeshes/Roughness"))
+			var indices: Array = by_bucket.get("1:%d" % bucket, [])
+			_check(indices.size() == int(instance["count"]), "MultiMesh %s holds the plan's %d instances" % [node, indices.size()])
+			for row in mini(indices.size(), (instance["instances"] as Array).size()):
+				seen += 1
+				if not _transforms_close(Lib.rows_to_transform(instance["instances"][row]), Transform3D(Basis(), positions[int(indices[row])])):
+					off += 1
+					if first_off.size() < 3:
+						first_off.append("%s row %d" % [node, row])
+		elif kind == "gridmap":
+			var items: Array = instance["items"]
+			_check(items.size() == 1 and node == "Instances/Grid", "a GridMap entry names one item of Instances/Grid (%s %s)" % [node, items])
+			_check((mesh_size.get(String(instance["mesh"]), Vector3()) as Vector3).is_equal_approx(grid_box), "GridMap item %s draws its %.1f m box (%s)" % [items, PerfLayout.BOX / PerfLayout.CELL, mesh_size.get(String(instance["mesh"]))])
+			var expected := {}
+			for index: int in by_bucket.get("2:%d" % int(items[0]), []):
+				expected[positions[index]] = true
+			_check(expected.size() == int(instance["count"]), "GridMap item %s has the plan's %d cells (%d)" % [items, expected.size(), int(instance["count"])])
+			for rows: Array in instance["instances"]:
+				seen += 1
+				var transform := Lib.rows_to_transform(rows)
+				if not transform.basis.is_equal_approx(Basis()) or not expected.has(transform.origin):
+					off += 1
+					if first_off.size() < 3:
+						first_off.append("%s cell %s" % [node, transform.origin])
+	_check(seen == positions.size() and off == 0, "every seeded placement is the plan's, in its feed (%d of %d seen, %d differ: %s)" % [seen, positions.size(), off, first_off])
+	if not p3:
+		return
+	var characters := 0
+	for instance: Dictionary in p_scene["instances"]:
+		if instance["kind"] != "skeletal":
+			continue
+		var node := String(instance["node"])
+		var index := int(node.trim_prefix("P3Characters/PerfCharacter").trim_suffix("/Visual"))
+		_check(node == "P3Characters/PerfCharacter%d/Visual" % index, "skeletal instance %s is a perf character" % node)
+		characters += 1
+		var frames := int(p_scene["frames"])
+		var expected_world: Array = []
+		var expected_poses: Array = []
+		var basis := Basis()
+		for frame in frames:
+			var travel := PerfLayout.spline_position(frame) - PerfLayout.spline_position(maxi(frame - 1, 0))
+			if travel.length_squared() > 1e-8:
+				basis = Basis.looking_at(travel, Vector3.UP)
+			expected_world.append(Transform3D(basis, Character.perf_position(index, frame)))
+			expected_poses.append(_walk_pose(frame, index * 7))
+		_check_character_tracks(p_dir, instance, expected_world, expected_poses, true)
+	_check(characters == Character.PERF_COUNT, "4 perf characters (%d)" % characters)
+
+
+## A walker's world track and pose track against the recomputed rows. Row 0's facing may be the one
+## the scene held before the path started (the spline's travel is zero there) when p_free_row0_basis.
+func _check_character_tracks(p_dir: String, p_instance: Dictionary, p_world: Array, p_poses: Array, p_free_row0_basis: bool) -> void:
+	var node := String(p_instance["node"])
+	var rows := _read_track(p_dir.path_join(String(p_instance["track"]))) if p_instance["track"] != null else []
+	_check(rows.size() == p_world.size(), "%s has a world track with one row per frame (%d)" % [node, rows.size()])
+	var off := 0
+	for row in mini(rows.size(), p_world.size()):
+		var got: Transform3D = rows[row]
+		var want: Transform3D = p_world[row]
+		if row == 0 and p_free_row0_basis:
+			if not got.origin.is_equal_approx(want.origin) or not (got.basis.is_equal_approx(Basis()) or (rows.size() > 1 and got.basis.is_equal_approx((rows[1] as Transform3D).basis))):
+				off += 1
+		elif not _transforms_close(got, want, 1e-4):
+			off += 1
+	_check(off == 0, "%s world track rows are the scene's path (%d differ)" % [node, off])
+	var poses := _read_pose_track(p_dir.path_join(String(p_instance["pose_track"])))
+	_check(poses.size() == p_poses.size(), "%s has a pose track with one row per frame (%d)" % [node, poses.size()])
+	var worst := 0.0
+	for row in mini(poses.size(), p_poses.size()):
+		var got: PackedFloat32Array = poses[row]
+		var want: PackedFloat32Array = p_poses[row]
+		if got.size() != want.size():
+			worst = INF
+			break
+		worst = maxf(worst, _pose_row_difference(got, want))
+	_check(worst <= 1e-4, "%s pose rows are the walk cycle at each frame (worst %s)" % [node, worst])
+
+
+## The largest difference between two pose rows (a rotation and its negation are the same).
+func _pose_row_difference(p_a: PackedFloat32Array, p_b: PackedFloat32Array) -> float:
+	var worst := 0.0
+	for base in range(0, p_a.size(), Lib.POSE_STRIDE):
+		var dot := 0.0
+		for index in range(3, 7):
+			dot += p_a[base + index] * p_b[base + index]
+		var sign := 1.0 if dot >= 0.0 else -1.0
+		for index in Lib.POSE_STRIDE:
+			var scale := sign if index >= 3 and index <= 6 else 1.0
+			worst = maxf(worst, absf(p_a[base + index] * scale - p_b[base + index]))
+	return worst
+
+
+## The walker's local bone poses (Lib.pose_row order) at a path frame and phase: positions at the
+## rests, the walk clip's rotations at (frame + phase) / 60 s wrapped at the 1 s cycle, unit scale.
+func _walk_pose(p_frame: int, p_phase: int) -> PackedFloat32Array:
+	if _walker_bones.is_empty():
+		# The walker's own skeleton builder, without the material make_character adds.
+		var skeleton := Skeleton3D.new()
+		Character._build_skeleton(skeleton)
+		for bone in skeleton.get_bone_count():
+			_walker_bones.append([String(skeleton.get_bone_name(bone)), skeleton.get_bone_rest(bone).origin])
+		skeleton.free()
+	var animation := Character.shared_animation()
+	var time := fmod(float(p_frame + p_phase) / 60.0, Character.WALK_CYCLE_SEC)
+	var rotations := {}
+	for track in animation.get_track_count():
+		if animation.track_get_type(track) == Animation.TYPE_ROTATION_3D:
+			rotations[String(animation.track_get_path(track).get_concatenated_subnames())] = animation.rotation_track_interpolate(track, time)
+	var row := PackedFloat32Array()
+	for bone: Array in _walker_bones:
+		var position: Vector3 = bone[1]
+		var rotation: Quaternion = rotations.get(String(bone[0]), Quaternion())
+		row.append_array(PackedFloat32Array([position.x, position.y, position.z, rotation.x, rotation.y, rotation.z, rotation.w, 1.0, 1.0, 1.0]))
+	return row
+
+
+## Each skeletal mesh's glb re-imports with the asset's bones (names, parents, rests), its skin's
+## binds, the scene mesh's triangles, vertices, bone indices and weights, and one clip per instance
+## whose every row (sampled at row / fps) is that instance's pose track row.
+func _check_skeletal(p_dir: String, p_scene: Dictionary) -> void:
+	for asset: Dictionary in p_scene["skeletal_meshes"]:
+		var id := String(asset["id"])
+		var document := GLTFDocument.new()
+		var state := GLTFState.new()
+		if document.append_from_file(p_dir.path_join(String(asset["file"])), state) != OK:
+			_check(false, "%s imports" % asset["file"])
+			continue
+		# Godot's importer resamples clips at bake_fps (30 by default); sample at the export's rate
+		# so each row is a key.
+		var root_node := document.generate_scene(state, float(p_scene["fps"]))
+		var skeletons := root_node.find_children("*", "Skeleton3D", true, false)
+		var instances := root_node.find_children("*", "MeshInstance3D", true, false)
+		var players := root_node.find_children("*", "AnimationPlayer", true, false)
+		_check(skeletons.size() == 1 and instances.size() == 1 and players.size() == 1, "%s holds one skeleton, one skinned mesh and one animation player" % asset["file"])
+		if skeletons.size() != 1 or instances.size() != 1 or players.size() != 1:
+			root_node.free()
+			continue
+		var skeleton := skeletons[0] as Skeleton3D
+		var instance := instances[0] as MeshInstance3D
+		var player := players[0] as AnimationPlayer
+		var bones: Array = asset["bones"]
+		var bones_ok := skeleton.get_bone_count() == bones.size()
+		for index in mini(skeleton.get_bone_count(), bones.size()):
+			var bone: Dictionary = bones[index]
+			var parent := skeleton.get_bone_parent(index)
+			var parent_name := String(skeleton.get_bone_name(parent)) if parent >= 0 else ""
+			var want_parent := String(bones[int(bone["parent"])]["name"]) if int(bone["parent"]) >= 0 else ""
+			if String(skeleton.get_bone_name(index)) != String(bone["name"]) or parent_name != want_parent or not _transforms_close(skeleton.get_bone_rest(index), Lib.rows_to_transform(bone["rest"]), 1e-5):
+				bones_ok = false
+		_check(bones_ok, "%s re-imports with the asset's %d bones, parents and rests" % [id, bones.size()])
+		var skin := instance.skin
+		var binds: Array = asset["binds"]
+		var binds_ok := skin != null and skin.get_bind_count() == binds.size()
+		for bind in (mini(skin.get_bind_count(), binds.size()) if skin != null else 0):
+			var name := String(skin.get_bind_name(bind))
+			if name.is_empty():
+				name = String(skeleton.get_bone_name(skin.get_bind_bone(bind)))
+			if name != String(binds[bind]["bone"]) or not _transforms_close(skin.get_bind_pose(bind), Lib.rows_to_transform(binds[bind]["pose"]), 1e-5):
+				binds_ok = false
+		_check(binds_ok, "%s re-imports with the skin's %d binds" % [id, binds.size()])
+		var source := _skeletal_source_mesh(p_scene, asset)
+		_check(source != null, "%s: the scene's skinned mesh is found for comparison" % id)
+		if source != null:
+			_check(_skin_arrays_equal(instance.mesh, source), "%s re-imports with the scene mesh's vertices, bone indices and weights" % id)
+		var clips_ok := true
+		var compared := 0
+		var worst := 0.0
+		for scene_instance: Dictionary in p_scene["instances"]:
+			if scene_instance["kind"] != "skeletal" or String(scene_instance["skeletal"]) != id:
+				continue
+			var clip := String(scene_instance["clip"])
+			if not player.has_animation(clip):
+				clips_ok = false
+				continue
+			var animation := player.get_animation(clip)
+			# bone name -> {track type: track index}
+			var tracks := {}
+			for track in animation.get_track_count():
+				var bone_name := String(animation.track_get_path(track).get_concatenated_subnames())
+				if not tracks.has(bone_name):
+					tracks[bone_name] = {}
+				tracks[bone_name][animation.track_get_type(track)] = track
+			var poses := _read_pose_track(p_dir.path_join(String(scene_instance["pose_track"])))
+			for row in poses.size():
+				var time := float(row) / float(p_scene["fps"])
+				var want: PackedFloat32Array = poses[row]
+				for bone in bones.size():
+					# Godot's importer drops the tracks that never change (the clip keys all three on
+					# every row): those hold the bone's rest.
+					var by_type: Dictionary = tracks.get(String(bones[bone]["name"]), {})
+					var position_track := int(by_type.get(Animation.TYPE_POSITION_3D, -1))
+					var rotation_track := int(by_type.get(Animation.TYPE_ROTATION_3D, -1))
+					var scale_track := int(by_type.get(Animation.TYPE_SCALE_3D, -1))
+					var rest := skeleton.get_bone_rest(bone)
+					var position := animation.position_track_interpolate(position_track, time) if position_track >= 0 else rest.origin
+					var rotation := animation.rotation_track_interpolate(rotation_track, time) if rotation_track >= 0 else rest.basis.get_rotation_quaternion()
+					var scale := animation.scale_track_interpolate(scale_track, time) if scale_track >= 0 else rest.basis.get_scale()
+					var base := bone * Lib.POSE_STRIDE
+					var got := [position.x, position.y, position.z, rotation.x, rotation.y, rotation.z, rotation.w, scale.x, scale.y, scale.z]
+					var sign := 1.0 if Quaternion(want[base + 3], want[base + 4], want[base + 5], want[base + 6]).dot(rotation) >= 0.0 else -1.0
+					for index in Lib.POSE_STRIDE:
+						var value := float(got[index]) * (sign if index >= 3 and index <= 6 else 1.0)
+						worst = maxf(worst, absf(value - want[base + index]))
+					compared += 1
+		_check(clips_ok and compared > 0 and worst <= 1e-4, "%s: every instance clip re-imports and holds its pose track at every row (%d bone rows compared, worst %s)" % [id, compared, worst])
+		root_node.free()
+
+
+## The scene's own skinned mesh an asset was made from (for the re-import comparison).
+func _skeletal_source_mesh(p_scene: Dictionary, p_asset: Dictionary) -> Mesh:
+	if _scene_path == String(SCENES["walk"]["scene"]):
+		# Read from the packed scene's state, without instancing its nodes.
+		var state := (load(_scene_path) as PackedScene).get_state()
+		for node in state.get_node_count():
+			if String(state.get_node_path(node)).trim_prefix("./") != "Character/Visual":
+				continue
+			for property in state.get_node_property_count(node):
+				if state.get_node_property_name(node, property) == &"mesh":
+					return state.get_node_property_value(node, property)
+		return null
+	if _scene_path == String(SCENES["perf"]["scene"]):
+		return Character.shared_mesh()
+	return null
+
+
+## Two skinned meshes draw the same triangles: corner by corner (the glTF import re-indexes the
+## vertices but keeps the triangle order), the same position and the same bones at the same weights.
+func _skin_arrays_equal(p_a: Mesh, p_b: Mesh) -> bool:
+	if p_a == null or p_b == null or p_a.get_surface_count() != p_b.get_surface_count():
+		return false
+	for surface in p_a.get_surface_count():
+		var a := p_a.surface_get_arrays(surface)
+		var b := p_b.surface_get_arrays(surface)
+		var ca := _corner_list(a)
+		var cb := _corner_list(b)
+		if ca.size() != cb.size():
+			return false
+		var va: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+		var vb: PackedVector3Array = b[Mesh.ARRAY_VERTEX]
+		var ba: PackedInt32Array = a[Mesh.ARRAY_BONES]
+		var bb: PackedInt32Array = b[Mesh.ARRAY_BONES]
+		var wa: PackedFloat32Array = a[Mesh.ARRAY_WEIGHTS]
+		var wb: PackedFloat32Array = b[Mesh.ARRAY_WEIGHTS]
+		if ba.size() != va.size() * 4 or bb.size() != vb.size() * 4 or wa.size() != ba.size() or wb.size() != bb.size():
+			return false
+		for corner in ca.size():
+			var x := ca[corner]
+			var y := cb[corner]
+			if not va[x].is_equal_approx(vb[y]):
+				return false
+			var weights_a := {}
+			var weights_b := {}
+			for slot in 4:
+				if wa[x * 4 + slot] > 0.0:
+					weights_a[ba[x * 4 + slot]] = snappedf(wa[x * 4 + slot], 1e-4)
+				if wb[y * 4 + slot] > 0.0:
+					weights_b[bb[y * 4 + slot]] = snappedf(wb[y * 4 + slot], 1e-4)
+			if weights_a != weights_b:
+				return false
+	return true
+
+
+func _corner_list(p_arrays: Array) -> PackedInt32Array:
+	if p_arrays[Mesh.ARRAY_INDEX] != null:
+		return p_arrays[Mesh.ARRAY_INDEX]
+	var corners := PackedInt32Array()
+	for index in (p_arrays[Mesh.ARRAY_VERTEX] as PackedVector3Array).size():
+		corners.append(index)
+	return corners
+
+
+## A pose track CSV as rows of Lib.pose_row numbers (empty when it does not parse).
+func _read_pose_track(p_path: String) -> Array:
+	var file := FileAccess.open(p_path, FileAccess.READ)
+	if file == null:
+		return []
+	var header := file.get_line().split(",")
+	if header.size() < 1 + Lib.POSE_STRIDE or header[0] != "frame" or (header.size() - 1) % Lib.POSE_STRIDE != 0:
+		return []
+	var rows: Array = []
+	while not file.eof_reached():
+		var line := file.get_line()
+		if line.is_empty():
+			continue
+		var cells := line.split(",")
+		if cells.size() != header.size() or int(cells[0]) != rows.size():
+			return []
+		var values := PackedFloat32Array()
+		for index in range(1, cells.size()):
+			values.append(float(cells[index]))
+		rows.append(values)
+	return rows
+
+
+## A user argument the export ran with (export_manifest.json user_args).
+func _user_arg(p_manifest: Dictionary, p_flag: String, p_default: String) -> String:
+	for arg: Variant in p_manifest.get("user_args", []):
+		if String(arg).begins_with(p_flag + "="):
+			return String(arg).substr(p_flag.length() + 1)
+	return p_default
+
+
 ## A node's world transform outside the tree: its local transforms multiplied up to the scene root.
 func _global(p_node: Node3D) -> Transform3D:
 	var transform := p_node.transform
@@ -955,6 +1423,7 @@ func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
 	var shell := (load(_scene_path) as PackedScene).instantiate() as Node3D
 	shell.set_meta("skip_runtime", true)
 	var torture := _scene_path == String(SCENES["torture"]["scene"])
+	var perf := _scene_path == String(SCENES["perf"]["scene"])
 	var camera := shell.get_node(_camera_name) as Camera3D
 	var pose := camera.transform.orthonormalized()
 	var follow := shell.get_node_or_null("CameraPath/CameraFollow") as PathFollow3D
@@ -988,6 +1457,9 @@ func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
 			# timeline's target from there (-Z forward, +Y up).
 			var position := curve.sample_baked(_torture_progress(rows) * curve.get_baked_length(), follow.cubic_interp)
 			pose = Transform3D(Basis.looking_at(TORTURE_TARGET - position, Vector3.UP), position)
+		elif perf:
+			# NextGI Perf's CaptureCam walks the layout's spline (#33).
+			pose = Transform3D(PerfLayout.spline_basis(rows), PerfLayout.spline_position(rows))
 		if not _transforms_close(row_pose, pose, 1e-4) or absf(float(cells[8]) - camera.fov) > 1e-6:
 			off += 1
 		rows += 1

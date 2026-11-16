@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks the UE comparison exporter (#235, #233, #232) on the overlap-heavy kitbash, RT Shadow Yard,
-# MegaLights Hall and Upscaler Torture.
+# Checks the UE comparison exporter (#235, #233, #232, #230) on the overlap-heavy kitbash, RT Shadow
+# Yard, MegaLights Hall, Upscaler Torture, Glass & Water, Character Walk and NextGI Perf.
 #
 # Usage:
 #   run_ue_export_check.sh <godot> [godot arguments, for example --rendering-driver vulkan]
@@ -20,18 +20,26 @@
 #    check_ue_export.gd on each pair. The hall without light_cull_mask must refuse (exit 1) and name
 #    it.
 # 6. Upscaler Torture (its camera path, 600 frames, cut at 400): without --approximate it must
-#    refuse (exit 1) and name alpha_antialiasing, diffuse_mode, particles, rigid_skin and
-#    shader_material; a cut outside the path must exit 2; then two exports with those
-#    approximations and check_ue_export.gd on the pair (moving fan and occluders, the character's
-#    rigid parts, the cut, UV transforms, texture filters and the shader). Each export log must hold
-#    exactly one UPSCALER_TORTURE_RESET line, at the --camera-cuts frame: the cut UE plays is the
-#    frame the scene resets the temporal history at.
-# 7. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
-#    still fixture must export; a light that moves and returns, a mesh hidden for one frame and a
-#    MultiMesh instance that moves and returns must each refuse (exit 1) and name the node with the
-#    row it changed at (a first-and-last comparison would miss all three); a Skeleton3D beside its
-#    skinned mesh and a camera cull mask that hides a placed layer must refuse and say so. No
-#    refused run may write scene.json.
+#    refuse (exit 1) and name alpha_antialiasing, diffuse_mode, particles and shader_material (its
+#    skinned character exports as a skeletal mesh by default); a cut outside the path must exit 2;
+#    then two exports with those approximations and rigid_skin (the character as rigid parts, as
+#    the #232 port imports it) and check_ue_export.gd on the pair (moving fan and occluders, the
+#    character's rigid parts, the cut, UV transforms, texture filters and the shader). Each export
+#    log must hold exactly one UPSCALER_TORTURE_RESET line, at the --camera-cuts frame: the cut UE
+#    plays is the frame the scene resets the temporal history at.
+# 7. Glass & Water (CaptureCam, 60 frames): without --approximate it must refuse and name
+#    translucent_shadow; then two exports with it and check_ue_export.gd on the pair. Character
+#    Walk (CaptureCam, the walk's 240 frames) and NextGI Perf (CaptureCam, --instances=180
+#    --variant=p3, 120 frames), which need no approximation: two exports each and
+#    check_ue_export.gd on each pair (their skinned characters as skeletal meshes, NextGI Perf's
+#    GridMap cells).
+# 8. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
+#    still fixture must export; a light that moves and returns, a mesh hidden for one frame, a
+#    MultiMesh instance and a GridMap cell that move and return must each refuse (exit 1) and name
+#    the node with the row it changed at (a first-and-last comparison would miss them); a Skeleton3D
+#    beside its skinned mesh and a camera cull mask that hides a placed layer must refuse and say
+#    so. Without rigid_skin the still fixture must export one skeletal instance and the offset
+#    skeleton must refuse too. No refused run may write scene.json.
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -165,11 +173,13 @@ torture_base=(--scene=res://scenes/upscaler_torture/upscaler_torture.tscn --came
 torture_cut=400
 torture_args=("${torture_base[@]}" --camera-cuts="$torture_cut")
 torture_ids=(alpha_antialiasing diffuse_mode particles rigid_skin shader_material)
+# Without --approximate the character exports as a skeletal mesh, so the refusal names the others.
+torture_refused_ids=(alpha_antialiasing diffuse_mode particles shader_material)
 status=0
 "$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
 	"${torture_args[@]}" --out="$work/torture_refused" >"$work/torture_refused.log" 2>&1 || status=$?
 report torture_refused "$status" 1 "$work/torture_refused.log"
-for id in "${torture_ids[@]}"; do
+for id in "${torture_refused_ids[@]}"; do
 	if ! grep -q -- "--approximate=$id" "$work/torture_refused.log"; then
 		echo "run_ue_export_check.sh: the refused torture export does not name --approximate=$id" >&2
 		failures=$((failures + 1))
@@ -197,21 +207,47 @@ for run in a b; do
 done
 check torture
 
-fixture_args=(--scene=res://tests/ue_export/motion_fixture.tscn --camera=Camera --warmup=0 --frames=20 --approximate=rigid_skin)
-# One fixture case: its expected exit code and, for a refusal, the text the log must hold.
+glass_args=(--scene=res://scenes/glass_water/glass_water.tscn --camera=CaptureCam --warmup=0 --frames=60)
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${glass_args[@]}" --out="$work/glass_refused" >"$work/glass_refused.log" 2>&1 || status=$?
+report glass_refused "$status" 1 "$work/glass_refused.log"
+for id in translucent_shadow; do
+	if ! grep -q -- "--approximate=$id" "$work/glass_refused.log" || [[ -e "$work/glass_refused/scene.json" ]]; then
+		echo "run_ue_export_check.sh: the refused Glass & Water export does not name --approximate=$id, or wrote scene.json" >&2
+		failures=$((failures + 1))
+	fi
+done
+export_pair glass "${glass_args[@]}" --approximate=translucent_shadow
+check glass
+
+export_pair walk --scene=res://scenes/character_walk/character_walk.tscn --camera=CaptureCam --warmup=0 --frames=240
+check walk
+
+export_pair perf --scene=res://scenes/nextgi_perf/nextgi_perf.tscn --camera=CaptureCam --warmup=0 --frames=120 --instances=180 --variant=p3
+check perf
+
+fixture_args=(--scene=res://tests/ue_export/motion_fixture.tscn --camera=Camera --warmup=0 --frames=20)
+# One fixture case: its expected exit code, for a refusal the text the log must hold, and the
+# export's --approximate (rigid_skin: the skinned triangle as a rigid part; none: a skeletal mesh).
 fixture_case() {
-	local name=$1 expected=$2 pattern=$3
+	local name=$1 expected=$2 pattern=$3 approximate=${4:-rigid_skin}
+	local label="${name}_$approximate"
+	local extra=()
+	if [[ "$approximate" != none ]]; then
+		extra=(--approximate="$approximate")
+	fi
 	status=0
 	"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
-		"${fixture_args[@]}" --case="$name" --out="$work/fixture_$name" >"$work/fixture_$name.log" 2>&1 || status=$?
-	report "fixture_$name" "$status" "$expected" "$work/fixture_$name.log"
+		"${fixture_args[@]}" ${extra[@]+"${extra[@]}"} --case="$name" --out="$work/fixture_$label" >"$work/fixture_$label.log" 2>&1 || status=$?
+	report "fixture_$label" "$status" "$expected" "$work/fixture_$label.log"
 	if [[ "$expected" -eq 0 ]]; then
-		if [[ ! -e "$work/fixture_$name/scene.json" ]]; then
-			echo "run_ue_export_check.sh: the still fixture wrote no scene.json" >&2
+		if [[ ! -e "$work/fixture_$label/scene.json" ]]; then
+			echo "run_ue_export_check.sh: the still fixture ($approximate) wrote no scene.json" >&2
 			failures=$((failures + 1))
 		fi
-	elif ! grep -q -F -- "$pattern" "$work/fixture_$name.log" || [[ -e "$work/fixture_$name/scene.json" ]]; then
-		echo "run_ue_export_check.sh: the $name fixture did not refuse with \"$pattern\", or wrote scene.json" >&2
+	elif ! grep -q -F -- "$pattern" "$work/fixture_$label.log" || [[ -e "$work/fixture_$label/scene.json" ]]; then
+		echo "run_ue_export_check.sh: the $name fixture ($approximate) did not refuse with \"$pattern\", or wrote scene.json" >&2
 		failures=$((failures + 1))
 	fi
 }
@@ -219,8 +255,17 @@ fixture_case none 0 ""
 fixture_case light_returns 1 "Light moved or changed at row"
 fixture_case mesh_blinks 1 "Box moved or changed at row"
 fixture_case multimesh_returns 1 "Rocks moved or changed at row"
+fixture_case gridmap_returns 1 "Grid moved or changed at row"
 fixture_case skeleton_offset 1 "skinned mesh Skinned whose Skeleton3D is not at the mesh instance's transform"
 fixture_case camera_cull 1 "a camera cull mask that hides some placed layers"
+# The skeletal path (the default since #230): the still fixture exports its skinned triangle as a
+# skeletal mesh, and the offset skeleton is refused there too.
+fixture_case none 0 "" none
+fixture_case skeleton_offset 1 "skinned mesh Skinned whose Skeleton3D is not at the mesh instance's transform" none
+if ! grep -q '"skeletal":1' "$work/fixture_none_none.log"; then
+	echo "run_ue_export_check.sh: the still fixture without rigid_skin did not export one skeletal instance" >&2
+	failures=$((failures + 1))
+fi
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2

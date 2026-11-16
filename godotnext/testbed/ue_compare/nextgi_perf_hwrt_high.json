@@ -1,0 +1,71 @@
+{
+	"schema": 1,
+	"name": "nextgi_perf_hwrt_high",
+	"title": "NextGI Perf with its 4 skinned characters, hardware ray tracing, High (G3-1 High)",
+	"port_issue": 230,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://scenes/nextgi_perf/nextgi_perf.tscn",
+		"camera": "CaptureCam",
+		"seed": 1,
+		"override": "res://ue_compare/nextgi_hwrt_high.override.cfg",
+		"nextgi": { "tier": "HWRT", "quality": "HIGH" },
+		"harness_args": ["--variant=p3"],
+		"timeout_minutes": 15
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/NextGIPerf/NextGIPerf.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 600,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.ShadowQuality 2",
+			"r.Lumen.HardwareRayTracing 1",
+			"r.Lumen.AsyncCompute 0"
+		],
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 15
+	},
+	"lines": [
+		{
+			"id": "g3_1_nextgi_total_high",
+			"name": "NextGI total at High, hardware ray tracing",
+			"gates": ["G3-1"],
+			"status": "ue_bar",
+			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5).",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },
+			"ue": { "group": "Lumen total (provisional)", "columns": ["GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections"] }
+		},
+		{
+			"id": "gpu_pass_sum",
+			"name": "GPU pass sum (pipeline check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line; recorded to check the comparison pipeline end to end.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		}
+	]
+}
