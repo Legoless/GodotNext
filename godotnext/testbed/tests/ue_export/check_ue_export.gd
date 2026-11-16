@@ -1015,9 +1015,9 @@ func _check_perf(p_dir: String, p_scene: Dictionary) -> void:
 	_check(int(checks["gridmap_cells"]) == int(share["gridmap"]), "%d GridMap cells (%d)" % [int(share["gridmap"]), int(checks["gridmap_cells"])])
 	_check(int(checks["skeletal_instances"]) == (Character.PERF_COUNT if p3 else 0), "the p3 variant's 4 characters (%d)" % int(checks["skeletal_instances"]))
 	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 16, "spot": 1}, "the sun, 16 omnis and the off-screen spot (%s)" % checks["light_types"])
-	# CaptureCam's far plane is 80 m, and the path starts at x = 4 looking along +X at the courtyard,
-	# which reaches x = 100: Godot clips its far end, the UE import does not.
-	_check(_approximations(p_scene).keys() == ["camera_far"] and int(checks["camera_far_rows"]) > 0, "NextGI Perf needs camera_far only, on some rows (%s, %d rows)" % [_approximations(p_scene).keys(), int(checks["camera_far_rows"])])
+	# CaptureCam's far plane (150 m) reaches past the courtyard's far end from every spline frame
+	# (#33), so nothing is clipped and the export needs no approximation.
+	_check(_approximations(p_scene).is_empty() and int(checks["camera_far_rows"]) == 0, "NextGI Perf needs no approximation and nothing reaches past CaptureCam's far plane (%s, %d rows)" % [_approximations(p_scene).keys(), int(checks["camera_far_rows"])])
 	var mesh_size := {}
 	for mesh: Dictionary in p_scene["meshes"]:
 		mesh_size[String(mesh["id"])] = _vector(mesh["aabb"]["size"])

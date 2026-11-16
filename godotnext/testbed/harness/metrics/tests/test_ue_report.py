@@ -16,7 +16,7 @@ import pytest
 from godotnext_metrics.ue_bar import DRY_RUN_NOTE, LINUX_REASON, ComparisonError
 from godotnext_metrics.ue_compare import build_plan, parse_config, write_plan
 from godotnext_metrics.ue_report import RUN_MODE_NOTE, build_report, main, render_markdown
-from test_ue_compare import UE_CSV_DIR, UE_EXE, UE_PROJECT, synthetic_config
+from test_ue_compare import UE_CSV_DIR, UE_EXE, UE_PROJECT, nextgi_config, synthetic_config
 
 UE_HEADER = ["EVENTS", "Synthetic/GameThread/Work", "Synthetic/GPU/PassA", "Synthetic/GPU/PassB", "Synthetic/Hitch"]
 GODOTNEXT_BASES = [1.10, 1.30, 1.20, 1.25, 1.15]
@@ -108,26 +108,43 @@ def _timing_csv(base: float, frames: int, blank_rows: int = 0) -> str:
     return "\n".join(rows) + "\n"
 
 
-def _ue_csv(base: float, warmup: int, frames: int, metadata: dict[str, str], hitch_in_window: bool = False) -> str:
+def _ue_csv(
+    base: float,
+    warmup: int,
+    frames: int,
+    metadata: dict[str, str],
+    hitch_in_window: bool = False,
+    idle_work_rows: int = 0,
+) -> str:
     rows = [",".join(UE_HEADER)]
     for _ in range(warmup):
         rows.append(",50.0,40.0,40.0,1")
     for frame in range(frames):
         hitch = 1 if hitch_in_window and frame == 1 else 0
-        rows.append(f",1.0,{base / 2:.6f},{base / 2:.6f},{hitch}")
+        # The first idle_work_rows window rows of the work column are 0 (a missed stat sample).
+        work = 0 if frame < idle_work_rows else 1.0
+        rows.append(f",{work},{base / 2:.6f},{base / 2:.6f},{hitch}")
     rows.append(",".join(UE_HEADER))
     rows.append(",".join(["[HasHeaderRowAtEnd],1"] + [f"[{key}],{value}" for key, value in metadata.items()]))
     return "\n".join(rows) + "\n"
 
 
-def _ue_log(cvars: dict[str, str]) -> str:
+def _ue_log(cvars: dict[str, str], extra: list[str] | None = None) -> str:
     lines = ["[2026.11.15-12.00.00:000][  0]LogInit: Display: synthetic start"]
     for name, value in cvars.items():
         lines.append(f"[2026.11.15-12.00.01:000][  0]LogConsoleResponse: Display: Cmd: {name} {value}")
     for name, value in cvars.items():
         # The observed echo: no log category, a LastSetBy note after the value.
         lines.append(f'[2026.11.15-12.00.01:001][  0]{name} = "{value}"      LastSetBy: Console')
-    return "\n".join(lines) + "\n"
+    return "\n".join([*lines, *(extra or [])]) + "\n"
+
+
+def _tsr_event(width: int, height: int, out_width: int = 1920, out_height: int = 1080) -> str:
+    """A synthetic ProfileGPU line in the observed shape of the TSR draw event."""
+    return (
+        f"[2026.11.15-12.00.02:000][  2]LogSynthetic:  1.00ms  TemporalSuperResolution(synthetic)"
+        f" {width}x{height} -> {out_width}x{out_height}"
+    )
 
 
 def make_set(
@@ -152,6 +169,9 @@ def make_set(
     kind: str = "run",
     wrong_token: bool = False,
     scales: list[float | None] | None = None,
+    log_extra: list[str] | None = None,
+    dpi_layer: str | None = "HighDpiAware",
+    idle_work_rows: int = 0,
 ) -> Path:
     parsed = parse_config(config or synthetic_config(lines=_lines()))
     plan = build_plan(
@@ -203,9 +223,12 @@ def make_set(
             token = f"token{job['name']}"
             values = dict(metadata or METADATA)
             values["godotnextrun"] = "other" if wrong_token else token
-            capture = _ue_csv(UE_BASES[position], parsed.ue.warmup_frames, frames, values, hitch_in_window)
+            capture = _ue_csv(
+                UE_BASES[position], parsed.ue.warmup_frames, frames, values, hitch_in_window, idle_work_rows
+            )
             (run_dir / "ue_profile.csv").write_text(capture, encoding="utf-8")
-            (run_dir / "ue.log").write_text(_ue_log(cvars or parsed.ue.checked_cvars()), encoding="utf-8")
+            log = _ue_log(cvars or parsed.ue.checked_cvars(), log_extra)
+            (run_dir / "ue.log").write_text(log, encoding="utf-8")
             runner = {
                 "engine": "ue",
                 "exe": exe,
@@ -222,6 +245,7 @@ def make_set(
                     "material_fallback_lines": 0,
                 },
                 "ue_editor": {"product_version": BUILD},
+                "env": {} if dpi_layer is None else {"__COMPAT_LAYER": dpi_layer},
                 "gpu_after": {"clocks_gr_mhz": 2610, "clocks_mem_mhz": 11501, "temperature_c": 45},
             }
             (run_dir / "runner_job.json").write_text(json.dumps(runner), encoding="utf-8")
@@ -283,7 +307,13 @@ def test_dry_run_has_numbers_and_ratios_but_no_verdict(tmp_path: Path) -> None:
     assert any("editor binary" in note for note in facts["notes"])
     ue_run = facts["ue_runs"][0]
     assert ue_run["changelist"] == "1"
-    assert ue_run["cvars"] == {"r.ScreenPercentage": "100", "sg.GlobalIlluminationQuality": "2"}
+    # The report lists every echoed value it checked: the screen percentage, the twelve scalability
+    # groups and the three async compute switches.
+    assert len(ue_run["cvars"]) == 16
+    assert ue_run["cvars"]["r.ScreenPercentage"] == "100"
+    assert ue_run["cvars"]["sg.LandscapeQuality"] == ue_run["cvars"]["sg.GlobalIlluminationQuality"] == "2"
+    assert ue_run["cvars"]["r.RDG.AsyncCompute"] == ue_run["cvars"]["r.TSR.AsyncCompute"] == "0"
+    assert ue_run["active_columns_rows"] == {}
     assert ue_run["rhi"] == "D3D12" and ue_run["feature_level"] == "SM6"
     assert report["platform"] == "windows"
 
@@ -362,21 +392,34 @@ def test_the_ue_resolution_comes_from_the_capture_not_the_command_line(tmp_path:
 
 
 def test_the_forced_console_variables_are_checked_in_the_log(tmp_path: Path) -> None:
+    echoed = parse_config(synthetic_config(lines=_lines())).ue.checked_cvars()
     with pytest.raises(ComparisonError, match="sg.GlobalIlluminationQuality was '3' in the run, not '2'"):
-        build_report(
-            make_set(
-                tmp_path / "other", cvars={"r.ScreenPercentage": "100.000000", "sg.GlobalIlluminationQuality": "3"}
-            ),
-            judge=False,
-        )
-    with pytest.raises(ComparisonError, match="no echo of sg.GlobalIlluminationQuality"):
-        build_report(make_set(tmp_path / "missing", cvars={"r.ScreenPercentage": "100"}), judge=False)
-    # A float echo of an integer value is the same value.
+        build_report(make_set(tmp_path / "other", cvars={**echoed, "sg.GlobalIlluminationQuality": "3"}), judge=False)
+    # Every pinned scalability group and async compute switch is checked, not only the set's own.
+    with pytest.raises(ComparisonError, match="r.TSR.AsyncCompute was '2' in the run, not '0'"):
+        build_report(make_set(tmp_path / "async", cvars={**echoed, "r.TSR.AsyncCompute": "2"}), judge=False)
+    # A boolean echo counts as its 0 or 1: true where 0 is wanted is another value.
+    with pytest.raises(ComparisonError, match="r.RDG.AsyncCompute was 'true' in the run, not '0'"):
+        build_report(make_set(tmp_path / "boolean", cvars={**echoed, "r.RDG.AsyncCompute": "true"}), judge=False)
+    missing = {name: value for name, value in echoed.items() if name != "sg.LandscapeQuality"}
+    with pytest.raises(ComparisonError, match="no echo of sg.LandscapeQuality"):
+        build_report(make_set(tmp_path / "missing", cvars=missing), judge=False)
+    # A float echo of an integer value is the same value, and so is a boolean's true/false echo.
     report = build_report(
-        make_set(tmp_path / "float", cvars={"r.ScreenPercentage": "100.000000", "sg.GlobalIlluminationQuality": "2"}),
+        make_set(
+            tmp_path / "float", cvars={**echoed, "r.ScreenPercentage": "100.000000", "r.RDG.AsyncCompute": "false"}
+        ),
         judge=False,
     )
     assert report["mode"] == "dry_run"
+
+
+def test_the_ue_launch_must_be_dpi_aware(tmp_path: Path) -> None:
+    # The runner gives every UE launch the HighDpiAware compatibility layer (lead decision 2026-11-16).
+    report = build_report(make_set(tmp_path / "aware"), judge=False)
+    assert report["set"]["ue_runs"][0]["dpi_layer"] == "HighDpiAware"  # type: ignore[index]
+    with pytest.raises(ComparisonError, match="not DPI-aware"):
+        build_report(make_set(tmp_path / "unaware", dpi_layer=None), judge=False)
 
 
 def test_only_a_clean_game_mode_exit_with_this_launchs_capture_counts(tmp_path: Path) -> None:
@@ -414,9 +457,37 @@ def test_pso_hitches_after_the_warm_up_are_noted_in_a_dry_run_and_refused_when_j
         build_report(make_set(tmp_path / "judged", hitch_in_window=True, **options), judge=True)  # type: ignore[arg-type]
 
 
+def _active_config(columns: list[str], frames: int = 6) -> dict[str, object]:
+    config: dict[str, object] = synthetic_config(lines=_lines(), frames=frames)
+    ue = copy.deepcopy(config["ue"])
+    assert isinstance(ue, dict)
+    ue["window_quiet_columns"] = []
+    ue["window_active_columns"] = columns
+    config["ue"] = ue
+    return config
+
+
+def test_the_active_columns_must_hold_values_in_the_window(tmp_path: Path) -> None:
+    # A set relies on a feature no line times (Lumen in the lights and shadows sets): the column must be
+    # in the capture and hold a value on all but the missed-sample share of the window, even in a dry run.
+    report = build_report(make_set(tmp_path / "on", config=_active_config(["Synthetic/GPU/PassA"])), judge=False)
+    assert report["set"]["ue_runs"][0]["active_columns_rows"] == {"Synthetic/GPU/PassA": 6}  # type: ignore[index]
+    with pytest.raises(ComparisonError, match="no 'Synthetic/GPU/Missing' column"):
+        build_report(make_set(tmp_path / "absent", config=_active_config(["Synthetic/GPU/Missing"])), judge=False)
+    with pytest.raises(ComparisonError, match="'Synthetic/Hitch' has a value on 0 of 6 window rows"):
+        build_report(make_set(tmp_path / "zero", config=_active_config(["Synthetic/Hitch"])), judge=False)
+    # Up to 5 % of the window may be a missed stat sample (3 of 60 rows), as for a line's columns.
+    work = _active_config(["Synthetic/GameThread/Work"], frames=60)
+    report = build_report(make_set(tmp_path / "missed", config=work, idle_work_rows=3), judge=False)
+    assert report["set"]["ue_runs"][0]["active_columns_rows"] == {"Synthetic/GameThread/Work": 57}  # type: ignore[index]
+    with pytest.raises(ComparisonError, match="a value on 56 of 60 window rows; the set needs it active"):
+        build_report(make_set(tmp_path / "idle", config=work, idle_work_rows=4), judge=False)
+
+
 def test_an_unverified_internal_resolution_is_noted_in_a_dry_run_and_refused_when_judged(tmp_path: Path) -> None:
-    # No UE capture column records UE's internal resolution (#232), so a set that renders below the
-    # output size cannot show both engines upscaled from the same size.
+    # No UE capture column records UE's internal resolution (#232): without the TSR draw event of a
+    # ProfileGPU dump in the log, a set that renders below the output size cannot show both engines
+    # upscaled from the same size.
     report = build_report(make_set(tmp_path / "dry", scales=[0.5]), judge=False)
     facts = report["set"]
     assert isinstance(facts, dict)
@@ -428,6 +499,37 @@ def test_an_unverified_internal_resolution_is_noted_in_a_dry_run_and_refused_whe
     options: dict[str, object] = {"config": _judged_config(), "kind": "timing", "editor_binary": False}
     with pytest.raises(ComparisonError, match="internal resolution is not verified"):
         build_report(make_set(tmp_path / "judged", scales=[0.5], **options), judge=True)  # type: ignore[arg-type]
+
+
+def test_the_internal_resolution_comes_from_the_tsr_draw_event(tmp_path: Path) -> None:
+    # The TSR draw event in the log shows the rendering size: half the output at scaling_3d_scale 0.5.
+    options: dict[str, object] = {"config": _judged_config(), "kind": "timing", "editor_binary": False}
+    half = [_tsr_event(960, 540)]
+    report = build_report(make_set(tmp_path / "half", scales=[0.5], log_extra=half, **options), judge=True)  # type: ignore[arg-type]
+    facts = report["set"]
+    assert isinstance(facts, dict)
+    assert not any("internal resolution" in note for note in facts["notes"])
+    assert all(run["upscale_sizes"] == [[960, 540, 1920, 1080]] for run in facts["ue_runs"])
+    # Another rendering size, or another output size, refuses the set even in a dry run.
+    with pytest.raises(
+        ComparisonError, match="UE rendered at 1920x1080 for 1920x1080; the GodotNext runs render at 960x540"
+    ):
+        build_report(make_set(tmp_path / "full", scales=[0.5], log_extra=[_tsr_event(1920, 1080)]), judge=False)
+    with pytest.raises(ComparisonError, match="for 3840x2160"):
+        build_report(
+            make_set(tmp_path / "output", scales=[0.5], log_extra=[_tsr_event(960, 540, 3840, 2160)]), judge=False
+        )
+    # GodotNext's manifest records the scale, not the size, and either engine may round a fractional
+    # scale's size down: 1 pixel per axis is the same internal size, 2 are not (0.667 of 1920x1080 is
+    # 1281x720 rounded).
+    near = [_tsr_event(1280, 720)]
+    report = build_report(make_set(tmp_path / "t4", scales=[0.667], log_extra=near), judge=False)
+    assert report["set"]["ue_runs"][0]["upscale_sizes"] == [[1280, 720, 1920, 1080]]  # type: ignore[index]
+    with pytest.raises(ComparisonError, match="UE rendered at 1279x720"):
+        build_report(make_set(tmp_path / "t4_far", scales=[0.667], log_extra=[_tsr_event(1279, 720)]), judge=False)
+    # At scale 1.0 a logged event must show the output size too; none is needed.
+    with pytest.raises(ComparisonError, match="UE rendered at 960x540"):
+        build_report(make_set(tmp_path / "native", log_extra=half), judge=False)
 
 
 def test_the_godotnext_runs_record_one_scaling_3d_scale(tmp_path: Path) -> None:
@@ -466,10 +568,8 @@ def test_a_prefix_line_sums_the_block_and_needs_its_columns(tmp_path: Path) -> N
 
 
 def test_a_nextgi_set_needs_the_forced_nextgi_at_the_configured_tier_and_quality(tmp_path: Path) -> None:
-    config = synthetic_config(lines=_lines())
-    godotnext = config["godotnext"]
-    assert isinstance(godotnext, dict)
-    godotnext["nextgi"] = {"tier": "SWRT", "quality": "HIGH"}
+    config = nextgi_config("SWRT", "0")
+    config["lines"] = _lines()
     good = {"forced": True, "environments": 1, "status": {"tier": "SWRT", "quality": "HIGH", "reason": "FORCED"}}
     report = build_report(make_set(tmp_path / "good", config=config, nextgi=good), judge=False)
     facts = report["set"]

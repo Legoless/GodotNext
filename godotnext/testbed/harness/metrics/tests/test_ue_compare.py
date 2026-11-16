@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from godotnext_metrics.ue_bar import ComparisonError
 from godotnext_metrics.ue_compare import (
+    SCALABILITY_LEVEL_GROUPS,
+    UE_ASYNC_OFF,
     build_plan,
     config_label,
     godotnext_args,
@@ -23,6 +25,13 @@ _CONFIGS = sorted((_TESTBED / "ue_compare").glob("*.json"))
 UE_EXE = "C:\\Epic\\UE_5.9\\Engine\\Binaries\\Win64\\UnrealEditor.exe"
 UE_PROJECT = "X:\\Synthetic\\Synthetic.uproject"
 UE_CSV_DIR = "C:\\Users\\synthetic\\AppData\\Local\\UnrealEngine\\5.9\\Saved\\Profiling\\CSV"
+# Every set pins all scalability groups and turns UE's async compute off (lead decisions 2026-11-16).
+PINNED = [
+    "r.ScreenPercentage 100",
+    "sg.ResolutionQuality 100",
+    *(f"{group} 2" for group in SCALABILITY_LEVEL_GROUPS),
+    *(f"{name} {value}" for name, value in UE_ASYNC_OFF.items()),
+]
 
 
 def synthetic_config(**overrides: object) -> dict[str, object]:
@@ -56,7 +65,7 @@ def synthetic_config(**overrides: object) -> dict[str, object]:
             "path_frames": 3,
             "fps": 60,
             "args": ["-dx12", "-sm6"],
-            "exec_cmds": ["r.ScreenPercentage 100", "sg.GlobalIlluminationQuality 2"],
+            "exec_cmds": list(PINNED),
             "window_quiet_columns": ["Synthetic/Hitch"],
             "ok_exit_codes": [0],
             "timeout_minutes": 5,
@@ -96,6 +105,52 @@ def _without(section: str, key: str) -> dict[str, object]:
     return config
 
 
+def _replaced(name: str, value: str | None) -> list[str]:
+    """PINNED with one console variable set to another value, or left out (None)."""
+    commands = [command for command in PINNED if command.split()[0] != name]
+    return commands if value is None else [*commands, f"{name} {value}"]
+
+
+def nextgi_config(tier: str, tier_cvar: str | None) -> dict[str, object]:
+    """A synthetic set that runs NextGI on the given tier, with UE's Lumen tier cvar (or none)."""
+    config = _with("godotnext", nextgi={"tier": tier, "quality": "HIGH"})
+    ue = copy.deepcopy(config["ue"])
+    assert isinstance(ue, dict)
+    ue["exec_cmds"] = _replaced("r.Lumen.HardwareRayTracing", tier_cvar)
+    config["ue"] = ue
+    return config
+
+
+def own_levels_config(quality: str | None, tsr: str | None, levels: dict[str, str]) -> dict[str, object]:
+    """A synthetic set at a NextGI quality (hardware tier) and/or a TSR quality, with these groups set."""
+    config = nextgi_config("HWRT", "1") if quality else synthetic_config()
+    godotnext = config["godotnext"]
+    ue = config["ue"]
+    assert isinstance(godotnext, dict) and isinstance(ue, dict)
+    if quality:
+        godotnext["nextgi"] = {"tier": "HWRT", "quality": quality}
+    if tsr:
+        godotnext["harness_args"] = ["--upscaler=tsr", f"--tsr-quality={tsr}", "--scale=0.5"]
+    commands = [str(command) for command in ue["exec_cmds"]]
+    for name, value in levels.items():
+        commands = [*(command for command in commands if command.split()[0] != name), f"{name} {value}"]
+    ue["exec_cmds"] = commands
+    return config
+
+
+def test_a_line_runs_only_its_own_groups_at_its_own_level() -> None:
+    # Plan §23.4: every quality group at High (2) but a group a line runs at its own level: a NextGI
+    # quality's GI and reflections, a TSR quality's anti-aliasing (the same names on the 0..4 scale).
+    for quality, level in (("MEDIUM", "1"), ("HIGH", "2"), ("EPIC", "3")):
+        levels = {"sg.GlobalIlluminationQuality": level, "sg.ReflectionQuality": level}
+        cvars = parse_config(own_levels_config(quality, None, levels)).ue.checked_cvars()
+        assert (cvars["sg.GlobalIlluminationQuality"], cvars["sg.ReflectionQuality"]) == (level, level)
+        assert cvars["sg.ShadowQuality"] == "2"
+    for tsr, level in (("low", "0"), ("high", "2"), ("epic", "3"), ("cinematic", "4")):
+        cvars = parse_config(own_levels_config(None, tsr, {"sg.AntiAliasingQuality": level})).ue.checked_cvars()
+        assert cvars["sg.AntiAliasingQuality"] == level
+
+
 def _plan(config: dict[str, object], root: Path, **kwargs: object) -> dict[str, object]:
     options: dict[str, object] = {
         "config_label": "ue_compare/synthetic.json",
@@ -122,6 +177,30 @@ def test_tracked_configs_load_and_their_overrides_exist(path: Path) -> None:
     assert config.ue.run_mode == "editor_game"
 
 
+# The lead's column rule (2026-11-16): every pass the captures show doing the GodotNext group's work.
+# Line 1a: the global distance field update on the software tier; the TLAS build and, where skinned
+# characters are traced (the captures show the column there only), their BLAS updates on the hardware tier.
+_SDF_1A = ("GPU/GlobalDistanceFieldUpdate",)
+_TLAS_1A = ("GPU/RayTracingScene",)
+_SKINNED_1A = (*_TLAS_1A, "GPU/RayTracingDynamicGeometry")
+_LUMEN_UPDATE = ("GPU/LumenSceneUpdate", "GPU/UpdateLumenSceneBuffers")
+_LUMEN_TOTAL = (*_LUMEN_UPDATE, "GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections")
+_LUMEN_LITE = (*_LUMEN_UPDATE, "GPU/LumenSceneLighting", "GPU/LumenIrradianceFieldGather")
+_TRANSLUCENCY = ("GPU/TranslucentLighting", "GPU/Translucency")
+# The Lumen columns of the sets that run Lumen; the sets without NextGI keep them quiet, and the GM sets
+# need the scene lighting, the screen probe gather and the TLAS build active.
+_LUMEN_QUIET = (*_LUMEN_UPDATE, "GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections")
+_GM_ACTIVE = ("GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/RayTracingScene")
+_PSO_QUIET = ("PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch")
+_MEGALIGHTS_TOTAL = (
+    "GPU/MegaLights",
+    "GPU/MegaLightsLightPowerDelta",
+    "GPU/LightGrid",
+    "GPU/VolumetricFog",
+    *_TRANSLUCENCY,
+)
+
+
 def test_the_kitbash_config_forces_nextgi_and_the_software_tier() -> None:
     config = load_config(_TESTBED / "ue_compare" / "swrt_kitbash_high.json")
     assert config.godotnext.nextgi is not None
@@ -141,6 +220,36 @@ def test_the_kitbash_config_forces_nextgi_and_the_software_tier() -> None:
     assert gs9.godotnext.prefix == "nextgi_"
     # The block's closing marker and line 1b (Q11) are not in the total.
     assert set(gs9.godotnext.exclude) == {"nextgi_2_ms", "nextgi_as_builds_ms"}
+    assert not gs9.godotnext.include
+    # The lead's column rule (2026-11-16): line 1a's global distance field update, the Lumen scene update
+    # and the Lumen total.
+    assert gs9.ue is not None and (gs9.ue.group, gs9.ue.columns) == ("Lumen total", (*_SDF_1A, *_LUMEN_TOTAL))
+
+
+@pytest.mark.parametrize("path", _CONFIGS, ids=lambda path: path.name)
+def test_every_set_pins_scalability_first_and_echoes_every_pinned_value(path: Path) -> None:
+    # parse_config refuses a set that breaks the lead's decisions of 2026-11-16 (the refusals below);
+    # this checks what it does not: the order of the pins, their echo, and where Lumen must (not) run.
+    config = load_config(path)
+    commands = [command.split() for command in config.ue.exec_cmds]
+    # The groups go first, so a later scalability change cannot undo a cvar the set writes itself.
+    names = [parts[0] for parts in commands]
+    assert max(names.index(group) for group in SCALABILITY_LEVEL_GROUPS) < min(
+        index for index, name in enumerate(names) if not name.startswith(("sg.", "r.ScreenPercentage"))
+    )
+    # The launch names every pinned group and async switch again on its own, so the log echoes the value.
+    (exec_arg,) = [arg for arg in ue_args(config) if arg.startswith("-ExecCmds=")]
+    echoed = exec_arg.removeprefix("-ExecCmds=").split(",")
+    for name in (*SCALABILITY_LEVEL_GROUPS, "sg.ResolutionQuality", *UE_ASYNC_OFF):
+        assert name in echoed, name
+    # UE runs Lumen only where GodotNext runs NextGI: the other sets set no tier and keep the Lumen
+    # columns quiet; the lights and shadows sets, which time no Lumen column, need it active.
+    if config.godotnext.nextgi is None:
+        assert not any(name.startswith("r.Lumen.HardwareRayTracing") for name in names)
+        assert config.ue.window_quiet_columns == (*_PSO_QUIET, *_LUMEN_QUIET)
+    else:
+        assert config.ue.window_quiet_columns == _PSO_QUIET
+    assert config.ue.window_active_columns == (_GM_ACTIVE if config.raw["port_issue"] == 233 else ())
 
 
 @pytest.mark.parametrize(
@@ -154,13 +263,17 @@ def test_the_kitbash_config_forces_nextgi_and_the_software_tier() -> None:
 def test_the_lights_and_shadows_configs(name: str, line_id: str, gate: str, lights: str | None) -> None:
     config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
     assert config.raw["port_issue"] == 233
-    # The scenes as authored run no NextGI; the timing runs record every per-light pass.
-    assert config.godotnext.nextgi is None
-    assert "--nextgi=on" not in godotnext_args(config)
+    # The GM sets run GI at High on both sides (lead decision 2026-11-16): NextGI forced on at High
+    # on the hardware tier (Auto takes it where the device has it), Lumen High on the hardware tier.
+    assert config.godotnext.nextgi is not None
+    assert (config.godotnext.nextgi.tier, config.godotnext.nextgi.quality) == ("HWRT", "HIGH")
+    assert "--nextgi=on" in godotnext_args(config)
     assert config.godotnext.camera == "cam_main"
     override = (_TESTBED / "ue_compare" / "lights_shadows.override.cfg").read_text(encoding="utf-8")
     assert config.godotnext.override == "res://ue_compare/lights_shadows.override.cfg"
     assert "settings/profiler/max_timestamp_query_elements=65535" in override
+    for setting in ("enabled=true", "hardware_ray_tracing=0", "quality=2"):
+        assert f"global_illumination/nextgi/{setting}" in override
     assert [arg for arg in godotnext_args(config) if arg.startswith("--lights")] == (
         [f"--lights={lights}"] if lights else []
     )
@@ -171,15 +284,20 @@ def test_the_lights_and_shadows_configs(name: str, line_id: str, gate: str, ligh
     assert line.godotnext is None
     cvars = config.ue.checked_cvars()
     assert cvars["r.ScreenPercentage"] == "100"
-    # Plan §21.3.3: these scenes run at the High preset. The settings record ties SMRT, the VSM pool,
-    # volumetric fog and MegaLights to the Shadow scalability group, so the set pins it at High
-    # and the report checks the echoed value.
+    # Plan §21.3.3: these scenes run at the High preset: every scalability group at High, Lumen High.
     assert cvars["sg.ShadowQuality"] == "2"
+    assert cvars["sg.GlobalIlluminationQuality"] == cvars["sg.ReflectionQuality"] == "2"
+    assert cvars["r.Lumen.HardwareRayTracing"] == "1"
     # Epic's MegaLights page: Stat GPU timings are distorted by async compute until
-    # r.RDG.AsyncCompute 0. Only GM-2 is a GPU-pass line; GM-5 times the render thread.
-    assert cvars.get("r.RDG.AsyncCompute") == ("0" if gate == "GM-2" else None)
-    # GM-2's UE group is provisional until the lead maps M-1 and M-8 (§23.5); the report prints why.
-    assert ("Provisional" in line.reason) == (gate == "GM-2")
+    # r.RDG.AsyncCompute 0; every set turns it off.
+    assert cvars["r.RDG.AsyncCompute"] == "0"
+    # No GM line times a Lumen column, so the report needs Lumen (and the TLAS it traces) active instead.
+    assert config.ue.window_active_columns == _GM_ACTIVE
+    # GM-2's UE group: every pass doing the work of M-1 to M-6 plus M-8 (the lead's column rule).
+    if gate == "GM-2":
+        assert line.ue is not None and (line.ue.group, line.ue.columns) == ("MegaLights total", _MEGALIGHTS_TOTAL)
+        assert "GPU/Fog" in line.reason
+    assert "Provisional" not in line.reason
 
 
 @pytest.mark.parametrize(
@@ -197,10 +315,10 @@ def test_the_upscaler_torture_configs(name: str, line_id: str, level: str, histo
     assert config.resolution == (3840, 2160)
     assert config.frames == config.ue.path_frames == 600
     line = next(line for line in config.lines if line.id == line_id)
-    # A 3840x2160 window did not render at 3840x2160 on the machine's 4K desktop; fullscreen does
-    # once the editor is DPI-aware there (the line's reason and the lead's decision).
+    # A 3840x2160 request rendered smaller on the machine's 125 % desktop until the runner made each UE
+    # launch DPI-aware (lead decision 2026-11-16); fullscreen recorded 3840x2160 then.
     assert config.ue.window == "fullscreen"
-    assert "2160p" in line.reason
+    assert "DPI-aware" in line.reason and "recorded 3840x2160" in line.reason
     assert "-fullscreen" in ue_args(config) and "-windowed" not in ue_args(config)
     assert config.godotnext.nextgi is None
     quality = "high" if level == "2" else "epic"
@@ -214,19 +332,32 @@ def test_the_upscaler_torture_configs(name: str, line_id: str, level: str, histo
     assert cvars["sg.ResolutionQuality"] == "50"
     assert cvars["sg.ShadowQuality"] == "2"
     assert cvars["r.TSR.History.ScreenPercentage"] == history
-    # The settings record's TSR async compute row: 2, UE's default, which the run must show (not set).
-    assert cvars["r.TSR.AsyncCompute"] == "2"
-    for name in ("r.TSR.History.ScreenPercentage", "r.TSR.AsyncCompute"):
-        assert not any(command.startswith(name + " ") for command in config.ue.exec_cmds)
-    # No capture records UE's internal resolution yet: the line says so, and a judged report refuses.
-    assert "internal resolution" in line.reason and "not verified" in line.reason
+    assert not any(command.startswith("r.TSR.History.ScreenPercentage ") for command in config.ue.exec_cmds)
+    # Async compute off in timing sets (lead decision 2026-11-16), TSR's own switch included.
+    assert cvars["r.TSR.AsyncCompute"] == "0"
+    assert dict(config.ue.expect_cvars) == {"r.TSR.History.ScreenPercentage": history}
+    # UE's internal resolution from the GPU profiler's TSR draw event: one ProfileGPU at start-up,
+    # without the profiler window, after every cvar the set writes.
+    assert config.ue.exec_cmds[-2:] == ("r.ProfileGPU.ShowUI 0", "ProfileGPU")
+    assert "internal resolution" in line.reason and "ProfileGPU" in line.reason
     assert (line.status, line.gates, line.statistic) == ("ue_bar", ("GT-4",), "p95")
     assert line.godotnext is not None and line.godotnext.columns == ("tsr_ms",)
     assert line.ue is not None and line.ue.group == "TSR"
 
 
-_LUMEN_TOTAL = ("GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections")
-_LUMEN_LITE = ("GPU/LumenSceneLighting", "GPU/LumenIrradianceFieldGather")
+# Each NextGI total's UE columns, as the ports' own captures on the RTX 4080 SUPER machine show them
+# (the walk's and NextGI Perf's High and Epic captures have GPU/RayTracingDynamicGeometry; its Medium
+# capture, Glass & Water's and the GM halls' do not).
+_NEXTGI_COLUMNS = {
+    "nextgi_perf_hwrt_high": ("Lumen total", (*_SKINNED_1A, *_LUMEN_TOTAL)),
+    "nextgi_perf_hwrt_epic": ("Lumen total", (*_SKINNED_1A, *_LUMEN_TOTAL)),
+    "nextgi_perf_hwrt_medium": ("Lumen total", (*_TLAS_1A, *_LUMEN_LITE)),
+    "nextgi_perf_swrt_high": ("Lumen total", (*_SDF_1A, *_LUMEN_TOTAL)),
+    "nextgi_perf_swrt_epic": ("Lumen total", (*_SDF_1A, *_LUMEN_TOTAL)),
+    "nextgi_perf_swrt_medium": ("Lumen total", (*_SDF_1A, *_LUMEN_LITE)),
+    "character_walk_hwrt_high": ("Lumen total", (*_SKINNED_1A, *_LUMEN_TOTAL)),
+    "glass_water_hwrt_high": ("Lumen total and translucency", (*_TLAS_1A, *_LUMEN_TOTAL, *_TRANSLUCENCY)),
+}
 
 
 @pytest.mark.parametrize(
@@ -269,7 +400,7 @@ def test_the_nextgi_scene_configs(
     assert cvars["sg.ShadowQuality"] == "2"
     assert cvars["r.Lumen.AsyncCompute"] == "0"
     # The shared comparison project keeps Use Hardware Ray Tracing when available off, so each set
-    # sets the tier at launch and the report checks the echo.
+    # sets the tier at launch (the lead accepted this on 2026-11-16) and the report checks the echo.
     assert cvars["r.Lumen.HardwareRayTracing"] == ("1" if tier == "HWRT" else "0")
     assert cvars.get("r.Lumen.TraceMeshSDFs") == (None if tier == "HWRT" else "0")
     # The Lumen performance guide's Medium: Irradiance Field Gather, r.Lumen.FinalGatherMethod 0.
@@ -278,16 +409,25 @@ def test_the_nextgi_scene_configs(
     assert (line.status, line.gates, line.statistic) == ("ue_bar", (gate,), "p95")
     assert line.godotnext is not None and line.godotnext.prefix == "nextgi_"
     assert set(line.godotnext.exclude) == {"nextgi_2_ms", "nextgi_as_builds_ms"}
-    # The UE columns come from the ports' own game-mode captures; both groups are provisional.
-    assert line.ue is not None and line.ue.group == "Lumen total (provisional)"
-    assert line.ue.columns == (_LUMEN_LITE if quality == "MEDIUM" else _LUMEN_TOTAL)
-    assert "Provisional" in line.reason
+    # On the hardware tier line 1a's "Skinned refit" timestamp (no nextgi_ prefix) holds the TLAS build on
+    # frames with skinned work, so the block takes its column too.
+    assert line.godotnext.include == (("skinned_refit_ms",) if tier == "HWRT" else ())
+    # The UE columns come from the ports' own game-mode captures, by the lead's column rule.
+    assert line.ue is not None and (line.ue.group, line.ue.columns) == _NEXTGI_COLUMNS[name]
+    assert "Provisional" not in line.reason and "GPU/LumenSceneUpdate" in line.reason
+    # The reason cites the plan's rule and names the busy columns it leaves out, and does not claim the
+    # settings record lists the columns yet.
+    assert "plan §23.5 states it" in line.reason and "settings record and plan §23.5 carry it" not in line.reason
+    assert "GPU/DistanceFields" in line.reason
+    assert ("GPU/NaniteRayTracing" in line.reason) == (tier == "HWRT")
+    assert ("skinned_refit_ms" in line.reason) == (tier == "HWRT")
+    assert ("other UE features" in line.reason) == (tier == "SWRT")
+    assert ("refit the UE side does not show" in line.reason) == (name == "nextgi_perf_hwrt_medium")
     assert ("Lumen Lite" in line.reason) == (quality == "MEDIUM")
-    # What the lead decides before the line is judged: NextGI Perf's far plane (the export's
-    # camera_far approximation), the hardware tier set by the cvar rather than by the project
-    # settings the settings record names, and which UE columns hold the translucency volume (G3-5).
-    assert ("camera_far" in line.reason) == name.startswith("nextgi_perf_")
-    assert ("departs from the settings record" in line.reason) == (tier == "HWRT")
+    # NextGI Perf's camera now reaches the courtyard's far end (no camera_far approximation), and the
+    # tier set per launch is the lead's accepted form.
+    assert "camera_far" not in line.reason
+    assert ("accepted on 2026-11-16" in line.reason) == (tier == "HWRT")
     assert ("translucency volume" in line.reason) == (gate == "G3-5")
 
 
@@ -318,6 +458,8 @@ def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: i
     assert cvars["r.ScreenPercentage"] == "100"
     assert cvars["sg.ResolutionQuality"] == "100"
     assert cvars["sg.ShadowQuality"] == "2"
+    # The maps turn Lumen off to match: the Lumen columns must stay quiet in the window.
+    assert set(_LUMEN_QUIET) <= set(config.ue.window_quiet_columns)
     line = next(line for line in config.lines if line.id == line_id)
     assert (line.status, line.gates, line.statistic) == ("ue_bar", (gate,), "p95")
     # No NextGeo virtual geometry in the generated content and the PN features not built: no
@@ -330,8 +472,11 @@ def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: i
     assert (line.ue.group, line.ue.columns) == ("Nanite total (provisional)", _NANITE_TOTAL)
     assert "Provisional" in line.reason and "GPU/ShadowDepths" in line.reason
     assert ("GPU/GPUSkinCache" in line.reason) == (gate == "GN-5")
-    # GN-6 compares against Nanite tessellation, which the UE map does not run yet.
+    # GN-6 compares against Nanite tessellation, which the UE map does not run yet: the lead accepted
+    # it as not like-for-like until #163 (2026-11-16), and forcing Nanite on the port meshes.
     assert ("tessellation" in line.reason) == (gate == "GN-6")
+    assert ("#163" in line.reason) == (gate == "GN-6")
+    assert "waits for the lead" not in line.reason
     assert ("Nanite Foliage" in line.reason) == (gate == "GN-7")
     # The foliage row's Preserve Area is neither set nor read back on the UE side; it stays open.
     assert ("Preserve Area" in line.reason) == (gate == "GN-7")
@@ -347,12 +492,14 @@ def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: i
 _DENSE_CITY_LINES = {
     # line id: gates, status, UE group, UE columns (from the port's own game-mode captures)
     "g5_1_whole_frame": (("G5-1",), "ue_bar", "Whole frame, GPU", ("GPUTime",)),
-    # The lead's column rule (2026-11-16): the Lumen total plus the Lumen scene update.
+    # The lead's column rule (2026-11-16): line 1a's TLAS build, the Lumen scene update and the Lumen total
+    # (the city traces no skinned meshes, and its capture has no GPU/RayTracingDynamicGeometry).
     "g5_1_nextgi_total": (
         ("G5-1",),
         "ue_bar",
         "Lumen total",
         (
+            "GPU/RayTracingScene",
             "GPU/LumenSceneUpdate",
             "GPU/UpdateLumenSceneBuffers",
             "GPU/LumenSceneLighting",
@@ -435,6 +582,8 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
         nextgi = lines["g5_1_nextgi_total"].godotnext
         assert nextgi is not None and nextgi.prefix == "nextgi_"
         assert set(nextgi.exclude) == {"nextgi_2_ms", "nextgi_as_builds_ms"}
+        assert nextgi.include == ("skinned_refit_ms",)
+        assert "plan §23.5 states it" in lines["g5_1_nextgi_total"].reason
         cull = lines["g5_1_nextgeo_cull"].godotnext
         assert cull is not None and "nextgeo_hiz_ms" in cull.columns
         resolve = lines["g5_1_nextgeo_resolve"].godotnext
@@ -513,7 +662,7 @@ def test_godotnext_timing_arguments() -> None:
         "--frames=6",
         "--variant=static",
     ]
-    forced = parse_config(_with("godotnext", nextgi={"tier": "SWRT", "quality": "HIGH"}))
+    forced = parse_config(nextgi_config("SWRT", "0"))
     assert godotnext_args(forced)[-2:] == ["--nextgi=on", "--variant=static"]
 
 
@@ -539,7 +688,7 @@ def test_ue_launch_arguments_run_the_editor_in_game_mode() -> None:
         "-ExitAfterCsvProfiling",
         "-abslog={out}\\ue.log",
         # Each set console variable is named again on its own, so the log echoes the value the run used.
-        "-ExecCmds=r.ScreenPercentage 100,sg.GlobalIlluminationQuality 2,r.ScreenPercentage,sg.GlobalIlluminationQuality",
+        "-ExecCmds=" + ",".join(PINNED + [command.split()[0] for command in PINNED]),
     ]
     default_map = parse_config(_with("ue", map=None))
     assert ue_args(default_map)[0] == "-game"
@@ -657,6 +806,31 @@ def test_a_tracked_config_is_named_relative_to_the_repository() -> None:
         (_with("ue", expect_cvars={"r.TSR.History.ScreenPercentage": "1,2"}), "expect_cvars"),
         (_with("ue", expect_cvars={"bad name": "1"}), "expect_cvars"),
         (_with("ue", window="borderless"), "ue.window"),
+        # The lead's decisions of 2026-11-16: every scalability group pinned, async compute off, and
+        # UE's Lumen tier set per launch where GodotNext runs NextGI.
+        (_with("ue", exec_cmds=_replaced("sg.LandscapeQuality", None)), "sg.LandscapeQuality"),
+        (_with("ue", exec_cmds=_replaced("sg.ShadowQuality", "5")), "sg.ShadowQuality"),
+        (_with("ue", exec_cmds=_replaced("sg.ResolutionQuality", None)), "sg.ResolutionQuality"),
+        (_with("ue", exec_cmds=_replaced("sg.ResolutionQuality", "5")), "sg.ResolutionQuality"),
+        (_with("ue", exec_cmds=_replaced("r.RDG.AsyncCompute", "1")), "async compute off: r.RDG.AsyncCompute 0"),
+        (_with("ue", exec_cmds=_replaced("r.Lumen.AsyncCompute", None)), "r.Lumen.AsyncCompute 0"),
+        (_with("ue", exec_cmds=_replaced("r.TSR.AsyncCompute", "2")), "r.TSR.AsyncCompute 0"),
+        (_with("ue", exec_cmds=PINNED[:-1], expect_cvars={"r.TSR.AsyncCompute": "0"}), "r.TSR.AsyncCompute 0"),
+        (nextgi_config("HWRT", None), "r.Lumen.HardwareRayTracing 1"),
+        (nextgi_config("HWRT", "0"), "r.Lumen.HardwareRayTracing 1"),
+        (nextgi_config("SWRT", "1"), "r.Lumen.HardwareRayTracing 0"),
+        # High (2) everywhere but a line's own groups (plan §23.4), checked by parse_config itself.
+        (own_levels_config(None, None, {"sg.ShadowQuality": "3"}), r"sg.ShadowQuality 2 \(High\), not '3'"),
+        (own_levels_config(None, None, {"sg.ReflectionQuality": "3"}), r"sg.ReflectionQuality 2 \(High\)"),
+        (own_levels_config("EPIC", None, {}), r"sg.GlobalIlluminationQuality 3 \(the line's own level\), not '2'"),
+        (own_levels_config("HIGH", None, {"sg.ReflectionQuality": "3"}), r"sg.ReflectionQuality 2 \(the line's own"),
+        (own_levels_config("MEDIUM", None, {"sg.GlobalIlluminationQuality": "1"}), "sg.ReflectionQuality 1"),
+        (own_levels_config(None, "epic", {}), r"sg.AntiAliasingQuality 3 \(the line's own level\), not '2'"),
+        (own_levels_config(None, "high", {"sg.AntiAliasingQuality": "3"}), "sg.AntiAliasingQuality 2"),
+        (own_levels_config(None, "ultra", {}), "tsr-quality=ultra"),
+        (_with("ue", exec_cmds=_replaced("sg.ResolutionQuality", "50")), r"at r.ScreenPercentage \(100\)"),
+        # A column cannot be both quiet and active.
+        (_with("ue", window_active_columns=["Synthetic/Hitch"]), "window_active_columns"),
     ],
 )
 def test_bad_configs_are_refused(config: dict[str, object], match: str) -> None:

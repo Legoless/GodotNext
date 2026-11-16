@@ -17,7 +17,7 @@
 		"camera": "cam_main",
 		"seed": 1,
 		"override": "res://ue_compare/lights_shadows.override.cfg",
-		"nextgi": null,
+		"nextgi": { "tier": "HWRT", "quality": "HIGH" },
 		"harness_args": ["--lights=1024"],
 		"timeout_minutes": 15
 	},
@@ -31,8 +31,27 @@
 		"path_frames": 1,
 		"fps": 60,
 		"args": ["-dx12", "-sm6"],
-		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100", "sg.ShadowQuality 2", "r.RDG.AsyncCompute 0"],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.ViewDistanceQuality 2",
+			"sg.AntiAliasingQuality 2",
+			"sg.ShadowQuality 2",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.PostProcessQuality 2",
+			"sg.TextureQuality 2",
+			"sg.EffectsQuality 2",
+			"sg.FoliageQuality 2",
+			"sg.ShadingQuality 2",
+			"sg.LandscapeQuality 2",
+			"r.Lumen.HardwareRayTracing 1",
+			"r.RDG.AsyncCompute 0",
+			"r.Lumen.AsyncCompute 0",
+			"r.TSR.AsyncCompute 0"
+		],
 		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"window_active_columns": ["GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/RayTracingScene"],
 		"ok_exit_codes": [0],
 		"timeout_minutes": 15
 	},
@@ -42,11 +61,11 @@
 			"name": "MegaLights total at 1,024 lights (M-1 to M-6 plus M-8)",
 			"gates": ["GM-2"],
 			"status": "ue_bar",
-			"reason": "Provisional UE group: GPU/MegaLights alone, while GM-2's GodotNext total is M-1 to M-6 plus M-8. The same captures report GPU/LightGrid, GPU/VolumetricFog, GPU/TranslucentLighting, GPU/Translucency and GPU/MegaLightsLightPowerDelta as separate columns, and the port leaves MegaLights front-layer translucency at its default. Which UE columns match M-1 and M-8, and that setting, wait for the lead and the settings record (plan §23.5).",
+			"reason": "The UE group takes every pass the captures show doing the work of GM-2's GodotNext total (M-1 to M-6 plus M-8), by the lead's column rule (2026-11-16; the settings record and plan §23.5 carry it): GPU/MegaLights and GPU/MegaLightsLightPowerDelta, the light grid (GPU/LightGrid, M-1), and for M-8 the volumetric fog (GPU/VolumetricFog) and translucency (GPU/TranslucentLighting, GPU/Translucency). GPU/Fog, the height fog itself, stays out, and the port leaves MegaLights front-layer translucency at its default. The GM sets run GI at High on both sides (NextGI High on the hardware tier, Lumen High with r.Lumen.HardwareRayTracing 1), so the translucency columns can also hold Lumen work, which the capture does not separate.",
 			"statistic": "p95",
 			"direction": "lower",
 			"godotnext": null,
-			"ue": { "group": "MegaLights (provisional)", "columns": ["GPU/MegaLights"] }
+			"ue": { "group": "MegaLights total", "columns": ["GPU/MegaLights", "GPU/MegaLightsLightPowerDelta", "GPU/LightGrid", "GPU/VolumetricFog", "GPU/TranslucentLighting", "GPU/Translucency"] }
 		},
 		{
 			"id": "gpu_pass_sum",

@@ -21,10 +21,16 @@ capture repeats some, such as ``PSO/ComputePSOHitch``); a window check reads
 every column of that name. Nothing here knows a UE stat name: the comparison
 config supplies them.
 
-The UE log (``-abslog``) is read for two things: the value a console variable
+The UE log (``-abslog``) is read for three things: the value a console variable
 echoes when ``-ExecCmds`` names it without a value (``<name> = "<value>"``
-after the line's time prefix, observed in the 5.9 editor in game mode), and the
-``Metadata set`` lines.
+after the line's time prefix, observed in the 5.9 editor in game mode), the
+``Metadata set`` lines, and the sizes of the TSR draw event when the run asked
+for a GPU profile. ``ProfileGPU`` prints the GPU profiler's draw events to the
+log (Epic's 5.9 console-variable reference, ``r.ProfileGPU.ShowUI``: "The
+results will always go to the log/console"), and Epic's TSR page says the
+TemporalSuperResolution draw event "includes the rendering and display
+resolutions": ``TemporalSuperResolution(...) <w>x<h> -> <W>x<H>`` in the 5.9
+editor in game mode (observed on the RTX 4080 SUPER machine).
 """
 
 from __future__ import annotations
@@ -49,6 +55,8 @@ _LOG_METADATA = re.compile(r'Metadata set : ([A-Za-z0-9_]+)="(.*)"\s*$')
 # A queried console variable echoes `<name> = "<value>"`, right after the log line's
 # `[time][frame]` prefix (no category) and followed by `LastSetBy: <source>` (observed, UE 5.9).
 _LOG_CVAR = re.compile(r'(?:^|[\s:\]])([A-Za-z][A-Za-z0-9_.]*) = "([^"]*)"')
+# The TSR draw event in a ProfileGPU dump: its rendering and display resolutions (observed, UE 5.9).
+_LOG_TSR_SIZES = re.compile(r"TemporalSuperResolution\(.*?(\d+)x(\d+)\s*->\s*(\d+)x(\d+)")
 
 
 class CsvProfileError(ValueError):
@@ -165,6 +173,18 @@ def read_log_cvars(text: str, names: Sequence[str]) -> dict[str, str]:
         match = _LOG_CVAR.search(line)
         if match and match.group(1) in wanted:
             found[match.group(1)] = match.group(2)
+    return found
+
+
+def read_log_upscale_sizes(text: str) -> list[tuple[int, int, int, int]]:
+    """Rendering and display sizes of each TSR draw event a ``ProfileGPU`` dump printed:
+    ``(width, height, output width, output height)`` per event, in log order."""
+    found: list[tuple[int, int, int, int]] = []
+    for line in text.splitlines():
+        match = _LOG_TSR_SIZES.search(line)
+        if match:
+            width, height, out_width, out_height = (int(group) for group in match.groups())
+            found.append((width, height, out_width, out_height))
     return found
 
 

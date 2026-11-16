@@ -62,19 +62,25 @@ class GodotNextSelection:
 
     ``columns`` names them; ``all_passes`` takes every pass column; ``prefix`` takes every
     column whose name starts with it except ``exclude``, for a frame block whose inner
-    timestamps vary by tier or mode (the NextGI block: ``nextgi_*``).
+    timestamps vary by tier or mode (the NextGI block: ``nextgi_*``), plus the ``include``
+    columns a run has: a timestamp inside the block whose name lacks the prefix (line 1a's
+    ``skinned_refit_ms``) appears only on the frames that emit it.
     """
 
     columns: tuple[str, ...] = ()
     all_passes: bool = False
     prefix: str = ""
     exclude: tuple[str, ...] = ()
+    include: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, object]:
         if self.all_passes:
             return {"all_passes": True}
         if self.prefix:
-            return {"prefix": self.prefix, "exclude": list(self.exclude)}
+            data: dict[str, object] = {"prefix": self.prefix, "exclude": list(self.exclude)}
+            if self.include:
+                data["include"] = list(self.include)
+            return data
         return {"columns": list(self.columns)}
 
     def select(self, available: Sequence[str]) -> list[str]:
@@ -83,7 +89,11 @@ class GodotNextSelection:
         if self.all_passes:
             return passes
         if self.prefix:
-            return [name for name in passes if name.startswith(self.prefix) and name not in self.exclude]
+            return [
+                name
+                for name in passes
+                if (name.startswith(self.prefix) or name in self.include) and name not in self.exclude
+            ]
         return list(self.columns)
 
 
@@ -398,8 +408,9 @@ def _godotnext_selection(line_id: str, value: object) -> GodotNextSelection | No
     kinds = [key for key in ("all_passes", "columns", "prefix") if key in data]
     if len(kinds) != 1:
         raise ComparisonError(f"line {line_id}: godotnext takes one of all_passes, columns or prefix, not both")
-    if "exclude" in data and kinds != ["prefix"]:
-        raise ComparisonError(f"line {line_id}: godotnext exclude goes with prefix")
+    for key in ("exclude", "include"):
+        if key in data and kinds != ["prefix"]:
+            raise ComparisonError(f"line {line_id}: godotnext {key} goes with prefix")
     if kinds == ["all_passes"]:
         if data.get("all_passes") is not True:
             raise ComparisonError(f"line {line_id}: godotnext all_passes is true")
@@ -409,7 +420,13 @@ def _godotnext_selection(line_id: str, value: object) -> GodotNextSelection | No
         if not prefix or not prefix.endswith("_"):
             raise ComparisonError(f"line {line_id}: godotnext prefix is a column-name prefix ending in _")
         exclude = tuple(str(column) for column in as_list(data.get("exclude", [])))
-        return GodotNextSelection(prefix=prefix, exclude=exclude)
+        include = tuple(str(column) for column in as_list(data.get("include", [])))
+        for column in include:
+            if not column or column.startswith(prefix) or column in exclude:
+                raise ComparisonError(
+                    f"line {line_id}: godotnext include names a column outside the prefix and not excluded: {column!r}"
+                )
+        return GodotNextSelection(prefix=prefix, exclude=exclude, include=include)
     columns = tuple(str(column) for column in as_list(data.get("columns")))
     if not columns:
         raise ComparisonError(f"line {line_id}: godotnext needs columns, all_passes or prefix")

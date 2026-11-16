@@ -34,11 +34,21 @@
 		"exec_cmds": [
 			"r.ScreenPercentage 100",
 			"sg.ResolutionQuality 100",
+			"sg.ViewDistanceQuality 2",
+			"sg.AntiAliasingQuality 2",
+			"sg.ShadowQuality 2",
 			"sg.GlobalIlluminationQuality 3",
 			"sg.ReflectionQuality 3",
-			"sg.ShadowQuality 2",
+			"sg.PostProcessQuality 2",
+			"sg.TextureQuality 2",
+			"sg.EffectsQuality 2",
+			"sg.FoliageQuality 2",
+			"sg.ShadingQuality 2",
+			"sg.LandscapeQuality 2",
 			"r.Lumen.HardwareRayTracing 1",
-			"r.Lumen.AsyncCompute 0"
+			"r.RDG.AsyncCompute 0",
+			"r.Lumen.AsyncCompute 0",
+			"r.TSR.AsyncCompute 0"
 		],
 		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
 		"ok_exit_codes": [0],
@@ -50,11 +60,11 @@
 			"name": "NextGI total at Epic, hardware ray tracing",
 			"gates": ["G3-1"],
 			"status": "ue_bar",
-			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5). On 244 of the path's 600 rows GodotNext's 80 m far plane clips geometry inside the view (the courtyard's far end) that the UE port draws and lights, because the UE import sets only the camera's near plane (the export's camera_far approximation): the lead decides on this difference, as on the loop wrap, before the line is judged. UE takes the hardware tier from r.Lumen.HardwareRayTracing 1 at launch, because the shared comparison project keeps Use Hardware Ray Tracing when available off. This departs from the settings record and plan §23.5, which say the comparison enables the two project settings, until the lead decides.",
+			"reason": "The GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b) plus skinned_refit_ms when a run has it: on frames with skinned BLAS work, line 1a's TLAS rebuild emits a Skinned refit timestamp inside the block, and that column, which then holds the TLAS build, has no nextgi_ prefix (the harness maps it to line 1a). The UE group takes every pass the captures show doing that work, by the lead's column rule (2026-11-16; plan §23.5 states it since v3.9.7, and the settings record does not list every column named here yet): for line 1a, GPU/RayTracingScene, the TLAS build (the settings record's skinned refit row names it from Epic's ray tracing performance guide), and GPU/RayTracingDynamicGeometry, which the captures show only where skinned characters are traced (Character Walk and NextGI Perf's four characters at High and Epic); the Lumen scene update, GPU/LumenSceneUpdate and GPU/UpdateLumenSceneBuffers; and the three stat gpu passes the settings record names for the Lumen total. Two busy columns stay out until the lead decides which GodotNext line, if any, does their work: GPU/NaniteRayTracing, busy in every hardware-tier capture and absent on the software tier, and GPU/DistanceFields, busy in every capture on both tiers and in the sets without Lumen. UE takes the hardware tier from r.Lumen.HardwareRayTracing 1, set per launch as the lead accepted on 2026-11-16, because the shared comparison project keeps Use Hardware Ray Tracing when available off.",
 			"statistic": "p95",
 			"direction": "lower",
-			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },
-			"ue": { "group": "Lumen total (provisional)", "columns": ["GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections"] }
+			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"], "include": ["skinned_refit_ms"] },
+			"ue": { "group": "Lumen total", "columns": ["GPU/RayTracingScene", "GPU/RayTracingDynamicGeometry", "GPU/LumenSceneUpdate", "GPU/UpdateLumenSceneBuffers", "GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections"] }
 		},
 		{
 			"id": "gpu_pass_sum",

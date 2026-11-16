@@ -23,6 +23,22 @@ variable ``exec_cmds`` sets is echoed again by its bare name, so the report can
 read the value the run used from the log. ``expect_cvars`` names console
 variables the run does not set but whose value it must have (for example one
 that a scalability level sets): they are echoed and checked the same way.
+
+The lead's decisions of 2026-11-16 hold for every set, and ``parse_config``
+refuses a config that breaks them. ``exec_cmds`` pins every scalability group
+of Epic's 5.9 console-variable reference (``sg.ResolutionQuality`` at the
+set's ``r.ScreenPercentage``, and the eleven quality groups at High, 2, so the
+editor's saved scalability never decides a level), except the groups a line
+runs at its own level (plan §23.4): a NextGI set's GI and reflections at its
+NextGI quality, a TSR set's anti-aliasing at its ``--tsr-quality``. It turns
+UE's async compute off (``r.RDG.AsyncCompute 0``, "no async compute is used",
+plus the Lumen and TSR switches), so timed passes do not overlap. A set that
+runs NextGI sets UE's Lumen tier for the launch with
+``r.Lumen.HardwareRayTracing`` (1 for the hardware tier, 0 for the software
+tier). The runner makes every UE launch DPI-aware (``win_session1.ps1``).
+``window_active_columns`` names UE columns that must hold values in the
+measured window (a feature the set relies on that no line times, such as
+Lumen in the lights and shadows sets): the report refuses a run without them.
 """
 
 from __future__ import annotations
@@ -47,10 +63,42 @@ QUIT_AFTER_MARGIN = 1050
 UE_RUN_MODES = ("editor_game",)
 # Epic's command-line reference: -Windowed "Use windowed mode", -fullscreen "Use fullscreen mode".
 # On the RTX 4080 SUPER machine (a 3840x2160 desktop at 125 % scaling) a 3840x2160 request recorded
-# 2560x1440 windowed and 3072x1728 fullscreen, the editor in game mode not being DPI-aware there;
-# a fullscreen launch made DPI-aware recorded 3840x2160 (#232). 2160p sets ask for fullscreen, and
-# the report refuses a capture whose recorded resolution is not the set's.
+# 2560x1440 windowed and 3072x1728 fullscreen while the editor in game mode was not DPI-aware there;
+# the runner now makes each UE launch DPI-aware (#232, lead decision 2026-11-16). 2160p sets ask for
+# fullscreen, and the report refuses a capture whose recorded resolution is not the set's.
 UE_WINDOW_MODES = ("windowed", "fullscreen")
+# Epic's 5.9 console-variable reference: the quality groups take "0:low, 1:med, 2:high, 3:epic,
+# 4:cinematic, default: 3", and sg.ResolutionQuality takes "10..100, default: 100". Every set pins
+# all of them (lead decision 2026-11-16: every group at High unless the line sets its own level).
+SCALABILITY_LEVEL_GROUPS = (
+    "sg.ViewDistanceQuality",
+    "sg.AntiAliasingQuality",
+    "sg.ShadowQuality",
+    "sg.GlobalIlluminationQuality",
+    "sg.ReflectionQuality",
+    "sg.PostProcessQuality",
+    "sg.TextureQuality",
+    "sg.EffectsQuality",
+    "sg.FoliageQuality",
+    "sg.ShadingQuality",
+    "sg.LandscapeQuality",
+)
+SCALABILITY_RESOLUTION = "sg.ResolutionQuality"
+SCALABILITY_HIGH = "2"
+# Groups a line runs at its own level (plan §23.4): a NextGI quality's GI and reflections (the settings
+# record's Medium, High and Epic rows: 1, 2 and 3), and TSR's anti-aliasing at GodotNext's --tsr-quality,
+# the same names on the reference's 0..4 scale (the settings record's TSR rows: sg.AntiAliasingQuality 2
+# for TSR High, 3 for TSR Epic).
+NEXTGI_LEVEL_GROUPS = ("sg.GlobalIlluminationQuality", "sg.ReflectionQuality")
+NEXTGI_LEVELS = {"MEDIUM": "1", "HIGH": "2", "EPIC": "3"}
+TSR_LEVEL_GROUP = "sg.AntiAliasingQuality"
+TSR_LEVELS = {"low": "0", "medium": "1", "high": "2", "epic": "3", "cinematic": "4"}
+# UE's async compute is off in every timing set (lead decision 2026-11-16). The reference:
+# r.RDG.AsyncCompute "0:disabled, no async compute is used"; r.Lumen.AsyncCompute "Whether Lumen should
+# use async compute if supported."; r.TSR.AsyncCompute "0: Disabled".
+UE_ASYNC_OFF = {"r.RDG.AsyncCompute": "0", "r.Lumen.AsyncCompute": "0", "r.TSR.AsyncCompute": "0"}
+# The Lumen tier per launch for a set that runs NextGI (lead decision 2026-11-16).
+UE_LUMEN_TIER = "r.Lumen.HardwareRayTracing"
 UE_EDITOR_EXE = "UnrealEditor.exe"
 NEXTGI_TIERS = ("SWRT", "HWRT")
 NEXTGI_QUALITIES = ("MEDIUM", "HIGH", "EPIC")
@@ -123,6 +171,7 @@ class UeJob:
     timeout_minutes: float
     expect_cvars: tuple[tuple[str, str], ...] = ()
     window: str = "windowed"
+    window_active_columns: tuple[str, ...] = ()
 
     def checked_cvars(self) -> dict[str, str]:
         """Console variables ``exec_cmds`` sets and those ``expect_cvars`` names, with their
@@ -185,6 +234,14 @@ def parse_config(value: object) -> ComparisonConfig:
     ue = _ue_job(as_dict(data.get("ue")), warmup)
     if frames % ue.path_frames:
         raise ComparisonError(f"frames ({frames}) must be a whole number of camera paths ({ue.path_frames} frames)")
+    _check_levels(godotnext, _set_cvars(ue.exec_cmds))
+    if godotnext.nextgi is not None:
+        tier = _set_cvars(ue.exec_cmds).get(UE_LUMEN_TIER)
+        wanted = "1" if godotnext.nextgi.tier == "HWRT" else "0"
+        if tier != wanted:
+            raise ComparisonError(
+                f"the set runs NextGI on the {godotnext.nextgi.tier} tier, so ue.exec_cmds sets {UE_LUMEN_TIER} {wanted}"
+            )
     lines = tuple(parse_line(item) for item in as_list(data.get("lines")))
     if not lines:
         raise ComparisonError("a comparison serves at least one line")
@@ -501,6 +558,10 @@ def _ue_job(data: dict[str, object], default_warmup: int) -> UeJob:
         if "," in command or '"' in command:
             raise ComparisonError(f"ue.exec_cmds {command!r}: one command per entry, no commas or quotes")
     quiet = tuple(str(item) for item in as_list(data.get("window_quiet_columns", [])))
+    active = tuple(str(item) for item in as_list(data.get("window_active_columns", [])))
+    for column in active:
+        if not column or column in quiet:
+            raise ComparisonError(f"ue.window_active_columns {column!r}: a column name not in window_quiet_columns")
     expected = as_dict(data.get("expect_cvars") or {})
     for name, value in expected.items():
         text = str(value)
@@ -509,6 +570,7 @@ def _ue_job(data: dict[str, object], default_warmup: int) -> UeJob:
                 f"ue.expect_cvars {name!r}: a console variable name and one value without spaces, commas or quotes"
             )
     set_by_commands = _set_cvars(exec_cmds)
+    _check_pinned(set_by_commands)
     for name in expected:
         if name in set_by_commands:
             raise ComparisonError(f"ue.expect_cvars {name!r}: exec_cmds sets it; expect only what the run does not set")
@@ -535,7 +597,42 @@ def _ue_job(data: dict[str, object], default_warmup: int) -> UeJob:
         timeout_minutes=_minutes(data),
         expect_cvars=tuple((str(name), str(value)) for name, value in expected.items()),
         window=window,
+        window_active_columns=active,
     )
+
+
+def _check_pinned(cvars: dict[str, str]) -> None:
+    """Every scalability group pinned and UE's async compute off (lead decisions 2026-11-16)."""
+    for name in SCALABILITY_LEVEL_GROUPS:
+        if cvars.get(name) not in ("0", "1", "2", "3", "4"):
+            raise ComparisonError(f"ue.exec_cmds pins every scalability group: {name} 0..4 (High is 2)")
+    resolution = cvars.get(SCALABILITY_RESOLUTION, "")
+    if not resolution.isdigit() or not 10 <= int(resolution) <= 100:
+        raise ComparisonError(f"ue.exec_cmds pins {SCALABILITY_RESOLUTION} (10..100)")
+    percentage = cvars.get("r.ScreenPercentage")
+    if percentage is not None and percentage != resolution:
+        raise ComparisonError(f"ue.exec_cmds pins {SCALABILITY_RESOLUTION} at r.ScreenPercentage ({percentage})")
+    for name, value in UE_ASYNC_OFF.items():
+        if cvars.get(name) != value:
+            raise ComparisonError(f"ue.exec_cmds turns UE's async compute off: {name} {value}")
+
+
+def _check_levels(godotnext: GodotNextJob, cvars: dict[str, str]) -> None:
+    """Every quality group at High (2) but the groups a line runs at its own level (plan §23.4)."""
+    own: dict[str, str] = {}
+    if godotnext.nextgi is not None:
+        own.update(dict.fromkeys(NEXTGI_LEVEL_GROUPS, NEXTGI_LEVELS[godotnext.nextgi.quality]))
+    for arg in godotnext.harness_args:
+        if arg.startswith("--tsr-quality="):
+            quality = arg.split("=", 1)[1]
+            if quality not in TSR_LEVELS:
+                raise ComparisonError(f"godotnext.harness_args {arg}: one of {', '.join(TSR_LEVELS)}")
+            own[TSR_LEVEL_GROUP] = TSR_LEVELS[quality]
+    for name in SCALABILITY_LEVEL_GROUPS:
+        wanted = own.get(name, SCALABILITY_HIGH)
+        if cvars.get(name) != wanted:
+            why = "the line's own level" if name in own else "High"
+            raise ComparisonError(f"ue.exec_cmds sets {name} {wanted} ({why}), not {cvars.get(name)!r}")
 
 
 def _minutes(data: dict[str, object]) -> float:

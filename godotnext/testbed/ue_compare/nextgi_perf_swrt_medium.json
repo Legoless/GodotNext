@@ -34,13 +34,23 @@
 		"exec_cmds": [
 			"r.ScreenPercentage 100",
 			"sg.ResolutionQuality 100",
+			"sg.ViewDistanceQuality 2",
+			"sg.AntiAliasingQuality 2",
+			"sg.ShadowQuality 2",
 			"sg.GlobalIlluminationQuality 1",
 			"sg.ReflectionQuality 1",
-			"sg.ShadowQuality 2",
+			"sg.PostProcessQuality 2",
+			"sg.TextureQuality 2",
+			"sg.EffectsQuality 2",
+			"sg.FoliageQuality 2",
+			"sg.ShadingQuality 2",
+			"sg.LandscapeQuality 2",
 			"r.Lumen.FinalGatherMethod 0",
 			"r.Lumen.HardwareRayTracing 0",
 			"r.Lumen.TraceMeshSDFs 0",
-			"r.Lumen.AsyncCompute 0"
+			"r.RDG.AsyncCompute 0",
+			"r.Lumen.AsyncCompute 0",
+			"r.TSR.AsyncCompute 0"
 		],
 		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
 		"ok_exit_codes": [0],
@@ -52,11 +62,11 @@
 			"name": "SWRT total at Medium (Lite, irradiance field gather)",
 			"gates": ["GS-2"],
 			"status": "ue_bar",
-			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5). At Medium UE runs Lumen Lite: the game-mode captures on the RTX 4080 SUPER show GPU/LumenIrradianceFieldGather, while GPU/LumenScreenProbeGather and GPU/LumenReflections stay at 0 (sg.ReflectionQuality 1 turns Lumen reflections off and GPU/ScreenSpaceReflections appears), so the UE group is the scene lighting and the irradiance field gather. On 244 of the path's 600 rows GodotNext's 80 m far plane clips geometry inside the view (the courtyard's far end) that the UE port draws and lights, because the UE import sets only the camera's near plane (the export's camera_far approximation): the lead decides on this difference, as on the loop wrap, before the line is judged.",
+			"reason": "The GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b). The UE group takes every pass the captures show doing that work, by the lead's column rule (2026-11-16; plan §23.5 states it since v3.9.7, and the settings record does not list every column named here yet): for line 1a's global SDF update, GPU/GlobalDistanceFieldUpdate, busy here and at 0 in the hardware-tier Lumen captures (it is also busy in the captures without Lumen, the PN and Upscaler Torture sets, so it may serve other UE features as well, which the lead weighs); the Lumen scene update, GPU/LumenSceneUpdate and GPU/UpdateLumenSceneBuffers; and Lumen Lite's passes (below). GPU/DistanceFields, busy in every capture on both tiers and in the sets without Lumen, stays out until the lead decides whether it does the work of line 1a's mesh SDF table upload. At Medium UE runs Lumen Lite: the game-mode captures on the RTX 4080 SUPER show GPU/LumenIrradianceFieldGather, while GPU/LumenScreenProbeGather and GPU/LumenReflections are absent or 0 (sg.ReflectionQuality 1 turns Lumen reflections off and GPU/ScreenSpaceReflections appears), so Lite's passes are the scene lighting and the irradiance field gather.",
 			"statistic": "p95",
 			"direction": "lower",
 			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },
-			"ue": { "group": "Lumen total (provisional)", "columns": ["GPU/LumenSceneLighting", "GPU/LumenIrradianceFieldGather"] }
+			"ue": { "group": "Lumen total", "columns": ["GPU/GlobalDistanceFieldUpdate", "GPU/LumenSceneUpdate", "GPU/UpdateLumenSceneBuffers", "GPU/LumenSceneLighting", "GPU/LumenIrradianceFieldGather"] }
 		},
 		{
 			"id": "gpu_pass_sum",

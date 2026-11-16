@@ -7,6 +7,7 @@ const Scaffold := preload("res://generators/scaffold.gd")
 const Layout = preload("res://scenes/nextgi_perf/layout.gd")
 
 const STREAM := 35
+const CAPTURE_FAR := 150.0
 const CAMERAS: Array[String] = ["CovCam0", "CovCam1", "CovCam2", "CovCam3", "CaptureCam"]
 
 
@@ -107,8 +108,11 @@ static func build() -> Dictionary:
 			Vector3(60.0, 4.0, -20.0), Vector3(90.0, 2.0, 0.0), 80.0)
 	Scaffold.make_camera(root, root, "CovCam3",
 			Vector3(60.0, 4.0, 20.0), Vector3(90.0, 2.0, 0.0), 80.0)
+	# The timing camera's far plane reaches past the courtyard's far end from every spline frame (the
+	# scene box lies at most 101.2 m ahead of the view), so no placement is clipped (#33, the UE
+	# comparison's camera_far check).
 	var capture := Scaffold.make_camera(root, root, "CaptureCam",
-			Layout.spline_position(0), Layout.spline_position(1), 80.0, 60.0, true)
+			Layout.spline_position(0), Layout.spline_position(1), CAPTURE_FAR, 60.0, true)
 	capture.transform = Transform3D(Layout.spline_basis(0), Layout.spline_position(0))
 
 	root.set_script(load("res://scenes/nextgi_perf/nextgi_perf.gd"))

@@ -53,6 +53,9 @@
 #   kind                 "run" or "timing" (clock locks and the power plan as for Godot)
 #   ok_exit_codes        the editor's exit codes that count as a finished run (default [0]); the
 #                        runner then exits 0 and records the editor's own code in runner_job.json
+# A UE launch runs with __COMPAT_LAYER=HighDpiAware in its own environment (recorded under env in
+# runner_job.json), so it renders the requested size on the machine's 125 % desktop; the desktop's
+# scaling is left alone.
 # The runner waits for the editor process only, never for the processes it leaves running (its
 # derived-data server and crash handler stay up after a game-mode exit and are shared), and on a
 # timeout stops that one process by its id. A run that exits 0 counts only when the log it wrote
@@ -440,6 +443,16 @@ if ($null -ne $envField) {
 		}
 		$extraEnv[$property.Name] = ([string]$property.Value).Replace('{out}', $outDir)
 	}
+}
+if ($ueJob) {
+	# The machine's desktop runs at 125 % scaling, and the editor in game mode is not DPI-aware there:
+	# a 3840x2160 request recorded 2560x1440 windowed and 3072x1728 fullscreen (#232). The launch gets
+	# the HighDpiAware compatibility layer in its own environment, so the editor (and what it starts)
+	# renders the requested size without changing the desktop's scaling (lead decision 2026-11-16).
+	if ($extraEnv.Contains('__COMPAT_LAYER')) {
+		Fail 2 'a UE job takes no __COMPAT_LAYER in env; the runner makes the launch DPI-aware itself'
+	}
+	$extraEnv['__COMPAT_LAYER'] = 'HighDpiAware'
 }
 $token = [guid]::NewGuid().ToString('N').Substring(0, 12)
 if ($ueJob) {

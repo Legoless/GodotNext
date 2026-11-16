@@ -32,9 +32,9 @@
 #    translucent_shadow; then two exports with it and check_ue_export.gd on the pair. Character
 #    Walk (CaptureCam, the walk's 240 frames), which needs no approximation: two exports and
 #    check_ue_export.gd on the pair. NextGI Perf (CaptureCam, --instances=180 --variant=p3, 120
-#    frames): without --approximate it must refuse and name camera_far (CaptureCam's 80 m far plane
-#    clips the courtyard's far end); then two exports with it and check_ue_export.gd on the pair
-#    (the skinned characters as skeletal meshes, the GridMap cells, the far-plane row count).
+#    frames), which needs no approximation (CaptureCam's 150 m far plane reaches past the
+#    courtyard's far end): two exports and check_ue_export.gd on the pair (the skinned characters
+#    as skeletal meshes, the GridMap cells, a far-plane row count of 0).
 # 8. The PN scenes (#234): generators/build_pn.gd writes them into the gitignored
 #    res://generated/pn_content/ first (a failed generation fails the step; nothing is skipped).
 #    Foliage Field (cam_main, 60 frames) without --approximate must refuse and name diffuse_mode;
@@ -255,16 +255,7 @@ check glass
 export_pair walk --scene=res://scenes/character_walk/character_walk.tscn --camera=CaptureCam --warmup=0 --frames=240
 check walk
 
-perf_args=(--scene=res://scenes/nextgi_perf/nextgi_perf.tscn --camera=CaptureCam --warmup=0 --frames=120 --instances=180 --variant=p3)
-status=0
-"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
-	"${perf_args[@]}" --out="$work/perf_refused" >"$work/perf_refused.log" 2>&1 || status=$?
-report perf_refused "$status" 1 "$work/perf_refused.log"
-if ! grep -q -- "--approximate=camera_far" "$work/perf_refused.log" || [[ -e "$work/perf_refused/scene.json" ]]; then
-	echo "run_ue_export_check.sh: the refused NextGI Perf export does not name --approximate=camera_far, or wrote scene.json" >&2
-	failures=$((failures + 1))
-fi
-export_pair perf "${perf_args[@]}" --approximate=camera_far
+export_pair perf --scene=res://scenes/nextgi_perf/nextgi_perf.tscn --camera=CaptureCam --warmup=0 --frames=120 --instances=180 --variant=p3
 check perf
 
 # The PN scenes are generated, not committed: build them (byte-identical on every run) first.

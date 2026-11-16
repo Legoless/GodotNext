@@ -24,6 +24,7 @@ from godotnext_metrics.ue_csv import (
     read_csv_profile,
     read_log_cvars,
     read_log_metadata,
+    read_log_upscale_sizes,
     window_activity,
 )
 
@@ -201,3 +202,17 @@ def test_console_variable_echoes_are_read_from_the_log() -> None:
         "synthetic.Value": "0",
         "synthetic.Other": "2.000000",
     }
+
+
+def test_the_tsr_draw_event_sizes_are_read_from_a_gpu_profile() -> None:
+    # Synthetic lines in the observed shape: the draw event's name, its parameters in parentheses, then
+    # the rendering and display resolutions. Other TSR passes and sizes without the arrow do not count.
+    log = "\n".join([
+        "[2026.11.16-09.43.05:000][  2]LogSynthetic:  1.00ms  TemporalSuperResolution(synthetic=1) 1920x1080 -> 3840x2160",
+        "[2026.11.16-09.43.05:001][  2]LogSynthetic:  0.10ms  TSR SyntheticPass 1920x1080",
+        "[2026.11.16-09.43.05:002][  2]LogSynthetic:  0.20ms  TemporalSuperResolution 1920x1080",
+        "[2026.11.16-09.43.05:003][  2]LogSynthetic:  0.30ms  SomethingElse(x) 960x540 -> 1920x1080",
+        "[2026.11.16-09.43.09:000][  9]LogSynthetic:  1.00ms  TemporalSuperResolution(synthetic=2) 1280x720->2560x1440",
+    ])
+    assert read_log_upscale_sizes(log) == [(1920, 1080, 3840, 2160), (1280, 720, 2560, 1440)]
+    assert read_log_upscale_sizes("no profile here") == []

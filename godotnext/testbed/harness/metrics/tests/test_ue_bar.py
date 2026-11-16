@@ -213,6 +213,11 @@ def test_line_specs_are_validated() -> None:
         parse_line(_line(godotnext={"prefix": "a"}))
     with pytest.raises(ComparisonError, match="exclude goes with prefix"):
         parse_line(_line(godotnext={"columns": ["a_ms"], "exclude": ["b_ms"]}))
+    with pytest.raises(ComparisonError, match="include goes with prefix"):
+        parse_line(_line(godotnext={"columns": ["a_ms"], "include": ["b_ms"]}))
+    for column in ("a_b_ms", "b_ms", ""):
+        with pytest.raises(ComparisonError, match="include names a column outside the prefix"):
+            parse_line(_line(godotnext={"prefix": "a_", "exclude": ["b_ms"], "include": [column]}))
     with pytest.raises(ComparisonError, match="non-empty list"):
         parse_line(_line(ue={"group": "Feature", "columns": []}))
 
@@ -324,3 +329,16 @@ def test_a_prefix_selection_takes_the_block_columns_without_the_excluded_ones() 
     spec = parse_line(_line(godotnext={"prefix": "nextgi_", "exclude": ["nextgi_2_ms"]}))
     assert spec.godotnext is not None
     assert spec.godotnext.to_json() == {"prefix": "nextgi_", "exclude": ["nextgi_2_ms"]}
+
+
+def test_a_prefix_selection_adds_the_included_columns_a_run_has() -> None:
+    # Line 1a's "Skinned refit" timestamp sits inside the NextGI block without the prefix: its column
+    # joins the block on the runs (and frames) that emit it, and a run without it sums the block alone.
+    data = {"prefix": "nextgi_", "exclude": ["nextgi_2_ms"], "include": ["skinned_refit_ms"]}
+    spec = parse_line(_line(godotnext=data))
+    assert spec.godotnext is not None and spec.godotnext.to_json() == data
+    with_refit = ["frame", "wall_ms", "nextgi_as_updates_ms", "skinned_refit_ms", "nextgi_as_builds_ms", "nextgi_2_ms"]
+    assert spec.godotnext.select(with_refit) == ["nextgi_as_updates_ms", "skinned_refit_ms", "nextgi_as_builds_ms"]
+    without = [name for name in with_refit if name != "skinned_refit_ms"]
+    assert spec.godotnext.select(without) == ["nextgi_as_updates_ms", "nextgi_as_builds_ms"]
+    assert "skinned_refit_ms" not in GodotNextSelection(prefix="nextgi_").select(with_refit)

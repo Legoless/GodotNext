@@ -13,16 +13,24 @@ Every UE fact the report checks comes from what the run left, not from the
 command line: the GPU, the RHI, the feature level, the resolution, VSync and
 the build from the capture's metadata; the console variables from their echo
 in the log; the run mode from the executable the runner launched and the
-capture's command line; the clean exit from the runner's record. A GodotNext
-run that the config expects to run NextGI must record the forced NextGI with
-the configured tier and quality in its manifest, and a line on a NextGI
-column group must find those columns with values in ``timing.csv``.
+capture's command line; the clean exit from the runner's record, which must
+also show the launch ran DPI-aware (the runner's per-launch
+``__COMPAT_LAYER``, lead decision 2026-11-16); the features a set relies on
+from the config's ``window_active_columns``, which must hold values in the
+window (such as Lumen in the lights and shadows sets). A GodotNext run that the config
+expects to run NextGI must record the forced NextGI with the configured tier
+and quality in its manifest, and a line on a NextGI column group must find
+those columns with values in ``timing.csv``.
 
-UE's internal resolution is not observed: no column or metadata key of a
-game-mode capture records the size UE renders at before it upscales, and the
-log echoes ``r.ScreenPercentage`` once, at start-up (#232). A set whose
-GodotNext runs record a ``scaling_3d_scale`` other than 1.0 is therefore noted
-in a dry run and refused when judged, until an observed source exists.
+UE's internal resolution comes from the GPU profiler: no column or metadata
+key of a game-mode capture records the size UE renders at before it upscales
+(#232), so a set that upscales runs ``ProfileGPU`` once at start-up and the
+report reads the rendering and display resolutions of the TSR draw event from
+the log (``ue_csv.read_log_upscale_sizes``). A logged size that is not the
+GodotNext runs' internal size (the output times their ``scaling_3d_scale``,
+within 1 pixel per axis for rounding) and the set's output size refuses the set. A set whose GodotNext runs record a
+``scaling_3d_scale`` other than 1.0 and whose UE runs logged no such event is
+noted in a dry run and refused when judged.
 
 Without ``--judge`` the report is a build-time dry run: numbers and ratios,
 no verdict, not a measurement (§22). Fewer than 5 runs per engine are allowed
@@ -52,6 +60,7 @@ from godotnext_metrics.jsonutil import as_dict, as_int, as_list
 from godotnext_metrics.result import json_ready
 from godotnext_metrics.timing_metrics import read_timing_csv
 from godotnext_metrics.ue_bar import (
+    MAX_MISSING_SHARE,
     UE_BAR,
     ComparisonError,
     LineSpec,
@@ -67,6 +76,7 @@ from godotnext_metrics.ue_csv import (
     group_ms,
     read_csv_profile,
     read_log_cvars,
+    read_log_upscale_sizes,
     window_activity,
 )
 
@@ -79,13 +89,15 @@ RUN_MODE_NOTE = (
 )
 # The capture metadata keys the report reads (lower-case, as the profiler writes them).
 _META_TOKEN = "godotnextrun"
-# No observed UE source records the internal resolution yet: a names-only inventory of every column
-# and metadata key of an Upscaler Torture game-mode capture found none (#232).
+# No capture column or metadata key records UE's internal resolution (#232); the TSR draw event of a
+# ProfileGPU dump in the log does.
 INTERNAL_SIZE_UNVERIFIED = (
-    "the GodotNext runs render at scaling_3d_scale {scale:g} of the output, and no UE capture column or"
-    " metadata records the internal resolution UE rendered at (the log echoes r.ScreenPercentage once, at"
-    " start-up), so the report cannot show that both engines upscaled from the same internal size"
+    "the GodotNext runs render at scaling_3d_scale {scale:g} of the output, and UE run(s) {runs} logged no"
+    " TemporalSuperResolution draw event with its rendering and display resolutions (ProfileGPU in the set's"
+    " exec_cmds), so the report cannot show that both engines upscaled from the same internal size"
 )
+# The runner makes every UE launch DPI-aware in its own environment (lead decision 2026-11-16).
+UE_DPI_LAYER = "HighDpiAware"
 
 
 def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
@@ -151,11 +163,7 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
     if len(scales) != 1:
         raise ComparisonError(f"the GodotNext runs differ in scaling_3d_scale: {sorted(scales)}")
     scale = next(iter(scales))
-    if scale != 1.0:
-        message = INTERNAL_SIZE_UNVERIFIED.format(scale=scale)
-        if judge:
-            raise ComparisonError(f"UE's internal resolution is not verified: {message}")
-        notes.append(f"UE's internal resolution is not verified: {message}; a judged report refuses the set.")
+    _check_internal_size(config, scale, ue_runs_facts, judge=judge, notes=notes)
     lines = []
     for spec in config.lines:
         godotnext_values, godotnext_missing = _godotnext_statistics(spec, config, godotnext_runs)
@@ -362,6 +370,37 @@ def _check_nextgi(config: ComparisonConfig, manifest: dict[str, object], name: s
     return {"nextgi_tier": tier, "nextgi_quality": quality, "nextgi_reason": str(status.get("reason", ""))}
 
 
+def _check_internal_size(
+    config: ComparisonConfig, scale: float, ue_facts: list[dict[str, object]], *, judge: bool, notes: list[str]
+) -> None:
+    """Every TSR draw event a UE run logged renders at the GodotNext runs' internal size and shows the
+    set's output size; a set that upscales needs one in every UE run when judged.
+
+    The manifest records the scale, not the size GodotNext rendered at, and either engine may round a
+    fractional scale's size down (0.667 of 1080 is 720.36), so the rendering size may differ from
+    round(output * scale) by 1 pixel per axis. The output size must match exactly."""
+    width, height = config.resolution
+    internal = (round(width * scale), round(height * scale))
+    silent: list[str] = []
+    for facts in ue_facts:
+        sizes = [tuple(as_int(value) for value in as_list(item)) for item in as_list(facts.get("upscale_sizes", []))]
+        if not sizes:
+            silent.append(str(facts.get("run")))
+        for size in sizes:
+            near = abs(size[0] - internal[0]) <= 1 and abs(size[1] - internal[1]) <= 1
+            if not near or size[2:] != (width, height):
+                raise ComparisonError(
+                    f"run {facts.get('run')}: UE rendered at {size[0]}x{size[1]} for {size[2]}x{size[3]};"
+                    f" the GodotNext runs render at {internal[0]}x{internal[1]} (scaling_3d_scale {scale:g})"
+                    f" for {width}x{height}"
+                )
+    if scale != 1.0 and silent:
+        message = INTERNAL_SIZE_UNVERIFIED.format(scale=scale, runs=", ".join(silent))
+        if judge:
+            raise ComparisonError(f"UE's internal resolution is not verified: {message}")
+        notes.append(f"UE's internal resolution is not verified: {message}; a judged report refuses the set.")
+
+
 def _check_ue_run(
     config: ComparisonConfig,
     name: str,
@@ -392,6 +431,12 @@ def _check_ue_run(
             f"run {name}: the UE log reports a material without its usage flag or the default material"
             f" in its place (material_fallback_lines {fallback}), so the capture is not of the imported content"
         )
+    layer = as_dict(runner.get("env") or {}).get("__COMPAT_LAYER")
+    if layer != UE_DPI_LAYER:
+        raise ComparisonError(
+            f"run {name}: the UE launch was not DPI-aware (__COMPAT_LAYER {layer!r}, not {UE_DPI_LAYER!r}),"
+            " so on a scaled desktop it may not render the requested size"
+        )
     expected = {
         "gpu": config.device,
         "rhiname": ue.rhi,
@@ -416,6 +461,7 @@ def _check_ue_run(
         if judge:
             raise ComparisonError(message)
         notes.append(message[0].upper() + message[1:] + ".")
+    active = _check_active_columns(config, name, profile)
     run_mode = _observed_run_mode(runner, metadata)
     if run_mode != ue.run_mode:
         raise ComparisonError(f"run {name}: the UE run was {run_mode}, not {ue.run_mode} (plan v3.9.3)")
@@ -429,12 +475,33 @@ def _check_ue_run(
         "rhi": metadata.get("rhiname", ""),
         "feature_level": metadata.get("rhifeaturelevel", ""),
         "cvars": {cvar: echoed[cvar] for cvar in wanted},
+        "dpi_layer": layer,
+        "upscale_sizes": [list(size) for size in read_log_upscale_sizes(log_text)],
         "quiet_columns_active_rows": activity,
+        "active_columns_rows": active,
         "exit_code": exit_record.get("code"),
         "children_alive_after": as_list(exit_record.get("children_alive_after", [])),
         "priority": str(runner.get("priority", "")),
         "gpu_after": runner.get("gpu_after"),
     }
+
+
+def _check_active_columns(config: ComparisonConfig, name: str, profile: CsvProfile) -> dict[str, int]:
+    """Rows of the window where each ``window_active_columns`` column has a value: a missing column, or
+    one without a value on more than the missed-sample share of the window, refuses the run (dry run
+    included), because the set's settings did not take effect."""
+    ue = config.ue
+    rows = window_activity(profile, ue.window_active_columns, ue.warmup_frames, config.frames)
+    needed = config.frames - int(MAX_MISSING_SHARE * config.frames)
+    for header in ue.window_active_columns:
+        if not profile.columns_named(header):
+            raise ComparisonError(f"run {name}: the capture has no {header!r} column, which the set needs active")
+        if rows[header] < needed:
+            raise ComparisonError(
+                f"run {name}: {header!r} has a value on {rows[header]} of {config.frames} window rows; the set"
+                f" needs it active (at least {needed})"
+            )
+    return rows
 
 
 def _observed_run_mode(runner: dict[str, object], metadata: dict[str, str]) -> str:
@@ -452,9 +519,14 @@ def _changelist(version: str) -> str:
     return match.group(1) if match else ""
 
 
+# A boolean console variable echoes true or false (observed: r.ProfileGPU.ShowUI 0 echoes "false").
+_BOOLEAN_ECHO = {"false": "0", "true": "1"}
+
+
 def _same_value(seen: str, wanted: str) -> bool:
     if seen == wanted:
         return True
+    seen = _BOOLEAN_ECHO.get(seen.lower(), seen)
     try:
         return float(seen) == float(wanted)
     except ValueError:
