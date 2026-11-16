@@ -96,21 +96,23 @@ RenderingDeviceDriver::MetalRayQueryCaps RenderingDeviceDriver::metal_ray_query_
 	return caps;
 }
 
-// GodotNext: rq_substrate (#22)
-RenderingDeviceDriver::VulkanRayQueryCaps RenderingDeviceDriver::vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id) {
+// GodotNext: rq_substrate (#22), rt_core_check (#283)
+RenderingDeviceDriver::VulkanRayQueryCaps RenderingDeviceDriver::vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated) {
 	VulkanRayQueryCaps caps;
 	if (!p_acceleration_structure || !p_ray_query || !p_buffer_device_address) {
 		caps.reason = RAY_QUERY_REASON_NO_RAY_QUERY;
 		return caps;
 	}
+	const RenderingContextDriver::RayQueryHardwareCheck check = RenderingContextDriver::check_ray_query_hardware_device(p_vendor_id, p_device_id, p_integrated);
 	caps.ray_query = true;
-	caps.hardware = RenderingContextDriver::is_ray_query_hardware_device(p_vendor_id, p_device_id);
+	caps.hardware = check.hardware;
+	caps.hardware_note = check.note;
 	caps.reason = RAY_QUERY_SUPPORTED;
 	return caps;
 }
 
-// GodotNext: d3d12_dxr (#118)
-RenderingDeviceDriver::D3D12RayQueryCaps RenderingDeviceDriver::d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id) {
+// GodotNext: d3d12_dxr (#118), rt_core_check (#283)
+RenderingDeviceDriver::D3D12RayQueryCaps RenderingDeviceDriver::d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated) {
 	D3D12RayQueryCaps caps;
 	// The first failing check wins.
 	if (p_raytracing_tier < D3D12_RAY_QUERY_MIN_RAYTRACING_TIER) {
@@ -129,8 +131,10 @@ RenderingDeviceDriver::D3D12RayQueryCaps RenderingDeviceDriver::d3d12_ray_query_
 		caps.missing = "a Mesa NIR library with ray query";
 		return caps;
 	}
+	const RenderingContextDriver::RayQueryHardwareCheck check = RenderingContextDriver::check_ray_query_hardware_device(p_vendor_id, p_device_id, p_integrated);
 	caps.ray_query = true;
-	caps.hardware = RenderingContextDriver::is_ray_query_hardware_device(p_vendor_id, p_device_id);
+	caps.hardware = check.hardware;
+	caps.hardware_note = check.note;
 	caps.reason = RAY_QUERY_SUPPORTED;
 	return caps;
 }

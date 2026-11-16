@@ -100,7 +100,7 @@ TEST_CASE("[NextGI][Editor] Vulkan switch offer truth table") {
 }
 
 // GodotNext: d3d12_dxr (#118). The modal and the inspector button only appear while D3D12 has no HWRT:
-// D3D12_NO_DXR (no ray query) or NOT_HW_ACCELERATED (ray query off the RT-core allowlist).
+// D3D12_NO_DXR (no ray query) or NOT_HW_ACCELERATED (ray query without RT units).
 TEST_CASE("[NextGI][Editor] D3D12 HWRT hides the Vulkan switch") {
 	CHECK(NextGIEditorPlugin::is_d3d12_hwrt_device("D3D12", true, true));
 	CHECK_FALSE(NextGIEditorPlugin::is_d3d12_hwrt_device("D3D12", false, false));
@@ -637,7 +637,7 @@ TEST_CASE("[NextGI] Tier rule: an RTX GPU selects HWRT") {
 	check_tier(hwrt_inputs(), NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
 }
 
-TEST_CASE("[NextGI] Tier rule: a GTX GPU off the RT-core allowlist gives NOT_HW_ACCELERATED") {
+TEST_CASE("[NextGI] Tier rule: a GTX GPU without RT cores gives NOT_HW_ACCELERATED") {
 	NextGI::TierInputs gtx = hwrt_inputs();
 	gtx.ray_query_hw = false; // Driver-emulated RT exposes ray query without RT cores.
 	check_tier(gtx, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
@@ -2982,42 +2982,330 @@ TEST_CASE("[NextGI][Denoise] The five denoise views map and label") {
 	CHECK_EQ(NextGI::debug_view_from_viewport(RSE::VIEWPORT_DEBUG_DRAW_DISABLED), NextGI::DEBUG_VIEW_MAX);
 }
 
-// GodotNext: rq_substrate (#22). ID checks only: mid-range NVIDIA, AMD and Intel ship enabled,
-// unvalidated (plan §23.2).
-TEST_CASE("[NextGI][RT] Ray query hardware allowlist") {
-	const uint32_t nvidia = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
-	const uint32_t amd = RenderingContextDriver::Vendor::VENDOR_AMD;
-	const uint32_t intel = RenderingContextDriver::Vendor::VENDOR_INTEL;
-	// The test fleet: the RTX 4080 SUPER (docs/godotnext/fleet/vulkaninfo/g0) and the RTX 5090.
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2702));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2B85));
-	// RT parts: RTX 20 (2080 Ti, 2060), RTX 3060, Navi 21 (RX 6800/6900), Arc DG2 (A770, A380),
-	// Battlemage (B580), RDNA3 (RX 7900), a Rembrandt APU.
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1E04));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1F08));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2503));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x73BF));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x744C));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x1681));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x56A0));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x56A5));
-	CHECK(RenderingContextDriver::is_ray_query_hardware_device(intel, 0xE20B));
-	// No RT units: GTX 16 (1660 Ti on TU116, and the 1660 SUPER and 1650 inside the TU106 block),
-	// MX570, CMP 70HX, A100, Navi 10 (RX 5700), Iris Xe, UHD 770 (Alder and Raptor Lake).
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x2182));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1F09));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x1F0A));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x25A6));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x248A));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(nvidia, 0x20B1));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x731F));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x9A49));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(intel, 0x4680));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(intel, 0xA780));
-	// lavapipe reports Mesa's vendor ID 0x10005, and a vendor's row never matches another vendor.
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(0x10005, 0x0000));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(amd, 0x2702));
-	CHECK_FALSE(RenderingContextDriver::is_ray_query_hardware_device(RenderingContextDriver::Vendor::VENDOR_APPLE, 0x2702));
+// GodotNext: rq_substrate (#22), rt_core_check (#283). The RT-core check with mocked PCI IDs and device
+// types (plan §23.2): a denylist of parts without RT units, so later RT generations count (plan §26.1).
+static void check_rt_core(uint32_t p_vendor, uint32_t p_device, bool p_integrated, bool p_hardware, RenderingContextDriver::RayQueryHardwareRule p_rule) {
+	INFO(vformat("vendor 0x%04X device 0x%04X integrated %s", p_vendor, p_device, p_integrated ? "yes" : "no"));
+	const RenderingContextDriver::RayQueryHardwareCheck check = RenderingContextDriver::check_ray_query_hardware_device(p_vendor, p_device, p_integrated);
+	CHECK_EQ(check.hardware, p_hardware);
+	CHECK_EQ(check.rule, p_rule);
+	CHECK_FALSE(String(check.note).is_empty());
+	CHECK_EQ(RenderingContextDriver::is_ray_query_hardware_device(p_vendor, p_device, p_integrated), p_hardware);
+	// Through the Vulkan and D3D12 helpers and the tier rule, with ray query exposed: HWRT, or the
+	// software tier with NOT_HW_ACCELERATED.
+	const RenderingDeviceDriver::VulkanRayQueryCaps vk = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, p_vendor, p_device, p_integrated);
+	const RenderingDeviceDriver::D3D12RayQueryCaps dx = RenderingDeviceDriver::d3d12_ray_query_caps(11, 0x66, true, p_vendor, p_device, p_integrated);
+	CHECK_EQ(vk.hardware, p_hardware);
+	CHECK_EQ(dx.hardware, p_hardware);
+	CHECK_EQ(String(vk.hardware_note), String(check.note));
+	NextGI::TierInputs inputs = hwrt_inputs();
+	NextGI::apply_driver_ray_query(vk.ray_query, vk.ray_query && vk.hardware, vk.reason, inputs);
+	check_tier(inputs, p_hardware ? NextGI::TIER_HWRT : NextGI::TIER_SOFTWARE, p_hardware ? NextGI::TIER_REASON_NONE : NextGI::NOT_HW_ACCELERATED);
+}
+
+static constexpr uint32_t RT_NVIDIA = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
+static constexpr uint32_t RT_AMD = RenderingContextDriver::Vendor::VENDOR_AMD;
+static constexpr uint32_t RT_INTEL = RenderingContextDriver::Vendor::VENDOR_INTEL;
+
+TEST_CASE("[NextGI][RT] RT-core check: RT parts of NVIDIA, AMD and Intel count") {
+	const RenderingContextDriver::RayQueryHardwareRule rt = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_RT_GENERATION;
+	// The fleet: the RTX 4080 SUPER (docs/godotnext/fleet/vulkaninfo/g0), the RTX 5090, the cloud RTX PRO
+	// 6000 Blackwell, L4 and T4.
+	for (uint32_t device : { 0x2702u, 0x2B85u, 0x2BB5u, 0x27B8u, 0x1EB8u }) {
+		check_rt_core(RT_NVIDIA, device, false, true, rt);
+	}
+	// RTX 2080 Ti, RTX 2060, RTX 3060, RTX 4090, RTX 5070.
+	for (uint32_t device : { 0x1E04u, 0x1F08u, 0x2503u, 0x2684u, 0x2F04u }) {
+		check_rt_core(RT_NVIDIA, device, false, true, rt);
+	}
+	// Discrete RDNA2, RDNA3 and RDNA4: RX 6800/6900, RX 6600, RX 6500 XT, RX 7900 XTX, RX 7600, the cloud
+	// Radeon PRO V710, RX 9070 XT, RX 9060 XT.
+	for (uint32_t device : { 0x73BFu, 0x73FFu, 0x743Fu, 0x744Cu, 0x7480u, 0x7461u, 0x7550u, 0x7590u }) {
+		check_rt_core(RT_AMD, device, false, true, rt);
+	}
+	// Discrete Arc: A770 and A380 (DG2), Arc Pro A60M, B580 (Battlemage), the Flex 170 (ATS-M).
+	for (uint32_t device : { 0x56A0u, 0x56A5u, 0x56B3u, 0xE20Bu, 0x56C0u }) {
+		check_rt_core(RT_INTEL, device, false, true, rt);
+	}
+}
+
+TEST_CASE("[NextGI][RT] RT-core check: RT parts released after the list count") {
+	const RenderingContextDriver::RayQueryHardwareRule rt = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_RT_GENERATION;
+	// IDs no table lists yet, after each vendor's newest RT block: the closed allowlist made them
+	// NOT_HW_ACCELERATED until someone added a row; the denylist counts them, as UE's "or newer" does.
+	check_rt_core(RT_NVIDIA, 0x3500, false, true, rt);
+	check_rt_core(RT_AMD, 0x7700, false, true, rt);
+	check_rt_core(RT_INTEL, 0xE300, false, true, rt);
+	// Parts the old allowlist missed: NVIDIA GB10 (Blackwell RTX, integrated) and Intel Panther Lake (Xe3).
+	check_rt_core(RT_NVIDIA, 0x2E12, true, true, rt);
+	check_rt_core(RT_INTEL, 0xB080, true, true, rt);
+	// Through the Vulkan helper and the tier rule: HWRT with no reason.
+	const uint32_t future[][2] = { { RT_NVIDIA, 0x3500 }, { RT_AMD, 0x7700 }, { RT_INTEL, 0xE300 } };
+	for (const uint32_t *ids : future) {
+		const RenderingDeviceDriver::VulkanRayQueryCaps caps = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, ids[0], ids[1], false);
+		CHECK(caps.ray_query);
+		CHECK(caps.hardware);
+		NextGI::TierInputs inputs = hwrt_inputs();
+		NextGI::apply_driver_ray_query(caps.ray_query, caps.ray_query && caps.hardware, caps.reason, inputs);
+		check_tier(inputs, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+	}
+}
+
+TEST_CASE("[NextGI][RT] RT-core check: parts without RT units are denylisted") {
+	const RenderingContextDriver::RayQueryHardwareRule deny = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_DENYLIST;
+	// NVIDIA: GTX 1080 and 1060 (Pascal), TITAN V (Volta), GTX 1660 Ti (TU116), GTX 1660 SUPER and 1650
+	// inside the TU106 block, GTX 1650 (TU117), MX570, CMP 70HX, A100, H100, B200, B300.
+	for (uint32_t device : { 0x1B80u, 0x1C03u, 0x1D81u, 0x2182u, 0x1F09u, 0x1F0Au, 0x1F82u, 0x25A6u, 0x248Au, 0x20B1u, 0x2330u, 0x2901u, 0x3182u }) {
+		check_rt_core(RT_NVIDIA, device, false, false, deny);
+	}
+	// AMD discrete before RDNA2: RX 5700 XT (RDNA1), Vega 64, RX 580, HD 4870; CDNA: MI250X, MI300X, MI355X.
+	for (uint32_t device : { 0x731Fu, 0x687Fu, 0x67DFu, 0x9440u, 0x740Cu, 0x74A1u, 0x75A3u }) {
+		check_rt_core(RT_AMD, device, false, false, deny);
+	}
+	// Intel without RT units: UHD 770 (Alder and Raptor Lake), Iris Xe (Tiger Lake), Iris Xe MAX (DG1),
+	// HD 530 (Skylake), Wildcat Lake and Nova Lake S, whose Xe3 GPUs Mesa marks without ray tracing.
+	for (uint32_t device : { 0x4680u, 0xA780u, 0x9A49u, 0x4905u, 0x1912u, 0xFD80u, 0xD740u, 0xD74Au }) {
+		check_rt_core(RT_INTEL, device, false, false, deny);
+	}
+	// A driver that emulates ray query on one of them (DXR on a GTX 1660 Ti, RADV_PERFTEST=emulate_rt on
+	// an RX 5700 XT) gets NOT_HW_ACCELERATED on Vulkan and D3D12, and force still runs HWRT.
+	const uint32_t emulated[][2] = { { RT_NVIDIA, 0x2182 }, { RT_AMD, 0x731F } };
+	for (const uint32_t *ids : emulated) {
+		const RenderingDeviceDriver::VulkanRayQueryCaps vk = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, ids[0], ids[1], false);
+		CHECK(vk.ray_query);
+		CHECK_FALSE(vk.hardware);
+		NextGI::TierInputs inputs = hwrt_inputs();
+		NextGI::apply_driver_ray_query(vk.ray_query, vk.ray_query && vk.hardware, vk.reason, inputs);
+		check_tier(inputs, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+		inputs.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
+		check_tier(inputs, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+		const RenderingDeviceDriver::D3D12RayQueryCaps dx = RenderingDeviceDriver::d3d12_ray_query_caps(11, 0x66, true, ids[0], ids[1], false);
+		CHECK(dx.ray_query);
+		CHECK_FALSE(dx.hardware);
+		CHECK_EQ(String(dx.hardware_note), String(vk.hardware_note));
+	}
+}
+
+// Every denylist row's first and last ID, restated here so that a changed bound fails, and the RT parts
+// just outside the rows, so that a row grown into an RT block fails too (source log rhi-vulkan.md, #283).
+TEST_CASE("[NextGI][RT] RT-core check: the bounds of every denylist row") {
+	struct DenyRow {
+		uint32_t vendor;
+		uint32_t first_id;
+		uint32_t last_id;
+	};
+	const DenyRow rows[] = {
+		{ RT_NVIDIA, 0x0000, 0x1E01 }, // NVIDIA before Turing (Tesla to Pascal) and Volta
+		{ RT_NVIDIA, 0x1E09, 0x1E09 }, // CMP 50HX (TU102)
+		{ RT_NVIDIA, 0x1F09, 0x1F0B }, // GeForce GTX 1660 SUPER, GTX 1650 and CMP 40HX (TU106)
+		{ RT_NVIDIA, 0x1F80, 0x1FFF }, // TU117: GeForce GTX 1650 and 1630, MX450, MX550, T400 to T1200
+		{ RT_NVIDIA, 0x2080, 0x20FF }, // GA100 compute: A100, A30, A800, CMP 170HX
+		{ RT_NVIDIA, 0x2180, 0x21FF }, // TU116: GeForce GTX 1660 (Ti, SUPER), GTX 1650 (SUPER), CMP 30HX
+		{ RT_NVIDIA, 0x220D, 0x220D }, // CMP 90HX (GA102)
+		{ RT_NVIDIA, 0x2300, 0x23FF }, // GH100 compute: H100, H200, H800, H20, GH200
+		{ RT_NVIDIA, 0x248A, 0x248A }, // CMP 70HX (GA104)
+		{ RT_NVIDIA, 0x25A6, 0x25A7 }, // GeForce MX570 (GA107)
+		{ RT_NVIDIA, 0x25AA, 0x25AA }, // GeForce MX570 A (GA107)
+		{ RT_NVIDIA, 0x2900, 0x29FF }, // GB100 and GB102 compute: B200, B100, GB200
+		{ RT_NVIDIA, 0x3180, 0x31FF }, // GB110 compute: B300, GB300
+		{ RT_AMD, 0x2000, 0x739F }, // AMD before RDNA2: up to Polaris, Vega, RX 5000 (RDNA1), Instinct MI100
+		{ RT_AMD, 0x7400, 0x741F }, // CDNA2 compute: Instinct MI200
+		{ RT_AMD, 0x74A0, 0x74BF }, // CDNA3 compute: Instinct MI300
+		{ RT_AMD, 0x75A0, 0x75BF }, // CDNA4 compute: Instinct MI350
+		{ RT_AMD, 0x7834, 0x7835 }, // RS350 chipset graphics
+		{ RT_AMD, 0x791E, 0x796E }, // RS690, RS600 and RS740 chipset graphics
+		{ RT_AMD, 0x9400, 0x95CF }, // R600 to RV790 (Radeon HD 2000 to 4000)
+		{ RT_AMD, 0x9610, 0x964F }, // RS780 chipset graphics, Sumo APUs
+		{ RT_AMD, 0x9710, 0x9715 }, // RS880 chipset graphics
+		{ RT_AMD, 0x9802, 0x98E4 }, // Wrestler, Kabini, Mullins, Carrizo and Stoney APUs
+		{ RT_AMD, 0x9900, 0x99A4 }, // Trinity and Richland APUs, console APUs
+		{ RT_INTEL, 0x0042, 0x004A }, // Ironlake
+		{ RT_INTEL, 0x0102, 0x0176 }, // Sandy Bridge, Ivy Bridge, Bay Trail
+		{ RT_INTEL, 0x0402, 0x042E }, // Haswell
+		{ RT_INTEL, 0x08CF, 0x08CF }, // Clover Trail
+		{ RT_INTEL, 0x0A02, 0x0A84 }, // Haswell, Broxton
+		{ RT_INTEL, 0x0C02, 0x0C2E }, // Haswell
+		{ RT_INTEL, 0x0D02, 0x0D36 }, // Haswell, Crystal Well
+		{ RT_INTEL, 0x0F30, 0x0F33 }, // Bay Trail
+		{ RT_INTEL, 0x1132, 0x1132 }, // i815
+		{ RT_INTEL, 0x1240, 0x1240 }, // i752
+		{ RT_INTEL, 0x1602, 0x163E }, // Broadwell
+		{ RT_INTEL, 0x1902, 0x193D }, // Skylake
+		{ RT_INTEL, 0x1A12, 0x1A85 }, // Timna, Broxton
+		{ RT_INTEL, 0x22B0, 0x22B3 }, // Cherry View
+		{ RT_INTEL, 0x2562, 0x2592 }, // i845G to i915GM
+		{ RT_INTEL, 0x2772, 0x27AE }, // i945G, i945GM
+		{ RT_INTEL, 0x2972, 0x29D3 }, // i965, G33
+		{ RT_INTEL, 0x2A02, 0x2A43 }, // i965, G4x
+		{ RT_INTEL, 0x2E02, 0x2E93 }, // G4x
+		{ RT_INTEL, 0x3184, 0x3185 }, // Gemini Lake
+		{ RT_INTEL, 0x3577, 0x358E }, // i830, i85x
+		{ RT_INTEL, 0x3E90, 0x3EA9 }, // Coffee Lake
+		{ RT_INTEL, 0x4100, 0x410F }, // Moorestown, Atom E6xx
+		{ RT_INTEL, 0x4541, 0x4571 }, // Elkhart Lake
+		{ RT_INTEL, 0x4626, 0x46D4 }, // Alder Lake (UHD Graphics, Iris Xe)
+		{ RT_INTEL, 0x4905, 0x4909 }, // DG1 (Iris Xe MAX), SG1
+		{ RT_INTEL, 0x4C80, 0x4C9A }, // Rocket Lake
+		{ RT_INTEL, 0x4E51, 0x4E71 }, // Jasper Lake, Elkhart Lake
+		{ RT_INTEL, 0x5002, 0x5009 }, // CE 3100
+		{ RT_INTEL, 0x5902, 0x593B }, // Kaby Lake
+		{ RT_INTEL, 0x5A40, 0x5A85 }, // Cannon Lake, Broxton
+		{ RT_INTEL, 0x7120, 0x712A }, // i810
+		{ RT_INTEL, 0x7800, 0x7800 }, // i740
+		{ RT_INTEL, 0x8108, 0x8109 }, // Poulsbo
+		{ RT_INTEL, 0x8182, 0x8182 }, // Atom E6xx
+		{ RT_INTEL, 0x87C0, 0x87CA }, // Kaby Lake, Coffee Lake
+		{ RT_INTEL, 0x8A50, 0x8A71 }, // Ice Lake
+		{ RT_INTEL, 0x9840, 0x9841 }, // Lakefield
+		{ RT_INTEL, 0x9A40, 0x9AF8 }, // Tiger Lake (Iris Xe, UHD Graphics)
+		{ RT_INTEL, 0x9B21, 0x9BF6 }, // Comet Lake
+		{ RT_INTEL, 0xA001, 0xA012 }, // Pineview
+		{ RT_INTEL, 0xA720, 0xA7AD }, // Raptor Lake (UHD Graphics 770, Iris Xe)
+		{ RT_INTEL, 0xD740, 0xD740 }, // Nova Lake S/HX/UL
+		{ RT_INTEL, 0xD743, 0xD743 }, // Nova Lake S/HX/UL
+		{ RT_INTEL, 0xD745, 0xD745 }, // Nova Lake S/HX/UL
+		{ RT_INTEL, 0xD74A, 0xD74B }, // Nova Lake S
+		{ RT_INTEL, 0xFD80, 0xFD81 }, // Wildcat Lake
+	};
+	const RenderingContextDriver::RayQueryHardwareRule deny = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_DENYLIST;
+	for (const DenyRow &row : rows) {
+		check_rt_core(row.vendor, row.first_id, false, false, deny);
+		check_rt_core(row.vendor, row.last_id, false, false, deny);
+		if (row.vendor == RT_INTEL) {
+			// The integrated flag changes nothing for Intel.
+			check_rt_core(row.vendor, row.first_id, true, false, deny);
+			check_rt_core(row.vendor, row.last_id, true, false, deny);
+		}
+	}
+	// RT parts next to a row: TITAN RTX after the pre-Turing row, the last ID of TU106's block before
+	// TU117, RTX 2060 Rev. A before the GTX 1660 SUPER, RTX 3060 Ti LHR before CMP 70HX, RTX 3050
+	// Mobile before the MX570, RTX 2050 and RTX 3050 4GB Laptop around the MX570 A; the first IDs of
+	// Navi 21's block after the pre-RDNA2 row, RX 6600 before CDNA2, the first ID of Navi 24's block
+	// after CDNA2, RX 7500 before CDNA3; Nova Lake U and H (RT units) beside Nova Lake S and HX.
+	const uint32_t rt_neighbors[][2] = {
+		{ RT_NVIDIA, 0x1E02 },
+		{ RT_NVIDIA, 0x1F7F },
+		{ RT_NVIDIA, 0x1F08 },
+		{ RT_NVIDIA, 0x2489 },
+		{ RT_NVIDIA, 0x25A5 },
+		{ RT_NVIDIA, 0x25A9 },
+		{ RT_NVIDIA, 0x25AB },
+		{ RT_AMD, 0x73A0 },
+		{ RT_AMD, 0x73A1 },
+		{ RT_AMD, 0x73FF },
+		{ RT_AMD, 0x7420 },
+		{ RT_AMD, 0x749F },
+		{ RT_INTEL, 0xD741 },
+		{ RT_INTEL, 0xD742 },
+	};
+	for (const uint32_t *ids : rt_neighbors) {
+		check_rt_core(ids[0], ids[1], false, true, RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_RT_GENERATION);
+	}
+}
+
+// A device ID above 0xFFFF is not a PCI device ID: Vulkan reports a platform value for a GPU that is not
+// primarily a PCI device, such as 0x93BA03D7 for the Tegra X2. No denylist row can name it, so it does
+// not count, as under the #22 allowlist.
+TEST_CASE("[NextGI][RT] RT-core check: device IDs above 0xFFFF do not count") {
+	const RenderingContextDriver::RayQueryHardwareRule not_pci = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_NOT_PCI_DEVICE_ID;
+	check_rt_core(RT_NVIDIA, 0x93BA03D7, true, false, not_pci);
+	check_rt_core(RT_NVIDIA, 0x93BA03D7, false, false, not_pci);
+	for (uint32_t vendor : { RT_NVIDIA, RT_AMD, RT_INTEL }) {
+		check_rt_core(vendor, 0x10000, false, false, not_pci);
+		check_rt_core(vendor, 0x10000, true, false, not_pci);
+		check_rt_core(vendor, 0xFFFFFFFF, false, false, not_pci);
+	}
+}
+
+TEST_CASE("[NextGI][RT] RT-core check: integrated Intel Arc GPUs with RT units count, other Intel integrated GPUs keep their tier") {
+	const RenderingContextDriver::RayQueryHardwareRule rt = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_RT_GENERATION;
+	// Meteor Lake H and U, Arrow Lake H (Arc 140T) and S, Lunar Lake (Arc 140V), Panther Lake: Xe-LPG,
+	// Xe2 and Xe3 with RT units, reported as integrated GPUs.
+	for (uint32_t device : { 0x7D55u, 0x7D45u, 0x7D51u, 0x7D67u, 0x64A0u, 0xB080u }) {
+		check_rt_core(RT_INTEL, device, true, true, rt);
+		const RenderingDeviceDriver::VulkanRayQueryCaps caps = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, RT_INTEL, device, true);
+		NextGI::TierInputs inputs = hwrt_inputs();
+		NextGI::apply_driver_ray_query(caps.ray_query, caps.ray_query && caps.hardware, caps.reason, inputs);
+		check_tier(inputs, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+	}
+	// The UHD 770 (Xe-LP, no RT units) keeps what it had before #283: NOT_HW_ACCELERATED where a driver
+	// exposes ray query, NO_RAY_QUERY where it does not (its real drivers, plan §3.1 row 6).
+	check_rt_core(RT_INTEL, 0xA780, true, false, RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_DENYLIST);
+	const RenderingDeviceDriver::VulkanRayQueryCaps uhd = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, RT_INTEL, 0xA780, true);
+	NextGI::TierInputs exposed = hwrt_inputs();
+	NextGI::apply_driver_ray_query(uhd.ray_query, uhd.ray_query && uhd.hardware, uhd.reason, exposed);
+	check_tier(exposed, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+	const RenderingDeviceDriver::VulkanRayQueryCaps uhd_no_rq = RenderingDeviceDriver::vulkan_ray_query_caps(true, false, true, RT_INTEL, 0xA780, true);
+	NextGI::TierInputs hidden = hwrt_inputs();
+	NextGI::apply_driver_ray_query(uhd_no_rq.ray_query, uhd_no_rq.ray_query && uhd_no_rq.hardware, uhd_no_rq.reason, hidden);
+	check_tier(hidden, NextGI::TIER_SOFTWARE, NextGI::NO_RAY_QUERY);
+}
+
+TEST_CASE("[NextGI][RT] RT-core check: AMD integrated GPUs take the software tier, discrete RX 6000 and newer get HWRT") {
+	const RenderingContextDriver::RayQueryHardwareRule apu = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_AMD_INTEGRATED;
+	// Every AMD APU ID the #22 allowlist listed: RDNA2 (Mendocino, Van Gogh, Rembrandt, Raphael, Granite
+	// Ridge), RDNA3 (Phoenix, Hawk Point) and RDNA3.5 (Strix, Strix Halo, Krackan). They have ray
+	// accelerators, but UE names only discrete AMD RX 6000 series or newer (lead decision 2026-11-16). The
+	// device type decides, and so does the APU ID block when a driver does not report the type (D3D12
+	// without UMA).
+	const uint32_t allowlisted_apus[] = { 0x1506, 0x163F, 0x164D, 0x164E, 0x1681, 0x13C0, 0x15BF, 0x15C8, 0x164F, 0x1900, 0x1901, 0x1902, 0x150E, 0x1586, 0x1114 };
+	for (uint32_t device : allowlisted_apus) {
+		check_rt_core(RT_AMD, device, true, false, apu);
+		check_rt_core(RT_AMD, device, false, false, apu);
+	}
+	// Vega APUs, which have no ray accelerators: Raven Ridge, Picasso, Renoir, Cezanne, Lucienne.
+	for (uint32_t device : { 0x15DDu, 0x15D8u, 0x1636u, 0x1638u, 0x164Cu }) {
+		check_rt_core(RT_AMD, device, true, false, apu);
+		check_rt_core(RT_AMD, device, false, false, apu);
+	}
+	// GFX8 APUs (Carrizo, Stoney) sit outside the block on a denylist row; reported as integrated they
+	// take the integrated rule.
+	for (uint32_t device : { 0x9874u, 0x98E4u }) {
+		check_rt_core(RT_AMD, device, true, false, apu);
+		check_rt_core(RT_AMD, device, false, false, RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_DENYLIST);
+	}
+	// A later APU with an ID outside the block: the integrated device type alone keeps it off HWRT.
+	check_rt_core(RT_AMD, 0x7700, true, false, apu);
+	// Discrete RX 6000 (RX 6800 XT, Navi 21) and RX 7000 (RX 7900 XTX, Navi 31; RX 7600, Navi 33) get HWRT.
+	for (uint32_t device : { 0x73BFu, 0x744Cu, 0x7480u }) {
+		check_rt_core(RT_AMD, device, false, true, RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_RT_GENERATION);
+	}
+	// Through the Vulkan and D3D12 helpers and the tier rule: the APU falls back with NOT_HW_ACCELERATED and
+	// a note that names the rule; the discrete GPUs select HWRT.
+	const RenderingDeviceDriver::VulkanRayQueryCaps phoenix_vk = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, RT_AMD, 0x15BF, true);
+	CHECK(phoenix_vk.ray_query);
+	CHECK_FALSE(phoenix_vk.hardware);
+	CHECK(String(phoenix_vk.hardware_note).contains("integrated"));
+	CHECK(String(phoenix_vk.hardware_note).contains("RX 6000"));
+	NextGI::TierInputs phoenix = hwrt_inputs();
+	NextGI::apply_driver_ray_query(phoenix_vk.ray_query, phoenix_vk.ray_query && phoenix_vk.hardware, phoenix_vk.reason, phoenix);
+	check_tier(phoenix, NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+	const RenderingDeviceDriver::D3D12RayQueryCaps rembrandt_dx = RenderingDeviceDriver::d3d12_ray_query_caps(11, 0x66, true, RT_AMD, 0x1681, true);
+	CHECK(rembrandt_dx.ray_query);
+	CHECK_FALSE(rembrandt_dx.hardware);
+	CHECK(String(rembrandt_dx.hardware_note).contains("integrated"));
+	for (uint32_t device : { 0x73BFu, 0x744Cu }) {
+		const RenderingDeviceDriver::VulkanRayQueryCaps vk = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, RT_AMD, device, false);
+		const RenderingDeviceDriver::D3D12RayQueryCaps dx = RenderingDeviceDriver::d3d12_ray_query_caps(11, 0x66, true, RT_AMD, device, false);
+		CHECK(vk.hardware);
+		CHECK(dx.hardware);
+		NextGI::TierInputs inputs = hwrt_inputs();
+		NextGI::apply_driver_ray_query(dx.ray_query, dx.ray_query && dx.hardware, dx.reason, inputs);
+		check_tier(inputs, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+	}
+}
+
+TEST_CASE("[NextGI][RT] RT-core check: other vendors keep the closed rule") {
+	const RenderingContextDriver::RayQueryHardwareRule other = RenderingContextDriver::RAY_QUERY_HARDWARE_RULE_OTHER_VENDOR;
+	// lavapipe (Mesa's vendor ID 0x10005), Apple, Qualcomm, ARM, Microsoft (WARP): no hardware, whatever
+	// the device ID or type, as before #283.
+	const uint32_t vendors[] = { 0x10005, RenderingContextDriver::Vendor::VENDOR_APPLE, RenderingContextDriver::Vendor::VENDOR_QUALCOMM, RenderingContextDriver::Vendor::VENDOR_ARM, RenderingContextDriver::Vendor::VENDOR_MICROSOFT };
+	for (uint32_t vendor : vendors) {
+		for (uint32_t device : { 0x0000u, 0x2702u, 0x744Cu, 0xFFFFu }) {
+			check_rt_core(vendor, device, false, false, other);
+			check_rt_core(vendor, device, true, false, other);
+		}
+	}
 }
 
 // GodotNext: rq_substrate (#22). A Vulkan device without ray query, with mocked capabilities.
@@ -3025,17 +3313,17 @@ TEST_CASE("[NextGI][RT] Vulkan ray-query capabilities and acceleration-structure
 	const uint32_t nvidia = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
 	// Every input missing in turn: no ray query, not hardware, NO_RAY_QUERY.
 	for (int missing = 0; missing < 3; missing++) {
-		const RenderingDeviceDriver::VulkanRayQueryCaps caps = RenderingDeviceDriver::vulkan_ray_query_caps(missing != 0, missing != 1, missing != 2, nvidia, 0x2702);
+		const RenderingDeviceDriver::VulkanRayQueryCaps caps = RenderingDeviceDriver::vulkan_ray_query_caps(missing != 0, missing != 1, missing != 2, nvidia, 0x2702, false);
 		CHECK_FALSE(caps.ray_query);
 		CHECK_FALSE(caps.hardware);
 		CHECK(caps.reason == RenderingDeviceDriver::RAY_QUERY_REASON_NO_RAY_QUERY);
 	}
-	// All inputs: ray query; hardware only for an allowlisted device (lavapipe is software).
-	const RenderingDeviceDriver::VulkanRayQueryCaps rtx = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, nvidia, 0x2702);
+	// All inputs: ray query; hardware only where the RT-core check passes (lavapipe is software).
+	const RenderingDeviceDriver::VulkanRayQueryCaps rtx = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, nvidia, 0x2702, false);
 	CHECK(rtx.ray_query);
 	CHECK(rtx.hardware);
 	CHECK(rtx.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
-	const RenderingDeviceDriver::VulkanRayQueryCaps lavapipe = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, 0x10005, 0x0000);
+	const RenderingDeviceDriver::VulkanRayQueryCaps lavapipe = RenderingDeviceDriver::vulkan_ray_query_caps(true, true, true, 0x10005, 0x0000, false);
 	CHECK(lavapipe.ray_query);
 	CHECK_FALSE(lavapipe.hardware);
 	CHECK(lavapipe.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
@@ -3075,8 +3363,8 @@ TEST_CASE("[NextGI][RT] Vulkan ray-query capabilities and acceleration-structure
 
 // GodotNext: d3d12_dxr (#118). GD-7 with mocked device capabilities (plan §23.2): the D3D12 driver's
 // capability check feeds the §3.1 tier rule, as the driver does at startup.
-static RenderingDeviceDriver::D3D12RayQueryCaps d3d12_caps(uint32_t p_tier, uint32_t p_shader_model, bool p_toolchain = true, uint32_t p_vendor = RenderingContextDriver::Vendor::VENDOR_NVIDIA, uint32_t p_device = 0x2702) {
-	return RenderingDeviceDriver::d3d12_ray_query_caps(p_tier, p_shader_model, p_toolchain, p_vendor, p_device);
+static RenderingDeviceDriver::D3D12RayQueryCaps d3d12_caps(uint32_t p_tier, uint32_t p_shader_model, bool p_toolchain = true, uint32_t p_vendor = RenderingContextDriver::Vendor::VENDOR_NVIDIA, uint32_t p_device = 0x2702, bool p_integrated = false) {
+	return RenderingDeviceDriver::d3d12_ray_query_caps(p_tier, p_shader_model, p_toolchain, p_vendor, p_device, p_integrated);
 }
 
 static NextGI::TierInputs d3d12_tier_inputs(const RenderingDeviceDriver::D3D12RayQueryCaps &p_caps, bool p_cpu_device = false) {
@@ -3143,7 +3431,7 @@ TEST_CASE("[NextGI][RT] D3D12 with the upstream Mesa NIR library gives D3D12_NO_
 	check_tier(d3d12_tier_inputs(caps), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
 }
 
-TEST_CASE("[NextGI][RT] D3D12 off the RT-core allowlist gives NOT_HW_ACCELERATED, with one line") {
+TEST_CASE("[NextGI][RT] D3D12 without RT units gives NOT_HW_ACCELERATED, with one line") {
 	const uint32_t nvidia = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
 	const uint32_t intel = RenderingContextDriver::Vendor::VENDOR_INTEL;
 	// The RTX 4080 SUPER, the RTX 5090 and the cloud L4 (AD104): DXR 1.1 on RT cores.
@@ -3154,10 +3442,10 @@ TEST_CASE("[NextGI][RT] D3D12 off the RT-core allowlist gives NOT_HW_ACCELERATED
 		CHECK(rtx.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
 		check_tier(d3d12_tier_inputs(rtx), NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
 	}
-	// A GTX 1660 Ti and an Intel UHD 770 whose drivers expose tier 1.1 without RT units.
-	const uint32_t no_rt_units[][2] = { { nvidia, 0x2182 }, { intel, 0xA780 } };
+	// A GTX 1660 Ti and an Intel UHD 770 (an integrated GPU) whose drivers expose tier 1.1 without RT units.
+	const uint32_t no_rt_units[][3] = { { nvidia, 0x2182, 0 }, { intel, 0xA780, 1 } };
 	for (const uint32_t *ids : no_rt_units) {
-		const RenderingDeviceDriver::D3D12RayQueryCaps caps = d3d12_caps(11, 0x66, true, ids[0], ids[1]);
+		const RenderingDeviceDriver::D3D12RayQueryCaps caps = d3d12_caps(11, 0x66, true, ids[0], ids[1], ids[2] != 0);
 		CHECK(caps.ray_query);
 		CHECK_FALSE(caps.hardware);
 		CHECK(caps.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);

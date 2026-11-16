@@ -1534,9 +1534,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			print_verbose("- Vulkan Acceleration Structure not supported");
 		}
 
-		// GodotNext: rq_substrate (#22). Ray query also needs buffer device addresses; the hardware
-		// flag needs an RT-core allowlist row. The AS limits stay 0 without ray query.
-		ray_query_caps = vulkan_ray_query_caps(acceleration_structure_capabilities.acceleration_structure_support, ray_query_support, buffer_device_address_support, physical_device_properties.vendorID, physical_device_properties.deviceID);
+		// GodotNext: rq_substrate (#22), rt_core_check (#283). Ray query also needs buffer device
+		// addresses; the hardware flag needs the RT-core check, which also reads the device type (AMD
+		// integrated GPUs do not count). The AS limits stay 0 without ray query.
+		ray_query_caps = vulkan_ray_query_caps(acceleration_structure_capabilities.acceleration_structure_support, ray_query_support, buffer_device_address_support, physical_device_properties.vendorID, physical_device_properties.deviceID, physical_device_properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
 		acceleration_structure_limits = AccelerationStructureLimits();
 		if (ray_query_caps.ray_query) {
 			acceleration_structure_limits.max_instances = acceleration_structure_properties.maxInstanceCount;
@@ -1545,7 +1546,11 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			acceleration_structure_limits.max_per_stage = acceleration_structure_properties.maxPerStageDescriptorAccelerationStructures;
 			acceleration_structure_limits.min_scratch_offset_alignment = acceleration_structure_properties.minAccelerationStructureScratchOffsetAlignment;
 		}
-		print_verbose(vformat("- Vulkan ray query %s, hardware %s (vendor 0x%04X device 0x%04X)", ray_query_caps.ray_query ? "supported" : "not supported", ray_query_caps.hardware ? "allowlisted" : "not allowlisted", physical_device_properties.vendorID, physical_device_properties.deviceID));
+		if (ray_query_caps.ray_query) {
+			print_verbose(vformat("- Vulkan ray query supported, hardware %s (%s; vendor 0x%04X device 0x%04X)", ray_query_caps.hardware ? "yes" : "no", ray_query_caps.hardware_note, physical_device_properties.vendorID, physical_device_properties.deviceID));
+		} else {
+			print_verbose(vformat("- Vulkan ray query not supported (vendor 0x%04X device 0x%04X)", physical_device_properties.vendorID, physical_device_properties.deviceID));
+		}
 
 		if (raytracing_capabilities.raytracing_pipeline_support) {
 			raytracing_capabilities.shader_group_handle_size = raytracing_properties.shaderGroupHandleSize;

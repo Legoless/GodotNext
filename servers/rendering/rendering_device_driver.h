@@ -1099,17 +1099,19 @@ public:
 
 	static MetalRayQueryCaps metal_ray_query_caps(uint32_t p_apple_family, bool p_is_macos, uint32_t p_os_major, bool p_supports_raytracing, uint32_t p_msl_version, bool p_gpu_address, bool p_barriers, bool p_argument_buffers);
 
-	// GodotNext: rq_substrate (#22)
+	// GodotNext: rq_substrate (#22), rt_core_check (#283)
 	// Pure Vulkan ray-query capability check, always compiled so the doctests run without a GPU.
 	// Ray query needs acceleration structures, the rayQuery feature and buffer device addresses;
-	// hardware also needs an RT-core allowlist row for the device
-	// (RenderingContextDriver::is_ray_query_hardware_device).
+	// hardware also needs the RT-core check to pass for the device's PCI IDs and type
+	// (RenderingContextDriver::check_ray_query_hardware_device; p_integrated is
+	// VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU). hardware_note says why, for the capability log.
 	struct VulkanRayQueryCaps {
 		bool ray_query = false;
 		bool hardware = false;
 		RayQueryUnsupportedReason reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+		const char *hardware_note = "";
 	};
-	static VulkanRayQueryCaps vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id);
+	static VulkanRayQueryCaps vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated);
 
 	// GodotNext: d3d12_dxr (#118)
 	// Pure D3D12 ray-query capability check, always compiled so the doctests run without a GPU.
@@ -1118,19 +1120,21 @@ public:
 	// buffer device addresses (scratch ring, instance buffers, build inputs), which the D3D12 driver
 	// gives from shader model 6.6, the same tightening as on Vulkan. The Mesa NIR library must compile
 	// ray query (#123). Any failing check gives D3D12_NO_DXR, and `missing` names the first one.
-	// Hardware also needs an RT-core allowlist row for the adapter's PCI IDs. The tier rule alone
-	// turns WARP (a software adapter) into CPU_DEVICE.
+	// Hardware also needs the RT-core check to pass for the adapter's PCI IDs (#283; p_integrated is
+	// D3D12_FEATURE_DATA_ARCHITECTURE1::UMA). The tier rule alone turns WARP (a software adapter) into
+	// CPU_DEVICE.
 	struct D3D12RayQueryCaps {
 		bool ray_query = false;
 		bool hardware = false;
 		RayQueryUnsupportedReason reason = RAY_QUERY_REASON_D3D12_NO_DXR;
 		const char *missing = "";
+		const char *hardware_note = "";
 	};
 	static constexpr uint32_t D3D12_RAY_QUERY_MIN_RAYTRACING_TIER = 11; // D3D12_RAYTRACING_TIER_1_1.
 	static constexpr uint32_t D3D12_RAY_QUERY_MIN_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5.
 	static constexpr uint32_t D3D12_BUFFER_DEVICE_ADDRESS_MIN_SHADER_MODEL = 0x66; // D3D_SHADER_MODEL_6_6.
 	static constexpr uint32_t D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE = 64; // D3D12_RAYTRACING_INSTANCE_DESC.
-	static D3D12RayQueryCaps d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id);
+	static D3D12RayQueryCaps d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated);
 	// The RD vertex formats a D3D12 triangle geometry accepts: DXR's tier 1.0 and 1.1 lists, as RD formats
 	// with the same memory layout. BGR-ordered RD formats the D3D12 driver maps onto a listed DXGI format
 	// (B8G8R8A8_SNORM, or A2R10G10B10_UNORM_PACK32 through an SRV swizzle a build never applies) are not

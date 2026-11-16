@@ -87,3 +87,18 @@ How it was used: the driver calls the public entry points and reports the header
 | Copied files | None |
 
 How it was used: the hardware flag comes from the adapter's PCI IDs, as on Vulkan, and the HWRT fault latch's driver key includes the user-mode driver version, so a driver update clears the latch (G1-6).
+
+### D3D12 adapter architecture: UMA for the AMD integrated rule (#283)
+
+| Field | Value |
+|---|---|
+| What | `D3D12_FEATURE_ARCHITECTURE1` and `D3D12_FEATURE_DATA_ARCHITECTURE1::UMA`, which the runtime sets to TRUE when "the hardware and driver support UMA"; the structure, "introduced in Windows 10, version 1703", supersedes `D3D12_FEATURE_DATA_ARCHITECTURE`, and the pages' remarks pair UMA with "integrated/ UMA adapters" and `UMA` false with discrete adapters |
+| Upstream | https://learn.microsoft.com/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_architecture1 and https://learn.microsoft.com/windows/win32/api/d3d12/ns-d3d12-d3d12_feature_data_architecture |
+| Version | Microsoft Learn as published on 2026-11-16 (both pages updated 2024-07-12) |
+| License | Microsoft Learn documentation (CC-BY 4.0). Consulted, not copied. |
+| Read on | 2026-11-16, for issue #283 |
+| Consulted by | The #283 implementer |
+| Used in | `drivers/d3d12/rendering_device_driver_d3d12.cpp` (`_check_capabilities`) |
+| Copied files | None; the header was already vendored |
+
+How it was used: the RT-core check needs to know whether an AMD adapter is an integrated GPU (lead decision 2026-11-16: AMD APUs take the software tier, as UE names only discrete AMD RX 6000 series or newer). The context driver's DXGI device type comes from `DedicatedVideoMemory`, which an APU's carve-out can make non-zero, so the D3D12 driver asks `CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1)` for node 0 and passes `UMA` as the integrated flag (issue #283 names `ARCHITECTURE1`; for node 0 its `UMA` is the same field as in `D3D12_FEATURE_DATA_ARCHITECTURE`, and Windows 10 1703 is older than any DXR runtime). The PCI IDs of every current AMD APU are on the RT-core check's APU block as well (source log rhi-vulkan.md, #283).

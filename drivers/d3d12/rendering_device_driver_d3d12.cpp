@@ -7466,7 +7466,8 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	// GodotNext: d3d12_dxr (#118). DXR 1.1 ray query: RaytracingTier 1.1, shader model 6.5 (6.6 for the
 	// buffer device addresses the acceleration-structure path uses), ID3D12Device5, and a Mesa NIR library
-	// that compiles ray query. The adapter's PCI IDs decide the hardware flag (RT-core allowlist).
+	// that compiles ray query. The adapter's PCI IDs and its UMA flag decide the hardware flag (the RT-core
+	// check, #283: an AMD UMA adapter is an integrated GPU and does not count).
 	{
 		D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
 		res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
@@ -7486,7 +7487,10 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 			adapter_driver_version = (uint64_t)umd_version.QuadPart;
 		}
 
-		ray_query_caps = d3d12_ray_query_caps(effective_tier, (uint32_t)shader_capabilities.shader_model, RenderingShaderContainerD3D12::is_raytracing_supported(), adapter_vendor_id, adapter_device_id);
+		D3D12_FEATURE_DATA_ARCHITECTURE1 architecture = {}; // NodeIndex 0: the adapter itself.
+		const bool uma = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &architecture, sizeof(architecture))) && architecture.UMA;
+
+		ray_query_caps = d3d12_ray_query_caps(effective_tier, (uint32_t)shader_capabilities.shader_model, RenderingShaderContainerD3D12::is_raytracing_supported(), adapter_vendor_id, adapter_device_id, uma);
 		acceleration_structure_limits = AccelerationStructureLimits();
 		if (ray_query_caps.ray_query) {
 			acceleration_structure_limits.max_instances = D3D12_RAYTRACING_MAX_INSTANCES_PER_TOP_LEVEL_ACCELERATION_STRUCTURE;
@@ -7499,7 +7503,7 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		const String tier_name = raytracing_tier == 0 ? String("none") : vformat("%d.%d", raytracing_tier / 10, raytracing_tier % 10);
 		print_verbose("- D3D12 driver version key: " + get_driver_version_key());
 		if (ray_query_caps.ray_query) {
-			print_verbose(vformat("- D3D12 ray query (DXR 1.1) supported, hardware %s (raytracing tier %s, vendor 0x%04X device 0x%04X)", ray_query_caps.hardware ? "allowlisted" : "not allowlisted", tier_name, adapter_vendor_id, adapter_device_id));
+			print_verbose(vformat("- D3D12 ray query (DXR 1.1) supported, hardware %s (%s; raytracing tier %s, vendor 0x%04X device 0x%04X, UMA %s)", ray_query_caps.hardware ? "yes" : "no", ray_query_caps.hardware_note, tier_name, adapter_vendor_id, adapter_device_id, uma ? "yes" : "no"));
 		} else {
 			print_verbose(vformat("- D3D12 ray query (DXR 1.1) not supported: needs %s (raytracing tier %s, shader model %s)", ray_query_caps.missing, tier_name, D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model)));
 		}

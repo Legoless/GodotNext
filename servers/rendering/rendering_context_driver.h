@@ -96,12 +96,32 @@ public:
 		uint32_t compute_units = 0;
 	};
 
-	// GodotNext: rq_substrate (#22). True when the vendor and device IDs fall in a row of the
-	// RT-core allowlist (rendering_context_driver.cpp): NVIDIA Turing and later RTX parts, AMD
-	// RDNA2 and later, Intel Xe-HPG (Arc A-series) and Xe2 (Battlemage, Lunar Lake). Unknown IDs
-	// are false, so new devices fall back until a row covers them. Drivers report it as
-	// SUPPORTS_RAY_QUERY_HARDWARE; the device-type check lives in the tier rule.
-	static bool is_ray_query_hardware_device(uint32_t p_vendor_id, uint32_t p_device_id);
+	// GodotNext: rq_substrate (#22), rt_core_check (#283). The RT-core check behind
+	// SUPPORTS_RAY_QUERY_HARDWARE, which the Vulkan and D3D12 drivers report for a device with ray
+	// query. An NVIDIA, AMD or Intel device counts unless a row of a finite denylist
+	// (rendering_context_driver.cpp) names it as a part without RT units, so later RT generations
+	// count without a list update, as UE 5.9's "or newer" classes do (plan §26.1). Integrated Intel
+	// Arc GPUs with RT units count. AMD integrated GPUs never count: UE names only discrete "AMD
+	// RX-6000 series or newer" cards (lead decision 2026-11-16); p_integrated is the API's device type
+	// (Vulkan's integrated-GPU type, D3D12's UMA flag), and the AMD APU device-ID block counts too.
+	// A device ID above 0xFFFF is not a PCI device ID (a Vulkan SoC GPU such as NVIDIA Tegra) and
+	// never counts, as under the #22 allowlist. Other vendors never count. The device-type check for
+	// CPUs lives in the tier rule.
+	enum RayQueryHardwareRule {
+		RAY_QUERY_HARDWARE_RULE_OTHER_VENDOR, // Not NVIDIA, AMD or Intel.
+		RAY_QUERY_HARDWARE_RULE_NOT_PCI_DEVICE_ID, // NVIDIA, AMD or Intel with a device ID above 0xFFFF.
+		RAY_QUERY_HARDWARE_RULE_AMD_INTEGRATED,
+		RAY_QUERY_HARDWARE_RULE_DENYLIST, // A part without RT units.
+		RAY_QUERY_HARDWARE_RULE_RT_GENERATION, // Hardware: the vendor's RT generations.
+	};
+	struct RayQueryHardwareCheck {
+		bool hardware = false;
+		RayQueryHardwareRule rule = RAY_QUERY_HARDWARE_RULE_OTHER_VENDOR;
+		// For the drivers' capability log: the denylist row's parts, or what the rule means.
+		const char *note = "";
+	};
+	static RayQueryHardwareCheck check_ray_query_hardware_device(uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated);
+	static bool is_ray_query_hardware_device(uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated);
 
 	virtual ~RenderingContextDriver();
 	virtual Error initialize() = 0;

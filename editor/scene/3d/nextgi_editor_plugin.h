@@ -66,7 +66,7 @@ public:
 	// ray query, and Vulkan would add nothing.
 	static bool should_offer_vulkan_switch(bool p_was_enabled, bool p_is_enabled, const String &p_driver_windows, bool p_already_offered, bool p_d3d12_hwrt_active);
 	// GodotNext: d3d12_dxr (#118). D3D12 HWRT is active when the editor's rendering device is D3D12
-	// with ray query on an RT-core allowlisted adapter. D3D12_NO_DXR and NOT_HW_ACCELERATED keep the offer.
+	// with ray query on an adapter that passes the RT-core check. D3D12_NO_DXR and NOT_HW_ACCELERATED keep the offer.
 	static bool is_d3d12_hwrt_device(const String &p_api_name, bool p_ray_query, bool p_ray_query_hardware);
 	static bool is_d3d12_hwrt_active();
 	// Sets driver.windows to vulkan, keeps fallback_to_d3d12, and saves project.godot.
