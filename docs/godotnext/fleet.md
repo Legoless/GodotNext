@@ -113,14 +113,24 @@ v1 supports the GPU vendors, hardware generations, operating systems and API ver
 
 | Machine | Class it covers | System and APIs | Status |
 |---|---|---|---|
-| Cloud NVIDIA T4 VM | NVIDIA Turing, UE's minimum hardware ray tracing class ("NVIDIA RTX-2000 series or newer") | Windows, D3D12 and Vulkan | Being created (2026-11-16); build row, device mapping and `vulkaninfo` to add here (#280) |
+| Cloud NVIDIA T4 VM (the cloud T4 test machine) | NVIDIA Turing, UE's minimum hardware ray tracing class ("NVIDIA RTX-2000 series or newer") | Windows, D3D12 and Vulkan | Running since 2026-11-16; device mapping below; build row and `vulkaninfo` to add here (#280) |
 | Cloud AMD Radeon PRO V710 VM | AMD RDNA3, UE's "AMD RX-6000 series or newer" class | Windows, D3D12 and Vulkan | Being set up by the lead; build row, device mapping and `vulkaninfo` to add here (#280) |
 | Cloud Linux VM (above) | NVIDIA on Linux (UE's Linux floor: NVIDIA 570 or newer) | Ubuntu 24.04, Vulkan | In use |
 
 - They follow the cloud VM rules above: no DLSS-enabled build, stopped when idle, and their names and addresses only in the git-ignored `local/fleet.env`.
 - UE's minimum OS versions get one functional run each in PQ: Windows 10 22H2 and Rocky Linux 8, on a fleet machine that can boot them (#282). macOS 14.5 is a known gap: the M5 Max cannot run it.
-- Supported, but with no fleet device (known gaps, not hardware to buy, plan §26.5): Intel Arc (discrete, and integrated with RT units), AMD and Intel on Linux, AMD GCN and RDNA1, NVIDIA Ampere, Pascal and Maxwell, and Apple M1 to M4.
+- These runs and the machines' runs are reported, not blocking (lead decision 2026-11-16, plan v3.9.11): a machine or OS that is not available when PQ runs, for example no Windows 10 22H2 host, is reported as a coverage gap, and MQ does not wait on it. A real fault a run finds (a crash, a validation error, a wrong tier or a wrong image) holds MQ: its fix is a v1 bug.
+- During the build, an issue box that needs one of these machines does not hold the issue (plan v3.9.11): the issue can close on the main machines plus WARP or DXIL checks, the run on the vendor machine is reported in the issue when the machine is available, and a failure then reopens the issue.
+- Supported, but with no fleet device (known gaps, not hardware to buy, plan §26.5): Intel Arc (discrete, and integrated with RT units), AMD integrated GPUs (which take the software tier, plan §26.2), AMD and Intel on Linux, AMD GCN and RDNA1, NVIDIA Ampere, Pascal and Maxwell, and Apple M1 to M4.
 - The Intel UHD 770 in the RTX 4080 SUPER machine is not a test device (plan §26.4). A one-off informational run on it, such as #176's bindless check, is allowed and is not coverage.
+
+On the cloud T4 test machine the user signs in automatically, so rendered runs go through `runners/win_session1.ps1` in Session 1, as on the Windows L4 VM. Godot names the GPU `Tesla T4` on Vulkan and `NVIDIA Tesla T4` on D3D12, so a job names the device the way its driver reports it; the other driver's column is `n/a`, so a job that pairs a name with the wrong driver fails. D3D12 also lists two `Microsoft Basic Render Driver` adapters (WARP), at `1` and `2`; Vulkan lists only the T4:
+
+| Device name | v1 role | Godot Session-1 Vulkan `--gpu-index` | Godot Session-1 D3D12 `--gpu-index` | `nvidia-smi -i` | Session-0 `vulkaninfo --json=<n>` |
+|---|---|---|---|---|---|
+| `Tesla T4` | Functional-coverage device, NVIDIA Turing (TU104, PCI `0x10DE:0x1EB8`); no PQ lines (plan §26.5); the name Vulkan reports | `0` | n/a | `0` | to record (#280) |
+| `NVIDIA Tesla T4` | The same T4, under the name D3D12 reports | n/a | `0` | `0` | to record (#280) |
+| `Microsoft Basic Render Driver` | Software WARP adapters (unused); D3D12 lists two, at `1` and `2` | n/a | `1` | n/a | n/a |
 
 ### Vulkan capability archive (`docs/godotnext/fleet/vulkaninfo/g0/`)
 
