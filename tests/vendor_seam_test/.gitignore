@@ -1,0 +1,12 @@
+godot/.godot
+godot/*.dll
+godot/*.dylib
+godot/*.exp
+godot/*.lib
+godot/*.pdb
+godot/*.so
+src/deps/
+src/*.o
+src/*.obj
+src/*.os
+godot/override.cfg

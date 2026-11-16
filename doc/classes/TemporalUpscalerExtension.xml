@@ -18,7 +18,7 @@
 			<param index="0" name="target_size" type="Vector2i" />
 			<param index="1" name="render_size" type="Vector2i" />
 			<description>
-				Returns the number of camera jitter phases to use for a viewport of [param target_size] rendered at [param render_size]. Return a negative value to use the engine's default, [code]8 * (target_size.x / render_size.x)^2[/code] rounded to the nearest integer.
+				Returns the number of camera jitter phases to use for a viewport of [param target_size] rendered at [param render_size]. Return a negative value to use the engine's default, [code]8 * (target_size.x / render_size.x)^2[/code] rounded to the nearest integer. Return [code]0[/code] to render without jitter, for example in an upscaler that cannot resolve it.
 			</description>
 		</method>
 		<method name="_get_mip_bias_offset" qualifiers="virtual const">

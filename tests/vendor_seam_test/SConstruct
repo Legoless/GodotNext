@@ -1,0 +1,22 @@
+#!/usr/bin/env python
+# ruff: noqa: F821
+
+# GodotNext: pu_vendor_seam_parity (#210). Builds the test-only vendor-seam GDExtension
+# (godot/vendor_seam_test) from plain C against the gdextension_interface.h that
+# `godot --headless --dump-gdextension-interface` writes (move it to src/deps/ first).
+# Warnings are errors, so a clean build has none.
+
+env = Environment()
+
+env.Append(CPPPATH=["src"])
+if env.subst("$CC") == "cl":
+    env.Append(CFLAGS=["/std:c11", "/W4", "/WX", "/O2"])
+else:
+    env.Append(CFLAGS=["-std=c11", "-O2", "-g", "-Wall", "-Wextra", "-Werror"])
+
+library = env.SharedLibrary(
+    target="#godot/vendor_seam_test",
+    source="#src/vendor_seam.c",
+)
+
+env.Default(library)

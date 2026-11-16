@@ -1,0 +1,8 @@
+[configuration]
+entry_symbol = "vendor_seam_init"
+compatibility_minimum = "4.7"
+
+[libraries]
+linux.x86_64 = "res://libvendor_seam_test.so"
+windows.x86_64 = "res://vendor_seam_test.dll"
+macos = "res://libvendor_seam_test.dylib"
