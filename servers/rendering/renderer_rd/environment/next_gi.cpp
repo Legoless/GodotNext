@@ -1302,8 +1302,8 @@ void NextGI::_clear_gi_reflection(RenderSceneBuffersRD *p_render_buffers) const 
 
 RID NextGI::get_specular_hit_distance(RenderSceneBuffersRD *p_render_buffers, int p_view) const {
 	// GodotNext: nextgi_reflect_divisor (#274). Lite frames skip the gather, so after a runtime
-	// switch from a traced preset the texture keeps the last traced frame's distances, and the
-	// front layer, which Lite does not turn off, still writes it.
+	// switch from a traced preset the texture keeps the last traced frame's distances. The front
+	// layer, which Lite does not turn off, writes its own target (#276).
 	if (!lite_traces_specular(is_lumen_lite())) {
 		return RID();
 	}

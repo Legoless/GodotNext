@@ -34,6 +34,7 @@ TEST_FORCE_LINK(test_nextgi_front_layer)
 
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 
 TEST_CASE("[NextGI][FrontLayer] Fragment visibility and nearest-layer matching") {
 	CHECK_FALSE(RendererRD::nextgi_front_layer_fragment_visible(0.09f, 0.5f, 0.8f));
@@ -55,6 +56,34 @@ TEST_CASE("[NextGI][FrontLayer] Allow and environment flags gate lazy resources"
 	CHECK_FALSE(bool(info["front_layer_targets_created"]));
 	CHECK_EQ(int(info["front_layer_shader_count"]), 0);
 	CHECK_EQ(int(info["front_layer_dispatch_count"]), 0);
+	// GodotNext: nextgi_front_layer_hit (#276). No trace yet, so no trace size and no hit target.
+	// A missing key would read as 0, so check that the keys are reported first.
+	CHECK(info.has("front_layer_trace_width"));
+	CHECK(info.has("front_layer_trace_height"));
+	CHECK(info.has("front_layer_hit_distance_width"));
+	CHECK(info.has("front_layer_hit_distance_height"));
+	CHECK_EQ(int(info["front_layer_trace_width"]), 0);
+	CHECK_EQ(int(info["front_layer_trace_height"]), 0);
+	CHECK_EQ(int(info["front_layer_hit_distance_width"]), 0);
+	CHECK_EQ(int(info["front_layer_hit_distance_height"]), 0);
+}
+
+// GodotNext: nextgi_front_layer_hit (#276).
+TEST_CASE("[NextGI][FrontLayer] The front layer's trace writes its own hit distances, never the view's") {
+	const RID front_target = RID::from_uint64(11);
+	const RID view_target = RID::from_uint64(22);
+	// The view's gather writes and reads the view's RB_TEX_SPECULAR_HIT.
+	CHECK_EQ(RendererRD::nextgi_specular_hit_target(false, RID(), view_target), view_target);
+	CHECK_EQ(RendererRD::nextgi_specular_hit_target(false, front_target, view_target), view_target);
+	CHECK_FALSE(RendererRD::nextgi_specular_hit_target(false, front_target, RID()).is_valid());
+	// The front layer's gather uses its own target while the view's texture exists, and does not
+	// fall back to the view's texture when its own is missing.
+	CHECK_EQ(RendererRD::nextgi_specular_hit_target(true, front_target, view_target), front_target);
+	CHECK_FALSE(RendererRD::nextgi_specular_hit_target(true, RID(), view_target).is_valid());
+
+	// A gather that never traced allocated no front-layer target.
+	RendererRD::NextGIGather gather;
+	CHECK_EQ(gather.get_front_hit_distance_size(), Size2i());
 }
 
 TEST_CASE("[NextGI][FrontLayer] Counters unregister with the owner") {

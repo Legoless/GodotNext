@@ -67,6 +67,14 @@ _FORCE_INLINE_ Size2i nextgi_reflect_trace_size(const Size2i &p_internal_size, u
 	return Size2i(int32_t(nextgi_reflect_trace_axis(uint32_t(MAX(p_internal_size.x, 0)), p_divisor)), int32_t(nextgi_reflect_trace_axis(uint32_t(MAX(p_internal_size.y, 0)), p_divisor)));
 }
 
+// GodotNext: nextgi_front_layer_hit (#276). The hit distance texture a gather's specular trace
+// writes (binding 35) and its specular denoiser reads. The view's gather uses the view's
+// RB_TEX_SPECULAR_HIT; the front layer's gather uses its own target and never the view's, which
+// keeps the view's trace for the readers after the frame block (the RR hit distance guide).
+_FORCE_INLINE_ RID nextgi_specular_hit_target(bool p_front_layer, const RID &p_front_layer_target, const RID &p_view_target) {
+	return p_front_layer ? p_front_layer_target : p_view_target;
+}
+
 // 8x8 workgroups, one thread per trace pixel.
 _FORCE_INLINE_ uint32_t nextgi_reflect_dispatch_groups(uint32_t p_trace_pixels) {
 	return MAX((p_trace_pixels + 7u) / 8u, 1u);
@@ -211,6 +219,8 @@ class NextGIGather {
 	RID front_depth;
 	RID front_normal_roughness;
 	RID front_reflection;
+	// GodotNext: nextgi_front_layer_hit (#276). The front layer's own hit distances (R16F, trace
+	// size), which this gather allocates; the view's gather writes RB_TEX_SPECULAR_HIT instead.
 	RID front_hit_distance;
 
 	bool _ensure_shader();
@@ -235,7 +245,10 @@ public:
 	void init();
 	void free_resources();
 	void gather(RenderDataRD *p_render_data, bool p_diffuse = true);
-	void set_front_layer_inputs(RID p_depth, RID p_normal_roughness, RID p_reflection, RID p_hit_distance);
+	void set_front_layer_inputs(RID p_depth, RID p_normal_roughness, RID p_reflection);
+	// GodotNext: nextgi_front_layer_hit (#276). The size of the front layer's own hit distance
+	// target as allocated (0x0 for the view's gather and before the first front-layer trace).
+	Size2i get_front_hit_distance_size() const;
 	uint32_t get_shader_version_count() const;
 	RID get_specular_history() const { return specular_history; }
 	void integrate(RenderDataRD *p_render_data);

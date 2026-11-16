@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the #127 front-layer scene with HWRT enabled before renderer initialization.
-# Usage: run_front_layer.sh -- <godot> <godot arguments> [-- --on|--disallow|--capture]
+# Usage: run_front_layer.sh -- <godot> <godot arguments> [-- --on|--disallow|--capture|--switch]
 set -euo pipefail
 
 export GODOTNEXT_BACKGROUND="${GODOTNEXT_BACKGROUND:-1}"

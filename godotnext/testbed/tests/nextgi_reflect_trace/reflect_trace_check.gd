@@ -25,6 +25,17 @@ extends Node3D
 ## --dump=PATH writes the hit texture as two int32 (width, height) and width x height float32, and
 ## --capture=PATH saves the frame shown right after the copy as a PNG.
 ##
+## Front layer (#276). --front-layer=true turns on the Environment's front-layer translucency
+## reflections (false turns them off). With them on, the front layer must have traced (dispatches
+## and rays in the tier info) and its own hit distance target must have the trace size: its gather
+## writes there, not into the view's texture. --compare=PATH compares the view's hit texture with a
+## --dump from another run (same scene, quality and frame count, so the same frame) texel by texel,
+## bit for bit, outside the front layer: outside the screen bounds of every visible mesh with an
+## alpha-blended material, grown by 2 pixels (a trace texel is outside when every view pixel it may
+## sample is). Every outside texel must match, and the dump must hold at least
+## --min-compared-hits (1) finite distances outside, or the comparison would not see an overwrite.
+## Texels inside are compared and reported, not required to match.
+##
 ## Run through run_reflect_trace_check.sh, which sets the NextGI quality. Prints one
 ## "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure.
 
@@ -39,6 +50,8 @@ var _failures := PackedStringArray()
 var _result := {"test": "nextgi_reflect_trace"}
 var _probe: TraceProbe
 var _environment: Environment
+var _scene: Node
+var _camera: Camera3D
 
 
 func _ready() -> void:
@@ -51,6 +64,7 @@ func _ready() -> void:
 	var scene := packed.instantiate()
 	scene.set_meta("skip_runtime", true)
 	add_child(scene)
+	_scene = scene
 	var world := scene.get_node_or_null("WorldEnvironment") as WorldEnvironment
 	if world == null or world.environment == null:
 		_finish_with("the scene has no WorldEnvironment")
@@ -65,6 +79,10 @@ func _ready() -> void:
 		_environment.fog_density = 0.05
 		_environment.nextgi_fog_on_reflection_hits = true
 		_result["fog"] = true
+	var front_layer := SceneArgs.value("--front-layer", "")
+	if not front_layer.is_empty():
+		_environment.nextgi_translucency_front_layer_reflections = front_layer == "true"
+		_result["front_layer"] = front_layer == "true"
 	world.environment = _environment
 	var roughness := float(SceneArgs.value("--roughness", "-1"))
 	if roughness >= 0.0:
@@ -81,6 +99,7 @@ func _ready() -> void:
 		_result["pitch"] = pitch
 		camera.rotate_object_local(Vector3.RIGHT, -deg_to_rad(pitch))
 	camera.current = true
+	_camera = camera
 	_probe = TraceProbe.new()
 	var compositor := Compositor.new()
 	var effects := compositor.compositor_effects
@@ -239,7 +258,138 @@ func _run() -> void:
 				_failures.append("quarter %d of the hit distance texture holds no traced hit (top left, top right, bottom left, bottom right)" % quarter)
 	if SceneArgs.value("--require-sky-misses", "false") == "true" and smooth_misses == 0:
 		_failures.append("no traced texel holds 65504, though the scene's reflections reach the sky")
+	if _result.get("front_layer", false):
+		_check_front_layer(info, expected_trace)
+	var compare_path := SceneArgs.value("--compare", "")
+	if not compare_path.is_empty():
+		_compare(compare_path, hit, hit_size, view, columns, rows)
 	_finish()
+
+
+## The front layer traced, and its own hit distance target has the trace size (#276).
+func _check_front_layer(p_info: Dictionary, p_expected_trace: Vector2i) -> void:
+	var dispatches := int(p_info.get("front_layer_dispatch_count", -1))
+	var traced := int(p_info.get("front_layer_traced", -1))
+	var trace := Vector2i(int(p_info.get("front_layer_trace_width", -1)), int(p_info.get("front_layer_trace_height", -1)))
+	var target := Vector2i(int(p_info.get("front_layer_hit_distance_width", -1)), int(p_info.get("front_layer_hit_distance_height", -1)))
+	_result["front_layer_dispatch_count"] = dispatches
+	_result["front_layer_traced"] = traced
+	_result["front_layer_hits"] = int(p_info.get("front_layer_hits", -1))
+	_result["front_layer_trace_size"] = [trace.x, trace.y]
+	_result["front_layer_hit_distance_size"] = [target.x, target.y]
+	if dispatches <= 0 or traced <= 0:
+		_failures.append("the front layer did not trace (dispatches %d, rays %d)" % [dispatches, traced])
+	if trace != p_expected_trace:
+		_failures.append("the front layer traces %dx%d, expected the view's trace size %dx%d" % [trace.x, trace.y, p_expected_trace.x, p_expected_trace.y])
+	if target != trace:
+		_failures.append("the front layer's hit distance target is %dx%d, expected its trace size %dx%d" % [target.x, target.y, trace.x, trace.y])
+
+
+## Compares the view's hit distances with a --dump of another run, outside the front layer (#276).
+func _compare(p_path: String, p_hit: PackedFloat32Array, p_hit_size: Vector2i, p_view: Vector2i, p_columns: Array, p_rows: Array) -> void:
+	_result["compare"] = p_path
+	var file := FileAccess.open(p_path, FileAccess.READ)
+	if file == null:
+		_failures.append("cannot read the comparison dump %s" % p_path)
+		return
+	var width := int(file.get_32())
+	var height := int(file.get_32())
+	var size := Vector2i(width, height)
+	var reference := file.get_buffer(width * height * 4)
+	file.close()
+	if size != p_hit_size or reference.size() != size.x * size.y * 4:
+		_failures.append("the comparison dump is %dx%d, the hit distance texture %dx%d" % [size.x, size.y, p_hit_size.x, p_hit_size.y])
+		return
+	var red := PackedFloat32Array()
+	red.resize(size.x * size.y)
+	for i in red.size():
+		red[i] = p_hit[i * 4]
+	var current := red.to_byte_array()
+	var rects := []
+	_front_layer_rects(_scene, p_view, rects)
+	var outside_mask := PackedByteArray()
+	outside_mask.resize(size.x * size.y)
+	for y in size.y:
+		for x in size.x:
+			var outside := 1
+			for full_y: int in p_rows[y]:
+				for full_x: int in p_columns[x]:
+					var center := Vector2(full_x + 0.5, full_y + 0.5)
+					for rect: Rect2 in rects:
+						if rect.has_point(center):
+							outside = 0
+			outside_mask[y * size.x + x] = outside
+	var outside_texels := 0
+	var outside_hits := 0
+	var outside_differing := 0
+	var inside_texels := 0
+	var inside_differing := 0
+	var examples := []
+	for i in size.x * size.y:
+		var same := current.decode_u32(i * 4) == reference.decode_u32(i * 4)
+		if outside_mask[i] == 1:
+			outside_texels += 1
+			if reference.decode_float(i * 4) < MISS_DISTANCE:
+				outside_hits += 1
+			if not same:
+				outside_differing += 1
+				if examples.size() < 4:
+					examples.append([i % size.x, i / size.x, reference.decode_float(i * 4), current.decode_float(i * 4)])
+		else:
+			inside_texels += 1
+			if not same:
+				inside_differing += 1
+	var rect_list := []
+	for rect: Rect2 in rects:
+		rect_list.append([rect.position.x, rect.position.y, rect.size.x, rect.size.y])
+	_result["compare_front_layer_rects"] = rect_list
+	_result["compare_outside_texels"] = outside_texels
+	_result["compare_outside_hits"] = outside_hits
+	_result["compare_outside_differing"] = outside_differing
+	_result["compare_outside_examples"] = examples
+	_result["compare_inside_texels"] = inside_texels
+	_result["compare_inside_differing"] = inside_differing
+	if outside_differing != 0:
+		_failures.append("%d of %d hit distances outside the front layer differ from %s (x, y, dump, now: %s)" % [outside_differing, outside_texels, p_path, str(examples)])
+	var min_hits := SceneArgs.int_value("--min-compared-hits", 1)
+	if outside_hits < min_hits:
+		_failures.append("the dump holds %d finite hit distances outside the front layer, fewer than %d" % [outside_hits, min_hits])
+
+
+## Screen rectangles, in view pixels, that hold every surface the front layer can draw: the projected
+## bounds of every visible mesh with an alpha-blended material (or a material whose blending is not
+## known here), grown by 2 pixels. A mesh reaching behind the camera covers the whole view.
+func _front_layer_rects(p_node: Node, p_view: Vector2i, r_rects: Array) -> void:
+	var mesh_instance := p_node as MeshInstance3D
+	if mesh_instance != null and mesh_instance.mesh != null and mesh_instance.is_visible_in_tree() and _maybe_alpha_blended(mesh_instance):
+		var viewport_size := _camera.get_viewport().get_visible_rect().size
+		var scale := Vector2(p_view) / viewport_size
+		var aabb := mesh_instance.get_aabb()
+		var bounds := Rect2()
+		var behind := false
+		for corner in 8:
+			var world := mesh_instance.global_transform * aabb.get_endpoint(corner)
+			if _camera.is_position_behind(world):
+				behind = true
+				break
+			var screen := _camera.unproject_position(world) * scale
+			bounds = Rect2(screen, Vector2()) if corner == 0 else bounds.expand(screen)
+		r_rects.append(Rect2(Vector2(), Vector2(p_view)) if behind else bounds.grow(2.0))
+	for child in p_node.get_children():
+		_front_layer_rects(child, p_view, r_rects)
+
+
+func _maybe_alpha_blended(p_mesh_instance: MeshInstance3D) -> bool:
+	if p_mesh_instance.transparency > 0.0:
+		return true
+	for surface in p_mesh_instance.mesh.get_surface_count():
+		var material := p_mesh_instance.get_active_material(surface)
+		var base := material as BaseMaterial3D
+		if material != null and base == null:
+			return true
+		if base != null and (base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA or base.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS):
+			return true
+	return false
 
 
 ## Per trace pixel along one axis, the view pixels the kernel may sample: one, or the two

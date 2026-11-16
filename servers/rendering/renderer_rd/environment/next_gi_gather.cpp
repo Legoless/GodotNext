@@ -323,7 +323,7 @@ void NextGIGather::free_resources() {
 		rd->free_rid(readback_buffer);
 		readback_buffer = RID();
 	}
-	RID resources[29] = { blue_noise_texture, specular_debug_variance, specular_debug_rejected, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
+	RID resources[30] = { blue_noise_texture, specular_debug_variance, specular_debug_rejected, probe_image, probe_scratch, probe_history, history_length, debug_raw, debug_variance, debug_history, debug_rejected, reflect_counter_buffer, specular_debug, clamp_totals_buffer, specular_raw, specular_history, specular_scratch, specular_denoised, specular_history_length, front_hit_distance, reset_mask_buffer, ambient_scratch, prev_ambient, params_buffer, counter_buffer, feedback_buffer, confidence_buffer, dummy_color, dummy_storage, dummy_buffer };
 	for (RID resource : resources) {
 		if (resource.is_valid()) {
 			rd->free_rid(resource);
@@ -351,6 +351,7 @@ void NextGIGather::free_resources() {
 	specular_debug_variance = RID();
 	specular_debug_rejected = RID();
 	specular_final = RID();
+	front_hit_distance = RID();
 	blue_noise_texture = RID();
 	params_buffer = RID();
 	counter_buffer = RID();
@@ -604,12 +605,20 @@ bool NextGIGather::_ensure_targets(uint32_t p_screen_w, uint32_t p_screen_h) {
 	return true;
 }
 
-void NextGIGather::set_front_layer_inputs(RID p_depth, RID p_normal_roughness, RID p_reflection, RID p_hit_distance) {
-	front_layer = p_depth.is_valid() && p_normal_roughness.is_valid() && p_reflection.is_valid() && p_hit_distance.is_valid();
+void NextGIGather::set_front_layer_inputs(RID p_depth, RID p_normal_roughness, RID p_reflection) {
+	front_layer = p_depth.is_valid() && p_normal_roughness.is_valid() && p_reflection.is_valid();
 	front_depth = front_layer ? p_depth : RID();
 	front_normal_roughness = front_layer ? p_normal_roughness : RID();
 	front_reflection = front_layer ? p_reflection : RID();
-	front_hit_distance = front_layer ? p_hit_distance : RID();
+}
+
+Size2i NextGIGather::get_front_hit_distance_size() const {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr || !front_hit_distance.is_valid()) {
+		return Size2i();
+	}
+	const RD::TextureFormat format = rd->texture_get_format(front_hit_distance);
+	return Size2i(int32_t(format.width), int32_t(format.height));
 }
 
 uint32_t NextGIGather::get_shader_version_count() const {
@@ -921,11 +930,34 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 				rd->texture_clear(*texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
 			}
 		}
-		// The hit distance is written per trace pixel too (plan §8: at trace resolution). The front
-		// layer's gather writes the view's texture as well, at the same size.
-		NextGI::ensure_specular_hit_buffer(rb.ptr(), last_trace_size);
+		// The hit distance is written per trace pixel too (plan §8: at trace resolution).
+		// GodotNext: nextgi_front_layer_hit (#276). Only the view's gather writes the view's
+		// texture. The front layer's gather traces after it in the frame and writes every trace
+		// pixel, 65504 where no front layer is, so it writes its own target.
+		if (front_layer) {
+			if (front_hit_distance.is_valid()) {
+				const RD::TextureFormat hit_format = rd->texture_get_format(front_hit_distance);
+				if (hit_format.width != trace_w || hit_format.height != trace_h) {
+					rd->free_rid(front_hit_distance);
+					front_hit_distance = RID();
+				}
+			}
+			if (!front_hit_distance.is_valid()) {
+				RD::TextureFormat hit_format;
+				hit_format.width = trace_w;
+				hit_format.height = trace_h;
+				hit_format.format = RD::DATA_FORMAT_R16_SFLOAT;
+				hit_format.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+				front_hit_distance = rd->texture_create(hit_format, RD::TextureView());
+				ERR_FAIL_COND_V(front_hit_distance.is_null(), false);
+				// A texel the trace has not written yet reads as a miss.
+				rd->texture_clear(front_hit_distance, Color(65504.0, 0, 0, 0), 0, 1, 0, 1);
+			}
+		} else {
+			NextGI::ensure_specular_hit_buffer(rb.ptr(), last_trace_size);
+		}
 	}
-	last_specular_hit = front_layer ? front_hit_distance : (rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID());
+	last_specular_hit = nextgi_specular_hit_target(front_layer, front_hit_distance, rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : RID());
 	if (params.reflect_debug != 0u && specular_debug.is_valid()) {
 		const RD::TextureFormat debug_format = rd->texture_get_format(specular_debug);
 		if (int32_t(debug_format.width) != last_trace_size.width || int32_t(debug_format.height) != last_trace_size.height) {
@@ -978,7 +1010,7 @@ bool NextGIGather::_bind(RenderDataRD *p_render_data, uint32_t p_feedback_count,
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 32, Vector<RID>({ sampler_nearest, normal_roughness })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 33, Vector<RID>({ specular_raw.is_valid() ? specular_raw : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, reflect_counter_buffer.is_valid() ? reflect_counter_buffer : dummy_buffer),
-		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ rb->has_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) ? rb->get_texture(RB_SCOPE_GI, RB_TEX_SPECULAR_HIT) : probe_image })),
+		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 35, Vector<RID>({ last_specular_hit.is_valid() ? last_specular_hit : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 36, Vector<RID>({ specular_debug.is_valid() ? specular_debug : probe_image })),
 		RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 37, clamp_totals_buffer.is_valid() ? clamp_totals_buffer : dummy_buffer),
 		RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 38, Vector<RID>({ sampler_nearest, blue_noise_texture.is_valid() ? blue_noise_texture : dummy_color })),

@@ -60,7 +60,7 @@ bool NextGIFrontLayer::ensure_targets(const Size2i &p_size) {
 		rd->free_rid(framebuffer);
 		framebuffer = RID();
 	}
-	RID textures[5] = { depth, normal_roughness, reflection, hit_distance, opaque_depth };
+	RID textures[4] = { depth, normal_roughness, reflection, opaque_depth };
 	for (RID &texture : textures) {
 		if (texture.is_valid()) {
 			rd->free_rid(texture);
@@ -84,10 +84,8 @@ bool NextGIFrontLayer::ensure_targets(const Size2i &p_size) {
 	format.usage_bits |= RD::TEXTURE_USAGE_STORAGE_BIT;
 	reflection = rd->texture_create(format, RD::TextureView());
 	ERR_FAIL_COND_V(reflection.is_null(), false);
-
-	format.format = RD::DATA_FORMAT_R16_SFLOAT;
-	hit_distance = rd->texture_create(format, RD::TextureView());
-	ERR_FAIL_COND_V(hit_distance.is_null(), false);
+	// GodotNext: nextgi_front_layer_hit (#276). The gather allocates the front layer's hit
+	// distances at the specular trace size, apart from the view's RB_TEX_SPECULAR_HIT.
 
 	Vector<RID> attachments;
 	attachments.push_back(normal_roughness);
@@ -128,7 +126,7 @@ void NextGIFrontLayer::trace(RenderDataRD *p_render_data) {
 		gather = memnew(NextGIGather);
 		gather->init();
 	}
-	gather->set_front_layer_inputs(depth, normal_roughness, reflection, hit_distance);
+	gather->set_front_layer_inputs(depth, normal_roughness, reflection);
 	gather->gather(p_render_data, false);
 	dispatch_count++;
 }
@@ -140,7 +138,7 @@ void NextGIFrontLayer::free_resources() {
 	}
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd != nullptr) {
-		RID resources[6] = { framebuffer, depth, normal_roughness, reflection, hit_distance, opaque_depth };
+		RID resources[5] = { framebuffer, depth, normal_roughness, reflection, opaque_depth };
 		for (RID &resource : resources) {
 			if (resource.is_valid()) {
 				rd->free_rid(resource);
@@ -151,7 +149,6 @@ void NextGIFrontLayer::free_resources() {
 	depth = RID();
 	normal_roughness = RID();
 	reflection = RID();
-	hit_distance = RID();
 	opaque_depth = RID();
 	size = Size2i();
 	if (owner != nullptr && NextGI::get_singleton() == owner) {
@@ -170,9 +167,20 @@ void NextGIFrontLayer::fill_info(Dictionary &r_info) const {
 		gather->fill_info(gather_info);
 		r_info["front_layer_traced"] = gather_info.get("reflection_rays", 0);
 		r_info["front_layer_hits"] = gather_info.get("reflection_hits", 0);
+		// GodotNext: nextgi_front_layer_hit (#276). The front layer's trace size and its own hit
+		// distance target, which must match it.
+		r_info["front_layer_trace_width"] = gather_info.get("reflection_trace_width", 0);
+		r_info["front_layer_trace_height"] = gather_info.get("reflection_trace_height", 0);
+		const Size2i hit_size = gather->get_front_hit_distance_size();
+		r_info["front_layer_hit_distance_width"] = int64_t(hit_size.width);
+		r_info["front_layer_hit_distance_height"] = int64_t(hit_size.height);
 	} else {
 		r_info["front_layer_traced"] = 0;
 		r_info["front_layer_hits"] = 0;
+		r_info["front_layer_trace_width"] = 0;
+		r_info["front_layer_trace_height"] = 0;
+		r_info["front_layer_hit_distance_width"] = 0;
+		r_info["front_layer_hit_distance_height"] = 0;
 	}
 }
 

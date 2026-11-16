@@ -61,7 +61,6 @@ class NextGIFrontLayer {
 	RID depth;
 	RID normal_roughness;
 	RID reflection;
-	RID hit_distance;
 	RID opaque_depth;
 	Size2i size;
 	uint32_t dispatch_count = 0;

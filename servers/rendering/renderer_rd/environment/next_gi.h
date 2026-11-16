@@ -630,7 +630,8 @@ public:
 	// Mirrors the buffer setup of GI::process_gi with get_gi_buffer_usage_bits.
 	void ensure_gi_buffers(RenderSceneBuffersRD *p_render_buffers, bool p_half_resolution);
 	// GodotNext: nextgi_reflect_divisor (#274). (Re)creates RB_TEX_SPECULAR_HIT at the specular trace
-	// size, cleared to the miss value; NextGIGather calls it when it sizes the trace.
+	// size, cleared to the miss value; the view's NextGIGather calls it when it sizes the trace (the
+	// front layer's gather writes its own target, #276).
 	static void ensure_specular_hit_buffer(RenderSceneBuffersRD *p_render_buffers, const Size2i &p_trace_size);
 
 	// _render_shadow_begin and _render_shadow_end bracket a shadow batch, which fills
