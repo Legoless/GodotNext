@@ -291,6 +291,56 @@ def test_the_nextgi_scene_configs(
     assert ("translucency volume" in line.reason) == (gate == "G3-5")
 
 
+_NANITE_TOTAL = ("GPU/NaniteStreaming", "GPU/NaniteVisBuffer", "GPU/NaniteBasePass", "GPU/NaniteReadback")
+
+
+@pytest.mark.parametrize(
+    ("name", "line_id", "gate", "path_frames"),
+    [
+        ("foliage_field", "gn7_nextgeo_total", "GN-7", 1),
+        ("displacement_cliff", "gn6_parent_nextgeo_total", "GN-6", 1),
+        ("character_crowd", "gn5_parent_nextgeo_total", "GN-5", 600),
+    ],
+)
+def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: int) -> None:
+    config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
+    assert config.raw["port_issue"] == 234
+    # The PN scenes are generated (generators/build_pn.gd) into the gitignored generated folder and
+    # timed with their static cam_main; their Environments leave NextGI off.
+    assert config.godotnext.scene == f"res://generated/pn_content/{name}.tscn"
+    assert config.godotnext.camera == "cam_main"
+    assert config.godotnext.nextgi is None and not config.godotnext.override
+    assert "--nextgi=on" not in godotnext_args(config)
+    # The crowd's Level Sequence holds the walkers' 600-row clips (a whole number of walk cycles, so
+    # its loop wrap continues the cycle); the field and the cliff are still.
+    assert (config.frames, config.ue.path_frames) == (600, path_frames)
+    cvars = config.ue.checked_cvars()
+    assert cvars["r.ScreenPercentage"] == "100"
+    assert cvars["sg.ResolutionQuality"] == "100"
+    assert cvars["sg.ShadowQuality"] == "2"
+    line = next(line for line in config.lines if line.id == line_id)
+    assert (line.status, line.gates, line.statistic) == ("ue_bar", (gate,), "p95")
+    # No NextGeo virtual geometry in the generated content and the PN features not built: no
+    # GodotNext group, and the reason says why.
+    assert line.godotnext is None
+    assert "no NextGeo virtual geometry" in line.reason
+    # The columns that appear only with Nanite on, from the port's own captures; provisional, and the
+    # shadow raster inside GPU/ShadowDepths (and, for the crowd, the skin cache) left open.
+    assert line.ue is not None
+    assert (line.ue.group, line.ue.columns) == ("Nanite total (provisional)", _NANITE_TOTAL)
+    assert "Provisional" in line.reason and "GPU/ShadowDepths" in line.reason
+    assert ("GPU/GPUSkinCache" in line.reason) == (gate == "GN-5")
+    # GN-6 compares against Nanite tessellation, which the UE map does not run yet.
+    assert ("tessellation" in line.reason) == (gate == "GN-6")
+    assert ("Nanite Foliage" in line.reason) == (gate == "GN-7")
+    # GN-13 judges Dense City and Foliage Field together: the Foliage Field half is report-only here.
+    render = [line for line in config.lines if line.gates == ("GN-13",)]
+    assert len(render) == (1 if name == "foliage_field" else 0)
+    for line in render:
+        assert line.status == "report_only" and "Dense City" in line.reason
+        assert line.ue is not None and line.ue.columns == ("RenderThreadTime",)
+
+
 def test_the_ue_window_mode_comes_from_the_config() -> None:
     assert "-windowed" in ue_args(parse_config(synthetic_config()))
     fullscreen = ue_args(parse_config(_with("ue", window="fullscreen")))

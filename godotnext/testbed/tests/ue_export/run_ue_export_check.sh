@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Checks the UE comparison exporter (#235, #233, #232, #230) on the overlap-heavy kitbash, RT Shadow
-# Yard, MegaLights Hall, Upscaler Torture, Glass & Water, Character Walk and NextGI Perf.
+# Checks the UE comparison exporter (#235, #233, #232, #230, #234) on the overlap-heavy kitbash, RT
+# Shadow Yard, MegaLights Hall, Upscaler Torture, Glass & Water, Character Walk, NextGI Perf and the PN
+# scenes Foliage Field, Displacement Cliff and Character Crowd.
 #
 # Usage:
 #   run_ue_export_check.sh <godot> [godot arguments, for example --rendering-driver vulkan]
@@ -34,7 +35,14 @@
 #    frames): without --approximate it must refuse and name camera_far (CaptureCam's 80 m far plane
 #    clips the courtyard's far end); then two exports with it and check_ue_export.gd on the pair
 #    (the skinned characters as skeletal meshes, the GridMap cells, the far-plane row count).
-# 8. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
+# 8. The PN scenes (#234): generators/build_pn.gd writes them into the gitignored
+#    res://generated/pn_content/ first (a failed generation fails the step; nothing is skipped).
+#    Foliage Field (cam_main, 60 frames) without --approximate must refuse and name diffuse_mode;
+#    then two exports each of Foliage Field (with it), Displacement Cliff and Character Crowd
+#    (cam_main, 60 frames) and check_ue_export.gd on each pair (the 200,000 seeded MultiMesh
+#    placements and masked materials, the heightfield and its tiled noise texture, the 100 walkers
+#    as skeletal instances with their walk-cycle poses).
+# 9. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
 #    still fixture must export; a light that moves and returns, a mesh hidden for one frame, a
 #    MultiMesh instance and a GridMap cell that move and return must each refuse (exit 1) and name
 #    the node with row 8, the row it changed at (a first-and-last comparison would miss them); a
@@ -244,6 +252,26 @@ if ! grep -q -- "--approximate=camera_far" "$work/perf_refused.log" || [[ -e "$w
 fi
 export_pair perf "${perf_args[@]}" --approximate=camera_far
 check perf
+
+# The PN scenes are generated, not committed: build them (byte-identical on every run) first.
+status=0
+"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://generators/build_pn.gd >"$work/pn_build.log" 2>&1 || status=$?
+report pn_generate "$status" 0 "$work/pn_build.log"
+foliage_args=(--scene=res://generated/pn_content/foliage_field.tscn --camera=cam_main --warmup=0 --frames=60)
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${foliage_args[@]}" --out="$work/foliage_refused" >"$work/foliage_refused.log" 2>&1 || status=$?
+report foliage_refused "$status" 1 "$work/foliage_refused.log"
+if ! grep -q -- "--approximate=diffuse_mode" "$work/foliage_refused.log" || [[ -e "$work/foliage_refused/scene.json" ]]; then
+	echo "run_ue_export_check.sh: the refused Foliage Field export does not name --approximate=diffuse_mode, or wrote scene.json" >&2
+	failures=$((failures + 1))
+fi
+export_pair foliage "${foliage_args[@]}" --approximate=diffuse_mode
+check foliage
+export_pair cliff --scene=res://generated/pn_content/displacement_cliff.tscn --camera=cam_main --warmup=0 --frames=60
+check cliff
+export_pair crowd --scene=res://generated/pn_content/character_crowd.tscn --camera=cam_main --warmup=0 --frames=60
+check crowd
 
 fixture_args=(--scene=res://tests/ue_export/motion_fixture.tscn --camera=Camera --warmup=0 --frames=20)
 # One fixture case: its expected exit code, for a refusal the text the log must hold, and the

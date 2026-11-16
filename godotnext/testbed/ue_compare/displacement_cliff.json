@@ -1,0 +1,62 @@
+{
+	"schema": 1,
+	"name": "displacement_cliff",
+	"title": "Displacement Cliff, the NextGeo total against Nanite tessellation (GN-6's parent)",
+	"port_issue": 234,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://generated/pn_content/displacement_cliff.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"nextgi": null,
+		"harness_args": [],
+		"timeout_minutes": 15
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/DisplacementCliff/DisplacementCliff.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 1,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100", "sg.ShadowQuality 2"],
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 15
+	},
+	"lines": [
+		{
+			"id": "gn6_parent_nextgeo_total",
+			"name": "Displacement Cliff NextGeo total (GN-6's parent)",
+			"gates": ["GN-6"],
+			"status": "ue_bar",
+			"reason": "Provisional UE group: the four GPU columns that appear in the capture only when the meshes are Nanite (a names-only comparison with the same map's meshes imported without Nanite, on the RTX 4080 SUPER machine in game mode); Nanite's virtual shadow map raster runs inside GPU/ShadowDepths with the rest of the shadow work and is left out. The settings record names the final columns (plan §23.5). The GodotNext group is not defined: the generated PN scene carries no NextGeo virtual geometry (its meshes are procedural ArrayMeshes, and NextGeo builds virtual geometry only at import), and the PN features this line measures are not built yet, so a GodotNext timing run of it has no NextGeo cull or raster column. The UE side is not yet the gate's equivalent either: the cliff is baked geometry with no displacement material in GodotNext (pn-displacement-material is not built), so the export carries no displacement input, and UE tessellation needs r.Nanite.AllowTessellation=1, a read-only config cvar, in the shared comparison project's config, which waits for the lead. The UE map draws the baked cliff on Nanite without tessellation.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": { "group": "Nanite total (provisional)", "columns": ["GPU/NaniteStreaming", "GPU/NaniteVisBuffer", "GPU/NaniteBasePass", "GPU/NaniteReadback"] }
+		},
+		{
+			"id": "gpu_pass_sum",
+			"name": "GPU pass sum (pipeline check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line; recorded to check the comparison pipeline end to end.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		}
+	]
+}

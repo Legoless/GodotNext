@@ -473,7 +473,7 @@ static func _cliff_height(p_x: float, p_z: float, p_noise: FastNoiseLite) -> flo
 
 # --- Spline Road -------------------------------------------------------------
 
-## Two kilometres of road and guard rails along a stored Curve3D.
+## Two kilometers of road and guard rails along a stored Curve3D.
 static func build_spline_road() -> Dictionary:
 	var root := Node3D.new()
 	root.name = "SplineRoad"
@@ -670,6 +670,10 @@ static func build_character_crowd() -> Dictionary:
 		actor.rotation.y = rng.randf_range(-PI, PI)
 		Character.apply_walk_frame(actor, 0, index * 3)
 		Scaffold.add_owned(crowd, actor, root)
+		# The skeleton, the skinned mesh and the animation player are the
+		# actor's children; without an owner the saved scene drops them.
+		for part in actor.get_children():
+			part.owner = root
 
 	var flight := Path3D.new()
 	flight.name = "FlightPath"

@@ -1,0 +1,62 @@
+{
+	"schema": 1,
+	"name": "character_crowd",
+	"title": "Character Crowd, the NextGeo total against skinned Nanite (GN-5's parent)",
+	"port_issue": 234,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://generated/pn_content/character_crowd.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"nextgi": null,
+		"harness_args": [],
+		"timeout_minutes": 15
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/CharacterCrowd/CharacterCrowd.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 600,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100", "sg.ShadowQuality 2"],
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 15
+	},
+	"lines": [
+		{
+			"id": "gn5_parent_nextgeo_total",
+			"name": "Character Crowd NextGeo total (GN-5's parent)",
+			"gates": ["GN-5"],
+			"status": "ue_bar",
+			"reason": "Provisional UE group: the four GPU columns that appear in the capture only when the meshes are Nanite (a names-only comparison with the same map's meshes imported without Nanite, on the RTX 4080 SUPER machine in game mode); Nanite's virtual shadow map raster runs inside GPU/ShadowDepths with the rest of the shadow work and is left out. The settings record names the final columns (plan §23.5). With Nanite on, the walkers leave the base pass and GPU/GPUSkinCache drops to about a third, so part of the skinning still runs there; whether that column belongs in the total is open too. The GodotNext group is not defined: the generated PN scene carries no NextGeo virtual geometry (its meshes are procedural ArrayMeshes, and NextGeo builds virtual geometry only at import), and the PN features this line measures are not built yet, so a GodotNext timing run of it has no NextGeo cull or raster column. The UE map places the 100 walkers as skeletal mesh actors of one Nanite-enabled skeletal mesh, each playing a clip of the poses GodotNext showed on every row; the skeletal mesh's own material slot holds the port's material, because with the importer's material the game log named a missing usage flag and the walkers drew through the non-Nanite base pass.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": { "group": "Nanite total (provisional)", "columns": ["GPU/NaniteStreaming", "GPU/NaniteVisBuffer", "GPU/NaniteBasePass", "GPU/NaniteReadback"] }
+		},
+		{
+			"id": "gpu_pass_sum",
+			"name": "GPU pass sum (pipeline check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line; recorded to check the comparison pipeline end to end.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		}
+	]
+}

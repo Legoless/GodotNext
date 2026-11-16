@@ -133,7 +133,28 @@ func _check_crowd() -> void:
 	if crowd != null and count > 0:
 		var triangles := int(crowd.get_child(0).get_meta("triangles", 0))
 		_check(triangles >= CROWD_MIN_TRIANGLES, "character_crowd actor has %d triangles, expected at least %d." % [triangles, CROWD_MIN_TRIANGLES])
+		# Every saved actor keeps its skeleton, its skinned mesh and its walk
+		# player, and the runtime script's actor path reaches each one.
+		var complete := 0
+		var mesh_triangles := {}
+		for index in count:
+			var actor := root.get_node_or_null("Crowd/Crowd%03d" % index)
+			if actor == null:
+				continue
+			var visual := actor.get_node_or_null("Visual") as MeshInstance3D
+			if visual == null or visual.mesh == null or visual.skin == null:
+				continue
+			if not mesh_triangles.has(visual.mesh):
+				mesh_triangles[visual.mesh] = visual.mesh.get_faces().size() / 3
+			if actor.get_node_or_null("Skeleton3D") is Skeleton3D and int(mesh_triangles[visual.mesh]) >= CROWD_MIN_TRIANGLES \
+					and actor.get_node_or_null("AnimationPlayer") is AnimationPlayer:
+				complete += 1
+		_check(complete == CROWD_COUNT, "character_crowd.tscn has %d complete actors (skeleton, skinned mesh of at least %d triangles, walk player), expected %d." % [complete, CROWD_MIN_TRIANGLES, CROWD_COUNT])
 	_check_cameras_and_path(root, "character_crowd.tscn")
+	# Drop the walkers' own override materials first: freeing 100 of them with an instance that never
+	# entered the tree makes the headless dummy renderer log a "material is null" error.
+	for node in root.find_children("*", "MeshInstance3D", true, false):
+		(node as MeshInstance3D).set_surface_override_material(0, null)
 	root.free()
 
 
