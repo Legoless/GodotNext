@@ -14,6 +14,8 @@ extends Node3D
 ##   skeleton_offset    the skinned triangle's Skeleton3D sits 0.5 m beside the mesh instance
 ##   camera_cull        the camera's cull mask hides the box's layer
 ##   camera_far         the camera's far plane is 5 m, so the boxes 5.5 m and more ahead reach past it
+##   mover_far          the camera's far plane is 20 m, which only the box reaches past, on frame 8,
+##                      when it moves 30 m away (a mover, exported with a track)
 ##   auto_skin          the skinned triangle has no Skin (the renderer makes one from the rests)
 ##   skin_scale         the skeleton's bone has a skin scale of 1.5
 ##   rest_only          the skeleton shows the rest pose only, while its bone is posed
@@ -92,6 +94,8 @@ func _init() -> void:
 		camera.cull_mask = 0xFFFFF & ~BOX_LAYER
 	if _case == "camera_far":
 		camera.far = 5.0
+	elif _case == "mover_far":
+		camera.far = 20.0
 	add_child(camera)
 
 	var box_mesh := BoxMesh.new()
@@ -212,6 +216,8 @@ func _process(_delta: float) -> void:
 			_light.position = Vector3(3.0, 2.0, 2.0) if perturb else Vector3(2.0, 2.0, 2.0)
 		"mesh_blinks":
 			_box.visible = not perturb
+		"mover_far":
+			_box.position = Vector3(0.0, 0.0, -30.0) if perturb else Vector3.ZERO
 		"multimesh_returns":
 			var moved := _rock_transform.translated(Vector3(0.0, 1.0, 0.0))
 			_rocks.multimesh.set_instance_transform(1, moved if perturb else _rock_transform)

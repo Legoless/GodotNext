@@ -92,7 +92,7 @@ func _initialize() -> void:
 			"perf":
 				_check_perf(first, scene)
 			"fixture":
-				_check_fixture(scene)
+				_check_fixture(first, scene)
 		_check_skeletal(first, scene)
 		_check_library(first, scene)
 		_check_axes(first)
@@ -1064,19 +1064,26 @@ func _check_perf(p_dir: String, p_scene: Dictionary) -> void:
 	_check(characters == Character.PERF_COUNT, "4 perf characters (%d)" % characters)
 
 
-## The still motion fixture (tests/ue_export/motion_fixture.tscn): the box, the three MultiMesh boxes,
-## the skinned triangle as one skeletal instance, no approximation and no row past the far plane, and
+## The motion fixture (tests/ue_export/motion_fixture.tscn), still or with --case=mover_far: the box,
+## the three MultiMesh boxes, the skinned triangle as one skeletal instance; still, no approximation
+## and no row past the far plane; with mover_far, the box as the one mover and camera_far on exactly
+## one row (frame 8, the only row its track reaches past the 20 m far plane); and
 ## both GridMaps' cells against transforms written out from each GridMap's settings rather than
 ## read from GridMap.get_meshes(): the GridMap's transform times the cell's (its orientation scaled
 ## by the cell scale, at cell x cell size plus half a cell on each centered axis) times the item's
 ## mesh transform. GridTurned has a rotated node, non-cubic cells centered on Y and Z only, a cell
 ## scale of 0.8, an item mesh transform and rotated cells.
-func _check_fixture(p_scene: Dictionary) -> void:
+func _check_fixture(p_dir: String, p_scene: Dictionary) -> void:
 	var checks: Dictionary = p_scene["checks"]
 	var turned_cells: Array = Fixture.turned_cells()
+	var fixture_case := _user_arg(_read_json(p_dir.path_join("export_manifest.json")), "--case", "none")
+	_check(fixture_case in ["none", "mover_far"], "the fixture check reads the still fixture or mover_far (%s)" % fixture_case)
 	_check(int(checks["node_instances"]) == 1 and int(checks["multimesh_instances"]) == 3 and int(checks["skeletal_instances"]) == 1, "the box, three MultiMesh boxes and the skinned triangle (%d, %d, %d)" % [int(checks["node_instances"]), int(checks["multimesh_instances"]), int(checks["skeletal_instances"])])
 	_check(int(checks["gridmap_cells"]) == 2 + turned_cells.size() and int(checks["gridmap_entries"]) == 2, "two Grid cells and %d GridTurned cells in one entry each (%d)" % [turned_cells.size(), int(checks["gridmap_cells"])])
-	_check(_approximations(p_scene).is_empty() and int(checks["camera_far_rows"]) == 0, "the still fixture needs no approximation (%s)" % [_approximations(p_scene).keys()])
+	if fixture_case == "mover_far":
+		_check(_approximations(p_scene).keys() == ["camera_far"] and int(checks["camera_far_rows"]) == 1 and int(checks["movers"]) == 1, "only the box's row 8 reaches past the 20 m far plane, as a mover (%s, %d rows, %d movers)" % [_approximations(p_scene).keys(), int(checks["camera_far_rows"]), int(checks["movers"])])
+	else:
+		_check(_approximations(p_scene).is_empty() and int(checks["camera_far_rows"]) == 0, "the still fixture needs no approximation (%s)" % [_approximations(p_scene).keys()])
 	var expected := {
 		# Grid: 1 m cells centered on every axis, at (0, 2.5, -2).
 		"Grid": [Transform3D(Basis(), Vector3(-0.5, 3.0, -1.5)), Transform3D(Basis(), Vector3(1.5, 3.0, -1.5))],

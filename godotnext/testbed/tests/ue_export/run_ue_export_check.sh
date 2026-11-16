@@ -46,7 +46,8 @@
 #    different shadow settings, and a 5 m far plane (camera_far), which exports with
 #    --approximate=camera_far. No refused run may write scene.json. Two exports of the still
 #    fixture without rigid_skin go through check_ue_export.gd (its two GridMaps' cells against
-#    transforms written out from their settings).
+#    transforms written out from their settings), and two of mover_far (only the box, a mover,
+#    reaches past a 20 m far plane, on row 8) with camera_far.
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -108,11 +109,12 @@ for run in a b; do
 	grep '^GODOTNEXT_UE_EXPORT ' "$work/kitbash_$run.log" || true
 done
 
+# check <name> [scene]: check_ue_export.gd <scene, default name> on $work/<name>_a and _b.
 check() {
-	local name=$1
+	local name=$1 scene=${2:-$1}
 	status=0
 	"$godot" --headless --audio-driver Dummy --path "$testbed_dir" --script res://tests/ue_export/check_ue_export.gd -- \
-		"$name" "$work/${name}_a" "$work/${name}_b" >"$work/check_$name.log" 2>&1 || status=$?
+		"$scene" "$work/${name}_a" "$work/${name}_b" >"$work/check_$name.log" 2>&1 || status=$?
 	report "check_$name" "$status" 0 "$work/check_$name.log"
 	grep '^GODOTNEXT_RESULT' "$work/check_$name.log" || true
 }
@@ -303,6 +305,9 @@ fi
 # a cell scale, an item mesh transform and rotated cells) against transforms written out by hand.
 export_pair fixture "${fixture_args[@]}"
 check fixture
+# A mover alone reaches past the far plane, on one row: the count follows movers row by row.
+export_pair fixture_far "${fixture_args[@]}" --case=mover_far --approximate=camera_far
+check fixture_far fixture
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2
