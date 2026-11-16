@@ -344,6 +344,97 @@ def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: i
         assert line.ue is not None and line.ue.columns == ("RenderThreadTime",)
 
 
+_DENSE_CITY_LINES = {
+    # line id: gates, status, UE group, UE columns (from the port's own game-mode captures)
+    "g5_1_whole_frame": (("G5-1",), "ue_bar", "Whole frame, GPU", ("GPUTime",)),
+    "g5_1_nextgi_total": (("G5-1",), "ue_bar", "Lumen total (provisional)", _LUMEN_TOTAL),
+    "g5_1_nextgeo_cull": (("G5-1", "GN-2"), "ue_bar", "Nanite raster and cull (provisional)", ("GPU/NaniteVisBuffer",)),
+    "g5_1_nextgeo_resolve": (("G5-1", "GN-11"), "ue_bar", "Nanite shading (provisional)", ("GPU/NaniteBasePass",)),
+    "g5_1_vsm_total": (
+        ("G5-1",),
+        "ue_bar",
+        "Virtual Shadow Maps (provisional)",
+        ("GPU/ShadowDepths", "GPU/ShadowProjection"),
+    ),
+    "gn13_render_thread_dense_city": (("GN-13",), "ue_bar", "Render thread, CPU", ("RenderThreadTime",)),
+}
+
+
+@pytest.mark.parametrize(
+    ("name", "variant"),
+    [
+        ("dense_city_hwrt_high", "dense_city"),
+        ("dense_city_sweep_10m_hwrt_high", "dense_city_sweep_10m"),
+        ("dense_city_sweep_100m_hwrt_high", "dense_city_sweep_100m"),
+        ("dense_city_sweep_1b_hwrt_high", "dense_city_sweep_1b"),
+    ],
+)
+def test_the_dense_city_configs(name: str, variant: str) -> None:
+    config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
+    assert config.raw["port_issue"] == 231
+    # The generated city (generators/dense_city/, into the gitignored generated folder) and its sweeps,
+    # timed with the still street camera cam_main and NextGI at the hardware tier, High (G5-1).
+    assert config.godotnext.scene == f"res://generated/dense_city/{variant}.tscn"
+    assert config.godotnext.camera == "cam_main"
+    assert (config.frames, config.ue.path_frames) == (600, 1)
+    assert config.godotnext.nextgi is not None
+    assert (config.godotnext.nextgi.tier, config.godotnext.nextgi.quality) == ("HWRT", "HIGH")
+    assert config.godotnext.override == "res://ue_compare/nextgi_hwrt_high.override.cfg"
+    assert "--nextgi=on" in godotnext_args(config)
+    cvars = config.ue.checked_cvars()
+    assert cvars["r.ScreenPercentage"] == "100"
+    assert cvars["sg.ResolutionQuality"] == "100"
+    assert cvars["sg.GlobalIlluminationQuality"] == "2"
+    assert cvars["sg.ReflectionQuality"] == "2"
+    assert cvars["sg.ShadowQuality"] == "2"
+    assert cvars["r.Lumen.AsyncCompute"] == "0"
+    assert cvars["r.Lumen.HardwareRayTracing"] == "1"
+    # Not set, only checked from the echo: UE renders Virtual Shadow Maps (the project's method, G5-1's
+    # shadow_method = virtual) and Nanite meshes trace their fallback (or proxy) in ray tracing.
+    assert dict(config.ue.expect_cvars) == {"r.Shadow.Virtual.Enable": "1", "r.RayTracing.Nanite.Mode": "0"}
+    lines = {line.id: line for line in config.lines}
+    if variant == "dense_city":
+        assert set(lines) == set(_DENSE_CITY_LINES)
+        for line_id, (gates, status, group, columns) in _DENSE_CITY_LINES.items():
+            line = lines[line_id]
+            assert (line.gates, line.status, line.statistic) == (gates, status, "p95")
+            assert line.ue is not None and (line.ue.group, line.ue.columns) == (group, columns)
+        # GodotNext's virtual shadow maps are not built: the VSM line has no GodotNext group, the
+        # whole frame says it is not like for like, and neither is the render thread's group defined.
+        assert lines["g5_1_vsm_total"].godotnext is None
+        assert lines["gn13_render_thread_dense_city"].godotnext is None
+        assert "Foliage Field" in lines["gn13_render_thread_dense_city"].reason
+        nextgi = lines["g5_1_nextgi_total"].godotnext
+        assert nextgi is not None and nextgi.prefix == "nextgi_"
+        assert set(nextgi.exclude) == {"nextgi_2_ms", "nextgi_as_builds_ms"}
+        cull = lines["g5_1_nextgeo_cull"].godotnext
+        assert cull is not None and "nextgeo_hiz_ms" in cull.columns
+        resolve = lines["g5_1_nextgeo_resolve"].godotnext
+        assert resolve is not None and resolve.columns == ("nextgeo_stage_a_ms", "nextgeo_stage_b_ms")
+        for line_id in ("g5_1_whole_frame", "g5_1_vsm_total"):
+            assert "shadow_method" in lines[line_id].reason and "not like for like" in lines[line_id].reason
+        assert "GPU/HZB" in lines["g5_1_nextgeo_cull"].reason
+        assert "Generate Ray Tracing Proxies" in lines["g5_1_nextgi_total"].reason
+    else:
+        # G5-9: the sweeps' whole frame, report-only with the UE ratio, at the G5-1 set's settings.
+        (line,) = config.lines
+        assert (line.gates, line.status, line.statistic) == (("G5-9",), "report_only", "p95")
+        assert line.godotnext is not None and line.godotnext.all_passes
+        assert line.ue is not None and line.ue.columns == ("GPUTime",)
+        assert "shadow_method" in line.reason
+    # The hardware tier comes from the launch cvar, not from the project settings the record names: the
+    # lines that time Lumen (the whole frame and the Lumen total) say so.
+    tier_lines = {
+        "g5_1_whole_frame",
+        "g5_1_nextgi_total",
+        "g5_9_whole_frame_10m",
+        "g5_9_whole_frame_100m",
+        "g5_9_whole_frame_1b",
+    }
+    for line in config.lines:
+        assert ("departs from the settings record" in line.reason) == (line.id in tier_lines)
+
+
 def test_the_ue_window_mode_comes_from_the_config() -> None:
     assert "-windowed" in ue_args(parse_config(synthetic_config()))
     fullscreen = ue_args(parse_config(_with("ue", window="fullscreen")))

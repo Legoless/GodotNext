@@ -1,0 +1,116 @@
+{
+	"schema": 1,
+	"name": "dense_city_hwrt_high",
+	"title": "Dense City Blocks with Nanite, NextGI High: the G5-1 whole frame and its feature totals (GN-2, GN-11; GN-13's Dense City half)",
+	"port_issue": 231,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://generated/dense_city/dense_city.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"override": "res://ue_compare/nextgi_hwrt_high.override.cfg",
+		"nextgi": { "tier": "HWRT", "quality": "HIGH" },
+		"harness_args": [],
+		"timeout_minutes": 20
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/DenseCity/DenseCity.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 1,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.ShadowQuality 2",
+			"r.Lumen.HardwareRayTracing 1",
+			"r.Lumen.AsyncCompute 0"
+		],
+		"expect_cvars": { "r.Shadow.Virtual.Enable": "1", "r.RayTracing.Nanite.Mode": "0" },
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 20
+	},
+	"lines": [
+		{
+			"id": "g5_1_whole_frame",
+			"name": "Dense City + NextGI High, whole frame",
+			"gates": ["G5-1"],
+			"status": "ue_bar",
+			"reason": "The GodotNext side is every timed pass of the frame, against UE's whole-frame GPU time. GodotNext's virtual shadow maps are not built yet (the engine has no shadow_method setting), so its side renders the scene's shadows on the shadow atlas (the sun's 4 directional splits and the street lights' shadow faces) while UE renders Virtual Shadow Maps, the comparison project's shadow method (r.Shadow.Virtual.Enable, which the report checks from each run's echo); the line is not like for like until GodotNext's virtual shadow maps land. UE also draws the sun's distance-field shadows beyond the dynamic shadow distance (GPU/DistanceFieldShadows in these captures; on by default for directional lights and used in tandem with Virtual Shadow Maps, the settings record's far-shadow row), which GodotNext has not built yet. UE takes the hardware tier from r.Lumen.HardwareRayTracing 1 at launch, because the shared comparison project keeps Use Hardware Ray Tracing when available off. This departs from the settings record and plan §23.5, which say the comparison enables the two project settings, until the lead decides.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		},
+		{
+			"id": "g5_1_nextgi_total",
+			"name": "G5-1 NextGI total against Lumen, hardware tier, High",
+			"gates": ["G5-1"],
+			"status": "ue_bar",
+			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5). NextGI's hardware tier traces the kit's fixed RT proxies (rt_max_error 2 cm). Lumen's hardware ray tracing at r.RayTracing.Nanite.Mode 0 (the default, which each run's echo confirms) traces each Nanite mesh's fallback mesh, or its ray tracing proxy when the project setting Generate Ray Tracing Proxies is on, which the settings record leaves unconfirmed for 5.9; the UE import keeps the fallback at its import default, a few hundred triangles per kit mesh. Whether UE traces a comparable density waits for the lead. UE takes the hardware tier from r.Lumen.HardwareRayTracing 1 at launch, because the shared comparison project keeps Use Hardware Ray Tracing when available off. This departs from the settings record and plan §23.5, which say the comparison enables the two project settings, until the lead decides.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },
+			"ue": { "group": "Lumen total (provisional)", "columns": ["GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections"] }
+		},
+		{
+			"id": "g5_1_nextgeo_cull",
+			"name": "NextGeo cull + Hi-Z + visibility against Nanite raster and cull (G5-1 cull line; GN-2's Dense City line)",
+			"gates": ["G5-1", "GN-2"],
+			"status": "ue_bar",
+			"reason": "Provisional groups on both sides (plan §23.5 names neither column). GodotNext: the main view's NextGeo passes from the instance cull through the second raster pass, each column running from its timestamp to the next one (the resolve classification starts after the second raster pass). UE: GPU/NaniteVisBuffer, the Nanite column whose name says it draws the visibility buffer, the raster and cull of the main view in these captures; the HZB the frame builds afterwards is a separate column (GPU/HZB), and Nanite's virtual shadow map raster runs inside GPU/ShadowDepths. Whether UE's group takes the HZB as GodotNext's takes its Hi-Z waits for the lead; the settings record names the final columns.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "columns": ["nextgeo_instance_cull_ms", "nextgeo_bvh_ms", "nextgeo_cluster_cull_ms", "nextgeo_raster_p1_ms", "nextgeo_hiz_ms", "nextgeo_phase2_cull_ms", "nextgeo_raster_p2_ms"] },
+			"ue": { "group": "Nanite raster and cull (provisional)", "columns": ["GPU/NaniteVisBuffer"] }
+		},
+		{
+			"id": "g5_1_nextgeo_resolve",
+			"name": "NextGeo resolve, Stage A + Stage B, against Nanite shading (G5-1 resolve line; GN-11 Stage A+B)",
+			"gates": ["G5-1", "GN-11"],
+			"status": "ue_bar",
+			"reason": "Provisional groups on both sides (plan §23.5 names neither column). GodotNext: the Stage A and Stage B resolve columns, without the resolve classification (binning, report-only line N3); the compute shading bins (#158) are not built, so the resolve draws 8x8 tile quads per material bucket. UE: GPU/NaniteBasePass, Nanite's material shading in these captures. The settings record names the final columns.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "columns": ["nextgeo_stage_a_ms", "nextgeo_stage_b_ms"] },
+			"ue": { "group": "Nanite shading (provisional)", "columns": ["GPU/NaniteBasePass"] }
+		},
+		{
+			"id": "g5_1_vsm_total",
+			"name": "G5-1 VSM total against Virtual Shadow Maps",
+			"gates": ["G5-1"],
+			"status": "ue_bar",
+			"reason": "No GodotNext group (V1 to V5). GodotNext's virtual shadow maps are not built yet (the engine has no shadow_method setting), so its side renders the scene's shadows on the shadow atlas (the sun's 4 directional splits and the street lights' shadow faces) while UE renders Virtual Shadow Maps, the comparison project's shadow method (r.Shadow.Virtual.Enable, which the report checks from each run's echo); the line is not like for like until GodotNext's virtual shadow maps land. UE: the settings record's two stat gpu buckets, GPU/ShadowDepths and GPU/ShadowProjection in these captures, where every light of the scene renders Virtual Shadow Maps; the sun's distance-field shadows (GPU/DistanceFieldShadows) stay out, as the settings record's far-shadow row has no timing stat. The CSV category VSM the settings record names is not in the default capture, and no public page says whether GPU/Lights counts the projection again; the group is provisional.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": { "group": "Virtual Shadow Maps (provisional)", "columns": ["GPU/ShadowDepths", "GPU/ShadowProjection"] }
+		},
+		{
+			"id": "gn13_render_thread_dense_city",
+			"name": "Render-thread CPU, Dense City (GN-13 adds Foliage Field)",
+			"gates": ["GN-13"],
+			"status": "ue_bar",
+			"reason": "GN-13 judges the render-thread time of Dense City and Foliage Field together (plan §21.4.3); this set records the Dense City half (#234's foliage_field set holds the other), and the sum across the two sets is not defined in the harness yet. The GodotNext render-thread column group is not defined yet either.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": { "group": "Render thread, CPU", "columns": ["RenderThreadTime"] }
+		}
+	]
+}

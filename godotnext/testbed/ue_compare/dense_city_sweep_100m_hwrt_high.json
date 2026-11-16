@@ -1,0 +1,61 @@
+{
+	"schema": 1,
+	"name": "dense_city_sweep_100m_hwrt_high",
+	"title": "Dense City sweep at 100M instanced triangles, NextGI High: G5-9's whole frame, report-only",
+	"port_issue": 231,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [1920, 1080],
+	"runs": 5,
+	"warmup_frames": 120,
+	"frames": 600,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "vulkan",
+		"scene": "res://generated/dense_city/dense_city_sweep_100m.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"override": "res://ue_compare/nextgi_hwrt_high.override.cfg",
+		"nextgi": { "tier": "HWRT", "quality": "HIGH" },
+		"harness_args": [],
+		"timeout_minutes": 20
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/DenseCitySweep100M/DenseCitySweep100M.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 300,
+		"path_frames": 1,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.ShadowQuality 2",
+			"r.Lumen.HardwareRayTracing 1",
+			"r.Lumen.AsyncCompute 0"
+		],
+		"expect_cvars": { "r.Shadow.Virtual.Enable": "1", "r.RayTracing.Nanite.Mode": "0" },
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 20
+	},
+	"lines": [
+		{
+			"id": "g5_9_whole_frame_100m",
+			"name": "Dense City sweep, 100M instanced triangles, whole frame",
+			"gates": ["G5-9"],
+			"status": "report_only",
+			"reason": "G5-9 is report-only with the UE ratio (plan §23.6); the sweep runs the G5-1 set's settings. GodotNext's virtual shadow maps are not built yet (the engine has no shadow_method setting), so its side renders the scene's shadows on the shadow atlas (the sun's 4 directional splits and the street lights' shadow faces) while UE renders Virtual Shadow Maps, the comparison project's shadow method (r.Shadow.Virtual.Enable, which the report checks from each run's echo); the line is not like for like until GodotNext's virtual shadow maps land. UE also draws the sun's distance-field shadows beyond the dynamic shadow distance (GPU/DistanceFieldShadows in these captures; on by default for directional lights and used in tandem with Virtual Shadow Maps, the settings record's far-shadow row), which GodotNext has not built yet. UE takes the hardware tier from r.Lumen.HardwareRayTracing 1 at launch, because the shared comparison project keeps Use Hardware Ray Tracing when available off. This departs from the settings record and plan §23.5, which say the comparison enables the two project settings, until the lead decides.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		}
+	]
+}
