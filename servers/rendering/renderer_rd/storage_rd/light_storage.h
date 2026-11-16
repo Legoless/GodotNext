@@ -167,7 +167,17 @@ private:
 		float volumetric_fog_energy;
 		uint32_t bake_mode;
 		float projector_rect[4];
+		// GodotNext: vsm_page_pool (#220). The light's first virtual shadow map, or
+		// RendererVirtualShadowMapStorage::MAP_NONE, and its map kind and count. Written for
+		// every light on every frame.
+		uint32_t vsm_map_base;
+		uint32_t vsm_flags;
+		uint32_t vsm_pad[2];
 	};
+	// GodotNext: vsm_page_pool (#220). An std430 array element: keep the GLSL copy in
+	// light_data_inc.glsl in step.
+	static_assert(sizeof(LightData) == 240, "LightData must match light_data_inc.glsl.");
+	static_assert(sizeof(LightData) % 16 == 0, "LightData must stay a multiple of 16 bytes.");
 
 	struct LightInstanceDepthSort {
 		float depth;
@@ -224,7 +234,15 @@ private:
 		float uv_scale2[2];
 		float uv_scale3[2];
 		float uv_scale4[2];
+		// GodotNext: vsm_page_pool (#220). As LightData's.
+		uint32_t vsm_map_base;
+		uint32_t vsm_flags;
+		uint32_t vsm_pad[2];
 	};
+	// GodotNext: vsm_page_pool (#220). An std140 array element: keep the GLSL copy in
+	// light_data_inc.glsl in step.
+	static_assert(sizeof(DirectionalLightData) == 480, "DirectionalLightData must match light_data_inc.glsl.");
+	static_assert(sizeof(DirectionalLightData) % 16 == 0, "DirectionalLightData must stay a multiple of 16 bytes.");
 
 	uint32_t max_directional_lights;
 	DirectionalLightData *directional_lights = nullptr;

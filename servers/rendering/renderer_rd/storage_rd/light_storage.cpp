@@ -35,6 +35,8 @@
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+// GodotNext: vsm_page_pool (#220).
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
 
 using namespace RendererRD;
@@ -583,6 +585,11 @@ RID LightStorage::light_instance_create(RID p_light) {
 void LightStorage::light_instance_free(RID p_light) {
 	LightInstance *light_instance = light_instance_owner.get_or_null(p_light);
 
+	// GodotNext: vsm_page_pool (#220). The light's virtual shadow maps go with it, in this frame.
+	if (VirtualShadowMapStorage::get_singleton() != nullptr) {
+		VirtualShadowMapStorage::get_singleton()->light_instance_freed(p_light);
+	}
+
 	//remove from shadow atlases..
 	for (const RID &E : light_instance->shadow_atlases) {
 		ShadowAtlas *shadow_atlas = shadow_atlas_owner.get_or_null(E);
@@ -817,6 +824,27 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				}
 
 				light_data.bake_mode = light->bake_mode;
+
+				// GodotNext: vsm_page_pool (#220). Reflection probes keep the main view's clipmap levels.
+				{
+					uint32_t vsm_map_base = RendererVirtualShadowMapStorage::MAP_NONE;
+					uint32_t vsm_flags = 0;
+					VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+					if (vsm != nullptr) {
+						// The level count follows the light alone, never a view's far plane: views with
+						// different far planes would otherwise reallocate the levels every frame. A max
+						// distance of 0 (the camera's far plane for atlas shadows) takes every level.
+						float max_distance = light->param[RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE];
+						if (max_distance <= 0.0f) {
+							max_distance = float(Math::INF);
+						}
+						vsm->update_light(light_instance->self, RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL, light->shadow, light_transform.basis, p_camera_transform.origin, max_distance, !p_render_data->reflection_probe.is_valid(), vsm_map_base, vsm_flags);
+					}
+					light_data.vsm_map_base = vsm_map_base;
+					light_data.vsm_flags = vsm_flags;
+					light_data.vsm_pad[0] = 0;
+					light_data.vsm_pad[1] = 0;
+				}
 
 				if (light_data.shadow_opacity > 0.001) {
 					RSE::LightDirectionalShadowMode smode = light->directional_shadow_mode;
@@ -1075,6 +1103,21 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 		light_data.specular_amount = light->param[RSE::LIGHT_PARAM_SPECULAR] * 2.0;
 		light_data.volumetric_fog_energy = light->param[RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY];
 		light_data.bake_mode = light->bake_mode;
+
+		// GodotNext: vsm_page_pool (#220).
+		{
+			uint32_t vsm_map_base = RendererVirtualShadowMapStorage::MAP_NONE;
+			uint32_t vsm_flags = 0;
+			VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
+			if (vsm != nullptr) {
+				const RendererVirtualShadowMapStorage::MapKind kind = type == RSE::LIGHT_OMNI ? RendererVirtualShadowMapStorage::MAP_KIND_OMNI : (type == RSE::LIGHT_SPOT ? RendererVirtualShadowMapStorage::MAP_KIND_SPOT : RendererVirtualShadowMapStorage::MAP_KIND_AREA);
+				vsm->update_light(light_instance->self, kind, light->shadow, light_transform.basis, p_camera_transform.origin, 0.0f, false, vsm_map_base, vsm_flags);
+			}
+			light_data.vsm_map_base = vsm_map_base;
+			light_data.vsm_flags = vsm_flags;
+			light_data.vsm_pad[0] = 0;
+			light_data.vsm_pad[1] = 0;
+		}
 
 		float radius = MAX(0.001, light->param[RSE::LIGHT_PARAM_RANGE]);
 		light_data.inv_radius = 1.0 / radius;

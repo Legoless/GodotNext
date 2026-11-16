@@ -45,6 +45,8 @@
 #include "servers/rendering/storage/frame_generation_extension.h"
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
+// GodotNext: vsm_page_pool (#220).
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #endif
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_device.h"
@@ -2338,6 +2340,28 @@ Dictionary RenderingServer::virtual_geometry_get_memory_report() {
 	return report;
 }
 
+Dictionary RenderingServer::virtual_shadow_maps_get_debug_info() {
+	// GodotNext: vsm_page_pool (#220). Empty where the renderer has no virtual shadow map storage.
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+		return RendererRD::VirtualShadowMapStorage::get_singleton()->get_debug_info();
+	}
+#endif
+	return Dictionary();
+}
+
+Dictionary RenderingServer::virtual_shadow_maps_run_self_check(int p_seed, int p_query_count, int p_cycles) {
+	// GodotNext: vsm_page_pool (#220).
+	ERR_FAIL_COND_V_MSG(p_query_count < 1 || p_query_count > (1 << 20), Dictionary(), "The query count must be 1 to 1048576.");
+	ERR_FAIL_COND_V_MSG(p_cycles < 0 || p_cycles > 1000000, Dictionary(), "The cycle count must be 0 to 1000000.");
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+		return RendererRD::VirtualShadowMapStorage::get_singleton()->run_self_check(uint32_t(p_seed), uint32_t(p_query_count), uint32_t(p_cycles));
+	}
+#endif
+	return Dictionary();
+}
+
 Dictionary RenderingServer::virtual_geometry_get_routing_counters() {
 	// GodotNext: nextgeo_residency (#78, Q12). Routing, residency invariants and page-upload GPU time.
 	Dictionary out;
@@ -3035,6 +3059,9 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_memory_report"), &RenderingServer::virtual_geometry_get_memory_report);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_routing_counters"), &RenderingServer::virtual_geometry_get_routing_counters);
+	// GodotNext: vsm_page_pool (#220).
+	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_debug_info"), &RenderingServer::virtual_shadow_maps_get_debug_info);
+	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_run_self_check", "seed", "query_count", "cycles"), &RenderingServer::virtual_shadow_maps_run_self_check, DEFVAL(1), DEFVAL(65536), DEFVAL(10000));
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);

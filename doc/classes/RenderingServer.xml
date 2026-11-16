@@ -4776,6 +4776,22 @@
 				Returns a [Dictionary] of NextGeo streaming, residency, and routing counters for the latest frame: [code]page_upload_ms[/code], [code]double_dispatch[/code], [code]missing[/code], [code]child_resident_without_parent[/code], [code]evictions_with_resident_child[/code], [code]non_main_view_requests[/code], [code]page_uploads[/code], [code]page_evictions[/code], [code]resident_pages[/code], and [code]pinned_pages[/code].
 			</description>
 		</method>
+		<method name="virtual_shadow_maps_get_debug_info">
+			<return type="Dictionary" />
+			<description>
+				Returns the state of the virtual shadow map core: [code]active[/code], [code]quality[/code], the physical pool ([code]pool_pages[/code], [code]pool_grid[/code], [code]pool_texture_size[/code], [code]pool_layers[/code], [code]pool_bytes[/code], [code]pool_driver_bytes[/code], [code]pool_reallocations[/code]), the page table ([code]page_table_maps[/code], [code]page_table_bytes[/code], [code]maps_allocated[/code], [code]maps_free[/code], [code]free_ranges[/code], [code]lights[/code], [code]scroll_passes[/code], [code]failed_allocations[/code], [code]map_allocations[/code], [code]evicted_lights[/code], [code]evicted_maps[/code], [code]frame[/code]) and the provisional sizes ([code]page_size[/code], [code]virtual_size[/code], [code]mip_count[/code], [code]entries_per_map[/code], [code]map_table_bytes[/code], [code]table_growth_maps[/code], [code]table_max_maps[/code], [code]pool_quality_pages[/code], [code]clipmap_level0_extent[/code], [code]clipmap_max_levels[/code]). Returns an empty [Dictionary] when the renderer has no virtual shadow maps (the Mobile and Compatibility renderers).
+				[b]Note:[/b] No project setting turns virtual shadow maps on yet. In debug builds, the [code]GODOT_DEV_VSM[/code] environment variable ([code]1[/code], [code]low[/code], [code]medium[/code], [code]high[/code] or [code]epic[/code]) makes every shadow-casting light allocate its virtual maps; the lights keep their shadow atlas.
+			</description>
+		</method>
+		<method name="virtual_shadow_maps_run_self_check">
+			<return type="Dictionary" />
+			<param index="0" name="seed" type="int" default="1" />
+			<param index="1" name="query_count" type="int" default="65536" />
+			<param index="2" name="cycles" type="int" default="10000" />
+			<description>
+				Runs the virtual shadow map core's GPU self-check and returns its results. It creates the physical pool at each quality level ([code]pools[/code]), fills maps of every light kind with random entries, compares the clipmap scroll pass with its CPU model ([code]scroll_mismatched_entries[/code]), runs [param query_count] page-table lookups on the GPU and compares each with the CPU model ([code]lookup_matches[/code], [code]lookup_mismatches[/code], with the outcome histogram), as many directional clipmap lookups with unaligned window origins ([code]clipmap_matches[/code], [code]clipmap_window_stops[/code]) and a set of lookups on maps a light does not have ([code]map_guard_matches[/code]), then runs [param cycles] map allocate and free cycles while recreating the pool, and reads back the page-table entries of every map no light owns ([code]table_nonzero_entries[/code], [code]leaked_maps[/code], [code]evicted_lights[/code]). Recreating the pool drops every page cached in it. [code]expected_buffer_delta[/code] and [code]expected_texture_delta[/code] are the changes [method RenderingDevice.get_memory_usage] must show once the resources the check freed are released. The check stalls the GPU; it is meant for tests. Returns an empty [Dictionary] when the renderer has no virtual shadow maps.
+			</description>
+		</method>
 		<method name="visibility_notifier_create">
 			<return type="RID" />
 			<description>

@@ -32,8 +32,6 @@
 
 #include "core/io/image.h"
 #include "servers/rendering/renderer_compositor.h"
-#include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
-#include "servers/rendering/storage/virtual_mesh_storage.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/renderer_canvas_render_rd.h"
@@ -45,7 +43,14 @@
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/utilities.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
+#include "servers/rendering/storage/virtual_mesh_storage.h"
+
+// GodotNext: vsm_page_pool (#220).
+namespace RendererRD {
+class VirtualShadowMapStorage;
+} // namespace RendererRD
 
 class RendererCompositorRD : public RendererCompositor {
 protected:
@@ -64,6 +69,8 @@ protected:
 	RendererRD::Utilities *utilities = nullptr;
 	// GodotNext: nextgeo_instance_records (#75).
 	RendererRD::VirtualMeshStorage *virtual_mesh_storage = nullptr;
+	// GodotNext: vsm_page_pool (#220).
+	RendererRD::VirtualShadowMapStorage *virtual_shadow_map_storage = nullptr;
 
 	enum BlitMode {
 		BLIT_MODE_NORMAL,

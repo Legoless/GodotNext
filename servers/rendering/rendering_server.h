@@ -591,6 +591,9 @@ public:
 	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID());
 	virtual Dictionary virtual_geometry_get_memory_report();
 	virtual Dictionary virtual_geometry_get_routing_counters();
+	// GodotNext: vsm_page_pool (#220). The Virtual Shadow Map core's state and its GPU self-check.
+	virtual Dictionary virtual_shadow_maps_get_debug_info();
+	virtual Dictionary virtual_shadow_maps_run_self_check(int p_seed = 1, int p_query_count = 65536, int p_cycles = 10000);
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;

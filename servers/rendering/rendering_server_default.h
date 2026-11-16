@@ -113,6 +113,13 @@ class RenderingServerDefault : public RenderingServer {
 	Dictionary _virtual_geometry_get_routing_counters() {
 		return RenderingServer::virtual_geometry_get_routing_counters();
 	}
+	// GodotNext: vsm_page_pool (#220).
+	Dictionary _virtual_shadow_maps_get_debug_info() {
+		return RenderingServer::virtual_shadow_maps_get_debug_info();
+	}
+	Dictionary _virtual_shadow_maps_run_self_check(int p_seed, int p_query_count, int p_cycles) {
+		return RenderingServer::virtual_shadow_maps_run_self_check(p_seed, p_query_count, p_cycles);
+	}
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -1340,6 +1347,29 @@ public:
 		} else {
 			Dictionary ret;
 			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_geometry_get_routing_counters, &ret);
+			return ret;
+		}
+	}
+
+	// GodotNext: vsm_page_pool (#220).
+	virtual Dictionary virtual_shadow_maps_get_debug_info() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _virtual_shadow_maps_get_debug_info();
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_shadow_maps_get_debug_info, &ret);
+			return ret;
+		}
+	}
+
+	virtual Dictionary virtual_shadow_maps_run_self_check(int p_seed = 1, int p_query_count = 65536, int p_cycles = 10000) override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _virtual_shadow_maps_run_self_check(p_seed, p_query_count, p_cycles);
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_shadow_maps_run_self_check, &ret, p_seed, p_query_count, p_cycles);
 			return ret;
 		}
 	}

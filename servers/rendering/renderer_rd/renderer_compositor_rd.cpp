@@ -38,6 +38,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/forward_mobile/render_forward_mobile.h"
 #include "servers/rendering/renderer_rd/storage_rd/virtual_mesh_storage.h"
+// GodotNext: vsm_page_pool (#220).
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -183,6 +185,11 @@ void RendererCompositorRD::finalize() {
 	memdelete(canvas);
 	memdelete(fog);
 	memdelete(particles_storage);
+	// GodotNext: vsm_page_pool (#220). Before the light storage, whose light instances own maps.
+	if (virtual_shadow_map_storage != nullptr) {
+		memdelete(virtual_shadow_map_storage);
+		virtual_shadow_map_storage = nullptr;
+	}
 	memdelete(light_storage);
 	memdelete(mesh_storage);
 	memdelete(virtual_mesh_storage);
@@ -408,6 +415,8 @@ RendererCompositorRD::RendererCompositorRD() {
 	// NextGeo records; Mobile and GLES3 keep the RS calls as no-ops.
 	if (rendering_method != "mobile" && textures_per_stage >= 48) {
 		virtual_mesh_storage = memnew(RendererRD::VirtualMeshStorage);
+		// GodotNext: vsm_page_pool (#220). Beside the light storage; Forward+ only.
+		virtual_shadow_map_storage = memnew(RendererRD::VirtualShadowMapStorage);
 	}
 #endif
 }
