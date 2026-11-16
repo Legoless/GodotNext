@@ -419,6 +419,53 @@ TEST_CASE("[NextGIHit] Dead groups are relinked away past the threshold, never d
 	CHECK_FALSE(nextgi_hit_should_relink(NEXTGI_HIT_RELINK_DEAD_GROUPS * 4, true));
 }
 
+TEST_CASE("[NextGIHit] A full bindless table is tried again once a released slot is reusable") {
+	const uint32_t delay = 3;
+	SUBCASE("A slot released just before the failure wakes the table") {
+		// The parameter buffer's resize releases its slot and allocates again in one frame.
+		NextGIHitTableLatch latch;
+		CHECK(latch.may_allocate(10));
+		latch.released(10, delay);
+		latch.allocated(false, 10, delay);
+		CHECK_FALSE(latch.may_allocate(10));
+		CHECK_FALSE(latch.may_allocate(10 + delay));
+		CHECK(latch.may_allocate(10 + delay + 1));
+		latch.allocated(true, 10 + delay + 1, delay);
+		CHECK(latch.may_allocate(10 + delay + 1));
+	}
+	SUBCASE("Without a release the table stays shut") {
+		NextGIHitTableLatch latch;
+		latch.allocated(false, 10, delay);
+		CHECK_FALSE(latch.may_allocate(1000));
+		latch.released(1000, delay);
+		CHECK_FALSE(latch.may_allocate(1000 + delay));
+		CHECK(latch.may_allocate(1000 + delay + 1));
+	}
+	SUBCASE("A release every frame does not keep the table shut") {
+		NextGIHitTableLatch latch;
+		latch.allocated(false, 10, delay);
+		for (uint64_t frame = 11; frame < 11 + delay; frame++) {
+			latch.released(frame, delay);
+			CHECK_FALSE(latch.may_allocate(frame));
+		}
+		latch.released(11 + delay, delay);
+		CHECK(latch.may_allocate(11 + delay + 1));
+	}
+	SUBCASE("A retry that fails again waits for the releases it could not see yet") {
+		NextGIHitTableLatch latch;
+		latch.allocated(false, 10, delay);
+		latch.released(12, delay);
+		const uint64_t retry = 12 + delay + 1;
+		CHECK(latch.may_allocate(retry));
+		latch.allocated(false, retry, delay);
+		// The release at frame 12 was reusable by the retry: nothing else is pending.
+		CHECK_FALSE(latch.may_allocate(retry + 100));
+		latch.released(retry, delay);
+		latch.allocated(false, retry, delay);
+		CHECK(latch.may_allocate(retry + delay + 1));
+	}
+}
+
 TEST_CASE("[NextGIHit] The arena drops the trailing chunks the stream left wholly free") {
 	NextGIArenaAllocator allocator(1024);
 	const NextGIArenaAllocator::Allocation geometry = allocator.allocate(600);

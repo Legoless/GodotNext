@@ -721,13 +721,8 @@ struct NextGIHitMaterials::Internal {
 		uint32_t slot = RDBindless::INVALID_SLOT;
 		uint32_t refs = 0;
 	};
-	struct TableState {
-		bool full = false; // The last allocation failed.
-		bool released_since_full = false;
-		uint64_t released_frame = 0;
-	};
-	TableState texture_table_state;
-	TableState params_table_state;
+	NextGIHitTableLatch texture_table_latch;
+	NextGIHitTableLatch params_table_latch;
 	HashMap<RID, TextureSlot> texture_slots;
 	bool tables_dirty = true;
 	RID material_table_buffer;
@@ -946,17 +941,13 @@ void NextGIHitMaterials::_release_texture_slot(RID p_texture) {
 
 uint32_t NextGIHitMaterials::_allocate_slot(bool p_texture_table, RID p_resource) {
 	Internal &in = *internal;
-	Internal::TableState &state = p_texture_table ? in.texture_table_state : in.params_table_state;
-	if (state.full) {
-		// A released slot is reusable once the frames that may still read it are done.
-		const uint64_t reusable = state.released_frame + RD::get_singleton()->get_frame_delay() + 1;
-		if (!state.released_since_full || in.frame < reusable) {
-			return RDBindless::INVALID_SLOT;
-		}
+	NextGIHitTableLatch &latch = p_texture_table ? in.texture_table_latch : in.params_table_latch;
+	if (!latch.may_allocate(in.frame)) {
+		return RDBindless::INVALID_SLOT;
 	}
-	const uint32_t slot = RD::get_singleton()->bindless_table_allocate(p_texture_table ? in.texture_table : in.params_table, p_resource);
-	state.full = slot == RDBindless::INVALID_SLOT;
-	state.released_since_full = false;
+	RenderingDevice *rd = RD::get_singleton();
+	const uint32_t slot = rd->bindless_table_allocate(p_texture_table ? in.texture_table : in.params_table, p_resource);
+	latch.allocated(slot != RDBindless::INVALID_SLOT, in.frame, rd->get_frame_delay());
 	return slot;
 }
 
@@ -965,14 +956,12 @@ void NextGIHitMaterials::_release_slot(bool p_texture_table, uint32_t p_slot) {
 	if (p_slot == RDBindless::INVALID_SLOT) {
 		return;
 	}
-	RD::get_singleton()->bindless_table_release(p_texture_table ? in.texture_table : in.params_table, p_slot);
-	Internal::TableState &state = p_texture_table ? in.texture_table_state : in.params_table_state;
-	state.released_since_full = true;
-	state.released_frame = in.frame;
+	RenderingDevice *rd = RD::get_singleton();
+	rd->bindless_table_release(p_texture_table ? in.texture_table : in.params_table, p_slot);
+	(p_texture_table ? in.texture_table_latch : in.params_table_latch).released(in.frame, rd->get_frame_delay());
 }
 
 void NextGIHitMaterials::_release_material_slots(Material &r_material) {
-	Internal &in = *internal;
 	for (const RID &texture : r_material.textures) {
 		_release_texture_slot(texture);
 	}
