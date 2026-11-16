@@ -223,6 +223,17 @@ public:
 	// Fog froxels and transparents request the coarsest COARSE_MIPS mips only.
 	static constexpr uint32_t COARSE_MIPS = 2;
 	static constexpr uint32_t COARSE_FIRST_MIP = MIP_COUNT - COARSE_MIPS;
+	// Always-resident pages (UE's coarse pages; lead decision 2026-11-16): every marked view requests,
+	// for every light with maps, the root page (the last mip) of each spot, omni and area face, and
+	// every page of mips CLIPMAP_RESIDENT_MIP and coarser of each directional clipmap level (21 per
+	// level). Allocation hands them out before any other request, so a sample whose own page
+	// overflowed still finds one: its face's root page, or the resident mips of its level or the next
+	// level. A level's window lies within pages 16 to 48 of the next level's, and that level's mip m
+	// window holds pages [0, 64 - (origin mod 2^m)): mip 4 is the finest mip whose window always
+	// holds the whole finer level. The last level has no next level: a pixel request there outside
+	// the resident mips' window also requests, as a coarse request, its page at the coarsest mip
+	// whose window holds the point (mark_directional_point()).
+	static constexpr uint32_t CLIPMAP_RESIDENT_MIP = 4;
 	// Overflow: in every frame whose requests the pool could not hold, the maps that requested the
 	// most pages take one mip coarser, up to OVERFLOW_MAX_BIAS; without overflow they give one mip
 	// back per OVERFLOW_DECAY_FRAMES frames. Both count frames, not views: a map rises at most once
@@ -325,6 +336,8 @@ public:
 		STATE_CACHED, // Pages kept for an entry not requested in the view.
 		STATE_MAX_MAP_REQUESTS, // The largest map's request count.
 		STATE_BIASED_MAPS, // Maps with an overflow bias after the view.
+		STATE_RESIDENT, // Always-resident requests: the request list's first entries.
+		STATE_RESIDENT_OVERFLOW, // Of those, entries left without a page.
 		STATE_SINK, // Written only by impossible atomic results (#277).
 		STATE_VIEW_END = 32,
 		STATE_TOTAL_OVERFLOW = STATE_VIEW_END, // Requests left without a page since start.
@@ -332,6 +345,7 @@ public:
 		STATE_TOTAL_DROPPED, // Requests dropped by a full list since start.
 		STATE_VIEWS, // Views marked since start.
 		STATE_BIAS_FRAME, // The frame (plus one) of the last view that updated the overflow bias.
+		STATE_TOTAL_RESIDENT_OVERFLOW, // Always-resident requests left without a page since start.
 		STATE_BUCKETS = 64,
 		STATE_BUCKET_OFFSETS = STATE_BUCKETS + BUCKET_COUNT,
 		STATE_BUCKET_CURSORS = STATE_BUCKET_OFFSETS + BUCKET_COUNT,
@@ -374,15 +388,42 @@ public:
 	// the vertex does not). r_all_faces is set when the light is within one diagonal of the vertex:
 	// the cells around it may then meet every face.
 	static bool light_reaches_cell(const MarkLight &p_light, const Vector3 &p_rel, float p_cell_size, bool &r_all_faces);
+	// The sampling check (GV-2's sampled-but-unmapped pages): each fine request of mark_local_point()
+	// and mark_directional_point() is looked up in a page table after allocation, as the projection
+	// (#222) will look it up: a face from the request's mip down to its root page (lookup()); a
+	// clipmap from the request's level and mip (clipmap_sample()).
+	struct SampleCheck {
+		const uint32_t *table = nullptr; // The page table after allocation.
+		const uint32_t *requested = nullptr; // Optional: the table after marking. Requests it does not flag are not sampled.
+		uint32_t sampled = 0;
+		uint32_t fallback = 0; // Served by a coarser page: the request's own entry had none.
+		uint32_t unmapped = 0; // Served by no page.
+		uint32_t unconfirmed = 0; // Not sampled: the GPU did not make the request (float rounding).
+	};
+	// The sample of a clipmap request at p_level and p_mip: the level's lookup from p_mip while the
+	// level's window holds the point (lookup_clipmap()), then each next level from the mip with the
+	// same texel size, p_mip minus the levels moved (at least 0).
+	static LookupResult clipmap_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t p_level, uint32_t p_mip);
+	// The coarse sample of a directional clipmap (#215): mips CLIPMAP_RESIDENT_MIP and coarser in the
+	// finest level whose mip-CLIPMAP_RESIDENT_MIP window holds the point, or, in the last level's far
+	// strip outside that window, the coarsest mip (< CLIPMAP_RESIDENT_MIP) whose window holds it.
+	static LookupResult clipmap_coarse_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0);
 	// The fine requests of a pixel (or the coarse ones of a fog point) in one local light's maps.
-	// p_map_bias holds each map's overflow bias state (bits 0-7 the bias), or is null.
-	static void mark_local_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, const MarkLight &p_light, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, bool p_all_faces, LocalVector<uint64_t> &r_requests);
-	// The same for a directional light whose levels start at p_map_base.
-	static void mark_directional_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, LocalVector<uint64_t> &r_requests);
+	// p_map_bias holds each map's overflow bias state (bits 0-7 the bias), or is null. r_sample, when
+	// set, looks up every fine or coarse request.
+	static void mark_local_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, const MarkLight &p_light, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, bool p_all_faces, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample = nullptr);
+	// The same for a directional light whose levels start at p_map_base. A request in the last level
+	// outside its resident mips' window also requests its page at the coarsest mip whose window holds
+	// the point, as a coarse request.
+	static void mark_directional_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample = nullptr);
+	// The always-resident requests of a light (coarse keys): the root page of each face of a spot, omni
+	// or area light, or every page of mips CLIPMAP_RESIDENT_MIP and coarser of each clipmap level.
+	static void mark_resident(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, LocalVector<uint64_t> &r_requests);
 	// The coarse requests of a world-space box: every coarse page its corners' bounding rect touches,
-	// in every level or face the box reaches (a face whose near plane cuts the box: all coarse pages).
-	static void mark_local_box(const MapData *p_maps, uint32_t p_table_maps, const MarkLight &p_light, const Vector3 &p_light_world, const AABB &p_box, LocalVector<uint64_t> &r_requests);
-	static void mark_directional_box(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, LocalVector<uint64_t> &r_requests);
+	// in every level or face the box reaches (a face whose near plane cuts the box: all coarse pages;
+	// the last clipmap level's far strip: the coarsest in-window mip < CLIPMAP_RESIDENT_MIP).
+	static void mark_local_box(const MapData *p_maps, uint32_t p_table_maps, const MarkLight &p_light, const Vector3 &p_light_world, const AABB &p_box, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample = nullptr);
+	static void mark_directional_box(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample = nullptr);
 
 	// The physical page records of the pool header (vsm_allocate_pages.glsl): the owning entry plus
 	// one (0: free), the frame it was last requested in, and its bucket in this view's free list.
@@ -403,6 +444,7 @@ public:
 		uint32_t available = 0; // The free list's length.
 		uint32_t dirty = 0; // Requested entries whose page must be rendered.
 		uint32_t coarse = 0; // Requested entries with ENTRY_COARSE.
+		uint32_t resident_overflow = 0; // Always-resident requests left without a page.
 	};
 	// Whether an entry's page must be rendered after allocation.
 	static constexpr uint32_t ENTRY_DIRTY_MASK = ENTRY_DIRTY_STATIC | ENTRY_DIRTY_DYNAMIC;
@@ -419,11 +461,12 @@ public:
 		PAGE_UPDATE_ORPHANED,
 	};
 	static PageUpdate page_update(const PageRecord &p_page, uint32_t p_page_index, uint32_t p_grid_width, const uint32_t *p_table, uint64_t p_table_entries, uint32_t p_frame, uint32_t p_cache_frames, uint32_t &r_bucket);
-	// The CPU model of the allocation passes (update, free list, assign in two phases: coarse requests
-	// first), in place on a page table and the page records. Pages go out in free-list order (bucket,
-	// then page index); the GPU hands them out in atomic order, so only the counts and the outcomes that
-	// do not depend on that order compare.
-	static AllocationCounts allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames);
+	// The CPU model of the allocation passes (update, free list, assign in three phases: the
+	// always-resident requests, which are the list's first p_resident_count, then the other coarse
+	// requests, then the rest), in place on a page table and the page records. Pages go out in
+	// free-list order (bucket, then page index); the GPU hands them out in atomic order, so only the
+	// counts and the outcomes that do not depend on that order compare.
+	static AllocationCounts allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames, uint32_t p_resident_count = 0);
 	// The page-table entry after the emit pass: request flags cleared, dirty flags handed to the list.
 	static constexpr uint32_t entry_after_emit(uint32_t p_entry) {
 		return p_entry & ~(ENTRY_REQUESTED | ENTRY_COARSE | ENTRY_DIRTY_STATIC | ENTRY_DIRTY_DYNAMIC | ENTRY_SCROLLED | ((p_entry & ENTRY_ALLOCATED) ? ENTRY_OVERFLOW : 0u));

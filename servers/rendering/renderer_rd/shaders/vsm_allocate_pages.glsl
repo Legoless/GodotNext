@@ -13,7 +13,8 @@
 //   buckets: 0 for free pages, then cache_frames - age, so the oldest cached pages come first.
 // MODE_SCAN: one thread: the buckets' offsets and the free list's length.
 // MODE_SCATTER: one thread per page: the free list, least recently used first.
-// MODE_ASSIGN: one thread per request, run twice: coarse requests first (phase 0), then the rest.
+// MODE_ASSIGN: one thread per request, run three times: the always-resident requests (the list's
+//   first VSM_STATE_RESIDENT entries, phase 0), the other coarse requests (phase 1), then the rest.
 //   A requested entry with a page keeps it (a scrolled or uncached one is re-rendered there, not
 //   reallocated); a new request takes the next free-list page, clearing the entry of a cached page
 //   it takes; past the end of the list the entry gets VSM_ENTRY_OVERFLOW.
@@ -215,7 +216,8 @@ void main() {
 	uint index = requests.data[i];
 	uint entry = vsm_page_table.entries[index];
 	bool coarse = (entry & VSM_ENTRY_COARSE) != 0u;
-	if (coarse != (params.phase == 0u)) {
+	uint phase = i < min(state.data[VSM_STATE_RESIDENT], params.request_capacity) ? 0u : (coarse ? 1u : 2u);
+	if (phase != params.phase) {
 		return;
 	}
 	uint map = index / VSM_ENTRIES_PER_MAP;
@@ -237,6 +239,9 @@ void main() {
 	if (slot >= state.data[VSM_STATE_AVAILABLE]) {
 		vsm_page_table.entries[index] = entry | VSM_ENTRY_OVERFLOW;
 		vsm_count(VSM_STATE_OVERFLOW);
+		if (phase == 0u) {
+			vsm_count(VSM_STATE_RESIDENT_OVERFLOW);
+		}
 		return;
 	}
 	uint p = free_list.data[slot];
@@ -371,6 +376,7 @@ void main() {
 		state.data[VSM_STATE_TOTAL_OVERFLOW] += overflow;
 		state.data[VSM_STATE_OVERFLOW_VIEWS] += overflow > 0u ? 1u : 0u;
 		state.data[VSM_STATE_TOTAL_DROPPED] += state.data[VSM_STATE_REQUESTS_DROPPED];
+		state.data[VSM_STATE_TOTAL_RESIDENT_OVERFLOW] += state.data[VSM_STATE_RESIDENT_OVERFLOW];
 		state.data[VSM_STATE_VIEWS] += 1u;
 		state.data[VSM_STATE_BIAS_FRAME] = params.frame + 1u;
 		indirect.data[VSM_INDIRECT_DIRECTIONAL] = totals[0];

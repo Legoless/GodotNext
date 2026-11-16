@@ -21,12 +21,15 @@ extends Node3D
 ##   dangling entry, every request served or flagged OVERFLOW), the dirty-page list and its indirect
 ##   arguments, the page clear (the pool is filled with a non-zero value before allocation: the
 ##   layers each dirty page names must read 0 after the clear pass, every other texel the fill
-##   value), and the overflow bias.
+##   value), the overflow bias, and sampling (every pixel request must find a mapped page, at its
+##   requested mip or at an always-resident coarse fallback page). Pose 7 turns volumetric fog and
+##   the transparent box off so that only the always-resident pass marks coarse pages there.
 ## Across the captures, pages must be newly allocated, put in the dirty list (directional ones too),
 ## cleared and orphaned; with the default pool, dropped as well.
 ## With --expect-overflow=true (run it with GODOT_DEV_VSM=25%, a quarter of the default pool) the
-## pool must overflow (the OVERFLOW counter is non-zero) and some map must take an overflow bias,
-## with every invariant still holding: no corrupted page.
+## pool must overflow (the OVERFLOW counter is non-zero), some map must take an overflow bias,
+## overflowed pixel requests must fall back to coarse pages with 0 sampled-but-unmapped pages, and
+## every invariant must still hold: no corrupted page.
 ## With --expect-active=false (GODOT_DEV_VSM unset) VSM must mark nothing.
 ##
 ## It prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure.
@@ -64,11 +67,21 @@ var _armed_frame := -1
 var _armed_kind := ""
 var _captures := 0
 var _camera: Camera3D
+var _environment: Environment
+var _glass: MeshInstance3D
+var _far_glass: MeshInstance3D
 var _sun: DirectionalLight3D
 var _omni: Array[OmniLight3D] = []
 var _totals := {"new": 0, "dirty": 0, "dirty_directional": 0, "evicted": 0, "orphaned": 0, "stolen": 0, "kept": 0, "handed_out_cached": 0}
 var _cleared_pages := 0
 var _clear_checks := 0
+var _sampled_pages := 0
+var _sampled_fallback := 0
+var _sampled_unmapped := 0
+var _coarse_sampled := 0
+var _coarse_receiver_unmapped := 0
+var _coarse_unmapped := 0
+var _without_coarse_unmapped := 0
 var _failures := PackedStringArray()
 var _result := {}
 var _poses: Array = []
@@ -88,14 +101,14 @@ func _ready() -> void:
 
 
 func _build_scene() -> void:
-	var environment := Environment.new()
-	environment.background_mode = Environment.BG_COLOR
-	environment.background_color = Color(0.2, 0.25, 0.3)
-	environment.volumetric_fog_enabled = true
-	environment.volumetric_fog_density = 0.02
-	environment.volumetric_fog_length = 40.0
+	_environment = Environment.new()
+	_environment.background_mode = Environment.BG_COLOR
+	_environment.background_color = Color(0.2, 0.25, 0.3)
+	_environment.volumetric_fog_enabled = true
+	_environment.volumetric_fog_density = 0.02
+	_environment.volumetric_fog_length = 40.0
 	var world := WorldEnvironment.new()
-	world.environment = environment
+	world.environment = _environment
 	add_child(world)
 
 	var floor_mesh := MeshInstance3D.new()
@@ -114,16 +127,16 @@ func _build_scene() -> void:
 		box.rotation.y = rng.randf_range(0.0, TAU)
 		add_child(box)
 	# A transparent box: its world box requests coarse pages.
-	var glass := MeshInstance3D.new()
+	_glass = MeshInstance3D.new()
 	var glass_mesh := BoxMesh.new()
 	glass_mesh.size = Vector3(1.5, 2.0, 0.2)
-	glass.mesh = glass_mesh
+	_glass.mesh = glass_mesh
 	var glass_material := StandardMaterial3D.new()
 	glass_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	glass_material.albedo_color = Color(0.6, 0.8, 1.0, 0.35)
-	glass.material_override = glass_material
-	glass.position = Vector3(-1.5, 1.0, 1.5)
-	add_child(glass)
+	_glass.material_override = glass_material
+	_glass.position = Vector3(-1.5, 1.0, 1.5)
+	add_child(_glass)
 
 	_camera = Camera3D.new()
 	add_child(_camera)
@@ -133,6 +146,15 @@ func _build_scene() -> void:
 	_sun.shadow_enabled = true
 	_sun.rotation_degrees = Vector3(-55.0, 35.0, 0.0)
 	add_child(_sun)
+	# A second transparent box in the sun's coarsest clipmap level's far strip against the sky (no opaque
+	# pixel behind it): only MODE_BOX's far-strip coarse request covers it.
+	_far_glass = MeshInstance3D.new()
+	var far_glass_mesh := BoxMesh.new()
+	far_glass_mesh.size = Vector3(1.0, 1.0, 1.0)
+	_far_glass.mesh = far_glass_mesh
+	_far_glass.material_override = glass_material
+	_far_glass.position = _sun.transform.basis.x.normalized() * 114.0 + Vector3(0.0, 12.0, 0.0)
+	add_child(_far_glass)
 	var spot := SpotLight3D.new()
 	spot.shadow_enabled = true
 	spot.position = Vector3(-3.0, 5.0, -2.0)
@@ -178,6 +200,10 @@ func _process(_delta: float) -> void:
 		"poses":
 			_pose_frame += 1
 			if _pose_frame == 1:
+				var fog_and_alpha := _pose + 1 < POSES.size()
+				_environment.volumetric_fog_enabled = fog_and_alpha
+				_glass.visible = fog_and_alpha
+				_far_glass.visible = fog_and_alpha
 				_camera.position = POSES[_pose][0]
 				_camera.look_at(POSES[_pose][1])
 				_arm("pose %d move" % _pose)
@@ -187,6 +213,9 @@ func _process(_delta: float) -> void:
 				_pose += 1
 				_pose_frame = 0
 				if _pose >= POSES.size():
+					_environment.volumetric_fog_enabled = true
+					_glass.visible = true
+					_far_glass.visible = true
 					_camera.position = POSES[0][0]
 					_camera.look_at(POSES[0][1])
 					_next("hold")
@@ -239,6 +268,8 @@ func _record(p_check: Dictionary, p_kind: String) -> void:
 		"dirty": dirty,
 		"bias": p_check.get("bias", {}),
 		"clear": p_check.get("clear", {}),
+		"resident": p_check.get("resident", {}),
+		"sample": p_check.get("sample", {}),
 	}
 	_poses.append(pose)
 	for failure in p_check.get("failures", PackedStringArray()):
@@ -253,6 +284,14 @@ func _record(p_check: Dictionary, p_kind: String) -> void:
 	if bool(clear.get("checked", false)):
 		_clear_checks += 1
 		_cleared_pages += int(clear.get("cleared_pages", 0))
+	var sample: Dictionary = p_check.get("sample", {})
+	_sampled_pages += int(sample.get("sampled", 0))
+	_sampled_fallback += int(sample.get("fallback", 0))
+	_sampled_unmapped += int(sample.get("unmapped", 0))
+	_coarse_sampled += int(sample.get("coarse_sampled", 0))
+	_coarse_receiver_unmapped += int(sample.get("coarse_receiver_unmapped", 0))
+	_coarse_unmapped += int(sample.get("coarse_unmapped", 0))
+	_without_coarse_unmapped += int(sample.get("without_coarse_unmapped", 0))
 	var bias: Dictionary = p_check.get("bias", {})
 	_max_biased = maxi(_max_biased, int(bias.get("biased_maps", 0)))
 	var pages: Dictionary = info.get("pages", {})
@@ -294,11 +333,29 @@ func _check_end() -> void:
 	_result["max_biased_maps"] = _max_biased
 	_result["total_overflow"] = int(pages.get("total_overflow", 0))
 	_result["overflow_views"] = int(pages.get("overflow_views", 0))
+	_result["total_resident_overflow"] = int(pages.get("total_resident_overflow", 0))
+	_result["sampled_pages"] = _sampled_pages
+	_result["sampled_fallback"] = _sampled_fallback
+	_result["sampled_unmapped"] = _sampled_unmapped
+	_result["coarse_sampled"] = _coarse_sampled
+	_result["coarse_receiver_unmapped"] = _coarse_receiver_unmapped
+	_result["coarse_unmapped"] = _coarse_unmapped
+	_result["without_coarse_unmapped"] = _without_coarse_unmapped
+	if _sampled_pages == 0:
+		_failures.append("no pixel shadow request was sampled")
+	if _sampled_unmapped != 0:
+		_failures.append("%d of %d sampled pixel requests found no mapped page" % [_sampled_unmapped, _sampled_pages])
+	if _coarse_sampled == 0 or _coarse_receiver_unmapped != 0:
+		_failures.append("%d of %d coarse froxel/box lookups found no mapped page" % [_coarse_receiver_unmapped, _coarse_sampled])
+	if _coarse_unmapped != 0 or int(pages.get("total_resident_overflow", 0)) != 0:
+		_failures.append("%d coarse and %d resident requests went without a page" % [_coarse_unmapped, int(pages.get("total_resident_overflow", 0))])
 	if _expect_overflow:
 		if int(pages.get("total_overflow", 0)) == 0:
 			_failures.append("the pool of %d pages never overflowed" % int(info.get("pool_pages", 0)))
 		if _max_biased == 0:
 			_failures.append("no map took an overflow bias")
+		if _sampled_fallback == 0 or _without_coarse_unmapped == 0:
+			_failures.append("overflowed views saw %d fallback samples and %d unmapped without coarse pages" % [_sampled_fallback, _without_coarse_unmapped])
 	if int(pages.get("total_dropped", 0)) != 0:
 		_failures.append("%d requests found the request list full" % int(pages.get("total_dropped", 0)))
 

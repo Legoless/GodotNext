@@ -145,15 +145,19 @@ TEST_CASE("[VSM] Marking and allocation constants and their GLSL defines") {
 	CHECK(std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT) == VSM::CLIPMAP_LEVEL0_EXTENT / float(VSM::VIRTUAL_SIZE));
 	const String defines = VSM::get_glsl_defines();
 	CHECK(defines.contains("#define VSM_COARSE_FIRST_MIP 5u"));
+	CHECK(defines.contains("#define VSM_CLIPMAP_RESIDENT_MIP 4u"));
 	CHECK(defines.contains("#define VSM_CLIPMAP_TEXEL0_EXPONENT (-10)"));
 	CHECK(defines.contains("#define VSM_MAP_KIND_NONE 4u"));
-	CHECK(defines.contains("#define VSM_STATE_SINK 16u"));
+	CHECK(defines.contains("#define VSM_STATE_RESIDENT 16u"));
+	CHECK(defines.contains("#define VSM_STATE_RESIDENT_OVERFLOW 17u"));
+	CHECK(defines.contains("#define VSM_STATE_SINK 18u"));
 	CHECK(defines.contains("#define VSM_STATE_TOTAL_OVERFLOW 32u"));
 	CHECK(defines.contains("#define VSM_MAP_STATE_BIAS 4u"));
 	CHECK(defines.contains("#define VSM_INDIRECT_ALL 6u"));
 	CHECK(defines.contains("#define VSM_STATE_BIAS_FRAME " + itos(VSM::STATE_BIAS_FRAME) + "u"));
+	CHECK(defines.contains("#define VSM_STATE_TOTAL_RESIDENT_OVERFLOW " + itos(VSM::STATE_TOTAL_RESIDENT_OVERFLOW) + "u"));
 	CHECK(defines.contains("#define VSM_OVERFLOW_BIAS_RAISED 65536u"));
-	CHECK(VSM::STATE_BIAS_FRAME < VSM::STATE_BUCKETS);
+	CHECK(VSM::STATE_TOTAL_RESIDENT_OVERFLOW < VSM::STATE_BUCKETS);
 	CHECK(defines.contains("#define VSM_ENTRY_DIRTY_MASK " + itos(VSM::ENTRY_DIRTY_MASK) + "u"));
 }
 
@@ -346,26 +350,30 @@ TEST_CASE("[VSM] Directional and local requests: levels, mips, overflow bias and
 	requests.clear();
 	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, Vector3(500.0f, 0.0f, 0.7f), std::ldexp(1.0f, -10), 0, false, requests);
 	CHECK(requests.is_empty());
-	// Coarse: each coarse mip in the finest level whose window holds the point at that mip. Here the
-	// point is in level 0's mip 5 window; mip 6's single page covers an aligned half of each level that
-	// misses this point in every level (origins of -28, -30, -31 and -32 pages).
+	// Coarse: each coarse mip from CLIPMAP_RESIDENT_MIP in the finest level whose window holds the
+	// point at that mip (plus the coarsest in-window mip < CLIPMAP_RESIDENT_MIP in the last level's
+	// far strip). Here the point is in level 0's mip 4 and mip 5 windows; mip 6's single page covers
+	// an aligned half of each level that misses this point in every level.
 	requests.clear();
 	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, near_point, 1.0f, 0, true, requests);
-	REQUIRE(requests.size() == 1);
-	CHECK((requests[0] & VSM::REQUEST_COARSE) != 0);
-	CHECK(uint32_t(requests[0]) / VSM::ENTRIES_PER_MAP == 0);
-	CHECK(uint32_t(requests[0]) % VSM::ENTRIES_PER_MAP >= VSM::mip_entry_offset(VSM::COARSE_FIRST_MIP));
-	CHECK(uint32_t(requests[0]) % VSM::ENTRIES_PER_MAP < VSM::mip_entry_offset(VSM::COARSE_FIRST_MIP + 1));
+	REQUIRE(requests.size() == 2);
+	for (uint32_t m = 0; m < 2; m++) {
+		const uint32_t mip = VSM::CLIPMAP_RESIDENT_MIP + m;
+		CHECK((requests[m] & VSM::REQUEST_COARSE) != 0);
+		CHECK(uint32_t(requests[m]) / VSM::ENTRIES_PER_MAP == 0);
+		CHECK(uint32_t(requests[m]) % VSM::ENTRIES_PER_MAP >= VSM::mip_entry_offset(mip));
+		CHECK(uint32_t(requests[m]) % VSM::ENTRIES_PER_MAP < VSM::mip_entry_offset(mip + 1));
+	}
 	// The same rule, brute force over the levels, for points around the camera.
 	RandomPCG rng(21900);
 	uint32_t coarse_mismatches = 0;
 	for (uint32_t i = 0; i < 1024; i++) {
-		const Vector3 point(camera.x + rng.randf() * 200.0f - 100.0f, 0.0f, camera.z + rng.randf() * 200.0f - 100.0f);
+		const Vector3 point(camera.x + rng.randf() * 260.0f - 130.0f, 0.0f, camera.z + rng.randf() * 260.0f - 130.0f);
 		requests.clear();
 		VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, point, 1.0f, 0, true, requests);
 		const Vector2i texel0 = VSM::clipmap_texel0(maps[0], point);
 		uint32_t expected = 0;
-		for (uint32_t mip = VSM::COARSE_FIRST_MIP; mip < VSM::MIP_COUNT; mip++) {
+		for (uint32_t mip = VSM::CLIPMAP_RESIDENT_MIP; mip < VSM::MIP_COUNT; mip++) {
 			for (uint32_t level = 0; level < 7; level++) {
 				const Vector2i level_texel = VSM::clipmap_level_texel(texel0, level);
 				if (VSM::clipmap_in_window(Vector2i(maps[level].origin[0], maps[level].origin[1]), level_texel, mip)) {
@@ -376,6 +384,18 @@ TEST_CASE("[VSM] Directional and local requests: levels, mips, overflow bias and
 					break;
 				}
 			}
+		}
+		const Vector2i last_origin(maps[6].origin[0], maps[6].origin[1]);
+		const Vector2i last_texel = VSM::clipmap_level_texel(texel0, 6);
+		if (VSM::clipmap_in_window(last_origin, last_texel, 0) && !VSM::clipmap_in_window(last_origin, last_texel, VSM::CLIPMAP_RESIDENT_MIP)) {
+			uint32_t resident = 0;
+			while (resident + 1 < VSM::CLIPMAP_RESIDENT_MIP && VSM::clipmap_in_window(last_origin, last_texel, resident + 1)) {
+				resident++;
+			}
+			const Vector2i page = VSM::clipmap_page(last_texel, resident);
+			const uint64_t key = uint64_t(VSM::entry_index(6, resident, uint32_t(page.x), uint32_t(page.y))) | VSM::REQUEST_COARSE;
+			coarse_mismatches += requests.find(key) < 0 ? 1 : 0;
+			expected++;
 		}
 		coarse_mismatches += requests.size() != expected ? 1 : 0;
 	}
@@ -788,6 +808,504 @@ TEST_CASE("[VSM] Overflow bias counts frames, not views") {
 	state = VSM::overflow_bias_update(state, 50, 100, 0, true);
 	CHECK(VSM::overflow_bias(state) == 2); // One frame into a new wait of 30.
 	CHECK(((state >> 8) & 0xFFu) == 1);
+}
+
+TEST_CASE("[VSM] Always-resident coarse pages: root page per face and mips 4 to 6 per clipmap level") {
+	const uint32_t table_maps = 20;
+	LocalVector<VSM::MapData> maps;
+	maps.resize(table_maps);
+	const Basis sun;
+	for (uint32_t level = 0; level < 7; level++) {
+		maps[level] = VSM::map_data_clipmap(sun, level, Vector2i(-32, -32), 100.0f);
+	}
+	const Transform3D xform(Basis(), Vector3(1.0f, 2.0f, 3.0f));
+	maps[7] = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, xform, 10.0f, 30.0f);
+	for (uint32_t face = 0; face < 6; face++) {
+		maps[8 + face] = VSM::map_data_face(VSM::MAP_KIND_OMNI, face, xform, 10.0f, 0.0f);
+	}
+	for (uint32_t face = 0; face < 5; face++) {
+		maps[14 + face] = VSM::map_data_face(VSM::MAP_KIND_AREA, face, xform, 10.0f, 0.0f);
+	}
+	// maps[19] stays MAP_KIND_MAX (unowned).
+
+	LocalVector<uint64_t> requests;
+	VSM::mark_resident(maps.ptr(), table_maps, 0, VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 7), requests);
+	// 16 + 4 + 1 = 21 coarse entries per clipmap level.
+	CHECK(requests.size() == 7 * 21);
+	for (uint64_t r : requests) {
+		CHECK((r & VSM::REQUEST_COARSE) != 0);
+		const uint32_t local = uint32_t(r) % VSM::ENTRIES_PER_MAP;
+		CHECK(local >= VSM::mip_entry_offset(VSM::CLIPMAP_RESIDENT_MIP));
+	}
+
+	requests.clear();
+	VSM::mark_resident(maps.ptr(), table_maps, 7, VSM::light_flags(VSM::MAP_KIND_SPOT, 1), requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] == (uint64_t(VSM::entry_index(7, VSM::MIP_COUNT - 1, 0, 0)) | VSM::REQUEST_COARSE));
+
+	requests.clear();
+	VSM::mark_resident(maps.ptr(), table_maps, 8, VSM::light_flags(VSM::MAP_KIND_OMNI, 6), requests);
+	REQUIRE(requests.size() == 6);
+	for (uint32_t face = 0; face < 6; face++) {
+		CHECK(requests[face] == (uint64_t(VSM::entry_index(8 + face, VSM::MIP_COUNT - 1, 0, 0)) | VSM::REQUEST_COARSE));
+	}
+
+	requests.clear();
+	VSM::mark_resident(maps.ptr(), table_maps, 14, VSM::light_flags(VSM::MAP_KIND_AREA, 5), requests);
+	REQUIRE(requests.size() == 5);
+
+	// MAP_NONE, past table_maps, or an unowned map marks nothing.
+	requests.clear();
+	VSM::mark_resident(maps.ptr(), table_maps, VSM::MAP_NONE, VSM::light_flags(VSM::MAP_KIND_OMNI, 6), requests);
+	VSM::mark_resident(maps.ptr(), table_maps, 19, VSM::light_flags(VSM::MAP_KIND_SPOT, 1), requests);
+	VSM::mark_resident(maps.ptr(), table_maps, 20, VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 4), requests);
+	CHECK(requests.is_empty());
+}
+
+TEST_CASE("[VSM] Allocation serves resident pages first, then other coarse requests, and never evicts active resident pages") {
+	AllocationFixture fixture(4, 2);
+	const uint32_t cache = 8;
+	// List: 2 resident requests [0..2), 3 other coarse requests (indices 10, 11, 12), 3 fine requests (20, 21, 22).
+	// Even if fine requests appear earlier than phase-1 coarse requests after the resident prefix,
+	// phase 0 gets 2 pages, phase 1 gets the remaining 2 pages, and phase 2 gets none.
+	LocalVector<uint32_t> requests;
+	const uint32_t res0 = VSM::entry_index(0, VSM::MIP_COUNT - 1, 0, 0);
+	const uint32_t res1 = VSM::entry_index(0, VSM::MIP_COUNT - 2, 0, 0);
+	requests.push_back(res0);
+	requests.push_back(res1);
+	requests.push_back(20);
+	requests.push_back(21);
+	requests.push_back(10);
+	requests.push_back(11);
+	requests.push_back(12);
+	requests.push_back(22);
+	for (uint32_t r : requests) {
+		fixture.table[r] |= VSM::ENTRY_REQUESTED;
+	}
+	fixture.table[res0] |= VSM::ENTRY_COARSE;
+	fixture.table[res1] |= VSM::ENTRY_COARSE;
+	fixture.table[10] |= VSM::ENTRY_COARSE;
+	fixture.table[11] |= VSM::ENTRY_COARSE;
+	fixture.table[12] |= VSM::ENTRY_COARSE;
+	VSM::AllocationCounts counts = VSM::allocate_model(fixture.table.ptr(), fixture.table.size(), fixture.pages.ptr(), fixture.pages.size(), fixture.width, requests.ptr(), requests.size(), 1, cache, 2);
+	for (uint32_t r : requests) {
+		fixture.table[r] = VSM::entry_after_emit(fixture.table[r]);
+	}
+	CHECK(counts.new_pages == 4);
+	CHECK(counts.overflow == 4);
+	CHECK(counts.resident_overflow == 0);
+	CHECK(fixture.page_of(res0) != UINT32_MAX);
+	CHECK(fixture.page_of(res1) != UINT32_MAX);
+	CHECK(fixture.page_of(10) != UINT32_MAX);
+	CHECK(fixture.page_of(11) != UINT32_MAX);
+	CHECK(fixture.page_of(12) == UINT32_MAX);
+	CHECK(fixture.page_of(20) == UINT32_MAX);
+	CHECK(fixture.consistent());
+
+	// Next frame with 6 new fine requests overflowing the 4-page pool: the two active resident pages
+	// keep their physical pages and are never stolen or evicted; the two unrequested cached pages are stolen.
+	const uint32_t p0 = fixture.page_of(res0);
+	const uint32_t p1 = fixture.page_of(res1);
+	LocalVector<uint32_t> frame2;
+	frame2.push_back(res0);
+	frame2.push_back(res1);
+	for (uint32_t i = 30; i < 36; i++) {
+		frame2.push_back(i);
+	}
+	for (uint32_t r : frame2) {
+		fixture.table[r] |= VSM::ENTRY_REQUESTED;
+	}
+	fixture.table[res0] |= VSM::ENTRY_COARSE;
+	fixture.table[res1] |= VSM::ENTRY_COARSE;
+	counts = VSM::allocate_model(fixture.table.ptr(), fixture.table.size(), fixture.pages.ptr(), fixture.pages.size(), fixture.width, frame2.ptr(), frame2.size(), 2, cache, 2);
+	for (uint32_t r : frame2) {
+		fixture.table[r] = VSM::entry_after_emit(fixture.table[r]);
+	}
+	CHECK(counts.kept == 2);
+	CHECK(counts.stolen == 2);
+	CHECK(counts.overflow == 4);
+	CHECK(counts.resident_overflow == 0);
+	CHECK(fixture.page_of(res0) == p0);
+	CHECK(fixture.page_of(res1) == p1);
+	CHECK(fixture.consistent());
+
+	// When the pool has fewer pages than the resident requests themselves, resident_overflow counts them.
+	AllocationFixture tiny(1, 1);
+	LocalVector<uint32_t> three_res;
+	three_res.push_back(res0);
+	three_res.push_back(res1);
+	three_res.push_back(10);
+	for (uint32_t r : three_res) {
+		tiny.table[r] |= VSM::ENTRY_REQUESTED | VSM::ENTRY_COARSE;
+	}
+	counts = VSM::allocate_model(tiny.table.ptr(), tiny.table.size(), tiny.pages.ptr(), tiny.pages.size(), tiny.width, three_res.ptr(), three_res.size(), 1, cache, 3);
+	CHECK(counts.new_pages == 1);
+	CHECK(counts.overflow == 2);
+	CHECK(counts.resident_overflow == 2);
+}
+
+TEST_CASE("[VSM] Overflow sampling: resident pages and the last level's far-edge fallback leave zero unmapped samples") {
+	// 1. Local lights (spot, omni, area): even when every fine request overflows and only mark_resident
+	// pages are mapped, every pixel request hits its face's root page.
+	{
+		const uint32_t table_maps = 12;
+		LocalVector<VSM::MapData> maps;
+		maps.resize(table_maps);
+		const Transform3D xform(Basis::from_euler(Vector3(0.4f, -0.6f, 0.1f)), Vector3(2.0f, 3.0f, -1.0f));
+		maps[0] = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, xform, 15.0f, 40.0f);
+		for (uint32_t face = 0; face < 6; face++) {
+			maps[1 + face] = VSM::map_data_face(VSM::MAP_KIND_OMNI, face, xform, 15.0f, 0.0f);
+		}
+		for (uint32_t face = 0; face < 5; face++) {
+			maps[7 + face] = VSM::map_data_face(VSM::MAP_KIND_AREA, face, xform, 15.0f, 0.0f);
+		}
+		VSM::MarkLight lights[3];
+		lights[0].kind = VSM::MAP_KIND_SPOT;
+		lights[0].map_base = 0;
+		lights[0].flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+		lights[1].kind = VSM::MAP_KIND_OMNI;
+		lights[1].map_base = 1;
+		lights[1].flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6);
+		lights[2].kind = VSM::MAP_KIND_AREA;
+		lights[2].map_base = 7;
+		lights[2].flags = VSM::light_flags(VSM::MAP_KIND_AREA, 5);
+
+		LocalVector<uint32_t> table;
+		table.resize(table_maps * VSM::ENTRIES_PER_MAP);
+		memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+		LocalVector<uint32_t> empty_table(table);
+		LocalVector<uint64_t> resident;
+		for (const VSM::MarkLight &l : lights) {
+			VSM::mark_resident(maps.ptr(), table_maps, l.map_base, l.flags, resident);
+		}
+		REQUIRE(resident.size() == 12);
+		for (uint64_t r : resident) {
+			table[uint32_t(r)] = VSM::entry_pack(1, 1, VSM::ENTRY_ALLOCATED);
+		}
+
+		VSM::SampleCheck sample;
+		sample.table = table.ptr();
+		VSM::SampleCheck mutant;
+		mutant.table = empty_table.ptr();
+		RandomPCG rng(21940);
+		LocalVector<uint64_t> requests;
+		for (uint32_t i = 0; i < 4096; i++) {
+			const Vector3 dir = Vector3(rng.randf() * 2.0f - 1.0f, rng.randf() * 2.0f - 1.0f, rng.randf() * 2.0f - 1.0f).normalized();
+			const Vector3 world = xform.origin + dir * (0.2f + rng.randf() * 14.0f);
+			const float footprint = 0.001f + rng.randf() * 0.05f;
+			for (const VSM::MarkLight &l : lights) {
+				requests.clear();
+				VSM::mark_local_point(maps.ptr(), table_maps, nullptr, l, world, footprint, 0, false, false, requests, &sample);
+				requests.clear();
+				VSM::mark_local_point(maps.ptr(), table_maps, nullptr, l, world, footprint, 0, false, false, requests, &mutant);
+			}
+		}
+		CHECK(sample.sampled > 4000);
+		CHECK(sample.fallback > 0);
+		CHECK(sample.unmapped == 0);
+		CHECK(mutant.unmapped == sample.sampled);
+	}
+
+	// 2. Directional clipmaps: adversarial camera positions, 1 to 16 levels, overflow biases 0 to 3,
+	// and points both near the camera and in the last level's far strip outside mip 4's window.
+	{
+		const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f));
+		LocalVector<VSM::MapData> maps;
+		maps.resize(VSM::CLIPMAP_MAX_LEVELS);
+		LocalVector<uint32_t> bias;
+		bias.resize(VSM::CLIPMAP_MAX_LEVELS);
+		LocalVector<uint32_t> table;
+		table.resize(VSM::CLIPMAP_MAX_LEVELS * VSM::ENTRIES_PER_MAP);
+		LocalVector<uint32_t> table_no_mip4;
+		table_no_mip4.resize(table.size());
+		LocalVector<uint32_t> table_no_far;
+		table_no_far.resize(table.size());
+
+		RandomPCG rng(21941);
+		uint32_t sampled = 0;
+		uint32_t fallbacks = 0;
+		uint32_t unmapped = 0;
+		uint32_t unbiased_unmapped = 0;
+		uint32_t mutant_no_mip4_unmapped = 0;
+		uint32_t mutant_no_far_unmapped = 0;
+		LocalVector<uint64_t> resident;
+		LocalVector<uint64_t> requests;
+
+		for (uint32_t trial = 0; trial < 4096; trial++) {
+			const uint32_t count = 1 + rng.rand(VSM::CLIPMAP_MAX_LEVELS);
+			const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+			Vector2 center(rng.randf() * 2000.0f - 1000.0f, rng.randf() * 2000.0f - 1000.0f);
+			if ((trial & 3) == 0) {
+				// Adversarial camera origins with large remainder modulo 16 and 32.
+				const float page0 = VSM::clipmap_page_world_size(0);
+				center = Vector2(-page0 * float(1 + int32_t(rng.rand(64))), page0 * float(63 - int32_t(rng.rand(16))));
+			}
+			for (uint32_t level = 0; level < count; level++) {
+				maps[level] = VSM::map_data_clipmap(sun, level, VSM::clipmap_level_origin(center, level), 1.0e6f);
+				bias[level] = rng.rand(VSM::OVERFLOW_MAX_BIAS + 1);
+			}
+			// Pick a world point inside either a random level or the last level's far strip.
+			const uint32_t pick = (trial & 1) ? (count - 1) : rng.rand(count);
+			const Vector2i o(maps[pick].origin[0], maps[pick].origin[1]);
+			const float page_m = VSM::clipmap_page_world_size(pick);
+			const int32_t wp_x = (trial & 1) ? int32_t(48 + rng.rand(16)) : int32_t(rng.rand(VSM::PAGES_PER_SIDE));
+			const int32_t wp_y = (trial & 1) ? int32_t(48 + rng.rand(16)) : int32_t(rng.rand(VSM::PAGES_PER_SIDE));
+			const float lx = (float(o.x + wp_x) + 0.25f + 0.5f * rng.randf()) * page_m;
+			const float ly = (float(o.y + wp_y) + 0.25f + 0.5f * rng.randf()) * page_m;
+			// sun looks straight down (-90 deg around X): light X is world +X, light Y is world -Z.
+			const Vector3 world(lx, 0.0f, -ly);
+			const float footprint = std::ldexp(1.0f, int32_t(rng.rand(24)) - 12);
+			const int32_t lod_bias = int32_t(rng.rand(5)) - 2;
+
+			resident.clear();
+			VSM::mark_resident(maps.ptr(), count, 0, flags, resident);
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, bias.ptr(), 0, flags, world, footprint, lod_bias, false, requests);
+			if (requests.is_empty()) {
+				continue;
+			}
+
+			memset(table.ptr(), 0, count * VSM::ENTRIES_PER_MAP * sizeof(uint32_t));
+			memset(table_no_mip4.ptr(), 0, count * VSM::ENTRIES_PER_MAP * sizeof(uint32_t));
+			memset(table_no_far.ptr(), 0, count * VSM::ENTRIES_PER_MAP * sizeof(uint32_t));
+			for (uint64_t r : resident) {
+				const uint32_t idx = uint32_t(r);
+				table[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				table_no_far[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				const uint32_t in_map = idx % VSM::ENTRIES_PER_MAP;
+				if (in_map >= VSM::mip_entry_offset(VSM::CLIPMAP_RESIDENT_MIP + 1)) {
+					table_no_mip4[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				}
+			}
+			// Allocate coarse requests from mark_directional_point (the last level's far-edge fallback),
+			// leaving every fine request overflowed.
+			for (uint64_t r : requests) {
+				if (r & VSM::REQUEST_COARSE) {
+					const uint32_t idx = uint32_t(r);
+					table[idx] = VSM::entry_pack(2, 0, VSM::ENTRY_ALLOCATED);
+					table_no_mip4[idx] = VSM::entry_pack(2, 0, VSM::ENTRY_ALLOCATED);
+				}
+			}
+
+			VSM::SampleCheck s_ok;
+			s_ok.table = table.ptr();
+			VSM::SampleCheck s_no_mip4;
+			s_no_mip4.table = table_no_mip4.ptr();
+			VSM::SampleCheck s_no_far;
+			s_no_far.table = table_no_far.ptr();
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, bias.ptr(), 0, flags, world, footprint, lod_bias, false, requests, &s_ok);
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, bias.ptr(), 0, flags, world, footprint, lod_bias, false, requests, &s_no_mip4);
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, bias.ptr(), 0, flags, world, footprint, lod_bias, false, requests, &s_no_far);
+			sampled += s_ok.sampled;
+			fallbacks += s_ok.fallback;
+			unmapped += s_ok.unmapped;
+			mutant_no_mip4_unmapped += s_no_mip4.unmapped;
+			mutant_no_far_unmapped += s_no_far.unmapped;
+
+			// Also verify unbiased projection (without p_map_bias, as #222 looks up).
+			VSM::SampleCheck s_unbiased;
+			s_unbiased.table = table.ptr();
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, nullptr, 0, flags, world, footprint, lod_bias, false, requests, &s_unbiased);
+			unbiased_unmapped += s_unbiased.unmapped;
+		}
+		CHECK(sampled > 3000);
+		CHECK(fallbacks > 0);
+		CHECK(unmapped == 0);
+		CHECK(unbiased_unmapped == 0);
+		CHECK(mutant_no_mip4_unmapped > 0);
+		CHECK(mutant_no_far_unmapped > 0);
+	}
+}
+
+TEST_CASE("[VSM] Directional coarse marking and lookup cover (origin & 31) == 31 and the last level's far strip") {
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f));
+	// 1. Camera at (-0.05, -0.05): (origin & 31) == 31 across every level, so mips 5 and 6 end 1 page
+	// past the camera in every level and miss world.x = +5.0 m; mip 4 (CLIPMAP_RESIDENT_MIP) covers it,
+	// with zero pixel requests.
+	{
+		const uint32_t count = 7;
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+		LocalVector<VSM::MapData> maps;
+		maps.resize(count);
+		for (uint32_t level = 0; level < count; level++) {
+			maps[level] = VSM::map_data_clipmap(sun, level, VSM::clipmap_level_origin(Vector2(-0.05f, -0.05f), level), 100.0f);
+			CHECK((uint32_t(maps[level].origin[0]) & 31u) == 31u);
+		}
+		const Vector3 world(5.0f, 0.0f, 0.0f);
+		const Vector2i texel0 = VSM::clipmap_texel0(maps[0], world);
+		for (uint32_t level = 0; level < count; level++) {
+			const Vector2i origin(maps[level].origin[0], maps[level].origin[1]);
+			const Vector2i lt = VSM::clipmap_level_texel(texel0, level);
+			CHECK_FALSE(VSM::clipmap_in_window(origin, lt, 5));
+			CHECK_FALSE(VSM::clipmap_in_window(origin, lt, 6));
+		}
+
+		LocalVector<uint64_t> froxel_requests;
+		VSM::mark_directional_point(maps.ptr(), count, nullptr, 0, flags, world, 1.0f, 0, true, froxel_requests);
+		REQUIRE(!froxel_requests.is_empty());
+
+		LocalVector<uint32_t> table;
+		table.resize(count * VSM::ENTRIES_PER_MAP);
+		memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+		for (uint64_t r : froxel_requests) {
+			table[uint32_t(r)] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+		}
+		const VSM::LookupResult froxel_hit = VSM::clipmap_coarse_sample(table.ptr(), count, maps.ptr(), 0, count, texel0);
+		CHECK(froxel_hit.valid);
+		CHECK(froxel_hit.mip == VSM::CLIPMAP_RESIDENT_MIP);
+
+		// Same for a transparent box at +5 m with zero pixel requests.
+		LocalVector<uint64_t> box_requests;
+		const AABB box(Vector3(4.8f, 0.5f, -0.2f), Vector3(0.4f, 0.4f, 0.4f));
+		VSM::mark_directional_box(maps.ptr(), count, 0, flags, box, box_requests);
+		REQUIRE(!box_requests.is_empty());
+		memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+		for (uint64_t r : box_requests) {
+			table[uint32_t(r)] = VSM::entry_pack(2, 0, VSM::ENTRY_ALLOCATED);
+		}
+		VSM::SampleCheck box_sample;
+		box_sample.table = table.ptr();
+		box_requests.clear();
+		VSM::mark_directional_box(maps.ptr(), count, 0, flags, box, box_requests, &box_sample);
+		CHECK(box_sample.sampled == 9);
+		CHECK(box_sample.unmapped == 0);
+	}
+
+	// 2. Adversarial trials across 1..16 levels, (origin & 31) == 31, and the last level's far strip
+	// ([64 - (origin mod 16), 64)) with ZERO pixel requests (sky behind fog froxels and transparent
+	// boxes) and all fine pages unallocated.
+	{
+		LocalVector<VSM::MapData> maps;
+		maps.resize(VSM::CLIPMAP_MAX_LEVELS);
+		LocalVector<uint32_t> table_froxel;
+		table_froxel.resize(VSM::CLIPMAP_MAX_LEVELS * VSM::ENTRIES_PER_MAP);
+		LocalVector<uint32_t> table_box;
+		table_box.resize(table_froxel.size());
+		LocalVector<uint32_t> table_resident_only;
+		table_resident_only.resize(table_froxel.size());
+		LocalVector<uint32_t> table_no_mip4;
+		table_no_mip4.resize(table_froxel.size());
+
+		RandomPCG rng(21942);
+		uint32_t froxel_sampled = 0;
+		uint32_t froxel_unmapped = 0;
+		uint32_t froxel_no_far_unmapped = 0;
+		uint32_t froxel_no_mip4_unmapped = 0;
+		uint32_t box_sampled = 0;
+		uint32_t box_unmapped = 0;
+		uint32_t box_no_far_unmapped = 0;
+		uint32_t box_no_mip4_unmapped = 0;
+		LocalVector<uint64_t> resident;
+		LocalVector<uint64_t> requests;
+
+		for (uint32_t trial = 0; trial < 4096; trial++) {
+			const uint32_t count = 1 + rng.rand(VSM::CLIPMAP_MAX_LEVELS);
+			const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+			const float page0 = VSM::clipmap_page_world_size(0);
+			Vector2 center(rng.randf() * 1000.0f - 500.0f, rng.randf() * 1000.0f - 500.0f);
+			if ((trial & 1) == 0) {
+				// Force (origin & 31) == 31 across levels, or large origin mod 16.
+				center = Vector2(-page0 * float(1 + int32_t(rng.rand(4))), -page0 * float(1 + int32_t(rng.rand(16))));
+			}
+			for (uint32_t level = 0; level < count; level++) {
+				maps[level] = VSM::map_data_clipmap(sun, level, VSM::clipmap_level_origin(center, level), 1.0e6f);
+			}
+			const uint32_t pick = (trial % 3 != 0) ? (count - 1) : rng.rand(count);
+			const Vector2i o(maps[pick].origin[0], maps[pick].origin[1]);
+			const float page_m = VSM::clipmap_page_world_size(pick);
+			const int32_t wp_x = (trial % 3 == 1) ? int32_t(48 + rng.rand(16)) : ((trial % 3 == 2) ? int32_t(32 + rng.rand(17)) : int32_t(rng.rand(VSM::PAGES_PER_SIDE)));
+			const int32_t wp_y = (trial % 3 == 1) ? int32_t(48 + rng.rand(16)) : int32_t(rng.rand(VSM::PAGES_PER_SIDE));
+			const float lx = (float(o.x + wp_x) + 0.1f + 0.8f * rng.randf()) * page_m;
+			const float ly = (float(o.y + wp_y) + 0.1f + 0.8f * rng.randf()) * page_m;
+			const Vector3 world(lx, 2.0f, -ly);
+			const Vector3 box_size(page_m * (0.2f + 1.5f * rng.randf()), 1.0f, page_m * (0.2f + 1.5f * rng.randf()));
+			const AABB box(world - box_size * 0.5f, box_size);
+
+			resident.clear();
+			VSM::mark_resident(maps.ptr(), count, 0, flags, resident);
+			const size_t bytes = count * VSM::ENTRIES_PER_MAP * sizeof(uint32_t);
+			memset(table_froxel.ptr(), 0, bytes);
+			memset(table_box.ptr(), 0, bytes);
+			memset(table_resident_only.ptr(), 0, bytes);
+			memset(table_no_mip4.ptr(), 0, bytes);
+			for (uint64_t r : resident) {
+				const uint32_t idx = uint32_t(r);
+				table_froxel[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				table_box[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				table_resident_only[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				if ((idx % VSM::ENTRIES_PER_MAP) >= VSM::mip_entry_offset(VSM::CLIPMAP_RESIDENT_MIP + 1)) {
+					table_no_mip4[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				}
+			}
+
+			// Froxel marking only (zero pixel requests).
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, nullptr, 0, flags, world, 1.0f, 0, true, requests);
+			for (uint64_t r : requests) {
+				const uint32_t idx = uint32_t(r);
+				table_froxel[idx] = VSM::entry_pack(2, 0, VSM::ENTRY_ALLOCATED);
+				if ((idx % VSM::ENTRIES_PER_MAP) < VSM::mip_entry_offset(VSM::CLIPMAP_RESIDENT_MIP)) {
+					table_no_mip4[idx] = VSM::entry_pack(2, 0, VSM::ENTRY_ALLOCATED);
+				}
+			}
+			VSM::SampleCheck sf_ok{ table_froxel.ptr(), nullptr, 0, 0, 0, 0 };
+			VSM::SampleCheck sf_no_far{ table_resident_only.ptr(), nullptr, 0, 0, 0, 0 };
+			VSM::SampleCheck sf_no_mip4{ table_no_mip4.ptr(), nullptr, 0, 0, 0, 0 };
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, nullptr, 0, flags, world, 1.0f, 0, true, requests, &sf_ok);
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, nullptr, 0, flags, world, 1.0f, 0, true, requests, &sf_no_far);
+			requests.clear();
+			VSM::mark_directional_point(maps.ptr(), count, nullptr, 0, flags, world, 1.0f, 0, true, requests, &sf_no_mip4);
+			froxel_sampled += sf_ok.sampled;
+			froxel_unmapped += sf_ok.unmapped;
+			froxel_no_far_unmapped += sf_no_far.unmapped;
+			froxel_no_mip4_unmapped += sf_no_mip4.unmapped;
+
+			// Box marking only (zero pixel requests).
+			memset(table_no_mip4.ptr(), 0, bytes);
+			for (uint64_t r : resident) {
+				const uint32_t idx = uint32_t(r);
+				if ((idx % VSM::ENTRIES_PER_MAP) >= VSM::mip_entry_offset(VSM::CLIPMAP_RESIDENT_MIP + 1)) {
+					table_no_mip4[idx] = VSM::entry_pack(1, 0, VSM::ENTRY_ALLOCATED);
+				}
+			}
+			requests.clear();
+			VSM::mark_directional_box(maps.ptr(), count, 0, flags, box, requests);
+			for (uint64_t r : requests) {
+				const uint32_t idx = uint32_t(r);
+				table_box[idx] = VSM::entry_pack(3, 0, VSM::ENTRY_ALLOCATED);
+				if ((idx % VSM::ENTRIES_PER_MAP) < VSM::mip_entry_offset(VSM::CLIPMAP_RESIDENT_MIP)) {
+					table_no_mip4[idx] = VSM::entry_pack(3, 0, VSM::ENTRY_ALLOCATED);
+				}
+			}
+			VSM::SampleCheck sb_ok{ table_box.ptr(), nullptr, 0, 0, 0, 0 };
+			VSM::SampleCheck sb_no_far{ table_resident_only.ptr(), nullptr, 0, 0, 0, 0 };
+			VSM::SampleCheck sb_no_mip4{ table_no_mip4.ptr(), nullptr, 0, 0, 0, 0 };
+			requests.clear();
+			VSM::mark_directional_box(maps.ptr(), count, 0, flags, box, requests, &sb_ok);
+			requests.clear();
+			VSM::mark_directional_box(maps.ptr(), count, 0, flags, box, requests, &sb_no_far);
+			requests.clear();
+			VSM::mark_directional_box(maps.ptr(), count, 0, flags, box, requests, &sb_no_mip4);
+			box_sampled += sb_ok.sampled;
+			box_unmapped += sb_ok.unmapped;
+			box_no_far_unmapped += sb_no_far.unmapped;
+			box_no_mip4_unmapped += sb_no_mip4.unmapped;
+		}
+		CHECK(froxel_sampled > 3000);
+		CHECK(froxel_unmapped == 0);
+		CHECK(froxel_no_far_unmapped > 0);
+		CHECK(froxel_no_mip4_unmapped > 0);
+		CHECK(box_sampled > 20000);
+		CHECK(box_unmapped == 0);
+		CHECK(box_no_far_unmapped > 0);
+		CHECK(box_no_mip4_unmapped > 0);
+	}
 }
 
 } // namespace TestVirtualShadowMaps

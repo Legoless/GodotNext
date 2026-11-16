@@ -404,6 +404,9 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 			pages["cached"] = int64_t(state[STATE_CACHED]);
 			pages["max_map_requests"] = int64_t(state[STATE_MAX_MAP_REQUESTS]);
 			pages["biased_maps"] = int64_t(state[STATE_BIASED_MAPS]);
+			pages["resident"] = int64_t(state[STATE_RESIDENT]);
+			pages["resident_overflow"] = int64_t(state[STATE_RESIDENT_OVERFLOW]);
+			pages["total_resident_overflow"] = int64_t(state[STATE_TOTAL_RESIDENT_OVERFLOW]);
 			pages["total_overflow"] = int64_t(state[STATE_TOTAL_OVERFLOW]);
 			pages["overflow_views"] = int64_t(state[STATE_OVERFLOW_VIEWS]);
 			pages["total_dropped"] = int64_t(state[STATE_TOTAL_DROPPED]);
@@ -1040,6 +1043,7 @@ bool VirtualShadowMapStorage::_ensure_marking_shaders() {
 	mark_modes.push_back("\n#define MODE_PIXEL\n");
 	mark_modes.push_back("\n#define MODE_FROXEL\n");
 	mark_modes.push_back("\n#define MODE_BOX\n");
+	mark_modes.push_back("\n#define MODE_RESIDENT\n");
 	mark_shader.initialize(mark_modes, defines);
 	mark_version = mark_shader.version_create();
 	Vector<String> allocate_modes;
@@ -1430,6 +1434,16 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, box_buffer));
 	{
 		RD::ComputeListID list = rd->compute_list_begin();
+		// The always-resident pages first: they take the request list's first entries, which
+		// allocation serves before any other request.
+		const uint32_t light_count = view.counts[0] + view.counts[1] + view.counts[2] + view.counts[3];
+		if (light_count > 0) {
+			const RID resident_shader = mark_shader.version_get_shader(mark_version, MARK_MODE_RESIDENT);
+			rd->compute_list_bind_compute_pipeline(list, mark_pipelines[MARK_MODE_RESIDENT]);
+			rd->compute_list_bind_uniform_set(list, UniformSetCacheRD::get_singleton()->get_cache_vec(resident_shader, 0, uniforms), 0);
+			rd->compute_list_dispatch_threads(list, light_count, 1, 1);
+			rd->compute_list_add_barrier(list);
+		}
 		const RID pixel_shader = mark_shader.version_get_shader(mark_version, MARK_MODE_PIXEL);
 		rd->compute_list_bind_compute_pipeline(list, mark_pipelines[MARK_MODE_PIXEL]);
 		rd->compute_list_bind_uniform_set(list, UniformSetCacheRD::get_singleton()->get_cache_vec(pixel_shader, 0, uniforms), 0);
@@ -1502,7 +1516,8 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 		bind(list, ALLOCATE_MODE_SCATTER);
 		rd->compute_list_dispatch_threads(list, page_count, 1, 1);
 		rd->compute_list_add_barrier(list);
-		for (uint32_t phase = 0; phase < 2; phase++) {
+		// The always-resident requests, the other coarse requests, then the rest.
+		for (uint32_t phase = 0; phase < 3; phase++) {
 			push.phase = phase;
 			bind(list, ALLOCATE_MODE_ASSIGN);
 			rd->compute_list_dispatch_threads(list, request_buffer_capacity, 1, 1);
@@ -1650,9 +1665,24 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	}
 	const uint32_t directional_count = view.counts[0];
 
+	// The always-resident requests of every light of the view (MODE_RESIDENT).
+	auto mark_view_resident = [&](LocalVector<uint64_t> &r_requests) {
+		for (uint32_t i = 0; i < directional_count; i++) {
+			mark_resident(maps, table_maps, view.directional[i][0], view.directional[i][1], r_requests);
+		}
+		for (uint32_t type = 0; type < 3; type++) {
+			for (const MarkLight &light : lights[type]) {
+				if (light.map_base != MAP_NONE) {
+					mark_resident(maps, table_maps, light.map_base, light.flags, r_requests);
+				}
+			}
+		}
+	};
+
 	// 1. Marking: the CPU models over every pixel, fog vertex and box, against the GPU's flags.
 	// A point's requests at view-space position p_view (the perturbation is added by the caller).
-	auto mark_point = [&](uint32_t p_screen_x, uint32_t p_screen_y, const Vector3 &p_view, bool p_coarse, float p_cell_size, LocalVector<uint64_t> &r_requests) {
+	// r_sample, when set, looks up each fine request (section 7).
+	auto mark_point = [&](uint32_t p_screen_x, uint32_t p_screen_y, const Vector3 &p_view, bool p_coarse, float p_cell_size, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample = nullptr) {
 		const float view_depth = -float(p_view.z);
 		const float footprint = view_depth * view.footprint[0] + view.footprint[1];
 		const Vector3 world(row_dot(view.view_to_world[0], p_view), row_dot(view.view_to_world[1], p_view), row_dot(view.view_to_world[2], p_view));
@@ -1662,7 +1692,7 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 			if (view_depth > max_distance || (p_coarse && !(fog_energy > 0.0f))) {
 				continue;
 			}
-			mark_directional_point(maps, table_maps, bias, view.directional[i][0], view.directional[i][1], world, footprint, view.bias[0], p_coarse, r_requests);
+			mark_directional_point(maps, table_maps, bias, view.directional[i][0], view.directional[i][1], world, footprint, view.bias[0], p_coarse, r_requests, r_sample);
 		}
 		const uint32_t cluster_x = p_screen_x >> view.cluster[0];
 		const uint32_t cluster_y = p_screen_y >> view.cluster[0];
@@ -1705,7 +1735,7 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 					} else if (!light_reaches(light, rel)) {
 						continue;
 					}
-					mark_local_point(maps, table_maps, bias, light, world, footprint, view.bias[1], p_coarse, all_faces, r_requests);
+					mark_local_point(maps, table_maps, bias, light, world, footprint, view.bias[1], p_coarse, all_faces, r_requests, r_sample);
 				}
 			}
 		}
@@ -1834,6 +1864,10 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 				}
 			});
 		}
+		// The resident pages take no float input: every corner gives the same requests.
+		evaluate([&](uint32_t p_corner, LocalVector<uint64_t> &r_out) {
+			mark_view_resident(r_out);
+		});
 	};
 
 	// The GPU's flags after marking.
@@ -1954,6 +1988,28 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	if (list_duplicates + list_unrequested + list_missing + map_count_mismatches > 0) {
 		failures.push_back(vformat("request list: %d duplicates, %d unrequested, %d missing, %d per-map counts off", list_duplicates, list_unrequested, list_missing, map_count_mismatches));
 	}
+	// The always-resident requests are the list's first entries: exactly the CPU model's resident set.
+	const uint32_t resident_listed = MIN(state_marked[STATE_RESIDENT], listed);
+	HashSet<uint32_t> resident_expected;
+	{
+		LocalVector<uint64_t> resident_requests;
+		mark_view_resident(resident_requests);
+		for (uint64_t request : resident_requests) {
+			resident_expected.insert(uint32_t(request));
+		}
+	}
+	uint32_t resident_wrong = 0;
+	for (uint32_t i = 0; i < resident_listed && i < request_list.size(); i++) {
+		resident_wrong += resident_expected.has(request_list[i]) ? 0 : 1;
+	}
+	Dictionary resident_info;
+	resident_info["listed"] = int64_t(resident_listed);
+	resident_info["expected"] = int64_t(resident_expected.size());
+	resident_info["wrong"] = int64_t(resident_wrong);
+	result["resident"] = resident_info;
+	if (resident_wrong > 0 || resident_listed != resident_expected.size()) {
+		failures.push_back(vformat("resident pages: %d listed first, %d expected, %d of them not resident", resident_listed, resident_expected.size(), resident_wrong));
+	}
 
 	// 3. Allocation: the CPU model on the state after marking, against the GPU's counters, and the
 	// GPU's table and pool header after allocation against the invariants.
@@ -1965,7 +2021,7 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		model_pages[p].last_used = pages_before[p * 4 + 1];
 		model_pages[p].bucket = pages_before[p * 4 + 2];
 	}
-	const AllocationCounts model = allocate_model(model_table.ptr(), table_entries, model_pages.ptr(), check.pool_pages, check.grid_width, request_list.ptr(), MIN(listed, request_list.size()), check.frame, check.cache_frames);
+	const AllocationCounts model = allocate_model(model_table.ptr(), table_entries, model_pages.ptr(), check.pool_pages, check.grid_width, request_list.ptr(), MIN(listed, request_list.size()), check.frame, check.cache_frames, resident_listed);
 	Dictionary counts;
 	const struct {
 		const char *name;
@@ -1982,6 +2038,7 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		{ "available", model.available, state_after[STATE_AVAILABLE] },
 		{ "dirty", model.dirty, state_after[STATE_DIRTY] },
 		{ "coarse", model.coarse, state_after[STATE_COARSE] },
+		{ "resident_overflow", model.resident_overflow, state_after[STATE_RESIDENT_OVERFLOW] },
 	};
 	uint32_t count_mismatches = 0;
 	for (const auto &pair : pairs) {
@@ -1990,6 +2047,7 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 		count_mismatches += pair.model != pair.gpu ? 1 : 0;
 	}
 	counts["requests"] = int64_t(state_after[STATE_REQUESTS]);
+	counts["resident"] = int64_t(resident_listed);
 	counts["dirty_directional"] = int64_t(state_after[STATE_DIRTY_DIRECTIONAL]);
 	counts["max_map_requests"] = int64_t(state_after[STATE_MAX_MAP_REQUESTS]);
 	counts["biased_maps"] = int64_t(state_after[STATE_BIASED_MAPS]);
@@ -2117,8 +2175,27 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 			}
 		}
 	}
+	uint32_t resident_overflowed = 0;
+	uint32_t later_served_new = 0;
+	for (uint32_t i = 0; i < MIN(listed, request_list.size()); i++) {
+		const uint32_t index = request_list[i];
+		if (uint64_t(index) >= table_entries) {
+			continue;
+		}
+		if (i < resident_listed) {
+			resident_overflowed += (table_after[index] & ENTRY_ALLOCATED) ? 0 : 1;
+		} else if (!(table_marked[index] & ENTRY_ALLOCATED) && (table_after[index] & ENTRY_ALLOCATED)) {
+			later_served_new++;
+		}
+	}
 	if (overflow_flagged != state_after[STATE_OVERFLOW]) {
 		failures.push_back(vformat("allocation: %d requested entries carry the overflow flag, the counter says %d", overflow_flagged, state_after[STATE_OVERFLOW]));
+	}
+	if (resident_overflowed != state_after[STATE_RESIDENT_OVERFLOW]) {
+		failures.push_back(vformat("allocation: %d resident entries have no page, the counter says %d", resident_overflowed, state_after[STATE_RESIDENT_OVERFLOW]));
+	}
+	if (resident_overflowed > 0 && later_served_new > 0) {
+		failures.push_back(vformat("allocation: %d resident requests have no page while %d later requests got new ones", resident_overflowed, later_served_new));
 	}
 	// Evicted entries the GPU kept can only be ones the GPU did not steal and the model did: the
 	// steal order inside a bucket differs. Their number cannot exceed the stolen count.
@@ -2142,6 +2219,8 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	invariants["stamp_mismatches"] = int64_t(stamp_mismatches);
 	invariants["coarse_overflowed"] = int64_t(coarse_overflowed);
 	invariants["fine_served_new"] = int64_t(fine_served_new);
+	invariants["resident_overflowed"] = int64_t(resident_overflowed);
+	invariants["later_served_new"] = int64_t(later_served_new);
 	result["invariants"] = invariants;
 	if (owner_mismatches + dangling + double_mapped + unserved + moved + flags_left + stamp_mismatches > 0) {
 		failures.push_back(vformat("allocation invariants: %d owner mismatches, %d dangling entries, %d double-mapped pages, %d unserved requests, %d moved pages, %d flags left, %d stamps", owner_mismatches, dangling, double_mapped, unserved, moved, flags_left, stamp_mismatches));
@@ -2298,6 +2377,91 @@ Dictionary VirtualShadowMapStorage::get_check_result() {
 	}
 	if (unowned_biased > 0) {
 		failures.push_back(vformat("overflow bias: %d maps no light owns keep a bias state", unowned_biased));
+	}
+
+	// 7. Sampling: every pixel request and every coarse froxel/box lookup that the GPU also marked
+	// must find an allocated page in the table after allocation.
+	SampleCheck sample;
+	sample.table = table_after.ptr();
+	sample.requested = table_marked.ptr();
+	SampleCheck coarse_sample;
+	coarse_sample.table = table_after.ptr();
+	coarse_sample.requested = table_marked.ptr();
+	LocalVector<uint32_t> table_without_coarse;
+	SampleCheck without_coarse;
+	if (state_after[STATE_OVERFLOW] > 0) {
+		table_without_coarse = table_after;
+		for (uint64_t i = 0; i < table_entries; i++) {
+			if (table_marked[i] & ENTRY_COARSE) {
+				table_without_coarse[i] = 0;
+			}
+		}
+		without_coarse.table = table_without_coarse.ptr();
+		without_coarse.requested = table_marked.ptr();
+	}
+	LocalVector<uint64_t> sample_requests;
+	for (uint32_t y = 0; y < height; y++) {
+		for (uint32_t x = 0; x < width; x++) {
+			bool valid = false;
+			const Vector3 base = pixel_view(x, y, valid);
+			if (!valid) {
+				continue;
+			}
+			sample_requests.clear();
+			mark_point(x, y, base, false, 0.0f, sample_requests, &sample);
+			if (without_coarse.table != nullptr) {
+				sample_requests.clear();
+				mark_point(x, y, base, false, 0.0f, sample_requests, &without_coarse);
+			}
+		}
+	}
+	if (fog) {
+		for (int32_t z = 0; z <= fog_size.z; z++) {
+			for (int32_t y = 0; y <= fog_size.y; y++) {
+				for (int32_t x = 0; x <= fog_size.x; x++) {
+					const Vector3 base = froxel_view(x, y, z);
+					const Vector3 next = froxel_view(x + 1, y + 1, z + 1);
+					const Vector3 diagonal(float(next.x) - float(base.x), float(next.y) - float(base.y), float(next.z) - float(base.z));
+					const float cell_size = std::sqrt(float(diagonal.x) * float(diagonal.x) + float(diagonal.y) * float(diagonal.y) + float(diagonal.z) * float(diagonal.z));
+					const uint32_t screen_x = MIN(uint32_t(float(x) / float(fog_size.x) * float(width)), width - 1);
+					const uint32_t screen_y = MIN(uint32_t(float(y) / float(fog_size.y) * float(height)), height - 1);
+					sample_requests.clear();
+					mark_point(screen_x, screen_y, base, true, cell_size, sample_requests, &coarse_sample);
+				}
+			}
+		}
+	}
+	for (const AABB &box : check.boxes) {
+		sample_requests.clear();
+		for (uint32_t i = 0; i < directional_count; i++) {
+			mark_directional_box(maps, table_maps, view.directional[i][0], view.directional[i][1], box, sample_requests, &coarse_sample);
+		}
+		for (uint32_t type = 0; type < 3; type++) {
+			for (const MarkLight &light : lights[type]) {
+				if (light.map_base == MAP_NONE) {
+					continue;
+				}
+				const Vector3 light_world(row_dot(view.view_to_world[0], light.position), row_dot(view.view_to_world[1], light.position), row_dot(view.view_to_world[2], light.position));
+				mark_local_box(maps, table_maps, light, light_world, box, sample_requests, &coarse_sample);
+			}
+		}
+	}
+	Dictionary sample_info;
+	sample_info["sampled"] = int64_t(sample.sampled);
+	sample_info["fallback"] = int64_t(sample.fallback);
+	sample_info["unmapped"] = int64_t(sample.unmapped);
+	sample_info["unconfirmed"] = int64_t(sample.unconfirmed);
+	sample_info["coarse_sampled"] = int64_t(coarse_sample.sampled);
+	sample_info["coarse_receiver_unmapped"] = int64_t(coarse_sample.unmapped);
+	sample_info["coarse_unmapped"] = int64_t(coarse_overflowed);
+	sample_info["resident_overflow"] = int64_t(state_after[STATE_RESIDENT_OVERFLOW]);
+	sample_info["without_coarse_unmapped"] = int64_t(without_coarse.unmapped);
+	result["sample"] = sample_info;
+	if (sample.unmapped > 0) {
+		failures.push_back(vformat("sampling: %d of %d pixel requests found no mapped page", sample.unmapped, sample.sampled));
+	}
+	if (coarse_sample.unmapped > 0) {
+		failures.push_back(vformat("sampling: %d of %d coarse froxel/box lookups found no mapped page", coarse_sample.unmapped, coarse_sample.sampled));
 	}
 
 	result["table_maps"] = int64_t(table_maps);

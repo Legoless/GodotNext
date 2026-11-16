@@ -325,7 +325,8 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_BUCKET_NONE " + itos(BUCKET_NONE) + "u\n";
 	defines += "#define VSM_MAX_DIRECTIONAL_LIGHTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "u\n";
 	defines += "#define VSM_CLIPMAP_TEXEL0_EXPONENT (" + itos(CLIPMAP_TEXEL0_EXPONENT) + ")\n";
-	const char *state_names[] = { "REQUESTS", "REQUESTS_DROPPED", "AVAILABLE", "CURSOR", "OVERFLOW", "NEW", "KEPT", "EVICTED", "ORPHANED", "STOLEN", "DIRTY", "DIRTY_DIRECTIONAL", "COARSE", "CACHED", "MAX_MAP_REQUESTS", "BIASED_MAPS", "SINK" };
+	defines += "#define VSM_CLIPMAP_RESIDENT_MIP " + itos(CLIPMAP_RESIDENT_MIP) + "u\n";
+	const char *state_names[] = { "REQUESTS", "REQUESTS_DROPPED", "AVAILABLE", "CURSOR", "OVERFLOW", "NEW", "KEPT", "EVICTED", "ORPHANED", "STOLEN", "DIRTY", "DIRTY_DIRECTIONAL", "COARSE", "CACHED", "MAX_MAP_REQUESTS", "BIASED_MAPS", "RESIDENT", "RESIDENT_OVERFLOW", "SINK" };
 	static_assert(sizeof(state_names) / sizeof(state_names[0]) == STATE_SINK + 1, "One name per per-view counter.");
 	for (uint32_t i = 0; i < sizeof(state_names) / sizeof(state_names[0]); i++) {
 		defines += "#define VSM_STATE_" + String(state_names[i]) + " " + itos(i) + "u\n";
@@ -335,6 +336,7 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_STATE_TOTAL_DROPPED " + itos(STATE_TOTAL_DROPPED) + "u\n";
 	defines += "#define VSM_STATE_VIEWS " + itos(STATE_VIEWS) + "u\n";
 	defines += "#define VSM_STATE_BIAS_FRAME " + itos(STATE_BIAS_FRAME) + "u\n";
+	defines += "#define VSM_STATE_TOTAL_RESIDENT_OVERFLOW " + itos(STATE_TOTAL_RESIDENT_OVERFLOW) + "u\n";
 	defines += "#define VSM_STATE_BUCKETS " + itos(STATE_BUCKETS) + "u\n";
 	defines += "#define VSM_STATE_BUCKET_OFFSETS " + itos(STATE_BUCKET_OFFSETS) + "u\n";
 	defines += "#define VSM_STATE_BUCKET_CURSORS " + itos(STATE_BUCKET_CURSORS) + "u\n";
@@ -599,7 +601,10 @@ static_assert(RendererVirtualShadowMapStorage::CLIPMAP_TEXEL0_EXPONENT == -10, "
 static_assert(RendererVirtualShadowMapStorage::cache_frames(RendererVirtualShadowMapStorage::POOL_QUALITY_EPIC) <= RendererVirtualShadowMapStorage::MAX_CACHE_FRAMES, "Every quality's cache frames fit the buckets.");
 static_assert(RendererVirtualShadowMapStorage::MAX_CACHE_FRAMES < RendererVirtualShadowMapStorage::BUCKET_COUNT, "Bucket 0 and one bucket per cached age.");
 static_assert(RendererVirtualShadowMapStorage::STATE_SINK < RendererVirtualShadowMapStorage::STATE_VIEW_END, "Per-view counters fit their region.");
-static_assert(RendererVirtualShadowMapStorage::STATE_BIAS_FRAME < RendererVirtualShadowMapStorage::STATE_BUCKETS, "Totals fit their region.");
+static_assert(RendererVirtualShadowMapStorage::STATE_TOTAL_RESIDENT_OVERFLOW < RendererVirtualShadowMapStorage::STATE_BUCKETS, "Totals fit their region.");
+// A level's window lies within pages [16, 48] of the next level's; the next level's window at the
+// resident mip holds pages [0, 64 - (origin mod 2^mip)), so 2^mip - 1 must stay below 16.
+static_assert(RendererVirtualShadowMapStorage::CLIPMAP_RESIDENT_MIP < RendererVirtualShadowMapStorage::MIP_COUNT && (1u << RendererVirtualShadowMapStorage::CLIPMAP_RESIDENT_MIP) <= RendererVirtualShadowMapStorage::PAGES_PER_SIDE / 4, "The next level's resident mips always hold the whole finer level.");
 static_assert(RendererVirtualShadowMapStorage::OVERFLOW_DECAY_FRAMES < 256 && RendererVirtualShadowMapStorage::OVERFLOW_MAX_BIAS < 256, "The bias state packs both in 8 bits.");
 static_assert(RendererVirtualShadowMapStorage::OVERFLOW_BIAS_RAISED == (1u << 16), "The raised bit follows the bias and the decay.");
 
@@ -800,7 +805,134 @@ bool RendererVirtualShadowMapStorage::light_reaches_cell(const MarkLight &p_ligh
 	return (d2 * p_light.inv_radius) * p_light.inv_radius < reach * reach;
 }
 
-void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, const MarkLight &p_light, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, bool p_all_faces, LocalVector<uint64_t> &r_requests) {
+// Records one sample of SampleCheck: the request's entry p_index and what its lookup found.
+static void _sample_record(RendererVirtualShadowMapStorage::SampleCheck *r_sample, uint32_t p_index, const RendererVirtualShadowMapStorage::LookupResult &p_result) {
+	r_sample->sampled++;
+	if (!p_result.valid) {
+		r_sample->unmapped++;
+	} else if (!(r_sample->table[p_index] & RendererVirtualShadowMapStorage::ENTRY_ALLOCATED)) {
+		r_sample->fallback++;
+	}
+}
+
+// Whether SampleCheck looks up the request p_index (the GPU made it too).
+static bool _sample_confirmed(RendererVirtualShadowMapStorage::SampleCheck *r_sample, uint32_t p_index) {
+	if (r_sample->requested != nullptr && !(r_sample->requested[p_index] & RendererVirtualShadowMapStorage::ENTRY_REQUESTED)) {
+		r_sample->unconfirmed++;
+		return false;
+	}
+	return true;
+}
+
+RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::clipmap_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t p_level, uint32_t p_mip) {
+	for (uint32_t level = p_level; level < p_count; level++) {
+		const uint32_t map = p_first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const uint32_t mip = uint32_t(MAX(int32_t(p_mip) - int32_t(level - p_level), 0));
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const LookupResult result = lookup_clipmap(p_table, p_table_maps, map, origin, clipmap_level_texel(p_texel0, level), mip, true);
+		if (result.valid) {
+			return result;
+		}
+	}
+	return LookupResult();
+}
+
+// The entry clipmap_coarse_sample() tries first for p_texel0, or UINT32_MAX outside the clipmap.
+static uint32_t _clipmap_coarse_entry(const RendererVirtualShadowMapStorage::MapData *p_maps, uint32_t p_table_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0) {
+	using VSM = RendererVirtualShadowMapStorage;
+	for (uint32_t level = 0; level < p_count; level++) {
+		const uint32_t map = p_first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const Vector2i level_texel = VSM::clipmap_level_texel(p_texel0, level);
+		if (VSM::clipmap_in_window(origin, level_texel, VSM::CLIPMAP_RESIDENT_MIP)) {
+			const Vector2i page = VSM::clipmap_page(level_texel, VSM::CLIPMAP_RESIDENT_MIP);
+			return VSM::entry_index(map, VSM::CLIPMAP_RESIDENT_MIP, uint32_t(page.x), uint32_t(page.y));
+		}
+	}
+	if (p_count > 0 && p_first + p_count - 1 < p_table_maps) {
+		const uint32_t last = p_count - 1;
+		const uint32_t map = p_first + last;
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const Vector2i level_texel = VSM::clipmap_level_texel(p_texel0, last);
+		if (VSM::clipmap_in_window(origin, level_texel, 0)) {
+			uint32_t resident = 0;
+			while (resident + 1 < VSM::CLIPMAP_RESIDENT_MIP && VSM::clipmap_in_window(origin, level_texel, resident + 1)) {
+				resident++;
+			}
+			const Vector2i page = VSM::clipmap_page(level_texel, resident);
+			return VSM::entry_index(map, resident, uint32_t(page.x), uint32_t(page.y));
+		}
+	}
+	return UINT32_MAX;
+}
+
+RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::clipmap_coarse_sample(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0) {
+	for (uint32_t level = 0; level < p_count; level++) {
+		const uint32_t map = p_first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const LookupResult result = lookup_clipmap(p_table, p_table_maps, map, origin, clipmap_level_texel(p_texel0, level), CLIPMAP_RESIDENT_MIP, true);
+		if (result.valid) {
+			return result;
+		}
+	}
+	if (p_count > 0 && p_first + p_count - 1 < p_table_maps) {
+		const uint32_t last = p_count - 1;
+		const uint32_t map = p_first + last;
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const Vector2i level_texel = clipmap_level_texel(p_texel0, last);
+		if (clipmap_in_window(origin, level_texel, 0) && !clipmap_in_window(origin, level_texel, CLIPMAP_RESIDENT_MIP)) {
+			uint32_t resident = 0;
+			while (resident + 1 < CLIPMAP_RESIDENT_MIP && clipmap_in_window(origin, level_texel, resident + 1)) {
+				resident++;
+			}
+			return lookup_clipmap(p_table, p_table_maps, map, origin, level_texel, resident, false);
+		}
+	}
+	return LookupResult();
+}
+
+void RendererVirtualShadowMapStorage::mark_resident(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, LocalVector<uint64_t> &r_requests) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	if (MapKind(p_light_flags & LIGHT_FLAGS_KIND_MASK) == MAP_KIND_DIRECTIONAL) {
+		const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+		if (first >= p_table_maps || p_maps[first].kind != MAP_KIND_DIRECTIONAL) {
+			return;
+		}
+		for (uint32_t level = 0; level < count; level++) {
+			const uint32_t map = first + level;
+			if (map >= p_table_maps) {
+				break;
+			}
+			for (uint32_t mip = CLIPMAP_RESIDENT_MIP; mip < MIP_COUNT; mip++) {
+				const uint32_t pages = PAGES_PER_SIDE >> mip;
+				for (uint32_t y = 0; y < pages; y++) {
+					for (uint32_t x = 0; x < pages; x++) {
+						r_requests.push_back(uint64_t(entry_index(map, mip, x, y)) | REQUEST_COARSE);
+					}
+				}
+			}
+		}
+		return;
+	}
+	for (uint32_t face = 0; face < count; face++) {
+		const uint32_t map = light_map(p_map_base, p_light_flags, face);
+		if (map >= p_table_maps || p_maps[map].kind == MAP_KIND_MAX || p_maps[map].kind == MAP_KIND_DIRECTIONAL) {
+			continue;
+		}
+		r_requests.push_back(uint64_t(entry_index(map, MIP_COUNT - 1, 0, 0)) | REQUEST_COARSE);
+	}
+}
+
+void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, const MarkLight &p_light, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, bool p_all_faces, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample) {
 	const uint32_t count = (p_light.flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
 	for (uint32_t face = 0; face < count; face++) {
 		const uint32_t map = light_map(p_light.map_base, p_light.flags, face);
@@ -831,6 +963,13 @@ void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, ui
 					}
 				}
 			}
+			if (inside && r_sample != nullptr && r_sample->table != nullptr) {
+				const uint32_t coarse_index = entry_index(map, COARSE_FIRST_MIP, (texel_x >> COARSE_FIRST_MIP) >> PAGE_SIZE_SHIFT, (texel_y >> COARSE_FIRST_MIP) >> PAGE_SIZE_SHIFT);
+				if (_sample_confirmed(r_sample, coarse_index)) {
+					const Vector2 uv((float(texel_x) + 0.5f) / float(VIRTUAL_SIZE), (float(texel_y) + 0.5f) / float(VIRTUAL_SIZE));
+					_sample_record(r_sample, coarse_index, lookup(r_sample->table, p_table_maps, map, uv, COARSE_FIRST_MIP, true));
+				}
+			}
 			continue;
 		}
 		if (!inside) {
@@ -838,11 +977,17 @@ void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, ui
 		}
 		const int32_t bias = p_lod_bias + (p_map_bias != nullptr ? int32_t(overflow_bias(p_map_bias[map])) : 0);
 		const uint32_t mip = biased_mip(int32_t(face_mip(w * data.texel_scale, p_footprint)), bias);
-		r_requests.push_back(uint64_t(entry_index(map, mip, (texel_x >> mip) >> PAGE_SIZE_SHIFT, (texel_y >> mip) >> PAGE_SIZE_SHIFT)));
+		const uint32_t index = entry_index(map, mip, (texel_x >> mip) >> PAGE_SIZE_SHIFT, (texel_y >> mip) >> PAGE_SIZE_SHIFT);
+		r_requests.push_back(uint64_t(index));
+		if (r_sample != nullptr && r_sample->table != nullptr && _sample_confirmed(r_sample, index)) {
+			// The texel's center: lookup() lands on the same texel.
+			const Vector2 uv((float(texel_x) + 0.5f) / float(VIRTUAL_SIZE), (float(texel_y) + 0.5f) / float(VIRTUAL_SIZE));
+			_sample_record(r_sample, index, lookup(r_sample->table, p_table_maps, map, uv, mip, true));
+		}
 	}
 }
 
-void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, LocalVector<uint64_t> &r_requests) {
+void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample) {
 	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
 	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
 	if (first >= p_table_maps || p_maps[first].kind != MAP_KIND_DIRECTIONAL) {
@@ -850,8 +995,9 @@ void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_ma
 	}
 	const Vector2i texel0 = clipmap_texel0(p_maps[first], p_world);
 	if (p_coarse) {
-		// Each coarse mip in the finest level whose window holds the point at that mip.
-		for (uint32_t mip = COARSE_FIRST_MIP; mip < MIP_COUNT; mip++) {
+		// Each coarse mip (down to CLIPMAP_RESIDENT_MIP) in the finest level whose window holds the point
+		// at that mip, plus the coarsest in-window mip (< CLIPMAP_RESIDENT_MIP) in the last level's far strip.
+		for (uint32_t mip = CLIPMAP_RESIDENT_MIP; mip < MIP_COUNT; mip++) {
 			for (uint32_t level = 0; level < count; level++) {
 				const uint32_t map = first + level;
 				if (map >= p_table_maps) {
@@ -864,6 +1010,26 @@ void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_ma
 					r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(page.x), uint32_t(page.y))) | REQUEST_COARSE);
 					break;
 				}
+			}
+		}
+		if (count > 0 && first + count - 1 < p_table_maps) {
+			const uint32_t last = count - 1;
+			const uint32_t last_map = first + last;
+			const Vector2i origin(p_maps[last_map].origin[0], p_maps[last_map].origin[1]);
+			const Vector2i level_texel = clipmap_level_texel(texel0, last);
+			if (clipmap_in_window(origin, level_texel, 0) && !clipmap_in_window(origin, level_texel, CLIPMAP_RESIDENT_MIP)) {
+				uint32_t resident = 0;
+				while (resident + 1 < CLIPMAP_RESIDENT_MIP && clipmap_in_window(origin, level_texel, resident + 1)) {
+					resident++;
+				}
+				const Vector2i page = clipmap_page(level_texel, resident);
+				r_requests.push_back(uint64_t(entry_index(last_map, resident, uint32_t(page.x), uint32_t(page.y))) | REQUEST_COARSE);
+			}
+		}
+		if (r_sample != nullptr && r_sample->table != nullptr) {
+			const uint32_t coarse_index = _clipmap_coarse_entry(p_maps, p_table_maps, first, count, texel0);
+			if (coarse_index != UINT32_MAX && _sample_confirmed(r_sample, coarse_index)) {
+				_sample_record(r_sample, coarse_index, clipmap_coarse_sample(r_sample->table, p_table_maps, p_maps, first, count, texel0));
 			}
 		}
 		return;
@@ -885,16 +1051,38 @@ void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_ma
 		if (p_map_bias != nullptr) {
 			mip = MIN(mip + overflow_bias(p_map_bias[map]), MIP_COUNT - 1);
 		}
-		if (!clipmap_in_window(origin, level_texel, mip)) {
+		if (level + 1 == count) {
+			while (mip > 0 && !clipmap_in_window(origin, level_texel, mip)) {
+				mip--;
+			}
+		} else if (!clipmap_in_window(origin, level_texel, mip)) {
 			continue;
 		}
 		const Vector2i page = clipmap_page(level_texel, mip);
-		r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(page.x), uint32_t(page.y))));
+		const uint32_t index = entry_index(map, mip, uint32_t(page.x), uint32_t(page.y));
+		// The last level's far edge: outside its resident mips' window, and no coarser level holds it.
+		// The page at the coarsest mip whose window holds the point is requested ahead of the fine
+		// requests, so the sample always finds a page.
+		const bool far_resident = level + 1 == count && !clipmap_in_window(origin, level_texel, CLIPMAP_RESIDENT_MIP);
+		uint32_t resident = mip;
+		if (far_resident) {
+			while (resident + 1 < CLIPMAP_RESIDENT_MIP && clipmap_in_window(origin, level_texel, resident + 1)) {
+				resident++;
+			}
+		}
+		r_requests.push_back(uint64_t(index) | (far_resident && resident == mip ? REQUEST_COARSE : 0u));
+		if (far_resident && resident != mip) {
+			const Vector2i resident_page = clipmap_page(level_texel, resident);
+			r_requests.push_back(uint64_t(entry_index(map, resident, uint32_t(resident_page.x), uint32_t(resident_page.y))) | REQUEST_COARSE);
+		}
+		if (r_sample != nullptr && r_sample->table != nullptr && _sample_confirmed(r_sample, index)) {
+			_sample_record(r_sample, index, clipmap_sample(r_sample->table, p_table_maps, p_maps, first, count, texel0, level, mip));
+		}
 		return;
 	}
 }
 
-void RendererVirtualShadowMapStorage::mark_local_box(const MapData *p_maps, uint32_t p_table_maps, const MarkLight &p_light, const Vector3 &p_light_world, const AABB &p_box, LocalVector<uint64_t> &r_requests) {
+void RendererVirtualShadowMapStorage::mark_local_box(const MapData *p_maps, uint32_t p_table_maps, const MarkLight &p_light, const Vector3 &p_light_world, const AABB &p_box, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample) {
 	if (!(p_light.inv_radius > 0.0f)) {
 		return;
 	}
@@ -912,10 +1100,11 @@ void RendererVirtualShadowMapStorage::mark_local_box(const MapData *p_maps, uint
 	if (d2 > radius * radius) {
 		return;
 	}
-	Vector3 corners[8];
+	Vector3 corners[9];
 	for (int i = 0; i < 8; i++) {
 		corners[i] = Vector3((i & 1) ? box_max.x : box_min.x, (i & 2) ? box_max.y : box_min.y, (i & 4) ? box_max.z : box_min.z);
 	}
+	corners[8] = (box_min + box_max) * 0.5f;
 	const uint32_t count = (p_light.flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
 	for (uint32_t face = 0; face < count; face++) {
 		const uint32_t map = light_map(p_light.map_base, p_light.flags, face);
@@ -975,10 +1164,25 @@ void RendererVirtualShadowMapStorage::mark_local_box(const MapData *p_maps, uint
 				}
 			}
 		}
+		if (r_sample != nullptr && r_sample->table != nullptr) {
+			for (int i = 0; i < 9; i++) {
+				float w = 0.0f;
+				uint32_t tx = 0;
+				uint32_t ty = 0;
+				if (!face_texel(data, corners[i], w, tx, ty)) {
+					continue;
+				}
+				const uint32_t coarse_index = entry_index(map, COARSE_FIRST_MIP, (tx >> COARSE_FIRST_MIP) >> PAGE_SIZE_SHIFT, (ty >> COARSE_FIRST_MIP) >> PAGE_SIZE_SHIFT);
+				if (_sample_confirmed(r_sample, coarse_index)) {
+					const Vector2 uv((float(tx) + 0.5f) / float(VIRTUAL_SIZE), (float(ty) + 0.5f) / float(VIRTUAL_SIZE));
+					_sample_record(r_sample, coarse_index, lookup(r_sample->table, p_table_maps, map, uv, COARSE_FIRST_MIP, true));
+				}
+			}
+		}
 	}
 }
 
-void RendererVirtualShadowMapStorage::mark_directional_box(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, LocalVector<uint64_t> &r_requests) {
+void RendererVirtualShadowMapStorage::mark_directional_box(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, LocalVector<uint64_t> &r_requests, SampleCheck *r_sample) {
 	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
 	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
 	if (first >= p_table_maps || p_maps[first].kind != MAP_KIND_DIRECTIONAL) {
@@ -986,14 +1190,17 @@ void RendererVirtualShadowMapStorage::mark_directional_box(const MapData *p_maps
 	}
 	const Vector3 box_min = p_box.position;
 	const Vector3 box_max = p_box.position + p_box.size;
+	Vector3 sample_points[9];
 	Vector2i texel_min(INT32_MAX, INT32_MAX);
 	Vector2i texel_max(INT32_MIN, INT32_MIN);
 	for (int i = 0; i < 8; i++) {
 		const Vector3 corner((i & 1) ? box_max.x : box_min.x, (i & 2) ? box_max.y : box_min.y, (i & 4) ? box_max.z : box_min.z);
+		sample_points[i] = corner;
 		const Vector2i texel = clipmap_texel0(p_maps[first], corner);
 		texel_min = Vector2i(MIN(texel_min.x, texel.x), MIN(texel_min.y, texel.y));
 		texel_max = Vector2i(MAX(texel_max.x, texel.x), MAX(texel_max.y, texel.y));
 	}
+	sample_points[8] = (box_min + box_max) * 0.5f;
 	for (uint32_t level = 0; level < count; level++) {
 		const uint32_t map = first + level;
 		if (map >= p_table_maps) {
@@ -1002,13 +1209,14 @@ void RendererVirtualShadowMapStorage::mark_directional_box(const MapData *p_maps
 		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
 		const Vector2i level_min = clipmap_level_texel(texel_min, level);
 		const Vector2i level_max = clipmap_level_texel(texel_max, level);
-		for (uint32_t mip = COARSE_FIRST_MIP; mip < MIP_COUNT; mip++) {
+		const uint32_t first_mip = level + 1 == count ? 0 : CLIPMAP_RESIDENT_MIP;
+		for (uint32_t mip = first_mip; mip < MIP_COUNT; mip++) {
 			// The level texels the lookup reads at this mip: [origin * PAGE_SIZE, mip window end).
 			int64_t lo[2];
 			int64_t hi[2];
 			bool empty = false;
 			for (int axis = 0; axis < 2; axis++) {
-				const int64_t window_start = (int64_t(_floor_shift(origin[axis], mip)) << mip) * int64_t(PAGE_SIZE);
+				const int64_t window_start = int64_t(_floor_shift(origin[axis], mip)) * (int64_t(PAGE_SIZE) << mip);
 				lo[axis] = MAX(int64_t(level_min[axis]), int64_t(origin[axis]) * int64_t(PAGE_SIZE));
 				hi[axis] = MIN(int64_t(level_max[axis]), window_start + int64_t(VIRTUAL_SIZE) - 1);
 				empty = empty || lo[axis] > hi[axis];
@@ -1018,10 +1226,23 @@ void RendererVirtualShadowMapStorage::mark_directional_box(const MapData *p_maps
 			}
 			const uint32_t shift = mip + PAGE_SIZE_SHIFT;
 			const uint32_t mask = (PAGES_PER_SIDE >> mip) - 1;
+			const int32_t next_end_x = _floor_shift(origin.x, mip + 1) * 2 + int32_t(PAGES_PER_SIDE >> mip);
+			const int32_t next_end_y = _floor_shift(origin.y, mip + 1) * 2 + int32_t(PAGES_PER_SIDE >> mip);
 			for (int32_t y = _floor_shift(int32_t(lo[1]), shift); y <= _floor_shift(int32_t(hi[1]), shift); y++) {
 				for (int32_t x = _floor_shift(int32_t(lo[0]), shift); x <= _floor_shift(int32_t(hi[0]), shift); x++) {
-					r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(x) & mask, uint32_t(y) & mask)) | REQUEST_COARSE);
+					if (mip >= CLIPMAP_RESIDENT_MIP || x >= next_end_x || y >= next_end_y) {
+						r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(x) & mask, uint32_t(y) & mask)) | REQUEST_COARSE);
+					}
 				}
+			}
+		}
+	}
+	if (r_sample != nullptr && r_sample->table != nullptr) {
+		for (int i = 0; i < 9; i++) {
+			const Vector2i point_texel0 = clipmap_texel0(p_maps[first], sample_points[i]);
+			const uint32_t coarse_index = _clipmap_coarse_entry(p_maps, p_table_maps, first, count, point_texel0);
+			if (coarse_index != UINT32_MAX && _sample_confirmed(r_sample, coarse_index)) {
+				_sample_record(r_sample, coarse_index, clipmap_coarse_sample(r_sample->table, p_table_maps, p_maps, first, count, point_texel0));
 			}
 		}
 	}
@@ -1050,7 +1271,7 @@ RendererVirtualShadowMapStorage::PageUpdate RendererVirtualShadowMapStorage::pag
 	return PAGE_UPDATE_CACHED;
 }
 
-RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorage::allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames) {
+RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorage::allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames, uint32_t p_resident_count) {
 	AllocationCounts counts;
 	ERR_FAIL_COND_V(p_grid_width == 0 || p_cache_frames == 0 || p_cache_frames > MAX_CACHE_FRAMES, counts);
 	// Update: orphaned pages, pages dropped after cache_frames frames or scrolled, the rest by bucket.
@@ -1095,15 +1316,17 @@ RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorag
 			free_list[offsets[r_pages[p].bucket]++] = p;
 		}
 	}
-	// Assign: coarse requests first, then the rest.
+	// Assign: the always-resident requests (the list's first p_resident_count) first, then the other
+	// coarse requests, then the rest.
 	uint32_t cursor = 0;
-	for (uint32_t phase = 0; phase < 2; phase++) {
+	for (uint32_t phase = 0; phase < 3; phase++) {
 		for (uint32_t i = 0; i < p_request_count; i++) {
 			const uint32_t index = p_requests[i];
 			ERR_CONTINUE(uint64_t(index) >= p_table_entries);
 			uint32_t entry = r_table[index];
 			const bool coarse = (entry & ENTRY_COARSE) != 0;
-			if (coarse != (phase == 0)) {
+			const uint32_t request_phase = i < p_resident_count ? 0 : (coarse ? 1 : 2);
+			if (request_phase != phase) {
 				continue;
 			}
 			counts.coarse += coarse ? 1 : 0;
@@ -1120,6 +1343,7 @@ RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorag
 			if (slot >= counts.available) {
 				r_table[index] = entry | ENTRY_OVERFLOW;
 				counts.overflow++;
+				counts.resident_overflow += phase == 0 ? 1 : 0;
 				continue;
 			}
 			const uint32_t p = free_list[slot];

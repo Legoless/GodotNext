@@ -55,8 +55,9 @@ namespace RendererRD {
 // GodotNext: vsm_page_marking (#219). With VSM on, every view with Forward+ render buffers forces the
 // depth prepass and, at the end of RenderForwardClustered::_pre_opaque_render() (once the light
 // buffers and the cluster are built), runs mark_and_allocate(): vsm_mark_pages.glsl flags the pages
-// the view samples, and vsm_allocate_pages.glsl gives them physical pages and emits the dirty-page
-// list and its indirect arguments for the raster passes (#216, #217, #218).
+// the view samples, plus every light's always-resident pages, and vsm_allocate_pages.glsl gives them
+// physical pages (the resident ones first) and emits the dirty-page list and its indirect arguments
+// for the raster passes (#216, #217, #218).
 class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	static VirtualShadowMapStorage *singleton;
 
@@ -91,6 +92,7 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 		MARK_MODE_PIXEL,
 		MARK_MODE_FROXEL,
 		MARK_MODE_BOX,
+		MARK_MODE_RESIDENT,
 		MARK_MODE_MAX,
 	};
 	enum AllocateMode {
