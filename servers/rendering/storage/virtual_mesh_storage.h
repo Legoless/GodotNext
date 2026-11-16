@@ -251,6 +251,9 @@ public:
 		uint32_t residency_page_table_word_offset = 0;
 		bool page_dag_ready = false;
 		bool page_dag_scanning = false;
+		// GodotNext: nextgeo_rt_native (#156). Bumped whenever refine_ok is recomputed, that is on
+		// every residency change, so native RT buckets know when to take their cut again.
+		uint64_t residency_generation = 0;
 	};
 
 	RendererVirtualMeshStorage();

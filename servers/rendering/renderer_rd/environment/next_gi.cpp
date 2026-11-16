@@ -44,6 +44,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+// GodotNext: nextgeo_rt_native (#156)
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rq_selftest.glsl.gen.h"
@@ -949,6 +951,56 @@ Dictionary NextGI::get_tier_info() const {
 		info["rt_scene_update_ms"] = rt_stats.scene_update_ms;
 		info["rt_tlas_build_count"] = int64_t(rt_stats.tlas_build_count);
 		info["rt_as_memory_exceeded"] = rt_scene->is_as_memory_exceeded();
+		// GodotNext: nextgeo_rt_native (#156). Native Nanite RT (EXPERIMENTAL); the keys exist only in
+		// native mode.
+		info["nextgeo_ray_tracing_mode"] = rt_scene->get_native() != nullptr ? String("native") : String("fallback");
+		if (rt_scene->get_native() != nullptr) {
+			const NextGIRTNative::Stats &native = rt_scene->get_native()->get_stats();
+			info["rt_native_buckets"] = int64_t(native.buckets);
+			info["rt_native_current_sets"] = int64_t(native.current_sets);
+			info["rt_native_pending_sets"] = int64_t(native.pending_sets);
+			info["rt_native_parts"] = int64_t(native.parts);
+			info["rt_native_triangles"] = int64_t(native.triangles);
+			info["rt_native_blas_bytes"] = int64_t(native.blas_bytes);
+			info["rt_native_build_bytes"] = int64_t(native.build_bytes);
+			info["rt_native_fallback_bytes"] = int64_t(native.fallback_bytes);
+			info["rt_native_fallback_compacted_bytes"] = int64_t(native.fallback_compacted_bytes);
+			info["rt_native_memory_cap_bytes"] = int64_t(native.memory_cap_bytes);
+			info["rt_native_as_budget_bytes"] = int64_t(MIN(native.as_budget_bytes, uint64_t(INT64_MAX)));
+			info["rt_native_as_proxy_bytes"] = int64_t(native.as_proxy_bytes);
+			info["rt_native_coarser_sets"] = int64_t(native.coarser_sets);
+			info["rt_native_cap_releases"] = int64_t(native.cap_releases);
+			info["rt_native_band_mask"] = int64_t(native.band_mask);
+			info["rt_native_shared_buckets"] = int64_t(native.shared_buckets);
+			info["rt_native_last_refusal_band"] = int64_t(native.last_refusal_band);
+			info["rt_native_last_refusal_triangles"] = int64_t(native.last_refusal_triangles);
+			info["rt_native_last_refusal_bytes"] = int64_t(native.last_refusal_bytes);
+			info["rt_native_last_refusal_headroom"] = int64_t(native.last_refusal_headroom);
+			info["rt_native_instances"] = int64_t(native.instances_band);
+			info["rt_native_previous_instances"] = int64_t(native.instances_previous);
+			info["rt_native_proxy_instances"] = int64_t(native.instances_proxy);
+			info["rt_native_traced_triangles_max"] = int64_t(native.traced_triangles_max);
+			info["rt_native_traced_triangles_min"] = int64_t(native.traced_triangles_min);
+			info["rt_native_excluded_skinned"] = int64_t(native.excluded[NEXTGEO_RT_NATIVE_EXCLUDED_SKINNED]);
+			info["rt_native_excluded_vertex_offset"] = int64_t(native.excluded[NEXTGEO_RT_NATIVE_EXCLUDED_VERTEX_OFFSET]);
+			info["rt_native_excluded_legacy_surfaces"] = int64_t(native.excluded[NEXTGEO_RT_NATIVE_EXCLUDED_LEGACY_SURFACES]);
+			info["rt_native_coarse_buckets"] = int64_t(native.coarse_buckets);
+			info["rt_native_memory_refusals"] = int64_t(native.memory_refusals);
+			info["rt_native_reclaims"] = int64_t(native.reclaims);
+			info["rt_native_build_triangles"] = int64_t(native.build_triangles);
+			info["rt_native_build_count"] = int64_t(native.build_count);
+			info["rt_native_rebuild_cap"] = int64_t(NEXTGEO_RT_NATIVE_REBUILD_TRIANGLE_CAP);
+			info["rt_native_extract_triangles"] = int64_t(native.extract_triangles);
+			info["rt_native_extract_count"] = int64_t(native.extract_count);
+			info["rt_native_swaps"] = int64_t(native.swaps);
+			info["rt_native_compactions"] = int64_t(native.compactions);
+			info["rt_native_no_card_triangles"] = int64_t(native.no_card_triangles);
+			info["rt_native_chosen_card_triangles"] = int64_t(native.chosen_card_triangles);
+			info["rt_native_card_meshes"] = int64_t(native.card_meshes);
+			info["rt_native_direct_card_meshes"] = int64_t(native.direct_card_meshes);
+			info["rt_native_proxy_card_meshes"] = int64_t(native.proxy_card_meshes);
+			info["rt_native_proxy_card_triangles"] = int64_t(native.proxy_card_triangles);
+		}
 		if (rt_scene->get_far_field() != nullptr) {
 			const NextGIFarField::Stats &far_stats = rt_scene->get_far_field()->get_stats();
 			info["far_field_cell_count"] = int64_t(far_stats.cell_count);

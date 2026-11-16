@@ -1742,6 +1742,8 @@ void RendererVirtualMeshStorage::compute_refine_ok_bits(uint32_t p_group_count, 
 }
 
 void RendererVirtualMeshStorage::_recompute_mesh_refine_ok(MeshInfo &r_info) {
+	// GodotNext: nextgeo_rt_native (#156)
+	r_info.residency_generation++;
 	LocalVector<uint8_t> resident_bytes;
 	resident_bytes.resize(r_info.total_page_count);
 	for (uint32_t p = 0; p < r_info.total_page_count; p++) {

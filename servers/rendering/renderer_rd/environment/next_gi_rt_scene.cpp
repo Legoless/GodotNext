@@ -43,6 +43,8 @@
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
+// GodotNext: nextgeo_rt_native (#156)
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_instances.glsl.gen.h"
@@ -757,6 +759,56 @@ static bool _nextgi_rt_material_is_alpha(RID p_material) {
 	return nextgi_rt_material_is_alpha(p_material);
 }
 
+// GodotNext: nextgeo_rt_native (#156). Native-mode exclusions (plan §21.4 N13, #156 step 8). A
+// material whose vertex code moves the surface (it writes VERTEX, POSITION, MODELVIEW_MATRIX or
+// PROJECTION_MATRIX, or uses skip_vertex_transform) rasterizes away from the cut, so its instance
+// keeps the proxy. Only the materials that shape the base surface count (the override or each
+// surface's material): an overlay or next pass draws another layer over that surface and does not
+// move the surface the TLAS carries.
+static bool _nextgeo_rt_native_material_moves_vertices(RID p_material) {
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	if (p_material.is_null() || material_storage == nullptr) {
+		return false;
+	}
+	MaterialStorage::ShaderData *shader_data = material_storage->material_get_shader_data(p_material);
+	return shader_data != nullptr && shader_data->nextgeo_moves_vertices();
+}
+
+static bool _nextgeo_rt_native_vertex_offset(const RenderGeometryInstanceBase *p_instance, RID p_mesh) {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (p_instance == nullptr || p_instance->data == nullptr || mesh_storage == nullptr) {
+		return false;
+	}
+	if (_nextgeo_rt_native_material_moves_vertices(p_instance->data->material_override)) {
+		return true;
+	}
+	const int surface_count = mesh_storage->mesh_get_surface_count(p_mesh);
+	for (int surface = 0; surface < surface_count; surface++) {
+		const bool overridden = surface < p_instance->data->surface_materials.size() && p_instance->data->surface_materials[surface].is_valid();
+		const RID material = overridden ? p_instance->data->surface_materials[surface] : mesh_storage->mesh_surface_get_material(p_mesh, surface);
+		if (_nextgeo_rt_native_material_moves_vertices(material)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// The proxy also carries the mesh's legacy (non-virtual) surfaces; the native cut has none of them.
+static bool _nextgeo_rt_native_legacy_surfaces(RID p_mesh, const LocalVector<MeshStorage::NextGIRTPart> &p_parts) {
+	const RenderingServerTypes::VirtualGeometryDesc *desc = RSG::virtual_mesh_storage != nullptr ? RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(p_mesh) : nullptr;
+	if (desc == nullptr) {
+		return true;
+	}
+	for (const MeshStorage::NextGIRTPart &part : p_parts) {
+		for (const NextGIRTPartGeometry &geometry : part.geometries) {
+			if (geometry.surface >= 32u || (desc->eligible_surface_mask & (1u << geometry.surface)) == 0u) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 struct NextGIRTScene::InstanceEncoder {
 	NextgiRtInstancesShaderRD shader;
 	RID version;
@@ -792,6 +844,12 @@ void NextGIRTScene::free_far_field() {
 void NextGIRTScene::free() {
 	free_far_field();
 	total_record_count = 0;
+	// GodotNext: nextgeo_rt_native (#156)
+	if (native != nullptr) {
+		native->free();
+		memdelete(native);
+		native = nullptr;
+	}
 	if (RD::get_singleton() == nullptr) {
 		return;
 	}
@@ -1219,6 +1277,21 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (tlas.is_null()) {
 		return;
 	}
+	// GodotNext: nextgeo_rt_native (#156). Native Nanite RT exists only while the mode is native
+	// (EXPERIMENTAL); the fallback mode, the default, creates nothing and takes no new path. Its
+	// frame start runs before the early returns, so a switch back or the last instance's removal
+	// releases the native sets even when no instance is fed.
+	const bool native_mode = nextgeo_rt_mode_from_setting(GLOBAL_GET_CACHED(int, "rendering/nextgeo/ray_tracing_mode")) == NEXTGEO_RT_MODE_NATIVE;
+	if (native_mode && native == nullptr) {
+		native = memnew(NextGIRTNative);
+	} else if (!native_mode && native != nullptr) {
+		native->free();
+		memdelete(native);
+		native = nullptr;
+	}
+	if (native != nullptr) {
+		native->begin_frame(p_render_data, RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
+	}
 	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = _nextgi_rt_fed_instances(p_render_data);
 	if (fed_instances == nullptr || fed_instances->is_empty()) {
 		LocalVector<NextGIInstanceRecord> records;
@@ -1461,13 +1534,29 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		}
 
 		const Transform3D transform = fed.has_rt_transform ? fed.rt_transform : geometry_instance->transform;
+		// GodotNext: nextgeo_rt_native (#156). In native mode a NextGeo instance traces the BLAS of
+		// its (mesh, distance band) bucket, its previous native BLAS, or else its proxy parts.
+		const LocalVector<MeshStorage::NextGIRTPart> *tlas_parts = parts;
+		bool native_parts = false;
+		float native_eps = 0.0f;
+		if (native != nullptr && !parts->is_empty() && (*parts)[0].is_proxy) {
+			const NextGeoRTNativeExclusion exclusion = nextgeo_rt_native_exclusion(geometry_instance->mesh_instance.is_valid(), _nextgeo_rt_native_vertex_offset(geometry_instance, mesh), _nextgeo_rt_native_legacy_surfaces(mesh, *parts));
+			const uint64_t instance_key = (uint64_t(uintptr_t(geometry_instance)) << 8u) ^ uint64_t(fed.element_index);
+			const LocalVector<MeshStorage::NextGIRTPart> *selected = native->select(mesh, instance_key, transform.xform(mesh_storage->mesh_get_aabb(mesh)), transform, camera_origin, exclusion, native_eps);
+			if (selected != nullptr) {
+				tlas_parts = selected;
+				native_parts = true;
+			}
+		}
 		bool entered_tlas = false;
 		uint32_t first_rt_fields[6] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, 0u, UINT32_MAX, UINT32_MAX };
 		const bool has_vgd_cards = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh) != nullptr && !RSG::virtual_mesh_storage->mesh_get_virtual_geometry_desc(mesh)->card_descriptors.is_empty();
 		const Vector3 scale = transform.basis.get_scale_abs();
 		const float max_scale = MAX(scale.x, MAX(scale.y, scale.z));
-		for (const MeshStorage::NextGIRTPart &part : *parts) {
-			if (!nextgi_rt_part_enters_tlas(blas_dirty, part.blas.is_valid()) || part.geometries.is_empty()) {
+		for (const MeshStorage::NextGIRTPart &part : *tlas_parts) {
+			// GodotNext: nextgeo_rt_native (#156). A built native set is complete even while the
+			// proxy is dirty.
+			if (!nextgi_rt_part_enters_tlas(native_parts ? false : blas_dirty, part.blas.is_valid()) || part.geometries.is_empty()) {
 				continue;
 			}
 			if (instance_records.size() >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
@@ -1531,7 +1620,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				}
 				surface_records.push_back(surface_record);
 			}
-			record.origin_offset = nextgi_rt_origin_offset(eps_rt, max_scale);
+			// GodotNext: nextgeo_rt_native (#156). A native set's eps is its bucket's (select()).
+			record.origin_offset = nextgi_rt_origin_offset(native_parts ? native_eps : eps_rt, max_scale);
 			_queue_pages(geometry_instance, record, fed.element_index); // GodotNext: nextgi_src_page_levels (#247)
 			instance_records.push_back(record);
 			if (RSG::rasterizer != nullptr) {
@@ -1893,6 +1983,11 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 			tlas_traceable = false;
 		}
 	}
+	// GodotNext: nextgeo_rt_native (#156). Native sets spend what line 1b left, at most the N7 cap.
+	// They are new BLASes, so the TLAS built this frame stays traceable.
+	if (native != nullptr) {
+		native->build(nextgeo_rt_native_build_budget(triangle_budget > scheduled_triangles ? triangle_budget - scheduled_triangles : 0u));
+	}
 
 	uint64_t frame = 0;
 	if (RSG::rasterizer != nullptr) {
@@ -1905,7 +2000,8 @@ void NextGIRTScene::build_dirty_blas(const ::RenderDataRD *p_render_data) {
 }
 
 void NextGIRTScene::compact_after_traces() {
-	if (tlas.is_null() || RD::get_singleton() == nullptr || pending_compactions.is_empty()) {
+	// GodotNext: nextgeo_rt_native (#156). Native compaction runs even with no proxy pending.
+	if (tlas.is_null() || RD::get_singleton() == nullptr) {
 		return;
 	}
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
@@ -1934,6 +2030,10 @@ void NextGIRTScene::compact_after_traces() {
 		}
 	}
 	pending_compactions = deferred;
+	// GodotNext: nextgeo_rt_native (#156). The proxies go first; native compactions share the cap.
+	if (native != nullptr && native->compact_after_traces(compaction_triangles_this_frame, uint32_t(NEXTGI_RT_BUILD_TRIANGLE_CAP))) {
+		tlas_traceable = false;
+	}
 }
 
 uint32_t NextGIRTScene::_mesh_triangle_count(RID p_mesh) const {
@@ -2017,7 +2117,13 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 			total += meshes[i].bytes;
 		}
 	}
-	stats.as_bytes = total;
+	// GodotNext: nextgeo_rt_native (#156). Native BLASes sit inside the AS memory line (MN4): the
+	// proxies keep the line's eviction rule, and native mode's cap leaves them room (over it,
+	// instances keep the proxy), so native sets never push the tier to AS_MEMORY.
+	if (native != nullptr) {
+		native->set_as_line(as_budget_bytes, total);
+	}
+	stats.as_bytes = total + (native != nullptr ? native->get_blas_bytes() : 0u);
 	as_memory_exceeded = over;
 }
 

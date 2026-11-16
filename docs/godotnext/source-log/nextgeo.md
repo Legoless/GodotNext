@@ -77,6 +77,18 @@ design itself (the 64-bit depth and ID buffer written with atomic max by both pa
 the per-cluster triangle-size switch and the export pass) comes from plan §21.4 N1 to
 N3; no Unreal Engine documentation beyond what the plan already cites was read for it.
 
+## Native Nanite ray tracing (#156)
+
+No outside input. `rendering/nextgeo/ray_tracing_mode`, the per-band cut buckets and
+their shared set pool, the extraction pass `rt_cut_extract.glsl`, the N7 rebuild cap,
+the MN4 memory cap (inside the AS memory line) with its whole-set admission, reclaim
+and release, the per-triangle Stage-2 card choice and the exclusions were written from
+the plan (§21.4 N13, N7, MN4, GN-9 and its parity rows) and the issue. That Unreal Engine
+keeps native Nanite ray tracing Experimental and off, with the fallback mesh as the
+default, is the plan's parity row (§21.4), which cites UE's public documentation; no UE
+page is recorded as read for this issue. The card choice follows GodotNext's own #77
+card layers (`modules/nextgeo/nextgeo_rt_proxy.cpp`). Copied files: none.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

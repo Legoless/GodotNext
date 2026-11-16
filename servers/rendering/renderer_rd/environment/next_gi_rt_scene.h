@@ -48,6 +48,9 @@ class NextGIFarField;
 
 namespace RendererRD {
 
+// GodotNext: nextgeo_rt_native (#156)
+class NextGIRTNative;
+
 // NextGI RT scene v0 (#28, plan D13 and §6.3/§8.2): the contracts and pure helpers for the
 // chunked RT geometry arena, static BLAS parts and the CPU-fed TLAS. Everything above
 // NextGIRTScene is device-free so doctests can run it without a GPU.
@@ -539,6 +542,9 @@ private:
 	bool tlas_traceable = false;
 	uint32_t compaction_triangles_this_frame = 0;
 	uint64_t as_budget_bytes = NEXTGI_RT_AS_BUDGET_BYTES;
+	// GodotNext: nextgeo_rt_native (#156). Exists only in native mode (EXPERIMENTAL); the fallback
+	// mode, the default, never creates it.
+	NextGIRTNative *native = nullptr;
 
 	void _build_dirty_mesh_parts(RID p_mesh);
 	void _build_proxy_part(RID p_mesh, uint32_t p_part_index);
@@ -582,6 +588,8 @@ public:
 	RID get_surface_record_buffer() const { return surface_record_buffer; }
 	const Stats &get_stats() const { return stats; }
 	bool is_as_memory_exceeded() const { return as_memory_exceeded; }
+	// GodotNext: nextgeo_rt_native (#156). nullptr in the fallback mode.
+	const NextGIRTNative *get_native() const { return native; }
 	// True only after this frame's TLAS build, and only while line 1b has not rebuilt a BLAS the TLAS references.
 	bool is_tlas_traceable() const { return tlas_traceable; }
 	void set_as_budget_bytes(uint64_t p_bytes) { as_budget_bytes = p_bytes; }

@@ -4083,6 +4083,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/geometry_cache_mb", PROPERTY_HINT_RANGE, "16,2047,1,suffix:MiB"), 512);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/page_upload_kib_per_frame", PROPERTY_HINT_RANGE, "64,65536,64,suffix:KiB"), 4096);
 	GLOBAL_DEF("rendering/nextgeo/streaming/debug_io_delay_ms", Vector2(0, 0));
+	// GodotNext: nextgeo_rt_native (#156). EXPERIMENTAL native Nanite ray tracing; Fallback (the
+	// fixed RT proxy, D13) stays the default.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/ray_tracing_mode", PROPERTY_HINT_ENUM, "Fallback,Native (Experimental)"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/fsr_sharpness", PROPERTY_HINT_RANGE, "0,2,0.01"), 0.2f);
 	// GodotNext: pu_dlss_scaling_mode (#103). Inert without modules/dlss.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/scaling_3d/dlss/preset", PROPERTY_HINT_ENUM, "Default,J,K,L,M"), 0);

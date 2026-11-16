@@ -89,6 +89,9 @@ public:
 		virtual NextGIRTClass get_nextgi_rt_class() const { return NEXTGI_RT_OPAQUE; }
 		// GodotNext: nextgeo_resolve (#80). Material-level fallback reason (RendererRD::NextGeoFallback).
 		virtual uint32_t get_nextgeo_fallback() const { return 0; }
+		// GodotNext: nextgeo_rt_native (#156). The vertex code moves the surface: it writes VERTEX,
+		// POSITION, MODELVIEW_MATRIX or PROJECTION_MATRIX, or uses skip_vertex_transform.
+		virtual bool nextgeo_moves_vertices() const { return false; }
 
 		virtual bool casts_shadows() const = 0;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const = 0;

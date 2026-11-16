@@ -2422,6 +2422,8 @@ void ArrayMesh::_push_virtual_geometry_to_rs() const {
 		desc.rt_proxy_triangle_groups = virtual_geometry->get_rt_proxy_triangle_groups();
 		desc.card_descriptors = virtual_geometry->get_card_descriptors();
 		desc.rt_proxy_eps = virtual_geometry->get_rt_proxy_eps();
+		// GodotNext: nextgeo_rt_native (#156)
+		desc.rt_proxy_clusters = virtual_geometry->get_rt_proxy_clusters();
 		const PackedByteArray eligibility = virtual_geometry->get_surface_eligibility();
 		for (int index = 0; index < eligibility.size() && index < 32; index++) {
 			if (eligibility[index] == 1) {

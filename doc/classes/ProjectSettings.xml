@@ -3452,6 +3452,11 @@
 		<member name="rendering/nextgeo/raster_mode" type="int" setter="" getter="" default="0">
 			How NextGeo rasterizes its visibility buffer. [code]Hybrid[/code] rasterizes clusters of small triangles in a compute shader and the others in hardware, both into one 64-bit depth and visibility ID buffer, which an export pass then turns into the depth buffer and the visibility targets. [code]Hardware[/code] rasterizes every cluster in hardware with a depth attachment. A device without 64-bit atomics or indirect-count draws always uses [code]Hardware[/code] and logs the reason [code]NO_INT64_ATOMICS[/code] once.
 		</member>
+		<member name="rendering/nextgeo/ray_tracing_mode" type="int" setter="" getter="" default="0" experimental="Native Nanite ray tracing is experimental and off by default, as in Unreal Engine.">
+			How NextGeo meshes enter hardware ray tracing (the NextGI hardware tier's TLAS).
+			[b]Fallback[/b] (the default) traces each mesh's fixed ray tracing proxy, a cut built at import at [member rendering/global_illumination/nextgi/rt_max_error].
+			[b]Native (Experimental)[/b] traces BLASes built at run time from the resident pages, one per mesh and camera-distance band, with the band's error target capped at the proxy's error. Rebuilds follow page residency and are capped per frame; their BLAS memory is capped at twice the proxy BLAS memory, inside the ray tracing memory budget, and held there when either shrinks. Distance bands with the same cut share one BLAS. An instance whose BLAS is not built yet keeps its previous one, or the proxy; when the memory cap has room for the new BLAS only without the previous one, the instance traces the proxy until the new BLAS is built. Skinned instances, materials with custom vertex code and meshes with non-virtualized surfaces keep the proxy.
+		</member>
 		<member name="rendering/nextgeo/streaming/debug_io_delay_ms" type="Vector2" setter="" getter="" default="Vector2(0, 0)">
 			Injects a deterministic seeded uniform wall-time IO delay in milliseconds ([code]Vector2(min_ms, max_ms)[/code]) on each background NextGeo page read request for slow-storage streaming stress tests. Set to [code]Vector2(0, 0)[/code] outside tests.
 		</member>

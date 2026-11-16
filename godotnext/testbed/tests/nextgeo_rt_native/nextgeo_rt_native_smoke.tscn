@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/nextgeo_rt_native/nextgeo_rt_native_smoke.gd" id="1_ngrts"]
+
+[node name="NextGeoRTNativeSmoke" type="Node"]
+script = ExtResource("1_ngrts")

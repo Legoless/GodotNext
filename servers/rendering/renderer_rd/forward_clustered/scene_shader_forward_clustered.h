@@ -422,6 +422,8 @@ public:
 		// GodotNext: nextgi_alpha_policy (#61).
 		virtual RendererRD::MaterialStorage::ShaderData::NextGIRTClass get_nextgi_rt_class() const;
 		virtual uint32_t get_nextgeo_fallback() const { return uint32_t(nextgeo_fallback); }
+		// GodotNext: nextgeo_rt_native (#156)
+		virtual bool nextgeo_moves_vertices() const { return uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform; }
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const;
 		uint16_t _get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const;

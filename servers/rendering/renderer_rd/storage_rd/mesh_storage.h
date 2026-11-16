@@ -86,6 +86,9 @@ public:
 		LocalVector<NextGIRTPartGeometry> geometries;
 	};
 
+	// GodotNext: nextgeo_rt_native (#156). See mesh_nextgi_set_virtual_geometry_changed_callback().
+	typedef void (*NextGIVirtualGeometryChanged)(void *p_userdata, RID p_mesh);
+
 	struct NextGIRTSurfaceInfo {
 		bool eligible = false;
 		uint32_t chunk = UINT32_MAX;
@@ -306,6 +309,9 @@ private:
 	bool nextgi_hwrt_tier_active = false;
 	float nextgi_rt_max_error = 0.02f;
 	NextGIArenaAllocator nextgi_rt_allocator;
+	// GodotNext: nextgeo_rt_native (#156)
+	NextGIVirtualGeometryChanged nextgi_vg_changed_callback = nullptr;
+	void *nextgi_vg_changed_userdata = nullptr;
 	// GodotNext: ps_mesh_sdf_atlas (#185).
 	NextGISDFAtlas sdf_atlas;
 	struct SDFJob {
@@ -580,6 +586,14 @@ public:
 	bool mesh_nextgi_rt_allows_update(RID p_mesh) const;
 	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_parts(RID p_mesh);
 	void mesh_nextgi_rt_clear_parts(RID p_mesh);
+	// GodotNext: nextgeo_rt_native (#156). RT-arena ranges of native Nanite RT parts, outside any
+	// mesh's parts. An allocation is invalid when the arena is off or a chunk cannot be created.
+	NextGIArenaAllocator::Allocation mesh_nextgi_rt_arena_allocate(uint32_t p_size);
+	void mesh_nextgi_rt_arena_free(const NextGIArenaAllocator::Allocation &p_allocation);
+	// The owner of those parts hears when a mesh's virtual geometry changes or its last instance
+	// leaves (mesh_on_virtual_geometry_changed), so it frees them with the mesh's proxy.
+	void mesh_nextgi_set_virtual_geometry_changed_callback(NextGIVirtualGeometryChanged p_callback, void *p_userdata);
+	void *mesh_nextgi_get_virtual_geometry_changed_userdata() const { return nextgi_vg_changed_userdata; }
 	void mesh_nextgi_release_cpu_geometry(RID p_mesh);
 	// GodotNext: nextgi_skinned_actors (#59). True when a surface is bone-driven, so the mesh has
 	// no static BLAS parts and its cards come from the bind-pose CPU copy.

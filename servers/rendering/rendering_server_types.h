@@ -151,6 +151,9 @@ struct VirtualGeometryDesc {
 	PackedByteArray rt_proxy_triangle_groups;
 	PackedByteArray card_descriptors;
 	float rt_proxy_eps = 0.0f;
+	// GodotNext: nextgeo_rt_native (#156). The proxy cut's clusters in its packing order, so native
+	// Nanite RT can give its triangles the proxy's Stage-2 card groups.
+	PackedInt32Array rt_proxy_clusters;
 };
 
 /* STATUS INFORMATION */
