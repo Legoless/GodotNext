@@ -81,6 +81,21 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	bool nextgeo_proxy_active = false;
 	bool nextgeo_rt_proxy_active = false;
 	LocalVector<uint32_t> nextgeo_bucket_table;
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). This frame's per-(instance, surface) raster-bin
+	// table (filled only while a programmable bin exists), the material of each programmable bin it
+	// uses, and whether the main view runs the hybrid raster that draws them. A surface with a
+	// programmable bin in a view without the hybrid raster draws on legacy raster.
+	struct NextGeoRasterBinOwner {
+		SceneShaderForwardClustered::ShaderData *shader = nullptr;
+		SceneShaderForwardClustered::MaterialData *material = nullptr;
+	};
+	LocalVector<uint32_t> nextgeo_raster_bin_table;
+	NextGeoRasterBinOwner nextgeo_raster_bin_owners[RendererVirtualMeshStorage::RASTER_BIN_LIMIT];
+	uint64_t nextgeo_raster_bins_used = 0;
+	bool nextgeo_programmable_view_active = false;
+	bool nextgeo_raster_bins_exhausted_warned = false;
+	bool _nextgeo_programmable_raster_admitted();
+	bool _nextgeo_view_runs_hybrid_raster();
 
 	enum {
 		SCENE_UNIFORM_SET = 0,
@@ -632,6 +647,9 @@ private:
 		uint32_t flags = 0;
 		uint32_t surface_index = 0;
 		RendererRD::NextGeoFallback nextgeo_fallback_reason = RendererRD::NEXTGEO_FALLBACK_NONE;
+		// GodotNext: nextgeo_raster_bins (#155). The surface's programmable raster bin (0: fixed-function),
+		// a reference held in RendererVirtualMeshStorage's RasterBinRegistry until the cache is freed.
+		uint32_t nextgeo_raster_bin = 0;
 		bool uses_lightmap_specular = false;
 		bool uses_prepass_velocity = false;
 		uint32_t color_pass_inclusion_mask = 0;

@@ -190,6 +190,9 @@ vec3 fallback_reason_color(uint reason, uint cls, uint rt_excl) {
 		case 14u: // MULTIMESH_OR_PARTICLES / VGD_IGNORED
 			base_col = vec3(0.45, 0.72, 0.25);
 			break;
+		case 15u: // UNSUPPORTED_RASTER_FEATURE (#155)
+			base_col = vec3(0.30, 0.45, 0.95);
+			break;
 		default:
 			base_col = vec3(0.82, 0.52, 0.22);
 			break;

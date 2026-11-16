@@ -1321,6 +1321,17 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			nextgeo_instance_data.resize(MAX(record_count, 1u));
 			memset(nextgeo_instance_data.ptr(), 0, nextgeo_instance_data.size() * sizeof(SceneState::InstanceData));
 		}
+		// GodotNext: nextgeo_raster_bins (#155). The raster-bin table exists only while a programmable bin does.
+		if (!p_append) {
+			nextgeo_raster_bins_used = 0;
+			if (nextgeo_programmable_view_active) {
+				const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
+				nextgeo_raster_bin_table.resize(MAX(record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
+				memset(nextgeo_raster_bin_table.ptr(), 0, nextgeo_raster_bin_table.size() * sizeof(uint32_t));
+			} else {
+				nextgeo_raster_bin_table.clear();
+			}
+		}
 	}
 
 	bool nextgeo_request_redraw = false;
@@ -1496,10 +1507,13 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			// raster in active shadow views), not by the legacy opaque/motion/shadow lists.
 			const bool surface_virtual = (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0;
 			const bool shadow_virtual_view = nextgeo_shadow_pass_active && p_render_list == RENDER_LIST_SECONDARY && (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP);
-			const bool skip_virtual = ((nextgeo_virtual_view && (p_render_list == RENDER_LIST_OPAQUE || p_render_list == RENDER_LIST_MOTION)) || shadow_virtual_view) && surface_virtual;
+			// GodotNext: nextgeo_raster_bins (#155). A surface with a programmable raster bin draws on legacy
+			// raster in a view without the hybrid raster; its bucket entry stays invalid, so NextGeo skips it.
+			const bool programmable_on_legacy = surface_virtual && surf->nextgeo_raster_bin != 0u && !nextgeo_programmable_view_active && !shadow_virtual_view;
+			const bool skip_virtual = ((nextgeo_virtual_view && (p_render_list == RENDER_LIST_OPAQUE || p_render_list == RENDER_LIST_MOTION)) || shadow_virtual_view) && surface_virtual && !programmable_on_legacy;
 #ifdef DEBUG_ENABLED
 			if ((nextgeo_virtual_view && p_pass_mode == PASS_MODE_COLOR && p_render_list == RENDER_LIST_OPAQUE) || shadow_virtual_view) {
-				if (surface_virtual && !skip_virtual) {
+				if (surface_virtual && !skip_virtual && !programmable_on_legacy) {
 					// The skip below must have caught it; an add here is a double dispatch.
 					RSG::virtual_mesh_storage->nextgeo_count_double_dispatch();
 				} else if (surface_virtual && skip_virtual && inst->nextgeo_record_index == UINT32_MAX) {
@@ -1515,6 +1529,14 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 			}
 #endif
 			if (skip_virtual) {
+				// GodotNext: nextgeo_raster_bins (#155). The surface's programmable bin, and the material it binds.
+				if (surf->nextgeo_raster_bin != 0u && nextgeo_virtual_view && p_render_list == RENDER_LIST_OPAQUE && surf->surface_index < 32 && surf->nextgeo_raster_bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT &&
+						inst->nextgeo_record_index != UINT32_MAX && RendererRD::nextgeo_raster_bin_table_word(inst->nextgeo_record_index, surf->surface_index) < nextgeo_raster_bin_table.size()) {
+					RendererRD::nextgeo_raster_bin_table_set(nextgeo_raster_bin_table.ptr(), inst->nextgeo_record_index, surf->surface_index, surf->nextgeo_raster_bin);
+					nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].shader = surf->shader;
+					nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].material = surf->material;
+					nextgeo_raster_bins_used |= uint64_t(1) << surf->nextgeo_raster_bin;
+				}
 				if (!nextgeo_visibility_only_active && p_render_list == RENDER_LIST_OPAQUE && inst->nextgeo_record_index < nextgeo_instance_data.size() && surf->surface_index < 32) {
 					const uint32_t rec = inst->nextgeo_record_index;
 					SceneState::InstanceData &idata = nextgeo_instance_data[rec];
@@ -3008,6 +3030,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	nextgeo_virtual_active = using_nextgeo;
 	nextgeo_visibility_only_active = visibility_only;
+	// GodotNext: nextgeo_raster_bins (#155). Programmable raster bins draw on the hybrid main view only;
+	// elsewhere their surfaces draw on legacy raster.
+	{
+		const bool main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
+		nextgeo_programmable_view_active = using_nextgeo && main_view && RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_raster_bins().get_active_count() > 0u && _nextgeo_view_runs_hybrid_raster();
+	}
 
 	// GodotNext: megalights_inputs (#136). #143 takes over MegaLightsInputs::is_requested().
 	// Reflection probes leave the main view's targets alone. enable_view_shader_groups() is
@@ -3397,6 +3425,33 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					raster_inputs.z_near = scene_data->z_near;
 					raster_inputs.orthographic = scene_data->cam_orthogonal;
 					raster_inputs.sw_raster_max_edge_px = float(GLOBAL_GET("rendering/nextgeo/sw_raster_max_edge_px"));
+					// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). This frame's programmable bins:
+					// each bin's raster target and material parameters, and the scene environment.
+					if (nextgeo_programmable_view_active && nextgeo_raster_bins_used != 0u && !nextgeo_raster_bin_table.is_empty()) {
+						const bool buffer = vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER;
+						for (uint32_t bin = 1; bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT; bin++) {
+							const NextGeoRasterBinOwner &owner = nextgeo_raster_bin_owners[bin];
+							if ((nextgeo_raster_bins_used & (uint64_t(1) << bin)) == 0u || owner.shader == nullptr || owner.material == nullptr) {
+								continue;
+							}
+							NextGeoRasterBinProgram program;
+							program.bin = bin;
+							program.sw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(false, buffer);
+							program.hw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(true, buffer);
+							Vector<RD::Uniform> material_uniforms;
+							owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
+							for (const RD::Uniform &uniform : material_uniforms) {
+								program.material_uniforms.push_back(uniform);
+							}
+							raster_inputs.raster_bin_programs.push_back(program);
+						}
+						raster_inputs.raster_bin_table = nextgeo_raster_bin_table.ptr();
+						raster_inputs.raster_bin_table_words = nextgeo_raster_bin_table.size();
+						raster_inputs.environment_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, scene_data->get_uniform_buffer()));
+						raster_inputs.environment_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, nextgeo_resolve.get_instance_data_buffer()));
+						raster_inputs.environment_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, RendererRD::MaterialStorage::get_singleton()->global_shader_uniforms_get_storage_buffer()));
+						rb->get_samplers().append_uniforms(raster_inputs.environment_uniforms, 3);
+					}
 				}
 			}
 
@@ -6094,6 +6149,10 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::_mark_dirty() {
 
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
+		// GodotNext: nextgeo_raster_bins (#155). The surface's reference to its programmable raster bin.
+		if (surf->nextgeo_raster_bin != 0u && RSG::virtual_mesh_storage != nullptr) {
+			RSG::virtual_mesh_storage->raster_bin_release(surf->nextgeo_raster_bin);
+		}
 		RenderForwardClustered::get_singleton()->geometry_instance_surface_alloc.free(surf);
 		surf = next;
 	}
@@ -6212,6 +6271,15 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	route_facts.lightmapped = ginstance->lightmap_instance.is_valid();
 	route_facts.chain_blocked = p_chain_blocked;
 	route_facts.material_fallback = RendererRD::NextGeoFallback(p_material->shader_data->get_nextgeo_fallback());
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). rendering/nextgeo/debug_programmable_raster admits
+	// a masked or vertex-offset material into a programmable raster bin on the Nanite device tier; by
+	// default these keep their #80 reasons until #153 and #164 turn the features on.
+	bool admit_programmable = false;
+	if (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE && p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
+			p_material->shader_data->has_raster_target() && route_facts.mesh_has_virtual_geometry && _nextgeo_programmable_raster_admitted() && p_material->shader_data->ensure_raster_target()) {
+		admit_programmable = true;
+		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+	}
 	if (route_facts.material_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
 			(ginstance->fade_near || ginstance->fade_far || (ginstance->force_alpha * ginstance->parent_fade_alpha) < FADE_ALPHA_PASS_THRESHOLD)) {
 		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_ALPHA;
@@ -6219,7 +6287,31 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	// Eligibility is recorded regardless of the draw-ready gate; the gate is
 	// applied per view so caches built before draw-ready still route once set.
 	route_facts.draw_ready = true;
-	const RendererRD::NextGeoSurfaceRoute route = RendererRD::nextgeo_resolve_surface_route(route_facts);
+	RendererRD::NextGeoSurfaceRoute route = RendererRD::nextgeo_resolve_surface_route(route_facts);
+	// GodotNext: nextgeo_raster_bins (#155). An admitted surface holds a reference to its bin; with every
+	// bin taken it keeps the material's default route.
+	uint32_t raster_bin = 0;
+	if (route.virtual_geometry && admit_programmable) {
+		RendererVirtualMeshStorage::RasterBinKey bin_key;
+		bin_key.features = p_material->shader_data->raster_features;
+		bin_key.shader_version = p_material->shader_data->version;
+		bin_key.material = uint64_t(uintptr_t(p_material));
+		raster_bin = RSG::virtual_mesh_storage->raster_bin_acquire(bin_key);
+		if (raster_bin == 0u) {
+			route.virtual_geometry = false;
+			route.reason = RendererRD::NextGeoFallback(p_material->shader_data->get_nextgeo_fallback());
+			if (!nextgeo_raster_bins_exhausted_warned) {
+				nextgeo_raster_bins_exhausted_warned = true;
+				WARN_PRINT(vformat("NextGeo: all %d programmable raster bins are in use; further masked and vertex-offset materials stay on legacy raster.", int(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX)));
+			}
+		}
+	}
+	// N4: one line per material shader the raster target rejects.
+	if (route.reason == RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE && !p_material->shader_data->nextgeo_raster_reject_logged) {
+		p_material->shader_data->nextgeo_raster_reject_logged = true;
+		const String shader_name = p_material->shader_data->path.is_empty() ? vformat("<built-in>:%d", p_material->shader_data->code.hash()) : p_material->shader_data->path;
+		print_line(vformat("NextGeo: material shader \"%s\" stays on legacy raster (UNSUPPORTED_RASTER_FEATURE: %s).", shader_name, RendererRD::nextgeo_raster_reject_names(p_material->shader_data->raster_rejects)));
+	}
 	if (route.virtual_geometry) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL;
 	}
@@ -6228,6 +6320,7 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 
 	sdcache->flags = flags;
 	sdcache->nextgeo_fallback_reason = route.reason;
+	sdcache->nextgeo_raster_bin = raster_bin;
 	sdcache->mesh_has_virtual_geometry = RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->mesh_has_virtual_geometry(p_mesh);
 
 	sdcache->shader = p_material->shader_data;
@@ -7020,6 +7113,17 @@ void RenderForwardClustered::GeometryInstanceForwardClustered::set_lightmap_capt
 	_mark_dirty();
 }
 
+// GodotNext: nextgeo_raster_bins (#155). The setting is read first, so a project that never turns it on
+// never builds NextGeo's cut resources from here.
+bool RenderForwardClustered::_nextgeo_programmable_raster_admitted() {
+	return bool(GLOBAL_GET("rendering/nextgeo/debug_programmable_raster")) && RSG::virtual_mesh_storage != nullptr && nextgeo_cut.is_hybrid_raster_available();
+}
+
+bool RenderForwardClustered::_nextgeo_view_runs_hybrid_raster() {
+	return RendererRD::NextGeoRasterMode(int(GLOBAL_GET("rendering/nextgeo/raster_mode"))) == RendererRD::NEXTGEO_RASTER_MODE_HYBRID && nextgeo_cut.is_hybrid_raster_available() &&
+			nextgeo_cut.get_vis64_storage(bool(GLOBAL_GET("rendering/nextgeo/debug_vis64_buffer"))) != RendererRD::NEXTGEO_VIS64_NONE;
+}
+
 void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_geometry_instance) {
 	GeometryInstanceForwardClustered *ginstance = static_cast<GeometryInstanceForwardClustered *>(p_geometry_instance);
 	ERR_FAIL_NULL(ginstance);
@@ -7029,6 +7133,10 @@ void RenderForwardClustered::geometry_instance_free(RenderGeometryInstance *p_ge
 	GeometryInstanceSurfaceDataCache *surf = ginstance->surface_caches;
 	while (surf) {
 		GeometryInstanceSurfaceDataCache *next = surf->next;
+		// GodotNext: nextgeo_raster_bins (#155).
+		if (surf->nextgeo_raster_bin != 0u && RSG::virtual_mesh_storage != nullptr) {
+			RSG::virtual_mesh_storage->raster_bin_release(surf->nextgeo_raster_bin);
+		}
 		geometry_instance_surface_alloc.free(surf);
 		surf = next;
 	}

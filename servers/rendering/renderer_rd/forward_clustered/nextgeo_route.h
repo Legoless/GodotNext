@@ -56,6 +56,10 @@ enum NextGeoFallback : uint32_t {
 	// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N1). A per-view raster-path reason, not a route
 	// reason: below the Nanite device tier the view keeps NextGeo with the v2.4 hardware raster.
 	NEXTGEO_FALLBACK_NO_INT64_ATOMICS,
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). The material raster target rejects a material
+	// with a raster program (masked or vertex offset): it reads FRAGCOORD, the screen, depth or
+	// normal-roughness texture, or writes the absolute DEPTH. The surface stays on legacy raster.
+	NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE,
 	NEXTGEO_FALLBACK_MAX,
 };
 
@@ -171,6 +175,8 @@ inline const char *nextgeo_fallback_name(NextGeoFallback p_reason) {
 			return "alpha";
 		case NEXTGEO_FALLBACK_NO_INT64_ATOMICS:
 			return "NO_INT64_ATOMICS";
+		case NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE:
+			return "UNSUPPORTED_RASTER_FEATURE";
 		case NEXTGEO_FALLBACK_MAX:
 			break;
 	}

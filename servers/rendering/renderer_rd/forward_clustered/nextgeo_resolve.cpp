@@ -205,6 +205,13 @@ void NextGeoResolve::_ensure_classify_buffers(uint32_t p_bucket_count, uint32_t 
 	}
 }
 
+RID NextGeoResolve::get_instance_data_buffer() {
+	if (!_ensure()) {
+		return RID();
+	}
+	return instance_data_buffer.is_valid() ? instance_data_buffer : dummy_buffer;
+}
+
 RID NextGeoResolve::get_bucket_table_buffer() {
 	if (!_ensure()) {
 		return RID();

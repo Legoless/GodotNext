@@ -60,6 +60,23 @@ public:
 
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> *uniforms = nullptr;
 		bool visibility_resolve = false;
+		// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). With visibility_resolve: also emit the
+		// material raster target, code["raster_fragment"] and the compute-stage globals, and report
+		// GeneratedCode::raster_uses.
+		bool raster_target = false;
+	};
+
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). What the raster target's fragment subset uses
+	// that a raster bin cannot provide.
+	enum RasterTargetUse : uint32_t {
+		RASTER_USES_FRAGCOORD = 1u << 0, // FRAGCOORD in fragment() or a function it calls.
+		RASTER_USES_SCREEN_TEXTURE = 1u << 1,
+		RASTER_USES_DEPTH_TEXTURE = 1u << 2,
+		RASTER_USES_NORMAL_ROUGHNESS_TEXTURE = 1u << 3,
+		RASTER_WRITES_DEPTH = 1u << 4, // The absolute DEPTH, written in fragment() or a function it calls.
+		// Not a reject: discard in a function fragment() calls. The raster target rewrites discard only in
+		// fragment()'s own body, so such a material gets no raster target and keeps its default route.
+		RASTER_USES_FUNCTION_DISCARD = 1u << 5,
 	};
 
 	struct GeneratedCode {
@@ -92,6 +109,7 @@ public:
 		bool uses_depth_texture = false;
 		bool uses_normal_roughness_texture = false;
 		bool uses_unsupported_derivative = false;
+		uint32_t raster_uses = 0; // RasterTargetUse bits, with IdentifierActions::raster_target.
 	};
 
 	struct DefaultIdentifierActions {
@@ -126,6 +144,7 @@ private:
 	void _dump_function_deps(const ShaderLanguage::ShaderNode *p_node, const StringName &p_for_func, const HashMap<StringName, String> &p_func_code, String &r_to_add, HashSet<StringName> &added);
 	String _dump_node_code(const ShaderLanguage::Node *p_node, int p_level, GeneratedCode &r_gen_code, IdentifierActions &p_actions, const DefaultIdentifierActions &p_default_actions, bool p_assigning, bool p_scope = true);
 	void _compile_visibility_resolve(GeneratedCode &r_gen_code, IdentifierActions &p_actions, const DefaultIdentifierActions &p_default_actions);
+	uint32_t _get_raster_uses(const GeneratedCode &p_gen_code) const;
 
 	const ShaderLanguage::ShaderNode *shader = nullptr;
 	const ShaderLanguage::FunctionNode *function = nullptr;

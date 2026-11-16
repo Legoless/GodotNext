@@ -33,6 +33,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/renderer_rd/pipeline_hash_map_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_hw.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_sw.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -384,6 +386,21 @@ public:
 		bool writes_depth = false;
 		bool uses_unsupported_derivative = false;
 		RendererRD::NextGeoFallback nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+		// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). The material's raster features, what its
+		// raster target rejects, its fallback reason when rendering/nextgeo/debug_programmable_raster admits
+		// programmable raster, and its raster target (the code, kept only for a material a programmable bin
+		// can take, and the software and hardware forms' versions, made the first time a bin takes it).
+		uint32_t raster_features = 0;
+		uint32_t raster_rejects = 0;
+		RendererRD::NextGeoFallback nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+		bool raster_target_available = false;
+		HashMap<String, String> raster_code;
+		String raster_globals;
+		String raster_uniforms;
+		Vector<String> raster_defines;
+		RID raster_sw_version;
+		RID raster_hw_version;
+		bool nextgeo_raster_reject_logged = false;
 		RSE::CullMode cull_mode = RSE::CULL_MODE_DISABLED;
 
 		bool stencil_enabled = false;
@@ -424,6 +441,15 @@ public:
 		virtual uint32_t get_nextgeo_fallback() const { return uint32_t(nextgeo_fallback); }
 		// GodotNext: nextgeo_rt_native (#156)
 		virtual bool nextgeo_moves_vertices() const { return uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform; }
+		// GodotNext: nextgeo_raster_bins (#155). True when a programmable raster bin can take the material.
+		bool has_raster_target() const { return raster_target_available; }
+		// Makes the raster target's versions (ShaderRD compiles them in the background). False when this
+		// device has no raster target.
+		bool ensure_raster_target();
+		// The raster target's shader for one form (software or hardware) and visibility-buffer storage
+		// (image or buffer); invalid when this device does not build that storage.
+		RID get_raster_target_shader(bool p_hardware, bool p_buffer) const;
+		void _free_raster_target();
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const;
 		uint16_t _get_shader_version(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader) const;
@@ -466,6 +492,11 @@ public:
 
 	SceneForwardClusteredShaderRD shader;
 	ShaderCompiler compiler;
+	// GodotNext: nextgeo_raster_bins (#155). The material raster target's two forms, initialized on the
+	// Nanite device tier only (variants: image, buffer visibility-buffer storage).
+	RasterMaterialSwShaderRD raster_sw_shader;
+	RasterMaterialHwShaderRD raster_hw_shader;
+	bool raster_target_ready = false;
 	bool emulate_point_size = false;
 	bool depth_prepass_enabled = false;
 

@@ -34,3 +34,54 @@ const uint NEXTGEO_SW_DISPATCH_WIDTH = 32768u;
 uint nextgeo_raster_args_word(uint p_phase, uint p_bin, uint p_kind) {
 	return ((p_phase * NEXTGEO_RASTER_BIN_COUNT + p_bin) * 2u + p_kind) * 4u;
 }
+
+// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). Programmable raster bins: bin 0 is the
+// fixed-function bin above; bins 1 to NEXTGEO_RASTER_BIN_LIMIT - 1 run a material's raster program
+// (raster_material_inc.glsl). Copies of nextgeo_raster_bins.h and
+// RendererVirtualMeshStorage::RASTER_BIN_LIMIT: change both in the same commit.
+// A VSM page raster (#217) iterates the same bins with NEXTGEO_RASTER_DEPTH_ONLY: vertex() plus
+// coverage, no visibility ID.
+const uint NEXTGEO_RASTER_BIN_LIMIT = 64u;
+const uint NEXTGEO_RASTER_BIN_KIND_SW = 0u;
+const uint NEXTGEO_RASTER_BIN_KIND_HW = 1u;
+// Per (instance, surface): one byte per surface, indexed like the bucket table (bucket_base + surface).
+const uint NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD = 8u;
+// A cull entry: visible-cluster index | kind << 21 | bin << 22.
+const uint NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS = 21u;
+const uint NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT = 21u;
+const uint NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT = 22u;
+// Words of the bin state buffer.
+const uint NEXTGEO_RASTER_BIN_STATE_COUNTS = 0u; // [phase][bin][kind] cluster counts
+const uint NEXTGEO_RASTER_BIN_STATE_CURSORS = 256u; // [phase][bin][kind] range starts in the phase's region
+const uint NEXTGEO_RASTER_BIN_STATE_APPENDED = 512u; // [phase] appended entries
+const uint NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS = 516u; // [phase] uvec4 scatter dispatch
+const uint NEXTGEO_RASTER_BIN_STATE_FILL = 768u; // [phase][bin][kind] scatter fill counters
+const uint NEXTGEO_RASTER_BIN_STATE_ARGS = 1024u; // [phase][bin] SW uvec4 dispatch, then HW uvec4 draw
+
+uint nextgeo_raster_bin_table_word(uint p_bucket_base, uint p_surface) {
+	return (p_bucket_base + p_surface) >> 2u;
+}
+
+uint nextgeo_raster_bin_table_shift(uint p_surface) {
+	return (p_surface & 3u) * 8u;
+}
+
+uint nextgeo_raster_bin_count_word(uint p_phase, uint p_bin, uint p_kind) {
+	return NEXTGEO_RASTER_BIN_STATE_COUNTS + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+}
+
+uint nextgeo_raster_bin_cursor_word(uint p_phase, uint p_bin, uint p_kind) {
+	return NEXTGEO_RASTER_BIN_STATE_CURSORS + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+}
+
+uint nextgeo_raster_bin_fill_word(uint p_phase, uint p_bin, uint p_kind) {
+	return NEXTGEO_RASTER_BIN_STATE_FILL + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+}
+
+uint nextgeo_raster_bin_args_word(uint p_phase, uint p_bin, uint p_kind) {
+	return NEXTGEO_RASTER_BIN_STATE_ARGS + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 8u + p_kind * 4u;
+}
+
+uint nextgeo_raster_bin_pack_entry(uint p_visible_index, uint p_bin, uint p_kind) {
+	return (p_visible_index & ((1u << NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS) - 1u)) | ((p_kind & 1u) << NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT) | ((p_bin & 0x3Fu) << NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT);
+}

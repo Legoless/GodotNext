@@ -51,6 +51,9 @@ enum NextGeoCutFlags : uint32_t {
 	NEXTGEO_CUT_FLAG_SHADOW_VIEW = 1u << 4,
 	// GodotNext: nextgeo_sw_raster (#162). Main view: route emitted clusters to the hybrid raster's bins.
 	NEXTGEO_CUT_FLAG_HYBRID_RASTER = 1u << 5,
+	// GodotNext: nextgeo_raster_bins (#155). Hybrid main view with programmable raster bins: cluster cull
+	// reads each cluster's raster bin and appends programmable-bin clusters for the per-bin compaction.
+	NEXTGEO_CUT_FLAG_PROGRAMMABLE_BINS = 1u << 6,
 };
 
 // Projected error in pixels for a mesh-space sphere (plan §7.3 step 3).

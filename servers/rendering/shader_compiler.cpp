@@ -30,6 +30,7 @@
 
 #include "shader_compiler.h"
 
+#include "core/templates/local_vector.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/shader_types.h"
@@ -1884,6 +1885,9 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		bool is_vertex_mode = false;
 		bool is_entry_fragment = false;
 		bool is_entry_light = false;
+		// GodotNext: nextgeo_raster_bins (#155). The raster target's form of discard, which its compute
+		// template defines (a compute shader has no discard).
+		bool raster_discard = false;
 		int cf_depth = 0;
 		Vector<HashMap<StringName, ResolveVarInfo>> scopes;
 		HashMap<StringName, bool> *frag_to_light_exact_ptr = nullptr;
@@ -3073,7 +3077,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 							res.val = "return;";
 						}
 					} else if (cfnode->flow_op == SL::FLOW_OP_DISCARD) {
-						res.val = "discard;";
+						res.val = raster_discard ? "_NG_RASTER_DISCARD;" : "discard;";
 					} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
 						res.val = "continue;";
 					} else if (cfnode->flow_op == SL::FLOW_OP_BREAK) {
@@ -3355,8 +3359,29 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 			}
 		}
 
+		const HashMap<StringName, ResolveVarInfo> emitter_initial_scope(emitter.scopes[0]);
 		String resolve_frag_body = preamble + emitter.emit_node(ffunc->body, 2, false).val;
 		r_gen_code.code["resolve_fragment"] = resolve_frag_body;
+		// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). The raster target runs the same fragment
+		// body with the same analytic derivatives; only discard differs. The driver compiler keeps the
+		// statements that feed ALPHA, the alpha built-ins and discard.
+		if (p_actions.raster_target) {
+			ResolveEmitter raster_emitter;
+			raster_emitter.self = this;
+			raster_emitter.shader_node = shader;
+			raster_emitter.gen_code = &r_gen_code;
+			raster_emitter.id_actions = &p_actions;
+			raster_emitter.def_actions = &p_default_actions;
+			raster_emitter.cur_func = ffunc;
+			raster_emitter.cur_func_name = ffunc->name;
+			raster_emitter.is_vertex_mode = false;
+			raster_emitter.is_entry_fragment = true;
+			raster_emitter.raster_discard = true;
+			raster_emitter.frag_to_light_exact_ptr = &frag_to_light_exact;
+			raster_emitter.frag_to_light_varying_ptr = &frag_to_light_varying;
+			raster_emitter.scopes.push_back(HashMap<StringName, ResolveVarInfo>(emitter_initial_scope));
+			r_gen_code.code["raster_fragment"] = preamble + raster_emitter.emit_node(ffunc->body, 2, false).val;
+		}
 		r_gen_code.code["fragment"] = "#ifndef MODE_VISIBILITY_RESOLVE\n" + r_gen_code.code["fragment"] + "#else\n" + resolve_frag_body + "#endif\n";
 	}
 
@@ -3386,7 +3411,132 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 
 	if (!resolve_frag_globals.is_empty()) {
 		r_gen_code.stage_globals[STAGE_FRAGMENT] += "#ifdef MODE_VISIBILITY_RESOLVE\n" + resolve_frag_globals + "#endif\n";
+		// GodotNext: nextgeo_raster_bins (#155). The raster target's templates (compute, and vertex plus
+		// fragment) take the compute globals: structs, constants, textures and these.
+		if (p_actions.raster_target) {
+			r_gen_code.stage_globals[STAGE_COMPUTE] += "#ifdef MODE_VISIBILITY_RESOLVE\n" + resolve_frag_globals + "#endif\n";
+		}
 	}
+}
+
+// GodotNext: nextgeo_raster_bins (#155). Every variable and function name a node reads or writes.
+static void _collect_used_names(const SL::Node *p_node, HashSet<StringName> &r_used) {
+	if (!p_node) {
+		return;
+	}
+	switch (p_node->type) {
+		case SL::Node::NODE_TYPE_BLOCK: {
+			const SL::BlockNode *bnode = static_cast<const SL::BlockNode *>(p_node);
+			for (const SL::Node *stmt : bnode->statements) {
+				_collect_used_names(stmt, r_used);
+			}
+		} break;
+		case SL::Node::NODE_TYPE_VARIABLE_DECLARATION: {
+			const SL::VariableDeclarationNode *vdnode = static_cast<const SL::VariableDeclarationNode *>(p_node);
+			for (const SL::VariableDeclarationNode::Declaration &decl : vdnode->declarations) {
+				for (const SL::Node *init : decl.initializer) {
+					_collect_used_names(init, r_used);
+				}
+			}
+		} break;
+		case SL::Node::NODE_TYPE_VARIABLE: {
+			r_used.insert(static_cast<const SL::VariableNode *>(p_node)->name);
+		} break;
+		case SL::Node::NODE_TYPE_OPERATOR: {
+			const SL::OperatorNode *onode = static_cast<const SL::OperatorNode *>(p_node);
+			for (const SL::Node *arg : onode->arguments) {
+				_collect_used_names(arg, r_used);
+			}
+		} break;
+		case SL::Node::NODE_TYPE_CONTROL_FLOW: {
+			const SL::ControlFlowNode *cfnode = static_cast<const SL::ControlFlowNode *>(p_node);
+			if (cfnode->flow_op == SL::FLOW_OP_DISCARD) {
+				r_used.insert(SNAME("discard"));
+			}
+			for (const SL::Node *expr : cfnode->expressions) {
+				_collect_used_names(expr, r_used);
+			}
+			for (const SL::BlockNode *blk : cfnode->blocks) {
+				_collect_used_names(blk, r_used);
+			}
+		} break;
+		case SL::Node::NODE_TYPE_MEMBER: {
+			const SL::MemberNode *mnode = static_cast<const SL::MemberNode *>(p_node);
+			_collect_used_names(mnode->owner, r_used);
+			_collect_used_names(mnode->index_expression, r_used);
+			_collect_used_names(mnode->call_expression, r_used);
+			_collect_used_names(mnode->assign_expression, r_used);
+		} break;
+		case SL::Node::NODE_TYPE_ARRAY: {
+			const SL::ArrayNode *anode = static_cast<const SL::ArrayNode *>(p_node);
+			r_used.insert(anode->name);
+			_collect_used_names(anode->index_expression, r_used);
+			_collect_used_names(anode->call_expression, r_used);
+			_collect_used_names(anode->assign_expression, r_used);
+		} break;
+		case SL::Node::NODE_TYPE_ARRAY_CONSTRUCT: {
+			const SL::ArrayConstructNode *acnode = static_cast<const SL::ArrayConstructNode *>(p_node);
+			for (const SL::Node *init : acnode->initializer) {
+				_collect_used_names(init, r_used);
+			}
+		} break;
+		default:
+			break;
+	}
+}
+
+uint32_t ShaderCompiler::_get_raster_uses(const GeneratedCode &p_gen_code) const {
+	uint32_t uses = 0u;
+	if (p_gen_code.uses_screen_texture) {
+		uses |= RASTER_USES_SCREEN_TEXTURE;
+	}
+	if (p_gen_code.uses_depth_texture) {
+		uses |= RASTER_USES_DEPTH_TEXTURE;
+	}
+	if (p_gen_code.uses_normal_roughness_texture) {
+		uses |= RASTER_USES_NORMAL_ROUGHNESS_TEXTURE;
+	}
+	if (shader == nullptr) {
+		return uses;
+	}
+	// fragment() and every function it calls, directly or not.
+	HashSet<StringName> visited;
+	LocalVector<StringName> pending;
+	pending.push_back(SNAME("fragment"));
+	HashSet<StringName> used;
+	HashSet<StringName> assigned;
+	while (!pending.is_empty()) {
+		const StringName name = pending[pending.size() - 1];
+		pending.resize(pending.size() - 1);
+		if (visited.has(name)) {
+			continue;
+		}
+		visited.insert(name);
+		for (int i = 0; i < shader->vfunctions.size(); i++) {
+			if (shader->vfunctions[i].name != name) {
+				continue;
+			}
+			if (name != SNAME("fragment")) {
+				HashSet<StringName> function_used;
+				_collect_used_names(shader->vfunctions[i].function->body, function_used);
+				if (function_used.has(SNAME("discard"))) {
+					uses |= RASTER_USES_FUNCTION_DISCARD;
+				}
+			}
+			_collect_used_names(shader->vfunctions[i].function->body, used);
+			_collect_assigned_names(shader->vfunctions[i].function->body, assigned);
+			for (const StringName &callee : shader->vfunctions[i].uses_function) {
+				pending.push_back(callee);
+			}
+		}
+	}
+	if (used.has(SNAME("FRAGCOORD"))) {
+		uses |= RASTER_USES_FRAGCOORD;
+	}
+	if (assigned.has(SNAME("DEPTH"))) {
+		uses |= RASTER_WRITES_DEPTH;
+	}
+	return uses;
 }
 
 ShaderLanguage::DataType ShaderCompiler::_get_global_shader_uniform_type(const StringName &p_name) {
@@ -3498,6 +3648,7 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	r_gen_code.uses_depth_texture = false;
 	r_gen_code.uses_normal_roughness_texture = false;
 	r_gen_code.uses_unsupported_derivative = false;
+	r_gen_code.raster_uses = 0;
 
 	used_name_defines.clear();
 	used_rmode_defines.clear();
@@ -3511,6 +3662,10 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	_ALLOW_DISCARD_ _dump_node_code(shader, 1, r_gen_code, *p_actions, actions, false);
 	if (p_actions->visibility_resolve) {
 		_compile_visibility_resolve(r_gen_code, *p_actions, actions);
+		// GodotNext: nextgeo_raster_bins (#155).
+		if (p_actions->raster_target) {
+			r_gen_code.raster_uses = _get_raster_uses(r_gen_code);
+		}
 	}
 
 	return OK;

@@ -142,10 +142,19 @@ public:
 
 	// Bins of the visibility pass. Cluster cull compacts one software list and one hardware list per bin
 	// and phase; each bin is one indirect software dispatch and one indirect-count hardware draw.
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). RASTER_BIN_COUNT counts the bins with
+	// material-free pipelines (FIXED). RASTER_BIN_PROGRAMMABLE marks a table entry whose surfaces get a
+	// programmable bin, 1 to RASTER_BIN_PROGRAMMABLE_MAX, from the RasterBinRegistry below.
 	enum RasterBin : uint32_t {
 		RASTER_BIN_FIXED = 0,
 		RASTER_BIN_COUNT,
+		RASTER_BIN_PROGRAMMABLE = 0xFFu,
 	};
+	static constexpr uint32_t RASTER_BIN_PROGRAMMABLE_MAX = 63;
+	static constexpr uint32_t RASTER_BIN_LIMIT = RASTER_BIN_PROGRAMMABLE_MAX + 1;
+	// The features that need the material's raster program (vertex() and the coverage subset of
+	// fragment()). TWO_SIDED needs none: every bin flips facing from the per-surface cull bits.
+	static constexpr uint32_t RASTER_PROGRAM_FEATURES = RASTER_FEATURE_MASKED | RASTER_FEATURE_VERTEX_OFFSET | RASTER_FEATURE_DEPTH_OFFSET;
 
 	struct RasterBinEntry {
 		uint32_t features;
@@ -158,11 +167,21 @@ public:
 		{ 0u, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "FIXED" },
 		// #217's page raster: the same triangle setup (sw_raster_setup_inc.glsl), 32-bit depth.
 		{ 0u, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_FIXED" },
+		// #155: one entry per feature; a surface's bin rasterizes all of its features. The VSM entries use
+		// the raster target's depth-only mode (raster_material_inc.glsl, NEXTGEO_RASTER_DEPTH_ONLY).
+		{ RASTER_FEATURE_TWO_SIDED, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "TWO_SIDED" },
+		{ RASTER_FEATURE_TWO_SIDED, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_TWO_SIDED" },
+		{ RASTER_FEATURE_MASKED, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "MASKED" },
+		{ RASTER_FEATURE_MASKED, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_MASKED" },
+		{ RASTER_FEATURE_VERTEX_OFFSET, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "VERTEX_OFFSET" },
+		{ RASTER_FEATURE_VERTEX_OFFSET, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_VERTEX_OFFSET" },
+		// DEPTH_OFFSET arrives with #149's built-in; the bin evaluates it once the classifier sets the bit.
+		{ RASTER_FEATURE_DEPTH_OFFSET, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "DEPTH_OFFSET" },
+		{ RASTER_FEATURE_DEPTH_OFFSET, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_DEPTH_OFFSET" },
 	};
 	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
 
-	// The table entry that rasterizes p_features for p_pass, or -1 when no bin supports that feature
-	// mask yet (the surface keeps its legacy route).
+	// The table entry that rasterizes exactly p_features for p_pass, or -1 when no entry does.
 	static constexpr int32_t find_raster_bin_entry(uint32_t p_features, RasterPass p_pass) {
 		for (uint32_t i = 0; i < RASTER_BIN_TABLE_SIZE; i++) {
 			if (RASTER_BIN_TABLE[i].features == p_features && RASTER_BIN_TABLE[i].pass == p_pass) {
@@ -171,6 +190,90 @@ public:
 		}
 		return -1;
 	}
+
+	// GodotNext: nextgeo_raster_bins (#155). The bin kind that rasterizes a surface with p_features for
+	// p_pass: RASTER_BIN_FIXED, RASTER_BIN_PROGRAMMABLE, or -1 when a feature has no entry for that
+	// pass yet (the surface keeps its legacy route).
+	static constexpr int32_t resolve_raster_bin(uint32_t p_features, RasterPass p_pass) {
+		int32_t bin = int32_t(RASTER_BIN_FIXED);
+		for (uint32_t bit = 1u; bit != 0u && bit <= RASTER_FEATURE_ALL; bit <<= 1u) {
+			if ((p_features & bit) == 0u) {
+				continue;
+			}
+			const int32_t entry = find_raster_bin_entry(bit, p_pass);
+			if (entry < 0) {
+				return -1;
+			}
+			if (RASTER_BIN_TABLE[entry].bin == RASTER_BIN_PROGRAMMABLE) {
+				bin = int32_t(RASTER_BIN_PROGRAMMABLE);
+			}
+		}
+		if ((p_features & ~uint32_t(RASTER_FEATURE_ALL)) != 0u) {
+			return -1;
+		}
+		return bin;
+	}
+
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Programmable raster bins. A bin is keyed by
+	// (feature mask, material shader version) as N3 states, plus the material: a bin binds one material's
+	// parameters (its uniform buffer and textures) per dispatch. The (instance, surface) records that
+	// route through a bin hold a reference; the last release frees the bin index for reuse.
+	struct RasterBinKey {
+		uint32_t features = 0;
+		RID shader_version;
+		uint64_t material = 0;
+
+		bool operator==(const RasterBinKey &p_other) const {
+			return features == p_other.features && shader_version == p_other.shader_version && material == p_other.material;
+		}
+	};
+
+	class RasterBinRegistry {
+		RasterBinKey keys[RASTER_BIN_LIMIT];
+		uint32_t refcounts[RASTER_BIN_LIMIT] = {};
+		uint32_t active_count = 0;
+
+	public:
+		// The bin of p_key, with one more reference: the bin that already holds the key, else the lowest
+		// free bin. 0 (RASTER_BIN_FIXED) when the key has no program feature or every bin is taken.
+		uint32_t acquire(const RasterBinKey &p_key) {
+			if ((p_key.features & RASTER_PROGRAM_FEATURES) == 0u) {
+				return RASTER_BIN_FIXED;
+			}
+			uint32_t free_bin = 0;
+			for (uint32_t bin = 1; bin < RASTER_BIN_LIMIT; bin++) {
+				if (refcounts[bin] > 0u && keys[bin] == p_key) {
+					refcounts[bin]++;
+					return bin;
+				}
+				if (refcounts[bin] == 0u && free_bin == 0u) {
+					free_bin = bin;
+				}
+			}
+			if (free_bin == 0u) {
+				return RASTER_BIN_FIXED;
+			}
+			keys[free_bin] = p_key;
+			refcounts[free_bin] = 1u;
+			active_count++;
+			return free_bin;
+		}
+
+		void release(uint32_t p_bin) {
+			if (p_bin == RASTER_BIN_FIXED || p_bin >= RASTER_BIN_LIMIT || refcounts[p_bin] == 0u) {
+				return;
+			}
+			refcounts[p_bin]--;
+			if (refcounts[p_bin] == 0u) {
+				keys[p_bin] = RasterBinKey();
+				active_count--;
+			}
+		}
+
+		uint32_t get_refcount(uint32_t p_bin) const { return p_bin < RASTER_BIN_LIMIT ? refcounts[p_bin] : 0u; }
+		const RasterBinKey &get_key(uint32_t p_bin) const { return keys[p_bin < RASTER_BIN_LIMIT ? p_bin : 0u]; }
+		uint32_t get_active_count() const { return active_count; }
+	};
 
 	static constexpr uint32_t RECORD_BYTES = sizeof(Record);
 	static constexpr uint32_t MESH_RECORD_BYTES = sizeof(MeshRecord);
@@ -292,6 +395,10 @@ public:
 	uint64_t nextgeo_get_auxiliary_authored_virtual_draws() const { return nextgeo_auxiliary_authored_virtual_draws; }
 	uint64_t nextgeo_get_uv2_authored_draws() const { return nextgeo_uv2_authored_draws; }
 	uint64_t nextgeo_get_uv2_proxy_draws() const { return nextgeo_uv2_proxy_draws; }
+	// GodotNext: nextgeo_raster_bins (#155). The programmable raster bins (render thread only).
+	uint32_t raster_bin_acquire(const RasterBinKey &p_key) { return raster_bins.acquire(p_key); }
+	void raster_bin_release(uint32_t p_bin) { raster_bins.release(p_bin); }
+	const RasterBinRegistry &get_raster_bins() const { return raster_bins; }
 
 	// Instance records.
 	uint32_t instance_record_allocate(RID p_instance, RID p_mesh);
@@ -545,6 +652,7 @@ protected:
 	bool nextgeo_draw_ready = false;
 	uint32_t nextgeo_double_dispatch = 0;
 	uint32_t nextgeo_missing = 0;
+	RasterBinRegistry raster_bins;
 	uint32_t nextgeo_vgd_ignored_warnings = 0;
 	uint64_t nextgeo_auxiliary_proxy_draws = 0;
 	uint64_t nextgeo_auxiliary_authored_virtual_draws = 0;

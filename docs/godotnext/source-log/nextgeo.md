@@ -77,6 +77,31 @@ design itself (the 64-bit depth and ID buffer written with atomic max by both pa
 the per-cluster triangle-size switch and the export pass) comes from plan §21.4 N1 to
 N3; no Unreal Engine documentation beyond what the plan already cites was read for it.
 
+### Programmable raster bins (#155)
+
+The programmable raster bins (#155, plan §21.4 N3, N4) run a material's raster program in the
+hybrid raster's software and hardware paths.
+
+| Field | Value |
+|---|---|
+| What | The Vulkan specification's valid-usage rule VUID-RuntimeSpirv-NonWritable-06341 (appendix "Vulkan Environment for SPIR-V"): without the `vertexPipelineStoresAndAtomics` feature, every storage image, storage texel buffer and storage buffer variable in the vertex, tessellation and geometry stages must be decorated NonWritable. |
+| Upstream | https://docs.vulkan.org/spec/latest/appendices/spirvenv.html |
+| Version | The "latest" Vulkan specification page, which shows no revision or date, as read on 2026-11-16 |
+| License | The Vulkan specification (CC-BY 4.0, per https://github.com/KhronosGroup/Vulkan-Docs/blob/main/LICENSE.adoc). Consulted, not copied |
+| Read on | 2026-11-16, for issue #155 |
+| Consulted by | The #155 implementer |
+| Used in | `servers/rendering/renderer_rd/shaders/nextgeo/raster_material_inc.glsl` |
+| Copied files | None |
+
+How it was used: the hardware form's vertex stage declares the visibility buffer only in the
+pixel stage, so the vertex stage holds no writable storage resource. Everything else comes from
+the plan (§21.4 N3, N4) and from GodotNext's own code: the raster target reuses #80's
+visibility-resolve output and its analytic derivatives, and #162's triangle setup, edge rules,
+winding and visibility packing. The bin key, the per-(instance, surface) bin table, the cull
+append with a per-bin prefix and scatter, and the per-bin dispatch and draw are this
+implementation's own design. No Unreal Engine documentation beyond what the plan already cites
+was read for them.
+
 ## Native Nanite ray tracing (#156)
 
 No outside input. `rendering/nextgeo/ray_tracing_mode`, the per-band cut buckets and
