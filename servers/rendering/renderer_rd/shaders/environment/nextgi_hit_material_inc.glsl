@@ -287,17 +287,12 @@ float nextgi_hit_alpha_hash_threshold(vec3 p_pos, float p_hash_scale, float p_fo
 #endif // ALPHA_HASH_USED
 
 void main() {
-	// Only CPU-fed instances reach a material group, and a hit without records never touches hit_surfaces.
+	// Only CPU-fed instances reach a material group, but a hit without records never reads them.
 	NextGIInstanceRecord rec;
-	if (!nextgi_hit_fetch_record(uint(gl_InstanceCustomIndexEXT), uint(gl_GeometryIndexEXT), rec)) {
-#ifdef NEXTGI_HIT_CLOSEST
-		payload = nextgi_hit_unrecorded_payload(gl_WorldRayDirectionEXT, gl_HitTEXT, hit_record.shader_slot, uint(gl_InstanceCustomIndexEXT));
-#endif
-		return;
-	}
-	uint surface_index = rec.surface_base + gl_GeometryIndexEXT;
+	bool recorded = nextgi_hit_fetch_record(uint(gl_InstanceCustomIndexEXT), uint(gl_GeometryIndexEXT), rec);
+	uint surface_index = recorded ? rec.surface_base + gl_GeometryIndexEXT : 0u;
 	NextGIHitSurface hit_surface = hit_surfaces.data[surface_index];
-	if ((hit_surface.flags & 1u) == 0u || hit_surface.material_id == 0xFFFFFFFFu || hit_surface.attribute_chunk >= NEXTGI_HIT_ARENA_CHUNKS) {
+	if (!recorded || (hit_surface.flags & 1u) == 0u || hit_surface.material_id == 0xFFFFFFFFu || hit_surface.attribute_chunk >= NEXTGI_HIT_ARENA_CHUNKS) {
 #ifdef NEXTGI_HIT_CLOSEST
 		payload = nextgi_hit_unrecorded_payload(gl_WorldRayDirectionEXT, gl_HitTEXT, hit_record.shader_slot, uint(gl_InstanceCustomIndexEXT));
 #endif

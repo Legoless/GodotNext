@@ -47,7 +47,6 @@ class RenderGeometryInstance;
 
 namespace RendererRD {
 
-class NextGIArenaAllocator;
 class NextGIRTScene;
 class NextGISRC;
 
@@ -206,11 +205,6 @@ NextGIHitSourceLayout nextgi_hit_source_layout(uint64_t p_format, uint32_t p_ver
 // [r_byte_begin, r_byte_end) of the stream is what to upload.
 bool nextgi_hit_patch_stream(const NextGIHitSourceLayout &p_layout, uint32_t p_vertex_count, bool p_attribute_region, uint32_t p_offset, const uint8_t *p_data, uint32_t p_size, uint8_t *r_stream, uint32_t &r_byte_begin, uint32_t &r_byte_end);
 
-// Allocates and frees one surface's attribute stream in the RT arena, updating the stream byte total
-// MeshStorage reports. Nothing is allocated unless a consumer runs the hit groups (nextgi_hit_stream_needed()).
-bool nextgi_hit_allocate_surface_stream(const Array &p_arrays, uint32_t p_vertex_count, NextGIArenaAllocator &r_allocator, uint64_t &r_attribute_bytes, uint32_t &r_chunk, uint32_t &r_offset, uint32_t &r_size, Vector<uint8_t> &r_cpu);
-void nextgi_hit_free_surface_stream(NextGIArenaAllocator &r_allocator, uint64_t &r_attribute_bytes, uint32_t &r_chunk, uint32_t &r_offset, uint32_t &r_size, Vector<uint8_t> &r_cpu);
-
 // R11G11B10 float packing of the payload's emission (positive, truncated), and its decode.
 uint32_t nextgi_hit_pack_r11g11b10(const Color &p_color);
 Color nextgi_hit_unpack_r11g11b10(uint32_t p_packed);
@@ -274,34 +268,6 @@ bool nextgi_hit_element_needs_fallback(uint32_t p_inputs, bool p_element_colors,
 _FORCE_INLINE_ bool nextgi_hit_should_relink(uint32_t p_dead_linked_groups, bool p_link_running) {
 	return !p_link_running && p_dead_linked_groups >= NEXTGI_HIT_RELINK_DEAD_GROUPS;
 }
-
-// The full-table latch of a bindless table the hit groups allocate from. A failed allocation logs, so after one
-// the table is tried again only once a slot released from it can be reused: RenderingDevice reuses a released slot
-// after the frame delay. The retry frame never moves later, so steady releases cannot keep it shut.
-struct NextGIHitTableLatch {
-	static constexpr uint64_t NONE = UINT64_MAX;
-	bool full = false;
-	uint64_t retry_frame = NONE;
-	uint64_t last_release_frame = NONE;
-
-	bool may_allocate(uint64_t p_frame) const { return !full || p_frame >= retry_frame; }
-	void allocated(bool p_success, uint64_t p_frame, uint32_t p_frame_delay) {
-		full = !p_success;
-		if (p_success) {
-			retry_frame = NONE;
-			return;
-		}
-		// A slot released within the frame delay before this failure was not reusable yet: try again once it is.
-		const bool pending = last_release_frame != NONE && last_release_frame + p_frame_delay + 1 > p_frame;
-		retry_frame = pending ? last_release_frame + p_frame_delay + 1 : NONE;
-	}
-	void released(uint64_t p_frame, uint32_t p_frame_delay) {
-		last_release_frame = p_frame;
-		if (full) {
-			retry_frame = MIN(retry_frame, p_frame + p_frame_delay + 1);
-		}
-	}
-};
 // The texture defines the hit template reads the material's textures through: texture k of the material is
 // slot hit_texture_slots[hit_texture_base + k] of the bindless texture table.
 String nextgi_hit_texture_defines(const NextGIHitShaderSource &p_source);
@@ -404,7 +370,8 @@ private:
 	uint32_t _texture_slot(RID p_texture);
 	uint32_t _retry_texture_slot(RID p_texture);
 	void _release_texture_slot(RID p_texture);
-	// Bindless slots through each table's NextGIHitTableLatch.
+	// Bindless slots through a full-table latch: after a failed allocation (which logs) the table is tried again
+	// only once a slot released from it is reusable.
 	uint32_t _allocate_slot(bool p_texture_table, RID p_resource);
 	void _release_slot(bool p_texture_table, uint32_t p_slot);
 
