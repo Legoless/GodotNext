@@ -120,6 +120,52 @@ The plan cherry-picks one upstream SPIRV-Cross fix for Metal ray query
   `thirdparty/spirv-cross/LICENSES/` folder carries the Apache-2.0 and
   MIT license texts.
 
+### Mesa NIR library for Direct3D 12 (#123)
+
+The D3D12 driver translates SPIR-V to DXIL with Mesa's NIR-to-DXIL, which
+upstream Godot links as a prebuilt static library from godot-nir-static
+(`misc/scripts/install_d3d12_sdk_windows.py`). The upstream library has
+no `RayQueryKHR` or `RayTracingKHR`. For ray query and the ray-tracing
+stages, GodotNext builds a patched library privately (lead decision
+2026-11-15, plan v3.9): it is installed from a local archive, and no
+fork repository, CI build or download URL exists yet (#273). No library,
+header or patch file is committed; the tree builds against the upstream
+library by default.
+
+- Upstream build scripts:
+  https://github.com/godotengine/godot-nir-static, release `25.3.1-3`
+  (`85ada5463819a729631a786e78e692db8c703f6b`). License: MIT.
+- Mesa, as that release pins it: https://gitlab.freedesktop.org/mesa/mesa,
+  tag `mesa-25.3.1` (`5005a50879b11b953ade113fccd13a208f706ba0`).
+  License: MIT, Mesa's main license (the `src/microsoft` files that
+  NIR-to-DXIL is built from carry the MIT text).
+- Ray-tracing patch: Skyth's `spirv2dxil-rt` branch,
+  https://github.com/blueskythlikesclouds/mesa, pinned at
+  `99b60c908aeff7fd342739d8c403a110e3bba1cb` ("Implement raytracing
+  support to spirv2dxil", 2026-04-09). The repository has no branch
+  named `raytracing`, the name earlier plan versions used. It is one
+  commit on top of Mesa `main` at
+  `118b975ce7eda028fd8cfea81283f511ed14d8a4` and changes 17 existing
+  files: 16 under `src/microsoft` and `src/compiler/spirv/vtn_variables.c`.
+  License: MIT (Mesa's).
+- The patched library is labeled `25.3.1-gn2`. The first line of a
+  `godotnext-mesa.txt` file at the top of its archive holds the label,
+  which `drivers/d3d12/SCsub` reads to turn on ray query and the
+  ray-tracing stages; the lines after it record the build and are not
+  read.
+- `25.3.1-gn2` is built from three Mesa patches on `mesa-25.3.1`, the
+  first of them Skyth's commit above, and three godot-nir-static patches
+  on `25.3.1-3`. It replaces `25.3.1-gn1`. The patch list, the patch
+  files and the build record stay outside the repository until #273
+  publishes the fork.
+- `dxil.dll` and `dxcompiler.dll`, which the debug-only validator
+  (`GODOT_D3D12_DXIL_VALIDATE=1`) and the `[ShaderContainer]` tests load
+  at run time from an installed Windows SDK, are Microsoft runtime
+  components. They are never committed or shipped. The engine calls
+  them only through the documented `IDxcValidator` and
+  `IDxcCompiler::Disassemble` interfaces, by way of Mesa's MIT
+  `dxil_validator` wrapper.
+
 ### Brixelizer: HOLD
 
 AMD FidelityFX Brixelizer (and Brixelizer GI) is on hold (§16): the

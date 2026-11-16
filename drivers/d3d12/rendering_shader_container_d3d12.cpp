@@ -33,6 +33,15 @@
 #include "core/templates/sort_array.h"
 #include "drivers/d3d12/dxil_hash.h"
 
+#ifdef DEBUG_ENABLED
+#include "core/config/engine.h"
+#include "core/io/dir_access.h"
+#include "core/io/file_access.h"
+#include "core/os/mutex.h"
+#include "core/os/os.h"
+#include "core/templates/safe_refcount.h"
+#endif
+
 #include <drivers/d3d12/godot_d3d12ma.h>
 #include <drivers/d3d12/godot_d3dx12.h>
 #include <drivers/d3d12/godot_nir.h>
@@ -43,6 +52,10 @@ extern "C" {
 void dxil_reassign_driver_locations(nir_shader *s, nir_variable_mode modes,
 		uint64_t other_stage_mask, const BITSET_WORD *other_stage_frac_mask);
 }
+
+#if NIR_ENABLED && defined(DEBUG_ENABLED)
+#include <dxil_validator.h>
+#endif
 
 // SPIR-V to DXIL does way too many allocations, which causes worker threads
 // to bottleneck each other due to sharing the same global process heap.
@@ -362,6 +375,13 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 			MESA_SHADER_TESS_CTRL, // SHADER_STAGE_TESSELATION_CONTROL
 			MESA_SHADER_TESS_EVAL, // SHADER_STAGE_TESSELATION_EVALUATION
 			MESA_SHADER_COMPUTE, // SHADER_STAGE_COMPUTE
+			// GodotNext: dxil_toolchain (#123). nir_to_dxil emits each ray-tracing stage as a DXIL library
+			// (lib_6_x). Only the GodotNext Mesa NIR library translates them; see _set_code_from_spirv().
+			MESA_SHADER_RAYGEN, // SHADER_STAGE_RAYGEN
+			MESA_SHADER_ANY_HIT, // SHADER_STAGE_ANY_HIT
+			MESA_SHADER_CLOSEST_HIT, // SHADER_STAGE_CLOSEST_HIT
+			MESA_SHADER_MISS, // SHADER_STAGE_MISS
+			MESA_SHADER_INTERSECTION, // SHADER_STAGE_INTERSECTION
 		};
 
 		Span<uint32_t> code = p_spirv[i].spirv();
@@ -407,7 +427,8 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 				break;
 			}
 		}
-		if (prev_shader) {
+		// GodotNext: dxil_toolchain (#123). Ray-tracing stages are separate libraries with no varyings to link.
+		if (prev_shader && i < RenderingDeviceCommons::SHADER_STAGE_RAYGEN) {
 			dxil_spirv_metadata dxil_metadata = {};
 			dxil_spirv_nir_link(shader, prev_shader, &dxil_runtime_conf, &dxil_metadata);
 		}
@@ -523,6 +544,11 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 		// For buffer device address, minimum 6.6 is required.
 		if (reflection_data.has_physical_storage_buffer_addresses) {
 			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, SHADER_MODEL_6_6);
+		}
+
+		// GodotNext: dxil_toolchain (#123). Ray query (tier 1.1) and the ray-tracing library targets need 6.5.
+		if (reflection_data.has_ray_query || reflection_data.pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING) {
+			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(RAY_QUERY_SHADER_MODEL)));
 		}
 
 		dxil_logger logger = {};
@@ -714,6 +740,11 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 					range_type = uniform.writable ? D3D12_DESCRIPTOR_RANGE_TYPE_UAV : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 				} break;
 				case RDC::UNIFORM_TYPE_INPUT_ATTACHMENT: {
+					range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+				} break;
+				// GodotNext: dxil_toolchain (#123). A RaytracingAccelerationStructure is an SRV (nir_to_dxil
+				// declares it as a raw SRV). Only shaders built with the GodotNext Mesa NIR library get here.
+				case RDC::UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
 					range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 				} break;
 				default: {
@@ -950,7 +981,128 @@ void RenderingShaderContainerD3D12::_nir_report_bitcode_bit_offset(uint64_t p_bi
 		sc_d3d12.stages_bit_offsets[offset_idx] += p_bit_offset;
 	}
 }
-#endif
+
+#ifdef DEBUG_ENABLED
+// GodotNext: dxil_toolchain (#123). Debug-only DXIL validation. With GODOT_D3D12_DXIL_VALIDATE=1, every DXIL blob a
+// container compiles goes through IDxcValidator (Mesa's dxil_validator wrapper) before it is signed. dxil.dll is
+// loaded at run time from the installed Windows SDK, or else from the DLL search path; it is never shipped with
+// the engine or committed. Builds without DEBUG_ENABLED have none of this code, and every build keeps
+// NO_DXIL_VALIDATION in the nir_to_dxil options.
+namespace {
+struct DXILValidatorState {
+	Mutex mutex;
+	bool load_attempted = false;
+	dxil_validator *validator = nullptr;
+	// A second wrapper, used only to disassemble DXIL (RenderingShaderContainerD3D12::disassemble_dxil()) while
+	// validation is off.
+	bool disassembler_load_attempted = false;
+	dxil_validator *disassembler = nullptr;
+	SafeNumeric<uint32_t> validated_count;
+	SafeNumeric<uint32_t> failed_count;
+};
+
+DXILValidatorState &dxil_validator_state() {
+	static DXILValidatorState state;
+	return state;
+}
+
+bool dxil_validation_requested() {
+	static const bool requested = OS::get_singleton()->get_environment("GODOT_D3D12_DXIL_VALIDATE") == "1";
+	return requested;
+}
+
+// The newest <KitsRoot10>\bin\<version>\<arch> folder of the Windows SDK that has dxil.dll, or an empty string.
+String find_windows_sdk_dxil_dir() {
+	WCHAR root[MAX_PATH] = {};
+	DWORD root_size = sizeof(root);
+	if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots", L"KitsRoot10", RRF_RT_REG_SZ, nullptr, root, &root_size) != ERROR_SUCCESS) {
+		root_size = sizeof(root);
+		if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows Kits\\Installed Roots", L"KitsRoot10", RRF_RT_REG_SZ | RRF_SUBKEY_WOW6432KEY, nullptr, root, &root_size) != ERROR_SUCCESS) {
+			return String();
+		}
+	}
+
+	const String arch = Engine::get_singleton()->get_architecture_name();
+	const String arch_dir = arch == "arm64" ? "arm64" : (arch == "x86_32" ? "x86" : "x64");
+	const String bin_dir = String::utf16((const char16_t *)root).replace_char('\\', '/').path_join("bin");
+	PackedStringArray versions = DirAccess::get_directories_at(bin_dir);
+	versions.sort_custom<NaturalNoCaseComparator>();
+	for (int64_t i = versions.size() - 1; i >= 0; i--) {
+		const String dir = bin_dir.path_join(versions[i]).path_join(arch_dir);
+		if (versions[i].begins_with("10.") && FileAccess::exists(dir.path_join("dxil.dll"))) {
+			return dir;
+		}
+	}
+	return String();
+}
+
+// Loads dxil.dll and dxcompiler.dll of the newest Windows SDK by full path, so the LoadLibrary("DXIL.dll") and
+// LoadLibrary("dxcompiler.dll") inside Mesa's wrapper resolve to the SDK modules. dxcompiler.dll is optional for
+// validation: Mesa uses it only to turn validator errors into text, and to disassemble.
+void load_windows_sdk_dxil_modules() {
+	const String sdk_dir = find_windows_sdk_dxil_dir();
+	if (!sdk_dir.is_empty()) {
+		LoadLibraryW((LPCWSTR)sdk_dir.path_join("dxil.dll").replace_char('/', '\\').utf16().get_data());
+		LoadLibraryW((LPCWSTR)sdk_dir.path_join("dxcompiler.dll").replace_char('/', '\\').utf16().get_data());
+	}
+}
+
+void dxil_validator_load(DXILValidatorState &r_state) {
+	r_state.load_attempted = true;
+
+	load_windows_sdk_dxil_modules();
+	r_state.validator = dxil_create_validator(nullptr);
+	ERR_FAIL_NULL_MSG(r_state.validator, "GODOT_D3D12_DXIL_VALIDATE=1 is set, but dxil.dll could not be loaded from the Windows SDK or the DLL search path. DXIL validation is off.");
+
+	WCHAR module_path[MAX_PATH] = {};
+	HMODULE module = GetModuleHandleW(L"dxil.dll");
+	if (module != nullptr) {
+		GetModuleFileNameW(module, module_path, MAX_PATH);
+	}
+	const String module_name = String::utf16((const char16_t *)module_path);
+	const uint32_t version = dxil_get_validator_version(r_state.validator);
+
+	// With NO_DXIL_VALIDATION, nir_to_dxil tags every module for the newest validator it can write for
+	// (dxil_validator_max_capable_version, 1.8 in Mesa 25.3.1), and an older validator rejects that tag on every
+	// blob. Validation keeps NO_DXIL_VALIDATION, so that the DXIL it checks is the DXIL that ships.
+	if (version < uint32_t(DXIL_VALIDATOR_1_8)) {
+		dxil_destroy_validator(r_state.validator);
+		r_state.validator = nullptr;
+		ERR_FAIL_MSG(vformat("GODOT_D3D12_DXIL_VALIDATE=1 is set, but \"%s\" is DXIL validator %d.%d, and the DXIL this build writes needs validator 1.8 or later. Install a newer Windows SDK. DXIL validation is off.", module_name, version >> 16, version & 0xffff));
+	}
+
+	print_line(vformat("D3D12: DXIL validation is on (GODOT_D3D12_DXIL_VALIDATE=1): validator %d.%d from \"%s\".", version >> 16, version & 0xffff, module_name));
+}
+
+// Returns false only when the validator is loaded and rejects the blob.
+bool dxil_validate_blob(const CharString &p_shader_name, RenderingDeviceCommons::ShaderStage p_stage, const Vector<uint8_t> &p_blob) {
+	DXILValidatorState &state = dxil_validator_state();
+	MutexLock lock(state.mutex);
+	if (!state.load_attempted) {
+		dxil_validator_load(state);
+	}
+	if (state.validator == nullptr) {
+		return true;
+	}
+
+	// The validator may edit the blob in place (it signs it), so it gets a copy.
+	Vector<uint8_t> blob = p_blob;
+	char *error = nullptr;
+	const uint32_t validated = state.validated_count.increment();
+	const bool valid = dxil_validate_module(state.validator, blob.ptrw(), blob.size(), &error);
+	if (!valid) {
+		const uint32_t failed = state.failed_count.increment();
+		const String message = error != nullptr ? String::utf8(error).strip_edges() : String("(no message: dxcompiler.dll was not found)");
+		ERR_PRINT(vformat("DXIL validation failed for shader '%s', stage %s (failure %d, after %d validated blobs):\n%s", String::utf8(p_shader_name.get_data()), RenderingDeviceCommons::SHADER_STAGE_NAMES[p_stage], failed, validated, message));
+	}
+	if (error != nullptr) {
+		ralloc_free(error);
+	}
+	return valid;
+}
+} //namespace
+#endif // DEBUG_ENABLED
+#endif // NIR_ENABLED
 
 void RenderingShaderContainerD3D12::_set_from_shader_reflection_post(const ReflectShader &p_shader) {
 	reflection_binding_set_data_d3d12.resize(reflection_binding_set_uniforms_count.size());
@@ -971,6 +1123,14 @@ void RenderingShaderContainerD3D12::_set_from_shader_reflection_post(const Refle
 
 bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_shader) {
 #if NIR_ENABLED
+#ifndef NIR_RAYTRACING_ENABLED
+	// GodotNext: dxil_toolchain (#123). The upstream Mesa NIR library has no RayQueryKHR or RayTracingKHR, so these
+	// shaders are refused with one error here instead of failing inside Mesa.
+	const bool uses_raytracing_stages = p_shader.pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING;
+	ERR_FAIL_COND_V_MSG(uses_raytracing_stages || p_shader.has_ray_query, false,
+			vformat("Shader '%s' uses %s. Direct3D 12 compiles it only with the GodotNext Mesa NIR library (label 25.3.1-gn2 or later), and this build links the upstream library.", String::utf8(shader_name.get_data()), uses_raytracing_stages ? "ray-tracing stages" : "ray query"));
+#endif
+
 	const LocalVector<ReflectShaderStage> &p_spirv = p_shader.shader_stages;
 	reflection_data_d3d12.nir_runtime_data_root_param_idx = UINT32_MAX;
 
@@ -998,6 +1158,12 @@ bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_
 	// Sign.
 	uint32_t shader_index = 0;
 	for (KeyValue<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &E : dxil_blobs) {
+#ifdef DEBUG_ENABLED
+		// GodotNext: dxil_toolchain (#123).
+		if (dxil_validation_requested()) {
+			dxil_validate_blob(shader_name, E.key, E.value);
+		}
+#endif
 		RenderingDXIL::sign_bytecode(E.key, E.value);
 	}
 
@@ -1033,6 +1199,91 @@ RenderingShaderContainerD3D12::RenderingShaderContainerD3D12() {
 
 RenderingShaderContainerD3D12::RenderingShaderContainerD3D12(void *p_lib_d3d12) {
 	lib_d3d12 = p_lib_d3d12;
+}
+
+// GodotNext: dxil_toolchain (#123). drivers/d3d12/SCsub defines NIR_RAYTRACING_ENABLED and GODOTNEXT_MESA_LABEL
+// when the Mesa NIR library it links carries a godotnext-mesa.txt label.
+bool RenderingShaderContainerD3D12::is_raytracing_supported() {
+#ifdef NIR_RAYTRACING_ENABLED
+	return true;
+#else
+	return false;
+#endif
+}
+
+const char *RenderingShaderContainerD3D12::get_mesa_label() {
+#ifdef GODOTNEXT_MESA_LABEL
+	return GODOTNEXT_MESA_LABEL;
+#else
+	return "";
+#endif
+}
+
+// GodotNext: dxil_toolchain (#123).
+RenderingShaderContainerD3D12::DXILValidationStats RenderingShaderContainerD3D12::get_dxil_validation_stats() {
+	DXILValidationStats stats;
+#if NIR_ENABLED && defined(DEBUG_ENABLED)
+	stats.requested = dxil_validation_requested();
+	if (stats.requested) {
+		DXILValidatorState &state = dxil_validator_state();
+		MutexLock lock(state.mutex);
+		if (!state.load_attempted) {
+			dxil_validator_load(state);
+		}
+		stats.active = state.validator != nullptr;
+		stats.validated = state.validated_count.get();
+		stats.failed = state.failed_count.get();
+	}
+#endif
+	return stats;
+}
+
+bool RenderingShaderContainerD3D12::validate_dxil(const String &p_shader_name, RenderingDeviceCommons::ShaderStage p_stage, const Vector<uint8_t> &p_dxil) {
+#if NIR_ENABLED && defined(DEBUG_ENABLED)
+	if (dxil_validation_requested()) {
+		return dxil_validate_blob(p_shader_name.utf8(), p_stage, p_dxil);
+	}
+#endif
+	return true;
+}
+
+String RenderingShaderContainerD3D12::disassemble_dxil(const Vector<uint8_t> &p_dxil, String *r_error) {
+#if NIR_ENABLED && defined(DEBUG_ENABLED)
+	DXILValidatorState &state = dxil_validator_state();
+	MutexLock lock(state.mutex);
+	dxil_validator *wrapper = state.validator;
+	if (wrapper == nullptr) {
+		if (!state.disassembler_load_attempted) {
+			state.disassembler_load_attempted = true;
+			load_windows_sdk_dxil_modules();
+			state.disassembler = dxil_create_validator(nullptr);
+		}
+		wrapper = state.disassembler;
+	}
+	if (wrapper == nullptr) {
+		if (r_error != nullptr) {
+			*r_error = "dxil.dll could not be loaded from the Windows SDK or the DLL search path.";
+		}
+		return String();
+	}
+
+	Vector<uint8_t> blob = p_dxil;
+	char *text = dxil_disasm_module(wrapper, blob.ptrw(), blob.size());
+	if (text == nullptr) {
+		if (r_error != nullptr) {
+			*r_error = "dxcompiler.dll from the Windows SDK did not disassemble the DXIL (it is missing, or IDxcCompiler::Disassemble failed).";
+		}
+		return String();
+	}
+	const String disassembly = String::utf8(text);
+	ralloc_free(text);
+	return disassembly;
+#else
+	if (r_error != nullptr) {
+		*r_error = "DXIL disassembly needs a build with DEBUG_ENABLED.";
+	}
+	return String();
+#endif
 }
 
 RenderingShaderContainerD3D12::ShaderReflectionD3D12 RenderingShaderContainerD3D12::get_shader_reflection_d3d12() const {
@@ -1087,5 +1338,12 @@ RenderingShaderContainerFormatD3D12::RenderingShaderContainerFormatD3D12() {
 }
 
 RenderingShaderContainerFormatD3D12::~RenderingShaderContainerFormatD3D12() {
+#if NIR_ENABLED && defined(DEBUG_ENABLED)
+	// GodotNext: dxil_toolchain (#123). The totals since the process started.
+	if (dxil_validation_requested()) {
+		const DXILValidatorState &state = dxil_validator_state();
+		print_line(vformat("D3D12: DXIL validation checked %d blobs; %d failed.", state.validated_count.get(), state.failed_count.get()));
+	}
+#endif
 	glsl_type_singleton_decref();
 }

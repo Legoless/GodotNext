@@ -37,6 +37,8 @@ TEST_FORCE_LINK(test_d3d12_shader_container)
 // D3D12 shader container keeps those at small registers in register spaces of their own, and the
 // DXIL must declare every resource where the root signature binds it. No case needs a GPU: the
 // container compiles through glslang and Mesa, and d3d12.dll only (de)serializes root signatures.
+// GodotNext: dxil_toolchain (#123). The same layout holds for ray query and for the ray-tracing
+// stages, which compile only with the GodotNext Mesa NIR library; each stage is its own DXIL library.
 
 #include "modules/modules_enabled.gen.h"
 
@@ -117,6 +119,61 @@ bool read_psv0_resources(const Vector<uint8_t> &p_dxil, LocalVector<DxilResource
 	return false;
 }
 
+// GodotNext: dxil_toolchain (#123). A DXIL library has no PSV0 part: its resources are in the RDAT
+// (runtime data) part. RDAT holds its version, its part count and one offset per part from the start
+// of RDAT; each part is a type, a size and the data. The resource table (type 3) holds the record
+// count, the size of one record and the records: class (0 SRV, 1 UAV, 2 CBV, 3 sampler), kind, id,
+// space, lower bound, upper bound. The class and kind give the type PSV0 would give: a raw buffer
+// (kind 11) and an acceleration structure (kind 16) are raw, a structured buffer (kind 12) is
+// structured, and the rest are typed.
+bool read_rdat_resources(const Vector<uint8_t> &p_dxil, LocalVector<DxilResource> &r_resources) {
+	if (p_dxil.size() < 32 || read_u32(p_dxil.ptr()) != read_u32((const uint8_t *)"DXBC")) {
+		return false;
+	}
+	const uint32_t part_count = read_u32(p_dxil.ptr() + 28);
+	for (uint32_t i = 0; i < part_count; i++) {
+		const uint32_t offset = read_u32(p_dxil.ptr() + 32 + i * 4);
+		if (offset + 16 > uint32_t(p_dxil.size()) || read_u32(p_dxil.ptr() + offset) != read_u32((const uint8_t *)"RDAT")) {
+			continue;
+		}
+		const uint32_t rdat_size = read_u32(p_dxil.ptr() + offset + 4);
+		const uint8_t *rdat = p_dxil.ptr() + offset + 8;
+		const uint32_t rdat_part_count = read_u32(rdat + 4);
+		if (offset + 8 + uint64_t(rdat_size) > uint64_t(p_dxil.size()) || 8 + uint64_t(rdat_part_count) * 4 > rdat_size) {
+			return false;
+		}
+		for (uint32_t j = 0; j < rdat_part_count; j++) {
+			const uint32_t part_offset = read_u32(rdat + 8 + j * 4);
+			if (part_offset + 16 > rdat_size || read_u32(rdat + part_offset) != 3) {
+				continue;
+			}
+			const uint32_t table_size = read_u32(rdat + part_offset + 4);
+			const uint8_t *table = rdat + part_offset + 8;
+			const uint32_t record_count = read_u32(table);
+			const uint32_t record_size = read_u32(table + 4);
+			if (record_size < 24 || part_offset + 8 + uint64_t(table_size) > rdat_size || 8 + uint64_t(record_count) * record_size > table_size) {
+				return false;
+			}
+			for (uint32_t k = 0; k < record_count; k++) {
+				const uint8_t *record = table + 8 + k * record_size;
+				const uint32_t resource_class = read_u32(record);
+				const uint32_t kind = read_u32(record + 4);
+				uint32_t type = 1;
+				if (resource_class == 0) {
+					type = (kind == 11 || kind == 16) ? 4 : (kind == 12 ? 5 : 3);
+				} else if (resource_class == 1) {
+					type = kind == 11 ? 7 : (kind == 12 ? 8 : 6);
+				} else if (resource_class == 2) {
+					type = 2;
+				}
+				r_resources.push_back({ type, read_u32(record + 12), read_u32(record + 16), read_u32(record + 20) });
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
 D3D12_DESCRIPTOR_RANGE_TYPE range_type_for_dxil(uint32_t p_type) {
 	if (p_type == 1) {
 		return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
@@ -163,6 +220,22 @@ bool root_signature_binds(const D3D12_ROOT_SIGNATURE_DESC1 &p_desc, const DxilRe
 	return false;
 }
 
+// Compiles each stage with glslang for the D3D12 container format, with the dynamic buffers given as
+// ShaderRD::DynamicBuffer keys.
+Vector<RDC::ShaderStageSPIRVData> compile_stages(const RenderingShaderContainerFormat &p_format, const Vector<StageSource> &p_stages, const Vector<uint64_t> &p_dynamic_buffers) {
+	Vector<RDC::ShaderStageSPIRVData> spirv_stages;
+	for (const StageSource &source : p_stages) {
+		String error;
+		RDC::ShaderStageSPIRVData spirv_stage;
+		spirv_stage.shader_stage = source.stage;
+		spirv_stage.spirv = compile_glslang_shader(source.stage, source.code, p_format.get_shader_language_version(), p_format.get_shader_spirv_version(source.stage), &error);
+		spirv_stage.dynamic_buffers = p_dynamic_buffers;
+		REQUIRE_MESSAGE(!spirv_stage.spirv.is_empty(), ("glslang failed: " + error).utf8().get_data());
+		spirv_stages.push_back(spirv_stage);
+	}
+	return spirv_stages;
+}
+
 class ShaderContainerFixture {
 	HMODULE lib_d3d12 = nullptr;
 
@@ -181,16 +254,7 @@ public:
 		{
 			RenderingShaderContainerFormatD3D12 format;
 			format.set_lib_d3d12(lib_d3d12);
-			Vector<RDC::ShaderStageSPIRVData> spirv_stages;
-			for (const StageSource &source : p_stages) {
-				String error;
-				RDC::ShaderStageSPIRVData spirv_stage;
-				spirv_stage.shader_stage = source.stage;
-				spirv_stage.spirv = compile_glslang_shader(source.stage, source.code, format.get_shader_language_version(), format.get_shader_spirv_version(source.stage), &error);
-				spirv_stage.dynamic_buffers = p_dynamic_buffers;
-				REQUIRE_MESSAGE(!spirv_stage.spirv.is_empty(), ("glslang failed: " + error).utf8().get_data());
-				spirv_stages.push_back(spirv_stage);
-			}
+			const Vector<RDC::ShaderStageSPIRVData> spirv_stages = compile_stages(format, p_stages, p_dynamic_buffers);
 			container = format.create_container();
 			REQUIRE(container->set_code_from_spirv("test_d3d12_shader_container", spirv_stages));
 		}
@@ -209,7 +273,9 @@ public:
 			dxil.resize(shader.code_decompressed_size);
 			REQUIRE(container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, dxil.ptrw(), dxil.size()));
 			LocalVector<DxilResource> resources;
-			REQUIRE(read_psv0_resources(dxil, resources));
+			// GodotNext: dxil_toolchain (#123). A ray-tracing stage is a DXIL library, with RDAT instead of PSV0.
+			const bool found = read_psv0_resources(dxil, resources) || read_rdat_resources(dxil, resources);
+			REQUIRE(found);
 			stage_resources.push_back(resources);
 		}
 	}
@@ -398,6 +464,187 @@ TEST_CASE("[D3D12][ShaderContainer] Compute runtime data and dynamic UAVs use sm
 	CHECK(fixture.dxil_declares(7, dynamic_space, 4)); // Raw UAV.
 	CHECK_FALSE(fixture.dxil_declares(7, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + 4 * GODOT_NIR_BINDING_MULTIPLIER));
 	CHECK(fixture.dxil_declares(7, 0, GODOT_NIR_BINDING_MULTIPLIER)); // Output, set 0 binding 1.
+}
+
+// GodotNext: dxil_toolchain (#123). Ray query and the ray-tracing stages, with the GodotNext Mesa NIR library.
+
+// A ray-query kernel with root constants, NIR-DXIL runtime data (gl_NumWorkGroups), a dynamic UAV,
+// and an acceleration structure and a read-only buffer in a descriptor table.
+const char *RAY_QUERY_COMPUTE = R"(#version 460
+#extension GL_EXT_ray_query : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, std430) readonly buffer Rays { vec4 data[]; } rays;
+layout(set = 1, binding = 2, std430) writeonly buffer Hits { float t[]; } hits;
+layout(push_constant, std430) uniform Params { uint count; uint pad0; uint pad1; uint pad2; } params;
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	if (index >= params.count) {
+		return;
+	}
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT(ray_query, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, rays.data[2u * index].xyz, 0.0, rays.data[2u * index + 1u].xyz, 1000.0);
+	rayQueryProceedEXT(ray_query);
+	float t = -1.0;
+	if (rayQueryGetIntersectionTypeEXT(ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+		t = rayQueryGetIntersectionTEXT(ray_query, true);
+	}
+	hits.t[index] = t + float(gl_NumWorkGroups.x);
+}
+)";
+
+// A raygen with root constants and a dynamic uniform buffer, and a miss stage with a dynamic
+// read-only buffer: one container, two DXIL libraries.
+const char *RAYGEN = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image2D result_image;
+layout(set = 1, binding = 0, std140) uniform Camera { vec4 origin; vec4 direction; } camera;
+layout(push_constant, std430) uniform Params { float t_max; uint cull_mask; uint pad0; uint pad1; } params;
+layout(location = 0) rayPayloadEXT vec4 payload;
+void main() {
+	payload = vec4(0.0);
+	traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, params.cull_mask & 0xFFu, 0, 1, 0, camera.origin.xyz, 0.001, camera.direction.xyz, params.t_max, 0);
+	imageStore(result_image, ivec2(gl_LaunchIDEXT.xy), payload);
+}
+)";
+
+const char *MISS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(set = 1, binding = 1, std430) readonly buffer Sky { vec4 color; } sky;
+layout(location = 0) rayPayloadInEXT vec4 payload;
+void main() {
+	payload = sky.color;
+}
+)";
+
+// With the upstream Mesa NIR library, ray query and the ray-tracing stages are refused (with one
+// error; the [ShaderContainer][D3D12] cases check it), so there is no root signature to check.
+void check_refused(const Vector<StageSource> &p_stages, const Vector<uint64_t> &p_dynamic_buffers) {
+	HMODULE lib_d3d12 = LoadLibraryW(L"D3D12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	{
+		RenderingShaderContainerFormatD3D12 format;
+		format.set_lib_d3d12(lib_d3d12);
+		const Vector<RDC::ShaderStageSPIRVData> spirv_stages = compile_stages(format, p_stages, p_dynamic_buffers);
+		Ref<RenderingShaderContainer> container = format.create_container();
+		ERR_PRINT_OFF;
+		CHECK_FALSE(container->set_code_from_spirv("test_d3d12_shader_container", spirv_stages));
+		ERR_PRINT_ON;
+	}
+	FreeLibrary(lib_d3d12);
+}
+
+// With GODOT_D3D12_DXIL_VALIDATE=1 (debug builds), the DXIL validator checks each blob a container
+// compiles: it must have checked p_blobs more and rejected none. Without it, nothing is checked.
+void check_dxil_validation(const ContainerD3D12::DXILValidationStats &p_before, uint32_t p_blobs) {
+	const ContainerD3D12::DXILValidationStats after = ContainerD3D12::get_dxil_validation_stats();
+	CHECK_EQ(after.failed, p_before.failed);
+	if (after.requested) {
+		REQUIRE(after.active);
+		CHECK_EQ(after.validated - p_before.validated, p_blobs);
+	} else {
+		CHECK_EQ(after.validated, 0u);
+	}
+}
+
+TEST_CASE("[D3D12][ShaderContainer] Ray query root constants, runtime data and dynamic buffers use small registers outside space 0") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_COMPUTE, RAY_QUERY_COMPUTE });
+	Vector<uint64_t> dynamic_buffers;
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(1, 2)); // Hits: root UAV.
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, dynamic_buffers);
+		return;
+	}
+
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, dynamic_buffers);
+	check_dxil_validation(validation_before, 1);
+
+	const D3D12_ROOT_PARAMETER1 &push_constants = fixture.param(0);
+	REQUIRE_EQ(push_constants.ParameterType, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+	CHECK_EQ(push_constants.Constants.ShaderRegister, ContainerD3D12::ROOT_CONSTANT_REGISTER);
+	CHECK_EQ(push_constants.Constants.RegisterSpace, ContainerD3D12::ROOT_CONSTANT_SPACE);
+	CHECK_EQ(push_constants.Constants.Num32BitValues, 4u);
+	CHECK_EQ(fixture.reflection_d3d12.dxil_push_constant_stages, uint32_t(RDC::SHADER_STAGE_COMPUTE_BIT));
+
+	REQUIRE_EQ(fixture.reflection_d3d12.nir_runtime_data_root_param_idx, 1u);
+	const D3D12_ROOT_PARAMETER1 &runtime_data = fixture.param(1);
+	REQUIRE_EQ(runtime_data.ParameterType, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+	CHECK_EQ(runtime_data.Constants.ShaderRegister, ContainerD3D12::RUNTIME_DATA_REGISTER);
+	CHECK_EQ(runtime_data.Constants.RegisterSpace, ContainerD3D12::ROOT_CONSTANT_SPACE);
+
+	const uint32_t dynamic_space = ContainerD3D12::DYNAMIC_BUFFER_SPACE_BASE + 1;
+	const ContainerD3D12::ReflectionBindingDataD3D12 &hits = fixture.uniform_d3d12(1, 2);
+	const D3D12_ROOT_PARAMETER1 &hits_param = fixture.param(hits.root_param_idx);
+	CHECK_EQ(hits_param.ParameterType, D3D12_ROOT_PARAMETER_TYPE_UAV);
+	CHECK_EQ(hits_param.Descriptor.ShaderRegister, 2u);
+	CHECK_EQ(hits_param.Descriptor.RegisterSpace, dynamic_space);
+
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	CHECK(fixture.dxil_declares(2, ContainerD3D12::ROOT_CONSTANT_SPACE, ContainerD3D12::ROOT_CONSTANT_REGISTER)); // Push constants.
+	CHECK(fixture.dxil_declares(2, ContainerD3D12::ROOT_CONSTANT_SPACE, ContainerD3D12::RUNTIME_DATA_REGISTER)); // Runtime data.
+	CHECK(fixture.dxil_declares(7, dynamic_space, 2)); // Hits: raw UAV.
+	CHECK_FALSE(fixture.dxil_declares(7, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + 2 * GODOT_NIR_BINDING_MULTIPLIER));
+	// The acceleration structure (a raw SRV) and the read-only buffer keep Mesa's registers in space 0.
+	CHECK(fixture.dxil_declares(4, 0, 0)); // tlas, set 0 binding 0.
+	CHECK(fixture.dxil_declares(4, 0, GODOT_NIR_BINDING_MULTIPLIER)); // Rays, set 0 binding 1.
+}
+
+TEST_CASE("[D3D12][ShaderContainer] Ray-tracing library stages use small registers outside space 0 for root constants and dynamic buffers") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_RAYGEN, RAYGEN });
+	stages.push_back({ RDC::SHADER_STAGE_MISS, MISS });
+	Vector<uint64_t> dynamic_buffers;
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(1, 0)); // Camera: root CBV.
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(1, 1)); // Sky: root SRV.
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, dynamic_buffers);
+		return;
+	}
+
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, dynamic_buffers);
+	check_dxil_validation(validation_before, 2);
+	REQUIRE_EQ(fixture.container->shaders.size(), 2);
+
+	const D3D12_ROOT_PARAMETER1 &push_constants = fixture.param(0);
+	REQUIRE_EQ(push_constants.ParameterType, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+	CHECK_EQ(push_constants.Constants.ShaderRegister, ContainerD3D12::ROOT_CONSTANT_REGISTER);
+	CHECK_EQ(push_constants.Constants.RegisterSpace, ContainerD3D12::ROOT_CONSTANT_SPACE);
+	CHECK_EQ(push_constants.Constants.Num32BitValues, 4u);
+	CHECK_EQ(fixture.reflection_d3d12.dxil_push_constant_stages, uint32_t(RDC::SHADER_STAGE_RAYGEN_BIT));
+	CHECK_EQ(fixture.reflection_d3d12.nir_runtime_data_root_param_idx, UINT32_MAX);
+
+	const uint32_t dynamic_space = ContainerD3D12::DYNAMIC_BUFFER_SPACE_BASE + 1;
+	const ContainerD3D12::ReflectionBindingDataD3D12 &camera = fixture.uniform_d3d12(1, 0);
+	const D3D12_ROOT_PARAMETER1 &camera_param = fixture.param(camera.root_param_idx);
+	CHECK_EQ(camera_param.ParameterType, D3D12_ROOT_PARAMETER_TYPE_CBV);
+	CHECK_EQ(camera_param.Descriptor.ShaderRegister, 0u);
+	CHECK_EQ(camera_param.Descriptor.RegisterSpace, dynamic_space);
+	CHECK_EQ(camera.dxil_stages, uint32_t(RDC::SHADER_STAGE_RAYGEN_BIT));
+
+	const ContainerD3D12::ReflectionBindingDataD3D12 &sky = fixture.uniform_d3d12(1, 1);
+	const D3D12_ROOT_PARAMETER1 &sky_param = fixture.param(sky.root_param_idx);
+	CHECK_EQ(sky_param.ParameterType, D3D12_ROOT_PARAMETER_TYPE_SRV);
+	CHECK_EQ(sky_param.Descriptor.ShaderRegister, 1u);
+	CHECK_EQ(sky_param.Descriptor.RegisterSpace, dynamic_space);
+	CHECK_EQ(sky.dxil_stages, uint32_t(RDC::SHADER_STAGE_MISS_BIT));
+
+	// Each library's resource table (RDAT) agrees with the root signature.
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	CHECK(fixture.dxil_declares(2, ContainerD3D12::ROOT_CONSTANT_SPACE, ContainerD3D12::ROOT_CONSTANT_REGISTER)); // Push constants.
+	CHECK(fixture.dxil_declares(2, dynamic_space, 0)); // Camera: CBV.
+	CHECK(fixture.dxil_declares(4, dynamic_space, 1)); // Sky: raw SRV.
+	CHECK_FALSE(fixture.dxil_declares(2, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + 0 * GODOT_NIR_BINDING_MULTIPLIER));
+	CHECK_FALSE(fixture.dxil_declares(4, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + 1 * GODOT_NIR_BINDING_MULTIPLIER));
+	CHECK(fixture.dxil_declares(4, 0, 0)); // tlas, set 0 binding 0.
+	CHECK(fixture.dxil_declares(6, 0, GODOT_NIR_BINDING_MULTIPLIER)); // result_image: typed UAV, set 0 binding 1.
 }
 
 } // namespace TestD3D12ShaderContainer

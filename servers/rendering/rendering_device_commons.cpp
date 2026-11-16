@@ -995,4 +995,10 @@ const char *RenderingDeviceCommons::SHADER_STAGE_NAMES[SHADER_STAGE_MAX] = {
 	"TesselationControl",
 	"TesselationEvaluation",
 	"Compute",
+	// GodotNext: dxil_toolchain (#123). The ray-tracing stages had no names, so their error messages named no stage.
+	"Raygen",
+	"AnyHit",
+	"ClosestHit",
+	"Miss",
+	"Intersection",
 };

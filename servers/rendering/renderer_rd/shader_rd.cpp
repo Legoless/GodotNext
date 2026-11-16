@@ -38,6 +38,7 @@
 #include "core/os/os.h"
 #include "core/string/string_builder.h"
 #include "core/version.h"
+#include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_include_db.h"
 
 #include <cstring>
@@ -677,6 +678,11 @@ String ShaderRD::_version_get_sha1(Version *p_version) const {
 
 static const char *shader_file_header = "GDSC";
 // GodotNext: rd_atomics64 (#175). 5: shader container version 3, so older cache files are a cache miss.
+// GodotNext: dxil_toolchain (#123). Container version 4 keeps cache file version 5. The cache path includes
+// GODOT_VERSION_HASH (through base_sha256), so a file written by a build of another commit is never opened: it is a
+// plain cache miss. Only a build with the same version hash (an uncommitted build on the same commit, or a build
+// without git information) opens a file that holds version-3 containers; _load_from_cache() then rebuilds it, with
+// one warning per run.
 static const uint32_t cache_file_version = 5;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {
@@ -688,6 +694,19 @@ String ShaderRD::_get_cache_file_path(Version *p_version, int p_group, const Str
 	const String &shader_cache_dir = p_user_dir ? shader_cache_user_dir : shader_cache_res_dir;
 	String relative_path = _get_cache_file_relative_path(p_version, p_group, p_api_name);
 	return shader_cache_dir.path_join(relative_path);
+}
+
+// GodotNext: dxil_toolchain (#123). A stale cache prints one warning per run, however many cache files are
+// stale; the others go to the verbose log.
+static SafeNumeric<uint32_t> stale_shader_cache_count;
+
+static void _report_stale_shader_cache(const String &p_name, uint32_t p_container_version) {
+	const String message = vformat("Shader cache for '%s' was written with shader container version %d; rebuilding it for version %d.", p_name, p_container_version, RenderingShaderContainer::CONTAINER_VERSION);
+	if (stale_shader_cache_count.increment() == 1) {
+		WARN_PRINT(message + " Other stale shader caches are rebuilt without a warning (see the verbose log).");
+	} else {
+		print_verbose(message);
+	}
 }
 
 void ShaderRD::_load_variant_from_cache(uint32_t p_variant, CompileData p_data) {
@@ -748,6 +767,14 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 		uint32_t br = f->get_buffer(variant_bytes.ptrw(), variant_size);
 
 		ERR_FAIL_COND_V(br != variant_size, false);
+
+		// GodotNext: dxil_toolchain (#123). A container from another CONTAINER_VERSION cannot be parsed, so load
+		// nothing from this file: the group compiles again and _save_to_cache() rewrites the file.
+		uint32_t container_version = 0;
+		if (!RenderingShaderContainer::is_container_version_current(variant_bytes, &container_version)) {
+			_report_stale_shader_cache(name, container_version);
+			return false;
+		}
 
 		p_version->variant_data.write[variant_id] = variant_bytes;
 	}

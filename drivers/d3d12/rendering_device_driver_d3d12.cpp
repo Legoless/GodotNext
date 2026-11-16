@@ -6420,6 +6420,9 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 	{
 		static const D3D_SHADER_MODEL SMS_TO_CHECK[] = {
+			// GodotNext: dxil_toolchain (#123). Probe up to 6.8.
+			D3D_SHADER_MODEL_6_8,
+			D3D_SHADER_MODEL_6_7,
 			D3D_SHADER_MODEL_6_6,
 			D3D_SHADER_MODEL_6_5,
 			D3D_SHADER_MODEL_6_4,
@@ -6450,6 +6453,8 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 		print_verbose("- Shader:");
 		print_verbose("  model: " + D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model));
+		// GodotNext: dxil_toolchain (#123).
+		print_verbose(vformat("  Mesa NIR library: %s", RenderingShaderContainerD3D12::is_raytracing_supported() ? vformat("GodotNext %s, with ray query and ray-tracing stages", RenderingShaderContainerD3D12::get_mesa_label()) : String("upstream, without ray query")));
 	}
 
 	shader_container_format.set_lib_d3d12(context_driver->lib_d3d12);

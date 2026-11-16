@@ -40,7 +40,9 @@
 
 #include "drivers/d3d12/d3d12_godot_nir_bridge.h"
 
-#define D3D12_BITCODE_OFFSETS_NUM_STAGES 3
+// GodotNext: dxil_toolchain (#123). One slot per stage that can carry specialization constants: vertex,
+// fragment, compute and the five ray-tracing stages (each one is its own DXIL library).
+#define D3D12_BITCODE_OFFSETS_NUM_STAGES 8
 
 #if NIR_ENABLED
 struct nir_shader;
@@ -87,13 +89,22 @@ public:
 	static constexpr uint32_t DYNAMIC_BUFFER_SPACE_BASE = 2;
 	// Mesa keeps a resource's register space in 5 bits (nir_variable::data.descriptor_set).
 	static_assert(DYNAMIC_BUFFER_SPACE_BASE + RenderingDeviceCommons::MAX_UNIFORM_SETS <= 32);
-	static constexpr uint32_t FORMAT_VERSION = 1;
+	// GodotNext: dxil_toolchain (#123). Version 2 has 8 specialization-constant bit-offset slots instead of 3.
+	static constexpr uint32_t FORMAT_VERSION = 2;
+	// GodotNext: dxil_toolchain (#123). The DXIL shader model ray query (inline ray tracing, tier 1.1) and the
+	// ray-tracing library targets need.
+	static constexpr uint32_t RAY_QUERY_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
 		UINT32_MAX, // SHADER_STAGE_TESSELATION_CONTROL
 		UINT32_MAX, // SHADER_STAGE_TESSELATION_EVALUATION
 		2, // SHADER_STAGE_COMPUTE
+		3, // SHADER_STAGE_RAYGEN
+		4, // SHADER_STAGE_ANY_HIT
+		5, // SHADER_STAGE_CLOSEST_HIT
+		6, // SHADER_STAGE_MISS
+		7, // SHADER_STAGE_INTERSECTION
 	};
 
 	struct ReflectionBindingSetDataD3D12 {
@@ -180,6 +191,33 @@ public:
 	RenderingShaderContainerD3D12();
 	RenderingShaderContainerD3D12(void *p_lib_d3d12);
 	ShaderReflectionD3D12 get_shader_reflection_d3d12() const;
+
+	// GodotNext: dxil_toolchain (#123). Whether this build links the GodotNext Mesa NIR library (the build
+	// found its godotnext-mesa.txt label), which compiles ray query and the ray-tracing stages. With the
+	// upstream library those shaders are refused with one error. get_mesa_label() returns the label, or an
+	// empty string.
+	static bool is_raytracing_supported();
+	static const char *get_mesa_label();
+
+	// GodotNext: dxil_toolchain (#123). The debug-only DXIL validator (GODOT_D3D12_DXIL_VALIDATE=1 in a build with
+	// DEBUG_ENABLED). requested: the variable is set. active: dxil.dll is loaded; asking loads it when it was
+	// requested. validated and failed: the blobs checked, and rejected, since the process started. Other builds
+	// report all zeros.
+	struct DXILValidationStats {
+		bool requested = false;
+		bool active = false;
+		uint32_t validated = 0;
+		uint32_t failed = 0;
+	};
+	static DXILValidationStats get_dxil_validation_stats();
+	// Puts one DXIL container through the validator, as compiling a shader does before signing it, with one error
+	// message if it is rejected. Returns false only when the validator rejects it. Does nothing unless validation
+	// was requested. For tests.
+	static bool validate_dxil(const String &p_shader_name, RenderingDeviceCommons::ShaderStage p_stage, const Vector<uint8_t> &p_dxil);
+	// The text disassembly of one DXIL container, from IDxcCompiler::Disassemble in the Windows SDK's dxcompiler.dll
+	// (through Mesa's dxil_validator wrapper), or an empty string with r_error set. It does not turn validation on.
+	// Builds without DEBUG_ENABLED always return an empty string. For tests.
+	static String disassemble_dxil(const Vector<uint8_t> &p_dxil, String *r_error = nullptr);
 };
 
 class RenderingShaderContainerFormatD3D12 : public RenderingShaderContainerFormat {

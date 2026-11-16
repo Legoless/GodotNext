@@ -335,6 +335,10 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 					case SpvCapabilityPhysicalStorageBufferAddresses: {
 						reflection.has_physical_storage_buffer_addresses = true;
 					} break;
+					// GodotNext: dxil_toolchain (#123).
+					case SpvCapabilityRayQueryKHR: {
+						reflection.has_ray_query = true;
+					} break;
 					default: {
 					}
 				}
@@ -698,6 +702,7 @@ void RenderingShaderContainer::set_from_shader_reflection(const ReflectShader &p
 	reflection_data.has_physical_storage_buffer_addresses = p_reflection.has_physical_storage_buffer_addresses;
 	reflection_data.has_dynamic_buffers = p_reflection.has_dynamic_buffers;
 	reflection_data.int64_atomics = p_reflection.int64_atomics; // GodotNext: rd_atomics64 (#175).
+	reflection_data.has_ray_query = p_reflection.has_ray_query; // GodotNext: dxil_toolchain (#123).
 	reflection_data.compute_local_size[0] = p_reflection.compute_local_size[0];
 	reflection_data.compute_local_size[1] = p_reflection.compute_local_size[1];
 	reflection_data.compute_local_size[2] = p_reflection.compute_local_size[2];
@@ -804,6 +809,25 @@ RenderingDeviceCommons::ShaderReflection RenderingShaderContainer::get_shader_re
 	return shader_refl;
 }
 
+// GodotNext: dxil_toolchain (#123).
+bool RenderingShaderContainer::is_container_version_current(const PackedByteArray &p_bytes, uint32_t *r_version) {
+	if (r_version != nullptr) {
+		*r_version = 0;
+	}
+	if (p_bytes.size() < int64_t(sizeof(ContainerHeader))) {
+		return false;
+	}
+	ContainerHeader header;
+	memcpy(&header, p_bytes.ptr(), sizeof(ContainerHeader));
+	if (header.magic_number != CONTAINER_MAGIC_NUMBER) {
+		return false;
+	}
+	if (r_version != nullptr) {
+		*r_version = header.version;
+	}
+	return header.version == CONTAINER_VERSION;
+}
+
 bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 	const uint64_t alignment = sizeof(uint32_t);
 	const uint8_t *bytes_ptr = p_bytes.ptr();
@@ -818,6 +842,7 @@ bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 	ERR_FAIL_COND_V_MSG(container_header.magic_number != CONTAINER_MAGIC_NUMBER, false, "Incorrect magic number in shader container.");
 	// GodotNext: rd_atomics64 (#175). Older versions are rejected too: their reflection layout differs, so the
 	// container has to be rebuilt from SPIR-V.
+	// GodotNext: dxil_toolchain (#123). Shader caches do that, see ShaderRD::_load_from_cache().
 	ERR_FAIL_COND_V_MSG(container_header.version != CONTAINER_VERSION, false, vformat("Unsupported version in shader container (%d, expected %d); it must be rebuilt.", container_header.version, CONTAINER_VERSION));
 	ERR_FAIL_COND_V_MSG(container_header.format != _format(), false, "Incorrect format in shader container.");
 	ERR_FAIL_COND_V_MSG(container_header.format_version > _format_version(), false, "Unsupported format version in shader container.");

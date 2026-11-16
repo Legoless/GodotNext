@@ -453,19 +453,23 @@ TEST_CASE("[RD][Atomics64] The shader container keeps the usage and rejects olde
 	REQUIRE(plain->set_code_from_spirv("atomics64_32_bit", compute_stages(make_module(MODULE_BUFFER_32_BIT_IADD))));
 	CHECK_EQ(plain->get_int64_atomics_usage(), 0u);
 
-	// A version-2 container has the shorter reflection layout: it is rejected, not misread.
-	PackedByteArray old_bytes = bytes;
-	const uint32_t old_version = 2;
-	memcpy(old_bytes.ptrw() + sizeof(uint32_t), &old_version, sizeof(old_version));
-	Ref<Atomics64TestContainer> old;
-	old.instantiate();
-	Atomics64ErrorCapture errors;
-	ERR_PRINT_OFF;
-	const bool old_loaded = old->from_bytes(old_bytes);
-	ERR_PRINT_ON;
-	CHECK_FALSE(old_loaded);
-	CHECK_EQ(errors.count, 1);
-	CHECK_EQ(errors.last_message, String("Unsupported version in shader container (2, expected 3); it must be rebuilt."));
+	// Older containers are rejected, not misread: version 2 has the shorter reflection layout, and version 3
+	// (this item's own) has no has_ray_query from #123, which made it version 4.
+	CHECK_EQ(RenderingShaderContainer::CONTAINER_VERSION, 4u);
+	const uint32_t old_versions[] = { 2, 3 };
+	for (const uint32_t old_version : old_versions) {
+		PackedByteArray old_bytes = bytes;
+		memcpy(old_bytes.ptrw() + sizeof(uint32_t), &old_version, sizeof(old_version));
+		Ref<Atomics64TestContainer> old;
+		old.instantiate();
+		Atomics64ErrorCapture errors;
+		ERR_PRINT_OFF;
+		const bool old_loaded = old->from_bytes(old_bytes);
+		ERR_PRINT_ON;
+		CHECK_FALSE(old_loaded);
+		CHECK_EQ(errors.count, 1);
+		CHECK_EQ(errors.last_message, vformat("Unsupported version in shader container (%d, expected 4); it must be rebuilt.", old_version));
+	}
 }
 
 } // namespace TestRDAtomics64

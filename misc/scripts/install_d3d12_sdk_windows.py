@@ -20,6 +20,18 @@ parser.add_argument(
     default=os.getenv("MINGW_PREFIX", ""),
     help="Explicitly specify a path containing the MinGW bin folder.",
 )
+# GodotNext: dxil_toolchain (#123).
+parser.add_argument(
+    "--mesa-archive",
+    default="",
+    help="Install the Mesa NIR library from this local archive (a godot-nir-static release zip, for example the GodotNext "
+    "build labeled 25.3.1-gn2) instead of downloading the upstream release. Only the --mesa-arch variant is replaced.",
+)
+parser.add_argument(
+    "--mesa-arch",
+    default="x86_64-msvc",
+    help="The variant that --mesa-archive holds (default: x86_64-msvc).",
+)
 args = parser.parse_args()
 
 # Base Godot dependencies path
@@ -53,16 +65,37 @@ if not os.path.exists(deps_folder):
 
 # Mesa NIR
 color_print(f"{Ansi.BOLD}[1/3] Mesa NIR")
-for arch in [
-    "arm64-llvm",
-    "arm64-msvc",
-    "x86_32-gcc",
-    "x86_32-llvm",
-    "x86_32-msvc",
-    "x86_64-gcc",
-    "x86_64-llvm",
-    "x86_64-msvc",
-]:
+if args.mesa_archive:
+    # GodotNext: dxil_toolchain (#123). A local archive replaces one variant; the other variants stay as they are.
+    mesa_folder = os.path.join(deps_folder, "mesa-" + args.mesa_arch)
+    if not os.path.isfile(args.mesa_archive):
+        color_print(f'{Ansi.RED}Mesa NIR archive "{args.mesa_archive}" does not exist.')
+        sys.exit(1)
+    if os.path.exists(mesa_folder):
+        print(f"Removing existing local Mesa NIR installation in {mesa_folder} ...")
+        shutil.rmtree(mesa_folder)
+    print(f"Extracting Mesa NIR {args.mesa_archive} to {mesa_folder} ...")
+    shutil.unpack_archive(args.mesa_archive, mesa_folder)
+    # Sync the label file name with `drivers/d3d12/SCsub`, which reads the label from its first line.
+    mesa_label_path = os.path.join(mesa_folder, "godotnext-mesa.txt")
+    if os.path.isfile(mesa_label_path):
+        with open(mesa_label_path, encoding="utf-8-sig") as mesa_label_file:
+            print(f"Installed the GodotNext Mesa NIR library {mesa_label_file.readline().strip()} ({args.mesa_arch}).")
+    else:
+        print(f"Installed a Mesa NIR library without a godotnext-mesa.txt label ({args.mesa_arch}).")
+    mesa_variants = []
+else:
+    mesa_variants = [
+        "arm64-llvm",
+        "arm64-msvc",
+        "x86_32-gcc",
+        "x86_32-llvm",
+        "x86_32-msvc",
+        "x86_64-gcc",
+        "x86_64-llvm",
+        "x86_64-msvc",
+    ]
+for arch in mesa_variants:
     mesa_filename = "godot-nir-static-" + arch + "-release.zip"
     mesa_archive = os.path.join(deps_folder, mesa_filename)
     mesa_folder = os.path.join(deps_folder, "mesa-" + arch)

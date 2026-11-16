@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 import methods
-from methods import print_error
+from methods import print_error, print_info
 
 # Sync with `misc/scripts/install_d3d12_sdk_windows.py` when updating Mesa.
 # Check for latest version: https://github.com/godotengine/godot-nir-static/releases/latest
@@ -123,6 +123,24 @@ if (
         f"You can re-install them by running `python {os.path.join('misc', 'scripts', 'install_d3d12_sdk_windows.py')}`.\n"
     )
     sys.exit(255)
+
+# GodotNext: dxil_toolchain (#123). The GodotNext Mesa NIR library (upstream godot-nir-static plus the ray-tracing
+# patch) carries a `godotnext-mesa.txt` label at the top of its archive, beside `bin/` and `godot-mesa/`. Its first
+# line is the label, for example `25.3.1-gn2`; the lines after it record how the library was built and are not read.
+# With it, the driver compiles ray query and the ray-tracing stages; without it (the upstream download), those
+# shaders are refused and everything else builds and behaves as before.
+mesa_label_file = Path(Dir(mesa_libs).abspath + "/godotnext-mesa.txt")
+if mesa_label_file.is_file():
+    mesa_label_lines = mesa_label_file.read_text(encoding="utf-8-sig").splitlines()
+    mesa_label = mesa_label_lines[0].strip() if mesa_label_lines else ""
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-gn[0-9]+", mesa_label) is None:
+        print_error(f'Unrecognized label "{mesa_label}" in {mesa_label_file}; expected <version>-gn<number>.')
+        sys.exit(255)
+    print_info(f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} (ray query and ray-tracing stages).")
+    extra_defines += [
+        "NIR_RAYTRACING_ENABLED",
+        ("GODOTNEXT_MESA_LABEL", '\\"' + mesa_label + '\\"'),
+    ]
 
 # These defines are inspired by the Meson build scripts in the original repo.
 extra_defines += [
