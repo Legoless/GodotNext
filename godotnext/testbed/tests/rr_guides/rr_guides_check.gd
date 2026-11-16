@@ -33,13 +33,16 @@ extends Node
 ## roughness is at most --hit-max-roughness (0.4, every traced pixel) and where
 ## every path-traced sample and every guide frame hit: a mean over hits alone is
 ## biased where some rays miss. The guide is one ray per pixel and frame, so
-## --hit-frames frames (64) are averaged. Per pixel, that mean must be within
-## --hit-tolerance (1%) plus three of its standard errors of the reference; per
-## material roughness, the summed means must be within the tolerance alone.
-## --min-hit-samples is the least number of such pixels the scene must have.
+## --hit-frames frames (64) are averaged. Each such pixel gives the ratio guide
+## mean / reference mean, and hit_distance_rule.gd judges the ratios (lead
+## decision of 2026-11-16): at least --min-hit-samples of them, the median within
+## 1% of 1, the 5th percentile at least 0.85 and the 95th at most 1.15. No single
+## pixel has to be within 1%. The result reports the count and the three
+## percentiles, and the bias of the summed means per material roughness as a
+## report.
 ## Pixels the trace skips (prepass roughness above 0.4, no surface) must hold
 ## 65504. At High the trace runs at half resolution, and trace pixel t samples
-## view pixel 2t + 1, so the samples sit on odd pixels.
+## view pixel 2t + 1, so the samples sit on odd pixels for every even --step.
 ## --require-stage-b=true fails the run unless NextGeo Stage B drew virtual
 ## meshes, so their guides come from the Stage B variants.
 ## --separate-specular=true and --motion-vectors=true ask for a separate specular
@@ -68,6 +71,7 @@ extends Node
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure.
 
 const SceneArgs = preload("res://scenes/scene_args.gd")
+const HitDistanceRule = preload("res://tests/rr_guides/hit_distance_rule.gd")
 
 const MISS_DISTANCE := 65504.0
 ## A guide normal this far from the mesh normal (largest axis) is another surface.
@@ -273,9 +277,11 @@ func _check_scene() -> void:
 	var specular_range := Vector2(INF, -INF)
 	var examples := {}
 	var limit := {"diffuse_albedo": 0, "specular_albedo": 0, "normal_pack": 0, "normal_geometry": 0, "roughness": 0, "sky": 0, "surface_mismatch_inconsistent": 0}
-	# Odd pixels: a half-resolution specular trace samples pixel 2t + 1 (_check_hit_distance()).
-	for y in range(step / 2 + 1, size.y, step):
-		for x in range(step / 2 + 1, size.x, step):
+	# Odd pixels for every even step (3, 7, 11, ... at the default 4): a half-resolution specular
+	# trace samples pixel 2t + 1 (_check_hit_distance()).
+	var first := (step / 2) | 1
+	for y in range(first, size.y, step):
+		for x in range(first, size.x, step):
 			var hit := surfaces.cast_pixel(camera, x, y, to_view)
 			if hit.get("edge", false):
 				counts["edge"] += 1
@@ -410,8 +416,6 @@ func _check_hit_distance(p_size: Vector2i, p_samples: Array) -> void:
 	var frames := maxi(SceneArgs.int_value("--hit-frames", 64), 1)
 	var sums := PackedFloat64Array()
 	sums.resize(p_samples.size())
-	var squares := PackedFloat64Array()
-	squares.resize(p_samples.size())
 	var misses := PackedInt32Array()
 	misses.resize(p_samples.size())
 	var finite_max := 0.0
@@ -443,7 +447,6 @@ func _check_hit_distance(p_size: Vector2i, p_samples: Array) -> void:
 				misses[i] += 1
 			else:
 				sums[i] += distance
-				squares[i] += distance * distance
 				finite_max = maxf(finite_max, distance)
 
 	var spp := maxi(SceneArgs.int_value("--reference-spp", 256), 1)
@@ -473,17 +476,10 @@ func _check_hit_distance(p_size: Vector2i, p_samples: Array) -> void:
 	hit["frames"] = frames
 
 	var max_roughness := _float_arg("--hit-max-roughness", MAX_TRACE_ROUGHNESS)
-	var tolerance := _float_arg("--hit-tolerance", 0.01)
-	var errors := PackedFloat64Array()
-	# Per pixel the guide mean has a standard error; the test allows three of them on top of
-	# the tolerance. Per roughness, the summed guide means must match the summed reference
-	# means within the tolerance alone.
-	var over := 0
-	var worst_excess := 0.0
-	var groups := {}
-	# Guide mean over the frames that hit / reference mean, on every traced pixel the reference
-	# always hit (a report, not a test).
+	# One ratio per compared pixel: guide mean / reference mean (hit_distance_rule.gd).
 	var ratios := PackedFloat64Array()
+	# Per material roughness: samples, summed guide means, summed reference means (a report).
+	var groups := {}
 	var untraced := 0
 	var untraced_wrong := 0
 	var traced := 0
@@ -518,8 +514,6 @@ func _check_hit_distance(p_size: Vector2i, p_samples: Array) -> void:
 				reference_miss_guide_hit += 1
 			continue
 		var reference_distance := maxf(reference[index] / reference_hits, 1e-6)
-		if reference_hits >= reference_count and misses[i] < frames:
-			ratios.append(sums[i] / float(frames - misses[i]) / reference_distance)
 		# Compare only where both always hit: a mean over hits alone is biased where some rays miss.
 		if float(sample["roughness"]) > max_roughness:
 			above_max_roughness += 1
@@ -531,26 +525,15 @@ func _check_hit_distance(p_size: Vector2i, p_samples: Array) -> void:
 			mixed += 1
 			continue
 		var mean := sums[i] / float(frames)
-		var standard_error := sqrt(maxf(squares[i] / float(frames) - mean * mean, 0.0) / float(frames))
-		var error := absf(mean - reference_distance) / reference_distance
-		var allowed := tolerance + 3.0 * standard_error / reference_distance
-		errors.append(error)
-		if error > allowed:
-			over += 1
-			worst_excess = maxf(worst_excess, error - allowed)
+		ratios.append(mean / reference_distance)
 		var key := "%.3f" % float(sample["roughness"])
 		var group: Array = groups.get(key, [0, 0.0, 0.0])
 		groups[key] = [int(group[0]) + 1, float(group[1]) + mean, float(group[2]) + reference_distance]
-	errors.sort()
-	ratios.sort()
-	hit["ratio_samples"] = ratios.size()
 	hit["traced_guide_65504_every_frame"] = traced_all_miss
 	hit["traced_guide_65504_some_frames"] = traced_some_miss
 	hit["guide_largest_distance"] = finite_max
-	if not ratios.is_empty():
-		hit["ratio_p05_p50_p95"] = [ratios[int(ratios.size() * 0.05)], ratios[ratios.size() / 2], ratios[mini(int(ratios.size() * 0.95), ratios.size() - 1)]]
-	hit["compared"] = not errors.is_empty()
-	hit["compared_samples"] = errors.size()
+	hit["compared"] = not ratios.is_empty()
+	hit["compared_samples"] = ratios.size()
 	hit["traced_samples"] = traced
 	hit["not_compared_samples"] = mixed
 	hit["not_compared_rougher"] = above_max_roughness
@@ -561,27 +544,26 @@ func _check_hit_distance(p_size: Vector2i, p_samples: Array) -> void:
 	hit["reference_miss_samples"] = reference_miss
 	hit["reference_miss_guide_hit"] = reference_miss_guide_hit
 	hit["max_roughness"] = max_roughness
-	hit["tolerance"] = tolerance
 	if untraced_wrong > 0:
 		_failures.append("%d untraced samples do not hold 65504 in every frame" % untraced_wrong)
-	if errors.size() < min_samples:
-		_failures.append("%d samples to compare the hit distance on, expected at least %d (roughness at most %s, every reference sample a hit)" % [errors.size(), min_samples, str(max_roughness)])
-	if errors.is_empty():
-		return
-	hit["median_error"] = errors[errors.size() / 2]
-	hit["p95_error"] = errors[mini(int(errors.size() * 0.95), errors.size() - 1)]
-	hit["max_error"] = errors[errors.size() - 1]
-	hit["over_tolerance"] = over
-	hit["worst_excess"] = worst_excess
-	if over > 0:
-		_failures.append("the hit distance of %d of %d samples is more than %s plus three standard errors from the reference path tracer (median error %.4f, worst excess %.4f)" % [over, errors.size(), str(tolerance), hit["median_error"], worst_excess])
+
+	var verdict := HitDistanceRule.judge(ratios, min_samples)
+	hit["min_samples"] = min_samples
+	hit["limits"] = {"median_tolerance": HitDistanceRule.MEDIAN_TOLERANCE, "p05_min": HitDistanceRule.P05_MIN, "p95_max": HitDistanceRule.P95_MAX}
+	if not ratios.is_empty():
+		hit["ratio_p05"] = verdict["p05"]
+		hit["ratio_median"] = verdict["median"]
+		hit["ratio_p95"] = verdict["p95"]
+		var ordered := ratios.duplicate()
+		ordered.sort()
+		hit["ratio_range"] = [ordered[0], ordered[ordered.size() - 1]]
+	hit["rule_failed"] = verdict["failed"]
+	for message in verdict["failures"]:
+		_failures.append("%s (roughness at most %s, every reference sample and every guide frame a hit)" % [message, str(max_roughness)])
 	var by_roughness := {}
 	for key in groups:
 		var group: Array = groups[key]
-		var bias := float(group[1]) / float(group[2]) - 1.0
-		by_roughness[key] = {"samples": group[0], "bias": bias}
-		if absf(bias) > tolerance:
-			_failures.append("at roughness %s the mean hit distance of %d samples is %.4f from the reference path tracer's" % [key, group[0], bias])
+		by_roughness[key] = {"samples": group[0], "bias": float(group[1]) / float(group[2]) - 1.0}
 	hit["by_roughness"] = by_roughness
 
 

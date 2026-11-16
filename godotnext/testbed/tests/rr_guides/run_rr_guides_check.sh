@@ -22,8 +22,13 @@
 #              before the guides) and with NextGI and motion vectors (the TAA velocity plan loads
 #              velocity), and Color Box Room A's virtual-mesh twin with Keep, where Stage B
 #              clears them.
+#   hit_rule   The unit test of the hit distance rule (test_hit_distance_rule.gd), headless.
 #   hit        Roughness Corridor from Cam0 and from CaptureCam: the hit distance against the
-#              reference path tracer's reflections-only mode, on at least 64 pixels.
+#              reference path tracer's reflections-only mode. The ratios guide / reference must
+#              number at least 64, with the median within 1% of 1, p05 >= 0.85 and p95 <= 1.15
+#              (hit_distance_rule.gd). These passes sample every odd pixel in x and y (--step=2)
+#              rather than every fourth: only pixels whose reflections always hit within the
+#              trace's range can be compared, and at --step=4 CaptureCam has fewer than 64.
 #
 # Usage:
 #   run_rr_guides_check.sh [--work=<directory>] -- <godot> <godot arguments without a scene>
@@ -152,6 +157,20 @@ check_off_variants() {
 	fi
 }
 
+# The hit distance rule's unit test: no GPU, no window, no override.cfg.
+rule_log="$work/hit_rule.log"
+set +e
+"${godot_cmd[@]}" --headless --script res://tests/rr_guides/test_hit_distance_rule.gd >"$rule_log" 2>&1
+rule_status=$?
+set -e
+rule_result=$(grep -m1 '^test_hit_distance_rule: ' "$rule_log" || true)
+rule_errors=$(grep -c -E 'ERROR:|SCRIPT ERROR' "$rule_log" || true)
+echo "RR_GUIDES hit_rule status=$rule_status errors=$rule_errors $rule_result"
+if [[ "$rule_status" -ne 0 || "$rule_result" != 'test_hit_distance_rule: ok' || "$rule_errors" -ne 0 ]]; then
+	echo "run_rr_guides_check.sh: the hit_rule unit test failed (log $rule_log)" >&2
+	failed=1
+fi
+
 run_pass off "" "$no_cache" --rr-check=off
 check_off_variants off
 run_pass off_vg "" "$no_cache" --rr-check=off --scene=res://scenes/color_box_room/cbr_a_vg.tscn
@@ -180,8 +199,8 @@ run_pass corridor_specular_velocity 1 "" --rr-check=scene --scene=res://scenes/r
 run_pass corridor_keep 1 "" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --background=keep
 run_pass corridor_taa_velocity 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --motion-vectors=true
 run_pass cbr_a_vg_keep 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/color_box_room/cbr_a_vg.tscn --camera=CaptureCam --require-stage-b=true --max-surface-mismatch=0.05 --background=keep
-run_pass hit_cam0 1 "$nextgi_epic_reference" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=Cam0 --min-hit-samples=64
-run_pass hit_capturecam 1 "$nextgi_epic_reference" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --min-hit-samples=64
+run_pass hit_cam0 1 "$nextgi_epic_reference" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=Cam0 --step=2 --min-hit-samples=64
+run_pass hit_capturecam 1 "$nextgi_epic_reference" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --step=2 --min-hit-samples=64
 
 if [[ "$failed" -ne 0 ]]; then
 	echo "run_rr_guides_check.sh: failed (logs in $work)" >&2
