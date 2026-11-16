@@ -91,6 +91,13 @@ public:
 	static_assert(DYNAMIC_BUFFER_SPACE_BASE + RenderingDeviceCommons::MAX_UNIFORM_SETS <= 32);
 	// GodotNext: dxil_toolchain (#123). Version 2 has 8 specialization-constant bit-offset slots instead of 3.
 	static constexpr uint32_t FORMAT_VERSION = 2;
+	// GodotNext: dxil_atomics (#279). The layout of version 2, with DXIL from a Mesa NIR library that declares atomics
+	// without readnone (25.3.1-gn3 or later, see declares_atomics_without_readnone()). A build writes this or
+	// FORMAT_VERSION, and shader caches rebuild containers of the other one, so a build with such a library and one
+	// with an older library do not reuse each other's DXIL. FORMAT_VERSION covers both 25.3.1-gn2 and the upstream
+	// library, whose builds still reuse each other's caches as before #279; a later library that changes DXIL again
+	// needs its own format version.
+	static constexpr uint32_t FORMAT_VERSION_ATOMICS_WITHOUT_READNONE = 3;
 	// GodotNext: dxil_toolchain (#123). The DXIL shader model ray query (inline ray tracing, tier 1.1) and the
 	// ray-tracing library targets need.
 	static constexpr uint32_t RAY_QUERY_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5
@@ -221,6 +228,11 @@ public:
 	// empty string.
 	static bool is_raytracing_supported();
 	static const char *get_mesa_label();
+	// GodotNext: dxil_atomics (#279). Whether the linked library declares dx.op.atomicBinOp and
+	// dx.op.atomicCompareExchange without readnone, as DXC does: the GodotNext Mesa NIR library 25.3.1-gn3 or later.
+	// Older libraries declare them readnone, and D3D12 GPU-based validation then loses atomics whose result is
+	// unused (#277).
+	static bool declares_atomics_without_readnone();
 
 	// GodotNext: dxil_toolchain (#123). The debug-only DXIL validator (GODOT_D3D12_DXIL_VALIDATE=1 in a build with
 	// DEBUG_ENABLED). requested: the variable is set. active: dxil.dll is loaded; asking loads it when it was

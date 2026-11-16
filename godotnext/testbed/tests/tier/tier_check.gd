@@ -20,7 +20,9 @@ extends Node
 ## "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 ##
 ## The WRC benchmark counts its probe rays and hits with atomics whose result is unused, which D3D12
-## GPU-based validation loses (#277, harness/d3d12_gbv.gd). When the run asked for it and the
+## GPU-based validation loses (#277, harness/d3d12_gbv.gd) unless the build links the GodotNext
+## Mesa NIR library 25.3.1-gn3 or later (#279; with such a library the Windows runner fails a run
+## whose result still reports "not_checked"). When the run asked for it and the
 ## benchmark failed with no rays and no hits, the benchmark check and --expect-quality (the pick
 ## falls back to Medium) are "not_checked", and the result's "not_checked" field names them and
 ## gives the reason. Any other benchmark failure still fails.

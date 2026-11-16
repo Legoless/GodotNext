@@ -270,7 +270,8 @@ uint32_t RenderingShaderContainerD3D12::_format() const {
 }
 
 uint32_t RenderingShaderContainerD3D12::_format_version() const {
-	return FORMAT_VERSION;
+	// GodotNext: dxil_atomics (#279).
+	return declares_atomics_without_readnone() ? FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : FORMAT_VERSION;
 }
 
 uint32_t RenderingShaderContainerD3D12::_from_bytes_reflection_extra_data(const uint8_t *p_bytes) {
@@ -1330,6 +1331,15 @@ const char *RenderingShaderContainerD3D12::get_mesa_label() {
 	return GODOTNEXT_MESA_LABEL;
 #else
 	return "";
+#endif
+}
+
+// GodotNext: dxil_atomics (#279). drivers/d3d12/SCsub defines NIR_ATOMICS_WITHOUT_READNONE for 25.3.1-gn3 and later.
+bool RenderingShaderContainerD3D12::declares_atomics_without_readnone() {
+#ifdef NIR_ATOMICS_WITHOUT_READNONE
+	return true;
+#else
+	return false;
 #endif
 }
 

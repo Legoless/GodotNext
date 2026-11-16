@@ -126,7 +126,7 @@ if (
 
 # GodotNext: dxil_toolchain (#123). The GodotNext Mesa NIR library (upstream godot-nir-static plus the ray-tracing
 # patch) carries a `godotnext-mesa.txt` label at the top of its archive, beside `bin/` and `godot-mesa/`. Its first
-# line is the label, for example `25.3.1-gn2`; the lines after it record how the library was built and are not read.
+# line is the label, for example `25.3.1-gn3`; the lines after it record how the library was built and are not read.
 # With it, the driver compiles ray query and the ray-tracing stages; without it (the upstream download), those
 # shaders are refused and everything else builds and behaves as before.
 mesa_label_file = Path(Dir(mesa_libs).abspath + "/godotnext-mesa.txt")
@@ -137,19 +137,29 @@ if mesa_label_file.is_file():
     if mesa_label_match is None:
         print_error(f'Unrecognized label "{mesa_label}" in {mesa_label_file}; expected <version>-gn<number>.')
         sys.exit(255)
+    mesa_label_version = tuple(int(part) for part in mesa_label_match.groups())
     # GodotNext: d3d12_dxr (#118). 25.3.1-gn1 reads the ray-query instance custom index as the instance index, so
     # D3D12 ray query (DXR 1.1) would return wrong custom indices and the NextGI self-test would never pass.
-    if tuple(int(part) for part in mesa_label_match.groups()) < (25, 3, 1, 2):
+    if mesa_label_version < (25, 3, 1, 2):
         print_error(
             f'The GodotNext Mesa NIR library "{mesa_label}" in {mesa_label_file} is too old: D3D12 ray query needs '
             "25.3.1-gn2 or later, which reads the instance custom index as DXIL InstanceID."
         )
         sys.exit(255)
-    print_info(f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} (ray query and ray-tracing stages).")
+    # GodotNext: dxil_atomics (#279). 25.3.1-gn3 and later declare dx.op.atomicBinOp and dx.op.atomicCompareExchange
+    # without readnone, as DXC does. With 25.3.1-gn2 (still accepted) and the upstream library, D3D12 GPU-based
+    # validation loses atomics whose result is unused (#277).
+    mesa_atomics_without_readnone = mesa_label_version >= (25, 3, 1, 3)
+    print_info(
+        f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} (ray query and ray-tracing stages"
+        + (", atomics without readnone)." if mesa_atomics_without_readnone else ").")
+    )
     extra_defines += [
         "NIR_RAYTRACING_ENABLED",
         ("GODOTNEXT_MESA_LABEL", '\\"' + mesa_label + '\\"'),
     ]
+    if mesa_atomics_without_readnone:
+        extra_defines += ["NIR_ATOMICS_WITHOUT_READNONE"]
 
 # These defines are inspired by the Meson build scripts in the original repo.
 extra_defines += [

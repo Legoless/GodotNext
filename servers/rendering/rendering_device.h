@@ -1086,6 +1086,9 @@ public:
 
 	RID shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "", bool p_base_instance_native = false);
 	RID shader_create_from_bytecode(const Vector<uint8_t> &p_shader_binary, RID p_placeholder = RID());
+	// GodotNext: dxil_atomics (#279). Whether this driver's shader compiler wrote p_shader_binary the way it writes
+	// now (RenderingShaderContainer::is_container_current()). Reads only the header and prints nothing.
+	bool shader_binary_is_current(const Vector<uint8_t> &p_shader_binary, uint32_t *r_version = nullptr, uint32_t *r_format_version = nullptr) const;
 	RID shader_create_placeholder();
 	void shader_destroy_modules(RID p_shader);
 

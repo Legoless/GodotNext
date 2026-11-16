@@ -899,6 +899,21 @@ bool RenderingShaderContainer::is_container_version_current(const PackedByteArra
 	return header.version == CONTAINER_VERSION;
 }
 
+bool RenderingShaderContainer::is_container_current(const PackedByteArray &p_bytes, uint32_t *r_version, uint32_t *r_format_version) const {
+	if (r_format_version != nullptr) {
+		*r_format_version = 0;
+	}
+	if (!is_container_version_current(p_bytes, r_version)) {
+		return false;
+	}
+	ContainerHeader header;
+	memcpy(&header, p_bytes.ptr(), sizeof(ContainerHeader));
+	if (r_format_version != nullptr) {
+		*r_format_version = header.format_version;
+	}
+	return header.format == _format() && header.format_version == _format_version();
+}
+
 bool RenderingShaderContainer::from_bytes(const PackedByteArray &p_bytes) {
 	const uint64_t alignment = sizeof(uint32_t);
 	const uint8_t *bytes_ptr = p_bytes.ptr();

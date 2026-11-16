@@ -8,9 +8,17 @@ extends RefCounted
 ## validation patches a shader, such a call whose result nothing reads no longer runs. Atomics
 ## whose result is used, shared-memory atomics and plain stores are not affected.
 ##
+## That holds for builds that link the upstream Mesa NIR library or GodotNext's 25.3.1-gn2. The
+## GodotNext Mesa NIR library 25.3.1-gn3 and later declare the atomics as DXC does, and they land
+## (#279); such a build prints "D3D12: GPU-based validation keeps atomics whose result is unused"
+## after the line that turns GPU-based validation on. The runner then leaves out its not-checked
+## note and fails the run when a result still reports NOT_CHECKED. Scripts cannot see which
+## library the build links.
+##
 ## A check whose result depends on such atomics reports it as NOT_CHECKED, with REASON, when this
 ## run asked for GPU-based validation and the result is what the limit produces. Anything else it
-## still checks. A GPU-based validation run still counts its validation messages.
+## still checks, so with 25.3.1-gn3 such a check passes as usual. A GPU-based validation run still
+## counts its validation messages.
 
 const SETTING := "rendering/rendering_device/d3d12/gpu_based_validation"
 const NOT_CHECKED := "not_checked"

@@ -347,6 +347,14 @@ public:
 	// rejects. r_version receives the version found (0 if there is no header). Shader caches use it to
 	// rebuild stale entries.
 	static bool is_container_version_current(const PackedByteArray &p_bytes, uint32_t *r_version = nullptr);
+	// GodotNext: dxil_atomics (#279). Like is_container_version_current(), and p_bytes also has this container's
+	// format and format version, so the shader compiler this build uses wrote it the way it writes now (D3D12's
+	// format version tells a Mesa NIR library that declares atomics without readnone from older ones). r_format_version
+	// receives the format version found (0 if there is no current header). Shader caches use it to rebuild entries
+	// another build's compiler wrote.
+	bool is_container_current(const PackedByteArray &p_bytes, uint32_t *r_version = nullptr, uint32_t *r_format_version = nullptr) const;
+	// GodotNext: dxil_atomics (#279). The format version to_bytes() writes.
+	uint32_t get_current_format_version() const { return _format_version(); }
 	// GodotNext: rd_bindless (#176). Whether a set of the shader is a bindless table.
 	bool uses_bindless_tables() const;
 	bool from_bytes(const PackedByteArray &p_bytes);

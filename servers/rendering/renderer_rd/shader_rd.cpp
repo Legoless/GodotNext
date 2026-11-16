@@ -761,6 +761,12 @@ static const char *shader_file_header = "GDSC";
 // GodotNext: rd_rt_pipelines (#179). Container version 5 keeps cache file version 5 too. A build with the same
 // version hash opens files that hold older (version-4) containers and rebuilds them the same way.
 // GodotNext: rd_mesh_shaders (#178). So does container version 6, whose older containers are version 5.
+// GodotNext: dxil_atomics (#279). Builds of the same commit that link different Mesa NIR libraries also share the
+// cache path. A build with 25.3.1-gn3 or later writes D3D12 containers with format version 3 and an older library 2,
+// and _load_from_cache() rebuilds containers of the other format version the same way. One check covers both rules:
+// it reads the container version first, and the one warning per run names the container version or, for a container
+// of the current version, the format version. Builds with 25.3.1-gn2 and the upstream library both write 2, so they
+// still reuse each other's containers, as before #279.
 static const uint32_t cache_file_version = 5;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {
@@ -778,8 +784,12 @@ String ShaderRD::_get_cache_file_path(Version *p_version, int p_group, const Str
 // stale; the others go to the verbose log.
 static SafeNumeric<uint32_t> stale_shader_cache_count;
 
-static void _report_stale_shader_cache(const String &p_name, uint32_t p_container_version) {
-	const String message = vformat("Shader cache for '%s' was written with shader container version %d; rebuilding it for version %d.", p_name, p_container_version, RenderingShaderContainer::CONTAINER_VERSION);
+// GodotNext: dxil_atomics (#279). A container of the current version with another format version comes from another
+// build's shader compiler (on D3D12, a build whose Mesa NIR library declares the atomics differently).
+static void _report_stale_shader_cache(const String &p_name, uint32_t p_container_version, uint32_t p_format_version) {
+	const String message = p_container_version == RenderingShaderContainer::CONTAINER_VERSION
+			? vformat("Shader cache for '%s' was written with shader container format version %d, which this build's shader compiler does not write; rebuilding it.", p_name, p_format_version)
+			: vformat("Shader cache for '%s' was written with shader container version %d; rebuilding it for version %d.", p_name, p_container_version, RenderingShaderContainer::CONTAINER_VERSION);
 	if (stale_shader_cache_count.increment() == 1) {
 		WARN_PRINT(message + " Other stale shader caches are rebuilt without a warning (see the verbose log).");
 	} else {
@@ -848,9 +858,12 @@ bool ShaderRD::_load_from_cache(Version *p_version, int p_group) {
 
 		// GodotNext: dxil_toolchain (#123). A container from another CONTAINER_VERSION cannot be parsed, so load
 		// nothing from this file: the group compiles again and _save_to_cache() rewrites the file.
+		// GodotNext: dxil_atomics (#279). The same for another format or format version, so D3D12 DXIL from a Mesa NIR
+		// library that declares the atomics differently (25.3.1-gn3 or later against older ones) is not reused.
 		uint32_t container_version = 0;
-		if (!RenderingShaderContainer::is_container_version_current(variant_bytes, &container_version)) {
-			_report_stale_shader_cache(name, container_version);
+		uint32_t format_version = 0;
+		if (!RD::get_singleton()->shader_binary_is_current(variant_bytes, &container_version, &format_version)) {
+			_report_stale_shader_cache(name, container_version, format_version);
 			return false;
 		}
 

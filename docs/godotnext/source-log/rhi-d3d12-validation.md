@@ -2,8 +2,9 @@
 
 The plan's clean-room protocol (§19) requires a source log per subsystem. This file
 records the outside inputs used to make the D3D12 driver's root signatures work under
-GPU-based validation (#272), and to find why storage-buffer atomics do not land under it
-(#277): what each input is, where it came from, its license, and how it was used.
+GPU-based validation (#272), to find why storage-buffer atomics do not land under it
+(#277), and to make them land with a fixed Mesa NIR library (#279): what each input is, where
+it came from, its license, and how it was used.
 
 The cause of the failure, that `CreateRootSignature` with GPU-based validation on commits
 memory in proportion to the highest root-constant or root-descriptor register, was not
@@ -88,7 +89,9 @@ from a document:
   validation on both adapters.
 
 The fix belongs in Mesa (declaring the two atomic operations without `readnone`,
-as DXC does), which is not this repository's code. Until then the limit is documented in
+as DXC does), which is not this repository's code. The GodotNext Mesa NIR library 25.3.1-gn3
+carries it (#279, below); builds that link the upstream library or 25.3.1-gn2 keep the limit,
+and for them it is documented in
 `rendering/rendering_device/d3d12/gpu_based_validation`'s class reference, and the testbed
 reports the affected results as not checked under GPU-based validation
 (`godotnext/testbed/harness/d3d12_gbv.gd`, the fixture, `tests/tier/tier_check.gd` for the
@@ -162,3 +165,28 @@ How it was used: it explains the disassembly, and shows that the declaration com
 | Consulted by | The #277 implementer |
 | Used in | Nothing committed: a script that changed one declaration's attribute-list operand in a copy of the engine's DXIL, for the probe |
 | Copied files | None |
+
+## Atomics declared without readnone (#279)
+
+The GodotNext Mesa NIR library 25.3.1-gn3 is 25.3.1-gn2 plus one more Mesa patch, which
+declares `dx.op.atomicBinOp` and `dx.op.atomicCompareExchange` without `readnone`, as DXC does.
+The patch is made and kept privately, like the rest of the library's patches (#123, #273). The
+inputs are the ones the #277 section lists: the same Mesa 25.3.1 files (MIT, changed in the
+private library, not in this repository), and DXC's `nounwind` declaration, read in its
+`-dumpbin` disassembly. That section's shader has only an add, so the #279 implementer also ran
+the same `dxc.exe` (2026-11-16) on a compute shader whose compare-exchange, compare-store, or,
+exchange, max and add results are unused, for `cs_6_2` and `cs_6_8`: its disassembly declares
+`dx.op.atomicCompareExchange` and `dx.op.atomicBinOp` with the same `nounwind` attribute group, and
+every call stays. Nothing new was read for the engine side.
+
+What the engine does with it: `drivers/d3d12/SCsub` defines `NIR_ATOMICS_WITHOUT_READNONE` for
+labels 25.3.1-gn3 and later. Such a build writes D3D12 shader containers with format version 3
+instead of 2 (the layout is the same), and shader caches rebuild a container whose format version
+is not the one the build writes, with one warning per run, so a build with 25.3.1-gn3 and one with
+an older library do not reuse each other's DXIL. Builds with 25.3.1-gn2 and the upstream library
+both still write format version 2 and reuse each other's caches, as before #279; a later library
+that changes DXIL again needs its own format version. With GPU-based validation on, it also logs `D3D12: GPU-based validation keeps atomics
+whose result is unused`, which the runner reads. The `[ShaderContainer][D3D12]` test that checks
+the declarations reads the `declare` and `attributes #N = { ... }` lines of the disassembly that
+`IDxcCompiler::Disassemble` returns, which is LLVM assembly, the same output #123's
+instance-value test reads.

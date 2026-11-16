@@ -38,6 +38,10 @@ TEST_FORCE_LINK(test_rendering_shader_container)
 // validator and the DXIL operations that read the instance values). Most SPIR-V modules are assembled by hand; the
 // GLSL cases compile their shaders with the glslang module. No case needs a GPU. With the GodotNext Mesa NIR library,
 // the instance-value case disassembles DXIL with dxil.dll and dxcompiler.dll from the installed Windows SDK.
+// GodotNext: dxil_atomics (#279). Containers of another format or format version are not current, the D3D12 format
+// version follows whether the Mesa NIR library declares atomics without readnone, and the atomic-declaration case
+// disassembles DXIL the same way to check how the linked library declares the DXIL atomic operations (without
+// readnone from 25.3.1-gn3 on).
 
 #include "core/error/error_macros.h"
 #include "core/templates/local_vector.h"
@@ -231,6 +235,7 @@ void write_u32(PackedByteArray &r_bytes, int64_t p_offset, uint32_t p_value) {
 
 // The container header is magic, version, format, format version and shader count (5 x uint32_t).
 constexpr int64_t HEADER_VERSION_OFFSET = 4;
+constexpr int64_t HEADER_FORMAT_OFFSET = 8;
 constexpr int64_t HEADER_FORMAT_VERSION_OFFSET = 12;
 // ReflectionData follows the header (TestShaderContainer adds no header data). Version 4's was 72 bytes and ended with
 // int64_atomics (#175, offset 64) and has_ray_query (#123, offset 68). Version 5's was 80 bytes: it appended
@@ -338,6 +343,71 @@ TEST_CASE("[ShaderContainer] Containers of versions 2 to 5 are rejected with one
 	CHECK_FALSE(RenderingShaderContainer::is_container_version_current(garbage, &garbage_version));
 	CHECK(garbage_version == 0);
 	CHECK_FALSE(RenderingShaderContainer::is_container_version_current(PackedByteArray()));
+}
+
+// GodotNext: dxil_atomics (#279). Shader caches also rebuild a container of the current version whose format or format
+// version is not the one this build writes (on D3D12, DXIL from a Mesa NIR library that declares the atomics
+// differently).
+TEST_CASE("[ShaderContainer] A container of another format or format version is not current") {
+	Ref<TestShaderContainer> container;
+	container.instantiate();
+	REQUIRE(container->set_code_from_spirv("current", make_stages(TestModule::COMPUTE)));
+	const PackedByteArray current = container->to_bytes();
+	REQUIRE(current.size() > HEADER_FORMAT_VERSION_OFFSET + 4);
+	CHECK(container->get_current_format_version() == 1);
+	CHECK(read_u32(current, HEADER_FORMAT_VERSION_OFFSET) == 1);
+
+	// The check reads only the header and prints nothing.
+	ErrorCapture capture;
+	uint32_t version = 0;
+	uint32_t format_version = 0;
+	CHECK(container->is_container_current(current, &version, &format_version));
+	CHECK(version == RenderingShaderContainer::CONTAINER_VERSION);
+	CHECK(format_version == 1);
+
+	// An older or a newer format version is not current, and the one found is reported. The version check alone
+	// still passes, and from_bytes() reads the older one.
+	const uint32_t other_format_versions[] = { 0, 2 };
+	for (const uint32_t other_format_version : other_format_versions) {
+		PackedByteArray other = current;
+		write_u32(other, HEADER_FORMAT_VERSION_OFFSET, other_format_version);
+		CHECK_FALSE(container->is_container_current(other, &version, &format_version));
+		CHECK(version == RenderingShaderContainer::CONTAINER_VERSION);
+		CHECK(format_version == other_format_version);
+		CHECK(RenderingShaderContainer::is_container_version_current(other));
+	}
+	{
+		PackedByteArray older = current;
+		write_u32(older, HEADER_FORMAT_VERSION_OFFSET, 0);
+		Ref<TestShaderContainer> loaded;
+		loaded.instantiate();
+		CHECK(loaded->from_bytes(older));
+	}
+	CHECK(capture.count == 0);
+
+	// Another format.
+	PackedByteArray other_format = current;
+	write_u32(other_format, HEADER_FORMAT_OFFSET, 0x12345678);
+	CHECK_FALSE(container->is_container_current(other_format, &version, &format_version));
+	CHECK(format_version == 1);
+
+	// Another container version (4, the one before #179's raytracing_reorder): its format version is not read.
+	PackedByteArray old = current;
+	write_u32(old, HEADER_VERSION_OFFSET, 4);
+	CHECK_FALSE(container->is_container_current(old, &version, &format_version));
+	CHECK(version == 4);
+	CHECK(format_version == 0);
+
+	// Bytes that are not a shader container at all.
+	PackedByteArray garbage;
+	garbage.resize_initialized(32);
+	version = 7;
+	format_version = 7;
+	CHECK_FALSE(container->is_container_current(garbage, &version, &format_version));
+	CHECK(version == 0);
+	CHECK(format_version == 0);
+	CHECK_FALSE(container->is_container_current(PackedByteArray()));
+	CHECK(capture.count == 0);
 }
 
 TEST_CASE("[ShaderContainer] Version 6 keeps int64_atomics, has_ray_query and raytracing_reorder at their version-5 offsets and ends with a zero padding word") {
@@ -788,8 +858,34 @@ Vector<uint8_t> decompressed_code(const Ref<RenderingShaderContainer> &p_contain
 	return code;
 }
 
-TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version 2, shader models and the ray-tracing gate") {
+// GodotNext: dxil_atomics (#279). Whether a GodotNext Mesa NIR library label ("25.3.1-gn3") is 25.3.1-gn3 or later.
+bool mesa_label_declares_atomics_without_readnone(const String &p_label) {
+	const PackedStringArray parts = p_label.replace("-gn", ".").split(".");
+	if (parts.size() != 4) {
+		return false;
+	}
+	const int minimum[4] = { 25, 3, 1, 3 };
+	for (int i = 0; i < 4; i++) {
+		const int part = parts[i].to_int();
+		if (part != minimum[i]) {
+			return part > minimum[i];
+		}
+	}
+	return true;
+}
+
+TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader models and the ray-tracing gate") {
 	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION == 2);
+	// GodotNext: dxil_atomics (#279). The format version follows the library: 3 when it declares atomics without
+	// readnone (25.3.1-gn3 or later), else 2.
+	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE == 3);
+	CHECK(mesa_label_declares_atomics_without_readnone("25.3.1-gn3"));
+	CHECK(mesa_label_declares_atomics_without_readnone("25.4.0-gn1"));
+	CHECK_FALSE(mesa_label_declares_atomics_without_readnone("25.3.1-gn2"));
+	CHECK_FALSE(mesa_label_declares_atomics_without_readnone(""));
+	const bool atomics_without_readnone = RenderingShaderContainerD3D12::declares_atomics_without_readnone();
+	CHECK(atomics_without_readnone == mesa_label_declares_atomics_without_readnone(RenderingShaderContainerD3D12::get_mesa_label()));
+	const uint32_t format_version = atomics_without_readnone ? 3 : 2;
 
 	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
 	REQUIRE(lib_d3d12 != nullptr);
@@ -803,15 +899,25 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version 2, shader m
 	REQUIRE(plain->shaders.size() == 1);
 	CHECK(dxil_program_version(decompressed_code(plain, 0)) == ((5u << 16) | 0x62));
 
-	// It is written as container version 6, D3D12 format version 2, and copies of versions 2 to 5 are each
-	// rejected once.
+	// It is written as container version 6 and the library's D3D12 format version, and copies of versions 2 to 5 are
+	// each rejected once.
 	const PackedByteArray bytes = plain->to_bytes();
 	REQUIRE(bytes.size() > HEADER_FORMAT_VERSION_OFFSET + 4);
 	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 6);
-	CHECK(read_u32(bytes, HEADER_FORMAT_VERSION_OFFSET) == 2);
+	CHECK(read_u32(bytes, HEADER_FORMAT_VERSION_OFFSET) == format_version);
+	CHECK(plain->get_current_format_version() == format_version);
+	CHECK(plain->is_container_current(bytes));
 	{
 		Ref<RenderingShaderContainer> loaded = format.create_container();
 		CHECK(loaded->from_bytes(bytes));
+	}
+	{
+		// A container the other kind of library wrote is not current, so shader caches rebuild it.
+		PackedByteArray other = bytes;
+		write_u32(other, HEADER_FORMAT_VERSION_OFFSET, 5 - format_version);
+		uint32_t found = 0;
+		CHECK_FALSE(plain->is_container_current(other, nullptr, &found));
+		CHECK(found == 5 - format_version);
 	}
 	const uint32_t stale_versions[] = { 2, 3, 4, 5 };
 	for (const uint32_t stale_version : stale_versions) {
@@ -843,6 +949,7 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version 2, shader m
 	} else {
 		// The upstream library: both are refused with exactly one message each.
 		CHECK(String(RenderingShaderContainerD3D12::get_mesa_label()).is_empty());
+		CHECK_FALSE(atomics_without_readnone);
 		{
 			ErrorCapture capture;
 			CHECK_FALSE(ray_query->set_code_from_spirv("ray_query", make_stages(TestModule::COMPUTE_RAY_QUERY)));
@@ -1367,6 +1474,101 @@ TEST_CASE("[ShaderContainer][D3D12] Ray query and ray-tracing stages read the in
 	}
 
 	check_dxil_validation(validation_before, RenderingShaderContainerD3D12::is_raytracing_supported() ? 4 : 0);
+}
+
+// GodotNext: dxil_atomics (#279). Storage-buffer and image atomics whose result is unused, as counters use them.
+const char *UNUSED_RESULT_ATOMICS_GLSL = R"(
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict buffer Counters {
+	uint added;
+	uint swapped;
+}
+counters;
+
+layout(set = 0, binding = 1, r32ui) uniform restrict uimage2D counter_image;
+
+void main() {
+	atomicAdd(counters.added, 1u);
+	atomicCompSwap(counters.swapped, 0u, 1u);
+	imageAtomicAdd(counter_image, ivec2(0), 1u);
+}
+)";
+
+// The attribute list of the DXIL function that p_function names in a disassembly ("declare ... @dx.op.atomicBinOp.i32(...)
+// #0" and "attributes #0 = { nounwind }"), or an empty string if the disassembly does not declare it.
+String dxil_declaration_attributes(const String &p_disassembly, const String &p_function) {
+	String group;
+	for (const String &line : p_disassembly.split("\n")) {
+		if (line.begins_with("declare ") && line.contains("@" + p_function + "(") && line.rfind_char('#') >= 0) {
+			group = line.substr(line.rfind_char('#')).strip_edges();
+			break;
+		}
+	}
+	if (!group.begins_with("#")) {
+		return String();
+	}
+	for (const String &line : p_disassembly.split("\n")) {
+		if (line.begins_with("attributes " + group + " = ")) {
+			return line.get_slice("=", 1).strip_edges();
+		}
+	}
+	return String();
+}
+
+// 25.3.1-gn3 and later declare dx.op.atomicBinOp and dx.op.atomicCompareExchange "nounwind", as DXC does; older
+// libraries declare them "nounwind readnone", and D3D12 GPU-based validation then drops such atomics when their
+// result is unused (#277). This case pins which of the two the linked library writes.
+TEST_CASE("[ShaderContainer][D3D12] Storage-buffer and image atomics are declared without readnone with 25.3.1-gn3 or later") {
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+	const DXILValidationStats validation_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+	const bool atomics_without_readnone = RenderingShaderContainerD3D12::declares_atomics_without_readnone();
+
+	Vector<RDC::ShaderStageSPIRVData> stages;
+	stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_COMPUTE, UNUSED_RESULT_ATOMICS_GLSL));
+	REQUIRE_FALSE(stages[0].spirv.is_empty());
+	Ref<RenderingShaderContainer> container = format.create_container();
+	bool compiled = false;
+	{
+		ErrorCapture capture;
+		compiled = container->set_code_from_spirv("unused_result_atomics", stages);
+		CHECK_MESSAGE(compiled, capture.first_message);
+		CHECK_MESSAGE(capture.count == 0, capture.first_message);
+	}
+	// REQUIRE does not stop a test case in builds without exceptions.
+	if (!compiled || container->shaders.size() != 1) {
+		CHECK(container->shaders.size() == 1);
+		return;
+	}
+	String error;
+	const String disassembly = RenderingShaderContainerD3D12::disassemble_dxil(decompressed_code(container, 0), &error);
+	CHECK_MESSAGE(!disassembly.is_empty(), vformat("No DXIL disassembly, which needs dxil.dll and dxcompiler.dll from the Windows SDK: %s", error));
+	if (disassembly.is_empty()) {
+		return;
+	}
+
+	const char *functions[] = { "dx.op.atomicBinOp.i32", "dx.op.atomicCompareExchange.i32" };
+	for (const char *function : functions) {
+		const String attributes = dxil_declaration_attributes(disassembly, function);
+		CHECK_MESSAGE(attributes.contains("nounwind"), vformat("%s: attributes \"%s\"", function, attributes));
+		if (atomics_without_readnone) {
+			CHECK_MESSAGE(!attributes.contains("readnone"), vformat("%s is declared \"%s\"; 25.3.1-gn3 declares it without readnone", function, attributes));
+			CHECK_MESSAGE(!attributes.contains("readonly"), vformat("%s is declared \"%s\"; an atomic writes memory", function, attributes));
+		} else {
+			CHECK_MESSAGE(attributes.contains("readnone"), vformat("%s is declared \"%s\": this library no longer declares it readnone, so #277's limit and the D3D12 format version need a new look", function, attributes));
+		}
+	}
+
+	// The buffer add and the image add both go through dx.op.atomicBinOp (opcode 78), the compare-and-swap through
+	// dx.op.atomicCompareExchange (79), all three with their results unused.
+	CHECK(dxil_calls_op(disassembly, 78));
+	CHECK(dxil_calls_op(disassembly, 79));
+	check_dxil_validation(validation_before, 1);
 }
 #endif // DEBUG_ENABLED
 

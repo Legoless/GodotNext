@@ -148,16 +148,18 @@ library by default.
   `118b975ce7eda028fd8cfea81283f511ed14d8a4` and changes 17 existing
   files: 16 under `src/microsoft` and `src/compiler/spirv/vtn_variables.c`.
   License: MIT (Mesa's).
-- The patched library is labeled `25.3.1-gn2`. The first line of a
+- The patched library is labeled `25.3.1-gn3` (#279). The first line of a
   `godotnext-mesa.txt` file at the top of its archive holds the label,
   which `drivers/d3d12/SCsub` reads to turn on ray query and the
   ray-tracing stages; the lines after it record the build and are not
-  read.
-- `25.3.1-gn2` is built from three Mesa patches on `mesa-25.3.1`, the
-  first of them Skyth's commit above, and three godot-nir-static patches
-  on `25.3.1-3`. It replaces `25.3.1-gn1`. The patch list, the patch
-  files and the build record stay outside the repository until #273
-  publishes the fork.
+  read. The build still accepts `25.3.1-gn2`.
+- `25.3.1-gn3` is built from four Mesa patches on `mesa-25.3.1`, the
+  first of them Skyth's commit above, and four godot-nir-static patches
+  on `25.3.1-3`. Its fourth Mesa patch declares the DXIL atomic
+  operations without `readnone`, as DXC does (#277, #279). It replaces
+  `25.3.1-gn2`, which is the first three of each. The patch list, the
+  patch files and the build record stay outside the repository until
+  #273 publishes the fork.
 - `dxil.dll` and `dxcompiler.dll`, which the debug-only validator
   (`GODOT_D3D12_DXIL_VALIDATE=1`) and the `[ShaderContainer]` tests load
   at run time from an installed Windows SDK, are Microsoft runtime

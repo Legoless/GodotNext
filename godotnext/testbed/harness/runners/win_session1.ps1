@@ -858,20 +858,36 @@ if ($csvProblem -and $code -eq 0) {
 $errors = 0
 $validation = 0
 # D3D12 GPU-based validation, from the line the engine prints when it turns it on (#272). Under it,
-# atomics whose result is unused are lost (#277), so the line says that such results are not checked.
+# atomics whose result is unused are lost (#277), so the line says that such results are not checked,
+# unless the build's Mesa NIR library keeps them (25.3.1-gn3 or later, #279), which the engine prints too.
+# In such a build a GODOTNEXT_RESULT line that still reports "not_checked" means the atomics were lost
+# anyway, so the line says so and the run fails.
 $gbv = $false
+$gbvKeepsAtomics = $false
+$gbvNotCheckedAnyway = $false
 if (-not $ueJob) {
 	$errors = @($log | Where-Object { $_ -cmatch 'ERROR:' }).Count
 	$validation = @($log | Where-Object { $_ -cmatch 'Validation Error' }).Count
 	$gbv = @($log | Where-Object { $_ -cmatch 'D3D12: GPU-based validation is on\.' }).Count -gt 0
+	$gbvKeepsAtomics = @($log | Where-Object { $_ -cmatch 'D3D12: GPU-based validation keeps atomics whose result is unused' }).Count -gt 0
+	$gbvNotCheckedAnyway = $gbv -and $gbvKeepsAtomics -and @($log | Where-Object { $_ -cmatch 'GODOTNEXT_RESULT .*"not_checked"' }).Count -gt 0
 }
 $gbvFields = ''
 if ($gbv) {
-	$gbvFields = ',"d3d12_gpu_based_validation":true,"not_checked":"results that depend on atomics whose result is unused (#277)"'
+	$gbvFields = ',"d3d12_gpu_based_validation":true'
+	if (-not $gbvKeepsAtomics) {
+		$gbvFields += ',"not_checked":"results that depend on atomics whose result is unused (#277)"'
+	} elseif ($gbvNotCheckedAnyway) {
+		$gbvFields += ',"not_checked_with_kept_atomics":true'
+	}
 }
 Write-Output ('GODOTNEXT_RUNNER {"device":"' + $deviceName + '","driver":"' + $driverLabel + '","gpu_index":' + $device.GpuIndex + ',"session":' + $done.session + ',"clocks_locked":' + $lockClocks.ToString().ToLowerInvariant() + ',"errors":' + $errors + ',"validation_errors":' + $validation + ',"status":' + $code + ',"engine":"' + $engine + '"' + $gbvFields + '}')
 if ($failOnValidation -and $code -eq 0 -and ($errors -ne 0 -or $validation -ne 0)) {
 	[Console]::Error.WriteLine('win_session1.ps1: the run logged validation lines; the bar is 0')
+	$code = 1
+}
+if ($gbvNotCheckedAnyway -and $code -eq 0) {
+	[Console]::Error.WriteLine('win_session1.ps1: the build keeps atomics whose result is unused under GPU-based validation (#279), but a result reports "not_checked"')
 	$code = 1
 }
 exit $code

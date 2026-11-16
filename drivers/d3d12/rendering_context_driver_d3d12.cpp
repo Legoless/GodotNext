@@ -160,6 +160,11 @@ Error RenderingContextDriverD3D12::_initialize_debug_layers() {
 		if (SUCCEEDED(debug_controller.As(&debug_controller_1))) {
 			debug_controller_1->SetEnableGPUBasedValidation(TRUE);
 			print_line("D3D12: GPU-based validation is on.");
+#ifdef NIR_ATOMICS_WITHOUT_READNONE
+			// GodotNext: dxil_atomics (#279). With older Mesa NIR libraries, atomics whose result is unused are
+			// lost under GPU-based validation (#277). The testbed's runner reads this line.
+			print_line("D3D12: GPU-based validation keeps atomics whose result is unused (Mesa NIR library " GODOTNEXT_MESA_LABEL ").");
+#endif
 		} else {
 			WARN_PRINT("D3D12: GPU-based validation was requested, but ID3D12Debug1 is unavailable.");
 		}

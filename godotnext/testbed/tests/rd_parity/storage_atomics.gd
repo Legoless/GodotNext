@@ -26,7 +26,9 @@ extends Node
 ## path passed, <pass>_atomic is "not_checked" instead of "fail", and the result's "not_checked"
 ## field names it and gives the reason. Every other outcome is checked as usual, including a
 ## partial, excess or zeroed count on A, so the fixture shows the limit and passes again by itself
-## once the atomics land.
+## once the atomics land, as they do in a build that links the GodotNext Mesa NIR library
+## 25.3.1-gn3 or later (#279). In such a run, "not_checked" here is a failure of the library,
+## and the Windows runner fails the run (harness/d3d12_gbv.gd).
 ##
 ## It prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure. The result names
 ## the adapter and whether the run asked for D3D12 GPU-based validation, so a validation run and a

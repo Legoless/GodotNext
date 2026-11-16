@@ -4913,6 +4913,12 @@ RID RenderingDevice::shader_create_from_bytecode(const Vector<uint8_t> &p_shader
 	return shader_create_from_bytecode_with_samplers(p_shader_binary, p_placeholder, immutable_samplers);
 }
 
+bool RenderingDevice::shader_binary_is_current(const Vector<uint8_t> &p_shader_binary, uint32_t *r_version, uint32_t *r_format_version) const {
+	Ref<RenderingShaderContainer> shader_container = driver->get_shader_container_format().create_container();
+	ERR_FAIL_COND_V(shader_container.is_null(), false);
+	return shader_container->is_container_current(p_shader_binary, r_version, r_format_version);
+}
+
 RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint8_t> &p_shader_binary, RID p_placeholder, const Vector<PipelineImmutableSampler> &p_immutable_samplers) {
 	Ref<RenderingShaderContainer> shader_container = driver->get_shader_container_format().create_container();
 	ERR_FAIL_COND_V(shader_container.is_null(), RID());
