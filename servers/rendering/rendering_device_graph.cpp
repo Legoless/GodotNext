@@ -893,6 +893,12 @@ void RenderingDeviceGraph::_run_raytracing_list_command(RDD::CommandBufferID p_c
 				driver->command_trace_rays(p_command_buffer, trace_rays_instruction->raygen_sbt, trace_rays_instruction->miss_sbt, trace_rays_instruction->hit_sbt, trace_rays_instruction->width, trace_rays_instruction->height, trace_rays_instruction->depth);
 				instruction_data_cursor += sizeof(RaytracingListTraceRaysInstruction);
 			} break;
+			// GodotNext: rd_rt_pipelines (#179)
+			case RaytracingListInstruction::TYPE_TRACE_RAYS_INDIRECT: {
+				const RaytracingListTraceRaysIndirectInstruction *trace_rays_indirect_instruction = reinterpret_cast<const RaytracingListTraceRaysIndirectInstruction *>(instruction);
+				driver->command_trace_rays_indirect(p_command_buffer, trace_rays_indirect_instruction->raygen_sbt, trace_rays_indirect_instruction->miss_sbt, trace_rays_indirect_instruction->hit_sbt, trace_rays_indirect_instruction->buffer, trace_rays_indirect_instruction->offset);
+				instruction_data_cursor += sizeof(RaytracingListTraceRaysIndirectInstruction);
+			} break;
 			case RaytracingListInstruction::TYPE_SET_PUSH_CONSTANT: {
 				const RaytracingListSetPushConstantInstruction *set_push_constant_instruction = reinterpret_cast<const RaytracingListSetPushConstantInstruction *>(instruction);
 				const VectorView push_constant_data_view(reinterpret_cast<const uint32_t *>(set_push_constant_instruction->data()), set_push_constant_instruction->size / sizeof(uint32_t));
@@ -1909,6 +1915,12 @@ void RenderingDeviceGraph::_print_raytracing_list(const uint8_t *p_instruction_d
 				print_line("\tTRACE RAYS WIDTH", itos(trace_rays_instruction->width), "HEIGHT", itos(trace_rays_instruction->height));
 				instruction_data_cursor += sizeof(RaytracingListTraceRaysInstruction);
 			} break;
+			// GodotNext: rd_rt_pipelines (#179)
+			case RaytracingListInstruction::TYPE_TRACE_RAYS_INDIRECT: {
+				const RaytracingListTraceRaysIndirectInstruction *trace_rays_indirect_instruction = reinterpret_cast<const RaytracingListTraceRaysIndirectInstruction *>(instruction);
+				print_line("\tTRACE RAYS INDIRECT BUFFER ID", itos(trace_rays_indirect_instruction->buffer.id), "OFFSET", itos(trace_rays_indirect_instruction->offset));
+				instruction_data_cursor += sizeof(RaytracingListTraceRaysIndirectInstruction);
+			} break;
 			case RaytracingListInstruction::TYPE_UNIFORM_SET_PREPARE_FOR_USE: {
 				const RaytracingListUniformSetPrepareForUseInstruction *uniform_set_prepare_for_use_instruction = reinterpret_cast<const RaytracingListUniformSetPrepareForUseInstruction *>(instruction);
 				print_line("\tUNIFORM SET PREPARE FOR USE ID", itos(uniform_set_prepare_for_use_instruction->uniform_set.id), "SHADER ID", itos(uniform_set_prepare_for_use_instruction->shader.id), "INDEX", itos(uniform_set_prepare_for_use_instruction->set_index));
@@ -2311,6 +2323,36 @@ void RenderingDeviceGraph::add_raytracing_list_trace_rays(const RDD::ShaderBindi
 	instruction->depth = p_depth;
 }
 
+// GodotNext: rd_rt_pipelines (#179)
+bool RenderingDeviceGraph::add_raytracing_list_trace_rays_indirect(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint64_t p_offset) {
+	// As in add_draw_list_draw_indirect_count() (#177): a tracker keeps the first usage it gets in a raytracing
+	// list (add_raytracing_list_usage()), so a launch-size buffer this list already uses another way, such as
+	// from a uniform set, would get no indirect-argument barrier.
+	if (p_buffer_tracker != nullptr) {
+		p_buffer_tracker->reset_if_outdated(tracking_frame);
+		ERR_FAIL_COND_V_MSG(p_buffer_tracker->raytracing_list_index == raytracing_instruction_list.index && p_buffer_tracker->raytracing_list_usage != RESOURCE_USAGE_INDIRECT_BUFFER_READ, false,
+				vformat("The launch-size buffer of an indirect trace is also used in this raytracing list (%s). A buffer has one usage per raytracing list, so it would not be synchronized for the indirect read; bind it in none of this raytracing list's uniform sets.", _usage_to_string(p_buffer_tracker->raytracing_list_usage)));
+		// GodotNext: rd_bindless (#176). The same for a dirty resident of a bindless table the list binds (the
+		// tables of this trace are bound by now), whose table read becomes a usage at the list's end.
+		ERR_FAIL_COND_V_MSG(_bindless_dirty_in_list_tables(raytracing_instruction_list, p_buffer_tracker), false,
+				"The launch-size buffer of an indirect trace is in a bindless table that this raytracing list binds, and the table has not read it since it was last written. A buffer has one usage per raytracing list, so the table's read would not be synchronized; bind the table in an earlier list after the write, or keep the buffer out of the table.");
+	}
+
+	RaytracingListTraceRaysIndirectInstruction *instruction = reinterpret_cast<RaytracingListTraceRaysIndirectInstruction *>(_allocate_raytracing_list_instruction(sizeof(RaytracingListTraceRaysIndirectInstruction)));
+	instruction->type = RaytracingListInstruction::TYPE_TRACE_RAYS_INDIRECT;
+	instruction->raygen_sbt = p_raygen_sbt;
+	instruction->miss_sbt = p_miss_sbt;
+	instruction->hit_sbt = p_hit_sbt;
+	instruction->buffer = p_buffer;
+	instruction->offset = p_offset;
+	raytracing_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+
+	if (p_buffer_tracker != nullptr) {
+		add_raytracing_list_usage(p_buffer_tracker, RESOURCE_USAGE_INDIRECT_BUFFER_READ);
+	}
+	return true;
+}
+
 void RenderingDeviceGraph::add_raytracing_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index) {
 	RaytracingListUniformSetPrepareForUseInstruction *instruction = reinterpret_cast<RaytracingListUniformSetPrepareForUseInstruction *>(_allocate_raytracing_list_instruction(sizeof(RaytracingListUniformSetPrepareForUseInstruction)));
 	instruction->type = RaytracingListInstruction::TYPE_UNIFORM_SET_PREPARE_FOR_USE;
@@ -2354,8 +2396,8 @@ void RenderingDeviceGraph::add_raytracing_list_end() {
 	command->self_stages = raytracing_instruction_list.stages;
 	command->instruction_data_size = instruction_data_size;
 	memcpy(command->instruction_data(), raytracing_instruction_list.data.ptr(), instruction_data_size);
-	// GodotNext: rd_bindless (#176).
-	_bindless_tables_add_usages(raytracing_instruction_list, &RenderingDeviceGraph::add_raytracing_list_usage);
+	// GodotNext: rd_bindless (#176), rd_rt_pipelines (#179).
+	_bindless_raytracing_list_tables_add_usages(command_index);
 	_add_command_to_graph(raytracing_instruction_list.command_trackers.ptr(), raytracing_instruction_list.command_tracker_usages.ptr(), raytracing_instruction_list.command_trackers.size(), command_index, command);
 	_bindless_tables_bound(raytracing_instruction_list, command_index, command);
 }
@@ -3295,6 +3337,26 @@ void RenderingDeviceGraph::_bindless_draw_list_tables_add_usages(int32_t p_comma
 				continue;
 			}
 			add_draw_list_usage(tracker, table->read_usage);
+		}
+	}
+}
+
+// GodotNext: rd_rt_pipelines (#179). _bindless_draw_list_tables_add_usages() for the raytracing list: a dirty
+// resident the list already reads as the launch size of an indirect trace recorded before the table was bound
+// keeps that usage and stays dirty, so the next command that binds the table gets the barrier.
+void RenderingDeviceGraph::_bindless_raytracing_list_tables_add_usages(int32_t p_command_index) {
+	for (BindlessTableTracker *table : raytracing_instruction_list.bindless_tables) {
+		for (ResourceTracker *tracker : table->dirty) {
+			tracker->reset_if_outdated(tracking_frame);
+			if (tracker->raytracing_list_index == raytracing_instruction_list.index && tracker->raytracing_list_usage == RESOURCE_USAGE_INDIRECT_BUFFER_READ) {
+				ERR_PRINT("A buffer in a bindless table that this raytracing list binds is also the launch-size buffer of one of its indirect traces, and the table has not read it since it was last written. A buffer has one usage per raytracing list, so the table's reads in this raytracing list are not synchronized; bind the table in an earlier list after the write, or keep the buffer out of the table.");
+				BindlessResidency *residency = _bindless_find_residency(tracker, table);
+				DEV_ASSERT(residency != nullptr);
+				residency->dirty_frame = tracking_frame;
+				residency->dirty_command_index = p_command_index;
+				continue;
+			}
+			add_raytracing_list_usage(tracker, table->read_usage);
 		}
 	}
 }

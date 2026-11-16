@@ -45,6 +45,8 @@
 #include "servers/rendering/rendering_device_atomics64.h"
 // GodotNext: rd_ray_query_api
 #include "servers/rendering/rendering_device_ray_query.h"
+// GodotNext: rd_rt_pipelines (#179)
+#include "servers/rendering/rendering_device_rt_pipeline.h"
 #include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_include_db.h"
 
@@ -337,6 +339,18 @@ static bool _base_instance_native_supported(const RenderingDevice *p_device, boo
 	ERR_FAIL_V_MSG(false, vformat("%s is compiled with base_instance_native, which this device does not support. Missing RenderingDevice feature: SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE.", shader));
 }
 
+// GodotNext: rd_rt_pipelines (#179). Checked before the driver sees the SPIR-V too, so a shader that reorders
+// with an extension the device lacks gives this one error, not a failure in the driver.
+static bool _raytracing_reorder_supported(const RenderingDevice *p_device, const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	uint32_t usage = 0;
+	for (const RenderingDeviceCommons::ShaderStageSPIRVData &stage : p_spirv) {
+		usage |= RDRTPipeline::get_spirv_reorder_usage(stage.spirv.ptr(), stage.spirv.size());
+	}
+	const uint32_t missing = p_device->get_missing_raytracing_reorder(usage);
+	ERR_FAIL_COND_V_MSG(missing != 0, false, RDRTPipeline::get_missing_reorder_error(p_shader_name, missing));
+	return true;
+}
+
 RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name, bool p_base_instance_native) {
 	// GodotNext: rd_atomics64 (#175). shader_compile_binary_from_spirv() checks too; checking here as well
 	// keeps it to the one error, without the empty-bytecode error below.
@@ -349,6 +363,10 @@ RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData>
 	}
 	// GodotNext: rd_indirect_count (#177). Likewise.
 	if (!_base_instance_native_supported(this, p_base_instance_native, p_shader_name)) {
+		return RID();
+	}
+	// GodotNext: rd_rt_pipelines (#179). The same for shader execution reordering.
+	if (!_raytracing_reorder_supported(this, p_spirv, p_shader_name)) {
 		return RID();
 	}
 
@@ -1105,7 +1123,8 @@ RDD::BufferID RenderingDevice::_hit_sbt_buffer_create(uint32_t p_buffer_size) {
 Error RenderingDevice::_hit_sbt_buffer_update(HitShaderBindingTable *p_hit_sbt, RID p_hit_sbt_id, RDD::ShaderBindingTable &r_sbt) {
 	uint32_t shader_group_handle_size = driver->api_trait_get(RDD::API_TRAIT_SHADER_GROUP_HANDLE_SIZE);
 	uint32_t shader_group_handle_alignment = driver->api_trait_get(RDD::API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT);
-	uint32_t shader_group_stride = STEPIFY(shader_group_handle_size, shader_group_handle_alignment);
+	// GodotNext: rd_rt_pipelines (#179). Each entry is the hit group's handle, then its shader record.
+	uint32_t shader_group_stride = RDRTPipeline::get_hit_group_stride(shader_group_handle_size, shader_group_handle_alignment, p_hit_sbt->record_size);
 
 	uint32_t buffer_size = p_hit_sbt->hit_group_indices.size() * shader_group_stride;
 
@@ -1113,7 +1132,10 @@ Error RenderingDevice::_hit_sbt_buffer_update(HitShaderBindingTable *p_hit_sbt, 
 		RDD::BufferID buffer = _hit_sbt_buffer_create(buffer_size);
 		ERR_FAIL_COND_V(!buffer, ERR_CANT_CREATE);
 
-		RDG::resource_tracker_free(p_hit_sbt->draw_tracker);
+		// GodotNext: rd_rt_pipelines (#179). Not freed here: the open raytracing list may already use the old
+		// tracker (an earlier trace of this table, before hit_sbt_set_pipeline() changed the stride or
+		// hit_sbt_range_alloc() grew the table), and raytracing_list_end() reads it.
+		frames[frame].hit_sbt_trackers_to_dispose_of.push_back(p_hit_sbt->draw_tracker);
 		frames[frame].buffers_to_dispose_of.push_back(*p_hit_sbt);
 
 		p_hit_sbt->driver_id = buffer;
@@ -1139,6 +1161,11 @@ Error RenderingDevice::_hit_sbt_buffer_update(HitShaderBindingTable *p_hit_sbt, 
 				data.ptr(),
 				shader_group_stride);
 		ERR_FAIL_COND_V(!success, ERR_CANT_CREATE);
+
+		// GodotNext: rd_rt_pipelines (#179)
+		const RaytracingPipeline *raytracing_pipeline = raytracing_pipeline_owner.get_or_null(p_hit_sbt->raytracing_pipeline_id);
+		ERR_FAIL_NULL_V(raytracing_pipeline, ERR_INVALID_PARAMETER);
+		RDRTPipeline::write_hit_group_records(data.ptr(), shader_group_stride, shader_group_handle_size, p_hit_sbt->record_size, p_hit_sbt->hit_group_indices.ptr() + p_hit_sbt->first_dirty_index, count, raytracing_pipeline->hit_group_records.ptr(), raytracing_pipeline->hit_group_count);
 
 		Error err = _buffer_update(p_hit_sbt, p_hit_sbt_id, offset, size, data.ptr());
 		ERR_FAIL_COND_V(err != OK, err);
@@ -1168,11 +1195,15 @@ RID RenderingDevice::hit_sbt_create(RID p_raytracing_pipeline, uint32_t p_initia
 	RaytracingPipeline *raytracing_pipeline = raytracing_pipeline_owner.get_or_null(p_raytracing_pipeline);
 	ERR_FAIL_NULL_V(raytracing_pipeline, RID());
 	ERR_FAIL_COND_V(p_initial_hit_group_capacity == 0, RID());
+	// GodotNext: rd_rt_pipelines (#179)
+	ERR_FAIL_COND_V_MSG(raytracing_pipeline->flags & RAYTRACING_PIPELINE_FLAG_LIBRARY, RID(), RDRTPipeline::ERROR_LIBRARY_NOT_BINDABLE);
 
-	uint32_t shader_group_size = driver->api_trait_get(RDD::API_TRAIT_SHADER_GROUP_HANDLE_SIZE);
+	// GodotNext: rd_rt_pipelines (#179). Sized by the stride _hit_sbt_buffer_update() uses, handle and record.
+	const uint32_t shader_group_stride = RDRTPipeline::get_hit_group_stride(driver->api_trait_get(RDD::API_TRAIT_SHADER_GROUP_HANDLE_SIZE), driver->api_trait_get(RDD::API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT), raytracing_pipeline->hit_group_record_size);
 
 	HitShaderBindingTable hit_sbt;
-	hit_sbt.size = p_initial_hit_group_capacity * shader_group_size;
+	hit_sbt.size = p_initial_hit_group_capacity * shader_group_stride;
+	hit_sbt.record_size = raytracing_pipeline->hit_group_record_size;
 	hit_sbt.driver_id = _hit_sbt_buffer_create(hit_sbt.size);
 	ERR_FAIL_COND_V(!hit_sbt.driver_id, RID());
 
@@ -1203,6 +1234,8 @@ Error RenderingDevice::hit_sbt_set_pipeline(RID p_hit_sbt, RID p_raytracing_pipe
 	if (hit_sbt->raytracing_pipeline_id != p_raytracing_pipeline) {
 		RaytracingPipeline *raytracing_pipeline = raytracing_pipeline_owner.get_or_null(p_raytracing_pipeline);
 		ERR_FAIL_NULL_V(raytracing_pipeline, ERR_INVALID_PARAMETER);
+		// GodotNext: rd_rt_pipelines (#179)
+		ERR_FAIL_COND_V_MSG(raytracing_pipeline->flags & RAYTRACING_PIPELINE_FLAG_LIBRARY, ERR_INVALID_PARAMETER, RDRTPipeline::ERROR_LIBRARY_NOT_BINDABLE);
 		ERR_FAIL_COND_V_MSG(raytracing_pipeline->hit_group_count < hit_sbt->raytracing_pipeline_hit_group_count, ERR_INVALID_PARAMETER, "The new pipeline must be a superset of the existing pipeline.");
 
 		_remove_dependency(p_hit_sbt, hit_sbt->raytracing_pipeline_id);
@@ -1211,6 +1244,9 @@ Error RenderingDevice::hit_sbt_set_pipeline(RID p_hit_sbt, RID p_raytracing_pipe
 		hit_sbt->raytracing_pipeline = raytracing_pipeline->driver_id;
 		hit_sbt->index_offset = raytracing_pipeline->raygen_shader_count + raytracing_pipeline->miss_shader_count;
 		hit_sbt->raytracing_pipeline_hit_group_count = raytracing_pipeline->hit_group_count;
+		// GodotNext: rd_rt_pipelines (#179). A different record size changes the stride, and the next update
+		// then reallocates the table.
+		hit_sbt->record_size = raytracing_pipeline->hit_group_record_size;
 
 		_add_dependency(p_hit_sbt, p_raytracing_pipeline);
 
@@ -4825,6 +4861,10 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	if (!_base_instance_native_supported(this, p_base_instance_native, p_shader_name)) {
 		return Vector<uint8_t>();
 	}
+	// GodotNext: rd_rt_pipelines (#179)
+	if (!_raytracing_reorder_supported(this, p_spirv, p_shader_name)) {
+		return Vector<uint8_t>();
+	}
 
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
@@ -4859,6 +4899,9 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 	// GodotNext: rd_bindless (#176). Checked before the driver lays out the shader's sets, for bytecode
 	// compiled elsewhere.
 	ERR_FAIL_COND_V_MSG(shader_container->uses_bindless_tables() && !has_feature(SUPPORTS_BINDLESS), RID(), RDBindless::get_unsupported_shader_error(String::utf8(shader_container->shader_name.get_data())));
+	// GodotNext: rd_rt_pipelines (#179). The reordering scanned when the bytecode was compiled.
+	const uint32_t reorder_missing = get_missing_raytracing_reorder(shader_container->get_raytracing_reorder_usage());
+	ERR_FAIL_COND_V_MSG(reorder_missing != 0, RID(), RDRTPipeline::get_missing_reorder_error(String::utf8(shader_container->shader_name.get_data()), reorder_missing));
 
 	Vector<RDD::ImmutableSampler> driver_immutable_samplers;
 	for (const PipelineImmutableSampler &source_sampler : p_immutable_samplers) {
@@ -4917,6 +4960,35 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 		}
 
 		shader->set_formats.push_back(format);
+	}
+
+	// GodotNext: rd_rt_pipelines (#179). The immutable samplers the driver puts in the set layouts: on each
+	// sampler binding, the first immutable sampler with its binding number, as the Vulkan driver chooses
+	// them. Set formats leave them out, so raytracing_pipeline_link() compares this too. 0 without any.
+	shader->immutable_sampler_hash = 0;
+	if (!p_immutable_samplers.is_empty()) {
+		uint32_t h = hash_murmur3_one_32(0);
+		bool any = false;
+		for (int i = 0; i < shader->uniform_sets.size(); i++) {
+			for (const ShaderUniform &uniform : shader->uniform_sets[i]) {
+				if (uniform.type != UNIFORM_TYPE_SAMPLER) {
+					continue;
+				}
+				for (const PipelineImmutableSampler &sampler : p_immutable_samplers) {
+					if (uint32_t(sampler.binding) != uniform.binding) {
+						continue;
+					}
+					h = hash_murmur3_one_32(i, h);
+					h = hash_murmur3_one_32(uniform.binding, h);
+					for (uint32_t j = 0; j < sampler.get_id_count(); j++) {
+						h = hash_murmur3_one_64(sampler.get_id(j).get_id(), h);
+					}
+					any = true;
+					break;
+				}
+			}
+		}
+		shader->immutable_sampler_hash = any ? hash_fmix32(h) : 0;
 	}
 
 	for (ShaderStage stage : shader->stages_vector) {
@@ -6054,11 +6126,22 @@ Error RenderingDevice::_raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPip
 	return OK;
 }
 
-RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth) {
+RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, BitField<RaytracingPipelineFlags> p_flags) {
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), RID(), "The current rendering device has neither raytracing pipeline nor ray query support.");
 	// GodotNext: rd_ray_query_api
 	// A ray-query-only device has no RT pipeline entry points in its driver.
 	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE), RID(), RDRayQuery::ERROR_NO_RAYTRACING_PIPELINE);
+
+	// GodotNext: rd_rt_pipelines (#179). The flags and the records, before any shader or driver work.
+	const bool library = p_flags.has_flag(RAYTRACING_PIPELINE_FLAG_LIBRARY);
+	ERR_FAIL_COND_V_MSG(library && !has_feature(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY), RID(), RDRTPipeline::ERROR_NO_LIBRARIES);
+	ERR_FAIL_COND_V_MSG(p_flags.has_flag(RAYTRACING_PIPELINE_FLAG_REORDER) && !has_feature(SUPPORTS_RAYTRACING_REORDER), RID(), RDRTPipeline::ERROR_NO_REORDER);
+	uint32_t hit_group_record_size = 0;
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		const uint32_t record_size = p_hit_groups[i].record_data.size();
+		ERR_FAIL_COND_V_MSG(record_size > RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE, RID(), RDRTPipeline::get_record_too_large_error(i, record_size));
+		hit_group_record_size = MAX(hit_group_record_size, record_size);
+	}
 
 	struct PipelineShaderKey : PipelineShader {
 		ShaderStage shader_stage = {};
@@ -6095,7 +6178,10 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 	thread_local AHashMap<PipelineShaderKey, uint32_t> shader_indices;
 	thread_local LocalVector<uint32_t> raygen_and_miss_shader_indices;
 	thread_local LocalVector<RDD::HitGroup> hit_groups;
+	// GodotNext: rd_rt_pipelines (#179). The RID of each entry of shaders, for the library payload check.
+	thread_local LocalVector<RID> shader_rids;
 	shaders.clear();
+	shader_rids.clear();
 	shader_indices.clear();
 	raygen_and_miss_shader_indices.clear();
 	hit_groups.clear();
@@ -6156,6 +6242,7 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 			rdd_shader.shader_stage = p_shader_stage;
 			rdd_shader.specialization_constants = p_shader.specialization_constants;
 			shaders.push_back(rdd_shader);
+			shader_rids.push_back(p_shader.shader); // GodotNext: rd_rt_pipelines (#179).
 		}
 
 		return index - 1;
@@ -6200,14 +6287,38 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 
 	ERR_FAIL_NULL_V(layout_defining_shader, RID());
 
+	// GodotNext: rd_rt_pipelines (#179). Libraries and the pipelines linked from them declare one payload
+	// size, so each stage's payload must fit in it.
+	if (library) {
+		for (uint32_t i = 0; i < shaders.size(); i++) {
+			const uint32_t payload_size = driver->shader_get_raytracing_payload_size(shaders[i].shader, shaders[i].shader_stage);
+			if (payload_size > RDRTPipeline::LIBRARY_MAX_PAYLOAD_SIZE) {
+				const Shader *shader = shader_owner.get_or_null(shader_rids[i]);
+				ERR_FAIL_V_MSG(RID(), RDRTPipeline::get_library_payload_error(shader != nullptr ? shader->name : String(), shaders[i].shader_stage, payload_size));
+			}
+		}
+	}
+
 	RaytracingPipeline pipeline;
-	pipeline.driver_id = driver->raytracing_pipeline_create(
-			shaders,
-			VectorView(raygen_and_miss_shader_indices.ptr(), p_raygen_shaders.size()),
-			VectorView(raygen_and_miss_shader_indices.ptr() + p_raygen_shaders.size(), p_miss_shaders.size()),
-			hit_groups,
-			p_max_trace_recursion_depth,
-			layout_defining_shader->driver_id);
+	// GodotNext: rd_rt_pipelines (#179). A library has no shader binding table of its own.
+	if (library) {
+		pipeline.driver_id = driver->raytracing_pipeline_library_create(
+				shaders,
+				VectorView(raygen_and_miss_shader_indices.ptr(), p_raygen_shaders.size()),
+				VectorView(raygen_and_miss_shader_indices.ptr() + p_raygen_shaders.size(), p_miss_shaders.size()),
+				hit_groups,
+				p_max_trace_recursion_depth,
+				RDRTPipeline::LIBRARY_MAX_PAYLOAD_SIZE,
+				layout_defining_shader->driver_id);
+	} else {
+		pipeline.driver_id = driver->raytracing_pipeline_create(
+				shaders,
+				VectorView(raygen_and_miss_shader_indices.ptr(), p_raygen_shaders.size()),
+				VectorView(raygen_and_miss_shader_indices.ptr() + p_raygen_shaders.size(), p_miss_shaders.size()),
+				hit_groups,
+				p_max_trace_recursion_depth,
+				layout_defining_shader->driver_id);
+	}
 
 	ERR_FAIL_COND_V(!pipeline.driver_id, RID());
 
@@ -6220,16 +6331,29 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 	pipeline.layout_defining_shader_layout_hash = layout_defining_shader->layout_hash;
 	pipeline.set_formats = layout_defining_shader->set_formats;
 	pipeline.push_constant_size = layout_defining_shader->push_constant_size;
+	pipeline.immutable_sampler_hash = layout_defining_shader->immutable_sampler_hash; // GodotNext: rd_rt_pipelines (#179).
 
-	Error err = _raytracing_pipeline_create_sbt_buffer(pipeline.driver_id, p_raygen_shaders.size(), p_miss_shaders.size(), pipeline.sbt_buffer);
-	if (unlikely(err != OK)) {
-		driver->raytracing_pipeline_free(pipeline.driver_id);
-		ERR_FAIL_V(RID());
+	if (!library) {
+		Error err = _raytracing_pipeline_create_sbt_buffer(pipeline.driver_id, p_raygen_shaders.size(), p_miss_shaders.size(), pipeline.sbt_buffer);
+		if (unlikely(err != OK)) {
+			driver->raytracing_pipeline_free(pipeline.driver_id);
+			ERR_FAIL_V(RID());
+		}
 	}
 
 	pipeline.raygen_shader_count = p_raygen_shaders.size();
 	pipeline.miss_shader_count = p_miss_shaders.size();
 	pipeline.hit_group_count = p_hit_groups.size();
+	// GodotNext: rd_rt_pipelines (#179)
+	pipeline.flags = uint32_t(p_flags);
+	pipeline.max_trace_recursion_depth = p_max_trace_recursion_depth;
+	pipeline.hit_group_record_size = hit_group_record_size;
+	pipeline.hit_group_records.resize_initialized(p_hit_groups.size() * RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE);
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		if (!p_hit_groups[i].record_data.is_empty()) {
+			memcpy(pipeline.hit_group_records.ptrw() + i * RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE, p_hit_groups[i].record_data.ptr(), p_hit_groups[i].record_data.size());
+		}
+	}
 
 	// Create ID to associate with this pipeline.
 	RID id = raytracing_pipeline_owner.make_rid(pipeline);
@@ -6265,6 +6389,106 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 
 bool RenderingDevice::raytracing_pipeline_is_valid(RID p_pipeline) {
 	return raytracing_pipeline_owner.owns(p_pipeline);
+}
+
+// GodotNext: rd_rt_pipelines (#179). Like raytracing_pipeline_create(), it takes no lock while the driver links,
+// so a worker thread can link while the render thread records.
+RID RenderingDevice::raytracing_pipeline_link(RID p_base, Span<RID> p_libraries) {
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE) && !has_feature(SUPPORTS_RAY_QUERY), RID(), "The current rendering device has neither raytracing pipeline nor ray query support.");
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE), RID(), RDRayQuery::ERROR_NO_RAYTRACING_PIPELINE);
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY), RID(), RDRTPipeline::ERROR_NO_LIBRARIES);
+
+	auto link_part = [](const RaytracingPipeline &p_pipeline) {
+		RDRTPipeline::LinkPart part;
+		part.library = (p_pipeline.flags & RAYTRACING_PIPELINE_FLAG_LIBRARY) != 0;
+		part.linked = p_pipeline.linked;
+		part.raygen_count = p_pipeline.raygen_shader_count;
+		part.miss_count = p_pipeline.miss_shader_count;
+		part.max_trace_recursion_depth = p_pipeline.max_trace_recursion_depth;
+		part.push_constant_size = p_pipeline.push_constant_size;
+		part.set_formats = p_pipeline.set_formats;
+		part.immutable_sampler_hash = p_pipeline.immutable_sampler_hash;
+		return part;
+	};
+
+	const RaytracingPipeline *base = raytracing_pipeline_owner.get_or_null(p_base);
+	ERR_FAIL_NULL_V_MSG(base, RID(), "The base of a link is not a raytracing pipeline.");
+	const RDRTPipeline::LinkPart base_part = link_part(*base);
+	RDRTPipeline::LinkStatus status = RDRTPipeline::get_link_base_status(base_part);
+	ERR_FAIL_COND_V_MSG(status != RDRTPipeline::LINK_OK, RID(), RDRTPipeline::get_link_error(status));
+
+	// The libraries in group order: the base's (the base itself, or the libraries a linked base was made
+	// from), then p_libraries.
+	LocalVector<RID> library_ids;
+	if (base->linked) {
+		for (const RID &library_id : base->libraries) {
+			library_ids.push_back(library_id);
+		}
+	} else {
+		library_ids.push_back(p_base);
+	}
+	for (uint32_t i = 0; i < p_libraries.size(); i++) {
+		const RaytracingPipeline *library = raytracing_pipeline_owner.get_or_null(p_libraries[i]);
+		ERR_FAIL_NULL_V_MSG(library, RID(), vformat("Library %d of a link is not a raytracing pipeline.", i));
+		status = RDRTPipeline::get_link_library_status(base_part, link_part(*library));
+		if (status == RDRTPipeline::LINK_OK && library_ids.has(p_libraries[i])) {
+			status = RDRTPipeline::LINK_DUPLICATE_LIBRARY;
+		}
+		ERR_FAIL_COND_V_MSG(status != RDRTPipeline::LINK_OK, RID(), vformat("Library %d of a link: %s", i, RDRTPipeline::get_link_error(status)));
+		library_ids.push_back(p_libraries[i]);
+	}
+
+	// The base library's raygen and miss groups come first, then every library's hit groups.
+	const RaytracingPipeline *base_library = raytracing_pipeline_owner.get_or_null(library_ids[0]);
+	ERR_FAIL_NULL_V(base_library, RID());
+
+	RaytracingPipeline pipeline;
+	pipeline.layout_defining_shader = base_library->layout_defining_shader;
+	pipeline.layout_defining_shader_driver_id = base_library->layout_defining_shader_driver_id;
+	pipeline.layout_defining_shader_layout_hash = base_library->layout_defining_shader_layout_hash;
+	pipeline.set_formats = base_library->set_formats;
+	pipeline.push_constant_size = base_library->push_constant_size;
+	pipeline.immutable_sampler_hash = base_library->immutable_sampler_hash;
+	pipeline.raygen_shader_count = base_library->raygen_shader_count;
+	pipeline.miss_shader_count = base_library->miss_shader_count;
+	pipeline.flags = base->flags & ~uint32_t(RAYTRACING_PIPELINE_FLAG_LIBRARY);
+	pipeline.linked = true;
+	pipeline.max_trace_recursion_depth = base->max_trace_recursion_depth;
+
+	LocalVector<RDD::RaytracingPipelineID> driver_libraries;
+	for (const RID &library_id : library_ids) {
+		const RaytracingPipeline *library = raytracing_pipeline_owner.get_or_null(library_id);
+		ERR_FAIL_NULL_V(library, RID());
+		driver_libraries.push_back(library->driver_id);
+		pipeline.hit_group_count += library->hit_group_count;
+		pipeline.hit_group_record_size = MAX(pipeline.hit_group_record_size, library->hit_group_record_size);
+		pipeline.hit_group_records.append_array(library->hit_group_records);
+		pipeline.libraries.push_back(library_id);
+	}
+
+	pipeline.driver_id = driver->raytracing_pipeline_link(driver_libraries, pipeline.max_trace_recursion_depth, RDRTPipeline::LIBRARY_MAX_PAYLOAD_SIZE, pipeline.layout_defining_shader_driver_id);
+	ERR_FAIL_COND_V(!pipeline.driver_id, RID());
+
+	if (pipeline_cache_enabled) {
+		update_pipeline_cache();
+	}
+
+	Error err = _raytracing_pipeline_create_sbt_buffer(pipeline.driver_id, pipeline.raygen_shader_count, pipeline.miss_shader_count, pipeline.sbt_buffer);
+	if (unlikely(err != OK)) {
+		driver->raytracing_pipeline_free(pipeline.driver_id);
+		ERR_FAIL_V(RID());
+	}
+
+	RID id = raytracing_pipeline_owner.make_rid(pipeline);
+#ifdef DEV_ENABLED
+	set_resource_name(id, "RID:" + itos(id.get_id()));
+#endif
+	// Freeing a library frees the pipelines linked from it.
+	for (const RID &library_id : library_ids) {
+		_add_dependency(id, library_id);
+	}
+
+	return id;
 }
 
 /****************/
@@ -7377,6 +7601,8 @@ void RenderingDevice::raytracing_list_bind_raytracing_pipeline(RaytracingListID 
 
 	RaytracingPipeline *pipeline = raytracing_pipeline_owner.get_or_null(p_raytracing_pipeline);
 	ERR_FAIL_NULL(pipeline);
+	// GodotNext: rd_rt_pipelines (#179)
+	ERR_FAIL_COND_MSG(pipeline->flags & RAYTRACING_PIPELINE_FLAG_LIBRARY, RDRTPipeline::ERROR_LIBRARY_NOT_BINDABLE);
 
 	if (p_raytracing_pipeline == raytracing_list.state.pipeline) {
 		return; // Redundant state, return.
@@ -7515,18 +7741,63 @@ void RenderingDevice::raytracing_list_trace_rays(RaytracingListID p_list, uint32
 	ERR_FAIL_COND(p_list != ID_TYPE_RAYTRACING_LIST);
 	ERR_FAIL_COND(!raytracing_list.active);
 
+	// GodotNext: rd_rt_pipelines (#179). Shared with raytracing_list_trace_rays_indirect().
+	RDD::ShaderBindingTable raygen_sbt;
+	RDD::ShaderBindingTable miss_sbt;
+	RDD::ShaderBindingTable rdd_hit_sbt;
+	if (!_raytracing_list_prepare_trace(p_raygen_shader_index, p_hit_sbt, raygen_sbt, miss_sbt, rdd_hit_sbt)) {
+		return;
+	}
+
+	draw_graph.add_raytracing_list_trace_rays(raygen_sbt, miss_sbt, rdd_hit_sbt, p_width, p_height, p_depth);
+	raytracing_list.state.trace_count++;
+}
+
+// GodotNext: rd_rt_pipelines (#179)
+void RenderingDevice::raytracing_list_trace_rays_indirect(RaytracingListID p_list, uint32_t p_raygen_shader_index, RID p_hit_sbt, RID p_buffer, uint32_t p_offset) {
+	ERR_RENDER_THREAD_GUARD();
+
+	ERR_FAIL_COND(p_list != ID_TYPE_RAYTRACING_LIST);
+	ERR_FAIL_COND(!raytracing_list.active);
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT), RDRTPipeline::ERROR_NO_INDIRECT);
+
+	Buffer *buffer = storage_buffer_owner.get_or_null(p_buffer);
+	ERR_FAIL_NULL_MSG(buffer, "The indirect trace buffer is not a storage buffer.");
+	const RDRTPipeline::IndirectStatus status = RDRTPipeline::get_indirect_status(buffer->usage, p_offset, buffer->size);
+	ERR_FAIL_COND_MSG(status != RDRTPipeline::INDIRECT_OK, RDRTPipeline::get_indirect_error(status));
+
+	RDD::ShaderBindingTable raygen_sbt;
+	RDD::ShaderBindingTable miss_sbt;
+	RDD::ShaderBindingTable hit_sbt;
+	if (!_raytracing_list_prepare_trace(p_raygen_shader_index, p_hit_sbt, raygen_sbt, miss_sbt, hit_sbt)) {
+		return;
+	}
+
+	// The graph records the indirect read of the launch size after the trace's sets and tables are bound, or
+	// says why it cannot (as for #177's count draws).
+	if (!draw_graph.add_raytracing_list_trace_rays_indirect(raygen_sbt, miss_sbt, hit_sbt, buffer->driver_id, buffer->draw_tracker, p_offset)) {
+		return;
+	}
+	raytracing_list.state.trace_count++;
+
+	_check_transfer_worker_buffer(buffer);
+}
+
+// GodotNext: rd_rt_pipelines (#179). The checks, set binds and tables of raytracing_list_trace_rays(), moved
+// here unchanged so the indirect trace shares them.
+bool RenderingDevice::_raytracing_list_prepare_trace(uint32_t p_raygen_shader_index, RID p_hit_sbt, RDD::ShaderBindingTable &r_raygen_sbt, RDD::ShaderBindingTable &r_miss_sbt, RDD::ShaderBindingTable &r_hit_sbt) {
 #ifdef DEBUG_ENABLED
-	ERR_FAIL_NULL_MSG(shader_owner.get_or_null(raytracing_list.state.layout_defining_shader), "No shader was set before attempting to trace rays.");
-	ERR_FAIL_NULL_MSG(raytracing_pipeline_owner.get_or_null(raytracing_list.state.pipeline), "No raytracing pipeline was set before attempting to trace rays.");
+	ERR_FAIL_NULL_V_MSG(shader_owner.get_or_null(raytracing_list.state.layout_defining_shader), false, "No shader was set before attempting to trace rays.");
+	ERR_FAIL_NULL_V_MSG(raytracing_pipeline_owner.get_or_null(raytracing_list.state.pipeline), false, "No raytracing pipeline was set before attempting to trace rays.");
 #endif
 
 #ifdef DEBUG_ENABLED
 
-	ERR_FAIL_COND_MSG(!raytracing_list.validation.pipeline_active, "No raytracing pipeline was set before attempting to draw.");
+	ERR_FAIL_COND_V_MSG(!raytracing_list.validation.pipeline_active, false, "No raytracing pipeline was set before attempting to draw.");
 
 	if (raytracing_list.validation.pipeline_push_constant_size > 0) {
 		// Using push constants, check that they were supplied.
-		ERR_FAIL_COND_MSG(!raytracing_list.validation.pipeline_push_constant_supplied,
+		ERR_FAIL_COND_V_MSG(!raytracing_list.validation.pipeline_push_constant_supplied, false,
 				"The shader in this pipeline requires a push constant to be set before drawing, but it's not present.");
 	}
 
@@ -7541,12 +7812,12 @@ void RenderingDevice::raytracing_list_trace_rays(RaytracingListID p_list, uint32
 
 		if (raytracing_list.state.sets[i].pipeline_expected_format != raytracing_list.state.sets[i].uniform_set_format) {
 			if (raytracing_list.state.sets[i].uniform_set_format == 0) {
-				ERR_FAIL_MSG("Uniforms were never supplied for set (" + itos(i) + ") at the time of drawing, which are required by the pipeline.");
+				ERR_FAIL_V_MSG(false, "Uniforms were never supplied for set (" + itos(i) + ") at the time of drawing, which are required by the pipeline.");
 			} else if (uniform_set_owner.owns(raytracing_list.state.sets[i].uniform_set)) {
 				UniformSet *us = uniform_set_owner.get_or_null(raytracing_list.state.sets[i].uniform_set);
-				ERR_FAIL_MSG("Uniforms supplied for set (" + itos(i) + "):\n" + _shader_uniform_debug(us->shader_id, us->shader_set) + "\nare not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n" + _shader_uniform_debug(raytracing_list.state.layout_defining_shader));
+				ERR_FAIL_V_MSG(false, "Uniforms supplied for set (" + itos(i) + "):\n" + _shader_uniform_debug(us->shader_id, us->shader_set) + "\nare not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n" + _shader_uniform_debug(raytracing_list.state.layout_defining_shader));
 			} else {
-				ERR_FAIL_MSG("Uniforms supplied for set (" + itos(i) + ", which was just freed) are not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n" + _shader_uniform_debug(raytracing_list.state.layout_defining_shader));
+				ERR_FAIL_V_MSG(false, "Uniforms supplied for set (" + itos(i) + ", which was just freed) are not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n" + _shader_uniform_debug(raytracing_list.state.layout_defining_shader));
 			}
 		}
 	}
@@ -7593,34 +7864,30 @@ void RenderingDevice::raytracing_list_trace_rays(RaytracingListID p_list, uint32
 	uint32_t shader_group_stride = STEPIFY(shader_group_handle_size, shader_group_handle_alignment);
 	uint32_t raygen_shader_group_stride = STEPIFY(shader_group_stride, shader_group_base_alignment);
 
-	ERR_FAIL_COND(p_raygen_shader_index >= raytracing_list.state.raygen_shader_count);
+	ERR_FAIL_COND_V(p_raygen_shader_index >= raytracing_list.state.raygen_shader_count, false);
 
-	RDD::ShaderBindingTable raygen_sbt;
-	raygen_sbt.buffer = raytracing_list.state.sbt_buffer;
-	raygen_sbt.offset = p_raygen_shader_index * raygen_shader_group_stride;
-	raygen_sbt.stride = raygen_shader_group_stride;
-	raygen_sbt.size = raygen_shader_group_stride;
+	r_raygen_sbt.buffer = raytracing_list.state.sbt_buffer;
+	r_raygen_sbt.offset = p_raygen_shader_index * raygen_shader_group_stride;
+	r_raygen_sbt.stride = raygen_shader_group_stride;
+	r_raygen_sbt.size = raygen_shader_group_stride;
 
-	RDD::ShaderBindingTable miss_sbt;
-	miss_sbt.buffer = raytracing_list.state.sbt_buffer;
-	miss_sbt.offset = STEPIFY(raytracing_list.state.raygen_shader_count * raygen_shader_group_stride, shader_group_base_alignment);
-	miss_sbt.stride = shader_group_stride;
-	miss_sbt.size = raytracing_list.state.miss_shader_count * shader_group_stride;
+	r_miss_sbt.buffer = raytracing_list.state.sbt_buffer;
+	r_miss_sbt.offset = STEPIFY(raytracing_list.state.raygen_shader_count * raygen_shader_group_stride, shader_group_base_alignment);
+	r_miss_sbt.stride = shader_group_stride;
+	r_miss_sbt.size = raytracing_list.state.miss_shader_count * shader_group_stride;
 
 	HitShaderBindingTable *hit_sbt = hit_sbt_owner.get_or_null(p_hit_sbt);
-	ERR_FAIL_NULL(hit_sbt);
-	ERR_FAIL_COND(hit_sbt->raytracing_pipeline != raytracing_list.state.pipeline_driver_id);
+	ERR_FAIL_NULL_V(hit_sbt, false);
+	ERR_FAIL_COND_V(hit_sbt->raytracing_pipeline != raytracing_list.state.pipeline_driver_id, false);
 
-	RDD::ShaderBindingTable rdd_hit_sbt;
-	Error err = _hit_sbt_buffer_update(hit_sbt, p_hit_sbt, rdd_hit_sbt);
-	ERR_FAIL_COND(err != OK);
+	Error err = _hit_sbt_buffer_update(hit_sbt, p_hit_sbt, r_hit_sbt);
+	ERR_FAIL_COND_V(err != OK, false);
 
 	if (hit_sbt->draw_tracker != nullptr) {
 		draw_graph.add_raytracing_list_usage(hit_sbt->draw_tracker, RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ);
 	}
 
-	draw_graph.add_raytracing_list_trace_rays(raygen_sbt, miss_sbt, rdd_hit_sbt, p_width, p_height, p_depth);
-	raytracing_list.state.trace_count++;
+	return true;
 }
 
 void RenderingDevice::raytracing_list_end() {
@@ -9123,8 +9390,11 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 	while (frames[p_frame].raytracing_pipelines_to_dispose_of.front()) {
 		RaytracingPipeline *pipeline = &frames[p_frame].raytracing_pipelines_to_dispose_of.front()->get();
 
-		driver->buffer_free(pipeline->sbt_buffer.driver_id);
-		buffer_memory.sub(pipeline->sbt_buffer.size);
+		// GodotNext: rd_rt_pipelines (#179). A library has no shader binding table.
+		if (pipeline->sbt_buffer.driver_id) {
+			driver->buffer_free(pipeline->sbt_buffer.driver_id);
+			buffer_memory.sub(pipeline->sbt_buffer.size);
+		}
 
 		driver->raytracing_pipeline_free(pipeline->driver_id);
 
@@ -9220,6 +9490,12 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 
 		frames[p_frame].textures_to_dispose_of.pop_front();
 	}
+
+	// GodotNext: rd_rt_pipelines (#179)
+	for (RDG::ResourceTracker *tracker : frames[p_frame].hit_sbt_trackers_to_dispose_of) {
+		RDG::resource_tracker_free(tracker);
+	}
+	frames[p_frame].hit_sbt_trackers_to_dispose_of.clear();
 
 	// Buffers.
 	while (frames[p_frame].buffers_to_dispose_of.front()) {
@@ -10157,6 +10433,10 @@ String RenderingDevice::get_captured_timestamp_name(uint32_t p_index) const {
 }
 
 uint64_t RenderingDevice::limit_get(Limit p_limit) const {
+	// GodotNext: rd_rt_pipelines (#179). Drivers without SER return their default for unknown limits.
+	if (p_limit == LIMIT_RAYTRACING_REORDER_EXTENSIONS && !has_feature(SUPPORTS_RAYTRACING_REORDER)) {
+		return 0;
+	}
 	return driver->limit_get(p_limit);
 }
 
@@ -10421,6 +10701,17 @@ uint32_t RenderingDevice::get_missing_int64_atomics(uint32_t p_usage) const {
 	return missing;
 }
 
+// GodotNext: rd_rt_pipelines (#179)
+uint32_t RenderingDevice::get_missing_raytracing_reorder(uint32_t p_usage) const {
+	if (p_usage == 0) {
+		return 0;
+	}
+	if (!has_feature(SUPPORTS_RAYTRACING_REORDER)) {
+		return p_usage;
+	}
+	return p_usage & ~uint32_t(limit_get(LIMIT_RAYTRACING_REORDER_EXTENSIONS));
+}
+
 void RenderingDevice::_bind_methods() {
 #ifdef DEV_ENABLED
 	ClassDB::bind_method(D_METHOD("_dev_driver_callback_clear", "texture", "color", "force_zero_stages"), &RenderingDevice::_dev_driver_callback_clear);
@@ -10508,8 +10799,10 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("compute_pipeline_create", "shader", "specialization_constants"), &RenderingDevice::_compute_pipeline_create, DEFVAL(TypedArray<RDPipelineSpecializationConstant>()));
 	ClassDB::bind_method(D_METHOD("compute_pipeline_is_valid", "compute_pipeline"), &RenderingDevice::compute_pipeline_is_valid);
 
-	ClassDB::bind_method(D_METHOD("raytracing_pipeline_create", "raygen_shaders", "miss_shaders", "hit_groups", "max_trace_recursion_depth"), &RenderingDevice::_raytracing_pipeline_create);
+	ClassDB::bind_method(D_METHOD("raytracing_pipeline_create", "raygen_shaders", "miss_shaders", "hit_groups", "max_trace_recursion_depth", "flags"), &RenderingDevice::_raytracing_pipeline_create, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("raytracing_pipeline_is_valid", "raytracing_pipeline"), &RenderingDevice::raytracing_pipeline_is_valid);
+	// GodotNext: rd_rt_pipelines (#179)
+	ClassDB::bind_method(D_METHOD("raytracing_pipeline_link", "base", "libraries"), &RenderingDevice::_raytracing_pipeline_link);
 
 	ClassDB::bind_method(D_METHOD("blas_create", "geometries", "flags"), &RenderingDevice::_blas_create);
 	// GodotNext: rq_substrate (#22)
@@ -10585,6 +10878,8 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("raytracing_list_set_push_constant", "raytracing_list", "buffer", "size_bytes"), &RenderingDevice::_raytracing_list_set_push_constant);
 	ClassDB::bind_method(D_METHOD("raytracing_list_bind_uniform_set", "raytracing_list", "uniform_set", "set_index"), &RenderingDevice::raytracing_list_bind_uniform_set);
 	ClassDB::bind_method(D_METHOD("raytracing_list_trace_rays", "raytracing_list", "raygen_shader_index", "hit_sbt", "width", "height", "depth"), &RenderingDevice::raytracing_list_trace_rays);
+	// GodotNext: rd_rt_pipelines (#179)
+	ClassDB::bind_method(D_METHOD("raytracing_list_trace_rays_indirect", "raytracing_list", "raygen_shader_index", "hit_sbt", "buffer", "offset"), &RenderingDevice::raytracing_list_trace_rays_indirect);
 	ClassDB::bind_method(D_METHOD("raytracing_list_end"), &RenderingDevice::raytracing_list_end);
 
 	ClassDB::bind_method(D_METHOD("free_rid", "rid"), &RenderingDevice::free_rid);
@@ -11123,6 +11418,10 @@ void RenderingDevice::_bind_methods() {
 	BIND_BITFIELD_FLAG(DYNAMIC_STATE_STENCIL_WRITE_MASK);
 	BIND_BITFIELD_FLAG(DYNAMIC_STATE_STENCIL_REFERENCE);
 
+	// GodotNext: rd_rt_pipelines (#179)
+	BIND_BITFIELD_FLAG(RAYTRACING_PIPELINE_FLAG_LIBRARY);
+	BIND_BITFIELD_FLAG(RAYTRACING_PIPELINE_FLAG_REORDER);
+
 #ifndef DISABLE_DEPRECATED
 	BIND_ENUM_CONSTANT(INITIAL_ACTION_LOAD);
 	BIND_ENUM_CONSTANT(INITIAL_ACTION_CLEAR);
@@ -11188,6 +11487,10 @@ void RenderingDevice::_bind_methods() {
 	// GodotNext: rd_indirect_count (#177)
 	BIND_ENUM_CONSTANT(SUPPORTS_DRAW_INDIRECT_COUNT);
 	BIND_ENUM_CONSTANT(SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE);
+	// GodotNext: rd_rt_pipelines (#179)
+	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_REORDER);
+	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY);
+	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
@@ -11251,6 +11554,8 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_TEXTURES);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_SAMPLERS);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_STORAGE_BUFFERS);
+	// GodotNext: rd_rt_pipelines (#179)
+	BIND_ENUM_CONSTANT(LIMIT_RAYTRACING_REORDER_EXTENSIONS);
 
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);
@@ -11647,7 +11952,7 @@ RID RenderingDevice::_compute_pipeline_create(RID p_shader, const TypedArray<RDP
 	return compute_pipeline_create(p_shader, _get_spec_constants(p_specialization_constants));
 }
 
-RID RenderingDevice::_raytracing_pipeline_create(const TypedArray<RDPipelineShader> &p_raygen_shaders, const TypedArray<RDPipelineShader> &p_miss_shaders, const TypedArray<RDHitGroup> &p_hit_groups, uint32_t p_max_trace_recursion_depth) {
+RID RenderingDevice::_raytracing_pipeline_create(const TypedArray<RDPipelineShader> &p_raygen_shaders, const TypedArray<RDPipelineShader> &p_miss_shaders, const TypedArray<RDHitGroup> &p_hit_groups, uint32_t p_max_trace_recursion_depth, BitField<RaytracingPipelineFlags> p_flags) {
 	thread_local LocalVector<PipelineShader> raygen_and_miss_shaders;
 	thread_local LocalVector<HitGroup> hit_groups;
 	raygen_and_miss_shaders.clear();
@@ -11687,6 +11992,7 @@ RID RenderingDevice::_raytracing_pipeline_create(const TypedArray<RDPipelineShad
 		if (rd_hit_group->intersection_shader.is_valid()) {
 			hit_group.intersection_shader = _get_shader(*rd_hit_group->intersection_shader);
 		}
+		hit_group.record_data = rd_hit_group->record_data; // GodotNext: rd_rt_pipelines (#179)
 
 		hit_groups.push_back(hit_group);
 	}
@@ -11695,7 +12001,17 @@ RID RenderingDevice::_raytracing_pipeline_create(const TypedArray<RDPipelineShad
 			Span<PipelineShader>(raygen_and_miss_shaders.ptr(), p_raygen_shaders.size()),
 			Span<PipelineShader>(raygen_and_miss_shaders.ptr() + p_raygen_shaders.size(), p_miss_shaders.size()),
 			hit_groups,
-			p_max_trace_recursion_depth);
+			p_max_trace_recursion_depth,
+			p_flags);
+}
+
+// GodotNext: rd_rt_pipelines (#179)
+RID RenderingDevice::_raytracing_pipeline_link(RID p_base, const TypedArray<RID> &p_libraries) {
+	LocalVector<RID> libraries;
+	for (int i = 0; i < p_libraries.size(); i++) {
+		libraries.push_back(p_libraries[i]);
+	}
+	return raytracing_pipeline_link(p_base, libraries);
 }
 
 #ifndef DISABLE_DEPRECATED

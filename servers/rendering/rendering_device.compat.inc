@@ -186,6 +186,11 @@ Error RenderingDevice::_tlas_build_bind_compat_gn45(RID p_tlas, const TypedArray
 	return _tlas_build(p_tlas, p_instances, ACCELERATION_STRUCTURE_BUILD_MODE_BUILD);
 }
 
+// GodotNext: rd_rt_pipelines (#179)
+RID RenderingDevice::_raytracing_pipeline_create_bind_compat_gn179(const TypedArray<RDPipelineShader> &p_raygen_shaders, const TypedArray<RDPipelineShader> &p_miss_shaders, const TypedArray<RDHitGroup> &p_hit_groups, uint32_t p_max_trace_recursion_depth) {
+	return _raytracing_pipeline_create(p_raygen_shaders, p_miss_shaders, p_hit_groups, p_max_trace_recursion_depth, 0);
+}
+
 void RenderingDevice::_bind_compatibility_methods() {
 	ClassDB::bind_compatibility_method(D_METHOD("shader_create_from_bytecode", "binary_data"), &RenderingDevice::_shader_create_from_bytecode_bind_compat_79606);
 
@@ -221,6 +226,9 @@ void RenderingDevice::_bind_compatibility_methods() {
 	// GodotNext: as_build_modes
 	ClassDB::bind_compatibility_method(D_METHOD("blas_build", "blas"), &RenderingDevice::_blas_build_bind_compat_gn45);
 	ClassDB::bind_compatibility_method(D_METHOD("tlas_build", "tlas", "instances"), &RenderingDevice::_tlas_build_bind_compat_gn45);
+
+	// GodotNext: rd_rt_pipelines (#179)
+	ClassDB::bind_compatibility_method(D_METHOD("raytracing_pipeline_create", "raygen_shaders", "miss_shaders", "hit_groups", "max_trace_recursion_depth"), &RenderingDevice::_raytracing_pipeline_create_bind_compat_gn179);
 
 	// GodotNext: async_compute (#174)
 	ClassDB::bind_compatibility_method(D_METHOD("compute_list_begin"), &RenderingDevice::_compute_list_begin_bind_compat_gn174);

@@ -37,6 +37,7 @@
 #include "drivers/vulkan/vulkan_extension_provider.h" // GodotNext: pu_vk_extension_providers (#105).
 #include "drivers/vulkan/vulkan_hooks.h"
 #include "servers/rendering/rendering_device_bindless.h" // GodotNext: rd_bindless (#176).
+#include "servers/rendering/rendering_device_rt_pipeline.h" // GodotNext: rd_rt_pipelines (#179).
 
 #include <thirdparty/misc/smolv.h>
 
@@ -632,6 +633,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	// extension enables it, also on Vulkan 1.2 and later, where VkPhysicalDeviceVulkan12Features is the
 	// only other way (and it must not sit beside the individual structures of the device chain).
 	_register_requested_device_extension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME, false);
+	// GodotNext: rd_rt_pipelines (#179). Pipeline libraries and shader execution reordering for RT pipelines.
+	_register_requested_device_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -1003,6 +1008,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			shader_draw_parameters_features.pNext = next_features;
 			next_features = &shader_draw_parameters_features;
 		}
+		// GodotNext: rd_rt_pipelines (#179). Each is chained only with its extension: validation layers that
+		// predate the EXT structure report it as unknown.
+		VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT reorder_features_ext = {};
+		VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorder_features_nv = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -1122,6 +1131,18 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
 			ray_query_features.pNext = next_features;
 			next_features = &ray_query_features;
+		}
+
+		// GodotNext: rd_rt_pipelines (#179)
+		if (enabled_device_extension_names.has(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)) {
+			reorder_features_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT;
+			reorder_features_ext.pNext = next_features;
+			next_features = &reorder_features_ext;
+		}
+		if (enabled_device_extension_names.has(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME)) {
+			reorder_features_nv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+			reorder_features_nv.pNext = next_features;
+			next_features = &reorder_features_nv;
 		}
 
 		VkPhysicalDeviceFeatures2 device_features_2 = {};
@@ -1253,6 +1274,11 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		if (enabled_device_extension_names.has(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
 			raytracing_capabilities.raytracing_pipeline_support = raytracing_pipeline_features.rayTracingPipeline;
 			raytracing_capabilities.validation = raytracing_validation_features.rayTracingValidation;
+			// GodotNext: rd_rt_pipelines (#179)
+			raytracing_capabilities.trace_rays_indirect_support = raytracing_pipeline_features.rayTracingPipeline && raytracing_pipeline_features.rayTracingPipelineTraceRaysIndirect;
+			raytracing_capabilities.library_support = raytracing_pipeline_features.rayTracingPipeline && enabled_device_extension_names.has(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+			raytracing_capabilities.reorder_ext = raytracing_pipeline_features.rayTracingPipeline && enabled_device_extension_names.has(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) && reorder_features_ext.rayTracingInvocationReorder;
+			raytracing_capabilities.reorder_nv = raytracing_pipeline_features.rayTracingPipeline && enabled_device_extension_names.has(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME) && reorder_features_nv.rayTracingInvocationReorder;
 		}
 
 		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
@@ -1486,12 +1512,15 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			raytracing_capabilities.shader_group_handle_alignment = raytracing_properties.shaderGroupHandleAlignment;
 			raytracing_capabilities.shader_group_handle_size_aligned = _align_up(raytracing_capabilities.shader_group_handle_size, raytracing_capabilities.shader_group_handle_alignment);
 			raytracing_capabilities.shader_group_base_alignment = raytracing_properties.shaderGroupBaseAlignment;
+			raytracing_capabilities.max_ray_hit_attribute_size = raytracing_properties.maxRayHitAttributeSize; // GodotNext: rd_rt_pipelines (#179).
 
 			print_verbose("- Vulkan Raytracing supported");
 			print_verbose("  shader group handle size: " + itos(raytracing_capabilities.shader_group_handle_size));
 			print_verbose("  shader group handle alignment: " + itos(raytracing_capabilities.shader_group_handle_alignment));
 			print_verbose("  shader group handle size aligned: " + itos(raytracing_capabilities.shader_group_handle_size_aligned));
 			print_verbose("  shader group base alignment: " + itos(raytracing_capabilities.shader_group_base_alignment));
+			// GodotNext: rd_rt_pipelines (#179)
+			print_verbose(vformat("  pipeline libraries: %s, indirect trace: %s, invocation reorder: EXT %s, NV %s", raytracing_capabilities.library_support ? "yes" : "no", raytracing_capabilities.trace_rays_indirect_support ? "yes" : "no", raytracing_capabilities.reorder_ext ? "yes" : "no", raytracing_capabilities.reorder_nv ? "yes" : "no"));
 		} else {
 			print_verbose("- Vulkan Raytracing not supported");
 		}
@@ -1647,7 +1676,25 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		raytracing_pipeline_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 		raytracing_pipeline_features.pNext = create_info_next;
 		raytracing_pipeline_features.rayTracingPipeline = raytracing_capabilities.raytracing_pipeline_support;
+		// GodotNext: rd_rt_pipelines (#179)
+		raytracing_pipeline_features.rayTracingPipelineTraceRaysIndirect = raytracing_capabilities.trace_rays_indirect_support;
 		create_info_next = &raytracing_pipeline_features;
+	}
+
+	// GodotNext: rd_rt_pipelines (#179)
+	VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT reorder_features_ext = {};
+	if (raytracing_capabilities.reorder_ext) {
+		reorder_features_ext.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT;
+		reorder_features_ext.pNext = create_info_next;
+		reorder_features_ext.rayTracingInvocationReorder = VK_TRUE;
+		create_info_next = &reorder_features_ext;
+	}
+	VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorder_features_nv = {};
+	if (raytracing_capabilities.reorder_nv) {
+		reorder_features_nv.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_NV;
+		reorder_features_nv.pNext = create_info_next;
+		reorder_features_nv.rayTracingInvocationReorder = VK_TRUE;
+		create_info_next = &reorder_features_nv;
 	}
 
 	VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
@@ -1830,6 +1877,8 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			device_functions.CreateRaytracingPipelinesKHR = PFN_vkCreateRayTracingPipelinesKHR(functions.GetDeviceProcAddr(vk_device, "vkCreateRayTracingPipelinesKHR"));
 			device_functions.GetRayTracingShaderGroupHandlesKHR = PFN_vkGetRayTracingShaderGroupHandlesKHR(functions.GetDeviceProcAddr(vk_device, "vkGetRayTracingShaderGroupHandlesKHR"));
 			device_functions.CmdTraceRaysKHR = PFN_vkCmdTraceRaysKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdTraceRaysKHR"));
+			// GodotNext: rd_rt_pipelines (#179)
+			device_functions.CmdTraceRaysIndirectKHR = PFN_vkCmdTraceRaysIndirectKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdTraceRaysIndirectKHR"));
 		}
 	}
 
@@ -4879,6 +4928,12 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 
 		shader_info.original_stage_size.push_back(decoded_spirv.size());
 
+		// GodotNext: rd_rt_pipelines (#179). Measured before re-spirv, from the module as compiled.
+		const ShaderStage stage = shader_refl.stages_vector[i];
+		if (stage >= SHADER_STAGE_RAYGEN && stage <= SHADER_STAGE_INTERSECTION) {
+			shader_info.raytracing_payload_sizes[stage] = RDRTPipeline::get_spirv_payload_size(decoded_spirv.ptr(), decoded_spirv.size());
+		}
+
 		// GodotNext: nextgi_vulkan (#50). Ray-query modules skip re-spirv (see _spirv_declares_ray_query).
 		if (use_respv && _spirv_declares_ray_query(decoded_spirv)) {
 			if (store_respv) {
@@ -5054,6 +5109,14 @@ void RenderingDeviceDriverVulkan::shader_destroy_modules(ShaderID p_shader) {
 		}
 	}
 	si->vk_stages_create_info.clear();
+}
+
+// GodotNext: rd_rt_pipelines (#179)
+uint32_t RenderingDeviceDriverVulkan::shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const {
+	const ShaderInfo *si = (const ShaderInfo *)p_shader.id;
+	ERR_FAIL_NULL_V(si, 0);
+	ERR_FAIL_INDEX_V(p_stage, SHADER_STAGE_MAX, 0);
+	return si->raytracing_payload_sizes[p_stage];
 }
 
 /*********************/
@@ -7459,9 +7522,30 @@ void RenderingDeviceDriverVulkan::command_trace_rays(CommandBufferID p_cmd_buffe
 #endif
 }
 
+// GodotNext: rd_rt_pipelines (#179)
+void RenderingDeviceDriverVulkan::command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_NULL(device_functions.CmdTraceRaysIndirectKHR);
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	VkStridedDeviceAddressRegionKHR raygen_sbt = _sbt_to_vk_strided_device_address_region(p_raygen_sbt);
+	VkStridedDeviceAddressRegionKHR miss_sbt = _sbt_to_vk_strided_device_address_region(p_miss_sbt);
+	VkStridedDeviceAddressRegionKHR hit_sbt = _sbt_to_vk_strided_device_address_region(p_hit_sbt);
+	VkStridedDeviceAddressRegionKHR callable_sbt = {};
+	const VkDeviceAddress indirect_address = buffer_get_device_address(p_indirect_buffer) + p_offset;
+	device_functions.CmdTraceRaysIndirectKHR(command_buffer->vk_command_buffer, &raygen_sbt, &miss_sbt, &hit_sbt, &callable_sbt, indirect_address);
+#endif
+}
+
 // --- PIPELINE ---
 
 RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) {
+	// GodotNext: rd_rt_pipelines (#179). Shared with raytracing_pipeline_library_create().
+	return _raytracing_pipeline_create(p_shaders, p_raygen_shader_indices, p_miss_shader_indices, p_hit_groups, p_max_trace_recursion_depth, p_layout_defining_shader, 0, nullptr);
+}
+
+// GodotNext: rd_rt_pipelines (#179). The body of raytracing_pipeline_create(), with the pipeline flags and the
+// library interface added.
+RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::_raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader, VkPipelineCreateFlags p_flags, const VkRayTracingPipelineInterfaceCreateInfoKHR *p_library_interface) {
 #if VULKAN_RAYTRACING_ENABLED
 	// GodotNext: rd_ray_query_api
 	// Loaded only with VK_KHR_ray_tracing_pipeline; a ray-query-only device leaves it null.
@@ -7553,11 +7637,69 @@ RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_creat
 	pipeline_create_info.groupCount = shader_group_count;
 	pipeline_create_info.pGroups = shader_groups;
 	pipeline_create_info.maxPipelineRayRecursionDepth = p_max_trace_recursion_depth;
+	// GodotNext: rd_rt_pipelines (#179)
+	pipeline_create_info.flags = p_flags;
+	pipeline_create_info.pLibraryInterface = p_library_interface;
 
 	VkPipeline vk_pipeline = VK_NULL_HANDLE;
 	VkResult err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &pipeline_create_info, nullptr, &vk_pipeline);
 	ERR_FAIL_COND_V_MSG(err, RaytracingPipelineID(), vformat("Couldn't create Vulkan raytracing pipelines (VkResult error %d).", err));
 	_track_handle(vk_pipeline); // GodotNext: pu_vk_extension_providers (#105).
+
+	return RaytracingPipelineID(vk_pipeline);
+#else
+	return RaytracingPipelineID();
+#endif
+}
+
+// GodotNext: rd_rt_pipelines (#179)
+RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V(!raytracing_capabilities.library_support, RaytracingPipelineID());
+	VkRayTracingPipelineInterfaceCreateInfoKHR library_interface = {};
+	library_interface.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_INTERFACE_CREATE_INFO_KHR;
+	library_interface.maxPipelineRayPayloadSize = p_max_payload_size;
+	library_interface.maxPipelineRayHitAttributeSize = raytracing_capabilities.max_ray_hit_attribute_size;
+	return _raytracing_pipeline_create(p_shaders, p_raygen_shader_indices, p_miss_shader_indices, p_hit_groups, p_max_trace_recursion_depth, p_layout_defining_shader, VK_PIPELINE_CREATE_LIBRARY_BIT_KHR, &library_interface);
+#else
+	return RaytracingPipelineID();
+#endif
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverVulkan::raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+#if VULKAN_RAYTRACING_ENABLED
+	ERR_FAIL_COND_V(!raytracing_capabilities.library_support, RaytracingPipelineID());
+	ERR_FAIL_NULL_V(device_functions.CreateRaytracingPipelinesKHR, RaytracingPipelineID());
+	ERR_FAIL_COND_V(p_libraries.size() == 0, RaytracingPipelineID());
+
+	VkPipeline *vk_libraries = ALLOCA_ARRAY(VkPipeline, p_libraries.size());
+	for (uint32_t i = 0; i < p_libraries.size(); i++) {
+		vk_libraries[i] = (VkPipeline)p_libraries[i].id;
+	}
+
+	VkPipelineLibraryCreateInfoKHR library_info = {};
+	library_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR;
+	library_info.libraryCount = p_libraries.size();
+	library_info.pLibraries = vk_libraries;
+
+	VkRayTracingPipelineInterfaceCreateInfoKHR library_interface = {};
+	library_interface.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_INTERFACE_CREATE_INFO_KHR;
+	library_interface.maxPipelineRayPayloadSize = p_max_payload_size;
+	library_interface.maxPipelineRayHitAttributeSize = raytracing_capabilities.max_ray_hit_attribute_size;
+
+	// The stages and groups all come from the libraries, in p_libraries order.
+	const ShaderInfo *layout_defining_shader_info = (const ShaderInfo *)p_layout_defining_shader.id;
+	VkRayTracingPipelineCreateInfoKHR pipeline_create_info = {};
+	pipeline_create_info.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
+	pipeline_create_info.layout = layout_defining_shader_info->vk_pipeline_layout;
+	pipeline_create_info.maxPipelineRayRecursionDepth = p_max_trace_recursion_depth;
+	pipeline_create_info.pLibraryInfo = &library_info;
+	pipeline_create_info.pLibraryInterface = &library_interface;
+
+	VkPipeline vk_pipeline = VK_NULL_HANDLE;
+	VkResult err = device_functions.CreateRaytracingPipelinesKHR(vk_device, VK_NULL_HANDLE, pipelines_cache.vk_cache, 1, &pipeline_create_info, nullptr, &vk_pipeline);
+	ERR_FAIL_COND_V_MSG(err, RaytracingPipelineID(), vformat("Couldn't link Vulkan raytracing pipeline libraries (VkResult error %d).", err));
+	_track_handle(vk_pipeline);
 
 	return RaytracingPipelineID(vk_pipeline);
 #else
@@ -8265,6 +8407,9 @@ uint64_t RenderingDeviceDriverVulkan::limit_get(Limit p_limit) {
 			return has_feature(SUPPORTS_BINDLESS) ? bindless_capabilities.max_samplers : 0;
 		case LIMIT_MAX_BINDLESS_STORAGE_BUFFERS:
 			return has_feature(SUPPORTS_BINDLESS) ? bindless_capabilities.max_storage_buffers : 0;
+		// GodotNext: rd_rt_pipelines (#179). The bits of RDRTPipeline::ReorderUsage.
+		case LIMIT_RAYTRACING_REORDER_EXTENSIONS:
+			return has_feature(SUPPORTS_RAYTRACING_REORDER) ? uint64_t((raytracing_capabilities.reorder_ext ? uint32_t(RDRTPipeline::REORDER_USAGE_EXT) : 0u) | (raytracing_capabilities.reorder_nv ? uint32_t(RDRTPipeline::REORDER_USAGE_NV) : 0u)) : 0;
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return limits.maxBoundDescriptorSets;
 		case LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS:
@@ -8453,6 +8598,13 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return device_functions.CmdDrawIndirectCountKHR != nullptr && device_functions.CmdDrawIndexedIndirectCountKHR != nullptr;
 		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
 			return requested_device_features.drawIndirectFirstInstance;
+		// GodotNext: rd_rt_pipelines (#179)
+		case SUPPORTS_RAYTRACING_REORDER:
+			return has_feature(SUPPORTS_RAYTRACING_PIPELINE) && (raytracing_capabilities.reorder_ext || raytracing_capabilities.reorder_nv);
+		case SUPPORTS_RAYTRACING_PIPELINE_LIBRARY:
+			return has_feature(SUPPORTS_RAYTRACING_PIPELINE) && raytracing_capabilities.library_support;
+		case SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT:
+			return has_feature(SUPPORTS_RAYTRACING_PIPELINE) && raytracing_capabilities.trace_rays_indirect_support;
 		default:
 			return false;
 	}

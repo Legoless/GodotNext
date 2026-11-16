@@ -149,6 +149,12 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		uint32_t shader_group_handle_size_aligned = 0;
 		uint32_t shader_group_base_alignment = 0;
 		bool validation = false;
+		// GodotNext: rd_rt_pipelines (#179)
+		bool library_support = false; // VK_KHR_pipeline_library.
+		bool trace_rays_indirect_support = false; // rayTracingPipelineTraceRaysIndirect.
+		uint32_t max_ray_hit_attribute_size = 0;
+		bool reorder_ext = false; // VK_EXT_ray_tracing_invocation_reorder's rayTracingInvocationReorder.
+		bool reorder_nv = false; // VK_NV_ray_tracing_invocation_reorder's rayTracingInvocationReorder.
 	};
 
 	struct DeviceFunctions {
@@ -181,6 +187,8 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		PFN_vkCreateRayTracingPipelinesKHR CreateRaytracingPipelinesKHR = nullptr;
 		PFN_vkGetRayTracingShaderGroupHandlesKHR GetRayTracingShaderGroupHandlesKHR = nullptr;
 		PFN_vkCmdTraceRaysKHR CmdTraceRaysKHR = nullptr;
+		// GodotNext: rd_rt_pipelines (#179)
+		PFN_vkCmdTraceRaysIndirectKHR CmdTraceRaysIndirectKHR = nullptr;
 
 		// GodotNext: rd_indirect_count (#177). VK_KHR_draw_indirect_count.
 		PFN_vkCmdDrawIndirectCountKHR CmdDrawIndirectCountKHR = nullptr;
@@ -605,6 +613,8 @@ private:
 		TightLocalVector<Vector<uint8_t>> spirv_stage_bytes;
 		TightLocalVector<uint64_t> original_stage_size;
 		VkPipelineLayout vk_pipeline_layout = VK_NULL_HANDLE;
+		// GodotNext: rd_rt_pipelines (#179). Each ray tracing stage's payload (RDRTPipeline::get_spirv_payload_size()).
+		uint32_t raytracing_payload_sizes[SHADER_STAGE_MAX] = {};
 	};
 
 public:
@@ -612,6 +622,8 @@ public:
 	virtual void shader_free(ShaderID p_shader) override final;
 
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
+	// GodotNext: rd_rt_pipelines (#179)
+	virtual uint32_t shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const override final;
 	/*********************/
 	/**** UNIFORM SET ****/
 	/*********************/
@@ -899,6 +911,13 @@ public:
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) override final;
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override final;
+	// GodotNext: rd_rt_pipelines (#179)
+	virtual void command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) override final;
+
+private:
+	// GodotNext: rd_rt_pipelines (#179). raytracing_pipeline_create() and raytracing_pipeline_library_create(),
+	// with the pipeline flags and the library interface (null for a pipeline that uses no libraries).
+	RaytracingPipelineID _raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader, VkPipelineCreateFlags p_flags, const VkRayTracingPipelineInterfaceCreateInfoKHR *p_library_interface);
 
 public:
 	// ----- PIPELINE -----
@@ -906,6 +925,10 @@ public:
 	virtual void raytracing_pipeline_free(RaytracingPipelineID p_pipeline) override final;
 
 	virtual bool raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) override final;
+
+	// GodotNext: rd_rt_pipelines (#179)
+	virtual RaytracingPipelineID raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
+	virtual RaytracingPipelineID raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
 
 	/*****************/
 	/**** QUERIES ****/

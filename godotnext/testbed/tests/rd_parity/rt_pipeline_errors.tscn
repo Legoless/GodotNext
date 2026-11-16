@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/rd_parity/rt_pipeline_errors.gd" id="1_rt_pipeline_errors"]
+
+[node name="RTPipelineErrors" type="Node"]
+script = ExtResource("1_rt_pipeline_errors")

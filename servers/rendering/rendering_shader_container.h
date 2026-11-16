@@ -43,9 +43,10 @@ class RenderingShaderContainer : public RefCounted {
 public:
 	static const uint32_t CONTAINER_MAGIC_NUMBER = 0x43535247;
 	// GodotNext: rd_atomics64 (#175). Version 3 added ReflectionData::int64_atomics.
-	// GodotNext: dxil_toolchain (#123). Version 4 adds ReflectionData::has_ray_query. constexpr, so it can be
+	// GodotNext: dxil_toolchain (#123). Version 4 added ReflectionData::has_ray_query. constexpr, so it can be
 	// passed by reference without an out-of-class definition.
-	static constexpr uint32_t CONTAINER_VERSION = 4;
+	// GodotNext: rd_rt_pipelines (#179). Version 5 adds ReflectionData::raytracing_reorder.
+	static constexpr uint32_t CONTAINER_VERSION = 5;
 
 protected:
 	using RDC = RenderingDeviceCommons;
@@ -75,11 +76,15 @@ protected:
 		// GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits. Appended so the fields above keep their
 		// offsets.
 		uint32_t int64_atomics = 0;
-		// GodotNext: dxil_toolchain (#123). Takes the word that was padding in version 3, so the struct stays
-		// 72 bytes with no uninitialized bytes when it is copied into a container.
+		// GodotNext: dxil_toolchain (#123). Takes the word that was padding in version 3.
 		uint32_t has_ray_query = 0;
+		// GodotNext: rd_rt_pipelines (#179). RDRTPipeline::ReorderUsage bits, appended in version 5. The explicit
+		// padding keeps the struct free of uninitialized bytes when it is copied into a container; a later field
+		// can take it.
+		uint32_t raytracing_reorder = 0;
+		uint32_t padding = 0;
 	};
-	static_assert(sizeof(ReflectionData) == 72, "ReflectionData must not contain implicit padding.");
+	static_assert(sizeof(ReflectionData) == 80, "ReflectionData must not contain implicit padding.");
 
 	struct ReflectionBindingData {
 		uint32_t type = 0;
@@ -247,6 +252,7 @@ protected:
 		// GodotNext: rd_indirect_count (#177). A compile option, not reflected and not stored in the container:
 		// gl_InstanceIndex includes firstInstance (D3D12 compiles the shader for shader model 6.8).
 		bool base_instance_native = false;
+		uint32_t raytracing_reorder = 0; // GodotNext: rd_rt_pipelines (#179). RDRTPipeline::ReorderUsage bits.
 		RDC::PipelineType pipeline_type = RDC::PIPELINE_TYPE_RASTERIZATION;
 
 		LocalVector<ReflectShaderStage> shader_stages;
@@ -314,6 +320,8 @@ public:
 	RDC::ShaderReflection get_shader_reflection() const;
 	// GodotNext: rd_atomics64 (#175). The RDAtomics64::Usage bits, without building the whole reflection.
 	uint32_t get_int64_atomics_usage() const { return reflection_data.int64_atomics; }
+	// GodotNext: rd_rt_pipelines (#179). The RDRTPipeline::ReorderUsage bits, without building the whole reflection.
+	uint32_t get_raytracing_reorder_usage() const { return reflection_data.raytracing_reorder; }
 	// GodotNext: dxil_toolchain (#123). Reads only the container header and prints nothing. Returns false when
 	// p_bytes is not a shader container or was written with another CONTAINER_VERSION, which from_bytes()
 	// rejects. r_version receives the version found (0 if there is no header). Shader caches use it to

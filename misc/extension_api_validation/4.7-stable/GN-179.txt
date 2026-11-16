@@ -1,0 +1,4 @@
+Validate extension JSON: Error: Field 'classes/RenderingDevice/methods/raytracing_pipeline_create/arguments': size changed value in new API, from 4 to 5.
+
+Added an optional RaytracingPipelineFlags argument to RenderingDevice.raytracing_pipeline_create (GodotNext #179).
+The default is 0, so existing calls keep their behavior. A compatibility method is registered.

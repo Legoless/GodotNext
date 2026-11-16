@@ -20,5 +20,8 @@
 		<member name="intersection_shader" type="RDPipelineShader" setter="set_intersection_shader" getter="get_intersection_shader">
 			Intersection shader for this hit group. Required for non-triangle geometry. Must be [code]null[/code] when using for triangle geometry.
 		</member>
+		<member name="record_data" type="PackedByteArray" setter="set_record_data" getter="get_record_data" default="PackedByteArray()">
+			Shader record for this hit group, at most 32 bytes. A hit shader binding table writes it after the hit group's handle, and the hit group's shaders read it through a [code]shaderRecordEXT[/code] buffer block, for example an index into a bindless table ([method RenderingDevice.bindless_table_create]). Empty for no record.
+		</member>
 	</members>
 </class>

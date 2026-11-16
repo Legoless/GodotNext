@@ -32,12 +32,12 @@
 
 TEST_FORCE_LINK(test_rendering_shader_container)
 
-// GodotNext: dxil_toolchain (#123). Shader container version 4 (has_ray_query, beside #175's int64_atomics) and, on
-// Windows, the D3D12 container (FORMAT_VERSION 2, shader models, the ray-tracing gate on the Mesa NIR library, the
-// debug-only DXIL validator and the DXIL operations that read the instance values). Most SPIR-V modules are assembled
-// by hand; the GLSL cases compile their shaders with the glslang module. No case needs a GPU. With the GodotNext Mesa
-// NIR library, the instance-value case disassembles DXIL with dxil.dll and dxcompiler.dll from the installed Windows
-// SDK.
+// GodotNext: dxil_toolchain (#123). The shader container's has_ray_query, beside #175's int64_atomics (version 4;
+// version 5 appends #179's raytracing_reorder) and, on Windows, the D3D12 container (FORMAT_VERSION 2, shader models,
+// the ray-tracing gate on the Mesa NIR library, the debug-only DXIL validator and the DXIL operations that read the
+// instance values). Most SPIR-V modules are assembled by hand; the GLSL cases compile their shaders with the glslang
+// module. No case needs a GPU. With the GodotNext Mesa NIR library, the instance-value case disassembles DXIL with
+// dxil.dll and dxcompiler.dll from the installed Windows SDK.
 
 #include "core/error/error_macros.h"
 #include "core/templates/local_vector.h"
@@ -221,15 +221,18 @@ void write_u32(PackedByteArray &r_bytes, int64_t p_offset, uint32_t p_value) {
 // The container header is magic, version, format, format version and shader count (5 x uint32_t).
 constexpr int64_t HEADER_VERSION_OFFSET = 4;
 constexpr int64_t HEADER_FORMAT_VERSION_OFFSET = 12;
-// ReflectionData follows the header (TestShaderContainer adds no header data). It is 72 bytes, and version 4's last
-// two words are int64_atomics (#175, offset 64) and has_ray_query (#123, offset 68).
+// ReflectionData follows the header (TestShaderContainer adds no header data). Version 4's was 72 bytes and ended with
+// int64_atomics (#175, offset 64) and has_ray_query (#123, offset 68). Version 5's is 80 bytes: it appends
+// raytracing_reorder (#179, offset 72) and an explicit padding word (offset 76).
 constexpr int64_t REFLECTION_OFFSET = 20;
 constexpr int64_t REFLECTION_INT64_ATOMICS_OFFSET = REFLECTION_OFFSET + 64;
 constexpr int64_t REFLECTION_HAS_RAY_QUERY_OFFSET = REFLECTION_OFFSET + 68;
-constexpr int64_t REFLECTION_END = REFLECTION_OFFSET + 72;
+constexpr int64_t REFLECTION_RAYTRACING_REORDER_OFFSET = REFLECTION_OFFSET + 72;
+constexpr int64_t REFLECTION_PADDING_OFFSET = REFLECTION_OFFSET + 76;
+constexpr int64_t REFLECTION_END = REFLECTION_OFFSET + 80;
 
 TEST_CASE("[ShaderContainer] Reflection sets has_ray_query from the SPIR-V RayQueryKHR capability") {
-	CHECK(RenderingShaderContainer::CONTAINER_VERSION == 4);
+	CHECK(RenderingShaderContainer::CONTAINER_VERSION == 5);
 
 	Ref<TestShaderContainer> plain;
 	plain.instantiate();
@@ -262,15 +265,16 @@ TEST_CASE("[ShaderContainer] Reflection sets has_ray_query from the SPIR-V RayQu
 	CHECK_FALSE(loaded_plain->has_ray_query());
 }
 
-TEST_CASE("[ShaderContainer] Version-2 and version-3 containers are rejected with one message and rebuilt") {
+TEST_CASE("[ShaderContainer] Version-2, version-3 and version-4 containers are rejected with one message and rebuilt") {
 	Ref<TestShaderContainer> container;
 	container.instantiate();
 	REQUIRE(container->set_code_from_spirv("stale", make_stages(TestModule::COMPUTE)));
 	const PackedByteArray current = container->to_bytes();
 	REQUIRE(current.size() > HEADER_FORMAT_VERSION_OFFSET + 4);
 
-	// Version 2 is the layout before #175, version 3 is #175's (int64_atomics, no has_ray_query).
-	const uint32_t stale_versions[] = { 2, 3 };
+	// Version 2 is the layout before #175, version 3 is #175's (int64_atomics, no has_ray_query), version 4 is #123's
+	// (72 bytes, no raytracing_reorder).
+	const uint32_t stale_versions[] = { 2, 3, 4 };
 	for (const uint32_t stale_version : stale_versions) {
 		PackedByteArray stale = current;
 		write_u32(stale, HEADER_VERSION_OFFSET, stale_version);
@@ -290,7 +294,7 @@ TEST_CASE("[ShaderContainer] Version-2 and version-3 containers are rejected wit
 			loaded.instantiate();
 			CHECK_FALSE(loaded->from_bytes(stale));
 			CHECK(capture.count == 1);
-			CHECK_MESSAGE(capture.first_message.contains(vformat("(%d, expected 4)", stale_version)), capture.first_message);
+			CHECK_MESSAGE(capture.first_message.contains(vformat("(%d, expected 5)", stale_version)), capture.first_message);
 		}
 	}
 
@@ -301,7 +305,7 @@ TEST_CASE("[ShaderContainer] Version-2 and version-3 containers are rejected wit
 	const PackedByteArray fresh = rebuilt->to_bytes();
 	uint32_t fresh_version = 0;
 	CHECK(RenderingShaderContainer::is_container_version_current(fresh, &fresh_version));
-	CHECK(fresh_version == 4);
+	CHECK(fresh_version == 5);
 	{
 		ErrorCapture capture;
 		Ref<TestShaderContainer> loaded;
@@ -320,7 +324,7 @@ TEST_CASE("[ShaderContainer] Version-2 and version-3 containers are rejected wit
 	CHECK_FALSE(RenderingShaderContainer::is_container_version_current(PackedByteArray()));
 }
 
-TEST_CASE("[ShaderContainer] Version 4 writes int64_atomics and has_ray_query as ReflectionData's last two words") {
+TEST_CASE("[ShaderContainer] Version 5 writes int64_atomics, has_ray_query and raytracing_reorder, then a zero padding word") {
 	Ref<TestShaderContainer> both;
 	both.instantiate();
 	REQUIRE(both->set_code_from_spirv("both", make_stages(TestModule::COMPUTE_RAY_QUERY_INT64_ATOMICS)));
@@ -329,9 +333,12 @@ TEST_CASE("[ShaderContainer] Version 4 writes int64_atomics and has_ray_query as
 
 	const PackedByteArray bytes = both->to_bytes();
 	REQUIRE(bytes.size() >= REFLECTION_END + 4);
-	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 4);
+	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 5);
 	CHECK(read_u32(bytes, REFLECTION_INT64_ATOMICS_OFFSET) == uint32_t(RDAtomics64::USAGE_INT64_ATOMICS));
 	CHECK(read_u32(bytes, REFLECTION_HAS_RAY_QUERY_OFFSET) == 1);
+	// A compute shader does not reorder; test_rd_rt_pipelines.cpp checks a raygen shader's word.
+	CHECK(read_u32(bytes, REFLECTION_RAYTRACING_REORDER_OFFSET) == 0);
+	CHECK(read_u32(bytes, REFLECTION_PADDING_OFFSET) == 0);
 	// The shader name follows ReflectionData directly (no reflection extra data in this container).
 	CHECK(memcmp(bytes.ptr() + REFLECTION_END, "both", 4) == 0);
 
@@ -449,17 +456,17 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version 2, shader m
 	REQUIRE(plain->shaders.size() == 1);
 	CHECK(dxil_program_version(decompressed_code(plain, 0)) == ((5u << 16) | 0x62));
 
-	// It is written as container version 4, D3D12 format version 2, and version-2 and version-3 copies are each
-	// rejected once.
+	// It is written as container version 5, D3D12 format version 2, and version-2, version-3 and version-4 copies
+	// are each rejected once.
 	const PackedByteArray bytes = plain->to_bytes();
 	REQUIRE(bytes.size() > HEADER_FORMAT_VERSION_OFFSET + 4);
-	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 4);
+	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 5);
 	CHECK(read_u32(bytes, HEADER_FORMAT_VERSION_OFFSET) == 2);
 	{
 		Ref<RenderingShaderContainer> loaded = format.create_container();
 		CHECK(loaded->from_bytes(bytes));
 	}
-	const uint32_t stale_versions[] = { 2, 3 };
+	const uint32_t stale_versions[] = { 2, 3, 4 };
 	for (const uint32_t stale_version : stale_versions) {
 		PackedByteArray stale = bytes;
 		write_u32(stale, HEADER_VERSION_OFFSET, stale_version);

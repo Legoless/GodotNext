@@ -525,6 +525,11 @@ public:
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) = 0;
 	// Only meaningful if API_TRAIT_SHADER_CHANGE_INVALIDATION is SHADER_CHANGE_INVALIDATION_ALL_OR_NONE_ACCORDING_TO_LAYOUT_HASH.
 	virtual uint32_t shader_get_layout_hash(ShaderID p_shader) { return 0; }
+	// GodotNext: rd_rt_pipelines (#179). The ray payload of one stage of p_shader, in bytes, measured as
+	// RDRTPipeline::get_spirv_payload_size() measures it (or RDRTPipeline::PAYLOAD_SIZE_UNKNOWN), so
+	// RenderingDevice can check it against the payload size libraries declare. 0 without a payload, and
+	// from drivers without pipeline libraries.
+	virtual uint32_t shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const { return 0; }
 	virtual void shader_free(ShaderID p_shader) = 0;
 	virtual void shader_destroy_modules(ShaderID p_shader) = 0;
 
@@ -868,6 +873,19 @@ public:
 
 	virtual bool raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) = 0;
 
+	// GodotNext: rd_rt_pipelines (#179). Pipeline libraries (plan §21.1 C5). A library is created like a
+	// pipeline, but can be neither bound nor queried for handles; raytracing_pipeline_link() makes a
+	// pipeline from libraries whose groups follow each other in p_libraries order. Every library and the
+	// linked pipeline declare p_max_payload_size bytes of ray payload, the device's largest hit attribute
+	// and the same recursion depth. Drivers without libraries keep these defaults: RenderingDevice checks
+	// has_feature(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY) and does not call them.
+	virtual RaytracingPipelineID raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+		ERR_FAIL_V_MSG(RaytracingPipelineID(), "Raytracing pipeline libraries are not implemented by this driver.");
+	}
+	virtual RaytracingPipelineID raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+		ERR_FAIL_V_MSG(RaytracingPipelineID(), "Raytracing pipeline libraries are not implemented by this driver.");
+	}
+
 	// ----- COMMANDS -----
 
 	// GodotNext: as_build_modes
@@ -884,6 +902,11 @@ public:
 	};
 
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) = 0;
+	// GodotNext: rd_rt_pipelines (#179). The launch size comes from three uint32 (width, height, depth) at
+	// p_offset in p_indirect_buffer. Drivers without SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT keep this default.
+	virtual void command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) {
+		ERR_FAIL_MSG("Indirect ray tracing is not implemented by this driver.");
+	}
 
 	/******************/
 	/**** CALLBACK ****/

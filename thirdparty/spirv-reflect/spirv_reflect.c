@@ -857,6 +857,8 @@ static SpvReflectResult ParseNodes(SpvReflectPrvParser* p_parser) {
       case SpvOpTypeAccelerationStructureKHR:
       case SpvOpTypeRayQueryKHR:
       case SpvOpTypeHitObjectNV:
+      // GodotNext: rd_rt_pipelines (#179). The hit object of SPV_EXT_shader_invocation_reorder.
+      case SpvOpTypeHitObjectEXT:
       case SpvOpTypeCooperativeVectorNV:
       case SpvOpTypeCooperativeMatrixNV:
       case SpvOpTypeCooperativeMatrixKHR: {

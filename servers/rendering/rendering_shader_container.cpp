@@ -33,6 +33,8 @@
 #include "core/io/compression.h"
 #include "servers/rendering/renderer_rd/shader_rd.h"
 #include "servers/rendering/rendering_device_atomics64.h"
+// GodotNext: rd_rt_pipelines (#179)
+#include "servers/rendering/rendering_device_rt_pipeline.h"
 
 #include <thirdparty/spirv-reflect/spirv_reflect.h>
 
@@ -326,6 +328,8 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 
 			// GodotNext: rd_atomics64 (#175). The same scan RenderingDevice runs before it creates a shader.
 			reflection.int64_atomics |= RDAtomics64::get_spirv_usage(spirv, p_spirv[i].spirv.size());
+			// GodotNext: rd_rt_pipelines (#179). The same for shader execution reordering.
+			reflection.raytracing_reorder |= RDRTPipeline::get_spirv_reorder_usage(spirv, p_spirv[i].spirv.size());
 
 			for (uint32_t j = 0; j < module.capability_count; j++) {
 				switch (module.capabilities[j].value) {
@@ -728,6 +732,7 @@ void RenderingShaderContainer::set_from_shader_reflection(const ReflectShader &p
 	reflection_data.has_dynamic_buffers = p_reflection.has_dynamic_buffers;
 	reflection_data.int64_atomics = p_reflection.int64_atomics; // GodotNext: rd_atomics64 (#175).
 	reflection_data.has_ray_query = p_reflection.has_ray_query; // GodotNext: dxil_toolchain (#123).
+	reflection_data.raytracing_reorder = p_reflection.raytracing_reorder; // GodotNext: rd_rt_pipelines (#179).
 	reflection_data.compute_local_size[0] = p_reflection.compute_local_size[0];
 	reflection_data.compute_local_size[1] = p_reflection.compute_local_size[1];
 	reflection_data.compute_local_size[2] = p_reflection.compute_local_size[2];

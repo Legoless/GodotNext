@@ -851,6 +851,8 @@ class RDHitGroup : public RefCounted {
 	Ref<RDPipelineShader> closest_hit_shader;
 	Ref<RDPipelineShader> any_hit_shader;
 	Ref<RDPipelineShader> intersection_shader;
+	// GodotNext: rd_rt_pipelines (#179)
+	Vector<uint8_t> record_data;
 
 public:
 	void set_closest_hit_shader(const Ref<RDPipelineShader> &p_closest_hit_shader) {
@@ -877,10 +879,21 @@ public:
 		return intersection_shader;
 	}
 
+	// GodotNext: rd_rt_pipelines (#179)
+	void set_record_data(const Vector<uint8_t> &p_record_data) {
+		record_data = p_record_data;
+	}
+
+	Vector<uint8_t> get_record_data() const {
+		return record_data;
+	}
+
 protected:
 	static void _bind_methods() {
 		RD_BIND(Variant::OBJECT, RDHitGroup, closest_hit_shader);
 		RD_BIND(Variant::OBJECT, RDHitGroup, any_hit_shader);
 		RD_BIND(Variant::OBJECT, RDHitGroup, intersection_shader);
+		// GodotNext: rd_rt_pipelines (#179)
+		RD_BIND(Variant::PACKED_BYTE_ARRAY, RDHitGroup, record_data);
 	}
 };

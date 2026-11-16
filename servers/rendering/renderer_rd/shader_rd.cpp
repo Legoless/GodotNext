@@ -696,6 +696,8 @@ static const char *shader_file_header = "GDSC";
 // plain cache miss. Only a build with the same version hash (an uncommitted build on the same commit, or a build
 // without git information) opens a file that holds version-3 containers; _load_from_cache() then rebuilds it, with
 // one warning per run.
+// GodotNext: rd_rt_pipelines (#179). Container version 5 keeps cache file version 5 too. A build with the same
+// version hash opens files that hold older (version-4) containers and rebuilds them the same way.
 static const uint32_t cache_file_version = 5;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {

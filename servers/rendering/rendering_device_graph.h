@@ -56,6 +56,8 @@ public:
 			TYPE_SET_PUSH_CONSTANT,
 			TYPE_TRACE_RAYS,
 			TYPE_UNIFORM_SET_PREPARE_FOR_USE,
+			// GodotNext: rd_rt_pipelines (#179)
+			TYPE_TRACE_RAYS_INDIRECT,
 		};
 
 		Type type = TYPE_NONE;
@@ -987,6 +989,15 @@ private:
 		uint32_t set_index = 0;
 	};
 
+	// GodotNext: rd_rt_pipelines (#179)
+	struct RaytracingListTraceRaysIndirectInstruction : RaytracingListInstruction {
+		RDD::ShaderBindingTable raygen_sbt;
+		RDD::ShaderBindingTable miss_sbt;
+		RDD::ShaderBindingTable hit_sbt;
+		RDD::BufferID buffer;
+		uint64_t offset = 0;
+	};
+
 	struct ComputeListBindPipelineInstruction : ComputeListInstruction {
 		RDD::PipelineID pipeline;
 	};
@@ -1176,6 +1187,8 @@ private:
 	// GodotNext: rd_indirect_count (#177).
 	static bool _bindless_dirty_in_list_tables(const InstructionList &p_list, const ResourceTracker *p_tracker);
 	void _bindless_draw_list_tables_add_usages(int32_t p_command_index);
+	// GodotNext: rd_rt_pipelines (#179). The same for the raytracing list and its indirect traces.
+	void _bindless_raytracing_list_tables_add_usages(int32_t p_command_index);
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
 	void _print_draw_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
 	void _print_compute_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
@@ -1207,6 +1220,11 @@ public:
 	void add_raytracing_list_bind_uniform_set(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
 	void add_raytracing_list_set_push_constant(RDD::ShaderID p_shader, const void *p_data, uint32_t p_data_size);
 	void add_raytracing_list_trace_rays(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth);
+	// GodotNext: rd_rt_pipelines (#179). The list also runs at the indirect-command stage, which reads
+	// the launch size, and gets the buffer's RESOURCE_USAGE_INDIRECT_BUFFER_READ usage. Like #177's count
+	// draws, it records nothing and returns false, with one error, when the list already uses the buffer
+	// another way or a bindless table the list binds has not read it since it was last written.
+	bool add_raytracing_list_trace_rays_indirect(const RDD::ShaderBindingTable &p_raygen_sbt, const RDD::ShaderBindingTable &p_miss_sbt, const RDD::ShaderBindingTable &p_hit_sbt, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint64_t p_offset);
 	void add_raytracing_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
 	void add_raytracing_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage);
 	void add_raytracing_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);

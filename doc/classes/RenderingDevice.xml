@@ -1020,12 +1020,27 @@
 				[param hit_sbt] must use the same pipeline bound to [param raytracing_list].
 			</description>
 		</method>
+		<method name="raytracing_list_trace_rays_indirect" experimental="">
+			<return type="void" />
+			<param index="0" name="raytracing_list" type="int" />
+			<param index="1" name="raygen_shader_index" type="int" />
+			<param index="2" name="hit_sbt" type="RID" />
+			<param index="3" name="buffer" type="RID" />
+			<param index="4" name="offset" type="int" />
+			<description>
+				Like [method raytracing_list_trace_rays], but the launch size comes from [param buffer]: three 32-bit unsigned integers (width, height and depth) at byte [param offset], which must be a multiple of 4. A compute shader can write them earlier in the same frame; the device waits for that write.
+				[param buffer] must be a storage buffer created with [constant STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT] and [constant BUFFER_CREATION_DEVICE_ADDRESS_BIT].
+				[param buffer] may not also be bound in a uniform set of the same raytracing list. A buffer has one usage per raytracing list, so it would not be synchronized for the indirect read; this method fails with an error when the raytracing list already uses the buffer that way. The same holds for a buffer in a bindless table that the raytracing list binds, when the table has not read the buffer since it was last written: this method fails with an error when the table is bound before the trace, and [method raytracing_list_end] prints one when it is bound after. To use such a buffer, bind the table in an earlier list after the write, or keep the buffer out of the table.
+				[b]Note:[/b] Requires [constant SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT].
+			</description>
+		</method>
 		<method name="raytracing_pipeline_create" experimental="">
 			<return type="RID" />
 			<param index="0" name="raygen_shaders" type="RDPipelineShader[]" />
 			<param index="1" name="miss_shaders" type="RDPipelineShader[]" />
 			<param index="2" name="hit_groups" type="RDHitGroup[]" />
 			<param index="3" name="max_trace_recursion_depth" type="int" />
+			<param index="4" name="flags" type="int" enum="RenderingDevice.RaytracingPipelineFlags" is_bitfield="true" default="0" />
 			<description>
 				Creates a new raytracing pipeline. It can be accessed with the RID that is returned.
 				Once finished with your RID, you will want to free the RID using the RenderingDevice's [method free_rid] method.
@@ -1034,6 +1049,8 @@
 				- [param raygen_shaders] is indexed in [method raytracing_list_trace_rays].
 				- [param miss_shaders] is indexed in [code]traceRayEXT[/code].
 				- [param hit_groups] is indexed in [method hit_sbt_range_update].
+				Each hit group can carry a shader record of up to 32 bytes ([member RDHitGroup.record_data]), which a hit shader binding table places after the hit group's handle.
+				With [constant RAYTRACING_PIPELINE_FLAG_LIBRARY] (which requires [constant SUPPORTS_RAYTRACING_PIPELINE_LIBRARY]), the pipeline is a library for [method raytracing_pipeline_link]: a library of hit groups compiles only those, so adding a material compiles only its own hit group. Each stage of a library may use a ray payload of at most 64 bytes, or the library fails to create with an error. The device's lock is not held while the driver compiles, so a library can be created on a [WorkerThreadPool] task while the rendering thread keeps recording. With [constant RAYTRACING_PIPELINE_FLAG_REORDER], the ray generation shaders reorder their hit invocations.
 				[b]Note:[/b] Requires [constant SUPPORTS_RAYTRACING_PIPELINE]. Without it, this method prints an error and returns an invalid RID, including on devices that support only [constant SUPPORTS_RAY_QUERY].
 			</description>
 		</method>
@@ -1042,6 +1059,17 @@
 			<param index="0" name="raytracing_pipeline" type="RID" />
 			<description>
 				Returns [code]true[/code] if the raytracing pipeline specified by the [param raytracing_pipeline] RID is valid, [code]false[/code] otherwise.
+			</description>
+		</method>
+		<method name="raytracing_pipeline_link" experimental="">
+			<return type="RID" />
+			<param index="0" name="base" type="RID" />
+			<param index="1" name="libraries" type="RID[]" />
+			<description>
+				Links pipeline libraries made with [constant RAYTRACING_PIPELINE_FLAG_LIBRARY] into a raytracing pipeline, and returns its RID. [param base] is a library with at least one ray generation shader, or a pipeline this method returned before, whose libraries are linked again. [param libraries] are libraries of hit groups only, each linked once, with the base's [code]max_trace_recursion_depth[/code] and the same layout: the same uniform set formats, immutable samplers and push constant size.
+				The pipeline's ray generation and miss shaders are the base's. Its hit groups are the base's, then each library's in order, so a pipeline linked from another one with more libraries is a superset of it for [method hit_sbt_set_pipeline]. The libraries declare a ray payload of 64 bytes; their shaders must not use a larger one.
+				The device's lock is not held while the driver links, so linking can run on a [WorkerThreadPool] task while the rendering thread keeps recording. Freeing one of the libraries frees the pipeline.
+				[b]Note:[/b] Requires [constant SUPPORTS_RAYTRACING_PIPELINE_LIBRARY].
 			</description>
 		</method>
 		<method name="render_pipeline_create">
@@ -2848,6 +2876,12 @@
 		</constant>
 		<constant name="DYNAMIC_STATE_STENCIL_REFERENCE" value="64" enum="PipelineDynamicStateFlags" is_bitfield="true">
 		</constant>
+		<constant name="RAYTRACING_PIPELINE_FLAG_LIBRARY" value="1" enum="RaytracingPipelineFlags" is_bitfield="true">
+			The pipeline is a library for [method raytracing_pipeline_link]. A library can be neither bound to a raytracing list nor given a hit shader binding table. Requires [constant SUPPORTS_RAYTRACING_PIPELINE_LIBRARY].
+		</constant>
+		<constant name="RAYTRACING_PIPELINE_FLAG_REORDER" value="2" enum="RaytracingPipelineFlags" is_bitfield="true">
+			Hint that the pipeline's ray generation shaders reorder their hit invocations with shader execution reordering. Requires [constant SUPPORTS_RAYTRACING_REORDER].
+		</constant>
 		<constant name="INITIAL_ACTION_LOAD" value="0" enum="InitialAction" deprecated="Initial actions are solved automatically by RenderingDevice.">
 			Load the previous contents of the framebuffer.
 		</constant>
@@ -3007,6 +3041,18 @@
 		<constant name="SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE" value="23" enum="Features">
 			Indirect draws honor a first instance other than [code]0[/code], and [code]gl_InstanceIndex[/code] includes it.
 			[b]Note:[/b] The Vulkan driver sets it when the device has [code]drawIndirectFirstInstance[/code]; the Metal driver always sets it. The Direct3D 12 driver sets it with shader model 6.8 and extended command information, and only shaders compiled with [member RDShaderSPIRV.base_instance_native] see the first instance there.
+		</constant>
+		<constant name="SUPPORTS_RAYTRACING_REORDER" value="24" enum="Features">
+			Raytracing pipelines support shader execution reordering: ray generation shaders can trace into a hit object, reorder the invocations by it and then run its hit shaders. [constant LIMIT_RAYTRACING_REORDER_EXTENSIONS] says which GLSL extension the shaders use. A shader that reorders on a device without it fails to create with an error.
+			[b]Note:[/b] The Vulkan driver needs [code]VK_EXT_ray_tracing_invocation_reorder[/code] or [code]VK_NV_ray_tracing_invocation_reorder[/code]. The Direct3D 12 and Metal drivers report [code]false[/code].
+		</constant>
+		<constant name="SUPPORTS_RAYTRACING_PIPELINE_LIBRARY" value="25" enum="Features">
+			Raytracing pipelines can be created as libraries with [constant RAYTRACING_PIPELINE_FLAG_LIBRARY] and linked with [method raytracing_pipeline_link], so adding a hit group compiles only its own shaders.
+			[b]Note:[/b] The Vulkan driver needs [code]VK_KHR_pipeline_library[/code]. The Direct3D 12 and Metal drivers report [code]false[/code].
+		</constant>
+		<constant name="SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT" value="26" enum="Features">
+			Raytracing lists can take their launch size from a buffer with [method raytracing_list_trace_rays_indirect].
+			[b]Note:[/b] The Vulkan driver needs the [code]rayTracingPipelineTraceRaysIndirect[/code] feature. The Direct3D 12 and Metal drivers report [code]false[/code].
 		</constant>
 		<constant name="COMPUTE_QUEUE_MAIN" value="0" enum="ComputeQueue">
 			Records the compute list on the main queue.
@@ -3182,6 +3228,9 @@
 		</constant>
 		<constant name="LIMIT_MAX_BINDLESS_STORAGE_BUFFERS" value="56" enum="Limit">
 			Maximum number of slots in a bindless table of [constant UNIFORM_TYPE_STORAGE_BUFFER] entries. [code]0[/code] without [constant SUPPORTS_BINDLESS].
+		</constant>
+		<constant name="LIMIT_RAYTRACING_REORDER_EXTENSIONS" value="57" enum="Limit">
+			The GLSL extensions shaders can use for shader execution reordering, as bits: [code]1[/code] for [code]GL_EXT_shader_invocation_reorder[/code] and [code]2[/code] for [code]GL_NV_shader_invocation_reorder[/code]. [code]0[/code] without [constant SUPPORTS_RAYTRACING_REORDER].
 		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.

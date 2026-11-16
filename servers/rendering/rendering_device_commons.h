@@ -1042,6 +1042,10 @@ public:
 		LIMIT_MAX_BINDLESS_TEXTURES,
 		LIMIT_MAX_BINDLESS_SAMPLERS,
 		LIMIT_MAX_BINDLESS_STORAGE_BUFFERS,
+		// GodotNext: rd_rt_pipelines (#179). The GLSL extensions a shader can use for shader execution
+		// reordering: bit 0 (1) GL_EXT_shader_invocation_reorder, bit 1 (2) GL_NV_shader_invocation_reorder.
+		// 0 without SUPPORTS_RAYTRACING_REORDER.
+		LIMIT_RAYTRACING_REORDER_EXTENSIONS,
 	};
 
 	enum Features {
@@ -1088,6 +1092,15 @@ public:
 		// Indirect draws honor a firstInstance other than 0, and gl_InstanceIndex includes it. On D3D12
 		// only in shaders compiled with base_instance_native (shader model 6.8).
 		SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE,
+		// GodotNext: rd_rt_pipelines (#179)
+		// Shader execution reordering in RT pipelines (plan §21.1 C2): raygen shaders can reorder their hit
+		// invocations. LIMIT_RAYTRACING_REORDER_EXTENSIONS says which GLSL extension the shaders use.
+		SUPPORTS_RAYTRACING_REORDER,
+		// RT pipeline libraries: raytracing_pipeline_create() with RAYTRACING_PIPELINE_FLAG_LIBRARY, and
+		// raytracing_pipeline_link().
+		SUPPORTS_RAYTRACING_PIPELINE_LIBRARY,
+		// raytracing_list_trace_rays_indirect(): a trace whose launch size comes from a buffer.
+		SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT,
 	};
 
 	// GodotNext: metal_ray_query

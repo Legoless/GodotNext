@@ -106,6 +106,8 @@ protected:
 	// GodotNext: as_build_modes
 	Error _blas_build_bind_compat_gn45(RID p_blas);
 	Error _tlas_build_bind_compat_gn45(RID p_tlas, const TypedArray<RDAccelerationStructureInstance> &p_instances);
+	// GodotNext: rd_rt_pipelines (#179)
+	RID _raytracing_pipeline_create_bind_compat_gn179(const TypedArray<RDPipelineShader> &p_raygen_shaders, const TypedArray<RDPipelineShader> &p_miss_shaders, const TypedArray<RDHitGroup> &p_hit_groups, uint32_t p_max_trace_recursion_depth);
 	// GodotNext: tlas_from_buffer
 	Error _tlas_build_from_buffer(RID p_tlas, RID p_instance_buffer, uint64_t p_offset, uint32_t p_count, const TypedArray<RID> &p_referenced_blases, AccelerationStructureBuildMode p_mode);
 	PackedByteArray _acceleration_structure_instance_encode(const Ref<RDAccelerationStructureInstance> &p_instance);
@@ -976,6 +978,8 @@ private:
 		uint32_t layout_hash = 0;
 		BitField<RDD::PipelineStageBits> stage_bits = {};
 		Vector<uint32_t> set_formats;
+		// GodotNext: rd_rt_pipelines (#179). Identifies the immutable samplers in the set layouts; 0 without any.
+		uint32_t immutable_sampler_hash = 0;
 	};
 
 	String _shader_uniform_debug(RID p_shader, int p_set = -1);
@@ -1070,6 +1074,9 @@ public:
 	// GodotNext: rd_atomics64 (#175)
 	// The RDAtomics64::Usage bits in p_usage whose feature this device lacks.
 	uint32_t get_missing_int64_atomics(uint32_t p_usage) const;
+	// GodotNext: rd_rt_pipelines (#179)
+	// The RDRTPipeline::ReorderUsage bits in p_usage whose GLSL extension this device lacks.
+	uint32_t get_missing_raytracing_reorder(uint32_t p_usage) const;
 
 	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true);
 	// GodotNext: rd_indirect_count (#177). p_base_instance_native compiles the shader so that gl_InstanceIndex
@@ -1350,6 +1357,19 @@ private:
 		uint32_t raygen_shader_count = 0;
 		uint32_t miss_shader_count = 0;
 		uint32_t hit_group_count = 0;
+		// GodotNext: rd_rt_pipelines (#179)
+		uint32_t flags = 0; // RaytracingPipelineFlags.
+		bool linked = false; // Returned by raytracing_pipeline_link().
+		uint32_t max_trace_recursion_depth = 0;
+		// The bytes each hit group's record takes after its handle: the largest record_data of the
+		// pipeline's hit groups. 0 without records.
+		uint32_t hit_group_record_size = 0;
+		// RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE bytes per hit group, zero-padded.
+		Vector<uint8_t> hit_group_records;
+		// The libraries a linked pipeline was made from, base first, in group order.
+		Vector<RID> libraries;
+		// The layout-defining shader's Shader::immutable_sampler_hash, which links compare.
+		uint32_t immutable_sampler_hash = 0;
 	};
 
 	Error _raytracing_pipeline_create_sbt_buffer(RDD::RaytracingPipelineID p_raytracing_pipeline, uint32_t p_raygen_shader_count, uint32_t p_miss_shader_count, Buffer &r_sbt_buffer);
@@ -1376,10 +1396,29 @@ public:
 		PipelineShader closest_hit_shader;
 		PipelineShader any_hit_shader;
 		PipelineShader intersection_shader;
+		// GodotNext: rd_rt_pipelines (#179). The shader record written after this hit group's handle in a hit
+		// shader binding table, read in its shaders through a shaderRecordEXT buffer. At most
+		// RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE (32) bytes.
+		Vector<uint8_t> record_data;
 	};
 
-	RID raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth);
+	// GodotNext: rd_rt_pipelines (#179)
+	enum RaytracingPipelineFlags {
+		// A pipeline library: it is linked by raytracing_pipeline_link(), and can be neither bound nor given
+		// a hit shader binding table itself.
+		RAYTRACING_PIPELINE_FLAG_LIBRARY = (1 << 0),
+		// The pipeline's ray generation shaders reorder their hit invocations (shader execution reordering).
+		// Needs SUPPORTS_RAYTRACING_REORDER.
+		RAYTRACING_PIPELINE_FLAG_REORDER = (1 << 1),
+	};
+
+	RID raytracing_pipeline_create(Span<PipelineShader> p_raygen_shaders, Span<PipelineShader> p_miss_shaders, Span<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, BitField<RaytracingPipelineFlags> p_flags = 0);
 	bool raytracing_pipeline_is_valid(RID p_pipeline);
+	// GodotNext: rd_rt_pipelines (#179). A pipeline from p_base (a library with ray generation shaders, or a
+	// pipeline this returned before) and p_libraries (libraries of hit groups). Its hit groups are the base's,
+	// then each library's in order, so a pipeline linked from another one is a superset of it for
+	// hit_sbt_set_pipeline(). Callable off the render thread.
+	RID raytracing_pipeline_link(RID p_base, Span<RID> p_libraries);
 
 	void update_pipeline_cache(bool p_closing = false);
 
@@ -1534,6 +1573,8 @@ private:
 		RDD::RaytracingPipelineID raytracing_pipeline;
 		uint32_t index_offset = 0;
 		uint32_t raytracing_pipeline_hit_group_count = 0; // Used for validation.
+		// GodotNext: rd_rt_pipelines (#179). The pipeline's hit_group_record_size.
+		uint32_t record_size = 0;
 
 		Vector<uint32_t> hit_group_indices;
 		uint32_t used_hit_group_count = 0;
@@ -1769,8 +1810,17 @@ public:
 	void raytracing_list_bind_uniform_set(RaytracingListID p_list, RID p_uniform_set, uint32_t p_index);
 	void raytracing_list_set_push_constant(RaytracingListID p_list, const void *p_data, uint32_t p_data_size);
 	void raytracing_list_trace_rays(RaytracingListID p_list, uint32_t p_raygen_shader_index, RID p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth);
+	// GodotNext: rd_rt_pipelines (#179). The launch size is three uint32 (width, height, depth) at p_offset
+	// in p_buffer, a storage buffer created with STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT and
+	// BUFFER_CREATION_DEVICE_ADDRESS_BIT.
+	void raytracing_list_trace_rays_indirect(RaytracingListID p_list, uint32_t p_raygen_shader_index, RID p_hit_sbt, RID p_buffer, uint32_t p_offset);
 	void raytracing_list_end();
 
+private:
+	// GodotNext: rd_rt_pipelines (#179). Binds the list's sets and builds the three tables a trace needs.
+	bool _raytracing_list_prepare_trace(uint32_t p_raygen_shader_index, RID p_hit_sbt, RDD::ShaderBindingTable &r_raygen_sbt, RDD::ShaderBindingTable &r_miss_sbt, RDD::ShaderBindingTable &r_hit_sbt);
+
+public:
 	// GodotNext: async_compute (#174)
 public:
 	enum ComputeQueue {
@@ -2019,6 +2069,9 @@ private:
 		LocalVector<BlasCompactionQueryPool> blas_compaction_query_pools;
 		LocalVector<BlasCompactionPending> blas_compactions_pending;
 		List<RaytracingPipeline> raytracing_pipelines_to_dispose_of;
+		// GodotNext: rd_rt_pipelines (#179). The trackers of hit shader binding tables that were reallocated.
+		// An open raytracing list can still hold one, so it is freed with the old buffer, after the frame.
+		LocalVector<RDG::ResourceTracker *> hit_sbt_trackers_to_dispose_of;
 
 		// Pending asynchronous data transfer for buffers.
 		LocalVector<RDD::BufferID> download_buffer_staging_buffers;
@@ -2262,7 +2315,9 @@ private:
 
 	RID _render_pipeline_create(RID p_shader, FramebufferFormatID p_framebuffer_format, VertexFormatID p_vertex_format, RenderPrimitive p_render_primitive, const Ref<RDPipelineRasterizationState> &p_rasterization_state, const Ref<RDPipelineMultisampleState> &p_multisample_state, const Ref<RDPipelineDepthStencilState> &p_depth_stencil_state, const Ref<RDPipelineColorBlendState> &p_blend_state, BitField<PipelineDynamicStateFlags> p_dynamic_state_flags, uint32_t p_for_render_pass, const TypedArray<RDPipelineSpecializationConstant> &p_specialization_constants);
 	RID _compute_pipeline_create(RID p_shader, const TypedArray<RDPipelineSpecializationConstant> &p_specialization_constants);
-	RID _raytracing_pipeline_create(const TypedArray<RDPipelineShader> &p_raygen_shaders, const TypedArray<RDPipelineShader> &p_miss_shaders, const TypedArray<RDHitGroup> &p_hit_groups, uint32_t p_max_trace_recursion_depth);
+	RID _raytracing_pipeline_create(const TypedArray<RDPipelineShader> &p_raygen_shaders, const TypedArray<RDPipelineShader> &p_miss_shaders, const TypedArray<RDHitGroup> &p_hit_groups, uint32_t p_max_trace_recursion_depth, BitField<RaytracingPipelineFlags> p_flags = 0);
+	// GodotNext: rd_rt_pipelines (#179)
+	RID _raytracing_pipeline_link(RID p_base, const TypedArray<RID> &p_libraries);
 
 	void _draw_list_set_push_constant(DrawListID p_list, const Vector<uint8_t> &p_data, uint32_t p_data_size);
 	void _compute_list_set_push_constant(ComputeListID p_list, const Vector<uint8_t> &p_data, uint32_t p_data_size);
@@ -2301,6 +2356,8 @@ VARIANT_ENUM_CAST(RenderingDevice::LogicOperation)
 VARIANT_ENUM_CAST(RenderingDevice::BlendFactor)
 VARIANT_ENUM_CAST(RenderingDevice::BlendOperation)
 VARIANT_BITFIELD_CAST(RenderingDevice::PipelineDynamicStateFlags)
+// GodotNext: rd_rt_pipelines (#179)
+VARIANT_BITFIELD_CAST(RenderingDevice::RaytracingPipelineFlags)
 VARIANT_ENUM_CAST(RenderingDevice::PipelineSpecializationConstantType)
 VARIANT_ENUM_CAST(RenderingDevice::Limit)
 VARIANT_ENUM_CAST(RenderingDevice::MemoryType)
