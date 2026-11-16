@@ -2,8 +2,8 @@
 
 The plan's clean-room protocol (§19) requires a source log per subsystem. This file
 records the outside inputs used to make the D3D12 driver's root signatures work under
-GPU-based validation (#272): what each input is, where it came from, its license, and
-how it was used.
+GPU-based validation (#272), and to find why storage-buffer atomics do not land under it
+(#277): what each input is, where it came from, its license, and how it was used.
 
 The cause of the failure, that `CreateRootSignature` with GPU-based validation on commits
 memory in proportion to the highest root-constant or root-descriptor register, was not
@@ -58,3 +58,107 @@ How it was used: it shows that the multipliers are compiled into the prebuilt li
 | Copied files | None |
 
 How it was used: the switch queries `ID3D12Debug1` from the debug controller and calls `SetEnableGPUBasedValidation` after `EnableDebugLayer`. The root signature gives root constants and root descriptors their new register spaces. The doctest deserializes the container's root signature to check each parameter's register and space.
+
+## Atomics under GPU-based validation (#277)
+
+What was measured, on an NVIDIA L4 and on WARP (the Microsoft Basic Render Driver software
+adapter) with the Agility SDK 1.618 debug layers, by the #277 implementer. None of it was taken
+from a document:
+
+- With GPU-based validation on, storage-buffer and image atomics whose result the shader does
+  not use are lost, with no debug-layer message: `atomicAdd` on a storage buffer in compute and
+  fragment shaders, and, tried in compute shaders only, `atomicOr`, `atomicMax`,
+  `atomicExchange`, `atomicCompSwap` and `imageAtomicAdd` (all 32-bit; the D3D12 driver does
+  not offer 64-bit atomics yet, so those were not tried). Atomics whose result is used,
+  shared-memory atomics and plain stores land. Without GPU-based validation everything lands.
+  The fixture is `godotnext/testbed/tests/rd_parity/storage_atomics.tscn`.
+- On the L4, it happens whenever GPU-based validation patches shaders: the debug device's
+  default shader patch mode set to state tracking only, unguarded or guarded validation loses
+  the atomics, and "none" keeps them. Forcing the patch mode is not a fix, since "none" turns
+  the shader checks off.
+- It is the DXIL the engine's Mesa library writes, not the GPU driver and not GPU-based
+  validation in general. A standalone probe program (not committed) ran the same shader compiled
+  by the DirectX Shader Compiler, and the engine's own DXIL with its root signature. The DXC
+  shader landed every atomic under GPU-based validation on both adapters, and the engine's DXIL
+  lost the unused-result ones on both. The disassembly shows the difference: Mesa declares
+  `dx.op.atomicBinOp` (and, in its source, `dx.op.atomicCompareExchange`) with the attributes
+  `nounwind readnone`, and DXC declares `dx.op.atomicBinOp` `nounwind`. The probe then changed
+  only the attribute list of the engine DXIL's `dx.op.atomicBinOp.i32` declaration, to
+  `nounwind` or to none, and rehashed the container: every atomic landed under GPU-based
+  validation on both adapters.
+
+The fix belongs in Mesa (declaring the two atomic operations without `readnone`,
+as DXC does), which is not this repository's code. Until then the limit is documented in
+`rendering/rendering_device/d3d12/gpu_based_validation`'s class reference, and the testbed
+reports the affected results as not checked under GPU-based validation
+(`godotnext/testbed/harness/d3d12_gbv.gd`, the fixture, `tests/tier/tier_check.gd` for the
+NextGI WRC benchmark, whose ray and hit counters are such atomics, and the `GODOTNEXT_RUNNER`
+line of `harness/runners/win_session1.ps1`). The engine's shaders use statement-form
+atomics on storage buffers or images in 20 files: NextGI (the WRC update, the
+gathers, voxel lighting, the global SDF and source relighting), NextGeo culling, volumetric fog,
+the Forward+ and Mobile scene shaders, particles, SDFGI preprocessing and the SSAO and SSIL
+importance maps. Their results in a GPU-based validation run are not valid; its validation
+messages are. Apart from `tier_check.gd`, the testbed checks that read counters NextGI or
+NextGeo fill with such atomics are not routed through `d3d12_gbv.gd`, so under GPU-based
+validation only the runner line marks them. They were not all audited. Many checks read NextGI's
+counters through `nextgi_get_tier_info`, `nextgi_get_counters` or `nextgi_get_status`; for
+example, `tests/swrt_gi/swrt_gi_check.gd` fails a run whose gather traced no rays or whose
+software WRC found no clean SDF hit, and both counts are such atomics.
+`tests/nextgeo_visibility/nextgeo_visibility_check.gd` is another: its probe counts virtual
+pixels and non-finite and sentinel velocities with such atomics, and NextGeo's culling uses them
+too, so the whole result is not valid. So are the Q21 counts that `harness/velocity_dump.gd`
+writes for a PQ metric.
+
+### Mesa: DXIL function declarations
+
+| Field | Value |
+|---|---|
+| What | The table of DXIL operations Mesa declares, with each declaration's attribute (`predefined_funcs` in `dxil_function.c`: `dx.op.atomicBinOp` and `dx.op.atomicCompareExchange` are `DXIL_ATTR_KIND_READ_NONE`), and how `dxil_module.c` turns that attribute into the declaration's attribute set (`nounwind` plus the given attribute) |
+| Upstream | Mesa, https://gitlab.freedesktop.org/mesa/mesa: `src/microsoft/compiler/dxil_function.c` and `src/microsoft/compiler/dxil_module.c` |
+| Version | Mesa 25.3.1, the version both the upstream library (godot-nir-static `25.3.1-3`) and the GodotNext Mesa NIR library build, and Mesa `main` at `6c09d07c567eb8c9624b4026e49d09fd83166ae0` (2026-11-16), which declares the two operations the same way |
+| License | MIT, under a Microsoft Corporation copyright. Consulted, not copied |
+| Read on | 2026-11-16, for issue #277 |
+| Consulted by | The #277 implementer |
+| Used in | Nothing committed. The class reference of `rendering/rendering_device/d3d12/gpu_based_validation` and `godotnext/testbed/harness/d3d12_gbv.gd` state the declaration |
+| Copied files | None |
+
+How it was used: it explains the disassembly, and shows that the declaration comes from a fixed table in the library rather than from the shader, so the engine cannot change it through Mesa's options.
+
+### DirectX-Headers (`d3d12sdklayers.h`): GPU-based validation settings
+
+| Field | Value |
+|---|---|
+| What | `ID3D12Debug2::SetGPUBasedValidationFlags` (`D3D12_GPU_BASED_VALIDATION_FLAGS_DISABLE_STATE_TRACKING`), `ID3D12DebugDevice2::SetDebugParameter` and `GetDebugParameter` with `D3D12_DEBUG_DEVICE_PARAMETER_GPU_BASED_VALIDATION_SETTINGS` (`D3D12_DEBUG_DEVICE_GPU_BASED_VALIDATION_SETTINGS`, the `D3D12_GPU_BASED_VALIDATION_SHADER_PATCH_MODE` values) |
+| Upstream | https://github.com/microsoft/DirectX-Headers, vendored in `thirdparty/directx_headers` |
+| Version | The vendored copy, as recorded in `thirdparty/README.md` |
+| License | MIT, as recorded in `thirdparty/README.md`. Read in the tree, not copied |
+| Read on | 2026-11-16, for issue #277 |
+| Consulted by | The #277 implementer |
+| Used in | Nothing committed: a diagnostic build and the probe program used them to try each shader patch mode |
+| Copied files | None |
+
+### DirectX Shader Compiler (`dxc.exe` in the Windows SDK)
+
+| Field | Value |
+|---|---|
+| What | The compiler and disassembler: a compute shader with `RWByteAddressBuffer::InterlockedAdd`, compiled for `cs_6_2` as the probe's control, and `-dumpbin` disassembly of that shader and of the engine's DXIL |
+| Upstream | https://github.com/microsoft/DirectXShaderCompiler, as shipped in the Windows SDK |
+| Version | Windows SDK 10.0.26100.0, `bin\10.0.26100.0\x64\dxc.exe` |
+| License | University of Illinois/NCSA Open Source License for the project. Run as a tool; nothing copied or shipped |
+| Read on | 2026-11-16, for issue #277 |
+| Consulted by | The #277 implementer |
+| Used in | Nothing committed |
+| Copied files | None |
+
+### LLVM bitcode format
+
+| Field | Value |
+|---|---|
+| What | The bitstream format that DXIL's LLVM 3.7 bitcode uses (blocks, abbreviations, VBR operands), the module's function records (the attribute-list operand) and the attribute blocks, as LLVM documents them |
+| Upstream | LLVM, "LLVM Bitcode File Format", https://llvm.org/docs/BitCodeFormat.html |
+| Version | The format of LLVM 3.7, which DXIL is based on |
+| License | LLVM 3.7 is under the University of Illinois/NCSA Open Source License. Consulted, not copied |
+| Read on | 2026-11-16, for issue #277 |
+| Consulted by | The #277 implementer |
+| Used in | Nothing committed: a script that changed one declaration's attribute-list operand in a copy of the engine's DXIL, for the probe |
+| Copied files | None |

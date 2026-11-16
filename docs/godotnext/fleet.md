@@ -91,6 +91,8 @@ Compute Engine `g2-standard-16` VMs (16 vCPU, 64 GB) with one NVIDIA L4 each run
 
 Neither VM has an audio device: pass `--audio-driver Dummy`, or ALSA (Linux) and WASAPI (Windows) log `ERROR:` lines that fail the validation bar. The Windows VM has the Graphics Tools optional feature for the D3D12 debug layer (`--gpu-validation` on D3D12); D3D12 HWRT reports `D3D12_NO_DXR` until PD lands, as on the RTX 4080 SUPER.
 
+D3D12 GPU-based validation runs, on either Windows machine, add `rendering_device/d3d12/gpu_based_validation=true` under `[rendering]` in the run's `override.cfg` to `--gpu-validation` (#272). A run counts only when its log has both `D3D12: GPU-based validation is on.` and `D3D12: Debug layer messages go to the log.`. Include `res://tests/rd_parity/storage_atomics.tscn` in every such run. Under GPU-based validation, atomics whose result is unused are lost (#277), so the fixture, `tests/tier/tier_check.gd` and the runner's `GODOTNEXT_RUNNER` line report the results that depend on them as `not_checked`; the run checks the validation messages.
+
 On the Windows VM the user signs in automatically, so rendered runs go through `runners/win_session1.ps1` in Session 1 as on the RTX 4080 SUPER machine; its OpenSSH default shell is PowerShell. `run_remote.sh` reaches it with `GODOTNEXT_RTX_HOST`, `GODOTNEXT_RTX_REPO` and `GODOTNEXT_RTX_SSH_OPTS` (the key) set for the run. The L4 is its only GPU apart from the WARP software adapter:
 
 | Device name | v1 role | Godot Session-1 Vulkan `--gpu-index` | Godot Session-1 D3D12 `--gpu-index` | `nvidia-smi -i` | Session-0 `vulkaninfo --json=<n>` |

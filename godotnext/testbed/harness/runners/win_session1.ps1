@@ -827,11 +827,19 @@ if ($csvProblem -and $code -eq 0) {
 # not scanned.
 $errors = 0
 $validation = 0
+# D3D12 GPU-based validation, from the line the engine prints when it turns it on (#272). Under it,
+# atomics whose result is unused are lost (#277), so the line says that such results are not checked.
+$gbv = $false
 if (-not $ueJob) {
 	$errors = @($log | Where-Object { $_ -cmatch 'ERROR:' }).Count
 	$validation = @($log | Where-Object { $_ -cmatch 'Validation Error' }).Count
+	$gbv = @($log | Where-Object { $_ -cmatch 'D3D12: GPU-based validation is on\.' }).Count -gt 0
 }
-Write-Output ('GODOTNEXT_RUNNER {"device":"' + $deviceName + '","driver":"' + $driverLabel + '","gpu_index":' + $device.GpuIndex + ',"session":' + $done.session + ',"clocks_locked":' + $lockClocks.ToString().ToLowerInvariant() + ',"errors":' + $errors + ',"validation_errors":' + $validation + ',"status":' + $code + ',"engine":"' + $engine + '"}')
+$gbvFields = ''
+if ($gbv) {
+	$gbvFields = ',"d3d12_gpu_based_validation":true,"not_checked":"results that depend on atomics whose result is unused (#277)"'
+}
+Write-Output ('GODOTNEXT_RUNNER {"device":"' + $deviceName + '","driver":"' + $driverLabel + '","gpu_index":' + $device.GpuIndex + ',"session":' + $done.session + ',"clocks_locked":' + $lockClocks.ToString().ToLowerInvariant() + ',"errors":' + $errors + ',"validation_errors":' + $validation + ',"status":' + $code + ',"engine":"' + $engine + '"' + $gbvFields + '}')
 if ($failOnValidation -and $code -eq 0 -and ($errors -ne 0 -or $validation -ne 0)) {
 	[Console]::Error.WriteLine('win_session1.ps1: the run logged validation lines; the bar is 0')
 	$code = 1
