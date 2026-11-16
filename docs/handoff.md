@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-16, evening. **Handed to Gemini.** Claude stopped every lane and the report loop, and every cloud VM is stopped. Nothing is running. All unfinished work is in WIP branches (below) and in the matching local worktrees.
+**Last updated:** 2026-11-17, night (Gemini active). Cloud VMs and active lanes are running under Gemini coordination.
 
 ## How to continue
 
@@ -28,9 +28,9 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 ## State at the handover
 
 - Master: see `git log`. Plan v3.9.12. The tracker showed 132 of 229 build tasks done; the 18 gates are measured in PQ by design.
-- Landed on 2026-11-16:
+- Landed on 2026-11-16 / 2026-11-17:
   - **Closed:** #272, #277, #278, #279, #287.
-  - **Landed as progress:** #118, #121, #123, #156, #162, #176, #177, #178, #179, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
+  - **Landed as progress:** #118, #121, #123, #156, #162, #176, #177, #178, #179, #195, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
   - **Plans:** v3.9.5 to v3.9.12.
 
 ## In progress (restart these first)
@@ -39,8 +39,7 @@ Each has a WIP branch, never to be merged as is, and a local worktree under `.cl
 
 | Issue | WIP branch | Where it stopped | Next step | Machines |
 |---|---|---|---|---|
-| #195 TSR on D3D12 and Metal | `feature/wip-195-tsr-d3d12-metal` | Built and proven (all 5 presets clean under D3D12 GPU-based validation on an L4). Review: 0 blockers, 5 minors, not yet fixed | Fix the 5 minors. Lead choice: a device missing a TSR storage format falls back to the plain upscaler with a logged reason, not black frames; the Metal driver's format query stays as is. Then rebase and the landing check | Windows VM 4, Linux C |
-| #130 Material hit groups | `feature/wip-130-material-hit-groups` | Built (Vulkan clean on two L4 VMs). Review: 4 majors and 12 minors, none affecting default rendering. Partial fixes committed, not re-proven | Finish the fixes and re-prove. Rebase onto master (#121 landed and changed the D3D12 RT side), then the landing check | Linux D, Windows VM 2 |
+| #130 Material hit groups | `feature/wip-130-material-hit-groups` | Rebased onto master (#121), review fixes applied, proven on Linux Vulkan and Windows D3D12 HWRT (`gn3`) | Finalize report and land | Linux D, Windows VM 2 |
 | #219 follow-up: always-resident coarse VSM pages | `feature/wip-219-vsm-coarse-pages` | Partial edits, not built | Build, review and fix. Lead choice (follow UE): every shadowed light keeps coarse pages, handed out first, and the 25% pool run must overflow with zero sampled-but-unmapped pages. Also update the texts of #219 step 2, #216 and #215 | Windows VM 2, Linux E |
 | #218 VSM non-Nanite path | no branch (no edits yet) | Not started | Build, review and fix | Windows T4 VM, Linux C |
 | #155 Programmable raster bins | `feature/wip-155-raster-bins` | Partial edits, not built | Rebase, then build, review and fix | Windows VM 1, Linux C |
@@ -51,7 +50,8 @@ Each has a WIP branch, never to be merged as is, and a local worktree under `.cl
 - **#145** RT visibility policy shared by RT shadows, MegaLights and SRC (unblocked by #121).
 - **#295** AVBOIT, Experimental and off by default (no blockers).
 - **#221** VSM product surface and **#222** VSM projection and SMRT soft shadows. Start them after the #219 follow-up and #218.
-- These open once their blocker lands: #158 (after #155), #286 and #167 (after #130), #193 (after #195), #294 (after #129, #130 and #286), #296 (after #152 and #160).
+- **#193** TSR async compute (code unblocked by #195 landing as `32531a8b35`).
+- These open once their blocker lands: #158 (after #155), #286 and #167 (after #130), #294 (after #129, #130 and #286), #296 (after #152 and #160).
 
 ## Waiting on the lead
 
