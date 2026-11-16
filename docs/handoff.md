@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, workflow run IDs, VM names and zones, private library folders) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-16, about 16:50 CET. Every lane was stopped and every cloud VM was shut down for an offline period.
+**Last updated:** 2026-11-16, about 17:00 CET. Every lane was stopped and every cloud VM was shut down for an offline period.
 
 ## Resume in five steps
 
@@ -26,9 +26,19 @@ Landed as progress (open for Metal/macOS, PQ boxes or later steps): #118, #121, 
 
 Plan revisions v3.9.5 to v3.9.12. They cover the lead decisions of 2026-11-16 (§18.1) and the new §26 (hardware support follows UE 5.9). They added issues #280–#287 and #292–#296.
 
-## In progress (uncommitted, restart these first)
+## In progress (restart these first)
 
-Each worktree is under `.claude/worktrees/` in the local checkout.
+Each worktree is under `.claude/worktrees/` in the local checkout. The unfinished work is also pushed as WIP branches, so it survives without the local checkout. They are unreviewed and partly unbuilt: never merge them as they are. Restart a lane from its branch, or from the worktree if it is still there, then land through the normal checks.
+
+| Issue | WIP branch |
+|---|---|
+| #195 | `feature/wip-195-tsr-d3d12-metal` |
+| #130 | `feature/wip-130-material-hit-groups` |
+| #219 follow-up | `feature/wip-219-vsm-coarse-pages` |
+| #155 | `feature/wip-155-raster-bins` |
+| #122 + #293 | `feature/wip-122-293-mesa-gn4` (engine side only; the private Mesa library is not in the repository) |
+
+#218 had no edits yet, so it has no branch.
 
 | Issue | Worktree | Where it stopped | Next step | Machines |
 |---|---|---|---|---|
