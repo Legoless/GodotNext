@@ -39,13 +39,19 @@
 #include "servers/display/display_server.h"
 #include "servers/rendering/renderer_canvas_cull.h"
 #include "servers/rendering/renderer_compositor.h"
+// GodotNext: pu_fg_present_path (#203).
+#include "servers/rendering/renderer_rd/effects/copy_effects.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
+#include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_scene_occlusion_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_method.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: pu_fg_present_path (#203).
+#include "servers/rendering/storage/frame_generation_extension.h"
 #include "servers/rendering/storage/texture_storage.h"
 
 #ifndef XR_DISABLED
@@ -729,11 +735,33 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 		}
 	}
 
+	// GodotNext: pu_fg_present_path (#203). While a frame-generation provider is active, the main
+	// window's viewport splits its frame: the 3D colour (with any canvas background under it) is
+	// copied right after _draw_3d, and the canvas layers above it draw into the UI layer, which is
+	// composited over the 3D at the end. Otherwise nothing here changes the frame.
+	bool frame_generation_ready = false;
+	bool frame_generation_split = false;
+	if (can_draw_3d && p_viewport == frame_generation_viewport) {
+		// The previous frame's camera, if this viewport rendered 3D in the frame right before.
+		p_viewport->frame_generation.has_prev_camera = p_viewport->prev_camera_data_frame != 0 && p_viewport->prev_camera_data_frame + 1 == RSG::rasterizer->get_frame_number();
+		p_viewport->frame_generation.prev_camera = p_viewport->prev_camera_data;
+		frame_generation_ready = _frame_generation_prepare(p_viewport);
+	}
+	RID canvas_render_target = p_viewport->render_target;
+	// Called right after each _draw_3d below: from here on the canvas layers draw into the UI layer.
+	auto frame_generation_after_3d = [&]() {
+		if (frame_generation_ready) {
+			frame_generation_split = _frame_generation_copy_hudless(p_viewport);
+			canvas_render_target = frame_generation_split ? p_viewport->frame_generation.ui_render_target : p_viewport->render_target;
+		}
+	};
+
 	if (!scenario_draw_canvas_bg && can_draw_3d) {
 		if (force_clear_render_target) {
 			RSG::texture_storage->render_target_do_clear_request(p_viewport->render_target);
 		}
 		_draw_3d(p_viewport);
+		frame_generation_after_3d();
 	}
 
 	if (can_draw_2d) {
@@ -749,7 +777,7 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 		if (p_viewport->sdf_active) {
 			// Process SDF.
 
-			Rect2 sdf_rect = RSG::texture_storage->render_target_get_sdf_rect(p_viewport->render_target);
+			Rect2 sdf_rect = RSG::texture_storage->render_target_get_sdf_rect(canvas_render_target);
 
 			RendererCanvasRender::LightOccluderInstance *occluders = nullptr;
 
@@ -778,12 +806,21 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 				}
 			}
 
-			RSG::canvas_render->render_sdf(p_viewport->render_target, occluders);
-			RSG::texture_storage->render_target_mark_sdf_enabled(p_viewport->render_target, true);
+			RSG::canvas_render->render_sdf(canvas_render_target, occluders);
+			RSG::texture_storage->render_target_mark_sdf_enabled(canvas_render_target, true);
+			// GodotNext: pu_fg_present_path (#203). With a canvas background the split starts after
+			// the 3D, part way through the layers: the UI layer gets the same SDF.
+			if (frame_generation_ready && canvas_render_target != p_viewport->frame_generation.ui_render_target) {
+				RSG::canvas_render->render_sdf(p_viewport->frame_generation.ui_render_target, occluders);
+				RSG::texture_storage->render_target_mark_sdf_enabled(p_viewport->frame_generation.ui_render_target, true);
+			}
 
 			p_viewport->sdf_active = false; // If used, gets set active again.
 		} else {
-			RSG::texture_storage->render_target_mark_sdf_enabled(p_viewport->render_target, false);
+			RSG::texture_storage->render_target_mark_sdf_enabled(canvas_render_target, false);
+			if (frame_generation_ready) {
+				RSG::texture_storage->render_target_mark_sdf_enabled(p_viewport->frame_generation.ui_render_target, false);
+			}
 		}
 
 		Rect2 shadow_rect;
@@ -1007,6 +1044,7 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 				RSG::scene->render_empty_scene(p_viewport->render_buffers, p_viewport->scenario, p_viewport->shadow_atlas, p_viewport->window_output_max_value);
 			} else {
 				_draw_3d(p_viewport);
+				frame_generation_after_3d();
 			}
 			scenario_draw_canvas_bg = false;
 		}
@@ -1040,7 +1078,7 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 
 			RENDER_TIMESTAMP("> Render Canvas " + itos(canvas_idx));
 
-			RSG::canvas->render_canvas(p_viewport->render_target, canvas, xform, canvas_lights, canvas_directional_lights, clip_rect, p_viewport->texture_filter, p_viewport->texture_repeat, p_viewport->snap_2d_transforms_to_pixel, p_viewport->snap_2d_vertices_to_pixel, p_viewport->canvas_cull_mask, &p_viewport->render_info);
+			RSG::canvas->render_canvas(canvas_render_target, canvas, xform, canvas_lights, canvas_directional_lights, clip_rect, p_viewport->texture_filter, p_viewport->texture_repeat, p_viewport->snap_2d_transforms_to_pixel, p_viewport->snap_2d_vertices_to_pixel, p_viewport->canvas_cull_mask, &p_viewport->render_info);
 
 			RENDER_TIMESTAMP("< Render Canvas " + itos(canvas_idx));
 
@@ -1056,6 +1094,7 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 					RSG::scene->render_empty_scene(p_viewport->render_buffers, p_viewport->scenario, p_viewport->shadow_atlas, p_viewport->window_output_max_value);
 				} else {
 					_draw_3d(p_viewport);
+					frame_generation_after_3d();
 				}
 
 				scenario_draw_canvas_bg = false;
@@ -1072,8 +1111,16 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 				RSG::scene->render_empty_scene(p_viewport->render_buffers, p_viewport->scenario, p_viewport->shadow_atlas, p_viewport->window_output_max_value);
 			} else {
 				_draw_3d(p_viewport);
+				frame_generation_after_3d();
 			}
 		}
+	}
+
+	if (frame_generation_split) {
+		_frame_generation_split_end(p_viewport);
+	} else if (p_viewport->frame_generation.ui_render_target.is_valid() || p_viewport->frame_generation.hudless_color.is_valid()) {
+		// GodotNext: pu_fg_present_path (#203). No split this frame: the split's textures go.
+		_frame_generation_release(p_viewport);
 	}
 
 	if (RSG::texture_storage->render_target_is_clear_requested(p_viewport->render_target)) {
@@ -1091,6 +1138,222 @@ void RendererViewport::_draw_viewport(Viewport *p_viewport) {
 		RSG::utilities->capture_timestamp(rt_id);
 		timestamp_vp_map[rt_id] = p_viewport->self;
 	}
+}
+
+// GodotNext: pu_fg_present_path (#203).
+void RendererViewport::_frame_generation_update_status() {
+	FrameGenerationRegistry::Context context = FrameGenerationRegistry::read_context();
+	if (!context.provider.is_empty()) {
+		for (const Viewport *vp : active_viewports) {
+			if (vp->viewport_to_screen == DisplayServerEnums::MAIN_WINDOW_ID && vp->use_xr) {
+				context.xr_main_window = true;
+				break;
+			}
+		}
+	}
+	FrameGenerationRegistry::update(context);
+}
+
+void RendererViewport::_frame_generation_select_viewport() {
+	frame_generation_viewport = nullptr;
+	if (!FrameGenerationRegistry::is_active()) {
+		frame_generation_owner = RID();
+		return;
+	}
+	// The main window's viewport of a running game, rendering 3D this frame. Only one splits, so the
+	// provider gets one set of inputs per frame even when another viewport is attached to the main
+	// window: the one that split before while it stays eligible, otherwise the first root viewport (no
+	// parent viewport, like the main window's own), otherwise the first eligible one in draw order.
+	const bool editor = Engine::get_singleton()->is_editor_hint();
+	Viewport *first_root = nullptr;
+	Viewport *first = nullptr;
+	for (Viewport *vp : sorted_active_viewports) {
+		if (vp->last_pass != draw_viewports_pass || vp->disable_3d || vp->scenario.is_null() || vp->camera.is_null() || !FrameGenerationRegistry::is_viewport_eligible(vp->viewport_to_screen, vp->use_xr, vp->view_count, editor)) {
+			continue;
+		}
+		if (vp->self == frame_generation_owner) {
+			frame_generation_viewport = vp;
+			return;
+		}
+		if (first_root == nullptr && vp->parent.is_null()) {
+			first_root = vp;
+		}
+		if (first == nullptr) {
+			first = vp;
+		}
+	}
+	frame_generation_viewport = first_root != nullptr ? first_root : first;
+	frame_generation_owner = frame_generation_viewport != nullptr ? frame_generation_viewport->self : RID();
+}
+
+bool RendererViewport::_frame_generation_prepare(Viewport *p_viewport) {
+#ifdef RD_ENABLED
+	if (RD::get_singleton() == nullptr || RendererRD::TextureStorage::get_singleton() == nullptr || RSG::rasterizer->is_opengl() || p_viewport->size.x <= 0 || p_viewport->size.y <= 0) {
+		return false;
+	}
+	Viewport::FrameGenerationSplit &split = p_viewport->frame_generation;
+
+	// The UI layer: a transparent render target with the viewport's 2D settings, so the canvas layers
+	// draw into it exactly as they would into the viewport. RGBA8 premultiplied, or RGBA16F with HDR 2D.
+	const bool fresh = split.ui_render_target.is_null();
+	if (fresh) {
+		split.ui_render_target = RSG::texture_storage->render_target_create();
+		RSG::texture_storage->render_target_set_transparent(split.ui_render_target, true);
+		// The canvas adjusts Add, LCD text and blend_disabled items for the premultiplied composite.
+		RendererRD::TextureStorage::get_singleton()->render_target_set_premultiplied_ui_layer(split.ui_render_target, true);
+		split.reset_pending = true;
+	}
+	if (fresh || split.use_hdr != p_viewport->use_hdr_2d) {
+		split.use_hdr = p_viewport->use_hdr_2d;
+		RSG::texture_storage->render_target_set_use_hdr(split.ui_render_target, split.use_hdr);
+	}
+	if (fresh || split.msaa != p_viewport->msaa_2d) {
+		split.msaa = p_viewport->msaa_2d;
+		RSG::texture_storage->render_target_set_msaa(split.ui_render_target, split.msaa);
+	}
+	if (fresh || split.sdf_oversize != p_viewport->sdf_oversize || split.sdf_scale != p_viewport->sdf_scale) {
+		split.sdf_oversize = p_viewport->sdf_oversize;
+		split.sdf_scale = p_viewport->sdf_scale;
+		RSG::texture_storage->render_target_set_sdf_size_and_scale(split.ui_render_target, split.sdf_oversize, split.sdf_scale);
+	}
+	if (fresh || split.size != p_viewport->size) {
+		split.size = p_viewport->size;
+		RSG::texture_storage->render_target_set_size(split.ui_render_target, split.size.x, split.size.y, 1);
+		split.reset_pending = true;
+	}
+	return true;
+#else
+	(void)p_viewport;
+	return false;
+#endif
+}
+
+bool RendererViewport::_frame_generation_copy_hudless(Viewport *p_viewport) {
+#ifdef RD_ENABLED
+	RenderingDevice *rd = RD::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	Viewport::FrameGenerationSplit &split = p_viewport->frame_generation;
+	ERR_FAIL_COND_V(split.ui_render_target.is_null(), false);
+
+	// With 2D MSAA the 3D was drawn into the multisample buffer: resolve it before the copy.
+	if (RSG::texture_storage->render_target_get_msaa_needs_resolve(p_viewport->render_target)) {
+		RSG::texture_storage->render_target_do_msaa_resolve(p_viewport->render_target);
+	}
+	const RID target_color = texture_storage->render_target_get_rd_texture(p_viewport->render_target);
+	if (target_color.is_null()) {
+		return false;
+	}
+	const RD::TextureFormat target_format = rd->texture_get_format(target_color);
+	if (split.hudless_color.is_valid()) {
+		const RD::TextureFormat hudless_format = rd->texture_get_format(split.hudless_color);
+		if (hudless_format.width != target_format.width || hudless_format.height != target_format.height || hudless_format.format != target_format.format) {
+			rd->free_rid(split.hudless_color);
+			split.hudless_color = RID();
+		}
+	}
+	if (split.hudless_color.is_null()) {
+		RD::TextureFormat format;
+		format.format = target_format.format;
+		format.width = target_format.width;
+		format.height = target_format.height;
+		format.texture_type = RD::TEXTURE_TYPE_2D;
+		format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+		split.hudless_color = rd->texture_create(format, RD::TextureView());
+		ERR_FAIL_COND_V(split.hudless_color.is_null(), false);
+		rd->set_resource_name(split.hudless_color, "Frame generation HUD-less color");
+		split.reset_pending = true;
+	}
+	rd->texture_copy(target_color, split.hudless_color, Vector3(), Vector3(), Vector3(target_format.width, target_format.height, 1), 0, 0, 0, 0);
+
+	// Cleared to transparent black by the first canvas layer, or in _frame_generation_split_end().
+	RSG::texture_storage->render_target_request_clear(split.ui_render_target, Color(0, 0, 0, 0));
+	return true;
+#else
+	(void)p_viewport;
+	return false;
+#endif
+}
+
+void RendererViewport::_frame_generation_split_end(Viewport *p_viewport) {
+#ifdef RD_ENABLED
+	Viewport::FrameGenerationSplit &split = p_viewport->frame_generation;
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	if (RSG::texture_storage->render_target_is_clear_requested(split.ui_render_target)) {
+		RSG::texture_storage->render_target_do_clear_request(split.ui_render_target);
+	}
+	if (RSG::texture_storage->render_target_get_msaa_needs_resolve(split.ui_render_target)) {
+		RSG::texture_storage->render_target_do_msaa_resolve(split.ui_render_target);
+	}
+	const RID ui_color = texture_storage->render_target_get_rd_texture(split.ui_render_target);
+	const RID target_color = texture_storage->render_target_get_rd_texture(p_viewport->render_target);
+	// An explicit pass: with 2D MSAA the target is a resolve buffer, which an automatic pass would
+	// attach as a resolve attachment instead of the colour attachment.
+	RD::FramebufferPass pass;
+	pass.color_attachments.push_back(0);
+	const RID target_framebuffer = FramebufferCacheRD::get_singleton()->get_cache_multipass(Vector<RID>{ target_color }, Vector<RD::FramebufferPass>{ pass }, 1);
+	// The premultiplied UI over the 3D: what drawing the layers straight into the viewport gives.
+	RendererRD::CopyEffects::get_singleton()->blend_premultiplied_to_fb(ui_color, target_framebuffer);
+
+	Ref<FrameGenerationInputs> inputs = FrameGenerationRegistry::get_inputs();
+	inputs->set_hudless_color(split.hudless_color);
+	inputs->set_ui_color(ui_color);
+	RID depth;
+	RID velocity;
+	Size2i render_size = p_viewport->internal_size;
+	const Ref<RenderSceneBuffersRD> render_buffers = p_viewport->render_buffers;
+	if (render_buffers.is_valid()) {
+		depth = render_buffers->get_depth_texture(0);
+		if (render_buffers->has_velocity_buffer(false)) {
+			velocity = render_buffers->get_velocity_buffer(false, 0);
+		}
+		render_size = render_buffers->get_internal_size();
+	}
+	inputs->set_depth(depth);
+	inputs->set_velocity(velocity);
+	inputs->set_render_size(render_size);
+	inputs->set_output_size(p_viewport->size);
+	inputs->set_motion_vector_scale(Vector2(render_size));
+
+	// _draw_3d stored this frame's camera in prev_camera_data.
+	const RendererSceneRender::CameraData &camera = p_viewport->prev_camera_data;
+	const Projection &projection = camera.main_projection;
+	inputs->set_camera_transform(camera.main_transform);
+	inputs->set_view_to_clip(projection);
+	inputs->set_clip_to_prev_clip(split.has_prev_camera ? FrameGenerationInputs::compute_clip_to_prev_clip(projection, camera.main_transform, split.prev_camera.main_projection, split.prev_camera.main_transform) : Projection());
+	const real_t aspect = projection.get_aspect();
+	inputs->set_z_near(projection.get_z_near());
+	inputs->set_z_far(projection.get_z_far());
+	inputs->set_aspect(aspect);
+	inputs->set_fovy(aspect > 0.0 ? Projection::get_fovy(projection.get_fov(), 1.0 / aspect) : 0.0);
+	inputs->set_jitter(camera.taa_jitter * Vector2(render_size) * 0.5f);
+	inputs->set_reset(split.reset_pending || !split.has_prev_camera);
+	// The frame being recorded: the counter D3D12's present callback reports for it (RenderingDevice
+	// counts one past the frame it records).
+	inputs->set_frame_index(RD::get_singleton()->get_frames_drawn() - 1);
+	split.reset_pending = false;
+	FrameGenerationRegistry::dispatch_frame_inputs();
+#else
+	(void)p_viewport;
+#endif
+}
+
+void RendererViewport::_frame_generation_release(Viewport *p_viewport) {
+	Viewport::FrameGenerationSplit &split = p_viewport->frame_generation;
+	if (split.ui_render_target.is_null() && split.hudless_color.is_null()) {
+		return;
+	}
+	// The shared inputs must not keep naming the freed textures (D3D12 still presents with them), when
+	// this viewport filled them.
+	FrameGenerationRegistry::forget_split_textures(split.hudless_color);
+	if (split.ui_render_target.is_valid()) {
+		RSG::texture_storage->render_target_free(split.ui_render_target);
+	}
+#ifdef RD_ENABLED
+	if (split.hudless_color.is_valid() && RD::get_singleton() != nullptr) {
+		RD::get_singleton()->free_rid(split.hudless_color);
+	}
+#endif
+	split = Viewport::FrameGenerationSplit();
 }
 
 DisplayServerEnums::WindowID RendererViewport::_get_containing_window(Viewport *p_viewport) {
@@ -1125,6 +1388,10 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 	if (Engine::get_singleton()->is_editor_hint()) {
 		RSG::texture_storage->set_default_clear_color(GLOBAL_GET_CACHED(Color, "rendering/environment/defaults/default_clear_color"));
 	}
+
+	// GodotNext: pu_fg_present_path (#203). Settings, registrations and availability reach the
+	// frame-generation status before any viewport renders.
+	_frame_generation_update_status();
 
 	if (sorted_active_viewports_dirty) {
 		GodotProfileZoneGrouped(_profile_zone, "_sort_active_viewports");
@@ -1183,6 +1450,9 @@ void RendererViewport::draw_viewports(bool p_swap_buffers) {
 			vp->last_pass = draw_viewports_pass;
 		}
 	}
+
+	// GodotNext: pu_fg_present_path (#203). After the visibility pass: the viewport that splits.
+	_frame_generation_select_viewport();
 
 	// Select the primary 3D viewport for NextGeo streaming (#78): prefer a screen-attached
 	// root 3D viewport, then an unparented root 3D viewport, then the largest active 3D viewport.
@@ -1567,6 +1837,24 @@ void RendererViewport::viewport_reset_temporal_history(RID p_viewport) {
 	if (viewport->render_buffers.is_valid()) {
 		viewport->render_buffers->set_temporal_history_reset();
 	}
+	// GodotNext: pu_fg_present_path (#203). The next frame inputs carry the reset.
+	viewport->frame_generation.reset_pending = true;
+}
+
+// GodotNext: pu_fg_present_path (#203).
+Dictionary RendererViewport::get_frame_generation_status() {
+	_frame_generation_update_status();
+	Dictionary status = FrameGenerationRegistry::get_status();
+	int split_textures = 0;
+	const uint32_t rid_count = viewport_owner.get_rid_count();
+	RID *rids = (RID *)alloca(sizeof(RID) * rid_count);
+	viewport_owner.fill_owned_buffer(rids);
+	for (uint32_t i = 0; i < rid_count; i++) {
+		const Viewport *viewport = viewport_owner.get_or_null(rids[i]);
+		split_textures += int(viewport->frame_generation.ui_render_target.is_valid()) + int(viewport->frame_generation.hudless_color.is_valid());
+	}
+	status["split_textures"] = split_textures;
+	return status;
 }
 
 void RendererViewport::viewport_set_scaling_3d_mode(RID p_viewport, RSE::ViewportScaling3DMode p_mode) {
@@ -2193,6 +2481,9 @@ void RendererViewport::viewport_set_sdf_oversize_and_scale(RID p_viewport, RSE::
 	ERR_FAIL_NULL(viewport);
 
 	RSG::texture_storage->render_target_set_sdf_size_and_scale(viewport->render_target, p_size, p_scale);
+	// GodotNext: pu_fg_present_path (#203). The frame-generation UI layer follows these.
+	viewport->sdf_oversize = p_size;
+	viewport->sdf_scale = p_scale;
 }
 
 RID RendererViewport::viewport_find_from_screen_attachment(DisplayServerEnums::WindowID p_id) const {
@@ -2236,6 +2527,14 @@ bool RendererViewport::free(RID p_rid) {
 	if (viewport_owner.owns(p_rid)) {
 		Viewport *viewport = viewport_owner.get_or_null(p_rid);
 
+		// GodotNext: pu_fg_present_path (#203).
+		_frame_generation_release(viewport);
+		if (frame_generation_viewport == viewport) {
+			frame_generation_viewport = nullptr;
+		}
+		if (frame_generation_owner == p_rid) {
+			frame_generation_owner = RID();
+		}
 		RSG::texture_storage->render_target_free(viewport->render_target);
 		RSG::light_storage->shadow_atlas_free(viewport->shadow_atlas);
 		if (viewport->render_buffers.is_valid()) {

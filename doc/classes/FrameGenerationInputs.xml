@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="FrameGenerationInputs" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		The per-frame inputs passed to a [FrameGenerationExtension].
+	</brief_description>
+	<description>
+		Holds the textures and camera values of one rendered frame of the main window, as [method FrameGenerationExtension._on_frame_inputs] and [method FrameGenerationExtension._on_present] receive them. The engine reuses one instance and refills it every frame.
+	</description>
+	<tutorials>
+	</tutorials>
+	<members>
+		<member name="aspect" type="float" setter="set_aspect" getter="get_aspect" default="0.0">
+			The camera's aspect ratio (width divided by height).
+		</member>
+		<member name="camera_transform" type="Transform3D" setter="set_camera_transform" getter="get_camera_transform" default="Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0)">
+			The camera's global transform (view to world).
+		</member>
+		<member name="clip_to_prev_clip" type="Projection" setter="set_clip_to_prev_clip" getter="get_clip_to_prev_clip" default="Projection(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)">
+			Transforms this frame's clip space into the previous frame's, for camera motion. Identity on the first frame. It uses the clip space of [member view_to_clip]; in the clip space of the textures it is [code]correction * clip_to_prev_clip * correction.inverse()[/code], with [code]correction = Projection.create_depth_correction(true)[/code].
+		</member>
+		<member name="depth" type="RID" setter="set_depth" getter="get_depth" default="RID()">
+			The 3D render's depth texture, at [member render_size]: reverse Z, from [code]1.0[/code] at the near plane to [code]0.0[/code] at the far plane, the [code]z[/code] of [code]Projection.create_depth_correction(true) * view_to_clip[/code] after the perspective divide.
+		</member>
+		<member name="fovy" type="float" setter="set_fovy" getter="get_fovy" default="0.0">
+			The camera's vertical field of view, in degrees.
+		</member>
+		<member name="frame_index" type="int" setter="set_frame_index" getter="get_frame_index" default="0">
+			The [RenderingDevice] frame counter of the frame being rendered. On D3D12, [method FrameGenerationExtension._on_present] comes after that frame's [method FrameGenerationExtension._on_frame_inputs] and sets it to the counter of the frame being presented. That is the value [method FrameGenerationExtension._on_frame_inputs] saw for the same frame, unless the GPU was flushed between the two (a swap chain created or resized in that frame), which makes the present's value larger. The counter also increases by more than one between frames when the GPU is flushed in between (a texture readback, for example).
+		</member>
+		<member name="hudless_color" type="RID" setter="set_hudless_color" getter="get_hudless_color" default="RID()">
+			The frame's 3D image before the canvas layers above it, at [member output_size], in the viewport's format. With a canvas background ([constant Environment.BG_CANVAS]), the layers up to [member Environment.background_canvas_max_layer] are part of it.
+		</member>
+		<member name="jitter" type="Vector2" setter="set_jitter" getter="get_jitter" default="Vector2(0, 0)">
+			The camera jitter for this frame, in render pixels.
+		</member>
+		<member name="motion_vector_scale" type="Vector2" setter="set_motion_vector_scale" getter="get_motion_vector_scale" default="Vector2(0, 0)">
+			Multiplies [member velocity] into render pixels.
+		</member>
+		<member name="output_size" type="Vector2i" setter="set_output_size" getter="get_output_size" default="Vector2i(0, 0)">
+			The size of the viewport, [member hudless_color] and [member ui_color], in pixels.
+		</member>
+		<member name="render_size" type="Vector2i" setter="set_render_size" getter="get_render_size" default="Vector2i(0, 0)">
+			The size of the 3D render ([member depth] and [member velocity]), in pixels.
+		</member>
+		<member name="reset" type="bool" setter="set_reset" getter="get_reset" default="false">
+			If [code]true[/code], the frame history must be discarded: on the first frame after the provider becomes active, after the viewport is resized, and after [method RenderingServer.viewport_reset_temporal_history].
+		</member>
+		<member name="swap_chain" type="int" setter="set_swap_chain" getter="get_swap_chain" default="0">
+			During [method FrameGenerationExtension._on_present] on D3D12, the native [code]IDXGISwapChain[/code] pointer being presented. [code]0[/code] otherwise.
+		</member>
+		<member name="ui_color" type="RID" setter="set_ui_color" getter="get_ui_color" default="RID()">
+			The frame's canvas layers alone, with premultiplied alpha, at [member output_size]: RGBA8, or RGBA16F when the viewport uses HDR 2D.
+		</member>
+		<member name="velocity" type="RID" setter="set_velocity" getter="get_velocity" default="RID()">
+			The 3D render's velocity texture at [member render_size], when the viewport renders motion vectors. It is dense (every pixel, camera motion included) when the viewport's temporal upscaler uses the dense velocity row, as TSR, DLSS, MetalFX and custom upscalers do. With TAA, FSR2 or a [CompositorEffect] that needs motion vectors it holds that path's motion vectors. Empty when the viewport renders no motion vectors (no temporal anti-aliasing or upscaler) and with the Mobile renderer: frame generation does not turn motion vectors on by itself.
+		</member>
+		<member name="view_to_clip" type="Projection" setter="set_view_to_clip" getter="get_view_to_clip" default="Projection(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)">
+			The camera's projection, without jitter, in Godot's convention, as [method Camera3D.get_camera_projection] returns it and as [member TemporalUpscalerInputs.view_to_clip] passes it: [code]y[/code] up, and depth from [code]-1[/code] at the near plane to [code]1[/code] at the far plane. The textures are [code]y[/code] down with reverse Z: [code]Projection.create_depth_correction(true) * view_to_clip[/code] is the projection that matches them, and maps a view-space position to the texture's UV ([code]xy * 0.5 + 0.5[/code]) and [member depth] value ([code]z[/code]) after the perspective divide.
+		</member>
+		<member name="z_far" type="float" setter="set_z_far" getter="get_z_far" default="0.0">
+			The camera's far plane distance.
+		</member>
+		<member name="z_near" type="float" setter="set_z_near" getter="get_z_near" default="0.0">
+			The camera's near plane distance.
+		</member>
+	</members>
+</class>

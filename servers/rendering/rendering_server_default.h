@@ -101,6 +101,9 @@ class RenderingServerDefault : public RenderingServer {
 	bool drawing_frame = false;
 	void _register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension);
 	void _unregister_temporal_upscaler_extension(ObjectID p_extension_id);
+	// GodotNext: pu_fg_present_path (#203).
+	void _register_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension);
+	void _unregister_frame_generation_extension(ObjectID p_extension_id);
 	Dictionary _virtual_geometry_get_debug_stats(RID p_viewport) {
 		return RenderingServer::virtual_geometry_get_debug_stats(p_viewport);
 	}
@@ -806,6 +809,8 @@ public:
 
 	FUNC2(viewport_set_scaling_3d_mode, RID, RSE::ViewportScaling3DMode)
 	FUNC1R(Dictionary, viewport_get_scaling_3d_status, RID)
+	// GodotNext: pu_fg_present_path (#203). Runs on the server thread, like the split it describes.
+	FUNC0R(Dictionary, get_frame_generation_status)
 	FUNC1(viewport_reset_temporal_history, RID)
 	FUNC2(viewport_set_scaling_3d_scale, RID, float)
 	FUNC2(viewport_set_fsr_sharpness, RID, float)
@@ -1302,6 +1307,9 @@ public:
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	virtual void register_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) override;
 	virtual void unregister_temporal_upscaler_extension(const Ref<TemporalUpscalerExtension> &p_extension) override;
+	// GodotNext: pu_fg_present_path (#203).
+	virtual void register_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) override;
+	virtual void unregister_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) override;
 
 	virtual Dictionary virtual_geometry_get_debug_stats(RID p_viewport = RID()) override {
 		if (Thread::get_caller_id() == server_thread) {

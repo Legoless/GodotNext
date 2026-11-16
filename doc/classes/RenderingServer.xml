@@ -1713,6 +1713,12 @@
 				Returns the default clear color which is used when a specific clear color has not been selected. See also [method set_default_clear_color].
 			</description>
 		</method>
+		<method name="get_frame_generation_status">
+			<return type="Dictionary" />
+			<description>
+				Returns the frame-generation state, as resolved for the next frame: [code]provider[/code] ([String], [member ProjectSettings.rendering/frame_generation/provider]), [code]requested[/code] ([bool], a provider is set), [code]active[/code] ([bool]), [code]active_provider[/code] ([String], the name of the active provider, or empty), [code]reason[/code] ([int], a [enum FrameGenerationExtension.FrameGenerationReason]), [code]multiplier[/code] ([int], the active multiplier, or [code]1[/code] while frame generation is off), [code]requested_multiplier[/code] ([int], [member ProjectSettings.rendering/frame_generation/multiplier]), [code]dynamic[/code] ([bool], [member ProjectSettings.rendering/frame_generation/dynamic]), [code]present_hook[/code] ([bool], [method FrameGenerationExtension._on_present] is called; D3D12 only) and [code]split_textures[/code] ([int], the textures the HUD-less split holds: [code]0[/code] while frame generation is off, [code]2[/code] while a viewport splits).
+			</description>
+		</method>
 		<method name="get_frame_setup_time_cpu" qualifiers="const">
 			<return type="float" />
 			<description>
@@ -3689,6 +3695,13 @@
 				Sets how often the reflection probe updates. Can either be once or every frame.
 			</description>
 		</method>
+		<method name="register_frame_generation_extension">
+			<return type="void" />
+			<param index="0" name="extension" type="FrameGenerationExtension" />
+			<description>
+				Registers [param extension] as a frame-generation provider. It becomes active when [member ProjectSettings.rendering/frame_generation/provider] matches its [method FrameGenerationExtension._get_name] and [method FrameGenerationExtension._is_available] allows it, from the next frame on. Registering the same object again has its availability checked again. While a provider is active, registering a different object with its name fails with [constant FrameGenerationExtension.REASON_PROVIDER_ALREADY_ACTIVE] and one error.
+			</description>
+		</method>
 		<method name="register_temporal_upscaler_extension">
 			<return type="void" />
 			<param index="0" name="extension" type="TemporalUpscalerExtension" />
@@ -4242,6 +4255,13 @@
 			<param index="2" name="height" type="int" />
 			<description>
 				Sets the size at which the texture should be [i]displayed[/i] in 2D, ignoring its original size. This does not rescale the texture data itself, only how it is drawn in 2D. Set [param width] and [param height] to 0 to disable the size override.
+			</description>
+		</method>
+		<method name="unregister_frame_generation_extension">
+			<return type="void" />
+			<param index="0" name="extension" type="FrameGenerationExtension" />
+			<description>
+				Unregisters [param extension]. If it was active, frame generation is off from the next frame on; another provider still cannot activate until the engine restarts.
 			</description>
 		</method>
 		<method name="unregister_temporal_upscaler_extension">

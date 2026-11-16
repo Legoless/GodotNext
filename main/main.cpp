@@ -83,6 +83,8 @@
 // GodotNext: pt_temporal_upscaler_extension (#192).
 #include "core/object/callable_mp.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+// GodotNext: pu_fg_present_path (#203).
+#include "servers/rendering/storage/frame_generation_extension.h"
 #include "servers/text/text_server.h"
 #include "servers/text/text_server_dummy.h"
 
@@ -3328,6 +3330,10 @@ Error Main::setup2(bool p_show_boot_logo) {
 		// register the stub interposer where a module would register its D3D12 hooks.
 		d3d12_hooks_stub_install();
 #endif
+		// GodotNext: pu_fg_present_path (#203). After the modules, which may own the D3D12 present
+		// callback, and before the rendering context locks it. A no-op unless the project asks for
+		// a frame-generation provider on D3D12.
+		FrameGenerationRegistry::install_present_hook();
 
 		OS::get_singleton()->benchmark_end_measure("Servers", "Modules and Extensions");
 	}
@@ -5338,6 +5344,8 @@ void Main::cleanup(bool p_force) {
 		// TemporalUpscalerExtensions on the render thread while their scripts
 		// and GDExtensions can still run their destructors.
 		rendering_server->call_on_render_thread(callable_mp_static(&TemporalUpscalerRegistry::clear_extensions));
+		// GodotNext: pu_fg_present_path (#203). Same for frame-generation providers.
+		rendering_server->call_on_render_thread(callable_mp_static(&FrameGenerationRegistry::clear));
 		rendering_server->sync();
 	}
 

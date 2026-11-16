@@ -41,6 +41,8 @@
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: pu_fg_present_path (#203).
+#include "servers/rendering/storage/frame_generation_extension.h"
 #ifdef RD_ENABLED
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
@@ -71,6 +73,40 @@ void RenderingServerDefault::_free(RID p_rid) {
 	}
 	if (RSG::scene->free(p_rid)) {
 		return;
+	}
+}
+
+// GodotNext: pu_fg_present_path (#203). Providers register on the server thread, like the
+// temporal upscalers; draw_viewports() resolves the status before the next frame renders.
+void RenderingServerDefault::_register_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) {
+	FrameGenerationRegistry::register_extension(p_extension);
+	redraw_request();
+}
+
+void RenderingServerDefault::_unregister_frame_generation_extension(ObjectID p_extension_id) {
+	FrameGenerationRegistry::unregister_extension(p_extension_id);
+	redraw_request();
+}
+
+void RenderingServerDefault::register_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) {
+	ERR_FAIL_COND(p_extension.is_null());
+	if (Thread::get_caller_id() != server_thread) {
+		command_queue.push(this, &RenderingServerDefault::_register_frame_generation_extension, p_extension);
+	} else {
+		command_queue.flush_if_pending();
+		_register_frame_generation_extension(p_extension);
+	}
+}
+
+void RenderingServerDefault::unregister_frame_generation_extension(const Ref<FrameGenerationExtension> &p_extension) {
+	ERR_FAIL_COND(p_extension.is_null());
+	// The queued command carries only the id, never the last reference.
+	const ObjectID id = p_extension->get_instance_id();
+	if (Thread::get_caller_id() != server_thread) {
+		command_queue.push(this, &RenderingServerDefault::_unregister_frame_generation_extension, id);
+	} else {
+		command_queue.flush_if_pending();
+		_unregister_frame_generation_extension(id);
 	}
 }
 
@@ -279,6 +315,8 @@ void RenderingServerDefault::_finish() {
 	// GodotNext: pt_temporal_upscaler_extension (#192). Main::cleanup() releases
 	// the extensions before the script languages finish; this catches the rest.
 	TemporalUpscalerRegistry::clear_extensions();
+	// GodotNext: pu_fg_present_path (#203). Same for frame-generation providers.
+	FrameGenerationRegistry::clear();
 
 	if (test_cube.is_valid()) {
 		free_rid(test_cube);

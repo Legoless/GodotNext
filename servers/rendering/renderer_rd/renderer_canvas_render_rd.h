@@ -121,6 +121,10 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 				uint32_t use_lighting : 1;
 				uint32_t use_msdf : 1;
 				uint32_t use_lcd : 1;
+				// GodotNext: pu_fg_present_path (#203). Drawing into a frame-generation UI layer:
+				// LCD text writes its coverage as alpha, and blend_disabled items write alpha 1.
+				uint32_t ui_layer_lcd_alpha : 1;
+				uint32_t ui_layer_opaque : 1;
 			};
 		};
 	};
@@ -133,6 +137,8 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		ShaderSpecialization shader_specialization = {};
 		uint32_t lcd_blend = 0;
 		uint32_t ubershader = 0;
+		// GodotNext: pu_fg_present_path (#203). An Add item drawing into a frame-generation UI layer.
+		uint32_t ui_layer_add = 0;
 
 		uint32_t hash() const {
 			uint32_t h = hash_murmur3_one_32(variant);
@@ -142,6 +148,7 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 			h = hash_murmur3_one_32(shader_specialization.packed_0, h);
 			h = hash_murmur3_one_32(lcd_blend, h);
 			h = hash_murmur3_one_32(ubershader, h);
+			h = hash_murmur3_one_32(ui_layer_add, h);
 			return hash_fmix32(h);
 		}
 	};
@@ -670,12 +677,14 @@ class RendererCanvasRenderRD : public RendererCanvasRender {
 		// Current render target for the canvas.
 		RID render_target;
 		bool use_linear_colors = false;
+		// GodotNext: pu_fg_present_path (#203). The target is a frame-generation UI layer.
+		bool premultiplied_ui_layer = false;
 	};
 
 	inline RID _get_pipeline_specialization_or_ubershader(CanvasShaderData *p_shader_data, PipelineKey &r_pipeline_key, PushConstant &r_push_constant, RID p_mesh_instance = RID(), void *p_surface = nullptr, uint32_t p_surface_index = 0, RID *r_vertex_array = nullptr);
 	void _render_batch_items(RenderTarget p_to_render_target, int p_item_count, const Transform2D &p_canvas_transform_inverse, Light *p_lights, bool &r_sdf_used, bool p_to_backbuffer = false, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
 	void _record_item_commands(const Item *p_item, RenderTarget p_render_target, const Transform2D &p_base_transform, Item *&r_current_clip, Light *p_lights, bool &r_batch_broken, bool &r_sdf_used, Batch *&r_current_batch);
-	void _render_batch(RD::DrawListID p_draw_list, CanvasShaderData *p_shader_data, RenderingDevice::FramebufferFormatID p_framebuffer_format, Light *p_lights, const Batch *p_batch, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
+	void _render_batch(RD::DrawListID p_draw_list, CanvasShaderData *p_shader_data, RenderingDevice::FramebufferFormatID p_framebuffer_format, Light *p_lights, const Batch *p_batch, bool p_premultiplied_ui_layer, RenderingServerTypes::RenderInfo *r_render_info = nullptr);
 	void _prepare_batch_texture_info(RID p_texture, TextureState &p_state, TextureInfo *p_info);
 
 	// non-UMA

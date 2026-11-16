@@ -41,6 +41,8 @@
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_cut.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/storage/temporal_upscaler_extension.h"
+// GodotNext: pu_fg_present_path (#203).
+#include "servers/rendering/storage/frame_generation_extension.h"
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
 #endif
@@ -3026,6 +3028,10 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	ClassDB::bind_method(D_METHOD("register_temporal_upscaler_extension", "extension"), &RenderingServer::register_temporal_upscaler_extension);
 	ClassDB::bind_method(D_METHOD("unregister_temporal_upscaler_extension", "extension"), &RenderingServer::unregister_temporal_upscaler_extension);
+	// GodotNext: pu_fg_present_path (#203).
+	ClassDB::bind_method(D_METHOD("register_frame_generation_extension", "extension"), &RenderingServer::register_frame_generation_extension);
+	ClassDB::bind_method(D_METHOD("unregister_frame_generation_extension", "extension"), &RenderingServer::unregister_frame_generation_extension);
+	ClassDB::bind_method(D_METHOD("get_frame_generation_status"), &RenderingServer::get_frame_generation_status);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_debug_stats", "viewport"), &RenderingServer::virtual_geometry_get_debug_stats, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_memory_report"), &RenderingServer::virtual_geometry_get_memory_report);
 	ClassDB::bind_method(D_METHOD("virtual_geometry_get_routing_counters"), &RenderingServer::virtual_geometry_get_routing_counters);
@@ -4058,6 +4064,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/scaling_3d/dynamic_resolution/max_scale", PROPERTY_HINT_RANGE, "0.1,2.0,0.0001"), 1.0f);
 	// GodotNext: pt_temporal_upscaler_extension (#192).
 	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/scaling_3d/custom_upscaler", PROPERTY_HINT_NONE, ""), String());
+	// GodotNext: pu_fg_present_path (#203). Off by default; "" is off.
+	GLOBAL_DEF(PropertyInfo(Variant::STRING, "rendering/frame_generation/provider", PROPERTY_HINT_NONE, ""), String());
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/frame_generation/multiplier", PROPERTY_HINT_RANGE, "2,6,1"), 2);
+	GLOBAL_DEF("rendering/frame_generation/dynamic", false);
 
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/textures/default_filters/texture_mipmap_bias", PROPERTY_HINT_RANGE, "-2,2,0.001"), 0.0f);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/textures/decals/filter", PROPERTY_HINT_ENUM, "Nearest (Fast),Linear (Fast),Nearest Mipmap (Fast),Linear Mipmap (Fast),Nearest Mipmap Anisotropic (Average),Linear Mipmap Anisotropic (Average)"), RSE::DECAL_FILTER_LINEAR_MIPMAPS);

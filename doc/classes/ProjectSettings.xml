@@ -3044,6 +3044,15 @@
 		<member name="rendering/environment/volumetric_fog/volume_size" type="int" setter="" getter="" default="64">
 			Base size used to determine size of froxel buffer in the camera X-axis and Y-axis. The final size is scaled by the aspect ratio of the screen, so actual values may differ from what is set. Set a larger size for more detailed fog, set a smaller size for better performance.
 		</member>
+		<member name="rendering/frame_generation/dynamic" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], asks the frame-generation provider to choose the multiplier at runtime. Passed to [method FrameGenerationExtension._set_mode]; a provider that cannot do this keeps [member rendering/frame_generation/multiplier].
+		</member>
+		<member name="rendering/frame_generation/multiplier" type="int" setter="" getter="" default="2">
+			The number of displayed frames per rendered frame that frame generation asks for, from 2 to 6. Passed to [method FrameGenerationExtension._set_mode]. [method RenderingServer.get_frame_generation_status] reports the multiplier that runs.
+		</member>
+		<member name="rendering/frame_generation/provider" type="String" setter="" getter="" default="&quot;&quot;">
+			The name of the [FrameGenerationExtension] that generates frames, as returned by its [method FrameGenerationExtension._get_name]. Empty turns frame generation off. Register the provider with [method RenderingServer.register_frame_generation_extension]. Frame generation runs only in the main window of a running game. Only one provider can be active per process, so changing this to another provider needs a restart. On D3D12, set it before the engine starts for [method FrameGenerationExtension._on_present] to be called.
+		</member>
 		<member name="rendering/gl_compatibility/driver" type="String" setter="" getter="" default="&quot;opengl3&quot;">
 			Sets the driver to be used by the renderer when using the Compatibility renderer. Editing this property has no effect in the default configuration, as first-party platforms each have platform-specific overrides. Use those overrides to configure the driver for each platform.
 			This can be overridden using the [code]--rendering-driver &lt;driver&gt;[/code] command line argument.

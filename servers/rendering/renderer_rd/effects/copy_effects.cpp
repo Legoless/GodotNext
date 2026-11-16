@@ -140,6 +140,20 @@ CopyEffects::CopyEffects(BitField<RasterEffects> p_raster_effects) {
 				copy_to_fb.pipelines[i].clear();
 			}
 		}
+
+		// GodotNext: pu_fg_present_path (#203). The frame-generation split composites its
+		// premultiplied UI layer with this; the pipeline is only compiled when that runs.
+		RD::PipelineColorBlendState blend_premultiplied;
+		RD::PipelineColorBlendState::Attachment attachment;
+		attachment.enable_blend = true;
+		attachment.color_blend_op = RD::BLEND_OP_ADD;
+		attachment.src_color_blend_factor = RD::BLEND_FACTOR_ONE;
+		attachment.dst_color_blend_factor = RD::BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		attachment.alpha_blend_op = RD::BLEND_OP_ADD;
+		attachment.src_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+		attachment.dst_alpha_blend_factor = RD::BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+		blend_premultiplied.attachments.push_back(attachment);
+		copy_to_fb.blend_premultiplied_pipeline.setup(copy_to_fb.shader.version_get_shader(copy_to_fb.shader_version, COPY_TO_FB_COPY), RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), blend_premultiplied, 0);
 	}
 
 	{
@@ -703,6 +717,30 @@ void CopyEffects::copy_to_drawlist(RD::DrawListID p_draw_list, RD::FramebufferFo
 	RD::get_singleton()->draw_list_bind_index_array(p_draw_list, material_storage->get_quad_index_array());
 	RD::get_singleton()->draw_list_set_push_constant(p_draw_list, &copy_to_fb.push_constant, sizeof(CopyToFbPushConstant));
 	RD::get_singleton()->draw_list_draw(p_draw_list, true);
+}
+
+void CopyEffects::blend_premultiplied_to_fb(RID p_source_rd_texture, RID p_dest_framebuffer) {
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(uniform_set_cache);
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_NULL(material_storage);
+
+	memset(&copy_to_fb.push_constant, 0, sizeof(CopyToFbPushConstant));
+	copy_to_fb.push_constant.luminance_multiplier = 1.0;
+
+	RID sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_source_rd_texture(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_source_rd_texture }));
+
+	RID shader = copy_to_fb.shader.version_get_shader(copy_to_fb.shader_version, COPY_TO_FB_COPY);
+	ERR_FAIL_COND(shader.is_null());
+
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer);
+	RD::get_singleton()->draw_list_bind_render_pipeline(draw_list, copy_to_fb.blend_premultiplied_pipeline.get_render_pipeline(RD::INVALID_ID, RD::get_singleton()->framebuffer_get_format(p_dest_framebuffer)));
+	RD::get_singleton()->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_source_rd_texture), 0);
+	RD::get_singleton()->draw_list_bind_index_array(draw_list, material_storage->get_quad_index_array());
+	RD::get_singleton()->draw_list_set_push_constant(draw_list, &copy_to_fb.push_constant, sizeof(CopyToFbPushConstant));
+	RD::get_singleton()->draw_list_draw(draw_list, true);
+	RD::get_singleton()->draw_list_end();
 }
 
 void CopyEffects::copy_raster(RID p_source_texture, RID p_dest_framebuffer) {

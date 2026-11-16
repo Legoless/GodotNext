@@ -758,6 +758,8 @@ void RendererCanvasRenderRD::canvas_render_items(RID p_to_render_target, Item *p
 	RenderTarget to_render_target;
 	to_render_target.render_target = p_to_render_target;
 	to_render_target.use_linear_colors = use_linear_colors;
+	// GodotNext: pu_fg_present_path (#203).
+	to_render_target.premultiplied_ui_layer = texture_storage->render_target_is_premultiplied_ui_layer(p_to_render_target);
 
 	while (ci) {
 		if (ci->copy_back_buffer && canvas_group_owner == nullptr) {
@@ -1515,6 +1517,13 @@ void RendererCanvasRenderRD::CanvasShaderData::_create_pipeline(PipelineKey p_pi
 		dynamic_state_flags = RD::DYNAMIC_STATE_BLEND_CONSTANTS;
 	} else {
 		attachment = RendererRD::MaterialStorage::ShaderData::blend_mode_to_blend_attachment(blend_mode_rd);
+		// GodotNext: pu_fg_present_path (#203). In a frame-generation UI layer, additive light keeps
+		// the layer's alpha: the premultiplied composite then adds it to the 3D, as drawing it over the
+		// 3D does.
+		if (p_pipeline_key.ui_layer_add) {
+			attachment.src_alpha_blend_factor = RD::BLEND_FACTOR_ZERO;
+			attachment.dst_alpha_blend_factor = RD::BLEND_FACTOR_ONE;
+		}
 	}
 
 	blend_state.attachments.push_back(attachment);
@@ -2332,7 +2341,9 @@ void RendererCanvasRenderRD::_render_batch_items(RenderTarget p_to_render_target
 			}
 		}
 
-		_render_batch(draw_list, shader_data, fb_format, p_lights, current_batch, r_render_info);
+		// GodotNext: pu_fg_present_path (#203). The layer's own framebuffer only: its backbuffer (canvas
+		// groups) is drawn as it is on any target.
+		_render_batch(draw_list, shader_data, fb_format, p_lights, current_batch, !p_to_backbuffer && p_to_render_target.premultiplied_ui_layer, r_render_info);
 	}
 
 	RD::get_singleton()->draw_list_end();
@@ -3005,7 +3016,7 @@ void RendererCanvasRenderRD::_canvas_texture_invalidation_callback(bool p_delete
 	}
 }
 
-void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasShaderData *p_shader_data, RenderingDevice::FramebufferFormatID p_framebuffer_format, Light *p_lights, const Batch *p_batch, RenderingServerTypes::RenderInfo *r_render_info) {
+void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasShaderData *p_shader_data, RenderingDevice::FramebufferFormatID p_framebuffer_format, Light *p_lights, const Batch *p_batch, bool p_premultiplied_ui_layer, RenderingServerTypes::RenderInfo *r_render_info) {
 	{
 		RendererRD::TextureStorage *ts = RendererRD::TextureStorage::get_singleton();
 
@@ -3055,6 +3066,14 @@ void RendererCanvasRenderRD::_render_batch(RD::DrawListID p_draw_list, CanvasSha
 	pipeline_key.shader_specialization.use_msdf = p_batch->use_msdf;
 	pipeline_key.shader_specialization.use_lcd = p_batch->use_lcd;
 	pipeline_key.lcd_blend = p_batch->has_blend;
+	// GodotNext: pu_fg_present_path (#203). The canvas draws into a frame-generation UI layer, which is
+	// composited over the 3D with premultiplied alpha: Add, LCD text and blend_disabled need the layer's
+	// alpha adjusted for that composite to give what drawing over the 3D gives.
+	if (p_premultiplied_ui_layer) {
+		pipeline_key.ui_layer_add = p_shader_data->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_ADD;
+		pipeline_key.shader_specialization.ui_layer_lcd_alpha = p_batch->use_lcd;
+		pipeline_key.shader_specialization.ui_layer_opaque = p_shader_data->blend_mode == RendererRD::MaterialStorage::ShaderData::BLEND_MODE_DISABLED;
+	}
 
 	switch (p_batch->command_type) {
 		case Item::Command::TYPE_RECT:

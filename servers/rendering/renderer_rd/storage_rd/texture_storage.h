@@ -418,6 +418,9 @@ private:
 		Image::Format image_format = Image::FORMAT_L8;
 
 		bool is_transparent = false;
+		// GodotNext: pu_fg_present_path (#203). A frame-generation UI layer: the canvas draws into it
+		// premultiplied, and it is composited over the 3D afterwards.
+		bool is_premultiplied_ui_layer = false;
 		bool use_hdr = false;
 		bool use_debanding = false;
 
@@ -864,6 +867,9 @@ public:
 	virtual Size2i render_target_get_size(RID p_render_target) const override;
 	virtual void render_target_set_transparent(RID p_render_target, bool p_is_transparent) override;
 	virtual bool render_target_get_transparent(RID p_render_target) const override;
+	// GodotNext: pu_fg_present_path (#203).
+	void render_target_set_premultiplied_ui_layer(RID p_render_target, bool p_enable);
+	bool render_target_is_premultiplied_ui_layer(RID p_render_target) const;
 	virtual void render_target_set_direct_to_screen(RID p_render_target, bool p_direct_to_screen) override;
 	virtual bool render_target_get_direct_to_screen(RID p_render_target) const override;
 	virtual bool render_target_was_used(RID p_render_target) const override;

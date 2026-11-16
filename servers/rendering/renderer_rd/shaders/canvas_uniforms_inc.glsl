@@ -103,6 +103,16 @@ bool sc_use_lcd() {
 	return ((sc_packed_0() >> 2) & 1U) != 0;
 }
 
+// GodotNext: pu_fg_present_path (#203). Drawing into a frame-generation UI layer, which is composited
+// over the 3D with premultiplied alpha afterwards.
+bool sc_ui_layer_lcd_alpha() {
+	return ((sc_packed_0() >> 3) & 1U) != 0;
+}
+
+bool sc_ui_layer_opaque() {
+	return ((sc_packed_0() >> 4) & 1U) != 0;
+}
+
 // In vulkan, sets should always be ordered using the following logic:
 // Lower Sets: Sets that change format and layout less often
 // Higher sets: Sets that change format and layout very often

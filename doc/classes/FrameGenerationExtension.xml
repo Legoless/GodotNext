@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="FrameGenerationExtension" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../class.xsd">
+	<brief_description>
+		Base class for a frame-generation provider.
+	</brief_description>
+	<description>
+		Extend this class in a script or a GDExtension to provide frame generation from outside the engine, for example a vendor's frame generation shipped as a plugin. Register an instance with [method RenderingServer.register_frame_generation_extension], then set [member ProjectSettings.rendering/frame_generation/provider] to the name returned by [method _get_name].
+		While the provider is active, the main window's viewport splits each frame: the 3D image is copied before the canvas layers above it draw ([member FrameGenerationInputs.hudless_color]), those layers draw into a separate premultiplied layer ([member FrameGenerationInputs.ui_color]), and that layer is composited over the 3D image. Only one viewport splits per frame: when several viewports with a 3D camera are attached to the main window, the split stays with the one that started it, which is one without a parent viewport (such as the main window's own) when there is one. [method _on_frame_inputs] receives both, with depth, velocity and the camera, once per rendered frame. On D3D12, [method _on_present] is called right before and right after each present of the main window.
+		While the frame is split, the Mix, Premultiplied Alpha and Add blend modes and [code]blend_disabled[/code] items give the same image as drawing straight over the 3D, up to rounding in the UI layer; additive light is stored in the UI layer with no alpha, and a [code]blend_disabled[/code] item with alpha [code]1[/code].
+		[b]Note:[/b] While the frame is split, canvas items that read the screen ([code]SCREEN_TEXTURE[/code], [BackBufferCopy]) and the Subtract and Multiply blend modes act on the UI layer, not on the 3D image under it. LCD subpixel text keeps its colors, but the UI layer holds one alpha per pixel for its three subpixel coverages, the largest of them, so behind the colored edges of its glyphs the 3D is dimmed by that largest coverage in every channel and comes out darker than without the split.
+		Only one provider can be active per process: the first provider that activates keeps it, and switching providers needs a restart. Frame generation runs only in the main window of a running game, never in the editor, a secondary window or XR. [method RenderingServer.get_frame_generation_status] reports the state and its [enum FrameGenerationReason]; each fallback prints one log line that names the reason.
+		[b]Note:[/b] Call [method RenderingServer.unregister_frame_generation_extension] before the script or library that implements the provider unloads. The engine releases any provider still registered when it shuts down.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_get_name" qualifiers="virtual const">
+			<return type="String" />
+			<description>
+				Returns the name that [member ProjectSettings.rendering/frame_generation/provider] selects this provider by. It must not be empty.
+			</description>
+		</method>
+		<method name="_is_available" qualifiers="virtual const">
+			<return type="int" />
+			<description>
+				Returns a [enum FrameGenerationReason]: [constant REASON_OK] if the provider can run on the current device and rendering driver with the mode last passed to [method _set_mode], or the reason it cannot. [constant REASON_MFG_REQUIRES_RTX50] keeps the provider active at a multiplier of 2. Any other reason leaves frame generation off. It is called on the rendering thread after [method _set_mode], when the provider is selected and whenever the settings or the registrations change; register the provider again to have it checked again. If not overridden, [constant REASON_PROVIDER_UNAVAILABLE] is returned.
+				A provider that needs a present hook should return [constant REASON_API_UNSUPPORTED] on Vulkan and Metal, which have none.
+			</description>
+		</method>
+		<method name="_on_frame_inputs" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="inputs" type="FrameGenerationInputs" />
+			<description>
+				Called on the rendering thread once per rendered frame of the main window, after the UI layer is composited. Record GPU work through [method RenderingServer.get_rendering_device]. When [member FrameGenerationInputs.reset] is [code]true[/code], [method _reset] is called right before.
+				[b]Note:[/b] The engine reuses [param inputs] every frame. Read its values during the call.
+			</description>
+		</method>
+		<method name="_on_present" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="inputs" type="Object" />
+			<param index="1" name="before" type="bool" />
+			<description>
+				Called on the rendering thread right before ([param before] is [code]true[/code]) and right after ([param before] is [code]false[/code]) each present of the main window's swap chain, once per presented frame. [param inputs] is the [FrameGenerationInputs] of the presented frame, with [member FrameGenerationInputs.swap_chain] set to the native [code]IDXGISwapChain[/code] pointer. If the main window's viewport rendered no split frame (no 3D camera, for example), its textures are empty and its other values are those of the last split frame.
+				[b]Note:[/b] Only D3D12 calls it, and only when [member ProjectSettings.rendering/frame_generation/provider] is set when the engine starts. Vulkan and Metal have no present hook.
+			</description>
+		</method>
+		<method name="_reset" qualifiers="virtual">
+			<return type="void" />
+			<description>
+				Called right before [method _on_frame_inputs] when the frame history must be discarded: on the first frame after the provider becomes active, after the viewport is resized, and after [method RenderingServer.viewport_reset_temporal_history].
+			</description>
+		</method>
+		<method name="_set_mode" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="mode" type="Dictionary" />
+			<description>
+				Called on the rendering thread with the requested mode before [method _is_available], when the provider is selected and whenever the mode changes. [param mode] has the keys [code]multiplier[/code] (an [int] from 2 to 6, [member ProjectSettings.rendering/frame_generation/multiplier]) and [code]dynamic[/code] (a [bool], [member ProjectSettings.rendering/frame_generation/dynamic]).
+			</description>
+		</method>
+	</methods>
+	<constants>
+		<constant name="REASON_OK" value="0" enum="FrameGenerationReason">
+			Frame generation is off because no provider is requested, or the provider runs as requested.
+		</constant>
+		<constant name="REASON_API_UNSUPPORTED" value="1" enum="FrameGenerationReason">
+			The rendering driver cannot run the provider: no [RenderingDevice] (the Compatibility renderer, or headless), or a driver the provider does not support, such as Vulkan or Metal for a provider that needs a present hook.
+		</constant>
+		<constant name="REASON_FG_GPU_UNSUPPORTED" value="2" enum="FrameGenerationReason">
+			The GPU cannot run the provider's frame generation.
+		</constant>
+		<constant name="REASON_MFG_REQUIRES_RTX50" value="3" enum="FrameGenerationReason">
+			A multiplier above 2 needs an NVIDIA RTX 50 series GPU. The provider stays active at a multiplier of 2.
+		</constant>
+		<constant name="REASON_NOT_NVIDIA_RTX" value="4" enum="FrameGenerationReason">
+			The provider needs an NVIDIA RTX GPU.
+		</constant>
+		<constant name="REASON_NOT_MAIN_WINDOW" value="5" enum="FrameGenerationReason">
+			Frame generation runs only in the main window of a running game: not in the editor, and not while the main window's viewport uses XR.
+		</constant>
+		<constant name="REASON_PROVIDER_ALREADY_ACTIVE" value="6" enum="FrameGenerationReason">
+			Another provider already activated in this process. It keeps running; switching providers needs a restart. One error is printed.
+		</constant>
+		<constant name="REASON_PROVIDER_UNAVAILABLE" value="7" enum="FrameGenerationReason">
+			No registered provider has the requested name, or the provider cannot run for a reason not listed here.
+		</constant>
+		<constant name="REASON_MAX" value="8" enum="FrameGenerationReason">
+			Represents the size of the [enum FrameGenerationReason] enum.
+		</constant>
+	</constants>
+</class>

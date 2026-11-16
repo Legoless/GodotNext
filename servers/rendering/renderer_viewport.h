@@ -117,6 +117,26 @@ public:
 		bool shadow_atlas_16_bits = true;
 
 		bool sdf_active = false;
+		// GodotNext: pu_fg_present_path (#203). The SDF settings, so the UI layer can match them.
+		RSE::ViewportSDFOversize sdf_oversize = RSE::VIEWPORT_SDF_OVERSIZE_120_PERCENT;
+		RSE::ViewportSDFScale sdf_scale = RSE::VIEWPORT_SDF_SCALE_50_PERCENT;
+
+		// GodotNext: pu_fg_present_path (#203). The HUD-less split's textures: the UI layer's render
+		// target and the copy of the 3D colour. Empty unless a frame-generation provider is active
+		// and this is the main window's viewport.
+		struct FrameGenerationSplit {
+			RID ui_render_target;
+			RID hudless_color;
+			Size2i size;
+			bool use_hdr = false;
+			RSE::ViewportMSAA msaa = RSE::VIEWPORT_MSAA_DISABLED;
+			RSE::ViewportSDFOversize sdf_oversize = RSE::VIEWPORT_SDF_OVERSIZE_120_PERCENT;
+			RSE::ViewportSDFScale sdf_scale = RSE::VIEWPORT_SDF_SCALE_50_PERCENT;
+			bool reset_pending = true;
+			// The camera before this frame's 3D render, for clip_to_prev_clip.
+			bool has_prev_camera = false;
+			RendererSceneRender::CameraData prev_camera;
+		} frame_generation;
 
 		float mesh_lod_threshold = 1.0;
 
@@ -218,6 +238,11 @@ public:
 
 private:
 	RID main_3d_render_target;
+	// GodotNext: pu_fg_present_path (#203). The one viewport that splits its frame: kept while it stays
+	// eligible (frame_generation_owner), chosen again in each draw_viewports() pass.
+	RID frame_generation_owner;
+	Viewport *frame_generation_viewport = nullptr;
+	void _frame_generation_select_viewport();
 	DynamicResolutionController dynres_controller;
 	uint64_t dynres_last_stamp_frame = UINT64_MAX;
 	uint64_t dynres_min_valid_stamp_frame = 0;
@@ -230,6 +255,15 @@ private:
 	void _configure_3d_render_buffers(Viewport *p_viewport);
 	void _draw_3d(Viewport *p_viewport);
 	void _draw_viewport(Viewport *p_viewport);
+	// GodotNext: pu_fg_present_path (#203). The HUD-less split (plan §21.5 U5).
+	void _frame_generation_update_status();
+	// Before the frame draws: creates or updates the UI layer's render target.
+	bool _frame_generation_prepare(Viewport *p_viewport);
+	// Right after _draw_3d: copies the 3D colour to hudless_color and requests the UI layer's clear.
+	bool _frame_generation_copy_hudless(Viewport *p_viewport);
+	// After the canvas layers: composites the UI layer and hands the inputs to the provider.
+	void _frame_generation_split_end(Viewport *p_viewport);
+	void _frame_generation_release(Viewport *p_viewport);
 	DisplayServerEnums::WindowID _get_containing_window(Viewport *p_viewport);
 
 	int occlusion_rays_per_thread = 512;
@@ -255,6 +289,9 @@ public:
 	void viewport_set_scaling_3d_mode(RID p_viewport, RSE::ViewportScaling3DMode p_mode);
 	Dictionary viewport_get_scaling_3d_status(RID p_viewport) const;
 	void viewport_reset_temporal_history(RID p_viewport);
+	// GodotNext: pu_fg_present_path (#203). The registry's status, plus split_textures: how many
+	// textures the split holds across all viewports (0 while no provider is active, 2 while one splits).
+	Dictionary get_frame_generation_status();
 	void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale);
 	void viewport_set_fsr_sharpness(RID p_viewport, float p_sharpness);
 	void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality);

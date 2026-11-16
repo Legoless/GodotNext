@@ -4810,6 +4810,19 @@ bool TextureStorage::render_target_get_transparent(RID p_render_target) const {
 	return rt->is_transparent;
 }
 
+// GodotNext: pu_fg_present_path (#203).
+void TextureStorage::render_target_set_premultiplied_ui_layer(RID p_render_target, bool p_enable) {
+	RenderTarget *rt = render_target_owner.get_or_null(p_render_target);
+	ERR_FAIL_NULL(rt);
+	rt->is_premultiplied_ui_layer = p_enable;
+}
+
+bool TextureStorage::render_target_is_premultiplied_ui_layer(RID p_render_target) const {
+	RenderTarget *rt = render_target_owner.get_or_null(p_render_target);
+	ERR_FAIL_NULL_V(rt, false);
+	return rt->is_premultiplied_ui_layer;
+}
+
 void TextureStorage::render_target_set_direct_to_screen(RID p_render_target, bool p_value) {
 }
 

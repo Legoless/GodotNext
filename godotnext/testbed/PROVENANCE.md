@@ -313,6 +313,15 @@ Original content generated or written in this repository, with no third-party as
 | `harness/metrics/tests/fixtures/fg/presentmon_2_6_0_fg_off.csv`, `presentmon_v2_metrics.csv`, `nsys_dx12_workload.sql`, `README.md` | hand-written for #202 from the tools' public documentation (`docs/godotnext/source-log/metrics.md`); not recorded from the tools | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
 | `harness/metrics/tests/fixtures/fg/presentmon_2_6_0_recorded.csv` | recorded for #202: PresentMon 2.6.0 output for the testbed's static-UI scene run by the master editor (D3D12), trimmed to 231 rows; timing data only, no third-party content | MIT | 2026-11-15 | the cloud Windows VM (NVIDIA L4) |
 
+## Frame-generation seam check (#203)
+
+Hand-written test content for the vendor-neutral frame-generation seam: a pass-through provider that generates no frames, and the scene that checks it on the static-UI scene (#202). No vendor code or SDK.
+
+| Path | Generator / author | License | Date | Host |
+|---|---|---|---|---|
+| `addons/sample_passthrough_fg/passthrough_fg.gd` | hand-authored for #203 (test-only pass-through `FrameGenerationExtension`) | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+| `tests/frame_generation/frame_generation.gd`, `frame_generation.tscn`, `run_frame_generation.sh` | hand-authored for #203 | MIT | 2026-11-15 | the cloud Linux VM (NVIDIA L4) |
+
 ## Virtualized G5-6 Scenes (#77)
 
 Every entry below is original procedural content generated in this repository for G5-6 (virtualized copies of Color Box Room A, B, off-screen light, ≥40 m single-mesh hall with 10 cm interior walls, and Concave Courtyard, imported with `meshes/generate_virtual_geometry=true`). License: MIT; date: 2026-11-08; host: the Apple M5 Max.

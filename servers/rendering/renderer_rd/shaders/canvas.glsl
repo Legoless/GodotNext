@@ -628,6 +628,12 @@ void main() {
 		vec4 lcd_sample = texture(sampler2D(color_texture, texture_sampler), uv);
 		if (lcd_sample.a == 1.0) {
 			color.rgb = lcd_sample.rgb * color.a;
+			// GodotNext: pu_fg_present_path (#203). In a frame-generation UI layer the glyph's alpha is its
+			// largest channel coverage, not the whole glyph cell: one alpha cannot carry the three
+			// coverages, so the 3D behind colored fringes comes out slightly darker than on the target.
+			if (sc_ui_layer_lcd_alpha()) {
+				color.a *= max(lcd_sample.r, max(lcd_sample.g, lcd_sample.b));
+			}
 		} else {
 			color = vec4(0.0, 0.0, 0.0, 0.0);
 		}
@@ -855,6 +861,12 @@ void main() {
 #ifdef MODE_LIGHT_ONLY
 	color.a *= light_only_alpha;
 #endif
+
+	// GodotNext: pu_fg_present_path (#203). A blend_disabled item replaces what is under it, so in a
+	// frame-generation UI layer it covers the 3D completely.
+	if (sc_ui_layer_opaque()) {
+		color.a = 1.0;
+	}
 
 	frag_color = color;
 }
