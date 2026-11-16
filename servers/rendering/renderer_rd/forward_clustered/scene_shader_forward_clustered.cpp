@@ -38,6 +38,9 @@
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+// GodotNext: nextgi_hit_groups (#130)
+#include "core/templates/safe_refcount.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -273,6 +276,11 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		}
 	}
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
+	// GodotNext: nextgi_hit_groups (#130). A new serial for each code, so a hit group is compiled once per code.
+	{
+		static SafeNumeric<uint64_t> nextgi_hit_serials;
+		nextgi_hit_serial = nextgi_hit_serials.increment();
+	}
 
 	ubo_size = gen_code.uniform_total_size;
 	ubo_offsets = gen_code.uniform_offsets;
@@ -303,6 +311,67 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	} else {
 		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	}
+}
+
+// GodotNext: nextgi_hit_groups (#130)
+bool SceneShaderForwardClustered::ShaderData::build_nextgi_hit_source(const String &p_code, const String &p_path, RendererRD::NextGIHitShaderSource &r_source) {
+	if (p_code.is_empty() || SceneShaderForwardClustered::singleton == nullptr) {
+		return false;
+	}
+	ShaderCompiler::GeneratedCode gen_code;
+	ShaderCompiler::IdentifierActions actions;
+	actions.entry_point_stages["vertex"] = ShaderCompiler::STAGE_VERTEX;
+	actions.entry_point_stages["fragment"] = ShaderCompiler::STAGE_FRAGMENT;
+	// In hit mode light() is noted (code["light"] exists, empty) but neither it nor the functions only it uses
+	// are generated.
+	actions.entry_point_stages["light"] = ShaderCompiler::STAGE_FRAGMENT;
+	bool alpha_scissor = false;
+	bool alpha_hash = false;
+	bool discard = false;
+	bool depth = false;
+	bool position = false;
+	bool modelview_or_projection = false;
+	actions.usage_flag_pointers["ALPHA_SCISSOR_THRESHOLD"] = &alpha_scissor;
+	actions.usage_flag_pointers["ALPHA_HASH_SCALE"] = &alpha_hash;
+	actions.usage_flag_pointers["DISCARD"] = &discard;
+	actions.write_flag_pointers["DEPTH"] = &depth;
+	actions.write_flag_pointers["POSITION"] = &position;
+	actions.write_flag_pointers["MODELVIEW_MATRIX"] = &modelview_or_projection;
+	actions.write_flag_pointers["PROJECTION_MATRIX"] = &modelview_or_projection;
+	HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> hit_uniforms;
+	actions.uniforms = &hit_uniforms;
+	actions.nextgi_hit = true;
+
+	Error err = OK;
+	{
+		MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
+		err = SceneShaderForwardClustered::singleton->compiler.compile(RSE::SHADER_SPATIAL, p_code, &actions, p_path, gen_code);
+	}
+	if (err != OK) {
+		return false;
+	}
+
+	r_source.defines = gen_code.defines;
+	r_source.uniforms = gen_code.uniforms;
+	r_source.globals = gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
+	r_source.vertex_code = gen_code.code.has("vertex") ? gen_code.code["vertex"] : String();
+	r_source.fragment_code = gen_code.code.has("fragment") ? gen_code.code["fragment"] : String();
+	r_source.textures = gen_code.texture_uniforms;
+	r_source.ubo_size = gen_code.uniform_total_size;
+	r_source.has_light = gen_code.code.has("light");
+	r_source.alpha_scissor = alpha_scissor;
+	r_source.alpha_hash = alpha_hash;
+	r_source.screen_read = gen_code.uses_screen_texture || gen_code.uses_depth_texture || gen_code.uses_normal_roughness_texture;
+	r_source.uses_discard = discard;
+	r_source.writes_depth = depth;
+	r_source.writes_position = position || modelview_or_projection;
+	r_source.instance_uniforms = false;
+	for (const KeyValue<StringName, ShaderLanguage::ShaderNode::Uniform> &E : hit_uniforms) {
+		if (E.value.scope == ShaderLanguage::ShaderNode::Uniform::SCOPE_INSTANCE) {
+			r_source.instance_uniforms = true;
+		}
+	}
+	return true;
 }
 
 bool SceneShaderForwardClustered::ShaderData::is_animated() const {

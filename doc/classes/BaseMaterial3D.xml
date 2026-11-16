@@ -298,7 +298,7 @@
 			The width of the range around the shape between the minimum and maximum representable signed distance.
 		</member>
 		<member name="nextgi_rt_treat_as_opaque" type="bool" setter="set_flag" getter="get_flag" default="false">
-			If [code]true[/code], an alpha-scissor or alpha-hash material is traced as opaque by NextGI's ray tracing, so it can occlude and bounce light. Blended materials are never traced.
+			If [code]true[/code], an alpha-scissor or alpha-hash material is traced as opaque by NextGI's ray tracing, so it can occlude and bounce light. Blended materials are never traced. A NextGI trace that asks for alpha testing explicitly (such as a retrace that evaluates materials) still runs the material's alpha test.
 		</member>
 		<member name="no_depth_test" type="bool" setter="set_flag" getter="get_flag" default="false">
 			If [code]true[/code], depth testing is disabled and the object will be drawn in render order.

@@ -34,6 +34,8 @@
 #include "core/config/project_settings.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+// GodotNext: nextgi_hit_groups (#130)
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
@@ -672,6 +674,8 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RenderingServerTypes::Surfa
 void MeshStorage::_mesh_surface_clear(Mesh *p_mesh, int p_surface) {
 	Mesh::Surface &s = *p_mesh->surfaces[p_surface];
 
+	// GodotNext: nextgi_hit_groups (#130)
+	_mesh_nextgi_hit_free_attributes(&s);
 	// GodotNext: nextgi_rt_arena
 	if (s.rt_chunk != UINT32_MAX) {
 		NextGIArenaAllocator::Allocation allocation;
@@ -840,6 +844,116 @@ void MeshStorage::_mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface
 	p_surface->rt_allocation_size = allocation.size;
 	p_surface->rt_eligible = true;
 	p_mesh->nextgi_blas_dirty = true;
+	// GodotNext: nextgi_hit_groups (#130)
+	if (nextgi_hit_attributes_enabled) {
+		_mesh_nextgi_hit_add_attributes(p_surface, p_surface_data);
+	}
+}
+
+// GodotNext: nextgi_hit_groups (#130). The stream is decoded through RenderingServer, so compressed and
+// uncompressed surfaces give the same attributes, and placed in its own arena range.
+void MeshStorage::_mesh_nextgi_hit_add_attributes(Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data) {
+	if (!p_surface->rt_eligible || p_surface->rt_attr_chunk != UINT32_MAX || p_surface->rt_vertex_count == 0 || RenderingServer::get_singleton() == nullptr) {
+		return;
+	}
+	RenderingServerTypes::SurfaceData data;
+	// Only the vertex attributes: no indices, and arena surfaces have no skin.
+	data.format = p_surface_data.format & ~uint64_t(RSE::ARRAY_FORMAT_INDEX | RSE::ARRAY_FORMAT_BONES | RSE::ARRAY_FORMAT_WEIGHTS);
+	data.primitive = p_surface_data.primitive;
+	data.vertex_data = p_surface_data.vertex_data;
+	data.attribute_data = p_surface_data.attribute_data;
+	data.vertex_count = p_surface_data.vertex_count;
+	data.aabb = p_surface_data.aabb;
+	data.uv_scale = p_surface_data.uv_scale;
+	const Array arrays = RenderingServer::get_singleton()->mesh_create_arrays_from_surface_data(data);
+	if (!nextgi_hit_allocate_surface_stream(arrays, p_surface->rt_vertex_count, nextgi_rt_allocator, nextgi_hit_attribute_bytes, p_surface->rt_attr_chunk, p_surface->rt_attr_offset, p_surface->rt_attr_size, p_surface->rt_attr_cpu)) {
+		return;
+	}
+	const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(p_surface->rt_attr_chunk);
+	if (chunk_buffer.is_null()) {
+		nextgi_hit_free_surface_stream(nextgi_rt_allocator, nextgi_hit_attribute_bytes, p_surface->rt_attr_chunk, p_surface->rt_attr_offset, p_surface->rt_attr_size, p_surface->rt_attr_cpu);
+		return;
+	}
+	RD::get_singleton()->buffer_update(chunk_buffer, p_surface->rt_attr_offset, uint32_t(p_surface->rt_attr_cpu.size()), p_surface->rt_attr_cpu.ptr());
+}
+
+void MeshStorage::_mesh_nextgi_hit_free_attributes(Mesh::Surface *p_surface) {
+	nextgi_hit_free_surface_stream(nextgi_rt_allocator, nextgi_hit_attribute_bytes, p_surface->rt_attr_chunk, p_surface->rt_attr_offset, p_surface->rt_attr_size, p_surface->rt_attr_cpu);
+}
+
+// An uncompressed region update patches the copy and uploads the vertices it touched. A compressed buffer is
+// not patched (as its 16-bit positions are not, nextgi_rt_plan_vertex_update()): its stream stays stale until
+// the surface is set again.
+void MeshStorage::_mesh_nextgi_hit_patch_attributes(Mesh::Surface *p_surface, bool p_attribute_region, uint32_t p_offset, const Vector<uint8_t> &p_data) {
+	if (p_surface->rt_attr_chunk == UINT32_MAX || p_surface->rt_attr_chunk >= nextgi_rt_chunks.size() || p_surface->rt_attr_cpu.is_empty()) {
+		return;
+	}
+	const NextGIHitSourceLayout layout = nextgi_hit_source_layout(p_surface->format, p_surface->rt_vertex_count);
+	uint32_t begin = 0;
+	uint32_t end = 0;
+	if (!nextgi_hit_patch_stream(layout, p_surface->rt_vertex_count, p_attribute_region, p_offset, p_data.ptr(), uint32_t(p_data.size()), p_surface->rt_attr_cpu.ptrw(), begin, end)) {
+		return;
+	}
+	RD::get_singleton()->buffer_update(nextgi_rt_chunks[p_surface->rt_attr_chunk].buffer, p_surface->rt_attr_offset + begin, end - begin, p_surface->rt_attr_cpu.ptr() + begin);
+}
+
+void MeshStorage::mesh_nextgi_set_hit_attributes(bool p_enabled) {
+	if (nextgi_hit_attributes_enabled == p_enabled) {
+		return;
+	}
+	nextgi_hit_attributes_enabled = p_enabled;
+	const LocalVector<RID> owned = mesh_owner.get_owned_list();
+	for (const RID &mesh_rid : owned) {
+		Mesh *mesh = mesh_owner.get_or_null(mesh_rid);
+		if (mesh == nullptr) {
+			continue;
+		}
+		for (uint32_t i = 0; i < mesh->surface_count; i++) {
+			Mesh::Surface *surface = mesh->surfaces[i];
+			if (surface == nullptr) {
+				continue;
+			}
+			if (!p_enabled) {
+				_mesh_nextgi_hit_free_attributes(surface);
+				continue;
+			}
+			if (!surface->rt_eligible || surface->rt_attr_chunk != UINT32_MAX) {
+				continue;
+			}
+			// A surface added before the stream was needed: read its buffers back once (mesh_get_surface()).
+			RenderingServerTypes::SurfaceData data;
+			data.format = surface->format;
+			data.primitive = surface->primitive;
+			data.vertex_count = surface->vertex_count;
+			data.aabb = surface->aabb;
+			data.uv_scale = surface->uv_scale;
+			if (surface->vertex_buffer.is_valid()) {
+				data.vertex_data = RD::get_singleton()->buffer_get_data(surface->vertex_buffer);
+				if (!(surface->format & RSE::ARRAY_FLAG_COMPRESS_ATTRIBUTES) && (surface->format & RSE::ARRAY_FORMAT_NORMAL) && !(surface->format & RSE::ARRAY_FORMAT_TANGENT)) {
+					data.vertex_data.resize(data.vertex_data.size() - sizeof(uint16_t) * 2);
+				}
+			}
+			if (surface->attribute_buffer.is_valid()) {
+				data.attribute_data = RD::get_singleton()->buffer_get_data(surface->attribute_buffer);
+			}
+			_mesh_nextgi_hit_add_attributes(surface, data);
+		}
+	}
+	if (!p_enabled) {
+		_mesh_nextgi_release_empty_chunks();
+		// A chunk only streams filled is released with them (the rest of the arena stays where it is).
+		const uint32_t chunk_count = nextgi_rt_allocator.release_trailing_free_chunks();
+		if (chunk_count < nextgi_rt_chunks.size()) {
+			while (nextgi_rt_chunks.size() > chunk_count) {
+				const NextGIRTChunk &chunk = nextgi_rt_chunks[nextgi_rt_chunks.size() - 1];
+				if (chunk.buffer.is_valid()) {
+					RD::get_singleton()->free_rid(chunk.buffer);
+				}
+				nextgi_rt_chunks.resize(nextgi_rt_chunks.size() - 1);
+			}
+			_mesh_nextgi_rt_rebuild_chunk_address_buffer();
+		}
+	}
 }
 
 void MeshStorage::_mesh_nextgi_release_empty_chunks() {
@@ -904,6 +1018,9 @@ bool MeshStorage::mesh_nextgi_rt_get_surface_info(RID p_mesh, uint32_t p_surface
 	r_info.index_count = surface->rt_index_count;
 	r_info.eps = surface->rt_eps;
 	r_info.material = surface->material;
+	// GodotNext: nextgi_hit_groups (#130)
+	r_info.attribute_chunk = surface->rt_attr_chunk;
+	r_info.attribute_offset = surface->rt_attr_offset;
 	return true;
 }
 
@@ -1007,6 +1124,8 @@ void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
 				continue;
 			}
 			const bool is_virtual = RSG::virtual_mesh_storage->mesh_surface_is_virtual(p_mesh, s);
+			// GodotNext: nextgi_hit_groups (#130). The stream goes with the surface's arena range.
+			_mesh_nextgi_hit_free_attributes(surface);
 			if (surface->rt_chunk != UINT32_MAX) {
 				NextGIArenaAllocator::Allocation allocation;
 				allocation.chunk = surface->rt_chunk;
@@ -1699,12 +1818,20 @@ void MeshStorage::mesh_nextgi_rt_arena_free(const NextGIArenaAllocator::Allocati
 MeshStorage::NextGIRTStats MeshStorage::mesh_nextgi_get_rt_stats() const {
 	NextGIRTStats out;
 	out.rt_arena_bytes = nextgi_rt_allocator.get_allocated_bytes();
+	// GodotNext: nextgi_hit_groups (#130)
+	out.rt_attribute_bytes = nextgi_hit_attribute_bytes;
 	RenderingDevice *rd = RD::get_singleton();
 	const LocalVector<RID> owned = mesh_owner.get_owned_list();
 	for (const RID &mesh_rid : owned) {
 		const Mesh *mesh = mesh_owner.get_or_null(mesh_rid);
 		if (mesh == nullptr || mesh->nextgi_skip_rt_arena) {
 			continue;
+		}
+		// GodotNext: nextgi_hit_groups (#130)
+		for (uint32_t i = 0; i < mesh->surface_count; i++) {
+			if (mesh->surfaces[i] != nullptr && mesh->surfaces[i]->rt_attr_chunk != UINT32_MAX) {
+				out.rt_attribute_surfaces++;
+			}
 		}
 		for (const NextGIRTPart &part : mesh->nextgi_parts) {
 			const uint64_t current_bytes = (rd != nullptr && part.blas.is_valid()) ? rd->acceleration_structure_get_size_bytes(part.blas) : 0;
@@ -1837,6 +1964,8 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 	if (plan.note_update) {
 		mesh_nextgi_rt_note_vertex_update(p_mesh);
 	}
+	// GodotNext: nextgi_hit_groups (#130). The vertex buffer holds the normals and tangents.
+	_mesh_nextgi_hit_patch_attributes(surface, false, uint32_t(p_offset), p_data);
 }
 
 void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
@@ -1850,6 +1979,8 @@ void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface
 	const uint8_t *r = p_data.ptr();
 
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->attribute_buffer, p_offset, data_size, r);
+	// GodotNext: nextgi_hit_groups (#130). The attribute buffer holds the colors and UVs.
+	_mesh_nextgi_hit_patch_attributes(mesh->surfaces[p_surface], true, uint32_t(p_offset), p_data);
 }
 
 void MeshStorage::mesh_surface_update_skin_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {

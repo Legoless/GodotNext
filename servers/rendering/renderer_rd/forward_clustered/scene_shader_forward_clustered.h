@@ -36,6 +36,11 @@
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_types.h"
 
+// GodotNext: nextgi_hit_groups (#130)
+namespace RendererRD {
+struct NextGIHitShaderSource;
+} // namespace RendererRD
+
 namespace RendererSceneRenderImplementation {
 
 class SceneShaderForwardClustered {
@@ -44,6 +49,9 @@ private:
 	static Mutex singleton_mutex;
 
 public:
+	// GodotNext: nextgi_hit_groups (#130). The material the rasterizer draws a surface without one with.
+	static RID get_default_material_for_nextgi() { return singleton != nullptr ? singleton->default_material : RID(); }
+
 	enum ShaderGroup {
 		SHADER_GROUP_BASE, // Always compiled at the beginning.
 		SHADER_GROUP_ADVANCED,
@@ -433,6 +441,13 @@ public:
 		uint64_t get_vertex_input_mask(PipelineVersion p_pipeline_version, uint32_t p_color_pass_flags, bool p_ubershader);
 		RD::PolygonCullMode get_cull_mode_from_cull_variant(CullVariant p_cull_variant);
 		bool is_valid() const;
+
+		// GodotNext: nextgi_hit_groups (#130). Unique across every shader and every set_code(), so NextGI's hit
+		// groups know when a shader's code changed. 0 until the shader has code.
+		uint64_t nextgi_hit_serial = 0;
+		// The NextGI hit variant: the ShaderCompiler output of p_code in nextgi_hit mode. Takes the compiler's
+		// mutex, as set_code() does, so any thread may call it (NextGI calls it once per serial on a worker).
+		static bool build_nextgi_hit_source(const String &p_code, const String &p_path, RendererRD::NextGIHitShaderSource &r_source);
 
 		SelfList<ShaderData> shader_list_element;
 		ShaderData();

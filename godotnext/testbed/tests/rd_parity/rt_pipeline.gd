@@ -33,6 +33,9 @@ extends Node
 ## - "reorder": the direct pipeline with a ray generation shader that reorders its hits (shader execution
 ##   reordering, with whichever GLSL extension LIMIT_RAYTRACING_REORDER_EXTENSIONS names), created with
 ##   RAYTRACING_PIPELINE_FLAG_REORDER.
+## Pipelines and a linked pipeline are also created and freed before any list binds them, on the local
+## device after its last trace and on the rendering server's device while the engine quits; the run must
+## log no ERROR line for them (their ray generation and miss table upload is finished before the free).
 ## A device without SUPPORTS_RAYTRACING_REORDER, SUPPORTS_RAYTRACING_PIPELINE_LIBRARY or
 ## SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT runs the other variants and fails with reason NO_REORDER,
 ## NO_LIBRARIES or NO_INDIRECT. The one exception: Direct3D 12 has no shader execution reordering in v1
@@ -274,12 +277,70 @@ var _probes_at_start := -1
 var _probes_at_end := -1
 # The hit shader binding table ranges of each table, by material.
 var _ranges_of := {}
+var _base_library := RID()
 
 
 func _ready() -> void:
 	var result: Dictionary = _run()
 	print("GODOTNEXT_RESULT " + JSON.stringify(result))
 	get_tree().quit(0 if result["pass"] else 1)
+
+
+func _exit_tree() -> void:
+	_free_unbound_on_main_device()
+
+
+# Pipelines on the rendering server's own device, created and freed while the engine quits, so no frame
+# submits the device between their creation and its shutdown: the upload of their ray generation and miss
+# table is still on a transfer worker when they are freed, and freeing one must finish that upload first
+# (found by #130). The run's 0-ERROR bar covers it.
+func _free_unbound_on_main_device() -> void:
+	var rd := RenderingServer.get_rendering_device()
+	if rd == null or not rd.has_feature(RenderingDevice.SUPPORTS_RAYTRACING_PIPELINE):
+		return
+	var raygen := _main_device_shader(rd, { "raygen": COMMON % "" + RAYGEN, "miss": COMMON % "" + MISS_SHADER })
+	var hit := _main_device_shader(rd, { "any_hit": COMMON % "" + RECORD + ANY_HIT, "closest_hit": COMMON % "" + RECORD + CLOSEST_HIT })
+	if raygen.is_valid() and hit.is_valid():
+		var slots := _material_slots()
+		var cutoffs := _material_cutoffs()
+		var groups: Array[RDHitGroup] = []
+		for m in MATERIALS:
+			groups.append(_hit_group(hit, m, slots[m], cutoffs[m]))
+		var pipeline := rd.raytracing_pipeline_create([_pipeline_shader(raygen)], [_pipeline_shader(raygen)], groups, 1)
+		if pipeline.is_valid():
+			rd.free_rid(pipeline)
+		else:
+			printerr("rt_pipeline: the pipeline on the main device was not created")
+		if rd.has_feature(RenderingDevice.SUPPORTS_RAYTRACING_PIPELINE_LIBRARY):
+			var base := rd.raytracing_pipeline_create([_pipeline_shader(raygen)], [_pipeline_shader(raygen)], [], 1, RenderingDevice.RAYTRACING_PIPELINE_FLAG_LIBRARY)
+			var library := rd.raytracing_pipeline_create([], [], [groups[0]], 1, RenderingDevice.RAYTRACING_PIPELINE_FLAG_LIBRARY)
+			if base.is_valid() and library.is_valid():
+				var linked := rd.raytracing_pipeline_link(base, [library])
+				if linked.is_valid():
+					rd.free_rid(linked)
+				else:
+					printerr("rt_pipeline: the linked pipeline on the main device was not created")
+			if library.is_valid():
+				rd.free_rid(library)
+			if base.is_valid():
+				rd.free_rid(base)
+	if hit.is_valid():
+		rd.free_rid(hit)
+	if raygen.is_valid():
+		rd.free_rid(raygen)
+
+
+func _main_device_shader(rd: RenderingDevice, p_stages: Dictionary) -> RID:
+	var source := RDShaderSource.new()
+	for stage in p_stages:
+		source.set("source_" + stage, p_stages[stage])
+	var spirv := rd.shader_compile_spirv_from_source(source)
+	for stage in p_stages:
+		var error: String = spirv.get("compile_error_" + stage)
+		if not error.is_empty():
+			printerr("rt_pipeline: the %s stage does not compile on the main device: %s" % [stage, error])
+			return RID()
+	return rd.shader_create_from_spirv(spirv, "rt_pipeline main device")
 
 
 func _run() -> Dictionary:
@@ -425,6 +486,7 @@ func _run_pipelines(rd: RenderingDevice, result: Dictionary) -> void:
 		_check(base_library.is_valid(), "the base library (ray generation and miss) is created")
 		if base_library.is_valid() and direct_pipeline.is_valid():
 			_freed.append(base_library)
+			_base_library = base_library
 			_run_libraries(rd, base_library, raygen, direct_pipeline, hit_groups, tlas, rays, table, alpha_tested, variants, result)
 
 	# Shader execution reordering.
@@ -440,6 +502,20 @@ func _run_pipelines(rd: RenderingDevice, result: Dictionary) -> void:
 				_freed.append(reorder_pipeline)
 				var sbt := _hit_sbt(rd, reorder_pipeline, MATERIALS)
 				variants["reorder"] = _compare(alpha_tested, _trace(rd, reorder_raygen, reorder_pipeline, sbt, tlas, rays, table, RID()))
+
+	# Pipelines freed before any list binds them, after the last trace, so nothing submits the device before
+	# it is freed: the upload of their ray generation and miss table can still be on a transfer worker, so
+	# freeing one finishes that upload first (found by #130). The run's 0-ERROR bar covers it.
+	for i in 4:
+		var unbound := rd.raytracing_pipeline_create([raygen_shader], [miss_shader], hit_groups, 1)
+		_check(unbound.is_valid(), "a pipeline that is freed before any trace is created")
+		if unbound.is_valid():
+			rd.free_rid(unbound)
+	if result["supported"]["libraries"] and not _libraries.is_empty() and _base_library.is_valid():
+		var unbound_linked := rd.raytracing_pipeline_link(_base_library, _libraries)
+		_check(unbound_linked.is_valid(), "a linked pipeline that is freed before any trace is created")
+		if unbound_linked.is_valid():
+			rd.free_rid(unbound_linked)
 
 	var expected := ["direct", "restrided", "mid_list_1", "mid_list_2"]
 	if result["supported"]["indirect"]:
