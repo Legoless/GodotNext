@@ -50,7 +50,7 @@
 			"name": "NextGI total at High (G3-5's parent)",
 			"gates": ["G3-5"],
 			"status": "ue_bar",
-			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5).",
+			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5). UE takes the hardware tier from r.Lumen.HardwareRayTracing 1 at launch, because the shared comparison project keeps Use Hardware Ray Tracing when available off. This departs from the settings record and plan §23.5, which say the comparison enables the two project settings, until the lead decides. The Glass & Water captures also report GPU/TranslucentLighting and GPU/Translucency outside the group, no public Epic page names the UE pass that carries Lumen's translucency volume (plan §23.5's L9 row), and the GodotNext group includes the translucency volume's fill within NextGI's line 3: which UE columns hold the volume waits for the settings record before any judged run.",
 			"statistic": "p95",
 			"direction": "lower",
 			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },

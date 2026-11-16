@@ -130,6 +130,7 @@ const APPROXIMATIONS := {
 	"rigid_skin": "A skinned mesh whose every vertex follows one bone at full weight, exported as rigid parts instead of the default skeletal mesh: the export writes one mesh per bone (the triangles bound to it) with a per-frame transform track, and the UE import places them as rigid moving meshes. The poses are the same; UE draws rigid meshes, not a skinned one.",
 	"shader_material": "A ShaderMaterial: scene.json carries its code, the code's SHA-256 and its uniform values, and the UE import builds a hand-written UE material only for a shader it knows by that SHA-256 (it refuses any other), so the UE surface is a port by hand, not a conversion.",
 	"particles": "GPU or CPU particles: no public UE import path carries a Godot particle system, so the UE import builds none and the UE scene draws no particles.",
+	"camera_far": "Geometry past the camera's far plane inside the view on some row: Godot clips it and shows the sky there, while the UE import sets only the camera's near plane, so UE draws that geometry and Lumen lights it. checks.camera_far_rows counts the rows.",
 }
 
 ## Texture filters the format carries (BaseMaterial3D.texture_filter), as scene.json names them.
@@ -504,6 +505,65 @@ static func translucent_shadow(p_material: Material, p_cast_shadow: int) -> bool
 	if p_cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_OFF or not (p_material is BaseMaterial3D):
 		return false
 	return (p_material as BaseMaterial3D).transparency == BaseMaterial3D.TRANSPARENCY_ALPHA
+
+
+## The view past a camera's far plane, as world-space planes (camera_far): the four side planes of
+## the view, then the far plane. A point is inside the view when it is over no side plane
+## (Plane.distance_to <= 0) and past the far plane when it is over the far plane. p_keep_height is
+## Camera3D.KEEP_HEIGHT (the field of view is the vertical angle); p_aspect is width / height.
+static func far_planes(p_camera: Transform3D, p_fov_deg: float, p_keep_height: bool, p_aspect: float, p_far: float) -> Array[Plane]:
+	var half := tan(deg_to_rad(p_fov_deg) * 0.5)
+	var tan_x := half * p_aspect if p_keep_height else half
+	var tan_y := half if p_keep_height else half / p_aspect
+	var basis := p_camera.basis.orthonormalized()
+	var origin := p_camera.origin
+	var planes: Array[Plane] = []
+	# In camera space the view looks down -Z, and a side plane through the eye bounds, for example,
+	# x <= tan_x * -z.
+	for normal: Vector3 in [Vector3(1.0, 0.0, tan_x), Vector3(-1.0, 0.0, tan_x), Vector3(0.0, 1.0, tan_y), Vector3(0.0, -1.0, tan_y)]:
+		var world := (basis * normal).normalized()
+		planes.append(Plane(world, world.dot(origin)))
+	var forward := (basis * Vector3(0.0, 0.0, -1.0)).normalized()
+	planes.append(Plane(forward, forward.dot(origin) + p_far))
+	return planes
+
+
+## Whether a world box may reach past the far plane inside the view (far_planes): it is not wholly
+## over a side plane, and some of it lies more than p_tolerance past the far plane. Conservative
+## near the corners of the view, as frustum culling is.
+static func box_past_far(p_box: AABB, p_planes: Array[Plane], p_tolerance: float = 0.001) -> bool:
+	var center := p_box.get_center()
+	var half := p_box.size * 0.5
+	for index in 4:
+		var side: Plane = p_planes[index]
+		if side.distance_to(center) - _box_reach(side.normal, half) > 0.0:
+			return false
+	var far: Plane = p_planes[4]
+	return far.distance_to(center) + _box_reach(far.normal, half) > p_tolerance
+
+
+static func _box_reach(p_normal: Vector3, p_half: Vector3) -> float:
+	return absf(p_normal.x) * p_half.x + absf(p_normal.y) * p_half.y + absf(p_normal.z) * p_half.z
+
+
+## What the format cannot carry in a skinned mesh's skeleton (#230), as messages. The export reads
+## each bone's pose (pose_row), but the renderer skins with what the skeleton hands it on the skin
+## update: show_rest_only and a disabled bone hand it the rest pose, a bone's skin scale scales its
+## bind pose, and a SkeletonModifier3D child modifies the poses for the update and restores them
+## after it (scene/3d/skeleton_3d.cpp).
+static func skeleton_refusals(p_skeleton: Skeleton3D) -> PackedStringArray:
+	var found := PackedStringArray()
+	if p_skeleton.show_rest_only:
+		found.append("its Skeleton3D shows the rest pose only")
+	for child in p_skeleton.get_children():
+		if child is SkeletonModifier3D:
+			found.append("its Skeleton3D has a SkeletonModifier3D (%s)" % child.name)
+	for bone in p_skeleton.get_bone_count():
+		if not p_skeleton.is_bone_enabled(bone):
+			found.append("bone %s is disabled" % p_skeleton.get_bone_name(bone))
+		if not p_skeleton.get_bone_skin_scale(bone).is_equal_approx(Vector3.ONE):
+			found.append("bone %s has a skin scale" % p_skeleton.get_bone_name(bone))
+	return found
 
 
 ## How a light's layer mask treats the placed geometry: "all" when it keeps every layer the placed

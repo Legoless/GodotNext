@@ -29,17 +29,24 @@
 #    plays is the frame the scene resets the temporal history at.
 # 7. Glass & Water (CaptureCam, 60 frames): without --approximate it must refuse and name
 #    translucent_shadow; then two exports with it and check_ue_export.gd on the pair. Character
-#    Walk (CaptureCam, the walk's 240 frames) and NextGI Perf (CaptureCam, --instances=180
-#    --variant=p3, 120 frames), which need no approximation: two exports each and
-#    check_ue_export.gd on each pair (their skinned characters as skeletal meshes, NextGI Perf's
-#    GridMap cells).
+#    Walk (CaptureCam, the walk's 240 frames), which needs no approximation: two exports and
+#    check_ue_export.gd on the pair. NextGI Perf (CaptureCam, --instances=180 --variant=p3, 120
+#    frames): without --approximate it must refuse and name camera_far (CaptureCam's 80 m far plane
+#    clips the courtyard's far end); then two exports with it and check_ue_export.gd on the pair
+#    (the skinned characters as skeletal meshes, the GridMap cells, the far-plane row count).
 # 8. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
 #    still fixture must export; a light that moves and returns, a mesh hidden for one frame, a
 #    MultiMesh instance and a GridMap cell that move and return must each refuse (exit 1) and name
-#    the node with the row it changed at (a first-and-last comparison would miss them); a Skeleton3D
-#    beside its skinned mesh and a camera cull mask that hides a placed layer must refuse and say
-#    so. Without rigid_skin the still fixture must export one skeletal instance and the offset
-#    skeleton must refuse too. No refused run may write scene.json.
+#    the node with row 8, the row it changed at (a first-and-last comparison would miss them); a
+#    Skeleton3D beside its skinned mesh, a camera cull mask that hides a placed layer and a bone
+#    skin scale must refuse and say so. Without rigid_skin the still fixture must export one
+#    skeletal instance, and must refuse with each of: the offset skeleton, a skinned mesh without a
+#    Skin, a bone skin scale, show_rest_only, a disabled bone, a SkeletonModifier3D, an alpha-blended
+#    GridMap item that casts shadows (translucent_shadow), two GridMap items that share a mesh with
+#    different shadow settings, and a 5 m far plane (camera_far), which exports with
+#    --approximate=camera_far. No refused run may write scene.json. Two exports of the still
+#    fixture without rigid_skin go through check_ue_export.gd (its two GridMaps' cells against
+#    transforms written out from their settings).
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -224,7 +231,16 @@ check glass
 export_pair walk --scene=res://scenes/character_walk/character_walk.tscn --camera=CaptureCam --warmup=0 --frames=240
 check walk
 
-export_pair perf --scene=res://scenes/nextgi_perf/nextgi_perf.tscn --camera=CaptureCam --warmup=0 --frames=120 --instances=180 --variant=p3
+perf_args=(--scene=res://scenes/nextgi_perf/nextgi_perf.tscn --camera=CaptureCam --warmup=0 --frames=120 --instances=180 --variant=p3)
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${perf_args[@]}" --out="$work/perf_refused" >"$work/perf_refused.log" 2>&1 || status=$?
+report perf_refused "$status" 1 "$work/perf_refused.log"
+if ! grep -q -- "--approximate=camera_far" "$work/perf_refused.log" || [[ -e "$work/perf_refused/scene.json" ]]; then
+	echo "run_ue_export_check.sh: the refused NextGI Perf export does not name --approximate=camera_far, or wrote scene.json" >&2
+	failures=$((failures + 1))
+fi
+export_pair perf "${perf_args[@]}" --approximate=camera_far
 check perf
 
 fixture_args=(--scene=res://tests/ue_export/motion_fixture.tscn --camera=Camera --warmup=0 --frames=20)
@@ -252,12 +268,14 @@ fixture_case() {
 	fi
 }
 fixture_case none 0 ""
-fixture_case light_returns 1 "Light moved or changed at row"
-fixture_case mesh_blinks 1 "Box moved or changed at row"
-fixture_case multimesh_returns 1 "Rocks moved or changed at row"
-fixture_case gridmap_returns 1 "Grid moved or changed at row"
+# Each motion case changes on frame 8 and is back on frame 9.
+fixture_case light_returns 1 "Light moved or changed at row 8;"
+fixture_case mesh_blinks 1 "Box moved or changed at row 8;"
+fixture_case multimesh_returns 1 "Rocks moved or changed at row 8;"
+fixture_case gridmap_returns 1 "Grid moved or changed at row 8;"
 fixture_case skeleton_offset 1 "skinned mesh Skinned whose Skeleton3D is not at the mesh instance's transform"
 fixture_case camera_cull 1 "a camera cull mask that hides some placed layers"
+fixture_case skin_scale 1 "skinned mesh Skinned: bone root has a skin scale"
 # The skeletal path (the default since #230): the still fixture exports its skinned triangle as a
 # skeletal mesh, and the offset skeleton is refused there too.
 fixture_case none 0 "" none
@@ -266,6 +284,25 @@ if ! grep -q '"skeletal":1' "$work/fixture_none_none.log"; then
 	echo "run_ue_export_check.sh: the still fixture without rigid_skin did not export one skeletal instance" >&2
 	failures=$((failures + 1))
 fi
+# What the renderer skins besides the bones' poses (a Skin made from the rests, a skin scale, the
+# rest pose only, a disabled bone, a modifier) is refused, not exported as the bones' poses.
+fixture_case auto_skin 1 "skinned mesh Skinned has no Skin" none
+fixture_case skin_scale 1 "skinned mesh Skinned: bone root has a skin scale" none
+fixture_case rest_only 1 "skinned mesh Skinned: its Skeleton3D shows the rest pose only" none
+fixture_case bone_disabled 1 "skinned mesh Skinned: bone root is disabled" none
+fixture_case modifier 1 "skinned mesh Skinned: its Skeleton3D has a SkeletonModifier3D (Turn)" none
+fixture_case gridmap_glass 1 "translucent_shadow on Grid (pass --approximate=translucent_shadow" none
+fixture_case gridmap_shadows 1 "GridMap Grid: items [0, 1] share a mesh with different shadow settings" none
+fixture_case camera_far 1 "camera_far on Camera (pass --approximate=camera_far" none
+fixture_case camera_far 0 "" camera_far
+if ! grep -q '"approximations":\["camera_far"\]' "$work/fixture_camera_far_camera_far.log"; then
+	echo "run_ue_export_check.sh: the fixture with a 5 m far plane did not export camera_far" >&2
+	failures=$((failures + 1))
+fi
+# The still fixture's two GridMaps (one with a rotated node, non-cubic cells centered on two axes,
+# a cell scale, an item mesh transform and rotated cells) against transforms written out by hand.
+export_pair fixture "${fixture_args[@]}"
+check fixture
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2

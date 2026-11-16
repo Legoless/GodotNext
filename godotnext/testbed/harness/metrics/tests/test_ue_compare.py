@@ -283,6 +283,12 @@ def test_the_nextgi_scene_configs(
     assert line.ue.columns == (_LUMEN_LITE if quality == "MEDIUM" else _LUMEN_TOTAL)
     assert "Provisional" in line.reason
     assert ("Lumen Lite" in line.reason) == (quality == "MEDIUM")
+    # What the lead decides before the line is judged: NextGI Perf's far plane (the export's
+    # camera_far approximation), the hardware tier set by the cvar rather than by the project
+    # settings the settings record names, and which UE columns hold the translucency volume (G3-5).
+    assert ("camera_far" in line.reason) == name.startswith("nextgi_perf_")
+    assert ("departs from the settings record" in line.reason) == (tier == "HWRT")
+    assert ("translucency volume" in line.reason) == (gate == "G3-5")
 
 
 def test_the_ue_window_mode_comes_from_the_config() -> None:

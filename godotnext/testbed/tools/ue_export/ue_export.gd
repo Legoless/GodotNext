@@ -141,6 +141,15 @@ var _approximation_items := {}
 ## Light entries and their nodes, for the mask effects resolved once every layer is known.
 var _light_nodes: Array = []
 var _layers_in_use := 0
+## The far-plane test (camera_far): per camera row [world transform, fov, far, KEEP_HEIGHT]; the
+## world box of every placement that holds still and their union; [local box, Array of Transform3D
+## per row] per mover; and the number of rows on which a placement reaches past the far plane.
+var _camera_poses: Array = []
+var _still_boxes: Array[AABB] = []
+var _still_union := AABB()
+var _still_union_set := false
+var _moving_boxes: Array = []
+var _camera_far_rows := 0
 
 
 func _initialize() -> void:
@@ -267,6 +276,7 @@ func _fail(p_code: int, p_message: String) -> void:
 
 func _camera_row(p_frame: int) -> String:
 	var transform := _camera.global_transform.orthonormalized()
+	_camera_poses.append([transform, _camera.fov, _camera.far, _camera.keep_aspect == Camera3D.KEEP_HEIGHT])
 	var q := transform.basis.get_rotation_quaternion()
 	var values := [transform.origin.x, transform.origin.y, transform.origin.z, q.x, q.y, q.z, q.w, _camera.fov, _camera.near, _camera.far]
 	var cells := PackedStringArray([str(p_frame)])
@@ -444,6 +454,7 @@ func _check_rigid_skin(p_instance: MeshInstance3D, p_world: Transform3D, p_parts
 func _export() -> String:
 	_walk(_scene)
 	_resolve_light_masks()
+	_check_camera_far()
 	if Lib.mask_effect(_camera.cull_mask, _layers_in_use) != "all":
 		_unsupported.append("a camera cull mask that hides some placed layers (not exported yet)")
 	var environment_refusals := Lib.environment_refusals(_environment_node.environment if _environment_node != null else null, _camera)
@@ -598,6 +609,7 @@ func _export() -> String:
 			"movers": _movers,
 			"rigid_skin_max_error_m": Lib.json_value(_rigid_skin_error),
 			"rigid_skin_vertices_compared": _rigid_skin_compared,
+			"camera_far_rows": _camera_far_rows,
 		},
 	}
 	if _camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
@@ -671,6 +683,9 @@ func _add_mesh_instance(p_node: MeshInstance3D) -> void:
 	if mesh == null:
 		return
 	var path := str(_scene.get_path_to(p_node))
+	if p_node.skin == null and p_node.get_node_or_null(p_node.skeleton) is Skeleton3D and _has_bones(mesh):
+		_unsupported.append("skinned mesh %s has no Skin: the renderer skins it with one made from its Skeleton3D's rest transforms (not exported yet)" % path)
+		return
 	if p_node.skin != null:
 		if "rigid_skin" in _approximate:
 			_add_skinned(p_node, path)
@@ -711,7 +726,7 @@ func _add_node_instance(p_node: MeshInstance3D, p_path: String, p_id: String, p_
 		entry["skin_part"] = p_skin_part
 	_instances.append(entry)
 	_layers_in_use |= p_node.layers
-	_add_placement(transform, p_mesh)
+	_add_placement(transform, p_mesh, -1, _slot_moves.get(slot))
 	_node_instances += 1
 
 
@@ -816,6 +831,10 @@ func _add_skinned(p_node: MeshInstance3D, p_path: String) -> void:
 	if not skeleton.global_transform.is_equal_approx(p_node.global_transform):
 		_unsupported.append("skinned mesh %s whose Skeleton3D is not at the mesh instance's transform (not exported yet)" % p_path)
 		return
+	var skeleton_refusals := Lib.skeleton_refusals(skeleton)
+	if not skeleton_refusals.is_empty():
+		_unsupported.append("skinned mesh %s: %s (not exported yet)" % [p_path, ", ".join(skeleton_refusals)])
+		return
 	var split := Lib.rigid_skin_parts(p_node.mesh)
 	if split.has("error"):
 		_unsupported.append("skinned mesh %s: %s (a skinned mesh is exported only as rigid parts: triangle lists without blend shapes, every vertex on one bone at full weight)" % [p_path, split["error"]])
@@ -873,6 +892,7 @@ func _add_skeletal(p_node: MeshInstance3D, p_path: String) -> void:
 		_unsupported.append("skinned mesh %s whose Skeleton3D is not at the mesh instance's transform (not exported yet)" % p_path)
 		return
 	var refusals := Lib.skeletal_refusals(p_node.mesh)
+	refusals.append_array(Lib.skeleton_refusals(skeleton))
 	if not refusals.is_empty():
 		_unsupported.append("skinned mesh %s: %s (not exported yet)" % [p_path, ", ".join(refusals)])
 		return
@@ -957,9 +977,7 @@ func _add_skeletal(p_node: MeshInstance3D, p_path: String) -> void:
 	_layers_in_use |= p_node.layers
 	_world_transforms.append(transform)
 	_triangles_total += int(asset["triangles"])
-	var box := transform * p_node.mesh.get_aabb()
-	_aabb = _aabb.merge(box) if _aabb_set else box
-	_aabb_set = true
+	_add_bounds(p_node.mesh.get_aabb(), transform, _slot_moves.get(slot))
 	_skeletal_instances += 1
 
 
@@ -990,9 +1008,14 @@ func _add_gridmap(p_node: GridMap) -> void:
 		if id.is_empty():
 			return
 		var materials: Array = []
+		var cast_shadow := int(shadows.keys()[0])
+		var translucent_shadow := false
 		for surface in mesh.get_surface_count():
 			materials.append(_material_id(mesh.surface_get_material(surface)))
-		var cast_shadow := int(shadows.keys()[0])
+			translucent_shadow = translucent_shadow or Lib.translucent_shadow(mesh.surface_get_material(surface), cast_shadow)
+		# The items' cast shadow setting applies to every cell, as an instance's does.
+		if translucent_shadow:
+			_need_approximation("translucent_shadow", path)
 		var rows: Array = []
 		for local: Transform3D in groups[mesh]:
 			var world := p_node.global_transform * local
@@ -1079,15 +1102,68 @@ func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
 	_multimesh_nodes += 1
 
 
-func _add_placement(p_world: Transform3D, p_mesh: Mesh, p_triangles: int = -1) -> void:
+## One placement at its row-0 world transform; p_rows holds a mover's transform on every row.
+func _add_placement(p_world: Transform3D, p_mesh: Mesh, p_triangles: int = -1, p_rows: Variant = null) -> void:
 	_world_transforms.append(p_world)
 	_triangles_total += p_triangles if p_triangles >= 0 else int(_meshes[_mesh_ids[p_mesh]["index"]]["triangles"])
-	var box := p_world * p_mesh.get_aabb()
+	_add_bounds(p_mesh.get_aabb(), p_world, p_rows)
+
+
+## A placement's bounds: merged into checks.aabb at row 0, and kept for the far-plane test.
+func _add_bounds(p_local: AABB, p_world: Transform3D, p_rows: Variant) -> void:
+	var box := p_world * p_local
 	if _aabb_set:
 		_aabb = _aabb.merge(box)
 	else:
 		_aabb = box
 		_aabb_set = true
+	if p_rows == null:
+		_still_boxes.append(box)
+		_still_union = _still_union.merge(box) if _still_union_set else box
+		_still_union_set = true
+	else:
+		_moving_boxes.append([p_local, p_rows])
+
+
+## camera_far: counts the camera rows on which some placement reaches past the camera's far plane
+## inside the view (Lib.box_past_far), at the project's viewport aspect (the comparison renders at
+## that aspect). Godot clips that geometry; the UE import does not. The test of the still
+## placements is repeated only when the camera's pose or projection changes.
+func _check_camera_far() -> void:
+	var width := float(ProjectSettings.get_setting("display/window/size/viewport_width", 1920))
+	var height := float(ProjectSettings.get_setting("display/window/size/viewport_height", 1080))
+	var aspect := width / maxf(height, 1.0)
+	var still_past := false
+	for row in _camera_poses.size():
+		var pose: Array = _camera_poses[row]
+		var planes := Lib.far_planes(pose[0], float(pose[1]), bool(pose[3]), aspect, float(pose[2]))
+		if row == 0 or pose != (_camera_poses[row - 1] as Array):
+			still_past = false
+			if _still_union_set and Lib.box_past_far(_still_union, planes):
+				for box: AABB in _still_boxes:
+					if Lib.box_past_far(box, planes):
+						still_past = true
+						break
+		var past := still_past
+		for moving: Array in _moving_boxes:
+			if past:
+				break
+			var rows: Array = moving[1]
+			if row < rows.size() and Lib.box_past_far((rows[row] as Transform3D) * (moving[0] as AABB), planes):
+				past = true
+		if past:
+			_camera_far_rows += 1
+	if _camera_far_rows > 0:
+		_need_approximation("camera_far", str(_scene.get_path_to(_camera)))
+
+
+static func _has_bones(p_mesh: Mesh) -> bool:
+	if not (p_mesh is ArrayMesh):
+		return false
+	for surface in p_mesh.get_surface_count():
+		if ((p_mesh as ArrayMesh).surface_get_format(surface) & Mesh.ARRAY_FORMAT_BONES) != 0:
+			return true
+	return false
 
 
 func _mesh_id(p_mesh: Mesh) -> String:

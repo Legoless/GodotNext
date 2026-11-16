@@ -5,7 +5,7 @@ extends SceneTree
 ## run_ue_export_check.sh makes them; this script runs headless:
 ##
 ##   godot --headless --path godotnext/testbed --script res://tests/ue_export/check_ue_export.gd -- \
-##     <kitbash|yard|hall|torture|glass|walk|perf> <export A> <export B>
+##     <kitbash|yard|hall|torture|glass|walk|perf|fixture> <export A> <export B>
 ##
 ## It checks that the two exports are byte-identical apart from export_manifest.json, that the
 ## manifest checksums match, that scene.json follows ue_export_schema.md, that library.glb and
@@ -22,12 +22,15 @@ extends SceneTree
 ## scene's bones, binds, mesh and one clip per character whose every row is the pose track's, and
 ## the pose and world tracks recomputed from the scene's walk cycle and paths); NextGI Perf's
 ## seeded instances in all three feeds (MeshInstance3D, MultiMesh and GridMap cells as drawn) and
-## its camera spline. Prints GODOTNEXT_RESULT and exits 1 on any failure.
+## its camera spline; the still motion fixture's GridMap cells (tests/ue_export/motion_fixture.tscn)
+## against transforms written out from each GridMap's settings. Prints GODOTNEXT_RESULT and exits 1
+## on any failure.
 
 const Lib := preload("res://tools/ue_export/ue_export_lib.gd")
 const Layout := preload("res://scenes/swrt_kitbash/layout.gd")
 const PerfLayout := preload("res://scenes/nextgi_perf/layout.gd")
 const Character := preload("res://scenes/character_walk/character.gd")
+const Fixture := preload("res://tests/ue_export/motion_fixture.gd")
 
 const SCENES := {
 	"kitbash": {"scene": "res://scenes/swrt_kitbash/swrt_kitbash.tscn", "camera": "CaptureCam", "sky": true},
@@ -37,6 +40,7 @@ const SCENES := {
 	"glass": {"scene": "res://scenes/glass_water/glass_water.tscn", "camera": "CaptureCam", "sky": true},
 	"walk": {"scene": "res://scenes/character_walk/character_walk.tscn", "camera": "CaptureCam", "sky": true},
 	"perf": {"scene": "res://scenes/nextgi_perf/nextgi_perf.tscn", "camera": "CaptureCam", "sky": true},
+	"fixture": {"scene": "res://tests/ue_export/motion_fixture.tscn", "camera": "Camera", "sky": false},
 }
 ## Upscaler Torture (#232): the frame the scene resets the temporal history at, and its timeline
 ## (torture_timeline.gd), restated here so the check recomputes the poses on its own.
@@ -58,7 +62,7 @@ var _walker_bones: Array = []
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.size() != 3 or not SCENES.has(String(args[0])):
-		printerr("check_ue_export.gd: pass <kitbash|yard|hall|torture|glass|walk|perf> and two export directories after --")
+		printerr("check_ue_export.gd: pass <kitbash|yard|hall|torture|glass|walk|perf|fixture> and two export directories after --")
 		quit(2)
 		return
 	var which := String(args[0])
@@ -87,15 +91,18 @@ func _initialize() -> void:
 				_check_walk(first, scene)
 			"perf":
 				_check_perf(first, scene)
+			"fixture":
+				_check_fixture(scene)
 		_check_skeletal(first, scene)
 		_check_library(first, scene)
 		_check_axes(first)
 		_check_camera_track(first, scene)
+		_check_camera_far(first, scene)
 		_check_textures(first, scene)
 		if _has_sky:
 			_check_sky(first, scene)
 		else:
-			_check(scene["environment"]["sky"] == null and not FileAccess.file_exists(first.path_join("sky.hdr")), "a scene without a sky has no sky.hdr")
+			_check((scene["environment"] == null or scene["environment"]["sky"] == null) and not FileAccess.file_exists(first.path_join("sky.hdr")), "a scene without a sky has no sky.hdr")
 	var ok := _failures.is_empty()
 	print("GODOTNEXT_RESULT " + JSON.stringify({"test": "ue_export", "scene": which, "ok": ok, "checks": _checks, "failures": _failures.size()}))
 	for failure in _failures:
@@ -250,9 +257,11 @@ func _test_refusals() -> void:
 	_check(not png.is_empty() and decoded.load_png_from_buffer(png) == OK and decoded.get_size() == Vector2i(4, 4), "a texture becomes a PNG of its size")
 	_check(Lib.texture_png(null).is_empty(), "no texture gives no PNG")
 	_test_texture_png()
-	for id: String in ["diffuse_mode", "shadow_caster_mask", "light_projector", "light_cull_mask", "translucent_shadow", "alpha_antialiasing", "rigid_skin", "shader_material", "particles"]:
+	for id: String in ["diffuse_mode", "shadow_caster_mask", "light_projector", "light_cull_mask", "translucent_shadow", "alpha_antialiasing", "rigid_skin", "shader_material", "particles", "camera_far"]:
 		_check(Lib.APPROXIMATIONS.has(id) and not String(Lib.APPROXIMATIONS[id]).is_empty(), "approximation %s is described" % id)
 	_test_rigid_skin()
+	_test_skeleton_refusals()
+	_test_camera_far()
 	var environment := Environment.new()
 	environment.sky = Sky.new()
 	var sky := ProceduralSkyMaterial.new()
@@ -369,6 +378,54 @@ func _test_rigid_skin() -> void:
 	_check(is_inf(float(Lib.rigid_skin_error(split, null, {0: part_a, 3: part_b})["max_m"])), "a missing bake is not a match")
 
 
+## skeleton_refusals names what makes the renderer skin a pose other than the bones' poses: the rest
+## pose only, a disabled bone, a bone's skin scale and a SkeletonModifier3D child; a plain skeleton
+## is carried.
+func _test_skeleton_refusals() -> void:
+	var skeleton := Skeleton3D.new()
+	skeleton.add_bone("root")
+	skeleton.add_bone("tip")
+	skeleton.set_bone_parent(1, 0)
+	_check(Lib.skeleton_refusals(skeleton).is_empty(), "a skeleton without modifiers, skin scales or disabled bones is carried")
+	skeleton.show_rest_only = true
+	_check(Lib.skeleton_refusals(skeleton) == PackedStringArray(["its Skeleton3D shows the rest pose only"]), "show_rest_only is refused")
+	skeleton.show_rest_only = false
+	skeleton.set_bone_enabled(1, false)
+	_check(Lib.skeleton_refusals(skeleton) == PackedStringArray(["bone tip is disabled"]), "a disabled bone is refused")
+	skeleton.set_bone_enabled(1, true)
+	skeleton.set_bone_skin_scale(0, Vector3(1.0, 2.0, 1.0))
+	_check(Lib.skeleton_refusals(skeleton) == PackedStringArray(["bone root has a skin scale"]), "a bone's skin scale is refused")
+	skeleton.set_bone_skin_scale(0, Vector3.ONE)
+	var modifier := Fixture.TurnModifier.new()
+	modifier.name = "Turn"
+	skeleton.add_child(modifier)
+	_check(Lib.skeleton_refusals(skeleton) == PackedStringArray(["its Skeleton3D has a SkeletonModifier3D (Turn)"]), "a SkeletonModifier3D child is refused")
+	skeleton.free()
+
+
+## far_planes and box_past_far: a box counts when part of it lies past the far plane inside the view;
+## nearer boxes, boxes behind the camera and boxes past the far depth but outside the side planes do
+## not. The side planes follow the camera's keep-aspect mode.
+func _test_camera_far() -> void:
+	var aspect := 16.0 / 9.0
+	var ahead := Lib.far_planes(Transform3D(), 60.0, true, aspect, 10.0)
+	_check(ahead.size() == 5, "far_planes gives four side planes and the far plane")
+	_check(Lib.box_past_far(AABB(Vector3(-0.5, -0.5, -12.5), Vector3.ONE), ahead), "a box wholly past the far plane, inside the view, counts")
+	_check(Lib.box_past_far(AABB(Vector3(-0.5, -0.5, -10.5), Vector3.ONE), ahead), "a box across the far plane counts")
+	_check(not Lib.box_past_far(AABB(Vector3(-0.5, -0.5, -9.5), Vector3.ONE * 0.9), ahead), "a box nearer than the far plane does not count")
+	_check(not Lib.box_past_far(AABB(Vector3(-0.5, -0.5, 11.5), Vector3.ONE), ahead), "a box behind the camera does not count")
+	_check(not Lib.box_past_far(AABB(Vector3(49.5, -0.5, -12.5), Vector3.ONE), ahead), "a box past the far depth but outside the side planes does not count")
+	# At 12 m the view's half-width is 12.3 m with a vertical 60 degree field of view at 16:9, and
+	# 6.9 m when the 60 degrees are horizontal (Camera3D.KEEP_WIDTH).
+	var edge := AABB(Vector3(10.5, -0.5, -12.5), Vector3.ONE)
+	_check(Lib.box_past_far(edge, ahead), "a box 11 m aside at 12 m is inside a vertical 60 degree view")
+	_check(not Lib.box_past_far(edge, Lib.far_planes(Transform3D(), 60.0, false, aspect, 10.0)), "and outside a horizontal 60 degree view")
+	var turned := Lib.far_planes(Transform3D(Basis(Vector3.UP, -PI * 0.5), Vector3(1.0, 2.0, 3.0)), 60.0, true, aspect, 10.0)
+	_check(Lib.box_past_far(AABB(Vector3(12.5, 1.5, 2.5), Vector3.ONE), turned), "a camera turned to +X sees a box 12 m along +X past its far plane")
+	_check(not Lib.box_past_far(AABB(Vector3(-12.5, 1.5, 2.5), Vector3.ONE), turned), "and not one 12 m behind it")
+	_check(not Lib.box_past_far(AABB(Vector3(-0.5, -0.5, -10.0005), Vector3(1.0, 1.0, 0.0001)), ahead), "a box within the 1 mm tolerance past the far plane does not count")
+
+
 ## texture_png writes the base level's pixels as stored, independently of how the texture keeps
 ## them: channel order and alpha survive, mipmaps are dropped, nothing is converted to another
 ## color space, and a VRAM-compressed texture is written decompressed.
@@ -452,7 +509,9 @@ func _check_schema(p_scene: Dictionary) -> void:
 	}
 	var before := _failures.size()
 	for key: String in top:
-		_check(p_scene.has(key) and typeof(p_scene[key]) == top[key], "scene.json has %s of the right type" % key)
+		# environment is null in a scene without a WorldEnvironment (the motion fixture).
+		var nullable := key == "environment" and p_scene.get(key, 0) == null
+		_check(p_scene.has(key) and (typeof(p_scene[key]) == top[key] or nullable), "scene.json has %s of the right type" % key)
 	if _failures.size() > before:
 		return
 	_check(p_scene["units"] == {"length": "m", "up": "+Y", "handedness": "right", "camera_forward": "-Z", "light_forward": "-Z"}, "units")
@@ -566,6 +625,9 @@ func _check_schema(p_scene: Dictionary) -> void:
 	_check(PackedStringArray(approximations.get("light_cull_mask", [])) == unlit_lights, "light_cull_mask names every light that lights no placed layer (%s)" % unlit_lights)
 	_check(PackedStringArray(approximations.get("translucent_shadow", [])) == translucent_casters, "translucent_shadow names every shadow-casting instance with an alpha-blended surface (%s)" % translucent_casters)
 	var checks: Dictionary = p_scene["checks"]
+	var far_rows := int(checks.get("camera_far_rows", -1))
+	_check(far_rows >= 0 and far_rows <= int(p_scene["frames"]), "checks.camera_far_rows counts camera rows (%d)" % far_rows)
+	_check(approximations.has("camera_far") == (far_rows > 0) and (far_rows == 0 or PackedStringArray(approximations["camera_far"]) == PackedStringArray([String(p_scene["camera"]["node"])])), "camera_far is named, with the camera, exactly when some row reaches past the far plane (%d rows)" % far_rows)
 	_check(int(checks["node_instances"]) == node_count, "checks.node_instances")
 	_check(int(checks["multimesh_instances"]) == multimesh_count, "checks.multimesh_instances")
 	_check(int(checks["gridmap_cells"]) == gridmap_count, "checks.gridmap_cells")
@@ -925,7 +987,9 @@ func _check_perf(p_dir: String, p_scene: Dictionary) -> void:
 	_check(int(checks["gridmap_cells"]) == int(share["gridmap"]), "%d GridMap cells (%d)" % [int(share["gridmap"]), int(checks["gridmap_cells"])])
 	_check(int(checks["skeletal_instances"]) == (Character.PERF_COUNT if p3 else 0), "the p3 variant's 4 characters (%d)" % int(checks["skeletal_instances"]))
 	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 16, "spot": 1}, "the sun, 16 omnis and the off-screen spot (%s)" % checks["light_types"])
-	_check(_approximations(p_scene).is_empty(), "NextGI Perf needs no approximation (%s)" % [_approximations(p_scene).keys()])
+	# CaptureCam's far plane is 80 m, and the path starts at x = 4 looking along +X at the courtyard,
+	# which reaches x = 100: Godot clips its far end, the UE import does not.
+	_check(_approximations(p_scene).keys() == ["camera_far"] and int(checks["camera_far_rows"]) > 0, "NextGI Perf needs camera_far only, on some rows (%s, %d rows)" % [_approximations(p_scene).keys(), int(checks["camera_far_rows"])])
 	var mesh_size := {}
 	for mesh: Dictionary in p_scene["meshes"]:
 		mesh_size[String(mesh["id"])] = _vector(mesh["aabb"]["size"])
@@ -998,6 +1062,53 @@ func _check_perf(p_dir: String, p_scene: Dictionary) -> void:
 			expected_poses.append(_walk_pose(frame, index * 7))
 		_check_character_tracks(p_dir, instance, expected_world, expected_poses, true)
 	_check(characters == Character.PERF_COUNT, "4 perf characters (%d)" % characters)
+
+
+## The still motion fixture (tests/ue_export/motion_fixture.tscn): the box, the three MultiMesh boxes,
+## the skinned triangle as one skeletal instance, no approximation and no row past the far plane, and
+## both GridMaps' cells against transforms written out from each GridMap's settings rather than
+## read from GridMap.get_meshes(): the GridMap's transform times the cell's (its orientation scaled
+## by the cell scale, at cell x cell size plus half a cell on each centered axis) times the item's
+## mesh transform. GridTurned has a rotated node, non-cubic cells centered on Y and Z only, a cell
+## scale of 0.8, an item mesh transform and rotated cells.
+func _check_fixture(p_scene: Dictionary) -> void:
+	var checks: Dictionary = p_scene["checks"]
+	var turned_cells: Array = Fixture.turned_cells()
+	_check(int(checks["node_instances"]) == 1 and int(checks["multimesh_instances"]) == 3 and int(checks["skeletal_instances"]) == 1, "the box, three MultiMesh boxes and the skinned triangle (%d, %d, %d)" % [int(checks["node_instances"]), int(checks["multimesh_instances"]), int(checks["skeletal_instances"])])
+	_check(int(checks["gridmap_cells"]) == 2 + turned_cells.size() and int(checks["gridmap_entries"]) == 2, "two Grid cells and %d GridTurned cells in one entry each (%d)" % [turned_cells.size(), int(checks["gridmap_cells"])])
+	_check(_approximations(p_scene).is_empty() and int(checks["camera_far_rows"]) == 0, "the still fixture needs no approximation (%s)" % [_approximations(p_scene).keys()])
+	var expected := {
+		# Grid: 1 m cells centered on every axis, at (0, 2.5, -2).
+		"Grid": [Transform3D(Basis(), Vector3(-0.5, 3.0, -1.5)), Transform3D(Basis(), Vector3(1.5, 3.0, -1.5))],
+		"GridTurned": [],
+	}
+	var size := Fixture.turned_cell_size()
+	var center := Fixture.turned_center()
+	var offset := Vector3(size.x * 0.5 * center.x, size.y * 0.5 * center.y, size.z * 0.5 * center.z)
+	var scale := Fixture.turned_cell_scale()
+	for cell: Array in turned_cells:
+		var position := Vector3(cell[0]) * size + offset
+		var local := Transform3D((cell[1] as Basis) * Basis.from_scale(Vector3.ONE * scale), position)
+		(expected["GridTurned"] as Array).append(Fixture.turned_transform() * local * Fixture.turned_item_transform())
+	var found := {}
+	for instance: Dictionary in p_scene["instances"]:
+		if instance["kind"] != "gridmap":
+			continue
+		var node := String(instance["node"])
+		_check(expected.has(node) and not found.has(node), "one GridMap entry for %s" % node)
+		found[node] = true
+		var wanted: Array = expected.get(node, [])
+		var rows: Array = instance["instances"]
+		var matched := 0
+		var used := {}
+		for transform: Transform3D in wanted:
+			for row in rows.size():
+				if not used.has(row) and _transforms_close(Lib.rows_to_transform(rows[row]), transform):
+					used[row] = true
+					matched += 1
+					break
+		_check(rows.size() == wanted.size() and matched == wanted.size(), "%s: every cell is placed where its cell, orientation, cell scale, centering and item transform put it (%d of %d)" % [node, matched, wanted.size()])
+	_check(found.size() == 2, "both GridMaps are exported (%s)" % [found.keys()])
 
 
 ## A walker's world track and pose track against the recomputed rows. Row 0's facing may be the one
@@ -1173,6 +1284,12 @@ func _skeletal_source_mesh(p_scene: Dictionary, p_asset: Dictionary) -> Mesh:
 		return null
 	if _scene_path == String(SCENES["perf"]["scene"]):
 		return Character.shared_mesh()
+	if _scene_path == String(SCENES["fixture"]["scene"]):
+		# The fixture builds its nodes in _init.
+		var shell := (load(_scene_path) as PackedScene).instantiate()
+		var mesh := (shell.get_node("Skinned") as MeshInstance3D).mesh
+		shell.free()
+		return mesh
 	return null
 
 
@@ -1477,6 +1594,73 @@ func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
 		_check(jumps == PackedInt32Array([TORTURE_CUT]), "the path's only jump is the cut at frame %d (%s)" % [TORTURE_CUT, jumps])
 		_check(still == 199, "the camera holds still through frames 0 to 199 (%d still steps)" % still)
 	shell.free()
+
+
+## checks.camera_far_rows recomputed from the exported files alone: the camera rows of
+## camera_track.csv (pose, field of view and far plane, at the viewport aspect scene.json records),
+## and every placement's bounds, its mesh's (or skeletal mesh's) aabb at its transform, or at every
+## row of its track for a mover. A row counts when some placement reaches past the far plane inside
+## the view (Lib.box_past_far, unit-tested above).
+func _check_camera_far(p_dir: String, p_scene: Dictionary) -> void:
+	var project: Dictionary = p_scene["rendering"]["project"]
+	var aspect := float(project.get("display/window/size/viewport_width", 0)) / maxf(float(project.get("display/window/size/viewport_height", 0)), 1.0)
+	_check(aspect > 0.0, "scene.json records the viewport size")
+	var keep_height := String(p_scene["camera"]["fov_axis"]) == "vertical"
+	var local_boxes := {}
+	for mesh: Dictionary in p_scene["meshes"]:
+		local_boxes[String(mesh["id"])] = AABB(_vector(mesh["aabb"]["position"]), _vector(mesh["aabb"]["size"]))
+	for asset: Dictionary in p_scene["skeletal_meshes"]:
+		local_boxes[String(asset["id"])] = AABB(_vector(asset["aabb"]["position"]), _vector(asset["aabb"]["size"]))
+	var still: Array[AABB] = []
+	var moving: Array = []
+	for instance: Dictionary in p_scene["instances"]:
+		var kind := String(instance["kind"])
+		var local: AABB = local_boxes.get(String(instance.get("skeletal" if kind == "skeletal" else "mesh", "")), AABB())
+		if kind == "multimesh" or kind == "gridmap":
+			for rows: Array in instance["instances"]:
+				still.append(Lib.rows_to_transform(rows) * local)
+		elif instance.get("track") != null:
+			moving.append([local, _read_track(p_dir.path_join(String(instance["track"])))])
+		else:
+			still.append(Lib.rows_to_transform(instance["transform"]) * local)
+	var union := AABB()
+	for index in still.size():
+		union = still[index] if index == 0 else union.merge(still[index])
+	var file := FileAccess.open(p_dir.path_join("camera_track.csv"), FileAccess.READ)
+	if file == null:
+		_check(false, "camera_track.csv opens for the far-plane recount")
+		return
+	file.get_line()
+	var counted := 0
+	var row := 0
+	var last_pose := ""
+	var still_past := false
+	while not file.eof_reached():
+		var line := file.get_line()
+		if line.is_empty():
+			continue
+		var cells := line.split(",")
+		var q := Quaternion(float(cells[4]), float(cells[5]), float(cells[6]), float(cells[7]))
+		var camera := Transform3D(Basis(q), Vector3(float(cells[1]), float(cells[2]), float(cells[3])))
+		var planes := Lib.far_planes(camera, float(cells[8]), keep_height, aspect, float(cells[10]))
+		var pose := line.substr(line.find(","))
+		if pose != last_pose:
+			last_pose = pose
+			still_past = false
+			if not still.is_empty() and Lib.box_past_far(union, planes):
+				for box: AABB in still:
+					if Lib.box_past_far(box, planes):
+						still_past = true
+						break
+		var past := still_past
+		for entry: Array in moving:
+			var rows: Array = entry[1]
+			if not past and row < rows.size() and Lib.box_past_far((rows[row] as Transform3D) * (entry[0] as AABB), planes):
+				past = true
+		if past:
+			counted += 1
+		row += 1
+	_check(counted == int(p_scene["checks"]["camera_far_rows"]), "checks.camera_far_rows is the number of rows on which a placement reaches past the far plane, recomputed from the export (%d, %d)" % [counted, int(p_scene["checks"]["camera_far_rows"])])
 
 
 ## torture_timeline.gd's path progress for a frame.

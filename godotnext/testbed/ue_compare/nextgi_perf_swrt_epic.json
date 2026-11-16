@@ -51,7 +51,7 @@
 			"name": "SWRT total at Epic",
 			"gates": ["GS-2"],
 			"status": "ue_bar",
-			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5).",
+			"reason": "Provisional groups, as GS-9's on the kitbash set: the GodotNext group is the NextGI frame block (nextgi_* without the closing marker's column and line 1b), and the UE group is the three stat gpu passes the settings record names for the Lumen total, which leave out the Lumen scene update columns the captures also report. Which columns both totals take waits for the lead and the settings record (plan §23.5). On 244 of the path's 600 rows GodotNext's 80 m far plane clips geometry inside the view (the courtyard's far end) that the UE port draws and lights, because the UE import sets only the camera's near plane (the export's camera_far approximation): the lead decides on this difference, as on the loop wrap, before the line is judged.",
 			"statistic": "p95",
 			"direction": "lower",
 			"godotnext": { "prefix": "nextgi_", "exclude": ["nextgi_2_ms", "nextgi_as_builds_ms"] },
