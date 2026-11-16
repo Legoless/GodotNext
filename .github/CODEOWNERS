@@ -544,6 +544,7 @@
 /godotnext/**/tests/**/SConstruct             @godotengine/rendering @godotengine/tests @godotengine/buildsystem
 /godotnext/**/tests/**/SCsub                  @godotengine/rendering @godotengine/tests @godotengine/buildsystem
 /docs/godotnext/                              @godotengine/documentation
+/docs/handoff.md                              @godotengine/documentation
 /docs/godotnext/**/*.bat                      @godotengine/documentation @godotengine/buildsystem
 /docs/godotnext/**/*.py                       @godotengine/documentation @godotengine/buildsystem
 /docs/godotnext/**/*.sh                       @godotengine/documentation @godotengine/buildsystem
