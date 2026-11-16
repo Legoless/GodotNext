@@ -153,6 +153,12 @@ void RenderSceneBuffersRD::cleanup() {
 	}
 	named_textures.clear();
 
+	// GodotNext: nextgeo_sw_raster (#162)
+	if (nextgeo_vis64_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(nextgeo_vis64_buffer);
+		nextgeo_vis64_buffer = RID();
+	}
+
 	// Clear weight_buffer / blur textures.
 	for (WeightBuffers &weight_buffer : weight_buffers) {
 		if (weight_buffer.weight.is_valid()) {
@@ -1044,6 +1050,34 @@ RID RenderSceneBuffersRD::get_nextgeo_visibility() const {
 
 RID RenderSceneBuffersRD::get_nextgeo_instance_id() const {
 	return has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID) ? get_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_INSTANCE_ID) : RID();
+}
+
+// GodotNext: nextgeo_sw_raster (#162)
+void RenderSceneBuffersRD::ensure_nextgeo_vis64(bool p_buffer) {
+	if (p_buffer) {
+		if (has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VIS64)) {
+			free_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VIS64);
+		}
+		if (!nextgeo_vis64_buffer.is_valid()) {
+			const uint64_t texels = uint64_t(MAX(internal_size.x, 1)) * uint64_t(MAX(internal_size.y, 1));
+			nextgeo_vis64_buffer = RD::get_singleton()->storage_buffer_create(uint32_t(texels * 8u));
+		}
+		return;
+	}
+	if (nextgeo_vis64_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(nextgeo_vis64_buffer);
+		nextgeo_vis64_buffer = RID();
+	}
+	if (!has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VIS64)) {
+		create_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VIS64, RD::DATA_FORMAT_R64_UINT, RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_STORAGE_ATOMIC_BIT, RD::TEXTURE_SAMPLES_1, internal_size, 1, 1);
+	}
+}
+
+RID RenderSceneBuffersRD::get_nextgeo_vis64() const {
+	if (nextgeo_vis64_buffer.is_valid()) {
+		return nextgeo_vis64_buffer;
+	}
+	return has_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VIS64) ? get_texture(RB_SCOPE_NEXTGEO, RB_TEX_NEXTGEO_VIS64) : RID();
 }
 
 // GodotNext: megalights_inputs (#136)

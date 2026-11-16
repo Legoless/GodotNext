@@ -501,6 +501,55 @@ TEST_CASE("[NextGeo][VGD] Every stored page fits in page_size") {
 	check_written_pages_fit(one_cluster_page, TestUtils::get_temp_path("ngm72_pages_small.ngm"), true);
 }
 
+// GodotNext: nextgeo_sw_raster (#162). `.ngm` v2 cluster records carry the cluster's longest edge.
+TEST_CASE("[NextGeo][VGD] Every cluster record stores its tagged max_edge") {
+	NextGeoBuildInput input;
+	input.surfaces.push_back(make_grid(16));
+	input.page_size = NGM_PROVISIONAL_PAGE_SIZE;
+	input.use_threads = false;
+
+	NextGeoBuildOutput output;
+	REQUIRE(nextgeo_build_dag(input, output) == OK);
+	Vector<Vector<uint8_t>> payloads;
+	REQUIRE(nextgeo_write_pages(output, payloads) == OK);
+
+	NGMHeader header;
+	REQUIRE(nextgeo_fill_ngm_header(output, payloads, header) == OK);
+	CHECK(header.version == 2);
+
+	uint32_t records = 0;
+	float shortest = float(Math::INF);
+	for (uint32_t p = 0; p < output.pages.size(); p++) {
+		const NextGeoPage &page = output.pages[p];
+		const Vector<uint8_t> &payload = payloads[int(p)];
+		CHECK(ngm_page_has_max_edges(payload.ptr(), uint64_t(payload.size())));
+		for (uint32_t i = 0; i < page.cluster_count; i++) {
+			const NextGeoCluster &cluster = output.clusters[page.cluster_offset + i];
+			// The longest edge from the build output's own vertices and triangles.
+			double longest = 0.0;
+			for (uint32_t t = 0; t < cluster.triangle_count; t++) {
+				for (uint32_t e = 0; e < 3; e++) {
+					const uint8_t a = output.triangles[(cluster.triangle_offset + t) * 3 + e];
+					const uint8_t b = output.triangles[(cluster.triangle_offset + t) * 3 + (e + 1) % 3];
+					const float *pa = output.vertices.ptr() + uint64_t(cluster.vertex_offset + a) * output.vertex_stride;
+					const float *pb = output.vertices.ptr() + uint64_t(cluster.vertex_offset + b) * output.vertex_stride;
+					longest = MAX(longest, double(Vector3(pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]).length()));
+				}
+			}
+			const uint32_t word = read_u32(payload, int(16 + i * 80 + 64));
+			CHECK((word >> 16) == NGM_MAX_EDGE_TAG);
+			const float stored = ngm_half_to_float(uint16_t(word & 0xFFFFu));
+			CHECK(double(stored) >= longest);
+			CHECK(double(stored) <= longest * (1.0 + 1.0 / 1024.0) + 1e-6);
+			shortest = MIN(shortest, stored);
+			records++;
+		}
+	}
+	CHECK(records == output.clusters.size());
+	// The finest clusters of the unit grid have the cell diagonal as their longest edge.
+	CHECK(shortest == ngm_half_to_float(ngm_half_ceil(Math::SQRT2)));
+}
+
 #endif // MODULE_NEXTGEO_ENABLED
 
 } // namespace TestVirtualGeometryData

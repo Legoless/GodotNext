@@ -3292,6 +3292,20 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				raster_inputs.bucket_table = nextgeo_resolve.get_bucket_table_buffer();
 				raster_inputs.bucket_table_words = nextgeo_bucket_table.size();
 			}
+			// GodotNext: nextgeo_sw_raster (#162). The hybrid HW/SW raster on the Nanite device tier (N1);
+			// below it, or with raster_mode = hardware, the v2.4 hardware raster.
+			if (RendererRD::NextGeoRasterMode(int(GLOBAL_GET("rendering/nextgeo/raster_mode"))) == RendererRD::NEXTGEO_RASTER_MODE_HYBRID && nextgeo_cut.is_hybrid_raster_available()) {
+				const RendererRD::NextGeoVis64Storage vis64_storage = nextgeo_cut.get_vis64_storage(bool(GLOBAL_GET("rendering/nextgeo/debug_vis64_buffer")));
+				if (vis64_storage != RendererRD::NEXTGEO_VIS64_NONE) {
+					rb->ensure_nextgeo_vis64(vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER);
+					raster_inputs.vis64 = rb->get_nextgeo_vis64();
+					raster_inputs.vis64_storage = vis64_storage;
+					raster_inputs.camera_forward = -scene_data->cam_transform.basis.get_column(2);
+					raster_inputs.z_near = scene_data->z_near;
+					raster_inputs.orthographic = scene_data->cam_orthogonal;
+					raster_inputs.sw_raster_max_edge_px = float(GLOBAL_GET("rendering/nextgeo/sw_raster_max_edge_px"));
+				}
+			}
 
 			nextgeo_drew = nextgeo_cut.dispatch(RSG::virtual_mesh_storage, rb->get_depth_texture(), view_projection, prev_view_projection, scene_data->cam_transform.origin, rb->get_internal_size(), scene_data->camera_visible_layers, float(GLOBAL_GET("rendering/nextgeo/max_pixel_error")), 1.0f, bool(GLOBAL_GET("rendering/nextgeo/occlusion")), bool(GLOBAL_GET("rendering/nextgeo/debug_stats")), &raster_inputs, is_nextgeo_main_view);
 			if (nextgeo_drew && !visibility_only && nextgeo_resolve.get_bucket_count() > 0) {

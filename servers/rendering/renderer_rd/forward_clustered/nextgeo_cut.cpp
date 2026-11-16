@@ -37,12 +37,15 @@
 #include "core/templates/hash_map.h"
 #include "core/variant/array.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_visibility.h"
 #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+
+#include <cstddef>
 
 namespace {
 struct CutParams {
@@ -52,8 +55,11 @@ struct CutParams {
 	float camera[4];
 	float view[4];
 	uint32_t cull[4];
+	// GodotNext: nextgeo_sw_raster (#162). The triangle-size switch; zero for shadow views.
+	float raster_forward[4]; // xyz = camera forward axis, w = z_near.
+	float raster_params[4]; // x = T px, y = px scale, z = 1 for an orthographic view.
 };
-static_assert(sizeof(CutParams) == 272, "CutParams must stay 272 bytes.");
+static_assert(sizeof(CutParams) == 304, "CutParams must match NextGeoCullParamsData (304 bytes).");
 
 struct CutCounters {
 	uint32_t phase1;
@@ -72,8 +78,14 @@ struct CutCounters {
 	uint32_t phase2_visible_count;
 	uint32_t phase2_group_count;
 	uint32_t phase2_level_counts[8];
+	// GodotNext: nextgeo_sw_raster (#162). sw_raster.glsl reads these by word index.
+	uint32_t raster_sw[2];
+	uint32_t raster_hw[2];
+	uint32_t raster_sw_writes;
 };
-static_assert(sizeof(CutCounters) == 124, "CutCounters must stay 124 bytes.");
+static_assert(sizeof(CutCounters) == 144, "CutCounters must match NextGeoCountersData (144 bytes).");
+static_assert(offsetof(CutCounters, raster_sw) == 31 * sizeof(uint32_t), "sw_raster.glsl reads raster_sw at word 31.");
+static_assert(offsetof(CutCounters, raster_sw_writes) == 35 * sizeof(uint32_t), "sw_raster.glsl adds raster_sw_writes at word 35.");
 
 struct RasterParams {
 	float proj[16];
@@ -86,8 +98,22 @@ struct RasterParams {
 	uint32_t reset_velocity;
 	float cull_sign;
 	uint32_t bucket_table_words;
+	// GodotNext: nextgeo_sw_raster (#162). Read by visibility_export.glsl; the raster shaders declare
+	// only the fields above.
+	float inv_view_proj[16];
+	uint32_t size[2];
+	uint32_t raster_region;
+	uint32_t pad;
 };
-static_assert(sizeof(RasterParams) == 288, "RasterParams must stay 288 bytes.");
+static_assert(sizeof(RasterParams) == 368, "RasterParams must stay 368 bytes.");
+
+// GodotNext: nextgeo_sw_raster (#162). Words of raster_args (raster_features_inc.glsl): per phase and
+// bin a software dispatch (x, y, 1, 0) and a hardware draw record, then the hardware draw counts.
+constexpr uint32_t RASTER_BIN_COUNT = RendererVirtualMeshStorage::RASTER_BIN_COUNT;
+constexpr uint32_t RASTER_ARGS_WORDS = 2u * RASTER_BIN_COUNT * 2u * 4u;
+constexpr uint32_t raster_args_word(uint32_t p_phase, uint32_t p_bin, uint32_t p_kind) {
+	return ((p_phase * RASTER_BIN_COUNT + p_bin) * 2u + p_kind) * 4u;
+}
 
 struct ShadowRasterParams {
 	float proj[16];
@@ -116,6 +142,11 @@ uint32_t s_shadow_views_dispatched = 0;
 uint32_t s_shadow_raster_draws = 0;
 double s_shadow_cull_gpu_ms = 0.0;
 double s_shadow_raster_gpu_ms = 0.0;
+// GodotNext: nextgeo_sw_raster (#162). The last main view's raster path, for the debug stats.
+const char *s_raster_mode = "hardware";
+const char *s_raster_reason = "NO_INT64_ATOMICS";
+const char *s_vis64_storage = "none";
+float s_sw_raster_max_edge_px = 0.0f;
 
 Mutex s_page_req_registry_mutex;
 HashMap<uint64_t, NextGeoCut *> s_page_req_registry;
@@ -434,8 +465,288 @@ bool NextGeoCut::_ensure() {
 	initialized = params.is_valid() && raster_params.is_valid() && counters.is_valid() && aux_counters.is_valid() && shadow_params.is_valid() && shadow_raster_params.is_valid() && shadow_counters.is_valid() && counters_ring[0].is_valid() && counters_ring[1].is_valid() && counters_ring[2].is_valid() && shadow_counters_ring[0].is_valid() && shadow_counters_ring[1].is_valid() && shadow_counters_ring[2].is_valid() && request_ring[0].is_valid() && request_ring[1].is_valid() && request_ring[2].is_valid() && nodes.is_valid() && phase2_nodes.is_valid() && groups.is_valid() && clusters.is_valid() && level_a.is_valid() && level_b.is_valid() && shadow_nodes.is_valid() && shadow_level_a.is_valid() && shadow_level_b.is_valid() && shadow_groups.is_valid() && shadow_clusters.is_valid() && bvh_args[0].is_valid() && bvh_args[1].is_valid() && draw_args.is_valid() && shadow_bvh_args[0].is_valid() && shadow_bvh_args[1].is_valid() && shadow_draw_args.is_valid() && dummy_page_buf.is_valid() && dummy_hiz.is_valid() && dummy_sampler.is_valid();
 	if (!initialized) {
 		failed = true;
+		return false;
 	}
+	// GodotNext: nextgeo_sw_raster (#162). Below the Nanite device tier, or when its shaders cannot be
+	// built, every view keeps the v2.4 hardware raster.
+	_ensure_hybrid(rd);
 	return initialized;
+}
+
+bool NextGeoCut::_ensure_hybrid(RenderingDevice *p_rd) {
+	hybrid_ready = false;
+	vis64_image_ready = false;
+	vis64_buffer_ready = false;
+	raster_tier = RendererRD::nextgeo_raster_tier(p_rd);
+	String detail;
+	if (!raster_tier.hybrid) {
+		PackedStringArray missing;
+		if (!p_rd->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS) && !p_rd->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS)) {
+			missing.push_back("SUPPORTS_IMAGE_INT64_ATOMICS");
+			missing.push_back("SUPPORTS_BUFFER_INT64_ATOMICS");
+		}
+		if (!p_rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT)) {
+			missing.push_back("SUPPORTS_DRAW_INDIRECT_COUNT");
+		}
+		detail = "the device lacks " + String(", ").join(missing);
+	} else {
+		const bool image_int64 = p_rd->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
+		const bool buffer_int64 = p_rd->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
+#ifdef REAL_T_IS_DOUBLE
+		const String base_defines = "\n#define REAL_T_IS_DOUBLE\n";
+#else
+		const String base_defines = "";
+#endif
+		// Variants a device cannot create stay disabled: #175 fails shader creation for a missing
+		// 64-bit atomic feature. The hardware variants live in their own ShaderRD of
+		// visibility_raster.glsl, so they can never invalidate the v2.4 raster's version.
+		if (sw_shader.get_variant_count() == 0) {
+			sw_shader.initialize(Vector<String>({
+					base_defines,
+					base_defines + "\n#define VIS64_BUFFER\n",
+					base_defines + "\n#define CLEAR_VIS64\n",
+					base_defines + "\n#define CLEAR_VIS64\n#define VIS64_BUFFER\n",
+			}));
+		}
+		if (export_shader.get_variant_count() == 0) {
+			export_shader.initialize(Vector<String>({
+					base_defines,
+					base_defines + "\n#define WITH_VELOCITY\n",
+					base_defines + "\n#define VIS64_BUFFER\n",
+					base_defines + "\n#define VIS64_BUFFER\n#define WITH_VELOCITY\n",
+			}));
+		}
+		if (vis64_raster_shader.get_variant_count() == 0) {
+			vis64_raster_shader.initialize(Vector<String>({
+					base_defines + "\n#define MODE_VIS64\n",
+					base_defines + "\n#define MODE_VIS64\n#define DEBUG_BACKFACE\n",
+					base_defines + "\n#define MODE_VIS64\n#define VIS64_BUFFER\n",
+					base_defines + "\n#define MODE_VIS64\n#define VIS64_BUFFER\n#define DEBUG_BACKFACE\n",
+			}));
+		}
+		for (int storage = 0; storage < 2; storage++) {
+			const bool supported = storage == 0 ? image_int64 : buffer_int64;
+			sw_shader.set_variant_enabled(storage, supported);
+			sw_shader.set_variant_enabled(2 + storage, supported);
+			for (int sub = 0; sub < 2; sub++) {
+				export_shader.set_variant_enabled(storage * 2 + sub, supported);
+				vis64_raster_shader.set_variant_enabled(storage * 2 + sub, supported);
+			}
+		}
+		sw_version = sw_shader.version_create();
+		export_version = export_shader.version_create();
+		vis64_raster_version = vis64_raster_shader.version_create();
+		raster_args = p_rd->storage_buffer_create(RASTER_ARGS_WORDS * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		raster_counts = p_rd->storage_buffer_create(4 * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		raster_lists = _storage(CLUSTER_CAPACITY * sizeof(uint32_t));
+		if (sw_version.is_valid() && export_version.is_valid() && vis64_raster_version.is_valid() && raster_args.is_valid() && raster_counts.is_valid() && raster_lists.is_valid()) {
+			for (int storage = 0; storage < 2; storage++) {
+				const bool supported = storage == 0 ? image_int64 : buffer_int64;
+				if (!supported) {
+					continue;
+				}
+				const RID sw = sw_shader.version_get_shader(sw_version, storage);
+				const RID clear = sw_shader.version_get_shader(sw_version, 2 + storage);
+				if (!sw.is_valid() || !clear.is_valid()) {
+					continue;
+				}
+				sw_pipelines[storage] = p_rd->compute_pipeline_create(sw);
+				vis64_clear_pipelines[storage] = p_rd->compute_pipeline_create(clear);
+				bool ok = sw_pipelines[storage].is_valid() && vis64_clear_pipelines[storage].is_valid();
+				for (int sub = 0; sub < 2 && ok; sub++) {
+					const RID export_variant = export_shader.version_get_shader(export_version, storage * 2 + sub);
+					const RID raster_variant = vis64_raster_shader.version_get_shader(vis64_raster_version, storage * 2 + sub);
+					ok = export_variant.is_valid() && raster_variant.is_valid();
+					if (!ok) {
+						break;
+					}
+					// Export: GREATER_OR_EQUAL against the depth pre-pass, as the v2.4 raster tests.
+					RD::PipelineRasterizationState export_raster_state;
+					RD::PipelineMultisampleState multisample_state;
+					RD::PipelineDepthStencilState export_depth;
+					export_depth.enable_depth_test = true;
+					export_depth.enable_depth_write = true;
+					export_depth.depth_compare_operator = RD::COMPARE_OP_GREATER_OR_EQUAL;
+					export_pipelines[storage * 2 + sub].setup(export_variant, RD::RENDER_PRIMITIVE_TRIANGLES, export_raster_state, multisample_state, export_depth, RD::PipelineColorBlendState::create_disabled(sub != 0 ? 3 : 2));
+					// Hardware path: no attachments; the back-face debug variant disables culling.
+					RD::PipelineRasterizationState vis64_raster_state;
+					vis64_raster_state.cull_mode = sub != 0 ? RD::POLYGON_CULL_DISABLED : RD::POLYGON_CULL_BACK;
+					vis64_raster_pipelines[storage * 2 + sub].setup(raster_variant, RD::RENDER_PRIMITIVE_TRIANGLES, vis64_raster_state, multisample_state, RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(0));
+				}
+				if (ok) {
+					(storage == 0 ? vis64_image_ready : vis64_buffer_ready) = true;
+				}
+			}
+		}
+		hybrid_ready = vis64_image_ready || vis64_buffer_ready;
+		if (!hybrid_ready) {
+			detail = "its shaders could not be built";
+		}
+	}
+	if (!hybrid_ready) {
+		raster_tier.hybrid = false;
+		raster_tier.storage = RendererRD::NEXTGEO_VIS64_NONE;
+		raster_tier.reason = RendererRD::NEXTGEO_FALLBACK_NO_INT64_ATOMICS;
+		// GN-13: the reason is logged once, and NextGeo keeps the v2.4 hardware raster.
+		print_line(vformat("NextGeo: the hybrid HW/SW raster is off (%s): %s. NextGeo keeps the v2.4 hardware raster.", RendererRD::nextgeo_fallback_name(raster_tier.reason), detail));
+	}
+	{
+		MutexLock lock(s_stats_mutex);
+		s_raster_reason = RendererRD::nextgeo_fallback_name(raster_tier.reason);
+	}
+	return hybrid_ready;
+}
+
+bool NextGeoCut::is_hybrid_raster_available() {
+	return _ensure() && hybrid_ready;
+}
+
+RendererRD::NextGeoVis64Storage NextGeoCut::get_vis64_storage(bool p_prefer_buffer) const {
+	if (!hybrid_ready) {
+		return RendererRD::NEXTGEO_VIS64_NONE;
+	}
+	if (vis64_buffer_ready && (p_prefer_buffer || !vis64_image_ready)) {
+		return RendererRD::NEXTGEO_VIS64_BUFFER;
+	}
+	return vis64_image_ready ? RendererRD::NEXTGEO_VIS64_IMAGE : RendererRD::NEXTGEO_VIS64_NONE;
+}
+
+void NextGeoCut::_clear_vis64(const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	const int storage = p_raster.vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER ? 1 : 0;
+	RID shader = sw_shader.version_get_shader(sw_version, 2 + storage);
+	RD::Uniform u_vis64(storage == 1 ? RD::UNIFORM_TYPE_STORAGE_BUFFER : RD::UNIFORM_TYPE_IMAGE, 0, p_raster.vis64);
+	RID set = UniformSetCacheRD::get_singleton()->get_cache(shader, 0, u_vis64);
+	if (!set.is_valid()) {
+		return;
+	}
+	const uint32_t width = uint32_t(MAX(p_internal_size.x, 1));
+	const uint32_t height = uint32_t(MAX(p_internal_size.y, 1));
+	const uint32_t push[4] = { width, height, 0u, 0u };
+	RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, vis64_clear_pipelines[storage]);
+	rd->compute_list_bind_uniform_set(list, set, 0);
+	rd->compute_list_set_push_constant(list, push, sizeof(push));
+	rd->compute_list_dispatch(list, (width + 63u) / 64u, height, 1u);
+	rd->compute_list_end();
+}
+
+RID NextGeoCut::_get_vis64_framebuffer(const Size2i &p_size) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (vis64_framebuffer.is_valid() && vis64_framebuffer_size == p_size && rd->framebuffer_is_valid(vis64_framebuffer)) {
+		return vis64_framebuffer;
+	}
+	if (vis64_framebuffer.is_valid() && rd->framebuffer_is_valid(vis64_framebuffer)) {
+		rd->free_rid(vis64_framebuffer);
+	}
+	vis64_framebuffer = rd->framebuffer_create_empty(p_size);
+	vis64_framebuffer_size = p_size;
+	return vis64_framebuffer;
+}
+
+// One phase of the hybrid raster (N2): the software dispatch and the hardware indirect-count draw of
+// each raster bin write the visibility buffer, then the export writes the v2.4 targets and depth.
+bool NextGeoCut::_draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, RID p_counters, const Size2i &p_internal_size, bool p_stats) {
+	RenderingDevice *rd = RD::get_singleton();
+	FramebufferCacheRD *fb_cache = FramebufferCacheRD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || fb_cache == nullptr || uniform_set_cache == nullptr) {
+		return false;
+	}
+	const int storage = p_raster.vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER ? 1 : 0;
+	const RD::UniformType vis64_type = storage == 1 ? RD::UNIFORM_TYPE_STORAGE_BUFFER : RD::UNIFORM_TYPE_IMAGE;
+	const Size2i size(MAX(p_internal_size.x, 1), MAX(p_internal_size.y, 1));
+	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
+	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
+	const RID bucket_buf = p_raster.bucket_table.is_valid() ? p_raster.bucket_table : dummy_page_buf;
+	RD::Uniform u_records(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
+	RD::Uniform u_meshes(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer());
+	RD::Uniform u_pages(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf);
+	RD::Uniform u_cluster_table(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf);
+	RD::Uniform u_visible(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, clusters);
+	RD::Uniform u_raster(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, raster_params);
+	RD::Uniform u_buckets(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, bucket_buf);
+	RD::Uniform u_lists(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, raster_lists);
+
+	// Software clusters: one workgroup each, dispatched indirectly per bin.
+	{
+		RID shader = sw_shader.version_get_shader(sw_version, storage);
+		RD::Uniform u_counters(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_counters);
+		RD::Uniform u_vis64(vis64_type, 9, p_raster.vis64);
+		RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_counters, u_vis64);
+		if (!set.is_valid()) {
+			return false;
+		}
+		const uint32_t flags = (p_raster.debug_backface ? 1u : 0u) | (p_stats ? 2u : 0u);
+		const uint32_t push[8] = { p_list_base, p_phase, flags, 0u, uint32_t(size.x), uint32_t(size.y), 0u, 0u };
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, sw_pipelines[storage]);
+		rd->compute_list_bind_uniform_set(list, set, 0);
+		rd->compute_list_set_push_constant(list, push, sizeof(push));
+		for (uint32_t bin = 0; bin < RASTER_BIN_COUNT; bin++) {
+			rd->compute_list_dispatch_indirect(list, raster_args, raster_args_word(p_phase, bin, 0u) * sizeof(uint32_t));
+		}
+		rd->compute_list_end();
+	}
+
+	// Hardware clusters: one indirect-count draw over the bin records, with no attachments.
+	{
+		const int variant = storage * 2 + (p_raster.debug_backface ? 1 : 0);
+		RID fb = _get_vis64_framebuffer(size);
+		if (!fb.is_valid()) {
+			return false;
+		}
+		RID pipeline = vis64_raster_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
+		RID shader = vis64_raster_shader.version_get_shader(vis64_raster_version, variant);
+		RD::Uniform u_vis64(vis64_type, 8, p_raster.vis64);
+		RID set = uniform_set_cache->get_cache(shader, 0, u_records, u_meshes, u_pages, u_cluster_table, u_visible, u_raster, u_buckets, u_lists, u_vis64);
+		if (!pipeline.is_valid() || !set.is_valid()) {
+			return false;
+		}
+		RD::DrawListID dl = rd->draw_list_begin(fb, RD::DRAW_DEFAULT_ALL);
+		rd->draw_list_bind_render_pipeline(dl, pipeline);
+		rd->draw_list_bind_uniform_set(dl, set, 0);
+		const uint32_t push[4] = { p_list_base, PHASE2_CLUSTER_BASE, uint32_t(size.x), 0u };
+		rd->draw_list_set_push_constant(dl, push, sizeof(push));
+		rd->draw_list_draw_indirect_count(dl, false, raster_args, raster_args_word(p_phase, 0u, 1u) * sizeof(uint32_t), raster_counts, p_phase * sizeof(uint32_t), RASTER_BIN_COUNT, 2u * 4u * sizeof(uint32_t));
+		rd->draw_list_end();
+	}
+
+	// Export: depth, the R32 visibility ID, the instance ID and velocity.
+	{
+		const bool with_velocity = p_raster.velocity.is_valid();
+		const int variant = storage * 2 + (with_velocity ? 1 : 0);
+		RID fb = with_velocity ? fb_cache->get_cache(p_raster.visibility, p_raster.instance_id, p_raster.velocity, p_raster.depth) : fb_cache->get_cache(p_raster.visibility, p_raster.instance_id, p_raster.depth);
+		if (!fb.is_valid()) {
+			return false;
+		}
+		RID pipeline = export_pipelines[variant].get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(fb));
+		RID shader = export_shader.version_get_shader(export_version, variant);
+		RD::Uniform u_export_records(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer());
+		RD::Uniform u_export_visible(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, clusters);
+		RD::Uniform u_export_raster(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_params);
+		RD::Uniform u_export_vis64(vis64_type, 3, p_raster.vis64);
+		RID set = uniform_set_cache->get_cache(shader, 0, u_export_records, u_export_visible, u_export_raster, u_export_vis64);
+		if (!pipeline.is_valid() || !set.is_valid()) {
+			return false;
+		}
+		// The v2.4 load/clear rules: load visibility, instance ID and depth; clear velocity in Phase 1
+		// only when the legacy prepass did not already pre-clear it. Never DRAW_IGNORE_ALL.
+		BitField<RD::DrawFlags> draw_flags = RD::DRAW_DEFAULT_ALL;
+		Vector<Color> clear_colors;
+		if (p_phase == 0 && p_raster.clear_velocity && with_velocity) {
+			draw_flags = RD::DRAW_CLEAR_COLOR_2;
+			clear_colors.push_back(Color(0, 0, 0, 0));
+			clear_colors.push_back(Color(0, 0, 0, 0));
+			clear_colors.push_back(p_raster.velocity_clear);
+		}
+		RD::DrawListID dl = rd->draw_list_begin(fb, draw_flags, clear_colors, 0.0f);
+		rd->draw_list_bind_render_pipeline(dl, pipeline);
+		rd->draw_list_bind_uniform_set(dl, set, 0);
+		rd->draw_list_draw(dl, false, 1u, 3u);
+		rd->draw_list_end();
+	}
+	return true;
 }
 
 void NextGeoCut::_release_hiz() {
@@ -660,6 +971,13 @@ void NextGeoCut::_set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID 
 	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, dummy_page_buf));
 }
 
+// GodotNext: nextgeo_sw_raster (#162). The main-view CLUSTER_CULL variant's raster-bin outputs.
+void NextGeoCut::_set_raster_bin_uniforms(LocalVector<RD::Uniform> &r_uniforms) {
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, raster_args.is_valid() ? raster_args : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, raster_counts.is_valid() ? raster_counts : dummy_page_buf));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, raster_lists.is_valid() ? raster_lists : dummy_page_buf));
+}
+
 void NextGeoCut::_harvest_shadow_timestamps() {
 	if (RSG::utilities == nullptr) {
 		return;
@@ -739,6 +1057,12 @@ void NextGeoCut::_request_stats(uint32_t p_ring_slot, RID p_counters_buf, uint32
 	info["hiz_mips"] = int64_t(hiz_mips);
 	info["cluster_capacity"] = int64_t(CLUSTER_CAPACITY);
 	info["raster_indirect_draws"] = int64_t(p_raster_draws);
+	{
+		MutexLock lock(s_stats_mutex);
+		info["raster_mode"] = s_raster_mode;
+		info["vis64_storage"] = s_vis64_storage;
+		info["sw_raster_max_edge_px"] = s_sw_raster_max_edge_px;
+	}
 	info["nextgeo_double_dispatch"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_double_dispatch());
 	info["nextgeo_missing"] = int64_t(RSG::virtual_mesh_storage->nextgeo_get_missing());
 
@@ -820,6 +1144,14 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 	info["phase1_clusters"] = int64_t(stats->phase1_clusters);
 	info["phase2_clusters"] = int64_t(stats->phase2_clusters);
 	info["overflow"] = int64_t(stats->overflow);
+	// GodotNext: nextgeo_sw_raster (#162). Clusters per path of the hybrid raster (0 on the v2.4 path).
+	info["sw_clusters"] = int64_t(stats->raster_sw[0]) + int64_t(stats->raster_sw[1]);
+	info["hw_clusters"] = int64_t(stats->raster_hw[0]) + int64_t(stats->raster_hw[1]);
+	info["sw_clusters_phase1"] = int64_t(stats->raster_sw[0]);
+	info["sw_clusters_phase2"] = int64_t(stats->raster_sw[1]);
+	info["hw_clusters_phase1"] = int64_t(stats->raster_hw[0]);
+	info["hw_clusters_phase2"] = int64_t(stats->raster_hw[1]);
+	info["sw_raster_writes"] = int64_t(stats->raster_sw_writes);
 	info["hiz_tested"] = int64_t(stats->pad[0]);
 	info["hiz_hit"] = int64_t(stats->pad[1]);
 	info["hiz_behind"] = int64_t(stats->cut_lo);
@@ -989,6 +1321,17 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	}
 
 	const bool can_raster = p_raster != nullptr && p_raster->visibility.is_valid() && p_raster->instance_id.is_valid() && p_raster->depth.is_valid();
+	// GodotNext: nextgeo_sw_raster (#162). The hybrid raster runs when the caller passes a visibility
+	// buffer in a storage form this device built; otherwise the view keeps the v2.4 raster.
+	const bool hybrid = can_raster && hybrid_ready && p_raster->vis64.is_valid() &&
+			((p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_IMAGE && vis64_image_ready) || (p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER && vis64_buffer_ready));
+	const float sw_raster_switch_px = hybrid ? RendererRD::nextgeo_sw_raster_switch_px(p_raster->sw_raster_max_edge_px) : 0.0f;
+	if (p_is_main_view) {
+		MutexLock lock(s_stats_mutex);
+		s_raster_mode = RendererRD::nextgeo_raster_mode_name(hybrid ? RendererRD::NEXTGEO_RASTER_MODE_HYBRID : RendererRD::NEXTGEO_RASTER_MODE_HARDWARE);
+		s_vis64_storage = !hybrid ? "none" : (p_raster->vis64_storage == RendererRD::NEXTGEO_VIS64_BUFFER ? "buffer" : "image");
+		s_sw_raster_max_edge_px = sw_raster_switch_px;
+	}
 	if (can_raster) {
 		RasterParams rp = {};
 		RendererRD::MaterialStorage::store_camera(p_raster->proj, rp.proj);
@@ -1003,8 +1346,28 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 		rp.reset_velocity = p_raster->reset_velocity ? 1u : 0u;
 		rp.cull_sign = p_raster->reverse_cull ? -1.0f : 1.0f;
 		rp.bucket_table_words = p_raster->bucket_table.is_valid() ? p_raster->bucket_table_words : 0u;
+		// GodotNext: nextgeo_sw_raster (#162). The export reconstructs each pixel's surface point.
+		const Projection view_proj = p_raster->proj * Projection(p_raster->view);
+		RendererRD::MaterialStorage::store_camera(view_proj.inverse(), rp.inv_view_proj);
+		rp.size[0] = uint32_t(MAX(p_internal_size.x, 1));
+		rp.size[1] = uint32_t(MAX(p_internal_size.y, 1));
+		rp.raster_region = PHASE2_CLUSTER_BASE;
 		rd->buffer_update(raster_params, 0, sizeof(RasterParams), &rp);
 		_clear_visibility_targets(p_raster->visibility, p_raster->instance_id, p_internal_size);
+		if (hybrid) {
+			_clear_vis64(*p_raster, p_internal_size);
+			uint32_t args_init[RASTER_ARGS_WORDS] = {};
+			for (uint32_t phase = 0; phase < 2; phase++) {
+				for (uint32_t bin = 0; bin < RASTER_BIN_COUNT; bin++) {
+					// Software: (0, 0, 1) groups until a cluster arrives. Hardware: 384 vertices, 0 instances.
+					args_init[raster_args_word(phase, bin, 0u) + 2u] = 1u;
+					args_init[raster_args_word(phase, bin, 1u) + 0u] = RendererRD::NEXTGEO_RASTER_VERTEX_COUNT;
+				}
+			}
+			rd->buffer_update(raster_args, 0, sizeof(args_init), args_init);
+			const uint32_t counts_init[4] = { 0u, 0u, 0u, 0u };
+			rd->buffer_update(raster_counts, 0, sizeof(counts_init), counts_init);
+		}
 	}
 
 	const bool use_occlusion = p_is_main_view && p_occlusion;
@@ -1043,6 +1406,20 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	cut.cull[1] = record_count;
 	cut.cull[2] = NODE_CAPACITY;
 	cut.cull[3] = (use_occlusion ? 1u : 0u) | (p_is_main_view ? 2u : 0u);
+	// GodotNext: nextgeo_sw_raster (#162). The triangle-size switch (N2).
+	memset(cut.raster_forward, 0, sizeof(cut.raster_forward));
+	memset(cut.raster_params, 0, sizeof(cut.raster_params));
+	if (hybrid) {
+		const Vector3 forward = p_raster->camera_forward.normalized();
+		cut.raster_forward[0] = forward.x;
+		cut.raster_forward[1] = forward.y;
+		cut.raster_forward[2] = forward.z;
+		cut.raster_forward[3] = p_raster->z_near;
+		cut.raster_params[0] = sw_raster_switch_px;
+		cut.raster_params[1] = RendererRD::nextgeo_sw_raster_px_scale(p_raster->proj, float(p_internal_size.x), float(p_internal_size.y), p_raster->orthographic);
+		cut.raster_params[2] = p_raster->orthographic ? 1.0f : 0.0f;
+		cut.cull[3] |= RendererRD::NEXTGEO_CUT_FLAG_HYBRID_RASTER;
+	}
 	rd->buffer_update(params, 0, sizeof(CutParams), &cut);
 
 	bool capture_stats = false;
@@ -1153,6 +1530,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	{
 		LocalVector<RD::Uniform> uniforms;
 		_set_common_uniforms(uniforms, active_counters, prev_hiz_tex, groups, level_a, dummy_page_buf, clusters, bvh_args[0], request_buf);
+		_set_raster_bin_uniforms(uniforms);
 		RID set = _uniform_set(uniforms, 1);
 		if (set.is_valid()) {
 			list = rd->compute_list_begin();
@@ -1168,7 +1546,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 	uint32_t raster_draws = 0;
 	if (can_raster) {
 		RENDER_TIMESTAMP("NextGeo Raster P1");
-		if (_draw_raster_phase(0, 0u, *p_raster)) {
+		if (hybrid ? _draw_hybrid_phase(0, 0u, *p_raster, active_counters, p_internal_size, capture_stats) : _draw_raster_phase(0, 0u, *p_raster)) {
 			raster_draws++;
 		}
 	}
@@ -1225,6 +1603,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 
 		LocalVector<RD::Uniform> leaf_uniforms;
 		_set_common_uniforms(leaf_uniforms, active_counters, prev_hiz_tex, groups, level_a, dummy_page_buf, clusters, bvh_args[0], request_buf);
+		_set_raster_bin_uniforms(leaf_uniforms);
 		RID leaf_set = _uniform_set(leaf_uniforms, 1);
 		if (leaf_set.is_valid()) {
 			list = rd->compute_list_begin();
@@ -1257,7 +1636,7 @@ bool NextGeoCut::dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, co
 
 	if (can_raster) {
 		RENDER_TIMESTAMP("NextGeo Raster P2");
-		if (_draw_raster_phase(1, PHASE2_CLUSTER_BASE, *p_raster)) {
+		if (hybrid ? _draw_hybrid_phase(1, PHASE2_CLUSTER_BASE, *p_raster, active_counters, p_internal_size, capture_stats) : _draw_raster_phase(1, PHASE2_CLUSTER_BASE, *p_raster)) {
 			raster_draws++;
 		}
 		if (build_hiz && hiz_texture[1].is_valid()) {
@@ -1646,6 +2025,35 @@ void NextGeoCut::free_resources() {
 	for (int variant = 0; variant < 2; variant++) {
 		shadow_raster_pipelines[variant].clear();
 	}
+	// GodotNext: nextgeo_sw_raster (#162).
+	for (int variant = 0; variant < 4; variant++) {
+		export_pipelines[variant].clear();
+		vis64_raster_pipelines[variant].clear();
+	}
+	for (int storage = 0; storage < 2; storage++) {
+		sw_pipelines[storage] = RID();
+		vis64_clear_pipelines[storage] = RID();
+	}
+	if (sw_version.is_valid()) {
+		sw_shader.version_free(sw_version);
+		sw_version = RID();
+	}
+	if (export_version.is_valid()) {
+		export_shader.version_free(export_version);
+		export_version = RID();
+	}
+	if (vis64_raster_version.is_valid()) {
+		vis64_raster_shader.version_free(vis64_raster_version);
+		vis64_raster_version = RID();
+	}
+	if (vis64_framebuffer.is_valid() && rd->framebuffer_is_valid(vis64_framebuffer)) {
+		rd->free_rid(vis64_framebuffer);
+	}
+	vis64_framebuffer = RID();
+	vis64_framebuffer_size = Size2i();
+	hybrid_ready = false;
+	vis64_image_ready = false;
+	vis64_buffer_ready = false;
 	if (raster_version.is_valid()) {
 		raster_shader.version_free(raster_version);
 		raster_version = RID();
@@ -1673,7 +2081,7 @@ void NextGeoCut::free_resources() {
 	cluster_shadow_hash = RID();
 	hiz_pipeline = RID();
 	clear_vis_pipeline = RID();
-	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf }) {
+	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &raster_args, &raster_counts, &raster_lists }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();
@@ -1719,5 +2127,12 @@ void NextGeoCut::set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a
 
 Dictionary NextGeoCut::get_last_stats() {
 	MutexLock lock(s_stats_mutex);
-	return s_last_stats.duplicate();
+	Dictionary stats = s_last_stats.duplicate();
+	// GodotNext: nextgeo_sw_raster (#162). The raster path of the last main view, with or without
+	// debug_stats: "hybrid" or "hardware", and why the device is below the Nanite tier (N1).
+	stats["raster_mode"] = s_raster_mode;
+	stats["raster_reason"] = s_raster_reason;
+	stats["vis64_storage"] = s_vis64_storage;
+	stats["sw_raster_max_edge_px"] = s_sw_raster_max_edge_px;
+	return stats;
 }

@@ -49,6 +49,8 @@ enum NextGeoCutFlags : uint32_t {
 	NEXTGEO_CUT_FLAG_ORTHOGRAPHIC = 1u << 2,
 	NEXTGEO_CUT_FLAG_DUAL_PARABOLOID = 1u << 3,
 	NEXTGEO_CUT_FLAG_SHADOW_VIEW = 1u << 4,
+	// GodotNext: nextgeo_sw_raster (#162). Main view: route emitted clusters to the hybrid raster's bins.
+	NEXTGEO_CUT_FLAG_HYBRID_RASTER = 1u << 5,
 };
 
 // Projected error in pixels for a mesh-space sphere (plan §7.3 step 3).

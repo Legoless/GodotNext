@@ -53,6 +53,9 @@ enum NextGeoFallback : uint32_t {
 	NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER,
 	NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE,
 	NEXTGEO_FALLBACK_ALPHA,
+	// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N1). A per-view raster-path reason, not a route
+	// reason: below the Nanite device tier the view keeps NextGeo with the v2.4 hardware raster.
+	NEXTGEO_FALLBACK_NO_INT64_ATOMICS,
 	NEXTGEO_FALLBACK_MAX,
 };
 
@@ -166,6 +169,8 @@ inline const char *nextgeo_fallback_name(NextGeoFallback p_reason) {
 			return "UNSUPPORTED_DERIVATIVE";
 		case NEXTGEO_FALLBACK_ALPHA:
 			return "alpha";
+		case NEXTGEO_FALLBACK_NO_INT64_ATOMICS:
+			return "NO_INT64_ATOMICS";
 		case NEXTGEO_FALLBACK_MAX:
 			break;
 	}

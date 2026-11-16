@@ -43,7 +43,9 @@ struct NextGeoCullParamsData {
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
 	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view)
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster)
+	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
+	vec4 raster_params; // #162: x = T px, y = px scale, z = 1 for an orthographic view
 };
 
 struct NextGeoCountersData {
@@ -62,6 +64,9 @@ struct NextGeoCountersData {
 	uint phase2_visible_count;
 	uint phase2_group_count;
 	uint phase2_level_counts[8];
+	uint raster_sw[2]; // #162: software clusters per phase
+	uint raster_hw[2]; // #162: hardware clusters per phase
+	uint raster_sw_writes; // #162: samples the software rasterizer wrote (debug stats only)
 };
 
 #ifdef SHADOW_VIEW
@@ -76,7 +81,9 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly CullParams {
 	vec4 frustum[6];
 	vec4 camera; // xyz, w = max pixel error
 	vec4 view; // x = internal width (or ortho inv_texel_size), y = internal height, z = z_near, w = lod bias
-	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view)
+	uvec4 cull; // x = layer mask, y = instance count, z = list capacity, w = flags (bit 0 = occlusion, bit 1 = main view, bit 2 = ortho, bit 3 = dual_paraboloid, bit 4 = shadow_view, bit 5 = hybrid raster)
+	vec4 raster_forward; // #162: camera forward axis (xyz), w = z_near of the triangle-size switch
+	vec4 raster_params; // #162: x = T px, y = px scale, z = 1 for an orthographic view
 }
 cull;
 #endif
@@ -108,6 +115,9 @@ layout(set = 0, binding = 5, std430) buffer restrict Counters {
 	uint phase2_visible_count;
 	uint phase2_group_count;
 	uint phase2_level_counts[8];
+	uint raster_sw[2]; // #162: software clusters per phase
+	uint raster_hw[2]; // #162: hardware clusters per phase
+	uint raster_sw_writes; // #162: samples the software rasterizer wrote (debug stats only)
 }
 counters;
 #endif

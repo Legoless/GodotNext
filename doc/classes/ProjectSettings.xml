@@ -3437,6 +3437,9 @@
 		<member name="rendering/nextgeo/debug_stats_interval" type="int" setter="" getter="" default="1">
 			Read the NextGeo cut debug stats every N frames instead of every frame, to limit the GPU stall during long sweeps.
 		</member>
+		<member name="rendering/nextgeo/debug_vis64_buffer" type="bool" setter="" getter="" default="false">
+			Use the storage-buffer form of the hybrid raster's 64-bit visibility buffer even where 64-bit image atomics are available. The buffer form is the one devices without 64-bit image atomics use; this setting exercises it on other devices for testing.
+		</member>
 		<member name="rendering/nextgeo/hiz_debug" type="bool" setter="" getter="" default="false">
 			Read the previous and current Hi-Z chains back with the cut debug stats and report their center depth. It is a debug-only readback and stalls the GPU.
 		</member>
@@ -3446,8 +3449,14 @@
 		<member name="rendering/nextgeo/occlusion" type="bool" setter="" getter="" default="true">
 			Enable the NextGeo two-phase Hi-Z occlusion test. Phase 1 tests the previous frame's Hi-Z chain; phase 2 re-tests the instances it occluded against the chain built from the current depth, so moving occluders disocclude in the same frame. Off gives the CPU-reference parity cut (the debug comparison).
 		</member>
+		<member name="rendering/nextgeo/raster_mode" type="int" setter="" getter="" default="0">
+			How NextGeo rasterizes its visibility buffer. [code]Hybrid[/code] rasterizes clusters of small triangles in a compute shader and the others in hardware, both into one 64-bit depth and visibility ID buffer, which an export pass then turns into the depth buffer and the visibility targets. [code]Hardware[/code] rasterizes every cluster in hardware with a depth attachment. A device without 64-bit atomics or indirect-count draws always uses [code]Hardware[/code] and logs the reason [code]NO_INT64_ATOMICS[/code] once.
+		</member>
 		<member name="rendering/nextgeo/streaming/debug_io_delay_ms" type="Vector2" setter="" getter="" default="Vector2(0, 0)">
 			Injects a deterministic seeded uniform wall-time IO delay in milliseconds ([code]Vector2(min_ms, max_ms)[/code]) on each background NextGeo page read request for slow-storage streaming stress tests. Set to [code]Vector2(0, 0)[/code] outside tests.
+		</member>
+		<member name="rendering/nextgeo/sw_raster_max_edge_px" type="float" setter="" getter="" default="8.0">
+			The triangle-size switch of the [code]Hybrid[/code] raster mode, in pixels at the internal resolution. A cluster goes to the software rasterizer when its longest edge projects below this value and it lies entirely in front of the near plane; every other cluster goes to the hardware rasterizer. [code]0[/code] sends every cluster to the hardware rasterizer. Values above [code]64[/code] are clamped to [code]64[/code], so every software-rasterized triangle keeps the full subpixel precision. The default is provisional.
 		</member>
 		<member name="rendering/nextgeo/visibility_only" type="bool" setter="" getter="" default="false">
 			Skip virtual surfaces in the legacy opaque and motion render lists before Stage A/B resolve is enabled, isolating NextGeo visibility-buffer, depth, and motion-vector output for diagnostics and tests.

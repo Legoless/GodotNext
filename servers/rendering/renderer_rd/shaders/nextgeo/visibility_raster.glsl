@@ -7,6 +7,9 @@
 // GodotNext: nextgeo_visibility_raster (#83, plan §6.1, §6.3, §7.4).
 // Draw path (c): one indirect instanced draw per phase over the compacted
 // visible-cluster list, pulling cluster vertices from the page arena.
+// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N2). MODE_VIS64 is the hybrid
+// raster's hardware path: an indirect-count draw over the phase's hardware list,
+// no attachments, and a pixel shader that writes atomicMax(vis64, depth << 32 | ID).
 
 // clang-format off
 #include "nextgeo_records_inc.glsl"
@@ -18,13 +21,16 @@ layout(location = 0) out float dp_clip_out;
 #endif
 #else
 layout(location = 0) out flat uint vis_id_out;
+#ifndef MODE_VIS64
 layout(location = 1) out flat uint instance_id_out;
+#endif
 #ifdef WITH_VELOCITY
 layout(location = 2) out vec4 screen_position;
 layout(location = 3) out vec4 prev_screen_position;
 #endif
 #endif
 
+// MODE_VIS64: pad0 = the phase region's size in raster_lists, pad1 = the target width.
 layout(push_constant, std430) uniform PushParams {
 	uint list_base;
 	uint pad0;
@@ -97,6 +103,14 @@ layout(set = 0, binding = 6, std430) buffer restrict readonly BucketTable {
 }
 bucket_table;
 
+#ifdef MODE_VIS64
+// Hardware entries grow down from the top of the phase's region (raster_features_inc.glsl).
+layout(set = 0, binding = 7, std430) buffer restrict readonly RasterLists {
+	uint data[];
+}
+raster_lists;
+#endif
+
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
 #ifdef MODE_SHADOW
@@ -105,7 +119,9 @@ void collapse_triangle() {
 #endif
 #else
 	vis_id_out = 0xFFFFFFFFu;
+#ifndef MODE_VIS64
 	instance_id_out = 0xFFFFFFFFu;
+#endif
 #ifdef WITH_VELOCITY
 	screen_position = vec4(0.0, 0.0, 0.0, 1.0);
 	prev_screen_position = vec4(0.0, 0.0, 0.0, 1.0);
@@ -235,7 +251,11 @@ void main() {
 }
 #else
 void main() {
+#ifdef MODE_VIS64
+	uint vis_cluster = raster_lists.data[push_params.list_base + push_params.pad0 - 1u - uint(gl_InstanceIndex)];
+#else
 	uint vis_cluster = push_params.list_base + uint(gl_InstanceIndex);
+#endif
 	uint t = uint(gl_VertexIndex) / 3u;
 	uint corner = uint(gl_VertexIndex) - t * 3u;
 
@@ -343,7 +363,9 @@ void main() {
 
 	gl_Position = cur_clip;
 	vis_id_out = (vis_cluster << 7u) | (t & 0x7Fu);
+#ifndef MODE_VIS64
 	instance_id_out = entry.x;
+#endif
 
 #ifdef WITH_VELOCITY
 	vec3 prev_world_pos = vec3(
@@ -363,6 +385,15 @@ void main() {
 
 #VERSION_DEFINES
 
+#ifdef MODE_VIS64
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#ifdef VIS64_BUFFER
+#extension GL_EXT_shader_atomic_int64 : require
+#else
+#extension GL_EXT_shader_image_int64 : require
+#endif
+#endif
+
 #ifdef MODE_SHADOW
 #ifdef MODE_DUAL_PARABOLOID
 layout(location = 0) in float dp_clip_in;
@@ -373,6 +404,39 @@ void main() {
 	if (dp_clip_in > 0.0) {
 		discard;
 	}
+#endif
+}
+#elif defined(MODE_VIS64)
+layout(location = 0) in flat uint vis_id_in;
+
+layout(push_constant, std430) uniform PushParams {
+	uint list_base;
+	uint pad0;
+	uint pad1; // The target width.
+	uint pad2;
+}
+push_params;
+
+#ifdef VIS64_BUFFER
+layout(set = 0, binding = 8, std430) buffer restrict Vis64 {
+	uint64_t data[];
+}
+vis64;
+#else
+layout(set = 0, binding = 8, r64ui) uniform restrict u64image2D vis64;
+#endif
+
+void main() {
+	// Depth 0 is the far plane and the empty texel.
+	if (!(gl_FragCoord.z > 0.0)) {
+		return;
+	}
+	uint64_t value = (uint64_t(floatBitsToUint(min(gl_FragCoord.z, 1.0))) << 32u) | uint64_t(vis_id_in);
+	ivec2 pixel = ivec2(gl_FragCoord.xy);
+#ifdef VIS64_BUFFER
+	atomicMax(vis64.data[uint(pixel.y) * push_params.pad1 + uint(pixel.x)], value);
+#else
+	imageAtomicMax(vis64, pixel, value);
 #endif
 }
 #else

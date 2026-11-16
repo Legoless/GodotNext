@@ -35,6 +35,7 @@
 
 #include <zlib.h>
 
+#include <cmath>
 #include <cstring>
 
 namespace {
@@ -156,9 +157,129 @@ Error NGMHandlePool::read_at(const String &p_key, const String &p_open_path, uin
 	return OK;
 }
 
+// GodotNext: nextgeo_sw_raster (#162). The max_edge field of `.ngm` v2 cluster records.
+uint16_t ngm_half_ceil(double p_value) {
+	if (std::isnan(p_value) || p_value > 65504.0) {
+		return 0x7C00u;
+	}
+	if (p_value <= 0.0) {
+		return 0u;
+	}
+	int exponent = 0;
+	std::frexp(p_value, &exponent);
+	exponent -= 1; // p_value = m * 2^exponent with m in [1, 2).
+	if (exponent < -14) {
+		// Subnormal: units of 2^-24. 1024 units is the smallest normal value, whose bits are 0x0400.
+		return uint16_t(std::ceil(std::ldexp(p_value, 24)));
+	}
+	const double mantissa = std::ceil((std::ldexp(p_value, -exponent) - 1.0) * 1024.0);
+	// A mantissa of 1024 carries into the exponent, which is the next binade's first value.
+	const uint32_t bits = (uint32_t(exponent + 15) << 10) + uint32_t(mantissa);
+	return bits >= 0x7C00u ? uint16_t(0x7C00u) : uint16_t(bits);
+}
+
+float ngm_half_to_float(uint16_t p_half) {
+	const uint32_t exponent = (p_half >> 10) & 0x1Fu;
+	const uint32_t mantissa = p_half & 0x3FFu;
+	const float sign = (p_half & 0x8000u) != 0 ? -1.0f : 1.0f;
+	if (exponent == 0) {
+		return sign * float(std::ldexp(double(mantissa), -24));
+	}
+	if (exponent == 31) {
+		return mantissa != 0 ? NAN : sign * INFINITY;
+	}
+	return sign * float(std::ldexp(double(1024u + mantissa), int(exponent) - 25));
+}
+
+double ngm_cluster_max_edge(const uint8_t *p_vertices, uint32_t p_stride, uint32_t p_vertex_count, const uint8_t *p_triangles, uint32_t p_triangle_count) {
+	double longest = 0.0;
+	if (p_stride < 3) {
+		return longest;
+	}
+	for (uint32_t t = 0; t < p_triangle_count; t++) {
+		float corners[3][3];
+		bool valid = true;
+		for (uint32_t c = 0; c < 3; c++) {
+			const uint32_t index = p_triangles[t * 3 + c];
+			if (index >= p_vertex_count) {
+				valid = false;
+				break;
+			}
+			memcpy(corners[c], p_vertices + uint64_t(index) * p_stride * sizeof(float), sizeof(corners[c]));
+		}
+		if (!valid) {
+			continue;
+		}
+		for (uint32_t e = 0; e < 3; e++) {
+			const float *a = corners[e];
+			const float *b = corners[(e + 1) % 3];
+			const double dx = double(b[0]) - double(a[0]);
+			const double dy = double(b[1]) - double(a[1]);
+			const double dz = double(b[2]) - double(a[2]);
+			const double length = std::sqrt(dx * dx + dy * dy + dz * dz);
+			// A position that is not finite makes the edge unbounded, so the cluster stays on the
+			// hardware path.
+			longest = std::isfinite(length) ? MAX(longest, length) : INFINITY;
+		}
+	}
+	return longest;
+}
+
+uint32_t ngm_max_edge_word(double p_max_edge) {
+	return uint32_t(ngm_half_ceil(p_max_edge)) | (uint32_t(NGM_MAX_EDGE_TAG) << 16);
+}
+
+bool ngm_page_has_max_edges(const uint8_t *p_page, uint64_t p_size) {
+	if (p_page == nullptr || p_size < 16u) {
+		return false;
+	}
+	const uint32_t cluster_count = load_u32(p_page);
+	if (16ull + uint64_t(cluster_count) * NGM_CLUSTER_RECORD_SIZE > p_size) {
+		return false;
+	}
+	for (uint32_t i = 0; i < cluster_count; i++) {
+		const uint8_t *record = p_page + 16u + uint64_t(i) * NGM_CLUSTER_RECORD_SIZE;
+		if ((load_u32(record + NGM_RECORD_MAX_EDGE_OFFSET) >> 16) != NGM_MAX_EDGE_TAG) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool ngm_page_fill_max_edges(uint8_t *p_page, uint64_t p_size, uint32_t p_stride) {
+	if (p_page == nullptr || p_size < 16u || p_stride < 3u) {
+		return false;
+	}
+	const uint32_t cluster_count = load_u32(p_page);
+	const uint32_t vertex_count = load_u32(p_page + 4);
+	const uint32_t triangle_count = load_u32(p_page + 8);
+	const uint64_t vertex_begin = 16ull + uint64_t(cluster_count) * NGM_CLUSTER_RECORD_SIZE;
+	const uint64_t triangle_begin = vertex_begin + uint64_t(vertex_count) * p_stride * sizeof(float);
+	if (triangle_begin + uint64_t(triangle_count) * 3ull > p_size) {
+		return false;
+	}
+	for (uint32_t i = 0; i < cluster_count; i++) {
+		uint8_t *record = p_page + 16u + uint64_t(i) * NGM_CLUSTER_RECORD_SIZE;
+		const uint32_t first_vertex = load_u32(record + 68);
+		const uint32_t first_triangle = load_u32(record + 72);
+		const uint32_t cluster_vertices = record[76];
+		const uint32_t cluster_triangles = record[77];
+		// A cluster whose ranges leave the page gets +infinity, which keeps it on the hardware path.
+		double longest = INFINITY;
+		if (uint64_t(first_vertex) + cluster_vertices <= vertex_count && uint64_t(first_triangle) + cluster_triangles <= triangle_count) {
+			longest = ngm_cluster_max_edge(p_page + vertex_begin + uint64_t(first_vertex) * p_stride * sizeof(float), p_stride, cluster_vertices, p_page + triangle_begin + uint64_t(first_triangle) * 3ull, cluster_triangles);
+		}
+		const uint32_t word = ngm_max_edge_word(longest);
+		for (uint32_t b = 0; b < 4; b++) {
+			record[NGM_RECORD_MAX_EDGE_OFFSET + b] = uint8_t((word >> (8u * b)) & 0xFFu);
+		}
+	}
+	return true;
+}
+
 Error NGMWriter::write(const String &p_path, const NGMHeader &p_header, const Vector<NGMPage> &p_pages) {
 	ERR_FAIL_COND_V_MSG(p_path.is_empty(), ERR_INVALID_PARAMETER, "NGM: path is empty.");
-	ERR_FAIL_COND_V_MSG(p_header.version != NGM_VERSION, ERR_INVALID_PARAMETER, "NGM: writer only emits version 1.");
+	ERR_FAIL_COND_V_MSG(p_header.version != NGM_VERSION, ERR_INVALID_PARAMETER, "NGM: writer only emits version 2.");
 	ERR_FAIL_COND_V_MSG(p_header.page_size == 0, ERR_INVALID_PARAMETER, "NGM: page_size is required.");
 	ERR_FAIL_COND_V_MSG(p_header.page_count != uint32_t(p_pages.size()), ERR_INVALID_PARAMETER, "NGM: page_count does not match the page list.");
 	ERR_FAIL_COND_V_MSG(p_header.root_page_count > p_header.page_count, ERR_INVALID_PARAMETER, "NGM: root_page_count exceeds page_count.");
@@ -331,7 +452,7 @@ Error NGMFile::open(const String &p_path) {
 		return ERR_FILE_CORRUPT;
 	}
 	header.version = load_u32(prefix.ptr() + 4);
-	if (header.version != NGM_VERSION) {
+	if (header.version < NGM_VERSION_MIN || header.version > NGM_VERSION) {
 		return ERR_FILE_UNRECOGNIZED;
 	}
 	if (prefix.size() < NGM_HEADER_SIZE) {

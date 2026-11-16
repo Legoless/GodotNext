@@ -4074,6 +4074,11 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_visibility_raster (#83).
 	GLOBAL_DEF("rendering/nextgeo/debug_backface", false);
 	GLOBAL_DEF("rendering/nextgeo/visibility_only", false);
+	// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N1, N2). The threshold is provisional; PQ measures
+	// it per GPU class with GN-2 and records it in Appendix A.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/raster_mode", PROPERTY_HINT_ENUM, "Hybrid,Hardware"), 0);
+	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/sw_raster_max_edge_px", PROPERTY_HINT_RANGE, "0,32,0.25,suffix:px"), 8.0);
+	GLOBAL_DEF("rendering/nextgeo/debug_vis64_buffer", false);
 	// GodotNext: nextgeo_residency (#78).
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/geometry_cache_mb", PROPERTY_HINT_RANGE, "16,2047,1,suffix:MiB"), 512);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/page_upload_kib_per_frame", PROPERTY_HINT_RANGE, "64,65536,64,suffix:KiB"), 4096);

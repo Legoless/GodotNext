@@ -116,6 +116,62 @@ public:
 		uint32_t surface_count = 0;
 	};
 
+	// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N3). The raster-feature table. A raster bin is keyed
+	// by (feature mask, material shader version); the fixed-function bin has no feature bit. Each entry
+	// names the pass it rasterizes for, so the VSM page raster (#217) shares the table, and every later
+	// feature adds its VSM entry in the same change. The GLSL copy is
+	// shaders/nextgeo/raster_features_inc.glsl: change both in the same commit.
+	enum RasterFeature : uint32_t {
+		RASTER_FEATURE_MASKED = 1u << 0,
+		RASTER_FEATURE_VERTEX_OFFSET = 1u << 1,
+		RASTER_FEATURE_DEPTH_OFFSET = 1u << 2,
+		RASTER_FEATURE_TWO_SIDED = 1u << 3,
+		RASTER_FEATURE_SKINNED = 1u << 4,
+		RASTER_FEATURE_DISPLACED = 1u << 5,
+		RASTER_FEATURE_SPLINE = 1u << 6,
+		RASTER_FEATURE_VOXEL = 1u << 7,
+		RASTER_FEATURE_ASSEMBLY = 1u << 8,
+		RASTER_FEATURE_ALL = (1u << 9) - 1u,
+	};
+
+	enum RasterPass : uint32_t {
+		RASTER_PASS_VISIBILITY = 0, // The main-view visibility buffer (#162).
+		RASTER_PASS_VSM = 1, // The virtual shadow map page pool (#217).
+		RASTER_PASS_MAX,
+	};
+
+	// Bins of the visibility pass. Cluster cull compacts one software list and one hardware list per bin
+	// and phase; each bin is one indirect software dispatch and one indirect-count hardware draw.
+	enum RasterBin : uint32_t {
+		RASTER_BIN_FIXED = 0,
+		RASTER_BIN_COUNT,
+	};
+
+	struct RasterBinEntry {
+		uint32_t features;
+		RasterPass pass;
+		RasterBin bin;
+		const char *name;
+	};
+
+	static constexpr RasterBinEntry RASTER_BIN_TABLE[] = {
+		{ 0u, RASTER_PASS_VISIBILITY, RASTER_BIN_FIXED, "FIXED" },
+		// #217's page raster: the same triangle setup (sw_raster_setup_inc.glsl), 32-bit depth.
+		{ 0u, RASTER_PASS_VSM, RASTER_BIN_FIXED, "VSM_FIXED" },
+	};
+	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
+
+	// The table entry that rasterizes p_features for p_pass, or -1 when no bin supports that feature
+	// mask yet (the surface keeps its legacy route).
+	static constexpr int32_t find_raster_bin_entry(uint32_t p_features, RasterPass p_pass) {
+		for (uint32_t i = 0; i < RASTER_BIN_TABLE_SIZE; i++) {
+			if (RASTER_BIN_TABLE[i].features == p_features && RASTER_BIN_TABLE[i].pass == p_pass) {
+				return int32_t(i);
+			}
+		}
+		return -1;
+	}
+
 	static constexpr uint32_t RECORD_BYTES = sizeof(Record);
 	static constexpr uint32_t MESH_RECORD_BYTES = sizeof(MeshRecord);
 	static constexpr uint32_t INITIAL_RECORD_CAPACITY = 4096;

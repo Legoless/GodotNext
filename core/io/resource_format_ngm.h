@@ -37,14 +37,14 @@
 #include "core/templates/list.h"
 #include "core/templates/vector.h"
 
-// `.ngm` v1, the paged sidecar for one virtualized mesh (plan §7.2). It is not a
+// `.ngm` v2, the paged sidecar for one virtualized mesh (plan §7.2). It is not a
 // resource: nothing here is registered as a ResourceFormatLoader or Saver, and `ngm`
 // is not a resource extension, so the editor file scan and the stock export loop
 // ignore the files.
 //
 // Little-endian. Header, 128 bytes:
 //   0  char[4] magic "NGM1"
-//   4  u32     version = 1
+//   4  u32     version = 2 (readers also take 1)
 //   8  u32     header_size = 128
 //  12  u32     flags (bit 0 = meshopt codec; the provisional codec is raw, so bit 0 is clear)
 //  16  u32     page_size (builder budget, bytes; provisional value is NGM_PROVISIONAL_PAGE_SIZE)
@@ -65,7 +65,8 @@
 //
 // Each page starts 16-byte aligned. Its payload (the bytes `NGMFile::read_page` returns) is:
 //   u32 cluster_count, vertex_count, triangle_count, skin_bytes;
-//   cluster_count records of 80 bytes (NextGeoCluster layout, page-local vertex and triangle offsets);
+//   cluster_count records of 80 bytes (NextGeoCluster layout, page-local vertex and triangle offsets;
+//     bytes 64..67 hold the tagged max_edge in v2 and the page_id in v1, see NGM_RECORD_MAX_EDGE_OFFSET);
 //   vertices, vertex_count * stride floats, stride derived from vertex_layout;
 //   triangles, triangle_count * 3 bytes;
 //   skinning section, `skin_bytes` bytes (0 when the skinned flag is clear), per cluster:
@@ -74,14 +75,26 @@
 //     vertex_count * influences u8 cluster-local bone indices;
 //     vertex_count * influences unorm16 weights.
 // The skinning section is per-page so every stored page (section included) stays within
-// `page_size`. The version stays 1: files without the section are plain v1, and a v1
+// `page_size`. The section did not change the version: files without it are plain, and a
 // reader that predates the section rejects a skinned file on its unknown flag.
 // Bytes between a page's stored payload and the next 16-byte boundary are zero and are not
 // part of the CRC. `page_size` budgets the whole stored page: the 16-byte header, every
 // cluster record, the vertices and triangles, and that padding. `raw_size` is the payload
 // without the padding, so `raw_size` is at most `page_size`.
 
-static constexpr uint32_t NGM_VERSION = 1;
+// GodotNext: nextgeo_sw_raster (#162). Version 2 keeps the v1 layout except bytes 64..67 of every
+// cluster record. v1 stored the record's page_id there, which is always the page that holds the record
+// and which no reader uses. v2 stores the cluster's longest triangle edge in mesh units, `max_edge`, as
+// an IEEE binary16 rounded up (bytes 64..65), then NGM_MAX_EDGE_TAG (bytes 66..67). The hybrid
+// rasterizer's triangle-size switch reads it. The tag marks the value in the page itself, because root
+// pages also travel inside VirtualGeometryData, without the file header; a v1 page_id would need more
+// than 1.29 billion pages to look tagged. The runtime computes max_edge for an untagged (v1) page when
+// it installs it (ngm_page_fill_max_edges).
+static constexpr uint32_t NGM_VERSION = 2;
+static constexpr uint32_t NGM_VERSION_MIN = 1;
+static constexpr uint32_t NGM_CLUSTER_RECORD_SIZE = 80;
+static constexpr uint32_t NGM_RECORD_MAX_EDGE_OFFSET = 64;
+static constexpr uint16_t NGM_MAX_EDGE_TAG = 0x4D45;
 static constexpr uint32_t NGM_HEADER_SIZE = 128;
 static constexpr uint32_t NGM_PAGE_TABLE_ENTRY_SIZE = 32;
 static constexpr uint32_t NGM_PAGE_ALIGN = 16;
@@ -107,6 +120,26 @@ struct NGMHeader {
 	uint32_t skin_influences = 0; // 0, 4 or 8; non-zero iff NGM_FLAG_SKINNED is set.
 	uint8_t source_sha256[32] = {};
 };
+
+// GodotNext: nextgeo_sw_raster (#162). The max_edge field of `.ngm` v2 cluster records.
+// The smallest IEEE binary16 at or above p_value: 0 for zero and negative values, +infinity (0x7C00)
+// above 65504 and for NaN, so a stored max_edge never understates an edge.
+uint16_t ngm_half_ceil(double p_value);
+float ngm_half_to_float(uint16_t p_half);
+// The longest edge of p_triangle_count triangles (three u8 cluster-local indices each) over vertices
+// whose first three floats are the position, p_stride floats apart. 0 with no valid triangle;
+// +infinity when a position is not finite, so the cluster stays on the hardware rasterizer.
+double ngm_cluster_max_edge(const uint8_t *p_vertices, uint32_t p_stride, uint32_t p_vertex_count, const uint8_t *p_triangles, uint32_t p_triangle_count);
+// Record bytes 64..67 of a v2 cluster record: ngm_half_ceil(p_max_edge) in the low half and
+// NGM_MAX_EDGE_TAG in the high half.
+uint32_t ngm_max_edge_word(double p_max_edge);
+// True when every cluster record of a page payload carries a tagged max_edge (a v2 page). False for a
+// v1 page or a payload whose header and records do not fit p_size.
+bool ngm_page_has_max_edges(const uint8_t *p_page, uint64_t p_size);
+// Writes the tagged max_edge into every cluster record of a page payload from its own vertices and
+// triangles (+infinity for a cluster whose ranges leave the page). p_stride is the vertex stride in
+// floats. False, with the payload unchanged, when its header does not fit it.
+bool ngm_page_fill_max_edges(uint8_t *p_page, uint64_t p_size, uint32_t p_stride);
 
 struct NGMPage {
 	Vector<uint8_t> bytes;
@@ -143,14 +176,14 @@ class NGMFile : public RefCounted {
 	Vector<PageEntry> pages;
 
 public:
-	// Checks magic, version (anything other than 1, or a meshopt/unknown flag, is not v1 raw)
+	// Checks magic, version (1 or 2; anything else, or a meshopt/unknown flag, is not raw v1 or v2)
 	// and that the page table and every page range sit inside the file.
 	// Version or magic mismatch returns ERR_FILE_UNRECOGNIZED. A truncated or inconsistent
 	// table returns ERR_FILE_CORRUPT. An encrypted pack entry returns ERR_UNAVAILABLE.
 	Error open(const String &p_path);
 	// Bounds or CRC failure returns ERR_FILE_CORRUPT and clears `r_raw`. Never crashes.
 	Error read_page(uint32_t p_index, Vector<uint8_t> &r_raw) const;
-	// Reads only the 16-byte page header and 80-byte cluster records of `p_index` (raw v1).
+	// Reads only the 16-byte page header and 80-byte cluster records of `p_index` (raw v1 or v2).
 	Error read_page_cluster_records(uint32_t p_index, uint32_t &r_cluster_count, Vector<uint8_t> &r_records) const;
 
 	bool is_open() const { return opened; }

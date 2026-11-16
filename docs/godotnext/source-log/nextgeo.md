@@ -50,6 +50,33 @@ MIT) is already vendored. #65 adds `meshletcodec.cpp` and `meshletutils.cpp`, bo
 unmodified upstream files that were vendored but not compiled, to
 `modules/meshoptimizer/SCsub` (decision D3).
 
+### Rasterization rules for the software rasterizer (#162)
+
+The hybrid HW/SW rasterizer (#162, plan §21.4 N2) rasterizes small triangles in a compute
+shader, so its coverage, facing and depth must agree with the hardware rasterizer's.
+
+| Field | Value |
+|---|---|
+| What | Direct3D's triangle rasterization rules: pixel centers are sampled, and a center on an edge is inside under the top-left rule (a top edge is exactly horizontal and above the other edges; a left edge is not horizontal and on the triangle's left side). The Vulkan specification's rasterization chapter: single-sample rasterization samples the fragment center; a sample on an edge shared by two polygons is covered by exactly one of them; the front face is chosen by the sign of the polygon's framebuffer-space area (`VK_FRONT_FACE_CLOCKWISE`: negative area is front-facing); polygon depth is interpolated linearly in screen space. |
+| Upstream | https://learn.microsoft.com/en-us/windows/win32/direct3d11/d3d10-graphics-programming-guide-rasterizer-stage-rules and https://docs.vulkan.org/spec/latest/chapters/primsrast.html |
+| Version | The Microsoft Learn page dated 2026-09-08; the "latest" Vulkan specification page, which shows no revision or date, as read on 2026-11-16 |
+| License | Microsoft Learn documentation (CC-BY 4.0); the Vulkan specification (CC-BY 4.0, per https://github.com/KhronosGroup/Vulkan-Docs/blob/main/LICENSE.adoc). Consulted, not copied |
+| Read on | 2026-11-16, for issue #162 |
+| Consulted by | The #162 implementer |
+| Used in | `servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h`, `servers/rendering/renderer_rd/shaders/nextgeo/sw_raster_setup_inc.glsl`, `tests/servers/rendering/test_nextgeo_sw_raster.cpp` |
+| Copied files | None |
+
+How it was used: the software setup samples pixel centers, keeps a center on an edge
+when the edge is a top or left edge (framebuffer y points down), keeps the faces the
+v2.4 pipeline keeps (cull back, front face clockwise) and interpolates depth linearly
+from the integer edge functions. The test's reference rasterizer restates the top-left
+rule as "the sample moved by an infinitely small (e, e^2) is inside" and checks the
+shared-edge property on watertight meshes. Vertex snapping to 1/256 pixel and the
+coarser grid for large triangles are this implementation's own choice. The hybrid
+design itself (the 64-bit depth and ID buffer written with atomic max by both paths,
+the per-cluster triangle-size switch and the export pass) comes from plan §21.4 N1 to
+N3; no Unreal Engine documentation beyond what the plan already cites was read for it.
+
 ## Forbidden inputs
 
 No Unreal Engine source or shaders, UE plugin source, NvRTX, DLSS sample or Donut

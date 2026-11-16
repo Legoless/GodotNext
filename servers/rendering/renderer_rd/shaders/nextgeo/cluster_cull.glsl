@@ -5,7 +5,9 @@
 // GodotNext: nextgeo_gpu_cull (#76). Level-synchronous BVH8 traversal and
 // cluster compaction. Variants:
 //   (none)       BVH_LEVEL: descend one level of the tree.
-//   CLUSTER_CULL: test leaf groups and emit (record, cluster).
+//   CLUSTER_CULL: test leaf groups and emit (record, cluster). With the hybrid
+//                raster flag (#162), it also routes each emitted main-view
+//                cluster to the software or hardware list of its raster bin.
 //   CUT_HASH:    XOR the order-independent hash of every compacted cluster.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -13,6 +15,7 @@ layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 // clang-format off
 #include "nextgeo_records_inc.glsl"
 #include "nextgeo_cull_inc.glsl"
+#include "raster_features_inc.glsl"
 // clang-format on
 
 layout(set = 0, binding = 8, std430) buffer restrict readonly LevelInput {
@@ -117,6 +120,26 @@ layout(set = 0, binding = 15, std430) buffer restrict PageRequests {
 }
 page_requests;
 
+#if defined(CLUSTER_CULL) && !defined(SHADOW_VIEW)
+// GodotNext: nextgeo_sw_raster (#162, plan §21.4 N2, N3). Per phase and raster bin: the software
+// dispatch and hardware draw arguments, the hardware draw counts, and the lists of visible-cluster
+// indices (layouts in raster_features_inc.glsl).
+layout(set = 0, binding = 16, std430) buffer restrict RasterArgs {
+	uint data[];
+}
+raster_args;
+layout(set = 0, binding = 17, std430) buffer restrict RasterCounts {
+	uint data[];
+}
+raster_counts;
+layout(set = 0, binding = 18, std430) buffer restrict writeonly RasterLists {
+	uint data[];
+}
+raster_lists;
+
+const uint NEXTGEO_CULL_FLAG_HYBRID_RASTER = 1u << 5u;
+#endif
+
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
 	return vec3(
 			dot(p_record.transform[0].xyz, p_local) + p_record.transform[0].w,
@@ -173,6 +196,59 @@ bool mesh_group_refine_ok(uint p_mesh_idx, uint p_group_idx) {
 }
 
 #ifdef CLUSTER_CULL
+#ifndef SHADOW_VIEW
+// The most the instance's basis stretches a length, RendererRD::nextgeo_sw_raster_instance_scale(): a
+// Gershgorin bound on the Gram matrix of its columns, exact for a rotation times a scale, mirrored or
+// not. world_aabb_min.w cannot serve: it is negative for a mirrored instance.
+float sw_raster_instance_scale(NextGeoInstanceRecord p_record) {
+	vec3 c0 = vec3(p_record.transform[0].x, p_record.transform[1].x, p_record.transform[2].x);
+	vec3 c1 = vec3(p_record.transform[0].y, p_record.transform[1].y, p_record.transform[2].y);
+	vec3 c2 = vec3(p_record.transform[0].z, p_record.transform[1].z, p_record.transform[2].z);
+	float d01 = abs(dot(c0, c1));
+	float d02 = abs(dot(c0, c2));
+	float d12 = abs(dot(c1, c2));
+	return sqrt(max(dot(c0, c0) + d01 + d02, max(dot(c1, c1) + d01 + d12, dot(c2, c2) + d02 + d12)));
+}
+
+// The triangle-size switch (N2), RendererRD::nextgeo_sw_raster_route(): software when the cluster's
+// culling sphere lies in front of the near plane and its longest edge projects below T px.
+// p_scale: sw_raster_instance_scale(p_record).
+bool sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_bounds, float p_max_edge) {
+	float max_edge_px = cull.raster_params.x;
+	if (!(max_edge_px > 0.0) || !(p_scale > 0.0) || !(p_max_edge >= 0.0) || isinf(p_max_edge)) {
+		return false;
+	}
+	vec3 center = instance_point(p_record, p_bounds.xyz);
+	float z_min = dot(center - cull.camera.xyz, cull.raster_forward.xyz) - p_bounds.w * p_scale;
+	if (!(z_min > cull.raster_forward.w)) {
+		return false;
+	}
+	float edge_px = p_max_edge * p_scale * cull.raster_params.y;
+	if (cull.raster_params.z == 0.0) {
+		edge_px /= max(z_min, 1e-20);
+	}
+	return edge_px < max_edge_px;
+}
+
+// Appends visible cluster p_vis_index to the software or hardware list of the fixed-function bin.
+void raster_route(uint p_vis_index, bool p_software) {
+	uint region_base = params.list_base;
+	if (p_software) {
+		uint slot = atomicAdd(counters.raster_sw[params.phase], 1u);
+		raster_lists.data[region_base + slot] = p_vis_index;
+		uint word = nextgeo_raster_args_word(params.phase, NEXTGEO_RASTER_BIN_FIXED, NEXTGEO_RASTER_ARGS_SW);
+		atomicMax(raster_args.data[word + 0u], min(slot + 1u, NEXTGEO_SW_DISPATCH_WIDTH));
+		atomicMax(raster_args.data[word + 1u], slot / NEXTGEO_SW_DISPATCH_WIDTH + 1u);
+	} else {
+		uint slot = atomicAdd(counters.raster_hw[params.phase], 1u);
+		raster_lists.data[region_base + params.output_capacity - 1u - slot] = p_vis_index;
+		uint word = nextgeo_raster_args_word(params.phase, NEXTGEO_RASTER_BIN_FIXED, NEXTGEO_RASTER_ARGS_HW);
+		atomicAdd(raster_args.data[word + 1u], 1u);
+		atomicMax(raster_counts.data[params.phase], NEXTGEO_RASTER_BIN_FIXED + 1u);
+	}
+}
+#endif
+
 #ifdef SHADOW_VIEW
 void main() {
 	uint index = gl_GlobalInvocationID.x;
@@ -308,14 +384,18 @@ void main() {
 	uint page_cluster_hdr = (page_slot != 0xFFFFFFFFu && slot_page_size >= 96u) ? pages.data[(page_slot * slot_page_size) >> 2u] : 0u;
 	uint last_requested_page = 0xFFFFFFFFu;
 	bool emitted_any = false;
+	bool hybrid_raster = (cull.cull.w & NEXTGEO_CULL_FLAG_HYBRID_RASTER) != 0u;
+	float route_scale = hybrid_raster ? sw_raster_instance_scale(record) : 0.0;
 
 	for (uint cluster = 0u; cluster < cluster_count; cluster++) {
 		uint global_cluster = cluster_offset + cluster;
+		uint route_rec_word = 0xFFFFFFFFu;
 		if (page_cluster_hdr > 0u && global_cluster >= mesh.cluster_offset) {
 			uint local_cluster = global_cluster - mesh.cluster_offset;
 			if (local_cluster >= page_first_cluster && (local_cluster - page_first_cluster) < page_cluster_hdr) {
 				uint in_page = local_cluster - page_first_cluster;
 				uint rec_word = ((page_slot * slot_page_size) >> 2u) + 4u + in_page * 20u;
+				route_rec_word = rec_word;
 				int refined_group = int(pages.data[rec_word + 15u]);
 				if (refined_group >= 0 && uint(refined_group) < group_count) {
 					vec4 own_lod = vec4(
@@ -363,6 +443,20 @@ void main() {
 		atomicAdd(counters.cluster_count, 1u);
 		atomicAdd(draw_args.data[params.phase].y, 1u);
 		clusters_out.data[params.list_base + slot] = uvec2(entry.x, global_cluster);
+		if (hybrid_raster) {
+			bool software = false;
+			if (route_rec_word != 0xFFFFFFFFu) {
+				// The cluster record: culling sphere at words 0-3, max_edge (f16, .ngm v2) at word 16.
+				vec4 bounds = vec4(
+						uintBitsToFloat(pages.data[route_rec_word + 0u]),
+						uintBitsToFloat(pages.data[route_rec_word + 1u]),
+						uintBitsToFloat(pages.data[route_rec_word + 2u]),
+						uintBitsToFloat(pages.data[route_rec_word + 3u]));
+				float max_edge = unpackHalf2x16(pages.data[route_rec_word + 16u]).x;
+				software = sw_raster_route(record, route_scale, bounds, max_edge);
+			}
+			raster_route(params.list_base + slot, software);
+		}
 	}
 
 	if (emitted_any && (cull.cull.w & 2u) != 0u && page_slot != 0xFFFFFFFFu) {

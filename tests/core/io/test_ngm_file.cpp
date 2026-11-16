@@ -146,7 +146,7 @@ TEST_CASE("[NextGeo][NGM] Round trip, determinism and rejection") {
 	CHECK(sha_a == sha_b);
 	CHECK(sha_a.length() == 64);
 
-	CHECK(load_u32(bytes_a, 4) == 1);
+	CHECK(load_u32(bytes_a, 4) == 2); // GodotNext: nextgeo_sw_raster (#162). The writer emits version 2.
 	CHECK(load_u32(bytes_a, 8) == 128);
 	CHECK(load_u32(bytes_a, 12) == 0);
 	CHECK(load_u32(bytes_a, 16) == NGM_PROVISIONAL_PAGE_SIZE);
@@ -228,12 +228,21 @@ TEST_CASE("[NextGeo][NGM] Corrupt, truncated and version-mismatched files") {
 		CHECK(file->open(write_patched("ngm72_bad_magic.ngm", bad_magic)) == ERR_FILE_UNRECOGNIZED);
 	}
 
-	Vector<uint8_t> bad_version = original;
-	store_u32(bad_version, 4, 2);
-	{
+	// GodotNext: nextgeo_sw_raster (#162). Readers take versions 1 and 2 and nothing else.
+	for (uint32_t version : { 0u, 3u }) {
+		Vector<uint8_t> bad_version = original;
+		store_u32(bad_version, 4, version);
 		Ref<NGMFile> file;
 		file.instantiate();
-		CHECK(file->open(write_patched("ngm72_bad_version.ngm", bad_version)) == ERR_FILE_UNRECOGNIZED);
+		CHECK(file->open(write_patched("ngm72_bad_version_" + itos(version) + ".ngm", bad_version)) == ERR_FILE_UNRECOGNIZED);
+	}
+	{
+		Vector<uint8_t> version_1 = original;
+		store_u32(version_1, 4, 1);
+		Ref<NGMFile> file;
+		file.instantiate();
+		CHECK(file->open(write_patched("ngm72_version_1.ngm", version_1)) == OK);
+		CHECK(file->get_header().version == 1);
 	}
 
 	Vector<uint8_t> meshopt = original;

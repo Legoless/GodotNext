@@ -40,10 +40,13 @@
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/cluster_cull.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/hiz_pyramid.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/instance_cull.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/sw_raster.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_export.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
@@ -87,6 +90,15 @@ struct NextGeoRasterInputs {
 	bool debug_backface = false;
 	RID bucket_table;
 	uint32_t bucket_table_words = 0;
+	// GodotNext: nextgeo_sw_raster (#162). Set to run the hybrid raster: the 64-bit visibility buffer
+	// (a texture for NEXTGEO_VIS64_IMAGE, a storage buffer for NEXTGEO_VIS64_BUFFER) and the
+	// triangle-size switch. Without it the view keeps the v2.4 hardware raster.
+	RID vis64;
+	RendererRD::NextGeoVis64Storage vis64_storage = RendererRD::NEXTGEO_VIS64_NONE;
+	Vector3 camera_forward = Vector3(0.0f, 0.0f, -1.0f);
+	float z_near = 0.05f;
+	bool orthographic = false;
+	float sw_raster_max_edge_px = 0.0f;
 };
 
 // GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
@@ -107,6 +119,13 @@ public:
 	static constexpr uint32_t SHADOW_GROUPS_PER_VIEW = 8192;
 	static constexpr uint32_t SHADOW_CLUSTERS_PER_VIEW = 32768;
 
+	// GodotNext: nextgeo_sw_raster (#162). True on the Nanite device tier (N1) once the hybrid raster's
+	// shaders exist. The storage it picks is the image unless the device has only buffer 64-bit
+	// atomics or p_prefer_buffer asks for the buffer form (rendering/nextgeo/debug_vis64_buffer).
+	bool is_hybrid_raster_available();
+	RendererRD::NextGeoVis64Storage get_vis64_storage(bool p_prefer_buffer) const;
+	const RendererRD::NextGeoRasterTier &get_raster_tier() const { return raster_tier; }
+
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
 	bool dispatch_shadows(RendererVirtualMeshStorage *p_storage, const NextGeoShadowViewDesc *p_views, uint32_t p_view_count, bool p_debug_stats);
 	bool draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, const Rect2i &p_rect, bool p_dual_paraboloid);
@@ -124,12 +143,18 @@ private:
 	void _build_hiz(RID p_depth, const Size2i &p_internal_size);
 	void _clear_visibility_targets(RID p_visibility, RID p_instance_id, const Size2i &p_internal_size);
 	bool _draw_raster_phase(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster);
+	// GodotNext: nextgeo_sw_raster (#162).
+	bool _ensure_hybrid(RenderingDevice *p_rd);
+	void _clear_vis64(const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size);
+	RID _get_vis64_framebuffer(const Size2i &p_size);
+	bool _draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, RID p_counters, const Size2i &p_internal_size, bool p_stats);
 	void _swap_hiz();
 	void _release_hiz();
 	RID _storage(uint32_t p_bytes);
 	RID _uniform_set(const LocalVector<RD::Uniform> &p_uniforms, int p_variant);
 	void _set_common_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_hiz_tex, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out, RID p_request_buf);
 	void _set_shadow_uniforms(LocalVector<RD::Uniform> &r_uniforms, RID p_counters, RID p_input, RID p_output, RID p_groups, RID p_clusters, RID p_bvh_args_out);
+	void _set_raster_bin_uniforms(LocalVector<RD::Uniform> &r_uniforms);
 	void _harvest_shadow_timestamps();
 	void _request_stats(uint32_t p_ring_slot, RID p_counters_buf, uint32_t p_record_count, uint32_t p_max_levels, const void *p_cut, bool p_occlusion, bool p_have_prev, uint32_t p_raster_draws);
 	void _publish_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
@@ -161,6 +186,28 @@ private:
 	RID raster_version;
 	PipelineCacheRD raster_pipelines[4];
 	PipelineCacheRD shadow_raster_pipelines[2];
+
+	// GodotNext: nextgeo_sw_raster (#162). Built only on the Nanite device tier.
+	RendererRD::NextGeoRasterTier raster_tier;
+	bool hybrid_ready = false;
+	bool vis64_image_ready = false;
+	bool vis64_buffer_ready = false;
+	SwRasterShaderRD sw_shader;
+	RID sw_version;
+	RID sw_pipelines[2]; // Image, buffer.
+	RID vis64_clear_pipelines[2];
+	VisibilityExportShaderRD export_shader;
+	RID export_version;
+	PipelineCacheRD export_pipelines[4]; // (buffer ? 2 : 0) | (velocity ? 1 : 0).
+	PipelineCacheRD vis64_raster_pipelines[4]; // (buffer ? 2 : 0) | (back-face debug ? 1 : 0).
+	VisibilityRasterShaderRD vis64_raster_shader; // visibility_raster.glsl's MODE_VIS64 variants.
+	RID vis64_raster_version;
+	RID raster_args;
+	RID raster_counts;
+	RID raster_lists;
+	// The attachment-less framebuffer of the hardware path, at the last internal size.
+	RID vis64_framebuffer;
+	Size2i vis64_framebuffer_size;
 
 	RID params;
 	RID raster_params;

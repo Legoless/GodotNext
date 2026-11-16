@@ -71,6 +71,7 @@
 
 #define RB_TEX_NEXTGEO_VISIBILITY SNAME("visibility")
 #define RB_TEX_NEXTGEO_INSTANCE_ID SNAME("instance_id")
+#define RB_TEX_NEXTGEO_VIS64 SNAME("vis64")
 
 // GodotNext: megalights_inputs (#136)
 #define RB_SCOPE_MEGALIGHTS SNAME("megalights")
@@ -102,6 +103,8 @@ private:
 
 	// The internal size of the textures we render 3D to in case we render at a lower resolution and upscale
 	Size2i internal_size = Size2i(0, 0);
+	// GodotNext: nextgeo_sw_raster (#162). The buffer form of the 64-bit visibility buffer.
+	RID nextgeo_vis64_buffer;
 	Size2i max_internal_size = Size2i(0, 0);
 	Size2i min_internal_size = Size2i(0, 0);
 	bool has_explicit_max_internal_size = false;
@@ -378,6 +381,11 @@ public:
 	bool has_nextgeo_targets() const;
 	RID get_nextgeo_visibility() const;
 	RID get_nextgeo_instance_id() const;
+	// GodotNext: nextgeo_sw_raster (#162). The hybrid raster's 64-bit visibility buffer at internal
+	// resolution (MN1: 8 B per pixel): an R64_UINT storage image, or with p_buffer a storage buffer for
+	// devices whose images lack 64-bit atomics. Only one form exists at a time.
+	void ensure_nextgeo_vis64(bool p_buffer);
+	RID get_nextgeo_vis64() const;
 
 	// GodotNext: megalights_inputs (#136). RGBA8 direct-light inputs, allocated
 	// only while MegaLights inputs are requested for a view without MSAA.

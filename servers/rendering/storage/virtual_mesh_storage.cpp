@@ -1552,7 +1552,17 @@ bool RendererVirtualMeshStorage::_install_page_in_slot(MeshInfo &r_info, uint32_
 	}
 
 	const uint32_t page_global = p_slot * slot_page_size;
-	_upload_pages(page_global, p_raw.ptr(), uint32_t(p_raw.size()));
+	// GodotNext: nextgeo_sw_raster (#162). A v1 page gets each cluster's max_edge, which .ngm v2 stores,
+	// computed from its own vertices, so the triangle-size switch reads the same record field.
+	Vector<uint8_t> patched_page;
+	if (!ngm_page_has_max_edges(p_raw.ptr(), uint64_t(p_raw.size()))) {
+		patched_page = p_raw;
+		if (!ngm_page_fill_max_edges(patched_page.ptrw(), uint64_t(patched_page.size()), stride)) {
+			patched_page.clear();
+		}
+	}
+	const Vector<uint8_t> &uploaded_page = patched_page.is_empty() ? p_raw : patched_page;
+	_upload_pages(page_global, uploaded_page.ptr(), uint32_t(uploaded_page.size()));
 
 	const uint32_t page_vert_bytes = page_global + 16u + page_clusters * 80u;
 	const uint32_t page_tri_bytes = page_vert_bytes + page_vertices * stride * 4u;

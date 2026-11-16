@@ -131,7 +131,9 @@ Error decode_layout(uint32_t p_bits, uint32_t p_stride, VertexLayout &r_layout) 
 	return OK;
 }
 
-void write_cluster(ByteWriter &r_writer, const NextGeoCluster &p_cluster) {
+// GodotNext: nextgeo_sw_raster (#162). `.ngm` v2 stores the cluster's tagged max_edge
+// (ngm_max_edge_word) where v1 stored its page_id.
+void write_cluster(ByteWriter &r_writer, const NextGeoCluster &p_cluster, uint32_t p_max_edge_word) {
 	for (uint32_t i = 0; i < 4; i++) {
 		r_writer.f32(p_cluster.bounds[i]);
 	}
@@ -148,7 +150,7 @@ void write_cluster(ByteWriter &r_writer, const NextGeoCluster &p_cluster) {
 	}
 	r_writer.f32(p_cluster.parent_error);
 	r_writer.i32(p_cluster.refined_group);
-	r_writer.u32(p_cluster.page_id);
+	r_writer.u32(p_max_edge_word);
 	r_writer.u32(p_cluster.vertex_offset);
 	r_writer.u32(p_cluster.triangle_offset);
 	r_writer.u8(p_cluster.vertex_count);
@@ -273,9 +275,11 @@ Error nextgeo_write_pages(const NextGeoBuildOutput &p_output, Vector<Vector<uint
 		uint32_t local_triangle = 0;
 		for (uint32_t i = 0; i < page.cluster_count; i++) {
 			NextGeoCluster cluster = p_output.clusters[page.cluster_offset + i];
+			// page_ranges() checked the cluster's vertex and triangle ranges.
+			const double max_edge = ngm_cluster_max_edge(reinterpret_cast<const uint8_t *>(p_output.vertices.ptr() + uint64_t(cluster.vertex_offset) * layout.stride), layout.stride, cluster.vertex_count, p_output.triangles.ptr() + uint64_t(cluster.triangle_offset) * 3, cluster.triangle_count);
 			cluster.vertex_offset = local_vertex;
 			cluster.triangle_offset = local_triangle;
-			write_cluster(writer, cluster);
+			write_cluster(writer, cluster, ngm_max_edge_word(max_edge));
 			local_vertex += cluster.vertex_count;
 			local_triangle += cluster.triangle_count;
 		}

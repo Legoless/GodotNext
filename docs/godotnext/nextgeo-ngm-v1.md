@@ -1,6 +1,6 @@
-# NextGeo `.ngm` v1 format
+# NextGeo `.ngm` format
 
-This is the on-disk contract for NextGeo virtual geometry, as the code implements it. It covers the `.ngm` v1 page file, the 80-byte cluster record, the DAG header and its BVH8 node, the fixed RT proxy layout and the import manifest (#6 exit criteria; plan §6.3, §7.1, §7.2, §7.5). The code is the authority. If this file and the code disagree, the code wins and this file is fixed.
+This is the on-disk contract for NextGeo virtual geometry, as the code implements it. It covers the `.ngm` page file (version 2, and version 1, which readers still take), the 80-byte cluster record, the DAG header and its BVH8 node, the fixed RT proxy layout and the import manifest (#6 exit criteria; plan §6.3, §7.1, §7.2, §7.5). The code is the authority. If this file and the code disagree, the code wins and this file is fixed.
 
 #6 froze these layouts before P5. Two values stay provisional (plan §22.10, v3.4.2): the page size, 64 KiB, and the codec, raw. G4 (#73) measures them in PQ, and #72 records the frozen choice here.
 
@@ -41,7 +41,7 @@ The page table always starts at byte 128, directly after the header. Page 0 star
 | Offset | Type | Field | Value |
 |---|---|---|---|
 | 0 | `char[4]` | magic | `NGM1` |
-| 4 | `u32` | version | 1 |
+| 4 | `u32` | version | 2. Version 1 differs only in cluster record bytes 64 to 67 (see the cluster record). |
 | 8 | `u32` | header_size | 128 |
 | 12 | `u32` | flags | Bit 0 `NGM_FLAG_MESHOPT` (meshopt codec): always clear, because the codec is raw. Bit 1 `NGM_FLAG_SKINNED`: the pages carry the skinning section. Other bits are 0. |
 | 16 | `u32` | page_size | The page budget the build used, in bytes. Not a format limit. The importer passes `NGM_PROVISIONAL_PAGE_SIZE` (65536). |
@@ -104,7 +104,7 @@ The builder always sets bits 0 to 3. It sets UV2 and color when any eligible sur
 | vertex_count × influences `u8` cluster-local bone indices | vertex_count × influences |
 | vertex_count × influences `u16` unorm16 weights | 2 × vertex_count × influences |
 
-A cluster holds at most 16 bones (`NEXTGEO_MAX_CLUSTER_BONES`), except a lone triangle that touches more. An index whose weight is 0 is stored as 0. Bones are sorted by global index. The section sits inside the page so that every stored page, skinning included, stays within `page_size`. The version stays 1: a file without the skinned flag has no section, and a v1 reader that predates the section rejects a skinned file on its unknown flag.
+A cluster holds at most 16 bones (`NEXTGEO_MAX_CLUSTER_BONES`), except a lone triangle that touches more. An index whose weight is 0 is stored as 0. Bones are sorted by global index. The section sits inside the page so that every stored page, skinning included, stays within `page_size`. The section did not change the version: a file without the skinned flag has no section, and a reader that predates the section rejects a skinned file on its unknown flag.
 
 **Page budget.** The builder keeps `align16(16 + the sum of the clusters' bytes)` at most `page_size`. A cluster's bytes are its 80-byte record, its vertices and triangles, and its skinning bytes. So `raw_size` is at most `page_size` too. A build fails when `page_size` cannot hold one full cluster: 128 vertices, 128 triangles and, when skinned, 16 bones.
 
@@ -130,7 +130,7 @@ A cluster holds at most 16 bones (`NEXTGEO_MAX_CLUSTER_BONES`), except a lone tr
 | 40 | `f32[4]` | parent_lod | LOD sphere of the group the cluster belongs to |
 | 56 | `f32` | parent_error | Error of that group; `FLT_MAX` for a root group |
 | 60 | `i32` | refined_group | The group whose simplification produced this cluster; -1 for a source cluster |
-| 64 | `u32` | page_id | The page that holds this cluster's group |
+| 64 | `u16`, `u16` | max_edge, tag | Version 2: the longest edge of the cluster's triangles in mesh units, as an IEEE binary16 rounded up (+infinity when a position is not finite), then the tag `0x4D45` (`NGM_MAX_EDGE_TAG`). The hybrid rasterizer's triangle-size switch reads it (#162, plan §21.4 N2). Version 1 stored a `u32` page_id here, the page that holds the record, which no reader uses. |
 | 68 | `u32` | vertex_offset | First vertex. Page-local in a stored page; global in the builder output. |
 | 72 | `u32` | triangle_offset | First triangle. Page-local in a stored page; global in the builder output. |
 | 76 | `u8` | vertex_count | At most 128 |
@@ -138,6 +138,8 @@ A cluster holds at most 16 bones (`NEXTGEO_MAX_CLUSTER_BONES`), except a lone tr
 | 78 | `u16` | surface_id | Source surface (material) index |
 
 A cluster's triangle indices are relative to its own first vertex. Every cluster of a group carries the group's LOD bound as `parent_lod` and `parent_error` (plan §6.3, v3.4.1).
+
+The tag marks a version 2 record inside the page itself, because root pages also travel inside `VirtualGeometryData` without the file header. A version 1 page_id would need more than 1.29 billion pages to look tagged. When the runtime installs a page whose records are not all tagged, it computes max_edge from the page's own vertices first (`ngm_page_fill_max_edges` in `core/io/resource_format_ngm.cpp`), so version 1 files keep working.
 
 ## The DAG header
 
@@ -278,7 +280,7 @@ One entry is written per mesh that produced virtual geometry. A mesh whose build
 
 | Check | Error |
 |---|---|
-| The magic is `NGM1`, and version is 1 | `ERR_FILE_UNRECOGNIZED` |
+| The magic is `NGM1`, and version is 1 or 2 | `ERR_FILE_UNRECOGNIZED` |
 | No flag bit other than bits 0 and 1 is set | `ERR_FILE_UNRECOGNIZED` |
 | The meshopt flag (bit 0) is clear | `ERR_UNAVAILABLE` |
 | The file is not an encrypted pack entry | `ERR_UNAVAILABLE` |
@@ -290,7 +292,7 @@ One entry is written per mesh that produced virtual geometry. A mesh whose build
 
 `read_page` reads one payload and returns `ERR_FILE_CORRUPT` on a range or CRC failure. It never crashes. `read_page_cluster_records` reads only a page's 16-byte header and its cluster records, without a CRC check. Inside a PCK, reads seek to the packed file's offset plus the page offset. ZIP and directory entries, and loose files, are opened by path. `NGMHandlePool` keeps at most 16 open handles (`NGM_MAX_HANDLES`), as an LRU, and a PCK uses one handle.
 
-`NGMWriter` refuses a header whose version is not 1, whose `page_size` is 0, whose `page_count` does not match the pages, whose `root_page_count` exceeds `page_count`, whose page group ranges leave `group_count`, or whose flags are unknown or inconsistent with `skin_influences`. A meshopt flag returns `ERR_UNAVAILABLE`.
+`NGMWriter` refuses a header whose version is not 2, whose `page_size` is 0, whose `page_count` does not match the pages, whose `root_page_count` exceeds `page_count`, whose page group ranges leave `group_count`, or whose flags are unknown or inconsistent with `skin_influences`. A meshopt flag returns `ERR_UNAVAILABLE`.
 
 ## Determinism
 
@@ -299,7 +301,8 @@ The same header and pages give the same file bytes. The DAG builder gives the sa
 ## Tests that pin this format
 
 - `tests/core/io/test_ngm_file.cpp`: round trip, determinism, rejection of corrupt, truncated and version-mismatched files, and the handle pool.
-- `tests/scene/test_virtual_geometry_data.cpp`: the build output in `VirtualGeometryData` and a deterministic `.ngm`, unskinned and skinned.
+- `tests/scene/test_virtual_geometry_data.cpp`: the build output in `VirtualGeometryData` and a deterministic `.ngm`, unskinned and skinned, and the max_edge of every cluster record.
+- `tests/servers/rendering/test_nextgeo_sw_raster.cpp`: the binary16 rounding of max_edge, and the runtime's fill of a version 1 page.
 - `tests/scene/test_importer_mesh_virtual_geometry.cpp`: embedded `.ngm` names and stale-file removal on reimport.
 - `tests/editor/test_nextgeo_export.cpp`: the manifest scan, the encryption pre-check and stripping.
 - `modules/nextgeo/tests/test_nextgeo_cards.h`: two imports give a bit-identical `.ngm` and card table.
