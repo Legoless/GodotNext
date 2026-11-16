@@ -44,8 +44,12 @@ extends Node
 ## meshes, so their guides come from the Stage B variants.
 ## --separate-specular=true and --motion-vectors=true ask for a separate specular
 ## and a velocity attachment in the opaque pass (through the probe's
-## CompositorEffect flags). They move the guides' clear flags
-## (RRGuides::load_guides()), and the run fails if the view lacks them.
+## CompositorEffect flags). They move the guides' clear flags and clear colors
+## (RRGuides::clear_guides()), and the run fails if the view lacks them.
+## --background=keep sets the scene's background to Keep, so the opaque pass
+## loads the color attachment and clears nothing but the guides (#275).
+## The result's texture_digests hold the SHA-256 of every texture read, so two
+## builds' guides can be compared byte for byte.
 ##
 ## --rr-check=factor. A scene built here: quads lit only by a white sky, so the
 ## frame color of a quad without diffuse light is the factor the forward shader
@@ -185,6 +189,17 @@ func _load_scene() -> Camera3D:
 		environment.sdfgi_enabled = false
 		environment.ssr_enabled = false
 		world.environment = environment
+	var background := SceneArgs.value("--background", "")
+	if background == "keep":
+		if world == null or world.environment == null:
+			_failures.append("--background=keep needs a WorldEnvironment in %s" % path)
+		else:
+			var kept: Environment = world.environment.duplicate()
+			kept.background_mode = Environment.BG_KEEP
+			world.environment = kept
+			_result["background"] = "keep"
+	elif background != "":
+		_failures.append("unknown --background %s" % background)
 	var camera_name := SceneArgs.value("--camera", "CaptureCam")
 	_result["camera"] = camera_name
 	var camera := scene.find_child(camera_name, true, false) as Camera3D
@@ -236,6 +251,7 @@ func _check_scene() -> void:
 
 	var names := PackedStringArray(["diffuse_albedo", "specular_albedo", "normal_roughness", "prepass_normal_roughness"])
 	var guides := await _dump(names)
+	_result["texture_digests"] = _digests(guides)
 	for texture_name in names:
 		if not guides.has(texture_name):
 			_failures.append("the %s texture could not be read" % texture_name)
@@ -636,6 +652,7 @@ func _check_factor() -> void:
 		_failures.append("%d of the 3 guide textures exist" % _probe.guide_textures)
 		return
 	var guides := await _dump(PackedStringArray(["diffuse_albedo", "specular_albedo"]))
+	_result["texture_digests"] = _digests(guides)
 	if not guides.has("diffuse_albedo") or not guides.has("specular_albedo"):
 		_failures.append("the albedo guides could not be read")
 		return
@@ -782,6 +799,18 @@ func _add_quad(p_parent: Node, p_position: Vector3, p_size: Vector2, p_albedo: C
 	instance.material_override = material
 	p_parent.add_child(instance)
 	return material
+
+
+## The SHA-256 of each texture _dump() read.
+static func _digests(p_textures: Dictionary) -> Dictionary:
+	var digests := {}
+	for texture_name: String in p_textures:
+		var data: PackedFloat32Array = p_textures[texture_name]
+		var context := HashingContext.new()
+		context.start(HashingContext.HASH_SHA256)
+		context.update(data.to_byte_array())
+		digests[texture_name] = context.finish().hex_encode()
+	return digests
 
 
 ## Keeps the first four failing samples of a check: x, y and the guide texels.

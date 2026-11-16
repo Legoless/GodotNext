@@ -724,7 +724,10 @@ void MDCommandBufferBase::_render_clear_render_area() {
 	for (uint32_t i = 0; i < color_count; i++) {
 		uint32_t idx = subpass.color_references[i].attachment;
 		if (idx != RDD::AttachmentReference::UNUSED && pass.attachments[idx].shouldClear(subpass, false)) {
-			clears[clears_count++] = { .aspect = RDD::TEXTURE_ASPECT_COLOR_BIT, .color_attachment = idx, .value = clear_values[idx] };
+			// GodotNext: rd_clear_values (#275). The subpass color slot i, as on Vulkan:
+			// render_next_subpass() binds attachment idx at output i, which differs from idx after an
+			// unused slot or a depth attachment.
+			clears[clears_count++] = { .aspect = RDD::TEXTURE_ASPECT_COLOR_BIT, .color_attachment = i, .value = clear_values[idx] };
 		}
 	}
 

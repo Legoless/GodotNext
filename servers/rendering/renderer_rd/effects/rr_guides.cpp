@@ -66,16 +66,22 @@ bool RRGuides::view_writes_guides(bool p_requested, bool p_reflection_probe, uin
 	return true;
 }
 
-BitField<RD::DrawFlags> RRGuides::load_guides(BitField<RD::DrawFlags> p_flags, bool p_has_specular, bool p_has_velocity) {
+void RRGuides::clear_guides(BitField<RD::DrawFlags> &r_flags, Vector<Color> &r_clear_colors, bool p_has_specular, bool p_has_velocity) {
 	const uint32_t first = first_guide_color_index(p_has_specular, p_has_velocity);
-	p_flags.clear_flag(BitField<RD::DrawFlags>((RD::DRAW_CLEAR_COLOR_0 | RD::DRAW_IGNORE_COLOR_0) << first));
-	p_flags.clear_flag(BitField<RD::DrawFlags>((RD::DRAW_CLEAR_COLOR_0 | RD::DRAW_IGNORE_COLOR_0) << (first + 1)));
-	return p_flags;
-}
-
-void RRGuides::clear(RID p_diffuse_albedo, RID p_specular_albedo) {
-	RD::get_singleton()->texture_clear(p_diffuse_albedo, diffuse_albedo_clear_color(), 0, 1, 0, 1);
-	RD::get_singleton()->texture_clear(p_specular_albedo, specular_albedo_clear_color(), 0, 1, 0, 1);
+	// The padding below would turn a pass's missing clear color into (0, 0, 0, 1) and hide the
+	// error draw_list_begin() gives for it.
+	for (uint32_t i = uint32_t(r_clear_colors.size()); i < first; i++) {
+		ERR_FAIL_COND_MSG(r_flags.has_flag(BitField<RD::DrawFlags>(RD::DRAW_CLEAR_COLOR_0 << i)), vformat("Color attachment %d is cleared, but the pass gives no clear color for it.", i));
+	}
+	if (uint32_t(r_clear_colors.size()) < first + 2) {
+		r_clear_colors.resize(first + 2);
+	}
+	r_clear_colors.write[first] = diffuse_albedo_clear_color();
+	r_clear_colors.write[first + 1] = specular_albedo_clear_color();
+	for (uint32_t i = first; i < first + 2; i++) {
+		r_flags.clear_flag(BitField<RD::DrawFlags>(RD::DRAW_IGNORE_COLOR_0 << i));
+		r_flags.set_flag(BitField<RD::DrawFlags>(RD::DRAW_CLEAR_COLOR_0 << i));
+	}
 }
 
 String RRGuides::glsl_pack_prelude() {

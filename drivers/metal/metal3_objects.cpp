@@ -1026,16 +1026,21 @@ void MDCommandBuffer::render_clear_attachments(VectorView<RDD::AttachmentClear> 
 		const RDD::AttachmentClear &attClear = p_attachment_clears[i];
 		uint32_t attachment_index;
 		if (attClear.aspect.has_flag(RDD::TEXTURE_ASPECT_COLOR_BIT)) {
-			attachment_index = attClear.color_attachment;
+			// GodotNext: rd_clear_values (#275). color_attachment is the subpass color slot, as on
+			// Vulkan. The clear pipeline writes that output, where render_next_subpass() binds the
+			// slot's render pass attachment.
+			ERR_CONTINUE(attClear.color_attachment >= subpass.color_references.size());
+			attachment_index = subpass.color_references[attClear.color_attachment].attachment;
+			ERR_CONTINUE(attachment_index == RDD::AttachmentReference::UNUSED);
 		} else {
 			attachment_index = subpass.depth_stencil_reference.attachment;
 		}
 
 		const MDAttachment &mda = render.pass->attachments[attachment_index];
 		if (attClear.aspect.has_flag(RDD::TEXTURE_ASPECT_COLOR_BIT)) {
-			key.set_color_format(attachment_index, mda.format);
+			key.set_color_format(attClear.color_attachment, mda.format);
 
-			clear_colors[attachment_index] = simd_make_float4(
+			clear_colors[attClear.color_attachment] = simd_make_float4(
 					attClear.value.color.r,
 					attClear.value.color.g,
 					attClear.value.color.b,

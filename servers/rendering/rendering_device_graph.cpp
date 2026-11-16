@@ -1102,6 +1102,19 @@ void RenderingDeviceGraph::_run_draw_list_command(RDD::CommandBufferID p_command
 	}
 }
 
+// GodotNext: rd_clear_values (#275)
+void RenderingDeviceGraph::draw_list_driver_clear_values(const FramebufferCache *p_framebuffer_cache, VectorView<RDD::RenderPassClearValue> p_slot_clear_values, LocalVector<RDD::RenderPassClearValue> &r_clear_values) {
+	r_clear_values.clear();
+	for (uint32_t i = 0; i < p_slot_clear_values.size(); i++) {
+		if (p_framebuffer_cache != nullptr && (i >= p_framebuffer_cache->trackers.size() || p_framebuffer_cache->trackers[i] == nullptr)) {
+			continue;
+		}
+		r_clear_values.push_back(p_slot_clear_values[i]);
+	}
+	// The driver framebuffer holds the slots that have a tracker (RenderingDevice::framebuffer_create_multipass()).
+	DEV_ASSERT(p_framebuffer_cache == nullptr || r_clear_values.size() == p_framebuffer_cache->textures.size());
+}
+
 void RenderingDeviceGraph::_add_draw_list_begin(FramebufferCache *p_framebuffer_cache, RDD::RenderPassID p_render_pass, RDD::FramebufferID p_framebuffer, Rect2i p_region, VectorView<AttachmentOperation> p_attachment_operations, VectorView<RDD::RenderPassClearValue> p_attachment_clear_values, BitField<RDD::PipelineStageBits> p_stages, uint32_t p_breadcrumb, bool p_split_cmd_buffer) {
 	DEV_ASSERT(p_attachment_operations.size() == p_attachment_clear_values.size());
 
@@ -1113,12 +1126,13 @@ void RenderingDeviceGraph::_add_draw_list_begin(FramebufferCache *p_framebuffer_
 	draw_instruction_list.region = p_region;
 	draw_instruction_list.stages = p_stages;
 	draw_instruction_list.attachment_operations.resize(p_attachment_operations.size());
-	draw_instruction_list.attachment_clear_values.resize(p_attachment_clear_values.size());
 
 	for (uint32_t i = 0; i < p_attachment_operations.size(); i++) {
 		draw_instruction_list.attachment_operations[i] = p_attachment_operations[i];
-		draw_instruction_list.attachment_clear_values[i] = p_attachment_clear_values[i];
 	}
+
+	// GodotNext: rd_clear_values (#275)
+	draw_list_driver_clear_values(p_framebuffer_cache, p_attachment_clear_values, draw_instruction_list.attachment_clear_values);
 
 	draw_instruction_list.split_cmd_buffer = p_split_cmd_buffer;
 
@@ -2209,6 +2223,22 @@ void RenderingDeviceGraph::command_get_stages(int32_t p_command_index, BitField<
 	r_next = command->next_stages;
 }
 
+// GodotNext: rd_clear_values (#275)
+void RenderingDeviceGraph::draw_list_attachments_for_test(int32_t p_command_index, LocalVector<RDD::AttachmentLoadOp> &r_load_ops, LocalVector<RDD::RenderPassClearValue> &r_clear_values) const {
+	r_load_ops.clear();
+	r_clear_values.clear();
+	ERR_FAIL_COND(p_command_index < 0 || uint32_t(p_command_index) >= command_count);
+	const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
+	ERR_FAIL_COND(command->type != RecordedCommand::TYPE_DRAW_LIST);
+	const RecordedDrawListCommand *draw_list_command = reinterpret_cast<const RecordedDrawListCommand *>(command);
+	for (uint32_t i = 0; i < draw_list_command->trackers_count; i++) {
+		r_load_ops.push_back(draw_list_command->load_ops()[i]);
+	}
+	for (uint32_t i = 0; i < draw_list_command->clear_values_count; i++) {
+		r_clear_values.push_back(draw_list_command->clear_values()[i]);
+	}
+}
+
 void RenderingDeviceGraph::add_raytracing_list_begin() {
 	raytracing_instruction_list.clear();
 	raytracing_instruction_list.index++;
@@ -2647,7 +2677,8 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	for (uint32_t i = 0; i < command->trackers_count; i++) {
 		ResourceTracker *resource_tracker = framebuffer_cache->trackers[i];
 		if (resource_tracker != nullptr) {
-			if (i < command->clear_values_count && i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_CLEAR) {
+			// GodotNext: rd_clear_values (#275). The clear values are not per slot (draw_list_driver_clear_values()).
+			if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_CLEAR) {
 				load_ops[i] = RDD::ATTACHMENT_LOAD_OP_CLEAR;
 			} else if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_IGNORE) {
 				load_ops[i] = RDD::ATTACHMENT_LOAD_OP_DONT_CARE;

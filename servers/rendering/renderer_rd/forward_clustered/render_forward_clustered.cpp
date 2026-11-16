@@ -3410,13 +3410,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
 			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
 
-			// GodotNext: rr_guides (#205). The two guides are cleared here every frame and the
-			// opaque passes load them (RRGuides::load_guides() says why).
+			// GodotNext: rr_guides (#205, #275). Stage B clears the two guides when it opens the
+			// framebuffer, otherwise the opaque pass does; after Stage B the opaque pass loads
+			// everything.
 			const bool rr_has_specular = (opaque_color_pass_flags & COLOR_PASS_FLAG_SEPARATE_SPECULAR) != 0;
 			const bool rr_has_velocity = (opaque_color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS) != 0;
-			if (rr_guides_active) {
-				RendererRD::RRGuides::clear(rb->get_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_DIFFUSE_ALBEDO), rb->get_texture(RB_SCOPE_RR_GUIDES, RB_TEX_RR_SPECULAR_ALBEDO));
-			}
+			bool rr_guides_cleared = false;
 
 			auto build_opaque_clear_colors = [&](bool p_load_color) {
 				Vector<Color> colors;
@@ -3451,10 +3450,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				}
 				const bool zero_vel = velocity_plan.prepass_writes && (stage_b_pipeline_flags & SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_MOTION_VECTORS);
 				BitField<RD::DrawFlags> stage_b_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
+				Vector<Color> stage_b_clear = build_opaque_clear_colors(load_color);
 				if (rr_guides_active) {
-					stage_b_draw_flags = RendererRD::RRGuides::load_guides(stage_b_draw_flags, rr_has_specular, rr_has_velocity);
+					RendererRD::RRGuides::clear_guides(stage_b_draw_flags, stage_b_clear, rr_has_specular, rr_has_velocity);
 				}
-				const Vector<Color> stage_b_clear = build_opaque_clear_colors(load_color);
 				bool stage_b_redraw = false;
 				const bool stage_b_opened = nextgeo_resolve.draw_stage_b(
 						RSG::virtual_mesh_storage,
@@ -3479,6 +3478,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				stage_b_wrote = stage_b_opened && stage_b_draws > 0;
 				if (stage_b_opened) {
 					load_color = true;
+					rr_guides_cleared = true; // GodotNext: rr_guides (#275)
 				}
 				RD::get_singleton()->draw_command_end_label();
 			}
@@ -3489,8 +3489,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			render_list_params.use_nextgeo_proxy = is_reflection_probe;
 			// Load the velocity attachment on TAA when prepass/NextGeo wrote it; never DRAW_IGNORE_ALL (§6.1).
 			BitField<RD::DrawFlags> opaque_draw_flags = RendererRD::nextgeo_color_pass_draw_flags(load_color, velocity_plan.color_pass_loads, using_separate_specular, depth_pre_pass);
-			if (rr_guides_active) {
-				opaque_draw_flags = RendererRD::RRGuides::load_guides(opaque_draw_flags, rr_has_specular, rr_has_velocity);
+			if (rr_guides_active && !rr_guides_cleared) {
+				RendererRD::RRGuides::clear_guides(opaque_draw_flags, c, rr_has_specular, rr_has_velocity);
 			}
 			if (!stage_b_wrote || !render_list[RENDER_LIST_OPAQUE].elements.is_empty()) {
 				_render_list_with_draw_list(&render_list_params, opaque_framebuffer, opaque_draw_flags, c, 0.0f, 0u, p_render_data->render_region);

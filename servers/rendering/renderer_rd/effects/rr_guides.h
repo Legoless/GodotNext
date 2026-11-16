@@ -97,19 +97,21 @@ public:
 	static Color diffuse_albedo_clear_color() { return Color(0.5, 0.5, 0.5, 0.0); }
 	static Color specular_albedo_clear_color() { return Color(0.0, 0.0, 0.0, 0.0); }
 
-	// The guides are cleared by clear() before the opaque passes, which load them. A render
-	// pass clear would give them the wrong values: RenderingDevice passes clear values by
-	// framebuffer slot, unused slots included, while the Vulkan and D3D12 render passes keep
-	// only the attachments that exist, so without separate specular or velocity every clear
-	// value after the unused slots lands one or two attachments early.
-	// draw_list_begin() numbers its clear flags by the color attachments that exist, so the
-	// guides' flags follow whichever of separate specular and velocity the framebuffer has.
+	// The first opaque color pass of a frame to open the guides (NextGeo Stage B, else the
+	// opaque pass) clears them with its render pass (#275); a later one loads them. The clear
+	// covers the draw list's render region, as the color attachment's does: with an XR render
+	// region the texels outside it keep older contents.
+	// draw_list_begin() numbers its clear flags and clear colors by the color attachments that
+	// exist, so the guides' index follows whichever of separate specular and velocity the
+	// framebuffer has.
 	static uint32_t first_guide_color_index(bool p_has_specular, bool p_has_velocity) {
 		return 1 + (p_has_specular ? 1 : 0) + (p_has_velocity ? 1 : 0);
 	}
-	// p_flags with the guides' clear flags taken out, so the pass loads them.
-	static BitField<RD::DrawFlags> load_guides(BitField<RD::DrawFlags> p_flags, bool p_has_specular, bool p_has_velocity);
-	static void clear(RID p_diffuse_albedo, RID p_specular_albedo);
+	// Makes a color pass clear the guides: sets their clear flags and puts their clear colors at
+	// their index in r_clear_colors, which grows to reach it. The colors before them stay; the
+	// pass reads only those its flags clear. Fails with an error and changes nothing when a flag
+	// clears a color attachment before the guides that has no clear color.
+	static void clear_guides(BitField<RD::DrawFlags> &r_flags, Vector<Color> &r_clear_colors, bool p_has_specular, bool p_has_velocity);
 
 	// The prepass stores roughness * ROUGHNESS_STORED_MAX / 255 in an RGBA8 channel, and one
 	// minus that (above DYNAMIC_FLAG_THRESHOLD) for dynamic instances.

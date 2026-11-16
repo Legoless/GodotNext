@@ -402,6 +402,14 @@ public:
 	static BitField<RDD::PipelineStageBits> async_queue_stages(BitField<RDD::PipelineStageBits> p_stages);
 	static BitField<RDD::BarrierAccessBits> async_queue_access(BitField<RDD::BarrierAccessBits> p_access);
 
+	// GodotNext: rd_clear_values (#275). The clear values a draw list passes to
+	// RDD::command_begin_render_pass(): one per attachment of the driver's render pass and
+	// framebuffer, in their order. RenderingDevice gives one per framebuffer slot, but it leaves the
+	// unused slots (null trackers in p_framebuffer_cache) out of the render pass and the framebuffer
+	// it creates in the driver, so their values are dropped. Without a framebuffer cache (a screen's
+	// render pass) every value is kept.
+	static void draw_list_driver_clear_values(const FramebufferCache *p_framebuffer_cache, VectorView<RDD::RenderPassClearValue> p_slot_clear_values, LocalVector<RDD::RenderPassClearValue> &r_clear_values);
+
 	enum AttachmentOperation {
 		// Loads or ignores if the attachment is discardable.
 		ATTACHMENT_OPERATION_DEFAULT,
@@ -445,6 +453,8 @@ private:
 		RDD::FramebufferID framebuffer;
 		Rect2i region;
 		LocalVector<AttachmentOperation> attachment_operations;
+		// GodotNext: rd_clear_values (#275). One per driver attachment
+		// (draw_list_driver_clear_values()); attachment_operations has one per framebuffer slot.
 		LocalVector<RDD::RenderPassClearValue> attachment_clear_values;
 
 #if defined(DEBUG_ENABLED) || defined(DEV_ENABLED)
@@ -1176,6 +1186,9 @@ public:
 	// the plan is active, gathers p_selection's barriers from every async command of the frame.
 	void set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions);
 	void async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers);
+	// GodotNext: rd_clear_values (#275). C++-only and driver-free, for the doctests: what a recorded
+	// draw list passes to the driver, the load ops of its framebuffer slots and its clear values.
+	void draw_list_attachments_for_test(int32_t p_command_index, LocalVector<RDD::AttachmentLoadOp> &r_load_ops, LocalVector<RDD::RenderPassClearValue> &r_clear_values) const;
 	// submit_chained_command_buffers(): the frame's queue submissions in order. The fork command
 	// buffer signals the async work, which runs on the async queue, and the join command buffer
 	// waits for it: one wait on each side of the async queue.

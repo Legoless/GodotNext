@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/rd_parity/attachment_clears.gd" id="1_attachment_clears"]
+
+[node name="AttachmentClears" type="Node"]
+script = ExtResource("1_attachment_clears")

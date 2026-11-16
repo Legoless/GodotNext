@@ -17,6 +17,11 @@
 #   attachments Roughness Corridor (NextGI off) with a velocity attachment, a separate specular
 #              attachment and both in the opaque pass: each moves the guides' clear flags, and
 #              the sky the camera sees must hold the clear values.
+#   loads      The opaque pass clears the guides while it loads other attachments (#275):
+#              Roughness Corridor with the background set to Keep (color loads, no clear color
+#              before the guides) and with NextGI and motion vectors (the TAA velocity plan loads
+#              velocity), and Color Box Room A's virtual-mesh twin with Keep, where Stage B
+#              clears them.
 #   hit        Roughness Corridor from Cam0 and from CaptureCam: the hit distance against the
 #              reference path tracer's reflections-only mode, on at least 64 pixels.
 #
@@ -172,6 +177,9 @@ $upscaled" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_co
 run_pass corridor_velocity 1 "" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --motion-vectors=true
 run_pass corridor_specular 1 "" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --separate-specular=true
 run_pass corridor_specular_velocity 1 "" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --separate-specular=true --motion-vectors=true
+run_pass corridor_keep 1 "" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --background=keep
+run_pass corridor_taa_velocity 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --motion-vectors=true
+run_pass cbr_a_vg_keep 1 "$nextgi_epic" --rr-check=scene --scene=res://scenes/color_box_room/cbr_a_vg.tscn --camera=CaptureCam --require-stage-b=true --max-surface-mismatch=0.05 --background=keep
 run_pass hit_cam0 1 "$nextgi_epic_reference" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=Cam0 --min-hit-samples=64
 run_pass hit_capturecam 1 "$nextgi_epic_reference" --rr-check=scene --scene=res://scenes/roughness_corridor/roughness_corridor.tscn --camera=CaptureCam --min-hit-samples=64
 

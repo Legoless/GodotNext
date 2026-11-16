@@ -164,15 +164,16 @@ TEST_CASE("[Upscalers][RRGuides] Shader groups stay off unless a view writes the
 	}
 }
 
-TEST_CASE("[Upscalers][RRGuides] The opaque passes load the guides; clear() fills them before (#205)") {
+TEST_CASE("[Upscalers][RRGuides] The first opaque pass clears the guides at their color index (#205, #275)") {
 	using RR = RendererRD::RRGuides;
 
 	// Where no opaque surface is: diffuse albedo 0.5, specular albedo 0, alpha 0 (plan §8.6).
 	CHECK_EQ(RR::diffuse_albedo_clear_color(), Color(0.5, 0.5, 0.5, 0.0));
 	CHECK_EQ(RR::specular_albedo_clear_color(), Color(0.0, 0.0, 0.0, 0.0));
 
-	// draw_list_begin() numbers its clear flags by the color attachments that exist: color,
-	// then separate specular and velocity when the framebuffer has them, then the two guides.
+	// draw_list_begin() numbers its clear flags and clear colors by the color attachments that
+	// exist: color, then separate specular and velocity when the framebuffer has them, then the
+	// two guides.
 	CHECK_EQ(RR::first_guide_color_index(false, false), 1u);
 	CHECK_EQ(RR::first_guide_color_index(true, false), 2u);
 	CHECK_EQ(RR::first_guide_color_index(false, true), 2u);
@@ -186,24 +187,63 @@ TEST_CASE("[Upscalers][RRGuides] The opaque passes load the guides; clear() fill
 		BitField<RD::DrawFlags>(RD::DRAW_CLEAR_COLOR_0 | RD::DRAW_CLEAR_COLOR_1),
 		BitField<RD::DrawFlags>(RD::DRAW_IGNORE_COLOR_ALL | RD::DRAW_CLEAR_STENCIL),
 	};
+	// The colors the opaque passes give: color, separate specular and velocity when they clear
+	// color (all three even where the framebuffer lacks the last two), none when they load it.
+	const Color color_clear(0.1, 0.2, 0.3, 0.0);
+	Vector<Color> clearing_colors;
+	clearing_colors.push_back(color_clear);
+	clearing_colors.push_back(Color(0, 0, 0, 0));
+	clearing_colors.push_back(Color(0, 0, 0, 0));
+	const Vector<Color> color_inputs[] = { clearing_colors, Vector<Color>() };
+
+	int refused = 0;
 	for (int shape = 0; shape < 4; shape++) {
 		const bool has_specular = (shape & 1) != 0;
 		const bool has_velocity = (shape & 2) != 0;
 		const uint32_t first = RR::first_guide_color_index(has_specular, has_velocity);
 		for (const BitField<RD::DrawFlags> &input : inputs) {
-			const BitField<RD::DrawFlags> output = RR::load_guides(input, has_specular, has_velocity);
-			for (uint32_t i = 0; i < 8; i++) {
-				const bool guide = i == first || i == first + 1;
-				const RD::DrawFlags clear = RD::DrawFlags(RD::DRAW_CLEAR_COLOR_0 << i);
-				const RD::DrawFlags ignore = RD::DrawFlags(RD::DRAW_IGNORE_COLOR_0 << i);
-				// A guide neither clears nor drops its contents; every other attachment keeps its flags.
-				CHECK_EQ(output.has_flag(clear), guide ? false : input.has_flag(clear));
-				CHECK_EQ(output.has_flag(ignore), guide ? false : input.has_flag(ignore));
+			for (const Vector<Color> &input_colors : color_inputs) {
+				// draw_list_begin() fails a flag that clears a color attachment without a clear
+				// color. Before the guides, clear_guides() fails it too and changes nothing, so
+				// draw_list_begin() still reports it (the opaque passes never do this).
+				bool has_colors = true;
+				for (uint32_t i = uint32_t(input_colors.size()); i < first; i++) {
+					has_colors = has_colors && !input.has_flag(RD::DrawFlags(RD::DRAW_CLEAR_COLOR_0 << i));
+				}
+				BitField<RD::DrawFlags> output = input;
+				Vector<Color> colors = input_colors;
+				if (!has_colors) {
+					ERR_PRINT_OFF;
+					RR::clear_guides(output, colors, has_specular, has_velocity);
+					ERR_PRINT_ON;
+					CHECK_EQ(uint64_t(output), uint64_t(input));
+					CHECK(colors == input_colors);
+					refused++;
+					continue;
+				}
+				RR::clear_guides(output, colors, has_specular, has_velocity);
+				for (uint32_t i = 0; i < 8; i++) {
+					const bool guide = i == first || i == first + 1;
+					const RD::DrawFlags clear = RD::DrawFlags(RD::DRAW_CLEAR_COLOR_0 << i);
+					const RD::DrawFlags ignore = RD::DrawFlags(RD::DRAW_IGNORE_COLOR_0 << i);
+					// The guides clear; every other attachment keeps its flags.
+					CHECK_EQ(output.has_flag(clear), guide ? true : input.has_flag(clear));
+					CHECK_EQ(output.has_flag(ignore), guide ? false : input.has_flag(ignore));
+				}
+				CHECK_EQ(output.has_flag(RD::DRAW_CLEAR_DEPTH), input.has_flag(RD::DRAW_CLEAR_DEPTH));
+				CHECK_EQ(output.has_flag(RD::DRAW_CLEAR_STENCIL), input.has_flag(RD::DRAW_CLEAR_STENCIL));
+				REQUIRE(uint32_t(colors.size()) >= first + 2);
+				CHECK_EQ(colors[first], RR::diffuse_albedo_clear_color());
+				CHECK_EQ(colors[first + 1], RR::specular_albedo_clear_color());
+				// The colors before the guides are the pass's own.
+				for (uint32_t i = 0; i < first && i < uint32_t(input_colors.size()); i++) {
+					CHECK_EQ(colors[i], input_colors[i]);
+				}
 			}
-			CHECK_EQ(output.has_flag(RD::DRAW_CLEAR_DEPTH), input.has_flag(RD::DRAW_CLEAR_DEPTH));
-			CHECK_EQ(output.has_flag(RD::DRAW_CLEAR_STENCIL), input.has_flag(RD::DRAW_CLEAR_STENCIL));
 		}
 	}
+	// Without colors, the three inputs that clear color 0 are refused in every shape.
+	CHECK_EQ(refused, 12);
 }
 
 TEST_CASE("[Upscalers][RRGuides] Pack math: world-space normals of 64 sample normals (#205)") {

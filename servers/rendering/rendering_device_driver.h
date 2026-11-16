@@ -684,6 +684,8 @@ public:
 		RenderPassClearValue value;
 	};
 
+	// GodotNext: rd_clear_values (#275). p_clear_values holds one value per attachment of
+	// p_render_pass, in its order (RenderingDeviceGraph::draw_list_driver_clear_values()).
 	virtual void command_begin_render_pass(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, FramebufferID p_framebuffer, CommandBufferType p_cmd_buffer_type, const Rect2i &p_rect, VectorView<RenderPassClearValue> p_clear_values) = 0;
 	virtual void command_end_render_pass(CommandBufferID p_cmd_buffer) = 0;
 	virtual void command_next_render_subpass(CommandBufferID p_cmd_buffer, CommandBufferType p_cmd_buffer_type) = 0;
