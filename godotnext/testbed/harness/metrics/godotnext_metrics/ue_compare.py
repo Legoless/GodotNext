@@ -65,7 +65,7 @@ UE_RUN_MODES = ("editor_game",)
 # On the RTX 4080 SUPER machine (a 3840x2160 desktop at 125 % scaling) a 3840x2160 request recorded
 # 2560x1440 windowed and 3072x1728 fullscreen while the editor in game mode was not DPI-aware there;
 # the runner now makes each UE launch DPI-aware (#232, lead decision 2026-11-16). 2160p sets ask for
-# fullscreen, and the report refuses a capture whose recorded resolution is not the set's.
+# fullscreen, and the report refuses a UE run whose capture records a resolution other than the set's.
 UE_WINDOW_MODES = ("windowed", "fullscreen")
 # Epic's 5.9 console-variable reference: the quality groups take "0:low, 1:med, 2:high, 3:epic,
 # 4:cinematic, default: 3", and sg.ResolutionQuality takes "10..100, default: 100". Every set pins
@@ -109,6 +109,18 @@ REPO_ROOT = Path(__file__).resolve().parents[5]
 _RES_PATH = re.compile(r"^res://[A-Za-z0-9_./-]+$")
 _CVAR = re.compile(r"^[A-Za-z][A-Za-z0-9_.]*$")
 _HARNESS_OWNED = ("--mode", "--scene", "--camera", "--out", "--seed", "--warmup", "--frames", "--nextgi")
+# Engine flags the plan or the runner sets: godotnext.engine_args cannot repeat them (the runner adds
+# --rendering-driver and --gpu-index), and "--" would end the engine's arguments early.
+_ENGINE_OWNED = (
+    "--",
+    "--path",
+    "--resolution",
+    "--disable-vsync",
+    "--gpu-profile",
+    "--quit-after",
+    "--rendering-driver",
+    "--gpu-index",
+)
 _UE_OWNED = (
     "-game",
     "-windowed",
@@ -152,6 +164,7 @@ class GodotNextJob:
     harness_args: tuple[str, ...]
     nextgi: NextGIExpectation | None
     timeout_minutes: float
+    engine_args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -267,7 +280,8 @@ def parse_config(value: object) -> ComparisonConfig:
 
 
 def godotnext_args(config: ComparisonConfig) -> list[str]:
-    """Godot arguments for a timing run (the runner adds --rendering-driver and --gpu-index)."""
+    """Godot arguments for a timing run (the runner adds --rendering-driver and --gpu-index).
+    ``engine_args`` go before ``--``, after the plan's own engine flags."""
     job = config.godotnext
     width, height = config.resolution
     quit_after = config.warmup_frames + config.frames + QUIT_AFTER_MARGIN
@@ -278,6 +292,7 @@ def godotnext_args(config: ComparisonConfig) -> list[str]:
         f"{width}x{height}",
         "--disable-vsync",
         "--gpu-profile",
+        *job.engine_args,
         "--quit-after",
         str(quit_after),
         "--",
@@ -512,6 +527,10 @@ def _godotnext_job(data: dict[str, object]) -> GodotNextJob:
     for arg in harness_args:
         if arg.split("=", 1)[0] in _HARNESS_OWNED:
             raise ComparisonError(f"godotnext.harness_args sets {arg.split('=', 1)[0]}; the plan sets it")
+    engine_args = tuple(str(item) for item in as_list(data.get("engine_args", [])))
+    for arg in engine_args:
+        if arg.split("=", 1)[0] in _ENGINE_OWNED:
+            raise ComparisonError(f"godotnext.engine_args sets {arg.split('=', 1)[0]}; the plan or the runner sets it")
     nextgi = None
     if data.get("nextgi") is not None:
         expected = as_dict(data.get("nextgi"))
@@ -531,6 +550,7 @@ def _godotnext_job(data: dict[str, object]) -> GodotNextJob:
         harness_args=harness_args,
         nextgi=nextgi,
         timeout_minutes=_minutes(data),
+        engine_args=engine_args,
     )
 
 

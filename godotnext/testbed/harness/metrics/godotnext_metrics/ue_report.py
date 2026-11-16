@@ -446,6 +446,14 @@ def _check_ue_run(
     for key, value in expected.items():
         if metadata.get(key) != value:
             raise ComparisonError(f"run {name}: the capture records {key} {metadata.get(key)!r}, not {value!r}")
+    # The recorded output size is the set's, so a UE run is refused on its own, without a GodotNext run
+    # beside it (a capture that records none is refused by the set check).
+    recorded = (metadata.get("systemresolution.resx", ""), metadata.get("systemresolution.resy", ""))
+    if all(value.isdigit() for value in recorded) and (int(recorded[0]), int(recorded[1])) != config.resolution:
+        width, height = config.resolution
+        raise ComparisonError(
+            f"run {name}: the capture records {recorded[0]}x{recorded[1]}, not the set's {width}x{height}"
+        )
     wanted = ue.checked_cvars()
     echoed = read_log_cvars(log_text, list(wanted))
     for cvar, value in wanted.items():

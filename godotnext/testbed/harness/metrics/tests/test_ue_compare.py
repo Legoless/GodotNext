@@ -623,54 +623,101 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
         assert "departs from the settings record" not in line.reason
 
 
-def test_the_gu_plus_config() -> None:
+def _readme_job(name: str) -> dict[str, object]:
+    """A harness job from the harness README's JSON examples, by its name."""
+    text = (_TESTBED / "harness" / "README.md").read_text(encoding="utf-8")
+    for block in text.split("```json\n")[1:]:
+        body = block.split("\n```", 1)[0]
+        if f'"name": "{name}"' in body:
+            job = json.loads(body)
+            assert isinstance(job, dict)
+            return job
+    raise AssertionError(f"no README job {name}")
+
+
+def _engine_options(args: list[str]) -> list[tuple[str, str | None]]:
+    """The engine flags before "--" as (flag, value) pairs, in sorted order."""
+    head = args[: args.index("--")]
+    pairs: list[tuple[str, str | None]] = []
+    index = 0
+    while index < len(head):
+        value = head[index + 1] if index + 1 < len(head) and not head[index + 1].startswith("--") else None
+        pairs.append((head[index], value))
+        index += 1 if value is None else 2
+    return sorted(pairs, key=lambda pair: (pair[0], pair[1] or ""))
+
+
+def test_the_gu_plus_config(tmp_path: Path) -> None:
     config = load_config(_TESTBED / "ue_compare" / "dense_city_gu_plus_2160p.json")
     assert config.raw["port_issue"] == 236
-    # #202's GU+ GPU-bound job: the generated city's still street camera, 2160p, VSync off, D3D12,
-    # 600 warm-up and 3,000 measured frames, without NextGI.
-    assert config.godotnext.scene == "res://generated/dense_city/dense_city.tscn"
-    assert config.godotnext.camera == "cam_main"
-    assert config.godotnext.driver == "d3d12"
-    assert config.resolution == (3840, 2160)
-    assert (config.warmup_frames, config.frames) == (600, 3000)
+    # The GodotNext side is #202's GU+ job (the README's gu_plus_fg_off example) exactly: every GodotNext job
+    # the timing plan writes has the job's device, driver and kind, the same engine flags before "--"
+    # (--fullscreen and --audio-driver Dummy among them) and the same harness arguments after it. The runner
+    # adds --rendering-driver and --gpu-index to both.
+    job = _readme_job("gu_plus_fg_off")
+    listed = job["args"]
+    assert isinstance(listed, list)
+    wanted = [str(arg) for arg in listed]
+    plan = build_plan(
+        config,
+        config_label="godotnext/testbed/ue_compare/dense_city_gu_plus_2160p.json",
+        config_sha256="0" * 64,
+        out_dir=tmp_path,
+        ue_exe=UE_EXE,
+        ue_project=UE_PROJECT,
+        ue_csv_dir=UE_CSV_DIR,
+    )
+    files = plan["job_files"]
+    assert isinstance(files, dict)
+    planned = [file for file in files.values() if file["engine"] == "godotnext"]
+    assert len(planned) == config.runs + 1
+    for file in planned:
+        assert (file["device"], file["driver"], file["kind"]) == (job["device"], job["driver"], job["kind"])
+        args = [str(arg) for arg in file["args"]]
+        assert _engine_options(args) == _engine_options(wanted)
+        assert args[args.index("--") :] == wanted[wanted.index("--") :]
     assert config.godotnext.nextgi is None and not config.godotnext.override
-    args = godotnext_args(config)
-    assert "--nextgi=on" not in args
-    assert args[args.index("--quit-after") + 1] == "4650"
-    assert {"--resolution", "3840x2160", "--disable-vsync", "--warmup=600", "--frames=3000"} <= set(args)
-    # The UE map's sequence holds the still pose for 600 + 3,000 frames, and UE drops as many warm-up rows.
+    # Godot's --fullscreen window on Windows is the testbed's borderless window (#270).
+    project = (_TESTBED / "project.godot").read_text(encoding="utf-8").splitlines()
+    assert "window/size/borderless.windows=true" in project
+    # The UE map's sequence holds the still pose for 600 + 3,000 frames, and UE drops 600 warm-up rows.
     assert config.ue.map == "/Game/Ports/DenseCityGUPlus/DenseCityGUPlus.umap"
     assert (config.ue.warmup_frames, config.ue.path_frames) == (600, 1)
     launch = ue_args(config)
     assert "-csvCaptureFrames=3600" in launch
-    # Borderless at 2160p on both sides (#270): UE's fullscreen is windowed fullscreen, checked from the echo.
     assert config.ue.window == "fullscreen"
-    assert "-fullscreen" in launch and "-windowed" not in launch
-    # UE draws without anti-aliasing, as the testbed does (the project's r.AntiAliasingMethod 0, checked too).
     assert dict(config.ue.expect_cvars) == {
         "r.Shadow.Virtual.Enable": "1",
         "r.FullScreenMode": "1",
         "r.AntiAliasingMethod": "0",
     }
-    cvars = config.ue.checked_cvars()
-    assert (cvars["r.ScreenPercentage"], cvars["sg.ResolutionQuality"]) == ("100", "100")
-    for group in SCALABILITY_LEVEL_GROUPS:
-        assert cvars[group] == "2", group
-    for name, value in UE_ASYNC_OFF.items():
-        assert cvars[name] == value, name
-    # No NextGI on the GodotNext side, so no Lumen on the UE side: no tier, and the Lumen columns stay quiet.
-    assert "r.Lumen.HardwareRayTracing" not in cvars
+    # No NextGI on the GodotNext side, so no Lumen tier on the UE side and the Lumen columns stay quiet.
+    assert "r.Lumen.HardwareRayTracing" not in config.ue.checked_cvars()
     assert config.ue.window_quiet_columns == (*_PSO_QUIET, *_LUMEN_QUIET)
-    # FG, MFG, Reflex and the PresentMon and Nsight Systems methods wait for #98 and #229: report-only
-    # lines only, none with a gate.
+    # Whether UE meets #202's GPU-bound rule here is open, so nothing names the set or a line GPU-bound.
+    assert "GPU-bound" not in config.title
     lines = {line.id: line for line in config.lines}
     assert set(lines) == {"gpu_pass_sum", "ue_render_thread"}
     for line in config.lines:
         assert line.status == "report_only" and line.gates == ()
+        assert "GPU-bound" not in line.name
     total = lines["gpu_pass_sum"]
     assert total.godotnext is not None and total.godotnext.all_passes
     assert total.ue is not None and total.ue.columns == ("GPUTime",)
-    for text in ("#98", "PresentMon", "Nsight Systems", "95%", "anti-alias", "shadow_method", "not like for like"):
+    for text in (
+        "#98",
+        "PresentMon",
+        "Nsight Systems",
+        "95%",
+        "is open",
+        "--fullscreen",
+        "anti-alias",
+        "shadow_method",
+        "GPU/DistanceFieldShadows",
+        "GPU/DistanceFields",
+        "GPU/GlobalDistanceFieldUpdate",
+        "not like for like",
+    ):
         assert text in total.reason, text
     render = lines["ue_render_thread"]
     assert render.godotnext is None
@@ -718,6 +765,14 @@ def test_godotnext_timing_arguments() -> None:
     ]
     forced = parse_config(nextgi_config("SWRT", "0"))
     assert godotnext_args(forced)[-2:] == ["--nextgi=on", "--variant=static"]
+    # engine_args go before "--", after the plan's own engine flags.
+    flagged = godotnext_args(parse_config(_with("godotnext", engine_args=["--fullscreen", "--audio-driver", "Dummy"])))
+    assert flagged[flagged.index("--gpu-profile") + 1 : flagged.index("--quit-after")] == [
+        "--fullscreen",
+        "--audio-driver",
+        "Dummy",
+    ]
+    assert flagged.index("--quit-after") < flagged.index("--")
 
 
 def test_ue_launch_arguments_run_the_editor_in_game_mode() -> None:
@@ -844,6 +899,10 @@ def test_a_tracked_config_is_named_relative_to_the_repository() -> None:
         (_with("godotnext", driver="metal"), "vulkan or d3d12"),
         (_with("godotnext", harness_args=["--frames=10"]), "the plan sets it"),
         (_with("godotnext", harness_args=["--nextgi=on"]), "the plan sets it"),
+        (_with("godotnext", engine_args=["--quit-after", "10"]), "the plan or the runner sets it"),
+        (_with("godotnext", engine_args=["--rendering-driver", "vulkan"]), "the plan or the runner sets it"),
+        (_with("godotnext", engine_args=["--resolution=1280x720"]), "the plan or the runner sets it"),
+        (_with("godotnext", engine_args=["--fullscreen", "--", "--mode=capture"]), "the plan or the runner sets it"),
         (_with("godotnext", override="res://x.txt"), "override"),
         (_with("godotnext", nextgi={"tier": "SOFTWARE", "quality": "HIGH"}), "godotnext.nextgi"),
         (_with("ue", config="Test"), "game mode"),

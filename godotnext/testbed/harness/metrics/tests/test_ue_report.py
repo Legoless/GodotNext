@@ -383,12 +383,27 @@ def test_the_ue_run_is_checked_against_its_own_metadata(tmp_path: Path, key: str
 
 
 def test_the_ue_resolution_comes_from_the_capture_not_the_command_line(tmp_path: Path) -> None:
+    # The UE run's own check refuses a capture that records another size than the set's, before the
+    # set check compares the engines.
     metadata = {**METADATA, "systemresolution.resx": "1280", "systemresolution.resy": "720"}
-    with pytest.raises(ComparisonError, match="differ in resolution"):
+    with pytest.raises(ComparisonError, match="records 1280x720, not the set's 1920x1080"):
         build_report(make_set(tmp_path / "small", metadata=metadata), judge=False)
     unknown = {key: value for key, value in METADATA.items() if not key.startswith("systemresolution")}
     with pytest.raises(ComparisonError, match="does not record its resolution"):
         build_report(make_set(tmp_path / "unknown", metadata=unknown), judge=False)
+
+
+def test_a_2160p_set_refuses_a_ue_run_at_another_size(tmp_path: Path) -> None:
+    # A 3840x2160 request recorded 3072x1728 fullscreen while the editor was not DPI-aware (#232).
+    config = synthetic_config(resolution=[3840, 2160], lines=_lines())
+    scaled = {**METADATA, "systemresolution.resx": "3072", "systemresolution.resy": "1728"}
+    with pytest.raises(ComparisonError, match="records 3072x1728, not the set's 3840x2160"):
+        build_report(make_set(tmp_path / "scaled", config=config, metadata=scaled), judge=False)
+    # At the set's size the UE runs pass their own check, and the set check still compares them with the
+    # GodotNext runs' output size (1920x1080 in these synthetic manifests).
+    native = {**METADATA, "systemresolution.resx": "3840", "systemresolution.resy": "2160"}
+    with pytest.raises(ComparisonError, match="differ in resolution"):
+        build_report(make_set(tmp_path / "native", config=config, metadata=native), judge=False)
 
 
 def test_the_forced_console_variables_are_checked_in_the_log(tmp_path: Path) -> None:
