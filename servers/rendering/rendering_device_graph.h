@@ -191,6 +191,22 @@ public:
 		RESOURCE_USAGE_MAX
 	};
 
+	// GodotNext: rd_bindless (#176).
+	struct BindlessTableTracker;
+
+	// GodotNext: rd_bindless (#176). A bindless table whose slots hold a resource.
+	struct BindlessResidency {
+		BindlessTableTracker *table = nullptr;
+		// How many of the table's slots hold the resource.
+		uint32_t slots = 0;
+		// On the table's dirty list: the table has not read the resource since a command left it unready.
+		bool dirty = false;
+		// The command that made it dirty last. When that command also binds the table, the resource stays
+		// dirty after it.
+		int64_t dirty_frame = -1;
+		int32_t dirty_command_index = -1;
+	};
+
 	struct ResourceTracker {
 		uint32_t reference_count = 0;
 		int64_t command_frame = -1;
@@ -231,6 +247,9 @@ public:
 		bool in_parent_dirty_list = false;
 		bool write_command_list_enabled = false;
 		bool is_discardable = false;
+		// GodotNext: rd_bindless (#176). The bindless tables whose slots hold this resource. Only whole
+		// resources are resident: a texture slice is not, but a command that uses one dirties its parent.
+		LocalVector<BindlessResidency> bindless_residency;
 
 		_FORCE_INLINE_ void reset_if_outdated(int64_t new_command_frame) {
 			if (new_command_frame != command_frame) {
@@ -249,6 +268,29 @@ public:
 				write_command_list_enabled = false;
 			}
 		}
+	};
+
+	// GodotNext: rd_bindless (#176). A bindless table as the graph sees it. A command that binds the table
+	// reads every resource its slots hold, but only the dirty ones become usages of the command, so the
+	// command gets barriers for those alone and not for the whole table. A resident resource becomes dirty
+	// when a command uses it in a way that leaves it unready for the table's read: any write, and for a
+	// texture any usage but sampling, as that changes its layout. The table orders its own reads against
+	// those commands: a command that dirties a resident resource waits for the commands that bound the
+	// table, and a command that binds the table waits for the binds that made dirty resources ready.
+	struct BindlessTableTracker {
+		// RESOURCE_USAGE_TEXTURE_SAMPLE for texture tables, RESOURCE_USAGE_STORAGE_BUFFER_READ for
+		// storage-buffer tables. Sampler tables have no resources to track.
+		ResourceUsage read_usage = RESOURCE_USAGE_NONE;
+		// Resident resources the table has not read since a command left them unready, each once.
+		LocalVector<ResourceTracker *> dirty;
+		// The commands of tracking frame command_frame that bound the table, and those of them that
+		// read dirty resources (made them ready).
+		int64_t command_frame = -1;
+		LocalVector<int32_t> read_commands;
+		LocalVector<int32_t> ready_commands;
+		// Every stage that has bound the table, in any frame. A command that dirties a resident resource
+		// waits for these stages, as the reads before it can be from an earlier frame.
+		BitField<RDD::PipelineStageBits> read_stages = {};
 	};
 
 	typedef RDD::RenderPassID (*RenderPassCreationFunction)(RenderingDeviceDriver *p_driver, VectorView<RDD::AttachmentLoadOp> p_load_ops, VectorView<RDD::AttachmentStoreOp> p_store_ops, void *p_user_data);
@@ -424,6 +466,8 @@ private:
 		LocalVector<uint8_t> data;
 		LocalVector<ResourceTracker *> command_trackers;
 		LocalVector<ResourceUsage> command_tracker_usages;
+		// GodotNext: rd_bindless (#176). The bindless tables the list binds, each once.
+		LocalVector<BindlessTableTracker *> bindless_tables;
 		BitField<RDD::PipelineStageBits> stages = {};
 		int32_t index = 0;
 
@@ -431,6 +475,7 @@ private:
 			data.clear();
 			command_trackers.clear();
 			command_tracker_usages.clear();
+			bindless_tables.clear();
 			stages.clear();
 		}
 	};
@@ -1090,6 +1135,13 @@ private:
 	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection = BARRIER_SELECTION_ALL);
 	bool _gather_barriers_for_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection);
 	bool _async_fork_texture_barriers_added(const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const;
+	// GodotNext: rd_bindless (#176).
+	typedef void (RenderingDeviceGraph::*ListUsageFunction)(ResourceTracker *p_tracker, ResourceUsage p_usage);
+	static BindlessResidency *_bindless_find_residency(ResourceTracker *p_tracker, BindlessTableTracker *p_table);
+	void _bindless_table_reset_if_outdated(BindlessTableTracker *p_table) const;
+	void _bindless_resource_used(ResourceTracker *p_resident, ResourceUsage p_usage, int32_t p_command_index, RecordedCommand *r_command);
+	void _bindless_tables_add_usages(InstructionList &r_list, ListUsageFunction p_add_usage);
+	void _bindless_tables_bound(InstructionList &r_list, int32_t p_command_index, RecordedCommand *r_command);
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
 	void _print_draw_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
 	void _print_compute_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
@@ -1193,6 +1245,19 @@ public:
 	// buffer signals the async work, which runs on the async queue, and the join command buffer
 	// waits for it: one wait on each side of the async queue.
 	static void submit_chained_command_buffers(const ChainedSubmission &p_submission, ChainedSubmitFunction p_submit, void *p_userdata);
+	// GodotNext: rd_bindless (#176). C++-only and driver-free, for the doctests: the barriers recorded for
+	// one command.
+	void command_barriers_for_test(int32_t p_command_index, LocalVector<RDD::TextureBarrier> &r_texture_barriers, LocalVector<RDD::BufferBarrier> &r_buffer_barriers, RDD::MemoryAccessBarrier &r_memory_barrier) const;
+	// GodotNext: rd_bindless (#176). Bindless tables (see BindlessTableTracker). A resource that enters a
+	// table is dirty, as the table has not read it in its current state. add_*_list_bindless_table()
+	// records that the list binds the table; the list's end adds the dirty resources as its usages.
+	static BindlessTableTracker *bindless_table_tracker_create(ResourceUsage p_read_usage);
+	static void bindless_table_tracker_free(BindlessTableTracker *p_table);
+	static void bindless_table_add_resident(BindlessTableTracker *p_table, ResourceTracker *p_tracker);
+	static void bindless_table_remove_resident(BindlessTableTracker *p_table, ResourceTracker *p_tracker);
+	void add_compute_list_bindless_table(BindlessTableTracker *p_table);
+	void add_draw_list_bindless_table(BindlessTableTracker *p_table);
+	void add_raytracing_list_bindless_table(BindlessTableTracker *p_table);
 	static ResourceTracker *resource_tracker_create();
 	static void resource_tracker_free(ResourceTracker *p_tracker);
 	static FramebufferCache *framebuffer_cache_create();

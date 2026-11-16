@@ -60,6 +60,7 @@
 #include "drivers/metal/pixel_formats.h"
 #include "drivers/metal/rendering_context_driver_metal.h"
 #include "drivers/metal/rendering_shader_container_metal.h"
+#include "servers/rendering/rendering_device_bindless.h" // GodotNext: rd_bindless (#176).
 
 #include <Metal/Metal.hpp>
 #include <objc/message.h>
@@ -1377,6 +1378,15 @@ RDD::UniformSetID RenderingDeviceDriverMetal::uniform_set_create(VectorView<Boun
 
 	MDShader *shader = (MDShader *)(p_shader.id);
 	ERR_FAIL_INDEX_V_MSG(p_set_index, shader->sets.size(), UniformSetID(), "Set index out of range");
+
+	// GodotNext: rd_bindless (#176). The set's argument buffer is the table.
+	if (p_uniforms.size() == 1 && p_uniforms[0].type == UNIFORM_TYPE_BINDLESS_TABLE) {
+		ERR_FAIL_COND_V(p_uniforms[0].ids.size() != 1, UniformSetID());
+		MDUniformSet *table_set = memnew(MDUniformSet);
+		table_set->bindless_table = (MDBindlessTable *)p_uniforms[0].ids[0].id;
+		return UniformSetID(table_set);
+	}
+
 	const UniformSet &shader_set = shader->sets.get(p_set_index);
 	MDUniformSet *set = memnew(MDUniformSet);
 	// Determine if there are any dynamic uniforms in this set.
@@ -1557,6 +1567,87 @@ void RenderingDeviceDriverMetal::uniform_set_free(UniformSetID p_uniform_set) {
 	MDUniformSet *obj = (MDUniformSet *)p_uniform_set.id;
 	allocator->free_buffer(obj->arg_buffer);
 	memdelete(obj);
+}
+
+#pragma mark - Bindless Table
+
+// GodotNext: rd_bindless (#176)
+
+RDD::BindlessTableID RenderingDeviceDriverMetal::bindless_table_create(UniformType p_type, uint32_t p_capacity) {
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_BINDLESS), BindlessTableID());
+	ERR_FAIL_COND_V(p_capacity == 0 || p_capacity > limit_get(RDBindless::get_capacity_limit(p_type)), BindlessTableID());
+
+	GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wunguarded-availability-new")
+	MDBindlessTable *table = memnew(MDBindlessTable);
+	table->type = p_type;
+	table->capacity = p_capacity;
+	table->slot_resources.resize(p_capacity);
+	for (MTL::Resource *&resource : table->slot_resources) {
+		resource = nullptr;
+	}
+	// Shared storage: RenderingDevice writes an entry only while no submitted work reads it.
+	const NS::UInteger size = NS::UInteger(p_capacity) * sizeof(uint64_t);
+	table->buffer = NS::TransferPtr(device->newBuffer(size, MTL::ResourceStorageModeShared | MTL::ResourceHazardTrackingModeUntracked));
+	if (table->buffer.get() == nullptr) {
+		memdelete(table);
+		ERR_FAIL_V_MSG(BindlessTableID(), "Couldn't create the bindless table's buffer.");
+	}
+	memset(table->buffer->contents(), 0, size);
+#if DEV_ENABLED
+	table->buffer->setLabel(NS::String::string("Bindless Table", NS::UTF8StringEncoding));
+#endif
+	GODOT_CLANG_WARNING_POP
+	return BindlessTableID(table);
+}
+
+void RenderingDeviceDriverMetal::bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) {
+	GODOT_CLANG_WARNING_PUSH_AND_IGNORE("-Wunguarded-availability-new")
+	MDBindlessTable *table = (MDBindlessTable *)p_table.id;
+	switch (table->type) {
+		case UNIFORM_TYPE_TEXTURE: {
+			MTL::Texture *texture = ((TextureInfo *)p_resource.id)->texture.get();
+			const MTL::ResourceID resource_id = texture->gpuResourceID();
+			uint64_t entry = 0;
+			static_assert(sizeof(resource_id) == sizeof(entry));
+			memcpy(&entry, &resource_id, sizeof(entry));
+			table->set_slot(p_slot, entry, texture);
+		} break;
+		case UNIFORM_TYPE_SAMPLER: {
+			MTL::SamplerState *sampler = reinterpret_cast<MTL::SamplerState *>(p_resource.id);
+			const MTL::ResourceID resource_id = sampler->gpuResourceID();
+			uint64_t entry = 0;
+			memcpy(&entry, &resource_id, sizeof(entry));
+			table->set_slot(p_slot, entry, nullptr);
+		} break;
+		case UNIFORM_TYPE_STORAGE_BUFFER: {
+			MTL::Buffer *buffer = ((const BufferInfo *)p_resource.id)->buffer.get();
+			table->set_slot(p_slot, buffer->gpuAddress(), buffer);
+		} break;
+		default: {
+			ERR_FAIL();
+		}
+	}
+	GODOT_CLANG_WARNING_POP
+}
+
+void RenderingDeviceDriverMetal::bindless_table_clear(BindlessTableID p_table, uint32_t p_slot) {
+	MDBindlessTable *table = (MDBindlessTable *)p_table.id;
+	// Commands recorded before the release may still read the slot, and their encoders are built when the
+	// graph replays the frame, so the resource stays resident until the next segment begins.
+	if (table->clear_slot(p_slot)) {
+		bindless_tables_with_releases.insert(table);
+	}
+}
+
+void RenderingDeviceDriverMetal::bindless_table_free(BindlessTableID p_table) {
+	MDBindlessTable *table = (MDBindlessTable *)p_table.id;
+	bindless_tables_with_releases.erase(table);
+	memdelete(table);
+}
+
+uint64_t RenderingDeviceDriverMetal::bindless_table_get_memory_usage(BindlessTableID p_table) const {
+	const MDBindlessTable *table = (const MDBindlessTable *)p_table.id;
+	return uint64_t(table->capacity) * sizeof(uint64_t);
 }
 
 uint32_t RenderingDeviceDriverMetal::uniform_sets_get_dynamic_offsets(VectorView<UniformSetID> p_uniform_sets, ShaderID p_shader, uint32_t p_first_set_index, uint32_t p_set_count) const {
@@ -2508,6 +2599,14 @@ void RenderingDeviceDriverMetal::begin_segment(uint32_t p_frame_index, uint32_t 
 	_frame_index = p_frame_index;
 	_frames_drawn = p_frames_drawn;
 
+	// GodotNext: rd_bindless (#176). The previous segment's commands are encoded, so the slots released
+	// while it was recorded no longer keep their resources resident. RenderingDevice frees a resource whose
+	// free waited for its slot only later in this frame's start, or frames later.
+	for (MDBindlessTable *table : bindless_tables_with_releases) {
+		table->drop_released();
+	}
+	bindless_tables_with_releases.clear();
+
 	LocalVector<CFTypeRef> ready_to_release;
 	{
 		MutexLock lock(deferred_releases_mutex);
@@ -2592,7 +2691,10 @@ void RenderingDeviceDriverMetal::set_object_name(ObjectType p_type, ID p_driver_
 		} break;
 		case OBJECT_TYPE_UNIFORM_SET: {
 			MDUniformSet *set = (MDUniformSet *)(p_driver_id.id);
-			set->arg_buffer.buffer->setLabel(label);
+			// GodotNext: rd_bindless (#176). A set that binds a bindless table has no buffer of its own.
+			if (set->arg_buffer.buffer.get() != nullptr) {
+				set->arg_buffer.buffer->setLabel(label);
+			}
 		} break;
 		case OBJECT_TYPE_PIPELINE: {
 			// Can't set label after creation.
@@ -2738,6 +2840,14 @@ uint64_t RenderingDeviceDriverMetal::limit_get(Limit p_limit) {
 
 	// clang-format off
 	switch (p_limit) {
+		// GodotNext: rd_bindless (#176). Half of an argument buffer's limit, so a shader can bind two full
+		// tables of a type, capped like the Vulkan driver's. 0 until BINDLESS_VALIDATED.
+		case LIMIT_MAX_BINDLESS_TEXTURES:
+			return BINDLESS_VALIDATED && device_properties->features.argument_buffers_enabled() ? MIN(limits.maxTexturesPerArgumentBuffer / 2, uint64_t(1) << 18) : 0;
+		case LIMIT_MAX_BINDLESS_SAMPLERS:
+			return BINDLESS_VALIDATED && device_properties->features.argument_buffers_enabled() ? MIN(limits.maxSamplersPerArgumentBuffer, uint64_t(1024)) : 0;
+		case LIMIT_MAX_BINDLESS_STORAGE_BUFFERS:
+			return BINDLESS_VALIDATED && device_properties->features.argument_buffers_enabled() ? MIN(limits.maxBuffersPerArgumentBuffer / 2, uint64_t(1) << 18) : 0;
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return limits.maxBoundDescriptorSets;
 		case LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS:
@@ -2925,6 +3035,10 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 			return device_properties->features.supports_buffer_atomic_64_bit && device_properties->features.supports_image_atomic_64_bit && device_properties->features.supports_native_image_atomics;
 		case SUPPORTS_INT64_ATOMIC_ARITH:
 			return false;
+		// GodotNext: rd_bindless (#176). Runtime arrays live in tier 2 argument buffers without encoders. False
+		// until BINDLESS_VALIDATED.
+		case SUPPORTS_BINDLESS:
+			return BINDLESS_VALIDATED && device_properties->features.argument_buffers_enabled() && limit_get(LIMIT_MAX_BINDLESS_TEXTURES) >= RDBindless::MIN_SLOTS && limit_get(LIMIT_MAX_BINDLESS_STORAGE_BUFFERS) >= RDBindless::MIN_SLOTS && limit_get(LIMIT_MAX_BINDLESS_SAMPLERS) >= RDBindless::MIN_SAMPLER_SLOTS;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return false;
 		default:

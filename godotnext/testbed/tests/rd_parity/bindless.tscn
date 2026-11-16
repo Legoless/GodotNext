@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/rd_parity/bindless.gd" id="1_bindless"]
+
+[node name="Bindless" type="Node"]
+script = ExtResource("1_bindless")

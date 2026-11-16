@@ -2163,6 +2163,15 @@ void MDCommandBuffer::_bind_uniforms_argument_buffers(MDUniformSet *p_set, MDSha
 	DEV_ASSERT(render.encoder.get() != nullptr);
 
 	MTL::RenderCommandEncoder *enc = render.encoder.get();
+
+	// GodotNext: rd_bindless (#176). The table is the set's argument buffer, and its resources become
+	// resident with the set's.
+	if (p_set->bindless_table != nullptr) {
+		render.resource_tracker.merge_from(p_set->bindless_table->get_usage_to_resources());
+		_set_arg_buffer(enc, p_shader->sets[p_set_index], p_set->bindless_table->buffer.get(), 0, p_set_index);
+		return;
+	}
+
 	render.resource_tracker.merge_from(p_set->usage_to_resources);
 
 	const UniformSet &shader_set = p_shader->sets[p_set_index];
@@ -2322,6 +2331,14 @@ void MDCommandBuffer::_bind_uniforms_argument_buffers_compute(MDUniformSet *p_se
 	DEV_ASSERT(compute.encoder);
 
 	MTL::ComputeCommandEncoder *enc = compute.encoder.get();
+
+	// GodotNext: rd_bindless (#176). The table is the set's argument buffer.
+	if (p_set->bindless_table != nullptr) {
+		compute.resource_tracker.merge_from(p_set->bindless_table->get_usage_to_resources());
+		enc->setBuffer(p_set->bindless_table->buffer.get(), 0, p_set_index);
+		return;
+	}
+
 	compute.resource_tracker.merge_from(p_set->usage_to_resources);
 
 	const UniformSet &shader_set = p_shader->sets[p_set_index];

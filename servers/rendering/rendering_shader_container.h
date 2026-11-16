@@ -315,6 +315,8 @@ public:
 	// rejects. r_version receives the version found (0 if there is no header). Shader caches use it to
 	// rebuild stale entries.
 	static bool is_container_version_current(const PackedByteArray &p_bytes, uint32_t *r_version = nullptr);
+	// GodotNext: rd_bindless (#176). Whether a set of the shader is a bindless table.
+	bool uses_bindless_tables() const;
 	bool from_bytes(const PackedByteArray &p_bytes);
 	PackedByteArray to_bytes() const;
 	bool compress_code(const uint8_t *p_decompressed_bytes, uint32_t p_decompressed_size, uint8_t *p_compressed_bytes, uint32_t *r_compressed_size, uint32_t *r_compressed_flags) const;

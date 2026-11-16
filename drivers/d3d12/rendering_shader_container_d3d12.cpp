@@ -410,6 +410,8 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 		dxil_spirv_nir_passes(shader, &dxil_runtime_conf, &dxil_metadata);
 		// GodotNext: d3d12_gpu_based_validation (#272).
 		_remap_dynamic_buffers(shader);
+		// GodotNext: rd_bindless (#176).
+		_remap_bindless_tables(shader);
 
 		r_stages_nir_shaders[stage] = shader;
 	}
@@ -499,6 +501,61 @@ void RenderingShaderContainerD3D12::_remap_dynamic_buffers(nir_shader *p_shader)
 						if (intrinsic->intrinsic == nir_intrinsic_vulkan_resource_index && nir_intrinsic_desc_set(intrinsic) == 0 && nir_intrinsic_binding(intrinsic) == mesa_register) {
 							nir_intrinsic_set_desc_set(intrinsic, space);
 							nir_intrinsic_set_binding(intrinsic, uniform.binding);
+						}
+					}
+				}
+			}
+		}
+		binding_start += uniform_count;
+	}
+}
+
+// GodotNext: rd_bindless (#176). Mesa's NIR-to-DXIL sizes a resource array by its element count, which a
+// runtime array does not have. It never declares a texture or sampler runtime array, so reading one
+// reaches an UNREACHABLE in emit_createhandle_call_dynamic() (undefined behavior in the release library:
+// shader creation crashed, or the pipeline failed to create), and it declares a storage-buffer runtime
+// array with a range size of 0. So each table's array gets the size of its root-signature range. The table
+// also moves from Mesa's register in space 0 (set * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER) to register
+// BINDLESS_TABLE_REGISTER in its set's space, as _remap_dynamic_buffers() moves dynamic buffers, so its
+// range does not depend on Mesa's register multipliers. The variable, the derefs of it and every
+// vulkan_resource_index that names it change together, which keeps nir_to_dxil's lookups intact.
+void RenderingShaderContainerD3D12::_remap_bindless_tables(nir_shader *p_shader) const {
+	uint32_t binding_start = 0;
+	for (uint32_t i = 0; i < reflection_binding_set_uniforms_count.size(); i++) {
+		const uint32_t uniform_count = reflection_binding_set_uniforms_count[i];
+		for (uint32_t j = 0; j < uniform_count; j++) {
+			const ReflectionBindingData &uniform = reflection_binding_set_uniforms_data[binding_start + j];
+			if (uniform.type != RDC::UNIFORM_TYPE_BINDLESS_TABLE) {
+				continue;
+			}
+
+			const uint32_t mesa_register = i * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + uniform.binding * GODOT_NIR_BINDING_MULTIPLIER;
+			const uint32_t space = BINDLESS_TABLE_SPACE_BASE + i;
+			const uint32_t size = uniform.length == RDC::UNIFORM_TYPE_SAMPLER ? BINDLESS_SAMPLER_RANGE_SIZE : BINDLESS_RESOURCE_RANGE_SIZE;
+			nir_foreach_variable_with_modes(var, p_shader, nir_var_uniform | nir_var_mem_ssbo) {
+				if (var->data.descriptor_set != 0 || var->data.binding != mesa_register) {
+					continue;
+				}
+				if (glsl_type_is_unsized_array(var->type)) {
+					var->type = glsl_array_type(glsl_get_array_element(var->type), size, glsl_get_explicit_stride(var->type));
+				}
+				var->data.descriptor_set = space;
+				var->data.binding = BINDLESS_TABLE_REGISTER;
+			}
+			nir_foreach_function_impl(impl, p_shader) {
+				nir_foreach_block(block, impl) {
+					nir_foreach_instr(instr, block) {
+						if (instr->type == nir_instr_type_deref) {
+							nir_deref_instr *deref = nir_instr_as_deref(instr);
+							if (deref->deref_type == nir_deref_type_var && deref->var->data.descriptor_set == space && deref->var->data.binding == BINDLESS_TABLE_REGISTER) {
+								deref->type = deref->var->type;
+							}
+						} else if (instr->type == nir_instr_type_intrinsic) {
+							nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+							if (intrinsic->intrinsic == nir_intrinsic_vulkan_resource_index && nir_intrinsic_desc_set(intrinsic) == 0 && nir_intrinsic_binding(intrinsic) == mesa_register) {
+								nir_intrinsic_set_desc_set(intrinsic, space);
+								nir_intrinsic_set_binding(intrinsic, BINDLESS_TABLE_REGISTER);
+							}
 						}
 					}
 				}
@@ -659,6 +716,10 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 			DEV_ASSERT(anybody_home == really_used);
 #endif
 
+			// GodotNext: rd_bindless (#176). p_bindless: the range of a bindless table, whose descriptors
+			// change while it is bound and need not all be valid, so they are volatile. It sits where
+			// _remap_bindless_tables() moved the table. The table owns its heap range, so the range does not
+			// count towards the set's descriptors.
 			auto insert_range = [i](D3D12_DESCRIPTOR_RANGE_TYPE p_range_type,
 										uint32_t p_num_descriptors,
 										uint32_t p_dxil_register,
@@ -666,7 +727,8 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 										uint32_t &r_descriptor_offset,
 										uint32_t &r_descriptor_count,
 										bool &r_first_in_set,
-										Vector<TraceableDescriptorTable> &r_tables) {
+										Vector<TraceableDescriptorTable> &r_tables,
+										bool p_bindless) {
 				r_descriptor_offset = r_descriptor_count;
 
 				if (r_first_in_set) {
@@ -691,14 +753,26 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 					flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
 				}
 
-				range.Init(p_range_type, p_num_descriptors, p_dxil_register, 0, flags, r_descriptor_offset);
-				r_descriptor_count += p_num_descriptors;
+				if (p_bindless) {
+					flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
+					if (p_range_type != D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER) {
+						flags |= D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+					}
+				}
+
+				const uint32_t base_register = p_bindless ? BINDLESS_TABLE_REGISTER : p_dxil_register;
+				const uint32_t space = p_bindless ? BINDLESS_TABLE_SPACE_BASE + i : 0;
+				range.Init(p_range_type, p_num_descriptors, base_register, space, flags, r_descriptor_offset);
+				if (!p_bindless) {
+					r_descriptor_count += p_num_descriptors;
+				}
 				table.ranges.push_back(range);
 			};
 
 			D3D12_DESCRIPTOR_RANGE_TYPE range_type = (D3D12_DESCRIPTOR_RANGE_TYPE)UINT_MAX;
 			bool has_sampler = false;
 			uint32_t num_descriptors = 1;
+			bool bindless = false; // GodotNext: rd_bindless (#176).
 
 			switch (uniform.type) {
 				case RDC::UNIFORM_TYPE_SAMPLER: {
@@ -747,6 +821,18 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 				case RDC::UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
 					range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 				} break;
+				// GodotNext: rd_bindless (#176). The table is the set's only binding, so its range is the set's
+				// whole descriptor table. Storage buffers in a table are read-only (SRVs).
+				case RDC::UNIFORM_TYPE_BINDLESS_TABLE: {
+					bindless = true;
+					if (uniform.length == RDC::UNIFORM_TYPE_SAMPLER) {
+						has_sampler = true;
+						num_descriptors = BINDLESS_SAMPLER_RANGE_SIZE;
+					} else {
+						range_type = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+						num_descriptors = BINDLESS_RESOURCE_RANGE_SIZE;
+					}
+				} break;
 				default: {
 					DEV_ASSERT(false);
 				}
@@ -789,7 +875,8 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 							uniform_d3d12.resource_descriptor_offset,
 							reflection_binding_set_data_d3d12.ptrw()[i].resource_descriptor_count,
 							first_resource_in_set,
-							resource_tables_maps);
+							resource_tables_maps,
+							bindless);
 				}
 			}
 
@@ -802,7 +889,8 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 						uniform_d3d12.sampler_descriptor_offset,
 						reflection_binding_set_data_d3d12.ptrw()[i].sampler_descriptor_count,
 						first_sampler_in_set,
-						sampler_tables_maps);
+						sampler_tables_maps,
+						bindless);
 			}
 		}
 
@@ -908,7 +996,9 @@ void RenderingShaderContainerD3D12::_nir_report_resource(uint32_t p_register, ui
 	} else {
 		uint32_t set = p_register / GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER;
 		uint32_t binding = (p_register % GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER) / GODOT_NIR_BINDING_MULTIPLIER;
-		// GodotNext: d3d12_gpu_based_validation (#272). A dynamic buffer, moved by _remap_dynamic_buffers().
+		// GodotNext: d3d12_gpu_based_validation (#272). A dynamic buffer, moved by _remap_dynamic_buffers(),
+		// or a bindless table (#176), moved by _remap_bindless_tables(). Both use the set's space.
+		static_assert(BINDLESS_TABLE_SPACE_BASE == DYNAMIC_BUFFER_SPACE_BASE);
 		if (p_space != 0) {
 			DEV_ASSERT(p_space >= DYNAMIC_BUFFER_SPACE_BASE && p_space < DYNAMIC_BUFFER_SPACE_BASE + RenderingDeviceCommons::MAX_UNIFORM_SETS);
 			set = p_space - DYNAMIC_BUFFER_SPACE_BASE;

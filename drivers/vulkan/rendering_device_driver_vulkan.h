@@ -109,6 +109,39 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		bool r64_storage_atomic_supported = false; // VK_FORMAT_R64_UINT has STORAGE_IMAGE_ATOMIC with optimal tiling.
 	};
 
+	// GodotNext: rd_bindless (#176). Descriptor indexing (VK_EXT_descriptor_indexing, core in Vulkan 1.2),
+	// as bindless tables use it.
+	struct BindlessCapabilities {
+		bool runtime_descriptor_array = false;
+		bool sampled_image_non_uniform_indexing = false; // Covers samplers too.
+		bool storage_buffer_non_uniform_indexing = false;
+		bool partially_bound = false;
+		bool update_unused_while_pending = false;
+		bool sampled_image_update_after_bind = false; // Covers samplers too.
+		bool storage_buffer_update_after_bind = false;
+		bool variable_descriptor_count = false;
+		// The capacity limits: half of the update-after-bind descriptor limits, so a shader can bind two
+		// full tables of a type beside its ordinary uniform sets, capped at MAX_SLOTS (MAX_SAMPLER_SLOTS).
+		uint32_t max_textures = 0;
+		uint32_t max_samplers = 0;
+		uint32_t max_storage_buffers = 0;
+		// The descriptor sizes VK_EXT_descriptor_buffer reports, for the memory a table reports; 0 when the
+		// device does not expose the extension.
+		uint32_t sampled_image_descriptor_size = 0;
+		uint32_t sampler_descriptor_size = 0;
+		uint32_t storage_buffer_descriptor_size = 0;
+
+		static constexpr uint32_t MAX_SLOTS = 1 << 18;
+		static constexpr uint32_t MAX_SAMPLER_SLOTS = 4096;
+		// The size a table reports per entry when the device does not give its descriptor sizes: an upper
+		// bound of the descriptor sizes desktop drivers report.
+		static constexpr uint32_t FALLBACK_DESCRIPTOR_SIZE = 64;
+
+		bool features_supported() const {
+			return runtime_descriptor_array && sampled_image_non_uniform_indexing && storage_buffer_non_uniform_indexing && partially_bound && update_unused_while_pending && sampled_image_update_after_bind && storage_buffer_update_after_bind && variable_descriptor_count;
+		}
+	};
+
 	struct RaytracingCapabilities {
 		bool raytracing_pipeline_support = false;
 		uint32_t shader_group_handle_size = 0;
@@ -188,6 +221,9 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	AccelerationStructureLimits acceleration_structure_limits;
 	RaytracingCapabilities raytracing_capabilities;
 	Int64AtomicsCapabilities int64_atomics_capabilities; // GodotNext: rd_atomics64 (#175).
+	BindlessCapabilities bindless_capabilities; // GodotNext: rd_bindless (#176).
+	// GodotNext: rd_bindless (#176). Found, not enabled: the table memory line reads its descriptor sizes.
+	bool descriptor_buffer_available = false;
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
 	bool framebuffer_depth_resolve = false;
@@ -619,6 +655,8 @@ private:
 		VkDescriptorPool vk_linear_descriptor_pool = VK_NULL_HANDLE;
 		DescriptorSetPools::Iterator pool_sets_it;
 		TightLocalVector<const BufferInfo *, uint32_t> dynamic_buffers;
+		// GodotNext: rd_bindless (#176). The set is a bindless table's descriptor set, which the table owns.
+		bool bindless_table = false;
 	};
 
 	bool adreno_5xx_empty_descriptor_set_layout_workaround = false;
@@ -633,6 +671,32 @@ public:
 	// ----- COMMANDS -----
 
 	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
+
+	/************************/
+	/**** BINDLESS TABLE ****/
+	/************************/
+
+	// GodotNext: rd_bindless (#176). A table is one UPDATE_AFTER_BIND descriptor set, from a pool of its
+	// own, with one partially bound, variable-count runtime array at binding 0. Shaders lay out the set
+	// the same way (_bindless_set_layout_create()), so the table's set is compatible with them.
+private:
+	struct BindlessTableInfo {
+		UniformType type = UNIFORM_TYPE_MAX;
+		uint32_t capacity = 0;
+		VkDescriptorSetLayout vk_layout = VK_NULL_HANDLE;
+		VkDescriptorPool vk_pool = VK_NULL_HANDLE;
+		VkDescriptorSet vk_set = VK_NULL_HANDLE;
+	};
+
+	static VkDescriptorType _bindless_descriptor_type(UniformType p_type);
+	uint32_t _bindless_max_capacity(UniformType p_type) const;
+	VkDescriptorSetLayout _bindless_set_layout_create(UniformType p_type);
+
+public:
+	virtual BindlessTableID bindless_table_create(UniformType p_type, uint32_t p_capacity) override final;
+	virtual void bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) override final;
+	virtual void bindless_table_free(BindlessTableID p_table) override final;
+	virtual uint64_t bindless_table_get_memory_usage(BindlessTableID p_table) const override final;
 
 	/******************/
 	/**** TRANSFER ****/

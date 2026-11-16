@@ -661,6 +661,10 @@ public:
 		UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC, // Same as UNIFORM but created with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT.
 		UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC, // Same as STORAGE but created with BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT.
 		UNIFORM_TYPE_ACCELERATION_STRUCTURE, // Bounding Volume Hierarchy (Top + Bottom Level acceleration structures), for raytracing only.
+		// GodotNext: rd_bindless (#176)
+		// A bindless table: a runtime array of textures, samplers or read-only storage buffers. The uniform
+		// gives one ID, the table's RID. It must be the only binding of its set, at binding 0.
+		UNIFORM_TYPE_BINDLESS_TABLE,
 		UNIFORM_TYPE_MAX
 	};
 
@@ -1033,6 +1037,11 @@ public:
 		LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES,
 		LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES,
 		LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT,
+		// GodotNext: rd_bindless (#176). The most slots a bindless table of each type can have; 0 without
+		// SUPPORTS_BINDLESS.
+		LIMIT_MAX_BINDLESS_TEXTURES,
+		LIMIT_MAX_BINDLESS_SAMPLERS,
+		LIMIT_MAX_BINDLESS_STORAGE_BUFFERS,
 	};
 
 	enum Features {
@@ -1069,6 +1078,10 @@ public:
 		// decrement, bitwise, signed min and max, load and store; and any 64-bit atomic on shared memory
 		// or on a 64-bit image that is arrayed, multisampled or not 2D.
 		SUPPORTS_INT64_ATOMIC_ARITH,
+		// GodotNext: rd_bindless (#176)
+		// Bindless tables (plan §21.1 C4): texture and storage-buffer tables of at least 65,536 slots, sampler
+		// tables up to LIMIT_MAX_BINDLESS_SAMPLERS, read at non-uniform indices.
+		SUPPORTS_BINDLESS,
 	};
 
 	// GodotNext: metal_ray_query
@@ -1161,7 +1174,10 @@ public:
 		bool writable = false;
 		uint32_t binding = 0;
 		BitField<ShaderStage> stages = {};
-		uint32_t length = 0; // Size of arrays (in total elements), or ubos (in bytes * total elements).
+		// Size of arrays (in total elements), or ubos (in bytes * total elements).
+		// GodotNext: rd_bindless (#176). For UNIFORM_TYPE_BINDLESS_TABLE, the UniformType of the table's
+		// entries (UNIFORM_TYPE_TEXTURE, UNIFORM_TYPE_SAMPLER or UNIFORM_TYPE_STORAGE_BUFFER).
+		uint32_t length = 0;
 		TextureType texture_type = TEXTURE_TYPE_MAX;
 		DataFormat texture_format = DATA_FORMAT_MAX;
 

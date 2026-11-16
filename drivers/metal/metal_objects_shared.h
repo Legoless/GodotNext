@@ -972,12 +972,49 @@ _FORCE_INLINE_ MTL::ResourceUsage resource_usage_for_stage(StageResourceUsage p_
 	return MTL::ResourceUsage((p_usage >> (p_stage * 2)) & 0b11);
 }
 
+// GodotNext: rd_bindless (#176). A bindless table: one 8-byte entry per slot, which shaders read through a
+// SPIRV-Cross runtime array in a device-storage argument buffer. Texture and sampler entries are
+// MTLResourceIDs, storage-buffer entries GPU addresses. The table is the argument buffer of the uniform
+// set that binds it, and its resident resources are made resident wherever the set is bound.
+class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0), visionos(2.0)) MDBindlessTable {
+	// How many slots hold each resident resource.
+	HashMap<MTL::Resource *, uint32_t> resident_counts;
+	// One key, a read in every stage, mapped to the resident resources in address order, the order
+	// ResourceTracker::merge_from() needs. Rebuilt from resident_counts when a slot changes.
+	ResourceUsageMap usage_to_resources;
+	bool usage_dirty = false;
+	// The resources of slots released since the driver's segment began. Commands recorded before a release
+	// may read the slot, and their encoders are built when the graph replays the frame, so these stay
+	// resident until drop_released().
+	LocalVector<MTL::Resource *> released_resources;
+
+	void _unreference(MTL::Resource *p_resource);
+
+public:
+	RDD::UniformType type = RDD::UNIFORM_TYPE_MAX;
+	uint32_t capacity = 0;
+	NS::SharedPtr<MTL::Buffer> buffer;
+	// The resource each slot's entry names, or null; samplers are not resources.
+	LocalVector<MTL::Resource *> slot_resources;
+
+	// Writes the slot's entry. p_resource is the resource to keep resident, or null for a sampler.
+	void set_slot(uint32_t p_slot, uint64_t p_entry, MTL::Resource *p_resource);
+	// The slot holds nothing any more. Submitted work may still read its entry, so the entry stays, and
+	// its resource stays resident until drop_released(). Returns true when the slot held a resource.
+	bool clear_slot(uint32_t p_slot);
+	// Called when a new segment begins: the released slots' resources are no longer resident.
+	void drop_released();
+	const ResourceUsageMap &get_usage_to_resources();
+};
+
 class API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0), visionos(2.0)) MDUniformSet {
 public:
 	MetalBuffer arg_buffer;
 	Vector<uint8_t> arg_buffer_data; // Stored for dynamic uniform sets.
 	ResourceUsageMap usage_to_resources; // Used by Metal 3 for resource tracking.
 	Vector<RDD::BoundUniform> uniforms;
+	// GodotNext: rd_bindless (#176). Set when the set binds a bindless table; the table owns the buffer.
+	MDBindlessTable *bindless_table = nullptr;
 };
 
 #pragma mark - Pipeline Types

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/hash_set.h"
 #include "core/templates/paged_allocator.h"
 #include "drivers/metal/metal_allocator.h"
 #include "drivers/metal/metal_device_profile.h"
@@ -190,6 +191,14 @@ protected:
 	};
 	Mutex deferred_releases_mutex;
 	LocalVector<DeferredRelease> deferred_releases;
+
+	// GodotNext: rd_bindless (#176). The tables are written but not yet compiled or run on a Mac, so
+	// SUPPORTS_BINDLESS is false and the LIMIT_MAX_BINDLESS_* limits are 0 until an M5 Max run of
+	// rd_parity/bindless with Metal API validation turns this on.
+	static constexpr bool BINDLESS_VALIDATED = false;
+	// GodotNext: rd_bindless (#176). The tables with slots released while the current segment was
+	// recorded (MDBindlessTable::clear_slot()); begin_segment() drops the residency those slots kept.
+	HashSet<MDBindlessTable *> bindless_tables_with_releases;
 
 public:
 	void encode_imported_resources(MTL::RenderCommandEncoder *p_enc);
@@ -429,6 +438,16 @@ public:
 #pragma mark - Commands
 
 	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
+
+#pragma mark - Bindless Table
+
+	// GodotNext: rd_bindless (#176). Tables need tier 2 argument buffers without argument encoders (Metal 3),
+	// which give every texture and sampler an MTLResourceID.
+	virtual BindlessTableID bindless_table_create(UniformType p_type, uint32_t p_capacity) override final;
+	virtual void bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) override final;
+	virtual void bindless_table_clear(BindlessTableID p_table, uint32_t p_slot) override final;
+	virtual void bindless_table_free(BindlessTableID p_table) override final;
+	virtual uint64_t bindless_table_get_memory_usage(BindlessTableID p_table) const override final;
 
 #pragma mark Transfer
 

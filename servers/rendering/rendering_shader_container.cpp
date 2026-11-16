@@ -477,6 +477,20 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 								"On shader stage '" + String(RDC::SHADER_STAGE_NAMES[stage]) + "', uniform '" + binding.name + "' does not have a valid texture type.");
 					}
 
+					// GodotNext: rd_bindless (#176). A runtime array (dimension 0) is a bindless table, not an array
+					// of length 0. Its length holds the entry type.
+					if (binding.array.dims_count > 0 && binding.array.dims[0] == SPV_REFLECT_ARRAY_DIM_RUNTIME) {
+						const RDC::UniformType entry_type = uniform.type;
+						ERR_FAIL_COND_V_MSG(entry_type != RDC::UNIFORM_TYPE_TEXTURE && entry_type != RDC::UNIFORM_TYPE_SAMPLER && entry_type != RDC::UNIFORM_TYPE_STORAGE_BUFFER, FAILED,
+								"On shader stage '" + String(RDC::SHADER_STAGE_NAMES[stage]) + "', uniform '" + binding.name + "' is a runtime array that a bindless table cannot hold. Bindless tables hold textures, samplers or read-only storage buffers.");
+						ERR_FAIL_COND_V_MSG(binding.array.dims_count != 1, FAILED,
+								"On shader stage '" + String(RDC::SHADER_STAGE_NAMES[stage]) + "', uniform '" + binding.name + "' is a runtime array of arrays; a bindless table is a runtime array of single entries.");
+						ERR_FAIL_COND_V_MSG(uniform.writable, FAILED,
+								"On shader stage '" + String(RDC::SHADER_STAGE_NAMES[stage]) + "', uniform '" + binding.name + "' is a bindless table of writable storage buffers; bindless storage buffers are read-only, so declare the buffer readonly.");
+						uniform.type = RDC::UNIFORM_TYPE_BINDLESS_TABLE;
+						uniform.length = entry_type;
+					}
+
 					uniform.binding = binding.binding;
 					uint32_t set = binding.set;
 
@@ -683,6 +697,17 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 		reflection.uniform_sets[i].sort();
 	}
 
+	// GodotNext: rd_bindless (#176). A bindless table is bound as a set of its own: the set's driver object
+	// is the table, so the table is its only binding, at binding 0.
+	for (uint32_t i = 0; i < reflection.uniform_sets.size(); i++) {
+		for (const ReflectUniform &uniform : reflection.uniform_sets[i]) {
+			if (uniform.type == RDC::UNIFORM_TYPE_BINDLESS_TABLE) {
+				ERR_FAIL_COND_V_MSG(reflection.uniform_sets[i].size() != 1 || uniform.binding != 0, FAILED,
+						vformat("Shader '%s': the bindless table in set %d must be the set's only binding, at binding 0.", p_shader_name, i));
+			}
+		}
+	}
+
 	set_from_shader_reflection(reflection);
 
 	return OK;
@@ -751,6 +776,16 @@ bool RenderingShaderContainer::set_code_from_spirv(const String &p_shader_name, 
 	ReflectShader shader;
 	ERR_FAIL_COND_V(reflect_spirv(p_shader_name, p_spirv, shader) != OK, false);
 	return _set_code_from_spirv(shader);
+}
+
+// GodotNext: rd_bindless (#176)
+bool RenderingShaderContainer::uses_bindless_tables() const {
+	for (const ReflectionBindingData &binding : reflection_binding_set_uniforms_data) {
+		if (binding.type == RDC::UNIFORM_TYPE_BINDLESS_TABLE) {
+			return true;
+		}
+	}
+	return false;
 }
 
 RenderingDeviceCommons::ShaderReflection RenderingShaderContainer::get_shader_reflection() const {

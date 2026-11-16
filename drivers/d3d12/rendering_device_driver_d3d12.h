@@ -142,6 +142,32 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	BarrierCapabilities barrier_capabilities;
 	MiscFeaturesSupport misc_features_support;
 	Int64AtomicsCapabilities int64_atomics_capabilities; // GodotNext: rd_atomics64 (#175).
+	// GodotNext: rd_bindless (#176). Bindless tables are ranges of the shader-visible descriptor heaps,
+	// which grow by these reservations on devices that support them.
+	struct BindlessCapabilities {
+		// Resource binding tier 2 or higher (tier 1 allows 128 SRVs per stage) and enhanced barriers (the graph
+		// places the tables' barriers; the legacy resource-state path would have to track every slot), on an
+		// NVIDIA GPU. Shaders read a table through a bounded array that RenderingShaderContainerD3D12 gives the
+		// runtime array (see _remap_bindless_tables()). Mesa's NIR-to-DXIL does not mark those reads
+		// non-uniform (createHandle's nonUniformIndex is false), which HLSL requires for an index that varies
+		// across a wave; a GPU may treat an unmarked index as uniform and give the whole wave one lane's
+		// descriptor. The reads are correct on an NVIDIA L4, where the rd_parity/bindless fixture reads a
+		// different slot in every pixel, so only NVIDIA GPUs report bindless tables until the DXIL marks them.
+		bool supported = false;
+		uint32_t resource_descriptors = 0; // Reserved in the CBV/SRV/UAV heap.
+		uint32_t sampler_descriptors = 0; // Reserved in the sampler heap.
+		// The most descriptors a shader-visible CBV/SRV/UAV heap may hold: what the runtime reports
+		// (D3D12_FEATURE_DATA_D3D12_OPTIONS19::MaxViewDescriptorHeapSize), or else the tier 1 and 2 maximum.
+		uint32_t max_view_descriptor_heap_size = D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2;
+
+		// Every table takes a whole range of the size its root-signature range has
+		// (RenderingShaderContainerD3D12::BINDLESS_*_RANGE_SIZE). Two resource tables fit: a texture table
+		// and a storage-buffer table of 65,536 slots. The shader-visible sampler heap holds at most 2,048
+		// samplers, shared with the sampler sets, so one sampler table fits beside the default 1,024.
+		static constexpr uint32_t RESOURCE_DESCRIPTORS = 2 * RenderingShaderContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE;
+		static constexpr uint32_t SAMPLER_DESCRIPTORS = RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE;
+	};
+	BindlessCapabilities bindless_capabilities;
 	SamplerCapabilities sampler_capabilities;
 	RenderingShaderContainerFormatD3D12 shader_container_format;
 	String pipeline_cache_id;
@@ -191,6 +217,24 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 
 	DescriptorHeap sampler_descriptor_heap;
 	BinaryMutex sampler_descriptor_heap_mutex;
+
+	// GodotNext: rd_bindless (#176). The bindless reservation of a shader-visible heap: one allocation, made
+	// when the heap is created, split into ranges of the root-signature range's size, one per table. Uniform
+	// sets and per-frame descriptors allocate from the rest of the heap, so they cannot take the reservation,
+	// and tables cannot take more than it. Guarded by the heap's mutex.
+	struct BindlessReservation {
+		DescriptorHeap::Allocation allocation;
+		uint32_t range_size = 0;
+		LocalVector<bool> ranges_used;
+
+		Error initialize(DescriptorHeap &p_heap, uint32_t p_descriptor_count, uint32_t p_range_size);
+		void finalize(DescriptorHeap &p_heap);
+		// Points r_allocation at a free range. Returns false when every range holds a table.
+		bool take(const DescriptorHeap &p_heap, DescriptorHeap::Allocation &r_allocation);
+		void give_back(const DescriptorHeap::Allocation &p_allocation);
+	};
+	BindlessReservation bindless_resource_reservation;
+	BindlessReservation bindless_sampler_reservation;
 
 	CPUDescriptorHeapPool resource_descriptor_heap_pool;
 	CPUDescriptorHeapPool rtv_descriptor_heap_pool;
@@ -695,6 +739,8 @@ private:
 	struct UniformSetInfo {
 		DescriptorHeap::Allocation resource_descriptor_heap_alloc;
 		SamplerDescriptorHeapAllocation *sampler_descriptor_heap_alloc = nullptr;
+		// GodotNext: rd_bindless (#176). The allocations are a bindless table's, which the table owns.
+		bool bindless_table = false;
 
 		struct DynamicBuffer {
 			const BufferDynamicInfo *info = nullptr;
@@ -726,7 +772,30 @@ private:
 	void _command_check_descriptor_sets(CommandBufferID p_cmd_buffer);
 	DescriptorHeap::Allocation _command_allocate_per_frame_descriptor();
 
+	/************************/
+	/**** BINDLESS TABLE ****/
+	/************************/
+
+	// GodotNext: rd_bindless (#176). A table is a range of the shader-visible CBV/SRV/UAV heap (texture and
+	// storage-buffer tables) or sampler heap, bound through a descriptor table with one range of
+	// RenderingShaderContainerD3D12::BINDLESS_*_RANGE_SIZE descriptors, the size the shader's array gets.
+	struct BindlessTableInfo {
+		UniformType type = UNIFORM_TYPE_MAX;
+		uint32_t capacity = 0;
+		uint32_t range_size = 0; // The descriptors allocated: the root-signature range's size.
+
+		DescriptorHeap::Allocation resource_alloc;
+		SamplerDescriptorHeapAllocation sampler_alloc;
+	};
+
+	void _bindless_write_null(const BindlessTableInfo *p_table, uint32_t p_slot);
+
 public:
+	virtual BindlessTableID bindless_table_create(UniformType p_type, uint32_t p_capacity) override final;
+	virtual void bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) override final;
+	virtual void bindless_table_free(BindlessTableID p_table) override final;
+	virtual uint64_t bindless_table_get_memory_usage(BindlessTableID p_table) const override final;
+
 	/******************/
 	/**** TRANSFER ****/
 	/******************/

@@ -35,6 +35,7 @@
 #include "core/os/os.h"
 #include "drivers/d3d12/d3d12_hooks.h"
 #include "drivers/d3d12/rendering_context_driver_d3d12.h"
+#include "servers/rendering/rendering_device_bindless.h" // GodotNext: rd_bindless (#176).
 
 #include <drivers/d3d12/godot_d3d12ma.h>
 #include <drivers/d3d12/godot_nir.h>
@@ -395,6 +396,51 @@ void RenderingDeviceDriverD3D12::DescriptorHeap::free(const Allocation &p_alloca
 	virtual_alloc.AllocHandle = p_allocation.virtual_alloc_handle;
 
 	virtual_block->FreeAllocation(virtual_alloc);
+}
+
+// GodotNext: rd_bindless (#176)
+
+Error RenderingDeviceDriverD3D12::BindlessReservation::initialize(DescriptorHeap &p_heap, uint32_t p_descriptor_count, uint32_t p_range_size) {
+	DEV_ASSERT(p_descriptor_count % p_range_size == 0);
+	Error err = p_heap.allocate(p_descriptor_count, allocation);
+	ERR_FAIL_COND_V(err != OK, err);
+	range_size = p_range_size;
+	ranges_used.resize(p_descriptor_count / p_range_size);
+	for (bool &used : ranges_used) {
+		used = false;
+	}
+	return OK;
+}
+
+void RenderingDeviceDriverD3D12::BindlessReservation::finalize(DescriptorHeap &p_heap) {
+	if (allocation.virtual_alloc_handle != 0) {
+		p_heap.free(allocation);
+		allocation = DescriptorHeap::Allocation();
+	}
+	ranges_used.clear();
+}
+
+bool RenderingDeviceDriverD3D12::BindlessReservation::take(const DescriptorHeap &p_heap, DescriptorHeap::Allocation &r_allocation) {
+	for (uint32_t i = 0; i < ranges_used.size(); i++) {
+		if (ranges_used[i]) {
+			continue;
+		}
+		ranges_used[i] = true;
+		// The range belongs to the reservation's allocation, so it has no allocation handle of its own.
+		r_allocation.virtual_alloc_handle = 0;
+		r_allocation.offset = allocation.offset + uint64_t(i) * range_size;
+		r_allocation.cpu_handle = get_cpu_handle(p_heap.cpu_handle, r_allocation.offset, p_heap.increment_size);
+		r_allocation.gpu_handle = get_gpu_handle(p_heap.gpu_handle, r_allocation.offset, p_heap.increment_size);
+		return true;
+	}
+	return false;
+}
+
+void RenderingDeviceDriverD3D12::BindlessReservation::give_back(const DescriptorHeap::Allocation &p_allocation) {
+	ERR_FAIL_COND(p_allocation.offset < allocation.offset);
+	const uint64_t index = (p_allocation.offset - allocation.offset) / range_size;
+	ERR_FAIL_UNSIGNED_INDEX(index, uint64_t(ranges_used.size()));
+	ranges_used[index] = false;
 }
 
 void RenderingDeviceDriverD3D12::CPUDescriptorHeapPool::initialize(ID3D12Device *p_device, D3D12_DESCRIPTOR_HEAP_TYPE p_type) {
@@ -3545,6 +3591,20 @@ void RenderingDeviceDriverD3D12::shader_destroy_modules(ShaderID p_shader) {
 /*********************/
 
 RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) {
+	// GodotNext: rd_bindless (#176). The set binds the table's own heap range.
+	if (p_uniforms.size() == 1 && p_uniforms[0].type == UNIFORM_TYPE_BINDLESS_TABLE) {
+		ERR_FAIL_COND_V(p_uniforms[0].ids.size() != 1, UniformSetID());
+		BindlessTableInfo *table = (BindlessTableInfo *)p_uniforms[0].ids[0].id;
+		UniformSetInfo *table_set_info = VersatileResource::allocate<UniformSetInfo>(resources_allocator);
+		table_set_info->bindless_table = true;
+		if (table->type == UNIFORM_TYPE_SAMPLER) {
+			table_set_info->sampler_descriptor_heap_alloc = &table->sampler_alloc;
+		} else {
+			table_set_info->resource_descriptor_heap_alloc = table->resource_alloc;
+		}
+		return UniformSetID(table_set_info);
+	}
+
 	// Pre-bookkeep.
 	UniformSetInfo *uniform_set_info = VersatileResource::allocate<UniformSetInfo>(resources_allocator);
 
@@ -3807,6 +3867,12 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 void RenderingDeviceDriverD3D12::uniform_set_free(UniformSetID p_uniform_set) {
 	UniformSetInfo *uniform_set_info = (UniformSetInfo *)p_uniform_set.id;
 
+	// GodotNext: rd_bindless (#176). The table owns its heap range.
+	if (uniform_set_info->bindless_table) {
+		VersatileResource::free(resources_allocator, uniform_set_info);
+		return;
+	}
+
 	if (uniform_set_info->resource_descriptor_heap_alloc.virtual_alloc_handle != 0) {
 		MutexLock lock(resource_descriptor_heap_mutex);
 
@@ -4020,6 +4086,130 @@ RenderingDeviceDriverD3D12::DescriptorHeap::Allocation RenderingDeviceDriverD3D1
 
 		return descriptor_allocation;
 	}
+}
+
+/************************/
+/**** BINDLESS TABLE ****/
+/************************/
+
+// GodotNext: rd_bindless (#176)
+
+void RenderingDeviceDriverD3D12::_bindless_write_null(const BindlessTableInfo *p_table, uint32_t p_slot) {
+	switch (p_table->type) {
+		case UNIFORM_TYPE_TEXTURE: {
+			D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+			srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+			srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srv_desc.Texture2D.MipLevels = 1;
+			device->CreateShaderResourceView(nullptr, &srv_desc, get_cpu_handle(p_table->resource_alloc.cpu_handle, p_slot, resource_descriptor_heap.increment_size));
+		} break;
+		case UNIFORM_TYPE_STORAGE_BUFFER: {
+			D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+			srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+			srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srv_desc.Buffer.NumElements = 1;
+			srv_desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+			device->CreateShaderResourceView(nullptr, &srv_desc, get_cpu_handle(p_table->resource_alloc.cpu_handle, p_slot, resource_descriptor_heap.increment_size));
+		} break;
+		case UNIFORM_TYPE_SAMPLER: {
+			D3D12_SAMPLER_DESC sampler_desc = {};
+			sampler_desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+			sampler_desc.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			sampler_desc.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			sampler_desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			sampler_desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+			sampler_desc.MaxLOD = D3D12_FLOAT32_MAX;
+			device->CreateSampler(&sampler_desc, get_cpu_handle(p_table->sampler_alloc.cpu_handle, p_slot, sampler_descriptor_heap.increment_size));
+		} break;
+		default: {
+			ERR_FAIL();
+		}
+	}
+}
+
+RDD::BindlessTableID RenderingDeviceDriverD3D12::bindless_table_create(UniformType p_type, uint32_t p_capacity) {
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_BINDLESS), BindlessTableID());
+	ERR_FAIL_COND_V(p_capacity == 0 || p_capacity > limit_get(RDBindless::get_capacity_limit(p_type)), BindlessTableID());
+
+	BindlessTableInfo *table = memnew(BindlessTableInfo);
+	table->type = p_type;
+	table->capacity = p_capacity;
+
+	// The table takes a whole range of the bindless reservation, the root-signature range's size whatever its
+	// capacity, so the range never reaches past the table into other descriptors or the end of the heap.
+	bool taken;
+	if (p_type == UNIFORM_TYPE_SAMPLER) {
+		table->range_size = RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE;
+		MutexLock lock(sampler_descriptor_heap_mutex);
+		taken = bindless_sampler_reservation.take(sampler_descriptor_heap, table->sampler_alloc);
+	} else {
+		table->range_size = RenderingShaderContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE;
+		MutexLock lock(resource_descriptor_heap_mutex);
+		taken = bindless_resource_reservation.take(resource_descriptor_heap, table->resource_alloc);
+	}
+	if (!taken) {
+		memdelete(table);
+		static_assert(BindlessCapabilities::RESOURCE_DESCRIPTORS == 2 * RenderingShaderContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE && BindlessCapabilities::SAMPLER_DESCRIPTORS == RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE, "The message below names the table counts.");
+		ERR_FAIL_V_MSG(BindlessTableID(), vformat("Cannot create the bindless table: Direct3D 12 holds two texture or storage-buffer tables and one sampler table at a time, and every %s table it has room for exists. Free one first.", p_type == UNIFORM_TYPE_SAMPLER ? "sampler" : "texture or storage-buffer"));
+	}
+
+	// Every entry starts as a null descriptor, so a shader that reads a free slot by mistake reads zeros.
+	for (uint32_t slot = 0; slot < table->range_size; slot++) {
+		_bindless_write_null(table, slot);
+	}
+	return BindlessTableID(table);
+}
+
+void RenderingDeviceDriverD3D12::bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) {
+	const BindlessTableInfo *table = (const BindlessTableInfo *)p_table.id;
+	ERR_FAIL_UNSIGNED_INDEX(p_slot, table->capacity);
+
+	switch (table->type) {
+		case UNIFORM_TYPE_TEXTURE: {
+			const TextureInfo *texture_info = (const TextureInfo *)p_resource.id;
+			device->CreateShaderResourceView(texture_info->resource, &texture_info->view_descs.srv, get_cpu_handle(table->resource_alloc.cpu_handle, p_slot, resource_descriptor_heap.increment_size));
+		} break;
+		case UNIFORM_TYPE_STORAGE_BUFFER: {
+			// A raw view, as uniform_set_create() makes for a read-only storage buffer.
+			const BufferInfo *buf_info = (const BufferInfo *)p_resource.id;
+			D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+			srv_desc.Format = DXGI_FORMAT_R32_TYPELESS;
+			srv_desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+			srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+			srv_desc.Buffer.FirstElement = 0;
+			srv_desc.Buffer.NumElements = (buf_info->size + 3u) / 4u;
+			srv_desc.Buffer.StructureByteStride = 0;
+			srv_desc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+			device->CreateShaderResourceView(buf_info->resource, &srv_desc, get_cpu_handle(table->resource_alloc.cpu_handle, p_slot, resource_descriptor_heap.increment_size));
+		} break;
+		case UNIFORM_TYPE_SAMPLER: {
+			const D3D12_SAMPLER_DESC &sampler_desc = samplers[p_resource.id];
+			device->CreateSampler(&sampler_desc, get_cpu_handle(table->sampler_alloc.cpu_handle, p_slot, sampler_descriptor_heap.increment_size));
+		} break;
+		default: {
+			ERR_FAIL();
+		}
+	}
+}
+
+void RenderingDeviceDriverD3D12::bindless_table_free(BindlessTableID p_table) {
+	BindlessTableInfo *table = (BindlessTableInfo *)p_table.id;
+	if (table->type == UNIFORM_TYPE_SAMPLER) {
+		MutexLock lock(sampler_descriptor_heap_mutex);
+		bindless_sampler_reservation.give_back(table->sampler_alloc);
+	} else {
+		MutexLock lock(resource_descriptor_heap_mutex);
+		bindless_resource_reservation.give_back(table->resource_alloc);
+	}
+	memdelete(table);
+}
+
+uint64_t RenderingDeviceDriverD3D12::bindless_table_get_memory_usage(BindlessTableID p_table) const {
+	const BindlessTableInfo *table = (const BindlessTableInfo *)p_table.id;
+	const uint32_t increment_size = table->type == UNIFORM_TYPE_SAMPLER ? sampler_descriptor_heap.increment_size : resource_descriptor_heap.increment_size;
+	return uint64_t(table->range_size) * increment_size;
 }
 
 void RenderingDeviceDriverD3D12::command_clear_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, uint64_t p_offset, uint64_t p_size) {
@@ -6065,6 +6255,12 @@ uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 		return acceleration_structure_value;
 	}
 	switch (p_limit) {
+		// GodotNext: rd_bindless (#176)
+		case LIMIT_MAX_BINDLESS_TEXTURES:
+		case LIMIT_MAX_BINDLESS_STORAGE_BUFFERS:
+			return has_feature(SUPPORTS_BINDLESS) ? RenderingShaderContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE : 0;
+		case LIMIT_MAX_BINDLESS_SAMPLERS:
+			return has_feature(SUPPORTS_BINDLESS) ? RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE : 0;
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return safe_unbounded;
 		case LIMIT_MAX_TEXTURE_ARRAY_LAYERS:
@@ -6177,6 +6373,9 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 		case SUPPORTS_IMAGE_INT64_ATOMICS:
 		case SUPPORTS_INT64_ATOMIC_ARITH:
 			return false;
+		// GodotNext: rd_bindless (#176)
+		case SUPPORTS_BINDLESS:
+			return bindless_capabilities.supported && bindless_capabilities.resource_descriptors >= RDBindless::MIN_SLOTS && bindless_capabilities.sampler_descriptors >= RDBindless::MIN_SAMPLER_SLOTS;
 		default:
 			return false;
 	}
@@ -6240,6 +6439,13 @@ RenderingDeviceDriverD3D12::~RenderingDeviceDriverD3D12() {
 				resource_descriptor_heap.free(alloc);
 			}
 		}
+
+		bindless_resource_reservation.finalize(resource_descriptor_heap); // GodotNext: rd_bindless (#176).
+	}
+
+	{
+		MutexLock lock(sampler_descriptor_heap_mutex);
+		bindless_sampler_reservation.finalize(sampler_descriptor_heap); // GodotNext: rd_bindless (#176).
 	}
 
 	if (D3D12Hooks::get_singleton() != nullptr) {
@@ -6537,6 +6743,10 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));
 	if (SUCCEEDED(res)) {
 		sampler_capabilities.aniso_filter_with_point_mip_supported = options19.AnisoFilterWithPointMipSupported;
+		// GodotNext: rd_bindless (#176).
+		if (options19.MaxViewDescriptorHeapSize > 0) {
+			bindless_capabilities.max_view_descriptor_heap_size = options19.MaxViewDescriptorHeapSize;
+		}
 	}
 
 	if (fsr_capabilities.pipeline_supported || fsr_capabilities.primitive_supported || fsr_capabilities.attachment_supported) {
@@ -6602,6 +6812,16 @@ Error RenderingDeviceDriverD3D12::_get_device_limits() {
 	device_limits.max_srvs_per_shader_stage = options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1 ? 128 : UINT64_MAX;
 	device_limits.max_cbvs_per_shader_stage = options.ResourceBindingTier <= D3D12_RESOURCE_BINDING_TIER_2 ? 14 : UINT64_MAX;
 	device_limits.max_samplers_across_all_stages = options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1 ? 16 : 2048;
+	// GodotNext: rd_bindless (#176). A 65,536-descriptor SRV range needs resource binding tier 2: tier 1
+	// allows 128 SRVs per shader stage. Only NVIDIA GPUs, because the DXIL does not mark table reads
+	// non-uniform (see BindlessCapabilities).
+	if (options.ResourceBindingTier < D3D12_RESOURCE_BINDING_TIER_2 || !barrier_capabilities.enhanced_barriers_supported) {
+		print_verbose("D3D12: Bindless tables are not supported: they need resource binding tier 2 and enhanced barriers.");
+	} else if (context_device.vendor != RenderingContextDriver::Vendor::VENDOR_NVIDIA) {
+		print_verbose("D3D12: Bindless tables are not supported: only NVIDIA GPUs report them, because the DXIL does not mark table reads non-uniform.");
+	} else {
+		bindless_capabilities.supported = true;
+	}
 	if (options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1) {
 		device_limits.max_uavs_across_all_stages = feature_level <= 110 ? 8 : 64;
 	} else if (options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_2) {
@@ -6700,11 +6920,37 @@ Error RenderingDeviceDriverD3D12::_initialize_frames(uint32_t p_frame_count) {
 	uint32_t num_resource_descriptors = GLOBAL_GET("rendering/rendering_device/d3d12/max_resource_descriptors");
 	uint32_t num_sampler_descriptors = GLOBAL_GET("rendering/rendering_device/d3d12/max_sampler_descriptors");
 
+	// GodotNext: rd_bindless (#176). Room for bindless tables in the shader-visible heaps, beside what the
+	// project settings ask for. Both reservations or neither: a shader-visible CBV/SRV/UAV heap holds at most
+	// max_view_descriptor_heap_size descriptors and a sampler heap at most 2,048 samplers, and when either
+	// reservation does not fit, nothing is reserved and the device does not report SUPPORTS_BINDLESS.
+	if (bindless_capabilities.supported) {
+		const bool resources_fit = uint64_t(num_resource_descriptors) + BindlessCapabilities::RESOURCE_DESCRIPTORS <= uint64_t(bindless_capabilities.max_view_descriptor_heap_size);
+		const bool samplers_fit = uint64_t(num_sampler_descriptors) + BindlessCapabilities::SAMPLER_DESCRIPTORS <= uint64_t(D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE);
+		if (resources_fit && samplers_fit) {
+			bindless_capabilities.resource_descriptors = BindlessCapabilities::RESOURCE_DESCRIPTORS;
+			bindless_capabilities.sampler_descriptors = BindlessCapabilities::SAMPLER_DESCRIPTORS;
+			num_resource_descriptors += bindless_capabilities.resource_descriptors;
+			num_sampler_descriptors += bindless_capabilities.sampler_descriptors;
+		} else {
+			bindless_capabilities.supported = false;
+		}
+		print_verbose(vformat("D3D12: Bindless tables: %d resource and %d sampler descriptors reserved (heaps of at most %d and %d descriptors).", bindless_capabilities.resource_descriptors, bindless_capabilities.sampler_descriptors, bindless_capabilities.max_view_descriptor_heap_size, D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE));
+	}
+
 	Error err = resource_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, num_resource_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
 
 	err = sampler_descriptor_heap.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, num_sampler_descriptors, true);
 	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+
+	// GodotNext: rd_bindless (#176). Taken before anything else allocates from the heaps.
+	if (bindless_capabilities.supported) {
+		err = bindless_resource_reservation.initialize(resource_descriptor_heap, bindless_capabilities.resource_descriptors, RenderingShaderContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+		ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+		err = bindless_sampler_reservation.initialize(sampler_descriptor_heap, bindless_capabilities.sampler_descriptors, RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE);
+		ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+	}
 
 	resource_descriptor_heap_pool.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 	rtv_descriptor_heap_pool.initialize(device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV);

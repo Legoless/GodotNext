@@ -36,6 +36,7 @@
 #include "core/templates/fixed_vector.h"
 #include "drivers/vulkan/vulkan_extension_provider.h" // GodotNext: pu_vk_extension_providers (#105).
 #include "drivers/vulkan/vulkan_hooks.h"
+#include "servers/rendering/rendering_device_bindless.h" // GodotNext: rd_bindless (#176).
 
 #include <thirdparty/misc/smolv.h>
 
@@ -625,6 +626,8 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	// GodotNext: rd_atomics64 (#175)
 	_register_requested_device_extension(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME, false);
+	// GodotNext: rd_bindless (#176). Core in Vulkan 1.2.
+	_register_requested_device_extension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -712,6 +715,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 		CharString extension_name(device_extensions[i].extensionName);
 		if (requested_device_extensions.has(extension_name)) {
 			enabled_device_extension_names.insert(extension_name);
+		}
+		// GodotNext: rd_bindless (#176). Only its properties are read, so it is not enabled.
+		if (strcmp(device_extensions[i].extensionName, VK_EXT_DESCRIPTOR_BUFFER_EXTENSION_NAME) == 0) {
+			descriptor_buffer_available = true;
 		}
 	}
 
@@ -983,6 +990,8 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		// structure on 1.2 devices.
 		VkPhysicalDeviceShaderAtomicInt64FeaturesKHR shader_atomic_int64_features = {};
 		VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT shader_image_atomic_int64_features = {};
+		// GodotNext: rd_bindless (#176). Read from the Vulkan 1.2 structure on 1.2 devices.
+		VkPhysicalDeviceDescriptorIndexingFeaturesEXT descriptor_indexing_features = {};
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -1010,6 +1019,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				shader_atomic_int64_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR;
 				shader_atomic_int64_features.pNext = next_features;
 				next_features = &shader_atomic_int64_features;
+			}
+			// GodotNext: rd_bindless (#176)
+			if (enabled_device_extension_names.has(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+				descriptor_indexing_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+				descriptor_indexing_features.pNext = next_features;
+				next_features = &descriptor_indexing_features;
 			}
 		}
 
@@ -1123,6 +1138,15 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				int64_atomics_capabilities.buffer_supported = device_features_vk_1_2.shaderBufferInt64Atomics;
 				int64_atomics_capabilities.shared_supported = device_features_vk_1_2.shaderSharedInt64Atomics;
 			}
+			// GodotNext: rd_bindless (#176). Descriptor indexing is core in Vulkan 1.2.
+			bindless_capabilities.runtime_descriptor_array = device_features_vk_1_2.runtimeDescriptorArray;
+			bindless_capabilities.sampled_image_non_uniform_indexing = device_features_vk_1_2.shaderSampledImageArrayNonUniformIndexing;
+			bindless_capabilities.storage_buffer_non_uniform_indexing = device_features_vk_1_2.shaderStorageBufferArrayNonUniformIndexing;
+			bindless_capabilities.partially_bound = device_features_vk_1_2.descriptorBindingPartiallyBound;
+			bindless_capabilities.update_unused_while_pending = device_features_vk_1_2.descriptorBindingUpdateUnusedWhilePending;
+			bindless_capabilities.sampled_image_update_after_bind = device_features_vk_1_2.descriptorBindingSampledImageUpdateAfterBind;
+			bindless_capabilities.storage_buffer_update_after_bind = device_features_vk_1_2.descriptorBindingStorageBufferUpdateAfterBind;
+			bindless_capabilities.variable_descriptor_count = device_features_vk_1_2.descriptorBindingVariableDescriptorCount;
 		} else {
 			if (enabled_device_extension_names.has(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME)) {
 				shader_capabilities.shader_float16_is_supported = shader_features.shaderFloat16;
@@ -1139,6 +1163,17 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			if (enabled_device_extension_names.has(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
 				int64_atomics_capabilities.buffer_supported = shader_atomic_int64_features.shaderBufferInt64Atomics;
 				int64_atomics_capabilities.shared_supported = shader_atomic_int64_features.shaderSharedInt64Atomics;
+			}
+			// GodotNext: rd_bindless (#176)
+			if (enabled_device_extension_names.has(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+				bindless_capabilities.runtime_descriptor_array = descriptor_indexing_features.runtimeDescriptorArray;
+				bindless_capabilities.sampled_image_non_uniform_indexing = descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing;
+				bindless_capabilities.storage_buffer_non_uniform_indexing = descriptor_indexing_features.shaderStorageBufferArrayNonUniformIndexing;
+				bindless_capabilities.partially_bound = descriptor_indexing_features.descriptorBindingPartiallyBound;
+				bindless_capabilities.update_unused_while_pending = descriptor_indexing_features.descriptorBindingUpdateUnusedWhilePending;
+				bindless_capabilities.sampled_image_update_after_bind = descriptor_indexing_features.descriptorBindingSampledImageUpdateAfterBind;
+				bindless_capabilities.storage_buffer_update_after_bind = descriptor_indexing_features.descriptorBindingStorageBufferUpdateAfterBind;
+				bindless_capabilities.variable_descriptor_count = descriptor_indexing_features.descriptorBindingVariableDescriptorCount;
 			}
 		}
 
@@ -1221,6 +1256,9 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control_properties = {};
 		VkPhysicalDeviceAccelerationStructurePropertiesKHR acceleration_structure_properties = {};
 		VkPhysicalDeviceRayTracingPipelinePropertiesKHR raytracing_properties = {};
+		// GodotNext: rd_bindless (#176)
+		VkPhysicalDeviceDescriptorIndexingPropertiesEXT descriptor_indexing_properties = {};
+		VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer_properties = {};
 		VkPhysicalDeviceProperties2 physical_device_properties_2 = {};
 
 		const bool use_1_1_properties = physical_device_properties.apiVersion >= VK_API_VERSION_1_1;
@@ -1273,9 +1311,43 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			next_properties = &raytracing_properties;
 		}
 
+		// GodotNext: rd_bindless (#176)
+		if (bindless_capabilities.features_supported()) {
+			descriptor_indexing_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES_EXT;
+			descriptor_indexing_properties.pNext = next_properties;
+			next_properties = &descriptor_indexing_properties;
+
+			if (descriptor_buffer_available) {
+				descriptor_buffer_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
+				descriptor_buffer_properties.pNext = next_properties;
+				next_properties = &descriptor_buffer_properties;
+			}
+		}
+
 		physical_device_properties_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 		physical_device_properties_2.pNext = next_properties;
 		functions.GetPhysicalDeviceProperties2(physical_device, &physical_device_properties_2);
+
+		// GodotNext: rd_bindless (#176). Half of each update-after-bind limit, so a shader can bind two full
+		// tables of a type beside its ordinary uniform sets.
+		if (bindless_capabilities.features_supported()) {
+			const VkPhysicalDeviceDescriptorIndexingPropertiesEXT &dip = descriptor_indexing_properties;
+			const uint64_t all_pools = dip.maxUpdateAfterBindDescriptorsInAllPools;
+			const uint64_t per_stage_resources = dip.maxPerStageUpdateAfterBindResources;
+			auto capacity = [&](uint64_t p_per_stage, uint64_t p_per_set, uint32_t p_cap) -> uint32_t {
+				const uint64_t limit = MIN(MIN(p_per_stage, p_per_set), MIN(all_pools, per_stage_resources)) / 2;
+				return uint32_t(MIN(limit, uint64_t(p_cap)));
+			};
+			bindless_capabilities.max_textures = capacity(dip.maxPerStageDescriptorUpdateAfterBindSampledImages, dip.maxDescriptorSetUpdateAfterBindSampledImages, BindlessCapabilities::MAX_SLOTS);
+			bindless_capabilities.max_samplers = capacity(dip.maxPerStageDescriptorUpdateAfterBindSamplers, dip.maxDescriptorSetUpdateAfterBindSamplers, BindlessCapabilities::MAX_SAMPLER_SLOTS);
+			bindless_capabilities.max_storage_buffers = capacity(dip.maxPerStageDescriptorUpdateAfterBindStorageBuffers, dip.maxDescriptorSetUpdateAfterBindStorageBuffers, BindlessCapabilities::MAX_SLOTS);
+			if (descriptor_buffer_available) {
+				bindless_capabilities.sampled_image_descriptor_size = descriptor_buffer_properties.sampledImageDescriptorSize;
+				bindless_capabilities.sampler_descriptor_size = descriptor_buffer_properties.samplerDescriptorSize;
+				bindless_capabilities.storage_buffer_descriptor_size = descriptor_buffer_properties.storageBufferDescriptorSize;
+			}
+			print_verbose(vformat("- Vulkan bindless tables: %d textures, %d samplers, %d storage buffers per table.", bindless_capabilities.max_textures, bindless_capabilities.max_samplers, bindless_capabilities.max_storage_buffers));
+		}
 
 		subgroup_capabilities.size = subgroup_properties.subgroupSize;
 		subgroup_capabilities.min_size = subgroup_properties.subgroupSize;
@@ -1640,6 +1712,23 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		shader_image_atomic_int64_features.pNext = create_info_next;
 		shader_image_atomic_int64_features.shaderImageInt64Atomics = VK_TRUE;
 		create_info_next = &shader_image_atomic_int64_features;
+	}
+
+	// GodotNext: rd_bindless (#176). Its own feature structure as well (plan §21.1 C2), only on devices
+	// with every feature bindless tables use.
+	VkPhysicalDeviceDescriptorIndexingFeaturesEXT descriptor_indexing_features = {};
+	if (bindless_capabilities.features_supported()) {
+		descriptor_indexing_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT;
+		descriptor_indexing_features.pNext = create_info_next;
+		descriptor_indexing_features.runtimeDescriptorArray = VK_TRUE;
+		descriptor_indexing_features.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+		descriptor_indexing_features.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+		descriptor_indexing_features.descriptorBindingPartiallyBound = VK_TRUE;
+		descriptor_indexing_features.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+		descriptor_indexing_features.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+		descriptor_indexing_features.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+		descriptor_indexing_features.descriptorBindingVariableDescriptorCount = VK_TRUE;
+		create_info_next = &descriptor_indexing_features;
 	}
 
 	// GodotNext: pu_vk_extension_providers (#105). Providers prepend their feature structures to
@@ -4623,7 +4712,11 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 	// Set bindings.
 	Vector<Vector<VkDescriptorSetLayoutBinding>> vk_set_bindings;
 	vk_set_bindings.resize(shader_refl.uniform_sets.size());
+	// GodotNext: rd_bindless (#176). The entry type of each set that is a bindless table, else UNIFORM_TYPE_MAX.
+	LocalVector<UniformType> bindless_set_types;
+	bindless_set_types.resize(shader_refl.uniform_sets.size());
 	for (uint32_t i = 0; i < shader_refl.uniform_sets.size(); i++) {
+		bindless_set_types[i] = UNIFORM_TYPE_MAX;
 		for (uint32_t j = 0; j < shader_refl.uniform_sets[i].size(); j++) {
 			const ShaderUniform &uniform = shader_refl.uniform_sets[i][j];
 			VkDescriptorSetLayoutBinding layout_binding = {};
@@ -4689,6 +4782,11 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 				} break;
 				case UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
 					layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+				} break;
+				// GodotNext: rd_bindless (#176). The set's layout comes from _bindless_set_layout_create().
+				case UNIFORM_TYPE_BINDLESS_TABLE: {
+					bindless_set_types[i] = UniformType(uniform.length);
+					layout_binding.descriptorType = _bindless_descriptor_type(bindless_set_types[i]);
 				} break;
 				default: {
 					DEV_ASSERT(false);
@@ -4834,7 +4932,17 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 			}
 
 			VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-			res = vkCreateDescriptorSetLayout(vk_device, &layout_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT), &layout);
+			if (bindless_set_types[i] != UNIFORM_TYPE_MAX) {
+				// GodotNext: rd_bindless (#176). Laid out as the tables' sets are, so a table's set binds here.
+				if (!has_feature(SUPPORTS_BINDLESS)) {
+					error_text = vformat("Set %d is a bindless table, which this device does not support (SUPPORTS_BINDLESS).", i);
+					break;
+				}
+				layout = _bindless_set_layout_create(bindless_set_types[i]);
+				res = layout != VK_NULL_HANDLE ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+			} else {
+				res = vkCreateDescriptorSetLayout(vk_device, &layout_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT), &layout);
+			}
 			if (res) {
 				error_text = vformat("Error (%d) creating descriptor set layout for set %d.", res, i);
 				break;
@@ -5053,6 +5161,16 @@ void RenderingDeviceDriverVulkan::_descriptor_set_pool_unreference(DescriptorSet
 }
 
 RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<BoundUniform> p_uniforms, ShaderID p_shader, uint32_t p_set_index, int p_linear_pool_index) {
+	// GodotNext: rd_bindless (#176). The set is the table's own descriptor set.
+	if (p_uniforms.size() == 1 && p_uniforms[0].type == UNIFORM_TYPE_BINDLESS_TABLE) {
+		ERR_FAIL_COND_V(p_uniforms[0].ids.size() != 1, UniformSetID());
+		const BindlessTableInfo *table = (const BindlessTableInfo *)p_uniforms[0].ids[0].id;
+		UniformSetInfo *usi = VersatileResource::allocate<UniformSetInfo>(resources_allocator);
+		usi->vk_descriptor_set = table->vk_set;
+		usi->bindless_table = true;
+		return UniformSetID(usi);
+	}
+
 	if (!linear_descriptor_pools_enabled) {
 		p_linear_pool_index = -1;
 	}
@@ -5368,6 +5486,12 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 void RenderingDeviceDriverVulkan::uniform_set_free(UniformSetID p_uniform_set) {
 	UniformSetInfo *usi = (UniformSetInfo *)p_uniform_set.id;
 
+	// GodotNext: rd_bindless (#176). The table owns the descriptor set.
+	if (usi->bindless_table) {
+		VersatileResource::free(resources_allocator, usi);
+		return;
+	}
+
 	if (usi->vk_linear_descriptor_pool) {
 		// Nothing to do. All sets are freed at once using vkResetDescriptorPool.
 		//
@@ -5436,6 +5560,191 @@ void RenderingDeviceDriverVulkan::linear_uniform_set_pools_reset(int p_linear_po
 // ----- COMMANDS -----
 
 void RenderingDeviceDriverVulkan::command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) {
+}
+
+/************************/
+/**** BINDLESS TABLE ****/
+/************************/
+
+// GodotNext: rd_bindless (#176)
+
+VkDescriptorType RenderingDeviceDriverVulkan::_bindless_descriptor_type(UniformType p_type) {
+	switch (p_type) {
+		case UNIFORM_TYPE_SAMPLER:
+			return VK_DESCRIPTOR_TYPE_SAMPLER;
+		case UNIFORM_TYPE_STORAGE_BUFFER:
+			return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		default:
+			return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+	}
+}
+
+uint32_t RenderingDeviceDriverVulkan::_bindless_max_capacity(UniformType p_type) const {
+	switch (p_type) {
+		case UNIFORM_TYPE_SAMPLER:
+			return bindless_capabilities.max_samplers;
+		case UNIFORM_TYPE_STORAGE_BUFFER:
+			return bindless_capabilities.max_storage_buffers;
+		default:
+			return bindless_capabilities.max_textures;
+	}
+}
+
+VkDescriptorSetLayout RenderingDeviceDriverVulkan::_bindless_set_layout_create(UniformType p_type) {
+	// One runtime array at binding 0, visible to every stage. Its count is the most slots a table of the
+	// type can have; each table allocates its own capacity (a variable count). Entries are written while
+	// the set is bound (update after bind) and while submitted work uses other entries (update unused
+	// while pending), and unwritten entries are left alone (partially bound).
+	VkDescriptorSetLayoutBinding binding = {};
+	binding.binding = 0;
+	binding.descriptorType = _bindless_descriptor_type(p_type);
+	binding.descriptorCount = _bindless_max_capacity(p_type);
+	binding.stageFlags = VK_SHADER_STAGE_ALL;
+
+	const VkDescriptorBindingFlags binding_flags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT | VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT;
+	VkDescriptorSetLayoutBindingFlagsCreateInfo binding_flags_create_info = {};
+	binding_flags_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+	binding_flags_create_info.bindingCount = 1;
+	binding_flags_create_info.pBindingFlags = &binding_flags;
+
+	VkDescriptorSetLayoutCreateInfo layout_create_info = {};
+	layout_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	layout_create_info.pNext = &binding_flags_create_info;
+	layout_create_info.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+	layout_create_info.bindingCount = 1;
+	layout_create_info.pBindings = &binding;
+
+	VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+	VkResult res = vkCreateDescriptorSetLayout(vk_device, &layout_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT), &layout);
+	ERR_FAIL_COND_V_MSG(res != VK_SUCCESS, VK_NULL_HANDLE, vformat("Couldn't create the bindless descriptor set layout (VkResult error %d).", res));
+	return layout;
+}
+
+RDD::BindlessTableID RenderingDeviceDriverVulkan::bindless_table_create(UniformType p_type, uint32_t p_capacity) {
+	ERR_FAIL_COND_V(!has_feature(SUPPORTS_BINDLESS), BindlessTableID());
+	ERR_FAIL_COND_V(p_capacity == 0 || p_capacity > _bindless_max_capacity(p_type), BindlessTableID());
+
+	BindlessTableInfo *table = memnew(BindlessTableInfo);
+	table->type = p_type;
+	table->capacity = p_capacity;
+	table->vk_layout = _bindless_set_layout_create(p_type);
+	if (table->vk_layout == VK_NULL_HANDLE) {
+		memdelete(table);
+		return BindlessTableID();
+	}
+
+	VkDescriptorPoolSize pool_size = {};
+	pool_size.type = _bindless_descriptor_type(p_type);
+	pool_size.descriptorCount = p_capacity;
+
+	VkDescriptorPoolCreateInfo pool_create_info = {};
+	pool_create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	pool_create_info.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+	pool_create_info.maxSets = 1;
+	pool_create_info.poolSizeCount = 1;
+	pool_create_info.pPoolSizes = &pool_size;
+
+	VkResult res = vkCreateDescriptorPool(vk_device, &pool_create_info, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL), &table->vk_pool);
+	if (res != VK_SUCCESS) {
+		vkDestroyDescriptorSetLayout(vk_device, table->vk_layout, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT));
+		memdelete(table);
+		ERR_FAIL_V_MSG(BindlessTableID(), vformat("Couldn't create the bindless table's descriptor pool (VkResult error %d).", res));
+	}
+
+	VkDescriptorSetVariableDescriptorCountAllocateInfo variable_count_info = {};
+	variable_count_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
+	variable_count_info.descriptorSetCount = 1;
+	variable_count_info.pDescriptorCounts = &p_capacity;
+
+	VkDescriptorSetAllocateInfo allocate_info = {};
+	allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	allocate_info.pNext = &variable_count_info;
+	allocate_info.descriptorPool = table->vk_pool;
+	allocate_info.descriptorSetCount = 1;
+	allocate_info.pSetLayouts = &table->vk_layout;
+
+	res = vkAllocateDescriptorSets(vk_device, &allocate_info, &table->vk_set);
+	if (res != VK_SUCCESS) {
+		vkDestroyDescriptorPool(vk_device, table->vk_pool, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL));
+		vkDestroyDescriptorSetLayout(vk_device, table->vk_layout, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT));
+		memdelete(table);
+		ERR_FAIL_V_MSG(BindlessTableID(), vformat("Couldn't allocate the bindless table's descriptor set (VkResult error %d).", res));
+	}
+
+	_track_handle(table->vk_layout); // GodotNext: pu_vk_extension_providers (#105).
+	_track_handle(table->vk_pool);
+	_track_handle(table->vk_set);
+	return BindlessTableID(table);
+}
+
+void RenderingDeviceDriverVulkan::bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) {
+	const BindlessTableInfo *table = (const BindlessTableInfo *)p_table.id;
+	ERR_FAIL_UNSIGNED_INDEX(p_slot, table->capacity);
+
+	VkDescriptorImageInfo image_info = {};
+	VkDescriptorBufferInfo buffer_info = {};
+	VkWriteDescriptorSet write = {};
+	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet = table->vk_set;
+	write.dstBinding = 0;
+	write.dstArrayElement = p_slot;
+	write.descriptorCount = 1;
+	write.descriptorType = _bindless_descriptor_type(table->type);
+
+	switch (table->type) {
+		case UNIFORM_TYPE_TEXTURE: {
+			const TextureInfo *texture_info = (const TextureInfo *)p_resource.id;
+			image_info.imageView = texture_info->vk_view;
+			image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			write.pImageInfo = &image_info;
+		} break;
+		case UNIFORM_TYPE_SAMPLER: {
+			image_info.sampler = (VkSampler)p_resource.id;
+			write.pImageInfo = &image_info;
+		} break;
+		case UNIFORM_TYPE_STORAGE_BUFFER: {
+			const BufferInfo *buffer_info_in = (const BufferInfo *)p_resource.id;
+			buffer_info.buffer = buffer_info_in->vk_buffer;
+			buffer_info.range = buffer_info_in->size;
+			write.pBufferInfo = &buffer_info;
+		} break;
+		default: {
+			ERR_FAIL();
+		}
+	}
+
+	vkUpdateDescriptorSets(vk_device, 1, &write, 0, nullptr);
+}
+
+void RenderingDeviceDriverVulkan::bindless_table_free(BindlessTableID p_table) {
+	BindlessTableInfo *table = (BindlessTableInfo *)p_table.id;
+	// Destroying the pool frees its set.
+	vkDestroyDescriptorPool(vk_device, table->vk_pool, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_POOL));
+	vkDestroyDescriptorSetLayout(vk_device, table->vk_layout, VKC::get_allocation_callbacks(VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT));
+	_untrack_handle(table->vk_set); // GodotNext: pu_vk_extension_providers (#105).
+	_untrack_handle(table->vk_pool);
+	_untrack_handle(table->vk_layout);
+	memdelete(table);
+}
+
+uint64_t RenderingDeviceDriverVulkan::bindless_table_get_memory_usage(BindlessTableID p_table) const {
+	const BindlessTableInfo *table = (const BindlessTableInfo *)p_table.id;
+	uint32_t descriptor_size = 0;
+	switch (table->type) {
+		case UNIFORM_TYPE_SAMPLER:
+			descriptor_size = bindless_capabilities.sampler_descriptor_size;
+			break;
+		case UNIFORM_TYPE_STORAGE_BUFFER:
+			descriptor_size = bindless_capabilities.storage_buffer_descriptor_size;
+			break;
+		default:
+			descriptor_size = bindless_capabilities.sampled_image_descriptor_size;
+			break;
+	}
+	if (descriptor_size == 0) {
+		descriptor_size = BindlessCapabilities::FALLBACK_DESCRIPTOR_SIZE;
+	}
+	return uint64_t(table->capacity) * descriptor_size;
 }
 
 /******************/
@@ -7915,6 +8224,13 @@ uint64_t RenderingDeviceDriverVulkan::limit_get(Limit p_limit) {
 		return acceleration_structure_value;
 	}
 	switch (p_limit) {
+		// GodotNext: rd_bindless (#176)
+		case LIMIT_MAX_BINDLESS_TEXTURES:
+			return has_feature(SUPPORTS_BINDLESS) ? bindless_capabilities.max_textures : 0;
+		case LIMIT_MAX_BINDLESS_SAMPLERS:
+			return has_feature(SUPPORTS_BINDLESS) ? bindless_capabilities.max_samplers : 0;
+		case LIMIT_MAX_BINDLESS_STORAGE_BUFFERS:
+			return has_feature(SUPPORTS_BINDLESS) ? bindless_capabilities.max_storage_buffers : 0;
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return limits.maxBoundDescriptorSets;
 		case LIMIT_MAX_FRAMEBUFFER_COLOR_ATTACHMENTS:
@@ -8094,6 +8410,9 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 #endif
 		case SUPPORTS_IMAGE_INT64_ATOMICS:
 			return int64_atomics_capabilities.buffer_supported && physical_device_features.shaderInt64 && int64_atomics_capabilities.image_supported && int64_atomics_capabilities.r64_storage_atomic_supported;
+		// GodotNext: rd_bindless (#176)
+		case SUPPORTS_BINDLESS:
+			return bindless_capabilities.features_supported() && bindless_capabilities.max_textures >= RDBindless::MIN_SLOTS && bindless_capabilities.max_storage_buffers >= RDBindless::MIN_SLOTS && bindless_capabilities.max_samplers >= RDBindless::MIN_SAMPLER_SLOTS;
 		default:
 			return false;
 	}

@@ -94,6 +94,16 @@ public:
 	// GodotNext: dxil_toolchain (#123). The DXIL shader model ray query (inline ray tracing, tier 1.1) and the
 	// ray-tracing library targets need.
 	static constexpr uint32_t RAY_QUERY_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5
+	// GodotNext: rd_bindless (#176). A bindless table is its set's only binding, so its set has no dynamic
+	// buffers, and the table takes register 0 of its set's space: register BINDLESS_TABLE_REGISTER in space
+	// BINDLESS_TABLE_SPACE_BASE + set (see _remap_bindless_tables()).
+	static constexpr uint32_t BINDLESS_TABLE_SPACE_BASE = DYNAMIC_BUFFER_SPACE_BASE;
+	static constexpr uint32_t BINDLESS_TABLE_REGISTER = 0;
+	// The size of a bindless table's runtime array in the DXIL, and of the descriptor range its set binds.
+	// The driver allocates every table at this size, so the range never reads past the table's heap
+	// allocation.
+	static constexpr uint32_t BINDLESS_RESOURCE_RANGE_SIZE = 65536;
+	static constexpr uint32_t BINDLESS_SAMPLER_RANGE_SIZE = 1024;
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
@@ -152,6 +162,7 @@ protected:
 	bool _convert_nir_to_dxil(const HashMap<int, nir_shader *> &p_stages_nir_shaders, BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed, HashMap<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &r_dxil_blobs);
 	bool _convert_spirv_to_dxil(Span<ReflectShaderStage> p_spirv, HashMap<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &r_dxil_blobs, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed);
 	void _remap_dynamic_buffers(nir_shader *p_shader) const; // GodotNext: d3d12_gpu_based_validation (#272).
+	void _remap_bindless_tables(nir_shader *p_shader) const; // GodotNext: rd_bindless (#176).
 	bool _generate_root_signature(BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed);
 
 	// GodotNirCallbacks.

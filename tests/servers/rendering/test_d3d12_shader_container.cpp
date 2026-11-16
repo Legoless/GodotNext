@@ -305,8 +305,9 @@ public:
 	}
 
 	// Every root constant and root descriptor sits at a small register outside space 0, and every
-	// descriptor table range stays in space 0 at Mesa's set/binding register.
+	// descriptor table range stays in space 0 at Mesa's set/binding register, except a bindless table's.
 	void check_root_parameter_registers() const {
+		const RDC::ShaderReflection reflection = container->get_shader_reflection();
 		for (uint32_t i = 0; i < root_signature->NumParameters; i++) {
 			const D3D12_ROOT_PARAMETER1 &root_param = root_signature->pParameters[i];
 			if (root_param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
@@ -315,6 +316,26 @@ public:
 			} else if (root_param.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
 				for (uint32_t j = 0; j < root_param.DescriptorTable.NumDescriptorRanges; j++) {
 					const D3D12_DESCRIPTOR_RANGE1 &range = root_param.DescriptorTable.pDescriptorRanges[j];
+					// GodotNext: rd_bindless (#176). Only a bindless table's range leaves space 0: the only range
+					// of its set's descriptor table, at register 0 of the set's space, of the table's size, for a
+					// set whose one uniform is the table.
+					if (range.RegisterSpace != 0) {
+						INFO("Descriptor table ", i, ", register space ", range.RegisterSpace);
+						CHECK_EQ(root_param.DescriptorTable.NumDescriptorRanges, 1u);
+						CHECK_EQ(range.BaseShaderRegister, ContainerD3D12::BINDLESS_TABLE_REGISTER);
+						REQUIRE_GE(range.RegisterSpace, ContainerD3D12::BINDLESS_TABLE_SPACE_BASE);
+						const uint32_t set = range.RegisterSpace - ContainerD3D12::BINDLESS_TABLE_SPACE_BASE;
+						REQUIRE_LT(set, uint32_t(reflection.uniform_sets.size()));
+						REQUIRE_EQ(reflection.uniform_sets[set].size(), 1);
+						const RDC::ShaderUniform &table = reflection.uniform_sets[set][0];
+						CHECK_EQ(table.type, RDC::UNIFORM_TYPE_BINDLESS_TABLE);
+						const bool sampler_range = range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+						CHECK_EQ(table.length == RDC::UNIFORM_TYPE_SAMPLER, sampler_range);
+						CHECK_EQ(range.NumDescriptors, sampler_range ? ContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE : ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+						const ContainerD3D12::ReflectionBindingSetDataD3D12 &set_d3d12 = reflection_d3d12.reflection_binding_sets_d3d12[set];
+						CHECK_EQ(sampler_range ? set_d3d12.sampler_root_param_idx : set_d3d12.resource_root_param_idx, i);
+						continue;
+					}
 					CHECK_EQ(range.RegisterSpace, 0u);
 					CHECK_EQ(range.BaseShaderRegister % GODOT_NIR_BINDING_MULTIPLIER, 0u);
 				}
@@ -346,6 +367,26 @@ public:
 			}
 		}
 		return false;
+	}
+
+	// GodotNext: rd_bindless (#176). Whether a stage's DXIL declares a resource at exactly these registers.
+	bool dxil_declares_range(uint32_t p_type, uint32_t p_space, uint32_t p_lower_bound, uint32_t p_upper_bound) const {
+		for (const LocalVector<DxilResource> &resources : stage_resources) {
+			for (const DxilResource &resource : resources) {
+				if (resource.type == p_type && resource.space == p_space && resource.lower_bound == p_lower_bound && resource.upper_bound == p_upper_bound) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	// GodotNext: rd_bindless (#176). The one range of the descriptor table at a root parameter.
+	const D3D12_DESCRIPTOR_RANGE1 &only_range(uint32_t p_root_param_idx) const {
+		const D3D12_ROOT_PARAMETER1 &root_param = param(p_root_param_idx);
+		REQUIRE_EQ(root_param.ParameterType, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE);
+		REQUIRE_EQ(root_param.DescriptorTable.NumDescriptorRanges, 1u);
+		return root_param.DescriptorTable.pDescriptorRanges[0];
 	}
 };
 
@@ -645,6 +686,333 @@ TEST_CASE("[D3D12][ShaderContainer] Ray-tracing library stages use small registe
 	CHECK_FALSE(fixture.dxil_declares(4, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + 1 * GODOT_NIR_BINDING_MULTIPLIER));
 	CHECK(fixture.dxil_declares(4, 0, 0)); // tlas, set 0 binding 0.
 	CHECK(fixture.dxil_declares(6, 0, GODOT_NIR_BINDING_MULTIPLIER)); // result_image: typed UAV, set 0 binding 1.
+}
+
+// GodotNext: rd_bindless (#176). Mesa's NIR-to-DXIL sizes a resource array by its element count, so it
+// never declared a texture or sampler runtime array and declared a storage-buffer one with a range size
+// of 0; pipelines with such shaders failed to create. Each bindless table now has the size of its root
+// signature range, at register 0 in its set's space.
+
+const char *COMPUTE_BINDLESS = R"(#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) restrict writeonly buffer Results { uint data[]; } results;
+layout(set = 1, binding = 0) uniform texture2D textures[];
+layout(set = 2, binding = 0) uniform sampler samplers[];
+layout(set = 3, binding = 0, std430) restrict readonly buffer Words { uint data[]; } words[];
+layout(push_constant, std430) uniform Params { uint texture_slot; uint sampler_slot; uint buffer_slot; uint pad; } params;
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	vec4 color = textureLod(sampler2D(textures[nonuniformEXT(params.texture_slot + index)], samplers[nonuniformEXT(params.sampler_slot + index)]), vec2(0.5), 0.0);
+	results.data[index] = packUnorm4x8(color) ^ words[nonuniformEXT(params.buffer_slot + index)].data[index];
+}
+)";
+
+const char *RASTER_BINDLESS_VERTEX = R"(#version 450
+layout(push_constant, std430) uniform Params { float scale; } params;
+layout(location = 0) in vec3 vertex;
+layout(location = 0) out vec2 uv;
+void main() {
+	uv = vertex.xy;
+	gl_Position = vec4(vertex * params.scale, 1.0);
+}
+)";
+
+const char *RASTER_BINDLESS_FRAGMENT = R"(#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+layout(set = 0, binding = 0, std140) uniform Material { uint texture_slot; uint sampler_slot; } material;
+layout(set = 1, binding = 0) uniform texture2D textures[];
+layout(set = 2, binding = 0) uniform sampler samplers[];
+layout(location = 0) in vec2 uv;
+layout(location = 0) out vec4 frag_color;
+void main() {
+	frag_color = texture(sampler2D(textures[nonuniformEXT(material.texture_slot)], samplers[nonuniformEXT(material.sampler_slot)]), uv);
+}
+)";
+
+TEST_CASE("[D3D12][ShaderContainer] Compute bindless tables are bounded arrays at register 0 in a space of their own") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_COMPUTE, COMPUTE_BINDLESS });
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, Vector<uint64_t>());
+	check_dxil_validation(validation_before, 1);
+
+	const uint32_t texture_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 1;
+	const uint32_t sampler_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 2;
+	const uint32_t buffer_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 3;
+	const D3D12_DESCRIPTOR_RANGE_FLAGS resource_flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+
+	// The root signature binds each table through a descriptor table of one volatile range of the table's
+	// size, at register 0 in the table's space.
+	const D3D12_DESCRIPTOR_RANGE1 &textures = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[1].resource_root_param_idx);
+	CHECK_EQ(textures.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+	CHECK_EQ(textures.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(textures.BaseShaderRegister, ContainerD3D12::BINDLESS_TABLE_REGISTER);
+	CHECK_EQ(textures.RegisterSpace, texture_space);
+	CHECK_EQ(textures.Flags, resource_flags);
+
+	const D3D12_DESCRIPTOR_RANGE1 &samplers = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[2].sampler_root_param_idx);
+	CHECK_EQ(samplers.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER);
+	CHECK_EQ(samplers.NumDescriptors, ContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE);
+	CHECK_EQ(samplers.BaseShaderRegister, ContainerD3D12::BINDLESS_TABLE_REGISTER);
+	CHECK_EQ(samplers.RegisterSpace, sampler_space);
+	CHECK_EQ(samplers.Flags, D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE);
+
+	const D3D12_DESCRIPTOR_RANGE1 &words = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[3].resource_root_param_idx);
+	CHECK_EQ(words.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+	CHECK_EQ(words.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(words.BaseShaderRegister, ContainerD3D12::BINDLESS_TABLE_REGISTER);
+	CHECK_EQ(words.RegisterSpace, buffer_space);
+	CHECK_EQ(words.Flags, resource_flags);
+
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	// The DXIL declares every table, as an array of exactly the range's size where the range is.
+	CHECK(fixture.dxil_declares_range(3, texture_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Typed SRV.
+	CHECK(fixture.dxil_declares_range(1, sampler_space, 0, ContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE - 1)); // Sampler.
+	CHECK(fixture.dxil_declares_range(4, buffer_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Raw SRV.
+	CHECK_FALSE(fixture.dxil_declares(3, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK_FALSE(fixture.dxil_declares(1, 0, 2 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK_FALSE(fixture.dxil_declares(4, 0, 3 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	// The other resources keep Mesa's registers in space 0.
+	CHECK(fixture.dxil_declares(7, 0, 0)); // Results, set 0 binding 0: raw UAV.
+
+	// The reflection finds each table where the DXIL declares it.
+	CHECK_EQ(fixture.uniform_d3d12(1, 0).dxil_stages, 1u << RDC::SHADER_STAGE_COMPUTE);
+	CHECK_EQ(fixture.uniform_d3d12(1, 0).resource_class, uint32_t(RES_CLASS_SRV));
+	CHECK_EQ(fixture.uniform_d3d12(2, 0).dxil_stages, 1u << RDC::SHADER_STAGE_COMPUTE);
+	CHECK(fixture.uniform_d3d12(2, 0).has_sampler);
+	CHECK_EQ(fixture.uniform_d3d12(3, 0).dxil_stages, 1u << RDC::SHADER_STAGE_COMPUTE);
+	CHECK_EQ(fixture.uniform_d3d12(3, 0).resource_class, uint32_t(RES_CLASS_SRV));
+}
+
+TEST_CASE("[D3D12][ShaderContainer] Raster bindless tables and dynamic buffers keep apart in register spaces") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_VERTEX, RASTER_BINDLESS_VERTEX });
+	stages.push_back({ RDC::SHADER_STAGE_FRAGMENT, RASTER_BINDLESS_FRAGMENT });
+	Vector<uint64_t> dynamic_buffers;
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(0, 0)); // Material: root CBV.
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, dynamic_buffers);
+	check_dxil_validation(validation_before, 2);
+
+	// The dynamic buffer of set 0 and the tables of sets 1 and 2 each have a space of their own.
+	const ContainerD3D12::ReflectionBindingDataD3D12 &material = fixture.uniform_d3d12(0, 0);
+	const D3D12_ROOT_PARAMETER1 &material_param = fixture.param(material.root_param_idx);
+	CHECK_EQ(material_param.ParameterType, D3D12_ROOT_PARAMETER_TYPE_CBV);
+	CHECK_EQ(material_param.Descriptor.ShaderRegister, 0u);
+	CHECK_EQ(material_param.Descriptor.RegisterSpace, ContainerD3D12::DYNAMIC_BUFFER_SPACE_BASE + 0);
+
+	const uint32_t texture_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 1;
+	const uint32_t sampler_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 2;
+
+	const uint32_t texture_param_idx = fixture.reflection_d3d12.reflection_binding_sets_d3d12[1].resource_root_param_idx;
+	const D3D12_DESCRIPTOR_RANGE1 &textures = fixture.only_range(texture_param_idx);
+	CHECK_EQ(textures.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(textures.BaseShaderRegister, ContainerD3D12::BINDLESS_TABLE_REGISTER);
+	CHECK_EQ(textures.RegisterSpace, texture_space);
+	CHECK_EQ(fixture.param(texture_param_idx).ShaderVisibility, D3D12_SHADER_VISIBILITY_PIXEL);
+
+	const uint32_t sampler_param_idx = fixture.reflection_d3d12.reflection_binding_sets_d3d12[2].sampler_root_param_idx;
+	const D3D12_DESCRIPTOR_RANGE1 &samplers = fixture.only_range(sampler_param_idx);
+	CHECK_EQ(samplers.NumDescriptors, ContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE);
+	CHECK_EQ(samplers.BaseShaderRegister, ContainerD3D12::BINDLESS_TABLE_REGISTER);
+	CHECK_EQ(samplers.RegisterSpace, sampler_space);
+	CHECK_EQ(fixture.param(sampler_param_idx).ShaderVisibility, D3D12_SHADER_VISIBILITY_PIXEL);
+
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	CHECK(fixture.dxil_declares(2, ContainerD3D12::DYNAMIC_BUFFER_SPACE_BASE + 0, 0)); // Material.
+	CHECK(fixture.dxil_declares_range(3, texture_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1));
+	CHECK(fixture.dxil_declares_range(1, sampler_space, 0, ContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE - 1));
+	CHECK_EQ(fixture.uniform_d3d12(1, 0).dxil_stages, 1u << RDC::SHADER_STAGE_FRAGMENT);
+	CHECK_EQ(fixture.uniform_d3d12(2, 0).dxil_stages, 1u << RDC::SHADER_STAGE_FRAGMENT);
+}
+
+// GodotNext: rd_bindless (#176). Buffer device addresses raise the shader model to 6.6, where Mesa creates
+// handles with createHandleFromBinding; the tables must still be declared where the root signature puts them.
+const char *COMPUTE_BINDLESS_DEVICE_ADDRESS = R"(#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Words { uint data[]; };
+layout(set = 0, binding = 0, std430) restrict writeonly buffer Results { uint data[]; } results;
+layout(set = 1, binding = 0) uniform texture2D textures[];
+layout(set = 2, binding = 0, std430) restrict readonly buffer Colors { uint data[]; } colors[];
+layout(push_constant, std430) uniform Params { Words words; uint texture_slot; uint buffer_slot; } params;
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	uint texel = packUnorm4x8(texelFetch(textures[nonuniformEXT(params.texture_slot + index)], ivec2(0), 0));
+	results.data[index] = texel ^ colors[nonuniformEXT(params.buffer_slot + index)].data[index] ^ params.words.data[index];
+}
+)";
+
+TEST_CASE("[D3D12][ShaderContainer] Bindless tables with buffer device addresses (shader model 6.6) are bounded arrays at register 0 in a space of their own") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_COMPUTE, COMPUTE_BINDLESS_DEVICE_ADDRESS });
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, Vector<uint64_t>());
+	check_dxil_validation(validation_before, 1);
+
+	const uint32_t texture_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 1;
+	const uint32_t buffer_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 2;
+	const D3D12_DESCRIPTOR_RANGE1 &textures = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[1].resource_root_param_idx);
+	CHECK_EQ(textures.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(textures.RegisterSpace, texture_space);
+	const D3D12_DESCRIPTOR_RANGE1 &colors = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[2].resource_root_param_idx);
+	CHECK_EQ(colors.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(colors.RegisterSpace, buffer_space);
+
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	CHECK(fixture.dxil_declares_range(3, texture_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Typed SRV.
+	CHECK(fixture.dxil_declares_range(4, buffer_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Raw SRV.
+	CHECK_FALSE(fixture.dxil_declares(3, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK_FALSE(fixture.dxil_declares(4, 0, 2 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+}
+
+// GodotNext: rd_bindless (#176). Bindless tables in a ray-query kernel and in ray-tracing libraries, which
+// compile only with the GodotNext Mesa NIR library (dxil_toolchain, #123). Its patches change how
+// nir_to_dxil declares resources and creates their handles, so the tables are checked through it too.
+
+const char *RAY_QUERY_BINDLESS = R"(#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, std430) writeonly buffer Hits { float t[]; } hits;
+layout(set = 1, binding = 0, std430) readonly buffer Rays { vec4 data[]; } rays[];
+layout(set = 2, binding = 0) uniform texture2D textures[];
+layout(push_constant, std430) uniform Params { uint count; uint pad0; uint pad1; uint pad2; } params;
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	if (index >= params.count) {
+		return;
+	}
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT(ray_query, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, rays[nonuniformEXT(index)].data[0].xyz, 0.0, rays[nonuniformEXT(index)].data[1].xyz, 1000.0);
+	rayQueryProceedEXT(ray_query);
+	float t = -1.0;
+	if (rayQueryGetIntersectionTypeEXT(ray_query, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+		t = rayQueryGetIntersectionTEXT(ray_query, true);
+	}
+	hits.t[index] = t * texelFetch(textures[nonuniformEXT(index)], ivec2(0), 0).x;
+}
+)";
+
+const char *RAYGEN_BINDLESS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image2D result_image;
+layout(set = 1, binding = 0) uniform texture2D textures[];
+layout(push_constant, std430) uniform Params { float t_max; uint pad0; uint pad1; uint pad2; } params;
+layout(location = 0) rayPayloadEXT vec4 payload;
+void main() {
+	payload = vec4(0.0);
+	traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFFu, 0, 1, 0, vec3(0.0), 0.001, vec3(0.0, 0.0, 1.0), params.t_max, 0);
+	imageStore(result_image, ivec2(gl_LaunchIDEXT.xy), payload * texelFetch(textures[nonuniformEXT(gl_LaunchIDEXT.x)], ivec2(0), 0));
+}
+)";
+
+// The GodotNext Mesa library translates a hit stage only when it declares a payload and a hit attribute.
+const char *CLOSEST_HIT_BINDLESS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+layout(set = 2, binding = 0, std430) readonly buffer Colors { vec4 color; } colors[];
+layout(location = 0) rayPayloadInEXT vec4 payload;
+hitAttributeEXT vec2 barycentrics;
+void main() {
+	payload = colors[nonuniformEXT(gl_InstanceCustomIndexEXT)].color * barycentrics.x;
+}
+)";
+
+const char *MISS_BINDLESS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+layout(set = 2, binding = 0, std430) readonly buffer Colors { vec4 color; } colors[];
+layout(location = 0) rayPayloadInEXT vec4 payload;
+void main() {
+	payload = colors[nonuniformEXT(uint(gl_LaunchIDEXT.x))].color;
+}
+)";
+
+TEST_CASE("[D3D12][ShaderContainer] Ray query bindless tables are bounded arrays at register 0 in a space of their own") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_COMPUTE, RAY_QUERY_BINDLESS });
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, Vector<uint64_t>());
+		return;
+	}
+
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, Vector<uint64_t>());
+	check_dxil_validation(validation_before, 1);
+
+	const uint32_t buffer_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 1;
+	const uint32_t texture_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 2;
+	const D3D12_DESCRIPTOR_RANGE1 &rays = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[1].resource_root_param_idx);
+	CHECK_EQ(rays.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+	CHECK_EQ(rays.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(rays.RegisterSpace, buffer_space);
+	const D3D12_DESCRIPTOR_RANGE1 &textures = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[2].resource_root_param_idx);
+	CHECK_EQ(textures.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+	CHECK_EQ(textures.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(textures.RegisterSpace, texture_space);
+
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	CHECK(fixture.dxil_declares_range(4, buffer_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Raw SRV.
+	CHECK(fixture.dxil_declares_range(3, texture_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Typed SRV.
+	CHECK_FALSE(fixture.dxil_declares(4, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK_FALSE(fixture.dxil_declares(3, 0, 2 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK(fixture.dxil_declares(4, 0, 0)); // tlas, set 0 binding 0.
+	CHECK(fixture.dxil_declares(7, 0, GODOT_NIR_BINDING_MULTIPLIER)); // Hits, set 0 binding 1: raw UAV.
+}
+
+TEST_CASE("[D3D12][ShaderContainer] Ray-tracing library bindless tables are bounded arrays at register 0 in a space of their own") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_RAYGEN, RAYGEN_BINDLESS });
+	stages.push_back({ RDC::SHADER_STAGE_CLOSEST_HIT, CLOSEST_HIT_BINDLESS });
+	stages.push_back({ RDC::SHADER_STAGE_MISS, MISS_BINDLESS });
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, Vector<uint64_t>());
+		return;
+	}
+
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, Vector<uint64_t>());
+	check_dxil_validation(validation_before, 3);
+	REQUIRE_EQ(fixture.container->shaders.size(), 3);
+
+	const uint32_t texture_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 1;
+	const uint32_t buffer_space = ContainerD3D12::BINDLESS_TABLE_SPACE_BASE + 2;
+	const D3D12_DESCRIPTOR_RANGE1 &textures = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[1].resource_root_param_idx);
+	CHECK_EQ(textures.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+	CHECK_EQ(textures.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(textures.RegisterSpace, texture_space);
+	const D3D12_DESCRIPTOR_RANGE1 &colors = fixture.only_range(fixture.reflection_d3d12.reflection_binding_sets_d3d12[2].resource_root_param_idx);
+	CHECK_EQ(colors.RangeType, D3D12_DESCRIPTOR_RANGE_TYPE_SRV);
+	CHECK_EQ(colors.NumDescriptors, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE);
+	CHECK_EQ(colors.RegisterSpace, buffer_space);
+
+	// Each library's resource table (RDAT) agrees with the root signature.
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	CHECK(fixture.dxil_declares_range(3, texture_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Raygen: typed SRV.
+	CHECK(fixture.dxil_declares_range(4, buffer_space, 0, ContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE - 1)); // Closest hit and miss: raw SRV.
+	CHECK_FALSE(fixture.dxil_declares(3, 0, 1 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK_FALSE(fixture.dxil_declares(4, 0, 2 * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER));
+	CHECK_EQ(fixture.uniform_d3d12(1, 0).dxil_stages, uint32_t(RDC::SHADER_STAGE_RAYGEN_BIT));
+	CHECK_EQ(fixture.uniform_d3d12(2, 0).dxil_stages, uint32_t(RDC::SHADER_STAGE_CLOSEST_HIT_BIT | RDC::SHADER_STAGE_MISS_BIT));
 }
 
 } // namespace TestD3D12ShaderContainer

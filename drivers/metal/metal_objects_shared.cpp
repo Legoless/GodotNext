@@ -1050,3 +1050,71 @@ std::shared_ptr<MDLibrary> MDLibrary::create(ShaderCacheEntry *p_entry,
 	p_entry->library = lib;
 	return lib;
 }
+
+#pragma mark - Bindless Table
+
+// GodotNext: rd_bindless (#176)
+
+void MDBindlessTable::_unreference(MTL::Resource *p_resource) {
+	HashMap<MTL::Resource *, uint32_t>::Iterator E = resident_counts.find(p_resource);
+	ERR_FAIL_COND(!E);
+	if (--E->value == 0) {
+		resident_counts.remove(E);
+		usage_dirty = true;
+	}
+}
+
+void MDBindlessTable::set_slot(uint32_t p_slot, uint64_t p_entry, MTL::Resource *p_resource) {
+	ERR_FAIL_UNSIGNED_INDEX(p_slot, capacity);
+	// Only slots no submitted work reads are written (RenderingDevice waits for the frame ring), and the
+	// buffer is in shared storage, so the entry is written in place.
+	static_cast<uint64_t *>(buffer->contents())[p_slot] = p_entry;
+
+	if (slot_resources[p_slot] != nullptr) {
+		_unreference(slot_resources[p_slot]);
+	}
+	slot_resources[p_slot] = p_resource;
+	if (p_resource != nullptr) {
+		uint32_t *count = resident_counts.getptr(p_resource);
+		if (count != nullptr) {
+			(*count)++;
+		} else {
+			resident_counts.insert(p_resource, 1);
+			usage_dirty = true;
+		}
+	}
+}
+
+bool MDBindlessTable::clear_slot(uint32_t p_slot) {
+	ERR_FAIL_UNSIGNED_INDEX_V(p_slot, capacity, false);
+	if (slot_resources[p_slot] == nullptr) {
+		return false;
+	}
+	released_resources.push_back(slot_resources[p_slot]);
+	slot_resources[p_slot] = nullptr;
+	return true;
+}
+
+void MDBindlessTable::drop_released() {
+	for (MTL::Resource *resource : released_resources) {
+		_unreference(resource);
+	}
+	released_resources.clear();
+}
+
+const ResourceUsageMap &MDBindlessTable::get_usage_to_resources() {
+	if (usage_dirty) {
+		usage_dirty = false;
+		const StageResourceUsage read = StageResourceUsage(VertexRead | FragmentRead | ComputeRead);
+		usage_to_resources.clear();
+		if (!resident_counts.is_empty()) {
+			ResourceVector &resources = usage_to_resources.insert(read, ResourceVector())->value;
+			resources.reserve(resident_counts.size());
+			for (const KeyValue<MTL::Resource *, uint32_t> &E : resident_counts) {
+				resources.push_back(E.key);
+			}
+			resources.sort();
+		}
+	}
+	return usage_to_resources;
+}

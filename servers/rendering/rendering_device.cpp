@@ -315,10 +315,26 @@ static bool _int64_atomics_supported(const RenderingDevice *p_device, const Vect
 	return true;
 }
 
+// GodotNext: rd_bindless (#176). Checked before the driver sees the SPIR-V too, so a shader with a bindless
+// table gives this one error on a device without SUPPORTS_BINDLESS, not a failure in its translation.
+static bool _bindless_supported(const RenderingDevice *p_device, const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+	if (p_device->has_feature(RenderingDevice::SUPPORTS_BINDLESS)) {
+		return true;
+	}
+	for (const RenderingDeviceCommons::ShaderStageSPIRVData &stage : p_spirv) {
+		ERR_FAIL_COND_V_MSG(RDBindless::spirv_uses_runtime_descriptor_arrays(stage.spirv.ptr(), stage.spirv.size()), false, RDBindless::get_unsupported_shader_error(p_shader_name));
+	}
+	return true;
+}
+
 RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
 	// GodotNext: rd_atomics64 (#175). shader_compile_binary_from_spirv() checks too; checking here as well
 	// keeps it to the one error, without the empty-bytecode error below.
 	if (!_int64_atomics_supported(this, p_spirv, p_shader_name)) {
+		return RID();
+	}
+	// GodotNext: rd_bindless (#176). The same for bindless tables.
+	if (!_bindless_supported(this, p_spirv, p_shader_name)) {
 		return RID();
 	}
 
@@ -4750,6 +4766,7 @@ static const char *SHADER_UNIFORM_NAMES[RenderingDevice::UNIFORM_TYPE_MAX] = {
 	"UniformBufferDynamic",
 	"StorageBufferDynamic",
 	"AccelerationStructure",
+	"BindlessTable", // GodotNext: rd_bindless (#176).
 };
 
 String RenderingDevice::_shader_uniform_debug(RID p_shader, int p_set) {
@@ -4786,6 +4803,10 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	if (!_int64_atomics_supported(this, p_spirv, p_shader_name)) {
 		return Vector<uint8_t>();
 	}
+	// GodotNext: rd_bindless (#176)
+	if (!_bindless_supported(this, p_spirv, p_shader_name)) {
+		return Vector<uint8_t>();
+	}
 
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
@@ -4817,6 +4838,9 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 	// the usage scanned when they were compiled.
 	const uint32_t int64_atomics_missing = get_missing_int64_atomics(shader_container->get_int64_atomics_usage());
 	ERR_FAIL_COND_V_MSG(int64_atomics_missing != 0, RID(), RDAtomics64::get_missing_features_error(String::utf8(shader_container->shader_name.get_data()), int64_atomics_missing));
+	// GodotNext: rd_bindless (#176). Checked before the driver lays out the shader's sets, for bytecode
+	// compiled elsewhere.
+	ERR_FAIL_COND_V_MSG(shader_container->uses_bindless_tables() && !has_feature(SUPPORTS_BINDLESS), RID(), RDBindless::get_unsupported_shader_error(String::utf8(shader_container->shader_name.get_data())));
 
 	Vector<RDD::ImmutableSampler> driver_immutable_samplers;
 	for (const PipelineImmutableSampler &source_sampler : p_immutable_samplers) {
@@ -5035,6 +5059,7 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 	Vector<UniformSet::SharedTexture> shared_textures_to_update;
 	LocalVector<RID> pending_clear_textures;
 	Vector<RID> acceleration_structures;
+	RDG::BindlessTableTracker *bindless_table_tracker = nullptr; // GodotNext: rd_bindless (#176).
 
 	for (uint32_t i = 0; i < set_uniform_count; i++) {
 		const ShaderUniform &set_uniform = set_uniforms[i];
@@ -5418,6 +5443,19 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 				driver_uniform.ids.push_back(accel->driver_id);
 				acceleration_structures.push_back(accel_id);
 			} break;
+			// GodotNext: rd_bindless (#176)
+			case UNIFORM_TYPE_BINDLESS_TABLE: {
+				ERR_FAIL_COND_V_MSG(uniform.get_id_count() != 1, RID(),
+						"Bindless table supplied (binding: " + itos(uniform.binding) + ") must provide one ID (" + itos(uniform.get_id_count()) + " provided).");
+
+				const BindlessTable *table = bindless_table_owner.get_or_null(uniform.get_id(0));
+				ERR_FAIL_NULL_V_MSG(table, RID(), "Bindless table supplied (binding: " + itos(uniform.binding) + ") is invalid.");
+				ERR_FAIL_COND_V_MSG(uint32_t(table->type) != set_uniform.length, RID(),
+						vformat("Bindless table supplied (binding: %d) holds %s entries, but shader '%s' declares %s entries.", uniform.binding, RDBindless::get_type_name(table->type), shader->name, RDBindless::get_type_name(UniformType(set_uniform.length))));
+
+				driver_uniform.ids.push_back(table->driver_id);
+				bindless_table_tracker = table->draw_tracker;
+			} break;
 			default: {
 			}
 		}
@@ -5439,6 +5477,7 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
 	uniform_set.shader_set = p_shader_set;
 	uniform_set.shader_id = p_shader;
 	uniform_set.is_linear_pool = p_linear_pool;
+	uniform_set.bindless_table_tracker = bindless_table_tracker; // GodotNext: rd_bindless (#176).
 
 	// Store the original uniforms so the set can be re-created if a texture is replaced.
 	uniform_set.bound_uniforms.resize(uniform_count);
@@ -5480,6 +5519,199 @@ void RenderingDevice::uniform_set_set_invalidation_callback(RID p_uniform_set, I
 
 bool RenderingDevice::uniform_sets_have_linear_pools() const {
 	return driver->uniform_sets_have_linear_pools();
+}
+
+/************************/
+/**** BINDLESS TABLE ****/
+/************************/
+
+// GodotNext: rd_bindless (#176)
+
+RID RenderingDevice::bindless_table_create(UniformType p_type, uint32_t p_capacity) {
+	_THREAD_SAFE_METHOD_
+
+	ERR_FAIL_COND_V_MSG(!has_feature(SUPPORTS_BINDLESS), RID(), "This device does not support bindless tables (SUPPORTS_BINDLESS).");
+	ERR_FAIL_COND_V_MSG(!RDBindless::is_table_type(p_type), RID(), vformat("A bindless table holds UNIFORM_TYPE_TEXTURE, UNIFORM_TYPE_SAMPLER or UNIFORM_TYPE_STORAGE_BUFFER entries, not uniform type %d.", p_type));
+	const uint64_t max_capacity = driver->limit_get(RDBindless::get_capacity_limit(p_type));
+	ERR_FAIL_COND_V_MSG(p_capacity == 0 || p_capacity > max_capacity, RID(), vformat("A bindless table of %s entries has 1 to %d slots on this device (%d requested).", RDBindless::get_type_name(p_type), max_capacity, p_capacity));
+
+	BindlessTable table;
+	table.type = p_type;
+	table.driver_id = driver->bindless_table_create(p_type, p_capacity);
+	ERR_FAIL_COND_V_MSG(!table.driver_id, RID(), "The driver failed to create the bindless table.");
+	table.slots.initialize(p_capacity);
+	table.slot_resources.resize(p_capacity);
+	table.draw_tracker = RDG::bindless_table_tracker_create(p_type == UNIFORM_TYPE_STORAGE_BUFFER ? RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ : RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+
+	RID id = bindless_table_owner.make_rid(table);
+#ifdef DEV_ENABLED
+	set_resource_name(id, "RID:" + itos(id.get_id()));
+#endif
+	return id;
+}
+
+uint32_t RenderingDevice::bindless_table_allocate(RID p_table, RID p_resource) {
+	_THREAD_SAFE_METHOD_
+
+	BindlessTable *table = bindless_table_owner.get_or_null(p_table);
+	ERR_FAIL_NULL_V_MSG(table, RDBindless::INVALID_SLOT, "Invalid bindless table.");
+	ERR_FAIL_COND_V_MSG(bindless_residency.is_free_pending(p_resource), RDBindless::INVALID_SLOT, "The resource was freed; it stays alive only until the bindless slots that hold it are released.");
+
+	RDD::ID driver_resource;
+	RDG::ResourceTracker *tracker = nullptr;
+	RID pinned_owner;
+	switch (table->type) {
+		case UNIFORM_TYPE_TEXTURE: {
+			Texture *texture = texture_owner.get_or_null(p_resource);
+			ERR_FAIL_NULL_V_MSG(texture, RDBindless::INVALID_SLOT, "The resource for a bindless texture table is not a valid texture.");
+			ERR_FAIL_COND_V_MSG(!(texture->usage_flags & TEXTURE_USAGE_SAMPLING_BIT), RDBindless::INVALID_SLOT, "A texture in a bindless table needs the TEXTURE_USAGE_SAMPLING_BIT usage flag.");
+			ERR_FAIL_COND_V_MSG(texture->slice_type != TEXTURE_SLICE_MAX, RDBindless::INVALID_SLOT, "A texture slice cannot be placed in a bindless table; place the whole texture or a shared texture of it.");
+			// As in uniform_set_create(): only a shared texture with a fallback copy of its own samples something
+			// other than its driver texture. An owner whose views needed fallbacks samples itself.
+			ERR_FAIL_COND_V_MSG(texture->shared_fallback != nullptr && texture->shared_fallback->texture.id != 0, RDBindless::INVALID_SLOT, "A shared texture that is a fallback copy (its format cannot be reinterpreted on this driver) cannot be placed in a bindless table.");
+
+			_check_transfer_worker_texture(texture);
+			if (texture->pending_clear) {
+				_texture_check_pending_clear(p_resource, texture);
+			}
+			// The table reads the texture through the graph, so it needs a tracker.
+			if (_texture_make_mutable(texture, p_resource)) {
+				draw_graph.add_synchronization();
+			}
+			tracker = texture->draw_tracker;
+			driver_resource = texture->driver_id;
+			// A shared texture keeps the texture it views alive too.
+			pinned_owner = texture->owner;
+		} break;
+		case UNIFORM_TYPE_SAMPLER: {
+			const RDD::SamplerID *sampler = sampler_owner.get_or_null(p_resource);
+			ERR_FAIL_NULL_V_MSG(sampler, RDBindless::INVALID_SLOT, "The resource for a bindless sampler table is not a valid sampler.");
+			driver_resource = *sampler;
+		} break;
+		case UNIFORM_TYPE_STORAGE_BUFFER: {
+			Buffer *buffer = nullptr;
+			if (storage_buffer_owner.owns(p_resource)) {
+				buffer = storage_buffer_owner.get_or_null(p_resource);
+			} else if (vertex_buffer_owner.owns(p_resource)) {
+				buffer = vertex_buffer_owner.get_or_null(p_resource);
+				ERR_FAIL_COND_V_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT), RDBindless::INVALID_SLOT, "A vertex buffer in a bindless table needs to be created with the storage flag.");
+			} else if (index_buffer_owner.owns(p_resource)) {
+				buffer = index_buffer_owner.get_or_null(p_resource);
+				ERR_FAIL_COND_V_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT), RDBindless::INVALID_SLOT, "An index buffer in a bindless table needs to be created with the storage flag.");
+			}
+			ERR_FAIL_NULL_V_MSG(buffer, RDBindless::INVALID_SLOT, "The resource for a bindless storage-buffer table is not a valid storage buffer.");
+			// A dynamic buffer moves its contents every frame; a table entry names one place.
+			ERR_FAIL_COND_V_MSG(buffer->usage.has_flag(RDD::BUFFER_USAGE_DYNAMIC_PERSISTENT_BIT), RDBindless::INVALID_SLOT, "A dynamic (persistent) storage buffer cannot be placed in a bindless table.");
+
+			_check_transfer_worker_buffer(buffer);
+			if (_buffer_make_mutable(buffer, p_resource)) {
+				draw_graph.add_synchronization();
+			}
+			tracker = buffer->draw_tracker;
+			driver_resource = buffer->driver_id;
+		} break;
+		default: {
+			ERR_FAIL_V(RDBindless::INVALID_SLOT);
+		}
+	}
+
+	// Slots released frames.size() frames ago are free again: the device has waited for the frame that
+	// released them.
+	table->slots.reclaim(frames_drawn, frames.size());
+	const uint32_t slot = table->slots.allocate();
+	ERR_FAIL_COND_V_MSG(slot == RDBindless::INVALID_SLOT, RDBindless::INVALID_SLOT, vformat("The bindless table is full: its %d slots are allocated or were released less than %d frames ago.", table->slots.get_capacity(), frames.size()));
+
+	driver->bindless_table_write(table->driver_id, slot, driver_resource);
+	table->slot_resources[slot] = p_resource;
+	bindless_residency.add(p_resource);
+	if (pinned_owner.is_valid()) {
+		bindless_residency.add(pinned_owner);
+	}
+	if (tracker != nullptr) {
+		RDG::bindless_table_add_resident(table->draw_tracker, tracker);
+	}
+	return slot;
+}
+
+int64_t RenderingDevice::_bindless_table_allocate(RID p_table, RID p_resource) {
+	const uint32_t slot = bindless_table_allocate(p_table, p_resource);
+	return slot == RDBindless::INVALID_SLOT ? -1 : int64_t(slot);
+}
+
+void RenderingDevice::bindless_table_release(RID p_table, uint32_t p_slot) {
+	_THREAD_SAFE_METHOD_
+
+	BindlessTable *table = bindless_table_owner.get_or_null(p_table);
+	ERR_FAIL_NULL_MSG(table, "Invalid bindless table.");
+	ERR_FAIL_COND_MSG(!table->slots.release(p_slot, frames_drawn), vformat("Slot %d of the bindless table is not allocated.", p_slot));
+
+	driver->bindless_table_clear(table->driver_id, p_slot);
+	const RID resource = table->slot_resources[p_slot];
+	table->slot_resources[p_slot] = RID();
+	_bindless_table_unreference(table, resource);
+}
+
+uint64_t RenderingDevice::bindless_table_get_memory_usage(RID p_table) {
+	_THREAD_SAFE_METHOD_
+
+	const BindlessTable *table = bindless_table_owner.get_or_null(p_table);
+	ERR_FAIL_NULL_V_MSG(table, 0, "Invalid bindless table.");
+	return driver->bindless_table_get_memory_usage(table->driver_id);
+}
+
+RDG::ResourceTracker *RenderingDevice::_bindless_resource_tracker(RID p_resource) {
+	if (Texture *texture = texture_owner.get_or_null(p_resource)) {
+		return texture->draw_tracker;
+	}
+	if (storage_buffer_owner.owns(p_resource)) {
+		return storage_buffer_owner.get_or_null(p_resource)->draw_tracker;
+	}
+	if (vertex_buffer_owner.owns(p_resource)) {
+		return vertex_buffer_owner.get_or_null(p_resource)->draw_tracker;
+	}
+	if (index_buffer_owner.owns(p_resource)) {
+		return index_buffer_owner.get_or_null(p_resource)->draw_tracker;
+	}
+	return nullptr;
+}
+
+void RenderingDevice::_bindless_table_unreference(BindlessTable *p_table, RID p_resource) {
+	RDG::ResourceTracker *tracker = _bindless_resource_tracker(p_resource);
+	if (tracker != nullptr) {
+		RDG::bindless_table_remove_resident(p_table->draw_tracker, tracker);
+	}
+
+	RID pinned_owner;
+	if (p_table->type == UNIFORM_TYPE_TEXTURE) {
+		const Texture *texture = texture_owner.get_or_null(p_resource);
+		if (texture != nullptr) {
+			pinned_owner = texture->owner;
+		}
+	}
+
+	// The frees deferred while a slot held them: the resource first, as its owner's free would free it.
+	const bool free_resource = bindless_residency.remove(p_resource);
+	const bool free_owner = pinned_owner.is_valid() && bindless_residency.remove(pinned_owner);
+	if (free_resource) {
+		free_rid(p_resource);
+	}
+	if (free_owner) {
+		free_rid(pinned_owner);
+	}
+}
+
+void RenderingDevice::_bindless_table_release_all(BindlessTable *p_table) {
+	for (uint32_t slot = 0; slot < p_table->slot_resources.size(); slot++) {
+		const RID resource = p_table->slot_resources[slot];
+		if (resource.is_null()) {
+			continue;
+		}
+
+		p_table->slots.release(slot, frames_drawn);
+		driver->bindless_table_clear(p_table->driver_id, slot);
+		p_table->slot_resources[slot] = RID();
+		_bindless_table_unreference(p_table, resource);
+	}
 }
 
 /*******************/
@@ -6761,6 +6993,10 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 				_uniform_set_update_clears(uniform_set);
 
 				draw_graph.add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+				// GodotNext: rd_bindless (#176)
+				if (uniform_set->bindless_table_tracker != nullptr) {
+					draw_graph.add_draw_list_bindless_table(uniform_set->bindless_table_tracker);
+				}
 				draw_list.state.sets[i].bound = true;
 
 				last_set_index = i;
@@ -6901,6 +7137,10 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 			_uniform_set_update_clears(uniform_set);
 
 			draw_graph.add_draw_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+			// GodotNext: rd_bindless (#176)
+			if (uniform_set->bindless_table_tracker != nullptr) {
+				draw_graph.add_draw_list_bindless_table(uniform_set->bindless_table_tracker);
+			}
 
 			draw_list.state.sets[i].bound = true;
 		}
@@ -7266,6 +7506,10 @@ void RenderingDevice::raytracing_list_trace_rays(RaytracingListID p_list, uint32
 			_uniform_set_update_shared(uniform_set);
 
 			draw_graph.add_raytracing_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+			// GodotNext: rd_bindless (#176)
+			if (uniform_set->bindless_table_tracker != nullptr) {
+				draw_graph.add_raytracing_list_bindless_table(uniform_set->bindless_table_tracker);
+			}
 
 			raytracing_list.state.sets[i].bound = true;
 		}
@@ -7631,6 +7875,10 @@ void RenderingDevice::compute_list_dispatch(ComputeListID p_list, uint32_t p_x_g
 			_uniform_set_update_clears(uniform_set);
 
 			draw_graph.add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+			// GodotNext: rd_bindless (#176)
+			if (uniform_set->bindless_table_tracker != nullptr) {
+				draw_graph.add_compute_list_bindless_table(uniform_set->bindless_table_tracker);
+			}
 			compute_list.state.sets[i].bound = true;
 		}
 	}
@@ -7768,6 +8016,10 @@ void RenderingDevice::compute_list_dispatch_indirect(ComputeListID p_list, RID p
 			_uniform_set_update_clears(uniform_set);
 
 			draw_graph.add_compute_list_usages(uniform_set->draw_trackers, uniform_set->draw_trackers_usage);
+			// GodotNext: rd_bindless (#176)
+			if (uniform_set->bindless_table_tracker != nullptr) {
+				draw_graph.add_compute_list_bindless_table(uniform_set->bindless_table_tracker);
+			}
 			compute_list.state.sets[i].bound = true;
 		}
 	}
@@ -8327,6 +8579,12 @@ bool RenderingDevice::_dependencies_make_mutable(RID p_id, RDG::ResourceTracker 
 void RenderingDevice::free_rid(RID p_rid) {
 	ERR_RENDER_THREAD_GUARD();
 
+	// GodotNext: rd_bindless (#176). A resource that a bindless slot holds is freed when its last slot is
+	// released.
+	if (bindless_residency.defer_free(p_rid)) {
+		return;
+	}
+
 	_free_dependencies(p_rid); // Recursively erase dependencies first, to avoid potential API problems.
 	_free_internal(p_rid);
 }
@@ -8452,6 +8710,14 @@ void RenderingDevice::_free_internal(RID p_id) {
 		RDG::resource_tracker_free(acceleration_structure->draw_tracker);
 		frames[frame].acceleration_structures_to_dispose_of.push_back(*acceleration_structure);
 		acceleration_structure_owner.free(p_id);
+	} else if (bindless_table_owner.owns(p_id)) {
+		// GodotNext: rd_bindless (#176). The uniform sets that bound the table were freed as its
+		// dependencies. Releasing its slots completes the frees they deferred.
+		BindlessTable *table = bindless_table_owner.get_or_null(p_id);
+		_bindless_table_release_all(table);
+		RDG::bindless_table_tracker_free(table->draw_tracker);
+		frames[frame].bindless_tables_to_dispose_of.push_back(table->driver_id);
+		bindless_table_owner.free(p_id);
 	} else if (raytracing_pipeline_owner.owns(p_id)) {
 		RaytracingPipeline *pipeline = raytracing_pipeline_owner.get_or_null(p_id);
 		frames[frame].raytracing_pipelines_to_dispose_of.push_back(*pipeline);
@@ -8644,6 +8910,9 @@ void RenderingDevice::set_resource_name(RID p_id, const String &p_name) {
 	} else if (hit_sbt_owner.owns(p_id)) {
 		HitShaderBindingTable *hit_sbt = hit_sbt_owner.get_or_null(p_id);
 		driver->set_object_name(RDD::OBJECT_TYPE_BUFFER, hit_sbt->driver_id, p_name);
+	} else if (bindless_table_owner.owns(p_id)) {
+		// GodotNext: rd_bindless (#176). The table's driver objects have no name of their own; the name is
+		// kept for the leak report.
 	} else {
 		ERR_PRINT("Attempted to name invalid ID: " + itos(p_id.get_id()));
 		return;
@@ -8833,6 +9102,12 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 		driver->uniform_set_free(uniform_set->driver_id);
 
 		frames[p_frame].uniform_sets_to_dispose_of.pop_front();
+	}
+
+	// GodotNext: rd_bindless (#176). After the uniform sets that bound them, before what they hold.
+	while (frames[p_frame].bindless_tables_to_dispose_of.front()) {
+		driver->bindless_table_free(frames[p_frame].bindless_tables_to_dispose_of.front()->get());
+		frames[p_frame].bindless_tables_to_dispose_of.pop_front();
 	}
 
 	// Shaders.
@@ -9836,6 +10111,8 @@ void RenderingDevice::finalize() {
 	_free_rids(acceleration_structure_owner, "AccelerationStructure");
 	_free_rids(hit_sbt_owner, "HitShaderBindingTable");
 	_free_rids(uniform_set_owner, "UniformSet");
+	// GodotNext: rd_bindless (#176). Before the resources their slots hold, so deferred frees complete.
+	_free_rids(bindless_table_owner, "BindlessTable");
 	_free_rids(texture_buffer_owner, "TextureBuffer");
 	_free_rids(storage_buffer_owner, "StorageBuffer");
 	_free_rids(uniform_buffer_owner, "UniformBuffer");
@@ -10140,6 +10417,12 @@ void RenderingDevice::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("uniform_set_create", "uniforms", "shader", "shader_set"), &RenderingDevice::_uniform_set_create);
 	ClassDB::bind_method(D_METHOD("uniform_set_is_valid", "uniform_set"), &RenderingDevice::uniform_set_is_valid);
+
+	// GodotNext: rd_bindless (#176)
+	ClassDB::bind_method(D_METHOD("bindless_table_create", "type", "capacity"), &RenderingDevice::bindless_table_create);
+	ClassDB::bind_method(D_METHOD("bindless_table_allocate", "table", "resource"), &RenderingDevice::_bindless_table_allocate);
+	ClassDB::bind_method(D_METHOD("bindless_table_release", "table", "slot"), &RenderingDevice::bindless_table_release);
+	ClassDB::bind_method(D_METHOD("bindless_table_get_memory_usage", "table"), &RenderingDevice::bindless_table_get_memory_usage);
 
 	ClassDB::bind_method(D_METHOD("buffer_copy", "src_buffer", "dst_buffer", "src_offset", "dst_offset", "size"), &RenderingDevice::buffer_copy);
 	ClassDB::bind_method(D_METHOD("buffer_update", "buffer", "offset", "size_bytes", "data"), &RenderingDevice::_buffer_update_bind);
@@ -10669,6 +10952,8 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC); // Exposed in case a BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT buffer created by C++ makes it into GD users.
 	BIND_ENUM_CONSTANT(UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC); // Exposed in case a BUFFER_CREATION_DYNAMIC_PERSISTENT_BIT buffer created by C++ makes it into GD users.
 	BIND_ENUM_CONSTANT(UNIFORM_TYPE_ACCELERATION_STRUCTURE); //acceleration structure (TLAS)); for raytracing
+	// GodotNext: rd_bindless (#176)
+	BIND_ENUM_CONSTANT(UNIFORM_TYPE_BINDLESS_TABLE);
 	BIND_ENUM_CONSTANT(UNIFORM_TYPE_MAX);
 
 	BIND_ENUM_CONSTANT(RENDER_PRIMITIVE_POINTS);
@@ -10825,6 +11110,8 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_BUFFER_INT64_ATOMICS);
 	BIND_ENUM_CONSTANT(SUPPORTS_IMAGE_INT64_ATOMICS);
 	BIND_ENUM_CONSTANT(SUPPORTS_INT64_ATOMIC_ARITH);
+	// GodotNext: rd_bindless (#176)
+	BIND_ENUM_CONSTANT(SUPPORTS_BINDLESS);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
@@ -10884,6 +11171,10 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES);
 	BIND_ENUM_CONSTANT(LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES);
 	BIND_ENUM_CONSTANT(LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT);
+	// GodotNext: rd_bindless (#176)
+	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_TEXTURES);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_SAMPLERS);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_STORAGE_BUFFERS);
 
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);

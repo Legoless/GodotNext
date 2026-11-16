@@ -142,6 +142,8 @@ public:
 	DEFINE_ID(Semaphore);
 	DEFINE_ID(AccelerationStructure);
 	DEFINE_ID(RaytracingPipeline);
+	// GodotNext: rd_bindless (#176)
+	DEFINE_ID(BindlessTable);
 
 public:
 	/*****************/
@@ -553,6 +555,28 @@ public:
 	// ----- COMMANDS -----
 
 	virtual void command_uniform_set_prepare_for_use(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) = 0;
+
+	/************************/
+	/**** BINDLESS TABLE ****/
+	/************************/
+
+	// GodotNext: rd_bindless (#176). A bindless table (plan §21.1 C4): a runtime array of textures,
+	// samplers or read-only storage buffers. It is bound as the only binding of a uniform set, at
+	// binding 0: uniform_set_create() gets one UNIFORM_TYPE_BINDLESS_TABLE uniform whose ID is the
+	// table. bindless_table_write() writes one entry while the table may be bound in recorded or
+	// submitted work; RenderingDevice never writes an entry that submitted work can still read. A driver
+	// that reports SUPPORTS_BINDLESS overrides all four; the defaults are for the drivers that do not.
+	virtual BindlessTableID bindless_table_create(UniformType p_type, uint32_t p_capacity) { return BindlessTableID(); }
+	// p_resource is a TextureID, SamplerID or BufferID, as the table's type says.
+	virtual void bindless_table_write(BindlessTableID p_table, uint32_t p_slot, ID p_resource) {}
+	// The slot no longer holds a resource. Recorded and submitted work can still read its entry, so the entry
+	// stays as written. A driver that keeps the table's resources resident keeps this one resident until the
+	// commands recorded before the release are encoded (the next begin_segment()). A resource whose free
+	// waited for the slot reaches the driver's free only later, once its frame comes around again.
+	virtual void bindless_table_clear(BindlessTableID p_table, uint32_t p_slot) {}
+	virtual void bindless_table_free(BindlessTableID p_table) {}
+	// The GPU memory of the table's entries, in bytes.
+	virtual uint64_t bindless_table_get_memory_usage(BindlessTableID p_table) const { return 0; }
 
 	/******************/
 	/**** TRANSFER ****/

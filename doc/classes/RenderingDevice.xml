@@ -53,6 +53,41 @@
 				This method does nothing.
 			</description>
 		</method>
+		<method name="bindless_table_allocate">
+			<return type="int" />
+			<param index="0" name="table" type="RID" />
+			<param index="1" name="resource" type="RID" />
+			<description>
+				Places [param resource] in a free slot of the bindless [param table] and returns the slot, the index shaders read it at. Returns [code]-1[/code] on failure, for example when every slot is allocated or was released less than [method get_frame_delay] frames ago.
+				The resource must match the table's type: a texture created with [constant TEXTURE_USAGE_SAMPLING_BIT] (not a texture slice) for [constant UNIFORM_TYPE_TEXTURE], a sampler for [constant UNIFORM_TYPE_SAMPLER], or a storage buffer (or a vertex or index buffer created with the storage flag) for [constant UNIFORM_TYPE_STORAGE_BUFFER]. A resource can be in several slots and several tables. While a slot holds it, [method free_rid] on the resource is deferred until its last slot is released; a shared texture also keeps the texture it shares alive.
+			</description>
+		</method>
+		<method name="bindless_table_create">
+			<return type="RID" />
+			<param index="0" name="type" type="int" enum="RenderingDevice.UniformType" />
+			<param index="1" name="capacity" type="int" />
+			<description>
+				Creates a bindless table of [param capacity] slots, which shaders index at run time, for example with a different index in every pixel. [param type] is the type of its entries: [constant UNIFORM_TYPE_TEXTURE], [constant UNIFORM_TYPE_SAMPLER] or [constant UNIFORM_TYPE_STORAGE_BUFFER]. The entries are read-only. [param capacity] can be at most [constant LIMIT_MAX_BINDLESS_TEXTURES], [constant LIMIT_MAX_BINDLESS_SAMPLERS] or [constant LIMIT_MAX_BINDLESS_STORAGE_BUFFERS] for the type.
+				A shader declares a table as a runtime array that is the only binding of its set, at binding 0, for example [code]layout(set = 1, binding = 0) uniform texture2D textures[];[/code], and indexes it with [code]nonuniformEXT()[/code] where the index varies. Bind it with a uniform set made of one [constant UNIFORM_TYPE_BINDLESS_TABLE] uniform. Fill it with [method bindless_table_allocate].
+				Requires [constant SUPPORTS_BINDLESS]. Once you are done with the table, free it with [method free_rid]; this releases its slots, which completes the frees they deferred, and frees the uniform sets that bind it.
+				[b]Note:[/b] On Direct3D 12, at most two texture or storage-buffer tables and one sampler table exist at a time, whatever their capacity. Creating another one fails until one of them is freed.
+			</description>
+		</method>
+		<method name="bindless_table_get_memory_usage">
+			<return type="int" />
+			<param index="0" name="table" type="RID" />
+			<description>
+				Returns the GPU memory the bindless [param table]'s entries take, in bytes, as the driver computes it from the table's capacity and its entry size; it is not a measured allocation. On Vulkan this is the capacity times the descriptor size the device reports through [code]VK_EXT_descriptor_buffer[/code], or 64 bytes per slot when it does not report one. On Direct3D 12 it is the descriptor heap range the table takes, and on Metal 8 bytes per slot.
+			</description>
+		</method>
+		<method name="bindless_table_release">
+			<return type="void" />
+			<param index="0" name="table" type="RID" />
+			<param index="1" name="slot" type="int" />
+			<description>
+				Releases [param slot] of the bindless [param table]. Shaders must not read the slot afterwards. The slot is reused only after [method get_frame_delay] frames, so work recorded or submitted before the release can still read it. If this was the last slot holding a resource that [method free_rid] was called on, the resource is freed now.
+			</description>
+		</method>
 		<method name="blas_build" experimental="">
 			<return type="int" enum="Error" />
 			<param index="0" name="blas" type="RID" />
@@ -2536,7 +2571,10 @@
 		<constant name="UNIFORM_TYPE_ACCELERATION_STRUCTURE" value="12" enum="UniformType">
 			Acceleration structure uniform.
 		</constant>
-		<constant name="UNIFORM_TYPE_MAX" value="13" enum="UniformType">
+		<constant name="UNIFORM_TYPE_BINDLESS_TABLE" value="13" enum="UniformType">
+			Bindless table uniform: one ID, a table from [method bindless_table_create]. The table must be the only uniform of its set, at binding 0, where the shader declares a runtime array of the table's entry type.
+		</constant>
+		<constant name="UNIFORM_TYPE_MAX" value="14" enum="UniformType">
 			Represents the size of the [enum UniformType] enum.
 		</constant>
 		<constant name="RENDER_PRIMITIVE_POINTS" value="0" enum="RenderPrimitive">
@@ -2942,6 +2980,10 @@
 			The device supports every other 64-bit integer atomic: add, subtract, exchange, compare-exchange, increment, decrement, bitwise operations, signed minimum and maximum, and atomic loads and stores. It also covers every 64-bit atomic on shared memory ([code]shared[/code] variables), and shaders with 64-bit atomics that declare a 64-bit image that is arrayed, multisampled or not 2D. Without it, only the operations of [constant SUPPORTS_BUFFER_INT64_ATOMICS] and [constant SUPPORTS_IMAGE_INT64_ATOMICS] are available.
 			[b]Note:[/b] The Vulkan driver sets it together with [constant SUPPORTS_BUFFER_INT64_ATOMICS] when the device also has [code]shaderSharedInt64Atomics[/code], except on macOS and iOS, where MoltenVK runs on Metal. The Metal driver never sets it: Metal has no 64-bit atomic add. The Direct3D 12 driver reports [code]false[/code] until its shader toolchain can compile 64-bit atomics.
 		</constant>
+		<constant name="SUPPORTS_BINDLESS" value="21" enum="Features">
+			The device supports bindless tables ([method bindless_table_create]): texture and storage-buffer tables of at least 65,536 slots, and sampler tables of at least 1,024 slots, read at non-uniform indices.
+			[b]Note:[/b] The Vulkan driver needs descriptor indexing ([code]VK_EXT_descriptor_indexing[/code] or Vulkan 1.2) with update-after-bind, partially bound and variable-count bindings. The Metal driver reports [code]false[/code] for now: its tables, in tier 2 argument buffers on Metal 3, have not been run on a Mac yet. The Direct3D 12 driver needs resource binding tier 2, enhanced barriers, and room for the tables in the shader-visible descriptor heaps beside [member ProjectSettings.rendering/rendering_device/d3d12/max_resource_descriptors] and [member ProjectSettings.rendering/rendering_device/d3d12/max_sampler_descriptors]. It reports [code]true[/code] only on NVIDIA GPUs for now: the shaders it compiles do not mark table reads as non-uniform, which other GPUs may need to read the right entry in every pixel.
+		</constant>
 		<constant name="COMPUTE_QUEUE_MAIN" value="0" enum="ComputeQueue">
 			Records the compute list on the main queue.
 		</constant>
@@ -3107,6 +3149,15 @@
 		</constant>
 		<constant name="LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT" value="53" enum="Limit">
 			Required alignment, in bytes, of an acceleration-structure build's scratch memory. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+		</constant>
+		<constant name="LIMIT_MAX_BINDLESS_TEXTURES" value="54" enum="Limit">
+			Maximum number of slots in a bindless table of [constant UNIFORM_TYPE_TEXTURE] entries. [code]0[/code] without [constant SUPPORTS_BINDLESS].
+		</constant>
+		<constant name="LIMIT_MAX_BINDLESS_SAMPLERS" value="55" enum="Limit">
+			Maximum number of slots in a bindless table of [constant UNIFORM_TYPE_SAMPLER] entries. [code]0[/code] without [constant SUPPORTS_BINDLESS].
+		</constant>
+		<constant name="LIMIT_MAX_BINDLESS_STORAGE_BUFFERS" value="56" enum="Limit">
+			Maximum number of slots in a bindless table of [constant UNIFORM_TYPE_STORAGE_BUFFER] entries. [code]0[/code] without [constant SUPPORTS_BINDLESS].
 		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.

@@ -438,6 +438,9 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 	// Assign MSL bindings for all the descriptor sets.
 	typedef std::pair<MSLResourceBinding, uint32_t> MSLBindingInfo;
 	LocalVector<MSLBindingInfo> spirv_bindings;
+	// GodotNext: rd_bindless (#176). The sets that are bindless tables. SPIRV-Cross puts a runtime array only
+	// in an argument buffer in device storage.
+	uint32_t bindless_sets = 0;
 	MSLResourceBinding push_constant_resource_binding;
 	{
 		enum IndexType {
@@ -452,6 +455,7 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 		spirv_bindings.resize(size);
 
 		uint32_t indices[IndexType::Max] = { 0 };
+		bindless_sets = 0;
 		auto next_index = [&indices](IndexType p_t, uint32_t p_stride) -> uint32_t {
 			uint32_t v = indices[p_t];
 			indices[p_t] += p_stride;
@@ -479,7 +483,8 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 
 				RDC::UniformType type = RDC::UniformType(uniform.type);
 				uint32_t binding_stride = 1; // If this is an array, stride will be the length of the array.
-				if (uniform.length > 1) {
+				// GodotNext: rd_bindless (#176). A bindless table's length is its entry type, not a count.
+				if (uniform.length > 1 && type != RDC::UNIFORM_TYPE_BINDLESS_TABLE) {
 					switch (type) {
 						case RDC::UNIFORM_TYPE_UNIFORM_BUFFER_DYNAMIC:
 						case RDC::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC:
@@ -590,6 +595,38 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 						found->get_indexes(UniformData::IndexType::ARG).buffer = next_arg_index(binding_stride);
 						rb.basetype = SPIRType::AccelerationStructure;
 					} break;
+					// GodotNext: rd_bindless (#176). A runtime array in a device-storage argument buffer
+					// (bindless_sets, below): one 8-byte entry per slot from the argument buffer's start, an
+					// MTLResourceID for textures and samplers, a GPU address for storage buffers. The entries
+					// are read-only. A count of 0 makes SPIRV-Cross keep the array runtime-sized: in an
+					// argument buffer it takes the binding's count over the shader's declaration, and a count
+					// of 1 would make it a one-element array.
+					case RDC::UNIFORM_TYPE_BINDLESS_TABLE: {
+						bindless_sets |= 1u << idx_dset;
+						rb.count = 0;
+						found->access = MTL::BindingAccessReadOnly;
+						found->usage = MTL::ResourceUsageRead;
+						switch (RDC::UniformType(uniform.length)) {
+							case RDC::UNIFORM_TYPE_SAMPLER: {
+								found->data_type = MTL::DataTypeSampler;
+								found->get_indexes(UniformData::IndexType::SLOT).sampler = next_index(Sampler, 1);
+								found->get_indexes(UniformData::IndexType::ARG).sampler = next_arg_index(1);
+								rb.basetype = SPIRType::BaseType::Sampler;
+							} break;
+							case RDC::UNIFORM_TYPE_STORAGE_BUFFER: {
+								found->data_type = MTL::DataTypePointer;
+								found->get_indexes(UniformData::IndexType::SLOT).buffer = next_index(Buffer, 1);
+								found->get_indexes(UniformData::IndexType::ARG).buffer = next_arg_index(1);
+								rb.basetype = SPIRType::BaseType::Void;
+							} break;
+							default: {
+								found->data_type = MTL::DataTypeTexture;
+								found->get_indexes(UniformData::IndexType::SLOT).texture = next_index(Texture, 1);
+								found->get_indexes(UniformData::IndexType::ARG).texture = next_arg_index(1);
+								rb.basetype = SPIRType::BaseType::Image;
+							} break;
+						}
+					} break;
 					case RDC::UNIFORM_TYPE_MAX:
 					default:
 						CRASH_NOW_MSG("Unreachable");
@@ -691,6 +728,13 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 		CompilerMSL compiler(std::move(parser.get_parsed_ir()));
 		compiler.set_msl_options(msl_options);
 		compiler.set_common_options(options);
+		// GodotNext: rd_bindless (#176)
+		for (uint32_t set_index = 0; set_index < 32; set_index++) {
+			if (bindless_sets & (1u << set_index)) {
+				ERR_FAIL_COND_V_MSG(!msl_options.argument_buffers, false, "Shader '" + String(shader_name.ptr()) + "' uses a bindless table, which needs argument buffers.");
+				compiler.set_argument_buffer_device_address_space(set_index, true);
+			}
+		}
 
 		spv::ExecutionModel execution_model = map_stage(stage);
 		for (uint32_t jj = 0; jj < spirv_bindings.size(); jj++) {

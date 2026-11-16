@@ -40,6 +40,8 @@
 #include "core/variant/type_info.h"
 #include "core/variant/typed_array.h"
 #include "servers/display/display_server_enums.h"
+// GodotNext: rd_bindless (#176)
+#include "servers/rendering/rendering_device_bindless.h"
 #include "servers/rendering/rendering_device_commons.h"
 #include "servers/rendering/rendering_device_driver.h"
 #include "servers/rendering/rendering_device_enums.h"
@@ -1211,6 +1213,9 @@ private:
 		// Stored for uniform set re-creation during texture replacement.
 		LocalVector<Uniform> bound_uniforms;
 		bool is_linear_pool = false;
+		// GodotNext: rd_bindless (#176). The table of a set that holds a bindless table. The set depends on
+		// the table, so it is freed first.
+		RDG::BindlessTableTracker *bindless_table_tracker = nullptr;
 	};
 
 	RID_Owner<UniformSet, true> uniform_set_owner;
@@ -1234,6 +1239,42 @@ public:
 	void uniform_set_set_invalidation_callback(RID p_uniform_set, InvalidationCallback p_callback, void *p_userdata);
 
 	bool uniform_sets_have_linear_pools() const;
+
+	/************************/
+	/**** BINDLESS TABLE ****/
+	/************************/
+
+	// GodotNext: rd_bindless (#176). Bindless tables (plan §21.1 C4), on devices with SUPPORTS_BINDLESS.
+	// A table is a runtime array of read-only textures, samplers or storage buffers that shaders index at
+	// run time, bound through a uniform set with one UNIFORM_TYPE_BINDLESS_TABLE uniform. Its lifetime
+	// rules live in RDBindless (rendering_device_bindless.h): a released slot is reused only after
+	// frames.size() frames, and freeing a resource that a slot holds is deferred until its last slot is
+	// released.
+private:
+	struct BindlessTable {
+		UniformType type = UNIFORM_TYPE_MAX;
+		RDD::BindlessTableID driver_id;
+		RDG::BindlessTableTracker *draw_tracker = nullptr;
+		RDBindless::SlotAllocator slots;
+		// The resource each slot holds; a null RID for a free slot.
+		LocalVector<RID> slot_resources;
+	};
+
+	RID_Owner<BindlessTable, true> bindless_table_owner;
+	RDBindless::Residency bindless_residency;
+
+	RDG::ResourceTracker *_bindless_resource_tracker(RID p_resource);
+	void _bindless_table_unreference(BindlessTable *p_table, RID p_resource);
+	void _bindless_table_release_all(BindlessTable *p_table);
+	int64_t _bindless_table_allocate(RID p_table, RID p_resource);
+
+public:
+	RID bindless_table_create(UniformType p_type, uint32_t p_capacity);
+	// Returns the slot that now holds p_resource, or RDBindless::INVALID_SLOT.
+	uint32_t bindless_table_allocate(RID p_table, RID p_resource);
+	void bindless_table_release(RID p_table, uint32_t p_slot);
+	// The GPU memory of the table's entries, in bytes.
+	uint64_t bindless_table_get_memory_usage(RID p_table);
 
 	/*******************/
 	/**** PIPELINES ****/
@@ -1939,6 +1980,8 @@ private:
 		List<RDD::SamplerID> samplers_to_dispose_of;
 		List<Shader> shaders_to_dispose_of;
 		List<UniformSet> uniform_sets_to_dispose_of;
+		// GodotNext: rd_bindless (#176)
+		List<RDD::BindlessTableID> bindless_tables_to_dispose_of;
 		List<RenderPipeline> render_pipelines_to_dispose_of;
 		List<ComputePipeline> compute_pipelines_to_dispose_of;
 		List<AccelerationStructure> acceleration_structures_to_dispose_of;

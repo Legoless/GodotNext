@@ -441,6 +441,13 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		const int32_t async_normalization_start = r_command->normalization_barrier_count;
 		const int32_t async_transition_start = r_command->transition_barrier_count;
 
+		// GodotNext: rd_bindless (#176). A use of a resident resource, or of a slice of one, can leave it
+		// unready for the tables that hold it.
+		ResourceTracker *bindless_tracker = resource_tracker->parent != nullptr ? resource_tracker->parent : resource_tracker;
+		if (!bindless_tracker->bindless_residency.is_empty()) {
+			_bindless_resource_used(bindless_tracker, p_resource_usages[i], p_command_index, r_command);
+		}
+
 		const RDD::TextureSubresourceRange &subresources = resource_tracker->texture_subresources;
 		const Rect2i resource_tracker_rect(subresources.base_mipmap, subresources.base_layer, subresources.mipmap_count, subresources.layer_count);
 		Rect2i search_tracker_rect = resource_tracker_rect;
@@ -2322,7 +2329,10 @@ void RenderingDeviceGraph::add_raytracing_list_end() {
 	command->self_stages = raytracing_instruction_list.stages;
 	command->instruction_data_size = instruction_data_size;
 	memcpy(command->instruction_data(), raytracing_instruction_list.data.ptr(), instruction_data_size);
+	// GodotNext: rd_bindless (#176).
+	_bindless_tables_add_usages(raytracing_instruction_list, &RenderingDeviceGraph::add_raytracing_list_usage);
 	_add_command_to_graph(raytracing_instruction_list.command_trackers.ptr(), raytracing_instruction_list.command_tracker_usages.ptr(), raytracing_instruction_list.command_trackers.size(), command_index, command);
+	_bindless_tables_bound(raytracing_instruction_list, command_index, command);
 }
 
 // GodotNext: async_compute (#174). p_queue tags the list for the async compute queue.
@@ -2437,7 +2447,10 @@ void RenderingDeviceGraph::add_compute_list_end() {
 	}
 	command->instruction_data_size = instruction_data_size;
 	memcpy(command->instruction_data(), compute_instruction_list.data.ptr(), instruction_data_size);
+	// GodotNext: rd_bindless (#176).
+	_bindless_tables_add_usages(compute_instruction_list, &RenderingDeviceGraph::add_compute_list_usage);
 	_add_command_to_graph(compute_instruction_list.command_trackers.ptr(), compute_instruction_list.command_tracker_usages.ptr(), compute_instruction_list.command_trackers.size(), command_index, command);
+	_bindless_tables_bound(compute_instruction_list, command_index, command);
 }
 
 void RenderingDeviceGraph::add_draw_list_begin(FramebufferCache *p_framebuffer_cache, Rect2i p_region, VectorView<AttachmentOperation> p_attachment_operations, VectorView<RDD::RenderPassClearValue> p_attachment_clear_values, BitField<RDD::PipelineStageBits> p_stages, uint32_t p_breadcrumb, bool p_split_cmd_buffer) {
@@ -2707,7 +2720,10 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	}
 
 	memcpy(command->instruction_data(), draw_instruction_list.data.ptr(), instruction_data_size);
+	// GodotNext: rd_bindless (#176).
+	_bindless_tables_add_usages(draw_instruction_list, &RenderingDeviceGraph::add_draw_list_usage);
 	_add_command_to_graph(draw_instruction_list.command_trackers.ptr(), draw_instruction_list.command_tracker_usages.ptr(), draw_instruction_list.command_trackers.size(), command_index, command);
+	_bindless_tables_bound(draw_instruction_list, command_index, command);
 }
 
 void RenderingDeviceGraph::add_texture_clear_color(RDD::TextureID p_dst, ResourceTracker *p_dst_tracker, const Color &p_color, const RDD::TextureSubresourceRange &p_range) {
@@ -3120,6 +3136,190 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 static uint32_t resource_tracker_total = 0;
 #endif
 
+// GodotNext: rd_bindless (#176)
+RenderingDeviceGraph::BindlessResidency *RenderingDeviceGraph::_bindless_find_residency(ResourceTracker *p_tracker, BindlessTableTracker *p_table) {
+	for (BindlessResidency &residency : p_tracker->bindless_residency) {
+		if (residency.table == p_table) {
+			return &residency;
+		}
+	}
+	return nullptr;
+}
+
+void RenderingDeviceGraph::_bindless_table_reset_if_outdated(BindlessTableTracker *p_table) const {
+	if (p_table->command_frame != tracking_frame) {
+		p_table->command_frame = tracking_frame;
+		p_table->read_commands.clear();
+		p_table->ready_commands.clear();
+	}
+}
+
+void RenderingDeviceGraph::_bindless_resource_used(ResourceTracker *p_resident, ResourceUsage p_usage, int32_t p_command_index, RecordedCommand *r_command) {
+	// A texture is ready while it is sampled; any other usage changes its layout. A buffer is ready
+	// until it is written.
+	const bool is_texture = p_resident->texture_driver_id.id != 0;
+	const bool leaves_unready = is_texture ? p_usage != RESOURCE_USAGE_TEXTURE_SAMPLE : _is_write_usage(p_usage);
+	if (!leaves_unready) {
+		return;
+	}
+
+	for (BindlessResidency &residency : p_resident->bindless_residency) {
+		BindlessTableTracker *table = residency.table;
+		_bindless_table_reset_if_outdated(table);
+
+		// Write after read: the commands that bound the table this frame read the resource in its old
+		// state. The table's reads in earlier frames add their stages to the barrier.
+		for (int32_t read_command : table->read_commands) {
+			if (read_command != p_command_index) {
+				_add_adjacent_command(read_command, p_command_index, r_command);
+			}
+		}
+		r_command->previous_stages = r_command->previous_stages | table->read_stages;
+
+		if (!residency.dirty) {
+			residency.dirty = true;
+			table->dirty.push_back(p_resident);
+		}
+		residency.dirty_frame = tracking_frame;
+		residency.dirty_command_index = p_command_index;
+	}
+}
+
+void RenderingDeviceGraph::_bindless_tables_add_usages(InstructionList &r_list, ListUsageFunction p_add_usage) {
+	for (BindlessTableTracker *table : r_list.bindless_tables) {
+		for (ResourceTracker *tracker : table->dirty) {
+			(this->*p_add_usage)(tracker, table->read_usage);
+		}
+	}
+}
+
+void RenderingDeviceGraph::_bindless_tables_bound(InstructionList &r_list, int32_t p_command_index, RecordedCommand *r_command) {
+	for (BindlessTableTracker *table : r_list.bindless_tables) {
+		_bindless_table_reset_if_outdated(table);
+
+		// Read after write: the binds that made resources ready this frame come first, as this command
+		// reads those resources without adding them as usages.
+		for (int32_t ready_command : table->ready_commands) {
+			if (ready_command != p_command_index) {
+				_add_adjacent_command(ready_command, p_command_index, r_command);
+			}
+		}
+
+		// The dirty resources were usages of this command, so they are ready now, except for those this
+		// command made dirty itself.
+		bool made_ready = false;
+		uint32_t still_dirty = 0;
+		for (uint32_t i = 0; i < table->dirty.size(); i++) {
+			ResourceTracker *tracker = table->dirty[i];
+			BindlessResidency *residency = _bindless_find_residency(tracker, table);
+			DEV_ASSERT(residency != nullptr);
+			if (residency->dirty_frame == tracking_frame && residency->dirty_command_index == p_command_index) {
+				table->dirty[still_dirty++] = tracker;
+			} else {
+				residency->dirty = false;
+				made_ready = true;
+			}
+		}
+		table->dirty.resize(still_dirty);
+
+		table->read_commands.push_back(p_command_index);
+		if (made_ready) {
+			table->ready_commands.push_back(p_command_index);
+		}
+		table->read_stages = table->read_stages | r_command->self_stages;
+	}
+}
+
+static void _add_bindless_table_to_list(LocalVector<RenderingDeviceGraph::BindlessTableTracker *> &r_tables, RenderingDeviceGraph::BindlessTableTracker *p_table) {
+	DEV_ASSERT(p_table != nullptr);
+	if (!r_tables.has(p_table)) {
+		r_tables.push_back(p_table);
+	}
+}
+
+void RenderingDeviceGraph::add_compute_list_bindless_table(BindlessTableTracker *p_table) {
+	_add_bindless_table_to_list(compute_instruction_list.bindless_tables, p_table);
+}
+
+void RenderingDeviceGraph::add_draw_list_bindless_table(BindlessTableTracker *p_table) {
+	_add_bindless_table_to_list(draw_instruction_list.bindless_tables, p_table);
+}
+
+void RenderingDeviceGraph::add_raytracing_list_bindless_table(BindlessTableTracker *p_table) {
+	_add_bindless_table_to_list(raytracing_instruction_list.bindless_tables, p_table);
+}
+
+RenderingDeviceGraph::BindlessTableTracker *RenderingDeviceGraph::bindless_table_tracker_create(ResourceUsage p_read_usage) {
+	BindlessTableTracker *table = memnew(BindlessTableTracker);
+	table->read_usage = p_read_usage;
+	return table;
+}
+
+void RenderingDeviceGraph::bindless_table_tracker_free(BindlessTableTracker *p_table) {
+	if (p_table == nullptr) {
+		return;
+	}
+
+	// RenderingDevice releases every slot first.
+	DEV_ASSERT(p_table->dirty.is_empty());
+	memdelete(p_table);
+}
+
+void RenderingDeviceGraph::bindless_table_add_resident(BindlessTableTracker *p_table, ResourceTracker *p_tracker) {
+	DEV_ASSERT(p_table != nullptr && p_tracker != nullptr);
+	DEV_ASSERT(p_tracker->parent == nullptr);
+	BindlessResidency *residency = _bindless_find_residency(p_tracker, p_table);
+	if (residency == nullptr) {
+		BindlessResidency new_residency;
+		new_residency.table = p_table;
+		new_residency.dirty = true;
+		p_tracker->bindless_residency.push_back(new_residency);
+		residency = &p_tracker->bindless_residency[p_tracker->bindless_residency.size() - 1];
+		p_table->dirty.push_back(p_tracker);
+	}
+	residency->slots++;
+}
+
+void RenderingDeviceGraph::bindless_table_remove_resident(BindlessTableTracker *p_table, ResourceTracker *p_tracker) {
+	DEV_ASSERT(p_table != nullptr && p_tracker != nullptr);
+	for (uint32_t i = 0; i < p_tracker->bindless_residency.size(); i++) {
+		BindlessResidency &residency = p_tracker->bindless_residency[i];
+		if (residency.table != p_table) {
+			continue;
+		}
+
+		DEV_ASSERT(residency.slots > 0);
+		residency.slots--;
+		if (residency.slots == 0) {
+			if (residency.dirty) {
+				p_table->dirty.erase_unordered(p_tracker);
+			}
+			p_tracker->bindless_residency.remove_at_unordered(i);
+		}
+		return;
+	}
+	DEV_ASSERT(false && "The resource is not resident in the bindless table.");
+}
+
+void RenderingDeviceGraph::command_barriers_for_test(int32_t p_command_index, LocalVector<RDD::TextureBarrier> &r_texture_barriers, LocalVector<RDD::BufferBarrier> &r_buffer_barriers, RDD::MemoryAccessBarrier &r_memory_barrier) const {
+	ERR_FAIL_INDEX(p_command_index, int32_t(command_count));
+	const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
+	r_texture_barriers.clear();
+	for (int32_t j = 0; j < command->normalization_barrier_count; j++) {
+		r_texture_barriers.push_back(command_normalization_barriers[command->normalization_barrier_index + j]);
+	}
+	for (int32_t j = 0; j < command->transition_barrier_count; j++) {
+		r_texture_barriers.push_back(command_transition_barriers[command->transition_barrier_index + j]);
+	}
+	r_buffer_barriers.clear();
+#if USE_BUFFER_BARRIERS
+	for (int32_t j = 0; j < command->buffer_barrier_count; j++) {
+		r_buffer_barriers.push_back(command_buffer_barriers[command->buffer_barrier_index + j]);
+	}
+#endif
+	r_memory_barrier = command->memory_barrier;
+}
+
 RenderingDeviceGraph::ResourceTracker *RenderingDeviceGraph::resource_tracker_create() {
 #if PRINT_RESOURCE_TRACKER_TOTAL
 	print_line("Resource trackers:", ++resource_tracker_total);
@@ -3131,6 +3331,9 @@ void RenderingDeviceGraph::resource_tracker_free(ResourceTracker *p_tracker) {
 	if (p_tracker == nullptr) {
 		return;
 	}
+
+	// GodotNext: rd_bindless (#176). RenderingDevice defers the free of a resident resource.
+	DEV_ASSERT(p_tracker->bindless_residency.is_empty());
 
 	if (p_tracker->in_parent_dirty_list) {
 		// Delete the tracker from the parent's dirty linked list.
