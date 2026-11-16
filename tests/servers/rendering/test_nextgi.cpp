@@ -3480,6 +3480,68 @@ TEST_CASE("[NextGI][RT] D3D12 driver version key") {
 	CHECK_EQ(RenderingDeviceDriver::D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE, 64u);
 }
 
+// GodotNext: linux_driver_minimums (#285). UE 5.9's Linux driver minimums with mocked
+// VkPhysicalDeviceDriverProperties (plan §26.1): one warning below them, nothing else changes.
+static void check_driver_minimum(uint32_t p_driver_id, const String &p_info, bool p_checked, bool p_below, const String &p_version) {
+	INFO(vformat("driver %d \"%s\"", p_driver_id, p_info));
+	const RenderingDeviceDriver::VulkanDriverMinimumCheck check = RenderingDeviceDriver::vulkan_linux_driver_minimum_check(p_driver_id, p_info);
+	CHECK_EQ(check.checked, p_checked);
+	CHECK_EQ(check.below_minimum, p_below);
+	CHECK_EQ(check.version, p_version);
+	CHECK_EQ(check.warning.is_empty(), !p_below);
+}
+
+TEST_CASE("[NextGI][Vulkan] Linux driver minimums: NVIDIA's proprietary driver below, at and above 570") {
+	const uint32_t nvidia = RenderingDeviceDriver::VULKAN_DRIVER_ID_NVIDIA_PROPRIETARY;
+	check_driver_minimum(nvidia, "535.247.01", true, true, "535.247.01");
+	check_driver_minimum(nvidia, "565.77", true, true, "565.77");
+	check_driver_minimum(nvidia, "569.99", true, true, "569.99");
+	check_driver_minimum(nvidia, "570.86.16", true, false, "570.86.16");
+	check_driver_minimum(nvidia, "570", true, false, "570");
+	// The cloud L4 Linux VM's driver, and one with a later major version.
+	check_driver_minimum(nvidia, "580.178.04", true, false, "580.178.04");
+	check_driver_minimum(nvidia, " 1000.1.2 ", true, false, "1000.1.2");
+	// Versions that do not parse give no warning.
+	for (const char *info : { "", "unknown", "NVIDIA", ".570", "Mesa 25.0.0" }) {
+		check_driver_minimum(nvidia, info, false, false, "");
+	}
+	// The warning names the driver, the version it found and the minimum.
+	CHECK_EQ(RenderingDeviceDriver::vulkan_linux_driver_minimum_check(nvidia, "565.77").warning, "Vulkan: The NVIDIA driver 565.77 is older than 570, the minimum supported version on Linux. Rendering continues, but updating the graphics driver is recommended.");
+}
+
+TEST_CASE("[NextGI][Vulkan] Linux driver minimums: RADV below, at and above 24.2.8") {
+	const uint32_t radv = RenderingDeviceDriver::VULKAN_DRIVER_ID_MESA_RADV;
+	check_driver_minimum(radv, "Mesa 24.2.7", true, true, "24.2.7");
+	check_driver_minimum(radv, "Mesa 24.1.9", true, true, "24.1.9");
+	check_driver_minimum(radv, "Mesa 23.3.6-1ubuntu1", true, true, "23.3.6");
+	check_driver_minimum(radv, "Mesa 24.2", true, true, "24.2");
+	check_driver_minimum(radv, "Mesa 24.2.8", true, false, "24.2.8");
+	check_driver_minimum(radv, "Mesa 24.2.8-1ubuntu1~24.04.1", true, false, "24.2.8");
+	check_driver_minimum(radv, "Mesa 24.2.10", true, false, "24.2.10");
+	check_driver_minimum(radv, "Mesa 24.10.0", true, false, "24.10.0");
+	check_driver_minimum(radv, "Mesa 25.0.7-0ubuntu0.24.04.2", true, false, "25.0.7");
+	check_driver_minimum(radv, "Mesa 25.1.0-devel (git-1a2b3c4d5e)", true, false, "25.1.0");
+	// Versions that do not parse give no warning.
+	for (const char *info : { "", "Mesa", "Mesa ", "Mesa x.y.z", "Mesa 24", "radv", "24.2.7" }) {
+		check_driver_minimum(radv, info, false, false, "");
+	}
+	CHECK_EQ(RenderingDeviceDriver::vulkan_linux_driver_minimum_check(radv, "Mesa 24.2.7").warning, "Vulkan: The RADV driver 24.2.7 is older than 24.2.8, the minimum supported version on Linux. Rendering continues, but updating the graphics driver is recommended.");
+}
+
+TEST_CASE("[NextGI][Vulkan] Linux driver minimums: other drivers get no check") {
+	// AMDVLK (VK_DRIVER_ID_AMD_OPEN_SOURCE 2), ANV (VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA 6), lavapipe
+	// (VK_DRIVER_ID_MESA_LLVMPIPE 13) and NVK (VK_DRIVER_ID_MESA_NVK 24): UE names no minimum for them.
+	for (uint32_t driver_id : { 2u, 6u, 13u, 24u }) {
+		for (const char *info : { "Mesa 20.0.0", "100.0", "" }) {
+			const RenderingDeviceDriver::VulkanDriverMinimumCheck check = RenderingDeviceDriver::vulkan_linux_driver_minimum_check(driver_id, info);
+			CHECK_FALSE(check.checked);
+			CHECK_FALSE(check.below_minimum);
+			CHECK(check.driver.is_empty());
+			CHECK(check.warning.is_empty());
+		}
+	}
+}
+
 TEST_CASE("[NextGI][RT] D3D12 acceleration-structure vertex formats keep their component order") {
 	// DXR tier 1.0 and the formats tier 1.1 adds, as RD formats with the same memory layout.
 	const RenderingDeviceDriver::DataFormat accepted[] = {

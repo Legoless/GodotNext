@@ -847,6 +847,21 @@ void RenderingDeviceDriverVulkan::_get_device_properties() {
 
 		_check_driver_workarounds(physical_device_properties, &driver_props);
 
+#if defined(LINUXBSD_ENABLED) && defined(__linux__)
+		// GodotNext: linux_driver_minimums (#285). One warning below UE 5.9's Linux driver minimums
+		// (NVIDIA 570, RADV 24.2.8); the tier and its reason stay as they are.
+		static_assert(VULKAN_DRIVER_ID_MESA_RADV == uint32_t(VK_DRIVER_ID_MESA_RADV));
+		static_assert(VULKAN_DRIVER_ID_NVIDIA_PROPRIETARY == uint32_t(VK_DRIVER_ID_NVIDIA_PROPRIETARY));
+		const VulkanDriverMinimumCheck minimum = vulkan_linux_driver_minimum_check(uint32_t(driver_props.driverID), String::utf8(driver_props.driverInfo));
+		if (!minimum.warning.is_empty()) {
+			WARN_PRINT_ONCE(minimum.warning);
+		} else if (minimum.checked) {
+			print_verbose(vformat("Vulkan: The %s driver %s meets the Linux minimum %s.", minimum.driver, minimum.version, minimum.minimum));
+		} else if (!minimum.driver.is_empty()) {
+			print_verbose(vformat("Vulkan: Could not read the %s driver version from \"%s\"; no Linux minimum check.", minimum.driver, String::utf8(driver_props.driverInfo)));
+		}
+#endif
+
 	} else {
 		vkGetPhysicalDeviceProperties(physical_device, &physical_device_properties);
 

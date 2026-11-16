@@ -298,6 +298,71 @@ String RenderingDeviceDriver::format_d3d12_driver_version_key(uint32_t p_vendor_
 	return "D3D12:" + String::num_uint64(p_vendor_id) + ":" + String::num_uint64(p_device_id) + ":" + version;
 }
 
+// GodotNext: linux_driver_minimums (#285)
+// Reads up to three dot-separated numbers at the start of p_text ("580.178.04", "24.2.8-1ubuntu1") and
+// returns how many it read, 0 when p_text does not start with a digit. r_end is where they end.
+static int _parse_driver_version_numbers(const String &p_text, uint32_t r_numbers[3], int &r_end) {
+	int count = 0;
+	int pos = 0;
+	const int length = p_text.length();
+	while (count < 3 && pos < length && is_digit(p_text[pos])) {
+		uint64_t value = 0;
+		while (pos < length && is_digit(p_text[pos])) {
+			value = MIN(value * 10 + uint64_t(p_text[pos] - '0'), uint64_t(UINT32_MAX));
+			pos++;
+		}
+		r_numbers[count++] = uint32_t(value);
+		r_end = pos;
+		if (count < 3 && pos + 1 < length && p_text[pos] == '.' && is_digit(p_text[pos + 1])) {
+			pos++;
+		} else {
+			break;
+		}
+	}
+	return count;
+}
+
+RenderingDeviceDriver::VulkanDriverMinimumCheck RenderingDeviceDriver::vulkan_linux_driver_minimum_check(uint32_t p_driver_id, const String &p_driver_info) {
+	VulkanDriverMinimumCheck check;
+	uint32_t numbers[3] = { 0, 0, 0 };
+	int end = 0;
+	String text = p_driver_info.strip_edges();
+	if (p_driver_id == VULKAN_DRIVER_ID_NVIDIA_PROPRIETARY) {
+		check.driver = "NVIDIA";
+		check.minimum = itos(VULKAN_LINUX_NVIDIA_MIN_MAJOR);
+		if (_parse_driver_version_numbers(text, numbers, end) == 0) {
+			return check;
+		}
+		check.below_minimum = numbers[0] < VULKAN_LINUX_NVIDIA_MIN_MAJOR;
+	} else if (p_driver_id == VULKAN_DRIVER_ID_MESA_RADV) {
+		check.driver = "RADV";
+		check.minimum = vformat("%d.%d.%d", VULKAN_LINUX_RADV_MIN_MAJOR, VULKAN_LINUX_RADV_MIN_MINOR, VULKAN_LINUX_RADV_MIN_PATCH);
+		if (!text.begins_with("Mesa ")) {
+			return check;
+		}
+		text = text.substr(5);
+		// Mesa versions are major.minor.patch; a missing patch reads as 0.
+		if (_parse_driver_version_numbers(text, numbers, end) < 2) {
+			return check;
+		}
+		if (numbers[0] != VULKAN_LINUX_RADV_MIN_MAJOR) {
+			check.below_minimum = numbers[0] < VULKAN_LINUX_RADV_MIN_MAJOR;
+		} else if (numbers[1] != VULKAN_LINUX_RADV_MIN_MINOR) {
+			check.below_minimum = numbers[1] < VULKAN_LINUX_RADV_MIN_MINOR;
+		} else {
+			check.below_minimum = numbers[2] < VULKAN_LINUX_RADV_MIN_PATCH;
+		}
+	} else {
+		return check;
+	}
+	check.checked = true;
+	check.version = text.substr(0, end);
+	if (check.below_minimum) {
+		check.warning = vformat("Vulkan: The %s driver %s is older than %s, the minimum supported version on Linux. Rendering continues, but updating the graphics driver is recommended.", check.driver, check.version, check.minimum);
+	}
+	return check;
+}
+
 void RenderingDeviceDriver::set_driver_version_identity(const String &p_vendor, const String &p_device_name) {
 	driver_version_vendor = p_vendor;
 	driver_version_device = p_device_name;

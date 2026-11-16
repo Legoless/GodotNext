@@ -1210,6 +1210,28 @@ public:
 	// GodotNext: d3d12_dxr (#118). PCI IDs and the user-mode driver version DXGI reports
 	// (IDXGIAdapter::CheckInterfaceSupport), as "D3D12:<vendor>:<device>:<a>.<b>.<c>.<d>".
 	static String format_d3d12_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint64_t p_driver_version);
+	// GodotNext: linux_driver_minimums (#285)
+	// UE 5.9's Linux Vulkan driver minimums (plan §26.1): NVIDIA's proprietary driver 570 and RADV 24.2.8.
+	// Below them the Vulkan driver logs one warning on Linux and changes nothing else: no tier, no reason
+	// (lead decision 2026-11-16). Pure, so the doctests run anywhere. p_driver_id and p_driver_info are
+	// VkPhysicalDeviceDriverProperties::driverID and driverInfo: "580.178.04" on NVIDIA, "Mesa 24.2.8" (with
+	// an optional suffix such as "-1ubuntu1" or "-devel") on RADV. Other drivers, and a version that does
+	// not parse, give no warning.
+	static constexpr uint32_t VULKAN_DRIVER_ID_MESA_RADV = 3; // VK_DRIVER_ID_MESA_RADV.
+	static constexpr uint32_t VULKAN_DRIVER_ID_NVIDIA_PROPRIETARY = 4; // VK_DRIVER_ID_NVIDIA_PROPRIETARY.
+	static constexpr uint32_t VULKAN_LINUX_NVIDIA_MIN_MAJOR = 570;
+	static constexpr uint32_t VULKAN_LINUX_RADV_MIN_MAJOR = 24;
+	static constexpr uint32_t VULKAN_LINUX_RADV_MIN_MINOR = 2;
+	static constexpr uint32_t VULKAN_LINUX_RADV_MIN_PATCH = 8;
+	struct VulkanDriverMinimumCheck {
+		bool checked = false; // NVIDIA's proprietary driver or RADV, and its version parsed.
+		bool below_minimum = false;
+		String driver; // "NVIDIA" or "RADV"; empty for other drivers.
+		String version; // As parsed: "580.178.04", "24.2.8".
+		String minimum; // "570" or "24.2.8".
+		String warning; // Empty unless below_minimum.
+	};
+	static VulkanDriverMinimumCheck vulkan_linux_driver_minimum_check(uint32_t p_driver_id, const String &p_driver_info);
 	void set_driver_version_identity(const String &p_vendor, const String &p_device_name);
 	virtual String get_driver_version_key() const;
 	typedef void (*DeviceLostCallback)(void *);

@@ -58,3 +58,18 @@ How it was used:
 - Checked with a script over these tables (in the implementer's lane folder, not committed): every Mesa RT ID passes, every Mesa and kernel non-RT ID is denylisted, and against the #22 allowlist the only GPUs that change are the RDNA2-and-later APUs (now off HWRT) and IDs the allowlist did not list.
 - Device IDs above 0xFFFF. The rows are PCI device IDs, and the Vulkan specification puts a PCI device ID in the low 16 bits of `deviceID` with "the remaining bits" zero; a device not "driven primarily by a PCI device" returns a value chosen by "operating system or platform policies". The forum's Jetson TX2 output shows one: vendor 0x10DE, device 0x93BA03D7, `INTEGRATED_GPU`, "NVIDIA Tegra X2 (nvgpu)". "Every ID below the first RT die" therefore holds only for 16-bit IDs, so an NVIDIA, AMD or Intel device ID above 0xFFFF does not count, as under the #22 allowlist, which had no such row.
 - The doctests restate every row's first and last ID and test the RT parts just outside the rows (TITAN RTX after the pre-Turing row, Navi 21 after the pre-RDNA2 row, Nova Lake U and H beside Nova Lake S and HX, and others), and every AMD APU ID the #22 allowlist listed.
+
+### Vulkan driver properties and Mesa's RADV driver string: Linux driver minimums (#285)
+
+| Field | Value |
+|---|---|
+| What | `VkPhysicalDeviceDriverProperties` (`driverID`, `driverInfo`) and the `VkDriverId` values `VK_DRIVER_ID_MESA_RADV` (3) and `VK_DRIVER_ID_NVIDIA_PROPRIETARY` (4); RADV's `driverInfo`, which is "Mesa " followed by Mesa's version and an optional git suffix; UE 5.9's Linux minimums, "Vulkan: AMD (RADV minimum 24.2.8+, recommended 25.0.0+) and NVIDIA (570+)", as plan §26.1 quotes Epic's Linux Development Requirements page |
+| Upstream | The Vulkan specification and `vulkan/vulkan_core.h` (as for #9 above); Mesa (https://gitlab.freedesktop.org/mesa/mesa) `src/amd/vulkan/radv_physical_device.c`; plan §26.1, source [L] |
+| Version | Vulkan 1.4 specification and the SDK header already used; Mesa main at 4fac8318e4a5 (2026-11-16) |
+| License | Vulkan specification CC-BY-4.0 and header Apache-2.0 OR MIT (above); Mesa MIT. Consulted, not copied |
+| Read on | 2026-11-16, for issue #285 |
+| Consulted by | The #285 implementer |
+| Used in | `servers/rendering/rendering_device_driver.{h,cpp}` (`vulkan_linux_driver_minimum_check`), `drivers/vulkan/rendering_device_driver_vulkan.cpp` (`_get_device_properties`, Linux only), `tests/servers/rendering/test_nextgi.cpp` |
+| Copied files | None |
+
+How it was used: on Linux, the Vulkan driver passes the driver ID and `driverInfo` it already reads for its workarounds to a pure helper. NVIDIA's proprietary driver reports its version as `driverInfo` ("580.178.04" on the cloud L4 Linux VM); the helper compares its major number with 570. RADV's string starts with "Mesa "; the helper compares major, minor and patch with 24.2.8. Below a minimum it logs one warning that names the driver, the version it read and the minimum, and the tier and its reason do not change (lead decision 2026-11-16: a warning, not a forced fallback). A version that does not parse, and every other driver, gives no warning. No Windows or macOS check: UE names no driver numbers there.
