@@ -294,6 +294,8 @@ fragment void fullscreenNoopFrag(float4 gl_FragCoord [[position]]) {
 // GodotNext: rd_indirect_count (#177). One thread per record: copies the record (4 or 5 words, read with the
 // draw's stride) to a tightly packed array, sets its instanceCount (word 1) to 0 at or past the count, and
 // otherwise multiplies it by the pass's view count, as MDCommandBuffer::render_draw() does for multiview.
+// GodotNext: rd_mesh_shaders (#178). The word is a parameter: mesh task records (3 words) zero threadgroupsPerGrid.x
+// (word 0), with a view count of 1.
 NS::SharedPtr<MTL::ComputePipelineState> MDResourceFactory::new_indirect_count_clamp_pipeline_state(String &r_error) {
 	NS::SharedPtr<NS::AutoreleasePool> pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
 	static const char *msl = R"(#include <metal_stdlib>
@@ -304,6 +306,7 @@ struct IndirectCountClampParams {
     uint stride;
     uint words;
     uint view_count;
+    uint count_word;
 };
 
 kernel void indirectCountClamp(device const uchar *records [[buffer(0)]],
@@ -319,7 +322,7 @@ kernel void indirectCountClamp(device const uchar *records [[buffer(0)]],
     for (uint i = 0; i < params.words; i++) {
         out[i] = record[i];
     }
-    out[1] = index < count[0] ? record[1] * params.view_count : 0u;
+    out[params.count_word] = index < count[0] ? record[params.count_word] * params.view_count : 0u;
 }
 )";
 

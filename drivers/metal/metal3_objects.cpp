@@ -105,11 +105,35 @@ void MDCommandBuffer::_encode_residency(MTL::ComputeCommandEncoder *p_enc) {
 // before vertex) would allow more overlap, but the graph does not tell us which
 // stage of a pass reads or writes, so use the conservative mask.
 static constexpr MTL::RenderStages RENDER_FENCE_STAGES = MTL::RenderStageVertex | MTL::RenderStageFragment;
+// GodotNext: rd_mesh_shaders (#178). Added to an encoder's residency and fences only once it binds a mesh pipeline
+// (_encode_mesh_stages()), so passes without mesh shaders keep the masks above.
+static constexpr MTL::RenderStages MESH_FENCE_STAGES = MTL::RenderStageObject | MTL::RenderStageMesh;
 
-void MDCommandBuffer::_fence_wait(MTL::RenderCommandEncoder *p_enc) {
+// GodotNext: rd_mesh_shaders (#178). Returns the fence waited on, which a mesh pipeline bound later in the encoder
+// waits on too.
+MTL::Fence *MDCommandBuffer::_fence_wait(MTL::RenderCommandEncoder *p_enc) {
 	MTL::Fence *fence = _fence_to_wait();
 	if (p_enc && fence) {
 		p_enc->waitForFence(fence, RENDER_FENCE_STAGES);
+	}
+	return fence;
+}
+
+// GodotNext: rd_mesh_shaders (#178). The object and mesh stages read resources and wait on the encoder's fence like
+// the vertex and fragment stages, from the first mesh pipeline bound on the encoder.
+void MDCommandBuffer::_encode_mesh_stages() {
+	MTL::RenderCommandEncoder *enc = render.encoder.get();
+	if (enc == nullptr || render.mesh_stages_encoded) {
+		return;
+	}
+	render.mesh_stages_encoded = true;
+	if (sync_mode != RDM::SyncMode::HazardTracking) {
+		// _encode_residency() filled _resident_heaps when the encoder was created.
+		enc->useHeaps(_resident_heaps.ptr(), _resident_heaps.size(), MESH_FENCE_STAGES);
+		device_driver->encode_imported_resources(enc, MESH_FENCE_STAGES);
+	}
+	if (render.encoder_wait_fence != nullptr) {
+		enc->waitForFence(render.encoder_wait_fence, MESH_FENCE_STAGES);
 	}
 }
 
@@ -127,12 +151,13 @@ void MDCommandBuffer::_fence_wait(MTL::BlitCommandEncoder *p_enc) {
 	}
 }
 
-void MDCommandBuffer::_fence_update(MTL::RenderCommandEncoder *p_enc) {
+void MDCommandBuffer::_fence_update(MTL::RenderCommandEncoder *p_enc, bool p_mesh_stages) {
 	if (!p_enc) {
 		return;
 	}
 	if (MTL::Fence *fence = _fence_to_update()) {
-		p_enc->updateFence(fence, RENDER_FENCE_STAGES);
+		// GodotNext: rd_mesh_shaders (#178). After the object and mesh stages too when the encoder ran them.
+		p_enc->updateFence(fence, p_mesh_stages ? (RENDER_FENCE_STAGES | MESH_FENCE_STAGES) : RENDER_FENCE_STAGES);
 	}
 }
 
@@ -440,7 +465,9 @@ void MDCommandBuffer::bind_pipeline(RDD::PipelineID p_pipeline) {
 			render.clear_arg_buffer_cache();
 			render.encoder_raster = MDRenderPipeline::RasterState();
 			_encode_residency(render.encoder.get());
-			_fence_wait(render.encoder.get());
+			// GodotNext: rd_mesh_shaders (#178)
+			render.encoder_wait_fence = _fence_wait(render.encoder.get());
+			render.mesh_stages_encoded = false;
 		}
 
 		if (render.pipeline != rp) {
@@ -458,6 +485,10 @@ void MDCommandBuffer::bind_pipeline(RDD::PipelineID p_pipeline) {
 			render.mark_uniforms_dirty();
 			render.pipeline = rp;
 			render.raster_state = rp->raster_state;
+		}
+		// GodotNext: rd_mesh_shaders (#178)
+		if (rp->shader->is_mesh()) {
+			_encode_mesh_stages();
 		}
 	} else if (p->type == MDPipelineType::Compute) {
 		DEV_ASSERT(type == MDCommandBufferStateType::Compute);
@@ -1114,6 +1145,15 @@ void MDCommandBuffer::_render_set_dirty_state() {
 			render.encoder->setFragmentBytes(push_constant_data, push_constant_data_len, slot);
 			render.arg_buffer_cache[RenderState::ARG_BUFFER_STAGE_FRAGMENT].invalidate_buffer(slot);
 		}
+		// GodotNext: rd_mesh_shaders (#178)
+		if (push_constant_binding.has(RDD::SHADER_STAGE_TASK)) {
+			render.encoder->setObjectBytes(push_constant_data, push_constant_data_len, slot);
+			render.arg_buffer_cache[RenderState::ARG_BUFFER_STAGE_OBJECT].invalidate_buffer(slot);
+		}
+		if (push_constant_binding.has(RDD::SHADER_STAGE_MESH)) {
+			render.encoder->setMeshBytes(push_constant_data, push_constant_data_len, slot);
+			render.arg_buffer_cache[RenderState::ARG_BUFFER_STAGE_MESH].invalidate_buffer(slot);
+		}
 		binding_cache.invalidate_buffer(slot);
 	}
 
@@ -1241,6 +1281,16 @@ void ResourceTracker::encode(MTL::RenderCommandEncoder *p_enc) {
 			if (frag_usage != 0) {
 				p_enc->useResources(resources, count, frag_usage, MTL::RenderStageFragment);
 			}
+		}
+		// GodotNext: rd_mesh_shaders (#178). Resources of the object and mesh functions (only mesh pipelines have
+		// these usages).
+		MTL::ResourceUsage object_usage = (MTL::ResourceUsage)metal_shader_validation_usage((uint32_t)resource_usage_for_stage(keyval.key, RDD::ShaderStage::SHADER_STAGE_TASK));
+		MTL::ResourceUsage mesh_usage = (MTL::ResourceUsage)metal_shader_validation_usage((uint32_t)resource_usage_for_stage(keyval.key, RDD::ShaderStage::SHADER_STAGE_MESH));
+		if (object_usage != 0) {
+			p_enc->useResources(resources, count, object_usage, MTL::RenderStageObject);
+		}
+		if (mesh_usage != 0) {
+			p_enc->useResources(resources, count, mesh_usage, MTL::RenderStageMesh);
 		}
 	}
 
@@ -1458,7 +1508,9 @@ void MDCommandBuffer::render_next_subpass() {
 		render.clear_arg_buffer_cache();
 		render.encoder_raster = MDRenderPipeline::RasterState();
 		_encode_residency(render.encoder.get());
-		_fence_wait(render.encoder.get());
+		// GodotNext: rd_mesh_shaders (#178)
+		render.encoder_wait_fence = _fence_wait(render.encoder.get());
+		render.mesh_stages_encoded = false;
 
 		if (!render.is_rendering_entire_area) {
 			_render_clear_render_area();
@@ -1598,11 +1650,23 @@ void MDCommandBuffer::render_draw_indirect_count_prepare(RDD::RenderPassID p_ren
 	const uint32_t words = p_indexed ? 5 : 4;
 	static_assert(sizeof(MTL::DrawIndexedPrimitivesIndirectArguments) == 5 * sizeof(uint32_t));
 	static_assert(sizeof(MTL::DrawPrimitivesIndirectArguments) == 4 * sizeof(uint32_t));
-	const uint32_t stride = p_stride == 0 ? words * sizeof(uint32_t) : p_stride;
 	// SPIRV-Cross derives gl_ViewIndex from the instance, so a multiview draw runs instanceCount x view_count
 	// instances, as in render_draw(). Every subpass of a pass has the pass's view count (render_pass_create()).
 	const MDRenderPass *pass = (const MDRenderPass *)(p_render_pass.id);
 	const uint32_t view_count = (pass != nullptr && !pass->subpasses.is_empty()) ? MAX(pass->subpasses[0].view_count, 1u) : 1u;
+
+	// GodotNext: rd_mesh_shaders (#178). The clamp pass moved to _prepare_indirect_count_clamp(); word 1 is
+	// instanceCount.
+	_prepare_indirect_count_clamp(clamp, words, 1, view_count, p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_stride);
+}
+
+// GodotNext: rd_mesh_shaders (#178). The body of #177's render_draw_indirect_count_prepare(), for any record layout.
+void MDCommandBuffer::_prepare_indirect_count_clamp(IndirectCountClamp p_clamp, uint32_t p_words, uint32_t p_count_word, uint32_t p_view_count, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_stride) {
+	IndirectCountClamp &clamp = p_clamp;
+	const uint32_t p_max_draw_count = clamp.max_draw_count;
+	const uint32_t words = p_words;
+	const uint32_t view_count = p_view_count;
+	const uint32_t stride = p_stride == 0 ? words * sizeof(uint32_t) : p_stride;
 
 	// Null after one error when the kernel cannot be created; the draw is then skipped.
 	MTL::ComputePipelineState *pipeline = device_driver->get_resource_cache().get_indirect_count_clamp_pipeline_state();
@@ -1620,7 +1684,8 @@ void MDCommandBuffer::render_draw_indirect_count_prepare(RDD::RenderPassID p_ren
 				uint32_t stride;
 				uint32_t words;
 				uint32_t view_count;
-			} params = { p_max_draw_count, stride, words, view_count };
+				uint32_t count_word; // GodotNext: rd_mesh_shaders (#178)
+			} params = { p_max_draw_count, stride, words, view_count, p_count_word };
 
 			// A self-contained encoder before the render pass, as in timestamp_write(). It waits on what wrote the
 			// records and the count, and the render pass (or the next clamp) waits on it.
@@ -1657,7 +1722,7 @@ void MDCommandBuffer::_render_draw_indirect_count(bool p_indexed, uint32_t p_max
 	DEV_ASSERT(type == MDCommandBufferStateType::Render);
 	ERR_FAIL_COND_MSG(_indirect_count_clamps_used >= _indirect_count_clamps.size(), "An indirect count draw was not prepared before its render pass.");
 	const IndirectCountClamp clamp = _indirect_count_clamps[_indirect_count_clamps_used++];
-	DEV_ASSERT(clamp.indexed == p_indexed && clamp.max_draw_count == p_max_draw_count);
+	DEV_ASSERT(!clamp.mesh_tasks && clamp.indexed == p_indexed && clamp.max_draw_count == p_max_draw_count); // GodotNext: rd_mesh_shaders (#178)
 	if (clamp.buffer == nullptr) {
 		return; // The prepare failed and said why.
 	}
@@ -1675,6 +1740,70 @@ void MDCommandBuffer::_render_draw_indirect_count(bool p_indexed, uint32_t p_max
 			enc->drawPrimitives(render.pipeline->raster_state.render_primitive, clamp.buffer, indirect_offset);
 		}
 		indirect_offset += record_size;
+	}
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void MDCommandBuffer::render_draw_mesh_tasks_indirect_count_prepare(RDD::RenderPassID p_render_pass, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	IndirectCountClamp clamp;
+	clamp.max_draw_count = p_max_draw_count;
+	clamp.mesh_tasks = true;
+	static_assert(sizeof(MTL::DispatchThreadgroupsIndirectArguments) == 3 * sizeof(uint32_t));
+	// Word 0 is threadgroupsPerGrid.x. Mesh pipelines take no view count multiplication.
+	_prepare_indirect_count_clamp(clamp, 3, 0, 1, p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_stride);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void MDCommandBuffer::render_draw_mesh_tasks(uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
+	DEV_ASSERT(type == MDCommandBufferStateType::Render);
+	ERR_FAIL_NULL_MSG(render.pipeline, "No pipeline set for render command buffer.");
+	const MDRenderShader *shader = render.pipeline->shader;
+	ERR_FAIL_COND_MSG(!shader->is_mesh(), "The bound pipeline has no mesh function.");
+
+	_render_set_dirty_state();
+
+	render.encoder->drawMeshThreadgroups(MTL::Size(p_group_count_x, p_group_count_y, p_group_count_z), shader->task_local, shader->mesh_local);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void MDCommandBuffer::render_draw_mesh_tasks_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	DEV_ASSERT(type == MDCommandBufferStateType::Render);
+	ERR_FAIL_NULL_MSG(render.pipeline, "No pipeline set for render command buffer.");
+	const MDRenderShader *shader = render.pipeline->shader;
+	ERR_FAIL_COND_MSG(!shader->is_mesh(), "The bound pipeline has no mesh function.");
+
+	_render_set_dirty_state();
+
+	MTL::RenderCommandEncoder *enc = render.encoder.get();
+	const RenderingDeviceDriverMetal::BufferInfo *indirect_buffer = (const RenderingDeviceDriverMetal::BufferInfo *)p_indirect_buffer.id;
+	const NS::UInteger stride = p_stride == 0 ? sizeof(MTL::DispatchThreadgroupsIndirectArguments) : p_stride;
+	NS::UInteger indirect_offset = p_offset;
+	for (uint32_t i = 0; i < p_draw_count; i++) {
+		enc->drawMeshThreadgroups(indirect_buffer->buffer.get(), indirect_offset, shader->task_local, shader->mesh_local);
+		indirect_offset += stride;
+	}
+}
+
+// GodotNext: rd_mesh_shaders (#178). The records and the count were read by the prepare step.
+void MDCommandBuffer::render_draw_mesh_tasks_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	DEV_ASSERT(type == MDCommandBufferStateType::Render);
+	ERR_FAIL_COND_MSG(_indirect_count_clamps_used >= _indirect_count_clamps.size(), "An indirect count draw was not prepared before its render pass.");
+	const IndirectCountClamp clamp = _indirect_count_clamps[_indirect_count_clamps_used++];
+	DEV_ASSERT(clamp.mesh_tasks && clamp.max_draw_count == p_max_draw_count);
+	if (clamp.buffer == nullptr) {
+		return; // The prepare failed and said why.
+	}
+	ERR_FAIL_NULL_MSG(render.pipeline, "No pipeline set for render command buffer.");
+	const MDRenderShader *shader = render.pipeline->shader;
+	ERR_FAIL_COND_MSG(!shader->is_mesh(), "The bound pipeline has no mesh function.");
+
+	_render_set_dirty_state();
+
+	MTL::RenderCommandEncoder *enc = render.encoder.get();
+	NS::UInteger indirect_offset = 0;
+	for (uint32_t i = 0; i < p_max_draw_count; i++) {
+		enc->drawMeshThreadgroups(clamp.buffer, indirect_offset, shader->task_local, shader->mesh_local);
+		indirect_offset += sizeof(MTL::DispatchThreadgroupsIndirectArguments);
 	}
 }
 
@@ -1704,7 +1833,7 @@ void MDCommandBuffer::render_end_pass() {
 	DEV_ASSERT(type == MDCommandBufferStateType::Render);
 
 	_pop_active_encoder_labels();
-	_fence_update(render.encoder.get());
+	_fence_update(render.encoder.get(), render.mesh_stages_encoded); // GodotNext: rd_mesh_shaders (#178)
 	render.end_encoding();
 	render.reset();
 	reset();
@@ -1743,6 +1872,9 @@ void MDCommandBuffer::RenderState::reset() {
 	bzero(vertex_offsets.ptr(), sizeof(NS::UInteger) * vertex_offsets.size());
 	vertex_offsets.clear();
 	resource_tracker.reset();
+	// GodotNext: rd_mesh_shaders (#178)
+	encoder_wait_fence = nullptr;
+	mesh_stages_encoded = false;
 }
 
 void MDCommandBuffer::RenderState::end_encoding() {
@@ -2261,6 +2393,15 @@ void MDCommandBuffer::_set_arg_buffer(MTL::RenderCommandEncoder *p_enc, const Un
 	if (p_shader_set.active_stages.has_flag(RDD::SHADER_STAGE_FRAGMENT_BIT) &&
 			render.arg_buffer_cache[RenderState::ARG_BUFFER_STAGE_FRAGMENT].update(p_buffer, p_offset, p_set_index)) {
 		p_enc->setFragmentBuffer(p_buffer, p_offset, p_set_index);
+	}
+	// GodotNext: rd_mesh_shaders (#178)
+	if (p_shader_set.active_stages.has_flag(RDD::SHADER_STAGE_TASK_BIT) &&
+			render.arg_buffer_cache[RenderState::ARG_BUFFER_STAGE_OBJECT].update(p_buffer, p_offset, p_set_index)) {
+		p_enc->setObjectBuffer(p_buffer, p_offset, p_set_index);
+	}
+	if (p_shader_set.active_stages.has_flag(RDD::SHADER_STAGE_MESH_BIT) &&
+			render.arg_buffer_cache[RenderState::ARG_BUFFER_STAGE_MESH].update(p_buffer, p_offset, p_set_index)) {
+		p_enc->setMeshBuffer(p_buffer, p_offset, p_set_index);
 	}
 }
 

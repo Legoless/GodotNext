@@ -152,6 +152,8 @@ private:
 	RD::PipelineType pipeline_type = RD::PIPELINE_TYPE_RASTERIZATION;
 
 	bool ray_query_required = false;
+	// GodotNext: rd_mesh_shaders (#178). Set by setup_mesh(): the render stages are task (optional), mesh and fragment.
+	bool mesh_shader_required = false;
 	// GodotNext: nextgi_ray_query_census (#186). Versions created by ray-query ShaderRDs in this
 	// process, so the software tier can prove it never creates one.
 	static inline SafeNumeric<uint64_t> ray_query_versions_created{ 0 };
@@ -184,6 +186,9 @@ private:
 		STAGE_TYPE_CLOSEST_HIT,
 		STAGE_TYPE_MISS,
 		STAGE_TYPE_INTERSECTION,
+		// GodotNext: rd_mesh_shaders (#178)
+		STAGE_TYPE_TASK,
+		STAGE_TYPE_MESH,
 		STAGE_TYPE_MAX,
 	};
 
@@ -209,11 +214,17 @@ protected:
 	static CharString _decompress_code(const uint8_t *p_compressed, int p_compressed_size, int p_size);
 	void setup(const char *p_vertex_code, const char *p_fragment_code, const char *p_compute_code, const char *p_name);
 	void setup_raytracing(const char *p_raygen_code, const char *p_any_hit_code, const char *p_closest_hit_code, const char *p_miss_code, const char *p_intersection_code, const char *p_name);
+	// GodotNext: rd_mesh_shaders (#178). A render shader whose pre-raster stages are a task shader (p_task_code may be
+	// null) and a mesh shader. glsl_builders.py calls it for files with #[mesh] (and #[task]) sections. Only devices
+	// with RenderingDevice::SUPPORTS_MESH_SHADER create its variants.
+	void setup_mesh(const char *p_task_code, const char *p_mesh_code, const char *p_fragment_code, const char *p_name);
 
 public:
 	// GodotNext: shader_baker_ray_query
 	void set_requires_ray_query(bool p_enabled) { ray_query_required = p_enabled; }
 	bool requires_ray_query() const { return ray_query_required; }
+	// GodotNext: rd_mesh_shaders (#178). The shader baker bakes these only for formats with mesh stages.
+	bool requires_mesh_shader() const { return mesh_shader_required; }
 	// GodotNext: nextgi_ray_query_census (#186)
 	static uint64_t get_ray_query_versions_created() { return ray_query_versions_created.get(); }
 

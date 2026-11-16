@@ -45,8 +45,10 @@ public:
 	// GodotNext: rd_atomics64 (#175). Version 3 added ReflectionData::int64_atomics.
 	// GodotNext: dxil_toolchain (#123). Version 4 added ReflectionData::has_ray_query. constexpr, so it can be
 	// passed by reference without an out-of-class definition.
-	// GodotNext: rd_rt_pipelines (#179). Version 5 adds ReflectionData::raytracing_reorder.
-	static constexpr uint32_t CONTAINER_VERSION = 5;
+	// GodotNext: rd_rt_pipelines (#179). Version 5 added ReflectionData::raytracing_reorder.
+	// GodotNext: rd_mesh_shaders (#178). Version 6 adds the task and mesh stages and their workgroup sizes
+	// (ReflectionData::task_local_size and mesh_local_size).
+	static constexpr uint32_t CONTAINER_VERSION = 6;
 
 protected:
 	using RDC = RenderingDeviceCommons;
@@ -78,13 +80,16 @@ protected:
 		uint32_t int64_atomics = 0;
 		// GodotNext: dxil_toolchain (#123). Takes the word that was padding in version 3.
 		uint32_t has_ray_query = 0;
-		// GodotNext: rd_rt_pipelines (#179). RDRTPipeline::ReorderUsage bits, appended in version 5. The explicit
-		// padding keeps the struct free of uninitialized bytes when it is copied into a container; a later field
-		// can take it.
+		// GodotNext: rd_rt_pipelines (#179). RDRTPipeline::ReorderUsage bits, appended in version 5.
 		uint32_t raytracing_reorder = 0;
+		// GodotNext: rd_mesh_shaders (#178). Appended in version 6: the six words take the word that was padding in
+		// version 5 and end at 100 bytes, so an explicit padding word keeps the struct a multiple of its 8-byte
+		// alignment and free of uninitialized bytes when it is copied into a container; a later field can take it.
+		uint32_t task_local_size[3] = {};
+		uint32_t mesh_local_size[3] = {};
 		uint32_t padding = 0;
 	};
-	static_assert(sizeof(ReflectionData) == 80, "ReflectionData must not contain implicit padding.");
+	static_assert(sizeof(ReflectionData) == 104, "ReflectionData must not contain implicit padding.");
 
 	struct ReflectionBindingData {
 		uint32_t type = 0;
@@ -145,13 +150,25 @@ protected:
 
 	template <class T>
 	struct ReflectSymbol {
-		static constexpr uint32_t STAGE_INDEX[RDC::SHADER_STAGE_MAX] = {
+		// GodotNext: rd_mesh_shaders (#178). Sized by its initializer, so a stage without an entry fails the
+		// static_assert below instead of reading 0.
+		static constexpr uint32_t STAGE_INDEX[] = {
 			0, // SHADER_STAGE_VERTEX
 			1, // SHADER_STAGE_FRAGMENT
 			0, // SHADER_STAGE_TESSELATION_CONTROL
 			1, // SHADER_STAGE_TESSELATION_EVALUATION
 			0, // SHADER_STAGE_COMPUTE
+			0, // SHADER_STAGE_RAYGEN
+			0, // SHADER_STAGE_ANY_HIT
+			0, // SHADER_STAGE_CLOSEST_HIT
+			0, // SHADER_STAGE_MISS
+			0, // SHADER_STAGE_INTERSECTION
+			// GodotNext: rd_mesh_shaders (#178). A symbol keeps the first stage that declares it, as the
+			// ray-tracing stages do.
+			0, // SHADER_STAGE_TASK
+			0, // SHADER_STAGE_MESH
 		};
+		static_assert(std_size(STAGE_INDEX) == RDC::SHADER_STAGE_MAX);
 
 		BitField<RDC::ShaderStage> stages = {};
 
@@ -249,6 +266,9 @@ protected:
 		bool has_dynamic_buffers = false;
 		bool has_ray_query = false; // GodotNext: dxil_toolchain (#123).
 		uint32_t int64_atomics = 0; // GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits.
+		// GodotNext: rd_mesh_shaders (#178). The workgroup sizes of the task and mesh stages.
+		uint32_t task_local_size[3] = {};
+		uint32_t mesh_local_size[3] = {};
 		// GodotNext: rd_indirect_count (#177). A compile option, not reflected and not stored in the container:
 		// gl_InstanceIndex includes firstInstance (D3D12 compiles the shader for shader model 6.8).
 		bool base_instance_native = false;
@@ -346,4 +366,7 @@ public:
 	virtual ShaderSpirvVersion get_shader_spirv_version(ShaderStage p_stage) const = 0;
 	// GodotNext: shader_baker_ray_query
 	virtual bool supports_acceleration_structures() const { return false; }
+	// GodotNext: rd_mesh_shaders (#178). Whether containers of this format can hold task and mesh stages, so the
+	// shader baker bakes the mesh-shader versions for them.
+	virtual bool supports_mesh_shaders() const { return false; }
 };

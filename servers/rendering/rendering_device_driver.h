@@ -333,6 +333,10 @@ public:
 		PIPELINE_STAGE_ALL_GRAPHICS_BIT = (1 << 15),
 		PIPELINE_STAGE_ALL_COMMANDS_BIT = (1 << 16),
 		PIPELINE_STAGE_CLEAR_STORAGE_BIT = (1 << 17),
+		// GodotNext: rd_mesh_shaders (#178). The values of VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT and
+		// VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT.
+		PIPELINE_STAGE_TASK_SHADER_BIT = (1 << 19),
+		PIPELINE_STAGE_MESH_SHADER_BIT = (1 << 20),
 		PIPELINE_STAGE_RAY_TRACING_SHADER_BIT = (1 << 21),
 		PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT = (1 << 22),
 		PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT = (1 << 23),
@@ -738,6 +742,15 @@ public:
 	// inside a render pass (Metal clamps the records with a compute pass). The other parameters are the draw's.
 	virtual void command_render_draw_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, bool p_indexed, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {}
 
+	// GodotNext: rd_mesh_shaders (#178). Task and mesh shader draws, with a pipeline whose pre-raster stages are task
+	// (optional) and mesh shaders bound. The indirect records are three uint32 group counts (x, y, z).
+	virtual void command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) = 0;
+	virtual void command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) = 0;
+	virtual void command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
+	// Like command_render_draw_indirect_count_prepare(), for the indirect-count mesh task draws of a draw list. Both
+	// hooks are called in the order the draws were recorded.
+	virtual void command_render_draw_mesh_tasks_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {}
+
 	// Buffer binding.
 	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) = 0;
 	virtual void command_render_bind_index_buffer(CommandBufferID p_cmd_buffer, BufferID p_buffer, IndexBufferFormat p_format, uint64_t p_offset) = 0;
@@ -1123,6 +1136,47 @@ public:
 	// (B8G8R8A8_SNORM, or A2R10G10B10_UNORM_PACK32 through an SRV swizzle a build never applies) are not
 	// included: a build would read their components in the wrong order.
 	static bool d3d12_acceleration_structure_vertex_format_supported(DataFormat p_format);
+
+	// GodotNext: rd_mesh_shaders (#178)
+	// Pure mesh-shader capability rules (SUPPORTS_MESH_SHADER and SUPPORTS_MESH_SHADER_INDIRECT), always compiled so
+	// the doctests run without a GPU. indirect is never true without mesh.
+	struct MeshShaderCaps {
+		bool mesh = false;
+		bool indirect = false;
+	};
+	// Metal: object and mesh functions from Apple7 with MSL 3.0 (macOS 13, iOS 16) and argument buffers, which the
+	// driver's mesh pipelines bind; indirect mesh draws need Apple9 (plan §21.1.5). p_msl_version uses
+	// major * 10000 + minor * 100, like metal_ray_query_caps(). The driver passes the device's values, the shader
+	// baker an export profile's.
+	static constexpr uint32_t METAL_MESH_SHADER_FAMILY = 1007; // Apple7.
+	static constexpr uint32_t METAL_MESH_SHADER_INDIRECT_FAMILY = 1009; // Apple9.
+	static constexpr uint32_t METAL_MESH_SHADER_MIN_MSL = 30000; // MSL 3.0.
+	static MeshShaderCaps metal_mesh_shader_caps(uint32_t p_apple_family, uint32_t p_msl_version, bool p_argument_buffers);
+	// D3D12: p_mesh_shader_tier is D3D12_FEATURE_DATA_D3D12_OPTIONS7::MeshShaderTier (0, or 10 for tier 1), and
+	// p_dxil_mesh_stages whether the shader container translates task and mesh stages to DXIL, which it does not
+	// yet. r_log_line is the one line the driver prints about it when it checks the device.
+	static constexpr uint32_t D3D12_MESH_SHADER_TIER_1 = 10;
+	static MeshShaderCaps d3d12_mesh_shader_caps(uint32_t p_mesh_shader_tier, bool p_dxil_mesh_stages, String &r_log_line);
+
+	// GodotNext: rd_mesh_shaders (#178)
+	// The group counts a mesh task draw may launch, which a driver reports through limit_get(): task workgroups (from
+	// a draw whose pipeline has a task stage) and mesh workgroups (from a draw without one, or from one task
+	// workgroup). Every field is 0 on a device without SUPPORTS_MESH_SHADER.
+	struct MeshShaderLimits {
+		uint64_t max_task_workgroup_count[3] = {};
+		uint64_t max_task_workgroup_total_count = 0;
+		uint64_t max_mesh_workgroup_count[3] = {};
+		uint64_t max_mesh_workgroup_total_count = 0;
+	};
+	// Writes r_value and returns true when p_limit is one of the eight mesh task group-count limits.
+	static bool mesh_shader_limit_get(Limit p_limit, const MeshShaderLimits &p_limits, uint64_t &r_value);
+	// Metal Feature Set Tables: no limit on the threadgroups of an object shader grid (reported as UINT32_MAX, the
+	// most a draw can ask for, as the driver reports its compute counts); threadgroups per mesh shader grid 1024 on
+	// Apple7 and Apple8, 1,048,575 on Apple9 and 4,194,303 from Apple10.
+	static MeshShaderLimits metal_mesh_shader_limits(uint32_t p_apple_family, bool p_mesh_shader);
+	// The Direct3D 12 mesh shader specification: each DispatchMesh() group count below 64k, and their product at most
+	// 2^22, from the command list and from an amplification shader alike.
+	static MeshShaderLimits d3d12_mesh_shader_limits(bool p_mesh_shader);
 
 	// The acceleration-structure limits a driver reports through limit_get(). Every field is 0 on
 	// a device without ray query and wherever the API does not report the limit.

@@ -55,8 +55,9 @@ String ShaderBakerExportPlugin::get_name() const {
 }
 
 // GodotNext: shader_baker_ray_query
-bool ShaderBakerExportPlugin::should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures) {
-	return !p_requires_ray_query || p_supports_acceleration_structures;
+bool ShaderBakerExportPlugin::should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures, bool p_requires_mesh_shader, bool p_supports_mesh_shaders) {
+	// GodotNext: rd_mesh_shaders (#178)
+	return (!p_requires_ray_query || p_supports_acceleration_structures) && (!p_requires_mesh_shader || p_supports_mesh_shaders);
 }
 
 // GodotNext: scene customization
@@ -124,6 +125,7 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	tasks_total = 0;
 	skipped_ray_query_versions = 0;
 	baked_ray_query_versions = 0;
+	skipped_mesh_shader_versions = 0; // GodotNext: rd_mesh_shaders (#178)
 	tasks_cancelled = false;
 
 	StringBuilder to_hash;
@@ -210,6 +212,10 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 	// GodotNext: shader_baker_ray_query
 	if (!shader_container_driver.is_empty()) {
 		print_line(vformat("Shader baker: driver '%s', baked %d and skipped %d ray-query shader version(s).", shader_container_driver, baked_ray_query_versions, skipped_ray_query_versions));
+		// GodotNext: rd_mesh_shaders (#178)
+		if (skipped_mesh_shader_versions > 0) {
+			print_line(vformat("Shader baker: driver '%s' cannot hold task and mesh shaders; skipped %d mesh-shader version(s).", shader_container_driver, skipped_mesh_shader_versions));
+		}
 	}
 
 	if (!_initialize_cache_directory()) {
@@ -408,6 +414,11 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 	ERR_FAIL_NULL(shader_container_format);
 	if (!should_bake_version(p_shader->requires_ray_query(), shader_container_format->supports_acceleration_structures())) {
 		skipped_ray_query_versions++;
+		return;
+	}
+	// GodotNext: rd_mesh_shaders (#178). Only for formats whose platform runs task and mesh shaders.
+	if (!should_bake_version(false, false, p_shader->requires_mesh_shader(), shader_container_format->supports_mesh_shaders())) {
+		skipped_mesh_shader_versions++;
 		return;
 	}
 

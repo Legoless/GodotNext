@@ -46,9 +46,41 @@ GODOT_GCC_WARNING_PUSH_AND_IGNORE("-Wshadow")
 
 GODOT_GCC_WARNING_POP
 
+// GodotNext: rd_mesh_shaders (#178). Whether a line of the source enables GL_EXT_mesh_shader: an #extension directive
+// with require, enable or warn. A comment or a "disable" that names it does not.
+static bool _source_enables_mesh_shader_extension(const String &p_source_code) {
+	if (!p_source_code.contains("GL_EXT_mesh_shader")) {
+		return false;
+	}
+	for (const String &line : p_source_code.split("\n")) {
+		String directive = line.strip_edges();
+		if (!directive.begins_with("#")) {
+			continue;
+		}
+		directive = directive.substr(1).strip_edges();
+		if (!directive.begins_with("extension")) {
+			continue;
+		}
+		directive = directive.substr(int(sizeof("extension")) - 1).strip_edges();
+		if (!directive.begins_with("GL_EXT_mesh_shader")) {
+			continue;
+		}
+		directive = directive.substr(int(sizeof("GL_EXT_mesh_shader")) - 1).strip_edges();
+		if (!directive.begins_with(":")) {
+			continue;
+		}
+		directive = directive.substr(1).strip_edges();
+		if (directive.begins_with("require") || directive.begins_with("enable") || directive.begins_with("warn")) {
+			return true;
+		}
+	}
+	return false;
+}
+
 Vector<uint8_t> compile_glslang_shader(RenderingDeviceCommons::ShaderStage p_stage, const String &p_source_code, RenderingDeviceCommons::ShaderLanguageVersion p_language_version, RenderingDeviceCommons::ShaderSpirvVersion p_spirv_version, String *r_error) {
 	Vector<uint8_t> ret;
-	EShLanguage stages[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
+	// GodotNext: rd_mesh_shaders (#178). Sized by the initializer, so a stage without an entry fails to compile.
+	static const EShLanguage stages[] = {
 		EShLangVertex,
 		EShLangFragment,
 		EShLangTessControl,
@@ -59,7 +91,20 @@ Vector<uint8_t> compile_glslang_shader(RenderingDeviceCommons::ShaderStage p_sta
 		EShLangClosestHit,
 		EShLangMiss,
 		EShLangIntersect,
+		// GL_EXT_mesh_shader needs SPIR-V 1.4, which every container format asks for these two stages.
+		EShLangTask,
+		EShLangMesh,
 	};
+	static_assert(std_size(stages) == RenderingDeviceCommons::SHADER_STAGE_MAX);
+	ERR_FAIL_INDEX_V(p_stage, RenderingDeviceCommons::SHADER_STAGE_MAX, ret);
+
+	// GodotNext: rd_mesh_shaders (#178). GL_EXT_mesh_shader needs SPIR-V 1.4, and glslang refuses lower targets. The
+	// fragment shader of a mesh pipeline enables it to read per-primitive values (perprimitiveEXT), while container
+	// formats ask for SPIR-V 1.3 for every fragment shader (Vulkan 1.1 devices). A device that runs mesh shaders
+	// takes SPIR-V 1.4, so a stage that enables the extension is compiled for it.
+	if (p_spirv_version < RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_4 && _source_enables_mesh_shader_extension(p_source_code)) {
+		p_spirv_version = RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_4;
+	}
 
 	int ClientInputSemanticsVersion = 100; // maps to, say, #define VULKAN 100
 

@@ -2396,6 +2396,11 @@ static void _rd_stages_to_d3d12(BitField<RDD::PipelineStageBits> p_stages, D3D12
 			r_sync |= D3D12_BARRIER_SYNC_VERTEX_SHADING;
 		}
 
+		// GodotNext: rd_mesh_shaders (#178). Likewise for the amplification and mesh stages, which precede pixel shading.
+		if (p_stages.has_flag(RDD::PIPELINE_STAGE_TASK_SHADER_BIT) || p_stages.has_flag(RDD::PIPELINE_STAGE_MESH_SHADER_BIT)) {
+			r_sync |= D3D12_BARRIER_SYNC_VERTEX_SHADING;
+		}
+
 		if (p_stages.has_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT) || p_stages.has_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT)) {
 			r_sync |= D3D12_BARRIER_SYNC_PIXEL_SHADING;
 		}
@@ -2920,6 +2925,7 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_1.GetAddressOf());
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_4.GetAddressOf()); // GodotNext: d3d12_dxr (#118)
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_5.GetAddressOf());
+	cmd_list->QueryInterface(cmd_buf_info->cmd_list_6.GetAddressOf()); // GodotNext: rd_mesh_shaders (#178)
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_7.GetAddressOf());
 
 	cmd_buf_info->uav_alloc = uav_alloc;
@@ -3626,7 +3632,8 @@ RDD::ShaderID RenderingDeviceDriverD3D12::shader_create_from_container(const Ref
 		if (requires_decompression) {
 			decompressed_code.resize(shader.code_decompressed_size);
 			bool decompressed = p_shader_container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, decompressed_code.ptrw(), decompressed_code.size());
-			ERR_FAIL_COND_V_MSG(!decompressed, ShaderID(), vformat("Failed to decompress code on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]])));
+			// GodotNext: rd_mesh_shaders (#178). The stage of this code entry, not stages_vector[i] (stage order).
+			ERR_FAIL_COND_V_MSG(!decompressed, ShaderID(), vformat("Failed to decompress code on shader stage %s.", String(SHADER_STAGE_NAMES[shader.shader_stage])));
 		}
 
 		if (requires_decompression) {
@@ -5485,6 +5492,43 @@ void RenderingDeviceDriverD3D12::command_render_draw_indirect_count(CommandBuffe
 	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
 }
 
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDeviceDriverD3D12::command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	ERR_FAIL_NULL_MSG(cmd_buf_info->cmd_list_6.Get(), "DispatchMesh() needs ID3D12GraphicsCommandList6.");
+	cmd_buf_info->cmd_list_6->DispatchMesh(p_group_count_x, p_group_count_y, p_group_count_z);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDeviceDriverD3D12::command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_resource_transition_batch(cmd_buf_info, indirect_buf_info, 0, 1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, p_stride, p_draw_count);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_draw_count, indirect_buf_info->resource, p_offset, nullptr, 0);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDeviceDriverD3D12::command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
+	BufferInfo *count_buf_info = (BufferInfo *)p_count_buffer.id;
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_resource_transition_batch(cmd_buf_info, indirect_buf_info, 0, 1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+		_resource_transition_batch(cmd_buf_info, count_buf_info, 0, 1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH, p_stride, p_max_draw_count);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
+}
+
 void RenderingDeviceDriverD3D12::command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 
@@ -5878,10 +5922,14 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 	bool ok = _shader_apply_specialization_constants(shader_info_in, p_specialization_constants, final_stages_bytecode);
 	ERR_FAIL_COND_V(!ok, PipelineID());
 
-	pipeline_desc.VS = D3D12_SHADER_BYTECODE{
-		final_stages_bytecode[SHADER_STAGE_VERTEX].ptr(),
-		(SIZE_T)final_stages_bytecode[SHADER_STAGE_VERTEX].size()
-	};
+	// GodotNext: rd_mesh_shaders (#178). Amplification and mesh shaders take the vertex shader's place.
+	const bool mesh_pipeline = final_stages_bytecode.has(SHADER_STAGE_MESH);
+	if (!mesh_pipeline) {
+		pipeline_desc.VS = D3D12_SHADER_BYTECODE{
+			final_stages_bytecode[SHADER_STAGE_VERTEX].ptr(),
+			(SIZE_T)final_stages_bytecode[SHADER_STAGE_VERTEX].size()
+		};
+	}
 	pipeline_desc.PS = D3D12_SHADER_BYTECODE{
 		final_stages_bytecode[SHADER_STAGE_FRAGMENT].ptr(),
 		(SIZE_T)final_stages_bytecode[SHADER_STAGE_FRAGMENT].size()
@@ -5891,7 +5939,36 @@ RDD::PipelineID RenderingDeviceDriverD3D12::render_pipeline_create(
 	device->QueryInterface(device_2.GetAddressOf());
 	ComPtr<ID3D12PipelineState> pso;
 	HRESULT res = E_FAIL;
-	if (device_2) {
+	if (mesh_pipeline) {
+		// GodotNext: rd_mesh_shaders (#178). A stream with the AS and MS subobjects and the same states, without an
+		// input layout or vertex shader.
+		ERR_FAIL_COND_V_MSG(!device_2, PipelineID(), "Mesh shader pipelines need ID3D12Device2.");
+		CD3DX12_PIPELINE_STATE_STREAM2 mesh_desc;
+		mesh_desc.Flags = pipeline_desc.Flags;
+		mesh_desc.NodeMask = pipeline_desc.NodeMask;
+		mesh_desc.pRootSignature = pipeline_desc.pRootSignature;
+		mesh_desc.PrimitiveTopologyType = pipeline_desc.PrimitiveTopologyType;
+		mesh_desc.PS = pipeline_desc.PS;
+		if (final_stages_bytecode.has(SHADER_STAGE_TASK)) {
+			const Vector<uint8_t> &task_bytecode = final_stages_bytecode[SHADER_STAGE_TASK];
+			mesh_desc.AS = D3D12_SHADER_BYTECODE{ task_bytecode.ptr(), (SIZE_T)task_bytecode.size() };
+		}
+		const Vector<uint8_t> &mesh_bytecode = final_stages_bytecode[SHADER_STAGE_MESH];
+		mesh_desc.MS = D3D12_SHADER_BYTECODE{ mesh_bytecode.ptr(), (SIZE_T)mesh_bytecode.size() };
+		mesh_desc.BlendState = pipeline_desc.BlendState;
+		mesh_desc.DepthStencilState = pipeline_desc.DepthStencilState;
+		mesh_desc.DSVFormat = pipeline_desc.DSVFormat;
+		mesh_desc.RasterizerState = pipeline_desc.RasterizerState;
+		mesh_desc.RTVFormats = pipeline_desc.RTVFormats;
+		mesh_desc.SampleDesc = pipeline_desc.SampleDesc;
+		mesh_desc.SampleMask = pipeline_desc.SampleMask;
+		mesh_desc.CachedPSO = pipeline_desc.CachedPSO;
+		mesh_desc.ViewInstancingDesc = pipeline_desc.ViewInstancingDesc;
+		D3D12_PIPELINE_STATE_STREAM_DESC pssd = {};
+		pssd.pPipelineStateSubobjectStream = &mesh_desc;
+		pssd.SizeInBytes = sizeof(mesh_desc);
+		res = device_2->CreatePipelineState(&pssd, IID_PPV_ARGS(pso.GetAddressOf()));
+	} else if (device_2) {
 		D3D12_PIPELINE_STATE_STREAM_DESC pssd = {};
 		pssd.pPipelineStateSubobjectStream = &pipeline_desc;
 		pssd.SizeInBytes = sizeof(pipeline_desc);
@@ -6784,6 +6861,11 @@ uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 	if (acceleration_structure_limit_get(p_limit, acceleration_structure_limits, acceleration_structure_value)) {
 		return acceleration_structure_value;
 	}
+	// GodotNext: rd_mesh_shaders (#178). 0 while mesh shaders are off (#122).
+	uint64_t mesh_shader_value = 0;
+	if (mesh_shader_limit_get(p_limit, d3d12_mesh_shader_limits(mesh_shader_caps.mesh), mesh_shader_value)) {
+		return mesh_shader_value;
+	}
 	switch (p_limit) {
 		// GodotNext: rd_bindless (#176)
 		case LIMIT_MAX_BINDLESS_TEXTURES:
@@ -6920,6 +7002,11 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return true;
 		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
 			return shader_capabilities.base_instance_native_supported();
+		// GodotNext: rd_mesh_shaders (#178). False until the shader container translates task and mesh stages (#122).
+		case SUPPORTS_MESH_SHADER:
+			return mesh_shader_caps.mesh;
+		case SUPPORTS_MESH_SHADER_INDIRECT:
+			return mesh_shader_caps.indirect;
 		default:
 			return false;
 	}
@@ -7314,6 +7401,18 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	}
 	print_verbose(vformat("- D3D12 indirect draws: base instance in shaders %s (shader model %s, extended command information %s)", shader_capabilities.base_instance_native_supported() ? "supported" : "not supported", D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model), shader_capabilities.extended_command_info_supported ? "supported" : "not supported"));
 
+	// GodotNext: rd_mesh_shaders (#178). The driver can build mesh pipelines and record mesh draws, but the shader
+	// container does not translate task and mesh stages to DXIL until the Mesa fork's mesh patch lands (#122), so
+	// SUPPORTS_MESH_SHADER stays false. One line says so, with the device's tier.
+	D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7));
+	if (SUCCEEDED(res)) {
+		mesh_shader_tier = uint32_t(options7.MeshShaderTier);
+	}
+	String mesh_shader_line;
+	mesh_shader_caps = d3d12_mesh_shader_caps(mesh_shader_tier, RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED, mesh_shader_line);
+	print_line(mesh_shader_line);
+
 	if (fsr_capabilities.pipeline_supported || fsr_capabilities.primitive_supported || fsr_capabilities.attachment_supported) {
 		print_verbose("- D3D12 Variable Rate Shading supported:");
 		if (fsr_capabilities.pipeline_supported) {
@@ -7587,6 +7686,9 @@ static uint32_t indirect_argument_size(D3D12_INDIRECT_ARGUMENT_TYPE p_type) {
 			return sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
 		case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH:
 			return sizeof(D3D12_DISPATCH_ARGUMENTS);
+		// GodotNext: rd_mesh_shaders (#178). Made on first use only: a device without mesh shaders cannot create it.
+		case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH:
+			return sizeof(D3D12_DISPATCH_MESH_ARGUMENTS);
 		default:
 			return 0;
 	}

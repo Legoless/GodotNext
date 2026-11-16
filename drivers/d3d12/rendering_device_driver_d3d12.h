@@ -180,6 +180,9 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		static constexpr uint32_t SAMPLER_DESCRIPTORS = RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE;
 	};
 	BindlessCapabilities bindless_capabilities;
+	// GodotNext: rd_mesh_shaders (#178). OPTIONS7.MeshShaderTier, and what has_feature() reports for it.
+	uint32_t mesh_shader_tier = 0;
+	MeshShaderCaps mesh_shader_caps;
 	SamplerCapabilities sampler_capabilities;
 	// GodotNext: d3d12_dxr (#118)
 	D3D12RayQueryCaps ray_query_caps;
@@ -589,6 +592,7 @@ private:
 		// GodotNext: d3d12_dxr (#118). Acceleration-structure builds, copies and postbuild info.
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmd_list_4;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> cmd_list_5;
+		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList6> cmd_list_6; // GodotNext: rd_mesh_shaders (#178). DispatchMesh().
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList7> cmd_list_7;
 
 		ID3D12PipelineState *graphics_pso = nullptr;
@@ -913,6 +917,10 @@ public:
 	virtual void command_render_draw_indexed_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 	virtual void command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
 	virtual void command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
+	// GodotNext: rd_mesh_shaders (#178). DispatchMesh() and ExecuteIndirect() with D3D12_DISPATCH_MESH_ARGUMENTS records.
+	virtual void command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) override final;
+	virtual void command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
+	virtual void command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 
 	// Buffer binding.
 	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) override final;

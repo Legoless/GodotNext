@@ -162,6 +162,93 @@ bool RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported
 	}
 }
 
+// GodotNext: rd_mesh_shaders (#178)
+RenderingDeviceDriver::MeshShaderCaps RenderingDeviceDriver::metal_mesh_shader_caps(uint32_t p_apple_family, uint32_t p_msl_version, bool p_argument_buffers) {
+	MeshShaderCaps caps;
+	caps.mesh = p_apple_family >= METAL_MESH_SHADER_FAMILY && p_msl_version >= METAL_MESH_SHADER_MIN_MSL && p_argument_buffers;
+	caps.indirect = caps.mesh && p_apple_family >= METAL_MESH_SHADER_INDIRECT_FAMILY;
+	return caps;
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+RenderingDeviceDriver::MeshShaderCaps RenderingDeviceDriver::d3d12_mesh_shader_caps(uint32_t p_mesh_shader_tier, bool p_dxil_mesh_stages, String &r_log_line) {
+	MeshShaderCaps caps;
+	const String tier = p_mesh_shader_tier >= D3D12_MESH_SHADER_TIER_1 ? String("1") : String("none");
+	if (p_mesh_shader_tier < D3D12_MESH_SHADER_TIER_1) {
+		r_log_line = vformat("D3D12: Mesh shaders are off: the device has no mesh shader support (mesh shader tier %s).", tier);
+	} else if (!p_dxil_mesh_stages) {
+		r_log_line = vformat("D3D12: Mesh shaders are off: the shader compiler does not translate task and mesh shaders to DXIL yet (mesh shader tier %s).", tier);
+	} else {
+		caps.mesh = true;
+		// ExecuteIndirect takes D3D12_DISPATCH_MESH_ARGUMENTS records, with a count buffer too.
+		caps.indirect = true;
+		r_log_line = vformat("D3D12: Mesh shaders are on (mesh shader tier %s).", tier);
+	}
+	return caps;
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+bool RenderingDeviceDriver::mesh_shader_limit_get(Limit p_limit, const MeshShaderLimits &p_limits, uint64_t &r_value) {
+	switch (p_limit) {
+		case LIMIT_MAX_TASK_WORKGROUP_COUNT_X:
+		case LIMIT_MAX_TASK_WORKGROUP_COUNT_Y:
+		case LIMIT_MAX_TASK_WORKGROUP_COUNT_Z:
+			r_value = p_limits.max_task_workgroup_count[p_limit - LIMIT_MAX_TASK_WORKGROUP_COUNT_X];
+			return true;
+		case LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT:
+			r_value = p_limits.max_task_workgroup_total_count;
+			return true;
+		case LIMIT_MAX_MESH_WORKGROUP_COUNT_X:
+		case LIMIT_MAX_MESH_WORKGROUP_COUNT_Y:
+		case LIMIT_MAX_MESH_WORKGROUP_COUNT_Z:
+			r_value = p_limits.max_mesh_workgroup_count[p_limit - LIMIT_MAX_MESH_WORKGROUP_COUNT_X];
+			return true;
+		case LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT:
+			r_value = p_limits.max_mesh_workgroup_total_count;
+			return true;
+		default:
+			return false;
+	}
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+RenderingDeviceDriver::MeshShaderLimits RenderingDeviceDriver::metal_mesh_shader_limits(uint32_t p_apple_family, bool p_mesh_shader) {
+	MeshShaderLimits limits;
+	if (!p_mesh_shader) {
+		return limits;
+	}
+	for (uint64_t &count : limits.max_task_workgroup_count) {
+		count = UINT32_MAX;
+	}
+	limits.max_task_workgroup_total_count = UINT32_MAX;
+	uint64_t mesh_grid = 1024; // Apple7 and Apple8.
+	if (p_apple_family >= 1010) {
+		mesh_grid = 4194303;
+	} else if (p_apple_family >= 1009) {
+		mesh_grid = 1048575;
+	}
+	for (uint64_t &count : limits.max_mesh_workgroup_count) {
+		count = mesh_grid;
+	}
+	limits.max_mesh_workgroup_total_count = mesh_grid;
+	return limits;
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+RenderingDeviceDriver::MeshShaderLimits RenderingDeviceDriver::d3d12_mesh_shader_limits(bool p_mesh_shader) {
+	MeshShaderLimits limits;
+	if (!p_mesh_shader) {
+		return limits;
+	}
+	for (uint32_t i = 0; i < 3; i++) {
+		limits.max_task_workgroup_count[i] = 65535;
+		limits.max_mesh_workgroup_count[i] = 65535;
+	}
+	limits.max_task_workgroup_total_count = uint64_t(1) << 22;
+	limits.max_mesh_workgroup_total_count = uint64_t(1) << 22;
+	return limits;
+}
+
 bool RenderingDeviceDriver::acceleration_structure_limit_get(Limit p_limit, const AccelerationStructureLimits &p_limits, uint64_t &r_value) {
 	switch (p_limit) {
 		case LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES:

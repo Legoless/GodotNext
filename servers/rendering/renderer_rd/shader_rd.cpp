@@ -98,6 +98,12 @@ void ShaderRD::_add_stage(const char *p_code, StageType p_stage_type) {
 				case STAGE_TYPE_INTERSECTION:
 					chunk.type = StageTemplate::Chunk::TYPE_INTERSECTION_GLOBALS;
 					break;
+				// GodotNext: rd_mesh_shaders (#178). Versions carry no globals for these stages, so the line adds no
+				// code (the chunk type is otherwise left unset).
+				case STAGE_TYPE_TASK:
+				case STAGE_TYPE_MESH:
+					chunk.type = StageTemplate::Chunk::TYPE_TEXT;
+					break;
 				default: {
 				}
 			}
@@ -240,6 +246,38 @@ void ShaderRD::setup_raytracing(const char *p_raygen_code, const char *p_any_hit
 	tohash.append(p_miss_code ? p_miss_code : "");
 	tohash.append("[Intersection]");
 	tohash.append(p_intersection_code ? p_intersection_code : "");
+	tohash.append("[DebugInfo]");
+	tohash.append(Engine::get_singleton()->is_generate_spirv_debug_info_enabled() ? "1" : "0");
+
+	base_sha256 = tohash.as_string().sha256_text();
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void ShaderRD::setup_mesh(const char *p_task_code, const char *p_mesh_code, const char *p_fragment_code, const char *p_name) {
+	ERR_FAIL_NULL_MSG(p_mesh_code, "A mesh shader setup needs mesh shader code.");
+	name = p_name;
+
+	pipeline_type = RD::PIPELINE_TYPE_RASTERIZATION;
+	mesh_shader_required = true;
+	if (p_task_code) {
+		_add_stage(p_task_code, STAGE_TYPE_TASK);
+	}
+	_add_stage(p_mesh_code, STAGE_TYPE_MESH);
+	if (p_fragment_code) {
+		_add_stage(p_fragment_code, STAGE_TYPE_FRAGMENT);
+	}
+
+	StringBuilder tohash;
+	tohash.append("[GodotVersionNumber]");
+	tohash.append(GODOT_VERSION_NUMBER);
+	tohash.append("[GodotVersionHash]");
+	tohash.append(GODOT_VERSION_HASH);
+	tohash.append("[Task]");
+	tohash.append(p_task_code ? p_task_code : "");
+	tohash.append("[Mesh]");
+	tohash.append(p_mesh_code);
+	tohash.append("[Fragment]");
+	tohash.append(p_fragment_code ? p_fragment_code : "");
 	tohash.append("[DebugInfo]");
 	tohash.append(Engine::get_singleton()->is_generate_spirv_debug_info_enabled() ? "1" : "0");
 
@@ -422,6 +460,25 @@ Vector<String> ShaderRD::_build_variant_stage_sources(uint32_t p_variant, Compil
 			_build_variant_code(builder, p_variant, p_data.version, stage_templates[STAGE_TYPE_INTERSECTION]);
 			stage_sources.write[RD::SHADER_STAGE_INTERSECTION] = builder.as_string();
 		}
+	} else if (mesh_shader_required) {
+		// GodotNext: rd_mesh_shaders (#178). Task (when present), mesh and fragment stages.
+		if (!stage_templates[STAGE_TYPE_TASK].chunks.is_empty()) {
+			StringBuilder builder;
+			_build_variant_code(builder, p_variant, p_data.version, stage_templates[STAGE_TYPE_TASK]);
+			stage_sources.write[RD::SHADER_STAGE_TASK] = builder.as_string();
+		}
+
+		{
+			StringBuilder builder;
+			_build_variant_code(builder, p_variant, p_data.version, stage_templates[STAGE_TYPE_MESH]);
+			stage_sources.write[RD::SHADER_STAGE_MESH] = builder.as_string();
+		}
+
+		if (!stage_templates[STAGE_TYPE_FRAGMENT].chunks.is_empty()) {
+			StringBuilder builder;
+			_build_variant_code(builder, p_variant, p_data.version, stage_templates[STAGE_TYPE_FRAGMENT]);
+			stage_sources.write[RD::SHADER_STAGE_FRAGMENT] = builder.as_string();
+		}
 	} else {
 		{
 			// Vertex stage.
@@ -486,6 +543,11 @@ static const char *_spirv_dump_stage_name(RD::ShaderStage p_stage) {
 			return "miss";
 		case RD::SHADER_STAGE_INTERSECTION:
 			return "intersection";
+		// GodotNext: rd_mesh_shaders (#178)
+		case RD::SHADER_STAGE_TASK:
+			return "task";
+		case RD::SHADER_STAGE_MESH:
+			return "mesh";
 		default:
 			return "stage";
 	}
@@ -698,6 +760,7 @@ static const char *shader_file_header = "GDSC";
 // one warning per run.
 // GodotNext: rd_rt_pipelines (#179). Container version 5 keeps cache file version 5 too. A build with the same
 // version hash opens files that hold older (version-4) containers and rebuilds them the same way.
+// GodotNext: rd_mesh_shaders (#178). So does container version 6, whose older containers are version 5.
 static const uint32_t cache_file_version = 5;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {
@@ -1303,7 +1366,8 @@ Vector<RD::ShaderStageSPIRVData> ShaderRD::compile_stages(const Vector<String> &
 	}
 
 	if (compilation_failed) {
-		ERR_PRINT("Error compiling " + String(compilation_failed_stage == RD::SHADER_STAGE_COMPUTE ? "Compute " : (compilation_failed_stage == RD::SHADER_STAGE_VERTEX ? "Vertex" : "Fragment")) + " shader.");
+		// GodotNext: rd_mesh_shaders (#178). Every stage by name; the old choice called any other stage "Fragment".
+		ERR_PRINT("Error compiling " + String(RD::SHADER_STAGE_NAMES[compilation_failed_stage]) + " shader.");
 		ERR_PRINT(error);
 
 #ifdef DEBUG_ENABLED

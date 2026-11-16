@@ -1350,6 +1350,17 @@ RDD::ShaderID RenderingDeviceDriverMetal::shader_create_from_container(const Ref
 				mtl_reflection_data.uses_argument_buffers(),
 				libraries[RDD::ShaderStage::SHADER_STAGE_VERTEX],
 				libraries[RDD::ShaderStage::SHADER_STAGE_FRAGMENT]);
+		// GodotNext: rd_mesh_shaders (#178). Mesh pipelines bind their resources through argument buffers only.
+		if (refl.is_mesh()) {
+			ERR_FAIL_COND_V_MSG(!mtl_reflection_data.uses_argument_buffers(), RDD::ShaderID(), "Mesh shaders need argument buffers on Metal.");
+			if (libraries.has(RDD::ShaderStage::SHADER_STAGE_TASK)) {
+				rs->task = libraries[RDD::ShaderStage::SHADER_STAGE_TASK];
+			}
+			rs->mesh = libraries[RDD::ShaderStage::SHADER_STAGE_MESH];
+			rs->task_local = MTL::Size(refl.task_local_size[0], refl.task_local_size[1], refl.task_local_size[2]);
+			rs->mesh_local = MTL::Size(refl.mesh_local_size[0], refl.mesh_local_size[1], refl.mesh_local_size[2]);
+			rs->task_payload_size = mtl_reflection_data.task_payload_size;
+		}
 		shader = rs;
 	}
 
@@ -1415,6 +1426,13 @@ RDD::UniformSetID RenderingDeviceDriverMetal::uniform_set_create(VectorView<Boun
 			}
 			if (stage.has_flag(RDD::SHADER_STAGE_COMPUTE_BIT)) {
 				*sru |= stage_resource_usage(RDD::SHADER_STAGE_COMPUTE, usage);
+			}
+			// GodotNext: rd_mesh_shaders (#178)
+			if (stage.has_flag(RDD::SHADER_STAGE_TASK_BIT)) {
+				*sru |= stage_resource_usage(RDD::SHADER_STAGE_TASK, usage);
+			}
+			if (stage.has_flag(RDD::SHADER_STAGE_MESH_BIT)) {
+				*sru |= stage_resource_usage(RDD::SHADER_STAGE_MESH, usage);
 			}
 		};
 // GodotNext: metal_shader_validation
@@ -1942,6 +1960,27 @@ void RenderingDeviceDriverMetal::command_render_draw_indirect_count(CommandBuffe
 	cb->render_draw_indirect_count(p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
 }
 
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDeviceDriverMetal::command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
+	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
+	cb->render_draw_mesh_tasks(p_group_count_x, p_group_count_y, p_group_count_z);
+}
+
+void RenderingDeviceDriverMetal::command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
+	cb->render_draw_mesh_tasks_indirect(p_indirect_buffer, p_offset, p_draw_count, p_stride);
+}
+
+void RenderingDeviceDriverMetal::command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
+	cb->render_draw_mesh_tasks_indirect_count(p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
+}
+
+void RenderingDeviceDriverMetal::command_render_draw_mesh_tasks_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
+	cb->render_draw_mesh_tasks_indirect_count_prepare(p_render_pass, p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
+}
+
 // GodotNext: rd_indirect_count (#177)
 void RenderingDeviceDriverMetal::command_render_draw_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, bool p_indexed, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
 	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
@@ -2360,6 +2399,52 @@ RDD::PipelineID RenderingDeviceDriverMetal::render_pipeline_create(
 
 	if (p_dynamic_state.has_flag(DYNAMIC_STATE_STENCIL_REFERENCE)) {
 		pipeline->raster_state.stencil.enabled = true;
+	}
+
+	// GodotNext: rd_mesh_shaders (#178). A mesh pipeline: the same attachment, blend and raster settings in a
+	// MTLMeshRenderPipelineDescriptor, with object (optional), mesh and fragment functions and no vertex descriptor.
+	if (shader->is_mesh()) {
+		NS::SharedPtr<MTL::MeshRenderPipelineDescriptor> mesh_desc = NS::TransferPtr(MTL::MeshRenderPipelineDescriptor::alloc()->init());
+		mesh_desc->setLabel(desc->label());
+		for (uint32_t i = 0; i < 8; i++) {
+			mesh_desc->colorAttachments()->setObject(desc->colorAttachments()->object(i), i);
+		}
+		mesh_desc->setDepthAttachmentPixelFormat(desc->depthAttachmentPixelFormat());
+		mesh_desc->setStencilAttachmentPixelFormat(desc->stencilAttachmentPixelFormat());
+		mesh_desc->setRasterSampleCount(desc->rasterSampleCount());
+		mesh_desc->setAlphaToCoverageEnabled(desc->isAlphaToCoverageEnabled());
+		mesh_desc->setAlphaToOneEnabled(desc->isAlphaToOneEnabled());
+		mesh_desc->setRasterizationEnabled(desc->isRasterizationEnabled());
+		for (uint32_t i = 0; i < shader->sets.size(); i++) {
+			const MTL::Mutability mutability = shader->sets[i].dynamic_uniforms.is_empty() ? MTL::MutabilityImmutable : MTL::MutabilityMutable;
+			mesh_desc->objectBuffers()->object(i)->setMutability(mutability);
+			mesh_desc->meshBuffers()->object(i)->setMutability(mutability);
+			mesh_desc->fragmentBuffers()->object(i)->setMutability(mutability);
+		}
+
+		if (shader->task) {
+			Result<NS::SharedPtr<MTL::Function>> function_or_err = _create_function(shader->task.get(), MTLSTR("main0"), p_specialization_constants);
+			ERR_FAIL_COND_V(std::holds_alternative<Error>(function_or_err), PipelineID());
+			mesh_desc->setObjectFunction(std::get<NS::SharedPtr<MTL::Function>>(function_or_err).get());
+			mesh_desc->setPayloadMemoryLength(shader->task_payload_size);
+		}
+		{
+			Result<NS::SharedPtr<MTL::Function>> function_or_err = _create_function(shader->mesh.get(), MTLSTR("main0"), p_specialization_constants);
+			ERR_FAIL_COND_V(std::holds_alternative<Error>(function_or_err), PipelineID());
+			mesh_desc->setMeshFunction(std::get<NS::SharedPtr<MTL::Function>>(function_or_err).get());
+		}
+		if (shader->frag) {
+			Result<NS::SharedPtr<MTL::Function>> function_or_err = _create_function(shader->frag.get(), MTLSTR("main0"), p_specialization_constants);
+			ERR_FAIL_COND_V(std::holds_alternative<Error>(function_or_err), PipelineID());
+			mesh_desc->setFragmentFunction(std::get<NS::SharedPtr<MTL::Function>>(function_or_err).get());
+		}
+
+		NS::Error *mesh_error = nullptr;
+		pipeline->state = NS::TransferPtr(device->newRenderPipelineState(mesh_desc.get(), MTL::PipelineOptionNone, nullptr, &mesh_error));
+		pipeline->shader = shader;
+		ERR_FAIL_COND_V_MSG(mesh_error != nullptr, PipelineID(), String("error creating mesh pipeline: ") + mesh_error->localizedDescription()->utf8String());
+		ERR_FAIL_COND_V_MSG(!pipeline->state, PipelineID(), "Failed to create mesh render pipeline state");
+		return PipelineID(pipeline);
 	}
 
 	if (shader->vert) {
@@ -2844,6 +2929,12 @@ uint64_t RenderingDeviceDriverMetal::limit_get(Limit p_limit) {
 		return safe_unbounded
 #endif
 
+	// GodotNext: rd_mesh_shaders (#178). 0 without mesh shaders.
+	uint64_t mesh_shader_value = 0;
+	if (mesh_shader_limit_get(p_limit, metal_mesh_shader_limits((uint32_t)props.features.highestFamily, mesh_shader_caps.mesh), mesh_shader_value)) {
+		return mesh_shader_value;
+	}
+
 	// clang-format off
 	switch (p_limit) {
 		// GodotNext: rd_bindless (#176). Half of an argument buffer's limit, so a shader can bind two full
@@ -3050,6 +3141,11 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 		case SUPPORTS_DRAW_INDIRECT_COUNT:
 		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
 			return true;
+		// GodotNext: rd_mesh_shaders (#178)
+		case SUPPORTS_MESH_SHADER:
+			return mesh_shader_caps.mesh;
+		case SUPPORTS_MESH_SHADER_INDIRECT:
+			return mesh_shader_caps.indirect;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return false;
 		default:
@@ -3166,10 +3262,10 @@ Error RenderingDeviceDriverMetal::_create_device() {
 	return OK;
 }
 
-void RenderingDeviceDriverMetal::encode_imported_resources(MTL::RenderCommandEncoder *p_enc) {
+void RenderingDeviceDriverMetal::encode_imported_resources(MTL::RenderCommandEncoder *p_enc, MTL::RenderStages p_stages) {
 	MutexLock lock(imported_textures_mutex);
 	if (!imported_textures.is_empty()) {
-		p_enc->useResources((const MTL::Resource *const *)imported_textures.ptr(), imported_textures.size(), MTL::ResourceUsageRead, MTL::RenderStageVertex | MTL::RenderStageFragment);
+		p_enc->useResources((const MTL::Resource *const *)imported_textures.ptr(), imported_textures.size(), MTL::ResourceUsageRead, p_stages); // GodotNext: rd_mesh_shaders (#178)
 	}
 }
 
@@ -3335,6 +3431,9 @@ Error RenderingDeviceDriverMetal::_initialize(uint32_t p_device_index, uint32_t 
 	device_properties = memnew(MetalDeviceProperties(device));
 	// GodotNext: metal_ray_query
 	_update_ray_query_caps();
+	// GodotNext: rd_mesh_shaders (#178)
+	mesh_shader_caps = metal_mesh_shader_caps((uint32_t)device_properties->features.highestFamily, device_properties->features.msl_target_version, device_properties->features.argument_buffers_enabled());
+	print_verbose(vformat("- Metal mesh shaders %s, indirect mesh draws %s", mesh_shader_caps.mesh ? "supported" : "not supported", mesh_shader_caps.indirect ? "supported" : "not supported"));
 	pixel_formats = memnew(PixelFormats(device, device_properties->features));
 	device_profile = device_profile_from_properties(device_properties);
 	resource_cache = std::make_unique<MDResourceCache>(device, *pixel_formats, device_properties->limits.maxPerStageBufferCount);

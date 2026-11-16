@@ -1322,6 +1322,9 @@ private:
 		RDD::PipelineID driver_id;
 		BitField<RDD::PipelineStageBits> stage_bits = {};
 		uint32_t push_constant_size = 0;
+		// GodotNext: rd_mesh_shaders (#178). The shader has a mesh stage: the pipeline draws only with
+		// draw_list_draw_mesh_tasks*().
+		bool mesh = false;
 	};
 
 	RID_Owner<RenderPipeline, true> render_pipeline_owner;
@@ -1637,6 +1640,8 @@ private:
 			RID vertex_array;
 			RID index_array;
 			uint32_t draw_count = 0;
+			bool pipeline_mesh = false; // GodotNext: rd_mesh_shaders (#178). RenderPipeline::mesh of the bound pipeline.
+			bool pipeline_task = false; // GodotNext: rd_mesh_shaders (#178). The bound mesh pipeline has a task stage.
 		} state;
 
 #ifdef DEBUG_ENABLED
@@ -1685,6 +1690,9 @@ private:
 	// GodotNext: rd_indirect_count (#177). The pipeline, push constant and uniform set checks and the uniform
 	// set binding that draw_list_draw_indirect() and draw_list_draw_indirect_count() share. False on an error.
 	bool _draw_list_prepare_indirect_draw(bool p_use_indices);
+	// GodotNext: rd_mesh_shaders (#178). False, with an error, when the bound pipeline is not the kind the draw needs:
+	// a mesh pipeline for draw_list_draw_mesh_tasks*(), any other one for the vertex draws.
+	bool _draw_list_check_pipeline_kind(bool p_mesh_tasks);
 
 public:
 	enum DrawFlags {
@@ -1744,6 +1752,15 @@ public:
 	// Neither buffer may also be bound in the draw list's uniform sets: a buffer has one usage per draw list.
 	// Nor may it be in a bindless table the draw list binds while the table has not read it since its last write.
 	void draw_list_draw_indirect_count(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride);
+	// GodotNext: rd_mesh_shaders (#178)
+	// Task and mesh shader draws, with a render pipeline whose shader has a mesh stage bound. The direct draw runs
+	// p_group_count_x * y * z task workgroups (or mesh workgroups, without a task stage). The indirect records are
+	// three uint32 group counts; p_stride 0 means tightly packed (12 bytes). The count variant also needs
+	// SUPPORTS_DRAW_INDIRECT_COUNT and reads its count like draw_list_draw_indirect_count(). Neither buffer may also
+	// be bound in the draw list's uniform sets.
+	void draw_list_draw_mesh_tasks(DrawListID p_list, uint32_t p_group_count_x, uint32_t p_group_count_y = 1, uint32_t p_group_count_z = 1);
+	void draw_list_draw_mesh_tasks_indirect(DrawListID p_list, RID p_buffer, uint32_t p_offset = 0, uint32_t p_draw_count = 1, uint32_t p_stride = 0);
+	void draw_list_draw_mesh_tasks_indirect_count(DrawListID p_list, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 
 	void draw_list_set_viewport(DrawListID p_list, const Rect2i &p_rect);
 	void draw_list_enable_scissor(DrawListID p_list, const Rect2 &p_rect);

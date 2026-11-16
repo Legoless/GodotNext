@@ -46,11 +46,17 @@
 		<member name="source_intersection" type="String" setter="set_stage_source" getter="get_stage_source" default="&quot;&quot;">
 			Source code for the shader's intersection stage.
 		</member>
+		<member name="source_mesh" type="String" setter="set_stage_source" getter="get_stage_source" default="&quot;&quot;">
+			Source code for the shader's mesh stage. It needs [code]#extension GL_EXT_mesh_shader : require[/code] and [constant RenderingDevice.SUPPORTS_MESH_SHADER].
+		</member>
 		<member name="source_miss" type="String" setter="set_stage_source" getter="get_stage_source" default="&quot;&quot;">
 			Source code for the shader's miss stage.
 		</member>
 		<member name="source_raygen" type="String" setter="set_stage_source" getter="get_stage_source" default="&quot;&quot;">
 			Source code for the shader's ray generation stage.
+		</member>
+		<member name="source_task" type="String" setter="set_stage_source" getter="get_stage_source" default="&quot;&quot;">
+			Source code for the shader's task stage. It needs [code]#extension GL_EXT_mesh_shader : require[/code], a [member source_mesh] stage and [constant RenderingDevice.SUPPORTS_MESH_SHADER].
 		</member>
 		<member name="source_tesselation_control" type="String" setter="set_stage_source" getter="get_stage_source" default="&quot;&quot;">
 			Source code for the shader's tessellation control stage.

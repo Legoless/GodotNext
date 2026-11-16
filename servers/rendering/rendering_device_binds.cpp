@@ -43,7 +43,9 @@ Error RDShaderFile::parse_versions_from_text(const String &p_text, const String 
 	bool reading_versions = false;
 	bool stage_found[RD::SHADER_STAGE_MAX] = {};
 	RD::ShaderStage stage = RD::SHADER_STAGE_MAX;
-	static const char *stage_str[RD::SHADER_STAGE_MAX] = {
+	// GodotNext: rd_mesh_shaders (#178). Sized by the initializer, so a stage without a section name fails to
+	// compile.
+	static const char *stage_str[] = {
 		"vertex",
 		"fragment",
 		"tesselation_control",
@@ -54,7 +56,10 @@ Error RDShaderFile::parse_versions_from_text(const String &p_text, const String 
 		"closest_hit",
 		"miss",
 		"intersection",
+		"task",
+		"mesh",
 	};
+	static_assert(std_size(stage_str) == RD::SHADER_STAGE_MAX);
 	String stage_code[RD::SHADER_STAGE_MAX];
 	int stages_found = 0;
 	HashMap<StringName, String> version_texts;
@@ -199,7 +204,8 @@ Error RDShaderFile::parse_versions_from_text(const String &p_text, const String 
 				String error;
 #ifdef MODULE_GLSLANG_ENABLED
 				RD::ShaderSpirvVersion spirv_version = RD::SHADER_SPIRV_VERSION_1_3;
-				if (i >= RD::SHADER_STAGE_RAYGEN && i <= RD::SHADER_STAGE_INTERSECTION) {
+				// GodotNext: rd_mesh_shaders (#178). GL_EXT_mesh_shader needs SPIR-V 1.4 too.
+				if ((i >= RD::SHADER_STAGE_RAYGEN && i <= RD::SHADER_STAGE_INTERSECTION) || i == RD::SHADER_STAGE_TASK || i == RD::SHADER_STAGE_MESH) {
 					spirv_version = RD::SHADER_SPIRV_VERSION_1_4;
 				}
 				Vector<uint8_t> spirv = compile_glslang_shader(RD::ShaderStage(i), ShaderIncludeDB::parse_include_files(code), RD::SHADER_LANGUAGE_VULKAN_VERSION_1_1, spirv_version, &error);

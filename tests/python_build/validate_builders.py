@@ -39,6 +39,12 @@ FUNC_PATH_KWARGS: list[tuple[Callable[..., None], str, dict[str, Any]]] = [
         "tests/python_build/fixtures/rd_glsl/vertex_fragment.out",
         {"shader": "tests/python_build/fixtures/rd_glsl/vertex_fragment.glsl"},
     ),
+    # GodotNext: rd_mesh_shaders (#178)
+    (
+        build_rd_header,
+        "tests/python_build/fixtures/rd_glsl/task_mesh.out",
+        {"shader": "tests/python_build/fixtures/rd_glsl/task_mesh.glsl"},
+    ),
 ]
 
 

@@ -63,6 +63,8 @@ public:
 	virtual ShaderSpirvVersion get_shader_spirv_version(ShaderStage p_stage) const override;
 	// GodotNext: shader_baker_ray_query
 	virtual bool supports_acceleration_structures() const override { return true; }
+	// GodotNext: rd_mesh_shaders (#178)
+	virtual bool supports_mesh_shaders() const override { return true; }
 	void set_debug_info_enabled(bool p_debug_info_enabled);
 	bool get_debug_info_enabled() const;
 	RenderingShaderContainerFormatVulkan();

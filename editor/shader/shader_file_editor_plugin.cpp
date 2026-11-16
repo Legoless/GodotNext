@@ -269,7 +269,8 @@ ShaderFileEditor::ShaderFileEditor() {
 	main_vb->set_h_size_flags(SIZE_EXPAND_FILL);
 	main_hs->add_child(main_vb);
 
-	static const char *stage_str[RD::SHADER_STAGE_MAX] = {
+	// GodotNext: rd_mesh_shaders (#178). Sized by the initializer, so a stage without a label fails to compile.
+	static const char *stage_str[] = {
 		"Vertex",
 		"Fragment",
 		"TessControl",
@@ -280,7 +281,10 @@ ShaderFileEditor::ShaderFileEditor() {
 		"ClosestHit",
 		"Miss",
 		"Intersection",
+		"Task",
+		"Mesh",
 	};
+	static_assert(std_size(stage_str) == RD::SHADER_STAGE_MAX);
 
 	stage_hb = memnew(HFlowContainer);
 	main_vb->add_child(stage_hb);

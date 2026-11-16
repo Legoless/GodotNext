@@ -273,6 +273,9 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 			case RDC::SHADER_STAGE_FRAGMENT:
 			case RDC::SHADER_STAGE_TESSELATION_CONTROL:
 			case RDC::SHADER_STAGE_TESSELATION_EVALUATION:
+			// GodotNext: rd_mesh_shaders (#178). Task and mesh shaders replace the vertex stages of a render pipeline.
+			case RDC::SHADER_STAGE_TASK:
+			case RDC::SHADER_STAGE_MESH:
 				pipeline_type = RDC::PIPELINE_TYPE_RASTERIZATION;
 				break;
 			case RDC::SHADER_STAGE_COMPUTE:
@@ -352,6 +355,13 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 				reflection.compute_local_size[0] = module.entry_points->local_size.x;
 				reflection.compute_local_size[1] = module.entry_points->local_size.y;
 				reflection.compute_local_size[2] = module.entry_points->local_size.z;
+			}
+			// GodotNext: rd_mesh_shaders (#178)
+			if (stage == RDC::SHADER_STAGE_TASK || stage == RDC::SHADER_STAGE_MESH) {
+				uint32_t *local_size = stage == RDC::SHADER_STAGE_TASK ? reflection.task_local_size : reflection.mesh_local_size;
+				local_size[0] = module.entry_points->local_size.x;
+				local_size[1] = module.entry_points->local_size.y;
+				local_size[2] = module.entry_points->local_size.z;
 			}
 			uint32_t binding_count = 0;
 			result = spvReflectEnumerateDescriptorBindings(&module, &binding_count, nullptr);
@@ -696,6 +706,16 @@ Error RenderingShaderContainer::reflect_spirv(const String &p_shader_name, Span<
 		}
 	}
 
+	// GodotNext: rd_mesh_shaders (#178). The pre-raster stages are either vertex (with optional tessellation)
+	// or mesh (with an optional task stage), never both.
+	const BitField<RDC::ShaderStage> vertex_stages = RDC::SHADER_STAGE_VERTEX_BIT | RDC::SHADER_STAGE_TESSELATION_CONTROL_BIT | RDC::SHADER_STAGE_TESSELATION_EVALUATION_BIT;
+	if (reflection.stages_bits.has_flag(RDC::SHADER_STAGE_TASK_BIT) || reflection.stages_bits.has_flag(RDC::SHADER_STAGE_MESH_BIT)) {
+		ERR_FAIL_COND_V_MSG(!reflection.stages_bits.has_flag(RDC::SHADER_STAGE_MESH_BIT), FAILED,
+				"Shader '" + String(shader_name.get_data()) + "': a task shader needs a mesh shader in the same shader.");
+		ERR_FAIL_COND_V_MSG((uint32_t(reflection.stages_bits) & uint32_t(vertex_stages)) != 0, FAILED,
+				"Shader '" + String(shader_name.get_data()) + "': mesh and task shaders cannot be mixed with vertex or tessellation shaders.");
+	}
+
 	// Sort all uniform_sets by binding.
 	for (uint32_t i = 0; i < reflection.uniform_sets.size(); i++) {
 		reflection.uniform_sets[i].sort();
@@ -736,6 +756,11 @@ void RenderingShaderContainer::set_from_shader_reflection(const ReflectShader &p
 	reflection_data.compute_local_size[0] = p_reflection.compute_local_size[0];
 	reflection_data.compute_local_size[1] = p_reflection.compute_local_size[1];
 	reflection_data.compute_local_size[2] = p_reflection.compute_local_size[2];
+	// GodotNext: rd_mesh_shaders (#178)
+	for (uint32_t i = 0; i < 3; i++) {
+		reflection_data.task_local_size[i] = p_reflection.task_local_size[i];
+		reflection_data.mesh_local_size[i] = p_reflection.mesh_local_size[i];
+	}
 	reflection_data.set_count = p_reflection.uniform_sets.size();
 	reflection_data.push_constant_size = p_reflection.push_constant_size;
 	reflection_data.push_constant_stages_mask = uint32_t(p_reflection.push_constant_stages);
@@ -808,6 +833,11 @@ RenderingDeviceCommons::ShaderReflection RenderingShaderContainer::get_shader_re
 	shader_refl.compute_local_size[0] = reflection_data.compute_local_size[0];
 	shader_refl.compute_local_size[1] = reflection_data.compute_local_size[1];
 	shader_refl.compute_local_size[2] = reflection_data.compute_local_size[2];
+	// GodotNext: rd_mesh_shaders (#178)
+	for (uint32_t i = 0; i < 3; i++) {
+		shader_refl.task_local_size[i] = reflection_data.task_local_size[i];
+		shader_refl.mesh_local_size[i] = reflection_data.mesh_local_size[i];
+	}
 	shader_refl.uniform_sets.resize(reflection_data.set_count);
 	shader_refl.specialization_constants.resize(reflection_data.specialization_constants_count);
 	shader_refl.stages_vector.resize(reflection_data.stage_count);

@@ -154,6 +154,11 @@ static D3D12_SHADER_VISIBILITY stages_to_d3d12_visibility(uint32_t p_stages_mask
 			return D3D12_SHADER_VISIBILITY_VERTEX;
 		case RenderingDeviceCommons::SHADER_STAGE_FRAGMENT_BIT:
 			return D3D12_SHADER_VISIBILITY_PIXEL;
+		// GodotNext: rd_mesh_shaders (#178)
+		case RenderingDeviceCommons::SHADER_STAGE_TASK_BIT:
+			return D3D12_SHADER_VISIBILITY_AMPLIFICATION;
+		case RenderingDeviceCommons::SHADER_STAGE_MESH_BIT:
+			return D3D12_SHADER_VISIBILITY_MESH;
 		default:
 			return D3D12_SHADER_VISIBILITY_ALL;
 	}
@@ -385,6 +390,9 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 			MESA_SHADER_CLOSEST_HIT, // SHADER_STAGE_CLOSEST_HIT
 			MESA_SHADER_MISS, // SHADER_STAGE_MISS
 			MESA_SHADER_INTERSECTION, // SHADER_STAGE_INTERSECTION
+			// GodotNext: rd_mesh_shaders (#178). Not reached until MESH_STAGES_SUPPORTED (#122).
+			MESA_SHADER_TASK, // SHADER_STAGE_TASK
+			MESA_SHADER_MESH, // SHADER_STAGE_MESH
 		};
 
 		Span<uint32_t> code = p_spirv[i].spirv();
@@ -1221,6 +1229,13 @@ void RenderingShaderContainerD3D12::_set_from_shader_reflection_post(const Refle
 
 bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_shader) {
 #if NIR_ENABLED
+	// GodotNext: rd_mesh_shaders (#178). The Mesa NIR library translates no task or mesh stage to DXIL yet (#122).
+	// RenderingDevice refuses these shaders first (SUPPORTS_MESH_SHADER is false on D3D12); this covers the shader
+	// baker and direct container use, with one error instead of a failure inside Mesa.
+	const bool uses_mesh_stages = p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_TASK_BIT) || p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_MESH_BIT);
+	ERR_FAIL_COND_V_MSG(uses_mesh_stages && !MESH_STAGES_SUPPORTED, false,
+			vformat("Shader '%s' has task or mesh shader stages, which Direct3D 12 cannot compile yet: the shader compiler does not translate them to DXIL.", String::utf8(shader_name.get_data())));
+
 #ifndef NIR_RAYTRACING_ENABLED
 	// GodotNext: dxil_toolchain (#123). The upstream Mesa NIR library has no RayQueryKHR or RayTracingKHR, so these
 	// shaders are refused with one error here instead of failing inside Mesa.

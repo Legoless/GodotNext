@@ -193,6 +193,11 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		// GodotNext: rd_indirect_count (#177). VK_KHR_draw_indirect_count.
 		PFN_vkCmdDrawIndirectCountKHR CmdDrawIndirectCountKHR = nullptr;
 		PFN_vkCmdDrawIndexedIndirectCountKHR CmdDrawIndexedIndirectCountKHR = nullptr;
+
+		// GodotNext: rd_mesh_shaders (#178). VK_EXT_mesh_shader.
+		PFN_vkCmdDrawMeshTasksEXT CmdDrawMeshTasksEXT = nullptr;
+		PFN_vkCmdDrawMeshTasksIndirectEXT CmdDrawMeshTasksIndirectEXT = nullptr;
+		PFN_vkCmdDrawMeshTasksIndirectCountEXT CmdDrawMeshTasksIndirectCountEXT = nullptr;
 	};
 	// Debug marker extensions.
 	VkDebugReportObjectTypeEXT _convert_to_debug_report_objectType(VkObjectType p_object_type);
@@ -238,6 +243,10 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool descriptor_buffer_available = false;
 	// GodotNext: rd_indirect_count (#177). shaderDrawParameters (gl_DrawID, gl_BaseInstance, gl_BaseVertex).
 	bool shader_draw_parameters_support = false;
+	// GodotNext: rd_mesh_shaders (#178). The taskShader and meshShader features of VK_EXT_mesh_shader; device
+	// creation enables both, and nothing else of the extension, when the device has both.
+	bool mesh_shader_support = false;
+	MeshShaderLimits mesh_shader_limits; // GodotNext: rd_mesh_shaders (#178). From VkPhysicalDeviceMeshShaderPropertiesEXT.
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
 	bool framebuffer_depth_resolve = false;
@@ -808,6 +817,10 @@ public:
 	virtual void command_render_draw_indexed_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 	virtual void command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
 	virtual void command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
+	// GodotNext: rd_mesh_shaders (#178)
+	virtual void command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) override final;
+	virtual void command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
+	virtual void command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 
 	// Buffer binding.
 	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) override final;

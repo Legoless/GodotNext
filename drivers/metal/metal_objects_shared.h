@@ -729,6 +729,12 @@ public:
 	// GodotNext: rd_indirect_count (#177). Outside a render pass, before p_render_pass, the pass of the count draw
 	// it prepares.
 	virtual void render_draw_indirect_count_prepare(RDD::RenderPassID p_render_pass, bool p_indexed, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
+	// GodotNext: rd_mesh_shaders (#178). Mesh task draws with a mesh pipeline bound; the prepare step is the count
+	// draws' one, for the mesh task count draws.
+	virtual void render_draw_mesh_tasks(uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) = 0;
+	virtual void render_draw_mesh_tasks_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) = 0;
+	virtual void render_draw_mesh_tasks_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
+	virtual void render_draw_mesh_tasks_indirect_count_prepare(RDD::RenderPassID p_render_pass, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
 
 	virtual void render_end_pass() = 0;
 
@@ -945,6 +951,16 @@ public:
 
 	std::shared_ptr<MDLibrary> vert;
 	std::shared_ptr<MDLibrary> frag;
+
+	// GodotNext: rd_mesh_shaders (#178). The object (task) and mesh functions of a mesh shader, which has no vertex
+	// function, with the threadgroup sizes the draws dispatch them with and the object function's payload size.
+	std::shared_ptr<MDLibrary> task;
+	std::shared_ptr<MDLibrary> mesh;
+	MTL::Size task_local = MTL::Size(0, 0, 0);
+	MTL::Size mesh_local = MTL::Size(0, 0, 0);
+	uint32_t task_payload_size = 0;
+
+	_FORCE_INLINE_ bool is_mesh() const { return mesh != nullptr; }
 
 	MDRenderShader(CharString p_name,
 			Vector<UniformSet> p_sets,

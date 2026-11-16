@@ -100,6 +100,10 @@ public:
 			// GodotNext: rd_indirect_count (#177)
 			TYPE_DRAW_INDIRECT_COUNT,
 			TYPE_DRAW_INDEXED_INDIRECT_COUNT,
+			// GodotNext: rd_mesh_shaders (#178)
+			TYPE_DRAW_MESH_TASKS,
+			TYPE_DRAW_MESH_TASKS_INDIRECT,
+			TYPE_DRAW_MESH_TASKS_INDIRECT_COUNT,
 		};
 
 		Type type = TYPE_NONE;
@@ -889,7 +893,21 @@ private:
 		uint32_t stride = 0;
 	};
 
+	// GodotNext: rd_mesh_shaders (#178)
+	struct DrawListDrawMeshTasksInstruction : DrawListInstruction {
+		uint32_t group_count[3] = {};
+	};
+
+	// GodotNext: rd_mesh_shaders (#178). Three uint32 group counts per record.
+	struct DrawListDrawMeshTasksIndirectInstruction : DrawListInstruction {
+		RDD::BufferID buffer;
+		uint32_t offset = 0;
+		uint32_t draw_count = 0;
+		uint32_t stride = 0;
+	};
+
 	// GodotNext: rd_indirect_count (#177). TYPE_DRAW_INDIRECT_COUNT and TYPE_DRAW_INDEXED_INDIRECT_COUNT.
+	// GodotNext: rd_mesh_shaders (#178). And TYPE_DRAW_MESH_TASKS_INDIRECT_COUNT.
 	struct DrawListDrawIndirectCountInstruction : DrawListInstruction {
 		RDD::BufferID buffer;
 		RDD::BufferID count_buffer;
@@ -1132,6 +1150,11 @@ private:
 #endif
 
 	static String _usage_to_string(ResourceUsage p_usage);
+	// GodotNext: rd_mesh_shaders (#178). The indirect-count draw recording that #177's draws and the mesh task draws
+	// share, and its check that the current draw list uses p_tracker for nothing else (p_draw names the draw in the
+	// error).
+	bool _draw_list_indirect_buffer_usable(ResourceTracker *p_tracker, const char *p_role, const char *p_draw);
+	bool _add_draw_list_draw_indirect_count(DrawListInstruction::Type p_type, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, RDD::BufferID p_count_buffer, ResourceTracker *p_count_buffer_tracker, uint32_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 	static bool _is_write_usage(ResourceUsage p_usage);
 	static RDD::TextureLayout _usage_to_image_layout(ResourceUsage p_usage);
 	static RDD::BarrierAccessBits _usage_to_access_bits(ResourceUsage p_usage);
@@ -1257,6 +1280,12 @@ public:
 	// Fails with an error, and records nothing, when this draw list already uses either buffer another way, or
 	// binds a bindless table that has not read either buffer since it was last written.
 	bool add_draw_list_draw_indirect_count(bool p_indexed, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, RDD::BufferID p_count_buffer, ResourceTracker *p_count_buffer_tracker, uint32_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride);
+	// GodotNext: rd_mesh_shaders (#178). The indirect variants also record the indirect read of their buffers
+	// (trackers may be null) and fail like add_draw_list_draw_indirect_count() when this draw list already uses one
+	// of them another way. The count variant goes through the same driver preparation as the count draws.
+	void add_draw_list_draw_mesh_tasks(uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z);
+	bool add_draw_list_draw_mesh_tasks_indirect(RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
+	bool add_draw_list_draw_mesh_tasks_indirect_count(RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, RDD::BufferID p_count_buffer, ResourceTracker *p_count_buffer_tracker, uint32_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 	void add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer);
 	void add_draw_list_next_subpass(RDD::CommandBufferType p_command_buffer_type);
 	void add_draw_list_set_blend_constants(const Color &p_color);
@@ -1297,6 +1326,7 @@ public:
 	// list), as the driver is asked to prepare them before its render pass begins.
 	struct IndirectCountDraw {
 		bool indexed = false;
+		bool mesh_tasks = false; // GodotNext: rd_mesh_shaders (#178)
 		RDD::BufferID buffer;
 		RDD::BufferID count_buffer;
 		uint32_t offset = 0;

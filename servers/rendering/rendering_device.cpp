@@ -351,6 +351,26 @@ static bool _raytracing_reorder_supported(const RenderingDevice *p_device, const
 	return true;
 }
 
+// GodotNext: rd_mesh_shaders (#178). Plan §21.1 C2: a shader with task or mesh stages fails with one named error on a
+// device without SUPPORTS_MESH_SHADER, before the driver translates it.
+static bool _mesh_stages_supported(const RenderingDevice *p_device, bool p_has_mesh_stages, const String &p_shader_name) {
+	if (!p_has_mesh_stages || p_device->has_feature(RenderingDeviceCommons::SUPPORTS_MESH_SHADER)) {
+		return true;
+	}
+	const String shader = p_shader_name.is_empty() ? String("A shader") : vformat("Shader '%s'", p_shader_name);
+	ERR_FAIL_V_MSG(false, vformat("%s has task or mesh shader stages, which this device does not support. Missing RenderingDevice feature: SUPPORTS_MESH_SHADER.", shader));
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+static bool _spirv_has_mesh_stages(const Vector<RenderingDeviceCommons::ShaderStageSPIRVData> &p_spirv) {
+	for (const RenderingDeviceCommons::ShaderStageSPIRVData &stage : p_spirv) {
+		if (stage.shader_stage == RenderingDeviceCommons::SHADER_STAGE_TASK || stage.shader_stage == RenderingDeviceCommons::SHADER_STAGE_MESH) {
+			return true;
+		}
+	}
+	return false;
+}
+
 RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name, bool p_base_instance_native) {
 	// GodotNext: rd_atomics64 (#175). shader_compile_binary_from_spirv() checks too; checking here as well
 	// keeps it to the one error, without the empty-bytecode error below.
@@ -367,6 +387,10 @@ RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData>
 	}
 	// GodotNext: rd_rt_pipelines (#179). The same for shader execution reordering.
 	if (!_raytracing_reorder_supported(this, p_spirv, p_shader_name)) {
+		return RID();
+	}
+	// GodotNext: rd_mesh_shaders (#178). Likewise.
+	if (!_mesh_stages_supported(this, _spirv_has_mesh_stages(p_spirv), p_shader_name)) {
 		return RID();
 	}
 
@@ -4865,6 +4889,10 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	if (!_raytracing_reorder_supported(this, p_spirv, p_shader_name)) {
 		return Vector<uint8_t>();
 	}
+	// GodotNext: rd_mesh_shaders (#178)
+	if (!_mesh_stages_supported(this, _spirv_has_mesh_stages(p_spirv), p_shader_name)) {
+		return Vector<uint8_t>();
+	}
 
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
@@ -4902,6 +4930,15 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 	// GodotNext: rd_rt_pipelines (#179). The reordering scanned when the bytecode was compiled.
 	const uint32_t reorder_missing = get_missing_raytracing_reorder(shader_container->get_raytracing_reorder_usage());
 	ERR_FAIL_COND_V_MSG(reorder_missing != 0, RID(), RDRTPipeline::get_missing_reorder_error(String::utf8(shader_container->shader_name.get_data()), reorder_missing));
+
+	// GodotNext: rd_mesh_shaders (#178). Binaries from a shader cache or shader_compile_binary_from_spirv() too.
+	bool has_mesh_stages = false;
+	for (const RenderingShaderContainer::Shader &container_shader : shader_container->shaders) {
+		has_mesh_stages = has_mesh_stages || container_shader.shader_stage == SHADER_STAGE_TASK || container_shader.shader_stage == SHADER_STAGE_MESH;
+	}
+	if (!_mesh_stages_supported(this, has_mesh_stages, String::utf8(shader_container->shader_name.get_data()))) {
+		return RID();
+	}
 
 	Vector<RDD::ImmutableSampler> driver_immutable_samplers;
 	for (const PipelineImmutableSampler &source_sampler : p_immutable_samplers) {
@@ -5014,6 +5051,13 @@ RID RenderingDevice::shader_create_from_bytecode_with_samplers(const Vector<uint
 			case SHADER_STAGE_MISS:
 			case SHADER_STAGE_INTERSECTION:
 				shader->stage_bits.set_flag(RDD::PIPELINE_STAGE_RAY_TRACING_SHADER_BIT);
+				break;
+			// GodotNext: rd_mesh_shaders (#178). The render graph's barriers reach these stages through the bits.
+			case SHADER_STAGE_TASK:
+				shader->stage_bits.set_flag(RDD::PIPELINE_STAGE_TASK_SHADER_BIT);
+				break;
+			case SHADER_STAGE_MESH:
+				shader->stage_bits.set_flag(RDD::PIPELINE_STAGE_MESH_SHADER_BIT);
 				break;
 			default:
 				DEV_ASSERT(false && "Unknown shader stage.");
@@ -5815,8 +5859,11 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 	ERR_FAIL_COND_V_MSG(shader->pipeline_type != PIPELINE_TYPE_RASTERIZATION, RID(),
 			"Only render shaders can be used in render pipelines");
 
-	// Validate pre-raster shader. One of stages must be vertex shader or mesh shader (not implemented yet).
-	ERR_FAIL_COND_V_MSG(!shader->stage_bits.has_flag(RDD::PIPELINE_STAGE_VERTEX_SHADER_BIT), RID(), "Pre-raster shader (vertex shader) is not provided for pipeline creation.");
+	// Validate pre-raster shader. One of stages must be vertex shader or mesh shader.
+	// GodotNext: rd_mesh_shaders (#178). A mesh shader (with an optional task shader) takes no vertex format.
+	const bool mesh_pipeline = shader->is_mesh();
+	ERR_FAIL_COND_V_MSG(!mesh_pipeline && !shader->stage_bits.has_flag(RDD::PIPELINE_STAGE_VERTEX_SHADER_BIT), RID(), "Pre-raster shader (vertex shader or mesh shader) is not provided for pipeline creation.");
+	ERR_FAIL_COND_V_MSG(mesh_pipeline && p_vertex_format != INVALID_ID, RID(), "A render pipeline with a mesh shader takes no vertex format: pass INVALID_FORMAT_ID (its vertices come from the mesh shader).");
 
 	FramebufferFormat fb_format;
 	{
@@ -5829,6 +5876,10 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 		ERR_FAIL_COND_V(!framebuffer_formats.has(p_framebuffer_format), RID());
 		fb_format = framebuffer_formats[p_framebuffer_format];
 	}
+
+	// GodotNext: rd_mesh_shaders (#178). Vulkan devices enable no multiviewMeshShader, and Metal draws mesh threadgroups
+	// for one view only.
+	ERR_FAIL_COND_V_MSG(mesh_pipeline && fb_format.view_count > 1, RID(), vformat("A render pipeline with a mesh shader cannot draw to a multiview framebuffer format (%d views): mesh shaders do not support multiview.", fb_format.view_count));
 
 	// Validate shader vs. framebuffer.
 	{
@@ -5958,6 +6009,7 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 	pipeline.set_formats = shader->set_formats;
 	pipeline.push_constant_size = shader->push_constant_size;
 	pipeline.stage_bits = shader->stage_bits;
+	pipeline.mesh = mesh_pipeline; // GodotNext: rd_mesh_shaders (#178)
 
 #ifdef DEBUG_ENABLED
 	pipeline.validation.dynamic_state = p_dynamic_state_flags;
@@ -6844,6 +6896,9 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 	}
 
 	draw_list.state.pipeline = p_render_pipeline;
+	// GodotNext: rd_mesh_shaders (#178)
+	draw_list.state.pipeline_mesh = pipeline->mesh;
+	draw_list.state.pipeline_task = pipeline->stage_bits.has_flag(RDD::PIPELINE_STAGE_TASK_SHADER_BIT);
 
 	draw_graph.add_draw_list_bind_pipeline(pipeline->driver_id, pipeline->stage_bits);
 
@@ -7139,6 +7194,10 @@ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint
 	ERR_RENDER_THREAD_GUARD();
 
 	ERR_FAIL_COND(!draw_list.active);
+	// GodotNext: rd_mesh_shaders (#178)
+	if (!_draw_list_check_pipeline_kind(false)) {
+		return;
+	}
 
 #ifdef DEBUG_ENABLED
 	ERR_FAIL_COND_MSG(!draw_list.validation.pipeline_active,
@@ -7312,6 +7371,11 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 
 	ERR_FAIL_COND_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "Buffer provided was not created to do indirect dispatch.");
 
+	// GodotNext: rd_mesh_shaders (#178)
+	if (!_draw_list_check_pipeline_kind(false)) {
+		return;
+	}
+
 	// GodotNext: rd_indirect_count (#177). The checks and the uniform set binding moved to
 	// _draw_list_prepare_indirect_draw(), which draw_list_draw_indirect_count() shares.
 	if (!_draw_list_prepare_indirect_draw(p_use_indices)) {
@@ -7453,12 +7517,154 @@ void RenderingDevice::draw_list_draw_indirect_count(DrawListID p_list, bool p_us
 		ERR_FAIL_COND_MSG(end > buffer->size, vformat("%d records of %d bytes from offset %d end past the indirect buffer (%d bytes).", p_max_draw_count, stride, p_offset, buffer->size));
 	}
 
+	// GodotNext: rd_mesh_shaders (#178)
+	if (!_draw_list_check_pipeline_kind(false)) {
+		return;
+	}
+
 	if (!_draw_list_prepare_indirect_draw(p_use_indices)) {
 		return;
 	}
 
 	// The graph records the indirect read of both buffers, or says why it cannot.
 	if (!draw_graph.add_draw_list_draw_indirect_count(p_use_indices, buffer->driver_id, buffer->draw_tracker, p_offset, count_buffer->driver_id, count_buffer->draw_tracker, p_count_offset, p_max_draw_count, stride)) {
+		return;
+	}
+
+	draw_list.state.draw_count++;
+
+	_check_transfer_worker_buffer(buffer);
+	_check_transfer_worker_buffer(count_buffer);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+bool RenderingDevice::_draw_list_check_pipeline_kind(bool p_mesh_tasks) {
+	if (draw_list.state.pipeline.is_null()) {
+		return true; // The draw's own checks report the missing pipeline.
+	}
+	ERR_FAIL_COND_V_MSG(p_mesh_tasks && !draw_list.state.pipeline_mesh, false, "draw_list_draw_mesh_tasks*() needs a render pipeline whose shader has a mesh stage, but the bound pipeline's shader has a vertex stage.");
+	ERR_FAIL_COND_V_MSG(!p_mesh_tasks && draw_list.state.pipeline_mesh, false, "The bound render pipeline's shader has a mesh stage: draw it with draw_list_draw_mesh_tasks(), draw_list_draw_mesh_tasks_indirect() or draw_list_draw_mesh_tasks_indirect_count().");
+	return true;
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDevice::draw_list_draw_mesh_tasks(DrawListID p_list, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
+	ERR_RENDER_THREAD_GUARD();
+
+	// Checked first, so a device without the feature gives this one error.
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_MESH_SHADER), "This device does not support mesh shaders (RenderingDevice feature SUPPORTS_MESH_SHADER).");
+	ERR_FAIL_COND(!draw_list.active);
+	if (!_draw_list_check_pipeline_kind(true)) {
+		return;
+	}
+
+#ifdef DEBUG_ENABLED
+	// Like compute_list_dispatch(): the counts launch task workgroups, or mesh workgroups without a task stage.
+	{
+		const bool task = draw_list.state.pipeline_task;
+		const char *kind = task ? "task" : "mesh";
+		const uint32_t counts[3] = { p_group_count_x, p_group_count_y, p_group_count_z };
+		const char *axes[3] = { "X", "Y", "Z" };
+		for (uint32_t i = 0; i < 3; i++) {
+			const Limit limit = Limit((task ? LIMIT_MAX_TASK_WORKGROUP_COUNT_X : LIMIT_MAX_MESH_WORKGROUP_COUNT_X) + i);
+			const uint64_t max_count = driver->limit_get(limit);
+			ERR_FAIL_COND_MSG(counts[i] > max_count, vformat("The %s group count of the mesh task draw (%d) is larger than the device limit for %s workgroups (%d).", axes[i], counts[i], kind, max_count));
+		}
+		// X * Y fits in 64 bits; comparing it with the limit divided by Z keeps X * Y * Z from overflowing.
+		const uint64_t max_total = driver->limit_get(task ? LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT : LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT);
+		const uint64_t xy = uint64_t(p_group_count_x) * p_group_count_y;
+		ERR_FAIL_COND_MSG(p_group_count_z != 0 && xy > max_total / p_group_count_z, vformat("The mesh task draw launches %d x %d x %d %s workgroups, more than the device limit of %d in all.", p_group_count_x, p_group_count_y, p_group_count_z, kind, max_total));
+	}
+#endif
+
+	// The pipeline, push constant and uniform set checks and the uniform set binding of the indirect draws. A mesh
+	// pipeline has no vertex format, so no vertex array is checked.
+	if (!_draw_list_prepare_indirect_draw(false)) {
+		return;
+	}
+
+	draw_graph.add_draw_list_draw_mesh_tasks(p_group_count_x, p_group_count_y, p_group_count_z);
+	draw_list.state.draw_count++;
+}
+
+// GodotNext: rd_mesh_shaders (#178). The record size of the indirect mesh task draws: VkDrawMeshTasksIndirectCommandEXT,
+// D3D12_DISPATCH_MESH_ARGUMENTS and MTLDispatchThreadgroupsIndirectArguments are all three uint32.
+static constexpr uint32_t MESH_TASKS_INDIRECT_RECORD_SIZE = 12;
+
+// GodotNext: rd_mesh_shaders (#178). The stride and range checks of the indirect mesh task draws. False after an error.
+static bool _mesh_tasks_indirect_range_valid(uint64_t p_buffer_size, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	ERR_FAIL_COND_V_MSG(p_stride < MESH_TASKS_INDIRECT_RECORD_SIZE || (p_stride % 4) != 0, false, vformat("The stride (%d) must be a multiple of 4 and at least %d bytes.", p_stride, MESH_TASKS_INDIRECT_RECORD_SIZE));
+	ERR_FAIL_COND_V_MSG((p_offset % 4) != 0, false, "The offset into the indirect buffer must be a multiple of 4.");
+	if (p_draw_count > 0) {
+		const uint64_t end = uint64_t(p_offset) + uint64_t(p_stride) * (p_draw_count - 1) + MESH_TASKS_INDIRECT_RECORD_SIZE;
+		ERR_FAIL_COND_V_MSG(end > p_buffer_size, false, vformat("%d records of %d bytes from offset %d end past the indirect buffer (%d bytes).", p_draw_count, p_stride, p_offset, p_buffer_size));
+	}
+	return true;
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDevice::draw_list_draw_mesh_tasks_indirect(DrawListID p_list, RID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	ERR_RENDER_THREAD_GUARD();
+
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_MESH_SHADER_INDIRECT), "This device does not support indirect mesh task draws (RenderingDevice feature SUPPORTS_MESH_SHADER_INDIRECT).");
+	ERR_FAIL_COND(!draw_list.active);
+
+	Buffer *buffer = storage_buffer_owner.get_or_null(p_buffer);
+	ERR_FAIL_NULL_MSG(buffer, "The indirect buffer is not a valid storage buffer.");
+	ERR_FAIL_COND_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "The indirect buffer was not created with STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT.");
+	const uint32_t stride = p_stride == 0 ? MESH_TASKS_INDIRECT_RECORD_SIZE : p_stride;
+	if (!_mesh_tasks_indirect_range_valid(buffer->size, p_offset, p_draw_count, stride)) {
+		return;
+	}
+
+	if (!_draw_list_check_pipeline_kind(true)) {
+		return;
+	}
+	if (!_draw_list_prepare_indirect_draw(false)) {
+		return;
+	}
+
+	// The graph records the indirect read of the buffer, or says why it cannot.
+	if (!draw_graph.add_draw_list_draw_mesh_tasks_indirect(buffer->driver_id, buffer->draw_tracker, p_offset, p_draw_count, stride)) {
+		return;
+	}
+
+	draw_list.state.draw_count++;
+
+	_check_transfer_worker_buffer(buffer);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDevice::draw_list_draw_mesh_tasks_indirect_count(DrawListID p_list, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	ERR_RENDER_THREAD_GUARD();
+
+	// Checked first, so a device without either feature gives one error that names it.
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_MESH_SHADER_INDIRECT), "This device does not support indirect mesh task draws (RenderingDevice feature SUPPORTS_MESH_SHADER_INDIRECT).");
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_DRAW_INDIRECT_COUNT), "This device does not support indirect draws with a GPU count (RenderingDevice feature SUPPORTS_DRAW_INDIRECT_COUNT).");
+	ERR_FAIL_COND(!draw_list.active);
+
+	Buffer *buffer = storage_buffer_owner.get_or_null(p_buffer);
+	ERR_FAIL_NULL_MSG(buffer, "The indirect buffer is not a valid storage buffer.");
+	Buffer *count_buffer = storage_buffer_owner.get_or_null(p_count_buffer);
+	ERR_FAIL_NULL_MSG(count_buffer, "The count buffer is not a valid storage buffer.");
+	ERR_FAIL_COND_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "The indirect buffer was not created with STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT.");
+	ERR_FAIL_COND_MSG(!count_buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "The count buffer was not created with STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT.");
+	const uint32_t stride = p_stride == 0 ? MESH_TASKS_INDIRECT_RECORD_SIZE : p_stride;
+	if (!_mesh_tasks_indirect_range_valid(buffer->size, p_offset, p_max_draw_count, stride)) {
+		return;
+	}
+	ERR_FAIL_COND_MSG((p_count_offset % 4) != 0, "The offset into the count buffer must be a multiple of 4.");
+	ERR_FAIL_COND_MSG(uint64_t(p_count_offset) + 4 > count_buffer->size, "The count offset (+4) is past the end of the count buffer.");
+
+	if (!_draw_list_check_pipeline_kind(true)) {
+		return;
+	}
+	if (!_draw_list_prepare_indirect_draw(false)) {
+		return;
+	}
+
+	// The graph records the indirect read of both buffers, or says why it cannot.
+	if (!draw_graph.add_draw_list_draw_mesh_tasks_indirect_count(buffer->driver_id, buffer->draw_tracker, p_offset, count_buffer->driver_id, count_buffer->draw_tracker, p_count_offset, p_max_draw_count, stride)) {
 		return;
 	}
 
@@ -10852,6 +11058,10 @@ void RenderingDevice::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("draw_list_draw_indirect", "draw_list", "use_indices", "buffer", "offset", "draw_count", "stride"), &RenderingDevice::draw_list_draw_indirect, DEFVAL(0), DEFVAL(1), DEFVAL(0));
 	// GodotNext: rd_indirect_count (#177)
 	ClassDB::bind_method(D_METHOD("draw_list_draw_indirect_count", "draw_list", "use_indices", "buffer", "offset", "count_buffer", "count_offset", "max_draw_count", "stride"), &RenderingDevice::draw_list_draw_indirect_count);
+	// GodotNext: rd_mesh_shaders (#178)
+	ClassDB::bind_method(D_METHOD("draw_list_draw_mesh_tasks", "draw_list", "group_count_x", "group_count_y", "group_count_z"), &RenderingDevice::draw_list_draw_mesh_tasks, DEFVAL(1), DEFVAL(1));
+	ClassDB::bind_method(D_METHOD("draw_list_draw_mesh_tasks_indirect", "draw_list", "buffer", "offset", "draw_count", "stride"), &RenderingDevice::draw_list_draw_mesh_tasks_indirect, DEFVAL(0), DEFVAL(1), DEFVAL(0));
+	ClassDB::bind_method(D_METHOD("draw_list_draw_mesh_tasks_indirect_count", "draw_list", "buffer", "offset", "count_buffer", "count_offset", "max_draw_count", "stride"), &RenderingDevice::draw_list_draw_mesh_tasks_indirect_count);
 
 	ClassDB::bind_method(D_METHOD("draw_list_enable_scissor", "draw_list", "rect"), &RenderingDevice::draw_list_enable_scissor, DEFVAL(Rect2()));
 	ClassDB::bind_method(D_METHOD("draw_list_disable_scissor", "draw_list"), &RenderingDevice::draw_list_disable_scissor);
@@ -11450,6 +11660,9 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADER_STAGE_CLOSEST_HIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_MISS);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_INTERSECTION);
+	// GodotNext: rd_mesh_shaders (#178)
+	BIND_ENUM_CONSTANT(SHADER_STAGE_TASK);
+	BIND_ENUM_CONSTANT(SHADER_STAGE_MESH);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_MAX);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_VERTEX_BIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_FRAGMENT_BIT);
@@ -11461,6 +11674,9 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADER_STAGE_CLOSEST_HIT_BIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_MISS_BIT);
 	BIND_ENUM_CONSTANT(SHADER_STAGE_INTERSECTION_BIT);
+	// GodotNext: rd_mesh_shaders (#178)
+	BIND_ENUM_CONSTANT(SHADER_STAGE_TASK_BIT);
+	BIND_ENUM_CONSTANT(SHADER_STAGE_MESH_BIT);
 
 	BIND_ENUM_CONSTANT(SHADER_LANGUAGE_GLSL);
 	BIND_ENUM_CONSTANT(SHADER_LANGUAGE_HLSL);
@@ -11491,6 +11707,9 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_REORDER);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE_LIBRARY);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT);
+	// GodotNext: rd_mesh_shaders (#178)
+	BIND_ENUM_CONSTANT(SUPPORTS_MESH_SHADER);
+	BIND_ENUM_CONSTANT(SUPPORTS_MESH_SHADER_INDIRECT);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
@@ -11556,6 +11775,15 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(LIMIT_MAX_BINDLESS_STORAGE_BUFFERS);
 	// GodotNext: rd_rt_pipelines (#179)
 	BIND_ENUM_CONSTANT(LIMIT_RAYTRACING_REORDER_EXTENSIONS);
+	// GodotNext: rd_mesh_shaders (#178)
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_COUNT_X);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_COUNT_Y);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_COUNT_Z);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_COUNT_X);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_COUNT_Y);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_COUNT_Z);
+	BIND_ENUM_CONSTANT(LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT);
 
 	BIND_ENUM_CONSTANT(MEMORY_TEXTURES);
 	BIND_ENUM_CONSTANT(MEMORY_BUFFERS);

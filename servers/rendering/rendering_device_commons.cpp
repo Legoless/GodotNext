@@ -1001,4 +1001,7 @@ const char *RenderingDeviceCommons::SHADER_STAGE_NAMES[SHADER_STAGE_MAX] = {
 	"ClosestHit",
 	"Miss",
 	"Intersection",
+	// GodotNext: rd_mesh_shaders (#178)
+	"Task",
+	"Mesh",
 };

@@ -597,6 +597,9 @@ public:
 		SHADER_STAGE_CLOSEST_HIT,
 		SHADER_STAGE_MISS,
 		SHADER_STAGE_INTERSECTION,
+		// GodotNext: rd_mesh_shaders (#178). Appended, so the bound values above keep their numbers.
+		SHADER_STAGE_TASK,
+		SHADER_STAGE_MESH,
 		SHADER_STAGE_MAX,
 		SHADER_STAGE_VERTEX_BIT = (1 << SHADER_STAGE_VERTEX),
 		SHADER_STAGE_FRAGMENT_BIT = (1 << SHADER_STAGE_FRAGMENT),
@@ -608,6 +611,9 @@ public:
 		SHADER_STAGE_CLOSEST_HIT_BIT = (1 << SHADER_STAGE_CLOSEST_HIT),
 		SHADER_STAGE_MISS_BIT = (1 << SHADER_STAGE_MISS),
 		SHADER_STAGE_INTERSECTION_BIT = (1 << SHADER_STAGE_INTERSECTION),
+		// GodotNext: rd_mesh_shaders (#178)
+		SHADER_STAGE_TASK_BIT = (1 << SHADER_STAGE_TASK),
+		SHADER_STAGE_MESH_BIT = (1 << SHADER_STAGE_MESH),
 	};
 
 	enum ShaderLanguage {
@@ -1046,6 +1052,16 @@ public:
 		// reordering: bit 0 (1) GL_EXT_shader_invocation_reorder, bit 1 (2) GL_NV_shader_invocation_reorder.
 		// 0 without SUPPORTS_RAYTRACING_REORDER.
 		LIMIT_RAYTRACING_REORDER_EXTENSIONS,
+		// GodotNext: rd_mesh_shaders (#178). The group counts of a mesh task draw: task workgroups when the pipeline
+		// has a task stage, mesh workgroups without one (and per task workgroup). 0 without SUPPORTS_MESH_SHADER.
+		LIMIT_MAX_TASK_WORKGROUP_COUNT_X,
+		LIMIT_MAX_TASK_WORKGROUP_COUNT_Y,
+		LIMIT_MAX_TASK_WORKGROUP_COUNT_Z,
+		LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT,
+		LIMIT_MAX_MESH_WORKGROUP_COUNT_X,
+		LIMIT_MAX_MESH_WORKGROUP_COUNT_Y,
+		LIMIT_MAX_MESH_WORKGROUP_COUNT_Z,
+		LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT,
 	};
 
 	enum Features {
@@ -1102,6 +1118,12 @@ public:
 		SUPPORTS_RAYTRACING_PIPELINE_LIBRARY,
 		// raytracing_list_trace_rays_indirect(): a trace whose launch size comes from a buffer.
 		SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT,
+		// GodotNext: rd_mesh_shaders (#178)
+		// Task and mesh shader stages in render pipelines, and draw_list_draw_mesh_tasks().
+		SUPPORTS_MESH_SHADER,
+		// draw_list_draw_mesh_tasks_indirect(); draw_list_draw_mesh_tasks_indirect_count() also needs
+		// SUPPORTS_DRAW_INDIRECT_COUNT. Drivers set it only together with SUPPORTS_MESH_SHADER.
+		SUPPORTS_MESH_SHADER_INDIRECT,
 	};
 
 	// GodotNext: metal_ray_query
@@ -1248,6 +1270,15 @@ public:
 		uint32_t push_constant_size = 0;
 		// GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits of every stage.
 		uint32_t int64_atomics = 0;
+		// GodotNext: rd_mesh_shaders (#178). The workgroup sizes of the task and mesh stages (0 without the stage).
+		// Metal dispatches mesh draws with them.
+		uint32_t task_local_size[3] = {};
+		uint32_t mesh_local_size[3] = {};
+
+		// GodotNext: rd_mesh_shaders (#178). A render shader whose pre-raster stages are task and mesh shaders.
+		_FORCE_INLINE_ bool is_mesh() const {
+			return stages_bits.has_flag(SHADER_STAGE_MESH_BIT);
+		}
 
 		Vector<Vector<ShaderUniform>> uniform_sets;
 		Vector<ShaderSpecializationConstant> specialization_constants;

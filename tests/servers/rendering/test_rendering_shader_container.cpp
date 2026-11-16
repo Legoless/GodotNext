@@ -33,11 +33,11 @@
 TEST_FORCE_LINK(test_rendering_shader_container)
 
 // GodotNext: dxil_toolchain (#123). The shader container's has_ray_query, beside #175's int64_atomics (version 4;
-// version 5 appends #179's raytracing_reorder) and, on Windows, the D3D12 container (FORMAT_VERSION 2, shader models,
-// the ray-tracing gate on the Mesa NIR library, the debug-only DXIL validator and the DXIL operations that read the
-// instance values). Most SPIR-V modules are assembled by hand; the GLSL cases compile their shaders with the glslang
-// module. No case needs a GPU. With the GodotNext Mesa NIR library, the instance-value case disassembles DXIL with
-// dxil.dll and dxcompiler.dll from the installed Windows SDK.
+// version 5 appended #179's raytracing_reorder, version 6 #178's workgroup sizes) and, on Windows, the D3D12
+// container (FORMAT_VERSION 2, shader models, the ray-tracing gate on the Mesa NIR library, the debug-only DXIL
+// validator and the DXIL operations that read the instance values). Most SPIR-V modules are assembled by hand; the
+// GLSL cases compile their shaders with the glslang module. No case needs a GPU. With the GodotNext Mesa NIR library,
+// the instance-value case disassembles DXIL with dxil.dll and dxcompiler.dll from the installed Windows SDK.
 
 #include "core/error/error_macros.h"
 #include "core/templates/local_vector.h"
@@ -45,6 +45,17 @@ TEST_FORCE_LINK(test_rendering_shader_container)
 #include "servers/rendering/rendering_shader_container.h"
 
 #include "modules/modules_enabled.gen.h" // For glslang.
+
+// GodotNext: rd_mesh_shaders (#178). The task and mesh stage cases compile GLSL on every platform.
+#ifdef MODULE_GLSLANG_ENABLED
+#include "modules/glslang/shader_compile.h"
+#endif
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/rendering_shader_container_vulkan.h"
+#endif
+#ifdef METAL_ENABLED
+#include "drivers/metal/rendering_shader_container_metal.h"
+#endif
 
 #ifdef D3D12_ENABLED
 #include "drivers/d3d12/rendering_shader_container_d3d12.h"
@@ -222,17 +233,21 @@ void write_u32(PackedByteArray &r_bytes, int64_t p_offset, uint32_t p_value) {
 constexpr int64_t HEADER_VERSION_OFFSET = 4;
 constexpr int64_t HEADER_FORMAT_VERSION_OFFSET = 12;
 // ReflectionData follows the header (TestShaderContainer adds no header data). Version 4's was 72 bytes and ended with
-// int64_atomics (#175, offset 64) and has_ray_query (#123, offset 68). Version 5's is 80 bytes: it appends
-// raytracing_reorder (#179, offset 72) and an explicit padding word (offset 76).
+// int64_atomics (#175, offset 64) and has_ray_query (#123, offset 68). Version 5's was 80 bytes: it appended
+// raytracing_reorder (#179, offset 72) and an explicit padding word (offset 76). Version 6's is 104 bytes: the task and
+// mesh workgroup sizes (#178, offsets 76 and 88) take that padding word, and a new explicit padding word follows them
+// (offset 100).
 constexpr int64_t REFLECTION_OFFSET = 20;
 constexpr int64_t REFLECTION_INT64_ATOMICS_OFFSET = REFLECTION_OFFSET + 64;
 constexpr int64_t REFLECTION_HAS_RAY_QUERY_OFFSET = REFLECTION_OFFSET + 68;
 constexpr int64_t REFLECTION_RAYTRACING_REORDER_OFFSET = REFLECTION_OFFSET + 72;
-constexpr int64_t REFLECTION_PADDING_OFFSET = REFLECTION_OFFSET + 76;
-constexpr int64_t REFLECTION_END = REFLECTION_OFFSET + 80;
+constexpr int64_t REFLECTION_TASK_LOCAL_SIZE_OFFSET = REFLECTION_OFFSET + 76;
+constexpr int64_t REFLECTION_MESH_LOCAL_SIZE_OFFSET = REFLECTION_OFFSET + 88;
+constexpr int64_t REFLECTION_PADDING_OFFSET = REFLECTION_OFFSET + 100;
+constexpr int64_t REFLECTION_END = REFLECTION_OFFSET + 104;
 
 TEST_CASE("[ShaderContainer] Reflection sets has_ray_query from the SPIR-V RayQueryKHR capability") {
-	CHECK(RenderingShaderContainer::CONTAINER_VERSION == 5);
+	CHECK(RenderingShaderContainer::CONTAINER_VERSION == 6);
 
 	Ref<TestShaderContainer> plain;
 	plain.instantiate();
@@ -265,7 +280,7 @@ TEST_CASE("[ShaderContainer] Reflection sets has_ray_query from the SPIR-V RayQu
 	CHECK_FALSE(loaded_plain->has_ray_query());
 }
 
-TEST_CASE("[ShaderContainer] Version-2, version-3 and version-4 containers are rejected with one message and rebuilt") {
+TEST_CASE("[ShaderContainer] Containers of versions 2 to 5 are rejected with one message and rebuilt") {
 	Ref<TestShaderContainer> container;
 	container.instantiate();
 	REQUIRE(container->set_code_from_spirv("stale", make_stages(TestModule::COMPUTE)));
@@ -273,8 +288,9 @@ TEST_CASE("[ShaderContainer] Version-2, version-3 and version-4 containers are r
 	REQUIRE(current.size() > HEADER_FORMAT_VERSION_OFFSET + 4);
 
 	// Version 2 is the layout before #175, version 3 is #175's (int64_atomics, no has_ray_query), version 4 is #123's
-	// (72 bytes, no raytracing_reorder).
-	const uint32_t stale_versions[] = { 2, 3, 4 };
+	// (72 bytes, no raytracing_reorder) and version 5 is #179's (80 bytes, no task or mesh stages and workgroup sizes,
+	// #178).
+	const uint32_t stale_versions[] = { 2, 3, 4, 5 };
 	for (const uint32_t stale_version : stale_versions) {
 		PackedByteArray stale = current;
 		write_u32(stale, HEADER_VERSION_OFFSET, stale_version);
@@ -294,7 +310,7 @@ TEST_CASE("[ShaderContainer] Version-2, version-3 and version-4 containers are r
 			loaded.instantiate();
 			CHECK_FALSE(loaded->from_bytes(stale));
 			CHECK(capture.count == 1);
-			CHECK_MESSAGE(capture.first_message.contains(vformat("(%d, expected 5)", stale_version)), capture.first_message);
+			CHECK_MESSAGE(capture.first_message.contains(vformat("(%d, expected 6)", stale_version)), capture.first_message);
 		}
 	}
 
@@ -305,7 +321,7 @@ TEST_CASE("[ShaderContainer] Version-2, version-3 and version-4 containers are r
 	const PackedByteArray fresh = rebuilt->to_bytes();
 	uint32_t fresh_version = 0;
 	CHECK(RenderingShaderContainer::is_container_version_current(fresh, &fresh_version));
-	CHECK(fresh_version == 5);
+	CHECK(fresh_version == 6);
 	{
 		ErrorCapture capture;
 		Ref<TestShaderContainer> loaded;
@@ -324,7 +340,7 @@ TEST_CASE("[ShaderContainer] Version-2, version-3 and version-4 containers are r
 	CHECK_FALSE(RenderingShaderContainer::is_container_version_current(PackedByteArray()));
 }
 
-TEST_CASE("[ShaderContainer] Version 5 writes int64_atomics, has_ray_query and raytracing_reorder, then a zero padding word") {
+TEST_CASE("[ShaderContainer] Version 6 keeps int64_atomics, has_ray_query and raytracing_reorder at their version-5 offsets and ends with a zero padding word") {
 	Ref<TestShaderContainer> both;
 	both.instantiate();
 	REQUIRE(both->set_code_from_spirv("both", make_stages(TestModule::COMPUTE_RAY_QUERY_INT64_ATOMICS)));
@@ -333,7 +349,7 @@ TEST_CASE("[ShaderContainer] Version 5 writes int64_atomics, has_ray_query and r
 
 	const PackedByteArray bytes = both->to_bytes();
 	REQUIRE(bytes.size() >= REFLECTION_END + 4);
-	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 5);
+	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 6);
 	CHECK(read_u32(bytes, REFLECTION_INT64_ATOMICS_OFFSET) == uint32_t(RDAtomics64::USAGE_INT64_ATOMICS));
 	CHECK(read_u32(bytes, REFLECTION_HAS_RAY_QUERY_OFFSET) == 1);
 	// A compute shader does not reorder; test_rd_rt_pipelines.cpp checks a raygen shader's word.
@@ -367,6 +383,337 @@ TEST_CASE("[ShaderContainer] Version 5 writes int64_atomics, has_ray_query and r
 	CHECK_FALSE(loaded_int64_only->has_ray_query());
 	CHECK(loaded_int64_only->get_int64_atomics_usage() == uint32_t(RDAtomics64::USAGE_INT64_ATOMICS));
 }
+
+// GodotNext: rd_mesh_shaders (#178). Container version 6: the task and mesh stages, their workgroup sizes and the
+// rules for combining them with the other render stages. The shaders compile with the glslang module.
+#ifdef MODULE_GLSLANG_ENABLED
+const char *MESH_TASK_GLSL = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
+
+struct Payload {
+	uint meshlets[32];
+};
+taskPayloadSharedEXT Payload payload;
+
+layout(set = 0, binding = 0, std430) readonly buffer Visible {
+	uint data[];
+}
+visible;
+
+void main() {
+	payload.meshlets[gl_LocalInvocationIndex] = visible.data[gl_GlobalInvocationID.x];
+	EmitMeshTasksEXT(32, 1, 1);
+}
+)";
+
+const char *MESH_MESH_GLSL = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 16, local_size_y = 2, local_size_z = 1) in;
+layout(triangles, max_vertices = 64, max_primitives = 124) out;
+
+struct Payload {
+	uint meshlets[32];
+};
+taskPayloadSharedEXT Payload payload;
+
+layout(push_constant, std430) uniform Params {
+	uint base;
+}
+params;
+
+layout(location = 0) perprimitiveEXT out uint primitive_id[];
+
+void main() {
+	SetMeshOutputsEXT(3, 1);
+	if (gl_LocalInvocationIndex == 0) {
+		gl_MeshVerticesEXT[0].gl_Position = vec4(-1.0, -1.0, 0.0, 1.0);
+		gl_MeshVerticesEXT[1].gl_Position = vec4(3.0, -1.0, 0.0, 1.0);
+		gl_MeshVerticesEXT[2].gl_Position = vec4(-1.0, 3.0, 0.0, 1.0);
+		gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+		primitive_id[0] = payload.meshlets[gl_WorkGroupID.x] + params.base;
+	}
+}
+)";
+
+// A mesh shader without a task stage, so it reads no payload.
+const char *MESH_ONLY_GLSL = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+layout(triangles, max_vertices = 3, max_primitives = 1) out;
+
+layout(location = 0) perprimitiveEXT out uint primitive_id[];
+
+void main() {
+	SetMeshOutputsEXT(3, 1);
+	if (gl_LocalInvocationIndex == 0) {
+		gl_MeshVerticesEXT[0].gl_Position = vec4(-1.0, -1.0, 0.0, 1.0);
+		gl_MeshVerticesEXT[1].gl_Position = vec4(3.0, -1.0, 0.0, 1.0);
+		gl_MeshVerticesEXT[2].gl_Position = vec4(-1.0, 3.0, 0.0, 1.0);
+		gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
+		primitive_id[0] = gl_WorkGroupID.x;
+	}
+}
+)";
+
+const char *MESH_FRAGMENT_GLSL = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(location = 0) perprimitiveEXT flat in uint primitive_id;
+layout(location = 0) out uint color;
+
+void main() {
+	color = primitive_id;
+}
+)";
+
+const char *MESH_VERTEX_GLSL = R"(#version 450
+
+void main() {
+	gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}
+)";
+
+// Compiles one stage for Vulkan 1.1 at the SPIR-V version the Vulkan container format asks for (1.4 for the task
+// and mesh stages, which GL_EXT_mesh_shader needs).
+RDC::ShaderStageSPIRVData compile_mesh_case_stage(RDC::ShaderStage p_stage, const char *p_source) {
+	String error;
+	RDC::ShaderStageSPIRVData stage;
+	stage.shader_stage = p_stage;
+	const bool mesh_stage = p_stage == RDC::SHADER_STAGE_TASK || p_stage == RDC::SHADER_STAGE_MESH;
+	stage.spirv = compile_glslang_shader(p_stage, String::utf8(p_source), RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, mesh_stage ? RDC::SHADER_SPIRV_VERSION_1_4 : RDC::SHADER_SPIRV_VERSION_1_3, &error);
+	REQUIRE_MESSAGE(!stage.spirv.is_empty(), vformat("glslang failed to compile the %s stage:\n%s", RDC::SHADER_STAGE_NAMES[p_stage], error));
+	return stage;
+}
+
+Vector<RDC::ShaderStageSPIRVData> task_mesh_fragment_stages() {
+	Vector<RDC::ShaderStageSPIRVData> stages;
+	stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_TASK, MESH_TASK_GLSL));
+	stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, MESH_MESH_GLSL));
+	stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+	return stages;
+}
+
+void check_task_mesh_reflection(const RDC::ShaderReflection &p_reflection) {
+	CHECK(p_reflection.pipeline_type == RDC::PIPELINE_TYPE_RASTERIZATION);
+	CHECK(p_reflection.is_mesh());
+	CHECK(uint32_t(p_reflection.stages_bits) == uint32_t(RDC::SHADER_STAGE_TASK_BIT | RDC::SHADER_STAGE_MESH_BIT | RDC::SHADER_STAGE_FRAGMENT_BIT));
+	REQUIRE(p_reflection.stages_vector.size() == 3);
+	CHECK(p_reflection.stages_vector[0] == RDC::SHADER_STAGE_FRAGMENT);
+	CHECK(p_reflection.stages_vector[1] == RDC::SHADER_STAGE_TASK);
+	CHECK(p_reflection.stages_vector[2] == RDC::SHADER_STAGE_MESH);
+	CHECK(p_reflection.task_local_size[0] == 32);
+	CHECK(p_reflection.task_local_size[1] == 1);
+	CHECK(p_reflection.task_local_size[2] == 1);
+	CHECK(p_reflection.mesh_local_size[0] == 16);
+	CHECK(p_reflection.mesh_local_size[1] == 2);
+	CHECK(p_reflection.mesh_local_size[2] == 1);
+	CHECK(p_reflection.vertex_input_mask == 0);
+	CHECK(p_reflection.fragment_output_mask == 1);
+	CHECK(p_reflection.push_constant_size == 4);
+	CHECK(p_reflection.push_constant_stages.has_flag(RDC::SHADER_STAGE_MESH_BIT));
+	CHECK_FALSE(p_reflection.push_constant_stages.has_flag(RDC::SHADER_STAGE_TASK_BIT));
+	REQUIRE(p_reflection.uniform_sets.size() == 1);
+	REQUIRE(p_reflection.uniform_sets[0].size() == 1);
+	CHECK(p_reflection.uniform_sets[0][0].stages == uint32_t(RDC::SHADER_STAGE_TASK_BIT));
+	CHECK(p_reflection.compute_local_size[0] == 0);
+}
+
+TEST_CASE("[ShaderContainer] Version 6 round-trips task and mesh stages and their workgroup sizes") {
+	Ref<TestShaderContainer> container;
+	container.instantiate();
+	REQUIRE(container->set_code_from_spirv("task_mesh", task_mesh_fragment_stages()));
+	check_task_mesh_reflection(container->get_shader_reflection());
+
+	// The sizes are ReflectionData's six words before its padding word.
+	const PackedByteArray bytes = container->to_bytes();
+	REQUIRE(bytes.size() >= REFLECTION_END + 4);
+	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 6);
+	CHECK(read_u32(bytes, REFLECTION_TASK_LOCAL_SIZE_OFFSET) == 32);
+	CHECK(read_u32(bytes, REFLECTION_TASK_LOCAL_SIZE_OFFSET + 4) == 1);
+	CHECK(read_u32(bytes, REFLECTION_TASK_LOCAL_SIZE_OFFSET + 8) == 1);
+	CHECK(read_u32(bytes, REFLECTION_MESH_LOCAL_SIZE_OFFSET) == 16);
+	CHECK(read_u32(bytes, REFLECTION_MESH_LOCAL_SIZE_OFFSET + 4) == 2);
+	CHECK(read_u32(bytes, REFLECTION_MESH_LOCAL_SIZE_OFFSET + 8) == 1);
+	CHECK(read_u32(bytes, REFLECTION_PADDING_OFFSET) == 0);
+	CHECK(memcmp(bytes.ptr() + REFLECTION_END, "task_mesh", 9) == 0);
+
+	Ref<TestShaderContainer> loaded;
+	loaded.instantiate();
+	{
+		ErrorCapture capture;
+		REQUIRE(loaded->from_bytes(bytes));
+		CHECK(capture.count == 0);
+	}
+	check_task_mesh_reflection(loaded->get_shader_reflection());
+	REQUIRE(loaded->shaders.size() == 3);
+	CHECK(loaded->shaders[1].shader_stage == RDC::SHADER_STAGE_MESH);
+
+	// A copy that claims version 5 is rejected with one message, so caches rebuild it.
+	PackedByteArray stale = bytes;
+	write_u32(stale, HEADER_VERSION_OFFSET, 5);
+	ErrorCapture capture;
+	Ref<TestShaderContainer> stale_loaded;
+	stale_loaded.instantiate();
+	CHECK_FALSE(stale_loaded->from_bytes(stale));
+	CHECK(capture.count == 1);
+	CHECK_MESSAGE(capture.first_message.contains("(5, expected 6)"), capture.first_message);
+}
+
+TEST_CASE("[ShaderContainer] A stage that enables GL_EXT_mesh_shader compiles to SPIR-V 1.4") {
+	// The fragment shader of a mesh pipeline reads per-primitive values, which need the extension and so SPIR-V 1.4,
+	// while the container formats ask for SPIR-V 1.3 for fragment shaders.
+	String error;
+	const Vector<uint8_t> fragment = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, String::utf8(MESH_FRAGMENT_GLSL), RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_3, &error);
+	REQUIRE_MESSAGE(fragment.size() >= 8, error);
+	CHECK(read_u32(fragment, 4) == 0x00010400);
+	// Without the extension the requested version stands.
+	const Vector<uint8_t> vertex = compile_glslang_shader(RDC::SHADER_STAGE_VERTEX, String::utf8(MESH_VERTEX_GLSL), RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_3, &error);
+	REQUIRE_MESSAGE(vertex.size() >= 8, error);
+	CHECK(read_u32(vertex, 4) == 0x00010300);
+	// Only a directive that enables it counts: a comment or "disable" that names it keeps SPIR-V 1.3, which Vulkan 1.1
+	// devices without VK_KHR_spirv_1_4 load. Spaces around the parts of a directive do not matter. (glslang refuses
+	// the extension's directive in a vertex shader, so these are fragment shaders.) A failed compile must not be read:
+	// REQUIRE does not stop a test case in builds without exceptions.
+	const char *named_only[] = {
+		"#version 450\n// Unlike the mesh path, this needs no GL_EXT_mesh_shader.\nlayout(location = 0) out vec4 color;\nvoid main() {\n\tcolor = vec4(1.0);\n}\n",
+		"#version 450\n#extension GL_EXT_mesh_shader : disable\nlayout(location = 0) out vec4 color;\nvoid main() {\n\tcolor = vec4(1.0);\n}\n",
+	};
+	for (const char *source : named_only) {
+		const Vector<uint8_t> named = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, String::utf8(source), RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_3, &error);
+		CHECK_MESSAGE(named.size() >= 8, error);
+		if (named.size() >= 8) {
+			CHECK_MESSAGE(read_u32(named, 4) == 0x00010300, source);
+		}
+	}
+	const String spaced = String::utf8(MESH_FRAGMENT_GLSL).replace("#extension GL_EXT_mesh_shader : require", "  #  extension GL_EXT_mesh_shader:enable");
+	CHECK(spaced != String::utf8(MESH_FRAGMENT_GLSL));
+	const Vector<uint8_t> enabled = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, spaced, RDC::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RDC::SHADER_SPIRV_VERSION_1_3, &error);
+	CHECK_MESSAGE(enabled.size() >= 8, error);
+	if (enabled.size() >= 8) {
+		CHECK(read_u32(enabled, 4) == 0x00010400);
+	}
+}
+
+TEST_CASE("[ShaderContainer] A mesh shader needs no task stage, and its task workgroup size stays 0") {
+	Vector<RDC::ShaderStageSPIRVData> stages;
+	stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, MESH_ONLY_GLSL));
+	stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+	Ref<TestShaderContainer> container;
+	container.instantiate();
+	REQUIRE(container->set_code_from_spirv("mesh_only", stages));
+	Ref<TestShaderContainer> loaded;
+	loaded.instantiate();
+	REQUIRE(loaded->from_bytes(container->to_bytes()));
+	const RDC::ShaderReflection reflection = loaded->get_shader_reflection();
+	CHECK(reflection.is_mesh());
+	CHECK(uint32_t(reflection.stages_bits) == uint32_t(RDC::SHADER_STAGE_MESH_BIT | RDC::SHADER_STAGE_FRAGMENT_BIT));
+	CHECK(reflection.task_local_size[0] == 0);
+	CHECK(reflection.task_local_size[1] == 0);
+	CHECK(reflection.task_local_size[2] == 0);
+	CHECK(reflection.mesh_local_size[0] == 64);
+	CHECK(reflection.mesh_local_size[1] == 1);
+	CHECK(reflection.mesh_local_size[2] == 1);
+
+	// A vertex shader's container is not a mesh shader and has no mesh sizes.
+	Vector<RDC::ShaderStageSPIRVData> vertex_stages;
+	vertex_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_VERTEX, MESH_VERTEX_GLSL));
+	Ref<TestShaderContainer> vertex;
+	vertex.instantiate();
+	REQUIRE(vertex->set_code_from_spirv("vertex", vertex_stages));
+	CHECK_FALSE(vertex->get_shader_reflection().is_mesh());
+	CHECK(vertex->get_shader_reflection().mesh_local_size[0] == 0);
+}
+
+TEST_CASE("[ShaderContainer] Task and mesh stages mix with no vertex stage, and a task stage needs a mesh stage") {
+	SUBCASE("Vertex and mesh") {
+		Vector<RDC::ShaderStageSPIRVData> stages;
+		stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_VERTEX, MESH_VERTEX_GLSL));
+		stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, MESH_ONLY_GLSL));
+		Ref<TestShaderContainer> container;
+		container.instantiate();
+		ErrorCapture capture;
+		CHECK_FALSE(container->set_code_from_spirv("mixed", stages));
+		CHECK(capture.count == 2); // The rule, then set_code_from_spirv()'s reflection failure.
+		CHECK_MESSAGE(capture.first_message.contains("'mixed': mesh and task shaders cannot be mixed with vertex or tessellation shaders."), capture.first_message);
+	}
+	SUBCASE("Task without mesh") {
+		Vector<RDC::ShaderStageSPIRVData> stages;
+		stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_TASK, MESH_TASK_GLSL));
+		stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+		Ref<TestShaderContainer> container;
+		container.instantiate();
+		ErrorCapture capture;
+		CHECK_FALSE(container->set_code_from_spirv("task_only", stages));
+		CHECK(capture.count == 2);
+		CHECK_MESSAGE(capture.first_message.contains("'task_only': a task shader needs a mesh shader in the same shader."), capture.first_message);
+	}
+}
+
+#ifdef VULKAN_ENABLED
+TEST_CASE("[ShaderContainer][Vulkan] Vulkan containers hold task and mesh stages as SPIR-V 1.4") {
+	RenderingShaderContainerFormatVulkan format;
+	CHECK(format.supports_mesh_shaders());
+	CHECK(format.get_shader_spirv_version(RDC::SHADER_STAGE_TASK) == RDC::SHADER_SPIRV_VERSION_1_4);
+	CHECK(format.get_shader_spirv_version(RDC::SHADER_STAGE_MESH) == RDC::SHADER_SPIRV_VERSION_1_4);
+	CHECK(format.get_shader_spirv_version(RDC::SHADER_STAGE_VERTEX) == RDC::SHADER_SPIRV_VERSION_1_3);
+
+	Ref<RenderingShaderContainer> container = format.create_container();
+	REQUIRE(container->set_code_from_spirv("task_mesh", task_mesh_fragment_stages()));
+	Ref<RenderingShaderContainer> loaded = format.create_container();
+	REQUIRE(loaded->from_bytes(container->to_bytes()));
+	check_task_mesh_reflection(loaded->get_shader_reflection());
+	REQUIRE(loaded->shaders.size() == 3);
+	CHECK(loaded->shaders[0].shader_stage == RDC::SHADER_STAGE_TASK);
+	CHECK(loaded->shaders[1].shader_stage == RDC::SHADER_STAGE_MESH);
+	CHECK(loaded->shaders[2].shader_stage == RDC::SHADER_STAGE_FRAGMENT);
+}
+#endif // VULKAN_ENABLED
+
+#ifdef METAL_ENABLED
+// The MSL source the Metal container stores for a shader (before any compiled library).
+String metal_source(const Ref<RenderingShaderContainerMetal> &p_container, int64_t p_index) {
+	const RenderingShaderContainer::Shader &shader = p_container->shaders[p_index];
+	Vector<uint8_t> code;
+	code.resize(shader.code_decompressed_size);
+	REQUIRE(p_container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, code.ptrw(), code.size()));
+	return String::utf8((const char *)code.ptr(), p_container->mtl_shaders[p_index].source_size);
+}
+
+TEST_CASE("[ShaderContainer][Metal] Task and mesh stages compile to object and mesh functions, with the payload size") {
+	const MetalDeviceProfile *profile = MetalDeviceProfile::get_profile(MetalDeviceProfile::Platform::macOS, MetalDeviceProfile::GPU::Apple9, os_version::MACOS_14_0);
+	REQUIRE(profile != nullptr);
+	RenderingShaderContainerFormatMetal format(profile);
+	CHECK(format.supports_mesh_shaders());
+	// The shader baker bakes mesh-shader versions only for profiles whose GPUs run them (Apple7 and later).
+	const MetalDeviceProfile *apple6 = MetalDeviceProfile::get_profile(MetalDeviceProfile::Platform::iOS, MetalDeviceProfile::GPU::Apple6, os_version::IOS_17_0);
+	REQUIRE(apple6 != nullptr);
+	CHECK_FALSE(RenderingShaderContainerFormatMetal(apple6).supports_mesh_shaders());
+	// An Apple7 profile for iOS 15 has MSL 2.4 and no argument buffers, so its exports bake no mesh-shader versions.
+	const MetalDeviceProfile *ios15 = MetalDeviceProfile::get_profile(MetalDeviceProfile::Platform::iOS, MetalDeviceProfile::GPU::Apple7, os_version::IOS_15_0);
+	REQUIRE(ios15 != nullptr);
+	CHECK_FALSE(RenderingShaderContainerFormatMetal(ios15).supports_mesh_shaders());
+	CHECK(RenderingShaderContainerMetal::FORMAT_VERSION == 4);
+
+	Ref<RenderingShaderContainerMetal> container = format.create_container();
+	REQUIRE(container.is_valid());
+	REQUIRE(container->set_code_from_spirv("task_mesh", task_mesh_fragment_stages()));
+	// The payload is 32 uints, which the mesh pipeline reserves (payloadMemoryLength).
+	CHECK(container->mtl_reflection_data.task_payload_size == 128);
+	REQUIRE(container->shaders.size() == 3);
+	CHECK(metal_source(container, 0).contains("[[object]]"));
+	CHECK(metal_source(container, 1).contains("[[mesh]]"));
+
+	Ref<RenderingShaderContainerMetal> loaded = format.create_container();
+	REQUIRE(loaded->from_bytes(container->to_bytes()));
+	CHECK(loaded->mtl_reflection_data.task_payload_size == 128);
+	check_task_mesh_reflection(loaded->get_shader_reflection());
+}
+#endif // METAL_ENABLED
+#endif // MODULE_GLSLANG_ENABLED
 
 #ifdef D3D12_ENABLED
 using DXILValidationStats = RenderingShaderContainerD3D12::DXILValidationStats;
@@ -456,17 +803,17 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version 2, shader m
 	REQUIRE(plain->shaders.size() == 1);
 	CHECK(dxil_program_version(decompressed_code(plain, 0)) == ((5u << 16) | 0x62));
 
-	// It is written as container version 5, D3D12 format version 2, and version-2, version-3 and version-4 copies
-	// are each rejected once.
+	// It is written as container version 6, D3D12 format version 2, and copies of versions 2 to 5 are each
+	// rejected once.
 	const PackedByteArray bytes = plain->to_bytes();
 	REQUIRE(bytes.size() > HEADER_FORMAT_VERSION_OFFSET + 4);
-	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 5);
+	CHECK(read_u32(bytes, HEADER_VERSION_OFFSET) == 6);
 	CHECK(read_u32(bytes, HEADER_FORMAT_VERSION_OFFSET) == 2);
 	{
 		Ref<RenderingShaderContainer> loaded = format.create_container();
 		CHECK(loaded->from_bytes(bytes));
 	}
-	const uint32_t stale_versions[] = { 2, 3, 4 };
+	const uint32_t stale_versions[] = { 2, 3, 4, 5 };
 	for (const uint32_t stale_version : stale_versions) {
 		PackedByteArray stale = bytes;
 		write_u32(stale, HEADER_VERSION_OFFSET, stale_version);
@@ -839,6 +1186,28 @@ TEST_CASE("[ShaderContainer][D3D12] GLSL ray query and a raygen, any-hit, closes
 		}
 		check_dxil_validation(validation_before, 0);
 	}
+}
+
+// GodotNext: rd_mesh_shaders (#178). Until the shader compiler translates task and mesh stages to DXIL (#122), the
+// container refuses them with one named error, for the shader baker and direct container use (RenderingDevice refuses
+// them first, as SUPPORTS_MESH_SHADER is false on Direct3D 12).
+TEST_CASE("[ShaderContainer][D3D12] Task and mesh stages are refused with one error until they translate to DXIL") {
+	CHECK_FALSE(RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED);
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+	const Vector<RDC::ShaderStageSPIRVData> stages = task_mesh_fragment_stages();
+	REQUIRE(stages.size() == 3);
+	for (const RDC::ShaderStageSPIRVData &stage : stages) {
+		REQUIRE_FALSE(stage.spirv.is_empty());
+	}
+	Ref<RenderingShaderContainer> container = format.create_container();
+	ErrorCapture capture;
+	CHECK_FALSE(container->set_code_from_spirv("task_mesh", stages));
+	CHECK(capture.count == 1);
+	CHECK_MESSAGE(capture.first_message.contains("Shader 'task_mesh' has task or mesh shader stages, which Direct3D 12 cannot compile yet"), capture.first_message);
+	CHECK(container->shaders.is_empty());
 }
 
 // The DXIL disassembly comes from the Windows SDK's dxcompiler.dll, through a hook that exists only with DEBUG_ENABLED.

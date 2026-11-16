@@ -397,6 +397,7 @@ LocalVector<RenderingDeviceGraph::IndirectCountDraw> RenderingDeviceGraph::indir
 		const DrawListDrawIndirectCountInstruction *instruction = reinterpret_cast<const DrawListDrawIndirectCountInstruction *>(draw_list_command->instruction_data() + draw_list_command->indirect_count_offsets()[i]);
 		IndirectCountDraw draw;
 		draw.indexed = instruction->type == DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT;
+		draw.mesh_tasks = instruction->type == DrawListInstruction::TYPE_DRAW_MESH_TASKS_INDIRECT_COUNT; // GodotNext: rd_mesh_shaders (#178)
 		draw.buffer = instruction->buffer;
 		draw.count_buffer = instruction->count_buffer;
 		draw.offset = instruction->offset;

@@ -15,6 +15,9 @@ class RDHeaderStruct:
         self.closest_hit_lines = []
         self.miss_lines = []
         self.intersection_lines = []
+        # GodotNext: rd_mesh_shaders (#178)
+        self.task_lines = []
+        self.mesh_lines = []
 
         self.vertex_included_files = []
         self.fragment_included_files = []
@@ -24,6 +27,8 @@ class RDHeaderStruct:
         self.closest_hit_included_files = []
         self.miss_included_files = []
         self.intersection_included_files = []
+        self.task_included_files = []
+        self.mesh_included_files = []
 
         self.reading = ""
         self.line_offset = 0
@@ -35,6 +40,8 @@ class RDHeaderStruct:
         self.closest_hit_offset = 0
         self.miss_offset = 0
         self.intersection_offset = 0
+        self.task_offset = 0
+        self.mesh_offset = 0
 
 
 def include_file_in_rd_header(filename: str, header_data: RDHeaderStruct, depth: int) -> RDHeaderStruct:
@@ -102,6 +109,21 @@ def include_file_in_rd_header(filename: str, header_data: RDHeaderStruct, depth:
                 header_data.intersection_offset = header_data.line_offset
                 continue
 
+            # GodotNext: rd_mesh_shaders (#178)
+            if line.find("#[task]") != -1:
+                header_data.reading = "task"
+                line = fs.readline()
+                header_data.line_offset += 1
+                header_data.task_offset = header_data.line_offset
+                continue
+
+            if line.find("#[mesh]") != -1:
+                header_data.reading = "mesh"
+                line = fs.readline()
+                header_data.line_offset += 1
+                header_data.mesh_offset = header_data.line_offset
+                continue
+
             while line.find("#include ") != -1:
                 includeline = line.replace("#include ", "").strip()[1:-1]
 
@@ -148,6 +170,14 @@ def include_file_in_rd_header(filename: str, header_data: RDHeaderStruct, depth:
                     header_data.intersection_included_files += [included_file]
                     if include_file_in_rd_header(included_file, header_data, depth + 1) is None:
                         print_error(f'In file "{filename}": #include "{includeline}" could not be found!"')
+                elif included_file not in header_data.task_included_files and header_data.reading == "task":
+                    header_data.task_included_files += [included_file]
+                    if include_file_in_rd_header(included_file, header_data, depth + 1) is None:
+                        print_error(f'In file "{filename}": #include "{includeline}" could not be found!"')
+                elif included_file not in header_data.mesh_included_files and header_data.reading == "mesh":
+                    header_data.mesh_included_files += [included_file]
+                    if include_file_in_rd_header(included_file, header_data, depth + 1) is None:
+                        print_error(f'In file "{filename}": #include "{includeline}" could not be found!"')
 
                 line = fs.readline()
 
@@ -169,6 +199,10 @@ def include_file_in_rd_header(filename: str, header_data: RDHeaderStruct, depth:
                 header_data.miss_lines += [line]
             if header_data.reading == "intersection":
                 header_data.intersection_lines += [line]
+            if header_data.reading == "task":
+                header_data.task_lines += [line]
+            if header_data.reading == "mesh":
+                header_data.mesh_lines += [line]
 
             line = fs.readline()
             header_data.line_offset += 1
@@ -194,6 +228,13 @@ def build_rd_header(filename: str, shader: str) -> None:
             header_data.closest_hit_lines or None,
             header_data.miss_lines or None,
             header_data.intersection_lines or None,
+        ]
+    elif header_data.mesh_lines:  # GodotNext: rd_mesh_shaders (#178). Task (optional), mesh and fragment.
+        setup_function = "setup_mesh"
+        stages = [
+            header_data.task_lines or None,
+            header_data.mesh_lines,
+            header_data.fragment_lines or None,
         ]
     elif header_data.compute_lines:  # Compute
         setup_function = "setup"

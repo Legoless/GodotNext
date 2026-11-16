@@ -454,10 +454,11 @@ TEST_CASE("[RD][Atomics64] The shader container keeps the usage and rejects olde
 	CHECK_EQ(plain->get_int64_atomics_usage(), 0u);
 
 	// Older containers are rejected, not misread: version 2 has the shorter reflection layout, version 3
-	// (this item's own) has no has_ray_query from #123, which made it version 4, and version 4 has no
-	// raytracing_reorder from #179, which made it version 5.
-	CHECK_EQ(RenderingShaderContainer::CONTAINER_VERSION, 5u);
-	const uint32_t old_versions[] = { 2, 3, 4 };
+	// (this item's own) has no has_ray_query from #123, which made it version 4, version 4 has no
+	// raytracing_reorder from #179, which made it version 5, and version 5 has no task and mesh workgroup sizes
+	// from #178, which made it version 6.
+	CHECK_EQ(RenderingShaderContainer::CONTAINER_VERSION, 6u);
+	const uint32_t old_versions[] = { 2, 3, 4, 5 };
 	for (const uint32_t old_version : old_versions) {
 		PackedByteArray old_bytes = bytes;
 		memcpy(old_bytes.ptrw() + sizeof(uint32_t), &old_version, sizeof(old_version));
@@ -469,7 +470,7 @@ TEST_CASE("[RD][Atomics64] The shader container keeps the usage and rejects olde
 		ERR_PRINT_ON;
 		CHECK_FALSE(old_loaded);
 		CHECK_EQ(errors.count, 1);
-		CHECK_EQ(errors.last_message, vformat("Unsupported version in shader container (%d, expected 5); it must be rebuilt.", old_version));
+		CHECK_EQ(errors.last_message, vformat("Unsupported version in shader container (%d, expected 6); it must be rebuilt.", old_version));
 	}
 }
 

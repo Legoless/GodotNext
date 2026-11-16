@@ -107,6 +107,9 @@ public:
 	// GodotNext: rd_indirect_count (#177). SV_StartVertexLocation and SV_StartInstanceLocation (extended command
 	// information), which shaders compiled with base_instance_native read.
 	static constexpr uint32_t BASE_INSTANCE_NATIVE_SHADER_MODEL = 0x68; // D3D_SHADER_MODEL_6_8
+	// GodotNext: rd_mesh_shaders (#178). Whether task and mesh stages translate to DXIL (amplification and mesh
+	// shaders). The Mesa fork's mesh patch turns it on (#122); until then SUPPORTS_MESH_SHADER is false on D3D12.
+	static constexpr bool MESH_STAGES_SUPPORTED = false;
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
@@ -118,6 +121,10 @@ public:
 		5, // SHADER_STAGE_CLOSEST_HIT
 		6, // SHADER_STAGE_MISS
 		7, // SHADER_STAGE_INTERSECTION
+		// GodotNext: rd_mesh_shaders (#178). No specialization-constant slot until the stages compile (#122): a 0 here
+		// would patch the vertex stage's offsets.
+		UINT32_MAX, // SHADER_STAGE_TASK
+		UINT32_MAX, // SHADER_STAGE_MESH
 	};
 
 	struct ReflectionBindingSetDataD3D12 {
@@ -235,6 +242,13 @@ public:
 	// Builds without DEBUG_ENABLED always return an empty string. For tests.
 	static String disassemble_dxil(const Vector<uint8_t> &p_dxil, String *r_error = nullptr);
 };
+
+// GodotNext: rd_mesh_shaders (#178). The task and mesh entries of SHADER_STAGES_BIT_OFFSET_INDICES index
+// stages_bit_offsets unchecked once the stages compile, so turning MESH_STAGES_SUPPORTED on (#122) needs real slots.
+static_assert(!RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED ||
+				(RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_TASK] < uint32_t(D3D12_BITCODE_OFFSETS_NUM_STAGES) &&
+						RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MESH] < uint32_t(D3D12_BITCODE_OFFSETS_NUM_STAGES)),
+		"Task and mesh stages need specialization-constant bit-offset slots before MESH_STAGES_SUPPORTED is turned on.");
 
 class RenderingShaderContainerFormatD3D12 : public RenderingShaderContainerFormat {
 protected:

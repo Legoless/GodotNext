@@ -226,13 +226,23 @@ Error RenderingShaderContainerMetal::compile_metal_source(const char *p_source, 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunguarded-availability"
 
-static spv::ExecutionModel SHADER_STAGE_REMAP[RDD::SHADER_STAGE_MAX] = {
+// GodotNext: rd_mesh_shaders (#178). Sized by the initializer, so a stage without an entry fails to compile; the
+// ray-tracing stages read as vertex shaders before (they had no entries).
+static spv::ExecutionModel SHADER_STAGE_REMAP[] = {
 	spv::ExecutionModelVertex, // RDD::SHADER_STAGE_VERTEX
 	spv::ExecutionModelFragment, // RDD::SHADER_STAGE_FRAGMENT
 	spv::ExecutionModelTessellationControl, // RDD::SHADER_STAGE_TESSELATION_CONTROL
 	spv::ExecutionModelTessellationEvaluation, // RDD::SHADER_STAGE_TESSELATION_EVALUATION
 	spv::ExecutionModelGLCompute, // RDD::SHADER_STAGE_COMPUTE
+	spv::ExecutionModelRayGenerationKHR, // RDD::SHADER_STAGE_RAYGEN
+	spv::ExecutionModelAnyHitKHR, // RDD::SHADER_STAGE_ANY_HIT
+	spv::ExecutionModelClosestHitKHR, // RDD::SHADER_STAGE_CLOSEST_HIT
+	spv::ExecutionModelMissKHR, // RDD::SHADER_STAGE_MISS
+	spv::ExecutionModelIntersectionKHR, // RDD::SHADER_STAGE_INTERSECTION
+	spv::ExecutionModelTaskEXT, // RDD::SHADER_STAGE_TASK: an object function.
+	spv::ExecutionModelMeshEXT, // RDD::SHADER_STAGE_MESH
 };
+static_assert(std_size(SHADER_STAGE_REMAP) == RDD::SHADER_STAGE_MAX);
 
 spv::ExecutionModel get_stage(uint32_t p_stages_mask, RDD::ShaderStage p_stage) {
 	if (p_stages_mask & (1 << p_stage)) {
@@ -243,6 +253,87 @@ spv::ExecutionModel get_stage(uint32_t p_stages_mask, RDD::ShaderStage p_stage) 
 
 spv::ExecutionModel map_stage(RDD::ShaderStage p_stage) {
 	return SHADER_STAGE_REMAP[p_stage];
+}
+
+// GodotNext: rd_mesh_shaders (#178). The size and alignment of a type in MSL's natural layout, which is how
+// SPIRV-Cross declares the task payload: a plain struct in object_data memory. Its members have no Offset decorations,
+// so Compiler::get_declared_struct_size() and CompilerMSL's own size helpers cannot size it. A 3-component vector
+// takes the size and alignment of a 4-component one, and a struct is aligned to its largest member. False, with
+// r_error naming the type, for a type this does not size.
+static bool _msl_natural_layout(const spirv_cross::CompilerMSL &p_compiler, const spirv_cross::SPIRType &p_type, uint32_t &r_size, uint32_t &r_alignment, String &r_error) {
+	using spirv_cross::SPIRType;
+	if (p_type.op == spv::OpTypePointer) {
+		if (p_type.storage != spv::StorageClassPhysicalStorageBuffer) {
+			r_error = "a pointer that is not a buffer reference";
+			return false;
+		}
+		r_size = 8;
+		r_alignment = 8;
+		return true;
+	}
+	if (p_type.op == spv::OpTypeRuntimeArray) {
+		r_error = "a runtime array";
+		return false;
+	}
+	if (p_type.op == spv::OpTypeArray) {
+		if (p_type.array.empty() || !p_type.array_size_literal.back()) {
+			r_error = "an array sized by a specialization constant";
+			return false;
+		}
+		uint32_t element_size = 0;
+		uint32_t element_alignment = 0;
+		if (!_msl_natural_layout(p_compiler, p_compiler.get_type(p_type.parent_type), element_size, element_alignment, r_error)) {
+			return false;
+		}
+		r_size = element_size * p_type.array.back();
+		r_alignment = element_alignment;
+		return true;
+	}
+	switch (p_type.basetype) {
+		case SPIRType::Struct: {
+			if (p_type.member_types.empty()) {
+				r_error = "an empty struct";
+				return false;
+			}
+			uint32_t offset = 0;
+			uint32_t alignment = 1;
+			for (const spirv_cross::TypeID member_type_id : p_type.member_types) {
+				uint32_t member_size = 0;
+				uint32_t member_alignment = 0;
+				if (!_msl_natural_layout(p_compiler, p_compiler.get_type(member_type_id), member_size, member_alignment, r_error)) {
+					return false;
+				}
+				offset = (offset + member_alignment - 1) / member_alignment * member_alignment + member_size;
+				alignment = MAX(alignment, member_alignment);
+			}
+			r_size = (offset + alignment - 1) / alignment * alignment;
+			r_alignment = alignment;
+			return true;
+		}
+		case SPIRType::Boolean:
+		case SPIRType::SByte:
+		case SPIRType::UByte:
+		case SPIRType::Short:
+		case SPIRType::UShort:
+		case SPIRType::Int:
+		case SPIRType::UInt:
+		case SPIRType::Int64:
+		case SPIRType::UInt64:
+		case SPIRType::Half:
+		case SPIRType::Float: {
+			// SPIR-V gives booleans a width of 1 bit. SPIRV-Cross declares a boolean struct member as a short (2 bytes),
+			// and a payload that is a bool itself as a 1-byte bool, which 2 bytes over-reserves harmlessly.
+			const uint32_t component = p_type.basetype == SPIRType::Boolean ? 2 : p_type.width / 8;
+			// A vector, or one column of a matrix.
+			const uint32_t vector = component * (p_type.vecsize == 3 ? 4 : p_type.vecsize);
+			r_size = vector * p_type.columns;
+			r_alignment = vector;
+			return true;
+		}
+		default:
+			r_error = vformat("a type of SPIRV-Cross base type %d", int(p_type.basetype));
+			return false;
+	}
 }
 
 MetalDeviceProfile::MinimumRequirements RenderingShaderContainerMetal::inspect_spirv(const ReflectShader &p_shader) {
@@ -280,6 +371,13 @@ MetalDeviceProfile::MinimumRequirements RenderingShaderContainerMetal::inspect_s
 					reqs.gpu = MetalDeviceProfile::GPU::Apple8;
 				}
 				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_31);
+			}
+			// GodotNext: rd_mesh_shaders (#178). Object and mesh functions need Apple7 and MSL 3.0.
+			if (word_count >= 2 && opcode == spv::OpCapability && words[1] == spv::CapabilityMeshShadingEXT) {
+				if (reqs.gpu < MetalDeviceProfile::GPU::Apple7) {
+					reqs.gpu = MetalDeviceProfile::GPU::Apple7;
+				}
+				reqs.msl_version = MAX(reqs.msl_version, MSL_VERSION_30);
 			}
 			if (opcode == spv::OpImageTexelPointer) {
 				atomic_image_ids.insert(words[3]);
@@ -783,6 +881,30 @@ bool RenderingShaderContainerMetal::_set_code_from_spirv(const ReflectShader &p_
 		if (push_constant_resource_binding.desc_set == ResourceBindingPushConstantDescriptorSet &&
 				compiler.is_msl_resource_binding_used(execution_model, ResourceBindingPushConstantDescriptorSet, ResourceBindingPushConstantBinding)) {
 			mtl_reflection_data.push_constant_binding.set(stage, push_constant_resource_binding.msl_buffer);
+		}
+
+		// GodotNext: rd_mesh_shaders (#178). The object function's payload, which the mesh pipeline reserves. From
+		// SPIR-V 1.4 the entry point lists every global variable it uses, the payload included.
+		if (stage == RDC::SHADER_STAGE_TASK) {
+			mtl_reflection_data.task_payload_size = 0;
+			for (VariableID id : entry_point.interface_variables) {
+				if (compiler.get_storage_class(id) != spv::StorageClassTaskPayloadWorkgroupEXT) {
+					continue;
+				}
+				uint32_t payload_size = 0;
+				uint32_t payload_alignment = 0;
+				String payload_error;
+				bool sized = false;
+				try {
+					// The variable's type is a pointer; the payload is what it points to.
+					const SPIRType &payload_type = compiler.get_type(compiler.get_type_from_variable(id).parent_type);
+					sized = _msl_natural_layout(compiler, payload_type, payload_size, payload_alignment, payload_error);
+				} catch (CompilerError &e) {
+					payload_error = e.what();
+				}
+				ERR_FAIL_COND_V_MSG(!sized, false, vformat("Shader '%s': failed to size the task payload (%s).", String(shader_name.ptr()), payload_error));
+				mtl_reflection_data.task_payload_size += payload_size;
+			}
 		}
 
 		stage_data.is_position_invariant = compiler.is_position_invariant();

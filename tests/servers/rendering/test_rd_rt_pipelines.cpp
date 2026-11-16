@@ -363,15 +363,16 @@ TEST_CASE("[RD][RTPipeline] Shader containers keep the reordering they were comp
 	CHECK_EQ(container->get_raytracing_reorder_usage(), uint32_t(RDRTPipeline::REORDER_USAGE_NV));
 
 	// The bytes of a shader cache: the usage survives them, for shader_create_from_bytecode(). Container version 5
-	// keeps it in ReflectionData's word at offset 72, after the 20-byte container header (this container adds no
-	// header data), followed by a zero padding word.
+	// put it in ReflectionData's word at offset 72, after the 20-byte container header (this container adds no
+	// header data). GodotNext: rd_mesh_shaders (#178). Version 6 keeps it there and appends the task and mesh
+	// workgroup sizes after it, so the next word is the task stage's X size: 0, as this shader has no task stage.
 	const PackedByteArray bytes = container->to_bytes();
-	REQUIRE(bytes.size() >= 20 + 80);
+	REQUIRE(bytes.size() >= 20 + 104);
 	uint32_t words[3] = {};
 	memcpy(&words[0], bytes.ptr() + 4, sizeof(uint32_t));
 	memcpy(&words[1], bytes.ptr() + 20 + 72, sizeof(uint32_t));
 	memcpy(&words[2], bytes.ptr() + 20 + 76, sizeof(uint32_t));
-	CHECK_EQ(words[0], 5u);
+	CHECK_EQ(words[0], 6u);
 	CHECK_EQ(words[1], uint32_t(RDRTPipeline::REORDER_USAGE_NV));
 	CHECK_EQ(words[2], 0u);
 	Ref<RTTestContainer> loaded;

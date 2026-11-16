@@ -343,12 +343,15 @@ private:
 
 	RDM::SyncMode sync_mode = RDM::SyncMode::Barriers;
 
-	void _fence_wait(MTL::RenderCommandEncoder *p_enc);
+	MTL::Fence *_fence_wait(MTL::RenderCommandEncoder *p_enc); // GodotNext: rd_mesh_shaders (#178). Returns the fence.
 	void _fence_wait(MTL::ComputeCommandEncoder *p_enc);
 	void _fence_wait(MTL::BlitCommandEncoder *p_enc);
 	// GodotNext: metal_acceleration_structure
 	void _fence_wait(MTL::AccelerationStructureCommandEncoder *p_enc);
-	void _fence_update(MTL::RenderCommandEncoder *p_enc);
+	// GodotNext: rd_mesh_shaders (#178). p_mesh_stages: the encoder ran object and mesh functions.
+	void _fence_update(MTL::RenderCommandEncoder *p_enc, bool p_mesh_stages = false);
+	// GodotNext: rd_mesh_shaders (#178). See metal3_objects.cpp.
+	void _encode_mesh_stages();
 	void _fence_update(MTL::ComputeCommandEncoder *p_enc);
 	void _fence_update(MTL::BlitCommandEncoder *p_enc);
 	// GodotNext: metal_acceleration_structure
@@ -407,7 +410,7 @@ protected:
 	LocalVector<RDD::RenderPassClearValue> &get_clear_values() override { return render.clear_values; }
 	const Rect2i &get_render_area() const override { return render.render_area; }
 	void end_render_encoding() override {
-		_fence_update(render.encoder.get());
+		_fence_update(render.encoder.get(), render.mesh_stages_encoded); // GodotNext: rd_mesh_shaders (#178)
 		render.end_encoding();
 	}
 
@@ -437,9 +440,16 @@ public:
 		enum ArgBufferStage {
 			ARG_BUFFER_STAGE_VERTEX,
 			ARG_BUFFER_STAGE_FRAGMENT,
+			// GodotNext: rd_mesh_shaders (#178). The object (task) and mesh functions of a mesh pipeline.
+			ARG_BUFFER_STAGE_OBJECT,
+			ARG_BUFFER_STAGE_MESH,
 			ARG_BUFFER_STAGE_MAX,
 		};
 		BindingCache arg_buffer_cache[ARG_BUFFER_STAGE_MAX];
+		// GodotNext: rd_mesh_shaders (#178). The fence the encoder waited on when it was created, and whether a mesh
+		// pipeline added the object and mesh stages to its residency and fences.
+		MTL::Fence *encoder_wait_fence = nullptr;
+		bool mesh_stages_encoded = false;
 
 		MDRenderPipeline::RasterState encoder_raster;
 		MDRenderPipeline::RasterState raster_state;
@@ -610,12 +620,16 @@ public:
 		MTL::Buffer *buffer = nullptr; // Null when the prepare failed: the draw is skipped.
 		uint32_t max_draw_count = 0;
 		bool indexed = false;
+		bool mesh_tasks = false; // GodotNext: rd_mesh_shaders (#178). Three-word MTLDispatchThreadgroupsIndirectArguments.
 	};
 	LocalVector<IndirectCountClamp> _indirect_count_clamps;
 	uint32_t _indirect_count_clamps_used = 0;
 	// A clamp pass updated the current level's fence, which the next clamp pass and the render pass wait on.
 	bool _indirect_count_clamp_fenced = false;
 	void _render_draw_indirect_count(bool p_indexed, uint32_t p_max_draw_count);
+	// GodotNext: rd_mesh_shaders (#178). The clamp pass of render_draw_indirect_count_prepare(), for p_words-word records
+	// whose word p_count_word is zeroed at or past the count (and multiplied by p_view_count before it).
+	void _prepare_indirect_count_clamp(IndirectCountClamp p_clamp, uint32_t p_words, uint32_t p_count_word, uint32_t p_view_count, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_stride);
 
 	MTL::CommandBuffer *command_buffer();
 	_FORCE_INLINE_ MTL::CommandBuffer *get_command_buffer() const {
@@ -660,6 +674,13 @@ public:
 	// count (and multiplies it by the pass's view count in the others); the draw then issues p_max_draw_count
 	// indirect draws from that copy.
 	void render_draw_indirect_count_prepare(RDD::RenderPassID p_render_pass, bool p_indexed, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override;
+	// GodotNext: rd_mesh_shaders (#178). drawMeshThreadgroups() with the object and mesh threadgroup sizes of the bound
+	// pipeline's shader. The indirect variants need Apple9 (SUPPORTS_MESH_SHADER_INDIRECT); the count one clamps its
+	// records like the count draws, setting threadgroupsPerGrid.x to 0 at or past the count.
+	void render_draw_mesh_tasks(uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) override;
+	void render_draw_mesh_tasks_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override;
+	void render_draw_mesh_tasks_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override;
+	void render_draw_mesh_tasks_indirect_count_prepare(RDD::RenderPassID p_render_pass, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override;
 
 	void render_end_pass() override;
 

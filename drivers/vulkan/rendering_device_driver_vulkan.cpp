@@ -466,6 +466,13 @@ uint32_t RenderingDeviceDriverVulkan::SubgroupCapabilities::supported_stages_fla
 	if (supported_stages & VK_SHADER_STAGE_INTERSECTION_BIT_KHR) {
 		flags += SHADER_STAGE_INTERSECTION_BIT;
 	}
+	// GodotNext: rd_mesh_shaders (#178)
+	if (supported_stages & VK_SHADER_STAGE_TASK_BIT_EXT) {
+		flags += SHADER_STAGE_TASK_BIT;
+	}
+	if (supported_stages & VK_SHADER_STAGE_MESH_BIT_EXT) {
+		flags += SHADER_STAGE_MESH_BIT;
+	}
 
 	return flags;
 }
@@ -637,6 +644,9 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_EXT_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_NV_RAY_TRACING_INVOCATION_REORDER_EXTENSION_NAME, false);
+	// GodotNext: rd_mesh_shaders (#178). Task and mesh shaders. It needs SPIR-V 1.4 (Vulkan 1.2, or
+	// VK_KHR_spirv_1_4 above).
+	_register_requested_device_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -1012,6 +1022,13 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		// predate the EXT structure report it as unknown.
 		VkPhysicalDeviceRayTracingInvocationReorderFeaturesEXT reorder_features_ext = {};
 		VkPhysicalDeviceRayTracingInvocationReorderFeaturesNV reorder_features_nv = {};
+		// GodotNext: rd_mesh_shaders (#178)
+		VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader_features = {};
+		if (enabled_device_extension_names.has(VK_EXT_MESH_SHADER_EXTENSION_NAME)) {
+			mesh_shader_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+			mesh_shader_features.pNext = next_features;
+			next_features = &mesh_shader_features;
+		}
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -1212,6 +1229,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		// GodotNext: rd_indirect_count (#177)
 		shader_draw_parameters_support = shader_draw_parameters_features.shaderDrawParameters;
 
+		// GodotNext: rd_mesh_shaders (#178). Task shaders are optional in a mesh pipeline, but the RenderingDevice
+		// feature covers both stages. SPIR-V 1.4 is core from Vulkan 1.2.
+		const bool spirv_1_4 = physical_device_properties.apiVersion >= VK_API_VERSION_1_2 || enabled_device_extension_names.has(VK_KHR_SPIRV_1_4_EXTENSION_NAME);
+		mesh_shader_support = enabled_device_extension_names.has(VK_EXT_MESH_SHADER_EXTENSION_NAME) && spirv_1_4 && mesh_shader_features.taskShader && mesh_shader_features.meshShader;
+		print_verbose(vformat("- Vulkan mesh shaders %s", mesh_shader_support ? "supported (task and mesh shaders)" : "not supported"));
+
 		// GodotNext: rd_atomics64 (#175)
 		if (enabled_device_extension_names.has(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME)) {
 			int64_atomics_capabilities.image_supported = shader_image_atomic_int64_features.shaderImageInt64Atomics;
@@ -1299,6 +1322,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		// GodotNext: rd_bindless (#176)
 		VkPhysicalDeviceDescriptorIndexingPropertiesEXT descriptor_indexing_properties = {};
 		VkPhysicalDeviceDescriptorBufferPropertiesEXT descriptor_buffer_properties = {};
+		VkPhysicalDeviceMeshShaderPropertiesEXT mesh_shader_properties = {}; // GodotNext: rd_mesh_shaders (#178)
 		VkPhysicalDeviceProperties2 physical_device_properties_2 = {};
 
 		const bool use_1_1_properties = physical_device_properties.apiVersion >= VK_API_VERSION_1_1;
@@ -1363,6 +1387,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				next_properties = &descriptor_buffer_properties;
 			}
 		}
+		// GodotNext: rd_mesh_shaders (#178)
+		if (mesh_shader_support) {
+			mesh_shader_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
+			mesh_shader_properties.pNext = next_properties;
+			next_properties = &mesh_shader_properties;
+		}
 
 		physical_device_properties_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 		physical_device_properties_2.pNext = next_properties;
@@ -1387,6 +1417,16 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				bindless_capabilities.storage_buffer_descriptor_size = descriptor_buffer_properties.storageBufferDescriptorSize;
 			}
 			print_verbose(vformat("- Vulkan bindless tables: %d textures, %d samplers, %d storage buffers per table.", bindless_capabilities.max_textures, bindless_capabilities.max_samplers, bindless_capabilities.max_storage_buffers));
+		}
+		// GodotNext: rd_mesh_shaders (#178). The group counts draw_list_draw_mesh_tasks() checks; 0 without mesh shaders.
+		mesh_shader_limits = MeshShaderLimits();
+		if (mesh_shader_support) {
+			for (uint32_t i = 0; i < 3; i++) {
+				mesh_shader_limits.max_task_workgroup_count[i] = mesh_shader_properties.maxTaskWorkGroupCount[i];
+				mesh_shader_limits.max_mesh_workgroup_count[i] = mesh_shader_properties.maxMeshWorkGroupCount[i];
+			}
+			mesh_shader_limits.max_task_workgroup_total_count = mesh_shader_properties.maxTaskWorkGroupTotalCount;
+			mesh_shader_limits.max_mesh_workgroup_total_count = mesh_shader_properties.maxMeshWorkGroupTotalCount;
 		}
 
 		subgroup_capabilities.size = subgroup_properties.subgroupSize;
@@ -1801,6 +1841,16 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		descriptor_indexing_features.descriptorBindingVariableDescriptorCount = VK_TRUE;
 		create_info_next = &descriptor_indexing_features;
 	}
+	// GodotNext: rd_mesh_shaders (#178). Its own structure, with only taskShader and meshShader: the extension's
+	// other features (multiview, primitive shading rate, queries) need features this device does not enable.
+	VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader_features = {};
+	if (mesh_shader_support) {
+		mesh_shader_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+		mesh_shader_features.pNext = create_info_next;
+		mesh_shader_features.taskShader = VK_TRUE;
+		mesh_shader_features.meshShader = VK_TRUE;
+		create_info_next = &mesh_shader_features;
+	}
 
 	// GodotNext: pu_vk_extension_providers (#105). Providers prepend their feature structures to
 	// Godot's chain.
@@ -1859,6 +1909,13 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		if (enabled_device_extension_names.has(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME)) {
 			device_functions.CmdDrawIndirectCountKHR = PFN_vkCmdDrawIndirectCountKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawIndirectCountKHR"));
 			device_functions.CmdDrawIndexedIndirectCountKHR = PFN_vkCmdDrawIndexedIndirectCountKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawIndexedIndirectCountKHR"));
+		}
+
+		// GodotNext: rd_mesh_shaders (#178)
+		if (mesh_shader_support) {
+			device_functions.CmdDrawMeshTasksEXT = PFN_vkCmdDrawMeshTasksEXT(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawMeshTasksEXT"));
+			device_functions.CmdDrawMeshTasksIndirectEXT = PFN_vkCmdDrawMeshTasksIndirectEXT(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawMeshTasksIndirectEXT"));
+			device_functions.CmdDrawMeshTasksIndirectCountEXT = PFN_vkCmdDrawMeshTasksIndirectCountEXT(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawMeshTasksIndirectCountEXT"));
 		}
 
 		// Device raytracing extensions.
@@ -3321,6 +3378,9 @@ static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELI
 static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT, VK_PIPELINE_STAGE_FRAGMENT_DENSITY_PROCESS_BIT_EXT));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_RAY_TRACING_SHADER_BIT, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR));
+// GodotNext: rd_mesh_shaders (#178)
+static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_TASK_SHADER_BIT, VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_MESH_SHADER_BIT, VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT));
 static_assert(ENUM_MEMBERS_EQUAL(RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR));
 
 // RDD::BarrierAccessBits == VkAccessFlagBits.
@@ -3350,7 +3410,10 @@ static VkPipelineStageFlags _remove_pipeline_stage_shader_bits(VkPipelineStageFl
 			VK_PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT |
 			VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT |
 			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+			VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+			// GodotNext: rd_mesh_shaders (#178)
+			VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT |
+			VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT);
 	return p_flags;
 }
 
@@ -4764,7 +4827,8 @@ void RenderingDeviceDriverVulkan::framebuffer_free(FramebufferID p_framebuffer) 
 /**** SHADER ****/
 /****************/
 
-static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[RDD::SHADER_STAGE_MAX] = {
+// GodotNext: rd_mesh_shaders (#178). Sized by the initializer, so a stage without an entry fails to compile.
+static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[] = {
 	VK_SHADER_STAGE_VERTEX_BIT,
 	VK_SHADER_STAGE_FRAGMENT_BIT,
 	VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
@@ -4775,7 +4839,10 @@ static VkShaderStageFlagBits RD_STAGE_TO_VK_SHADER_STAGE_BITS[RDD::SHADER_STAGE_
 	VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR,
 	VK_SHADER_STAGE_MISS_BIT_KHR,
 	VK_SHADER_STAGE_INTERSECTION_BIT_KHR,
+	VK_SHADER_STAGE_TASK_BIT_EXT,
+	VK_SHADER_STAGE_MESH_BIT_EXT,
 };
+static_assert(std_size(RD_STAGE_TO_VK_SHADER_STAGE_BITS) == RDD::SHADER_STAGE_MAX);
 
 RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) {
 	ShaderReflection shader_refl = p_shader_container->get_shader_reflection();
@@ -4896,6 +4963,8 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		shader_info.respv_stage_shaders.reserve(stage_count);
 	}
 
+	// GodotNext: rd_mesh_shaders (#178). The error messages name the stage of each code entry, like create_info.stage
+	// below, not stages_vector[i].
 	for (int i = 0; i < stage_count; i++) {
 		const RenderingShaderContainer::Shader &shader = p_shader_container->shaders[i];
 		bool requires_decompression = (shader.code_decompressed_size > 0);
@@ -4903,7 +4972,7 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 			decompressed_code.resize(shader.code_decompressed_size);
 			bool decompressed = p_shader_container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, decompressed_code.ptrw(), decompressed_code.size());
 			if (!decompressed) {
-				error_text = vformat("Failed to decompress code on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
+				error_text = vformat("Failed to decompress code on shader stage %s.", String(SHADER_STAGE_NAMES[shader.shader_stage]));
 				break;
 			}
 		}
@@ -4913,12 +4982,12 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		if (shader.code_compression_flags & RenderingShaderContainerVulkan::COMPRESSION_FLAG_SMOLV) {
 			decoded_spirv.resize(smolv::GetDecodedBufferSize(smolv_input, smolv_input_size));
 			if (decoded_spirv.is_empty()) {
-				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
+				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader.shader_stage]));
 				break;
 			}
 
 			if (!smolv::Decode(smolv_input, smolv_input_size, decoded_spirv.ptrw(), decoded_spirv.size())) {
-				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
+				error_text = vformat("Malformed smolv input on shader stage %s.", String(SHADER_STAGE_NAMES[shader.shader_stage]));
 				break;
 			}
 		} else {
@@ -4935,7 +5004,10 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		}
 
 		// GodotNext: nextgi_vulkan (#50). Ray-query modules skip re-spirv (see _spirv_declares_ray_query).
-		if (use_respv && _spirv_declares_ray_query(decoded_spirv)) {
+		// GodotNext: rd_mesh_shaders (#178). So do task and mesh modules: re-spirv does not know their
+		// instructions (OpEmitMeshTasksEXT, OpSetMeshOutputsEXT), prints that to stderr and keeps the module.
+		const ShaderStage respv_stage = shader.shader_stage;
+		if (use_respv && (_spirv_declares_ray_query(decoded_spirv) || respv_stage == SHADER_STAGE_TASK || respv_stage == SHADER_STAGE_MESH)) {
 			if (store_respv) {
 				shader_info.respv_stage_shaders.push_back(respv::Shader());
 			}
@@ -4981,13 +5053,15 @@ RDD::ShaderID RenderingDeviceDriverVulkan::shader_create_from_container(const Re
 		POWERVR_ROGUE_SHADER_CRASH_WORKAROUND_MUTEX_UNLOCK
 
 		if (res != VK_SUCCESS) {
-			error_text = vformat("Error (%d) creating module for shader stage %s.", res, String(SHADER_STAGE_NAMES[shader_refl.stages_vector[i]]));
+			error_text = vformat("Error (%d) creating module for shader stage %s.", res, String(SHADER_STAGE_NAMES[shader.shader_stage]));
 			break;
 		}
 
 		VkPipelineShaderStageCreateInfo create_info = {};
 		create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		create_info.stage = RD_STAGE_TO_VK_SHADER_STAGE_BITS[shader_refl.stages_vector[i]];
+		// GodotNext: rd_mesh_shaders (#178). The stage of this code entry: stages_vector is in stage order, the
+		// entries in the order the stages were given, which differ for a task, mesh and fragment shader given so.
+		create_info.stage = RD_STAGE_TO_VK_SHADER_STAGE_BITS[shader.shader_stage];
 		create_info.module = vk_module;
 		create_info.pName = "main";
 		shader_info.vk_stages_create_info.push_back(create_info);
@@ -6574,6 +6648,30 @@ void RenderingDeviceDriverVulkan::command_render_draw_indirect_count(CommandBuff
 	device_functions.CmdDrawIndirectCountKHR(command_buffer->vk_command_buffer, indirect_buf_info->vk_buffer, p_offset, count_buf_info->vk_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
 }
 
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDeviceDriverVulkan::command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	ERR_FAIL_NULL_MSG(device_functions.CmdDrawMeshTasksEXT, "VK_EXT_mesh_shader is not enabled.");
+	device_functions.CmdDrawMeshTasksEXT(command_buffer->vk_command_buffer, p_group_count_x, p_group_count_y, p_group_count_z);
+}
+
+// GodotNext: rd_mesh_shaders (#178)
+void RenderingDeviceDriverVulkan::command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const BufferInfo *buf_info = (const BufferInfo *)p_indirect_buffer.id;
+	ERR_FAIL_NULL_MSG(device_functions.CmdDrawMeshTasksIndirectEXT, "VK_EXT_mesh_shader is not enabled.");
+	device_functions.CmdDrawMeshTasksIndirectEXT(command_buffer->vk_command_buffer, buf_info->vk_buffer, p_offset, p_draw_count, p_stride);
+}
+
+// GodotNext: rd_mesh_shaders (#178). Needs drawIndirectCount, which VK_KHR_draw_indirect_count enables (#177).
+void RenderingDeviceDriverVulkan::command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
+	const BufferInfo *indirect_buf_info = (const BufferInfo *)p_indirect_buffer.id;
+	const BufferInfo *count_buf_info = (const BufferInfo *)p_count_buffer.id;
+	ERR_FAIL_NULL_MSG(device_functions.CmdDrawMeshTasksIndirectCountEXT, "VK_EXT_mesh_shader is not enabled.");
+	device_functions.CmdDrawMeshTasksIndirectCountEXT(command_buffer->vk_command_buffer, indirect_buf_info->vk_buffer, p_offset, count_buf_info->vk_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
+}
+
 void RenderingDeviceDriverVulkan::command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) {
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	VkBuffer *vk_buffers = ALLOCA_ARRAY(VkBuffer, p_binding_count);
@@ -7024,6 +7122,14 @@ RDD::PipelineID RenderingDeviceDriverVulkan::render_pipeline_create(
 	pipeline_create_info.pStages = vk_pipeline_stages;
 	pipeline_create_info.pVertexInputState = vertex_input_state_create_info;
 	pipeline_create_info.pInputAssemblyState = &input_assembly_create_info;
+	// GodotNext: rd_mesh_shaders (#178). A mesh pipeline has no vertex input or input assembly state.
+	for (uint32_t i = 0; i < pipeline_create_info.stageCount; i++) {
+		if (vk_pipeline_stages[i].stage == VK_SHADER_STAGE_MESH_BIT_EXT) {
+			pipeline_create_info.pVertexInputState = nullptr;
+			pipeline_create_info.pInputAssemblyState = nullptr;
+			break;
+		}
+	}
 	pipeline_create_info.pTessellationState = &tessellation_create_info;
 	pipeline_create_info.pViewportState = &viewport_state_create_info;
 	pipeline_create_info.pRasterizationState = &rasterization_state_create_info;
@@ -8399,6 +8505,11 @@ uint64_t RenderingDeviceDriverVulkan::limit_get(Limit p_limit) {
 	if (acceleration_structure_limit_get(p_limit, acceleration_structure_limits, acceleration_structure_value)) {
 		return acceleration_structure_value;
 	}
+	// GodotNext: rd_mesh_shaders (#178)
+	uint64_t mesh_shader_value = 0;
+	if (mesh_shader_limit_get(p_limit, mesh_shader_limits, mesh_shader_value)) {
+		return mesh_shader_value;
+	}
 	switch (p_limit) {
 		// GodotNext: rd_bindless (#176)
 		case LIMIT_MAX_BINDLESS_TEXTURES:
@@ -8605,6 +8716,10 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 			return has_feature(SUPPORTS_RAYTRACING_PIPELINE) && raytracing_capabilities.library_support;
 		case SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT:
 			return has_feature(SUPPORTS_RAYTRACING_PIPELINE) && raytracing_capabilities.trace_rays_indirect_support;
+		// GodotNext: rd_mesh_shaders (#178). The indirect draws are part of VK_EXT_mesh_shader.
+		case SUPPORTS_MESH_SHADER:
+		case SUPPORTS_MESH_SHADER_INDIRECT:
+			return device_functions.CmdDrawMeshTasksEXT != nullptr && device_functions.CmdDrawMeshTasksIndirectEXT != nullptr && device_functions.CmdDrawMeshTasksIndirectCountEXT != nullptr;
 		default:
 			return false;
 	}

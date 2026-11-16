@@ -88,6 +88,8 @@ protected:
 	uint32_t skipped_ray_query_versions = 0;
 	// GodotNext: nextgi_vulkan (#50). Ray-query versions handed to the bake, so an export log shows they were baked.
 	uint32_t baked_ray_query_versions = 0;
+	// GodotNext: rd_mesh_shaders (#178). Versions with task and mesh stages a format cannot hold.
+	uint32_t skipped_mesh_shader_versions = 0;
 	std::atomic<bool> tasks_cancelled;
 	BinaryMutex tasks_mutex;
 	ConditionVariable tasks_condition;
@@ -108,7 +110,9 @@ protected:
 
 public:
 	// GodotNext: shader_baker_ray_query
-	static bool should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures);
+	// GodotNext: rd_mesh_shaders (#178). Mesh-shader versions bake only for formats with mesh stages (Vulkan and
+	// Metal; Direct3D 12 once its compiler translates them, #122).
+	static bool should_bake_version(bool p_requires_ray_query, bool p_supports_acceleration_structures, bool p_requires_mesh_shader = false, bool p_supports_mesh_shaders = true);
 	// GodotNext: scene customization happens outside the tree, so script-only `global_*` properties
 	// cannot be read without reporting an error, and the material does not use them.
 	static bool should_copy_scene_property(const StringName &p_name);

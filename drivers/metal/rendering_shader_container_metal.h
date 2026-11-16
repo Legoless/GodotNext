@@ -55,6 +55,10 @@ class RenderingShaderContainerFormatMetal;
 /// │                  ...                   │
 /// ├─────────┬──────────────────────────────┤
 /// │   15    │  SHADER_STAGE_INTERSECTION   │
+/// ├─────────┼──────────────────────────────┤
+/// │   16    │      SHADER_STAGE_TASK       │
+/// ├─────────┼──────────────────────────────┤
+/// │   17    │      SHADER_STAGE_MESH       │
 /// └─────────┴──────────────────────────────┘
 struct MetalPushConstantBinding {
 	using RDC = RenderingDeviceCommons;
@@ -129,6 +133,9 @@ public:
 		MinOsVersion os_min_version;
 		uint32_t flags = NONE;
 		MetalPushConstantBinding push_constant_binding; ///< Per-stage Metal binding slots for the push constant data.
+		/// GodotNext: rd_mesh_shaders (#178). The size of the task stage's payload (taskPayloadSharedEXT), for
+		/// MTLMeshRenderPipelineDescriptor.payloadMemoryLength; 0 without a task stage. Format version 4.
+		uint32_t task_payload_size = 0;
 
 		/// @brief Returns `true` if the shader is compiled with multi-view support.
 		bool needs_view_mask_buffer() const {
@@ -255,7 +262,9 @@ private:
 	MetalDeviceProfile::MinimumRequirements inspect_spirv(const ReflectShader &p_shader);
 
 public:
-	static constexpr uint32_t FORMAT_VERSION = 3;
+	// GodotNext: rd_mesh_shaders (#178). Version 4 adds HeaderData::task_payload_size. Containers of version 3 never
+	// reach it: they have container version 5 or older, which RenderingShaderContainer::from_bytes() rejects first.
+	static constexpr uint32_t FORMAT_VERSION = 4;
 
 	void set_export_mode(bool p_export_mode) { export_mode = p_export_mode; }
 	void set_device_profile(const MetalDeviceProfile *p_device_profile) { device_profile = p_device_profile; }
@@ -293,6 +302,11 @@ public:
 	virtual ShaderSpirvVersion get_shader_spirv_version(ShaderStage p_stage) const override;
 	// GodotNext: shader_baker_ray_query
 	virtual bool supports_acceleration_structures() const override { return true; }
+	// GodotNext: rd_mesh_shaders (#178). Object and mesh functions, for profiles whose GPU, MSL version and argument
+	// buffers run them (the driver's rule: Apple7, MSL 3.0, argument buffers).
+	virtual bool supports_mesh_shaders() const override {
+		return device_profile != nullptr && RenderingDeviceDriver::metal_mesh_shader_caps(uint32_t(device_profile->gpu), device_profile->features.msl_version, device_profile->features.use_argument_buffers).mesh;
+	}
 	RenderingShaderContainerFormatMetal(const MetalDeviceProfile *p_device_profile, bool p_export = false);
 	virtual ~RenderingShaderContainerFormatMetal() = default;
 };

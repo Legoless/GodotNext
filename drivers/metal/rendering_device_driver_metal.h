@@ -94,6 +94,9 @@ protected:
 	// (as_objects_ready), so a device that cannot build an acceleration structure stays off.
 	MetalRayQueryCaps ray_query_caps;
 	RayQueryUnsupportedReason ray_query_reason = RAY_QUERY_REASON_NO_RAY_QUERY;
+	// GodotNext: rd_mesh_shaders (#178). Object and mesh functions from Apple7, indirect mesh draws from Apple9, both
+	// only with argument buffers (the binding path the mesh stages use).
+	MeshShaderCaps mesh_shader_caps;
 	static constexpr bool RAY_QUERY_AS_READY = true;
 	bool as_objects_ready = false;
 	// GodotNext: metal_acceleration_structure
@@ -201,7 +204,8 @@ protected:
 	HashSet<MDBindlessTable *> bindless_tables_with_releases;
 
 public:
-	void encode_imported_resources(MTL::RenderCommandEncoder *p_enc);
+	// GodotNext: rd_mesh_shaders (#178). p_stages: the object and mesh stages for an encoder that binds a mesh pipeline.
+	void encode_imported_resources(MTL::RenderCommandEncoder *p_enc, MTL::RenderStages p_stages = MTL::RenderStageVertex | MTL::RenderStageFragment);
 	void encode_imported_resources(MTL::ComputeCommandEncoder *p_enc);
 	void defer_release(CFTypeRef p_resource);
 	void flush_deferred_releases();
@@ -515,6 +519,11 @@ public:
 	virtual void command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 	// GodotNext: rd_indirect_count (#177)
 	virtual void command_render_draw_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, bool p_indexed, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
+	// GodotNext: rd_mesh_shaders (#178)
+	virtual void command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) override final;
+	virtual void command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override final;
+	virtual void command_render_draw_mesh_tasks_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
+	virtual void command_render_draw_mesh_tasks_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override final;
 
 	// Buffer binding.
 	virtual void command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) override final;

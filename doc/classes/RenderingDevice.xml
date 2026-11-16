@@ -495,6 +495,43 @@
 				[b]Note:[/b] Neither buffer may also be bound in a uniform set of the same draw list. A buffer has one usage per draw list, so it would not be synchronized for the indirect read; this method fails with an error when the draw list already uses either buffer that way. The same holds for a buffer in a bindless table that the draw list binds, when the table has not read the buffer since it was last written: this method fails with an error when the table is bound before the draw, and [method draw_list_end] prints one when it is bound after. To use such a buffer, bind the table in an earlier list after the write, or keep the buffer out of the table.
 			</description>
 		</method>
+		<method name="draw_list_draw_mesh_tasks">
+			<return type="void" />
+			<param index="0" name="draw_list" type="int" />
+			<param index="1" name="group_count_x" type="int" />
+			<param index="2" name="group_count_y" type="int" default="1" />
+			<param index="3" name="group_count_z" type="int" default="1" />
+			<description>
+				Submits a task and mesh shader draw to [param draw_list]: [param group_count_x] x [param group_count_y] x [param group_count_z] task shader workgroups, or mesh shader workgroups when the shader has no task stage. The bound render pipeline's shader must have a [constant SHADER_STAGE_MESH] stage; such a pipeline draws only with this method, [method draw_list_draw_mesh_tasks_indirect] and [method draw_list_draw_mesh_tasks_indirect_count], and the vertex draws fail with an error. Requires [constant SUPPORTS_MESH_SHADER].
+				Each group count must be at most the device's [constant LIMIT_MAX_TASK_WORKGROUP_COUNT_X], [constant LIMIT_MAX_TASK_WORKGROUP_COUNT_Y] and [constant LIMIT_MAX_TASK_WORKGROUP_COUNT_Z], and their product at most [constant LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT]; without a task stage, the [code]LIMIT_MAX_MESH_WORKGROUP_*[/code] limits apply instead. Debug builds check this.
+			</description>
+		</method>
+		<method name="draw_list_draw_mesh_tasks_indirect">
+			<return type="void" />
+			<param index="0" name="draw_list" type="int" />
+			<param index="1" name="buffer" type="RID" />
+			<param index="2" name="offset" type="int" default="0" />
+			<param index="3" name="draw_count" type="int" default="1" />
+			<param index="4" name="stride" type="int" default="0" />
+			<description>
+				Submits [param draw_count] task and mesh shader draws, like [method draw_list_draw_mesh_tasks], whose workgroup counts are stored in [param buffer] from [param offset], [param stride] bytes apart. Each record is three 32-bit unsigned integers: the x, y and z workgroup counts. A [param stride] of [code]0[/code] means tightly packed records (12 bytes); the stride must otherwise be a multiple of 4 and at least 12 bytes, and [param offset] a multiple of 4. The buffer must have been created with the [constant STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT] flag. Requires [constant SUPPORTS_MESH_SHADER_INDIRECT].
+				[b]Note:[/b] The buffer may not also be bound in a uniform set of the same draw list. A buffer has one usage per draw list, so it would not be synchronized for the indirect read; this method fails with an error when the draw list already uses it that way.
+			</description>
+		</method>
+		<method name="draw_list_draw_mesh_tasks_indirect_count">
+			<return type="void" />
+			<param index="0" name="draw_list" type="int" />
+			<param index="1" name="buffer" type="RID" />
+			<param index="2" name="offset" type="int" />
+			<param index="3" name="count_buffer" type="RID" />
+			<param index="4" name="count_offset" type="int" />
+			<param index="5" name="max_draw_count" type="int" />
+			<param index="6" name="stride" type="int" />
+			<description>
+				Submits up to [param max_draw_count] task and mesh shader draws whose records are stored in [param buffer], like [method draw_list_draw_mesh_tasks_indirect]. The GPU reads how many of them run from the 32-bit unsigned integer at [param count_offset] in [param count_buffer], as in [method draw_list_draw_indirect_count]; [param count_offset] must be a multiple of 4. Both buffers must have been created with the [constant STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT] flag. Requires [constant SUPPORTS_MESH_SHADER_INDIRECT] and [constant SUPPORTS_DRAW_INDIRECT_COUNT].
+				[b]Note:[/b] Neither buffer may also be bound in a uniform set of the same draw list; this method fails with an error when the draw list already uses either buffer that way.
+			</description>
+		</method>
 		<method name="draw_list_enable_scissor">
 			<return type="void" />
 			<param index="0" name="draw_list" type="int" />
@@ -1089,6 +1126,7 @@
 				Creates a new render pipeline. It can be accessed with the RID that is returned.
 				Once finished with your RID, you will want to free the RID using the RenderingDevice's [method free_rid] method.
 				This will be freed automatically when the [param shader] is freed.
+				[b]Note:[/b] A pipeline whose [param shader] has a [constant SHADER_STAGE_MESH] stage takes no vertex format: pass [constant INVALID_FORMAT_ID] as [param vertex_format]. It cannot be created for a multiview framebuffer format (more than one view), as mesh shaders do not support multiview.
 			</description>
 		</method>
 		<method name="render_pipeline_is_valid">
@@ -2947,7 +2985,13 @@
 		<constant name="SHADER_STAGE_INTERSECTION" value="9" enum="ShaderStage">
 			Intersection shader stage. The intersection shader for triangles is built-in. This can be used to compute ray intersections with primitives that are not triangles.
 		</constant>
-		<constant name="SHADER_STAGE_MAX" value="10" enum="ShaderStage">
+		<constant name="SHADER_STAGE_TASK" value="10" enum="ShaderStage">
+			Task shader stage. A task shader decides how many mesh shader workgroups run, and can pass them data, for example to cull meshlets. It is optional in a mesh shader pipeline.
+		</constant>
+		<constant name="SHADER_STAGE_MESH" value="11" enum="ShaderStage">
+			Mesh shader stage. A mesh shader writes the vertices and primitives of a workgroup in place of the vertex stage, so a render pipeline whose shader has this stage takes no vertex format and draws with [method draw_list_draw_mesh_tasks]. It cannot be combined with vertex or tessellation stages. Requires [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="SHADER_STAGE_MAX" value="12" enum="ShaderStage">
 			Represents the size of the [enum ShaderStage] enum.
 		</constant>
 		<constant name="SHADER_STAGE_VERTEX_BIT" value="1" enum="ShaderStage">
@@ -2979,6 +3023,12 @@
 		</constant>
 		<constant name="SHADER_STAGE_INTERSECTION_BIT" value="512" enum="ShaderStage">
 			Intersection shader stage bit (see also [constant SHADER_STAGE_INTERSECTION]).
+		</constant>
+		<constant name="SHADER_STAGE_TASK_BIT" value="1024" enum="ShaderStage">
+			Task shader stage bit (see also [constant SHADER_STAGE_TASK]).
+		</constant>
+		<constant name="SHADER_STAGE_MESH_BIT" value="2048" enum="ShaderStage">
+			Mesh shader stage bit (see also [constant SHADER_STAGE_MESH]).
 		</constant>
 		<constant name="SHADER_LANGUAGE_GLSL" value="0" enum="ShaderLanguage">
 			Khronos' GLSL shading language (used natively by OpenGL and Vulkan). This is the language used for core Godot shaders.
@@ -3053,6 +3103,14 @@
 		<constant name="SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT" value="26" enum="Features">
 			Raytracing lists can take their launch size from a buffer with [method raytracing_list_trace_rays_indirect].
 			[b]Note:[/b] The Vulkan driver needs the [code]rayTracingPipelineTraceRaysIndirect[/code] feature. The Direct3D 12 and Metal drivers report [code]false[/code].
+		</constant>
+		<constant name="SUPPORTS_MESH_SHADER" value="27" enum="Features">
+			The device supports task and mesh shaders ([constant SHADER_STAGE_TASK] and [constant SHADER_STAGE_MESH], GLSL [code]GL_EXT_mesh_shader[/code]) and [method draw_list_draw_mesh_tasks]. A shader with these stages fails [method shader_create_from_spirv], [method shader_compile_binary_from_spirv] and [method shader_create_from_bytecode] with one error that names this feature on a device without it.
+			[b]Note:[/b] The Vulkan driver sets it when the device has [code]VK_EXT_mesh_shader[/code] with [code]taskShader[/code] and [code]meshShader[/code]. The Metal driver sets it on Apple7 and later GPUs with argument buffers. The Direct3D 12 driver reports [code]false[/code] until its shader compiler translates task and mesh shaders to DXIL, and prints one line about it with the device's mesh shader tier.
+		</constant>
+		<constant name="SUPPORTS_MESH_SHADER_INDIRECT" value="28" enum="Features">
+			The device supports [method draw_list_draw_mesh_tasks_indirect], and with [constant SUPPORTS_DRAW_INDIRECT_COUNT] also [method draw_list_draw_mesh_tasks_indirect_count]. It is only reported together with [constant SUPPORTS_MESH_SHADER].
+			[b]Note:[/b] The Vulkan driver sets it together with [constant SUPPORTS_MESH_SHADER]. The Metal driver sets it on Apple9 and later GPUs; Apple7 and Apple8 GPUs draw mesh shaders with direct draws only. On Metal, the indirect count draws clamp their records with a compute pass before the render pass, as [constant SUPPORTS_DRAW_INDIRECT_COUNT] describes.
 		</constant>
 		<constant name="COMPUTE_QUEUE_MAIN" value="0" enum="ComputeQueue">
 			Records the compute list on the main queue.
@@ -3231,6 +3289,30 @@
 		</constant>
 		<constant name="LIMIT_RAYTRACING_REORDER_EXTENSIONS" value="57" enum="Limit">
 			The GLSL extensions shaders can use for shader execution reordering, as bits: [code]1[/code] for [code]GL_EXT_shader_invocation_reorder[/code] and [code]2[/code] for [code]GL_NV_shader_invocation_reorder[/code]. [code]0[/code] without [constant SUPPORTS_RAYTRACING_REORDER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_COUNT_X" value="58" enum="Limit">
+			Maximum number of task shader workgroups along the X axis of one mesh task draw ([method draw_list_draw_mesh_tasks] with a pipeline that has a [constant SHADER_STAGE_TASK] stage). [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_COUNT_Y" value="59" enum="Limit">
+			Maximum number of task shader workgroups along the Y axis of one mesh task draw. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_COUNT_Z" value="60" enum="Limit">
+			Maximum number of task shader workgroups along the Z axis of one mesh task draw. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_TASK_WORKGROUP_TOTAL_COUNT" value="61" enum="Limit">
+			Maximum total number of task shader workgroups (X * Y * Z) of one mesh task draw. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_COUNT_X" value="62" enum="Limit">
+			Maximum number of mesh shader workgroups along the X axis that one mesh task draw without a task stage, or one task shader workgroup, can launch. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_COUNT_Y" value="63" enum="Limit">
+			Maximum number of mesh shader workgroups along the Y axis that one mesh task draw without a task stage, or one task shader workgroup, can launch. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_COUNT_Z" value="64" enum="Limit">
+			Maximum number of mesh shader workgroups along the Z axis that one mesh task draw without a task stage, or one task shader workgroup, can launch. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
+		</constant>
+		<constant name="LIMIT_MAX_MESH_WORKGROUP_TOTAL_COUNT" value="65" enum="Limit">
+			Maximum total number of mesh shader workgroups (X * Y * Z) that one mesh task draw without a task stage, or one task shader workgroup, can launch. [code]0[/code] on a device without [constant SUPPORTS_MESH_SHADER].
 		</constant>
 		<constant name="MEMORY_TEXTURES" value="0" enum="MemoryType">
 			Memory taken by textures.

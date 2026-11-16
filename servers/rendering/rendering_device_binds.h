@@ -283,6 +283,9 @@ protected:
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "source_closest_hit"), "set_stage_source", "get_stage_source", RD::SHADER_STAGE_CLOSEST_HIT);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "source_miss"), "set_stage_source", "get_stage_source", RD::SHADER_STAGE_MISS);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "source_intersection"), "set_stage_source", "get_stage_source", RD::SHADER_STAGE_INTERSECTION);
+		// GodotNext: rd_mesh_shaders (#178)
+		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "source_task"), "set_stage_source", "get_stage_source", RD::SHADER_STAGE_TASK);
+		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "source_mesh"), "set_stage_source", "get_stage_source", RD::SHADER_STAGE_MESH);
 		ADD_GROUP("Syntax", "source_");
 		ADD_PROPERTY(PropertyInfo(Variant::INT, "language", PROPERTY_HINT_RANGE, "GLSL,HLSL"), "set_language", "get_language");
 	}
@@ -353,6 +356,9 @@ protected:
 		ADD_PROPERTYI(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "bytecode_closest_hit"), "set_stage_bytecode", "get_stage_bytecode", RD::SHADER_STAGE_CLOSEST_HIT);
 		ADD_PROPERTYI(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "bytecode_miss"), "set_stage_bytecode", "get_stage_bytecode", RD::SHADER_STAGE_MISS);
 		ADD_PROPERTYI(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "bytecode_intersection"), "set_stage_bytecode", "get_stage_bytecode", RD::SHADER_STAGE_INTERSECTION);
+		// GodotNext: rd_mesh_shaders (#178)
+		ADD_PROPERTYI(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "bytecode_task"), "set_stage_bytecode", "get_stage_bytecode", RD::SHADER_STAGE_TASK);
+		ADD_PROPERTYI(PropertyInfo(Variant::PACKED_BYTE_ARRAY, "bytecode_mesh"), "set_stage_bytecode", "get_stage_bytecode", RD::SHADER_STAGE_MESH);
 		ADD_GROUP("Compile Error", "compile_error_");
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_vertex"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_VERTEX);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_fragment"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_FRAGMENT);
@@ -364,6 +370,9 @@ protected:
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_closest_hit"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_CLOSEST_HIT);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_miss"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_MISS);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_intersection"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_INTERSECTION);
+		// GodotNext: rd_mesh_shaders (#178)
+		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_task"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_TASK);
+		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_mesh"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_MESH);
 
 		// GodotNext: rd_indirect_count (#177)
 		ClassDB::bind_method(D_METHOD("set_base_instance_native", "enabled"), &RDShaderSPIRV::set_base_instance_native);
@@ -427,13 +436,23 @@ public:
 				for (int i = 0; i < RD::SHADER_STAGE_MAX; i++) {
 					String error = E.value->get_stage_compile_error(RD::ShaderStage(i));
 					if (!error.is_empty()) {
-						static const char *stage_str[RD::SHADER_STAGE_MAX] = {
+						// GodotNext: rd_mesh_shaders (#178). Every stage's section name (only five were listed, so a
+						// ray-tracing stage's error printed no name).
+						static const char *stage_str[] = {
 							"vertex",
 							"fragment",
 							"tesselation_control",
 							"tesselation_evaluation",
-							"compute"
+							"compute",
+							"raygen",
+							"any_hit",
+							"closest_hit",
+							"miss",
+							"intersection",
+							"task",
+							"mesh",
 						};
+						static_assert(std_size(stage_str) == RD::SHADER_STAGE_MAX);
 
 						print_error("Error parsing shader '" + p_file + "', version '" + String(E.key) + "', stage '" + stage_str[i] + "':\n\n" + error);
 					}
