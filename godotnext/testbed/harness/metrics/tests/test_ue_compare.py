@@ -214,7 +214,12 @@ def test_the_upscaler_torture_configs(name: str, line_id: str, level: str, histo
     assert cvars["sg.ResolutionQuality"] == "50"
     assert cvars["sg.ShadowQuality"] == "2"
     assert cvars["r.TSR.History.ScreenPercentage"] == history
-    assert not any(command.startswith("r.TSR.History.ScreenPercentage ") for command in config.ue.exec_cmds)
+    # The settings record's TSR async compute row: 2, UE's default, which the run must show (not set).
+    assert cvars["r.TSR.AsyncCompute"] == "2"
+    for name in ("r.TSR.History.ScreenPercentage", "r.TSR.AsyncCompute"):
+        assert not any(command.startswith(name + " ") for command in config.ue.exec_cmds)
+    # No capture records UE's internal resolution yet: the line says so, and a judged report refuses.
+    assert "internal resolution" in line.reason and "not verified" in line.reason
     assert (line.status, line.gates, line.statistic) == ("ue_bar", ("GT-4",), "p95")
     assert line.godotnext is not None and line.godotnext.columns == ("tsr_ms",)
     assert line.ue is not None and line.ue.group == "TSR"

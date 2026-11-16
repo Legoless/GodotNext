@@ -182,6 +182,9 @@ func _test_refusals() -> void:
 		var carried := filter in [BaseMaterial3D.TEXTURE_FILTER_NEAREST, BaseMaterial3D.TEXTURE_FILTER_LINEAR, BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS]
 		_check(Lib.material_refusals(textured).is_empty() == carried and Lib.texture_filter_name(textured).is_empty() != carried, "texture filter %d is %s" % [filter, "carried" if carried else "refused"])
 	_check(Lib.texture_filter_name(plain) == "linear_mipmaps", "the default texture filter is linear with mipmaps")
+	var anisotropic := plain.duplicate() as StandardMaterial3D
+	anisotropic.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	_check(Lib.material_refusals(anisotropic).is_empty() and Lib.texture_filter_name(anisotropic).is_empty(), "an untextured material's filter is not refused; scene.json leaves it empty")
 	textured.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	_check(Lib.texture_filter_name(textured) == "nearest", "nearest filtering is named nearest")
 	textured.texture_repeat = false
@@ -246,8 +249,10 @@ func _test_refusals() -> void:
 
 
 ## rigid_skin_parts splits a mesh whose vertices each follow one bone at full weight into one part
-## per bone, keeping each vertex's position and its source index, and refuses blended weights and
-## triangles that span bones.
+## per bone, keeping each vertex's position and its source index, and refuses blended weights,
+## triangles that span bones, blend shapes, other primitive types and other mesh classes.
+## rigid_skin_error compares the parts with hand-made skinned positions: exact part transforms
+## match, and a bind pose 1 cm off, a missing part or a missing bake does not.
 func _test_rigid_skin() -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -281,6 +286,43 @@ func _test_rigid_skin() -> void:
 		st.set_weights(PackedFloat32Array([1.0, 0.0, 0.0, 0.0]))
 		st.add_vertex(positions[index])
 	_check(Lib.rigid_skin_parts(st.commit()).has("error"), "a triangle that spans bones is refused")
+	var arrays := mesh.surface_get_arrays(0)
+	var shape := []
+	shape.resize(Mesh.ARRAY_MAX)
+	for slot in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TANGENT]:
+		shape[slot] = arrays[slot]
+	var morphed := ArrayMesh.new()
+	morphed.add_blend_shape("open")
+	morphed.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays, [shape])
+	_check(morphed.get_blend_shape_count() == 1 and String(Lib.rigid_skin_parts(morphed).get("error", "")).contains("blend shapes"), "a skinned mesh with blend shapes is refused")
+	st.clear()
+	st.begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+	for index in 4:
+		st.set_bones(PackedInt32Array([0, 0, 0, 0]))
+		st.set_weights(PackedFloat32Array([1.0, 0.0, 0.0, 0.0]))
+		st.add_vertex(positions[index])
+	var strip := st.commit()
+	_check(strip.surface_get_primitive_type(0) == Mesh.PRIMITIVE_TRIANGLE_STRIP and String(Lib.rigid_skin_parts(strip).get("error", "")).contains("triangle list"), "a skinned triangle strip is refused, not regrouped")
+	_check(String(Lib.rigid_skin_parts(BoxMesh.new()).get("error", "")).contains("ArrayMesh"), "a mesh other than an ArrayMesh is refused")
+	if split.has("error"):
+		return
+	var part_a := Transform3D(Basis.from_euler(Vector3(0.1, 0.2, 0.3)), Vector3(0.5, 1.0, -2.0))
+	var part_b := Transform3D(Basis.from_euler(Vector3(-0.4, 0.0, 0.7)), Vector3(-1.0, 0.25, 0.0))
+	var skinned := PackedVector3Array()
+	for index in positions.size():
+		skinned.append((part_a if index < 3 else part_b) * positions[index])
+	var baked_arrays := []
+	baked_arrays.resize(Mesh.ARRAY_MAX)
+	baked_arrays[Mesh.ARRAY_VERTEX] = skinned
+	var baked := ArrayMesh.new()
+	baked.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, baked_arrays)
+	var right := Lib.rigid_skin_error(split, baked, {0: part_a, 3: part_b})
+	_check(float(right["max_m"]) < 1e-5 and int(right["compared"]) == 6, "rigid parts at their bones' transforms match the skinned positions (%s)" % right)
+	# A bind pose 1 cm off: the part lands 1 cm from where the renderer skins it.
+	var wrong := Lib.rigid_skin_error(split, baked, {0: part_a, 3: part_b * Transform3D(Basis(), Vector3(0.0, 0.01, 0.0))})
+	_check(float(wrong["max_m"]) > 1e-4 and absf(float(wrong["max_m"]) - 0.01) < 1e-5, "a bind pose 1 cm off shows as 1 cm, over the 0.1 mm limit (%s)" % wrong)
+	_check(is_inf(float(Lib.rigid_skin_error(split, baked, {0: part_a})["max_m"])), "a part without a transform is not a match")
+	_check(is_inf(float(Lib.rigid_skin_error(split, null, {0: part_a, 3: part_b})["max_m"])), "a missing bake is not a match")
 
 
 ## texture_png writes the base level's pixels as stored, independently of how the texture keeps
@@ -399,7 +441,8 @@ func _check_schema(p_scene: Dictionary) -> void:
 			_check(material.has(key), "material has %s" % key)
 		_check(String(material.get("blend", "")) in ["opaque", "masked", "translucent"], "material blend is opaque, masked or translucent")
 		_check(material.get("albedo_texture") == null or texture_ids.has(String(material["albedo_texture"])), "material texture exists")
-		_check(String(material.get("texture_filter", "")) in ["nearest", "linear", "linear_mipmaps"], "material texture filter is carried")
+		var filter := String(material.get("texture_filter", ""))
+		_check(filter in ["nearest", "linear", "linear_mipmaps"] or (filter.is_empty() and material.get("albedo_texture") == null), "material texture filter is carried (empty only without a texture)")
 	var placements: Array = []
 	var triangles := 0
 	var node_count := 0
@@ -472,6 +515,11 @@ func _check_schema(p_scene: Dictionary) -> void:
 		if instance.get("track") != null:
 			movers += 1
 	_check(int(checks["movers"]) == movers, "checks.movers counts the instances with a track")
+	var skinned_parts := 0
+	for instance: Dictionary in p_scene["instances"]:
+		if instance.has("skin_part"):
+			skinned_parts += 1
+	_check(checks.has("rigid_skin_vertices_compared") and (skinned_parts > 0 or (int(checks["rigid_skin_vertices_compared"]) == 0 and float(checks["rigid_skin_max_error_m"]) == 0.0)), "the skinning comparison runs only with rigid parts")
 	var cuts: Array = p_scene["camera"]["cuts"]
 	for index in cuts.size():
 		_check(int(cuts[index]) > 0 and int(cuts[index]) < int(p_scene["frames"]) and (index == 0 or int(cuts[index]) > int(cuts[index - 1])), "camera cuts are increasing frames inside the path")
@@ -635,6 +683,14 @@ func _check_torture(p_dir: String, p_scene: Dictionary) -> void:
 	_check(int(checks["movers"]) == 10, "the fan's 5 meshes and the character's 5 parts move (%d)" % int(checks["movers"]))
 	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 1}, "the sun and the fill light (%s)" % checks["light_types"])
 	_check(float(checks["rigid_skin_max_error_m"]) <= 1e-4, "the rigid parts match the renderer's skinning within 0.1 mm (%s)" % checks["rigid_skin_max_error_m"])
+	var mesh_vertices := {}
+	for mesh: Dictionary in p_scene["meshes"]:
+		mesh_vertices[String(mesh["id"])] = int(mesh["vertices"])
+	var part_vertices := 0
+	for instance: Dictionary in p_scene["instances"]:
+		if instance.has("skin_part"):
+			part_vertices += int(mesh_vertices.get(String(instance["mesh"]), 0))
+	_check(part_vertices > 0 and int(checks["rigid_skin_vertices_compared"]) == part_vertices * int(p_scene["frames"]), "the skinning comparison covered every rigid-part vertex on every row (%s of %d x %d)" % [checks["rigid_skin_vertices_compared"], part_vertices, int(p_scene["frames"])])
 	_check(p_scene["camera"]["cuts"] == [float(TORTURE_CUT)], "the camera cuts at frame %d (%s)" % [TORTURE_CUT, p_scene["camera"]["cuts"]])
 	var environment: Dictionary = p_scene["environment"]["properties"]
 	_check(int(environment["background_mode"]) == Environment.BG_COLOR and int(environment["ambient_light_source"]) == Environment.AMBIENT_SOURCE_COLOR, "a color background and color ambient light")

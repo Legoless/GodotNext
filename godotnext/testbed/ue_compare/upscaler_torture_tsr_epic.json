@@ -32,7 +32,7 @@
 		"args": ["-dx12", "-sm6"],
 		"window": "fullscreen",
 		"exec_cmds": ["r.AntiAliasingMethod 4", "sg.AntiAliasingQuality 3", "sg.ResolutionQuality 50", "r.ScreenPercentage 50", "sg.ShadowQuality 2"],
-		"expect_cvars": { "r.TSR.History.ScreenPercentage": "200" },
+		"expect_cvars": { "r.TSR.History.ScreenPercentage": "200", "r.TSR.AsyncCompute": "2" },
 		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
 		"ok_exit_codes": [0],
 		"timeout_minutes": 15
@@ -43,7 +43,7 @@
 			"name": "TSR Epic, 200% history, 2160p output at 0.5 (T2)",
 			"gates": ["GT-4"],
 			"status": "ue_bar",
-			"reason": "Not runnable at 2160p yet: the RTX 4080 SUPER machine's desktop runs at 125 % scaling and the UE editor in game mode is not DPI-aware there, so 3840x2160 requests recorded 3072x1728 (fullscreen) and 2560x1440 (windowed); a fullscreen launch made DPI-aware recorded 3840x2160. How the UE side gets 2160p (Epic's 'Allow High DPI in Game Mode' project setting, or 100 % scaling during the PQ sessions) is the lead's decision. Until then the report refuses these sets for the resolution mismatch.",
+			"reason": "Not runnable at 2160p yet: the RTX 4080 SUPER machine's desktop runs at 125 % scaling and the UE editor in game mode is not DPI-aware there, so 3840x2160 requests recorded 3072x1728 (fullscreen) and 2560x1440 (windowed); a fullscreen launch made DPI-aware recorded 3840x2160. How the UE side gets 2160p (Epic's 'Allow High DPI in Game Mode' project setting, or 100 % scaling during the PQ sessions) is the lead's decision. Until then the report refuses these sets for the resolution mismatch. UE's internal resolution (screen percentage 50) is not verified either: no capture column or metadata records it, so a judged report refuses these sets until an observed source exists.",
 			"statistic": "p95",
 			"direction": "lower",
 			"godotnext": { "columns": ["tsr_ms"] },

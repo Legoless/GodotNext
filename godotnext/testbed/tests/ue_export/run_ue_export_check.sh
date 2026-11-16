@@ -23,7 +23,15 @@
 #    refuse (exit 1) and name alpha_antialiasing, diffuse_mode, particles, rigid_skin and
 #    shader_material; a cut outside the path must exit 2; then two exports with those
 #    approximations and check_ue_export.gd on the pair (moving fan and occluders, the character's
-#    rigid parts, the cut, UV transforms, texture filters and the shader).
+#    rigid parts, the cut, UV transforms, texture filters and the shader). Each export log must hold
+#    exactly one UPSCALER_TORTURE_RESET line, at the --camera-cuts frame: the cut UE plays is the
+#    frame the scene resets the temporal history at.
+# 7. The per-row refusals, on tests/ue_export/motion_fixture.tscn (20 frames, rigid_skin): the
+#    still fixture must export; a light that moves and returns, a mesh hidden for one frame and a
+#    MultiMesh instance that moves and returns must each refuse (exit 1) and name the node with the
+#    row it changed at (a first-and-last comparison would miss all three); a Skeleton3D beside its
+#    skinned mesh and a camera cull mask that hides a placed layer must refuse and say so. No
+#    refused run may write scene.json.
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -154,7 +162,8 @@ export_pair hall "${hall_args[@]}" --approximate=diffuse_mode,light_cull_mask,li
 check hall
 
 torture_base=(--scene=res://scenes/upscaler_torture/upscaler_torture.tscn --camera=CameraPath/CameraFollow/Camera3D --warmup=0 --frames=600)
-torture_args=("${torture_base[@]}" --camera-cuts=400)
+torture_cut=400
+torture_args=("${torture_base[@]}" --camera-cuts="$torture_cut")
 torture_ids=(alpha_antialiasing diffuse_mode particles rigid_skin shader_material)
 status=0
 "$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
@@ -176,7 +185,42 @@ status=0
 report torture_cut_outside_path "$status" 2 "$work/torture_bad_cut.log"
 torture_approximations=$(IFS=,; echo "${torture_ids[*]}")
 export_pair torture "${torture_args[@]}" --approximate="$torture_approximations"
+# The scene prints UPSCALER_TORTURE_RESET when it resets the temporal history (the export drives
+# it as a timing run does): the cut the export names must be that frame.
+for run in a b; do
+	resets=$(grep -o 'UPSCALER_TORTURE_RESET frame=[0-9]*' "$work/torture_$run.log" || true)
+	echo "GODOTNEXT_UE_EXPORT_STEP {\"step\":\"torture_reset_$run\",\"resets\":\"${resets//$'\n'/;}\",\"cut\":$torture_cut}"
+	if [[ "$resets" != "UPSCALER_TORTURE_RESET frame=$torture_cut" ]]; then
+		echo "run_ue_export_check.sh: torture export $run reset the temporal history at '${resets//$'\n'/, }', not only at the --camera-cuts frame $torture_cut" >&2
+		failures=$((failures + 1))
+	fi
+done
 check torture
+
+fixture_args=(--scene=res://tests/ue_export/motion_fixture.tscn --camera=Camera --warmup=0 --frames=20 --approximate=rigid_skin)
+# One fixture case: its expected exit code and, for a refusal, the text the log must hold.
+fixture_case() {
+	local name=$1 expected=$2 pattern=$3
+	status=0
+	"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+		"${fixture_args[@]}" --case="$name" --out="$work/fixture_$name" >"$work/fixture_$name.log" 2>&1 || status=$?
+	report "fixture_$name" "$status" "$expected" "$work/fixture_$name.log"
+	if [[ "$expected" -eq 0 ]]; then
+		if [[ ! -e "$work/fixture_$name/scene.json" ]]; then
+			echo "run_ue_export_check.sh: the still fixture wrote no scene.json" >&2
+			failures=$((failures + 1))
+		fi
+	elif ! grep -q -F -- "$pattern" "$work/fixture_$name.log" || [[ -e "$work/fixture_$name/scene.json" ]]; then
+		echo "run_ue_export_check.sh: the $name fixture did not refuse with \"$pattern\", or wrote scene.json" >&2
+		failures=$((failures + 1))
+	fi
+}
+fixture_case none 0 ""
+fixture_case light_returns 1 "Light moved or changed at row"
+fixture_case mesh_blinks 1 "Box moved or changed at row"
+fixture_case multimesh_returns 1 "Rocks moved or changed at row"
+fixture_case skeleton_offset 1 "skinned mesh Skinned whose Skeleton3D is not at the mesh instance's transform"
+fixture_case camera_cull 1 "a camera cull mask that hides some placed layers"
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2

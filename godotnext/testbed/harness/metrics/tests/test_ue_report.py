@@ -151,6 +151,7 @@ def make_set(
     nextgi: dict[str, object] | None = None,
     kind: str = "run",
     wrong_token: bool = False,
+    scales: list[float | None] | None = None,
 ) -> Path:
     parsed = parse_config(config or synthetic_config(lines=_lines()))
     plan = build_plan(
@@ -191,6 +192,9 @@ def make_set(
                 "editor_binary": editor_binary,
                 "runner": {"clock": {"locked": False, "detail": "Clocks are not locked for this job."}},
             }
+            scale = (scales or [1.0])[position % len(scales or [1.0])]
+            if scale is not None:
+                manifest["scaling_3d_scale"] = scale
             if nextgi is not None:
                 manifest["nextgi"] = nextgi
             (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -394,6 +398,29 @@ def test_pso_hitches_after_the_warm_up_are_noted_in_a_dry_run_and_refused_when_j
     options: dict[str, object] = {"config": _judged_config(), "kind": "timing", "editor_binary": False}
     with pytest.raises(ComparisonError, match="must be quiet after the warm-up"):
         build_report(make_set(tmp_path / "judged", hitch_in_window=True, **options), judge=True)  # type: ignore[arg-type]
+
+
+def test_an_unverified_internal_resolution_is_noted_in_a_dry_run_and_refused_when_judged(tmp_path: Path) -> None:
+    # No UE capture column records UE's internal resolution (#232), so a set that renders below the
+    # output size cannot show both engines upscaled from the same size.
+    report = build_report(make_set(tmp_path / "dry", scales=[0.5]), judge=False)
+    facts = report["set"]
+    assert isinstance(facts, dict)
+    assert facts["godotnext_scaling_3d_scale"] == 0.5
+    assert any("internal resolution is not verified" in note and "0.5" in note for note in facts["notes"])
+    assert _line(report, "total")["ratio"] == pytest.approx(1.20)
+    native = build_report(make_set(tmp_path / "native"), judge=False)
+    assert not any("internal resolution" in note for note in native["set"]["notes"])  # type: ignore[index]
+    options: dict[str, object] = {"config": _judged_config(), "kind": "timing", "editor_binary": False}
+    with pytest.raises(ComparisonError, match="internal resolution is not verified"):
+        build_report(make_set(tmp_path / "judged", scales=[0.5], **options), judge=True)  # type: ignore[arg-type]
+
+
+def test_the_godotnext_runs_record_one_scaling_3d_scale(tmp_path: Path) -> None:
+    with pytest.raises(ComparisonError, match="differ in scaling_3d_scale"):
+        build_report(make_set(tmp_path / "mixed", scales=[1.0, 0.5]), judge=False)
+    with pytest.raises(ComparisonError, match="does not record its scaling_3d_scale"):
+        build_report(make_set(tmp_path / "missing", scales=[None]), judge=False)
 
 
 def test_skipped_godotnext_frames_are_dropped_not_zero(tmp_path: Path) -> None:

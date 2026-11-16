@@ -247,13 +247,22 @@ static func texture_filter_name(p_material: BaseMaterial3D) -> String:
 
 
 ## Splits a skinned mesh into rigid parts, one per skin bind, for the rigid_skin approximation.
-## Every vertex must follow exactly one bind at full weight, and every triangle must stay on one
-## bind. Returns {"parts": [{"bind": int, "surfaces": [original surface index, ...],
+## The mesh must be an ArrayMesh of triangle-list surfaces without blend shapes (the parts carry
+## neither morphs nor another primitive type), every vertex must follow exactly one bind at full
+## weight, and every triangle must stay on one bind. Returns {"parts": [{"bind": int, "surfaces": [original surface index, ...],
 ## "arrays": [surface arrays without bones and weights, ...], "sources": [PackedInt32Array of the
 ## original vertex index of each part vertex, ...]}], "triangles": int} sorted by bind, or
 ## {"error": message}. The part vertices stay in the mesh's own space, so a part placed at
 ## mesh_instance.global_transform * bone_global_pose * bind_pose draws what the skinned mesh draws.
 static func rigid_skin_parts(p_mesh: Mesh) -> Dictionary:
+	if not (p_mesh is ArrayMesh):
+		return {"error": "it is a %s, not an ArrayMesh" % p_mesh.get_class()}
+	var array_mesh := p_mesh as ArrayMesh
+	if array_mesh.get_blend_shape_count() > 0:
+		return {"error": "it has blend shapes, which rigid parts would drop"}
+	for surface in array_mesh.get_surface_count():
+		if array_mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+			return {"error": "surface %d is not a triangle list" % surface}
 	var parts := {}
 	var triangles := 0
 	for surface in p_mesh.get_surface_count():
@@ -332,6 +341,41 @@ static func rigid_skin_parts(p_mesh: Mesh) -> Dictionary:
 	for bind: int in sorted:
 		result.append(parts[bind])
 	return {"parts": result, "triangles": triangles}
+
+
+## The rigid parts of p_split against the renderer's own skinning of the same pose (p_baked, from
+## MeshInstance3D.bake_mesh_from_current_skeleton_pose): every part vertex, moved by its part's
+## transform in the mesh instance's space (p_local_parts: bind -> Transform3D), must sit where
+## p_baked puts the source vertex. Returns {"max_m": the largest distance in meters, "compared":
+## the number of vertices compared}; max_m is INF when a part has no transform or p_baked does not
+## hold a source vertex.
+static func rigid_skin_error(p_split: Dictionary, p_baked: Mesh, p_local_parts: Dictionary) -> Dictionary:
+	if p_baked == null:
+		return {"max_m": INF, "compared": 0}
+	var worst := 0.0
+	var compared := 0
+	for part: Dictionary in p_split["parts"]:
+		var bind := int(part["bind"])
+		if not p_local_parts.has(bind):
+			worst = INF
+			continue
+		var local: Transform3D = p_local_parts[bind]
+		var surfaces: Array = part["surfaces"]
+		for index in surfaces.size():
+			var surface := int(surfaces[index])
+			if surface >= p_baked.get_surface_count():
+				worst = INF
+				continue
+			var skinned: PackedVector3Array = p_baked.surface_get_arrays(surface)[Mesh.ARRAY_VERTEX]
+			var part_vertices: PackedVector3Array = part["arrays"][index][Mesh.ARRAY_VERTEX]
+			var sources: PackedInt32Array = part["sources"][index]
+			for vertex in part_vertices.size():
+				if sources[vertex] >= skinned.size():
+					worst = INF
+					continue
+				worst = maxf(worst, (local * part_vertices[vertex] - skinned[sources[vertex]]).length())
+				compared += 1
+	return {"max_m": worst, "compared": compared}
 
 
 ## The elements of a per-vertex mesh array at p_order (components per vertex inferred from the

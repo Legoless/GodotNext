@@ -83,13 +83,16 @@ var _slot_moves := {}
 ## [node, path, skeleton, skin, [[bind, bone], ...]] per MeshInstance3D (skeleton and skin null
 ## when it is not skinned).
 var _sampled_nodes: Array = []
-## [node, path, global transform, visible, light energy or -1] per light and per other geometry
-## node, and the visibility of every mesh instance: compared with row 0 on every row.
+## [node, path, global transform, visible, light energy or -1, MultiMesh state or null] per light
+## and per other geometry node, and the visibility of every mesh instance: compared with row 0 on
+## every row. A MultiMesh's state is [its MultiMesh, its instance buffer, its visible instance count].
 var _watched: Array = []
 var _motion_errors: Array[String] = []
 ## The largest distance between a rigid part's vertex and the same vertex skinned by the renderer
-## (MeshInstance3D.bake_mesh_from_current_skeleton_pose), over every row, in meters.
+## (MeshInstance3D.bake_mesh_from_current_skeleton_pose), over every row, in meters, and how many
+## vertices that compared.
 var _rigid_skin_error := 0.0
+var _rigid_skin_compared := 0
 ## Track files to write: [file name, Array of Transform3D].
 var _pending_tracks: Array = []
 ## "<mesh instance id>:<bind>" -> the ArrayMesh of that rigid part.
@@ -258,7 +261,7 @@ func _camera_row(p_frame: int) -> String:
 ## Transforms of every geometry node other than a mesh instance (mesh instances are sampled on
 ## every row and exported as tracks when they move) and light, the visibility of every one of
 ## them, every MultiMesh's instances, and light energies: compared between the first and the last
-## sampled frame. _sample_row() compares the cheap part of it on every row.
+## sampled frame. _sample_row() compares the same things with row 0 on every row.
 func _motion_state() -> Dictionary:
 	var state := {}
 	var stack: Array[Node] = [_scene]
@@ -317,10 +320,14 @@ func _start_sampling() -> void:
 						binds.append([bind, bone])
 						_slots["%s|%d" % [path, bind]] = _slots.size()
 			_sampled_nodes.append([instance, path, skeleton, instance.skin if skeleton != null else null, binds])
-			_watched.append([node_3d, path, null, node_3d.is_visible_in_tree(), -1.0])
+			_watched.append([node_3d, path, null, node_3d.is_visible_in_tree(), -1.0, null])
 		else:
 			var energy := (node as Light3D).light_energy if node is Light3D else -1.0
-			_watched.append([node_3d, path, node_3d.global_transform, node_3d.is_visible_in_tree(), energy])
+			var multimesh_state: Variant = null
+			if node is MultiMeshInstance3D and (node as MultiMeshInstance3D).multimesh != null:
+				var multimesh := (node as MultiMeshInstance3D).multimesh
+				multimesh_state = [multimesh, multimesh.buffer, multimesh.visible_instance_count]
+			_watched.append([node_3d, path, node_3d.global_transform, node_3d.is_visible_in_tree(), energy, multimesh_state])
 
 
 ## One row: every mesh instance's world transform (and its rigid parts when skinned), and the
@@ -354,6 +361,11 @@ func _sample_row() -> void:
 			changed = true
 		if float(entry[4]) >= 0.0 and (node as Light3D).light_energy != float(entry[4]):
 			changed = true
+		if entry[5] != null:
+			var state: Array = entry[5]
+			var multimesh := (node as MultiMeshInstance3D).multimesh
+			if multimesh != state[0] or multimesh.visible_instance_count != int(state[2]) or multimesh.buffer != state[1]:
+				changed = true
 		if changed and _motion_errors.is_empty():
 			_motion_errors.append("%s moved or changed at row %d; only mesh instance transforms are exported as tracks" % [entry[1], _row])
 
@@ -373,29 +385,19 @@ func _sample_slot(p_slot: int, p_transform: Transform3D) -> void:
 		_slot_moves[p_slot] = rows
 
 
-## The rigid parts against the renderer's own skinning of the same pose: every vertex of a part,
-## moved by its part transform, must sit where the skinned mesh puts it.
+## The rigid parts against the renderer's own skinning of the same pose (Lib.rigid_skin_error):
+## every vertex of a part, moved by its part transform, must sit where the skinned mesh puts it.
 func _check_rigid_skin(p_instance: MeshInstance3D, p_world: Transform3D, p_parts: Dictionary) -> void:
 	var split := Lib.rigid_skin_parts(p_instance.mesh)
 	if split.has("error"):
 		return
-	var baked := p_instance.bake_mesh_from_current_skeleton_pose()
-	if baked == null:
-		_rigid_skin_error = INF
-		return
 	var to_local := p_world.affine_inverse()
-	for part: Dictionary in split["parts"]:
-		if not p_parts.has(int(part["bind"])):
-			_rigid_skin_error = INF
-			continue
-		var local: Transform3D = to_local * p_parts[int(part["bind"])]
-		var surfaces: Array = part["surfaces"]
-		for index in surfaces.size():
-			var skinned: PackedVector3Array = baked.surface_get_arrays(int(surfaces[index]))[Mesh.ARRAY_VERTEX]
-			var part_vertices: PackedVector3Array = part["arrays"][index][Mesh.ARRAY_VERTEX]
-			var sources: PackedInt32Array = part["sources"][index]
-			for vertex in part_vertices.size():
-				_rigid_skin_error = maxf(_rigid_skin_error, (local * part_vertices[vertex] - skinned[sources[vertex]]).length())
+	var local_parts := {}
+	for bind: int in p_parts:
+		local_parts[bind] = to_local * (p_parts[bind] as Transform3D)
+	var result := Lib.rigid_skin_error(split, p_instance.bake_mesh_from_current_skeleton_pose(), local_parts)
+	_rigid_skin_error = maxf(_rigid_skin_error, float(result["max_m"]))
+	_rigid_skin_compared += int(result["compared"])
 
 
 func _export() -> String:
@@ -531,6 +533,7 @@ func _export() -> String:
 			"camera_rows": _track.size(),
 			"movers": _movers,
 			"rigid_skin_max_error_m": Lib.json_value(_rigid_skin_error),
+			"rigid_skin_vertices_compared": _rigid_skin_compared,
 		},
 	}
 	if _camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
@@ -679,7 +682,7 @@ func _add_skinned(p_node: MeshInstance3D, p_path: String) -> void:
 		return
 	var split := Lib.rigid_skin_parts(p_node.mesh)
 	if split.has("error"):
-		_unsupported.append("skinned mesh %s: %s (only one bone per vertex at full weight is exported, as rigid parts)" % [p_path, split["error"]])
+		_unsupported.append("skinned mesh %s: %s (a skinned mesh is exported only as rigid parts: triangle lists without blend shapes, every vertex on one bone at full weight)" % [p_path, split["error"]])
 		return
 	if _rigid_skin_error > 1e-4:
 		_unsupported.append("skinned mesh %s: its rigid parts are up to %s m off the renderer's skinning" % [p_path, _rigid_skin_error])

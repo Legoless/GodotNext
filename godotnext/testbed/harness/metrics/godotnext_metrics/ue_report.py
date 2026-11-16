@@ -18,6 +18,12 @@ run that the config expects to run NextGI must record the forced NextGI with
 the configured tier and quality in its manifest, and a line on a NextGI
 column group must find those columns with values in ``timing.csv``.
 
+UE's internal resolution is not observed: no column or metadata key of a
+game-mode capture records the size UE renders at before it upscales, and the
+log echoes ``r.ScreenPercentage`` once, at start-up (#232). A set whose
+GodotNext runs record a ``scaling_3d_scale`` other than 1.0 is therefore noted
+in a dry run and refused when judged, until an observed source exists.
+
 Without ``--judge`` the report is a build-time dry run: numbers and ratios,
 no verdict, not a measurement (§22). Fewer than 5 runs per engine are allowed
 then. ``--judge`` is for PQ: it needs 5 runs per engine, every column named,
@@ -73,6 +79,13 @@ RUN_MODE_NOTE = (
 )
 # The capture metadata keys the report reads (lower-case, as the profiler writes them).
 _META_TOKEN = "godotnextrun"
+# No observed UE source records the internal resolution yet: a names-only inventory of every column
+# and metadata key of an Upscaler Torture game-mode capture found none (#232).
+INTERNAL_SIZE_UNVERIFIED = (
+    "the GodotNext runs render at scaling_3d_scale {scale:g} of the output, and no UE capture column or"
+    " metadata records the internal resolution UE rendered at (the log echoes r.ScreenPercentage once, at"
+    " start-up), so the report cannot show that both engines upscaled from the same internal size"
+)
 
 
 def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
@@ -89,6 +102,7 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
     notes: list[str] = []
     ue_runs_facts: list[dict[str, object]] = []
     godotnext_facts: list[dict[str, object]] = []
+    scales: set[float] = set()
     for job in jobs:
         name = str(job.get("name"))
         if name not in results:
@@ -104,6 +118,7 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
         if engine == "godotnext":
             manifest = _json(run_dir / "manifest.json")
             platforms.add(_platform(manifest))
+            scales.add(_scaling_scale(manifest, name))
             godotnext_facts.append({"run": name, **_check_nextgi(config, manifest, name)})
             records.append(_godotnext_record(manifest, index))
             godotnext_runs.append(run_dir)
@@ -133,6 +148,14 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
     if len(platforms) != 1:
         raise ComparisonError(f"the GodotNext runs ran on different platforms: {sorted(platforms)}")
     platform = next(iter(platforms))
+    if len(scales) != 1:
+        raise ComparisonError(f"the GodotNext runs differ in scaling_3d_scale: {sorted(scales)}")
+    scale = next(iter(scales))
+    if scale != 1.0:
+        message = INTERNAL_SIZE_UNVERIFIED.format(scale=scale)
+        if judge:
+            raise ComparisonError(f"UE's internal resolution is not verified: {message}")
+        notes.append(f"UE's internal resolution is not verified: {message}; a judged report refuses the set.")
     lines = []
     for spec in config.lines:
         godotnext_values, godotnext_missing = _godotnext_statistics(spec, config, godotnext_runs)
@@ -149,6 +172,7 @@ def build_report(compare_dir: Path, *, judge: bool) -> dict[str, object]:
             )
         )
     facts["notes"] = [RUN_MODE_NOTE, *as_list(facts.get("notes", [])), *_unique(notes)]
+    facts["godotnext_scaling_3d_scale"] = scale
     facts["ue_runs"] = ue_runs_facts
     facts["godotnext_runs"] = godotnext_facts
     first_profile = ue_runs[0][1] if ue_runs else None
@@ -427,6 +451,13 @@ def _same_value(seen: str, wanted: str) -> bool:
         return float(seen) == float(wanted)
     except ValueError:
         return False
+
+
+def _scaling_scale(manifest: dict[str, object], name: str) -> float:
+    value = manifest.get("scaling_3d_scale")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ComparisonError(f"GodotNext run {name} does not record its scaling_3d_scale")
+    return float(value)
 
 
 def _godotnext_record(manifest: dict[str, object], index: int) -> RunRecord:
