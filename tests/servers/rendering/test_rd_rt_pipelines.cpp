@@ -948,4 +948,190 @@ TEST_CASE("[RD][RTPipeline] The reorder feature, its limit and the pipeline flag
 	CHECK_EQ(hit_group->get_record_data(), record);
 }
 
+// GodotNext: d3d12_rt_pipelines (#121). Direct3D 12's RT pipeline rules, without a GPU.
+
+#ifdef MODULE_GLSLANG_ENABLED
+// How many pointer types and variables of a module are in the shader record storage class, and the storage class and
+// DescriptorSet and Binding decorations of one variable.
+struct ModuleStorage {
+	uint32_t shader_record_words = 0; // Pointer types and variables in the ShaderRecordBufferKHR class.
+	uint32_t record_storage_class = 0; // The storage class of the variable p_variable.
+	int64_t set = -1;
+	int64_t binding = -1;
+};
+
+static ModuleStorage scan_module_storage(const Vector<uint32_t> &p_spirv, uint32_t p_variable) {
+	ModuleStorage storage;
+	for (int64_t i = 5; i < p_spirv.size();) {
+		const uint32_t length = p_spirv[i] >> SpvWordCountShift;
+		const uint32_t opcode = p_spirv[i] & SpvOpCodeMask;
+		if (length == 0) {
+			break;
+		}
+		if ((opcode == SpvOpTypePointer && p_spirv[i + 2] == SpvStorageClassShaderRecordBufferKHR) || (opcode == SpvOpVariable && p_spirv[i + 3] == SpvStorageClassShaderRecordBufferKHR)) {
+			storage.shader_record_words++;
+		}
+		if (opcode == SpvOpVariable && p_spirv[i + 2] == p_variable) {
+			storage.record_storage_class = p_spirv[i + 3];
+		}
+		if (opcode == SpvOpDecorate && p_spirv[i + 1] == p_variable && p_spirv[i + 2] == SpvDecorationDescriptorSet) {
+			storage.set = p_spirv[i + 3];
+		}
+		if (opcode == SpvOpDecorate && p_spirv[i + 1] == p_variable && p_spirv[i + 2] == SpvDecorationBinding) {
+			storage.binding = p_spirv[i + 3];
+		}
+		i += length;
+	}
+	return storage;
+}
+
+TEST_CASE("[RD][RTPipeline] For Direct3D 12, a module's shader record becomes a uniform buffer in the set and binding given") {
+	const String record_source = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+hitAttributeEXT vec2 bary;
+layout(shaderRecordEXT, std430) buffer HitRecord {
+	uint material;
+	uint slot;
+}
+record;
+void main() {
+	payload = uvec4(record.material, record.slot, floatBitsToUint(bary));
+}
+)";
+	String error;
+	const Vector<uint8_t> bytes = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_CLOSEST_HIT, record_source, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_4, &error);
+	REQUIRE_MESSAGE(!bytes.is_empty(), error);
+	Vector<uint32_t> spirv;
+	spirv.resize(bytes.size() / sizeof(uint32_t));
+	memcpy(spirv.ptrw(), bytes.ptr(), bytes.size());
+
+	// The record variable of the module as compiled.
+	uint32_t record_id = 0;
+	for (int64_t i = 5; i < spirv.size();) {
+		const uint32_t length = spirv[i] >> SpvWordCountShift;
+		REQUIRE(length > 0);
+		if ((spirv[i] & SpvOpCodeMask) == SpvOpVariable && spirv[i + 3] == SpvStorageClassShaderRecordBufferKHR) {
+			record_id = spirv[i + 2];
+		}
+		i += length;
+	}
+	REQUIRE(record_id != 0);
+	const ModuleStorage before = scan_module_storage(spirv, record_id);
+	CHECK(before.shader_record_words >= 2);
+	CHECK_EQ(before.set, -1);
+
+	Vector<uint32_t> rewritten;
+	CHECK(RDRTPipeline::rewrite_spirv_shader_record_as_uniform_buffer(spirv.ptr(), spirv.size(), 16, 3, rewritten));
+	// Two decorations, four words each, and nothing else added.
+	CHECK_EQ(rewritten.size(), spirv.size() + 8);
+	const ModuleStorage after = scan_module_storage(rewritten, record_id);
+	CHECK_EQ(after.shader_record_words, 0u);
+	CHECK_EQ(after.record_storage_class, uint32_t(SpvStorageClassUniform));
+	CHECK_EQ(after.set, 16);
+	CHECK_EQ(after.binding, 3);
+	// Still a module the payload measure parses.
+	CHECK_EQ(RDRTPipeline::get_spirv_payload_size((const uint8_t *)rewritten.ptr(), rewritten.size() * sizeof(uint32_t)), 16u);
+
+	// Without a record, nothing to rewrite.
+	const String plain_source = "#version 460\n#extension GL_EXT_ray_tracing : require\nlayout(location = 0) rayPayloadInEXT uvec4 payload;\nvoid main() { payload = uvec4(1u); }\n";
+	const Vector<uint8_t> plain_bytes = compile_glslang_shader(RenderingDeviceCommons::SHADER_STAGE_MISS, plain_source, RenderingDeviceCommons::SHADER_LANGUAGE_VULKAN_VERSION_1_1, RenderingDeviceCommons::SHADER_SPIRV_VERSION_1_4, &error);
+	REQUIRE_MESSAGE(!plain_bytes.is_empty(), error);
+	Vector<uint32_t> plain;
+	plain.resize(plain_bytes.size() / sizeof(uint32_t));
+	memcpy(plain.ptrw(), plain_bytes.ptr(), plain_bytes.size());
+	CHECK_FALSE(RDRTPipeline::rewrite_spirv_shader_record_as_uniform_buffer(plain.ptr(), plain.size(), 16, 0, rewritten));
+	CHECK(rewritten.is_empty());
+	const uint32_t not_spirv[6] = { 1, 2, 3, 4, 5, 6 };
+	CHECK_FALSE(RDRTPipeline::rewrite_spirv_shader_record_as_uniform_buffer(not_spirv, 6, 16, 0, rewritten));
+}
+#endif // MODULE_GLSLANG_ENABLED
+
+TEST_CASE("[RD][RTPipeline] Direct3D 12 refuses a hit group whose stages would get different payloads or attributes") {
+	auto stage = [](uint32_t p_payload, bool p_payload_declared, uint32_t p_attributes, bool p_attributes_declared) {
+		RDRTPipeline::StageInterface stage_interface;
+		stage_interface.payload_size = p_payload;
+		stage_interface.payload_declared = p_payload_declared;
+		stage_interface.attribute_size = p_attributes;
+		stage_interface.attributes_declared = p_attributes_declared;
+		return stage_interface;
+	};
+	const RDRTPipeline::StageInterface any_hit_16 = stage(16, true, 8, true);
+	const RDRTPipeline::StageInterface closest_hit_16 = stage(16, true, 8, true);
+	const RDRTPipeline::StageInterface any_hit_4 = stage(4, true, 8, true);
+	const RDRTPipeline::StageInterface any_hit_stand_in = stage(4, false, 8, false);
+
+	// Triangles with the barycentrics, declared or stand-in, and one payload.
+	CHECK(RDRTPipeline::get_hit_group_interface_error(0, &any_hit_16, &closest_hit_16, nullptr).is_empty());
+	CHECK(RDRTPipeline::get_hit_group_interface_error(0, nullptr, &closest_hit_16, nullptr).is_empty());
+	CHECK(RDRTPipeline::get_hit_group_interface_error(0, &any_hit_stand_in, nullptr, nullptr).is_empty());
+
+	// Different payloads.
+	String error = RDRTPipeline::get_hit_group_interface_error(3, &any_hit_4, &closest_hit_16, nullptr);
+	CHECK_MESSAGE(error.begins_with("Hit group 3: "), error);
+	CHECK_MESSAGE((error.contains("a 4-byte ray payload") && error.contains("a 16-byte ray payload") && error.contains("passes both the same ray payload")), error);
+	// A declaration that a stage does not use gets a stand-in again, so the remedy is to declare and use one.
+	CHECK_MESSAGE(error.contains("must declare and use (read or write) the same rayPayloadInEXT type"), error);
+	error = RDRTPipeline::get_hit_group_interface_error(0, &any_hit_stand_in, &closest_hit_16, nullptr);
+	CHECK_MESSAGE(error.contains("no ray payload that it uses (it gets a stand-in of 4 bytes)"), error);
+
+	// A triangle hit has two floats of attributes.
+	const RDRTPipeline::StageInterface closest_hit_vec3 = stage(16, true, 12, true);
+	error = RDRTPipeline::get_hit_group_interface_error(1, nullptr, &closest_hit_vec3, nullptr);
+	CHECK_MESSAGE((error.contains("12 bytes of hit attributes") && error.contains("two barycentrics") && error.contains("to declare and read hitAttributeEXT vec2")), error);
+
+	// A procedural hit has the intersection shader's attributes.
+	const RDRTPipeline::StageInterface intersection_16 = stage(0, false, 16, true);
+	const RDRTPipeline::StageInterface closest_hit_procedural = stage(16, true, 16, true);
+	CHECK(RDRTPipeline::get_hit_group_interface_error(0, nullptr, &closest_hit_procedural, &intersection_16).is_empty());
+	error = RDRTPipeline::get_hit_group_interface_error(2, &any_hit_stand_in, &closest_hit_procedural, &intersection_16);
+	CHECK_MESSAGE(error.contains("payload"), error);
+	// An intersection stage that reports no attributes: the hit stages' stand-ins are not compared with it.
+	const RDRTPipeline::StageInterface intersection_without_attributes = stage(0, false, 0, false);
+	CHECK(RDRTPipeline::get_hit_group_interface_error(2, nullptr, &closest_hit_16, &intersection_without_attributes).is_empty());
+	const RDRTPipeline::StageInterface any_hit_procedural_stand_in = stage(16, true, 8, false);
+	error = RDRTPipeline::get_hit_group_interface_error(2, &any_hit_procedural_stand_in, &closest_hit_procedural, &intersection_16);
+	CHECK_MESSAGE((error.contains("no hit attributes that it uses (it gets a stand-in of 8 bytes)") && error.contains("intersection shader reports 16 bytes") && error.contains("must declare and read the intersection shader's hitAttributeEXT type")), error);
+}
+
+TEST_CASE("[RD][RTPipeline] Direct3D 12 refuses stages from old containers, and records outside hit groups or over 32 bytes") {
+	// Stages without a record, and hit stages with records of up to 32 bytes.
+	for (const RDD::ShaderStage stage : { RDD::SHADER_STAGE_RAYGEN, RDD::SHADER_STAGE_MISS, RDD::SHADER_STAGE_ANY_HIT, RDD::SHADER_STAGE_CLOSEST_HIT, RDD::SHADER_STAGE_INTERSECTION }) {
+		CHECK(RDRTPipeline::get_d3d12_stage_error(0, stage, true, 0).is_empty());
+	}
+	for (const RDD::ShaderStage stage : { RDD::SHADER_STAGE_ANY_HIT, RDD::SHADER_STAGE_CLOSEST_HIT, RDD::SHADER_STAGE_INTERSECTION }) {
+		CHECK(RDRTPipeline::get_d3d12_stage_error(0, stage, true, 16).is_empty());
+		CHECK(RDRTPipeline::get_d3d12_stage_error(0, stage, true, RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE).is_empty());
+	}
+
+	// A stage from a D3D12 container of format version 3 or older has no ray-tracing data.
+	String error = RDRTPipeline::get_d3d12_stage_error(3, RDD::SHADER_STAGE_CLOSEST_HIT, false, 0);
+	CHECK_MESSAGE((error.contains("The closest-hit stage of shader 3") && error.contains("older format") && error.contains("Compile the shader again")), error);
+
+	// Records reach hit groups only.
+	error = RDRTPipeline::get_d3d12_stage_error(0, RDD::SHADER_STAGE_RAYGEN, true, 16);
+	CHECK_MESSAGE(error == "A ray generation shader reads a shader record (shaderRecordEXT); only hit groups carry records.", error);
+	error = RDRTPipeline::get_d3d12_stage_error(1, RDD::SHADER_STAGE_MISS, true, 16);
+	CHECK_MESSAGE(error == "A miss shader reads a shader record (shaderRecordEXT); only hit groups carry records.", error);
+
+	// At most 32 bytes.
+	error = RDRTPipeline::get_d3d12_stage_error(2, RDD::SHADER_STAGE_CLOSEST_HIT, true, 48);
+	CHECK_MESSAGE(error == "A closest-hit shader reads a 48-byte shader record (shaderRecordEXT); a record holds at most 32 bytes.", error);
+}
+
+TEST_CASE("[RD][RTPipeline] Direct3D 12 RT pipelines follow ray query, and libraries also need ID3D12Device7") {
+	RenderingDeviceDriver::D3D12RaytracingPipelineCaps caps = RenderingDeviceDriver::d3d12_raytracing_pipeline_caps(false, true);
+	CHECK_FALSE(caps.pipeline);
+	CHECK_FALSE(caps.library);
+	CHECK_FALSE(caps.trace_rays_indirect);
+	caps = RenderingDeviceDriver::d3d12_raytracing_pipeline_caps(true, false);
+	CHECK(caps.pipeline);
+	CHECK_FALSE(caps.library);
+	CHECK(caps.trace_rays_indirect);
+	caps = RenderingDeviceDriver::d3d12_raytracing_pipeline_caps(true, true);
+	CHECK(caps.pipeline);
+	CHECK(caps.library);
+	CHECK(caps.trace_rays_indirect);
+}
+
 #endif // RD_ENABLED

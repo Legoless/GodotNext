@@ -36,6 +36,7 @@
 #include "drivers/d3d12/d3d12_hooks.h"
 #include "drivers/d3d12/rendering_context_driver_d3d12.h"
 #include "servers/rendering/rendering_device_bindless.h" // GodotNext: rd_bindless (#176).
+#include "servers/rendering/rendering_device_rt_pipeline.h" // GodotNext: d3d12_rt_pipelines (#121).
 
 #include <drivers/d3d12/godot_d3d12ma.h>
 #include <drivers/d3d12/godot_nir.h>
@@ -939,6 +940,12 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 
 	D3D12MA::ALLOCATION_DESC allocation_desc = {};
 	allocation_desc.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+	// GodotNext: d3d12_rt_pipelines (#121). A shader table starts on a 64-byte boundary
+	// (D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT). Tight alignment may place a buffer on an 8-byte one, but a committed
+	// buffer is always 4 KiB aligned.
+	if (p_usage.has_flag(BUFFER_USAGE_SHADER_BINDING_TABLE_BIT)) {
+		allocation_desc.Flags = D3D12MA::ALLOCATION_FLAG_COMMITTED;
+	}
 	D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_COMMON;
 	switch (p_allocation_type) {
 		case MEMORY_ALLOCATION_TYPE_CPU: {
@@ -2861,6 +2868,14 @@ void RenderingDeviceDriverD3D12::command_pool_free(CommandPoolID p_cmd_pool) {
 		rtv_descriptor_heap_pool.free(cmd_buf_info->rtv_alloc);
 		dsv_descriptor_heap_pool.free(cmd_buf_info->dsv_alloc);
 
+		// GodotNext: d3d12_rt_pipelines (#121)
+		for (CommandBufferInfo::DispatchRaysArguments &chunk : cmd_buf_info->dispatch_rays_arguments) {
+			buffer_unmap(chunk.upload);
+			buffer_free(chunk.upload);
+			buffer_free(chunk.arguments);
+		}
+		cmd_buf_info->dispatch_rays_arguments.clear();
+
 		VersatileResource::free(resources_allocator, cmd_buf_info);
 	}
 
@@ -2967,6 +2982,12 @@ void RenderingDeviceDriverD3D12::command_buffer_end(CommandBufferID p_cmd_buffer
 	cmd_buf_info->compute_root_signature_crc = 0;
 	cmd_buf_info->pending_dyn_params = true;
 	cmd_buf_info->descriptor_heaps_set = false;
+	// GodotNext: d3d12_rt_pipelines (#121). The next recording starts after this one ran, so it reuses the indirect
+	// trace arguments from the first slot, and nothing has accessed them yet in it.
+	cmd_buf_info->dispatch_rays_arguments_used = 0;
+	for (CommandBufferInfo::DispatchRaysArguments &chunk : cmd_buf_info->dispatch_rays_arguments) {
+		chunk.accessed = false;
+	}
 }
 
 void RenderingDeviceDriverD3D12::command_buffer_execute_secondary(CommandBufferID p_cmd_buffer, VectorView<CommandBufferID> p_secondary_cmd_buffers) {
@@ -3581,7 +3602,8 @@ RDD::ShaderID RenderingDeviceDriverD3D12::shader_create_from_container(const Ref
 	ERR_FAIL_NULL_V_MSG(shader_container_d3d12, ShaderID(), "Shader container is not a recognized format.");
 
 	RenderingShaderContainerD3D12::ShaderReflectionD3D12 shader_refl_d3d12 = shader_container_d3d12->get_shader_reflection_d3d12();
-	if (shader_refl_d3d12.dxil_push_constant_stages != 0) {
+	// GodotNext: d3d12_rt_pipelines (#121). Also the push constants of a ray-tracing shader whose stages do not read them.
+	if (RenderingShaderContainerD3D12::has_root_constants(shader_refl.pipeline_type, shader_refl.push_constant_size, shader_refl_d3d12.dxil_push_constant_stages)) {
 		shader_info_in.dxil_push_constant_size = shader_refl.push_constant_size;
 	}
 
@@ -3605,6 +3627,11 @@ RDD::ShaderID RenderingDeviceDriverD3D12::shader_create_from_container(const Ref
 			const RenderingShaderContainerD3D12::ReflectionBindingDataD3D12 &uniform_d3d12 = shader_refl_d3d12.reflection_binding_set_uniforms_d3d12[i][j];
 			ShaderInfo::UniformBindingInfo &binding = set.bindings[j];
 			binding.stages = uniform_d3d12.dxil_stages;
+			// GodotNext: d3d12_rt_pipelines (#121). A ray-tracing set binds for every stage of the pipeline, which
+			// includes stages of other shaders, so the legacy barrier path prepares every binding the shader declares.
+			if (shader_refl.pipeline_type == PIPELINE_TYPE_RAYTRACING) {
+				binding.stages |= uint32_t(uniform.stages);
+			}
 			binding.res_class = (ResourceClass)(uniform_d3d12.resource_class);
 			binding.type = UniformType(uniform.type);
 			binding.length = uniform.length;
@@ -3655,6 +3682,30 @@ RDD::ShaderID RenderingDeviceDriverD3D12::shader_create_from_container(const Ref
 
 	shader_info_in.root_signature_desc = shader_info_in.root_signature_deserializer->GetRootSignatureDesc();
 	shader_info_in.root_signature_crc = shader_refl_d3d12.root_signature_crc;
+	// GodotNext: d3d12_rt_pipelines (#121)
+	memcpy(shader_info_in.raytracing_stages, shader_refl_d3d12.raytracing_stages, sizeof(shader_info_in.raytracing_stages));
+	shader_info_in.has_raytracing_stage_data = shader_refl_d3d12.has_raytracing_stage_data;
+	// GodotNext: d3d12_rt_pipelines (#121). Every shader a dispatch reaches must use the global root signature the command
+	// list has, and a pipeline's stages and libraries come from several shaders, each compiled with its own root
+	// signature. So ray-tracing shaders whose root signatures are the same share one root signature object.
+	if (shader_refl.pipeline_type == PIPELINE_TYPE_RAYTRACING) {
+		MutexLock lock(raytracing_root_signatures_mutex);
+		LocalVector<RaytracingRootSignature> &candidates = raytracing_root_signatures[shader_refl_d3d12.root_signature_crc];
+		bool shared = false;
+		for (const RaytracingRootSignature &candidate : candidates) {
+			if (candidate.bytes == shader_refl_d3d12.root_signature_bytes) {
+				shader_info_in.root_signature = candidate.root_signature;
+				shared = true;
+				break;
+			}
+		}
+		if (!shared) {
+			RaytracingRootSignature entry;
+			entry.bytes = shader_refl_d3d12.root_signature_bytes;
+			entry.root_signature = shader_info_in.root_signature;
+			candidates.push_back(entry);
+		}
+	}
 
 	// Bookkeep.
 	ShaderInfo *shader_info_ptr = VersatileResource::allocate<ShaderInfo>(resources_allocator);
@@ -3665,6 +3716,18 @@ RDD::ShaderID RenderingDeviceDriverD3D12::shader_create_from_container(const Ref
 uint32_t RenderingDeviceDriverD3D12::shader_get_layout_hash(ShaderID p_shader) {
 	const ShaderInfo *shader_info_in = (const ShaderInfo *)p_shader.id;
 	return shader_info_in->root_signature_crc;
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). The larger of the payload as Vulkan measures it and as DXIL lays it out, so
+// a library refuses what either would not hold.
+uint32_t RenderingDeviceDriverD3D12::shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const {
+	const ShaderInfo *shader_info_in = (const ShaderInfo *)p_shader.id;
+	ERR_FAIL_NULL_V(shader_info_in, 0);
+	if (p_stage < SHADER_STAGE_RAYGEN || p_stage > SHADER_STAGE_INTERSECTION) {
+		return 0;
+	}
+	const RenderingShaderContainerD3D12::RaytracingStageDataD3D12 &stage_data = shader_info_in->raytracing_stages[p_stage - SHADER_STAGE_RAYGEN];
+	return MAX(stage_data.spirv_payload_size, stage_data.payload_size);
 }
 
 void RenderingDeviceDriverD3D12::shader_free(ShaderID p_shader) {
@@ -4743,7 +4806,8 @@ void RenderingDeviceDriverD3D12::command_bind_push_constants(CommandBufferID p_c
 	} else if (shader_info_in->pipeline_type == PIPELINE_TYPE_RASTERIZATION) {
 		cmd_buf_info->cmd_list->SetGraphicsRoot32BitConstants(0, p_data.size(), p_data.ptr(), p_dst_first_index);
 	} else if (shader_info_in->pipeline_type == PIPELINE_TYPE_RAYTRACING) {
-		ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+		// GodotNext: d3d12_rt_pipelines (#121). The global root signature is the compute root signature.
+		cmd_buf_info->cmd_list->SetComputeRoot32BitConstants(0, p_data.size(), p_data.ptr(), p_dst_first_index);
 	} else {
 		ERR_FAIL_MSG("This pipeline type is not currently supported by the D3D12 driver.");
 	}
@@ -6518,16 +6582,343 @@ void RenderingDeviceDriverD3D12::_acceleration_structure_uav_barrier(CommandBuff
 
 // ----- PIPELINE -----
 
+// GodotNext: d3d12_rt_pipelines (#121). RT pipelines are DXR state objects made of the stages' DXIL libraries (plan
+// §21.1 GD-4). Each stage of each pipeline shader becomes one DXIL library subobject that exports its "main" under a
+// name of its own, so one shader can be part of many pipelines and collections. The global root signature is the
+// layout-defining shader's, which binds every binding the pipeline's shaders declare (RenderingShaderContainerD3D12).
+// A hit group's shader record arrives through a local root signature: root constants that its shaders read as the
+// constant buffer RenderingShaderContainerD3D12::SHADER_RECORD_REGISTER. The state object is built after the approach of
+// upstream Godot pull request #118654 (DXIL library subobjects with renamed exports, a hit group subobject per hit
+// group, and one shader config and pipeline config), extended with records, libraries and the payload rules.
+
+ID3D12RootSignature *RenderingDeviceDriverD3D12::_get_local_root_signature(uint32_t p_record_size) {
+	ERR_FAIL_COND_V(p_record_size == 0 || p_record_size > LOCAL_ROOT_SIGNATURE_MAX_SIZE || (p_record_size % 16) != 0, nullptr);
+	MutexLock lock(local_root_signatures_mutex);
+	Microsoft::WRL::ComPtr<ID3D12RootSignature> &root_signature = local_root_signatures[p_record_size / 16 - 1];
+	if (root_signature) {
+		return root_signature.Get();
+	}
+
+	CD3DX12_ROOT_PARAMETER1 record;
+	record.InitAsConstants(p_record_size / sizeof(uint32_t), RenderingShaderContainerD3D12::SHADER_RECORD_REGISTER, RenderingShaderContainerD3D12::ROOT_CONSTANT_SPACE);
+	CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC desc = {};
+	desc.Init_1_1(1, &record, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE);
+	ComPtr<ID3DBlob> blob;
+	ComPtr<ID3DBlob> error_blob;
+	HRESULT res = D3DX12SerializeVersionedRootSignature(context_driver->lib_d3d12, &desc, D3D_ROOT_SIGNATURE_VERSION_1_1, blob.GetAddressOf(), error_blob.GetAddressOf());
+	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), nullptr, vformat("Serializing the local root signature of a %d-byte shader record failed with error 0x%08ux.", p_record_size, (uint64_t)res));
+	res = device->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(), IID_PPV_ARGS(root_signature.GetAddressOf()));
+	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), nullptr, vformat("CreateRootSignature failed for the local root signature of a %d-byte shader record, with error 0x%08ux.", p_record_size, (uint64_t)res));
+	return root_signature.Get();
+}
+
+String RenderingDeviceDriverD3D12::raytracing_pipeline_get_create_error(VectorView<PipelineShader> p_shaders, VectorView<HitGroup> p_hit_groups) {
+	auto stage_data = [&](uint32_t p_index) -> const RenderingShaderContainerD3D12::RaytracingStageDataD3D12 & {
+		const ShaderInfo *shader_info = (const ShaderInfo *)p_shaders[p_index].shader.id;
+		return shader_info->raytracing_stages[p_shaders[p_index].shader_stage - SHADER_STAGE_RAYGEN];
+	};
+
+	static_assert(LOCAL_ROOT_SIGNATURE_MAX_SIZE == RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE);
+	for (uint32_t i = 0; i < p_shaders.size(); i++) {
+		const ShaderInfo *shader_info = (const ShaderInfo *)p_shaders[i].shader.id;
+		const String error = RDRTPipeline::get_d3d12_stage_error(i, p_shaders[i].shader_stage, shader_info->has_raytracing_stage_data, shader_info->has_raytracing_stage_data ? stage_data(i).record_size : 0);
+		if (!error.is_empty()) {
+			return error;
+		}
+	}
+
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		const HitGroup &hit_group = p_hit_groups[i];
+		RDRTPipeline::StageInterface interfaces[3];
+		const RDRTPipeline::StageInterface *stages[3] = {};
+		const uint32_t indices[3] = { hit_group.any_hit_shader_index, hit_group.closest_hit_shader_index, hit_group.intersection_shader_index };
+		for (uint32_t j = 0; j < 3; j++) {
+			if (indices[j] == UINT32_MAX) {
+				continue;
+			}
+			const RenderingShaderContainerD3D12::RaytracingStageDataD3D12 &data = stage_data(indices[j]);
+			interfaces[j].payload_size = data.incoming_payload_size;
+			interfaces[j].payload_declared = (data.flags & RenderingShaderContainerD3D12::RAYTRACING_STAGE_PAYLOAD_DECLARED) != 0;
+			interfaces[j].attribute_size = data.attribute_size;
+			interfaces[j].attributes_declared = (data.flags & RenderingShaderContainerD3D12::RAYTRACING_STAGE_ATTRIBUTES_DECLARED) != 0;
+			stages[j] = &interfaces[j];
+		}
+		const String error = RDRTPipeline::get_hit_group_interface_error(i, stages[0], stages[1], stages[2]);
+		if (!error.is_empty()) {
+			return error;
+		}
+	}
+	return String();
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::_raytracing_state_object_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader, bool p_library, uint32_t p_max_payload_size) {
+	ERR_FAIL_COND_V_MSG(!raytracing_pipeline_caps.pipeline, RaytracingPipelineID(), "This D3D12 device has no RT pipelines (SUPPORTS_RAYTRACING_PIPELINE).");
+	ERR_FAIL_COND_V(p_library && !raytracing_pipeline_caps.library, RaytracingPipelineID());
+	const ShaderInfo *layout_shader_info = (const ShaderInfo *)p_layout_defining_shader.id;
+	ERR_FAIL_NULL_V(layout_shader_info, RaytracingPipelineID());
+
+	const uint64_t number = raytracing_state_object_count.increment();
+	CD3DX12_STATE_OBJECT_DESC desc(p_library ? D3D12_STATE_OBJECT_TYPE_COLLECTION : D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
+
+	// The DXIL library of each stage, with its specialization constants. The subobjects point at the bytecode, so it
+	// lives until the state object is created.
+	LocalVector<Vector<uint8_t>> bytecodes;
+	LocalVector<Char16String> shader_names;
+	uint32_t payload_size = 0;
+	uint32_t attribute_size = RDRTPipeline::TRIANGLE_ATTRIBUTE_SIZE;
+	for (uint32_t i = 0; i < p_shaders.size(); i++) {
+		const ShaderInfo *shader_info = (const ShaderInfo *)p_shaders[i].shader.id;
+		const ShaderStage stage = p_shaders[i].shader_stage;
+		ERR_FAIL_COND_V(stage < SHADER_STAGE_RAYGEN || stage > SHADER_STAGE_INTERSECTION, RaytracingPipelineID());
+		HashMap<ShaderStage, Vector<uint8_t>> stages_bytecode;
+		ERR_FAIL_COND_V(!_shader_apply_specialization_constants(shader_info, p_shaders[i].specialization_constants, stages_bytecode), RaytracingPipelineID());
+		const Vector<uint8_t> *bytecode = stages_bytecode.getptr(stage);
+		ERR_FAIL_NULL_V_MSG(bytecode, RaytracingPipelineID(), vformat("The shader has no %s stage.", RDRTPipeline::get_stage_name(stage)));
+		bytecodes.push_back(*bytecode);
+		shader_names.push_back(vformat("gn%d_s%d", number, i).utf16());
+
+		const RenderingShaderContainerD3D12::RaytracingStageDataD3D12 &stage_data = shader_info->raytracing_stages[stage - SHADER_STAGE_RAYGEN];
+		payload_size = MAX(payload_size, stage_data.payload_size);
+		attribute_size = MAX(attribute_size, stage_data.attribute_size);
+	}
+	for (uint32_t i = 0; i < p_shaders.size(); i++) {
+		CD3DX12_DXIL_LIBRARY_SUBOBJECT *library = desc.CreateSubobject<CD3DX12_DXIL_LIBRARY_SUBOBJECT>();
+		const D3D12_SHADER_BYTECODE bytecode = { bytecodes[i].ptr(), (SIZE_T)bytecodes[i].size() };
+		library->SetDXILLibrary(&bytecode);
+		library->DefineExport((LPCWSTR)shader_names[i].get_data(), L"main");
+	}
+
+	// The shader groups, in group order.
+	RaytracingPipelineInfo *info = memnew(RaytracingPipelineInfo);
+	info->collection = p_library;
+	info->root_signature = layout_shader_info->root_signature;
+	info->root_signature_crc = layout_shader_info->root_signature_crc;
+	for (uint32_t i = 0; i < p_raygen_shader_indices.size(); i++) {
+		info->group_names.push_back(shader_names[p_raygen_shader_indices[i]]);
+	}
+	for (uint32_t i = 0; i < p_miss_shader_indices.size(); i++) {
+		info->group_names.push_back(shader_names[p_miss_shader_indices[i]]);
+	}
+	uint32_t record_size = 0;
+	LocalVector<Char16String> hit_group_names;
+	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
+		const HitGroup &hit_group = p_hit_groups[i];
+		hit_group_names.push_back(vformat("gn%d_g%d", number, i).utf16());
+		CD3DX12_HIT_GROUP_SUBOBJECT *group = desc.CreateSubobject<CD3DX12_HIT_GROUP_SUBOBJECT>();
+		group->SetHitGroupExport((LPCWSTR)hit_group_names[i].get_data());
+		group->SetHitGroupType(hit_group.intersection_shader_index != UINT32_MAX ? D3D12_HIT_GROUP_TYPE_PROCEDURAL_PRIMITIVE : D3D12_HIT_GROUP_TYPE_TRIANGLES);
+		const uint32_t indices[3] = { hit_group.any_hit_shader_index, hit_group.closest_hit_shader_index, hit_group.intersection_shader_index };
+		for (uint32_t j = 0; j < 3; j++) {
+			if (indices[j] == UINT32_MAX) {
+				continue;
+			}
+			const LPCWSTR name = (LPCWSTR)shader_names[indices[j]].get_data();
+			if (j == 0) {
+				group->SetAnyHitShaderImport(name);
+			} else if (j == 1) {
+				group->SetClosestHitShaderImport(name);
+			} else {
+				group->SetIntersectionShaderImport(name);
+			}
+			const ShaderInfo *shader_info = (const ShaderInfo *)p_shaders[indices[j]].shader.id;
+			record_size = MAX(record_size, shader_info->raytracing_stages[p_shaders[indices[j]].shader_stage - SHADER_STAGE_RAYGEN].record_size);
+		}
+		info->group_names.push_back(hit_group_names[i]);
+	}
+
+	// Libraries, and the pipelines linked from them, declare the payload size RenderingDevice gives and the largest
+	// hit attributes, so all of them match; a pipeline declares what its stages use.
+	CD3DX12_RAYTRACING_SHADER_CONFIG_SUBOBJECT *shader_config = desc.CreateSubobject<CD3DX12_RAYTRACING_SHADER_CONFIG_SUBOBJECT>();
+	if (p_library) {
+		shader_config->Config(p_max_payload_size, D3D12_RAYTRACING_MAX_ATTRIBUTE_SIZE_IN_BYTES);
+	} else {
+		shader_config->Config(MAX(payload_size, (uint32_t)sizeof(uint32_t)), MIN(attribute_size, (uint32_t)D3D12_RAYTRACING_MAX_ATTRIBUTE_SIZE_IN_BYTES));
+	}
+	CD3DX12_RAYTRACING_PIPELINE_CONFIG_SUBOBJECT *pipeline_config = desc.CreateSubobject<CD3DX12_RAYTRACING_PIPELINE_CONFIG_SUBOBJECT>();
+	pipeline_config->Config(p_max_trace_recursion_depth);
+	CD3DX12_GLOBAL_ROOT_SIGNATURE_SUBOBJECT *global_root_signature = desc.CreateSubobject<CD3DX12_GLOBAL_ROOT_SIGNATURE_SUBOBJECT>();
+	global_root_signature->SetRootSignature(layout_shader_info->root_signature.Get());
+
+	// Every hit group gets the local root signature of the largest record its pipeline's hit shaders read, so a shader
+	// that is part of several hit groups has one local root signature. RenderingDevice makes every hit group's record at
+	// least that big (raytracing_pipeline_get_hit_group_record_size()).
+	info->hit_group_record_size = record_size;
+	if (record_size > 0) {
+		ID3D12RootSignature *local_root_signature = _get_local_root_signature(record_size);
+		if (local_root_signature == nullptr) {
+			memdelete(info);
+			ERR_FAIL_V(RaytracingPipelineID());
+		}
+		CD3DX12_LOCAL_ROOT_SIGNATURE_SUBOBJECT *local = desc.CreateSubobject<CD3DX12_LOCAL_ROOT_SIGNATURE_SUBOBJECT>();
+		local->SetRootSignature(local_root_signature);
+		CD3DX12_SUBOBJECT_TO_EXPORTS_ASSOCIATION_SUBOBJECT *association = desc.CreateSubobject<CD3DX12_SUBOBJECT_TO_EXPORTS_ASSOCIATION_SUBOBJECT>();
+		association->SetSubobjectToAssociate(*local);
+		for (const Char16String &name : hit_group_names) {
+			association->AddExport((LPCWSTR)name.get_data());
+		}
+	}
+
+	// A collection that a pipeline with additions can import, and that AddToStateObject() can add.
+	if (p_library) {
+		CD3DX12_STATE_OBJECT_CONFIG_SUBOBJECT *config = desc.CreateSubobject<CD3DX12_STATE_OBJECT_CONFIG_SUBOBJECT>();
+		config->SetFlags(D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS);
+	}
+
+	ComPtr<ID3D12StateObject> state_object;
+	const HRESULT res = device_5->CreateStateObject(desc, IID_PPV_ARGS(state_object.GetAddressOf()));
+	if (!SUCCEEDED(res)) {
+		memdelete(info);
+		ERR_FAIL_V_MSG(RaytracingPipelineID(), vformat("CreateStateObject failed for a D3D12 raytracing %s with error 0x%08ux.", p_library ? "pipeline library (collection)" : "pipeline", (uint64_t)res));
+	}
+	info->state_object = state_object;
+	if (!p_library && !_raytracing_get_identifiers(info, state_object.Get(), 0)) {
+		memdelete(info);
+		ERR_FAIL_V(RaytracingPipelineID());
+	}
+	return RaytracingPipelineID(info);
+}
+
+bool RenderingDeviceDriverD3D12::_raytracing_get_identifiers(RaytracingPipelineInfo *p_info, ID3D12StateObject *p_state_object, uint32_t p_first_group) {
+	ComPtr<ID3D12StateObjectProperties> properties;
+	HRESULT res = p_state_object->QueryInterface(IID_PPV_ARGS(properties.GetAddressOf()));
+	ERR_FAIL_COND_V_MSG(!SUCCEEDED(res), false, vformat("A D3D12 raytracing state object has no ID3D12StateObjectProperties (error 0x%08ux).", (uint64_t)res));
+	p_info->identifiers.resize(p_info->group_names.size() * D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+	for (uint32_t i = p_first_group; i < p_info->group_names.size(); i++) {
+		const void *identifier = properties->GetShaderIdentifier((LPCWSTR)p_info->group_names[i].get_data());
+		ERR_FAIL_NULL_V_MSG(identifier, false, "A D3D12 raytracing state object has no shader identifier for " + String::utf16(p_info->group_names[i].get_data()) + ".");
+		memcpy(p_info->identifiers.ptr() + uint64_t(i) * D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, identifier, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+	}
+	return true;
+}
+
 RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) {
-	ERR_FAIL_V_MSG(RaytracingPipelineID(), "Ray tracing is not currently supported by the D3D12 driver.");
+	return _raytracing_state_object_create(p_shaders, p_raygen_shader_indices, p_miss_shader_indices, p_hit_groups, p_max_trace_recursion_depth, p_layout_defining_shader, false, 0);
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+	return _raytracing_state_object_create(p_shaders, p_raygen_shader_indices, p_miss_shader_indices, p_hit_groups, p_max_trace_recursion_depth, p_layout_defining_shader, true, p_max_payload_size);
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+	ERR_FAIL_COND_V(!raytracing_pipeline_caps.library, RaytracingPipelineID());
+	ERR_FAIL_COND_V(p_libraries.size() == 0, RaytracingPipelineID());
+	const ShaderInfo *layout_shader_info = (const ShaderInfo *)p_layout_defining_shader.id;
+	ERR_FAIL_NULL_V(layout_shader_info, RaytracingPipelineID());
+
+	// The collections hold every subobject their exports need (configs and root signatures), so the pipeline is the
+	// collections plus the flag that lets AddToStateObject() grow it.
+	CD3DX12_STATE_OBJECT_DESC desc(D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
+	RaytracingPipelineInfo *info = memnew(RaytracingPipelineInfo);
+	info->root_signature = layout_shader_info->root_signature;
+	info->root_signature_crc = layout_shader_info->root_signature_crc;
+	info->library_count = p_libraries.size();
+	for (uint32_t i = 0; i < p_libraries.size(); i++) {
+		const RaytracingPipelineInfo *library = (const RaytracingPipelineInfo *)p_libraries[i].id;
+		if (library == nullptr || !library->collection) {
+			memdelete(info);
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), vformat("Library %d of a D3D12 link is not a pipeline library.", i));
+		}
+		CD3DX12_EXISTING_COLLECTION_SUBOBJECT *collection = desc.CreateSubobject<CD3DX12_EXISTING_COLLECTION_SUBOBJECT>();
+		collection->SetExistingCollection(library->state_object.Get());
+		for (const Char16String &name : library->group_names) {
+			info->group_names.push_back(name);
+		}
+		info->hit_group_record_size = MAX(info->hit_group_record_size, library->hit_group_record_size);
+	}
+	CD3DX12_STATE_OBJECT_CONFIG_SUBOBJECT *config = desc.CreateSubobject<CD3DX12_STATE_OBJECT_CONFIG_SUBOBJECT>();
+	config->SetFlags(D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS);
+
+	ComPtr<ID3D12StateObject> state_object;
+	const HRESULT res = device_5->CreateStateObject(desc, IID_PPV_ARGS(state_object.GetAddressOf()));
+	if (!SUCCEEDED(res)) {
+		memdelete(info);
+		ERR_FAIL_V_MSG(RaytracingPipelineID(), vformat("CreateStateObject failed to link %d D3D12 raytracing pipeline libraries, with error 0x%08ux.", p_libraries.size(), (uint64_t)res));
+	}
+	info->state_object = state_object;
+	if (!_raytracing_get_identifiers(info, state_object.Get(), 0)) {
+		memdelete(info);
+		ERR_FAIL_V(RaytracingPipelineID());
+	}
+	return RaytracingPipelineID(info);
+}
+
+RDD::RaytracingPipelineID RenderingDeviceDriverD3D12::raytracing_pipeline_link_add(RaytracingPipelineID p_base, uint32_t p_base_library_count, VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+	ERR_FAIL_COND_V(!raytracing_pipeline_caps.library || !device_7, RaytracingPipelineID());
+	const RaytracingPipelineInfo *base = (const RaytracingPipelineInfo *)p_base.id;
+	ERR_FAIL_NULL_V(base, RaytracingPipelineID());
+	ERR_FAIL_COND_V_MSG(base->collection || base->library_count != p_base_library_count || p_base_library_count > p_libraries.size(), RaytracingPipelineID(), "The base of a D3D12 link that adds libraries must be the pipeline linked from the first of them.");
+	if (p_base_library_count == p_libraries.size()) {
+		return raytracing_pipeline_link(p_libraries, p_max_trace_recursion_depth, p_max_payload_size, p_layout_defining_shader);
+	}
+
+	// AddToStateObject() compiles nothing that the base holds: the addition is only the new collections. The new state
+	// object keeps the base's shader identifiers, so only the new groups' are fetched.
+	CD3DX12_STATE_OBJECT_DESC addition(D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE);
+	RaytracingPipelineInfo *info = memnew(RaytracingPipelineInfo);
+	info->root_signature = base->root_signature;
+	info->root_signature_crc = base->root_signature_crc;
+	info->library_count = p_libraries.size();
+	info->group_names = base->group_names;
+	info->hit_group_record_size = base->hit_group_record_size;
+	for (uint32_t i = p_base_library_count; i < p_libraries.size(); i++) {
+		const RaytracingPipelineInfo *library = (const RaytracingPipelineInfo *)p_libraries[i].id;
+		if (library == nullptr || !library->collection) {
+			memdelete(info);
+			ERR_FAIL_V_MSG(RaytracingPipelineID(), vformat("Library %d of a D3D12 link is not a pipeline library.", i));
+		}
+		CD3DX12_EXISTING_COLLECTION_SUBOBJECT *collection = addition.CreateSubobject<CD3DX12_EXISTING_COLLECTION_SUBOBJECT>();
+		collection->SetExistingCollection(library->state_object.Get());
+		for (const Char16String &name : library->group_names) {
+			info->group_names.push_back(name);
+		}
+		info->hit_group_record_size = MAX(info->hit_group_record_size, library->hit_group_record_size);
+	}
+	CD3DX12_STATE_OBJECT_CONFIG_SUBOBJECT *config = addition.CreateSubobject<CD3DX12_STATE_OBJECT_CONFIG_SUBOBJECT>();
+	config->SetFlags(D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS);
+
+	ComPtr<ID3D12StateObject> state_object;
+	const HRESULT res = device_7->AddToStateObject(addition, base->state_object.Get(), IID_PPV_ARGS(state_object.GetAddressOf()));
+	if (!SUCCEEDED(res)) {
+		memdelete(info);
+		ERR_FAIL_V_MSG(RaytracingPipelineID(), vformat("AddToStateObject failed to add %d D3D12 raytracing pipeline libraries, with error 0x%08ux.", p_libraries.size() - p_base_library_count, (uint64_t)res));
+	}
+	info->state_object = state_object;
+	const uint32_t base_group_count = base->group_names.size();
+	if (!_raytracing_get_identifiers(info, state_object.Get(), base_group_count)) {
+		memdelete(info);
+		ERR_FAIL_V(RaytracingPipelineID());
+	}
+	memcpy(info->identifiers.ptr(), base->identifiers.ptr(), uint64_t(base_group_count) * D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+	return RaytracingPipelineID(info);
 }
 
 void RenderingDeviceDriverD3D12::raytracing_pipeline_free(RDD::RaytracingPipelineID p_pipeline) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_rt_pipelines (#121)
+	RaytracingPipelineInfo *info = (RaytracingPipelineInfo *)p_pipeline.id;
+	ERR_FAIL_NULL(info);
+	memdelete(info);
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). DispatchRays reads a hit group's local root arguments right after its
+// identifier, so the hit shader binding table's stride must hold them, also where no hit group has record_data.
+uint32_t RenderingDeviceDriverD3D12::raytracing_pipeline_get_hit_group_record_size(RaytracingPipelineID p_pipeline) {
+	const RaytracingPipelineInfo *info = (const RaytracingPipelineInfo *)p_pipeline.id;
+	ERR_FAIL_NULL_V(info, 0);
+	return info->hit_group_record_size;
 }
 
 bool RenderingDeviceDriverD3D12::raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) {
-	ERR_FAIL_V_MSG(false, "Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_rt_pipelines (#121)
+	const RaytracingPipelineInfo *info = (const RaytracingPipelineInfo *)p_pipeline.id;
+	ERR_FAIL_NULL_V(info, false);
+	ERR_FAIL_COND_V_MSG(info->collection, false, "A D3D12 raytracing pipeline library has no shader identifiers; link it first.");
+	const uint32_t group_count = info->identifiers.size() / D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+	for (uint32_t i = 0; i < p_group_indices.size(); i++) {
+		const uint32_t group = p_group_index_offset + p_group_indices[i];
+		ERR_FAIL_COND_V_MSG(group >= group_count, false, vformat("Shader group %d is past the %d groups of the D3D12 raytracing pipeline.", group, group_count));
+		memcpy(r_data + uint64_t(i) * p_data_stride_bytes, info->identifiers.ptr() + uint64_t(group) * D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES, D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES);
+	}
+	return true;
 }
 
 // ----- COMMANDS -----
@@ -6601,15 +6992,179 @@ void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer
 }
 
 void RenderingDeviceDriverD3D12::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_rt_pipelines (#121). The global root signature is the compute root signature.
+	_command_check_descriptor_sets(p_cmd_buffer);
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	const RaytracingPipelineInfo *info = (const RaytracingPipelineInfo *)p_pipeline.id;
+	ERR_FAIL_NULL(info);
+	ERR_FAIL_COND_MSG(info->collection, "A D3D12 raytracing pipeline library cannot be bound.");
+	cmd_buf_info->cmd_list_4->SetPipelineState1(info->state_object.Get());
+	// The state object replaced whichever pipeline state was set.
+	cmd_buf_info->compute_pso = nullptr;
+	cmd_buf_info->graphics_pso = nullptr;
+	cmd_buf_info->nir_compute_runtime_data_root_param_idx = UINT32_MAX;
+	if (cmd_buf_info->compute_root_signature_crc != info->root_signature_crc) {
+		cmd_buf_info->cmd_list->SetComputeRootSignature(info->root_signature.Get());
+		cmd_buf_info->compute_root_signature_crc = info->root_signature_crc;
+	}
 }
 
 void RenderingDeviceDriverD3D12::command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_rt_pipelines (#121). Ray-tracing stages see the global (compute) root signature's bindings.
+	command_bind_compute_uniform_sets(p_cmd_buffer, VectorView<UniformSetID>(p_uniform_set), p_shader, p_set_index, 1, 0);
+}
+
+// GodotNext: d3d12_rt_pipelines (#121)
+D3D12_DISPATCH_RAYS_DESC RenderingDeviceDriverD3D12::_dispatch_rays_desc(const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) const {
+	auto address = [](const ShaderBindingTable &p_sbt) -> D3D12_GPU_VIRTUAL_ADDRESS {
+		const BufferInfo *buffer = (const BufferInfo *)p_sbt.buffer.id;
+		return buffer != nullptr ? buffer->gpu_virtual_address + p_sbt.offset : 0;
+	};
+	D3D12_DISPATCH_RAYS_DESC desc = {};
+	desc.RayGenerationShaderRecord.StartAddress = address(p_raygen_sbt);
+	desc.RayGenerationShaderRecord.SizeInBytes = p_raygen_sbt.size;
+	desc.MissShaderTable.StartAddress = address(p_miss_sbt);
+	desc.MissShaderTable.SizeInBytes = p_miss_sbt.size;
+	desc.MissShaderTable.StrideInBytes = p_miss_sbt.stride;
+	desc.HitGroupTable.StartAddress = address(p_hit_sbt);
+	desc.HitGroupTable.SizeInBytes = p_hit_sbt.size;
+	desc.HitGroupTable.StrideInBytes = p_hit_sbt.stride;
+	desc.Width = p_width;
+	desc.Height = p_height;
+	desc.Depth = p_depth;
+	DEV_ASSERT(desc.RayGenerationShaderRecord.StartAddress % D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT == 0);
+	DEV_ASSERT(desc.MissShaderTable.StartAddress % D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT == 0);
+	DEV_ASSERT(desc.HitGroupTable.StartAddress % D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT == 0);
+	DEV_ASSERT(desc.MissShaderTable.StrideInBytes % D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT == 0 && desc.HitGroupTable.StrideInBytes % D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT == 0);
+	return desc;
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). Legacy barriers: shader tables are read in NON_PIXEL_SHADER_RESOURCE. With
+// enhanced barriers the render graph synchronizes them.
+void RenderingDeviceDriverD3D12::_shader_binding_tables_transition(CommandBufferInfo *p_cmd_buf_info, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt) {
+	for (const ShaderBindingTable *sbt : { &p_raygen_sbt, &p_miss_sbt, &p_hit_sbt }) {
+		if (sbt->buffer) {
+			_resource_transition_batch(p_cmd_buf_info, (BufferInfo *)sbt->buffer.id, 0, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		}
+	}
 }
 
 void RenderingDeviceDriverD3D12::command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_rt_pipelines (#121)
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_shader_binding_tables_transition(cmd_buf_info, p_raygen_sbt, p_miss_sbt, p_hit_sbt);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+	const D3D12_DISPATCH_RAYS_DESC desc = _dispatch_rays_desc(p_raygen_sbt, p_miss_sbt, p_hit_sbt, p_width, p_height, p_depth);
+	cmd_buf_info->cmd_list_4->DispatchRays(&desc);
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). ExecuteIndirect's DispatchRays reads a whole D3D12_DISPATCH_RAYS_DESC, shader
+// tables included, but the indirect trace's buffer holds only the launch size. So each indirect trace takes a slot of
+// this command buffer's argument buffers: the tables' part is written on the CPU into an upload buffer and copied in,
+// then the launch size is copied in from the trace's buffer, and ExecuteIndirect reads the slot. The render graph has
+// made the launch size readable as an indirect argument; for the copy it is made a copy source here and back after.
+void RenderingDeviceDriverD3D12::command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) {
+	static_assert(offsetof(D3D12_DISPATCH_RAYS_DESC, Height) == offsetof(D3D12_DISPATCH_RAYS_DESC, Width) + sizeof(UINT) && offsetof(D3D12_DISPATCH_RAYS_DESC, Depth) == offsetof(D3D12_DISPATCH_RAYS_DESC, Height) + sizeof(UINT));
+	static_assert(sizeof(D3D12_DISPATCH_RAYS_DESC) <= DISPATCH_RAYS_ARGUMENT_STRIDE);
+	constexpr uint64_t launch_size_offset = offsetof(D3D12_DISPATCH_RAYS_DESC, Width);
+	static_assert(launch_size_offset + RDRTPipeline::INDIRECT_COMMAND_SIZE <= sizeof(D3D12_DISPATCH_RAYS_DESC));
+
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	BufferInfo *launch_buffer = (BufferInfo *)p_indirect_buffer.id;
+	ERR_FAIL_NULL(launch_buffer);
+	ERR_FAIL_COND_MSG(!raytracing_pipeline_caps.trace_rays_indirect, "This D3D12 device has no indirect trace (SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT).");
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS, 0, 1);
+	ERR_FAIL_NULL(signature);
+
+	const uint32_t chunk_index = cmd_buf_info->dispatch_rays_arguments_used / DISPATCH_RAYS_ARGUMENTS_PER_CHUNK;
+	if (chunk_index >= cmd_buf_info->dispatch_rays_arguments.size()) {
+		CommandBufferInfo::DispatchRaysArguments chunk;
+		const uint64_t chunk_size = uint64_t(DISPATCH_RAYS_ARGUMENT_STRIDE) * DISPATCH_RAYS_ARGUMENTS_PER_CHUNK;
+		chunk.upload = buffer_create(chunk_size, BUFFER_USAGE_TRANSFER_FROM_BIT, MEMORY_ALLOCATION_TYPE_CPU, 0);
+		ERR_FAIL_COND(!chunk.upload);
+		chunk.upload_ptr = buffer_map(chunk.upload);
+		chunk.arguments = buffer_create(chunk_size, BUFFER_USAGE_TRANSFER_TO_BIT | BUFFER_USAGE_INDIRECT_BIT, MEMORY_ALLOCATION_TYPE_GPU, 0);
+		if (chunk.upload_ptr == nullptr || !chunk.arguments) {
+			if (chunk.arguments) {
+				buffer_free(chunk.arguments);
+			}
+			buffer_unmap(chunk.upload);
+			buffer_free(chunk.upload);
+			ERR_FAIL_MSG("Couldn't create the arguments of a D3D12 indirect trace.");
+		}
+		cmd_buf_info->dispatch_rays_arguments.push_back(chunk);
+	}
+	CommandBufferInfo::DispatchRaysArguments &chunk = cmd_buf_info->dispatch_rays_arguments[chunk_index];
+	const uint64_t slot = uint64_t(cmd_buf_info->dispatch_rays_arguments_used % DISPATCH_RAYS_ARGUMENTS_PER_CHUNK) * DISPATCH_RAYS_ARGUMENT_STRIDE;
+	cmd_buf_info->dispatch_rays_arguments_used++;
+
+	const D3D12_DISPATCH_RAYS_DESC desc = _dispatch_rays_desc(p_raygen_sbt, p_miss_sbt, p_hit_sbt, 0, 0, 0);
+	memcpy(chunk.upload_ptr + slot, &desc, launch_size_offset);
+	BufferInfo *upload = (BufferInfo *)chunk.upload.id;
+	BufferInfo *arguments = (BufferInfo *)chunk.arguments.id;
+
+	if (barrier_capabilities.enhanced_barriers_supported) {
+		D3D12_BUFFER_BARRIER barriers[2] = {};
+		barriers[0].SyncBefore = chunk.accessed ? D3D12_BARRIER_SYNC_EXECUTE_INDIRECT : D3D12_BARRIER_SYNC_NONE;
+		barriers[0].SyncAfter = D3D12_BARRIER_SYNC_COPY;
+		barriers[0].AccessBefore = chunk.accessed ? D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT : D3D12_BARRIER_ACCESS_NO_ACCESS;
+		barriers[0].AccessAfter = D3D12_BARRIER_ACCESS_COPY_DEST;
+		barriers[0].pResource = arguments->resource;
+		barriers[0].Offset = 0;
+		barriers[0].Size = UINT64_MAX;
+		barriers[1].SyncBefore = D3D12_BARRIER_SYNC_EXECUTE_INDIRECT;
+		barriers[1].SyncAfter = D3D12_BARRIER_SYNC_COPY;
+		barriers[1].AccessBefore = D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+		barriers[1].AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+		barriers[1].pResource = launch_buffer->resource;
+		barriers[1].Offset = 0;
+		barriers[1].Size = UINT64_MAX;
+		D3D12_BARRIER_GROUP group = {};
+		group.Type = D3D12_BARRIER_TYPE_BUFFER;
+		group.NumBarriers = 2;
+		group.pBufferBarriers = barriers;
+		cmd_buf_info->cmd_list_7->Barrier(1, &group);
+	} else {
+		_shader_binding_tables_transition(cmd_buf_info, p_raygen_sbt, p_miss_sbt, p_hit_sbt);
+		_resource_transition_batch(cmd_buf_info, arguments, 0, 1, D3D12_RESOURCE_STATE_COPY_DEST);
+		_resource_transition_batch(cmd_buf_info, launch_buffer, 0, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+
+	cmd_buf_info->cmd_list->CopyBufferRegion(arguments->resource, slot, upload->resource, slot, launch_size_offset);
+	cmd_buf_info->cmd_list->CopyBufferRegion(arguments->resource, slot + launch_size_offset, launch_buffer->resource, p_offset, RDRTPipeline::INDIRECT_COMMAND_SIZE);
+
+	if (barrier_capabilities.enhanced_barriers_supported) {
+		D3D12_BUFFER_BARRIER barriers[2] = {};
+		barriers[0].SyncBefore = D3D12_BARRIER_SYNC_COPY;
+		barriers[0].SyncAfter = D3D12_BARRIER_SYNC_EXECUTE_INDIRECT;
+		barriers[0].AccessBefore = D3D12_BARRIER_ACCESS_COPY_DEST;
+		barriers[0].AccessAfter = D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+		barriers[0].pResource = arguments->resource;
+		barriers[0].Offset = 0;
+		barriers[0].Size = UINT64_MAX;
+		// Back to what the render graph made it.
+		barriers[1].SyncBefore = D3D12_BARRIER_SYNC_COPY;
+		barriers[1].SyncAfter = D3D12_BARRIER_SYNC_EXECUTE_INDIRECT;
+		barriers[1].AccessBefore = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+		barriers[1].AccessAfter = D3D12_BARRIER_ACCESS_INDIRECT_ARGUMENT;
+		barriers[1].pResource = launch_buffer->resource;
+		barriers[1].Offset = 0;
+		barriers[1].Size = UINT64_MAX;
+		D3D12_BARRIER_GROUP group = {};
+		group.Type = D3D12_BARRIER_TYPE_BUFFER;
+		group.NumBarriers = 2;
+		group.pBufferBarriers = barriers;
+		cmd_buf_info->cmd_list_7->Barrier(1, &group);
+	} else {
+		_resource_transition_batch(cmd_buf_info, arguments, 0, 1, D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+	chunk.accessed = true;
+
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, 1, arguments->resource, slot, nullptr, 0);
 }
 
 /*****************/
@@ -6873,6 +7428,9 @@ uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 			return has_feature(SUPPORTS_BINDLESS) ? RenderingShaderContainerD3D12::BINDLESS_RESOURCE_RANGE_SIZE : 0;
 		case LIMIT_MAX_BINDLESS_SAMPLERS:
 			return has_feature(SUPPORTS_BINDLESS) ? RenderingShaderContainerD3D12::BINDLESS_SAMPLER_RANGE_SIZE : 0;
+		// GodotNext: d3d12_rt_pipelines (#121). No shader execution reordering on D3D12.
+		case LIMIT_RAYTRACING_REORDER_EXTENSIONS:
+			return 0;
 		case LIMIT_MAX_BOUND_UNIFORM_SETS:
 			return safe_unbounded;
 		case LIMIT_MAX_TEXTURE_ARRAY_LAYERS:
@@ -6952,6 +7510,13 @@ uint64_t RenderingDeviceDriverD3D12::api_trait_get(ApiTrait p_trait) {
 			return D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS:
 			return true;
+		// GodotNext: d3d12_rt_pipelines (#121). Shader identifiers, record and table alignments.
+		case API_TRAIT_SHADER_GROUP_HANDLE_SIZE:
+			return D3D12_SHADER_IDENTIFIER_SIZE_IN_BYTES;
+		case API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT:
+			return D3D12_RAYTRACING_SHADER_RECORD_BYTE_ALIGNMENT;
+		case API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT:
+			return D3D12_RAYTRACING_SHADER_TABLE_BYTE_ALIGNMENT;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}
@@ -6996,6 +7561,14 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return ray_query_caps.ray_query;
 		case SUPPORTS_RAY_QUERY_HARDWARE:
 			return ray_query_caps.ray_query && ray_query_caps.hardware;
+		// GodotNext: d3d12_rt_pipelines (#121). No shader execution reordering: DXIL's HitObject (shader model 6.9) is
+		// not in the Mesa NIR library (plan §21.1).
+		case SUPPORTS_RAYTRACING_PIPELINE:
+			return raytracing_pipeline_caps.pipeline;
+		case SUPPORTS_RAYTRACING_PIPELINE_LIBRARY:
+			return raytracing_pipeline_caps.library;
+		case SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT:
+			return raytracing_pipeline_caps.trace_rays_indirect;
 		// GodotNext: rd_indirect_count (#177). ExecuteIndirect takes a count buffer. firstInstance reaches
 		// gl_InstanceIndex only through SV_StartInstanceLocation, in shaders compiled with base_instance_native.
 		case SUPPORTS_DRAW_INDIRECT_COUNT:
@@ -7491,6 +8064,11 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		const bool uma = SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1, &architecture, sizeof(architecture))) && architecture.UMA;
 
 		ray_query_caps = d3d12_ray_query_caps(effective_tier, (uint32_t)shader_capabilities.shader_model, RenderingShaderContainerD3D12::is_raytracing_supported(), adapter_vendor_id, adapter_device_id, uma);
+		// GodotNext: d3d12_rt_pipelines (#121)
+		if (ray_query_caps.ray_query) {
+			device->QueryInterface(device_7.GetAddressOf());
+		}
+		raytracing_pipeline_caps = d3d12_raytracing_pipeline_caps(ray_query_caps.ray_query, device_7 != nullptr);
 		acceleration_structure_limits = AccelerationStructureLimits();
 		if (ray_query_caps.ray_query) {
 			acceleration_structure_limits.max_instances = D3D12_RAYTRACING_MAX_INSTANCES_PER_TOP_LEVEL_ACCELERATION_STRUCTURE;
@@ -7504,6 +8082,8 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		print_verbose("- D3D12 driver version key: " + get_driver_version_key());
 		if (ray_query_caps.ray_query) {
 			print_verbose(vformat("- D3D12 ray query (DXR 1.1) supported, hardware %s (%s; raytracing tier %s, vendor 0x%04X device 0x%04X, UMA %s)", ray_query_caps.hardware ? "yes" : "no", ray_query_caps.hardware_note, tier_name, adapter_vendor_id, adapter_device_id, uma ? "yes" : "no"));
+			// GodotNext: d3d12_rt_pipelines (#121)
+			print_verbose(vformat("- D3D12 RT pipelines: %s, pipeline libraries: %s, indirect trace: %s", raytracing_pipeline_caps.pipeline ? "yes" : "no", raytracing_pipeline_caps.library ? "yes" : "no (no ID3D12Device7)", raytracing_pipeline_caps.trace_rays_indirect ? "yes" : "no"));
 		} else {
 			print_verbose(vformat("- D3D12 ray query (DXR 1.1) not supported: needs %s (raytracing tier %s, shader model %s)", ray_query_caps.missing, tier_name, D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model)));
 		}
@@ -7693,6 +8273,9 @@ static uint32_t indirect_argument_size(D3D12_INDIRECT_ARGUMENT_TYPE p_type) {
 		// GodotNext: rd_mesh_shaders (#178). Made on first use only: a device without mesh shaders cannot create it.
 		case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH:
 			return sizeof(D3D12_DISPATCH_MESH_ARGUMENTS);
+		// GodotNext: d3d12_rt_pipelines (#121)
+		case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_RAYS:
+			return sizeof(D3D12_DISPATCH_RAYS_DESC);
 		default:
 			return 0;
 	}

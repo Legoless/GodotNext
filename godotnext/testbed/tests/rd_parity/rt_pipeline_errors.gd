@@ -9,7 +9,10 @@ extends Node
 ## Each check makes one call that RenderingDevice must refuse with one named error, before the driver works:
 ## a library given a hit shader binding table or bound to a list, the indirect trace buffer rules, a launch-size
 ## buffer that the raytracing list also reads from a uniform set or through a bindless table that has not read it
-## since it was last written, each link rule, and a library whose payload is over 64 bytes. A logger captures the errors: each check passes only
+## since it was last written, each link rule, and a library whose payload is over 64 bytes. On the d3d12 driver also
+## what Direct3D 12 refuses while Vulkan has no such rule (#121): a hit group whose any-hit and closest-hit shaders
+## declare different ray payloads, a miss shader that reads a shader record, and a hit shader that reads a record over
+## 32 bytes; a pipeline made after those refusals shows the device still works. A logger captures the errors: each check passes only
 ## when its call fails and prints exactly one error with the expected text, and the run fails if anything
 ## else prints an error. A library of the 16-byte payload shader and a link of a matching library are the
 ## controls: they print nothing. Because the errors are printed on purpose, "expected_errors" in the result lists
@@ -69,6 +72,60 @@ layout(location = 0) rayPayloadInEXT Payload payload;
 
 void main() {
 	payload.data[4] = uvec4(uint(gl_PrimitiveID));
+}
+"""
+
+
+# An any-hit shader that uses a 4-byte payload, which SMALL_HIT's 16-byte one does not match (#121).
+const MISMATCHED_PAYLOAD_ANY_HIT := """#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(location = 0) rayPayloadInEXT uint payload;
+hitAttributeEXT vec2 barycentrics;
+
+void main() {
+	payload = uint(gl_PrimitiveID);
+	if (barycentrics.x > 2.0) {
+		ignoreIntersectionEXT;
+	}
+}
+"""
+
+# A ray generation and a miss shader whose miss stage reads a shader record, which Direct3D 12 gives only hit groups (#121).
+const RECORD_MISS_RAYGEN := """#version 460
+#extension GL_EXT_ray_tracing : require
+
+void main() {
+}
+"""
+
+const RECORD_MISS := """#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+layout(shaderRecordEXT, std430) buffer MissRecord {
+	uint value;
+	uint pad;
+}
+record;
+
+void main() {
+	payload = uvec4(record.value);
+}
+"""
+
+# A closest-hit shader that reads a 48-byte shader record, over the 32 bytes a record holds (#121).
+const LARGE_RECORD_HIT := """#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+layout(shaderRecordEXT, std430) buffer LargeRecord {
+	uvec4 data[3];
+}
+record;
+
+void main() {
+	payload = record.data[2];
 }
 """
 
@@ -265,6 +322,27 @@ func _run_checks(rd: RenderingDevice) -> void:
 	var large_group := RDHitGroup.new()
 	large_group.closest_hit_shader = _base._pipeline_shader(large_hit)
 	_expect("library_payload", "80-byte ray payload in its closest-hit stage", func() -> bool: return not rd.raytracing_pipeline_create([], [], [large_group], 1, library).is_valid())
+
+	# Direct3D 12 passes one ray payload to a hit group's any-hit and closest-hit shaders and leaves the behavior
+	# undefined when they declare different ones, and it gives shader records (at most 32 bytes of local root arguments)
+	# to hit groups only, so it refuses those pipelines before the driver creates anything (#121).
+	if RenderingServer.get_current_rendering_driver_name() == "d3d12":
+		var mismatched_any_hit := _base._create_shader(rd, { "any_hit": MISMATCHED_PAYLOAD_ANY_HIT }, "rt mismatched payload any-hit")
+		var record_miss := _base._create_shader(rd, { "raygen": RECORD_MISS_RAYGEN, "miss": RECORD_MISS }, "rt record miss")
+		var large_record_hit := _base._create_shader(rd, { "closest_hit": LARGE_RECORD_HIT }, "rt large record hit")
+		_base._check(mismatched_any_hit.is_valid() and record_miss.is_valid() and large_record_hit.is_valid() and _log.take().is_empty(), "the any-hit shader with a 4-byte payload, the miss shader with a record and the hit shader with a 48-byte record are created")
+		if mismatched_any_hit.is_valid() and record_miss.is_valid() and large_record_hit.is_valid():
+			var mismatched_group := RDHitGroup.new()
+			mismatched_group.closest_hit_shader = _base._pipeline_shader(small_hit)
+			mismatched_group.any_hit_shader = _base._pipeline_shader(mismatched_any_hit)
+			_expect("payload_mismatch", "passes both the same ray payload", func() -> bool: return not rd.raytracing_pipeline_create([launch_stage], [launch_stage], [mismatched_group], 1).is_valid())
+			var record_miss_stage: RDPipelineShader = _base._pipeline_shader(record_miss)
+			_expect("record_in_miss", "A miss shader reads a shader record (shaderRecordEXT); only hit groups carry records", func() -> bool: return not rd.raytracing_pipeline_create([record_miss_stage], [record_miss_stage], [small_group], 1).is_valid())
+			var large_record_group := RDHitGroup.new()
+			large_record_group.closest_hit_shader = _base._pipeline_shader(large_record_hit)
+			_expect("record_too_large", "A closest-hit shader reads a 48-byte shader record (shaderRecordEXT); a record holds at most 32 bytes", func() -> bool: return not rd.raytracing_pipeline_create([launch_stage], [launch_stage], [large_record_group], 1).is_valid())
+			var after := _keep(rd.raytracing_pipeline_create([launch_stage], [launch_stage], [small_group], 1))
+			_base._check(after.is_valid() and _log.take().is_empty(), "a pipeline is created after the payload and record refusals")
 
 
 # Runs p_call, which returns true when its call failed as it should, and checks that it printed exactly one

@@ -34,10 +34,11 @@ TEST_FORCE_LINK(test_rendering_shader_container)
 
 // GodotNext: dxil_toolchain (#123). The shader container's has_ray_query, beside #175's int64_atomics (version 4;
 // version 5 appended #179's raytracing_reorder, version 6 #178's workgroup sizes) and, on Windows, the D3D12
-// container (FORMAT_VERSION 2, shader models, the ray-tracing gate on the Mesa NIR library, the debug-only DXIL
-// validator and the DXIL operations that read the instance values). Most SPIR-V modules are assembled by hand; the
-// GLSL cases compile their shaders with the glslang module. No case needs a GPU. With the GodotNext Mesa NIR library,
-// the instance-value case disassembles DXIL with dxil.dll and dxcompiler.dll from the installed Windows SDK.
+// container (FORMAT_VERSION 4, shader models, the ray-tracing gate on the Mesa NIR library, the debug-only DXIL
+// validator and the DXIL operations that read the instance values, and #121's ray-tracing stage data, shader
+// records, stand-ins and unused-resource removal). Most SPIR-V modules are assembled by hand; the GLSL cases compile
+// their shaders with the glslang module. No case needs a GPU. With the GodotNext Mesa NIR library, the instance-value
+// case disassembles DXIL with dxil.dll and dxcompiler.dll from the installed Windows SDK.
 // GodotNext: dxil_atomics (#279). Containers of another format or format version are not current, the D3D12 format
 // version follows whether the Mesa NIR library declares atomics without readnone, and the atomic-declaration case
 // disassembles DXIL the same way to check how the linked library declares the DXIL atomic operations (without
@@ -875,17 +876,18 @@ bool mesa_label_declares_atomics_without_readnone(const String &p_label) {
 }
 
 TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader models and the ray-tracing gate") {
-	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION == 2);
-	// GodotNext: dxil_atomics (#279). The format version follows the library: 3 when it declares atomics without
-	// readnone (25.3.1-gn3 or later), else 2.
-	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE == 3);
+	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION == 4);
+	// GodotNext: dxil_atomics (#279). The format version follows the library: 5 when it declares atomics without
+	// readnone (25.3.1-gn3 or later), else 4 (3 and 2 before #121's ray-tracing stage data).
+	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE == 5);
+	CHECK(RenderingShaderContainerD3D12::RAYTRACING_STAGE_DATA_FORMAT_VERSION == 4);
 	CHECK(mesa_label_declares_atomics_without_readnone("25.3.1-gn3"));
 	CHECK(mesa_label_declares_atomics_without_readnone("25.4.0-gn1"));
 	CHECK_FALSE(mesa_label_declares_atomics_without_readnone("25.3.1-gn2"));
 	CHECK_FALSE(mesa_label_declares_atomics_without_readnone(""));
 	const bool atomics_without_readnone = RenderingShaderContainerD3D12::declares_atomics_without_readnone();
 	CHECK(atomics_without_readnone == mesa_label_declares_atomics_without_readnone(RenderingShaderContainerD3D12::get_mesa_label()));
-	const uint32_t format_version = atomics_without_readnone ? 3 : 2;
+	const uint32_t format_version = atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : RenderingShaderContainerD3D12::FORMAT_VERSION;
 
 	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
 	REQUIRE(lib_d3d12 != nullptr);
@@ -910,14 +912,32 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader mod
 	{
 		Ref<RenderingShaderContainer> loaded = format.create_container();
 		CHECK(loaded->from_bytes(bytes));
+		CHECK(Object::cast_to<RenderingShaderContainerD3D12>(loaded.ptr())->get_shader_reflection_d3d12().has_raytracing_stage_data);
+	}
+	// GodotNext: d3d12_rt_pipelines (#121). Format versions 4 and 5 end with the ray-tracing stage data. Containers of
+	// format versions 2 and 3 (version 2's layout, from a build before #121 with an older library or with 25.3.1-gn3)
+	// still load without it, and say they have none, so ray-tracing pipelines refuse their stages.
+	const uint32_t old_layout_format_versions[] = { 2, 3 };
+	for (const uint32_t old_format_version : old_layout_format_versions) {
+		constexpr int64_t raytracing_stage_data_size = sizeof(RenderingShaderContainerD3D12::RaytracingStageDataD3D12) * RenderingShaderContainerD3D12::RAYTRACING_STAGE_COUNT;
+		PackedByteArray old_layout = bytes;
+		old_layout.resize(bytes.size() - raytracing_stage_data_size);
+		write_u32(old_layout, HEADER_FORMAT_VERSION_OFFSET, old_format_version);
+		CHECK_FALSE(plain->is_container_current(old_layout));
+		ErrorCapture capture;
+		Ref<RenderingShaderContainer> loaded = format.create_container();
+		CHECK(loaded->from_bytes(old_layout));
+		CHECK(capture.count == 0);
+		CHECK_FALSE(Object::cast_to<RenderingShaderContainerD3D12>(loaded.ptr())->get_shader_reflection_d3d12().has_raytracing_stage_data);
 	}
 	{
 		// A container the other kind of library wrote is not current, so shader caches rebuild it.
+		const uint32_t other_format_version = atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION : RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE;
 		PackedByteArray other = bytes;
-		write_u32(other, HEADER_FORMAT_VERSION_OFFSET, 5 - format_version);
+		write_u32(other, HEADER_FORMAT_VERSION_OFFSET, other_format_version);
 		uint32_t found = 0;
 		CHECK_FALSE(plain->is_container_current(other, nullptr, &found));
-		CHECK(found == 5 - format_version);
+		CHECK(found == other_format_version);
 	}
 	const uint32_t stale_versions[] = { 2, 3, 4, 5 };
 	for (const uint32_t stale_version : stale_versions) {
@@ -1656,6 +1676,278 @@ TEST_CASE("[ShaderContainer][D3D12] GLSL ray query in a pixel shader compiles to
 		// The shader baker skips them instead of failing the export.
 		CHECK_FALSE(format.supports_acceleration_structures());
 	}
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). The stages of godotnext/testbed/tests/rd_parity/rt_pipeline.gd: a ray generation
+// and a miss shader that declare (but do not all use) storage buffers, an acceleration structure, a bindless texture
+// table and push constants; an any-hit shader without a ray payload; hit shaders that read a shader record; and a
+// closest-hit shader without hit attributes. Then miss shaders without a payload beside ray generation shaders that
+// trace one payload type and two.
+const char *RT_COMMON_GLSL = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, std430) restrict readonly buffer Rays {
+	vec4 data[];
+}
+rays;
+layout(set = 0, binding = 2, std430) restrict writeonly buffer Results {
+	uvec4 data[];
+}
+results;
+layout(set = 1, binding = 0) uniform texture2D alpha_textures[];
+layout(push_constant, std430) uniform Params {
+	uint width;
+	uint height;
+	uint pad0;
+	uint pad1;
+}
+params;
+uint alpha_at(uint slot, vec2 bary) {
+	uvec2 texel = min(uvec2(bary * 16.0), uvec2(15u));
+	return uint(texelFetch(alpha_textures[nonuniformEXT(slot)], ivec2(texel), 0).a * 255.0 + 0.5);
+}
+)";
+
+const char *RT_RAYGEN_GLSL = R"(
+layout(location = 0) rayPayloadEXT uvec4 payload;
+void main() {
+	uint index = gl_LaunchIDEXT.y * gl_LaunchSizeEXT.x + gl_LaunchIDEXT.x;
+	traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 1, 0, rays.data[index * 2u].xyz, 0.0, rays.data[index * 2u + 1u].xyz, 100.0, 0);
+	results.data[index] = payload;
+}
+)";
+
+const char *RT_MISS_GLSL = R"(
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+void main() {
+	payload = uvec4(0xFFFFFFFFu);
+}
+)";
+
+const char *RT_RECORD_GLSL = R"(
+layout(shaderRecordEXT, std430) buffer HitRecord {
+	uint material;
+	uint slot;
+}
+record;
+hitAttributeEXT vec2 bary;
+)";
+
+const char *RT_ANY_HIT_GLSL = R"(
+layout(constant_id = 0) const uint ALPHA_CUTOFF = 128u;
+void main() {
+	if (alpha_at(record.slot, bary) < ALPHA_CUTOFF) {
+		ignoreIntersectionEXT;
+	}
+}
+)";
+
+const char *RT_CLOSEST_HIT_GLSL = R"(
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+void main() {
+	payload = uvec4(uint(gl_InstanceID), uint(gl_PrimitiveID), floatBitsToUint(gl_HitTEXT), record.material | (alpha_at(record.slot, bary) << 24u));
+}
+)";
+
+const char *RT_CLOSEST_HIT_WITHOUT_ATTRIBUTES_GLSL = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+void main() {
+	payload = uvec4(uint(gl_PrimitiveID));
+}
+)";
+
+// A miss stage that uses no payload (a shadow miss that leaves the value the ray generation stage set): beside
+// RT_RAYGEN_GLSL, which traces one 16-byte payload type, its stand-in is that type.
+const char *RT_MISS_WITHOUT_PAYLOAD_GLSL = R"(
+void main() {
+}
+)";
+
+// A ray generation stage that traces two payload types, so a miss stage beside it that uses no payload gets the
+// 4-byte uint stand-in.
+const char *RT_RAYGEN_TWO_PAYLOADS_GLSL = R"(
+layout(location = 0) rayPayloadEXT uvec4 payload;
+layout(location = 1) rayPayloadEXT float shadow;
+void main() {
+	uint index = gl_LaunchIDEXT.y * gl_LaunchSizeEXT.x + gl_LaunchIDEXT.x;
+	traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 1, 0, rays.data[index * 2u].xyz, 0.0, rays.data[index * 2u + 1u].xyz, 100.0, 0);
+	traceRayEXT(tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 1, 0, rays.data[index * 2u].xyz, 0.0, rays.data[index * 2u + 1u].xyz, 100.0, 1);
+	results.data[index] = payload + uvec4(floatBitsToUint(shadow));
+}
+)";
+
+// The ray-tracing data of one stage of a container.
+RenderingShaderContainerD3D12::RaytracingStageDataD3D12 raytracing_stage_data(const Ref<RenderingShaderContainer> &p_container, RDC::ShaderStage p_stage) {
+	const RenderingShaderContainerD3D12 *container = Object::cast_to<RenderingShaderContainerD3D12>(p_container.ptr());
+	if (container == nullptr) {
+		return RenderingShaderContainerD3D12::RaytracingStageDataD3D12();
+	}
+	return container->get_shader_reflection_d3d12().raytracing_stages[p_stage - RDC::SHADER_STAGE_RAYGEN];
+}
+
+// The DXIL of one stage of a container, or an empty blob.
+Vector<uint8_t> stage_code(const Ref<RenderingShaderContainer> &p_container, RDC::ShaderStage p_stage) {
+	for (int i = 0; i < p_container->shaders.size(); i++) {
+		if (p_container->shaders[i].shader_stage == p_stage) {
+			return decompressed_code(p_container, i);
+		}
+	}
+	return Vector<uint8_t>();
+}
+
+// Run it with GODOT_D3D12_DXIL_VALIDATE=1 set, and every blob also goes through the DXIL validator: the miss stage, which
+// declares the ray generation stage's storage buffers but uses none, failed it before #121 ("Internal declaration ...
+// is unused.").
+TEST_CASE("[ShaderContainer][D3D12] RT pipeline stages: shader records, payload and attribute stand-ins, and no unused resources") {
+	// Ray generation through intersection have ray-tracing stage data; no other stage has, also none after them.
+	CHECK(RenderingShaderContainerD3D12::is_raytracing_stage(RDC::SHADER_STAGE_RAYGEN));
+	CHECK(RenderingShaderContainerD3D12::is_raytracing_stage(RDC::SHADER_STAGE_INTERSECTION));
+	CHECK_FALSE(RenderingShaderContainerD3D12::is_raytracing_stage(RDC::SHADER_STAGE_COMPUTE));
+	CHECK_FALSE(RenderingShaderContainerD3D12::is_raytracing_stage(RDC::SHADER_STAGE_INTERSECTION + 1));
+
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+
+	const String common = RT_COMMON_GLSL;
+	Vector<RDC::ShaderStageSPIRVData> raygen_stages;
+	raygen_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_RAYGEN, (common + RT_RAYGEN_GLSL).utf8().get_data()));
+	raygen_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_MISS, (common + RT_MISS_GLSL).utf8().get_data()));
+	Vector<RDC::ShaderStageSPIRVData> hit_stages;
+	hit_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_ANY_HIT, (common + RT_RECORD_GLSL + RT_ANY_HIT_GLSL).utf8().get_data()));
+	hit_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_CLOSEST_HIT, (common + RT_RECORD_GLSL + RT_CLOSEST_HIT_GLSL).utf8().get_data()));
+	Vector<RDC::ShaderStageSPIRVData> small_hit_stages;
+	small_hit_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_CLOSEST_HIT, RT_CLOSEST_HIT_WITHOUT_ATTRIBUTES_GLSL));
+	Vector<RDC::ShaderStageSPIRVData> shadow_miss_stages;
+	shadow_miss_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_RAYGEN, (common + RT_RAYGEN_GLSL).utf8().get_data()));
+	shadow_miss_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_MISS, (common + RT_MISS_WITHOUT_PAYLOAD_GLSL).utf8().get_data()));
+	Vector<RDC::ShaderStageSPIRVData> two_payloads_stages;
+	two_payloads_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_RAYGEN, (common + RT_RAYGEN_TWO_PAYLOADS_GLSL).utf8().get_data()));
+	two_payloads_stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_MISS, (common + RT_MISS_WITHOUT_PAYLOAD_GLSL).utf8().get_data()));
+	for (const Vector<RDC::ShaderStageSPIRVData> &stages : { raygen_stages, hit_stages, small_hit_stages, shadow_miss_stages, two_payloads_stages }) {
+		for (const RDC::ShaderStageSPIRVData &stage : stages) {
+			REQUIRE_FALSE(stage.spirv.is_empty());
+		}
+	}
+
+	const DXILValidationStats validation_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+	Ref<RenderingShaderContainer> raygen = format.create_container();
+	Ref<RenderingShaderContainer> hit = format.create_container();
+	Ref<RenderingShaderContainer> small_hit = format.create_container();
+	Ref<RenderingShaderContainer> shadow_miss = format.create_container();
+	Ref<RenderingShaderContainer> two_payloads = format.create_container();
+	struct ContainerStages {
+		Ref<RenderingShaderContainer> container;
+		const char *name = nullptr;
+		const Vector<RDC::ShaderStageSPIRVData> *stages = nullptr;
+	};
+	const ContainerStages containers[] = {
+		{ raygen, "rt raygen", &raygen_stages },
+		{ hit, "rt hit", &hit_stages },
+		{ small_hit, "rt small hit", &small_hit_stages },
+		{ shadow_miss, "rt shadow miss", &shadow_miss_stages },
+		{ two_payloads, "rt two payloads", &two_payloads_stages },
+	};
+	if (!RenderingShaderContainerD3D12::is_raytracing_supported()) {
+		// The upstream library refuses ray-tracing stages, with one message each.
+		for (const ContainerStages &entry : containers) {
+			ErrorCapture capture;
+			CHECK_FALSE(entry.container->set_code_from_spirv(entry.name, *entry.stages));
+			CHECK(capture.count == 1);
+		}
+		check_dxil_validation(validation_before, 0);
+		return;
+	}
+
+	{
+		// Before #121 the any-hit stage (no payload), the hit stages (a shader record), the closest-hit stage without
+		// hit attributes and the miss stages without a payload failed to translate.
+		ErrorCapture capture;
+		for (const ContainerStages &entry : containers) {
+			REQUIRE_MESSAGE(entry.container->set_code_from_spirv(entry.name, *entry.stages), entry.name);
+		}
+		CHECK_MESSAGE(capture.count == 0, capture.first_message);
+	}
+	using StageData = RenderingShaderContainerD3D12::RaytracingStageDataD3D12;
+	constexpr uint32_t PRESENT = RenderingShaderContainerD3D12::RAYTRACING_STAGE_PRESENT;
+	constexpr uint32_t PAYLOAD = RenderingShaderContainerD3D12::RAYTRACING_STAGE_PAYLOAD_DECLARED;
+	constexpr uint32_t ATTRIBUTES = RenderingShaderContainerD3D12::RAYTRACING_STAGE_ATTRIBUTES_DECLARED;
+
+	// The ray generation stage passes a 16-byte payload; the miss stage takes it. Neither reads a record.
+	const StageData raygen_data = raytracing_stage_data(raygen, RDC::SHADER_STAGE_RAYGEN);
+	CHECK(raygen_data.flags == PRESENT);
+	CHECK(raygen_data.payload_size == 16);
+	CHECK(raygen_data.spirv_payload_size == 16);
+	CHECK(raygen_data.incoming_payload_size == 0);
+	CHECK(raygen_data.record_size == 0);
+	const StageData miss_data = raytracing_stage_data(raygen, RDC::SHADER_STAGE_MISS);
+	CHECK(miss_data.flags == (PRESENT | PAYLOAD));
+	CHECK(miss_data.incoming_payload_size == 16);
+	CHECK(miss_data.record_size == 0);
+
+	// The any-hit stage declares no payload: it gets the closest-hit stage's 16-byte type. Both read the 8-byte record,
+	// a 16-byte constant buffer row, and declare the triangle's two-float attributes.
+	const StageData any_hit_data = raytracing_stage_data(hit, RDC::SHADER_STAGE_ANY_HIT);
+	CHECK(any_hit_data.flags == (PRESENT | ATTRIBUTES));
+	CHECK(any_hit_data.incoming_payload_size == 16);
+	CHECK(any_hit_data.attribute_size == 8);
+	CHECK(any_hit_data.record_size == 16);
+	const StageData closest_hit_data = raytracing_stage_data(hit, RDC::SHADER_STAGE_CLOSEST_HIT);
+	CHECK(closest_hit_data.flags == (PRESENT | PAYLOAD | ATTRIBUTES));
+	CHECK(closest_hit_data.incoming_payload_size == 16);
+	CHECK(closest_hit_data.attribute_size == 8);
+	CHECK(closest_hit_data.record_size == 16);
+
+	// A closest-hit stage without hit attributes gets the barycentrics' two floats.
+	const StageData small_hit_data = raytracing_stage_data(small_hit, RDC::SHADER_STAGE_CLOSEST_HIT);
+	CHECK(small_hit_data.flags == (PRESENT | PAYLOAD));
+	CHECK(small_hit_data.attribute_size == 8);
+	CHECK(small_hit_data.record_size == 0);
+
+	// A miss stage without a payload beside a ray generation stage that traces one payload type gets that type; beside
+	// one that traces two, the uint.
+	const StageData shadow_miss_data = raytracing_stage_data(shadow_miss, RDC::SHADER_STAGE_MISS);
+	CHECK(shadow_miss_data.flags == PRESENT);
+	CHECK(shadow_miss_data.incoming_payload_size == 16);
+	CHECK(shadow_miss_data.payload_size == 16);
+	const StageData two_payloads_raygen_data = raytracing_stage_data(two_payloads, RDC::SHADER_STAGE_RAYGEN);
+	CHECK(two_payloads_raygen_data.payload_size == 16);
+	const StageData two_payloads_miss_data = raytracing_stage_data(two_payloads, RDC::SHADER_STAGE_MISS);
+	CHECK(two_payloads_miss_data.flags == PRESENT);
+	CHECK(two_payloads_miss_data.incoming_payload_size == 4);
+
+	// The data survives a round trip through bytes.
+	{
+		Ref<RenderingShaderContainer> loaded = format.create_container();
+		REQUIRE(loaded->from_bytes(hit->to_bytes()));
+		const StageData loaded_data = raytracing_stage_data(loaded, RDC::SHADER_STAGE_ANY_HIT);
+		CHECK(memcmp(&loaded_data, &any_hit_data, sizeof(StageData)) == 0);
+	}
+
+	// Three containers of a ray generation and a miss blob each, two hit blobs and one closest-hit blob.
+	check_dxil_validation(validation_before, 9);
+
+#ifdef DEBUG_ENABLED
+	// The record is the constant buffer of the local root signature (register 2 of the root constants' space 1), and the
+	// miss stage no longer declares the storage buffers it does not use (registers 100000 and 200000: set 0, bindings 1
+	// and 2), which the ray generation stage uses.
+	String error;
+	const String closest_hit_disassembly = RenderingShaderContainerD3D12::disassemble_dxil(stage_code(hit, RDC::SHADER_STAGE_CLOSEST_HIT), &error);
+	REQUIRE_MESSAGE(!closest_hit_disassembly.is_empty(), error);
+	CHECK_MESSAGE(closest_hit_disassembly.contains("cb2,space1"), closest_hit_disassembly);
+	const String miss_disassembly = RenderingShaderContainerD3D12::disassemble_dxil(stage_code(raygen, RDC::SHADER_STAGE_MISS), &error);
+	REQUIRE_MESSAGE(!miss_disassembly.is_empty(), error);
+	CHECK_FALSE_MESSAGE(miss_disassembly.contains("100000"), miss_disassembly);
+	CHECK_FALSE_MESSAGE(miss_disassembly.contains("200000"), miss_disassembly);
+	const String raygen_disassembly = RenderingShaderContainerD3D12::disassemble_dxil(stage_code(raygen, RDC::SHADER_STAGE_RAYGEN), &error);
+	REQUIRE_MESSAGE(!raygen_disassembly.is_empty(), error);
+	CHECK_MESSAGE(raygen_disassembly.contains("100000"), raygen_disassembly);
+	CHECK_MESSAGE(raygen_disassembly.contains("200000"), raygen_disassembly);
+#endif
 }
 #endif // MODULE_GLSLANG_ENABLED
 #endif // D3D12_ENABLED

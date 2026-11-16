@@ -22,6 +22,7 @@
 		</member>
 		<member name="record_data" type="PackedByteArray" setter="set_record_data" getter="get_record_data" default="PackedByteArray()">
 			Shader record for this hit group, at most 32 bytes. A hit shader binding table writes it after the hit group's handle, and the hit group's shaders read it through a [code]shaderRecordEXT[/code] buffer block, for example an index into a bindless table ([method RenderingDevice.bindless_table_create]). Empty for no record.
+			[b]Note:[/b] On Direct3D 12 the block is the root constants of a local root signature, so only hit shaders can read a record, and the block holds at most 32 bytes. A hit group whose shaders read a record that its [member record_data] does not fill reads zeros there, also when no hit group of the pipeline has a record.
 		</member>
 	</members>
 </class>

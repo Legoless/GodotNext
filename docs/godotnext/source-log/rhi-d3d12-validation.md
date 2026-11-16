@@ -181,11 +181,12 @@ every call stays. Nothing new was read for the engine side.
 
 What the engine does with it: `drivers/d3d12/SCsub` defines `NIR_ATOMICS_WITHOUT_READNONE` for
 labels 25.3.1-gn3 and later. Such a build writes D3D12 shader containers with format version 3
-instead of 2 (the layout is the same), and shader caches rebuild a container whose format version
+instead of 2 (the layout is the same; since #121, which adds the ray-tracing stage data, 5
+instead of 4), and shader caches rebuild a container whose format version
 is not the one the build writes, with one warning per run, so a build with 25.3.1-gn3 and one with
 an older library do not reuse each other's DXIL. Builds with 25.3.1-gn2 and the upstream library
-both still write format version 2 and reuse each other's caches, as before #279; a later library
-that changes DXIL again needs its own format version. With GPU-based validation on, it also logs `D3D12: GPU-based validation keeps atomics
+both still write the same format version (2, and 4 since #121) and reuse each other's caches,
+as before #279; a later library that changes DXIL again needs its own format version. With GPU-based validation on, it also logs `D3D12: GPU-based validation keeps atomics
 whose result is unused`, which the runner reads. The `[ShaderContainer][D3D12]` test that checks
 the declarations reads the `declare` and `attributes #N = { ... }` lines of the disassembly that
 `IDxcCompiler::Disassemble` returns, which is LLVM assembly, the same output #123's

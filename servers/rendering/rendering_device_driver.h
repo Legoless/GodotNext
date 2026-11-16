@@ -898,6 +898,22 @@ public:
 	virtual RaytracingPipelineID raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
 		ERR_FAIL_V_MSG(RaytracingPipelineID(), "Raytracing pipeline libraries are not implemented by this driver.");
 	}
+	// GodotNext: d3d12_rt_pipelines (#121). The same link as raytracing_pipeline_link(), when its base is p_base, a
+	// pipeline this driver linked from the first p_base_library_count entries of p_libraries: a driver that can grow an
+	// existing pipeline (Direct3D 12's AddToStateObject) adds only the libraries after them. The default links all of
+	// p_libraries again.
+	virtual RaytracingPipelineID raytracing_pipeline_link_add(RaytracingPipelineID p_base, uint32_t p_base_library_count, VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) {
+		return raytracing_pipeline_link(p_libraries, p_max_trace_recursion_depth, p_max_payload_size, p_layout_defining_shader);
+	}
+	// GodotNext: d3d12_rt_pipelines (#121). Rules of the driver's own that a pipeline or library of these shaders and hit
+	// groups breaks, as one error that RenderingDevice fails with before it creates anything (Direct3D 12: the stages of
+	// a hit group must declare the same ray payload and hit attributes). Empty when there are none, as by default.
+	virtual String raytracing_pipeline_get_create_error(VectorView<PipelineShader> p_shaders, VectorView<HitGroup> p_hit_groups) { return String(); }
+	// GodotNext: d3d12_rt_pipelines (#121). The bytes after each hit group's handle that the hit shaders of this pipeline
+	// or library read whatever record_data the hit groups carry (Direct3D 12: the local root arguments of their shader
+	// record). RenderingDevice makes every hit group's record at least this big, filled with zeros past its record_data.
+	// 0 by default.
+	virtual uint32_t raytracing_pipeline_get_hit_group_record_size(RaytracingPipelineID p_pipeline) { return 0; }
 
 	// ----- COMMANDS -----
 
@@ -1135,6 +1151,17 @@ public:
 	static constexpr uint32_t D3D12_BUFFER_DEVICE_ADDRESS_MIN_SHADER_MODEL = 0x66; // D3D_SHADER_MODEL_6_6.
 	static constexpr uint32_t D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE = 64; // D3D12_RAYTRACING_INSTANCE_DESC.
 	static D3D12RayQueryCaps d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id, bool p_integrated);
+	// GodotNext: d3d12_rt_pipelines (#121). Pure D3D12 RT pipeline capability check. RT pipelines need what ray query
+	// needs (p_ray_query: raytracing tier 1.1, the shader models and the Mesa NIR library, which compiles the
+	// ray-tracing stages too), the same floor as the plan's DXR 1.1 path. Tier 1.1 also brings ExecuteIndirect's
+	// DispatchRays (the indirect trace) and AddToStateObject; pipeline libraries (collections, linked with
+	// AddToStateObject) also need ID3D12Device7 (p_device_7).
+	struct D3D12RaytracingPipelineCaps {
+		bool pipeline = false;
+		bool library = false;
+		bool trace_rays_indirect = false;
+	};
+	static D3D12RaytracingPipelineCaps d3d12_raytracing_pipeline_caps(bool p_ray_query, bool p_device_7);
 	// The RD vertex formats a D3D12 triangle geometry accepts: DXR's tier 1.0 and 1.1 lists, as RD formats
 	// with the same memory layout. BGR-ordered RD formats the D3D12 driver maps onto a listed DXGI format
 	// (B8G8R8A8_SNORM, or A2R10G10B10_UNORM_PACK32 through an SRV swizzle a build never applies) are not

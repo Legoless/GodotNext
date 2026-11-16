@@ -9,7 +9,8 @@ Mesa NIR library that compiles ray query to DXIL (#123) is recorded in
 The D3D12 driver implements the same RenderingDevice acceleration-structure API as the
 Vulkan and Metal drivers in this repository, which are not outside sources. Godot PR
 #118654, which the issue names as the AS and ray-query half to port, was not an input:
-it was not read for this work.
+it was not read for this work. Its RT-pipeline half was read for the RT pipelines
+(#121); see that section.
 
 ## DXR 1.1 ray query (#118)
 
@@ -102,3 +103,85 @@ How it was used: the hardware flag comes from the adapter's PCI IDs, as on Vulka
 | Copied files | None; the header was already vendored |
 
 How it was used: the RT-core check needs to know whether an AMD adapter is an integrated GPU (lead decision 2026-11-16: AMD APUs take the software tier, as UE names only discrete AMD RX 6000 series or newer). The context driver's DXGI device type comes from `DedicatedVideoMemory`, which an APU's carve-out can make non-zero, so the D3D12 driver asks `CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE1)` for node 0 and passes `UMA` as the integrated flag (issue #283 names `ARCHITECTURE1`; for node 0 its `UMA` is the same field as in `D3D12_FEATURE_DATA_ARCHITECTURE`, and Windows 10 1703 is older than any DXR runtime). The PCI IDs of every current AMD APU are on the RT-core check's APU block as well (source log rhi-vulkan.md, #283).
+
+## RT pipelines (#121)
+
+### Godot pull request #118654, "Implement raytracing in D3D12 driver"
+
+| Field | Value |
+|---|---|
+| What | The RT-pipeline half of the draft: `raytracing_pipeline_create` as a `D3D12_STATE_OBJECT_TYPE_RAYTRACING_PIPELINE` with one DXIL library subobject per stage that exports `main` under a new name, one hit group subobject per hit group (triangles, or procedural with an intersection shader), one shader config with the largest payload and attribute sizes, one pipeline config, and the layout-defining shader's root signature as the global root signature; identifiers from `ID3D12StateObjectProperties::GetShaderIdentifier`; `SetPipelineState1` plus `SetComputeRootSignature` to bind; uniform sets bound as compute sets; `DispatchRays` with the three shader tables; shader identifier size and the table and record alignments as API traits. The description names the two open problems: payload and attribute definitions that differ between stages (undefined on D3D12, and GLSL allows stages that declare none), and unused resources in the DXIL libraries, which fail validation. |
+| Upstream | https://github.com/godotengine/godot/pull/118654 (draft by Skyth; its public diff and description) |
+| Version | The pull request as published on 2026-11-16 (last updated 2026-04-16) |
+| License | MIT (Godot Engine contributions). The approach was followed; the code here is written for this fork's driver. |
+| Read on | 2026-11-16, for issue #121, which names the pull request as the base of its RT-pipeline half |
+| Consulted by | The #121 implementer |
+| Used in | `drivers/d3d12/rendering_device_driver_d3d12.cpp` (`_raytracing_state_object_create`, `command_bind_raytracing_pipeline`, `command_bind_raytracing_uniform_set`, `command_trace_rays`, `api_trait_get`) |
+| Copied files | None |
+
+How it was used: the state object follows the pull request's layout. What the pull request lacks was
+added here: export names unique in the process (so collections combine), shader records through a local
+root signature, collections and `AddToStateObject` for libraries, the indirect trace, and both open
+problems. For the first, each stage without a payload or attributes gets a stand-in of the type another
+stage of its shader declares, and a pipeline whose hit group still mixes payload or attribute sizes fails
+with one error. For the second, the D3D12 shader container removes the resource variables a stage does
+not use before the DXIL is made (`RenderingShaderContainerD3D12::_remove_unused_resources`), while the
+root signature keeps every binding.
+
+### Mesa SPIR-V to DXIL, with the ray-tracing patch
+
+| Field | Value |
+|---|---|
+| What | How the translation the D3D12 shader container links treats the ray-tracing stages: each stage is its own DXIL library whose entry function exports `main` under a mangled name; any-hit and closest-hit entry functions take a ray payload and hit attributes and miss entry functions a payload, and translation fails when the stage has no such variable; the payload and attribute variables are wrapped in one struct each, and an incoming payload is SPIR-V `IncomingRayPayloadKHR` while outgoing ones are temporaries passed to `traceRayEXT`; a `ShaderRecordBufferKHR` block is not translated; uniform and storage buffers, root constants and acceleration structures are read through resource indices that name the set and binding (register), while textures and samplers are read through their variables; unused uniform-mode variables other than acceleration structures are removed, and unused buffer variables stay declared; a uniform buffer becomes a constant buffer of whole 16-byte rows. |
+| Upstream | Mesa `mesa-25.3.1` (https://gitlab.freedesktop.org/mesa/mesa) and the public ray-tracing commit `99b60c908aeff7fd342739d8c403a110e3bba1cb` of https://github.com/blueskythlikesclouds/mesa, as `docs/godotnext/clean-room.md` records them |
+| Version | As pinned in `docs/godotnext/clean-room.md` |
+| License | MIT (Mesa's). Read, not copied. |
+| Read on | 2026-11-16, for issue #121 |
+| Consulted by | The #121 implementer |
+| Used in | `drivers/d3d12/rendering_shader_container_d3d12.cpp` (`_add_raytracing_stand_ins`, `_remove_unused_resources`, `_remap_shader_record`, `_convert_spirv_to_nir`) and `servers/rendering/rendering_device_rt_pipeline.cpp` (`rewrite_spirv_shader_record_as_uniform_buffer`) |
+| Copied files | None |
+
+How it was used: the container hands Mesa a copy of each module whose shader record is a uniform buffer, then
+moves that buffer to the local root signature's register; gives a stage without a payload or attributes a
+variable of the type another stage declares before Mesa's passes run; and after them removes the resource
+variables that no resource index names and no instruction reads. The local root signature covers the
+record's constant buffer rounded to 16 bytes.
+
+### DirectX Raytracing (DXR) functional specification, RT pipelines
+
+| Field | Value |
+|---|---|
+| What | State objects and subobjects; collections and the configuration they need to compile alone; `D3D12_STATE_OBJECT_FLAG_ALLOW_STATE_OBJECT_ADDITIONS` on collections and on pipelines that `AddToStateObject` grows, which takes a self-contained addition whose shader exports are new and keeps the parent's shader identifiers valid; default and explicit subobject associations, and that a hit group's component shaders must share their local root signature; local root signatures (`D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE`, registers apart from the global root signature's, arguments right after the 32-byte identifier, root constants packed as DWORDs); the shader record stride (a multiple of 32 bytes, at least the largest record) and the 64-byte table start; `D3D12_EXPORT_DESC` renaming an export (`ExportToRename` may be unmangled); `D3D12_RAYTRACING_SHADER_CONFIG` (payload and attribute sizes, attributes at most 32 bytes) and that every collection's config must match; the payload rule (every shader a trace reaches must declare the trace's payload type, also when it does not use it); triangle hits' `BuiltInTriangleIntersectionAttributes` (two floats); `D3D12_DISPATCH_RAYS_DESC` and the `DISPATCH_RAYS` indirect argument, which holds the whole description. |
+| Upstream | https://microsoft.github.io/DirectX-Specs/d3d/Raytracing.html (source: the `d3d/Raytracing.md` file of the DirectX-Specs repository) |
+| Version | DirectX-Specs as published on 2026-11-16 |
+| License | Microsoft DirectX-Specs (CC-BY 4.0). Consulted, not copied. |
+| Read on | 2026-11-16, for issue #121 |
+| Consulted by | The #121 implementer |
+| Used in | `drivers/d3d12/rendering_device_driver_d3d12.cpp` (`_raytracing_state_object_create`, `raytracing_pipeline_link`, `raytracing_pipeline_link_add`, `_get_local_root_signature`, `raytracing_pipeline_get_create_error`, `raytracing_pipeline_get_hit_group_record_size`, `command_trace_rays_indirect`), `drivers/d3d12/rendering_shader_container_d3d12.cpp` (`_add_raytracing_stand_ins`), `servers/rendering/rendering_device_rt_pipeline.cpp` (`get_hit_group_interface_error`, `get_d3d12_stage_error`), `servers/rendering/rendering_device.cpp` (`raytracing_pipeline_create`) |
+| Copied files | None |
+
+How it was used: a library is a collection with its own configs and root signatures; a link is a
+pipeline of existing collections only, and a link onto a linked pipeline adds just the new collections
+with `AddToStateObject`. Every state object gives all its hit groups one local root signature, of the
+largest record its hit shaders read, so no component shader gets two. Because the local root arguments
+follow each identifier, the hit table's stride holds them also where no hit group has `record_data`
+(the driver reports their size, and RenderingDevice makes every record at least that big, with zeros).
+By the payload rule, a miss stage that uses no payload gets the one payload type its shader's ray
+generation stage traces, when no stage of the shader receives one. The indirect trace writes the
+shader-table part of a `D3D12_DISPATCH_RAYS_DESC` per trace and copies the launch size in after it.
+
+### Direct3D 12 tight placed-resource alignment specification
+
+| Field | Value |
+|---|---|
+| What | With `D3D12_RESOURCE_FLAG_USE_TIGHT_ALIGNMENT`, placed buffers may be aligned to as little as 8 bytes, while committed buffers keep a 4 KiB alignment. |
+| Upstream | https://microsoft.github.io/DirectX-Specs/d3d/D3D12TightPlacedResourceAlignment.html |
+| Version | DirectX-Specs as published on 2026-11-16 |
+| License | Microsoft DirectX-Specs (CC-BY 4.0). Consulted, not copied. |
+| Read on | 2026-11-16, for issue #121 |
+| Consulted by | The #121 implementer |
+| Used in | `drivers/d3d12/rendering_device_driver_d3d12.cpp` (`buffer_create`) |
+| Copied files | None |
+
+How it was used: shader binding table buffers are committed resources, so each table starts on the
+64-byte boundary DXR needs on devices with tight alignment too.

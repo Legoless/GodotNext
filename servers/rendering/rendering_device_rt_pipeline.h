@@ -146,4 +146,46 @@ enum IndirectStatus {
 IndirectStatus get_indirect_status(BitField<RDD::BufferUsageBits> p_usage, uint64_t p_offset, uint64_t p_buffer_size);
 const char *get_indirect_error(IndirectStatus p_status);
 
+// GodotNext: d3d12_rt_pipelines (#121). Direct3D 12 (plan §21.1 GD-4).
+
+// The name of a ray-tracing stage in errors ("ray generation", "any-hit", "closest-hit", "miss", "intersection").
+String get_stage_name(RDD::ShaderStage p_stage);
+
+// Direct3D 12 has no shader record buffer: a hit group's record reaches its shaders as the root constants of a local
+// root signature, which DXIL reads as a constant buffer. Mesa translates SPIR-V uniform buffers to constant buffers, so
+// the D3D12 shader container translates a copy of each module whose ShaderRecordBufferKHR block is a uniform buffer
+// (storage class Uniform) decorated with descriptor set p_set and binding p_binding. Returns true and fills
+// r_spirv with that copy when the module declares a shader record; returns false otherwise (and for anything that is not
+// a little-endian SPIR-V module).
+bool rewrite_spirv_shader_record_as_uniform_buffer(const uint32_t *p_spirv, uint64_t p_word_count, uint32_t p_set, uint32_t p_binding, Vector<uint32_t> &r_spirv);
+
+// What one ray-tracing stage's DXIL entry function takes on Direct3D 12: the payload parameter of an any-hit,
+// closest-hit or miss stage, and the attributes parameter of an any-hit or closest-hit stage (for an intersection
+// stage: the attributes it reports). DXIL needs both parameters even where the stage uses neither (a variable that the
+// stage declares but never uses is not in its SPIR-V entry point); the D3D12 shader container then gives the stage a
+// stand-in, and *_declared is false.
+struct StageInterface {
+	uint32_t payload_size = 0;
+	bool payload_declared = false;
+	uint32_t attribute_size = 0;
+	bool attributes_declared = false;
+};
+
+// The attributes of a triangle hit: its two barycentrics (D3D12 BuiltInTriangleIntersectionAttributes).
+static constexpr uint32_t TRIANGLE_ATTRIBUTE_SIZE = 8;
+
+// The error a Direct3D 12 RT pipeline fails with for its shader p_shader_index's stage p_stage, or an empty string. A
+// shader record reaches only hit groups (as their local root arguments), so a ray generation or miss stage must not read
+// one, and a hit stage's record (p_record_size bytes, 0 for none) holds at most MAX_HIT_GROUP_RECORD_SIZE bytes. A stage
+// from a D3D12 shader container of format version 3 or older (p_has_stage_data false) lacks the data these rules need.
+String get_d3d12_stage_error(uint32_t p_shader_index, RDD::ShaderStage p_stage, bool p_has_stage_data, uint32_t p_record_size);
+
+// One trace passes one payload to a hit group's any-hit and closest-hit shaders and one set of attributes to both, and
+// Direct3D 12 leaves the behavior undefined when their declarations differ. Returns the error a pipeline fails with
+// for hit group p_hit_group_index when they differ: the any-hit and closest-hit payload sizes, either stage's
+// attribute size against the attributes the intersection stage reports (when it reports any), or, in a triangle hit group
+// (no intersection stage), against the barycentrics' TRIANGLE_ATTRIBUTE_SIZE. Absent stages are null. Empty when the
+// hit group is consistent.
+String get_hit_group_interface_error(uint32_t p_hit_group_index, const StageInterface *p_any_hit, const StageInterface *p_closest_hit, const StageInterface *p_intersection);
+
 } // namespace RDRTPipeline

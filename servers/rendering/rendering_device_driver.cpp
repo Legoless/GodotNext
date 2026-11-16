@@ -139,6 +139,15 @@ RenderingDeviceDriver::D3D12RayQueryCaps RenderingDeviceDriver::d3d12_ray_query_
 	return caps;
 }
 
+// GodotNext: d3d12_rt_pipelines (#121)
+RenderingDeviceDriver::D3D12RaytracingPipelineCaps RenderingDeviceDriver::d3d12_raytracing_pipeline_caps(bool p_ray_query, bool p_device_7) {
+	D3D12RaytracingPipelineCaps caps;
+	caps.pipeline = p_ray_query;
+	caps.trace_rays_indirect = caps.pipeline;
+	caps.library = caps.pipeline && p_device_7;
+	return caps;
+}
+
 // GodotNext: d3d12_dxr (#118)
 bool RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(DataFormat p_format) {
 	switch (p_format) {

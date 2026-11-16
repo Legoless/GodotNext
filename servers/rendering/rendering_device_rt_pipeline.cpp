@@ -418,4 +418,164 @@ const char *get_indirect_error(IndirectStatus p_status) {
 	}
 }
 
+// GodotNext: d3d12_rt_pipelines (#121)
+
+String get_stage_name(RDD::ShaderStage p_stage) {
+	switch (p_stage) {
+		case RDD::SHADER_STAGE_RAYGEN:
+			return "ray generation";
+		case RDD::SHADER_STAGE_ANY_HIT:
+			return "any-hit";
+		case RDD::SHADER_STAGE_CLOSEST_HIT:
+			return "closest-hit";
+		case RDD::SHADER_STAGE_MISS:
+			return "miss";
+		case RDD::SHADER_STAGE_INTERSECTION:
+			return "intersection";
+		default:
+			return itos(p_stage);
+	}
+}
+
+bool rewrite_spirv_shader_record_as_uniform_buffer(const uint32_t *p_spirv, uint64_t p_word_count, uint32_t p_set, uint32_t p_binding, Vector<uint32_t> &r_spirv) {
+	r_spirv.clear();
+	const uint64_t header_words = 5;
+	if (p_spirv == nullptr || p_word_count < header_words || p_spirv[0] != SpvMagicNumber) {
+		return false;
+	}
+
+	// The record's variable, and where the annotations start: the first instruction after the debug section.
+	uint32_t record_id = 0;
+	uint64_t annotations_start = 0;
+	for (uint64_t i = header_words; i < p_word_count;) {
+		const uint32_t length = p_spirv[i] >> SpvWordCountShift;
+		if (length == 0 || i + length > p_word_count) {
+			return false;
+		}
+		switch (SpvOp(p_spirv[i] & SpvOpCodeMask)) {
+			case SpvOpNop:
+			case SpvOpSourceContinued:
+			case SpvOpSource:
+			case SpvOpSourceExtension:
+			case SpvOpName:
+			case SpvOpMemberName:
+			case SpvOpString:
+			case SpvOpLine:
+			case SpvOpNoLine:
+			case SpvOpModuleProcessed:
+			case SpvOpCapability:
+			case SpvOpExtension:
+			case SpvOpExtInstImport:
+			case SpvOpMemoryModel:
+			case SpvOpEntryPoint:
+			case SpvOpExecutionMode:
+			case SpvOpExecutionModeId:
+				break;
+			case SpvOpVariable:
+				if (annotations_start == 0) {
+					annotations_start = i;
+				}
+				if (length >= 4 && p_spirv[i + 3] == SpvStorageClassShaderRecordBufferKHR) {
+					// GLSL allows one shaderRecordEXT block per stage.
+					if (record_id != 0) {
+						return false;
+					}
+					record_id = p_spirv[i + 2];
+				}
+				break;
+			default:
+				if (annotations_start == 0) {
+					annotations_start = i;
+				}
+				break;
+		}
+		i += length;
+	}
+	if (record_id == 0 || annotations_start == 0) {
+		return false;
+	}
+
+	// The block becomes a uniform buffer: the variable and every pointer type in the record's storage class move to
+	// Uniform, and the variable gets the set and binding Mesa reads.
+	const uint32_t decorations[] = {
+		(4u << SpvWordCountShift) | SpvOpDecorate, record_id, SpvDecorationDescriptorSet, p_set,
+		(4u << SpvWordCountShift) | SpvOpDecorate, record_id, SpvDecorationBinding, p_binding
+	};
+	r_spirv.resize(p_word_count + std_size(decorations));
+	uint32_t *out = r_spirv.ptrw();
+	memcpy(out, p_spirv, annotations_start * sizeof(uint32_t));
+	memcpy(out + annotations_start, decorations, sizeof(decorations));
+	memcpy(out + annotations_start + std_size(decorations), p_spirv + annotations_start, (p_word_count - annotations_start) * sizeof(uint32_t));
+	for (uint64_t i = header_words; i < uint64_t(r_spirv.size());) {
+		const uint32_t length = out[i] >> SpvWordCountShift;
+		switch (SpvOp(out[i] & SpvOpCodeMask)) {
+			case SpvOpTypePointer:
+			case SpvOpTypeForwardPointer:
+				if (length >= 3 && out[i + 2] == SpvStorageClassShaderRecordBufferKHR) {
+					out[i + 2] = SpvStorageClassUniform;
+				}
+				break;
+			case SpvOpVariable:
+				if (length >= 4 && out[i + 3] == SpvStorageClassShaderRecordBufferKHR) {
+					out[i + 3] = SpvStorageClassUniform;
+				}
+				break;
+			default:
+				break;
+		}
+		i += length;
+	}
+	return true;
+}
+
+String get_d3d12_stage_error(uint32_t p_shader_index, RDD::ShaderStage p_stage, bool p_has_stage_data, uint32_t p_record_size) {
+	if (!p_has_stage_data) {
+		return vformat("The %s stage of shader %d was compiled into a D3D12 shader container of an older format, without its ray-tracing data. Compile the shader again.", get_stage_name(p_stage), p_shader_index);
+	}
+	if (p_record_size == 0) {
+		return String();
+	}
+	if (p_stage == RDD::SHADER_STAGE_RAYGEN || p_stage == RDD::SHADER_STAGE_MISS) {
+		return vformat("A %s shader reads a shader record (shaderRecordEXT); only hit groups carry records.", get_stage_name(p_stage));
+	}
+	if (p_record_size > MAX_HIT_GROUP_RECORD_SIZE) {
+		return vformat("A %s shader reads a %d-byte shader record (shaderRecordEXT); a record holds at most %d bytes.", get_stage_name(p_stage), p_record_size, MAX_HIT_GROUP_RECORD_SIZE);
+	}
+	return String();
+}
+
+namespace {
+
+String describe_payload(const StageInterface &p_stage) {
+	return p_stage.payload_declared ? vformat("a %d-byte ray payload", p_stage.payload_size) : vformat("no ray payload that it uses (it gets a stand-in of %d bytes)", p_stage.payload_size);
+}
+
+String describe_attributes(const StageInterface &p_stage) {
+	return p_stage.attributes_declared ? vformat("%d bytes of hit attributes", p_stage.attribute_size) : vformat("no hit attributes that it uses (it gets a stand-in of %d bytes)", p_stage.attribute_size);
+}
+
+} // namespace
+
+String get_hit_group_interface_error(uint32_t p_hit_group_index, const StageInterface *p_any_hit, const StageInterface *p_closest_hit, const StageInterface *p_intersection) {
+	const String prefix = vformat("Hit group %d: ", p_hit_group_index);
+	if (p_any_hit != nullptr && p_closest_hit != nullptr && p_any_hit->payload_size != p_closest_hit->payload_size) {
+		return prefix + vformat("its any-hit shader declares %s and its closest-hit shader %s. Direct3D 12 passes both the same ray payload, so they must declare and use (read or write) the same rayPayloadInEXT type.", describe_payload(*p_any_hit), describe_payload(*p_closest_hit));
+	}
+	const StageInterface *stages[] = { p_any_hit, p_closest_hit };
+	const char *stage_names[] = { "any-hit", "closest-hit" };
+	for (uint32_t i = 0; i < std_size(stages); i++) {
+		if (stages[i] == nullptr) {
+			continue;
+		}
+		// An intersection stage that reports no attributes leaves the hit stages' attributes undefined, whatever they declare.
+		if (p_intersection != nullptr && p_intersection->attributes_declared && stages[i]->attribute_size != p_intersection->attribute_size) {
+			return prefix + vformat("its %s shader declares %s, and its intersection shader reports %d bytes. Direct3D 12 passes the reported hit attributes, so the %s shader must declare and read the intersection shader's hitAttributeEXT type.", stage_names[i], describe_attributes(*stages[i]), p_intersection->attribute_size, stage_names[i]);
+		}
+		if (p_intersection == nullptr && stages[i]->attribute_size != TRIANGLE_ATTRIBUTE_SIZE) {
+			return prefix + vformat("its %s shader declares %s, but a triangle hit has %d bytes of hit attributes (two barycentrics). Direct3D 12 needs the hit shaders of a triangle hit group to declare and read hitAttributeEXT vec2.", stage_names[i], describe_attributes(*stages[i]), TRIANGLE_ATTRIBUTE_SIZE);
+		}
+	}
+	return String();
+}
+
 } // namespace RDRTPipeline

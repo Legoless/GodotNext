@@ -21,7 +21,8 @@ extends Node
 ## - "indirect": the same pipeline, traced with raytracing_list_trace_rays_indirect() from a launch size a
 ##   compute shader wrote in the same frame;
 ## - "restrided": a hit shader binding table made for the same hit groups without records, given the
-##   pipeline with records by hit_sbt_set_pipeline(), so its entries grow and it is rewritten;
+##   pipeline with records by hit_sbt_set_pipeline(), so its entries grow and it is rewritten (on Direct3D 12
+##   they keep their size: the hit shaders read a 16-byte record, which every entry holds there, #121);
 ## - "mid_list_1" and "mid_list_2": two traces of one table in one raytracing list, with
 ##   hit_sbt_range_alloc() growing the table between them, so the second trace reallocates the table
 ##   that the first one already put in the list;
@@ -34,7 +35,9 @@ extends Node
 ##   RAYTRACING_PIPELINE_FLAG_REORDER.
 ## A device without SUPPORTS_RAYTRACING_REORDER, SUPPORTS_RAYTRACING_PIPELINE_LIBRARY or
 ## SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT runs the other variants and fails with reason NO_REORDER,
-## NO_LIBRARIES or NO_INDIRECT.
+## NO_LIBRARIES or NO_INDIRECT. The one exception: Direct3D 12 has no shader execution reordering in v1
+## (plan §21.1: DXIL's HitObject, shader model 6.9, is not in the Mesa NIR library), so on the d3d12 driver
+## the result says "reorder": "not on D3D12" and the run does not fail for it (#121).
 ##
 ## Off the main thread: the first 15 libraries are created on WorkerThreadPool tasks and the base is linked
 ## with them on another, while the main thread traces "direct" again and again on the same device and
@@ -49,6 +52,9 @@ extends Node
 ## User arguments: --out=<dir> to write the compiled ray generation SPIR-V there.
 
 const SceneArgs = preload("res://scenes/scene_args.gd")
+
+# The drivers that have no shader execution reordering by the plan (§21.1), and so do not fail without it.
+const DRIVERS_WITHOUT_REORDER := ["d3d12"]
 
 const WIDTH := 256
 const HEIGHT := 256
@@ -311,6 +317,9 @@ func _run() -> Dictionary:
 		_run_pipelines(rd, result)
 		# Each missing feature fails the run with its reason; the variants that need it did not run.
 		for feature in [["reorder", "NO_REORDER", "SUPPORTS_RAYTRACING_REORDER"], ["indirect", "NO_INDIRECT", "SUPPORTS_RAYTRACING_TRACE_RAYS_INDIRECT"], ["libraries", "NO_LIBRARIES", "SUPPORTS_RAYTRACING_PIPELINE_LIBRARY"]]:
+			if feature[0] == "reorder" and not result["supported"]["reorder"] and DRIVERS_WITHOUT_REORDER.has(result["driver"]):
+				result["reorder"] = "not on D3D12"
+				continue
 			if not result["supported"][feature[0]]:
 				result["reason"] = feature[1]
 				_check(false, "the device reports " + feature[2])
@@ -396,7 +405,7 @@ func _run_pipelines(rd: RenderingDevice, result: Dictionary) -> void:
 		variants["mid_list_1"] = _compare(alpha_tested, traces[0])
 		variants["mid_list_2"] = _compare(alpha_tested, traces[1])
 		# A table made for the same hit groups without records takes the pipeline with them: its entries
-		# grow by the record, so the table is reallocated and rewritten.
+		# grow by the record, so the table is reallocated and rewritten (on Direct3D 12 only rewritten).
 		var plain_groups: Array[RDHitGroup] = []
 		for m in MATERIALS:
 			var plain := _hit_group(hit, m, slots[m], cutoffs[m])

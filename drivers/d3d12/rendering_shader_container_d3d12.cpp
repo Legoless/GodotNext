@@ -30,8 +30,10 @@
 
 #include "rendering_shader_container_d3d12.h"
 
+#include "core/templates/hash_set.h" // GodotNext: d3d12_rt_pipelines (#121).
 #include "core/templates/sort_array.h"
 #include "drivers/d3d12/dxil_hash.h"
+#include "servers/rendering/rendering_device_rt_pipeline.h" // GodotNext: d3d12_rt_pipelines (#121).
 
 #ifdef DEBUG_ENABLED
 #include "core/config/engine.h"
@@ -308,7 +310,16 @@ uint32_t RenderingShaderContainerD3D12::_from_bytes_footer_extra_data(const uint
 	root_signature_crc = footer.root_signature_crc;
 	root_signature_bytes.resize(footer.root_signature_length);
 	memcpy(root_signature_bytes.ptrw(), p_bytes + sizeof(ContainerFooterD3D12), root_signature_bytes.size());
-	return sizeof(ContainerFooterD3D12) + footer.root_signature_length;
+	// GodotNext: d3d12_rt_pipelines (#121). The ray-tracing stage data follows the root signature from format version 4.
+	has_raytracing_stage_data = container_header.format_version >= RAYTRACING_STAGE_DATA_FORMAT_VERSION;
+	if (!has_raytracing_stage_data) {
+		for (RaytracingStageDataD3D12 &stage_data : raytracing_stage_data_d3d12) {
+			stage_data = RaytracingStageDataD3D12();
+		}
+		return sizeof(ContainerFooterD3D12) + footer.root_signature_length;
+	}
+	memcpy(raytracing_stage_data_d3d12, p_bytes + sizeof(ContainerFooterD3D12) + footer.root_signature_length, sizeof(raytracing_stage_data_d3d12));
+	return sizeof(ContainerFooterD3D12) + footer.root_signature_length + sizeof(raytracing_stage_data_d3d12);
 }
 
 uint32_t RenderingShaderContainerD3D12::_to_bytes_reflection_extra_data(uint8_t *p_bytes) const {
@@ -344,9 +355,11 @@ uint32_t RenderingShaderContainerD3D12::_to_bytes_footer_extra_data(uint8_t *p_b
 		footer.root_signature_length = root_signature_bytes.size();
 		footer.root_signature_crc = root_signature_crc;
 		memcpy(p_bytes + sizeof(ContainerFooterD3D12), root_signature_bytes.ptr(), root_signature_bytes.size());
+		// GodotNext: d3d12_rt_pipelines (#121)
+		memcpy(p_bytes + sizeof(ContainerFooterD3D12) + root_signature_bytes.size(), raytracing_stage_data_d3d12, sizeof(raytracing_stage_data_d3d12));
 	}
 
-	return sizeof(ContainerFooterD3D12) + root_signature_bytes.size();
+	return sizeof(ContainerFooterD3D12) + root_signature_bytes.size() + sizeof(raytracing_stage_data_d3d12); // GodotNext: d3d12_rt_pipelines (#121).
 }
 
 #if NIR_ENABLED
@@ -397,6 +410,16 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 		};
 
 		Span<uint32_t> code = p_spirv[i].spirv();
+		// GodotNext: d3d12_rt_pipelines (#121). Mesa has no shader record buffer, so it translates the record as a uniform
+		// buffer, which _remap_shader_record() moves to the local root signature's constants. The Vulkan payload measure is
+		// taken from the module as compiled.
+		Vector<uint32_t> record_spirv;
+		if (is_raytracing_stage(stage)) {
+			raytracing_stage_data_d3d12[stage - RenderingDeviceCommons::SHADER_STAGE_RAYGEN].spirv_payload_size = RDRTPipeline::get_spirv_payload_size((const uint8_t *)code.ptr(), code.size() * sizeof(uint32_t));
+			if (RDRTPipeline::rewrite_spirv_shader_record_as_uniform_buffer(code.ptr(), code.size(), SHADER_RECORD_SPIRV_SET, SHADER_RECORD_SPIRV_BINDING, record_spirv)) {
+				code = Span<uint32_t>(record_spirv.ptr(), record_spirv.size());
+			}
+		}
 		nir_shader *shader = spirv_to_nir(
 				code.ptr(),
 				code.size(),
@@ -408,6 +431,20 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 				p_compiler_options);
 
 		ERR_FAIL_NULL_V_MSG(shader, false, "Shader translation (step 1) at stage " + String(RenderingDeviceCommons::SHADER_STAGE_NAMES[stage]) + " failed.");
+
+		// GodotNext: d3d12_rt_pipelines (#121). Every stage is translated before any is prepared for DXIL, so a ray-tracing
+		// stage can get a stand-in payload or attributes of the type another stage declares.
+		r_stages_nir_shaders[stage] = shader;
+	}
+
+	// GodotNext: d3d12_rt_pipelines (#121)
+	if (reflection_data.pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING) {
+		_add_raytracing_stand_ins(r_stages_nir_shaders);
+	}
+
+	for (uint64_t i = 0; i < p_spirv.size(); i++) {
+		RenderingDeviceCommons::ShaderStage stage = p_spirv[i].shader_stage;
+		nir_shader *shader = r_stages_nir_shaders[stage];
 
 		if (stage == RenderingDeviceCommons::SHADER_STAGE_VERTEX) {
 			dxil_runtime_conf.yz_flip.y_mask = 0xffff;
@@ -424,8 +461,11 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 		_remap_dynamic_buffers(shader);
 		// GodotNext: rd_bindless (#176).
 		_remap_bindless_tables(shader);
-
-		r_stages_nir_shaders[stage] = shader;
+		// GodotNext: d3d12_rt_pipelines (#121)
+		if (is_raytracing_stage(stage)) {
+			_remove_unused_resources(shader);
+			_remap_shader_record(shader, stage);
+		}
 	}
 
 	// Link NIR shaders.
@@ -577,6 +617,207 @@ void RenderingShaderContainerD3D12::_remap_bindless_tables(nir_shader *p_shader)
 	}
 }
 
+// GodotNext: d3d12_rt_pipelines (#121). The size DXIL gives a ray payload or hit attributes made of p_count variables:
+// one variable keeps its type, several become one struct (as Mesa's dxil_nir_wrap_rt_variables_in_structs() makes it).
+static uint32_t _raytracing_variables_size(const glsl_type *const *p_types, uint32_t p_count) {
+	if (p_count == 0) {
+		return 0;
+	}
+	const glsl_type *type = p_types[0];
+	LocalVector<glsl_struct_field> fields;
+	if (p_count > 1) {
+		for (uint32_t i = 0; i < p_count; i++) {
+			glsl_struct_field field = {};
+			field.type = p_types[i];
+			field.name = "field";
+			fields.push_back(field);
+		}
+		type = glsl_struct_type(fields.ptr(), fields.size(), "godotnext_raytracing_variables", false);
+	}
+	unsigned size = 0;
+	unsigned align = 0;
+	glsl_get_natural_size_align_bytes(type, &size, &align);
+	return size;
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). Mesa's DXIL entry function of an any-hit or closest-hit stage takes a ray
+// payload and hit attributes, and that of a miss stage a payload, and its translation fails when the stage declares
+// none (GLSL allows that). DXR also leaves the behavior undefined unless every stage a trace reaches declares the
+// trace's payload type, and every hit stage the attributes its hit reports. So a stage without them gets a stand-in
+// variable, which it does not access: of the type another stage of this shader declares (a hit group's stages usually
+// share a shader), else the one payload type its ray generation stage traces (a miss stage that shares a shader with
+// the ray generation stage whose traces it ends), else a uint payload and two-float (triangle barycentrics)
+// attributes. Pipeline creation then refuses hit groups whose stages still differ
+// (RDRTPipeline::get_hit_group_interface_error()). This also measures what each ray-tracing stage takes and passes,
+// before Mesa lowers the payloads to temporaries.
+void RenderingShaderContainerD3D12::_add_raytracing_stand_ins(const HashMap<int, nir_shader *> &p_stages_nir_shaders) {
+	const glsl_type *declared_payloads[RDC::SHADER_STAGE_MAX] = {};
+	const glsl_type *declared_attributes[RDC::SHADER_STAGE_MAX] = {};
+	for (const KeyValue<int, nir_shader *> &E : p_stages_nir_shaders) {
+		if (!is_raytracing_stage(E.key)) {
+			continue;
+		}
+		// The incoming payload (rayPayloadInEXT) is shader call data; outgoing payloads (rayPayloadEXT) are temporaries.
+		nir_foreach_variable_with_modes(var, E.value, nir_var_shader_call_data) {
+			declared_payloads[E.key] = var->type;
+		}
+		nir_foreach_variable_with_modes(var, E.value, nir_var_ray_hit_attrib) {
+			declared_attributes[E.key] = var->type;
+		}
+	}
+
+	// The payload type each traceRayEXT of a stage passes (glsl types are unique, so equal types are equal pointers).
+	auto traced_payloads = [](nir_shader *p_shader) {
+		LocalVector<const glsl_type *> types;
+		nir_foreach_function_impl(impl, p_shader) {
+			nir_foreach_block(block, impl) {
+				nir_foreach_instr(instr, block) {
+					if (instr->type != nir_instr_type_intrinsic) {
+						continue;
+					}
+					nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+					if (intrinsic->intrinsic != nir_intrinsic_trace_ray) {
+						continue;
+					}
+					const nir_deref_instr *payload = nir_src_as_deref(intrinsic->src[10]);
+					if (payload != nullptr && !types.has(payload->type)) {
+						types.push_back(payload->type);
+					}
+				}
+			}
+		}
+		return types;
+	};
+
+	const glsl_type *payload_stand_in = nullptr;
+	for (const RDC::ShaderStage stage : { RDC::SHADER_STAGE_CLOSEST_HIT, RDC::SHADER_STAGE_ANY_HIT, RDC::SHADER_STAGE_MISS }) {
+		if (declared_payloads[stage] != nullptr) {
+			payload_stand_in = declared_payloads[stage];
+			break;
+		}
+	}
+	nir_shader *const *raygen = p_stages_nir_shaders.getptr(RDC::SHADER_STAGE_RAYGEN);
+	if (payload_stand_in == nullptr && raygen != nullptr) {
+		const LocalVector<const glsl_type *> raygen_payloads = traced_payloads(*raygen);
+		if (raygen_payloads.size() == 1) {
+			payload_stand_in = raygen_payloads[0];
+		}
+	}
+	if (payload_stand_in == nullptr) {
+		payload_stand_in = glsl_uint_type();
+	}
+	const glsl_type *attribute_stand_in = glsl_vec_type(2);
+	for (const RDC::ShaderStage stage : { RDC::SHADER_STAGE_INTERSECTION, RDC::SHADER_STAGE_CLOSEST_HIT, RDC::SHADER_STAGE_ANY_HIT }) {
+		if (declared_attributes[stage] != nullptr) {
+			attribute_stand_in = declared_attributes[stage];
+			break;
+		}
+	}
+
+	for (const KeyValue<int, nir_shader *> &E : p_stages_nir_shaders) {
+		if (!is_raytracing_stage(E.key)) {
+			continue;
+		}
+		nir_shader *shader = E.value;
+		RaytracingStageDataD3D12 &stage_data = raytracing_stage_data_d3d12[E.key - RDC::SHADER_STAGE_RAYGEN];
+		stage_data.flags |= RAYTRACING_STAGE_PRESENT;
+		const bool takes_payload = E.key == RDC::SHADER_STAGE_ANY_HIT || E.key == RDC::SHADER_STAGE_CLOSEST_HIT || E.key == RDC::SHADER_STAGE_MISS;
+		const bool takes_attributes = E.key == RDC::SHADER_STAGE_ANY_HIT || E.key == RDC::SHADER_STAGE_CLOSEST_HIT;
+		if (declared_payloads[E.key] != nullptr) {
+			stage_data.flags |= RAYTRACING_STAGE_PAYLOAD_DECLARED;
+		} else if (takes_payload) {
+			nir_variable_create(shader, nir_var_shader_call_data, payload_stand_in, "godotnext_payload_stand_in");
+		}
+		if (declared_attributes[E.key] != nullptr) {
+			stage_data.flags |= RAYTRACING_STAGE_ATTRIBUTES_DECLARED;
+		} else if (takes_attributes) {
+			nir_variable_create(shader, nir_var_ray_hit_attrib, attribute_stand_in, "godotnext_attributes_stand_in");
+		}
+
+		LocalVector<const glsl_type *> types;
+		nir_foreach_variable_with_modes(var, shader, nir_var_shader_call_data) {
+			types.push_back(var->type);
+		}
+		stage_data.incoming_payload_size = _raytracing_variables_size(types.ptr(), types.size());
+		types.clear();
+		nir_foreach_variable_with_modes(var, shader, nir_var_ray_hit_attrib) {
+			types.push_back(var->type);
+		}
+		stage_data.attribute_size = _raytracing_variables_size(types.ptr(), types.size());
+
+		// The payload each traceRayEXT passes.
+		uint32_t outgoing_payload_size = 0;
+		for (const glsl_type *type : traced_payloads(shader)) {
+			outgoing_payload_size = MAX(outgoing_payload_size, _raytracing_variables_size(&type, 1));
+		}
+		stage_data.payload_size = MAX(stage_data.incoming_payload_size, outgoing_payload_size);
+	}
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). DXIL validation rejects a library that declares a resource none of its functions
+// uses ("Internal declaration '...' is unused."), and each ray-tracing stage is a library of its own, which often uses
+// a few of the bindings its shader declares. So this removes the resource variables that no resource index names and
+// that no instruction reads. Mesa reads uniform and storage buffers (and root constants) through resource indices
+// rather than through their variables, so those variables count as used when an index names their register. The root
+// signature still binds every binding of the shader, so the pipeline's global root signature covers all its stages.
+void RenderingShaderContainerD3D12::_remove_unused_resources(nir_shader *p_shader) const {
+	HashSet<uint64_t> indexed;
+	nir_foreach_function_impl(impl, p_shader) {
+		nir_foreach_block(block, impl) {
+			nir_foreach_instr(instr, block) {
+				if (instr->type != nir_instr_type_intrinsic) {
+					continue;
+				}
+				nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+				if (intrinsic->intrinsic == nir_intrinsic_vulkan_resource_index) {
+					indexed.insert((uint64_t(nir_intrinsic_desc_set(intrinsic)) << 32) | nir_intrinsic_binding(intrinsic));
+				}
+			}
+		}
+	}
+
+	nir_remove_dead_variables_options options = {};
+	options.can_remove_var = [](nir_variable *p_var, void *p_data) -> bool {
+		const HashSet<uint64_t> &indexed_registers = *(const HashSet<uint64_t> *)p_data;
+		return !indexed_registers.has((uint64_t(p_var->data.descriptor_set) << 32) | p_var->data.binding);
+	};
+	options.can_remove_var_data = &indexed;
+	nir_remove_dead_variables(p_shader, nir_variable_mode(nir_var_mem_ubo | nir_var_mem_ssbo | nir_var_uniform | nir_var_image), &options);
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). The shader record, translated as a uniform buffer in set SHADER_RECORD_SPIRV_SET,
+// moves from Mesa's register for that set to SHADER_RECORD_REGISTER in ROOT_CONSTANT_SPACE, where the pipeline's local
+// root signature puts the record's root constants. As in _remap_dynamic_buffers(), the variable and every resource
+// index that names it change together. Records the constant buffer's size, which the local root signature must cover.
+void RenderingShaderContainerD3D12::_remap_shader_record(nir_shader *p_shader, RenderingDeviceCommons::ShaderStage p_stage) {
+	const uint32_t mesa_register = SHADER_RECORD_SPIRV_SET * GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER + SHADER_RECORD_SPIRV_BINDING * GODOT_NIR_BINDING_MULTIPLIER;
+	uint32_t record_size = 0;
+	nir_foreach_variable_with_modes(var, p_shader, nir_var_mem_ubo) {
+		if (var->data.descriptor_set == 0 && var->data.binding == mesa_register) {
+			var->data.descriptor_set = ROOT_CONSTANT_SPACE;
+			var->data.binding = SHADER_RECORD_REGISTER;
+			// Mesa declares a constant buffer of whole 16-byte rows.
+			const uint32_t size = glsl_get_explicit_size(glsl_without_array(var->type), false);
+			record_size = (size + 15) & ~15u;
+		}
+	}
+	nir_foreach_function_impl(impl, p_shader) {
+		nir_foreach_block(block, impl) {
+			nir_foreach_instr(instr, block) {
+				if (instr->type != nir_instr_type_intrinsic) {
+					continue;
+				}
+				nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+				if (intrinsic->intrinsic == nir_intrinsic_vulkan_resource_index && nir_intrinsic_desc_set(intrinsic) == 0 && nir_intrinsic_binding(intrinsic) == mesa_register) {
+					nir_intrinsic_set_desc_set(intrinsic, ROOT_CONSTANT_SPACE);
+					nir_intrinsic_set_binding(intrinsic, SHADER_RECORD_REGISTER);
+				}
+			}
+		}
+	}
+	raytracing_stage_data_d3d12[p_stage - RenderingDeviceCommons::SHADER_STAGE_RAYGEN].record_size = record_size;
+}
+
 struct GodotNirCallbackUserData {
 	RenderingShaderContainerD3D12 *container;
 	RenderingDeviceCommons::ShaderStage stage;
@@ -682,7 +923,9 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_dxil(Span<ReflectShaderSta
 bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed) {
 	// Root (push) constants.
 	LocalVector<D3D12_ROOT_PARAMETER1> root_params;
-	if (reflection_data_d3d12.dxil_push_constant_stages) {
+	// GodotNext: d3d12_rt_pipelines (#121). has_root_constants(): a ray-tracing shader binds its declared push constants
+	// whether or not its DXIL reads them.
+	if (has_root_constants(reflection_data.pipeline_type, reflection_data.push_constant_size, reflection_data_d3d12.dxil_push_constant_stages)) {
 		CD3DX12_ROOT_PARAMETER1 push_constant;
 		push_constant.InitAsConstants(
 				reflection_data.push_constant_size / sizeof(uint32_t),
@@ -880,6 +1123,13 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 							DEV_ASSERT(false && "Unrecognized range type.");
 						} break;
 					}
+					// GodotNext: d3d12_rt_pipelines (#121). A ray-tracing pipeline binds its layout-defining shader's
+					// root signature for the stages of all its shaders, and _remove_unused_resources() drops the
+					// buffers a stage does not read, so none of this shader's stages may have reported the buffer's
+					// class. The driver sets a root descriptor by that class, so it is the root parameter's.
+					if (reflection_data.pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING && (ResourceClass)uniform_d3d12.resource_class == RES_CLASS_INVALID) {
+						uniform_d3d12.resource_class = range_type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV ? RES_CLASS_CBV : (range_type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV ? RES_CLASS_SRV : RES_CLASS_UAV);
+					}
 
 					uniform_d3d12.root_param_idx = root_params.size();
 					root_params.push_back(root_param);
@@ -1010,6 +1260,10 @@ void RenderingShaderContainerD3D12::_nir_report_resource(uint32_t p_register, ui
 	} else if (p_register == RUNTIME_DATA_REGISTER && p_space == ROOT_CONSTANT_SPACE) {
 		DEV_ASSERT(resource_class == RES_CLASS_CBV);
 		user_data.container->reflection_data_d3d12.nir_runtime_data_root_param_idx = 1; // Temporary, to be determined later.
+	} else if (p_register == SHADER_RECORD_REGISTER && p_space == ROOT_CONSTANT_SPACE) {
+		// GodotNext: d3d12_rt_pipelines (#121). The shader record: a local root signature binds it, not this shader's
+		// root signature (see RaytracingStageDataD3D12::record_size).
+		DEV_ASSERT(resource_class == RES_CLASS_CBV);
 	} else {
 		uint32_t set = p_register / GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER;
 		uint32_t binding = (p_register % GODOT_NIR_DESCRIPTOR_SET_MULTIPLIER) / GODOT_NIR_BINDING_MULTIPLIER;
@@ -1247,6 +1501,11 @@ bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_
 
 	const LocalVector<ReflectShaderStage> &p_spirv = p_shader.shader_stages;
 	reflection_data_d3d12.nir_runtime_data_root_param_idx = UINT32_MAX;
+	// GodotNext: d3d12_rt_pipelines (#121). Filled while the ray-tracing stages are translated.
+	for (RaytracingStageDataD3D12 &stage_data : raytracing_stage_data_d3d12) {
+		stage_data = RaytracingStageDataD3D12();
+	}
+	has_raytracing_stage_data = true;
 	base_instance_native = p_shader.base_instance_native; // GodotNext: rd_indirect_count (#177)
 
 	for (int64_t i = 0; i < reflection_specialization_data.size(); i++) {
@@ -1419,6 +1678,9 @@ RenderingShaderContainerD3D12::ShaderReflectionD3D12 RenderingShaderContainerD3D
 	reflection.reflection_specialization_data_d3d12 = reflection_specialization_data_d3d12;
 	reflection.root_signature_bytes = root_signature_bytes;
 	reflection.root_signature_crc = root_signature_crc;
+	// GodotNext: d3d12_rt_pipelines (#121)
+	memcpy(reflection.raytracing_stages, raytracing_stage_data_d3d12, sizeof(raytracing_stage_data_d3d12));
+	reflection.has_raytracing_stage_data = has_raytracing_stage_data;
 
 	// Transform data vector into a vector of vectors that's easier to user.
 	uint32_t uniform_index = 0;

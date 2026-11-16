@@ -6345,6 +6345,10 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 
 	ERR_FAIL_NULL_V(layout_defining_shader, RID());
 
+	// GodotNext: d3d12_rt_pipelines (#121). The driver's own rules, as one error before anything is created.
+	const String driver_error = driver->raytracing_pipeline_get_create_error(shaders, hit_groups);
+	ERR_FAIL_COND_V_MSG(!driver_error.is_empty(), RID(), driver_error);
+
 	// GodotNext: rd_rt_pipelines (#179). Libraries and the pipelines linked from them declare one payload
 	// size, so each stage's payload must fit in it.
 	if (library) {
@@ -6405,7 +6409,11 @@ RID RenderingDevice::raytracing_pipeline_create(Span<PipelineShader> p_raygen_sh
 	// GodotNext: rd_rt_pipelines (#179)
 	pipeline.flags = uint32_t(p_flags);
 	pipeline.max_trace_recursion_depth = p_max_trace_recursion_depth;
-	pipeline.hit_group_record_size = hit_group_record_size;
+	// GodotNext: d3d12_rt_pipelines (#121). Room for the record the driver reads after each handle, also where no hit
+	// group has record_data; links take the largest of their libraries' sizes.
+	const uint32_t driver_record_size = driver->raytracing_pipeline_get_hit_group_record_size(pipeline.driver_id);
+	DEV_ASSERT(driver_record_size <= RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE);
+	pipeline.hit_group_record_size = MAX(hit_group_record_size, driver_record_size);
 	pipeline.hit_group_records.resize_initialized(p_hit_groups.size() * RDRTPipeline::MAX_HIT_GROUP_RECORD_SIZE);
 	for (uint32_t i = 0; i < p_hit_groups.size(); i++) {
 		if (!p_hit_groups[i].record_data.is_empty()) {
@@ -6524,7 +6532,13 @@ RID RenderingDevice::raytracing_pipeline_link(RID p_base, Span<RID> p_libraries)
 		pipeline.libraries.push_back(library_id);
 	}
 
-	pipeline.driver_id = driver->raytracing_pipeline_link(driver_libraries, pipeline.max_trace_recursion_depth, RDRTPipeline::LIBRARY_MAX_PAYLOAD_SIZE, pipeline.layout_defining_shader_driver_id);
+	// GodotNext: d3d12_rt_pipelines (#121). A linked base holds the first of these libraries already, so a driver that
+	// can grow it adds only the new ones.
+	if (base->linked) {
+		pipeline.driver_id = driver->raytracing_pipeline_link_add(base->driver_id, base->libraries.size(), driver_libraries, pipeline.max_trace_recursion_depth, RDRTPipeline::LIBRARY_MAX_PAYLOAD_SIZE, pipeline.layout_defining_shader_driver_id);
+	} else {
+		pipeline.driver_id = driver->raytracing_pipeline_link(driver_libraries, pipeline.max_trace_recursion_depth, RDRTPipeline::LIBRARY_MAX_PAYLOAD_SIZE, pipeline.layout_defining_shader_driver_id);
+	}
 	ERR_FAIL_COND_V(!pipeline.driver_id, RID());
 
 	if (pipeline_cache_enabled) {

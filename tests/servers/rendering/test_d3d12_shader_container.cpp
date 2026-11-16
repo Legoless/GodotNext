@@ -1132,6 +1132,142 @@ TEST_CASE("[D3D12][ShaderContainer] base_instance_native compiles gl_InstanceInd
 	CHECK_NE(runtime_data, UINT32_MAX);
 }
 
+// GodotNext: d3d12_rt_pipelines (#121). Ray-tracing stages that declare push constants but do not read them: a pipeline's
+// global root signature is its layout-defining shader's, so it still binds them, as root constants at the usual place,
+// for the pipeline's other stages that read them.
+const char *RAYGEN_UNREAD_PUSH_CONSTANTS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image2D result_image;
+layout(push_constant, std430) uniform Params { float t_max; uint cull_mask; uint pad0; uint pad1; } params;
+layout(location = 0) rayPayloadEXT vec4 payload;
+void main() {
+	payload = vec4(0.0);
+	traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFFu, 0, 1, 0, vec3(0.0), 0.001, vec3(0.0, 0.0, -1.0), 100.0, 0);
+	imageStore(result_image, ivec2(gl_LaunchIDEXT.xy), payload);
+}
+)";
+
+TEST_CASE("[D3D12][ShaderContainer] Ray-tracing stages bind their declared push constants even when they do not read them") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_RAYGEN, RAYGEN_UNREAD_PUSH_CONSTANTS });
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, Vector<uint64_t>());
+		return;
+	}
+
+	ShaderContainerFixture fixture(stages, Vector<uint64_t>());
+	CHECK_EQ(fixture.reflection_d3d12.dxil_push_constant_stages, 0u);
+	CHECK(ContainerD3D12::has_root_constants(RDC::PIPELINE_TYPE_RAYTRACING, 16, fixture.reflection_d3d12.dxil_push_constant_stages));
+	const D3D12_ROOT_PARAMETER1 &push_constants = fixture.param(0);
+	REQUIRE_EQ(push_constants.ParameterType, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+	CHECK_EQ(push_constants.Constants.ShaderRegister, ContainerD3D12::ROOT_CONSTANT_REGISTER);
+	CHECK_EQ(push_constants.Constants.RegisterSpace, ContainerD3D12::ROOT_CONSTANT_SPACE);
+	CHECK_EQ(push_constants.Constants.Num32BitValues, 4u);
+	CHECK_EQ(push_constants.ShaderVisibility, D3D12_SHADER_VISIBILITY_ALL);
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+
+	// Other pipelines keep binding root constants only where their DXIL reads them.
+	CHECK_FALSE(ContainerD3D12::has_root_constants(RDC::PIPELINE_TYPE_COMPUTE, 16, 0));
+	CHECK(ContainerD3D12::has_root_constants(RDC::PIPELINE_TYPE_COMPUTE, 16, RDC::SHADER_STAGE_COMPUTE_BIT));
+	CHECK_FALSE(ContainerD3D12::has_root_constants(RDC::PIPELINE_TYPE_RAYTRACING, 0, 0));
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). A hit stage that reads push constants, which the layout-defining shader of its
+// pipeline may not read: removing the resources a stage does not use keeps their constant buffer, which Mesa reads
+// through a resource index.
+const char *CLOSEST_HIT_READS_PUSH_CONSTANTS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(push_constant, std430) uniform Params { uint add; uint pad0; uint pad1; uint pad2; } params;
+layout(location = 0) rayPayloadInEXT uvec4 payload;
+void main() {
+	payload = uvec4(uint(gl_PrimitiveID) + params.add);
+}
+)";
+
+TEST_CASE("[D3D12][ShaderContainer] A ray-tracing stage that reads push constants keeps their constant buffer") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_CLOSEST_HIT, CLOSEST_HIT_READS_PUSH_CONSTANTS });
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, Vector<uint64_t>());
+		return;
+	}
+
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, Vector<uint64_t>());
+	check_dxil_validation(validation_before, 1);
+	CHECK_EQ(fixture.reflection_d3d12.dxil_push_constant_stages, uint32_t(RDC::SHADER_STAGE_CLOSEST_HIT_BIT));
+	const D3D12_ROOT_PARAMETER1 &push_constants = fixture.param(0);
+	REQUIRE_EQ(push_constants.ParameterType, D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS);
+	CHECK_EQ(push_constants.Constants.Num32BitValues, 4u);
+	CHECK(fixture.dxil_declares(2, ContainerD3D12::ROOT_CONSTANT_SPACE, ContainerD3D12::ROOT_CONSTANT_REGISTER));
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+}
+
+// GodotNext: d3d12_rt_pipelines (#121). Dynamic buffers that no stage of a ray-tracing shader reads: its stages' DXIL
+// does not declare them (unused resources are removed), but its root signature, which a pipeline gives the stages of
+// all its shaders, has their root descriptors. The driver sets a root descriptor by the binding's resource class, so
+// the class comes from the uniform type: CBV, UAV for a writable storage buffer, SRV for a read-only one.
+const char *RAYGEN_UNREAD_DYNAMIC_BUFFERS = R"(#version 460
+#extension GL_EXT_ray_tracing : require
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image2D result_image;
+layout(set = 1, binding = 0, std140) uniform Camera { vec4 origin; } camera;
+layout(set = 1, binding = 1, std430) restrict buffer Counters { uint count[]; } counters;
+layout(set = 1, binding = 2, std430) restrict readonly buffer Sky { vec4 color; } sky;
+layout(location = 0) rayPayloadEXT vec4 payload;
+void main() {
+	payload = vec4(0.0);
+	traceRayEXT(tlas, gl_RayFlagsOpaqueEXT, 0xFFu, 0, 1, 0, vec3(0.0), 0.001, vec3(0.0, 0.0, -1.0), 100.0, 0);
+	imageStore(result_image, ivec2(gl_LaunchIDEXT.xy), payload);
+}
+)";
+
+TEST_CASE("[D3D12][ShaderContainer] Dynamic buffers that no ray-tracing stage reads keep the class of their root descriptor") {
+	Vector<StageSource> stages;
+	stages.push_back({ RDC::SHADER_STAGE_RAYGEN, RAYGEN_UNREAD_DYNAMIC_BUFFERS });
+	Vector<uint64_t> dynamic_buffers;
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(1, 0)); // Camera: root CBV.
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(1, 1)); // Counters: root UAV.
+	dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(1, 2)); // Sky: root SRV.
+	if (!ContainerD3D12::is_raytracing_supported()) {
+		check_refused(stages, dynamic_buffers);
+		return;
+	}
+
+	const ContainerD3D12::DXILValidationStats validation_before = ContainerD3D12::get_dxil_validation_stats();
+	ShaderContainerFixture fixture(stages, dynamic_buffers);
+	check_dxil_validation(validation_before, 1);
+
+	struct ExpectedBuffer {
+		uint32_t binding = 0;
+		D3D12_ROOT_PARAMETER_TYPE parameter_type = D3D12_ROOT_PARAMETER_TYPE_CBV;
+		ResourceClass resource_class = RES_CLASS_INVALID;
+		uint32_t dxil_type = 0; // As DxilResource::type.
+	};
+	const ExpectedBuffer expected[] = {
+		{ 0, D3D12_ROOT_PARAMETER_TYPE_CBV, RES_CLASS_CBV, 2 },
+		{ 1, D3D12_ROOT_PARAMETER_TYPE_UAV, RES_CLASS_UAV, 7 },
+		{ 2, D3D12_ROOT_PARAMETER_TYPE_SRV, RES_CLASS_SRV, 4 },
+	};
+	const uint32_t dynamic_space = ContainerD3D12::DYNAMIC_BUFFER_SPACE_BASE + 1;
+	for (const ExpectedBuffer &buffer : expected) {
+		INFO("Set 1, binding ", buffer.binding);
+		const ContainerD3D12::ReflectionBindingDataD3D12 &uniform = fixture.uniform_d3d12(1, buffer.binding);
+		CHECK_EQ(uniform.dxil_stages, 0u);
+		CHECK_EQ(uniform.resource_class, uint32_t(buffer.resource_class));
+		const D3D12_ROOT_PARAMETER1 &param = fixture.param(uniform.root_param_idx);
+		CHECK_EQ(param.ParameterType, buffer.parameter_type);
+		CHECK_EQ(param.Descriptor.ShaderRegister, buffer.binding);
+		CHECK_EQ(param.Descriptor.RegisterSpace, dynamic_space);
+		CHECK_FALSE(fixture.dxil_declares(buffer.dxil_type, dynamic_space, buffer.binding));
+	}
+	fixture.check_root_parameter_registers();
+	fixture.check_dxil_resources_bound();
+}
+
 } // namespace TestD3D12ShaderContainer
 
 #endif // NIR_ENABLED

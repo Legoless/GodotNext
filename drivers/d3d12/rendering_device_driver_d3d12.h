@@ -34,6 +34,7 @@
 #include "core/templates/hash_map.h"
 #include "core/templates/paged_allocator.h"
 #include "core/templates/rb_map.h"
+#include "core/templates/safe_refcount.h" // GodotNext: d3d12_rt_pipelines (#121).
 #include "core/templates/self_list.h"
 #include "drivers/d3d12/rendering_shader_container_d3d12.h"
 #include "servers/rendering/rendering_device_driver.h"
@@ -186,6 +187,9 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	SamplerCapabilities sampler_capabilities;
 	// GodotNext: d3d12_dxr (#118)
 	D3D12RayQueryCaps ray_query_caps;
+	// GodotNext: d3d12_rt_pipelines (#121). Null without ID3D12Device7 (AddToStateObject).
+	D3D12RaytracingPipelineCaps raytracing_pipeline_caps;
+	Microsoft::WRL::ComPtr<ID3D12Device7> device_7;
 	AccelerationStructureLimits acceleration_structure_limits;
 	uint32_t raytracing_tier = 0; // D3D12_RAYTRACING_TIER: 0, 10 (1.0), 11 (1.1), 12 (1.2).
 	uint32_t adapter_vendor_id = 0;
@@ -610,6 +614,17 @@ private:
 		RenderPassState render_pass_state;
 		bool descriptor_heaps_set = false;
 
+		// GodotNext: d3d12_rt_pipelines (#121). The D3D12_DISPATCH_RAYS_DESC of each indirect trace since the command
+		// buffer began, in chunks of DISPATCH_RAYS_ARGUMENTS_PER_CHUNK (see command_trace_rays_indirect()).
+		struct DispatchRaysArguments {
+			BufferID upload; // Upload heap: the CPU writes the shader tables' part.
+			uint8_t *upload_ptr = nullptr;
+			BufferID arguments; // What ExecuteIndirect reads: the tables, then the launch size copied in.
+			bool accessed = false; // Written in this recording (enhanced barriers: it is no longer NO_ACCESS).
+		};
+		LocalVector<DispatchRaysArguments> dispatch_rays_arguments;
+		uint32_t dispatch_rays_arguments_used = 0;
+
 		HashMap<ResourceInfo::States *, BarrierRequest> res_barriers_requests;
 		LocalVector<D3D12_RESOURCE_BARRIER> res_barriers;
 		uint32_t res_barriers_count = 0;
@@ -749,6 +764,11 @@ private:
 		Microsoft::WRL::ComPtr<ID3D12RootSignatureDeserializer> root_signature_deserializer;
 		const D3D12_ROOT_SIGNATURE_DESC *root_signature_desc = nullptr; // Owned by the deserializer.
 		uint32_t root_signature_crc = 0;
+
+		// GodotNext: d3d12_rt_pipelines (#121). The ray-tracing stages' data from the container, by stage -
+		// SHADER_STAGE_RAYGEN. False for containers of D3D12 format version 3 and older, which lack it.
+		RenderingShaderContainerD3D12::RaytracingStageDataD3D12 raytracing_stages[RenderingShaderContainerD3D12::RAYTRACING_STAGE_COUNT];
+		bool has_raytracing_stage_data = false;
 	};
 
 	bool _shader_apply_specialization_constants(
@@ -759,6 +779,8 @@ private:
 public:
 	virtual ShaderID shader_create_from_container(const Ref<RenderingShaderContainer> &p_shader_container, const Vector<ImmutableSampler> &p_immutable_samplers) override final;
 	virtual uint32_t shader_get_layout_hash(ShaderID p_shader) override final;
+	// GodotNext: d3d12_rt_pipelines (#121)
+	virtual uint32_t shader_get_raytracing_payload_size(ShaderID p_shader, ShaderStage p_stage) const override final;
 	virtual void shader_free(ShaderID p_shader) override final;
 	virtual void shader_destroy_modules(ShaderID p_shader) override final;
 
@@ -1030,10 +1052,63 @@ public:
 
 	// ----- PIPELINE -----
 
+private:
+	// GodotNext: d3d12_rt_pipelines (#121). An RT pipeline is a ray-tracing state object; a pipeline library is a
+	// collection, and a link is a state object made of collections. Every shader group has an export name that is
+	// unique in the process (gn<state object number>_s<shader> for ray generation and miss shaders, _g<hit group> for
+	// hit groups), so collections can be put together.
+	struct RaytracingPipelineInfo {
+		Microsoft::WRL::ComPtr<ID3D12StateObject> state_object;
+		Microsoft::WRL::ComPtr<ID3D12RootSignature> root_signature; // The global one: the layout-defining shader's.
+		uint32_t root_signature_crc = 0;
+		bool collection = false;
+		uint32_t library_count = 0; // A linked pipeline: how many collections it holds.
+		// The export name of each shader group, in group order: ray generation, miss, then hit groups.
+		LocalVector<Char16String> group_names;
+		// Executable state objects: the shader identifier of each group, in group order.
+		LocalVector<uint8_t> identifiers;
+		// The local root arguments (the root constants of the shader record) after each hit group's identifier: the
+		// largest record the hit shaders read, 0 when none reads one.
+		uint32_t hit_group_record_size = 0;
+	};
+
+	// The root signature objects of ray-tracing shaders, by CRC: one object per root signature (see
+	// shader_create_from_container()).
+	struct RaytracingRootSignature {
+		Vector<uint8_t> bytes;
+		Microsoft::WRL::ComPtr<ID3D12RootSignature> root_signature;
+	};
+	Mutex raytracing_root_signatures_mutex;
+	HashMap<uint32_t, LocalVector<RaytracingRootSignature>> raytracing_root_signatures;
+
+	// The largest record a hit group carries, and so the most root constants a local root signature holds.
+	static constexpr uint32_t LOCAL_ROOT_SIGNATURE_MAX_SIZE = 32;
+	Mutex local_root_signatures_mutex;
+	// One local root signature per constant buffer size (16 or 32 bytes), made on first use.
+	Microsoft::WRL::ComPtr<ID3D12RootSignature> local_root_signatures[LOCAL_ROOT_SIGNATURE_MAX_SIZE / 16];
+	SafeNumeric<uint64_t> raytracing_state_object_count;
+
+	ID3D12RootSignature *_get_local_root_signature(uint32_t p_record_size);
+	RaytracingPipelineID _raytracing_state_object_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader, bool p_library, uint32_t p_max_payload_size);
+	bool _raytracing_get_identifiers(RaytracingPipelineInfo *p_info, ID3D12StateObject *p_state_object, uint32_t p_first_group);
+	D3D12_DISPATCH_RAYS_DESC _dispatch_rays_desc(const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) const;
+	void _shader_binding_tables_transition(CommandBufferInfo *p_cmd_buf_info, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt);
+	// Slots of DISPATCH_RAYS_ARGUMENT_STRIDE bytes, which keeps every slot's 8-byte addresses aligned.
+	static constexpr uint32_t DISPATCH_RAYS_ARGUMENT_STRIDE = 128;
+	static constexpr uint32_t DISPATCH_RAYS_ARGUMENTS_PER_CHUNK = 32;
+
+public:
 	virtual RaytracingPipelineID raytracing_pipeline_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, ShaderID p_layout_defining_shader) override final;
 	virtual void raytracing_pipeline_free(RaytracingPipelineID p_pipeline) override final;
 
 	virtual bool raytracing_pipeline_get_shader_group_handles(RaytracingPipelineID p_pipeline, uint32_t p_group_index_offset, VectorView<uint32_t> p_group_indices, uint8_t *r_data, uint32_t p_data_stride_bytes) override final;
+
+	// GodotNext: d3d12_rt_pipelines (#121)
+	virtual RaytracingPipelineID raytracing_pipeline_library_create(VectorView<PipelineShader> p_shaders, VectorView<uint32_t> p_raygen_shader_indices, VectorView<uint32_t> p_miss_shader_indices, VectorView<HitGroup> p_hit_groups, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
+	virtual RaytracingPipelineID raytracing_pipeline_link(VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
+	virtual RaytracingPipelineID raytracing_pipeline_link_add(RaytracingPipelineID p_base, uint32_t p_base_library_count, VectorView<RaytracingPipelineID> p_libraries, uint32_t p_max_trace_recursion_depth, uint32_t p_max_payload_size, ShaderID p_layout_defining_shader) override final;
+	virtual String raytracing_pipeline_get_create_error(VectorView<PipelineShader> p_shaders, VectorView<HitGroup> p_hit_groups) override final;
+	virtual uint32_t raytracing_pipeline_get_hit_group_record_size(RaytracingPipelineID p_pipeline) override final;
 
 	// ----- COMMANDS -----
 
@@ -1043,6 +1118,8 @@ public:
 	virtual void command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) override final;
 	virtual void command_bind_raytracing_uniform_set(CommandBufferID p_cmd_buffer, UniformSetID p_uniform_set, ShaderID p_shader, uint32_t p_set_index) override final;
 	virtual void command_trace_rays(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, uint32_t p_width, uint32_t p_height, uint32_t p_depth) override final;
+	// GodotNext: d3d12_rt_pipelines (#121)
+	virtual void command_trace_rays_indirect(CommandBufferID p_cmd_buffer, const ShaderBindingTable &p_raygen_sbt, const ShaderBindingTable &p_miss_sbt, const ShaderBindingTable &p_hit_sbt, BufferID p_indirect_buffer, uint64_t p_offset) override final;
 
 	/*****************/
 	/**** QUERIES ****/

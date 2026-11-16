@@ -90,14 +90,38 @@ public:
 	// Mesa keeps a resource's register space in 5 bits (nir_variable::data.descriptor_set).
 	static_assert(DYNAMIC_BUFFER_SPACE_BASE + RenderingDeviceCommons::MAX_UNIFORM_SETS <= 32);
 	// GodotNext: dxil_toolchain (#123). Version 2 has 8 specialization-constant bit-offset slots instead of 3.
-	static constexpr uint32_t FORMAT_VERSION = 2;
-	// GodotNext: dxil_atomics (#279). The layout of version 2, with DXIL from a Mesa NIR library that declares atomics
-	// without readnone (25.3.1-gn3 or later, see declares_atomics_without_readnone()). A build writes this or
+	// GodotNext: d3d12_rt_pipelines (#121). Version 4 appends the ray-tracing stages' RaytracingStageDataD3D12 to the
+	// footer. Older containers are still read, without it (see has_raytracing_stage_data): versions 2 and 3 have
+	// version 2's layout.
+	static constexpr uint32_t FORMAT_VERSION = 4;
+	// GodotNext: dxil_atomics (#279). The layout of FORMAT_VERSION, with DXIL from a Mesa NIR library that declares
+	// atomics without readnone (25.3.1-gn3 or later, see declares_atomics_without_readnone()). A build writes this or
 	// FORMAT_VERSION, and shader caches rebuild containers of the other one, so a build with such a library and one
 	// with an older library do not reuse each other's DXIL. FORMAT_VERSION covers both 25.3.1-gn2 and the upstream
 	// library, whose builds still reuse each other's caches as before #279; a later library that changes DXIL again
-	// needs its own format version.
-	static constexpr uint32_t FORMAT_VERSION_ATOMICS_WITHOUT_READNONE = 3;
+	// needs its own format version. Before #121 the two were 2 and 3.
+	static constexpr uint32_t FORMAT_VERSION_ATOMICS_WITHOUT_READNONE = 5;
+	static constexpr uint32_t RAYTRACING_STAGE_DATA_FORMAT_VERSION = 4;
+	// GodotNext: d3d12_rt_pipelines (#121). A hit group's shader record (shaderRecordEXT) is the constant buffer at
+	// register SHADER_RECORD_REGISTER in ROOT_CONSTANT_SPACE, filled by the root constants of a local root signature
+	// from the record's bytes after the shader identifier. Before Mesa's register assignment the record is a uniform
+	// buffer at descriptor set SHADER_RECORD_SPIRV_SET (past every real set), binding 0.
+	static constexpr uint32_t SHADER_RECORD_REGISTER = 2;
+	static constexpr uint32_t SHADER_RECORD_SPIRV_SET = RenderingDeviceCommons::MAX_UNIFORM_SETS;
+	static constexpr uint32_t SHADER_RECORD_SPIRV_BINDING = 0;
+	static constexpr uint32_t RAYTRACING_STAGE_COUNT = RenderingDeviceCommons::SHADER_STAGE_INTERSECTION - RenderingDeviceCommons::SHADER_STAGE_RAYGEN + 1;
+	// GodotNext: d3d12_rt_pipelines (#121). The stages that have RaytracingStageDataD3D12 (by stage - SHADER_STAGE_RAYGEN):
+	// ray generation through intersection, and no stage after them.
+	static constexpr bool is_raytracing_stage(uint32_t p_stage) {
+		return p_stage >= RenderingDeviceCommons::SHADER_STAGE_RAYGEN && p_stage <= RenderingDeviceCommons::SHADER_STAGE_INTERSECTION;
+	}
+	// GodotNext: d3d12_rt_pipelines (#121). Whether a shader's root signature starts with its push constants (root
+	// constants at ROOT_CONSTANT_REGISTER): when a stage's DXIL reads them, and in every ray-tracing shader that declares
+	// them. A ray-tracing pipeline uses its layout-defining shader's root signature as the global root signature of every
+	// stage, including stages of other shaders, which may read push constants that this shader's stages do not.
+	static bool has_root_constants(RenderingDeviceCommons::PipelineType p_pipeline_type, uint32_t p_push_constant_size, uint32_t p_dxil_push_constant_stages) {
+		return p_dxil_push_constant_stages != 0 || (p_pipeline_type == RenderingDeviceCommons::PIPELINE_TYPE_RAYTRACING && p_push_constant_size > 0);
+	}
 	// GodotNext: dxil_toolchain (#123). The DXIL shader model ray query (inline ray tracing, tier 1.1) and the
 	// ray-tracing library targets need.
 	static constexpr uint32_t RAY_QUERY_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5
@@ -154,6 +178,32 @@ public:
 		uint64_t stages_bit_offsets[D3D12_BITCODE_OFFSETS_NUM_STAGES] = {};
 	};
 
+	// GodotNext: d3d12_rt_pipelines (#121). What a ray-tracing stage's DXIL library takes and reads, for its state
+	// object: the shader config's payload and attribute sizes, the hit group rules
+	// (RDRTPipeline::get_hit_group_interface_error()) and the local root signature of the shader record. Sizes in bytes,
+	// as DXIL lays the types out.
+	enum RaytracingStageFlags : uint32_t {
+		RAYTRACING_STAGE_PRESENT = 1 << 0,
+		// The stage declares and uses its payload parameter (rayPayloadInEXT); without it, it gets a stand-in.
+		RAYTRACING_STAGE_PAYLOAD_DECLARED = 1 << 1,
+		// The stage declares and uses its attributes parameter (hitAttributeEXT); without it, it gets a stand-in.
+		RAYTRACING_STAGE_ATTRIBUTES_DECLARED = 1 << 2,
+	};
+	struct RaytracingStageDataD3D12 {
+		uint32_t flags = 0;
+		// The largest ray payload the stage receives or passes to traceRayEXT (D3D12_RAYTRACING_SHADER_CONFIG).
+		uint32_t payload_size = 0;
+		// The same, measured as Vulkan measures it (RDRTPipeline::get_spirv_payload_size()), for the library limit.
+		uint32_t spirv_payload_size = 0;
+		// The payload parameter of an any-hit, closest-hit or miss stage, declared or stand-in.
+		uint32_t incoming_payload_size = 0;
+		// The attributes parameter of an any-hit or closest-hit stage (declared or stand-in), or the attributes an
+		// intersection stage reports.
+		uint32_t attribute_size = 0;
+		// The shader record constant buffer the stage reads (a multiple of 16 bytes), 0 when it reads none.
+		uint32_t record_size = 0;
+	};
+
 protected:
 	struct ReflectionDataD3D12 {
 		uint32_t spirv_specialization_constants_ids_mask = 0;
@@ -175,8 +225,17 @@ protected:
 	uint32_t root_signature_crc = 0;
 	// GodotNext: rd_indirect_count (#177). Set from ReflectShader::base_instance_native for one compilation.
 	bool base_instance_native = false;
+	// GodotNext: d3d12_rt_pipelines (#121). By stage - SHADER_STAGE_RAYGEN; read from containers of format version 4 or
+	// later (has_raytracing_stage_data).
+	RaytracingStageDataD3D12 raytracing_stage_data_d3d12[RAYTRACING_STAGE_COUNT];
+	bool has_raytracing_stage_data = false;
 
 #if NIR_ENABLED
+	// GodotNext: d3d12_rt_pipelines (#121)
+	void _add_raytracing_stand_ins(const HashMap<int, nir_shader *> &p_stages_nir_shaders);
+	void _remove_unused_resources(nir_shader *p_shader) const;
+	void _remap_shader_record(nir_shader *p_shader, RenderingDeviceCommons::ShaderStage p_stage);
+
 	bool _convert_spirv_to_nir(Span<ReflectShaderStage> p_spirv, const nir_shader_compiler_options *p_compiler_options, HashMap<int, nir_shader *> &r_stages_nir_shaders, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed);
 	bool _convert_nir_to_dxil(const HashMap<int, nir_shader *> &p_stages_nir_shaders, BitField<RenderingDeviceCommons::ShaderStage> p_stages_processed, HashMap<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &r_dxil_blobs);
 	bool _convert_spirv_to_dxil(Span<ReflectShaderStage> p_spirv, HashMap<RenderingDeviceCommons::ShaderStage, Vector<uint8_t>> &r_dxil_blobs, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed);
@@ -216,6 +275,9 @@ public:
 		Vector<ReflectionSpecializationDataD3D12> reflection_specialization_data_d3d12;
 		Vector<uint8_t> root_signature_bytes;
 		uint32_t root_signature_crc = 0;
+		// GodotNext: d3d12_rt_pipelines (#121)
+		RaytracingStageDataD3D12 raytracing_stages[RAYTRACING_STAGE_COUNT];
+		bool has_raytracing_stage_data = false;
 	};
 
 	RenderingShaderContainerD3D12();
