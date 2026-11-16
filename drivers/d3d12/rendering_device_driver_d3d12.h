@@ -111,6 +111,8 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		bool depth_bounds_supported = false;
 		bool uma_supported = false;
 		bool gpu_upload_heap_supported = false;
+		// GodotNext: d3d12_dxr (#118). D3D12MA places buffers with tight alignment.
+		bool tight_alignment_supported = false;
 	};
 
 	struct SamplerCapabilities {
@@ -130,6 +132,8 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	RenderingContextDriver::Device context_device;
 	Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
 	Microsoft::WRL::ComPtr<ID3D12Device> device;
+	// GodotNext: d3d12_dxr (#118). Null unless the device has DXR (ID3D12Device5).
+	Microsoft::WRL::ComPtr<ID3D12Device5> device_5;
 	DeviceLimits device_limits;
 	RDD::Capabilities device_capabilities;
 	uint32_t feature_level = 0; // Major * 10 + minor.
@@ -169,6 +173,13 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	};
 	BindlessCapabilities bindless_capabilities;
 	SamplerCapabilities sampler_capabilities;
+	// GodotNext: d3d12_dxr (#118)
+	D3D12RayQueryCaps ray_query_caps;
+	AccelerationStructureLimits acceleration_structure_limits;
+	uint32_t raytracing_tier = 0; // D3D12_RAYTRACING_TIER: 0, 10 (1.0), 11 (1.1), 12 (1.2).
+	uint32_t adapter_vendor_id = 0;
+	uint32_t adapter_device_id = 0;
+	uint64_t adapter_driver_version = 0; // The user-mode driver version, 0 when DXGI does not report it.
 	RenderingShaderContainerFormatD3D12 shader_container_format;
 	String pipeline_cache_id;
 	D3D12_HEAP_TYPE dynamic_persistent_upload_heap = D3D12_HEAP_TYPE_UPLOAD;
@@ -462,6 +473,8 @@ private:
 		UINT64 fence_value = 0;
 	};
 
+	void _on_device_removed(); // GodotNext: d3d12_dxr (#118)
+
 public:
 	virtual FenceID fence_create() override;
 	virtual Error fence_wait(FenceID p_fence) override;
@@ -561,6 +574,8 @@ private:
 		Microsoft::WRL::ComPtr<ID3D12CommandAllocator> cmd_allocator;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> cmd_list;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList1> cmd_list_1;
+		// GodotNext: d3d12_dxr (#118). Acceleration-structure builds, copies and postbuild info.
+		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList4> cmd_list_4;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList5> cmd_list_5;
 		Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList7> cmd_list_7;
 
@@ -940,13 +955,58 @@ public:
 
 	// ---- ACCELERATION STRUCTURES ----
 
+private:
+	// GodotNext: d3d12_dxr (#118). A DXR acceleration structure lives in a buffer that stays in
+	// D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE (legacy barriers) or carries
+	// D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE (enhanced barriers). Its GPU virtual
+	// address is fixed at creation; a TLAS instance and an AS SRV both name it.
+	struct AccelerationStructureInfo {
+		BufferID buffer;
+		D3D12_GPU_VIRTUAL_ADDRESS gpu_virtual_address = 0;
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+		D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE;
+		uint64_t size_bytes = 0;
+		uint64_t scratch_size = 0;
+		uint64_t update_scratch_size = 0;
+		// Bottom level only: the geometry descriptions with their input GPU addresses, and the input
+		// buffers, which the legacy barrier path moves to NON_PIXEL_SHADER_RESOURCE before a build.
+		TightLocalVector<D3D12_RAYTRACING_GEOMETRY_DESC> geometries;
+		TightLocalVector<BufferInfo *> input_buffers;
+	};
+
+	// Compacted-size queries: EmitRaytracingAccelerationStructurePostbuildInfo writes 8 bytes per
+	// structure into a UAV buffer, which is copied into a readback buffer in the same command list.
+	struct AccelerationStructureSizeQueryPoolInfo {
+		BufferID gpu_buffer;
+		BufferID readback_buffer;
+		uint32_t count = 0;
+	};
+
+	BufferID _acceleration_structure_buffer_create(uint64_t p_size, D3D12_GPU_VIRTUAL_ADDRESS &r_address);
+	D3D12_GPU_VIRTUAL_ADDRESS _acceleration_structure_scratch_address(const BufferInfo *p_scratch_buffer, uint64_t p_scratch_offset) const;
+	bool _acceleration_structure_allocate(AccelerationStructureInfo *p_info, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS &p_inputs);
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS _acceleration_structure_inputs(const AccelerationStructureInfo *p_info, uint32_t p_instance_count, D3D12_GPU_VIRTUAL_ADDRESS p_instances, bool p_update) const;
+	void _acceleration_structure_uav_barrier(CommandBufferInfo *p_cmd_buf_info, const AccelerationStructureInfo *p_info);
+
+public:
 	virtual AccelerationStructureID blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) override final;
+	// GodotNext: d3d12_dxr (#118)
+	virtual bool acceleration_structure_vertex_format_is_supported(DataFormat p_format) override final;
 	virtual AccelerationStructureID tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) override final;
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) override final;
 	virtual uint64_t acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) override final;
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) override final;
 	// GodotNext: as_build_modes
 	virtual uint32_t acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) override final;
+	// GodotNext: d3d12_dxr (#118)
+	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) override final;
+	virtual bool acceleration_structure_compaction_supported() const override final;
+	virtual QueryPoolID acceleration_structure_size_query_pool_create(uint32_t p_count) override final;
+	virtual void acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) override final;
+	virtual void acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) override final;
+	virtual void command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) override final;
+	virtual AccelerationStructureID acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) override final;
+	virtual void command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) override final;
 
 	// ----- PIPELINE -----
 
@@ -1029,8 +1089,11 @@ public:
 	virtual uint64_t limit_get(Limit p_limit) override final;
 	virtual uint64_t api_trait_get(ApiTrait p_trait) override final;
 	virtual bool has_feature(Features p_feature) override final;
-	// GodotNext: rq_substrate (#22). No DXR yet (#118).
-	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const override final { return RAY_QUERY_REASON_D3D12_NO_DXR; }
+	// GodotNext: rq_substrate (#22), d3d12_dxr (#118).
+	virtual RayQueryUnsupportedReason get_ray_query_unsupported_reason() const override final { return ray_query_caps.reason; }
+	// GodotNext: d3d12_dxr (#118). Vendor, device and user-mode driver version, so the HWRT fault latch
+	// clears when the driver changes.
+	virtual String get_driver_version_key() const override final;
 	virtual const MultiviewCapabilities &get_multiview_capabilities() override final;
 	virtual const FragmentShadingRateCapabilities &get_fragment_shading_rate_capabilities() override final;
 	virtual const FragmentDensityMapCapabilities &get_fragment_density_map_capabilities() override final;

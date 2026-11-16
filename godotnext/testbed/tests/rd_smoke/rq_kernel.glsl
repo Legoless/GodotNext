@@ -3,7 +3,8 @@
 #extension GL_EXT_ray_query : require
 
 // RD ray-query smoke kernel (#18): opaque traversal, one rayQueryProceedEXT,
-// committed getters only (the D5 rules in nextgi_rt_inc.glsl).
+// committed getters only (the D5 rules in nextgi_rt_inc.glsl). The ray cull
+// mask comes from the push constants (fixture E, #118).
 
 layout(local_size_x = 64) in;
 
@@ -38,7 +39,7 @@ results;
 
 layout(push_constant, std430) uniform Params {
 	uint count;
-	uint pad0;
+	uint cull_mask;
 	uint pad1;
 	uint pad2;
 }
@@ -51,7 +52,7 @@ void main() {
 	}
 	SmokeRay smoke_ray = rays.data[i];
 	rayQueryEXT rq;
-	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, smoke_ray.origin_tmin.xyz, smoke_ray.origin_tmin.w, smoke_ray.dir_tmax.xyz, smoke_ray.dir_tmax.w);
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, params.cull_mask & 0xFFu, smoke_ray.origin_tmin.xyz, smoke_ray.origin_tmin.w, smoke_ray.dir_tmax.xyz, smoke_ray.dir_tmax.w);
 	rayQueryProceedEXT(rq);
 
 	Result result;

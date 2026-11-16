@@ -107,6 +107,7 @@ func _run() -> Dictionary:
 		"max_rel_t": stats["max_rel_t"],
 		"max_abs_bary": stats["max_abs_bary"],
 		"mismatch": stats["mismatch"],
+		"hits": stats["hits"],
 		"failures": _failures,
 	}
 
@@ -241,7 +242,8 @@ func _trace(rd: RenderingDevice, shader: RID, tlas: RID, rays: PackedByteArray) 
 	var uniform_set := rd.uniform_set_create(uniforms, shader, 0)
 	var data := PackedByteArray()
 	if pipeline.is_valid() and uniform_set.is_valid():
-		var push := PackedInt32Array([RAYS, 0, 0, 0]).to_byte_array()
+		# rq_kernel.glsl takes the ray cull mask from the second push constant (#118).
+		var push := PackedInt32Array([RAYS, 0xFF, 0, 0]).to_byte_array()
 		var compute_list := rd.compute_list_begin()
 		rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
 		rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
@@ -256,7 +258,7 @@ func _trace(rd: RenderingDevice, shader: RID, tlas: RID, rays: PackedByteArray) 
 
 
 func _compare(cpu: PackedByteArray, gpu: PackedByteArray) -> Dictionary:
-	var stats := { "id_exact": 0, "max_rel_t": 0.0, "max_abs_bary": 0.0, "mismatch": 0 }
+	var stats := { "id_exact": 0, "max_rel_t": 0.0, "max_abs_bary": 0.0, "mismatch": 0, "hits": 0 }
 	_check(cpu.size() == gpu.size() and cpu.size() == RAYS * RECORD_SIZE, "both traces returned %d records" % RAYS)
 	if cpu.size() != gpu.size():
 		return stats
@@ -274,6 +276,7 @@ func _compare(cpu: PackedByteArray, gpu: PackedByteArray) -> Dictionary:
 			stats["mismatch"] += 1
 		if cpu_committed == 0 or gpu_committed == 0:
 			continue
+		stats["hits"] += 1
 		var cpu_t := cpu.decode_float(o)
 		var gpu_t := gpu.decode_float(o)
 		var rel_t := absf(cpu_t - gpu_t) / maxf(absf(cpu_t), 1e-9)
@@ -284,6 +287,9 @@ func _compare(cpu: PackedByteArray, gpu: PackedByteArray) -> Dictionary:
 			stats["mismatch"] += 1
 	if stats["id_exact"] != RAYS:
 		_failures.append("GPU TLAS IDs differ on %d of %d rays" % [RAYS - stats["id_exact"], RAYS])
+	# Two traces that miss everywhere agree too, so the rays must hit (#118).
+	if stats["hits"] == 0:
+		_failures.append("no ray hit either TLAS")
 	if stats["max_rel_t"] > REL_T_TOLERANCE:
 		_failures.append("max relative t %f exceeds %f" % [stats["max_rel_t"], REL_T_TOLERANCE])
 	return stats

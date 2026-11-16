@@ -72,6 +72,18 @@ def _fixture_rows() -> dict[str, tuple[list[dict[str, object]], list[dict[str, o
     tri = [_hit(t=5.0, custom_index=7, primitive=0), _hit(t=5.0, custom_index=7, primitive=0, front_face=0)]
     rays = [_hit(), _hit(t=3.5, custom_index=1002, primitive=4, u=0.1, v=0.2)]
     winding = [_hit(custom_index=2000, primitive=0), _hit(custom_index=2001, primitive=0, front_face=0)]
+    miss: dict[str, object] = {
+        "t": -1.0,
+        "custom_index": 0,
+        "primitive": 0,
+        "u": 0.0,
+        "v": 0.0,
+        "front_face": 0,
+        "committed": 0,
+        "candidate_count": 0,
+    }
+    ids = [_hit(t=5.0, custom_index=0xFFFFFF, primitive=0), miss]
+    pixel = [_hit(t=5.0, custom_index=7, primitive=0, u=0.03125, v=0.03125), dict(miss)]
     edge_records = [_edge_record(2), _edge_record(5)]
     edge_analytic = [_edge_analytic([2, 3]), _edge_analytic([4, 5])]
     return {
@@ -79,6 +91,8 @@ def _fixture_rows() -> dict[str, tuple[list[dict[str, object]], list[dict[str, o
         "rays": (rays, rays),
         "edges": (edge_records, edge_analytic),
         "winding": (winding, winding),
+        "ids": (ids, ids),
+        "pixel": (pixel, pixel),
     }
 
 
@@ -107,11 +121,11 @@ def _write_dump(
     return folder
 
 
-def test_analytic_mode_passes_on_all_four_fixtures(tmp_path: Path) -> None:
+def test_analytic_mode_passes_on_all_six_fixtures(tmp_path: Path) -> None:
     result = q17_dump(_write_dump(tmp_path / "metal"))
     assert result.passed
     assert _values(result)["mode"] == "analytic"
-    assert set(_values(result)["fixtures"]) == {"tri", "rays", "edges", "winding"}
+    assert set(_values(result)["fixtures"]) == {"tri", "rays", "edges", "winding", "ids", "pixel"}
     assert _values(result)["in_device"] == {"driver": "metal", "adapter": "metal device"}
 
 
@@ -176,6 +190,16 @@ def test_across_api_id_mismatch_fails(tmp_path: Path) -> None:
     result = q17_dump(vulkan, metal)
     assert not result.passed
     assert _values(result)["fixtures"]["rays"]["failures"] == 1
+
+
+def test_ids_fixture_hit_versus_miss_fails(tmp_path: Path) -> None:
+    # #118: a mask or miss bug turns an expected miss into a hit (or back).
+    folder = _write_dump(
+        tmp_path / "d3d12", overrides={"ids": {1: {"committed": 1, "t": 5.0, "custom_index": 0xFFFFFF}}}
+    )
+    result = q17_dump(folder)
+    assert not result.passed
+    assert any("ids record 1: custom_index 16777215 != 0" in failure for failure in _failures(result))
 
 
 def test_across_api_winding_front_face_mismatch_fails(tmp_path: Path) -> None:

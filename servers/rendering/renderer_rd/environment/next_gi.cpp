@@ -228,16 +228,19 @@ void NextGI::collect_device_inputs(const RenderingDevice *p_device, const String
 	// mocked devices of the doctests) the API name decides, as before.
 	RenderingDeviceDriver *driver = p_device != nullptr ? p_device->get_device_driver() : nullptr;
 	if (driver != nullptr) {
-		r_inputs.ray_query_hw = p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY_HARDWARE);
-		r_inputs.driver_reason = _nextgi_reason_from_driver(driver->get_ray_query_unsupported_reason());
-		if (r_inputs.ray_query) {
-			r_inputs.driver_reason = TIER_REASON_NONE;
-		}
+		apply_driver_ray_query(r_inputs.ray_query, p_device->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY_HARDWARE), driver->get_ray_query_unsupported_reason(), r_inputs);
 		return;
 	}
 
 	r_inputs.driver_reason = r_inputs.ray_query ? TIER_REASON_NONE : (p_api_name == "D3D12" ? D3D12_NO_DXR : NO_RAY_QUERY);
 	r_inputs.ray_query_hw = r_inputs.ray_query;
+}
+
+// GodotNext: d3d12_dxr (#118)
+void NextGI::apply_driver_ray_query(bool p_ray_query, bool p_ray_query_hw, RenderingDeviceCommons::RayQueryUnsupportedReason p_reason, TierInputs &r_inputs) {
+	r_inputs.ray_query = p_ray_query;
+	r_inputs.ray_query_hw = p_ray_query_hw;
+	r_inputs.driver_reason = p_ray_query ? TIER_REASON_NONE : _nextgi_reason_from_driver(p_reason);
 }
 
 // GodotNext: ps_swrt_trace (#186, #188)
@@ -1569,7 +1572,7 @@ String RendererRD::NextGI::build_toolchain_selftest_source() {
 }
 
 bool RendererRD::NextGI::run_toolchain_selftest(String &r_report) {
-	// Metal and D3D12 do not expose ray query yet (#48, #47, PD). Leave the ShaderRD untouched.
+	// A device without ray query leaves the ShaderRD untouched.
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	if (rd == nullptr || !rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY)) {
 		r_report = "{\"pass\":false,\"reason\":\"NO_RAY_QUERY\"}";

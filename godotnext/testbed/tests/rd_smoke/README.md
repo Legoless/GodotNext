@@ -13,9 +13,12 @@ assert the fallback; they never skip.
 | B | `rays` | 64 instances (ids 1000–1063) of a 1 m quad and an 8-triangle bipyramid on a centered 10 m grid, seeded rotations | 4096, seed `0x4E455854` | IDs, primitive, front face and committed exact; t within 1e-5 relative; barycentrics within 1e-5 absolute |
 | C | `edges` | Same scene; geometry built with `NO_DUPLICATE_ANY_HIT_INVOCATION` | 1024 at shared edges | `candidate_count == 1` and the primitive is one of the two adjacent triangles |
 | D | `winding` | One triangle in six instances (ids 2000–2005): plain, `FLIP_FACING`, mirrored (x scale −1), mirrored + `FLIP_FACING`, turned 180°, `FACING_CULL_DISABLE` | 36, from both sides | As A, with the front face of the facing rule below |
+| E | `ids` | One triangle in three instances: custom index 0xFFFFFF (the 24-bit maximum) with mask 0x01, 0xABC with mask 0x02, and mask 0x00 | 12, under ray cull masks 0xFF, 0x02, 0x01 and 0x03, plus misses into empty space, short of the triangle (tmax) and from past it (tmin) | Hits as A; a masked-out instance, an instance with mask 0 and every miss report committed 0 (#118) |
+| F | `pixel` | Fixture A's triangle, traced from a fragment shader: a fullscreen triangle over an 8x8 RGBA32F target holding t, u, v and the packed primitive index, custom index and front face; one ray per pixel from a quarter pixel before its center | 64; the 36 with x + y ≤ 7 hit | As A for hits; misses committed 0 with t = −1. Committed and the candidate count come from the hit flag (#118) |
 
-Every fixture runs with BLAS inputs in vertex/index buffers and again in
-storage buffers; the result records must be bit-identical. The analytic side
+Fixtures A to E run with BLAS inputs in vertex/index buffers and again in
+storage buffers; the result records must be bit-identical. Fixture F uses
+vertex buffers only. The analytic side
 intersects the exact float32 values the GPU receives (float32 vertices,
 float32 instance transforms, float32-quantized rays) against every world
 triangle in double precision, and rejects any fixture B ray whose
@@ -26,7 +29,9 @@ barycentric distance of an edge.
 
 - `rd_smoke.tscn` / `rd_smoke.gd` — the fixtures and the comparison.
 - `rq_kernel.glsl` — opaque traversal, one `rayQueryProceedEXT`, committed
-  getters (the D5 rules of `nextgi_rt_inc.glsl`). Fixtures A, B and D.
+  getters (the D5 rules of `nextgi_rt_inc.glsl`); the ray cull mask comes from
+  the push constants. Fixtures A, B, D and E. Fixture F's vertex and fragment
+  shaders are inline in `rd_smoke.gd`.
 - `rq_edges.glsl` — fixture C only: `gl_RayFlagsNoOpaqueEXT` with a candidate
   loop, so double hits and cracks on shared edges are visible.
 - `run_rd_smoke.sh` — the M5 Max runner (Metal validation plus the Q17 tool).
@@ -45,7 +50,7 @@ The dump folder is the Q17 tool's input (`harness/metrics`, #49):
 
 - `meta.json`: the schema, the driver and adapter names, the seed and the
   record count of each fixture;
-- `<name>.bin` for `tri`, `rays`, `edges` and `winding`: the 32-byte Q17
+- `<name>.bin` for `tri`, `rays`, `edges`, `winding`, `ids` and `pixel`: the 32-byte Q17
   records shared with #14 (`{float t; uint custom_index; uint primitive;
   float u; float v; uint front_face; uint committed; uint candidate_count;}`);
 - `<name>_analytic.json`: the analytic expectations. Edge rows carry only
@@ -119,9 +124,14 @@ godotnext/testbed/harness/runners/run_remote.sh job rd_smoke.json /tmp/rd_smoke_
 ```
 
 The dump comes back in `/tmp/rd_smoke_remote/rd-smoke/dump`. With
-`--rendering-driver d3d12` the test takes the fallback (`D3D12_NO_DXR`) until
-PD. The Linux VM runs the full test if lavapipe exposes ray query and the
-fallback otherwise; record which ran.
+`"driver": "d3d12"` the same job runs the D3D12 (DXR 1.1) path when the build
+links the GodotNext Mesa NIR library (#118, #123). A build with the upstream
+library takes the fallback (`D3D12_NO_DXR`). Debug builds take
+`GODOT_D3D12_LEGACY_BARRIERS=1` in the job's `env` to run D3D12's legacy
+resource-state path on a device with enhanced barriers. Compare a D3D12 dump
+with a Vulkan dump from the same machine with the Q17 tool's `--ref` (GD-1).
+The Linux VM runs the full test if lavapipe exposes ray query and the fallback
+otherwise; record which ran.
 
 ## Q17 metric tool and SPIR-V validation
 

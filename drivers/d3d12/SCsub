@@ -133,8 +133,17 @@ mesa_label_file = Path(Dir(mesa_libs).abspath + "/godotnext-mesa.txt")
 if mesa_label_file.is_file():
     mesa_label_lines = mesa_label_file.read_text(encoding="utf-8-sig").splitlines()
     mesa_label = mesa_label_lines[0].strip() if mesa_label_lines else ""
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-gn[0-9]+", mesa_label) is None:
+    mesa_label_match = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)-gn([0-9]+)", mesa_label)
+    if mesa_label_match is None:
         print_error(f'Unrecognized label "{mesa_label}" in {mesa_label_file}; expected <version>-gn<number>.')
+        sys.exit(255)
+    # GodotNext: d3d12_dxr (#118). 25.3.1-gn1 reads the ray-query instance custom index as the instance index, so
+    # D3D12 ray query (DXR 1.1) would return wrong custom indices and the NextGI self-test would never pass.
+    if tuple(int(part) for part in mesa_label_match.groups()) < (25, 3, 1, 2):
+        print_error(
+            f'The GodotNext Mesa NIR library "{mesa_label}" in {mesa_label_file} is too old: D3D12 ray query needs '
+            "25.3.1-gn2 or later, which reads the instance custom index as DXIL InstanceID."
+        )
         sys.exit(255)
     print_info(f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} (ray query and ray-tracing stages).")
     extra_defines += [

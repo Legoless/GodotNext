@@ -109,6 +109,59 @@ RenderingDeviceDriver::VulkanRayQueryCaps RenderingDeviceDriver::vulkan_ray_quer
 	return caps;
 }
 
+// GodotNext: d3d12_dxr (#118)
+RenderingDeviceDriver::D3D12RayQueryCaps RenderingDeviceDriver::d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id) {
+	D3D12RayQueryCaps caps;
+	// The first failing check wins.
+	if (p_raytracing_tier < D3D12_RAY_QUERY_MIN_RAYTRACING_TIER) {
+		caps.missing = "raytracing tier 1.1";
+		return caps;
+	}
+	if (p_shader_model < D3D12_RAY_QUERY_MIN_SHADER_MODEL) {
+		caps.missing = "shader model 6.5";
+		return caps;
+	}
+	if (p_shader_model < D3D12_BUFFER_DEVICE_ADDRESS_MIN_SHADER_MODEL) {
+		caps.missing = "shader model 6.6 (buffer device addresses)";
+		return caps;
+	}
+	if (!p_ray_query_toolchain) {
+		caps.missing = "a Mesa NIR library with ray query";
+		return caps;
+	}
+	caps.ray_query = true;
+	caps.hardware = RenderingContextDriver::is_ray_query_hardware_device(p_vendor_id, p_device_id);
+	caps.reason = RAY_QUERY_SUPPORTED;
+	return caps;
+}
+
+// GodotNext: d3d12_dxr (#118)
+bool RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(DataFormat p_format) {
+	switch (p_format) {
+		// Tier 1.0.
+		case DATA_FORMAT_R32G32_SFLOAT:
+		case DATA_FORMAT_R32G32B32_SFLOAT:
+		case DATA_FORMAT_R16G16_SFLOAT:
+		case DATA_FORMAT_R16G16B16A16_SFLOAT:
+		case DATA_FORMAT_R16G16_SNORM:
+		case DATA_FORMAT_R16G16B16A16_SNORM:
+		// Tier 1.1. A2B10G10R10_PACK32 keeps R in the low bits, as DXGI_FORMAT_R10G10B10A2_UNORM does, and
+		// A8B8G8R8_PACK32 has the bytes of R8G8B8A8.
+		case DATA_FORMAT_R16G16B16A16_UNORM:
+		case DATA_FORMAT_R16G16_UNORM:
+		case DATA_FORMAT_A2B10G10R10_UNORM_PACK32:
+		case DATA_FORMAT_R8G8B8A8_UNORM:
+		case DATA_FORMAT_A8B8G8R8_UNORM_PACK32:
+		case DATA_FORMAT_R8G8_UNORM:
+		case DATA_FORMAT_R8G8B8A8_SNORM:
+		case DATA_FORMAT_A8B8G8R8_SNORM_PACK32:
+		case DATA_FORMAT_R8G8_SNORM:
+			return true;
+		default:
+			return false;
+	}
+}
+
 bool RenderingDeviceDriver::acceleration_structure_limit_get(Limit p_limit, const AccelerationStructureLimits &p_limits, uint64_t &r_value) {
 	switch (p_limit) {
 		case LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES:
@@ -146,6 +199,12 @@ String RenderingDeviceDriver::format_driver_version_key(const String &p_vendor, 
 
 String RenderingDeviceDriver::format_vulkan_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint32_t p_driver_version) {
 	return String::num_uint64(p_vendor_id) + ":" + String::num_uint64(p_device_id) + ":" + String::num_uint64(p_driver_version);
+}
+
+// GodotNext: d3d12_dxr (#118)
+String RenderingDeviceDriver::format_d3d12_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint64_t p_driver_version) {
+	const String version = vformat("%d.%d.%d.%d", (p_driver_version >> 48) & 0xFFFF, (p_driver_version >> 32) & 0xFFFF, (p_driver_version >> 16) & 0xFFFF, p_driver_version & 0xFFFF);
+	return "D3D12:" + String::num_uint64(p_vendor_id) + ":" + String::num_uint64(p_device_id) + ":" + version;
 }
 
 void RenderingDeviceDriver::set_driver_version_identity(const String &p_vendor, const String &p_device_name) {

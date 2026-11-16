@@ -18,6 +18,17 @@ extends Node
 ##   FACING_CULL_DISABLE), hit from both sides. The expected front face follows
 ##   the Vulkan facing rule: facing is decided in the instance's space, so a
 ##   mirrored instance transform inverts it and FLIP_FACING inverts it again.
+## - Fixture E (IDs, masks and misses, #118): one triangle in three instances
+##   with custom index 0xFFFFFF (the 24-bit maximum) and mask 0x01, custom
+##   index 0xABC and mask 0x02, and mask 0x00 (never hit). Rays under cull
+##   masks 0xFF, 0x02 and 0x01, plus rays that miss: into empty space, short
+##   of the triangle (tmax) and starting past it (tmin). Hits exact as in
+##   fixture A; misses report committed 0.
+## - Fixture F (pixel shader, #118): ray query in a fragment shader. A
+##   fullscreen triangle covers an 8x8 RGBA32F target; each pixel traces one ray
+##   straight down from a quarter pixel before its center onto fixture A's
+##   triangle, so the 36 pixels with x + y <= 7 hit and none meets an edge.
+##   Exact as in fixture A.
 ##
 ## Every fixture runs twice, once with BLAS inputs in vertex/index buffers
 ## and once in storage buffers; the two result buffers must be bit-identical.
@@ -36,7 +47,7 @@ extends Node
 ##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on failure.
 ## The dump folder is the Q17 tool's input (harness/metrics, #49): meta.json,
-## and for each fixture (tri, rays, edges, winding) <name>.bin with the 32-byte
+## and for each fixture (tri, rays, edges, winding, ids, pixel) <name>.bin with the 32-byte
 ## Q17 records and <name>_analytic.json with the analytic expectations, plus
 ## kernel.spv and edges.spv.
 
@@ -53,6 +64,46 @@ const DUMP_SCHEMA := 1
 const WINDING_ID_BASE := 2000
 const WINDING_DISTANCE := 5.0
 const WINDING_BARYS: Array[Vector2] = [Vector2(0.25, 0.25), Vector2(0.6, 0.2), Vector2(0.1, 0.7)]
+const IDS_MAX_CUSTOM_INDEX := 0xFFFFFF
+const IDS_SECOND_CUSTOM_INDEX := 0xABC
+const IDS_DISTANCE := 5.0
+const PIXEL_SIZE := 8
+const PIXEL_CUSTOM_INDEX := 7
+# Fixture F. The fragment shader writes (t, u, v, primitive << 9 | custom index << 1 | front face), or
+# (-1, 0, 0, -1) on a miss; the packed integer stays below 2^24, so it is exact in float32. Its ray starts at
+# ((frag_coord - 0.25) / 8, 0): exact in float32, and off every edge. The record's committed and candidate
+# count come from the hit flag, as rq_kernel.glsl writes them.
+const PIXEL_VERTEX_GLSL := """
+#version 450
+
+void main() {
+	vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+	gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+"""
+const PIXEL_FRAGMENT_GLSL := """
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+
+layout(location = 0) out vec4 frag_color;
+
+void main() {
+	vec2 xy = (gl_FragCoord.xy - 0.25) / 8.0;
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, vec3(xy, 0.0), 0.001, vec3(0.0, 0.0, -1.0), 100.0);
+	rayQueryProceedEXT(rq);
+	frag_color = vec4(-1.0, 0.0, 0.0, -1.0);
+	if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+		vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+		uint front = rayQueryGetIntersectionFrontFaceEXT(rq, true) ? 1u : 0u;
+		uint custom_index = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+		uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+		frag_color = vec4(rayQueryGetIntersectionTEXT(rq, true), bary, float((primitive << 9u) | (custom_index << 1u) | front));
+	}
+}
+"""
 const REASON_NAMES := {
 	RenderingDevice.RAY_QUERY_SUPPORTED: "RAY_QUERY_SUPPORTED",
 	RenderingDevice.RAY_QUERY_REASON_NO_RAY_QUERY: "NO_RAY_QUERY",
@@ -101,11 +152,13 @@ func _run() -> Dictionary:
 
 	var kernel := _load_kernel(rd, "res://tests/rd_smoke/rq_kernel.glsl", _out_path("kernel.spv"))
 	var edges := _load_kernel(rd, "res://tests/rd_smoke/rq_edges.glsl", _out_path("edges.spv"))
-	var stats := { "id_exact": 0, "front_face_exact": 0, "edge_ok": 0, "winding_front_face_exact": 0 }
+	var stats := { "id_exact": 0, "front_face_exact": 0, "edge_ok": 0, "winding_front_face_exact": 0, "ids_exact": 0, "pixel_exact": 0 }
 	if kernel.is_valid():
 		_fixture_a(rd, kernel)
 		_fixture_b(rd, kernel, stats)
 		_fixture_d(rd, kernel, stats)
+		_fixture_e(rd, kernel, stats)
+	_fixture_f(rd, stats)
 	if edges.is_valid():
 		_fixture_c(rd, edges, stats)
 	_free_all(rd, [kernel, edges])
@@ -128,6 +181,10 @@ func _run() -> Dictionary:
 		"id_exact": stats["id_exact"],
 		"front_face_exact": stats["front_face_exact"],
 		"winding_front_face_exact": stats["winding_front_face_exact"],
+		"ids": _ids_ray_list().size(),
+		"ids_exact": stats["ids_exact"],
+		"pixels": PIXEL_SIZE * PIXEL_SIZE,
+		"pixel_exact": stats["pixel_exact"],
 		"max_rel_t": _max_rel_t,
 		"max_abs_bary": _max_abs_bary,
 		"edge_ok": stats["edge_ok"],
@@ -241,11 +298,11 @@ func _triangle_count(verts: Array[float], indices: Array[int]) -> int:
 	return indices.size() / 3 if not indices.is_empty() else verts.size() / 9
 
 
-func _instance(blas: RID, id: int, transform: Transform3D, flags: int = 0) -> RDAccelerationStructureInstance:
+func _instance(blas: RID, id: int, transform: Transform3D, flags: int = 0, mask: int = 0xFF) -> RDAccelerationStructureInstance:
 	var instance := RDAccelerationStructureInstance.new()
 	instance.blas = blas
 	instance.id = id
-	instance.mask = 0xFF
+	instance.mask = mask
 	instance.hit_sbt_range = 0
 	instance.transform = transform
 	instance.flags = flags
@@ -258,9 +315,9 @@ func _build_tlas(rd: RenderingDevice, instances: Array[RDAccelerationStructureIn
 	return tlas
 
 
-# Dispatches count rays (32 bytes each: origin/tmin, dir/tmax) and returns
-# the raw Q17 result records.
-func _trace(rd: RenderingDevice, shader: RID, tlas: RID, rays: PackedByteArray, count: int) -> PackedByteArray:
+# Dispatches count rays (32 bytes each: origin/tmin, dir/tmax) with the given
+# ray cull mask and returns the raw Q17 result records.
+func _trace(rd: RenderingDevice, shader: RID, tlas: RID, rays: PackedByteArray, count: int, cull_mask: int = 0xFF) -> PackedByteArray:
 	var pipeline := rd.compute_pipeline_create(shader)
 	var ray_buffer := rd.storage_buffer_create(rays.size(), rays)
 	var result_buffer := rd.storage_buffer_create(count * RECORD_SIZE)
@@ -277,7 +334,7 @@ func _trace(rd: RenderingDevice, shader: RID, tlas: RID, rays: PackedByteArray, 
 	_check(pipeline.is_valid() and uniform_set.is_valid(), "trace pipeline and uniform set are created")
 	var data := PackedByteArray()
 	if pipeline.is_valid() and uniform_set.is_valid():
-		var push := PackedInt32Array([count, 0, 0, 0]).to_byte_array()
+		var push := PackedInt32Array([count, cull_mask, 0, 0]).to_byte_array()
 		var compute_list := rd.compute_list_begin()
 		rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
 		rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
@@ -803,6 +860,178 @@ func _fixture_d(rd: RenderingDevice, shader: RID, stats: Dictionary) -> void:
 		_free_all(rd, [tlas] + Array(built))
 	if variants.size() == 2:
 		_check(variants[0] == variants[1], "fixture D vertex-buffer and storage-buffer results are bit-identical")
+
+
+# Fixture E rays: [cull mask, target instance x offset, tmin, tmax, expected
+# custom index or -1 for a miss]. The instances sit at x = 0 (custom index
+# 0xFFFFFF, mask 0x01), x = 3 (0xABC, mask 0x02) and x = 6 (mask 0x00).
+func _ids_ray_list() -> Array:
+	return [
+		[0xFF, 0.0, 0.001, 100.0, IDS_MAX_CUSTOM_INDEX],
+		[0xFF, 3.0, 0.001, 100.0, IDS_SECOND_CUSTOM_INDEX],
+		[0xFF, 6.0, 0.001, 100.0, -1], # Instance mask 0x00 is never included.
+		[0xFF, -3.0, 0.001, 100.0, -1], # Empty space.
+		[0xFF, 0.0, 0.001, 4.0, -1], # tmax short of the triangle.
+		[0xFF, 0.0, 6.0, 100.0, -1], # tmin past the triangle.
+		[0x02, 0.0, 0.001, 100.0, -1], # 0x02 & 0x01 == 0.
+		[0x02, 3.0, 0.001, 100.0, IDS_SECOND_CUSTOM_INDEX],
+		[0x01, 0.0, 0.001, 100.0, IDS_MAX_CUSTOM_INDEX],
+		[0x01, 3.0, 0.001, 100.0, -1], # 0x01 & 0x02 == 0.
+		[0x03, 6.0, 0.001, 100.0, -1], # No cull mask reaches mask 0x00.
+		[0x03, 3.0, 0.001, 100.0, IDS_SECOND_CUSTOM_INDEX],
+	]
+
+
+func _ids_expected(custom_index: int) -> Dictionary:
+	if custom_index < 0:
+		return { "t": -1.0, "custom_index": 0, "primitive": 0, "u": 0.0, "v": 0.0, "front_face": 0, "committed": 0, "candidate_count": 0 }
+	return { "t": IDS_DISTANCE, "custom_index": custom_index, "primitive": 0, "u": 0.25, "v": 0.25, "front_face": 1, "committed": 1, "candidate_count": 1 }
+
+
+func _fixture_e(rd: RenderingDevice, shader: RID, stats: Dictionary) -> void:
+	var cases := _ids_ray_list()
+	var expected: Array = []
+	for ray_case in cases:
+		expected.append(_ids_expected(ray_case[4]))
+	var variants: Array[PackedByteArray] = []
+	for storage in [false, true]:
+		var built := _build_blas(rd, TRI_VERTS, [], storage, false)
+		var instances: Array[RDAccelerationStructureInstance] = [
+			_instance(built[0], IDS_MAX_CUSTOM_INDEX, Transform3D(Basis(), Vector3(0, 0, -IDS_DISTANCE)), 0, 0x01),
+			_instance(built[0], IDS_SECOND_CUSTOM_INDEX, Transform3D(Basis(), Vector3(3, 0, -IDS_DISTANCE)), 0, 0x02),
+			_instance(built[0], 1, Transform3D(Basis(), Vector3(6, 0, -IDS_DISTANCE)), 0, 0x00),
+		]
+		var tlas := _build_tlas(rd, instances)
+		# One dispatch per ray: each carries its own cull mask in the push constants.
+		var data := PackedByteArray()
+		for ray_case in cases:
+			var rays := PackedByteArray()
+			_append_ray(rays, [ray_case[1] + 0.25, 0.25, 0], ray_case[2], [0, 0, -1], ray_case[3])
+			data.append_array(_trace(rd, shader, tlas, rays, 1, ray_case[0]))
+		_check(data.size() == cases.size() * RECORD_SIZE, "fixture E returns %d records (storage=%s)" % [cases.size(), storage])
+		if data.size() == cases.size() * RECORD_SIZE:
+			var exact := 0
+			var wrong := PackedStringArray()
+			for i in cases.size():
+				var got := _record(data, i)
+				var want: Dictionary = expected[i]
+				var ok: bool = got["custom_index"] == want["custom_index"] and got["primitive"] == want["primitive"] and got["committed"] == want["committed"] and got["front_face"] == want["front_face"] and got["candidate_count"] == want["candidate_count"]
+				if want["committed"] == 1:
+					ok = ok and absf(got["t"] - want["t"]) / want["t"] <= REL_T_TOLERANCE and maxf(absf(got["u"] - want["u"]), absf(got["v"] - want["v"])) <= ABS_BARY_TOLERANCE
+				else:
+					ok = ok and got["t"] == -1.0
+				if ok:
+					exact += 1
+				else:
+					wrong.append("%d (mask 0x%02X, x %s)" % [i, cases[i][0], cases[i][1]])
+			_check(wrong.is_empty(), "fixture E IDs, masks and misses match (storage=%s); wrong rays: %s" % [storage, ", ".join(wrong)])
+			if not storage:
+				stats["ids_exact"] = exact
+				_dump("ids", data, expected)
+		variants.append(data)
+		_free_all(rd, [tlas] + Array(built))
+	if variants.size() == 2:
+		_check(variants[0] == variants[1], "fixture E vertex-buffer and storage-buffer results are bit-identical")
+
+
+# Fixture F's analytic record for the pixel in column x, row y.
+func _pixel_expected(x: int, y: int) -> Dictionary:
+	var u := (x + 0.25) / PIXEL_SIZE
+	var v := (y + 0.25) / PIXEL_SIZE
+	if u + v >= 1.0:
+		return _ids_expected(-1)
+	return { "t": 5.0, "custom_index": PIXEL_CUSTOM_INDEX, "primitive": 0, "u": u, "v": v, "front_face": 1, "committed": 1, "candidate_count": 1 }
+
+
+# Renders fixture F and returns its pixels as Q17 records, or an empty array on failure.
+func _render_pixels(rd: RenderingDevice, shader: RID, tlas: RID) -> PackedByteArray:
+	var format := RDTextureFormat.new()
+	format.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
+	format.width = PIXEL_SIZE
+	format.height = PIXEL_SIZE
+	format.usage_bits = RenderingDevice.TEXTURE_USAGE_COLOR_ATTACHMENT_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+	var color := rd.texture_create(format, RDTextureView.new())
+	var framebuffer_textures: Array[RID] = [color]
+	var framebuffer := rd.framebuffer_create(framebuffer_textures)
+	var blend := RDPipelineColorBlendState.new()
+	var attachments: Array[RDPipelineColorBlendStateAttachment] = [RDPipelineColorBlendStateAttachment.new()]
+	blend.attachments = attachments
+	var pipeline := rd.render_pipeline_create(shader, rd.framebuffer_get_format(framebuffer), RenderingDevice.INVALID_FORMAT_ID, RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend)
+	var uniform := RDUniform.new()
+	uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_ACCELERATION_STRUCTURE
+	uniform.binding = 0
+	uniform.add_id(tlas)
+	var uniforms: Array[RDUniform] = [uniform]
+	var uniform_set := rd.uniform_set_create(uniforms, shader, 0)
+	_check(color.is_valid() and framebuffer.is_valid() and pipeline.is_valid() and uniform_set.is_valid(), "fixture F target, pipeline and uniform set are created")
+	var records := PackedByteArray()
+	if color.is_valid() and framebuffer.is_valid() and pipeline.is_valid() and uniform_set.is_valid():
+		var draw_list := rd.draw_list_begin(framebuffer, RenderingDevice.DRAW_CLEAR_COLOR_0, PackedColorArray([Color(0, 0, 0, 0)]))
+		rd.draw_list_bind_render_pipeline(draw_list, pipeline)
+		rd.draw_list_bind_uniform_set(draw_list, uniform_set, 0)
+		rd.draw_list_draw(draw_list, false, 1, 3)
+		rd.draw_list_end()
+		rd.submit()
+		rd.sync()
+		var pixels := rd.texture_get_data(color, 0)
+		_check(pixels.size() == PIXEL_SIZE * PIXEL_SIZE * 16, "fixture F reads back %d pixels" % (PIXEL_SIZE * PIXEL_SIZE))
+		if pixels.size() == PIXEL_SIZE * PIXEL_SIZE * 16:
+			records.resize(PIXEL_SIZE * PIXEL_SIZE * RECORD_SIZE)
+			for i in PIXEL_SIZE * PIXEL_SIZE:
+				var t := pixels.decode_float(i * 16)
+				var packed := pixels.decode_float(i * 16 + 12)
+				var hit := packed >= 0.0
+				var bits: int = int(packed) if hit else 0
+				var o := i * RECORD_SIZE
+				records.encode_float(o, t)
+				records.encode_u32(o + 4, (bits >> 1) & 0xFF)
+				records.encode_u32(o + 8, bits >> 9)
+				records.encode_float(o + 12, pixels.decode_float(i * 16 + 4))
+				records.encode_float(o + 16, pixels.decode_float(i * 16 + 8))
+				records.encode_u32(o + 20, bits & 1)
+				records.encode_u32(o + 24, 1 if hit else 0)
+				records.encode_u32(o + 28, 1 if hit else 0)
+	_free_all(rd, [uniform_set, pipeline, framebuffer, color])
+	return records
+
+
+func _fixture_f(rd: RenderingDevice, stats: Dictionary) -> void:
+	var source := RDShaderSource.new()
+	source.source_vertex = PIXEL_VERTEX_GLSL
+	source.source_fragment = PIXEL_FRAGMENT_GLSL
+	var spirv := rd.shader_compile_spirv_from_source(source)
+	var errors := spirv.compile_error_vertex + spirv.compile_error_fragment
+	_check(errors.is_empty(), "fixture F shaders compile: " + errors)
+	if not errors.is_empty():
+		return
+	var shader := rd.shader_create_from_spirv(spirv, "rd_smoke_pixel")
+	_check(shader.is_valid(), "fixture F shader is created")
+	if not shader.is_valid():
+		return
+	var expected: Array = []
+	for y in PIXEL_SIZE:
+		for x in PIXEL_SIZE:
+			expected.append(_pixel_expected(x, y))
+	var built := _build_blas(rd, TRI_VERTS, [], false, false)
+	var tlas := _build_tlas(rd, [_instance(built[0], PIXEL_CUSTOM_INDEX, Transform3D(Basis(), Vector3(0, 0, -5)))])
+	var data := _render_pixels(rd, shader, tlas)
+	if data.size() == expected.size() * RECORD_SIZE:
+		var wrong := PackedStringArray()
+		for i in expected.size():
+			var got := _record(data, i)
+			var want: Dictionary = expected[i]
+			var ok: bool = got["custom_index"] == want["custom_index"] and got["primitive"] == want["primitive"] and got["committed"] == want["committed"] and got["front_face"] == want["front_face"]
+			if want["committed"] == 1:
+				ok = ok and absf(got["t"] - want["t"]) / want["t"] <= REL_T_TOLERANCE and maxf(absf(got["u"] - want["u"]), absf(got["v"] - want["v"])) <= ABS_BARY_TOLERANCE
+			else:
+				ok = ok and got["t"] == -1.0
+			if ok:
+				stats["pixel_exact"] += 1
+			elif wrong.size() < 8:
+				wrong.append("(%d, %d)" % [i % PIXEL_SIZE, i / PIXEL_SIZE])
+		_check(wrong.is_empty(), "fixture F pixel-shader ray queries match; first wrong pixels: %s" % ", ".join(wrong))
+		_dump("pixel", data, expected)
+	_free_all(rd, [tlas] + Array(built) + [shader])
 
 
 # Writes one fixture's Q17 records and analytic expectations to the dump folder.

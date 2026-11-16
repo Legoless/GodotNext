@@ -15,8 +15,13 @@ and, for each fixture in ``FIXTURES``, ``<name>.bin`` with the records and
 hold only ``rays.bin`` and ``analytic.json``. ``q17_dump`` compares one folder
 against its analytic files, or against another device's folder (G2-1):
 
-- ``tri``, ``rays``, ``winding``: IDs, primitive, committed, front face and
-  candidate count exact; t and barycentrics within the mode's tolerance.
+- ``tri``, ``rays``, ``winding``, ``ids``, ``pixel``: IDs, primitive,
+  committed, front face and candidate count exact; t and barycentrics within
+  the mode's tolerance. ``ids`` and ``pixel`` (#118) also hold misses,
+  recorded as t = -1 with every other field 0. ``pixel`` comes from ray
+  queries in a fragment shader. Outside ``edges`` the kernels report no
+  candidates, so the candidate count is 1 on a committed hit and 0 on a
+  miss; ``pixel`` takes both from the shader's hit flag.
 - ``edges``: each side is judged on its own by the edge rule. The two APIs may
   legally report different adjacent triangles, so they are never compared.
 """
@@ -47,7 +52,7 @@ assert RECORD_DTYPE.itemsize == 32
 ANALYTIC_REL_T = 1e-5
 ANALYTIC_ABS_BARY = 1e-5
 API_TOLERANCE = 1e-4
-FIXTURES = ("tri", "rays", "edges", "winding")
+FIXTURES = ("tri", "rays", "edges", "winding", "ids", "pixel")
 EDGE_FIXTURE = "edges"
 EXACT_FIELDS = ("custom_index", "primitive", "committed", "front_face", "candidate_count")
 

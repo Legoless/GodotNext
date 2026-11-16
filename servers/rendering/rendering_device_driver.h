@@ -810,7 +810,7 @@ public:
 	virtual void acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) = 0;
 	// GodotNext: tlas_from_buffer
 	// Opaque reference a GPU-written instance record needs for this BLAS: the Vulkan device address,
-	// or Metal's resource ID. 0 when the API has no GPU instance path yet (D3D12).
+	// Metal's resource ID or the D3D12 GPU virtual address (#118).
 	virtual uint64_t acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) = 0;
 
 	virtual void acceleration_structure_free(AccelerationStructureID p_acceleration_structure) = 0;
@@ -819,7 +819,7 @@ public:
 	// GodotNext: metal_acceleration_structure
 	// Bytes of the acceleration structure object itself. RenderingDevice adds them to
 	// MEMORY_BUFFERS and MEMORY_ACCELERATION_STRUCTURES: Vulkan reports accelerationStructureSize
-	// (#22), Metal the object's allocated size; D3D12 has no acceleration structures yet.
+	// (#22), Metal the object's allocated size and D3D12 the prebuild or compacted size (#118).
 	virtual uint64_t acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) { return 0; }
 
 	// GodotNext: blas_compact
@@ -1071,6 +1071,32 @@ public:
 	};
 	static VulkanRayQueryCaps vulkan_ray_query_caps(bool p_acceleration_structure, bool p_ray_query, bool p_buffer_device_address, uint32_t p_vendor_id, uint32_t p_device_id);
 
+	// GodotNext: d3d12_dxr (#118)
+	// Pure D3D12 ray-query capability check, always compiled so the doctests run without a GPU.
+	// Ray query (DXR 1.1 inline ray tracing) needs D3D12_OPTIONS5 RaytracingTier 1.1 or later and
+	// shader model 6.5 (RayQuery in DXIL). RenderingDevice's acceleration-structure path also asks for
+	// buffer device addresses (scratch ring, instance buffers, build inputs), which the D3D12 driver
+	// gives from shader model 6.6, the same tightening as on Vulkan. The Mesa NIR library must compile
+	// ray query (#123). Any failing check gives D3D12_NO_DXR, and `missing` names the first one.
+	// Hardware also needs an RT-core allowlist row for the adapter's PCI IDs. The tier rule alone
+	// turns WARP (a software adapter) into CPU_DEVICE.
+	struct D3D12RayQueryCaps {
+		bool ray_query = false;
+		bool hardware = false;
+		RayQueryUnsupportedReason reason = RAY_QUERY_REASON_D3D12_NO_DXR;
+		const char *missing = "";
+	};
+	static constexpr uint32_t D3D12_RAY_QUERY_MIN_RAYTRACING_TIER = 11; // D3D12_RAYTRACING_TIER_1_1.
+	static constexpr uint32_t D3D12_RAY_QUERY_MIN_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5.
+	static constexpr uint32_t D3D12_BUFFER_DEVICE_ADDRESS_MIN_SHADER_MODEL = 0x66; // D3D_SHADER_MODEL_6_6.
+	static constexpr uint32_t D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE = 64; // D3D12_RAYTRACING_INSTANCE_DESC.
+	static D3D12RayQueryCaps d3d12_ray_query_caps(uint32_t p_raytracing_tier, uint32_t p_shader_model, bool p_ray_query_toolchain, uint32_t p_vendor_id, uint32_t p_device_id);
+	// The RD vertex formats a D3D12 triangle geometry accepts: DXR's tier 1.0 and 1.1 lists, as RD formats
+	// with the same memory layout. BGR-ordered RD formats the D3D12 driver maps onto a listed DXGI format
+	// (B8G8R8A8_SNORM, or A2R10G10B10_UNORM_PACK32 through an SRV swizzle a build never applies) are not
+	// included: a build would read their components in the wrong order.
+	static bool d3d12_acceleration_structure_vertex_format_supported(DataFormat p_format);
+
 	// The acceleration-structure limits a driver reports through limit_get(). Every field is 0 on
 	// a device without ray query and wherever the API does not report the limit.
 	struct AccelerationStructureLimits {
@@ -1096,6 +1122,9 @@ public:
 	// Default key is vendor, device name and API version. Vulkan overrides with vendorID:deviceID:driverVersion.
 	static String format_driver_version_key(const String &p_vendor, const String &p_device_name, const String &p_api_version);
 	static String format_vulkan_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint32_t p_driver_version);
+	// GodotNext: d3d12_dxr (#118). PCI IDs and the user-mode driver version DXGI reports
+	// (IDXGIAdapter::CheckInterfaceSupport), as "D3D12:<vendor>:<device>:<a>.<b>.<c>.<d>".
+	static String format_d3d12_driver_version_key(uint32_t p_vendor_id, uint32_t p_device_id, uint64_t p_driver_version);
 	void set_driver_version_identity(const String &p_vendor, const String &p_device_name);
 	virtual String get_driver_version_key() const;
 	typedef void (*DeviceLostCallback)(void *);

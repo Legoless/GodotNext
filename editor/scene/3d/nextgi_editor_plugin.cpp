@@ -44,6 +44,7 @@
 #include "scene/gui/label.h"
 #include "scene/resources/environment.h"
 #include "scene/scene_string_names.h"
+#include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
 
 void NextGIEditorPlugin::_notification(int p_what) {
@@ -73,7 +74,7 @@ void NextGIEditorPlugin::_on_project_settings_changed() {
 	const bool already_offered = editor_settings && bool(editor_settings->get_project_metadata("nextgi", "vulkan_switch_offered", false));
 	const String driver_windows = ps->get_setting("rendering/rendering_device/driver.windows", "vulkan");
 
-	if (should_offer_vulkan_switch(nextgi_was_enabled, now_enabled, driver_windows, already_offered)) {
+	if (should_offer_vulkan_switch(nextgi_was_enabled, now_enabled, driver_windows, already_offered, is_d3d12_hwrt_active())) {
 		_offer_vulkan_switch();
 	}
 	// GodotNext: mesh_sdf_offer
@@ -107,8 +108,21 @@ void NextGIEditorPlugin::_restart_confirmed() {
 	editor->restart_editor();
 }
 
-bool NextGIEditorPlugin::should_offer_vulkan_switch(bool p_was_enabled, bool p_is_enabled, const String &p_driver_windows, bool p_already_offered) {
-	return !p_was_enabled && p_is_enabled && p_driver_windows == "d3d12" && !p_already_offered;
+bool NextGIEditorPlugin::should_offer_vulkan_switch(bool p_was_enabled, bool p_is_enabled, const String &p_driver_windows, bool p_already_offered, bool p_d3d12_hwrt_active) {
+	return !p_was_enabled && p_is_enabled && p_driver_windows == "d3d12" && !p_already_offered && !p_d3d12_hwrt_active;
+}
+
+// GodotNext: d3d12_dxr (#118)
+bool NextGIEditorPlugin::is_d3d12_hwrt_device(const String &p_api_name, bool p_ray_query, bool p_ray_query_hardware) {
+	return p_api_name == "D3D12" && p_ray_query && p_ray_query_hardware;
+}
+
+bool NextGIEditorPlugin::is_d3d12_hwrt_active() {
+	const RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (rd == nullptr) {
+		return false;
+	}
+	return is_d3d12_hwrt_device(rd->get_device_api_name(), rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY), rd->has_feature(RenderingDevice::SUPPORTS_RAY_QUERY_HARDWARE));
 }
 
 void NextGIEditorPlugin::apply_vulkan_switch() {
@@ -173,8 +187,8 @@ String NextGIEditorPlugin::get_vulkan_switch_dialog_title() {
 	return TTR("Use Vulkan on Windows for hardware RT");
 }
 
-bool NextGIEditorPlugin::should_show_inspector_vulkan_button(const String &p_host_os, const String &p_driver_windows) {
-	return p_host_os == "Windows" && p_driver_windows == "d3d12";
+bool NextGIEditorPlugin::should_show_inspector_vulkan_button(const String &p_host_os, const String &p_driver_windows, bool p_d3d12_hwrt_active) {
+	return p_host_os == "Windows" && p_driver_windows == "d3d12" && !p_d3d12_hwrt_active;
 }
 
 static String _nextgi_overlay_tier_name(const String &p_tier) {
@@ -380,7 +394,7 @@ public:
 		ProjectSettings *ps = ProjectSettings::get_singleton();
 		const String driver = ps ? String(ps->get_setting("rendering/rendering_device/driver.windows", "vulkan")) : String("vulkan");
 		const String host_os = OS::get_singleton() ? OS::get_singleton()->get_name() : String();
-		if (!NextGIEditorPlugin::should_show_inspector_vulkan_button(host_os, driver)) {
+		if (!NextGIEditorPlugin::should_show_inspector_vulkan_button(host_os, driver, NextGIEditorPlugin::is_d3d12_hwrt_active())) {
 			return;
 		}
 

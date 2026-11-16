@@ -62,8 +62,13 @@ protected:
 public:
 	// True only on a false-to-true flip of nextgi/enabled, while Windows builds use d3d12 and this
 	// project has not been asked before. The editor's host OS does not matter: driver.windows is
-	// what a Windows export runs.
-	static bool should_offer_vulkan_switch(bool p_was_enabled, bool p_is_enabled, const String &p_driver_windows, bool p_already_offered);
+	// what a Windows export runs. Never while D3D12 HWRT is active (#118): D3D12 then has hardware
+	// ray query, and Vulkan would add nothing.
+	static bool should_offer_vulkan_switch(bool p_was_enabled, bool p_is_enabled, const String &p_driver_windows, bool p_already_offered, bool p_d3d12_hwrt_active);
+	// GodotNext: d3d12_dxr (#118). D3D12 HWRT is active when the editor's rendering device is D3D12
+	// with ray query on an RT-core allowlisted adapter. D3D12_NO_DXR and NOT_HW_ACCELERATED keep the offer.
+	static bool is_d3d12_hwrt_device(const String &p_api_name, bool p_ray_query, bool p_ray_query_hardware);
+	static bool is_d3d12_hwrt_active();
 	// Sets driver.windows to vulkan, keeps fallback_to_d3d12, and saves project.godot.
 	static void apply_vulkan_switch();
 
@@ -72,7 +77,7 @@ public:
 
 	// GodotNext: nextgi_user_surface
 	// The inspector button is host-OS gated. The one-time project modal is not.
-	static bool should_show_inspector_vulkan_button(const String &p_host_os, const String &p_driver_windows);
+	static bool should_show_inspector_vulkan_button(const String &p_host_os, const String &p_driver_windows, bool p_d3d12_hwrt_active);
 	static String format_status_panel(const Dictionary &p_status);
 
 	// GodotNext: mesh_sdf_offer

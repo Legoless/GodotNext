@@ -37,6 +37,7 @@
 #include "core/templates/rid.h"
 #include "core/templates/vector.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/rendering_device_commons.h"
 #include "servers/rendering/rendering_device_enums.h"
 
 class RenderDataRD;
@@ -467,6 +468,9 @@ public:
 	// take the reason from the API name (D3D12 -> D3D12_NO_DXR, else NO_RAY_QUERY) and every ray-query
 	// device counts as hardware accelerated.
 	static void collect_device_inputs(const RenderingDevice *p_device, const String &p_api_name, RenderingDeviceEnums::DeviceType p_device_type, TierInputs &r_inputs);
+	// GodotNext: d3d12_dxr (#118). The driver half of collect_device_inputs(): what a driver reports
+	// through SUPPORTS_RAY_QUERY, SUPPORTS_RAY_QUERY_HARDWARE and get_ray_query_unsupported_reason().
+	static void apply_driver_ray_query(bool p_ray_query, bool p_ray_query_hw, RenderingDeviceCommons::RayQueryUnsupportedReason p_reason, TierInputs &r_inputs);
 	// GodotNext: ps_swrt_trace (#186, #188). debug/deny_ray_query: the inputs of a device without
 	// ray query (NO_RAY_QUERY). Applied after collect_device_inputs() and before the startup
 	// self-test, which then never runs.

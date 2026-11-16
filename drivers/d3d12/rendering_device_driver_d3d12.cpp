@@ -926,8 +926,12 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 	bool buffer_device_address = p_usage.has_flag(RDD::BUFFER_USAGE_DEVICE_ADDRESS_BIT);
 	ERR_FAIL_COND_V_MSG(buffer_device_address && !shader_capabilities.buffer_device_address_supported(), RDD::BufferID(), "Buffer device address is unsupported on this device.");
 
+	// GodotNext: d3d12_dxr (#118). Acceleration-structure storage needs unordered access.
+	const bool acceleration_structure = p_usage.has_flag(RDD::BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT);
+	ERR_FAIL_COND_V_MSG(acceleration_structure && p_allocation_type != MEMORY_ALLOCATION_TYPE_GPU, RDD::BufferID(), "Acceleration-structure storage must be GPU memory.");
+
 	CD3DX12_RESOURCE_DESC1 resource_desc = CD3DX12_RESOURCE_DESC1::Buffer(p_size);
-	if (p_usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT) || buffer_device_address) {
+	if (p_usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT) || buffer_device_address || acceleration_structure) {
 		resource_desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 	} else {
 		resource_desc.Flags |= D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
@@ -984,6 +988,16 @@ RDD::BufferID RenderingDeviceDriverD3D12::buffer_create(uint64_t p_size, BitFiel
 				ERR_FAIL_V_MSG(BufferID(), "GPU mappable buffers are unsupported on this device.");
 			}
 		} break;
+	}
+
+	// GodotNext: d3d12_dxr (#118). An acceleration structure's buffer is created in, and never leaves,
+	// D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE. With enhanced barriers buffers have no
+	// state, so the resource flag marks it instead.
+	if (acceleration_structure) {
+		initial_state = D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE;
+		if (barrier_capabilities.enhanced_barriers_supported) {
+			resource_desc.Flags |= D3D12_RESOURCE_FLAG_RAYTRACING_ACCELERATION_STRUCTURE;
+		}
 	}
 
 	ComPtr<ID3D12Resource> buffer;
@@ -2305,7 +2319,8 @@ static void _rd_access_to_d3d12_and_mask(BitField<RDD::BarrierAccessBits> p_acce
 	}
 
 	const D3D12_BARRIER_SYNC unordered_access_mask = D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING |
-			D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW;
+			D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_CLEAR_UNORDERED_ACCESS_VIEW |
+			D3D12_BARRIER_SYNC_RAYTRACING | D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO; // GodotNext: d3d12_dxr (#118)
 
 	if (p_access.has_flag(RDD::BARRIER_ACCESS_STORAGE_CLEAR_BIT)) {
 		r_access |= D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
@@ -2324,7 +2339,26 @@ static void _rd_access_to_d3d12_and_mask(BitField<RDD::BarrierAccessBits> p_acce
 		} else {
 			r_access |= D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
 			r_sync_mask |= D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING;
+			// GodotNext: d3d12_dxr (#118). Acceleration-structure builds read their vertex, index and
+			// instance inputs as shader resources.
+			r_sync_mask |= D3D12_BARRIER_SYNC_RAYTRACING | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE;
 		}
+	}
+
+	// GodotNext: d3d12_dxr (#118). The sync scopes the Enhanced Barriers specification allows with each
+	// acceleration-structure access: shader stages only through COMPUTE_SHADING, RAYTRACING or
+	// ALL_SHADING, plus the build, copy and (for reads) postbuild-info scopes.
+	if (p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT)) {
+		r_access |= D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_READ;
+		r_sync_mask |= D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_RAYTRACING | D3D12_BARRIER_SYNC_ALL_SHADING |
+				D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE |
+				D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
+	}
+
+	if (p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT)) {
+		r_access |= D3D12_BARRIER_ACCESS_RAYTRACING_ACCELERATION_STRUCTURE_WRITE;
+		r_sync_mask |= D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_RAYTRACING | D3D12_BARRIER_SYNC_ALL_SHADING |
+				D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE;
 	}
 
 	if (p_access.has_flag(RDD::BARRIER_ACCESS_COLOR_ATTACHMENT_WRITE_BIT) || p_access.has_flag(RDD::BARRIER_ACCESS_COLOR_ATTACHMENT_READ_BIT)) {
@@ -2394,6 +2428,16 @@ static void _rd_stages_to_d3d12(BitField<RDD::PipelineStageBits> p_stages, D3D12
 		if (p_stages.has_flag(RDD::PIPELINE_STAGE_ALL_GRAPHICS_BIT)) {
 			r_sync |= D3D12_BARRIER_SYNC_DRAW;
 		}
+
+		// GodotNext: d3d12_dxr (#118). RenderingDevice runs acceleration-structure builds, compaction
+		// copies and compacted-size queries in this stage.
+		if (p_stages.has_flag(RDD::PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT)) {
+			r_sync |= D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_COPY_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
+		}
+
+		if (p_stages.has_flag(RDD::PIPELINE_STAGE_RAY_TRACING_SHADER_BIT)) {
+			r_sync |= D3D12_BARRIER_SYNC_RAYTRACING;
+		}
 	}
 }
 
@@ -2417,6 +2461,12 @@ static void _rd_stages_and_access_to_d3d12(BitField<RDD::PipelineStageBits> p_st
 
 	// Convert stage bits to the D3D12 synchronization scope bits.
 	_rd_stages_to_d3d12(p_stages, r_sync);
+
+	// GodotNext: d3d12_dxr (#118). Ray queries in vertex or pixel shaders read acceleration structures
+	// in ALL_SHADING, the only graphics scope those accesses allow.
+	if ((p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_READ_BIT) || p_access.has_flag(RDD::BARRIER_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT)) && (r_sync & (D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING))) {
+		r_sync |= D3D12_BARRIER_SYNC_ALL_SHADING;
+	}
 
 	// Only enable synchronization stages compatible with the access bits that were used.
 	r_sync &= sync_mask;
@@ -2491,7 +2541,7 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		return;
 	}
 
-	if (p_memory_barriers.size() == 0 && p_buffer_barriers.size() == 0 && p_texture_barriers.size() == 0) {
+	if (p_memory_barriers.size() == 0 && p_buffer_barriers.size() == 0 && p_texture_barriers.size() == 0 && p_acceleration_structure_barriers.size() == 0) {
 		// At least one barrier must be present in the arguments.
 		return;
 	}
@@ -2523,6 +2573,17 @@ void RenderingDeviceDriverD3D12::command_pipeline_barrier(CommandBufferID p_cmd_
 		_rd_stages_and_access_to_d3d12(p_src_stages, RDD::TEXTURE_LAYOUT_MAX, buffer_barrier_rd.src_access, buffer_barrier_d3d12.SyncBefore, buffer_barrier_d3d12.AccessBefore);
 		_rd_stages_and_access_to_d3d12(p_dst_stages, RDD::TEXTURE_LAYOUT_MAX, buffer_barrier_rd.dst_access, buffer_barrier_d3d12.SyncAfter, buffer_barrier_d3d12.AccessAfter);
 		buffer_barrier_d3d12.pResource = buffer_info->resource;
+		buffer_barriers.push_back(buffer_barrier_d3d12);
+	}
+
+	// GodotNext: d3d12_dxr (#118). An acceleration-structure barrier is a buffer barrier on the buffer
+	// that holds the structure, with the acceleration-structure accesses and scopes.
+	for (uint32_t i = 0; i < p_acceleration_structure_barriers.size(); i++) {
+		const AccelerationStructureBarrier &as_barrier_rd = p_acceleration_structure_barriers[i];
+		const AccelerationStructureInfo *as_info = (const AccelerationStructureInfo *)(as_barrier_rd.acceleration_structure.id);
+		_rd_stages_and_access_to_d3d12(p_src_stages, RDD::TEXTURE_LAYOUT_MAX, as_barrier_rd.src_access, buffer_barrier_d3d12.SyncBefore, buffer_barrier_d3d12.AccessBefore);
+		_rd_stages_and_access_to_d3d12(p_dst_stages, RDD::TEXTURE_LAYOUT_MAX, as_barrier_rd.dst_access, buffer_barrier_d3d12.SyncAfter, buffer_barrier_d3d12.AccessAfter);
+		buffer_barrier_d3d12.pResource = ((const BufferInfo *)as_info->buffer.id)->resource;
 		buffer_barriers.push_back(buffer_barrier_d3d12);
 	}
 
@@ -2617,7 +2678,24 @@ Error RenderingDeviceDriverD3D12::fence_wait(FenceID p_fence) {
 	PIXNotifyWakeFromFenceSignal(fence->event_handle);
 #endif
 
+	// GodotNext: d3d12_dxr (#118), hwrt_safety_net. A removed device completes every fence with
+	// UINT64_MAX.
+	if (fence->d3d_fence->GetCompletedValue() == UINT64_MAX) {
+		_on_device_removed();
+	}
+
 	return (res == WAIT_FAILED) ? FAILED : OK;
+}
+
+// GodotNext: d3d12_dxr (#118), hwrt_safety_net. Tells RenderingDevice first, so NextGI's HWRT fault
+// latch is written before the crash, as the Vulkan driver does on VK_ERROR_DEVICE_LOST.
+void RenderingDeviceDriverD3D12::_on_device_removed() {
+	const HRESULT reason = device->GetDeviceRemovedReason();
+	if (reason == S_OK) {
+		return;
+	}
+	notify_device_lost();
+	CRASH_NOW_MSG(vformat("D3D12 device was removed (reason 0x%08ux). This could be due to a driver issue, a hardware issue, or the driver resetting itself because it was unresponsive for too long (TDR).", (uint64_t)reason));
 }
 
 void RenderingDeviceDriverD3D12::fence_free(FenceID p_fence) {
@@ -2728,6 +2806,10 @@ Error RenderingDeviceDriverD3D12::command_queue_execute_and_present(CommandQueue
 			D3D12Hooks::call_present_callback(swap_chain->d3d_swap_chain.Get(), frames_drawn, D3D12Hooks::PRESENT_STAGE_AFTER);
 		}
 		if (!SUCCEEDED(res)) {
+			// GodotNext: d3d12_dxr (#118), hwrt_safety_net.
+			if (res == DXGI_ERROR_DEVICE_REMOVED || res == DXGI_ERROR_DEVICE_RESET) {
+				_on_device_removed();
+			}
 			print_verbose(vformat("D3D12: Presenting swapchain failed with error 0x%08ux.", (uint64_t)res));
 			any_present_failed = true;
 		}
@@ -2765,6 +2847,7 @@ void RenderingDeviceDriverD3D12::command_pool_free(CommandPoolID p_cmd_pool) {
 
 		cmd_buf_info->cmd_list.Reset();
 		cmd_buf_info->cmd_list_1.Reset();
+		cmd_buf_info->cmd_list_4.Reset(); // GodotNext: d3d12_dxr (#118)
 		cmd_buf_info->cmd_list_5.Reset();
 		cmd_buf_info->cmd_list_7.Reset();
 		cmd_buf_info->cmd_allocator.Reset();
@@ -2835,6 +2918,7 @@ RDD::CommandBufferID RenderingDeviceDriverD3D12::command_buffer_create(CommandPo
 	cmd_buf_info->cmd_list = cmd_list;
 
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_1.GetAddressOf());
+	cmd_list->QueryInterface(cmd_buf_info->cmd_list_4.GetAddressOf()); // GodotNext: d3d12_dxr (#118)
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_5.GetAddressOf());
 	cmd_list->QueryInterface(cmd_buf_info->cmd_list_7.GetAddressOf());
 
@@ -3837,6 +3921,19 @@ RDD::UniformSetID RenderingDeviceDriverD3D12::uniform_set_create(VectorView<Boun
 					ns.shader_uniform_idx_mask |= ((uint64_t)1 << i);
 					ns.states |= D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 				}
+			} break;
+			// GodotNext: d3d12_dxr (#118). A RaytracingAccelerationStructure SRV names the structure by GPU
+			// virtual address, with no resource. The structure's buffer never changes state, so it adds no
+			// state requirement.
+			case UNIFORM_TYPE_ACCELERATION_STRUCTURE: {
+				const AccelerationStructureInfo *as_info = (const AccelerationStructureInfo *)uniform.ids[0].id;
+				ERR_FAIL_NULL_V(as_info, UniformSetID());
+				D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {};
+				srv_desc.Format = DXGI_FORMAT_UNKNOWN;
+				srv_desc.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+				srv_desc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+				srv_desc.RaytracingAccelerationStructure.Location = as_info->gpu_virtual_address;
+				device->CreateShaderResourceView(nullptr, &srv_desc, get_cpu_handle(uniform_set_info->resource_descriptor_heap_alloc.cpu_handle, binding.resource_descriptor_offset, resource_descriptor_heap.increment_size));
 			} break;
 			default: {
 				DEV_ASSERT(false);
@@ -5949,31 +6046,382 @@ RDD::PipelineID RenderingDeviceDriverD3D12::compute_pipeline_create(ShaderID p_s
 
 // ---- ACCELERATION STRUCTURES ----
 
+// GodotNext: d3d12_dxr (#118). RD's build flags, geometry flags and instance flags have D3D12's values,
+// so they pass through. RD's ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT is D3D12's
+// TRIANGLE_FRONT_COUNTERCLOCKWISE, which reverses the default facing as Vulkan's FLIP_FACING does.
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_LOW_MEMORY_BIT, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_MINIMIZE_MEMORY));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT, D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_GEOMETRY_NO_DUPLICATE_ANY_HIT_INVOCATION_BIT, D3D12_RAYTRACING_GEOMETRY_FLAG_NO_DUPLICATE_ANYHIT_INVOCATION));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT, D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FLIP_FACING_BIT, D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT, D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE));
+static_assert(ENUM_MEMBERS_EQUAL(RDD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT, D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE));
+static_assert(sizeof(D3D12_RAYTRACING_INSTANCE_DESC) == RDD::D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE);
+
+// Vertex formats a triangle geometry accepts: the tier 1.0 list plus the formats tier 1.1 adds. Ray
+// query needs tier 1.1, so every listed format is available whenever acceleration structures are.
+static bool _d3d12_acceleration_structure_vertex_format_supported(DXGI_FORMAT p_format) {
+	switch (p_format) {
+		// Tier 1.0.
+		case DXGI_FORMAT_R32G32_FLOAT:
+		case DXGI_FORMAT_R32G32B32_FLOAT:
+		case DXGI_FORMAT_R16G16_FLOAT:
+		case DXGI_FORMAT_R16G16B16A16_FLOAT:
+		case DXGI_FORMAT_R16G16_SNORM:
+		case DXGI_FORMAT_R16G16B16A16_SNORM:
+		// Tier 1.1.
+		case DXGI_FORMAT_R16G16B16A16_UNORM:
+		case DXGI_FORMAT_R16G16_UNORM:
+		case DXGI_FORMAT_R10G10B10A2_UNORM:
+		case DXGI_FORMAT_R8G8B8A8_UNORM:
+		case DXGI_FORMAT_R8G8_UNORM:
+		case DXGI_FORMAT_R8G8B8A8_SNORM:
+		case DXGI_FORMAT_R8G8_SNORM:
+			return true;
+		default:
+			return false;
+	}
+}
+
+bool RenderingDeviceDriverD3D12::acceleration_structure_vertex_format_is_supported(DataFormat p_format) {
+	if (!ray_query_caps.ray_query || p_format >= DATA_FORMAT_MAX) {
+		return false;
+	}
+	// The RD list keeps the component order; the DXGI list checks the table maps it onto a DXR format.
+	return d3d12_acceleration_structure_vertex_format_supported(p_format) && _d3d12_acceleration_structure_vertex_format_supported(RD_TO_D3D12_FORMAT[p_format].general_format);
+}
+
+RDD::BufferID RenderingDeviceDriverD3D12::_acceleration_structure_buffer_create(uint64_t p_size, D3D12_GPU_VIRTUAL_ADDRESS &r_address) {
+	// Acceleration structures start on 256-byte boundaries. Without tight alignment buffers are placed at
+	// 64 KiB. With it, which D3D12MA uses whenever the device supports it, a buffer may start on any 8-byte
+	// boundary, and Agility SDK 1.618 takes no alignment floor for a buffer. So the buffer gets 256 bytes
+	// more and the structure starts at its first 256-byte boundary.
+	const uint64_t alignment = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+	const uint64_t padding = misc_features_support.tight_alignment_supported ? alignment : 0;
+	const BufferID buffer = buffer_create(STEPIFY(p_size, alignment) + padding, BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT, MEMORY_ALLOCATION_TYPE_GPU, 0);
+	if (buffer) {
+		r_address = STEPIFY(((const BufferInfo *)buffer.id)->gpu_virtual_address, alignment);
+	}
+	return buffer;
+}
+
+D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS RenderingDeviceDriverD3D12::_acceleration_structure_inputs(const AccelerationStructureInfo *p_info, uint32_t p_instance_count, D3D12_GPU_VIRTUAL_ADDRESS p_instances, bool p_update) const {
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs = {};
+	inputs.Type = p_info->type;
+	inputs.Flags = p_info->flags;
+	if (p_update) {
+		inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+	}
+	inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+	if (p_info->type == D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL) {
+		inputs.NumDescs = p_instance_count;
+		inputs.InstanceDescs = p_instances;
+	} else {
+		inputs.NumDescs = p_info->geometries.size();
+		inputs.pGeometryDescs = p_info->geometries.ptr();
+	}
+	return inputs;
+}
+
+bool RenderingDeviceDriverD3D12::_acceleration_structure_allocate(AccelerationStructureInfo *p_info, const D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS &p_inputs) {
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO prebuild_info = {};
+	device_5->GetRaytracingAccelerationStructurePrebuildInfo(&p_inputs, &prebuild_info);
+	ERR_FAIL_COND_V_MSG(prebuild_info.ResultDataMaxSizeInBytes == 0, false, "D3D12 reported no size for an acceleration structure.");
+
+	p_info->buffer = _acceleration_structure_buffer_create(prebuild_info.ResultDataMaxSizeInBytes, p_info->gpu_virtual_address);
+	ERR_FAIL_COND_V_MSG(!p_info->buffer, false, "Couldn't create the buffer of a D3D12 acceleration structure.");
+	p_info->size_bytes = prebuild_info.ResultDataMaxSizeInBytes;
+	p_info->scratch_size = prebuild_info.ScratchDataSizeInBytes;
+	// 0 without ALLOW_UPDATE; RenderingDevice refuses an UPDATE of such a structure first.
+	p_info->update_scratch_size = prebuild_info.UpdateScratchDataSizeInBytes;
+	return true;
+}
+
 RDD::AccelerationStructureID RenderingDeviceDriverD3D12::blas_create(VectorView<AccelerationStructureGeometry> p_geometries, BitField<AccelerationStructureFlagBits> p_flags) {
-	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_dxr (#118)
+	ERR_FAIL_COND_V_MSG(!ray_query_caps.ray_query, AccelerationStructureID(), vformat("D3D12 has no ray query on this device (it needs %s).", ray_query_caps.missing));
+	ERR_FAIL_COND_V(p_geometries.size() == 0 || p_geometries.size() > D3D12_RAYTRACING_MAX_GEOMETRIES_PER_BOTTOM_LEVEL_ACCELERATION_STRUCTURE, AccelerationStructureID());
+
+	AccelerationStructureInfo *as_info = memnew(AccelerationStructureInfo);
+	as_info->type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+	as_info->flags = (D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS)(uint32_t)p_flags;
+	as_info->geometries.resize(p_geometries.size());
+
+	for (uint32_t i = 0; i < p_geometries.size(); i++) {
+		const AccelerationStructureGeometry &geometry = p_geometries[i];
+		BufferInfo *vertex_buffer = (BufferInfo *)geometry.vertex_buffer.id;
+
+		D3D12_RAYTRACING_GEOMETRY_DESC &desc = as_info->geometries[i];
+		desc = {};
+		desc.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+		desc.Flags = (D3D12_RAYTRACING_GEOMETRY_FLAGS)(uint32_t)geometry.flags;
+		desc.Triangles.Transform3x4 = 0;
+		desc.Triangles.VertexFormat = RD_TO_D3D12_FORMAT[geometry.vertex_format].general_format;
+		desc.Triangles.VertexCount = geometry.vertex_count;
+		// The real GPU virtual address: buffer_get_device_address() returns spirv2dxil's descriptor
+		// encoding instead.
+		desc.Triangles.VertexBuffer.StartAddress = vertex_buffer->gpu_virtual_address + geometry.vertex_offset;
+		desc.Triangles.VertexBuffer.StrideInBytes = geometry.vertex_stride;
+		as_info->input_buffers.push_back(vertex_buffer);
+
+		if (geometry.index_buffer) {
+			BufferInfo *index_buffer = (BufferInfo *)geometry.index_buffer.id;
+			desc.Triangles.IndexFormat = geometry.index_format == INDEX_BUFFER_FORMAT_UINT16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+			desc.Triangles.IndexCount = geometry.index_count;
+			desc.Triangles.IndexBuffer = index_buffer->gpu_virtual_address + geometry.index_offset;
+			if (index_buffer != vertex_buffer) {
+				as_info->input_buffers.push_back(index_buffer);
+			}
+		} else {
+			desc.Triangles.IndexFormat = DXGI_FORMAT_UNKNOWN;
+			desc.Triangles.IndexCount = 0;
+			desc.Triangles.IndexBuffer = 0;
+		}
+	}
+
+	if (!_acceleration_structure_allocate(as_info, _acceleration_structure_inputs(as_info, 0, 0, false))) {
+		memdelete(as_info);
+		return AccelerationStructureID();
+	}
+	return AccelerationStructureID(as_info);
 }
 
 RDD::AccelerationStructureID RenderingDeviceDriverD3D12::tlas_create(uint32_t p_max_instance_count, BitField<AccelerationStructureFlagBits> p_flags) {
-	ERR_FAIL_V_MSG(AccelerationStructureID(), "Ray tracing is not currently supported by the D3D12 driver.");
-}
+	// GodotNext: d3d12_dxr (#118)
+	ERR_FAIL_COND_V_MSG(!ray_query_caps.ray_query, AccelerationStructureID(), vformat("D3D12 has no ray query on this device (it needs %s).", ray_query_caps.missing));
+	ERR_FAIL_COND_V_MSG(p_max_instance_count > D3D12_RAYTRACING_MAX_INSTANCES_PER_TOP_LEVEL_ACCELERATION_STRUCTURE, AccelerationStructureID(), vformat("A D3D12 TLAS holds at most %d instances.", D3D12_RAYTRACING_MAX_INSTANCES_PER_TOP_LEVEL_ACCELERATION_STRUCTURE));
 
-uint64_t RenderingDeviceDriverD3D12::acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) {
-	// D3D12 has no GPU instance-record path until DXR 1.1 lands (#118).
-	return 0;
+	AccelerationStructureInfo *as_info = memnew(AccelerationStructureInfo);
+	as_info->type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+	as_info->flags = (D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS)(uint32_t)p_flags;
+	// Sized for the maximum: a build with fewer instances fits.
+	if (!_acceleration_structure_allocate(as_info, _acceleration_structure_inputs(as_info, MAX(p_max_instance_count, 1u), 0, false))) {
+		memdelete(as_info);
+		return AccelerationStructureID();
+	}
+	return AccelerationStructureID(as_info);
 }
 
 void RenderingDeviceDriverD3D12::acceleration_structure_instance_write(uint8_t *r_driver_instance, const AccelerationStructureInstance &p_instance) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_dxr (#118). D3D12_RAYTRACING_INSTANCE_DESC: a row-major 3x4 object-to-world
+	// matrix, 24-bit ID and hit group offset, 8-bit mask and flags, and the BLAS GPU address. It has bit
+	// fields, so it is filled on the stack and copied at once (the target may be write-combined).
+	D3D12_RAYTRACING_INSTANCE_DESC desc = {};
+	for (int row = 0; row < 3; row++) {
+		desc.Transform[row][0] = p_instance.transform.basis.rows[row][0];
+		desc.Transform[row][1] = p_instance.transform.basis.rows[row][1];
+		desc.Transform[row][2] = p_instance.transform.basis.rows[row][2];
+		desc.Transform[row][3] = p_instance.transform.origin[row];
+	}
+	desc.InstanceID = p_instance.id & 0xFFFFFF;
+	desc.InstanceMask = p_instance.mask;
+	desc.InstanceContributionToHitGroupIndex = p_instance.hit_sbt_offset & 0xFFFFFF;
+	desc.Flags = (uint32_t)p_instance.flags & 0xFF;
+	const AccelerationStructureInfo *blas_info = (const AccelerationStructureInfo *)p_instance.blas.id;
+	desc.AccelerationStructure = blas_info != nullptr ? blas_info->gpu_virtual_address : 0;
+	memcpy(r_driver_instance, &desc, sizeof(D3D12_RAYTRACING_INSTANCE_DESC));
+}
+
+uint64_t RenderingDeviceDriverD3D12::acceleration_structure_get_instance_reference(AccelerationStructureID p_acceleration_structure) {
+	// GodotNext: d3d12_dxr (#118). A GPU-written D3D12_RAYTRACING_INSTANCE_DESC names the BLAS by its
+	// GPU virtual address, like the Vulkan device address.
+	const AccelerationStructureInfo *as_info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	return as_info != nullptr ? as_info->gpu_virtual_address : 0;
 }
 
 void RenderingDeviceDriverD3D12::acceleration_structure_free(AccelerationStructureID p_acceleration_structure) {
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: d3d12_dxr (#118)
+	AccelerationStructureInfo *as_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
+	ERR_FAIL_NULL(as_info);
+	if (as_info->buffer) {
+		buffer_free(as_info->buffer);
+	}
+	memdelete(as_info);
 }
 
 uint32_t RenderingDeviceDriverD3D12::acceleration_structure_get_scratch_size_bytes(AccelerationStructureID p_acceleration_structure, AccelerationStructureBuildMode p_mode) {
-	// GodotNext: as_build_modes
-	(void)p_mode;
-	ERR_FAIL_V_MSG(0, "Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: as_build_modes, d3d12_dxr (#118). RenderingDevice places each build's scratch at a
+	// 256-byte boundary of its ring (LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT), counted
+	// from the ring's start. Under tight alignment the ring itself may start on any 8-byte boundary, so each
+	// build asks for 256 bytes more and starts at the first 256-byte boundary of its region
+	// (_acceleration_structure_scratch_address).
+	const AccelerationStructureInfo *as_info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	ERR_FAIL_NULL_V(as_info, 0);
+	const uint64_t size = p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE ? as_info->update_scratch_size : as_info->scratch_size;
+	const uint64_t padding = misc_features_support.tight_alignment_supported ? (uint64_t)D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT : 0;
+	const uint64_t aligned = MAX(STEPIFY(size, (uint64_t)D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT), (uint64_t)D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT) + padding;
+	ERR_FAIL_COND_V_MSG(aligned > UINT32_MAX, 0, "Acceleration-structure build scratch exceeds 4 GiB.");
+	return (uint32_t)aligned;
+}
+
+uint64_t RenderingDeviceDriverD3D12::acceleration_structure_get_size_bytes(AccelerationStructureID p_acceleration_structure) {
+	// GodotNext: d3d12_dxr (#118). ResultDataMaxSizeInBytes, or the compacted size.
+	const AccelerationStructureInfo *as_info = (const AccelerationStructureInfo *)p_acceleration_structure.id;
+	return as_info != nullptr ? as_info->size_bytes : 0;
+}
+
+bool RenderingDeviceDriverD3D12::acceleration_structure_compaction_supported() const {
+	// GodotNext: d3d12_dxr (#118). Compaction is core DXR (tier 1.0).
+	return ray_query_caps.ray_query;
+}
+
+RDD::QueryPoolID RenderingDeviceDriverD3D12::acceleration_structure_size_query_pool_create(uint32_t p_count) {
+	// GodotNext: d3d12_dxr (#118)
+	ERR_FAIL_COND_V(p_count == 0, QueryPoolID());
+	const uint64_t size = (uint64_t)p_count * sizeof(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE_DESC);
+	AccelerationStructureSizeQueryPoolInfo *pool = memnew(AccelerationStructureSizeQueryPoolInfo);
+	pool->count = p_count;
+	pool->gpu_buffer = buffer_create(size, BUFFER_USAGE_STORAGE_BIT | BUFFER_USAGE_TRANSFER_FROM_BIT, MEMORY_ALLOCATION_TYPE_GPU, 0);
+	pool->readback_buffer = buffer_create(size, BUFFER_USAGE_TRANSFER_TO_BIT, MEMORY_ALLOCATION_TYPE_CPU, 0);
+	if (!pool->gpu_buffer || !pool->readback_buffer) {
+		acceleration_structure_size_query_pool_free(QueryPoolID(pool));
+		ERR_FAIL_V_MSG(QueryPoolID(), "Couldn't create the buffers of a D3D12 compacted-size query pool.");
+	}
+	return QueryPoolID(pool);
+}
+
+void RenderingDeviceDriverD3D12::acceleration_structure_size_query_pool_free(QueryPoolID p_pool_id) {
+	// GodotNext: d3d12_dxr (#118)
+	AccelerationStructureSizeQueryPoolInfo *pool = (AccelerationStructureSizeQueryPoolInfo *)p_pool_id.id;
+	ERR_FAIL_NULL(pool);
+	if (pool->gpu_buffer) {
+		buffer_free(pool->gpu_buffer);
+	}
+	if (pool->readback_buffer) {
+		buffer_free(pool->readback_buffer);
+	}
+	memdelete(pool);
+}
+
+void RenderingDeviceDriverD3D12::acceleration_structure_size_query_pool_get_results(QueryPoolID p_pool_id, uint32_t p_query_count, uint64_t *r_results) {
+	// GodotNext: d3d12_dxr (#118). RenderingDevice reads the pool once its frame has completed.
+	const AccelerationStructureSizeQueryPoolInfo *pool = (const AccelerationStructureSizeQueryPoolInfo *)p_pool_id.id;
+	ERR_FAIL_NULL(pool);
+	ERR_FAIL_COND(p_query_count > pool->count);
+	const uint8_t *data = buffer_map(pool->readback_buffer);
+	if (data == nullptr) {
+		memset(r_results, 0, sizeof(uint64_t) * p_query_count);
+		ERR_FAIL_MSG("Couldn't map the readback buffer of a D3D12 compacted-size query pool.");
+	}
+	memcpy(r_results, data, sizeof(uint64_t) * p_query_count);
+	buffer_unmap(pool->readback_buffer);
+}
+
+void RenderingDeviceDriverD3D12::command_acceleration_structure_write_compacted_size(CommandBufferID p_cmd_buffer, VectorView<AccelerationStructureID> p_acceleration_structures, QueryPoolID p_pool_id, uint32_t p_first) {
+	// GodotNext: d3d12_dxr (#118). The postbuild info goes to the pool's UAV buffer (8-byte aligned
+	// entries, one per structure, in order), then the written range is copied to its readback buffer.
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	AccelerationStructureSizeQueryPoolInfo *pool = (AccelerationStructureSizeQueryPoolInfo *)p_pool_id.id;
+	ERR_FAIL_NULL(pool);
+	const uint32_t count = p_acceleration_structures.size();
+	ERR_FAIL_COND(count == 0 || p_first + count > pool->count);
+	BufferInfo *gpu_buffer = (BufferInfo *)pool->gpu_buffer.id;
+	const BufferInfo *readback_buffer = (const BufferInfo *)pool->readback_buffer.id;
+	const uint64_t entry_size = sizeof(D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE_DESC);
+	const uint64_t offset = p_first * entry_size;
+
+	thread_local LocalVector<D3D12_GPU_VIRTUAL_ADDRESS> sources;
+	sources.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		sources[i] = ((const AccelerationStructureInfo *)p_acceleration_structures[i].id)->gpu_virtual_address;
+	}
+
+	if (barrier_capabilities.enhanced_barriers_supported) {
+		D3D12_BUFFER_BARRIER barrier = {};
+		barrier.SyncBefore = D3D12_BARRIER_SYNC_COPY;
+		barrier.AccessBefore = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+		barrier.SyncAfter = D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
+		barrier.AccessAfter = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+		barrier.pResource = gpu_buffer->resource;
+		barrier.Size = UINT64_MAX;
+		D3D12_BARRIER_GROUP group = {};
+		group.Type = D3D12_BARRIER_TYPE_BUFFER;
+		group.NumBarriers = 1;
+		group.pBufferBarriers = &barrier;
+		cmd_buf_info->cmd_list_7->Barrier(1, &group);
+	} else {
+		_resource_transition_batch(cmd_buf_info, gpu_buffer, 0, 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+
+	D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuild_desc = {};
+	postbuild_desc.DestBuffer = gpu_buffer->gpu_virtual_address + offset;
+	postbuild_desc.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+	cmd_buf_info->cmd_list_4->EmitRaytracingAccelerationStructurePostbuildInfo(&postbuild_desc, count, sources.ptr());
+
+	if (barrier_capabilities.enhanced_barriers_supported) {
+		D3D12_BUFFER_BARRIER barrier = {};
+		barrier.SyncBefore = D3D12_BARRIER_SYNC_EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO;
+		barrier.AccessBefore = D3D12_BARRIER_ACCESS_UNORDERED_ACCESS;
+		barrier.SyncAfter = D3D12_BARRIER_SYNC_COPY;
+		barrier.AccessAfter = D3D12_BARRIER_ACCESS_COPY_SOURCE;
+		barrier.pResource = gpu_buffer->resource;
+		barrier.Size = UINT64_MAX;
+		D3D12_BARRIER_GROUP group = {};
+		group.Type = D3D12_BARRIER_TYPE_BUFFER;
+		group.NumBarriers = 1;
+		group.pBufferBarriers = &barrier;
+		cmd_buf_info->cmd_list_7->Barrier(1, &group);
+	} else {
+		_resource_transition_batch(cmd_buf_info, gpu_buffer, 0, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		_resource_transitions_flush(cmd_buf_info);
+	}
+	cmd_buf_info->cmd_list->CopyBufferRegion(readback_buffer->resource, offset, gpu_buffer->resource, offset, count * entry_size);
+}
+
+RDD::AccelerationStructureID RenderingDeviceDriverD3D12::acceleration_structure_create_compacted(AccelerationStructureID p_src, uint64_t p_size) {
+	// GodotNext: d3d12_dxr (#118)
+	const AccelerationStructureInfo *src = (const AccelerationStructureInfo *)p_src.id;
+	ERR_FAIL_NULL_V(src, AccelerationStructureID());
+	ERR_FAIL_COND_V(p_size == 0, AccelerationStructureID());
+
+	AccelerationStructureInfo *as_info = memnew(AccelerationStructureInfo);
+	// Later builds of the compacted copy would use the source's inputs.
+	as_info->type = src->type;
+	as_info->flags = src->flags;
+	as_info->scratch_size = src->scratch_size;
+	as_info->update_scratch_size = src->update_scratch_size;
+	as_info->geometries = src->geometries;
+	as_info->input_buffers = src->input_buffers;
+	as_info->buffer = _acceleration_structure_buffer_create(p_size, as_info->gpu_virtual_address);
+	if (!as_info->buffer) {
+		memdelete(as_info);
+		ERR_FAIL_V_MSG(AccelerationStructureID(), "Couldn't create the buffer of a compacted D3D12 acceleration structure.");
+	}
+	as_info->size_bytes = p_size;
+	return AccelerationStructureID(as_info);
+}
+
+void RenderingDeviceDriverD3D12::command_copy_acceleration_structure_compact(CommandBufferID p_cmd_buffer, AccelerationStructureID p_src, AccelerationStructureID p_dst) {
+	// GodotNext: d3d12_dxr (#118)
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	const AccelerationStructureInfo *src = (const AccelerationStructureInfo *)p_src.id;
+	const AccelerationStructureInfo *dst = (const AccelerationStructureInfo *)p_dst.id;
+	ERR_FAIL_NULL(src);
+	ERR_FAIL_NULL(dst);
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		_resource_transitions_flush(cmd_buf_info);
+	}
+	cmd_buf_info->cmd_list_4->CopyRaytracingAccelerationStructure(dst->gpu_virtual_address, src->gpu_virtual_address, D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+	_acceleration_structure_uav_barrier(cmd_buf_info, dst);
+}
+
+void RenderingDeviceDriverD3D12::_acceleration_structure_uav_barrier(CommandBufferInfo *p_cmd_buf_info, const AccelerationStructureInfo *p_info) {
+	// GodotNext: d3d12_dxr (#118). Legacy barriers only. RenderingDevice's graph emits no barriers for a
+	// driver that does not honor them, so the driver orders acceleration-structure writes itself: a UAV
+	// barrier on the structure's buffer after every build or copy that writes it, so later builds,
+	// copies, postbuild queries and ray queries read finished data, and one before a build, so it does
+	// not overwrite a structure that earlier work still reads. Enhanced barriers come from the graph.
+	if (barrier_capabilities.enhanced_barriers_supported) {
+		return;
+	}
+	const BufferInfo *buf_info = (const BufferInfo *)p_info->buffer.id;
+	const D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::UAV(buf_info->resource);
+	p_cmd_buf_info->cmd_list->ResourceBarrier(1, &barrier);
 }
 
 // ----- PIPELINE -----
@@ -5992,16 +6440,72 @@ bool RenderingDeviceDriverD3D12::raytracing_pipeline_get_shader_group_handles(Ra
 
 // ----- COMMANDS -----
 
+D3D12_GPU_VIRTUAL_ADDRESS RenderingDeviceDriverD3D12::_acceleration_structure_scratch_address(const BufferInfo *p_scratch_buffer, uint64_t p_scratch_offset) const {
+	// GodotNext: d3d12_dxr (#118). The first 256-byte boundary of the build's scratch region. The region is
+	// 256 bytes longer under tight alignment (acceleration_structure_get_scratch_size_bytes()); otherwise the
+	// ring starts at 64 KiB and the offset is already aligned.
+	return STEPIFY(p_scratch_buffer->gpu_virtual_address + p_scratch_offset, (uint64_t)D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT);
+}
+
 void RenderingDeviceDriverD3D12::command_build_blas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, AccelerationStructureBuildMode p_mode) {
-	// GodotNext: as_build_modes
-	(void)p_mode;
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: as_build_modes, d3d12_dxr (#118). UPDATE refits in place: the structure is both the
+	// source and the destination (PERFORM_UPDATE).
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	AccelerationStructureInfo *as_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
+	ERR_FAIL_NULL(as_info);
+	BufferInfo *scratch_buffer = (BufferInfo *)p_scratch_buffer.id;
+	const bool update = p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE;
+
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		// Inputs are read in NON_PIXEL_SHADER_RESOURCE and scratch is written in UNORDERED_ACCESS.
+		for (BufferInfo *input_buffer : as_info->input_buffers) {
+			_resource_transition_batch(cmd_buf_info, input_buffer, 0, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		}
+		_resource_transition_batch(cmd_buf_info, scratch_buffer, 0, 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		_resource_transitions_flush(cmd_buf_info);
+		_acceleration_structure_uav_barrier(cmd_buf_info, as_info);
+	}
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {};
+	desc.Inputs = _acceleration_structure_inputs(as_info, 0, 0, update);
+	desc.DestAccelerationStructureData = as_info->gpu_virtual_address;
+	desc.SourceAccelerationStructureData = update ? as_info->gpu_virtual_address : 0;
+	desc.ScratchAccelerationStructureData = _acceleration_structure_scratch_address(scratch_buffer, p_scratch_offset);
+	cmd_buf_info->cmd_list_4->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
+
+	_acceleration_structure_uav_barrier(cmd_buf_info, as_info);
 }
 
 void RenderingDeviceDriverD3D12::command_build_tlas(CommandBufferID p_cmd_buffer, AccelerationStructureID p_acceleration_structure, BufferID p_scratch_buffer, uint64_t p_scratch_offset, BufferID p_instance_buffer, uint32_t p_instance_offset, uint32_t p_instance_count, AccelerationStructureBuildMode p_mode) {
-	// GodotNext: as_build_modes
-	(void)p_mode;
-	ERR_FAIL_MSG("Ray tracing is not currently supported by the D3D12 driver.");
+	// GodotNext: as_build_modes, d3d12_dxr (#118). The instances come from RenderingDevice's CPU-written
+	// upload buffer or, through tlas_build_from_buffer, from a storage buffer the GPU wrote; each record
+	// names its BLAS by GPU virtual address.
+	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
+	AccelerationStructureInfo *as_info = (AccelerationStructureInfo *)p_acceleration_structure.id;
+	ERR_FAIL_NULL(as_info);
+	BufferInfo *scratch_buffer = (BufferInfo *)p_scratch_buffer.id;
+	BufferInfo *instance_buffer = (BufferInfo *)p_instance_buffer.id;
+	const bool update = p_mode == ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE;
+	// Instance descriptions cannot be moved here. RenderingDevice keeps their offset 16-byte aligned, and tight
+	// alignment places a buffer on at least an 8-byte boundary, so an unaligned instance buffer is refused.
+	ERR_FAIL_COND_MSG((instance_buffer->gpu_virtual_address + p_instance_offset) % D3D12_RAYTRACING_INSTANCE_DESCS_BYTE_ALIGNMENT != 0, "D3D12 top-level instance descriptions do not start on a 16-byte boundary.");
+
+	if (!barrier_capabilities.enhanced_barriers_supported) {
+		// An upload-heap instance buffer stays in GENERIC_READ, which already includes this state.
+		_resource_transition_batch(cmd_buf_info, instance_buffer, 0, 1, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		_resource_transition_batch(cmd_buf_info, scratch_buffer, 0, 1, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		_resource_transitions_flush(cmd_buf_info);
+		_acceleration_structure_uav_barrier(cmd_buf_info, as_info);
+	}
+
+	D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC desc = {};
+	desc.Inputs = _acceleration_structure_inputs(as_info, p_instance_count, instance_buffer->gpu_virtual_address + p_instance_offset, update);
+	desc.DestAccelerationStructureData = as_info->gpu_virtual_address;
+	desc.SourceAccelerationStructureData = update ? as_info->gpu_virtual_address : 0;
+	desc.ScratchAccelerationStructureData = _acceleration_structure_scratch_address(scratch_buffer, p_scratch_offset);
+	cmd_buf_info->cmd_list_4->BuildRaytracingAccelerationStructure(&desc, 0, nullptr);
+
+	_acceleration_structure_uav_barrier(cmd_buf_info, as_info);
 }
 
 void RenderingDeviceDriverD3D12::command_bind_raytracing_pipeline(CommandBufferID p_cmd_buffer, RaytracingPipelineID p_pipeline) {
@@ -6120,6 +6624,17 @@ void RenderingDeviceDriverD3D12::begin_segment(uint32_t p_frame_index, uint32_t 
 
 	frames_drawn = p_frames_drawn;
 	allocator->SetCurrentFrameIndex(p_frames_drawn);
+
+#ifdef DEBUG_ENABLED
+	// GodotNext: d3d12_dxr (#118). Test hook for the device-removed path: with
+	// GODOT_D3D12_REMOVE_DEVICE_AT_FRAME=<n>, ID3D12Device5::RemoveDevice runs when frame n begins, and the next
+	// fence wait or Present reports the removal.
+	static const int64_t remove_device_at_frame = OS::get_singleton()->get_environment("GODOT_D3D12_REMOVE_DEVICE_AT_FRAME").to_int();
+	if (remove_device_at_frame > 0 && (int64_t)p_frames_drawn == remove_device_at_frame && device_5) {
+		print_line(vformat("D3D12: removing the device at frame %d (GODOT_D3D12_REMOVE_DEVICE_AT_FRAME).", remove_device_at_frame));
+		device_5->RemoveDevice();
+	}
+#endif
 
 	segment_begun = true;
 }
@@ -6248,10 +6763,10 @@ uint64_t RenderingDeviceDriverD3D12::get_lazily_memory_used() {
 
 uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 	uint64_t safe_unbounded = ((uint64_t)1 << 30);
-	// GodotNext: rq_substrate (#22). No acceleration structures on D3D12 until DXR (#118): the AS
-	// limits are 0 rather than the default's 1 << 30.
+	// GodotNext: rq_substrate (#22), d3d12_dxr (#118). The AS limits are 0 without ray query rather than
+	// the default's 1 << 30.
 	uint64_t acceleration_structure_value = 0;
-	if (acceleration_structure_limit_get(p_limit, AccelerationStructureLimits(), acceleration_structure_value)) {
+	if (acceleration_structure_limit_get(p_limit, acceleration_structure_limits, acceleration_structure_value)) {
 		return acceleration_structure_value;
 	}
 	switch (p_limit) {
@@ -6335,6 +6850,9 @@ uint64_t RenderingDeviceDriverD3D12::api_trait_get(ApiTrait p_trait) {
 			return true;
 		case API_TRAIT_BUFFERS_REQUIRE_TRANSITIONS:
 			return !barrier_capabilities.enhanced_barriers_supported;
+		// GodotNext: d3d12_dxr (#118)
+		case API_TRAIT_ACCELERATION_STRUCTURE_INSTANCE_SIZE:
+			return D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS:
 			return true;
 		default:
@@ -6376,9 +6894,19 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 		// GodotNext: rd_bindless (#176)
 		case SUPPORTS_BINDLESS:
 			return bindless_capabilities.supported && bindless_capabilities.resource_descriptors >= RDBindless::MIN_SLOTS && bindless_capabilities.sampler_descriptors >= RDBindless::MIN_SAMPLER_SLOTS;
+		// GodotNext: d3d12_dxr (#118). DXR 1.1 inline ray tracing; RT pipelines are #121.
+		case SUPPORTS_RAY_QUERY:
+			return ray_query_caps.ray_query;
+		case SUPPORTS_RAY_QUERY_HARDWARE:
+			return ray_query_caps.ray_query && ray_query_caps.hardware;
 		default:
 			return false;
 	}
+}
+
+// GodotNext: d3d12_dxr (#118)
+String RenderingDeviceDriverD3D12::get_driver_version_key() const {
+	return format_d3d12_driver_version_key(adapter_vendor_id, adapter_device_id, adapter_driver_version);
 }
 
 const RDD::MultiviewCapabilities &RenderingDeviceDriverD3D12::get_multiview_capabilities() {
@@ -6738,6 +7266,14 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		format_capabilities.relaxed_casting_supported = options12.RelaxedFormatCastingSupported;
 		barrier_capabilities.enhanced_barriers_supported = options12.EnhancedBarriersSupported;
 	}
+#ifdef DEBUG_ENABLED
+	// GodotNext: d3d12_dxr (#118). Debug builds can force the legacy resource-state path, so both
+	// barrier paths can be validated on a device with enhanced barriers.
+	if (barrier_capabilities.enhanced_barriers_supported && OS::get_singleton()->get_environment("GODOT_D3D12_LEGACY_BARRIERS") == "1") {
+		barrier_capabilities.enhanced_barriers_supported = false;
+		print_line("D3D12: enhanced barriers are off (GODOT_D3D12_LEGACY_BARRIERS=1).");
+	}
+#endif
 
 	D3D12_FEATURE_DATA_D3D12_OPTIONS19 options19 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS19, &options19, sizeof(options19));
@@ -6798,6 +7334,47 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		print_verbose("- Depth bounds test supported");
 	} else {
 		print_verbose("- Depth bounds test not supported");
+	}
+
+	// GodotNext: d3d12_dxr (#118). DXR 1.1 ray query: RaytracingTier 1.1, shader model 6.5 (6.6 for the
+	// buffer device addresses the acceleration-structure path uses), ID3D12Device5, and a Mesa NIR library
+	// that compiles ray query. The adapter's PCI IDs decide the hardware flag (RT-core allowlist).
+	{
+		D3D12_FEATURE_DATA_D3D12_OPTIONS5 options5 = {};
+		res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options5, sizeof(options5));
+		raytracing_tier = SUCCEEDED(res) ? (uint32_t)options5.RaytracingTier : 0;
+		if (raytracing_tier >= D3D12_RAYTRACING_TIER_1_0) {
+			device->QueryInterface(device_5.GetAddressOf());
+		}
+		const uint32_t effective_tier = device_5 ? raytracing_tier : 0;
+
+		DXGI_ADAPTER_DESC adapter_desc = {};
+		if (SUCCEEDED(adapter->GetDesc(&adapter_desc))) {
+			adapter_vendor_id = adapter_desc.VendorId;
+			adapter_device_id = adapter_desc.DeviceId;
+		}
+		LARGE_INTEGER umd_version = {};
+		if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd_version))) {
+			adapter_driver_version = (uint64_t)umd_version.QuadPart;
+		}
+
+		ray_query_caps = d3d12_ray_query_caps(effective_tier, (uint32_t)shader_capabilities.shader_model, RenderingShaderContainerD3D12::is_raytracing_supported(), adapter_vendor_id, adapter_device_id);
+		acceleration_structure_limits = AccelerationStructureLimits();
+		if (ray_query_caps.ray_query) {
+			acceleration_structure_limits.max_instances = D3D12_RAYTRACING_MAX_INSTANCES_PER_TOP_LEVEL_ACCELERATION_STRUCTURE;
+			acceleration_structure_limits.max_geometries = D3D12_RAYTRACING_MAX_GEOMETRIES_PER_BOTTOM_LEVEL_ACCELERATION_STRUCTURE;
+			acceleration_structure_limits.max_primitives = D3D12_RAYTRACING_MAX_PRIMITIVES_PER_BOTTOM_LEVEL_ACCELERATION_STRUCTURE;
+			// An AS is an SRV; tier 1 and 2 shader-visible heaps hold up to 1,000,000 descriptors.
+			acceleration_structure_limits.max_per_stage = D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1;
+			acceleration_structure_limits.min_scratch_offset_alignment = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT;
+		}
+		const String tier_name = raytracing_tier == 0 ? String("none") : vformat("%d.%d", raytracing_tier / 10, raytracing_tier % 10);
+		print_verbose("- D3D12 driver version key: " + get_driver_version_key());
+		if (ray_query_caps.ray_query) {
+			print_verbose(vformat("- D3D12 ray query (DXR 1.1) supported, hardware %s (raytracing tier %s, vendor 0x%04X device 0x%04X)", ray_query_caps.hardware ? "allowlisted" : "not allowlisted", tier_name, adapter_vendor_id, adapter_device_id));
+		} else {
+			print_verbose(vformat("- D3D12 ray query (DXR 1.1) not supported: needs %s (raytracing tier %s, shader model %s)", ray_query_caps.missing, tier_name, D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model)));
+		}
 	}
 
 	return OK;
@@ -6866,6 +7443,11 @@ Error RenderingDeviceDriverD3D12::_initialize_allocator() {
 
 	misc_features_support.uma_supported = allocator->IsUMA();
 	misc_features_support.gpu_upload_heap_supported = allocator->IsGPUUploadHeapSupported();
+	// GodotNext: d3d12_dxr (#118). The allocator is created without ALLOCATOR_FLAG_DONT_USE_TIGHT_ALIGNMENT,
+	// so it uses tight alignment whenever the device supports it. Acceleration structures and their build
+	// scratch then get 256 bytes of padding to start on a 256-byte boundary.
+	misc_features_support.tight_alignment_supported = allocator->IsTightAlignmentSupported();
+	print_verbose(vformat("D3D12: Tight placed-resource alignment %s.", misc_features_support.tight_alignment_supported ? "supported (D3D12_TIGHT_ALIGNMENT_TIER_1)" : "not supported"));
 
 	// If UMA is supported but GPU upload heap isn't, the same functionality can be achieved
 	// by creating resources from a pool with the same properties as an upload heap.

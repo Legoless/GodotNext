@@ -1423,6 +1423,11 @@ RenderingDeviceCommons::ShaderSpirvVersion RenderingShaderContainerFormatD3D12::
 	return SHADER_SPIRV_VERSION_1_5;
 }
 
+// GodotNext: d3d12_dxr (#118)
+bool RenderingShaderContainerFormatD3D12::supports_acceleration_structures() const {
+	return RenderingShaderContainerD3D12::is_raytracing_supported();
+}
+
 RenderingShaderContainerFormatD3D12::RenderingShaderContainerFormatD3D12() {
 	glsl_type_singleton_init_or_ref();
 }

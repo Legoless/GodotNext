@@ -42,7 +42,7 @@
 			<return type="bool" />
 			<param index="0" name="format" type="int" enum="RenderingDevice.DataFormat" />
 			<description>
-				Returns [code]true[/code] if [method blas_create] accepts [param format] as a vertex format on this device, which rejects geometry in any other format. Vulkan reports the formats with [code]VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR[/code], and Metal the formats it maps to a Metal vertex format. Always [code]false[/code] on D3D12 until its acceleration-structure support lands.
+				Returns [code]true[/code] if [method blas_create] accepts [param format] as a vertex format on this device, which rejects geometry in any other format. Vulkan reports the formats with [code]VK_FORMAT_FEATURE_ACCELERATION_STRUCTURE_VERTEX_BUFFER_BIT_KHR[/code], Metal the formats it maps to a Metal vertex format, and D3D12, when it reports [constant SUPPORTS_RAY_QUERY], the vertex formats of DXR tiers 1.0 and 1.1 whose components keep their order in memory.
 			</description>
 		</method>
 		<method name="barrier" deprecated="Barriers are automatically inserted by RenderingDevice.">
@@ -2960,10 +2960,10 @@
 		<constant name="SUPPORTS_RAY_QUERY" value="11" enum="Features">
 			Support for ray query extension.
 
-			[b]Note:[/b] Vulkan reports this when the device exposes acceleration structures, ray query and buffer device addresses. The Metal driver reports it on Apple9 and later once an acceleration structure can be built. D3D12 reports [code]false[/code] until DXR support lands.
+			[b]Note:[/b] Vulkan reports this when the device exposes acceleration structures, ray query and buffer device addresses. The Metal driver reports it on Apple9 and later once an acceleration structure can be built. D3D12 reports it with DXR 1.1 (raytracing tier 1.1), shader model 6.6 (for the buffer device addresses acceleration structures use) and a build that links the GodotNext Mesa NIR library, which compiles ray query to DXIL; otherwise the reason is [constant RAY_QUERY_REASON_D3D12_NO_DXR].
 		</constant>
 		<constant name="SUPPORTS_RAY_QUERY_HARDWARE" value="16" enum="Features">
-			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later. The Vulkan driver sets it for devices in its RT-core allowlist: NVIDIA Turing and later RTX parts, AMD RDNA2 and later, and Intel Arc A-series, Battlemage and Lunar Lake. Other devices with ray query, such as software implementations, leave it unset. D3D12 reports [code]false[/code] until DXR support lands.
+			The device implements ray query in hardware. The Metal driver sets this for Apple9 and later. The Vulkan driver sets it for devices in its RT-core allowlist: NVIDIA Turing and later RTX parts, AMD RDNA2 and later, and Intel Arc A-series, Battlemage and Lunar Lake. The D3D12 driver uses the same allowlist with the adapter's PCI IDs. Other devices with ray query, such as software implementations, leave it unset.
 		</constant>
 		<constant name="SUPPORTS_ASYNC_COMPUTE" value="17" enum="Features">
 			The device can create a second compute queue. The Metal driver sets this only in barrier sync mode, which has real semaphores. The Vulkan driver sets it when the device has a queue family with compute and without graphics, and the Direct3D 12 driver when the device supports enhanced barriers.
@@ -3008,7 +3008,7 @@
 			The device or driver has no ray query: on Vulkan, acceleration structures, the ray query feature or buffer device addresses are missing.
 		</constant>
 		<constant name="RAY_QUERY_REASON_D3D12_NO_DXR" value="2" enum="RayQueryUnsupportedReason">
-			The D3D12 driver has no DXR support yet.
+			The D3D12 device or build has no DXR 1.1 ray query: the device is below raytracing tier 1.1 or shader model 6.6, or the build links the upstream Mesa NIR library, which cannot compile ray query to DXIL.
 		</constant>
 		<constant name="RAY_QUERY_REASON_METAL_SYNC_MODE" value="3" enum="RayQueryUnsupportedReason">
 			The Metal driver runs in a synchronization mode without the barriers ray query needs.
@@ -3136,19 +3136,19 @@
 			[b]Note:[/b] The returned value is multiplied by a factor of [code]1000000[/code] to preserve 6 digits of precision. It must be divided by [code]1000000.0[/code] to convert the value to a floating point number.
 		</constant>
 		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_INSTANCES" value="49" enum="Limit">
-			Maximum number of instances in one top-level acceleration structure. [code]0[/code] on a device without ray query and on D3D12.
+			Maximum number of instances in one top-level acceleration structure. [code]0[/code] on a device without ray query.
 		</constant>
 		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_GEOMETRIES" value="50" enum="Limit">
-			Maximum number of geometries in one bottom-level acceleration structure. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+			Maximum number of geometries in one bottom-level acceleration structure. [code]0[/code] on a device without ray query, and on Metal, which does not report it.
 		</constant>
 		<constant name="LIMIT_MAX_ACCELERATION_STRUCTURE_PRIMITIVES" value="51" enum="Limit">
-			Maximum number of triangles in one bottom-level acceleration structure. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+			Maximum number of triangles in one bottom-level acceleration structure. [code]0[/code] on a device without ray query, and on Metal, which does not report it.
 		</constant>
 		<constant name="LIMIT_MAX_PER_STAGE_ACCELERATION_STRUCTURES" value="52" enum="Limit">
-			Maximum number of acceleration structures one shader stage can access. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+			Maximum number of acceleration structures one shader stage can access. [code]0[/code] on a device without ray query, and on Metal, which does not report it.
 		</constant>
 		<constant name="LIMIT_MIN_ACCELERATION_STRUCTURE_SCRATCH_OFFSET_ALIGNMENT" value="53" enum="Limit">
-			Required alignment, in bytes, of an acceleration-structure build's scratch memory. [code]0[/code] on a device without ray query, and on Metal and D3D12, which do not report it.
+			Required alignment, in bytes, of an acceleration-structure build's scratch memory. [code]0[/code] on a device without ray query, and on Metal, which does not report it.
 		</constant>
 		<constant name="LIMIT_MAX_BINDLESS_TEXTURES" value="54" enum="Limit">
 			Maximum number of slots in a bindless table of [constant UNIFORM_TYPE_TEXTURE] entries. [code]0[/code] without [constant SUPPORTS_BINDLESS].
@@ -3169,7 +3169,7 @@
 			Total memory taken. This is greater than the sum of [constant MEMORY_TEXTURES] and [constant MEMORY_BUFFERS], as it also includes miscellaneous memory usage.
 		</constant>
 		<constant name="MEMORY_ACCELERATION_STRUCTURES" value="3" enum="MemoryType">
-			Memory taken by acceleration-structure objects, also counted in [constant MEMORY_BUFFERS]. Their build scratch and instance buffers are not included. [code]0[/code] on D3D12 until its acceleration-structure support lands.
+			Memory taken by acceleration-structure objects, also counted in [constant MEMORY_BUFFERS]. Their build scratch and instance buffers are not included.
 		</constant>
 		<constant name="INVALID_ID" value="-1">
 			Returned by functions that return an ID if a value is invalid.

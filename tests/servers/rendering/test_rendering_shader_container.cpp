@@ -993,6 +993,92 @@ TEST_CASE("[ShaderContainer][D3D12] Ray query and ray-tracing stages read the in
 	check_dxil_validation(validation_before, RenderingShaderContainerD3D12::is_raytracing_supported() ? 4 : 0);
 }
 #endif // DEBUG_ENABLED
+
+// GodotNext: d3d12_dxr (#118). Ray query in a pixel shader, as rd_smoke's fixture F runs it: a fullscreen triangle
+// and a fragment shader that traces one ray per pixel.
+const char *PIXEL_RAY_QUERY_VERTEX_GLSL = R"(
+#version 450
+
+void main() {
+	vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+	gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+const char *PIXEL_RAY_QUERY_FRAGMENT_GLSL = R"(
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT tlas;
+
+layout(location = 0) out vec4 frag_color;
+
+void main() {
+	vec2 xy = (gl_FragCoord.xy - 0.25) / 8.0;
+	rayQueryEXT rq;
+	rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFFu, vec3(xy, 0.0), 0.001, vec3(0.0, 0.0, -1.0), 100.0);
+	rayQueryProceedEXT(rq);
+	frag_color = vec4(-1.0, 0.0, 0.0, -1.0);
+	if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+		vec2 bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+		uint front = rayQueryGetIntersectionFrontFaceEXT(rq, true) ? 1u : 0u;
+		uint custom_index = rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true);
+		uint primitive = rayQueryGetIntersectionPrimitiveIndexEXT(rq, true);
+		frag_color = vec4(rayQueryGetIntersectionTEXT(rq, true), bary, float((primitive << 9u) | (custom_index << 1u) | front));
+	}
+}
+)";
+
+TEST_CASE("[ShaderContainer][D3D12] GLSL ray query in a pixel shader compiles to DXIL") {
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+
+	Vector<RDC::ShaderStageSPIRVData> stages;
+	stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_VERTEX, PIXEL_RAY_QUERY_VERTEX_GLSL));
+	stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_FRAGMENT, PIXEL_RAY_QUERY_FRAGMENT_GLSL));
+	for (const RDC::ShaderStageSPIRVData &stage : stages) {
+		REQUIRE_FALSE(stage.spirv.is_empty());
+	}
+
+	Ref<RenderingShaderContainer> container = format.create_container();
+	if (RenderingShaderContainerD3D12::is_raytracing_supported()) {
+		{
+			ErrorCapture capture;
+			REQUIRE(container->set_code_from_spirv("pixel_ray_query", stages));
+			CHECK_MESSAGE(capture.count == 0, capture.first_message);
+		}
+		// The shader baker bakes ray-query versions for this format (ShaderBakerExportPlugin::should_bake_version).
+		CHECK(format.supports_acceleration_structures());
+		// A DXIL pixel shader (program kind 0) at shader model 6.5, and its acceleration structure is an SRV in the
+		// root signature's descriptor table.
+		REQUIRE(container->shaders.size() == 2);
+		bool fragment_found = false;
+		for (int i = 0; i < container->shaders.size(); i++) {
+			if (container->shaders[i].shader_stage == RDC::SHADER_STAGE_FRAGMENT) {
+				fragment_found = true;
+				CHECK(dxil_program_version(decompressed_code(container, i)) == ((0u << 16) | 0x65));
+			}
+		}
+		CHECK(fragment_found);
+		const RenderingShaderContainerD3D12 *container_d3d12 = Object::cast_to<RenderingShaderContainerD3D12>(container.ptr());
+		REQUIRE(container_d3d12 != nullptr);
+		const RenderingShaderContainerD3D12::ShaderReflectionD3D12 reflection = container_d3d12->get_shader_reflection_d3d12();
+		REQUIRE(reflection.reflection_binding_set_uniforms_d3d12.size() == 1);
+		REQUIRE(reflection.reflection_binding_set_uniforms_d3d12[0].size() == 1);
+		CHECK(reflection.reflection_binding_set_uniforms_d3d12[0][0].resource_class == (uint32_t)RES_CLASS_SRV);
+		CHECK(reflection.reflection_binding_sets_d3d12[0].resource_descriptor_count == 1);
+		CHECK(reflection.reflection_binding_sets_d3d12[0].resource_root_param_idx != UINT32_MAX);
+	} else {
+		ErrorCapture capture;
+		CHECK_FALSE(container->set_code_from_spirv("pixel_ray_query", stages));
+		CHECK(capture.count == 1);
+		CHECK_MESSAGE(capture.first_message.contains("uses ray query"), capture.first_message);
+		// The shader baker skips them instead of failing the export.
+		CHECK_FALSE(format.supports_acceleration_structures());
+	}
+}
 #endif // MODULE_GLSLANG_ENABLED
 #endif // D3D12_ENABLED
 

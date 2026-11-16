@@ -89,12 +89,27 @@ TEST_CASE("[NextGI][Editor] New projects map driver.windows to vulkan") {
 }
 
 TEST_CASE("[NextGI][Editor] Vulkan switch offer truth table") {
-	CHECK(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "d3d12", false));
+	CHECK(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "d3d12", false, false));
 
-	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "d3d12", true));
-	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "vulkan", false));
-	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(true, true, "d3d12", false));
-	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, false, "d3d12", false));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "d3d12", true, false));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "vulkan", false, false));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(true, true, "d3d12", false, false));
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, false, "d3d12", false, false));
+	// GodotNext: d3d12_dxr (#118). Never while D3D12 HWRT is active.
+	CHECK_FALSE(NextGIEditorPlugin::should_offer_vulkan_switch(false, true, "d3d12", false, true));
+}
+
+// GodotNext: d3d12_dxr (#118). The modal and the inspector button only appear while D3D12 has no HWRT:
+// D3D12_NO_DXR (no ray query) or NOT_HW_ACCELERATED (ray query off the RT-core allowlist).
+TEST_CASE("[NextGI][Editor] D3D12 HWRT hides the Vulkan switch") {
+	CHECK(NextGIEditorPlugin::is_d3d12_hwrt_device("D3D12", true, true));
+	CHECK_FALSE(NextGIEditorPlugin::is_d3d12_hwrt_device("D3D12", false, false));
+	CHECK_FALSE(NextGIEditorPlugin::is_d3d12_hwrt_device("D3D12", true, false));
+	CHECK_FALSE(NextGIEditorPlugin::is_d3d12_hwrt_device("Vulkan", true, true));
+	CHECK_FALSE(NextGIEditorPlugin::is_d3d12_hwrt_device("Metal", true, true));
+
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "d3d12", true));
+	CHECK(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "d3d12", false));
 }
 
 // GodotNext: mesh_sdf_offer_test
@@ -151,11 +166,11 @@ TEST_CASE("[NextGI][Editor] apply_vulkan_switch writes vulkan and keeps the D3D1
 }
 
 TEST_CASE("[NextGI][Editor] The inspector Vulkan button is Windows and d3d12 only") {
-	CHECK(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "d3d12"));
-	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("macOS", "d3d12"));
-	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Linux", "d3d12"));
-	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "vulkan"));
-	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", ""));
+	CHECK(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "d3d12", false));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("macOS", "d3d12", false));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Linux", "d3d12", false));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "vulkan", false));
+	CHECK_FALSE(NextGIEditorPlugin::should_show_inspector_vulkan_button("Windows", "", false));
 }
 
 TEST_CASE("[NextGI][Editor] Vulkan switch dialog names the HDR and DComp cost") {
@@ -3056,6 +3071,165 @@ TEST_CASE("[NextGI][RT] Vulkan ray-query capabilities and acceleration-structure
 	uint64_t untouched = 7;
 	CHECK_FALSE(RenderingDeviceDriver::acceleration_structure_limit_get(RenderingDeviceDriver::LIMIT_MAX_TEXTURE_SIZE_2D, rtx_limits, untouched));
 	CHECK(untouched == 7);
+}
+
+// GodotNext: d3d12_dxr (#118). GD-7 with mocked device capabilities (plan §23.2): the D3D12 driver's
+// capability check feeds the §3.1 tier rule, as the driver does at startup.
+static RenderingDeviceDriver::D3D12RayQueryCaps d3d12_caps(uint32_t p_tier, uint32_t p_shader_model, bool p_toolchain = true, uint32_t p_vendor = RenderingContextDriver::Vendor::VENDOR_NVIDIA, uint32_t p_device = 0x2702) {
+	return RenderingDeviceDriver::d3d12_ray_query_caps(p_tier, p_shader_model, p_toolchain, p_vendor, p_device);
+}
+
+static NextGI::TierInputs d3d12_tier_inputs(const RenderingDeviceDriver::D3D12RayQueryCaps &p_caps, bool p_cpu_device = false) {
+	NextGI::TierInputs inputs = hwrt_inputs();
+	inputs.cpu_device = p_cpu_device;
+	// What collect_device_inputs reads from the D3D12 driver: SUPPORTS_RAY_QUERY is caps.ray_query,
+	// SUPPORTS_RAY_QUERY_HARDWARE is caps.ray_query && caps.hardware, and the reason is caps.reason.
+	NextGI::apply_driver_ray_query(p_caps.ray_query, p_caps.ray_query && p_caps.hardware, p_caps.reason, inputs);
+	return inputs;
+}
+
+// One tier line for the selection, and none when the same inputs are evaluated again.
+static void check_d3d12_one_line(const NextGI::TierInputs &p_inputs, const String &p_reason_name) {
+	NextGI next_gi;
+	String line;
+	REQUIRE(next_gi.update_tier(p_inputs, NextGI::QUALITY_HIGH, line));
+	CHECK_EQ(line.count("NextGI:"), 1);
+	CHECK_EQ(line, "NextGI: tier=SWRT reason=" + p_reason_name + " quality=HIGH");
+	line = String();
+	CHECK_FALSE(next_gi.update_tier(p_inputs, NextGI::QUALITY_HIGH, line));
+	CHECK(line.is_empty());
+}
+
+TEST_CASE("[NextGI][RT] D3D12 below raytracing tier 1.1 or shader model 6.5 gives D3D12_NO_DXR, with one line") {
+	// Tiers 0 (no DXR) and 1.0 (DXR without inline ray tracing), each with shader model 6.8.
+	for (uint32_t tier : { 0u, 10u }) {
+		const RenderingDeviceDriver::D3D12RayQueryCaps caps = d3d12_caps(tier, 0x68);
+		CHECK_FALSE(caps.ray_query);
+		CHECK_FALSE(caps.hardware);
+		CHECK(caps.reason == RenderingDeviceDriver::RAY_QUERY_REASON_D3D12_NO_DXR);
+		CHECK_EQ(String(caps.missing), "raytracing tier 1.1");
+		check_tier(d3d12_tier_inputs(caps), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
+		check_d3d12_one_line(d3d12_tier_inputs(caps), "D3D12_NO_DXR");
+	}
+	// Tier 1.1 with shader model 6.4: no RayQuery in DXIL.
+	const RenderingDeviceDriver::D3D12RayQueryCaps sm64 = d3d12_caps(11, 0x64);
+	CHECK_FALSE(sm64.ray_query);
+	CHECK(sm64.reason == RenderingDeviceDriver::RAY_QUERY_REASON_D3D12_NO_DXR);
+	CHECK_EQ(String(sm64.missing), "shader model 6.5");
+	check_tier(d3d12_tier_inputs(sm64), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
+	check_d3d12_one_line(d3d12_tier_inputs(sm64), "D3D12_NO_DXR");
+	// Tier 1.1 with shader model 6.5: RayQuery compiles, but the acceleration-structure path needs the
+	// buffer device addresses the D3D12 driver gives from shader model 6.6.
+	const RenderingDeviceDriver::D3D12RayQueryCaps sm65 = d3d12_caps(11, 0x65);
+	CHECK_FALSE(sm65.ray_query);
+	CHECK(sm65.reason == RenderingDeviceDriver::RAY_QUERY_REASON_D3D12_NO_DXR);
+	CHECK_EQ(String(sm65.missing), "shader model 6.6 (buffer device addresses)");
+	check_tier(d3d12_tier_inputs(sm65), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
+	// The tier is checked before the shader model.
+	CHECK_EQ(String(d3d12_caps(10, 0x60).missing), "raytracing tier 1.1");
+	// Force cannot put a device without DXR on HWRT, and warns.
+	NextGI::TierInputs forced = d3d12_tier_inputs(d3d12_caps(10, 0x68));
+	forced.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
+	check_tier(forced, NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR, true);
+}
+
+TEST_CASE("[NextGI][RT] D3D12 with the upstream Mesa NIR library gives D3D12_NO_DXR") {
+	// Ray query cannot compile to DXIL without the GodotNext library (#123), whatever the device.
+	const RenderingDeviceDriver::D3D12RayQueryCaps caps = d3d12_caps(11, 0x68, false);
+	CHECK_FALSE(caps.ray_query);
+	CHECK_FALSE(caps.hardware);
+	CHECK(caps.reason == RenderingDeviceDriver::RAY_QUERY_REASON_D3D12_NO_DXR);
+	CHECK_EQ(String(caps.missing), "a Mesa NIR library with ray query");
+	check_tier(d3d12_tier_inputs(caps), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
+}
+
+TEST_CASE("[NextGI][RT] D3D12 off the RT-core allowlist gives NOT_HW_ACCELERATED, with one line") {
+	const uint32_t nvidia = RenderingContextDriver::Vendor::VENDOR_NVIDIA;
+	const uint32_t intel = RenderingContextDriver::Vendor::VENDOR_INTEL;
+	// The RTX 4080 SUPER, the RTX 5090 and the cloud L4 (AD104): DXR 1.1 on RT cores.
+	for (uint32_t device_id : { 0x2702u, 0x2B85u, 0x27B8u }) {
+		const RenderingDeviceDriver::D3D12RayQueryCaps rtx = d3d12_caps(11, 0x68, true, nvidia, device_id);
+		CHECK(rtx.ray_query);
+		CHECK(rtx.hardware);
+		CHECK(rtx.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+		check_tier(d3d12_tier_inputs(rtx), NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+	}
+	// A GTX 1660 Ti and an Intel UHD 770 whose drivers expose tier 1.1 without RT units.
+	const uint32_t no_rt_units[][2] = { { nvidia, 0x2182 }, { intel, 0xA780 } };
+	for (const uint32_t *ids : no_rt_units) {
+		const RenderingDeviceDriver::D3D12RayQueryCaps caps = d3d12_caps(11, 0x66, true, ids[0], ids[1]);
+		CHECK(caps.ray_query);
+		CHECK_FALSE(caps.hardware);
+		CHECK(caps.reason == RenderingDeviceDriver::RAY_QUERY_SUPPORTED);
+		check_tier(d3d12_tier_inputs(caps), NextGI::TIER_SOFTWARE, NextGI::NOT_HW_ACCELERATED);
+		check_d3d12_one_line(d3d12_tier_inputs(caps), "NOT_HW_ACCELERATED");
+		// Force runs HWRT on it anyway.
+		NextGI::TierInputs forced = d3d12_tier_inputs(caps);
+		forced.hwrt_setting = NextGI::HARDWARE_RAY_TRACING_FORCE;
+		check_tier(forced, NextGI::TIER_HWRT, NextGI::TIER_REASON_NONE);
+	}
+}
+
+TEST_CASE("[NextGI][RT] D3D12 WARP gives CPU_DEVICE") {
+	// WARP is a software adapter (DXGI_ADAPTER_FLAG_SOFTWARE, so DEVICE_TYPE_CPU), Microsoft's vendor
+	// ID 0x1414. With DXR 1.1 the driver reports ray query; the tier rule's device-type check wins.
+	const RenderingDeviceDriver::D3D12RayQueryCaps warp = d3d12_caps(11, 0x68, true, 0x1414, 0x008C);
+	CHECK(warp.ray_query);
+	CHECK_FALSE(warp.hardware);
+	check_tier(d3d12_tier_inputs(warp, true), NextGI::TIER_SOFTWARE, NextGI::CPU_DEVICE);
+	check_d3d12_one_line(d3d12_tier_inputs(warp, true), "CPU_DEVICE");
+	// A WARP without DXR 1.1 falls back with the driver's reason.
+	const RenderingDeviceDriver::D3D12RayQueryCaps old_warp = d3d12_caps(0, 0x66, true, 0x1414, 0x008C);
+	check_tier(d3d12_tier_inputs(old_warp, true), NextGI::TIER_SOFTWARE, NextGI::D3D12_NO_DXR);
+}
+
+TEST_CASE("[NextGI][RT] D3D12 driver version key") {
+	// 32.0.15.6614 packed as DXGI's user-mode driver version (LARGE_INTEGER, 16 bits per part).
+	const uint64_t version = (uint64_t(32) << 48) | (uint64_t(0) << 32) | (uint64_t(15) << 16) | uint64_t(6614);
+	CHECK_EQ(RenderingDeviceDriver::format_d3d12_driver_version_key(0x10DE, 0x2702, version), "D3D12:4318:9986:32.0.15.6614");
+	// A driver update changes the key, which clears an HWRT fault latch.
+	CHECK_NE(RenderingDeviceDriver::format_d3d12_driver_version_key(0x10DE, 0x2702, version + 1), RenderingDeviceDriver::format_d3d12_driver_version_key(0x10DE, 0x2702, version));
+	CHECK_EQ(RenderingDeviceDriver::D3D12_ACCELERATION_STRUCTURE_INSTANCE_SIZE, 64u);
+}
+
+TEST_CASE("[NextGI][RT] D3D12 acceleration-structure vertex formats keep their component order") {
+	// DXR tier 1.0 and the formats tier 1.1 adds, as RD formats with the same memory layout.
+	const RenderingDeviceDriver::DataFormat accepted[] = {
+		RenderingDeviceDriver::DATA_FORMAT_R32G32_SFLOAT,
+		RenderingDeviceDriver::DATA_FORMAT_R32G32B32_SFLOAT,
+		RenderingDeviceDriver::DATA_FORMAT_R16G16_SFLOAT,
+		RenderingDeviceDriver::DATA_FORMAT_R16G16B16A16_SFLOAT,
+		RenderingDeviceDriver::DATA_FORMAT_R16G16_SNORM,
+		RenderingDeviceDriver::DATA_FORMAT_R16G16B16A16_SNORM,
+		RenderingDeviceDriver::DATA_FORMAT_R16G16B16A16_UNORM,
+		RenderingDeviceDriver::DATA_FORMAT_R16G16_UNORM,
+		RenderingDeviceDriver::DATA_FORMAT_A2B10G10R10_UNORM_PACK32,
+		RenderingDeviceDriver::DATA_FORMAT_R8G8B8A8_UNORM,
+		RenderingDeviceDriver::DATA_FORMAT_A8B8G8R8_UNORM_PACK32,
+		RenderingDeviceDriver::DATA_FORMAT_R8G8_UNORM,
+		RenderingDeviceDriver::DATA_FORMAT_R8G8B8A8_SNORM,
+		RenderingDeviceDriver::DATA_FORMAT_A8B8G8R8_SNORM_PACK32,
+		RenderingDeviceDriver::DATA_FORMAT_R8G8_SNORM,
+	};
+	uint32_t accepted_count = 0;
+	for (int format = 0; format < RenderingDeviceDriver::DATA_FORMAT_MAX; format++) {
+		if (RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(RenderingDeviceDriver::DataFormat(format))) {
+			accepted_count++;
+		}
+	}
+	CHECK_EQ(accepted_count, (uint32_t)std_size(accepted));
+	for (const RenderingDeviceDriver::DataFormat format : accepted) {
+		CHECK(RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(format));
+	}
+	// The D3D12 format table maps these onto listed DXGI formats with the components in another order
+	// (B8G8R8A8_SNORM onto R8G8B8A8_SNORM, and A2R10G10B10 onto R10G10B10A2 through an SRV swizzle a
+	// build never applies), so a BLAS built from them would swap x and z.
+	CHECK_FALSE(RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(RenderingDeviceDriver::DATA_FORMAT_B8G8R8A8_SNORM));
+	CHECK_FALSE(RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(RenderingDeviceDriver::DATA_FORMAT_A2R10G10B10_UNORM_PACK32));
+	CHECK_FALSE(RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(RenderingDeviceDriver::DATA_FORMAT_B8G8R8A8_UNORM));
+	// Not on DXR's lists.
+	CHECK_FALSE(RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(RenderingDeviceDriver::DATA_FORMAT_R32G32B32A32_SFLOAT));
+	CHECK_FALSE(RenderingDeviceDriver::d3d12_acceleration_structure_vertex_format_supported(RenderingDeviceDriver::DATA_FORMAT_R8G8B8A8_SRGB));
 }
 
 TEST_CASE("[NextGI][RT] The GPU instance encoder compiles for both API layouts") {

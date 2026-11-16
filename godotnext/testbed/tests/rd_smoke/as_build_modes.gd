@@ -184,7 +184,8 @@ func _trace(rd: RenderingDevice, shader: RID, tlas: RID, rays: PackedByteArray, 
 	var uniform_set := rd.uniform_set_create(uniforms, shader, 0)
 	var data := PackedByteArray()
 	if pipeline.is_valid() and uniform_set.is_valid():
-		var push := PackedInt32Array([count, 0, 0, 0]).to_byte_array()
+		# rq_kernel.glsl takes the ray cull mask from the second push constant (#118).
+		var push := PackedInt32Array([count, 0xFF, 0, 0]).to_byte_array()
 		var compute_list := rd.compute_list_begin()
 		rd.compute_list_bind_compute_pipeline(compute_list, pipeline)
 		rd.compute_list_bind_uniform_set(compute_list, uniform_set, 0)
