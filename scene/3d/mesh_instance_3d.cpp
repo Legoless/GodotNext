@@ -131,12 +131,16 @@ void MeshInstance3D::set_mesh(const Ref<Mesh> &p_mesh) {
 	if (mesh.is_valid()) {
 		// If mesh is a PrimitiveMesh, calling get_rid on it can trigger a changed callback
 		// so do this before connecting _mesh_changed.
-		set_base(mesh->get_rid());
+		// GodotNext: mesh_instance_free_overrides (#278). Remember the base for ~MeshInstance3D.
+		mesh_base = mesh->get_rid();
+		set_base(mesh_base);
 		mesh->connect_changed(callable_mp(this, &MeshInstance3D::_mesh_changed));
 		_mesh_changed();
 	} else {
 		blend_shape_tracks.clear();
 		blend_shape_properties.clear();
+		// GodotNext: mesh_instance_free_overrides (#278).
+		mesh_base = RID();
 		set_base(RID());
 		update_gizmos();
 	}
@@ -958,4 +962,24 @@ MeshInstance3D::MeshInstance3D() {
 		skeleton_path = NodePath("..");
 	}
 #endif
+}
+
+// GodotNext: mesh_instance_free_overrides (#278). The override materials are released before
+// ~VisualInstance3D frees the rendering instance, and freeing an instance first applies its pending
+// update. An instance no frame has updated yet (for example one that never entered the tree) would
+// still hold the RIDs of the freed materials and query them. Detach them first, as
+// ~GeometryInstance3D does for the material override and overlay. The instance holds surface
+// materials only while its base is the mesh set_mesh() gave it: without a mesh it has none, and
+// VisualInstance3D::set_base() is bound, so a script may have cleared or replaced the base, which
+// clears the instance's materials.
+MeshInstance3D::~MeshInstance3D() {
+	if (mesh_base.is_null() || get_base() != mesh_base) {
+		return;
+	}
+	ERR_FAIL_NULL(RenderingServer::get_singleton());
+	for (int surface_index = 0; surface_index < surface_override_materials.size(); surface_index++) {
+		if (surface_override_materials[surface_index].is_valid()) {
+			RS::get_singleton()->instance_set_surface_override_material(get_instance(), surface_index, RID());
+		}
+	}
 }

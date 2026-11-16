@@ -54,6 +54,8 @@ protected:
 	LocalVector<float> blend_shape_tracks;
 	HashMap<StringName, int> blend_shape_properties;
 	Vector<Ref<Material>> surface_override_materials;
+	// GodotNext: mesh_instance_free_overrides (#278). The base set_mesh() gave the rendering instance.
+	RID mesh_base;
 
 	void _mesh_changed();
 	void _resolve_skeleton_path();
@@ -135,4 +137,6 @@ public:
 	virtual PackedStringArray get_configuration_warnings() const override;
 
 	MeshInstance3D();
+	// GodotNext: mesh_instance_free_overrides (#278).
+	~MeshInstance3D();
 };

@@ -151,10 +151,6 @@ func _check_crowd() -> void:
 				complete += 1
 		_check(complete == CROWD_COUNT, "character_crowd.tscn has %d complete actors (skeleton, skinned mesh of at least %d triangles, walk player), expected %d." % [complete, CROWD_MIN_TRIANGLES, CROWD_COUNT])
 	_check_cameras_and_path(root, "character_crowd.tscn")
-	# Drop the walkers' own override materials first: freeing 100 of them with an instance that never
-	# entered the tree makes the headless dummy renderer log a "material is null" error (#278).
-	for node in root.find_children("*", "MeshInstance3D", true, false):
-		(node as MeshInstance3D).set_surface_override_material(0, null)
 	root.free()
 
 

@@ -1804,19 +1804,7 @@ func _check_textures(p_dir: String, p_scene: Dictionary) -> void:
 	var texture_ids: Array = files.keys()
 	texture_ids.sort()
 	_check(compared_ids == texture_ids, "every texture was compared with its source (%s of %s)" % [compared_ids, texture_ids])
-	_free_shell(shell)
-
-
-## Frees a scene instance that never entered the tree. Its surface override materials are dropped
-## first: freeing Character Crowd's 100 walkers with their own override materials makes the headless
-## dummy renderer log a "material is null" error (material_get_instance_shader_parameters) that the
-## run script would count as a failure; without the overrides it frees cleanly. Remove this once #278 is fixed.
-func _free_shell(p_shell: Node) -> void:
-	for node in p_shell.find_children("*", "MeshInstance3D", true, false):
-		var mesh_instance := node as MeshInstance3D
-		for surface in mesh_instance.get_surface_override_material_count():
-			mesh_instance.set_surface_override_material(surface, null)
-	p_shell.free()
+	shell.free()
 
 
 ## The PNG of a scene texture, from a fresh copy: the dummy renderer of a headless run keeps the
@@ -1877,7 +1865,7 @@ func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
 	var file := FileAccess.open(p_dir.path_join("camera_track.csv"), FileAccess.READ)
 	_check(file != null, "camera_track.csv opens")
 	if file == null:
-		_free_shell(shell)
+		shell.free()
 		return
 	_check(file.get_line() == "frame,px,py,pz,qx,qy,qz,qw,fov_deg,near,far", "camera_track.csv header")
 	var rows := 0
@@ -1918,7 +1906,7 @@ func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
 				still += 1
 		_check(jumps == PackedInt32Array([TORTURE_CUT]), "the path's only jump is the cut at frame %d (%s)" % [TORTURE_CUT, jumps])
 		_check(still == 199, "the camera holds still through frames 0 to 199 (%d still steps)" % still)
-	_free_shell(shell)
+	shell.free()
 
 
 ## checks.camera_far_rows recomputed from the exported files alone: the camera rows of
@@ -2029,7 +2017,7 @@ func _check_sky(p_dir: String, p_scene: Dictionary) -> void:
 	_check(worst < 0.01, "sky.hdr holds the procedural sky (worst relative error %f)" % worst)
 	var zenith := Lib.procedural_sky_radiance(sky, [], Vector3.UP)
 	_check(zenith.is_equal_approx(sky.sky_top_color.srgb_to_linear()), "the zenith is the linear sky top color")
-	_free_shell(shell)
+	shell.free()
 
 
 ## Mesh nodes of a glTF file: name -> {triangles, aabb, transform}.
