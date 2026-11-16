@@ -5,7 +5,10 @@ extends RefCounted
 
 ## 2 (#233): material blend modes and albedo textures, area lights, layers and light masks,
 ## textures and approximations. An import written for schema 1 builds every material opaque.
-const SCHEMA := 2
+## 3 (#232): per-frame transform tracks for moving mesh instances, camera cuts, UV1 scale and
+## offset, texture filtering and mipmaps, skinned meshes as rigid per-bone parts, ShaderMaterials
+## and particles (approximations). An import written for schema 2 places movers at frame 0 only.
+const SCHEMA := 3
 const SKY_WIDTH := 512
 const SKY_HEIGHT := 256
 
@@ -117,6 +120,19 @@ const APPROXIMATIONS := {
 	"light_projector": "A light projector texture: the UE import builds the light without it. Epic's light functions page (UE 5.9) does not say how a light function maps a texture onto a spot light's cone.",
 	"light_cull_mask": "A light whose cull mask lights none of the placed layers: the UE import puts it on its own lighting channel, but Epic's lighting channels page (UE 5.9) says channels do not work with Static-mobility mesh actors, and the import places its meshes Static, so in UE the light lights the placed geometry.",
 	"translucent_shadow": "An alpha-blended surface on an instance that casts shadows: Godot's alpha blending casts no shadow, while the UE import keeps the instance's Cast Shadow on, so in UE the surface shadows the lights.",
+	"alpha_antialiasing": "Alpha antialiasing (alpha to coverage) on an alpha-scissor material: the UE import builds a Masked material clipped at the threshold, without alpha to coverage.",
+	"rigid_skin": "A skinned mesh whose every vertex follows one bone at full weight: the export writes one mesh per bone (the triangles bound to it) with a per-frame transform track, and the UE import places them as rigid moving meshes instead of a skeletal mesh. The poses are the same; UE draws rigid meshes, not a skinned one.",
+	"shader_material": "A ShaderMaterial: scene.json carries its code, the code's SHA-256 and its uniform values, and the UE import builds a hand-written UE material only for a shader it knows by that SHA-256 (it refuses any other), so the UE surface is a port by hand, not a conversion.",
+	"particles": "GPU or CPU particles: no public UE import path carries a Godot particle system, so the UE import builds none and the UE scene draws no particles.",
+}
+
+## Texture filters the format carries (BaseMaterial3D.texture_filter), as scene.json names them.
+## The UE import builds nearest and linear without mipmaps, and linear with mipmaps as trilinear
+## filtering; the other filters (nearest with mipmaps, anisotropic) are refused.
+const CARRIED_FILTERS := {
+	BaseMaterial3D.TEXTURE_FILTER_NEAREST: "nearest",
+	BaseMaterial3D.TEXTURE_FILTER_LINEAR: "linear",
+	BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS: "linear_mipmaps",
 }
 
 ## Material properties that change what Godot draws and that the UE import does not build:
@@ -178,8 +194,6 @@ static func material_refusals(p_material: BaseMaterial3D) -> PackedStringArray:
 		found.append("alpha hash")
 	elif p_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_DEPTH_PRE_PASS:
 		found.append("alpha with a depth pre-pass")
-	if p_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR and p_material.alpha_antialiasing_mode != BaseMaterial3D.ALPHA_ANTIALIASING_OFF:
-		found.append("alpha antialiasing")
 	if p_material.blend_mode != BaseMaterial3D.BLEND_MODE_MIX:
 		found.append("a blend mode other than mix")
 	if p_material.shading_mode != BaseMaterial3D.SHADING_MODE_PER_PIXEL:
@@ -203,10 +217,16 @@ static func material_refusals(p_material: BaseMaterial3D) -> PackedStringArray:
 		else:
 			found.append("a texture in slot %d (only the albedo texture is exported)" % slot)
 	if textured:
-		if p_material.uv1_triplanar or not p_material.uv1_scale.is_equal_approx(Vector3.ONE) or not p_material.uv1_offset.is_zero_approx():
-			found.append("a UV1 transform or triplanar mapping")
+		# UV1 scale and offset are carried (the UE import tiles and offsets the texture coordinate);
+		# triplanar mapping is not.
+		if p_material.uv1_triplanar:
+			found.append("triplanar UV1 mapping")
 		if p_material.albedo_texture_msdf:
 			found.append("an MSDF albedo texture")
+		if not CARRIED_FILTERS.has(p_material.texture_filter):
+			found.append("a texture filter with mipmaps other than linear (nearest with mipmaps, or anisotropic)")
+		if not p_material.texture_repeat:
+			found.append("texture repeat disabled")
 	return found
 
 
@@ -215,7 +235,134 @@ static func material_approximations(p_material: BaseMaterial3D) -> PackedStringA
 	var found := PackedStringArray()
 	if p_material.diffuse_mode != BaseMaterial3D.DIFFUSE_LAMBERT:
 		found.append("diffuse_mode")
+	if p_material.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR and p_material.alpha_antialiasing_mode != BaseMaterial3D.ALPHA_ANTIALIASING_OFF:
+		found.append("alpha_antialiasing")
 	return found
+
+
+## The material's texture filter as scene.json names it ("nearest", "linear", "linear_mipmaps"), or
+## an empty string for one the format does not carry.
+static func texture_filter_name(p_material: BaseMaterial3D) -> String:
+	return String(CARRIED_FILTERS.get(p_material.texture_filter, ""))
+
+
+## Splits a skinned mesh into rigid parts, one per skin bind, for the rigid_skin approximation.
+## Every vertex must follow exactly one bind at full weight, and every triangle must stay on one
+## bind. Returns {"parts": [{"bind": int, "surfaces": [original surface index, ...],
+## "arrays": [surface arrays without bones and weights, ...], "sources": [PackedInt32Array of the
+## original vertex index of each part vertex, ...]}], "triangles": int} sorted by bind, or
+## {"error": message}. The part vertices stay in the mesh's own space, so a part placed at
+## mesh_instance.global_transform * bone_global_pose * bind_pose draws what the skinned mesh draws.
+static func rigid_skin_parts(p_mesh: Mesh) -> Dictionary:
+	var parts := {}
+	var triangles := 0
+	for surface in p_mesh.get_surface_count():
+		var arrays := p_mesh.surface_get_arrays(surface)
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var bones: Variant = arrays[Mesh.ARRAY_BONES]
+		var weights: Variant = arrays[Mesh.ARRAY_WEIGHTS]
+		if bones == null or weights == null:
+			return {"error": "surface %d has no bones or weights" % surface}
+		var bone_ids := bones as PackedInt32Array
+		var bone_weights := weights as PackedFloat32Array
+		if vertices.is_empty() or bone_ids.size() != bone_weights.size() or bone_ids.size() % vertices.size() != 0:
+			return {"error": "surface %d has a bone array that does not match its vertices" % surface}
+		var per_vertex := bone_ids.size() / vertices.size()
+		var bind_of := PackedInt32Array()
+		bind_of.resize(vertices.size())
+		for vertex in vertices.size():
+			var found := -1
+			for slot in per_vertex:
+				var weight := bone_weights[vertex * per_vertex + slot]
+				if weight >= 1.0 - 1e-6 and found < 0:
+					found = bone_ids[vertex * per_vertex + slot]
+				elif absf(weight) > 1e-6:
+					return {"error": "vertex %d of surface %d blends more than one bone" % [vertex, surface]}
+			if found < 0:
+				return {"error": "vertex %d of surface %d follows no bone at full weight" % [vertex, surface]}
+			bind_of[vertex] = found
+		var indices: Variant = arrays[Mesh.ARRAY_INDEX]
+		var corners := PackedInt32Array()
+		if indices != null:
+			corners = indices as PackedInt32Array
+		else:
+			for vertex in vertices.size():
+				corners.append(vertex)
+		# bind -> {"remap": {old: new}, "corners": PackedInt32Array}
+		var by_bind := {}
+		for triangle in corners.size() / 3:
+			var a := corners[triangle * 3]
+			var bind := bind_of[a]
+			if bind_of[corners[triangle * 3 + 1]] != bind or bind_of[corners[triangle * 3 + 2]] != bind:
+				return {"error": "triangle %d of surface %d spans more than one bone" % [triangle, surface]}
+			if not by_bind.has(bind):
+				by_bind[bind] = {"remap": {}, "corners": PackedInt32Array()}
+			var entry: Dictionary = by_bind[bind]
+			var part_corners: PackedInt32Array = entry["corners"]
+			for corner in 3:
+				var old := corners[triangle * 3 + corner]
+				var remap: Dictionary = entry["remap"]
+				if not remap.has(old):
+					remap[old] = remap.size()
+				part_corners.append(int(remap[old]))
+			entry["corners"] = part_corners
+			triangles += 1
+		var binds: Array = by_bind.keys()
+		binds.sort()
+		for bind: int in binds:
+			var entry: Dictionary = by_bind[bind]
+			var remap: Dictionary = entry["remap"]
+			var order := PackedInt32Array()
+			order.resize(remap.size())
+			for old: int in remap:
+				order[int(remap[old])] = old
+			var part_arrays := []
+			part_arrays.resize(Mesh.ARRAY_MAX)
+			for slot in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TANGENT, Mesh.ARRAY_COLOR, Mesh.ARRAY_TEX_UV, Mesh.ARRAY_TEX_UV2]:
+				part_arrays[slot] = _gather(arrays[slot], order, vertices.size())
+			part_arrays[Mesh.ARRAY_INDEX] = entry["corners"]
+			if not parts.has(bind):
+				parts[bind] = {"bind": bind, "surfaces": [], "arrays": [], "sources": []}
+			(parts[bind]["surfaces"] as Array).append(surface)
+			(parts[bind]["arrays"] as Array).append(part_arrays)
+			(parts[bind]["sources"] as Array).append(order)
+	var sorted: Array = parts.keys()
+	sorted.sort()
+	var result: Array = []
+	for bind: int in sorted:
+		result.append(parts[bind])
+	return {"parts": result, "triangles": triangles}
+
+
+## The elements of a per-vertex mesh array at p_order (components per vertex inferred from the
+## array's size), or null for an absent array.
+static func _gather(p_array: Variant, p_order: PackedInt32Array, p_vertices: int) -> Variant:
+	if p_array == null:
+		return null
+	match typeof(p_array):
+		TYPE_PACKED_VECTOR3_ARRAY:
+			var out := PackedVector3Array()
+			for index in p_order:
+				out.append(p_array[index])
+			return out
+		TYPE_PACKED_VECTOR2_ARRAY:
+			var out := PackedVector2Array()
+			for index in p_order:
+				out.append(p_array[index])
+			return out
+		TYPE_PACKED_COLOR_ARRAY:
+			var out := PackedColorArray()
+			for index in p_order:
+				out.append(p_array[index])
+			return out
+		TYPE_PACKED_FLOAT32_ARRAY:
+			var stride := (p_array as PackedFloat32Array).size() / p_vertices
+			var out := PackedFloat32Array()
+			for index in p_order:
+				for component in stride:
+					out.append(p_array[index * stride + component])
+			return out
+	return null
 
 
 ## Whether a surface with this material on an instance with this cast_shadow setting needs the

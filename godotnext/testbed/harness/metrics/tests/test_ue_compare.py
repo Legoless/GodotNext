@@ -182,6 +182,62 @@ def test_the_lights_and_shadows_configs(name: str, line_id: str, gate: str, ligh
     assert ("Provisional" in line.reason) == (gate == "GM-2")
 
 
+@pytest.mark.parametrize(
+    ("name", "line_id", "level", "history"),
+    [
+        ("upscaler_torture_tsr_high", "gt4_t1_tsr_high", "2", "100"),
+        ("upscaler_torture_tsr_epic", "gt4_t2_tsr_epic", "3", "200"),
+    ],
+)
+def test_the_upscaler_torture_configs(name: str, line_id: str, level: str, history: str) -> None:
+    config = load_config(_TESTBED / "ue_compare" / f"{name}.json")
+    assert config.raw["port_issue"] == 232
+    # Plan §21.5.4: T1 and T2 are TSR at 2160p output and 0.5 scale on the RTX 4080 SUPER, p95 over
+    # the 600-frame path; the UE path loops once per measured window.
+    assert config.resolution == (3840, 2160)
+    assert config.frames == config.ue.path_frames == 600
+    line = next(line for line in config.lines if line.id == line_id)
+    # A 3840x2160 window did not render at 3840x2160 on the machine's 4K desktop; fullscreen does
+    # once the editor is DPI-aware there (the line's reason and the lead's decision).
+    assert config.ue.window == "fullscreen"
+    assert "2160p" in line.reason
+    assert "-fullscreen" in ue_args(config) and "-windowed" not in ue_args(config)
+    assert config.godotnext.nextgi is None
+    quality = "high" if level == "2" else "epic"
+    assert godotnext_args(config)[-3:] == ["--upscaler=tsr", f"--tsr-quality={quality}", "--scale=0.5"]
+    cvars = config.ue.checked_cvars()
+    # The TSR page: r.AntiAliasingMethod=4 is TSR, sg.AntiAliasingQuality 2 is High and 3 is Epic,
+    # and Epic (only) uses a 200 % history. The history is not set: the run must show it.
+    assert cvars["r.AntiAliasingMethod"] == "4"
+    assert cvars["sg.AntiAliasingQuality"] == level
+    assert cvars["r.ScreenPercentage"] == "50"
+    assert cvars["sg.ResolutionQuality"] == "50"
+    assert cvars["sg.ShadowQuality"] == "2"
+    assert cvars["r.TSR.History.ScreenPercentage"] == history
+    assert not any(command.startswith("r.TSR.History.ScreenPercentage ") for command in config.ue.exec_cmds)
+    assert (line.status, line.gates, line.statistic) == ("ue_bar", ("GT-4",), "p95")
+    assert line.godotnext is not None and line.godotnext.columns == ("tsr_ms",)
+    assert line.ue is not None and line.ue.group == "TSR"
+
+
+def test_the_ue_window_mode_comes_from_the_config() -> None:
+    assert "-windowed" in ue_args(parse_config(synthetic_config()))
+    fullscreen = ue_args(parse_config(_with("ue", window="fullscreen")))
+    assert "-fullscreen" in fullscreen and "-windowed" not in fullscreen
+    assert fullscreen[fullscreen.index("-fullscreen") + 1 : fullscreen.index("-fullscreen") + 3] == [
+        "-ResX=1920",
+        "-ResY=1080",
+    ]
+
+
+def test_expected_cvars_are_echoed_and_checked_but_not_set() -> None:
+    config = parse_config(_with("ue", expect_cvars={"r.TSR.History.ScreenPercentage": "200"}))
+    assert config.ue.checked_cvars()["r.TSR.History.ScreenPercentage"] == "200"
+    commands = ue_args(config)[-1].removeprefix("-ExecCmds=").split(",")
+    assert "r.TSR.History.ScreenPercentage" in commands
+    assert not any(command.startswith("r.TSR.History.ScreenPercentage ") for command in commands)
+
+
 def test_godotnext_timing_arguments() -> None:
     config = parse_config(synthetic_config())
     assert godotnext_args(config) == [
@@ -343,6 +399,10 @@ def test_a_tracked_config_is_named_relative_to_the_repository() -> None:
         (_with("ue", map="Synthetic"), "/Game/"),
         (_with("ue", path_frames=0), "path_frames"),
         (_with("ue", ok_exit_codes=[777003]), "0 among them"),
+        (_with("ue", expect_cvars={"r.ScreenPercentage": "100"}), "exec_cmds sets it"),
+        (_with("ue", expect_cvars={"r.TSR.History.ScreenPercentage": "1,2"}), "expect_cvars"),
+        (_with("ue", expect_cvars={"bad name": "1"}), "expect_cvars"),
+        (_with("ue", window="borderless"), "ue.window"),
     ],
 )
 def test_bad_configs_are_refused(config: dict[str, object], match: str) -> None:

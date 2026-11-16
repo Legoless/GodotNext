@@ -20,7 +20,9 @@ frames`` rows from startup and exits (``-csvCaptureFrames``,
 any ``frames = k x path_frames`` consecutive rows hold every path frame k
 times, the same poses as GodotNext's frame-indexed window. Every console
 variable ``exec_cmds`` sets is echoed again by its bare name, so the report can
-read the value the run used from the log.
+read the value the run used from the log. ``expect_cvars`` names console
+variables the run does not set but whose value it must have (for example one
+that a scalability level sets): they are echoed and checked the same way.
 """
 
 from __future__ import annotations
@@ -43,6 +45,12 @@ GODOTNEXT_DRIVERS = ("vulkan", "d3d12")
 QUIT_AFTER_MARGIN = 1050
 # Plan v3.9.3: the installed editor in game mode is the only UE run mode.
 UE_RUN_MODES = ("editor_game",)
+# Epic's command-line reference: -Windowed "Use windowed mode", -fullscreen "Use fullscreen mode".
+# On the RTX 4080 SUPER machine (a 3840x2160 desktop at 125 % scaling) a 3840x2160 request recorded
+# 2560x1440 windowed and 3072x1728 fullscreen, the editor in game mode not being DPI-aware there;
+# a fullscreen launch made DPI-aware recorded 3840x2160 (#232). 2160p sets ask for fullscreen, and
+# the report refuses a capture whose recorded resolution is not the set's.
+UE_WINDOW_MODES = ("windowed", "fullscreen")
 UE_EDITOR_EXE = "UnrealEditor.exe"
 NEXTGI_TIERS = ("SWRT", "HWRT")
 NEXTGI_QUALITIES = ("MEDIUM", "HIGH", "EPIC")
@@ -113,15 +121,25 @@ class UeJob:
     window_quiet_columns: tuple[str, ...]
     ok_exit_codes: tuple[int, ...]
     timeout_minutes: float
+    expect_cvars: tuple[tuple[str, str], ...] = ()
+    window: str = "windowed"
 
     def checked_cvars(self) -> dict[str, str]:
-        """Console variables ``exec_cmds`` sets, with their values: the report checks each one."""
-        found: dict[str, str] = {}
-        for command in self.exec_cmds:
-            parts = command.split()
-            if len(parts) == 2 and _CVAR.match(parts[0]):
-                found[parts[0]] = parts[1]
+        """Console variables ``exec_cmds`` sets and those ``expect_cvars`` names, with their
+        values: the launch echoes each one and the report checks it."""
+        found = _set_cvars(self.exec_cmds)
+        found.update(dict(self.expect_cvars))
         return found
+
+
+def _set_cvars(exec_cmds: tuple[str, ...]) -> dict[str, str]:
+    """Console variables the ``exec_cmds`` entries set, with their values."""
+    found: dict[str, str] = {}
+    for command in exec_cmds:
+        parts = command.split()
+        if len(parts) == 2 and _CVAR.match(parts[0]):
+            found[parts[0]] = parts[1]
+    return found
 
 
 @dataclass(frozen=True)
@@ -229,7 +247,7 @@ def ue_args(config: ComparisonConfig, out_marker: str = "{out}") -> list[str]:
     args.append("-game")
     args += list(ue.args)
     args += [
-        "-windowed",
+        f"-{ue.window}",
         f"-ResX={width}",
         f"-ResY={height}",
         "-novsync",
@@ -483,9 +501,23 @@ def _ue_job(data: dict[str, object], default_warmup: int) -> UeJob:
         if "," in command or '"' in command:
             raise ComparisonError(f"ue.exec_cmds {command!r}: one command per entry, no commas or quotes")
     quiet = tuple(str(item) for item in as_list(data.get("window_quiet_columns", [])))
+    expected = as_dict(data.get("expect_cvars") or {})
+    for name, value in expected.items():
+        text = str(value)
+        if not _CVAR.match(name) or not text or any(ch in text for ch in ' ,"'):
+            raise ComparisonError(
+                f"ue.expect_cvars {name!r}: a console variable name and one value without spaces, commas or quotes"
+            )
+    set_by_commands = _set_cvars(exec_cmds)
+    for name in expected:
+        if name in set_by_commands:
+            raise ComparisonError(f"ue.expect_cvars {name!r}: exec_cmds sets it; expect only what the run does not set")
     ok_exit_codes = tuple(as_int(code) for code in as_list(data.get("ok_exit_codes", [0])))
     if 0 not in ok_exit_codes:
         raise ComparisonError("ue.ok_exit_codes lists the exit codes of a finished run, 0 among them")
+    window = str(data.get("window", "windowed"))
+    if window not in UE_WINDOW_MODES:
+        raise ComparisonError(f"ue.window must be one of {', '.join(UE_WINDOW_MODES)}, not {window!r}")
     warmup = data.get("warmup_frames", default_warmup)
     return UeJob(
         run_mode=run_mode,
@@ -501,6 +533,8 @@ def _ue_job(data: dict[str, object], default_warmup: int) -> UeJob:
         window_quiet_columns=quiet,
         ok_exit_codes=ok_exit_codes,
         timeout_minutes=_minutes(data),
+        expect_cvars=tuple((str(name), str(value)) for name, value in expected.items()),
+        window=window,
     )
 
 

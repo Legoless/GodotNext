@@ -1,10 +1,10 @@
 extends SceneTree
 ## Checks two exports of one scene made by tools/ue_export/ue_export.gd: the overlap-heavy kitbash
-## (#235), RT Shadow Yard or MegaLights Hall at 1,024 lights (#233). run_ue_export_check.sh makes
-## them; this script runs headless:
+## (#235), RT Shadow Yard or MegaLights Hall at 1,024 lights (#233), or Upscaler Torture (#232).
+## run_ue_export_check.sh makes them; this script runs headless:
 ##
 ##   godot --headless --path godotnext/testbed --script res://tests/ue_export/check_ue_export.gd -- \
-##     <kitbash|yard|hall> <export A> <export B>
+##     <kitbash|yard|hall|torture> <export A> <export B>
 ##
 ## It checks that the two exports are byte-identical apart from export_manifest.json, that the
 ## manifest checksums match, that scene.json follows ue_export_schema.md, that library.glb and
@@ -13,20 +13,30 @@ extends SceneTree
 ## own texture, and that sky.hdr holds the procedural sky. Per scene: every kitbash rock placement
 ## equals the seeded layout's plan (so the MultiMesh half kept its transforms); the yard's
 ## caster-mask matrix, blend modes and approximations; the hall's light mix, area lights, light
-## masks and approximations. Prints GODOTNEXT_RESULT and exits 1 on any failure.
+## masks and approximations; Upscaler Torture's camera path and cut, recomputed from the scene's
+## curve, its moving fan and occluders and the rigid parts of its skinned character, recomputed from
+## the scene's nodes and animation, its UV transforms, texture filters, ShaderMaterial and
+## approximations. Prints GODOTNEXT_RESULT and exits 1 on any failure.
 
 const Lib := preload("res://tools/ue_export/ue_export_lib.gd")
 const Layout := preload("res://scenes/swrt_kitbash/layout.gd")
 
 const SCENES := {
-	"kitbash": {"scene": "res://scenes/swrt_kitbash/swrt_kitbash.tscn", "camera": "CaptureCam"},
-	"yard": {"scene": "res://scenes/rt_shadow_yard/rt_shadow_yard.tscn", "camera": "cam_main"},
-	"hall": {"scene": "res://scenes/mega_lights_hall/mega_lights_hall.tscn", "camera": "cam_main"},
+	"kitbash": {"scene": "res://scenes/swrt_kitbash/swrt_kitbash.tscn", "camera": "CaptureCam", "sky": true},
+	"yard": {"scene": "res://scenes/rt_shadow_yard/rt_shadow_yard.tscn", "camera": "cam_main", "sky": true},
+	"hall": {"scene": "res://scenes/mega_lights_hall/mega_lights_hall.tscn", "camera": "cam_main", "sky": true},
+	"torture": {"scene": "res://scenes/upscaler_torture/upscaler_torture.tscn", "camera": "CameraPath/CameraFollow/Camera3D", "sky": false},
 }
+## Upscaler Torture (#232): the frame the scene resets the temporal history at, and its timeline
+## (torture_timeline.gd), restated here so the check recomputes the poses on its own.
+const TORTURE_CUT := 400
+const TORTURE_TARGET := Vector3(0.0, 1.1, -0.4)
+const TORTURE_FRAMES := [0, 150, 199, 200, 299, 300, 320, 340, 399, 400, 450, 599]
 const EPSILON := 1e-5
 
 var _scene_path := ""
 var _camera_name := ""
+var _has_sky := true
 
 var _failures: Array[String] = []
 var _checks := 0
@@ -35,12 +45,13 @@ var _checks := 0
 func _initialize() -> void:
 	var args := OS.get_cmdline_user_args()
 	if args.size() != 3 or not SCENES.has(String(args[0])):
-		printerr("check_ue_export.gd: pass <kitbash|yard|hall> and two export directories after --")
+		printerr("check_ue_export.gd: pass <kitbash|yard|hall|torture> and two export directories after --")
 		quit(2)
 		return
 	var which := String(args[0])
 	_scene_path = String(SCENES[which]["scene"])
 	_camera_name = String(SCENES[which]["camera"])
+	_has_sky = bool(SCENES[which]["sky"])
 	_test_lib()
 	var first := String(args[1])
 	var second := String(args[2])
@@ -55,11 +66,16 @@ func _initialize() -> void:
 				_check_yard(scene)
 			"hall":
 				_check_hall(scene)
+			"torture":
+				_check_torture(first, scene)
 		_check_library(first, scene)
 		_check_axes(first)
 		_check_camera_track(first, scene)
 		_check_textures(first, scene)
-		_check_sky(first, scene)
+		if _has_sky:
+			_check_sky(first, scene)
+		else:
+			_check(scene["environment"]["sky"] == null and not FileAccess.file_exists(first.path_join("sky.hdr")), "a scene without a sky has no sky.hdr")
 	var ok := _failures.is_empty()
 	print("GODOTNEXT_RESULT " + JSON.stringify({"test": "ue_export", "scene": which, "ok": ok, "checks": _checks, "failures": _failures.size()}))
 	for failure in _failures:
@@ -123,7 +139,10 @@ func _test_refusals() -> void:
 	scissor.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
 	_check(Lib.material_refusals(scissor).is_empty() and Lib.material_blend(scissor) == "masked", "alpha scissor is carried as masked")
 	scissor.alpha_antialiasing_mode = BaseMaterial3D.ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE
-	_check(Lib.material_refusals(scissor).size() == 1, "alpha scissor with alpha antialiasing is refused")
+	_check(Lib.material_refusals(scissor).is_empty() and Lib.material_approximations(scissor) == PackedStringArray(["alpha_antialiasing"]), "alpha scissor with alpha antialiasing needs the alpha_antialiasing approximation")
+	transparent.alpha_antialiasing_mode = BaseMaterial3D.ALPHA_ANTIALIASING_ALPHA_TO_COVERAGE
+	_check(Lib.material_approximations(transparent).is_empty(), "alpha antialiasing on an alpha-blended material (where Godot does not use it) needs no approximation")
+	transparent.alpha_antialiasing_mode = BaseMaterial3D.ALPHA_ANTIALIASING_OFF
 	var hashed := plain.duplicate() as StandardMaterial3D
 	hashed.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_HASH
 	_check(Lib.material_refusals(hashed).size() == 1, "alpha hash is refused")
@@ -153,7 +172,21 @@ func _test_refusals() -> void:
 	textured.albedo_texture = leaf
 	_check(Lib.material_refusals(textured).is_empty(), "an albedo texture is carried")
 	textured.uv1_scale = Vector3(2.0, 2.0, 1.0)
-	_check(Lib.material_refusals(textured).size() == 1, "an albedo texture with a UV1 scale is refused")
+	textured.uv1_offset = Vector3(0.25, 0.5, 0.0)
+	_check(Lib.material_refusals(textured).is_empty(), "an albedo texture with a UV1 scale and offset is carried")
+	textured.uv1_triplanar = true
+	_check(Lib.material_refusals(textured).size() == 1, "triplanar UV1 mapping is refused")
+	textured.uv1_triplanar = false
+	for filter: int in BaseMaterial3D.TEXTURE_FILTER_MAX:
+		textured.texture_filter = filter as BaseMaterial3D.TextureFilter
+		var carried := filter in [BaseMaterial3D.TEXTURE_FILTER_NEAREST, BaseMaterial3D.TEXTURE_FILTER_LINEAR, BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS]
+		_check(Lib.material_refusals(textured).is_empty() == carried and Lib.texture_filter_name(textured).is_empty() != carried, "texture filter %d is %s" % [filter, "carried" if carried else "refused"])
+	_check(Lib.texture_filter_name(plain) == "linear_mipmaps", "the default texture filter is linear with mipmaps")
+	textured.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+	_check(Lib.texture_filter_name(textured) == "nearest", "nearest filtering is named nearest")
+	textured.texture_repeat = false
+	_check(Lib.material_refusals(textured).size() == 1, "an albedo texture without repeat is refused")
+	textured.texture_repeat = true
 	var roughness_map := plain.duplicate() as StandardMaterial3D
 	roughness_map.roughness_texture = leaf
 	_check(Lib.material_refusals(roughness_map).size() == 1, "a texture in another slot is refused")
@@ -194,8 +227,9 @@ func _test_refusals() -> void:
 	_check(not png.is_empty() and decoded.load_png_from_buffer(png) == OK and decoded.get_size() == Vector2i(4, 4), "a texture becomes a PNG of its size")
 	_check(Lib.texture_png(null).is_empty(), "no texture gives no PNG")
 	_test_texture_png()
-	for id: String in ["diffuse_mode", "shadow_caster_mask", "light_projector", "light_cull_mask", "translucent_shadow"]:
+	for id: String in ["diffuse_mode", "shadow_caster_mask", "light_projector", "light_cull_mask", "translucent_shadow", "alpha_antialiasing", "rigid_skin", "shader_material", "particles"]:
 		_check(Lib.APPROXIMATIONS.has(id) and not String(Lib.APPROXIMATIONS[id]).is_empty(), "approximation %s is described" % id)
+	_test_rigid_skin()
 	var environment := Environment.new()
 	environment.sky = Sky.new()
 	var sky := ProceduralSkyMaterial.new()
@@ -209,6 +243,44 @@ func _test_refusals() -> void:
 	_check(Lib.environment_refusals(environment, camera).size() == 1, "an Environment on the camera is refused")
 	_check(Lib.environment_refusals(null, null).is_empty(), "no environment and no camera refuse nothing")
 	camera.free()
+
+
+## rigid_skin_parts splits a mesh whose vertices each follow one bone at full weight into one part
+## per bone, keeping each vertex's position and its source index, and refuses blended weights and
+## triangles that span bones.
+func _test_rigid_skin() -> void:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var positions: Array[Vector3] = [Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(2, 0, 0), Vector3(3, 0, 0), Vector3(2, 1, 0)]
+	for index in positions.size():
+		st.set_bones(PackedInt32Array([0 if index < 3 else 3, 1, 2, 0]))
+		st.set_weights(PackedFloat32Array([1.0, 0.0, 0.0, 0.0]))
+		st.add_vertex(positions[index])
+	var mesh := st.commit()
+	var split := Lib.rigid_skin_parts(mesh)
+	_check(not split.has("error") and int(split["triangles"]) == 2 and (split["parts"] as Array).size() == 2, "a two-bone mesh splits into two rigid parts (%s)" % split.get("error", ""))
+	if not split.has("error") and (split["parts"] as Array).size() == 2:
+		var second: Dictionary = split["parts"][1]
+		var vertices: PackedVector3Array = second["arrays"][0][Mesh.ARRAY_VERTEX]
+		var sources: PackedInt32Array = second["sources"][0]
+		var kept: bool = int(second["bind"]) == 3 and second["surfaces"] == [0] and vertices.size() == 3
+		for index in vertices.size():
+			kept = kept and vertices[index] == positions[sources[index]] and sources[index] >= 3
+		_check(kept and second["arrays"][0][Mesh.ARRAY_BONES] == null, "a rigid part keeps its vertices and their source indices, without bones")
+	st.clear()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for index in 3:
+		st.set_bones(PackedInt32Array([0, 1, 0, 0]))
+		st.set_weights(PackedFloat32Array([0.5, 0.5, 0.0, 0.0]))
+		st.add_vertex(positions[index])
+	_check(Lib.rigid_skin_parts(st.commit()).has("error"), "blended bone weights are refused")
+	st.clear()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for index in 3:
+		st.set_bones(PackedInt32Array([index, 0, 0, 0]))
+		st.set_weights(PackedFloat32Array([1.0, 0.0, 0.0, 0.0]))
+		st.add_vertex(positions[index])
+	_check(Lib.rigid_skin_parts(st.commit()).has("error"), "a triangle that spans bones is refused")
 
 
 ## texture_png writes the base level's pixels as stored, independently of how the texture keeps
@@ -256,7 +328,10 @@ func _check_determinism(p_first: String, p_second: String) -> void:
 	var other: Array = (second["files"] as Dictionary).keys()
 	other.sort()
 	_check(names == other, "both exports list the same files")
-	for name: String in ["library.glb", "axes.glb", "scene.json", "camera_track.csv", "sky.hdr"]:
+	var required := ["library.glb", "axes.glb", "scene.json", "camera_track.csv"]
+	if _has_sky:
+		required.append("sky.hdr")
+	for name: String in required:
 		_check(name in names, "the export has %s" % name)
 	for file_name: String in names:
 		var a := FileAccess.get_sha256(p_first.path_join(file_name))
@@ -296,7 +371,7 @@ func _check_schema(p_scene: Dictionary) -> void:
 		return
 	_check(p_scene["units"] == {"length": "m", "up": "+Y", "handedness": "right", "camera_forward": "-Z", "light_forward": "-Z"}, "units")
 	var camera: Dictionary = p_scene["camera"]
-	for key in ["node", "track", "fov_deg", "fov_axis", "near", "far", "projection"]:
+	for key in ["node", "track", "fov_deg", "fov_axis", "near", "far", "projection", "cuts"]:
 		_check(camera.has(key), "camera has %s" % key)
 	var mesh_ids := {}
 	for mesh: Dictionary in p_scene["meshes"]:
@@ -305,16 +380,26 @@ func _check_schema(p_scene: Dictionary) -> void:
 		mesh_ids[String(mesh["id"])] = mesh
 	var texture_ids := {}
 	for texture: Dictionary in p_scene["textures"]:
-		for key in ["id", "file", "class", "size", "usages"]:
+		for key in ["id", "file", "class", "size", "mipmaps", "usages"]:
 			_check(texture.has(key), "texture has %s" % key)
 		texture_ids[String(texture["id"])] = true
 	var material_ids := {}
 	for material: Dictionary in p_scene["materials"]:
-		for key in ["id", "class", "blend", "alpha_scissor_threshold", "two_sided", "albedo_linear", "albedo_texture", "emission_linear", "properties"]:
+		material_ids[String(material["id"])] = true
+		if String(material.get("blend", "")) == "shader":
+			for key in ["id", "class", "shader", "properties"]:
+				_check(material.has(key), "shader material has %s" % key)
+			var shader: Dictionary = material.get("shader", {})
+			_check(String(shader.get("sha256", "")) == String(shader.get("code", "")).sha256_text(), "shader material %s carries its code's SHA-256" % material["id"])
+			for uniform: Dictionary in (shader.get("uniforms", {}) as Dictionary).values():
+				_check(uniform.has("value") != uniform.has("texture"), "a shader uniform has a value or a texture")
+				_check(not uniform.has("texture") or texture_ids.has(String(uniform["texture"])), "shader uniform texture exists")
+			continue
+		for key in ["id", "class", "blend", "alpha_scissor_threshold", "two_sided", "albedo_linear", "albedo_texture", "uv1_scale", "uv1_offset", "texture_filter", "texture_repeat", "emission_linear", "properties"]:
 			_check(material.has(key), "material has %s" % key)
 		_check(String(material.get("blend", "")) in ["opaque", "masked", "translucent"], "material blend is opaque, masked or translucent")
 		_check(material.get("albedo_texture") == null or texture_ids.has(String(material["albedo_texture"])), "material texture exists")
-		material_ids[String(material["id"])] = true
+		_check(String(material.get("texture_filter", "")) in ["nearest", "linear", "linear_mipmaps"], "material texture filter is carried")
 	var placements: Array = []
 	var triangles := 0
 	var node_count := 0
@@ -337,6 +422,7 @@ func _check_schema(p_scene: Dictionary) -> void:
 			_check(material_ids.has(String(material_id)), "instance material %s exists" % material_id)
 		_check((instance["transform"] as Array).size() == 12, "instance transform has 12 numbers")
 		_check(instance.has("layers"), "instance has layers")
+		_check(kind == "multimesh" or instance.has("track"), "a node instance has a track entry")
 		var mesh_triangles := int(mesh_ids[String(instance["mesh"])]["triangles"]) if mesh_ids.has(String(instance["mesh"])) else 0
 		if kind == "node":
 			placements.append(Lib.rows_to_transform(instance["transform"]))
@@ -381,6 +467,14 @@ func _check_schema(p_scene: Dictionary) -> void:
 	_check(stated_types == light_types, "checks.light_types matches the light rows")
 	_check(String(checks["instances_sha256"]) == Lib.transforms_sha256(placements), "checks.instances_sha256 matches the instance rows")
 	_check(int(checks["camera_rows"]) == int(p_scene["frames"]), "one camera row per frame")
+	var movers := 0
+	for instance: Dictionary in p_scene["instances"]:
+		if instance.get("track") != null:
+			movers += 1
+	_check(int(checks["movers"]) == movers, "checks.movers counts the instances with a track")
+	var cuts: Array = p_scene["camera"]["cuts"]
+	for index in cuts.size():
+		_check(int(cuts[index]) > 0 and int(cuts[index]) < int(p_scene["frames"]) and (index == 0 or int(cuts[index]) > int(cuts[index - 1])), "camera cuts are increasing frames inside the path")
 	var rows: Dictionary = p_scene["rendering"]["record_rows"]
 	_check(rows.has("rendering/global_illumination/nextgi/hardware_ray_tracing"), "rendering names the settings-record row of hardware_ray_tracing")
 
@@ -528,6 +622,169 @@ func _check_hall(p_scene: Dictionary) -> void:
 	_check(int(checks["textures"]) == 11, "6 foliage, 1 rect-light and 4 projector textures (%d)" % int(checks["textures"]))
 
 
+## Upscaler Torture (#232): 55 placed meshes (24 wires, the fence, the checker floor and backdrop,
+## the moiré plane, the fan's 4 blades and hub, the scrolling emissive, 2 grilles of bars and a
+## backing, 12 cables, and the character's 5 rigid parts), 10 of them moving; a sun and a fill
+## light; the cut at frame 400; the fan and occluder motion and the character's bone poses
+## recomputed from the scene's nodes and animation at TORTURE_FRAMES; the fence, checker and moiré
+## materials' UV transforms and filters; the scrolling emissive's shader; and the alpha_antialiasing,
+## diffuse_mode, particles, rigid_skin and shader_material approximations.
+func _check_torture(p_dir: String, p_scene: Dictionary) -> void:
+	var checks: Dictionary = p_scene["checks"]
+	_check(int(checks["node_instances"]) == 55 and int(checks["multimesh_instances"]) == 0, "55 placed meshes (%d)" % int(checks["node_instances"]))
+	_check(int(checks["movers"]) == 10, "the fan's 5 meshes and the character's 5 parts move (%d)" % int(checks["movers"]))
+	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 1}, "the sun and the fill light (%s)" % checks["light_types"])
+	_check(float(checks["rigid_skin_max_error_m"]) <= 1e-4, "the rigid parts match the renderer's skinning within 0.1 mm (%s)" % checks["rigid_skin_max_error_m"])
+	_check(p_scene["camera"]["cuts"] == [float(TORTURE_CUT)], "the camera cuts at frame %d (%s)" % [TORTURE_CUT, p_scene["camera"]["cuts"]])
+	var environment: Dictionary = p_scene["environment"]["properties"]
+	_check(int(environment["background_mode"]) == Environment.BG_COLOR and int(environment["ambient_light_source"]) == Environment.AMBIENT_SOURCE_COLOR, "a color background and color ambient light")
+	var approximations := _approximations(p_scene)
+	_check(approximations.keys() == ["alpha_antialiasing", "diffuse_mode", "particles", "rigid_skin", "shader_material"], "the torture needs alpha_antialiasing, diffuse_mode, particles, rigid_skin and shader_material (%s)" % [approximations.keys()])
+	_check(approximations.get("particles", []) == ["AlphaParticles"], "particles names the alpha particles")
+	_check(approximations.get("rigid_skin", []) == ["Occluders/SkinnedCharacter/CharacterMesh"], "rigid_skin names the character")
+	var by_node := {}
+	var parts := 0
+	for instance: Dictionary in p_scene["instances"]:
+		var node := String(instance["node"])
+		if instance.has("skin_part"):
+			parts += 1
+			_check(node == "Occluders/SkinnedCharacter/CharacterMesh", "only the character has rigid parts")
+			by_node["%s|%d" % [node, int(instance["skin_part"]["bind"])]] = instance
+		else:
+			by_node[node] = instance
+		_check((instance["track"] != null) == node.begins_with("Occluders/"), "%s has a track exactly when it is an occluder" % node)
+	_check(parts == 5, "the character splits into 5 rigid parts (hips has no triangles) (%d)" % parts)
+	# The shell stays out of the tree (a SceneTree script's _initialize runs before the root
+	# enters it): world transforms are the products of the local ones, and the bone poses come
+	# from the animation's own keys.
+	var shell := (load(_scene_path) as PackedScene).instantiate() as Node3D
+	shell.set_meta("skip_runtime", true)
+	var tracks := {}
+	for key: String in by_node:
+		var instance: Dictionary = by_node[key]
+		if instance["track"] != null:
+			var rows := _read_track(p_dir.path_join(String(instance["track"])))
+			_check(rows.size() == int(p_scene["frames"]), "%s track has one row per frame" % key)
+			if not rows.is_empty():
+				_check(_transforms_close(rows[0], Lib.rows_to_transform(instance["transform"])), "%s track row 0 is its placement" % key)
+			tracks[key] = rows
+	var occluders := shell.get_node("Occluders") as Node3D
+	var fan := shell.get_node("Occluders/Fan") as Node3D
+	var player := shell.get_node("Occluders/SkinnedCharacter/AnimationPlayer") as AnimationPlayer
+	var skeleton := shell.get_node("Occluders/SkinnedCharacter/Skeleton3D") as Skeleton3D
+	var character := shell.get_node("Occluders/SkinnedCharacter/CharacterMesh") as MeshInstance3D
+	var animation := player.get_animation("swing")
+	var off := 0
+	var compared := 0
+	for frame: int in TORTURE_FRAMES:
+		if frame >= int(p_scene["frames"]):
+			continue
+		occluders.position.x = -1.35 if frame < 300 else (lerpf(-1.35, 1.35, float(frame - 300) / 40.0) if frame <= 340 else 1.35)
+		fan.rotation.z = float(frame) * 0.24
+		var bones := _animated_bones(skeleton, animation, fposmod(float(frame) / 60.0 * 3.0, 0.5))
+		for key: String in tracks:
+			var rows: Array = tracks[key]
+			if frame >= rows.size():
+				continue
+			var expected: Transform3D
+			if key.contains("|"):
+				var bind := int(key.get_slice("|", 1))
+				var bone := character.skin.get_bind_bone(bind)
+				expected = _global(character) * bones[bone] * character.skin.get_bind_pose(bind)
+			else:
+				expected = _global(shell.get_node(key) as Node3D)
+			compared += 1
+			if not _transforms_close(rows[frame], expected, 1e-4):
+				off += 1
+	_check(compared == tracks.size() * TORTURE_FRAMES.size() and off == 0, "every track row is the occluder's pose at frames %s (%d of %d differ)" % [TORTURE_FRAMES, off, compared])
+	shell.free()
+	var materials := {}
+	for material: Dictionary in p_scene["materials"]:
+		materials[String(material["id"])] = material
+	var textures := {}
+	for texture: Dictionary in p_scene["textures"]:
+		textures[String(texture["id"])] = texture
+	var expectations := {
+		"ChainLinkFence": {"blend": "masked", "uv1_scale": [4.0, 2.0, 1.0], "texture_filter": "linear_mipmaps", "mipmaps": true, "two_sided": true},
+		"CheckerPlane": {"blend": "opaque", "uv1_scale": [48.0, 48.0, 1.0], "texture_filter": "nearest", "mipmaps": false, "two_sided": false},
+		"CheckerBackdrop": {"blend": "opaque", "uv1_scale": [16.0, 8.0, 1.0], "texture_filter": "nearest", "mipmaps": false, "two_sided": false},
+		"MoirePlane": {"blend": "opaque", "uv1_scale": [1.0, 1.0, 1.0], "texture_filter": "linear_mipmaps", "mipmaps": true, "two_sided": true},
+	}
+	for node: String in expectations:
+		var instance: Dictionary = by_node.get(node, {})
+		var material: Dictionary = materials.get(String(instance.get("materials", [""])[0]), {})
+		var want: Dictionary = expectations[node]
+		var texture: Dictionary = textures.get(String(material.get("albedo_texture", "")), {})
+		_check(material.get("blend") == want["blend"] and material.get("uv1_scale") == want["uv1_scale"] and material.get("uv1_offset") == [0.0, 0.0, 0.0] and material.get("texture_filter") == want["texture_filter"] and bool(material.get("texture_repeat", false)) and bool(material.get("two_sided", false)) == want["two_sided"] and texture.get("mipmaps") == want["mipmaps"], "%s: %s blend, UV1 scale %s, %s filtering, mipmaps %s (%s, %s)" % [node, want["blend"], want["uv1_scale"], want["texture_filter"], want["mipmaps"], material.get("uv1_scale"), material.get("texture_filter")])
+	var emissive: Dictionary = materials.get(String(by_node.get("ScrollingEmissive", {}).get("materials", [""])[0]), {})
+	var source_shader := ((load(_scene_path) as PackedScene).instantiate() as Node3D)
+	var code := (((source_shader.get_node("ScrollingEmissive") as MeshInstance3D).material_override as ShaderMaterial).shader.code)
+	source_shader.free()
+	var shader: Dictionary = emissive.get("shader", {})
+	var uniforms: Dictionary = shader.get("uniforms", {})
+	_check(emissive.get("blend") == "shader" and shader.get("code") == code and shader.get("sha256") == code.sha256_text(), "the scrolling emissive carries the scene's shader code and its SHA-256")
+	var uniform_names: Array = uniforms.keys()
+	uniform_names.sort()
+	_check(uniform_names == ["scroll_speed", "stripes", "time_offset"] and uniforms["stripes"].has("texture") and is_equal_approx(float(uniforms["scroll_speed"].get("value", 0.0)), 2.0), "the shader's uniforms: the stripes texture and a scroll speed of 2 (%s)" % [uniforms])
+	_check(approximations.get("shader_material", []) == ["%s" % _material_label(emissive)], "shader_material names the scrolling emissive's material")
+
+
+## A node's world transform outside the tree: its local transforms multiplied up to the scene root.
+func _global(p_node: Node3D) -> Transform3D:
+	var transform := p_node.transform
+	var parent := p_node.get_parent()
+	while parent is Node3D:
+		transform = (parent as Node3D).transform * transform
+		parent = parent.get_parent()
+	return transform
+
+
+## Every bone's skeleton-space pose at p_time from the animation's rotation keys: each bone's
+## stored pose (position, rotation, scale; the scene stores zero positions, not its rests), its
+## rotation replaced where the animation has a rotation track for it, times its parent's pose.
+func _animated_bones(p_skeleton: Skeleton3D, p_animation: Animation, p_time: float) -> Array[Transform3D]:
+	var rotations := {}
+	for track in p_animation.get_track_count():
+		if p_animation.track_get_type(track) == Animation.TYPE_ROTATION_3D:
+			var path := p_animation.track_get_path(track)
+			rotations[String(path.get_concatenated_subnames())] = p_animation.rotation_track_interpolate(track, p_time)
+	var poses: Array[Transform3D] = []
+	for bone in p_skeleton.get_bone_count():
+		var rotation := p_skeleton.get_bone_pose_rotation(bone)
+		var name := p_skeleton.get_bone_name(bone)
+		if rotations.has(name):
+			rotation = rotations[name] as Quaternion
+		var local := Transform3D(Basis(rotation).scaled_local(p_skeleton.get_bone_pose_scale(bone)), p_skeleton.get_bone_pose_position(bone))
+		var parent := p_skeleton.get_bone_parent(bone)
+		poses.append(poses[parent] * local if parent >= 0 else local)
+	return poses
+
+
+func _material_label(p_material: Dictionary) -> String:
+	var name := String(p_material.get("name", ""))
+	return String(p_material["id"]) if name.is_empty() else "%s (%s)" % [p_material["id"], name]
+
+
+## A track CSV as transforms, one per row (empty when it does not parse).
+func _read_track(p_path: String) -> Array:
+	var file := FileAccess.open(p_path, FileAccess.READ)
+	if file == null or file.get_line() != "frame,m00,m01,m02,m03,m10,m11,m12,m13,m20,m21,m22,m23":
+		return []
+	var rows: Array = []
+	while not file.eof_reached():
+		var line := file.get_line()
+		if line.is_empty():
+			continue
+		var cells := line.split(",")
+		if cells.size() != 13 or int(cells[0]) != rows.size():
+			return []
+		var values: Array = []
+		for index in range(1, 13):
+			values.append(float(cells[index]))
+		rows.append(Lib.rows_to_transform(values))
+	return rows
+
+
 ## JSON numbers come back as floats.
 func _int_counts(p_counts: Dictionary) -> Dictionary:
 	var counts := {}
@@ -564,8 +821,19 @@ func _check_textures(p_dir: String, p_scene: Dictionary) -> void:
 		if node == null or instance["kind"] != "node":
 			continue
 		for surface in (instance["materials"] as Array).size():
-			var source := node.get_active_material(surface) as BaseMaterial3D
+			var source_surface := surface
+			if instance.has("skin_part"):
+				source_surface = int(instance["skin_part"]["surfaces"][surface])
 			var material: Dictionary = materials.get(String(instance["materials"][surface]), {})
+			if node.get_active_material(source_surface) is ShaderMaterial:
+				var shader_material := node.get_active_material(source_surface) as ShaderMaterial
+				for name: String in material.get("shader", {}).get("uniforms", {}):
+					var uniform: Dictionary = material["shader"]["uniforms"][name]
+					if uniform.has("texture"):
+						compared[String(uniform["texture"])] = true
+						_check(files.get(String(uniform["texture"]), PackedByteArray()) == _source_png(shader_material.get_shader_parameter(name)), "%s uniform %s texture is the scene's" % [instance["node"], name])
+				continue
+			var source := node.get_active_material(source_surface) as BaseMaterial3D
 			if source == null or source.albedo_texture == null:
 				_check(material.get("albedo_texture") == null, "%s surface %d has no texture" % [instance["node"], surface])
 				continue
@@ -623,11 +891,22 @@ func _check_axes(p_dir: String) -> void:
 			_check(center.is_equal_approx(expected[name]), "%s is centered at %s (%s)" % [name, expected[name], center])
 
 
+## Every camera row against the camera's pose: the static pose of the kitbash, yard and hall
+## cameras, and for Upscaler Torture the pose recomputed from the scene's curve (the timeline's
+## progress for that frame, then the look-at target), plus the cut: the only large jump in the path
+## is at the cut frame.
 func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
-	var shell := (load(_scene_path) as PackedScene).instantiate()
+	var shell := (load(_scene_path) as PackedScene).instantiate() as Node3D
 	shell.set_meta("skip_runtime", true)
+	var torture := _scene_path == String(SCENES["torture"]["scene"])
 	var camera := shell.get_node(_camera_name) as Camera3D
 	var pose := camera.transform.orthonormalized()
+	var follow := shell.get_node_or_null("CameraPath/CameraFollow") as PathFollow3D
+	var curve: Curve3D = null
+	if torture:
+		curve = (shell.get_node("CameraPath") as Path3D).curve
+		_check(follow.rotation_mode == PathFollow3D.ROTATION_NONE and _global(follow.get_parent() as Node3D).is_equal_approx(Transform3D.IDENTITY), "the torture camera follows its path without rotation, from the origin")
+	var origins := PackedVector3Array()
 	var file := FileAccess.open(p_dir.path_join("camera_track.csv"), FileAccess.READ)
 	_check(file != null, "camera_track.csv opens")
 	if file == null:
@@ -647,12 +926,38 @@ func _check_camera_track(p_dir: String, p_scene: Dictionary) -> void:
 			continue
 		var q := Quaternion(float(cells[4]), float(cells[5]), float(cells[6]), float(cells[7]))
 		var row_pose := Transform3D(Basis(q), Vector3(float(cells[1]), float(cells[2]), float(cells[3])))
+		origins.append(row_pose.origin)
+		if torture:
+			# The follower sits on the curve at the timeline's progress; the camera looks at the
+			# timeline's target from there (-Z forward, +Y up).
+			var position := curve.sample_baked(_torture_progress(rows) * curve.get_baked_length(), follow.cubic_interp)
+			pose = Transform3D(Basis.looking_at(TORTURE_TARGET - position, Vector3.UP), position)
 		if not _transforms_close(row_pose, pose, 1e-4) or absf(float(cells[8]) - camera.fov) > 1e-6:
 			off += 1
 		rows += 1
 	_check(rows == int(p_scene["frames"]), "camera_track.csv has %d rows (%d)" % [int(p_scene["frames"]), rows])
 	_check(off == 0, "every camera row is %s's pose and fov (%d differ)" % [_camera_name, off])
+	if torture:
+		var jumps := PackedInt32Array()
+		var still := 0
+		for index in range(1, origins.size()):
+			var step := origins[index].distance_to(origins[index - 1])
+			if step > 0.5:
+				jumps.append(index)
+			if index < 200 and step == 0.0:
+				still += 1
+		_check(jumps == PackedInt32Array([TORTURE_CUT]), "the path's only jump is the cut at frame %d (%s)" % [TORTURE_CUT, jumps])
+		_check(still == 199, "the camera holds still through frames 0 to 199 (%d still steps)" % still)
 	shell.free()
+
+
+## torture_timeline.gd's path progress for a frame.
+func _torture_progress(p_frame: int) -> float:
+	if p_frame < 200:
+		return 0.0
+	if p_frame < 400:
+		return float(p_frame - 200) / 199.0 * 0.45
+	return 0.78 + clampf(float(p_frame - 400) / 199.0, 0.0, 1.0) * 0.22
 
 
 func _check_sky(p_dir: String, p_scene: Dictionary) -> void:

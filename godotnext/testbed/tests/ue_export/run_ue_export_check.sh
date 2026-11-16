@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Checks the UE comparison exporter (#235, #233) on the overlap-heavy kitbash, RT Shadow Yard and
-# MegaLights Hall.
+# Checks the UE comparison exporter (#235, #233, #232) on the overlap-heavy kitbash, RT Shadow Yard,
+# MegaLights Hall and Upscaler Torture.
 #
 # Usage:
 #   run_ue_export_check.sh <godot> [godot arguments, for example --rendering-driver vulkan]
@@ -19,6 +19,11 @@
 #    --approximate=diffuse_mode,light_cull_mask,light_projector,translucent_shadow), 60 frames, then
 #    check_ue_export.gd on each pair. The hall without light_cull_mask must refuse (exit 1) and name
 #    it.
+# 6. Upscaler Torture (its camera path, 600 frames, cut at 400): without --approximate it must
+#    refuse (exit 1) and name alpha_antialiasing, diffuse_mode, particles, rigid_skin and
+#    shader_material; a cut outside the path must exit 2; then two exports with those
+#    approximations and check_ue_export.gd on the pair (moving fan and occluders, the character's
+#    rigid parts, the cut, UV transforms, texture filters and the shader).
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -147,6 +152,31 @@ if ! grep -q -- "--approximate=light_cull_mask" "$work/hall_refused.log" || [[ -
 fi
 export_pair hall "${hall_args[@]}" --approximate=diffuse_mode,light_cull_mask,light_projector,translucent_shadow
 check hall
+
+torture_base=(--scene=res://scenes/upscaler_torture/upscaler_torture.tscn --camera=CameraPath/CameraFollow/Camera3D --warmup=0 --frames=600)
+torture_args=("${torture_base[@]}" --camera-cuts=400)
+torture_ids=(alpha_antialiasing diffuse_mode particles rigid_skin shader_material)
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${torture_args[@]}" --out="$work/torture_refused" >"$work/torture_refused.log" 2>&1 || status=$?
+report torture_refused "$status" 1 "$work/torture_refused.log"
+for id in "${torture_ids[@]}"; do
+	if ! grep -q -- "--approximate=$id" "$work/torture_refused.log"; then
+		echo "run_ue_export_check.sh: the refused torture export does not name --approximate=$id" >&2
+		failures=$((failures + 1))
+	fi
+done
+if [[ -e "$work/torture_refused/scene.json" ]]; then
+	echo "run_ue_export_check.sh: the refused torture export wrote scene.json" >&2
+	failures=$((failures + 1))
+fi
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${torture_base[@]}" --camera-cuts=600 --out="$work/torture_bad_cut" >"$work/torture_bad_cut.log" 2>&1 || status=$?
+report torture_cut_outside_path "$status" 2 "$work/torture_bad_cut.log"
+torture_approximations=$(IFS=,; echo "${torture_ids[*]}")
+export_pair torture "${torture_args[@]}" --approximate="$torture_approximations"
+check torture
 
 if [[ "$failures" -ne 0 ]]; then
 	echo "run_ue_export_check.sh: $failures step(s) failed" >&2

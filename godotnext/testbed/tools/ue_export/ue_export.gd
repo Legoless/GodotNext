@@ -9,15 +9,19 @@ extends SceneTree
 ##   godot --path godotnext/testbed --script res://tools/ue_export/ue_export.gd -- \
 ##     --scene=res://scenes/swrt_kitbash/swrt_kitbash.tscn --camera=CaptureCam \
 ##     --warmup=120 --frames=600 --out=/absolute/dir [--fps=60] [--source-commit=<sha>]
-##     [--approximate=<id>[,<id>]]
+##     [--approximate=<id>[,<id>]] [--camera-cuts=<frame>[,<frame>]]
 ##
 ## Other user arguments (for example --instances) reach the scene as in a harness run. The scene
 ## runs as in a timing run: every _ready runs, so seeded generators spawn their content, and the
-## camera is sampled while the harness publishes frame index N for row N (Harness.drive_frame),
-## the pose a timing run shows at measured row N. Content the format does not carry yet
-## (moving geometry, skinned meshes, textured or shader materials, other visual nodes) stops
-## the export instead of being left out. Content the UE import builds only approximately
+## camera and every mesh instance are sampled while the harness publishes frame index N for row N
+## (Harness.drive_frame), the pose a timing run shows at measured row N. A mesh instance that
+## moves gets a per-frame transform track. Content the format does not carry yet (moving lights,
+## MultiMeshes or other nodes, unsupported materials, other visual nodes) stops the export
+## instead of being left out. Content the UE import builds only approximately
 ## (Lib.APPROXIMATIONS) is refused too, unless --approximate names it: scene.json then lists it.
+## A scene that resets the temporal history (Viewport.reset_temporal_history) does so in its own
+## script, which the export cannot see: --camera-cuts names those frames, and scene.json carries
+## them so the UE Level Sequence cuts there too.
 ##
 ## Exit codes: 0 written, 1 the scene has content the format does not carry, 2 bad arguments.
 
@@ -58,6 +62,7 @@ var _warmup := 0
 var _fps := 60
 var _source_commit := ""
 var _approximate: Array[String] = []
+var _cuts: Array[int] = []
 var _scene: Node
 var _camera: Camera3D
 var _harness: Node
@@ -66,6 +71,30 @@ var _row := -1
 var _done := false
 var _track := PackedStringArray()
 var _baseline := {}
+
+# Per-frame sampling (#232), filled from row 0 on. A slot is one MeshInstance3D's world transform
+# (bind -1) or one rigid part of a skinned one (its skin bind).
+## "<node path>|<bind>" -> slot index.
+var _slots := {}
+## Each slot's row-0 transform.
+var _slot_row0: Array[Transform3D] = []
+## Slot index -> Array of Transform3D, one per row so far, for the slots that moved.
+var _slot_moves := {}
+## [node, path, skeleton, skin, [[bind, bone], ...]] per MeshInstance3D (skeleton and skin null
+## when it is not skinned).
+var _sampled_nodes: Array = []
+## [node, path, global transform, visible, light energy or -1] per light and per other geometry
+## node, and the visibility of every mesh instance: compared with row 0 on every row.
+var _watched: Array = []
+var _motion_errors: Array[String] = []
+## The largest distance between a rigid part's vertex and the same vertex skinned by the renderer
+## (MeshInstance3D.bake_mesh_from_current_skeleton_pose), over every row, in meters.
+var _rigid_skin_error := 0.0
+## Track files to write: [file name, Array of Transform3D].
+var _pending_tracks: Array = []
+## "<mesh instance id>:<bind>" -> the ArrayMesh of that rigid part.
+var _part_meshes := {}
+var _movers := 0
 
 # Filled by _walk().
 var _mesh_ids := {}
@@ -139,6 +168,8 @@ func _process(_delta: float) -> bool:
 	_track.append(_camera_row(_row))
 	if _row == 0:
 		_baseline = _motion_state()
+		_start_sampling()
+	_sample_row()
 	if _row + 1 < _frames:
 		_publish(_row + 1)
 		return false
@@ -158,6 +189,11 @@ func _parse_args() -> String:
 		if not Lib.APPROXIMATIONS.has(id):
 			return "--approximate takes %s, not %s" % [", ".join(PackedStringArray(Lib.APPROXIMATIONS.keys())), id]
 		_approximate.append(id)
+	for cut in SceneArgs.value("--camera-cuts").split(",", false):
+		if not cut.is_valid_int():
+			return "--camera-cuts takes frame numbers, not %s" % cut
+		_cuts.append(int(cut))
+	_cuts.sort()
 	if not _scene_path.begins_with("res://"):
 		return "--scene=res://... is required"
 	if _camera_name.is_empty():
@@ -168,6 +204,9 @@ func _parse_args() -> String:
 		return "--frames has to be at least 1"
 	if _warmup < 0 or _fps < 1:
 		return "--warmup has to be at least 0 and --fps at least 1"
+	for index in _cuts.size():
+		if _cuts[index] < 1 or _cuts[index] >= _frames or (index > 0 and _cuts[index] == _cuts[index - 1]):
+			return "--camera-cuts takes distinct frames from 1 to --frames - 1"
 	return ""
 
 
@@ -180,6 +219,8 @@ func _finish() -> void:
 	_done = true
 	_harness.call("drive_frame", -1)
 	var moved := _motion_error(_baseline, _motion_state())
+	if moved.is_empty() and not _motion_errors.is_empty():
+		moved = _motion_errors[0]
 	if not moved.is_empty():
 		_fail(1, moved)
 		return
@@ -214,8 +255,10 @@ func _camera_row(p_frame: int) -> String:
 	return ",".join(cells)
 
 
-## Transforms of every geometry node and light, every MultiMesh's instances, and light energies:
-## compared between the first and the last sampled frame.
+## Transforms of every geometry node other than a mesh instance (mesh instances are sampled on
+## every row and exported as tracks when they move) and light, the visibility of every one of
+## them, every MultiMesh's instances, and light energies: compared between the first and the last
+## sampled frame. _sample_row() compares the cheap part of it on every row.
 func _motion_state() -> Dictionary:
 	var state := {}
 	var stack: Array[Node] = [_scene]
@@ -223,7 +266,8 @@ func _motion_state() -> Dictionary:
 		var node: Node = stack.pop_back()
 		if node is GeometryInstance3D or node is Light3D:
 			var key := str(_scene.get_path_to(node))
-			var entry := [(node as Node3D).global_transform, (node as Node3D).is_visible_in_tree()]
+			var placed: Variant = null if node is MeshInstance3D else (node as Node3D).global_transform
+			var entry := [placed, (node as Node3D).is_visible_in_tree()]
 			if node is Light3D:
 				entry.append((node as Light3D).light_energy)
 			if node is MultiMeshInstance3D and (node as MultiMeshInstance3D).multimesh != null:
@@ -240,16 +284,125 @@ func _motion_state() -> Dictionary:
 
 func _motion_error(p_first: Dictionary, p_last: Dictionary) -> String:
 	if p_first.size() != p_last.size():
-		return "the scene added or removed geometry or lights while the camera path ran; moving content is not exported yet"
+		return "the scene added or removed geometry or lights while the camera path ran; that is not exported yet"
 	for key: String in p_first:
 		if not p_last.has(key) or p_first[key] != p_last[key]:
-			return "%s moved or changed while the camera path ran; moving content is not exported yet" % key
+			return "%s moved or changed while the camera path ran; only mesh instance transforms are exported as tracks" % key
 	return ""
+
+
+## Row 0: the mesh instances to sample and the other nodes to watch.
+func _start_sampling() -> void:
+	var stack: Array[Node] = [_scene]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for child in node.get_children():
+			stack.append(child)
+		if not (node is GeometryInstance3D or node is Light3D):
+			continue
+		var path := str(_scene.get_path_to(node))
+		var node_3d := node as Node3D
+		if node is MeshInstance3D:
+			var instance := node as MeshInstance3D
+			var skeleton: Skeleton3D = null
+			var binds: Array = []
+			_slots["%s|-1" % path] = _slots.size()
+			if instance.skin != null and instance.mesh != null:
+				skeleton = instance.get_node_or_null(instance.skeleton) as Skeleton3D
+				if skeleton != null:
+					for bind in instance.skin.get_bind_count():
+						var bone := instance.skin.get_bind_bone(bind)
+						if instance.skin.get_bind_name(bind) != StringName():
+							bone = skeleton.find_bone(instance.skin.get_bind_name(bind))
+						binds.append([bind, bone])
+						_slots["%s|%d" % [path, bind]] = _slots.size()
+			_sampled_nodes.append([instance, path, skeleton, instance.skin if skeleton != null else null, binds])
+			_watched.append([node_3d, path, null, node_3d.is_visible_in_tree(), -1.0])
+		else:
+			var energy := (node as Light3D).light_energy if node is Light3D else -1.0
+			_watched.append([node_3d, path, node_3d.global_transform, node_3d.is_visible_in_tree(), energy])
+
+
+## One row: every mesh instance's world transform (and its rigid parts when skinned), and the
+## other nodes against row 0.
+func _sample_row() -> void:
+	var slot := 0
+	for entry: Array in _sampled_nodes:
+		var instance: MeshInstance3D = entry[0]
+		var world := instance.global_transform
+		_sample_slot(slot, world)
+		slot += 1
+		var skeleton: Skeleton3D = entry[2]
+		if skeleton == null:
+			continue
+		var skin: Skin = entry[3]
+		var part_transforms := {}
+		for pair: Array in entry[4]:
+			var bind: int = pair[0]
+			var bone: int = pair[1]
+			var part := world
+			if bone >= 0 and bone < skeleton.get_bone_count():
+				part = world * skeleton.get_bone_global_pose(bone) * skin.get_bind_pose(bind)
+				part_transforms[bind] = part
+			_sample_slot(slot, part)
+			slot += 1
+		_check_rigid_skin(instance, world, part_transforms)
+	for entry: Array in _watched:
+		var node: Node3D = entry[0]
+		var changed: bool = node.is_visible_in_tree() != bool(entry[3])
+		if entry[2] != null and node.global_transform != entry[2]:
+			changed = true
+		if float(entry[4]) >= 0.0 and (node as Light3D).light_energy != float(entry[4]):
+			changed = true
+		if changed and _motion_errors.is_empty():
+			_motion_errors.append("%s moved or changed at row %d; only mesh instance transforms are exported as tracks" % [entry[1], _row])
+
+
+## Row _row of one slot. Only slots that move keep every row; a still slot keeps its row 0.
+func _sample_slot(p_slot: int, p_transform: Transform3D) -> void:
+	if _row == 0:
+		_slot_row0.append(p_transform)
+		return
+	if _slot_moves.has(p_slot):
+		(_slot_moves[p_slot] as Array).append(p_transform)
+	elif p_transform != _slot_row0[p_slot]:
+		var rows: Array = []
+		for row in _row:
+			rows.append(_slot_row0[p_slot])
+		rows.append(p_transform)
+		_slot_moves[p_slot] = rows
+
+
+## The rigid parts against the renderer's own skinning of the same pose: every vertex of a part,
+## moved by its part transform, must sit where the skinned mesh puts it.
+func _check_rigid_skin(p_instance: MeshInstance3D, p_world: Transform3D, p_parts: Dictionary) -> void:
+	var split := Lib.rigid_skin_parts(p_instance.mesh)
+	if split.has("error"):
+		return
+	var baked := p_instance.bake_mesh_from_current_skeleton_pose()
+	if baked == null:
+		_rigid_skin_error = INF
+		return
+	var to_local := p_world.affine_inverse()
+	for part: Dictionary in split["parts"]:
+		if not p_parts.has(int(part["bind"])):
+			_rigid_skin_error = INF
+			continue
+		var local: Transform3D = to_local * p_parts[int(part["bind"])]
+		var surfaces: Array = part["surfaces"]
+		for index in surfaces.size():
+			var skinned: PackedVector3Array = baked.surface_get_arrays(int(surfaces[index]))[Mesh.ARRAY_VERTEX]
+			var part_vertices: PackedVector3Array = part["arrays"][index][Mesh.ARRAY_VERTEX]
+			var sources: PackedInt32Array = part["sources"][index]
+			for vertex in part_vertices.size():
+				_rigid_skin_error = maxf(_rigid_skin_error, (local * part_vertices[vertex] - skinned[sources[vertex]]).length())
 
 
 func _export() -> String:
 	_walk(_scene)
 	_resolve_light_masks()
+	if Lib.mask_effect(_camera.cull_mask, _layers_in_use) != "all":
+		_unsupported.append("a camera cull mask that hides some placed layers (not exported yet)")
 	var environment_refusals := Lib.environment_refusals(_environment_node.environment if _environment_node != null else null, _camera)
 	for refusal in environment_refusals:
 		_unsupported.append(refusal)
@@ -288,6 +441,12 @@ func _export() -> String:
 		files.append(String(entry["file"]))
 		entry.erase("png")
 		texture_entries.append(entry)
+	for pending: Array in _pending_tracks:
+		DirAccess.make_dir_recursive_absolute(_out.path_join("tracks"))
+		error = _write_text(String(pending[0]), _track_csv(pending[1]))
+		if not error.is_empty():
+			return error
+		files.append(String(pending[0]))
 
 	var csv := "frame,px,py,pz,qx,qy,qz,qw,fov_deg,near,far\n" + "\n".join(_track) + "\n"
 	error = _write_text("camera_track.csv", csv)
@@ -345,6 +504,7 @@ func _export() -> String:
 			"far": _camera.far,
 			"projection": "perspective" if _camera.projection == Camera3D.PROJECTION_PERSPECTIVE else "unsupported",
 			"attributes": Lib.storage_properties(_camera.attributes) if _camera.attributes != null else null,
+			"cuts": _cuts,
 		},
 		"meshes": mesh_entries,
 		"materials": _materials,
@@ -369,6 +529,8 @@ func _export() -> String:
 			"instances_sha256": Lib.transforms_sha256(_world_transforms),
 			"positions_sha256": Lib.positions_sha256(_world_transforms),
 			"camera_rows": _track.size(),
+			"movers": _movers,
+			"rigid_skin_max_error_m": Lib.json_value(_rigid_skin_error),
 		},
 	}
 	if _camera.projection != Camera3D.PROJECTION_PERSPECTIVE:
@@ -404,6 +566,7 @@ func _export() -> String:
 		"textures": _textures.size(),
 		"approximations": approximations.map(func(entry: Dictionary) -> String: return String(entry["id"])),
 		"camera_rows": _track.size(),
+		"movers": _movers,
 		"files": files.size() + 1,
 	}, "", true))
 	return ""
@@ -420,6 +583,8 @@ func _walk(p_node: Node) -> void:
 		_add_multimesh(p_node)
 	elif p_node is DirectionalLight3D or p_node is OmniLight3D or p_node is SpotLight3D or p_node is AreaLight3D:
 		_add_light(p_node)
+	elif p_node is GPUParticles3D or p_node is CPUParticles3D:
+		_need_approximation("particles", str(_scene.get_path_to(p_node)))
 	elif p_node is VisualInstance3D:
 		_unsupported.append("%s (%s)" % [_scene.get_path_to(p_node), p_node.get_class()])
 	elif p_node is WorldEnvironment:
@@ -434,8 +599,9 @@ func _add_mesh_instance(p_node: MeshInstance3D) -> void:
 	var mesh := p_node.mesh
 	if mesh == null:
 		return
+	var path := str(_scene.get_path_to(p_node))
 	if p_node.skin != null:
-		_unsupported.append("skinned mesh %s" % _scene.get_path_to(p_node))
+		_add_skinned(p_node, path)
 		return
 	var id := _mesh_id(mesh)
 	if id.is_empty():
@@ -446,21 +612,113 @@ func _add_mesh_instance(p_node: MeshInstance3D) -> void:
 		sources.append(p_node.get_active_material(surface))
 		materials.append(_material_id(sources[-1]))
 	_check_translucent_shadow(p_node, sources)
+	_add_node_instance(p_node, path, id, materials, "%s|-1" % path, mesh, null)
+
+
+## One placed mesh: at its row-0 transform, with a per-frame track when it moves.
+func _add_node_instance(p_node: MeshInstance3D, p_path: String, p_id: String, p_materials: Array, p_slot_key: String, p_mesh: Mesh, p_skin_part: Variant) -> void:
+	var slot := int(_slots.get(p_slot_key, -1))
 	var transform := p_node.global_transform
-	_instances.append({
+	if slot >= 0 and slot < _slot_row0.size():
+		transform = _slot_row0[slot]
+	var entry := {
 		"kind": "node",
-		"node": str(_scene.get_path_to(p_node)),
-		"mesh": id,
-		"materials": materials,
+		"node": p_path,
+		"mesh": p_id,
+		"materials": p_materials,
 		"transform": Lib.transform_rows(transform),
+		"track": _track_for(slot),
 		"cast_shadow": p_node.cast_shadow,
 		"gi_mode": p_node.gi_mode,
 		"visibility_range": [p_node.visibility_range_begin, p_node.visibility_range_end],
 		"layers": p_node.layers,
-	})
+	}
+	if p_skin_part != null:
+		entry["skin_part"] = p_skin_part
+	_instances.append(entry)
 	_layers_in_use |= p_node.layers
-	_add_placement(transform, mesh)
+	_add_placement(transform, p_mesh)
 	_node_instances += 1
+
+
+## The track file of a mover (its transform differs from row 0 on some row), queued for _export;
+## null for an instance that holds still.
+func _track_for(p_slot: int) -> Variant:
+	if not _slot_moves.has(p_slot):
+		return null
+	var rows: Array = _slot_moves[p_slot]
+	if rows.size() != _frames:
+		_unsupported.append("a mover's track has %d rows, not %d" % [rows.size(), _frames])
+		return null
+	var file := "tracks/t%04d.csv" % _pending_tracks.size()
+	_pending_tracks.append([file, rows])
+	_movers += 1
+	return file
+
+
+## A track as CSV: frame, then the 12 numbers of the world transform (row-major 3x4, as scene.json).
+func _track_csv(p_rows: Array) -> String:
+	var lines := PackedStringArray(["frame,m00,m01,m02,m03,m10,m11,m12,m13,m20,m21,m22,m23"])
+	for row in p_rows.size():
+		var cells := PackedStringArray([str(row)])
+		for value: float in Lib.transform_rows(p_rows[row]):
+			cells.append("%.9f" % value)
+		lines.append(",".join(cells))
+	return "\n".join(lines) + "\n"
+
+
+## A skinned mesh as rigid parts, one per skin bind (APPROXIMATIONS.rigid_skin): each part is the
+## triangles bound to that bind, placed and tracked with the bone's per-frame transform.
+func _add_skinned(p_node: MeshInstance3D, p_path: String) -> void:
+	var skeleton := p_node.get_node_or_null(p_node.skeleton) as Skeleton3D
+	if skeleton == null:
+		_unsupported.append("skinned mesh %s without a Skeleton3D" % p_path)
+		return
+	if not skeleton.global_transform.is_equal_approx(p_node.global_transform):
+		_unsupported.append("skinned mesh %s whose Skeleton3D is not at the mesh instance's transform (not exported yet)" % p_path)
+		return
+	var split := Lib.rigid_skin_parts(p_node.mesh)
+	if split.has("error"):
+		_unsupported.append("skinned mesh %s: %s (only one bone per vertex at full weight is exported, as rigid parts)" % [p_path, split["error"]])
+		return
+	if _rigid_skin_error > 1e-4:
+		_unsupported.append("skinned mesh %s: its rigid parts are up to %s m off the renderer's skinning" % [p_path, _rigid_skin_error])
+		return
+	_need_approximation("rigid_skin", p_path)
+	var bones := {}
+	for pair: Array in _sampled_nodes:
+		if pair[1] == p_path:
+			for bind_bone: Array in pair[4]:
+				bones[int(bind_bone[0])] = int(bind_bone[1])
+	for part: Dictionary in split["parts"]:
+		var bind := int(part["bind"])
+		var key := "%d:%d" % [p_node.mesh.get_instance_id(), bind]
+		if not _part_meshes.has(key):
+			var part_mesh := ArrayMesh.new()
+			part_mesh.resource_name = "%s bind %d" % [p_node.mesh.resource_name, bind]
+			for arrays: Array in part["arrays"]:
+				part_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			_part_meshes[key] = part_mesh
+		var mesh: ArrayMesh = _part_meshes[key]
+		var id := _mesh_id(mesh)
+		if id.is_empty():
+			return
+		var materials: Array = []
+		var sources: Array = []
+		for surface: int in part["surfaces"]:
+			sources.append(p_node.get_active_material(surface))
+			materials.append(_material_id(sources[-1]))
+		_check_translucent_shadow(p_node, sources)
+		var bone := int(bones.get(bind, -1))
+		var skin_part := {
+			"bind": bind,
+			"bone": skeleton.get_bone_name(bone) if bone >= 0 and bone < skeleton.get_bone_count() else "",
+			"surfaces": part["surfaces"],
+		}
+		if bone < 0 or bone >= skeleton.get_bone_count():
+			_unsupported.append("skinned mesh %s: skin bind %d has no bone" % [p_path, bind])
+			return
+		_add_node_instance(p_node, p_path, id, materials, "%s|%d" % [p_path, bind], mesh, skin_part)
 
 
 func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
@@ -593,6 +851,9 @@ func _material_id(p_material: Material) -> String:
 		_material_count += 1
 	_material_ids[key] = id
 	var label := id if material.resource_name.is_empty() else "%s (%s)" % [id, material.resource_name]
+	if material is ShaderMaterial:
+		_add_shader_material(material as ShaderMaterial, id, label)
+		return id
 	if not (material is BaseMaterial3D):
 		_unsupported.append("%s material %s" % [material.get_class(), label])
 		return id
@@ -619,10 +880,52 @@ func _material_id(p_material: Material) -> String:
 		"two_sided": base.cull_mode == BaseMaterial3D.CULL_DISABLED,
 		"albedo_linear": Lib.json_value(base.albedo_color.srgb_to_linear()),
 		"albedo_texture": albedo_texture,
+		"uv1_scale": Lib.json_value(base.uv1_scale),
+		"uv1_offset": Lib.json_value(base.uv1_offset),
+		"texture_filter": Lib.texture_filter_name(base),
+		"texture_repeat": base.texture_repeat,
 		"emission_linear": [emission.r, emission.g, emission.b],
 		"properties": Lib.storage_properties(base),
 	})
 	return id
+
+
+## A ShaderMaterial (APPROXIMATIONS.shader_material): its code, the code's SHA-256 and every
+## uniform's value (the material's own, or the shader's default when the material leaves it
+## unset); texture uniforms are written as textures. The UE import builds only shaders it knows.
+func _add_shader_material(p_material: ShaderMaterial, p_id: String, p_label: String) -> void:
+	var shader := p_material.shader
+	if shader == null or shader.get_mode() != Shader.MODE_SPATIAL:
+		_unsupported.append("ShaderMaterial %s without a spatial shader" % p_label)
+		return
+	if p_material.next_pass != null or p_material.render_priority != 0:
+		_unsupported.append("ShaderMaterial %s with a next pass or a render priority" % p_label)
+		return
+	_need_approximation("shader_material", p_label)
+	var uniforms := {}
+	for info: Dictionary in shader.get_shader_uniform_list():
+		var name := String(info["name"])
+		var value: Variant = p_material.get_shader_parameter(name)
+		var is_set := value != null
+		if not is_set:
+			value = RenderingServer.shader_get_parameter_default(shader.get_rid(), name)
+		var entry := {"type": int(info["type"]), "set": is_set}
+		if value is Texture2D:
+			entry["texture"] = _texture_id(value as Texture2D, "shader")
+		elif value is Object:
+			_unsupported.append("ShaderMaterial %s uniform %s holds a %s" % [p_label, name, (value as Object).get_class()])
+			continue
+		else:
+			entry["value"] = Lib.json_value(value)
+		uniforms[name] = entry
+	_materials.append({
+		"id": p_id,
+		"name": String(p_material.resource_name),
+		"class": p_material.get_class(),
+		"blend": "shader",
+		"shader": {"code": shader.code, "sha256": shader.code.sha256_text(), "uniforms": uniforms},
+		"properties": Lib.storage_properties(p_material),
+	})
 
 
 ## A texture written as textures/<id>.png (RGBA8, the pixels as stored).
@@ -644,6 +947,7 @@ func _texture_id(p_texture: Texture2D, p_usage: String) -> Variant:
 		"class": p_texture.get_class(),
 		"name": String(p_texture.resource_name),
 		"size": [p_texture.get_width(), p_texture.get_height()],
+		"mipmaps": p_texture.get_image() != null and p_texture.get_image().has_mipmaps(),
 		"usages": [p_usage],
 		"png": png,
 	})
