@@ -145,6 +145,46 @@ thin coverage) are the ones issue #198 lists, each drawn from GodotNext's own te
 the scene's luma at 25%. The resurrection-hits view recomputes the history update's own test
 (`tsr_resurrection_match` in `tsr_stability_inc.glsl`).
 
+### Shader and format portability across Vulkan, D3D12 and Metal (#195)
+
+No Epic document was read for this work: UE's TSR page says only that TSR runs on every
+desktop RHI. The inputs are API specifications and the open-source shader toolchains the
+repository already builds with.
+
+| Input | Upstream | Version / Read on | License | What was used |
+|---|---|---|---|---|
+| Khronos *GLSL.std.450* extended instruction set | https://registry.khronos.org/SPIR-V/specs/unified1/GLSL.std.450.html | Version 1.00, Revision 17; read 2026-11-16 | Khronos specification, public | `Round`: "The fraction 0.5 rounds in a direction chosen by the implementation". `RoundEven`: 0.5 rounds toward the nearest even whole number. |
+| SPIRV-Cross (in tree, `thirdparty/spirv-cross/spirv_msl.cpp`, `spirv_glsl.cpp`) | The in-tree copy | Read 2026-11-16 | Apache-2.0 | The MSL backend writes `RoundEven` as `rint`; `Round` falls through to the GLSL backend's `round`. |
+| Mesa SPIR-V to NIR (`src/compiler/spirv/vtn_glsl450.c`, the source of the private Mesa NIR library #123 builds for D3D12) | The #123 Mesa checkout | Mesa 25.3.1, the base of the #123 library 25.3.1-gn3; read 2026-11-16 | MIT | `Round` and `RoundEven` both become `fround_even`, which DXIL emits as `round_ne`. |
+| Godot's RenderingDevice drivers (in tree, `drivers/d3d12`, `drivers/metal`, `drivers/vulkan`) | The in-tree code | Read 2026-11-16 | MIT | How each driver answers `texture_is_format_supported_for_usage` with the storage bit: D3D12 from `D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW`; Metal never clears the storage bit (its format table gives `RG11B10Float` every capability on macOS, and no write capability on iOS GPUs below the Apple3 family). |
+
+Note on Metal Shading Language math semantics: Apple's *Metal Shading Language Specification*
+was not consulted for this work. SPIRV-Cross's MSL backend emits `rint` for `RoundEven` and
+`round` for `Round`, and this change assumes MSL's `round` and `rint` follow C99 (`round`
+rounds halfway cases away from zero; `rint` rounds to nearest even).
+
+What was used:
+
+- The history update's sample position (`tsr_history_update.glsl`, mirrored in
+  `tsr_debug_view.glsl`) rounds with `roundEven` instead of `round`. The x jitter is a base-2
+  Halton value, so with a power-of-two ratio between the history and internal sizes (scale
+  0.5 at 100% history, 1.0 at 200% history) the position can land on an exact `.5` tie.
+  GLSL leaves `round`'s tie-breaking direction to the implementation, whereas `roundEven`
+  emits SPIR-V `RoundEven`, DXIL `round_ne` and MSL `rint`, so exact `.5` ties round to even
+  across all three backends (the floating-point evaluation of `x_in` itself is not guaranteed
+  to be bit-identical across drivers or fast-math modes).
+- TSR asks the device about every format of `TSR_FORMAT_TABLE` and
+  `TSR_STABILITY_STORE_TABLE` with the usage it creates them with (sampling, storage and
+  copy-to). R11G11B10 history colour falls back to RGBA16F, as #194 already did for that
+  format alone; the extra 4 B per texel count against T6. On a device missing any other
+  `RB_SCOPE_TSR` format, `RenderForwardClustered` leaves TSR off (`SCALE_NONE`, plain 3D
+  scaling) and logs one warning when TSR is requested.
+
+GodotNext's own: the selection order, the "first missing format" report, the
+`GODOTNEXT_TSR_DENY_STORAGE_FORMATS` test switch and the doctest's mock capability table.
+TSR uses no subgroup operations, and its largest thread-group array is 10 x 10 `vec3`
+(1,600 B with Metal's 16-byte `float3`), far below Metal's 32 KB.
+
 ### Standard academic / public graphics literature (general mathematical techniques)
 
 | Reference | Date / Venue | License / Status | What was used |

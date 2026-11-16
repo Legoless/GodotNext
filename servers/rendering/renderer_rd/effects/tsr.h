@@ -101,6 +101,32 @@ inline constexpr TSRStabilityStoreEntry TSR_STABILITY_STORE_TABLE[] = {
 	{ "thin_coverage_1", RD::DATA_FORMAT_R8_UNORM, 1, TSR_FEATURE_THIN_GEOMETRY, TSR_STABILITY_STORE_THIN, 0.0f },
 };
 
+// GodotNext: pt_tsr_d3d12_metal (#195). Every RB_SCOPE_TSR texture is written as a storage
+// image and read through a sampler, with this usage on every driver.
+inline constexpr uint32_t TSR_TEXTURE_USAGE = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+// History colour (and the persistent frames, which follow it) is the one format with a
+// fallback: a device that reports no storage use of R11G11B10 gets RGBA16F, whose 4 extra bytes
+// per texel TSR::estimate_memory_bytes and TSR::stability_layout count against T6. TSR only
+// writes its storage images (no typed loads). The other formats (R8, R16F, RG16F) have no
+// fallback: D3D12 requires typed UAV stores for them from feature level 11, and desktop Vulkan
+// and Metal GPUs write them as storage images too. On a device without one, RenderForwardClustered
+// leaves TSR off (SCALE_NONE, plain 3D scaling) and warns once when TSR is requested.
+inline constexpr RD::DataFormat TSR_HISTORY_COLOR_FORMAT = RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32;
+inline constexpr RD::DataFormat TSR_HISTORY_COLOR_FALLBACK_FORMAT = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+
+// The formats TSR::select_formats chose for this device.
+struct TSRFormatSelection {
+	bool history_rgba16f = false; // History colour and the persistent frames use the fallback.
+	bool supported = true; // false: a format TSR needs has no usable storage format on this device.
+	RD::DataFormat missing_format = RD::DATA_FORMAT_MAX; // The first format with neither itself nor a fallback.
+	uint32_t formats_checked = 0; // Distinct formats queried, fallback included.
+
+	// The format a TSR_FORMAT_TABLE or TSR_STABILITY_STORE_TABLE entry is allocated with.
+	RD::DataFormat resolve(RD::DataFormat p_table_format) const {
+		return (history_rgba16f && p_table_format == TSR_HISTORY_COLOR_FORMAT) ? TSR_HISTORY_COLOR_FALLBACK_FORMAT : p_table_format;
+	}
+};
+
 // Sizes of the stability stores for one view, from TSR::stability_layout.
 struct TSRStabilityLayout {
 	uint32_t features = 0;
@@ -302,7 +328,7 @@ public:
 	bool ensure_stability_textures(Ref<RenderSceneBuffersRD> p_render_buffers, const TSRStabilityLayout &p_layout) const;
 	void process(const Parameters &p_params);
 
-	bool is_history_rgba16f() const { return history_use_rgba16f; }
+	bool is_history_rgba16f() const { return format_selection.history_rgba16f; }
 
 	static uint32_t jitter_phase_count(const Size2i &p_target_size, const Size2i &p_render_size) {
 		return nextgi_tsr_jitter_phase_count(p_target_size, p_render_size);
@@ -320,6 +346,78 @@ public:
 	// room, shrinking the stores (never below TSR_FIT_MIN_Q16 per axis) where they
 	// leave less than the full layout needs. Pure arithmetic, for one view.
 	static TSRStabilityLayout stability_layout(const Size2i &p_internal_size, const Size2i &p_max_internal_size, const Size2i &p_output_size, RSE::ViewportTSRQuality p_quality, uint32_t p_features, bool p_history_rgba16f = false, uint32_t p_budget_x100 = TSR_STABILITY_BUDGET_X100);
+
+	// GodotNext: pt_tsr_d3d12_metal (#195). Picks TSR's RB_SCOPE_TSR storage formats from a
+	// capability query, bool p_supported(RD::DataFormat, uint32_t usage), asked once per distinct
+	// format of TSR_FORMAT_TABLE and TSR_STABILITY_STORE_TABLE with TSR_TEXTURE_USAGE, and for the
+	// history fallback when R11G11B10 fails. Pure: the doctests pass a mock capability table.
+	template <typename Query>
+	static TSRFormatSelection select_formats(const Query &p_supported) {
+		TSRFormatSelection selection;
+		constexpr uint32_t max_asked = uint32_t(std_size(TSR_FORMAT_TABLE) + std_size(TSR_STABILITY_STORE_TABLE)) + 1;
+		RD::DataFormat asked[max_asked] = {};
+		bool answers[max_asked] = {};
+		auto ask = [&](RD::DataFormat p_format) -> bool {
+			for (uint32_t i = 0; i < selection.formats_checked; i++) {
+				if (asked[i] == p_format) {
+					return answers[i];
+				}
+			}
+			const bool answer = p_supported(p_format, TSR_TEXTURE_USAGE);
+			asked[selection.formats_checked] = p_format;
+			answers[selection.formats_checked] = answer;
+			selection.formats_checked++;
+			return answer;
+		};
+		auto take = [&](RD::DataFormat p_format) {
+			bool usable = ask(p_format);
+			if (!usable && p_format == TSR_HISTORY_COLOR_FORMAT && ask(TSR_HISTORY_COLOR_FALLBACK_FORMAT)) {
+				selection.history_rgba16f = true;
+				usable = true;
+			}
+			if (!usable && selection.supported) {
+				selection.supported = false;
+				selection.missing_format = p_format;
+			}
+		};
+		for (const TSRTextureFormatEntry &entry : TSR_FORMAT_TABLE) {
+			take(entry.format);
+		}
+		for (const TSRStabilityStoreEntry &entry : TSR_STABILITY_STORE_TABLE) {
+			take(entry.format);
+		}
+		return selection;
+	}
+	// select_formats with the formats a GODOTNEXT_TSR_DENY_STORAGE_FORMATS list names treated
+	// as unusable.
+	template <typename Query>
+	static TSRFormatSelection select_formats_for(const String &p_deny_list, const Query &p_supported) {
+		const Vector<RD::DataFormat> denied = parse_denied_formats(p_deny_list);
+		return select_formats([&](RD::DataFormat p_format, uint32_t p_usage) -> bool {
+			return !denied.has(p_format) && p_supported(p_format, p_usage);
+		});
+	}
+	// select_formats_for reading GODOTNEXT_TSR_DENY_STORAGE_FORMATS from the environment, shared
+	// between select_device_formats (TSR::TSR) and the doctests.
+	template <typename Query>
+	static TSRFormatSelection select_env_formats(const Query &p_supported) {
+		return select_formats_for(get_deny_list(), p_supported);
+	}
+	// The selection on the current RenderingDevice, with the environment's deny list, stored by
+	// TSR's constructor (get_format_selection()). Without a RenderingDevice it reports TSR as
+	// unsupported, with no missing format.
+	static TSRFormatSelection select_device_formats();
+	// GODOTNEXT_TSR_DENY_STORAGE_FORMATS: a comma-separated list of RB_SCOPE_TSR formats, by their
+	// RenderingDevice.DataFormat names with or without the DATA_FORMAT_ prefix, in any case
+	// (for example "B10G11R11_UFLOAT_PACK32"), that TSR treats as unusable for storage, so the
+	// fallback can run on any GPU. Names of other formats, and unknown names, are ignored.
+	static Vector<RD::DataFormat> parse_denied_formats(const String &p_list);
+	// The environment variable's value ("" without an OS singleton).
+	static String get_deny_list();
+	// The DataFormat name of one of RB_SCOPE_TSR's formats ("DATA_FORMAT_R8_UNORM"), else "".
+	static const char *format_name(RD::DataFormat p_format);
+	const TSRFormatSelection &get_format_selection() const { return format_selection; }
+	void warn_unsupported_once() const;
 
 private:
 	struct {
@@ -367,7 +465,9 @@ private:
 
 	RID nearest_sampler;
 	RID linear_sampler;
-	bool history_use_rgba16f = false;
+	// GodotNext: pt_tsr_d3d12_metal (#195). From select_device_formats, once; it replaces
+	// #194's history_use_rgba16f (format_selection.history_rgba16f).
+	TSRFormatSelection format_selection;
 };
 
 } // namespace RendererRD

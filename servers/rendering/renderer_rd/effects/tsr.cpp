@@ -30,6 +30,7 @@
 
 #include "tsr.h"
 
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
@@ -271,12 +272,83 @@ TSRStabilityLayout TSR::stability_layout(const Size2i &p_internal_size, const Si
 	return layout;
 }
 
+// GodotNext: pt_tsr_d3d12_metal (#195). The formats GODOTNEXT_TSR_DENY_STORAGE_FORMATS can name.
+static const struct {
+	RD::DataFormat format;
+	const char *name;
+} TSR_FORMAT_NAMES[] = {
+	{ RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, "DATA_FORMAT_B10G11R11_UFLOAT_PACK32" },
+	{ RD::DATA_FORMAT_R16G16B16A16_SFLOAT, "DATA_FORMAT_R16G16B16A16_SFLOAT" },
+	{ RD::DATA_FORMAT_R8_UNORM, "DATA_FORMAT_R8_UNORM" },
+	{ RD::DATA_FORMAT_R16G16_SFLOAT, "DATA_FORMAT_R16G16_SFLOAT" },
+	{ RD::DATA_FORMAT_R16_SFLOAT, "DATA_FORMAT_R16_SFLOAT" },
+};
+
+const char *TSR::format_name(RD::DataFormat p_format) {
+	for (const auto &entry : TSR_FORMAT_NAMES) {
+		if (entry.format == p_format) {
+			return entry.name;
+		}
+	}
+	return "";
+}
+
+Vector<RD::DataFormat> TSR::parse_denied_formats(const String &p_list) {
+	Vector<RD::DataFormat> denied;
+	for (const String &item : p_list.split(",", false)) {
+		String name = item.strip_edges().to_upper();
+		if (!name.begins_with("DATA_FORMAT_")) {
+			name = "DATA_FORMAT_" + name;
+		}
+		for (const auto &entry : TSR_FORMAT_NAMES) {
+			if (name == entry.name && !denied.has(entry.format)) {
+				denied.push_back(entry.format);
+			}
+		}
+	}
+	return denied;
+}
+
+String TSR::get_deny_list() {
+	return OS::get_singleton() != nullptr ? OS::get_singleton()->get_environment("GODOTNEXT_TSR_DENY_STORAGE_FORMATS") : String();
+}
+
+TSRFormatSelection TSR::select_device_formats() {
+	RenderingDevice *device = RD::get_singleton();
+	if (device == nullptr) {
+		TSRFormatSelection none;
+		none.supported = false;
+		return none;
+	}
+	return select_env_formats([device](RD::DataFormat p_format, uint32_t p_usage) -> bool {
+		return device->texture_is_format_supported_for_usage(p_format, p_usage);
+	});
+}
+
+void TSR::warn_unsupported_once() const {
+	if (!format_selection.supported) {
+		WARN_PRINT_ONCE(vformat("TSR: this device cannot use %s as a storage image; falling back to plain 3D scaling.", format_name(format_selection.missing_format)));
+	}
+}
+
 TSR::TSR() {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL(rd);
 
-	const uint32_t storage_usage = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
-	history_use_rgba16f = !rd->texture_is_format_supported_for_usage(RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32, storage_usage);
+	// GodotNext: pt_tsr_d3d12_metal (#195). Every RB_SCOPE_TSR format is checked for storage use
+	// on this device; R11G11B10 history colour falls back to RGBA16F.
+	format_selection = select_device_formats();
+	const Vector<RD::DataFormat> denied = parse_denied_formats(get_deny_list());
+	for (const RD::DataFormat denied_format : denied) {
+		print_line(vformat("TSR: %s is treated as unusable for storage (GODOTNEXT_TSR_DENY_STORAGE_FORMATS).", format_name(denied_format)));
+	}
+	if (format_selection.supported && (!denied.is_empty() || format_selection.history_rgba16f)) {
+		print_line(vformat("TSR: history colour uses %s.", format_selection.history_rgba16f ? "the RGBA16F fallback" : "R11G11B10"));
+	}
+	if (!format_selection.supported) {
+		// Viewports that ask for TSR warn once and fall back to plain 3D scaling.
+		print_verbose(vformat("TSR: this device cannot use %s as a storage image; TSR is off.", format_name(format_selection.missing_format)));
+	}
 
 	{
 		Vector<String> single_mode;
@@ -479,7 +551,7 @@ bool TSR::ensure_textures(Ref<RenderSceneBuffersRD> p_render_buffers, const Size
 		return false;
 	}
 
-	const uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	const uint32_t usage_bits = TSR_TEXTURE_USAGE; // The usage TSR::select_formats checked.
 	const uint32_t view_count = p_render_buffers->get_view_count();
 
 	for (const TSRTextureFormatEntry &entry : TSR_FORMAT_TABLE) {
@@ -490,10 +562,7 @@ bool TSR::ensure_textures(Ref<RenderSceneBuffersRD> p_render_buffers, const Size
 		const StringName tex_name(entry.name);
 		p_render_buffers->free_texture(RB_SCOPE_TSR, tex_name);
 
-		RD::DataFormat fmt = entry.format;
-		if (history_use_rgba16f && fmt == RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32) {
-			fmt = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-		}
+		const RD::DataFormat fmt = format_selection.resolve(entry.format);
 		const Size2i tex_size = is_history ? p_history_size : p_internal_size;
 		const RID tex = p_render_buffers->create_texture(RB_SCOPE_TSR, tex_name, fmt, usage_bits, RD::TEXTURE_SAMPLES_1, tex_size);
 		if (tex.is_valid()) {
@@ -508,7 +577,7 @@ bool TSR::ensure_stability_textures(Ref<RenderSceneBuffersRD> p_render_buffers, 
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
 
-	const uint32_t usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	const uint32_t usage_bits = TSR_TEXTURE_USAGE; // The usage TSR::select_formats checked.
 	const uint32_t view_count = p_render_buffers->get_view_count();
 	bool changed = false;
 
@@ -531,10 +600,7 @@ bool TSR::ensure_stability_textures(Ref<RenderSceneBuffersRD> p_render_buffers, 
 		}
 
 		RD::TextureFormat tf;
-		tf.format = entry.format;
-		if (history_use_rgba16f && tf.format == RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32) {
-			tf.format = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
-		}
+		tf.format = format_selection.resolve(entry.format);
 		// The persistent frames are sampled as an array even with a single layer.
 		if (entry.store == TSR_STABILITY_STORE_PERSISTENT || layers > 1) {
 			tf.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
@@ -563,6 +629,12 @@ void TSR::process(const Parameters &p_params) {
 	ERR_FAIL_NULL(rd);
 	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
 	ERR_FAIL_NULL(uniform_set_cache);
+	// GodotNext: pt_tsr_d3d12_metal (#195). RenderForwardClustered skips TSR when unsupported;
+	// guard direct callers too so no texture is created and no pass runs.
+	if (!format_selection.supported) {
+		warn_unsupported_once();
+		return;
+	}
 
 	p_params.context->sync_dimensions(p_params.internal_size, p_params.output_size, p_params.quality);
 	if (p_params.reset) {
@@ -594,7 +666,7 @@ void TSR::process(const Parameters &p_params) {
 	// neither the mask nor the plan.
 	const uint32_t features = nextgi_tsr_feature_mask(p_params.quality, p_params.thin_geometry);
 	const TSRPassPlan plan = nextgi_tsr_pass_plan(features);
-	const TSRStabilityLayout layout = stability_layout(internal_size, p_params.max_internal_size, output_size, p_params.quality, features, history_use_rgba16f);
+	const TSRStabilityLayout layout = stability_layout(internal_size, p_params.max_internal_size, output_size, p_params.quality, features, format_selection.history_rgba16f);
 	if (p_params.view == 0) {
 		textures_changed = ensure_stability_textures(p_params.render_buffers, layout) || textures_changed;
 		if (textures_changed) {
@@ -603,6 +675,13 @@ void TSR::process(const Parameters &p_params) {
 			const uint64_t layout_bytes = layout.total_bytes() * uint64_t(p_params.render_buffers->get_view_count());
 			if (allocated_bytes != layout_bytes) {
 				ERR_PRINT(vformat("TSR: the textures in the TSR scope take %d bytes, but the stability layout accounts for %d.", allocated_bytes, layout_bytes));
+			}
+			if (layout.history_rgba16f && layout.over_budget) {
+				static bool reported_fallback_over_budget = false;
+				if (!reported_fallback_over_budget) {
+					reported_fallback_over_budget = true;
+					print_line(vformat("TSR: the RGBA16F history fallback puts RB_SCOPE_TSR at %d bytes per view, over the %d-byte T6 budget.", layout.total_bytes(), layout.budget_bytes));
+				}
 			}
 		}
 	}
@@ -752,7 +831,7 @@ void TSR::process(const Parameters &p_params) {
 	}
 	pc.history_scale = preset.history_scale;
 
-	const HistoryMode history_mode = history_use_rgba16f ? HISTORY_MODE_RGBA16F : HISTORY_MODE_R11G11B10F;
+	const HistoryMode history_mode = format_selection.history_rgba16f ? HISTORY_MODE_RGBA16F : HISTORY_MODE_R11G11B10F;
 
 	ResolveMode resolve_mode = RESOLVE_MODE_R11G11B10F;
 	const RD::DataFormat out_format = rd->texture_get_format(p_params.output).format;

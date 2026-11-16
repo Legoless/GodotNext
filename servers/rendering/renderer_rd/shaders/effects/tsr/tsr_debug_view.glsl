@@ -83,7 +83,7 @@ void main() {
 				color = mix(bg, TSR_DEBUG_MAGENTA, 0.75);
 			} else if (rej > TSR_RESURRECT_MIN_REJECTION) {
 				vec2 x_in = u * vec2(params.internal_size) + params.jitter_pixels - 0.5;
-				ivec2 base_in = ivec2(round(x_in));
+				ivec2 base_in = ivec2(roundEven(x_in)); // As the history update rounds it.
 				ivec2 max_in = params.internal_size - ivec2(1);
 				vec3 m1 = vec3(0.0);
 				vec3 m2 = vec3(0.0);

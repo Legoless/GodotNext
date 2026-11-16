@@ -2810,8 +2810,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			}
 			break;
 		case RSE::VIEWPORT_SCALING_3D_MODE_TSR:
+			// GodotNext: pt_tsr_d3d12_metal (#195). Fall back to plain 3D scaling (SCALE_NONE)
+			// when the device lacks a required RB_SCOPE_TSR storage format.
 			if (tsr_effect != nullptr) {
-				scale_type = SCALE_TSR;
+				if (tsr_effect->get_format_selection().supported) {
+					scale_type = SCALE_TSR;
+				} else if (!is_reflection_probe) {
+					tsr_effect->warn_unsupported_once();
+				}
 			}
 			break;
 		default:

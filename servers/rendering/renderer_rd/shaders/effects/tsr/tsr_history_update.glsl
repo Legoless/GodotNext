@@ -43,7 +43,12 @@ void main() {
 
 	// Current jittered input sample position corresponding to unjittered UV u.
 	vec2 x_in = u * vec2(params.internal_size) + params.jitter_pixels - 0.5;
-	ivec2 base_in = ivec2(round(x_in));
+	// roundEven, not round: x_in.x can land on an exact .5 tie (the x jitter is a base-2 Halton
+	// value, and history and internal sizes often differ by a power of two), where GLSL leaves
+	// round()'s tie-breaking direction to the implementation. roundEven maps to SPIR-V RoundEven,
+	// DXIL round_ne and MSL rint, so exact .5 ties round to even on all three backends (floating-
+	// point evaluation of x_in itself can still differ across drivers or fast-math modes).
+	ivec2 base_in = ivec2(roundEven(x_in));
 	vec2 subpixel_delta = x_in - vec2(base_in);
 	ivec2 max_in = params.internal_size - ivec2(1);
 

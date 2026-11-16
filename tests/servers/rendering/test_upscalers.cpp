@@ -35,6 +35,7 @@ TEST_FORCE_LINK(test_upscalers)
 #include "core/config/project_settings.h"
 #include "core/object/class_db.h"
 #include "core/object/script_instance.h"
+#include "core/os/os.h"
 #include "scene/main/viewport.h"
 #include "servers/rendering/dynamic_resolution.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
@@ -578,6 +579,217 @@ TEST_CASE("[Upscalers][TSR] Format table bytes per history pixel, T6 budgets, an
 	CHECK_EQ(tsr_vel.pre_clear_g, ext_vel.pre_clear_g);
 	CHECK_EQ(tsr_vel.mfx_preserve, ext_vel.mfx_preserve);
 	CHECK_EQ(tsr_vel.skip_clear_pass, ext_vel.skip_clear_pass);
+}
+
+// GodotNext: pt_tsr_d3d12_metal (#195).
+TEST_CASE("[Upscalers][TSR] Storage format fallback follows a mock capability table") {
+	using RendererRD::TSR;
+	using RendererRD::TSRFormatSelection;
+
+	// A mock device: the formats it cannot use as storage images. Every query is recorded.
+	Vector<RD::DataFormat> asked;
+	uint32_t wrong_usage = 0;
+	auto select = [&](const Vector<RD::DataFormat> &p_no_storage) {
+		asked.clear();
+		wrong_usage = 0;
+		return TSR::select_formats([&](RD::DataFormat p_format, uint32_t p_usage) {
+			asked.push_back(p_format);
+			if (p_usage != RendererRD::TSR_TEXTURE_USAGE) {
+				wrong_usage++;
+			}
+			return !p_no_storage.has(p_format);
+		});
+	};
+	auto asked_count = [&](RD::DataFormat p_format) {
+		int count = 0;
+		for (const RD::DataFormat format : asked) {
+			count += format == p_format ? 1 : 0;
+		}
+		return count;
+	};
+	// The query covers storage, sampling and the clear's copy-to, as the textures are created.
+	CHECK_EQ(RendererRD::TSR_TEXTURE_USAGE & RD::TEXTURE_USAGE_STORAGE_BIT, uint32_t(RD::TEXTURE_USAGE_STORAGE_BIT));
+	CHECK_EQ(RendererRD::TSR_TEXTURE_USAGE & RD::TEXTURE_USAGE_SAMPLING_BIT, uint32_t(RD::TEXTURE_USAGE_SAMPLING_BIT));
+	CHECK_EQ(RendererRD::TSR_TEXTURE_USAGE & RD::TEXTURE_USAGE_CAN_COPY_TO_BIT, uint32_t(RD::TEXTURE_USAGE_CAN_COPY_TO_BIT));
+
+	const RD::DataFormat r11g11b10 = RD::DATA_FORMAT_B10G11R11_UFLOAT_PACK32;
+	const RD::DataFormat rgba16f = RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+
+	// A device with every format: R11G11B10 history, each format of both tables asked once.
+	{
+		const TSRFormatSelection all = select({});
+		CHECK(all.supported);
+		CHECK_FALSE(all.history_rgba16f);
+		CHECK_EQ(all.missing_format, RD::DATA_FORMAT_MAX);
+		CHECK_EQ(all.resolve(r11g11b10), r11g11b10);
+		CHECK_EQ(wrong_usage, 0u);
+		CHECK_EQ(all.formats_checked, 4u); // R11G11B10, R8, RG16F and R16F.
+		CHECK_EQ(uint32_t(asked.size()), all.formats_checked);
+		CHECK_EQ(asked_count(rgba16f), 0);
+		for (const RendererRD::TSRTextureFormatEntry &entry : RendererRD::TSR_FORMAT_TABLE) {
+			CHECK_EQ(asked_count(entry.format), 1);
+			CHECK_EQ(all.resolve(entry.format), entry.format);
+			// GODOTNEXT_TSR_DENY_STORAGE_FORMATS can name every RB_SCOPE_TSR format.
+			CHECK(String(TSR::format_name(entry.format)).begins_with("DATA_FORMAT_"));
+		}
+		for (const RendererRD::TSRStabilityStoreEntry &entry : RendererRD::TSR_STABILITY_STORE_TABLE) {
+			CHECK_EQ(asked_count(entry.format), 1);
+			CHECK(String(TSR::format_name(entry.format)).begins_with("DATA_FORMAT_"));
+		}
+	}
+
+	// R11G11B10 cannot be a storage image (a Vulkan device without B10G11R11 storage, or
+	// GODOTNEXT_TSR_DENY_STORAGE_FORMATS): history colour and the persistent frames take RGBA16F.
+	{
+		const TSRFormatSelection wide = select({ r11g11b10 });
+		CHECK(wide.supported);
+		CHECK(wide.history_rgba16f);
+		CHECK_EQ(wide.missing_format, RD::DATA_FORMAT_MAX);
+		CHECK_EQ(wide.formats_checked, 5u);
+		CHECK_EQ(asked_count(r11g11b10), 1);
+		CHECK_EQ(asked_count(rgba16f), 1);
+		CHECK_EQ(wrong_usage, 0u);
+		CHECK_EQ(wide.resolve(r11g11b10), rgba16f);
+		CHECK_EQ(wide.resolve(RendererRD::TSR_STABILITY_STORE_TABLE[0].format), rgba16f); // The persistent frames.
+		CHECK_EQ(wide.resolve(RD::DATA_FORMAT_R8_UNORM), RD::DATA_FORMAT_R8_UNORM);
+		CHECK_EQ(wide.resolve(RD::DATA_FORMAT_R16G16_SFLOAT), RD::DATA_FORMAT_R16G16_SFLOAT);
+		CHECK_EQ(RD::get_image_format_pixel_size(rgba16f), 8u);
+
+		// T6 counts the fallback's extra bytes: 4 B more per history-colour texel, on both
+		// history targets, so 18 B per history pixel for the #194 textures alone, over the
+		// 14 B line. TSR still runs; layout.over_budget records the overrun (logged once when
+		// the fallback allocates RB_SCOPE_TSR) and the stability stores shrink to their floor.
+		const Size2i out_1440p(2560, 1440);
+		const Size2i int_1440p_q(int(2560 * 0.667f), int(1440 * 0.667f));
+		const uint64_t history_pixels = uint64_t(2560) * uint64_t(1440);
+		const uint64_t packed_bytes = TSR::estimate_memory_bytes(int_1440p_q, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, 1, false);
+		const uint64_t wide_bytes = TSR::estimate_memory_bytes(int_1440p_q, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, 1, wide.history_rgba16f);
+		CHECK_EQ(wide_bytes - packed_bytes, 8ull * history_pixels);
+		CHECK_EQ(TSR::history_bytes_per_pixel() + 8u, 18u);
+		const uint32_t high = nextgi_tsr_feature_mask(RSE::VIEWPORT_TSR_QUALITY_HIGH, false);
+		const RendererRD::TSRStabilityLayout packed_layout = TSR::stability_layout(int_1440p_q, int_1440p_q, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high, false);
+		const RendererRD::TSRStabilityLayout wide_layout = TSR::stability_layout(int_1440p_q, int_1440p_q, out_1440p, RSE::VIEWPORT_TSR_QUALITY_HIGH, high, wide.history_rgba16f);
+		CHECK_FALSE(packed_layout.over_budget);
+		CHECK_EQ(wide_layout.core_bytes, wide_bytes);
+		CHECK_GT(wide_layout.core_bytes, 14ull * history_pixels);
+		CHECK(wide_layout.over_budget);
+		CHECK_EQ(wide_layout.store_bytes_per_pixel(RendererRD::TSR_STABILITY_STORE_TABLE[0]), 8u);
+		// The stores shrink to their floor instead of growing the overrun further.
+		CHECK_EQ(wide_layout.persistent_fit_q16, TSR_FIT_MIN_Q16);
+		CHECK_EQ(wide_layout.state_fit_q16, TSR_FIT_MIN_Q16);
+	}
+
+	// Neither R11G11B10 nor RGBA16F: no history format, and the selection says which.
+	{
+		const TSRFormatSelection none = select({ r11g11b10, rgba16f });
+		CHECK_FALSE(none.supported);
+		CHECK_FALSE(none.history_rgba16f);
+		CHECK_EQ(none.missing_format, r11g11b10);
+		CHECK_EQ(asked_count(r11g11b10), 1);
+		CHECK_EQ(asked_count(rgba16f), 1);
+	}
+
+	// The other formats have no fallback; the first one missing, in table order, is reported.
+	{
+		const TSRFormatSelection no_r8 = select({ RD::DATA_FORMAT_R8_UNORM });
+		CHECK_FALSE(no_r8.supported);
+		CHECK_FALSE(no_r8.history_rgba16f);
+		CHECK_EQ(no_r8.missing_format, RD::DATA_FORMAT_R8_UNORM);
+		CHECK_EQ(asked_count(rgba16f), 0);
+
+		const TSRFormatSelection no_rg16f = select({ RD::DATA_FORMAT_R16G16_SFLOAT });
+		CHECK_FALSE(no_rg16f.supported);
+		CHECK_EQ(no_rg16f.missing_format, RD::DATA_FORMAT_R16G16_SFLOAT);
+
+		const TSRFormatSelection no_r16f = select({ RD::DATA_FORMAT_R16_SFLOAT });
+		CHECK_FALSE(no_r16f.supported);
+		CHECK_EQ(no_r16f.missing_format, RD::DATA_FORMAT_R16_SFLOAT);
+
+		// dilated_velocity (RG16F) comes before prev_depth (R16F) in TSR_FORMAT_TABLE.
+		const TSRFormatSelection no_half = select({ RD::DATA_FORMAT_R16_SFLOAT, RD::DATA_FORMAT_R16G16_SFLOAT });
+		CHECK_EQ(no_half.missing_format, RD::DATA_FORMAT_R16G16_SFLOAT);
+
+		// A missing R8 and a missing R11G11B10 with RGBA16F available: R8 is reported, and the
+		// history still takes its fallback.
+		const TSRFormatSelection mixed = select({ r11g11b10, RD::DATA_FORMAT_R8_UNORM });
+		CHECK_FALSE(mixed.supported);
+		CHECK(mixed.history_rgba16f);
+		CHECK_EQ(mixed.missing_format, RD::DATA_FORMAT_R8_UNORM);
+	}
+
+	// GODOTNEXT_TSR_DENY_STORAGE_FORMATS: RB_SCOPE_TSR formats by name, any case, with or without
+	// the DATA_FORMAT_ prefix; repeats, other formats and unknown names are ignored.
+	{
+		const Vector<RD::DataFormat> denied = TSR::parse_denied_formats(" b10g11r11_ufloat_pack32, DATA_FORMAT_R8_UNORM ,bogus,R8_UNORM,R32_SFLOAT,");
+		REQUIRE_EQ(denied.size(), 2);
+		CHECK_EQ(denied[0], r11g11b10);
+		CHECK_EQ(denied[1], RD::DATA_FORMAT_R8_UNORM);
+		CHECK(TSR::parse_denied_formats("").is_empty());
+		CHECK(TSR::parse_denied_formats("R32_SFLOAT").is_empty());
+		CHECK_EQ(String(TSR::format_name(r11g11b10)), String("DATA_FORMAT_B10G11R11_UFLOAT_PACK32"));
+		CHECK(String(TSR::format_name(RD::DATA_FORMAT_R32_SFLOAT)).is_empty());
+
+		// Exercise TSR's shared helpers (select_formats_for and select_env_formats, which
+		// select_device_formats and TSR::TSR call) with OS's environment variable.
+		const TSRFormatSelection by_list = TSR::select_formats_for("B10G11R11_UFLOAT_PACK32", [](RD::DataFormat, uint32_t p_usage) {
+			return p_usage == RendererRD::TSR_TEXTURE_USAGE;
+		});
+		CHECK(by_list.supported);
+		CHECK(by_list.history_rgba16f);
+
+		struct ScopedDenyEnv {
+			String prev_value;
+			bool had_previous = false;
+
+			explicit ScopedDenyEnv(const String &p_value) {
+				OS *os = OS::get_singleton();
+				if (os != nullptr) {
+					had_previous = os->has_environment("GODOTNEXT_TSR_DENY_STORAGE_FORMATS");
+					if (had_previous) {
+						prev_value = os->get_environment("GODOTNEXT_TSR_DENY_STORAGE_FORMATS");
+					}
+					os->set_environment("GODOTNEXT_TSR_DENY_STORAGE_FORMATS", p_value);
+				}
+			}
+
+			~ScopedDenyEnv() {
+				OS *os = OS::get_singleton();
+				if (os != nullptr) {
+					if (had_previous) {
+						os->set_environment("GODOTNEXT_TSR_DENY_STORAGE_FORMATS", prev_value);
+					} else {
+						os->unset_environment("GODOTNEXT_TSR_DENY_STORAGE_FORMATS");
+					}
+				}
+			}
+		};
+
+		REQUIRE(OS::get_singleton() != nullptr);
+		{
+			ScopedDenyEnv env_fallback("B10G11R11_UFLOAT_PACK32");
+			CHECK_EQ(TSR::get_deny_list(), String("B10G11R11_UFLOAT_PACK32"));
+			const TSRFormatSelection forced = TSR::select_env_formats([](RD::DataFormat, uint32_t p_usage) {
+				return p_usage == RendererRD::TSR_TEXTURE_USAGE;
+			});
+			CHECK(forced.supported);
+			CHECK(forced.history_rgba16f);
+			CHECK_EQ(forced.resolve(r11g11b10), rgba16f);
+		}
+		{
+			ScopedDenyEnv env_unsupported("R8_UNORM");
+			const TSRFormatSelection denied_r8 = TSR::select_env_formats([](RD::DataFormat, uint32_t p_usage) {
+				return p_usage == RendererRD::TSR_TEXTURE_USAGE;
+			});
+			CHECK_FALSE(denied_r8.supported);
+			CHECK_FALSE(denied_r8.history_rgba16f);
+			CHECK_EQ(denied_r8.missing_format, RD::DATA_FORMAT_R8_UNORM);
+		}
+		if (RD::get_singleton() == nullptr) {
+			const TSRFormatSelection headless = TSR::select_device_formats();
+			CHECK_FALSE(headless.supported);
+			CHECK_EQ(headless.missing_format, RD::DATA_FORMAT_MAX);
+		}
+	}
 }
 
 // GodotNext: pt_tsr_stability (#198).
