@@ -157,6 +157,34 @@ func _test_refusals() -> void:
 	var roughness_map := plain.duplicate() as StandardMaterial3D
 	roughness_map.roughness_texture = leaf
 	_check(Lib.material_refusals(roughness_map).size() == 1, "a texture in another slot is refused")
+	# One value per Lib.REFUSED_FLAGS property that changes what Godot draws.
+	var flag_values := {
+		"depth_draw_mode": BaseMaterial3D.DEPTH_DRAW_ALWAYS,
+		"no_depth_test": true,
+		"render_priority": 1,
+		"proximity_fade_enabled": true,
+		"distance_fade_mode": BaseMaterial3D.DISTANCE_FADE_PIXEL_ALPHA,
+		"billboard_mode": BaseMaterial3D.BILLBOARD_ENABLED,
+		"grow": true,
+		"disable_receive_shadows": true,
+		"shadow_to_opacity": true,
+		"disable_ambient_light": true,
+		"disable_fog": true,
+	}
+	_check(flag_values.keys() == Lib.REFUSED_FLAGS.keys(), "every refused material flag has a unit check")
+	for property: String in flag_values:
+		var flagged := transparent.duplicate() as StandardMaterial3D
+		flagged.set(property, flag_values[property])
+		var refusals := Lib.material_refusals(flagged)
+		_check(refusals.size() == 1 and Lib.REFUSED_FLAGS.has(property) and refusals[0] == String(Lib.REFUSED_FLAGS[property][1]), "material flag %s is refused (%s)" % [property, refusals])
+	var drawn_depth := plain.duplicate() as StandardMaterial3D
+	drawn_depth.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	_check(Lib.material_refusals(drawn_depth).size() == 1, "a disabled depth draw is refused")
+	_check(Lib.translucent_shadow(transparent, GeometryInstance3D.SHADOW_CASTING_SETTING_ON), "an alpha-blended surface on a shadow caster needs translucent_shadow")
+	_check(Lib.translucent_shadow(transparent, GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY), "an alpha-blended surface on a shadows-only caster needs translucent_shadow")
+	_check(not Lib.translucent_shadow(transparent, GeometryInstance3D.SHADOW_CASTING_SETTING_OFF), "an alpha-blended surface that casts no shadow is carried as it is")
+	_check(not Lib.translucent_shadow(scissor, GeometryInstance3D.SHADOW_CASTING_SETTING_ON) and not Lib.translucent_shadow(plain, GeometryInstance3D.SHADOW_CASTING_SETTING_ON), "opaque and alpha-scissor casters are carried as they are")
+	_check(not Lib.translucent_shadow(null, GeometryInstance3D.SHADOW_CASTING_SETTING_ON), "a surface without a material is carried as it is")
 	_check(Lib.mask_effect(0xFFFFFFFF, 0b111) == "all", "a full mask keeps every placed layer")
 	_check(Lib.mask_effect(1 << 18, 0b111) == "none", "a mask on unused layers keeps none")
 	_check(Lib.mask_effect(0b010, 0b111) == "some", "a mask on one used layer keeps some")
@@ -165,7 +193,8 @@ func _test_refusals() -> void:
 	var decoded := Image.new()
 	_check(not png.is_empty() and decoded.load_png_from_buffer(png) == OK and decoded.get_size() == Vector2i(4, 4), "a texture becomes a PNG of its size")
 	_check(Lib.texture_png(null).is_empty(), "no texture gives no PNG")
-	for id: String in ["diffuse_mode", "shadow_caster_mask", "light_projector"]:
+	_test_texture_png()
+	for id: String in ["diffuse_mode", "shadow_caster_mask", "light_projector", "light_cull_mask", "translucent_shadow"]:
 		_check(Lib.APPROXIMATIONS.has(id) and not String(Lib.APPROXIMATIONS[id]).is_empty(), "approximation %s is described" % id)
 	var environment := Environment.new()
 	environment.sky = Sky.new()
@@ -180,6 +209,40 @@ func _test_refusals() -> void:
 	_check(Lib.environment_refusals(environment, camera).size() == 1, "an Environment on the camera is refused")
 	_check(Lib.environment_refusals(null, null).is_empty(), "no environment and no camera refuse nothing")
 	camera.free()
+
+
+## texture_png writes the base level's pixels as stored, independently of how the texture keeps
+## them: channel order and alpha survive, mipmaps are dropped, nothing is converted to another
+## color space, and a VRAM-compressed texture is written decompressed.
+func _test_texture_png() -> void:
+	var source := Image.create_empty(4, 2, false, Image.FORMAT_RGBA8)
+	var expected := PackedByteArray()
+	for y in 2:
+		for x in 4:
+			var texel := PackedByteArray([10 + 60 * x, 20 + 100 * y, 200 - 40 * x, 30 + 40 * x + 80 * y])
+			source.set_pixel(x, y, Color8(texel[0], texel[1], texel[2], texel[3]))
+			expected.append_array(texel)
+	var mipmapped := source.duplicate() as Image
+	mipmapped.generate_mipmaps()
+	var decoded := Image.new()
+	var png := Lib.texture_png(ImageTexture.create_from_image(mipmapped))
+	var ok := not png.is_empty() and decoded.load_png_from_buffer(png) == OK
+	if ok:
+		decoded.convert(Image.FORMAT_RGBA8)
+	_check(ok and decoded.get_size() == Vector2i(4, 2) and not decoded.has_mipmaps() and decoded.get_data() == expected, "a texture with mipmaps becomes a PNG of its base level's RGBA bytes")
+	# One hand-made DXT1 block: endpoints red (0xF800) and blue (0x001F) in RGB565, the top two rows
+	# use endpoint 0 and the bottom two endpoint 1, so the decoded texels are known exactly.
+	var block := Image.create_from_data(4, 4, false, Image.FORMAT_DXT1, PackedByteArray([0x00, 0xF8, 0x1F, 0x00, 0x00, 0x00, 0x55, 0x55]))
+	var block_expected := PackedByteArray()
+	for y in 4:
+		for x in 4:
+			block_expected.append_array(PackedByteArray([255, 0, 0, 255]) if y < 2 else PackedByteArray([0, 0, 255, 255]))
+	decoded = Image.new()
+	png = Lib.texture_png(ImageTexture.create_from_image(block))
+	ok = block.is_compressed() and not png.is_empty() and decoded.load_png_from_buffer(png) == OK
+	if ok:
+		decoded.convert(Image.FORMAT_RGBA8)
+	_check(ok and decoded.get_size() == Vector2i(4, 4) and decoded.get_data() == block_expected, "a VRAM-compressed texture becomes a PNG of its decoded texels")
 
 
 func _check_determinism(p_first: String, p_second: String) -> void:
@@ -256,6 +319,16 @@ func _check_schema(p_scene: Dictionary) -> void:
 	var triangles := 0
 	var node_count := 0
 	var multimesh_count := 0
+	var blends := {}
+	for material: Dictionary in p_scene["materials"]:
+		blends[String(material["id"])] = String(material.get("blend", ""))
+	var translucent_casters := PackedStringArray()
+	for instance: Dictionary in p_scene["instances"]:
+		if int(instance.get("cast_shadow", 0)) != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+			for material_id: Variant in instance["materials"]:
+				if blends.get(String(material_id), "") == "translucent":
+					translucent_casters.append(String(instance["node"]))
+					break
 	for instance: Dictionary in p_scene["instances"]:
 		var kind := String(instance["kind"])
 		_check(kind == "node" or kind == "multimesh", "instance kind is node or multimesh")
@@ -276,11 +349,14 @@ func _check_schema(p_scene: Dictionary) -> void:
 				triangles += mesh_triangles
 				multimesh_count += 1
 	var light_types := {}
+	var unlit_lights := PackedStringArray()
 	for light: Dictionary in p_scene["lights"]:
 		for key in ["node", "type", "transform", "direction", "color_linear", "projector", "properties", "cull_mask_effect", "caster_mask_effect"]:
 			_check(light.has(key), "light has %s" % key)
 		_check(String(light.get("type", "")) in ["directional", "omni", "spot", "area"], "light type is known")
-		_check(String(light.get("cull_mask_effect", "")) in ["all", "none"], "a carried cull mask lights all placed layers or none")
+		_check(String(light.get("cull_mask_effect", "")) in ["all", "none"], "an exported cull mask lights all placed layers or none (none is the light_cull_mask approximation)")
+		if String(light.get("cull_mask_effect", "")) == "none":
+			unlit_lights.append(String(light["node"]))
 		_check(light.get("projector") == null or texture_ids.has(String(light["projector"])), "light projector texture exists")
 		if light.get("type") == "area":
 			_check(light.has("area") and (light["area"] as Dictionary).has("size") and (light["area"] as Dictionary).has("normalize_energy"), "area light has its size and normalization")
@@ -288,6 +364,9 @@ func _check_schema(p_scene: Dictionary) -> void:
 		light_types[light["type"]] = int(light_types.get(light["type"], 0)) + 1
 	for approximation: Dictionary in p_scene["approximations"]:
 		_check(Lib.APPROXIMATIONS.has(String(approximation["id"])) and not (approximation["items"] as Array).is_empty(), "approximation %s is known and names its items" % approximation["id"])
+	var approximations := _approximations(p_scene)
+	_check(PackedStringArray(approximations.get("light_cull_mask", [])) == unlit_lights, "light_cull_mask names every light that lights no placed layer (%s)" % unlit_lights)
+	_check(PackedStringArray(approximations.get("translucent_shadow", [])) == translucent_casters, "translucent_shadow names every shadow-casting instance with an alpha-blended surface (%s)" % translucent_casters)
 	var checks: Dictionary = p_scene["checks"]
 	_check(int(checks["node_instances"]) == node_count, "checks.node_instances")
 	_check(int(checks["multimesh_instances"]) == multimesh_count, "checks.multimesh_instances")
@@ -363,8 +442,8 @@ func _check_kitbash(p_scene: Dictionary) -> void:
 
 
 ## The yard (#233): sun and 64 local lights, the 20-layer caster-mask matrix, two alpha-scissor
-## foliage cards and three alpha-blended glass panes, exported with the diffuse_mode and
-## shadow_caster_mask approximations.
+## foliage cards and three alpha-blended glass panes, exported with the diffuse_mode,
+## shadow_caster_mask and translucent_shadow approximations.
 func _check_yard(p_scene: Dictionary) -> void:
 	var checks: Dictionary = p_scene["checks"]
 	_check(int(checks["node_instances"]) == 34 and int(checks["multimesh_instances"]) == 0, "the ground, 20 occluders, 2 foliage cards, 3 glass panes and 8 pillars (%d)" % int(checks["node_instances"]))
@@ -388,9 +467,10 @@ func _check_yard(p_scene: Dictionary) -> void:
 			matrix.append(node)
 			_check(int(light["properties"]["shadow_caster_mask"]) == 1 << int(node.trim_prefix("MatrixLight")), "%s keeps its caster mask in its properties" % node)
 	var approximations := _approximations(p_scene)
-	_check(approximations.keys() == ["diffuse_mode", "shadow_caster_mask"], "the yard needs diffuse_mode and shadow_caster_mask (%s)" % [approximations.keys()])
+	_check(approximations.keys() == ["diffuse_mode", "shadow_caster_mask", "translucent_shadow"], "the yard needs diffuse_mode, shadow_caster_mask and translucent_shadow (%s)" % [approximations.keys()])
 	_check(PackedStringArray(approximations.get("shadow_caster_mask", [])) == matrix, "shadow_caster_mask names the 20 matrix lights")
 	_check((approximations.get("diffuse_mode", []) as Array).size() == 5, "diffuse_mode names the 2 foliage and 3 glass materials")
+	_check(PackedStringArray(approximations.get("translucent_shadow", [])) == PackedStringArray(["YardGlass0", "YardGlass1", "YardGlass2"]), "translucent_shadow names the 3 glass panes")
 	var masked := 0
 	var translucent := 0
 	for material: Dictionary in p_scene["materials"]:
@@ -407,7 +487,8 @@ func _check_yard(p_scene: Dictionary) -> void:
 
 ## MegaLights Hall at --lights=1024 (#233): 64 base lights (42 points, 8 spots, 8 rects of which
 ## 4 textured, 4 IES projector spots, 2 lighting-channel omnis) plus 960 spawned omnis, the sun,
-## volumetric fog, glass and foliage, with the diffuse_mode and light_projector approximations.
+## volumetric fog, glass and foliage, with the diffuse_mode, light_cull_mask, light_projector and
+## translucent_shadow approximations.
 func _check_hall(p_scene: Dictionary) -> void:
 	var checks: Dictionary = p_scene["checks"]
 	_check(_int_counts(checks["light_types"]) == {"directional": 1, "omni": 1004, "spot": 12, "area": 8}, "the sun and 1,024 local lights (%s)" % checks["light_types"])
@@ -430,8 +511,10 @@ func _check_hall(p_scene: Dictionary) -> void:
 	_check(projectors == PackedStringArray(["Lights/Ies00", "Lights/Ies01", "Lights/Ies02", "Lights/Ies03"]), "the four IES spots carry their projector")
 	_check(textured_areas == 4, "four textured rect lights")
 	var approximations := _approximations(p_scene)
-	_check(approximations.keys() == ["diffuse_mode", "light_projector"], "the hall needs diffuse_mode and light_projector (%s)" % [approximations.keys()])
+	_check(approximations.keys() == ["diffuse_mode", "light_cull_mask", "light_projector", "translucent_shadow"], "the hall needs diffuse_mode, light_cull_mask, light_projector and translucent_shadow (%s)" % [approximations.keys()])
 	_check(PackedStringArray(approximations.get("light_projector", [])) == projectors, "light_projector names the four IES spots")
+	_check(PackedStringArray(approximations.get("light_cull_mask", [])) == PackedStringArray(["Lights/ChannelLight0", "Lights/ChannelLight1"]), "light_cull_mask names the two lighting-channel omnis")
+	_check(PackedStringArray(approximations.get("translucent_shadow", [])) == PackedStringArray(["FrontGlass0", "FrontGlass1", "FrontGlass2", "FrontGlass3"]), "translucent_shadow names the 4 glass panes")
 	_check(bool(p_scene["environment"]["properties"]["volumetric_fog_enabled"]), "the environment's volumetric fog is carried")
 	var masked := 0
 	var translucent := 0
@@ -475,7 +558,7 @@ func _check_textures(p_dir: String, p_scene: Dictionary) -> void:
 		materials[String(material["id"])] = material
 	var shell := (load(_scene_path) as PackedScene).instantiate()
 	shell.set_meta("skip_runtime", true)
-	var compared := 0
+	var compared := {}
 	for instance: Dictionary in p_scene["instances"]:
 		var node := shell.get_node_or_null(NodePath(String(instance["node"]))) as MeshInstance3D
 		if node == null or instance["kind"] != "node":
@@ -486,19 +569,23 @@ func _check_textures(p_dir: String, p_scene: Dictionary) -> void:
 			if source == null or source.albedo_texture == null:
 				_check(material.get("albedo_texture") == null, "%s surface %d has no texture" % [instance["node"], surface])
 				continue
-			compared += 1
+			compared[String(material.get("albedo_texture", ""))] = true
 			_check(files.get(String(material.get("albedo_texture", "")), PackedByteArray()) == _source_png(source.albedo_texture), "%s surface %d texture is the scene's" % [instance["node"], surface])
 	for light: Dictionary in p_scene["lights"]:
 		var node := shell.get_node_or_null(NodePath(String(light["node"]))) as Light3D
 		if node == null:
 			continue
 		if node.light_projector != null:
-			compared += 1
+			compared[String(light["projector"])] = true
 			_check(files.get(String(light["projector"]), PackedByteArray()) == _source_png(node.light_projector), "%s projector is the scene's" % light["node"])
 		if node is AreaLight3D and (node as AreaLight3D).area_texture != null:
-			compared += 1
+			compared[String(light["area"]["texture"])] = true
 			_check(files.get(String(light["area"]["texture"]), PackedByteArray()) == _source_png((node as AreaLight3D).area_texture), "%s rect texture is the scene's" % light["node"])
-	_check(compared >= (p_scene["textures"] as Array).size(), "every texture was compared with its source (%d comparisons)" % compared)
+	var compared_ids: Array = compared.keys()
+	compared_ids.sort()
+	var texture_ids: Array = files.keys()
+	texture_ids.sort()
+	_check(compared_ids == texture_ids, "every texture was compared with its source (%s of %s)" % [compared_ids, texture_ids])
 	shell.free()
 
 

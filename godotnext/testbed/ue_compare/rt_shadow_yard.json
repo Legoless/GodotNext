@@ -31,7 +31,7 @@
 		"path_frames": 1,
 		"fps": 60,
 		"args": ["-dx12", "-sm6"],
-		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100"],
+		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100", "sg.ShadowQuality 2"],
 		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
 		"ok_exit_codes": [0],
 		"timeout_minutes": 15

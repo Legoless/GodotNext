@@ -441,8 +441,11 @@ func _add_mesh_instance(p_node: MeshInstance3D) -> void:
 	if id.is_empty():
 		return
 	var materials: Array = []
+	var sources: Array = []
 	for surface in mesh.get_surface_count():
-		materials.append(_material_id(p_node.get_active_material(surface)))
+		sources.append(p_node.get_active_material(surface))
+		materials.append(_material_id(sources[-1]))
+	_check_translucent_shadow(p_node, sources)
 	var transform := p_node.global_transform
 	_instances.append({
 		"kind": "node",
@@ -472,9 +475,12 @@ func _add_multimesh(p_node: MultiMeshInstance3D) -> void:
 	if id.is_empty():
 		return
 	var materials: Array = []
+	var sources: Array = []
 	for surface in multimesh.mesh.get_surface_count():
 		var material := p_node.material_override if p_node.material_override != null else multimesh.mesh.surface_get_material(surface)
+		sources.append(material)
 		materials.append(_material_id(material))
+	_check_translucent_shadow(p_node, sources)
 	var count := multimesh.instance_count
 	if multimesh.visible_instance_count >= 0:
 		count = mini(count, multimesh.visible_instance_count)
@@ -644,6 +650,15 @@ func _texture_id(p_texture: Texture2D, p_usage: String) -> Variant:
 	return id
 
 
+## An instance that casts shadows with an alpha-blended surface needs translucent_shadow: Godot
+## draws no shadow for it, and the UE import keeps the instance's Cast Shadow on.
+func _check_translucent_shadow(p_node: GeometryInstance3D, p_materials: Array) -> void:
+	for material: Variant in p_materials:
+		if Lib.translucent_shadow(material as Material, p_node.cast_shadow):
+			_need_approximation("translucent_shadow", str(_scene.get_path_to(p_node)))
+			return
+
+
 func _need_approximation(p_id: String, p_item: String) -> void:
 	if not _approximation_items.has(p_id):
 		_approximation_items[p_id] = []
@@ -695,8 +710,9 @@ func _add_light(p_light: Light3D) -> void:
 
 
 ## The light masks against the layers the placed instances use. A cull mask that lights every
-## placed layer or none of them is carried (the UE import gives a light that lights none its own
-## lighting channel); one that lights some of them is not exported yet. A shadow caster mask that
+## placed layer is carried. One that lights none of them is an approximation
+## (APPROXIMATIONS.light_cull_mask): the UE import's lighting channel does not keep it off the
+## Static meshes. One that lights some of them is not exported yet. A shadow caster mask that
 ## leaves out a placed layer has no UE equivalent (APPROXIMATIONS.shadow_caster_mask).
 func _resolve_light_masks() -> void:
 	for pair: Array in _light_nodes:
@@ -706,6 +722,8 @@ func _resolve_light_masks() -> void:
 		entry["cull_mask_effect"] = cull
 		if cull == "some":
 			_unsupported.append("%s: a light cull mask that lights some of the placed layers but not all (not exported yet)" % entry["node"])
+		elif cull == "none":
+			_need_approximation("light_cull_mask", String(entry["node"]))
 		var caster := Lib.mask_effect(light.shadow_caster_mask, _layers_in_use) if light.shadow_enabled else "all"
 		entry["caster_mask_effect"] = caster
 		if caster != "all":

@@ -31,7 +31,7 @@
 		"path_frames": 1,
 		"fps": 60,
 		"args": ["-dx12", "-sm6"],
-		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100", "r.RDG.AsyncCompute 0"],
+		"exec_cmds": ["r.ScreenPercentage 100", "sg.ResolutionQuality 100", "sg.ShadowQuality 2", "r.RDG.AsyncCompute 0"],
 		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch"],
 		"ok_exit_codes": [0],
 		"timeout_minutes": 15
@@ -42,10 +42,11 @@
 			"name": "MegaLights total at 1,024 lights (M-1 to M-6 plus M-8)",
 			"gates": ["GM-2"],
 			"status": "ue_bar",
+			"reason": "Provisional UE group: GPU/MegaLights alone, while GM-2's GodotNext total is M-1 to M-6 plus M-8. The same captures report GPU/LightGrid, GPU/VolumetricFog, GPU/TranslucentLighting, GPU/Translucency and GPU/MegaLightsLightPowerDelta as separate columns, and the port leaves MegaLights front-layer translucency at its default. Which UE columns match M-1 and M-8, and that setting, wait for the lead and the settings record (plan §23.5).",
 			"statistic": "p95",
 			"direction": "lower",
 			"godotnext": null,
-			"ue": { "group": "MegaLights", "columns": ["GPU/MegaLights"] }
+			"ue": { "group": "MegaLights (provisional)", "columns": ["GPU/MegaLights"] }
 		},
 		{
 			"id": "gpu_pass_sum",

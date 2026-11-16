@@ -115,6 +115,24 @@ const APPROXIMATIONS := {
 	"diffuse_mode": "A diffuse mode other than Lambert (Godot's Burley default): the UE import builds UE's default-lit diffuse.",
 	"shadow_caster_mask": "A light's shadow caster mask that leaves out placed layers: UE lights have no shadow caster mask, so every placed caster shadows the light.",
 	"light_projector": "A light projector texture: the UE import builds the light without it. Epic's light functions page (UE 5.9) does not say how a light function maps a texture onto a spot light's cone.",
+	"light_cull_mask": "A light whose cull mask lights none of the placed layers: the UE import puts it on its own lighting channel, but Epic's lighting channels page (UE 5.9) says channels do not work with Static-mobility mesh actors, and the import places its meshes Static, so in UE the light lights the placed geometry.",
+	"translucent_shadow": "An alpha-blended surface on an instance that casts shadows: Godot's alpha blending casts no shadow, while the UE import keeps the instance's Cast Shadow on, so in UE the surface shadows the lights.",
+}
+
+## Material properties that change what Godot draws and that the UE import does not build:
+## property -> [the value the format carries, what the refusal names]. Any other value is refused.
+const REFUSED_FLAGS := {
+	"depth_draw_mode": [BaseMaterial3D.DEPTH_DRAW_OPAQUE_ONLY, "a depth draw mode other than opaque only"],
+	"no_depth_test": [false, "no depth test"],
+	"render_priority": [0, "a render priority other than 0"],
+	"proximity_fade_enabled": [false, "proximity fade"],
+	"distance_fade_mode": [BaseMaterial3D.DISTANCE_FADE_DISABLED, "distance fade"],
+	"billboard_mode": [BaseMaterial3D.BILLBOARD_DISABLED, "a billboard mode"],
+	"grow": [false, "grow"],
+	"disable_receive_shadows": [false, "shadow receiving disabled"],
+	"shadow_to_opacity": [false, "shadow to opacity"],
+	"disable_ambient_light": [false, "ambient light disabled"],
+	"disable_fog": [false, "fog disabled"],
 }
 
 ## Texture slots the format carries, and what the UE import builds from them.
@@ -170,6 +188,9 @@ static func material_refusals(p_material: BaseMaterial3D) -> PackedStringArray:
 		found.append("a specular mode other than Schlick-GGX")
 	if p_material.cull_mode == BaseMaterial3D.CULL_FRONT:
 		found.append("front-face culling")
+	for property: String in REFUSED_FLAGS:
+		if p_material.get(property) != REFUSED_FLAGS[property][0]:
+			found.append(String(REFUSED_FLAGS[property][1]))
 	for feature: int in FEATURE_NAMES:
 		if p_material.get_feature(feature):
 			found.append(String(FEATURE_NAMES[feature]))
@@ -195,6 +216,15 @@ static func material_approximations(p_material: BaseMaterial3D) -> PackedStringA
 	if p_material.diffuse_mode != BaseMaterial3D.DIFFUSE_LAMBERT:
 		found.append("diffuse_mode")
 	return found
+
+
+## Whether a surface with this material on an instance with this cast_shadow setting needs the
+## translucent_shadow approximation: Godot's alpha blending (TRANSPARENCY_ALPHA) casts no shadow,
+## and the UE import keeps the instance's Cast Shadow on.
+static func translucent_shadow(p_material: Material, p_cast_shadow: int) -> bool:
+	if p_cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_OFF or not (p_material is BaseMaterial3D):
+		return false
+	return (p_material as BaseMaterial3D).transparency == BaseMaterial3D.TRANSPARENCY_ALPHA
 
 
 ## How a light's layer mask treats the placed geometry: "all" when it keeps every layer the placed

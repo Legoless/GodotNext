@@ -11,12 +11,14 @@
 #    600 frames) into a temporary folder. Each must exit 0 and log no "ERROR:" or "SCRIPT ERROR"
 #    line (a script error inside the exporter would otherwise drop content and still exit 0).
 # 3. check_ue_export.gd, headless, on the two exports (see that script for what it checks).
-# 4. RT Shadow Yard without --approximate must refuse (exit 1) and name the diffuse_mode and
-#    shadow_caster_mask approximations it needs; an unknown --approximate id must exit 2; a run
-#    the engine ends after 3 frames must exit 1 and write nothing.
+# 4. RT Shadow Yard without --approximate must refuse (exit 1) and name the diffuse_mode,
+#    shadow_caster_mask and translucent_shadow approximations it needs; an unknown --approximate id
+#    must exit 2; a run the engine ends after 3 frames must exit 1 and write nothing.
 # 5. Two rendered exports each of RT Shadow Yard (cam_main, --approximate=diffuse_mode,
-#    shadow_caster_mask) and MegaLights Hall at --lights=1024 (cam_main, --approximate=diffuse_mode,
-#    light_projector), 60 frames, then check_ue_export.gd on each pair.
+#    shadow_caster_mask,translucent_shadow) and MegaLights Hall at --lights=1024 (cam_main,
+#    --approximate=diffuse_mode,light_cull_mask,light_projector,translucent_shadow), 60 frames, then
+#    check_ue_export.gd on each pair. The hall without light_cull_mask must refuse (exit 1) and name
+#    it.
 #
 # The exports need a window: on a headless Linux machine set DISPLAY to an X server, as on the
 # cloud L4 VMs (DISPLAY=:0). Exits non-zero when any step fails.
@@ -107,7 +109,7 @@ status=0
 "$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
 	"${yard_args[@]}" --out="$work/yard_refused" >"$work/yard_refused.log" 2>&1 || status=$?
 report yard_refused "$status" 1 "$work/yard_refused.log"
-for id in diffuse_mode shadow_caster_mask; do
+for id in diffuse_mode shadow_caster_mask translucent_shadow; do
 	if ! grep -q -- "--approximate=$id" "$work/yard_refused.log"; then
 		echo "run_ue_export_check.sh: the refused yard export does not name --approximate=$id" >&2
 		failures=$((failures + 1))
@@ -122,17 +124,28 @@ report yard_unknown_approximation "$status" 2 "$work/yard_bad.log"
 # --frames limit would) must exit 1, say so and write nothing.
 status=0
 "$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --quit-after 3 --script res://tools/ue_export/ue_export.gd -- \
-	"${yard_args[@]}" --approximate=diffuse_mode,shadow_caster_mask --out="$work/yard_quit" >"$work/yard_quit.log" 2>&1 || status=$?
+	"${yard_args[@]}" --approximate=diffuse_mode,shadow_caster_mask,translucent_shadow --out="$work/yard_quit" >"$work/yard_quit.log" 2>&1 || status=$?
 report yard_ended_early "$status" 1 "$work/yard_quit.log"
 if ! grep -q 'tree quit at camera row' "$work/yard_quit.log" || [[ -e "$work/yard_quit/scene.json" ]]; then
 	echo "run_ue_export_check.sh: the run that ended early did not say so, or wrote scene.json" >&2
 	failures=$((failures + 1))
 fi
 
-export_pair yard "${yard_args[@]}" --approximate=diffuse_mode,shadow_caster_mask
+export_pair yard "${yard_args[@]}" --approximate=diffuse_mode,shadow_caster_mask,translucent_shadow
 check yard
-export_pair hall --scene=res://scenes/mega_lights_hall/mega_lights_hall.tscn --camera=cam_main --lights=1024 \
-	--warmup=0 --frames=60 --approximate=diffuse_mode,light_projector
+
+# The hall's two lighting-channel lights light no placed layer: without light_cull_mask the export
+# must refuse and name it.
+hall_args=(--scene=res://scenes/mega_lights_hall/mega_lights_hall.tscn --camera=cam_main --lights=1024 --warmup=0 --frames=60)
+status=0
+"$godot" --audio-driver Dummy --path "$testbed_dir" ${godot_args[@]+"${godot_args[@]}"} --script res://tools/ue_export/ue_export.gd -- \
+	"${hall_args[@]}" --approximate=diffuse_mode,light_projector,translucent_shadow --out="$work/hall_refused" >"$work/hall_refused.log" 2>&1 || status=$?
+report hall_refused "$status" 1 "$work/hall_refused.log"
+if ! grep -q -- "--approximate=light_cull_mask" "$work/hall_refused.log" || [[ -e "$work/hall_refused/scene.json" ]]; then
+	echo "run_ue_export_check.sh: the refused hall export does not name --approximate=light_cull_mask, or wrote scene.json" >&2
+	failures=$((failures + 1))
+fi
+export_pair hall "${hall_args[@]}" --approximate=diffuse_mode,light_cull_mask,light_projector,translucent_shadow
 check hall
 
 if [[ "$failures" -ne 0 ]]; then

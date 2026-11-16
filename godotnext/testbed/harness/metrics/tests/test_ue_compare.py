@@ -171,8 +171,15 @@ def test_the_lights_and_shadows_configs(name: str, line_id: str, gate: str, ligh
     assert line.godotnext is None
     cvars = config.ue.checked_cvars()
     assert cvars["r.ScreenPercentage"] == "100"
-    # Epic's MegaLights page: Stat GPU timings are distorted by async compute until r.RDG.AsyncCompute 0.
-    assert ("r.RDG.AsyncCompute" in cvars) == (lights is not None)
+    # Plan §21.3.3: these scenes run at the High preset. The settings record ties SMRT, the VSM pool,
+    # volumetric fog and MegaLights to the Shadow scalability group, so the set pins it at High
+    # and the report checks the echoed value.
+    assert cvars["sg.ShadowQuality"] == "2"
+    # Epic's MegaLights page: Stat GPU timings are distorted by async compute until
+    # r.RDG.AsyncCompute 0. Only GM-2 is a GPU-pass line; GM-5 times the render thread.
+    assert cvars.get("r.RDG.AsyncCompute") == ("0" if gate == "GM-2" else None)
+    # GM-2's UE group is provisional until the lead maps M-1 and M-8 (§23.5); the report prints why.
+    assert ("Provisional" in line.reason) == (gate == "GM-2")
 
 
 def test_godotnext_timing_arguments() -> None:
