@@ -333,6 +333,8 @@ def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: i
     # GN-6 compares against Nanite tessellation, which the UE map does not run yet.
     assert ("tessellation" in line.reason) == (gate == "GN-6")
     assert ("Nanite Foliage" in line.reason) == (gate == "GN-7")
+    # The foliage row's Preserve Area is neither set nor read back on the UE side; it stays open.
+    assert ("Preserve Area" in line.reason) == (gate == "GN-7")
     # GN-13 judges Dense City and Foliage Field together: this set records the Foliage Field half and
     # keeps the UE bar (§23.6); the cross-set sum and the GodotNext group are not defined yet.
     render = [line for line in config.lines if line.gates == ("GN-13",)]

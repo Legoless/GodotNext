@@ -213,7 +213,14 @@ def make_set(
                 "clock": {"locked": False},
                 "priority": "BelowNormal",
                 "csv": {"token": token, "collected": True},
-                "exit": exit_record or {"code": 0, "csv_exit": True, "log_exit": True, "fatal": False},
+                "exit": exit_record
+                or {
+                    "code": 0,
+                    "csv_exit": True,
+                    "log_exit": True,
+                    "fatal": False,
+                    "material_fallback_lines": 0,
+                },
                 "ue_editor": {"product_version": BUILD},
                 "gpu_after": {"clocks_gr_mhz": 2610, "clocks_mem_mhz": 11501, "temperature_c": 45},
             }
@@ -381,6 +388,13 @@ def test_only_a_clean_game_mode_exit_with_this_launchs_capture_counts(tmp_path: 
         build_report(
             make_set(tmp_path / "fatal", exit_record={"code": 0, "csv_exit": True, "fatal": True}), judge=False
         )
+    # A clean exit whose log reports a material without its usage flag (or the default material in
+    # its place) is refused too, and so is a runner record without that count.
+    clean: dict[str, object] = {"code": 0, "csv_exit": True, "log_exit": True, "fatal": False}
+    with pytest.raises(ComparisonError, match="without its usage flag"):
+        build_report(make_set(tmp_path / "fallback", exit_record={**clean, "material_fallback_lines": 2}), judge=False)
+    with pytest.raises(ComparisonError, match="material_fallback_lines None"):
+        build_report(make_set(tmp_path / "nocount", exit_record=clean), judge=False)
     with pytest.raises(ComparisonError, match="csvMetadata token"):
         build_report(make_set(tmp_path / "token", wrong_token=True), judge=False)
     with pytest.raises(ComparisonError, match="not editor_game"):

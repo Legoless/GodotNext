@@ -56,10 +56,12 @@
 # The runner waits for the editor process only, never for the processes it leaves running (its
 # derived-data server and crash handler stay up after a game-mode exit and are shared), and on a
 # timeout stops that one process by its id. A run that exits 0 counts only when the log it wrote
-# with -abslog=<out>\ue.log shows the CSV profiler's exit request and no fatal error (exit 7
-# otherwise); runner_job.json records those booleans, the editor's version, its observed priority
-# and the GPU clocks and temperature after the run. The editor's stdout and stderr are not
-# redirected (its derived-data server would inherit the handles and outlive it); its log is ue.log.
+# with -abslog=<out>\ue.log shows the CSV profiler's exit request, no fatal error and no line that
+# reports a material without its usage flag or the default material in its place (exit 7
+# otherwise); runner_job.json records those booleans, that line count, the editor's version, its
+# observed priority and the GPU clocks and temperature after the run. The editor's stdout and
+# stderr are not redirected (its derived-data server would inherit the handles and outlive it); its
+# log is ue.log.
 #
 # Kind "timing" requires the High performance (or Ultimate Performance) power plan. Kind
 # "validation" sets NV_ALLOW_RAYTRACING_VALIDATION=1 and VK_KHRONOS_VALIDATION_VALIDATE_SYNC=1.
@@ -71,7 +73,8 @@
 # The output directory gets run.log (stdout, then stderr), done.json and runner_job.json.
 # Exit codes: the engine's, or 2 for a bad job, 3 for a timeout, 4 when the task could not start,
 # 5 when a UE job did not leave exactly one tagged CSV profile, 6 when exclusive_gpu found another
-# engine process, 7 when a UE run exited 0 without the CSV profiler's exit or with a fatal error.
+# engine process, 7 when a UE run exited 0 without the CSV profiler's exit, with a fatal error or
+# with a material fallback line.
 
 param(
 	[Parameter(Mandatory = $true)][string]$JobFile
@@ -179,6 +182,16 @@ function Find-TaggedCsvProfiles([string]$Directory, [string]$Token, [datetime]$S
 		}
 	}
 	return $found
+}
+
+# The number of lines in a UE log that report a material without its usage flag or the default
+# material drawn in its place. Epic's Material Properties page (UE 5.9, Usage): "If you do not have
+# the appropriate usage flag set, the default world grid material will be used in-game instead. This
+# will have an appropriate message in the log of the game client." Content drawn that way leaves its
+# own passes (a Nanite mesh then draws in the base pass, for example) while the run still exits
+# cleanly. Case-insensitive; only the count is kept.
+function Measure-UeMaterialFallbackLines([string]$Path) {
+	return @(Select-String -LiteralPath $Path -Pattern 'usage flag|default ?material').Count
 }
 
 # The device table of fleet.md: name -> Session-1 Vulkan and D3D12 --gpu-index, nvidia-smi index.
@@ -754,8 +767,9 @@ function ConvertTo-GpuAfter([string]$Text) {
 	return [ordered]@{ clocks_gr_mhz = [double]::Parse($cells[0], $culture); clocks_mem_mhz = [double]::Parse($cells[1], $culture); temperature_c = [double]::Parse($cells[2], $culture); throttle_reasons = $cells[3] }
 }
 
-# A UE job: move the one CSV profile tagged with this launch's token, read the exit markers from the
-# log it wrote, and record them in runner_job.json (UE writes no manifest). Only booleans and counts
+# A UE job: move the one CSV profile tagged with this launch's token, read the exit markers and the
+# material fallback count from the log it wrote, and record them in runner_job.json (UE writes no
+# manifest). Only booleans and counts
 # are recorded; no UE log text leaves the output directory.
 $csvProblem = ''
 $exitProblem = ''
@@ -769,15 +783,18 @@ if ($ueJob) {
 		$csvProblem = "the UE run left $($tagged.Count) CSV profiles tagged $csvToken; expected one"
 	}
 	$ueLog = Join-Path $outDir 'ue.log'
-	$exitRecord = [ordered]@{ code = [long]$done.exit_code; log = $false; csv_exit = $false; log_exit = $false; fatal = $null; children_alive_after = @($done.children) }
+	$exitRecord = [ordered]@{ code = [long]$done.exit_code; log = $false; csv_exit = $false; log_exit = $false; fatal = $null; material_fallback_lines = $null; children_alive_after = @($done.children) }
 	if (Test-Path -LiteralPath $ueLog) {
 		$exitRecord.log = $true
 		$exitRecord.csv_exit = [bool](Select-String -LiteralPath $ueLog -SimpleMatch 'CsvProfiler.ExitAfterCsvProfiling' -Quiet)
 		$exitRecord.log_exit = [bool](Select-String -LiteralPath $ueLog -SimpleMatch 'LogExit: Exiting.' -Quiet)
 		$exitRecord.fatal = [bool](Select-String -LiteralPath $ueLog -Pattern 'Fatal error|=== Critical error ===|Unhandled Exception' -Quiet)
+		$exitRecord.material_fallback_lines = Measure-UeMaterialFallbackLines $ueLog
 	}
 	if (-not $exitRecord.csv_exit -or $exitRecord.fatal -ne $false) {
 		$exitProblem = "the UE run did not end through -ExitAfterCsvProfiling or logged a fatal error (csv_exit $($exitRecord.csv_exit), fatal $($exitRecord.fatal))"
+	} elseif ($exitRecord.material_fallback_lines -ne 0) {
+		$exitProblem = "the UE log has $($exitRecord.material_fallback_lines) line(s) reporting a material without its usage flag or the default material in its place, so some content did not draw as imported"
 	}
 	$runnerJob['csv'] = $csvRecord
 	$runnerJob['exit'] = $exitRecord

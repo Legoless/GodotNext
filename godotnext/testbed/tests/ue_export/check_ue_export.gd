@@ -1123,8 +1123,14 @@ func _check_foliage(p_scene: Dictionary) -> void:
 		_check(off == 0, "every %s placement is the generator's seeded transform (%d differ)" % [node, off])
 		var ids: Array = instance["materials"]
 		_check(ids.size() == int(surfaces.get(String(instance["mesh"]), -1)) and ids.size() == (2 if node == "Trees" else 1), "%s has one material per surface (%d)" % [node, ids.size()])
+		# The node's override, not the mesh's own surface materials (which are null, and so export as
+		# "default"): every surface's material has the generator's override settings.
+		var source: StandardMaterial3D = BuildPn.tree_material() if node == "Trees" else BuildPn.grass_material()
 		for id: String in ids:
-			_check(id == String(ids[0]), "%s draws every surface with its material override (%s)" % [node, ids])
+			var drawn_material: Dictionary = materials.get(id, {})
+			var drawn: Dictionary = drawn_material.get("properties", {})
+			var is_override := id != "default" and id == String(ids[0]) and is_equal_approx(float(drawn.get("roughness", -1.0)), source.roughness) and int(drawn.get("transparency", -1)) == source.transparency and int(drawn.get("cull_mode", -1)) == source.cull_mode
+			_check(is_override, "%s draws every surface with its material override (%s)" % [node, ids])
 			masked[id] = true
 		var material: Dictionary = materials.get(String(ids[0]) if not ids.is_empty() else "", {})
 		_check(String(material.get("blend", "")) == "masked" and bool(material.get("two_sided", false)) and is_equal_approx(float(material.get("alpha_scissor_threshold", 0.0)), 0.5), "%s is masked, two-sided and clipped at 0.5" % node)

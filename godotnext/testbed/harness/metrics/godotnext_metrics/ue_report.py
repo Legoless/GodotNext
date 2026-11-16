@@ -384,6 +384,14 @@ def _check_ue_run(
             f"run {name}: the UE run did not end cleanly through -ExitAfterCsvProfiling"
             f" (csv_exit {exit_record.get('csv_exit')}, fatal {exit_record.get('fatal')})"
         )
+    # The runner counts the log lines that report a material without its usage flag or the default
+    # material in its place (content that did not draw as imported); only 0 counts.
+    fallback = exit_record.get("material_fallback_lines")
+    if type(fallback) is not int or fallback != 0:
+        raise ComparisonError(
+            f"run {name}: the UE log reports a material without its usage flag or the default material"
+            f" in its place (material_fallback_lines {fallback}), so the capture is not of the imported content"
+        )
     expected = {
         "gpu": config.device,
         "rhiname": ue.rhi,
