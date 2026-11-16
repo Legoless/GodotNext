@@ -36,6 +36,9 @@ TEST_FORCE_LINK(test_virtual_shadow_maps)
 #include "core/math/random_pcg.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
+#include <cmath>
+#include <cstring>
+
 // GodotNext: vsm_page_pool (#220, plan §21.3 contract S2). The Virtual Shadow Map core without a GPU:
 // the sizes and budget V6, the entry format, map allocation and its leaks, the clipmap math and
 // the CPU model of the page lookup. godotnext/testbed/tests/vsm/page_table.gd compares the GPU
@@ -122,6 +125,669 @@ void fill_light(TestVSMStorage &r_storage, RID p_light, uint32_t p_page) {
 			entries[i] = VSM::entry_pack(p_page, p_page, VSM::ENTRY_ALLOCATED);
 		}
 	}
+}
+
+// GodotNext: vsm_page_marking (#219, plan §21.3 contract S3). The CPU models of the page marking and
+// allocation passes. godotnext/testbed/tests/vsm/page_marking.gd compares the GPU passes with them.
+
+TEST_CASE("[VSM] Marking and allocation constants and their GLSL defines") {
+	CHECK(VSM::COARSE_FIRST_MIP == VSM::MIP_COUNT - 2);
+	CHECK(VSM::OVERFLOW_MAX_BIAS == 3);
+	CHECK(VSM::OVERFLOW_DECAY_FRAMES == 30);
+	for (uint32_t quality = 0; quality < VSM::POOL_QUALITY_MAX; quality++) {
+		const uint32_t frames = VSM::cache_frames(VSM::PoolQuality(quality));
+		CHECK(frames > 0);
+		CHECK(frames <= VSM::MAX_CACHE_FRAMES);
+		CHECK(VSM::request_capacity(VSM::pool_quality_pages(VSM::PoolQuality(quality))) >= VSM::pool_quality_pages(VSM::PoolQuality(quality)));
+	}
+	CHECK(VSM::request_capacity(1) == VSM::REQUEST_LIST_MIN);
+	// A clipmap level 0 texel is 2^CLIPMAP_TEXEL0_EXPONENT meters.
+	CHECK(std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT) == VSM::CLIPMAP_LEVEL0_EXTENT / float(VSM::VIRTUAL_SIZE));
+	const String defines = VSM::get_glsl_defines();
+	CHECK(defines.contains("#define VSM_COARSE_FIRST_MIP 5u"));
+	CHECK(defines.contains("#define VSM_CLIPMAP_TEXEL0_EXPONENT (-10)"));
+	CHECK(defines.contains("#define VSM_MAP_KIND_NONE 4u"));
+	CHECK(defines.contains("#define VSM_STATE_SINK 16u"));
+	CHECK(defines.contains("#define VSM_STATE_TOTAL_OVERFLOW 32u"));
+	CHECK(defines.contains("#define VSM_MAP_STATE_BIAS 4u"));
+	CHECK(defines.contains("#define VSM_INDIRECT_ALL 6u"));
+	CHECK(defines.contains("#define VSM_STATE_BIAS_FRAME " + itos(VSM::STATE_BIAS_FRAME) + "u"));
+	CHECK(defines.contains("#define VSM_OVERFLOW_BIAS_RAISED 65536u"));
+	CHECK(VSM::STATE_BIAS_FRAME < VSM::STATE_BUCKETS);
+	CHECK(defines.contains("#define VSM_ENTRY_DIRTY_MASK " + itos(VSM::ENTRY_DIRTY_MASK) + "u"));
+}
+
+TEST_CASE("[VSM] Map data: clipmap levels differ by exact powers of two and faces cover their lights") {
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-50.0f), Math::deg_to_rad(30.0f), 0.0f));
+	const VSM::MapData level0 = VSM::map_data_clipmap(sun, 0, Vector2i(-32, -32), 100.0f);
+	CHECK(level0.kind == VSM::MAP_KIND_DIRECTIONAL);
+	CHECK(level0.texel_scale == std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT));
+	for (uint32_t level = 1; level < VSM::CLIPMAP_MAX_LEVELS; level++) {
+		const VSM::MapData data = VSM::map_data_clipmap(sun, level, Vector2i(), 100.0f);
+		CHECK(data.texel_scale == std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT + int32_t(level)));
+		for (int row = 0; row < 2; row++) {
+			for (int column = 0; column < 3; column++) {
+				CHECK(data.rows[row][column] == std::ldexp(level0.rows[row][column], -int32_t(level)));
+			}
+		}
+	}
+	// So a level's texel is level 0's divided by 2^level with no rounding, for any point.
+	RandomPCG rng(219);
+	uint32_t level_texel_mismatches = 0;
+	for (uint32_t i = 0; i < 4096; i++) {
+		const Vector3 world(rng.randf() * 600.0f - 300.0f, rng.randf() * 60.0f - 5.0f, rng.randf() * 600.0f - 300.0f);
+		const Vector2i texel0 = VSM::clipmap_texel0(level0, world);
+		const uint32_t level = rng.rand(VSM::CLIPMAP_MAX_LEVELS);
+		const VSM::MapData data = VSM::map_data_clipmap(sun, level, Vector2i(), 100.0f);
+		level_texel_mismatches += VSM::clipmap_texel0(data, world) != VSM::clipmap_level_texel(texel0, level) ? 1 : 0;
+	}
+	CHECK(level_texel_mismatches == 0);
+
+	// Omni faces see every direction; area faces every direction in front of the light, none behind.
+	const Transform3D light(Basis::from_euler(Vector3(0.3f, -0.7f, 0.2f)), Vector3(3.0f, 2.0f, -1.0f));
+	VSM::MapData omni[6];
+	VSM::MapData area[5];
+	for (uint32_t face = 0; face < 6; face++) {
+		omni[face] = VSM::map_data_face(VSM::MAP_KIND_OMNI, face, light, 10.0f, 0.0f);
+		CHECK(Math::is_equal_approx(omni[face].texel_scale, 2.0f / float(VSM::VIRTUAL_SIZE)));
+	}
+	for (uint32_t face = 0; face < 5; face++) {
+		area[face] = VSM::map_data_face(VSM::MAP_KIND_AREA, face, light, 10.0f, 0.0f);
+	}
+	uint32_t omni_missed = 0;
+	uint32_t area_missed = 0;
+	uint32_t area_behind = 0;
+	const Vector3 front = -light.basis.get_column(2).normalized();
+	for (uint32_t i = 0; i < 4096; i++) {
+		const Vector3 direction = Vector3(rng.randf() * 2.0f - 1.0f, rng.randf() * 2.0f - 1.0f, rng.randf() * 2.0f - 1.0f).normalized();
+		const Vector3 point = light.origin + direction * (0.5f + rng.randf() * 9.0f);
+		float w = 0.0f;
+		uint32_t x = 0;
+		uint32_t y = 0;
+		bool in_omni = false;
+		for (const VSM::MapData &data : omni) {
+			in_omni = in_omni || VSM::face_texel(data, point, w, x, y);
+		}
+		omni_missed += in_omni ? 0 : 1;
+		bool in_area = false;
+		for (const VSM::MapData &data : area) {
+			in_area = in_area || VSM::face_texel(data, point, w, x, y);
+		}
+		const float facing = direction.dot(front);
+		if (facing > 0.01f) {
+			area_missed += in_area ? 0 : 1;
+		} else if (facing < -0.71f) {
+			area_behind += in_area ? 1 : 0; // Only the back face's cone is uncovered.
+		}
+	}
+	CHECK(omni_missed == 0);
+	CHECK(area_missed == 0);
+	CHECK(area_behind == 0);
+
+	// A spot's map: the axis lands in the map's center, its texel at 1 m is 2 tan(angle) / 4096 m.
+	const Transform3D spot(Basis(), Vector3(0.0f, 4.0f, 0.0f));
+	const VSM::MapData spot_map = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot, 20.0f, 30.0f);
+	float w = 0.0f;
+	uint32_t x = 0;
+	uint32_t y = 0;
+	CHECK(VSM::face_texel(spot_map, Vector3(0.0f, 4.0f, -2.0f), w, x, y));
+	CHECK(Math::is_equal_approx(w, 2.0f));
+	CHECK(x == VSM::VIRTUAL_SIZE / 2);
+	CHECK(y == VSM::VIRTUAL_SIZE / 2);
+	CHECK(Math::is_equal_approx(spot_map.texel_scale, float(2.0 * Math::tan(Math::deg_to_rad(30.0))) / float(VSM::VIRTUAL_SIZE)));
+	CHECK_FALSE(VSM::face_texel(spot_map, Vector3(0.0f, 4.0f, 2.0f), w, x, y)); // Behind the light.
+	CHECK_FALSE(VSM::face_texel(spot_map, Vector3(5.0f, 4.0f, -2.0f), w, x, y)); // Outside the cone's frustum.
+}
+
+TEST_CASE("[VSM] The mip a request takes: at most one shadow texel per pixel footprint") {
+	// float_exponent() is floor(log2()).
+	CHECK(VSM::float_exponent(1.0f) == 0);
+	CHECK(VSM::float_exponent(1.99f) == 0);
+	CHECK(VSM::float_exponent(2.0f) == 1);
+	CHECK(VSM::float_exponent(0.75f) == -1);
+	CHECK(VSM::float_exponent(std::ldexp(1.0f, -10)) == -10);
+	CHECK(VSM::float_exponent(0.0f) == -127);
+	// Faces: the coarsest mip whose texel is not larger than the footprint, clamped to the chain.
+	CHECK(VSM::face_mip(1.0f, 0.5f) == 0);
+	CHECK(VSM::face_mip(1.0f, 1.0f) == 0);
+	CHECK(VSM::face_mip(1.0f, 1.99f) == 0);
+	CHECK(VSM::face_mip(1.0f, 2.0f) == 1);
+	CHECK(VSM::face_mip(1.0f, 7.9f) == 2);
+	CHECK(VSM::face_mip(1.0f, 1.0e6f) == VSM::MIP_COUNT - 1);
+	RandomPCG rng(2190);
+	uint32_t too_coarse = 0;
+	uint32_t too_fine = 0;
+	for (uint32_t i = 0; i < 65536; i++) {
+		const float texel0 = 1.0e-4f + rng.randf() * 0.01f;
+		const float footprint = rng.randf() * 0.5f;
+		const uint32_t mip = VSM::face_mip(texel0, footprint);
+		const float texel = texel0 * float(1u << mip);
+		too_coarse += (mip > 0 && texel > footprint) ? 1 : 0;
+		too_fine += (mip + 1 < VSM::MIP_COUNT && texel * 2.0f <= footprint) ? 1 : 0;
+	}
+	CHECK(too_coarse == 0);
+	CHECK(too_fine == 0);
+	CHECK(VSM::biased_mip(2, 3) == 5);
+	CHECK(VSM::biased_mip(5, 3) == VSM::MIP_COUNT - 1);
+	CHECK(VSM::biased_mip(1, -3) == 0);
+	// Clipmaps: level + mip is the exponent of the footprint over a level 0 texel.
+	CHECK(VSM::clipmap_level_mip(std::ldexp(1.0f, -10), 0) == 0);
+	CHECK(VSM::clipmap_level_mip(std::ldexp(1.5f, -10), 0) == 0);
+	CHECK(VSM::clipmap_level_mip(std::ldexp(1.0f, -7), 0) == 3);
+	CHECK(VSM::clipmap_level_mip(std::ldexp(1.0f, -7), 2) == 5);
+	CHECK(VSM::clipmap_level_mip(std::ldexp(1.0f, -12), 0) == -2);
+}
+
+TEST_CASE("[VSM] Lights reach points by range, cone and hemisphere") {
+	VSM::MarkLight omni;
+	omni.kind = VSM::MAP_KIND_OMNI;
+	omni.inv_radius = 0.5f;
+	CHECK(VSM::light_reaches(omni, Vector3(1.9f, 0.0f, 0.0f)));
+	CHECK_FALSE(VSM::light_reaches(omni, Vector3(2.0f, 0.1f, 0.0f)));
+	VSM::MarkLight spot = omni;
+	spot.kind = VSM::MAP_KIND_SPOT;
+	spot.direction = Vector3(0.0f, 0.0f, -1.0f);
+	spot.cos_angle = Math::cos(Math::deg_to_rad(30.0f));
+	CHECK(VSM::light_reaches(spot, Vector3(0.0f, 0.5f, -1.0f))); // 26.6 degrees off the axis.
+	CHECK_FALSE(VSM::light_reaches(spot, Vector3(0.0f, 0.6f, -1.0f))); // 31 degrees.
+	CHECK_FALSE(VSM::light_reaches(spot, Vector3(0.0f, 0.0f, 1.0f))); // Behind.
+	spot.cos_angle = Math::cos(Math::deg_to_rad(120.0f)); // A cone wider than a hemisphere.
+	CHECK(VSM::light_reaches(spot, Vector3(0.0f, 1.0f, 0.3f)));
+	CHECK_FALSE(VSM::light_reaches(spot, Vector3(0.0f, 0.1f, 1.0f)));
+	VSM::MarkLight area = omni;
+	area.kind = VSM::MAP_KIND_AREA;
+	area.direction = Vector3(0.0f, -1.0f, 0.0f);
+	CHECK(VSM::light_reaches(area, Vector3(1.0f, -0.1f, 0.0f)));
+	CHECK_FALSE(VSM::light_reaches(area, Vector3(1.0f, 0.1f, 0.0f)));
+}
+
+TEST_CASE("[VSM] Directional and local requests: levels, mips, overflow bias and coarse pages") {
+	// One directional light (levels 0 to 6 from map 0), one spot (map 7) and an omni light (8 to 13).
+	const uint32_t table_maps = 16;
+	LocalVector<VSM::MapData> maps;
+	maps.resize(table_maps);
+	LocalVector<uint32_t> bias;
+	bias.resize(table_maps);
+	memset(bias.ptr(), 0, table_maps * sizeof(uint32_t));
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f)); // Straight down.
+	const Vector3 camera(0.3f, 2.0f, 0.7f);
+	const Vector2 center(sun.get_column(0).normalized().dot(camera), sun.get_column(1).normalized().dot(camera));
+	for (uint32_t level = 0; level < 7; level++) {
+		maps[level] = VSM::map_data_clipmap(sun, level, VSM::clipmap_level_origin(center, level), 100.0f);
+	}
+	const uint32_t sun_flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 7);
+	LocalVector<uint64_t> requests;
+
+	// A point under the camera with a footprint of exactly one level 0 texel: level 0, mip 0.
+	const Vector3 near_point(0.3f, 0.0f, 0.7f);
+	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, near_point, std::ldexp(1.0f, -10), 0, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] < uint64_t(VSM::ENTRIES_PER_MAP));
+	CHECK(requests[0] < VSM::mip_entry_offset(1));
+	// Footprint 8 level 0 texels: still level 0, mip 3. With overflow bias 2 on level 0: mip 5.
+	requests.clear();
+	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, near_point, std::ldexp(1.0f, -7), 0, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] >= VSM::mip_entry_offset(3));
+	CHECK(requests[0] < VSM::mip_entry_offset(4));
+	bias[0] = 2;
+	requests.clear();
+	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, near_point, std::ldexp(1.0f, -7), 0, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] >= VSM::mip_entry_offset(5));
+	CHECK(requests[0] < VSM::mip_entry_offset(6));
+	bias[0] = 0;
+	// 30 m away: outside levels 0 to 3 (half extents 2 to 16 m), inside level 4 (32 m).
+	requests.clear();
+	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, Vector3(30.3f, 0.0f, 0.7f), std::ldexp(1.0f, -10), 0, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] / VSM::ENTRIES_PER_MAP == 4);
+	// Past the last level: no request.
+	requests.clear();
+	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, Vector3(500.0f, 0.0f, 0.7f), std::ldexp(1.0f, -10), 0, false, requests);
+	CHECK(requests.is_empty());
+	// Coarse: each coarse mip in the finest level whose window holds the point at that mip. Here the
+	// point is in level 0's mip 5 window; mip 6's single page covers an aligned half of each level that
+	// misses this point in every level (origins of -28, -30, -31 and -32 pages).
+	requests.clear();
+	VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, near_point, 1.0f, 0, true, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK((requests[0] & VSM::REQUEST_COARSE) != 0);
+	CHECK(uint32_t(requests[0]) / VSM::ENTRIES_PER_MAP == 0);
+	CHECK(uint32_t(requests[0]) % VSM::ENTRIES_PER_MAP >= VSM::mip_entry_offset(VSM::COARSE_FIRST_MIP));
+	CHECK(uint32_t(requests[0]) % VSM::ENTRIES_PER_MAP < VSM::mip_entry_offset(VSM::COARSE_FIRST_MIP + 1));
+	// The same rule, brute force over the levels, for points around the camera.
+	RandomPCG rng(21900);
+	uint32_t coarse_mismatches = 0;
+	for (uint32_t i = 0; i < 1024; i++) {
+		const Vector3 point(camera.x + rng.randf() * 200.0f - 100.0f, 0.0f, camera.z + rng.randf() * 200.0f - 100.0f);
+		requests.clear();
+		VSM::mark_directional_point(maps.ptr(), table_maps, bias.ptr(), 0, sun_flags, point, 1.0f, 0, true, requests);
+		const Vector2i texel0 = VSM::clipmap_texel0(maps[0], point);
+		uint32_t expected = 0;
+		for (uint32_t mip = VSM::COARSE_FIRST_MIP; mip < VSM::MIP_COUNT; mip++) {
+			for (uint32_t level = 0; level < 7; level++) {
+				const Vector2i level_texel = VSM::clipmap_level_texel(texel0, level);
+				if (VSM::clipmap_in_window(Vector2i(maps[level].origin[0], maps[level].origin[1]), level_texel, mip)) {
+					const Vector2i page = VSM::clipmap_page(level_texel, mip);
+					const uint64_t key = uint64_t(VSM::entry_index(level, mip, uint32_t(page.x), uint32_t(page.y))) | VSM::REQUEST_COARSE;
+					coarse_mismatches += requests.find(key) < 0 ? 1 : 0;
+					expected++;
+					break;
+				}
+			}
+		}
+		coarse_mismatches += requests.size() != expected ? 1 : 0;
+	}
+	CHECK(coarse_mismatches == 0);
+
+	// The spot looks down from 4 m: the point under it, 4 m away, footprint 1 mm: mip 0, as its texel
+	// there is 4 * 2 tan(30) / 4096 = 1.13 mm > 1 mm; footprint 3 mm: mip 1.
+	const Transform3D spot_transform(Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f)), Vector3(0.0f, 4.0f, 0.0f));
+	maps[7] = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_transform, 20.0f, 30.0f);
+	VSM::MarkLight spot;
+	spot.kind = VSM::MAP_KIND_SPOT;
+	spot.inv_radius = 1.0f / 20.0f;
+	spot.map_base = 7;
+	spot.flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), spot, Vector3(0.0f, 0.0f, 0.0f), 0.001f, 0, false, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] >= VSM::ENTRIES_PER_MAP * 7);
+	CHECK(requests[0] < VSM::ENTRIES_PER_MAP * 7 + VSM::mip_entry_offset(1));
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), spot, Vector3(0.0f, 0.0f, 0.0f), 0.003f, 0, false, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] - VSM::ENTRIES_PER_MAP * 7 >= VSM::mip_entry_offset(1));
+	CHECK(requests[0] - VSM::ENTRIES_PER_MAP * 7 < VSM::mip_entry_offset(2));
+	// The configured bias and the map's overflow bias add up, clamped to the last mip.
+	bias[7] = 3;
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), spot, Vector3(0.0f, 0.0f, 0.0f), 0.003f, 4, false, false, requests);
+	REQUIRE(requests.size() == 1);
+	CHECK(requests[0] - VSM::ENTRIES_PER_MAP * 7 == VSM::mip_entry_offset(VSM::MIP_COUNT - 1));
+	bias[7] = 0;
+
+	// An omni light requests one face for a point inside a face, two on an edge between faces.
+	const Transform3D omni_transform(Basis(), Vector3(10.0f, 2.0f, 0.0f));
+	for (uint32_t face = 0; face < 6; face++) {
+		maps[8 + face] = VSM::map_data_face(VSM::MAP_KIND_OMNI, face, omni_transform, 8.0f, 0.0f);
+	}
+	VSM::MarkLight omni;
+	omni.kind = VSM::MAP_KIND_OMNI;
+	omni.map_base = 8;
+	omni.flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6);
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), omni, Vector3(12.0f, 2.3f, 0.1f), 0.01f, 0, false, false, requests);
+	CHECK(requests.size() == 1);
+	CHECK(requests[0] / VSM::ENTRIES_PER_MAP == 8); // The +X face.
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), omni, Vector3(12.0f, 4.0f, 0.0f), 0.01f, 0, false, false, requests);
+	CHECK(requests.size() >= 1); // On the edge of +X and +Y: one face or both, as rounding goes.
+	CHECK(requests.size() <= 2);
+	// A fog point at the light (inside no face): with p_all_faces, every face's coarse pages (5 each).
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), omni, Vector3(10.0f, 2.0f, 0.0f), 0.0f, 0, true, true, requests);
+	CHECK(requests.size() == 6 * 5);
+	requests.clear();
+	VSM::mark_local_point(maps.ptr(), table_maps, bias.ptr(), omni, Vector3(10.0f, 2.0f, 0.0f), 0.0f, 0, true, false, requests);
+	CHECK(requests.is_empty());
+	// Boxes: in front of the spot, its coarse pages; a box the near plane cuts, all of them; a box
+	// outside its frustum, none.
+	// A small box in one quadrant of the spot's map: one page of mip 5, the one page of mip 6.
+	requests.clear();
+	VSM::mark_local_box(maps.ptr(), table_maps, spot, spot_transform.origin, AABB(Vector3(0.5f, 0.0f, -0.7f), Vector3(0.2f, 0.2f, 0.2f)), requests);
+	CHECK(requests.size() == 2);
+	// A box under the light that spans the map's center: all four mip 5 pages and mip 6.
+	requests.clear();
+	VSM::mark_local_box(maps.ptr(), table_maps, spot, spot_transform.origin, AABB(Vector3(-0.5f, 0.0f, -0.5f), Vector3(1.0f, 1.0f, 1.0f)), requests);
+	CHECK(requests.size() == 5);
+	requests.clear();
+	VSM::mark_local_box(maps.ptr(), table_maps, spot, spot_transform.origin, AABB(Vector3(-0.5f, 3.5f, -0.5f), Vector3(1.0f, 1.0f, 1.0f)), requests);
+	CHECK(requests.size() == 5);
+	requests.clear();
+	VSM::mark_local_box(maps.ptr(), table_maps, spot, spot_transform.origin, AABB(Vector3(8.0f, 0.0f, -0.5f), Vector3(1.0f, 1.0f, 1.0f)), requests);
+	CHECK(requests.is_empty());
+	requests.clear();
+	VSM::mark_directional_box(maps.ptr(), table_maps, 0, sun_flags, AABB(Vector3(-0.2f, 0.0f, 0.2f), Vector3(1.0f, 1.0f, 1.0f)), requests);
+	CHECK(requests.size() >= 7); // Every level's mip 5 window holds the box, which is next to the camera.
+	for (uint64_t request : requests) {
+		CHECK((request & VSM::REQUEST_COARSE) != 0);
+	}
+}
+
+namespace {
+
+// A page table of one map and a pool of p_pages pages in a grid of p_width columns.
+struct AllocationFixture {
+	LocalVector<uint32_t> table;
+	LocalVector<VSM::PageRecord> pages;
+	uint32_t width = 4;
+
+	AllocationFixture(uint32_t p_pages, uint32_t p_width) {
+		table.resize(VSM::ENTRIES_PER_MAP);
+		memset(table.ptr(), 0, table.size() * sizeof(uint32_t));
+		pages.resize(p_pages);
+		width = p_width;
+	}
+	VSM::AllocationCounts run(const LocalVector<uint32_t> &p_requests, uint32_t p_frame, uint32_t p_cache_frames) {
+		for (uint32_t index : p_requests) {
+			table[index] |= VSM::ENTRY_REQUESTED;
+		}
+		const VSM::AllocationCounts counts = VSM::allocate_model(table.ptr(), table.size(), pages.ptr(), pages.size(), width, p_requests.ptr(), p_requests.size(), p_frame, p_cache_frames);
+		for (uint32_t index : p_requests) {
+			table[index] = VSM::entry_after_emit(table[index]);
+		}
+		return counts;
+	}
+	uint32_t page_of(uint32_t p_index) const {
+		const uint32_t entry = table[p_index];
+		return (entry & VSM::ENTRY_ALLOCATED) ? VSM::entry_page_y(entry) * width + VSM::entry_page_x(entry) : UINT32_MAX;
+	}
+	bool consistent() const {
+		for (uint32_t p = 0; p < pages.size(); p++) {
+			if (pages[p].owner != 0 && page_of(pages[p].owner - 1) != p) {
+				return false;
+			}
+		}
+		for (uint32_t i = 0; i < table.size(); i++) {
+			const uint32_t p = page_of(i);
+			if (p != UINT32_MAX && (p >= pages.size() || pages[p].owner != i + 1)) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+} // namespace
+
+TEST_CASE("[VSM] Allocation keeps cached pages, reuses the least recently used and drops stale pages") {
+	AllocationFixture fixture(8, 4);
+	const uint32_t cache = 10;
+	// Frame 1: four requests get four free pages, all to be rendered.
+	LocalVector<uint32_t> first;
+	for (uint32_t i = 0; i < 4; i++) {
+		first.push_back(i);
+	}
+	VSM::AllocationCounts counts = fixture.run(first, 1, cache);
+	CHECK(counts.new_pages == 4);
+	CHECK(counts.dirty == 4);
+	CHECK(counts.available == 8);
+	CHECK(counts.overflow == 0);
+	CHECK(fixture.consistent());
+	uint32_t pages_before[4];
+	for (uint32_t i = 0; i < 4; i++) {
+		pages_before[i] = fixture.page_of(i);
+		CHECK(pages_before[i] != UINT32_MAX);
+		CHECK((fixture.table[i] & (VSM::ENTRY_REQUESTED | VSM::ENTRY_DIRTY_MASK)) == 0); // Handed to the dirty list.
+	}
+	// Frame 2: the same requests keep their pages; nothing is re-rendered.
+	counts = fixture.run(first, 2, cache);
+	CHECK(counts.kept == 4);
+	CHECK(counts.new_pages == 0);
+	CHECK(counts.dirty == 0);
+	for (uint32_t i = 0; i < 4; i++) {
+		CHECK(fixture.page_of(i) == pages_before[i]);
+	}
+	// Frame 3: entries 0 and 1 only. Entries 2 and 3 stay cached.
+	LocalVector<uint32_t> two;
+	two.push_back(0);
+	two.push_back(1);
+	counts = fixture.run(two, 3, cache);
+	CHECK(counts.kept == 2);
+	// Frame 5: six new requests: four free pages, then the two cached pages, both 2 frames old.
+	LocalVector<uint32_t> six;
+	for (uint32_t i = 10; i < 16; i++) {
+		six.push_back(i);
+	}
+	six.push_back(0);
+	six.push_back(1);
+	counts = fixture.run(six, 5, cache);
+	CHECK(counts.kept == 2);
+	CHECK(counts.new_pages == 6);
+	CHECK(counts.stolen == 2);
+	CHECK(counts.cached == 2);
+	CHECK(fixture.page_of(2) == UINT32_MAX);
+	CHECK(fixture.page_of(3) == UINT32_MAX);
+	CHECK(fixture.consistent());
+	// Frame 6: two more requests; the pool is full and every page is in use or 1 frame old: the
+	// oldest cached pages go first. Entries 10 to 15 were requested at frame 5, 0 and 1 too.
+	LocalVector<uint32_t> late;
+	late.push_back(20);
+	late.push_back(21);
+	late.push_back(0);
+	late.push_back(1);
+	counts = fixture.run(late, 6, cache);
+	CHECK(counts.new_pages == 2);
+	CHECK(counts.stolen == 2);
+	CHECK(counts.overflow == 0);
+	CHECK(fixture.consistent());
+	// Frame 30: nothing for 24 frames: every page is past the 10 cached frames and is dropped.
+	LocalVector<uint32_t> none;
+	counts = fixture.run(none, 30, cache);
+	CHECK(counts.evicted == 8);
+	CHECK(counts.available == 8);
+	for (uint32_t p = 0; p < 8; p++) {
+		CHECK(fixture.pages[p].owner == 0);
+	}
+	CHECK(fixture.consistent());
+}
+
+TEST_CASE("[VSM] Allocation: overflow, coarse requests first, scrolled and orphaned pages") {
+	AllocationFixture fixture(4, 2);
+	const uint32_t cache = 10;
+	// Six requests for four pages; two coarse ones among them get pages first.
+	LocalVector<uint32_t> requests;
+	for (uint32_t i = 0; i < 6; i++) {
+		requests.push_back(i);
+	}
+	fixture.table[4] |= VSM::ENTRY_COARSE;
+	fixture.table[5] |= VSM::ENTRY_COARSE;
+	VSM::AllocationCounts counts = fixture.run(requests, 1, cache);
+	CHECK(counts.new_pages == 4);
+	CHECK(counts.overflow == 2);
+	CHECK(counts.coarse == 2);
+	CHECK(fixture.page_of(4) != UINT32_MAX);
+	CHECK(fixture.page_of(5) != UINT32_MAX);
+	uint32_t flagged = 0;
+	for (uint32_t i = 0; i < 6; i++) {
+		if (fixture.page_of(i) == UINT32_MAX) {
+			flagged += (fixture.table[i] & VSM::ENTRY_OVERFLOW) ? 1 : 0;
+		} else {
+			CHECK((fixture.table[i] & VSM::ENTRY_OVERFLOW) == 0);
+		}
+	}
+	CHECK(flagged == 2);
+	CHECK(fixture.consistent());
+
+	// A scrolled entry that is requested keeps its page and is re-rendered there.
+	const uint32_t scrolled = 4;
+	const uint32_t scrolled_page = fixture.page_of(scrolled);
+	fixture.table[scrolled] |= VSM::ENTRY_SCROLLED;
+	LocalVector<uint32_t> again;
+	again.push_back(scrolled);
+	counts = fixture.run(again, 2, cache);
+	CHECK(counts.kept == 1);
+	CHECK(counts.dirty == 1);
+	CHECK(fixture.page_of(scrolled) == scrolled_page);
+	CHECK((fixture.table[scrolled] & VSM::ENTRY_SCROLLED) == 0);
+	// A scrolled entry nobody requests is dropped: its page holds the wrong ground.
+	const uint32_t other = 5;
+	fixture.table[other] |= VSM::ENTRY_SCROLLED;
+	LocalVector<uint32_t> none;
+	counts = fixture.run(none, 3, cache);
+	CHECK(counts.evicted == 1);
+	CHECK(fixture.page_of(other) == UINT32_MAX);
+	// A cleared entry (a freed light) leaves its page orphaned: free again.
+	uint32_t cleared = 0;
+	for (uint32_t i = 0; i < 6; i++) {
+		if (fixture.page_of(i) != UINT32_MAX && i != scrolled) {
+			cleared = i;
+			break;
+		}
+	}
+	fixture.table[cleared] = 0;
+	counts = fixture.run(none, 4, cache);
+	CHECK(counts.orphaned == 1);
+	CHECK(fixture.consistent());
+}
+
+TEST_CASE("[VSM] Allocation reuses free pages first, then cached pages oldest first") {
+	AllocationFixture fixture(6, 3);
+	const uint32_t cache = 20;
+	// Frames 1 to 5: entry i is last requested at frame i + 1 (entries 4 and 5 at frame 5).
+	for (uint32_t frame = 1; frame <= 5; frame++) {
+		LocalVector<uint32_t> requests;
+		for (uint32_t i = frame - 1; i < 6; i++) {
+			requests.push_back(i);
+		}
+		fixture.run(requests, frame, cache);
+	}
+	CHECK(fixture.consistent());
+	uint32_t pages[6];
+	for (uint32_t i = 0; i < 6; i++) {
+		pages[i] = fixture.page_of(i);
+		REQUIRE(pages[i] != UINT32_MAX);
+	}
+	// The update step at frame 6: every page is cached, in bucket cache_frames - age.
+	for (uint32_t i = 0; i < 6; i++) {
+		uint32_t bucket = 0;
+		const VSM::PageUpdate update = VSM::page_update(fixture.pages[pages[i]], pages[i], fixture.width, fixture.table.ptr(), fixture.table.size(), 6, cache, bucket);
+		CHECK(update == VSM::PAGE_UPDATE_CACHED);
+		CHECK(bucket == cache - (6 - MIN(i + 1, 5u)));
+	}
+	// Frame 6: two new requests and no free page: the two least recently used entries (ages 5 and 4)
+	// lose their pages; the more recent ones keep theirs.
+	LocalVector<uint32_t> two_new;
+	two_new.push_back(10);
+	two_new.push_back(11);
+	VSM::AllocationCounts counts = fixture.run(two_new, 6, cache);
+	CHECK(counts.available == 6);
+	CHECK(counts.new_pages == 2);
+	CHECK(counts.stolen == 2);
+	CHECK(fixture.page_of(0) == UINT32_MAX);
+	CHECK(fixture.page_of(1) == UINT32_MAX);
+	for (uint32_t i = 2; i < 6; i++) {
+		CHECK(fixture.page_of(i) == pages[i]);
+	}
+	CHECK(((fixture.page_of(10) == pages[0] && fixture.page_of(11) == pages[1]) || (fixture.page_of(10) == pages[1] && fixture.page_of(11) == pages[0])));
+	CHECK(fixture.consistent());
+	// Frame 7: entry 3's light is gone (its entry cleared): its page is free and goes before the
+	// oldest cached page (entry 2's, 4 frames old).
+	fixture.table[3] = 0;
+	LocalVector<uint32_t> one_new;
+	one_new.push_back(12);
+	counts = fixture.run(one_new, 7, cache);
+	CHECK(counts.orphaned == 1);
+	CHECK(counts.stolen == 0);
+	CHECK(fixture.page_of(12) == pages[3]);
+	CHECK(fixture.page_of(2) == pages[2]);
+	CHECK(fixture.consistent());
+	// A page requested in this frame is never reused, and a free page is in bucket 0.
+	uint32_t bucket = 0;
+	CHECK(VSM::page_update(fixture.pages[pages[3]], pages[3], fixture.width, fixture.table.ptr(), fixture.table.size(), 7, cache, bucket) == VSM::PAGE_UPDATE_CACHED);
+	CHECK(bucket == VSM::BUCKET_NONE);
+	VSM::PageRecord free_page;
+	CHECK(VSM::page_update(free_page, 0, fixture.width, fixture.table.ptr(), fixture.table.size(), 7, cache, bucket) == VSM::PAGE_UPDATE_FREE);
+	CHECK(bucket == 0);
+}
+
+TEST_CASE("[VSM] Fog cells: a light reaches the cells around a vertex within its range plus one cell") {
+	VSM::MarkLight omni;
+	omni.kind = VSM::MAP_KIND_OMNI;
+	omni.inv_radius = 1.0f / 1.5f;
+	// A light of 1.5 m range at the center of a cell whose diagonal is 3.2 m: every vertex of the cell
+	// is 1.6 m away, out of its range, but the fog shades the cell's center.
+	const Vector3 rel(0.92376f, 0.92376f, 0.92376f);
+	CHECK_FALSE(VSM::light_reaches(omni, rel));
+	bool all_faces = false;
+	CHECK(VSM::light_reaches_cell(omni, rel, 3.2f, all_faces));
+	CHECK(all_faces);
+	// 2 m away with 1 m cells: within range plus one cell, not within one cell.
+	CHECK(VSM::light_reaches_cell(omni, Vector3(2.0f, 0.0f, 0.0f), 1.0f, all_faces));
+	CHECK_FALSE(all_faces);
+	CHECK_FALSE(VSM::light_reaches_cell(omni, Vector3(2.6f, 0.0f, 0.0f), 1.0f, all_faces));
+	// A spot: a vertex just outside the cone still reaches the cells around it, which the cone may cross.
+	VSM::MarkLight spot;
+	spot.kind = VSM::MAP_KIND_SPOT;
+	spot.inv_radius = 1.0f / 20.0f;
+	spot.direction = Vector3(0.0f, 0.0f, -1.0f);
+	spot.cos_angle = Math::cos(Math::deg_to_rad(30.0f));
+	CHECK_FALSE(VSM::light_reaches(spot, Vector3(0.0f, 0.6f, -1.0f)));
+	CHECK(VSM::light_reaches_cell(spot, Vector3(0.0f, 0.6f, -1.0f), 0.5f, all_faces));
+	CHECK_FALSE(all_faces);
+}
+
+TEST_CASE("[VSM] Overflow bias: the largest requesters take up to three mips and give one back per 30 frames") {
+	uint32_t state = 0;
+	// Overflow with this map among the largest requesters (at least half the largest count), one view
+	// per frame.
+	for (uint32_t frame = 0; frame < 5; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 7, true);
+	}
+	CHECK(VSM::overflow_bias(state) == VSM::OVERFLOW_MAX_BIAS);
+	// A map below half the largest count keeps its bias.
+	CHECK(VSM::overflow_bias(VSM::overflow_bias_update(0, 49, 100, 7, true)) == 0);
+	CHECK(VSM::overflow_bias(VSM::overflow_bias_update(0, 0, 0, 7, true)) == 0);
+	// Without overflow: one mip back after 30 frames, then 30 more for the next.
+	for (uint32_t frame = 0; frame < 29; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	}
+	CHECK(VSM::overflow_bias(state) == 3);
+	state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	CHECK(VSM::overflow_bias(state) == 2);
+	// Pressure again restarts the wait.
+	for (uint32_t frame = 0; frame < 20; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	}
+	state = VSM::overflow_bias_update(state, 10, 100, 3, true);
+	CHECK(VSM::overflow_bias(state) == 2);
+	for (uint32_t frame = 0; frame < 29; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	}
+	CHECK(VSM::overflow_bias(state) == 2);
+	for (uint32_t frame = 0; frame < 61; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	}
+	CHECK(VSM::overflow_bias(state) == 0);
+	CHECK(state == 0);
+}
+
+TEST_CASE("[VSM] Overflow bias counts frames, not views") {
+	// Two views per frame (two viewports), both overflowing: one mip per frame, not two.
+	uint32_t state = 0;
+	for (uint32_t frame = 0; frame < 2; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 7, true);
+		state = VSM::overflow_bias_update(state, 50, 100, 7, false);
+	}
+	CHECK(VSM::overflow_bias(state) == 2);
+	// A second view that overflows after a first view that did not: the frame still raises once.
+	state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	state = VSM::overflow_bias_update(state, 50, 100, 7, false);
+	CHECK(VSM::overflow_bias(state) == 3);
+	// The bias goes back after 30 frames without overflow, whatever the number of views in each.
+	uint32_t frames = 0;
+	while (VSM::overflow_bias(state) == 3 && frames < 100) {
+		for (uint32_t view = 0; view < 3; view++) {
+			state = VSM::overflow_bias_update(state, 50, 100, 0, view == 0);
+		}
+		frames++;
+	}
+	CHECK(frames == VSM::OVERFLOW_DECAY_FRAMES);
+	// An overflow in a later view of a frame restarts the wait that the frame's first view counted:
+	// 28 frames, then a frame whose first view counts the 29th and whose second view overflows.
+	for (uint32_t frame = 0; frame < 28; frame++) {
+		state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	}
+	state = VSM::overflow_bias_update(state, 10, 100, 0, true);
+	CHECK(((state >> 8) & 0xFFu) == 29);
+	state = VSM::overflow_bias_update(state, 10, 100, 5, false); // Not a top requester: no rise.
+	CHECK(VSM::overflow_bias(state) == 2);
+	CHECK(((state >> 8) & 0xFFu) == 0);
+	state = VSM::overflow_bias_update(state, 50, 100, 0, true);
+	CHECK(VSM::overflow_bias(state) == 2); // One frame into a new wait of 30.
+	CHECK(((state >> 8) & 0xFFu) == 1);
 }
 
 } // namespace TestVirtualShadowMaps

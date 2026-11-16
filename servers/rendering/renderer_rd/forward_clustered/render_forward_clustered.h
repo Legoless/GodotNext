@@ -895,6 +895,13 @@ private:
 	// GodotNext: nextgi_alpha_policy (#61). True while the NextGI frame block runs this frame.
 	bool nextgi_active = false;
 
+	// GodotNext: vsm_page_marking (#219). Whether VSM marks pages for this view (a mono Forward+ view
+	// with render buffers, not a reflection probe), and whether its depth prepass ran.
+	bool _vsm_marks_view(const RenderDataRD *p_render_data) const;
+	bool vsm_mark_view = false;
+	// Marks the pages the view samples and allocates them, once the light buffers and the cluster are built.
+	void _vsm_mark_pages(RenderDataRD *p_render_data);
+
 protected:
 	/* setup */
 

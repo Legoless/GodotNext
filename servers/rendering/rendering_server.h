@@ -594,6 +594,9 @@ public:
 	// GodotNext: vsm_page_pool (#220). The Virtual Shadow Map core's state and its GPU self-check.
 	virtual Dictionary virtual_shadow_maps_get_debug_info();
 	virtual Dictionary virtual_shadow_maps_run_self_check(int p_seed = 1, int p_query_count = 65536, int p_cycles = 10000);
+	// GodotNext: vsm_page_marking (#219). The GPU check of page marking and allocation.
+	virtual void virtual_shadow_maps_request_check();
+	virtual Dictionary virtual_shadow_maps_get_check_result();
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;

@@ -32,7 +32,11 @@
 
 #include "core/error/error_macros.h"
 #include "core/math/math_funcs.h"
+#include "core/math/projection.h"
 #include "core/variant/variant.h"
+
+#include <cmath>
+#include <cstring>
 
 // GodotNext: vsm_page_pool (#220).
 
@@ -309,6 +313,39 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_MAP_KIND_SPOT " + itos(MAP_KIND_SPOT) + "u\n";
 	defines += "#define VSM_MAP_KIND_OMNI " + itos(MAP_KIND_OMNI) + "u\n";
 	defines += "#define VSM_MAP_KIND_AREA " + itos(MAP_KIND_AREA) + "u\n";
+	// GodotNext: vsm_page_marking (#219).
+	defines += "#define VSM_MAP_KIND_NONE " + itos(MAP_KIND_MAX) + "u\n";
+	defines += "#define VSM_ENTRY_DIRTY_MASK " + itos(ENTRY_DIRTY_MASK) + "u\n";
+	defines += "#define VSM_ENTRY_FLAGS_MASK " + itos(ENTRY_FLAGS_MASK) + "u\n";
+	defines += "#define VSM_COARSE_FIRST_MIP " + itos(COARSE_FIRST_MIP) + "u\n";
+	defines += "#define VSM_OVERFLOW_MAX_BIAS " + itos(OVERFLOW_MAX_BIAS) + "u\n";
+	defines += "#define VSM_OVERFLOW_DECAY_FRAMES " + itos(OVERFLOW_DECAY_FRAMES) + "u\n";
+	defines += "#define VSM_OVERFLOW_BIAS_RAISED " + itos(OVERFLOW_BIAS_RAISED) + "u\n";
+	defines += "#define VSM_BUCKET_COUNT " + itos(BUCKET_COUNT) + "u\n";
+	defines += "#define VSM_BUCKET_NONE " + itos(BUCKET_NONE) + "u\n";
+	defines += "#define VSM_MAX_DIRECTIONAL_LIGHTS " + itos(MAX_DIRECTIONAL_LIGHTS) + "u\n";
+	defines += "#define VSM_CLIPMAP_TEXEL0_EXPONENT (" + itos(CLIPMAP_TEXEL0_EXPONENT) + ")\n";
+	const char *state_names[] = { "REQUESTS", "REQUESTS_DROPPED", "AVAILABLE", "CURSOR", "OVERFLOW", "NEW", "KEPT", "EVICTED", "ORPHANED", "STOLEN", "DIRTY", "DIRTY_DIRECTIONAL", "COARSE", "CACHED", "MAX_MAP_REQUESTS", "BIASED_MAPS", "SINK" };
+	static_assert(sizeof(state_names) / sizeof(state_names[0]) == STATE_SINK + 1, "One name per per-view counter.");
+	for (uint32_t i = 0; i < sizeof(state_names) / sizeof(state_names[0]); i++) {
+		defines += "#define VSM_STATE_" + String(state_names[i]) + " " + itos(i) + "u\n";
+	}
+	defines += "#define VSM_STATE_TOTAL_OVERFLOW " + itos(STATE_TOTAL_OVERFLOW) + "u\n";
+	defines += "#define VSM_STATE_OVERFLOW_VIEWS " + itos(STATE_OVERFLOW_VIEWS) + "u\n";
+	defines += "#define VSM_STATE_TOTAL_DROPPED " + itos(STATE_TOTAL_DROPPED) + "u\n";
+	defines += "#define VSM_STATE_VIEWS " + itos(STATE_VIEWS) + "u\n";
+	defines += "#define VSM_STATE_BIAS_FRAME " + itos(STATE_BIAS_FRAME) + "u\n";
+	defines += "#define VSM_STATE_BUCKETS " + itos(STATE_BUCKETS) + "u\n";
+	defines += "#define VSM_STATE_BUCKET_OFFSETS " + itos(STATE_BUCKET_OFFSETS) + "u\n";
+	defines += "#define VSM_STATE_BUCKET_CURSORS " + itos(STATE_BUCKET_CURSORS) + "u\n";
+	const char *map_state_names[] = { "REQUESTS", "DIRTY_COUNT", "DIRTY_OFFSET", "DIRTY_CURSOR", "BIAS" };
+	static_assert(sizeof(map_state_names) / sizeof(map_state_names[0]) == MAP_STATE_REGIONS, "One name per map state region.");
+	for (uint32_t i = 0; i < MAP_STATE_REGIONS; i++) {
+		defines += "#define VSM_MAP_STATE_" + String(map_state_names[i]) + " " + itos(i) + "u\n";
+	}
+	defines += "#define VSM_INDIRECT_DIRECTIONAL " + itos(INDIRECT_DIRECTIONAL) + "u\n";
+	defines += "#define VSM_INDIRECT_LOCAL " + itos(INDIRECT_LOCAL) + "u\n";
+	defines += "#define VSM_INDIRECT_ALL " + itos(INDIRECT_ALL) + "u\n";
 	return defines;
 }
 
@@ -549,4 +586,581 @@ void RendererVirtualShadowMapStorage::free_all() {
 		map_free(light_maps.begin()->key);
 	}
 	pool_free();
+}
+
+/* PAGE MARKING AND ALLOCATION (#219) */
+
+// GodotNext: vsm_page_marking (#219, plan §21.3 contract S3). CPU models of vsm_mark_inc.glsl,
+// vsm_mark_pages.glsl and vsm_allocate_pages.glsl, written in the shaders' operation order.
+
+static_assert(sizeof(RendererVirtualShadowMapStorage::MapData) == 96, "MapData must match VSMMapData in vsm_mark_inc.glsl.");
+static_assert(RendererVirtualShadowMapStorage::CLIPMAP_LEVEL0_EXTENT / float(RendererVirtualShadowMapStorage::VIRTUAL_SIZE) == 1.0f / 1024.0f, "A clipmap level 0 texel is 2^CLIPMAP_TEXEL0_EXPONENT meters.");
+static_assert(RendererVirtualShadowMapStorage::CLIPMAP_TEXEL0_EXPONENT == -10, "A clipmap level 0 texel is 2^CLIPMAP_TEXEL0_EXPONENT meters.");
+static_assert(RendererVirtualShadowMapStorage::cache_frames(RendererVirtualShadowMapStorage::POOL_QUALITY_EPIC) <= RendererVirtualShadowMapStorage::MAX_CACHE_FRAMES, "Every quality's cache frames fit the buckets.");
+static_assert(RendererVirtualShadowMapStorage::MAX_CACHE_FRAMES < RendererVirtualShadowMapStorage::BUCKET_COUNT, "Bucket 0 and one bucket per cached age.");
+static_assert(RendererVirtualShadowMapStorage::STATE_SINK < RendererVirtualShadowMapStorage::STATE_VIEW_END, "Per-view counters fit their region.");
+static_assert(RendererVirtualShadowMapStorage::STATE_BIAS_FRAME < RendererVirtualShadowMapStorage::STATE_BUCKETS, "Totals fit their region.");
+static_assert(RendererVirtualShadowMapStorage::OVERFLOW_DECAY_FRAMES < 256 && RendererVirtualShadowMapStorage::OVERFLOW_MAX_BIAS < 256, "The bias state packs both in 8 bits.");
+static_assert(RendererVirtualShadowMapStorage::OVERFLOW_BIAS_RAISED == (1u << 16), "The raised bit follows the bias and the decay.");
+
+bool RendererVirtualShadowMapStorage::MapData::operator==(const MapData &p_other) const {
+	return memcmp(this, &p_other, sizeof(MapData)) == 0;
+}
+
+RendererVirtualShadowMapStorage::MapData RendererVirtualShadowMapStorage::map_data_clipmap(const Basis &p_light_basis, uint32_t p_level, const Vector2i &p_origin, float p_max_distance) {
+	MapData data;
+	// The axes directional_update() centers the levels with.
+	const Vector3 axis_x = p_light_basis.get_column(0).normalized();
+	const Vector3 axis_y = p_light_basis.get_column(1).normalized();
+	const Vector3 axis_z = p_light_basis.get_column(2).normalized();
+	// VIRTUAL_SIZE / the level's extent, a power of two: rows of different levels differ by exact
+	// powers of two, so a level's texel is level 0's divided by 2^level with no rounding.
+	const float scale = std::ldexp(1.0f, -CLIPMAP_TEXEL0_EXPONENT - int32_t(MIN(p_level, CLIPMAP_MAX_LEVELS - 1)));
+	const Vector3 axes[3] = { axis_x * scale, axis_y * scale, -axis_z };
+	for (int row = 0; row < 3; row++) {
+		data.rows[row][0] = float(axes[row].x);
+		data.rows[row][1] = float(axes[row].y);
+		data.rows[row][2] = float(axes[row].z);
+		data.rows[row][3] = 0.0f;
+	}
+	data.rows[3][3] = 1.0f;
+	data.origin[0] = p_origin.x;
+	data.origin[1] = p_origin.y;
+	data.kind = MAP_KIND_DIRECTIONAL;
+	data.texel_scale = 1.0f / scale;
+	data.max_distance = p_max_distance;
+	data.index = p_level;
+	return data;
+}
+
+Transform3D RendererVirtualShadowMapStorage::face_camera(MapKind p_kind, uint32_t p_face, const Transform3D &p_light_transform) {
+	// Directions and up vectors in the light's space: +X, -X, +Y, -Y, +Z, -Z.
+	static const Vector3 forward[6] = { Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, -1, 0), Vector3(0, 0, 1), Vector3(0, 0, -1) };
+	static const Vector3 up[6] = { Vector3(0, 1, 0), Vector3(0, 1, 0), Vector3(0, 0, -1), Vector3(0, 0, 1), Vector3(0, 1, 0), Vector3(0, 1, 0) };
+	static const uint32_t area_faces[5] = { 0, 1, 2, 3, 5 };
+	uint32_t direction = 5; // Spot: the light's -Z.
+	if (p_kind == MAP_KIND_OMNI) {
+		direction = MIN(p_face, 5u);
+	} else if (p_kind == MAP_KIND_AREA) {
+		direction = area_faces[MIN(p_face, 4u)];
+	}
+	const Basis local = Basis::looking_at(forward[direction], up[direction]);
+	return Transform3D(p_light_transform.basis.orthonormalized() * local, p_light_transform.origin);
+}
+
+float RendererVirtualShadowMapStorage::face_fov_degrees(MapKind p_kind, float p_spot_angle) {
+	if (p_kind == MAP_KIND_SPOT) {
+		// The map's square frustum holds the cone. Cones of 90 degrees or more are clamped.
+		return CLAMP(2.0f * p_spot_angle, 1.0f, 179.0f);
+	}
+	return 90.0f;
+}
+
+RendererVirtualShadowMapStorage::MapData RendererVirtualShadowMapStorage::map_data_face(MapKind p_kind, uint32_t p_face, const Transform3D &p_light_transform, float p_range, float p_spot_angle) {
+	MapData data;
+	const Transform3D camera = face_camera(p_kind, p_face, p_light_transform);
+	const float fov = face_fov_degrees(p_kind, p_spot_angle);
+	const float range = MAX(p_range, 0.001f);
+	const float z_near = CLAMP(range * FACE_NEAR_FRACTION, FACE_NEAR_MIN, MIN(FACE_NEAR_MAX, range * 0.5f));
+	Projection projection;
+	projection.set_perspective(fov, 1.0, z_near, range, false);
+	const Projection clip = projection * Projection(camera.affine_inverse());
+	for (int row = 0; row < 4; row++) {
+		for (int column = 0; column < 4; column++) {
+			data.rows[row][column] = float(clip.columns[column][row]);
+		}
+	}
+	data.kind = p_kind;
+	data.texel_scale = float(2.0 * Math::tan(Math::deg_to_rad(double(fov)) * 0.5) / double(VIRTUAL_SIZE));
+	data.near_w = z_near;
+	data.max_distance = range;
+	data.index = p_face;
+	return data;
+}
+
+float RendererVirtualShadowMapStorage::row_dot(const float p_row[4], const Vector3 &p_point) {
+	const float x = float(p_point.x);
+	const float y = float(p_point.y);
+	const float z = float(p_point.z);
+	float sum = p_row[0] * x;
+	sum = sum + p_row[1] * y;
+	sum = sum + p_row[2] * z;
+	return sum + p_row[3];
+}
+
+int32_t RendererVirtualShadowMapStorage::float_exponent(float p_value) {
+	uint32_t bits = 0;
+	memcpy(&bits, &p_value, sizeof(uint32_t));
+	const int32_t exponent = int32_t((bits >> 23) & 0xFFu);
+	return exponent == 0 ? -127 : exponent - 127;
+}
+
+uint32_t RendererVirtualShadowMapStorage::face_mip(float p_texel0, float p_footprint) {
+	uint32_t mip = 0;
+	while (mip + 1 < MIP_COUNT && p_texel0 * float(1u << (mip + 1)) <= p_footprint) {
+		mip++;
+	}
+	return mip;
+}
+
+uint32_t RendererVirtualShadowMapStorage::biased_mip(int32_t p_mip, int32_t p_bias) {
+	return uint32_t(CLAMP(p_mip + p_bias, 0, int32_t(MIP_COUNT) - 1));
+}
+
+bool RendererVirtualShadowMapStorage::face_texel(const MapData &p_map, const Vector3 &p_world, float &r_w, uint32_t &r_texel_x, uint32_t &r_texel_y) {
+	const float x = row_dot(p_map.rows[0], p_world);
+	const float y = row_dot(p_map.rows[1], p_world);
+	const float w = row_dot(p_map.rows[3], p_world);
+	r_w = w;
+	r_texel_x = 0;
+	r_texel_y = 0;
+	if (!(w > p_map.near_w) || std::fabs(x) > w || std::fabs(y) > w) {
+		return false;
+	}
+	const float u = x / w * 0.5f + 0.5f;
+	const float v = y / w * 0.5f + 0.5f;
+	r_texel_x = MIN(uint32_t(CLAMP(u, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1);
+	r_texel_y = MIN(uint32_t(CLAMP(v, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1);
+	return true;
+}
+
+Vector2i RendererVirtualShadowMapStorage::clipmap_texel0(const MapData &p_level0, const Vector3 &p_world) {
+	// Clamped to +-2^30 texels (1,048 km at level 0), so the integers and the shifts stay in range.
+	const float limit = 1073741824.0f;
+	const float x = CLAMP(std::floor(row_dot(p_level0.rows[0], p_world)), -limit, limit);
+	const float y = CLAMP(std::floor(row_dot(p_level0.rows[1], p_world)), -limit, limit);
+	return Vector2i(int32_t(x), int32_t(y));
+}
+
+bool RendererVirtualShadowMapStorage::clipmap_in_window(const Vector2i &p_origin, const Vector2i &p_level_texel, uint32_t p_mip) {
+	for (int axis = 0; axis < 2; axis++) {
+		const int64_t rel = int64_t(p_level_texel[axis]) - int64_t(p_origin[axis]) * int64_t(PAGE_SIZE);
+		if (rel < 0 || rel >= int64_t(VIRTUAL_SIZE)) {
+			return false;
+		}
+		const uint32_t offset = (uint32_t(p_origin[axis]) & ((1u << p_mip) - 1u)) + (uint32_t(rel) >> PAGE_SIZE_SHIFT);
+		if (offset >= PAGES_PER_SIDE) {
+			return false;
+		}
+	}
+	return true;
+}
+
+Vector2i RendererVirtualShadowMapStorage::clipmap_page(const Vector2i &p_level_texel, uint32_t p_mip) {
+	const uint32_t x = uint32_t(p_level_texel.x) & (VIRTUAL_SIZE - 1);
+	const uint32_t y = uint32_t(p_level_texel.y) & (VIRTUAL_SIZE - 1);
+	return Vector2i(int32_t((x >> p_mip) >> PAGE_SIZE_SHIFT), int32_t((y >> p_mip) >> PAGE_SIZE_SHIFT));
+}
+
+int32_t RendererVirtualShadowMapStorage::clipmap_level_mip(float p_footprint, int32_t p_bias) {
+	return float_exponent(p_footprint) - CLIPMAP_TEXEL0_EXPONENT + p_bias;
+}
+
+Vector2i RendererVirtualShadowMapStorage::clipmap_level_texel(const Vector2i &p_texel0, uint32_t p_level) {
+	return Vector2i(_floor_shift(p_texel0.x, p_level), _floor_shift(p_texel0.y, p_level));
+}
+
+bool RendererVirtualShadowMapStorage::light_reaches(const MarkLight &p_light, const Vector3 &p_rel) {
+	const float rx = float(p_rel.x);
+	const float ry = float(p_rel.y);
+	const float rz = float(p_rel.z);
+	float d2 = rx * rx;
+	d2 = d2 + ry * ry;
+	d2 = d2 + rz * rz;
+	if (!((d2 * p_light.inv_radius) * p_light.inv_radius < 1.0f)) {
+		return false;
+	}
+	if (p_light.kind == MAP_KIND_OMNI) {
+		return true;
+	}
+	float c = rx * float(p_light.direction.x);
+	c = c + ry * float(p_light.direction.y);
+	c = c + rz * float(p_light.direction.z);
+	if (p_light.kind == MAP_KIND_AREA) {
+		return c > 0.0f; // The front hemisphere.
+	}
+	// Spot: the angle to the axis is below the spot angle: c / |rel| > cos(angle).
+	const float limit = (p_light.cos_angle * p_light.cos_angle) * d2;
+	if (p_light.cos_angle >= 0.0f) {
+		return c > 0.0f && c * c > limit;
+	}
+	return c > 0.0f || c * c < limit;
+}
+
+bool RendererVirtualShadowMapStorage::light_reaches_cell(const MarkLight &p_light, const Vector3 &p_rel, float p_cell_size, bool &r_all_faces) {
+	const float rx = float(p_rel.x);
+	const float ry = float(p_rel.y);
+	const float rz = float(p_rel.z);
+	float d2 = rx * rx;
+	d2 = d2 + ry * ry;
+	d2 = d2 + rz * rz;
+	r_all_faces = d2 < p_cell_size * p_cell_size;
+	// |rel| < range + cell size, without a division: |rel| / range < 1 + cell size / range.
+	const float reach = 1.0f + p_cell_size * p_light.inv_radius;
+	return (d2 * p_light.inv_radius) * p_light.inv_radius < reach * reach;
+}
+
+void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, const MarkLight &p_light, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, bool p_all_faces, LocalVector<uint64_t> &r_requests) {
+	const uint32_t count = (p_light.flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	for (uint32_t face = 0; face < count; face++) {
+		const uint32_t map = light_map(p_light.map_base, p_light.flags, face);
+		if (map >= p_table_maps) {
+			continue;
+		}
+		const MapData &data = p_maps[map];
+		if (data.kind == MAP_KIND_MAX || data.kind == MAP_KIND_DIRECTIONAL) {
+			continue;
+		}
+		float w = 0.0f;
+		uint32_t texel_x = 0;
+		uint32_t texel_y = 0;
+		const bool inside = face_texel(data, p_world, w, texel_x, texel_y);
+		if (p_coarse) {
+			if (!inside && !p_all_faces) {
+				continue;
+			}
+			for (uint32_t mip = COARSE_FIRST_MIP; mip < MIP_COUNT; mip++) {
+				const uint32_t pages = PAGES_PER_SIDE >> mip;
+				if (inside) {
+					r_requests.push_back(uint64_t(entry_index(map, mip, (texel_x >> mip) >> PAGE_SIZE_SHIFT, (texel_y >> mip) >> PAGE_SIZE_SHIFT)) | REQUEST_COARSE);
+				} else {
+					for (uint32_t y = 0; y < pages; y++) {
+						for (uint32_t x = 0; x < pages; x++) {
+							r_requests.push_back(uint64_t(entry_index(map, mip, x, y)) | REQUEST_COARSE);
+						}
+					}
+				}
+			}
+			continue;
+		}
+		if (!inside) {
+			continue;
+		}
+		const int32_t bias = p_lod_bias + (p_map_bias != nullptr ? int32_t(overflow_bias(p_map_bias[map])) : 0);
+		const uint32_t mip = biased_mip(int32_t(face_mip(w * data.texel_scale, p_footprint)), bias);
+		r_requests.push_back(uint64_t(entry_index(map, mip, (texel_x >> mip) >> PAGE_SIZE_SHIFT, (texel_y >> mip) >> PAGE_SIZE_SHIFT)));
+	}
+}
+
+void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, LocalVector<uint64_t> &r_requests) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+	if (first >= p_table_maps || p_maps[first].kind != MAP_KIND_DIRECTIONAL) {
+		return;
+	}
+	const Vector2i texel0 = clipmap_texel0(p_maps[first], p_world);
+	if (p_coarse) {
+		// Each coarse mip in the finest level whose window holds the point at that mip.
+		for (uint32_t mip = COARSE_FIRST_MIP; mip < MIP_COUNT; mip++) {
+			for (uint32_t level = 0; level < count; level++) {
+				const uint32_t map = first + level;
+				if (map >= p_table_maps) {
+					break;
+				}
+				const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+				const Vector2i level_texel = clipmap_level_texel(texel0, level);
+				if (clipmap_in_window(origin, level_texel, mip)) {
+					const Vector2i page = clipmap_page(level_texel, mip);
+					r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(page.x), uint32_t(page.y))) | REQUEST_COARSE);
+					break;
+				}
+			}
+		}
+		return;
+	}
+	// The finest level that holds the point; level + mip as the footprint asks, then the map's overflow
+	// bias. A page outside that mip's window goes to the next level.
+	const int32_t level_mip = clipmap_level_mip(p_footprint, p_lod_bias);
+	for (uint32_t level = 0; level < count; level++) {
+		const uint32_t map = first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const Vector2i level_texel = clipmap_level_texel(texel0, level);
+		if (!clipmap_in_window(origin, level_texel, 0)) {
+			continue;
+		}
+		uint32_t mip = biased_mip(level_mip - int32_t(level), 0);
+		if (p_map_bias != nullptr) {
+			mip = MIN(mip + overflow_bias(p_map_bias[map]), MIP_COUNT - 1);
+		}
+		if (!clipmap_in_window(origin, level_texel, mip)) {
+			continue;
+		}
+		const Vector2i page = clipmap_page(level_texel, mip);
+		r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(page.x), uint32_t(page.y))));
+		return;
+	}
+}
+
+void RendererVirtualShadowMapStorage::mark_local_box(const MapData *p_maps, uint32_t p_table_maps, const MarkLight &p_light, const Vector3 &p_light_world, const AABB &p_box, LocalVector<uint64_t> &r_requests) {
+	if (!(p_light.inv_radius > 0.0f)) {
+		return;
+	}
+	// The light's sphere must touch the box.
+	const float radius = 1.0f / p_light.inv_radius;
+	const Vector3 box_min = p_box.position;
+	const Vector3 box_max = p_box.position + p_box.size;
+	float d2 = 0.0f;
+	for (int axis = 0; axis < 3; axis++) {
+		const float below = float(box_min[axis]) - float(p_light_world[axis]);
+		const float above = float(p_light_world[axis]) - float(box_max[axis]);
+		const float excess = MAX(MAX(below, above), 0.0f);
+		d2 = d2 + excess * excess;
+	}
+	if (d2 > radius * radius) {
+		return;
+	}
+	Vector3 corners[8];
+	for (int i = 0; i < 8; i++) {
+		corners[i] = Vector3((i & 1) ? box_max.x : box_min.x, (i & 2) ? box_max.y : box_min.y, (i & 4) ? box_max.z : box_min.z);
+	}
+	const uint32_t count = (p_light.flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	for (uint32_t face = 0; face < count; face++) {
+		const uint32_t map = light_map(p_light.map_base, p_light.flags, face);
+		if (map >= p_table_maps) {
+			continue;
+		}
+		const MapData &data = p_maps[map];
+		if (data.kind == MAP_KIND_MAX || data.kind == MAP_KIND_DIRECTIONAL) {
+			continue;
+		}
+		// Clip-space planes w - x, w + x, w - y, w + y and w - near: skip the face when every corner is
+		// outside one of them; take every coarse page when the near plane cuts the box.
+		uint32_t outside[5] = { 0, 0, 0, 0, 0 };
+		float u_min = 1.0f;
+		float u_max = 0.0f;
+		float v_min = 1.0f;
+		float v_max = 0.0f;
+		bool cut = false;
+		for (int i = 0; i < 8; i++) {
+			const float x = row_dot(data.rows[0], corners[i]);
+			const float y = row_dot(data.rows[1], corners[i]);
+			const float w = row_dot(data.rows[3], corners[i]);
+			outside[0] += (w - x < 0.0f) ? 1 : 0;
+			outside[1] += (w + x < 0.0f) ? 1 : 0;
+			outside[2] += (w - y < 0.0f) ? 1 : 0;
+			outside[3] += (w + y < 0.0f) ? 1 : 0;
+			outside[4] += (w - data.near_w < 0.0f) ? 1 : 0;
+			if (!(w > data.near_w)) {
+				cut = true;
+				continue;
+			}
+			const float u = x / w * 0.5f + 0.5f;
+			const float v = y / w * 0.5f + 0.5f;
+			u_min = MIN(u_min, u);
+			u_max = MAX(u_max, u);
+			v_min = MIN(v_min, v);
+			v_max = MAX(v_max, v);
+		}
+		if (outside[0] == 8 || outside[1] == 8 || outside[2] == 8 || outside[3] == 8 || outside[4] == 8) {
+			continue;
+		}
+		uint32_t tx0 = 0;
+		uint32_t ty0 = 0;
+		uint32_t tx1 = VIRTUAL_SIZE - 1;
+		uint32_t ty1 = VIRTUAL_SIZE - 1;
+		if (!cut) {
+			tx0 = MIN(uint32_t(CLAMP(u_min, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1);
+			ty0 = MIN(uint32_t(CLAMP(v_min, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1);
+			tx1 = MIN(uint32_t(CLAMP(u_max, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1);
+			ty1 = MIN(uint32_t(CLAMP(v_max, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1);
+		}
+		for (uint32_t mip = COARSE_FIRST_MIP; mip < MIP_COUNT; mip++) {
+			const uint32_t shift = mip + PAGE_SIZE_SHIFT;
+			for (uint32_t y = ty0 >> shift; y <= (ty1 >> shift); y++) {
+				for (uint32_t x = tx0 >> shift; x <= (tx1 >> shift); x++) {
+					r_requests.push_back(uint64_t(entry_index(map, mip, x, y)) | REQUEST_COARSE);
+				}
+			}
+		}
+	}
+}
+
+void RendererVirtualShadowMapStorage::mark_directional_box(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, LocalVector<uint64_t> &r_requests) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+	if (first >= p_table_maps || p_maps[first].kind != MAP_KIND_DIRECTIONAL) {
+		return;
+	}
+	const Vector3 box_min = p_box.position;
+	const Vector3 box_max = p_box.position + p_box.size;
+	Vector2i texel_min(INT32_MAX, INT32_MAX);
+	Vector2i texel_max(INT32_MIN, INT32_MIN);
+	for (int i = 0; i < 8; i++) {
+		const Vector3 corner((i & 1) ? box_max.x : box_min.x, (i & 2) ? box_max.y : box_min.y, (i & 4) ? box_max.z : box_min.z);
+		const Vector2i texel = clipmap_texel0(p_maps[first], corner);
+		texel_min = Vector2i(MIN(texel_min.x, texel.x), MIN(texel_min.y, texel.y));
+		texel_max = Vector2i(MAX(texel_max.x, texel.x), MAX(texel_max.y, texel.y));
+	}
+	for (uint32_t level = 0; level < count; level++) {
+		const uint32_t map = first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const Vector2i level_min = clipmap_level_texel(texel_min, level);
+		const Vector2i level_max = clipmap_level_texel(texel_max, level);
+		for (uint32_t mip = COARSE_FIRST_MIP; mip < MIP_COUNT; mip++) {
+			// The level texels the lookup reads at this mip: [origin * PAGE_SIZE, mip window end).
+			int64_t lo[2];
+			int64_t hi[2];
+			bool empty = false;
+			for (int axis = 0; axis < 2; axis++) {
+				const int64_t window_start = (int64_t(_floor_shift(origin[axis], mip)) << mip) * int64_t(PAGE_SIZE);
+				lo[axis] = MAX(int64_t(level_min[axis]), int64_t(origin[axis]) * int64_t(PAGE_SIZE));
+				hi[axis] = MIN(int64_t(level_max[axis]), window_start + int64_t(VIRTUAL_SIZE) - 1);
+				empty = empty || lo[axis] > hi[axis];
+			}
+			if (empty) {
+				continue;
+			}
+			const uint32_t shift = mip + PAGE_SIZE_SHIFT;
+			const uint32_t mask = (PAGES_PER_SIDE >> mip) - 1;
+			for (int32_t y = _floor_shift(int32_t(lo[1]), shift); y <= _floor_shift(int32_t(hi[1]), shift); y++) {
+				for (int32_t x = _floor_shift(int32_t(lo[0]), shift); x <= _floor_shift(int32_t(hi[0]), shift); x++) {
+					r_requests.push_back(uint64_t(entry_index(map, mip, uint32_t(x) & mask, uint32_t(y) & mask)) | REQUEST_COARSE);
+				}
+			}
+		}
+	}
+}
+
+RendererVirtualShadowMapStorage::PageUpdate RendererVirtualShadowMapStorage::page_update(const PageRecord &p_page, uint32_t p_page_index, uint32_t p_grid_width, const uint32_t *p_table, uint64_t p_table_entries, uint32_t p_frame, uint32_t p_cache_frames, uint32_t &r_bucket) {
+	r_bucket = 0;
+	if (p_page.owner == 0) {
+		return PAGE_UPDATE_FREE;
+	}
+	const uint64_t index = p_page.owner - 1;
+	const uint32_t entry = index < p_table_entries ? p_table[index] : 0u;
+	if (!(entry & ENTRY_ALLOCATED) || p_grid_width == 0 || entry_page_x(entry) != p_page_index % p_grid_width || entry_page_y(entry) != p_page_index / p_grid_width) {
+		return PAGE_UPDATE_ORPHANED;
+	}
+	if (entry & ENTRY_REQUESTED) {
+		r_bucket = BUCKET_NONE;
+		return PAGE_UPDATE_KEPT;
+	}
+	const uint32_t age = p_frame - p_page.last_used;
+	if (age >= p_cache_frames || (entry & ENTRY_SCROLLED)) {
+		return PAGE_UPDATE_EVICTED;
+	}
+	// Cached: the least recently used first; a page requested earlier in this frame is not reused.
+	r_bucket = age != 0 ? p_cache_frames - age : BUCKET_NONE;
+	return PAGE_UPDATE_CACHED;
+}
+
+RendererVirtualShadowMapStorage::AllocationCounts RendererVirtualShadowMapStorage::allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames) {
+	AllocationCounts counts;
+	ERR_FAIL_COND_V(p_grid_width == 0 || p_cache_frames == 0 || p_cache_frames > MAX_CACHE_FRAMES, counts);
+	// Update: orphaned pages, pages dropped after cache_frames frames or scrolled, the rest by bucket.
+	uint32_t bucket_counts[BUCKET_COUNT] = {};
+	for (uint32_t p = 0; p < p_pool_pages; p++) {
+		PageRecord &page = r_pages[p];
+		uint32_t bucket = BUCKET_NONE;
+		switch (page_update(page, p, p_grid_width, r_table, p_table_entries, p_frame, p_cache_frames, bucket)) {
+			case PAGE_UPDATE_FREE:
+				break;
+			case PAGE_UPDATE_KEPT:
+				page.last_used = p_frame;
+				break;
+			case PAGE_UPDATE_CACHED:
+				counts.cached++;
+				break;
+			case PAGE_UPDATE_EVICTED:
+				r_table[page.owner - 1] = 0;
+				page.owner = 0;
+				counts.evicted++;
+				break;
+			case PAGE_UPDATE_ORPHANED:
+				page.owner = 0;
+				counts.orphaned++;
+				break;
+		}
+		page.bucket = bucket;
+		if (bucket != BUCKET_NONE) {
+			bucket_counts[bucket]++;
+		}
+	}
+	// The free list: free pages first, then cached pages, least recently used first.
+	uint32_t offsets[BUCKET_COUNT] = {};
+	for (uint32_t b = 0; b < BUCKET_COUNT; b++) {
+		offsets[b] = counts.available;
+		counts.available += bucket_counts[b];
+	}
+	LocalVector<uint32_t> free_list;
+	free_list.resize(counts.available);
+	for (uint32_t p = 0; p < p_pool_pages; p++) {
+		if (r_pages[p].bucket != BUCKET_NONE) {
+			free_list[offsets[r_pages[p].bucket]++] = p;
+		}
+	}
+	// Assign: coarse requests first, then the rest.
+	uint32_t cursor = 0;
+	for (uint32_t phase = 0; phase < 2; phase++) {
+		for (uint32_t i = 0; i < p_request_count; i++) {
+			const uint32_t index = p_requests[i];
+			ERR_CONTINUE(uint64_t(index) >= p_table_entries);
+			uint32_t entry = r_table[index];
+			const bool coarse = (entry & ENTRY_COARSE) != 0;
+			if (coarse != (phase == 0)) {
+				continue;
+			}
+			counts.coarse += coarse ? 1 : 0;
+			if (entry & ENTRY_ALLOCATED) {
+				counts.kept++;
+				if (entry & (ENTRY_SCROLLED | ENTRY_UNCACHED)) {
+					entry |= ENTRY_DIRTY_MASK;
+					r_table[index] = entry;
+				}
+				counts.dirty += (entry & ENTRY_DIRTY_MASK) ? 1 : 0;
+				continue;
+			}
+			const uint32_t slot = cursor++;
+			if (slot >= counts.available) {
+				r_table[index] = entry | ENTRY_OVERFLOW;
+				counts.overflow++;
+				continue;
+			}
+			const uint32_t p = free_list[slot];
+			if (r_pages[p].owner != 0) {
+				r_table[r_pages[p].owner - 1] = 0;
+				counts.stolen++;
+			}
+			r_table[index] = entry_pack(p % p_grid_width, p / p_grid_width, ENTRY_ALLOCATED | ENTRY_REQUESTED | ENTRY_DIRTY_MASK | (entry & (ENTRY_COARSE | ENTRY_UNCACHED)));
+			r_pages[p].owner = index + 1;
+			r_pages[p].last_used = p_frame;
+			r_pages[p].bucket = BUCKET_NONE;
+			counts.new_pages++;
+			counts.dirty++;
+		}
+	}
+	return counts;
+}
+
+uint32_t RendererVirtualShadowMapStorage::overflow_bias_update(uint32_t p_state, uint32_t p_requests, uint32_t p_max_requests, uint32_t p_overflow, bool p_new_frame) {
+	uint32_t bias = p_state & 0xFFu;
+	uint32_t decay = (p_state >> 8) & 0xFFu;
+	bool raised = !p_new_frame && (p_state & OVERFLOW_BIAS_RAISED) != 0;
+	if (p_overflow > 0) {
+		// Pressure: the largest requesters (at least half the largest map's requests) take one mip more,
+		// once per frame.
+		decay = 0;
+		if (!raised && p_requests > 0 && uint64_t(p_requests) * 2 >= uint64_t(p_max_requests)) {
+			bias = MIN(bias + 1, OVERFLOW_MAX_BIAS);
+			raised = true;
+		}
+	} else if (p_new_frame) {
+		// A frame without overflow so far: its first view counts it.
+		if (bias > 0) {
+			decay++;
+			if (decay >= OVERFLOW_DECAY_FRAMES) {
+				bias--;
+				decay = 0;
+			}
+		} else {
+			decay = 0;
+		}
+	}
+	return bias | (decay << 8) | (raised ? OVERFLOW_BIAS_RAISED : 0u);
 }

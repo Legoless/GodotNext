@@ -30,7 +30,9 @@
 
 #pragma once
 
+#include "core/math/aabb.h"
 #include "core/math/basis.h"
+#include "core/math/transform_3d.h"
 #include "core/math/vector2.h"
 #include "core/math/vector2i.h"
 #include "core/math/vector3.h"
@@ -215,6 +217,222 @@ public:
 
 	// "#define VSM_..." lines for every shader that includes vsm_page_table_inc.glsl.
 	static String get_glsl_defines();
+
+	/* PAGE MARKING AND ALLOCATION (#219, plan §21.3 contract S3) */
+
+	// Fog froxels and transparents request the coarsest COARSE_MIPS mips only.
+	static constexpr uint32_t COARSE_MIPS = 2;
+	static constexpr uint32_t COARSE_FIRST_MIP = MIP_COUNT - COARSE_MIPS;
+	// Overflow: in every frame whose requests the pool could not hold, the maps that requested the
+	// most pages take one mip coarser, up to OVERFLOW_MAX_BIAS; without overflow they give one mip
+	// back per OVERFLOW_DECAY_FRAMES frames. Both count frames, not views: a map rises at most once
+	// per frame however many views overflow, and only a frame's first marked view moves the decay.
+	static constexpr uint32_t OVERFLOW_MAX_BIAS = 3;
+	static constexpr uint32_t OVERFLOW_DECAY_FRAMES = 30;
+	// The overflow bias state of a map: bits 0-7 the bias, 8-15 frames without overflow, and this bit
+	// once the bias rose in the frame of the last update.
+	static constexpr uint32_t OVERFLOW_BIAS_RAISED = 1u << 16;
+	// A page that no view requested for cache_frames() frames is dropped. Provisional values (until PQ):
+	// a quarter, half, one and two seconds at 60 frames per second.
+	static constexpr uint32_t MAX_CACHE_FRAMES = 120;
+	static constexpr uint32_t cache_frames(PoolQuality p_quality) {
+		return p_quality == POOL_QUALITY_LOW ? 15u : (p_quality == POOL_QUALITY_MEDIUM ? 30u : (p_quality == POOL_QUALITY_HIGH ? 60u : 120u));
+	}
+	// The allocation pass sorts reusable pages into buckets: 0 for free pages, then one per age of a
+	// cached page, oldest first (bucket cache_frames - age).
+	static constexpr uint32_t BUCKET_COUNT = 128;
+	static constexpr uint32_t BUCKET_NONE = 0xFFFFFFFFu;
+	// The request list holds every entry first requested in a view: four per pool page, at least 65,536.
+	static constexpr uint32_t REQUEST_LIST_MIN = 65536;
+	static constexpr uint32_t request_capacity(uint32_t p_pool_pages) {
+		return p_pool_pages * 4u > REQUEST_LIST_MIN ? p_pool_pages * 4u : REQUEST_LIST_MIN;
+	}
+	// Godot's directional light limit, and the transparent boxes one view marks (more merge into the last).
+	static constexpr uint32_t MAX_DIRECTIONAL_LIGHTS = 8;
+	static constexpr uint32_t MAX_TRANSPARENT_BOXES = 1024;
+	// log2 of a clipmap level 0 texel in meters: CLIPMAP_LEVEL0_EXTENT / VIRTUAL_SIZE = 2^-10.
+	static constexpr int32_t CLIPMAP_TEXEL0_EXPONENT = -10;
+	// Spot, omni and area faces: the near distance along the face axis, a fraction of the range.
+	static constexpr float FACE_NEAR_FRACTION = 0.001f;
+	static constexpr float FACE_NEAR_MIN = 0.001f;
+	static constexpr float FACE_NEAR_MAX = 0.05f;
+
+	// Per-map data, one record per page-table map (VSMMapData in vsm_mark_inc.glsl, std430): how a
+	// world position lands in the map. Rows are (x, y, z, constant) coefficients of the world position.
+	// - Directional clipmap level: row 0 and 1 give the absolute mip 0 virtual texel of the level
+	//   (the light plane's X and Y in meters times VIRTUAL_SIZE / the level's extent, a power of two),
+	//   row 2 the depth along the light, row 3 is (0, 0, 0, 1). origin is the level's window origin.
+	// - Spot, omni and area face: rows 0 to 3 are a perspective clip transform; the map's uv is
+	//   (x / w, y / w) * 0.5 + 0.5, with no Y flip, and a point is in the face when w > near_w and
+	//   |x| <= w and |y| <= w. texel_scale * w is the face's mip 0 texel in meters at the point.
+	struct MapData {
+		float rows[4][4] = {};
+		int32_t origin[2] = {};
+		uint32_t kind = MAP_KIND_MAX; // MAP_KIND_MAX: no map.
+		float texel_scale = 0.0f; // Clipmap: the level's mip 0 texel in meters; face: per meter of w.
+		float near_w = 0.0f;
+		float max_distance = 0.0f; // Clipmap: no view pixel deeper than this requests the light.
+		uint32_t index = 0; // The clipmap level or the face.
+		uint32_t pad = 0;
+		bool operator==(const MapData &p_other) const;
+		bool operator!=(const MapData &p_other) const { return !(*this == p_other); }
+	};
+	static MapData map_data_clipmap(const Basis &p_light_basis, uint32_t p_level, const Vector2i &p_origin, float p_max_distance);
+	// The face's camera: spot face 0 looks along the light's -Z; omni faces 0-5 along the light's +X,
+	// -X, +Y, -Y, +Z, -Z; area faces 0-4 along +X, -X, +Y, -Y and -Z (the front hemisphere).
+	static Transform3D face_camera(MapKind p_kind, uint32_t p_face, const Transform3D &p_light_transform);
+	static float face_fov_degrees(MapKind p_kind, float p_spot_angle);
+	static MapData map_data_face(MapKind p_kind, uint32_t p_face, const Transform3D &p_light_transform, float p_range, float p_spot_angle);
+
+	// CPU models of the vsm_mark_inc.glsl functions, written in the same operation order.
+	// ((r0 * x + r1 * y) + r2 * z) + r3.
+	static float row_dot(const float p_row[4], const Vector3 &p_point);
+	// floor(log2(p_value)) from the float's exponent bits; -127 for zero and subnormals.
+	static int32_t float_exponent(float p_value);
+	// The coarsest face mip whose texel, p_texel0 * 2^mip, is not larger than p_footprint (mip 0 when
+	// even mip 0's texel is larger).
+	static uint32_t face_mip(float p_texel0, float p_footprint);
+	static uint32_t biased_mip(int32_t p_mip, int32_t p_bias);
+	// A face's virtual texel of p_world, and w. False when the point is not in the face.
+	static bool face_texel(const MapData &p_map, const Vector3 &p_world, float &r_w, uint32_t &r_texel_x, uint32_t &r_texel_y);
+	// The absolute mip 0 texel of p_world in a directional light's level 0; level l's is this >> l.
+	static Vector2i clipmap_texel0(const MapData &p_level0, const Vector3 &p_world);
+	// Whether vsm_lookup_clipmap() reads level p_level_texel at p_mip: inside the level and the mip's window.
+	static bool clipmap_in_window(const Vector2i &p_origin, const Vector2i &p_level_texel, uint32_t p_mip);
+	// The page slot of a level texel at a mip.
+	static Vector2i clipmap_page(const Vector2i &p_level_texel, uint32_t p_mip);
+	// level + mip of a clipmap request: a level l mip m texel is 2^(l + m + CLIPMAP_TEXEL0_EXPONENT) m.
+	static int32_t clipmap_level_mip(float p_footprint, int32_t p_bias);
+	// The level texel of a level 0 texel: floor division by 2^p_level.
+	static Vector2i clipmap_level_texel(const Vector2i &p_texel0, uint32_t p_level);
+
+	// The allocation state buffer (uints): per-view counters [0, STATE_VIEW_END), totals since start
+	// [STATE_VIEW_END, STATE_BUCKETS), then the free-list buckets' counts, offsets and cursors.
+	enum StateIndex : uint32_t {
+		STATE_REQUESTS, // Entries first requested in the view (may exceed the list's capacity).
+		STATE_REQUESTS_DROPPED, // Requests the full list could not hold.
+		STATE_AVAILABLE, // The free list's length.
+		STATE_CURSOR, // Pages handed out.
+		STATE_OVERFLOW, // Requested entries left without a page.
+		STATE_NEW, // Requested entries that got a page.
+		STATE_KEPT, // Requested entries that had a page.
+		STATE_EVICTED, // Pages dropped: not requested for cache_frames() frames, or scrolled.
+		STATE_ORPHANED, // Pages whose entry was cleared.
+		STATE_STOLEN, // New pages taken from a cached entry.
+		STATE_DIRTY, // Pages in the dirty list.
+		STATE_DIRTY_DIRECTIONAL, // Of those, directional pages (the list's first part).
+		STATE_COARSE, // Requested entries with ENTRY_COARSE.
+		STATE_CACHED, // Pages kept for an entry not requested in the view.
+		STATE_MAX_MAP_REQUESTS, // The largest map's request count.
+		STATE_BIASED_MAPS, // Maps with an overflow bias after the view.
+		STATE_SINK, // Written only by impossible atomic results (#277).
+		STATE_VIEW_END = 32,
+		STATE_TOTAL_OVERFLOW = STATE_VIEW_END, // Requests left without a page since start.
+		STATE_OVERFLOW_VIEWS, // Views with overflow since start.
+		STATE_TOTAL_DROPPED, // Requests dropped by a full list since start.
+		STATE_VIEWS, // Views marked since start.
+		STATE_BIAS_FRAME, // The frame (plus one) of the last view that updated the overflow bias.
+		STATE_BUCKETS = 64,
+		STATE_BUCKET_OFFSETS = STATE_BUCKETS + BUCKET_COUNT,
+		STATE_BUCKET_CURSORS = STATE_BUCKET_OFFSETS + BUCKET_COUNT,
+		STATE_SIZE = STATE_BUCKET_CURSORS + BUCKET_COUNT,
+	};
+	// The per-map state buffer: MAP_STATE_REGIONS regions of the page table's map count (uints).
+	enum MapStateRegion : uint32_t {
+		MAP_STATE_REQUESTS, // Entries first requested in the view, per map.
+		MAP_STATE_DIRTY_COUNT, // Dirty pages per map.
+		MAP_STATE_DIRTY_OFFSET, // The map's first record in the dirty list.
+		MAP_STATE_DIRTY_CURSOR, // Records written so far.
+		MAP_STATE_BIAS, // The overflow bias state (overflow_bias_update()); kept across views.
+		MAP_STATE_REGIONS,
+	};
+	// The dirty list's indirect arguments (uints): dispatch (count, 1, 1) for the directional pages,
+	// the local pages and all pages, each one workgroup per page.
+	static constexpr uint32_t INDIRECT_DIRECTIONAL = 0;
+	static constexpr uint32_t INDIRECT_LOCAL = 3;
+	static constexpr uint32_t INDIRECT_ALL = 6;
+	static constexpr uint32_t INDIRECT_WORDS = 9;
+
+	// Request keys of the CPU models: the entry index, plus bit 32 for a coarse request.
+	static constexpr uint64_t REQUEST_COARSE = uint64_t(1) << 32;
+	// A local light as the mark pass reads it from LightData (view space).
+	struct MarkLight {
+		MapKind kind = MAP_KIND_SPOT;
+		Vector3 position; // View space.
+		Vector3 direction; // View space, where the light shines.
+		float inv_radius = 0.0f; // Omni and spot: 1 / range. Area: 1 / (range + half the diagonal).
+		float cos_angle = 0.0f; // Spot only.
+		float fog_energy = 0.0f;
+		uint32_t map_base = MAP_NONE;
+		uint32_t flags = 0;
+	};
+	// Whether the light reaches a point p_rel (the point minus the light's position, view space).
+	static bool light_reaches(const MarkLight &p_light, const Vector3 &p_rel);
+	// Whether the light reaches the fog cells around a froxel grid vertex p_rel (the vertex minus the
+	// light's position, view space) whose cells' diagonal is p_cell_size: within its range plus one
+	// diagonal, with no cone or hemisphere test (a point of the cells may lie inside the cone while
+	// the vertex does not). r_all_faces is set when the light is within one diagonal of the vertex:
+	// the cells around it may then meet every face.
+	static bool light_reaches_cell(const MarkLight &p_light, const Vector3 &p_rel, float p_cell_size, bool &r_all_faces);
+	// The fine requests of a pixel (or the coarse ones of a fog point) in one local light's maps.
+	// p_map_bias holds each map's overflow bias state (bits 0-7 the bias), or is null.
+	static void mark_local_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, const MarkLight &p_light, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, bool p_all_faces, LocalVector<uint64_t> &r_requests);
+	// The same for a directional light whose levels start at p_map_base.
+	static void mark_directional_point(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float p_footprint, int32_t p_lod_bias, bool p_coarse, LocalVector<uint64_t> &r_requests);
+	// The coarse requests of a world-space box: every coarse page its corners' bounding rect touches,
+	// in every level or face the box reaches (a face whose near plane cuts the box: all coarse pages).
+	static void mark_local_box(const MapData *p_maps, uint32_t p_table_maps, const MarkLight &p_light, const Vector3 &p_light_world, const AABB &p_box, LocalVector<uint64_t> &r_requests);
+	static void mark_directional_box(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, LocalVector<uint64_t> &r_requests);
+
+	// The physical page records of the pool header (vsm_allocate_pages.glsl): the owning entry plus
+	// one (0: free), the frame it was last requested in, and its bucket in this view's free list.
+	struct PageRecord {
+		uint32_t owner = 0;
+		uint32_t last_used = 0;
+		uint32_t bucket = BUCKET_NONE;
+		uint32_t pad = 0;
+	};
+	struct AllocationCounts {
+		uint32_t kept = 0; // Requested entries that had a page.
+		uint32_t new_pages = 0; // Requested entries that got a page.
+		uint32_t stolen = 0; // Of those, pages taken from a cached entry.
+		uint32_t overflow = 0; // Requested entries left without a page.
+		uint32_t evicted = 0; // Pages dropped: not requested for cache_frames() frames, or scrolled.
+		uint32_t orphaned = 0; // Pages whose entry was cleared (a freed light, a new pool).
+		uint32_t cached = 0; // Pages kept for an entry not requested in this view.
+		uint32_t available = 0; // The free list's length.
+		uint32_t dirty = 0; // Requested entries whose page must be rendered.
+		uint32_t coarse = 0; // Requested entries with ENTRY_COARSE.
+	};
+	// Whether an entry's page must be rendered after allocation.
+	static constexpr uint32_t ENTRY_DIRTY_MASK = ENTRY_DIRTY_STATIC | ENTRY_DIRTY_DYNAMIC;
+	// The update step of the allocation pass for one physical page (MODE_UPDATE), given the page table
+	// after marking: whether the page is kept for a requested entry, stays cached for an unrequested
+	// one, is dropped (not requested for p_cache_frames frames, or scrolled), was orphaned (its entry
+	// was cleared) or was free. r_bucket is its free-list bucket: 0 for a page that is free after the
+	// step, cache_frames - age for a cached page (the oldest come first), BUCKET_NONE otherwise.
+	enum PageUpdate {
+		PAGE_UPDATE_FREE,
+		PAGE_UPDATE_KEPT,
+		PAGE_UPDATE_CACHED,
+		PAGE_UPDATE_EVICTED,
+		PAGE_UPDATE_ORPHANED,
+	};
+	static PageUpdate page_update(const PageRecord &p_page, uint32_t p_page_index, uint32_t p_grid_width, const uint32_t *p_table, uint64_t p_table_entries, uint32_t p_frame, uint32_t p_cache_frames, uint32_t &r_bucket);
+	// The CPU model of the allocation passes (update, free list, assign in two phases: coarse requests
+	// first), in place on a page table and the page records. Pages go out in free-list order (bucket,
+	// then page index); the GPU hands them out in atomic order, so only the counts and the outcomes that
+	// do not depend on that order compare.
+	static AllocationCounts allocate_model(uint32_t *r_table, uint64_t p_table_entries, PageRecord *r_pages, uint32_t p_pool_pages, uint32_t p_grid_width, const uint32_t *p_requests, uint32_t p_request_count, uint32_t p_frame, uint32_t p_cache_frames);
+	// The page-table entry after the emit pass: request flags cleared, dirty flags handed to the list.
+	static constexpr uint32_t entry_after_emit(uint32_t p_entry) {
+		return p_entry & ~(ENTRY_REQUESTED | ENTRY_COARSE | ENTRY_DIRTY_STATIC | ENTRY_DIRTY_DYNAMIC | ENTRY_SCROLLED | ((p_entry & ENTRY_ALLOCATED) ? ENTRY_OVERFLOW : 0u));
+	}
+	// The overflow bias state of a map (OVERFLOW_BIAS_RAISED) after a view with p_overflow requests
+	// left without a page; p_max_requests is the largest map's request count; p_new_frame is set for
+	// the first marked view of a frame.
+	static uint32_t overflow_bias_update(uint32_t p_state, uint32_t p_requests, uint32_t p_max_requests, uint32_t p_overflow, bool p_new_frame);
+	static uint32_t overflow_bias(uint32_t p_state) { return p_state & 0xFFu; }
 
 	struct MapRange {
 		uint32_t first = MAP_NONE;

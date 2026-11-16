@@ -30,8 +30,12 @@
 
 #pragma once
 
+#include "core/math/aabb.h"
+#include "core/math/projection.h"
 #include "core/math/transform_3d.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/shaders/vsm_allocate_pages.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/vsm_mark_pages.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/vsm_page_table.glsl.gen.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
@@ -44,8 +48,15 @@ namespace RendererRD {
 //
 // Nothing turns VSM on for a project yet: the shadow-method settings come with #221. Until then
 // GODOT_DEV_VSM in the environment (builds with DEBUG_ENABLED) turns the core on for every
-// shadow-casting light: 1 picks the High pool, or name the pool quality (low, medium, high, epic).
-// The lights keep their atlas shadows; the maps only fill LightData's vsm_map_base and vsm_flags.
+// shadow-casting light: 1 picks the High pool, or name the pool quality (low, medium, high, epic),
+// or a percentage of the default High pool ("25%"). The lights keep their atlas shadows; the maps
+// fill LightData's vsm_map_base and vsm_flags.
+//
+// GodotNext: vsm_page_marking (#219). With VSM on, every view with Forward+ render buffers forces the
+// depth prepass and, at the end of RenderForwardClustered::_pre_opaque_render() (once the light
+// buffers and the cluster are built), runs mark_and_allocate(): vsm_mark_pages.glsl flags the pages
+// the view samples, and vsm_allocate_pages.glsl gives them physical pages and emits the dirty-page
+// list and its indirect arguments for the raster passes (#216, #217, #218).
 class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	static VirtualShadowMapStorage *singleton;
 
@@ -75,6 +86,147 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	bool shader_ready = false;
 	bool shader_failed = false; // ShaderRD initializes once: a failed build is not retried.
 
+	// GodotNext: vsm_page_marking (#219).
+	enum MarkMode {
+		MARK_MODE_PIXEL,
+		MARK_MODE_FROXEL,
+		MARK_MODE_BOX,
+		MARK_MODE_MAX,
+	};
+	enum AllocateMode {
+		ALLOCATE_MODE_UPDATE,
+		ALLOCATE_MODE_SCAN,
+		ALLOCATE_MODE_SCATTER,
+		ALLOCATE_MODE_ASSIGN,
+		ALLOCATE_MODE_MAPS,
+		ALLOCATE_MODE_EMIT,
+		ALLOCATE_MODE_CLEAR,
+		ALLOCATE_MODE_MAX,
+	};
+	// VSMViewParams in vsm_state_inc.glsl (std430).
+	struct ViewParams {
+		float inv_projection[4][4] = {};
+		float view_to_world[3][4] = {};
+		uint32_t screen[4] = {};
+		float footprint[4] = {};
+		uint32_t cluster[4] = {};
+		uint32_t counts[4] = {};
+		uint32_t misc[4] = {};
+		int32_t bias[4] = {};
+		uint32_t fog_size[4] = {};
+		float fog_a[4] = {};
+		float fog_b[4] = {};
+		uint32_t directional[MAX_DIRECTIONAL_LIGHTS][4] = {};
+	};
+	static_assert(sizeof(ViewParams) == 384, "ViewParams must match VSMViewParams in vsm_state_inc.glsl.");
+	struct AllocatePushConstant {
+		uint32_t frame = 0;
+		uint32_t cache_frames = 0;
+		uint32_t table_maps = 0;
+		uint32_t pool_pages = 0;
+		uint32_t grid_width = 0;
+		uint32_t request_capacity = 0;
+		uint32_t phase = 0;
+		uint32_t pad = 0;
+	};
+	static_assert(sizeof(AllocatePushConstant) % 16 == 0, "Push constants are a multiple of 16 bytes.");
+	// A directional light of the current view (VSMViewParams::directional).
+	struct DirectionalEntry {
+		uint32_t map_base = MAP_NONE;
+		uint32_t flags = 0;
+		float max_distance = 0.0f;
+		float fog_energy = 0.0f;
+	};
+
+	VsmMarkPagesShaderRD mark_shader;
+	RID mark_version;
+	RID mark_pipelines[MARK_MODE_MAX];
+	VsmAllocatePagesShaderRD allocate_shader;
+	RID allocate_version;
+	RID allocate_pipelines[ALLOCATE_MODE_MAX];
+	bool marking_ready = false;
+	bool marking_failed = false;
+
+	// Sized by the page table's map count, and grown with it in _table_resize().
+	static constexpr uint32_t MAP_BUFFER_BYTES_PER_MAP = sizeof(MapData) + MAP_STATE_REGIONS * sizeof(uint32_t);
+	RID map_data_buffer;
+	RID map_state_buffer;
+	uint32_t map_buffers_maps = 0;
+	LocalVector<MapData> map_data;
+	uint32_t map_data_dirty_begin = 0;
+	uint32_t map_data_dirty_end = 0;
+	// Sized by the pool.
+	RID pages_buffer;
+	RID free_list_buffer;
+	RID dirty_buffer;
+	RID request_buffer;
+	uint32_t page_buffers_pages = 0;
+	uint32_t request_buffer_capacity = 0;
+	// Fixed size.
+	RID state_buffer;
+	RID view_buffer;
+	RID indirect_buffer;
+	RID box_buffer;
+	RID capture_depth_buffer;
+	uint32_t capture_depth_words = 0;
+	uint64_t processed_pool_reallocations = 0;
+	LocalVector<DirectionalEntry> view_directional;
+	int32_t lod_bias_directional = 0;
+	int32_t lod_bias_local = 0;
+	uint32_t active_cache_frames = cache_frames(POOL_QUALITY_HIGH);
+	uint64_t marked_views = 0;
+
+	// The GPU check (RenderingServer.virtual_shadow_maps_request_check()): the next marked view copies
+	// its inputs and the state after marking and after allocation into these buffers.
+	struct CheckCapture {
+		bool armed = false;
+		bool captured = false;
+		ViewParams view;
+		uint32_t table_maps = 0;
+		uint32_t pool_pages = 0;
+		uint32_t grid_width = 0;
+		uint32_t request_capacity = 0;
+		uint32_t frame = 0;
+		uint32_t cache_frames = 0;
+		uint32_t omni_count = 0;
+		uint32_t spot_count = 0;
+		uint32_t area_count = 0;
+		bool fog = false;
+		LocalVector<AABB> boxes;
+		LocalVector<MapData> map_data;
+		RID cluster;
+		uint32_t cluster_bytes = 0;
+		RID lights[3];
+		RID bias_before;
+		RID table_marked;
+		RID pages_before;
+		RID state_marked;
+		RID requests;
+		RID map_state_marked;
+		RID table_after;
+		RID pages_after;
+		RID state_after;
+		RID map_state_after;
+		RID dirty;
+		RID indirect;
+		// The page clear: the pool is filled with a non-zero value before allocation, copied after the
+		// clear pass, then restored from the copy taken before and cleared again, as without the check.
+		RID pool_saved;
+		RID pool_cleared;
+	};
+	CheckCapture check;
+
+	bool _ensure_marking_shaders();
+	void _resize_map_buffers(uint32_t p_maps);
+	void _ensure_page_buffers();
+	void _set_map_data(uint32_t p_map, const MapData &p_data);
+	void _upload_map_data();
+	void _free_marking_resources();
+	void _free_check_buffers();
+	RID _snapshot(RID p_buffer, uint32_t p_offset, uint32_t p_bytes, const char *p_name);
+	RID _pool_snapshot(const char *p_name);
+	void _pool_copy(RID p_from, RID p_to);
+
 	RID pool_texture;
 	Vector2i pool_texture_size;
 	uint64_t pool_driver_bytes = 0;
@@ -96,20 +248,85 @@ protected:
 public:
 	static VirtualShadowMapStorage *get_singleton() { return singleton; }
 
-	// GODOT_DEV_VSM, read once. False in builds without DEBUG_ENABLED.
-	static bool is_dev_switch_on(PoolQuality *r_quality = nullptr);
+	// GodotNext: vsm_page_marking (#219). LightStorage::LightData's layout (light_data_inc.glsl), for the
+	// GPU check's read-back of the light buffers; LightStorage::update_light_buffers() asserts it.
+	static constexpr uint32_t LIGHT_DATA_BYTES = 240;
+	static constexpr uint32_t LIGHT_DATA_POSITION = 0;
+	static constexpr uint32_t LIGHT_DATA_INV_RADIUS = 12;
+	static constexpr uint32_t LIGHT_DATA_DIRECTION = 16;
+	static constexpr uint32_t LIGHT_DATA_AREA_INV_RANGE = 60;
+	static constexpr uint32_t LIGHT_DATA_COS_SPOT_ANGLE = 76;
+	static constexpr uint32_t LIGHT_DATA_FOG_ENERGY = 200;
+	static constexpr uint32_t LIGHT_DATA_VSM_MAP_BASE = 224;
+	static constexpr uint32_t LIGHT_DATA_VSM_FLAGS = 228;
+	// A LightData record (LIGHT_DATA_BYTES / 4 words) as the mark pass reads it.
+	static MarkLight _mark_light(const uint32_t *p_light_words, MapKind p_kind);
+
+	// GODOT_DEV_VSM, read once. False in builds without DEBUG_ENABLED. r_pool_pages is the pool's page
+	// count: the quality's, or a percentage of the default High pool's.
+	static bool is_dev_switch_on(PoolQuality *r_quality = nullptr, uint32_t *r_pool_pages = nullptr);
 
 	bool is_active() const { return active; }
 	RID get_pool_texture() const { return pool_texture; }
 	RID get_page_table_buffer() const { return table_buffer; }
 
-	// LightStorage::update_light_buffers() calls this for every light it writes. It allocates or
-	// keeps the light's maps (and moves a directional light's clipmap levels to the camera when
-	// p_move_clipmaps is set), marks them used in the renderer's current frame, and returns
-	// LightData's vsm_map_base and vsm_flags: MAP_NONE and 0 for a light without maps.
-	void update_light(RID p_light_instance, MapKind p_kind, bool p_casts_shadow, const Basis &p_light_basis, const Vector3 &p_camera_position, float p_max_distance, bool p_move_clipmaps, uint32_t &r_map_base, uint32_t &r_flags);
+	// GodotNext: vsm_page_marking (#219). What update_light() needs of a light.
+	struct LightUpdate {
+		MapKind kind = MAP_KIND_SPOT;
+		bool casts_shadow = false;
+		Transform3D transform; // World space.
+		Vector3 camera_position;
+		float max_distance = 0.0f; // Directional: the shadow max distance (INF for the far plane).
+		bool move_clipmaps = false;
+		float range = 0.0f; // Spot, omni and area.
+		float spot_angle = 0.0f; // Degrees.
+		float fog_energy = 0.0f;
+	};
+	// LightStorage::update_light_buffers() calls begin_light_update() once, then this for every light it
+	// writes. It allocates or keeps the light's maps (and moves a directional light's clipmap levels to
+	// the camera when move_clipmaps is set), marks them used in the renderer's current frame, writes
+	// each map's MapData, and returns LightData's vsm_map_base and vsm_flags: MAP_NONE and 0 for a
+	// light without maps.
+	void begin_light_update();
+	void update_light(RID p_light_instance, const LightUpdate &p_light, uint32_t &r_map_base, uint32_t &r_flags);
 	// LightStorage::light_instance_free() calls this; the light's entries are cleared in this frame.
 	void light_instance_freed(RID p_light_instance);
+
+	// GodotNext: vsm_page_marking (#219). One view's page marking and allocation inputs.
+	struct MarkInput {
+		RID depth_texture; // Resolved prepass depth (reversed Z).
+		Size2i size;
+		Projection inv_projection; // Depth-texture clip space to view space (NextGIView::inv_projection()).
+		Transform3D cam_transform;
+		float pixel_scale = 0.0f; // A pixel's footprint in meters: view depth * pixel_scale + pixel_bias.
+		float pixel_bias = 0.0f;
+		float z_far = 1.0f;
+		RID cluster_buffer;
+		uint32_t cluster_size = 32;
+		uint32_t cluster_max_elements = 0;
+		RID omni_buffer;
+		RID spot_buffer;
+		RID area_buffer;
+		uint32_t omni_count = 0;
+		uint32_t spot_count = 0;
+		uint32_t area_count = 0;
+		bool fog = false; // Volumetric fog: the froxel grid requests coarse pages.
+		Vector3i fog_size;
+		float fog_length = 0.0f;
+		float fog_spread = 1.0f;
+		Vector2 fog_near_size;
+		Vector2 fog_far_size;
+		LocalVector<AABB> boxes; // Transparent instances' world boxes: coarse pages.
+	};
+	// Whether VSM marks pages for views (VSM on, the pool and the marking shaders ready).
+	bool is_marking_enabled();
+	void mark_and_allocate(const MarkInput &p_input);
+	// The configurable resolution LOD bias, in mips (#221 wires the settings).
+	void set_lod_bias(int32_t p_directional, int32_t p_local);
+	// The GPU check of RenderingServer.virtual_shadow_maps_request_check(): arms the next marked view's
+	// capture; get_check_result() compares it with the CPU models once that view has run.
+	void request_check();
+	Dictionary get_check_result();
 
 	Dictionary get_debug_info() const;
 	// Runs the self-check of RenderingServer.virtual_shadow_maps_run_self_check().

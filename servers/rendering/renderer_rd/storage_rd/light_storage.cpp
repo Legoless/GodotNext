@@ -39,6 +39,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/rendering_server_globals.h"
 
+#include <cstddef>
+
 using namespace RendererRD;
 
 LightStorage *LightStorage::singleton = nullptr;
@@ -739,6 +741,20 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 
 	Transform3D inverse_transform = p_camera_transform.affine_inverse();
 
+	// GodotNext: vsm_page_marking (#219). The GPU check reads LightData back with these offsets.
+	static_assert(sizeof(LightData) == VirtualShadowMapStorage::LIGHT_DATA_BYTES, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, position) == VirtualShadowMapStorage::LIGHT_DATA_POSITION, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, inv_radius) == VirtualShadowMapStorage::LIGHT_DATA_INV_RADIUS, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, direction) == VirtualShadowMapStorage::LIGHT_DATA_DIRECTION, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, inv_spot_attenuation) == VirtualShadowMapStorage::LIGHT_DATA_AREA_INV_RANGE, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, cos_spot_angle) == VirtualShadowMapStorage::LIGHT_DATA_COS_SPOT_ANGLE, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, volumetric_fog_energy) == VirtualShadowMapStorage::LIGHT_DATA_FOG_ENERGY, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, vsm_map_base) == VirtualShadowMapStorage::LIGHT_DATA_VSM_MAP_BASE, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	static_assert(offsetof(LightData, vsm_flags) == VirtualShadowMapStorage::LIGHT_DATA_VSM_FLAGS, "VirtualShadowMapStorage::LIGHT_DATA_* must match LightData.");
+	if (VirtualShadowMapStorage::get_singleton() != nullptr) {
+		VirtualShadowMapStorage::get_singleton()->begin_light_update();
+	}
+
 	r_directional_light_count = 0;
 	r_positional_light_count = 0;
 
@@ -838,7 +854,15 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						if (max_distance <= 0.0f) {
 							max_distance = float(Math::INF);
 						}
-						vsm->update_light(light_instance->self, RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL, light->shadow, light_transform.basis, p_camera_transform.origin, max_distance, !p_render_data->reflection_probe.is_valid(), vsm_map_base, vsm_flags);
+						VirtualShadowMapStorage::LightUpdate update;
+						update.kind = RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL;
+						update.casts_shadow = light->shadow;
+						update.transform = light_transform;
+						update.camera_position = p_camera_transform.origin;
+						update.max_distance = max_distance;
+						update.move_clipmaps = !p_render_data->reflection_probe.is_valid();
+						update.fog_energy = light->param[RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY];
+						vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
 					}
 					light_data.vsm_map_base = vsm_map_base;
 					light_data.vsm_flags = vsm_flags;
@@ -1111,7 +1135,15 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 			VirtualShadowMapStorage *vsm = VirtualShadowMapStorage::get_singleton();
 			if (vsm != nullptr) {
 				const RendererVirtualShadowMapStorage::MapKind kind = type == RSE::LIGHT_OMNI ? RendererVirtualShadowMapStorage::MAP_KIND_OMNI : (type == RSE::LIGHT_SPOT ? RendererVirtualShadowMapStorage::MAP_KIND_SPOT : RendererVirtualShadowMapStorage::MAP_KIND_AREA);
-				vsm->update_light(light_instance->self, kind, light->shadow, light_transform.basis, p_camera_transform.origin, 0.0f, false, vsm_map_base, vsm_flags);
+				VirtualShadowMapStorage::LightUpdate update;
+				update.kind = kind;
+				update.casts_shadow = light->shadow;
+				update.transform = light_transform;
+				update.camera_position = p_camera_transform.origin;
+				update.range = light->param[RSE::LIGHT_PARAM_RANGE];
+				update.spot_angle = light->param[RSE::LIGHT_PARAM_SPOT_ANGLE];
+				update.fog_energy = light->param[RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY];
+				vsm->update_light(light_instance->self, update, vsm_map_base, vsm_flags);
 			}
 			light_data.vsm_map_base = vsm_map_base;
 			light_data.vsm_flags = vsm_flags;

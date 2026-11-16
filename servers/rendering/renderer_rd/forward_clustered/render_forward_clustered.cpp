@@ -31,6 +31,7 @@
 #include "render_forward_clustered.h"
 
 #include "core/config/project_settings.h"
+#include "core/templates/hash_set.h"
 #include "servers/rendering/renderer_rd/environment/fog.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
 #include "servers/rendering/renderer_rd/environment/nextgeo_cull.h"
@@ -42,6 +43,9 @@
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
+// GodotNext: vsm_page_marking (#219).
+#include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_device.h"
@@ -2492,11 +2496,94 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		current_cluster_builder->bake_cluster();
 	}
 
+	// GodotNext: vsm_page_marking (#219). After the light buffers (vsm_map_base) and the cluster.
+	if (vsm_mark_view && rb_data.is_valid() && current_cluster_builder) {
+		_vsm_mark_pages(p_render_data);
+	}
+	vsm_mark_view = false;
+
 	if (rb_data.is_valid()) {
 		RENDER_TIMESTAMP("Update Volumetric Fog");
 		bool directional_shadows = RendererRD::LightStorage::get_singleton()->has_directional_shadows(directional_light_count);
 		_update_volumetric_fog(rb, p_render_data->environment, p_render_data->scene_data->cam_projection, p_render_data->scene_data->cam_transform, p_render_data->scene_data->prev_cam_transform.affine_inverse(), p_render_data->shadow_atlas, directional_light_count, directional_shadows, positional_light_count, p_render_data->voxel_gi_count, *p_render_data->fog_volumes);
 	}
+}
+
+bool RenderForwardClustered::_vsm_marks_view(const RenderDataRD *p_render_data) const {
+	// GodotNext: vsm_page_marking (#219).
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	if (vsm == nullptr || !vsm->is_active() || p_render_data->reflection_probe.is_valid() || p_render_data->render_buffers.is_null() || p_render_data->scene_data->view_count != 1) {
+		return false;
+	}
+	if (!p_render_data->render_buffers->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	return vsm->is_marking_enabled();
+}
+
+void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
+	// GodotNext: vsm_page_marking (#219, plan §21.3 contract S3).
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	ERR_FAIL_NULL(vsm);
+	ERR_FAIL_COND(rb.is_null());
+	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	RENDER_TIMESTAMP("VSM Page Marking");
+
+	RendererRD::VirtualShadowMapStorage::MarkInput input;
+	input.depth_texture = rb->get_depth_texture(0);
+	input.size = rb->get_internal_size();
+	input.inv_projection = NextGIView::inv_projection(*scene_data);
+	input.cam_transform = scene_data->cam_transform;
+	// A pixel's footprint: the world size of one pixel at the point's view depth, the finer axis.
+	const Projection &projection = scene_data->cam_projection;
+	const float size_x = 2.0f / (Math::abs(float(projection.columns[0][0])) * float(MAX(input.size.x, 1)));
+	const float size_y = 2.0f / (Math::abs(float(projection.columns[1][1])) * float(MAX(input.size.y, 1)));
+	if (projection.is_orthogonal()) {
+		input.pixel_scale = 0.0f;
+		input.pixel_bias = MIN(size_x, size_y);
+	} else {
+		input.pixel_scale = MIN(size_x, size_y);
+		input.pixel_bias = 0.0f;
+	}
+	input.z_far = scene_data->z_far;
+	input.cluster_buffer = p_render_data->cluster_buffer;
+	input.cluster_size = p_render_data->cluster_size;
+	input.cluster_max_elements = p_render_data->cluster_max_elements;
+	input.omni_buffer = light_storage->get_omni_light_buffer();
+	input.spot_buffer = light_storage->get_spot_light_buffer();
+	input.area_buffer = light_storage->get_area_light_buffer();
+	input.omni_count = light_storage->get_omni_light_count();
+	input.spot_count = light_storage->get_spot_light_count();
+	input.area_count = light_storage->get_area_light_count();
+
+	// Volumetric fog: the froxel grid of _update_volumetric_fog() and Fog::volumetric_fog_update().
+	if (p_render_data->environment.is_valid() && environment_get_volumetric_fog_enabled(p_render_data->environment)) {
+		const float ratio = float(input.size.x) / float((input.size.x + input.size.y) / 2);
+		input.fog = true;
+		input.fog_size = Vector3i(int32_t(float(get_volumetric_fog_size()) * ratio), int32_t(float(get_volumetric_fog_size()) / ratio), int32_t(get_volumetric_fog_depth()));
+		input.fog_length = environment_get_volumetric_fog_length(p_render_data->environment);
+		input.fog_spread = environment_get_volumetric_fog_detail_spread(p_render_data->environment);
+		const Vector2 frustum_near_size = projection.get_viewport_half_extents();
+		const Vector2 frustum_far_size = projection.get_far_plane_half_extents();
+		const float z_near = projection.get_z_near();
+		const float z_far = projection.get_z_far();
+		input.fog_far_size = frustum_near_size.lerp(frustum_far_size, (input.fog_length - z_near) / (z_far - z_near));
+		input.fog_near_size = projection.is_orthogonal() ? input.fog_far_size : frustum_near_size.maxf(0.001);
+	}
+
+	// Transparent instances: their world boxes request coarse pages.
+	HashSet<const GeometryInstanceForwardClustered *> seen;
+	for (const GeometryInstanceSurfaceDataCache *surface : render_list[RENDER_LIST_ALPHA].elements) {
+		if (surface->owner == nullptr || seen.has(surface->owner)) {
+			continue;
+		}
+		seen.insert(surface->owner);
+		input.boxes.push_back(surface->owner->transformed_aabb);
+	}
+
+	vsm->mark_and_allocate(input);
 }
 
 void RenderForwardClustered::_process_sss(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection &p_camera) {
@@ -3198,7 +3285,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83) / nextgeo_residency (#78)
 	// GodotNext: megalights_inputs (#136) / rr_guides (#205)
 	force_depth_pre_pass = force_depth_pre_pass || using_nextgi || using_nextgeo || megalights_inputs_active || rr_guides_active;
+	// GodotNext: vsm_page_marking (#219). Page marking reads the prepass depth.
+	const bool using_vsm = _vsm_marks_view(p_render_data);
+	force_depth_pre_pass = force_depth_pre_pass || using_vsm;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
+	vsm_mark_view = using_vsm && depth_pre_pass;
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -3240,6 +3331,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
 		finish_depth = finish_depth || using_nextgi || using_nextgeo;
+		// GodotNext: vsm_page_marking (#219). With MSAA, marking reads the resolved depth.
+		finish_depth = finish_depth || using_vsm;
 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 		render_list_params.use_nextgeo_proxy = is_reflection_probe;
 		render_list_params.prepass_motion = using_nextgi && velocity_plan.prepass_writes && (depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || depth_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI);
