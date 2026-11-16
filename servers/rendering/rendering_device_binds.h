@@ -293,8 +293,14 @@ class RDShaderSPIRV : public Resource {
 
 	Vector<uint8_t> bytecode[RD::SHADER_STAGE_MAX];
 	String compile_error[RD::SHADER_STAGE_MAX];
+	bool base_instance_native = false; // GodotNext: rd_indirect_count (#177)
 
 public:
+	// GodotNext: rd_indirect_count (#177). Read by shader_compile_binary_from_spirv() and
+	// shader_create_from_spirv().
+	void set_base_instance_native(bool p_enabled) { base_instance_native = p_enabled; }
+	bool get_base_instance_native() const { return base_instance_native; }
+
 	void set_stage_bytecode(RD::ShaderStage p_stage, const Vector<uint8_t> &p_bytecode) {
 		ERR_FAIL_INDEX(p_stage, RD::SHADER_STAGE_MAX);
 		bytecode[p_stage] = p_bytecode;
@@ -358,6 +364,12 @@ protected:
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_closest_hit"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_CLOSEST_HIT);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_miss"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_MISS);
 		ADD_PROPERTYI(PropertyInfo(Variant::STRING, "compile_error_intersection"), "set_stage_compile_error", "get_stage_compile_error", RD::SHADER_STAGE_INTERSECTION);
+
+		// GodotNext: rd_indirect_count (#177)
+		ClassDB::bind_method(D_METHOD("set_base_instance_native", "enabled"), &RDShaderSPIRV::set_base_instance_native);
+		ClassDB::bind_method(D_METHOD("get_base_instance_native"), &RDShaderSPIRV::get_base_instance_native);
+		ADD_GROUP("", "");
+		ADD_PROPERTY(PropertyInfo(Variant::BOOL, "base_instance_native"), "set_base_instance_native", "get_base_instance_native");
 	}
 };
 

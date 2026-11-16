@@ -1072,9 +1072,12 @@ public:
 	uint32_t get_missing_int64_atomics(uint32_t p_usage) const;
 
 	Vector<uint8_t> shader_compile_spirv_from_source(ShaderStage p_stage, const String &p_source_code, ShaderLanguage p_language = SHADER_LANGUAGE_GLSL, String *r_error = nullptr, bool p_allow_cache = true);
-	Vector<uint8_t> shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");
+	// GodotNext: rd_indirect_count (#177). p_base_instance_native compiles the shader so that gl_InstanceIndex
+	// includes the firstInstance of indirect draws on every driver (on D3D12, shader model 6.8). It needs
+	// SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE; without it, compilation fails with one named error.
+	Vector<uint8_t> shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "", bool p_base_instance_native = false);
 
-	RID shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "");
+	RID shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name = "", bool p_base_instance_native = false);
 	RID shader_create_from_bytecode(const Vector<uint8_t> &p_shader_binary, RID p_placeholder = RID());
 	RID shader_create_placeholder();
 	void shader_destroy_modules(RID p_shader);
@@ -1638,6 +1641,9 @@ private:
 
 	void _draw_list_start(const Rect2i &p_viewport);
 	void _draw_list_end(Rect2i *r_last_viewport = nullptr);
+	// GodotNext: rd_indirect_count (#177). The pipeline, push constant and uniform set checks and the uniform
+	// set binding that draw_list_draw_indirect() and draw_list_draw_indirect_count() share. False on an error.
+	bool _draw_list_prepare_indirect_draw(bool p_use_indices);
 
 public:
 	enum DrawFlags {
@@ -1691,6 +1697,12 @@ public:
 
 	void draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances = 1, uint32_t p_procedural_vertices = 0);
 	void draw_list_draw_indirect(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset = 0, uint32_t p_draw_count = 1, uint32_t p_stride = 0);
+	// GodotNext: rd_indirect_count (#177)
+	// Up to p_max_draw_count indirect draws; the uint32 at p_count_offset in p_count_buffer holds how many run.
+	// p_stride 0 means tightly packed records (16 bytes, or 20 with indices). Needs SUPPORTS_DRAW_INDIRECT_COUNT.
+	// Neither buffer may also be bound in the draw list's uniform sets: a buffer has one usage per draw list.
+	// Nor may it be in a bindless table the draw list binds while the table has not read it since its last write.
+	void draw_list_draw_indirect_count(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 
 	void draw_list_set_viewport(DrawListID p_list, const Rect2i &p_rect);
 	void draw_list_enable_scissor(DrawListID p_list, const Rect2 &p_rect);

@@ -1942,6 +1942,12 @@ void RenderingDeviceDriverMetal::command_render_draw_indirect_count(CommandBuffe
 	cb->render_draw_indirect_count(p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
 }
 
+// GodotNext: rd_indirect_count (#177)
+void RenderingDeviceDriverMetal::command_render_draw_indirect_count_prepare(CommandBufferID p_cmd_buffer, RenderPassID p_render_pass, bool p_indexed, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
+	cb->render_draw_indirect_count_prepare(p_render_pass, p_indexed, p_indirect_buffer, p_offset, p_count_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
+}
+
 void RenderingDeviceDriverMetal::command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) {
 	MDCommandBufferBase *cb = (MDCommandBufferBase *)(p_cmd_buffer.id);
 	cb->render_bind_vertex_buffers(p_binding_count, p_buffers, p_offsets, p_dynamic_offsets);
@@ -3039,6 +3045,11 @@ bool RenderingDeviceDriverMetal::has_feature(Features p_feature) {
 		// until BINDLESS_VALIDATED.
 		case SUPPORTS_BINDLESS:
 			return BINDLESS_VALIDATED && device_properties->features.argument_buffers_enabled() && limit_get(LIMIT_MAX_BINDLESS_TEXTURES) >= RDBindless::MIN_SLOTS && limit_get(LIMIT_MAX_BINDLESS_STORAGE_BUFFERS) >= RDBindless::MIN_SLOTS && limit_get(LIMIT_MAX_BINDLESS_SAMPLERS) >= RDBindless::MIN_SAMPLER_SLOTS;
+		// GodotNext: rd_indirect_count (#177). Count draws are emulated with a clamp pass before the render pass.
+		// gl_InstanceIndex is [[instance_id]], which includes the base instance.
+		case SUPPORTS_DRAW_INDIRECT_COUNT:
+		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
+			return true;
 		case SUPPORTS_RAYTRACING_PIPELINE:
 			return false;
 		default:

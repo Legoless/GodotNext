@@ -244,6 +244,9 @@ protected:
 		bool has_dynamic_buffers = false;
 		bool has_ray_query = false; // GodotNext: dxil_toolchain (#123).
 		uint32_t int64_atomics = 0; // GodotNext: rd_atomics64 (#175). RDAtomics64::Usage bits.
+		// GodotNext: rd_indirect_count (#177). A compile option, not reflected and not stored in the container:
+		// gl_InstanceIndex includes firstInstance (D3D12 compiles the shader for shader model 6.8).
+		bool base_instance_native = false;
 		RDC::PipelineType pipeline_type = RDC::PIPELINE_TYPE_RASTERIZATION;
 
 		LocalVector<ReflectShaderStage> shader_stages;
@@ -306,7 +309,8 @@ public:
 	CharString shader_name;
 	Vector<Shader> shaders;
 
-	bool set_code_from_spirv(const String &p_shader_name, Span<RDC::ShaderStageSPIRVData> p_spirv);
+	// GodotNext: rd_indirect_count (#177). p_base_instance_native: see ReflectShader::base_instance_native.
+	bool set_code_from_spirv(const String &p_shader_name, Span<RDC::ShaderStageSPIRVData> p_spirv, bool p_base_instance_native = false);
 	RDC::ShaderReflection get_shader_reflection() const;
 	// GodotNext: rd_atomics64 (#175). The RDAtomics64::Usage bits, without building the whole reflection.
 	uint32_t get_int64_atomics_usage() const { return reflection_data.int64_atomics; }

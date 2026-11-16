@@ -605,6 +605,18 @@ public:
 	LocalVector<MetalBuffer> _as_staging;
 	LocalVector<NS::SharedPtr<MTL::AccelerationStructureDescriptor>> _as_descriptors;
 
+	// GodotNext: rd_indirect_count (#177). The clamped copies of the next render passes' count draws, in draw order.
+	struct IndirectCountClamp {
+		MTL::Buffer *buffer = nullptr; // Null when the prepare failed: the draw is skipped.
+		uint32_t max_draw_count = 0;
+		bool indexed = false;
+	};
+	LocalVector<IndirectCountClamp> _indirect_count_clamps;
+	uint32_t _indirect_count_clamps_used = 0;
+	// A clamp pass updated the current level's fence, which the next clamp pass and the render pass wait on.
+	bool _indirect_count_clamp_fenced = false;
+	void _render_draw_indirect_count(bool p_indexed, uint32_t p_max_draw_count);
+
 	MTL::CommandBuffer *command_buffer();
 	_FORCE_INLINE_ MTL::CommandBuffer *get_command_buffer() const {
 		return commandBuffer.get();
@@ -643,6 +655,11 @@ public:
 	void render_draw_indexed_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override;
 	void render_draw_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) override;
 	void render_draw_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override;
+	// GodotNext: rd_indirect_count (#177). Metal has no count draws: a compute pass before the render pass copies the
+	// records into a buffer of this command buffer and sets instanceCount to 0 in the records at or past the GPU
+	// count (and multiplies it by the pass's view count in the others); the draw then issues p_max_draw_count
+	// indirect draws from that copy.
+	void render_draw_indirect_count_prepare(RDD::RenderPassID p_render_pass, bool p_indexed, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) override;
 
 	void render_end_pass() override;
 

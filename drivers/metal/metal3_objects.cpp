@@ -254,6 +254,10 @@ void MDCommandBuffer::_begin() {
 	release_resources();
 	// GodotNext: metal_acceleration_structure
 	_free_as_staging();
+	// GodotNext: rd_indirect_count (#177)
+	_indirect_count_clamps.clear();
+	_indirect_count_clamps_used = 0;
+	_indirect_count_clamp_fenced = false;
 }
 
 MDCommandBuffer::Alloc MDCommandBuffer::allocate_arg_buffer(uint32_t p_size) {
@@ -1335,6 +1339,11 @@ void MDCommandBuffer::render_begin_pass(RDD::RenderPassID p_render_pass, RDD::Fr
 	}
 	render.is_rendering_entire_area = (p_rect.position == Point2i(0, 0)) && p_rect.size == fb->size;
 	render.frameBuffer = fb;
+	// GodotNext: rd_indirect_count (#177). The pass reads the clamped records written just before it.
+	if (_indirect_count_clamp_fenced) {
+		_fence_wait_current_level = true;
+		_indirect_count_clamp_fenced = false;
+	}
 	render_next_subpass();
 }
 
@@ -1575,7 +1584,98 @@ void MDCommandBuffer::render_draw_indexed_indirect(RDD::BufferID p_indirect_buff
 }
 
 void MDCommandBuffer::render_draw_indexed_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
-	ERR_FAIL_MSG("not implemented");
+	// GodotNext: rd_indirect_count (#177). The records and the count were read by the prepare step.
+	_render_draw_indirect_count(true, p_max_draw_count);
+}
+
+// GodotNext: rd_indirect_count (#177)
+void MDCommandBuffer::render_draw_indirect_count_prepare(RDD::RenderPassID p_render_pass, bool p_indexed, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	// Every prepare adds one entry, so the draws find theirs by order.
+	IndirectCountClamp clamp;
+	clamp.max_draw_count = p_max_draw_count;
+	clamp.indexed = p_indexed;
+
+	const uint32_t words = p_indexed ? 5 : 4;
+	static_assert(sizeof(MTL::DrawIndexedPrimitivesIndirectArguments) == 5 * sizeof(uint32_t));
+	static_assert(sizeof(MTL::DrawPrimitivesIndirectArguments) == 4 * sizeof(uint32_t));
+	const uint32_t stride = p_stride == 0 ? words * sizeof(uint32_t) : p_stride;
+	// SPIRV-Cross derives gl_ViewIndex from the instance, so a multiview draw runs instanceCount x view_count
+	// instances, as in render_draw(). Every subpass of a pass has the pass's view count (render_pass_create()).
+	const MDRenderPass *pass = (const MDRenderPass *)(p_render_pass.id);
+	const uint32_t view_count = (pass != nullptr && !pass->subpasses.is_empty()) ? MAX(pass->subpasses[0].view_count, 1u) : 1u;
+
+	// Null after one error when the kernel cannot be created; the draw is then skipped.
+	MTL::ComputePipelineState *pipeline = device_driver->get_resource_cache().get_indirect_count_clamp_pipeline_state();
+	if (p_max_draw_count > 0 && pipeline != nullptr) {
+		MetalBuffer clamped = device_driver->get_allocator()->new_buffer(NS::UInteger(p_max_draw_count) * words * sizeof(uint32_t), MTL::ResourceStorageModePrivate);
+		if (clamped.buffer) {
+			// Freed with the command buffer's other deferred buffers, once it has run.
+			defer_acceleration_structure_resource(clamped);
+			clamp.buffer = clamped.buffer.get();
+
+			const RenderingDeviceDriverMetal::BufferInfo *indirect_buffer = (const RenderingDeviceDriverMetal::BufferInfo *)p_indirect_buffer.id;
+			const RenderingDeviceDriverMetal::BufferInfo *count_buffer = (const RenderingDeviceDriverMetal::BufferInfo *)p_count_buffer.id;
+			struct {
+				uint32_t max_draw_count;
+				uint32_t stride;
+				uint32_t words;
+				uint32_t view_count;
+			} params = { p_max_draw_count, stride, words, view_count };
+
+			// A self-contained encoder before the render pass, as in timestamp_write(). It waits on what wrote the
+			// records and the count, and the render pass (or the next clamp) waits on it.
+			end();
+			MTL::ComputeCommandEncoder *enc = command_buffer()->computeCommandEncoder(MTL::DispatchTypeConcurrent);
+#ifdef DEV_ENABLED
+			enc->setLabel(MTLSTR("Indirect Count Clamp"));
+#endif
+			if (_indirect_count_clamp_fenced) {
+				_fence_wait_current_level = true;
+			}
+			_fence_wait(enc);
+			_encode_residency(enc);
+			enc->setComputePipelineState(pipeline);
+			enc->setBuffer(indirect_buffer->buffer.get(), p_offset, 0);
+			enc->setBuffer(count_buffer->buffer.get(), p_count_buffer_offset, 1);
+			enc->setBuffer(clamp.buffer, 0, 2);
+			enc->setBytes(&params, sizeof(params), 3);
+			const NS::UInteger group = MIN(NS::UInteger(64), pipeline->maxTotalThreadsPerThreadgroup());
+			enc->dispatchThreads(MTL::Size(p_max_draw_count, 1, 1), MTL::Size(group, 1, 1));
+			_fence_update(enc);
+			enc->endEncoding();
+			_indirect_count_clamp_fenced = true;
+		} else {
+			ERR_PRINT("Cannot allocate the buffer for an indirect count clamp.");
+		}
+	}
+
+	_indirect_count_clamps.push_back(clamp);
+}
+
+// GodotNext: rd_indirect_count (#177)
+void MDCommandBuffer::_render_draw_indirect_count(bool p_indexed, uint32_t p_max_draw_count) {
+	DEV_ASSERT(type == MDCommandBufferStateType::Render);
+	ERR_FAIL_COND_MSG(_indirect_count_clamps_used >= _indirect_count_clamps.size(), "An indirect count draw was not prepared before its render pass.");
+	const IndirectCountClamp clamp = _indirect_count_clamps[_indirect_count_clamps_used++];
+	DEV_ASSERT(clamp.indexed == p_indexed && clamp.max_draw_count == p_max_draw_count);
+	if (clamp.buffer == nullptr) {
+		return; // The prepare failed and said why.
+	}
+	ERR_FAIL_NULL_MSG(render.pipeline, "No pipeline set for render command buffer.");
+
+	_render_set_dirty_state();
+
+	MTL::RenderCommandEncoder *enc = render.encoder.get();
+	const NS::UInteger record_size = p_indexed ? sizeof(MTL::DrawIndexedPrimitivesIndirectArguments) : sizeof(MTL::DrawPrimitivesIndirectArguments);
+	NS::UInteger indirect_offset = 0;
+	for (uint32_t i = 0; i < p_max_draw_count; i++) {
+		if (p_indexed) {
+			enc->drawIndexedPrimitives(render.pipeline->raster_state.render_primitive, render.index_type, render.index_buffer, render.index_offset, clamp.buffer, indirect_offset);
+		} else {
+			enc->drawPrimitives(render.pipeline->raster_state.render_primitive, clamp.buffer, indirect_offset);
+		}
+		indirect_offset += record_size;
+	}
 }
 
 void MDCommandBuffer::render_draw_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
@@ -1596,7 +1696,8 @@ void MDCommandBuffer::render_draw_indirect(RDD::BufferID p_indirect_buffer, uint
 }
 
 void MDCommandBuffer::render_draw_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
-	ERR_FAIL_MSG("not implemented");
+	// GodotNext: rd_indirect_count (#177)
+	_render_draw_indirect_count(false, p_max_draw_count);
 }
 
 void MDCommandBuffer::render_end_pass() {
@@ -1607,6 +1708,11 @@ void MDCommandBuffer::render_end_pass() {
 	render.end_encoding();
 	render.reset();
 	reset();
+
+	// GodotNext: rd_indirect_count (#177). The render graph prepares each pass's count draws right before it.
+	DEV_ASSERT(_indirect_count_clamps_used == _indirect_count_clamps.size());
+	_indirect_count_clamps.clear();
+	_indirect_count_clamps_used = 0;
 }
 
 #pragma mark - RenderState

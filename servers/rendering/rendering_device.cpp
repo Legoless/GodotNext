@@ -327,7 +327,17 @@ static bool _bindless_supported(const RenderingDevice *p_device, const Vector<Re
 	return true;
 }
 
-RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+// GodotNext: rd_indirect_count (#177). A shader compiled with base_instance_native relies on firstInstance
+// reaching gl_InstanceIndex; on D3D12 it is shader model 6.8 code. Checked before the driver translates it.
+static bool _base_instance_native_supported(const RenderingDevice *p_device, bool p_base_instance_native, const String &p_shader_name) {
+	if (!p_base_instance_native || p_device->has_feature(RenderingDeviceCommons::SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE)) {
+		return true;
+	}
+	const String shader = p_shader_name.is_empty() ? String("A shader") : vformat("Shader '%s'", p_shader_name);
+	ERR_FAIL_V_MSG(false, vformat("%s is compiled with base_instance_native, which this device does not support. Missing RenderingDevice feature: SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE.", shader));
+}
+
+RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name, bool p_base_instance_native) {
 	// GodotNext: rd_atomics64 (#175). shader_compile_binary_from_spirv() checks too; checking here as well
 	// keeps it to the one error, without the empty-bytecode error below.
 	if (!_int64_atomics_supported(this, p_spirv, p_shader_name)) {
@@ -337,8 +347,12 @@ RID RenderingDevice::shader_create_from_spirv(const Vector<ShaderStageSPIRVData>
 	if (!_bindless_supported(this, p_spirv, p_shader_name)) {
 		return RID();
 	}
+	// GodotNext: rd_indirect_count (#177). Likewise.
+	if (!_base_instance_native_supported(this, p_base_instance_native, p_shader_name)) {
+		return RID();
+	}
 
-	Vector<uint8_t> bytecode = shader_compile_binary_from_spirv(p_spirv, p_shader_name);
+	Vector<uint8_t> bytecode = shader_compile_binary_from_spirv(p_spirv, p_shader_name, p_base_instance_native);
 	ERR_FAIL_COND_V(bytecode.is_empty(), RID());
 	return shader_create_from_bytecode(bytecode);
 }
@@ -4798,7 +4812,7 @@ String RenderingDevice::_shader_uniform_debug(RID p_shader, int p_set) {
 	return ret;
 }
 
-Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name) {
+Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<ShaderStageSPIRVData> &p_spirv, const String &p_shader_name, bool p_base_instance_native) {
 	// GodotNext: rd_atomics64 (#175). The path of ShaderRD and of the bound method.
 	if (!_int64_atomics_supported(this, p_spirv, p_shader_name)) {
 		return Vector<uint8_t>();
@@ -4807,13 +4821,17 @@ Vector<uint8_t> RenderingDevice::shader_compile_binary_from_spirv(const Vector<S
 	if (!_bindless_supported(this, p_spirv, p_shader_name)) {
 		return Vector<uint8_t>();
 	}
+	// GodotNext: rd_indirect_count (#177)
+	if (!_base_instance_native_supported(this, p_base_instance_native, p_shader_name)) {
+		return Vector<uint8_t>();
+	}
 
 	const RenderingShaderContainerFormat &container_format = driver->get_shader_container_format();
 	Ref<RenderingShaderContainer> shader_container = container_format.create_container();
 	ERR_FAIL_COND_V(shader_container.is_null(), Vector<uint8_t>());
 
 	// Compile shader binary from SPIR-V.
-	bool code_compiled = shader_container->set_code_from_spirv(p_shader_name, p_spirv);
+	bool code_compiled = shader_container->set_code_from_spirv(p_shader_name, p_spirv, p_base_instance_native); // GodotNext: rd_indirect_count (#177)
 	ERR_FAIL_COND_V_MSG(!code_compiled, Vector<uint8_t>(), vformat("Failed to compile code to native for SPIR-V."));
 
 	return shader_container->to_bytes();
@@ -7070,21 +7088,48 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 
 	ERR_FAIL_COND_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "Buffer provided was not created to do indirect dispatch.");
 
+	// GodotNext: rd_indirect_count (#177). The checks and the uniform set binding moved to
+	// _draw_list_prepare_indirect_draw(), which draw_list_draw_indirect_count() shares.
+	if (!_draw_list_prepare_indirect_draw(p_use_indices)) {
+		return;
+	}
+
+	if (p_use_indices) {
+		ERR_FAIL_COND_MSG(p_offset + 20 > buffer->size, "Offset provided (+20) is past the end of buffer.");
+
+		draw_graph.add_draw_list_draw_indexed_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+	} else {
+		ERR_FAIL_COND_MSG(p_offset + 16 > buffer->size, "Offset provided (+16) is past the end of buffer.");
+
+		draw_graph.add_draw_list_draw_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+	}
+
+	draw_list.state.draw_count++;
+
+	if (buffer->draw_tracker != nullptr) {
+		draw_graph.add_draw_list_usage(buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
+	}
+
+	_check_transfer_worker_buffer(buffer);
+}
+
+// GodotNext: rd_indirect_count (#177)
+bool RenderingDevice::_draw_list_prepare_indirect_draw(bool p_use_indices) {
 #ifdef DEBUG_ENABLED
-	ERR_FAIL_COND_MSG(!draw_list.validation.pipeline_active,
+	ERR_FAIL_COND_V_MSG(!draw_list.validation.pipeline_active, false,
 			"No render pipeline was set before attempting to draw.");
 	if (draw_list.validation.pipeline_vertex_format != INVALID_ID) {
 		// Pipeline uses vertices, validate format.
-		ERR_FAIL_COND_MSG(draw_list.validation.vertex_format == INVALID_ID,
+		ERR_FAIL_COND_V_MSG(draw_list.validation.vertex_format == INVALID_ID, false,
 				"No vertex array was bound, and render pipeline expects vertices.");
 		// Make sure format is right.
-		ERR_FAIL_COND_MSG(draw_list.validation.pipeline_vertex_format != draw_list.validation.vertex_format,
+		ERR_FAIL_COND_V_MSG(draw_list.validation.pipeline_vertex_format != draw_list.validation.vertex_format, false,
 				"The vertex format used to create the pipeline does not match the vertex format bound.");
 	}
 
 	if (draw_list.validation.pipeline_push_constant_size > 0) {
 		// Using push constants, check that they were supplied.
-		ERR_FAIL_COND_MSG(!draw_list.validation.pipeline_push_constant_supplied,
+		ERR_FAIL_COND_V_MSG(!draw_list.validation.pipeline_push_constant_supplied, false,
 				"The shader in this pipeline requires a push constant to be set before drawing, but it's not present.");
 	}
 #endif
@@ -7098,13 +7143,13 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 
 		if (draw_list.state.sets[i].pipeline_expected_format != draw_list.state.sets[i].uniform_set_format) {
 			if (draw_list.state.sets[i].uniform_set_format == 0) {
-				ERR_FAIL_MSG(vformat("Uniforms were never supplied for set (%d) at the time of drawing, which are required by the pipeline.", i));
+				ERR_FAIL_V_MSG(false, vformat("Uniforms were never supplied for set (%d) at the time of drawing, which are required by the pipeline.", i));
 			} else if (uniform_set_owner.owns(draw_list.state.sets[i].uniform_set)) {
 				UniformSet *us = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
 				const String us_info = us ? vformat("(%d):\n%s\n", i, _shader_uniform_debug(us->shader_id, us->shader_set)) : vformat("(%d, which was just freed) ", i);
-				ERR_FAIL_MSG(vformat("Uniforms supplied for set %sare not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n%s", us_info, _shader_uniform_debug(draw_list.state.pipeline_shader)));
+				ERR_FAIL_V_MSG(false, vformat("Uniforms supplied for set %sare not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n%s", us_info, _shader_uniform_debug(draw_list.state.pipeline_shader)));
 			} else {
-				ERR_FAIL_MSG(vformat("Uniforms supplied for set (%d, which was just freed) are not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n%s", i, _shader_uniform_debug(draw_list.state.pipeline_shader)));
+				ERR_FAIL_V_MSG(false, vformat("Uniforms supplied for set (%d, which was just freed) are not the same format as required by the pipeline shader. Pipeline shader requires the following bindings:\n%s", i, _shader_uniform_debug(draw_list.state.pipeline_shader)));
 			}
 		}
 	}
@@ -7132,7 +7177,7 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 			draw_graph.add_draw_list_bind_uniform_set(draw_list.state.pipeline_shader_driver_id, draw_list.state.sets[i].uniform_set_driver_id, i);
 
 			UniformSet *uniform_set = uniform_set_owner.get_or_null(draw_list.state.sets[i].uniform_set);
-			ERR_FAIL_NULL(uniform_set);
+			ERR_FAIL_NULL_V(uniform_set, false);
 			_uniform_set_update_shared(uniform_set);
 			_uniform_set_update_clears(uniform_set);
 
@@ -7146,31 +7191,57 @@ void RenderingDevice::draw_list_draw_indirect(DrawListID p_list, bool p_use_indi
 		}
 	}
 
-	if (p_use_indices) {
 #ifdef DEBUG_ENABLED
-		ERR_FAIL_COND_MSG(!draw_list.validation.index_array_count,
+	if (p_use_indices) {
+		ERR_FAIL_COND_V_MSG(!draw_list.validation.index_array_count, false,
 				"Draw command requested indices, but no index buffer was set.");
 
-		ERR_FAIL_COND_MSG(draw_list.validation.pipeline_uses_restart_indices != draw_list.validation.index_buffer_uses_restart_indices,
+		ERR_FAIL_COND_V_MSG(draw_list.validation.pipeline_uses_restart_indices != draw_list.validation.index_buffer_uses_restart_indices, false,
 				"The usage of restart indices in index buffer does not match the render primitive in the pipeline.");
+	}
 #endif
 
-		ERR_FAIL_COND_MSG(p_offset + 20 > buffer->size, "Offset provided (+20) is past the end of buffer.");
+	return true;
+}
 
-		draw_graph.add_draw_list_draw_indexed_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
-	} else {
-		ERR_FAIL_COND_MSG(p_offset + 16 > buffer->size, "Offset provided (+16) is past the end of buffer.");
+// GodotNext: rd_indirect_count (#177)
+void RenderingDevice::draw_list_draw_indirect_count(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset, RID p_count_buffer, uint32_t p_count_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	ERR_RENDER_THREAD_GUARD();
 
-		draw_graph.add_draw_list_draw_indirect(buffer->driver_id, p_offset, p_draw_count, p_stride);
+	// Checked first, so a device without the feature gives this one error.
+	ERR_FAIL_COND_MSG(!has_feature(SUPPORTS_DRAW_INDIRECT_COUNT), "This device does not support indirect draws with a GPU count (RenderingDevice feature SUPPORTS_DRAW_INDIRECT_COUNT).");
+	ERR_FAIL_COND(!draw_list.active);
+
+	Buffer *buffer = storage_buffer_owner.get_or_null(p_buffer);
+	ERR_FAIL_NULL_MSG(buffer, "The indirect buffer is not a valid storage buffer.");
+	Buffer *count_buffer = storage_buffer_owner.get_or_null(p_count_buffer);
+	ERR_FAIL_NULL_MSG(count_buffer, "The count buffer is not a valid storage buffer.");
+	ERR_FAIL_COND_MSG(!buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "The indirect buffer was not created with STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT.");
+	ERR_FAIL_COND_MSG(!count_buffer->usage.has_flag(RDD::BUFFER_USAGE_INDIRECT_BIT), "The count buffer was not created with STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT.");
+
+	const uint32_t record_size = p_use_indices ? 20 : 16;
+	const uint32_t stride = p_stride == 0 ? record_size : p_stride;
+	ERR_FAIL_COND_MSG(stride < record_size || (stride % 4) != 0, vformat("The stride (%d) must be a multiple of 4 and at least %d bytes.", stride, record_size));
+	ERR_FAIL_COND_MSG((p_offset % 4) != 0 || (p_count_offset % 4) != 0, "The offsets into the indirect and count buffers must be multiples of 4.");
+	ERR_FAIL_COND_MSG(uint64_t(p_count_offset) + 4 > count_buffer->size, "The count offset (+4) is past the end of the count buffer.");
+	if (p_max_draw_count > 0) {
+		const uint64_t end = uint64_t(p_offset) + uint64_t(stride) * (p_max_draw_count - 1) + record_size;
+		ERR_FAIL_COND_MSG(end > buffer->size, vformat("%d records of %d bytes from offset %d end past the indirect buffer (%d bytes).", p_max_draw_count, stride, p_offset, buffer->size));
+	}
+
+	if (!_draw_list_prepare_indirect_draw(p_use_indices)) {
+		return;
+	}
+
+	// The graph records the indirect read of both buffers, or says why it cannot.
+	if (!draw_graph.add_draw_list_draw_indirect_count(p_use_indices, buffer->driver_id, buffer->draw_tracker, p_offset, count_buffer->driver_id, count_buffer->draw_tracker, p_count_offset, p_max_draw_count, stride)) {
+		return;
 	}
 
 	draw_list.state.draw_count++;
 
-	if (buffer->draw_tracker != nullptr) {
-		draw_graph.add_draw_list_usage(buffer->draw_tracker, RDG::RESOURCE_USAGE_INDIRECT_BUFFER_READ);
-	}
-
 	_check_transfer_worker_buffer(buffer);
+	_check_transfer_worker_buffer(count_buffer);
 }
 
 void RenderingDevice::draw_list_set_viewport(DrawListID p_list, const Rect2i &p_rect) {
@@ -10486,6 +10557,8 @@ void RenderingDevice::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("draw_list_draw", "draw_list", "use_indices", "instances", "procedural_vertex_count"), &RenderingDevice::draw_list_draw, DEFVAL(0));
 	ClassDB::bind_method(D_METHOD("draw_list_draw_indirect", "draw_list", "use_indices", "buffer", "offset", "draw_count", "stride"), &RenderingDevice::draw_list_draw_indirect, DEFVAL(0), DEFVAL(1), DEFVAL(0));
+	// GodotNext: rd_indirect_count (#177)
+	ClassDB::bind_method(D_METHOD("draw_list_draw_indirect_count", "draw_list", "use_indices", "buffer", "offset", "count_buffer", "count_offset", "max_draw_count", "stride"), &RenderingDevice::draw_list_draw_indirect_count);
 
 	ClassDB::bind_method(D_METHOD("draw_list_enable_scissor", "draw_list", "rect"), &RenderingDevice::draw_list_enable_scissor, DEFVAL(Rect2()));
 	ClassDB::bind_method(D_METHOD("draw_list_disable_scissor", "draw_list"), &RenderingDevice::draw_list_disable_scissor);
@@ -11112,6 +11185,9 @@ void RenderingDevice::_bind_methods() {
 	BIND_ENUM_CONSTANT(SUPPORTS_INT64_ATOMIC_ARITH);
 	// GodotNext: rd_bindless (#176)
 	BIND_ENUM_CONSTANT(SUPPORTS_BINDLESS);
+	// GodotNext: rd_indirect_count (#177)
+	BIND_ENUM_CONSTANT(SUPPORTS_DRAW_INDIRECT_COUNT);
+	BIND_ENUM_CONSTANT(SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_MAIN);
 	BIND_ENUM_CONSTANT(COMPUTE_QUEUE_ASYNC);
 	BIND_ENUM_CONSTANT(SUPPORTS_RAYTRACING_PIPELINE);
@@ -11418,7 +11494,7 @@ Vector<uint8_t> RenderingDevice::_shader_compile_binary_from_spirv(const Ref<RDS
 		stage_data.push_back(sd);
 	}
 
-	return shader_compile_binary_from_spirv(stage_data, p_shader_name);
+	return shader_compile_binary_from_spirv(stage_data, p_shader_name, p_spirv->get_base_instance_native()); // GodotNext: rd_indirect_count (#177)
 }
 
 RID RenderingDevice::_shader_create_from_spirv(const Ref<RDShaderSPIRV> &p_spirv, const String &p_shader_name) {
@@ -11437,7 +11513,7 @@ RID RenderingDevice::_shader_create_from_spirv(const Ref<RDShaderSPIRV> &p_spirv
 		}
 		stage_data.push_back(sd);
 	}
-	return shader_create_from_spirv(stage_data, p_shader_name);
+	return shader_create_from_spirv(stage_data, p_shader_name, p_spirv->get_base_instance_native()); // GodotNext: rd_indirect_count (#177)
 }
 
 RID RenderingDevice::_uniform_set_create(const TypedArray<RDUniform> &p_uniforms, RID p_shader, uint32_t p_shader_set) {

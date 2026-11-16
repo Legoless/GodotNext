@@ -628,6 +628,10 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME, false);
 	// GodotNext: rd_bindless (#176). Core in Vulkan 1.2.
 	_register_requested_device_extension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME, false);
+	// GodotNext: rd_indirect_count (#177). drawIndirectCount has no feature structure of its own: enabling the
+	// extension enables it, also on Vulkan 1.2 and later, where VkPhysicalDeviceVulkan12Features is the
+	// only other way (and it must not sit beside the individual structures of the device chain).
+	_register_requested_device_extension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -992,6 +996,13 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT shader_image_atomic_int64_features = {};
 		// GodotNext: rd_bindless (#176). Read from the Vulkan 1.2 structure on 1.2 devices.
 		VkPhysicalDeviceDescriptorIndexingFeaturesEXT descriptor_indexing_features = {};
+		// GodotNext: rd_indirect_count (#177). A Vulkan 1.1 structure.
+		VkPhysicalDeviceShaderDrawParametersFeatures shader_draw_parameters_features = {};
+		if (physical_device_properties.apiVersion >= VK_API_VERSION_1_1) {
+			shader_draw_parameters_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
+			shader_draw_parameters_features.pNext = next_features;
+			next_features = &shader_draw_parameters_features;
+		}
 
 		const bool use_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 		if (use_1_2_features) {
@@ -1176,6 +1187,9 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 				bindless_capabilities.variable_descriptor_count = descriptor_indexing_features.descriptorBindingVariableDescriptorCount;
 			}
 		}
+
+		// GodotNext: rd_indirect_count (#177)
+		shader_draw_parameters_support = shader_draw_parameters_features.shaderDrawParameters;
 
 		// GodotNext: rd_atomics64 (#175)
 		if (enabled_device_extension_names.has(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME)) {
@@ -1655,6 +1669,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 	VkPhysicalDeviceVulkan11Features vulkan_1_1_features = {};
 	VkPhysicalDevice16BitStorageFeaturesKHR storage_features = {};
 	VkPhysicalDeviceMultiviewFeatures multiview_features = {};
+	VkPhysicalDeviceShaderDrawParametersFeatures shader_draw_parameters_features = {}; // GodotNext: rd_indirect_count (#177)
 	const bool enable_1_2_features = physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
 	if (enable_1_2_features) {
 		// In Vulkan 1.2 and newer we use a newer struct to enable various features.
@@ -1671,7 +1686,8 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		vulkan_1_1_features.variablePointers = 0;
 		vulkan_1_1_features.protectedMemory = 0;
 		vulkan_1_1_features.samplerYcbcrConversion = 0;
-		vulkan_1_1_features.shaderDrawParameters = 0;
+		// GodotNext: rd_indirect_count (#177). Was 0; gl_DrawID and gl_BaseInstance need it.
+		vulkan_1_1_features.shaderDrawParameters = shader_draw_parameters_support;
 		create_info_next = &vulkan_1_1_features;
 	} else {
 		// On Vulkan 1.0 and 1.1 we use our older structs to initialize these features.
@@ -1691,6 +1707,14 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 			multiview_features.multiviewGeometryShader = multiview_capabilities.geometry_shader_is_supported;
 			multiview_features.multiviewTessellationShader = multiview_capabilities.tessellation_shader_is_supported;
 			create_info_next = &multiview_features;
+
+			// GodotNext: rd_indirect_count (#177). Vulkan 1.1 has no VkPhysicalDeviceVulkan11Features.
+			if (shader_draw_parameters_support) {
+				shader_draw_parameters_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES;
+				shader_draw_parameters_features.pNext = create_info_next;
+				shader_draw_parameters_features.shaderDrawParameters = VK_TRUE;
+				create_info_next = &shader_draw_parameters_features;
+			}
 		}
 	}
 
@@ -1782,6 +1806,12 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		// Debug device fault extension.
 		if (device_fault_support) {
 			device_functions.GetDeviceFaultInfoEXT = (PFN_vkGetDeviceFaultInfoEXT)functions.GetDeviceProcAddr(vk_device, "vkGetDeviceFaultInfoEXT");
+		}
+
+		// GodotNext: rd_indirect_count (#177)
+		if (enabled_device_extension_names.has(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME)) {
+			device_functions.CmdDrawIndirectCountKHR = PFN_vkCmdDrawIndirectCountKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawIndirectCountKHR"));
+			device_functions.CmdDrawIndexedIndirectCountKHR = PFN_vkCmdDrawIndexedIndirectCountKHR(functions.GetDeviceProcAddr(vk_device, "vkCmdDrawIndexedIndirectCountKHR"));
 		}
 
 		// Device raytracing extensions.
@@ -6461,7 +6491,9 @@ void RenderingDeviceDriverVulkan::command_render_draw_indexed_indirect_count(Com
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	const BufferInfo *indirect_buf_info = (const BufferInfo *)p_indirect_buffer.id;
 	const BufferInfo *count_buf_info = (const BufferInfo *)p_count_buffer.id;
-	vkCmdDrawIndexedIndirectCount(command_buffer->vk_command_buffer, indirect_buf_info->vk_buffer, p_offset, count_buf_info->vk_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
+	// GodotNext: rd_indirect_count (#177). The extension's entry point: the extension enables the feature.
+	ERR_FAIL_NULL_MSG(device_functions.CmdDrawIndexedIndirectCountKHR, "VK_KHR_draw_indirect_count is not enabled.");
+	device_functions.CmdDrawIndexedIndirectCountKHR(command_buffer->vk_command_buffer, indirect_buf_info->vk_buffer, p_offset, count_buf_info->vk_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
 }
 
 void RenderingDeviceDriverVulkan::command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
@@ -6474,7 +6506,9 @@ void RenderingDeviceDriverVulkan::command_render_draw_indirect_count(CommandBuff
 	const CommandBufferInfo *command_buffer = (const CommandBufferInfo *)p_cmd_buffer.id;
 	const BufferInfo *indirect_buf_info = (const BufferInfo *)p_indirect_buffer.id;
 	const BufferInfo *count_buf_info = (const BufferInfo *)p_count_buffer.id;
-	vkCmdDrawIndirectCount(command_buffer->vk_command_buffer, indirect_buf_info->vk_buffer, p_offset, count_buf_info->vk_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
+	// GodotNext: rd_indirect_count (#177)
+	ERR_FAIL_NULL_MSG(device_functions.CmdDrawIndirectCountKHR, "VK_KHR_draw_indirect_count is not enabled.");
+	device_functions.CmdDrawIndirectCountKHR(command_buffer->vk_command_buffer, indirect_buf_info->vk_buffer, p_offset, count_buf_info->vk_buffer, p_count_buffer_offset, p_max_draw_count, p_stride);
 }
 
 void RenderingDeviceDriverVulkan::command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) {
@@ -8413,6 +8447,12 @@ bool RenderingDeviceDriverVulkan::has_feature(Features p_feature) {
 		// GodotNext: rd_bindless (#176)
 		case SUPPORTS_BINDLESS:
 			return bindless_capabilities.features_supported() && bindless_capabilities.max_textures >= RDBindless::MIN_SLOTS && bindless_capabilities.max_storage_buffers >= RDBindless::MIN_SLOTS && bindless_capabilities.max_samplers >= RDBindless::MIN_SAMPLER_SLOTS;
+		// GodotNext: rd_indirect_count (#177). Device creation enables drawIndirectFirstInstance whenever the
+		// device has it; gl_InstanceIndex includes firstInstance on Vulkan.
+		case SUPPORTS_DRAW_INDIRECT_COUNT:
+			return device_functions.CmdDrawIndirectCountKHR != nullptr && device_functions.CmdDrawIndexedIndirectCountKHR != nullptr;
+		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
+			return requested_device_features.drawIndirectFirstInstance;
 		default:
 			return false;
 	}

@@ -97,6 +97,8 @@ private:
 		bool dirty;
 		bool initialize_needed;
 		bool embedded;
+		// GodotNext: rd_indirect_count (#177). Compiled with RenderingDevice's base_instance_native.
+		bool base_instance_native = false;
 	};
 
 	struct CompileData {
@@ -215,7 +217,11 @@ public:
 	// GodotNext: nextgi_ray_query_census (#186)
 	static uint64_t get_ray_query_versions_created() { return ray_query_versions_created.get(); }
 
-	RID version_create(bool p_embedded = true);
+	// GodotNext: rd_indirect_count (#177). p_base_instance_native compiles every variant of the version so that
+	// gl_InstanceIndex includes the firstInstance of indirect draws (on D3D12, shader model 6.8). Only for
+	// devices with RenderingDevice::SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE; elsewhere the variants fail to compile.
+	RID version_create(bool p_embedded = true, bool p_base_instance_native = false);
+	bool version_is_base_instance_native(RID p_version);
 
 	void version_set_code(RID p_version, const HashMap<String, String> &p_code, const String &p_uniforms, const String &p_vertex_globals, const String &p_fragment_globals, const Vector<String> &p_custom_defines);
 	void version_set_compute_code(RID p_version, const HashMap<String, String> &p_code, const String &p_uniforms, const String &p_compute_globals, const Vector<String> &p_custom_defines);

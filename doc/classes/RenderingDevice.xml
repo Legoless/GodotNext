@@ -479,6 +479,22 @@
 				Submits [param draw_list] for rendering on the GPU with the given parameters stored in the [param buffer] at [param offset]. Parameters being integers: vertex count, instance count, first vertex, first instance. And when using indices: index count, instance count, first index, vertex offset, first instance. Buffer must have been created with [constant STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT] flag.
 			</description>
 		</method>
+		<method name="draw_list_draw_indirect_count">
+			<return type="void" />
+			<param index="0" name="draw_list" type="int" />
+			<param index="1" name="use_indices" type="bool" />
+			<param index="2" name="buffer" type="RID" />
+			<param index="3" name="offset" type="int" />
+			<param index="4" name="count_buffer" type="RID" />
+			<param index="5" name="count_offset" type="int" />
+			<param index="6" name="max_draw_count" type="int" />
+			<param index="7" name="stride" type="int" />
+			<description>
+				Submits up to [param max_draw_count] indirect draws whose parameters are stored in [param buffer] from [param offset], [param stride] bytes apart, like [method draw_list_draw_indirect]. The GPU reads how many of them run from the 32-bit unsigned integer at [param count_offset] in [param count_buffer], so a compute shader can write the count; the draws past it, or past [param max_draw_count], do not run. A [param stride] of [code]0[/code] means tightly packed records: 16 bytes, or 20 bytes with [param use_indices]. The stride must otherwise be a multiple of 4 and at least that size, and both offsets must be multiples of 4. Both buffers must have been created with the [constant STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT] flag. Requires [constant SUPPORTS_DRAW_INDIRECT_COUNT].
+				A first instance other than [code]0[/code] in the records also needs [constant SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE], and on Direct3D 12 a shader compiled with [member RDShaderSPIRV.base_instance_native] for [code]gl_InstanceIndex[/code] to include it.
+				[b]Note:[/b] Neither buffer may also be bound in a uniform set of the same draw list. A buffer has one usage per draw list, so it would not be synchronized for the indirect read; this method fails with an error when the draw list already uses either buffer that way. The same holds for a buffer in a bindless table that the draw list binds, when the table has not read the buffer since it was last written: this method fails with an error when the table is bound before the draw, and [method draw_list_end] prints one when it is bound after. To use such a buffer, bind the table in an earlier list after the write, or keep the buffer out of the table.
+			</description>
+		</method>
 		<method name="draw_list_enable_scissor">
 			<return type="void" />
 			<param index="0" name="draw_list" type="int" />
@@ -2983,6 +2999,14 @@
 		<constant name="SUPPORTS_BINDLESS" value="21" enum="Features">
 			The device supports bindless tables ([method bindless_table_create]): texture and storage-buffer tables of at least 65,536 slots, and sampler tables of at least 1,024 slots, read at non-uniform indices.
 			[b]Note:[/b] The Vulkan driver needs descriptor indexing ([code]VK_EXT_descriptor_indexing[/code] or Vulkan 1.2) with update-after-bind, partially bound and variable-count bindings. The Metal driver reports [code]false[/code] for now: its tables, in tier 2 argument buffers on Metal 3, have not been run on a Mac yet. The Direct3D 12 driver needs resource binding tier 2, enhanced barriers, and room for the tables in the shader-visible descriptor heaps beside [member ProjectSettings.rendering/rendering_device/d3d12/max_resource_descriptors] and [member ProjectSettings.rendering/rendering_device/d3d12/max_sampler_descriptors]. It reports [code]true[/code] only on NVIDIA GPUs for now: the shaders it compiles do not mark table reads as non-uniform, which other GPUs may need to read the right entry in every pixel.
+		</constant>
+		<constant name="SUPPORTS_DRAW_INDIRECT_COUNT" value="22" enum="Features">
+			The device supports [method draw_list_draw_indirect_count]: indirect draws whose count the GPU reads from a buffer.
+			[b]Note:[/b] The Vulkan driver sets it when the device has [code]VK_KHR_draw_indirect_count[/code]. The Direct3D 12 driver always sets it ([code]ExecuteIndirect[/code] with a count buffer). The Metal driver sets it too: before the render pass, a compute pass copies the records and sets the instance count of those past the count to [code]0[/code], then the render pass issues the maximum number of indirect draws from that copy.
+		</constant>
+		<constant name="SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE" value="23" enum="Features">
+			Indirect draws honor a first instance other than [code]0[/code], and [code]gl_InstanceIndex[/code] includes it.
+			[b]Note:[/b] The Vulkan driver sets it when the device has [code]drawIndirectFirstInstance[/code]; the Metal driver always sets it. The Direct3D 12 driver sets it with shader model 6.8 and extended command information, and only shaders compiled with [member RDShaderSPIRV.base_instance_native] see the first instance there.
 		</constant>
 		<constant name="COMPUTE_QUEUE_MAIN" value="0" enum="ComputeQueue">
 			Records the compute list on the main queue.

@@ -1082,6 +1082,12 @@ public:
 		// Bindless tables (plan §21.1 C4): texture and storage-buffer tables of at least 65,536 slots, sampler
 		// tables up to LIMIT_MAX_BINDLESS_SAMPLERS, read at non-uniform indices.
 		SUPPORTS_BINDLESS,
+		// GodotNext: rd_indirect_count (#177)
+		// draw_list_draw_indirect_count(): indirect draws whose count a GPU buffer holds.
+		SUPPORTS_DRAW_INDIRECT_COUNT,
+		// Indirect draws honor a firstInstance other than 0, and gl_InstanceIndex includes it. On D3D12
+		// only in shaders compiled with base_instance_native (shader model 6.8).
+		SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE,
 	};
 
 	// GodotNext: metal_ray_query

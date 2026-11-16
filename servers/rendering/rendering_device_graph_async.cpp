@@ -386,6 +386,28 @@ void RenderingDeviceGraph::set_driver_traits_for_test(bool p_honors_barriers, bo
 	driver_textures_require_layout_transitions = p_textures_require_layout_transitions;
 }
 
+// GodotNext: rd_indirect_count (#177)
+LocalVector<RenderingDeviceGraph::IndirectCountDraw> RenderingDeviceGraph::indirect_count_draws_for_test(int32_t p_command_index) const {
+	LocalVector<IndirectCountDraw> draws;
+	ERR_FAIL_COND_V(p_command_index < 0 || uint32_t(p_command_index) >= command_count, draws);
+	const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
+	ERR_FAIL_COND_V(command->type != RecordedCommand::TYPE_DRAW_LIST, draws);
+	const RecordedDrawListCommand *draw_list_command = static_cast<const RecordedDrawListCommand *>(command);
+	for (uint32_t i = 0; i < draw_list_command->indirect_count_draws; i++) {
+		const DrawListDrawIndirectCountInstruction *instruction = reinterpret_cast<const DrawListDrawIndirectCountInstruction *>(draw_list_command->instruction_data() + draw_list_command->indirect_count_offsets()[i]);
+		IndirectCountDraw draw;
+		draw.indexed = instruction->type == DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT;
+		draw.buffer = instruction->buffer;
+		draw.count_buffer = instruction->count_buffer;
+		draw.offset = instruction->offset;
+		draw.count_buffer_offset = instruction->count_buffer_offset;
+		draw.max_draw_count = instruction->max_draw_count;
+		draw.stride = instruction->stride;
+		draws.push_back(draw);
+	}
+	return draws;
+}
+
 void RenderingDeviceGraph::async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers) {
 	LocalVector<RecordedCommandSort> commands_sorted;
 	_compute_command_levels(commands_sorted);

@@ -104,6 +104,9 @@ public:
 	// allocation.
 	static constexpr uint32_t BINDLESS_RESOURCE_RANGE_SIZE = 65536;
 	static constexpr uint32_t BINDLESS_SAMPLER_RANGE_SIZE = 1024;
+	// GodotNext: rd_indirect_count (#177). SV_StartVertexLocation and SV_StartInstanceLocation (extended command
+	// information), which shaders compiled with base_instance_native read.
+	static constexpr uint32_t BASE_INSTANCE_NATIVE_SHADER_MODEL = 0x68; // D3D_SHADER_MODEL_6_8
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
@@ -156,6 +159,8 @@ protected:
 	Vector<ReflectionSpecializationDataD3D12> reflection_specialization_data_d3d12;
 	Vector<uint8_t> root_signature_bytes;
 	uint32_t root_signature_crc = 0;
+	// GodotNext: rd_indirect_count (#177). Set from ReflectShader::base_instance_native for one compilation.
+	bool base_instance_native = false;
 
 #if NIR_ENABLED
 	bool _convert_spirv_to_nir(Span<ReflectShaderStage> p_spirv, const nir_shader_compiler_options *p_compiler_options, HashMap<int, nir_shader *> &r_stages_nir_shaders, Vector<RenderingDeviceCommons::ShaderStage> &r_stages, BitField<RenderingDeviceCommons::ShaderStage> &r_stages_processed);

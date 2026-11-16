@@ -5430,7 +5430,10 @@ void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect(CommandBuf
 		_resource_transitions_flush(cmd_buf_info);
 	}
 
-	cmd_buf_info->cmd_list->ExecuteIndirect(indirect_cmd_signatures.draw_indexed.Get(), p_draw_count, indirect_buf_info->resource, p_offset, nullptr, 0);
+	// GodotNext: rd_indirect_count (#177). A signature with the stride the records were written with.
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, p_stride, p_draw_count);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_draw_count, indirect_buf_info->resource, p_offset, nullptr, 0);
 }
 
 void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
@@ -5444,7 +5447,10 @@ void RenderingDeviceDriverD3D12::command_render_draw_indexed_indirect_count(Comm
 		_resource_transitions_flush(cmd_buf_info);
 	}
 
-	cmd_buf_info->cmd_list->ExecuteIndirect(indirect_cmd_signatures.draw_indexed.Get(), p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
+	// GodotNext: rd_indirect_count (#177)
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, p_stride, p_max_draw_count);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
 }
 
 void RenderingDeviceDriverD3D12::command_render_draw_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
@@ -5456,7 +5462,10 @@ void RenderingDeviceDriverD3D12::command_render_draw_indirect(CommandBufferID p_
 		_resource_transitions_flush(cmd_buf_info);
 	}
 
-	cmd_buf_info->cmd_list->ExecuteIndirect(indirect_cmd_signatures.draw.Get(), p_draw_count, indirect_buf_info->resource, p_offset, nullptr, 0);
+	// GodotNext: rd_indirect_count (#177)
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, p_stride, p_draw_count);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_draw_count, indirect_buf_info->resource, p_offset, nullptr, 0);
 }
 
 void RenderingDeviceDriverD3D12::command_render_draw_indirect_count(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
@@ -5470,7 +5479,10 @@ void RenderingDeviceDriverD3D12::command_render_draw_indirect_count(CommandBuffe
 		_resource_transitions_flush(cmd_buf_info);
 	}
 
-	cmd_buf_info->cmd_list->ExecuteIndirect(indirect_cmd_signatures.draw.Get(), p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
+	// GodotNext: rd_indirect_count (#177)
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, p_stride, p_max_draw_count);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
 }
 
 void RenderingDeviceDriverD3D12::command_render_bind_vertex_buffers(CommandBufferID p_cmd_buffer, uint32_t p_binding_count, const BufferID *p_buffers, const uint64_t *p_offsets, uint64_t p_dynamic_offsets) {
@@ -5995,7 +6007,10 @@ void RenderingDeviceDriverD3D12::command_compute_dispatch_indirect(CommandBuffer
 		_resource_transitions_flush(cmd_buf_info);
 	}
 
-	cmd_buf_info->cmd_list->ExecuteIndirect(indirect_cmd_signatures.dispatch.Get(), 1, indirect_buf_info->resource, p_offset, nullptr, 0);
+	// GodotNext: rd_indirect_count (#177)
+	ID3D12CommandSignature *signature = _get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, 0, 1);
+	ERR_FAIL_NULL(signature);
+	cmd_buf_info->cmd_list->ExecuteIndirect(signature, 1, indirect_buf_info->resource, p_offset, nullptr, 0);
 }
 
 // ----- PIPELINE -----
@@ -6899,6 +6914,12 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return ray_query_caps.ray_query;
 		case SUPPORTS_RAY_QUERY_HARDWARE:
 			return ray_query_caps.ray_query && ray_query_caps.hardware;
+		// GodotNext: rd_indirect_count (#177). ExecuteIndirect takes a count buffer. firstInstance reaches
+		// gl_InstanceIndex only through SV_StartInstanceLocation, in shaders compiled with base_instance_native.
+		case SUPPORTS_DRAW_INDIRECT_COUNT:
+			return true;
+		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
+			return shader_capabilities.base_instance_native_supported();
 		default:
 			return false;
 	}
@@ -7285,6 +7306,14 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 		}
 	}
 
+	// GodotNext: rd_indirect_count (#177). SV_StartVertexLocation and SV_StartInstanceLocation (shader model 6.8).
+	D3D12_FEATURE_DATA_D3D12_OPTIONS21 options21 = {};
+	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS21, &options21, sizeof(options21));
+	if (SUCCEEDED(res)) {
+		shader_capabilities.extended_command_info_supported = options21.ExtendedCommandInfoSupported;
+	}
+	print_verbose(vformat("- D3D12 indirect draws: base instance in shaders %s (shader model %s, extended command information %s)", shader_capabilities.base_instance_native_supported() ? "supported" : "not supported", D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model), shader_capabilities.extended_command_info_supported ? "supported" : "not supported"));
+
 	if (fsr_capabilities.pipeline_supported || fsr_capabilities.primitive_supported || fsr_capabilities.attachment_supported) {
 		print_verbose("- D3D12 Variable Rate Shading supported:");
 		if (fsr_capabilities.pipeline_supported) {
@@ -7551,15 +7580,42 @@ Error RenderingDeviceDriverD3D12::_initialize_frames(uint32_t p_frame_count) {
 	return OK;
 }
 
+// GodotNext: rd_indirect_count (#177)
+static uint32_t indirect_argument_size(D3D12_INDIRECT_ARGUMENT_TYPE p_type) {
+	switch (p_type) {
+		case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW:
+			return sizeof(D3D12_DRAW_ARGUMENTS);
+		case D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED:
+			return sizeof(D3D12_DRAW_INDEXED_ARGUMENTS);
+		case D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH:
+			return sizeof(D3D12_DISPATCH_ARGUMENTS);
+		default:
+			return 0;
+	}
+}
+
+ID3D12CommandSignature *RenderingDeviceDriverD3D12::_get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE p_type, uint32_t p_stride, uint32_t p_max_count) {
+	const uint32_t argument_size = indirect_argument_size(p_type);
+	const uint32_t stride = D3D12CommandSignatureCache<IndirectCommandSignature>::get_stride(p_stride, argument_size, p_max_count);
+	ERR_FAIL_COND_V_MSG(stride < argument_size || (stride % 4) != 0, nullptr, vformat("An indirect stride of %d bytes is not a multiple of 4 of at least %d bytes.", stride, argument_size));
+	ID3D12Device *d3d_device = device.Get();
+	bool valid = false;
+	const IndirectCommandSignature signature = indirect_cmd_signatures.get(
+			uint32_t(p_type), stride, [d3d_device](uint32_t p_signature_type, uint32_t p_signature_stride, IndirectCommandSignature &r_signature) {
+				return create_command_signature(d3d_device, D3D12_INDIRECT_ARGUMENT_TYPE(p_signature_type), p_signature_stride, &r_signature.signature) == OK;
+			},
+			valid);
+	ERR_FAIL_COND_V(!valid, nullptr);
+	// The cache keeps a reference, so the pointer outlives this copy.
+	return signature.signature.Get();
+}
+
 Error RenderingDeviceDriverD3D12::_initialize_command_signatures() {
-	Error err = create_command_signature(device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(D3D12_DRAW_ARGUMENTS), &indirect_cmd_signatures.draw);
-	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
-
-	err = create_command_signature(device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, sizeof(D3D12_DRAW_INDEXED_ARGUMENTS), &indirect_cmd_signatures.draw_indexed);
-	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
-
-	err = create_command_signature(device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, sizeof(D3D12_DISPATCH_ARGUMENTS), &indirect_cmd_signatures.dispatch);
-	ERR_FAIL_COND_V(err != OK, ERR_CANT_CREATE);
+	// GodotNext: rd_indirect_count (#177). The tightly packed signatures; other strides are made on first use.
+	const D3D12_INDIRECT_ARGUMENT_TYPE types[] = { D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH };
+	for (const D3D12_INDIRECT_ARGUMENT_TYPE type : types) {
+		ERR_FAIL_NULL_V(_get_indirect_cmd_signature(type, 0, 1), ERR_CANT_CREATE);
+	}
 
 	return OK;
 }

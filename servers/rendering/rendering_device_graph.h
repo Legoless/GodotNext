@@ -94,7 +94,10 @@ public:
 			TYPE_SET_PUSH_CONSTANT,
 			TYPE_SET_SCISSOR,
 			TYPE_SET_VIEWPORT,
-			TYPE_UNIFORM_SET_PREPARE_FOR_USE
+			TYPE_UNIFORM_SET_PREPARE_FOR_USE,
+			// GodotNext: rd_indirect_count (#177)
+			TYPE_DRAW_INDIRECT_COUNT,
+			TYPE_DRAW_INDEXED_INDIRECT_COUNT,
 		};
 
 		Type type = TYPE_NONE;
@@ -506,6 +509,8 @@ private:
 		uint32_t breadcrumb;
 #endif
 		bool split_cmd_buffer = false;
+		// GodotNext: rd_indirect_count (#177). Where the indirect-count draws sit in data.
+		LocalVector<uint32_t> indirect_count_offsets;
 	};
 
 	struct RecordedCommandSort {
@@ -704,6 +709,22 @@ private:
 		_FORCE_INLINE_ const uint8_t *instruction_data() const {
 			return reinterpret_cast<const uint8_t *>(&store_ops()[trackers_count]);
 		}
+
+		// GodotNext: rd_indirect_count (#177). The offsets of the indirect-count draws in instruction_data(),
+		// after it at the next 8-byte boundary, so drivers can prepare them before the render pass begins.
+		uint32_t indirect_count_draws = 0;
+
+		_FORCE_INLINE_ static uint32_t indirect_count_offsets_start(uint32_t p_instruction_data_size) {
+			return (p_instruction_data_size + 7u) & ~7u;
+		}
+
+		_FORCE_INLINE_ uint32_t *indirect_count_offsets() {
+			return reinterpret_cast<uint32_t *>(instruction_data() + indirect_count_offsets_start(instruction_data_size));
+		}
+
+		_FORCE_INLINE_ const uint32_t *indirect_count_offsets() const {
+			return reinterpret_cast<const uint32_t *>(instruction_data() + indirect_count_offsets_start(instruction_data_size));
+		}
 	};
 
 	struct RecordedTextureClearColorCommand : RecordedCommand {
@@ -863,6 +884,16 @@ private:
 		RDD::BufferID buffer;
 		uint32_t offset = 0;
 		uint32_t draw_count = 0;
+		uint32_t stride = 0;
+	};
+
+	// GodotNext: rd_indirect_count (#177). TYPE_DRAW_INDIRECT_COUNT and TYPE_DRAW_INDEXED_INDIRECT_COUNT.
+	struct DrawListDrawIndirectCountInstruction : DrawListInstruction {
+		RDD::BufferID buffer;
+		RDD::BufferID count_buffer;
+		uint32_t offset = 0;
+		uint32_t count_buffer_offset = 0;
+		uint32_t max_draw_count = 0;
 		uint32_t stride = 0;
 	};
 
@@ -1142,6 +1173,9 @@ private:
 	void _bindless_resource_used(ResourceTracker *p_resident, ResourceUsage p_usage, int32_t p_command_index, RecordedCommand *r_command);
 	void _bindless_tables_add_usages(InstructionList &r_list, ListUsageFunction p_add_usage);
 	void _bindless_tables_bound(InstructionList &r_list, int32_t p_command_index, RecordedCommand *r_command);
+	// GodotNext: rd_indirect_count (#177).
+	static bool _bindless_dirty_in_list_tables(const InstructionList &p_list, const ResourceTracker *p_tracker);
+	void _bindless_draw_list_tables_add_usages(int32_t p_command_index);
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
 	void _print_draw_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
 	void _print_compute_list(const uint8_t *p_instruction_data, uint32_t p_instruction_data_size);
@@ -1201,6 +1235,10 @@ public:
 	void add_draw_list_draw_indexed(uint32_t p_index_count, uint32_t p_instance_count, uint32_t p_first_index);
 	void add_draw_list_draw_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
 	void add_draw_list_draw_indexed_indirect(RDD::BufferID p_buffer, uint32_t p_offset, uint32_t p_draw_count, uint32_t p_stride);
+	// GodotNext: rd_indirect_count (#177). Also records the indirect read of both buffers (trackers may be null).
+	// Fails with an error, and records nothing, when this draw list already uses either buffer another way, or
+	// binds a bindless table that has not read either buffer since it was last written.
+	bool add_draw_list_draw_indirect_count(bool p_indexed, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, RDD::BufferID p_count_buffer, ResourceTracker *p_count_buffer_tracker, uint32_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 	void add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer);
 	void add_draw_list_next_subpass(RDD::CommandBufferType p_command_buffer_type);
 	void add_draw_list_set_blend_constants(const Color &p_color);
@@ -1237,6 +1275,18 @@ public:
 	// barriers. async_barriers_for_test(): plans as end() does with an async command buffer and, when
 	// the plan is active, gathers p_selection's barriers from every async command of the frame.
 	void set_driver_traits_for_test(bool p_honors_barriers, bool p_textures_require_layout_transitions);
+	// GodotNext: rd_indirect_count (#177). The indirect-count draws of recorded command p_command_index (a draw
+	// list), as the driver is asked to prepare them before its render pass begins.
+	struct IndirectCountDraw {
+		bool indexed = false;
+		RDD::BufferID buffer;
+		RDD::BufferID count_buffer;
+		uint32_t offset = 0;
+		uint32_t count_buffer_offset = 0;
+		uint32_t max_draw_count = 0;
+		uint32_t stride = 0;
+	};
+	LocalVector<IndirectCountDraw> indirect_count_draws_for_test(int32_t p_command_index) const;
 	void async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers);
 	// GodotNext: rd_clear_values (#275). C++-only and driver-free, for the doctests: what a recorded
 	// draw list passes to the driver, the load ops of its framebuffer slots and its clear values.

@@ -246,7 +246,7 @@ void ShaderRD::setup_raytracing(const char *p_raygen_code, const char *p_any_hit
 	base_sha256 = tohash.as_string().sha256_text();
 }
 
-RID ShaderRD::version_create(bool p_embedded) {
+RID ShaderRD::version_create(bool p_embedded, bool p_base_instance_native) {
 	//initialize() was never called
 	ERR_FAIL_COND_V(group_to_variant_map.is_empty(), RID());
 
@@ -255,6 +255,7 @@ RID ShaderRD::version_create(bool p_embedded) {
 	version.valid = false;
 	version.initialize_needed = true;
 	version.embedded = p_embedded;
+	version.base_instance_native = p_base_instance_native; // GodotNext: rd_indirect_count (#177)
 	version.variants.clear();
 	version.variant_data.clear();
 
@@ -276,6 +277,13 @@ RID ShaderRD::version_create(bool p_embedded) {
 	}
 
 	return rid;
+}
+
+// GodotNext: rd_indirect_count (#177)
+bool ShaderRD::version_is_base_instance_native(RID p_version) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+	return version->base_instance_native;
 }
 
 void ShaderRD::_initialize_version(Version *p_version) {
@@ -446,7 +454,7 @@ void ShaderRD::_compile_variant(uint32_t p_variant, CompileData p_data) {
 	// GodotNext: spirv_dump
 	_dump_spirv_if_requested(variant, variant_stages);
 
-	Vector<uint8_t> shader_data = RD::get_singleton()->shader_compile_binary_from_spirv(variant_stages, name + ":" + itos(variant));
+	Vector<uint8_t> shader_data = RD::get_singleton()->shader_compile_binary_from_spirv(variant_stages, name + ":" + itos(variant), p_data.version->base_instance_native); // GodotNext: rd_indirect_count (#177)
 	ERR_FAIL_COND(shader_data.is_empty());
 
 	{
@@ -671,6 +679,11 @@ String ShaderRD::_version_get_sha1(Version *p_version) const {
 	for (int i = 0; i < p_version->custom_defines.size(); i++) {
 		hash_build.append("[custom_defines:" + itos(i) + "]");
 		hash_build.append(p_version->custom_defines[i].get_data());
+	}
+	// GodotNext: rd_indirect_count (#177). The same code compiles differently, so it is cached apart. Versions
+	// without the flag keep their hash.
+	if (p_version->base_instance_native) {
+		hash_build.append("[base_instance_native]");
 	}
 
 	return hash_build.as_string().sha1_text();

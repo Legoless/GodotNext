@@ -451,6 +451,7 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 		work_item.stage_sources = p_shader->version_build_variant_stage_sources(p_version, i);
 		work_item.dynamic_buffers = p_shader->get_dynamic_buffers();
 		work_item.variant = i;
+		work_item.base_instance_native = p_shader->version_is_base_instance_native(p_version); // GodotNext: rd_indirect_count (#177)
 
 		WorkerThreadPool::TaskID task_id = WorkerThreadPool::get_singleton()->add_template_task(this, &ShaderBakerExportPlugin::_process_work_item, work_item);
 		group_items[group].variant_tasks.push_back(task_id);
@@ -477,7 +478,7 @@ void ShaderBakerExportPlugin::_process_work_item(WorkItem p_work_item) {
 			Ref<RenderingShaderContainer> shader_container = shader_container_format->create_container();
 
 			// Compile shader binary from SPIR-V.
-			bool code_compiled = shader_container->set_code_from_spirv(p_work_item.shader_name, spirv_data);
+			bool code_compiled = shader_container->set_code_from_spirv(p_work_item.shader_name, spirv_data, p_work_item.base_instance_native); // GodotNext: rd_indirect_count (#177)
 			if (unlikely(!code_compiled)) {
 				ERR_PRINT("Failed to compile code to native for SPIR-V.");
 			} else {

@@ -254,6 +254,8 @@ public:
 	NS::SharedPtr<MTL::RenderPipelineState> new_clear_pipeline_state(ClearAttKey &p_key, NS::Error **p_error);
 	NS::SharedPtr<MTL::RenderPipelineState> new_empty_draw_pipeline_state(ClearAttKey &p_key, NS::Error **p_error);
 	NS::SharedPtr<MTL::DepthStencilState> new_depth_stencil_state(bool p_use_depth, bool p_use_stencil);
+	// GodotNext: rd_indirect_count (#177). r_error says why, when it returns null.
+	NS::SharedPtr<MTL::ComputePipelineState> new_indirect_count_clamp_pipeline_state(String &r_error);
 
 	MDResourceFactory(MTL::Device *p_device, PixelFormats &p_pixel_formats, uint32_t p_max_buffer_count) :
 			device(p_device), pixel_formats(p_pixel_formats), max_buffer_count(p_max_buffer_count) {}
@@ -274,10 +276,18 @@ private:
 		NS::SharedPtr<MTL::DepthStencilState> none;
 	} clear_depth_stencil_state;
 
+	// GodotNext: rd_indirect_count (#177). A failed creation is reported once and not tried again.
+	NS::SharedPtr<MTL::ComputePipelineState> indirect_count_clamp_state;
+	bool indirect_count_clamp_failed = false;
+
 public:
 	MTL::RenderPipelineState *get_clear_render_pipeline_state(ClearAttKey &p_key, NS::Error **p_error);
 	MTL::RenderPipelineState *get_empty_draw_pipeline_state(ClearAttKey &p_key, NS::Error **p_error);
 	MTL::DepthStencilState *get_depth_stencil_state(bool p_use_depth, bool p_use_stencil);
+	// GodotNext: rd_indirect_count (#177). The kernel that copies indirect draw records and sets instanceCount to 0
+	// in the records at or past the GPU count (see MDCommandBuffer::render_draw_indirect_count_prepare()). Null,
+	// after one error, when it cannot be created.
+	MTL::ComputePipelineState *get_indirect_count_clamp_pipeline_state();
 
 	explicit MDResourceCache(MTL::Device *p_device, PixelFormats &p_pixel_formats, uint32_t p_max_buffer_count) :
 			resource_factory(new MDResourceFactory(p_device, p_pixel_formats, p_max_buffer_count)) {}
@@ -716,6 +726,9 @@ public:
 	virtual void render_draw_indexed_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
 	virtual void render_draw_indirect(RDD::BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) = 0;
 	virtual void render_draw_indirect_count(RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
+	// GodotNext: rd_indirect_count (#177). Outside a render pass, before p_render_pass, the pass of the count draw
+	// it prepares.
+	virtual void render_draw_indirect_count_prepare(RDD::RenderPassID p_render_pass, bool p_indexed, RDD::BufferID p_indirect_buffer, uint64_t p_offset, RDD::BufferID p_count_buffer, uint64_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) = 0;
 
 	virtual void render_end_pass() = 0;
 

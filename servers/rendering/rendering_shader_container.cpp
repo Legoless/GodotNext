@@ -772,9 +772,10 @@ void RenderingShaderContainer::set_from_shader_reflection(const ReflectShader &p
 	_set_from_shader_reflection_post(p_reflection);
 }
 
-bool RenderingShaderContainer::set_code_from_spirv(const String &p_shader_name, Span<RDC::ShaderStageSPIRVData> p_spirv) {
+bool RenderingShaderContainer::set_code_from_spirv(const String &p_shader_name, Span<RDC::ShaderStageSPIRVData> p_spirv, bool p_base_instance_native) {
 	ReflectShader shader;
 	ERR_FAIL_COND_V(reflect_spirv(p_shader_name, p_spirv, shader) != OK, false);
+	shader.base_instance_native = p_base_instance_native; // GodotNext: rd_indirect_count (#177)
 	return _set_code_from_spirv(shader);
 }
 

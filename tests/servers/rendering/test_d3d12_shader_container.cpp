@@ -1015,6 +1015,123 @@ TEST_CASE("[D3D12][ShaderContainer] Ray-tracing library bindless tables are boun
 	CHECK_EQ(fixture.uniform_d3d12(2, 0).dxil_stages, uint32_t(RDC::SHADER_STAGE_CLOSEST_HIT_BIT | RDC::SHADER_STAGE_MISS_BIT));
 }
 
+// GodotNext: rd_indirect_count (#177). A vertex shader that reads gl_InstanceIndex, gl_VertexIndex and the draw
+// parameters gl_BaseVertex and gl_BaseInstance.
+const char *INSTANCE_INDEX_VERTEX = R"(#version 460
+layout(location = 0) flat out uvec4 ids;
+void main() {
+	ids = uvec4(gl_InstanceIndex, gl_VertexIndex, gl_BaseVertex, gl_BaseInstance);
+	gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}
+)";
+
+// The same with gl_DrawID, which NIR-DXIL reads from its runtime data.
+const char *DRAW_ID_VERTEX = R"(#version 460
+layout(location = 0) flat out uvec4 ids;
+void main() {
+	ids = uvec4(gl_InstanceIndex, gl_VertexIndex, gl_BaseVertex, gl_DrawID);
+	gl_Position = vec4(0.0, 0.0, 0.0, 1.0);
+}
+)";
+
+const char *INSTANCE_INDEX_FRAGMENT = R"(#version 450
+layout(location = 0) flat in uvec4 ids;
+layout(location = 0) out uvec4 frag_ids;
+void main() {
+	frag_ids = ids;
+}
+)";
+
+// The data of the DXIL container part p_fourcc, or null.
+const uint8_t *find_dxil_part(const Vector<uint8_t> &p_dxil, const char *p_fourcc, uint32_t &r_size) {
+	if (p_dxil.size() < 32 || read_u32(p_dxil.ptr()) != read_u32((const uint8_t *)"DXBC")) {
+		return nullptr;
+	}
+	const uint32_t part_count = read_u32(p_dxil.ptr() + 28);
+	for (uint32_t i = 0; i < part_count; i++) {
+		const uint32_t offset = read_u32(p_dxil.ptr() + 32 + i * 4);
+		if (offset + 8 <= uint32_t(p_dxil.size()) && read_u32(p_dxil.ptr() + offset) == read_u32((const uint8_t *)p_fourcc)) {
+			r_size = read_u32(p_dxil.ptr() + offset + 4);
+			return p_dxil.ptr() + offset + 8;
+		}
+	}
+	return nullptr;
+}
+
+struct StageModel {
+	uint32_t shader_model_minor = 0; // From the DXIL part's program version.
+	bool extended_command_info = false; // SFI0 bit 32: SV_StartVertexLocation or SV_StartInstanceLocation.
+};
+
+// Compiles p_vertex (by default the vertex shader above) and the fragment shader above, with or without
+// base_instance_native. r_runtime_data_root_param_idx is the root parameter of NIR-DXIL's runtime data, which
+// the Direct3D 12 driver fills for compute only (UINT32_MAX when the shader reads none).
+LocalVector<StageModel> compile_instance_index_stages(bool p_base_instance_native, uint32_t &r_runtime_data_root_param_idx, const char *p_vertex = INSTANCE_INDEX_VERTEX) {
+	LocalVector<StageModel> models;
+	HMODULE lib_d3d12 = LoadLibraryW(L"D3D12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+	Vector<StageSource> sources;
+	sources.push_back({ RDC::SHADER_STAGE_VERTEX, p_vertex });
+	sources.push_back({ RDC::SHADER_STAGE_FRAGMENT, INSTANCE_INDEX_FRAGMENT });
+	const Vector<RDC::ShaderStageSPIRVData> spirv_stages = compile_stages(format, sources, Vector<uint64_t>());
+	Ref<RenderingShaderContainer> container = format.create_container();
+	REQUIRE(container->set_code_from_spirv("test_base_instance_native", spirv_stages, p_base_instance_native));
+	r_runtime_data_root_param_idx = static_cast<ContainerD3D12 *>(container.ptr())->get_shader_reflection_d3d12().nir_runtime_data_root_param_idx;
+	for (const RenderingShaderContainer::Shader &shader : container->shaders) {
+		Vector<uint8_t> dxil;
+		dxil.resize(shader.code_decompressed_size);
+		REQUIRE(container->decompress_code(shader.code_compressed_bytes.ptr(), shader.code_compressed_bytes.size(), shader.code_compression_flags, dxil.ptrw(), dxil.size()));
+		StageModel model;
+		uint32_t size = 0;
+		const uint8_t *program = find_dxil_part(dxil, "DXIL", size);
+		REQUIRE(program != nullptr);
+		REQUIRE(size >= 4);
+		model.shader_model_minor = read_u32(program) & 0xf; // Kind << 16 | major << 4 | minor.
+		CHECK_EQ((read_u32(program) >> 4) & 0xf, 6u);
+		const uint8_t *features = find_dxil_part(dxil, "SFI0", size);
+		REQUIRE(features != nullptr);
+		REQUIRE(size >= 8);
+		model.extended_command_info = (read_u32(features + 4) & 1u) != 0;
+		models.push_back(model);
+	}
+	container.unref();
+	FreeLibrary(lib_d3d12);
+	return models;
+}
+
+// GodotNext: rd_indirect_count (#177). By default the first instance and first vertex read as 0, so the DXIL
+// stays at the base shader model; base_instance_native reads them from SV_StartInstanceLocation and
+// SV_StartVertexLocation, which need shader model 6.8. Vulkan's gl_BaseVertex is the first vertex (Mesa's
+// first_vertex system value), so it reads SV_StartVertexLocation too, and none of these reads the runtime data.
+TEST_CASE("[D3D12][ShaderContainer] base_instance_native compiles gl_InstanceIndex with SV_StartInstanceLocation at shader model 6.8") {
+	uint32_t runtime_data = 0;
+	const LocalVector<StageModel> plain = compile_instance_index_stages(false, runtime_data);
+	REQUIRE_EQ(plain.size(), 2u);
+	for (const StageModel &model : plain) {
+		CHECK(model.shader_model_minor < 8u);
+		CHECK_FALSE(model.extended_command_info);
+	}
+	CHECK_EQ(runtime_data, UINT32_MAX);
+
+	const LocalVector<StageModel> native = compile_instance_index_stages(true, runtime_data);
+	REQUIRE_EQ(native.size(), 2u);
+	// The vertex stage reads the start locations; both stages are shader model 6.8.
+	CHECK_EQ(native[0].shader_model_minor, 8u);
+	CHECK(native[0].extended_command_info);
+	CHECK_EQ(native[1].shader_model_minor, 8u);
+	CHECK_FALSE(native[1].extended_command_info);
+	// gl_BaseVertex and gl_BaseInstance need no runtime data, which the driver never sets for draws.
+	CHECK_EQ(runtime_data, UINT32_MAX);
+
+	// gl_DrawID does read the runtime data, in both modes: the check above can see it.
+	compile_instance_index_stages(false, runtime_data, DRAW_ID_VERTEX);
+	CHECK_NE(runtime_data, UINT32_MAX);
+	compile_instance_index_stages(true, runtime_data, DRAW_ID_VERTEX);
+	CHECK_NE(runtime_data, UINT32_MAX);
+}
+
 } // namespace TestD3D12ShaderContainer
 
 #endif // NIR_ENABLED

@@ -353,7 +353,10 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 	// GodotNext: d3d12_gpu_based_validation (#272). Root constants sit in a register space of their own.
 	dxil_runtime_conf.runtime_data_cbv.register_space = ROOT_CONSTANT_SPACE;
 	dxil_runtime_conf.push_constant_cbv.register_space = ROOT_CONSTANT_SPACE;
-	dxil_runtime_conf.first_vertex_and_base_instance_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
+	// GodotNext: rd_indirect_count (#177). By default gl_InstanceIndex and gl_VertexIndex leave out
+	// firstInstance and firstVertex (they read as 0). base_instance_native reads them from
+	// SV_StartInstanceLocation and SV_StartVertexLocation instead (shader model 6.8).
+	dxil_runtime_conf.first_vertex_and_base_instance_mode = base_instance_native ? DXIL_SPIRV_SYSVAL_TYPE_NATIVE : DXIL_SPIRV_SYSVAL_TYPE_ZERO;
 	dxil_runtime_conf.workgroup_id_mode = DXIL_SPIRV_SYSVAL_TYPE_ZERO;
 
 	// Explicitly keeping these false because converting UAV descriptors to SRVs do not seem to have real performance benefits on desktop GPUs.
@@ -606,6 +609,11 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 		// GodotNext: dxil_toolchain (#123). Ray query (tier 1.1) and the ray-tracing library targets need 6.5.
 		if (reflection_data.has_ray_query || reflection_data.pipeline_type == RDC::PIPELINE_TYPE_RAYTRACING) {
 			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(RAY_QUERY_SHADER_MODEL)));
+		}
+
+		// GodotNext: rd_indirect_count (#177). Every stage, so the pipeline's stages share one shader model.
+		if (base_instance_native) {
+			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(BASE_INSTANCE_NATIVE_SHADER_MODEL)));
 		}
 
 		dxil_logger logger = {};
@@ -1223,6 +1231,7 @@ bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_
 
 	const LocalVector<ReflectShaderStage> &p_spirv = p_shader.shader_stages;
 	reflection_data_d3d12.nir_runtime_data_root_param_idx = UINT32_MAX;
+	base_instance_native = p_shader.base_instance_native; // GodotNext: rd_indirect_count (#177)
 
 	for (int64_t i = 0; i < reflection_specialization_data.size(); i++) {
 		DEV_ASSERT(reflection_specialization_data[i].constant_id < (sizeof(reflection_data_d3d12.spirv_specialization_constants_ids_mask) * 8) && "Constant IDs with values above 31 are not supported.");

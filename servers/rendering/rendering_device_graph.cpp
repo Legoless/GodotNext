@@ -1058,6 +1058,17 @@ void RenderingDeviceGraph::_run_draw_list_command(RDD::CommandBufferID p_command
 				driver->command_render_draw_indexed_indirect(p_command_buffer, draw_indexed_indirect_instruction->buffer, draw_indexed_indirect_instruction->offset, draw_indexed_indirect_instruction->draw_count, draw_indexed_indirect_instruction->stride);
 				instruction_data_cursor += sizeof(DrawListDrawIndexedIndirectInstruction);
 			} break;
+			// GodotNext: rd_indirect_count (#177)
+			case DrawListInstruction::TYPE_DRAW_INDIRECT_COUNT: {
+				const DrawListDrawIndirectCountInstruction *draw_instruction = reinterpret_cast<const DrawListDrawIndirectCountInstruction *>(instruction);
+				driver->command_render_draw_indirect_count(p_command_buffer, draw_instruction->buffer, draw_instruction->offset, draw_instruction->count_buffer, draw_instruction->count_buffer_offset, draw_instruction->max_draw_count, draw_instruction->stride);
+				instruction_data_cursor += sizeof(DrawListDrawIndirectCountInstruction);
+			} break;
+			case DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT: {
+				const DrawListDrawIndirectCountInstruction *draw_instruction = reinterpret_cast<const DrawListDrawIndirectCountInstruction *>(instruction);
+				driver->command_render_draw_indexed_indirect_count(p_command_buffer, draw_instruction->buffer, draw_instruction->offset, draw_instruction->count_buffer, draw_instruction->count_buffer_offset, draw_instruction->max_draw_count, draw_instruction->stride);
+				instruction_data_cursor += sizeof(DrawListDrawIndirectCountInstruction);
+			} break;
 			case DrawListInstruction::TYPE_EXECUTE_COMMANDS: {
 				const DrawListExecuteCommandsInstruction *execute_commands_instruction = reinterpret_cast<const DrawListExecuteCommandsInstruction *>(instruction);
 				driver->command_buffer_execute_secondary(p_command_buffer, execute_commands_instruction->command_buffer);
@@ -1126,6 +1137,7 @@ void RenderingDeviceGraph::_add_draw_list_begin(FramebufferCache *p_framebuffer_
 	DEV_ASSERT(p_attachment_operations.size() == p_attachment_clear_values.size());
 
 	draw_instruction_list.clear();
+	draw_instruction_list.indirect_count_offsets.clear(); // GodotNext: rd_indirect_count (#177)
 	draw_instruction_list.index++;
 	draw_instruction_list.framebuffer_cache = p_framebuffer_cache;
 	draw_instruction_list.render_pass = p_render_pass;
@@ -1286,6 +1298,12 @@ void RenderingDeviceGraph::_run_render_commands(int32_t p_level, const RecordedC
 				}
 
 				if (framebuffer && render_pass) {
+					// GodotNext: rd_indirect_count (#177). Drivers that emulate the count (Metal) prepare
+					// these draws with work that cannot run inside a render pass.
+					for (uint32_t draw_index = 0; draw_index < draw_list_command->indirect_count_draws; draw_index++) {
+						const DrawListDrawIndirectCountInstruction *draw_instruction = reinterpret_cast<const DrawListDrawIndirectCountInstruction *>(draw_list_command->instruction_data() + draw_list_command->indirect_count_offsets()[draw_index]);
+						driver->command_render_draw_indirect_count_prepare(r_command_buffer, render_pass, draw_instruction->type == DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT, draw_instruction->buffer, draw_instruction->offset, draw_instruction->count_buffer, draw_instruction->count_buffer_offset, draw_instruction->max_draw_count, draw_instruction->stride);
+					}
 					driver->command_begin_render_pass(r_command_buffer, render_pass, framebuffer, draw_list_command->command_buffer_type, draw_list_command->region, clear_values);
 					_run_draw_list_command(r_command_buffer, draw_list_command->instruction_data(), draw_list_command->instruction_data_size);
 					driver->command_end_render_pass(r_command_buffer);
@@ -1807,6 +1825,13 @@ void RenderingDeviceGraph::_print_draw_list(const uint8_t *p_instruction_data, u
 				const DrawListDrawIndexedIndirectInstruction *draw_indexed_indirect_instruction = reinterpret_cast<const DrawListDrawIndexedIndirectInstruction *>(instruction);
 				print_line("\tDRAW INDEXED INDIRECT BUFFER ID", itos(draw_indexed_indirect_instruction->buffer.id), "OFFSET", draw_indexed_indirect_instruction->offset, "DRAW COUNT", draw_indexed_indirect_instruction->draw_count, "STRIDE", draw_indexed_indirect_instruction->stride);
 				instruction_data_cursor += sizeof(DrawListDrawIndexedIndirectInstruction);
+			} break;
+			// GodotNext: rd_indirect_count (#177)
+			case DrawListInstruction::TYPE_DRAW_INDIRECT_COUNT:
+			case DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT: {
+				const DrawListDrawIndirectCountInstruction *draw_instruction = reinterpret_cast<const DrawListDrawIndirectCountInstruction *>(instruction);
+				print_line(instruction->type == DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT ? "\tDRAW INDEXED INDIRECT COUNT BUFFER ID" : "\tDRAW INDIRECT COUNT BUFFER ID", itos(draw_instruction->buffer.id), "OFFSET", draw_instruction->offset, "COUNT BUFFER ID", itos(draw_instruction->count_buffer.id), "COUNT OFFSET", draw_instruction->count_buffer_offset, "MAX DRAW COUNT", draw_instruction->max_draw_count, "STRIDE", draw_instruction->stride);
+				instruction_data_cursor += sizeof(DrawListDrawIndirectCountInstruction);
 			} break;
 			case DrawListInstruction::TYPE_EXECUTE_COMMANDS: {
 				print_line("\tEXECUTE COMMANDS");
@@ -2576,6 +2601,46 @@ void RenderingDeviceGraph::add_draw_list_draw_indexed_indirect(RDD::BufferID p_b
 	draw_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
 }
 
+// GodotNext: rd_indirect_count (#177)
+bool RenderingDeviceGraph::add_draw_list_draw_indirect_count(bool p_indexed, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, RDD::BufferID p_count_buffer, ResourceTracker *p_count_buffer_tracker, uint32_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride) {
+	// A tracker keeps the first usage it gets in a draw list (add_draw_list_usage()). A records or count buffer
+	// this draw list already uses another way, such as from a uniform set, would get no indirect-argument barrier.
+	ResourceTracker *const trackers[2] = { p_buffer_tracker, p_count_buffer_tracker };
+	for (ResourceTracker *tracker : trackers) {
+		if (tracker == nullptr) {
+			continue;
+		}
+		tracker->reset_if_outdated(tracking_frame);
+		ERR_FAIL_COND_V_MSG(tracker->draw_list_index == draw_instruction_list.index && tracker->draw_list_usage != RESOURCE_USAGE_INDIRECT_BUFFER_READ, false,
+				vformat("The %s buffer of an indirect count draw is also used in this draw list (%s). A buffer has one usage per draw list, so it would not be synchronized for the indirect read; bind it in none of this draw list's uniform sets.", tracker == p_buffer_tracker ? "indirect" : "count", _usage_to_string(tracker->draw_list_usage)));
+		// GodotNext: rd_bindless (#176). The same for a dirty resident of a bindless table the draw list binds
+		// (the tables of this draw are bound by now), whose table read becomes a usage at the list's end. A
+		// resident that is not dirty needs no barrier for the table: the indirect read does not write it.
+		ERR_FAIL_COND_V_MSG(_bindless_dirty_in_list_tables(draw_instruction_list, tracker), false,
+				vformat("The %s buffer of an indirect count draw is in a bindless table that this draw list binds, and the table has not read it since it was last written. A buffer has one usage per draw list, so the table's read would not be synchronized; bind the table in an earlier list after the write, or keep the buffer out of the table.", tracker == p_buffer_tracker ? "indirect" : "count"));
+	}
+
+	DrawListDrawIndirectCountInstruction *instruction = reinterpret_cast<DrawListDrawIndirectCountInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListDrawIndirectCountInstruction)));
+	instruction->type = p_indexed ? DrawListInstruction::TYPE_DRAW_INDEXED_INDIRECT_COUNT : DrawListInstruction::TYPE_DRAW_INDIRECT_COUNT;
+	instruction->buffer = p_buffer;
+	instruction->count_buffer = p_count_buffer;
+	instruction->offset = p_offset;
+	instruction->count_buffer_offset = p_count_buffer_offset;
+	instruction->max_draw_count = p_max_draw_count;
+	instruction->stride = p_stride;
+	draw_instruction_list.indirect_count_offsets.push_back(uint32_t(reinterpret_cast<uint8_t *>(instruction) - draw_instruction_list.data.ptr()));
+	draw_instruction_list.stages.set_flag(RDD::PIPELINE_STAGE_DRAW_INDIRECT_BIT);
+
+	// The count is read like the records: as an indirect argument, before the draws.
+	if (p_buffer_tracker != nullptr) {
+		add_draw_list_usage(p_buffer_tracker, RESOURCE_USAGE_INDIRECT_BUFFER_READ);
+	}
+	if (p_count_buffer_tracker != nullptr && p_count_buffer_tracker != p_buffer_tracker) {
+		add_draw_list_usage(p_count_buffer_tracker, RESOURCE_USAGE_INDIRECT_BUFFER_READ);
+	}
+	return true;
+}
+
 void RenderingDeviceGraph::add_draw_list_execute_commands(RDD::CommandBufferID p_command_buffer) {
 	DrawListExecuteCommandsInstruction *instruction = reinterpret_cast<DrawListExecuteCommandsInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListExecuteCommandsInstruction)));
 	instruction->type = DrawListInstruction::TYPE_EXECUTE_COMMANDS;
@@ -2661,6 +2726,11 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	uint32_t trackers_and_ops_size = (sizeof(ResourceTracker *) + sizeof(RDD::AttachmentLoadOp) + sizeof(RDD::AttachmentStoreOp)) * trackers_count;
 	uint32_t instruction_data_size = draw_instruction_list.data.size();
 	uint32_t command_size = sizeof(RecordedDrawListCommand) + clear_values_size + trackers_and_ops_size + instruction_data_size;
+	// GodotNext: rd_indirect_count (#177). The offsets of the indirect-count draws follow the instructions.
+	const uint32_t indirect_count_draws = draw_instruction_list.indirect_count_offsets.size();
+	if (indirect_count_draws > 0) {
+		command_size += RecordedDrawListCommand::indirect_count_offsets_start(instruction_data_size) - instruction_data_size + indirect_count_draws * sizeof(uint32_t);
+	}
 	RecordedDrawListCommand *command = static_cast<RecordedDrawListCommand *>(_allocate_command(command_size, command_index));
 	command->type = RecordedCommand::TYPE_DRAW_LIST;
 	command->self_stages = draw_instruction_list.stages;
@@ -2720,8 +2790,13 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	}
 
 	memcpy(command->instruction_data(), draw_instruction_list.data.ptr(), instruction_data_size);
-	// GodotNext: rd_bindless (#176).
-	_bindless_tables_add_usages(draw_instruction_list, &RenderingDeviceGraph::add_draw_list_usage);
+	// GodotNext: rd_indirect_count (#177)
+	command->indirect_count_draws = indirect_count_draws;
+	if (indirect_count_draws > 0) {
+		memcpy(command->indirect_count_offsets(), draw_instruction_list.indirect_count_offsets.ptr(), indirect_count_draws * sizeof(uint32_t));
+	}
+	// GodotNext: rd_bindless (#176), rd_indirect_count (#177).
+	_bindless_draw_list_tables_add_usages(command_index);
 	_add_command_to_graph(draw_instruction_list.command_trackers.ptr(), draw_instruction_list.command_tracker_usages.ptr(), draw_instruction_list.command_trackers.size(), command_index, command);
 	_bindless_tables_bound(draw_instruction_list, command_index, command);
 }
@@ -3189,6 +3264,37 @@ void RenderingDeviceGraph::_bindless_tables_add_usages(InstructionList &r_list, 
 	for (BindlessTableTracker *table : r_list.bindless_tables) {
 		for (ResourceTracker *tracker : table->dirty) {
 			(this->*p_add_usage)(tracker, table->read_usage);
+		}
+	}
+}
+
+// GodotNext: rd_indirect_count (#177)
+bool RenderingDeviceGraph::_bindless_dirty_in_list_tables(const InstructionList &p_list, const ResourceTracker *p_tracker) {
+	for (const BindlessResidency &residency : p_tracker->bindless_residency) {
+		if (residency.dirty && p_list.bindless_tables.has(residency.table)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// GodotNext: rd_indirect_count (#177). _bindless_tables_add_usages() for the draw list. A dirty resident the
+// list already reads as indirect arguments (an indirect draw, or a count draw recorded before the table was
+// bound) keeps that usage, so the table's read in this list gets no barrier. It stays dirty, as if this
+// list had left it unready, so the next command that binds the table gets the barrier.
+void RenderingDeviceGraph::_bindless_draw_list_tables_add_usages(int32_t p_command_index) {
+	for (BindlessTableTracker *table : draw_instruction_list.bindless_tables) {
+		for (ResourceTracker *tracker : table->dirty) {
+			tracker->reset_if_outdated(tracking_frame);
+			if (tracker->draw_list_index == draw_instruction_list.index && tracker->draw_list_usage == RESOURCE_USAGE_INDIRECT_BUFFER_READ) {
+				ERR_PRINT("A buffer in a bindless table that this draw list binds is also the indirect or count buffer of one of its indirect draws, and the table has not read it since it was last written. A buffer has one usage per draw list, so the table's reads in this draw list are not synchronized; bind the table in an earlier list after the write, or keep the buffer out of the table.");
+				BindlessResidency *residency = _bindless_find_residency(tracker, table);
+				DEV_ASSERT(residency != nullptr);
+				residency->dirty_frame = tracking_frame;
+				residency->dirty_command_index = p_command_index;
+				continue;
+			}
+			add_draw_list_usage(tracker, table->read_usage);
 		}
 	}
 }

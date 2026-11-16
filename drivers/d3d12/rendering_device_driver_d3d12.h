@@ -37,6 +37,8 @@
 #include "core/templates/self_list.h"
 #include "drivers/d3d12/rendering_shader_container_d3d12.h"
 #include "servers/rendering/rendering_device_driver.h"
+// GodotNext: rd_indirect_count (#177)
+#include "drivers/d3d12/d3d12_command_signature_cache.h"
 
 #include <drivers/d3d12/godot_d3dx12.h>
 #include <wrl/client.h>
@@ -93,9 +95,15 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 	struct ShaderCapabilities {
 		D3D_SHADER_MODEL shader_model = (D3D_SHADER_MODEL)0;
 		bool native_16bit_ops = false;
+		bool extended_command_info_supported = false; // GodotNext: rd_indirect_count (#177). OPTIONS21.
 
 		_FORCE_INLINE_ bool buffer_device_address_supported() const {
 			return shader_model >= D3D_SHADER_MODEL_6_6;
+		}
+
+		// GodotNext: rd_indirect_count (#177)
+		_FORCE_INLINE_ bool base_instance_native_supported() const {
+			return shader_model >= D3D_SHADER_MODEL(RenderingShaderContainerD3D12::BASE_INSTANCE_NATIVE_SHADER_MODEL) && extended_command_info_supported;
 		}
 	};
 
@@ -253,11 +261,15 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 
 	CPUDescriptorHeapPool::Allocation null_rtv_alloc;
 
-	struct {
-		Microsoft::WRL::ComPtr<ID3D12CommandSignature> draw;
-		Microsoft::WRL::ComPtr<ID3D12CommandSignature> draw_indexed;
-		Microsoft::WRL::ComPtr<ID3D12CommandSignature> dispatch;
-	} indirect_cmd_signatures;
+	// GodotNext: rd_indirect_count (#177). One command signature per (argument type, stride), so every
+	// ExecuteIndirect reads its records with the stride it was given; the three tightly packed ones are made
+	// when the device is.
+	// Wrapped: the cache takes its values' addresses, and the address of a WRL ComPtr releases it.
+	struct IndirectCommandSignature {
+		Microsoft::WRL::ComPtr<ID3D12CommandSignature> signature;
+	};
+	D3D12CommandSignatureCache<IndirectCommandSignature> indirect_cmd_signatures;
+	ID3D12CommandSignature *_get_indirect_cmd_signature(D3D12_INDIRECT_ARGUMENT_TYPE p_type, uint32_t p_stride, uint32_t p_max_count);
 
 	static void STDMETHODCALLTYPE _debug_message_func(D3D12_MESSAGE_CATEGORY p_category, D3D12_MESSAGE_SEVERITY p_severity, D3D12_MESSAGE_ID p_id, LPCSTR p_description, void *p_context);
 	void _set_object_name(ID3D12Object *p_object, String p_object_name);

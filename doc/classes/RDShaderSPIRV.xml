@@ -42,6 +42,10 @@
 		</method>
 	</methods>
 	<members>
+		<member name="base_instance_native" type="bool" setter="set_base_instance_native" getter="get_base_instance_native" default="false">
+			If [code]true[/code], [method RenderingDevice.shader_create_from_spirv] and [method RenderingDevice.shader_compile_binary_from_spirv] compile the shader so that [code]gl_InstanceIndex[/code] includes the first instance of indirect draws (and [code]gl_VertexIndex[/code] the first vertex) on every driver. This needs [constant RenderingDevice.SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE]; on a device without it, compilation fails with an error that names the feature.
+			[b]Note:[/b] Vulkan and Metal shaders always include them, so this changes nothing there. The Direct3D 12 driver compiles such a shader for shader model 6.8, where it reads [code]SV_StartInstanceLocation[/code] and [code]SV_StartVertexLocation[/code] (also for [code]gl_BaseInstance[/code] and [code]gl_BaseVertex[/code]); other Direct3D 12 shaders read the first instance and first vertex as 0.
+		</member>
 		<member name="bytecode_any_hit" type="PackedByteArray" setter="set_stage_bytecode" getter="get_stage_bytecode" default="PackedByteArray()">
 			The SPIR-V bytecode for the any hit shader stage.
 		</member>

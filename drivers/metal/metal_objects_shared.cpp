@@ -291,6 +291,61 @@ fragment void fullscreenNoopFrag(float4 gl_FragCoord [[position]]) {
 	return state;
 }
 
+// GodotNext: rd_indirect_count (#177). One thread per record: copies the record (4 or 5 words, read with the
+// draw's stride) to a tightly packed array, sets its instanceCount (word 1) to 0 at or past the count, and
+// otherwise multiplies it by the pass's view count, as MDCommandBuffer::render_draw() does for multiview.
+NS::SharedPtr<MTL::ComputePipelineState> MDResourceFactory::new_indirect_count_clamp_pipeline_state(String &r_error) {
+	NS::SharedPtr<NS::AutoreleasePool> pool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
+	static const char *msl = R"(#include <metal_stdlib>
+using namespace metal;
+
+struct IndirectCountClampParams {
+    uint max_draw_count;
+    uint stride;
+    uint words;
+    uint view_count;
+};
+
+kernel void indirectCountClamp(device const uchar *records [[buffer(0)]],
+        device const uint *count [[buffer(1)]],
+        device uint *clamped [[buffer(2)]],
+        constant IndirectCountClampParams &params [[buffer(3)]],
+        uint index [[thread_position_in_grid]]) {
+    if (index >= params.max_draw_count) {
+        return;
+    }
+    device const uint *record = (device const uint *)(records + index * params.stride);
+    device uint *out = clamped + index * params.words;
+    for (uint i = 0; i < params.words; i++) {
+        out[i] = record[i];
+    }
+    out[1] = index < count[0] ? record[1] * params.view_count : 0u;
+}
+)";
+
+	// The errors are autoreleased into the pool above, so their text is copied before it drains.
+	NS::Error *err = nullptr;
+	NS::SharedPtr<MTL::CompileOptions> options = NS::TransferPtr(MTL::CompileOptions::alloc()->init());
+	NS::SharedPtr<MTL::Library> mtlLib = NS::TransferPtr(device->newLibrary(NS::String::string(msl, NS::UTF8StringEncoding), options.get(), &err));
+	if (!mtlLib) {
+		r_error = err != nullptr ? String(err->localizedDescription()->utf8String()) : String("the kernel did not compile");
+		return {};
+	}
+
+	NS::SharedPtr<MTL::Function> function = NS::TransferPtr(mtlLib->newFunction(MTLSTR("indirectCountClamp")));
+	if (!function) {
+		r_error = "the kernel function is missing";
+		return {};
+	}
+
+	err = nullptr;
+	NS::SharedPtr<MTL::ComputePipelineState> state = NS::TransferPtr(device->newComputePipelineState(function.get(), &err));
+	if (!state) {
+		r_error = err != nullptr ? String(err->localizedDescription()->utf8String()) : String("the pipeline was not created");
+	}
+	return state;
+}
+
 #pragma mark - Resource Cache
 
 MTL::RenderPipelineState *MDResourceCache::get_clear_render_pipeline_state(ClearAttKey &p_key, NS::Error **p_error) {
@@ -315,6 +370,19 @@ MTL::RenderPipelineState *MDResourceCache::get_empty_draw_pipeline_state(ClearAt
 	MTL::RenderPipelineState *result = state.get();
 	empty_draw_states[p_key] = std::move(state);
 	return result;
+}
+
+// GodotNext: rd_indirect_count (#177)
+MTL::ComputePipelineState *MDResourceCache::get_indirect_count_clamp_pipeline_state() {
+	if (!indirect_count_clamp_state && !indirect_count_clamp_failed) {
+		String error;
+		indirect_count_clamp_state = resource_factory->new_indirect_count_clamp_pipeline_state(error);
+		if (!indirect_count_clamp_state) {
+			indirect_count_clamp_failed = true;
+			ERR_PRINT(vformat("Cannot create the indirect count clamp pipeline, so indirect count draws are skipped: %s", error));
+		}
+	}
+	return indirect_count_clamp_state.get();
 }
 
 MTL::DepthStencilState *MDResourceCache::get_depth_stencil_state(bool p_use_depth, bool p_use_stencil) {

@@ -181,6 +181,10 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 		PFN_vkCreateRayTracingPipelinesKHR CreateRaytracingPipelinesKHR = nullptr;
 		PFN_vkGetRayTracingShaderGroupHandlesKHR GetRayTracingShaderGroupHandlesKHR = nullptr;
 		PFN_vkCmdTraceRaysKHR CmdTraceRaysKHR = nullptr;
+
+		// GodotNext: rd_indirect_count (#177). VK_KHR_draw_indirect_count.
+		PFN_vkCmdDrawIndirectCountKHR CmdDrawIndirectCountKHR = nullptr;
+		PFN_vkCmdDrawIndexedIndirectCountKHR CmdDrawIndexedIndirectCountKHR = nullptr;
 	};
 	// Debug marker extensions.
 	VkDebugReportObjectTypeEXT _convert_to_debug_report_objectType(VkObjectType p_object_type);
@@ -224,6 +228,8 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	BindlessCapabilities bindless_capabilities; // GodotNext: rd_bindless (#176).
 	// GodotNext: rd_bindless (#176). Found, not enabled: the table memory line reads its descriptor sizes.
 	bool descriptor_buffer_available = false;
+	// GodotNext: rd_indirect_count (#177). shaderDrawParameters (gl_DrawID, gl_BaseInstance, gl_BaseVertex).
+	bool shader_draw_parameters_support = false;
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
 	bool framebuffer_depth_resolve = false;

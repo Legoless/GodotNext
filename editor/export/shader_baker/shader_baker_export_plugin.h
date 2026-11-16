@@ -58,6 +58,7 @@ protected:
 		Vector<String> stage_sources;
 		Vector<uint64_t> dynamic_buffers;
 		int64_t variant = 0;
+		bool base_instance_native = false; // GodotNext: rd_indirect_count (#177)
 	};
 
 	struct WorkResult {

@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/rd_parity/indirect_count.gd" id="1_indirectcount"]
+
+[node name="IndirectCount" type="Node"]
+script = ExtResource("1_indirectcount")
