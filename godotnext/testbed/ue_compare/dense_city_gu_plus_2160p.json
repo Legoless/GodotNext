@@ -1,0 +1,81 @@
+{
+	"schema": 1,
+	"name": "dense_city_gu_plus_2160p",
+	"title": "Dense City at 2160p, GPU-bound, frame generation off and Reflex Off: the GU+ baseline run (F1, GU+-5, GU+-9)",
+	"port_issue": 236,
+	"settings_record": "docs/godotnext/ue-bar/settings-map.md",
+	"sign_off": null,
+	"device": "NVIDIA GeForce RTX 4080 SUPER",
+	"resolution": [3840, 2160],
+	"runs": 5,
+	"warmup_frames": 600,
+	"frames": 3000,
+	"priority": "BelowNormal",
+	"godotnext": {
+		"driver": "d3d12",
+		"scene": "res://generated/dense_city/dense_city.tscn",
+		"camera": "cam_main",
+		"seed": 1,
+		"nextgi": null,
+		"harness_args": [],
+		"timeout_minutes": 30
+	},
+	"ue": {
+		"run_mode": "editor_game",
+		"build_version": null,
+		"map": "/Game/Ports/DenseCityGUPlus/DenseCityGUPlus.umap",
+		"rhi": "D3D12",
+		"feature_level": "SM6",
+		"warmup_frames": 600,
+		"path_frames": 1,
+		"fps": 60,
+		"args": ["-dx12", "-sm6"],
+		"window": "fullscreen",
+		"exec_cmds": [
+			"r.ScreenPercentage 100",
+			"sg.ResolutionQuality 100",
+			"sg.ViewDistanceQuality 2",
+			"sg.AntiAliasingQuality 2",
+			"sg.ShadowQuality 2",
+			"sg.GlobalIlluminationQuality 2",
+			"sg.ReflectionQuality 2",
+			"sg.PostProcessQuality 2",
+			"sg.TextureQuality 2",
+			"sg.EffectsQuality 2",
+			"sg.FoliageQuality 2",
+			"sg.ShadingQuality 2",
+			"sg.LandscapeQuality 2",
+			"r.RDG.AsyncCompute 0",
+			"r.Lumen.AsyncCompute 0",
+			"r.TSR.AsyncCompute 0"
+		],
+		"expect_cvars": { "r.Shadow.Virtual.Enable": "1", "r.FullScreenMode": "1", "r.AntiAliasingMethod": "0" },
+		"window_quiet_columns": ["PSO/PSOMisses", "PSO/PSOComputeMisses", "PSO/GraphicsPSOHitch", "PSO/ComputePSOHitch", "GPU/LumenSceneUpdate", "GPU/UpdateLumenSceneBuffers", "GPU/LumenSceneLighting", "GPU/LumenScreenProbeGather", "GPU/LumenReflections"],
+		"ok_exit_codes": [0],
+		"timeout_minutes": 60
+	},
+	"lines": [
+		{
+			"id": "gpu_pass_sum",
+			"name": "GPU pass sum at 2160p, FG off, Reflex Off (pipeline check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line reads these captures. The GU+ lines this run serves read #202's tools instead: GU+-5's PC latency and FG 2x displayed frame time and GU+-9's MFG 4x and Dynamic MFG displayed frame time from PresentMon, and F1's DLSS-G pass from an Nsight Systems trace. The comparison report reads neither yet (#229's PresentMon cross-check), and the configurations those lines time (FG 2x, MFG, Reflex On and On + Boost) need the GodotNext DLSS build and NVIDIA's UE DLSS plugin, which wait for the lead's DLSS sign-off (#98). This set is their FG-off, Reflex Off baseline, the configuration #202's GPU-bound rule applies to (PresentMon's GPU busy at least 95% of the application frame interval); the whole-frame GPU sum is recorded to check the pipeline end to end. GodotNext runs the scene as #202's GU+ job does, without NextGI (the city's Environment takes ambient light and reflections from the sky), so the UE map turns Lumen off in its Post Process Volume (global illumination and reflection method None, the sky light giving ambient light and reflections) and the Lumen columns stay quiet. Neither side anti-aliases: the testbed turns no MSAA, TAA or screen-space AA on, and the comparison project's r.AntiAliasingMethod is 0, which the report checks from each run's echo. GodotNext's virtual shadow maps are not built yet (the engine has no shadow_method setting), so its side renders the sun's 4 directional splits and the street lights' shadow faces on the shadow atlas while UE renders Virtual Shadow Maps, the comparison project's shadow method (r.Shadow.Virtual.Enable, which the report checks from each run's echo): the whole frame is not like for like until they land.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": { "all_passes": true },
+			"ue": { "group": "Whole frame, GPU", "columns": ["GPUTime"] }
+		},
+		{
+			"id": "ue_render_thread",
+			"name": "UE render thread at 2160p, FG off (GPU-bound check)",
+			"gates": [],
+			"status": "report_only",
+			"reason": "No gate line: recorded beside the GPU sum so a run shows whether UE's render thread, not its GPU, sets the frame interval. #202's GPU-bound rule reads PresentMon's GPU busy, which the comparison report does not read yet (#229's PresentMon cross-check). The GodotNext render-thread column group is not defined yet.",
+			"statistic": "p95",
+			"direction": "lower",
+			"godotnext": null,
+			"ue": { "group": "Render thread, CPU", "columns": ["RenderThreadTime"] }
+		}
+	]
+}

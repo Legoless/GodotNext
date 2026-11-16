@@ -623,6 +623,60 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
         assert "departs from the settings record" not in line.reason
 
 
+def test_the_gu_plus_config() -> None:
+    config = load_config(_TESTBED / "ue_compare" / "dense_city_gu_plus_2160p.json")
+    assert config.raw["port_issue"] == 236
+    # #202's GU+ GPU-bound job: the generated city's still street camera, 2160p, VSync off, D3D12,
+    # 600 warm-up and 3,000 measured frames, without NextGI.
+    assert config.godotnext.scene == "res://generated/dense_city/dense_city.tscn"
+    assert config.godotnext.camera == "cam_main"
+    assert config.godotnext.driver == "d3d12"
+    assert config.resolution == (3840, 2160)
+    assert (config.warmup_frames, config.frames) == (600, 3000)
+    assert config.godotnext.nextgi is None and not config.godotnext.override
+    args = godotnext_args(config)
+    assert "--nextgi=on" not in args
+    assert args[args.index("--quit-after") + 1] == "4650"
+    assert {"--resolution", "3840x2160", "--disable-vsync", "--warmup=600", "--frames=3000"} <= set(args)
+    # The UE map's sequence holds the still pose for 600 + 3,000 frames, and UE drops as many warm-up rows.
+    assert config.ue.map == "/Game/Ports/DenseCityGUPlus/DenseCityGUPlus.umap"
+    assert (config.ue.warmup_frames, config.ue.path_frames) == (600, 1)
+    launch = ue_args(config)
+    assert "-csvCaptureFrames=3600" in launch
+    # Borderless at 2160p on both sides (#270): UE's fullscreen is windowed fullscreen, checked from the echo.
+    assert config.ue.window == "fullscreen"
+    assert "-fullscreen" in launch and "-windowed" not in launch
+    # UE draws without anti-aliasing, as the testbed does (the project's r.AntiAliasingMethod 0, checked too).
+    assert dict(config.ue.expect_cvars) == {
+        "r.Shadow.Virtual.Enable": "1",
+        "r.FullScreenMode": "1",
+        "r.AntiAliasingMethod": "0",
+    }
+    cvars = config.ue.checked_cvars()
+    assert (cvars["r.ScreenPercentage"], cvars["sg.ResolutionQuality"]) == ("100", "100")
+    for group in SCALABILITY_LEVEL_GROUPS:
+        assert cvars[group] == "2", group
+    for name, value in UE_ASYNC_OFF.items():
+        assert cvars[name] == value, name
+    # No NextGI on the GodotNext side, so no Lumen on the UE side: no tier, and the Lumen columns stay quiet.
+    assert "r.Lumen.HardwareRayTracing" not in cvars
+    assert config.ue.window_quiet_columns == (*_PSO_QUIET, *_LUMEN_QUIET)
+    # FG, MFG, Reflex and the PresentMon and Nsight Systems methods wait for #98 and #229: report-only
+    # lines only, none with a gate.
+    lines = {line.id: line for line in config.lines}
+    assert set(lines) == {"gpu_pass_sum", "ue_render_thread"}
+    for line in config.lines:
+        assert line.status == "report_only" and line.gates == ()
+    total = lines["gpu_pass_sum"]
+    assert total.godotnext is not None and total.godotnext.all_passes
+    assert total.ue is not None and total.ue.columns == ("GPUTime",)
+    for text in ("#98", "PresentMon", "Nsight Systems", "95%", "anti-alias", "shadow_method", "not like for like"):
+        assert text in total.reason, text
+    render = lines["ue_render_thread"]
+    assert render.godotnext is None
+    assert render.ue is not None and render.ue.columns == ("RenderThreadTime",)
+
+
 def test_the_ue_window_mode_comes_from_the_config() -> None:
     assert "-windowed" in ue_args(parse_config(synthetic_config()))
     fullscreen = ue_args(parse_config(_with("ue", window="fullscreen")))
