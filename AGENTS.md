@@ -13,6 +13,7 @@ GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.9 ren
   - §19: the clean room.
 - **The work breakdown:** issues on `Legoless/GodotNext`. The roadmap tracker is #2, the phase epics are its sub-issues, and the final test phase is #224.
 - **The build tracker:** `docs/godotnext/tracker/index.html`, the project-manager view of progress.
+- **The handoff:** `docs/handoff.md` holds the current state: what is in progress, what to restart, what is ready and what waits on the lead. Read it first when resuming. Machine-specific details are in the git-ignored companion `local/handoff-private.md`.
 - **Local working files:** the git-ignored `local/` folder holds pages, exports and machine settings that are not committed, such as the lead-decisions page `local/decisions/index.html` and `local/fleet.env` (the RTX 4080 SUPER machine's SSH host alias and checkout path for `godotnext/testbed/harness/runners/run_remote.sh`).
 
 ## Rules
@@ -29,6 +30,7 @@ GodotNext is a fork of Godot Engine (MIT) that brings full Unreal Engine 5.9 ren
 - **Landing work.** The lead decided on 2026-11-03: commit finished issue work straight to master with "Closes #N" and push. This deliberately overrides the global "don't commit unless asked" rule, for finished issue work only; when the task is to investigate, review or draft, stop before committing and report. No branches or PRs unless the lead asks. No AI attribution or `Co-Authored-By` lines.
 - **One source of truth.** A plan change is carried to the issues and the tracker in the same change set. After work lands, refresh the tracker snapshot.
 - **The tracker** shows no timing estimates.
+- **Keep the handoff current.** Update `docs/handoff.md` (and `local/handoff-private.md`) whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. It must stay public-safe: no local paths, hosts, IPs, VM names or account names.
 
 ## Skills
 
