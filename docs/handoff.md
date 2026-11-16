@@ -1,83 +1,69 @@
 # GodotNext handoff
 
-The current state of the build and what to do next. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, workflow run IDs, VM names and zones, private library folders) are in the git-ignored companion `local/handoff-private.md`.
+The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-16, evening. Work resumed after an offline period. The six in-progress lanes below are running again on the cloud VMs (all eight started). If work stops again, restart them as described below.
+**Last updated:** 2026-11-16, evening. **Handed to Gemini.** Claude stopped every lane and the report loop, and every cloud VM is stopped. Nothing is running. All unfinished work is in WIP branches (below) and in the matching local worktrees.
 
-## Resume in five steps
+## How to continue
 
-1. Read this file, then `local/handoff-private.md`.
-2. `git fetch` and confirm master is at or after `c88a8a6dbb`. Refresh the tracker (`python3 docs/godotnext/tracker/export.py`).
-3. Start only the cloud VMs the next lanes need (table below). Stopped VMs get new external IPs, so write them into `local/fleet.env` after starting.
-4. Restart the in-progress lanes in the order of the "In progress" table. Each one has uncommitted work in a local worktree, plus saved build and review results.
-5. Start ready issues in phase order on the machines that are free (the "Ready" table).
+1. Read `AGENTS.md` (the rules) and the project skills in `.agents/skills/`. The skills are plain Markdown and work for any agent:
+   - `godotnext-implement-issue` builds an issue and lands it;
+   - `godotnext-fleet` covers the machines and how to use them;
+   - `godotnext-update-tracker`, `godotnext-plan-revision` and `godotnext-issues` cover the tracker, the plan and the issues.
+2. Read this file, then `local/handoff-private.md`. The private file has the VM start command, which also writes each VM's new IP into `local/fleet.env`, plus where every lane's saved results and notes are.
+3. `git fetch`; master should be at or after this commit. Refresh the tracker with `python3 docs/godotnext/tracker/export.py`.
+4. Start only the cloud VMs the lane you pick up needs (machine column below). Stop VMs as soon as they have no work left.
+5. Work one lane at a time, or a few in parallel, through the loop below. Land each one when it passes.
 
-## State at the stop
+### The lane loop (what Claude's workflows did)
 
-- Master: `c88a8a6dbb`. Plan: v3.9.12 (`4a44d8b50c`).
-- Tracker: 132 of 229 build tasks done, 0 of 18 gates (gates are measured in PQ by design).
-- Running: the fix steps of #195 and #130, and fresh runs of the #219 follow-up, #218, #155 and gn4 (#122 + #293). The RTX 4080 SUPER machine is idle.
+1. **Build.** Implement or finish the issue in its worktree. Builds and GPU runs go on the cloud VMs or the RTX 4080 SUPER machine, never the Mac. The helpers in `local/gce/` and `local/sal/` build a worktree's diff on a VM, run a scene job and fetch the logs; their header comments explain each one. Prove the issue's criteria: no warnings, full doctests, the issue's GPU checks with 0 validation errors on Vulkan and D3D12, and the phase smoke scene.
+2. **Review.** An independent read of the diff against the issue, the plan and the clean room (§19), looking for concrete defects.
+3. **Fix** the real findings and re-prove from a clean state.
+4. **Landing check** on the cloud test machine (Windows VM 4 with the private Mesa library) or the RTX 4080 SUPER machine. Apply the diff to current master, build, run the issue's landing runs, and name the machine in the issue comment (lead decision 2026-11-16).
+5. **Land** on master. Use "Closes #N" only when every build criterion is met. Metal and macOS builds wait for the lead's Mac runs, so most issues land as progress. Then post the issue comment, refresh the tracker, update this file and delete the WIP branch.
 
-### Landed on 2026-11-16
+The lead does not want questions. Take the recommended option, or follow UE 5.9, record the choice, and report it. Ask only about spending, accounts, the lead's own sign-offs, or publishing anything new.
 
-Closed: #272, #277, #278, #279, #287.
+## State at the handover
 
-Landed as progress (open for Metal/macOS, PQ boxes or later steps): #118, #121, #123, #156, #162, #176 (and its all-vendor follow-up), #177, #178, #179, #203, #205, #210, #219, #220, #229–#236 (the UE 5.9 comparison ports and settings rules), #275, #276, #283, #285.
-
-Plan revisions v3.9.5 to v3.9.12. They cover the lead decisions of 2026-11-16 (§18.1) and the new §26 (hardware support follows UE 5.9). They added issues #280–#287 and #292–#296.
+- Master: see `git log`. Plan v3.9.12. The tracker showed 132 of 229 build tasks done; the 18 gates are measured in PQ by design.
+- Landed on 2026-11-16:
+  - **Closed:** #272, #277, #278, #279, #287.
+  - **Landed as progress:** #118, #121, #123, #156, #162, #176, #177, #178, #179, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
+  - **Plans:** v3.9.5 to v3.9.12.
 
 ## In progress (restart these first)
 
-Each worktree is under `.claude/worktrees/` in the local checkout. The unfinished work is also pushed as WIP branches, so it survives without the local checkout. They are unreviewed and partly unbuilt: never merge them as they are. Restart a lane from its branch, or from the worktree if it is still there, then land through the normal checks.
+Each has a WIP branch, never to be merged as is, and a local worktree under `.claude/worktrees/`.
 
-| Issue | WIP branch |
-|---|---|
-| #195 | `feature/wip-195-tsr-d3d12-metal` |
-| #130 | `feature/wip-130-material-hit-groups` |
-| #219 follow-up | `feature/wip-219-vsm-coarse-pages` |
-| #155 | `feature/wip-155-raster-bins` |
-| #122 + #293 | `feature/wip-122-293-mesa-gn4` (engine side only; the private Mesa library is not in the repository) |
-
-#218 had no edits yet, so it has no branch.
-
-| Issue | Worktree | Where it stopped | Next step | Machines |
+| Issue | WIP branch | Where it stopped | Next step | Machines |
 |---|---|---|---|---|
-| #195 TSR on D3D12 and Metal | `p195` (base `1e574116f6`) | Build done (all 5 presets clean under D3D12 GPU-based validation on an L4). Review: 0 blockers, 5 minors. Fix step was running | Fix step: the 5 minors. Lead choice: a device missing a TSR storage format falls back to the plain upscaler with a logged reason, not black frames; the Metal driver's format query stays as is. Then rebase and a landing check on the cloud test machine | Windows VM 4, Linux C |
-| #130 Material hit groups | `p130` (base `beab45e691`) | Build done (Vulkan clean on two L4 VMs). Review: 4 majors and 12 minors, none affecting default rendering. Fix step was running | Fix step, then rebase onto master (#121 landed and changed the D3D12 RT side) and the landing check | Linux D, Windows VM 2 |
-| #219 follow-up: always-resident coarse VSM pages | `p219c` (base `531306c6b9`) | Build stopped by a usage limit; partial edits in the worktree | Build, review and fix. Lead choice (follow UE): every shadowed light keeps coarse pages, handed out first, and the 25% pool run must overflow with zero sampled-but-unmapped pages. Also update the texts of #219 step 2, #216 and #215 | Windows VM 2, Linux E |
-| #218 VSM non-Nanite path | `p218` (base `531306c6b9`) | Build stopped by a usage limit; no edits yet | Build, review and fix | Windows T4 VM, Linux C |
-| #155 Programmable raster bins | `p155` (base `928dad38b6`) | Build stopped twice by usage limits; partial edits | Build, review and fix; rebase first (master moved a lot) | Windows VM 1, Linux C |
-| #122 + #293 Private Mesa NIR 25.3.1-gn4 | `pgn4` (base `531306c6b9`) | Build stopped by a usage limit; partial edits, and possibly partial Mesa work on the Windows Mesa build VM | gn4 = gn3 + DXIL mesh/amplification shaders (#122) + `nonUniformIndex` for non-uniform bindless reads (#293). **The D3D12 container format version for gn4 is 6** (#121 renumbered: 4 for gn2/upstream, 5 for gn3) | Windows VM 3 (Mesa build), Windows T4 VM, Linux D |
+| #195 TSR on D3D12 and Metal | `feature/wip-195-tsr-d3d12-metal` | Built and proven (all 5 presets clean under D3D12 GPU-based validation on an L4). Review: 0 blockers, 5 minors, not yet fixed | Fix the 5 minors. Lead choice: a device missing a TSR storage format falls back to the plain upscaler with a logged reason, not black frames; the Metal driver's format query stays as is. Then rebase and the landing check | Windows VM 4, Linux C |
+| #130 Material hit groups | `feature/wip-130-material-hit-groups` | Built (Vulkan clean on two L4 VMs). Review: 4 majors and 12 minors, none affecting default rendering. Partial fixes committed, not re-proven | Finish the fixes and re-prove. Rebase onto master (#121 landed and changed the D3D12 RT side), then the landing check | Linux D, Windows VM 2 |
+| #219 follow-up: always-resident coarse VSM pages | `feature/wip-219-vsm-coarse-pages` | Partial edits, not built | Build, review and fix. Lead choice (follow UE): every shadowed light keeps coarse pages, handed out first, and the 25% pool run must overflow with zero sampled-but-unmapped pages. Also update the texts of #219 step 2, #216 and #215 | Windows VM 2, Linux E |
+| #218 VSM non-Nanite path | no branch (no edits yet) | Not started | Build, review and fix | Windows T4 VM, Linux C |
+| #155 Programmable raster bins | `feature/wip-155-raster-bins` | Partial edits, not built | Rebase, then build, review and fix | Windows VM 1, Linux C |
+| #122 + #293 Private Mesa NIR 25.3.1-gn4 | `feature/wip-122-293-mesa-gn4` (engine side only) | Partial edits; possibly partial Mesa work on the Windows Mesa build VM | Build gn4 = gn3 + DXIL mesh/amplification shaders + `nonUniformIndex` for non-uniform bindless reads. **The D3D12 container format version for gn4 is 6** (4 is gn2/upstream, 5 is gn3). The Mesa fork, its patches and the packed library are private and never committed | Windows VM 3 (Mesa build), Windows T4 VM, Linux D |
 
 ## Ready to start (phase order)
 
-- **#145** RT visibility policy shared by RT shadows, MegaLights and SRC (PM; unblocked by #121).
-- **#295** AVBOIT, Experimental and off by default (PL; no blockers).
-- **#221** VSM product surface and **#222** VSM projection and SMRT soft shadows (PV). Start them after the #219 follow-up and #218 settle, so three lanes don't collide in the same VSM files.
+- **#145** RT visibility policy shared by RT shadows, MegaLights and SRC (unblocked by #121).
+- **#295** AVBOIT, Experimental and off by default (no blockers).
+- **#221** VSM product surface and **#222** VSM projection and SMRT soft shadows. Start them after the #219 follow-up and #218.
 - These open once their blocker lands: #158 (after #155), #286 and #167 (after #130), #193 (after #195), #294 (after #129, #130 and #286), #296 (after #152 and #160).
 
 ## Waiting on the lead
 
-- **#98 DLSS license sign-off.** It holds the DLSS track (#99 and the rest), plus #236's UE-side Frame Generation, MFG, Reflex and Nsight.
-- **Mac runs.** Nothing has been built or run on Metal yet. Every landed issue's Metal half and the macOS builds wait for this.
-- **AMD test machine.** A cloud Radeon PRO V710 (#280), being set up by the lead.
-- **RTX PRO 6000 quota** on gcloud: the requests for europe-west4 and us-central1 are still at 0 granted. The VM script is ready once quota exists.
-- **Orchestrator VM** (optional): an always-on VM running the agent loop, so lanes continue while the lead's Mac is offline. It was proposed on 2026-11-16 and not yet approved.
+- **#98 DLSS license sign-off.** It holds the DLSS track, plus #236's UE-side Frame Generation, MFG, Reflex and Nsight.
+- **Mac runs.** Every Metal build and run waits for the lead.
+- **AMD test machine.** A cloud Radeon PRO V710 (#280).
+- **RTX PRO 6000 gcloud quota:** the requests are pending, with 0 granted.
 
 ## Known issues and risks
 
-- **Usage limits.** The account hit its spend limit four times on 2026-11-16, at about 10:00, 14:41, 14:58 and 15:45. Each time it lifted within minutes, but it stopped running agents. With more than ten lanes at once, expect this again.
-- **PresentMon writes no rows on the RTX 4080 SUPER machine** (noted on #202 and #236; possibly no active monitor). It must be fixed before PQ.
+- **PresentMon writes no rows on the RTX 4080 SUPER machine** (#202, #236; possibly no active monitor). It must be fixed before PQ.
 - **#236's UE side is render-thread bound in editor game mode**, so it is not GPU-bound. PQ decides how to handle it.
-- **Resuming workflows:** editing one item's prompt in a multi-item workflow re-runs every later agent call. To restart one unfinished item, run it as a new single-item workflow.
-
-## Decisions made under the lead's "recommended option or follow UE" rule
-
-The lead asked on 2026-11-16 for no more questions: take the recommended option, or follow UE, and report the choice. The plan's §18.1 and the issue comments record each one, for example:
-- #219's mip footprint and overflow;
-- #121's record padding;
-- #283's AMD APU detection;
-- the UE column-fairness choices;
-- LQ14's platform targets as post-v1.
-
-The lead can overrule any of them.
+- **The RTX 4080 SUPER machine is shared** with another project's UE automation. Never stop or touch anything that isn't GodotNext's own there.
+- **The repository is public.** No local paths, hosts, IPs, VM names or account names go in tracked files, commit messages or issue comments.
+- **Decisions made on 2026-11-16 under the lead's rule** are recorded in the plan's §18.1 and the issue comments. The lead can overrule any of them.
