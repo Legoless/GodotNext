@@ -37,7 +37,7 @@ Recorded on 2026-11-08 at base commit `17dd0086` (`4.8.beta.custom_build.17dd008
 | Host | OS | GPU | Compiler | Build command | Editor binary | Wall time | `--headless --test --force-colors` | Vulkan SDK and SPIR-V dev tools |
 |---|---|---|---|---|---|---|---|---|
 | Apple M5 Max | macOS 27.0.1 (26A434) | Apple M5 Max, 40 GPU cores, Metal 4 (`system_profiler SPDisplaysDataType`); Vulkan RT compiled out (MoltenVK), Metal HWRT active | Apple clang 21.0.0 (`clang-2100.4.1.1`) | `scons platform=macos target=editor dev_mode=yes arch=arm64 use_volk=yes -j8` | `bin/godot.macos.editor.arm64` | 10.82 s incremental (warm 2.5 GB SCons cache) | 1735 passed, 0 failed (3 pre-existing platform skips) | No LunarG SDK (`use_volk=yes`); `spirv-val`: `SPIRV-Tools v2026.4` (2026-09-10); `spirv-cross`: built 2026-09-16 (`/opt/homebrew/bin`) |
-| the RTX 4080 SUPER machine | Windows 11 Pro (10.0.26100) | NVIDIA GeForce RTX 4080 SUPER (plus Intel UHD 770, unused in v1) | MSVC 19.44.35228 for x64 (VS 14.3, Windows SDK 10.0.26100.0) | `python misc/scripts/install_d3d12_sdk_windows.py`, then `scons platform=windows target=editor dev_mode=yes d3d12=yes -j16` | `bin\godot.windows.editor.x86_64.console.exe` | 9m 27s (567.2 s) cold; 34.20 s incremental | 1728 passed, 0 failed (3 pre-existing platform skips) | LunarG Vulkan SDK `1.4.363.0` (`VK_LAYER_KHRONOS_validation` 1.4.363); `spirv-val`: `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`; `spirv-cross`: `vulkan-sdk-1.4.357.0-39-gf11ba9f0` (2026-09-27) |
+| the RTX 4080 SUPER machine | Windows 11 Pro (10.0.26100) | NVIDIA GeForce RTX 4080 SUPER (plus Intel UHD 770, not a test device: plan §26.4) | MSVC 19.44.35228 for x64 (VS 14.3, Windows SDK 10.0.26100.0) | `python misc/scripts/install_d3d12_sdk_windows.py`, then `scons platform=windows target=editor dev_mode=yes d3d12=yes -j16` | `bin\godot.windows.editor.x86_64.console.exe` | 9m 27s (567.2 s) cold; 34.20 s incremental | 1728 passed, 0 failed (3 pre-existing platform skips) | LunarG Vulkan SDK `1.4.363.0` (`VK_LAYER_KHRONOS_validation` 1.4.363); `spirv-val`: `SPIRV-Tools v2026.4 v2026.4.rc2-0-gef96ed76`; `spirv-cross`: `vulkan-sdk-1.4.357.0-39-gf11ba9f0` (2026-09-27) |
 | the Linux VM | Linux 7.2.5-3 x86_64 (Arch-based, 4 vCPU, 15 GiB RAM) | None (`llvmpipe`, LLVM 22.1.8, 256 bits, Mesa 26.2.2) | `g++ (GCC) 16.2.1 20260810` | `scons platform=linuxbsd target=editor dev_mode=yes -j4` | `bin/godot.linuxbsd.editor.x86_64` | 25m 39s (1538.7 s) cold; 11.67 s incremental | 1734 passed, 0 failed (3 pre-existing platform skips) | System Vulkan loader `1.4.357` (`VK_LAYER_KHRONOS_validation` 1.4.357); `spirv-val`: `SPIRV-Tools v2026.3 vulkan-sdk-1.4.357.0-0-g9a49b0883` |
 
 The dev tools (`spirv-val`, `spirv-cross`, LunarG Vulkan SDK) are local dependencies and are never vendored (§13.1).
@@ -49,7 +49,7 @@ SSH Session 0 cannot create desktop swapchains. In the interactive desktop sessi
 | Device name | v1 role | Godot Session-1 Vulkan `--gpu-index` | Godot Session-1 D3D12 `--gpu-index` | `nvidia-smi -i` | Session-0 `vulkaninfo --json=<n>` |
 |---|---|---|---|---|---|
 | `NVIDIA GeForce RTX 4080 SUPER` | Primary NVIDIA build & gate device | `0` | `0` | `0` | `1` |
-| `Intel(R) UHD Graphics 770` | Not a test device (§23) | `1` | `1` | n/a | `0` |
+| `Intel(R) UHD Graphics 770` | Not a test device (plan §23.2, §26.4); one-off informational runs only | `1` | `1` | n/a | `0` |
 | `Microsoft Basic Render Driver` | Software WARP adapter (unused) | n/a | `2` | n/a | n/a |
 
 Session-1 Vulkan `--verbose` excerpt (`bin\godot.windows.editor.x86_64.console.exe --verbose --rendering-driver vulkan --gpu-index 0 --quit-after 3`):
@@ -106,6 +106,21 @@ Until the RTX 5090 machine exists (#227), a Compute Engine Windows VM with one N
 - A landing check that says it renders on the RTX 4080 SUPER may run on the RTX 4080 SUPER machine or on the cloud test machine. The issue comment that reports it names the machine.
 - Like the L4 VMs, it runs no gate line, gives no judged timing or UE-comparison verdict and never runs a DLSS-enabled build, and it is stopped when idle.
 - PQ still runs on the RTX 5090 machine (#227); the PQ fleet is unchanged.
+
+### Functional-coverage machines (plan v3.9.9)
+
+v1 supports the GPU vendors, hardware generations, operating systems and API versions that UE 5.9 supports (lead decision 2026-11-16, plan §26). Outside the PQ fleet these classes get functional coverage only: the build, doctests, 0 validation errors, the phase smoke scenes and the expected NextGI tier and fallback reason. They run no gate line, timing line or UE comparison (plan §26.3). The runs are #281; the machine setup is #280.
+
+| Machine | Class it covers | System and APIs | Status |
+|---|---|---|---|
+| Cloud NVIDIA T4 VM | NVIDIA Turing, UE's minimum hardware ray tracing class ("NVIDIA RTX-2000 series or newer") | Windows, D3D12 and Vulkan | Being created (2026-11-16); build row, device mapping and `vulkaninfo` to add here (#280) |
+| Cloud AMD Radeon PRO V710 VM | AMD RDNA3, UE's "AMD RX-6000 series or newer" class | Windows, D3D12 and Vulkan | Being set up by the lead; build row, device mapping and `vulkaninfo` to add here (#280) |
+| Cloud Linux VM (above) | NVIDIA on Linux (UE's Linux floor: NVIDIA 570 or newer) | Ubuntu 24.04, Vulkan | In use |
+
+- They follow the cloud VM rules above: no DLSS-enabled build, stopped when idle, and their names and addresses only in the git-ignored `local/fleet.env`.
+- UE's minimum OS versions get one functional run each in PQ: Windows 10 22H2 and Rocky Linux 8, on a fleet machine that can boot them (#282). macOS 14.5 is a known gap: the M5 Max cannot run it.
+- Supported, but with no fleet device (known gaps, not hardware to buy, plan §26.5): Intel Arc (discrete, and integrated with RT units), AMD and Intel on Linux, AMD GCN and RDNA1, NVIDIA Ampere, Pascal and Maxwell, and Apple M1 to M4.
+- The Intel UHD 770 in the RTX 4080 SUPER machine is not a test device (plan §26.4). A one-off informational run on it, such as #176's bindless check, is allowed and is not coverage.
 
 ### Vulkan capability archive (`docs/godotnext/fleet/vulkaninfo/g0/`)
 

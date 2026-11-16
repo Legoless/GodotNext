@@ -1,6 +1,6 @@
 ---
 name: godotnext-fleet
-description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, a cloud NVIDIA RTX PRO 6000 test machine standing in for the RTX 5090 during the build, cloud NVIDIA L4 VMs for Linux and Windows, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
+description: Describes the GodotNext build and test hardware (Apple M5 Max, NVIDIA RTX 4080 SUPER, NVIDIA RTX 5090, a cloud NVIDIA RTX PRO 6000 test machine standing in for the RTX 5090 during the build, cloud NVIDIA L4 VMs for Linux and Windows, a cloud NVIDIA T4 and a cloud AMD Radeon PRO V710 for functional coverage, and a GPU-less Linux VM), what each is for, and how to use it. Use when a task needs a GPU run, a Linux or Windows build, a remote machine, or a rendered check of an HTML page.
 ---
 
 # Use the GodotNext hardware
@@ -14,8 +14,10 @@ description: Describes the GodotNext build and test hardware (Apple M5 Max, NVID
 | Linux x86_64 VM, no GPU | Linux, llvmpipe | CPU, doctest and software-Vulkan smoke runs; never DLSS-enabled builds | Available |
 | Cloud Linux VM, NVIDIA L4 (16 vCPU, 64 GB) | Ubuntu 24.04, Vulkan (NVIDIA 580 driver), headless X on the L4 | Linux builds and doctests, Linux Vulkan validation runs on a second NVIDIA (Ada) card; never DLSS-enabled builds | In use since 2026-11-14; stop when idle |
 | Cloud Windows VM, NVIDIA L4 (16 vCPU, 64 GB) | Windows Server 2025, Vulkan and D3D12 (NVIDIA GRID driver, WDDM) | Windows builds, Vulkan and D3D12 validation runs beside the RTX 4080 SUPER; never DLSS-enabled builds | In use since 2026-11-14; stop when idle |
+| Cloud NVIDIA T4 VM (Turing) | Windows, D3D12 and Vulkan | Functional coverage of UE's minimum NVIDIA ray tracing class (plan v3.9.9, §26); PR basics for changes to the vendor paths; never DLSS-enabled builds; no gate line | Being created (2026-11-16, #280); stop when idle |
+| Cloud AMD Radeon PRO V710 VM (RDNA3) | Windows, D3D12 and Vulkan | Functional coverage of UE's AMD class (plan v3.9.9, §26); PR basics for changes to the AMD paths; no gate line | Being set up by the lead (#280); stop when idle |
 
-The RTX 4080 SUPER machine also has an Intel UHD 770, which runs nothing in v1. In interactive Session 1 (where all rendered Godot runs happen), both Vulkan and D3D12 enumerate the NVIDIA GeForce RTX 4080 SUPER at `--gpu-index 0` and the Intel UHD 770 at `--gpu-index 1` (`nvidia-smi` also lists the RTX 4080 SUPER at `-i 0`, whereas SSH Session-0 `vulkaninfo` lists Intel first and uses `--json=1` for the RTX 4080 SUPER; resolve indices by device name from `docs/godotnext/fleet.md`). Mid-range NVIDIA, AMD and Intel GPUs ship "enabled, unvalidated" (§23.2).
+The RTX 4080 SUPER machine also has an Intel UHD 770, which is not a test device (plan §26.4); a one-off informational run on it is allowed. In interactive Session 1 (where all rendered Godot runs happen), both Vulkan and D3D12 enumerate the NVIDIA GeForce RTX 4080 SUPER at `--gpu-index 0` and the Intel UHD 770 at `--gpu-index 1` (`nvidia-smi` also lists the RTX 4080 SUPER at `-i 0`, whereas SSH Session-0 `vulkaninfo` lists Intel first and uses `--json=1` for the RTX 4080 SUPER; resolve indices by device name from `docs/godotnext/fleet.md`). v1 supports the hardware UE 5.9 supports (plan §26). Outside the PQ fleet, the cloud T4, the cloud Radeon PRO V710 and the cloud Linux L4 VM give functional coverage only: build, doctests, 0 validation errors, smoke scenes, and the expected tier and fallback reason. Intel Arc, AMD and Intel on Linux, NVIDIA Ampere and older, and Apple M1 to M4 are supported with no fleet device.
 
 ## Using the RTX 4080 SUPER machine
 
@@ -43,6 +45,10 @@ The cloud VMs are Compute Engine `g2-standard-16` machines with one NVIDIA L4 ea
 4. **Windows:** the SSH shell is PowerShell, as on the RTX 4080 SUPER machine (separate commands with `;`, not `&`); run a copied `.ps1` with `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`. `nvidia-smi` reports the L4 in WDDM mode, which D3D12 and Vulkan rendering need.
 5. **No L4 capacity:** a start can fail with a zone stockout, and a new VM can sit in `STAGING` for minutes and then disappear for the same reason, so wait for `RUNNING` before giving up on a zone and never delete a `STAGING` instance. When Europe has no L4s, the US zones often do. Retry later, or move the VM: snapshot its boot disk, create a `g2-standard-16` from the snapshot in a zone that has capacity (`--maintenance-policy TERMINATE`), copy the instance's `enable-windows-ssh` and `ssh-keys` metadata (Windows reads its SSH keys from them), and update `local/fleet.env`. The disk keeps the driver, the checkout and the autologon setup.
 6. **DLSS:** never on these VMs. NVIDIA's DLSS license (Supplement §3) leaves non-vGPU cloud use outside its scope, so DLSS-enabled builds run only on the owned cards.
+
+## The functional-coverage machines
+
+The cloud NVIDIA T4 and AMD Radeon PRO V710 VMs (plan §26.5, #280) are reached and handled like the Windows L4 VMs: their settings go in `local/fleet.env` when they are created, they bill while they run, and they never run a DLSS-enabled build. Their results are functional checks (#281), not gate lines or timings. Resolve `--gpu-index` by device name from `docs/godotnext/fleet.md` once their device-mapping rows are there.
 
 ## The cloud test machine
 
