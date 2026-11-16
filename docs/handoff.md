@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, workflow run IDs, VM names and zones, private library folders) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-16, about 17:00 CET. Every lane was stopped and every cloud VM was shut down for an offline period.
+**Last updated:** 2026-11-16, evening. Work resumed after an offline period. The six in-progress lanes below are running again on the cloud VMs (all eight started). If work stops again, restart them as described below.
 
 ## Resume in five steps
 
@@ -16,7 +16,7 @@ The current state of the build and what to do next. Update this file whenever wo
 
 - Master: `c88a8a6dbb`. Plan: v3.9.12 (`4a44d8b50c`).
 - Tracker: 132 of 229 build tasks done, 0 of 18 gates (gates are measured in PQ by design).
-- Every lane is stopped and nothing of GodotNext's is running on the RTX 4080 SUPER machine. All cloud VMs are stopped.
+- Running: the fix steps of #195 and #130, and fresh runs of the #219 follow-up, #218, #155 and gn4 (#122 + #293). The RTX 4080 SUPER machine is idle.
 
 ### Landed on 2026-11-16
 
