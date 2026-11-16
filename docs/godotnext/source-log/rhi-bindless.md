@@ -56,7 +56,7 @@ is written again.
 
 How it was used: Direct3D 12 reports `SUPPORTS_BINDLESS` with resource binding tier 2 (a
 65,536-descriptor SRV range) and enhanced barriers (the graph places the tables' barriers; the legacy
-resource-state path would have to track every slot), on NVIDIA GPUs only (see the Mesa section). The
+resource-state path would have to track every slot), on every vendor's GPU (see the Mesa section). The
 shader-visible heaps then grow by a reservation for tables: two resource tables of 65,536 descriptors and
 one sampler table of 1,024. It is made only when both fit: the sampler heap under its 2,048 cap, and the
 CBV/SRV/UAV heap under the maximum the runtime reports in `D3D12_FEATURE_DATA_D3D12_OPTIONS19`'s
@@ -90,9 +90,13 @@ each table's runtime array the size of its root-signature range and moves it to 
 space, changing the variable, its derefs and each `vulkan_resource_index` together. The Windows SDK's
 `dxc.exe -dumpbin` (10.0.26100) showed the result, for example `textures texture f32 2d T0 t0,space3
 65536`, and that every `createHandle` has `nonUniformIndex` false. Reads at non-uniform indices
-therefore rely on the GPU. They are correct on the NVIDIA L4, and HLSL requires the mark for an index
-that varies across a wave, so Direct3D 12 reports `SUPPORTS_BINDLESS` only on NVIDIA GPUs until the
-DXIL marks the reads. The GodotNext Mesa library (25.3.1-gn2, #123) patches `emit_srv`, `emit_sampler`,
+therefore rely on the hardware: HLSL requires the mark for an index that varies across a wave, and a
+GPU may treat an unmarked index as uniform and give the whole wave one lane's descriptor. Direct3D 12
+reports `SUPPORTS_BINDLESS` on every vendor's GPU anyway (the lead's decision of 2026-11-16 removed an
+NVIDIA-only gate). The rd_parity/bindless fixture, whose compute shader reads a different slot in every
+invocation, matches its CPU reference on the NVIDIA L4 and on WARP (the Microsoft Basic Render Driver).
+WARP is a software adapter, and no other vendor's GPU has run it, so these runs do not show that such
+GPUs read the right entry. The GodotNext Mesa library (25.3.1-gn2, #123) patches `emit_srv`, `emit_sampler`,
 `emit_createhandle_call_dynamic` and `emit_deref`; these notes describe the upstream `25.3.1-3`
 library, and the container's table layout was checked with both.
 

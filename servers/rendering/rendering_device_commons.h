@@ -1084,7 +1084,8 @@ public:
 		SUPPORTS_INT64_ATOMIC_ARITH,
 		// GodotNext: rd_bindless (#176)
 		// Bindless tables (plan §21.1 C4): texture and storage-buffer tables of at least 65,536 slots, sampler
-		// tables up to LIMIT_MAX_BINDLESS_SAMPLERS, read at non-uniform indices.
+		// tables up to LIMIT_MAX_BINDLESS_SAMPLERS, read at non-uniform indices. On Direct3D 12 such reads are
+		// checked only on NVIDIA GPUs and WARP (see the SUPPORTS_BINDLESS note in the class reference).
 		SUPPORTS_BINDLESS,
 		// GodotNext: rd_indirect_count (#177)
 		// draw_list_draw_indirect_count(): indirect draws whose count a GPU buffer holds.

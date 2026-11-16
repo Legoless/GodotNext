@@ -7419,12 +7419,10 @@ Error RenderingDeviceDriverD3D12::_get_device_limits() {
 	device_limits.max_cbvs_per_shader_stage = options.ResourceBindingTier <= D3D12_RESOURCE_BINDING_TIER_2 ? 14 : UINT64_MAX;
 	device_limits.max_samplers_across_all_stages = options.ResourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1 ? 16 : 2048;
 	// GodotNext: rd_bindless (#176). A 65,536-descriptor SRV range needs resource binding tier 2: tier 1
-	// allows 128 SRVs per shader stage. Only NVIDIA GPUs, because the DXIL does not mark table reads
-	// non-uniform (see BindlessCapabilities).
+	// allows 128 SRVs per shader stage. Any vendor: table reads at non-uniform indices rely on the hardware,
+	// because the DXIL does not mark them (see BindlessCapabilities).
 	if (options.ResourceBindingTier < D3D12_RESOURCE_BINDING_TIER_2 || !barrier_capabilities.enhanced_barriers_supported) {
 		print_verbose("D3D12: Bindless tables are not supported: they need resource binding tier 2 and enhanced barriers.");
-	} else if (context_device.vendor != RenderingContextDriver::Vendor::VENDOR_NVIDIA) {
-		print_verbose("D3D12: Bindless tables are not supported: only NVIDIA GPUs report them, because the DXIL does not mark table reads non-uniform.");
 	} else {
 		bindless_capabilities.supported = true;
 	}
