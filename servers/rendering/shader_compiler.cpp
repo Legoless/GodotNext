@@ -628,7 +628,8 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 				}
 				ucode += ";\n";
 				if (SL::is_sampler_type(uniform.type)) {
-					for (int j = 0; j < STAGE_MAX; j++) {
+					// GodotNext: nextgi_hit_groups (#130). The hit template defines each texture over its bindless table.
+					for (int j = 0; j < STAGE_MAX && !p_actions.nextgi_hit; j++) {
 						r_gen_code.stage_globals[j] += ucode;
 					}
 
@@ -741,6 +742,12 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 				}
 
 				vcode += ";\n";
+				// GodotNext: nextgi_hit_groups (#130). One module writes and reads the varyings: plain globals.
+				if (p_actions.nextgi_hit) {
+					frag_varying_code += vcode;
+					index += inc;
+					continue;
+				}
 				// GLSL ES 3.0 does not allow layout qualifiers for varyings
 				if (!RS::get_singleton()->is_low_end()) {
 					vert_varying_code += "layout(location=" + itos(index) + ") ";
@@ -752,7 +759,10 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 				index += inc;
 			}
 
-			if (!vert_varying_code.is_empty()) {
+			// GodotNext: nextgi_hit_groups (#130)
+			if (p_actions.nextgi_hit) {
+				r_gen_code.stage_globals[STAGE_FRAGMENT] += frag_varying_code;
+			} else if (!vert_varying_code.is_empty()) {
 				if (p_actions.visibility_resolve) {
 					r_gen_code.stage_globals[STAGE_VERTEX] += "#ifndef MODE_VISIBILITY_RESOLVE\n" + vert_varying_code + "#endif\n";
 					r_gen_code.stage_globals[STAGE_FRAGMENT] += "#ifndef MODE_VISIBILITY_RESOLVE\n" + frag_varying_code + "#endif\n";
@@ -804,8 +814,36 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 			HashMap<StringName, String> function_code;
 
 			//code for functions
+			// GodotNext: nextgi_hit_groups (#130). Hits never run light(), so neither light() nor a helper only it
+			// calls may set usage flags or defines for the hit module.
+			HashSet<StringName> hit_reachable_funcs;
+			if (p_actions.nextgi_hit) {
+				LocalVector<StringName> queue;
+				for (const KeyValue<StringName, Stage> &E : p_actions.entry_point_stages) {
+					if (E.key != "light") {
+						hit_reachable_funcs.insert(E.key);
+						queue.push_back(E.key);
+					}
+				}
+				for (uint32_t q = 0; q < queue.size(); q++) {
+					for (int i = 0; i < pnode->vfunctions.size(); i++) {
+						if (pnode->vfunctions[i].name == queue[q]) {
+							for (const StringName &dep : pnode->vfunctions[i].uses_function) {
+								if (!hit_reachable_funcs.has(dep)) {
+									hit_reachable_funcs.insert(dep);
+									queue.push_back(dep);
+								}
+							}
+							break;
+						}
+					}
+				}
+			}
 			for (int i = 0; i < pnode->vfunctions.size(); i++) {
 				SL::FunctionNode *fnode = pnode->vfunctions[i].function;
+				if (p_actions.nextgi_hit && !hit_reachable_funcs.has(fnode->name)) {
+					continue;
+				}
 				function = fnode;
 				current_func_name = fnode->name;
 				function_code[fnode->name] = _dump_node_code(fnode->body, p_level + 1, r_gen_code, p_actions, p_default_actions, p_assigning);
@@ -824,8 +862,16 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 
 				current_func_name = fnode->name;
 
-				if (p_actions.entry_point_stages.has(fnode->name)) {
+				// GodotNext: nextgi_hit_groups (#130). A hit never runs light(): note it (an empty entry), but leave it and
+				// the functions only it uses out of the module.
+				if (p_actions.nextgi_hit && fnode->name == "light" && p_actions.entry_point_stages.has(fnode->name)) {
+					r_gen_code.code[fnode->name] = String();
+				} else if (p_actions.entry_point_stages.has(fnode->name)) {
 					Stage stage = p_actions.entry_point_stages[fnode->name];
+					// GodotNext: nextgi_hit_groups (#130). One module: each function once, in the fragment globals.
+					if (p_actions.nextgi_hit) {
+						stage = STAGE_FRAGMENT;
+					}
 					_dump_function_deps(pnode, fnode->name, function_code, stage_func_code[stage], added_funcs_per_stage[stage]);
 					r_gen_code.code[fnode->name] = function_code[fnode->name];
 				}
@@ -1279,6 +1325,10 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 					// sampler2D and sampler2D array and vec2 UV and vec3 UV.
 					bool multiview_uv_needed = false;
 					bool is_normal_roughness_texture = false;
+					// GodotNext: nextgi_hit_groups (#130). The texture of a texture() or textureProj() call, for its LOD.
+					// Not the sampler: a combined sampler constructor must appear where it is used.
+					String nextgi_hit_texture;
+					const bool nextgi_hit_implicit_lod = p_actions.nextgi_hit && is_internal_func && (vnode->name == "texture" || vnode->name == "textureProj");
 
 					for (int i = 1; i < onode->arguments.size(); i++) {
 						if (i > 1) {
@@ -1323,6 +1373,10 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 						}
 
 						String node_code = _dump_node_code(onode->arguments[i], p_level, r_gen_code, p_actions, p_default_actions, p_assigning);
+						// GodotNext: nextgi_hit_groups (#130)
+						if (is_texture_func && i == 1) {
+							nextgi_hit_texture = node_code;
+						}
 						if (is_texture_func && i == 1) {
 							// If we're doing a texture lookup we need to check our texture argument
 							StringName texture_uniform;
@@ -1449,8 +1503,19 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 							}
 
 							code += node_code;
+						} else if (nextgi_hit_implicit_lod && i == 3) {
+							// GodotNext: nextgi_hit_groups (#130). texture(s, uv, bias) and textureProj(s, uv, bias): the bias adds
+							// to the cone's LOD.
+							code += "nextgi_hit_texture_lod(" + nextgi_hit_texture + ") + (" + node_code + ")";
 						} else {
 							code += node_code;
+						}
+					}
+					// GodotNext: nextgi_hit_groups (#130). A hit has no screen derivatives: sample at the ray cone's LOD.
+					if (nextgi_hit_implicit_lod && !nextgi_hit_texture.is_empty() && (code.begins_with("texture(") || code.begins_with("textureProj("))) {
+						code = code.begins_with("texture(") ? "textureLod(" + code.substr(8) : "textureProjLod(" + code.substr(12);
+						if (onode->arguments.size() == 3) {
+							code += ", nextgi_hit_texture_lod(" + nextgi_hit_texture + ")";
 						}
 					}
 					code += ")";

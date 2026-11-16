@@ -9284,6 +9284,10 @@ void RenderingDevice::_free_internal(RID p_id) {
 		bindless_table_owner.free(p_id);
 	} else if (raytracing_pipeline_owner.owns(p_id)) {
 		RaytracingPipeline *pipeline = raytracing_pipeline_owner.get_or_null(p_id);
+		// GodotNext: nextgi_hit_groups (#130). A pipeline freed before any list bound it can still have its ray
+		// generation and miss table's upload on a transfer worker; finish it first, as freed buffers do, or the
+		// worker's command buffer records into a destroyed buffer.
+		_check_transfer_worker_buffer(&pipeline->sbt_buffer);
 		frames[frame].raytracing_pipelines_to_dispose_of.push_back(*pipeline);
 		raytracing_pipeline_owner.free(p_id);
 	} else if (hit_sbt_owner.owns(p_id)) {

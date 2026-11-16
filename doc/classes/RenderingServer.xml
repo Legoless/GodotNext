@@ -3093,6 +3093,7 @@
 				- [code]clamped_energy_fraction[/code]: fraction of energy removed by the firefly clamp.
 				- [code]gather_dispatches[/code] and [code]reflection_dispatches[/code]: diffuse-gather and reflection-trace dispatches recorded in the last rendered frame, on either tier. Lumen Lite records none.
 				- [code]lite_probe_traces[/code]: Lumen Lite probes refreshed in the last rendered frame.
+				- [code]rt_attribute_bytes[/code] and [code]rt_attribute_surfaces[/code]: the material hit groups' vertex attribute stream, part of [code]rt_arena_bytes[/code], and the surfaces that have one (the stream exists only while the hit groups run); [code]hit_available[/code]; and the hit groups' [code]hit_*[/code] and [code]hit_check_*[/code] counters. Only present while something asks for the hit groups, such as [member ProjectSettings.rendering/global_illumination/nextgi/debug/hit_material_check].
 				The dummy renderer returns [code]0[/code] for every key.
 			</description>
 		</method>
@@ -3119,6 +3120,7 @@
 				- [code]lite_view_fields[/code]: the number of views that hold a Lumen Lite field. Each view keeps its own field, which is freed with the view.
 				- [code]wrc_views[/code]: the number of views that hold a world radiance cache, and [code]wrc_views_bytes[/code] their memory. Each view keeps its own cache, around its own camera, which is freed with the view. The other world radiance cache keys come from the view that updated its cache last.
 				- [code]mid_frame_tier_changes[/code]: the number of frames whose NextGI work ended on another tier than the frame began on. A tier change, including the switch to the software tier when acceleration structures exceed their memory budget ([code]AS_MEMORY[/code]), applies at the start of the next frame, so this stays [code]0[/code].
+				- [code]hit_groups[/code]: [code]"AVAILABLE"[/code] when the material hit groups run, or why they do not: [code]"NO_CONSUMER"[/code] (nothing asks for them, the default), [code]"NOT_HWRT"[/code], [code]"NO_RAYTRACING_PIPELINE"[/code] (Metal until its ray tracing pipelines land, or a device without them), [code]"NO_PIPELINE_LIBRARY"[/code], [code]"NO_BINDLESS"[/code] or [code]"INIT_FAILED"[/code] (setting them up failed; not retried until nothing asks for them).
 				- [code]hardware_ray_tracing_pending[/code]: only present while a [method nextgi_set_hardware_ray_tracing] request waits for a restart; the requested mode.
 			</description>
 		</method>

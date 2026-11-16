@@ -4192,6 +4192,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_seed", PROPERTY_HINT_RANGE, "1,4096,1"), 1);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/gather_hit_radiance", PROPERTY_HINT_ENUM, "SRC,Reference"), 0);
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/reference_readback", false);
+	// GodotNext: nextgi_hit_groups (#130). The material hit groups' check, and their consumer meanwhile.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/hit_material_check", false);
 	// GodotNext: nextgi_reference_capture (#263). Changing it restarts the accumulation.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_epoch", PROPERTY_HINT_RANGE, "0,65535,1,or_greater"), 0);
 

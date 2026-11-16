@@ -3157,6 +3157,9 @@
 		<member name="rendering/global_illumination/nextgi/debug/global_sdf" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI builds global distance-field clipmaps from the available mesh distance fields and includes a distance slice, coarse ray-step counts and CPU-reference comparisons in [method RenderingServer.nextgi_get_tier_info]. This is a debugging aid; it reads GPU buffers back.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/hit_material_check" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], NextGI keeps the material hit groups and the attribute stream they read on the hardware ray tracing tier, and checks them: it traces every covered texel of the surface cache's captured cards back into the scene through the hit groups and compares albedo, normal, roughness, metallic and opacity with the captured material atlas. [method RenderingServer.nextgi_get_counters] reports the results ([code]hit_check_*[/code]) and the hit groups ([code]hit_*[/code]), and [method RenderingServer.nextgi_get_tier_info] reports why they do not run ([code]hit_groups[/code]). Read every frame. Turning it off frees the hit groups and the attribute stream.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/read_page_radiance" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_page_probes[/code], the center-texel radiance of each surface-cache page. This reads a small buffer back from the GPU.
 		</member>

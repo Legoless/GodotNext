@@ -60,6 +60,11 @@ public:
 
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> *uniforms = nullptr;
 		bool visibility_resolve = false;
+		// GodotNext: nextgi_hit_groups (#130). The NextGI hit variant: one module runs vertex() and fragment(), so
+		// every entry point's functions go to the fragment globals once, varyings are plain globals, texture
+		// uniforms get no declarations (the hit template defines them over a bindless table), and texture(s, uv)
+		// becomes textureLod(s, uv, nextgi_hit_texture_lod(s)) at the ray cone's level of detail.
+		bool nextgi_hit = false;
 	};
 
 	struct GeneratedCode {

@@ -62,6 +62,9 @@ class NextGIRTScene;
 class NextGISRC;
 struct NextGICardClusterResult;
 
+// GodotNext: nextgi_hit_groups (#130)
+class NextGIHitMaterials;
+
 // GodotNext: nextgi_src_relight
 class NextGIRelight;
 
@@ -321,6 +324,16 @@ private:
 	// The SRC card sets and material atlas (next_gi_src.h), created by the first frame block.
 	NextGISRC *src = nullptr;
 	void _capture_src_cards(RenderDataRD *p_render_data);
+
+	// GodotNext: nextgi_hit_groups (#130). The material hit groups and the RT-arena attribute stream, only while
+	// a consumer asks for them (NextGIHitConsumer bits); the check is debug/hit_material_check's consumer.
+	NextGIHitMaterials *hit_materials = nullptr;
+	uint32_t hit_consumers = 0;
+	int hit_availability = 2; // NextGIHitAvailability of the last frame block; NEXTGI_HIT_NOT_HWRT before the first.
+	bool hit_init_failed = false; // NextGIHitMaterials failed to initialize; cleared when no consumer is left.
+	void _update_hit_materials(bool p_hwrt_frame, uint64_t p_frame);
+	void _free_hit_materials();
+	void _release_unused_hit_materials();
 
 	// GodotNext: nextgi_src_relight
 	NextGIRelight *relight = nullptr;
@@ -658,6 +671,13 @@ public:
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }
+	// GodotNext: nextgi_hit_groups (#130). A consumer of the material hit groups (NextGIHitConsumer bit): hit
+	// lighting (#129) while ray_lighting_mode is not surface_cache, translucency and far-field consumers. The
+	// attribute stream and the hit groups exist only while some consumer is set; the next frame block applies a
+	// change.
+	void set_hit_consumer(uint32_t p_consumer, bool p_enabled);
+	uint32_t get_hit_consumers() const;
+	NextGIHitMaterials *get_hit_materials() const { return hit_materials; }
 	void set_front_layer(NextGIFrontLayer *p_front_layer) { front_layer = p_front_layer; }
 	bool has_front_layer() const { return front_layer != nullptr; }
 	NextGIReference *get_reference() const { return reference; }

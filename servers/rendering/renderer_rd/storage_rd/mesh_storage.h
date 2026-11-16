@@ -98,6 +98,9 @@ public:
 		uint32_t index_count = 0;
 		float eps = 0.0f;
 		RID material;
+		// GodotNext: nextgi_hit_groups (#130). UINT32_MAX without an attribute stream.
+		uint32_t attribute_chunk = UINT32_MAX;
+		uint32_t attribute_offset = 0;
 	};
 
 private:
@@ -203,6 +206,13 @@ private:
 			// CPU copies, kept until mesh_nextgi_release_cpu_geometry() (the SRC card work).
 			Vector<float> rt_cpu_positions;
 			Vector<uint32_t> rt_cpu_indices;
+			// GodotNext: nextgi_hit_groups (#130). The hit attribute stream of an arena surface, while a consumer
+			// needs it: NEXTGI_HIT_ATTRIBUTE_STRIDE bytes per vertex in the arena, and the CPU copy that region
+			// updates patch.
+			uint32_t rt_attr_chunk = UINT32_MAX;
+			uint32_t rt_attr_offset = 0;
+			uint32_t rt_attr_size = 0;
+			Vector<uint8_t> rt_attr_cpu;
 		};
 
 		uint32_t blend_shape_count = 0;
@@ -340,6 +350,12 @@ private:
 	RID nextgi_rt_chunk_address_buffer;
 
 	void _mesh_nextgi_rt_add_surface(RID p_mesh_rid, uint32_t p_surface_index, Mesh *p_mesh, Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data);
+	// GodotNext: nextgi_hit_groups (#130). The hit attribute stream of arena surfaces.
+	bool nextgi_hit_attributes_enabled = false;
+	uint64_t nextgi_hit_attribute_bytes = 0;
+	void _mesh_nextgi_hit_add_attributes(Mesh::Surface *p_surface, const RenderingServerTypes::SurfaceData &p_surface_data);
+	void _mesh_nextgi_hit_free_attributes(Mesh::Surface *p_surface);
+	void _mesh_nextgi_hit_patch_attributes(Mesh::Surface *p_surface, bool p_attribute_region, uint32_t p_offset, const Vector<uint8_t> &p_data);
 	void _mesh_nextgi_rt_clear_parts(Mesh *p_mesh);
 	void _mesh_nextgi_release_empty_chunks();
 	RID _mesh_nextgi_rt_ensure_chunk(uint32_t p_chunk);
@@ -561,6 +577,9 @@ public:
 		uint64_t proxy_blas_bytes_uncompacted = 0;
 		uint64_t proxy_triangles = 0;
 		uint32_t proxy_blas_parts = 0;
+		// GodotNext: nextgi_hit_groups (#130). Arena bytes of the hit attribute streams (part of rt_arena_bytes).
+		uint64_t rt_attribute_bytes = 0;
+		uint32_t rt_attribute_surfaces = 0;
 	};
 	bool mesh_nextgi_rt_is_enabled() const { return nextgi_rt_enabled; }
 	// GodotNext: ps_swrt_trace (#186, #188). The CPU copies of mesh triangles are kept (the SRC
@@ -595,6 +614,11 @@ public:
 	void mesh_nextgi_set_virtual_geometry_changed_callback(NextGIVirtualGeometryChanged p_callback, void *p_userdata);
 	void *mesh_nextgi_get_virtual_geometry_changed_userdata() const { return nextgi_vg_changed_userdata; }
 	void mesh_nextgi_release_cpu_geometry(RID p_mesh);
+	// GodotNext: nextgi_hit_groups (#130). Allocates the hit attribute stream of every arena surface (reading
+	// back the vertex and attribute buffers of surfaces added before) or frees every stream. No stream exists
+	// while it is off.
+	void mesh_nextgi_set_hit_attributes(bool p_enabled);
+	bool mesh_nextgi_get_hit_attributes() const { return nextgi_hit_attributes_enabled; }
 	// GodotNext: nextgi_skinned_actors (#59). True when a surface is bone-driven, so the mesh has
 	// no static BLAS parts and its cards come from the bind-pose CPU copy.
 	bool mesh_nextgi_rt_is_skinned(RID p_mesh) const;

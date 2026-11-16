@@ -43,6 +43,8 @@
 #include "servers/rendering/renderer_rd/environment/gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
+// GodotNext: nextgi_hit_groups (#130)
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 // GodotNext: nextgeo_rt_native (#156)
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
@@ -605,6 +607,91 @@ void NextGI::set_hardware_ray_tracing(int p_mode) {
 	_ensure_rt_scene();
 }
 
+// GodotNext: nextgi_hit_groups (#130)
+static_assert(int(NEXTGI_HIT_NOT_HWRT) == 2, "NextGI::hit_availability starts at NEXTGI_HIT_NOT_HWRT (next_gi.h).");
+
+void NextGI::set_hit_consumer(uint32_t p_consumer, bool p_enabled) {
+	if (p_enabled) {
+		hit_consumers |= p_consumer;
+	} else {
+		hit_consumers &= ~p_consumer;
+	}
+}
+
+uint32_t NextGI::get_hit_consumers() const {
+	uint32_t consumers = hit_consumers;
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings != nullptr && settings->has_setting("rendering/global_illumination/nextgi/debug/hit_material_check") && bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/hit_material_check"))) {
+		consumers |= NEXTGI_HIT_CONSUMER_CHECK;
+	}
+	return consumers;
+}
+
+void NextGI::_free_hit_materials() {
+	if (hit_materials != nullptr) {
+		memdelete(hit_materials);
+		hit_materials = nullptr;
+	}
+}
+
+void NextGI::_release_unused_hit_materials() {
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (singleton != this || (hit_materials == nullptr && (mesh_storage == nullptr || !mesh_storage->mesh_nextgi_get_hit_attributes()))) {
+		return;
+	}
+	const uint32_t consumers = get_hit_consumers();
+	if (consumers != 0 && result.tier == TIER_HWRT) {
+		return;
+	}
+	_free_hit_materials();
+	if (mesh_storage != nullptr) {
+		mesh_storage->mesh_nextgi_set_hit_attributes(false);
+	}
+	hit_availability = consumers == 0 ? NEXTGI_HIT_NO_CONSUMER : NEXTGI_HIT_NOT_HWRT;
+	hit_init_failed = false;
+}
+
+// Once per frame, before the TLAS phase: the hit groups run where a consumer asks for them on the hardware tier
+// and the device has RT pipelines, pipeline libraries and bindless tables, and the stream exists only while
+// they run.
+void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
+	if (singleton != this) {
+		return;
+	}
+	const uint32_t consumers = get_hit_consumers();
+	if (consumers == 0) {
+		hit_init_failed = false;
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	const bool hwrt = p_hwrt_frame && rt_scene != nullptr;
+	NextGIHitAvailability availability = nextgi_hit_availability(consumers, hwrt,
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE),
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE_LIBRARY),
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed);
+	if (availability == NEXTGI_HIT_AVAILABLE && hit_materials == nullptr) {
+		hit_materials = memnew(NextGIHitMaterials);
+		if (!hit_materials->is_ready()) {
+			// Latched until the consumers go away, so a failure is not retried (and logged) every frame.
+			_free_hit_materials();
+			hit_init_failed = true;
+			availability = NEXTGI_HIT_INIT_FAILED;
+		}
+	}
+	if (availability != NextGIHitAvailability(hit_availability) && consumers != 0) {
+		print_verbose(vformat("NextGI hit groups: %s.", nextgi_hit_availability_name(availability)));
+	}
+	hit_availability = availability;
+	if (mesh_storage != nullptr) {
+		mesh_storage->mesh_nextgi_set_hit_attributes(nextgi_hit_stream_needed(availability, mesh_storage->mesh_nextgi_rt_is_enabled()));
+	}
+	if (availability != NEXTGI_HIT_AVAILABLE) {
+		_free_hit_materials();
+		return;
+	}
+	hit_materials->begin_frame(p_frame);
+}
+
 // GodotNext: nextgi_rt_scene
 void NextGI::_ensure_rt_scene() {
 	// The tier can be HWRT in doctests with mocked inputs and no live device; the RT scene
@@ -711,6 +798,16 @@ Dictionary NextGI::get_counters() const {
 	if (src != nullptr) {
 		counters["src_capture_texels"] = int64_t(src->get_stats().capture_texels);
 		counters["src_stage2_cards_captured"] = int64_t(src->get_stats().stage2_captured_card_count);
+	}
+	// GodotNext: nextgi_hit_groups (#130). Only while a consumer asks for the hit groups or a stream exists.
+	if (MeshStorage::get_singleton() != nullptr && (get_hit_consumers() != 0 || MeshStorage::get_singleton()->mesh_nextgi_get_hit_attributes() || hit_materials != nullptr)) {
+		const MeshStorage::NextGIRTStats ms_stats = MeshStorage::get_singleton()->mesh_nextgi_get_rt_stats();
+		counters["rt_attribute_bytes"] = int64_t(ms_stats.rt_attribute_bytes);
+		counters["rt_attribute_surfaces"] = int64_t(ms_stats.rt_attribute_surfaces);
+		counters["hit_available"] = int64_t(hit_availability == NEXTGI_HIT_AVAILABLE ? 1 : 0);
+		if (hit_materials != nullptr) {
+			hit_materials->fill_counters(counters);
+		}
 	}
 	if (relight != nullptr) {
 		counters["src_relight_texels"] = int64_t(relight->get_last_texels());
@@ -932,6 +1029,9 @@ Dictionary NextGI::get_tier_info() const {
 	info["ray_query_shader_versions_since_tier"] = int64_t(get_ray_query_versions_since_tier());
 	// GodotNext: nextgi_frame_tier (#186). Stays 0: a tier change applies at a frame's start.
 	info["mid_frame_tier_changes"] = int64_t(mid_frame_tier_changes);
+	// GodotNext: nextgi_hit_groups (#130). Why the material hit groups do or do not run. Without a consumer
+	// that is known at once; otherwise it is what the last frame block found.
+	info["hit_groups"] = nextgi_hit_availability_name(get_hit_consumers() == 0 ? NEXTGI_HIT_NO_CONSUMER : NextGIHitAvailability(hit_availability));
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
@@ -1167,6 +1267,9 @@ void NextGI::begin_frame(uint64_t p_frame) {
 		return;
 	}
 	frame_tier_frame = p_frame;
+	// GodotNext: nextgi_hit_groups (#130). Also on frames without a frame block (NextGI turned off in the
+	// environment first): once no consumer asks for them, or off the hardware tier, nothing is kept.
+	_release_unused_hit_materials();
 	if (budget_pending && p_frame > budget_frame) {
 		budget_pending = false;
 		// Only the budget comes from the noted frame; a later hardware_ray_tracing change stays.
@@ -1432,6 +1535,11 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	}
 	_begin_dispatch_frame();
 
+	// GodotNext: nextgi_hit_groups (#130). Before the TLAS phase, which writes the hit records.
+	if (new_scenario) {
+		_update_hit_materials(hwrt_frame, render_frame_number);
+	}
+
 	// Every slot emits its timestamp, also while it has no work yet.
 	for (int slot = PASS_SLOT_BEGIN + 1; slot < PASS_SLOT_END; slot++) {
 		// GodotNext: nextgi_wrc_per_view (#253). The WRC update is per view (G3-8): each view traces
@@ -1513,6 +1621,10 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	if (hwrt_frame && reference != nullptr) {
 		reference->render(p_render_data);
 	}
+	// GodotNext: nextgi_hit_groups (#130). The check traces this frame's TLAS too, before compaction.
+	if (hwrt_frame && new_scenario && hit_materials != nullptr && (get_hit_consumers() & NEXTGI_HIT_CONSUMER_CHECK)) {
+		hit_materials->run_check(rt_scene, src, p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f);
+	}
 	// GodotNext: ps_swrt_trace (#186). The verification trace (debug/swrt_trace_readback) reads
 	// this view's depth, Hi-Z and last frame after the slots; it adds no dispatch note.
 	if (swrt_frame && swrt_trace != nullptr && NextGISWRTTrace::readback_enabled() && rb->get_view_count() == 1) {
@@ -1584,6 +1696,9 @@ NextGI::~NextGI() {
 		memdelete(irradiance_field);
 		irradiance_field = nullptr;
 	}
+
+	// GodotNext: nextgi_hit_groups (#130). Before the RT scene: its pipeline and tables are its own.
+	_free_hit_materials();
 
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {

@@ -42,6 +42,8 @@
 // GodotNext: nextgi_src_cards
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
+// GodotNext: nextgi_hit_groups (#130)
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 // GodotNext: nextgeo_rt_native (#156)
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
@@ -195,6 +197,24 @@ void NextGIArenaAllocator::reset() {
 	chunk_count = 0;
 	allocated_bytes = 0;
 	free_ranges.clear();
+}
+
+// GodotNext: nextgi_hit_groups (#130)
+uint32_t NextGIArenaAllocator::release_trailing_free_chunks() {
+	bool released = true;
+	while (chunk_count > 0 && released) {
+		released = false;
+		for (uint32_t i = 0; i < free_ranges.size(); i++) {
+			const FreeRange &range = free_ranges[i];
+			if (range.chunk == chunk_count - 1 && range.offset == 0 && range.size == chunk_size) {
+				free_ranges.remove_at(i);
+				chunk_count--;
+				released = true;
+				break;
+			}
+		}
+	}
+	return chunk_count;
 }
 
 static _FORCE_INLINE_ uint32_t _nextgi_align16(uint32_t p_bytes) {
@@ -1292,6 +1312,14 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (native != nullptr) {
 		native->begin_frame(p_render_data, RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0);
 	}
+	// GodotNext: nextgi_hit_groups (#130). While a consumer needs the hit groups, every surface record gets a hit
+	// record at the same index and every TLAS instance a hit shader binding table range; otherwise nothing
+	// changes and the ranges stay 0.
+	NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton();
+	const bool hit_records = hit_materials != nullptr && hit_materials->is_ready();
+	if (hit_records) {
+		hit_materials->begin_records();
+	}
 	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = _nextgi_rt_fed_instances(p_render_data);
 	if (fed_instances == nullptr || fed_instances->is_empty()) {
 		LocalVector<NextGIInstanceRecord> records;
@@ -1301,6 +1329,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		// GodotNext: ps_lumen_lite (#183)
 		if (NextGIRelight::get_singleton() != nullptr) {
 			NextGIRelight::get_singleton()->finish_record_pass(records);
+		}
+		// GodotNext: nextgi_hit_groups (#130)
+		if (hit_records) {
+			hit_materials->finish_records(surfaces.size());
 		}
 		_ensure_record_buffers(records.size(), surfaces.size());
 		if (instance_record_buffer.is_valid() && !records.is_empty()) {
@@ -1482,12 +1514,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					// D6 samples the bind-pose cards at the posed hit's triangle and barycentrics.
 					surface_record.flags = NEXTGI_RT_SURFACE_FLAG_SKINNED | ((slot.bind_vertex_offset / NEXTGI_RT_ALIGNMENT) << 8);
 					surface_records.push_back(surface_record);
+					// GodotNext: nextgi_hit_groups (#130). A posed slot has no attribute stream: the fallback group.
+					if (hit_records) {
+						hit_materials->add_fallback_surfaces(1);
+					}
 					instance_records.push_back(record);
 					RD::AccelerationStructureInstance tlas_instance;
 					tlas_instance.transform = instance_transform;
 					tlas_instance.id = record.tlas_index;
 					tlas_instance.mask = 0xFF;
-					tlas_instance.hit_sbt_range = 0;
+					tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record.tlas_index, UINT32_MAX, false) : 0;
 					tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 					tlas_instance.blas = part->blas;
 					tlas_instances.push_back(tlas_instance);
@@ -1589,6 +1625,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			bool have_first_vertex_offset = false;
 			for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
 				NextGISurfaceRecord surface_record;
+				// GodotNext: nextgi_hit_groups (#130)
+				uint32_t hit_attribute_chunk = UINT32_MAX;
+				uint32_t hit_attribute_offset = 0;
+				uint32_t hit_arena_chunk = UINT32_MAX;
 				if (part_geometry.is_proxy_surface) {
 					record.arena_chunk = part.chunk;
 					eps_rt = MAX(eps_rt, part_geometry.eps);
@@ -1613,12 +1653,24 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
 					surface_record.triangle_count = part_geometry.triangle_count;
 					surface_record.flags = 0;
+					// GodotNext: nextgi_hit_groups (#130)
+					hit_attribute_chunk = info.attribute_chunk;
+					hit_attribute_offset = info.attribute_offset;
+					hit_arena_chunk = info.chunk;
 				}
 				if (!have_first_vertex_offset) {
 					first_vertex_offset = surface_record.vertex_offset;
 					have_first_vertex_offset = true;
 				}
 				surface_records.push_back(surface_record);
+				// GodotNext: nextgi_hit_groups (#130). A proxy part has no attribute stream yet (PN writes it).
+				if (hit_records) {
+					if (part_geometry.is_proxy_surface) {
+						hit_materials->add_fallback_surfaces(1);
+					} else {
+						hit_materials->add_geometry(geometry_instance, mesh, part_geometry.surface, hit_arena_chunk, hit_attribute_chunk != UINT32_MAX, hit_attribute_chunk, hit_attribute_offset, fed.element_index != UINT32_MAX);
+					}
+				}
 			}
 			// GodotNext: nextgeo_rt_native (#156). A native set's eps is its bucket's (select()).
 			record.origin_offset = nextgi_rt_origin_offset(native_parts ? native_eps : eps_rt, max_scale);
@@ -1632,7 +1684,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			tlas_instance.transform = transform;
 			tlas_instance.id = record_index;
 			tlas_instance.mask = 0xFF;
-			tlas_instance.hit_sbt_range = 0;
+			// GodotNext: nextgi_hit_groups (#130). A MultiMesh element shares the MultiMesh's card set: the check skips it.
+			tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record_index, record.card_set, fed.element_index == UINT32_MAX) : 0;
 			tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 			tlas_instance.blas = part.blas;
 			tlas_instances.push_back(tlas_instance);
@@ -1781,6 +1834,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		if (NextGIRelight::get_singleton() != nullptr) {
 			NextGIRelight::get_singleton()->finish_record_pass(instance_records);
 		}
+		// GodotNext: nextgi_hit_groups (#130)
+		if (hit_records) {
+			hit_materials->finish_records(surface_records.size());
+		}
 		_ensure_record_buffers(instance_records.size(), surface_records.size());
 		if (instance_record_buffer.is_valid() && !instance_records.is_empty()) {
 			RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());
@@ -1795,6 +1852,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	// GodotNext: ps_lumen_lite (#183). Records whose pages a later instance of this pass evicted.
 	if (NextGIRelight::get_singleton() != nullptr) {
 		NextGIRelight::get_singleton()->finish_record_pass(instance_records);
+	}
+	// GodotNext: nextgi_hit_groups (#130)
+	if (hit_records) {
+		hit_materials->finish_records(surface_records.size());
 	}
 	_ensure_record_buffers(instance_records.size(), surface_records.size());
 	if (instance_record_buffer.is_valid()) {

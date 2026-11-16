@@ -213,6 +213,9 @@ public:
 	Allocation allocate(uint32_t p_size);
 	void free_range(const Allocation &p_allocation);
 	void reset();
+	// GodotNext: nextgi_hit_groups (#130). Drops the last chunks while they are wholly free (the next allocation
+	// past the rest opens a new one) and returns the chunk count left.
+	uint32_t release_trailing_free_chunks();
 
 	uint32_t get_chunk_size() const { return chunk_size; }
 	uint32_t get_chunk_count() const { return chunk_count; }

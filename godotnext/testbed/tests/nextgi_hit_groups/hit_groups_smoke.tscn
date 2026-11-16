@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://tests/nextgi_hit_groups/hit_groups_smoke.gd" id="1"]
+
+[node name="HitGroupsSmoke" type="Node"]
+script = ExtResource("1")
