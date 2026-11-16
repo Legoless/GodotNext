@@ -347,7 +347,19 @@ def test_the_pn_scene_configs(name: str, line_id: str, gate: str, path_frames: i
 _DENSE_CITY_LINES = {
     # line id: gates, status, UE group, UE columns (from the port's own game-mode captures)
     "g5_1_whole_frame": (("G5-1",), "ue_bar", "Whole frame, GPU", ("GPUTime",)),
-    "g5_1_nextgi_total": (("G5-1",), "ue_bar", "Lumen total (provisional)", _LUMEN_TOTAL),
+    # The lead's column rule (2026-11-16): the Lumen total plus the Lumen scene update.
+    "g5_1_nextgi_total": (
+        ("G5-1",),
+        "ue_bar",
+        "Lumen total",
+        (
+            "GPU/LumenSceneUpdate",
+            "GPU/UpdateLumenSceneBuffers",
+            "GPU/LumenSceneLighting",
+            "GPU/LumenScreenProbeGather",
+            "GPU/LumenReflections",
+        ),
+    ),
     "g5_1_nextgeo_cull": (("G5-1", "GN-2"), "ue_bar", "Nanite raster and cull (provisional)", ("GPU/NaniteVisBuffer",)),
     "g5_1_nextgeo_resolve": (("G5-1", "GN-11"), "ue_bar", "Nanite shading (provisional)", ("GPU/NaniteBasePass",)),
     "g5_1_vsm_total": (
@@ -358,6 +370,20 @@ _DENSE_CITY_LINES = {
     ),
     "gn13_render_thread_dense_city": (("GN-13",), "ue_bar", "Render thread, CPU", ("RenderThreadTime",)),
 }
+# Epic's 5.9 console-variable reference: the eleven quality groups, pinned at High (2) in every set.
+_DENSE_CITY_SCALABILITY_GROUPS = (
+    "sg.ViewDistanceQuality",
+    "sg.AntiAliasingQuality",
+    "sg.ShadowQuality",
+    "sg.GlobalIlluminationQuality",
+    "sg.ReflectionQuality",
+    "sg.PostProcessQuality",
+    "sg.TextureQuality",
+    "sg.EffectsQuality",
+    "sg.FoliageQuality",
+    "sg.ShadingQuality",
+    "sg.LandscapeQuality",
+)
 
 
 @pytest.mark.parametrize(
@@ -384,10 +410,12 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
     cvars = config.ue.checked_cvars()
     assert cvars["r.ScreenPercentage"] == "100"
     assert cvars["sg.ResolutionQuality"] == "100"
-    assert cvars["sg.GlobalIlluminationQuality"] == "2"
-    assert cvars["sg.ReflectionQuality"] == "2"
-    assert cvars["sg.ShadowQuality"] == "2"
-    assert cvars["r.Lumen.AsyncCompute"] == "0"
+    # The lead's decisions of 2026-11-16 (plan v3.9.7 §23.4): every scalability group pinned at High,
+    # UE's async compute off, and the Lumen tier set per launch.
+    for group in _DENSE_CITY_SCALABILITY_GROUPS:
+        assert cvars[group] == "2", group
+    for name in ("r.RDG.AsyncCompute", "r.Lumen.AsyncCompute", "r.TSR.AsyncCompute"):
+        assert cvars[name] == "0", name
     assert cvars["r.Lumen.HardwareRayTracing"] == "1"
     # Not set, only checked from the echo: UE renders Virtual Shadow Maps (the project's method, G5-1's
     # shadow_method = virtual) and Nanite meshes trace their fallback (or proxy) in ray tracing.
@@ -415,6 +443,12 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
             assert "shadow_method" in lines[line_id].reason and "not like for like" in lines[line_id].reason
         assert "GPU/HZB" in lines["g5_1_nextgeo_cull"].reason
         assert "Generate Ray Tracing Proxies" in lines["g5_1_nextgi_total"].reason
+        assert "GPU/LumenSceneUpdate" in lines["g5_1_nextgi_total"].reason
+        assert "Provisional" not in lines["g5_1_nextgi_total"].reason
+        # The ground plane stays off Nanite as GodotNext draws it outside NextGeo, against §23.4's
+        # v3.9.7 sentence until the lead decides: the two Nanite-column lines say so.
+        for line_id in ("g5_1_nextgeo_cull", "g5_1_nextgeo_resolve"):
+            assert "ground plane" in lines[line_id].reason and "v3.9.7" in lines[line_id].reason
     else:
         # G5-9: the sweeps' whole frame, report-only with the UE ratio, at the G5-1 set's settings.
         (line,) = config.lines
@@ -422,8 +456,12 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
         assert line.godotnext is not None and line.godotnext.all_passes
         assert line.ue is not None and line.ue.columns == ("GPUTime",)
         assert "shadow_method" in line.reason
-    # The hardware tier comes from the launch cvar, not from the project settings the record names: the
-    # lines that time Lumen (the whole frame and the Lumen total) say so.
+        # Only the 1B sweep places buildings past the sun's 1,600 m shadow range, which the UE import
+        # does not map.
+        assert ("directional_shadow_max_distance" in line.reason) == (variant == "dense_city_sweep_1b")
+    # The hardware tier comes from the launch cvar, which the lead accepted on 2026-11-16, not from the
+    # project settings the record names: the lines that time Lumen (the whole frame and the Lumen total)
+    # say so.
     tier_lines = {
         "g5_1_whole_frame",
         "g5_1_nextgi_total",
@@ -432,7 +470,8 @@ def test_the_dense_city_configs(name: str, variant: str) -> None:
         "g5_9_whole_frame_1b",
     }
     for line in config.lines:
-        assert ("departs from the settings record" in line.reason) == (line.id in tier_lines)
+        assert ("accepted on 2026-11-16" in line.reason) == (line.id in tier_lines)
+        assert "departs from the settings record" not in line.reason
 
 
 def test_the_ue_window_mode_comes_from_the_config() -> None:
