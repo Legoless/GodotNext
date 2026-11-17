@@ -16,8 +16,12 @@
 //   range reaches within one cell diagonal of the vertex, as the fog samples anywhere in its cells.
 // MODE_BOX: one workgroup per transparent instance's world box: every light that reaches it
 //   requests the coarse pages the box's corners span.
+// MODE_RESIDENT: one thread per light of the view, dispatched before the other modes with a barrier
+//   after it: every light with maps requests its always-resident pages (the root page of each face,
+//   or mips VSM_CLIPMAP_RESIDENT_MIP and coarser of each clipmap level). They take the request list's
+//   first VSM_STATE_RESIDENT entries, which allocation serves before any other request.
 // The CPU models are RendererVirtualShadowMapStorage::mark_local_point(), mark_directional_point(),
-// mark_local_box() and mark_directional_box(); the GPU check compares their results.
+// mark_local_box(), mark_directional_box() and mark_resident(); the GPU check compares their results.
 
 #ifdef MODE_PIXEL
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -25,7 +29,7 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 #ifdef MODE_FROXEL
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 #endif
-#ifdef MODE_BOX
+#if defined(MODE_BOX) || defined(MODE_RESIDENT)
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 #endif
 
@@ -124,6 +128,10 @@ void vsm_request(uint map, uint mip, uvec2 page, bool coarse) {
 	if (slot < view.data.screen.w) {
 		requests.data[slot] = index;
 		vsm_sink(atomicAdd(map_state.data[VSM_MAP_STATE_REQUESTS * view.data.misc.x + map], 1u));
+#ifdef MODE_RESIDENT
+		// Nothing else is marked yet: the resident requests are the list's first entries.
+		vsm_sink(atomicAdd(state.data[VSM_STATE_RESIDENT], 1u));
+#endif
 	} else {
 		vsm_sink(atomicAnd(vsm_page_table.entries[index], ~(VSM_ENTRY_REQUESTED | VSM_ENTRY_COARSE)));
 		vsm_sink(atomicAdd(state.data[VSM_STATE_REQUESTS_DROPPED], 1u));
@@ -189,7 +197,7 @@ void vsm_mark_directional(uint map_base, uint light_flags, vec3 world, float foo
 	}
 	ivec2 texel0 = vsm_clipmap_texel0(vsm_maps.data[first], world);
 	if (coarse) {
-		for (uint mip = VSM_COARSE_FIRST_MIP; mip < VSM_MIP_COUNT; mip++) {
+		for (uint mip = VSM_CLIPMAP_RESIDENT_MIP; mip < VSM_MIP_COUNT; mip++) {
 			for (uint level = 0u; level < count; level++) {
 				uint map = first + level;
 				if (map >= view.data.misc.x) {
@@ -200,6 +208,19 @@ void vsm_mark_directional(uint map_base, uint light_flags, vec3 world, float foo
 					vsm_request(map, mip, vsm_clipmap_page(level_texel, mip), true);
 					break;
 				}
+			}
+		}
+		// The last level's far edge: outside mip VSM_CLIPMAP_RESIDENT_MIP's window, with no coarser level.
+		uint last_map = first + count - 1u;
+		if (count > 0u && last_map < view.data.misc.x) {
+			ivec2 origin = vsm_maps.data[last_map].origin;
+			ivec2 level_texel = texel0 >> int(count - 1u);
+			if (vsm_clipmap_in_window(origin, level_texel, 0u) && !vsm_clipmap_in_window(origin, level_texel, VSM_CLIPMAP_RESIDENT_MIP)) {
+				uint resident = 0u;
+				while (resident + 1u < VSM_CLIPMAP_RESIDENT_MIP && vsm_clipmap_in_window(origin, level_texel, resident + 1u)) {
+					resident++;
+				}
+				vsm_request(last_map, resident, vsm_clipmap_page(level_texel, resident), true);
 			}
 		}
 		return;
@@ -216,11 +237,67 @@ void vsm_mark_directional(uint map_base, uint light_flags, vec3 world, float foo
 			continue;
 		}
 		uint mip = min(vsm_biased_mip(level_mip - int(level), 0) + vsm_overflow_bias(map), VSM_MIP_COUNT - 1u);
-		if (!vsm_clipmap_in_window(origin, level_texel, mip)) {
+		if (level + 1u == count) {
+			while (mip > 0u && !vsm_clipmap_in_window(origin, level_texel, mip)) {
+				mip--;
+			}
+		} else if (!vsm_clipmap_in_window(origin, level_texel, mip)) {
 			continue;
 		}
-		vsm_request(map, mip, vsm_clipmap_page(level_texel, mip), false);
+		// The last level's far edge: outside its resident mips' window, and no coarser level holds it.
+		// The page at the coarsest mip whose window holds the point is requested ahead of the fine
+		// requests, so the sample always finds a page.
+		bool far_resident = level + 1u == count && !vsm_clipmap_in_window(origin, level_texel, VSM_CLIPMAP_RESIDENT_MIP);
+		uint resident = mip;
+		if (far_resident) {
+			while (resident + 1u < VSM_CLIPMAP_RESIDENT_MIP && vsm_clipmap_in_window(origin, level_texel, resident + 1u)) {
+				resident++;
+			}
+		}
+		vsm_request(map, mip, vsm_clipmap_page(level_texel, mip), far_resident && resident == mip);
+		if (far_resident && resident != mip) {
+			vsm_request(map, resident, vsm_clipmap_page(level_texel, resident), true);
+		}
 		return;
+	}
+}
+
+// A light's always-resident requests (RendererVirtualShadowMapStorage::mark_resident()): the root page
+// of each spot, omni and area face, or every page of mips VSM_CLIPMAP_RESIDENT_MIP and coarser of each
+// clipmap level.
+void vsm_mark_resident(uint map_base, uint light_flags) {
+	uint count = (light_flags >> VSM_LIGHT_FLAGS_COUNT_SHIFT) & VSM_LIGHT_FLAGS_COUNT_MASK;
+	if ((light_flags & VSM_LIGHT_FLAGS_KIND_MASK) == VSM_MAP_KIND_DIRECTIONAL) {
+		uint first = vsm_light_map(map_base, light_flags, 0u);
+		if (first >= view.data.misc.x || vsm_maps.data[first].kind != VSM_MAP_KIND_DIRECTIONAL) {
+			return;
+		}
+		for (uint level = 0u; level < count; level++) {
+			uint map = first + level;
+			if (map >= view.data.misc.x) {
+				break;
+			}
+			for (uint mip = VSM_CLIPMAP_RESIDENT_MIP; mip < VSM_MIP_COUNT; mip++) {
+				uint pages = VSM_PAGES_PER_SIDE >> mip;
+				for (uint y = 0u; y < pages; y++) {
+					for (uint x = 0u; x < pages; x++) {
+						vsm_request(map, mip, uvec2(x, y), true);
+					}
+				}
+			}
+		}
+		return;
+	}
+	for (uint face = 0u; face < count; face++) {
+		uint map = vsm_light_map(map_base, light_flags, face);
+		if (map >= view.data.misc.x) {
+			continue;
+		}
+		uint kind = vsm_maps.data[map].kind;
+		if (kind == VSM_MAP_KIND_NONE || kind == VSM_MAP_KIND_DIRECTIONAL) {
+			continue;
+		}
+		vsm_request(map, VSM_MIP_COUNT - 1u, uvec2(0u), true);
 	}
 }
 
@@ -399,7 +476,8 @@ void main() {
 				ivec2 origin = vsm_maps.data[map].origin;
 				ivec2 level_min = texel_min >> int(level);
 				ivec2 level_max = texel_max >> int(level);
-				for (uint mip = VSM_COARSE_FIRST_MIP; mip < VSM_MIP_COUNT; mip++) {
+				uint first_mip = level + 1u == count ? 0u : VSM_CLIPMAP_RESIDENT_MIP;
+				for (uint mip = first_mip; mip < VSM_MIP_COUNT; mip++) {
 					// The level texels the lookup reads at this mip: [origin * page size, mip window end).
 					ivec2 window_start = ((origin >> int(mip)) << int(mip)) * int(VSM_PAGE_SIZE);
 					ivec2 lo = max(level_min, origin * int(VSM_PAGE_SIZE));
@@ -409,9 +487,13 @@ void main() {
 					}
 					int shift = int(mip + VSM_PAGE_SIZE_SHIFT);
 					uint mask = (VSM_PAGES_PER_SIDE >> mip) - 1u;
+					// In the last level below VSM_CLIPMAP_RESIDENT_MIP, only pages outside mip + 1's window.
+					ivec2 next_end = (origin >> int(mip + 1u)) * 2 + ivec2(int(VSM_PAGES_PER_SIDE >> mip));
 					for (int y = lo.y >> shift; y <= (hi.y >> shift); y++) {
 						for (int x = lo.x >> shift; x <= (hi.x >> shift); x++) {
-							vsm_request(map, mip, uvec2(uint(x), uint(y)) & uvec2(mask), true);
+							if (mip >= VSM_CLIPMAP_RESIDENT_MIP || x >= next_end.x || y >= next_end.y) {
+								vsm_request(map, mip, uvec2(uint(x), uint(y)) & uvec2(mask), true);
+							}
 						}
 					}
 				}
@@ -495,6 +577,37 @@ void main() {
 				}
 			}
 		}
+	}
+}
+
+#endif
+
+#ifdef MODE_RESIDENT
+
+void main() {
+	uint l = gl_GlobalInvocationID.x;
+	if (l < view.data.counts.x) {
+		uvec4 light = view.data.directional[l];
+		vsm_mark_resident(light.x, light.y);
+		return;
+	}
+	uint local = l - view.data.counts.x;
+	uint map_base;
+	uint light_flags;
+	if (local < view.data.counts.y) {
+		map_base = omni_lights.data[local].vsm_map_base;
+		light_flags = omni_lights.data[local].vsm_flags;
+	} else if (local < view.data.counts.y + view.data.counts.z) {
+		map_base = spot_lights.data[local - view.data.counts.y].vsm_map_base;
+		light_flags = spot_lights.data[local - view.data.counts.y].vsm_flags;
+	} else if (local < view.data.counts.y + view.data.counts.z + view.data.counts.w) {
+		map_base = area_lights.data[local - view.data.counts.y - view.data.counts.z].vsm_map_base;
+		light_flags = area_lights.data[local - view.data.counts.y - view.data.counts.z].vsm_flags;
+	} else {
+		return;
+	}
+	if (map_base != VSM_MAP_NONE) {
+		vsm_mark_resident(map_base, light_flags);
 	}
 }
 
