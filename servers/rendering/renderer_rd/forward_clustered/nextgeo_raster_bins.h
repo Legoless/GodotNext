@@ -81,14 +81,15 @@ inline bool nextgeo_raster_has_program(uint32_t p_features) {
 }
 
 // N4: what the raster target rejects, for a material with a raster program: FRAGCOORD, the screen, depth
-// and normal-roughness textures and the absolute DEPTH. p_uses is ShaderCompiler::GeneratedCode::raster_uses.
-// A material without a raster program runs no material code in a bin; it keeps its #80 reason (screen
-// reads are alpha, an absolute DEPTH is a custom shader, and the resolve emulates FRAGCOORD).
+// and normal-roughness textures, the absolute DEPTH, and discard in a called helper or light(). p_uses
+// is ShaderCompiler::GeneratedCode::raster_uses. A material without a raster program runs no material
+// code in a bin; it keeps its #80 reason (screen reads are alpha, an absolute DEPTH is a custom shader,
+// and the resolve emulates FRAGCOORD).
 inline uint32_t nextgeo_raster_rejects(uint32_t p_uses, uint32_t p_features) {
 	if (!nextgeo_raster_has_program(p_features)) {
 		return 0u;
 	}
-	return p_uses & (ShaderCompiler::RASTER_USES_FRAGCOORD | ShaderCompiler::RASTER_USES_SCREEN_TEXTURE | ShaderCompiler::RASTER_USES_DEPTH_TEXTURE | ShaderCompiler::RASTER_USES_NORMAL_ROUGHNESS_TEXTURE | ShaderCompiler::RASTER_WRITES_DEPTH);
+	return p_uses & (ShaderCompiler::RASTER_USES_FRAGCOORD | ShaderCompiler::RASTER_USES_SCREEN_TEXTURE | ShaderCompiler::RASTER_USES_DEPTH_TEXTURE | ShaderCompiler::RASTER_USES_NORMAL_ROUGHNESS_TEXTURE | ShaderCompiler::RASTER_WRITES_DEPTH | ShaderCompiler::RASTER_USES_FUNCTION_DISCARD | ShaderCompiler::RASTER_USES_LIGHT_DISCARD);
 }
 
 inline String nextgeo_raster_reject_names(uint32_t p_rejects) {
@@ -101,6 +102,8 @@ inline String nextgeo_raster_reject_names(uint32_t p_rejects) {
 		{ ShaderCompiler::RASTER_USES_DEPTH_TEXTURE, "DEPTH_TEXTURE" },
 		{ ShaderCompiler::RASTER_USES_NORMAL_ROUGHNESS_TEXTURE, "NORMAL_ROUGHNESS_TEXTURE" },
 		{ ShaderCompiler::RASTER_WRITES_DEPTH, "DEPTH" },
+		{ ShaderCompiler::RASTER_USES_FUNCTION_DISCARD, "function discard" },
+		{ ShaderCompiler::RASTER_USES_LIGHT_DISCARD, "light() discard" },
 	};
 	String out;
 	for (const auto &entry : names) {
@@ -202,7 +205,7 @@ static constexpr uint32_t NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT = 21u;
 static constexpr uint32_t NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT = 22u;
 
 inline uint32_t nextgeo_raster_bin_pack_entry(uint32_t p_visible_index, uint32_t p_bin, uint32_t p_kind) {
-	return (p_visible_index & ((1u << NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS) - 1u)) | ((p_kind & 1u) << NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT) | ((p_bin & 0x3Fu) << NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT);
+	return (p_visible_index & ((1u << NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS) - 1u)) | ((p_kind & 1u) << NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT) | (((p_bin - 1u) & 0x3Fu) << NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT);
 }
 
 inline uint32_t nextgeo_raster_bin_entry_index(uint32_t p_entry) {
@@ -214,38 +217,46 @@ inline uint32_t nextgeo_raster_bin_entry_kind(uint32_t p_entry) {
 }
 
 inline uint32_t nextgeo_raster_bin_entry_bin(uint32_t p_entry) {
-	return (p_entry >> NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT) & 0x3Fu;
+	return ((p_entry >> NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT) & 0x3Fu) + 1u;
 }
 
-// Word layout of the bin state buffer (raster_features_inc.glsl has the GLSL copy).
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_COUNTS = 0u; // [phase][bin][kind] cluster counts
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_CURSORS = 256u; // [phase][bin][kind] range starts in the phase's region
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_APPENDED = 512u; // [phase] appended entries
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS = 516u; // [phase] uvec4 scatter dispatch
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_FILL = 768u; // [phase][bin][kind] scatter fill counters
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_ARGS = 1024u; // [phase][bin] SW uvec4 dispatch, HW uvec4 draw
-static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_WORDS = 2048u;
+// Word layouts of the bin state buffer and the dedicated indirect-arguments buffer
+// (raster_features_inc.glsl has the GLSL copies). Keeping indirect commands in raster_bin_args (written
+// only by PREFIX, read as indirect arguments by SCATTER, SW and HW) avoids dual-usage tracker hazards.
+static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_COUNTS = 0u; // [phase][bin - 1][kind] cluster counts
+static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_CURSORS = 256u; // [phase][bin - 1][kind] range starts in the phase's region
+static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_FILL = 512u; // [phase][bin - 1][kind] scatter fill counters
+static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_APPENDED = 768u; // [phase] appended entries
+static constexpr uint32_t NEXTGEO_RASTER_BIN_STATE_WORDS = 772u;
+
+static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_BINS = 0u; // [phase][bin - 1] SW uvec4 dispatch, HW uvec4 draw
+static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_SCATTER = 1024u; // [phase] uvec4 scatter dispatch
+static constexpr uint32_t NEXTGEO_RASTER_BIN_ARGS_WORDS = 1032u;
 
 inline uint32_t nextgeo_raster_bin_count_word(uint32_t p_phase, uint32_t p_bin, uint32_t p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_COUNTS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+	return NEXTGEO_RASTER_BIN_STATE_COUNTS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
 }
 
 inline uint32_t nextgeo_raster_bin_cursor_word(uint32_t p_phase, uint32_t p_bin, uint32_t p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_CURSORS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+	return NEXTGEO_RASTER_BIN_STATE_CURSORS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
 }
 
 inline uint32_t nextgeo_raster_bin_fill_word(uint32_t p_phase, uint32_t p_bin, uint32_t p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_FILL + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+	return NEXTGEO_RASTER_BIN_STATE_FILL + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
 }
 
 inline uint32_t nextgeo_raster_bin_args_word(uint32_t p_phase, uint32_t p_bin, uint32_t p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_ARGS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_LIMIT + p_bin) * 8u + p_kind * 4u;
+	return NEXTGEO_RASTER_BIN_ARGS_BINS + (p_phase * RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 8u + p_kind * 4u;
 }
 
-// The prefix pass for one phase: p_counts[bin * 2 + kind] in, the range starts out. Returns the total.
+inline uint32_t nextgeo_raster_bin_scatter_args_word(uint32_t p_phase) {
+	return NEXTGEO_RASTER_BIN_ARGS_SCATTER + p_phase * 4u;
+}
+
+// The prefix pass for one phase: p_counts[(bin - 1) * 2 + kind] in, the range starts out. Returns the total.
 inline uint32_t nextgeo_raster_bin_prefix(const uint32_t *p_counts, uint32_t *r_starts) {
 	uint32_t total = 0u;
-	for (uint32_t i = 0; i < RendererVirtualMeshStorage::RASTER_BIN_LIMIT * 2u; i++) {
+	for (uint32_t i = 0; i < RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX * 2u; i++) {
 		r_starts[i] = total;
 		total += p_counts[i];
 	}
@@ -262,12 +273,12 @@ inline void nextgeo_raster_bin_sw_groups(uint32_t p_count, uint32_t p_dispatch_w
 // p_starts comes from nextgeo_raster_bin_prefix(). Entries keep their append order within a range here;
 // the GPU's atomic cursors may order them differently, which does not change any bin's set.
 inline void nextgeo_raster_bin_scatter(const uint32_t *p_entries, uint32_t p_entry_count, const uint32_t *p_starts, uint32_t *r_cursors, uint32_t *r_lists) {
-	for (uint32_t i = 0; i < RendererVirtualMeshStorage::RASTER_BIN_LIMIT * 2u; i++) {
+	for (uint32_t i = 0; i < RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX * 2u; i++) {
 		r_cursors[i] = p_starts[i];
 	}
 	for (uint32_t i = 0; i < p_entry_count; i++) {
 		const uint32_t entry = p_entries[i];
-		const uint32_t slot = nextgeo_raster_bin_entry_bin(entry) * 2u + nextgeo_raster_bin_entry_kind(entry);
+		const uint32_t slot = (nextgeo_raster_bin_entry_bin(entry) - 1u) * 2u + nextgeo_raster_bin_entry_kind(entry);
 		r_lists[r_cursors[slot]++] = nextgeo_raster_bin_entry_index(entry);
 	}
 }

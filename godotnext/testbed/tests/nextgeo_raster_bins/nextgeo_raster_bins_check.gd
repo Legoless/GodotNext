@@ -73,6 +73,37 @@ void fragment() {
 }
 """
 
+const TWO_SIDED_FRAG_TO_LIGHT_SHADER := """
+shader_type spatial;
+render_mode cull_disabled;
+varying float v_f2l;
+float stripe_alpha(vec2 uv) {
+	return step(0.5, fract(uv.x * 6.0));
+}
+float light_boost(float x) {
+	return 0.5 + 0.5 * x;
+}
+void fragment() {
+	v_f2l = UV.y;
+	ALBEDO = vec3(0.7, 0.3, 0.8);
+	ALPHA = stripe_alpha(UV);
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+}
+void light() {
+	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * ATTENUATION * light_boost(v_f2l);
+}
+"""
+
+const NEAR_PLANE_MASKED_SHADER := """
+shader_type spatial;
+render_mode cull_disabled;
+void fragment() {
+	ALBEDO = vec3(0.2, 0.8, 0.8);
+	ALPHA = step(0.5, fract(UV.x * 6.0));
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+}
+"""
+
 # The raster target rejects these only in materials with a raster program, so each one is masked.
 const REJECTED_SHADERS := {
 	"fragcoord": """
@@ -119,26 +150,59 @@ void fragment() {
 	DEPTH = FRAGCOORD.z;
 }
 """,
+	"function_discard": """
+shader_type spatial;
+void clip_half(float x) {
+	if (fract(x * 4.0) < 0.5) {
+		discard;
+	}
+}
+void fragment() {
+	clip_half(UV.x);
+	ALBEDO = vec3(1.0, 0.5, 0.2);
+}
+""",
+	"light_discard": """
+shader_type spatial;
+void fragment() {
+	ALBEDO = vec3(0.5, 1.0, 0.5);
+}
+void light() {
+	if (fract(UV.x * 4.0) < 0.5) {
+		discard;
+	}
+	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * ATTENUATION;
+}
+""",
 }
 
 var _phases: Array[Dictionary] = [
-	{ "name": "legacy", "bins": false, "t": 8.0, "buffer": false },
-	{ "name": "bins_hw", "bins": true, "t": 0.0, "buffer": false },
-	{ "name": "bins_sw", "bins": true, "t": 32.0, "buffer": false },
-	{ "name": "bins_sw_buffer", "bins": true, "t": 32.0, "buffer": true },
-	{ "name": "legacy_again", "bins": false, "t": 8.0, "buffer": false },
+	{ "name": "legacy", "bins": false, "t": 8.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_hw", "bins": true, "t": 0.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_sw", "bins": true, "t": 32.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_sw_buffer", "bins": true, "t": 32.0, "buffer": true, "vis_only": false, "backface": false, "fill_64": false },
+	{ "name": "bins_vis_only", "bins": true, "t": 32.0, "buffer": false, "vis_only": true, "backface": false, "fill_64": false },
+	{ "name": "bins_backface_hw", "bins": true, "t": 0.0, "buffer": false, "vis_only": false, "backface": true, "fill_64": false },
+	{ "name": "bins_backface_sw", "bins": true, "t": 32.0, "buffer": false, "vis_only": false, "backface": true, "fill_64": false },
+	{ "name": "bins_64", "bins": true, "t": 32.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": true },
+	{ "name": "legacy_again", "bins": false, "t": 8.0, "buffer": false, "vis_only": false, "backface": false, "fill_64": false },
 ]
 
 var _probe: CompositorEffect
 var _background: MeshInstance3D
+var _box_mesh: Mesh
+var _shared_masked_shader: Shader
 var _programmable: Array[MeshInstance3D] = []
+var _extra_bins: Array[MeshInstance3D] = []
 var _rejected: Dictionary = {} # name -> MeshInstance3D
 var _materials: Dictionary = {} # MeshInstance3D -> Material
 var _phase_idx := 0
 var _phase_frame := 0
 var _captures: Dictionary = {}
+var _color_images: Dictionary = {} # phase name -> Image
 var _stats: Dictionary = {}
 var _routes: Dictionary = {} # phase name -> { instance name -> [route, reason] }
+var _extra_routes: Array = [] # [route, reason] for each extra bin instance in bins_64
 var _records: Dictionary = {} # instance name -> NextGeo record index
 var _report: Dictionary = {}
 var _failures: Array[String] = []
@@ -198,6 +262,9 @@ func _build_scene() -> void:
 	box_material.albedo_color = Color(0.7, 0.6, 0.5)
 	box.material = box_material
 	var box_mesh := _virtualize(box, "user://nextgeo_raster_bins_box.ngm")
+	_box_mesh = box_mesh
+	_shared_masked_shader = Shader.new()
+	_shared_masked_shader.code = MASKED_STRIPES_SHADER
 
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(3.0, 2.0)
@@ -205,26 +272,18 @@ func _build_scene() -> void:
 	plane.subdivide_depth = 32
 	var plane_mesh := _virtualize(plane, "user://nextgeo_raster_bins_plane.ngm")
 
+	var near_plane := PlaneMesh.new()
+	near_plane.size = Vector2(0.025, 0.30)
+	near_plane.subdivide_width = 2
+	near_plane.subdivide_depth = 0
+	var near_plane_mesh := _virtualize(near_plane, "user://nextgeo_raster_bins_near.ngm")
+
 	var sphere := SphereMesh.new()
 	sphere.radius = 0.6
 	sphere.height = 1.2
 	sphere.radial_segments = 96
 	sphere.rings = 48
 	var sphere_mesh := _virtualize(sphere, "user://nextgeo_raster_bins_sphere.ngm")
-
-	# The fixed-function background, wide and behind everything.
-	_background = _add("Background", box_mesh, Transform3D(Basis.from_scale(Vector3(12.0, 7.0, 0.5)), Vector3(0.0, 0.0, -3.0)), null)
-	# The plane faces the camera (PlaneMesh faces +Y).
-	_programmable.append(_add("MaskedStripes", plane_mesh, Transform3D(Basis(Vector3.RIGHT, deg_to_rad(90.0)), Vector3(0.0, 0.0, 0.0)), _shader_material(MASKED_STRIPES_SHADER)))
-	_programmable.append(_add("MaskedChecker", sphere_mesh, Transform3D(Basis(), Vector3(-2.3, -0.4, 0.3)), _shader_material(MASKED_CHECKER_SHADER)))
-	var vertex_offset := _shader_material(VERTEX_OFFSET_SHADER)
-	vertex_offset.set_shader_parameter("vertex_scale", VERTEX_SCALE)
-	_programmable.append(_add("VertexOffset", sphere_mesh, Transform3D(Basis(), Vector3(2.3, -0.4, 0.3)), vertex_offset))
-	_programmable.append(_add("TexturedScissor", plane_mesh, Transform3D(Basis(Vector3.RIGHT, deg_to_rad(90.0)).scaled(Vector3.ONE * 0.5), Vector3(3.4, 1.4, 0.2)), _textured_scissor_material()))
-	var i := 0
-	for rejected_name: String in REJECTED_SHADERS:
-		_rejected[rejected_name] = _add("Rejected_" + rejected_name, box_mesh, Transform3D(Basis.from_scale(Vector3.ONE * 0.4), Vector3(-2.0 + float(i), 1.6, 0.5)), _shader_material(REJECTED_SHADERS[rejected_name]))
-		i += 1
 
 	var camera := Camera3D.new()
 	camera.fov = 60.0
@@ -235,8 +294,29 @@ func _build_scene() -> void:
 	add_child(camera)
 	camera.look_at(Vector3(0.0, 0.0, 0.0))
 
+	# The fixed-function background, wide and behind everything, catching masked and WPO shadows.
+	_background = _add("Background", box_mesh, Transform3D(Basis.from_scale(Vector3(14.0, 9.0, 0.5)), Vector3(0.0, 0.0, -3.0)), null)
+	# The plane faces the camera (PlaneMesh faces +Y).
+	_programmable.append(_add("MaskedStripes", plane_mesh, Transform3D(Basis(Vector3.RIGHT, deg_to_rad(90.0)), Vector3(0.0, 0.0, 0.0)), _shader_material(MASKED_STRIPES_SHADER)))
+	_programmable.append(_add("MaskedChecker", sphere_mesh, Transform3D(Basis(), Vector3(-2.3, -0.4, 0.3)), _shader_material(MASKED_CHECKER_SHADER)))
+	var vertex_offset := _shader_material(VERTEX_OFFSET_SHADER)
+	vertex_offset.set_shader_parameter("vertex_scale", VERTEX_SCALE)
+	_programmable.append(_add("VertexOffset", sphere_mesh, Transform3D(Basis(), Vector3(2.3, -0.4, 0.3)), vertex_offset))
+	_programmable.append(_add("TexturedScissor", plane_mesh, Transform3D(Basis(Vector3.RIGHT, deg_to_rad(90.0)).scaled(Vector3.ONE * 0.5), Vector3(3.4, 1.4, 0.2)), _textured_scissor_material()))
+	# Back-facing plane with cull_disabled + frag_to_light varying (MASKED | TWO_SIDED + BUCKET_CULL_DISABLED).
+	_programmable.append(_add("TwoSidedFragToLight", plane_mesh, Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-90.0)).scaled(Vector3.ONE * 0.5), Vector3(-3.4, 1.4, 0.2)), _shader_material(TWO_SIDED_FRAG_TO_LIGHT_SHADER)))
+	# Near-plane-straddling plane: front edge w = +0.10 > near (0.05), back edge w = -0.20 < 0 (behind camera eye).
+	_programmable.append(_add("NearPlaneMasked", near_plane_mesh, camera.transform * Transform3D(Basis(), Vector3(0.0, -0.024, 0.05)), _shader_material(NEAR_PLANE_MASKED_SHADER)))
+	# Single-sided back-facing plane: culled normally, visible only under debug_backface.
+	_programmable.append(_add("BackfaceProbe", plane_mesh, Transform3D(Basis(Vector3.RIGHT, deg_to_rad(-90.0)).scaled(Vector3.ONE * 0.45), Vector3(3.5, -1.8, 0.2)), _shader_material(MASKED_STRIPES_SHADER)))
+	var i := 0
+	for rejected_name: String in REJECTED_SHADERS:
+		_rejected[rejected_name] = _add("Rejected_" + rejected_name, box_mesh, Transform3D(Basis.from_scale(Vector3.ONE * 0.35), Vector3(-2.1 + float(i) * 0.7, 1.6, 0.5)), _shader_material(REJECTED_SHADERS[rejected_name]))
+		i += 1
+
 	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-45.0, 30.0, 0.0)
+	sun.rotation_degrees = Vector3(-25.0, 20.0, 0.0)
+	sun.shadow_enabled = true
 	add_child(sun)
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_COLOR
@@ -282,11 +362,40 @@ func _reassign_materials() -> void:
 		instance.material_override = _materials[instance]
 
 
+func _clear_extra_bins() -> void:
+	for inst: MeshInstance3D in _extra_bins:
+		_materials.erase(inst)
+		remove_child(inst)
+		inst.free()
+	_extra_bins.clear()
+
+
+func _spawn_extra_bins() -> void:
+	_clear_extra_bins()
+	# Fill all 64 programmable bins plus 1 overflow material (total 65 programmable materials).
+	var needed := 65 - _programmable.size()
+	for idx in needed:
+		var mat := ShaderMaterial.new()
+		mat.shader = _shared_masked_shader
+		var col := idx % 30
+		var row := idx / 30
+		var x := -2.9 + float(col) * 0.2
+		var y := -2.0 - float(row) * 0.2
+		var inst := _add("ExtraBin_%d" % idx, _box_mesh, Transform3D(Basis.from_scale(Vector3.ONE * 0.06), Vector3(x, y, 0.4)), mat)
+		_extra_bins.append(inst)
+
+
 func _apply_phase() -> void:
 	var phase: Dictionary = _phases[_phase_idx]
 	ProjectSettings.set_setting("rendering/nextgeo/debug_programmable_raster", bool(phase["bins"]))
 	ProjectSettings.set_setting("rendering/nextgeo/sw_raster_max_edge_px", float(phase["t"]))
 	ProjectSettings.set_setting("rendering/nextgeo/debug_vis64_buffer", bool(phase["buffer"]))
+	ProjectSettings.set_setting("rendering/nextgeo/visibility_only", bool(phase["vis_only"]))
+	ProjectSettings.set_setting("rendering/nextgeo/debug_backface", bool(phase["backface"]))
+	if bool(phase["fill_64"]):
+		_spawn_extra_bins()
+	else:
+		_clear_extra_bins()
 	_reassign_materials()
 	_phase_frame = 0
 	_captures[phase["name"]] = []
@@ -318,6 +427,8 @@ func _process(_delta: float) -> void:
 		_probe.set("capture_armed", true)
 	if _phase_frame == STATS_FRAME:
 		_stats[phase_name] = RenderingServer.virtual_geometry_get_debug_stats(get_viewport().get_viewport_rid())
+		if not bool(phase["vis_only"]) and not bool(phase["backface"]) and not bool(phase["fill_64"]):
+			_color_images[phase_name] = get_viewport().get_texture().get_image()
 		var routes := {}
 		for instance: MeshInstance3D in _programmable:
 			routes[instance.name] = _route(instance)
@@ -325,6 +436,10 @@ func _process(_delta: float) -> void:
 			routes["Rejected_" + rejected_name] = _route(_rejected[rejected_name])
 		routes["Background"] = _route(_background)
 		_routes[phase_name] = routes
+		if bool(phase["fill_64"]):
+			_extra_routes.clear()
+			for inst: MeshInstance3D in _extra_bins:
+				_extra_routes.append(_route(inst))
 		_phase_idx += 1
 		if _phase_idx >= _phases.size():
 			_finish()
@@ -464,6 +579,10 @@ func _check_stats() -> void:
 		if stats.is_empty() or not stats.has("hw_clusters"):
 			_failures.append("%s: no NextGeo cut stats" % phase_name)
 			continue
+		var dd := int(stats.get("double_dispatched_surfaces", 0))
+		var ms := int(stats.get("missing_surfaces", 0))
+		if dd != 0 or ms != 0:
+			_failures.append("%s: double_dispatched=%d missing=%d" % [phase_name, dd, ms])
 		var admitted := bool(phase["bins"]) and _expect_bins
 		var bins := int(stats.get("programmable_bins", -1))
 		var sw := int(stats.get("programmable_sw_clusters", -1))
@@ -472,8 +591,9 @@ func _check_stats() -> void:
 			if bins != 0 or sw != 0 or hw != 0:
 				_failures.append("%s: programmable bins in use (bins %d, sw %d, hw %d)" % [phase_name, bins, sw, hw])
 			continue
-		if bins != _programmable.size():
-			_failures.append("%s: %d programmable bins, expected %d" % [phase_name, bins, _programmable.size()])
+		var expected_bins := 64 if bool(phase["fill_64"]) else _programmable.size()
+		if bins != expected_bins:
+			_failures.append("%s: %d programmable bins, expected %d" % [phase_name, bins, expected_bins])
 		if float(phase["t"]) == 0.0:
 			if sw != 0 or hw <= 0:
 				_failures.append("%s: T = 0 must route every programmable cluster to hardware (sw %d, hw %d)" % [phase_name, sw, hw])
@@ -483,6 +603,56 @@ func _check_stats() -> void:
 		var routed := int(stats.get("sw_clusters", 0)) + int(stats.get("hw_clusters", 0)) + sw + hw
 		if routed != visible:
 			_failures.append("%s: %d routed clusters, %d visible" % [phase_name, routed, visible])
+
+
+func _check_shadows(p_test: String) -> Dictionary:
+	var out := {}
+	if not _captures_ok("legacy") or not _captures_ok(p_test):
+		return out
+	var ref_img: Image = _color_images.get("legacy")
+	var tst_img: Image = _color_images.get(p_test)
+	if ref_img == null or tst_img == null:
+		_failures.append("%s: missing viewport color image for shadow check" % p_test)
+		return out
+	var cap_ref: Dictionary = _captures["legacy"][0]
+	var cap_tst: Dictionary = _captures[p_test][0]
+	var size: Vector2i = cap_ref["size"]
+	var img_size := ref_img.get_size()
+	var background := _record("Background")
+	var bg_ref := _pixels_of(cap_ref, background)
+	var bg_tst := _pixels_of(cap_tst, background)
+	var shared := 0
+	var ref_lit := 0
+	var ref_shadowed := 0
+	var mismatch := 0
+	for y in size.y:
+		var sy := mini(int((float(y) + 0.5) * float(img_size.y) / float(size.y)), img_size.y - 1)
+		for x in size.x:
+			var i := y * size.x + x
+			if bg_ref[i] != 1 or bg_tst[i] != 1:
+				continue
+			shared += 1
+			var sx := mini(int((float(x) + 0.5) * float(img_size.x) / float(size.x)), img_size.x - 1)
+			var l_ref := ref_img.get_pixel(sx, sy).get_luminance() > 0.16
+			var l_tst := tst_img.get_pixel(sx, sy).get_luminance() > 0.16
+			if l_ref:
+				ref_lit += 1
+			else:
+				ref_shadowed += 1
+			if l_ref != l_tst:
+				mismatch += 1
+	out = {
+		"shared_background_pixels": shared,
+		"reference_lit": ref_lit,
+		"reference_shadowed": ref_shadowed,
+		"mismatch": mismatch,
+	}
+	if ref_lit < 100 or ref_shadowed < 50:
+		_failures.append("%s: shadow check lacks lit (%d) or shadowed (%d) background pixels" % [p_test, ref_lit, ref_shadowed])
+	var limit := maxi(32, int(0.02 * float(shared)))
+	if mismatch > limit:
+		_failures.append("%s: background shadow lighting differs on %d pixels (limit %d of %d)" % [p_test, mismatch, limit, shared])
+	return out
 
 
 # The background's pixels in p_test against the reference: the programmable materials must leave the
@@ -513,7 +683,10 @@ func _finish() -> void:
 	if _expect_bins:
 		hw = _check_background("bins_hw")
 		sw = _check_background("bins_sw")
+		_report["bins_hw_shadows"] = _check_shadows("bins_hw")
+		_report["bins_sw_shadows"] = _check_shadows("bins_sw")
 		_check_identical("bins_sw", "bins_sw_buffer")
+		_check_identical("bins_sw", "bins_vis_only")
 		if _captures_ok("bins_hw") and _captures_ok("bins_sw"):
 			var records := _programmable_records()
 			for k in CAPTURE_FRAMES.size():
@@ -526,13 +699,34 @@ func _finish() -> void:
 					_failures.append("bins_sw vs bins_hw: programmable coverage differs on %d pixels (limit %d)" % [c["one_sided"], limit])
 			# The masks are real: each masked instance fills well under its screen bounding box.
 			for phase_name in ["bins_hw", "bins_sw"]:
-				for entry in [["MaskedStripes", MAX_STRIPES_FILL], ["MaskedChecker", MAX_CHECKER_FILL], ["TexturedScissor", MAX_STRIPES_FILL]]:
+				for entry in [["MaskedStripes", MAX_STRIPES_FILL], ["MaskedChecker", MAX_CHECKER_FILL], ["TexturedScissor", MAX_STRIPES_FILL], ["TwoSidedFragToLight", MAX_STRIPES_FILL], ["NearPlaneMasked", MAX_STRIPES_FILL]]:
 					var fill := _bbox_fill(_captures[phase_name][0], _record(entry[0]))
 					_report["%s_%s_fill" % [phase_name, entry[0]]] = fill
-					if float(fill[2]) < MIN_MASK_FILL or float(fill[2]) > float(entry[1]):
+					if int(fill[0]) < 20 or float(fill[2]) < MIN_MASK_FILL or float(fill[2]) > float(entry[1]):
 						_failures.append("%s/%s: covers %.3f of its bounding box (%d of %d pixels), expected %.2f to %.2f" % [phase_name, entry[0], fill[2], fill[0], fill[1], MIN_MASK_FILL, entry[1]])
+				var bf_off := _bbox_fill(_captures[phase_name][0], _record("BackfaceProbe"))
+				if int(bf_off[0]) != 0:
+					_failures.append("%s/BackfaceProbe: expected 0 pixels with debug_backface off, got %d" % [phase_name, bf_off[0]])
+		for bf_phase in ["bins_backface_hw", "bins_backface_sw"]:
+			if _captures_ok(bf_phase):
+				var bf_on := _bbox_fill(_captures[bf_phase][0], _record("BackfaceProbe"))
+				_report["%s_BackfaceProbe_fill" % bf_phase] = bf_on
+				if int(bf_on[0]) < 20 or float(bf_on[2]) < MIN_MASK_FILL or float(bf_on[2]) > MAX_STRIPES_FILL:
+					_failures.append("%s/BackfaceProbe: expected visible striped backface, got %s" % [bf_phase, str(bf_on)])
+		# 64-bin fill: first (64 - _programmable.size()) extra materials route virtual/NONE, 65th routes legacy/alpha.
+		var fit_count := 64 - _programmable.size()
+		if _extra_routes.size() != fit_count + 1:
+			_failures.append("bins_64: expected %d extra routes, got %d" % [fit_count + 1, _extra_routes.size()])
+		else:
+			for idx in fit_count:
+				var r: Array = _extra_routes[idx]
+				if r[0] != "virtual" or r[1] != "NONE":
+					_failures.append("bins_64/ExtraBin_%d: route %s/%s, expected virtual/NONE" % [idx, r[0], r[1]])
+			var overflow_r: Array = _extra_routes[fit_count]
+			if overflow_r[0] != "legacy" or overflow_r[1] != "alpha":
+				_failures.append("bins_64/ExtraBin_%d (65th): route %s/%s, expected legacy/alpha" % [fit_count, overflow_r[0], overflow_r[1]])
 	else:
-		# Below the Nanite tier the setting admits nothing: every phase is the reference.
+		# Below the Nanite tier the setting admits nothing: every phase without vis_only/backface/extra is the reference.
 		for test in ["bins_hw", "bins_sw", "bins_sw_buffer"]:
 			_check_identical("legacy", test)
 	var stats_report := {}

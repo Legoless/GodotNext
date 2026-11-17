@@ -74,9 +74,8 @@ public:
 		RASTER_USES_DEPTH_TEXTURE = 1u << 2,
 		RASTER_USES_NORMAL_ROUGHNESS_TEXTURE = 1u << 3,
 		RASTER_WRITES_DEPTH = 1u << 4, // The absolute DEPTH, written in fragment() or a function it calls.
-		// Not a reject: discard in a function fragment() calls. The raster target rewrites discard only in
-		// fragment()'s own body, so such a material gets no raster target and keeps its default route.
-		RASTER_USES_FUNCTION_DISCARD = 1u << 5,
+		RASTER_USES_FUNCTION_DISCARD = 1u << 5, // discard in a helper function fragment() calls.
+		RASTER_USES_LIGHT_DISCARD = 1u << 6, // discard in light() or a helper function it calls.
 	};
 
 	struct GeneratedCode {

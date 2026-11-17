@@ -190,24 +190,27 @@ TEST_CASE("[NextGeo][RasterBins] The material fallback order keeps every default
 }
 
 TEST_CASE("[NextGeo][RasterBins] The rejects follow N4, for materials with a raster program") {
-	const uint32_t all_uses = ShaderCompiler::RASTER_USES_FRAGCOORD | ShaderCompiler::RASTER_USES_SCREEN_TEXTURE | ShaderCompiler::RASTER_USES_DEPTH_TEXTURE | ShaderCompiler::RASTER_USES_NORMAL_ROUGHNESS_TEXTURE | ShaderCompiler::RASTER_WRITES_DEPTH;
+	const uint32_t all_uses = ShaderCompiler::RASTER_USES_FRAGCOORD | ShaderCompiler::RASTER_USES_SCREEN_TEXTURE | ShaderCompiler::RASTER_USES_DEPTH_TEXTURE | ShaderCompiler::RASTER_USES_NORMAL_ROUGHNESS_TEXTURE | ShaderCompiler::RASTER_WRITES_DEPTH | ShaderCompiler::RASTER_USES_FUNCTION_DISCARD | ShaderCompiler::RASTER_USES_LIGHT_DISCARD;
 	CHECK_EQ(nextgeo_raster_rejects(all_uses, VMS::RASTER_FEATURE_MASKED), all_uses);
 	CHECK_EQ(nextgeo_raster_rejects(all_uses, VMS::RASTER_FEATURE_VERTEX_OFFSET), all_uses);
 	// No raster program: no reject; #80's reasons apply.
 	CHECK_EQ(nextgeo_raster_rejects(all_uses, 0u), 0u);
 	CHECK_EQ(nextgeo_raster_rejects(all_uses, VMS::RASTER_FEATURE_TWO_SIDED), 0u);
 	CHECK_EQ(nextgeo_raster_rejects(ShaderCompiler::RASTER_USES_FRAGCOORD, VMS::RASTER_FEATURE_VERTEX_OFFSET), uint32_t(ShaderCompiler::RASTER_USES_FRAGCOORD));
-	// A discard in a called function is not a reject (the material gets no raster target instead).
-	CHECK_EQ(nextgeo_raster_rejects(ShaderCompiler::RASTER_USES_FUNCTION_DISCARD, VMS::RASTER_FEATURE_MASKED), 0u);
-	CHECK_EQ(nextgeo_raster_reject_names(all_uses), String("FRAGCOORD, SCREEN_TEXTURE, DEPTH_TEXTURE, NORMAL_ROUGHNESS_TEXTURE, DEPTH"));
+	CHECK_EQ(nextgeo_raster_rejects(ShaderCompiler::RASTER_USES_FUNCTION_DISCARD, VMS::RASTER_FEATURE_MASKED), uint32_t(ShaderCompiler::RASTER_USES_FUNCTION_DISCARD));
+	CHECK_EQ(nextgeo_raster_rejects(ShaderCompiler::RASTER_USES_LIGHT_DISCARD, VMS::RASTER_FEATURE_MASKED), uint32_t(ShaderCompiler::RASTER_USES_LIGHT_DISCARD));
+	CHECK_EQ(nextgeo_raster_reject_names(all_uses), String("FRAGCOORD, SCREEN_TEXTURE, DEPTH_TEXTURE, NORMAL_ROUGHNESS_TEXTURE, DEPTH, function discard, light() discard"));
 }
 
 TEST_CASE("[NextGeo][RasterBins] The registry keys bins by features, shader version and material, refcounted") {
+	CHECK_EQ(VMS::RASTER_BIN_PROGRAMMABLE_MAX, 64u);
+	CHECK_EQ(VMS::RASTER_BIN_LIMIT, 65u);
+
 	VMS::RasterBinRegistry registry;
 	VMS::RasterBinKey masked;
 	masked.features = VMS::RASTER_FEATURE_MASKED;
 	masked.shader_version = RID::from_uint64(1);
-	masked.material = 100;
+	masked.material = RID::from_uint64(100);
 
 	// No program feature: the fixed-function bin, no reference.
 	VMS::RasterBinKey fixed = masked;
@@ -226,7 +229,7 @@ TEST_CASE("[NextGeo][RasterBins] The registry keys bins by features, shader vers
 	VMS::RasterBinKey other_shader = masked;
 	other_shader.shader_version = RID::from_uint64(2);
 	VMS::RasterBinKey other_material = masked;
-	other_material.material = 101;
+	other_material.material = RID::from_uint64(101);
 	VMS::RasterBinKey other_features = masked;
 	other_features.features |= VMS::RASTER_FEATURE_TWO_SIDED;
 	const uint32_t b2 = registry.acquire(other_shader);
@@ -248,25 +251,28 @@ TEST_CASE("[NextGeo][RasterBins] The registry keys bins by features, shader vers
 	registry.release(VMS::RASTER_BIN_FIXED);
 	registry.release(VMS::RASTER_BIN_LIMIT + 5u);
 	VMS::RasterBinKey fresh = masked;
-	fresh.material = 200;
+	fresh.material = RID::from_uint64(200);
 	CHECK_EQ(registry.acquire(fresh), bin);
 	CHECK_EQ(registry.get_active_count(), 4u);
 
-	// Every programmable bin taken: the fixed-function answer, which keeps the surface on legacy raster.
+	// Every programmable bin (1..64) taken: the 65th returns the fixed-function answer, which keeps the surface on legacy raster.
 	VMS::RasterBinRegistry full;
 	for (uint32_t i = 0; i < VMS::RASTER_BIN_PROGRAMMABLE_MAX; i++) {
 		VMS::RasterBinKey key = masked;
-		key.material = 1000 + i;
+		key.material = RID::from_uint64(1000 + i);
 		CHECK_EQ(full.acquire(key), i + 1u);
 	}
-	CHECK_EQ(full.get_active_count(), VMS::RASTER_BIN_PROGRAMMABLE_MAX);
+	CHECK_EQ(full.get_active_count(), 64u);
 	VMS::RasterBinKey overflow = masked;
-	overflow.material = 5000;
+	overflow.material = RID::from_uint64(5000);
 	CHECK_EQ(full.acquire(overflow), uint32_t(VMS::RASTER_BIN_FIXED));
-	// A key that already has a bin still gets it.
+	// A key that already has a bin still gets it, including bin 64.
 	VMS::RasterBinKey existing = masked;
-	existing.material = 1000;
+	existing.material = RID::from_uint64(1000);
 	CHECK_EQ(full.acquire(existing), 1u);
+	VMS::RasterBinKey existing_64 = masked;
+	existing_64.material = RID::from_uint64(1063);
+	CHECK_EQ(full.acquire(existing_64), 64u);
 }
 
 TEST_CASE("[NextGeo][RasterBins] The raster-bin table packs one byte per surface, indexed like the bucket table") {
@@ -297,7 +303,7 @@ TEST_CASE("[NextGeo][RasterBins] Cull entries pack the visible-cluster index, ki
 	RandomPCG rng(1550);
 	for (uint32_t i = 0; i < 1000; i++) {
 		const uint32_t index = rng.rand() % (1u << NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS);
-		const uint32_t bin = 1u + rng.rand() % VMS::RASTER_BIN_PROGRAMMABLE_MAX;
+		const uint32_t bin = i == 0 ? VMS::RASTER_BIN_PROGRAMMABLE_MAX : (1u + rng.rand() % VMS::RASTER_BIN_PROGRAMMABLE_MAX);
 		const uint32_t kind = rng.rand() % 2u;
 		const uint32_t entry = nextgeo_raster_bin_pack_entry(index, bin, kind);
 		CHECK_EQ(nextgeo_raster_bin_entry_index(entry), index);
@@ -309,39 +315,40 @@ TEST_CASE("[NextGeo][RasterBins] Cull entries pack the visible-cluster index, ki
 }
 
 TEST_CASE("[NextGeo][RasterBins] Per-bin compaction gives each (bin, kind) its clusters, exactly once") {
+	constexpr uint32_t SLOTS = VMS::RASTER_BIN_PROGRAMMABLE_MAX * 2u;
 	RandomPCG rng(15500);
 	for (uint32_t trial = 0; trial < 8; trial++) {
 		// A phase's appended entries, in cull's (random) order.
 		const uint32_t entry_count = trial == 0 ? 0u : 1u + rng.rand() % 5000u;
 		LocalVector<uint32_t> entries;
-		uint32_t counts[VMS::RASTER_BIN_LIMIT * 2u] = {};
+		uint32_t counts[SLOTS] = {};
 		for (uint32_t i = 0; i < entry_count; i++) {
-			// Bins cluster on a few values, as a real frame's do; some bins stay empty.
-			const uint32_t bin = 1u + (rng.rand() % 7u) * (trial + 1u) % VMS::RASTER_BIN_PROGRAMMABLE_MAX;
+			// Bins cluster on a few values (including bin 64), as a real frame's do; some bins stay empty.
+			const uint32_t bin = i == 0 ? VMS::RASTER_BIN_PROGRAMMABLE_MAX : (1u + (rng.rand() % 7u) * (trial + 1u) % VMS::RASTER_BIN_PROGRAMMABLE_MAX);
 			const uint32_t kind = rng.rand() % 2u;
 			entries.push_back(nextgeo_raster_bin_pack_entry(i * 3u + 7u, bin, kind));
-			counts[bin * 2u + kind]++;
+			counts[(bin - 1u) * 2u + kind]++;
 		}
-		uint32_t starts[VMS::RASTER_BIN_LIMIT * 2u] = {};
+		uint32_t starts[SLOTS] = {};
 		const uint32_t total = nextgeo_raster_bin_prefix(counts, starts);
 		CHECK_EQ(total, entry_count);
-		// Ranges are contiguous, in bin order with the software range first.
+		// Ranges are contiguous, in bin order (1..64) with the software range first.
 		uint32_t expected_start = 0;
-		for (uint32_t slot = 0; slot < VMS::RASTER_BIN_LIMIT * 2u; slot++) {
+		for (uint32_t slot = 0; slot < SLOTS; slot++) {
 			CHECK_EQ(starts[slot], expected_start);
 			expected_start += counts[slot];
 		}
 		LocalVector<uint32_t> lists;
 		lists.resize(MAX(entry_count, 1u));
-		uint32_t cursors[VMS::RASTER_BIN_LIMIT * 2u] = {};
+		uint32_t cursors[SLOTS] = {};
 		nextgeo_raster_bin_scatter(entries.ptr(), entry_count, starts, cursors, lists.ptr());
-		for (uint32_t slot = 0; slot < VMS::RASTER_BIN_LIMIT * 2u; slot++) {
+		for (uint32_t slot = 0; slot < SLOTS; slot++) {
 			CHECK_EQ(cursors[slot], starts[slot] + counts[slot]);
 		}
 		// Every entry is in its own range, once.
 		for (uint32_t i = 0; i < entry_count; i++) {
 			const uint32_t entry = entries[i];
-			const uint32_t slot = nextgeo_raster_bin_entry_bin(entry) * 2u + nextgeo_raster_bin_entry_kind(entry);
+			const uint32_t slot = (nextgeo_raster_bin_entry_bin(entry) - 1u) * 2u + nextgeo_raster_bin_entry_kind(entry);
 			uint32_t found = 0;
 			for (uint32_t k = starts[slot]; k < starts[slot] + counts[slot]; k++) {
 				found += lists[k] == nextgeo_raster_bin_entry_index(entry) ? 1u : 0u;
@@ -349,13 +356,14 @@ TEST_CASE("[NextGeo][RasterBins] Per-bin compaction gives each (bin, kind) its c
 			CHECK_EQ(found, 1u);
 		}
 		// Each software range dispatches enough workgroups, split as #162 splits its dispatch.
-		for (uint32_t bin = 0; bin < VMS::RASTER_BIN_LIMIT; bin++) {
+		for (uint32_t bin = 1; bin <= VMS::RASTER_BIN_PROGRAMMABLE_MAX; bin++) {
+			const uint32_t sw_count = counts[(bin - 1u) * 2u];
 			uint32_t x = 0;
 			uint32_t y = 0;
-			nextgeo_raster_bin_sw_groups(counts[bin * 2u], 32768u, x, y);
-			CHECK(x * y >= counts[bin * 2u]);
+			nextgeo_raster_bin_sw_groups(sw_count, 32768u, x, y);
+			CHECK(x * y >= sw_count);
 			CHECK(x <= 32768u);
-			CHECK_EQ(counts[bin * 2u] == 0u, x == 0u || y == 0u);
+			CHECK_EQ(sw_count == 0u, x == 0u || y == 0u);
 		}
 	}
 	uint32_t x = 0;
@@ -366,7 +374,8 @@ TEST_CASE("[NextGeo][RasterBins] Per-bin compaction gives each (bin, kind) its c
 }
 
 TEST_CASE("[NextGeo][RasterBins] The bin layouts and their GLSL copies agree") {
-	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_LIMIT")), int64_t(VMS::RASTER_BIN_LIMIT));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX")), int64_t(VMS::RASTER_BIN_PROGRAMMABLE_MAX));
+	CHECK_EQ(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_LIMIT"), String("NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + 1u"));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_KIND_SW")), int64_t(NEXTGEO_RASTER_BIN_KIND_SW));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_KIND_HW")), int64_t(NEXTGEO_RASTER_BIN_KIND_HW));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD")), int64_t(NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD));
@@ -375,21 +384,27 @@ TEST_CASE("[NextGeo][RasterBins] The bin layouts and their GLSL copies agree") {
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT")), int64_t(NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_COUNTS")), int64_t(NEXTGEO_RASTER_BIN_STATE_COUNTS));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_CURSORS")), int64_t(NEXTGEO_RASTER_BIN_STATE_CURSORS));
-	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_APPENDED")), int64_t(NEXTGEO_RASTER_BIN_STATE_APPENDED));
-	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS")), int64_t(NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS));
 	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_FILL")), int64_t(NEXTGEO_RASTER_BIN_STATE_FILL));
-	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_ARGS")), int64_t(NEXTGEO_RASTER_BIN_STATE_ARGS));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_STATE_APPENDED")), int64_t(NEXTGEO_RASTER_BIN_STATE_APPENDED));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ARGS_BINS")), int64_t(NEXTGEO_RASTER_BIN_ARGS_BINS));
+	CHECK_EQ(glsl_integer(glsl_constant(raster_features_inc_shader_glsl, "NEXTGEO_RASTER_BIN_ARGS_SCATTER")), int64_t(NEXTGEO_RASTER_BIN_ARGS_SCATTER));
 
-	// The state regions do not overlap and fit the buffer: 2 phases of 64 bins of 2 kinds.
-	CHECK_EQ(nextgeo_raster_bin_count_word(1u, VMS::RASTER_BIN_LIMIT - 1u, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_CURSORS);
-	CHECK_EQ(nextgeo_raster_bin_cursor_word(1u, VMS::RASTER_BIN_LIMIT - 1u, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_APPENDED);
-	CHECK(NEXTGEO_RASTER_BIN_STATE_APPENDED + 2u <= NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS);
-	CHECK(NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS + 8u <= NEXTGEO_RASTER_BIN_STATE_FILL);
-	CHECK_EQ(nextgeo_raster_bin_fill_word(1u, VMS::RASTER_BIN_LIMIT - 1u, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_ARGS);
-	CHECK_EQ(nextgeo_raster_bin_args_word(1u, VMS::RASTER_BIN_LIMIT - 1u, 1u) + 4u, NEXTGEO_RASTER_BIN_STATE_WORDS);
+	// State and indirect-argument buffers stay disjoint (no dual-usage hazard), and regions do not overlap:
+	// 2 phases of 64 programmable bins (IDs 1..64) of 2 kinds.
+	CHECK_EQ(nextgeo_raster_bin_count_word(0u, 1u, 0u), NEXTGEO_RASTER_BIN_STATE_COUNTS);
+	CHECK_EQ(nextgeo_raster_bin_count_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_CURSORS);
+	CHECK_EQ(nextgeo_raster_bin_cursor_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_FILL);
+	CHECK_EQ(nextgeo_raster_bin_fill_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 1u, NEXTGEO_RASTER_BIN_STATE_APPENDED);
+	CHECK(NEXTGEO_RASTER_BIN_STATE_APPENDED + 2u <= NEXTGEO_RASTER_BIN_STATE_WORDS);
+	CHECK_EQ(nextgeo_raster_bin_args_word(0u, 1u, 0u), NEXTGEO_RASTER_BIN_ARGS_BINS);
+	CHECK_EQ(nextgeo_raster_bin_args_word(1u, VMS::RASTER_BIN_PROGRAMMABLE_MAX, 1u) + 4u, NEXTGEO_RASTER_BIN_ARGS_SCATTER);
+	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(0u), NEXTGEO_RASTER_BIN_ARGS_SCATTER);
+	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(1u) + 4u, NEXTGEO_RASTER_BIN_ARGS_WORDS);
 	// Indirect arguments sit on 16-byte boundaries.
 	CHECK_EQ(nextgeo_raster_bin_args_word(0u, 5u, 1u) % 4u, 0u);
-	CHECK_EQ(NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS % 4u, 0u);
+	CHECK_EQ(nextgeo_raster_bin_args_word(1u, 64u, 1u) % 4u, 0u);
+	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(0u) % 4u, 0u);
+	CHECK_EQ(nextgeo_raster_bin_scatter_args_word(1u) % 4u, 0u);
 	// The hardware draw keeps #162's per-cluster vertex count.
 	CHECK_EQ(NEXTGEO_RASTER_VERTEX_COUNT, 384u);
 }

@@ -41,22 +41,23 @@ uint nextgeo_raster_args_word(uint p_phase, uint p_bin, uint p_kind) {
 // RendererVirtualMeshStorage::RASTER_BIN_LIMIT: change both in the same commit.
 // A VSM page raster (#217) iterates the same bins with NEXTGEO_RASTER_DEPTH_ONLY: vertex() plus
 // coverage, no visibility ID.
-const uint NEXTGEO_RASTER_BIN_LIMIT = 64u;
+const uint NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX = 64u;
+const uint NEXTGEO_RASTER_BIN_LIMIT = NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + 1u;
 const uint NEXTGEO_RASTER_BIN_KIND_SW = 0u;
 const uint NEXTGEO_RASTER_BIN_KIND_HW = 1u;
 // Per (instance, surface): one byte per surface, indexed like the bucket table (bucket_base + surface).
 const uint NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD = 8u;
-// A cull entry: visible-cluster index | kind << 21 | bin << 22.
+// A cull entry: visible-cluster index | kind << 21 | (bin - 1) << 22.
 const uint NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS = 21u;
 const uint NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT = 21u;
 const uint NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT = 22u;
-// Words of the bin state buffer.
-const uint NEXTGEO_RASTER_BIN_STATE_COUNTS = 0u; // [phase][bin][kind] cluster counts
-const uint NEXTGEO_RASTER_BIN_STATE_CURSORS = 256u; // [phase][bin][kind] range starts in the phase's region
-const uint NEXTGEO_RASTER_BIN_STATE_APPENDED = 512u; // [phase] appended entries
-const uint NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS = 516u; // [phase] uvec4 scatter dispatch
-const uint NEXTGEO_RASTER_BIN_STATE_FILL = 768u; // [phase][bin][kind] scatter fill counters
-const uint NEXTGEO_RASTER_BIN_STATE_ARGS = 1024u; // [phase][bin] SW uvec4 dispatch, then HW uvec4 draw
+// Words of the bin state buffer and the dedicated indirect-arguments buffer.
+const uint NEXTGEO_RASTER_BIN_STATE_COUNTS = 0u; // [phase][bin - 1][kind] cluster counts
+const uint NEXTGEO_RASTER_BIN_STATE_CURSORS = 256u; // [phase][bin - 1][kind] range starts in the phase's region
+const uint NEXTGEO_RASTER_BIN_STATE_FILL = 512u; // [phase][bin - 1][kind] scatter fill counters
+const uint NEXTGEO_RASTER_BIN_STATE_APPENDED = 768u; // [phase] appended entries
+const uint NEXTGEO_RASTER_BIN_ARGS_BINS = 0u; // [phase][bin - 1] SW uvec4 dispatch, then HW uvec4 draw
+const uint NEXTGEO_RASTER_BIN_ARGS_SCATTER = 1024u; // [phase] uvec4 scatter dispatch
 
 uint nextgeo_raster_bin_table_word(uint p_bucket_base, uint p_surface) {
 	return (p_bucket_base + p_surface) >> 2u;
@@ -67,21 +68,29 @@ uint nextgeo_raster_bin_table_shift(uint p_surface) {
 }
 
 uint nextgeo_raster_bin_count_word(uint p_phase, uint p_bin, uint p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_COUNTS + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+	return NEXTGEO_RASTER_BIN_STATE_COUNTS + (p_phase * NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
 }
 
 uint nextgeo_raster_bin_cursor_word(uint p_phase, uint p_bin, uint p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_CURSORS + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+	return NEXTGEO_RASTER_BIN_STATE_CURSORS + (p_phase * NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
 }
 
 uint nextgeo_raster_bin_fill_word(uint p_phase, uint p_bin, uint p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_FILL + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 2u + p_kind;
+	return NEXTGEO_RASTER_BIN_STATE_FILL + (p_phase * NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 2u + p_kind;
 }
 
 uint nextgeo_raster_bin_args_word(uint p_phase, uint p_bin, uint p_kind) {
-	return NEXTGEO_RASTER_BIN_STATE_ARGS + (p_phase * NEXTGEO_RASTER_BIN_LIMIT + p_bin) * 8u + p_kind * 4u;
+	return NEXTGEO_RASTER_BIN_ARGS_BINS + (p_phase * NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX + (p_bin - 1u)) * 8u + p_kind * 4u;
+}
+
+uint nextgeo_raster_bin_scatter_args_word(uint p_phase) {
+	return NEXTGEO_RASTER_BIN_ARGS_SCATTER + p_phase * 4u;
 }
 
 uint nextgeo_raster_bin_pack_entry(uint p_visible_index, uint p_bin, uint p_kind) {
-	return (p_visible_index & ((1u << NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS) - 1u)) | ((p_kind & 1u) << NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT) | ((p_bin & 0x3Fu) << NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT);
+	return (p_visible_index & ((1u << NEXTGEO_RASTER_BIN_ENTRY_INDEX_BITS) - 1u)) | ((p_kind & 1u) << NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT) | (((p_bin - 1u) & 0x3Fu) << NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT);
+}
+
+uint nextgeo_raster_bin_entry_bin(uint p_entry) {
+	return ((p_entry >> NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT) & 0x3Fu) + 1u;
 }

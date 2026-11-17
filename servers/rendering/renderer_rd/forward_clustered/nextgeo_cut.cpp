@@ -200,7 +200,7 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 				!cast_ok ||
 				(record.flags & (RendererVirtualMeshStorage::RECORD_HAS_SKELETON | RendererVirtualMeshStorage::RECORD_HAS_INSTANCE_UNIFORMS)) != 0 ||
 				(record.gi_flags & RendererVirtualMeshStorage::GI_LIGHTMAPPED) != 0 ||
-				record.surface_mask == 0 ||
+				(is_shadow_view ? record.pad0 : record.surface_mask) == 0 ||
 				(record.layer_mask & cull_mask) == 0) {
 			continue;
 		}
@@ -792,7 +792,10 @@ bool NextGeoCut::_ensure_raster_bins(RenderingDevice *p_rd) {
 	raster_bin_prefix_pipeline = p_rd->compute_pipeline_create(prefix);
 	raster_bin_scatter_pipeline = p_rd->compute_pipeline_create(scatter);
 	if (raster_bin_state.is_null()) {
-		raster_bin_state = p_rd->storage_buffer_create(RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		raster_bin_state = _storage(RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t));
+	}
+	if (raster_bin_args.is_null()) {
+		raster_bin_args = p_rd->storage_buffer_create(RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
 	}
 	if (raster_bin_append.is_null()) {
 		raster_bin_append = _storage(CLUSTER_CAPACITY * sizeof(uint32_t));
@@ -800,7 +803,7 @@ bool NextGeoCut::_ensure_raster_bins(RenderingDevice *p_rd) {
 	if (raster_bin_lists.is_null()) {
 		raster_bin_lists = _storage(CLUSTER_CAPACITY * sizeof(uint32_t));
 	}
-	raster_bins_ready = raster_bin_prefix_pipeline.is_valid() && raster_bin_scatter_pipeline.is_valid() && raster_bin_state.is_valid() && raster_bin_append.is_valid() && raster_bin_lists.is_valid();
+	raster_bins_ready = raster_bin_prefix_pipeline.is_valid() && raster_bin_scatter_pipeline.is_valid() && raster_bin_state.is_valid() && raster_bin_args.is_valid() && raster_bin_append.is_valid() && raster_bin_lists.is_valid();
 	return raster_bins_ready;
 }
 
@@ -825,6 +828,7 @@ bool NextGeoCut::_prepare_raster_bins(const NextGeoRasterInputs &p_raster) {
 	}
 	rd->buffer_update(raster_bin_table_buffer, 0, p_raster.raster_bin_table_words * sizeof(uint32_t), p_raster.raster_bin_table);
 	rd->buffer_clear(raster_bin_state, 0, RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t));
+	rd->buffer_clear(raster_bin_args, 0, RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t));
 	return true;
 }
 
@@ -838,7 +842,8 @@ void NextGeoCut::_compact_raster_bins(uint32_t p_phase, uint32_t p_list_base) {
 	RD::Uniform u_state(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, raster_bin_state);
 	RD::Uniform u_append(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, raster_bin_append);
 	RD::Uniform u_lists(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, raster_bin_lists);
-	const RID prefix_set = uniform_set_cache->get_cache(prefix, 0, u_state, u_append, u_lists);
+	RD::Uniform u_args(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, raster_bin_args);
+	const RID prefix_set = uniform_set_cache->get_cache(prefix, 0, u_state, u_append, u_lists, u_args);
 	const RID scatter_set = uniform_set_cache->get_cache(scatter, 0, u_state, u_append, u_lists);
 	if (prefix_set.is_null() || scatter_set.is_null()) {
 		return;
@@ -857,7 +862,7 @@ void NextGeoCut::_compact_raster_bins(uint32_t p_phase, uint32_t p_list_base) {
 	rd->compute_list_bind_compute_pipeline(list, raster_bin_scatter_pipeline);
 	rd->compute_list_bind_uniform_set(list, scatter_set, 0);
 	rd->compute_list_set_push_constant(list, push, sizeof(push));
-	rd->compute_list_dispatch_indirect(list, raster_bin_state, (RendererRD::NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS + p_phase * 4u) * sizeof(uint32_t));
+	rd->compute_list_dispatch_indirect(list, raster_bin_args, RendererRD::nextgeo_raster_bin_scatter_args_word(p_phase) * sizeof(uint32_t));
 	rd->compute_list_end();
 }
 
@@ -943,6 +948,8 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 		return r_sets[0].is_valid() && r_sets[1].is_valid() && r_sets[2].is_valid() && (p_program.material_uniforms.is_empty() || r_sets[3].is_valid());
 	};
 
+	const uint32_t bin_flags = p_raster.debug_backface ? 1u : 0u;
+
 	// Software clusters: one workgroup each, dispatched indirectly per bin.
 	{
 		RD::ComputeListID list = rd->compute_list_begin();
@@ -956,8 +963,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 			if (pipeline.is_null() || !bind_sets(shader, program, sets)) {
 				continue;
 			}
-			// Both forms keep the surface's culling: the back-face debug view covers the fixed-function bin.
-			const BinPush push = { p_list_base, p_phase, program.bin, 0u, { size.x, size.y }, { 0u, 0u } };
+			const BinPush push = { p_list_base, p_phase, program.bin, bin_flags, { size.x, size.y }, { 0u, 0u } };
 			rd->compute_list_bind_compute_pipeline(list, pipeline);
 			for (uint32_t set = 0; set < 4; set++) {
 				if (sets[set].is_valid()) {
@@ -965,7 +971,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 				}
 			}
 			rd->compute_list_set_push_constant(list, &push, sizeof(push));
-			rd->compute_list_dispatch_indirect(list, raster_bin_state, RendererRD::nextgeo_raster_bin_args_word(p_phase, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_SW) * sizeof(uint32_t));
+			rd->compute_list_dispatch_indirect(list, raster_bin_args, RendererRD::nextgeo_raster_bin_args_word(p_phase, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_SW) * sizeof(uint32_t));
 		}
 		rd->compute_list_end();
 	}
@@ -988,7 +994,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 			if (pipeline.is_null() || !bind_sets(shader, program, sets)) {
 				continue;
 			}
-			const BinPush push = { p_list_base, p_phase, program.bin, 0u, { size.x, size.y }, { 0u, 0u } };
+			const BinPush push = { p_list_base, p_phase, program.bin, bin_flags, { size.x, size.y }, { 0u, 0u } };
 			rd->draw_list_bind_render_pipeline(dl, pipeline);
 			for (uint32_t set = 0; set < 4; set++) {
 				if (sets[set].is_valid()) {
@@ -996,7 +1002,7 @@ void NextGeoCut::_draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const
 				}
 			}
 			rd->draw_list_set_push_constant(dl, &push, sizeof(push));
-			rd->draw_list_draw_indirect(dl, false, raster_bin_state, RendererRD::nextgeo_raster_bin_args_word(p_phase, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_HW) * sizeof(uint32_t), 1u, 0u);
+			rd->draw_list_draw_indirect(dl, false, raster_bin_args, RendererRD::nextgeo_raster_bin_args_word(p_phase, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_HW) * sizeof(uint32_t), 1u, 0u);
 		}
 		rd->draw_list_end();
 	}
@@ -2376,7 +2382,7 @@ void NextGeoCut::free_resources() {
 	cluster_shadow_hash = RID();
 	hiz_pipeline = RID();
 	clear_vis_pipeline = RID();
-	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &raster_args, &raster_counts, &raster_lists, &raster_bin_state, &raster_bin_append, &raster_bin_lists, &raster_bin_table_buffer }) {
+	for (RID *buffer : { &params, &raster_params, &nodes, &phase2_nodes, &groups, &clusters, &level_a, &level_b, &bvh_args[0], &bvh_args[1], &draw_args, &counters, &aux_counters, &counters_ring[0], &counters_ring[1], &counters_ring[2], &shadow_params, &shadow_raster_params, &shadow_nodes, &shadow_level_a, &shadow_level_b, &shadow_groups, &shadow_clusters, &shadow_bvh_args[0], &shadow_bvh_args[1], &shadow_draw_args, &shadow_counters, &shadow_counters_ring[0], &shadow_counters_ring[1], &shadow_counters_ring[2], &request_ring[0], &request_ring[1], &request_ring[2], &dummy_page_buf, &raster_args, &raster_counts, &raster_lists, &raster_bin_state, &raster_bin_args, &raster_bin_append, &raster_bin_lists, &raster_bin_table_buffer }) {
 		if (buffer->is_valid()) {
 			rd->free_rid(*buffer);
 			*buffer = RID();

@@ -65,6 +65,9 @@ public:
 	virtual bool supports_acceleration_structures() const override { return true; }
 	// GodotNext: rd_mesh_shaders (#178)
 	virtual bool supports_mesh_shaders() const override { return true; }
+	// GodotNext: nextgeo_raster_bins (#155)
+	virtual bool supports_image_int64_atomics() const override { return true; }
+	virtual bool supports_buffer_int64_atomics() const override { return true; }
 	void set_debug_info_enabled(bool p_debug_info_enabled);
 	bool get_debug_info_enabled() const;
 	RenderingShaderContainerFormatVulkan();

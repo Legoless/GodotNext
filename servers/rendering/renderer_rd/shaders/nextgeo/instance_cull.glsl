@@ -60,7 +60,7 @@ void main() {
 			(record.flags & (NEXTGEO_RECORD_HAS_SKELETON | NEXTGEO_RECORD_HAS_INSTANCE_UNIFORMS)) != 0u ||
 			(record.gi_flags & NEXTGEO_GI_LIGHTMAPPED) != 0u ||
 			record.virtual_mesh == 0xFFFFFFFFu ||
-			record.surface_mask == 0u ||
+			record.pad0 == 0u ||
 			(record.layer_mask & sc.cull.x) == 0u) {
 		return;
 	}

@@ -50,8 +50,8 @@ void main() {
 
 	// The winding and culling of sw_raster.glsl.
 	int facing = NEXTGEO_SW_KEEP_BOTH;
-	if ((bin_push.flags & RASTER_BIN_FLAG_NO_CULL) == 0u && (cull_flags & (1u << 24u)) == 0u) {
-		float effective_cull_sign = ((cull_flags & (1u << 25u)) != 0u) ? -raster.cull_sign : raster.cull_sign;
+	if ((bin_push.flags & RASTER_BIN_FLAG_NO_CULL) == 0u && (cull_flags & NEXTGEO_BUCKET_CULL_DISABLED) == 0u) {
+		float effective_cull_sign = ((cull_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u) ? -raster.cull_sign : raster.cull_sign;
 		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
 		facing = (determinant(basis) * effective_cull_sign < 0.0) ? NEXTGEO_SW_KEEP_NEGATIVE : NEXTGEO_SW_KEEP_POSITIVE;
 	}

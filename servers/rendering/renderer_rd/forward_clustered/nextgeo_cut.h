@@ -244,7 +244,8 @@ private:
 	RID raster_bin_compact_version;
 	RID raster_bin_prefix_pipeline;
 	RID raster_bin_scatter_pipeline;
-	RID raster_bin_state; // nextgeo_raster_bins.h's state words, also the indirect arguments.
+	RID raster_bin_state; // nextgeo_raster_bins.h's state words.
+	RID raster_bin_args; // Dedicated indirect dispatch/draw arguments (written only in PREFIX).
 	RID raster_bin_append;
 	RID raster_bin_lists;
 	RID raster_bin_table_buffer;

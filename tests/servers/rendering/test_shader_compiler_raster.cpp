@@ -37,10 +37,32 @@ TEST_FORCE_LINK(test_shader_compiler_raster)
 // UNSUPPORTED_RASTER_FEATURE, and materials without a raster program stay in the fixed-function bin.
 
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_hw.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_sw.glsl.gen.h"
+#include "servers/rendering/rendering_shader_container.h"
 #include "servers/rendering/shader_compiler.h"
 #include "servers/rendering/shader_types.h"
 
+#include "modules/modules_enabled.gen.h"
+
+#ifdef MODULE_GLSLANG_ENABLED
+#include "modules/glslang/shader_compile.h"
+#endif
+#ifdef TOOLS_ENABLED
+#include "editor/export/shader_baker/shader_baker_export_plugin.h"
+#endif
+#ifdef VULKAN_ENABLED
+#include "drivers/vulkan/rendering_shader_container_vulkan.h"
+#endif
+#ifdef METAL_ENABLED
+#include "drivers/metal/rendering_shader_container_metal.h"
+#endif
+#ifdef D3D12_ENABLED
+#include "drivers/d3d12/rendering_shader_container_d3d12.h"
+#endif
+
 using namespace RendererRD;
+using RDC = RenderingDeviceCommons;
 
 namespace TestShaderCompilerRaster {
 
@@ -107,11 +129,15 @@ void init_spatial_raster_compiler(ShaderCompiler &r_compiler) {
 	actions.renames["ALPHA_HASH_SCALE"] = "alpha_hash_scale";
 	actions.renames["DEPTH"] = "gl_FragDepth";
 	actions.renames["VERTEX_ID"] = "VERTEX_INDEX";
+	actions.renames["LIGHT_COLOR"] = "light_color_highp";
+	actions.renames["ATTENUATION"] = "attenuation_highp";
+	actions.renames["DIFFUSE_LIGHT"] = "diffuse_light_highp";
 
 	actions.usage_defines["ALPHA_SCISSOR_THRESHOLD"] = "#define ALPHA_SCISSOR_USED\n";
 	actions.usage_defines["ALPHA_HASH_SCALE"] = "#define ALPHA_HASH_USED\n";
 	actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
 	actions.usage_defines["UV"] = "#define UV_USED\n";
+	actions.usage_defines["NORMAL"] = "#define NORMAL_USED\n";
 
 	actions.base_texture_binding_index = 1;
 	actions.texture_layout_set = 3;
@@ -369,6 +395,30 @@ void fragment() {
 }
 )",
 				ShaderCompiler::RASTER_WRITES_DEPTH },
+		{ "the absolute DEPTH written through an out parameter", R"(
+shader_type spatial;
+void set_depth_out(out float d) {
+	d = 0.5;
+}
+void fragment() {
+	ALPHA = UV.x;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+	set_depth_out(DEPTH);
+}
+)",
+				ShaderCompiler::RASTER_WRITES_DEPTH },
+		{ "the absolute DEPTH written through an inout parameter", R"(
+shader_type spatial;
+void adjust_depth(inout float d) {
+	d *= 0.5;
+}
+void fragment() {
+	ALPHA = UV.x;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+	adjust_depth(DEPTH);
+}
+)",
+				ShaderCompiler::RASTER_WRITES_DEPTH },
 	};
 	// hint_normal_roughness_texture parses only under the Forward+ renderer, which the doctests do not
 	// run; ShaderCompiler reports it as GeneratedCode::uses_normal_roughness_texture, and the classifier's
@@ -414,8 +464,10 @@ void fragment() {
 	}
 }
 
-TEST_CASE("[NextGeo][ShaderCompilerRaster] A discard in a called function withholds the raster target") {
-	const RasterCompileResult res = compile_spatial_raster(R"(
+TEST_CASE("[NextGeo][ShaderCompilerRaster] Helper and light() discards reject cleanly with UNSUPPORTED_RASTER_FEATURE") {
+	// Helper containing discard called from fragment(): rejected with RASTER_USES_FUNCTION_DISCARD, no raster_fragment emitted.
+	{
+		const RasterCompileResult res = compile_spatial_raster(R"(
 shader_type spatial;
 void clip_stripes(float x) {
 	if (fract(x * 8.0) < 0.5) {
@@ -427,13 +479,64 @@ void fragment() {
 	ALBEDO = vec3(1.0);
 }
 )");
-	REQUIRE_EQ(res.err, OK);
-	CHECK_EQ(res.features(), uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_MASKED));
-	CHECK((res.gen.raster_uses & ShaderCompiler::RASTER_USES_FUNCTION_DISCARD) != 0u);
-	// Not a reject: the material keeps #80's reason, and the scene shader makes no raster target for it.
-	CHECK_EQ(res.rejects(), 0u);
-	CHECK_EQ(res.fallback(false), NEXTGEO_FALLBACK_ALPHA);
-	// A discard in fragment() itself is the raster target's.
+		REQUIRE_EQ(res.err, OK);
+		CHECK_EQ(res.features(), uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_MASKED));
+		CHECK((res.gen.raster_uses & ShaderCompiler::RASTER_USES_FUNCTION_DISCARD) != 0u);
+		CHECK_EQ(res.rejects(), uint32_t(ShaderCompiler::RASTER_USES_FUNCTION_DISCARD));
+		CHECK_EQ(res.fallback(false), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+		CHECK_EQ(res.fallback(true), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+		CHECK_FALSE(res.gen.code.has("raster_fragment"));
+		CHECK_FALSE(res.gen.stage_globals[ShaderCompiler::STAGE_COMPUTE].contains("discard;"));
+	}
+	// discard directly in light(): rejected with RASTER_USES_LIGHT_DISCARD, never treated as fixed-coverage opaque.
+	{
+		const RasterCompileResult res = compile_spatial_raster(R"(
+shader_type spatial;
+void fragment() {
+	ALBEDO = vec3(1.0);
+}
+void light() {
+	if (ATTENUATION < 0.1) {
+		discard;
+	}
+	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * ATTENUATION;
+}
+)");
+		REQUIRE_EQ(res.err, OK);
+		CHECK_EQ(res.features(), uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_MASKED));
+		CHECK((res.gen.raster_uses & ShaderCompiler::RASTER_USES_LIGHT_DISCARD) != 0u);
+		CHECK_EQ(res.rejects(), uint32_t(ShaderCompiler::RASTER_USES_LIGHT_DISCARD));
+		CHECK_EQ(res.fallback(false), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+		CHECK_EQ(res.fallback(true), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+		CHECK_FALSE(res.gen.stage_globals[ShaderCompiler::STAGE_COMPUTE].contains("discard;"));
+	}
+	// discard in a helper called from light(): rejected with RASTER_USES_LIGHT_DISCARD, and light()'s helper stays out of STAGE_COMPUTE.
+	{
+		const RasterCompileResult res = compile_spatial_raster(R"(
+shader_type spatial;
+void clip_light(float a) {
+	if (a < 0.1) {
+		discard;
+	}
+}
+void fragment() {
+	ALPHA = UV.x;
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+}
+void light() {
+	clip_light(ATTENUATION);
+	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * ATTENUATION;
+}
+)");
+		REQUIRE_EQ(res.err, OK);
+		CHECK((res.gen.raster_uses & ShaderCompiler::RASTER_USES_LIGHT_DISCARD) != 0u);
+		CHECK_EQ(res.rejects(), uint32_t(ShaderCompiler::RASTER_USES_LIGHT_DISCARD));
+		CHECK_EQ(res.fallback(false), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+		CHECK_EQ(res.fallback(true), NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE);
+		CHECK_FALSE(res.gen.stage_globals[ShaderCompiler::STAGE_COMPUTE].contains("m_clip_light"));
+		CHECK_FALSE(res.gen.stage_globals[ShaderCompiler::STAGE_COMPUTE].contains("discard;"));
+	}
+	// A discard in fragment() itself is rewritten to _NG_RASTER_DISCARD and admitted.
 	const RasterCompileResult own = compile_spatial_raster(R"(
 shader_type spatial;
 void fragment() {
@@ -443,8 +546,173 @@ void fragment() {
 }
 )");
 	REQUIRE_EQ(own.err, OK);
-	CHECK_EQ(own.gen.raster_uses & ShaderCompiler::RASTER_USES_FUNCTION_DISCARD, 0u);
+	CHECK_EQ(own.gen.raster_uses & (ShaderCompiler::RASTER_USES_FUNCTION_DISCARD | ShaderCompiler::RASTER_USES_LIGHT_DISCARD), 0u);
+	CHECK_EQ(own.fallback(true), NEXTGEO_FALLBACK_NONE);
 }
+
+TEST_CASE("[NextGeo][ShaderCompilerRaster] Fragment-to-light varyings and raster templates compile cleanly") {
+	const RasterCompileResult res = compile_spatial_raster(R"(
+shader_type spatial;
+render_mode cull_disabled;
+uniform float scale = 1.1;
+varying vec2 v_uv;
+varying float v_f2l;
+float mask_stripe(vec2 uv) {
+	return step(0.5, fract(uv.x * 6.0));
+}
+float light_curve(float v) {
+	return 0.25 + 0.75 * v;
+}
+void vertex() {
+	VERTEX += NORMAL * (scale - 1.0);
+	v_uv = UV * 2.0;
+}
+void fragment() {
+	v_f2l = v_uv.y;
+	ALBEDO = vec3(0.8);
+	ALPHA = mask_stripe(v_uv);
+	ALPHA_SCISSOR_THRESHOLD = 0.5;
+}
+void light() {
+	DIFFUSE_LIGHT += ALBEDO * LIGHT_COLOR * ATTENUATION * light_curve(v_f2l);
+}
+)");
+	REQUIRE_EQ(res.err, OK);
+	CHECK_EQ(res.rejects(), 0u);
+	CHECK_EQ(res.fallback(true), NEXTGEO_FALLBACK_NONE);
+	const String &compute_globals = res.gen.stage_globals[ShaderCompiler::STAGE_COMPUTE];
+	CHECK(compute_globals.contains("frag_to_light;"));
+	CHECK(compute_globals.contains("_ng_dx_frag_to_light;"));
+	CHECK(compute_globals.contains("_ng_rf_m_mask_stripe"));
+	// light() helpers stay in STAGE_FRAGMENT only, never STAGE_COMPUTE.
+	CHECK_FALSE(compute_globals.contains("m_light_curve"));
+	CHECK(res.gen.stage_globals[ShaderCompiler::STAGE_FRAGMENT].contains("_ng_rf_m_light_curve"));
+
+	// Initialize SW and HW ShaderRDs with separate VIS64_IMAGE (group 0) and VIS64_BUFFER (group 1) groups,
+	// expand both variants, and verify GLSL -> SPIR-V -> container compilation.
+	RasterMaterialSwShaderRD sw_shader;
+	RasterMaterialHwShaderRD hw_shader;
+	Vector<ShaderRD::VariantDefine> raster_variants;
+	raster_variants.push_back(ShaderRD::VariantDefine(0, "", false));
+	raster_variants.push_back(ShaderRD::VariantDefine(1, "\n#define VIS64_BUFFER\n", false));
+	sw_shader.initialize(raster_variants);
+	sw_shader.set_group_int64_atomics(0, true, false);
+	sw_shader.set_group_int64_atomics(1, false, true);
+	hw_shader.initialize(raster_variants);
+	hw_shader.set_group_int64_atomics(0, true, false);
+	hw_shader.set_group_int64_atomics(1, false, true);
+
+	CHECK_EQ(sw_shader.get_group_count(), 2);
+	CHECK_FALSE(sw_shader.is_group_enabled(0));
+	CHECK_FALSE(sw_shader.is_group_enabled(1));
+	CHECK(sw_shader.group_requires_image_int64_atomics(0));
+	CHECK_FALSE(sw_shader.group_requires_buffer_int64_atomics(0));
+	CHECK_FALSE(sw_shader.group_requires_image_int64_atomics(1));
+	CHECK(sw_shader.group_requires_buffer_int64_atomics(1));
+
+	HashMap<String, String> raster_code;
+	raster_code["resolve_vertex"] = res.gen.code["resolve_vertex"];
+	raster_code["resolve_vertex_store"] = res.gen.code["resolve_vertex_store"];
+	raster_code["resolve_interpolate"] = res.gen.code["resolve_interpolate"];
+	raster_code["raster_fragment"] = res.gen.code["raster_fragment"];
+
+	Vector<String> defines = res.gen.defines;
+	defines.push_back("#define DO_SIDE_CHECK\n");
+
+	const RID sw_ver = sw_shader.version_create(false);
+	const RID hw_ver = hw_shader.version_create(false);
+	REQUIRE(sw_ver.is_valid());
+	REQUIRE(hw_ver.is_valid());
+	sw_shader.version_set_compute_code(sw_ver, raster_code, res.gen.uniforms, compute_globals, defines);
+	hw_shader.version_set_code(hw_ver, raster_code, res.gen.uniforms, compute_globals, compute_globals, defines);
+
+	CHECK_NE(sw_shader.version_get_cache_file_relative_path(sw_ver, 0, "vulkan"), sw_shader.version_get_cache_file_relative_path(sw_ver, 1, "vulkan"));
+	CHECK_NE(hw_shader.version_get_cache_file_relative_path(hw_ver, 0, "vulkan"), hw_shader.version_get_cache_file_relative_path(hw_ver, 1, "vulkan"));
+
+	for (int variant = 0; variant < 2; variant++) {
+		const Vector<String> sw_sources = sw_shader.version_build_variant_stage_sources(sw_ver, variant);
+		const Vector<String> hw_sources = hw_shader.version_build_variant_stage_sources(hw_ver, variant);
+		REQUIRE_EQ(sw_sources.size(), int(RD::SHADER_STAGE_MAX));
+		REQUIRE_EQ(hw_sources.size(), int(RD::SHADER_STAGE_MAX));
+		CHECK_EQ(sw_sources[RD::SHADER_STAGE_COMPUTE].contains("#define VIS64_BUFFER"), variant == 1);
+		CHECK_EQ(hw_sources[RD::SHADER_STAGE_FRAGMENT].contains("#define VIS64_BUFFER"), variant == 1);
+#if defined(MODULE_GLSLANG_ENABLED) && defined(VULKAN_ENABLED)
+		RenderingShaderContainerFormatVulkan vk_format;
+		String err;
+		RDC::ShaderStageSPIRVData sw_spv;
+		sw_spv.shader_stage = RDC::SHADER_STAGE_COMPUTE;
+		sw_spv.spirv = compile_glslang_shader(RDC::SHADER_STAGE_COMPUTE, sw_sources[RD::SHADER_STAGE_COMPUTE], vk_format.get_shader_language_version(), vk_format.get_shader_spirv_version(RDC::SHADER_STAGE_COMPUTE), &err);
+		CHECK_MESSAGE(!sw_spv.spirv.is_empty(), err);
+		Ref<RenderingShaderContainer> sw_container = vk_format.create_container();
+		Vector<RDC::ShaderStageSPIRVData> sw_stages = { sw_spv };
+		CHECK(sw_container->set_code_from_spirv("RasterMaterialSwShaderRD", sw_stages));
+
+		RDC::ShaderStageSPIRVData hw_vs;
+		hw_vs.shader_stage = RDC::SHADER_STAGE_VERTEX;
+		hw_vs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_VERTEX, hw_sources[RD::SHADER_STAGE_VERTEX], vk_format.get_shader_language_version(), vk_format.get_shader_spirv_version(RDC::SHADER_STAGE_VERTEX), &err);
+		CHECK_MESSAGE(!hw_vs.spirv.is_empty(), err);
+		RDC::ShaderStageSPIRVData hw_fs;
+		hw_fs.shader_stage = RDC::SHADER_STAGE_FRAGMENT;
+		hw_fs.spirv = compile_glslang_shader(RDC::SHADER_STAGE_FRAGMENT, hw_sources[RD::SHADER_STAGE_FRAGMENT], vk_format.get_shader_language_version(), vk_format.get_shader_spirv_version(RDC::SHADER_STAGE_FRAGMENT), &err);
+		CHECK_MESSAGE(!hw_fs.spirv.is_empty(), err);
+		Ref<RenderingShaderContainer> hw_container = vk_format.create_container();
+		Vector<RDC::ShaderStageSPIRVData> hw_stages = { hw_vs, hw_fs };
+		CHECK(hw_container->set_code_from_spirv("RasterMaterialHwShaderRD", hw_stages));
+#endif
+	}
+
+	CHECK(sw_shader.version_free(sw_ver));
+	CHECK(hw_shader.version_free(hw_ver));
+}
+
+#ifdef TOOLS_ENABLED
+TEST_CASE("[NextGeo][ShaderCompilerRaster] ShaderBakerExportPlugin gates 64-bit-atomic groups on container format capabilities") {
+	CHECK(ShaderBakerExportPlugin::should_bake_int64_atomic_group(false, false, false, false));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_bake_int64_atomic_group(true, false, false, false));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_bake_int64_atomic_group(true, false, false, true));
+	CHECK(ShaderBakerExportPlugin::should_bake_int64_atomic_group(true, false, true, false));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_bake_int64_atomic_group(false, true, false, false));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_bake_int64_atomic_group(false, true, true, false));
+	CHECK(ShaderBakerExportPlugin::should_bake_int64_atomic_group(false, true, false, true));
+	CHECK_FALSE(ShaderBakerExportPlugin::should_bake_int64_atomic_group(true, true, true, false));
+	CHECK(ShaderBakerExportPlugin::should_bake_int64_atomic_group(true, true, true, true));
+
+	// Serialized container versions stay untouched.
+	CHECK_EQ(RenderingShaderContainer::CONTAINER_VERSION, 6u);
+#ifdef VULKAN_ENABLED
+	RenderingShaderContainerFormatVulkan vk_format;
+	CHECK(vk_format.supports_image_int64_atomics());
+	CHECK(vk_format.supports_buffer_int64_atomics());
+#endif
+#ifdef METAL_ENABLED
+	MetalDeviceProfile apple9_mac;
+	apple9_mac.platform = MetalDeviceProfile::Platform::macOS;
+	apple9_mac.gpu = MetalDeviceProfile::GPU::Apple9;
+	apple9_mac.features.msl_version = 30100;
+	apple9_mac.features.use_argument_buffers = true;
+	CHECK(RenderingShaderContainerFormatMetal(&apple9_mac, true).supports_image_int64_atomics());
+	CHECK(RenderingShaderContainerFormatMetal(&apple9_mac, true).supports_buffer_int64_atomics());
+
+	MetalDeviceProfile apple8_mac = apple9_mac;
+	apple8_mac.gpu = MetalDeviceProfile::GPU::Apple8;
+	CHECK(RenderingShaderContainerFormatMetal(&apple8_mac, true).supports_image_int64_atomics());
+
+	MetalDeviceProfile apple8_ios = apple8_mac;
+	apple8_ios.platform = MetalDeviceProfile::Platform::iOS;
+	CHECK_FALSE(RenderingShaderContainerFormatMetal(&apple8_ios, true).supports_image_int64_atomics());
+
+	MetalDeviceProfile apple7_mac = apple9_mac;
+	apple7_mac.gpu = MetalDeviceProfile::GPU::Apple7;
+	CHECK_FALSE(RenderingShaderContainerFormatMetal(&apple7_mac, true).supports_image_int64_atomics());
+#endif
+#ifdef D3D12_ENABLED
+	RenderingShaderContainerFormatD3D12 d3d12_format;
+	CHECK_FALSE(d3d12_format.supports_image_int64_atomics());
+	CHECK_FALSE(d3d12_format.supports_buffer_int64_atomics());
+	CHECK_EQ(RenderingShaderContainerD3D12::FORMAT_VERSION, 4u);
+#endif
+}
+#endif // TOOLS_ENABLED
 
 TEST_CASE("[NextGeo][ShaderCompilerRaster] FRAGCOORD outside a raster program and in light() is not rejected") {
 	// The fixed-function bin runs no material code, and the resolve emulates FRAGCOORD.

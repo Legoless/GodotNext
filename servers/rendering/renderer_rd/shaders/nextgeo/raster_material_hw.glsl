@@ -21,6 +21,8 @@
 
 layout(location = 0) out flat uint vis_id_out;
 
+const uint RASTER_BIN_FLAG_NO_CULL = 1u << 0u; // The back-face debug view rasterizes both faces.
+
 void collapse_triangle() {
 	gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
 	vis_id_out = 0xFFFFFFFFu;
@@ -40,15 +42,16 @@ void main() {
 		return;
 	}
 
-	// The winding of visibility_raster.glsl: a cull-disabled surface turns every triangle to face the
-	// camera; otherwise the instance's handedness and the surface's cull bits pick the kept face.
-	if ((cull_flags & (1u << 24u)) != 0u) {
+	// The winding of visibility_raster.glsl: a cull-disabled surface (or the back-face debug view) turns
+	// every triangle to face the camera; otherwise the instance's handedness and the surface's cull bits
+	// pick the kept face.
+	if ((bin_push.flags & RASTER_BIN_FLAG_NO_CULL) != 0u || (cull_flags & NEXTGEO_BUCKET_CULL_DISABLED) != 0u) {
 		if (determinant(mat3(_ng_clip_c[0].xyw, _ng_clip_c[1].xyw, _ng_clip_c[2].xyw)) < 0.0 && corner != 0u) {
 			corner = 3u - corner;
 		}
 	} else {
 		NextGeoInstanceRecord record = nextgeo_records.data[entry.x];
-		float effective_cull_sign = ((cull_flags & (1u << 25u)) != 0u) ? -raster.cull_sign : raster.cull_sign;
+		float effective_cull_sign = ((cull_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u) ? -raster.cull_sign : raster.cull_sign;
 		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
 		if (determinant(basis) * effective_cull_sign < 0.0 && corner != 0u) {
 			corner = 3u - corner;

@@ -52,6 +52,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	_clear_vertex_input_mask_cache();
 
 	if (code.is_empty()) {
+		_free_raster_target();
+		raster_features = 0;
+		raster_rejects = 0;
+		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		return; //just invalid, but no error
 	}
 
@@ -201,6 +205,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	}
 
 	if (err != OK) {
+		_free_raster_target();
+		raster_features = 0;
+		raster_rejects = 0;
+		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		if (version.is_valid()) {
 			SceneShaderForwardClustered::singleton->shader.version_free(version);
 			version = RID();
@@ -336,12 +344,13 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	nextgeo_programmable_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
 
 	// The raster target's code, for a material a programmable bin can take. Its versions are made only
-	// when a bin first takes the material (ensure_raster_target()), so materials that never route through
-	// a programmable bin compile nothing more.
-	raster_target_available = SceneShaderForwardClustered::singleton->raster_target_ready && RendererRD::nextgeo_raster_has_program(raster_features) && nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE && !raster_fragment.is_empty() &&
-			(gen_code.raster_uses & ShaderCompiler::RASTER_USES_FUNCTION_DISCARD) == 0u &&
+	// when a bin or the shader baker first requests them (ensure_raster_target()), so materials that
+	// never route through a programmable bin compile nothing more.
+	const bool had_raster_versions = raster_sw_version.is_valid() || raster_hw_version.is_valid();
+	_free_raster_target();
+	raster_target_valid = RendererRD::nextgeo_raster_has_program(raster_features) && nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE && !raster_fragment.is_empty() &&
 			RendererVirtualMeshStorage::resolve_raster_bin(raster_features, RendererVirtualMeshStorage::RASTER_PASS_VISIBILITY) == int32_t(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE);
-	if (raster_target_available) {
+	if (raster_target_valid) {
 		raster_code.clear();
 		raster_code["resolve_vertex"] = gen_code.code.has("resolve_vertex") ? gen_code.code["resolve_vertex"] : String();
 		raster_code["resolve_vertex_store"] = gen_code.code.has("resolve_vertex_store") ? gen_code.code["resolve_vertex_store"] : String();
@@ -350,17 +359,14 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		raster_globals = gen_code.stage_globals[ShaderCompiler::STAGE_COMPUTE];
 		raster_uniforms = gen_code.uniforms;
 		raster_defines = gen_code.defines;
-		if (raster_sw_version.is_valid() && raster_hw_version.is_valid()) {
-			SceneShaderForwardClustered::singleton->raster_sw_shader.version_set_compute_code(raster_sw_version, raster_code, raster_uniforms, raster_globals, raster_defines);
-			SceneShaderForwardClustered::singleton->raster_hw_shader.version_set_code(raster_hw_version, raster_code, raster_uniforms, raster_globals, raster_globals, raster_defines);
+		if (had_raster_versions) {
+			ensure_raster_target();
 		}
-	} else {
-		_free_raster_target();
 	}
 }
 
 bool SceneShaderForwardClustered::ShaderData::ensure_raster_target() {
-	if (!raster_target_available || SceneShaderForwardClustered::singleton == nullptr) {
+	if (!raster_target_valid || SceneShaderForwardClustered::singleton == nullptr) {
 		return false;
 	}
 	if (raster_sw_version.is_valid() && raster_hw_version.is_valid()) {
@@ -379,7 +385,7 @@ bool SceneShaderForwardClustered::ShaderData::ensure_raster_target() {
 }
 
 void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
-	raster_target_available = false;
+	raster_target_valid = false;
 	raster_code.clear();
 	raster_globals = String();
 	raster_uniforms = String();
@@ -398,20 +404,31 @@ void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
 }
 
 RID SceneShaderForwardClustered::ShaderData::get_raster_target_shader(bool p_hardware, bool p_buffer) const {
-	if (raster_sw_version.is_null() || raster_hw_version.is_null()) {
+	if (raster_sw_version.is_null() || raster_hw_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_target_ready) {
 		return RID();
 	}
-	const int variant = p_buffer ? 1 : 0;
+	const bool supported = p_buffer ? SceneShaderForwardClustered::singleton->raster_buffer_int64_supported : SceneShaderForwardClustered::singleton->raster_image_int64_supported;
+	if (!supported) {
+		return RID();
+	}
+	const int group = p_buffer ? 1 : 0;
 	if (p_hardware) {
-		if (!SceneShaderForwardClustered::singleton->raster_hw_shader.is_variant_enabled(variant)) {
-			return RID();
+		if (!SceneShaderForwardClustered::singleton->raster_hw_shader.is_group_enabled(group)) {
+			SceneShaderForwardClustered::singleton->raster_hw_shader.enable_group(group);
 		}
-		return SceneShaderForwardClustered::singleton->raster_hw_shader.version_get_shader(raster_hw_version, variant);
+		return SceneShaderForwardClustered::singleton->raster_hw_shader.version_get_shader(raster_hw_version, group);
 	}
-	if (!SceneShaderForwardClustered::singleton->raster_sw_shader.is_variant_enabled(variant)) {
-		return RID();
+	if (!SceneShaderForwardClustered::singleton->raster_sw_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->raster_sw_shader.enable_group(group);
 	}
-	return SceneShaderForwardClustered::singleton->raster_sw_shader.version_get_shader(raster_sw_version, variant);
+	return SceneShaderForwardClustered::singleton->raster_sw_shader.version_get_shader(raster_sw_version, group);
+}
+
+void SceneShaderForwardClustered::ShaderData::get_extra_native_shader_and_versions(LocalVector<Pair<ShaderRD *, RID>> &r_versions) {
+	if (raster_target_valid && ensure_raster_target()) {
+		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_sw_shader, raster_sw_version });
+		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_hw_shader, raster_hw_version });
+	}
 }
 
 bool SceneShaderForwardClustered::ShaderData::is_animated() const {
@@ -1309,28 +1326,29 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		compiler.initialize(actions);
 	}
 
-	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). The material raster target's two forms exist on
-	// the Nanite device tier only (N1); a variant this device cannot build stays disabled, as #162's
-	// shaders do. Before the default material, so every material classifies against the same state.
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). Initialized unconditionally so the shader baker
+	// can bake per-bin software and hardware VIS64 variants regardless of the editor host's device tier.
+	// Group 0 (image) and group 1 (buffer) stay disabled until first runtime use on a supporting device.
+	// Before the default material, so every material classifies against the same state.
 	{
-		const RendererRD::NextGeoRasterTier tier = RendererRD::nextgeo_raster_tier(RD::get_singleton());
-		if (tier.hybrid) {
-			const bool image_int64 = RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
-			const bool buffer_int64 = RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
-			String raster_defines;
+		String raster_defines;
 #ifdef REAL_T_IS_DOUBLE
-			raster_defines += "\n#define USE_DOUBLE_PRECISION\n";
+		raster_defines += "\n#define USE_DOUBLE_PRECISION\n";
 #endif
-			const Vector<String> raster_variants = { "", "\n#define VIS64_BUFFER\n" };
-			raster_sw_shader.initialize(raster_variants, raster_defines);
-			raster_hw_shader.initialize(raster_variants, raster_defines);
-			for (int storage = 0; storage < 2; storage++) {
-				const bool supported = storage == 0 ? image_int64 : buffer_int64;
-				raster_sw_shader.set_variant_enabled(storage, supported);
-				raster_hw_shader.set_variant_enabled(storage, supported);
-			}
-			raster_target_ready = true;
-		}
+		Vector<ShaderRD::VariantDefine> raster_variants;
+		raster_variants.push_back(ShaderRD::VariantDefine(0, "", false));
+		raster_variants.push_back(ShaderRD::VariantDefine(1, "\n#define VIS64_BUFFER\n", false));
+		raster_sw_shader.initialize(raster_variants, raster_defines);
+		raster_sw_shader.set_group_int64_atomics(0, true, false);
+		raster_sw_shader.set_group_int64_atomics(1, false, true);
+		raster_hw_shader.initialize(raster_variants, raster_defines);
+		raster_hw_shader.set_group_int64_atomics(0, true, false);
+		raster_hw_shader.set_group_int64_atomics(1, false, true);
+
+		const RendererRD::NextGeoRasterTier tier = RendererRD::nextgeo_raster_tier(RD::get_singleton());
+		raster_target_ready = tier.hybrid;
+		raster_image_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
+		raster_buffer_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
 	}
 
 	{

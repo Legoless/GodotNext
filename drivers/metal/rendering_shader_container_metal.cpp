@@ -1048,6 +1048,18 @@ RenderingDeviceCommons::ShaderSpirvVersion RenderingShaderContainerFormatMetal::
 	return SHADER_SPIRV_VERSION_1_6;
 }
 
+bool RenderingShaderContainerFormatMetal::supports_image_int64_atomics() const {
+	return device_profile != nullptr &&
+			(device_profile->gpu >= MetalDeviceProfile::GPU::Apple9 ||
+					(device_profile->platform == MetalDeviceProfile::Platform::macOS && device_profile->gpu >= MetalDeviceProfile::GPU::Apple8)) &&
+			device_profile->features.msl_version >= MSL_VERSION_31 &&
+			device_profile->features.use_argument_buffers;
+}
+
+bool RenderingShaderContainerFormatMetal::supports_buffer_int64_atomics() const {
+	return supports_image_int64_atomics();
+}
+
 RenderingShaderContainerFormatMetal::RenderingShaderContainerFormatMetal(const MetalDeviceProfile *p_device_profile, bool p_export) :
 		export_mode(p_export), device_profile(p_device_profile) {
 }

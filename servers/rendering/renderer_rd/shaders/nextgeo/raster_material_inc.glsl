@@ -436,7 +436,7 @@ void _ng_resolve_vertex_corner(
 #define global_time scene_data_block.data.time
 
 // The cluster of a visible-cluster index, with the checks of sw_raster.glsl and visibility_raster.glsl.
-// r_cull_flags: the surface's bucket-word cull bits (bit 24 cull disabled, bit 25 cull front).
+// r_cull_flags: the surface's bucket-word cull bits (NEXTGEO_BUCKET_CULL_FRONT, NEXTGEO_BUCKET_CULL_DISABLED).
 bool _ng_raster_cluster(uint p_vis_cluster, out uvec2 r_entry, out uvec4 r_desc, out uint r_cull_flags) {
 	r_entry = uvec2(0u);
 	r_desc = uvec4(0u);
@@ -470,10 +470,10 @@ bool _ng_raster_cluster(uint p_vis_cluster, out uvec2 r_entry, out uvec4 r_desc,
 			return false;
 		}
 		uint bucket_word = nextgeo_bucket_table.data[bucket_slot];
-		if ((bucket_word & 0x00FFFFFFu) == 0x00FFFFFFu) {
+		if ((bucket_word & NEXTGEO_BUCKET_ID_MASK) == NEXTGEO_BUCKET_INVALID) {
 			return false;
 		}
-		r_cull_flags = bucket_word & ((1u << 24u) | (1u << 25u));
+		r_cull_flags = bucket_word & (NEXTGEO_BUCKET_CULL_DISABLED | NEXTGEO_BUCKET_CULL_FRONT);
 	}
 	return true;
 }
@@ -611,43 +611,34 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 	return true;
 }
 
-// The interpolants at framebuffer position p_frag_xy (a pixel center), as the resolve computes them
-// from the corners' clip positions: perspective-correct barycentrics and their screen derivatives.
+#ifndef NEXTGEO_RASTER_HW_VERTEX
+// The interpolants at framebuffer position p_frag_xy (a pixel center), evaluated in homogeneous 2D
+// clip space so near-plane-clipped hardware triangles with w <= 0 never divide by corner w or flip
+// _ng_front_facing.
 void _ng_raster_interpolate(vec2 p_frag_xy) {
-	vec2 _ng_ndc0 = _ng_clip_c[0].xy / _ng_clip_c[0].w;
-	vec2 _ng_ndc1 = _ng_clip_c[1].xy / _ng_clip_c[1].w;
-	vec2 _ng_ndc2 = _ng_clip_c[2].xy / _ng_clip_c[2].w;
-	vec2 _ng_e1 = _ng_ndc1 - _ng_ndc0;
-	vec2 _ng_e2 = _ng_ndc2 - _ng_ndc0;
-	float _ng_det = _ng_e1.x * _ng_e2.y - _ng_e1.y * _ng_e2.x;
+	mat3 _ng_m = mat3(_ng_clip_c[0].xyw, _ng_clip_c[1].xyw, _ng_clip_c[2].xyw);
+	vec3 _ng_u0 = cross(_ng_m[1], _ng_m[2]);
+	vec3 _ng_u1 = cross(_ng_m[2], _ng_m[0]);
+	vec3 _ng_u2 = cross(_ng_m[0], _ng_m[1]);
+	float _ng_det = dot(_ng_m[0], _ng_u0);
 	_ng_front_facing = (_ng_det > 0.0);
 
 	float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
-	vec2 _ng_p = p_frag_xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0;
-	vec2 _ng_dp = _ng_p - _ng_ndc0;
-	float _ng_l1 = (_ng_dp.x * _ng_e2.y - _ng_dp.y * _ng_e2.x) * _ng_inv_det;
-	float _ng_l2 = (_ng_e1.x * _ng_dp.y - _ng_e1.y * _ng_dp.x) * _ng_inv_det;
-	float _ng_l0 = 1.0 - _ng_l1 - _ng_l2;
-	vec3 _ng_l = vec3(_ng_l0, _ng_l1, _ng_l2);
-
-	vec3 _ng_dl_dx = vec3(-(_ng_e2.y - _ng_e1.y), _ng_e2.y, -_ng_e1.y) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.x);
-	vec3 _ng_dl_dy = vec3(-(-_ng_e2.x + _ng_e1.x), -_ng_e2.x, _ng_e1.x) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.y);
-
-	vec3 _ng_inv_w = vec3(1.0 / _ng_clip_c[0].w, 1.0 / _ng_clip_c[1].w, 1.0 / _ng_clip_c[2].w);
-	vec3 _ng_q = _ng_l * _ng_inv_w;
+	vec3 _ng_p = vec3(p_frag_xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0, 1.0);
+	vec3 _ng_q = vec3(dot(_ng_u0, _ng_p), dot(_ng_u1, _ng_p), dot(_ng_u2, _ng_p)) * _ng_inv_det;
 	float _ng_inv_w_sum = _ng_q.x + _ng_q.y + _ng_q.z;
 	float _ng_w_interp = abs(_ng_inv_w_sum) > 1e-20 ? (1.0 / _ng_inv_w_sum) : 1.0;
-	vec3 _ng_bary = _ng_q * _ng_w_interp;
+	vec3 _ng_bary = abs(_ng_inv_w_sum) > 1e-20 ? (_ng_q * _ng_w_interp) : vec3(1.0, 0.0, 0.0);
 
-	vec3 _ng_dq_dx = _ng_dl_dx * _ng_inv_w;
-	vec3 _ng_dq_dy = _ng_dl_dy * _ng_inv_w;
+	vec3 _ng_dq_dx = vec3(_ng_u0.x, _ng_u1.x, _ng_u2.x) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.x);
+	vec3 _ng_dq_dy = vec3(_ng_u0.y, _ng_u1.y, _ng_u2.y) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.y);
 	vec3 _ng_dbary_dx = (_ng_dq_dx - _ng_bary * (_ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z)) * _ng_w_interp;
 	vec3 _ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
 
-	vec3 _ng_z_ndc_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z) * _ng_inv_w;
-	_ng_fragcoord = vec4(p_frag_xy, dot(_ng_l, _ng_z_ndc_c), _ng_inv_w_sum);
-	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dl_dx, _ng_z_ndc_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
-	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dl_dy, _ng_z_ndc_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
+	vec3 _ng_z_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z);
+	_ng_fragcoord = vec4(p_frag_xy, dot(_ng_q, _ng_z_c), _ng_inv_w_sum);
+	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dq_dx, _ng_z_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
+	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dq_dy, _ng_z_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
 
 	vertex_interp = _ng_vtx_c[0] * _ng_bary.x + _ng_vtx_c[1] * _ng_bary.y + _ng_vtx_c[2] * _ng_bary.z;
 	vertex_interp_ddx = _ng_vtx_c[0] * _ng_dbary_dx.x + _ng_vtx_c[1] * _ng_dbary_dx.y + _ng_vtx_c[2] * _ng_dbary_dx.z;
@@ -840,7 +831,6 @@ void _ng_raster_fragment(in SceneData scene_data) {
 #endif
 }
 
-#ifndef NEXTGEO_RASTER_HW_VERTEX
 // The result of a 64-bit atomic max is never read: Metal's 64-bit max returns nothing (#175).
 void _ng_raster_write(ivec2 p_pixel, float p_depth, uint p_visibility_id) {
 #ifdef NEXTGEO_RASTER_DEPTH_ONLY

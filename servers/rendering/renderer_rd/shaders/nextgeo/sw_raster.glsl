@@ -197,14 +197,14 @@ void main() {
 			return;
 		}
 		uint bucket_word = bucket_table.data[bucket_slot];
-		if ((bucket_word & 0x00FFFFFFu) == 0x00FFFFFFu) {
+		if ((bucket_word & NEXTGEO_BUCKET_ID_MASK) == NEXTGEO_BUCKET_INVALID) {
 			return;
 		}
 		bucket_flags = bucket_word;
 	}
 	int facing = NEXTGEO_SW_KEEP_BOTH;
-	if ((params.flags & SW_FLAG_NO_CULL) == 0u && (bucket_flags & (1u << 24u)) == 0u) {
-		float effective_cull_sign = ((bucket_flags & (1u << 25u)) != 0u) ? -raster.cull_sign : raster.cull_sign;
+	if ((params.flags & SW_FLAG_NO_CULL) == 0u && (bucket_flags & NEXTGEO_BUCKET_CULL_DISABLED) == 0u) {
+		float effective_cull_sign = ((bucket_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u) ? -raster.cull_sign : raster.cull_sign;
 		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
 		facing = (determinant(basis) * effective_cull_sign < 0.0) ? NEXTGEO_SW_KEEP_NEGATIVE : NEXTGEO_SW_KEEP_POSITIVE;
 	}

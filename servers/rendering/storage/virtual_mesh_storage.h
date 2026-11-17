@@ -90,7 +90,7 @@ public:
 		uint32_t layer_mask = 0xFFFFFFFFu;
 		uint32_t flags = 0;
 		uint32_t gi_flags = 0;
-		uint32_t pad0 = 0;
+		uint32_t pad0 = 0; // Fixed-function shadow surface_mask (#155).
 		uint32_t tlas_instance_index = UINT32_MAX;
 		uint32_t blas_handle = UINT32_MAX;
 		uint32_t rt_arena_chunk = UINT32_MAX;
@@ -150,7 +150,7 @@ public:
 		RASTER_BIN_COUNT,
 		RASTER_BIN_PROGRAMMABLE = 0xFFu,
 	};
-	static constexpr uint32_t RASTER_BIN_PROGRAMMABLE_MAX = 63;
+	static constexpr uint32_t RASTER_BIN_PROGRAMMABLE_MAX = 64;
 	static constexpr uint32_t RASTER_BIN_LIMIT = RASTER_BIN_PROGRAMMABLE_MAX + 1;
 	// The features that need the material's raster program (vertex() and the coverage subset of
 	// fragment()). TWO_SIDED needs none: every bin flips facing from the per-surface cull bits.
@@ -221,7 +221,7 @@ public:
 	struct RasterBinKey {
 		uint32_t features = 0;
 		RID shader_version;
-		uint64_t material = 0;
+		RID material;
 
 		bool operator==(const RasterBinKey &p_other) const {
 			return features == p_other.features && shader_version == p_other.shader_version && material == p_other.material;
@@ -407,7 +407,7 @@ public:
 	void instance_record_set_state(uint32_t p_record, uint32_t p_flags);
 	void instance_record_set_layer_mask(uint32_t p_record, uint32_t p_layer_mask);
 	void instance_record_set_gi_flags(uint32_t p_record, uint32_t p_gi_flags);
-	void instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask);
+	void instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask, uint32_t p_shadow_surface_mask = UINT32_MAX);
 	void instance_record_set_surface_cull_masks(uint32_t p_record, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask);
 	RID instance_record_get_instance(uint32_t p_record) const;
 	// tlas_instance_index, blas_handle, rt_arena_chunk, rt_arena_offset, src_page_table, card_set.

@@ -45,12 +45,17 @@ params;
 
 #ifdef PREFIX
 
+layout(set = 0, binding = 3, std430) buffer restrict writeonly RasterBinArgs {
+	uint data[];
+}
+bin_args;
+
 void main() {
 	if (gl_GlobalInvocationID.x != 0u) {
 		return;
 	}
 	uint total = 0u;
-	for (uint bin = 0u; bin < NEXTGEO_RASTER_BIN_LIMIT; bin++) {
+	for (uint bin = 1u; bin <= NEXTGEO_RASTER_BIN_PROGRAMMABLE_MAX; bin++) {
 		for (uint kind = 0u; kind < 2u; kind++) {
 			uint count = state.data[nextgeo_raster_bin_count_word(params.phase, bin, kind)];
 			// The region never holds more entries than cull appended; clamp a count past it.
@@ -61,26 +66,26 @@ void main() {
 			uint args = nextgeo_raster_bin_args_word(params.phase, bin, kind);
 			if (kind == NEXTGEO_RASTER_BIN_KIND_SW) {
 				// Split as #162's software dispatch: x * y workgroups cover count clusters.
-				state.data[args + 0u] = min(count, NEXTGEO_SW_DISPATCH_WIDTH);
-				state.data[args + 1u] = count == 0u ? 0u : (count - 1u) / NEXTGEO_SW_DISPATCH_WIDTH + 1u;
-				state.data[args + 2u] = 1u;
-				state.data[args + 3u] = 0u;
+				bin_args.data[args + 0u] = min(count, NEXTGEO_SW_DISPATCH_WIDTH);
+				bin_args.data[args + 1u] = count == 0u ? 0u : (count - 1u) / NEXTGEO_SW_DISPATCH_WIDTH + 1u;
+				bin_args.data[args + 2u] = 1u;
+				bin_args.data[args + 3u] = 0u;
 			} else {
 				// VkDrawIndirectCommand: vertices, instances (clusters), first vertex, first instance.
-				state.data[args + 0u] = params.vertex_count;
-				state.data[args + 1u] = count;
-				state.data[args + 2u] = 0u;
-				state.data[args + 3u] = 0u;
+				bin_args.data[args + 0u] = params.vertex_count;
+				bin_args.data[args + 1u] = count;
+				bin_args.data[args + 2u] = 0u;
+				bin_args.data[args + 3u] = 0u;
 			}
 			total += count;
 		}
 	}
 	uint appended = min(state.data[NEXTGEO_RASTER_BIN_STATE_APPENDED + params.phase], params.region_size);
-	uint scatter = NEXTGEO_RASTER_BIN_STATE_SCATTER_ARGS + params.phase * 4u;
-	state.data[scatter + 0u] = (appended + 63u) / 64u;
-	state.data[scatter + 1u] = 1u;
-	state.data[scatter + 2u] = 1u;
-	state.data[scatter + 3u] = 0u;
+	uint scatter = nextgeo_raster_bin_scatter_args_word(params.phase);
+	bin_args.data[scatter + 0u] = (appended + 63u) / 64u;
+	bin_args.data[scatter + 1u] = 1u;
+	bin_args.data[scatter + 2u] = 1u;
+	bin_args.data[scatter + 3u] = 0u;
 }
 
 #else
@@ -92,7 +97,7 @@ void main() {
 		return;
 	}
 	uint entry = append_list.data[params.list_base + index];
-	uint bin = (entry >> NEXTGEO_RASTER_BIN_ENTRY_BIN_SHIFT) & 0x3Fu;
+	uint bin = nextgeo_raster_bin_entry_bin(entry);
 	uint kind = (entry >> NEXTGEO_RASTER_BIN_ENTRY_KIND_SHIFT) & 1u;
 	uint count = state.data[nextgeo_raster_bin_count_word(params.phase, bin, kind)];
 	uint fill = atomicAdd(state.data[nextgeo_raster_bin_fill_word(params.phase, bin, kind)], 1u);
