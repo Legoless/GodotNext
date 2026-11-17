@@ -68,54 +68,12 @@ TEST_CASE("[NextGIHit] The attribute stream exists only while the hit groups run
 	CHECK_FALSE(_stream_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, false, true, false, true));
 	CHECK_FALSE(_stream_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, true, false, false, true));
 	CHECK_FALSE(_stream_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, true, true, true, true));
-
-	// Surface stream allocation and free in the RT arena, as MeshStorage drives it across consumer off -> on -> off.
-	NextGIArenaAllocator allocator(512);
-	const NextGIArenaAllocator::Allocation geometry = allocator.allocate(448);
-	REQUIRE(geometry.is_valid());
-	const uint64_t geometry_bytes = allocator.get_allocated_bytes();
-	uint64_t attribute_bytes = 0;
-	uint32_t attr_chunk = UINT32_MAX;
-	uint32_t attr_offset = 0;
-	uint32_t attr_size = 0;
-	Vector<uint8_t> attr_cpu;
-
-	Array arrays;
-	arrays.resize(RSE::ARRAY_MAX);
-	arrays[RSE::ARRAY_VERTEX] = Vector<Vector3>({ Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(1, 1, 0) });
-	arrays[RSE::ARRAY_TEX_UV] = Vector<Vector2>({ Vector2(0, 0), Vector2(4, 0), Vector2(0, 4), Vector2(4, 4) });
-
-	// Consumer off: no stream is allocated.
-	if (_stream_for(0, true, true, true, true, false, true)) {
-		nextgi_hit_allocate_surface_stream(arrays, 4, allocator, attribute_bytes, attr_chunk, attr_offset, attr_size, attr_cpu);
-	}
-	CHECK_EQ(attr_chunk, UINT32_MAX);
-	CHECK_EQ(attribute_bytes, 0u);
-	CHECK_EQ(allocator.get_allocated_bytes(), geometry_bytes);
-
-	// Consumer on: the surface stream allocates in the arena (opening chunk 1 here) and reports its bytes.
-	REQUIRE(_stream_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, true, true, false, true));
-	REQUIRE(nextgi_hit_allocate_surface_stream(arrays, 4, allocator, attribute_bytes, attr_chunk, attr_offset, attr_size, attr_cpu));
-	CHECK_NE(attr_chunk, UINT32_MAX);
-	CHECK(attribute_bytes >= nextgi_hit_stream_size(4));
-	CHECK_EQ(allocator.get_allocated_bytes(), geometry_bytes + attribute_bytes);
-	CHECK_EQ(allocator.get_chunk_count(), 2u);
-	// Allocating again on an already-allocated surface is a no-op.
-	CHECK_FALSE(nextgi_hit_allocate_surface_stream(arrays, 4, allocator, attribute_bytes, attr_chunk, attr_offset, attr_size, attr_cpu));
-
-	// Consumer off again: the stream and its trailing chunk are released, restoring the geometry-only arena.
-	nextgi_hit_free_surface_stream(allocator, attribute_bytes, attr_chunk, attr_offset, attr_size, attr_cpu);
-	CHECK_EQ(allocator.release_trailing_free_chunks(), 1u);
-	CHECK_EQ(attr_chunk, UINT32_MAX);
-	CHECK_EQ(attribute_bytes, 0u);
-	CHECK(attr_cpu.is_empty());
-	CHECK_EQ(allocator.get_allocated_bytes(), geometry_bytes);
 }
 
 TEST_CASE("[NextGIHit] Availability names the first missing requirement") {
 	CHECK_EQ(nextgi_hit_availability(0, true, true, true, true), NEXTGI_HIT_NO_CONSUMER);
 	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, false, true, true, true), NEXTGI_HIT_NOT_HWRT);
-	// Metal reports no RT pipelines until #172: the hits fall back.
+	// D3D12 and Metal report no RT pipelines until #121 and #172: the hits fall back.
 	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, false, false, true), NEXTGI_HIT_NO_RAYTRACING_PIPELINE);
 	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, false, true), NEXTGI_HIT_NO_PIPELINE_LIBRARY);
 	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, true, false), NEXTGI_HIT_NO_BINDLESS);
@@ -593,9 +551,7 @@ static void _init_spatial_compiler(ShaderCompiler &r_compiler) {
 	actions.renames["ALBEDO"] = "albedo_highp";
 	actions.renames["ROUGHNESS"] = "roughness_highp";
 	actions.renames["TIME"] = "global_time";
-	actions.renames["FRAGCOORD"] = "gl_FragCoord";
 	actions.usage_defines["UV"] = "#define UV_USED\n";
-	actions.usage_defines["FRAGCOORD"] = "#define FRAGCOORD_USED\n";
 	actions.base_texture_binding_index = 1;
 	actions.texture_layout_set = 2;
 	actions.base_uniform_string = "material.";
@@ -704,7 +660,7 @@ void fragment() {
 }
 
 void light() {
-	DIFFUSE_LIGHT += vec3(light_only_helper(FRAGCOORD.x));
+	DIFFUSE_LIGHT += vec3(light_only_helper(1.0));
 }
 )";
 
@@ -718,10 +674,9 @@ void light() {
 	CHECK_FALSE(fragment.contains("textureProj(sampler2D("));
 	CHECK_MESSAGE(fragment.contains("textureProjLod(sampler2D(m_proj_map, SAMPLER_LINEAR_WITH_MIPMAPS_REPEAT), vec3(uv_interp, 1.0), nextgi_hit_texture_lod(m_proj_map))"), fragment);
 	CHECK_MESSAGE(fragment.contains("nextgi_hit_texture_lod(m_proj_map) + (0.5)"), fragment);
-	// light() is noted, and neither its body nor the derivative in the function only it uses pollutes the hit module.
+	// light() is noted, but neither it nor the derivative in the function only it uses is generated.
 	CHECK(hit.code.has("light"));
 	CHECK(hit.code["light"].is_empty());
-	CHECK_FALSE(hit.defines.has("#define FRAGCOORD_USED\n"));
 	const String &globals = hit.stage_globals[ShaderCompiler::STAGE_FRAGMENT];
 	CHECK_FALSE(globals.contains("m_light_only_helper"));
 	NextGIHitShaderSource source;

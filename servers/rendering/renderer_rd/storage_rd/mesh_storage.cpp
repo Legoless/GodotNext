@@ -866,19 +866,41 @@ void MeshStorage::_mesh_nextgi_hit_add_attributes(Mesh::Surface *p_surface, cons
 	data.aabb = p_surface_data.aabb;
 	data.uv_scale = p_surface_data.uv_scale;
 	const Array arrays = RenderingServer::get_singleton()->mesh_create_arrays_from_surface_data(data);
-	if (!nextgi_hit_allocate_surface_stream(arrays, p_surface->rt_vertex_count, nextgi_rt_allocator, nextgi_hit_attribute_bytes, p_surface->rt_attr_chunk, p_surface->rt_attr_offset, p_surface->rt_attr_size, p_surface->rt_attr_cpu)) {
+	Vector<uint8_t> stream;
+	if (!nextgi_hit_pack_arrays(arrays, p_surface->rt_vertex_count, stream)) {
 		return;
 	}
-	const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(p_surface->rt_attr_chunk);
+	const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(uint32_t(stream.size()));
+	if (!allocation.is_valid()) {
+		return;
+	}
+	const RID chunk_buffer = _mesh_nextgi_rt_ensure_chunk(allocation.chunk);
 	if (chunk_buffer.is_null()) {
-		nextgi_hit_free_surface_stream(nextgi_rt_allocator, nextgi_hit_attribute_bytes, p_surface->rt_attr_chunk, p_surface->rt_attr_offset, p_surface->rt_attr_size, p_surface->rt_attr_cpu);
+		nextgi_rt_allocator.free_range(allocation);
 		return;
 	}
-	RD::get_singleton()->buffer_update(chunk_buffer, p_surface->rt_attr_offset, uint32_t(p_surface->rt_attr_cpu.size()), p_surface->rt_attr_cpu.ptr());
+	RD::get_singleton()->buffer_update(chunk_buffer, allocation.offset, uint32_t(stream.size()), stream.ptr());
+	p_surface->rt_attr_chunk = allocation.chunk;
+	p_surface->rt_attr_offset = allocation.offset;
+	p_surface->rt_attr_size = allocation.size;
+	p_surface->rt_attr_cpu = stream;
+	nextgi_hit_attribute_bytes += allocation.size;
 }
 
 void MeshStorage::_mesh_nextgi_hit_free_attributes(Mesh::Surface *p_surface) {
-	nextgi_hit_free_surface_stream(nextgi_rt_allocator, nextgi_hit_attribute_bytes, p_surface->rt_attr_chunk, p_surface->rt_attr_offset, p_surface->rt_attr_size, p_surface->rt_attr_cpu);
+	if (p_surface->rt_attr_chunk == UINT32_MAX) {
+		return;
+	}
+	NextGIArenaAllocator::Allocation allocation;
+	allocation.chunk = p_surface->rt_attr_chunk;
+	allocation.offset = p_surface->rt_attr_offset;
+	allocation.size = p_surface->rt_attr_size;
+	nextgi_rt_allocator.free_range(allocation);
+	nextgi_hit_attribute_bytes -= MIN(nextgi_hit_attribute_bytes, uint64_t(p_surface->rt_attr_size));
+	p_surface->rt_attr_chunk = UINT32_MAX;
+	p_surface->rt_attr_offset = 0;
+	p_surface->rt_attr_size = 0;
+	p_surface->rt_attr_cpu.clear();
 }
 
 // An uncompressed region update patches the copy and uploads the vertices it touched. A compressed buffer is
@@ -1097,10 +1119,6 @@ uint32_t MeshStorage::mesh_nextgi_get_proxy_alpha_excluded(RID p_mesh) const {
 }
 
 void MeshStorage::mesh_on_virtual_geometry_changed(RID p_mesh) {
-	// GodotNext: nextgeo_rt_native (#156). Native RT sets of this mesh go with its proxy.
-	if (nextgi_vg_changed_callback != nullptr) {
-		nextgi_vg_changed_callback(nextgi_vg_changed_userdata, p_mesh);
-	}
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	if (mesh == nullptr || mesh->nextgi_skip_rt_arena) {
 		return;
@@ -1783,36 +1801,6 @@ void MeshStorage::mesh_nextgi_set_hwrt_active(bool p_active) {
 			mesh_nextgi_sync_vgd_proxy(mesh_rid);
 		}
 	}
-}
-
-// GodotNext: nextgeo_rt_native (#156)
-NextGIArenaAllocator::Allocation MeshStorage::mesh_nextgi_rt_arena_allocate(uint32_t p_size) {
-	if (!nextgi_rt_enabled || p_size == 0) {
-		return NextGIArenaAllocator::Allocation();
-	}
-	const NextGIArenaAllocator::Allocation allocation = nextgi_rt_allocator.allocate(p_size);
-	if (!allocation.is_valid()) {
-		return allocation;
-	}
-	if (_mesh_nextgi_rt_ensure_chunk(allocation.chunk).is_null()) {
-		nextgi_rt_allocator.free_range(allocation);
-		_mesh_nextgi_release_empty_chunks();
-		return NextGIArenaAllocator::Allocation();
-	}
-	return allocation;
-}
-
-void MeshStorage::mesh_nextgi_set_virtual_geometry_changed_callback(NextGIVirtualGeometryChanged p_callback, void *p_userdata) {
-	nextgi_vg_changed_callback = p_callback;
-	nextgi_vg_changed_userdata = p_userdata;
-}
-
-void MeshStorage::mesh_nextgi_rt_arena_free(const NextGIArenaAllocator::Allocation &p_allocation) {
-	if (!p_allocation.is_valid()) {
-		return;
-	}
-	nextgi_rt_allocator.free_range(p_allocation);
-	_mesh_nextgi_release_empty_chunks();
 }
 
 MeshStorage::NextGIRTStats MeshStorage::mesh_nextgi_get_rt_stats() const {

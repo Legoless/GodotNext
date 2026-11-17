@@ -47,7 +47,6 @@ class RenderGeometryInstance;
 
 namespace RendererRD {
 
-class NextGIArenaAllocator;
 class NextGIRTScene;
 class NextGISRC;
 
@@ -206,11 +205,6 @@ NextGIHitSourceLayout nextgi_hit_source_layout(uint64_t p_format, uint32_t p_ver
 // [r_byte_begin, r_byte_end) of the stream is what to upload.
 bool nextgi_hit_patch_stream(const NextGIHitSourceLayout &p_layout, uint32_t p_vertex_count, bool p_attribute_region, uint32_t p_offset, const uint8_t *p_data, uint32_t p_size, uint8_t *r_stream, uint32_t &r_byte_begin, uint32_t &r_byte_end);
 
-// Allocates and frees one surface's attribute stream in the RT arena, updating the stream byte total
-// MeshStorage reports. Nothing is allocated unless a consumer runs the hit groups (nextgi_hit_stream_needed()).
-bool nextgi_hit_allocate_surface_stream(const Array &p_arrays, uint32_t p_vertex_count, NextGIArenaAllocator &r_allocator, uint64_t &r_attribute_bytes, uint32_t &r_chunk, uint32_t &r_offset, uint32_t &r_size, Vector<uint8_t> &r_cpu);
-void nextgi_hit_free_surface_stream(NextGIArenaAllocator &r_allocator, uint64_t &r_attribute_bytes, uint32_t &r_chunk, uint32_t &r_offset, uint32_t &r_size, Vector<uint8_t> &r_cpu);
-
 // R11G11B10 float packing of the payload's emission (positive, truncated), and its decode.
 uint32_t nextgi_hit_pack_r11g11b10(const Color &p_color);
 Color nextgi_hit_unpack_r11g11b10(uint32_t p_packed);
@@ -291,9 +285,9 @@ struct NextGIHitTableLatch {
 			retry_frame = NONE;
 			return;
 		}
-		// A slot released within the frame delay before this failure was not reusable yet: try again once it is.
-		const bool pending = last_release_frame != NONE && last_release_frame + p_frame_delay + 1 > p_frame;
-		retry_frame = pending ? last_release_frame + p_frame_delay + 1 : NONE;
+		// A slot released within the frame delay before this failure is not reusable yet: try again once it is.
+		const bool pending = last_release_frame != NONE && last_release_frame + p_frame_delay + 1 >= p_frame;
+		retry_frame = pending ? p_frame + p_frame_delay + 1 : NONE;
 	}
 	void released(uint64_t p_frame, uint32_t p_frame_delay) {
 		last_release_frame = p_frame;

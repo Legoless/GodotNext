@@ -36,7 +36,7 @@ extends Node3D
 ##
 ## Run it with NextGI on (High), for example through hit_groups_check.sh:
 ##   godot --path godotnext/testbed --rendering-driver vulkan res://tests/nextgi_hit_groups/hit_groups_check.tscn
-## On a driver without RT pipelines (Metal until #172) pass -- --expect=no-pipeline: the hit groups
+## On a driver without RT pipelines (D3D12 until #121) pass -- --expect=no-pipeline: the hit groups
 ## report NO_RAYTRACING_PIPELINE, no attribute stream is allocated and nothing crashes. On the software
 ## tier (a D3D12 build without DXR, for example) pass -- --expect=not-hwrt: there is no RT arena, so no
 ## stream, and the hit groups report NOT_HWRT.

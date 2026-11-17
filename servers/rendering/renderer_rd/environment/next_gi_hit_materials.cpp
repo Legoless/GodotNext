@@ -426,42 +426,6 @@ bool nextgi_hit_patch_stream(const NextGIHitSourceLayout &p_layout, uint32_t p_v
 	return true;
 }
 
-bool nextgi_hit_allocate_surface_stream(const Array &p_arrays, uint32_t p_vertex_count, NextGIArenaAllocator &r_allocator, uint64_t &r_attribute_bytes, uint32_t &r_chunk, uint32_t &r_offset, uint32_t &r_size, Vector<uint8_t> &r_cpu) {
-	if (r_chunk != UINT32_MAX || p_vertex_count == 0) {
-		return false;
-	}
-	Vector<uint8_t> stream;
-	if (!nextgi_hit_pack_arrays(p_arrays, p_vertex_count, stream)) {
-		return false;
-	}
-	const NextGIArenaAllocator::Allocation allocation = r_allocator.allocate(uint32_t(stream.size()));
-	if (!allocation.is_valid()) {
-		return false;
-	}
-	r_chunk = allocation.chunk;
-	r_offset = allocation.offset;
-	r_size = allocation.size;
-	r_cpu = stream;
-	r_attribute_bytes += allocation.size;
-	return true;
-}
-
-void nextgi_hit_free_surface_stream(NextGIArenaAllocator &r_allocator, uint64_t &r_attribute_bytes, uint32_t &r_chunk, uint32_t &r_offset, uint32_t &r_size, Vector<uint8_t> &r_cpu) {
-	if (r_chunk == UINT32_MAX) {
-		return;
-	}
-	NextGIArenaAllocator::Allocation allocation;
-	allocation.chunk = r_chunk;
-	allocation.offset = r_offset;
-	allocation.size = r_size;
-	r_allocator.free_range(allocation);
-	r_attribute_bytes -= MIN(r_attribute_bytes, uint64_t(r_size));
-	r_chunk = UINT32_MAX;
-	r_offset = 0;
-	r_size = 0;
-	r_cpu.clear();
-}
-
 uint32_t nextgi_hit_pack_r11g11b10(const Color &p_color) {
 	auto bits = [](float p_value, uint32_t p_shift) {
 		const float clamped = CLAMP(p_value, 0.0f, 65000.0f);
@@ -719,7 +683,6 @@ struct NextGIHitMaterials::Material {
 	uint64_t serial = 0;
 	HitShader *shader = nullptr;
 	NextGIHitIneligible reason = NEXTGI_HIT_ELIGIBLE;
-	bool ready_for_hits = false; // False until update_parameters() has filled every texture slot.
 	RID params_buffer;
 	uint32_t params_size = 0;
 	uint32_t params_slot = RDBindless::INVALID_SLOT;
@@ -1080,9 +1043,9 @@ NextGIHitMaterials::Material *NextGIHitMaterials::_get_material(RID p_material, 
 		return material;
 	}
 
-	// Parameters: a storage buffer with the uniform buffer's std140 bytes, 16-byte aligned.
+	// Parameters: a storage buffer with the uniform buffer's std140 bytes.
 	const Vector<uint8_t> &ubo = data->get_ubo_data(true);
-	const uint32_t params_size = MAX((uint32_t(ubo.size()) + 15u) & ~15u, 16u);
+	const uint32_t params_size = MAX(uint32_t(ubo.size()), 16u);
 	if (material->params_size != params_size || material->params_buffer.is_null()) {
 		_release_slot(false, material->params_slot);
 		material->params_slot = RDBindless::INVALID_SLOT;
@@ -1132,11 +1095,8 @@ NextGIHitMaterials::Material *NextGIHitMaterials::_get_material(RID p_material, 
 			} else {
 				in.tables_dirty = true;
 			}
-		} else if (material->texture_slots[i] == RDBindless::INVALID_SLOT) {
-			slots_full = true;
 		}
 	}
-	material->ready_for_hits = !slots_full && int(material->texture_slots.size()) >= data->shader_data->texture_uniforms.size();
 	if (slots_full) {
 		// No parameter or texture slot: the shader would index past its table. The fallback group shades it.
 		material->reason = NEXTGI_HIT_INELIGIBLE_TABLE_FULL;
@@ -1512,7 +1472,7 @@ void NextGIHitMaterials::add_geometry(RenderGeometryInstance *p_instance, RID p_
 		record.attribute_offset = p_attribute_offset;
 		record.flags = 1u;
 		const Material *material = material_rid.is_valid() ? _get_material(material_rid, in.frame) : nullptr;
-		if (material != nullptr && material->reason == NEXTGI_HIT_ELIGIBLE && material->ready_for_hits) {
+		if (material != nullptr && material->reason == NEXTGI_HIT_ELIGIBLE) {
 			record.material = material->index;
 			if (material->shader != nullptr && material->shader->state == HitShader::STATE_LINKED) {
 				group = material->shader->group;
