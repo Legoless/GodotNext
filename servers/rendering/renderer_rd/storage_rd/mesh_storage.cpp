@@ -2445,6 +2445,19 @@ RendererMeshStorage::GeometryMemoryReport MeshStorage::get_geometry_memory_repor
 	return report;
 }
 
+NextGIArenaAllocator::Allocation MeshStorage::mesh_nextgi_rt_arena_allocate(uint32_t p_size) {
+	return nextgi_rt_allocator.allocate(p_size);
+}
+
+void MeshStorage::mesh_nextgi_rt_arena_free(const NextGIArenaAllocator::Allocation &p_allocation) {
+	nextgi_rt_allocator.free_range(p_allocation);
+}
+
+void MeshStorage::mesh_nextgi_set_virtual_geometry_changed_callback(NextGIVirtualGeometryChanged p_callback, void *p_userdata) {
+	nextgi_vg_changed_callback = p_callback;
+	nextgi_vg_changed_userdata = p_userdata;
+}
+
 bool MeshStorage::mesh_needs_instance(RID p_mesh, bool p_has_skeleton) {
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, false);
