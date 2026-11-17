@@ -897,7 +897,7 @@ void ShaderRD::_allocate_placeholders(Version *p_version, int p_group) {
 
 	for (uint32_t i = 0; i < group_to_variant_map[p_group].size(); i++) {
 		int variant_id = group_to_variant_map[p_group][i];
-		RID shader = RD::get_singleton()->shader_create_placeholder();
+		RID shader = RD::get_singleton() != nullptr ? RD::get_singleton()->shader_create_placeholder() : RID();
 		{
 			p_version->variants.write[variant_id] = shader;
 		}
@@ -1153,6 +1153,22 @@ const LocalVector<int> &ShaderRD::get_group_to_variants(int p_group) const {
 	return group_to_variant_map[p_group];
 }
 
+void ShaderRD::set_group_int64_atomics(int p_group, bool p_image, bool p_buffer) {
+	ERR_FAIL_INDEX(p_group, group_image_int64_atomics.size());
+	group_image_int64_atomics.write[p_group] = p_image;
+	group_buffer_int64_atomics.write[p_group] = p_buffer;
+}
+
+bool ShaderRD::group_requires_image_int64_atomics(int p_group) const {
+	ERR_FAIL_INDEX_V(p_group, group_image_int64_atomics.size(), false);
+	return group_image_int64_atomics[p_group];
+}
+
+bool ShaderRD::group_requires_buffer_int64_atomics(int p_group) const {
+	ERR_FAIL_INDEX_V(p_group, group_buffer_int64_atomics.size(), false);
+	return group_buffer_int64_atomics[p_group];
+}
+
 const String &ShaderRD::get_name() const {
 	return name;
 }
@@ -1196,6 +1212,8 @@ void ShaderRD::initialize(const Vector<String> &p_variant_defines, const String 
 	// When initialized this way, there is just one group and its always enabled.
 	group_to_variant_map.insert(0, LocalVector<int>{});
 	group_enabled.push_back(true);
+	group_image_int64_atomics.push_back(false);
+	group_buffer_int64_atomics.push_back(false);
 
 	for (int i = 0; i < p_variant_defines.size(); i++) {
 		variant_defines.push_back(VariantDefine(0, p_variant_defines[i], true));
@@ -1204,18 +1222,13 @@ void ShaderRD::initialize(const Vector<String> &p_variant_defines, const String 
 		group_to_variant_map[0].push_back(i);
 	}
 
-	if (!shader_cache_user_dir.is_empty() || !shader_cache_res_dir.is_empty()) {
-		group_sha256.resize(1);
-		_initialize_cache();
-	}
+	group_sha256.resize(1);
+	_initialize_cache();
 }
 
 void ShaderRD::_initialize_cache() {
 	shader_cache_user_dir_valid = !shader_cache_user_dir.is_empty();
 	shader_cache_res_dir_valid = !shader_cache_res_dir.is_empty();
-	if (!shader_cache_user_dir_valid) {
-		return;
-	}
 
 	for (const KeyValue<int, LocalVector<int>> &E : group_to_variant_map) {
 		StringBuilder hash_build;
@@ -1238,7 +1251,7 @@ void ShaderRD::_initialize_cache() {
 
 		group_sha256[E.key] = hash_build.as_string().sha256_text();
 
-		if (!shader_cache_user_dir.is_empty()) {
+		if (shader_cache_user_dir_valid) {
 			// Validate if it's possible to write to all the directories required by in the user directory.
 			Ref<DirAccess> d = DirAccess::open(shader_cache_user_dir);
 			if (d.is_null()) {
@@ -1302,6 +1315,8 @@ void ShaderRD::initialize(const Vector<VariantDefine> &p_variant_defines, const 
 
 	// Set all to groups to false, then enable those that should be default.
 	group_enabled.resize_initialized(max_group_id + 1);
+	group_image_int64_atomics.resize_initialized(max_group_id + 1);
+	group_buffer_int64_atomics.resize_initialized(max_group_id + 1);
 	bool *enabled_ptr = group_enabled.ptrw();
 	for (int i = 0; i < p_variant_defines.size(); i++) {
 		if (p_variant_defines[i].default_enabled) {
@@ -1309,10 +1324,8 @@ void ShaderRD::initialize(const Vector<VariantDefine> &p_variant_defines, const 
 		}
 	}
 
-	if (!shader_cache_user_dir.is_empty()) {
-		group_sha256.resize(max_group_id + 1);
-		_initialize_cache();
-	}
+	group_sha256.resize(max_group_id + 1);
+	_initialize_cache();
 }
 
 void ShaderRD::shaders_embedded_set_lock() {

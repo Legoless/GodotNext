@@ -37,14 +37,17 @@
 #include "core/math/vector2.h"
 #include "core/math/vector2i.h"
 #include "core/math/vector4.h"
+#include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/cluster_cull.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/hiz_pyramid.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/instance_cull.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/nextgeo/raster_bin_compact.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/sw_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_export.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
@@ -70,6 +73,16 @@ struct NextGeoShadowViewDesc {
 	bool dual_paraboloid_flip = false;
 	bool flip_y = false;
 	bool flip_cull = false;
+};
+
+// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). One programmable raster bin this frame: its
+// material raster target's shaders (the software and hardware forms, per visibility-buffer storage:
+// image, buffer) and the material's parameter uniforms for set 3.
+struct NextGeoRasterBinProgram {
+	uint32_t bin = 0;
+	RID sw_shader[2];
+	RID hw_shader[2];
+	LocalVector<RD::Uniform> material_uniforms;
 };
 
 struct NextGeoRasterInputs {
@@ -99,6 +112,15 @@ struct NextGeoRasterInputs {
 	float z_near = 0.05f;
 	bool orthographic = false;
 	float sw_raster_max_edge_px = 0.0f;
+	// GodotNext: nextgeo_raster_bins (#155). With the hybrid raster: the per-(instance, surface) raster-bin
+	// table (nextgeo_raster_bins.h), the programmable bins its surfaces use, and the scene environment
+	// their material code reads (raster_material_inc.glsl's set 1: the scene data, the per-record
+	// instance data, the global shader uniforms and the 12 material samplers). No programs: no
+	// programmable pass.
+	const uint32_t *raster_bin_table = nullptr;
+	uint32_t raster_bin_table_words = 0;
+	LocalVector<NextGeoRasterBinProgram> raster_bin_programs;
+	LocalVector<RD::Uniform> environment_uniforms;
 };
 
 // GodotNext: nextgeo_gpu_cull (#76), nextgeo_visibility_raster (#83)
@@ -148,6 +170,13 @@ private:
 	void _clear_vis64(const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size);
 	RID _get_vis64_framebuffer(const Size2i &p_size);
 	bool _draw_hybrid_phase(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, RID p_counters, const Size2i &p_internal_size, bool p_stats);
+	// GodotNext: nextgeo_raster_bins (#155).
+	bool _ensure_raster_bins(RenderingDevice *p_rd);
+	bool _prepare_raster_bins(const NextGeoRasterInputs &p_raster);
+	void _compact_raster_bins(uint32_t p_phase, uint32_t p_list_base);
+	void _draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size);
+	RID _raster_bin_compute_pipeline(RID p_shader);
+	RID _raster_bin_render_pipeline(RID p_shader, RD::FramebufferFormatID p_format);
 	void _swap_hiz();
 	void _release_hiz();
 	RID _storage(uint32_t p_bytes);
@@ -208,6 +237,22 @@ private:
 	// The attachment-less framebuffer of the hardware path, at the last internal size.
 	RID vis64_framebuffer;
 	Size2i vis64_framebuffer_size;
+	// GodotNext: nextgeo_raster_bins (#155). Built the first time a programmable bin is used.
+	bool raster_bins_ready = false;
+	bool raster_bins_active = false; // This frame's main view runs programmable bins.
+	RasterBinCompactShaderRD raster_bin_compact_shader;
+	RID raster_bin_compact_version;
+	RID raster_bin_prefix_pipeline;
+	RID raster_bin_scatter_pipeline;
+	RID raster_bin_state; // nextgeo_raster_bins.h's state words.
+	RID raster_bin_args; // Dedicated indirect dispatch/draw arguments (written only in PREFIX).
+	RID raster_bin_append;
+	RID raster_bin_lists;
+	RID raster_bin_table_buffer;
+	uint32_t raster_bin_table_capacity = 0; // Words.
+	HashMap<RID, RID> raster_bin_compute_pipelines; // Shader -> pipeline.
+	HashMap<RID, RID> raster_bin_render_pipelines; // Shader -> pipeline, for the vis64 framebuffer format.
+	RD::FramebufferFormatID raster_bin_render_format = RD::INVALID_ID;
 
 	RID params;
 	RID raster_params;

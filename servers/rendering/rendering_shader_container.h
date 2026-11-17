@@ -377,4 +377,8 @@ public:
 	// GodotNext: rd_mesh_shaders (#178). Whether containers of this format can hold task and mesh stages, so the
 	// shader baker bakes the mesh-shader versions for them.
 	virtual bool supports_mesh_shaders() const { return false; }
+	// GodotNext: nextgeo_raster_bins (#155). Whether containers of this format can hold 64-bit image or
+	// storage-buffer atomics, so the shader baker bakes only the 64-bit-atomic groups they can compile.
+	virtual bool supports_image_int64_atomics() const { return false; }
+	virtual bool supports_buffer_int64_atomics() const { return false; }
 };

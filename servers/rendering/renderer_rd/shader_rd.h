@@ -70,6 +70,11 @@ private:
 	Vector<uint32_t> variant_to_group;
 	HashMap<int, LocalVector<int>> group_to_variant_map;
 	Vector<bool> group_enabled;
+	// GodotNext: nextgeo_raster_bins (#155). Optional per-group 64-bit atomic requirements, so the shader baker
+	// bakes 64-bit-atomic groups directly against the export target's RenderingShaderContainerFormat without
+	// enabling them on an editor host device that lacks 64-bit atomics.
+	Vector<bool> group_image_int64_atomics;
+	Vector<bool> group_buffer_int64_atomics;
 
 	Vector<RD::PipelineImmutableSampler> immutable_samplers;
 	Vector<uint64_t> dynamic_buffers;
@@ -285,6 +290,10 @@ public:
 	bool is_group_enabled(int p_group) const;
 	int64_t get_group_count() const;
 	const LocalVector<int> &get_group_to_variants(int p_group) const;
+	// GodotNext: nextgeo_raster_bins (#155).
+	void set_group_int64_atomics(int p_group, bool p_image, bool p_buffer);
+	bool group_requires_image_int64_atomics(int p_group) const;
+	bool group_requires_buffer_int64_atomics(int p_group) const;
 
 	const String &get_name() const;
 

@@ -35,6 +35,8 @@
 // GodotNext: megalights_inputs (#136)
 #include "core/config/engine.h"
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -53,6 +55,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	_clear_vertex_input_mask_cache();
 
 	if (code.is_empty()) {
+		_free_raster_target();
+		raster_features = 0;
+		raster_rejects = 0;
+		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		return; //just invalid, but no error
 	}
 
@@ -94,6 +100,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	writes_depth = false;
 	uses_unsupported_derivative = false;
 	nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+	raster_features = 0;
+	raster_rejects = 0;
+	nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+	nextgeo_raster_reject_logged = false;
 
 	int depth_drawi = DEPTH_DRAW_OPAQUE;
 
@@ -172,6 +182,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.write_flag_pointers["DEPTH"] = &writes_depth;
 
 	actions.visibility_resolve = true;
+	// GodotNext: nextgeo_raster_bins (#155). The material raster target of the programmable raster bins.
+	actions.raster_target = true;
 
 	actions.stencil_mode_values["read"] = Pair<int *, int>(&stencil_readi, STENCIL_FLAG_READ);
 	actions.stencil_mode_values["write"] = Pair<int *, int>(&stencil_writei, STENCIL_FLAG_WRITE);
@@ -196,6 +208,10 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	}
 
 	if (err != OK) {
+		_free_raster_target();
+		raster_features = 0;
+		raster_rejects = 0;
+		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		if (version.is_valid()) {
 			SceneShaderForwardClustered::singleton->shader.version_free(version);
 			version = RID();
@@ -275,6 +291,12 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 			}
 		}
 	}
+	// GodotNext: nextgeo_raster_bins (#155). The raster target's fragment code stays out of the scene shader.
+	String raster_fragment;
+	if (gen_code.code.has("raster_fragment")) {
+		raster_fragment = gen_code.code["raster_fragment"];
+		gen_code.code.erase("raster_fragment");
+	}
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
 	// GodotNext: nextgi_hit_groups (#130). A new serial for each code, so a hit group is compiled once per code.
 	{
@@ -297,19 +319,123 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_unsupported_derivative = gen_code.uses_unsupported_derivative;
 
 	// GodotNext: nextgeo_resolve (#80, plan §7.4). Classify material-level NextGeo fallback reason.
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3, N4). The raster features and the raster
+	// target's rejects join the classification: a material with a raster program (masked or vertex offset)
+	// that reads FRAGCOORD, the screen, depth or normal-roughness texture, or writes the absolute DEPTH
+	// stays on legacy raster with UNSUPPORTED_RASTER_FEATURE. Every other material keeps its #80 reason;
+	// masked and vertex-offset materials keep theirs unless rendering/nextgeo/debug_programmable_raster
+	// admits them (#153 and #164 turn them on).
 	const bool force_vertex_shading = GLOBAL_GET_CACHED(bool, "rendering/shading/overrides/force_vertex_shading");
-	if (stencil_enabled) {
-		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NEXT_PASS_OR_OVERLAY;
-	} else if (uses_vertex_lighting || force_vertex_shading) {
-		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_VERTEX_LIGHTING;
-	} else if (uses_alpha_pass() || uses_alpha_clip || uses_discard || uses_alpha_antialiasing || alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF) {
-		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_ALPHA;
-	} else if (uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform || uses_z_clip_scale || uses_point_size || uses_particle_trails || wireframe || writes_depth) {
-		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_CUSTOM_SHADER;
-	} else if (uses_unsupported_derivative) {
-		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE;
-	} else {
-		nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
+	RendererRD::NextGeoRasterFacts raster_facts;
+	raster_facts.alpha_scissor = uses_alpha_clip;
+	raster_facts.discard = uses_discard;
+	raster_facts.writes_vertex = uses_vertex;
+	raster_facts.cull_mode = cull_mode;
+	raster_features = RendererRD::nextgeo_raster_features(raster_facts);
+	const uint32_t raster_uses = gen_code.raster_uses | (writes_depth ? uint32_t(ShaderCompiler::RASTER_WRITES_DEPTH) : 0u);
+	raster_rejects = RendererRD::nextgeo_raster_rejects(raster_uses, raster_features);
+
+	RendererRD::NextGeoMaterialFallbackFacts fallback_facts;
+	fallback_facts.stencil = stencil_enabled;
+	fallback_facts.vertex_lighting = uses_vertex_lighting || force_vertex_shading;
+	// uses_alpha_pass() without its screen-reading term, which the raster target rejects instead.
+	const bool has_base_alpha = uses_alpha && (!uses_alpha_clip || uses_alpha_antialiasing);
+	fallback_facts.transparent = has_base_alpha || uses_blend_alpha || depth_draw == DEPTH_DRAW_DISABLED || depth_test != DEPTH_TEST_ENABLED || uses_alpha_antialiasing || alpha_antialiasing_mode != ALPHA_ANTIALIASING_OFF;
+	fallback_facts.screen_reads = uses_screen_texture || uses_depth_texture || uses_normal_texture;
+	fallback_facts.masked = (raster_features & RendererVirtualMeshStorage::RASTER_FEATURE_MASKED) != 0u;
+	fallback_facts.writes_vertex = uses_vertex;
+	fallback_facts.other_custom_vertex = uses_position || writes_modelview_or_projection || uses_skip_vertex_transform || uses_z_clip_scale || uses_point_size || uses_particle_trails || wireframe || writes_depth;
+	fallback_facts.unsupported_derivative = uses_unsupported_derivative;
+	fallback_facts.raster_rejects = raster_rejects;
+	nextgeo_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
+	fallback_facts.admit_programmable = true;
+	nextgeo_programmable_fallback = RendererRD::nextgeo_material_fallback(fallback_facts);
+
+	// The raster target's code, for a material a programmable bin can take. Its versions are made only
+	// when a bin or the shader baker first requests them (ensure_raster_target()), so materials that
+	// never route through a programmable bin compile nothing more.
+	const bool had_raster_versions = raster_sw_version.is_valid() || raster_hw_version.is_valid();
+	_free_raster_target();
+	raster_target_valid = RendererRD::nextgeo_raster_has_program(raster_features) && nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE && !raster_fragment.is_empty() &&
+			RendererVirtualMeshStorage::resolve_raster_bin(raster_features, RendererVirtualMeshStorage::RASTER_PASS_VISIBILITY) == int32_t(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE);
+	if (raster_target_valid) {
+		raster_code.clear();
+		raster_code["resolve_vertex"] = gen_code.code.has("resolve_vertex") ? gen_code.code["resolve_vertex"] : String();
+		raster_code["resolve_vertex_store"] = gen_code.code.has("resolve_vertex_store") ? gen_code.code["resolve_vertex_store"] : String();
+		raster_code["resolve_interpolate"] = gen_code.code.has("resolve_interpolate") ? gen_code.code["resolve_interpolate"] : String();
+		raster_code["raster_fragment"] = raster_fragment;
+		raster_globals = gen_code.stage_globals[ShaderCompiler::STAGE_COMPUTE];
+		raster_uniforms = gen_code.uniforms;
+		raster_defines = gen_code.defines;
+		if (had_raster_versions) {
+			ensure_raster_target();
+		}
+	}
+}
+
+bool SceneShaderForwardClustered::ShaderData::ensure_raster_target() {
+	if (!raster_target_valid || SceneShaderForwardClustered::singleton == nullptr) {
+		return false;
+	}
+	if (raster_sw_version.is_valid() && raster_hw_version.is_valid()) {
+		return true;
+	}
+	MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
+	if (raster_sw_version.is_null()) {
+		raster_sw_version = SceneShaderForwardClustered::singleton->raster_sw_shader.version_create(false);
+		SceneShaderForwardClustered::singleton->raster_sw_shader.version_set_compute_code(raster_sw_version, raster_code, raster_uniforms, raster_globals, raster_defines);
+	}
+	if (raster_hw_version.is_null()) {
+		raster_hw_version = SceneShaderForwardClustered::singleton->raster_hw_shader.version_create(false);
+		SceneShaderForwardClustered::singleton->raster_hw_shader.version_set_code(raster_hw_version, raster_code, raster_uniforms, raster_globals, raster_globals, raster_defines);
+	}
+	return raster_sw_version.is_valid() && raster_hw_version.is_valid();
+}
+
+void SceneShaderForwardClustered::ShaderData::_free_raster_target() {
+	raster_target_valid = false;
+	raster_code.clear();
+	raster_globals = String();
+	raster_uniforms = String();
+	raster_defines.clear();
+	if (SceneShaderForwardClustered::singleton == nullptr) {
+		return;
+	}
+	if (raster_sw_version.is_valid()) {
+		SceneShaderForwardClustered::singleton->raster_sw_shader.version_free(raster_sw_version);
+		raster_sw_version = RID();
+	}
+	if (raster_hw_version.is_valid()) {
+		SceneShaderForwardClustered::singleton->raster_hw_shader.version_free(raster_hw_version);
+		raster_hw_version = RID();
+	}
+}
+
+RID SceneShaderForwardClustered::ShaderData::get_raster_target_shader(bool p_hardware, bool p_buffer) const {
+	if (raster_sw_version.is_null() || raster_hw_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_target_ready) {
+		return RID();
+	}
+	const bool supported = p_buffer ? SceneShaderForwardClustered::singleton->raster_buffer_int64_supported : SceneShaderForwardClustered::singleton->raster_image_int64_supported;
+	if (!supported) {
+		return RID();
+	}
+	const int group = p_buffer ? 1 : 0;
+	if (p_hardware) {
+		if (!SceneShaderForwardClustered::singleton->raster_hw_shader.is_group_enabled(group)) {
+			SceneShaderForwardClustered::singleton->raster_hw_shader.enable_group(group);
+		}
+		return SceneShaderForwardClustered::singleton->raster_hw_shader.version_get_shader(raster_hw_version, group);
+	}
+	if (!SceneShaderForwardClustered::singleton->raster_sw_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->raster_sw_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->raster_sw_shader.version_get_shader(raster_sw_version, group);
+}
+
+void SceneShaderForwardClustered::ShaderData::get_extra_native_shader_and_versions(LocalVector<Pair<ShaderRD *, RID>> &r_versions) {
+	if (raster_target_valid && ensure_raster_target()) {
+		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_sw_shader, raster_sw_version });
+		r_versions.push_back({ &SceneShaderForwardClustered::singleton->raster_hw_shader, raster_hw_version });
 	}
 }
 
@@ -831,6 +957,8 @@ SceneShaderForwardClustered::ShaderData::ShaderData() :
 
 SceneShaderForwardClustered::ShaderData::~ShaderData() {
 	pipeline_hash_map.clear_pipelines();
+	// GodotNext: nextgeo_raster_bins (#155).
+	_free_raster_target();
 
 	if (version.is_valid()) {
 		ERR_FAIL_NULL(SceneShaderForwardClustered::singleton);
@@ -1265,6 +1393,31 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.resolve_vertex_renames["INSTANCE_ID"] = "_ng_instance_id";
 
 		compiler.initialize(actions);
+	}
+
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). Initialized unconditionally so the shader baker
+	// can bake per-bin software and hardware VIS64 variants regardless of the editor host's device tier.
+	// Group 0 (image) and group 1 (buffer) stay disabled until first runtime use on a supporting device.
+	// Before the default material, so every material classifies against the same state.
+	{
+		String raster_defines;
+#ifdef REAL_T_IS_DOUBLE
+		raster_defines += "\n#define USE_DOUBLE_PRECISION\n";
+#endif
+		Vector<ShaderRD::VariantDefine> raster_variants;
+		raster_variants.push_back(ShaderRD::VariantDefine(0, "", false));
+		raster_variants.push_back(ShaderRD::VariantDefine(1, "\n#define VIS64_BUFFER\n", false));
+		raster_sw_shader.initialize(raster_variants, raster_defines);
+		raster_sw_shader.set_group_int64_atomics(0, true, false);
+		raster_sw_shader.set_group_int64_atomics(1, false, true);
+		raster_hw_shader.initialize(raster_variants, raster_defines);
+		raster_hw_shader.set_group_int64_atomics(0, true, false);
+		raster_hw_shader.set_group_int64_atomics(1, false, true);
+
+		const RendererRD::NextGeoRasterTier tier = RendererRD::nextgeo_raster_tier(RD::get_singleton());
+		raster_target_ready = tier.hybrid;
+		raster_image_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
+		raster_buffer_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
 	}
 
 	{

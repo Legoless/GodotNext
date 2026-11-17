@@ -645,6 +645,7 @@ void RendererVirtualMeshStorage::mesh_set_virtual_geometry(RID p_mesh, const Ren
 			continue;
 		}
 		records[slot].surface_mask = p_desc.eligible_surface_mask;
+		records[slot].pad0 = p_desc.eligible_surface_mask;
 		_mark_dirty(slot);
 	}
 	if (RSG::mesh_storage != nullptr) {
@@ -708,6 +709,7 @@ void RendererVirtualMeshStorage::mesh_clear_virtual_geometry(RID p_mesh, uint32_
 		}
 		records[slot].virtual_mesh = UINT32_MAX;
 		records[slot].surface_mask = 0;
+		records[slot].pad0 = 0;
 		_mark_dirty(slot);
 	}
 	// Keep the reason for the routing fallback overlay (#79); the record store
@@ -789,6 +791,7 @@ uint32_t RendererVirtualMeshStorage::instance_record_allocate(RID p_instance, RI
 	if (index != nullptr && info != nullptr) {
 		record.virtual_mesh = *index;
 		record.surface_mask = info->desc.eligible_surface_mask;
+		record.pad0 = info->desc.eligible_surface_mask;
 		info->live_instances++;
 		notify_first_instance = info->live_instances == 1u;
 	}
@@ -912,14 +915,16 @@ void RendererVirtualMeshStorage::instance_record_set_gi_flags(uint32_t p_record,
 	_mark_dirty(p_record);
 }
 
-void RendererVirtualMeshStorage::instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask) {
+void RendererVirtualMeshStorage::instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask, uint32_t p_shadow_surface_mask) {
 	if (p_record >= used_slots || !slot_states[p_record].allocated) {
 		return;
 	}
-	if (records[p_record].surface_mask == p_surface_mask) {
+	const uint32_t shadow_mask = p_shadow_surface_mask == UINT32_MAX ? p_surface_mask : p_shadow_surface_mask;
+	if (records[p_record].surface_mask == p_surface_mask && records[p_record].pad0 == shadow_mask) {
 		return;
 	}
 	records[p_record].surface_mask = p_surface_mask;
+	records[p_record].pad0 = shadow_mask;
 	_mark_dirty(p_record);
 }
 

@@ -190,6 +190,9 @@ vec3 fallback_reason_color(uint reason, uint cls, uint rt_excl) {
 		case 14u: // MULTIMESH_OR_PARTICLES / VGD_IGNORED
 			base_col = vec3(0.45, 0.72, 0.25);
 			break;
+		case 15u: // UNSUPPORTED_RASTER_FEATURE (#155)
+			base_col = vec3(0.30, 0.45, 0.95);
+			break;
 		default:
 			base_col = vec3(0.82, 0.52, 0.22);
 			break;
@@ -449,8 +452,8 @@ void main() {
 			bucket_flags = bucket_table.data[bucket_slot];
 		}
 	}
-	bool cull_disabled = (bucket_flags & (1u << 24u)) != 0u || (surface_id < 32u && (record.pad1[0] & (1u << surface_id)) != 0u);
-	bool cull_front = (bucket_flags & (1u << 25u)) != 0u || (surface_id < 32u && (record.pad1[1] & (1u << surface_id)) != 0u);
+	bool cull_disabled = (bucket_flags & NEXTGEO_BUCKET_CULL_DISABLED) != 0u || (surface_id < 32u && (record.pad1[0] & (1u << surface_id)) != 0u);
+	bool cull_front = (bucket_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u || (surface_id < 32u && (record.pad1[1] & (1u << surface_id)) != 0u);
 
 	float det2d = determinant(mat3(tri_clip[0].xyw, tri_clip[1].xyw, tri_clip[2].xyw));
 	float effective_cull_sign = cull_front ? -push_params.cull_sign : push_params.cull_sign;

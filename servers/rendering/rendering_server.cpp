@@ -4101,6 +4101,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/raster_mode", PROPERTY_HINT_ENUM, "Hybrid,Hardware"), 0);
 	GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/nextgeo/sw_raster_max_edge_px", PROPERTY_HINT_RANGE, "0,32,0.25,suffix:px"), 8.0);
 	GLOBAL_DEF("rendering/nextgeo/debug_vis64_buffer", false);
+	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Off until #153 and #164 route masked and
+	// vertex-offset materials through the programmable raster bins by default.
+	GLOBAL_DEF("rendering/nextgeo/debug_programmable_raster", false);
 	// GodotNext: nextgeo_residency (#78).
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/geometry_cache_mb", PROPERTY_HINT_RANGE, "16,2047,1,suffix:MiB"), 512);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/page_upload_kib_per_frame", PROPERTY_HINT_RANGE, "64,65536,64,suffix:KiB"), 4096);

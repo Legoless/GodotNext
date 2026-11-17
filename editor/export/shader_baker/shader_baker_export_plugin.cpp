@@ -60,6 +60,11 @@ bool ShaderBakerExportPlugin::should_bake_version(bool p_requires_ray_query, boo
 	return (!p_requires_ray_query || p_supports_acceleration_structures) && (!p_requires_mesh_shader || p_supports_mesh_shaders);
 }
 
+// GodotNext: nextgeo_raster_bins (#155)
+bool ShaderBakerExportPlugin::should_bake_int64_atomic_group(bool p_requires_image_int64, bool p_requires_buffer_int64, bool p_supports_image_int64, bool p_supports_buffer_int64) {
+	return (!p_requires_image_int64 || p_supports_image_int64) && (!p_requires_buffer_int64 || p_supports_buffer_int64);
+}
+
 // GodotNext: scene customization
 bool ShaderBakerExportPlugin::should_copy_scene_property(const StringName &p_name) {
 	// The scene is instantiated outside the tree, so a `global_*` getter reports `!is_inside_tree()`
@@ -126,6 +131,8 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	skipped_ray_query_versions = 0;
 	baked_ray_query_versions = 0;
 	skipped_mesh_shader_versions = 0; // GodotNext: rd_mesh_shaders (#178)
+	baked_int64_atomic_groups = 0; // GodotNext: nextgeo_raster_bins (#155)
+	skipped_int64_atomic_groups = 0;
 	tasks_cancelled = false;
 
 	StringBuilder to_hash;
@@ -192,6 +199,14 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 			if (shader_version_pair.first != nullptr) {
 				_customize_shader_version(shader_version_pair.first, shader_version_pair.second);
 			}
+			// GodotNext: nextgeo_raster_bins (#155). Per-material raster-target versions (SW compute and HW VIS64).
+			LocalVector<Pair<ShaderRD *, RID>> extra_versions;
+			shader_data->get_extra_native_shader_and_versions(extra_versions);
+			for (const Pair<ShaderRD *, RID> &extra_pair : extra_versions) {
+				if (extra_pair.first != nullptr && extra_pair.second.is_valid()) {
+					_customize_shader_version(extra_pair.first, extra_pair.second);
+				}
+			}
 		}
 	}
 
@@ -220,6 +235,10 @@ void ShaderBakerExportPlugin::_end_customize_resources() {
 		// GodotNext: rd_mesh_shaders (#178)
 		if (skipped_mesh_shader_versions > 0) {
 			print_line(vformat("Shader baker: driver '%s' cannot hold task and mesh shaders; skipped %d mesh-shader version(s).", shader_container_driver, skipped_mesh_shader_versions));
+		}
+		// GodotNext: nextgeo_raster_bins (#155)
+		if (baked_int64_atomic_groups > 0 || skipped_int64_atomic_groups > 0) {
+			print_line(vformat("Shader baker: driver '%s', baked %d and skipped %d 64-bit-atomic shader group(s).", shader_container_driver, baked_int64_atomic_groups, skipped_int64_atomic_groups));
 		}
 	}
 
@@ -329,6 +348,14 @@ Ref<Resource> ShaderBakerExportPlugin::_customize_resource(const Ref<Resource> &
 				if (shader_version_pair.first != nullptr) {
 					_customize_shader_version(shader_version_pair.first, shader_version_pair.second);
 				}
+				// GodotNext: nextgeo_raster_bins (#155). Per-material raster-target versions (SW compute and HW VIS64).
+				LocalVector<Pair<ShaderRD *, RID>> extra_versions;
+				shader_data->get_extra_native_shader_and_versions(extra_versions);
+				for (const Pair<ShaderRD *, RID> &extra_pair : extra_versions) {
+					if (extra_pair.first != nullptr && extra_pair.second.is_valid()) {
+						_customize_shader_version(extra_pair.first, extra_pair.second);
+					}
+				}
 			}
 		}
 	}
@@ -434,7 +461,14 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 
 	RBSet<uint32_t> groups_to_compile;
 	for (int64_t i = 0; i < group_count; i++) {
-		if (!p_shader->is_group_enabled(i)) {
+		const bool requires_image_int64 = p_shader->group_requires_image_int64_atomics(i);
+		const bool requires_buffer_int64 = p_shader->group_requires_buffer_int64_atomics(i);
+		if (requires_image_int64 || requires_buffer_int64) {
+			if (!should_bake_int64_atomic_group(requires_image_int64, requires_buffer_int64, shader_container_format->supports_image_int64_atomics(), shader_container_format->supports_buffer_int64_atomics())) {
+				skipped_int64_atomic_groups++;
+				continue;
+			}
+		} else if (!p_shader->is_group_enabled(i)) {
 			continue;
 		}
 
@@ -444,6 +478,9 @@ void ShaderBakerExportPlugin::_customize_shader_version(ShaderRD *p_shader, RID 
 		}
 
 		shader_paths_processed.insert(cache_path);
+		if (requires_image_int64 || requires_buffer_int64) {
+			baked_int64_atomic_groups++;
+		}
 		groups_to_compile.insert(i);
 
 		group_items[i].cache_path = cache_path;

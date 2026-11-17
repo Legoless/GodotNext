@@ -17,7 +17,7 @@ struct NextGeoInstanceRecord {
 	uint layer_mask; // 176
 	uint flags; // 180
 	uint gi_flags; // 184
-	uint pad0; // 188
+	uint pad0; // 188: fixed-function shadow surface_mask (#155)
 	uint tlas_instance_index; // 192
 	uint blas_handle; // 196
 	uint rt_arena_chunk; // 200

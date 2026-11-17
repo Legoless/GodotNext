@@ -30,6 +30,7 @@
 
 #include "shader_compiler.h"
 
+#include "core/templates/local_vector.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/shader_types.h"
@@ -785,6 +786,9 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 				}
 				gcode += "} frag_to_light;\n";
 				r_gen_code.stage_globals[STAGE_FRAGMENT] += gcode;
+				if (p_actions.raster_target) {
+					r_gen_code.stage_globals[STAGE_COMPUTE] += "\n#ifndef NEXTGEO_RASTER_HW_VERTEX" + gcode + "#endif\n";
+				}
 			}
 
 			for (int i = 0; i < pnode->vconstants.size(); i++) {
@@ -1735,22 +1739,33 @@ static SL::DataType _resolve_sampler_grad_type(SL::DataType p_sampler_type) {
 	}
 }
 
-static void _collect_assigned_names(const SL::Node *p_node, HashSet<StringName> &r_assigned) {
+static void _collect_assigned_names(const SL::Node *p_node, HashSet<StringName> &r_assigned, const SL::ShaderNode *p_shader = nullptr) {
 	if (!p_node) {
 		return;
 	}
+	auto insert_lvalue_root = [&](const SL::Node *p_lhs) {
+		const SL::Node *lhs = p_lhs;
+		while (lhs && lhs->type == SL::Node::NODE_TYPE_MEMBER) {
+			lhs = static_cast<const SL::MemberNode *>(lhs)->owner;
+		}
+		if (lhs && lhs->type == SL::Node::NODE_TYPE_VARIABLE) {
+			r_assigned.insert(static_cast<const SL::VariableNode *>(lhs)->name);
+		} else if (lhs && lhs->type == SL::Node::NODE_TYPE_ARRAY) {
+			r_assigned.insert(static_cast<const SL::ArrayNode *>(lhs)->name);
+		}
+	};
 	switch (p_node->type) {
 		case SL::Node::NODE_TYPE_BLOCK: {
 			const SL::BlockNode *bnode = static_cast<const SL::BlockNode *>(p_node);
 			for (const SL::Node *stmt : bnode->statements) {
-				_collect_assigned_names(stmt, r_assigned);
+				_collect_assigned_names(stmt, r_assigned, p_shader);
 			}
 		} break;
 		case SL::Node::NODE_TYPE_VARIABLE_DECLARATION: {
 			const SL::VariableDeclarationNode *vdnode = static_cast<const SL::VariableDeclarationNode *>(p_node);
 			for (const SL::VariableDeclarationNode::Declaration &decl : vdnode->declarations) {
 				for (const SL::Node *init : decl.initializer) {
-					_collect_assigned_names(init, r_assigned);
+					_collect_assigned_names(init, r_assigned, p_shader);
 				}
 			}
 		} break;
@@ -1772,59 +1787,73 @@ static void _collect_assigned_names(const SL::Node *p_node, HashSet<StringName> 
 				case SL::OP_DECREMENT:
 				case SL::OP_POST_INCREMENT:
 				case SL::OP_POST_DECREMENT: {
-					const SL::Node *lhs = onode->arguments[0];
-					while (lhs && lhs->type == SL::Node::NODE_TYPE_MEMBER) {
-						lhs = static_cast<const SL::MemberNode *>(lhs)->owner;
-					}
-					if (lhs && lhs->type == SL::Node::NODE_TYPE_VARIABLE) {
-						r_assigned.insert(static_cast<const SL::VariableNode *>(lhs)->name);
+					insert_lvalue_root(onode->arguments[0]);
+				} break;
+				case SL::OP_CALL: {
+					if (onode->arguments.size() > 1 && onode->arguments[0] && onode->arguments[0]->type == SL::Node::NODE_TYPE_VARIABLE) {
+						const StringName fn_name = static_cast<const SL::VariableNode *>(onode->arguments[0])->name;
+						const SL::FunctionNode *func = nullptr;
+						if (p_shader != nullptr) {
+							for (int i = 0; i < p_shader->vfunctions.size(); i++) {
+								if (p_shader->vfunctions[i].name == fn_name) {
+									func = p_shader->vfunctions[i].function;
+									break;
+								}
+							}
+						}
+						for (int i = 1; i < onode->arguments.size(); i++) {
+							bool is_out = false;
+							if (func != nullptr && (i - 1) < func->arguments.size()) {
+								const SL::ArgumentQualifier q = func->arguments[i - 1].qualifier;
+								is_out = q == SL::ARGUMENT_QUALIFIER_OUT || q == SL::ARGUMENT_QUALIFIER_INOUT;
+							} else if (func == nullptr) {
+								is_out = SL::is_builtin_func_out_parameter(fn_name, i - 1);
+							}
+							if (is_out) {
+								insert_lvalue_root(onode->arguments[i]);
+							}
+						}
 					}
 				} break;
 				default:
 					break;
 			}
 			for (const SL::Node *arg : onode->arguments) {
-				_collect_assigned_names(arg, r_assigned);
+				_collect_assigned_names(arg, r_assigned, p_shader);
 			}
 		} break;
 		case SL::Node::NODE_TYPE_CONTROL_FLOW: {
 			const SL::ControlFlowNode *cfnode = static_cast<const SL::ControlFlowNode *>(p_node);
 			for (const SL::Node *expr : cfnode->expressions) {
-				_collect_assigned_names(expr, r_assigned);
+				_collect_assigned_names(expr, r_assigned, p_shader);
 			}
 			for (const SL::BlockNode *blk : cfnode->blocks) {
-				_collect_assigned_names(blk, r_assigned);
+				_collect_assigned_names(blk, r_assigned, p_shader);
 			}
 		} break;
 		case SL::Node::NODE_TYPE_MEMBER: {
 			const SL::MemberNode *mnode = static_cast<const SL::MemberNode *>(p_node);
 			if (mnode->assign_expression) {
-				const SL::Node *lhs = mnode->owner;
-				while (lhs && lhs->type == SL::Node::NODE_TYPE_MEMBER) {
-					lhs = static_cast<const SL::MemberNode *>(lhs)->owner;
-				}
-				if (lhs && lhs->type == SL::Node::NODE_TYPE_VARIABLE) {
-					r_assigned.insert(static_cast<const SL::VariableNode *>(lhs)->name);
-				}
-				_collect_assigned_names(mnode->assign_expression, r_assigned);
+				insert_lvalue_root(mnode->owner);
+				_collect_assigned_names(mnode->assign_expression, r_assigned, p_shader);
 			}
-			_collect_assigned_names(mnode->owner, r_assigned);
-			_collect_assigned_names(mnode->index_expression, r_assigned);
-			_collect_assigned_names(mnode->call_expression, r_assigned);
+			_collect_assigned_names(mnode->owner, r_assigned, p_shader);
+			_collect_assigned_names(mnode->index_expression, r_assigned, p_shader);
+			_collect_assigned_names(mnode->call_expression, r_assigned, p_shader);
 		} break;
 		case SL::Node::NODE_TYPE_ARRAY: {
 			const SL::ArrayNode *anode = static_cast<const SL::ArrayNode *>(p_node);
 			if (anode->assign_expression) {
 				r_assigned.insert(anode->name);
-				_collect_assigned_names(anode->assign_expression, r_assigned);
+				_collect_assigned_names(anode->assign_expression, r_assigned, p_shader);
 			}
-			_collect_assigned_names(anode->index_expression, r_assigned);
-			_collect_assigned_names(anode->call_expression, r_assigned);
+			_collect_assigned_names(anode->index_expression, r_assigned, p_shader);
+			_collect_assigned_names(anode->call_expression, r_assigned, p_shader);
 		} break;
 		case SL::Node::NODE_TYPE_ARRAY_CONSTRUCT: {
 			const SL::ArrayConstructNode *acnode = static_cast<const SL::ArrayConstructNode *>(p_node);
 			for (const SL::Node *init : acnode->initializer) {
-				_collect_assigned_names(init, r_assigned);
+				_collect_assigned_names(init, r_assigned, p_shader);
 			}
 		} break;
 		default:
@@ -1865,6 +1894,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 	varying_names.sort_custom<StringName::AlphCompare>();
 
 	String resolve_frag_globals;
+	String raster_stage_globals;
 	String resolve_vertex_store;
 	String resolve_interpolate;
 	HashMap<StringName, bool> frag_to_light_exact;
@@ -1895,14 +1925,17 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		const String arr_suffix = varying.array_size > 0 ? ("[" + itos(varying.array_size) + "]") : String();
 		const bool is_smooth_diff = (varying.interpolation != SL::INTERPOLATION_FLAT) && _is_resolve_diff_type(varying.type);
 
-		resolve_frag_globals += type_decl + " " + id + arr_suffix + ";\n";
-		resolve_frag_globals += type_decl + " _ng_v0_" + id + arr_suffix + ";\n";
-		resolve_frag_globals += type_decl + " _ng_v1_" + id + arr_suffix + ";\n";
-		resolve_frag_globals += type_decl + " _ng_v2_" + id + arr_suffix + ";\n";
+		String varying_globals;
+		varying_globals += type_decl + " " + id + arr_suffix + ";\n";
+		varying_globals += type_decl + " _ng_v0_" + id + arr_suffix + ";\n";
+		varying_globals += type_decl + " _ng_v1_" + id + arr_suffix + ";\n";
+		varying_globals += type_decl + " _ng_v2_" + id + arr_suffix + ";\n";
 		if (is_smooth_diff) {
-			resolve_frag_globals += type_decl + " _ng_dx_" + id + arr_suffix + ";\n";
-			resolve_frag_globals += type_decl + " _ng_dy_" + id + arr_suffix + ";\n";
+			varying_globals += type_decl + " _ng_dx_" + id + arr_suffix + ";\n";
+			varying_globals += type_decl + " _ng_dy_" + id + arr_suffix + ";\n";
 		}
+		resolve_frag_globals += varying_globals;
+		raster_stage_globals += varying_globals;
 
 		if (varying.array_size > 0) {
 			for (int ai = 0; ai < varying.array_size; ai++) {
@@ -1933,6 +1966,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		frag_to_light_dy_struct += "} _ng_dy_frag_to_light;\n";
 		resolve_frag_globals += frag_to_light_dx_struct;
 		resolve_frag_globals += frag_to_light_dy_struct;
+		raster_stage_globals += "#ifndef NEXTGEO_RASTER_HW_VERTEX\n" + frag_to_light_dx_struct + frag_to_light_dy_struct + "#endif\n";
 	}
 
 	r_gen_code.code["resolve_vertex_store"] = resolve_vertex_store;
@@ -1949,6 +1983,9 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		bool is_vertex_mode = false;
 		bool is_entry_fragment = false;
 		bool is_entry_light = false;
+		// GodotNext: nextgeo_raster_bins (#155). The raster target's form of discard, which its compute
+		// template defines (a compute shader has no discard).
+		bool raster_discard = false;
 		int cf_depth = 0;
 		Vector<HashMap<StringName, ResolveVarInfo>> scopes;
 		HashMap<StringName, bool> *frag_to_light_exact_ptr = nullptr;
@@ -3138,7 +3175,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 							res.val = "return;";
 						}
 					} else if (cfnode->flow_op == SL::FLOW_OP_DISCARD) {
-						res.val = "discard;";
+						res.val = raster_discard ? "_NG_RASTER_DISCARD;" : "discard;";
 					} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
 						res.val = "continue;";
 					} else if (cfnode->flow_op == SL::FLOW_OP_BREAK) {
@@ -3342,10 +3379,13 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 	HashSet<StringName> added_rv_funcs;
 	HashSet<StringName> added_rf_funcs;
 
-	// 1. vertex() -> code["resolve_vertex"] and _ng_rv_ helpers in fragment globals.
+	// 1. vertex() -> code["resolve_vertex"] and _ng_rv_ helpers in fragment and raster globals.
 	int vertex_idx = find_vfunc_index(SNAME("vertex"));
 	if (vertex_idx != -1) {
-		deps_emitter.emit_deps(SNAME("vertex"), true, resolve_frag_globals, added_rv_funcs);
+		String rv_helpers;
+		deps_emitter.emit_deps(SNAME("vertex"), true, rv_helpers, added_rv_funcs);
+		resolve_frag_globals += rv_helpers;
+		raster_stage_globals += rv_helpers;
 		SL::FunctionNode *vfunc = shader->vfunctions[vertex_idx].function;
 		ResolveEmitter emitter;
 		emitter.self = this;
@@ -3366,10 +3406,18 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 	int fragment_idx = find_vfunc_index(SNAME("fragment"));
 	if (fragment_idx != -1) {
 		deps_emitter.emit_deps(SNAME("fragment"), false, resolve_frag_globals, added_rf_funcs);
+		if (p_actions.raster_target && (r_gen_code.raster_uses & RASTER_USES_FUNCTION_DISCARD) == 0u) {
+			HashSet<StringName> added_raster_rf_funcs;
+			String raster_rf_helpers;
+			deps_emitter.emit_deps(SNAME("fragment"), false, raster_rf_helpers, added_raster_rf_funcs);
+			if (!raster_rf_helpers.is_empty()) {
+				raster_stage_globals += "#ifndef NEXTGEO_RASTER_HW_VERTEX\n" + raster_rf_helpers + "\n#endif\n";
+			}
+		}
 		SL::FunctionNode *ffunc = shader->vfunctions[fragment_idx].function;
 
 		HashSet<StringName> assigned_in_frag;
-		_collect_assigned_names(ffunc->body, assigned_in_frag);
+		_collect_assigned_names(ffunc->body, assigned_in_frag, shader);
 
 		ResolveEmitter emitter;
 		emitter.self = this;
@@ -3420,8 +3468,29 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 			}
 		}
 
+		const HashMap<StringName, ResolveVarInfo> emitter_initial_scope(emitter.scopes[0]);
 		String resolve_frag_body = preamble + emitter.emit_node(ffunc->body, 2, false).val;
 		r_gen_code.code["resolve_fragment"] = resolve_frag_body;
+		// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N4). The raster target runs the same fragment
+		// body with the same analytic derivatives; only discard differs. The driver compiler keeps the
+		// statements that feed ALPHA, the alpha built-ins and discard.
+		if (p_actions.raster_target && (r_gen_code.raster_uses & RASTER_USES_FUNCTION_DISCARD) == 0u) {
+			ResolveEmitter raster_emitter;
+			raster_emitter.self = this;
+			raster_emitter.shader_node = shader;
+			raster_emitter.gen_code = &r_gen_code;
+			raster_emitter.id_actions = &p_actions;
+			raster_emitter.def_actions = &p_default_actions;
+			raster_emitter.cur_func = ffunc;
+			raster_emitter.cur_func_name = ffunc->name;
+			raster_emitter.is_vertex_mode = false;
+			raster_emitter.is_entry_fragment = true;
+			raster_emitter.raster_discard = true;
+			raster_emitter.frag_to_light_exact_ptr = &frag_to_light_exact;
+			raster_emitter.frag_to_light_varying_ptr = &frag_to_light_varying;
+			raster_emitter.scopes.push_back(HashMap<StringName, ResolveVarInfo>(emitter_initial_scope));
+			r_gen_code.code["raster_fragment"] = preamble + raster_emitter.emit_node(ffunc->body, 2, false).val;
+		}
 		r_gen_code.code["fragment"] = "#ifndef MODE_VISIBILITY_RESOLVE\n" + r_gen_code.code["fragment"] + "#else\n" + resolve_frag_body + "#endif\n";
 	}
 
@@ -3452,6 +3521,157 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 	if (!resolve_frag_globals.is_empty()) {
 		r_gen_code.stage_globals[STAGE_FRAGMENT] += "#ifdef MODE_VISIBILITY_RESOLVE\n" + resolve_frag_globals + "#endif\n";
 	}
+	// GodotNext: nextgeo_raster_bins (#155). The raster target's templates (compute, and vertex plus
+	// fragment) take the dedicated raster globals (without light()'s helpers).
+	if (p_actions.raster_target && !raster_stage_globals.is_empty()) {
+		r_gen_code.stage_globals[STAGE_COMPUTE] += "#ifdef MODE_VISIBILITY_RESOLVE\n" + raster_stage_globals + "#endif\n";
+	}
+}
+
+// GodotNext: nextgeo_raster_bins (#155). Every variable and function name a node reads or writes.
+static void _collect_used_names(const SL::Node *p_node, HashSet<StringName> &r_used) {
+	if (!p_node) {
+		return;
+	}
+	switch (p_node->type) {
+		case SL::Node::NODE_TYPE_BLOCK: {
+			const SL::BlockNode *bnode = static_cast<const SL::BlockNode *>(p_node);
+			for (const SL::Node *stmt : bnode->statements) {
+				_collect_used_names(stmt, r_used);
+			}
+		} break;
+		case SL::Node::NODE_TYPE_VARIABLE_DECLARATION: {
+			const SL::VariableDeclarationNode *vdnode = static_cast<const SL::VariableDeclarationNode *>(p_node);
+			for (const SL::VariableDeclarationNode::Declaration &decl : vdnode->declarations) {
+				for (const SL::Node *init : decl.initializer) {
+					_collect_used_names(init, r_used);
+				}
+			}
+		} break;
+		case SL::Node::NODE_TYPE_VARIABLE: {
+			r_used.insert(static_cast<const SL::VariableNode *>(p_node)->name);
+		} break;
+		case SL::Node::NODE_TYPE_OPERATOR: {
+			const SL::OperatorNode *onode = static_cast<const SL::OperatorNode *>(p_node);
+			for (const SL::Node *arg : onode->arguments) {
+				_collect_used_names(arg, r_used);
+			}
+		} break;
+		case SL::Node::NODE_TYPE_CONTROL_FLOW: {
+			const SL::ControlFlowNode *cfnode = static_cast<const SL::ControlFlowNode *>(p_node);
+			if (cfnode->flow_op == SL::FLOW_OP_DISCARD) {
+				r_used.insert(SNAME("discard"));
+			}
+			for (const SL::Node *expr : cfnode->expressions) {
+				_collect_used_names(expr, r_used);
+			}
+			for (const SL::BlockNode *blk : cfnode->blocks) {
+				_collect_used_names(blk, r_used);
+			}
+		} break;
+		case SL::Node::NODE_TYPE_MEMBER: {
+			const SL::MemberNode *mnode = static_cast<const SL::MemberNode *>(p_node);
+			_collect_used_names(mnode->owner, r_used);
+			_collect_used_names(mnode->index_expression, r_used);
+			_collect_used_names(mnode->call_expression, r_used);
+			_collect_used_names(mnode->assign_expression, r_used);
+		} break;
+		case SL::Node::NODE_TYPE_ARRAY: {
+			const SL::ArrayNode *anode = static_cast<const SL::ArrayNode *>(p_node);
+			r_used.insert(anode->name);
+			_collect_used_names(anode->index_expression, r_used);
+			_collect_used_names(anode->call_expression, r_used);
+			_collect_used_names(anode->assign_expression, r_used);
+		} break;
+		case SL::Node::NODE_TYPE_ARRAY_CONSTRUCT: {
+			const SL::ArrayConstructNode *acnode = static_cast<const SL::ArrayConstructNode *>(p_node);
+			for (const SL::Node *init : acnode->initializer) {
+				_collect_used_names(init, r_used);
+			}
+		} break;
+		default:
+			break;
+	}
+}
+
+uint32_t ShaderCompiler::_get_raster_uses(const GeneratedCode &p_gen_code) const {
+	uint32_t uses = 0u;
+	if (p_gen_code.uses_screen_texture) {
+		uses |= RASTER_USES_SCREEN_TEXTURE;
+	}
+	if (p_gen_code.uses_depth_texture) {
+		uses |= RASTER_USES_DEPTH_TEXTURE;
+	}
+	if (p_gen_code.uses_normal_roughness_texture) {
+		uses |= RASTER_USES_NORMAL_ROUGHNESS_TEXTURE;
+	}
+	if (shader == nullptr) {
+		return uses;
+	}
+	// fragment() and every function it calls, directly or not.
+	HashSet<StringName> visited;
+	LocalVector<StringName> pending;
+	pending.push_back(SNAME("fragment"));
+	HashSet<StringName> used;
+	HashSet<StringName> assigned;
+	while (!pending.is_empty()) {
+		const StringName name = pending[pending.size() - 1];
+		pending.resize(pending.size() - 1);
+		if (visited.has(name)) {
+			continue;
+		}
+		visited.insert(name);
+		for (int i = 0; i < shader->vfunctions.size(); i++) {
+			if (shader->vfunctions[i].name != name) {
+				continue;
+			}
+			if (name != SNAME("fragment")) {
+				HashSet<StringName> function_used;
+				_collect_used_names(shader->vfunctions[i].function->body, function_used);
+				if (function_used.has(SNAME("discard"))) {
+					uses |= RASTER_USES_FUNCTION_DISCARD;
+				}
+			}
+			_collect_used_names(shader->vfunctions[i].function->body, used);
+			_collect_assigned_names(shader->vfunctions[i].function->body, assigned, shader);
+			for (const StringName &callee : shader->vfunctions[i].uses_function) {
+				pending.push_back(callee);
+			}
+		}
+	}
+	if (used.has(SNAME("FRAGCOORD"))) {
+		uses |= RASTER_USES_FRAGCOORD;
+	}
+	if (assigned.has(SNAME("DEPTH"))) {
+		uses |= RASTER_WRITES_DEPTH;
+	}
+	// light() and every function it calls: discard there sets uses_discard (RASTER_FEATURE_MASKED),
+	// which a raster bin does not evaluate.
+	visited.clear();
+	pending.clear();
+	pending.push_back(SNAME("light"));
+	HashSet<StringName> light_used;
+	while (!pending.is_empty()) {
+		const StringName name = pending[pending.size() - 1];
+		pending.resize(pending.size() - 1);
+		if (visited.has(name)) {
+			continue;
+		}
+		visited.insert(name);
+		for (int i = 0; i < shader->vfunctions.size(); i++) {
+			if (shader->vfunctions[i].name != name) {
+				continue;
+			}
+			_collect_used_names(shader->vfunctions[i].function->body, light_used);
+			for (const StringName &callee : shader->vfunctions[i].uses_function) {
+				pending.push_back(callee);
+			}
+		}
+	}
+	if (light_used.has(SNAME("discard"))) {
+		uses |= RASTER_USES_LIGHT_DISCARD;
+	}
+	return uses;
 }
 
 ShaderLanguage::DataType ShaderCompiler::_get_global_shader_uniform_type(const StringName &p_name) {
@@ -3563,6 +3783,7 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	r_gen_code.uses_depth_texture = false;
 	r_gen_code.uses_normal_roughness_texture = false;
 	r_gen_code.uses_unsupported_derivative = false;
+	r_gen_code.raster_uses = 0;
 
 	used_name_defines.clear();
 	used_rmode_defines.clear();
@@ -3575,6 +3796,11 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	// Return value only relevant within nested calls.
 	_ALLOW_DISCARD_ _dump_node_code(shader, 1, r_gen_code, *p_actions, actions, false);
 	if (p_actions->visibility_resolve) {
+		// GodotNext: nextgeo_raster_bins (#155). Computed before _compile_visibility_resolve so helper
+		// discard in fragment() stays out of STAGE_COMPUTE.
+		if (p_actions->raster_target) {
+			r_gen_code.raster_uses = _get_raster_uses(r_gen_code);
+		}
 		_compile_visibility_resolve(r_gen_code, *p_actions, actions);
 	}
 

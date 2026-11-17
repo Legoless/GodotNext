@@ -835,8 +835,10 @@ TEST_CASE("[NextGeo][SwRaster] The raster-feature table and its GLSL copies agre
 	REQUIRE(vsm >= 0);
 	CHECK_EQ(uint32_t(RendererVirtualMeshStorage::RASTER_BIN_TABLE[vsm].bin), uint32_t(RendererVirtualMeshStorage::RASTER_BIN_FIXED));
 	CHECK_EQ(String(RendererVirtualMeshStorage::RASTER_BIN_TABLE[vsm].name), String("VSM_FIXED"));
-	// No bin rasterizes a geometry feature yet (#155 adds them).
-	CHECK_EQ(RendererVirtualMeshStorage::find_raster_bin_entry(RendererVirtualMeshStorage::RASTER_FEATURE_MASKED, RendererVirtualMeshStorage::RASTER_PASS_VISIBILITY), -1);
+	// #155 adds the programmable entries; test_nextgeo_raster_bins.cpp covers them.
+	const int32_t masked = RendererVirtualMeshStorage::find_raster_bin_entry(RendererVirtualMeshStorage::RASTER_FEATURE_MASKED, RendererVirtualMeshStorage::RASTER_PASS_VISIBILITY);
+	REQUIRE(masked >= 0);
+	CHECK_EQ(uint32_t(RendererVirtualMeshStorage::RASTER_BIN_TABLE[masked].bin), uint32_t(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE));
 
 	struct Feature {
 		const char *name;

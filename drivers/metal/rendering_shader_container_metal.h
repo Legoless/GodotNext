@@ -307,6 +307,10 @@ public:
 	virtual bool supports_mesh_shaders() const override {
 		return device_profile != nullptr && RenderingDeviceDriver::metal_mesh_shader_caps(uint32_t(device_profile->gpu), device_profile->features.msl_version, device_profile->features.use_argument_buffers).mesh;
 	}
+	// GodotNext: nextgeo_raster_bins (#155). 64-bit texture and buffer atomics (Apple9+, or macOS Apple8+,
+	// with MSL 3.1 and argument buffers).
+	virtual bool supports_image_int64_atomics() const override;
+	virtual bool supports_buffer_int64_atomics() const override;
 	RenderingShaderContainerFormatMetal(const MetalDeviceProfile *p_device_profile, bool p_export = false);
 	virtual ~RenderingShaderContainerFormatMetal() = default;
 };

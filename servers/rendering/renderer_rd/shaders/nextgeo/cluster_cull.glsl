@@ -8,6 +8,9 @@
 //   CLUSTER_CULL: test leaf groups and emit (record, cluster). With the hybrid
 //                raster flag (#162), it also routes each emitted main-view
 //                cluster to the software or hardware list of its raster bin.
+//                With the programmable-bins flag (#155), a cluster whose
+//                surface has a programmable raster bin is appended, with its
+//                bin, for raster_bin_compact.glsl instead.
 //   CUT_HASH:    XOR the order-independent hash of every compacted cluster.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -138,6 +141,28 @@ layout(set = 0, binding = 18, std430) buffer restrict writeonly RasterLists {
 raster_lists;
 
 const uint NEXTGEO_CULL_FLAG_HYBRID_RASTER = 1u << 5u;
+
+// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Read only under the programmable-bins flag: the
+// cluster table (for the cluster's surface), the per-(instance, surface) raster-bin table, and the
+// append list and state of the programmable bins (layouts in raster_features_inc.glsl).
+layout(set = 0, binding = 19, std430) buffer restrict readonly ClusterTable {
+	uvec4 data[];
+}
+cluster_table;
+layout(set = 0, binding = 20, std430) buffer restrict readonly RasterBinTable {
+	uint data[];
+}
+raster_bin_table;
+layout(set = 0, binding = 21, std430) buffer restrict writeonly RasterBinAppend {
+	uint data[];
+}
+raster_bin_append;
+layout(set = 0, binding = 22, std430) buffer restrict RasterBinState {
+	uint data[];
+}
+raster_bin_state;
+
+const uint NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS = 1u << 6u;
 #endif
 
 vec3 instance_point(NextGeoInstanceRecord p_record, vec3 p_local) {
@@ -228,6 +253,38 @@ bool sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_bound
 		edge_px /= max(z_min, 1e-20);
 	}
 	return edge_px < max_edge_px;
+}
+
+// GodotNext: nextgeo_raster_bins (#155). The raster bin of a cluster's surface: 0 (fixed-function) unless
+// the surface has a programmable bin.
+uint raster_bin_of(NextGeoInstanceRecord p_record, NextGeoMeshRecord p_mesh, uint p_global_cluster) {
+	if (p_global_cluster < p_mesh.cluster_offset) {
+		return NEXTGEO_RASTER_BIN_FIXED;
+	}
+	uint local_cluster = p_global_cluster - p_mesh.cluster_offset;
+	if (local_cluster >= p_mesh.cluster_count) {
+		return NEXTGEO_RASTER_BIN_FIXED;
+	}
+	uint surface_id = cluster_table.data[p_mesh.page_table_offset + local_cluster].w & 0xFFFFu;
+	if (surface_id >= 32u) {
+		return NEXTGEO_RASTER_BIN_FIXED;
+	}
+	uint word = raster_bin_table.data[nextgeo_raster_bin_table_word(p_record.bucket_base, surface_id)];
+	uint bin = (word >> nextgeo_raster_bin_table_shift(surface_id)) & 0xFFu;
+	return bin < NEXTGEO_RASTER_BIN_LIMIT ? bin : NEXTGEO_RASTER_BIN_FIXED;
+}
+
+// Appends visible cluster p_vis_index, with its programmable bin and path, for the per-bin compaction.
+void raster_bin_route(uint p_vis_index, uint p_bin, bool p_software) {
+	uint kind = p_software ? NEXTGEO_RASTER_BIN_KIND_SW : NEXTGEO_RASTER_BIN_KIND_HW;
+	uint slot = atomicAdd(raster_bin_state.data[NEXTGEO_RASTER_BIN_STATE_APPENDED + params.phase], 1u);
+	raster_bin_append.data[params.list_base + slot] = nextgeo_raster_bin_pack_entry(p_vis_index, p_bin, kind);
+	atomicAdd(raster_bin_state.data[nextgeo_raster_bin_count_word(params.phase, p_bin, kind)], 1u);
+	if (p_software) {
+		atomicAdd(counters.raster_bin_sw[params.phase], 1u);
+	} else {
+		atomicAdd(counters.raster_bin_hw[params.phase], 1u);
+	}
 }
 
 // Appends visible cluster p_vis_index to the software or hardware list of the fixed-function bin.
@@ -455,7 +512,15 @@ void main() {
 				float max_edge = unpackHalf2x16(pages.data[route_rec_word + 16u]).x;
 				software = sw_raster_route(record, route_scale, bounds, max_edge);
 			}
-			raster_route(params.list_base + slot, software);
+			uint bin = NEXTGEO_RASTER_BIN_FIXED;
+			if ((cull.cull.w & NEXTGEO_CULL_FLAG_PROGRAMMABLE_BINS) != 0u) {
+				bin = raster_bin_of(record, mesh, global_cluster);
+			}
+			if (bin == NEXTGEO_RASTER_BIN_FIXED) {
+				raster_route(params.list_base + slot, software);
+			} else {
+				raster_bin_route(params.list_base + slot, bin, software);
+			}
 		}
 	}
 

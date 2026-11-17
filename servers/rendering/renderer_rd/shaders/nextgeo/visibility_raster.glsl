@@ -187,7 +187,7 @@ void main() {
 	uint vert_count = (desc.z >> 8u) & 0xFFu;
 	uint tri_count = (desc.z >> 16u) & 0xFFu;
 	uint surface_id = desc.w & 0xFFFFu;
-	if (t >= tri_count || stride < 3u || vert_count == 0u || surface_id >= 32u || (record.surface_mask & (1u << surface_id)) == 0u) {
+	if (t >= tri_count || stride < 3u || vert_count == 0u || surface_id >= 32u || (record.pad0 & (1u << surface_id)) == 0u) {
 		collapse_triangle();
 		return;
 	}
@@ -300,7 +300,7 @@ void main() {
 			return;
 		}
 		uint bucket_word = bucket_table.data[bucket_slot];
-		if ((bucket_word & 0x00FFFFFFu) == 0x00FFFFFFu) {
+		if ((bucket_word & NEXTGEO_BUCKET_ID_MASK) == NEXTGEO_BUCKET_INVALID) {
 			collapse_triangle();
 			return;
 		}
@@ -308,7 +308,7 @@ void main() {
 	}
 
 #ifndef DEBUG_BACKFACE
-	if ((bucket_flags & (1u << 24u)) != 0u) {
+	if ((bucket_flags & NEXTGEO_BUCKET_CULL_DISABLED) != 0u) {
 		// NEXTGEO_BUCKET_CULL_DISABLED: orient the triangle clockwise in clip space so both faces pass POLYGON_CULL_BACK.
 		vec4 tri_clip[3];
 		for (uint c = 0u; c < 3u; c++) {
@@ -333,7 +333,7 @@ void main() {
 			corner = 3u - corner;
 		}
 	} else {
-		float effective_cull_sign = ((bucket_flags & (1u << 25u)) != 0u) ? -raster.cull_sign : raster.cull_sign;
+		float effective_cull_sign = ((bucket_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u) ? -raster.cull_sign : raster.cull_sign;
 		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
 		if (determinant(basis) * effective_cull_sign < 0.0 && corner != 0u) {
 			corner = 3u - corner;

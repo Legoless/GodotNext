@@ -89,6 +89,8 @@ public:
 		virtual NextGIRTClass get_nextgi_rt_class() const { return NEXTGI_RT_OPAQUE; }
 		// GodotNext: nextgeo_resolve (#80). Material-level fallback reason (RendererRD::NextGeoFallback).
 		virtual uint32_t get_nextgeo_fallback() const { return 0; }
+		// GodotNext: nextgeo_raster_bins (#155). RasterFeature bits of the material.
+		virtual uint32_t get_raster_features() const { return 0; }
 		// GodotNext: nextgeo_rt_native (#156). The vertex code moves the surface: it writes VERTEX,
 		// POSITION, MODELVIEW_MATRIX or PROJECTION_MATRIX, or uses skip_vertex_transform.
 		virtual bool nextgeo_moves_vertices() const { return false; }
@@ -96,6 +98,9 @@ public:
 		virtual bool casts_shadows() const = 0;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const = 0;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const = 0;
+		// GodotNext: nextgeo_raster_bins (#155). Extra ShaderRD versions owned by the shader (such as its
+		// programmable raster bin SW compute and HW VIS64 versions) for the shader baker.
+		virtual void get_extra_native_shader_and_versions(LocalVector<Pair<ShaderRD *, RID>> &r_versions) {}
 
 		virtual ~ShaderData() {}
 
@@ -126,6 +131,11 @@ public:
 		//to be used internally by update_parameters, in the most common configuration of material parameters
 		bool update_parameters_uniform_set(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty, const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, const HashMap<StringName, HashMap<int, RID>> &p_default_texture_params, uint32_t p_ubo_size, RID &r_uniform_set, RID p_shader, uint32_t p_shader_uniform_set, bool p_use_linear_color, bool p_3d_material);
 		void free_parameters_uniform_set(RID p_uniform_set);
+		// GodotNext: nextgeo_raster_bins (#155). The uniforms update_parameters_uniform_set() binds (the
+		// uniform buffer at binding 0, the textures from binding 1), for a uniform set of another shader
+		// that declares the same material layout, such as a NextGeo raster bin's.
+		void get_parameter_uniforms(Vector<RD::Uniform> &r_uniforms, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, uint32_t p_ubo_size, bool p_use_linear_color) const;
+		RID get_self() const { return self; }
 		RID material_feedback_rid;
 		// GodotNext: nextgi_hit_groups (#130). What update_parameters_uniform_set() last wrote, for the NextGI hit
 		// groups' copy of the material.

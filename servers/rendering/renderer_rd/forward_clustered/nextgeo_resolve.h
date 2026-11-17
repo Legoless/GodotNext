@@ -104,6 +104,9 @@ public:
 
 	bool upload_tables(const uint32_t *p_bucket_table, uint32_t p_bucket_table_words, const void *p_instance_data, uint32_t p_instance_data_bytes);
 	RID get_bucket_table_buffer();
+	// GodotNext: nextgeo_raster_bins (#155). The per-record InstanceData the resolve binds; a programmable
+	// raster bin's material code reads it too.
+	RID get_instance_data_buffer();
 
 	bool classify(RendererVirtualMeshStorage *p_storage, RID p_visibility_tex, RID p_visible_clusters_buf, const Size2i &p_viewport_size);
 
