@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-18, morning (Claude). Cloud VMs and seven lanes are running.
+**Last updated:** 2026-11-18, night (Claude). Cloud VMs and six lanes are running.
 
 ## How to continue
 
@@ -27,9 +27,9 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.13. The tracker shows 134 of 229 build tasks done and 9 in progress; the 18 gates are measured in PQ by design.
+- Master: see `git log`. Plan v3.9.14. The tracker shows 134 of 229 build tasks done and 9 in progress; the 18 gates are measured in PQ by design.
 - 2026-11-17: an agent session merged an unreviewed "do not merge" WIP of #130 over its landing, committed stray root files and closed #130, #155 and #219 early. 1969d8d986 (2026-11-18) restores the landed code. It also reverts an unreviewed VSM marking change (59a9794a95), adds missing `override` keywords and fixes the #155 raster-bins check's 64-bin phase. #130, #155 and #219 are reopened: their Metal criteria are still open.
-- Landed on 2026-11-18: #122 and #293 (CLOSED, 5620846da5; the private Mesa NIR library 25.3.1-gn4: D3D12 mesh shaders and non-uniform table reads) and plan v3.9.13 (bc37fd4781).
+- Landed on 2026-11-18: #286 as progress (711d22e04a; the per-platform Hardware Ray Tracing Mode, plan v3.9.14), #122 and #293 (CLOSED, 5620846da5; the private Mesa NIR library 25.3.1-gn4: D3D12 mesh shaders and non-uniform table reads) and plan v3.9.13 (bc37fd4781).
 - Landed on 2026-11-16 / 2026-11-17:
   - **Closed:** #272, #277, #278, #279, #287.
   - **Landed as progress:** #118, #121, #123, #130, #155, #156, #162, #176, #177, #178, #179, #195, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
@@ -37,7 +37,7 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## In progress (restart these first)
 
-Each lane works in a local worktree under `.claude/worktrees/` on master `bc37fd4781` (#218 on `d48fc06124`), builds on the cloud VMs, and keeps notes in its private lane folder (see `local/handoff-private.md`). Nothing is committed until it lands.
+Each lane works in a local worktree under `.claude/worktrees/` on master `bc37fd4781` (#218 on `d48fc06124`); every lane is past build and review and in its fix step. Lanes landing after #286 rebase onto current master and get a landing check there (#145 shares the NextGI hit-group files with #286 and sets its material-retrace consumer bit), builds on the cloud VMs, and keeps notes in its private lane folder (see `local/handoff-private.md`). Nothing is committed until it lands.
 
 | Issue | Where it stopped | Next step | Machines |
 |---|---|---|---|
@@ -45,7 +45,6 @@ Each lane works in a local worktree under `.claude/worktrees/` on master `bc37fd
 | #145 RT visibility policy | Started 2026-11-18. Decision under the lead's rule (LQ6, follow UE): translucent casters shadow as opaque | Build, review, fix | Windows T4 VM, Linux E |
 | #295 AVBOIT | Started 2026-11-18 | Build, review, fix | Windows VM 4, Linux E |
 | #193 TSR async compute | Started 2026-11-18 | Build, review, fix | Windows VM 3, Linux D |
-| #286 Hardware Ray Tracing Mode | Started 2026-11-18 (includes a plan change) | Build, review, fix | Windows VM 2, Linux C |
 | #167 Path tracer core | Started 2026-11-18 | Build, review, fix | Windows VM 3, Linux D |
 | #158 Material shading bins | Started 2026-11-18 | Build, review, fix | Windows VM 1, Linux C |
 
