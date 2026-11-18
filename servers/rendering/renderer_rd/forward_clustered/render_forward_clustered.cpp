@@ -2605,19 +2605,14 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 		input.fog_near_size = projection.is_orthogonal() ? input.fog_far_size : frustum_near_size.maxf(0.001);
 	}
 
-	// Opaque and transparent instances: their world boxes request coarse pages.
+	// Transparent instances: their world boxes request coarse pages.
 	HashSet<const GeometryInstanceForwardClustered *> seen;
-	for (uint32_t i = 0; i < RENDER_LIST_MAX; i++) {
-		if (i != RENDER_LIST_ALPHA && i != RENDER_LIST_OPAQUE) {
+	for (const GeometryInstanceSurfaceDataCache *surface : render_list[RENDER_LIST_ALPHA].elements) {
+		if (surface->owner == nullptr || seen.has(surface->owner)) {
 			continue;
 		}
-		for (const GeometryInstanceSurfaceDataCache *surface : render_list[i].elements) {
-			if (surface->owner == nullptr || seen.has(surface->owner)) {
-				continue;
-			}
-			seen.insert(surface->owner);
-			input.boxes.push_back(surface->owner->transformed_aabb);
-		}
+		seen.insert(surface->owner);
+		input.boxes.push_back(surface->owner->transformed_aabb);
 	}
 
 	vsm->mark_and_allocate(input);

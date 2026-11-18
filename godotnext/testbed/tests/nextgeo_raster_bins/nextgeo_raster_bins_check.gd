@@ -713,18 +713,26 @@ func _finish() -> void:
 				_report["%s_BackfaceProbe_fill" % bf_phase] = bf_on
 				if int(bf_on[0]) < 20 or float(bf_on[2]) < MIN_MASK_FILL or float(bf_on[2]) > MAX_STRIPES_FILL:
 					_failures.append("%s/BackfaceProbe: expected visible striped backface, got %s" % [bf_phase, str(bf_on)])
-		# 64-bin fill: first (64 - _programmable.size()) extra materials route virtual/NONE, 65th routes legacy/alpha.
+		# 64-bin fill: 64 - _programmable.size() extra materials route virtual/NONE and exactly one, the 65th
+		# programmable material to reach a bin, routes legacy/alpha. Bins go to surfaces in the order the renderer
+		# builds their caches, which is the dirty-instance list's (most recently queued first), not the spawn
+		# order, so the check counts routes instead of naming the overflowing instance.
 		var fit_count := 64 - _programmable.size()
 		if _extra_routes.size() != fit_count + 1:
 			_failures.append("bins_64: expected %d extra routes, got %d" % [fit_count + 1, _extra_routes.size()])
 		else:
-			for idx in fit_count:
+			var admitted := 0
+			var overflowed := 0
+			for idx in _extra_routes.size():
 				var r: Array = _extra_routes[idx]
-				if r[0] != "virtual" or r[1] != "NONE":
-					_failures.append("bins_64/ExtraBin_%d: route %s/%s, expected virtual/NONE" % [idx, r[0], r[1]])
-			var overflow_r: Array = _extra_routes[fit_count]
-			if overflow_r[0] != "legacy" or overflow_r[1] != "alpha":
-				_failures.append("bins_64/ExtraBin_%d (65th): route %s/%s, expected legacy/alpha" % [fit_count, overflow_r[0], overflow_r[1]])
+				if r[0] == "virtual" and r[1] == "NONE":
+					admitted += 1
+				elif r[0] == "legacy" and r[1] == "alpha":
+					overflowed += 1
+				else:
+					_failures.append("bins_64/ExtraBin_%d: route %s/%s, expected virtual/NONE or legacy/alpha" % [idx, r[0], r[1]])
+			if admitted != fit_count or overflowed != 1:
+				_failures.append("bins_64: %d extra materials got a bin and %d stayed legacy/alpha, expected %d and 1" % [admitted, overflowed, fit_count])
 	else:
 		# Below the Nanite tier the setting admits nothing: every phase without vis_only/backface/extra is the reference.
 		for test in ["bins_hw", "bins_sw", "bins_sw_buffer"]:

@@ -14,8 +14,8 @@
 # Example on the RTX 4080 SUPER machine:
 #   godotnext/testbed/tests/nextgi_hit_groups/hit_groups_check.sh -- godot --path godotnext/testbed \
 #     --rendering-driver vulkan --gpu-validation res://tests/nextgi_hit_groups/hit_groups_check.tscn
-# On D3D12 (no RT pipelines until #121), add "-- --expect=no-pipeline" after the scene; on the software
-# tier (a D3D12 build without DXR), "-- --expect=not-hwrt".
+# On a driver without RT pipelines (Metal until #172), add "-- --expect=no-pipeline" after the scene; on
+# the software tier (a build without DXR), "-- --expect=not-hwrt".
 
 set -euo pipefail
 

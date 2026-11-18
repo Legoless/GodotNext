@@ -1315,9 +1315,6 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	// GodotNext: nextgi_hit_groups (#130). While a consumer needs the hit groups, every surface record gets a hit
 	// record at the same index and every TLAS instance a hit shader binding table range; otherwise nothing
 	// changes and the ranges stay 0.
-	// GodotNext: nextgi_hit_groups (#130). While a consumer needs the hit groups, every surface record gets a hit
-	// record at the same index and every TLAS instance a hit shader binding table range; otherwise nothing
-	// changes and the ranges stay 0.
 	NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton();
 	const bool hit_records = hit_materials != nullptr && hit_materials->is_ready();
 	if (hit_records) {

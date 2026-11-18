@@ -7,7 +7,7 @@ extends Node
 ## and renders until the hit groups' check has run, or for --frames=N frames (default 600). Prints one
 ## "GODOTNEXT_RESULT <json>" line with the tier, the hit groups' availability and their counters. It
 ## passes when the hardware tier is active and the check ran on its material groups; with
-## --expect=no-pipeline (D3D12 until #121) it passes when the hit groups report NO_RAYTRACING_PIPELINE, and
+## --expect=no-pipeline (Metal until #172) it passes when the hit groups report NO_RAYTRACING_PIPELINE, and
 ## with --expect=not-hwrt (the software tier) when they report NOT_HWRT.
 ## The match shares on authored content are reported, not checked (hit_groups_check.tscn checks them).
 

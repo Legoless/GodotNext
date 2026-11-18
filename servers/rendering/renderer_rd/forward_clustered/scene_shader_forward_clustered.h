@@ -440,12 +440,12 @@ public:
 			return !uses_particle_trails && !writes_modelview_or_projection && !uses_vertex && !uses_position && !uses_discard && !uses_depth_prepass_alpha && !uses_alpha_clip && !uses_alpha_antialiasing && backface_culling && !uses_point_size && !uses_world_coordinates && !wireframe && !uses_z_clip_scale && !stencil_enabled;
 		}
 
-		virtual void set_code(const String &p_Code);
+		virtual void set_code(const String &p_Code) override;
 
-		virtual bool is_animated() const;
-		virtual bool casts_shadows() const;
+		virtual bool is_animated() const override;
+		virtual bool casts_shadows() const override;
 		// GodotNext: nextgi_alpha_policy (#61).
-		virtual RendererRD::MaterialStorage::ShaderData::NextGIRTClass get_nextgi_rt_class() const;
+		virtual RendererRD::MaterialStorage::ShaderData::NextGIRTClass get_nextgi_rt_class() const override;
 		virtual uint32_t get_nextgeo_fallback() const override { return uint32_t(nextgeo_fallback); }
 		virtual uint32_t get_raster_features() const override { return raster_features; }
 		// GodotNext: nextgeo_rt_native (#156)
