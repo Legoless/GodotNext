@@ -150,6 +150,47 @@ void godot_nir_free(void *p_block) {
 
 #endif
 
+#if NIR_ENABLED
+// GodotNext: dxil_mesh_shaders (#122). SPIR-V values from the public SPIR-V specification.
+static constexpr uint32_t SPIRV_BUILTIN_NUM_WORKGROUPS = 24; // BuiltIn NumWorkgroups (gl_NumWorkGroups).
+static constexpr uint32_t SPIRV_BUILTIN_DRAW_INDEX = 4426; // BuiltIn DrawIndex (gl_DrawID).
+static constexpr uint32_t SPIRV_EXECUTION_MODE_OUTPUT_POINTS = 27; // ExecutionMode OutputPoints (layout(points) out).
+
+// Whether a SPIR-V module has an instruction with opcode p_opcode whose word p_word (counted from the opcode word) is
+// p_value and, when p_next_value is not UINT32_MAX, whose next word is p_next_value.
+static bool spirv_has_instruction(Span<uint32_t> p_spirv, uint32_t p_opcode, uint32_t p_word, uint32_t p_value, uint32_t p_next_value = UINT32_MAX) {
+	constexpr uint64_t HEADER_WORDS = 5;
+	const uint32_t min_words = p_word + (p_next_value == UINT32_MAX ? 1 : 2);
+	uint64_t i = HEADER_WORDS;
+	while (i < p_spirv.size()) {
+		const uint32_t word_count = p_spirv[i] >> 16;
+		if (word_count == 0 || i + word_count > p_spirv.size()) {
+			break;
+		}
+		const uint32_t *words = p_spirv.ptr() + i;
+		if ((words[0] & 0xffff) == p_opcode && word_count >= min_words && words[p_word] == p_value && (p_next_value == UINT32_MAX || words[p_word + 1] == p_next_value)) {
+			return true;
+		}
+		i += word_count;
+	}
+	return false;
+}
+
+// Whether a SPIR-V module decorates a variable as the built-in p_builtin (OpDecorate <id> BuiltIn <p_builtin>), which
+// glslang emits only for the built-ins a shader uses.
+static bool spirv_decorates_builtin(Span<uint32_t> p_spirv, uint32_t p_builtin) {
+	constexpr uint32_t OP_DECORATE = 71;
+	constexpr uint32_t DECORATION_BUILT_IN = 11;
+	return spirv_has_instruction(p_spirv, OP_DECORATE, 2, DECORATION_BUILT_IN, p_builtin);
+}
+
+// Whether a SPIR-V module declares the execution mode p_mode (OpExecutionMode <entry point> <p_mode>).
+static bool spirv_declares_execution_mode(Span<uint32_t> p_spirv, uint32_t p_mode) {
+	constexpr uint32_t OP_EXECUTION_MODE = 16;
+	return spirv_has_instruction(p_spirv, OP_EXECUTION_MODE, 2, p_mode);
+}
+#endif // NIR_ENABLED
+
 static D3D12_SHADER_VISIBILITY stages_to_d3d12_visibility(uint32_t p_stages_mask) {
 	switch (p_stages_mask) {
 		case RenderingDeviceCommons::SHADER_STAGE_VERTEX_BIT:
@@ -272,8 +313,8 @@ uint32_t RenderingShaderContainerD3D12::_format() const {
 }
 
 uint32_t RenderingShaderContainerD3D12::_format_version() const {
-	// GodotNext: dxil_atomics (#279).
-	return declares_atomics_without_readnone() ? FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : FORMAT_VERSION;
+	// GodotNext: dxil_atomics (#279), dxil_nonuniform (#293).
+	return get_library_format_version();
 }
 
 uint32_t RenderingShaderContainerD3D12::_from_bytes_reflection_extra_data(const uint8_t *p_bytes) {
@@ -404,7 +445,7 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 			MESA_SHADER_CLOSEST_HIT, // SHADER_STAGE_CLOSEST_HIT
 			MESA_SHADER_MISS, // SHADER_STAGE_MISS
 			MESA_SHADER_INTERSECTION, // SHADER_STAGE_INTERSECTION
-			// GodotNext: rd_mesh_shaders (#178). Not reached until MESH_STAGES_SUPPORTED (#122).
+			// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). Only 25.3.1-gn4 and later reach these stages.
 			MESA_SHADER_TASK, // SHADER_STAGE_TASK
 			MESA_SHADER_MESH, // SHADER_STAGE_MESH
 		};
@@ -446,7 +487,8 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 		RenderingDeviceCommons::ShaderStage stage = p_spirv[i].shader_stage;
 		nir_shader *shader = r_stages_nir_shaders[stage];
 
-		if (stage == RenderingDeviceCommons::SHADER_STAGE_VERTEX) {
+		// GodotNext: dxil_mesh_shaders (#122). Mesh shaders emit SV_Position in clip space just like vertex shaders.
+		if (stage == RenderingDeviceCommons::SHADER_STAGE_VERTEX || stage == RenderingDeviceCommons::SHADER_STAGE_MESH) {
 			dxil_runtime_conf.yz_flip.y_mask = 0xffff;
 			dxil_runtime_conf.yz_flip.mode = DXIL_SPIRV_Y_FLIP_UNCONDITIONAL;
 		} else {
@@ -469,46 +511,67 @@ bool RenderingShaderContainerD3D12::_convert_spirv_to_nir(Span<ReflectShaderStag
 	}
 
 	// Link NIR shaders.
-	for (int i = RenderingDeviceCommons::SHADER_STAGE_MAX - 1; i >= 0; i--) {
-		if (!r_stages_nir_shaders.has(i)) {
-			continue;
-		}
-		nir_shader *shader = r_stages_nir_shaders[i];
-		nir_shader *prev_shader = nullptr;
-		for (int j = i - 1; j >= 0; j--) {
-			if (r_stages_nir_shaders.has(j)) {
-				prev_shader = r_stages_nir_shaders[j];
-				break;
-			}
-		}
-		// GodotNext: dxil_toolchain (#123). Ray-tracing stages are separate libraries with no varyings to link.
-		if (prev_shader && i < RenderingDeviceCommons::SHADER_STAGE_RAYGEN) {
-			dxil_spirv_metadata dxil_metadata = {};
-			dxil_spirv_nir_link(shader, prev_shader, &dxil_runtime_conf, &dxil_metadata);
-		}
+	auto fix_fragment_front_face_position = [](nir_shader *p_fragment, nir_shader *p_prev_shader) {
 		// There is a bug in the Direct3D runtime during creation of a PSO with view instancing. If a fragment
 		// shader uses front/back face detection (SV_IsFrontFace), its signature must include the pixel position
 		// builtin variable (SV_Position), otherwise an Internal Runtime error will occur.
-		if (i == RenderingDeviceCommons::SHADER_STAGE_FRAGMENT) {
-			const bool use_front_face =
-					nir_find_variable_with_location(shader, nir_var_shader_in, VARYING_SLOT_FACE) ||
-					(shader->info.inputs_read & VARYING_BIT_FACE) ||
-					nir_find_variable_with_location(shader, nir_var_system_value, SYSTEM_VALUE_FRONT_FACE) ||
-					BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRONT_FACE);
-			const bool use_position =
-					nir_find_variable_with_location(shader, nir_var_shader_in, VARYING_SLOT_POS) ||
-					(shader->info.inputs_read & VARYING_BIT_POS) ||
-					nir_find_variable_with_location(shader, nir_var_system_value, SYSTEM_VALUE_FRAG_COORD) ||
-					BITSET_TEST(shader->info.system_values_read, SYSTEM_VALUE_FRAG_COORD);
-			if (use_front_face && !use_position) {
-				nir_variable *const pos = nir_variable_create(shader, nir_var_shader_in, glsl_vec4_type(), "gl_FragCoord");
-				pos->data.location = VARYING_SLOT_POS;
-				shader->info.inputs_read |= VARYING_BIT_POS;
+		const bool use_front_face =
+				nir_find_variable_with_location(p_fragment, nir_var_shader_in, VARYING_SLOT_FACE) ||
+				(p_fragment->info.inputs_read & VARYING_BIT_FACE) ||
+				nir_find_variable_with_location(p_fragment, nir_var_system_value, SYSTEM_VALUE_FRONT_FACE) ||
+				BITSET_TEST(p_fragment->info.system_values_read, SYSTEM_VALUE_FRONT_FACE);
+		const bool use_position =
+				nir_find_variable_with_location(p_fragment, nir_var_shader_in, VARYING_SLOT_POS) ||
+				(p_fragment->info.inputs_read & VARYING_BIT_POS) ||
+				nir_find_variable_with_location(p_fragment, nir_var_system_value, SYSTEM_VALUE_FRAG_COORD) ||
+				BITSET_TEST(p_fragment->info.system_values_read, SYSTEM_VALUE_FRAG_COORD);
+		if (use_front_face && !use_position) {
+			nir_variable *const pos = nir_variable_create(p_fragment, nir_var_shader_in, glsl_vec4_type(), "gl_FragCoord");
+			pos->data.location = VARYING_SLOT_POS;
+			p_fragment->info.inputs_read |= VARYING_BIT_POS;
 
-				if (prev_shader) {
-					dxil_reassign_driver_locations(shader, nir_var_shader_in, prev_shader->info.outputs_written, nullptr);
-					dxil_reassign_driver_locations(prev_shader, nir_var_shader_out, shader->info.inputs_read, nullptr);
+			if (p_prev_shader) {
+				dxil_reassign_driver_locations(p_fragment, nir_var_shader_in, p_prev_shader->info.outputs_written, nullptr);
+				dxil_reassign_driver_locations(p_prev_shader, nir_var_shader_out, p_fragment->info.inputs_read, nullptr);
+			}
+		}
+	};
+
+	if (r_stages_nir_shaders.has(RenderingDeviceCommons::SHADER_STAGE_MESH)) {
+		// GodotNext: dxil_mesh_shaders (#122). SHADER_STAGE_TASK and SHADER_STAGE_MESH are numbered above
+		// SHADER_STAGE_FRAGMENT, so link fragment<-mesh and mesh<-task explicitly in pipeline order.
+		nir_shader *mesh_shader = r_stages_nir_shaders[RenderingDeviceCommons::SHADER_STAGE_MESH];
+		if (r_stages_nir_shaders.has(RenderingDeviceCommons::SHADER_STAGE_FRAGMENT)) {
+			nir_shader *fragment_shader = r_stages_nir_shaders[RenderingDeviceCommons::SHADER_STAGE_FRAGMENT];
+			dxil_spirv_metadata dxil_metadata = {};
+			dxil_spirv_nir_link(fragment_shader, mesh_shader, &dxil_runtime_conf, &dxil_metadata);
+			fix_fragment_front_face_position(fragment_shader, mesh_shader);
+		}
+		if (r_stages_nir_shaders.has(RenderingDeviceCommons::SHADER_STAGE_TASK)) {
+			nir_shader *task_shader = r_stages_nir_shaders[RenderingDeviceCommons::SHADER_STAGE_TASK];
+			dxil_spirv_metadata dxil_metadata = {};
+			dxil_spirv_nir_link(mesh_shader, task_shader, &dxil_runtime_conf, &dxil_metadata);
+		}
+	} else {
+		for (int i = RenderingDeviceCommons::SHADER_STAGE_MAX - 1; i >= 0; i--) {
+			if (!r_stages_nir_shaders.has(i)) {
+				continue;
+			}
+			nir_shader *shader = r_stages_nir_shaders[i];
+			nir_shader *prev_shader = nullptr;
+			for (int j = i - 1; j >= 0; j--) {
+				if (r_stages_nir_shaders.has(j)) {
+					prev_shader = r_stages_nir_shaders[j];
+					break;
 				}
+			}
+			// GodotNext: dxil_toolchain (#123). Ray-tracing stages are separate libraries with no varyings to link.
+			if (prev_shader && i < RenderingDeviceCommons::SHADER_STAGE_RAYGEN) {
+				dxil_spirv_metadata dxil_metadata = {};
+				dxil_spirv_nir_link(shader, prev_shader, &dxil_runtime_conf, &dxil_metadata);
+			}
+			if (i == RenderingDeviceCommons::SHADER_STAGE_FRAGMENT) {
+				fix_fragment_front_face_position(shader, prev_shader);
 			}
 		}
 	}
@@ -861,6 +924,12 @@ bool RenderingShaderContainerD3D12::_convert_nir_to_dxil(const HashMap<int, nir_
 			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(RAY_QUERY_SHADER_MODEL)));
 		}
 
+		// GodotNext: dxil_mesh_shaders (#122). Amplification and mesh shaders need 6.5; apply across every stage of a
+		// mesh pipeline so its stages share one shader model.
+		if (p_stages_processed.has_flag(RDC::SHADER_STAGE_TASK_BIT) || p_stages_processed.has_flag(RDC::SHADER_STAGE_MESH_BIT)) {
+			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(MESH_SHADER_MODEL)));
+		}
+
 		// GodotNext: rd_indirect_count (#177). Every stage, so the pipeline's stages share one shader model.
 		if (base_instance_native) {
 			nir_to_dxil_options.shader_model_max = MAX(nir_to_dxil_options.shader_model_max, shader_model_d3d_to_dxil(D3D_SHADER_MODEL(BASE_INSTANCE_NATIVE_SHADER_MODEL)));
@@ -938,9 +1007,11 @@ bool RenderingShaderContainerD3D12::_generate_root_signature(BitField<RenderingD
 
 	// NIR-DXIL runtime data.
 	if (reflection_data_d3d12.nir_runtime_data_root_param_idx == 1) { // Set above to 1 when discovering runtime data is needed.
-		bool is_compute = (reflection_data.pipeline_type == RDC::PIPELINE_TYPE_COMPUTE);
-		uint32_t runtime_data_size = (is_compute ? sizeof(dxil_spirv_compute_runtime_data) : sizeof(dxil_spirv_vertex_runtime_data));
-		D3D12_SHADER_VISIBILITY visibility = (is_compute ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX);
+		// GodotNext: dxil_mesh_shaders (#122). Task and mesh stages read gl_NumWorkGroups from compute runtime data,
+		// and a mesh pipeline denies vertex-shader root access.
+		bool is_compute_or_mesh = (reflection_data.pipeline_type == RDC::PIPELINE_TYPE_COMPUTE) || p_stages_processed.has_flag(RDC::SHADER_STAGE_MESH_BIT);
+		uint32_t runtime_data_size = (is_compute_or_mesh ? sizeof(dxil_spirv_compute_runtime_data) : sizeof(dxil_spirv_vertex_runtime_data));
+		D3D12_SHADER_VISIBILITY visibility = (is_compute_or_mesh ? D3D12_SHADER_VISIBILITY_ALL : D3D12_SHADER_VISIBILITY_VERTEX);
 
 		reflection_data_d3d12.nir_runtime_data_root_param_idx = root_params.size();
 		CD3DX12_ROOT_PARAMETER1 nir_runtime_data;
@@ -1484,12 +1555,33 @@ void RenderingShaderContainerD3D12::_set_from_shader_reflection_post(const Refle
 
 bool RenderingShaderContainerD3D12::_set_code_from_spirv(const ReflectShader &p_shader) {
 #if NIR_ENABLED
-	// GodotNext: rd_mesh_shaders (#178). The Mesa NIR library translates no task or mesh stage to DXIL yet (#122).
-	// RenderingDevice refuses these shaders first (SUPPORTS_MESH_SHADER is false on D3D12); this covers the shader
-	// baker and direct container use, with one error instead of a failure inside Mesa.
+	// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). Only the GodotNext Mesa NIR library 25.3.1-gn4 or
+	// later translates task and mesh stages to DXIL; older libraries refuse them here with one named error.
 	const bool uses_mesh_stages = p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_TASK_BIT) || p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_MESH_BIT);
-	ERR_FAIL_COND_V_MSG(uses_mesh_stages && !MESH_STAGES_SUPPORTED, false,
-			vformat("Shader '%s' has task or mesh shader stages, which Direct3D 12 cannot compile yet: the shader compiler does not translate them to DXIL.", String::utf8(shader_name.get_data())));
+	ERR_FAIL_COND_V_MSG(uses_mesh_stages && !is_mesh_shading_supported(), false,
+			vformat("Shader '%s' has task or mesh shader stages. Direct3D 12 compiles it only with the GodotNext Mesa NIR library (label 25.3.1-gn4 or later), and this build links %s.", String::utf8(shader_name.get_data()), is_raytracing_supported() ? vformat("label %s", get_mesa_label()) : String("the upstream library")));
+	// GodotNext: dxil_mesh_shaders (#122). gl_NumWorkGroups in a task or mesh stage reads the group counts of the draw
+	// from the NIR runtime data root constants (HLSL has no such system value). Behind a task stage, the mesh stage's
+	// counts are the task stage's EmitMeshTasksEXT() arguments, which only the GPU knows, so that read is refused.
+	if (p_shader.stages_bits.has_flag(RDC::SHADER_STAGE_TASK_BIT)) {
+		for (const ReflectShaderStage &stage : p_shader.shader_stages) {
+			ERR_FAIL_COND_V_MSG(stage.shader_stage == RDC::SHADER_STAGE_MESH && spirv_decorates_builtin(stage.spirv(), SPIRV_BUILTIN_NUM_WORKGROUPS), false,
+					vformat("Shader '%s' reads gl_NumWorkGroups in a mesh shader that follows a task shader, which Direct3D 12 cannot provide. Pass the counts in the task payload instead.", String::utf8(shader_name.get_data())));
+		}
+	}
+	// GodotNext: dxil_mesh_shaders (#122). Direct3D 12 has no draw index in task and mesh stages: Mesa reads gl_DrawID
+	// from the vertex layout of the NIR runtime data, but these stages get the compute layout, and indirect mesh draws
+	// (D3D12_DISPATCH_MESH_ARGUMENTS records) carry no index. Mesh shaders there output lines or triangles only
+	// (outputtopology "line" or "triangle"), so layout(points) out is refused too.
+	if (uses_mesh_stages) {
+		for (const ReflectShaderStage &stage : p_shader.shader_stages) {
+			const bool task_or_mesh = stage.shader_stage == RDC::SHADER_STAGE_TASK || stage.shader_stage == RDC::SHADER_STAGE_MESH;
+			ERR_FAIL_COND_V_MSG(task_or_mesh && spirv_decorates_builtin(stage.spirv(), SPIRV_BUILTIN_DRAW_INDEX), false,
+					vformat("Shader '%s' reads gl_DrawID in a %s shader, which Direct3D 12 cannot provide. Pass the draw index in a push constant or a buffer instead.", String::utf8(shader_name.get_data()), stage.shader_stage == RDC::SHADER_STAGE_TASK ? "task" : "mesh"));
+			ERR_FAIL_COND_V_MSG(stage.shader_stage == RDC::SHADER_STAGE_MESH && spirv_declares_execution_mode(stage.spirv(), SPIRV_EXECUTION_MODE_OUTPUT_POINTS), false,
+					vformat("Shader '%s' has a mesh shader that outputs points (layout(points) out), which Direct3D 12 does not support: its mesh shaders output lines or triangles.", String::utf8(shader_name.get_data())));
+		}
+	}
 
 #ifndef NIR_RAYTRACING_ENABLED
 	// GodotNext: dxil_toolchain (#123). The upstream Mesa NIR library has no RayQueryKHR or RayTracingKHR, so these
@@ -1596,6 +1688,32 @@ const char *RenderingShaderContainerD3D12::get_mesa_label() {
 // GodotNext: dxil_atomics (#279). drivers/d3d12/SCsub defines NIR_ATOMICS_WITHOUT_READNONE for 25.3.1-gn3 and later.
 bool RenderingShaderContainerD3D12::declares_atomics_without_readnone() {
 #ifdef NIR_ATOMICS_WITHOUT_READNONE
+	return true;
+#else
+	return false;
+#endif
+}
+
+// GodotNext: dxil_nonuniform (#293). drivers/d3d12/SCsub defines NIR_NONUNIFORM_RESOURCE_INDEX for 25.3.1-gn4 and later.
+bool RenderingShaderContainerD3D12::marks_non_uniform_resource_indices() {
+#ifdef NIR_NONUNIFORM_RESOURCE_INDEX
+	return true;
+#else
+	return false;
+#endif
+}
+
+// GodotNext: dxil_nonuniform (#293).
+uint32_t RenderingShaderContainerD3D12::get_library_format_version() {
+	if (marks_non_uniform_resource_indices()) {
+		return FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX;
+	}
+	return declares_atomics_without_readnone() ? FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : FORMAT_VERSION;
+}
+
+// GodotNext: dxil_mesh_shaders (#122). drivers/d3d12/SCsub defines NIR_MESH_SHADERS_ENABLED for 25.3.1-gn4 and later.
+bool RenderingShaderContainerD3D12::is_mesh_shading_supported() {
+#ifdef NIR_MESH_SHADERS_ENABLED
 	return true;
 #else
 	return false;
@@ -1722,6 +1840,11 @@ RenderingDeviceCommons::ShaderSpirvVersion RenderingShaderContainerFormatD3D12::
 // GodotNext: d3d12_dxr (#118)
 bool RenderingShaderContainerFormatD3D12::supports_acceleration_structures() const {
 	return RenderingShaderContainerD3D12::is_raytracing_supported();
+}
+
+// GodotNext: dxil_mesh_shaders (#122)
+bool RenderingShaderContainerFormatD3D12::supports_mesh_shaders() const {
+	return RenderingShaderContainerD3D12::is_mesh_shading_supported();
 }
 
 RenderingShaderContainerFormatD3D12::RenderingShaderContainerFormatD3D12() {

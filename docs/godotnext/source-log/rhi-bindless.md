@@ -146,3 +146,47 @@ an M5 Max run.
 | Consulted by | The #176 implementer |
 | Used in | `servers/rendering/rendering_shader_container.cpp` (`reflect_spirv`) |
 | Copied files | None; SPIRV-Reflect is not modified |
+
+## Non-uniform bindless table reads on Direct3D 12 (#293)
+
+### Public DXIL specification and Mesa SPIR-V to DXIL
+
+| Field | Value |
+|---|---|
+| What | `dx.op.createHandle` (opcode 57, `i8 resourceClass, i32 rangeId, i32 index, i1 nonUniformIndex`) and `dx.op.createHandleFromBinding` (opcode 217, `%dx.types.ResBind, i32 index, i1 nonUniformIndex`), where `nonUniformIndex` marks an index that may vary across invocations of a wave (`NonUniformResourceIndex` in HLSL); how SPIR-V `NonUniform` (`GL_EXT_nonuniform_qualifier` / `nonuniformEXT`) reaches Mesa NIR as `ACCESS_NON_UNIFORM` on `vulkan_resource_index`, texture instructions (`index_non_uniform`, `texture_non_uniform`, `sampler_non_uniform`) and image/SSBO intrinsics (`vtn_variables.c`, `spirv_to_nir.c`, `dxil_spirv_nir_lower_bindless.c`); and black-box `dxc.exe` disassembly output (Windows SDK 10.0.26100.0, DXC 1.9.2602.17, no DXC compiler source read) on a small original compute shader at `cs_6_2`, `cs_6_5` and `cs_6_6` confirming `i1 true` on dynamic `NonUniformResourceIndex` accesses and `i1 false` on constant and uniform accesses |
+| Upstream | https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst and https://learn.microsoft.com/en-us/windows/win32/direct3d12/resource-binding-in-hlsl#nonuniformresourceindex; Mesa `mesa-25.3.1` (`src/microsoft/compiler/nir_to_dxil.c`, `src/compiler/spirv/*`) |
+| Version | `DXIL.rst` and Microsoft Learn as published on 2026-11-16; Mesa 25.3.1; Windows SDK 10.0.26100.0 `dxc.exe` output |
+| License | `DXIL.rst`: LLVM/NCSA/MIT documentation; Microsoft Learn: CC-BY 4.0; Mesa: MIT. Consulted, not copied |
+| Read on | 2026-11-16, for issue #293 |
+| Consulted by | The #293 implementer |
+| Used in | The private GodotNext Mesa NIR library `25.3.1-gn4` (`docs/godotnext/clean-room.md`), `drivers/d3d12/SCsub`, `drivers/d3d12/rendering_shader_container_d3d12.{h,cpp}`, `servers/rendering/renderer_rd/shader_rd.cpp`, `editor/export/shader_baker/shader_baker_export_plugin.cpp` and `tests/servers/rendering/test_rendering_shader_container.cpp` |
+| Copied files | None |
+
+How it was used: the fifth Mesa patch in `25.3.1-gn4` first records which descriptor loads and
+descriptor-array derefs a `NonUniform` access reads its handle from (`ACCESS_NON_UNIFORM` on buffer and
+image intrinsics, `texture_non_uniform` and `sampler_non_uniform` on texture instructions), then passes
+`nonUniformIndex = true` when it creates those handles at a dynamic index; every other handle keeps
+`false`. Builds with `25.3.1-gn4` write D3D12 shader containers with format version 6 so shader caches
+rebuild containers compiled by older libraries once. The DXIL check is in
+`tests/servers/rendering/test_rendering_shader_container.cpp`, on an original shader and on the
+`rd_parity/bindless` fixture's own compute shader in its three `--tables` variants.
+
+### DXIL libraries: black-box DXC output and its bitcode records
+
+| Field | Value |
+|---|---|
+| What | Black-box `dxc.exe` output (Windows SDK 10.0.26100.0, DXC 1.9.2602.17, no DXC compiler source read) for a small original HLSL library (ray generation, closest-hit, any-hit and miss shaders reading texture, sampler, structured-buffer and byte-address-buffer arrays at `NonUniformResourceIndex()` and at uniform indices) at `lib_6_3`, `lib_6_5` and `lib_6_6`: the disassembly (`-Fc`) shows `dx.op.createHandleForLib` (opcode 160) with no `nonUniformIndex` operand, and the mark as `!dx.nonuniform !N` with `!N = !{i32 1}` on the `getelementptr` into the resource array, only on the non-uniform reads. A record dump of the same bitcode with LLVM 18's `llvm-bcanalyzer -dump` (a black-box tool) shows how it is stored: 18 `METADATA_KIND` records (code 6, `[kind, name...]`) in a second `METADATA_BLOCK` after the metadata nodes, `dx.nonuniform` being kind 15; and, at the end of each function block, after its value symbol table, a `METADATA_ATTACHMENT` block (block 16) of records (code 11) `[instruction, kind, node]`, where instruction counts every instruction of the function from 0 (void ones included) and node is the 0-based metadata id. LLVM's public bitcode format page was also read; its metadata sections are placeholders |
+| Upstream | Windows SDK `dxc.exe` and LLVM 18 `llvm-bcanalyzer` (run as tools, outputs only); https://llvm.org/docs/BitCodeFormat.html |
+| Version | Windows SDK 10.0.26100.0 (DXC 1.9.2602.17); LLVM 18; the LLVM page as published on 2026-11-18 |
+| License | Tool outputs of shaders written for this check; LLVM documentation: Apache-2.0 with LLVM exception. Consulted, not copied |
+| Read on | 2026-11-18, for issue #293 |
+| Consulted by | The #293 implementer |
+| Used in | The private GodotNext Mesa NIR library `25.3.1-gn4` (`docs/godotnext/clean-room.md`), `drivers/d3d12/rendering_shader_container_d3d12.h`, `drivers/d3d12/rendering_device_driver_d3d12.h`, `doc/classes/RenderingDevice.xml` and `tests/servers/rendering/test_rendering_shader_container.cpp` |
+| Copied files | None |
+
+How it was used: ray-tracing stages are DXIL libraries, where `25.3.1-gn4`'s fifth patch could not pass its flag
+(`dx.op.createHandleForLib` has no operand for it). Its seventh patch adds instruction metadata attachments to
+Mesa's DXIL writer in the layout above, emitted only when an instruction is marked, and attaches
+`!dx.nonuniform !{i32 1}` to the `getelementptr` of a `NonUniform` access in a library. The DXIL check is in
+`tests/servers/rendering/test_rendering_shader_container.cpp`, on `rd_parity/rt_pipeline.gd`'s any-hit and
+closest-hit stages (`alpha_textures[nonuniformEXT(slot)]`) and on the same stages without `nonuniformEXT`.

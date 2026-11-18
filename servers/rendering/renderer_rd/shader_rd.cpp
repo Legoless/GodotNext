@@ -762,11 +762,13 @@ static const char *shader_file_header = "GDSC";
 // version hash opens files that hold older (version-4) containers and rebuilds them the same way.
 // GodotNext: rd_mesh_shaders (#178). So does container version 6, whose older containers are version 5.
 // GodotNext: dxil_atomics (#279). Builds of the same commit that link different Mesa NIR libraries also share the
-// cache path. A build with 25.3.1-gn3 or later writes D3D12 containers with format version 5 and an older library 4
-// (3 and 2 before #121), and _load_from_cache() rebuilds containers of any other format version the same way. One
-// check covers both rules: it reads the container version first, and the one warning per run names the container
-// version or, for a container of the current version, the format version. Builds with 25.3.1-gn2 and the upstream
-// library both write 4, so they still reuse each other's containers, as before #279.
+// cache path. A build with 25.3.1-gn3 writes D3D12 containers with format version 5 and an older library 4 (3 and 2
+// before #121), and _load_from_cache() rebuilds containers of any other format version the same way. One check covers
+// both rules: it reads the container version first, and the one warning per run names the container version or, for a
+// container of the current version, the format version. Builds with 25.3.1-gn2 and the upstream library both write 4,
+// so they still reuse each other's containers, as before #279.
+// GodotNext: dxil_nonuniform (#293). 25.3.1-gn4 or later writes format version 6 (non-uniform resource indices), and
+// containers of the other format versions are rebuilt the same way.
 static const uint32_t cache_file_version = 5;
 
 String ShaderRD::_get_cache_file_relative_path(Version *p_version, int p_group, const String &p_api_name) {

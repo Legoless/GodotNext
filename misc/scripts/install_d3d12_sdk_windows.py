@@ -25,7 +25,7 @@ parser.add_argument(
     "--mesa-archive",
     default="",
     help="Install the Mesa NIR library from this local archive (a godot-nir-static release zip, for example the GodotNext "
-    "build labeled 25.3.1-gn3) instead of downloading the upstream release. Only the --mesa-arch variant is replaced.",
+    "build labeled 25.3.1-gn4) instead of downloading the upstream release. Only the --mesa-arch variant is replaced.",
 )
 parser.add_argument(
     "--mesa-arch",

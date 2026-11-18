@@ -161,11 +161,10 @@ class RenderingDeviceDriverD3D12 : public RenderingDeviceDriver {
 		// Resource binding tier 2 or higher (tier 1 allows 128 SRVs per stage) and enhanced barriers (the graph
 		// places the tables' barriers; the legacy resource-state path would have to track every slot), on any
 		// vendor's GPU. Shaders read a table through a bounded array that RenderingShaderContainerD3D12 gives the
-		// runtime array (see _remap_bindless_tables()). Mesa's NIR-to-DXIL does not mark those reads
-		// non-uniform (createHandle's nonUniformIndex is false), which HLSL requires for an index that varies
-		// across a wave; a GPU may treat an unmarked index as uniform and give the whole wave one lane's
-		// descriptor. Reads at non-uniform indices therefore rely on the hardware reading each lane's own
-		// descriptor.
+		// runtime array (see _remap_bindless_tables()). Builds with the GodotNext Mesa NIR library 25.3.1-gn4 or
+		// later mark nonuniformEXT table reads as non-uniform in every stage (#293): createHandle's nonUniformIndex,
+		// or !dx.nonuniform on the resource-array getelementptr in the DXIL libraries of ray-tracing stages. With
+		// older libraries such reads rely on the hardware reading each lane's own descriptor.
 		bool supported = false;
 		uint32_t resource_descriptors = 0; // Reserved in the CBV/SRV/UAV heap.
 		uint32_t sampler_descriptors = 0; // Reserved in the sampler heap.

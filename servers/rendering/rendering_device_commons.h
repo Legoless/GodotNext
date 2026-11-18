@@ -1098,10 +1098,11 @@ public:
 		// decrement, bitwise, signed min and max, load and store; and any 64-bit atomic on shared memory
 		// or on a 64-bit image that is arrayed, multisampled or not 2D.
 		SUPPORTS_INT64_ATOMIC_ARITH,
-		// GodotNext: rd_bindless (#176)
+		// GodotNext: rd_bindless (#176), dxil_nonuniform (#293)
 		// Bindless tables (plan §21.1 C4): texture and storage-buffer tables of at least 65,536 slots, sampler
-		// tables up to LIMIT_MAX_BINDLESS_SAMPLERS, read at non-uniform indices. On Direct3D 12 such reads are
-		// checked only on NVIDIA GPUs and WARP (see the SUPPORTS_BINDLESS note in the class reference).
+		// tables up to LIMIT_MAX_BINDLESS_SAMPLERS, read at non-uniform indices. On Direct3D 12 builds that link a
+		// Mesa NIR library older than 25.3.1-gn4, such reads are checked only on NVIDIA GPUs and WARP (see the
+		// SUPPORTS_BINDLESS note in the class reference).
 		SUPPORTS_BINDLESS,
 		// GodotNext: rd_indirect_count (#177)
 		// draw_list_draw_indirect_count(): indirect draws whose count a GPU buffer holds.

@@ -43,6 +43,8 @@ TEST_FORCE_LINK(test_rendering_shader_container)
 // version follows whether the Mesa NIR library declares atomics without readnone, and the atomic-declaration case
 // disassembles DXIL the same way to check how the linked library declares the DXIL atomic operations (without
 // readnone from 25.3.1-gn3 on).
+// GodotNext: dxil_nonuniform (#293). The D3D12 format version is 6 with 25.3.1-gn4 or later, and the non-uniform case
+// disassembles DXIL to check which createHandle calls mark their index non-uniform (from 25.3.1-gn4 on).
 
 #include "core/error/error_macros.h"
 #include "core/templates/local_vector.h"
@@ -859,13 +861,14 @@ Vector<uint8_t> decompressed_code(const Ref<RenderingShaderContainer> &p_contain
 	return code;
 }
 
-// GodotNext: dxil_atomics (#279). Whether a GodotNext Mesa NIR library label ("25.3.1-gn3") is 25.3.1-gn3 or later.
-bool mesa_label_declares_atomics_without_readnone(const String &p_label) {
+// GodotNext: dxil_atomics (#279), dxil_nonuniform (#293). Whether a GodotNext Mesa NIR library label ("25.3.1-gn3") is
+// 25.3.1-gn<p_gn> or later, as drivers/d3d12/SCsub compares them. An empty label (the upstream library) is not.
+bool mesa_label_is_at_least(const String &p_label, int p_gn) {
 	const PackedStringArray parts = p_label.replace("-gn", ".").split(".");
 	if (parts.size() != 4) {
 		return false;
 	}
-	const int minimum[4] = { 25, 3, 1, 3 };
+	const int minimum[4] = { 25, 3, 1, p_gn };
 	for (int i = 0; i < 4; i++) {
 		const int part = parts[i].to_int();
 		if (part != minimum[i]) {
@@ -873,6 +876,16 @@ bool mesa_label_declares_atomics_without_readnone(const String &p_label) {
 		}
 	}
 	return true;
+}
+
+// GodotNext: dxil_atomics (#279). 25.3.1-gn3 or later.
+bool mesa_label_declares_atomics_without_readnone(const String &p_label) {
+	return mesa_label_is_at_least(p_label, 3);
+}
+
+// GodotNext: dxil_nonuniform (#293). 25.3.1-gn4 or later.
+bool mesa_label_marks_non_uniform_resource_indices(const String &p_label) {
+	return mesa_label_is_at_least(p_label, 4);
 }
 
 TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader models and the ray-tracing gate") {
@@ -887,7 +900,24 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader mod
 	CHECK_FALSE(mesa_label_declares_atomics_without_readnone(""));
 	const bool atomics_without_readnone = RenderingShaderContainerD3D12::declares_atomics_without_readnone();
 	CHECK(atomics_without_readnone == mesa_label_declares_atomics_without_readnone(RenderingShaderContainerD3D12::get_mesa_label()));
-	const uint32_t format_version = atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : RenderingShaderContainerD3D12::FORMAT_VERSION;
+	// GodotNext: dxil_nonuniform (#293). 6 when the library also marks non-uniform resource indices (25.3.1-gn4 or
+	// later), which also declares atomics without readnone.
+	CHECK(RenderingShaderContainerD3D12::FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX == 6);
+	CHECK(mesa_label_marks_non_uniform_resource_indices("25.3.1-gn4"));
+	CHECK(mesa_label_marks_non_uniform_resource_indices("25.3.2-gn1"));
+	CHECK_FALSE(mesa_label_marks_non_uniform_resource_indices("25.3.1-gn3"));
+	CHECK_FALSE(mesa_label_marks_non_uniform_resource_indices(""));
+	const bool non_uniform_resource_indices = RenderingShaderContainerD3D12::marks_non_uniform_resource_indices();
+	CHECK(non_uniform_resource_indices == mesa_label_marks_non_uniform_resource_indices(RenderingShaderContainerD3D12::get_mesa_label()));
+	if (non_uniform_resource_indices) {
+		CHECK(atomics_without_readnone);
+	}
+	// GodotNext: dxil_mesh_shaders (#122). 25.3.1-gn4 and later also translate task and mesh stages to DXIL.
+	CHECK(RenderingShaderContainerD3D12::is_mesh_shading_supported() == mesa_label_is_at_least(RenderingShaderContainerD3D12::get_mesa_label(), 4));
+	const uint32_t format_version = non_uniform_resource_indices
+			? RenderingShaderContainerD3D12::FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX
+			: (atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE : RenderingShaderContainerD3D12::FORMAT_VERSION);
+	CHECK(RenderingShaderContainerD3D12::get_library_format_version() == format_version);
 
 	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
 	REQUIRE(lib_d3d12 != nullptr);
@@ -930,9 +960,12 @@ TEST_CASE("[ShaderContainer][D3D12] D3D12 containers: format version, shader mod
 		CHECK(capture.count == 0);
 		CHECK_FALSE(Object::cast_to<RenderingShaderContainerD3D12>(loaded.ptr())->get_shader_reflection_d3d12().has_raytracing_stage_data);
 	}
-	{
-		// A container the other kind of library wrote is not current, so shader caches rebuild it.
-		const uint32_t other_format_version = atomics_without_readnone ? RenderingShaderContainerD3D12::FORMAT_VERSION : RenderingShaderContainerD3D12::FORMAT_VERSION_ATOMICS_WITHOUT_READNONE;
+	// A container another kind of library wrote is not current, so shader caches rebuild it.
+	const uint32_t library_format_versions[] = { 4, 5, 6 };
+	for (const uint32_t other_format_version : library_format_versions) {
+		if (other_format_version == format_version) {
+			continue;
+		}
 		PackedByteArray other = bytes;
 		write_u32(other, HEADER_FORMAT_VERSION_OFFSET, other_format_version);
 		uint32_t found = 0;
@@ -1315,26 +1348,264 @@ TEST_CASE("[ShaderContainer][D3D12] GLSL ray query and a raygen, any-hit, closes
 	}
 }
 
-// GodotNext: rd_mesh_shaders (#178). Until the shader compiler translates task and mesh stages to DXIL (#122), the
-// container refuses them with one named error, for the shader baker and direct container use (RenderingDevice refuses
-// them first, as SUPPORTS_MESH_SHADER is false on Direct3D 12).
-TEST_CASE("[ShaderContainer][D3D12] Task and mesh stages are refused with one error until they translate to DXIL") {
-	CHECK_FALSE(RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED);
+// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). With 25.3.1-gn4 or later, task and mesh stages
+// compile to Shader Model 6.5 amplification (kind 14) and mesh (kind 13) DXIL; older libraries refuse them with one
+// named error.
+const char *MESH_SPEC_AND_CULL_TASK_GLSL = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 8, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint GROUP_SCALE = 1u;
+
+struct VecPayload {
+	uvec4 counts;
+};
+taskPayloadSharedEXT VecPayload payload;
+
+void main() {
+	if (gl_LocalInvocationIndex == 0u) {
+		payload.counts = uvec4(gl_NumWorkGroups.xyz, GROUP_SCALE);
+	}
+	EmitMeshTasksEXT(GROUP_SCALE, 1u, 1u);
+}
+)";
+
+const char *MESH_SPEC_AND_CULL_LINES_GLSL = R"(#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 8, local_size_y = 1, local_size_z = 1) in;
+layout(lines, max_vertices = 2, max_primitives = 1) out;
+layout(constant_id = 0) const uint GROUP_SCALE = 1u;
+
+struct VecPayload {
+	uvec4 counts;
+};
+taskPayloadSharedEXT VecPayload payload;
+
+layout(location = 0) out vec4 vertex_color[];
+
+void main() {
+	SetMeshOutputsEXT(2, 1);
+	if (gl_LocalInvocationIndex == 0u) {
+		gl_MeshVerticesEXT[0].gl_Position = vec4(-0.5, 0.0, 0.0, 1.0);
+		gl_MeshVerticesEXT[1].gl_Position = vec4(0.5, 0.0, 0.0, 1.0);
+		vertex_color[0] = vec4(float(payload.counts.x + GROUP_SCALE), 0.0, 0.0, 1.0);
+		vertex_color[1] = vec4(0.0, 1.0, 0.0, 1.0);
+		gl_PrimitiveLineIndicesEXT[0] = uvec2(0u, 1u);
+		gl_MeshPrimitivesEXT[0].gl_CullPrimitiveEXT = (payload.counts.w == 0u);
+	}
+}
+)";
+
+const char *MESH_SPEC_FRAGMENT_GLSL = R"(#version 460
+
+layout(constant_id = 0) const uint GROUP_SCALE = 1u;
+layout(location = 0) in vec4 vertex_color;
+layout(location = 0) out vec4 frag_color;
+
+void main() {
+	frag_color = vertex_color * float(GROUP_SCALE);
+}
+)";
+
+TEST_CASE("[ShaderContainer][D3D12] Task and mesh stages compile to SM 6.5 amplification and mesh DXIL with 25.3.1-gn4 or later") {
 	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
 	REQUIRE(lib_d3d12 != nullptr);
 	RenderingShaderContainerFormatD3D12 format;
 	format.set_lib_d3d12(lib_d3d12);
+	// The shader baker's gate follows the linked library's label (drivers/d3d12/SCsub), not the container's own flag.
+	CHECK(format.supports_mesh_shaders() == mesa_label_is_at_least(RenderingShaderContainerD3D12::get_mesa_label(), 4));
+
 	const Vector<RDC::ShaderStageSPIRVData> stages = task_mesh_fragment_stages();
 	REQUIRE(stages.size() == 3);
 	for (const RDC::ShaderStageSPIRVData &stage : stages) {
 		REQUIRE_FALSE(stage.spirv.is_empty());
 	}
+
+	const DXILValidationStats validation_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
 	Ref<RenderingShaderContainer> container = format.create_container();
-	ErrorCapture capture;
-	CHECK_FALSE(container->set_code_from_spirv("task_mesh", stages));
-	CHECK(capture.count == 1);
-	CHECK_MESSAGE(capture.first_message.contains("Shader 'task_mesh' has task or mesh shader stages, which Direct3D 12 cannot compile yet"), capture.first_message);
-	CHECK(container->shaders.is_empty());
+	if (!RenderingShaderContainerD3D12::is_mesh_shading_supported()) {
+		ErrorCapture capture;
+		CHECK_FALSE(container->set_code_from_spirv("task_mesh", stages));
+		CHECK(capture.count == 1);
+		CHECK_MESSAGE(capture.first_message.contains("Shader 'task_mesh' has task or mesh shader stages"), capture.first_message);
+		CHECK(container->shaders.is_empty());
+		check_dxil_validation(validation_before, 0);
+		return;
+	}
+
+	Vector<RDC::ShaderStageSPIRVData> mesh_only_stages;
+	mesh_only_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, MESH_ONLY_GLSL));
+	mesh_only_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+
+	Vector<RDC::ShaderStageSPIRVData> spec_cull_stages;
+	spec_cull_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_TASK, MESH_SPEC_AND_CULL_TASK_GLSL));
+	spec_cull_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, MESH_SPEC_AND_CULL_LINES_GLSL));
+	spec_cull_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_SPEC_FRAGMENT_GLSL));
+
+	Ref<RenderingShaderContainer> mesh_only = format.create_container();
+	Ref<RenderingShaderContainer> spec_cull = format.create_container();
+	{
+		ErrorCapture capture;
+		REQUIRE(container->set_code_from_spirv("task_mesh", stages));
+		REQUIRE(mesh_only->set_code_from_spirv("mesh_only", mesh_only_stages));
+		REQUIRE(spec_cull->set_code_from_spirv("mesh_spec_cull", spec_cull_stages));
+		CHECK_MESSAGE(capture.count == 0, capture.first_message);
+	}
+
+	// DXIL shader kinds from the public specification: pixel 0, mesh 13, amplification 14, all at Shader Model 6.5.
+	REQUIRE(container->shaders.size() == 3);
+	REQUIRE(mesh_only->shaders.size() == 2);
+	REQUIRE(spec_cull->shaders.size() == 3);
+	for (int i = 0; i < container->shaders.size(); i++) {
+		const RDC::ShaderStage stage = container->shaders[i].shader_stage;
+		const uint32_t expected_kind = stage == RDC::SHADER_STAGE_TASK ? 14u : (stage == RDC::SHADER_STAGE_MESH ? 13u : 0u);
+		CHECK_MESSAGE(dxil_program_version(decompressed_code(container, i)) == ((expected_kind << 16) | 0x65), String(RDC::SHADER_STAGE_NAMES[stage]));
+	}
+	for (int i = 0; i < mesh_only->shaders.size(); i++) {
+		const RDC::ShaderStage stage = mesh_only->shaders[i].shader_stage;
+		const uint32_t expected_kind = stage == RDC::SHADER_STAGE_MESH ? 13u : 0u;
+		CHECK_MESSAGE(dxil_program_version(decompressed_code(mesh_only, i)) == ((expected_kind << 16) | 0x65), String(RDC::SHADER_STAGE_NAMES[stage]));
+	}
+
+	Ref<RenderingShaderContainer> loaded = format.create_container();
+	REQUIRE(loaded->from_bytes(container->to_bytes()));
+	check_task_mesh_reflection(loaded->get_shader_reflection());
+	const RenderingShaderContainerD3D12 *loaded_d3d12 = Object::cast_to<RenderingShaderContainerD3D12>(loaded.ptr());
+	REQUIRE(loaded_d3d12 != nullptr);
+	CHECK((loaded_d3d12->get_shader_reflection_d3d12().dxil_push_constant_stages & RDC::SHADER_STAGE_MESH_BIT) != 0);
+	CHECK(!loaded_d3d12->get_shader_reflection_d3d12().root_signature_bytes.is_empty());
+
+	// Specialization constants in task, mesh and fragment stages each get their own bitcode offset, and
+	// gl_NumWorkGroups in the task stage requests NIR compute runtime data in the root signature.
+	const RenderingShaderContainerD3D12 *spec_d3d12 = Object::cast_to<RenderingShaderContainerD3D12>(spec_cull.ptr());
+	REQUIRE(spec_d3d12 != nullptr);
+	const RenderingShaderContainerD3D12::ShaderReflectionD3D12 spec_refl = spec_d3d12->get_shader_reflection_d3d12();
+	CHECK(spec_refl.nir_runtime_data_root_param_idx != UINT32_MAX);
+	REQUIRE(spec_refl.reflection_specialization_data_d3d12.size() == 1);
+	const uint64_t (&bit_offsets)[D3D12_BITCODE_OFFSETS_NUM_STAGES] = spec_refl.reflection_specialization_data_d3d12[0].stages_bit_offsets;
+	CHECK(bit_offsets[RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RDC::SHADER_STAGE_TASK]] != 0);
+	CHECK(bit_offsets[RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RDC::SHADER_STAGE_MESH]] != 0);
+	CHECK(bit_offsets[RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RDC::SHADER_STAGE_FRAGMENT]] != 0);
+	HashMap<RDC::ShaderStage, Vector<uint8_t>> stage_bytecodes;
+	for (int i = 0; i < spec_cull->shaders.size(); i++) {
+		stage_bytecodes.insert(spec_cull->shaders[i].shader_stage, decompressed_code(spec_cull, i));
+	}
+	const int32_t patched_scale = 3;
+	const uint32_t patched_mask = RenderingDXIL::patch_specialization_constant(RDC::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_INT, &patched_scale, bit_offsets, stage_bytecodes, false);
+	CHECK(patched_mask == uint32_t(RDC::SHADER_STAGE_TASK_BIT | RDC::SHADER_STAGE_MESH_BIT | RDC::SHADER_STAGE_FRAGMENT_BIT));
+
+	check_dxil_validation(validation_before, 8);
+
+	// gl_NumWorkGroups: a mesh stage without a task stage reads the draw's group counts from the NIR runtime data. Behind
+	// a task stage its counts are the task stage's EmitMeshTasksEXT() arguments, so the read is refused with one error.
+	{
+		const DXILValidationStats num_workgroups_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+		const String direct_source = String::utf8(MESH_ONLY_GLSL).replace("primitive_id[0] = gl_WorkGroupID.x;", "primitive_id[0] = gl_WorkGroupID.x + gl_NumWorkGroups.x;");
+		const String behind_task_source = String::utf8(MESH_MESH_GLSL).replace("+ params.base;", "+ params.base + gl_NumWorkGroups.x;");
+		CHECK(direct_source.contains("gl_NumWorkGroups"));
+		CHECK(behind_task_source.contains("gl_NumWorkGroups"));
+
+		Vector<RDC::ShaderStageSPIRVData> direct_stages;
+		direct_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, direct_source.utf8().get_data()));
+		direct_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+		Ref<RenderingShaderContainer> direct = format.create_container();
+		{
+			ErrorCapture capture;
+			CHECK(direct->set_code_from_spirv("mesh_num_workgroups", direct_stages));
+			CHECK_MESSAGE(capture.count == 0, capture.first_message);
+		}
+		const RenderingShaderContainerD3D12 *direct_d3d12 = Object::cast_to<RenderingShaderContainerD3D12>(direct.ptr());
+		CHECK(direct_d3d12 != nullptr);
+		if (direct_d3d12 != nullptr) {
+			CHECK(direct_d3d12->get_shader_reflection_d3d12().nir_runtime_data_root_param_idx != UINT32_MAX);
+		}
+
+		Vector<RDC::ShaderStageSPIRVData> behind_task_stages;
+		behind_task_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_TASK, MESH_TASK_GLSL));
+		behind_task_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, behind_task_source.utf8().get_data()));
+		behind_task_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+		Ref<RenderingShaderContainer> behind_task = format.create_container();
+		ErrorCapture capture;
+		CHECK_FALSE(behind_task->set_code_from_spirv("mesh_num_workgroups_behind_task", behind_task_stages));
+		CHECK(capture.count == 1);
+		CHECK_MESSAGE(capture.first_message.contains("Shader 'mesh_num_workgroups_behind_task' reads gl_NumWorkGroups in a mesh shader that follows a task shader"), capture.first_message);
+		CHECK(behind_task->shaders.is_empty());
+		check_dxil_validation(num_workgroups_before, 2);
+	}
+
+	// gl_DrawID in a task or mesh stage and a mesh stage that outputs points are refused with one error each: Direct3D 12
+	// has no draw index in these stages (an indirect mesh draw record carries only the group counts), and its mesh
+	// shaders output lines or triangles only.
+	{
+		const DXILValidationStats refused_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+		const String mesh_draw_id_source = String::utf8(MESH_ONLY_GLSL).replace("primitive_id[0] = gl_WorkGroupID.x;", "primitive_id[0] = gl_WorkGroupID.x + uint(gl_DrawID);");
+		const String task_draw_id_source = String::utf8(MESH_TASK_GLSL).replace("EmitMeshTasksEXT(32, 1, 1);", "EmitMeshTasksEXT(32u + uint(gl_DrawID), 1u, 1u);");
+		const String points_source = String::utf8(MESH_ONLY_GLSL).replace("layout(triangles, max_vertices = 3, max_primitives = 1) out;", "layout(points, max_vertices = 3, max_primitives = 1) out;").replace("gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);", "gl_PrimitivePointIndicesEXT[0] = 0u;");
+		CHECK(mesh_draw_id_source.contains("gl_DrawID"));
+		CHECK(task_draw_id_source.contains("gl_DrawID"));
+		CHECK(points_source.contains("layout(points"));
+		CHECK(points_source.contains("gl_PrimitivePointIndicesEXT"));
+
+		Vector<RDC::ShaderStageSPIRVData> mesh_draw_id_stages;
+		mesh_draw_id_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, mesh_draw_id_source.utf8().get_data()));
+		mesh_draw_id_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+		Vector<RDC::ShaderStageSPIRVData> task_draw_id_stages;
+		task_draw_id_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_TASK, task_draw_id_source.utf8().get_data()));
+		task_draw_id_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, MESH_MESH_GLSL));
+		task_draw_id_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+		Vector<RDC::ShaderStageSPIRVData> points_stages;
+		points_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_MESH, points_source.utf8().get_data()));
+		points_stages.push_back(compile_mesh_case_stage(RDC::SHADER_STAGE_FRAGMENT, MESH_FRAGMENT_GLSL));
+
+		struct RefusedCase {
+			const char *name;
+			const Vector<RDC::ShaderStageSPIRVData> *stages;
+			const char *message;
+		};
+		const RefusedCase refused_cases[] = {
+			{ "mesh_draw_id", &mesh_draw_id_stages, "Shader 'mesh_draw_id' reads gl_DrawID in a mesh shader, which Direct3D 12 cannot provide." },
+			{ "task_draw_id", &task_draw_id_stages, "Shader 'task_draw_id' reads gl_DrawID in a task shader, which Direct3D 12 cannot provide." },
+			{ "mesh_points", &points_stages, "Shader 'mesh_points' has a mesh shader that outputs points (layout(points) out), which Direct3D 12 does not support" },
+		};
+		for (const RefusedCase &refused_case : refused_cases) {
+			Ref<RenderingShaderContainer> refused = format.create_container();
+			ErrorCapture capture;
+			CHECK_FALSE(refused->set_code_from_spirv(refused_case.name, *refused_case.stages));
+			CHECK(capture.count == 1);
+			CHECK_MESSAGE(capture.first_message.contains(refused_case.message), capture.first_message);
+			CHECK(refused->shaders.is_empty());
+		}
+		check_dxil_validation(refused_before, 0);
+	}
+
+#ifdef DEBUG_ENABLED
+	// Check the emitted DXIL mesh/amplification operations: setMeshOutputCounts (168), emitIndices (169),
+	// getMeshPayload (170), storeVertexOutput (171), storePrimitiveOutput (172) and dispatchMesh (173).
+	String error;
+	const Vector<uint8_t> as_blob = decompressed_code(container, 0);
+	const Vector<uint8_t> ms_blob = decompressed_code(container, 1);
+	const String as_disasm = RenderingShaderContainerD3D12::disassemble_dxil(as_blob, &error);
+	CHECK_MESSAGE(!as_disasm.is_empty(), error);
+	if (!as_disasm.is_empty()) {
+		CHECK_MESSAGE(as_disasm.find("@dx.op.dispatchMesh.") >= 0, as_disasm);
+		CHECK_MESSAGE(as_disasm.contains("addrspace(3)*"), as_disasm);
+	}
+	const String ms_disasm = RenderingShaderContainerD3D12::disassemble_dxil(ms_blob, &error);
+	CHECK_MESSAGE(!ms_disasm.is_empty(), error);
+	if (!ms_disasm.is_empty()) {
+		CHECK_MESSAGE(ms_disasm.find("@dx.op.getMeshPayload.") >= 0, ms_disasm);
+		CHECK_MESSAGE(ms_disasm.contains("@dx.op.setMeshOutputCounts(i32 168,"), ms_disasm);
+		CHECK_MESSAGE(ms_disasm.contains("@dx.op.emitIndices(i32 169,"), ms_disasm);
+		CHECK_MESSAGE(ms_disasm.find("@dx.op.storeVertexOutput.") >= 0, ms_disasm);
+		CHECK_MESSAGE(ms_disasm.find("@dx.op.storePrimitiveOutput.") >= 0, ms_disasm);
+	}
+	const String cull_disasm = RenderingShaderContainerD3D12::disassemble_dxil(decompressed_code(spec_cull, 1), &error);
+	CHECK_MESSAGE(!cull_disasm.is_empty(), error);
+	if (!cull_disasm.is_empty()) {
+		CHECK_MESSAGE(cull_disasm.contains("SV_CullPrimitive"), cull_disasm);
+	}
+#endif
 }
 
 // The DXIL disassembly comes from the Windows SDK's dxcompiler.dll, through a hook that exists only with DEBUG_ENABLED.
@@ -1589,6 +1860,243 @@ TEST_CASE("[ShaderContainer][D3D12] Storage-buffer and image atomics are declare
 	CHECK(dxil_calls_op(disassembly, 78));
 	CHECK(dxil_calls_op(disassembly, 79));
 	check_dxil_validation(validation_before, 1);
+}
+
+// GodotNext: dxil_nonuniform (#293). Bindless tables (texture, sampler and storage-buffer runtime arrays, each its
+// set's only binding) plus a bounded storage-image descriptor array, read at an index that varies per invocation
+// (nonuniformEXT) or at a push-constant index that is the same for the whole draw. INDEX is replaced by the index
+// expression.
+const char *TABLE_READS_GLSL = R"(
+#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, std430) restrict writeonly buffer Result {
+	uint words[];
+}
+result;
+layout(set = 0, binding = 1, r32ui) uniform restrict readonly uimage2D images[4];
+
+layout(set = 1, binding = 0) uniform texture2D textures[];
+layout(set = 2, binding = 0) uniform sampler samplers[];
+layout(set = 3, binding = 0, std430) restrict readonly buffer Words {
+	uint data[];
+}
+words[];
+
+layout(push_constant, std430) uniform Params {
+	uint slot;
+}
+params;
+
+void main() {
+	uint slot = gl_GlobalInvocationID.x ^ gl_GlobalInvocationID.y;
+	vec4 color = textureLod(sampler2D(textures[INDEX(slot)], samplers[INDEX(slot & 1u)]), vec2(0.5), 0.0);
+	uint word = words[INDEX(slot)].data[gl_GlobalInvocationID.x];
+	uint texel = imageLoad(images[INDEX(slot & 3u)], ivec2(gl_GlobalInvocationID.xy)).x;
+	result.words[gl_GlobalInvocationID.y * 8u + gl_GlobalInvocationID.x] = floatBitsToUint(color.x) ^ word ^ texel;
+}
+)";
+
+// The handle-creating DXIL calls of a disassembly: dx.op.createHandle(i32 57, i8 class, i32 range, i32 index,
+// i1 nonUniformIndex) below shader model 6.6, dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind {...}, i32 index,
+// i1 nonUniformIndex) from 6.6. Each entry is the index operand and whether nonUniformIndex is true.
+struct DXILHandleCall {
+	String index;
+	bool non_uniform = false;
+};
+
+LocalVector<DXILHandleCall> dxil_handle_calls(const String &p_disassembly) {
+	LocalVector<DXILHandleCall> calls;
+	for (const String &full_line : p_disassembly.split("\n")) {
+		// The disassembler appends a comment that names the operands: "; CreateHandle(resourceClass,...)".
+		const String line = full_line.get_slice(";", 0);
+		const int call = MAX(line.find("@dx.op.createHandle("), line.find("@dx.op.createHandleFromBinding("));
+		if (call < 0 || line.strip_edges().begins_with("declare")) {
+			continue;
+		}
+		const int open = line.find_char('(', call);
+		const int close = line.rfind_char(')');
+		if (open < 0 || close <= open) {
+			continue;
+		}
+		// Split the arguments at the commas outside the ResBind braces.
+		PackedStringArray arguments;
+		String argument;
+		int depth = 0;
+		for (int i = open + 1; i < close; i++) {
+			const char32_t c = line[i];
+			if (c == '{') {
+				depth++;
+			} else if (c == '}') {
+				depth--;
+			}
+			if (c == ',' && depth == 0) {
+				arguments.push_back(argument.strip_edges());
+				argument = String();
+			} else {
+				argument += c;
+			}
+		}
+		arguments.push_back(argument.strip_edges());
+		if (arguments.size() < 2) {
+			continue;
+		}
+		DXILHandleCall handle_call;
+		handle_call.index = arguments[arguments.size() - 2];
+		handle_call.non_uniform = arguments[arguments.size() - 1] == "i1 true";
+		calls.push_back(handle_call);
+	}
+	return calls;
+}
+
+// GodotNext: dxil_nonuniform (#293). The compute shader of godotnext/testbed/tests/rd_parity/bindless.gd (its SOURCE,
+// keep the two the same), which reads the texture, sampler and storage-buffer tables at a different index in every
+// pixel. DEFINES is replaced as the fixture fills its %s: SAMPLER_TABLE and BUFFER_TABLE for --tables=all,
+// SAMPLER_TABLE for --tables=textures, nothing for --tables=fetch.
+const char *BINDLESS_FIXTURE_GLSL = R"(#version 450
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_samplerless_texture_functions : require
+DEFINES
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+struct Probe {
+	uint texture_slot;
+	uint lookup; // Texel x (2 bits), y (2 bits), offset x + 1 (2 bits), offset y + 1 (2 bits), sampler slot (1 bit).
+	uint buffer_slot;
+	uint element;
+};
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Probes {
+	Probe data[];
+}
+probes;
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Results {
+	uint data[];
+}
+results;
+
+layout(set = 1, binding = 0) uniform texture2D textures[];
+#ifdef SAMPLER_TABLE
+layout(set = 2, binding = 0) uniform sampler samplers[];
+#endif
+#ifdef BUFFER_TABLE
+layout(set = 3, binding = 0, std430) restrict readonly buffer Words {
+	uint data[];
+}
+words[];
+#endif
+
+layout(push_constant, std430) uniform Params {
+	uint width;
+	uint height;
+	uint pad0;
+	uint pad1;
+}
+params;
+
+void main() {
+	uvec2 pixel = gl_GlobalInvocationID.xy;
+	if (pixel.x >= params.width || pixel.y >= params.height) {
+		return;
+	}
+	uint index = pixel.y * params.width + pixel.x;
+	Probe probe = probes.data[index];
+	vec2 texel = vec2(float(probe.lookup & 3u), float((probe.lookup >> 2u) & 3u));
+	vec2 offset = vec2(float((probe.lookup >> 4u) & 3u), float((probe.lookup >> 6u) & 3u)) - 1.0;
+	uint sampler_slot = (probe.lookup >> 8u) & 1u;
+	vec2 uv = (texel + 0.5) / 4.0 + offset;
+#ifdef SAMPLER_TABLE
+	vec4 color = textureLod(sampler2D(textures[nonuniformEXT(probe.texture_slot)], samplers[nonuniformEXT(sampler_slot)]), uv, 0.0);
+#else
+	vec4 color = texelFetch(textures[nonuniformEXT(probe.texture_slot)], ivec2(texel), 0);
+#endif
+#ifdef BUFFER_TABLE
+	uint word = words[nonuniformEXT(probe.buffer_slot)].data[probe.element];
+#else
+	uint word = 0u;
+#endif
+	results.data[index] = packUnorm4x8(color) ^ word;
+}
+)";
+
+// GLSL nonuniformEXT (SPIR-V NonUniform) must reach DXIL as createHandle's nonUniformIndex, as DXC writes it for
+// NonUniformResourceIndex(): an index that varies across a wave is otherwise undefined, and some GPUs give the whole
+// wave one invocation's descriptor. 25.3.1-gn4 and later set it for the texture, sampler, storage-buffer and image
+// tables read at a non-uniform index, and keep it false for constant indices and for indices without nonuniformEXT.
+// Older libraries set it nowhere. The bindless fixture's own shader is checked the same way, in its three variants.
+TEST_CASE("[ShaderContainer][D3D12] Table reads at a nonuniformEXT index set createHandle's nonUniformIndex with 25.3.1-gn4 or later") {
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+	const DXILValidationStats validation_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+	const bool marks = RenderingShaderContainerD3D12::marks_non_uniform_resource_indices();
+
+	struct TableCase {
+		const char *name;
+		String source;
+		bool expect_non_uniform;
+		// Handle calls at a non-constant index: the tables the shader reads.
+		uint32_t varying_indices;
+		// Handle calls at a constant index: the buffers in set 0.
+		uint32_t constant_indices;
+	};
+	const String fixture = String::utf8(BINDLESS_FIXTURE_GLSL);
+	const TableCase cases[] = {
+		{ "non_uniform_table_reads", String::utf8(TABLE_READS_GLSL).replace("INDEX", "nonuniformEXT"), true, 4, 1 },
+		{ "uniform_table_reads", String::utf8(TABLE_READS_GLSL).replace("INDEX", "params.slot + 0u * "), false, 4, 1 },
+		{ "bindless_fixture_all", fixture.replace("DEFINES", "#define BUFFER_TABLE\n#define SAMPLER_TABLE\n"), true, 3, 2 },
+		{ "bindless_fixture_textures", fixture.replace("DEFINES", "#define SAMPLER_TABLE\n"), true, 2, 2 },
+		{ "bindless_fixture_fetch", fixture.replace("DEFINES", ""), true, 1, 2 },
+	};
+	uint32_t compiled_count = 0;
+	for (const TableCase &table_case : cases) {
+		Vector<RDC::ShaderStageSPIRVData> stages;
+		stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_COMPUTE, table_case.source.utf8().get_data()));
+		REQUIRE_FALSE(stages[0].spirv.is_empty());
+		Ref<RenderingShaderContainer> container = format.create_container();
+		bool compiled = false;
+		{
+			ErrorCapture capture;
+			compiled = container->set_code_from_spirv(table_case.name, stages);
+			CHECK_MESSAGE(compiled, vformat("%s: %s", table_case.name, capture.first_message));
+			CHECK_MESSAGE(capture.count == 0, capture.first_message);
+		}
+		// REQUIRE does not stop a test case in builds without exceptions.
+		if (!compiled || container->shaders.size() != 1) {
+			CHECK(container->shaders.size() == 1);
+			continue;
+		}
+		compiled_count++;
+		String error;
+		const String disassembly = RenderingShaderContainerD3D12::disassemble_dxil(decompressed_code(container, 0), &error);
+		CHECK_MESSAGE(!disassembly.is_empty(), vformat("%s: no DXIL disassembly, which needs dxil.dll and dxcompiler.dll from the Windows SDK: %s", table_case.name, error));
+		if (disassembly.is_empty()) {
+			continue;
+		}
+		// The buffers in set 0 (a constant index) and the tables (a varying index).
+		const LocalVector<DXILHandleCall> calls = dxil_handle_calls(disassembly);
+		uint32_t constant_indices = 0;
+		uint32_t varying_indices = 0;
+		for (const DXILHandleCall &call : calls) {
+			const bool constant = call.index.begins_with("i32 ") && call.index.substr(4).is_valid_int();
+			if (constant) {
+				constant_indices++;
+				CHECK_MESSAGE(!call.non_uniform, vformat("%s: a constant index is marked non-uniform (%s)", table_case.name, call.index));
+			} else {
+				varying_indices++;
+				const bool expected = marks && table_case.expect_non_uniform;
+				CHECK_MESSAGE(call.non_uniform == expected, vformat("%s: createHandle for index %s has nonUniformIndex %s, expected %s", table_case.name, call.index, call.non_uniform ? "true" : "false", expected ? "true" : "false"));
+			}
+		}
+		CHECK_MESSAGE(constant_indices >= table_case.constant_indices, vformat("%s: %d handle calls, %d at a constant index", table_case.name, calls.size(), constant_indices));
+		CHECK_MESSAGE(varying_indices >= table_case.varying_indices, vformat("%s: %d handle calls, %d at a varying index", table_case.name, calls.size(), varying_indices));
+	}
+	check_dxil_validation(validation_before, compiled_count);
 }
 #endif // DEBUG_ENABLED
 
@@ -1949,6 +2457,107 @@ TEST_CASE("[ShaderContainer][D3D12] RT pipeline stages: shader records, payload 
 	CHECK_MESSAGE(raygen_disassembly.contains("200000"), raygen_disassembly);
 #endif
 }
+
+#ifdef DEBUG_ENABLED
+// The getelementptr lines of a DXIL disassembly, and how many of them carry !dx.nonuniform.
+struct DXILGEPLines {
+	uint32_t geps = 0;
+	uint32_t non_uniform = 0;
+};
+
+DXILGEPLines dxil_gep_lines(const String &p_disassembly) {
+	DXILGEPLines lines;
+	for (const String &line : p_disassembly.split("\n")) {
+		if (!line.contains(" getelementptr ")) {
+			continue;
+		}
+		lines.geps++;
+		if (line.contains("!dx.nonuniform !")) {
+			lines.non_uniform++;
+		}
+	}
+	return lines;
+}
+
+// GodotNext: dxil_nonuniform (#293). Ray-tracing stages are DXIL libraries, which read a resource with
+// dx.op.createHandleForLib on a load from the resource's global. That call has no nonUniformIndex operand: DXC marks a
+// NonUniformResourceIndex() read by attaching !dx.nonuniform !{i32 1} to the getelementptr into the resource array
+// (lib_6_3 to lib_6_6). 25.3.1-gn4 and later do the same for nonuniformEXT reads, so rt_pipeline.gd's any-hit and
+// closest-hit stages, whose alpha_at() reads alpha_textures[nonuniformEXT(record.slot)], carry the mark; the same
+// stages reading alpha_textures[record.slot] (no nonuniformEXT) do not, and older libraries mark nothing.
+TEST_CASE("[ShaderContainer][D3D12] Table reads at a nonuniformEXT index in ray-tracing stages carry !dx.nonuniform with 25.3.1-gn4 or later") {
+	HMODULE lib_d3d12 = LoadLibraryW(L"d3d12.dll");
+	REQUIRE(lib_d3d12 != nullptr);
+	RenderingShaderContainerFormatD3D12 format;
+	format.set_lib_d3d12(lib_d3d12);
+	const bool marks = RenderingShaderContainerD3D12::marks_non_uniform_resource_indices();
+
+	const String non_uniform_common = RT_COMMON_GLSL;
+	const String uniform_common = non_uniform_common.replace("alpha_textures[nonuniformEXT(slot)]", "alpha_textures[slot]");
+	REQUIRE(non_uniform_common.contains("alpha_textures[nonuniformEXT(slot)]"));
+	REQUIRE(uniform_common != non_uniform_common);
+	struct HitCase {
+		const char *name;
+		String common;
+		bool expect_non_uniform;
+	};
+	const HitCase cases[] = {
+		{ "rt_hit_non_uniform_table", non_uniform_common, true },
+		{ "rt_hit_uniform_table", uniform_common, false },
+	};
+	const DXILValidationStats validation_before = RenderingShaderContainerD3D12::get_dxil_validation_stats();
+	uint32_t blobs = 0;
+	for (const HitCase &hit_case : cases) {
+		Vector<RDC::ShaderStageSPIRVData> stages;
+		stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_ANY_HIT, (hit_case.common + RT_RECORD_GLSL + RT_ANY_HIT_GLSL).utf8().get_data()));
+		stages.push_back(compile_glsl_stage(format, RDC::SHADER_STAGE_CLOSEST_HIT, (hit_case.common + RT_RECORD_GLSL + RT_CLOSEST_HIT_GLSL).utf8().get_data()));
+		REQUIRE_FALSE(stages[0].spirv.is_empty());
+		REQUIRE_FALSE(stages[1].spirv.is_empty());
+		Ref<RenderingShaderContainer> container = format.create_container();
+		if (!RenderingShaderContainerD3D12::is_raytracing_supported()) {
+			// The upstream library refuses ray-tracing stages, with one message.
+			ErrorCapture capture;
+			CHECK_FALSE(container->set_code_from_spirv(hit_case.name, stages));
+			CHECK(capture.count == 1);
+			CHECK_FALSE(marks);
+			continue;
+		}
+		bool compiled = false;
+		{
+			ErrorCapture capture;
+			compiled = container->set_code_from_spirv(hit_case.name, stages);
+			CHECK_MESSAGE(compiled, vformat("%s: %s", hit_case.name, capture.first_message));
+			CHECK_MESSAGE(capture.count == 0, capture.first_message);
+		}
+		// REQUIRE does not stop a test case in builds without exceptions.
+		if (!compiled || container->shaders.size() != 2) {
+			CHECK(container->shaders.size() == 2);
+			continue;
+		}
+		blobs += 2;
+		for (RDC::ShaderStage stage : { RDC::SHADER_STAGE_ANY_HIT, RDC::SHADER_STAGE_CLOSEST_HIT }) {
+			String error;
+			const String disassembly = RenderingShaderContainerD3D12::disassemble_dxil(stage_code(container, stage), &error);
+			CHECK_MESSAGE(!disassembly.is_empty(), vformat("%s %s: no DXIL disassembly, which needs dxil.dll and dxcompiler.dll from the Windows SDK: %s", hit_case.name, RDC::SHADER_STAGE_NAMES[stage], error));
+			if (disassembly.is_empty()) {
+				continue;
+			}
+			// A DXIL library reads the table through createHandleForLib, not createHandle.
+			CHECK_MESSAGE(disassembly.contains("@dx.op.createHandleForLib."), disassembly);
+			CHECK_MESSAGE(dxil_handle_calls(disassembly).is_empty(), disassembly);
+			const DXILGEPLines lines = dxil_gep_lines(disassembly);
+			CHECK_MESSAGE(lines.geps >= 1, disassembly);
+			if (marks && hit_case.expect_non_uniform) {
+				CHECK_MESSAGE(lines.non_uniform >= 1, vformat("%s %s: no getelementptr carries !dx.nonuniform:\n%s", hit_case.name, RDC::SHADER_STAGE_NAMES[stage], disassembly));
+				CHECK_MESSAGE(disassembly.contains("= !{i32 1}"), disassembly);
+			} else {
+				CHECK_MESSAGE(lines.non_uniform == 0, vformat("%s %s: %d getelementptr lines carry !dx.nonuniform:\n%s", hit_case.name, RDC::SHADER_STAGE_NAMES[stage], lines.non_uniform, disassembly));
+			}
+		}
+	}
+	check_dxil_validation(validation_before, blobs);
+}
+#endif // DEBUG_ENABLED
 #endif // MODULE_GLSLANG_ENABLED
 #endif // D3D12_ENABLED
 

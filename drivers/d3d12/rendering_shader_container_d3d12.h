@@ -101,6 +101,10 @@ public:
 	// library, whose builds still reuse each other's caches as before #279; a later library that changes DXIL again
 	// needs its own format version. Before #121 the two were 2 and 3.
 	static constexpr uint32_t FORMAT_VERSION_ATOMICS_WITHOUT_READNONE = 5;
+	// GodotNext: dxil_nonuniform (#293). The layout of FORMAT_VERSION, with DXIL from a Mesa NIR library that also
+	// marks non-uniform resource indices (25.3.1-gn4 or later, see marks_non_uniform_resource_indices()). Shader caches
+	// rebuild containers of the other format versions once, as for FORMAT_VERSION_ATOMICS_WITHOUT_READNONE.
+	static constexpr uint32_t FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX = 6;
 	static constexpr uint32_t RAYTRACING_STAGE_DATA_FORMAT_VERSION = 4;
 	// GodotNext: d3d12_rt_pipelines (#121). A hit group's shader record (shaderRecordEXT) is the constant buffer at
 	// register SHADER_RECORD_REGISTER in ROOT_CONSTANT_SPACE, filled by the root constants of a local root signature
@@ -138,9 +142,8 @@ public:
 	// GodotNext: rd_indirect_count (#177). SV_StartVertexLocation and SV_StartInstanceLocation (extended command
 	// information), which shaders compiled with base_instance_native read.
 	static constexpr uint32_t BASE_INSTANCE_NATIVE_SHADER_MODEL = 0x68; // D3D_SHADER_MODEL_6_8
-	// GodotNext: rd_mesh_shaders (#178). Whether task and mesh stages translate to DXIL (amplification and mesh
-	// shaders). The Mesa fork's mesh patch turns it on (#122); until then SUPPORTS_MESH_SHADER is false on D3D12.
-	static constexpr bool MESH_STAGES_SUPPORTED = false;
+	// GodotNext: dxil_mesh_shaders (#122). Amplification and mesh shaders (as_6_5 and ms_6_5) need shader model 6.5.
+	static constexpr uint32_t MESH_SHADER_MODEL = 0x65; // D3D_SHADER_MODEL_6_5
 	static constexpr uint32_t SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MAX] = {
 		0, // SHADER_STAGE_VERTEX
 		1, // SHADER_STAGE_FRAGMENT
@@ -152,10 +155,10 @@ public:
 		5, // SHADER_STAGE_CLOSEST_HIT
 		6, // SHADER_STAGE_MISS
 		7, // SHADER_STAGE_INTERSECTION
-		// GodotNext: rd_mesh_shaders (#178). No specialization-constant slot until the stages compile (#122): a 0 here
-		// would patch the vertex stage's offsets.
-		UINT32_MAX, // SHADER_STAGE_TASK
-		UINT32_MAX, // SHADER_STAGE_MESH
+		// GodotNext: dxil_mesh_shaders (#122). A shader with task or mesh stages has neither vertex nor compute stages
+		// (reflect_spirv() enforces that), so task shares compute's slot and mesh shares vertex's slot.
+		2, // SHADER_STAGE_TASK
+		0, // SHADER_STAGE_MESH
 	};
 
 	struct ReflectionBindingSetDataD3D12 {
@@ -295,6 +298,17 @@ public:
 	// Older libraries declare them readnone, and D3D12 GPU-based validation then loses atomics whose result is
 	// unused (#277).
 	static bool declares_atomics_without_readnone();
+	// GodotNext: dxil_nonuniform (#293). Whether the linked library marks resource reads whose SPIR-V access is
+	// NonUniform (GLSL nonuniformEXT) as DXC does for NonUniformResourceIndex(): createHandle's nonUniformIndex = true,
+	// or !dx.nonuniform on the resource-array getelementptr in DXIL libraries (ray-tracing stages). The GodotNext Mesa
+	// NIR library 25.3.1-gn4 or later does. With older libraries such reads rely on the hardware.
+	static bool marks_non_uniform_resource_indices();
+	// GodotNext: dxil_nonuniform (#293). The format version this build's containers are written with: one per kind
+	// of library (FORMAT_VERSION, FORMAT_VERSION_ATOMICS_WITHOUT_READNONE or FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX).
+	static uint32_t get_library_format_version();
+	// GodotNext: dxil_mesh_shaders (#122). Whether the linked library translates SPIR-V task and mesh stages to DXIL
+	// amplification and mesh shaders (the GodotNext Mesa NIR library 25.3.1-gn4 or later).
+	static bool is_mesh_shading_supported();
 
 	// GodotNext: dxil_toolchain (#123). The debug-only DXIL validator (GODOT_D3D12_DXIL_VALIDATE=1 in a build with
 	// DEBUG_ENABLED). requested: the variable is set. active: dxil.dll is loaded; asking loads it when it was
@@ -317,12 +331,14 @@ public:
 	static String disassemble_dxil(const Vector<uint8_t> &p_dxil, String *r_error = nullptr);
 };
 
-// GodotNext: rd_mesh_shaders (#178). The task and mesh entries of SHADER_STAGES_BIT_OFFSET_INDICES index
-// stages_bit_offsets unchecked once the stages compile, so turning MESH_STAGES_SUPPORTED on (#122) needs real slots.
-static_assert(!RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED ||
-				(RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_TASK] < uint32_t(D3D12_BITCODE_OFFSETS_NUM_STAGES) &&
-						RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MESH] < uint32_t(D3D12_BITCODE_OFFSETS_NUM_STAGES)),
-		"Task and mesh stages need specialization-constant bit-offset slots before MESH_STAGES_SUPPORTED is turned on.");
+// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). The task and mesh entries of
+// SHADER_STAGES_BIT_OFFSET_INDICES index stages_bit_offsets unchecked, and must not alias fragment's slot.
+static_assert(RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_TASK] < uint32_t(D3D12_BITCODE_OFFSETS_NUM_STAGES) &&
+				RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MESH] < uint32_t(D3D12_BITCODE_OFFSETS_NUM_STAGES) &&
+				RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_TASK] != RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MESH] &&
+				RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_TASK] != RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_FRAGMENT] &&
+				RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_MESH] != RenderingShaderContainerD3D12::SHADER_STAGES_BIT_OFFSET_INDICES[RenderingDeviceCommons::SHADER_STAGE_FRAGMENT],
+		"Task, mesh and fragment stages need distinct specialization-constant bit-offset slots.");
 
 class RenderingShaderContainerFormatD3D12 : public RenderingShaderContainerFormat {
 protected:
@@ -336,6 +352,8 @@ public:
 	// GodotNext: d3d12_dxr (#118). True only when the linked Mesa NIR library compiles ray query, so the
 	// shader baker bakes the ray-query ShaderRD versions for D3D12 exactly when they can compile.
 	virtual bool supports_acceleration_structures() const override;
+	// GodotNext: dxil_mesh_shaders (#122). Likewise for task and mesh shader stages.
+	virtual bool supports_mesh_shaders() const override;
 	RenderingShaderContainerFormatD3D12();
 	virtual ~RenderingShaderContainerFormatD3D12();
 };

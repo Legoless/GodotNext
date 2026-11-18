@@ -150,16 +150,31 @@ if mesa_label_file.is_file():
     # without readnone, as DXC does. With 25.3.1-gn2 (still accepted) and the upstream library, D3D12 GPU-based
     # validation loses atomics whose result is unused (#277).
     mesa_atomics_without_readnone = mesa_label_version >= (25, 3, 1, 3)
-    print_info(
-        f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} (ray query and ray-tracing stages"
-        + (", atomics without readnone)." if mesa_atomics_without_readnone else ").")
-    )
+    # GodotNext: dxil_nonuniform (#293). 25.3.1-gn4 and later mark table reads whose SPIR-V access is NonUniform as DXC
+    # does for NonUniformResourceIndex(): createHandle's nonUniformIndex = true, and in the DXIL libraries of ray-tracing
+    # stages !dx.nonuniform on the resource-array getelementptr. Older libraries mark none.
+    mesa_nonuniform_resource_index = mesa_label_version >= (25, 3, 1, 4)
+    # GodotNext: dxil_mesh_shaders (#122). 25.3.1-gn4 and later also translate SPIR-V task and mesh shader stages to
+    # DXIL amplification and mesh shaders (shader model 6.5).
+    mesa_mesh_shaders = mesa_label_version >= (25, 3, 1, 4)
+    mesa_features = ["ray query and ray-tracing stages"]
+    if mesa_atomics_without_readnone:
+        mesa_features += ["atomics without readnone"]
+    if mesa_nonuniform_resource_index:
+        mesa_features += ["non-uniform resource indices"]
+    if mesa_mesh_shaders:
+        mesa_features += ["mesh and amplification shaders"]
+    print_info(f"Direct3D 12: linking the GodotNext Mesa NIR library {mesa_label} ({', '.join(mesa_features)}).")
     extra_defines += [
         "NIR_RAYTRACING_ENABLED",
         ("GODOTNEXT_MESA_LABEL", '\\"' + mesa_label + '\\"'),
     ]
     if mesa_atomics_without_readnone:
         extra_defines += ["NIR_ATOMICS_WITHOUT_READNONE"]
+    if mesa_nonuniform_resource_index:
+        extra_defines += ["NIR_NONUNIFORM_RESOURCE_INDEX"]
+    if mesa_mesh_shaders:
+        extra_defines += ["NIR_MESH_SHADERS_ENABLED"]
 
 # These defines are inspired by the Meson build scripts in the original repo.
 extra_defines += [

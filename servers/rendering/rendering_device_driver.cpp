@@ -190,7 +190,7 @@ RenderingDeviceDriver::MeshShaderCaps RenderingDeviceDriver::d3d12_mesh_shader_c
 	if (p_mesh_shader_tier < D3D12_MESH_SHADER_TIER_1) {
 		r_log_line = vformat("D3D12: Mesh shaders are off: the device has no mesh shader support (mesh shader tier %s).", tier);
 	} else if (!p_dxil_mesh_stages) {
-		r_log_line = vformat("D3D12: Mesh shaders are off: the shader compiler does not translate task and mesh shaders to DXIL yet (mesh shader tier %s).", tier);
+		r_log_line = vformat("D3D12: Mesh shaders are off: the linked Mesa NIR library does not translate task and mesh shaders to DXIL (the GodotNext library 25.3.1-gn4 or later does; mesh shader tier %s).", tier);
 	} else {
 		caps.mesh = true;
 		// ExecuteIndirect takes D3D12_DISPATCH_MESH_ARGUMENTS records, with a count buffer too.

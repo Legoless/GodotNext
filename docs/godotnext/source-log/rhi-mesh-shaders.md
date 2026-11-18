@@ -120,9 +120,47 @@ a struct aligned to its largest member) and names any type it cannot size.
 | Used in | `drivers/d3d12/rendering_device_driver_d3d12.cpp`, `drivers/d3d12/rendering_shader_container_d3d12.cpp`, `servers/rendering/rendering_device_driver.cpp` (`d3d12_mesh_shader_limits`) |
 | Copied files | None |
 
-How it was used: the driver plumbing is in place, but `SUPPORTS_MESH_SHADER` stays false and the
-shader container refuses task and mesh stages until the Mesa fork translates them to DXIL (#122).
-The driver prints one line with the device's mesh shader tier. The group-count limits come from the
-specification's `DispatchMesh` rules (each count below 64k, their product at most 2^22, from the
-command list and from an amplification shader alike, re-read on 2026-11-16) and are reported only
-once the feature is on; until then every mesh limit is 0.
+How it was used: the driver plumbing is in place, and once the build links the GodotNext Mesa NIR
+library (`25.3.1-gn4` or later, #122), `SUPPORTS_MESH_SHADER` and `SUPPORTS_MESH_SHADER_INDIRECT` turn
+on when `OPTIONS7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1`; tier-0 devices and builds with an older
+library report `false` and print one line with the device's mesh shader tier. The group-count limits
+come from the specification's `DispatchMesh` rules (each count below 64k, their product at most 2^22,
+from the command list and from an amplification shader alike, re-read on 2026-11-16) and are reported
+only once the feature is on; until then every mesh limit is 0.
+
+## DXIL mesh and amplification shaders (#122)
+
+### Microsoft DirectX-Specs, Mesh Shader functional specification, and public DXIL specification
+
+| Field | Value |
+|---|---|
+| What | Shader Model 6.5 amplification (`as_6_5`, shader kind 14) and mesh (`ms_6_5`, shader kind 13) DXIL contracts: `dx.op.setMeshOutputCounts` (opcode 168), `dx.op.emitIndices` (169), `dx.op.getMeshPayload` (170, `readonly`), `dx.op.storeVertexOutput` (171), `dx.op.storePrimitiveOutput` (172) and `dx.op.dispatchMesh` (173, taking a `groupshared` address-space 3 payload struct pointer and dominating all exits of the amplification entry point); entry-point shader property tags `MSState` (tag 9: numthreads, max vertex count, max primitive count, output topology 1 = line / 2 = triangle, payload size in bytes) and `ASState` (tag 10: numthreads, payload size in bytes); `PSV0` `PSVRuntimeInfo` mesh/amplification fields (`MS` / `MS1` / `AS` and `PSV2` thread counts); `PSG1` primitive output signature part and `SV_CullPrimitive` (`CULLPRIM`, `i1` signature component stored as 0/1 `i32` with mask `N/A`); DXIL type rules forbidding vector and multidimensional fields in payload structs; shader feature flags (`array_layer_from_vs_or_ds` and `uavs_at_every_stage` apply to VS/HS/DS/GS, not MS/AS); and black-box `dxc.exe` disassembly output (Windows SDK 10.0.26100.0, DXC 1.9.2602.17, no DXC compiler source read) on small original `as_6_5`, `ms_6_5` and `ps_6_5` test shaders |
+| Upstream | https://microsoft.github.io/DirectX-Specs/d3d/MeshShader.html (`d3d/MeshShader.md`) and https://github.com/microsoft/DirectXShaderCompiler/blob/main/docs/DXIL.rst |
+| Version | DirectX-Specs and `DXIL.rst` as published on 2026-11-16; Windows SDK 10.0.26100.0 `dxc.exe` output |
+| License | DirectX-Specs: CC-BY 4.0; `DXIL.rst`: LLVM/NCSA/MIT documentation. Consulted, not copied |
+| Read on | 2026-11-16, for issue #122 |
+| Consulted by | The #122 implementer |
+| Used in | The private GodotNext Mesa NIR library `25.3.1-gn4` (`docs/godotnext/clean-room.md`), `drivers/d3d12/SCsub`, `drivers/d3d12/rendering_shader_container_d3d12.{h,cpp}`, `drivers/d3d12/rendering_device_driver_d3d12.cpp` and `tests/servers/rendering/test_rendering_shader_container.cpp` |
+| Copied files | None |
+
+How it was used: the sixth Mesa patch in `25.3.1-gn4` translates SPIR-V `SPV_EXT_mesh_shader` task and
+mesh stages to `as_6_5` and `ms_6_5` DXIL, lowers task payloads to a single-dimensional word-array
+struct in LLVM address space 3, normalizes task mesh launches to one dominating `dispatchMesh`, links
+task-to-mesh payload sizes and mesh-to-fragment per-vertex and per-primitive varyings, and flips mesh
+`SV_Position.y` like vertex shaders. On the engine side, `RenderingShaderContainerD3D12` links
+fragment against mesh and mesh against task, raises mesh pipelines to Shader Model 6.5, binds compute
+runtime data for `gl_NumWorkGroups` in direct `DispatchMesh` draws, shares the vertex and compute
+specialization-constant bit-offset slots with mesh and task, and reports `is_mesh_shading_supported()` so
+`SUPPORTS_MESH_SHADER`, `SUPPORTS_MESH_SHADER_INDIRECT` and `ShaderBakerExportPlugin` turn on with
+`25.3.1-gn4`. HLSL has no system value for the group counts, so two limits follow: a mesh shader behind a
+task shader cannot read `gl_NumWorkGroups` (its counts are the task shader's, known only on the GPU; the
+container refuses it with one error), and indirect mesh draws do not set it (the class reference says so).
+Two more refusals follow from the same sources, each with one error: `gl_DrawID` in a task or mesh stage
+(SPIR-V `BuiltIn DrawIndex`, 4426: Mesa reads it from the vertex layout of the runtime data, these stages
+get the compute layout, and `D3D12_DISPATCH_MESH_ARGUMENTS` records carry no draw index), and a mesh
+stage with `layout(points) out` (SPIR-V `ExecutionMode OutputPoints`, 27: the specification's
+`outputtopology` is `"line"` or `"triangle"` only). SPIR-V enumerant values are from the public SPIR-V
+specification (https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html). The GPU check of the runtime
+data and the specialization constants is `godotnext/testbed/tests/rd_parity/meshlets.gd`'s grid cases:
+`gl_NumWorkGroups` in a mesh shader without a task stage and in a task shader (direct draws), constants
+read by the task, mesh and fragment stages, and `gl_CullPrimitiveEXT`, each against a CPU image.

@@ -5556,14 +5556,24 @@ void RenderingDeviceDriverD3D12::command_render_draw_indirect_count(CommandBuffe
 	cmd_buf_info->cmd_list->ExecuteIndirect(signature, p_max_draw_count, indirect_buf_info->resource, p_offset, count_buf_info->resource, p_count_buffer_offset);
 }
 
-// GodotNext: rd_mesh_shaders (#178)
+// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122)
 void RenderingDeviceDriverD3D12::command_render_draw_mesh_tasks(CommandBufferID p_cmd_buffer, uint32_t p_group_count_x, uint32_t p_group_count_y, uint32_t p_group_count_z) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	ERR_FAIL_NULL_MSG(cmd_buf_info->cmd_list_6.Get(), "DispatchMesh() needs ID3D12GraphicsCommandList6.");
+	if (cmd_buf_info->nir_graphics_runtime_data_root_param_idx != UINT32_MAX) {
+		dxil_spirv_compute_runtime_data runtime_data = {};
+		runtime_data.group_count_x = p_group_count_x;
+		runtime_data.group_count_y = p_group_count_y;
+		runtime_data.group_count_z = p_group_count_z;
+		cmd_buf_info->cmd_list->SetGraphicsRoot32BitConstants(cmd_buf_info->nir_graphics_runtime_data_root_param_idx, sizeof(dxil_spirv_compute_runtime_data) / sizeof(uint32_t), &runtime_data, 0);
+	}
 	cmd_buf_info->cmd_list_6->DispatchMesh(p_group_count_x, p_group_count_y, p_group_count_z);
 }
 
-// GodotNext: rd_mesh_shaders (#178)
+// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). The records hold only the group counts, so these draws do
+// not set the NIR runtime data (gl_NumWorkGroups): its root constants are undefined here (a root signature change
+// resets them, and a pipeline drawn only indirectly never sets them). The class reference says task and mesh shaders
+// drawn this way must not read gl_NumWorkGroups.
 void RenderingDeviceDriverD3D12::command_render_draw_mesh_tasks_indirect(CommandBufferID p_cmd_buffer, BufferID p_indirect_buffer, uint64_t p_offset, uint32_t p_draw_count, uint32_t p_stride) {
 	CommandBufferInfo *cmd_buf_info = (CommandBufferInfo *)p_cmd_buffer.id;
 	BufferInfo *indirect_buf_info = (BufferInfo *)p_indirect_buffer.id;
@@ -7416,7 +7426,7 @@ uint64_t RenderingDeviceDriverD3D12::limit_get(Limit p_limit) {
 	if (acceleration_structure_limit_get(p_limit, acceleration_structure_limits, acceleration_structure_value)) {
 		return acceleration_structure_value;
 	}
-	// GodotNext: rd_mesh_shaders (#178). 0 while mesh shaders are off (#122).
+	// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). 0 while mesh shaders are off.
 	uint64_t mesh_shader_value = 0;
 	if (mesh_shader_limit_get(p_limit, d3d12_mesh_shader_limits(mesh_shader_caps.mesh), mesh_shader_value)) {
 		return mesh_shader_value;
@@ -7575,7 +7585,8 @@ bool RenderingDeviceDriverD3D12::has_feature(Features p_feature) {
 			return true;
 		case SUPPORTS_DRAW_INDIRECT_FIRST_INSTANCE:
 			return shader_capabilities.base_instance_native_supported();
-		// GodotNext: rd_mesh_shaders (#178). False until the shader container translates task and mesh stages (#122).
+		// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). Mesh shader tier 1 and a Mesa NIR library that
+		// translates task and mesh stages (25.3.1-gn4 or later).
 		case SUPPORTS_MESH_SHADER:
 			return mesh_shader_caps.mesh;
 		case SUPPORTS_MESH_SHADER_INDIRECT:
@@ -7868,8 +7879,23 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 
 		print_verbose("- Shader:");
 		print_verbose("  model: " + D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model));
-		// GodotNext: dxil_toolchain (#123).
-		print_verbose(vformat("  Mesa NIR library: %s", RenderingShaderContainerD3D12::is_raytracing_supported() ? vformat("GodotNext %s, with ray query and ray-tracing stages", RenderingShaderContainerD3D12::get_mesa_label()) : String("upstream, without ray query")));
+		// GodotNext: dxil_toolchain (#123), dxil_atomics (#279), dxil_nonuniform (#293), dxil_mesh_shaders (#122).
+		if (RenderingShaderContainerD3D12::is_raytracing_supported()) {
+			PackedStringArray mesa_features;
+			mesa_features.push_back("ray query and ray-tracing stages");
+			if (RenderingShaderContainerD3D12::declares_atomics_without_readnone()) {
+				mesa_features.push_back("atomics without readnone");
+			}
+			if (RenderingShaderContainerD3D12::marks_non_uniform_resource_indices()) {
+				mesa_features.push_back("non-uniform resource indices");
+			}
+			if (RenderingShaderContainerD3D12::is_mesh_shading_supported()) {
+				mesa_features.push_back("mesh and amplification shaders");
+			}
+			print_verbose(vformat("  Mesa NIR library: GodotNext %s, with %s", RenderingShaderContainerD3D12::get_mesa_label(), String(", ").join(mesa_features)));
+		} else {
+			print_verbose("  Mesa NIR library: upstream, without ray query");
+		}
 	}
 
 	shader_container_format.set_lib_d3d12(context_driver->lib_d3d12);
@@ -7974,16 +8000,15 @@ Error RenderingDeviceDriverD3D12::_check_capabilities() {
 	}
 	print_verbose(vformat("- D3D12 indirect draws: base instance in shaders %s (shader model %s, extended command information %s)", shader_capabilities.base_instance_native_supported() ? "supported" : "not supported", D3D_SHADER_MODEL_TO_STRING(shader_capabilities.shader_model), shader_capabilities.extended_command_info_supported ? "supported" : "not supported"));
 
-	// GodotNext: rd_mesh_shaders (#178). The driver can build mesh pipelines and record mesh draws, but the shader
-	// container does not translate task and mesh stages to DXIL until the Mesa fork's mesh patch lands (#122), so
-	// SUPPORTS_MESH_SHADER stays false. One line says so, with the device's tier.
+	// GodotNext: rd_mesh_shaders (#178), dxil_mesh_shaders (#122). Mesh shaders need mesh shader tier 1 and a Mesa NIR
+	// library that translates task and mesh stages to DXIL (25.3.1-gn4 or later). One line logs the state and tier.
 	D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7 = {};
 	res = device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7));
 	if (SUCCEEDED(res)) {
 		mesh_shader_tier = uint32_t(options7.MeshShaderTier);
 	}
 	String mesh_shader_line;
-	mesh_shader_caps = d3d12_mesh_shader_caps(mesh_shader_tier, RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED, mesh_shader_line);
+	mesh_shader_caps = d3d12_mesh_shader_caps(mesh_shader_tier, RenderingShaderContainerD3D12::is_mesh_shading_supported(), mesh_shader_line);
 	print_line(mesh_shader_line);
 
 	if (fsr_capabilities.pipeline_supported || fsr_capabilities.primitive_supported || fsr_capabilities.attachment_supported) {

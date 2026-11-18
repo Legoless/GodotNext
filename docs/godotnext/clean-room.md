@@ -148,16 +148,24 @@ library by default.
   `118b975ce7eda028fd8cfea81283f511ed14d8a4` and changes 17 existing
   files: 16 under `src/microsoft` and `src/compiler/spirv/vtn_variables.c`.
   License: MIT (Mesa's).
-- The patched library is labeled `25.3.1-gn3` (#279). The first line of a
-  `godotnext-mesa.txt` file at the top of its archive holds the label,
-  which `drivers/d3d12/SCsub` reads to turn on ray query and the
-  ray-tracing stages; the lines after it record the build and are not
-  read. The build still accepts `25.3.1-gn2`.
-- `25.3.1-gn3` is built from four Mesa patches on `mesa-25.3.1`, the
-  first of them Skyth's commit above, and four godot-nir-static patches
-  on `25.3.1-3`. Its fourth Mesa patch declares the DXIL atomic
-  operations without `readnone`, as DXC does (#277, #279). It replaces
-  `25.3.1-gn2`, which is the first three of each. The patch list, the
+- The patched library is labeled `25.3.1-gn4` (#122, #293). The first
+  line of a `godotnext-mesa.txt` file at the top of its archive holds the
+  label, which `drivers/d3d12/SCsub` reads to turn on ray query, the
+  ray-tracing stages, atomics without `readnone`, non-uniform resource
+  indices, and task and mesh shaders; the lines after it record the build
+  and are not read. The build still accepts `25.3.1-gn2` and
+  `25.3.1-gn3`.
+- `25.3.1-gn4` is built from seven Mesa patches on `mesa-25.3.1`, the
+  first of them Skyth's commit above, and five godot-nir-static patches on
+  `25.3.1-3`. Its fourth Mesa patch declares the DXIL atomic operations
+  without `readnone`, as DXC does (#277, #279); its fifth marks
+  `nonuniformEXT` resource accesses with `createHandle`'s
+  `nonUniformIndex` flag (#293); its sixth translates SPIR-V task and
+  mesh stages to Shader Model 6.5 DXIL amplification and mesh shaders
+  (#122); its seventh marks the same accesses in the DXIL libraries of
+  ray-tracing stages with `!dx.nonuniform` metadata on the resource-array
+  `getelementptr`, as DXC does (#293). It replaces `25.3.1-gn3` (four of each) and `25.3.1-gn2` (three
+  of each). The patch list, the
   patch files and the build record stay outside the repository until
   #273 publishes the fork.
 - `dxil.dll` and `dxcompiler.dll`, which the debug-only validator

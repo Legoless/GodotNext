@@ -25,10 +25,18 @@ extends Node
 ## - indirect_count: draw_list_draw_mesh_tasks_indirect_count() with a count a compute pass writes on the GPU, with
 ##   16- and 32-byte records and counts 1, 3 and 0, gives the direct image (or an empty one for 0) byte for byte;
 ##   the records past the count are poison that would draw again (SUPPORTS_DRAW_INDIRECT_COUNT too).
+## - mesh_workgroups: a mesh shader without a task stage, drawn with draw_list_draw_mesh_tasks(4, 2, 2), places one quad
+##   per workgroup in a grid it sizes from gl_NumWorkGroups; the image must equal the CPU's grid byte for byte.
+## - mesh_spec_default and mesh_spec_constants: a task, mesh and fragment shader whose specialization constants (one
+##   read by the task and mesh stages, one by the mesh stage, one by the fragment stage) set the grid's columns and the
+##   ids; the task stage reads gl_NumWorkGroups for the rows, and the mesh stage culls every third quad with
+##   gl_CullPrimitiveEXT. Its pipeline with the default constants and one with other values must each equal the CPU's
+##   grid byte for byte. These cases run only direct draws: Direct3D 12 sets gl_NumWorkGroups for direct draws only.
 ##
-## Without SUPPORTS_MESH_SHADER (Direct3D 12 until its compiler translates the stages) the vertex path still runs
-## and the mesh checks read "unsupported". It prints one "GODOTNEXT_RESULT <json>" line and exits 0 on pass, 1 on
-## failure. "digests" holds the SHA-256 of each case's read-back, which runs on different drivers can compare.
+## Without SUPPORTS_MESH_SHADER (Direct3D 12 builds without the GodotNext Mesa NIR library 25.3.1-gn4 or later)
+## the vertex path still runs and the mesh checks read "unsupported". It prints one "GODOTNEXT_RESULT <json>" line
+## and exits 0 on pass, 1 on failure. "digests" holds the SHA-256 of each case's read-back, which runs on different
+## drivers can compare.
 ##
 ## User arguments: --patches=N, and --require=<checks> (a comma-separated list of mesh, indirect and
 ## indirect_count) to fail the run when one of them is "unsupported".
@@ -56,6 +64,16 @@ const WIDTH := 768
 const HEIGHT := 768
 # Words read as a record, which draw 7 task workgroups again.
 const POISON := 7
+# The grid cases: each cell's quad leaves this many pixels free on every side, and its edges fall on pixel edges.
+const CELL_INSET := 8
+const WORKGROUPS_GROUPS: Array[int] = [4, 2, 2]
+const SPEC_TASK_GROUPS := 3
+# The constants of the grid pipeline: columns (task and mesh), the first id (mesh) and an id offset (fragment).
+const SPEC_COLUMNS := 5
+const SPEC_ID_BASE := 1000
+const SPEC_ID_ADD := 7
+# R16F 1.0, the fragment count of a covered pixel.
+const HALF_ONE := 0x3C00
 const RECORDS_OFFSET := 64
 const COUNT_OFFSET := 12
 const REQUIRE_CHECKS: Array[String] = ["mesh", "indirect", "indirect_count"]
@@ -239,6 +257,100 @@ void main() {
 }
 """
 
+# The grid cases' mesh stages: one quad per cell, its edges on pixel edges CELL_INSET pixels inside the cell.
+const CELL_COMMON := """
+layout(triangles, max_vertices = 4, max_primitives = 2) out;
+
+layout(location = 0) perprimitiveEXT out uint primitive_out[];
+
+void emit_cell(uint column, uint row, uint columns, uint rows, uint id, bool culled) {
+	SetMeshOutputsEXT(4u, 2u);
+	uint cell_width = %du / columns;
+	uint cell_height = %du / rows;
+	vec2 size = vec2(%d.0, %d.0);
+	vec2 lo = vec2(uvec2(column * cell_width + %du, row * cell_height + %du)) / size * 2.0 - 1.0;
+	vec2 hi = vec2(uvec2((column + 1u) * cell_width - %du, (row + 1u) * cell_height - %du)) / size * 2.0 - 1.0;
+	gl_MeshVerticesEXT[0].gl_Position = vec4(lo.x, lo.y, 0.0, 1.0);
+	gl_MeshVerticesEXT[1].gl_Position = vec4(hi.x, lo.y, 0.0, 1.0);
+	gl_MeshVerticesEXT[2].gl_Position = vec4(hi.x, hi.y, 0.0, 1.0);
+	gl_MeshVerticesEXT[3].gl_Position = vec4(lo.x, hi.y, 0.0, 1.0);
+	gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0u, 1u, 2u);
+	gl_PrimitiveTriangleIndicesEXT[1] = uvec3(0u, 2u, 3u);
+	primitive_out[0] = id;
+	primitive_out[1] = id;
+	gl_MeshPrimitivesEXT[0].gl_CullPrimitiveEXT = culled;
+	gl_MeshPrimitivesEXT[1].gl_CullPrimitiveEXT = culled;
+}
+"""
+
+# No task stage: the grid has gl_NumWorkGroups.x columns and gl_NumWorkGroups.y * gl_NumWorkGroups.z rows, so
+# every count the draw passes is read.
+const WORKGROUPS_MESH_SOURCE := """#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+%s
+void main() {
+	uvec3 groups = gl_NumWorkGroups;
+	uint row = gl_WorkGroupID.z * groups.y + gl_WorkGroupID.y;
+	emit_cell(gl_WorkGroupID.x, row, groups.x, groups.y * groups.z, row * groups.x + gl_WorkGroupID.x, false);
+}
+"""
+
+const SPEC_TASK_SOURCE := """#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint COLUMNS = 1u;
+
+struct CellPayload {
+	uint row;
+	uint rows;
+};
+taskPayloadSharedEXT CellPayload payload;
+
+void main() {
+	payload.row = gl_WorkGroupID.x;
+	payload.rows = gl_NumWorkGroups.x;
+	EmitMeshTasksEXT(COLUMNS, 1u, 1u);
+}
+"""
+
+const SPEC_MESH_SOURCE := """#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(constant_id = 0) const uint COLUMNS = 1u;
+layout(constant_id = 1) const uint ID_BASE = 1u;
+%s
+struct CellPayload {
+	uint row;
+	uint rows;
+};
+taskPayloadSharedEXT CellPayload payload;
+
+void main() {
+	uint cell = payload.row * COLUMNS + gl_WorkGroupID.x;
+	emit_cell(gl_WorkGroupID.x, payload.row, COLUMNS, payload.rows, ID_BASE + cell, cell %% 3u == 1u);
+}
+"""
+
+const SPEC_FRAGMENT_SOURCE := """#version 460
+#extension GL_EXT_mesh_shader : require
+
+layout(constant_id = 2) const uint ID_ADD = 0u;
+
+layout(location = 0) perprimitiveEXT flat in uint primitive_in;
+
+layout(location = 0) out uint frag_id;
+layout(location = 1) out float frag_count;
+
+void main() {
+	frag_id = primitive_in + ID_ADD;
+	frag_count = 1.0;
+}
+"""
+
 const COUNT_SOURCE := """#version 450
 
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
@@ -410,8 +522,21 @@ func _run() -> Dictionary:
 					cases[key] = status
 					if status != "pass":
 						checks["indirect_count"] = "fail"
+			# The grid cases: gl_NumWorkGroups in direct draws, specialization constants in all three stages, and
+			# gl_CullPrimitiveEXT, each against the CPU's image.
+			for grid_case in _grid_cases():
+				var key: String = grid_case["key"]
+				var grid := _draw_grid_case(rd, resources, grid_case)
+				digests[key] = _digest(grid["ids"] + grid["counts"])
+				var mismatched := _grid_mismatches(grid, grid_case)
+				stats[key + "_mismatched_pixels"] = mismatched
+				cases[key] = "pass" if mismatched == 0 else "fail"
+				_check(mismatched == 0, "%s: %d pixels differ from the CPU's grid" % [key, mismatched])
 			if cases["mesh_direct"] != "pass" or cases["culling"] != "pass" or cases["mesh_vs_vertex"] != "pass":
 				checks["mesh"] = "fail"
+			for key in ["mesh_workgroups", "mesh_spec_default", "mesh_spec_constants"]:
+				if cases[key] != "pass":
+					checks["mesh"] = "fail"
 		_free_resources(rd, resources)
 	rd.free()
 
@@ -563,6 +688,22 @@ func _create_resources(rd: RenderingDevice, params: Dictionary, mesh: Dictionary
 		_check(mesh_spirv.compile_error_task.is_empty() and mesh_spirv.compile_error_mesh.is_empty() and mesh_spirv.compile_error_fragment.is_empty(), "the mesh-path shader compiles: %s %s %s" % [mesh_spirv.compile_error_task, mesh_spirv.compile_error_mesh, mesh_spirv.compile_error_fragment])
 		resources["mesh_shader"] = rd.shader_create_from_spirv(mesh_spirv, "meshlets_mesh_path")
 
+		var cell_common := CELL_COMMON % [WIDTH, HEIGHT, WIDTH, HEIGHT, CELL_INSET, CELL_INSET, CELL_INSET, CELL_INSET]
+		var workgroups_source := RDShaderSource.new()
+		workgroups_source.source_mesh = WORKGROUPS_MESH_SOURCE % cell_common
+		workgroups_source.source_fragment = MESH_FRAGMENT_SOURCE
+		var workgroups_spirv := rd.shader_compile_spirv_from_source(workgroups_source)
+		_check(workgroups_spirv.compile_error_mesh.is_empty() and workgroups_spirv.compile_error_fragment.is_empty(), "the workgroups grid shader compiles: %s %s" % [workgroups_spirv.compile_error_mesh, workgroups_spirv.compile_error_fragment])
+		resources["workgroups_shader"] = rd.shader_create_from_spirv(workgroups_spirv, "meshlets_workgroups_grid")
+
+		var spec_source := RDShaderSource.new()
+		spec_source.source_task = SPEC_TASK_SOURCE
+		spec_source.source_mesh = SPEC_MESH_SOURCE % cell_common
+		spec_source.source_fragment = SPEC_FRAGMENT_SOURCE
+		var spec_spirv := rd.shader_compile_spirv_from_source(spec_source)
+		_check(spec_spirv.compile_error_task.is_empty() and spec_spirv.compile_error_mesh.is_empty() and spec_spirv.compile_error_fragment.is_empty(), "the specialization grid shader compiles: %s %s %s" % [spec_spirv.compile_error_task, spec_spirv.compile_error_mesh, spec_spirv.compile_error_fragment])
+		resources["spec_shader"] = rd.shader_create_from_spirv(spec_spirv, "meshlets_spec_grid")
+
 	for key in resources:
 		if not _valid(resources, key):
 			_check(false, "%s is created" % key)
@@ -624,6 +765,15 @@ func _create_resources(rd: RenderingDevice, params: Dictionary, mesh: Dictionary
 		resources["vertex_pipeline"] = rd.render_pipeline_create(resources["vertex_shader"], format, RenderingDevice.INVALID_FORMAT_ID, RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend)
 		if mesh_shader:
 			resources["mesh_pipeline"] = rd.render_pipeline_create(resources["mesh_shader"], format, RenderingDevice.INVALID_FORMAT_ID, RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend)
+			resources["workgroups_pipeline"] = rd.render_pipeline_create(resources["workgroups_shader"], format, RenderingDevice.INVALID_FORMAT_ID, RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend)
+			resources["spec_default_pipeline"] = rd.render_pipeline_create(resources["spec_shader"], format, RenderingDevice.INVALID_FORMAT_ID, RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend)
+			var constants: Array[RDPipelineSpecializationConstant] = []
+			for constant: Array in [[0, SPEC_COLUMNS], [1, SPEC_ID_BASE], [2, SPEC_ID_ADD]]:
+				var specialization := RDPipelineSpecializationConstant.new()
+				specialization.constant_id = constant[0]
+				specialization.value = constant[1]
+				constants.append(specialization)
+			resources["spec_pipeline"] = rd.render_pipeline_create(resources["spec_shader"], format, RenderingDevice.INVALID_FORMAT_ID, RenderingDevice.RENDER_PRIMITIVE_TRIANGLES, RDPipelineRasterizationState.new(), RDPipelineMultisampleState.new(), RDPipelineDepthStencilState.new(), blend, 0, 0, constants)
 
 	# Records for the indirect cases: RECORDS_OFFSET poison bytes, then the records with poison between them.
 	for stride: int in [0, 16, 32]:
@@ -712,6 +862,67 @@ func _draw_mesh_case(rd: RenderingDevice, params: Dictionary, resources: Diction
 	if records.is_valid():
 		rd.free_rid(records)
 	return result
+
+
+# The grid cases: the pipeline, the direct draw's group counts, and the CPU's grid (columns, rows and the id of each
+# cell's quad, 0 for a culled one).
+static func _grid_cases() -> Array[Dictionary]:
+	var workgroup_ids: Array[int] = []
+	for cell in WORKGROUPS_GROUPS[0] * WORKGROUPS_GROUPS[1] * WORKGROUPS_GROUPS[2]:
+		# The mesh stage writes the cell, and MESH_FRAGMENT_SOURCE adds 1.
+		workgroup_ids.append(cell + 1)
+	var default_ids: Array[int] = []
+	var spec_ids: Array[int] = []
+	for cell in SPEC_TASK_GROUPS:
+		# The defaults: one column, ID_BASE 1, ID_ADD 0.
+		default_ids.append(0 if cell % 3 == 1 else 1 + cell)
+	for cell in SPEC_TASK_GROUPS * SPEC_COLUMNS:
+		spec_ids.append(0 if cell % 3 == 1 else SPEC_ID_BASE + cell + SPEC_ID_ADD)
+	return [
+		{ "key": "mesh_workgroups", "pipeline": "workgroups_pipeline", "groups": WORKGROUPS_GROUPS, "columns": WORKGROUPS_GROUPS[0], "rows": WORKGROUPS_GROUPS[1] * WORKGROUPS_GROUPS[2], "ids": workgroup_ids },
+		{ "key": "mesh_spec_default", "pipeline": "spec_default_pipeline", "groups": [SPEC_TASK_GROUPS, 1, 1], "columns": 1, "rows": SPEC_TASK_GROUPS, "ids": default_ids },
+		{ "key": "mesh_spec_constants", "pipeline": "spec_pipeline", "groups": [SPEC_TASK_GROUPS, 1, 1], "columns": SPEC_COLUMNS, "rows": SPEC_TASK_GROUPS, "ids": spec_ids },
+	]
+
+
+func _draw_grid_case(rd: RenderingDevice, resources: Dictionary, grid_case: Dictionary) -> Dictionary:
+	var groups: Array = grid_case["groups"]
+	var draw_list := rd.draw_list_begin(resources["framebuffer"], RenderingDevice.DRAW_CLEAR_COLOR_ALL, PackedColorArray([Color(0, 0, 0, 0), Color(0, 0, 0, 0)]))
+	rd.draw_list_bind_render_pipeline(draw_list, resources[grid_case["pipeline"]])
+	rd.draw_list_draw_mesh_tasks(draw_list, groups[0], groups[1], groups[2])
+	rd.draw_list_end()
+	rd.submit()
+	rd.sync()
+	return { "ids": rd.texture_get_data(resources["ids"], 0), "counts": rd.texture_get_data(resources["counts"], 0) }
+
+
+# The pixels whose id or fragment count differ from the CPU's grid: columns x rows cells of WIDTH / columns by
+# HEIGHT / rows pixels (integer division, as the shader does), each covered by its quad CELL_INSET pixels inside the
+# cell, with the cell's id and one fragment, unless its id is 0; every other pixel is empty.
+static func _grid_mismatches(drawn: Dictionary, grid_case: Dictionary) -> int:
+	var ids: PackedByteArray = drawn["ids"]
+	var counts: PackedByteArray = drawn["counts"]
+	var columns: int = grid_case["columns"]
+	var rows: int = grid_case["rows"]
+	var cell_ids: Array = grid_case["ids"]
+	var cell_width: int = WIDTH / columns
+	var cell_height: int = HEIGHT / rows
+	var mismatched := 0
+	for y in HEIGHT:
+		var row: int = y / cell_height
+		var local_y: int = y - row * cell_height
+		var inside_y := row < rows and local_y >= CELL_INSET and local_y < cell_height - CELL_INSET
+		for x in WIDTH:
+			var expected := 0
+			if inside_y:
+				var column: int = x / cell_width
+				var local_x: int = x - column * cell_width
+				if column < columns and local_x >= CELL_INSET and local_x < cell_width - CELL_INSET:
+					expected = cell_ids[row * columns + column]
+			var pixel := y * WIDTH + x
+			if ids.decode_u32(pixel * 4) != expected or counts.decode_u16(pixel * 2) != (HALF_ONE if expected != 0 else 0):
+				mismatched += 1
+	return mismatched
 
 
 # Every pixel has 0 or 1 fragments, and the covered pixels have an id; returns the covered pixel count, or -1.
@@ -910,7 +1121,7 @@ func _expect_refused(error_log: ErrorLog, refused: Dictionary, key: String, was_
 
 func _free_resources(rd: RenderingDevice, resources: Dictionary) -> void:
 	# Dependents first: pipelines, uniform sets and the framebuffer before what they use.
-	for key in ["mesh_pipeline", "vertex_pipeline", "count_pipeline", "mesh_uniforms", "vertex_uniforms", "count_uniforms", "framebuffer"]:
+	for key in ["mesh_pipeline", "workgroups_pipeline", "spec_default_pipeline", "spec_pipeline", "vertex_pipeline", "count_pipeline", "mesh_uniforms", "vertex_uniforms", "count_uniforms", "framebuffer"]:
 		if _valid(resources, key):
 			rd.free_rid(resources[key])
 		resources.erase(key)

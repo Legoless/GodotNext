@@ -144,6 +144,7 @@ bool ShaderBakerExportPlugin::_begin_customize_resources(const Ref<EditorExportP
 	to_hash.append(shader_cache_renderer_name);
 	// GodotNext: dxil_atomics (#279). The D3D12 format version tells a Mesa NIR library that declares atomics without
 	// readnone (25.3.1-gn3 or later) from older ones, so an export cache baked with the other kind is not reused.
+	// GodotNext: dxil_nonuniform (#293). Likewise 25.3.1-gn4 or later (non-uniform resource indices).
 	const Ref<RenderingShaderContainer> format_container = shader_container_format->create_container();
 	to_hash.append("[ShaderContainerFormatVersion]");
 	to_hash.append(itos(format_container.is_valid() ? format_container->get_current_format_version() : 0));

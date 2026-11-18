@@ -34,8 +34,9 @@ TEST_FORCE_LINK(test_rd_mesh_shaders)
 
 // Task and mesh shader stages through RenderingDevice (#178, plan §21.1, GR-3) without a GPU: the appended stages
 // and features, the named errors of a device without them, the render graph's mesh draws and their barrier stages,
-// the per-driver capability rules (Metal from Apple7 with indirect draws from Apple9; Direct3D 12 off, with one log
-// line, until its compiler translates the stages), and ShaderRD's mesh setup with the shader baker's rule.
+// the per-driver capability rules (Metal from Apple7 with indirect draws from Apple9; Direct3D 12 with mesh shader
+// tier 1 and the GodotNext Mesa NIR library 25.3.1-gn4 or later, with one log line), and ShaderRD's mesh setup with
+// the shader baker's rule.
 // godotnext/testbed/tests/rd_parity/meshlets.gd runs the draws.
 
 #ifdef RD_ENABLED
@@ -511,29 +512,24 @@ TEST_CASE("[RD][MeshShader] The mesh task group-count limits: bound, mapped, and
 	}
 }
 
-TEST_CASE("[RD][MeshShader] Direct3D 12: mesh shaders stay off with exactly one log line until the compiler translates them") {
+TEST_CASE("[RD][MeshShader] Direct3D 12: mesh shaders follow the device tier and the linked Mesa NIR library, with exactly one log line") {
 	String line;
 	const RenderingDeviceDriver::MeshShaderCaps tier_1 = RenderingDeviceDriver::d3d12_mesh_shader_caps(RenderingDeviceDriver::D3D12_MESH_SHADER_TIER_1, false, line);
 	CHECK_FALSE(tier_1.mesh);
 	CHECK_FALSE(tier_1.indirect);
-	CHECK_EQ(line, String("D3D12: Mesh shaders are off: the shader compiler does not translate task and mesh shaders to DXIL yet (mesh shader tier 1)."));
+	CHECK_EQ(line, String("D3D12: Mesh shaders are off: the linked Mesa NIR library does not translate task and mesh shaders to DXIL (the GodotNext library 25.3.1-gn4 or later does; mesh shader tier 1)."));
 	CHECK_EQ(line.split("\n").size(), 1);
 
 	const RenderingDeviceDriver::MeshShaderCaps no_tier = RenderingDeviceDriver::d3d12_mesh_shader_caps(0, false, line);
 	CHECK_FALSE(no_tier.mesh);
 	CHECK_EQ(line, String("D3D12: Mesh shaders are off: the device has no mesh shader support (mesh shader tier none)."));
 
-	// Once the shader container translates the stages (#122), a tier-1 device reports both features.
+	// With a library that translates the stages (25.3.1-gn4 or later, #122), a tier-1 device reports both features.
 	const RenderingDeviceDriver::MeshShaderCaps translated = RenderingDeviceDriver::d3d12_mesh_shader_caps(RenderingDeviceDriver::D3D12_MESH_SHADER_TIER_1, true, line);
 	CHECK(translated.mesh);
 	CHECK(translated.indirect);
 	CHECK_EQ(line.split("\n").size(), 1);
 	CHECK_FALSE(RenderingDeviceDriver::d3d12_mesh_shader_caps(0, true, line).mesh);
-
-#ifdef D3D12_ENABLED
-	// The driver passes the container's flag, which is off until #122.
-	CHECK_FALSE(RenderingShaderContainerD3D12::MESH_STAGES_SUPPORTED);
-#endif
 }
 
 TEST_CASE("[RD][MeshShader] ShaderRD's mesh setup expands task, mesh and fragment stages") {
@@ -594,7 +590,9 @@ TEST_CASE("[RD][MeshShader] The shader baker bakes mesh-shader versions only for
 	CHECK(RenderingShaderContainerFormatVulkan().supports_mesh_shaders());
 #endif
 #ifdef D3D12_ENABLED
-	CHECK_FALSE(RenderingShaderContainerFormatD3D12().supports_mesh_shaders());
+	// Only libraries that write the format-6 containers (25.3.1-gn4 or later) translate the stages, so baked mesh
+	// shaders never meet a library that cannot run them.
+	CHECK_EQ(RenderingShaderContainerFormatD3D12().supports_mesh_shaders(), RenderingShaderContainerD3D12::get_library_format_version() >= RenderingShaderContainerD3D12::FORMAT_VERSION_NON_UNIFORM_RESOURCE_INDEX);
 #endif
 }
 #endif // TOOLS_ENABLED
