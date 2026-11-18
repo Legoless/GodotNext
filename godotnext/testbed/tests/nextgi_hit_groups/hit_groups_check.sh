@@ -16,6 +16,9 @@
 #     --rendering-driver vulkan --gpu-validation res://tests/nextgi_hit_groups/hit_groups_check.tscn
 # On a driver without RT pipelines (Metal until #172), add "-- --expect=no-pipeline" after the scene; on
 # the software tier (a build without DXR), "-- --expect=not-hwrt".
+# HIT_GROUPS_HWRT_MODE=1 (Simplified Material) or 2 (Inline) also writes
+# rendering/global_illumination/nextgi/hardware_ray_tracing_mode and its Windows and Linux entries (#286);
+# add "-- --expect=simplified-material" or "-- --expect=inline" after the scene.
 
 set -euo pipefail
 
@@ -53,6 +56,14 @@ global_illumination/nextgi/enabled=true
 global_illumination/nextgi/hardware_ray_tracing=0
 global_illumination/nextgi/quality=2
 CFG
+mode="${HIT_GROUPS_HWRT_MODE:-}"
+if [[ -n "$mode" ]]; then
+	cat >>"$override" <<CFG
+global_illumination/nextgi/hardware_ray_tracing_mode=$mode
+global_illumination/nextgi/hardware_ray_tracing_mode.windows=$mode
+global_illumination/nextgi/hardware_ray_tracing_mode.linuxbsd=$mode
+CFG
+fi
 
 set +e
 "$@" 2>&1 | tee "$log"

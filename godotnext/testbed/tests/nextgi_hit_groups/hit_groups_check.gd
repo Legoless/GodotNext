@@ -41,6 +41,14 @@ extends Node3D
 ## tier (a D3D12 build without DXR, for example) pass -- --expect=not-hwrt: there is no RT arena, so no
 ## stream, and the hit groups report NOT_HWRT.
 ##
+## With rendering/global_illumination/nextgi/hardware_ray_tracing_mode (#286) set to Inline, pass
+## -- --expect=inline: no hit pipeline is made, no attribute stream is allocated, the arena keeps its bytes,
+## and the hit groups and every feature that needs them report HWRT_MODE_INLINE. Set to Simplified Material,
+## pass -- --expect=simplified-material: the check runs on the base library alone, every hit comes from the
+## fallback group (the simplified hit shader), no material shader compiles a hit group, no stream is
+## allocated, and the other features report HWRT_MODE_SIMPLIFIED_MATERIAL. The default, Full, is the check
+## above, and the tier info must report FULL.
+##
 ## Prints one "GODOTNEXT_RESULT <json>" line and exits 0 when every check passes, 1 otherwise.
 
 const SETTING := "rendering/global_illumination/nextgi/debug/hit_material_check"
@@ -68,6 +76,8 @@ var _failures := PackedStringArray()
 var _result := {}
 var _expect_pipeline := true
 var _expect_hwrt := true
+# GodotNext: nextgi_hwrt_mode (#286). The Hardware Ray Tracing Mode the run expects (tier info's name).
+var _expect_mode := "FULL"
 # Diagnostics: --kinds=0,4,12 builds every material from these kinds only, --uv-scale=1 fixes the UV scale.
 var _kinds := PackedInt32Array()
 var _uv_scale := 0.0
@@ -85,6 +95,11 @@ func _ready() -> void:
 		elif arg == "--expect=not-hwrt":
 			_expect_pipeline = false
 			_expect_hwrt = false
+		elif arg == "--expect=inline":
+			_expect_pipeline = false
+			_expect_mode = "INLINE"
+		elif arg == "--expect=simplified-material":
+			_expect_mode = "SIMPLIFIED_MATERIAL"
 		elif arg.begins_with("--kinds="):
 			for kind in arg.trim_prefix("--kinds=").split(","):
 				_kinds.append(int(kind))
@@ -107,13 +122,15 @@ func _run() -> void:
 	_check((baseline_arena > 0) == _expect_hwrt, "the RT arena holds the panels on the hardware tier only (%d bytes)" % baseline_arena)
 	_check(not off.has("rt_attribute_bytes"), "no attribute stream is reported with the setting off")
 	_check(String(tier.get("hit_groups", "")) == "NO_CONSUMER", "the hit groups report NO_CONSUMER with the setting off (%s)" % tier.get("hit_groups", ""))
+	_result["hardware_ray_tracing_mode"] = String(tier.get("hardware_ray_tracing_mode", ""))
+	_check(_result["hardware_ray_tracing_mode"] == _expect_mode, "the Hardware Ray Tracing Mode is %s (%s)" % [_expect_mode, _result["hardware_ray_tracing_mode"]])
 
 	# On.
 	ProjectSettings.set_setting(SETTING, true)
 	_result["first"] = await _measure(baseline_arena)
 
 	# One shared shader's code changes again and again: each code is a new hit group, the old ones die.
-	if _expect_pipeline:
+	if _expect_pipeline and _expect_mode == "FULL":
 		_result["edits"] = await _edit_shader(baseline_arena)
 
 	# Off again, with NextGI off in the environment first, so no frame block runs: everything is still freed.
@@ -166,6 +183,17 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 	out["rt_attribute_bytes"] = attribute_bytes
 	out["rt_attribute_surfaces"] = int(counters.get("rt_attribute_surfaces", 0))
 	out["rt_arena_bytes"] = int(counters.get("rt_arena_bytes", 0))
+	var by_consumer: Dictionary = tier.get("hit_groups_by_consumer", {})
+	out["hit_groups_by_consumer"] = by_consumer
+	if _expect_mode == "INLINE":
+		# GodotNext: nextgi_hwrt_mode (#286). No hit pipeline: the mode is the reason, for every feature.
+		_check(out["hit_groups"] == "HWRT_MODE_INLINE", "the hit groups report HWRT_MODE_INLINE (%s)" % out["hit_groups"])
+		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "check"]:
+			_check(String(by_consumer.get(feature, "")) == "HWRT_MODE_INLINE", "%s reports HWRT_MODE_INLINE (%s)" % [feature, by_consumer.get(feature, "")])
+		_check(attribute_bytes == 0 and int(counters.get("rt_attribute_surfaces", 0)) == 0, "no attribute stream is allocated in Inline (%d bytes)" % attribute_bytes)
+		_check(int(counters.get("rt_arena_bytes", 0)) == p_baseline_arena, "the arena keeps its bytes in Inline (%d, %d)" % [counters.get("rt_arena_bytes", 0), p_baseline_arena])
+		_check(not counters.has("hit_check_runs") and not counters.has("hit_shaders"), "no hit pipeline exists in Inline")
+		return out
 	if not _expect_hwrt:
 		# The software tier has no RT arena, so a consumer gets no stream and no hit group.
 		_check(out["hit_groups"] == "NOT_HWRT", "the hit groups report NOT_HWRT (%s)" % out["hit_groups"])
@@ -179,6 +207,11 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 		_check(int(counters.get("rt_arena_bytes", 0)) == p_baseline_arena, "the arena keeps its bytes (%d, %d)" % [counters.get("rt_arena_bytes", 0), p_baseline_arena])
 		_check(not counters.has("hit_check_runs"), "no hit group runs without RT pipelines")
 		return out
+	if _expect_mode == "SIMPLIFIED_MATERIAL":
+		return _measure_simplified(out, counters, by_consumer, p_baseline_arena, runs_before)
+	_check(int(counters.get("hit_material_groups", 0)) == 1, "the material hit groups are on at Full")
+	# GodotNext: nextgi_hwrt_mode (#286). The check asks, so its reason is the one the frame block found.
+	_check(String(by_consumer.get("check", "")) == out["hit_groups"], "the check reports the hit groups' reason (%s, %s)" % [by_consumer.get("check", ""), out["hit_groups"]])
 	# Both panel meshes (uncompressed and compressed) get a stream of 32 header bytes and 20 bytes per vertex,
 	# in the arena.
 	var vertices := (PANEL_CELLS.x + 1) * (PANEL_CELLS.y + 1)
@@ -240,6 +273,37 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 	# Report only (GL-3, measured in PQ): the off-thread group add and link times.
 	print("NEXTGI_HIT_TIMING group_add_ms_max=%.3f link_ms_max=%.3f links=%d" % [counters.get("hit_group_add_ms_max", 0.0), counters.get("hit_link_ms_max", 0.0), counters.get("hit_links", 0)])
 	return out
+
+
+# GodotNext: nextgi_hwrt_mode (#286). Simplified Material: the base library alone. The check traces through
+# the fallback group, the simplified hit shader; no material compiles a hit group and no stream exists.
+func _measure_simplified(p_out: Dictionary, p_counters: Dictionary, p_by_consumer: Dictionary, p_baseline_arena: int, p_runs_before: int) -> Dictionary:
+	for key in p_counters.keys():
+		if String(key).begins_with("hit_"):
+			p_out[key] = p_counters[key]
+	_check(p_out["hit_groups"] == "AVAILABLE", "the simplified hit pipeline runs for the check (%s)" % p_out["hit_groups"])
+	_check(String(p_by_consumer.get("check", "")) == "AVAILABLE", "the check reports AVAILABLE (%s)" % p_by_consumer.get("check", ""))
+	for feature in ["hit_lighting", "translucency", "far_field", "material_retrace"]:
+		_check(String(p_by_consumer.get(feature, "")) == "HWRT_MODE_SIMPLIFIED_MATERIAL", "%s reports HWRT_MODE_SIMPLIFIED_MATERIAL (%s)" % [feature, p_by_consumer.get(feature, "")])
+	_check(int(p_counters.get("hit_check_runs", 0)) > p_runs_before, "the check ran within %d frames" % MAX_WAIT_FRAMES)
+	_check(int(p_counters.get("hit_material_groups", 1)) == 0, "the material hit groups are off")
+	_check(int(p_counters.get("rt_attribute_bytes", 0)) == 0 and int(p_counters.get("rt_attribute_surfaces", 0)) == 0, "no attribute stream is allocated (%d bytes)" % p_counters.get("rt_attribute_bytes", 0))
+	_check(int(p_counters.get("rt_arena_bytes", 0)) == p_baseline_arena, "the arena keeps its bytes (%d, %d)" % [p_counters.get("rt_arena_bytes", 0), p_baseline_arena])
+	_check(int(p_counters.get("hit_shaders", -1)) == 0, "no material shader compiled a hit group (%d)" % p_counters.get("hit_shaders", -1))
+	_check(int(p_counters.get("hit_groups_linked", -1)) == 0 and int(p_counters.get("hit_groups_pending", -1)) == 0, "no material group is linked or pending")
+	_check(int(p_counters.get("hit_materials", -1)) == 0, "no material was looked up (%d)" % p_counters.get("hit_materials", -1))
+	var geometries := int(p_counters.get("hit_geometries", 0))
+	_check(geometries > 0 and int(p_counters.get("hit_fallback_geometries", 0)) == geometries, "every geometry uses the simplified hit shader (%d of %d)" % [p_counters.get("hit_fallback_geometries", 0), geometries])
+	var samples := int(p_counters.get("hit_check_samples", 0))
+	var hits := int(p_counters.get("hit_check_hits", 0))
+	_check(samples >= MATERIALS * 1000, "the check traced the panels' texels (%d samples)" % samples)
+	_check(hits >= samples * MIN_MATCH, "the rays hit (%d of %d)" % [hits, samples])
+	_check(int(p_counters.get("hit_check_fallback", 0)) == hits, "every hit comes from the simplified hit shader (%d of %d)" % [p_counters.get("hit_check_fallback", 0), hits])
+	var probe_gpu := int(p_counters.get("hit_check_probe_gpu_instances", 0))
+	p_out["probe_gpu_instances"] = probe_gpu
+	_check(probe_gpu > 0, "the probe rays hit GPU-written TLAS instances (%d)" % probe_gpu)
+	_check(int(p_counters.get("hit_check_probe_gpu_fallback", 0)) == probe_gpu, "GPU-written instance hits use the fallback group too (%d of %d)" % [p_counters.get("hit_check_probe_gpu_fallback", 0), probe_gpu])
+	return p_out
 
 
 # Changes one shared shader's code SHADER_EDITS times, each time waiting until its new group is linked, so

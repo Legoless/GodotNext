@@ -331,6 +331,10 @@ private:
 	uint32_t hit_consumers = 0;
 	int hit_availability = 2; // NextGIHitAvailability of the last frame block; NEXTGI_HIT_NOT_HWRT before the first.
 	bool hit_init_failed = false; // NextGIHitMaterials failed to initialize; cleared when no consumer is left.
+	// GodotNext: nextgi_hwrt_mode (#286). NextGIHitMode of hardware_ray_tracing_mode, read by init(), and the mode
+	// the live hit_materials were made for. 0 is Full.
+	int hit_mode = 0;
+	int hit_materials_mode = 0;
 	void _update_hit_materials(bool p_hwrt_frame, uint64_t p_frame);
 	void _free_hit_materials();
 	void _release_unused_hit_materials();
@@ -677,6 +681,16 @@ public:
 	// change.
 	void set_hit_consumer(uint32_t p_consumer, bool p_enabled);
 	uint32_t get_hit_consumers() const;
+	// GodotNext: nextgi_hwrt_mode (#286). rendering/global_illumination/nextgi/hardware_ray_tracing_mode on this
+	// platform (its feature-tag overrides apply), as a NextGIHitMode; Full where the setting does not exist.
+	static int read_hardware_ray_tracing_mode();
+	// The mode init() read: it holds until the next start.
+	int get_hardware_ray_tracing_mode() const { return hit_mode; }
+	// Why the material hit groups do or do not run for one consumer (NextGIHitConsumer bit), as tier info's
+	// hit_groups_by_consumer reports it (nextgi_hit_consumer_availability()): the mode first; then, while the
+	// consumer asks, what the last frame block found, so AVAILABLE means get_hit_materials() holds the groups
+	// (trace on frames where its has_current_records() is true); while it does not ask, what it would get.
+	int get_hit_availability_for(uint32_t p_consumer) const;
 	NextGIHitMaterials *get_hit_materials() const { return hit_materials; }
 	void set_front_layer(NextGIFrontLayer *p_front_layer) { front_layer = p_front_layer; }
 	bool has_front_layer() const { return front_layer != nullptr; }

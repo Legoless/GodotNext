@@ -49,9 +49,63 @@ namespace RendererRD {
 
 /* Device-free helpers. */
 
-NextGIHitAvailability nextgi_hit_availability(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed) {
+NextGIHitMode nextgi_hit_mode_from_setting(int p_setting) {
+	return (p_setting > NEXTGI_HIT_MODE_FULL && p_setting < NEXTGI_HIT_MODE_MAX) ? NextGIHitMode(p_setting) : NEXTGI_HIT_MODE_FULL;
+}
+
+const char *nextgi_hit_mode_name(NextGIHitMode p_mode) {
+	switch (p_mode) {
+		case NEXTGI_HIT_MODE_FULL:
+			return "FULL";
+		case NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL:
+			return "SIMPLIFIED_MATERIAL";
+		case NEXTGI_HIT_MODE_INLINE:
+			return "INLINE";
+		case NEXTGI_HIT_MODE_MAX:
+			break;
+	}
+	return "UNKNOWN";
+}
+
+uint32_t nextgi_hit_mode_consumers(uint32_t p_consumers, NextGIHitMode p_mode) {
+	switch (p_mode) {
+		case NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL:
+			return p_consumers & NEXTGI_HIT_SIMPLIFIED_CONSUMERS;
+		case NEXTGI_HIT_MODE_INLINE:
+			return 0;
+		case NEXTGI_HIT_MODE_FULL:
+		case NEXTGI_HIT_MODE_MAX:
+			break;
+	}
+	return p_consumers;
+}
+
+bool nextgi_hit_geometry_uses_material(bool p_material_groups, bool p_has_stream, uint32_t p_attribute_chunk, uint32_t p_arena_chunk) {
+	return p_material_groups && p_has_stream && p_attribute_chunk < NEXTGI_HIT_ARENA_CHUNKS && p_arena_chunk < NEXTGI_HIT_ARENA_CHUNKS;
+}
+
+NextGIHitAvailability nextgi_hit_setting_availability(uint32_t p_consumers, NextGIHitMode p_mode) {
 	if (p_consumers == 0) {
 		return NEXTGI_HIT_NO_CONSUMER;
+	}
+	if (nextgi_hit_mode_consumers(p_consumers, p_mode) == 0) {
+		return p_mode == NEXTGI_HIT_MODE_INLINE ? NEXTGI_HIT_HWRT_MODE_INLINE : NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL;
+	}
+	return NEXTGI_HIT_AVAILABLE;
+}
+
+NextGIHitAvailability nextgi_hit_consumer_availability(uint32_t p_consumer, uint32_t p_consumers, NextGIHitMode p_mode, NextGIHitAvailability p_last_frame, NextGIHitAvailability p_on_its_own) {
+	const NextGIHitAvailability settings = nextgi_hit_setting_availability(p_consumer, p_mode);
+	if (settings != NEXTGI_HIT_AVAILABLE) {
+		return settings;
+	}
+	return (p_consumers & p_consumer) == p_consumer ? p_last_frame : p_on_its_own;
+}
+
+NextGIHitAvailability nextgi_hit_availability(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed, NextGIHitMode p_mode) {
+	const NextGIHitAvailability settings = nextgi_hit_setting_availability(p_consumers, p_mode);
+	if (settings != NEXTGI_HIT_AVAILABLE) {
+		return settings;
 	}
 	if (!p_hwrt_tier) {
 		return NEXTGI_HIT_NOT_HWRT;
@@ -87,6 +141,10 @@ const char *nextgi_hit_availability_name(NextGIHitAvailability p_availability) {
 			return "NO_BINDLESS";
 		case NEXTGI_HIT_INIT_FAILED:
 			return "INIT_FAILED";
+		case NEXTGI_HIT_HWRT_MODE_INLINE:
+			return "HWRT_MODE_INLINE";
+		case NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL:
+			return "HWRT_MODE_SIMPLIFIED_MATERIAL";
 		case NEXTGI_HIT_AVAILABILITY_MAX:
 			break;
 	}
@@ -802,6 +860,9 @@ struct NextGIHitMaterials::Internal {
 	uint32_t record_count = 0;
 	uint64_t records_frame = UINT64_MAX;
 	bool relink_failed = false; // A relink failed: dead groups stay until the hit groups are recreated.
+	// False in the Simplified Material mode (#286): no material shader compiles a hit group, and every geometry
+	// uses the fallback group, the simplified hit shader.
+	bool material_groups = true;
 	bool ready = false;
 	Counters counters;
 };
@@ -862,7 +923,9 @@ bool NextGIHitMaterials::_initialize() {
 	in.base_version = in.base_shader.version_create(false);
 	in.base_shader_rid = in.base_shader.version_get_shader(in.base_version, 0);
 	ERR_FAIL_COND_V_MSG(in.base_shader_rid.is_null(), false, "NextGI hit groups: the base hit shader did not compile.");
-	in.material_shader.initialize({ "" });
+	if (in.material_groups) {
+		in.material_shader.initialize({ "" });
+	}
 
 	RD::PipelineShader raygen;
 	raygen.shader = in.base_shader_rid;
@@ -1488,26 +1551,25 @@ void NextGIHitMaterials::begin_records() {
 void NextGIHitMaterials::add_geometry(RenderGeometryInstance *p_instance, RID p_mesh, uint32_t p_surface, uint32_t p_arena_chunk, bool p_has_stream, uint32_t p_attribute_chunk, uint32_t p_attribute_offset, bool p_multimesh_element) {
 	Internal &in = *internal;
 	RenderGeometryInstanceBase *instance = static_cast<RenderGeometryInstanceBase *>(p_instance);
-	RID material_rid;
-	if (instance != nullptr && instance->data != nullptr) {
-		if (instance->data->material_override.is_valid()) {
-			material_rid = instance->data->material_override;
-		} else if (int(p_surface) < instance->data->surface_materials.size() && instance->data->surface_materials[p_surface].is_valid()) {
-			material_rid = instance->data->surface_materials[p_surface];
-		}
-	}
-	if (material_rid.is_null() && MeshStorage::get_singleton() != nullptr && p_mesh.is_valid()) {
-		material_rid = MeshStorage::get_singleton()->mesh_surface_get_material(p_mesh, int(p_surface));
-	}
-	if (material_rid.is_null()) {
-		// No material anywhere: the rasterizer draws the scene shader's default material.
-		material_rid = RendererSceneRenderImplementation::SceneShaderForwardClustered::get_default_material_for_nextgi();
-	}
 
 	Internal::SurfaceRecord record;
 	uint32_t group = 0;
-	// The hit stages bind the first NEXTGI_HIT_ARENA_CHUNKS chunks: geometry past them has no stream.
-	if (p_has_stream && p_attribute_chunk < NEXTGI_HIT_ARENA_CHUNKS && p_arena_chunk < NEXTGI_HIT_ARENA_CHUNKS) {
+	if (nextgi_hit_geometry_uses_material(in.material_groups, p_has_stream, p_attribute_chunk, p_arena_chunk)) {
+		RID material_rid;
+		if (instance != nullptr && instance->data != nullptr) {
+			if (instance->data->material_override.is_valid()) {
+				material_rid = instance->data->material_override;
+			} else if (int(p_surface) < instance->data->surface_materials.size() && instance->data->surface_materials[p_surface].is_valid()) {
+				material_rid = instance->data->surface_materials[p_surface];
+			}
+		}
+		if (material_rid.is_null() && MeshStorage::get_singleton() != nullptr && p_mesh.is_valid()) {
+			material_rid = MeshStorage::get_singleton()->mesh_surface_get_material(p_mesh, int(p_surface));
+		}
+		if (material_rid.is_null()) {
+			// No material anywhere: the rasterizer draws the scene shader's default material.
+			material_rid = RendererSceneRenderImplementation::SceneShaderForwardClustered::get_default_material_for_nextgi();
+		}
 		record.attribute_chunk = p_attribute_chunk;
 		record.attribute_offset = p_attribute_offset;
 		record.flags = 1u;
@@ -1778,6 +1840,7 @@ const NextGIHitMaterials::Counters &NextGIHitMaterials::get_counters() const {
 
 void NextGIHitMaterials::fill_counters(Dictionary &r_counters) const {
 	const Counters &c = internal->counters;
+	r_counters["hit_material_groups"] = int64_t(internal->material_groups ? 1 : 0);
 	r_counters["hit_shaders"] = int64_t(c.shaders);
 	r_counters["hit_groups_linked"] = int64_t(c.groups_linked);
 	r_counters["hit_groups_pending"] = int64_t(c.groups_pending);
@@ -1807,8 +1870,9 @@ void NextGIHitMaterials::fill_counters(Dictionary &r_counters) const {
 	r_counters["hit_check_pending_shaders"] = int64_t(c.check_pending_shaders);
 }
 
-NextGIHitMaterials::NextGIHitMaterials() {
+NextGIHitMaterials::NextGIHitMaterials(bool p_material_groups) {
 	internal = memnew(Internal);
+	internal->material_groups = p_material_groups;
 	if (singleton == nullptr) {
 		singleton = this;
 	}

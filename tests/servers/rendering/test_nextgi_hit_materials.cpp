@@ -36,7 +36,10 @@
 
 TEST_FORCE_LINK(test_nextgi_hit_materials)
 
+#include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
+#include "core/os/os.h"
+#include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/rendering_server_enums.h"
@@ -129,6 +132,298 @@ TEST_CASE("[NextGIHit] Availability names the first missing requirement") {
 	for (int i = 0; i < NEXTGI_HIT_AVAILABILITY_MAX; i++) {
 		CHECK_NE(String(nextgi_hit_availability_name(NextGIHitAvailability(i))), "UNKNOWN");
 	}
+}
+
+// GodotNext: nextgi_hwrt_mode (#286). UE 5.9's per-platform Hardware Ray Tracing Mode (plan §21.1).
+static const uint32_t ALL_HIT_CONSUMERS[] = { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE };
+static const uint32_t EVERY_HIT_CONSUMER = NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_TRANSLUCENCY | NEXTGI_HIT_CONSUMER_FAR_FIELD | NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE;
+
+// The rule before the setting existed (#130, as on master before #286), written out so that Full is compared
+// with it and not with itself.
+static NextGIHitAvailability _availability_before_the_mode(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed) {
+	if (p_consumers == 0) {
+		return NEXTGI_HIT_NO_CONSUMER;
+	}
+	if (!p_hwrt_tier) {
+		return NEXTGI_HIT_NOT_HWRT;
+	}
+	if (!p_raytracing_pipeline) {
+		return NEXTGI_HIT_NO_RAYTRACING_PIPELINE;
+	}
+	if (!p_pipeline_library) {
+		return NEXTGI_HIT_NO_PIPELINE_LIBRARY;
+	}
+	if (!p_bindless) {
+		return NEXTGI_HIT_NO_BINDLESS;
+	}
+	if (p_init_failed) {
+		return NEXTGI_HIT_INIT_FAILED;
+	}
+	return NEXTGI_HIT_AVAILABLE;
+}
+
+TEST_CASE("[NextGIHit] The Hardware Ray Tracing Mode reads Full by default and for values out of range") {
+	CHECK_EQ(nextgi_hit_mode_from_setting(0), NEXTGI_HIT_MODE_FULL);
+	CHECK_EQ(nextgi_hit_mode_from_setting(1), NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL);
+	CHECK_EQ(nextgi_hit_mode_from_setting(2), NEXTGI_HIT_MODE_INLINE);
+	for (int value : { -1, 3, 99 }) {
+		CHECK_EQ(nextgi_hit_mode_from_setting(value), NEXTGI_HIT_MODE_FULL);
+	}
+	CHECK_EQ(String(nextgi_hit_mode_name(NEXTGI_HIT_MODE_FULL)), "FULL");
+	CHECK_EQ(String(nextgi_hit_mode_name(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL)), "SIMPLIFIED_MATERIAL");
+	CHECK_EQ(String(nextgi_hit_mode_name(NEXTGI_HIT_MODE_INLINE)), "INLINE");
+	CHECK_EQ(String(nextgi_hit_availability_name(NEXTGI_HIT_HWRT_MODE_INLINE)), "HWRT_MODE_INLINE");
+	CHECK_EQ(String(nextgi_hit_availability_name(NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL)), "HWRT_MODE_SIMPLIFIED_MATERIAL");
+	// Only Full compiles material hit groups.
+	CHECK(nextgi_hit_mode_material_groups(NEXTGI_HIT_MODE_FULL));
+	CHECK_FALSE(nextgi_hit_mode_material_groups(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+	CHECK_FALSE(nextgi_hit_mode_material_groups(NEXTGI_HIT_MODE_INLINE));
+}
+
+TEST_CASE("[NextGIHit] Full changes nothing: every input gives the availability it gave before the setting") {
+	const uint32_t consumer_sets[] = { 0, NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_CHECK, EVERY_HIT_CONSUMER };
+	for (uint32_t consumers : consumer_sets) {
+		CHECK_EQ(nextgi_hit_mode_consumers(consumers, NEXTGI_HIT_MODE_FULL), consumers);
+		for (uint32_t bits = 0; bits < 64; bits++) {
+			const bool hwrt = (bits & 1) != 0;
+			const bool pipeline = (bits & 2) != 0;
+			const bool library = (bits & 4) != 0;
+			const bool bindless = (bits & 8) != 0;
+			const bool failed = (bits & 16) != 0;
+			const bool arena = (bits & 32) != 0;
+			const NextGIHitAvailability before = _availability_before_the_mode(consumers, hwrt, pipeline, library, bindless, failed);
+			CHECK_EQ(nextgi_hit_availability(consumers, hwrt, pipeline, library, bindless, failed, NEXTGI_HIT_MODE_FULL), before);
+			CHECK_EQ(nextgi_hit_availability(consumers, hwrt, pipeline, library, bindless, failed), before);
+			// Before the setting, the stream existed exactly while the hit groups ran in the RT arena.
+			CHECK_EQ(nextgi_hit_stream_needed(before, arena, NEXTGI_HIT_MODE_FULL), (before == NEXTGI_HIT_AVAILABLE && arena));
+			CHECK_EQ(nextgi_hit_stream_needed(before, arena), (before == NEXTGI_HIT_AVAILABLE && arena));
+		}
+	}
+	// With a stream in the bound chunks, Full looks the geometry's material up: its shader compiles a hit group.
+	CHECK(nextgi_hit_geometry_uses_material(true, true, 0, 0));
+	CHECK(nextgi_hit_geometry_uses_material(true, true, NEXTGI_HIT_ARENA_CHUNKS - 1, NEXTGI_HIT_ARENA_CHUNKS - 1));
+	CHECK_FALSE(nextgi_hit_geometry_uses_material(true, false, 0, 0));
+	CHECK_FALSE(nextgi_hit_geometry_uses_material(true, true, NEXTGI_HIT_ARENA_CHUNKS, 0));
+	CHECK_FALSE(nextgi_hit_geometry_uses_material(true, true, 0, NEXTGI_HIT_ARENA_CHUNKS));
+}
+
+TEST_CASE("[NextGIHit] A feature that asks gets what the last frame block found; one that does not, what it would get") {
+	// Full, before the first frame block (or while NextGI is off in the environment): the device could run the
+	// hit groups, but none exist yet, so a feature that asks must not see AVAILABLE.
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_NOT_HWRT, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_NOT_HWRT);
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_NOT_HWRT, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_NOT_HWRT);
+	// Once the frame block made them, AVAILABLE; a latched failure stays reported.
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_AVAILABLE);
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_INIT_FAILED, NEXTGI_HIT_INIT_FAILED), NEXTGI_HIT_INIT_FAILED);
+	// A feature that does not ask gets what it would get on this tier and device.
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_NOT_HWRT, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_AVAILABLE);
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_FAR_FIELD, 0, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_NO_CONSUMER, NEXTGI_HIT_NO_RAYTRACING_PIPELINE), NEXTGI_HIT_NO_RAYTRACING_PIPELINE);
+	// The mode comes first. In Simplified Material, with the check and hit lighting both asking, the frame block
+	// made the simplified pipeline for the check (AVAILABLE), but it has no material groups: hit lighting and the
+	// other features that need them get the mode's reason, and the check gets AVAILABLE.
+	const uint32_t check_and_hit_lighting = NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_HIT_LIGHTING;
+	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE }) {
+		CHECK_EQ(nextgi_hit_consumer_availability(consumer, check_and_hit_lighting | consumer, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
+	}
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_CHECK, check_and_hit_lighting, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_AVAILABLE);
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_CHECK, check_and_hit_lighting, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, NEXTGI_HIT_NOT_HWRT, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_NOT_HWRT);
+	// In Inline every feature gets the mode's reason, whatever the frame block or the device would give.
+	for (uint32_t consumer : ALL_HIT_CONSUMERS) {
+		CHECK_EQ(nextgi_hit_consumer_availability(consumer, EVERY_HIT_CONSUMER, NEXTGI_HIT_MODE_INLINE, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_HWRT_MODE_INLINE);
+		CHECK_EQ(nextgi_hit_consumer_availability(consumer, 0, NEXTGI_HIT_MODE_INLINE, NEXTGI_HIT_NO_CONSUMER, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_HWRT_MODE_INLINE);
+	}
+}
+
+TEST_CASE("[NextGIHit] Inline creates no hit pipeline: every feature that needs one reports HWRT_MODE_INLINE") {
+	CHECK_EQ(nextgi_hit_mode_consumers(EVERY_HIT_CONSUMER, NEXTGI_HIT_MODE_INLINE), 0u);
+	// No consumer is still NO_CONSUMER; any consumer gets the mode's reason, on any tier and device, and the
+	// availability is never AVAILABLE, so NextGI creates no NextGIHitMaterials: no base library, no material hit
+	// group and no attribute stream.
+	CHECK_EQ(nextgi_hit_availability(0, true, true, true, true, false, NEXTGI_HIT_MODE_INLINE), NEXTGI_HIT_NO_CONSUMER);
+	CHECK_EQ(nextgi_hit_setting_availability(0, NEXTGI_HIT_MODE_INLINE), NEXTGI_HIT_NO_CONSUMER);
+	for (uint32_t consumer : ALL_HIT_CONSUMERS) {
+		CHECK_EQ(nextgi_hit_setting_availability(consumer, NEXTGI_HIT_MODE_INLINE), NEXTGI_HIT_HWRT_MODE_INLINE);
+		for (uint32_t bits = 0; bits < 32; bits++) {
+			const NextGIHitAvailability availability = nextgi_hit_availability(consumer, (bits & 1) != 0, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0, (bits & 16) != 0, NEXTGI_HIT_MODE_INLINE);
+			CHECK_EQ(availability, NEXTGI_HIT_HWRT_MODE_INLINE);
+			CHECK_FALSE(nextgi_hit_stream_needed(availability, true, NEXTGI_HIT_MODE_INLINE));
+		}
+	}
+	CHECK_EQ(nextgi_hit_availability(EVERY_HIT_CONSUMER, true, true, true, true, false, NEXTGI_HIT_MODE_INLINE), NEXTGI_HIT_HWRT_MODE_INLINE);
+}
+
+TEST_CASE("[NextGIHit] Simplified Material runs only the simplified consumers, with no material groups and no stream") {
+	CHECK_EQ(nextgi_hit_mode_consumers(EVERY_HIT_CONSUMER, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_SIMPLIFIED_CONSUMERS);
+	CHECK_EQ(NEXTGI_HIT_SIMPLIFIED_CONSUMERS, uint32_t(NEXTGI_HIT_CONSUMER_CHECK));
+	// The features that need a material's own hit group keep their inline path, with the mode's reason.
+	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE }) {
+		CHECK_EQ(nextgi_hit_setting_availability(consumer, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
+		CHECK_EQ(nextgi_hit_availability(consumer, true, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
+		CHECK_EQ(nextgi_hit_availability(consumer, false, false, false, false, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
+	}
+	// The check runs on the simplified hit shader, behind the same tier and device requirements as at Full.
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, true, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_AVAILABLE);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, false, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_NOT_HWRT);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, true, false, false, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_NO_RAYTRACING_PIPELINE);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, true, true, true, true, true, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_INIT_FAILED);
+	// With the check and hit lighting both asking, the pipeline runs for the check; hit lighting alone would not.
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_AVAILABLE);
+	// Running, the simplified pipeline keeps no attribute stream and looks no material up, so no material shader
+	// compiles a hit group: every geometry uses the fallback group, the simplified hit shader.
+	CHECK_FALSE(nextgi_hit_stream_needed(NEXTGI_HIT_AVAILABLE, true, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+	CHECK(nextgi_hit_stream_needed(NEXTGI_HIT_AVAILABLE, true, NEXTGI_HIT_MODE_FULL));
+	for (uint32_t chunk = 0; chunk <= NEXTGI_HIT_ARENA_CHUNKS; chunk++) {
+		CHECK_FALSE(nextgi_hit_geometry_uses_material(nextgi_hit_mode_material_groups(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), true, chunk, chunk));
+		CHECK_FALSE(nextgi_hit_geometry_uses_material(nextgi_hit_mode_material_groups(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), false, chunk, chunk));
+	}
+}
+
+// Sets a project setting for the test's scope and puts the previous value back.
+struct HitModeSettingOverride {
+	String name;
+	Variant previous;
+	bool existed = false;
+	HitModeSettingOverride(const String &p_name, const Variant &p_value) :
+			name(p_name) {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		existed = ps->has_setting(p_name);
+		previous = existed ? ps->get_setting(p_name) : Variant();
+		ps->set_setting(p_name, p_value);
+	}
+	~HitModeSettingOverride() {
+		ProjectSettings *ps = ProjectSettings::get_singleton();
+		if (existed) {
+			ps->set_setting(name, previous);
+		} else if (ps->has_setting(name)) {
+			ps->clear(name);
+		}
+	}
+};
+
+static const char *HWRT_MODE_SETTING = "rendering/global_illumination/nextgi/hardware_ray_tracing_mode";
+
+TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full by default and read at startup") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const String windows = String(HWRT_MODE_SETTING) + ".windows";
+	const String linuxbsd = String(HWRT_MODE_SETTING) + ".linuxbsd";
+	REQUIRE(ps->has_setting(HWRT_MODE_SETTING));
+	REQUIRE(ps->has_setting(windows));
+	REQUIRE(ps->has_setting(linuxbsd));
+	// The project default is Full, and a restart applies a change.
+	for (const String &name : { String(HWRT_MODE_SETTING), windows, linuxbsd }) {
+		CHECK_EQ(int(ps->property_get_revert(name)), int(NEXTGI_HIT_MODE_FULL));
+	}
+	List<PropertyInfo> properties;
+	ps->get_property_list(&properties);
+	bool listed = false;
+	for (const PropertyInfo &info : properties) {
+		if (info.name == HWRT_MODE_SETTING) {
+			listed = true;
+			CHECK_EQ(info.hint, PROPERTY_HINT_ENUM);
+			CHECK_EQ(info.hint_string, "Full,Simplified Material,Inline");
+			CHECK((info.usage & PROPERTY_USAGE_RESTART_IF_CHANGED) != 0);
+		}
+	}
+	CHECK(listed);
+	// Unset in the test project, the mode is Full on every platform.
+	CHECK_EQ(NextGI::read_hardware_ray_tracing_mode(), int(NEXTGI_HIT_MODE_FULL));
+
+	{
+		// The platform's entry decides where it exists (Windows, Linux); the base value elsewhere.
+		HitModeSettingOverride base(HWRT_MODE_SETTING, int(NEXTGI_HIT_MODE_INLINE));
+		HitModeSettingOverride win(windows, int(NEXTGI_HIT_MODE_INLINE));
+		HitModeSettingOverride lin(linuxbsd, int(NEXTGI_HIT_MODE_INLINE));
+		CHECK_EQ(NextGI::read_hardware_ray_tracing_mode(), int(NEXTGI_HIT_MODE_INLINE));
+		NextGI next_gi;
+		CHECK_EQ(next_gi.get_hardware_ray_tracing_mode(), int(NEXTGI_HIT_MODE_FULL));
+		next_gi.init(true);
+		CHECK_EQ(next_gi.get_hardware_ray_tracing_mode(), int(NEXTGI_HIT_MODE_INLINE));
+
+		// Every feature that needs the hit groups reports the mode's reason, the check included, with or
+		// without a frame block.
+		next_gi.set_hit_consumer(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true);
+		const Dictionary info = next_gi.get_tier_info();
+		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "INLINE");
+		CHECK_EQ(String(info["hit_groups"]), "HWRT_MODE_INLINE");
+		const Dictionary by_consumer = info["hit_groups_by_consumer"];
+		CHECK_EQ(by_consumer.size(), 5);
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check" }) {
+			CHECK_EQ(String(by_consumer[feature]), "HWRT_MODE_INLINE");
+		}
+		CHECK_EQ(next_gi.get_hit_availability_for(NEXTGI_HIT_CONSUMER_CHECK), int(NEXTGI_HIT_HWRT_MODE_INLINE));
+		// No device runs in the doctests, so no frame block makes hit groups in any mode. That Inline makes no hit
+		// pipeline and Simplified Material no material group is proven on a device by hit_groups_check.tscn with
+		// --expect=inline and --expect=simplified-material.
+		next_gi.set_hit_consumer(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, false);
+		CHECK_EQ(String(next_gi.get_tier_info()["hit_groups"]), "NO_CONSUMER");
+	}
+	{
+		HitModeSettingOverride base(HWRT_MODE_SETTING, int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+		HitModeSettingOverride win(windows, int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+		HitModeSettingOverride lin(linuxbsd, int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+		NextGI next_gi;
+		next_gi.init(true);
+		CHECK_EQ(next_gi.get_hardware_ray_tracing_mode(), int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+		next_gi.set_hit_consumer(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, true);
+		const Dictionary info = next_gi.get_tier_info();
+		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "SIMPLIFIED_MATERIAL");
+		CHECK_EQ(String(info["hit_groups"]), "HWRT_MODE_SIMPLIFIED_MATERIAL");
+		const Dictionary by_consumer = info["hit_groups_by_consumer"];
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace" }) {
+			CHECK_EQ(String(by_consumer[feature]), "HWRT_MODE_SIMPLIFIED_MATERIAL");
+		}
+		// The check could run here, but this NextGI has no hardware tier (no device in the doctests).
+		CHECK_EQ(String(by_consumer["check"]), "NOT_HWRT");
+		next_gi.set_hit_consumer(NEXTGI_HIT_CONSUMER_HIT_LIGHTING, false);
+	}
+	{
+		// An out-of-range value reads as Full, which changes nothing: the reasons are the ones before the setting.
+		HitModeSettingOverride base(HWRT_MODE_SETTING, 7);
+		HitModeSettingOverride win(windows, 7);
+		HitModeSettingOverride lin(linuxbsd, 7);
+		NextGI next_gi;
+		next_gi.init(true);
+		CHECK_EQ(next_gi.get_hardware_ray_tracing_mode(), int(NEXTGI_HIT_MODE_FULL));
+		const Dictionary info = next_gi.get_tier_info();
+		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "FULL");
+		CHECK_EQ(String(info["hit_groups"]), "NO_CONSUMER");
+		const Dictionary by_consumer = info["hit_groups_by_consumer"];
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check" }) {
+			CHECK_EQ(String(by_consumer[feature]), "NOT_HWRT");
+		}
+	}
+}
+
+static Vector<String> _features(const char *p_feature) {
+	Vector<String> features;
+	features.push_back(p_feature);
+	return features;
+}
+
+TEST_CASE("[NextGIHit] hardware_ray_tracing_mode's Windows and Linux entries decide on their platform, the base elsewhere") {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const String windows = String(HWRT_MODE_SETTING) + ".windows";
+	const String linuxbsd = String(HWRT_MODE_SETTING) + ".linuxbsd";
+	// Three different values, so each read shows which entry it came from.
+	HitModeSettingOverride base(HWRT_MODE_SETTING, int(NEXTGI_HIT_MODE_INLINE));
+	HitModeSettingOverride win(windows, int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+	HitModeSettingOverride lin(linuxbsd, int(NEXTGI_HIT_MODE_FULL));
+	CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(HWRT_MODE_SETTING, _features("windows"))), int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL));
+	CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(HWRT_MODE_SETTING, _features("linuxbsd"))), int(NEXTGI_HIT_MODE_FULL));
+	// Any other platform (macOS, for example) reads the base value.
+	CHECK_EQ(int(ps->get_setting_with_override_and_custom_features(HWRT_MODE_SETTING, _features("macos"))), int(NEXTGI_HIT_MODE_INLINE));
+
+	// On the platform the doctests run on, NextGI reads that platform's entry when it starts.
+	int expected = int(NEXTGI_HIT_MODE_INLINE);
+	if (OS::get_singleton()->has_feature("windows")) {
+		expected = int(NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL);
+	} else if (OS::get_singleton()->has_feature("linuxbsd")) {
+		expected = int(NEXTGI_HIT_MODE_FULL);
+	}
+	CHECK_EQ(NextGI::read_hardware_ray_tracing_mode(), expected);
+	NextGI next_gi;
+	next_gi.init(true);
+	CHECK_EQ(next_gi.get_hardware_ray_tracing_mode(), expected);
 }
 
 static NextGIHitStreamHeader _header(const Vector2 &p_uv_min, const Vector2 &p_uv_extent, const Vector2 &p_uv2_min, const Vector2 &p_uv2_extent) {

@@ -106,12 +106,49 @@ enum {
 // Who needs the attribute stream and the hit groups. Hit lighting (#129) sets NEXTGI_HIT_CONSUMER_HIT_LIGHTING
 // while ray_lighting_mode is not surface_cache; translucency and far-field consumers set their bits. The
 // debug/hit_material_check project setting is the check's consumer.
+// A consumer traces through the hit groups only while NextGI::get_hit_availability_for() returns AVAILABLE for
+// its bit (then NextGI::get_hit_materials() holds them), and keeps its inline path otherwise.
 enum NextGIHitConsumer : uint32_t {
 	NEXTGI_HIT_CONSUMER_HIT_LIGHTING = 1u << 0,
 	NEXTGI_HIT_CONSUMER_TRANSLUCENCY = 1u << 1,
 	NEXTGI_HIT_CONSUMER_FAR_FIELD = 1u << 2,
 	NEXTGI_HIT_CONSUMER_CHECK = 1u << 3,
+	// GodotNext: nextgi_hwrt_mode (#286). #145's material-evaluation retrace (any-hit groups of materials whose
+	// alpha comes from shader code), which #146's MegaLights retrace shares.
+	NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE = 1u << 4,
 };
+
+// GodotNext: nextgi_hwrt_mode (#286, plan §21.1). rendering/global_illumination/nextgi/hardware_ray_tracing_mode,
+// UE 5.9's per-platform Hardware Ray Tracing Mode for GodotNext's RT pipelines. UE's fourth mode, Disabled, is
+// rendering/global_illumination/nextgi/hardware_ray_tracing = Off. Read once, when NextGI starts.
+enum NextGIHitMode {
+	// The default. Every consumer runs on the material hit groups, as before the setting existed.
+	NEXTGI_HIT_MODE_FULL,
+	// The hit pipeline is the base library alone: its fallback group is the one simplified hit shader every
+	// geometry uses. No material shader compiles a hit group, and no attribute stream is kept. Only the consumers
+	// in NEXTGI_HIT_SIMPLIFIED_CONSUMERS run; the others report NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL and keep
+	// their inline path.
+	NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL,
+	// No hit pipeline at all: no material hit group, no base library and no attribute stream. Every consumer
+	// reports NEXTGI_HIT_HWRT_MODE_INLINE and keeps its inline path.
+	NEXTGI_HIT_MODE_INLINE,
+	NEXTGI_HIT_MODE_MAX,
+};
+
+// Out-of-range values read as Full, the mode that changes nothing.
+NextGIHitMode nextgi_hit_mode_from_setting(int p_setting);
+const char *nextgi_hit_mode_name(NextGIHitMode p_mode);
+
+// The consumers that can run on the simplified hit shader. The check then traces through the fallback group
+// alone. Hit lighting (#129), material retrace (#145), translucency and far field need the material's own group.
+inline constexpr uint32_t NEXTGI_HIT_SIMPLIFIED_CONSUMERS = NEXTGI_HIT_CONSUMER_CHECK;
+
+// The consumers p_mode lets run: all of them at Full, the simplified ones at Simplified Material, none at Inline.
+uint32_t nextgi_hit_mode_consumers(uint32_t p_consumers, NextGIHitMode p_mode);
+// Whether material shaders compile hit groups (and the attribute stream they read exists): Full only.
+_FORCE_INLINE_ bool nextgi_hit_mode_material_groups(NextGIHitMode p_mode) {
+	return p_mode == NEXTGI_HIT_MODE_FULL;
+}
 
 // Why the hit groups do not run although a consumer asked for them. Hit lighting falls back to the surface
 // cache in every case but AVAILABLE (plan §21.2 L7, HIT_LIGHTING_UNSUPPORTED).
@@ -123,17 +160,28 @@ enum NextGIHitAvailability {
 	NEXTGI_HIT_NO_PIPELINE_LIBRARY,
 	NEXTGI_HIT_NO_BINDLESS,
 	NEXTGI_HIT_INIT_FAILED, // The base library, its link, the hit shader binding table or the tables failed.
+	// GodotNext: nextgi_hwrt_mode (#286). The Hardware Ray Tracing Mode lets none of the consumers run.
+	NEXTGI_HIT_HWRT_MODE_INLINE,
+	NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL,
 	NEXTGI_HIT_AVAILABILITY_MAX,
 };
 
+// What the settings alone decide, known without a frame block: NO_CONSUMER, the mode's reason when it lets none
+// of the consumers run, or AVAILABLE when the tier and the device decide.
+NextGIHitAvailability nextgi_hit_setting_availability(uint32_t p_consumers, NextGIHitMode p_mode);
 // p_init_failed: NextGIHitMaterials failed to initialize since the consumers were last off (latched, so it is
-// not created again every frame).
-NextGIHitAvailability nextgi_hit_availability(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed = false);
+// not created again every frame). The mode comes right after the consumers, as a project setting, before the
+// tier and the device (as the tier rule puts SETTING_OFF before the device's reasons).
+NextGIHitAvailability nextgi_hit_availability(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed = false, NextGIHitMode p_mode = NEXTGI_HIT_MODE_FULL);
+// One consumer's reason (p_consumer is one NextGIHitConsumer bit): the mode's reason first; then, for a consumer
+// that asks (in p_consumers), p_last_frame, what the last frame block found, so it is AVAILABLE only while the hit
+// groups exist; for one that does not ask, p_on_its_own, what it would get on this tier and device if it asked.
+NextGIHitAvailability nextgi_hit_consumer_availability(uint32_t p_consumer, uint32_t p_consumers, NextGIHitMode p_mode, NextGIHitAvailability p_last_frame, NextGIHitAvailability p_on_its_own);
 const char *nextgi_hit_availability_name(NextGIHitAvailability p_availability);
 
-// The stream lives in the RT arena and only the hit groups read it, so it exists only while they run.
-_FORCE_INLINE_ bool nextgi_hit_stream_needed(NextGIHitAvailability p_availability, bool p_rt_arena) {
-	return p_availability == NEXTGI_HIT_AVAILABLE && p_rt_arena;
+// The stream lives in the RT arena and only the material hit groups read it, so it exists only while they run.
+_FORCE_INLINE_ bool nextgi_hit_stream_needed(NextGIHitAvailability p_availability, bool p_rt_arena, NextGIHitMode p_mode = NEXTGI_HIT_MODE_FULL) {
+	return p_availability == NEXTGI_HIT_AVAILABLE && p_rt_arena && nextgi_hit_mode_material_groups(p_mode);
 }
 
 // The head of a surface's attribute stream: each UV set's minimum and extent. The vertices' UVs are unorm16
@@ -156,6 +204,11 @@ struct NextGIHitAttributes {
 	uint8_t color[4];
 };
 static_assert(sizeof(NextGIHitAttributes) == NEXTGI_HIT_ATTRIBUTE_STRIDE, "The attribute stream is 20 bytes per vertex (plan §21.2 L7).");
+
+// Whether NextGIHitMaterials::add_geometry() looks up a geometry's material, the only path on which a material
+// shader compiles a hit group: with material groups (Full), for geometry with an attribute stream in the chunks the
+// hit stages bind. Otherwise the geometry uses the fallback group.
+bool nextgi_hit_geometry_uses_material(bool p_material_groups, bool p_has_stream, uint32_t p_attribute_chunk, uint32_t p_arena_chunk);
 
 // The bytes of a stream of p_vertex_count vertices.
 _FORCE_INLINE_ uint32_t nextgi_hit_stream_size(uint32_t p_vertex_count) {
@@ -441,7 +494,9 @@ public:
 	const Counters &get_counters() const;
 	void fill_counters(Dictionary &r_counters) const;
 
-	NextGIHitMaterials();
+	// p_material_groups false is the Simplified Material mode (#286): the base library alone, whose fallback group
+	// shades every hit; no material hit group compiles.
+	explicit NextGIHitMaterials(bool p_material_groups = true);
 	~NextGIHitMaterials();
 };
 

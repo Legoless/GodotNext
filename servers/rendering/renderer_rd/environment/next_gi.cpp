@@ -543,6 +543,8 @@ void NextGI::init(bool p_forward_plus) {
 	if (rd != nullptr) {
 		collect_device_inputs(rd, rd->get_device_api_name(), rd->get_device_type(), new_inputs);
 	}
+	// GodotNext: nextgi_hwrt_mode (#286). Read at startup only, like UE's per-platform setting.
+	hit_mode = read_hardware_ray_tracing_mode();
 	// GodotNext: ps_swrt_trace (#186, #188). Before the safety net, so no self-test runs.
 	deny_ray_query = _deny_ray_query();
 	apply_ray_query_denial(new_inputs, deny_ray_query);
@@ -618,6 +620,25 @@ void NextGI::set_hit_consumer(uint32_t p_consumer, bool p_enabled) {
 	}
 }
 
+// GodotNext: nextgi_hwrt_mode (#286)
+int NextGI::read_hardware_ray_tracing_mode() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings == nullptr || !settings->has_setting("rendering/global_illumination/nextgi/hardware_ray_tracing_mode")) {
+		return NEXTGI_HIT_MODE_FULL;
+	}
+	return nextgi_hit_mode_from_setting(int(GLOBAL_GET("rendering/global_illumination/nextgi/hardware_ray_tracing_mode")));
+}
+
+int NextGI::get_hit_availability_for(uint32_t p_consumer) const {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	const NextGIHitMode mode = NextGIHitMode(hit_mode);
+	const NextGIHitAvailability on_its_own = nextgi_hit_availability(p_consumer, result.tier == TIER_HWRT && rt_scene != nullptr,
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE),
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE_LIBRARY),
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed, mode);
+	return nextgi_hit_consumer_availability(p_consumer, get_hit_consumers(), mode, NextGIHitAvailability(hit_availability), on_its_own);
+}
+
 uint32_t NextGI::get_hit_consumers() const {
 	uint32_t consumers = hit_consumers;
 	ProjectSettings *settings = ProjectSettings::get_singleton();
@@ -640,14 +661,16 @@ void NextGI::_release_unused_hit_materials() {
 		return;
 	}
 	const uint32_t consumers = get_hit_consumers();
-	if (consumers != 0 && result.tier == TIER_HWRT) {
+	// GodotNext: nextgi_hwrt_mode (#286). A consumer the Hardware Ray Tracing Mode does not let run keeps nothing.
+	const NextGIHitAvailability setting_availability = nextgi_hit_setting_availability(consumers, NextGIHitMode(hit_mode));
+	if (setting_availability == NEXTGI_HIT_AVAILABLE && result.tier == TIER_HWRT) {
 		return;
 	}
 	_free_hit_materials();
 	if (mesh_storage != nullptr) {
 		mesh_storage->mesh_nextgi_set_hit_attributes(false);
 	}
-	hit_availability = consumers == 0 ? NEXTGI_HIT_NO_CONSUMER : NEXTGI_HIT_NOT_HWRT;
+	hit_availability = setting_availability != NEXTGI_HIT_AVAILABLE ? setting_availability : NEXTGI_HIT_NOT_HWRT;
 	hit_init_failed = false;
 }
 
@@ -665,12 +688,20 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	const bool hwrt = p_hwrt_frame && rt_scene != nullptr;
+	// GodotNext: nextgi_hwrt_mode (#286). Inline makes no hit pipeline; Simplified Material makes the base
+	// library alone, with no material groups and no attribute stream.
+	const NextGIHitMode mode = NextGIHitMode(hit_mode);
 	NextGIHitAvailability availability = nextgi_hit_availability(consumers, hwrt,
 			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE),
 			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE_LIBRARY),
-			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed);
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed, mode);
+	if (hit_materials != nullptr && hit_materials_mode != hit_mode) {
+		// init() read another mode (doctests): the hit groups are made again for it.
+		_free_hit_materials();
+	}
 	if (availability == NEXTGI_HIT_AVAILABLE && hit_materials == nullptr) {
-		hit_materials = memnew(NextGIHitMaterials);
+		hit_materials = memnew(NextGIHitMaterials(nextgi_hit_mode_material_groups(mode)));
+		hit_materials_mode = hit_mode;
 		if (!hit_materials->is_ready()) {
 			// Latched until the consumers go away, so a failure is not retried (and logged) every frame.
 			_free_hit_materials();
@@ -683,7 +714,7 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 	}
 	hit_availability = availability;
 	if (mesh_storage != nullptr) {
-		mesh_storage->mesh_nextgi_set_hit_attributes(nextgi_hit_stream_needed(availability, mesh_storage->mesh_nextgi_rt_is_enabled()));
+		mesh_storage->mesh_nextgi_set_hit_attributes(nextgi_hit_stream_needed(availability, mesh_storage->mesh_nextgi_rt_is_enabled(), mode));
 	}
 	if (availability != NEXTGI_HIT_AVAILABLE) {
 		_free_hit_materials();
@@ -1031,7 +1062,20 @@ Dictionary NextGI::get_tier_info() const {
 	info["mid_frame_tier_changes"] = int64_t(mid_frame_tier_changes);
 	// GodotNext: nextgi_hit_groups (#130). Why the material hit groups do or do not run. Without a consumer
 	// that is known at once; otherwise it is what the last frame block found.
-	info["hit_groups"] = nextgi_hit_availability_name(get_hit_consumers() == 0 ? NEXTGI_HIT_NO_CONSUMER : NextGIHitAvailability(hit_availability));
+	// GodotNext: nextgi_hwrt_mode (#286). The settings' reason is known at once too; each consumer's reason in
+	// the Hardware Ray Tracing Mode, the hit groups' consumers being the features that need them.
+	const NextGIHitAvailability hit_settings = nextgi_hit_setting_availability(get_hit_consumers(), NextGIHitMode(hit_mode));
+	info["hit_groups"] = nextgi_hit_availability_name(hit_settings != NEXTGI_HIT_AVAILABLE ? hit_settings : NextGIHitAvailability(hit_availability));
+	info["hardware_ray_tracing_mode"] = nextgi_hit_mode_name(NextGIHitMode(hit_mode));
+	{
+		Dictionary by_consumer;
+		by_consumer["hit_lighting"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_HIT_LIGHTING)));
+		by_consumer["translucency"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_TRANSLUCENCY)));
+		by_consumer["far_field"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_FAR_FIELD)));
+		by_consumer["material_retrace"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE)));
+		by_consumer["check"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_CHECK)));
+		info["hit_groups_by_consumer"] = by_consumer;
+	}
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {
