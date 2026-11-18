@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-17, night (Gemini active). Cloud VMs and active lanes are running under Gemini coordination.
+**Last updated:** 2026-11-18, morning (Claude). Cloud VMs and seven lanes are running.
 
 ## How to continue
 
@@ -27,31 +27,35 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.12. The tracker showed 132 of 229 build tasks done; the 18 gates are measured in PQ by design.
+- Master: see `git log`. Plan v3.9.13. The tracker shows 134 of 229 build tasks done and 9 in progress; the 18 gates are measured in PQ by design.
+- 2026-11-17: an agent session merged an unreviewed "do not merge" WIP of #130 over its landing, committed stray root files and closed #130, #155 and #219 early. 1969d8d986 (2026-11-18) restores the landed code. It also reverts an unreviewed VSM marking change (59a9794a95), adds missing `override` keywords and fixes the #155 raster-bins check's 64-bin phase. #130, #155 and #219 are reopened: their Metal criteria are still open.
+- Landed on 2026-11-18: #122 and #293 (CLOSED, 5620846da5; the private Mesa NIR library 25.3.1-gn4: D3D12 mesh shaders and non-uniform table reads) and plan v3.9.13 (bc37fd4781).
 - Landed on 2026-11-16 / 2026-11-17:
   - **Closed:** #272, #277, #278, #279, #287.
-  - **Landed as progress:** #118, #121, #123, #156, #162, #176, #177, #178, #179, #195, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
+  - **Landed as progress:** #118, #121, #123, #130, #155, #156, #162, #176, #177, #178, #179, #195, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
   - **Plans:** v3.9.5 to v3.9.12.
 
 ## In progress (restart these first)
 
-Each has a WIP branch, never to be merged as is, and a local worktree under `.claude/worktrees/`.
+Each lane works in a local worktree under `.claude/worktrees/` on master `bc37fd4781` (#218 on `d48fc06124`), builds on the cloud VMs, and keeps notes in its private lane folder (see `local/handoff-private.md`). Nothing is committed until it lands.
 
-| Issue | WIP branch | Where it stopped | Next step | Machines |
-|---|---|---|---|---|
-| #130 Material hit groups | `feature/wip-130-material-hit-groups` | Rebased onto master (#121), review fixes applied, proven on Linux Vulkan and Windows D3D12 HWRT (`gn3`) | Finalize report and land | Linux D, Windows VM 2 |
-| #219 follow-up: always-resident coarse VSM pages | `feature/wip-219-vsm-coarse-pages` | Partial edits, not built | Build, review and fix. Lead choice (follow UE): every shadowed light keeps coarse pages, handed out first, and the 25% pool run must overflow with zero sampled-but-unmapped pages. Also update the texts of #219 step 2, #216 and #215 | Windows VM 2, Linux E |
-| #218 VSM non-Nanite path | no branch (no edits yet) | Not started | Build, review and fix | Windows T4 VM, Linux C |
-| #155 Programmable raster bins | `feature/wip-155-raster-bins` | Partial edits, not built | Rebase, then build, review and fix | Windows VM 1, Linux C |
-| #122 + #293 Private Mesa NIR 25.3.1-gn4 | `feature/wip-122-293-mesa-gn4` (engine side only) | Partial edits; possibly partial Mesa work on the Windows Mesa build VM | Build gn4 = gn3 + DXIL mesh/amplification shaders + `nonUniformIndex` for non-uniform bindless reads. **The D3D12 container format version for gn4 is 6** (4 is gn2/upstream, 5 is gn3). The Mesa fork, its patches and the packed library are private and never committed | Windows VM 3 (Mesa build), Windows T4 VM, Linux D |
+| Issue | Where it stopped | Next step | Machines |
+|---|---|---|---|
+| #218 VSM non-Nanite path | Implementation proven on Linux, Windows and the T4; final proof runs | Review, fix, landing check, land | Linux C, Windows VM 2, Windows T4 VM |
+| #145 RT visibility policy | Started 2026-11-18. Decision under the lead's rule (LQ6, follow UE): translucent casters shadow as opaque | Build, review, fix | Windows T4 VM, Linux E |
+| #295 AVBOIT | Started 2026-11-18 | Build, review, fix | Windows VM 4, Linux E |
+| #193 TSR async compute | Started 2026-11-18 | Build, review, fix | Windows VM 3, Linux D |
+| #286 Hardware Ray Tracing Mode | Started 2026-11-18 (includes a plan change) | Build, review, fix | Windows VM 2, Linux C |
+| #167 Path tracer core | Started 2026-11-18 | Build, review, fix | Windows VM 3, Linux D |
+| #158 Material shading bins | Started 2026-11-18 | Build, review, fix | Windows VM 1, Linux C |
+
+The D3D12 fixture runs of the repair (1969d8d986) on the cloud test machine are still being finished; their results go on #130, #155 and #219.
 
 ## Ready to start (phase order)
 
-- **#145** RT visibility policy shared by RT shadows, MegaLights and SRC (unblocked by #121).
-- **#295** AVBOIT, Experimental and off by default (no blockers).
-- **#221** VSM product surface and **#222** VSM projection and SMRT soft shadows. Start them after the #219 follow-up and #218.
-- **#193** TSR async compute (code unblocked by #195 landing as `32531a8b35`).
-- These open once their blocker lands: #158 (after #155), #286 and #167 (after #130), #294 (after #129, #130 and #286), #296 (after #152 and #160).
+- **#150** Displacement material output (after #158, which touches the same resolve code).
+- **#217** VSM x Nanite, **#221** VSM product surface and **#222** VSM projection and SMRT soft shadows: start them after #218 lands (they share the VSM storage files).
+- These open once their blocker lands: #294 (after #129 and #286), #296 (after #152 and #160), #141 (after #145, #139 and #221).
 
 ## Waiting on the lead
 
@@ -65,5 +69,6 @@ Each has a WIP branch, never to be merged as is, and a local worktree under `.cl
 - **PresentMon writes no rows on the RTX 4080 SUPER machine** (#202, #236; possibly no active monitor). It must be fixed before PQ.
 - **#236's UE side is render-thread bound in editor game mode**, so it is not GPU-bound. PQ decides how to handle it.
 - **The RTX 4080 SUPER machine is shared** with another project's UE automation. Never stop or touch anything that isn't GodotNext's own there.
+- **A headless `--import` sometimes aborts at shutdown** ("Parameter \"singleton\" is null" in `is_cmdline_mode`) after the reimports finish, also on older trees. It needs its own issue and a backtrace from a debug build.
 - **The repository is public.** No local paths, hosts, IPs, VM names or account names go in tracked files, commit messages or issue comments.
 - **Decisions made on 2026-11-16 under the lead's rule** are recorded in the plan's §18.1 and the issue comments. The lead can overrule any of them.
