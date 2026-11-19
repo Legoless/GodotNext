@@ -3853,6 +3853,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 	max_shadows_used = 0;
 
 	if (p_using_shadows) { //setup shadow maps
+		// GodotNext: vsm_projection (#222). Whether this view's light loop samples virtual shadow maps.
+		const bool vsm_view_samples = scene_render->vsm_view_samples(p_render_buffers, p_reflection_probe.is_valid(), p_camera_data->view_count);
+		const bool vsm_check_casters = vsm_view_samples && scene_render->vsm_raster_check_armed();
 
 		// Directional Shadows
 
@@ -3882,6 +3885,16 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			InstanceLightData *light = static_cast<InstanceLightData *>(ins->base_data);
 
 			if (!RSG::light_storage->light_instance_is_shadow_visible_at_position(light->instance, camera_position)) {
+				continue;
+			}
+
+			// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps gets no
+			// atlas tile and no atlas pass. In a raster check's frame its atlas casters are still culled (the
+			// renderer draws none of them), for the check's per-light caster diff.
+			if (vsm_view_samples && scene_render->vsm_light_skips_atlas(light->instance, p_environment)) {
+				if (vsm_check_casters && max_shadows_used < MAX_UPDATE_SHADOWS && light_culler->prepare_regular_light(*ins)) {
+					_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers);
+				}
 				continue;
 			}
 

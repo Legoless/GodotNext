@@ -288,6 +288,7 @@ public:
 				uint32_t material_feedback : 1;
 				// GodotNext: avboit (#295). RendererRD::AVBOIT::CompositeMode, 0 outside the AVBOIT composite.
 				uint32_t avboit_composite : 3;
+				uint32_t use_vsm : 1; // GodotNext: vsm_projection (#222). The view samples virtual shadow maps.
 			};
 		};
 

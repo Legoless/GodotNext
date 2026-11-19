@@ -2912,3 +2912,527 @@ TEST_CASE("[VSM] Each map's light camera matches face_camera() and the light's a
 		CHECK(got.origin.is_equal_approx(camera));
 	}
 }
+
+// GodotNext: vsm_projection (#222, plan §21.3 contract S6). The CPU models of vsm_smrt_inc.glsl on an
+// analytic scene: ground at y = 0 and a horizontal slab of half size slab_half at slab_height, centered
+// on x = slab_x, z = 0. Every allocated page holds the scene's nearest depth at its texel centers, as the
+// raster (#218) stores it. godotnext/testbed/tests/vsm/projection.gd checks the GPU light loop.
+namespace TestVirtualShadowMapProjection {
+
+using VSM = RendererVirtualShadowMapStorage;
+
+struct ProjectionScene {
+	struct Page {
+		uint32_t map = 0;
+		uint32_t mip = 0;
+		uint32_t x = 0;
+		uint32_t y = 0;
+	};
+	static constexpr uint32_t GRID = 32; // Pool pages per row.
+
+	float slab_x = 0.0f;
+	float slab_height = 1.0f;
+	float slab_half = 0.5f;
+	LocalVector<VSM::MapData> maps;
+	LocalVector<uint32_t> table;
+	LocalVector<Page> pages;
+	LocalVector<uint32_t> pool;
+	uint32_t pool_width = GRID * VSM::PAGE_SIZE;
+	uint32_t pool_height = 0;
+	Vector3 light_position; // Faces: the light's position.
+
+	void set_maps(const LocalVector<VSM::MapData> &p_maps) {
+		maps = p_maps;
+		table.resize(maps.size() * VSM::ENTRIES_PER_MAP);
+		for (uint32_t &entry : table) {
+			entry = 0;
+		}
+	}
+	// Allocates every page of p_map at p_mip_min and coarser.
+	void allocate(uint32_t p_map, uint32_t p_mip_min) {
+		for (uint32_t mip = p_mip_min; mip < VSM::MIP_COUNT; mip++) {
+			const uint32_t side = VSM::PAGES_PER_SIDE >> mip;
+			for (uint32_t y = 0; y < side; y++) {
+				for (uint32_t x = 0; x < side; x++) {
+					const uint32_t page = pages.size();
+					table[VSM::entry_index(p_map, mip, x, y)] = VSM::entry_pack(page % GRID, page / GRID, VSM::ENTRY_ALLOCATED);
+					pages.push_back({ p_map, mip, x, y });
+				}
+			}
+		}
+	}
+	bool covers(float p_x, float p_z) const {
+		return std::fabs(p_x - slab_x) <= slab_half && std::fabs(p_z) <= slab_half;
+	}
+	// Writes every allocated page's texels (layer 0; layer 1 stays empty).
+	void fill() {
+		const uint32_t rows = (pages.size() + GRID - 1) / GRID;
+		pool_height = rows * VSM::PAGE_SIZE;
+		pool.resize(uint64_t(pool_width) * pool_height * 2);
+		for (uint32_t &texel : pool) {
+			texel = 0;
+		}
+		for (uint32_t page = 0; page < pages.size(); page++) {
+			const Page &record = pages[page];
+			const VSM::MapData &map = maps[record.map];
+			for (uint32_t ty = 0; ty < VSM::PAGE_SIZE; ty++) {
+				for (uint32_t tx = 0; tx < VSM::PAGE_SIZE; tx++) {
+					const uint32_t px = (page % GRID) * VSM::PAGE_SIZE + tx;
+					const uint32_t py = (page / GRID) * VSM::PAGE_SIZE + ty;
+					pool[uint64_t(py) * pool_width + px] = map.kind == VSM::MAP_KIND_DIRECTIONAL ? _clipmap_texel(record, tx, ty) : _face_texel(record, tx, ty);
+				}
+			}
+		}
+	}
+	VSM::ProjectionInput input() const {
+		VSM::ProjectionInput in;
+		in.table = table.ptr();
+		in.table_maps = maps.size();
+		in.maps = maps.ptr();
+		in.pool = pool.ptr();
+		in.pool_width = pool_width;
+		in.pool_height = pool_height;
+		return in;
+	}
+
+private:
+	// A clipmap slot's texel: the slot holds the page of the mip's window that wraps to it.
+	uint32_t _clipmap_texel(const Page &p_page, uint32_t p_tx, uint32_t p_ty) const {
+		const VSM::MapData &map = maps[p_page.map];
+		const Vector2i mip_origin = VSM::clipmap_mip_origin(Vector2i(map.origin[0], map.origin[1]), p_page.mip);
+		const int32_t side = int32_t(VSM::PAGES_PER_SIDE >> p_page.mip);
+		auto unwrap = [side](int32_t p_slot, int32_t p_origin) {
+			int32_t d = (p_slot - p_origin) % side;
+			return p_origin + (d < 0 ? d + side : d);
+		};
+		const int32_t ax = unwrap(int32_t(p_page.x), mip_origin.x);
+		const int32_t ay = unwrap(int32_t(p_page.y), mip_origin.y);
+		// A level l mip m texel spans 2^(l + m) level 0 texels; level 0 has 2^-CLIPMAP_TEXEL0_EXPONENT per meter.
+		const double span = std::ldexp(1.0, int32_t(p_page.mip + map.index) + VSM::CLIPMAP_TEXEL0_EXPONENT);
+		const double cx = (double(ax * int32_t(VSM::PAGE_SIZE) + int32_t(p_tx)) + 0.5) * span;
+		const double cy = (double(ay * int32_t(VSM::PAGE_SIZE) + int32_t(p_ty)) + 0.5) * span;
+		// Rows 0 and 1 of level 0 are the light's X and Y axes times 2^-CLIPMAP_TEXEL0_EXPONENT.
+		const float scale = std::ldexp(1.0f, VSM::CLIPMAP_TEXEL0_EXPONENT + int32_t(map.index));
+		const Vector3 axis_x = Vector3(map.rows[0][0], map.rows[0][1], map.rows[0][2]) * scale;
+		const Vector3 axis_y = Vector3(map.rows[1][0], map.rows[1][1], map.rows[1][2]) * scale;
+		const Vector3 column = axis_x * float(cx) + axis_y * float(cy);
+		const float top = covers(float(column.x), float(column.z)) ? slab_height : 0.0f;
+		return VSM::depth_pack(VSM::row_dot(map.rows[2], Vector3(column.x, top, column.z)));
+	}
+	// A face's texel: the nearest hit of the ray from the light through the texel's center.
+	uint32_t _face_texel(const Page &p_page, uint32_t p_tx, uint32_t p_ty) const {
+		const VSM::MapData &map = maps[p_page.map];
+		Basis rows;
+		rows.rows[0] = Vector3(map.rows[0][0], map.rows[0][1], map.rows[0][2]);
+		rows.rows[1] = Vector3(map.rows[1][0], map.rows[1][1], map.rows[1][2]);
+		rows.rows[2] = Vector3(map.rows[3][0], map.rows[3][1], map.rows[3][2]);
+		const float span = float(1u << p_page.mip) / float(VSM::VIRTUAL_SIZE);
+		const float u = (float(p_page.x * VSM::PAGE_SIZE + p_tx) + 0.5f) * span;
+		const float v = (float(p_page.y * VSM::PAGE_SIZE + p_ty) + 0.5f) * span;
+		const Vector3 dir = rows.inverse().xform(Vector3(u * 2.0f - 1.0f, v * 2.0f - 1.0f, 1.0f));
+		if (!(dir.y < 0.0f)) {
+			return 0u;
+		}
+		float hit = -light_position.y / dir.y;
+		const float slab_t = (slab_height - light_position.y) / dir.y;
+		const Vector3 slab_point = light_position + dir * slab_t;
+		if (slab_t > 0.0f && covers(float(slab_point.x), float(slab_point.z))) {
+			hit = MIN(hit, slab_t);
+		}
+		return VSM::depth_pack(VSM::row_dot(map.rows[3], light_position + dir * hit));
+	}
+};
+
+// A sun straight down: the light's -Z is world -Y.
+Basis down_sun() {
+	return Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1));
+}
+
+// p_count clipmap levels of the sun centered on the world origin.
+LocalVector<VSM::MapData> sun_levels(uint32_t p_count) {
+	LocalVector<VSM::MapData> maps;
+	for (uint32_t level = 0; level < p_count; level++) {
+		maps.push_back(VSM::map_data_clipmap(down_sun(), level, VSM::clipmap_level_origin(Vector2(), level), 1000.0f));
+	}
+	return maps;
+}
+
+// The shadow factor at a ground point, averaged over a 4 x 4 grid of noise values.
+float ground_shadow_directional(VSM::ProjectionInput p_in, uint32_t p_count, float p_x, float p_z, float p_tan_half_angle) {
+	float sum = 0.0f;
+	for (uint32_t i = 0; i < 16; i++) {
+		p_in.noise = Vector2((float(i % 4) + 0.5f) / 4.0f, (float(i / 4) + 0.5f) / 4.0f);
+		sum += VSM::shadow_directional(p_in, 0, VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, p_count), Vector3(p_x, 0.0f, p_z), Vector3(0, 1, 0), p_tan_half_angle);
+	}
+	return sum / 16.0f;
+}
+
+float ground_shadow_spot(const ProjectionScene &p_scene, VSM::ProjectionInput p_in, float p_x, float p_radius) {
+	float sum = 0.0f;
+	for (uint32_t i = 0; i < 16; i++) {
+		p_in.noise = Vector2((float(i % 4) + 0.5f) / 4.0f, (float(i / 4) + 0.5f) / 4.0f);
+		sum += VSM::shadow_local(p_in, 0, VSM::light_flags(VSM::MAP_KIND_SPOT, 1), Vector3(p_x, 0.0f, 0.0f), Vector3(0, 1, 0), p_scene.light_position, p_radius);
+	}
+	return sum / 16.0f;
+}
+
+// The penumbra's width along +x: from the first sample above 0.05 to the first above 0.95. -1 when the
+// profile never leaves the umbra or never reaches full light.
+template <typename F>
+float penumbra_width(F p_shadow_at, float p_from, float p_to, float p_step) {
+	float low = -1.0f;
+	for (float x = p_from; x <= p_to; x += p_step) {
+		const float shadow = p_shadow_at(x);
+		if (low < 0.0f && shadow > 0.05f) {
+			low = x;
+		}
+		if (shadow > 0.95f) {
+			return low < 0.0f ? 0.0f : x - low;
+		}
+	}
+	return -1.0f;
+}
+
+} // namespace TestVirtualShadowMapProjection
+
+TEST_CASE("[VSM] SMRT helpers, presets, settings and the sample flag (#222)") {
+	using VSM = RendererVirtualShadowMapStorage;
+	// UE documents 8 rays at Epic shadow scalability; 0 rays is one hard tap.
+	CHECK(VSM::smrt_preset_rays(VSM::POOL_QUALITY_EPIC) == 8);
+	for (uint32_t quality = 0; quality < VSM::POOL_QUALITY_MAX; quality++) {
+		CHECK(VSM::smrt_preset_rays(VSM::PoolQuality(quality)) <= VSM::SMRT_MAX_RAYS);
+		CHECK(VSM::smrt_preset_steps(VSM::PoolQuality(quality)) >= 1);
+		CHECK(VSM::smrt_preset_steps(VSM::PoolQuality(quality)) <= VSM::SMRT_MAX_STEPS);
+	}
+	CHECK(VSM::smrt_setting(-1, 4, VSM::SMRT_MAX_RAYS) == 4);
+	CHECK(VSM::smrt_setting(0, 4, VSM::SMRT_MAX_RAYS) == 0);
+	CHECK(VSM::smrt_setting(7, 4, VSM::SMRT_MAX_RAYS) == 7);
+	CHECK(VSM::smrt_setting(1000, 4, VSM::SMRT_MAX_RAYS) == VSM::SMRT_MAX_RAYS);
+
+	// Ray samples: inside the unit disk and the light's rectangle, stratified in radius.
+	for (uint32_t rays = 1; rays <= VSM::SMRT_MAX_RAYS; rays *= 2) {
+		float radius_squared_sum = 0.0f;
+		for (uint32_t ray = 0; ray < rays; ray++) {
+			const Vector2 disk = VSM::smrt_disk(ray, rays, Vector2(0.5f, 0.25f));
+			CHECK(disk.length() <= 1.0f + 1e-5f);
+			radius_squared_sum += float(disk.length_squared());
+			const Vector2 square = VSM::smrt_square(ray, rays, Vector2(0.5f, 0.25f));
+			CHECK(Math::abs(float(square.x)) <= 0.5f);
+			CHECK(Math::abs(float(square.y)) <= 0.5f);
+			const float jitter = VSM::smrt_jitter(ray, Vector2(0.9f, 0.7f));
+			CHECK(jitter >= 0.0f);
+			CHECK(jitter < 1.0f);
+		}
+		// Stratified radii: the mean squared radius of a uniform disk is 1/2.
+		CHECK(Math::abs(radius_squared_sum / float(rays) - 0.5f) <= 0.5f / float(rays) + 1e-5f);
+	}
+	// Steps: geometric from the first height, increasing, below the last.
+	float previous = 0.0f;
+	for (uint32_t step = 0; step < 6; step++) {
+		const float height = VSM::smrt_step(step, 6, 0.0f, 0.01f, 4.0f);
+		CHECK(height > previous);
+		CHECK(height < 4.0f);
+		previous = height;
+	}
+	CHECK(VSM::smrt_step(0, 6, 0.0f, 0.01f, 4.0f) == doctest::Approx(0.01f));
+	CHECK(VSM::smrt_step(3, 6, 0.5f, 0.02f, 0.01f) == doctest::Approx(0.02f)); // Last below first: the first.
+
+	// A directional light's size is 1 - cos(angular diameter).
+	const float diameter = Math::deg_to_rad(2.0f);
+	CHECK(VSM::directional_tan_half_angle(1.0f - Math::cos(diameter)) == doctest::Approx(Math::tan(diameter * 0.5f)).epsilon(1e-4));
+	CHECK(VSM::directional_tan_half_angle(0.0f) == 0.0f);
+
+	// The sample flag leaves the light's maps alone.
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6);
+	for (uint32_t face = 0; face < 7; face++) {
+		CHECK(VSM::light_map(40, flags | VSM::LIGHT_FLAGS_SAMPLE, face) == VSM::light_map(40, flags, face));
+	}
+
+	// Prefiltered Distant: the last two levels of a light with more than two.
+	CHECK_FALSE(VSM::prefiltered_distant_level(0, 4));
+	CHECK_FALSE(VSM::prefiltered_distant_level(1, 4));
+	CHECK(VSM::prefiltered_distant_level(2, 4));
+	CHECK(VSM::prefiltered_distant_level(3, 4));
+	CHECK_FALSE(VSM::prefiltered_distant_level(1, 2));
+
+	const String defines = VSM::get_glsl_defines();
+	CHECK(defines.contains("#define VSM_LIGHT_FLAGS_SAMPLE 128u"));
+	CHECK(defines.contains("#define VSM_SMRT_MAX_RAYS 32u"));
+	CHECK(defines.contains("#define VSM_SMRT_MAX_STEPS 16u"));
+	CHECK(defines.contains("#define VSM_PREFILTERED_DISTANT_LEVELS 2u"));
+	CHECK(defines.contains("#define VSM_PREFILTERED_DISTANT_TAPS 4u"));
+}
+
+TEST_CASE("[VSM] The projection reads the level and mip of the marking pass's fine request (#222)") {
+	using VSM = RendererVirtualShadowMapStorage;
+	RandomPCG rng(222);
+	const Basis sun(Vector3(0.3f, 0.9f, -0.2f).normalized(), 0.7f);
+	const uint32_t count = 7; // Level 6 reaches 128 m from the camera.
+	const Vector3 camera(13.0f, 2.0f, -41.0f);
+	const Vector2 center(float(sun.get_column(0).normalized().dot(camera)), float(sun.get_column(1).normalized().dot(camera)));
+	LocalVector<VSM::MapData> maps;
+	for (uint32_t level = 0; level < count; level++) {
+		maps.push_back(VSM::map_data_clipmap(sun, level, VSM::clipmap_level_origin(center, level), 10000.0f));
+	}
+	uint32_t map_bias[count];
+	for (uint32_t level = 0; level < count; level++) {
+		map_bias[level] = level % 3; // Overflow bias 0 to 2 mips.
+	}
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+	uint32_t compared = 0;
+	uint32_t outside = 0;
+	for (uint32_t i = 0; i < 20000; i++) {
+		const Vector3 world = camera + Vector3(rng.random(-60.0f, 60.0f), rng.random(-20.0f, 20.0f), rng.random(-60.0f, 60.0f));
+		const float footprint = std::ldexp(1.0f, int32_t(rng.rand() % 16) - 12) * rng.random(1.0f, 2.0f);
+		const int32_t lod_bias = int32_t(rng.rand() % 3) - 1;
+		// A moving light's extra bias (#221), held by level 0: the projection adds it as the marking pass does.
+		maps[0].lod_bias = int32_t(i % 2);
+		LocalVector<uint64_t> requests;
+		VSM::mark_directional_point(maps.ptr(), count, map_bias, 0, flags, world, footprint, lod_bias, false, requests);
+		uint32_t level = 0;
+		uint32_t mip = 0;
+		const Vector2i texel0 = VSM::clipmap_texel0(maps[0], world);
+		const bool selected = VSM::clipmap_projection_select(maps.ptr(), count, map_bias, 0, count, texel0, footprint, lod_bias, level, mip);
+		CHECK(selected == !requests.is_empty());
+		if (!selected || requests.is_empty()) {
+			outside++;
+			continue;
+		}
+		// The first request is the fine one; decode its map, mip and page.
+		const uint32_t index = uint32_t(requests[0] & 0xFFFFFFFFu);
+		const uint32_t map = index / VSM::ENTRIES_PER_MAP;
+		uint32_t request_mip = 0;
+		while (request_mip + 1 < VSM::MIP_COUNT && VSM::mip_entry_offset(request_mip + 1) <= index % VSM::ENTRIES_PER_MAP) {
+			request_mip++;
+		}
+		const Vector2i page = VSM::clipmap_page(VSM::clipmap_level_texel(texel0, level), mip);
+		CHECK(map == level);
+		CHECK(request_mip == mip);
+		CHECK(index == VSM::entry_index(level, mip, uint32_t(page.x), uint32_t(page.y)));
+		compared++;
+	}
+	// Every point lies within the last level.
+	CHECK(compared == 20000);
+	CHECK(outside == 0);
+}
+
+TEST_CASE("[VSM] Directional projection: shadow where the caster is, lit elsewhere and where no page is mapped (#222)") {
+	using namespace TestVirtualShadowMapProjection;
+	ProjectionScene scene;
+	const uint32_t count = 4;
+	scene.set_maps(sun_levels(count));
+	scene.allocate(0, 3);
+	scene.fill();
+	VSM::ProjectionInput in = scene.input();
+	in.footprint = std::ldexp(1.0f, -7); // Level 0, mip 3: 7.8 mm texels.
+	in.rays = 0;
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+	uint32_t level = 99;
+	uint32_t mip = 99;
+	REQUIRE(VSM::clipmap_projection_select(scene.maps.ptr(), count, nullptr, 0, count, VSM::clipmap_texel0(scene.maps[0], Vector3()), in.footprint, 0, level, mip));
+	CHECK(level == 0);
+	CHECK(mip == 3);
+
+	const Vector3 up(0, 1, 0);
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.4f, 0.0f, -0.3f), up, 0.0f) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.6f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(1.0f));
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(1.5f, 0.0f, 1.2f), up, 0.0f) == doctest::Approx(1.0f));
+	// The slab's own top is lit (the depth and normal biases keep it from shadowing itself).
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.1f, 1.0f, 0.1f), up, 0.0f) == doctest::Approx(1.0f));
+	// The LIGHT_FLAGS_SAMPLE bit does not change what is read.
+	CHECK(VSM::shadow_directional(in, 0, flags | VSM::LIGHT_FLAGS_SAMPLE, Vector3(0.0f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(0.0f));
+	// Rays without a light size take the hard tap too.
+	in.rays = 8;
+	in.steps = 6;
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(0.0f));
+	in.rays = 0;
+
+	// Mip 3 unmapped: the receiver falls back to mip 4 and stays shadowed.
+	for (uint32_t y = 0; y < (VSM::PAGES_PER_SIDE >> 3); y++) {
+		for (uint32_t x = 0; x < (VSM::PAGES_PER_SIDE >> 3); x++) {
+			scene.table[VSM::entry_index(0, 3, x, y)] = 0;
+		}
+	}
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(1.5f, 0.0f, 1.2f), up, 0.0f) == doctest::Approx(1.0f));
+	// No page at any mip or level: lit.
+	for (uint32_t &entry : scene.table) {
+		entry = 0;
+	}
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, 0.0f) == doctest::Approx(1.0f));
+	// A light without maps is lit.
+	CHECK(VSM::shadow_directional(in, VSM::MAP_NONE, VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 0), Vector3(), up, 0.0f) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("[VSM] SMRT: the penumbra widens with the sun's angular size and with the caster's height (#222)") {
+	using namespace TestVirtualShadowMapProjection;
+	auto width_for = [](float p_slab_height, float p_diameter_degrees) {
+		const uint32_t count = 4;
+		ProjectionScene scene;
+		scene.slab_height = p_slab_height;
+		scene.set_maps(sun_levels(count));
+		scene.allocate(0, 2);
+		scene.fill();
+		VSM::ProjectionInput in = scene.input();
+		in.footprint = std::ldexp(1.0f, -8); // Level 0, mip 2: 3.9 mm texels.
+		in.rays = VSM::SMRT_MAX_RAYS;
+		in.steps = VSM::SMRT_MAX_STEPS;
+		const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(p_diameter_degrees)));
+		// The umbra under the slab's middle and full light far from it.
+		CHECK(ground_shadow_directional(in, count, 0.0f, 0.0f, tan_half) < 0.05f);
+		CHECK(ground_shadow_directional(in, count, 1.5f, 0.0f, tan_half) > 0.95f);
+		return penumbra_width([&](float p_x) { return ground_shadow_directional(in, count, p_x, 0.0f, tan_half); }, 0.25f, 0.9f, 0.002f);
+	};
+	const float narrow = width_for(1.0f, 0.5f);
+	const float wide = width_for(1.0f, 4.0f);
+	const float wide_low = width_for(0.5f, 4.0f);
+	MESSAGE(vformat("SMRT penumbra widths: 0.5 deg %.4f m, 4 deg %.4f m, 4 deg at half the height %.4f m", narrow, wide, wide_low));
+	REQUIRE(narrow >= 0.0f);
+	REQUIRE(wide > 0.0f);
+	REQUIRE(wide_low > 0.0f);
+	// The full penumbra of a 4 degree disk 1 m above the ground is 1 m * tan(4 deg) = 7 cm.
+	CHECK(wide > 2.0f * narrow);
+	CHECK(wide > 0.2f * Math::tan(Math::deg_to_rad(4.0f)));
+	CHECK(wide < 1.5f * Math::tan(Math::deg_to_rad(4.0f)));
+	// Contact hardening: a lower caster gives a sharper shadow.
+	CHECK(wide > 1.4f * wide_low);
+}
+
+TEST_CASE("[VSM] SMRT for a spot light: shadow under the caster, and a penumbra that widens with the light's radius (#222)") {
+	using namespace TestVirtualShadowMapProjection;
+	auto make_scene = [](ProjectionScene &r_scene) {
+		const Transform3D light(Basis::looking_at(Vector3(0, -1, 0), Vector3(0, 0, -1)), Vector3(0, 3, 0));
+		r_scene.light_position = light.origin;
+		LocalVector<VSM::MapData> maps;
+		maps.push_back(VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, light, 10.0f, 45.0f));
+		r_scene.set_maps(maps);
+		// The face's rows put the light at x = y = w = 0 (the texel fill relies on it).
+		CHECK(Math::abs(VSM::row_dot(maps[0].rows[0], light.origin)) < 1e-4f);
+		CHECK(Math::abs(VSM::row_dot(maps[0].rows[1], light.origin)) < 1e-4f);
+		CHECK(Math::abs(VSM::row_dot(maps[0].rows[3], light.origin)) < 1e-4f);
+		r_scene.allocate(0, 2);
+		r_scene.fill();
+	};
+	ProjectionScene scene;
+	make_scene(scene);
+	VSM::ProjectionInput in = scene.input();
+	// Ground points lie 3 m along the face's axis; a footprint of 4.5 mip 0 texels there reads mip 2.
+	in.footprint = scene.maps[0].texel_scale * 3.0f * 4.5f;
+	CHECK(VSM::face_mip(scene.maps[0].texel_scale * 3.0f, in.footprint) == 2);
+	in.rays = 0;
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+	const Vector3 up(0, 1, 0);
+	// The slab's shadow edge on the ground is at 0.5 * 3 / (3 - 1) = 0.75 m.
+	CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, scene.light_position, 0.0f) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.7f, 0.0f, 0.0f), up, scene.light_position, 0.0f) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.8f, 0.0f, 0.0f), up, scene.light_position, 0.0f) == doctest::Approx(1.0f));
+	CHECK(VSM::shadow_local(in, 0, flags, Vector3(1.6f, 0.0f, -1.0f), up, scene.light_position, 0.0f) == doctest::Approx(1.0f));
+	// Outside the spot's face: lit.
+	CHECK(VSM::shadow_local(in, 0, flags, Vector3(0.0f, 5.0f, 0.0f), up, scene.light_position, 0.0f) == doctest::Approx(1.0f));
+
+	in.rays = VSM::SMRT_MAX_RAYS;
+	in.steps = VSM::SMRT_MAX_STEPS;
+	CHECK(ground_shadow_spot(scene, in, 0.0f, 0.3f) < 0.05f);
+	CHECK(ground_shadow_spot(scene, in, 1.6f, 0.3f) > 0.95f);
+	const float narrow = penumbra_width([&](float p_x) { return ground_shadow_spot(scene, in, p_x, 0.05f); }, 0.4f, 1.4f, 0.003f);
+	const float wide = penumbra_width([&](float p_x) { return ground_shadow_spot(scene, in, p_x, 0.3f); }, 0.4f, 1.4f, 0.003f);
+	MESSAGE(vformat("Spot SMRT penumbra widths: radius 0.05 m %.4f m, radius 0.3 m %.4f m", narrow, wide));
+	REQUIRE(narrow >= 0.0f);
+	REQUIRE(wide > 0.0f);
+	// The full penumbra of a 0.3 m radius light 2 m above a caster 1 m above the ground is 0.3 m.
+	CHECK(wide > 2.0f * narrow);
+	CHECK(wide > 0.2f * 0.3f);
+	CHECK(wide < 1.5f * 0.3f);
+	// An area light's rectangle softens the shadow as well.
+	const float area = penumbra_width([&](float p_x) {
+		float sum = 0.0f;
+		for (uint32_t i = 0; i < 16; i++) {
+			in.noise = Vector2((float(i % 4) + 0.5f) / 4.0f, (float(i / 4) + 0.5f) / 4.0f);
+			sum += VSM::shadow_local(in, 0, flags, Vector3(p_x, 0.0f, 0.0f), up, scene.light_position, 0.0f, Vector3(0.6f, 0.0f, 0.0f), Vector3(0.0f, 0.0f, 0.6f));
+		}
+		return sum / 16.0f;
+	},
+			0.4f, 1.4f, 0.003f);
+	MESSAGE(vformat("Area SMRT penumbra width (0.6 m square): %.4f m", area));
+	CHECK(area > 2.0f * narrow);
+}
+
+TEST_CASE("[VSM] Prefiltered Distant: the moments filter of the last levels shadows under the caster and is lit in the open (#222)") {
+	using namespace TestVirtualShadowMapProjection;
+	ProjectionScene scene;
+	scene.slab_x = 3.0f; // Outside level 0 (+-2 m): level 1, one of the last two of three.
+	const uint32_t count = 3;
+	scene.set_maps(sun_levels(count));
+	scene.allocate(1, 2);
+	scene.fill();
+	VSM::ProjectionInput in = scene.input();
+	in.footprint = std::ldexp(1.0f, -7); // Level 1, mip 2: 7.8 mm texels.
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, count);
+	uint32_t level = 99;
+	uint32_t mip = 99;
+	REQUIRE(VSM::clipmap_projection_select(scene.maps.ptr(), count, nullptr, 0, count, VSM::clipmap_texel0(scene.maps[0], Vector3(3.0f, 0.0f, 0.0f)), in.footprint, 0, level, mip));
+	CHECK(level == 1);
+	CHECK(mip == 2);
+	CHECK(VSM::prefiltered_distant_level(level, count));
+	const Vector3 up(0, 1, 0);
+	const float tan_half = VSM::directional_tan_half_angle(1.0f - Math::cos(Math::deg_to_rad(1.0f)));
+
+	// Off: the hard tap.
+	in.rays = 0;
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(3.0f, 0.0f, 0.0f), up, tan_half) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(3.0f, 0.0f, 1.5f), up, tan_half) == doctest::Approx(1.0f));
+	// On: the moments filter, whatever the ray count.
+	in.prefiltered_distant = true;
+	in.rays = VSM::SMRT_MAX_RAYS;
+	in.steps = VSM::SMRT_MAX_STEPS;
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(3.0f, 0.0f, 0.0f), up, tan_half) < 0.05f);
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(3.0f, 0.0f, 1.5f), up, tan_half) > 0.95f);
+	CHECK(VSM::shadow_directional(in, 0, flags, Vector3(3.2f, 1.0f, 0.1f), up, tan_half) > 0.95f); // The slab's top.
+	// Across the edge the filter is soft: some samples lie strictly between shadow and light, rising.
+	uint32_t partial = 0;
+	float previous = -1.0f;
+	bool rising = true;
+	for (float x = 3.3f; x <= 3.7f; x += 0.002f) {
+		const float shadow = VSM::shadow_directional(in, 0, flags, Vector3(x, 0.0f, 0.0f), up, tan_half);
+		partial += (shadow > 0.05f && shadow < 0.95f) ? 1u : 0u;
+		rising = rising && shadow >= previous - 1e-4f;
+		previous = shadow;
+	}
+	CHECK(partial > 0);
+	CHECK(rising);
+	// The CPU model of the filter is what shadow_directional() returns.
+	const Vector2 t(VSM::row_dot(scene.maps[0].rows[0], Vector3(3.0f, 0.0f, 0.0f)), VSM::row_dot(scene.maps[0].rows[1], Vector3(3.0f, 0.0f, 0.0f)));
+	CHECK(VSM::prefiltered_distant(in, 0, count, t, 0.0f, 1, 2) < 0.05f);
+	// A receiver in a finer level of a light with more levels than that takes SMRT, not the filter.
+	ProjectionScene near_scene;
+	near_scene.set_maps(sun_levels(count));
+	near_scene.allocate(0, 2);
+	near_scene.fill();
+	VSM::ProjectionInput near_in = near_scene.input();
+	near_in.footprint = std::ldexp(1.0f, -8);
+	near_in.prefiltered_distant = true;
+	near_in.rays = 0;
+	CHECK(VSM::shadow_directional(near_in, 0, flags, Vector3(0.0f, 0.0f, 0.0f), up, tan_half) == doctest::Approx(0.0f));
+	CHECK(VSM::shadow_directional(near_in, 0, flags, Vector3(0.52f, 0.0f, 0.0f), up, tan_half) == doctest::Approx(1.0f));
+}
+
+TEST_CASE("[VSM] Omni projection picks the face that holds the point (#222)") {
+	using VSM = RendererVirtualShadowMapStorage;
+	const Transform3D light(Basis(), Vector3(1.0f, 2.0f, 3.0f));
+	LocalVector<VSM::MapData> maps;
+	for (uint32_t face = 0; face < 6; face++) {
+		maps.push_back(VSM::map_data_face(VSM::MAP_KIND_OMNI, face, light, 10.0f, 0.0f));
+	}
+	const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_OMNI, 6);
+	// Faces 0-5 look along the light's +X, -X, +Y, -Y, +Z, -Z.
+	const Vector3 directions[6] = { Vector3(1, 0.1f, 0.2f), Vector3(-1, -0.2f, 0.1f), Vector3(0.1f, 1, -0.2f), Vector3(-0.2f, -1, 0.1f), Vector3(0.2f, 0.1f, 1), Vector3(0.1f, -0.2f, -1) };
+	for (uint32_t face = 0; face < 6; face++) {
+		float w = 0.0f;
+		CHECK(VSM::face_projection_select(maps.ptr(), 6, 0, flags, light.origin + directions[face] * 2.0f, w) == face);
+		CHECK(w > 0.0f);
+	}
+	// Past the table's map count: nothing.
+	float w = 0.0f;
+	CHECK(VSM::face_projection_select(maps.ptr(), 3, 0, flags, light.origin + directions[5] * 2.0f, w) == VSM::MAP_NONE);
+}

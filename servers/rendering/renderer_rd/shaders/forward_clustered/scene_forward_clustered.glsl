@@ -3073,8 +3073,17 @@ void fragment_shader(in SceneData scene_data) {
 	normal_bias -= light_dir * dot(light_dir, normal_bias); \
 	m_var.xyz += normal_bias;
 
-					//version with soft shadows, more expensive
-					if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
+#ifdef VSM_PROJECTION
+					// GodotNext: vsm_projection (#222). The light's virtual shadow maps replace its cascades; its
+					// angular size gives the penumbra (directional size is 1 - cos of the angular diameter).
+					if (vsm_light_sampled(directional_lights.data[i].vsm_flags)) {
+						float vsm_size = clamp(directional_lights.data[i].size, 0.0, 1.0);
+						shadow = vsm_shadow_directional(directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex), vsm_world_normal(geo_normal), sqrt(vsm_size / (2.0 - vsm_size)), depth_z, vsm_pixel_noise());
+					} else if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
+#else
+				//version with soft shadows, more expensive
+				if (sc_use_directional_soft_shadows() && directional_lights.data[i].softshadow_angle > 0) {
+#endif
 						uint blend_count = 0;
 						const uint blend_max = directional_lights.data[i].blend_splits ? 2 : 1;
 
@@ -3317,7 +3326,19 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef LIGHT_TRANSMITTANCE_USED
 			float transmittance_z = transmittance_depth;
 #ifndef SHADOWS_DISABLED
+#ifdef VSM_PROJECTION
+			// GodotNext: vsm_projection (#222).
+			const bool vsm_transmittance = vsm_light_sampled(directional_lights.data[i].vsm_flags);
+			if (vsm_transmittance && directional_lights.data[i].shadow_opacity > 0.001) {
+				float vsm_thickness = vsm_transmittance_directional(directional_lights.data[i].vsm_map_base, directional_lights.data[i].vsm_flags, vsm_world_position(vertex - geo_normal * directional_lights.data[i].shadow_transmittance_bias.x), -vertex.z);
+				if (vsm_thickness >= 0.0) {
+					transmittance_z = vsm_thickness;
+				}
+			}
+			if (!vsm_transmittance && directional_lights.data[i].shadow_opacity > 0.001) {
+#else
 			if (directional_lights.data[i].shadow_opacity > 0.001) {
+#endif
 				float depth_z = -vertex.z;
 
 				if (depth_z < directional_lights.data[i].shadow_split_offsets.x) {

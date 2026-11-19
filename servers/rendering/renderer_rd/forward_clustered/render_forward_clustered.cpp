@@ -49,6 +49,8 @@
 #include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
+// GodotNext: vsm_projection (#222). #54's blue-noise tile seeds the SMRT rays.
+#include "servers/rendering/renderer_rd/environment/nextgi_blue_noise.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/renderer_viewport.h"
 #include "servers/rendering/rendering_device.h"
@@ -2158,13 +2160,27 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 		render_shadow_to_view[i] = -1;
 	}
+	// GodotNext: vsm_projection (#222). The view's shadow-atlas passes, kept and skipped (debug info).
+	uint32_t vsm_atlas_passes = 0;
+	uint32_t vsm_atlas_passes_skipped = 0;
 	{
 		for (int i = 0; i < p_render_data->render_shadow_count; i++) {
 			RID li = p_render_data->render_shadows[i].light;
 			RID base = light_storage->light_instance_get_base_light(li);
+			// GodotNext: vsm_projection (#222, issue step 7). A light this view samples through its virtual
+			// shadow maps gets no atlas pass (a positional one has no tile either; its entries come only from a
+			// raster check's caster cull). Contact shadows keep their entry.
+			const bool atlas_pass = !(vsm_sample_view && vsm_light_skips_atlas(li, p_render_data->environment));
+			if (atlas_pass) {
+				vsm_atlas_passes++;
+			} else {
+				vsm_atlas_passes_skipped++;
+			}
 
 			if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
-				p_render_data->directional_shadows.push_back(i);
+				if (atlas_pass) {
+					p_render_data->directional_shadows.push_back(i);
+				}
 
 				if (rb_data.is_valid() && ss_effects) {
 					// Add contact shadows to be processed
@@ -2175,8 +2191,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 				}
 
 			} else if (light_storage->light_get_type(base) == RSE::LIGHT_OMNI && light_storage->light_omni_get_shadow_mode(base) == RSE::LIGHT_OMNI_SHADOW_CUBE) {
-				p_render_data->cube_shadows.push_back(i);
-			} else {
+				if (atlas_pass) {
+					p_render_data->cube_shadows.push_back(i);
+				}
+			} else if (atlas_pass) {
 				p_render_data->shadows.push_back(i);
 			}
 		}
@@ -2539,7 +2557,18 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	uint32_t directional_light_count = 0;
 	uint32_t positional_light_count = 0;
+	// GodotNext: vsm_projection (#222). The lights of a view that samples VSM get LIGHT_FLAGS_SAMPLE.
+	RendererRD::VirtualShadowMapStorage *vsm_storage = RendererRD::VirtualShadowMapStorage::get_singleton();
+	if (vsm_storage != nullptr) {
+		vsm_storage->set_view_samples(vsm_sample_view);
+	}
 	light_storage->update_light_buffers(p_render_data, *p_render_data->lights, p_render_data->scene_data->cam_transform, p_render_data->shadow_atlas, using_shadows, directional_light_count, positional_light_count, p_render_data->directional_light_soft_shadows);
+	if (vsm_storage != nullptr) {
+		if (vsm_sample_view) {
+			vsm_storage->record_projection_view(vsm_atlas_passes, vsm_atlas_passes_skipped);
+		}
+		vsm_storage->set_view_samples(false);
+	}
 	texture_storage->update_decal_buffer(*p_render_data->decals, p_render_data->scene_data->cam_transform);
 
 	p_render_data->directional_light_count = directional_light_count;
@@ -2550,14 +2579,18 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218). After the light buffers (vsm_map_base) and the cluster.
 	if (vsm_mark_view && rb_data.is_valid() && current_cluster_builder) {
-		// GodotNext: vsm_settings_debug (#221). Whether this view wrote the dirty list the debug draws read.
-		RendererRD::VirtualShadowMapStorage *vsm_storage = RendererRD::VirtualShadowMapStorage::get_singleton();
+		// GodotNext: vsm_settings_debug (#221). Whether this view wrote the dirty list the debug draws read
+		// (vsm_storage from vsm_projection (#222) above).
 		const uint64_t vsm_marked_before = vsm_storage != nullptr ? vsm_storage->get_marked_view_count() : 0;
 		_vsm_mark_pages(p_render_data);
 		vsm_debug_view_marked = vsm_storage != nullptr && vsm_storage->get_marked_view_count() != vsm_marked_before;
 		_vsm_raster_non_nanite(p_render_data);
 	}
 	vsm_mark_view = false;
+	// GodotNext: vsm_projection (#222). What this view's light loop reads to sample the maps.
+	if (vsm_sample_view) {
+		_vsm_update_projection(p_render_data);
+	}
 
 	if (rb_data.is_valid()) {
 		RENDER_TIMESTAMP("Update Volumetric Fog");
@@ -2566,16 +2599,174 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 	}
 }
 
-bool RenderForwardClustered::_vsm_marks_view(const RenderDataRD *p_render_data) const {
-	// GodotNext: vsm_page_marking (#219).
+// GodotNext: vsm_page_marking (#219) / vsm_projection (#222). The views that mark pages are the views whose
+// light loop samples them; the scene cull asks the same question (vsm_view_samples()).
+static bool _vsm_view_marks(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) {
 	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
-	if (vsm == nullptr || !vsm->is_active() || p_render_data->reflection_probe.is_valid() || p_render_data->render_buffers.is_null() || p_render_data->scene_data->view_count != 1) {
+	if (vsm == nullptr || !vsm->is_active() || p_reflection_probe || p_render_buffers.is_null() || p_view_count != 1) {
 		return false;
 	}
-	if (!p_render_data->render_buffers->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+	const Ref<RenderSceneBuffersRD> rb = p_render_buffers;
+	if (rb.is_null() || !rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
 		return false;
 	}
 	return vsm->is_marking_enabled();
+}
+
+bool RenderForwardClustered::_vsm_marks_view(const RenderDataRD *p_render_data) const {
+	// GodotNext: vsm_page_marking (#219).
+	return _vsm_view_marks(p_render_data->render_buffers, p_render_data->reflection_probe.is_valid(), p_render_data->scene_data->view_count);
+}
+
+// GodotNext: vsm_projection (#222). NextGeo virtual-mesh casters reach the shadow atlas only, until #217
+// rasterizes their clusters into VSM pages: while any is live, views keep the atlas path (their pages are
+// still marked and drawn).
+static bool _vsm_nextgeo_casters_live() {
+	return RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_live_record_count() > 0;
+}
+
+bool RenderForwardClustered::vsm_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) {
+	// GodotNext: vsm_projection (#222).
+	return _vsm_view_marks(p_render_buffers, p_reflection_probe, p_view_count) && !_vsm_nextgeo_casters_live();
+}
+
+bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const {
+	// GodotNext: vsm_projection (#222, issue step 7). A shadowed light that already holds virtual maps is
+	// sampled through them by a view that samples VSM (the maps it gets in its first frame are drawn and
+	// sampled in that frame, after its atlas pass). Volumetric fog still samples the shadow atlas (#215 moves
+	// it to coarse pages), so a light the fog shows keeps its atlas pass.
+	const RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	if (vsm == nullptr || !vsm->is_active() || vsm->map_get(p_light_instance) == nullptr) {
+		return false;
+	}
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	if (!light_storage->owns_light_instance(p_light_instance)) {
+		return false;
+	}
+	const RID base = light_storage->light_instance_get_base_light(p_light_instance);
+	if (base.is_null() || !light_storage->light_has_shadow(base)) {
+		return false;
+	}
+	// Only a light whose shadow method resolves to VIRTUAL (#221's resolve_light_shadow_method(), tier rule
+	// included). Its maps outlive a change to ATLAS until update_light() frees them later in the frame, so the
+	// method is checked here: an ATLAS light keeps its atlas pass from the frame it changes.
+	if (!RendererVirtualShadowMapStorage::light_uses_vsm(light_storage->light_get_shadow_method(base))) {
+		return false;
+	}
+	if (p_environment.is_valid() && environment_get_volumetric_fog_enabled(p_environment) && light_storage->light_get_param(base, RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY) > 0.0f) {
+		return false;
+	}
+	return true;
+}
+
+bool RenderForwardClustered::vsm_raster_check_armed() const {
+	// GodotNext: vsm_projection (#222).
+	const RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	return vsm != nullptr && vsm->is_raster_check_armed();
+}
+
+// GodotNext: vsm_projection (#222). A pixel's footprint in meters, view depth * r_scale + r_bias: the world
+// size of one internal-resolution pixel at that depth, the finer axis. Page marking requests pages by it and
+// the projection reads them by it.
+static void _vsm_pixel_footprint(const RenderSceneDataRD *p_scene_data, const Size2i &p_size, float &r_scale, float &r_bias) {
+	const Projection &projection = p_scene_data->cam_projection;
+	const float size_x = 2.0f / (Math::abs(float(projection.columns[0][0])) * float(MAX(p_size.x, 1)));
+	const float size_y = 2.0f / (Math::abs(float(projection.columns[1][1])) * float(MAX(p_size.y, 1)));
+	if (projection.is_orthogonal()) {
+		r_scale = 0.0f;
+		r_bias = MIN(size_x, size_y);
+	} else {
+		r_scale = MIN(size_x, size_y);
+		r_bias = 0.0f;
+	}
+}
+
+Variant RenderForwardClustered::_vsm_setting(const char *p_name, const Variant &p_default) {
+	// GodotNext: vsm_projection (#222).
+	const String key = String("rendering/lights_and_shadows/virtual_shadows/") + p_name;
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	return (settings != nullptr && settings->has_setting(key)) ? settings->get_setting(key) : p_default;
+}
+
+void RenderForwardClustered::_ensure_vsm_projection_resources() {
+	// GodotNext: vsm_projection (#222).
+	RenderingDevice *rd = RD::get_singleton();
+	if (vsm_projection_params_buffer.is_null()) {
+		vsm_projection_params_buffer = rd->storage_buffer_create(sizeof(VSMProjectionParams));
+		rd->set_resource_name(vsm_projection_params_buffer, "VSM Projection Params");
+		rd->buffer_clear(vsm_projection_params_buffer, 0, sizeof(VSMProjectionParams));
+	}
+	if (vsm_projection_default_buffer.is_null()) {
+		// Covers one VSMMapData record (96 bytes) and the params, all zero: every lookup misses.
+		vsm_projection_default_buffer = rd->storage_buffer_create(256);
+		rd->set_resource_name(vsm_projection_default_buffer, "VSM Projection Default Buffer");
+		rd->buffer_clear(vsm_projection_default_buffer, 0, 256);
+	}
+	if (vsm_projection_default_pool.is_null()) {
+		RD::TextureFormat format;
+		format.format = RD::DATA_FORMAT_R32_UINT;
+		format.texture_type = RD::TEXTURE_TYPE_2D_ARRAY;
+		format.width = 1;
+		format.height = 1;
+		format.array_layers = RendererVirtualShadowMapStorage::POOL_LAYERS;
+		format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<uint8_t> layer;
+		layer.resize_initialized(4);
+		Vector<Vector<uint8_t>> layers;
+		for (uint32_t i = 0; i < RendererVirtualShadowMapStorage::POOL_LAYERS; i++) {
+			layers.push_back(layer);
+		}
+		vsm_projection_default_pool = rd->texture_create(format, RD::TextureView(), layers);
+		rd->set_resource_name(vsm_projection_default_pool, "VSM Projection Default Pool");
+	}
+	if (vsm_projection_blue_noise.is_null()) {
+		RD::TextureFormat format;
+		format.width = 64;
+		format.height = 64;
+		format.format = RD::DATA_FORMAT_R8G8_UNORM;
+		format.usage_bits = RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT;
+		Vector<uint8_t> noise;
+		noise.resize(64 * 64 * 2);
+		memcpy(noise.ptrw(), nextgi_blue_noise_tile, 64 * 64 * 2);
+		Vector<Vector<uint8_t>> data;
+		data.push_back(noise);
+		vsm_projection_blue_noise = rd->texture_create(format, RD::TextureView(), data);
+		rd->set_resource_name(vsm_projection_blue_noise, "VSM Projection Blue Noise");
+	}
+}
+
+void RenderForwardClustered::_free_vsm_projection_resources() {
+	// GodotNext: vsm_projection (#222).
+	RenderingDevice *rd = RD::get_singleton();
+	for (RID *rid : { &vsm_projection_params_buffer, &vsm_projection_default_buffer, &vsm_projection_default_pool, &vsm_projection_blue_noise }) {
+		if (rd != nullptr && rid->is_valid()) {
+			rd->free_rid(*rid);
+		}
+		*rid = RID();
+	}
+}
+
+void RenderForwardClustered::_vsm_update_projection(const RenderDataRD *p_render_data) {
+	// GodotNext: vsm_projection (#222). The light loop of this view reads these to sample the maps.
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	ERR_FAIL_NULL(vsm);
+	_ensure_vsm_projection_resources();
+	VSMProjectionParams params;
+	const Size2i size = p_render_data->render_buffers.is_valid() ? p_render_data->render_buffers->get_internal_size() : Size2i(1, 1);
+	_vsm_pixel_footprint(p_render_data->scene_data, size, params.footprint[0], params.footprint[1]);
+	params.bias[0] = vsm->get_lod_bias_directional();
+	params.bias[1] = vsm->get_lod_bias_local();
+	// The table's map count while its buffers match it (0 otherwise: every lookup misses, as before any map).
+	const uint32_t table_maps = vsm->get_table_capacity();
+	params.counts[0] = (table_maps > 0 && vsm->get_map_buffers_capacity() == table_maps && vsm->get_page_table_buffer().is_valid()) ? table_maps : 0u;
+	using VSM = RendererVirtualShadowMapStorage;
+	const VSM::PoolQuality quality = vsm->get_quality();
+	params.counts[1] = VSM::smrt_setting(int64_t(_vsm_setting("smrt_rays_local", -1)), VSM::smrt_preset_rays(quality), VSM::SMRT_MAX_RAYS);
+	params.counts[2] = VSM::smrt_setting(int64_t(_vsm_setting("smrt_rays_directional", -1)), VSM::smrt_preset_rays(quality), VSM::SMRT_MAX_RAYS);
+	params.counts[3] = MAX(VSM::smrt_setting(int64_t(_vsm_setting("smrt_steps", -1)), VSM::smrt_preset_steps(quality), VSM::SMRT_MAX_STEPS), 1u);
+	params.misc[0] = bool(_vsm_setting("prefiltered_distant", false)) ? 1u : 0u;
+	RD::get_singleton()->buffer_update(vsm_projection_params_buffer, 0, sizeof(VSMProjectionParams), &params);
+	vsm->set_projection_params(params.counts[1], params.counts[2], params.counts[3], params.misc[0] != 0u);
 }
 
 void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
@@ -2594,16 +2785,9 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 	input.inv_projection = NextGIView::inv_projection(*scene_data);
 	input.cam_transform = scene_data->cam_transform;
 	// A pixel's footprint: the world size of one pixel at the point's view depth, the finer axis.
+	// GodotNext: vsm_projection (#222). Shared with the projection.
 	const Projection &projection = scene_data->cam_projection;
-	const float size_x = 2.0f / (Math::abs(float(projection.columns[0][0])) * float(MAX(input.size.x, 1)));
-	const float size_y = 2.0f / (Math::abs(float(projection.columns[1][1])) * float(MAX(input.size.y, 1)));
-	if (projection.is_orthogonal()) {
-		input.pixel_scale = 0.0f;
-		input.pixel_bias = MIN(size_x, size_y);
-	} else {
-		input.pixel_scale = MIN(size_x, size_y);
-		input.pixel_bias = 0.0f;
-	}
+	_vsm_pixel_footprint(scene_data, input.size, input.pixel_scale, input.pixel_bias);
 	input.z_far = scene_data->z_far;
 	input.cluster_buffer = p_render_data->cluster_buffer;
 	input.cluster_size = p_render_data->cluster_size;
@@ -5538,10 +5722,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite cull.
 	vsm_debug_view_marked = false;
 	vsm_debug_view_pairs = false;
+	// GodotNext: vsm_projection (#222). The scene cull asked the same question for this view's atlas tiles.
+	vsm_sample_view = using_vsm && !_vsm_nextgeo_casters_live();
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
 	base_specialization.use_depth_fog = p_render_data->environment.is_valid() && environment_get_fog_mode(p_render_data->environment) == RSE::EnvironmentFogMode::ENV_FOG_MODE_DEPTH;
+	base_specialization.use_vsm = vsm_sample_view; // GodotNext: vsm_projection (#222)
 
 	if (depth_pre_pass) { //depth pre pass
 		// GodotNext: megalights_decals (#136). The MegaLights input prepass runs the decal loop, but
@@ -8176,6 +8363,20 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		occlusion.append_id(avboit_bind_occlusion.is_valid() ? avboit_bind_occlusion : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK));
 		uniforms.push_back(occlusion);
 	}
+	{
+		// GodotNext: vsm_projection (#222). What the light loop reads to sample virtual shadow maps: the pool,
+		// the page table, the per-map data and state, the view's params and #54's blue noise. Defaults while
+		// VSM is off; a view that does not sample VSM never reads them.
+		_ensure_vsm_projection_resources();
+		RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+		const bool vsm_ready = vsm != nullptr && vsm->is_active() && vsm->get_pool_texture().is_valid() && vsm->get_page_table_buffer().is_valid() && vsm->get_map_data_buffer().is_valid() && vsm->get_map_state_buffer().is_valid();
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 51, vsm_ready ? vsm->get_pool_texture() : vsm_projection_default_pool));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 52, vsm_ready ? vsm->get_page_table_buffer() : vsm_projection_default_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 53, vsm_ready ? vsm->get_map_data_buffer() : vsm_projection_default_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 54, vsm_ready ? vsm->get_map_state_buffer() : vsm_projection_default_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 55, vsm_projection_params_buffer));
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 56, vsm_projection_blue_noise));
+	}
 
 	// GodotNext: nextgeo_shading_bins (#158)
 	if (r_uniforms != nullptr) {
@@ -10083,6 +10284,9 @@ RenderForwardClustered::RenderForwardClustered() {
 			defines += "\n#define USE_DOUBLE_PRECISION \n";
 		}
 #endif
+		// GodotNext: vsm_projection (#222). Every variant: the light loop samples the maps and the VSM
+		// raster variant (#218) draws them.
+		defines += RendererVirtualShadowMapStorage::get_glsl_defines();
 
 		scene_shader.init(defines);
 	}
@@ -10197,6 +10401,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 		RendererRD::VirtualShadowMapStorage::get_singleton()->set_raster_check_callbacks(nullptr, nullptr, nullptr);
 	}
 	_free_vsm_raster_resources();
+	_free_vsm_projection_resources(); // GodotNext: vsm_projection (#222)
 	vsm_cull_instances.reset();
 	next_gi.free_far_field();
 	nextgeo_cut.free_resources();

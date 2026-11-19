@@ -352,6 +352,20 @@ String RendererVirtualShadowMapStorage::get_glsl_defines() {
 	defines += "#define VSM_INDIRECT_DIRECTIONAL " + itos(INDIRECT_DIRECTIONAL) + "u\n";
 	defines += "#define VSM_INDIRECT_LOCAL " + itos(INDIRECT_LOCAL) + "u\n";
 	defines += "#define VSM_INDIRECT_ALL " + itos(INDIRECT_ALL) + "u\n";
+	// GodotNext: vsm_projection (#222).
+	defines += "#define VSM_LIGHT_FLAGS_SAMPLE " + itos(LIGHT_FLAGS_SAMPLE) + "u\n";
+	defines += "#define VSM_CLIPMAP_LEVEL0_EXTENT " + vformat("%.6f", CLIPMAP_LEVEL0_EXTENT) + "\n";
+	defines += "#define VSM_SMRT_MAX_RAYS " + itos(SMRT_MAX_RAYS) + "u\n";
+	defines += "#define VSM_SMRT_MAX_STEPS " + itos(SMRT_MAX_STEPS) + "u\n";
+	defines += "#define VSM_SMRT_MAX_TEXELS " + vformat("%.6f", SMRT_MAX_TEXELS) + "\n";
+	defines += "#define VSM_SMRT_FIRST_STEP_TEXELS " + vformat("%.6f", SMRT_FIRST_STEP_TEXELS) + "\n";
+	defines += "#define VSM_SMRT_NORMAL_BIAS_TEXELS " + vformat("%.6f", SMRT_NORMAL_BIAS_TEXELS) + "\n";
+	defines += "#define VSM_SMRT_DEPTH_BIAS_TEXELS " + vformat("%.6f", SMRT_DEPTH_BIAS_TEXELS) + "\n";
+	defines += "#define VSM_SMRT_LOCAL_MAX_REACH " + vformat("%.6f", SMRT_LOCAL_MAX_REACH) + "\n";
+	defines += "#define VSM_PREFILTERED_DISTANT_LEVELS " + itos(PREFILTERED_DISTANT_LEVELS) + "u\n";
+	defines += "#define VSM_PREFILTERED_DISTANT_TAPS " + itos(PREFILTERED_DISTANT_TAPS) + "u\n";
+	defines += "#define VSM_PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS " + vformat("%.6f", PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS) + "\n";
+	defines += "#define VSM_PREFILTERED_DISTANT_BLEED " + vformat("%.6f", PREFILTERED_DISTANT_BLEED) + "\n";
 	return defines;
 }
 
@@ -2017,4 +2031,391 @@ void RendererVirtualShadowMapStorage::reset_frame_stats() {
 	for (uint32_t i = 0; i < FRAME_STAT_MAX; i++) {
 		vsm_frame_stats[i].set(0);
 	}
+}
+
+/* PROJECTION AND SMRT SOFT SHADOWS (#222) */
+
+// GodotNext: vsm_projection (#222, plan §21.3 contract S6). CPU models of vsm_smrt_inc.glsl.
+
+static_assert(RendererVirtualShadowMapStorage::smrt_preset_rays(RendererVirtualShadowMapStorage::POOL_QUALITY_LOW) * RendererVirtualShadowMapStorage::smrt_preset_steps(RendererVirtualShadowMapStorage::POOL_QUALITY_LOW) == 8, "Low: Godot's Soft Very Low PCSS reads 4 + 4 texels.");
+static_assert(RendererVirtualShadowMapStorage::smrt_preset_rays(RendererVirtualShadowMapStorage::POOL_QUALITY_MEDIUM) * RendererVirtualShadowMapStorage::smrt_preset_steps(RendererVirtualShadowMapStorage::POOL_QUALITY_MEDIUM) == 16, "Medium: Godot's Soft Low PCSS reads 8 + 8 texels.");
+static_assert(RendererVirtualShadowMapStorage::smrt_preset_rays(RendererVirtualShadowMapStorage::POOL_QUALITY_HIGH) * RendererVirtualShadowMapStorage::smrt_preset_steps(RendererVirtualShadowMapStorage::POOL_QUALITY_HIGH) == 24, "High: Godot's Soft Medium PCSS reads 12 + 12 texels.");
+static_assert(RendererVirtualShadowMapStorage::smrt_preset_rays(RendererVirtualShadowMapStorage::POOL_QUALITY_EPIC) * RendererVirtualShadowMapStorage::smrt_preset_steps(RendererVirtualShadowMapStorage::POOL_QUALITY_EPIC) == 48, "Epic: Godot's Soft High PCSS reads 24 + 24 texels.");
+static_assert(RendererVirtualShadowMapStorage::SMRT_MAX_TEXELS <= float(RendererVirtualShadowMapStorage::PAGE_SIZE), "A ray reads at most the neighboring page.");
+
+Vector2 RendererVirtualShadowMapStorage::smrt_disk(uint32_t p_ray, uint32_t p_rays, const Vector2 &p_noise) {
+	const float count = float(MAX(p_rays, 1u));
+	const float radius = std::sqrt(MIN((float(p_ray) + float(p_noise.x)) / count, 1.0f));
+	float turn = float(p_ray) * 0.618034f + float(p_noise.y);
+	turn = turn - std::floor(turn);
+	const float angle = 6.2831853f * turn;
+	return Vector2(std::cos(angle) * radius, std::sin(angle) * radius);
+}
+
+Vector2 RendererVirtualShadowMapStorage::smrt_square(uint32_t p_ray, uint32_t p_rays, const Vector2 &p_noise) {
+	const float count = float(MAX(p_rays, 1u));
+	float u = (float(p_ray) + float(p_noise.x)) / count;
+	u = u - std::floor(u);
+	float v = float(p_ray) * 0.618034f + float(p_noise.y);
+	v = v - std::floor(v);
+	return Vector2(u - 0.5f, v - 0.5f);
+}
+
+float RendererVirtualShadowMapStorage::smrt_jitter(uint32_t p_ray, const Vector2 &p_noise) {
+	float jitter = (float(p_noise.x) + float(p_noise.y)) * 0.5f + float(p_ray) * 0.754878f;
+	return jitter - std::floor(jitter);
+}
+
+float RendererVirtualShadowMapStorage::smrt_step(uint32_t p_step, uint32_t p_steps, float p_jitter, float p_first, float p_last) {
+	const float t = (float(p_step) + p_jitter) / float(MAX(p_steps, 1u));
+	if (!(p_last > p_first) || !(p_first > 0.0f)) {
+		return p_first;
+	}
+	return p_first * std::pow(p_last / p_first, t);
+}
+
+float RendererVirtualShadowMapStorage::directional_tan_half_angle(float p_size) {
+	// size = 1 - cos(d) for the angular diameter d: tan(d / 2) = sqrt((1 - cos d) / (1 + cos d)).
+	const float size = CLAMP(p_size, 0.0f, 1.0f);
+	return std::sqrt(size / (2.0f - size));
+}
+
+bool RendererVirtualShadowMapStorage::clipmap_projection_select(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, float p_footprint, int32_t p_lod_bias, uint32_t &r_level, uint32_t &r_mip) {
+	// The same choice as mark_directional_point()'s fine request, with the light's moving bias (#221) held by
+	// level 0.
+	const int32_t level_mip = clipmap_level_mip(p_footprint, p_lod_bias + (p_first < p_table_maps ? p_maps[p_first].lod_bias : 0));
+	for (uint32_t level = 0; level < p_count; level++) {
+		const uint32_t map = p_first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const Vector2i level_texel = clipmap_level_texel(p_texel0, level);
+		if (!clipmap_in_window(origin, level_texel, 0)) {
+			continue;
+		}
+		uint32_t mip = biased_mip(level_mip - int32_t(level), 0);
+		if (p_map_bias != nullptr) {
+			mip = MIN(mip + overflow_bias(p_map_bias[map]), MIP_COUNT - 1);
+		}
+		if (level + 1 == p_count) {
+			while (mip > 0 && !clipmap_in_window(origin, level_texel, mip)) {
+				mip--;
+			}
+		} else if (!clipmap_in_window(origin, level_texel, mip)) {
+			continue;
+		}
+		r_level = level;
+		r_mip = mip;
+		return true;
+	}
+	return false;
+}
+
+RendererVirtualShadowMapStorage::LookupResult RendererVirtualShadowMapStorage::clipmap_sample_level(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t p_level, uint32_t p_mip, uint32_t &r_level) {
+	for (uint32_t level = p_level; level < p_count; level++) {
+		const uint32_t map = p_first + level;
+		if (map >= p_table_maps) {
+			break;
+		}
+		const uint32_t mip = uint32_t(MAX(int32_t(p_mip) - int32_t(level - p_level), 0));
+		const Vector2i origin(p_maps[map].origin[0], p_maps[map].origin[1]);
+		const LookupResult result = lookup_clipmap(p_table, p_table_maps, map, origin, clipmap_level_texel(p_texel0, level), mip, true);
+		if (result.valid) {
+			r_level = level;
+			return result;
+		}
+	}
+	return LookupResult();
+}
+
+uint32_t RendererVirtualShadowMapStorage::face_projection_select(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float &r_w) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	uint32_t best = MAP_NONE;
+	r_w = 0.0f;
+	for (uint32_t face = 0; face < count; face++) {
+		const uint32_t map = light_map(p_map_base, p_light_flags, face);
+		if (map >= p_table_maps || p_maps[map].kind == MAP_KIND_MAX || p_maps[map].kind == MAP_KIND_DIRECTIONAL) {
+			continue;
+		}
+		float w = 0.0f;
+		uint32_t texel_x = 0;
+		uint32_t texel_y = 0;
+		if (face_texel(p_maps[map], p_world, w, texel_x, texel_y) && (best == MAP_NONE || w > r_w)) {
+			best = map;
+			r_w = w;
+		}
+	}
+	return best;
+}
+
+float RendererVirtualShadowMapStorage::pool_depth(const ProjectionInput &p_in, uint32_t p_texel_x, uint32_t p_texel_y) {
+	if (p_in.pool == nullptr || p_texel_x >= p_in.pool_width || p_texel_y >= p_in.pool_height) {
+		return float(Math::INF);
+	}
+	const uint64_t layer = uint64_t(p_in.pool_width) * p_in.pool_height;
+	const uint64_t index = uint64_t(p_texel_y) * p_in.pool_width + p_texel_x;
+	return depth_unpack(MAX(p_in.pool[index], p_in.pool[layer + index]));
+}
+
+// A clipmap sample of SMRT: whether level 0 texel position p_t (floating texels) lies behind the stored
+// depth by more than the bias of the texel it reads. Unmapped (after the coarser mips and levels) is lit.
+static bool _smrt_clipmap_occluded(const RendererVirtualShadowMapStorage::ProjectionInput &p_in, uint32_t p_first, uint32_t p_count, const Vector2 &p_t, float p_depth, uint32_t p_level, uint32_t p_mip) {
+	using VSM = RendererVirtualShadowMapStorage;
+	const Vector2i texel0(int32_t(CLAMP(std::floor(float(p_t.x)), -1073741824.0f, 1073741824.0f)), int32_t(CLAMP(std::floor(float(p_t.y)), -1073741824.0f, 1073741824.0f)));
+	uint32_t level = p_level;
+	const VSM::LookupResult result = VSM::clipmap_sample_level(p_in.table, p_in.table_maps, p_in.maps, p_first, p_count, texel0, p_level, p_mip, level);
+	if (!result.valid) {
+		return false;
+	}
+	const float texel = std::ldexp(1.0f, int32_t(level + result.mip) + VSM::CLIPMAP_TEXEL0_EXPONENT);
+	const float stored = VSM::pool_depth(p_in, result.texel_x, result.texel_y);
+	return stored < p_depth - texel * VSM::SMRT_DEPTH_BIAS_TEXELS;
+}
+
+float RendererVirtualShadowMapStorage::shadow_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, float p_tan_half_angle) {
+	const uint32_t count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	const uint32_t first = light_map(p_map_base, p_light_flags, 0);
+	if (p_in.table == nullptr || p_in.maps == nullptr || first >= p_in.table_maps || p_in.maps[first].kind != MAP_KIND_DIRECTIONAL) {
+		return 1.0f;
+	}
+	const MapData &level0 = p_in.maps[first];
+	uint32_t level = 0;
+	uint32_t mip = 0;
+	if (!clipmap_projection_select(p_in.maps, p_in.table_maps, p_in.map_bias, first, count, clipmap_texel0(level0, p_world), p_in.footprint, p_in.lod_bias, level, mip)) {
+		return 1.0f;
+	}
+	const float texel = std::ldexp(1.0f, int32_t(level + mip) + CLIPMAP_TEXEL0_EXPONENT);
+	// Row 2 is minus the light's Z axis: the light shines along it, and the light lies along -row 2.
+	const Vector3 toward(-level0.rows[2][0], -level0.rows[2][1], -level0.rows[2][2]);
+	const float n_dot_l = CLAMP(float(p_normal.dot(toward)), -1.0f, 1.0f);
+	const float offset = texel * SMRT_NORMAL_BIAS_TEXELS * std::sqrt(MAX(1.0f - n_dot_l * n_dot_l, 0.0f));
+	const Vector3 receiver = p_world + p_normal * offset;
+	const Vector2 t(row_dot(level0.rows[0], receiver), row_dot(level0.rows[1], receiver));
+	const float depth = row_dot(level0.rows[2], receiver);
+	// Level 0 texels per meter across the light.
+	const float texels_per_meter = std::ldexp(1.0f, -CLIPMAP_TEXEL0_EXPONENT);
+
+	if (p_in.prefiltered_distant && prefiltered_distant_level(level, count)) {
+		return prefiltered_distant(p_in, first, count, t, depth, level, mip);
+	}
+	if (p_in.rays == 0 || !(p_tan_half_angle > 0.0f)) {
+		// One 2 x 2 filtered tap on the sampled level and mip.
+		const float scale = std::ldexp(1.0f, int32_t(level + mip));
+		const Vector2 grid = t / scale - Vector2(0.5f, 0.5f);
+		const Vector2 base(std::floor(float(grid.x)), std::floor(float(grid.y)));
+		const Vector2 f = grid - base;
+		float lit = 0.0f;
+		for (uint32_t corner = 0; corner < 4; corner++) {
+			const Vector2 offset_c(float(corner & 1u), float(corner >> 1u));
+			const Vector2 sample_t = (base + offset_c + Vector2(0.5f, 0.5f)) * scale;
+			const float weight = ((corner & 1u) != 0u ? float(f.x) : 1.0f - float(f.x)) * ((corner >> 1u) != 0u ? float(f.y) : 1.0f - float(f.y));
+			lit += _smrt_clipmap_occluded(p_in, first, count, sample_t, depth, level, mip) ? 0.0f : weight;
+		}
+		return lit;
+	}
+
+	const uint32_t rays = MIN(p_in.rays, SMRT_MAX_RAYS);
+	const uint32_t steps = CLAMP(p_in.steps, 1u, SMRT_MAX_STEPS);
+	const float first_height = texel * SMRT_FIRST_STEP_TEXELS;
+	const float level_extent = CLIPMAP_LEVEL0_EXTENT * std::ldexp(1.0f, int32_t(level));
+	uint32_t lit = 0;
+	for (uint32_t ray = 0; ray < rays; ray++) {
+		// The ray's slope across the light: a point of the light's disk, in tangent units.
+		const Vector2 slope = smrt_disk(ray, rays, p_in.noise) * p_tan_half_angle;
+		const float slope_length = float(slope.length());
+		float last_height = level_extent;
+		if (slope_length > 0.0f) {
+			last_height = MIN(SMRT_MAX_TEXELS * texel / slope_length, level_extent);
+		}
+		last_height = MAX(last_height, first_height);
+		const float jitter = smrt_jitter(ray, p_in.noise);
+		bool occluded = false;
+		for (uint32_t step = 0; step < steps && !occluded; step++) {
+			const float height = smrt_step(step, steps, jitter, first_height, last_height);
+			const Vector2 sample_t = t + slope * (height * texels_per_meter);
+			occluded = _smrt_clipmap_occluded(p_in, first, count, sample_t, depth - height, level, mip);
+		}
+		lit += occluded ? 0u : 1u;
+	}
+	return float(lit) / float(rays);
+}
+
+float RendererVirtualShadowMapStorage::prefiltered_distant(const ProjectionInput &p_in, uint32_t p_first, uint32_t p_count, const Vector2 &p_t, float p_depth, uint32_t p_level, uint32_t p_mip) {
+	const float scale = std::ldexp(1.0f, int32_t(p_level + p_mip));
+	const float texel = std::ldexp(1.0f, int32_t(p_level + p_mip) + CLIPMAP_TEXEL0_EXPONENT);
+	const Vector2 grid = p_t / scale - Vector2(0.5f, 0.5f);
+	const float half_block = float(PREFILTERED_DISTANT_TAPS / 2 - 1);
+	const Vector2 base(std::floor(float(grid.x)) - half_block, std::floor(float(grid.y)) - half_block);
+	float sum = 0.0f;
+	float sum_squares = 0.0f;
+	uint32_t stored_count = 0;
+	for (uint32_t y = 0; y < PREFILTERED_DISTANT_TAPS; y++) {
+		for (uint32_t x = 0; x < PREFILTERED_DISTANT_TAPS; x++) {
+			const Vector2 sample_t = (base + Vector2(float(x) + 0.5f, float(y) + 0.5f)) * scale;
+			const Vector2i texel0(int32_t(CLAMP(std::floor(float(sample_t.x)), -1073741824.0f, 1073741824.0f)), int32_t(CLAMP(std::floor(float(sample_t.y)), -1073741824.0f, 1073741824.0f)));
+			uint32_t found_level = p_level;
+			const LookupResult result = clipmap_sample_level(p_in.table, p_in.table_maps, p_in.maps, p_first, p_count, texel0, p_level, p_mip, found_level);
+			if (!result.valid) {
+				continue;
+			}
+			const float stored = pool_depth(p_in, result.texel_x, result.texel_y);
+			if (!(stored < 1.0e30f)) {
+				continue;
+			}
+			sum += stored;
+			sum_squares += stored * stored;
+			stored_count++;
+		}
+	}
+	if (stored_count == 0) {
+		return 1.0f;
+	}
+	const float coverage = float(stored_count) / float(PREFILTERED_DISTANT_TAPS * PREFILTERED_DISTANT_TAPS);
+	const float mean = sum / float(stored_count);
+	const float min_variance = texel * PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS * texel * PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS;
+	const float variance = MAX(sum_squares / float(stored_count) - mean * mean, min_variance);
+	const float d = p_depth - texel * SMRT_DEPTH_BIAS_TEXELS - mean;
+	float lit = 1.0f;
+	if (d > 0.0f) {
+		lit = variance / (variance + d * d);
+		lit = CLAMP((lit - PREFILTERED_DISTANT_BLEED) / (1.0f - PREFILTERED_DISTANT_BLEED), 0.0f, 1.0f);
+	}
+	return (1.0f - coverage) + coverage * lit;
+}
+
+// The face of a local light's sample point: the face p_map when it holds the point, else (omni and area)
+// the face with the largest w. MAP_NONE outside every face.
+static uint32_t _smrt_face(const RendererVirtualShadowMapStorage::ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, uint32_t p_map, const Vector3 &p_point, float &r_x, float &r_y, float &r_w) {
+	using VSM = RendererVirtualShadowMapStorage;
+	const VSM::MapData &data = p_in.maps[p_map];
+	r_x = VSM::row_dot(data.rows[0], p_point);
+	r_y = VSM::row_dot(data.rows[1], p_point);
+	r_w = VSM::row_dot(data.rows[3], p_point);
+	if (r_w > data.near_w && std::fabs(r_x) <= r_w && std::fabs(r_y) <= r_w) {
+		return p_map;
+	}
+	if (VSM::MapKind(p_light_flags & VSM::LIGHT_FLAGS_KIND_MASK) == VSM::MAP_KIND_SPOT) {
+		return VSM::MAP_NONE;
+	}
+	float w = 0.0f;
+	const uint32_t map = VSM::face_projection_select(p_in.maps, p_in.table_maps, p_map_base, p_light_flags, p_point, w);
+	if (map != VSM::MAP_NONE) {
+		const VSM::MapData &other = p_in.maps[map];
+		r_x = VSM::row_dot(other.rows[0], p_point);
+		r_y = VSM::row_dot(other.rows[1], p_point);
+		r_w = w;
+	}
+	return map;
+}
+
+// A face sample of SMRT: whether p_point (w = its depth) lies behind the stored depth. Unmapped is lit.
+static bool _smrt_face_occluded(const RendererVirtualShadowMapStorage::ProjectionInput &p_in, uint32_t p_map, float p_x, float p_y, float p_w, uint32_t p_mip) {
+	using VSM = RendererVirtualShadowMapStorage;
+	const Vector2 uv(p_x / p_w * 0.5f + 0.5f, p_y / p_w * 0.5f + 0.5f);
+	const VSM::LookupResult result = VSM::lookup(p_in.table, p_in.table_maps, p_map, uv, p_mip, true);
+	if (!result.valid) {
+		return false;
+	}
+	const float texel = p_in.maps[p_map].texel_scale * p_w * float(1u << result.mip);
+	const float stored = VSM::pool_depth(p_in, result.texel_x, result.texel_y);
+	return stored < p_w - texel * VSM::SMRT_DEPTH_BIAS_TEXELS;
+}
+
+float RendererVirtualShadowMapStorage::shadow_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, float p_radius, const Vector3 &p_area_a, const Vector3 &p_area_b) {
+	if (p_in.table == nullptr || p_in.maps == nullptr) {
+		return 1.0f;
+	}
+	float w = 0.0f;
+	const uint32_t map = face_projection_select(p_in.maps, p_in.table_maps, p_map_base, p_light_flags, p_world, w);
+	if (map == MAP_NONE) {
+		return 1.0f;
+	}
+	const MapData &face = p_in.maps[map];
+	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, as mark_local_point().
+	const int32_t bias = p_in.lod_bias + face.lod_bias + (p_in.map_bias != nullptr ? int32_t(overflow_bias(p_in.map_bias[map])) : 0);
+	const uint32_t mip = biased_mip(int32_t(face_mip(w * face.texel_scale, p_in.footprint)), bias);
+	const float texel = face.texel_scale * w * float(1u << mip);
+	const Vector3 to_light = p_light_position - p_world;
+	const float distance = float(to_light.length());
+	if (!(distance > 0.0f)) {
+		return 1.0f;
+	}
+	const Vector3 light_dir = to_light / distance;
+	const float n_dot_l = CLAMP(float(p_normal.dot(light_dir)), -1.0f, 1.0f);
+	const float offset = texel * SMRT_NORMAL_BIAS_TEXELS * std::sqrt(MAX(1.0f - n_dot_l * n_dot_l, 0.0f));
+	const Vector3 receiver = p_world + p_normal * offset;
+	const bool area = p_area_a.length_squared() > 0.0f && p_area_b.length_squared() > 0.0f;
+
+	float x = 0.0f;
+	float y = 0.0f;
+	float rw = 0.0f;
+	const uint32_t receiver_map = _smrt_face(p_in, p_map_base, p_light_flags, map, receiver, x, y, rw);
+	if (receiver_map == MAP_NONE) {
+		return 1.0f;
+	}
+	if (p_in.rays == 0 || (!area && !(p_radius > 0.0f))) {
+		// One 2 x 2 filtered tap at the receiver's mip.
+		const float mip_size = float(VIRTUAL_SIZE >> mip);
+		const Vector2 grid = Vector2(x / rw * 0.5f + 0.5f, y / rw * 0.5f + 0.5f) * mip_size - Vector2(0.5f, 0.5f);
+		const Vector2 base(std::floor(float(grid.x)), std::floor(float(grid.y)));
+		const Vector2 f = grid - base;
+		float lit = 0.0f;
+		for (uint32_t corner = 0; corner < 4; corner++) {
+			const Vector2 uv = (base + Vector2(float(corner & 1u), float(corner >> 1u)) + Vector2(0.5f, 0.5f)) / mip_size;
+			const float weight = ((corner & 1u) != 0u ? float(f.x) : 1.0f - float(f.x)) * ((corner >> 1u) != 0u ? float(f.y) : 1.0f - float(f.y));
+			lit += _smrt_face_occluded(p_in, receiver_map, (uv.x * 2.0f - 1.0f) * rw, (uv.y * 2.0f - 1.0f) * rw, rw, mip) ? 0.0f : weight;
+		}
+		return lit;
+	}
+
+	// A frame across the direction to the light, for points of a spot or omni light's disk.
+	const Vector3 up = std::fabs(float(light_dir.y)) < 0.99f ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+	const Vector3 tangent = light_dir.cross(up).normalized();
+	const Vector3 bitangent = light_dir.cross(tangent);
+	// The angle one texel of the receiver's mip spans, seen from the light.
+	const float texel_angle = face.texel_scale * float(1u << mip);
+	const uint32_t rays = MIN(p_in.rays, SMRT_MAX_RAYS);
+	const uint32_t steps = CLAMP(p_in.steps, 1u, SMRT_MAX_STEPS);
+	uint32_t lit = 0;
+	for (uint32_t ray = 0; ray < rays; ray++) {
+		Vector3 light_offset;
+		if (area) {
+			const Vector2 square = smrt_square(ray, rays, p_in.noise);
+			light_offset = p_area_a * square.x + p_area_b * square.y;
+		} else {
+			const Vector2 disk = smrt_disk(ray, rays, p_in.noise) * p_radius;
+			light_offset = tangent * disk.x + bitangent * disk.y;
+		}
+		const Vector3 ray_vector = p_light_position + light_offset - receiver;
+		const float ray_length = float(ray_vector.length());
+		if (!(ray_length > 0.0f)) {
+			lit++;
+			continue;
+		}
+		const float first = MIN(texel * SMRT_FIRST_STEP_TEXELS / ray_length, SMRT_LOCAL_MAX_REACH);
+		const float offset_length = float(light_offset.length());
+		float last = SMRT_LOCAL_MAX_REACH;
+		if (offset_length > 0.0f) {
+			// The angle between the sample and the receiver seen from the light is about
+			// s * offset / ((1 - s) * distance): it reaches SMRT_MAX_TEXELS texels at s = c / (1 + c).
+			const float c = SMRT_MAX_TEXELS * texel_angle * distance / offset_length;
+			last = MIN(c / (1.0f + c), SMRT_LOCAL_MAX_REACH);
+		}
+		last = MAX(last, first);
+		const float jitter = smrt_jitter(ray, p_in.noise);
+		bool occluded = false;
+		for (uint32_t step = 0; step < steps && !occluded; step++) {
+			const Vector3 point = receiver + ray_vector * smrt_step(step, steps, jitter, first, last);
+			float px = 0.0f;
+			float py = 0.0f;
+			float pw = 0.0f;
+			const uint32_t point_map = _smrt_face(p_in, p_map_base, p_light_flags, receiver_map, point, px, py, pw);
+			if (point_map != MAP_NONE) {
+				occluded = _smrt_face_occluded(p_in, point_map, px, py, pw, mip);
+			}
+		}
+		lit += occluded ? 0u : 1u;
+	}
+	return float(lit) / float(rays);
 }

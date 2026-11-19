@@ -75,6 +75,7 @@ and run a scene through the harness with `--scene=res://generated/pn_content/<na
 | `tests/vsm/page_marking*`, `tests/vsm/run_vsm_page_marking_check.sh` | hand-authored for #219 (Virtual Shadow Map page marking and allocation check) | MIT | 2026-11-16 | the Apple M5 Max |
 | `tests/vsm/non_nanite*`, `tests/vsm/run_vsm_non_nanite_check.sh` | hand-authored for #218 (Virtual Shadow Map non-Nanite culling and indirect raster check) | MIT | 2026-11-17 | the Apple M5 Max |
 | `tests/avboit/` (scene, script, runner) | hand-authored for #295 (AVBOIT draw-order fixture; its meshes and materials are built at runtime) | MIT | 2026-11-18 | the Apple M5 Max |
+| `tests/vsm/projection*`, `tests/vsm/run_vsm_projection_check.sh` | hand-authored for #222 (Virtual Shadow Map projection and SMRT soft shadow check) | MIT | 2026-11-19 | the Apple M5 Max |
 | `generators/dense_city/validate_dense_city.gd` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/variants.cfg` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |
 | `generators/dense_city/README.md` | hand-authored for #63 | MIT | 2026-11-03 | the Apple M5 Max |

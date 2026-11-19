@@ -17,11 +17,11 @@
 #include "../nextgeo/nextgeo_records_inc.glsl"
 #endif
 
-// GodotNext: vsm_non_nanite (#218)
-#ifdef MODE_VSM
+// GodotNext: vsm_non_nanite (#218) / vsm_projection (#222). In every variant (the VSM_* defines reach them
+// all): the VSM raster variant draws pages and the light loop samples them. The include builder inlines a
+// file once per stage, so these stay outside any variant branch.
 #include "../vsm_mark_inc.glsl"
 #include "../vsm_raster_inc.glsl"
-#endif
 
 #if !defined(MODE_RENDER_DEPTH) || defined(MODE_RENDER_MATERIAL) || defined(MODE_RENDER_SDF) || defined(MODE_RENDER_NORMAL_ROUGHNESS) || defined(MODE_RENDER_VOXEL_GI) || defined(TANGENT_USED) || defined(NORMAL_MAP_USED) || defined(BENT_NORMAL_MAP_USED) || defined(LIGHT_ANISOTROPY_USED)
 #ifndef NORMAL_USED
@@ -177,6 +177,12 @@ bool sc_material_feedback() {
 // GodotNext: avboit (#295). RendererRD::AVBOIT::CompositeMode: 0 outside the AVBOIT composite.
 uint sc_avboit_composite() {
 	return (sc_packed_1() >> 8) & 7U;
+}
+
+// GodotNext: vsm_projection (#222). The view's light loop samples virtual shadow maps for lights whose
+// vsm_flags carry VSM_LIGHT_FLAGS_SAMPLE.
+bool sc_use_vsm() {
+	return ((sc_packed_1() >> 11) & 1U) != 0;
 }
 
 float sc_luminance_multiplier() {
@@ -571,6 +577,42 @@ layout(set = 1, binding = 35) uniform texture2D ssr_buffer;
 layout(set = 1, binding = 36) uniform texture2D ssr_mip_level_buffer;
 layout(set = 1, binding = 37) uniform texture2DArray sscs_buffer;
 #endif // USE_MULTIVIEW
+
+// GodotNext: vsm_projection (#222, plan §21.3 contract S6). What the light loop reads to sample virtual
+// shadow maps (RenderForwardClustered::_setup_render_pass_uniform_set(); defaults while VSM is off).
+layout(set = 1, binding = 51) uniform utexture2DArray vsm_pool_tex;
+layout(set = 1, binding = 52, std430) buffer restrict readonly VSMPageTable {
+	uint entries[];
+}
+vsm_page_table;
+layout(set = 1, binding = 53, std430) buffer restrict readonly VSMMaps {
+	VSMMapData data[];
+}
+vsm_maps;
+layout(set = 1, binding = 54, std430) buffer restrict readonly VSMMapState {
+	uint data[];
+}
+vsm_map_state;
+
+// RenderForwardClustered::VSMProjectionParams.
+struct VSMProjectionParams {
+	vec4 footprint; // x, y: a pixel's footprint in meters is view depth * x + y (the marking pass's rule).
+	ivec4 bias; // x: directional LOD bias, y: local-light LOD bias (mips).
+	uvec4 counts; // x: the page table's map count, y: rays for local lights, z: rays for directional lights, w: steps.
+	uvec4 misc; // x: Prefiltered Distant on; y, z, w: unused.
+};
+
+layout(set = 1, binding = 55, std430) buffer restrict readonly VSMProjection {
+	VSMProjectionParams data;
+}
+vsm_projection;
+layout(set = 1, binding = 56) uniform texture2D vsm_blue_noise;
+
+#if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
+#define VSM_PROJECTION
+#include "../vsm_page_table_inc.glsl"
+#include "../vsm_smrt_inc.glsl"
+#endif
 
 #endif
 

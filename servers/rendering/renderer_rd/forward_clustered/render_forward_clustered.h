@@ -1152,6 +1152,28 @@ private:
 	static Dictionary _get_vsm_raster_check_cb(void *p_userdata);
 	Dictionary get_vsm_raster_check_result();
 
+	// GodotNext: vsm_projection (#222, plan §21.3 contract S6). VSMProjectionParams in
+	// scene_forward_clustered_inc.glsl (std430): what the light loop needs to sample the maps of this view.
+	struct VSMProjectionParams {
+		float footprint[4] = {}; // x, y: a pixel's footprint in meters is view depth * x + y.
+		int32_t bias[4] = {}; // x: directional LOD bias, y: local-light LOD bias.
+		uint32_t counts[4] = {}; // x: the page table's map count, y: local rays, z: directional rays, w: steps.
+		uint32_t misc[4] = {};
+	};
+	static_assert(sizeof(VSMProjectionParams) == 64, "VSMProjectionParams must match scene_forward_clustered_inc.glsl.");
+	// Whether the view being rendered samples virtual shadow maps (set in _render_scene()).
+	bool vsm_sample_view = false;
+	RID vsm_projection_params_buffer;
+	RID vsm_projection_blue_noise; // #54's 64 x 64 RG8 blue-noise tile.
+	RID vsm_projection_default_pool; // A 1 x 1 R32_UINT array of two layers, bound while VSM is off.
+	RID vsm_projection_default_buffer; // Bound for the page table, maps and map state while VSM is off.
+	void _ensure_vsm_projection_resources();
+	void _free_vsm_projection_resources();
+	// Fills the params buffer for the view after its pages are marked.
+	void _vsm_update_projection(const RenderDataRD *p_render_data);
+	// The project setting rendering/lights_and_shadows/virtual_shadows/<p_name>, or p_default.
+	static Variant _vsm_setting(const char *p_name, const Variant &p_default);
+
 protected:
 	/* setup */
 
@@ -1222,6 +1244,10 @@ public:
 
 	// GodotNext: vsm_non_nanite (#218)
 	virtual bool is_vsm_active() const override;
+	// GodotNext: vsm_projection (#222).
+	virtual bool vsm_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) override;
+	virtual bool vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const override;
+	virtual bool vsm_raster_check_armed() const override;
 
 	RenderForwardClustered();
 	~RenderForwardClustered();

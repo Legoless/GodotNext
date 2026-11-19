@@ -445,6 +445,13 @@ public:
 	virtual void update() = 0;
 	// GodotNext: vsm_non_nanite (#218). Whether virtual shadow maps rasterize this frame's shadow casters.
 	virtual bool is_vsm_active() const { return false; }
+	// GodotNext: vsm_projection (#222). Whether the view's light loop samples virtual shadow maps, and whether
+	// such a view samples this light's maps instead of its shadow atlas, so that the scene cull gives the light
+	// no atlas tile and no atlas pass. The renderer asks the same questions for its atlas passes.
+	virtual bool vsm_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) { return false; }
+	virtual bool vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const { return false; }
+	// A raster check is armed: lights that skip the atlas still get their atlas caster lists, for its diff.
+	virtual bool vsm_raster_check_armed() const { return false; }
 	virtual Dictionary geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const { return Dictionary(); }
 	virtual ~RendererSceneRender() {}
 };

@@ -45,8 +45,6 @@
 // GodotNext: nextgi_hit_groups (#130)
 #include "core/templates/safe_refcount.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
-// GodotNext: vsm_non_nanite (#218)
-#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 // GodotNext: avboit (#295)
 #include "servers/rendering/renderer_rd/effects/avboit.h"
 
@@ -1263,10 +1261,10 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n#define MODE_RR_GUIDES\n", false));
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n#define MODE_RR_GUIDES\n", false));
 
-		// GodotNext: vsm_non_nanite (#218). Off until VSM raster runs. Only these variants get the VSM_* constants.
-		const String vsm_defines = RendererVirtualShadowMapStorage::get_glsl_defines();
-		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n" + vsm_defines, false));
-		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n" + vsm_defines, false));
+		// GodotNext: vsm_non_nanite (#218). Off until VSM raster runs. The VSM_* constants reach every variant
+		// through the shader's defines (vsm_projection (#222): the light loop samples the maps).
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n", false));
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n", false));
 
 		// GodotNext: avboit (#295). The AVBOIT bounds and occlusion pre-passes, then their ubershader twins.
 		// They run the material's fragment code for its alpha, so they are depth variants with outputs.

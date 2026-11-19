@@ -439,6 +439,11 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 	}
 	r_map_base = first;
 	r_flags = light_flags(range->kind, range->count);
+	// GodotNext: vsm_projection (#222). The view's light loop samples these maps instead of the shadow atlas.
+	if (view_samples) {
+		r_flags |= LIGHT_FLAGS_SAMPLE;
+		view_sampled_lights++;
+	}
 
 	// GodotNext: vsm_settings_debug (#221). A moving light's maps take the moving resolution LOD bias; a
 	// directional light moves when its basis turns.
@@ -528,6 +533,19 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 	info["min_caster_texels"] = min_caster_texels;
 	if (!last_raster_stats.is_empty()) {
 		info["non_nanite"] = last_raster_stats;
+	}
+	// GodotNext: vsm_projection (#222). The last view whose light loop sampled the maps.
+	{
+		Dictionary projection;
+		projection["views"] = int64_t(projection_views);
+		projection["lights_sampled"] = int64_t(last_projection.lights_sampled);
+		projection["atlas_passes"] = int64_t(last_projection.atlas_passes);
+		projection["atlas_passes_skipped"] = int64_t(last_projection.atlas_passes_skipped);
+		projection["rays_local"] = int64_t(last_projection.rays_local);
+		projection["rays_directional"] = int64_t(last_projection.rays_directional);
+		projection["steps"] = int64_t(last_projection.steps);
+		projection["prefiltered_distant"] = last_projection.prefiltered_distant;
+		info["projection"] = projection;
 	}
 	if (state_buffer.is_valid() && RD::get_singleton() != nullptr) {
 		const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(state_buffer, 0, STATE_SIZE * uint32_t(sizeof(uint32_t)));

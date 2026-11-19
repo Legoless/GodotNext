@@ -51,8 +51,7 @@ namespace RendererRD {
 // shadow-casting light whose method resolves to VIRTUAL gets maps. GODOT_DEV_VSM in the environment
 // (builds with DEBUG_ENABLED) stands for shadow_method = virtual and picks the pool: 1 the High pool, or
 // the pool quality (low, medium, high, epic), or a percentage of the default High pool ("25%"). The
-// lights keep their atlas shadows until #222 projects the maps; the maps fill LightData's vsm_map_base
-// and vsm_flags.
+// maps fill LightData's vsm_map_base and vsm_flags, and the Forward+ light loop samples them (#222).
 //
 // GodotNext: vsm_page_marking (#219). With VSM on, every view with Forward+ render buffers forces the
 // depth prepass and, at the end of RenderForwardClustered::_pre_opaque_render() (once the light
@@ -258,6 +257,22 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	void _update_scalability();
 	void _record_frame_stats(uint64_t p_frame, bool p_view_marked);
 
+	// GodotNext: vsm_projection (#222).
+	bool view_samples = false;
+	uint32_t view_sampled_lights = 0;
+	struct ProjectionStats {
+		uint32_t lights_sampled = 0;
+		uint32_t atlas_passes = 0;
+		uint32_t atlas_passes_skipped = 0;
+		uint32_t rays_local = 0;
+		uint32_t rays_directional = 0;
+		uint32_t steps = 0;
+		bool prefiltered_distant = false;
+	};
+	ProjectionStats pending_projection;
+	ProjectionStats last_projection;
+	uint64_t projection_views = 0;
+
 	bool _ensure_shader();
 	RID _shader(ShaderMode p_mode);
 
@@ -299,6 +314,36 @@ public:
 	const Scalability &get_scalability() const { return scalability; }
 	// The views mark_and_allocate() has marked; it rises once per view whose dirty list it wrote.
 	uint64_t get_marked_view_count() const { return marked_views; }
+
+	// GodotNext: vsm_projection (#222). The active VSM quality preset (the pool's), its LOD biases, and whether
+	// the view whose light buffers update_light() writes samples virtual shadow maps: then every light with
+	// maps gets LIGHT_FLAGS_SAMPLE.
+	PoolQuality get_quality() const { return active_quality; }
+	int32_t get_lod_bias_directional() const { return lod_bias_directional; }
+	int32_t get_lod_bias_local() const { return lod_bias_local; }
+	void set_view_samples(bool p_samples) {
+		view_samples = p_samples;
+		if (p_samples) {
+			view_sampled_lights = 0;
+		}
+	}
+	bool get_view_samples() const { return view_samples; }
+	// The view that samples the maps: its shadow-atlas passes kept and skipped, after update_light() ran for
+	// its lights; then its SMRT counts (set_projection_params()). get_debug_info() reports them as "projection".
+	void record_projection_view(uint32_t p_atlas_passes, uint32_t p_atlas_passes_skipped) {
+		pending_projection = ProjectionStats();
+		pending_projection.lights_sampled = view_sampled_lights;
+		pending_projection.atlas_passes = p_atlas_passes;
+		pending_projection.atlas_passes_skipped = p_atlas_passes_skipped;
+	}
+	void set_projection_params(uint32_t p_rays_local, uint32_t p_rays_directional, uint32_t p_steps, bool p_prefiltered_distant) {
+		pending_projection.rays_local = p_rays_local;
+		pending_projection.rays_directional = p_rays_directional;
+		pending_projection.steps = p_steps;
+		pending_projection.prefiltered_distant = p_prefiltered_distant;
+		last_projection = pending_projection;
+		projection_views++;
+	}
 	RID get_pool_texture() const { return pool_texture; }
 	RID get_page_table_buffer() const { return table_buffer; }
 	// GodotNext: vsm_non_nanite (#218). Read-only access to the marking/allocation outputs for raster passes.

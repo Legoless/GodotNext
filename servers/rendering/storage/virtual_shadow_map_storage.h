@@ -151,6 +151,10 @@ public:
 	static constexpr uint32_t light_flags(MapKind p_kind, uint32_t p_map_count) {
 		return (uint32_t(p_kind) & LIGHT_FLAGS_KIND_MASK) | ((p_map_count & LIGHT_FLAGS_COUNT_MASK) << LIGHT_FLAGS_COUNT_SHIFT);
 	}
+	// GodotNext: vsm_projection (#222). Bit 7: the view's light loop samples the light's maps instead of its
+	// shadow atlas (vsm_shadow_directional() and vsm_shadow_local() in vsm_smrt_inc.glsl).
+	static constexpr uint32_t LIGHT_FLAGS_SAMPLE = 1u << 7;
+	static_assert((LIGHT_FLAGS_SAMPLE & (LIGHT_FLAGS_KIND_MASK | (LIGHT_FLAGS_COUNT_MASK << LIGHT_FLAGS_COUNT_SHIFT))) == 0, "LIGHT_FLAGS_SAMPLE must not overlap the kind and count bits.");
 	// The map of a light's clipmap level or face p_index, or MAP_NONE when the light has no maps or
 	// p_index is not below its map count. The CPU model of vsm_light_map() in
 	// vsm_page_table_inc.glsl: consumers never add an index to vsm_map_base themselves, since
@@ -659,6 +663,112 @@ public:
 		const uint64_t cap = p_max_groups > 0 ? uint64_t(p_max_groups) : 1u;
 		return uint32_t(wanted < 1u ? 1u : (wanted > cap ? cap : wanted));
 	}
+
+	/* PROJECTION AND SMRT SOFT SHADOWS (#222, plan §21.3 contract S6) */
+
+	// GodotNext: vsm_projection (#222). The forward light loop samples a light's maps with Shadow Map Ray
+	// Tracing: R rays from the receiver toward points of the light's disk (directional: the angular size;
+	// local: LIGHT_PARAM_SIZE as the radius; area: the rectangle), each marched in S steps through the map
+	// at the receiver's mip; a step behind the stored depth occludes its ray, and the shadow factor is the
+	// share of rays that reach the light. R = 0, or a light without size, takes one 2 x 2 filtered tap.
+	// vsm_smrt_inc.glsl is the GPU code; the functions below are its CPU models, written in the same order.
+	//
+	// Provisional values (PQ derives the final ones with GV-5; docs/godotnext/source-log/vsm.md records the
+	// derivation). Rays x steps per VSM quality preset equal the texel reads of Godot's own PCSS at the
+	// soft shadow quality the preset matches (blocker search plus filter, 2 x penumbra samples): Low and
+	// Soft Very Low 8, Medium and Soft Low 16, High and Soft Medium 24, Epic and Soft High 48. The project
+	// settings rendering/lights_and_shadows/virtual_shadows/smrt_rays_local, smrt_rays_directional and
+	// smrt_steps override them; their default, -1, takes the preset's value (smrt_setting()).
+	static constexpr uint32_t smrt_preset_rays(PoolQuality p_quality) {
+		return p_quality == POOL_QUALITY_LOW ? 2u : (p_quality == POOL_QUALITY_MEDIUM ? 4u : (p_quality == POOL_QUALITY_HIGH ? 4u : 8u));
+	}
+	static constexpr uint32_t smrt_preset_steps(PoolQuality p_quality) {
+		return p_quality == POOL_QUALITY_LOW ? 4u : (p_quality == POOL_QUALITY_MEDIUM ? 4u : 6u);
+	}
+	// The settings' ranges, and the shader's loop bounds.
+	static constexpr uint32_t SMRT_MAX_RAYS = 32;
+	static constexpr uint32_t SMRT_MAX_STEPS = 16;
+	// A ray ends this many texels of the sampled mip from the receiver's texel in the map, so it reads at
+	// most the neighboring page: half a page. This clamps the penumbra.
+	static constexpr float SMRT_MAX_TEXELS = float(PAGE_SIZE / 2);
+	// The first step's height above the receiver, toward the light, in texels of the sampled mip.
+	static constexpr float SMRT_FIRST_STEP_TEXELS = 2.0f;
+	// The receiver's offset along its normal (times the sine of its angle to the light) and the depth bias
+	// of every compare, in texels of the mip a sample reads.
+	static constexpr float SMRT_NORMAL_BIAS_TEXELS = 1.0f;
+	static constexpr float SMRT_DEPTH_BIAS_TEXELS = 1.0f;
+	// Local lights: no step goes further than this share of the way from the receiver to the light.
+	static constexpr float SMRT_LOCAL_MAX_REACH = 0.95f;
+	// The value a light loop uses: p_setting when it is 0 or more (clamped to p_max), else p_preset.
+	static constexpr uint32_t smrt_setting(int64_t p_setting, uint32_t p_preset, uint32_t p_max) {
+		return p_setting < 0 ? p_preset : (p_setting > int64_t(p_max) ? p_max : uint32_t(p_setting));
+	}
+
+	// Prefiltered Distant (rendering/lights_and_shadows/virtual_shadows/prefiltered_distant, UE Experimental,
+	// off): a receiver whose clipmap level is one of the last PREFILTERED_DISTANT_LEVELS levels of a light
+	// with more levels than that takes a moments filter instead of SMRT. The mean and mean square of the
+	// stored depths of the PREFILTERED_DISTANT_TAPS x PREFILTERED_DISTANT_TAPS block of texels around the
+	// receiver at its level and mip give Chebyshev's upper bound on the lit share of the block's occluders,
+	// with a variance of at least PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS^2 texels^2 and light bleeding cut
+	// below PREFILTERED_DISTANT_BLEED; empty and unmapped texels count as lit. The moments are taken per
+	// lookup from the pool, not stored as a separate mip (docs/godotnext/source-log/vsm.md).
+	static constexpr uint32_t PREFILTERED_DISTANT_LEVELS = 2;
+	static constexpr uint32_t PREFILTERED_DISTANT_TAPS = 4;
+	static constexpr float PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS = 0.5f;
+	static constexpr float PREFILTERED_DISTANT_BLEED = 0.2f;
+	// Whether a receiver in clipmap level p_level of a light with p_count levels takes the moments filter.
+	static constexpr bool prefiltered_distant_level(uint32_t p_level, uint32_t p_count) {
+		return p_count > PREFILTERED_DISTANT_LEVELS && p_level + PREFILTERED_DISTANT_LEVELS >= p_count;
+	}
+
+	// Ray p_ray of p_rays: a point of the unit disk, stratified in radius and turned by the golden angle,
+	// rotated by the pixel's blue noise (#54's tile).
+	static Vector2 smrt_disk(uint32_t p_ray, uint32_t p_rays, const Vector2 &p_noise);
+	// Ray p_ray of p_rays on an area light: a point of [-0.5, 0.5]^2 of the rectangle.
+	static Vector2 smrt_square(uint32_t p_ray, uint32_t p_rays, const Vector2 &p_noise);
+	// The ray's jitter of its step positions, in [0, 1).
+	static float smrt_jitter(uint32_t p_ray, const Vector2 &p_noise);
+	// Step p_step of p_steps: geometric from p_first to p_last, shifted by p_jitter of a step.
+	static float smrt_step(uint32_t p_step, uint32_t p_steps, float p_jitter, float p_first, float p_last);
+	// tan of half a directional light's angular diameter from DirectionalLightData::size, which is
+	// 1 - cos(angular diameter).
+	static float directional_tan_half_angle(float p_size);
+	// The level and mip the projection reads for a receiver: the marking pass's fine request
+	// (mark_directional_point()), so the sample finds the page the view asked for.
+	static bool clipmap_projection_select(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_bias, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, float p_footprint, int32_t p_lod_bias, uint32_t &r_level, uint32_t &r_mip);
+	// clipmap_sample() that also gives the level it found the page in.
+	static LookupResult clipmap_sample_level(const uint32_t *p_table, uint32_t p_table_maps, const MapData *p_maps, uint32_t p_first, uint32_t p_count, const Vector2i &p_texel0, uint32_t p_level, uint32_t p_mip, uint32_t &r_level);
+	// The face of a spot, omni or area light that holds p_world (the one with the largest w where faces
+	// overlap), or MAP_NONE; r_w is the face's w at the point.
+	static uint32_t face_projection_select(const MapData *p_maps, uint32_t p_table_maps, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, float &r_w);
+
+	// What the CPU models of the projection read. pool holds the physical pool as uint texels, layer 0
+	// (static) then layer 1 (dynamic), each pool_width x pool_height.
+	struct ProjectionInput {
+		const uint32_t *table = nullptr;
+		uint32_t table_maps = 0;
+		const MapData *maps = nullptr;
+		const uint32_t *map_bias = nullptr; // Each map's overflow bias state, or null.
+		const uint32_t *pool = nullptr;
+		uint32_t pool_width = 0;
+		uint32_t pool_height = 0;
+		float footprint = 0.0f; // The receiver pixel's footprint in meters.
+		int32_t lod_bias = 0;
+		uint32_t rays = 0;
+		uint32_t steps = 1;
+		Vector2 noise;
+		bool prefiltered_distant = false;
+	};
+	// The nearest depth of a pool texel (the larger packed value of the two layers), +INF when empty.
+	static float pool_depth(const ProjectionInput &p_in, uint32_t p_texel_x, uint32_t p_texel_y);
+	// CPU models of vsm_shadow_directional() and vsm_shadow_local(): 1 lit, 0 shadowed. p_normal is the
+	// receiver's world normal; p_tan_half_angle the directional light's (directional_tan_half_angle()).
+	// p_radius is a spot or omni light's radius; an area light passes its two edge vectors instead.
+	static float shadow_directional(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, float p_tan_half_angle);
+	// The moments filter of Prefiltered Distant at level-0 texel position p_t and depth p_depth along the
+	// light, on p_level and p_mip (CPU model of vsm_prefiltered_distant()).
+	static float prefiltered_distant(const ProjectionInput &p_in, uint32_t p_first, uint32_t p_count, const Vector2 &p_t, float p_depth, uint32_t p_level, uint32_t p_mip);
+	static float shadow_local(const ProjectionInput &p_in, uint32_t p_map_base, uint32_t p_light_flags, const Vector3 &p_world, const Vector3 &p_normal, const Vector3 &p_light_position, float p_radius, const Vector3 &p_area_a = Vector3(), const Vector3 &p_area_b = Vector3());
 
 private:
 	struct FreeRange {

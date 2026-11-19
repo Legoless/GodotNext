@@ -464,6 +464,33 @@ half sample_directional_soft_shadow(texture2D shadow, vec3 pssm_coord, vec2 tex_
 	}
 }
 
+#ifdef VSM_PROJECTION
+// GodotNext: vsm_projection (#222). The light loop works in view space, virtual shadow maps in world space.
+// SceneData's inv_view_matrix holds the camera transform's rows.
+vec3 vsm_world_position(vec3 p_view) {
+	vec4 p = vec4(p_view, 1.0);
+	return vec3(dot(scene_data_block.data.inv_view_matrix[0], p), dot(scene_data_block.data.inv_view_matrix[1], p), dot(scene_data_block.data.inv_view_matrix[2], p));
+}
+
+vec3 vsm_world_vector(vec3 p_view) {
+	vec4 v = vec4(p_view, 0.0);
+	return vec3(dot(scene_data_block.data.inv_view_matrix[0], v), dot(scene_data_block.data.inv_view_matrix[1], v), dot(scene_data_block.data.inv_view_matrix[2], v));
+}
+
+vec3 vsm_world_normal(vec3 p_view) {
+	return normalize(vsm_world_vector(p_view));
+}
+
+vec2 vsm_pixel_noise() {
+	// NEXTGEO_FRAG_COORD (#158): gl_FragCoord, or the bin pixel's center in NextGeo's compute shading bins.
+	return vsm_blue_noise_sample(uvec2(NEXTGEO_FRAG_COORD.xy), scene_data_block.data.taa_frame_count);
+}
+
+bool vsm_light_sampled(uint p_vsm_flags) {
+	return sc_use_vsm() && (p_vsm_flags & VSM_LIGHT_FLAGS_SAMPLE) != 0u;
+}
+#endif
+
 #endif // SHADOWS_DISABLED
 
 half get_omni_attenuation(float distance, float inv_range, float decay) {
@@ -511,7 +538,17 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	half shadow = half(1.0);
 #ifndef SHADOWS_DISABLED
 	// Omni light shadow.
+#ifdef VSM_PROJECTION
+	// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps has no atlas tile.
+	const bool vsm_sampled = vsm_light_sampled(omni_lights.data[idx].vsm_flags);
+	if (vsm_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
+		float vsm_shadow = vsm_shadow_local(omni_lights.data[idx].vsm_map_base, omni_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(omni_lights.data[idx].position), omni_lights.data[idx].size, vec3(0.0), vec3(0.0), -vertex.z, vsm_pixel_noise());
+		shadow = mix(half(1.0), half(vsm_shadow), half(omni_lights.data[idx].shadow_opacity));
+	}
+	if (!vsm_sampled && omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
+#else
 	if (omni_attenuation > HALF_FLT_MIN && omni_lights.data[idx].shadow_opacity > 0.001) {
+#endif
 		// there is a shadowmap
 		vec2 texel_size = scene_data_block.data.shadow_atlas_pixel_size;
 		vec4 base_uv_rect = omni_lights.data[idx].atlas_rect;
@@ -646,7 +683,18 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	half transmittance_z = transmittance_depth; //no transmittance by default
 	transmittance_color.a *= omni_attenuation;
 #ifndef SHADOWS_DISABLED
+#ifdef VSM_PROJECTION
+	// GodotNext: vsm_projection (#222).
+	if (vsm_sampled && omni_lights.data[idx].shadow_opacity > 0.001) {
+		float vsm_thickness = vsm_transmittance_local(omni_lights.data[idx].vsm_map_base, omni_lights.data[idx].vsm_flags, vsm_world_position(vertex - vec3(normal) * omni_lights.data[idx].transmittance_bias), -vertex.z);
+		if (vsm_thickness >= 0.0) {
+			transmittance_z = half(vsm_thickness);
+		}
+	}
+	if (!vsm_sampled && omni_lights.data[idx].shadow_opacity > 0.001) {
+#else
 	if (omni_lights.data[idx].shadow_opacity > 0.001) {
+#endif
 		// Redo shadowmapping, but shrink the model a bit to avoid artifacts.
 		vec2 texel_size = scene_data_block.data.shadow_atlas_pixel_size;
 		vec4 uv_rect = omni_lights.data[idx].atlas_rect;
@@ -821,7 +869,17 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	half shadow = half(1.0);
 #ifndef SHADOWS_DISABLED
 	// Spot light shadow.
+#ifdef VSM_PROJECTION
+	// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps has no atlas tile.
+	const bool vsm_sampled = vsm_light_sampled(spot_lights.data[idx].vsm_flags);
+	if (vsm_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
+		float vsm_shadow = vsm_shadow_local(spot_lights.data[idx].vsm_map_base, spot_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(spot_lights.data[idx].position), spot_lights.data[idx].size, vec3(0.0), vec3(0.0), -vertex.z, vsm_pixel_noise());
+		shadow = mix(half(1.0), half(vsm_shadow), half(spot_lights.data[idx].shadow_opacity));
+	}
+	if (!vsm_sampled && spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
+#else
 	if (spot_attenuation > HALF_FLT_MIN && spot_lights.data[idx].shadow_opacity > 0.001) {
+#endif
 		vec3 normal_bias = vec3(normal) * light_length * spot_lights.data[idx].shadow_normal_bias * (1.0 - abs(dot(normal, light_rel_vec_norm)));
 
 		//there is a shadowmap
@@ -900,7 +958,18 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 	half transmittance_z = transmittance_depth;
 	transmittance_color.a *= spot_attenuation;
 #ifndef SHADOWS_DISABLED
+#ifdef VSM_PROJECTION
+	// GodotNext: vsm_projection (#222).
+	if (vsm_sampled && spot_lights.data[idx].shadow_opacity > 0.001) {
+		float vsm_thickness = vsm_transmittance_local(spot_lights.data[idx].vsm_map_base, spot_lights.data[idx].vsm_flags, vsm_world_position(vertex - vec3(normal) * spot_lights.data[idx].transmittance_bias), -vertex.z);
+		if (vsm_thickness >= 0.0) {
+			transmittance_z = half(vsm_thickness);
+		}
+	}
+	if (!vsm_sampled && spot_lights.data[idx].shadow_opacity > 0.001) {
+#else
 	if (spot_lights.data[idx].shadow_opacity > 0.001) {
+#endif
 		vec4 splane = (spot_lights.data[idx].shadow_matrix * vec4(vertex - vec3(normal) * spot_lights.data[idx].transmittance_bias, 1.0));
 		splane /= splane.w;
 
@@ -1019,7 +1088,18 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 #ifndef SHADOWS_DISABLED
 	// Area light shadow.
+#ifdef VSM_PROJECTION
+	// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps has no atlas
+	// tile. The penumbra comes from the light's rectangle.
+	const bool vsm_sampled = vsm_light_sampled(area_lights.data[idx].vsm_flags);
+	if (vsm_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
+		float vsm_shadow = vsm_shadow_local(area_lights.data[idx].vsm_map_base, area_lights.data[idx].vsm_flags, vsm_world_position(vertex), vsm_world_normal(vec3(normal)), vsm_world_position(area_lights.data[idx].position), 0.0, vsm_world_vector(vec3(area_lights.data[idx].area_width)), vsm_world_vector(vec3(area_lights.data[idx].area_height)), -vertex.z, vsm_pixel_noise());
+		shadow = mix(half(1.0), half(vsm_shadow), half(area_lights.data[idx].shadow_opacity));
+	}
+	if (!vsm_sampled && light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
+#else
 	if (light_attenuation_raw > HALF_FLT_MIN && area_lights.data[idx].shadow_opacity > 0.001) {
+#endif
 		// there is a shadowmap
 		vec2 texel_size = scene_data_block.data.shadow_atlas_pixel_size;
 		vec4 base_uv_rect = area_lights.data[idx].atlas_rect;
@@ -1236,7 +1316,18 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 		half transmittance_z = transmittance_depth;
 		transmittance_color.a *= light_attenuation_raw; // not including shadows or ltc falloff
 #ifndef SHADOWS_DISABLED
+#ifdef VSM_PROJECTION
+		// GodotNext: vsm_projection (#222).
+		if (vsm_sampled && area_lights.data[idx].shadow_opacity > 0.001) {
+			float vsm_thickness = vsm_transmittance_local(area_lights.data[idx].vsm_map_base, area_lights.data[idx].vsm_flags, vsm_world_position(vertex - vec3(normal) * area_lights.data[idx].transmittance_bias), -vertex.z);
+			if (vsm_thickness >= 0.0) {
+				transmittance_z = half(vsm_thickness);
+			}
+		}
+		if (!vsm_sampled && area_lights.data[idx].shadow_opacity > 0.001) {
+#else
 		if (area_lights.data[idx].shadow_opacity > 0.001) {
+#endif
 			// Redo shadowmapping, but shrink the model a bit to avoid artifacts.
 			vec2 texel_size = scene_data_block.data.shadow_atlas_pixel_size;
 			vec4 uv_rect = area_lights.data[idx].atlas_rect;

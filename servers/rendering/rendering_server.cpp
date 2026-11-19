@@ -58,6 +58,8 @@
 #include "servers/rendering/shader_language.h"
 #include "servers/rendering/shader_warnings.h"
 #include "servers/rendering/storage/virtual_mesh_storage.h"
+// GodotNext: vsm_projection (#222). The SMRT settings' ranges.
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 RenderingServer *RenderingServer::singleton = nullptr;
 RenderingServer *(*RenderingServer::create_func)() = nullptr;
@@ -4089,6 +4091,18 @@ void RenderingServer::init() {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_local);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL_MOVING) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_directional_moving);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_local_moving);
+	}
+	// GodotNext: vsm_projection (#222). Virtual shadow map SMRT soft shadows: rays per pixel and light, and
+	// steps per ray. -1 takes the active VSM quality preset's value (RendererVirtualShadowMapStorage::
+	// smrt_preset_rays() and smrt_preset_steps()); 0 rays takes one filtered tap. Provisional until GV-5 derives
+	// the preset values in PQ. Prefiltered Distant (UE: Experimental, off) filters the coarsest clipmap levels.
+	{
+		using VSM = RendererVirtualShadowMapStorage;
+		const String ray_hint = vformat("-1,%d,1", VSM::SMRT_MAX_RAYS);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/virtual_shadows/smrt_rays_local", PROPERTY_HINT_RANGE, ray_hint), -1);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/virtual_shadows/smrt_rays_directional", PROPERTY_HINT_RANGE, ray_hint), -1);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/virtual_shadows/smrt_steps", PROPERTY_HINT_RANGE, vformat("-1,%d,1", VSM::SMRT_MAX_STEPS)), -1);
+		GLOBAL_DEF(PropertyInfo(Variant::BOOL, "rendering/lights_and_shadows/virtual_shadows/prefiltered_distant"), false);
 	}
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);

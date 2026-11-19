@@ -1265,9 +1265,12 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				owns_shadow_atlas(p_shadow_atlas) &&
 				shadow_atlas_owns_light_instance(p_shadow_atlas, light_instance->self) &&
 				light->shadow;
+		// GodotNext: vsm_projection (#222). The view's light loop samples the light's virtual shadow maps: it
+		// needs no atlas tile (the scene cull gave it none unless volumetric fog samples its atlas).
+		const bool vsm_shadow = p_using_shadows && light->shadow && (light_data.vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) != 0;
 
 		bool in_shadow_range = true;
-		if (needs_shadow && light->distance_fade) {
+		if ((needs_shadow || vsm_shadow) && light->distance_fade) { // GodotNext: vsm_projection (#222)
 			if (distance > light->distance_fade_shadow + light->distance_fade_length) {
 				// Out of range, don't draw shadows to improve performance.
 				in_shadow_range = false;
@@ -1350,6 +1353,36 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					light_data.soft_shadow_scale *= RendererSceneRenderRD::get_singleton()->shadows_quality_radius_get(); // Only use quality radius for PCF
 				}
 				light_data.shadow_bias *= MAX(light_data.soft_shadow_scale, 1.0f);
+			}
+			// GodotNext: vsm_projection (#222). No PCSS for a light the light loop samples through VSM: SMRT
+			// takes the penumbra from the light's size. Volumetric fog still reads this atlas data.
+			if (vsm_shadow) {
+				light_data.soft_shadow_size = 0.0;
+			}
+		} else if (vsm_shadow && in_shadow_range) {
+			// GodotNext: vsm_projection (#222). The light loop samples the light's virtual shadow maps: no atlas
+			// tile, no PCSS (SMRT takes the penumbra from the light's size). The shadow matrix stays, as the
+			// atlas path's, for light projectors.
+			light_data.shadow_opacity = light->param[RSE::LIGHT_PARAM_SHADOW_OPACITY] * shadow_opacity_fade;
+			light_data.shadow_bias = 0.0;
+			light_data.shadow_normal_bias = 0.0;
+			light_data.transmittance_bias = light->param[RSE::LIGHT_PARAM_TRANSMITTANCE_BIAS];
+			light_data.soft_shadow_size = 0.0;
+			light_data.soft_shadow_scale = 0.0;
+			if (type == RSE::LIGHT_SPOT) {
+				// The camera the scene cull gives a spot light's atlas pass.
+				const Transform3D modelview = (inverse_transform * light_transform).inverse();
+				Projection bias;
+				bias.set_light_bias();
+				Projection correction;
+				correction.set_depth_correction(false, true, false);
+				Projection camera;
+				camera.set_perspective(spot_angle * 2.0, 1.0, MIN(0.025f, radius), radius);
+				const Projection shadow_mtx = bias * correction * camera * modelview;
+				RendererRD::MaterialStorage::store_camera(shadow_mtx, light_data.shadow_matrix);
+			} else {
+				const Transform3D proj = (inverse_transform * light_transform).inverse();
+				RendererRD::MaterialStorage::store_transform(proj, light_data.shadow_matrix);
 			}
 		} else {
 			light_data.shadow_opacity = 0.0;
