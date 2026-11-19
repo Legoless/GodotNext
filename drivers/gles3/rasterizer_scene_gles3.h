@@ -39,6 +39,8 @@
 #include "drivers/gles3/storage/light_storage.h"
 #include "drivers/gles3/storage/material_storage.h"
 #include "servers/rendering/renderer_scene_render.h"
+// GodotNext: avboit (#295)
+#include "servers/rendering/avboit_policy.h"
 #include "servers/rendering/rendering_server_enums.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -750,6 +752,9 @@ private:
 	};
 
 	RenderList render_list[RENDER_LIST_MAX];
+
+	// GodotNext: avboit (#295)
+	AVBOITPolicy::ReasonLog avboit_log;
 
 	RSE::DecalFilter decals_filter = RSE::DECAL_FILTER_LINEAR_MIPMAPS;
 

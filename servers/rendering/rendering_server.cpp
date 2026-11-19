@@ -4189,6 +4189,9 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_converge", PROPERTY_HINT_ENUM, "5 (Less Latency but Lower Quality),10,15,20,25,30 (More Latency but Higher Quality)"), 5);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/sdfgi/frames_to_update_lights", PROPERTY_HINT_ENUM, "1 (Slower),2,4,8,16 (Faster)"), 2);
 
+	// GodotNext: avboit (#295, plan §21.2.1). Forward+ only; Sorted is the default, AVBOIT is EXPERIMENTAL.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/transparency/method", PROPERTY_HINT_ENUM, "Sorted,AVBOIT (Experimental)"), 0);
+
 	// GodotNext: nextgi_settings
 	GLOBAL_DEF_RST("rendering/global_illumination/nextgi/enabled", false);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/hardware_ray_tracing", PROPERTY_HINT_ENUM, "Auto,Off,Force"), 0);

@@ -2288,7 +2288,11 @@ TEST_CASE("[VSM] SceneShaderForwardClustered VSM shader group layout and pair ca
 
 	CHECK(int(Version::SHADER_VERSION_VSM_COUNT) == 2);
 	CHECK(int(Version::SHADER_VERSION_VSM_DEPTH_UBERSHADER) == int(Version::SHADER_VERSION_VSM_DEPTH) + 1);
-	CHECK(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE) == int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
+	// The VSM block follows the Stage B RR block, and the AVBOIT pre-pass block (#295) follows it, so
+	// every VSM variant has a vertex input mask and no other variant shares its index.
+	CHECK(int(Version::SHADER_VERSION_VSM_BASE) == int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT));
+	CHECK(int(Version::SHADER_VERSION_AVBOIT_BASE) == int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
+	CHECK(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE) >= int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
 
 	CHECK(VSM::raster_pair_capacity(0) == VSM::RASTER_PAIR_LIST_MIN);
 	CHECK(VSM::raster_pair_capacity(2048) == VSM::RASTER_PAIR_LIST_MIN);

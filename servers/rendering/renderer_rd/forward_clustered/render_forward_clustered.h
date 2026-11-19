@@ -33,6 +33,8 @@
 #include "core/templates/paged_allocator.h"
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/cluster_builder_rd.h"
+// GodotNext: avboit (#295)
+#include "servers/rendering/renderer_rd/effects/avboit.h"
 #include "servers/rendering/renderer_rd/effects/fsr2.h"
 #include "servers/rendering/renderer_rd/effects/motion_vectors_store.h"
 #include "servers/rendering/renderer_rd/effects/rr_guides.h"
@@ -332,6 +334,8 @@ private:
 		bool nextgeo_fallback_mark = false;
 		bool nextgeo_cracks_backface = false;
 		const uint32_t *nextgeo_fallback_codes = nullptr;
+		// GodotNext: avboit (#295). Which AVBOIT pass this is; each draws only its share of the alpha list.
+		RendererRD::AVBOIT::Pass avboit_pass = RendererRD::AVBOIT::PASS_NONE;
 
 		RenderListParameters(GeometryInstanceSurfaceDataCache **p_elements, RenderElementInfo *p_element_info, int p_element_count, bool p_reverse_cull, PassMode p_pass_mode, uint32_t p_color_pass_flags, bool p_no_gi, bool p_use_directional_soft_shadows, RID p_render_pass_uniform_set, bool p_force_wireframe = false, const Vector2 &p_uv_offset = Vector2(), float p_lod_distance_multiplier = 0.0, float p_screen_mesh_lod_threshold = 0.0, uint32_t p_view_count = 1, uint32_t p_element_offset = 0, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization = {}, bool p_use_material_feedback = false) {
 			elements = p_elements;
@@ -601,6 +605,16 @@ private:
 	RendererRD::NextGIFrontLayer front_layer;
 	void _render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
 	void _render_nextgi_translucency_mark(RenderDataRD *p_render_data);
+	// GodotNext: avboit (#295, plan §21.2.1). AVBOIT, the order-independent transparent pass.
+	RendererRD::AVBOIT avboit;
+	AVBOITPolicy::ReasonLog avboit_log;
+	int avboit_device_features = -1; // Queried on first use: 0 or 1.
+	// What _setup_render_pass_uniform_set binds at 49 and 50 (black when null): an AVBOIT pass binds
+	// the grids it reads, never the one it draws into.
+	RID avboit_bind_bounds;
+	RID avboit_bind_occlusion;
+	bool _avboit_view_active(const RenderDataRD *p_render_data, bool p_use_msaa, bool p_reflection_probe);
+	bool _render_avboit(RenderDataRD *p_render_data, RID p_alpha_framebuffer, uint32_t p_color_pass_flags, uint32_t p_uniform_buffer_index, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_reverse_cull, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
 	void _render_nextgeo_debug_scene_passes(RenderDataRD *p_render_data, bool p_using_nextgeo, bool p_nextgeo_drew, bool p_use_msaa, RSE::ViewportMSAA p_msaa, bool p_reverse_cull, const Size2i &p_screen_size, uint32_t p_depth_ubo_index, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);

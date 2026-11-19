@@ -47,6 +47,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 // GodotNext: vsm_non_nanite (#218)
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
+// GodotNext: avboit (#295)
+#include "servers/rendering/renderer_rd/effects/avboit.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -81,6 +83,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_alpha_antialiasing = false;
 	uses_blend_alpha = false;
 	uses_depth_prepass_alpha = false;
+	// GodotNext: avboit (#295)
+	uses_shadow_to_opacity = false;
 	uses_discard = false;
 	uses_roughness = false;
 	uses_normal = false;
@@ -159,6 +163,8 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.render_mode_flags["depth_prepass_alpha"] = &uses_depth_prepass_alpha;
 	// GodotNext: nextgi_alpha_policy (#61).
 	actions.render_mode_flags["nextgi_rt_opaque"] = &nextgi_rt_opaque;
+	// GodotNext: avboit (#295). The render mode's define is set in init(); AVBOIT also needs to know.
+	actions.render_mode_flags["shadow_to_opacity"] = &uses_shadow_to_opacity;
 
 	actions.usage_flag_pointers["SSS_STRENGTH"] = &uses_sss;
 	actions.usage_flag_pointers["SSS_TRANSMITTANCE_DEPTH"] = &uses_transmittance;
@@ -758,6 +764,11 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 		// GodotNext: vsm_non_nanite (#218).
 		case PIPELINE_VERSION_VSM_DEPTH:
 			return p_ubershader ? ShaderVersion::SHADER_VERSION_VSM_DEPTH_UBERSHADER : ShaderVersion::SHADER_VERSION_VSM_DEPTH;
+		// GodotNext: avboit (#295). The ubershader twins follow the two pre-pass variants.
+		case PIPELINE_VERSION_AVBOIT_BOUNDS:
+			return ShaderVersion::SHADER_VERSION_AVBOIT_BOUNDS + (p_ubershader ? ShaderVersion::SHADER_VERSION_AVBOIT_PASS_COUNT : 0);
+		case PIPELINE_VERSION_AVBOIT_OCCLUSION:
+			return ShaderVersion::SHADER_VERSION_AVBOIT_OCCLUSION + (p_ubershader ? ShaderVersion::SHADER_VERSION_AVBOIT_PASS_COUNT : 0);
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -810,7 +821,9 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML;
 
 	// GodotNext: vsm_non_nanite (#218). The VSM depth variant has no depth attachment.
-	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || p_pipeline_key.version == PIPELINE_VERSION_VSM_DEPTH || is_visibility_resolve) {
+	// GodotNext: avboit (#295). The AVBOIT pre-passes draw into depth-less low-resolution grids.
+	const bool is_avboit_prepass = p_pipeline_key.version == PIPELINE_VERSION_AVBOIT_BOUNDS || p_pipeline_key.version == PIPELINE_VERSION_AVBOIT_OCCLUSION;
+	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || p_pipeline_key.version == PIPELINE_VERSION_VSM_DEPTH || is_visibility_resolve || is_avboit_prepass) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
 	} else if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGEO_FALLBACK) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
@@ -904,6 +917,15 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			if (depth_draw == DEPTH_DRAW_OPAQUE) {
 				depth_stencil_state.enable_depth_write = false; //alpha does not draw depth
 			}
+
+			// GodotNext: avboit (#295). The AVBOIT composite adds into its accumulation target and only
+			// tests depth: a depth write would make a surface hide the ones drawn after it.
+			if (p_pipeline_key.avboit) {
+				blend_state.attachments.write[0] = RendererRD::AVBOIT::composite_blend_attachment();
+				depth_stencil_state.enable_depth_write = false;
+				multisample_state.enable_alpha_to_coverage = false;
+				multisample_state.enable_alpha_to_one = false;
+			}
 		} else {
 			blend_state = blend_state_color_opaque;
 
@@ -964,6 +986,13 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 				break;
 			case PIPELINE_VERSION_VISIBILITY_RESOLVE_COLOR:
 				blend_state = blend_state_color_opaque;
+				break;
+			// GodotNext: avboit (#295)
+			case PIPELINE_VERSION_AVBOIT_BOUNDS:
+				blend_state = RendererRD::AVBOIT::bounds_blend_state();
+				break;
+			case PIPELINE_VERSION_AVBOIT_OCCLUSION:
+				blend_state = RendererRD::AVBOIT::occlusion_blend_state();
 				break;
 			case PIPELINE_VERSION_DEPTH_PASS:
 			case PIPELINE_VERSION_DEPTH_PASS_DP:
@@ -1238,6 +1267,14 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		const String vsm_defines = RendererVirtualShadowMapStorage::get_glsl_defines();
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n" + vsm_defines, false));
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n" + vsm_defines, false));
+
+		// GodotNext: avboit (#295). The AVBOIT bounds and occlusion pre-passes, then their ubershader twins.
+		// They run the material's fragment code for its alpha, so they are depth variants with outputs.
+		for (uint32_t ubershader = 0; ubershader < 2; ubershader++) {
+			const String base_define = ubershader ? "\n#define UBERSHADER\n" : "";
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_AVBOIT, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_AVBOIT_PREPASS\n#define MODE_AVBOIT_BOUNDS\n", false)); // SHADER_VERSION_AVBOIT_BOUNDS
+			shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_AVBOIT, base_define + "\n#define MODE_RENDER_DEPTH\n#define MODE_AVBOIT_PREPASS\n#define MODE_AVBOIT_OCCLUSION\n", false)); // SHADER_VERSION_AVBOIT_OCCLUSION
+		}
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
@@ -1725,6 +1762,11 @@ void SceneShaderForwardClustered::enable_vsm_shader_group() {
 
 bool SceneShaderForwardClustered::is_vsm_shader_group_enabled() const {
 	return shader.is_group_enabled(SHADER_GROUP_VSM);
+}
+
+// GodotNext: avboit (#295)
+void SceneShaderForwardClustered::enable_avboit_shader_group() {
+	shader.enable_group(SHADER_GROUP_AVBOIT);
 }
 
 const char *SceneShaderForwardClustered::ShaderVersion::megalights_variant_defines(uint16_t p_relative) {

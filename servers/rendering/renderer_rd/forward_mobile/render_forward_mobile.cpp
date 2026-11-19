@@ -865,6 +865,17 @@ void RenderForwardMobile::_render_scene(RenderDataRD *p_render_data, const Color
 
 	ERR_FAIL_NULL(p_render_data);
 
+	// GodotNext: avboit (#295). The Mobile renderer keeps sorted translucency and says why once.
+	{
+		AVBOITPolicy::ViewInputs avboit_inputs;
+		avboit_inputs.method = AVBOITPolicy::method_from_setting(GLOBAL_GET_CACHED(int, AVBOITPolicy::SETTING_METHOD));
+		avboit_inputs.renderer = AVBOITPolicy::RENDERER_MOBILE;
+		const String avboit_line = avboit_log.note(avboit_inputs.method, AVBOITPolicy::evaluate(avboit_inputs));
+		if (!avboit_line.is_empty()) {
+			print_line(avboit_line);
+		}
+	}
+
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND(rb.is_null());
 

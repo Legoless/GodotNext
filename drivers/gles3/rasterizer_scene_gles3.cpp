@@ -2434,6 +2434,17 @@ void RasterizerSceneGLES3::render_scene(const Ref<RenderSceneBuffers> &p_render_
 	GLES3::Config *config = GLES3::Config::get_singleton();
 	RENDER_TIMESTAMP("Setup 3D Scene");
 
+	// GodotNext: avboit (#295). The Compatibility renderer keeps sorted translucency and says why once.
+	{
+		AVBOITPolicy::ViewInputs avboit_inputs;
+		avboit_inputs.method = AVBOITPolicy::method_from_setting(GLOBAL_GET_CACHED(int, AVBOITPolicy::SETTING_METHOD));
+		avboit_inputs.renderer = AVBOITPolicy::RENDERER_COMPATIBILITY;
+		const String avboit_line = avboit_log.note(avboit_inputs.method, AVBOITPolicy::evaluate(avboit_inputs));
+		if (!avboit_line.is_empty()) {
+			print_line(avboit_line);
+		}
+	}
+
 	bool apply_environment_effects_in_post = false;
 	bool is_reflection_probe = p_reflection_probe.is_valid();
 

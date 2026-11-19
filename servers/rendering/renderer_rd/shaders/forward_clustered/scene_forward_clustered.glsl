@@ -1209,6 +1209,17 @@ layout(location = 4) out float depth_output_buffer;
 layout(location = 0) out uint nextgeo_fallback_out;
 #endif
 
+// GodotNext: avboit (#295). The AVBOIT pre-passes' grids.
+#ifdef MODE_AVBOIT_BOUNDS
+layout(location = 0) out vec4 avboit_bounds_output;
+#endif
+#ifdef MODE_AVBOIT_OCCLUSION
+layout(location = 0) out vec4 avboit_occlusion_output_0;
+layout(location = 1) out vec4 avboit_occlusion_output_1;
+layout(location = 2) out vec4 avboit_occlusion_output_2;
+layout(location = 3) out vec4 avboit_occlusion_output_3;
+#endif
+
 #ifdef MODE_RENDER_NORMAL_ROUGHNESS
 layout(location = 0) out vec4 normal_roughness_output_buffer;
 
@@ -1931,7 +1942,8 @@ void fragment_shader(in SceneData scene_data) {
 #endif // ALPHA_ANTIALIASING_EDGE_USED
 
 #ifdef MODE_RENDER_DEPTH
-#if defined(USE_OPAQUE_PREPASS) || defined(ALPHA_ANTIALIASING_EDGE_USED)
+// GodotNext: avboit (#295). The AVBOIT pre-passes record translucency, which this threshold would drop.
+#if (defined(USE_OPAQUE_PREPASS) || defined(ALPHA_ANTIALIASING_EDGE_USED)) && !defined(MODE_AVBOIT_PREPASS)
 	if (alpha < scene_data.opaque_prepass_threshold) {
 		discard;
 	}
@@ -3624,6 +3636,30 @@ void fragment_shader(in SceneData scene_data) {
 
 #ifdef MODE_RENDER_DEPTH
 
+#ifdef MODE_AVBOIT_PREPASS
+	// GodotNext: avboit (#295). One sample per grid cell, at its center: the bounds pass keeps the
+	// cell's nearest and farthest depth by its min and max blend, the occlusion pass adds the surface's
+	// optical depth to its slice between them by an additive blend.
+	{
+		float avboit_alpha = clamp(alpha * scene_data.pass_alpha_multiplier, 0.0, 1.0);
+		if (!(avboit_alpha > 0.0)) {
+			discard;
+		}
+		float avboit_depth = avboit_view_depth(inv_projection_matrix, gl_FragCoord.xy, scene_data.viewport_size, gl_FragCoord.z);
+#ifdef MODE_AVBOIT_BOUNDS
+		avboit_bounds_output = vec4(avboit_depth);
+#else
+		vec4 avboit_cell_bounds = texelFetch(sampler2D(avboit_bounds, SAMPLER_NEAREST_CLAMP), ivec2(gl_FragCoord.xy), 0);
+		uint avboit_own = avboit_slice(avboit_depth, avboit_cell_bounds.r, avboit_cell_bounds.a);
+		float avboit_od = avboit_optical_depth(avboit_alpha);
+		avboit_occlusion_output_0 = avboit_slice_lanes(avboit_own, 0u) * avboit_od;
+		avboit_occlusion_output_1 = avboit_slice_lanes(avboit_own, 1u) * avboit_od;
+		avboit_occlusion_output_2 = avboit_slice_lanes(avboit_own, 2u) * avboit_od;
+		avboit_occlusion_output_3 = avboit_slice_lanes(avboit_own, 3u) * avboit_od;
+#endif
+	}
+#endif // MODE_AVBOIT_PREPASS
+
 #ifdef MODE_RENDER_SDF
 
 	{
@@ -3901,6 +3937,35 @@ void fragment_shader(in SceneData scene_data) {
 #if defined(PREMUL_ALPHA_USED) && !defined(MODE_RENDER_DEPTH)
 	frag_color.rgb *= premul_alpha;
 #endif //PREMUL_ALPHA_USED
+
+	// GodotNext: avboit (#295). The AVBOIT composite: the shaded surface weighted by the
+	// transmittance in front of it, for an accumulation that sums the same in any draw order
+	// (RendererRD::AVBOIT::CompositeMode: 1 mix, 2 premultiplied alpha, 3 add, 4 subtract, 5 and 6 as
+	// 1 and 2 for surfaces the pre-passes do not record).
+	// GodotNext: avboit (#295) with nextgeo_shading_bins (#158). NextGeo's compute shading bins shade
+	// opaque surfaces only, and a compute stage has no gl_FragCoord or screen derivatives.
+#ifndef NEXTGEO_RESOLVE_COMPUTE
+	if (sc_avboit_composite() != 0u) {
+		uint avboit_mode = sc_avboit_composite();
+		float avboit_alpha = clamp(frag_color.a, 0.0, 1.0);
+		bool avboit_recorded = avboit_mode <= 2u;
+		bool avboit_covers = avboit_recorded || avboit_mode >= 5u;
+		vec2 avboit_grid = vec2(textureSize(sampler2D(avboit_bounds, SAMPLER_NEAREST_CLAMP), 0));
+		ivec2 avboit_cell = clamp(ivec2(gl_FragCoord.xy * scene_data.screen_pixel_size * avboit_grid), ivec2(0), ivec2(avboit_grid) - 1);
+		// The surface's depth at the cell's center, where the pre-passes sampled it: its window depth,
+		// which is linear in screen space across a triangle, extrapolated there.
+		vec2 avboit_center = (vec2(avboit_cell) + 0.5) / avboit_grid / scene_data.screen_pixel_size;
+		vec2 avboit_offset = avboit_center - gl_FragCoord.xy;
+		float avboit_center_window_depth = gl_FragCoord.z + dFdx(gl_FragCoord.z) * avboit_offset.x + dFdy(gl_FragCoord.z) * avboit_offset.y;
+		float avboit_depth = avboit_view_depth(inv_projection_matrix, avboit_center, scene_data.viewport_size, avboit_center_window_depth);
+		float avboit_t = avboit_transmittance_front(avboit_cell, avboit_depth, avboit_recorded ? avboit_optical_depth(avboit_alpha) : 0.0);
+		vec3 avboit_rgb = (avboit_mode == 2u || avboit_mode == 6u) ? frag_color.rgb : frag_color.rgb * avboit_alpha;
+		if (avboit_mode == 4u) {
+			avboit_rgb = -avboit_rgb;
+		}
+		frag_color = vec4(avboit_rgb * avboit_t, avboit_covers ? avboit_alpha : 0.0);
+	}
+#endif // !NEXTGEO_RESOLVE_COMPUTE
 
 #endif //MODE_SEPARATE_SPECULAR
 

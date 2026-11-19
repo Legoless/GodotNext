@@ -74,6 +74,8 @@ public:
 		SHADER_GROUP_NEXTGEO_RR_GUIDES,
 		// GodotNext: vsm_non_nanite (#218). Off unless VSM raster runs.
 		SHADER_GROUP_VSM,
+		// GodotNext: avboit (#295). The AVBOIT pre-pass variants, off until a view draws with AVBOIT.
+		SHADER_GROUP_AVBOIT,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -130,6 +132,13 @@ public:
 		constexpr static uint16_t SHADER_VERSION_VSM_DEPTH = SHADER_VERSION_VSM_BASE + 0;
 		constexpr static uint16_t SHADER_VERSION_VSM_DEPTH_UBERSHADER = SHADER_VERSION_VSM_BASE + 1;
 		constexpr static uint16_t SHADER_VERSION_VSM_COUNT = 2;
+		// GodotNext: avboit (#295). The bounds and occlusion pre-pass variants, then their ubershader
+		// twins, appended last (after the VSM variants) so no earlier index moves.
+		constexpr static uint16_t SHADER_VERSION_AVBOIT_BASE = SHADER_VERSION_VSM_BASE + SHADER_VERSION_VSM_COUNT;
+		constexpr static uint16_t SHADER_VERSION_AVBOIT_BOUNDS = SHADER_VERSION_AVBOIT_BASE + 0;
+		constexpr static uint16_t SHADER_VERSION_AVBOIT_OCCLUSION = SHADER_VERSION_AVBOIT_BASE + 1;
+		constexpr static uint16_t SHADER_VERSION_AVBOIT_PASS_COUNT = 2;
+		constexpr static uint16_t SHADER_VERSION_AVBOIT_COUNT = SHADER_VERSION_AVBOIT_PASS_COUNT * 2;
 		// GodotNext: megalights_inputs (#136). init() pushes these groups, default off.
 		static constexpr bool MEGALIGHTS_VARIANTS_DEFAULT_ENABLED = false;
 		static constexpr ShaderGroup megalights_variant_group(uint16_t p_relative) {
@@ -205,6 +214,9 @@ public:
 		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML,
 		// GodotNext: vsm_non_nanite (#218).
 		PIPELINE_VERSION_VSM_DEPTH,
+		// GodotNext: avboit (#295)
+		PIPELINE_VERSION_AVBOIT_BOUNDS,
+		PIPELINE_VERSION_AVBOIT_OCCLUSION,
 		PIPELINE_VERSION_MAX
 	};
 
@@ -274,6 +286,8 @@ public:
 				uint32_t cluster_has_area_light : 1;
 				uint32_t use_lightmap_specular : 1;
 				uint32_t material_feedback : 1;
+				// GodotNext: avboit (#295). RendererRD::AVBOIT::CompositeMode, 0 outside the AVBOIT composite.
+				uint32_t avboit_composite : 3;
 			};
 		};
 
@@ -345,6 +359,9 @@ public:
 			uint32_t wireframe = false;
 			uint32_t ubershader = false;
 			uint32_t zero_velocity_write = false;
+			// GodotNext: avboit (#295). The AVBOIT composite's blend and depth state. A key field and not
+			// only a specialization bit, because the ubershader key clears the specialization.
+			uint32_t avboit = false;
 
 			uint32_t hash() const {
 				uint32_t h = hash_murmur3_one_64(vertex_format_id);
@@ -359,6 +376,10 @@ public:
 				h = hash_murmur3_one_32(wireframe, h);
 				h = hash_murmur3_one_32(ubershader, h);
 				h = hash_murmur3_one_32(zero_velocity_write, h);
+				// GodotNext: avboit (#295). Mixed in only when set, so every other key hashes as before.
+				if (avboit) {
+					h = hash_murmur3_one_32(avboit, h);
+				}
 				return hash_fmix32(h);
 			}
 		};
@@ -371,7 +392,8 @@ public:
 		// GodotNext: megalights_inputs (#136)
 		// GodotNext: rr_guides (#205). One entry per shader variant, the Stage B RR variants included.
 		// GodotNext: vsm_non_nanite (#218). Plus the VSM depth variants.
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT + ShaderVersion::SHADER_VERSION_VSM_COUNT;
+		// GodotNext: avboit (#295). And the AVBOIT pre-pass variants.
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT + ShaderVersion::SHADER_VERSION_VSM_COUNT + ShaderVersion::SHADER_VERSION_AVBOIT_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -396,6 +418,8 @@ public:
 		bool uses_alpha_clip = false;
 		bool uses_alpha_antialiasing = false;
 		bool uses_depth_prepass_alpha = false;
+		// GodotNext: avboit (#295). The shadow_to_opacity render mode: its alpha comes from lighting.
+		bool uses_shadow_to_opacity = false;
 		bool uses_discard = false;
 		bool uses_roughness = false;
 		bool uses_normal = false;
@@ -637,6 +661,8 @@ public:
 	// GodotNext: vsm_non_nanite (#218)
 	void enable_vsm_shader_group();
 	bool is_vsm_shader_group_enabled() const;
+	// GodotNext: avboit (#295)
+	void enable_avboit_shader_group();
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	bool is_nextgeo_shader_group_enabled() const;

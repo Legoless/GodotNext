@@ -264,11 +264,12 @@ TEST_CASE("[Renderer][MegaLights] Shader version layout (#136)") {
 	CHECK_EQ(int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML), int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + 9));
 	// GodotNext: rr_guides (#205). The RR guides flag doubles the color pass block (32 to 64)
 	// and four Stage B variants follow the MegaLights block.
-	// GodotNext: vsm_non_nanite (#218). The two VSM depth variants come last.
-	const int mask_count = int(Version::SHADER_VERSION_COLOR_PASS) * 2 + int(Shader::SHADER_COLOR_PASS_FLAG_COUNT) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT) + int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT) + int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT) + int(Version::SHADER_VERSION_VSM_COUNT);
+	// GodotNext: vsm_non_nanite (#218). The two VSM depth variants follow.
+	// GodotNext: avboit (#295). The four AVBOIT pre-pass variants come last.
+	const int mask_count = int(Version::SHADER_VERSION_COLOR_PASS) * 2 + int(Shader::SHADER_COLOR_PASS_FLAG_COUNT) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT) + int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT) + int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT) + int(Version::SHADER_VERSION_VSM_COUNT) + int(Version::SHADER_VERSION_AVBOIT_COUNT);
 	CHECK_EQ(int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT), 8);
 	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), mask_count);
-	CHECK_EQ(mask_count, 124);
+	CHECK_EQ(mask_count, 128);
 	CHECK_FALSE(Version::MEGALIGHTS_VARIANTS_DEFAULT_ENABLED);
 
 	const int ml_count = int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + Version::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT);

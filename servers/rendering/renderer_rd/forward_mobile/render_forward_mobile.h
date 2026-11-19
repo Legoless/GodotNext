@@ -34,6 +34,8 @@
 #include "servers/rendering/multi_uma_buffer.h"
 #include "servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
+// GodotNext: avboit (#295)
+#include "servers/rendering/avboit_policy.h"
 
 #define RB_SCOPE_MOBILE SNAME("mobile")
 
@@ -423,6 +425,9 @@ private:
 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_clear_colors = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
 
 	RenderList render_list[RENDER_LIST_MAX];
+
+	// GodotNext: avboit (#295)
+	AVBOITPolicy::ReasonLog avboit_log;
 
 protected:
 	/* setup */

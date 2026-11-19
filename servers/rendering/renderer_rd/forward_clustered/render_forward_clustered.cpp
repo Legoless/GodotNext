@@ -541,6 +541,8 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 	SceneShaderForwardClustered::ShaderData *shader = nullptr;
 	SceneShaderForwardClustered::ShaderData *prev_shader = nullptr;
 	SceneShaderForwardClustered::ShaderData::PipelineKey pipeline_key;
+	// GodotNext: avboit (#295)
+	pipeline_key.avboit = p_params->avboit_pass == RendererRD::AVBOIT::PASS_COMPOSITE;
 	uint32_t pipeline_hash = 0;
 	uint32_t prev_pipeline_hash = 0;
 
@@ -568,6 +570,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 		if (p_pass_mode == PASS_MODE_COLOR && surf->color_pass_inclusion_mask && (p_color_pass_flags & surf->color_pass_inclusion_mask) == 0) {
 			// Some surfaces can be repeated in multiple render lists. We exclude them from being rendered on the color pass based on the
 			// features supported by the pass compared to the exclusion mask.
+			continue;
+		}
+
+		// GodotNext: avboit (#295). Each AVBOIT pass draws only its share of the alpha list.
+		if (p_params->avboit_pass != RendererRD::AVBOIT::PASS_NONE && !RendererRD::AVBOIT::pass_draws(p_params->avboit_pass, surf->shader->blend_mode, surf->shader->uses_shadow_to_opacity)) {
 			continue;
 		}
 
@@ -664,7 +671,8 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 
 		// Determine the cull variant.
 		SceneShaderForwardClustered::ShaderData::CullVariant cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_MAX;
-		if ((p_pass_mode == PASS_MODE_DEPTH_MATERIAL && !p_params->nextgeo_fallback_mark) || p_pass_mode == PASS_MODE_SDF) {
+		// GodotNext: avboit (#295). The AVBOIT pre-passes cull as the composite does.
+		if ((p_pass_mode == PASS_MODE_DEPTH_MATERIAL && !p_params->nextgeo_fallback_mark && p_params->avboit_pass == RendererRD::AVBOIT::PASS_NONE) || p_pass_mode == PASS_MODE_SDF) {
 			cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
 		} else {
 			if constexpr (p_pass_mode == PASS_MODE_SHADOW || p_pass_mode == PASS_MODE_SHADOW_DP) {
@@ -735,6 +743,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					pipeline_key.color_pass_flags |= SceneShaderForwardClustered::PIPELINE_COLOR_PASS_FLAG_RR_GUIDES;
 				}
 
+				// GodotNext: avboit (#295)
+				if (p_params->avboit_pass == RendererRD::AVBOIT::PASS_COMPOSITE) {
+					pipeline_specialization.avboit_composite = RendererRD::AVBOIT::composite_mode(shader->blend_mode, shader->uses_shadow_to_opacity);
+				}
+
 				pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_COLOR_PASS;
 			} break;
 			case PASS_MODE_SHADOW:
@@ -782,6 +795,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
 					pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_NEXTGEO_FALLBACK;
 				} else if (p_params->nextgi_translucency_mark) {
 					pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK;
+				} else if (p_params->avboit_pass == RendererRD::AVBOIT::PASS_BOUNDS) { // GodotNext: avboit (#295)
+					pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_AVBOIT_BOUNDS;
+				} else if (p_params->avboit_pass == RendererRD::AVBOIT::PASS_OCCLUSION) {
+					pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_AVBOIT_OCCLUSION;
 				} else {
 					pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_DEPTH_PASS_WITH_MATERIAL;
 				}
@@ -4591,6 +4608,129 @@ void RenderForwardClustered::_render_nextgi_translucency_mark(RenderDataRD *p_re
 	RD::get_singleton()->draw_command_end_label();
 }
 
+// GodotNext: avboit (#295, plan §21.2.1)
+bool RenderForwardClustered::_avboit_view_active(const RenderDataRD *p_render_data, bool p_use_msaa, bool p_reflection_probe) {
+	const AVBOITPolicy::Method method = AVBOITPolicy::method_from_setting(GLOBAL_GET_CACHED(int, AVBOITPolicy::SETTING_METHOD));
+	if (method == AVBOITPolicy::METHOD_SORTED) {
+		const String line = avboit_log.note(method, AVBOITPolicy::REASON_SETTING);
+		if (!line.is_empty()) {
+			print_line(line);
+		}
+		return false;
+	}
+	// Reflection probes, the debug draw modes and views without translucency keep the sorted pass
+	// without a word: they are not a view the setting is for, or there is nothing to blend.
+	if (p_reflection_probe || p_render_data->render_buffers.is_null() || render_list[RENDER_LIST_ALPHA].elements.is_empty() || get_debug_draw_mode() != RSE::VIEWPORT_DEBUG_DRAW_DISABLED) {
+		return false;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (!rb->has_custom_data(RB_SCOPE_FORWARD_CLUSTERED)) {
+		return false;
+	}
+	if (avboit_device_features < 0) {
+		avboit_device_features = AVBOITPolicy::device_features_met(RendererRD::AVBOIT::query_device_features(RD::get_singleton())) ? 1 : 0;
+	}
+	AVBOITPolicy::ViewInputs inputs;
+	inputs.method = method;
+	inputs.renderer = AVBOITPolicy::RENDERER_FORWARD_PLUS;
+	// The resolve writes the view's color buffer as an RGBA16F storage image, which Forward+ always makes.
+	inputs.device_features = avboit_device_features == 1 && rb->get_can_be_storage() && rb->get_base_data_format() == RD::DATA_FORMAT_R16G16B16A16_SFLOAT;
+	inputs.msaa = p_use_msaa;
+	inputs.view_count = rb->get_view_count();
+	const AVBOITPolicy::Reason reason = AVBOITPolicy::evaluate(inputs);
+	const String line = avboit_log.note(method, reason);
+	if (!line.is_empty()) {
+		print_line(line);
+	}
+	return reason == AVBOITPolicy::REASON_NONE;
+}
+
+bool RenderForwardClustered::_render_avboit(RenderDataRD *p_render_data, RID p_alpha_framebuffer, uint32_t p_color_pass_flags, uint32_t p_uniform_buffer_index, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_reverse_cull, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	ERR_FAIL_COND_V(rb.is_null(), false);
+	RendererRD::AVBOIT::Targets targets;
+	if (!RendererRD::AVBOIT::ensure_targets(rb.ptr(), rb->get_depth_texture(), targets)) {
+		return false;
+	}
+	scene_shader.enable_avboit_shader_group();
+
+	RenderList &alpha = render_list[RENDER_LIST_ALPHA];
+	const float lod_distance_multiplier = p_render_data->scene_data->lod_distance_multiplier;
+	const float screen_mesh_lod_threshold = p_render_data->scene_data->screen_mesh_lod_threshold;
+
+	// 1 and 2: the bounds and occlusion pre-passes, at the grid's resolution. Each binds only the grid
+	// it reads, never the one it draws into.
+	RENDER_TIMESTAMP("AVBOIT Occlusion Pre-Pass");
+	RD::get_singleton()->draw_command_begin_label("AVBOIT Occlusion Pre-Pass");
+	const uint32_t grid_uniform_buffer_index = _setup_environment(p_render_data, false, targets.grid, targets.grid, Color(), false);
+	avboit_bind_bounds = RID();
+	avboit_bind_occlusion = RID();
+	RID uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, p_radiance_texture, p_samplers, grid_uniform_buffer_index, true);
+	{
+		RenderListParameters params(alpha.elements.ptr(), alpha.element_info.ptr(), alpha.elements.size(), p_reverse_cull, PASS_MODE_DEPTH_MATERIAL, 0, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), lod_distance_multiplier, screen_mesh_lod_threshold, 1, 0, p_base_specialization, false);
+		params.avboit_pass = RendererRD::AVBOIT::PASS_BOUNDS;
+		Vector<Color> clear;
+		clear.push_back(RendererRD::AVBOIT::bounds_clear_color());
+		_render_list_with_draw_list(&params, targets.bounds_framebuffer, RD::DRAW_CLEAR_ALL, clear);
+	}
+	avboit_bind_bounds = targets.bounds;
+	uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, p_radiance_texture, p_samplers, grid_uniform_buffer_index, true);
+	{
+		RenderListParameters params(alpha.elements.ptr(), alpha.element_info.ptr(), alpha.elements.size(), p_reverse_cull, PASS_MODE_DEPTH_MATERIAL, 0, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), lod_distance_multiplier, screen_mesh_lod_threshold, 1, 0, p_base_specialization, false);
+		params.avboit_pass = RendererRD::AVBOIT::PASS_OCCLUSION;
+		Vector<Color> clear;
+		for (uint32_t i = 0; i < RendererRD::AVBOIT::LAYERS; i++) {
+			clear.push_back(Color(0, 0, 0, 0));
+		}
+		_render_list_with_draw_list(&params, targets.occlusion_framebuffer, RD::DRAW_CLEAR_ALL, clear);
+	}
+	// The grid-sized scene data must not be what the frame is left with: POST_TRANSPARENT compositor
+	// effects read the last one set up, through RenderSceneData::get_uniform_buffer(). Set up the
+	// transparent pass's again, with its arguments (a view with AVBOIT is never a reflection probe).
+	_setup_environment(p_render_data, false, p_screen_size, p_screen_size, p_default_bg_color, false);
+	RD::get_singleton()->draw_command_end_label();
+
+	// 3: the composite into the accumulation target, depth-tested against the view's depth.
+	RENDER_TIMESTAMP("AVBOIT Composite");
+	RD::get_singleton()->draw_command_begin_label("AVBOIT Composite");
+	avboit_bind_occlusion = targets.occlusion;
+	uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_ALPHA, p_render_data, false, p_radiance_texture, p_samplers, p_uniform_buffer_index, true);
+	avboit_bind_bounds = RID();
+	avboit_bind_occlusion = RID();
+	{
+		RenderListParameters params(alpha.elements.ptr(), alpha.element_info.ptr(), alpha.elements.size(), p_reverse_cull, PASS_MODE_COLOR, p_color_pass_flags, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), lod_distance_multiplier, screen_mesh_lod_threshold, 1, 0, p_base_specialization, true);
+		params.avboit_pass = RendererRD::AVBOIT::PASS_COMPOSITE;
+		Vector<Color> clear;
+		clear.push_back(Color(0, 0, 0, 0));
+		_render_list_with_draw_list(&params, targets.composite_framebuffer, RD::DRAW_CLEAR_COLOR_0, clear, 0.0f, 0u, p_render_data->render_region);
+	}
+
+	// 4: the resolve, over the region the composite drew.
+	Rect2i rect(Point2i(), rb->get_internal_size());
+	if (p_render_data->render_region.has_area()) {
+		rect = rect.intersection(p_render_data->render_region);
+	}
+	if (rect.has_area()) {
+		avboit.resolve(targets.accum, rb->get_internal_texture(), rect);
+	}
+	RD::get_singleton()->draw_command_end_label();
+
+	// 5: blend modes that cannot be summed in any order (mul, blending disabled), in the sorted order.
+	bool has_remainder = false;
+	for (uint32_t i = 0; i < alpha.elements.size(); i++) {
+		if (RendererRD::AVBOIT::surface_class(alpha.elements[i]->shader->blend_mode, alpha.elements[i]->shader->uses_shadow_to_opacity) == RendererRD::AVBOIT::SURFACE_REMAINDER) {
+			has_remainder = true;
+			break;
+		}
+	}
+	if (has_remainder) {
+		RenderListParameters params(alpha.elements.ptr(), alpha.element_info.ptr(), alpha.elements.size(), p_reverse_cull, PASS_MODE_COLOR, p_color_pass_flags, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), lod_distance_multiplier, screen_mesh_lod_threshold, 1, 0, p_base_specialization, true);
+		params.avboit_pass = RendererRD::AVBOIT::PASS_REMAINDER;
+		_render_list_with_draw_list(&params, p_alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+	}
+	return true;
+}
+
 void RenderForwardClustered::_render_nextgi_front_layer(RenderDataRD *p_render_data, bool p_reverse_cull, const Size2i &p_screen_size, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {
 	if (!bool(GLOBAL_GET("rendering/global_illumination/nextgi/translucency_reflections_front_layer_allow")) || p_render_data->environment.is_null() || !environment_get_nextgi_translucency_front_layer_reflections(p_render_data->environment) || next_gi.get_tier_result().tier != RendererRD::NextGI::TIER_HWRT) {
 		return;
@@ -5978,9 +6118,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_RR_GUIDES);
 
 		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
-		RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
-		render_list_params.use_nextgeo_proxy = is_reflection_probe;
-		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+		// GodotNext: avboit (#295, plan §21.2.1). With AVBOIT the alpha list is drawn in any order.
+		if (!(_avboit_view_active(p_render_data, use_msaa, is_reflection_probe) && _render_avboit(p_render_data, alpha_framebuffer, transparent_color_pass_flags, transparent_pass_uniform_buffer_index, screen_size, p_default_bg_color, reverse_cull, radiance_texture, samplers, base_specialization))) {
+			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
+			render_list_params.use_nextgeo_proxy = is_reflection_probe;
+			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+		}
 	}
 	p_render_data->scene_data->nextgi_front_layer = false;
 
@@ -7881,6 +8024,19 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 			uniforms.push_back(u);
 		}
 	}
+	{
+		// GodotNext: avboit (#295). The AVBOIT grids the current AVBOIT pass reads; black otherwise.
+		RD::Uniform bounds;
+		bounds.binding = 49;
+		bounds.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		bounds.append_id(avboit_bind_bounds.is_valid() ? avboit_bind_bounds : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		uniforms.push_back(bounds);
+		RD::Uniform occlusion;
+		occlusion.binding = 50;
+		occlusion.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		occlusion.append_id(avboit_bind_occlusion.is_valid() ? avboit_bind_occlusion : texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK));
+		uniforms.push_back(occlusion);
+	}
 
 	// GodotNext: nextgeo_shading_bins (#158)
 	if (r_uniforms != nullptr) {
@@ -8129,6 +8285,17 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 			layer_uniform.append_id(texture_storage->texture_rd_get_default(i == 2 ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
 			uniforms.push_back(layer_uniform);
 		}
+		// GodotNext: avboit (#295). The SDF pass reads no AVBOIT grid.
+		RD::Uniform avboit_bounds;
+		avboit_bounds.binding = 49;
+		avboit_bounds.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		avboit_bounds.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		uniforms.push_back(avboit_bounds);
+		RD::Uniform avboit_occlusion;
+		avboit_occlusion.binding = 50;
+		avboit_occlusion.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		avboit_occlusion.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK));
+		uniforms.push_back(avboit_occlusion);
 	}
 
 	if (scene_shader.default_shader_sdfgi_rd.is_null()) {
@@ -8337,6 +8504,17 @@ RID RenderForwardClustered::_setup_vsm_render_pass_uniform_set(const RendererRD:
 			layer_uniform.append_id(texture_storage->texture_rd_get_default(i == 2 ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
 			uniforms.push_back(layer_uniform);
 		}
+		// GodotNext: avboit (#295). The VSM pass reads no AVBOIT grid.
+		RD::Uniform avboit_bounds;
+		avboit_bounds.binding = 49;
+		avboit_bounds.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		avboit_bounds.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK));
+		uniforms.push_back(avboit_bounds);
+		RD::Uniform avboit_occlusion;
+		avboit_occlusion.binding = 50;
+		avboit_occlusion.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		avboit_occlusion.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK));
+		uniforms.push_back(avboit_occlusion);
 	}
 
 	if (scene_shader.default_shader_vsm_rd.is_null()) {

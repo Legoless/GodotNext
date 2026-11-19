@@ -174,6 +174,11 @@ bool sc_material_feedback() {
 	return ((sc_packed_1() >> 7) & 1U) != 0;
 }
 
+// GodotNext: avboit (#295). RendererRD::AVBOIT::CompositeMode: 0 outside the AVBOIT composite.
+uint sc_avboit_composite() {
+	return (sc_packed_1() >> 8) & 7U;
+}
+
 float sc_luminance_multiplier() {
 	// Not used in clustered renderer but we share some code with the mobile renderer that requires this.
 	return 1.0;
@@ -627,6 +632,83 @@ layout(set = 1, binding = 45) uniform texture3D nextgi_translucency_b;
 layout(set = 1, binding = 46) uniform sampler2D nextgi_front_layer_opaque_depth;
 layout(set = 1, binding = 47) uniform sampler2D nextgi_front_layer_depth;
 layout(set = 1, binding = 48) uniform sampler2D nextgi_front_layer_reflection;
+
+// GodotNext: avboit (#295, plan §21.2.1). The AVBOIT occlusion grid: one cell per
+// RendererRD::AVBOIT::TILE_SIZE pixels square. avboit_bounds holds the nearest (.r) and farthest (.a)
+// view depth of the occluding translucent surfaces in the cell, avboit_occlusion the optical depth of
+// AVBOIT_SLICES slices, spaced logarithmically between them, four per layer. Outside the AVBOIT passes
+// both are black, which reads as an empty cell. RendererRD::AVBOIT has the same math on the CPU.
+layout(set = 1, binding = 49) uniform texture2D avboit_bounds;
+layout(set = 1, binding = 50) uniform texture2DArray avboit_occlusion;
+
+#define AVBOIT_SLICES 16u
+#define AVBOIT_MAX_ALPHA 0.999
+#define AVBOIT_MIN_DEPTH 1e-4
+// The largest half float: the bounds keep no farther depth.
+#define AVBOIT_MAX_DEPTH 65504.0
+// Past the cell's farthest depth by this factor (more than its half-float rounding), a surface is
+// behind every occluder the cell recorded.
+#define AVBOIT_FAR_MARGIN 1.002
+// The composite's depth at a cell's center and the pre-passes' differ by rounding, so a surface on a
+// slice boundary can land in the next slice in one of them: its own slice is every slice within this
+// relative distance of its depth.
+#define AVBOIT_SLICE_TOLERANCE 2.5e-4
+
+float avboit_optical_depth(float p_alpha) {
+	return -log(1.0 - clamp(p_alpha, 0.0, AVBOIT_MAX_ALPHA));
+}
+
+// The view depth of window depth p_window_depth at window position p_frag_coord, in a view
+// p_viewport_size pixels in size, kept to the bounds' half-float range. Both pre-passes and the
+// composite classify by it, so a surface's depth at a cell's center is the same number in each.
+float avboit_view_depth(mat4 p_inv_projection, vec2 p_frag_coord, vec2 p_viewport_size, float p_window_depth) {
+	vec2 ndc = p_frag_coord / p_viewport_size * 2.0 - 1.0;
+	vec4 view_position = p_inv_projection * vec4(ndc, clamp(p_window_depth, 0.0, 1.0), 1.0);
+	return clamp(-view_position.z / view_position.w, AVBOIT_MIN_DEPTH, AVBOIT_MAX_DEPTH);
+}
+
+uint avboit_slice(float p_depth, float p_near, float p_far) {
+	if (!(p_far > p_near * 1.0001)) {
+		return 0u;
+	}
+	float t = log(max(p_depth, p_near) / p_near) / log(p_far / p_near);
+	return uint(clamp(t * float(AVBOIT_SLICES), 0.0, float(AVBOIT_SLICES - 1u)));
+}
+
+// 1 in the lane of p_slice when it lies in layer p_layer.
+vec4 avboit_slice_lanes(uint p_slice, uint p_layer) {
+	return vec4(equal(uvec4(p_slice), uvec4(p_layer * 4u) + uvec4(0u, 1u, 2u, 3u)));
+}
+
+// The transmittance in front of a surface whose depth at the center of grid cell p_cell is p_depth
+// (where the pre-passes sampled it): the optical depth of the slices in front of its own, and of the
+// others in its own slice (the slices within AVBOIT_SLICE_TOLERANCE of its depth). p_self_optical_depth
+// is its own share when the pre-passes record it (0 otherwise); it comes off its own slice only, so a
+// surface the cell's center missed is not let through the slices in front of it.
+// A surface nearer than every occluder in the cell (an additive surface in front of glass, or a
+// layer's edge where the cell's center saw only the layers behind it) has nothing in front of it; one
+// behind every occluder the cell recorded has them all in front of it.
+float avboit_transmittance_front(ivec2 p_cell, float p_depth, float p_self_optical_depth) {
+	vec4 bounds = texelFetch(sampler2D(avboit_bounds, SAMPLER_NEAREST_CLAMP), p_cell, 0);
+	if (!(bounds.a > 0.0) || p_depth < bounds.r) {
+		return 1.0;
+	}
+	uint own_first = avboit_slice(p_depth * (1.0 - AVBOIT_SLICE_TOLERANCE), bounds.r, bounds.a);
+	uint own_last = avboit_slice(p_depth * (1.0 + AVBOIT_SLICE_TOLERANCE), bounds.r, bounds.a);
+	float in_front = 0.0;
+	float same = 0.0;
+	for (uint layer = 0u; layer < AVBOIT_SLICES / 4u; layer++) {
+		vec4 slices = texelFetch(sampler2DArray(avboit_occlusion, SAMPLER_NEAREST_CLAMP), ivec3(p_cell, int(layer)), 0);
+		uvec4 index = uvec4(layer * 4u) + uvec4(0u, 1u, 2u, 3u);
+		vec4 front = vec4(lessThan(index, uvec4(own_first)));
+		in_front += dot(slices, front);
+		same += dot(slices, vec4(lessThanEqual(index, uvec4(own_last))) - front);
+	}
+	if (p_depth > bounds.a * AVBOIT_FAR_MARGIN) {
+		return exp(-(in_front + same));
+	}
+	return exp(-(in_front + max(same - p_self_optical_depth, 0.0)));
+}
 
 vec3 nextgi_translucency_volume(vec2 p_screen_uv, float p_linear_depth, vec3 p_world_direction) {
 	const float near = nextgi_wrc_fwd.volume.z;
