@@ -549,6 +549,22 @@ private:
 	// mode, the default, never creates it.
 	NextGIRTNative *native = nullptr;
 
+public:
+	// GodotNext: path_tracer (#167). What a surface record of the last TLAS phase draws: its geometry instance, mesh
+	// and surface. Records without one (far proxies) keep the defaults.
+	struct SurfaceSource {
+		RenderGeometryInstance *instance = nullptr;
+		RID mesh;
+		uint32_t surface = UINT32_MAX;
+	};
+
+private:
+	LocalVector<SurfaceSource> surface_sources;
+	uint64_t records_hash = 0;
+	bool surface_sources_wanted = false;
+	bool surface_sources_valid = false;
+	void _finish_surface_sources(const LocalVector<NextGIInstanceRecord> &p_records, const LocalVector<NextGISurfaceRecord> &p_surfaces);
+
 	void _build_dirty_mesh_parts(RID p_mesh);
 	void _build_proxy_part(RID p_mesh, uint32_t p_part_index);
 	void _ensure_record_buffers(uint32_t p_instance_count, uint32_t p_surface_count);
@@ -595,6 +611,14 @@ public:
 	const NextGIRTNative *get_native() const { return native; }
 	// True only after this frame's TLAS build, and only while line 1b has not rebuilt a BLAS the TLAS references.
 	bool is_tlas_traceable() const { return tlas_traceable; }
+	// GodotNext: path_tracer (#167). One SurfaceSource per surface record of the last TLAS phase, in record order,
+	// and a hash of the records' transforms and geometry (not their relight pages or card sets, which change while
+	// the surface cache fills). The TLAS phase collects them only while a path tracer wants them (set before the
+	// phase); has_surface_sources() is true when this frame's phase collected them.
+	void set_surface_sources_wanted(bool p_wanted) { surface_sources_wanted = p_wanted; }
+	bool has_surface_sources() const { return surface_sources_valid; }
+	const LocalVector<SurfaceSource> &get_surface_sources() const { return surface_sources; }
+	uint64_t get_records_hash() const { return records_hash; }
 	void set_as_budget_bytes(uint64_t p_bytes) { as_budget_bytes = p_bytes; }
 
 	NextGIRTScene() {}

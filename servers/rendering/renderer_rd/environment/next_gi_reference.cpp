@@ -31,6 +31,7 @@
 #include "next_gi_reference.h"
 
 #include "core/config/project_settings.h"
+#include "servers/rendering/renderer_rd/effects/path_tracer.h" // GodotNext: path_tracer (#167)
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -49,17 +50,9 @@ struct NextGIReference::ShaderState {
 	RID composite;
 };
 
-struct NextGIRefGPUMaterial {
-	float albedo_metal[4] = { 0.8f, 0.8f, 0.8f, 0.0f };
-	float emission_roughness[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-	float specular_mode[4] = { 0.5f, 1.0f, 0.0f, 0.0f };
-};
-
 struct NextGIRefGPUParams {
-	float cam_origin_fov[4] = {};
-	float cam_forward_aspect[4] = {};
-	float cam_up[4] = {};
-	float cam_right[4] = {};
+	// GodotNext: path_tracer (#167). The camera block is RendererRD::PathTracer's, which both estimators read.
+	PathTracerGPUCamera camera;
 	uint32_t width = 0;
 	uint32_t height = 0;
 	uint32_t sample_index = 0;
@@ -84,39 +77,6 @@ uint32_t nextgi_reference_sample_count() {
 	return _nextgi_reference_samples;
 }
 } //namespace RendererRD
-
-static float _nextgi_reference_float_param(RID p_material, const char *p_name, float p_default) {
-	MaterialStorage *storage = MaterialStorage::get_singleton();
-	if (storage == nullptr || !storage->owns_material(p_material)) {
-		return p_default;
-	}
-	Variant value = storage->material_get_param(p_material, p_name);
-	if (value.get_type() == Variant::FLOAT || value.get_type() == Variant::INT) {
-		return float(value);
-	}
-	return p_default;
-}
-
-static Color _nextgi_reference_color_param(RID p_material, const char *p_name, const Color &p_default) {
-	MaterialStorage *storage = MaterialStorage::get_singleton();
-	if (storage == nullptr || !storage->owns_material(p_material)) {
-		return p_default;
-	}
-	Variant value = storage->material_get_param(p_material, p_name);
-	if (value.get_type() == Variant::COLOR) {
-		return value;
-	}
-	return p_default;
-}
-
-static bool _nextgi_reference_has_texture(RID p_material, const char *p_name) {
-	MaterialStorage *storage = MaterialStorage::get_singleton();
-	if (storage == nullptr || !storage->owns_material(p_material)) {
-		return false;
-	}
-	Variant value = storage->material_get_param(p_material, p_name);
-	return value.get_type() == Variant::RID && RID(value).is_valid();
-}
 
 void NextGIReference::_free_uniform_set() {
 	RenderingDevice *rd = RenderingDevice::get_singleton();
@@ -246,110 +206,15 @@ bool NextGIReference::_build_tables(const RenderDataRD *p_render_data, uint32_t 
 		r_light_count = cached_light_count;
 		return true;
 	}
-	r_surface_count = 0;
-	r_light_count = 0;
-	scene_invalid = false;
-	LocalVector<NextGIRefGPUMaterial> materials;
-	// GodotNext: nextgi_reference_capture (#263). Instance transforms feed the reset key.
-	uint64_t hash = 1469598103934665603ull;
-	const RendererSceneRender::RenderSDFGIUpdateData *update = p_render_data->sdfgi_update_data;
-	MeshStorage *mesh_storage = MeshStorage::get_singleton();
-	if (update != nullptr && update->nextgi_rt_instances != nullptr && mesh_storage != nullptr) {
-		for (const RendererSceneRender::NextGIRTInstance &fed : *update->nextgi_rt_instances) {
-			RenderGeometryInstanceBase *geometry = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance);
-			if (geometry == nullptr || geometry->data == nullptr) {
-				continue;
-			}
-			hash = nextgi_reference_hash_transform(hash, fed.has_rt_transform ? fed.rt_transform : geometry->transform);
-			const RID mesh = geometry->data->base;
-			if (!mesh_storage->owns_mesh(mesh)) {
-				continue;
-			}
-			const bool dirty = mesh_storage->mesh_nextgi_rt_is_blas_dirty(mesh);
-			const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(mesh);
-			if (parts == nullptr) {
-				continue;
-			}
-			for (const MeshStorage::NextGIRTPart &part : *parts) {
-				if (!nextgi_rt_part_enters_tlas(dirty, part.blas.is_valid())) {
-					continue;
-				}
-				for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
-					RID material = geometry->data->material_override;
-					if (!material.is_valid() && part_geometry.surface < uint32_t(geometry->data->surface_materials.size())) {
-						material = geometry->data->surface_materials[part_geometry.surface];
-					}
-					if (!material.is_valid()) {
-						material = mesh_storage->mesh_surface_get_material(mesh, int(part_geometry.surface));
-					}
-					NextGIRefGPUMaterial gpu;
-					if (material.is_valid() && (_nextgi_reference_has_texture(material, "texture_albedo") || _nextgi_reference_has_texture(material, "texture_emission"))) {
-						if (!scene_invalid) {
-							WARN_PRINT("NextGI reference path tracer ignores textured materials. This scene's reference is invalid.");
-						}
-						scene_invalid = true;
-					}
-					if (material.is_valid()) {
-						const Color albedo = _nextgi_reference_color_param(material, "albedo", Color(0.8, 0.8, 0.8));
-						const Color emission = _nextgi_reference_color_param(material, "emission", Color(0, 0, 0));
-						const float energy = _nextgi_reference_float_param(material, "emission_energy", 1.0f);
-						gpu.albedo_metal[0] = albedo.r;
-						gpu.albedo_metal[1] = albedo.g;
-						gpu.albedo_metal[2] = albedo.b;
-						gpu.albedo_metal[3] = _nextgi_reference_float_param(material, "metallic", 0.0f);
-						gpu.emission_roughness[0] = emission.r * energy;
-						gpu.emission_roughness[1] = emission.g * energy;
-						gpu.emission_roughness[2] = emission.b * energy;
-						gpu.emission_roughness[3] = _nextgi_reference_float_param(material, "roughness", 1.0f);
-						gpu.specular_mode[0] = _nextgi_reference_float_param(material, "specular", 0.5f);
-						// Specular 0 and roughness 1 is the Lambertian furnace. Burley is the StandardMaterial3D default otherwise.
-						gpu.specular_mode[1] = (gpu.specular_mode[0] <= 0.0f && gpu.emission_roughness[3] >= 1.0f) ? 0.0f : 1.0f;
-					}
-					materials.push_back(gpu);
-				}
-			}
-		}
+	// GodotNext: path_tracer (#167). The D16 tables are RendererRD::PathTracer's, built as #27 and #263 built them.
+	PathTracerTables tables;
+	PathTracer::build_reference_tables(p_render_data, tables);
+	scene_invalid = tables.textured_materials > 0;
+	if (scene_invalid) {
+		WARN_PRINT("NextGI reference path tracer ignores textured materials. This scene's reference is invalid.");
 	}
-	r_surface_count = materials.size();
-	if (r_surface_count == 0) {
-		NextGIRefGPUMaterial fallback;
-		materials.push_back(fallback);
-		r_surface_count = 1;
-	}
-
-	LocalVector<float> lights;
-	lights.resize(8 * 12);
-	for (uint32_t i = 0; i < lights.size(); i++) {
-		lights[i] = 0.0f;
-	}
-	LightStorage *light_storage = LightStorage::get_singleton();
-	if (light_storage != nullptr && p_render_data->lights != nullptr) {
-		for (uint32_t i = 0; i < p_render_data->lights->size() && r_light_count < 8; i++) {
-			const RID instance = (*p_render_data->lights)[i];
-			const RID light = light_storage->light_instance_get_base_light(instance);
-			if (!light.is_valid() || light_storage->light_get_type(light) == RSE::LIGHT_DIRECTIONAL) {
-				continue;
-			}
-			const Transform3D xform = light_storage->light_instance_get_base_transform(instance);
-			const Color color = light_storage->light_get_color(light);
-			const float energy = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ENERGY);
-			const float range = MAX(light_storage->light_get_param(light, RSE::LIGHT_PARAM_RANGE), 0.001f);
-			const float decay = light_storage->light_get_param(light, RSE::LIGHT_PARAM_ATTENUATION);
-			const float specular = light_storage->light_get_param(light, RSE::LIGHT_PARAM_SPECULAR);
-			const uint32_t base = r_light_count * 12;
-			lights[base + 0] = xform.origin.x;
-			lights[base + 1] = xform.origin.y;
-			lights[base + 2] = xform.origin.z;
-			lights[base + 3] = range;
-			lights[base + 4] = color.r;
-			lights[base + 5] = color.g;
-			lights[base + 6] = color.b;
-			lights[base + 7] = energy;
-			lights[base + 8] = decay;
-			lights[base + 9] = specular;
-			r_light_count++;
-		}
-	}
+	r_surface_count = tables.surface_count;
+	r_light_count = tables.light_count;
 
 	RenderingDevice *rd = RenderingDevice::get_singleton();
 	ERR_FAIL_NULL_V(rd, false);
@@ -360,15 +225,14 @@ bool NextGIReference::_build_tables(const RenderDataRD *p_render_data, uint32_t 
 		rd->free_rid(light_buffer);
 	}
 	Vector<uint8_t> material_bytes;
-	material_bytes.resize(materials.size() * sizeof(NextGIRefGPUMaterial));
-	memcpy(material_bytes.ptrw(), materials.ptr(), material_bytes.size());
+	material_bytes.resize(tables.materials.size() * sizeof(PathTracerGPUMaterial));
+	memcpy(material_bytes.ptrw(), tables.materials.ptr(), material_bytes.size());
 	material_buffer = rd->storage_buffer_create(material_bytes.size(), material_bytes);
 	Vector<uint8_t> light_bytes;
-	light_bytes.resize(lights.size() * sizeof(float));
-	memcpy(light_bytes.ptrw(), lights.ptr(), light_bytes.size());
+	light_bytes.resize(tables.lights.size() * sizeof(float));
+	memcpy(light_bytes.ptrw(), tables.lights.ptr(), light_bytes.size());
 	light_buffer = rd->storage_buffer_create(light_bytes.size(), light_bytes);
-	hash = nextgi_reference_hash_bytes(hash, material_bytes.ptr(), material_bytes.size());
-	tables_hash = nextgi_reference_hash_bytes(hash, light_bytes.ptr(), light_bytes.size());
+	tables_hash = tables.hash;
 	tables_current = material_buffer.is_valid() && light_buffer.is_valid();
 	cached_surface_count = r_surface_count;
 	cached_light_count = r_light_count;
@@ -493,23 +357,7 @@ void NextGIReference::render(const RenderDataRD *p_render_data) {
 	const Projection &projection = p_render_data->scene_data->cam_projection;
 	const Transform3D &camera = p_render_data->scene_data->cam_transform;
 	NextGIRefGPUParams params;
-	params.cam_origin_fov[0] = camera.origin.x;
-	params.cam_origin_fov[1] = camera.origin.y;
-	params.cam_origin_fov[2] = camera.origin.z;
-	params.cam_origin_fov[3] = Math::abs(projection.columns[1][1]) > 0.0f ? 2.0f * Math::atan(1.0f / Math::abs(projection.columns[1][1])) : Math::deg_to_rad(75.0f);
-	const Vector3 forward = -camera.basis.get_column(Vector3::AXIS_Z);
-	const Vector3 up = camera.basis.get_column(Vector3::AXIS_Y);
-	const Vector3 right = camera.basis.get_column(Vector3::AXIS_X);
-	params.cam_forward_aspect[0] = forward.x;
-	params.cam_forward_aspect[1] = forward.y;
-	params.cam_forward_aspect[2] = forward.z;
-	params.cam_forward_aspect[3] = float(screen.x) / float(screen.y);
-	params.cam_up[0] = up.x;
-	params.cam_up[1] = up.y;
-	params.cam_up[2] = up.z;
-	params.cam_right[0] = right.x;
-	params.cam_right[1] = right.y;
-	params.cam_right[2] = right.z;
+	params.camera = path_tracer_camera(camera, projection, screen);
 	params.width = width;
 	params.height = height;
 	params.sample_index = samples;

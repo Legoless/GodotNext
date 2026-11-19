@@ -1052,6 +1052,17 @@ void MeshStorage::mesh_nextgi_rt_note_vertex_update(RID p_mesh) {
 	mesh->nextgi_rt_dynamic = nextgi_rt_surface_is_dynamic(frame, mesh->nextgi_rt_update_frames);
 }
 
+// GodotNext: path_tracer (#167)
+uint64_t MeshStorage::mesh_get_content_serial(RID p_mesh) const {
+	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	return mesh != nullptr ? mesh->content_serial : 0;
+}
+
+uint64_t MeshStorage::mesh_instance_get_rt_pose_serial(RID p_mesh_instance) const {
+	const MeshInstance *mi = mesh_instance_owner.get_or_null(p_mesh_instance);
+	return mi != nullptr ? mi->rt_pose_serial : 0;
+}
+
 bool MeshStorage::mesh_nextgi_rt_is_dynamic(RID p_mesh) const {
 	const Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, false);
@@ -1943,6 +1954,7 @@ void MeshStorage::mesh_surface_update_vertex_region(RID p_mesh, int p_surface, i
 	const uint8_t *r = p_data.ptr();
 
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->vertex_buffer, p_offset, data_size, r);
+	mesh->content_serial++; // GodotNext: path_tracer (#167)
 	// GodotNext: nextgi_rt_registry
 	// GodotNext: ps_swrt_trace (#186, #188). The CPU copy and the update note follow the kept CPU
 	// copies, also without ray query; the arena upload and the BLAS flag need the RT arena.
@@ -1979,6 +1991,7 @@ void MeshStorage::mesh_surface_update_attribute_region(RID p_mesh, int p_surface
 	const uint8_t *r = p_data.ptr();
 
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->attribute_buffer, p_offset, data_size, r);
+	mesh->content_serial++; // GodotNext: path_tracer (#167)
 	// GodotNext: nextgi_hit_groups (#130). The attribute buffer holds the colors and UVs.
 	_mesh_nextgi_hit_patch_attributes(mesh->surfaces[p_surface], true, uint32_t(p_offset), p_data);
 }
@@ -1994,6 +2007,7 @@ void MeshStorage::mesh_surface_update_skin_region(RID p_mesh, int p_surface, int
 	const uint8_t *r = p_data.ptr();
 
 	RD::get_singleton()->buffer_update(mesh->surfaces[p_surface]->skin_buffer, p_offset, data_size, r);
+	mesh->content_serial++; // GodotNext: path_tracer (#167)
 }
 
 void RendererRD::MeshStorage::mesh_surface_update_index_region(RID p_mesh, int p_surface, int p_offset, const Vector<uint8_t> &p_data) {
@@ -2740,6 +2754,10 @@ void MeshStorage::update_mesh_instances() {
 
 			bool array_is_2d = mi->mesh->surfaces[i]->format & RSE::ARRAY_FLAG_USE_2D_VERTICES;
 			const bool write_rt_arena = !array_is_2d && mi->surfaces[i].rt_arena_chunk != UINT32_MAX;
+			// GodotNext: path_tracer (#167). The posed slot changes in place; the path tracer restarts on it.
+			if (write_rt_arena) {
+				mi->rt_pose_serial++;
+			}
 			const int mode = array_is_2d ? SkeletonShader::SHADER_MODE_2D : SkeletonShader::SHADER_MODE_3D;
 			RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, write_rt_arena ? skeleton_shader.pipeline_rt[mode] : skeleton_shader.pipeline[mode]);
 			{

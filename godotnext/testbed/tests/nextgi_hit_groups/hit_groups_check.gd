@@ -188,7 +188,7 @@ func _measure(p_baseline_arena: int, p_runs_before := 0) -> Dictionary:
 	if _expect_mode == "INLINE":
 		# GodotNext: nextgi_hwrt_mode (#286). No hit pipeline: the mode is the reason, for every feature.
 		_check(out["hit_groups"] == "HWRT_MODE_INLINE", "the hit groups report HWRT_MODE_INLINE (%s)" % out["hit_groups"])
-		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "check"]:
+		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer"]:
 			_check(String(by_consumer.get(feature, "")) == "HWRT_MODE_INLINE", "%s reports HWRT_MODE_INLINE (%s)" % [feature, by_consumer.get(feature, "")])
 		_check(attribute_bytes == 0 and int(counters.get("rt_attribute_surfaces", 0)) == 0, "no attribute stream is allocated in Inline (%d bytes)" % attribute_bytes)
 		_check(int(counters.get("rt_arena_bytes", 0)) == p_baseline_arena, "the arena keeps its bytes in Inline (%d, %d)" % [counters.get("rt_arena_bytes", 0), p_baseline_arena])
@@ -283,7 +283,7 @@ func _measure_simplified(p_out: Dictionary, p_counters: Dictionary, p_by_consume
 			p_out[key] = p_counters[key]
 	_check(p_out["hit_groups"] == "AVAILABLE", "the simplified hit pipeline runs for the check (%s)" % p_out["hit_groups"])
 	_check(String(p_by_consumer.get("check", "")) == "AVAILABLE", "the check reports AVAILABLE (%s)" % p_by_consumer.get("check", ""))
-	for feature in ["hit_lighting", "translucency", "far_field", "material_retrace"]:
+	for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "path_tracer"]:
 		_check(String(p_by_consumer.get(feature, "")) == "HWRT_MODE_SIMPLIFIED_MATERIAL", "%s reports HWRT_MODE_SIMPLIFIED_MATERIAL (%s)" % [feature, p_by_consumer.get(feature, "")])
 	_check(int(p_counters.get("hit_check_runs", 0)) > p_runs_before, "the check ran within %d frames" % MAX_WAIT_FRAMES)
 	_check(int(p_counters.get("hit_material_groups", 1)) == 0, "the material hit groups are off")

@@ -36,3 +36,18 @@ How it was used: each random number is the published hash of the pixel or patch 
 | Copied files | None |
 
 How it was used: when a material has a non-zero specular weight, the kernel samples a visible GGX normal in the shading frame and reflects the view direction. The analytic fixtures use specular 0, so they take the cosine lobe only. The PDF is the visible-normal density converted by the reflection Jacobian.
+
+### Path Tracer in Unreal Engine, Epic Games documentation
+
+| Field | Value |
+|---|---|
+| What | The settings and behavior of UE's product path tracer: Samples Per Pixel, Max Bounces, Max Path Intensity, when samples are invalidated, emissive materials as lights and the Nanite fallback mesh |
+| Upstream | https://dev.epicgames.com/documentation/en-us/unreal-engine/path-tracer-in-unreal-engine |
+| Version | The page as published on 2026-11-18 |
+| License | Public documentation. No source file was copied into the tree. |
+| Read on | 2026-11-18, for issue #167 |
+| Consulted by | The #167 implementer |
+| Used in | `servers/rendering/renderer_rd/effects/path_tracer.{h,cpp}`, `servers/rendering/renderer_rd/shaders/environment/path_tracer_inc.glsl`, `scene/main/viewport.cpp` |
+| Copied files | None |
+
+How it was used: `Viewport.path_tracing_samples` and `path_tracing_max_bounces` follow the meaning of Samples Per Pixel and Max Bounces (the defaults, 2048 and 32, are the issue's). `path_tracing_firefly_clamp` follows Max Path Intensity: the largest exposed radiance one path sample adds; 0 turns it off here. The history restarts on the changes the page lists (camera moves, material changes, objects moved or added) and on light and setting changes. Emissive surfaces light the scene through hit emission. NextGeo meshes are traced through their RT fallback by default, as the page states for Nanite meshes, and through the native sets in the Experimental mode. The page does not cover backface culling; the cull rule follows plan v3.4.3 (one-sided materials are culled, two-sided ones are not).

@@ -116,6 +116,27 @@ enum NextGIHitConsumer : uint32_t {
 	// GodotNext: nextgi_hwrt_mode (#286). #145's material-evaluation retrace (any-hit groups of materials whose
 	// alpha comes from shader code), which #146's MegaLights retrace shares.
 	NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE = 1u << 4,
+	// GodotNext: path_tracer (#167). A viewport path traces (RendererRD::PathTracer). It shades hits with the
+	// material's own hit group, so it runs on them at Full only; otherwise it traces with its INLINE backend.
+	NEXTGI_HIT_CONSUMER_PATH_TRACER = 1u << 5,
+};
+
+// GodotNext: path_tracer (#167). The base library's ray generation stages: the check's, then the path tracer's.
+enum {
+	NEXTGI_HIT_RAYGEN_CHECK = 0,
+	NEXTGI_HIT_RAYGEN_PATH_TRACER = 1,
+};
+
+// GodotNext: path_tracer (#167). One path tracer sample per pixel through the hit pipeline: the view's RGBA32F
+// history, the params (PathTracerGPUParams) and the D16 light and material tables (path_tracer_hit.glsl).
+struct NextGIHitPathTrace {
+	RID accumulation;
+	RID params;
+	RID lights;
+	RID materials;
+	uint32_t width = 0;
+	uint32_t height = 0;
+	float time = 0.0f;
 };
 
 // GodotNext: nextgi_hwrt_mode (#286, plan §21.1). rendering/global_illumination/nextgi/hardware_ray_tracing_mode,
@@ -140,7 +161,8 @@ NextGIHitMode nextgi_hit_mode_from_setting(int p_setting);
 const char *nextgi_hit_mode_name(NextGIHitMode p_mode);
 
 // The consumers that can run on the simplified hit shader. The check then traces through the fallback group
-// alone. Hit lighting (#129), material retrace (#145), translucency and far field need the material's own group.
+// alone. Hit lighting (#129), material retrace (#145), translucency, far field and the path tracer (#167) need the
+// material's own group.
 inline constexpr uint32_t NEXTGI_HIT_SIMPLIFIED_CONSUMERS = NEXTGI_HIT_CONSUMER_CHECK;
 
 // The consumers p_mode lets run: all of them at Full, the simplified ones at Simplified Material, none at Inline.
@@ -163,6 +185,10 @@ enum NextGIHitAvailability {
 	// GodotNext: nextgi_hwrt_mode (#286). The Hardware Ray Tracing Mode lets none of the consumers run.
 	NEXTGI_HIT_HWRT_MODE_INLINE,
 	NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL,
+	// GodotNext: path_tracer (#167). The previous hit groups were freed within the device's frame delay, and their
+	// bindless tables are freed only at its end: Direct3D 12 holds two texture or storage-buffer tables at a time,
+	// so new hit groups wait for them (a view that turns path tracing off and on again within a few frames).
+	NEXTGI_HIT_RELEASING,
 	NEXTGI_HIT_AVAILABILITY_MAX,
 };
 
@@ -172,11 +198,18 @@ NextGIHitAvailability nextgi_hit_setting_availability(uint32_t p_consumers, Next
 // p_init_failed: NextGIHitMaterials failed to initialize since the consumers were last off (latched, so it is
 // not created again every frame). The mode comes right after the consumers, as a project setting, before the
 // tier and the device (as the tier rule puts SETTING_OFF before the device's reasons).
-NextGIHitAvailability nextgi_hit_availability(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed = false, NextGIHitMode p_mode = NEXTGI_HIT_MODE_FULL);
+// GodotNext: path_tracer (#167). p_releasing: nextgi_hit_tables_releasing() for the last free, after the latched
+// failure.
+NextGIHitAvailability nextgi_hit_availability(uint32_t p_consumers, bool p_hwrt_tier, bool p_raytracing_pipeline, bool p_pipeline_library, bool p_bindless, bool p_init_failed = false, NextGIHitMode p_mode = NEXTGI_HIT_MODE_FULL, bool p_releasing = false);
 // One consumer's reason (p_consumer is one NextGIHitConsumer bit): the mode's reason first; then, for a consumer
 // that asks (in p_consumers), p_last_frame, what the last frame block found, so it is AVAILABLE only while the hit
 // groups exist; for one that does not ask, p_on_its_own, what it would get on this tier and device if it asked.
 NextGIHitAvailability nextgi_hit_consumer_availability(uint32_t p_consumer, uint32_t p_consumers, NextGIHitMode p_mode, NextGIHitAvailability p_last_frame, NextGIHitAvailability p_on_its_own);
+// GodotNext: path_tracer (#167). Whether the hit groups freed on frame p_freed_frame (UINT64_MAX: never) still hold
+// their bindless tables on frame p_frame: the device frees them p_frame_delay frames after the free.
+_FORCE_INLINE_ bool nextgi_hit_tables_releasing(uint64_t p_freed_frame, uint64_t p_frame, uint32_t p_frame_delay) {
+	return p_freed_frame != UINT64_MAX && p_frame <= p_freed_frame + p_frame_delay;
+}
 const char *nextgi_hit_availability_name(NextGIHitAvailability p_availability);
 
 // The stream lives in the RT arena and only the material hit groups read it, so it exists only while they run.
@@ -490,6 +523,15 @@ public:
 	// The debug check (debug/hit_material_check): traces the covered texels of every captured SRC card back
 	// into the TLAS through the hit pipeline and compares the payloads with the material atlas.
 	void run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, float p_time);
+
+	// GodotNext: path_tracer (#167). The path tracer's ray generation stage is in the base library with material
+	// groups (Full; a device that could not build it has the hit groups without it, and Simplified Material leaves
+	// it out, #286). It traces on frames with current records, on this frame's
+	// TLAS, and the pipeline serial changes on every link and relink (the path tracer restarts its history).
+	bool has_path_tracer_raygen() const;
+	bool can_trace_path_tracer() const;
+	uint64_t get_pipeline_serial() const;
+	bool trace_path_tracer(NextGIRTScene *p_rt_scene, const NextGIHitPathTrace &p_trace);
 
 	const Counters &get_counters() const;
 	void fill_counters(Dictionary &r_counters) const;

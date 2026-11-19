@@ -202,6 +202,11 @@ Vector2 RendererViewport::_get_upscaler_scale_range(const Viewport *p_viewport) 
 	if (p_viewport == nullptr) {
 		return Vector2(1.0f, 1.0f);
 	}
+	// GodotNext: path_tracer (#167). A path-traced view renders at the output size, so dynamic resolution keeps it
+	// at 1 and never reconfigures (and restarts) its history.
+	if (viewport_path_tracing_active(p_viewport->path_tracing_enabled, p_viewport->debug_draw)) {
+		return Vector2(1.0f, 1.0f);
+	}
 
 	RSE::ViewportScaling3DMode mode = p_viewport->requested_scaling_3d_mode;
 
@@ -513,6 +518,18 @@ void RendererViewport::_configure_3d_render_buffers(Viewport *p_viewport) {
 				use_taa = false;
 			}
 
+			// GodotNext: path_tracer (#167). The path tracer accumulates at the output size: while it is on, the 3D
+			// resolution is the output's (no scaling and no temporal upscaler) and TAA is off, so no jitter moves the
+			// camera between its samples.
+			if (viewport_path_tracing_active(p_viewport->path_tracing_enabled, p_viewport->debug_draw)) {
+				scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
+				scaling_type = RSE::scaling_3d_mode_type(scaling_3d_mode);
+				scaling_3d_scale = 1.0;
+				p_viewport->effective_scaling_3d_scale = 1.0f;
+				p_viewport->scaling_3d_mode = scaling_3d_mode;
+				use_taa = false;
+			}
+
 			const int target_width = p_viewport->size.width;
 			const int target_height = p_viewport->size.height;
 
@@ -654,6 +671,10 @@ void RendererViewport::_draw_3d(Viewport *p_viewport) {
 	}
 
 	float screen_mesh_lod_threshold = p_viewport->mesh_lod_threshold / float(p_viewport->size.width);
+	// GodotNext: path_tracer (#167). The view's effective path tracing settings, read by RendererRD::PathTracer.
+	if (p_viewport->render_buffers.is_valid()) {
+		p_viewport->render_buffers->set_path_tracing(viewport_path_tracing_active(p_viewport->path_tracing_enabled, p_viewport->debug_draw), p_viewport->path_tracing_samples, p_viewport->path_tracing_max_bounces, p_viewport->path_tracing_firefly_clamp);
+	}
 	RSG::scene->render_camera(p_viewport->render_buffers, p_viewport->camera, p_viewport->scenario, p_viewport->self, p_viewport->internal_size, p_viewport->jitter_phase_count, screen_mesh_lod_threshold, p_viewport->shadow_atlas, p_viewport->window_output_max_value, &p_viewport->render_info);
 
 	RENDER_TIMESTAMP("< Render 3D Scene");
@@ -1917,6 +1938,52 @@ void RendererViewport::viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSR
 	_configure_3d_render_buffers(viewport);
 }
 
+// GodotNext: path_tracer (#167)
+void RendererViewport::viewport_set_path_tracing_enabled(RID p_viewport, bool p_enabled) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	if (viewport->path_tracing_enabled == p_enabled) {
+		return;
+	}
+	const bool was_active = viewport_path_tracing_active(viewport->path_tracing_enabled, viewport->debug_draw);
+	viewport->path_tracing_enabled = p_enabled;
+	if (was_active != viewport_path_tracing_active(viewport->path_tracing_enabled, viewport->debug_draw)) {
+		_configure_3d_render_buffers(viewport);
+	}
+}
+
+void RendererViewport::viewport_set_path_tracing_samples(RID p_viewport, int p_samples) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->path_tracing_samples = RenderingServerTypes::path_tracing_validate_samples(p_samples);
+}
+
+void RendererViewport::viewport_set_path_tracing_max_bounces(RID p_viewport, int p_max_bounces) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->path_tracing_max_bounces = RenderingServerTypes::path_tracing_validate_max_bounces(p_max_bounces);
+}
+
+void RendererViewport::viewport_set_path_tracing_firefly_clamp(RID p_viewport, float p_firefly_clamp) {
+	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL(viewport);
+	viewport->path_tracing_firefly_clamp = RenderingServerTypes::path_tracing_validate_firefly_clamp(p_firefly_clamp);
+}
+
+Dictionary RendererViewport::viewport_get_path_tracing_info(RID p_viewport) const {
+	const Viewport *viewport = viewport_owner.get_or_null(p_viewport);
+	ERR_FAIL_NULL_V(viewport, Dictionary());
+	Dictionary info;
+	if (viewport->render_buffers.is_valid()) {
+		info = viewport->render_buffers->get_path_tracing_info();
+	}
+	info["enabled"] = viewport_path_tracing_active(viewport->path_tracing_enabled, viewport->debug_draw);
+	info["samples_setting"] = viewport->path_tracing_samples;
+	info["max_bounces_setting"] = viewport->path_tracing_max_bounces;
+	info["firefly_clamp_setting"] = viewport->path_tracing_firefly_clamp;
+	return info;
+}
+
 void RendererViewport::viewport_set_texture_mipmap_bias(RID p_viewport, float p_mipmap_bias) {
 	Viewport *viewport = viewport_owner.get_or_null(p_viewport);
 	ERR_FAIL_NULL(viewport);
@@ -2420,11 +2487,17 @@ void RendererViewport::viewport_set_debug_draw(RID p_viewport, RSE::ViewportDebu
 	ERR_FAIL_NULL(viewport);
 
 	bool motion_vectors_before = _viewport_requires_motion_vectors(viewport);
+	// GodotNext: path_tracer (#167). The path tracer debug draw renders at the output size, as path_tracing_enabled.
+	const bool path_tracing_before = viewport_path_tracing_active(viewport->path_tracing_enabled, viewport->debug_draw);
 	viewport->debug_draw = p_draw;
 
 	bool motion_vectors_after = _viewport_requires_motion_vectors(viewport);
 	if (motion_vectors_before != motion_vectors_after) {
 		num_viewports_with_motion_vectors += motion_vectors_after ? 1 : -1;
+	}
+	// GodotNext: path_tracer (#167). Turning the path tracer debug draw on or off resizes the 3D buffers.
+	if (path_tracing_before != viewport_path_tracing_active(viewport->path_tracing_enabled, viewport->debug_draw)) {
+		_configure_3d_render_buffers(viewport);
 	}
 }
 

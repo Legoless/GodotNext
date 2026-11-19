@@ -836,6 +836,12 @@ public:
 	FUNC2(viewport_set_scaling_3d_scale, RID, float)
 	FUNC2(viewport_set_fsr_sharpness, RID, float)
 	FUNC2(viewport_set_tsr_quality, RID, RSE::ViewportTSRQuality)
+	// GodotNext: path_tracer (#167)
+	FUNC2(viewport_set_path_tracing_enabled, RID, bool)
+	FUNC2(viewport_set_path_tracing_samples, RID, int)
+	FUNC2(viewport_set_path_tracing_max_bounces, RID, int)
+	FUNC2(viewport_set_path_tracing_firefly_clamp, RID, float)
+	FUNC1R(Dictionary, viewport_get_path_tracing_info, RID)
 	FUNC2(viewport_set_texture_mipmap_bias, RID, float)
 	FUNC2(viewport_set_anisotropic_filtering_level, RID, RSE::ViewportAnisotropicFiltering)
 

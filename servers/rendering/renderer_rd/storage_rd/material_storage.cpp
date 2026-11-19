@@ -1902,6 +1902,7 @@ void MaterialStorage::global_shader_parameter_set(const StringName &p_name, cons
 			//buffer
 			_global_shader_uniform_store_in_buffer(gv.buffer_index, gv.type, gv.value);
 			_global_shader_uniform_mark_buffer_dirty(gv.buffer_index, gv.buffer_elements);
+			global_shader_uniform_serial++; // GodotNext: path_tracer (#167)
 		} else {
 			//texture
 			MaterialStorage *material_storage = MaterialStorage::get_singleton();
@@ -1934,6 +1935,7 @@ void MaterialStorage::global_shader_parameter_set_override(const StringName &p_n
 		}
 
 		_global_shader_uniform_mark_buffer_dirty(gv.buffer_index, gv.buffer_elements);
+		global_shader_uniform_serial++; // GodotNext: path_tracer (#167)
 	} else {
 		//texture
 		MaterialStorage *material_storage = MaterialStorage::get_singleton();
@@ -2481,6 +2483,9 @@ void MaterialStorage::_update_queued_materials() {
 			//some implementations such as 3D renderer cache the material uniform set, so update is required
 			material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 		}
+		// GodotNext: path_tracer (#167). Every queued update is a change of this material that a path tracer tracing
+		// it must not keep in its history.
+		material->change_serial = ++material_change_serial;
 	}
 }
 
@@ -2516,6 +2521,8 @@ void MaterialStorage::material_free(RID p_rid) {
 void MaterialStorage::material_set_shader(RID p_material, RID p_shader) {
 	Material *material = material_owner.get_or_null(p_material);
 	ERR_FAIL_NULL(material);
+	// GodotNext: path_tracer (#167). A new shader, or none (which queues no update), is a change.
+	material->change_serial = ++material_change_serial;
 
 	if (material->data) {
 		memdelete(material->data);
@@ -2589,6 +2596,17 @@ void MaterialStorage::material_set_param(RID p_material, const StringName &p_par
 	} else {
 		_material_queue_update(material, true, true);
 	}
+}
+
+// GodotNext: path_tracer (#167)
+uint64_t MaterialStorage::material_get_change_serial(RID p_material) const {
+	const Material *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->change_serial : 0;
+}
+
+bool MaterialStorage::material_uses_global_shader_uniforms(RID p_material) const {
+	const Material *material = material_owner.get_or_null(p_material);
+	return material != nullptr && material->data != nullptr && material->data->global_buffer_E != nullptr;
 }
 
 MaterialStorage::ShaderData::NextGIRTClass MaterialStorage::material_get_nextgi_rt_class(RID p_material) {

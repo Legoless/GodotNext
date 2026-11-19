@@ -236,6 +236,8 @@ class Node3DEditorViewport : public Control {
 		VIEW_DISPLAY_ML_MATERIAL,
 		// GodotNext: pt_tsr_stability (#198)
 		VIEW_DISPLAY_TSR,
+		// GodotNext: path_tracer (#167)
+		VIEW_DISPLAY_PATH_TRACER,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 

@@ -3339,6 +3339,9 @@ void RenderingDeviceDriverMetal::_update_ray_query_caps() {
 void RenderingDeviceDriverMetal::_check_capabilities() {
 	capabilities.device_family = DEVICE_METAL;
 	parse_msl_version(device_properties->features.msl_target_version, capabilities.version_major, capabilities.version_minor);
+	// GodotNext: path_tracer (#167). MTLGPUFamilyApple1 is 1001, so Apple8 is 1008 (Apple11, 1011, is past metal-cpp's enum).
+	const int64_t family = int64_t(device_properties->features.highestFamily);
+	capabilities.apple_gpu_family = family > 1000 && family < 2000 ? uint32_t(family - 1000) : 0;
 }
 
 API_AVAILABLE(macos(11.0), ios(14.0), tvos(14.0))

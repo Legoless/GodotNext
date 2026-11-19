@@ -31,7 +31,10 @@
 #include "next_gi.h"
 
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
+// GodotNext: path_tracer (#167)
+#include "servers/rendering/renderer_rd/effects/path_tracer.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
+#include "servers/rendering/renderer_rd/storage_rd/render_scene_buffers_rd.h"
 
 // GodotNext: nextgi_rt_scene
 #include "core/config/project_settings.h"
@@ -645,6 +648,11 @@ uint32_t NextGI::get_hit_consumers() const {
 	if (settings != nullptr && settings->has_setting("rendering/global_illumination/nextgi/debug/hit_material_check") && bool(GLOBAL_GET("rendering/global_illumination/nextgi/debug/hit_material_check"))) {
 		consumers |= NEXTGI_HIT_CONSUMER_CHECK;
 	}
+	// GodotNext: path_tracer (#167). A view path traced on this frame or the last one.
+	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	if (path_tracer_request_frame != UINT64_MAX && frame <= path_tracer_request_frame + 1) {
+		consumers |= NEXTGI_HIT_CONSUMER_PATH_TRACER;
+	}
 	return consumers;
 }
 
@@ -652,6 +660,8 @@ void NextGI::_free_hit_materials() {
 	if (hit_materials != nullptr) {
 		memdelete(hit_materials);
 		hit_materials = nullptr;
+		// GodotNext: path_tracer (#167). Its bindless tables go at the end of the device's frame delay.
+		hit_materials_freed_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 	}
 }
 
@@ -691,14 +701,16 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 	// GodotNext: nextgi_hwrt_mode (#286). Inline makes no hit pipeline; Simplified Material makes the base
 	// library alone, with no material groups and no attribute stream.
 	const NextGIHitMode mode = NextGIHitMode(hit_mode);
+	if (hit_materials != nullptr && hit_materials_mode != hit_mode) {
+		// init() read another mode (doctests): the hit groups are made again for it, once their tables are freed.
+		_free_hit_materials();
+	}
+	// GodotNext: path_tracer (#167). New hit groups wait until the previous ones' tables are freed.
+	const bool releasing = hit_materials == nullptr && rd != nullptr && nextgi_hit_tables_releasing(hit_materials_freed_frame, p_frame, rd->get_frame_delay());
 	NextGIHitAvailability availability = nextgi_hit_availability(consumers, hwrt,
 			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE),
 			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE_LIBRARY),
-			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed, mode);
-	if (hit_materials != nullptr && hit_materials_mode != hit_mode) {
-		// init() read another mode (doctests): the hit groups are made again for it.
-		_free_hit_materials();
-	}
+			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed, mode, releasing);
 	if (availability == NEXTGI_HIT_AVAILABLE && hit_materials == nullptr) {
 		hit_materials = memnew(NextGIHitMaterials(nextgi_hit_mode_material_groups(mode)));
 		hit_materials_mode = hit_mode;
@@ -1074,6 +1086,8 @@ Dictionary NextGI::get_tier_info() const {
 		by_consumer["far_field"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_FAR_FIELD)));
 		by_consumer["material_retrace"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE)));
 		by_consumer["check"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_CHECK)));
+		// GodotNext: path_tracer (#167)
+		by_consumer["path_tracer"] = nextgi_hit_availability_name(NextGIHitAvailability(get_hit_availability_for(NEXTGI_HIT_CONSUMER_PATH_TRACER)));
 		info["hit_groups_by_consumer"] = by_consumer;
 	}
 	info["rough_reflection_mip_count"] = int64_t(rough_reflection_mip_count);
@@ -1224,6 +1238,50 @@ Dictionary NextGI::get_tier_info() const {
 		info["hardware_ray_tracing_pending"] = int(pending_hwrt_setting);
 	}
 	return info;
+}
+
+// GodotNext: path_tracer (#167)
+void NextGI::_render_path_tracer(RenderDataRD *p_render_data, bool p_hwrt_frame) {
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	if (rb.is_null()) {
+		return;
+	}
+	const PathTracerSettings settings = PathTracer::get_settings(rb.ptr());
+	if (!settings.enabled) {
+		if (PathTracer::get_view(rb.ptr(), false) != nullptr) {
+			PathTracer::set_status(rb.ptr(), PATH_TRACER_STATUS_OFF);
+		}
+		return;
+	}
+	path_tracer_request_frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+	if (!p_hwrt_frame || rt_scene == nullptr) {
+		PathTracer::set_status(rb.ptr(), PATH_TRACER_STATUS_NOT_HWRT);
+		return;
+	}
+	if (path_tracer == nullptr) {
+		path_tracer = memnew(PathTracer);
+	}
+	// The hit groups only while they run for the path tracer (#286: at Full; in Simplified Material they may run for
+	// the check alone, without material groups). PathTracer traces them only with current records.
+	const bool hit_groups = get_hit_availability_for(NEXTGI_HIT_CONSUMER_PATH_TRACER) == NEXTGI_HIT_AVAILABLE;
+	path_tracer->render(p_render_data, rt_scene, hit_groups ? hit_materials : nullptr);
+}
+
+void NextGI::composite_path_tracer(RenderSceneBuffersRD *p_render_buffers, RID p_color, bool p_frame_block) {
+	if (p_render_buffers == nullptr || !PathTracer::get_settings(p_render_buffers).enabled) {
+		if (p_render_buffers != nullptr && PathTracer::get_view(p_render_buffers, false) != nullptr) {
+			PathTracer::set_status(p_render_buffers, PATH_TRACER_STATUS_OFF);
+		}
+		return;
+	}
+	if (!p_frame_block) {
+		// No frame block, no TLAS: the environment's NextGI is off (or this view is not one NextGI renders).
+		PathTracer::set_status(p_render_buffers, PATH_TRACER_STATUS_NO_NEXTGI);
+		return;
+	}
+	if (path_tracer != nullptr) {
+		path_tracer->composite(p_render_buffers, p_color);
+	}
 }
 
 void NextGI::composite_reference(RID p_color) {
@@ -1605,6 +1663,9 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 		// meshes until then, which keeps every TLAS build correct.
 		// GodotNext: nextgi_src_cards — card capture is the "SRC capture" slot (line 2a).
 		if (slot == PASS_SLOT_AS_UPDATES && rt_scene != nullptr) {
+			// GodotNext: path_tracer (#167). The TLAS phase lists what each surface record draws only while a view
+			// path traces: this one, or one that traced on this frame or the last (a later view of this frame).
+			rt_scene->set_surface_sources_wanted(PathTracer::get_settings(rb.ptr()).enabled || (path_tracer_request_frame != UINT64_MAX && render_frame_number <= path_tracer_request_frame + 1));
 			rt_scene->rebuild_tlas(p_render_data);
 		} else if (slot == PASS_SLOT_AS_UPDATES && swrt_frame) {
 			// GodotNext: ps_swrt_trace (#186, plan §21.2.4). Line 1a on the software tier: the
@@ -1665,6 +1726,8 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	if (hwrt_frame && reference != nullptr) {
 		reference->render(p_render_data);
 	}
+	// GodotNext: path_tracer (#167). The view's path tracer sample, on this frame's TLAS before compaction.
+	_render_path_tracer(p_render_data, hwrt_frame);
 	// GodotNext: nextgi_hit_groups (#130). The check traces this frame's TLAS too, before compaction.
 	if (hwrt_frame && new_scenario && hit_materials != nullptr && (get_hit_consumers() & NEXTGI_HIT_CONSUMER_CHECK)) {
 		hit_materials->run_check(rt_scene, src, p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f);
@@ -1718,6 +1781,11 @@ NextGI::~NextGI() {
 		reference->free();
 		memdelete(reference);
 		reference = nullptr;
+	}
+	// GodotNext: path_tracer (#167)
+	if (path_tracer != nullptr) {
+		memdelete(path_tracer);
+		path_tracer = nullptr;
 	}
 	// GodotNext: nextgi_wrc_per_view (#253). Every view's WRC and the shared update shaders.
 	NextGIWRC::free_all_resources();

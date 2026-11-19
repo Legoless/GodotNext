@@ -66,6 +66,7 @@ TEST_FORCE_LINK(test_nextgi)
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_selftest.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/path_tracer.glsl.gen.h" // GodotNext: path_tracer (#167)
 // GodotNext: denoise_reset_regions
 #include "servers/rendering/renderer_rd/effects/denoise.h"
 #endif // RD_ENABLED
@@ -269,25 +270,27 @@ TEST_CASE("[NextGI][Editor] Every ray-query ShaderRD is marked for the shader ba
 	CHECK(NextgiReferenceShaderRD().requires_ray_query());
 	CHECK(NextgiSelftestShaderRD().requires_ray_query());
 	CHECK(NextgiRqSelftestShaderRD().requires_ray_query());
+	CHECK(PathTracerShaderRD().requires_ray_query()); // GodotNext: path_tracer (#167)
 }
 
 // GodotNext: nextgi_vulkan (#50)
 TEST_CASE("[NextGI][Editor] The shader baker gets a bake-only version of every NextGI ShaderRD an export cannot create") {
 	const RendererRD::NextGIBakeShaders bake;
 	const LocalVector<Pair<ShaderRD *, RID>> &versions = bake.get_versions();
-	REQUIRE(versions.size() == 10);
+	// GodotNext: path_tracer (#167). The path tracer's inline backend is the eleventh.
+	REQUIRE(versions.size() == 11);
 	Vector<String> names;
 	for (const Pair<ShaderRD *, RID> &pair : versions) {
 		CHECK(pair.second.is_valid());
 		names.push_back(pair.first->get_name());
 	}
-	const char *expected[10] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
-		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD" };
-	for (int i = 0; i < 10; i++) {
+	const char *expected[11] = { "NextgiGatherShaderRD", "NextgiSrcRelightShaderRD", "NextgiSrcRelightShaderRD", "NextgiWrcUpdateShaderRD", "NextgiReferenceShaderRD",
+		"NextgiGatherSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiSrcRelightSwrtShaderRD", "NextgiWrcUpdateSwrtShaderRD", "NextgiSelftestShaderRD", "PathTracerShaderRD" };
+	for (int i = 0; i < 11; i++) {
 		CHECK_EQ(names[i], String(expected[i]));
 	}
 	// The hardware instances and the self-test need ray query; the software siblings bake everywhere (#261).
-	for (int i = 0; i < 10; i++) {
+	for (int i = 0; i < 11; i++) {
 		const bool software = i >= 5 && i <= 8;
 		CHECK_EQ(versions[i].first->requires_ray_query(), !software);
 	}

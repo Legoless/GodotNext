@@ -4699,7 +4699,9 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		case VIEW_DISPLAY_ML_ALBEDO:
 		case VIEW_DISPLAY_ML_MATERIAL:
 		// GodotNext: pt_tsr_stability (#198)
-		case VIEW_DISPLAY_TSR: {
+		case VIEW_DISPLAY_TSR:
+		// GodotNext: path_tracer (#167)
+		case VIEW_DISPLAY_PATH_TRACER: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4760,6 +4762,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_ML_MATERIAL,
 				// GodotNext: pt_tsr_stability (#198)
 				VIEW_DISPLAY_TSR,
+				// GodotNext: path_tracer (#167)
+				VIEW_DISPLAY_PATH_TRACER,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4822,6 +4826,8 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_ML_MATERIAL,
 				// GodotNext: pt_tsr_stability (#198)
 				Viewport::DEBUG_DRAW_TSR,
+				// GodotNext: path_tracer (#167)
+				Viewport::DEBUG_DRAW_PATH_TRACER,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7179,6 +7185,9 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 	// GodotNext: pt_tsr_stability (#198)
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("TSR Debug View"), VIEW_DISPLAY_TSR, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Shows one TSR pass, chosen by the project setting rendering/anti_aliasing/tsr/debug_view: history validity, rejection, disocclusion, resurrection hits, flicker period or thin coverage. Green helps the image, red or yellow costs it, and magenta means the feature is off. Shows the normal image when TSR is not the active 3D scaling mode."));
+	// GodotNext: path_tracer (#167)
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Path Tracer"), VIEW_DISPLAY_PATH_TRACER, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Path traces the view progressively, at full resolution, as Viewport.path_tracing_enabled does. Needs NextGI on in the environment and the hardware ray tracing tier; shows the normal image otherwise."));
 	// GodotNext: nextgi_user_surface
 	display_submenu->add_separator();
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGI Tier"), VIEW_DISPLAY_NEXTGI_TIER, SupportedRenderingMethods::FORWARD_PLUS,

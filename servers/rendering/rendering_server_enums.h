@@ -694,6 +694,8 @@ enum ViewportDebugDraw {
 	VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES,
 	// GodotNext: pt_tsr_stability (#198)
 	VIEWPORT_DEBUG_DRAW_TSR,
+	// GodotNext: path_tracer (#167)
+	VIEWPORT_DEBUG_DRAW_PATH_TRACER,
 };
 
 enum ViewportVRSMode {

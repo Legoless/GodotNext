@@ -65,6 +65,9 @@ struct NextGICardClusterResult;
 // GodotNext: nextgi_hit_groups (#130)
 class NextGIHitMaterials;
 
+// GodotNext: path_tracer (#167)
+class PathTracer;
+
 // GodotNext: nextgi_src_relight
 class NextGIRelight;
 
@@ -335,6 +338,7 @@ private:
 	// the live hit_materials were made for. 0 is Full.
 	int hit_mode = 0;
 	int hit_materials_mode = 0;
+	uint64_t hit_materials_freed_frame = UINT64_MAX; // GodotNext: path_tracer (#167). nextgi_hit_tables_releasing().
 	void _update_hit_materials(bool p_hwrt_frame, uint64_t p_frame);
 	void _free_hit_materials();
 	void _release_unused_hit_materials();
@@ -391,6 +395,11 @@ private:
 	NextGIGather *gather = nullptr;
 	NextGIFrontLayer *front_layer = nullptr;
 	NextGIReference *reference = nullptr;
+	// GodotNext: path_tracer (#167). The product path tracer, and the last frame a view asked for it (the hit groups
+	// run for it on the next frames).
+	PathTracer *path_tracer = nullptr;
+	uint64_t path_tracer_request_frame = UINT64_MAX;
+	void _render_path_tracer(RenderDataRD *p_render_data, bool p_hwrt_frame);
 	uint32_t rough_reflection_mip_count = 1;
 	void _gather(RenderDataRD *p_render_data);
 	void _settings_changed();
@@ -672,6 +681,11 @@ public:
 	NextGIVoxelLighting *get_voxel_lighting() const { return voxel_lighting; }
 	// Writes the reference mean into the HDR color when reference_mode is on.
 	void composite_reference(RID p_color);
+	// GodotNext: path_tracer (#167). Writes the view's path-traced mean into the HDR color, before the reference
+	// composite and tonemapping. p_frame_block is whether this view ran the NextGI frame block (the path tracer
+	// traces its TLAS there); a view that asks for path tracing without it is marked NO_NEXTGI.
+	void composite_path_tracer(RenderSceneBuffersRD *p_render_buffers, RID p_color, bool p_frame_block);
+	PathTracer *get_path_tracer() const { return path_tracer; }
 
 	// GodotNext: nextgi_rt_scene
 	NextGIRTScene *get_rt_scene() const { return rt_scene; }

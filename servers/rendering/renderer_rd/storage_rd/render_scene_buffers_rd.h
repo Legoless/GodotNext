@@ -110,6 +110,11 @@ private:
 	bool has_explicit_max_internal_size = false;
 	RSE::ViewportScaling3DMode scaling_3d_mode = RSE::VIEWPORT_SCALING_3D_MODE_OFF;
 	RSE::ViewportTSRQuality tsr_quality = RSE::VIEWPORT_TSR_QUALITY_EPIC;
+	// GodotNext: path_tracer (#167)
+	bool path_tracing_enabled = false;
+	int path_tracing_samples = 2048;
+	int path_tracing_max_bounces = 32;
+	float path_tracing_firefly_clamp = 0.0f;
 	float fsr_sharpness = 0.2f;
 	float texture_mipmap_bias = 0.0f;
 	// GodotNext: pt_temporal_upscaler_extension (#192). The sampler mip bias,
@@ -246,6 +251,13 @@ public:
 	virtual void set_use_debanding(bool p_use_debanding) override;
 	virtual void set_temporal_history_reset() override { temporal_history_reset.request(); }
 	bool consume_temporal_history_reset() { return temporal_history_reset.consume(); }
+	// GodotNext: path_tracer (#167). RendererRD::PathTracer reads these and keeps its history in the custom data.
+	virtual void set_path_tracing(bool p_enabled, int p_samples, int p_max_bounces, float p_firefly_clamp) override;
+	virtual Dictionary get_path_tracing_info() const override;
+	bool get_path_tracing_enabled() const { return path_tracing_enabled; }
+	int get_path_tracing_samples() const { return path_tracing_samples; }
+	int get_path_tracing_max_bounces() const { return path_tracing_max_bounces; }
+	float get_path_tracing_firefly_clamp() const { return path_tracing_firefly_clamp; }
 
 #ifdef METAL_ENABLED
 	void ensure_mfx(RendererRD::MFXSpatialEffect *p_effect);

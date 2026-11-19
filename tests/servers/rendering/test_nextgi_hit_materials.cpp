@@ -128,6 +128,17 @@ TEST_CASE("[NextGIHit] Availability names the first missing requirement") {
 	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, false, true, true, true, true), NEXTGI_HIT_NOT_HWRT);
 	CHECK_EQ(nextgi_hit_availability(0, true, true, true, true, true), NEXTGI_HIT_NO_CONSUMER);
 	CHECK_EQ(String(nextgi_hit_availability_name(NEXTGI_HIT_INIT_FAILED)), "INIT_FAILED");
+	// GodotNext: path_tracer (#167). Freed hit groups whose tables are still in the frame delay: new ones wait.
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_PATH_TRACER, true, true, true, true, false, NEXTGI_HIT_MODE_FULL, true), NEXTGI_HIT_RELEASING);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_PATH_TRACER, true, true, true, true, true, NEXTGI_HIT_MODE_FULL, true), NEXTGI_HIT_INIT_FAILED);
+	CHECK_EQ(nextgi_hit_availability(0, true, true, true, true, false, NEXTGI_HIT_MODE_FULL, true), NEXTGI_HIT_NO_CONSUMER);
+	// The Hardware Ray Tracing Mode's reason (#286) comes before RELEASING; a consumer the mode lets run waits too.
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_PATH_TRACER, true, true, true, true, false, NEXTGI_HIT_MODE_INLINE, true), NEXTGI_HIT_HWRT_MODE_INLINE);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_PATH_TRACER, true, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, true), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, true, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, true), NEXTGI_HIT_RELEASING);
+	CHECK_EQ(nextgi_hit_availability(NEXTGI_HIT_CONSUMER_CHECK, false, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, true), NEXTGI_HIT_NOT_HWRT);
+	CHECK_EQ(String(nextgi_hit_availability_name(NEXTGI_HIT_RELEASING)), "RELEASING");
+	CHECK_FALSE(nextgi_hit_stream_needed(NEXTGI_HIT_RELEASING, true));
 	CHECK_EQ(String(nextgi_hit_availability_name(NEXTGI_HIT_NO_RAYTRACING_PIPELINE)), "NO_RAYTRACING_PIPELINE");
 	for (int i = 0; i < NEXTGI_HIT_AVAILABILITY_MAX; i++) {
 		CHECK_NE(String(nextgi_hit_availability_name(NextGIHitAvailability(i))), "UNKNOWN");
@@ -135,8 +146,9 @@ TEST_CASE("[NextGIHit] Availability names the first missing requirement") {
 }
 
 // GodotNext: nextgi_hwrt_mode (#286). UE 5.9's per-platform Hardware Ray Tracing Mode (plan §21.1).
-static const uint32_t ALL_HIT_CONSUMERS[] = { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE };
-static const uint32_t EVERY_HIT_CONSUMER = NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_TRANSLUCENCY | NEXTGI_HIT_CONSUMER_FAR_FIELD | NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE;
+// GodotNext: path_tracer (#167). The path tracer is one of them.
+static const uint32_t ALL_HIT_CONSUMERS[] = { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER };
+static const uint32_t EVERY_HIT_CONSUMER = NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_TRANSLUCENCY | NEXTGI_HIT_CONSUMER_FAR_FIELD | NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE | NEXTGI_HIT_CONSUMER_PATH_TRACER;
 
 // The rule before the setting existed (#130, as on master before #286), written out so that Full is compared
 // with it and not with itself.
@@ -181,7 +193,7 @@ TEST_CASE("[NextGIHit] The Hardware Ray Tracing Mode reads Full by default and f
 }
 
 TEST_CASE("[NextGIHit] Full changes nothing: every input gives the availability it gave before the setting") {
-	const uint32_t consumer_sets[] = { 0, NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_CHECK, EVERY_HIT_CONSUMER };
+	const uint32_t consumer_sets[] = { 0, NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER, NEXTGI_HIT_CONSUMER_HIT_LIGHTING | NEXTGI_HIT_CONSUMER_CHECK, EVERY_HIT_CONSUMER };
 	for (uint32_t consumers : consumer_sets) {
 		CHECK_EQ(nextgi_hit_mode_consumers(consumers, NEXTGI_HIT_MODE_FULL), consumers);
 		for (uint32_t bits = 0; bits < 64; bits++) {
@@ -222,11 +234,15 @@ TEST_CASE("[NextGIHit] A feature that asks gets what the last frame block found;
 	// made the simplified pipeline for the check (AVAILABLE), but it has no material groups: hit lighting and the
 	// other features that need them get the mode's reason, and the check gets AVAILABLE.
 	const uint32_t check_and_hit_lighting = NEXTGI_HIT_CONSUMER_CHECK | NEXTGI_HIT_CONSUMER_HIT_LIGHTING;
-	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE }) {
+	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER }) {
 		CHECK_EQ(nextgi_hit_consumer_availability(consumer, check_and_hit_lighting | consumer, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
 	}
 	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_CHECK, check_and_hit_lighting, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_AVAILABLE);
 	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_CHECK, check_and_hit_lighting, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL, NEXTGI_HIT_NOT_HWRT, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_NOT_HWRT);
+	// GodotNext: path_tracer (#167). The loop above holds for the path tracer: in Simplified Material a view traces
+	// with its INLINE backend, also while the check runs. At Full it gets the frame block's value, RELEASING included.
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_PATH_TRACER, NEXTGI_HIT_CONSUMER_PATH_TRACER, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_RELEASING, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_RELEASING);
+	CHECK_EQ(nextgi_hit_consumer_availability(NEXTGI_HIT_CONSUMER_PATH_TRACER, NEXTGI_HIT_CONSUMER_PATH_TRACER | NEXTGI_HIT_CONSUMER_CHECK, NEXTGI_HIT_MODE_FULL, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_AVAILABLE);
 	// In Inline every feature gets the mode's reason, whatever the frame block or the device would give.
 	for (uint32_t consumer : ALL_HIT_CONSUMERS) {
 		CHECK_EQ(nextgi_hit_consumer_availability(consumer, EVERY_HIT_CONSUMER, NEXTGI_HIT_MODE_INLINE, NEXTGI_HIT_AVAILABLE, NEXTGI_HIT_AVAILABLE), NEXTGI_HIT_HWRT_MODE_INLINE);
@@ -256,7 +272,7 @@ TEST_CASE("[NextGIHit] Simplified Material runs only the simplified consumers, w
 	CHECK_EQ(nextgi_hit_mode_consumers(EVERY_HIT_CONSUMER, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_SIMPLIFIED_CONSUMERS);
 	CHECK_EQ(NEXTGI_HIT_SIMPLIFIED_CONSUMERS, uint32_t(NEXTGI_HIT_CONSUMER_CHECK));
 	// The features that need a material's own hit group keep their inline path, with the mode's reason.
-	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE }) {
+	for (uint32_t consumer : { NEXTGI_HIT_CONSUMER_HIT_LIGHTING, NEXTGI_HIT_CONSUMER_TRANSLUCENCY, NEXTGI_HIT_CONSUMER_FAR_FIELD, NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NEXTGI_HIT_CONSUMER_PATH_TRACER }) {
 		CHECK_EQ(nextgi_hit_setting_availability(consumer, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
 		CHECK_EQ(nextgi_hit_availability(consumer, true, true, true, true, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
 		CHECK_EQ(nextgi_hit_availability(consumer, false, false, false, false, false, NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL), NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL);
@@ -346,8 +362,8 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full
 		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "INLINE");
 		CHECK_EQ(String(info["hit_groups"]), "HWRT_MODE_INLINE");
 		const Dictionary by_consumer = info["hit_groups_by_consumer"];
-		CHECK_EQ(by_consumer.size(), 5);
-		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check" }) {
+		CHECK_EQ(by_consumer.size(), 6);
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer" }) {
 			CHECK_EQ(String(by_consumer[feature]), "HWRT_MODE_INLINE");
 		}
 		CHECK_EQ(next_gi.get_hit_availability_for(NEXTGI_HIT_CONSUMER_CHECK), int(NEXTGI_HIT_HWRT_MODE_INLINE));
@@ -369,7 +385,7 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full
 		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "SIMPLIFIED_MATERIAL");
 		CHECK_EQ(String(info["hit_groups"]), "HWRT_MODE_SIMPLIFIED_MATERIAL");
 		const Dictionary by_consumer = info["hit_groups_by_consumer"];
-		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace" }) {
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "path_tracer" }) {
 			CHECK_EQ(String(by_consumer[feature]), "HWRT_MODE_SIMPLIFIED_MATERIAL");
 		}
 		// The check could run here, but this NextGI has no hardware tier (no device in the doctests).
@@ -388,7 +404,7 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode is a per-platform setting, Full
 		CHECK_EQ(String(info["hardware_ray_tracing_mode"]), "FULL");
 		CHECK_EQ(String(info["hit_groups"]), "NO_CONSUMER");
 		const Dictionary by_consumer = info["hit_groups_by_consumer"];
-		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check" }) {
+		for (const char *feature : { "hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer" }) {
 			CHECK_EQ(String(by_consumer[feature]), "NOT_HWRT");
 		}
 	}
@@ -424,6 +440,18 @@ TEST_CASE("[NextGIHit] hardware_ray_tracing_mode's Windows and Linux entries dec
 	NextGI next_gi;
 	next_gi.init(true);
 	CHECK_EQ(next_gi.get_hardware_ray_tracing_mode(), expected);
+}
+
+TEST_CASE("[NextGIHit] New hit groups wait for the previous ones' tables to leave the frame delay") {
+	// GodotNext: path_tracer (#167). Never freed: nothing to wait for.
+	CHECK_FALSE(nextgi_hit_tables_releasing(UINT64_MAX, 0, 3));
+	CHECK_FALSE(nextgi_hit_tables_releasing(UINT64_MAX, 100, 3));
+	// Freed on frame 100 with a frame delay of 3: the tables are freed when frame 100's slot comes back.
+	CHECK(nextgi_hit_tables_releasing(100, 100, 3));
+	CHECK(nextgi_hit_tables_releasing(100, 101, 3));
+	CHECK(nextgi_hit_tables_releasing(100, 103, 3));
+	CHECK_FALSE(nextgi_hit_tables_releasing(100, 104, 3));
+	CHECK_FALSE(nextgi_hit_tables_releasing(100, 200, 3));
 }
 
 static NextGIHitStreamHeader _header(const Vector2 &p_uv_min, const Vector2 &p_uv_extent, const Vector2 &p_uv2_min, const Vector2 &p_uv2_extent) {

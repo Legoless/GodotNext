@@ -2,6 +2,14 @@
 // nextgi_rt_inc.glsl, then the material, light, record, surface and chunk buffers.
 // Bounce rules match the v0 testbed tracer: Russian roulette after 4, hard stop at 64,
 // no clamp. Each trace is one nextgi_trace() call.
+//
+// GodotNext: path_tracer (#167). The product path tracer (RendererRD::PathTracer, path_tracer.glsl and
+// path_tracer_hit.glsl) shades with these same functions. NEXTGI_PT_MATERIAL(m) names the material a
+// function reads: the D16 table entry m unless the includer defines it first (the hit-group path reads the
+// material its hit group evaluated). The default expands to the code the reference always compiled.
+#ifndef NEXTGI_PT_MATERIAL
+#define NEXTGI_PT_MATERIAL(m) materials.data[m]
+#endif
 
 const uint NEXTGI_PT_BOUNCE_CAP = 64u;
 const uint NEXTGI_PT_ROULETTE_FROM = 4u;
@@ -44,22 +52,22 @@ void nextgi_pt_basis(vec3 normal, out vec3 tangent, out vec3 bitangent) {
 }
 
 vec3 nextgi_pt_f0(uint material) {
-	vec4 albedo_metal = materials.data[material].albedo_metal;
-	float specular = materials.data[material].specular_mode.x;
+	vec4 albedo_metal = NEXTGI_PT_MATERIAL(material).albedo_metal;
+	float specular = NEXTGI_PT_MATERIAL(material).specular_mode.x;
 	float dielectric = 0.16 * specular * specular;
 	return mix(vec3(dielectric), albedo_metal.rgb, albedo_metal.w);
 }
 
 vec3 nextgi_pt_diffuse_albedo(uint material) {
-	vec4 albedo_metal = materials.data[material].albedo_metal;
+	vec4 albedo_metal = NEXTGI_PT_MATERIAL(material).albedo_metal;
 	return albedo_metal.rgb * (1.0 - albedo_metal.w);
 }
 
 float nextgi_pt_diffuse_nl(uint material, vec3 normal, vec3 view, vec3 light_dir, float n_dot_l) {
-	if (materials.data[material].specular_mode.y < 0.5) {
+	if (NEXTGI_PT_MATERIAL(material).specular_mode.y < 0.5) {
 		return n_dot_l * (1.0 / NEXTGI_PT_PI);
 	}
-	float roughness = materials.data[material].emission_roughness.w;
+	float roughness = NEXTGI_PT_MATERIAL(material).emission_roughness.w;
 	float n_dot_v = max(dot(normal, view), 1e-4);
 	vec3 half_vec = normalize(view + light_dir);
 	float l_dot_h = clamp(dot(light_dir, half_vec), 0.0, 1.0);
@@ -70,7 +78,7 @@ float nextgi_pt_diffuse_nl(uint material, vec3 normal, vec3 view, vec3 light_dir
 }
 
 vec3 nextgi_pt_specular_nl(uint material, vec3 normal, vec3 view, vec3 light_dir, float n_dot_l) {
-	float roughness = materials.data[material].emission_roughness.w;
+	float roughness = NEXTGI_PT_MATERIAL(material).emission_roughness.w;
 	if (roughness <= 0.0 || n_dot_l <= 0.0) {
 		return vec3(0.0);
 	}
@@ -82,7 +90,7 @@ vec3 nextgi_pt_specular_nl(uint material, vec3 normal, vec3 view, vec3 light_dir
 	float alpha = roughness * roughness;
 	float distribution = nextgi_pt_d_ggx(n_dot_h, alpha);
 	float visibility = nextgi_pt_v_ggx(n_dot_l, n_dot_v, alpha);
-	float metallic = materials.data[material].albedo_metal.w;
+	float metallic = NEXTGI_PT_MATERIAL(material).albedo_metal.w;
 	float f90 = clamp(dot(f0, vec3(50.0 * 0.33)), metallic, 1.0);
 	vec3 fresnel = f0 + (vec3(f90) - f0) * nextgi_pt_schlick(l_dot_h);
 	return n_dot_l * distribution * fresnel * visibility;
@@ -235,7 +243,7 @@ vec3 nextgi_pt_ggx(vec3 normal, vec3 view, float alpha, vec2 random_uv) {
 }
 
 float nextgi_pt_ggx_pdf(uint material, vec3 normal, vec3 view, vec3 light_dir) {
-	float roughness = materials.data[material].emission_roughness.w;
+	float roughness = NEXTGI_PT_MATERIAL(material).emission_roughness.w;
 	float alpha = roughness * roughness;
 	vec3 half_vec = normalize(view + light_dir);
 	float n_dot_h = clamp(dot(normal, half_vec), 0.0, 1.0);
@@ -254,7 +262,7 @@ vec3 nextgi_pt_sample(uint material, vec3 normal, vec3 view, inout uint rng, out
 	pdf = 0.0;
 	vec3 reflected = nextgi_pt_diffuse_albedo(material);
 	vec3 f0 = nextgi_pt_f0(material);
-	float roughness = materials.data[material].emission_roughness.w;
+	float roughness = NEXTGI_PT_MATERIAL(material).emission_roughness.w;
 	float spec_weight = max(f0.r, max(f0.g, f0.b));
 	float diff_weight = max(reflected.r, max(reflected.g, reflected.b));
 	float p_spec = 0.0;
@@ -288,7 +296,7 @@ vec3 nextgi_pt_sample(uint material, vec3 normal, vec3 view, inout uint rng, out
 
 vec3 nextgi_pt_radiance_at(vec3 position, vec3 normal, vec3 wo, uint material, inout uint rng) {
 	vec3 throughput = vec3(1.0);
-	vec3 accumulated = materials.data[material].emission_roughness.rgb;
+	vec3 accumulated = NEXTGI_PT_MATERIAL(material).emission_roughness.rgb;
 	vec3 view = wo;
 	accumulated += nextgi_pt_next_event(position, normal, view, material);
 	if (ref_params.dispatch.w != 0u) {
@@ -319,7 +327,7 @@ vec3 nextgi_pt_radiance_at(vec3 position, vec3 normal, vec3 wo, uint material, i
 			break;
 		}
 		view = -direction;
-		accumulated += throughput * materials.data[material].emission_roughness.rgb;
+		accumulated += throughput * NEXTGI_PT_MATERIAL(material).emission_roughness.rgb;
 		accumulated += throughput * nextgi_pt_next_event(position, normal, view, material);
 		if (ref_params.dispatch.w != 0u) {
 			break;
@@ -347,7 +355,7 @@ vec3 nextgi_pt_sample_ggx(vec3 p_normal, vec3 p_view, float p_roughness, inout u
 vec3 nextgi_pt_reflection(vec3 p_position, vec3 p_normal, vec3 p_view, uint p_material, inout uint p_rng, out float r_distance, out float r_hit) {
 	r_distance = 0.0;
 	r_hit = 0.0;
-	const float roughness = materials.data[p_material].emission_roughness.w;
+	const float roughness = NEXTGI_PT_MATERIAL(p_material).emission_roughness.w;
 	vec3 direction = nextgi_pt_sample_ggx(p_normal, p_view, roughness, p_rng);
 	vec3 origin = p_position + p_normal * NEXTGI_PT_ORIGIN_OFFSET;
 	NextGIHit hit;

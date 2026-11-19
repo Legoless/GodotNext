@@ -5165,6 +5165,71 @@ Viewport::TSRQuality Viewport::get_tsr_quality() const {
 	return tsr_quality;
 }
 
+// GodotNext: path_tracer (#167)
+void Viewport::set_path_tracing_enabled(bool p_enabled) {
+	ERR_MAIN_THREAD_GUARD;
+	if (path_tracing_enabled == p_enabled) {
+		return;
+	}
+	path_tracing_enabled = p_enabled;
+	RS::get_singleton()->viewport_set_path_tracing_enabled(viewport, p_enabled);
+}
+
+bool Viewport::is_path_tracing_enabled() const {
+	ERR_READ_THREAD_GUARD_V(false);
+	return path_tracing_enabled;
+}
+
+void Viewport::set_path_tracing_samples(int p_samples) {
+	ERR_MAIN_THREAD_GUARD;
+	const int samples = RenderingServerTypes::path_tracing_validate_samples(p_samples);
+	if (path_tracing_samples == samples) {
+		return;
+	}
+	path_tracing_samples = samples;
+	RS::get_singleton()->viewport_set_path_tracing_samples(viewport, samples);
+}
+
+int Viewport::get_path_tracing_samples() const {
+	ERR_READ_THREAD_GUARD_V(RenderingServerTypes::PATH_TRACING_DEFAULT_SAMPLES);
+	return path_tracing_samples;
+}
+
+void Viewport::set_path_tracing_max_bounces(int p_max_bounces) {
+	ERR_MAIN_THREAD_GUARD;
+	const int max_bounces = RenderingServerTypes::path_tracing_validate_max_bounces(p_max_bounces);
+	if (path_tracing_max_bounces == max_bounces) {
+		return;
+	}
+	path_tracing_max_bounces = max_bounces;
+	RS::get_singleton()->viewport_set_path_tracing_max_bounces(viewport, max_bounces);
+}
+
+int Viewport::get_path_tracing_max_bounces() const {
+	ERR_READ_THREAD_GUARD_V(RenderingServerTypes::PATH_TRACING_DEFAULT_MAX_BOUNCES);
+	return path_tracing_max_bounces;
+}
+
+void Viewport::set_path_tracing_firefly_clamp(float p_firefly_clamp) {
+	ERR_MAIN_THREAD_GUARD;
+	const float firefly_clamp = RenderingServerTypes::path_tracing_validate_firefly_clamp(p_firefly_clamp);
+	if (path_tracing_firefly_clamp == firefly_clamp) {
+		return;
+	}
+	path_tracing_firefly_clamp = firefly_clamp;
+	RS::get_singleton()->viewport_set_path_tracing_firefly_clamp(viewport, firefly_clamp);
+}
+
+float Viewport::get_path_tracing_firefly_clamp() const {
+	ERR_READ_THREAD_GUARD_V(0.0f);
+	return path_tracing_firefly_clamp;
+}
+
+Dictionary Viewport::get_path_tracing_info() const {
+	ERR_READ_THREAD_GUARD_V(Dictionary());
+	return RS::get_singleton()->viewport_get_path_tracing_info(viewport);
+}
+
 void Viewport::set_texture_mipmap_bias(float p_texture_mipmap_bias) {
 	ERR_MAIN_THREAD_GUARD;
 	if (texture_mipmap_bias == p_texture_mipmap_bias) {
@@ -5404,6 +5469,17 @@ void Viewport::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_tsr_quality", "tsr_quality"), &Viewport::set_tsr_quality);
 	ClassDB::bind_method(D_METHOD("get_tsr_quality"), &Viewport::get_tsr_quality);
 
+	// GodotNext: path_tracer (#167)
+	ClassDB::bind_method(D_METHOD("set_path_tracing_enabled", "enabled"), &Viewport::set_path_tracing_enabled);
+	ClassDB::bind_method(D_METHOD("is_path_tracing_enabled"), &Viewport::is_path_tracing_enabled);
+	ClassDB::bind_method(D_METHOD("set_path_tracing_samples", "samples"), &Viewport::set_path_tracing_samples);
+	ClassDB::bind_method(D_METHOD("get_path_tracing_samples"), &Viewport::get_path_tracing_samples);
+	ClassDB::bind_method(D_METHOD("set_path_tracing_max_bounces", "max_bounces"), &Viewport::set_path_tracing_max_bounces);
+	ClassDB::bind_method(D_METHOD("get_path_tracing_max_bounces"), &Viewport::get_path_tracing_max_bounces);
+	ClassDB::bind_method(D_METHOD("set_path_tracing_firefly_clamp", "firefly_clamp"), &Viewport::set_path_tracing_firefly_clamp);
+	ClassDB::bind_method(D_METHOD("get_path_tracing_firefly_clamp"), &Viewport::get_path_tracing_firefly_clamp);
+	ClassDB::bind_method(D_METHOD("get_path_tracing_info"), &Viewport::get_path_tracing_info);
+
 	ClassDB::bind_method(D_METHOD("set_texture_mipmap_bias", "texture_mipmap_bias"), &Viewport::set_texture_mipmap_bias);
 	ClassDB::bind_method(D_METHOD("get_texture_mipmap_bias"), &Viewport::get_texture_mipmap_bias);
 
@@ -5454,6 +5530,12 @@ void Viewport::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "vrs_mode", PROPERTY_HINT_ENUM, "Disabled,Texture,XR"), "set_vrs_mode", "get_vrs_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "vrs_update_mode", PROPERTY_HINT_ENUM, "Disabled,Once,Always"), "set_vrs_update_mode", "get_vrs_update_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "vrs_texture", PROPERTY_HINT_RESOURCE_TYPE, Texture2D::get_class_static()), "set_vrs_texture", "get_vrs_texture");
+	// GodotNext: path_tracer (#167)
+	ADD_GROUP("Path Tracing", "path_tracing_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "path_tracing_enabled"), "set_path_tracing_enabled", "is_path_tracing_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "path_tracing_samples", PROPERTY_HINT_RANGE, "1,1048576,1"), "set_path_tracing_samples", "get_path_tracing_samples");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "path_tracing_max_bounces", PROPERTY_HINT_RANGE, "0,63,1"), "set_path_tracing_max_bounces", "get_path_tracing_max_bounces");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "path_tracing_firefly_clamp", PROPERTY_HINT_RANGE, "0,65504,0.01"), "set_path_tracing_firefly_clamp", "get_path_tracing_firefly_clamp");
 #endif
 	ADD_GROUP("Canvas Items", "canvas_item_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "canvas_item_default_texture_filter", PROPERTY_HINT_ENUM, "Nearest,Linear,Linear Mipmap,Nearest Mipmap,Inherit"), "set_default_canvas_item_texture_filter", "get_default_canvas_item_texture_filter");
@@ -5618,6 +5700,7 @@ void Viewport::_bind_methods() {
 	BIND_ENUM_CONSTANT(DEBUG_DRAW_NEXTGI_LITE_PROBES);
 	// GodotNext: pt_tsr_stability (#198)
 	BIND_ENUM_CONSTANT(DEBUG_DRAW_TSR);
+	BIND_ENUM_CONSTANT(DEBUG_DRAW_PATH_TRACER); // GodotNext: path_tracer (#167)
 
 	BIND_ENUM_CONSTANT(DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST);
 	BIND_ENUM_CONSTANT(DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_LINEAR);

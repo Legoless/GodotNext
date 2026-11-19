@@ -3120,9 +3120,9 @@
 				- [code]lite_view_fields[/code]: the number of views that hold a Lumen Lite field. Each view keeps its own field, which is freed with the view.
 				- [code]wrc_views[/code]: the number of views that hold a world radiance cache, and [code]wrc_views_bytes[/code] their memory. Each view keeps its own cache, around its own camera, which is freed with the view. The other world radiance cache keys come from the view that updated its cache last.
 				- [code]mid_frame_tier_changes[/code]: the number of frames whose NextGI work ended on another tier than the frame began on. A tier change, including the switch to the software tier when acceleration structures exceed their memory budget ([code]AS_MEMORY[/code]), applies at the start of the next frame, so this stays [code]0[/code].
-				- [code]hit_groups[/code]: [code]"AVAILABLE"[/code] when the material hit groups run, or why they do not: [code]"NO_CONSUMER"[/code] (nothing asks for them, the default), [code]"NOT_HWRT"[/code], [code]"NO_RAYTRACING_PIPELINE"[/code] (Metal until its ray tracing pipelines land, or a device without them), [code]"NO_PIPELINE_LIBRARY"[/code], [code]"NO_BINDLESS"[/code], [code]"INIT_FAILED"[/code] (setting them up failed; not retried until nothing asks for them), [code]"HWRT_MODE_INLINE"[/code] or [code]"HWRT_MODE_SIMPLIFIED_MATERIAL"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing_mode] lets none of the features that ask for them run).
+				- [code]hit_groups[/code]: [code]"AVAILABLE"[/code] when the material hit groups run, or why they do not: [code]"NO_CONSUMER"[/code] (nothing asks for them, the default), [code]"NOT_HWRT"[/code], [code]"NO_RAYTRACING_PIPELINE"[/code] (Metal until its ray tracing pipelines land, or a device without them), [code]"NO_PIPELINE_LIBRARY"[/code], [code]"NO_BINDLESS"[/code], [code]"INIT_FAILED"[/code] (setting them up failed; not retried until nothing asks for them), [code]"RELEASING"[/code] (they were freed a few frames ago and the device still holds their tables; they come back once it frees them), [code]"HWRT_MODE_INLINE"[/code] or [code]"HWRT_MODE_SIMPLIFIED_MATERIAL"[/code] ([member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing_mode] lets none of the features that ask for them run).
 				- [code]hardware_ray_tracing_mode[/code]: [code]"FULL"[/code], [code]"SIMPLIFIED_MATERIAL"[/code] or [code]"INLINE"[/code], the [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing_mode] read at startup.
-				- [code]hit_groups_by_consumer[/code]: for each feature that uses the material hit groups ([code]hit_lighting[/code], [code]translucency[/code], [code]far_field[/code], [code]material_retrace[/code] and the [code]check[/code] of [member ProjectSettings.rendering/global_illumination/nextgi/debug/hit_material_check]), [code]"AVAILABLE"[/code] or the reason its inline path is used. The reason of [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing_mode] comes first. Otherwise a feature that asks for the hit groups gets what the last frame gave it, so [code]"AVAILABLE"[/code] only while they exist, and a feature that does not ask gets the [code]hit_groups[/code] value it would get if it asked alone.
+				- [code]hit_groups_by_consumer[/code]: for each feature that uses the material hit groups ([code]hit_lighting[/code], [code]translucency[/code], [code]far_field[/code], [code]material_retrace[/code], the [code]check[/code] of [member ProjectSettings.rendering/global_illumination/nextgi/debug/hit_material_check] and the [code]path_tracer[/code] of [member Viewport.path_tracing_enabled], which runs on them only in the [b]Full[/b] mode and traces with its [code]INLINE[/code] backend otherwise), [code]"AVAILABLE"[/code] or the reason its inline path is used. The reason of [member ProjectSettings.rendering/global_illumination/nextgi/hardware_ray_tracing_mode] comes first. Otherwise a feature that asks for the hit groups gets what the last frame gave it, so [code]"AVAILABLE"[/code] only while they exist, and a feature that does not ask gets the [code]hit_groups[/code] value it would get if it asked alone.
 				- [code]hardware_ray_tracing_pending[/code]: only present while a [method nextgi_set_hardware_ray_tracing] request waits for a restart; the requested mode.
 			</description>
 		</method>
@@ -4334,6 +4334,13 @@
 				[b]Note:[/b] When GPU utilization is low enough during a certain period of time, GPUs will decrease their power state (which in turn decreases core and memory clock speeds). This can cause the reported GPU time to increase if GPU utilization is kept low enough by a framerate cap (compared to what it would be at the GPU's highest power state). Keep this in mind when benchmarking using [method viewport_get_measured_render_time_gpu]. This behavior can be overridden in the graphics driver settings at the cost of higher power usage.
 			</description>
 		</method>
+		<method name="viewport_get_path_tracing_info">
+			<return type="Dictionary" />
+			<param index="0" name="viewport" type="RID" />
+			<description>
+				Returns the state of the viewport's path tracer: [code]enabled[/code] and the settings it has ([code]samples_setting[/code], [code]max_bounces_setting[/code], [code]firefly_clamp_setting[/code]), and once it has rendered, [code]status[/code] ([code]OFF[/code], [code]ACTIVE[/code], [code]CONVERGED[/code], or why it cannot run: [code]NO_NEXTGI[/code], [code]NOT_HWRT[/code], [code]NO_TLAS[/code], [code]MULTIVIEW[/code], [code]REFERENCE_MODE[/code], [code]UNSUPPORTED_DEVICE[/code]), [code]backend[/code] ([code]HIT_GROUPS[/code] or [code]INLINE[/code]), [code]device_support[/code] ([code]SUPPORTED[/code], [code]EXPERIMENTAL[/code] on macOS, or why the device cannot path trace: [code]NO_RAY_QUERY[/code], [code]APPLE_FAMILY[/code] before Apple8), [code]samples[/code], [code]target_samples[/code], [code]width[/code], [code]height[/code], [code]resets[/code], [code]last_reset_reasons[/code], [code]reset_counts[/code] and [code]textured_materials[/code]. With [member ProjectSettings.rendering/global_illumination/nextgi/debug/path_tracer_readback] on, it also returns the history ([code]accumulation[/code]), its [code]mean[/code], [code]nonfinite[/code] and [code]hash[/code]. Equivalent to [method Viewport.get_path_tracing_info].
+			</description>
+		</method>
 		<method name="viewport_get_render_info">
 			<return type="int" />
 			<param index="0" name="viewport" type="RID" />
@@ -4564,6 +4571,38 @@
 			<param index="1" name="parent_viewport" type="RID" />
 			<description>
 				Sets the viewport's parent to the viewport specified by the [param parent_viewport] RID.
+			</description>
+		</method>
+		<method name="viewport_set_path_tracing_enabled">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="enabled" type="bool" />
+			<description>
+				If [code]true[/code], the viewport's 3D view is path traced progressively. Equivalent to [member Viewport.path_tracing_enabled].
+			</description>
+		</method>
+		<method name="viewport_set_path_tracing_firefly_clamp">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="firefly_clamp" type="float" />
+			<description>
+				Sets the largest exposed radiance one path sample may add; [code]0.0[/code] turns the clamp off. Equivalent to [member Viewport.path_tracing_firefly_clamp].
+			</description>
+		</method>
+		<method name="viewport_set_path_tracing_max_bounces">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="max_bounces" type="int" />
+			<description>
+				Sets the most bounces a path takes, between [code]0[/code] and [code]63[/code]. Equivalent to [member Viewport.path_tracing_max_bounces].
+			</description>
+		</method>
+		<method name="viewport_set_path_tracing_samples">
+			<return type="void" />
+			<param index="0" name="viewport" type="RID" />
+			<param index="1" name="samples" type="int" />
+			<description>
+				Sets the number of samples per pixel the path tracer accumulates. Equivalent to [member Viewport.path_tracing_samples].
 			</description>
 		</method>
 		<method name="viewport_set_positional_shadow_atlas_quadrant_subdivision">
@@ -6098,6 +6137,10 @@
 		</constant>
 		<constant name="VIEWPORT_DEBUG_DRAW_TSR" value="61" enum="ViewportDebugDraw">
 			Shows one pass of Temporal Super Resolution (TSR), chosen by [member ProjectSettings.rendering/anti_aliasing/tsr/debug_view]: history validity, rejection, disocclusion, resurrection hits, flicker period or thin coverage. Each view is drawn over the scene's luma at 25%. Green helps the image, red or yellow costs it, and magenta means the feature is off, for the pixel or for the whole view. TSR keeps running while the view is shown. When TSR is not the active scaling mode ([constant VIEWPORT_SCALING_3D_MODE_TSR]), the view shows the normal image.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_PATH_TRACER" value="62" enum="ViewportDebugDraw">
+			Path traces the view, as [method viewport_set_path_tracing_enabled] does, with the viewport's path tracing settings. Shows the normal image where the path tracer cannot run.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">

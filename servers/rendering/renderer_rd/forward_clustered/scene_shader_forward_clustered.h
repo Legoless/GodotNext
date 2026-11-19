@@ -461,6 +461,8 @@ public:
 		virtual uint32_t get_raster_features() const override { return raster_features; }
 		// GodotNext: nextgeo_rt_native (#156)
 		virtual bool nextgeo_moves_vertices() const override { return uses_vertex || uses_position || writes_modelview_or_projection || uses_skip_vertex_transform; }
+		// GodotNext: path_tracer (#167).
+		virtual RSE::CullMode get_cull_mode() const override { return cull_mode; }
 		// GodotNext: nextgeo_raster_bins (#155). True when a programmable raster bin can take the material on
 		// this device.
 		bool has_raster_target() const { return raster_target_valid && SceneShaderForwardClustered::singleton != nullptr && SceneShaderForwardClustered::singleton->raster_target_ready; }

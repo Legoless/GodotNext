@@ -3109,6 +3109,12 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);
+	// GodotNext: path_tracer (#167)
+	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_enabled", "viewport", "enabled"), &RenderingServer::viewport_set_path_tracing_enabled);
+	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_samples", "viewport", "samples"), &RenderingServer::viewport_set_path_tracing_samples);
+	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_max_bounces", "viewport", "max_bounces"), &RenderingServer::viewport_set_path_tracing_max_bounces);
+	ClassDB::bind_method(D_METHOD("viewport_set_path_tracing_firefly_clamp", "viewport", "firefly_clamp"), &RenderingServer::viewport_set_path_tracing_firefly_clamp);
+	ClassDB::bind_method(D_METHOD("viewport_get_path_tracing_info", "viewport"), &RenderingServer::viewport_get_path_tracing_info);
 	ClassDB::bind_method(D_METHOD("viewport_set_texture_mipmap_bias", "viewport", "mipmap_bias"), &RenderingServer::viewport_set_texture_mipmap_bias);
 	ClassDB::bind_method(D_METHOD("viewport_set_anisotropic_filtering_level", "viewport", "anisotropic_filtering_level"), &RenderingServer::viewport_set_anisotropic_filtering_level);
 	ClassDB::bind_method(D_METHOD("viewport_set_update_mode", "viewport", "update_mode"), &RenderingServer::viewport_set_update_mode);
@@ -3318,6 +3324,7 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_NEXTGI_LITE_PROBES);
 	// GodotNext: pt_tsr_stability (#198)
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_TSR);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_PATH_TRACER); // GodotNext: path_tracer (#167)
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -4228,6 +4235,10 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/hit_material_check", false);
 	// GodotNext: nextgi_reference_capture (#263). Changing it restarts the accumulation.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_epoch", PROPERTY_HINT_RANGE, "0,65535,1,or_greater"), 0);
+	// GodotNext: path_tracer (#167). Reads each view's path tracer history back for its checks.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/path_tracer_readback", false);
+	// GodotNext: path_tracer (#167). Traces as the D16 reference does, to compare the two estimators.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/path_tracer_reference_match", false);
 
 	// GodotNext: mesh_sdf_settings
 	GLOBAL_DEF("rendering/global_illumination/mesh_sdf/generate", false);

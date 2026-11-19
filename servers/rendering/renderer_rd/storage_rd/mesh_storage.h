@@ -250,6 +250,8 @@ private:
 		uint32_t nextgi_rt_update_frames[4] = { UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX };
 		bool nextgi_rt_dynamic = false;
 		bool nextgi_rt_allows_update = false;
+		// GodotNext: path_tracer (#167). Counts in-place updates of the surfaces' vertex, attribute or skin data.
+		uint64_t content_serial = 0;
 
 		// GodotNext: nextgeo_exclusive_dispatch (#79). Lazy coarse/RT proxy meshes for auxiliary and debug views.
 		RID virtual_proxy_mesh;
@@ -296,6 +298,8 @@ private:
 		RID blend_weights_buffer;
 		List<MeshInstance *>::Element *I = nullptr; //used to erase itself
 		uint64_t skeleton_version = 0;
+		// GodotNext: path_tracer (#167). Counts the skinning passes that wrote a posed RT-arena slot.
+		uint64_t rt_pose_serial = 0;
 		bool dirty = false;
 		bool weights_dirty = false;
 		SelfList<MeshInstance> weight_update_list;
@@ -600,6 +604,10 @@ public:
 	bool mesh_nextgi_rt_is_blas_dirty(RID p_mesh) const;
 	void mesh_nextgi_rt_set_blas_dirty(RID p_mesh, bool p_dirty);
 	void mesh_nextgi_rt_note_vertex_update(RID p_mesh);
+	// GodotNext: path_tracer (#167). What changes a traced shape or its hit attributes without a new BLAS layout:
+	// in-place region updates of a mesh, and the skinning passes of a mesh instance (0 for an unknown RID).
+	uint64_t mesh_get_content_serial(RID p_mesh) const;
+	uint64_t mesh_instance_get_rt_pose_serial(RID p_mesh_instance) const;
 	bool mesh_nextgi_rt_is_dynamic(RID p_mesh) const;
 	void mesh_nextgi_rt_set_allows_update(RID p_mesh, bool p_allows);
 	bool mesh_nextgi_rt_allows_update(RID p_mesh) const;

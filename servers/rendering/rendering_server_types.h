@@ -248,6 +248,32 @@ inline Rect2 get_splash_stretched_screen_rect(const Size2 &p_image_size, const S
 	return screenrect;
 }
 
+// GodotNext: path_tracer (#167). Viewport.path_tracing_* defaults and limits, shared by Viewport,
+// RendererViewport and RendererRD::PathTracer. The bounce limit is the D16 reference tracer's hard stop: 64
+// path vertices, so 63 bounces.
+static constexpr int PATH_TRACING_DEFAULT_SAMPLES = 2048;
+static constexpr int PATH_TRACING_MAX_SAMPLES = 1 << 20;
+static constexpr int PATH_TRACING_DEFAULT_MAX_BOUNCES = 32;
+static constexpr int PATH_TRACING_MAX_BOUNCES = 63;
+static constexpr float PATH_TRACING_MAX_FIREFLY_CLAMP = 65504.0f;
+
+inline int path_tracing_validate_samples(int64_t p_samples) {
+	return int(CLAMP(p_samples, int64_t(1), int64_t(PATH_TRACING_MAX_SAMPLES)));
+}
+
+inline int path_tracing_validate_max_bounces(int64_t p_max_bounces) {
+	return int(CLAMP(p_max_bounces, int64_t(0), int64_t(PATH_TRACING_MAX_BOUNCES)));
+}
+
+// The largest exposed radiance one path sample may add, as UE's Max Path Intensity. 0 turns the clamp off;
+// negative and non-finite values are 0.
+inline float path_tracing_validate_firefly_clamp(double p_clamp) {
+	if (!(p_clamp > 0.0) || !Math::is_finite(p_clamp)) {
+		return 0.0f;
+	}
+	return float(MIN(p_clamp, double(PATH_TRACING_MAX_FIREFLY_CLAMP)));
+}
+
 /* RENDERING METHOD */
 
 struct RenderInfo {

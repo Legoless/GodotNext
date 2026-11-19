@@ -1070,6 +1070,8 @@ public:
 		DeviceFamily device_family = DEVICE_UNKNOWN;
 		uint32_t version_major = 1;
 		uint32_t version_minor = 0;
+		// GodotNext: path_tracer (#167). The Apple GPU family on Metal (7 for Apple7, 8 for Apple8), 0 elsewhere.
+		uint32_t apple_gpu_family = 0;
 	};
 
 	virtual void set_object_name(ObjectType p_type, ID p_driver_id, const String &p_name) = 0;

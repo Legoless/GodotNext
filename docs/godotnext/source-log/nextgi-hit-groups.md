@@ -134,8 +134,9 @@ run on it follows the archived World Cache page until the plan's §25.3 re-check
 Cache does (#294 adds its consumer and what the simplified shader returns for it). UE's simplified hit shader "can
 still give the World Cache the surface color it needs at each hit"; GodotNext's does not yet, so the surface
 colour, and any per-material code or stream it needs, comes with #294. The debug check also runs on it, which
-proves on a device that no material hit group exists. Translucency, far field and material retrace (#145, and #146
-through it) keep their inline path, as UE's "Other features fall back to inline ray tracing"; each has its consumer
-bit, so tier info reports the reason for it. UE's Disabled is
+proves on a device that no material hit group exists. Translucency, far field, material retrace (#145, and #146
+through it) and the path tracer (#167, which then traces with its INLINE backend and the D16 table materials) keep
+their inline path, as UE's "Other features fall back to inline ray tracing"; each has its consumer bit, so tier
+info reports the reason for it. UE's Disabled is
 `rendering/global_illumination/nextgi/hardware_ray_tracing = Off`. The Windows and Linux entries use Godot's
 feature-tag overrides, as `rendering/rendering_device/driver.windows` does.

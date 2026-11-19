@@ -35,6 +35,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_reference.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_relight.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_wrc.h"
+// GodotNext: path_tracer (#167)
+#include "servers/rendering/renderer_rd/effects/path_tracer.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_gather_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_reference.glsl.gen.h"
@@ -43,6 +45,7 @@
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_wrc_update_swrt.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/path_tracer.glsl.gen.h"
 
 using namespace RendererRD;
 
@@ -59,6 +62,8 @@ struct NextGIBakeShaders::Instances {
 	NextgiSrcRelightSwrtShaderRD relight_swrt_rgba16f;
 	NextgiWrcUpdateSwrtShaderRD wrc_update_swrt;
 	NextgiSelftestShaderRD selftest;
+	// GodotNext: path_tracer (#167). The product path tracer's inline backend (ray query).
+	PathTracerShaderRD path_tracer;
 };
 
 void NextGIBakeShaders::_add(ShaderRD &p_shader, const Vector<String> &p_variant_defines) {
@@ -85,6 +90,7 @@ NextGIBakeShaders::NextGIBakeShaders() {
 	_add(instances->relight_swrt_rgba16f, NextGIRelight::get_shader_variant_defines(false));
 	_add(instances->wrc_update_swrt, NextGIWRC::get_shader_variant_defines());
 	_add(instances->selftest, NextGI::get_selftest_variant_defines());
+	_add(instances->path_tracer, PathTracer::get_shader_variant_defines()); // GodotNext: path_tracer (#167)
 }
 
 NextGIBakeShaders::~NextGIBakeShaders() {

@@ -3169,6 +3169,12 @@
 		<member name="rendering/global_illumination/nextgi/debug/hit_material_check" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], NextGI keeps the material hit groups and the attribute stream they read on the hardware ray tracing tier, and checks them: it traces every covered texel of the surface cache's captured cards back into the scene through the hit groups and compares albedo, normal, roughness, metallic and opacity with the captured material atlas. [method RenderingServer.nextgi_get_counters] reports the results ([code]hit_check_*[/code]) and the hit groups ([code]hit_*[/code]), and [method RenderingServer.nextgi_get_tier_info] reports why they do not run ([code]hit_groups[/code]). Read every frame. Turning it off frees the hit groups and the attribute stream.
 		</member>
+		<member name="rendering/global_illumination/nextgi/debug/path_tracer_readback" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the path tracer reads each path-traced view's history back after every traced frame, and [method RenderingServer.viewport_get_path_tracing_info] returns it with its mean. For the path tracer's checks; it stalls the GPU every frame.
+		</member>
+		<member name="rendering/global_illumination/nextgi/debug/path_tracer_reference_match" type="bool" setter="" getter="" default="false">
+			If [code]true[/code], the path tracer traces as the reference path tracer ([member rendering/global_illumination/nextgi/debug/reference_mode]) does: with inline ray query and the reference's material table (no textures, no material code, the color parameters' raw values), from pixel centers, with the reference's camera and random numbers and without backface culling, so its history can be compared with the reference's. For the path tracer's checks. Changing it restarts the history.
+		</member>
 		<member name="rendering/global_illumination/nextgi/debug/read_page_radiance" type="bool" setter="" getter="" default="false">
 			If [code]true[/code], [method RenderingServer.nextgi_get_tier_info] includes [code]src_page_probes[/code], the center-texel radiance of each surface-cache page. This reads a small buffer back from the GPU.
 		</member>
@@ -3224,7 +3230,7 @@
 		<member name="rendering/global_illumination/nextgi/hardware_ray_tracing_mode" type="int" setter="" getter="" default="0">
 			Which ray tracing pipelines NextGI's hardware ray tracing tier may use, as Unreal Engine 5.9's per-platform Hardware Ray Tracing Mode. Inline ray queries run in every mode. Unreal Engine's fourth mode, [b]Disabled[/b], is [b]Off[/b] in [member rendering/global_illumination/nextgi/hardware_ray_tracing].
 			[b]Full[/b] (the default) supports every ray tracing feature: materials compile to hit groups when a feature needs them.
-			[b]Simplified Material[/b] links only the base hit pipeline, whose one simplified hit shader returns the hit's distance, geometric normal and side for every geometry. No material compiles a hit group and no attribute stream is kept. Only features that can use the simplified hit shader run on it; features that need a material's own hit group, such as hit lighting, keep their inline path.
+			[b]Simplified Material[/b] links only the base hit pipeline, whose one simplified hit shader returns the hit's distance, geometric normal and side for every geometry. No material compiles a hit group and no attribute stream is kept. Only features that can use the simplified hit shader run on it; features that need a material's own hit group, such as hit lighting and the path tracer ([member Viewport.path_tracing_enabled]), keep their inline path.
 			[b]Inline[/b] creates no ray tracing pipeline and compiles no hit shader. Features that need one keep their inline path.
 			[method RenderingServer.nextgi_get_tier_info] reports the mode ([code]hardware_ray_tracing_mode[/code]) and, per feature, why the hit groups do or do not run for it ([code]hit_groups_by_consumer[/code], for example [code]HWRT_MODE_INLINE[/code]).
 			[b]Note:[/b] On Windows and Linux, the [code]rendering/global_illumination/nextgi/hardware_ray_tracing_mode.windows[/code] and [code]rendering/global_illumination/nextgi/hardware_ray_tracing_mode.linuxbsd[/code] overrides apply instead.

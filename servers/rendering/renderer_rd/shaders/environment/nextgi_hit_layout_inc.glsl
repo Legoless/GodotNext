@@ -110,6 +110,45 @@ layout(set = 0, binding = 29, std430) restrict buffer HitCheckCounters {
 }
 hit_check_counters;
 
+// GodotNext: path_tracer (#167). The path tracer's ray generation stage (path_tracer_hit.glsl): the view's history,
+// its params (PathTracerGPUParams in path_tracer.cpp), the D16 light table and the D16 material table, one entry
+// per surface record. The check binds stand-ins, as the path tracer does for the check's bindings.
+struct NextGIPTMaterial {
+	vec4 albedo_metal;
+	vec4 emission_roughness;
+	vec4 specular_mode; // specular, mode, cull mode (RSE::CullMode), unused
+};
+
+layout(rgba32f, set = 0, binding = 30) restrict uniform image2D hit_pt_accumulation;
+
+layout(set = 0, binding = 31, std430) restrict readonly buffer HitPTParams {
+	vec4 cam_origin_fov;
+	vec4 cam_forward_aspect;
+	vec4 cam_up;
+	vec4 cam_right;
+	uvec4 dispatch; // width, height, sample_index, mode (0 full)
+	uvec4 counts; // seed, light_count, surface_count, record_count
+	vec4 sky_color;
+	vec4 exposure_clear; // x exposure, y clear
+	uvec4 product; // x max bounces, y flags, z firefly clamp (float bits)
+	// The product's camera rays (PathTracerGPURays): the near-plane point at the view's center (w: 1 orthogonal) and
+	// its change per normalized device x and y (w: the ray cone's width at its origin and its spread).
+	vec4 ray_center;
+	vec4 ray_dx;
+	vec4 ray_dy;
+}
+hit_pt_params;
+
+layout(set = 0, binding = 32, std430) restrict readonly buffer HitPTLights {
+	vec4 data[];
+}
+hit_pt_lights;
+
+layout(set = 0, binding = 33, std430) restrict readonly buffer HitPTMaterials {
+	NextGIPTMaterial data[];
+}
+hit_pt_materials;
+
 layout(set = 1, binding = 0) uniform texture2D hit_textures[];
 
 // Indexes the texture table with a run-time index. glslang sizes an unsized array that no code indexes

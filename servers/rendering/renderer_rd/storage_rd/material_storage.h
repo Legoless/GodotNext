@@ -94,6 +94,8 @@ public:
 		// GodotNext: nextgeo_rt_native (#156). The vertex code moves the surface: it writes VERTEX,
 		// POSITION, MODELVIEW_MATRIX or PROJECTION_MATRIX, or uses skip_vertex_transform.
 		virtual bool nextgeo_moves_vertices() const { return false; }
+		// GodotNext: path_tracer (#167). The cull mode the path tracer applies to its camera and bounce rays.
+		virtual RSE::CullMode get_cull_mode() const { return RSE::CULL_MODE_BACK; }
 
 		virtual bool casts_shadows() const = 0;
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const = 0;
@@ -336,6 +338,8 @@ private:
 		int32_t priority = 0;
 		RID next_pass;
 		SelfList<Material> update_element;
+		// GodotNext: path_tracer (#167). The material_change_serial of its last change (an update, a shader).
+		uint64_t change_serial = 0;
 
 		Dependency dependency;
 
@@ -349,6 +353,10 @@ private:
 
 	SelfList<Material>::List material_update_list;
 	Mutex material_update_list_mutex;
+	// GodotNext: path_tracer (#167). Counts material changes; each change stamps its material. The global serial
+	// counts value changes of the global shader parameters in the uniform buffer.
+	uint64_t material_change_serial = 0;
+	uint64_t global_shader_uniform_serial = 0;
 
 	static void _material_uniform_set_erased(void *p_material);
 
@@ -534,6 +542,12 @@ public:
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const override;
 	// GodotNext: nextgi_alpha_policy (#61).
 	ShaderData::NextGIRTClass material_get_nextgi_rt_class(RID p_material);
+	// GodotNext: path_tracer (#167). The serial of a material's last change (parameters, textures, its shader; 0 for
+	// none or an unknown material), whether its code reads the global shader parameter buffer, and the serial of
+	// that buffer's values, so the path tracer restarts its history only for the materials it traces.
+	uint64_t material_get_change_serial(RID p_material) const;
+	bool material_uses_global_shader_uniforms(RID p_material) const;
+	uint64_t get_global_shader_uniform_serial() const { return global_shader_uniform_serial; }
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;

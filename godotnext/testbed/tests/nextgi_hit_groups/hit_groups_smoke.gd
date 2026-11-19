@@ -83,7 +83,7 @@ func _run(p_loaded: bool) -> void:
 	if _expect_mode == "INLINE":
 		if result["hit_groups"] != "HWRT_MODE_INLINE":
 			failures.append("the hit groups report %s, not HWRT_MODE_INLINE" % result["hit_groups"])
-		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "check"]:
+		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "check", "path_tracer"]:
 			if String(by_consumer.get(feature, "")) != "HWRT_MODE_INLINE":
 				failures.append("%s reports %s, not HWRT_MODE_INLINE" % [feature, by_consumer.get(feature, "")])
 		if int(counters.get("rt_attribute_bytes", 0)) != 0 or counters.has("hit_check_runs"):
@@ -91,7 +91,7 @@ func _run(p_loaded: bool) -> void:
 	elif _expect_mode == "SIMPLIFIED_MATERIAL":
 		if result["hit_groups"] != "AVAILABLE":
 			failures.append("the simplified hit pipeline is not available (%s)" % result["hit_groups"])
-		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace"]:
+		for feature in ["hit_lighting", "translucency", "far_field", "material_retrace", "path_tracer"]:
 			if String(by_consumer.get(feature, "")) != "HWRT_MODE_SIMPLIFIED_MATERIAL":
 				failures.append("%s reports %s, not HWRT_MODE_SIMPLIFIED_MATERIAL" % [feature, by_consumer.get(feature, "")])
 		if int(counters.get("hit_check_runs", 0)) == 0:

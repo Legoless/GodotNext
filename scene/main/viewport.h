@@ -239,6 +239,8 @@ public:
 		DEBUG_DRAW_NEXTGI_LITE_PROBES,
 		// GodotNext: pt_tsr_stability (#198)
 		DEBUG_DRAW_TSR,
+		// GodotNext: path_tracer (#167)
+		DEBUG_DRAW_PATH_TRACER,
 	};
 
 	enum DefaultCanvasItemTextureFilter {
@@ -376,6 +378,11 @@ private:
 	float scaling_3d_scale = 1.0;
 	float fsr_sharpness = 0.2f;
 	TSRQuality tsr_quality = TSR_QUALITY_EPIC;
+	// GodotNext: path_tracer (#167)
+	bool path_tracing_enabled = false;
+	int path_tracing_samples = 2048; // RenderingServerTypes::PATH_TRACING_DEFAULT_SAMPLES.
+	int path_tracing_max_bounces = 32; // RenderingServerTypes::PATH_TRACING_DEFAULT_MAX_BOUNCES.
+	float path_tracing_firefly_clamp = 0.0f;
 	float texture_mipmap_bias = 0.0f;
 	AnisotropicFiltering anisotropic_filtering_level = ANISOTROPY_4X;
 	bool use_debanding = false;
@@ -666,6 +673,17 @@ public:
 
 	void set_tsr_quality(TSRQuality p_tsr_quality);
 	TSRQuality get_tsr_quality() const;
+
+	// GodotNext: path_tracer (#167)
+	void set_path_tracing_enabled(bool p_enabled);
+	bool is_path_tracing_enabled() const;
+	void set_path_tracing_samples(int p_samples);
+	int get_path_tracing_samples() const;
+	void set_path_tracing_max_bounces(int p_max_bounces);
+	int get_path_tracing_max_bounces() const;
+	void set_path_tracing_firefly_clamp(float p_firefly_clamp);
+	float get_path_tracing_firefly_clamp() const;
+	Dictionary get_path_tracing_info() const;
 
 	void set_texture_mipmap_bias(float p_texture_mipmap_bias);
 	float get_texture_mipmap_bias() const;

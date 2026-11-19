@@ -1273,6 +1273,39 @@ static const LocalVector<RendererSceneRender::NextGIRTInstance> *_nextgi_rt_fed_
 	return update_data->nextgi_rt_instances;
 }
 
+// GodotNext: path_tracer (#167). The surface sources line up with the records (the far proxies, appended last,
+// have none), and the hash covers what the path tracer's history depends on.
+void NextGIRTScene::_finish_surface_sources(const LocalVector<NextGIInstanceRecord> &p_records, const LocalVector<NextGISurfaceRecord> &p_surfaces) {
+	// Only while a path tracer wants them: the default path does not pay for the walk.
+	if (!surface_sources_wanted) {
+		return;
+	}
+	if (surface_sources.size() > p_surfaces.size()) {
+		surface_sources.resize(p_surfaces.size());
+	}
+	while (surface_sources.size() < p_surfaces.size()) {
+		surface_sources.push_back(SurfaceSource());
+	}
+	uint64_t hash = 1469598103934665603ull;
+	auto mix = [&hash](const void *p_data, size_t p_size) {
+		const uint8_t *bytes = static_cast<const uint8_t *>(p_data);
+		for (size_t i = 0; i < p_size; i++) {
+			hash = (hash ^ bytes[i]) * 1099511628211ull;
+		}
+	};
+	for (const NextGIInstanceRecord &record : p_records) {
+		mix(record.object_to_world, sizeof(record.object_to_world));
+		const uint32_t words[3] = { record.surface_base, record.surface_count, record.arena_chunk };
+		mix(words, sizeof(words));
+	}
+	for (const NextGISurfaceRecord &surface : p_surfaces) {
+		const uint32_t words[3] = { surface.vertex_offset, surface.index_offset, surface.triangle_count };
+		mix(words, sizeof(words));
+	}
+	records_hash = hash;
+	surface_sources_valid = true;
+}
+
 void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	// This phase runs first in the frame block, so it also clears the per-frame stats;
 	// build_dirty_blas() then fills blas_build_count for the same frame.
@@ -1293,6 +1326,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		NextGIRelight::get_singleton()->begin_record_pass();
 	}
 	pending_pages.clear(); // GodotNext: nextgi_src_page_levels (#247)
+	// GodotNext: path_tracer (#167). This frame's sources come from this phase, or none.
+	surface_sources.clear();
+	surface_sources_valid = false;
+	records_hash = 0;
 	ERR_FAIL_NULL(p_render_data);
 	if (tlas.is_null()) {
 		return;
@@ -1334,6 +1371,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		if (hit_records) {
 			hit_materials->finish_records(surfaces.size());
 		}
+		_finish_surface_sources(records, surfaces); // GodotNext: path_tracer (#167)
 		_ensure_record_buffers(records.size(), surfaces.size());
 		if (instance_record_buffer.is_valid() && !records.is_empty()) {
 			RD::get_singleton()->buffer_update(instance_record_buffer, 0, records.size() * sizeof(NextGIInstanceRecord), records.ptr());
@@ -1514,6 +1552,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					// D6 samples the bind-pose cards at the posed hit's triangle and barycentrics.
 					surface_record.flags = NEXTGI_RT_SURFACE_FLAG_SKINNED | ((slot.bind_vertex_offset / NEXTGI_RT_ALIGNMENT) << 8);
 					surface_records.push_back(surface_record);
+					// GodotNext: path_tracer (#167)
+					if (surface_sources_wanted) {
+						surface_sources.push_back({ geometry_instance, mesh, slot_surfaces[k] });
+					}
 					// GodotNext: nextgi_hit_groups (#130). A posed slot has no attribute stream: the fallback group.
 					if (hit_records) {
 						hit_materials->add_fallback_surfaces(1);
@@ -1663,6 +1705,10 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					have_first_vertex_offset = true;
 				}
 				surface_records.push_back(surface_record);
+				// GodotNext: path_tracer (#167)
+				if (surface_sources_wanted) {
+					surface_sources.push_back({ geometry_instance, mesh, part_geometry.surface });
+				}
 				// GodotNext: nextgi_hit_groups (#130). A proxy part has no attribute stream yet (PN writes it).
 				if (hit_records) {
 					if (part_geometry.is_proxy_surface) {
@@ -1838,6 +1884,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		if (hit_records) {
 			hit_materials->finish_records(surface_records.size());
 		}
+		_finish_surface_sources(instance_records, surface_records); // GodotNext: path_tracer (#167)
 		_ensure_record_buffers(instance_records.size(), surface_records.size());
 		if (instance_record_buffer.is_valid() && !instance_records.is_empty()) {
 			RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());
@@ -1857,6 +1904,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (hit_records) {
 		hit_materials->finish_records(surface_records.size());
 	}
+	_finish_surface_sources(instance_records, surface_records); // GodotNext: path_tracer (#167)
 	_ensure_record_buffers(instance_records.size(), surface_records.size());
 	if (instance_record_buffer.is_valid()) {
 		RD::get_singleton()->buffer_update(instance_record_buffer, 0, instance_records.size() * sizeof(NextGIInstanceRecord), instance_records.ptr());

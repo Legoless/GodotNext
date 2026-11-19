@@ -32,6 +32,7 @@
 #include "render_scene_buffers_rd.compat.inc"
 
 #include "core/object/class_db.h"
+#include "servers/rendering/renderer_rd/effects/path_tracer.h" // GodotNext: path_tracer (#167)
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_device_binds.h"
@@ -445,6 +446,25 @@ void RenderSceneBuffersRD::set_anisotropic_filtering_level(RSE::ViewportAnisotro
 	anisotropic_filtering_level = p_anisotropic_filtering_level;
 
 	update_samplers();
+}
+
+// GodotNext: path_tracer (#167)
+void RenderSceneBuffersRD::set_path_tracing(bool p_enabled, int p_samples, int p_max_bounces, float p_firefly_clamp) {
+	path_tracing_enabled = p_enabled;
+	path_tracing_samples = p_samples;
+	path_tracing_max_bounces = p_max_bounces;
+	path_tracing_firefly_clamp = p_firefly_clamp;
+}
+
+Dictionary RenderSceneBuffersRD::get_path_tracing_info() const {
+	Dictionary info;
+	RendererRD::PathTracerView *view = RendererRD::PathTracer::get_view(const_cast<RenderSceneBuffersRD *>(this), false);
+	if (view != nullptr) {
+		view->fill_info(info);
+	} else {
+		info["status"] = RendererRD::path_tracer_status_name(RendererRD::PATH_TRACER_STATUS_OFF);
+	}
+	return info;
 }
 
 void RenderSceneBuffersRD::set_use_debanding(bool p_use_debanding) {

@@ -603,6 +603,12 @@ public:
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;
+	// GodotNext: path_tracer (#167). The progressive path tracer (Viewport.path_tracing_*).
+	virtual void viewport_set_path_tracing_enabled(RID p_viewport, bool p_enabled) = 0;
+	virtual void viewport_set_path_tracing_samples(RID p_viewport, int p_samples) = 0;
+	virtual void viewport_set_path_tracing_max_bounces(RID p_viewport, int p_max_bounces) = 0;
+	virtual void viewport_set_path_tracing_firefly_clamp(RID p_viewport, float p_firefly_clamp) = 0;
+	virtual Dictionary viewport_get_path_tracing_info(RID p_viewport) = 0;
 	virtual void viewport_set_texture_mipmap_bias(RID p_viewport, float p_texture_mipmap_bias) = 0;
 	virtual void viewport_set_anisotropic_filtering_level(RID p_viewport, RSE::ViewportAnisotropicFiltering p_anisotropic_filtering_level) = 0;
 
