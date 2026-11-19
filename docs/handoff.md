@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-18, night (Claude). Cloud VMs and six lanes are running.
+**Last updated:** 2026-11-19, midday (Claude). Cloud VMs and lanes are running.
 
 ## How to continue
 
@@ -27,34 +27,30 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.14. The tracker shows 134 of 229 build tasks done and 9 in progress; the 18 gates are measured in PQ by design.
-- 2026-11-17: an agent session merged an unreviewed "do not merge" WIP of #130 over its landing, committed stray root files and closed #130, #155 and #219 early. 1969d8d986 (2026-11-18) restores the landed code. It also reverts an unreviewed VSM marking change (59a9794a95), adds missing `override` keywords and fixes the #155 raster-bins check's 64-bin phase. #130, #155 and #219 are reopened: their Metal criteria are still open.
-- Landed on 2026-11-18: #286 as progress (711d22e04a; the per-platform Hardware Ray Tracing Mode, plan v3.9.14), #122 and #293 (CLOSED, 5620846da5; the private Mesa NIR library 25.3.1-gn4: D3D12 mesh shaders and non-uniform table reads) and plan v3.9.13 (bc37fd4781).
-- Landed on 2026-11-16 / 2026-11-17:
-  - **Closed:** #272, #277, #278, #279, #287.
-  - **Landed as progress:** #118, #121, #123, #130, #155, #156, #162, #176, #177, #178, #179, #195, #203, #205, #210, #219, #220, #229–#236, #275, #276, #283, #285.
-  - **Plans:** v3.9.5 to v3.9.12.
+- Master: see `git log`. Plan v3.9.15.
+- Landed on 2026-11-19, as progress (Metal criteria open): #193 TSR async compute (08ab628969), #218 VSM non-Nanite raster (49194956b6) and #167 the progressive path tracer (6a35db0f9d), with plan v3.9.15 (4f6f56cbeb). They were checked together, as one stacked tree, on the cloud L4 and T4 test machines. New follow-ups: #300 (XR async, post-v1) and #301 (RD read-only depth attachments, blocks GT-7).
+- Landed on 2026-11-18: the master repair (1969d8d986; #130, #155 and #219 reopened for Metal), #122 and #293 (closed; the private Mesa NIR library 25.3.1-gn4), #286 as progress (Hardware Ray Tracing Mode), plans v3.9.13 and v3.9.14. Filed #297, #298 and #299.
+- Earlier landings: see the tracker and `git log`.
 
 ## In progress (restart these first)
 
-Each lane works in a local worktree under `.claude/worktrees/` on master `bc37fd4781` (#218 on `d48fc06124`); every lane is past build and review and in its fix step. Lanes landing after #286 rebase onto current master and get a landing check there (#145 shares the NextGI hit-group files with #286 and sets its material-retrace consumer bit), builds on the cloud VMs, and keeps notes in its private lane folder (see `local/handoff-private.md`). Nothing is committed until it lands.
+Each lane works in a local worktree under `.claude/worktrees/`, builds on the cloud VMs and keeps notes in its private lane folder (see `local/handoff-private.md`). Nothing is committed until it lands.
 
 | Issue | Where it stopped | Next step | Machines |
 |---|---|---|---|
-| #218 VSM non-Nanite path | Implementation proven on Linux, Windows and the T4; final proof runs | Review, fix, landing check, land | Linux C, Windows VM 2, Windows T4 VM |
-| #145 RT visibility policy | Started 2026-11-18. Decision under the lead's rule (LQ6, follow UE): translucent casters shadow as opaque | Build, review, fix | Windows T4 VM, Linux E |
-| #295 AVBOIT | Started 2026-11-18 | Build, review, fix | Windows VM 4, Linux E |
-| #193 TSR async compute | Started 2026-11-18 | Build, review, fix | Windows VM 3, Linux D |
-| #167 Path tracer core | Started 2026-11-18 | Build, review, fix | Windows VM 3, Linux D |
-| #158 Material shading bins | Started 2026-11-18 | Build, review, fix | Windows VM 1, Linux C |
-
-The D3D12 fixture runs of the repair (1969d8d986) on the cloud test machine are still being finished; their results go on #130, #155 and #219.
+| #158 Material shading bins | Built, reviewed, fixed (on bc37fd4781) | Port onto master with #145 and #295, landing check, land | Windows VM 1, Linux C |
+| #145 RT visibility policy | Built, reviewed, fixed (on bc37fd4781); conflicts with #286 | Port (wire its retrace to #286's material-retrace consumer bit), landing check, land; plan text for LQ6 and GM-4 | Windows T4 VM, Linux E |
+| #295 AVBOIT | Built, reviewed, fixed (on bc37fd4781) | Port, landing check, land | Windows VM 4, Linux E |
+| #222 VSM projection and SMRT | Build step | Review, fix, landing check | Windows VM 1, Linux E |
+| #221 VSM product surface | Build step | Review, fix, landing check | Windows VM 4, Linux E |
+| #299 D3D12 front-layer depth target | Fix step | Landing check | Windows T4 VM, Windows VM 4, Linux E |
 
 ## Ready to start (phase order)
 
-- **#150** Displacement material output (after #158, which touches the same resolve code).
-- **#217** VSM x Nanite, **#221** VSM product surface and **#222** VSM projection and SMRT soft shadows: start them after #218 lands (they share the VSM storage files).
-- These open once their blocker lands: #294 (after #129 and #286), #296 (after #152 and #160), #141 (after #145, #139 and #221).
+- **#217** VSM x Nanite (#218 has landed).
+- **#150** Displacement material output, after #158 lands (same resolve code).
+- **#298** headless import abort at shutdown, and **#297** D3D12 legacy SDFGI drift (harness).
+- These open once their blocker lands: #294 (after #129), #296 (after #152 and #160), #141 (after #145, #139 and #221), #301 (after #193: ready now).
 
 ## Waiting on the lead
 

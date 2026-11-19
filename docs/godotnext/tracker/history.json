@@ -151,11 +151,11 @@
  },
  {
   "day": "2026-11-19",
-  "build_total": 232,
+  "build_total": 233,
   "build_done": 134,
   "in_progress": 12,
   "ready": 22,
-  "blocked": 64,
+  "blocked": 65,
   "gates_passed": 0,
   "gates_total": 18
  }
