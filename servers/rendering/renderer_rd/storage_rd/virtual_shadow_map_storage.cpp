@@ -384,6 +384,11 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 	info["cache_frames"] = int64_t(active_cache_frames);
 	info["lod_bias"] = Vector2i(lod_bias_directional, lod_bias_local);
 	info["request_capacity"] = int64_t(request_buffer_capacity);
+	// GodotNext: vsm_non_nanite (#218).
+	info["min_caster_texels"] = min_caster_texels;
+	if (!last_raster_stats.is_empty()) {
+		info["non_nanite"] = last_raster_stats;
+	}
 	if (state_buffer.is_valid() && RD::get_singleton() != nullptr) {
 		const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(state_buffer, 0, STATE_SIZE * uint32_t(sizeof(uint32_t)));
 		if (uint32_t(bytes.size()) == STATE_SIZE * sizeof(uint32_t)) {
@@ -1271,6 +1276,23 @@ void VirtualShadowMapStorage::set_lod_bias(int32_t p_directional, int32_t p_loca
 void VirtualShadowMapStorage::request_check() {
 	_free_check_buffers();
 	check.armed = true;
+}
+
+void VirtualShadowMapStorage::request_raster_check() {
+	if (raster_check_arm_callback != nullptr) {
+		raster_check_arm_callback(raster_check_userdata);
+	}
+	raster_check_armed = true;
+}
+
+Dictionary VirtualShadowMapStorage::get_raster_check_result() {
+	if (raster_check_getter != nullptr) {
+		return raster_check_getter(raster_check_userdata);
+	}
+	Dictionary result;
+	result["captured"] = false;
+	result["armed"] = raster_check_armed;
+	return result;
 }
 
 void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {

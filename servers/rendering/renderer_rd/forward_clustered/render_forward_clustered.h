@@ -49,6 +49,9 @@
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/best_fit_normal.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/integrate_dfg.glsl.gen.h"
+// GodotNext: vsm_non_nanite (#218)
+#include "servers/rendering/renderer_rd/shaders/vsm_instance_cull.glsl.gen.h"
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #ifdef METAL_ENABLED
 #include "servers/rendering/renderer_rd/effects/metal_fx.h"
@@ -923,6 +926,193 @@ private:
 	// Marks the pages the view samples and allocates them, once the light buffers and the cluster are built.
 	void _vsm_mark_pages(RenderDataRD *p_render_data);
 
+	// GodotNext: vsm_non_nanite (#218, plan §21.3 contract S4, budget V3).
+	enum VSMCullMode {
+		VSM_CULL_MODE_CLEAR,
+		VSM_CULL_MODE_COUNT_BOXES,
+		VSM_CULL_MODE_COUNT_INSTANCES,
+		VSM_CULL_MODE_SCAN,
+		VSM_CULL_MODE_WRITE_BOXES,
+		VSM_CULL_MODE_WRITE_INSTANCES,
+		VSM_CULL_MODE_FIXUP,
+		VSM_CULL_MODE_MAX,
+	};
+	// The cull state buffer (uints), VSM_CULL_STATE_* in vsm_instance_cull.glsl.
+	enum VSMCullState : uint32_t {
+		VSM_CULL_STATE_TOTAL_PAIRS,
+		VSM_CULL_STATE_DROPPED_PAIRS, // Pairs past the list's capacity.
+		VSM_CULL_STATE_SMALL_CULLED,
+		VSM_CULL_STATE_SINK,
+		VSM_CULL_STATE_REDRAW_MARKS, // Pairs not drawn whose page was marked to be drawn again.
+		VSM_CULL_STATE_WRITE_MISMATCH, // Pairs the write pass emitted that its count pass did not, or the reverse.
+		VSM_CULL_STATE_WORDS = 8,
+	};
+	static constexpr uint32_t VSM_CULL_FLAG_CAPTURE = 1u; // A raster check: write each pair's cull box.
+	static constexpr uint32_t VSM_SUB_FLAG_VIEW_FACING = 1u; // The shadow material writes MODELVIEW_MATRIX (billboards).
+	// The pair list grows past RendererVirtualShadowMapStorage::raster_pair_capacity() after an overflow, up to this.
+	static constexpr uint32_t VSM_PAIR_CAPACITY_MAX = 1u << 22;
+
+	struct VSMBoxCullRecord {
+		uint32_t meta0[4] = {};
+		uint32_t meta1[4] = {};
+		float box_min[4] = {};
+		float box_max[4] = {};
+	};
+	static_assert(sizeof(VSMBoxCullRecord) == 64, "VSMBoxCullRecord must match vsm_instance_cull.glsl.");
+
+	struct VSMSubCullRecord {
+		uint32_t meta0[4] = {};
+		uint32_t meta1[4] = {};
+		uint32_t meta2[4] = {};
+		float local_min[4] = {};
+		float local_max[4] = {};
+		float model_row0[4] = {};
+		float model_row1[4] = {};
+		float model_row2[4] = {};
+	};
+	static_assert(sizeof(VSMSubCullRecord) == 128, "VSMSubCullRecord must match vsm_instance_cull.glsl.");
+
+	struct VSMCullPushConstant {
+		uint32_t table_maps = 0;
+		uint32_t pool_pages = 0;
+		uint32_t group_count = 0;
+		uint32_t pair_capacity = 0;
+		uint32_t box_record_count = 0;
+		uint32_t sub_record_index = 0;
+		float min_caster_texels = 1.0f;
+		uint32_t flags = 0; // VSM_CULL_FLAG_*.
+	};
+	static_assert(sizeof(VSMCullPushConstant) == 32, "VSMCullPushConstant must match vsm_instance_cull.glsl.");
+
+	struct VSMCasterTelemetry {
+		uint64_t object_id = 0;
+		uint32_t base_type = 0;
+		uint32_t instance_count = 1;
+		bool is_skinned = false;
+		bool has_mesh_instance = false;
+		bool is_multimesh = false;
+		bool is_particles = false;
+		bool is_dynamic = false;
+		bool uses_alpha_scissor = false;
+		bool uses_vertex_displacement = false;
+		uint32_t dynamic_reasons = 0; // VSMDynamicReason bits.
+	};
+	// Why a caster renders into the dynamic layer (1) rather than the static one (0).
+	enum VSMDynamicReason : uint32_t {
+		VSM_DYNAMIC_MOVED = 1u << 0, // Its transform changed in this frame or the one before.
+		VSM_DYNAMIC_MESH_INSTANCE = 1u << 1, // Blend shapes or skinning (a mesh instance).
+		VSM_DYNAMIC_SKELETON = 1u << 2,
+		VSM_DYNAMIC_PARTICLES = 1u << 3,
+		VSM_DYNAMIC_MULTIMESH = 1u << 4, // A MultiMesh whose buffer changed recently.
+		VSM_DYNAMIC_VERTEX = 1u << 5, // The shadow material writes VERTEX (Godot's world position offset).
+		VSM_DYNAMIC_ANIMATED = 1u << 6, // The shadow material animates with TIME (ShaderData::is_animated()).
+		VSM_DYNAMIC_MAIN_CAMERA = 1u << 7, // The shadow material reads the main camera (camera-facing billboards).
+	};
+
+	struct VSMRasterCheckCapture {
+		bool captured = false;
+		bool used_indirect_count = false;
+		uint32_t table_maps = 0;
+		uint32_t pool_pages = 0;
+		uint32_t pair_capacity = 0;
+		float min_caster_texels = 1.0f;
+		uint32_t light_count = 0;
+		uint32_t surface_element_count = 0;
+		uint32_t atlas_non_virtual_casters = 0;
+		uint32_t virtual_skipped = 0;
+		uint32_t missing_from_vsm = 0;
+		uint32_t vsm_extra_casters = 0;
+		uint32_t point_size_skipped = 0;
+		uint32_t view_vsm_lights = 0; // Shadowed lights of the view with virtual maps.
+		LocalVector<uint64_t> lights_without_casters; // Of those, the ones without a caster list (light instance RID ids).
+		uint64_t frame = 0;
+		struct Light {
+			uint32_t map_first = 0;
+			uint32_t map_count = 0;
+			uint32_t kind = 0; // RendererVirtualShadowMapStorage::MapKind.
+			uint64_t base_light_id = 0; // The light's RID id.
+			Transform3D transform; // The light's world transform.
+		};
+		LocalVector<Light> lights; // The VSM lights with caster lists.
+		LocalVector<RendererVirtualShadowMapStorage::MapData> map_data;
+		LocalVector<VSMBoxCullRecord> box_records;
+		LocalVector<VSMSubCullRecord> sub_records;
+		LocalVector<uint32_t> sub_record_snap_index;
+		LocalVector<RID> sub_transform_snaps;
+		LocalVector<uint32_t> group_draw_meta; // 2 uints per group.
+		LocalVector<VSMCasterTelemetry> casters;
+		RID dirty_snap;
+		RID alloc_state_snap;
+		RID map_state_snap;
+		RID group_counts_snap;
+		RID group_offsets_snap;
+		RID indirect_commands_snap;
+		RID indirect_counts_snap;
+		RID cull_state_snap;
+		RID pairs_snap;
+		RID pair_texels_snap;
+		RID page_table_snap; // After the cull: the pages that a full pair list marked to be drawn again.
+		uint32_t page_table_maps = 0;
+		RID pool_snap;
+	};
+
+	VsmInstanceCullShaderRD vsm_cull_shader;
+	RID vsm_cull_version;
+	RID vsm_cull_pipelines[VSM_CULL_MODE_MAX];
+	bool vsm_cull_ready = false;
+	bool vsm_cull_failed = false;
+	RID vsm_empty_fb;
+	PagedArray<RenderGeometryInstance *> vsm_cull_instances;
+
+	RID vsm_box_records_buffer;
+	uint32_t vsm_box_records_capacity = 0;
+	RID vsm_sub_records_buffer;
+	uint32_t vsm_sub_records_capacity = 0;
+	RID vsm_group_draw_meta_buffer;
+	RID vsm_group_counts_buffer;
+	RID vsm_group_offsets_buffer;
+	RID vsm_group_cursors_buffer;
+	RID vsm_indirect_commands_buffer;
+	RID vsm_indirect_counts_buffer;
+	uint32_t vsm_groups_capacity = 0;
+	RID vsm_pairs_buffer;
+	uint32_t vsm_pairs_capacity = 0;
+	RID vsm_cull_state_buffer;
+	// Word 0: the #277 sink; word 1 + 2p: fragments that pair p wrote, word 2 + 2p: its vertices outside its
+	// cull box (only while a raster check captures).
+	RID vsm_pair_texels_buffer;
+	RID vsm_pair_boxes_buffer; // Each pair's cull box while a raster check captures (two vec4 per pair).
+	uint32_t vsm_pair_boxes_capacity = 0;
+	VSMRasterCheckCapture vsm_raster_check;
+	// The page entries a capture's full pair list marked, and its frame: the next frame's capture checks that
+	// they were drawn again.
+	HashSet<uint32_t> vsm_check_marked_entries;
+	uint64_t vsm_check_marked_frame = 0;
+
+	// Pair list overflow (read back a frame or more late): the list grows, and the pages are drawn again.
+	uint32_t vsm_pair_capacity_floor = 0;
+	uint32_t vsm_pair_capacity_override = 0; // GODOT_DEV_VSM_PAIR_CAPACITY (builds with DEBUG_ENABLED).
+	bool vsm_pair_capacity_env_read = false;
+	bool vsm_cull_state_pending = false;
+	bool vsm_overflow_warned = false;
+	bool vsm_overflow_cap_warned = false;
+	uint32_t vsm_last_pair_capacity = 0;
+	uint64_t vsm_overflow_frames = 0;
+	uint64_t vsm_dropped_pairs_total = 0;
+	uint64_t vsm_redraw_marks_total = 0;
+	uint64_t vsm_write_mismatch_total = 0;
+	static void _vsm_cull_state_received(const Vector<uint8_t> &p_data);
+
+	bool _ensure_vsm_cull_shader();
+	void _ensure_vsm_cull_buffers(uint32_t p_box_records, uint32_t p_sub_records, uint32_t p_groups, uint32_t p_pair_capacity, bool p_capture);
+	void _free_vsm_raster_check_buffers();
+	void _free_vsm_raster_resources();
+	RID _setup_vsm_render_pass_uniform_set(const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
+	void _vsm_raster_non_nanite(RenderDataRD *p_render_data);
+	static void _arm_vsm_raster_check_cb(void *p_userdata);
+	static Dictionary _get_vsm_raster_check_cb(void *p_userdata);
+	Dictionary get_vsm_raster_check_result();
+
 protected:
 	/* setup */
 
@@ -990,6 +1180,9 @@ public:
 	virtual bool free(RID p_rid) override;
 
 	virtual void update() override;
+
+	// GodotNext: vsm_non_nanite (#218)
+	virtual bool is_vsm_active() const override;
 
 	RenderForwardClustered();
 	~RenderForwardClustered();

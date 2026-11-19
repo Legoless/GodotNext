@@ -177,6 +177,13 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	int32_t lod_bias_local = 0;
 	uint32_t active_cache_frames = cache_frames(POOL_QUALITY_HIGH);
 	uint64_t marked_views = 0;
+	// GodotNext: vsm_non_nanite (#218).
+	float min_caster_texels = DEFAULT_MIN_CASTER_TEXELS;
+	bool raster_check_armed = false;
+	Dictionary (*raster_check_getter)(void *p_userdata) = nullptr;
+	void (*raster_check_arm_callback)(void *p_userdata) = nullptr;
+	void *raster_check_userdata = nullptr;
+	Dictionary last_raster_stats;
 
 	// The GPU check (RenderingServer.virtual_shadow_maps_request_check()): the next marked view copies
 	// its inputs and the state after marking and after allocation into these buffers.
@@ -271,6 +278,32 @@ public:
 	bool is_active() const { return active; }
 	RID get_pool_texture() const { return pool_texture; }
 	RID get_page_table_buffer() const { return table_buffer; }
+	// GodotNext: vsm_non_nanite (#218). Read-only access to the marking/allocation outputs for raster passes.
+	RID get_map_data_buffer() const { return map_data_buffer; }
+	RID get_map_state_buffer() const { return map_state_buffer; }
+	RID get_dirty_buffer() const { return dirty_buffer; }
+	RID get_state_buffer() const { return state_buffer; }
+	uint32_t get_map_buffers_capacity() const { return map_buffers_maps; }
+	uint32_t get_page_buffers_capacity() const { return page_buffers_pages; }
+	const LocalVector<MapData> &get_map_data() const { return map_data; }
+	RID snapshot_buffer(RID p_buffer, uint32_t p_offset, uint32_t p_bytes, const char *p_name) { return _snapshot(p_buffer, p_offset, p_bytes, p_name); }
+	RID snapshot_pool(const char *p_name) { return _pool_snapshot(p_name); }
+	void set_min_caster_texels(float p_min_texels) { min_caster_texels = MAX(p_min_texels, 0.0f); }
+	float get_min_caster_texels() const { return min_caster_texels; }
+	void set_raster_check_callbacks(void (*p_arm)(void *), Dictionary (*p_get)(void *), void *p_userdata) {
+		raster_check_arm_callback = p_arm;
+		raster_check_getter = p_get;
+		raster_check_userdata = p_userdata;
+	}
+	bool consume_raster_check_request() {
+		const bool armed = raster_check_armed;
+		raster_check_armed = false;
+		return armed;
+	}
+	bool is_raster_check_armed() const { return raster_check_armed; }
+	void set_last_raster_stats(const Dictionary &p_stats) { last_raster_stats = p_stats; }
+	void request_raster_check();
+	Dictionary get_raster_check_result();
 
 	// GodotNext: vsm_page_marking (#219). What update_light() needs of a light.
 	struct LightUpdate {

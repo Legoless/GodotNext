@@ -127,6 +127,13 @@ class RenderingServerDefault : public RenderingServer {
 	Dictionary _virtual_shadow_maps_get_check_result() {
 		return RenderingServer::virtual_shadow_maps_get_check_result();
 	}
+	// GodotNext: vsm_non_nanite (#218).
+	void _virtual_shadow_maps_request_raster_check() {
+		RenderingServer::virtual_shadow_maps_request_raster_check();
+	}
+	Dictionary _virtual_shadow_maps_get_raster_check_result() {
+		return RenderingServer::virtual_shadow_maps_get_raster_check_result();
+	}
 
 public:
 	//if editor is redrawing when it shouldn't, enable this and put a breakpoint in _changes_changed()
@@ -1398,6 +1405,27 @@ public:
 		} else {
 			Dictionary ret;
 			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_shadow_maps_get_check_result, &ret);
+			return ret;
+		}
+	}
+
+	// GodotNext: vsm_non_nanite (#218).
+	virtual void virtual_shadow_maps_request_raster_check() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			_virtual_shadow_maps_request_raster_check();
+		} else {
+			command_queue.push(this, &RenderingServerDefault::_virtual_shadow_maps_request_raster_check);
+		}
+	}
+
+	virtual Dictionary virtual_shadow_maps_get_raster_check_result() override {
+		if (Thread::get_caller_id() == server_thread) {
+			command_queue.flush_if_pending();
+			return _virtual_shadow_maps_get_raster_check_result();
+		} else {
+			Dictionary ret;
+			command_queue.push_and_ret(this, &RenderingServerDefault::_virtual_shadow_maps_get_raster_check_result, &ret);
 			return ret;
 		}
 	}

@@ -70,6 +70,8 @@ public:
 		SHADER_GROUP_RR_GUIDES,
 		SHADER_GROUP_RR_GUIDES_MULTIVIEW,
 		SHADER_GROUP_NEXTGEO_RR_GUIDES,
+		// GodotNext: vsm_non_nanite (#218). Off unless VSM raster runs.
+		SHADER_GROUP_VSM,
 	};
 
 	// Not an enum because these values are constants that are processed as numbers
@@ -121,6 +123,11 @@ public:
 		// appended last so no earlier index moves. Same order as the four above.
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE = SHADER_VERSION_MEGALIGHTS_INPUTS_BASE + SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT;
 		constexpr static uint16_t SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT = 4;
+		// GodotNext: vsm_non_nanite (#218). Specialized and ubershader VSM depth raster variants.
+		constexpr static uint16_t SHADER_VERSION_VSM_BASE = SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE + SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT;
+		constexpr static uint16_t SHADER_VERSION_VSM_DEPTH = SHADER_VERSION_VSM_BASE + 0;
+		constexpr static uint16_t SHADER_VERSION_VSM_DEPTH_UBERSHADER = SHADER_VERSION_VSM_BASE + 1;
+		constexpr static uint16_t SHADER_VERSION_VSM_COUNT = 2;
 		// GodotNext: megalights_inputs (#136). init() pushes these groups, default off.
 		static constexpr bool MEGALIGHTS_VARIANTS_DEFAULT_ENABLED = false;
 		static constexpr ShaderGroup megalights_variant_group(uint16_t p_relative) {
@@ -194,6 +201,8 @@ public:
 		PIPELINE_VERSION_DEPTH_PASS_WITH_MEGALIGHTS_INPUTS_AND_VOXEL_GI_AND_MOTION_MULTIVIEW,
 		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML,
 		PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML,
+		// GodotNext: vsm_non_nanite (#218).
+		PIPELINE_VERSION_VSM_DEPTH,
 		PIPELINE_VERSION_MAX
 	};
 
@@ -337,7 +346,8 @@ public:
 
 		// GodotNext: megalights_inputs (#136)
 		// GodotNext: rr_guides (#205). One entry per shader variant, the Stage B RR variants included.
-		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT;
+		// GodotNext: vsm_non_nanite (#218). Plus the VSM depth variants.
+		static const uint32_t VERTEX_INPUT_MASKS_SIZE = ShaderVersion::SHADER_VERSION_COLOR_PASS * 2 + SHADER_COLOR_PASS_FLAG_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT + ShaderVersion::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT + ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT + ShaderVersion::SHADER_VERSION_VSM_COUNT;
 		std::atomic<uint64_t> vertex_input_masks[VERTEX_INPUT_MASKS_SIZE] = {};
 
 		Vector<ShaderCompiler::GeneratedCode::Texture> texture_uniforms;
@@ -386,6 +396,7 @@ public:
 		bool uses_vertex_time = false;
 		bool uses_fragment_time = false;
 		bool writes_modelview_or_projection = false;
+		bool uses_main_camera = false; // GodotNext: vsm_non_nanite (#218). MAIN_CAM_INV_VIEW_MATRIX.
 		bool uses_world_coordinates = false;
 		bool uses_screen_texture_mipmaps = false;
 		bool uses_z_clip_scale = false;
@@ -529,6 +540,7 @@ public:
 	RID default_shader_rd;
 	RID default_multiview_shader_rd; // This is lazily initialized, use "get_default_shader_rd" instead.
 	RID default_shader_sdfgi_rd;
+	RID default_shader_vsm_rd; // GodotNext: vsm_non_nanite (#218)
 
 	RID default_vec4_xform_buffer;
 	RID default_vec4_xform_uniform_set;
@@ -563,6 +575,9 @@ public:
 	// GodotNext: rr_guides (#205)
 	void enable_rr_guides_shader_group();
 	void enable_nextgeo_rr_guides_shader_group();
+	// GodotNext: vsm_non_nanite (#218)
+	void enable_vsm_shader_group();
+	bool is_vsm_shader_group_enabled() const;
 	bool is_multiview_shader_group_enabled() const;
 	bool is_advanced_shader_group_enabled(bool p_multiview) const;
 	bool is_nextgeo_shader_group_enabled() const;

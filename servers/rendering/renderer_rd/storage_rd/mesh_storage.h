@@ -750,6 +750,16 @@ public:
 		}
 	}
 
+	// GodotNext: vsm_non_nanite (#218). The index (or vertex) count that mesh_surface_get_index_array()'s
+	// draw covers at p_lod, for indirect draws whose arguments the GPU writes.
+	_FORCE_INLINE_ uint32_t mesh_surface_get_lod_drawn_count(void *p_surface, uint32_t p_lod) const {
+		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
+		if (p_lod == 0) {
+			return s->index_count ? s->index_count : s->vertex_count;
+		}
+		return s->lods[p_lod - 1].index_count;
+	}
+
 	_FORCE_INLINE_ void mesh_surface_get_vertex_arrays_and_format(void *p_surface, uint64_t p_input_mask, bool p_input_motion_vectors, bool p_point_size_emulated, RID &r_vertex_array_rd, RD::VertexFormatID &r_vertex_format) {
 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
 

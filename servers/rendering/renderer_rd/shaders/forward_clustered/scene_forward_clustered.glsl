@@ -214,6 +214,16 @@ uint cluster_get_range_clip_mask(uint i, uint z_min, uint z_max) {
 layout(location = 14) out vec2 point_coord_interp;
 #endif
 
+// GodotNext: vsm_non_nanite (#218). x: the physical page and the layer (bit 24); y: the pair whose
+// fragments a raster check counts, or 0xFFFFFFFF; z: the map, whose light camera the fragment stage uses too.
+#ifdef MODE_VSM
+layout(location = 12) out flat uvec3 vsm_page_info_interp;
+layout(location = 13) out float vsm_depth_interp;
+uint vsm_pair_dirty = 0u;
+uint vsm_pair_counter = 0xFFFFFFFFu;
+uvec4 vsm_pair_record = uvec4(0u); // The pair's dirty page record: map, mip and slot, physical page, flags.
+#endif
+
 invariant gl_Position;
 
 #GLOBALS
@@ -274,6 +284,11 @@ void vertex_shader(vec3 vertex_input,
 			scene_data.inv_view_matrix[1],
 			scene_data.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+	// GodotNext: vsm_non_nanite (#218). The pair's map is the camera, as the light's camera is in the shadow atlas.
+#ifdef MODE_VSM
+	mat4 vsm_view_matrix;
+	vsm_map_view(vsm_maps.data[vsm_pair_record.x], scene_data.main_cam_inv_view_matrix[3].xyz, vsm_view_matrix, inv_view_matrix);
+#endif
 
 	mat4 model_matrix = transpose(mat4(in_model_matrix[0],
 			in_model_matrix[1],
@@ -282,6 +297,9 @@ void vertex_shader(vec3 vertex_input,
 
 #ifdef USE_DOUBLE_PRECISION
 	vec3 view_precision = scene_data.inv_view_precision.xyz;
+#ifdef MODE_VSM
+	view_precision = vec3(0.0); // GodotNext: vsm_non_nanite (#218)
+#endif
 #endif
 
 	mat3 model_normal_matrix;
@@ -449,6 +467,9 @@ void vertex_shader(vec3 vertex_input,
 			scene_data.view_matrix[1],
 			scene_data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#ifdef MODE_VSM
+	read_view_matrix = vsm_view_matrix; // GodotNext: vsm_non_nanite (#218)
+#endif
 
 #ifdef USE_DOUBLE_PRECISION
 	mat4 modelview = read_view_matrix * model_matrix;
@@ -556,6 +577,35 @@ void vertex_shader(vec3 vertex_input,
 	gl_Position = position;
 #else
 	gl_Position = projection_matrix * vec4(vertex_interp, 1.0);
+#endif
+	// GodotNext: vsm_non_nanite (#218). The pair's dirty page: its map, mip and slot place the vertex.
+#ifdef MODE_VSM
+	{
+		uint layer = vsm_pair_dirty >> 31u;
+		uint map = vsm_pair_record.x;
+		uint mip = vsm_pair_record.y & 0xFFu;
+		uvec2 slot = uvec2((vsm_pair_record.y >> 8u) & 0xFFu, (vsm_pair_record.y >> 16u) & 0xFFu);
+		VSMMapData map_data = vsm_maps.data[map];
+		vec3 vsm_world = (inv_view_matrix * vec4(vertex_interp, 1.0)).xyz;
+		float vsm_depth = 0.0;
+		gl_Position = vsm_page_clip_position(map_data, mip, slot, vsm_world, vsm_depth);
+		vsm_page_info_interp = uvec3((vsm_pair_record.z & 0x00FFFFFFu) | (layer << 24u), vsm_pair_counter, map);
+		vsm_depth_interp = vsm_depth;
+		// A raster check counts the vertices outside the box that culled the pair: a cull box that does not
+		// hold its geometry drops shadow from the pages it misses.
+		if (vsm_pair_counter != 0xFFFFFFFFu) {
+			vec3 box_min = vsm_pair_boxes.data[vsm_pair_counter * 2u + 0u].xyz;
+			vec3 box_max = vsm_pair_boxes.data[vsm_pair_counter * 2u + 1u].xyz;
+			vec3 box_abs = max(abs(box_min), abs(box_max));
+			float box_eps = 1.0e-4 * (1.0 + max(max(box_abs.x, box_abs.y), box_abs.z));
+			if (any(lessThan(vsm_world, box_min - vec3(box_eps))) || any(greaterThan(vsm_world, box_max + vec3(box_eps)))) {
+				// #277: every atomic's result is used.
+				if (atomicAdd(vsm_pair_texels.data[2u + 2u * vsm_pair_counter], 1u) == 0xFFFFFFFFu) {
+					vsm_pair_texels.data[0] = 1u;
+				}
+			}
+		}
+	}
 #endif
 
 #ifdef USE_MULTIVIEW
@@ -799,10 +849,22 @@ void _unpack_vertex_attributes(vec4 p_vertex_in, vec3 p_compressed_aabb_position
 }
 
 void main() {
+	// GodotNext: vsm_non_nanite (#218). One instance per (element, sub-instance, dirty page) pair; the
+	// draw's group (uv_offset) gives the first pair. A pair's w is its caster only in a raster check.
+#ifdef MODE_VSM
+	uint vsm_pair_index = vsm_group_offsets.data[draw_call.uv_offset] + uint(gl_InstanceIndex);
+	uvec4 vsm_pair = vsm_pairs.data[vsm_pair_index];
+	uint instance_index = vsm_pair.x;
+	vsm_sub_instance = int(vsm_pair.y);
+	vsm_pair_dirty = vsm_pair.z;
+	vsm_pair_counter = vsm_pair.w != 0xFFFFFFFFu ? vsm_pair_index : 0xFFFFFFFFu;
+	vsm_pair_record = vsm_dirty.data[vsm_pair_dirty & 0x7FFFFFFFu];
+#else
 	uint instance_index = draw_call.instance_index;
 	if (!sc_multimesh()) {
 		instance_index += INSTANCE_INDEX;
 	}
+#endif
 
 	instance_index_interp = instance_index;
 
@@ -1076,6 +1138,14 @@ vec2 point_coord_interp = vec2(0.5);
 #else
 layout(location = 14) in vec2 point_coord_interp;
 #endif
+#endif
+
+// GodotNext: vsm_non_nanite (#218). The VSM variant has no depth attachment: a DEPTH write is dropped.
+#ifdef MODE_VSM
+layout(location = 12) in flat uvec3 vsm_page_info_interp;
+layout(location = 13) in float vsm_depth_interp;
+float _vsm_unused_frag_depth = 0.0;
+#define gl_FragDepth _vsm_unused_frag_depth
 #endif
 
 //defines to keep compatibility with vertex
@@ -1677,6 +1747,10 @@ void fragment_shader(in SceneData scene_data) {
 			scene_data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 	vec2 read_viewport_size = scene_data.viewport_size;
+	// GodotNext: vsm_non_nanite (#218). The vertex stage's camera: VERTEX is in the light's view space.
+#ifdef MODE_VSM
+	vsm_map_view(vsm_maps.data[vsm_page_info_interp.z], scene_data.main_cam_inv_view_matrix[3].xyz, read_view_matrix, inv_view_matrix);
+#endif
 
 #ifdef MODE_RENDER_NEXTGI_TRANSLUCENCY_MARK
 	frag_color = vec4(mat3(inv_view_matrix) * vertex, 1.0);
@@ -3616,6 +3690,31 @@ void fragment_shader(in SceneData scene_data) {
 		}
 	}
 
+#endif
+
+	// GodotNext: vsm_non_nanite (#218). After the alpha discard: the nearest depth wins the texel.
+#ifdef MODE_VSM
+	if (!gl_HelperInvocation) {
+		ivec2 local_px = ivec2(gl_FragCoord.xy);
+		if (all(greaterThanEqual(local_px, ivec2(0))) && all(lessThan(local_px, ivec2(int(VSM_PAGE_SIZE))))) {
+			uint packed_depth = vsm_depth_pack(vsm_depth_interp);
+			if (packed_depth != 0u) {
+				uvec2 phys_page = vsm_raster_entry_page(vsm_page_info_interp.x);
+				int layer = int((vsm_page_info_interp.x >> 24u) & 1u);
+				ivec3 pool_coord = ivec3(ivec2(phys_page * VSM_PAGE_SIZE) + local_px, layer);
+				uint prev_depth = imageAtomicMax(vsm_pool, pool_coord, packed_depth);
+				uint counter = vsm_page_info_interp.y;
+				uint prev_count = 0u;
+				if (counter != 0xFFFFFFFFu) {
+					prev_count = atomicAdd(vsm_pair_texels.data[1u + 2u * counter], 1u);
+				}
+				// #277: every atomic's result is used.
+				if (prev_depth == 0xFFFFFFFFu || prev_count == 0xFFFFFFFFu) {
+					vsm_pair_texels.data[0] = 1u;
+				}
+			}
+		}
+	}
 #endif
 
 #ifdef MODE_RENDER_MATERIAL

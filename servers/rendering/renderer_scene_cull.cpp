@@ -45,6 +45,8 @@
 #include "servers/rendering/rendering_light_culler.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_default.h"
+// GodotNext: vsm_non_nanite (#218)
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #ifndef XR_DISABLED
 #include "servers/xr/xr_interface.h"
@@ -4019,6 +4021,169 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				}
 			}
 		}
+
+		// GodotNext: vsm_non_nanite (#218). Collect per-light VSM shadow casters independent of atlas tile
+		// capacity or atlas dirty flags, only when VSM is active.
+		if (p_reflection_probe.is_null() && scene_render->is_vsm_active()) {
+			vsm_shadow_data.clear();
+			bool vsm_mesh_instances_checked = false;
+			bool vsm_animated_material = false;
+			const uint64_t vp_mask = scenario->viewport_visibility_masks.has(p_viewport) ? scenario->viewport_visibility_masks[p_viewport] : 0;
+			const uint64_t instance_total = scenario->instance_data.size();
+
+			uint32_t dir_seen = 0;
+			for (Instance *dir_ins : scenario->directional_lights) {
+				if (!dir_ins->visible || !(dir_ins->layer_mask & p_visible_layers)) {
+					continue;
+				}
+				if (dir_seen >= RendererSceneRender::MAX_DIRECTIONAL_LIGHTS) {
+					break;
+				}
+				dir_seen++;
+				InstanceLightData *dir_light = static_cast<InstanceLightData *>(dir_ins->base_data);
+				if (dir_light == nullptr || !RSG::light_storage->light_has_shadow(dir_ins->base) || RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+					continue;
+				}
+				HashSet<RenderGeometryInstance *> csm_casters;
+				// The cascade casters were moved into render_shadow_data above (merge_unordered empties its
+				// source); a cascade past MAX_UPDATE_SHADOWS keeps its list in scene_cull_result.
+				for (uint32_t s = 0; s < max_shadows_used; s++) {
+					if (render_shadow_data[s].light == dir_light->instance) {
+						const PagedArray<RenderGeometryInstance *> &cascade_geoms = render_shadow_data[s].instances;
+						for (uint32_t g = 0; g < cascade_geoms.size(); g++) {
+							csm_casters.insert(cascade_geoms[g]);
+						}
+					}
+				}
+				for (uint32_t s = 0; s < cull.shadow_count; s++) {
+					if (cull.shadows[s].light_instance == dir_light->instance) {
+						for (uint32_t k = 0; k < cull.shadows[s].cascade_count; k++) {
+							const PagedArray<RenderGeometryInstance *> &cascade_geoms = scene_cull_result.directional_shadows[s].cascade_geometry_instances[k];
+							for (uint32_t g = 0; g < cascade_geoms.size(); g++) {
+								csm_casters.insert(cascade_geoms[g]);
+							}
+						}
+						break;
+					}
+				}
+				float max_dist = RSG::light_storage->light_get_param(dir_ins->base, RSE::LIGHT_PARAM_SHADOW_MAX_DISTANCE);
+				if (max_dist <= 0.0f) {
+					max_dist = float(Math::INF);
+				}
+				const uint32_t levels = RendererVirtualShadowMapStorage::clipmap_level_count(max_dist);
+				const uint32_t coarsest = levels - 1;
+				const float perp_limit = (RendererVirtualShadowMapStorage::clipmap_level_extent(coarsest) * 0.5f + RendererVirtualShadowMapStorage::clipmap_page_world_size(coarsest)) * 1.42f;
+				const Vector3 z_axis = dir_ins->transform.basis.get_column(2).normalized();
+				const uint32_t caster_mask = RSG::light_storage->light_get_shadow_caster_mask(dir_ins->base);
+
+				RendererSceneRender::RenderVSMShadowData entry;
+				entry.light = dir_light->instance;
+				for (uint64_t idx = 0; idx < instance_total; idx++) {
+					const InstanceData &idata = scenario->instance_data[idx];
+					const uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
+					if (!((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !(idata.flags & InstanceData::FLAG_CAST_SHADOWS)) {
+						continue;
+					}
+					if (!(p_visible_layers & idata.layer_mask & caster_mask)) {
+						continue;
+					}
+					const uint32_t vis_flags = idata.flags & (InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE | InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN | InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN);
+					if (vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE || vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN) {
+						continue;
+					}
+					if (vis_flags == InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK) {
+						if (idata.visibility_index != -1 && _visibility_range_check<false>(scenario->instance_visibility[idata.visibility_index], camera_position, vp_mask) != 0) {
+							continue;
+						}
+						if (idata.parent_array_index != -1) {
+							const uint32_t pf = scenario->instance_data[idata.parent_array_index].flags;
+							if (!(((pf & InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK) == InstanceData::FLAG_VISIBILITY_DEPENDENCY_HIDDEN_CLOSE_RANGE) || (pf & InstanceData::FLAG_VISIBILITY_DEPENDENCY_FADE_CHILDREN))) {
+								continue;
+							}
+						}
+					}
+					if (base_type == RSE::INSTANCE_PARTICLES && RSG::particles_storage->particles_is_inactive(idata.base_rid)) {
+						continue;
+					}
+					if (!csm_casters.has(idata.instance_geometry)) {
+						const AABB &b = idata.instance->transformed_aabb;
+						const Vector3 rel = (b.position + b.size * 0.5f) - camera_position;
+						const Vector3 perp = rel - z_axis * z_axis.dot(rel);
+						const float radius = float(b.size.length()) * 0.5f;
+						if (float(perp.length()) > perp_limit + radius) {
+							continue;
+						}
+					}
+					InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(idata.instance->base_data);
+					if (geom->material_is_animated) {
+						vsm_animated_material = true;
+					}
+					if (idata.instance->mesh_instance.is_valid()) {
+						RSG::mesh_storage->mesh_instance_check_for_update(idata.instance->mesh_instance);
+						vsm_mesh_instances_checked = true;
+					}
+					RendererSceneRender::RenderVSMCaster caster;
+					caster.geometry_instance = idata.instance_geometry;
+					caster.instance = idata.instance->self;
+					caster.object_id = uint64_t(idata.instance->object_id);
+					caster.extra_margin = idata.instance->extra_margin;
+					entry.casters.push_back(caster);
+				}
+				vsm_shadow_data.push_back(entry);
+			}
+
+			struct CullVSMBox {
+				PagedArray<Instance *> *result = nullptr;
+				_FORCE_INLINE_ bool operator()(void *p_data) {
+					result->push_back(static_cast<Instance *>(p_data));
+					return false;
+				}
+			};
+			for (uint32_t i = 0; i < (uint32_t)scene_cull_result.lights.size(); i++) {
+				Instance *pos_ins = scene_cull_result.lights[i];
+				InstanceLightData *pos_light = static_cast<InstanceLightData *>(pos_ins->base_data);
+				if (pos_light == nullptr || !RSG::light_storage->light_has_shadow(pos_ins->base)) {
+					continue;
+				}
+				const uint32_t caster_mask = RSG::light_storage->light_get_shadow_caster_mask(pos_ins->base);
+				instance_shadow_cull_result.clear();
+				CullVSMBox cull_box;
+				cull_box.result = &instance_shadow_cull_result;
+				scenario->indexers[Scenario::INDEXER_GEOMETRY].aabb_query(pos_ins->transformed_aabb, cull_box);
+
+				RendererSceneRender::RenderVSMShadowData entry;
+				entry.light = pos_light->instance;
+				for (uint32_t j = 0; j < instance_shadow_cull_result.size(); j++) {
+					Instance *inst = instance_shadow_cull_result[j];
+					const bool is_inactive_particle = (inst->base_type == RSE::INSTANCE_PARTICLES) && RSG::particles_storage->particles_is_inactive(inst->base);
+					InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(inst->base_data);
+					if (!inst->visible || !((1 << inst->base_type) & RSE::INSTANCE_GEOMETRY_MASK) || !geom->can_cast_shadows || !(p_visible_layers & inst->layer_mask & caster_mask) || is_inactive_particle) {
+						continue;
+					}
+					if (geom->material_is_animated) {
+						vsm_animated_material = true;
+					}
+					if (inst->mesh_instance.is_valid()) {
+						RSG::mesh_storage->mesh_instance_check_for_update(inst->mesh_instance);
+						vsm_mesh_instances_checked = true;
+					}
+					RendererSceneRender::RenderVSMCaster caster;
+					caster.geometry_instance = geom->geometry_instance;
+					caster.instance = inst->self;
+					caster.object_id = uint64_t(inst->object_id);
+					caster.extra_margin = inst->extra_margin;
+					entry.casters.push_back(caster);
+				}
+				vsm_shadow_data.push_back(entry);
+			}
+
+			if (vsm_mesh_instances_checked) {
+				RSG::mesh_storage->update_mesh_instances();
+			}
+			if (vsm_animated_material) {
+				RenderingServerDefault::redraw_request();
+			}
+		}
 	}
 
 	//render SDFGI
@@ -4027,6 +4192,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		// Q: Should this whole block be skipped if we're rendering our reflection probe?
 
 		sdfgi_update_data.update_static = false;
+		// GodotNext: vsm_non_nanite (#218).
+		sdfgi_update_data.vsm_shadows = nullptr;
+		sdfgi_update_data.vsm_shadow_count = 0;
 
 		if (cull.sdfgi.region_count > 0) {
 			//update regions
@@ -4060,6 +4228,9 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			sdfgi_update_data.nextgi_dynamic_light_count = scenario->nextgi_dynamic_lights.size();
 			sdfgi_update_data.nextgi_static_light_instances = scenario->static_lights.ptr();
 			sdfgi_update_data.nextgi_static_light_count = scenario->static_lights.size();
+			// GodotNext: vsm_non_nanite (#218).
+			sdfgi_update_data.vsm_shadows = vsm_shadow_data.is_empty() ? nullptr : vsm_shadow_data.ptr();
+			sdfgi_update_data.vsm_shadow_count = vsm_shadow_data.size();
 		}
 
 		// GodotNext: nextgi_rt_registry
@@ -4403,6 +4574,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		render_shadow_data[i].instances.clear();
 	}
 	max_shadows_used = 0;
+	// GodotNext: vsm_non_nanite (#218)
+	vsm_shadow_data.clear();
+	sdfgi_update_data.vsm_shadows = nullptr;
+	sdfgi_update_data.vsm_shadow_count = 0;
 
 	for (uint32_t i = 0; i < cull.sdfgi.region_count; i++) {
 		render_sdfgi_data[i].instances.clear();

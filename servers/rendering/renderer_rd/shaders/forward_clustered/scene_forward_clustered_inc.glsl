@@ -17,6 +17,12 @@
 #include "../nextgeo/nextgeo_records_inc.glsl"
 #endif
 
+// GodotNext: vsm_non_nanite (#218)
+#ifdef MODE_VSM
+#include "../vsm_mark_inc.glsl"
+#include "../vsm_raster_inc.glsl"
+#endif
+
 #if !defined(MODE_RENDER_DEPTH) || defined(MODE_RENDER_MATERIAL) || defined(MODE_RENDER_SDF) || defined(MODE_RENDER_NORMAL_ROUGHNESS) || defined(MODE_RENDER_VOXEL_GI) || defined(TANGENT_USED) || defined(NORMAL_MAP_USED) || defined(BENT_NORMAL_MAP_USED) || defined(LIGHT_ANISOTROPY_USED)
 #ifndef NORMAL_USED
 #define NORMAL_USED
@@ -175,7 +181,15 @@ float sc_luminance_multiplier() {
 
 layout(constant_id = 2) const bool sc_emulate_point_size = false;
 
-#ifdef POINT_SIZE_USED
+// GodotNext: vsm_non_nanite (#218). INSTANCE_INDEX is the pair's MultiMesh or particle instance;
+// the VSM variant never emulates point sizes.
+#ifdef MODE_VSM
+
+int vsm_sub_instance = 0;
+#define VERTEX_INDEX gl_VertexIndex
+#define INSTANCE_INDEX vsm_sub_instance
+
+#elif defined(POINT_SIZE_USED)
 
 #define VERTEX_INDEX (sc_emulate_point_size ? gl_InstanceIndex : gl_VertexIndex)
 #define INSTANCE_INDEX (sc_emulate_point_size ? (gl_VertexIndex / 6) : gl_InstanceIndex)
@@ -458,6 +472,40 @@ layout(r32ui, set = 1, binding = 26) uniform restrict writeonly uimage3D emissio
 layout(r32ui, set = 1, binding = 27) uniform restrict uimage3D geom_facing_grid;
 
 //still need to be present for shaders that use it, so remap them to something
+#define depth_buffer shadow_atlas
+#define color_buffer shadow_atlas
+#define normal_roughness_buffer shadow_atlas
+
+#define multiviewSampler sampler2D
+#elif defined(MODE_VSM)
+
+// GodotNext: vsm_non_nanite (#218). Per-page depth raster bindings in Set 1.
+layout(r32ui, set = 1, binding = 24) uniform restrict uimage2DArray vsm_pool;
+layout(set = 1, binding = 25, std430) buffer restrict readonly VSMGroupOffsets {
+	uint data[];
+}
+vsm_group_offsets;
+layout(set = 1, binding = 26, std430) buffer restrict readonly VSMPairs {
+	uvec4 data[];
+}
+vsm_pairs;
+layout(set = 1, binding = 27, std430) buffer restrict readonly VSMDirty {
+	uvec4 data[];
+}
+vsm_dirty;
+layout(set = 1, binding = 28, std430) buffer restrict readonly VSMMaps {
+	VSMMapData data[];
+}
+vsm_maps;
+layout(set = 1, binding = 29, std430) buffer restrict VSMPairTexels {
+	uint data[]; // 0: the #277 sink; 1 + 2 * pair: its fragments; 2 + 2 * pair: its vertices outside its cull box.
+}
+vsm_pair_texels;
+layout(set = 1, binding = 30, std430) buffer restrict readonly VSMPairBoxes {
+	vec4 data[]; // A raster check's cull box of each pair: min, max.
+}
+vsm_pair_boxes;
+
 #define depth_buffer shadow_atlas
 #define color_buffer shadow_atlas
 #define normal_roughness_buffer shadow_atlas

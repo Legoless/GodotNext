@@ -1388,3 +1388,323 @@ uint32_t RendererVirtualShadowMapStorage::overflow_bias_update(uint32_t p_state,
 	}
 	return bias | (decay << 8) | (raised ? OVERFLOW_BIAS_RAISED : 0u);
 }
+
+/* NON-NANITE PAGE CULLING AND RASTER (#218) */
+
+static_assert(sizeof(RendererVirtualShadowMapStorage::DirtyPageRecord) == 16, "DirtyPageRecord matches uvec4 in vsm_allocate_pages.glsl.");
+
+uint32_t RendererVirtualShadowMapStorage::depth_pack(float p_depth) {
+	if (!(p_depth == p_depth)) {
+		return 0u;
+	}
+	float neg = CLAMP(-p_depth, -1.0e30f, 1.0e30f);
+	if (neg == 0.0f) {
+		neg = 0.0f;
+	}
+	uint32_t bits = 0;
+	memcpy(&bits, &neg, sizeof(uint32_t));
+	return (bits & 0x80000000u) != 0u ? ~bits : (bits | 0x80000000u);
+}
+
+float RendererVirtualShadowMapStorage::depth_unpack(uint32_t p_packed) {
+	if (p_packed == 0u) {
+		return float(Math::INF);
+	}
+	const uint32_t bits = (p_packed & 0x80000000u) != 0u ? (p_packed & 0x7FFFFFFFu) : ~p_packed;
+	float neg = 0.0f;
+	memcpy(&neg, &bits, sizeof(float));
+	return neg == 0.0f ? 0.0f : -neg;
+}
+
+float RendererVirtualShadowMapStorage::view_facing_reach(const AABB &p_local_aabb) {
+	const Vector3 lmin = p_local_aabb.position;
+	const Vector3 lmax = p_local_aabb.position + p_local_aabb.size;
+	float reach = 0.0f;
+	for (uint32_t c = 0; c < 8u; c++) {
+		const Vector3 lp((c & 1u) ? lmax.x : lmin.x, (c & 2u) ? lmax.y : lmin.y, (c & 4u) ? lmax.z : lmin.z);
+		reach = MAX(reach, float(Math::abs(lp.x) + Math::abs(lp.y) + Math::abs(lp.z)));
+	}
+	return reach;
+}
+
+Transform3D RendererVirtualShadowMapStorage::map_view(const MapData &p_map, const Vector3 &p_camera_position) {
+	Vector3 x_axis;
+	Vector3 y_axis;
+	Vector3 z_axis;
+	Vector3 origin;
+	if (p_map.kind == MAP_KIND_DIRECTIONAL) {
+		x_axis = Vector3(p_map.rows[0][0], p_map.rows[0][1], p_map.rows[0][2]).normalized();
+		y_axis = Vector3(p_map.rows[1][0], p_map.rows[1][1], p_map.rows[1][2]).normalized();
+		z_axis = -Vector3(p_map.rows[2][0], p_map.rows[2][1], p_map.rows[2][2]);
+		origin = p_camera_position;
+	} else {
+		const float inv_cot = 1.0f / Vector3(p_map.rows[0][0], p_map.rows[0][1], p_map.rows[0][2]).length();
+		x_axis = Vector3(p_map.rows[0][0], p_map.rows[0][1], p_map.rows[0][2]) * inv_cot;
+		y_axis = Vector3(p_map.rows[1][0], p_map.rows[1][1], p_map.rows[1][2]) * inv_cot;
+		z_axis = -Vector3(p_map.rows[3][0], p_map.rows[3][1], p_map.rows[3][2]);
+		const Vector3 t(p_map.rows[0][3] * inv_cot, p_map.rows[1][3] * inv_cot, -p_map.rows[3][3]);
+		origin = -(x_axis * t.x + y_axis * t.y + z_axis * t.z);
+	}
+	return Transform3D(Basis(x_axis, y_axis, z_axis), origin); // The axes are the basis's columns.
+}
+
+bool RendererVirtualShadowMapStorage::sub_instance_box(const float p_model[12], const float *p_transforms, uint32_t p_sub_index, uint32_t p_current_offset, uint32_t p_stride_vec4, bool p_format_2d, uint32_t p_trail_steps, const AABB &p_local_aabb, float p_extra_margin, AABB &r_world_aabb, bool p_view_facing, float p_corner_reach) {
+	ERR_FAIL_NULL_V(p_model, false);
+	ERR_FAIL_NULL_V(p_transforms, false);
+	const uint32_t steps = MAX(p_trail_steps, 1u);
+	if (p_trail_steps <= 1u && p_stride_vec4 == 0u) {
+		return false;
+	}
+	static const float unit_z[4] = { 0.0f, 0.0f, 1.0f, 0.0f };
+	const Vector3 lmin = p_local_aabb.position;
+	const Vector3 lmax = p_local_aabb.position + p_local_aabb.size;
+	Vector3 world_min(1.0e30f, 1.0e30f, 1.0e30f);
+	Vector3 world_max(-1.0e30f, -1.0e30f, -1.0e30f);
+	bool any_valid = false;
+	for (uint32_t seg = 0; seg < steps; seg++) {
+		const uint32_t ofs_vec4 = (p_trail_steps > 1u) ? ((p_trail_steps * p_sub_index + seg) * 5u) : (p_stride_vec4 * (p_sub_index + p_current_offset));
+		const float *r0 = p_transforms + uint64_t(ofs_vec4) * 4u;
+		const float *r1 = r0 + 4u;
+		const float *r2 = (p_trail_steps <= 1u && p_format_2d) ? unit_z : (r0 + 8u);
+		bool finite = true;
+		for (int k = 0; k < 4; k++) {
+			finite = finite && (r0[k] == r0[k]) && Math::abs(r0[k]) < 1.0e30f;
+			finite = finite && (r1[k] == r1[k]) && Math::abs(r1[k]) < 1.0e30f;
+			finite = finite && (r2[k] == r2[k]) && Math::abs(r2[k]) < 1.0e30f;
+		}
+		if (!finite) {
+			continue;
+		}
+		const float basis_sq = ((r0[0] * r0[0] + r0[1] * r0[1]) + r0[2] * r0[2]) + ((r1[0] * r1[0] + r1[1] * r1[1]) + r1[2] * r1[2]) + ((r2[0] * r2[0] + r2[1] * r2[1]) + r2[2] * r2[2]);
+		if (!(basis_sq > 0.0f)) {
+			continue;
+		}
+		for (uint32_t c = 0; c < 8u; c++) {
+			const Vector3 lp((c & 1u) ? lmax.x : lmin.x, (c & 2u) ? lmax.y : lmin.y, (c & 4u) ? lmax.z : lmin.z);
+			const Vector3 sp(row_dot(r0, lp), row_dot(r1, lp), row_dot(r2, lp));
+			const Vector3 wp(row_dot(p_model + 0, sp), row_dot(p_model + 4, sp), row_dot(p_model + 8, sp));
+			if (!any_valid) {
+				world_min = wp;
+				world_max = wp;
+				any_valid = true;
+			} else {
+				world_min = world_min.min(wp);
+				world_max = world_max.max(wp);
+			}
+		}
+		if (p_view_facing) {
+			const Vector3 inst_origin(r0[3], r1[3], r2[3]);
+			const Vector3 origin(row_dot(p_model + 0, inst_origin), row_dot(p_model + 4, inst_origin), row_dot(p_model + 8, inst_origin));
+			float longest_sq = 0.0f;
+			for (int k = 0; k < 3; k++) {
+				const Vector3 inst_axis(r0[k], r1[k], r2[k]);
+				const Vector3 world_axis(
+						p_model[0] * inst_axis.x + p_model[1] * inst_axis.y + p_model[2] * inst_axis.z,
+						p_model[4] * inst_axis.x + p_model[5] * inst_axis.y + p_model[6] * inst_axis.z,
+						p_model[8] * inst_axis.x + p_model[9] * inst_axis.y + p_model[10] * inst_axis.z);
+				longest_sq = MAX(longest_sq, float(world_axis.length_squared()));
+			}
+			const float reach = p_corner_reach * MAX(1.0f, std::sqrt(longest_sq));
+			world_min = world_min.min(origin - Vector3(reach, reach, reach));
+			world_max = world_max.max(origin + Vector3(reach, reach, reach));
+		}
+	}
+	if (!any_valid) {
+		return false;
+	}
+	const float margin = MAX(p_extra_margin, 0.0f);
+	world_min -= Vector3(margin, margin, margin);
+	world_max += Vector3(margin, margin, margin);
+	r_world_aabb = AABB(world_min, world_max - world_min);
+	return true;
+}
+
+void RendererVirtualShadowMapStorage::cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled) {
+	r_dirty_indices.clear();
+	r_small_culled = 0;
+	if (p_maps == nullptr || p_map_dirty_counts == nullptr || p_map_dirty_offsets == nullptr || p_dirty == nullptr || p_dirty_limit == 0 || p_map_base == MAP_NONE) {
+		return;
+	}
+	const Vector3 box_min = p_box.position;
+	const Vector3 box_max = p_box.position + p_box.size;
+	if (!(box_max.x >= box_min.x && box_max.y >= box_min.y && box_max.z >= box_min.z)) {
+		return;
+	}
+	const float dx = float(box_max.x) - float(box_min.x);
+	const float dy = float(box_max.y) - float(box_min.y);
+	const float dz = float(box_max.z) - float(box_min.z);
+	const float box_extent = MAX(MAX(dx, dy), dz);
+	const uint32_t req_dirty = p_dynamic ? ENTRY_DIRTY_DYNAMIC : ENTRY_DIRTY_STATIC;
+	const uint32_t map_count = (p_light_flags >> LIGHT_FLAGS_COUNT_SHIFT) & LIGHT_FLAGS_COUNT_MASK;
+	for (uint32_t m_idx = 0; m_idx < map_count; m_idx++) {
+		const uint32_t map = light_map(p_map_base, p_light_flags, m_idx);
+		if (map >= p_table_maps) {
+			continue;
+		}
+		const uint32_t d_offset = p_map_dirty_offsets[map];
+		const uint32_t d_count = p_map_dirty_counts[map];
+		if (d_count == 0u || d_offset >= p_dirty_limit) {
+			continue;
+		}
+		const uint32_t d_end = MIN(d_offset + d_count, p_dirty_limit);
+		const MapData &md = p_maps[map];
+		if (md.kind == MAP_KIND_MAX) {
+			continue;
+		}
+		if (md.kind == MAP_KIND_DIRECTIONAL) {
+			float min_tx = 1.0e30f;
+			float max_tx = -1.0e30f;
+			float min_ty = 1.0e30f;
+			float max_ty = -1.0e30f;
+			for (uint32_t c = 0; c < 8u; c++) {
+				const Vector3 cp((c & 1u) ? box_max.x : box_min.x, (c & 2u) ? box_max.y : box_min.y, (c & 4u) ? box_max.z : box_min.z);
+				const float tx = row_dot(md.rows[0], cp);
+				const float ty = row_dot(md.rows[1], cp);
+				if (c == 0u) {
+					min_tx = tx;
+					max_tx = tx;
+					min_ty = ty;
+					max_ty = ty;
+				} else {
+					min_tx = MIN(min_tx, tx);
+					max_tx = MAX(max_tx, tx);
+					min_ty = MIN(min_ty, ty);
+					max_ty = MAX(max_ty, ty);
+				}
+			}
+			min_tx = CLAMP(min_tx, -1073741824.0f, 1073741824.0f);
+			max_tx = CLAMP(max_tx, -1073741824.0f, 1073741824.0f);
+			min_ty = CLAMP(min_ty, -1073741824.0f, 1073741824.0f);
+			max_ty = CLAMP(max_ty, -1073741824.0f, 1073741824.0f);
+			const int32_t t_min_x = int32_t(std::floor(min_tx));
+			const int32_t t_max_x = int32_t(std::floor(max_tx));
+			const int32_t t_min_y = int32_t(std::floor(min_ty));
+			const int32_t t_max_y = int32_t(std::floor(max_ty));
+			const int32_t win_min_x = md.origin[0] * int32_t(PAGE_SIZE);
+			const int32_t win_max_x = (md.origin[0] + int32_t(PAGES_PER_SIDE)) * int32_t(PAGE_SIZE) - 1;
+			const int32_t win_min_y = md.origin[1] * int32_t(PAGE_SIZE);
+			const int32_t win_max_y = (md.origin[1] + int32_t(PAGES_PER_SIDE)) * int32_t(PAGE_SIZE) - 1;
+			if (t_max_x < win_min_x || t_min_x > win_max_x || t_max_y < win_min_y || t_min_y > win_max_y) {
+				continue;
+			}
+			for (uint32_t d = d_offset; d < d_end; d++) {
+				const DirtyPageRecord &rec = p_dirty[d];
+				if ((rec.flags & req_dirty) == 0u) {
+					continue;
+				}
+				const uint32_t mip = rec.packed_page & 0xFFu;
+				if (mip >= MIP_COUNT) {
+					continue;
+				}
+				const uint32_t slot_x = (rec.packed_page >> 8u) & 0xFFu;
+				const uint32_t slot_y = (rec.packed_page >> 16u) & 0xFFu;
+				const uint32_t mask = (PAGES_PER_SIDE >> mip) - 1u;
+				const Vector2i mip_origin = clipmap_mip_origin(Vector2i(md.origin[0], md.origin[1]), mip);
+				const int32_t abs_px = mip_origin.x + int32_t((slot_x - uint32_t(mip_origin.x)) & mask);
+				const int32_t abs_py = mip_origin.y + int32_t((slot_y - uint32_t(mip_origin.y)) & mask);
+				const int32_t page_texels = int32_t(PAGE_SIZE << mip);
+				const int32_t p_min_x = abs_px * page_texels;
+				const int32_t p_max_x = p_min_x + page_texels - 1;
+				const int32_t p_min_y = abs_py * page_texels;
+				const int32_t p_max_y = p_min_y + page_texels - 1;
+				if (t_max_x < p_min_x || t_min_x > p_max_x || t_max_y < p_min_y || t_min_y > p_max_y) {
+					continue;
+				}
+				const float mip_texel = md.texel_scale * float(1u << mip);
+				if (p_min_texels > 0.0f && box_extent < p_min_texels * mip_texel) {
+					r_small_culled++;
+					continue;
+				}
+				r_dirty_indices.push_back(d);
+			}
+		} else {
+			float cx[8] = {};
+			float cy[8] = {};
+			float cw[8] = {};
+			uint32_t out_near = 0;
+			uint32_t out_far = 0;
+			uint32_t out_left = 0;
+			uint32_t out_right = 0;
+			uint32_t out_bottom = 0;
+			uint32_t out_top = 0;
+			float min_w = 0.0f;
+			for (uint32_t c = 0; c < 8u; c++) {
+				const Vector3 cp((c & 1u) ? box_max.x : box_min.x, (c & 2u) ? box_max.y : box_min.y, (c & 4u) ? box_max.z : box_min.z);
+				const float x = row_dot(md.rows[0], cp);
+				const float y = row_dot(md.rows[1], cp);
+				const float w = row_dot(md.rows[3], cp);
+				cx[c] = x;
+				cy[c] = y;
+				cw[c] = w;
+				min_w = c == 0u ? w : MIN(min_w, w);
+				out_near += w < md.near_w ? 1u : 0u;
+				out_far += w > md.max_distance ? 1u : 0u;
+				out_left += x < -w ? 1u : 0u;
+				out_right += x > w ? 1u : 0u;
+				out_bottom += y < -w ? 1u : 0u;
+				out_top += y > w ? 1u : 0u;
+			}
+			if (out_near == 8u || out_far == 8u || out_left == 8u || out_right == 8u || out_bottom == 8u || out_top == 8u) {
+				continue;
+			}
+			uint32_t t_min_x = 0u;
+			uint32_t t_max_x = VIRTUAL_SIZE - 1u;
+			uint32_t t_min_y = 0u;
+			uint32_t t_max_y = VIRTUAL_SIZE - 1u;
+			if (min_w > md.near_w) {
+				float min_u = 0.0f;
+				float max_u = 0.0f;
+				float min_v = 0.0f;
+				float max_v = 0.0f;
+				for (uint32_t c = 0; c < 8u; c++) {
+					const float u = (cx[c] / cw[c]) * 0.5f + 0.5f;
+					const float v = (cy[c] / cw[c]) * 0.5f + 0.5f;
+					if (c == 0u) {
+						min_u = u;
+						max_u = u;
+						min_v = v;
+						max_v = v;
+					} else {
+						min_u = MIN(min_u, u);
+						max_u = MAX(max_u, u);
+						min_v = MIN(min_v, v);
+						max_v = MAX(max_v, v);
+					}
+				}
+				if (max_u < 0.0f || min_u > 1.0f || max_v < 0.0f || min_v > 1.0f) {
+					continue;
+				}
+				t_min_x = MIN(uint32_t(CLAMP(min_u, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+				t_max_x = MIN(uint32_t(CLAMP(max_u, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+				t_min_y = MIN(uint32_t(CLAMP(min_v, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+				t_max_y = MIN(uint32_t(CLAMP(max_v, 0.0f, 1.0f) * float(VIRTUAL_SIZE)), VIRTUAL_SIZE - 1u);
+			}
+			const float closest_w = MAX(min_w, md.near_w);
+			for (uint32_t d = d_offset; d < d_end; d++) {
+				const DirtyPageRecord &rec = p_dirty[d];
+				if ((rec.flags & req_dirty) == 0u) {
+					continue;
+				}
+				const uint32_t mip = rec.packed_page & 0xFFu;
+				if (mip >= MIP_COUNT) {
+					continue;
+				}
+				const uint32_t page_x = (rec.packed_page >> 8u) & 0xFFu;
+				const uint32_t page_y = (rec.packed_page >> 16u) & 0xFFu;
+				const uint32_t bp_min_x = (t_min_x >> mip) >> PAGE_SIZE_SHIFT;
+				const uint32_t bp_max_x = (t_max_x >> mip) >> PAGE_SIZE_SHIFT;
+				const uint32_t bp_min_y = (t_min_y >> mip) >> PAGE_SIZE_SHIFT;
+				const uint32_t bp_max_y = (t_max_y >> mip) >> PAGE_SIZE_SHIFT;
+				if (page_x < bp_min_x || page_x > bp_max_x || page_y < bp_min_y || page_y > bp_max_y) {
+					continue;
+				}
+				const float mip_texel = (md.texel_scale * closest_w) * float(1u << mip);
+				if (p_min_texels > 0.0f && box_extent < p_min_texels * mip_texel) {
+					r_small_culled++;
+					continue;
+				}
+				r_dirty_indices.push_back(d);
+			}
+		}
+	}
+}

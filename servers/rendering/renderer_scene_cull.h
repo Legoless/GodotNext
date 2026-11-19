@@ -1091,6 +1091,8 @@ public:
 
 	RendererSceneRender::RenderShadowData render_shadow_data[MAX_UPDATE_SHADOWS];
 	uint32_t max_shadows_used = 0;
+	// GodotNext: vsm_non_nanite (#218).
+	LocalVector<RendererSceneRender::RenderVSMShadowData> vsm_shadow_data;
 
 	RendererSceneRender::RenderSDFGIData render_sdfgi_data[SDFGI_MAX_CASCADES * SDFGI_MAX_REGIONS_PER_CASCADE];
 	RendererSceneRender::RenderSDFGIUpdateData sdfgi_update_data;

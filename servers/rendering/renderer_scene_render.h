@@ -311,6 +311,20 @@ public:
 		PagedArray<RenderGeometryInstance *> instances;
 	};
 
+	// GodotNext: vsm_non_nanite (#218). Per-light shadow casters for VSM rasterization, independent of
+	// shadow-atlas tile limits or dirty flags.
+	struct RenderVSMCaster {
+		RenderGeometryInstance *geometry_instance = nullptr;
+		RID instance;
+		uint64_t object_id = 0;
+		float extra_margin = 0.0f;
+	};
+
+	struct RenderVSMShadowData {
+		RID light;
+		LocalVector<RenderVSMCaster> casters;
+	};
+
 	struct RenderSDFGIData {
 		int region = 0;
 		PagedArray<RenderGeometryInstance *> instances;
@@ -369,6 +383,9 @@ public:
 		const AABB *nextgi_light_volumes = nullptr;
 		uint32_t nextgi_light_volume_count = 0;
 		bool nextgi_directional_light_dirty = false;
+		// GodotNext: vsm_non_nanite (#218).
+		const RenderVSMShadowData *vsm_shadows = nullptr;
+		uint32_t vsm_shadow_count = 0;
 	};
 
 	struct CameraData {
@@ -423,6 +440,8 @@ public:
 	virtual void material_set_use_debanding(bool p_enable) = 0;
 
 	virtual void update() = 0;
+	// GodotNext: vsm_non_nanite (#218). Whether virtual shadow maps rasterize this frame's shadow casters.
+	virtual bool is_vsm_active() const { return false; }
 	virtual Dictionary geometry_instance_get_nextgeo_debug_stats(RenderGeometryInstance *p_geometry_instance) const { return Dictionary(); }
 	virtual ~RendererSceneRender() {}
 };

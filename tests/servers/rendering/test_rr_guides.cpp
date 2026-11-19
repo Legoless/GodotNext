@@ -89,8 +89,9 @@ TEST_CASE("[Upscalers][RRGuides] Color pass flag counts and shader version layou
 	CHECK_EQ(int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_BASE), int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_COUNT));
 	CHECK_EQ(int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE), int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_BASE) + int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_COUNT) + int(Version::SHADER_VERSION_MEGALIGHTS_INPUTS_UBER_COUNT));
 	CHECK_EQ(int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT), 4);
-	// One vertex input mask per variant, the last Stage B RR variant included.
-	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT));
+	// One vertex input mask per variant, the last Stage B RR and VSM variants included.
+	CHECK_EQ(int(Version::SHADER_VERSION_VSM_BASE), int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_BASE) + int(Version::SHADER_VERSION_VISIBILITY_RESOLVE_RR_GUIDES_COUNT));
+	CHECK_EQ(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE), int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
 
 	// Every variant with the guide outputs is in an RR group, so none compiles with RR off.
 	for (uint32_t flags = 0; flags < uint32_t(Shader::SHADER_COLOR_PASS_FLAG_COUNT); flags++) {

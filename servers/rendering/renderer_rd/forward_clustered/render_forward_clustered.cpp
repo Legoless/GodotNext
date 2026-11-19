@@ -45,6 +45,9 @@
 #include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 // GodotNext: vsm_page_marking (#219).
 #include "servers/rendering/renderer_rd/environment/next_gi_view.h"
+// GodotNext: vsm_non_nanite (#218).
+#include "core/object/callable_mp.h"
+#include "core/os/os.h"
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/renderer_viewport.h"
@@ -2528,9 +2531,10 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		current_cluster_builder->bake_cluster();
 	}
 
-	// GodotNext: vsm_page_marking (#219). After the light buffers (vsm_map_base) and the cluster.
+	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218). After the light buffers (vsm_map_base) and the cluster.
 	if (vsm_mark_view && rb_data.is_valid() && current_cluster_builder) {
 		_vsm_mark_pages(p_render_data);
+		_vsm_raster_non_nanite(p_render_data);
 	}
 	vsm_mark_view = false;
 
@@ -2616,6 +2620,1923 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 	}
 
 	vsm->mark_and_allocate(input);
+}
+
+// GodotNext: vsm_non_nanite (#218, plan §21.3 contract S4). Per-page GPU instance culling and indirect
+// raster of the non-Nanite shadow casters into the virtual shadow map pool, and its GPU check.
+bool RenderForwardClustered::is_vsm_active() const {
+	const RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	return vsm != nullptr && vsm->is_active();
+}
+
+void RenderForwardClustered::_arm_vsm_raster_check_cb(void *p_userdata) {
+	RenderForwardClustered *self = static_cast<RenderForwardClustered *>(p_userdata);
+	if (self != nullptr) {
+		self->_free_vsm_raster_check_buffers();
+	}
+}
+
+Dictionary RenderForwardClustered::_get_vsm_raster_check_cb(void *p_userdata) {
+	RenderForwardClustered *self = static_cast<RenderForwardClustered *>(p_userdata);
+	return self != nullptr ? self->get_vsm_raster_check_result() : Dictionary();
+}
+
+bool RenderForwardClustered::_ensure_vsm_cull_shader() {
+	if (vsm_cull_ready) {
+		return true;
+	}
+	if (vsm_cull_failed) {
+		return false;
+	}
+	Vector<String> modes;
+	modes.push_back("\n#define MODE_CLEAR\n");
+	modes.push_back("\n#define MODE_COUNT_BOXES\n");
+	modes.push_back("\n#define MODE_COUNT_INSTANCES\n");
+	modes.push_back("\n#define MODE_SCAN\n");
+	modes.push_back("\n#define MODE_WRITE_BOXES\n");
+	modes.push_back("\n#define MODE_WRITE_INSTANCES\n");
+	modes.push_back("\n#define MODE_FIXUP\n");
+	vsm_cull_shader.initialize(modes, RendererVirtualShadowMapStorage::get_glsl_defines());
+	vsm_cull_version = vsm_cull_shader.version_create();
+	bool ok = vsm_cull_version.is_valid();
+	for (int m = 0; m < VSM_CULL_MODE_MAX && ok; m++) {
+		const RID shader_rid = vsm_cull_shader.version_get_shader(vsm_cull_version, m);
+		ok = shader_rid.is_valid();
+		if (ok) {
+			vsm_cull_pipelines[m] = RD::get_singleton()->compute_pipeline_create(shader_rid);
+			ok = vsm_cull_pipelines[m].is_valid();
+		}
+	}
+	if (!ok) {
+		if (vsm_cull_version.is_valid()) {
+			vsm_cull_shader.version_free(vsm_cull_version);
+			vsm_cull_version = RID();
+		}
+		for (RID &pipeline : vsm_cull_pipelines) {
+			pipeline = RID();
+		}
+		vsm_cull_failed = true;
+		ERR_FAIL_V_MSG(false, "The virtual shadow map non-Nanite instance culling shader did not compile.");
+	}
+	vsm_cull_ready = true;
+	return true;
+}
+
+void RenderForwardClustered::_ensure_vsm_cull_buffers(uint32_t p_box_records, uint32_t p_sub_records, uint32_t p_groups, uint32_t p_pair_capacity, bool p_capture) {
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL(rd);
+
+	if (vsm_empty_fb.is_null()) {
+		vsm_empty_fb = rd->framebuffer_create_empty(Size2i(int32_t(RendererVirtualShadowMapStorage::PAGE_SIZE), int32_t(RendererVirtualShadowMapStorage::PAGE_SIZE)));
+	}
+	if (vsm_cull_state_buffer.is_null()) {
+		vsm_cull_state_buffer = rd->storage_buffer_create(VSM_CULL_STATE_WORDS * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_cull_state_buffer, "VSM Cull State");
+		rd->buffer_clear(vsm_cull_state_buffer, 0, VSM_CULL_STATE_WORDS * uint32_t(sizeof(uint32_t)));
+	}
+
+	const uint32_t want_boxes = MAX(p_box_records, 1u);
+	if (vsm_box_records_buffer.is_null() || vsm_box_records_capacity < want_boxes) {
+		if (vsm_box_records_buffer.is_valid()) {
+			rd->free_rid(vsm_box_records_buffer);
+		}
+		vsm_box_records_capacity = Math::nearest_power_of_2_templated(MAX(want_boxes, 64u));
+		vsm_box_records_buffer = rd->storage_buffer_create(vsm_box_records_capacity * uint32_t(sizeof(VSMBoxCullRecord)));
+		rd->set_resource_name(vsm_box_records_buffer, "VSM Box Cull Records");
+	}
+
+	const uint32_t want_subs = MAX(p_sub_records, 1u);
+	if (vsm_sub_records_buffer.is_null() || vsm_sub_records_capacity < want_subs) {
+		if (vsm_sub_records_buffer.is_valid()) {
+			rd->free_rid(vsm_sub_records_buffer);
+		}
+		vsm_sub_records_capacity = Math::nearest_power_of_2_templated(MAX(want_subs, 16u));
+		vsm_sub_records_buffer = rd->storage_buffer_create(vsm_sub_records_capacity * uint32_t(sizeof(VSMSubCullRecord)));
+		rd->set_resource_name(vsm_sub_records_buffer, "VSM Sub Cull Records");
+	}
+
+	const uint32_t want_groups = MAX(p_groups, 1u);
+	if (vsm_group_draw_meta_buffer.is_null() || vsm_groups_capacity < want_groups) {
+		for (RID *buf : { &vsm_group_draw_meta_buffer, &vsm_group_counts_buffer, &vsm_group_offsets_buffer, &vsm_group_cursors_buffer, &vsm_indirect_commands_buffer, &vsm_indirect_counts_buffer }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+		vsm_groups_capacity = Math::nearest_power_of_2_templated(MAX(want_groups, 32u));
+		vsm_group_draw_meta_buffer = rd->storage_buffer_create(vsm_groups_capacity * 2u * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_group_draw_meta_buffer, "VSM Group Draw Meta");
+		vsm_group_counts_buffer = rd->storage_buffer_create(vsm_groups_capacity * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_group_counts_buffer, "VSM Group Counts");
+		vsm_group_offsets_buffer = rd->storage_buffer_create(vsm_groups_capacity * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_group_offsets_buffer, "VSM Group Offsets");
+		vsm_group_cursors_buffer = rd->storage_buffer_create(vsm_groups_capacity * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_group_cursors_buffer, "VSM Group Cursors");
+		vsm_indirect_commands_buffer = rd->storage_buffer_create(vsm_groups_capacity * 5u * uint32_t(sizeof(uint32_t)), Span<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		rd->set_resource_name(vsm_indirect_commands_buffer, "VSM Indirect Commands");
+		vsm_indirect_counts_buffer = rd->storage_buffer_create(vsm_groups_capacity * uint32_t(sizeof(uint32_t)), Span<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+		rd->set_resource_name(vsm_indirect_counts_buffer, "VSM Indirect Counts");
+	}
+
+	const uint32_t want_pairs = MAX(p_pair_capacity, RendererVirtualShadowMapStorage::RASTER_PAIR_LIST_MIN);
+	if (vsm_pairs_buffer.is_null() || vsm_pairs_capacity != want_pairs) {
+		for (RID *buf : { &vsm_pairs_buffer, &vsm_pair_texels_buffer }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+		vsm_pairs_capacity = want_pairs;
+		vsm_pairs_buffer = rd->storage_buffer_create(vsm_pairs_capacity * 4u * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_pairs_buffer, "VSM Instance-Page Pairs");
+		// A fragment counter and an outside-vertex counter per pair, written only by a raster check's view
+		// (the pair's w is then its caster).
+		vsm_pair_texels_buffer = rd->storage_buffer_create((2u * vsm_pairs_capacity + 1u) * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(vsm_pair_texels_buffer, "VSM Pair Texels");
+		rd->buffer_clear(vsm_pair_texels_buffer, 0, (2u * vsm_pairs_capacity + 1u) * uint32_t(sizeof(uint32_t)));
+	}
+	// The pairs' cull boxes are written only while a raster check captures; otherwise one unused entry.
+	const uint32_t want_boxes_pairs = p_capture ? vsm_pairs_capacity : 1u;
+	if (vsm_pair_boxes_buffer.is_null() || vsm_pair_boxes_capacity != want_boxes_pairs) {
+		if (vsm_pair_boxes_buffer.is_valid()) {
+			rd->free_rid(vsm_pair_boxes_buffer);
+		}
+		vsm_pair_boxes_capacity = want_boxes_pairs;
+		vsm_pair_boxes_buffer = rd->storage_buffer_create(vsm_pair_boxes_capacity * 8u * uint32_t(sizeof(float)));
+		rd->set_resource_name(vsm_pair_boxes_buffer, "VSM Pair Cull Boxes");
+	}
+}
+
+void RenderForwardClustered::_free_vsm_raster_check_buffers() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		for (RID *buf : { &vsm_raster_check.dirty_snap, &vsm_raster_check.alloc_state_snap, &vsm_raster_check.map_state_snap, &vsm_raster_check.group_counts_snap, &vsm_raster_check.group_offsets_snap, &vsm_raster_check.indirect_commands_snap, &vsm_raster_check.indirect_counts_snap, &vsm_raster_check.cull_state_snap, &vsm_raster_check.pairs_snap, &vsm_raster_check.pair_texels_snap, &vsm_raster_check.page_table_snap, &vsm_raster_check.pool_snap }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+		for (RID &sub_snap : vsm_raster_check.sub_transform_snaps) {
+			if (sub_snap.is_valid()) {
+				rd->free_rid(sub_snap);
+			}
+		}
+	}
+	vsm_raster_check = VSMRasterCheckCapture();
+}
+
+void RenderForwardClustered::_free_vsm_raster_resources() {
+	_free_vsm_raster_check_buffers();
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		for (RID *buf : { &vsm_box_records_buffer, &vsm_sub_records_buffer, &vsm_group_draw_meta_buffer, &vsm_group_counts_buffer, &vsm_group_offsets_buffer, &vsm_group_cursors_buffer, &vsm_indirect_commands_buffer, &vsm_indirect_counts_buffer, &vsm_pairs_buffer, &vsm_cull_state_buffer, &vsm_pair_texels_buffer, &vsm_pair_boxes_buffer, &vsm_empty_fb }) {
+			if (buf->is_valid()) {
+				rd->free_rid(*buf);
+				*buf = RID();
+			}
+		}
+		if (vsm_cull_version.is_valid()) {
+			vsm_cull_shader.version_free(vsm_cull_version);
+			vsm_cull_version = RID();
+		}
+	}
+	for (RID &pipeline : vsm_cull_pipelines) {
+		pipeline = RID();
+	}
+	vsm_cull_ready = false;
+	vsm_box_records_capacity = 0;
+	vsm_sub_records_capacity = 0;
+	vsm_groups_capacity = 0;
+	vsm_pairs_capacity = 0;
+	vsm_pair_boxes_capacity = 0;
+}
+
+void RenderForwardClustered::_vsm_cull_state_received(const Vector<uint8_t> &p_data) {
+	// GodotNext: vsm_non_nanite (#218). A frame or more after the cull: a pair list that overflowed grows.
+	// Its pages were marked and are drawn again in full the next time a view requests them.
+	RenderForwardClustered *self = singleton;
+	if (self == nullptr) {
+		return;
+	}
+	self->vsm_cull_state_pending = false;
+	if (p_data.size() < int(VSM_CULL_STATE_WORDS * sizeof(uint32_t))) {
+		return;
+	}
+	uint32_t state[VSM_CULL_STATE_WORDS] = {};
+	memcpy(state, p_data.ptr(), sizeof(state));
+	const uint32_t total = state[VSM_CULL_STATE_TOTAL_PAIRS];
+	const uint32_t dropped = state[VSM_CULL_STATE_DROPPED_PAIRS];
+	self->vsm_redraw_marks_total += state[VSM_CULL_STATE_REDRAW_MARKS];
+	self->vsm_write_mismatch_total += state[VSM_CULL_STATE_WRITE_MISMATCH];
+	if (dropped == 0) {
+		return;
+	}
+	self->vsm_overflow_frames++;
+	self->vsm_dropped_pairs_total += dropped;
+	const uint64_t wanted = uint64_t(total) + uint64_t(total) / 4u;
+	const uint32_t grown = wanted >= uint64_t(VSM_PAIR_CAPACITY_MAX) ? VSM_PAIR_CAPACITY_MAX : Math::nearest_power_of_2_templated(uint32_t(wanted));
+	if (grown > self->vsm_pair_capacity_floor) {
+		self->vsm_pair_capacity_floor = grown;
+	}
+	if (!self->vsm_overflow_warned) {
+		self->vsm_overflow_warned = true;
+		WARN_PRINT(vformat("VSM: the non-Nanite instance-page pair list overflowed (%d pairs for %d places). The pages are drawn again, and the list grows to %d pairs.", total, self->vsm_last_pair_capacity, MIN(MAX(self->vsm_pair_capacity_floor, self->vsm_last_pair_capacity), VSM_PAIR_CAPACITY_MAX)));
+	}
+	if (self->vsm_last_pair_capacity >= VSM_PAIR_CAPACITY_MAX && !self->vsm_overflow_cap_warned) {
+		self->vsm_overflow_cap_warned = true;
+		WARN_PRINT(vformat("VSM: the non-Nanite pair list is at its %d-pair limit; pages that do not fit are drawn over the next frames.", VSM_PAIR_CAPACITY_MAX));
+	}
+}
+
+namespace {
+
+struct VSMGroupKey {
+	RID pipeline_rd;
+	RID vertex_array_rd;
+	RID index_array_rd;
+	RID xforms_uniform_set;
+	RID material_uniform_set;
+	uint32_t current_offset = 0;
+	uint32_t drawn_count = 0;
+	uint32_t ubershader = 0;
+	uint32_t cull_mode = 0;
+	uint32_t spec0 = 0;
+	uint32_t spec1 = 0;
+	uint32_t spec2 = 0;
+
+	bool operator==(const VSMGroupKey &p_other) const {
+		return pipeline_rd == p_other.pipeline_rd &&
+				vertex_array_rd == p_other.vertex_array_rd &&
+				index_array_rd == p_other.index_array_rd &&
+				xforms_uniform_set == p_other.xforms_uniform_set &&
+				material_uniform_set == p_other.material_uniform_set &&
+				current_offset == p_other.current_offset &&
+				drawn_count == p_other.drawn_count &&
+				ubershader == p_other.ubershader &&
+				cull_mode == p_other.cull_mode &&
+				spec0 == p_other.spec0 &&
+				spec1 == p_other.spec1 &&
+				spec2 == p_other.spec2;
+	}
+};
+
+struct VSMGroupKeyHasher {
+	static _FORCE_INLINE_ uint32_t hash(const VSMGroupKey &p_key) {
+		uint32_t h = hash_murmur3_one_64(p_key.pipeline_rd.get_id());
+		h = hash_murmur3_one_64(p_key.vertex_array_rd.get_id(), h);
+		h = hash_murmur3_one_64(p_key.index_array_rd.get_id(), h);
+		h = hash_murmur3_one_64(p_key.xforms_uniform_set.get_id(), h);
+		h = hash_murmur3_one_64(p_key.material_uniform_set.get_id(), h);
+		h = hash_murmur3_one_32(p_key.current_offset, h);
+		h = hash_murmur3_one_32(p_key.drawn_count, h);
+		h = hash_murmur3_one_32(p_key.ubershader, h);
+		h = hash_murmur3_one_32(p_key.cull_mode, h);
+		h = hash_murmur3_one_32(p_key.spec0, h);
+		h = hash_murmur3_one_32(p_key.spec1, h);
+		h = hash_murmur3_one_32(p_key.spec2, h);
+		return hash_fmix32(h);
+	}
+};
+
+struct VSMPairTuple {
+	uint32_t group = 0;
+	uint32_t elem = 0;
+	uint32_t sub = 0;
+	uint32_t dirty = 0;
+	uint32_t caster = 0;
+
+	bool operator==(const VSMPairTuple &p_other) const {
+		return group == p_other.group && elem == p_other.elem && sub == p_other.sub && dirty == p_other.dirty && caster == p_other.caster;
+	}
+};
+
+struct VSMPairTupleHasher {
+	static _FORCE_INLINE_ uint32_t hash(const VSMPairTuple &p_tuple) {
+		uint32_t h = hash_murmur3_one_32(p_tuple.group);
+		h = hash_murmur3_one_32(p_tuple.elem, h);
+		h = hash_murmur3_one_32(p_tuple.sub, h);
+		h = hash_murmur3_one_32(p_tuple.dirty, h);
+		h = hash_murmur3_one_32(p_tuple.caster, h);
+		return hash_fmix32(h);
+	}
+};
+
+LocalVector<uint32_t> _vsm_read_words(RID p_buffer) {
+	LocalVector<uint32_t> words;
+	if (p_buffer.is_null()) {
+		return words;
+	}
+	const Vector<uint8_t> bytes = RD::get_singleton()->buffer_get_data(p_buffer);
+	const uint32_t count = uint32_t(bytes.size()) / uint32_t(sizeof(uint32_t));
+	words.resize(count);
+	if (count > 0) {
+		memcpy(words.ptr(), bytes.ptr(), count * sizeof(uint32_t));
+	}
+	return words;
+}
+
+} // namespace
+
+void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data) {
+	// GodotNext: vsm_non_nanite (#218, plan §21.3 contract S4, budget V3).
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RendererRD::MeshStorage *mesh_storage = RendererRD::MeshStorage::get_singleton();
+	RendererRD::ParticlesStorage *particles_storage = RendererRD::ParticlesStorage::get_singleton();
+	RenderingDevice *rd = RD::get_singleton();
+	if (vsm == nullptr || !vsm->is_active() || rd == nullptr || p_render_data == nullptr || p_render_data->scene_data == nullptr) {
+		return;
+	}
+	// The compositor creates the storage after the scene renderer, so the check registers here.
+	vsm->set_raster_check_callbacks(&RenderForwardClustered::_arm_vsm_raster_check_cb, &RenderForwardClustered::_get_vsm_raster_check_cb, this);
+	const RID pool_tex = vsm->get_pool_texture();
+	const RID map_data_buf = vsm->get_map_data_buffer();
+	const RID map_state_buf = vsm->get_map_state_buffer();
+	const RID dirty_buf = vsm->get_dirty_buffer();
+	const RID alloc_state_buf = vsm->get_state_buffer();
+	const uint32_t table_maps = vsm->get_map_buffers_capacity();
+	const uint32_t pool_pages = vsm->get_page_buffers_capacity();
+	if (pool_tex.is_null() || map_data_buf.is_null() || map_state_buf.is_null() || dirty_buf.is_null() || alloc_state_buf.is_null() || vsm->get_page_table_buffer().is_null() || table_maps == 0 || pool_pages == 0) {
+		return;
+	}
+	if (!_ensure_vsm_cull_shader()) {
+		return;
+	}
+	if (!scene_shader.is_vsm_shader_group_enabled()) {
+		scene_shader.enable_vsm_shader_group();
+	}
+
+	RENDER_TIMESTAMP("VSM Non-Nanite Raster");
+	_update_dirty_geometry_instances();
+
+	const bool capture = vsm->consume_raster_check_request();
+	if (capture) {
+		_free_vsm_raster_check_buffers();
+	}
+
+	const bool skip_virtual_for_vsm = nextgeo_virtual_active &&
+			!p_render_data->reflection_probe.is_valid() &&
+			RSG::virtual_mesh_storage != nullptr &&
+			RSG::virtual_mesh_storage->get_live_record_count() > 0 &&
+			RSG::virtual_mesh_storage->get_record_count() > 0 &&
+			RSG::virtual_mesh_storage->get_record_buffer().is_valid() &&
+			RSG::virtual_mesh_storage->get_max_bvh_levels() > 0;
+
+	auto has_non_virtual_shadow_surface = [&](GeometryInstanceForwardClustered *p_inst) -> bool {
+		if (p_inst == nullptr || p_inst->data == nullptr || p_inst->instance_count == 0) {
+			return false;
+		}
+		for (const GeometryInstanceSurfaceDataCache *s = p_inst->surface_caches; s != nullptr; s = s->next) {
+			if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) == 0) {
+				continue;
+			}
+			if (skip_virtual_for_vsm && (s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0) {
+				continue;
+			}
+			if (s->surface_shadow != nullptr && s->shader_shadow != nullptr) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	struct CasterLightRef {
+		uint32_t map_base = RendererVirtualShadowMapStorage::MAP_NONE;
+		uint32_t light_flags = 0;
+		bool reverse_cull = false;
+	};
+	struct UniqueCaster {
+		GeometryInstanceForwardClustered *inst = nullptr;
+		uint64_t object_id = 0;
+		float extra_margin = 0.0f;
+		bool moved_this_frame = false;
+		uint32_t saved_flags = 0;
+		float saved_depth = 0.0f;
+		LocalVector<CasterLightRef> lights;
+	};
+
+	HashMap<GeometryInstanceForwardClustered *, uint32_t> caster_id_map;
+	HashSet<GeometryInstanceForwardClustered *> virtual_skipped_set;
+	LocalVector<UniqueCaster> unique_casters;
+	uint32_t active_vsm_lights = 0;
+	// Raster check only: the casters each light with virtual maps rasterizes, for the per-light atlas diff.
+	HashMap<RID, HashSet<GeometryInstanceForwardClustered *>> vsm_light_casters;
+	LocalVector<VSMRasterCheckCapture::Light> check_lights;
+
+	const RenderVSMShadowData *vsm_shadows = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->vsm_shadows : nullptr;
+	const uint32_t vsm_shadow_count = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->vsm_shadow_count : 0;
+
+	for (uint32_t s = 0; s < vsm_shadow_count && vsm_shadows != nullptr; s++) {
+		const RenderVSMShadowData &vs = vsm_shadows[s];
+		if (!light_storage->owns_light_instance(vs.light)) {
+			continue;
+		}
+		const RendererVirtualShadowMapStorage::MapRange *range = vsm->map_get(vs.light);
+		if (range == nullptr || range->first == RendererVirtualShadowMapStorage::MAP_NONE || range->count == 0) {
+			continue;
+		}
+		active_vsm_lights++;
+		const RID base_light = light_storage->light_instance_get_base_light(vs.light);
+		const bool rev_cull = base_light.is_valid() && light_storage->light_get_reverse_cull_face_mode(base_light);
+		const uint32_t lflags = RendererVirtualShadowMapStorage::light_flags(range->kind, range->count);
+		HashSet<GeometryInstanceForwardClustered *> *light_casters = capture ? &vsm_light_casters[vs.light] : nullptr;
+		if (capture) {
+			VSMRasterCheckCapture::Light check_light;
+			check_light.map_first = range->first;
+			check_light.map_count = range->count;
+			check_light.kind = uint32_t(range->kind);
+			check_light.base_light_id = base_light.get_id();
+			check_light.transform = light_storage->light_instance_get_base_transform(vs.light);
+			check_lights.push_back(check_light);
+		}
+
+		for (uint32_t i = 0; i < vs.casters.size(); i++) {
+			const RenderVSMCaster &c = vs.casters[i];
+			GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(c.geometry_instance);
+			if (inst == nullptr || inst->data == nullptr || inst->instance_count == 0) {
+				continue;
+			}
+			if (!has_non_virtual_shadow_surface(inst)) {
+				for (const GeometryInstanceSurfaceDataCache *sc = inst->surface_caches; sc != nullptr; sc = sc->next) {
+					if ((sc->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) != 0 && skip_virtual_for_vsm && (sc->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0) {
+						virtual_skipped_set.insert(inst);
+						break;
+					}
+				}
+				continue;
+			}
+			if (light_casters != nullptr) {
+				light_casters->insert(inst);
+			}
+			uint32_t *existing = caster_id_map.getptr(inst);
+			uint32_t cid = 0;
+			if (existing != nullptr) {
+				cid = *existing;
+			} else {
+				cid = unique_casters.size();
+				caster_id_map[inst] = cid;
+				UniqueCaster uc;
+				uc.inst = inst;
+				uc.object_id = c.object_id;
+				uc.extra_margin = c.extra_margin;
+				// A set_transform() with the same value is not a move (light changes re-set transforms).
+				uc.moved_this_frame = inst->transform != inst->prev_transform;
+				uc.saved_flags = inst->flags_cache;
+				uc.saved_depth = inst->depth;
+				unique_casters.push_back(uc);
+			}
+			LocalVector<CasterLightRef> &clights = unique_casters[cid].lights;
+			bool dup = false;
+			for (const CasterLightRef &prev : clights) {
+				if (prev.map_base == range->first) {
+					dup = true;
+					break;
+				}
+			}
+			if (!dup) {
+				CasterLightRef ref;
+				ref.map_base = range->first;
+				ref.light_flags = lflags;
+				ref.reverse_cull = rev_cull;
+				clights.push_back(ref);
+			}
+		}
+	}
+
+	uint32_t atlas_non_virtual_count = 0;
+	uint32_t missing_from_vsm_count = 0;
+	uint32_t vsm_extra_casters_count = 0;
+	if (capture) {
+		HashSet<GeometryInstanceForwardClustered *> atlas_set;
+		HashMap<RID, HashSet<GeometryInstanceForwardClustered *>> atlas_by_light;
+		for (int s = 0; s < p_render_data->render_shadow_count && p_render_data->render_shadows != nullptr; s++) {
+			const PagedArray<RenderGeometryInstance *> &arr = p_render_data->render_shadows[s].instances;
+			HashSet<GeometryInstanceForwardClustered *> &light_atlas = atlas_by_light[p_render_data->render_shadows[s].light];
+			for (uint32_t i = 0; i < arr.size(); i++) {
+				GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(arr[i]);
+				if (has_non_virtual_shadow_surface(inst)) {
+					atlas_set.insert(inst);
+					light_atlas.insert(inst);
+				}
+			}
+		}
+		atlas_non_virtual_count = atlas_set.size();
+		// Per light: a caster that the atlas draws for a light must be in that light's virtual maps. A light
+		// without virtual maps falls back to "in any light's virtual maps".
+		for (const KeyValue<RID, HashSet<GeometryInstanceForwardClustered *>> &kv : atlas_by_light) {
+			const HashSet<GeometryInstanceForwardClustered *> *light_casters = vsm_light_casters.getptr(kv.key);
+			for (GeometryInstanceForwardClustered *inst : kv.value) {
+				if (light_casters != nullptr ? !light_casters->has(inst) : !caster_id_map.has(inst)) {
+					missing_from_vsm_count++;
+				}
+			}
+		}
+		for (const UniqueCaster &uc : unique_casters) {
+			if (!atlas_set.has(uc.inst)) {
+				vsm_extra_casters_count++;
+			}
+		}
+	}
+
+	// Every shadowed light of the view that has virtual maps needs a caster list from the scene cull.
+	uint32_t view_vsm_lights = 0;
+	LocalVector<uint64_t> lights_without_casters;
+	if (capture && p_render_data->lights != nullptr) {
+		HashSet<RID> listed;
+		for (uint32_t s = 0; s < vsm_shadow_count && vsm_shadows != nullptr; s++) {
+			listed.insert(vsm_shadows[s].light);
+		}
+		for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+			const RID light_instance = (*p_render_data->lights)[i];
+			if (!light_storage->owns_light_instance(light_instance)) {
+				continue;
+			}
+			const RID base_light = light_storage->light_instance_get_base_light(light_instance);
+			if (base_light.is_null() || !light_storage->light_has_shadow(base_light)) {
+				continue;
+			}
+			if (light_storage->light_get_type(base_light) == RSE::LIGHT_DIRECTIONAL && light_storage->light_directional_get_sky_mode(base_light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+				continue;
+			}
+			const RendererVirtualShadowMapStorage::MapRange *range = vsm->map_get(light_instance);
+			if (range == nullptr || range->first == RendererVirtualShadowMapStorage::MAP_NONE || range->count == 0) {
+				continue;
+			}
+			view_vsm_lights++;
+			if (!listed.has(light_instance)) {
+				lights_without_casters.push_back(light_instance.get_id());
+			}
+		}
+	}
+
+	// The pair list: the pool's raster_pair_capacity() (or GODOT_DEV_VSM_PAIR_CAPACITY, to test an overflow),
+	// grown after an overflow up to VSM_PAIR_CAPACITY_MAX.
+#ifdef DEBUG_ENABLED
+	if (!vsm_pair_capacity_env_read) {
+		vsm_pair_capacity_env_read = true;
+		const String value = OS::get_singleton() != nullptr ? OS::get_singleton()->get_environment("GODOT_DEV_VSM_PAIR_CAPACITY").strip_edges() : String();
+		if (!value.is_empty()) {
+			const int64_t requested = value.to_int();
+			if (value.is_valid_int() && requested >= 64 && requested <= int64_t(VSM_PAIR_CAPACITY_MAX)) {
+				vsm_pair_capacity_override = uint32_t(requested);
+				print_line(vformat("VSM: GODOT_DEV_VSM_PAIR_CAPACITY is set: the non-Nanite pair list starts at %d pairs.", requested));
+			} else {
+				WARN_PRINT(vformat("GODOT_DEV_VSM_PAIR_CAPACITY=%s is not a whole number from 64 to %d; it is ignored.", value, VSM_PAIR_CAPACITY_MAX));
+			}
+		}
+	}
+#endif
+	const uint32_t base_pair_capacity = vsm_pair_capacity_override > 0 ? vsm_pair_capacity_override : RendererVirtualShadowMapStorage::raster_pair_capacity(pool_pages);
+	const uint32_t pair_capacity = MIN(MAX(base_pair_capacity, vsm_pair_capacity_floor), VSM_PAIR_CAPACITY_MAX);
+	vsm_last_pair_capacity = pair_capacity;
+	const float min_caster_texels = vsm->get_min_caster_texels();
+	const bool use_indirect_count = rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT);
+
+	// Save per-surface prepass velocity flags before _fill_render_list touches RENDER_LIST_SECONDARY.
+	struct SavedSurfaceVelocity {
+		GeometryInstanceSurfaceDataCache *surf = nullptr;
+		bool uses_prepass_velocity = false;
+	};
+	LocalVector<SavedSurfaceVelocity> saved_surf_vel;
+	vsm_cull_instances.clear();
+	for (const UniqueCaster &uc : unique_casters) {
+		vsm_cull_instances.push_back(uc.inst);
+		for (GeometryInstanceSurfaceDataCache *sc = uc.inst->surface_caches; sc != nullptr; sc = sc->next) {
+			if (sc->uses_prepass_velocity) {
+				saved_surf_vel.push_back({ sc, true });
+			}
+		}
+	}
+
+	RenderSceneDataRD vsm_scene_data;
+	vsm_scene_data.flip_y = false;
+	vsm_scene_data.cam_projection.set_orthogonal(-1.0f, 1.0f, -1.0f, 1.0f, 0.0f, 1.0f);
+	vsm_scene_data.cam_transform = Transform3D();
+	vsm_scene_data.view_projection[0] = vsm_scene_data.cam_projection;
+	vsm_scene_data.cam_orthogonal = false;
+	vsm_scene_data.z_near = 0.0f;
+	vsm_scene_data.z_far = p_render_data->scene_data->z_far;
+	vsm_scene_data.lod_distance_multiplier = p_render_data->scene_data->cam_projection.get_lod_multiplier();
+	vsm_scene_data.screen_mesh_lod_threshold = (get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_DISABLE_LOD) ? 0.0f : p_render_data->scene_data->screen_mesh_lod_threshold;
+	vsm_scene_data.opaque_prepass_threshold = 0.1f;
+	vsm_scene_data.time = time;
+	vsm_scene_data.time_step = time_step;
+	vsm_scene_data.main_cam_transform = p_render_data->scene_data->cam_transform;
+	vsm_scene_data.shadow_pass = true;
+
+	RenderDataRD vsm_rd;
+	vsm_rd.scene_data = &vsm_scene_data;
+	vsm_rd.cluster_size = 1;
+	vsm_rd.cluster_max_elements = 32;
+	vsm_rd.instances = &vsm_cull_instances;
+
+	_update_render_base_uniform_set();
+
+	const Size2i page_screen_size = Size2i(int32_t(RendererVirtualShadowMapStorage::PAGE_SIZE), int32_t(RendererVirtualShadowMapStorage::PAGE_SIZE));
+	const uint32_t uniform_buffer_index = _setup_environment(&vsm_rd, true, page_screen_size, page_screen_size, Color(), false, false, false);
+
+	{
+		NextGeoBoolScope vsm_nextgeo_scope(nextgeo_shadow_pass_active, skip_virtual_for_vsm);
+		_fill_render_list(RENDER_LIST_SECONDARY, &vsm_rd, PASS_MODE_SHADOW, false, false, false, false);
+	}
+	render_list[RENDER_LIST_SECONDARY].sort_by_key();
+	_fill_instance_data(RENDER_LIST_SECONDARY, nullptr, 0, -1, true);
+
+	for (const UniqueCaster &uc : unique_casters) {
+		uc.inst->flags_cache = uc.saved_flags;
+		uc.inst->depth = uc.saved_depth;
+	}
+	for (const SavedSurfaceVelocity &sv : saved_surf_vel) {
+		sv.surf->uses_prepass_velocity = sv.uses_prepass_velocity;
+	}
+
+	const uint32_t element_count = render_list[RENDER_LIST_SECONDARY].elements.size();
+	_ensure_vsm_cull_buffers(1u, 1u, 1u, pair_capacity, capture);
+	const RD::FramebufferFormatID empty_fb_format = rd->framebuffer_get_format(vsm_empty_fb);
+
+	LocalVector<VSMCasterTelemetry> caster_telemetry;
+	if (capture) {
+		caster_telemetry.resize(unique_casters.size());
+		for (uint32_t c = 0; c < unique_casters.size(); c++) {
+			const GeometryInstanceForwardClustered *inst = unique_casters[c].inst;
+			VSMCasterTelemetry &tel = caster_telemetry[c];
+			tel.object_id = unique_casters[c].object_id;
+			tel.base_type = uint32_t(inst->data->base_type);
+			tel.instance_count = inst->instance_count;
+			tel.is_skinned = mesh_storage->skeleton_is_valid(inst->data->skeleton);
+			tel.has_mesh_instance = inst->mesh_instance.is_valid();
+			tel.is_multimesh = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) != 0 && (inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) == 0;
+			tel.is_particles = (inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) != 0;
+		}
+	}
+
+	LocalVector<VSMGroupKey> groups;
+	LocalVector<uint32_t> group_draw_meta; // 2 uints per group: x = drawn_count, y = indexed_flag.
+	HashMap<VSMGroupKey, uint32_t, VSMGroupKeyHasher> group_map;
+	LocalVector<VSMBoxCullRecord> box_records;
+	LocalVector<VSMSubCullRecord> sub_records;
+	LocalVector<RID> sub_record_buffers;
+	LocalVector<uint32_t> sub_record_buffer_bytes;
+	bool should_request_redraw = false;
+	uint32_t point_size_skipped = 0;
+
+	// The custom AABB of the mesh that a MultiMesh or particle surface belongs to, or AABB().
+	auto surface_custom_aabb = [&](GeometryInstanceForwardClustered *p_inst, const GeometryInstanceSurfaceDataCache *p_surf) -> AABB {
+		if ((p_inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) != 0) {
+			const int passes = particles_storage->particles_get_draw_passes(p_inst->data->base);
+			for (int pass = 0; pass < passes; pass++) {
+				const RID pass_mesh = particles_storage->particles_get_draw_pass_mesh(p_inst->data->base, pass);
+				if (pass_mesh.is_valid() && int(p_surf->surface_index) < mesh_storage->mesh_get_surface_count(pass_mesh) && mesh_storage->mesh_get_surface(pass_mesh, p_surf->surface_index) == p_surf->surface) {
+					return mesh_storage->mesh_get_custom_aabb(pass_mesh);
+				}
+			}
+			return AABB();
+		}
+		const RID mm_mesh = mesh_storage->_multimesh_get_mesh(p_inst->data->base);
+		return mm_mesh.is_valid() ? mesh_storage->mesh_get_custom_aabb(mm_mesh) : AABB();
+	};
+
+	auto get_or_create_group = [&](const VSMGroupKey &p_key) -> uint32_t {
+		uint32_t *existing = group_map.getptr(p_key);
+		if (existing != nullptr) {
+			return *existing;
+		}
+		const uint32_t idx = groups.size();
+		group_map[p_key] = idx;
+		groups.push_back(p_key);
+		group_draw_meta.push_back(p_key.drawn_count);
+		group_draw_meta.push_back(p_key.index_array_rd.is_valid() ? 1u : 0u);
+		return idx;
+	};
+
+	for (uint32_t e = 0; e < element_count; e++) {
+		GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_SECONDARY].elements[e];
+		const RenderElementInfo &elem_info = render_list[RENDER_LIST_SECONDARY].element_info[e];
+		GeometryInstanceForwardClustered *inst = surf->owner;
+		if (inst == nullptr || inst->instance_count == 0) {
+			continue;
+		}
+		const uint32_t *cid_ptr = caster_id_map.getptr(inst);
+		if (cid_ptr == nullptr) {
+			continue;
+		}
+		const uint32_t cid = *cid_ptr;
+		const UniqueCaster &uc = unique_casters[cid];
+		void *mesh_surface = surf->surface_shadow;
+		SceneShaderForwardClustered::ShaderData *shader = surf->shader_shadow;
+		if (mesh_surface == nullptr || shader == nullptr) {
+			continue;
+		}
+		if (shader->uses_time || (surf->shader != nullptr && surf->shader->uses_time)) {
+			should_request_redraw = true;
+		}
+
+		const bool uses_particles = (inst->base_flags & INSTANCE_DATA_FLAG_PARTICLES) != 0;
+		const bool uses_multimesh = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH) != 0;
+		// The dynamic layer (1) takes what changes from frame to frame; the rest renders into the static
+		// layer (0). Only the shadow shader counts: it is the one that draws.
+		uint32_t dynamic_reasons = 0;
+		dynamic_reasons |= uc.moved_this_frame ? VSM_DYNAMIC_MOVED : 0u;
+		dynamic_reasons |= inst->mesh_instance.is_valid() ? VSM_DYNAMIC_MESH_INSTANCE : 0u;
+		dynamic_reasons |= mesh_storage->skeleton_is_valid(inst->data->skeleton) ? VSM_DYNAMIC_SKELETON : 0u;
+		dynamic_reasons |= uses_particles ? VSM_DYNAMIC_PARTICLES : 0u;
+		dynamic_reasons |= (!uses_particles && uses_multimesh && (mesh_storage->_multimesh_uses_motion_vectors_offsets(inst->data->base) || mesh_storage->multimesh_is_rt_dynamic(inst->data->base))) ? VSM_DYNAMIC_MULTIMESH : 0u;
+		dynamic_reasons |= shader->uses_vertex ? VSM_DYNAMIC_VERTEX : 0u;
+		dynamic_reasons |= (shader->is_animated() || (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_MOTION_VECTOR) != 0) ? VSM_DYNAMIC_ANIMATED : 0u;
+		dynamic_reasons |= shader->uses_main_camera ? VSM_DYNAMIC_MAIN_CAMERA : 0u;
+		const bool is_dynamic = dynamic_reasons != 0u;
+
+		if (capture) {
+			VSMCasterTelemetry &tel = caster_telemetry[cid];
+			tel.is_dynamic = tel.is_dynamic || is_dynamic;
+			tel.dynamic_reasons |= dynamic_reasons;
+			tel.uses_alpha_scissor = tel.uses_alpha_scissor || shader->uses_discard || shader->uses_alpha_clip;
+			tel.uses_vertex_displacement = tel.uses_vertex_displacement || shader->uses_vertex;
+		}
+
+		// The VSM variant reads its pair from gl_InstanceIndex, which point-size emulation needs for the
+		// vertex: a surface that sets POINT_SIZE on a device without point sizes (D3D12) is not drawn.
+		if (shader->uses_point_size && scene_shader.emulate_point_size) {
+			point_size_skipped++;
+			continue;
+		}
+		const uint32_t lod_index = elem_info.lod_index;
+		const RID index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, lod_index);
+		const uint32_t drawn_count = mesh_storage->mesh_surface_get_lod_drawn_count(mesh_surface, lod_index);
+		if (drawn_count == 0) {
+			continue;
+		}
+
+		uint32_t current_offset = 0;
+		uint32_t prev_offset_unused = 0;
+		if (uses_particles) {
+			particles_storage->particles_get_instance_buffer_motion_vectors_offsets(inst->data->base, current_offset, prev_offset_unused);
+		} else if (uses_multimesh) {
+			mesh_storage->_multimesh_get_motion_vectors_offsets(inst->data->base, current_offset, prev_offset_unused);
+		}
+
+		SceneShaderForwardClustered::ShaderSpecialization spec = {};
+		spec.multimesh = uses_multimesh;
+		spec.multimesh_format_2d = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_FORMAT_2D) != 0;
+		spec.multimesh_has_color = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_HAS_COLOR) != 0;
+		spec.multimesh_has_custom_data = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_HAS_CUSTOM_DATA) != 0;
+
+		auto resolve_group_for_rev_cull = [&](bool p_rev_cull, uint32_t &r_group) -> bool {
+			SceneShaderForwardClustered::ShaderData::CullVariant cull_variant = SceneShaderForwardClustered::ShaderData::CULL_VARIANT_DOUBLE_SIDED;
+			if ((surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_DOUBLE_SIDED_SHADOWS) == 0 && shader->cull_mode != RSE::CULL_MODE_DISABLED) {
+				const bool flip_cull = !p_rev_cull;
+				const bool mirror = inst->mirror != flip_cull;
+				cull_variant = mirror ? SceneShaderForwardClustered::ShaderData::CULL_VARIANT_REVERSED : SceneShaderForwardClustered::ShaderData::CULL_VARIANT_NORMAL;
+			}
+			const RD::PolygonCullMode cull_mode = shader->get_cull_mode_from_cull_variant(cull_variant);
+
+			SceneShaderForwardClustered::ShaderData::PipelineKey pipeline_key;
+			pipeline_key.framebuffer_format_id = empty_fb_format;
+			pipeline_key.primitive_type = surf->primitive;
+			pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_VSM_DEPTH;
+			pipeline_key.color_pass_flags = 0;
+			pipeline_key.wireframe = false;
+			pipeline_key.ubershader = 0;
+			pipeline_key.zero_velocity_write = 0;
+
+			RID vertex_array_rd;
+			RID pipeline_rd;
+			while (pipeline_key.ubershader < 2) {
+				RD::VertexFormatID vertex_format = -1;
+				const uint64_t input_mask = shader->get_vertex_input_mask(pipeline_key.version, 0, pipeline_key.ubershader);
+				if (inst->mesh_instance.is_valid()) {
+					mesh_storage->mesh_instance_surface_get_vertex_arrays_and_format(inst->mesh_instance, surf->surface_index, input_mask, false, false, vertex_array_rd, vertex_format);
+				} else {
+					mesh_storage->mesh_surface_get_vertex_arrays_and_format(mesh_surface, input_mask, false, false, vertex_array_rd, vertex_format);
+				}
+				pipeline_key.vertex_format_id = vertex_format;
+				if (pipeline_key.ubershader) {
+					pipeline_key.shader_specialization = {};
+					pipeline_key.cull_mode = RD::POLYGON_CULL_DISABLED;
+				} else {
+					pipeline_key.shader_specialization = spec;
+					pipeline_key.cull_mode = cull_mode;
+				}
+				const uint32_t pipeline_hash = pipeline_key.hash();
+				const RSE::PipelineSource p_source = pipeline_key.ubershader ? RSE::PIPELINE_SOURCE_DRAW : RSE::PIPELINE_SOURCE_SPECIALIZATION;
+				pipeline_rd = shader->pipeline_hash_map.get_pipeline(pipeline_key, pipeline_hash, pipeline_key.ubershader, p_source);
+				if (pipeline_rd.is_valid()) {
+					break;
+				}
+				pipeline_key.ubershader++;
+			}
+			if (pipeline_rd.is_null() || vertex_array_rd.is_null()) {
+				return false;
+			}
+			VSMGroupKey gkey;
+			gkey.pipeline_rd = pipeline_rd;
+			gkey.vertex_array_rd = vertex_array_rd;
+			gkey.index_array_rd = index_array_rd;
+			gkey.xforms_uniform_set = inst->transforms_uniform_set;
+			gkey.material_uniform_set = surf->material_uniform_set_shadow;
+			gkey.current_offset = current_offset;
+			gkey.drawn_count = drawn_count;
+			gkey.ubershader = pipeline_key.ubershader;
+			gkey.cull_mode = pipeline_key.ubershader ? uint32_t(cull_mode) : 0u;
+			gkey.spec0 = pipeline_key.ubershader ? spec.packed_0 : 0u;
+			gkey.spec1 = pipeline_key.ubershader ? spec.packed_1 : 0u;
+			gkey.spec2 = pipeline_key.ubershader ? spec.packed_2 : 0u;
+			r_group = get_or_create_group(gkey);
+			return true;
+		};
+
+		uint32_t cached_group[2] = { UINT32_MAX, UINT32_MAX };
+		bool group_checked[2] = { false, false };
+
+		const uint32_t record_caster_id = capture ? cid : 0xFFFFFFFFu;
+		const uint32_t is_dyn_u = is_dynamic ? 1u : 0u;
+		// A billboard (MODELVIEW_MATRIX written) turns the mesh about its instance's origin, which the mesh's
+		// box through the transform does not hold: the cull box then also covers the largest |x| + |y| + |z|
+		// of a corner around that origin.
+		const bool view_facing = shader->writes_modelview_or_projection;
+
+		if (uses_multimesh) {
+			RID sub_buf;
+			uint32_t stride_vec4 = 0;
+			const bool format_2d = (inst->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_FORMAT_2D) != 0;
+			const bool uses_trails = uses_particles && (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_USES_PARTICLE_TRAILS) != 0 && inst->trail_steps > 1;
+			const uint32_t effective_trail_steps = uses_trails ? inst->trail_steps : 1u;
+			const uint32_t sub_count = uses_trails ? (inst->instance_count / inst->trail_steps) : inst->instance_count;
+			if (uses_particles) {
+				sub_buf = particles_storage->particles_get_instance_buffer(inst->data->base);
+				stride_vec4 = 5u;
+			} else {
+				sub_buf = mesh_storage->_multimesh_get_buffer_rd_rid(inst->data->base);
+				stride_vec4 = mesh_storage->multimesh_get_stride(inst->data->base) / 4u;
+			}
+			if (sub_buf.is_null() || sub_count == 0 || stride_vec4 == 0) {
+				continue;
+			}
+			// Mesh.custom_aabb replaces the surface's box, as it replaces the mesh's box in the scene cull.
+			// MultiMesh.custom_aabb bounds the whole MultiMesh, not an instance, so it is not used here.
+			AABB local_aabb = mesh_storage->mesh_surface_get_aabb(mesh_surface);
+			const AABB custom_aabb = surface_custom_aabb(inst, surf);
+			if (custom_aabb != AABB()) {
+				local_aabb = custom_aabb;
+			}
+			const Vector3 lmin = local_aabb.position;
+			const Vector3 lmax = local_aabb.position + local_aabb.size;
+			const float corner_reach = RendererVirtualShadowMapStorage::view_facing_reach(local_aabb);
+			const SceneState::InstanceData &idata = scene_state.curr_gpu_ptr[RENDER_LIST_SECONDARY][e];
+			const uint32_t sub_words = uses_trails ? (sub_count * effective_trail_steps * 5u * 4u) : ((current_offset + sub_count) * stride_vec4 * 4u);
+			const uint32_t sub_bytes = sub_words * uint32_t(sizeof(float));
+
+			for (const CasterLightRef &lref : uc.lights) {
+				const int rc_idx = lref.reverse_cull ? 1 : 0;
+				if (!group_checked[rc_idx]) {
+					group_checked[rc_idx] = true;
+					uint32_t resolved = UINT32_MAX;
+					if (resolve_group_for_rev_cull(lref.reverse_cull, resolved)) {
+						cached_group[rc_idx] = resolved;
+					}
+				}
+				if (cached_group[rc_idx] == UINT32_MAX) {
+					continue;
+				}
+				VSMSubCullRecord rec;
+				rec.meta0[0] = e;
+				rec.meta0[1] = cached_group[rc_idx];
+				rec.meta0[2] = lref.map_base;
+				rec.meta0[3] = lref.light_flags;
+				rec.meta1[0] = is_dyn_u;
+				rec.meta1[1] = record_caster_id;
+				rec.meta1[2] = sub_count;
+				rec.meta1[3] = current_offset;
+				rec.meta2[0] = stride_vec4;
+				rec.meta2[1] = format_2d ? 1u : 0u;
+				rec.meta2[2] = effective_trail_steps;
+				rec.meta2[3] = view_facing ? VSM_SUB_FLAG_VIEW_FACING : 0u;
+				rec.local_min[0] = float(lmin.x);
+				rec.local_min[1] = float(lmin.y);
+				rec.local_min[2] = float(lmin.z);
+				rec.local_min[3] = MAX(uc.extra_margin, 0.0f);
+				rec.local_max[0] = float(lmax.x);
+				rec.local_max[1] = float(lmax.y);
+				rec.local_max[2] = float(lmax.z);
+				rec.local_max[3] = corner_reach;
+				memcpy(rec.model_row0, &idata.transform[0], 4 * sizeof(float));
+				memcpy(rec.model_row1, &idata.transform[4], 4 * sizeof(float));
+				memcpy(rec.model_row2, &idata.transform[8], 4 * sizeof(float));
+				sub_records.push_back(rec);
+				sub_record_buffers.push_back(sub_buf);
+				sub_record_buffer_bytes.push_back(sub_bytes);
+			}
+		} else {
+			// The scene cull already grew this box by extra_cull_margin (RendererSceneCull::_update_instance_aabb()).
+			AABB world_box = inst->transformed_aabb;
+			if (view_facing) {
+				// A MeshInstance3D with a billboard material keeps the mesh's flat box (Sprite3D and Label3D
+				// enlarge theirs): add the same bound as for sub-instances, times max(1, the longest axis) for
+				// Keep Scale, plus the margin.
+				AABB local_aabb = mesh_storage->mesh_surface_get_aabb(mesh_surface);
+				if (mesh_storage->owns_mesh(inst->data->base)) {
+					const AABB custom_aabb = mesh_storage->mesh_get_custom_aabb(inst->data->base);
+					if (custom_aabb != AABB()) {
+						local_aabb = custom_aabb;
+					}
+				}
+				const Basis &basis = inst->transform.basis;
+				const float scale = MAX(1.0f, float(MAX(basis.get_column(0).length(), MAX(basis.get_column(1).length(), basis.get_column(2).length()))));
+				const float reach = RendererVirtualShadowMapStorage::view_facing_reach(local_aabb) * scale + MAX(uc.extra_margin, 0.0f);
+				world_box.merge_with(AABB(inst->transform.origin - Vector3(reach, reach, reach), Vector3(reach, reach, reach) * 2.0f));
+			}
+			const Vector3 bmin = world_box.position;
+			const Vector3 bmax = world_box.position + world_box.size;
+
+			for (const CasterLightRef &lref : uc.lights) {
+				const int rc_idx = lref.reverse_cull ? 1 : 0;
+				if (!group_checked[rc_idx]) {
+					group_checked[rc_idx] = true;
+					uint32_t resolved = UINT32_MAX;
+					if (resolve_group_for_rev_cull(lref.reverse_cull, resolved)) {
+						cached_group[rc_idx] = resolved;
+					}
+				}
+				if (cached_group[rc_idx] == UINT32_MAX) {
+					continue;
+				}
+				VSMBoxCullRecord rec;
+				rec.meta0[0] = e;
+				rec.meta0[1] = cached_group[rc_idx];
+				rec.meta0[2] = lref.map_base;
+				rec.meta0[3] = lref.light_flags;
+				rec.meta1[0] = is_dyn_u;
+				rec.meta1[1] = record_caster_id;
+				rec.meta1[2] = 0u;
+				rec.meta1[3] = 0u;
+				rec.box_min[0] = float(bmin.x);
+				rec.box_min[1] = float(bmin.y);
+				rec.box_min[2] = float(bmin.z);
+				rec.box_min[3] = 0.0f;
+				rec.box_max[0] = float(bmax.x);
+				rec.box_max[1] = float(bmax.y);
+				rec.box_max[2] = float(bmax.z);
+				rec.box_max[3] = 0.0f;
+				box_records.push_back(rec);
+			}
+		}
+	}
+
+	if (should_request_redraw) {
+		RenderingServerDefault::redraw_request();
+	}
+
+	_ensure_vsm_cull_buffers(box_records.size(), sub_records.size(), groups.size(), pair_capacity, capture);
+
+	if (!box_records.is_empty()) {
+		rd->buffer_update(vsm_box_records_buffer, 0, box_records.size() * uint32_t(sizeof(VSMBoxCullRecord)), box_records.ptr());
+	}
+	if (!sub_records.is_empty()) {
+		rd->buffer_update(vsm_sub_records_buffer, 0, sub_records.size() * uint32_t(sizeof(VSMSubCullRecord)), sub_records.ptr());
+	}
+	if (!group_draw_meta.is_empty()) {
+		rd->buffer_update(vsm_group_draw_meta_buffer, 0, group_draw_meta.size() * uint32_t(sizeof(uint32_t)), group_draw_meta.ptr());
+	}
+	if (capture) {
+		rd->buffer_clear(vsm_pair_texels_buffer, 0, (pair_capacity + 1u) * uint32_t(sizeof(uint32_t)));
+	}
+
+	rd->draw_command_begin_label("VSM Non-Nanite Cull and Raster");
+
+	if (!groups.is_empty()) {
+		LocalVector<RD::Uniform> cull_uniforms;
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, map_data_buf));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, map_state_buf));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, dirty_buf));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, alloc_state_buf));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_box_records_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_sub_records_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, vsm_group_draw_meta_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, vsm_group_counts_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, vsm_group_offsets_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, vsm_group_cursors_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, vsm_pairs_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, vsm_indirect_commands_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, vsm_indirect_counts_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, vsm_cull_state_buffer));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, vsm->get_page_table_buffer()));
+		cull_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm_pair_boxes_buffer));
+
+		VSMCullPushConstant push;
+		push.table_maps = table_maps;
+		push.pool_pages = pool_pages;
+		push.group_count = groups.size();
+		push.pair_capacity = pair_capacity;
+		push.box_record_count = box_records.size();
+		push.sub_record_index = 0;
+		push.min_caster_texels = min_caster_texels;
+		push.flags = capture ? VSM_CULL_FLAG_CAPTURE : 0u;
+
+		auto bind_cull = [&](RD::ComputeListID p_list, VSMCullMode p_mode) -> RID {
+			const RID shader_rid = vsm_cull_shader.version_get_shader(vsm_cull_version, p_mode);
+			rd->compute_list_bind_compute_pipeline(p_list, vsm_cull_pipelines[p_mode]);
+			rd->compute_list_bind_uniform_set(p_list, UniformSetCacheRD::get_singleton()->get_cache_vec(shader_rid, 0, cull_uniforms), 0);
+			return shader_rid;
+		};
+
+		RD::ComputeListID clist = rd->compute_list_begin();
+		bind_cull(clist, VSM_CULL_MODE_CLEAR);
+		rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+		rd->compute_list_dispatch_threads(clist, MAX(groups.size(), 1u), 1, 1);
+		rd->compute_list_add_barrier(clist);
+
+		if (!box_records.is_empty()) {
+			bind_cull(clist, VSM_CULL_MODE_COUNT_BOXES);
+			rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+			rd->compute_list_dispatch_threads(clist, box_records.size(), 1, 1);
+		}
+		if (!sub_records.is_empty()) {
+			const RID shader_rid = bind_cull(clist, VSM_CULL_MODE_COUNT_INSTANCES);
+			for (uint32_t sr = 0; sr < sub_records.size(); sr++) {
+				push.sub_record_index = sr;
+				RD::Uniform u_sub(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, sub_record_buffers[sr]);
+				rd->compute_list_bind_uniform_set(clist, UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 1, u_sub), 1);
+				rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+				rd->compute_list_dispatch_threads(clist, sub_records[sr].meta1[2], 1, 1);
+			}
+			push.sub_record_index = 0;
+		}
+		rd->compute_list_add_barrier(clist);
+
+		bind_cull(clist, VSM_CULL_MODE_SCAN);
+		rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+		rd->compute_list_dispatch(clist, 1, 1, 1);
+		rd->compute_list_add_barrier(clist);
+
+		if (!box_records.is_empty()) {
+			bind_cull(clist, VSM_CULL_MODE_WRITE_BOXES);
+			rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+			rd->compute_list_dispatch_threads(clist, box_records.size(), 1, 1);
+		}
+		if (!sub_records.is_empty()) {
+			const RID shader_rid = bind_cull(clist, VSM_CULL_MODE_WRITE_INSTANCES);
+			for (uint32_t sr = 0; sr < sub_records.size(); sr++) {
+				push.sub_record_index = sr;
+				RD::Uniform u_sub(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, sub_record_buffers[sr]);
+				rd->compute_list_bind_uniform_set(clist, UniformSetCacheRD::get_singleton()->get_cache(shader_rid, 1, u_sub), 1);
+				rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+				rd->compute_list_dispatch_threads(clist, sub_records[sr].meta1[2], 1, 1);
+			}
+			push.sub_record_index = 0;
+		}
+		rd->compute_list_add_barrier(clist);
+
+		bind_cull(clist, VSM_CULL_MODE_FIXUP);
+		rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
+		rd->compute_list_dispatch_threads(clist, groups.size(), 1, 1);
+		rd->compute_list_end();
+
+		const RID vsm_rp_uniform_set = _setup_vsm_render_pass_uniform_set(RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), uniform_buffer_index);
+		if (vsm_rp_uniform_set.is_valid()) {
+			RD::DrawListID dlist = rd->draw_list_begin(vsm_empty_fb, RD::DRAW_DEFAULT_ALL);
+			rd->draw_list_bind_uniform_set(dlist, render_base_uniform_set, SCENE_UNIFORM_SET);
+			rd->draw_list_bind_uniform_set(dlist, vsm_rp_uniform_set, RENDER_PASS_UNIFORM_SET);
+			rd->draw_list_bind_uniform_set(dlist, scene_shader.default_vec4_xform_uniform_set, TRANSFORMS_UNIFORM_SET);
+
+			RID prev_pipeline;
+			RID prev_vertex_array;
+			RID prev_index_array;
+			RID prev_xforms_set = scene_shader.default_vec4_xform_uniform_set;
+			RID prev_material_set;
+
+			for (uint32_t g = 0; g < groups.size(); g++) {
+				const VSMGroupKey &grp = groups[g];
+				if (prev_vertex_array != grp.vertex_array_rd) {
+					rd->draw_list_bind_vertex_array(dlist, grp.vertex_array_rd);
+					prev_vertex_array = grp.vertex_array_rd;
+				}
+				if (prev_index_array != grp.index_array_rd) {
+					if (grp.index_array_rd.is_valid()) {
+						rd->draw_list_bind_index_array(dlist, grp.index_array_rd);
+					}
+					prev_index_array = grp.index_array_rd;
+				}
+				if (prev_pipeline != grp.pipeline_rd) {
+					rd->draw_list_bind_render_pipeline(dlist, grp.pipeline_rd);
+					prev_pipeline = grp.pipeline_rd;
+				}
+				const RID want_xforms = grp.xforms_uniform_set.is_valid() ? grp.xforms_uniform_set : scene_shader.default_vec4_xform_uniform_set;
+				if (prev_xforms_set != want_xforms) {
+					rd->draw_list_bind_uniform_set(dlist, want_xforms, TRANSFORMS_UNIFORM_SET);
+					prev_xforms_set = want_xforms;
+				}
+				if (prev_material_set != grp.material_uniform_set) {
+					if (grp.material_uniform_set.is_valid() && rd->uniform_set_is_valid(grp.material_uniform_set)) {
+						rd->draw_list_bind_uniform_set(dlist, grp.material_uniform_set, MATERIAL_UNIFORM_SET);
+					}
+					prev_material_set = grp.material_uniform_set;
+				}
+
+				SceneState::PushConstant push_constant = {};
+				push_constant.base_index = 0;
+				push_constant.uv_offset = g;
+				push_constant.multimesh_motion_vectors_current_offset = grp.current_offset;
+				push_constant.multimesh_motion_vectors_previous_offset = 0;
+				size_t push_size = sizeof(SceneState::PushConstant) - sizeof(SceneState::PushConstantUbershader);
+				if (grp.ubershader) {
+					push_constant.ubershader.specialization.packed_0 = grp.spec0;
+					push_constant.ubershader.specialization.packed_1 = grp.spec1;
+					push_constant.ubershader.specialization.packed_2 = grp.spec2;
+					push_constant.ubershader.constants = {};
+					push_constant.ubershader.constants.cull_mode = grp.cull_mode;
+					push_size = sizeof(SceneState::PushConstant);
+				}
+				rd->draw_list_set_push_constant(dlist, &push_constant, push_size);
+
+				const bool use_indices = grp.index_array_rd.is_valid();
+				const uint32_t cmd_offset = g * 5u * uint32_t(sizeof(uint32_t));
+				const uint32_t cnt_offset = g * uint32_t(sizeof(uint32_t));
+				if (use_indirect_count) {
+					rd->draw_list_draw_indirect_count(dlist, use_indices, vsm_indirect_commands_buffer, cmd_offset, vsm_indirect_counts_buffer, cnt_offset, 1, 0);
+				} else {
+					rd->draw_list_draw_indirect(dlist, use_indices, vsm_indirect_commands_buffer, cmd_offset, 1, 0);
+				}
+			}
+			rd->draw_list_end();
+		}
+
+		// The cull state reaches _vsm_cull_state_received() a frame or more late: an overflow grows the list.
+		if (!vsm_cull_state_pending) {
+			vsm_cull_state_pending = rd->buffer_get_data_async(vsm_cull_state_buffer, callable_mp_static(&RenderForwardClustered::_vsm_cull_state_received), 0, VSM_CULL_STATE_WORDS * uint32_t(sizeof(uint32_t))) == OK;
+		}
+	}
+
+	rd->draw_command_end_label();
+
+	Dictionary stats;
+	stats["light_count"] = int64_t(active_vsm_lights);
+	stats["caster_count"] = int64_t(unique_casters.size());
+	stats["surface_element_count"] = int64_t(element_count);
+	stats["group_count"] = int64_t(groups.size());
+	stats["box_record_count"] = int64_t(box_records.size());
+	stats["sub_record_count"] = int64_t(sub_records.size());
+	stats["pair_capacity"] = int64_t(pair_capacity);
+	stats["min_caster_texels"] = double(min_caster_texels);
+	stats["used_indirect_count"] = use_indirect_count;
+	stats["point_size_skipped"] = int64_t(point_size_skipped);
+	stats["pair_capacity_floor"] = int64_t(vsm_pair_capacity_floor);
+	stats["overflow_frames"] = int64_t(vsm_overflow_frames);
+	stats["dropped_pairs_total"] = int64_t(vsm_dropped_pairs_total);
+	stats["redraw_marks_total"] = int64_t(vsm_redraw_marks_total);
+	stats["write_mismatch_total"] = int64_t(vsm_write_mismatch_total);
+	vsm->set_last_raster_stats(stats);
+
+	if (capture) {
+		vsm_raster_check.captured = true;
+		vsm_raster_check.used_indirect_count = use_indirect_count;
+		vsm_raster_check.table_maps = table_maps;
+		vsm_raster_check.pool_pages = pool_pages;
+		vsm_raster_check.pair_capacity = pair_capacity;
+		vsm_raster_check.min_caster_texels = min_caster_texels;
+		vsm_raster_check.light_count = active_vsm_lights;
+		vsm_raster_check.surface_element_count = element_count;
+		vsm_raster_check.atlas_non_virtual_casters = atlas_non_virtual_count;
+		vsm_raster_check.virtual_skipped = virtual_skipped_set.size();
+		vsm_raster_check.missing_from_vsm = missing_from_vsm_count;
+		vsm_raster_check.vsm_extra_casters = vsm_extra_casters_count;
+		vsm_raster_check.point_size_skipped = point_size_skipped;
+		vsm_raster_check.view_vsm_lights = view_vsm_lights;
+		vsm_raster_check.lights_without_casters = lights_without_casters;
+		vsm_raster_check.lights = check_lights;
+		vsm_raster_check.frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
+		vsm_raster_check.map_data = vsm->get_map_data();
+		vsm_raster_check.box_records = box_records;
+		vsm_raster_check.sub_records = sub_records;
+		vsm_raster_check.group_draw_meta = group_draw_meta;
+		vsm_raster_check.casters = caster_telemetry;
+
+		HashMap<RID, uint32_t> snap_by_buf;
+		vsm_raster_check.sub_record_snap_index.resize(sub_records.size());
+		for (uint32_t sr = 0; sr < sub_records.size(); sr++) {
+			uint32_t *existing = snap_by_buf.getptr(sub_record_buffers[sr]);
+			if (existing != nullptr) {
+				vsm_raster_check.sub_record_snap_index[sr] = *existing;
+			} else {
+				const uint32_t snap_idx = vsm_raster_check.sub_transform_snaps.size();
+				snap_by_buf[sub_record_buffers[sr]] = snap_idx;
+				vsm_raster_check.sub_record_snap_index[sr] = snap_idx;
+				const uint32_t buf_bytes = sub_record_buffer_bytes[sr];
+				vsm_raster_check.sub_transform_snaps.push_back(vsm->snapshot_buffer(sub_record_buffers[sr], 0, buf_bytes, "Raster Sub Transforms"));
+			}
+		}
+
+		vsm_raster_check.dirty_snap = vsm->snapshot_buffer(dirty_buf, 0, pool_pages * 4u * uint32_t(sizeof(uint32_t)), "Raster Dirty");
+		vsm_raster_check.alloc_state_snap = vsm->snapshot_buffer(alloc_state_buf, 0, RendererVirtualShadowMapStorage::STATE_SIZE * uint32_t(sizeof(uint32_t)), "Raster Alloc State");
+		vsm_raster_check.map_state_snap = vsm->snapshot_buffer(map_state_buf, 0, table_maps * RendererVirtualShadowMapStorage::MAP_STATE_REGIONS * uint32_t(sizeof(uint32_t)), "Raster Map State");
+		if (!groups.is_empty()) {
+			const uint32_t gcount = groups.size();
+			vsm_raster_check.group_counts_snap = vsm->snapshot_buffer(vsm_group_counts_buffer, 0, gcount * uint32_t(sizeof(uint32_t)), "Raster Group Counts");
+			vsm_raster_check.group_offsets_snap = vsm->snapshot_buffer(vsm_group_offsets_buffer, 0, gcount * uint32_t(sizeof(uint32_t)), "Raster Group Offsets");
+			vsm_raster_check.indirect_commands_snap = vsm->snapshot_buffer(vsm_indirect_commands_buffer, 0, gcount * 5u * uint32_t(sizeof(uint32_t)), "Raster Indirect Cmds");
+			vsm_raster_check.indirect_counts_snap = vsm->snapshot_buffer(vsm_indirect_counts_buffer, 0, gcount * uint32_t(sizeof(uint32_t)), "Raster Indirect Counts");
+			vsm_raster_check.cull_state_snap = vsm->snapshot_buffer(vsm_cull_state_buffer, 0, VSM_CULL_STATE_WORDS * uint32_t(sizeof(uint32_t)), "Raster Cull State");
+			vsm_raster_check.pairs_snap = vsm->snapshot_buffer(vsm_pairs_buffer, 0, pair_capacity * 4u * uint32_t(sizeof(uint32_t)), "Raster Pairs");
+			vsm_raster_check.pair_texels_snap = vsm->snapshot_buffer(vsm_pair_texels_buffer, 0, (2u * pair_capacity + 1u) * uint32_t(sizeof(uint32_t)), "Raster Pair Texels");
+		}
+		const uint32_t page_table_maps = MIN(table_maps, vsm->get_table_capacity());
+		if (vsm->get_page_table_buffer().is_valid() && page_table_maps > 0) {
+			vsm_raster_check.page_table_maps = page_table_maps;
+			vsm_raster_check.page_table_snap = vsm->snapshot_buffer(vsm->get_page_table_buffer(), 0, page_table_maps * uint32_t(RendererVirtualShadowMapStorage::MAP_TABLE_BYTES), "Raster Page Table");
+		}
+		vsm_raster_check.pool_snap = vsm->snapshot_pool("Raster Pool");
+	}
+}
+
+Dictionary RenderForwardClustered::get_vsm_raster_check_result() {
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	Dictionary result;
+	result["captured"] = vsm_raster_check.captured;
+	result["armed"] = vsm != nullptr && vsm->is_raster_check_armed();
+	result["active"] = vsm != nullptr && vsm->is_active();
+	if (!vsm_raster_check.captured) {
+		return result;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, result);
+
+	PackedStringArray failures;
+	const uint32_t table_maps = vsm_raster_check.table_maps;
+	const uint32_t pool_pages = vsm_raster_check.pool_pages;
+	const uint32_t pair_capacity = vsm_raster_check.pair_capacity;
+	const float min_texels = vsm_raster_check.min_caster_texels;
+	const uint32_t group_count = vsm_raster_check.group_draw_meta.size() / 2u;
+
+	const LocalVector<uint32_t> dirty_words = _vsm_read_words(vsm_raster_check.dirty_snap);
+	const LocalVector<uint32_t> alloc_state = _vsm_read_words(vsm_raster_check.alloc_state_snap);
+	const LocalVector<uint32_t> map_state = _vsm_read_words(vsm_raster_check.map_state_snap);
+	const LocalVector<uint32_t> group_counts = _vsm_read_words(vsm_raster_check.group_counts_snap);
+	const LocalVector<uint32_t> group_offsets = _vsm_read_words(vsm_raster_check.group_offsets_snap);
+	const LocalVector<uint32_t> indirect_cmds = _vsm_read_words(vsm_raster_check.indirect_commands_snap);
+	const LocalVector<uint32_t> indirect_counts = _vsm_read_words(vsm_raster_check.indirect_counts_snap);
+	const LocalVector<uint32_t> cull_state = _vsm_read_words(vsm_raster_check.cull_state_snap);
+	const LocalVector<uint32_t> pairs_words = _vsm_read_words(vsm_raster_check.pairs_snap);
+	const LocalVector<uint32_t> pair_texels = _vsm_read_words(vsm_raster_check.pair_texels_snap);
+	const LocalVector<uint32_t> page_table = _vsm_read_words(vsm_raster_check.page_table_snap);
+
+	LocalVector<LocalVector<float>> sub_transforms;
+	sub_transforms.resize(vsm_raster_check.sub_transform_snaps.size());
+	for (uint32_t i = 0; i < vsm_raster_check.sub_transform_snaps.size(); i++) {
+		const LocalVector<uint32_t> w = _vsm_read_words(vsm_raster_check.sub_transform_snaps[i]);
+		sub_transforms[i].resize(w.size());
+		if (!w.is_empty()) {
+			memcpy(sub_transforms[i].ptr(), w.ptr(), w.size() * sizeof(float));
+		}
+	}
+
+	Vector<uint8_t> pool_layers[RendererVirtualShadowMapStorage::POOL_LAYERS];
+	if (vsm_raster_check.pool_snap.is_valid()) {
+		for (uint32_t layer = 0; layer < RendererVirtualShadowMapStorage::POOL_LAYERS; layer++) {
+			pool_layers[layer] = rd->texture_get_data(vsm_raster_check.pool_snap, layer);
+		}
+	}
+
+	const VSMRasterCheckCapture cap = vsm_raster_check;
+	_free_vsm_raster_check_buffers();
+
+	if (dirty_words.size() < pool_pages * 4u || alloc_state.size() < RendererVirtualShadowMapStorage::STATE_SIZE || map_state.size() < table_maps * RendererVirtualShadowMapStorage::MAP_STATE_REGIONS || cap.map_data.size() < table_maps) {
+		failures.push_back("incomplete marking/allocation snapshot buffers");
+		result["failures"] = failures;
+		result["pass"] = false;
+		return result;
+	}
+	if (group_count > 0 && (group_counts.size() < group_count || group_offsets.size() < group_count || indirect_cmds.size() < group_count * 5u || indirect_counts.size() < group_count || cull_state.size() < uint32_t(VSM_CULL_STATE_WORDS) || pairs_words.size() < pair_capacity * 4u || pair_texels.size() < 2u * pair_capacity + 1u)) {
+		failures.push_back("incomplete non-Nanite cull/raster snapshot buffers");
+		result["failures"] = failures;
+		result["pass"] = false;
+		return result;
+	}
+
+	const uint32_t dirty_limit = MIN(alloc_state[RendererVirtualShadowMapStorage::STATE_DIRTY], pool_pages);
+	const RendererVirtualShadowMapStorage::DirtyPageRecord *dirty_recs = reinterpret_cast<const RendererVirtualShadowMapStorage::DirtyPageRecord *>(dirty_words.ptr());
+	const uint32_t *map_dirty_counts = map_state.ptr() + RendererVirtualShadowMapStorage::MAP_STATE_DIRTY_COUNT * table_maps;
+	const uint32_t *map_dirty_offsets = map_state.ptr() + RendererVirtualShadowMapStorage::MAP_STATE_DIRTY_OFFSET * table_maps;
+	const RendererVirtualShadowMapStorage::MapData *maps = cap.map_data.ptr();
+
+	// The CPU model of the cull (cull_box_dirty_pages() and sub_instance_box()) over the records the
+	// view uploaded. cpu_exact holds its pairs for the exact inputs. A GPU pair outside cpu_union (the
+	// boxes grown by 1e-5 of their largest coordinate, the small-caster threshold lowered by 1e-5) or a
+	// cpu_robust pair (boxes shrunk, threshold raised) the GPU did not emit is a failure: float rounding
+	// cannot explain it. Exact differences are reported (exact_unexplained, exact_missing).
+	static constexpr float VSM_CHECK_TOLERANCE = 1e-5f;
+	HashSet<VSMPairTuple, VSMPairTupleHasher> cpu_exact;
+	HashSet<VSMPairTuple, VSMPairTupleHasher> cpu_union;
+	HashSet<VSMPairTuple, VSMPairTupleHasher> cpu_robust;
+	uint64_t cpu_total_pairs = 0;
+	uint64_t cpu_small_culled = 0;
+	LocalVector<uint32_t> tmp_dirty;
+
+	auto add_cpu_box = [&](uint32_t p_elem, uint32_t p_sub, uint32_t p_group, uint32_t p_map_base, uint32_t p_light_flags, bool p_dyn, uint32_t p_caster, const AABB &p_box) {
+		const uint32_t dyn_bit = p_dyn ? (1u << 31u) : 0u;
+		uint32_t small = 0;
+		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, p_box, p_dyn, min_texels, tmp_dirty, small);
+		cpu_total_pairs += tmp_dirty.size();
+		cpu_small_culled += small;
+		for (uint32_t d : tmp_dirty) {
+			cpu_exact.insert({ p_group, p_elem, p_sub, d | dyn_bit, p_caster });
+		}
+
+		const Vector3 hi = p_box.position + p_box.size;
+		float max_abs = 1.0f;
+		max_abs = MAX(max_abs, Math::abs(float(p_box.position.x)));
+		max_abs = MAX(max_abs, Math::abs(float(p_box.position.y)));
+		max_abs = MAX(max_abs, Math::abs(float(p_box.position.z)));
+		max_abs = MAX(max_abs, Math::abs(float(hi.x)));
+		max_abs = MAX(max_abs, Math::abs(float(hi.y)));
+		max_abs = MAX(max_abs, Math::abs(float(hi.z)));
+		const float eps = VSM_CHECK_TOLERANCE * max_abs;
+
+		AABB union_box = p_box;
+		union_box.grow_by(eps);
+		uint32_t unused = 0;
+		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, union_box, p_dyn, min_texels * (1.0f - VSM_CHECK_TOLERANCE), tmp_dirty, unused);
+		for (uint32_t d : tmp_dirty) {
+			cpu_union.insert({ p_group, p_elem, p_sub, d | dyn_bit, p_caster });
+		}
+
+		const Vector3 shrink(
+				MIN(eps, float(p_box.size.x) * 0.25f),
+				MIN(eps, float(p_box.size.y) * 0.25f),
+				MIN(eps, float(p_box.size.z) * 0.25f));
+		const AABB robust_box(p_box.position + shrink, p_box.size - shrink * 2.0f);
+		RendererVirtualShadowMapStorage::cull_box_dirty_pages(maps, table_maps, map_dirty_counts, map_dirty_offsets, dirty_recs, dirty_limit, p_map_base, p_light_flags, robust_box, p_dyn, min_texels * (1.0f + VSM_CHECK_TOLERANCE), tmp_dirty, unused);
+		for (uint32_t d : tmp_dirty) {
+			cpu_robust.insert({ p_group, p_elem, p_sub, d | dyn_bit, p_caster });
+		}
+	};
+
+	for (const VSMBoxCullRecord &rec : cap.box_records) {
+		const Vector3 bmin(rec.box_min[0], rec.box_min[1], rec.box_min[2]);
+		const Vector3 bmax(rec.box_max[0], rec.box_max[1], rec.box_max[2]);
+		add_cpu_box(rec.meta0[0], 0u, rec.meta0[1], rec.meta0[2], rec.meta0[3], rec.meta1[0] != 0u, rec.meta1[1], AABB(bmin, bmax - bmin));
+	}
+
+	uint32_t sub_snapshot_short = 0;
+	for (uint32_t sr = 0; sr < cap.sub_records.size(); sr++) {
+		const VSMSubCullRecord &rec = cap.sub_records[sr];
+		const uint32_t snap_idx = cap.sub_record_snap_index[sr];
+		if (snap_idx >= sub_transforms.size() || sub_transforms[snap_idx].is_empty()) {
+			sub_snapshot_short++;
+			continue;
+		}
+		float model[12];
+		memcpy(&model[0], rec.model_row0, 4 * sizeof(float));
+		memcpy(&model[4], rec.model_row1, 4 * sizeof(float));
+		memcpy(&model[8], rec.model_row2, 4 * sizeof(float));
+		const Vector3 lmin(rec.local_min[0], rec.local_min[1], rec.local_min[2]);
+		const Vector3 lmax(rec.local_max[0], rec.local_max[1], rec.local_max[2]);
+		const AABB local_aabb(lmin, lmax - lmin);
+		const uint32_t sub_count = rec.meta1[2];
+		const uint32_t cur_ofs = rec.meta1[3];
+		const uint32_t stride_vec4 = rec.meta2[0];
+		const bool format_2d = rec.meta2[1] != 0u;
+		const uint32_t trail_steps = rec.meta2[2];
+		const uint32_t avail_floats = sub_transforms[snap_idx].size();
+
+		for (uint32_t sub = 0; sub < sub_count; sub++) {
+			const uint32_t needed_floats = trail_steps > 1u ? ((trail_steps * (sub + 1u)) * 20u) : ((sub + cur_ofs + 1u) * stride_vec4 * 4u);
+			if (needed_floats > avail_floats) {
+				sub_snapshot_short++;
+				break;
+			}
+			AABB sub_box;
+			if (RendererVirtualShadowMapStorage::sub_instance_box(model, sub_transforms[snap_idx].ptr(), sub, cur_ofs, stride_vec4, format_2d, trail_steps, local_aabb, rec.local_min[3], sub_box, (rec.meta2[3] & VSM_SUB_FLAG_VIEW_FACING) != 0u, rec.local_max[3])) {
+				add_cpu_box(rec.meta0[0], sub, rec.meta0[1], rec.meta0[2], rec.meta0[3], rec.meta1[0] != 0u, rec.meta1[1], sub_box);
+			}
+		}
+	}
+
+	uint32_t scan_mismatches = 0;
+	uint32_t pair_unexpected = 0;
+	uint32_t pair_missing = 0;
+	uint32_t pair_duplicates = 0;
+	uint32_t pair_bad_target = 0; // Pairs whose dirty record is outside the list or whose layer is not dirty.
+	uint32_t exact_unexplained = 0;
+	uint32_t exact_missing = 0;
+	LocalVector<VSMPairTuple> exact_differences; // Pairs in only one of the GPU and the exact CPU model.
+	const uint32_t gpu_total_pairs = group_count > 0 ? cull_state[VSM_CULL_STATE_TOTAL_PAIRS] : 0u;
+	const uint32_t gpu_dropped_pairs = group_count > 0 ? cull_state[VSM_CULL_STATE_DROPPED_PAIRS] : 0u;
+	const uint32_t gpu_small_culled = group_count > 0 ? cull_state[VSM_CULL_STATE_SMALL_CULLED] : 0u;
+	const uint32_t cull_sink = group_count > 0 ? cull_state[VSM_CULL_STATE_SINK] : 0u;
+	const uint32_t redraw_marks = group_count > 0 ? cull_state[VSM_CULL_STATE_REDRAW_MARKS] : 0u;
+	const uint32_t write_mismatch = group_count > 0 ? cull_state[VSM_CULL_STATE_WRITE_MISMATCH] : 0u;
+	const uint32_t raster_sink = !pair_texels.is_empty() ? pair_texels[0] : 0u;
+
+	// The page-table entry of a dirty record, and whether the cull marked it to be drawn again (a pair the
+	// full list could not hold): after the emit pass no requested entry keeps ENTRY_SCROLLED otherwise.
+	auto dirty_entry_index = [&](const RendererVirtualShadowMapStorage::DirtyPageRecord &p_rec) -> uint32_t {
+		return RendererVirtualShadowMapStorage::entry_index(p_rec.map, p_rec.packed_page & 0xFFu, (p_rec.packed_page >> 8u) & 0xFFu, (p_rec.packed_page >> 16u) & 0xFFu);
+	};
+	auto dirty_marked = [&](uint32_t p_dirty) -> bool {
+		if (p_dirty >= dirty_limit || dirty_recs[p_dirty].map >= cap.page_table_maps) {
+			return false;
+		}
+		const uint32_t index = dirty_entry_index(dirty_recs[p_dirty]);
+		return index < page_table.size() && (page_table[index] & RendererVirtualShadowMapStorage::ENTRY_SCROLLED) != 0u;
+	};
+	// The base light of each map, for each caster's texels per light.
+	HashMap<uint32_t, uint32_t> map_light; // map -> index into cap.lights.
+	for (uint32_t l = 0; l < cap.lights.size(); l++) {
+		for (uint32_t m = 0; m < cap.lights[l].map_count; m++) {
+			map_light[cap.lights[l].map_first + m] = l;
+		}
+	}
+
+	// Per pair: the fragments its draw wrote (pair_texels[1 + pair]), summed per caster and per dirty
+	// page and layer.
+	HashSet<VSMPairTuple, VSMPairTupleHasher> gpu_emitted;
+	LocalVector<uint32_t> caster_pairs;
+	LocalVector<uint64_t> caster_fragments;
+	LocalVector<uint64_t> caster_outside; // Vertices outside the cull box of their pair.
+	LocalVector<HashSet<uint32_t>> caster_groups; // The draw groups each caster's pairs went to.
+	LocalVector<HashMap<uint32_t, uint64_t>> caster_light_fragments; // Per caster: light index -> fragments.
+	caster_pairs.resize(cap.casters.size());
+	caster_fragments.resize(cap.casters.size());
+	caster_outside.resize(cap.casters.size());
+	caster_groups.resize(cap.casters.size());
+	caster_light_fragments.resize(cap.casters.size());
+	for (uint32_t c = 0; c < caster_pairs.size(); c++) {
+		caster_pairs[c] = 0;
+		caster_fragments[c] = 0;
+		caster_outside[c] = 0;
+	}
+	uint64_t total_outside_vertices = 0;
+	LocalVector<uint32_t> page_layer_pairs;
+	LocalVector<uint64_t> page_layer_fragments;
+	page_layer_pairs.resize(dirty_limit * 2u);
+	page_layer_fragments.resize(dirty_limit * 2u);
+	for (uint32_t i = 0; i < dirty_limit * 2u; i++) {
+		page_layer_pairs[i] = 0;
+		page_layer_fragments[i] = 0;
+	}
+	uint64_t total_fragments = 0;
+
+	uint32_t running_excl = 0;
+	for (uint32_t g = 0; g < group_count; g++) {
+		const uint32_t raw = group_counts[g];
+		const uint32_t expected_ofs = MIN(running_excl, pair_capacity);
+		const uint32_t avail = running_excl < pair_capacity ? (pair_capacity - running_excl) : 0u;
+		const uint32_t expected_cnt = MIN(raw, avail);
+		const uint32_t expected_drawn = cap.group_draw_meta[g * 2u + 0u];
+		const uint32_t expected_icnt = expected_cnt > 0u ? 1u : 0u;
+
+		if (group_offsets[g] != expected_ofs ||
+				indirect_cmds[g * 5u + 0u] != expected_drawn ||
+				indirect_cmds[g * 5u + 1u] != expected_cnt ||
+				indirect_cmds[g * 5u + 2u] != 0u ||
+				indirect_cmds[g * 5u + 3u] != 0u ||
+				indirect_cmds[g * 5u + 4u] != 0u ||
+				indirect_counts[g] != expected_icnt) {
+			scan_mismatches++;
+		}
+		running_excl += raw;
+
+		const uint32_t gpu_ofs = group_offsets[g];
+		const uint32_t gpu_cnt = MIN(indirect_cmds[g * 5u + 1u], gpu_ofs < pair_capacity ? (pair_capacity - gpu_ofs) : 0u);
+		for (uint32_t k = 0; k < gpu_cnt; k++) {
+			const uint32_t pair_index = gpu_ofs + k;
+			const uint32_t *pw = pairs_words.ptr() + pair_index * 4u;
+			const VSMPairTuple tup{ g, pw[0], pw[1], pw[2], pw[3] };
+			if (gpu_emitted.has(tup)) {
+				pair_duplicates++;
+			} else {
+				gpu_emitted.insert(tup);
+			}
+			if (!cpu_union.has(tup)) {
+				pair_unexpected++;
+			}
+			if (!cpu_exact.has(tup)) {
+				exact_unexplained++;
+				exact_differences.push_back(tup);
+			}
+			const uint32_t fragments = (2u * pair_index + 1u) < pair_texels.size() ? pair_texels[2u * pair_index + 1u] : 0u;
+			const uint32_t outside = (2u * pair_index + 2u) < pair_texels.size() ? pair_texels[2u * pair_index + 2u] : 0u;
+			total_fragments += fragments;
+			total_outside_vertices += outside;
+			const uint32_t d = pw[2] & 0x7FFFFFFFu;
+			if (pw[3] < caster_pairs.size()) {
+				caster_pairs[pw[3]]++;
+				caster_fragments[pw[3]] += fragments;
+				caster_outside[pw[3]] += outside;
+				caster_groups[pw[3]].insert(g);
+				if (d < dirty_limit) {
+					const uint32_t *light_index = map_light.getptr(dirty_recs[d].map);
+					if (light_index != nullptr) {
+						caster_light_fragments[pw[3]][*light_index] += fragments;
+					}
+				}
+			}
+			const uint32_t layer = pw[2] >> 31u;
+			const uint32_t layer_flag = layer != 0u ? RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC : RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC;
+			if (d >= dirty_limit || (dirty_recs[d].flags & layer_flag) == 0u) {
+				pair_bad_target++;
+				continue;
+			}
+			page_layer_pairs[d * 2u + layer]++;
+			page_layer_fragments[d * 2u + layer] += fragments;
+		}
+	}
+	if (group_count > 0) {
+		const uint32_t expected_dropped = running_excl > pair_capacity ? (running_excl - pair_capacity) : 0u;
+		if (gpu_total_pairs != running_excl || gpu_dropped_pairs != expected_dropped) {
+			scan_mismatches++;
+		}
+	}
+	// A pair the GPU did not draw is a failure, unless the full pair list dropped it and marked its page
+	// to be drawn again in full.
+	uint32_t pair_missing_marked = 0;
+	for (const VSMPairTuple &tup : cpu_robust) {
+		if (!gpu_emitted.has(tup)) {
+			if (gpu_dropped_pairs > 0 && dirty_marked(tup.dirty & 0x7FFFFFFFu)) {
+				pair_missing_marked++;
+			} else {
+				pair_missing++;
+			}
+		}
+	}
+	// The pages this capture marked; the next frame's capture checks that they were drawn again.
+	HashSet<uint32_t> marked_entries;
+	HashSet<uint32_t> dirty_entries;
+	for (uint32_t d = 0; d < dirty_limit; d++) {
+		if (dirty_recs[d].map >= cap.page_table_maps) {
+			continue;
+		}
+		const uint32_t index = dirty_entry_index(dirty_recs[d]);
+		dirty_entries.insert(index);
+		if (dirty_marked(d)) {
+			marked_entries.insert(index);
+		}
+	}
+	const bool consecutive = vsm_check_marked_frame != 0 && cap.frame == vsm_check_marked_frame + 1;
+	uint32_t marked_not_redrawn = 0;
+	if (consecutive) {
+		for (uint32_t index : vsm_check_marked_entries) {
+			// A marked page the view still requests is dirty now; one it does not request was evicted.
+			const bool allocated = index < page_table.size() && (page_table[index] & RendererVirtualShadowMapStorage::ENTRY_ALLOCATED) != 0u;
+			if (allocated && !dirty_entries.has(index)) {
+				marked_not_redrawn++;
+			}
+		}
+	}
+	const uint32_t previous_marked = vsm_check_marked_entries.size();
+	vsm_check_marked_entries = marked_entries;
+	vsm_check_marked_frame = cap.frame;
+	if (gpu_dropped_pairs == 0) {
+		for (const VSMPairTuple &tup : cpu_exact) {
+			if (!gpu_emitted.has(tup)) {
+				exact_missing++;
+				exact_differences.push_back(tup);
+			}
+		}
+	}
+
+	const Vector2i pool_grid = RendererVirtualShadowMapStorage::pool_page_grid(pool_pages);
+	const uint32_t pool_width = uint32_t(pool_grid.x) * RendererVirtualShadowMapStorage::PAGE_SIZE;
+	const uint32_t pool_height = uint32_t(pool_grid.y) * RendererVirtualShadowMapStorage::PAGE_SIZE;
+	const uint64_t expected_layer_bytes = uint64_t(pool_width) * pool_height * sizeof(uint32_t);
+	const bool have_pool = uint64_t(pool_layers[0].size()) == expected_layer_bytes && uint64_t(pool_layers[1].size()) == expected_layer_bytes;
+
+	uint64_t nonzero_static_texels = 0;
+	uint64_t nonzero_dynamic_texels = 0;
+	uint32_t invalid_max_uint_texels = 0;
+	uint32_t non_finite_unpacked_texels = 0;
+	// Page checks, per dirty page and dirty layer: texels only where a pair drew, and every pair's
+	// fragments land in its own page.
+	uint32_t texels_without_pair = 0; // Written texels in a page and layer no pair drew into.
+	uint32_t fragments_without_texels = 0; // Fragments counted for a page and layer that holds no written texel.
+	uint32_t texels_exceed_fragments = 0; // More written texels than fragments drawn into the page and layer.
+	uint32_t pages_with_pairs = 0;
+	uint32_t pages_with_texels = 0;
+	Array dirty_pages_arr;
+
+	if (have_pool) {
+		const uint32_t *layer0 = reinterpret_cast<const uint32_t *>(pool_layers[0].ptr());
+		const uint32_t *layer1 = reinterpret_cast<const uint32_t *>(pool_layers[1].ptr());
+		const uint32_t psize = RendererVirtualShadowMapStorage::PAGE_SIZE;
+
+		for (uint32_t d = 0; d < dirty_limit; d++) {
+			const RendererVirtualShadowMapStorage::DirtyPageRecord &dr = dirty_recs[d];
+			const uint32_t phys_x = RendererVirtualShadowMapStorage::entry_page_x(dr.phys_entry);
+			const uint32_t phys_y = RendererVirtualShadowMapStorage::entry_page_y(dr.phys_entry);
+			if ((phys_x + 1u) * psize > pool_width || (phys_y + 1u) * psize > pool_height) {
+				continue;
+			}
+			uint32_t s_nz = 0;
+			uint32_t d_nz = 0;
+			float s_min = float(Math::INF);
+			float s_max = -float(Math::INF);
+			float d_min = float(Math::INF);
+			float d_max = -float(Math::INF);
+
+			for (uint32_t ly = 0; ly < psize; ly++) {
+				const uint32_t row_base = (phys_y * psize + ly) * pool_width + phys_x * psize;
+				for (uint32_t lx = 0; lx < psize; lx++) {
+					const uint32_t p0 = layer0[row_base + lx];
+					const uint32_t p1 = layer1[row_base + lx];
+					if (p0 == 0xFFFFFFFFu) {
+						invalid_max_uint_texels++;
+					} else if (p0 != 0u) {
+						s_nz++;
+						const float dep = RendererVirtualShadowMapStorage::depth_unpack(p0);
+						if (!Math::is_finite(dep)) {
+							non_finite_unpacked_texels++;
+						} else {
+							s_min = MIN(s_min, dep);
+							s_max = MAX(s_max, dep);
+						}
+					}
+					if (p1 == 0xFFFFFFFFu) {
+						invalid_max_uint_texels++;
+					} else if (p1 != 0u) {
+						d_nz++;
+						const float dep = RendererVirtualShadowMapStorage::depth_unpack(p1);
+						if (!Math::is_finite(dep)) {
+							non_finite_unpacked_texels++;
+						} else {
+							d_min = MIN(d_min, dep);
+							d_max = MAX(d_max, dep);
+						}
+					}
+				}
+			}
+			nonzero_static_texels += s_nz;
+			nonzero_dynamic_texels += d_nz;
+
+			const uint32_t layer_nz[2] = { s_nz, d_nz };
+			const uint32_t layer_flags[2] = { RendererVirtualShadowMapStorage::ENTRY_DIRTY_STATIC, RendererVirtualShadowMapStorage::ENTRY_DIRTY_DYNAMIC };
+			bool page_has_pairs = false;
+			bool page_has_texels = false;
+			for (uint32_t layer = 0; layer < 2u; layer++) {
+				if ((dr.flags & layer_flags[layer]) == 0u) {
+					continue; // A clean layer keeps its cached texels.
+				}
+				const uint64_t fragments = page_layer_fragments[d * 2u + layer];
+				page_has_pairs = page_has_pairs || page_layer_pairs[d * 2u + layer] > 0u;
+				page_has_texels = page_has_texels || layer_nz[layer] > 0u;
+				if (layer_nz[layer] > 0u && fragments == 0u) {
+					texels_without_pair++;
+				}
+				if (fragments > 0u && layer_nz[layer] == 0u) {
+					fragments_without_texels++;
+				}
+				if (uint64_t(layer_nz[layer]) > fragments) {
+					texels_exceed_fragments++;
+				}
+			}
+			pages_with_pairs += page_has_pairs ? 1u : 0u;
+			pages_with_texels += page_has_texels ? 1u : 0u;
+
+			if (dirty_pages_arr.size() < 4096) {
+				auto sample_texel = [&](const uint32_t *p_layer, uint32_t p_lx, uint32_t p_ly) -> float {
+					const uint32_t pv = p_layer[(phys_y * psize + p_ly) * pool_width + phys_x * psize + p_lx];
+					return pv == 0u ? float(Math::INF) : RendererVirtualShadowMapStorage::depth_unpack(pv);
+				};
+				Dictionary pd;
+				pd["dirty_index"] = int64_t(d);
+				pd["map"] = int64_t(dr.map);
+				pd["kind"] = dr.map < table_maps ? int64_t(maps[dr.map].kind) : int64_t(RendererVirtualShadowMapStorage::MAP_KIND_MAX);
+				pd["map_index"] = dr.map < table_maps ? int64_t(maps[dr.map].index) : int64_t(0);
+				pd["mip"] = int64_t(dr.packed_page & 0xFFu);
+				pd["page_x"] = int64_t((dr.packed_page >> 8u) & 0xFFu);
+				pd["page_y"] = int64_t((dr.packed_page >> 16u) & 0xFFu);
+				pd["phys_x"] = int64_t(phys_x);
+				pd["phys_y"] = int64_t(phys_y);
+				pd["flags"] = int64_t(dr.flags);
+				pd["static_pairs"] = int64_t(page_layer_pairs[d * 2u + 0u]);
+				pd["dynamic_pairs"] = int64_t(page_layer_pairs[d * 2u + 1u]);
+				pd["static_fragments"] = int64_t(page_layer_fragments[d * 2u + 0u]);
+				pd["dynamic_fragments"] = int64_t(page_layer_fragments[d * 2u + 1u]);
+				pd["static_nonzero"] = int64_t(s_nz);
+				pd["dynamic_nonzero"] = int64_t(d_nz);
+				pd["static_min_depth"] = double(s_min);
+				pd["static_max_depth"] = double(s_max);
+				pd["dynamic_min_depth"] = double(d_min);
+				pd["dynamic_max_depth"] = double(d_max);
+				pd["center_static_depth"] = double(sample_texel(layer0, psize / 2u, psize / 2u));
+				pd["center_dynamic_depth"] = double(sample_texel(layer1, psize / 2u, psize / 2u));
+				if (s_nz > 0 || d_nz > 0) {
+					PackedFloat32Array s_row;
+					PackedFloat32Array d_row;
+					PackedFloat32Array s_col;
+					PackedFloat32Array d_col;
+					s_row.resize(psize);
+					d_row.resize(psize);
+					s_col.resize(psize);
+					d_col.resize(psize);
+					float *sr_w = s_row.ptrw();
+					float *dr_w = d_row.ptrw();
+					float *sc_w = s_col.ptrw();
+					float *dc_w = d_col.ptrw();
+					for (uint32_t i = 0; i < psize; i++) {
+						sr_w[i] = sample_texel(layer0, i, psize / 2u);
+						dr_w[i] = sample_texel(layer1, i, psize / 2u);
+						sc_w[i] = sample_texel(layer0, psize / 2u, i);
+						dc_w[i] = sample_texel(layer1, psize / 2u, i);
+					}
+					pd["static_row32"] = s_row;
+					pd["dynamic_row32"] = d_row;
+					pd["static_col32"] = s_col;
+					pd["dynamic_col32"] = d_col;
+				}
+				dirty_pages_arr.push_back(pd);
+			}
+		}
+	} else {
+		failures.push_back("pool snapshot size did not match expected dimensions");
+	}
+
+	Array casters_arr;
+	PackedInt64Array casters_without_texels;
+	PackedInt64Array casters_outside_box;
+	for (uint32_t c = 0; c < cap.casters.size(); c++) {
+		const VSMCasterTelemetry &tel = cap.casters[c];
+		Dictionary cd;
+		cd["caster_id"] = int64_t(c);
+		cd["object_id"] = int64_t(tel.object_id);
+		cd["base_type"] = int64_t(tel.base_type);
+		cd["instance_count"] = int64_t(tel.instance_count);
+		cd["is_skinned"] = tel.is_skinned;
+		cd["has_mesh_instance"] = tel.has_mesh_instance;
+		cd["is_multimesh"] = tel.is_multimesh;
+		cd["is_particles"] = tel.is_particles;
+		cd["is_dynamic"] = tel.is_dynamic;
+		cd["uses_alpha_scissor"] = tel.uses_alpha_scissor;
+		cd["uses_vertex_displacement"] = tel.uses_vertex_displacement;
+		cd["dynamic_reasons"] = int64_t(tel.dynamic_reasons);
+		PackedInt32Array groups_used;
+		for (uint32_t g : caster_groups[c]) {
+			groups_used.push_back(int32_t(g));
+		}
+		groups_used.sort();
+		cd["groups"] = groups_used;
+		cd["pairs_emitted"] = int64_t(caster_pairs[c]);
+		cd["texels_written"] = int64_t(caster_fragments[c]);
+		cd["vertices_outside_box"] = int64_t(caster_outside[c]);
+		// Fragments per light: the light's RID id (the id in the result's lights) -> fragments.
+		Dictionary light_texels;
+		for (const KeyValue<uint32_t, uint64_t> &kv : caster_light_fragments[c]) {
+			light_texels[int64_t(cap.lights[kv.key].base_light_id)] = int64_t(kv.value);
+		}
+		cd["light_texels"] = light_texels;
+		casters_arr.push_back(cd);
+		if (caster_pairs[c] > 0u && caster_fragments[c] == 0u) {
+			casters_without_texels.push_back(int64_t(tel.object_id));
+		}
+		if (caster_outside[c] > 0u) {
+			casters_outside_box.push_back(int64_t(tel.object_id));
+		}
+	}
+
+	if (scan_mismatches > 0) {
+		failures.push_back(vformat("scan/indirect command mismatches: %d", scan_mismatches));
+	}
+	if (pair_unexpected > 0) {
+		failures.push_back(vformat("GPU emitted %d pairs outside the CPU model (1e-5 tolerance)", pair_unexpected));
+	}
+	if (pair_missing > 0) {
+		failures.push_back(vformat("GPU missed %d pairs of the CPU model (1e-5 tolerance)", pair_missing));
+	}
+	if (pair_duplicates > 0) {
+		failures.push_back(vformat("GPU emitted %d duplicate pairs", pair_duplicates));
+	}
+	if (pair_bad_target > 0) {
+		failures.push_back(vformat("%d pairs target a dirty record outside the list or a layer that is not dirty", pair_bad_target));
+	}
+	if (sub_snapshot_short > 0) {
+		failures.push_back(vformat("%d MultiMesh or particle records had a short transform snapshot", sub_snapshot_short));
+	}
+	if (gpu_dropped_pairs > 0 && write_mismatch == 0 && redraw_marks != gpu_dropped_pairs) {
+		// Every pair past the list's capacity marks its page to be drawn again.
+		failures.push_back(vformat("the pair list dropped %d pairs but marked %d pages to be drawn again", gpu_dropped_pairs, redraw_marks));
+	}
+	if (write_mismatch > 0) {
+		failures.push_back(vformat("the cull's write pass and count pass disagreed by %d pairs", write_mismatch));
+	}
+	if (marked_not_redrawn > 0) {
+		failures.push_back(vformat("%d pages that the previous frame's full pair list marked were not drawn again", marked_not_redrawn));
+	}
+	if (total_outside_vertices > 0) {
+		failures.push_back(vformat("%d vertices of %d casters lie outside the box that culled their pair: %s", total_outside_vertices, casters_outside_box.size(), String(Variant(casters_outside_box))));
+	}
+	if (cap.missing_from_vsm > 0) {
+		failures.push_back(vformat("%d atlas shadow casters were missing from their light's VSM casters", cap.missing_from_vsm));
+	}
+	if (cap.point_size_skipped > 0) {
+		// They cast in the shadow atlas (which emulates point sizes) but are not drawn into VSM pages.
+		failures.push_back(vformat("%d surfaces set POINT_SIZE on a device without point sizes and were not drawn into VSM pages", cap.point_size_skipped));
+	}
+	if (!cap.lights_without_casters.is_empty()) {
+		failures.push_back(vformat("%d shadowed lights with virtual maps had no caster list", cap.lights_without_casters.size()));
+	}
+	if (texels_without_pair > 0) {
+		failures.push_back(vformat("%d dirty page layers hold texels that no pair drew", texels_without_pair));
+	}
+	if (fragments_without_texels > 0) {
+		failures.push_back(vformat("%d dirty page layers received fragments but hold no texel", fragments_without_texels));
+	}
+	if (texels_exceed_fragments > 0) {
+		failures.push_back(vformat("%d dirty page layers hold more texels than fragments drawn into them", texels_exceed_fragments));
+	}
+	if (invalid_max_uint_texels > 0) {
+		failures.push_back(vformat("%d pool texels held reserved 0xFFFFFFFF", invalid_max_uint_texels));
+	}
+	if (non_finite_unpacked_texels > 0) {
+		failures.push_back(vformat("%d written pool texels unpacked to non-finite depth", non_finite_unpacked_texels));
+	}
+	if (cull_sink != 0u || raster_sink != 0u) {
+		failures.push_back("an atomic returned the reserved 0xFFFFFFFF (#277 sink)");
+	}
+
+	result["used_indirect_count"] = cap.used_indirect_count;
+	result["light_count"] = int64_t(cap.light_count);
+	result["view_vsm_lights"] = int64_t(cap.view_vsm_lights);
+	result["lights_without_casters"] = int64_t(cap.lights_without_casters.size());
+	result["caster_count"] = int64_t(cap.casters.size());
+	result["surface_element_count"] = int64_t(cap.surface_element_count);
+	result["group_count"] = int64_t(group_count);
+	result["box_record_count"] = int64_t(cap.box_records.size());
+	result["sub_record_count"] = int64_t(cap.sub_records.size());
+	result["dirty_page_count"] = int64_t(dirty_limit);
+	result["atlas_non_virtual_casters"] = int64_t(cap.atlas_non_virtual_casters);
+	result["virtual_skipped"] = int64_t(cap.virtual_skipped);
+	result["point_size_skipped"] = int64_t(cap.point_size_skipped);
+	result["missing_from_vsm"] = int64_t(cap.missing_from_vsm);
+	result["vsm_extra_casters"] = int64_t(cap.vsm_extra_casters);
+	result["gpu_total_pairs"] = int64_t(gpu_total_pairs);
+	result["gpu_dropped_pairs"] = int64_t(gpu_dropped_pairs);
+	result["pair_capacity"] = int64_t(pair_capacity);
+	result["redraw_marks"] = int64_t(redraw_marks);
+	result["pair_missing_marked"] = int64_t(pair_missing_marked);
+	result["marked_pages"] = int64_t(marked_entries.size());
+	result["previous_marked_pages"] = int64_t(consecutive ? previous_marked : 0u);
+	result["marked_not_redrawn"] = int64_t(marked_not_redrawn);
+	result["consecutive"] = consecutive;
+	result["write_mismatch"] = int64_t(write_mismatch);
+	result["vertices_outside_box"] = int64_t(total_outside_vertices);
+	result["casters_outside_box"] = casters_outside_box;
+	// The VSM lights, so a test can find a light's entry in each caster's light_texels.
+	Array lights_arr;
+	for (const VSMRasterCheckCapture::Light &light : cap.lights) {
+		Dictionary ld;
+		ld["id"] = int64_t(light.base_light_id);
+		ld["kind"] = int64_t(light.kind);
+		ld["position"] = light.transform.origin;
+		ld["direction"] = -light.transform.basis.get_column(2).normalized();
+		lights_arr.push_back(ld);
+	}
+	result["lights"] = lights_arr;
+	result["gpu_small_culled"] = int64_t(gpu_small_culled);
+	result["cpu_total_pairs"] = int64_t(cpu_total_pairs);
+	result["cpu_small_culled"] = int64_t(cpu_small_culled);
+	result["scan_mismatches"] = int64_t(scan_mismatches);
+	result["pair_unexpected"] = int64_t(pair_unexpected);
+	result["pair_missing"] = int64_t(pair_missing);
+	result["pair_duplicates"] = int64_t(pair_duplicates);
+	result["pair_bad_target"] = int64_t(pair_bad_target);
+	result["exact_unexplained"] = int64_t(exact_unexplained);
+	result["exact_missing"] = int64_t(exact_missing);
+	result["exact_match"] = exact_unexplained == 0u && exact_missing == 0u && pair_duplicates == 0u && gpu_dropped_pairs == 0u;
+	// The first differences, to tell float rounding at a page or threshold edge from a model error.
+	Array exact_samples;
+	for (uint32_t i = 0; i < exact_differences.size() && i < 16u; i++) {
+		const VSMPairTuple &tup = exact_differences[i];
+		const uint32_t d = tup.dirty & 0x7FFFFFFFu;
+		Dictionary sample;
+		sample["gpu"] = gpu_emitted.has(tup);
+		sample["caster_object_id"] = tup.caster < cap.casters.size() ? int64_t(cap.casters[tup.caster].object_id) : int64_t(-1);
+		sample["element"] = int64_t(tup.elem);
+		sample["sub_instance"] = int64_t(tup.sub);
+		sample["layer"] = int64_t(tup.dirty >> 31u);
+		if (d < dirty_limit) {
+			const RendererVirtualShadowMapStorage::DirtyPageRecord &dr = dirty_recs[d];
+			sample["map"] = int64_t(dr.map);
+			sample["kind"] = dr.map < table_maps ? int64_t(maps[dr.map].kind) : int64_t(RendererVirtualShadowMapStorage::MAP_KIND_MAX);
+			sample["mip"] = int64_t(dr.packed_page & 0xFFu);
+			sample["page"] = Vector2i(int32_t((dr.packed_page >> 8u) & 0xFFu), int32_t((dr.packed_page >> 16u) & 0xFFu));
+		}
+		exact_samples.push_back(sample);
+	}
+	result["exact_difference_samples"] = exact_samples;
+	result["total_fragments"] = int64_t(total_fragments);
+	result["pages_with_pairs"] = int64_t(pages_with_pairs);
+	result["pages_with_texels"] = int64_t(pages_with_texels);
+	result["texels_without_pair"] = int64_t(texels_without_pair);
+	result["fragments_without_texels"] = int64_t(fragments_without_texels);
+	result["texels_exceed_fragments"] = int64_t(texels_exceed_fragments);
+	result["casters_without_texels"] = casters_without_texels;
+	result["nonzero_static_texels"] = int64_t(nonzero_static_texels);
+	result["nonzero_dynamic_texels"] = int64_t(nonzero_dynamic_texels);
+	result["invalid_max_uint_texels"] = int64_t(invalid_max_uint_texels);
+	result["non_finite_unpacked_texels"] = int64_t(non_finite_unpacked_texels);
+	result["casters"] = casters_arr;
+	result["dirty_pages"] = dirty_pages_arr;
+	result["failures"] = failures;
+	result["pass"] = failures.is_empty();
+	return result;
 }
 
 void RenderForwardClustered::_process_sss(Ref<RenderSceneBuffersRD> p_render_buffers, const Projection &p_camera) {
@@ -6083,6 +8004,213 @@ RID RenderForwardClustered::_setup_sdfgi_render_pass_uniform_set(RID p_albedo_te
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_sdfgi_rd, RENDER_PASS_UNIFORM_SET, uniforms);
 }
 
+RID RenderForwardClustered::_setup_vsm_render_pass_uniform_set(const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index) {
+	// GodotNext: vsm_non_nanite (#218). Mirrors _setup_sdfgi_render_pass_uniform_set with MODE_VSM's Set 1 bindings 24-30.
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	ERR_FAIL_NULL_V(vsm, RID());
+
+	thread_local LocalVector<RD::Uniform> uniforms;
+	uniforms.clear();
+
+	{
+		RD::Uniform u;
+		u.binding = 0;
+		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+		u.append_id(scene_state.uniform_buffers[p_uniform_buffer_index]);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 1;
+		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
+		u.append_id(scene_state.implementation_uniform_buffers[p_uniform_buffer_index]);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 2;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER_DYNAMIC;
+		if (scene_state.instance_buffer[RENDER_LIST_SECONDARY].get_size(0u) == 0u) {
+			scene_state.instance_buffer[RENDER_LIST_SECONDARY].set_storage_size(0u, INSTANCE_DATA_BUFFER_MIN_SIZE * sizeof(SceneState::InstanceData));
+			scene_state.instance_buffer[RENDER_LIST_SECONDARY].prepare_for_upload();
+		}
+		u.append_id(scene_state.instance_buffer[RENDER_LIST_SECONDARY]._get(0u));
+		uniforms.push_back(u);
+	}
+	{
+		RID radiance_texture = texture_storage->texture_rd_get_default(is_using_radiance_octmap_array() ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+		RD::Uniform u;
+		u.binding = 3;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(radiance_texture);
+		uniforms.push_back(u);
+	}
+	{
+		RID ref_texture = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_BLACK);
+		RD::Uniform u;
+		u.binding = 4;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(ref_texture);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 5;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 6;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		u.append_id(texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 7;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID default_tex = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_2D_ARRAY_WHITE);
+		for (uint32_t i = 0; i < scene_state.max_lightmaps * 2; i++) {
+			u.append_id(default_tex);
+		}
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 8;
+		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+		RID default_tex = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_WHITE);
+		for (int i = 0; i < MAX_VOXEL_GI_INSTANCESS; i++) {
+			u.append_id(default_tex);
+		}
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 9;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(scene_shader.default_vec4_xform_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 10;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+		RID sampler;
+		switch (decals_get_filter()) {
+			case RSE::DECAL_FILTER_NEAREST: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_LINEAR: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_NEAREST_MIPMAPS: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_LINEAR_MIPMAPS: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_NEAREST_MIPMAPS_ANISOTROPIC: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::DECAL_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+		}
+		u.append_id(sampler);
+		uniforms.push_back(u);
+	}
+	{
+		RD::Uniform u;
+		u.binding = 11;
+		u.uniform_type = RD::UNIFORM_TYPE_SAMPLER;
+		RID sampler;
+		switch (light_projectors_get_filter()) {
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_NEAREST_MIPMAPS_ANISOTROPIC: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+			case RSE::LIGHT_PROJECTOR_FILTER_LINEAR_MIPMAPS_ANISOTROPIC: {
+				sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+			} break;
+		}
+		u.append_id(sampler);
+		uniforms.push_back(u);
+	}
+
+	p_samplers.append_uniforms(uniforms, 12);
+
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 24, vsm->get_pool_texture()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 25, vsm_group_offsets_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 26, vsm_pairs_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27, vsm->get_dirty_buffer()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, vsm->get_map_data_buffer()));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 29, vsm_pair_texels_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 30, vsm_pair_boxes_buffer));
+
+	{
+		RD::Uniform u;
+		u.binding = 38;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(scene_shader.default_material_feedback_buffer);
+		uniforms.push_back(u);
+	}
+	{
+		const RID black_3d = texture_storage->texture_rd_get_default(RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_3D_BLACK);
+		for (int i = 0; i < 3; i++) {
+			RD::Uniform u;
+			u.binding = 39 + i;
+			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			u.append_id(black_3d);
+			uniforms.push_back(u);
+		}
+		RD::Uniform u;
+		u.binding = 42;
+		u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+		u.append_id(scene_shader.default_material_feedback_buffer);
+		uniforms.push_back(u);
+		for (int i = 0; i < 3; i++) {
+			RD::Uniform volume_uniform;
+			volume_uniform.binding = 43 + i;
+			volume_uniform.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
+			volume_uniform.append_id(black_3d);
+			uniforms.push_back(volume_uniform);
+		}
+		const RID nearest_sampler = p_samplers.get_sampler(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+		for (uint32_t i = 0; i < 3; i++) {
+			RD::Uniform layer_uniform;
+			layer_uniform.binding = 46 + i;
+			layer_uniform.uniform_type = RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE;
+			layer_uniform.append_id(nearest_sampler);
+			layer_uniform.append_id(texture_storage->texture_rd_get_default(i == 2 ? RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_BLACK : RendererRD::TextureStorage::DEFAULT_RD_TEXTURE_DEPTH));
+			uniforms.push_back(layer_uniform);
+		}
+	}
+
+	if (scene_shader.default_shader_vsm_rd.is_null()) {
+		ERR_FAIL_NULL_V(scene_shader.default_material_shader_ptr, RID());
+		scene_shader.enable_vsm_shader_group();
+		scene_shader.default_shader_vsm_rd = scene_shader.default_material_shader_ptr->get_shader_variant(SceneShaderForwardClustered::PIPELINE_VERSION_VSM_DEPTH, 0, true);
+		ERR_FAIL_COND_V(scene_shader.default_shader_vsm_rd.is_null(), RID());
+	}
+
+	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.default_shader_vsm_rd, RENDER_PASS_UNIFORM_SET, uniforms);
+}
+
 RID RenderForwardClustered::_render_buffers_get_normal_texture(Ref<RenderSceneBuffersRD> p_render_buffers) {
 	Ref<RenderBufferDataForwardClustered> rb_data = p_render_buffers->get_custom_data(RB_SCOPE_FORWARD_CLUSTERED);
 
@@ -7063,6 +9191,13 @@ void RenderForwardClustered::_mesh_compile_pipelines_for_surface(const SurfacePi
 		pipeline_key.framebuffer_format_id = _get_reflection_probe_depth_framebuffer_format_for_pipeline();
 		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
 	}
+
+	// GodotNext: vsm_non_nanite (#218). The VSM depth variant draws into an attachmentless framebuffer.
+	if (scene_shader.is_vsm_shader_group_enabled()) {
+		pipeline_key.version = SceneShaderForwardClustered::PIPELINE_VERSION_VSM_DEPTH;
+		pipeline_key.framebuffer_format_id = RD::get_singleton()->framebuffer_format_create_empty();
+		_mesh_compile_pipeline_for_surface(p_surface.shader_shadow, p_surface.mesh_surface_shadow, true, p_surface.instanced, p_source, pipeline_key, r_pipeline_pairs);
+	}
 }
 
 void RenderForwardClustered::_mesh_generate_all_pipelines_for_surface_cache(GeometryInstanceSurfaceDataCache *p_surface_cache, const GlobalPipelineData &p_global) {
@@ -7593,12 +9728,21 @@ RenderForwardClustered::RenderForwardClustered() {
 	if (RSG::virtual_mesh_storage != nullptr) {
 		RSG::virtual_mesh_storage->set_nextgeo_draw_ready(!bool(GLOBAL_GET("rendering/nextgeo/visibility_only")));
 	}
+	// GodotNext: vsm_non_nanite (#218). The VSM storage does not exist yet: _vsm_raster_non_nanite()
+	// registers the raster check and enables the VSM shader group on first use.
+	vsm_cull_instances.set_page_pool(&cull_argument_pool);
 #ifdef METAL_MFXTEMPORAL_ENABLED
 	mfx_temporal_effect = memnew(RendererRD::MFXTemporalEffect);
 #endif
 }
 
 RenderForwardClustered::~RenderForwardClustered() {
+	// GodotNext: vsm_non_nanite (#218)
+	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+		RendererRD::VirtualShadowMapStorage::get_singleton()->set_raster_check_callbacks(nullptr, nullptr, nullptr);
+	}
+	_free_vsm_raster_resources();
+	vsm_cull_instances.reset();
 	next_gi.free_far_field();
 	nextgeo_cut.free_resources();
 	nextgeo_resolve.free_resources();
@@ -7678,4 +9822,7 @@ RenderForwardClustered::~RenderForwardClustered() {
 		RD::get_singleton()->free_rid(sdfgi_framebuffer_size_cache.begin()->value);
 		sdfgi_framebuffer_size_cache.remove(sdfgi_framebuffer_size_cache.begin());
 	}
+
+	// GodotNext: vsm_non_nanite (#218). A VSM cull-state readback that arrives later finds no renderer.
+	singleton = nullptr;
 }

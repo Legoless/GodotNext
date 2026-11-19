@@ -597,6 +597,9 @@ public:
 	// GodotNext: vsm_page_marking (#219). The GPU check of page marking and allocation.
 	virtual void virtual_shadow_maps_request_check();
 	virtual Dictionary virtual_shadow_maps_get_check_result();
+	// GodotNext: vsm_non_nanite (#218). The GPU check of non-Nanite per-page culling and raster.
+	virtual void virtual_shadow_maps_request_raster_check();
+	virtual Dictionary virtual_shadow_maps_get_raster_check_result();
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;

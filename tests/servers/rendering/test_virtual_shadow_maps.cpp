@@ -34,6 +34,7 @@ TEST_FORCE_LINK(test_virtual_shadow_maps)
 
 #include "core/math/math_funcs.h"
 #include "core/math/random_pcg.h"
+#include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #include <cmath>
@@ -2031,5 +2032,337 @@ TEST_CASE("[VSM] Stale lights make room before the page table grows") {
 		CHECK(storage.get_failed_allocation_count() == 0);
 		CHECK(storage.get_table_capacity() == 4 * VSM::TABLE_GROWTH_MAPS);
 		CHECK(storage.get_evicted_light_count() + storage.get_light_count() == 1 + 125 * 8 + 63);
+	}
+}
+
+TEST_CASE("[VSM] Reversed-Z R32_UINT depth encoding preserves strict order and round-trips (#218)") {
+	// Strictly sorted ascending depths (nearer first, including negative directional light-space depths):
+	// packed uint32 values must be strictly descending so R32_UINT imageAtomicMax selects the nearest occluder.
+	const float ordered_depths[] = {
+		-10000.0f, -250.5f, -12.25f, -1.0f, -0.001f, -1.0e-6f,
+		0.0f,
+		1.0e-6f, 0.001f, 0.05f, 1.0f, 3.5f, 42.125f, 1000.0f, 65536.0f, 1.0e6f
+	};
+	const uint32_t count = sizeof(ordered_depths) / sizeof(ordered_depths[0]);
+	uint32_t prev_packed = 0xFFFFFFFFu;
+	for (uint32_t i = 0; i < count; i++) {
+		const float d = ordered_depths[i];
+		const uint32_t p = VSM::depth_pack(d);
+		CHECK(p > 0u);
+		CHECK(p < 0xFFFFFFFFu);
+		CHECK(p < prev_packed);
+		const float u = VSM::depth_unpack(p);
+		if (d == 0.0f) {
+			CHECK(u == 0.0f);
+		} else {
+			CHECK(u == d);
+		}
+		prev_packed = p;
+	}
+	// -0.0f and +0.0f map to the same canonical value.
+	CHECK(VSM::depth_pack(-0.0f) == VSM::depth_pack(0.0f));
+
+	// Cleared pool texels hold 0u, which unpacks to +INF and loses against every valid depth.
+	const float empty_depth = VSM::depth_unpack(0u);
+	CHECK(std::isinf(empty_depth));
+	CHECK(empty_depth > 0.0f);
+
+	// NaN is rejected to 0u; +/-INF stay strictly inside (0u, 0xFFFFFFFFu) so 0xFFFFFFFFu stays reserved for #277 sinks.
+	CHECK(VSM::depth_pack(std::nanf("")) == 0u);
+	const uint32_t pos_inf = VSM::depth_pack(float(Math::INF));
+	const uint32_t neg_inf = VSM::depth_pack(-float(Math::INF));
+	CHECK(pos_inf > 0u);
+	CHECK(pos_inf < neg_inf);
+	CHECK(neg_inf < 0xFFFFFFFFu);
+
+	// Random finite round-trip and monotonicity fuzz.
+	RandomPCG rng(21801);
+	uint32_t order_failures = 0;
+	uint32_t roundtrip_failures = 0;
+	for (uint32_t i = 0; i < 2000; i++) {
+		const float a = (rng.randf() * 2.0f - 1.0f) * 5000.0f;
+		const float b = (rng.randf() * 2.0f - 1.0f) * 5000.0f;
+		const uint32_t pa = VSM::depth_pack(a);
+		const uint32_t pb = VSM::depth_pack(b);
+		if (VSM::depth_unpack(pa) != (a == 0.0f ? 0.0f : a)) {
+			roundtrip_failures++;
+		}
+		if (a < b && !(pa > pb)) {
+			order_failures++;
+		} else if (a > b && !(pa < pb)) {
+			order_failures++;
+		}
+	}
+	CHECK(roundtrip_failures == 0);
+	CHECK(order_failures == 0);
+}
+
+TEST_CASE("[VSM] Sub-instance AABB construction handles 3D/2D MultiMesh, particle trails and inactive sentinels (#218)") {
+	const AABB unit_box(Vector3(-0.5f, -1.0f, -0.25f), Vector3(1.0f, 2.0f, 0.5f));
+	// Parent model transform: translate by (10, 20, -5), scale X by 2.
+	const float model[12] = {
+		2.0f, 0.0f, 0.0f, 10.0f,
+		0.0f, 1.0f, 0.0f, 20.0f,
+		0.0f, 0.0f, 1.0f, -5.0f
+	};
+
+	// 1. 3D MultiMesh with stride = 5 vec4s (transform + color + custom) and motion-vector current_offset = 1.
+	{
+		float buf[3 * 5 * 4] = {};
+		// Slot 0 (skipped by current_offset = 1): zero scale.
+		// Slot 1 (sub_index = 0 at current_offset = 1): translate local by (3, -2, 4).
+		float *slot1 = buf + 1 * 20;
+		slot1[0] = 1.0f;
+		slot1[3] = 3.0f;
+		slot1[5] = 1.0f;
+		slot1[7] = -2.0f;
+		slot1[10] = 1.0f;
+		slot1[11] = 4.0f;
+
+		AABB world;
+		CHECK(VSM::sub_instance_box(model, buf, 0, 1, 5, false, 1, unit_box, 0.25f, world));
+		// Sub-space X is [2.5, 3.5] -> model X is [15.0, 17.0], plus 0.25 margin -> [14.75, 17.25].
+		// Sub-space Y is [-3.0, -1.0] -> model Y is [17.0, 19.0], plus 0.25 margin -> [16.75, 19.25].
+		// Sub-space Z is [3.75, 4.25] -> model Z is [-1.25, -0.75], plus 0.25 margin -> [-1.5, -0.5].
+		CHECK(world.position.is_equal_approx(Vector3(14.75f, 16.75f, -1.5f)));
+		CHECK(world.size.is_equal_approx(Vector3(2.5f, 2.5f, 1.0f)));
+
+		// Slot 2 has zero transform -> rejected cleanly.
+		AABB rejected;
+		CHECK_FALSE(VSM::sub_instance_box(model, buf, 1, 1, 5, false, 1, unit_box, 0.0f, rejected));
+	}
+
+	// 2. 2D MultiMesh (format_2d = true, stride = 2 vec4s): implicit Z row (0, 0, 1, 0).
+	{
+		const float identity_model[12] = {
+			1.0f, 0.0f, 0.0f, 0.0f,
+			0.0f, 1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f, 0.0f
+		};
+		const float buf2d[8] = {
+			1.0f, 0.0f, 0.0f, 5.0f,
+			0.0f, 2.0f, 0.0f, -3.0f
+		};
+		AABB world2d;
+		CHECK(VSM::sub_instance_box(identity_model, buf2d, 0, 0, 2, true, 1, unit_box, 0.0f, world2d));
+		CHECK(world2d.position.is_equal_approx(Vector3(4.5f, -5.0f, -0.25f)));
+		CHECK(world2d.size.is_equal_approx(Vector3(1.0f, 4.0f, 0.5f)));
+	}
+
+	// 3. Inactive GPUParticles3D (-INF diagonal sentinel from particles_copy.glsl) and trailed particles.
+	{
+		const float identity_model[12] = {
+			1.0f, 0.0f, 0.0f, 0.0f,
+			0.0f, 1.0f, 0.0f, 0.0f,
+			0.0f, 0.0f, 1.0f, 0.0f
+		};
+		const float neg_inf = -float(Math::INF);
+		// Trail of 3 steps for particle 0: step 0 inactive (-INF), step 1 at x = -2, step 2 at x = +4;
+		// particle 1: all 3 steps inactive (-INF).
+		float trail_buf[2 * 3 * 20] = {};
+		auto set_inactive = [&](float *p_seg) {
+			p_seg[0] = neg_inf;
+			p_seg[5] = neg_inf;
+			p_seg[10] = neg_inf;
+		};
+		set_inactive(trail_buf + 0 * 20);
+		float *seg1 = trail_buf + 1 * 20;
+		seg1[0] = 1.0f;
+		seg1[3] = -2.0f;
+		seg1[5] = 1.0f;
+		seg1[10] = 1.0f;
+		float *seg2 = trail_buf + 2 * 20;
+		seg2[0] = 1.0f;
+		seg2[3] = 4.0f;
+		seg2[5] = 1.0f;
+		seg2[10] = 1.0f;
+		set_inactive(trail_buf + 3 * 20);
+		set_inactive(trail_buf + 4 * 20);
+		set_inactive(trail_buf + 5 * 20);
+
+		AABB trail_world;
+		CHECK(VSM::sub_instance_box(identity_model, trail_buf, 0, 0, 5, false, 3, unit_box, 0.0f, trail_world));
+		CHECK(trail_world.position.is_equal_approx(Vector3(-2.5f, -1.0f, -0.25f)));
+		CHECK(trail_world.size.is_equal_approx(Vector3(7.0f, 2.0f, 0.5f)));
+
+		AABB inactive_world;
+		CHECK_FALSE(VSM::sub_instance_box(identity_model, trail_buf, 1, 0, 5, false, 3, unit_box, 0.0f, inactive_world));
+	}
+}
+
+TEST_CASE("[VSM] Per-page box culling handles toroidal clipmaps, perspective faces, dirty layers and small-caster culling (#218)") {
+	// 1. Directional clipmap level 2 (extent 16 m, page 0.25 m at mip 0, 0.5 m at mip 1) with odd negative origin (-3, 5).
+	{
+		const Basis sun_basis; // Light looks down -Z, light-plane X = +X, Y = +Y.
+		const Vector2i origin(-3, 5);
+		VSM::MapData maps[2];
+		maps[0] = VSM::map_data_clipmap(sun_basis, 2, origin, 200.0f);
+		maps[1] = VSM::MapData();
+
+		// At mip 1 (32x32 slots): mip_origin = floor((-3, 5) / 2) = (-2, 2).
+		// Absolute mip-1 page (-1, 3) wraps to slot ((-1) & 31, 3 & 31) = (31, 3), covering world X [-0.5, 0.0), Y [1.5, 2.0).
+		// Notice absolute mip-1 page (31, 3) (world X [15.5, 16.0)) would ALSO wrap to slot (31, 3), so a box at X = 15.7
+		// outside the clipmap window must NOT match slot (31, 3)!
+		VSM::DirtyPageRecord dirty[3];
+		dirty[0] = { 0u, 1u | (31u << 8u) | (3u << 16u), VSM::entry_pack(0, 0, 0), VSM::ENTRY_DIRTY_STATIC };
+		dirty[1] = { 0u, 1u | (31u << 8u) | (3u << 16u), VSM::entry_pack(1, 0, 0), VSM::ENTRY_DIRTY_DYNAMIC };
+		dirty[2] = { 0u, 4u | (3u << 8u) | (0u << 16u), VSM::entry_pack(2, 0, 0), VSM::ENTRY_DIRTY_STATIC | VSM::ENTRY_DIRTY_DYNAMIC };
+		// Mip 4 (4x4 slots): mip_origin = floor((-3, 5) / 16) = (-1, 0). Abs page (-1, 0) -> slot (3, 0), world X [-4, 0), Y [0, 4).
+		const uint32_t counts[2] = { 3u, 0u };
+		const uint32_t offsets[2] = { 0u, 0u };
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 1);
+
+		LocalVector<uint32_t> hits;
+		uint32_t small_culled = 0;
+		const AABB inside_box(Vector3(-0.3f, 1.6f, -2.0f), Vector3(0.1f, 0.1f, 0.1f));
+
+		// Static caster (extent 0.1 m): mip 1 texel = (16/4096)*2 = 0.0078125 m (passes 1-texel threshold -> hits dirty[0]);
+		// mip 4 texel = (16/4096)*16 = 0.0625 m (0.1 >= 0.0625 -> also hits dirty[2]); skips dynamic-only dirty[1]!
+		VSM::cull_box_dirty_pages(maps, 2, counts, offsets, dirty, 3, 0, flags, inside_box, false, 1.0f, hits, small_culled);
+		CHECK(hits.size() == 2);
+		CHECK(hits[0] == 0u);
+		CHECK(hits[1] == 2u);
+		CHECK(small_culled == 0u);
+
+		// Dynamic caster: skips static-only dirty[0], hits dirty[1] and dirty[2].
+		VSM::cull_box_dirty_pages(maps, 2, counts, offsets, dirty, 3, 0, flags, inside_box, true, 1.0f, hits, small_culled);
+		CHECK(hits.size() == 2);
+		CHECK(hits[0] == 1u);
+		CHECK(hits[1] == 2u);
+
+		// Tiny caster (extent 0.02 m): passes mip 1 (0.02 >= 0.0078125) -> hits dirty[0], culled on mip 4 (0.02 < 0.0625) -> small_culled == 1!
+		const AABB tiny_box(Vector3(-0.3f, 1.6f, -2.0f), Vector3(0.02f, 0.02f, 0.02f));
+		VSM::cull_box_dirty_pages(maps, 2, counts, offsets, dirty, 3, 0, flags, tiny_box, false, 1.0f, hits, small_culled);
+		CHECK(hits.size() == 1);
+		CHECK(hits[0] == 0u);
+		CHECK(small_culled == 1u);
+
+		// Disabling the threshold (min_texels = 0) keeps mip 4 as well.
+		VSM::cull_box_dirty_pages(maps, 2, counts, offsets, dirty, 3, 0, flags, tiny_box, false, 0.0f, hits, small_culled);
+		CHECK(hits.size() == 2);
+		CHECK(small_culled == 0u);
+
+		// Wrapped alias outside the toroidal window at X = 15.7 must NOT match!
+		const AABB wrapped_outside(Vector3(15.65f, 1.6f, -2.0f), Vector3(0.1f, 0.1f, 0.1f));
+		VSM::cull_box_dirty_pages(maps, 2, counts, offsets, dirty, 3, 0, flags, wrapped_outside, false, 1.0f, hits, small_culled);
+		CHECK(hits.is_empty());
+	}
+
+	// 2. Perspective spot/area faces: 6-plane frustum, near-plane straddle, conservative closest-w small-caster check.
+	{
+		const Transform3D spot_xform; // Origin, looking down -Z, 45 deg half-angle, range 20 m.
+		VSM::MapData spot_map = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xform, 20.0f, 45.0f);
+		// Center page at mip 0 is (32, 32), covering UV [0.5, 0.5 + 1/64).
+		VSM::DirtyPageRecord dirty[2];
+		dirty[0] = { 0u, 0u | (32u << 8u) | (32u << 16u), VSM::entry_pack(0, 0, 0), VSM::ENTRY_DIRTY_STATIC };
+		dirty[1] = { 0u, 0u | (5u << 8u) | (5u << 16u), VSM::entry_pack(1, 0, 0), VSM::ENTRY_DIRTY_STATIC };
+		const uint32_t counts[1] = { 2u };
+		const uint32_t offsets[1] = { 0u };
+		const uint32_t flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+
+		LocalVector<uint32_t> hits;
+		uint32_t small_culled = 0;
+
+		// Behind the light (z > 0 -> w < 0 < near_w): rejected.
+		VSM::cull_box_dirty_pages(&spot_map, 1, counts, offsets, dirty, 2, 0, flags, AABB(Vector3(-0.5f, -0.5f, 1.0f), Vector3(1.0f, 1.0f, 1.0f)), false, 1.0f, hits, small_culled);
+		CHECK(hits.is_empty());
+
+		// Beyond range (z = -25 -> w = 25 > 20): rejected.
+		VSM::cull_box_dirty_pages(&spot_map, 1, counts, offsets, dirty, 2, 0, flags, AABB(Vector3(-0.5f, -0.5f, -26.0f), Vector3(1.0f, 1.0f, 1.0f)), false, 1.0f, hits, small_culled);
+		CHECK(hits.is_empty());
+
+		// Straddling the near plane (z in [-0.5, +0.5], so min_w = -0.5 <= near_w <= max_w = +0.5): conservatively touches all dirty pages in the face!
+		VSM::cull_box_dirty_pages(&spot_map, 1, counts, offsets, dirty, 2, 0, flags, AABB(Vector3(-0.2f, -0.2f, -0.5f), Vector3(0.4f, 0.4f, 1.0f)), false, 1.0f, hits, small_culled);
+		CHECK(hits.size() == 2);
+
+		// Small-caster check at w = 16 m (mip 0 texel = (2 / 4096) * 16 = 0.0078125 m): a 0.002 m speck is culled!
+		VSM::cull_box_dirty_pages(&spot_map, 1, counts, offsets, dirty, 2, 0, flags, AABB(Vector3(0.001f, 0.001f, -16.002f), Vector3(0.002f, 0.002f, 0.002f)), false, 1.0f, hits, small_culled);
+		CHECK(hits.is_empty());
+		CHECK(small_culled == 1u);
+	}
+}
+
+TEST_CASE("[VSM] SceneShaderForwardClustered VSM shader group layout and pair capacity (#218)") {
+	using Shader = RendererSceneRenderImplementation::SceneShaderForwardClustered;
+	using Version = Shader::ShaderVersion;
+
+	CHECK(int(Version::SHADER_VERSION_VSM_COUNT) == 2);
+	CHECK(int(Version::SHADER_VERSION_VSM_DEPTH_UBERSHADER) == int(Version::SHADER_VERSION_VSM_DEPTH) + 1);
+	CHECK(int(Shader::ShaderData::VERTEX_INPUT_MASKS_SIZE) == int(Version::SHADER_VERSION_VSM_BASE) + int(Version::SHADER_VERSION_VSM_COUNT));
+
+	CHECK(VSM::raster_pair_capacity(0) == VSM::RASTER_PAIR_LIST_MIN);
+	CHECK(VSM::raster_pair_capacity(2048) == VSM::RASTER_PAIR_LIST_MIN);
+	CHECK(VSM::raster_pair_capacity(8192) == 8192u * 64u);
+	CHECK(VSM::raster_pair_capacity(16384) == 16384u * 64u);
+}
+
+TEST_CASE("[VSM] Billboard sub-instance boxes hold the mesh turned any way about the instance origin (#218)") {
+	// A 1 m quad off its origin (as an offset QuadMesh), flat in Z like QuadMesh's AABB.
+	const AABB quad(Vector3(-0.3f, -0.6f, 0.0f), Vector3(1.0f, 1.0f, 0.0f));
+	CHECK(VSM::view_facing_reach(quad) == doctest::Approx(0.7f + 0.6f));
+	const float model[12] = {
+		1.0f, 0.0f, 0.0f, 2.0f,
+		0.0f, 1.0f, 0.0f, 0.0f,
+		0.0f, 0.0f, 1.0f, -1.0f
+	};
+	// One instance at (3, 1, 0) in the model, scaled by 0.5 on X and 2.5 on Y.
+	const float inst[12] = {
+		0.5f, 0.0f, 0.0f, 3.0f,
+		0.0f, 2.5f, 0.0f, 1.0f,
+		0.0f, 0.0f, 1.0f, 0.0f
+	};
+	AABB flat;
+	CHECK(VSM::sub_instance_box(model, inst, 0, 0, 3, false, 1, quad, 0.0f, flat));
+	CHECK(flat.size.z == doctest::Approx(0.0f));
+	AABB facing;
+	CHECK(VSM::sub_instance_box(model, inst, 0, 0, 3, false, 1, quad, 0.0f, facing, true, VSM::view_facing_reach(quad)));
+	CHECK(facing.encloses(flat));
+	const Vector3 origin(5.0f, 1.0f, -1.0f);
+	const float longest = 2.5f; // Keep Scale scales by MODEL_MATRIX's axis lengths; otherwise by 1.
+	RandomPCG rng(218);
+	uint32_t outside = 0;
+	for (int i = 0; i < 2000; i++) {
+		// A random unit basis: orthonormal (BILLBOARD_ENABLED, BILLBOARD_PARTICLES) or, every third one,
+		// unit axes that are not orthogonal (BILLBOARD_FIXED_Y under a rolled camera).
+		Basis basis(Vector3(rng.randf() * 2.0f - 1.0f, rng.randf() * 2.0f - 1.0f, rng.randf() * 2.0f - 1.0f).normalized(), rng.randf() * Math::TAU);
+		if (i % 3 == 0) {
+			basis = Basis(Vector3(rng.randf() - 0.5f, rng.randf() - 0.5f, rng.randf() - 0.5f).normalized(), Vector3(0.0f, 1.0f, 0.0f), Vector3(rng.randf() - 0.5f, 0.0f, rng.randf() - 0.5f).normalized());
+		}
+		const float scale = (i % 2 == 0) ? 1.0f : longest;
+		for (uint32_t c = 0; c < 4u; c++) {
+			const Vector3 lp((c & 1u) ? quad.position.x + quad.size.x : quad.position.x, (c & 2u) ? quad.position.y + quad.size.y : quad.position.y, 0.0f);
+			const Vector3 world = origin + basis.xform(lp) * scale;
+			if (!facing.grow(1e-4f).has_point(world)) {
+				outside++;
+			}
+		}
+	}
+	CHECK(outside == 0);
+}
+
+TEST_CASE("[VSM] Each map's light camera matches face_camera() and the light's axes (#218)") {
+	const Transform3D light(Basis(Vector3(0.3f, 0.8f, -0.2f).normalized(), 1.1f), Vector3(4.0f, -2.0f, 7.5f));
+	const VSM::MapKind kinds[3] = { VSM::MAP_KIND_SPOT, VSM::MAP_KIND_OMNI, VSM::MAP_KIND_AREA };
+	for (VSM::MapKind kind : kinds) {
+		const uint32_t faces = kind == VSM::MAP_KIND_SPOT ? 1u : (kind == VSM::MAP_KIND_OMNI ? 6u : 5u);
+		for (uint32_t face = 0; face < faces; face++) {
+			const VSM::MapData map = VSM::map_data_face(kind, face, light, 12.0f, 30.0f);
+			const Transform3D expected = VSM::face_camera(kind, face, light);
+			const Transform3D got = VSM::map_view(map, Vector3(100.0f, 100.0f, 100.0f));
+			CHECK(got.basis.get_column(0).is_equal_approx(expected.basis.get_column(0)));
+			CHECK(got.basis.get_column(1).is_equal_approx(expected.basis.get_column(1)));
+			CHECK(got.basis.get_column(2).is_equal_approx(expected.basis.get_column(2)));
+			CHECK(got.origin.distance_to(expected.origin) < 1e-3f);
+		}
+	}
+	// A clipmap level looks along the light (-Z) from the camera position, at every level.
+	const Basis sun(Vector3(-0.4f, 1.0f, 0.2f).normalized(), 0.9f);
+	const Vector3 camera(12.0f, 3.0f, -8.0f);
+	for (uint32_t level = 0; level < 4u; level++) {
+		const Transform3D got = VSM::map_view(VSM::map_data_clipmap(sun, level, Vector2i(-3, 5), 200.0f), camera);
+		CHECK(got.basis.get_column(0).is_equal_approx(sun.get_column(0).normalized()));
+		CHECK(got.basis.get_column(1).is_equal_approx(sun.get_column(1).normalized()));
+		CHECK(got.basis.get_column(2).is_equal_approx(sun.get_column(2).normalized()));
+		CHECK(got.origin.is_equal_approx(camera));
 	}
 }

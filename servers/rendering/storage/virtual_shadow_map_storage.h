@@ -483,6 +483,47 @@ public:
 		MapKind kind = MAP_KIND_SPOT;
 	};
 
+	/* NON-NANITE PAGE CULLING AND RASTER (#218, plan §21.3 contract S4) */
+
+	// Sub-texel small-caster culling threshold in virtual texels at the target page's mip; 0 disables it.
+	static constexpr float DEFAULT_MIN_CASTER_TEXELS = 1.0f;
+	static constexpr uint32_t RASTER_PAIR_LIST_MIN = 262144;
+	static constexpr uint32_t raster_pair_capacity(uint32_t p_pool_pages) {
+		return p_pool_pages * 64u > RASTER_PAIR_LIST_MIN ? p_pool_pages * 64u : RASTER_PAIR_LIST_MIN;
+	}
+
+	// Order-preserving reversed-Z uint32 encoding of linear depth for R32_UINT imageAtomicMax:
+	// smaller (nearer) depth maps to a strictly larger uint in (0, 0xFFFFFFFF), so nearer casters win
+	// over farther ones and over cleared empty texels (0), while 0xFFFFFFFF stays reserved for #277 sinks.
+	static uint32_t depth_pack(float p_depth);
+	static float depth_unpack(uint32_t p_packed);
+
+	// One record of the dirty-page list emitted by vsm_allocate_pages.glsl (uvec4, std430).
+	struct DirtyPageRecord {
+		uint32_t map = 0;
+		uint32_t packed_page = 0; // mip | (page_x << 8) | (page_y << 16).
+		uint32_t phys_entry = 0; // Physical page x and y without flags.
+		uint32_t flags = 0; // ENTRY_DIRTY_STATIC, ENTRY_DIRTY_DYNAMIC, etc.
+	};
+
+	// CPU model of a MultiMesh or GPUParticles3D sub-instance's world-space AABB in vsm_instance_cull.glsl.
+	// Rejects inactive (-INF) particle slots and zero-scale transforms without producing NaN. With
+	// p_view_facing (the shadow material writes MODELVIEW_MATRIX: billboards), the box also holds
+	// p_corner_reach (view_facing_reach()) times max(1, the instance's longest world axis) around the
+	// instance's world origin, wherever the mesh is turned.
+	static bool sub_instance_box(const float p_model[12], const float *p_transforms, uint32_t p_sub_index, uint32_t p_current_offset, uint32_t p_stride_vec4, bool p_format_2d, uint32_t p_trail_steps, const AABB &p_local_aabb, float p_extra_margin, AABB &r_world_aabb, bool p_view_facing = false, float p_corner_reach = 0.0f);
+	// The largest |x| + |y| + |z| of a corner of p_local_aabb: a basis of unit axes (a billboard's) keeps
+	// every point of the box within it of the origin.
+	static float view_facing_reach(const AABB &p_local_aabb);
+	// CPU model of vsm_map_view() in vsm_raster_inc.glsl: the light's camera for one map (view to world).
+	// A face's is face_camera(); a clipmap level's looks along the light from p_camera_position.
+	static Transform3D map_view(const MapData &p_map, const Vector3 &p_camera_position);
+
+	// CPU model of vsm_cull_box_dirty_pages() in vsm_instance_cull.glsl: emits the dirty-record indices
+	// of a light's maps whose page frustum and static/dynamic dirty layer touch p_box and pass the
+	// small-caster threshold p_min_texels.
+	static void cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled);
+
 private:
 	struct FreeRange {
 		uint32_t first = 0;

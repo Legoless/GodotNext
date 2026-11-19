@@ -2381,6 +2381,25 @@ Dictionary RenderingServer::virtual_shadow_maps_get_check_result() {
 	return Dictionary();
 }
 
+void RenderingServer::virtual_shadow_maps_request_raster_check() {
+	// GodotNext: vsm_non_nanite (#218).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+		RendererRD::VirtualShadowMapStorage::get_singleton()->request_raster_check();
+	}
+#endif
+}
+
+Dictionary RenderingServer::virtual_shadow_maps_get_raster_check_result() {
+	// GodotNext: vsm_non_nanite (#218).
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+		return RendererRD::VirtualShadowMapStorage::get_singleton()->get_raster_check_result();
+	}
+#endif
+	return Dictionary();
+}
+
 Dictionary RenderingServer::virtual_geometry_get_routing_counters() {
 	// GodotNext: nextgeo_residency (#78, Q12). Routing, residency invariants and page-upload GPU time.
 	Dictionary out;
@@ -3084,6 +3103,9 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: vsm_page_marking (#219).
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_request_check"), &RenderingServer::virtual_shadow_maps_request_check);
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_check_result"), &RenderingServer::virtual_shadow_maps_get_check_result);
+	// GodotNext: vsm_non_nanite (#218).
+	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_request_raster_check"), &RenderingServer::virtual_shadow_maps_request_raster_check);
+	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_raster_check_result"), &RenderingServer::virtual_shadow_maps_get_raster_check_result);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
 	ClassDB::bind_method(D_METHOD("viewport_set_tsr_quality", "viewport", "quality"), &RenderingServer::viewport_set_tsr_quality);

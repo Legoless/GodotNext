@@ -43,6 +43,8 @@
 // GodotNext: nextgi_hit_groups (#130)
 #include "core/templates/safe_refcount.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
+// GodotNext: vsm_non_nanite (#218)
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -92,6 +94,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_transmittance = false;
 	uses_time = false;
 	writes_modelview_or_projection = false;
+	uses_main_camera = false; // GodotNext: vsm_non_nanite (#218)
 	uses_world_coordinates = false;
 	uses_particle_trails = false;
 	uses_z_clip_scale = false;
@@ -171,6 +174,9 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	actions.usage_flag_pointers["BINORMAL"] = &uses_tangent;
 	actions.usage_flag_pointers["ANISOTROPY"] = &uses_tangent;
 	actions.usage_flag_pointers["ANISOTROPY_FLOW"] = &uses_tangent;
+
+	// GodotNext: vsm_non_nanite (#218). Camera-facing billboards follow the main camera in shadow passes.
+	actions.usage_flag_pointers["MAIN_CAM_INV_VIEW_MATRIX"] = &uses_main_camera;
 
 	actions.write_flag_pointers["MODELVIEW_MATRIX"] = &writes_modelview_or_projection;
 	actions.write_flag_pointers["PROJECTION_MATRIX"] = &writes_modelview_or_projection;
@@ -643,6 +649,9 @@ uint16_t SceneShaderForwardClustered::ShaderData::_get_shader_version(PipelineVe
 			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_ML;
 		case PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML:
 			return ShaderVersion::SHADER_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML;
+		// GodotNext: vsm_non_nanite (#218).
+		case PIPELINE_VERSION_VSM_DEPTH:
+			return p_ubershader ? ShaderVersion::SHADER_VERSION_VSM_DEPTH_UBERSHADER : ShaderVersion::SHADER_VERSION_VSM_DEPTH;
 		default: {
 			DEV_ASSERT(false && "Unknown pipeline version.");
 			return 0;
@@ -694,7 +703,8 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_ML ||
 			p_pipeline_key.version == PIPELINE_VERSION_VISIBILITY_RESOLVE_GUIDES_VOXEL_GI_ML;
 
-	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || is_visibility_resolve) {
+	// GodotNext: vsm_non_nanite (#218). The VSM depth variant has no depth attachment.
+	if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGI_TRANSLUCENCY_MARK || p_pipeline_key.version == PIPELINE_VERSION_VSM_DEPTH || is_visibility_resolve) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
 	} else if (p_pipeline_key.version == PIPELINE_VERSION_NEXTGEO_FALLBACK) {
 		depth_stencil_state = RD::PipelineDepthStencilState();
@@ -754,7 +764,8 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 		RD::RENDER_PRIMITIVE_TRIANGLE_STRIPS,
 	};
 
-	bool emulate_point_size_flag = uses_point_size && !is_visibility_resolve && SceneShaderForwardClustered::singleton->emulate_point_size;
+	// GodotNext: vsm_non_nanite (#218). The VSM depth variant never emulates point sizes.
+	bool emulate_point_size_flag = uses_point_size && !is_visibility_resolve && p_pipeline_key.version != PIPELINE_VERSION_VSM_DEPTH && SceneShaderForwardClustered::singleton->emulate_point_size;
 
 	RD::RenderPrimitive primitive_rd;
 	if (is_visibility_resolve) {
@@ -852,6 +863,7 @@ void SceneShaderForwardClustered::ShaderData::_create_pipeline(PipelineKey p_pip
 			case PIPELINE_VERSION_DEPTH_PASS_DP:
 			case PIPELINE_VERSION_DEPTH_PASS_MULTIVIEW:
 			case PIPELINE_VERSION_DEPTH_PASS_WITH_SDF:
+			case PIPELINE_VERSION_VSM_DEPTH: // GodotNext: vsm_non_nanite (#218)
 			default:
 				break;
 		}
@@ -1113,6 +1125,11 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MODE_RR_GUIDES\n", false));
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n#define MODE_RR_GUIDES\n", false));
 		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_NEXTGEO_RR_GUIDES, "\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n#define MODE_RR_GUIDES\n", false));
+
+		// GodotNext: vsm_non_nanite (#218). Off until VSM raster runs. Only these variants get the VSM_* constants.
+		const String vsm_defines = RendererVirtualShadowMapStorage::get_glsl_defines();
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n" + vsm_defines, false));
+		shader_versions.push_back(ShaderRD::VariantDefine(SHADER_GROUP_VSM, "\n#define UBERSHADER\n#define MODE_RENDER_DEPTH\n#define MODE_VSM\n" + vsm_defines, false));
 
 		Vector<uint64_t> dynamic_buffers;
 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
@@ -1578,6 +1595,15 @@ void SceneShaderForwardClustered::enable_rr_guides_shader_group() {
 
 void SceneShaderForwardClustered::enable_nextgeo_rr_guides_shader_group() {
 	shader.enable_group(SHADER_GROUP_NEXTGEO_RR_GUIDES);
+}
+
+// GodotNext: vsm_non_nanite (#218)
+void SceneShaderForwardClustered::enable_vsm_shader_group() {
+	shader.enable_group(SHADER_GROUP_VSM);
+}
+
+bool SceneShaderForwardClustered::is_vsm_shader_group_enabled() const {
+	return shader.is_group_enabled(SHADER_GROUP_VSM);
 }
 
 const char *SceneShaderForwardClustered::ShaderVersion::megalights_variant_defines(uint16_t p_relative) {
