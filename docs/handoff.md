@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-19, midday (Claude). Cloud VMs and lanes are running.
+**Last updated:** 2026-11-19, afternoon (Claude). The lead closed all lanes: no lane is running, and the cloud VMs are stopped.
 
 ## How to continue
 
@@ -27,30 +27,32 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.15.
-- Landed on 2026-11-19, as progress (Metal criteria open): #193 TSR async compute (08ab628969), #218 VSM non-Nanite raster (49194956b6) and #167 the progressive path tracer (6a35db0f9d), with plan v3.9.15 (4f6f56cbeb). They were checked together, as one stacked tree, on the cloud L4 and T4 test machines. New follow-ups: #300 (XR async, post-v1) and #301 (RD read-only depth attachments, blocks GT-7).
-- Landed on 2026-11-18: the master repair (1969d8d986; #130, #155 and #219 reopened for Metal), #122 and #293 (closed; the private Mesa NIR library 25.3.1-gn4), #286 as progress (Hardware Ray Tracing Mode), plans v3.9.13 and v3.9.14. Filed #297, #298 and #299.
-- Earlier landings: see the tracker and `git log`.
+- Master: see `git log`. Plan v3.9.16.
+- Landed on 2026-11-19, all as progress unless noted:
+  - #193 TSR async compute, #218 VSM non-Nanite raster and #167 the path tracer (checked together on the cloud L4 and T4 test machines), with plan v3.9.15.
+  - #299 closed (the D3D12 front-layer depth target).
+  - When the lead closed the lanes, #158 material shading bins, #295 AVBOIT, #145 RT visibility policy, #221 VSM product surface and #222 VSM projection and SMRT, with plan v3.9.16 (LQ6 decided: translucent casters shadow as opaque, as UE 5.9 does). This stack had one combined build and full-doctest pass on Linux (GCC) and Windows (MSVC, gn4), and no landing check.
+- Landed on 2026-11-18: the master repair (#130, #155 and #219 reopened for Metal), #122 and #293 closed (the private Mesa NIR library 25.3.1-gn4), #286 (Hardware Ray Tracing Mode), plans v3.9.13 and v3.9.14.
+- New issues: #297 to #301.
 
-## In progress (restart these first)
+## Open work from the closed lanes (restart these first)
 
-Each lane works in a local worktree under `.claude/worktrees/`, builds on the cloud VMs and keeps notes in its private lane folder (see `local/handoff-private.md`). Nothing is committed until it lands.
+No lane is running. Each item below is on master; what is open is in the issue's landing comment.
 
-| Issue | Where it stopped | Next step | Machines |
-|---|---|---|---|
-| #158 Material shading bins | Built, reviewed, fixed (on bc37fd4781) | Port onto master with #145 and #295, landing check, land | Windows VM 1, Linux C |
-| #145 RT visibility policy | Built, reviewed, fixed (on bc37fd4781); conflicts with #286 | Port (wire its retrace to #286's material-retrace consumer bit), landing check, land; plan text for LQ6 and GM-4 | Windows T4 VM, Linux E |
-| #295 AVBOIT | Built, reviewed, fixed (on bc37fd4781) | Port, landing check, land | Windows VM 4, Linux E |
-| #222 VSM projection and SMRT | Build step | Review, fix, landing check | Windows VM 1, Linux E |
-| #221 VSM product surface | Build step | Review, fix, landing check | Windows VM 4, Linux E |
-| #299 D3D12 front-layer depth target | Fix step | Landing check | Windows T4 VM, Windows VM 4, Linux E |
+| Issue | What is open |
+|---|---|
+| #222 VSM projection and SMRT | Its build criteria (0 validation errors on the smoke scene and the Flythrough with VSM on, the pool-sampling fixture, the penumbra check), a review and a landing check. It was merged before its build step finished. |
+| #221 VSM product surface | Its review fixes passed builds and doctests, but their GPU runs never finished. Also a landing check. |
+| #145 RT visibility policy | Its port onto #286 and #167 has had only builds and doctests: rerun the GM-4 matrix, the alpha fixture and the hit-group mode rows on Vulkan and D3D12. Three follow-up issues to file (alpha-tested skinned and NextGeo alpha RT shadows, `discard` in #130's any-hit stage). |
+| #158, #295 | The four-machine landing check of the merged stack did not run. #295 also has the front-layer rerun on D3D12 with AVBOIT on (from #299). |
+| Merged stack | No Windows GPU run of the whole stack. A first job: rerun each lane's main fixture once on Vulkan and D3D12. |
 
 ## Ready to start (phase order)
 
-- **#217** VSM x Nanite (#218 has landed).
-- **#150** Displacement material output, after #158 lands (same resolve code).
-- **#298** headless import abort at shutdown, and **#297** D3D12 legacy SDFGI drift (harness).
-- These open once their blocker lands: #294 (after #129), #296 (after #152 and #160), #141 (after #145, #139 and #221), #301 (after #193: ready now).
+- **#217** VSM x Nanite, and **#150** displacement material output.
+- **#301** RD read-only depth attachments (GT-7 waits on it).
+- **#298** headless import abort at shutdown, and **#297** D3D12 legacy SDFGI drift.
+- Blocked until their blocker lands: #294, #296 and #141.
 
 ## Waiting on the lead
 
