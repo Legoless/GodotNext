@@ -1799,7 +1799,8 @@ TEST_CASE("[VSM] Frame stats: the frame's views add up; allocated pages come fro
 }
 
 TEST_CASE("[VSM] Debug draws, rendering info and monitors are appended and stay aligned (#221)") {
-	CHECK(int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK) == int(RSE::VIEWPORT_DEBUG_DRAW_TSR) + 1);
+	// Appended after the path tracer's debug draw (#167), which landed first.
+	CHECK(int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK) == int(RSE::VIEWPORT_DEBUG_DRAW_PATH_TRACER) + 1);
 	CHECK(int(RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK) + 5);
 	CHECK(int(Viewport::DEBUG_DRAW_VSM_MASK) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK));
 	CHECK(int(Viewport::DEBUG_DRAW_VSM_MIP) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP));
