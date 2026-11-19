@@ -2263,8 +2263,10 @@ float RendererVirtualShadowMapStorage::prefiltered_distant(const ProjectionInput
 			if (!(stored < 1.0e30f)) {
 				continue;
 			}
-			sum += stored;
-			sum_squares += stored * stored;
+			// Center around p_depth before squaring to avoid float32 cancellation on far clipmap levels.
+			const float delta = stored - p_depth;
+			sum += delta;
+			sum_squares += delta * delta;
 			stored_count++;
 		}
 	}
@@ -2272,10 +2274,10 @@ float RendererVirtualShadowMapStorage::prefiltered_distant(const ProjectionInput
 		return 1.0f;
 	}
 	const float coverage = float(stored_count) / float(PREFILTERED_DISTANT_TAPS * PREFILTERED_DISTANT_TAPS);
-	const float mean = sum / float(stored_count);
+	const float mean_delta = sum / float(stored_count);
 	const float min_variance = texel * PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS * texel * PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS;
-	const float variance = MAX(sum_squares / float(stored_count) - mean * mean, min_variance);
-	const float d = p_depth - texel * SMRT_DEPTH_BIAS_TEXELS - mean;
+	const float variance = MAX(sum_squares / float(stored_count) - mean_delta * mean_delta, min_variance);
+	const float d = -texel * SMRT_DEPTH_BIAS_TEXELS - mean_delta;
 	float lit = 1.0f;
 	if (d > 0.0f) {
 		lit = variance / (variance + d * d);

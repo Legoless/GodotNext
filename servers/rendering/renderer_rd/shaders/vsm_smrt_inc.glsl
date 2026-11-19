@@ -160,8 +160,10 @@ float vsm_prefiltered_distant(uint p_first, uint p_count, vec2 p_t, float p_dept
 			if (!(stored < 1.0e30)) {
 				continue;
 			}
-			sum += stored;
-			sum_squares += stored * stored;
+			// Center around p_depth before squaring to avoid float32 cancellation on far clipmap levels.
+			float delta = stored - p_depth;
+			sum += delta;
+			sum_squares += delta * delta;
 			stored_count++;
 		}
 	}
@@ -169,10 +171,10 @@ float vsm_prefiltered_distant(uint p_first, uint p_count, vec2 p_t, float p_dept
 		return 1.0;
 	}
 	float coverage = float(stored_count) / float(VSM_PREFILTERED_DISTANT_TAPS * VSM_PREFILTERED_DISTANT_TAPS);
-	float mean = sum / float(stored_count);
+	float mean_delta = sum / float(stored_count);
 	float min_variance = texel * VSM_PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS * texel * VSM_PREFILTERED_DISTANT_MIN_VARIANCE_TEXELS;
-	float variance = max(sum_squares / float(stored_count) - mean * mean, min_variance);
-	float d = p_depth - texel * VSM_SMRT_DEPTH_BIAS_TEXELS - mean;
+	float variance = max(sum_squares / float(stored_count) - mean_delta * mean_delta, min_variance);
+	float d = -texel * VSM_SMRT_DEPTH_BIAS_TEXELS - mean_delta;
 	float lit = 1.0;
 	if (d > 0.0) {
 		lit = variance / (variance + d * d);

@@ -3889,11 +3889,14 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 			}
 
 			// GodotNext: vsm_projection (#222). A light the view samples through its virtual shadow maps gets no
-			// atlas tile and no atlas pass. In a raster check's frame its atlas casters are still culled (the
-			// renderer draws none of them), for the check's per-light caster diff.
+			// atlas tile and no atlas pass. Release any Frame-1 atlas slot once VSM takes over so it does not
+			// occupy atlas capacity or leave stale spot-projector transforms. In a raster check's frame its atlas
+			// casters are still culled (the renderer draws none of them), for the check's per-light caster diff.
 			if (vsm_view_samples && scene_render->vsm_light_skips_atlas(light->instance, p_environment)) {
 				if (vsm_check_casters && max_shadows_used < MAX_UPDATE_SHADOWS && light_culler->prepare_regular_light(*ins)) {
 					_light_instance_update_shadow(ins, p_camera_data->main_transform, p_camera_data->main_projection, p_camera_data->is_orthogonal, p_camera_data->vaspect, p_shadow_atlas, scenario, p_screen_mesh_lod_threshold, p_visible_layers);
+				} else if (!vsm_check_casters) {
+					RSG::light_storage->shadow_atlas_remove_light(p_shadow_atlas, light->instance);
 				}
 				continue;
 			}

@@ -558,6 +558,8 @@ public:
 	// stage (or no material group compiles, Simplified Material), UNKNOWN while it compiles or before a material
 	// with it was seen.
 	NextGIShadowRetraceVerdict get_shadow_retrace_verdict(uint64_t p_serial) const;
+	// Wake the shared bindless texture-table latch when NextGIRTScene releases slots from the shared table.
+	void notify_shared_texture_slot_released();
 
 	const Counters &get_counters() const;
 	void fill_counters(Dictionary &r_counters) const;

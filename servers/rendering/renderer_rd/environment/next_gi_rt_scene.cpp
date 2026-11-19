@@ -1168,6 +1168,12 @@ void NextGIRTScene::_release_shadow_texture_slots() {
 		rd->bindless_table_release(shadow_texture_table, shadow_texture_slots[texture].slot);
 		shadow_texture_slots.erase(texture);
 	}
+	// GodotNext: nextgi_shadow_policy (#145). Wake the hit groups' shared-table latch when shadow slots free up.
+	if (!stale.is_empty()) {
+		if (NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton()) {
+			hit_materials->notify_shared_texture_slot_released();
+		}
+	}
 }
 
 // The bindless-texture path for BaseMaterial3D's alpha; any other alpha-tested material is left to the retrace.
@@ -1196,18 +1202,23 @@ void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_
 	}
 	known->frame = shadow_frame;
 	if (!known->texture_alpha) {
-		// Alpha from shader code: the retrace decides, unless the hit groups refused the shader or its group has no
-		// any-hit stage. Then nothing can evaluate it: it shadows as opaque, and asks for no retrace.
-		const NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton();
-		if (hit_materials != nullptr && known->serial != 0) {
-			known->verdict = nextgi_shadow_retrace_verdict(known->verdict, hit_materials->get_shadow_retrace_verdict(known->serial));
-		}
 		// A GPU-written instance has no hit record (#57): the retrace would meet its fallback group.
 		// GodotNext: nextgi_hwrt_mode (#286). Only Full compiles material hit groups: in Simplified Material and
 		// Inline the retrace never runs, so these casters shadow as opaque (the texture path above stays inline).
+		// Check retrace_mode before polling hit_materials so Simplified Material does not latch known->verdict to OPAQUE.
 		const NextGI *next_gi = NextGI::get_singleton();
 		const bool retrace_mode = next_gi == nullptr || nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NextGIHitMode(next_gi->get_hardware_ray_tracing_mode())) == NEXTGI_HIT_AVAILABLE;
-		if (!p_retrace || !retrace_mode || known->serial == 0 || known->verdict == NEXTGI_SHADOW_VERDICT_OPAQUE) {
+		if (!p_retrace || !retrace_mode || known->serial == 0) {
+			stats.shadow_opaque_alpha_entries++;
+			return;
+		}
+		// Alpha from shader code: the retrace decides, unless the hit groups refused the shader or its group has no
+		// any-hit stage. Then nothing can evaluate it: it shadows as opaque, and asks for no retrace.
+		const NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton();
+		if (hit_materials != nullptr) {
+			known->verdict = nextgi_shadow_retrace_verdict(known->verdict, hit_materials->get_shadow_retrace_verdict(known->serial));
+		}
+		if (known->verdict == NEXTGI_SHADOW_VERDICT_OPAQUE) {
 			stats.shadow_opaque_alpha_entries++;
 			return;
 		}

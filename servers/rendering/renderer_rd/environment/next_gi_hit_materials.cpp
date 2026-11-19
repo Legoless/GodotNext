@@ -2059,6 +2059,17 @@ NextGIShadowRetraceVerdict NextGIHitMaterials::get_shadow_retrace_verdict(uint64
 	return (*shader)->state != HitShader::STATE_INELIGIBLE && (*shader)->any_hit ? NEXTGI_SHADOW_VERDICT_RETRACE : NEXTGI_SHADOW_VERDICT_OPAQUE;
 }
 
+// GodotNext: nextgi_shadow_policy (#145). Notify the shared texture table latch when the RT scene releases slots.
+void NextGIHitMaterials::notify_shared_texture_slot_released() {
+	if (internal == nullptr || !internal->texture_table_shared) {
+		return;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		internal->texture_table_latch.released(internal->frame, rd->get_frame_delay());
+	}
+}
+
 const NextGIHitMaterials::Counters &NextGIHitMaterials::get_counters() const {
 	return internal->counters;
 }

@@ -2635,7 +2635,7 @@ bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_e
 	// sampled through them by a view that samples VSM (the maps it gets in its first frame are drawn and
 	// sampled in that frame, after its atlas pass). Volumetric fog still samples the shadow atlas (#215 moves
 	// it to coarse pages), so a light the fog shows keeps its atlas pass.
-	const RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
 	if (vsm == nullptr || !vsm->is_active() || vsm->map_get(p_light_instance) == nullptr) {
 		return false;
 	}
@@ -2656,7 +2656,21 @@ bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_e
 	if (p_environment.is_valid() && environment_get_volumetric_fog_enabled(p_environment) && light_storage->light_get_param(base, RSE::LIGHT_PARAM_VOLUMETRIC_FOG_ENERGY) > 0.0f) {
 		return false;
 	}
+	// Keep this light's map range from being LRU-evicted by another light before update_light_buffers() runs.
+	vsm->map_touch(p_light_instance);
 	return true;
+}
+
+// GodotNext: vsm_projection (#222). Shared readiness check for _vsm_update_projection() and
+// _setup_render_pass_uniform_set() so counts.x is nonzero only when every bound VSM resource is valid and sized.
+static bool _vsm_projection_buffers_ready(const RendererRD::VirtualShadowMapStorage *p_vsm) {
+	if (p_vsm == nullptr || !p_vsm->is_active()) {
+		return false;
+	}
+	const uint32_t table_maps = p_vsm->get_table_capacity();
+	return table_maps > 0 && p_vsm->get_map_buffers_capacity() == table_maps &&
+			p_vsm->get_pool_texture().is_valid() && p_vsm->get_page_table_buffer().is_valid() &&
+			p_vsm->get_map_data_buffer().is_valid() && p_vsm->get_map_state_buffer().is_valid();
 }
 
 bool RenderForwardClustered::vsm_raster_check_armed() const {
@@ -2756,9 +2770,8 @@ void RenderForwardClustered::_vsm_update_projection(const RenderDataRD *p_render
 	_vsm_pixel_footprint(p_render_data->scene_data, size, params.footprint[0], params.footprint[1]);
 	params.bias[0] = vsm->get_lod_bias_directional();
 	params.bias[1] = vsm->get_lod_bias_local();
-	// The table's map count while its buffers match it (0 otherwise: every lookup misses, as before any map).
-	const uint32_t table_maps = vsm->get_table_capacity();
-	params.counts[0] = (table_maps > 0 && vsm->get_map_buffers_capacity() == table_maps && vsm->get_page_table_buffer().is_valid()) ? table_maps : 0u;
+	// The table's map count while every bound buffer matches it (0 otherwise: every lookup misses).
+	params.counts[0] = _vsm_projection_buffers_ready(vsm) ? vsm->get_table_capacity() : 0u;
 	using VSM = RendererVirtualShadowMapStorage;
 	const VSM::PoolQuality quality = vsm->get_quality();
 	params.counts[1] = VSM::smrt_setting(int64_t(_vsm_setting("smrt_rays_local", -1)), VSM::smrt_preset_rays(quality), VSM::SMRT_MAX_RAYS);
@@ -5722,8 +5735,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite cull.
 	vsm_debug_view_marked = false;
 	vsm_debug_view_pairs = false;
-	// GodotNext: vsm_projection (#222). The scene cull asked the same question for this view's atlas tiles.
-	vsm_sample_view = using_vsm && !_vsm_nextgeo_casters_live();
+	// GodotNext: vsm_projection (#222). Only sample VSM when this view also runs page marking and non-Nanite raster.
+	vsm_sample_view = vsm_mark_view && current_cluster_builder != nullptr && !_vsm_nextgeo_casters_live();
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -8369,7 +8382,7 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		// VSM is off; a view that does not sample VSM never reads them.
 		_ensure_vsm_projection_resources();
 		RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
-		const bool vsm_ready = vsm != nullptr && vsm->is_active() && vsm->get_pool_texture().is_valid() && vsm->get_page_table_buffer().is_valid() && vsm->get_map_data_buffer().is_valid() && vsm->get_map_state_buffer().is_valid();
+		const bool vsm_ready = _vsm_projection_buffers_ready(vsm);
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 51, vsm_ready ? vsm->get_pool_texture() : vsm_projection_default_pool));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 52, vsm_ready ? vsm->get_page_table_buffer() : vsm_projection_default_buffer));
 		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 53, vsm_ready ? vsm->get_map_data_buffer() : vsm_projection_default_buffer));

@@ -3405,6 +3405,28 @@ TEST_CASE("[VSM] Prefiltered Distant: the moments filter of the last levels shad
 	// The CPU model of the filter is what shadow_directional() returns.
 	const Vector2 t(VSM::row_dot(scene.maps[0].rows[0], Vector3(3.0f, 0.0f, 0.0f)), VSM::row_dot(scene.maps[0].rows[1], Vector3(3.0f, 0.0f, 0.0f)));
 	CHECK(VSM::prefiltered_distant(in, 0, count, t, 0.0f, 1, 2) < 0.05f);
+	// Large world-space depths (far from origin): centering around p_depth avoids float32 variance cancellation.
+	{
+		ProjectionScene far_scene;
+		far_scene.slab_x = 3.0f;
+		far_scene.set_maps(sun_levels(count));
+		far_scene.allocate(1, 2);
+		far_scene.fill();
+		const uint64_t layer_size = uint64_t(far_scene.pool_width) * far_scene.pool_height;
+		const float base_depth = 10000.0f;
+		for (uint64_t i = 0; i < layer_size; i++) {
+			far_scene.pool[i] = VSM::depth_pack(base_depth);
+		}
+		VSM::ProjectionInput far_in = far_scene.input();
+		// A flat receiver 0.5 m behind the stored plane at depth ~10 km should stay solidly shadowed, matching near origin.
+		const float far_shadow = VSM::prefiltered_distant(far_in, 0, count, t, base_depth + 0.5f, 1, 2);
+		for (uint64_t i = 0; i < layer_size; i++) {
+			far_scene.pool[i] = VSM::depth_pack(10.0f);
+		}
+		const float near_shadow = VSM::prefiltered_distant(far_in, 0, count, t, 10.5f, 1, 2);
+		CHECK(far_shadow < 0.05f);
+		CHECK(far_shadow == doctest::Approx(near_shadow).epsilon(1e-4f));
+	}
 	// A receiver in a finer level of a light with more levels than that takes SMRT, not the filter.
 	ProjectionScene near_scene;
 	near_scene.set_maps(sun_levels(count));

@@ -893,6 +893,13 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 					light_data.vsm_flags = vsm_flags;
 					light_data.vsm_pad[0] = 0;
 					light_data.vsm_pad[1] = 0;
+					// GodotNext: vsm_projection (#222). If this view skipped the directional atlas pass for a VSM light
+					// whose map update failed to produce a sampleable map, do not sample an unrendered atlas slot.
+					if (vsm != nullptr && vsm->get_view_samples() && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method) &&
+							(vsm_flags & RendererVirtualShadowMapStorage::LIGHT_FLAGS_SAMPLE) == 0 &&
+							light_instance->last_scene_shadow_pass != RendererSceneRenderRD::get_singleton()->get_scene_pass()) {
+						light_data.shadow_opacity = 0.0;
+					}
 				}
 
 				if (light_data.shadow_opacity > 0.001) {
@@ -2879,6 +2886,18 @@ bool LightStorage::shadow_atlas_update_light(RID p_atlas, RID p_light_instance, 
 	}
 
 	return should_redraw;
+}
+
+// GodotNext: vsm_projection (#222). Release a positional VSM light's shadow-atlas slot once VSM takes over.
+void LightStorage::shadow_atlas_remove_light(RID p_atlas, RID p_light_instance) {
+	ShadowAtlas *shadow_atlas = shadow_atlas_owner.get_or_null(p_atlas);
+	if (shadow_atlas == nullptr || !shadow_atlas->shadow_owners.has(p_light_instance)) {
+		return;
+	}
+	const uint32_t key = shadow_atlas->shadow_owners[p_light_instance];
+	const uint32_t q = (key >> QUADRANT_SHIFT) & 0x3;
+	const uint32_t s = key & SHADOW_INDEX_MASK;
+	_shadow_atlas_invalidate_shadow(&shadow_atlas->quadrants[q].shadows.write[s], p_atlas, shadow_atlas, q, s);
 }
 
 void LightStorage::_shadow_atlas_invalidate_shadow(ShadowAtlas::Quadrant::Shadow *p_shadow, RID p_atlas, ShadowAtlas *p_shadow_atlas, uint32_t p_quadrant, uint32_t p_shadow_idx) {

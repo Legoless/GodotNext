@@ -214,6 +214,8 @@ public:
 	virtual void shadow_atlas_set_size(RID p_atlas, int p_size, bool p_use_16_bits = true) = 0;
 	virtual void shadow_atlas_set_quadrant_subdivision(RID p_atlas, int p_quadrant, int p_subdivision) = 0;
 	virtual bool shadow_atlas_update_light(RID p_atlas, RID p_light_instance, float p_coverage, uint64_t p_light_version) = 0;
+	// GodotNext: vsm_projection (#222). Release a positional VSM light's shadow-atlas slot once VSM takes over.
+	virtual void shadow_atlas_remove_light(RID p_atlas, RID p_light_instance) {}
 
 	virtual void shadow_atlas_update(RID p_atlas) = 0;
 
