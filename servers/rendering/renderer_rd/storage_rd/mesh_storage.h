@@ -241,6 +241,9 @@ private:
 
 		// GodotNext: nextgi_rt_arena
 		LocalVector<NextGIRTPart> nextgi_parts;
+		// GodotNext: nextgi_shadow_policy (#145). Parts of the surfaces whose material keeps them out of nextgi_parts
+		// (alpha-tested or blended, #61): only shadow rays trace them. They read the surfaces' arena ranges.
+		LocalVector<NextGIRTPart> nextgi_shadow_parts;
 		bool nextgi_blas_dirty = false;
 		bool nextgi_proxy_uploaded = false;
 		bool nextgi_skip_rt_arena = false;
@@ -612,6 +615,8 @@ public:
 	void mesh_nextgi_rt_set_allows_update(RID p_mesh, bool p_allows);
 	bool mesh_nextgi_rt_allows_update(RID p_mesh) const;
 	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_parts(RID p_mesh);
+	// GodotNext: nextgi_shadow_policy (#145). Cleared with the parts.
+	LocalVector<NextGIRTPart> *mesh_nextgi_rt_get_shadow_parts(RID p_mesh);
 	void mesh_nextgi_rt_clear_parts(RID p_mesh);
 	// GodotNext: nextgeo_rt_native (#156). RT-arena ranges of native Nanite RT parts, outside any
 	// mesh's parts. An allocation is invalid when the arena is off or a chunk cannot be created.

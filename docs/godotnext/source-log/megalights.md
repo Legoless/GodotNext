@@ -6,10 +6,45 @@ that the plan and the issues leave open.
 
 ## Approved inputs
 
-None so far. The direct-light inputs (#136) were written from the plan (§21.3, contract
+The direct-light inputs (#136) were written from the plan (§21.3, contract
 M1), the issue and Godot's own Forward+ shaders. No paper, article or outside code was
 consulted. The same holds for the 2026-11-09 follow-up below (decals, alpha-pass fallback),
 which reuses Godot's own decal loop.
+
+### RT visibility policy (#145, contract M4), 2026-11-18
+
+- Epic Games, *Hardware Ray Tracing* (Unreal Engine 5.9 documentation, public page, read on 2026-11-18),
+  Supported Ray Tracing Features table. Used for one behavior, not for code: the Light Transmission row is
+  marked not supported with the note "The translucent shadow is treated as opaque, meaning no colored shadows or
+  light transmission through the material"; the Translucent Shadows row is supported and the Colored Shadows row
+  is not. GodotNext's ray-traced shadow rays therefore treat translucent (alpha-blended) casters as opaque (lead
+  question LQ6, decided by following UE 5.9). Nothing else from the page was used.
+
+- Khronos, `GL_EXT_ray_tracing` and `GL_EXT_ray_query` GLSL extensions and the Vulkan specification's ray
+  traversal chapter (public). Used only for the documented meaning of the ray flags and instance flags the
+  policy relies on (opaque and non-opaque instances, `TerminateOnFirstHit`, `SkipClosestHitShader`, cull masks).
+
+The mask allocation, the instance and light words, the candidate loop and GM-4's check were written from the
+plan (§21.3 M4, GM-4), the issue and Godot's own shadow caster rule (`renderer_scene_cull.cpp`: a caster
+shadows a light when its layer mask meets the light's caster mask and its cast shadow setting is not off). The
+bindless-texture alpha path reads BaseMaterial3D's own generated alpha (`scene/resources/material.cpp`), and the
+material retrace reuses #130's hit groups and their any-hit stages.
+
+Where the RT caster rule differs from Godot's raster shadow pass, on purpose (decided 2026-11-18, recorded for
+review with GM-4):
+
+- The camera's cull mask is not applied. The raster pass draws a caster only when the camera's cull mask shows it;
+  a ray-traced shadow is view-independent (the surface cache relights for every view), so a caster on a layer the
+  camera hides still casts.
+- The raster pass drops alpha-blended materials, including alpha scissor with alpha antialiasing
+  (`casts_shadows()` is false). The rays treat alpha scissor (with or without antialiasing) and alpha hash as
+  alpha-tested at their threshold, and alpha blending as opaque (LQ6, following UE 5.9 above).
+- The bindless alpha path samples the albedo texture's top mip with its declared filter and repeat (emulated with
+  one linear repeating sampler); the raster pass also uses the mips.
+- Shaders that cut with `discard`, and any other shader the material hit groups refuse (#130,
+  `nextgi_hit_classify()`), cannot be retraced: their casters shadow as opaque.
+- The far field (merged per-cell proxies) traces every proxy as an opaque caster of every light: caster masks
+  and cast shadow off apply to near-field instances only.
 
 ## Contract decisions
 

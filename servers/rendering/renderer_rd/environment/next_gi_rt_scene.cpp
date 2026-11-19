@@ -50,10 +50,12 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_src.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_rt_instances.glsl.gen.h"
+#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/particles_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
+#include "servers/rendering/renderer_rd/storage_rd/texture_storage.h"
 #include "servers/rendering/rendering_server.h"
 #include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/environment_storage.h"
@@ -779,6 +781,37 @@ static bool _nextgi_rt_material_is_alpha(RID p_material) {
 	return nextgi_rt_material_is_alpha(p_material);
 }
 
+// GodotNext: nextgi_shadow_policy (#145). The material a shadow ray meets on a surface: the instance's override,
+// its surface override, then the mesh's material, as the rasterizer picks it. GI keeps #61's rule (the mesh's
+// material decides which surfaces it sees); shadow rays follow what the instance draws.
+static RID _nextgi_shadow_effective_material(const RenderGeometryInstanceBase *p_instance, RID p_mesh, uint32_t p_surface) {
+	if (p_instance != nullptr && p_instance->data != nullptr) {
+		if (p_instance->data->material_override.is_valid()) {
+			return p_instance->data->material_override;
+		}
+		if (int(p_surface) < p_instance->data->surface_materials.size() && p_instance->data->surface_materials[p_surface].is_valid()) {
+			return p_instance->data->surface_materials[p_surface];
+		}
+	}
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	return mesh_storage != nullptr && p_mesh.is_valid() ? mesh_storage->mesh_surface_get_material(p_mesh, int(p_surface)) : RID();
+}
+
+static NextGIShadowClass _nextgi_shadow_class(RID p_material) {
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	if (p_material.is_null() || material_storage == nullptr) {
+		return NEXTGI_SHADOW_CLASS_OPAQUE;
+	}
+	switch (material_storage->material_get_nextgi_rt_class(p_material)) {
+		case MaterialStorage::ShaderData::NEXTGI_RT_ALPHA_TESTED:
+			return NEXTGI_SHADOW_CLASS_ALPHA_TESTED;
+		case MaterialStorage::ShaderData::NEXTGI_RT_BLENDED:
+			return NEXTGI_SHADOW_CLASS_TRANSLUCENT;
+		default:
+			return NEXTGI_SHADOW_CLASS_OPAQUE;
+	}
+}
+
 // GodotNext: nextgeo_rt_native (#156). Native-mode exclusions (plan §21.4 N13, #156 step 8). A
 // material whose vertex code moves the surface (it writes VERTEX, POSITION, MODELVIEW_MATRIX or
 // PROJECTION_MATRIX, or uses skip_vertex_transform) rasterizes away from the cut, so its instance
@@ -923,6 +956,31 @@ void NextGIRTScene::free() {
 	}
 	instance_record_capacity = 0;
 	surface_record_capacity = 0;
+	// GodotNext: nextgi_shadow_policy (#145)
+	if (shadow_instance_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(shadow_instance_buffer);
+		shadow_instance_buffer = RID();
+	}
+	if (shadow_alpha_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(shadow_alpha_buffer);
+		shadow_alpha_buffer = RID();
+	}
+	shadow_instance_capacity = 0;
+	shadow_alpha_capacity = 0;
+	shadow_allocator.reset();
+	if (shadow_texture_table.is_valid()) {
+		RD::get_singleton()->free_rid(shadow_texture_table);
+		shadow_texture_table = RID();
+	}
+	if (shadow_dummy_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(shadow_dummy_buffer);
+		shadow_dummy_buffer = RID();
+	}
+	shadow_texture_slots.clear();
+	shadow_material_alpha.clear();
+	shadow_streams_frame = 0;
+	shadow_retrace_frame = 0;
+	shadow_variant_frame = 0;
 }
 
 void NextGIRTScene::_ensure_record_buffers(uint32_t p_instance_count, uint32_t p_surface_count) {
@@ -939,6 +997,333 @@ void NextGIRTScene::_ensure_record_buffers(uint32_t p_instance_count, uint32_t p
 		}
 		surface_record_capacity = MAX(p_surface_count, surface_record_capacity * 2);
 		surface_record_buffer = RD::get_singleton()->storage_buffer_create(surface_record_capacity * sizeof(NextGISurfaceRecord));
+	}
+}
+
+// GodotNext: nextgi_shadow_policy (#145)
+void NextGIRTScene::_update_shadow_allocation(const ::RenderDataRD *p_render_data) {
+	LocalVector<uint32_t> masks;
+	const RendererSceneRender::RenderSDFGIUpdateData *feed = p_render_data != nullptr ? p_render_data->sdfgi_update_data : nullptr;
+	LightStorage *light_storage = LightStorage::get_singleton();
+	if (feed != nullptr && light_storage != nullptr) {
+		// The lights whose shadows this frame traces: the SRC relight's shadowed lights.
+		auto add = [&](RID p_light_instance, bool p_directional) {
+			if (!light_storage->owns_light_instance(p_light_instance)) {
+				return;
+			}
+			const RID light = light_storage->light_instance_get_base_light(p_light_instance);
+			if (!light_storage->light_has_shadow(light) || light_storage->light_get_bake_mode(light) == RSE::LIGHT_BAKE_DISABLED) {
+				return;
+			}
+			if (p_directional && light_storage->light_directional_get_sky_mode(light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+				return;
+			}
+			masks.push_back(light_storage->light_get_shadow_caster_mask(light));
+		};
+		if (feed->directional_lights != nullptr) {
+			for (int i = 0; i < feed->directional_lights->size(); i++) {
+				add(feed->directional_lights->get(i), true);
+			}
+		}
+		for (uint32_t i = 0; i < feed->nextgi_dynamic_light_count; i++) {
+			add(feed->nextgi_dynamic_light_instances[i], false);
+		}
+		for (uint32_t i = 0; i < feed->nextgi_static_light_count; i++) {
+			add(feed->nextgi_static_light_instances[i], false);
+		}
+	}
+	shadow_allocator.update(masks.ptr(), masks.size());
+}
+
+void NextGIRTScene::_push_shadow_word(uint32_t p_layers, uint32_t p_alpha_base) {
+	const bool alpha = p_alpha_base != UINT32_MAX;
+	shadow_words.push_back((p_layers & NEXTGI_SHADOW_LAYER_MASK) | (alpha ? uint32_t(NEXTGI_SHADOW_INSTANCE_ALPHA) : 0u));
+	shadow_words.push_back(alpha ? p_alpha_base : 0u);
+}
+
+uint32_t NextGIRTScene::_push_shadow_alpha(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, bool p_retrace) {
+	const RenderGeometryInstanceBase *instance = static_cast<const RenderGeometryInstanceBase *>(p_instance);
+	bool alpha = false;
+	for (const NextGIRTPartGeometry &geometry : p_geometries) {
+		if (!geometry.is_proxy_surface && _nextgi_shadow_class(_nextgi_shadow_effective_material(instance, p_mesh, geometry.surface)) == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+			alpha = true;
+			break;
+		}
+	}
+	if (!alpha || (p_layers & NEXTGI_SHADOW_LAYER_MASK) == 0) {
+		return UINT32_MAX;
+	}
+	const uint32_t base = shadow_alpha.size();
+	for (const NextGIRTPartGeometry &geometry : p_geometries) {
+		NextGIShadowAlphaEntry entry;
+		if (!geometry.is_proxy_surface) {
+			const RID material = _nextgi_shadow_effective_material(instance, p_mesh, geometry.surface);
+			entry.flags = _nextgi_shadow_class(material);
+			if (entry.flags == NEXTGI_SHADOW_CLASS_ALPHA_TESTED) {
+				_fill_shadow_alpha_entry(material, p_mesh, geometry.surface, geometry.first_triangle, p_retrace, entry);
+			}
+		}
+		shadow_alpha.push_back(entry);
+	}
+	return base;
+}
+
+uint32_t NextGIRTScene::_push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers) {
+	const uint32_t base = _push_shadow_alpha(p_instance, p_mesh, p_geometries, p_layers, true);
+	_push_shadow_word(p_layers, base);
+	return base;
+}
+
+void NextGIRTScene::_push_shadow_check_source(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, const Transform3D &p_transform, uint32_t p_layers) {
+	const RenderGeometryInstanceBase *instance = static_cast<const RenderGeometryInstanceBase *>(p_instance);
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	ShadowCheckSource check;
+	check.transform = p_transform;
+	check.world_bounds = mesh_storage != nullptr ? p_transform.xform(mesh_storage->mesh_get_aabb(p_mesh)) : AABB();
+	check.layers = p_layers;
+	check.mesh = p_mesh;
+	for (const NextGIRTPartGeometry &geometry : p_geometries) {
+		if (geometry.is_proxy_surface) {
+			check.has_geometry = false;
+			check.opaque_caster = false;
+			continue;
+		}
+		if (_nextgi_shadow_class(_nextgi_shadow_effective_material(instance, p_mesh, geometry.surface)) != NEXTGI_SHADOW_CLASS_OPAQUE) {
+			check.opaque_caster = false;
+		}
+		if (check.surfaces.find(geometry.surface) < 0) {
+			check.surfaces.push_back(geometry.surface);
+		}
+	}
+	shadow_check_sources.push_back(check);
+}
+
+static_assert(int(NEXTGI_SHADOW_TEXTURE_SLOTS) == int(NEXTGI_HIT_TABLE_SLOTS), "The material hit groups allocate their texture slots from the shadow rays' texture table.");
+
+RID NextGIRTScene::ensure_shadow_texture_table() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (shadow_texture_table.is_null() && !shadow_texture_table_failed && rd != nullptr && rd->has_feature(RD::SUPPORTS_BINDLESS)) {
+		shadow_texture_table = rd->bindless_table_create(RD::UNIFORM_TYPE_TEXTURE, NEXTGI_SHADOW_TEXTURE_SLOTS);
+		shadow_texture_table_failed = shadow_texture_table.is_null();
+	}
+	return shadow_texture_table;
+}
+
+uint64_t NextGIRTScene::append_shadow_alpha_uniforms(uint32_t p_chunk_binding, uint32_t p_sampler_binding, LocalVector<RD::Uniform> &r_uniforms) {
+	RenderingDevice *rd = RD::get_singleton();
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	ERR_FAIL_COND_V(rd == nullptr || mesh_storage == nullptr || material_storage == nullptr, 0);
+	if (shadow_dummy_buffer.is_null()) {
+		shadow_dummy_buffer = rd->storage_buffer_create(16);
+	}
+	uint64_t key = hash_murmur3_one_64(shadow_dummy_buffer.get_id());
+	for (uint32_t i = 0; i < NEXTGI_SHADOW_ALPHA_CHUNKS; i++) {
+		RID chunk = i < mesh_storage->mesh_nextgi_rt_get_chunk_count() ? mesh_storage->mesh_nextgi_rt_get_chunk_buffer(i) : RID();
+		if (chunk.is_null()) {
+			chunk = shadow_dummy_buffer;
+		}
+		key = hash_murmur3_one_64(chunk.get_id(), key);
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, p_chunk_binding + i, chunk));
+	}
+	const RID sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_LINEAR, RSE::CANVAS_ITEM_TEXTURE_REPEAT_ENABLED);
+	key = hash_murmur3_one_64(sampler.get_id(), key);
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_SAMPLER, p_sampler_binding, sampler));
+	return key;
+}
+
+uint32_t NextGIRTScene::_shadow_texture_slot(RID p_rd_texture) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_rd_texture.is_null() || ensure_shadow_texture_table().is_null()) {
+		return UINT32_MAX;
+	}
+	ShadowTextureSlot *slot = shadow_texture_slots.getptr(p_rd_texture);
+	if (slot == nullptr) {
+		const uint32_t allocated = rd->bindless_table_allocate(shadow_texture_table, p_rd_texture);
+		if (allocated == RDBindless::INVALID_SLOT) {
+			return UINT32_MAX; // The table is full: the caster shadows as opaque.
+		}
+		ShadowTextureSlot created;
+		created.slot = allocated;
+		shadow_texture_slots.insert(p_rd_texture, created);
+		slot = shadow_texture_slots.getptr(p_rd_texture);
+	}
+	slot->frame = shadow_frame;
+	return slot->slot;
+}
+
+// Slots no caster used this frame go back to the table (RenderingDevice reuses a slot only after the frame delay).
+void NextGIRTScene::_release_shadow_texture_slots() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || shadow_texture_table.is_null()) {
+		return;
+	}
+	LocalVector<RID> stale;
+	for (const KeyValue<RID, ShadowTextureSlot> &entry : shadow_texture_slots) {
+		if (entry.value.frame != shadow_frame) {
+			stale.push_back(entry.key);
+		}
+	}
+	for (const RID &texture : stale) {
+		rd->bindless_table_release(shadow_texture_table, shadow_texture_slots[texture].slot);
+		shadow_texture_slots.erase(texture);
+	}
+}
+
+// The bindless-texture path for BaseMaterial3D's alpha; any other alpha-tested material is left to the retrace.
+void NextGIRTScene::_fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry) {
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	if (material_storage == nullptr || mesh_storage == nullptr || p_material.is_null()) {
+		return;
+	}
+	using SceneShaderData = RendererSceneRenderImplementation::SceneShaderForwardClustered::ShaderData;
+	MaterialStorage::ShaderData *shader_data = material_storage->material_get_shader_data(p_material);
+	if (shader_data == nullptr) {
+		stats.shadow_opaque_alpha_entries++;
+		return;
+	}
+	const SceneShaderData *scene_shader = static_cast<const SceneShaderData *>(shader_data);
+	// Read once per shader code: the serial changes with every code (a shader edit, or another shader).
+	ShadowMaterialAlpha *known = shadow_material_alpha.getptr(p_material);
+	if (known == nullptr || known->serial != scene_shader->nextgi_hit_serial) {
+		ShadowMaterialAlpha read;
+		read.serial = scene_shader->nextgi_hit_serial;
+		read.texture_alpha = nextgi_shadow_code_has_texture_alpha(scene_shader->code, read.hash);
+		read.sampler_flags = read.texture_alpha ? nextgi_shadow_code_albedo_sampler_flags(scene_shader->code) : 0u;
+		shadow_material_alpha[p_material] = read;
+		known = shadow_material_alpha.getptr(p_material);
+	}
+	known->frame = shadow_frame;
+	if (!known->texture_alpha) {
+		// Alpha from shader code: the retrace decides, unless the hit groups refused the shader or its group has no
+		// any-hit stage. Then nothing can evaluate it: it shadows as opaque, and asks for no retrace.
+		const NextGIHitMaterials *hit_materials = NextGIHitMaterials::get_singleton();
+		if (hit_materials != nullptr && known->serial != 0) {
+			known->verdict = nextgi_shadow_retrace_verdict(known->verdict, hit_materials->get_shadow_retrace_verdict(known->serial));
+		}
+		// A GPU-written instance has no hit record (#57): the retrace would meet its fallback group.
+		// GodotNext: nextgi_hwrt_mode (#286). Only Full compiles material hit groups: in Simplified Material and
+		// Inline the retrace never runs, so these casters shadow as opaque (the texture path above stays inline).
+		const NextGI *next_gi = NextGI::get_singleton();
+		const bool retrace_mode = next_gi == nullptr || nextgi_hit_setting_availability(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, NextGIHitMode(next_gi->get_hardware_ray_tracing_mode())) == NEXTGI_HIT_AVAILABLE;
+		if (!p_retrace || !retrace_mode || known->serial == 0 || known->verdict == NEXTGI_SHADOW_VERDICT_OPAQUE) {
+			stats.shadow_opaque_alpha_entries++;
+			return;
+		}
+		r_entry.flags |= NEXTGI_SHADOW_ALPHA_RETRACE;
+		stats.shadow_retrace_entries++;
+		return;
+	}
+	auto param = [&](const StringName &p_name) {
+		const Variant value = material_storage->material_get_param(p_material, p_name);
+		return value.get_type() != Variant::NIL ? value : shader_data->get_default_parameter(p_name);
+	};
+	const Variant threshold = param("alpha_scissor_threshold");
+	const Variant albedo = param("albedo");
+	const Variant uv_scale = param("uv1_scale");
+	const Variant uv_offset = param("uv1_offset");
+	const Variant texture = param("texture_albedo");
+	r_entry.threshold = known->hash ? 0.5f : (threshold.get_type() == Variant::NIL ? 0.5f : float(threshold));
+	r_entry.alpha_scale = albedo.get_type() == Variant::COLOR ? Color(albedo).a : 1.0f;
+	const Vector3 scale = uv_scale.get_type() == Variant::VECTOR3 ? Vector3(uv_scale) : Vector3(1, 1, 1);
+	const Vector3 offset = uv_offset.get_type() == Variant::VECTOR3 ? Vector3(uv_offset) : Vector3();
+	r_entry.uv_scale[0] = scale.x;
+	r_entry.uv_scale[1] = scale.y;
+	r_entry.uv_offset[0] = offset.x;
+	r_entry.uv_offset[1] = offset.y;
+	const RID texture_rid = texture.get_type() == Variant::RID ? RID(texture) : RID();
+	if (texture_rid.is_null()) {
+		// No albedo texture: the alpha is the albedo color's, the same on every texel.
+		if (r_entry.alpha_scale < r_entry.threshold) {
+			r_entry.flags |= NEXTGI_SHADOW_ALPHA_CUT;
+		}
+		stats.shadow_cut_entries++;
+		return;
+	}
+	// The bindless path reads the UV from the surface's attribute stream: NextGI keeps the streams while a caster
+	// needs one. Until it can sample, the geometry shadows as opaque.
+	shadow_streams_wanted = true;
+	MeshStorage::NextGIRTSurfaceInfo info;
+	if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, p_surface, info) || info.attribute_chunk == UINT32_MAX) {
+		stats.shadow_opaque_alpha_entries++;
+		return; // Opaque until the surface has its stream.
+	}
+	if (info.attribute_chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS || info.chunk >= NEXTGI_SHADOW_ALPHA_CHUNKS) {
+		stats.shadow_opaque_alpha_entries++;
+		return; // The shaders bind the first chunks only: opaque.
+	}
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	const RID rd_texture = texture_storage != nullptr ? texture_storage->texture_get_rd_texture(texture_rid) : RID();
+	const uint32_t slot = _shadow_texture_slot(rd_texture);
+	if (slot == UINT32_MAX) {
+		stats.shadow_opaque_alpha_entries++;
+		return;
+	}
+	r_entry.flags |= NEXTGI_SHADOW_ALPHA_TEXTURE | (known->hash ? uint32_t(NEXTGI_SHADOW_ALPHA_HASH) : 0u) | known->sampler_flags;
+	r_entry.texture_slot = slot;
+	r_entry.attribute_chunk = info.attribute_chunk;
+	r_entry.attribute_offset = info.attribute_offset;
+	r_entry.index_chunk = info.chunk;
+	r_entry.index_offset = info.index_offset + p_first_triangle * 3 * sizeof(uint32_t);
+	stats.shadow_texture_entries++;
+}
+
+void NextGIRTScene::_upload_shadow_buffers() {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	// Never empty: the shaders bind both buffers every frame.
+	const uint32_t word_pairs = MAX(shadow_words.size() / 2, 1u);
+	if (shadow_instance_buffer.is_null() || word_pairs > shadow_instance_capacity) {
+		if (shadow_instance_buffer.is_valid()) {
+			rd->free_rid(shadow_instance_buffer);
+		}
+		shadow_instance_capacity = MAX(word_pairs, shadow_instance_capacity * 2);
+		shadow_instance_buffer = rd->storage_buffer_create(shadow_instance_capacity * 2 * sizeof(uint32_t));
+	}
+	if (!shadow_words.is_empty()) {
+		rd->buffer_update(shadow_instance_buffer, 0, shadow_words.size() * sizeof(uint32_t), shadow_words.ptr());
+	}
+	const uint32_t entries = MAX(shadow_alpha.size(), 1u);
+	if (shadow_alpha_buffer.is_null() || entries > shadow_alpha_capacity) {
+		if (shadow_alpha_buffer.is_valid()) {
+			rd->free_rid(shadow_alpha_buffer);
+		}
+		shadow_alpha_capacity = MAX(entries, shadow_alpha_capacity * 2);
+		shadow_alpha_buffer = rd->storage_buffer_create(shadow_alpha_capacity * sizeof(NextGIShadowAlphaEntry));
+	}
+	if (!shadow_alpha.is_empty()) {
+		rd->buffer_update(shadow_alpha_buffer, 0, shadow_alpha.size() * sizeof(NextGIShadowAlphaEntry), shadow_alpha.ptr());
+	}
+	_release_shadow_texture_slots();
+	// What this phase's casters need, for the hold (the wants_*() accessors).
+	if (shadow_streams_wanted) {
+		shadow_streams_frame = shadow_frame;
+	}
+	if (stats.shadow_retrace_entries > 0) {
+		shadow_retrace_frame = shadow_frame;
+	}
+	if (shadow_streams_wanted || stats.shadow_texture_entries > 0 || stats.shadow_retrace_entries > 0) {
+		shadow_variant_frame = shadow_frame;
+	}
+	// Materials no TLAS phase used within the hold are forgotten.
+	LocalVector<RID> stale;
+	for (const KeyValue<RID, ShadowMaterialAlpha> &entry : shadow_material_alpha) {
+		if (!_shadow_held(entry.value.frame)) {
+			stale.push_back(entry.key);
+		}
+	}
+	for (const RID &material : stale) {
+		shadow_material_alpha.erase(material);
+	}
+}
+
+void NextGIRTScene::_check_shadow_word(uint32_t p_custom_index_end) {
+	if (shadow_words.size() != 2 * p_custom_index_end) {
+		shadow_word_misaligned++;
+		ERR_PRINT_ONCE("NextGI: the shadow instance words are out of step with the TLAS custom indices: shadow rays would read another instance's layers.");
 	}
 }
 
@@ -969,14 +1354,23 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 	triangle_counts.resize(surface_count);
 	chunks.resize(surface_count);
 	surface_infos.resize(surface_count);
+	// GodotNext: nextgi_shadow_policy (#145). The surfaces #61 keeps out of the parts get shadow parts.
+	LocalVector<uint32_t> shadow_triangle_counts;
+	LocalVector<uint32_t> shadow_chunks;
+	shadow_triangle_counts.resize(surface_count);
+	shadow_chunks.resize(surface_count);
 	for (uint32_t i = 0; i < surface_count; i++) {
 		triangle_counts[i] = 0;
 		chunks[i] = UINT32_MAX;
+		shadow_triangle_counts[i] = 0;
+		shadow_chunks[i] = UINT32_MAX;
 		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, i, surface_infos[i]) || !surface_infos[i].eligible) {
 			continue;
 		}
 		if (_nextgi_rt_material_is_alpha(surface_infos[i].material)) {
 			stats.coverage.alpha_excluded++;
+			shadow_triangle_counts[i] = surface_infos[i].index_count / 3;
+			shadow_chunks[i] = surface_infos[i].chunk;
 			continue;
 		}
 		triangle_counts[i] = surface_infos[i].index_count / 3;
@@ -1036,6 +1430,51 @@ void NextGIRTScene::_build_dirty_mesh_parts(RID p_mesh) {
 			}
 		}
 		parts->push_back(part);
+	}
+
+	// GodotNext: nextgi_shadow_policy (#145). Shadow parts: the same geometry layout, opaque geometry (the TLAS
+	// instance flags decide what is a candidate), not compacted.
+	LocalVector<NextGIRTPartPlan> shadow_plans;
+	nextgi_rt_split_parts(shadow_triangle_counts.ptr(), shadow_chunks.ptr(), surface_count, NEXTGI_RT_MAX_TRIANGLES_PER_BLAS, shadow_plans);
+	LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(p_mesh);
+	ERR_FAIL_NULL(shadow_parts);
+	for (const NextGIRTPartPlan &plan : shadow_plans) {
+		LocalVector<RD::AccelerationStructureGeometry> geometries;
+		const RID chunk_buffer = mesh_storage->mesh_nextgi_rt_get_chunk_buffer(plan.chunk);
+		ERR_CONTINUE(chunk_buffer.is_null());
+		for (const NextGIRTPartGeometry &part_geometry : plan.geometries) {
+			const MeshStorage::NextGIRTSurfaceInfo &info = surface_infos[part_geometry.surface];
+			RD::AccelerationStructureGeometry geometry;
+			geometry.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
+			geometry.vertex_buffer = chunk_buffer;
+			geometry.vertex_offset = info.vertex_offset;
+			geometry.vertex_stride = sizeof(float) * 3;
+			geometry.vertex_count = info.vertex_count;
+			geometry.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+			geometry.index_buffer = chunk_buffer;
+			geometry.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
+			geometry.index_count = part_geometry.triangle_count * 3;
+			geometry.index_format = RD::INDEX_BUFFER_FORMAT_UINT32;
+			geometries.push_back(geometry);
+		}
+		MeshStorage::NextGIRTPart part;
+		part.first_surface = plan.first_surface;
+		part.surface_count = plan.surface_count;
+		part.geometries = plan.geometries;
+		part.triangle_count = plan.triangle_count;
+		part.chunk = plan.chunk;
+		BitField<RD::AccelerationStructureFlagBits> flags = RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT;
+		if (dynamic) {
+			flags = flags | RD::ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT;
+		}
+		part.blas = RD::get_singleton()->blas_create(Span<RD::AccelerationStructureGeometry>(geometries.ptr(), geometries.size()), flags);
+		if (part.blas.is_valid()) {
+			RD::get_singleton()->blas_build(part.blas);
+			part.uncompacted_bytes = RD::get_singleton()->acceleration_structure_get_size_bytes(part.blas);
+			stats.blas_build_count++;
+			stats.blas_build_triangles += plan.triangle_count;
+		}
+		shadow_parts->push_back(part);
 	}
 	mesh_storage->mesh_nextgi_rt_set_allows_update(p_mesh, dynamic);
 	mesh_storage->mesh_nextgi_rt_set_blas_dirty(p_mesh, false);
@@ -1319,6 +1758,21 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	stats.skinned_instances = 0;
 	stats.skinned_refit_triangles = 0;
 	stats.skinned_build_triangles = 0;
+	// GodotNext: nextgi_shadow_policy (#145)
+	stats.shadow_only_instances = 0;
+	stats.shadow_alpha_instances = 0;
+	stats.shadow_unallocated_instances = 0;
+	shadow_words.clear();
+	shadow_alpha.clear();
+	shadow_alpha_bits = 0;
+	shadow_check_sources.clear();
+	stats.shadow_texture_entries = 0;
+	stats.shadow_cut_entries = 0;
+	stats.shadow_retrace_entries = 0;
+	stats.shadow_opaque_alpha_entries = 0;
+	stats.gpu_written_instances = 0;
+	shadow_streams_wanted = false;
+	shadow_frame++;
 	tlas_traceable = false;
 	compaction_triangles_this_frame = 0;
 	// GodotNext: ps_lumen_lite (#183). New instance records: relight pages claim them again.
@@ -1357,8 +1811,12 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (hit_records) {
 		hit_materials->begin_records();
 	}
+	// GodotNext: nextgi_shadow_policy (#145). The caster masks of this frame's shadowed lights decide the TLAS masks.
+	_update_shadow_allocation(p_render_data);
+	const NextGIShadowMaskAllocator::Allocation &shadow_allocation = shadow_allocator.get_allocation();
 	const LocalVector<RendererSceneRender::NextGIRTInstance> *fed_instances = _nextgi_rt_fed_instances(p_render_data);
 	if (fed_instances == nullptr || fed_instances->is_empty()) {
+		_upload_shadow_buffers(); // GodotNext: nextgi_shadow_policy (#145)
 		LocalVector<NextGIInstanceRecord> records;
 		LocalVector<NextGISurfaceRecord> surfaces;
 		_update_far_records(p_render_data, records, surfaces);
@@ -1408,6 +1866,16 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	LocalVector<RD::AccelerationStructureInstance> tlas_instances;
 	LocalVector<NextGIInstanceRecord> instance_records;
 	LocalVector<NextGISurfaceRecord> surface_records;
+	// GodotNext: nextgi_shadow_policy (#145)
+	struct DeferredShadowParts {
+		RenderGeometryInstanceBase *instance = nullptr;
+		RID mesh;
+		Transform3D transform;
+		uint32_t layers = 0;
+		float max_scale = 1.0f;
+		bool multimesh_element = false;
+	};
+	LocalVector<DeferredShadowParts> deferred_shadow_parts;
 	const Vector3 camera_origin = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
 	const uint64_t frame = RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0;
 
@@ -1564,10 +2032,23 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 					RD::AccelerationStructureInstance tlas_instance;
 					tlas_instance.transform = instance_transform;
 					tlas_instance.id = record.tlas_index;
-					tlas_instance.mask = 0xFF;
+					// GodotNext: nextgi_shadow_policy (#145). A posed slot shadows as opaque.
+					tlas_instance.mask = nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
+					stats.shadow_unallocated_instances += (tlas_instance.mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
+					_push_shadow_word(fed.shadow_layers, UINT32_MAX);
+					if (shadow_check_sources_enabled) {
+						ShadowCheckSource check;
+						check.transform = instance_transform;
+						check.world_bounds = geometry_instance->transformed_aabb;
+						check.layers = fed.shadow_layers;
+						check.opaque_caster = false;
+						check.has_geometry = false;
+						shadow_check_sources.push_back(check);
+					}
 					tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record.tlas_index, UINT32_MAX, false) : 0;
 					tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 					tlas_instance.blas = part->blas;
+					_check_shadow_word(tlas_instance.id + 1); // GodotNext: nextgi_shadow_policy (#145)
 					tlas_instances.push_back(tlas_instance);
 					skinned_entered = true;
 				}
@@ -1598,12 +2079,26 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			for (const MeshStorage::NextGIRTPart &part : *parts) {
 				triangles += part.triangle_count;
 			}
+			// GodotNext: nextgi_shadow_policy (#145). The shadow parts refit with them.
+			if (const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(mesh)) {
+				for (const MeshStorage::NextGIRTPart &part : *shadow_parts) {
+					triangles += part.triangle_count;
+				}
+			}
 			if (nextgi_rt_refit_or_exclude(stats.refit_triangles, triangles, NEXTGI_RT_REFIT_TRIANGLE_CAP) != NEXTGI_RT_INCLUDED) {
 				continue;
 			}
 			for (const MeshStorage::NextGIRTPart &part : *parts) {
 				if (part.blas.is_valid()) {
 					RD::get_singleton()->blas_build(part.blas, RD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
+				}
+			}
+			// GodotNext: nextgi_shadow_policy (#145)
+			if (const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(mesh)) {
+				for (const MeshStorage::NextGIRTPart &part : *shadow_parts) {
+					if (part.blas.is_valid()) {
+						RD::get_singleton()->blas_build(part.blas, RD::ACCELERATION_STRUCTURE_BUILD_MODE_UPDATE);
+					}
 				}
 			}
 			mesh_storage->mesh_nextgi_rt_set_blas_dirty(mesh, false);
@@ -1729,11 +2224,24 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			RD::AccelerationStructureInstance tlas_instance;
 			tlas_instance.transform = transform;
 			tlas_instance.id = record_index;
-			tlas_instance.mask = 0xFF;
+			// GodotNext: nextgi_shadow_policy (#145). GI sees the part as before. For shadow rays its geometries follow
+			// the instance's materials: with an alpha-tested one the instance is non-opaque (GI rays force opacity), and
+			// its geometries' alpha table entries tell the candidate loop which to test.
+			const uint32_t shadow_alpha_base = _push_shadow_part(geometry_instance, mesh, part.geometries, fed.shadow_layers);
+			tlas_instance.mask = nextgi_shadow_instance_mask(shadow_allocation, fed.shadow_layers, true);
+			stats.shadow_unallocated_instances += (tlas_instance.mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
+			if (shadow_alpha_base != UINT32_MAX) {
+				shadow_alpha_bits |= tlas_instance.mask;
+				stats.shadow_alpha_instances++;
+			}
+			if (shadow_check_sources_enabled) {
+				_push_shadow_check_source(geometry_instance, mesh, part.geometries, transform, fed.shadow_layers);
+			}
 			// GodotNext: nextgi_hit_groups (#130). A MultiMesh element shares the MultiMesh's card set: the check skips it.
 			tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record_index, record.card_set, fed.element_index == UINT32_MAX) : 0;
-			tlas_instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+			tlas_instance.flags = shadow_alpha_base != UINT32_MAX ? RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT : RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
 			tlas_instance.blas = part.blas;
+			_check_shadow_word(tlas_instance.id + 1); // GodotNext: nextgi_shadow_policy (#145)
 			tlas_instances.push_back(tlas_instance);
 
 			if (geometry_instance->nextgi_record_index == UINT32_MAX) {
@@ -1760,6 +2268,21 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		} else {
 			stats.coverage.blas_pending++;
 		}
+		// GodotNext: nextgi_shadow_policy (#145). The instance's shadow parts join after every GI record, so the GI
+		// records keep their indices.
+		if (!blas_dirty && (fed.shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0) {
+			const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(mesh);
+			if (shadow_parts != nullptr && !shadow_parts->is_empty()) {
+				DeferredShadowParts deferred;
+				deferred.instance = geometry_instance;
+				deferred.mesh = mesh;
+				deferred.transform = transform;
+				deferred.layers = fed.shadow_layers;
+				deferred.max_scale = max_scale;
+				deferred.multimesh_element = fed.element_index != UINT32_MAX;
+				deferred_shadow_parts.push_back(deferred);
+			}
+		}
 	}
 
 	// GodotNext: tlas_from_buffer
@@ -1774,8 +2297,17 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		uint32_t stride = 0;
 		uint32_t element_offset = 0;
 		float distance = 0.0f;
+		// GodotNext: nextgi_shadow_policy (#145). blas is the GI part's (invalid when the mesh has none: all its
+		// surfaces are alpha-tested or blended); its geometries and the mesh's shadow parts get alpha entries.
+		uint32_t shadow_layers = 0;
+		AABB bounds;
+		RenderGeometryInstance *instance = nullptr;
+		RID mesh;
+		uint32_t part_index = UINT32_MAX;
+		bool shadow_parts = false;
 	};
 	const Vector3 camera_pos = p_render_data->scene_data != nullptr ? p_render_data->scene_data->cam_transform.origin : Vector3();
+	// GodotNext: nextgi_shadow_policy (#145). Only GI instances are in tlas_instances yet: shadow-only ones join after.
 	uint32_t dynamic_budget = nextgi_rt_dynamic_budget(NEXTGI_RT_TLAS_CAPACITY, tlas_instances.size());
 	LocalVector<GpuSource> gpu_candidates;
 	for (const RendererSceneRender::NextGIRTInstance &fed : *fed_instances) {
@@ -1793,20 +2325,37 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			continue;
 		}
 		RID blas;
-		for (const MeshStorage::NextGIRTPart &part : *parts) {
-			if (part.blas.is_valid()) {
-				blas = part.blas;
+		uint32_t part_index = UINT32_MAX;
+		for (uint32_t p = 0; p < parts->size(); p++) {
+			if ((*parts)[p].blas.is_valid() && !(*parts)[p].geometries.is_empty()) {
+				blas = (*parts)[p].blas;
+				part_index = p;
 				break;
+			}
+		}
+		// GodotNext: nextgi_shadow_policy (#145). The elements also cast through the mesh's shadow parts.
+		bool shadow_parts = false;
+		if ((fed.shadow_layers & NEXTGI_SHADOW_LAYER_MASK) != 0) {
+			if (const LocalVector<MeshStorage::NextGIRTPart> *list = mesh_storage->mesh_nextgi_rt_get_shadow_parts(mesh)) {
+				for (const MeshStorage::NextGIRTPart &part : *list) {
+					shadow_parts = shadow_parts || (part.blas.is_valid() && !part.geometries.is_empty());
+				}
 			}
 		}
 		if (blas.is_null()) {
 			stats.coverage.blas_pending += fed.gpu_count;
-			continue;
+			if (!shadow_parts) {
+				continue;
+			}
 		}
 
 		GpuSource source;
 		source.source = fed.gpu_source;
 		source.blas = blas;
+		source.part_index = part_index;
+		source.shadow_parts = shadow_parts;
+		source.mesh = mesh;
+		source.instance = fed.geometry_instance;
 		source.count = fed.gpu_count;
 		source.stride = fed.gpu_stride;
 		if (fed.gpu_particles) {
@@ -1833,18 +2382,116 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 			continue;
 		}
 		source.distance = (fed.has_rt_transform ? fed.rt_transform.origin : Vector3()).distance_to(camera_pos);
+		// GodotNext: nextgi_shadow_policy (#145)
+		source.shadow_layers = fed.shadow_layers;
+		if (fed.geometry_instance != nullptr) {
+			source.bounds = static_cast<RenderGeometryInstanceBase *>(fed.geometry_instance)->transformed_aabb;
+		}
 		gpu_candidates.push_back(source);
 	}
 	std::sort(gpu_candidates.ptr(), gpu_candidates.ptr() + gpu_candidates.size(), [](const GpuSource &p_a, const GpuSource &p_b) { return p_a.distance > p_b.distance; });
 
 	LocalVector<GpuSource> gpu_sources;
+	// GodotNext: nextgi_shadow_policy (#145). Sources whose mesh has shadow parts: encoded last, with what is left.
+	LocalVector<GpuSource> gpu_shadow_sources;
 	for (const GpuSource &source : gpu_candidates) {
+		if (source.shadow_parts) {
+			gpu_shadow_sources.push_back(source);
+		}
+		if (source.blas.is_null()) {
+			continue;
+		}
 		if (source.count > dynamic_budget) {
 			stats.coverage.instance_cap += source.count;
 			continue;
 		}
 		dynamic_budget -= source.count;
 		gpu_sources.push_back(source);
+	}
+
+	// GodotNext: nextgi_shadow_policy (#145). Shadow parts: TLAS instances only shadow rays see (no GI bit, D17).
+	// They come after the GI instances and take only the capacity the GPU-written GI instances leave, so a
+	// shadow-only surface never pushes an instance GI sees out of the TLAS.
+	uint32_t gpu_reserved = 0;
+	for (const GpuSource &source : gpu_sources) {
+		gpu_reserved += source.count;
+	}
+	for (const DeferredShadowParts &deferred : deferred_shadow_parts) {
+		const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(deferred.mesh);
+		if (shadow_parts == nullptr) {
+			continue;
+		}
+		for (const MeshStorage::NextGIRTPart &part : *shadow_parts) {
+			if (!part.blas.is_valid() || part.geometries.is_empty()) {
+				continue;
+			}
+			const uint32_t mask = nextgi_shadow_instance_mask(shadow_allocation, deferred.layers, false);
+			if (mask == 0 || instance_records.size() + gpu_reserved >= NEXTGI_RT_TLAS_CAPACITY || instance_records.size() > NEXTGI_RT_RECORD_INDEX_MAX) {
+				continue;
+			}
+			const uint32_t record_index = instance_records.size();
+			NextGIInstanceRecord record;
+			for (int i = 0; i < 3; i++) {
+				record.object_to_world[i * 4 + 0] = deferred.transform.basis.rows[i][0];
+				record.object_to_world[i * 4 + 1] = deferred.transform.basis.rows[i][1];
+				record.object_to_world[i * 4 + 2] = deferred.transform.basis.rows[i][2];
+			}
+			record.object_to_world[3] = deferred.transform.origin.x;
+			record.object_to_world[7] = deferred.transform.origin.y;
+			record.object_to_world[11] = deferred.transform.origin.z;
+			record.surface_base = surface_records.size();
+			record.surface_count = part.geometries.size();
+			record.rt_flags = NEXTGI_RT_FLAG_STATIC;
+			record.tlas_index = record_index;
+			// No card set and no relight pages: GI never hits it.
+			float eps_rt = 0.0f;
+			for (const NextGIRTPartGeometry &part_geometry : part.geometries) {
+				NextGISurfaceRecord surface_record;
+				MeshStorage::NextGIRTSurfaceInfo info;
+				if (mesh_storage->mesh_nextgi_rt_get_surface_info(deferred.mesh, part_geometry.surface, info)) {
+					record.arena_chunk = info.chunk;
+					eps_rt = MAX(eps_rt, info.eps);
+					surface_record.vertex_offset = info.vertex_offset;
+					surface_record.index_offset = info.index_offset + part_geometry.first_triangle * 3 * sizeof(uint32_t);
+					surface_record.triangle_count = part_geometry.triangle_count;
+					surface_record.flags = NEXTGI_RT_SURFACE_FLAG_NO_CARDS;
+				}
+				surface_records.push_back(surface_record);
+				// GodotNext: path_tracer (#167). The path tracer never reaches a shadow-only surface (no GI bit): its
+				// source stays empty, in record order.
+				if (surface_sources_wanted) {
+					surface_sources.push_back(SurfaceSource());
+				}
+				if (hit_records) {
+					hit_materials->add_geometry(deferred.instance, deferred.mesh, part_geometry.surface, info.chunk, info.attribute_chunk != UINT32_MAX, info.attribute_chunk, info.attribute_offset, deferred.multimesh_element);
+				}
+			}
+			record.origin_offset = nextgi_rt_origin_offset(eps_rt, deferred.max_scale);
+			instance_records.push_back(record);
+			// The AS memory line tracks the mesh while its shadow parts are in the TLAS too (a mesh may have no other).
+			if (RSG::rasterizer != nullptr) {
+				mesh_last_tlas_frame[deferred.mesh] = RSG::rasterizer->get_frame_number();
+			}
+			const uint32_t shadow_alpha_base = _push_shadow_part(deferred.instance, deferred.mesh, part.geometries, deferred.layers);
+			RD::AccelerationStructureInstance tlas_instance;
+			tlas_instance.transform = deferred.transform;
+			tlas_instance.id = record_index;
+			tlas_instance.mask = mask;
+			tlas_instance.hit_sbt_range = hit_records ? hit_materials->end_instance(record_index, UINT32_MAX, false) : 0;
+			tlas_instance.flags = shadow_alpha_base != UINT32_MAX ? RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT : RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT;
+			tlas_instance.blas = part.blas;
+			_check_shadow_word(tlas_instance.id + 1);
+			tlas_instances.push_back(tlas_instance);
+			stats.shadow_only_instances++;
+			stats.shadow_unallocated_instances += (mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? 1 : 0;
+			if (shadow_alpha_base != UINT32_MAX) {
+				shadow_alpha_bits |= mask;
+				stats.shadow_alpha_instances++;
+			}
+			if (shadow_check_sources_enabled) {
+				_push_shadow_check_source(deferred.instance, deferred.mesh, part.geometries, deferred.transform, deferred.layers);
+			}
+		}
 	}
 
 	// GodotNext: nextgi_skinned_actors (#59). Counts refits and rebuilds of this frame's
@@ -1873,7 +2520,8 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	if (OS::get_singleton() != nullptr) {
 		stats.tlas_fill_ms = double(OS::get_singleton()->get_ticks_usec() - ticks_start) / 1000.0;
 	}
-	if (instance_records.is_empty() && gpu_sources.is_empty()) {
+	if (instance_records.is_empty() && gpu_sources.is_empty() && gpu_shadow_sources.is_empty()) {
+		_upload_shadow_buffers(); // GodotNext: nextgi_shadow_policy (#145)
 		_update_far_records(p_render_data, instance_records, surface_records);
 		_assign_pending_pages(p_render_data, instance_records); // GodotNext: nextgi_src_page_levels (#247)
 		// GodotNext: ps_lumen_lite (#183)
@@ -1916,7 +2564,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 	// No debug label here: the frame block's slot label names this work.
 	RenderingDevice *rd = RD::get_singleton();
 	bool built = false;
-	if (!gpu_sources.is_empty() && _ensure_gpu_instance_buffer()) {
+	if ((!gpu_sources.is_empty() || !gpu_shadow_sources.is_empty()) && _ensure_gpu_instance_buffer()) {
 		const uint32_t record_size = rd->acceleration_structure_get_instance_size();
 		PackedByteArray cpu_bytes;
 		cpu_bytes.resize(tlas_instances.size() * record_size);
@@ -1939,16 +2587,94 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 				}
 			}
 			uint32_t cursor = tlas_instances.size();
+			// GodotNext: nextgi_shadow_policy (#145). The API flag nextgi_rt_instances.glsl writes for a non-opaque
+			// instance: Vulkan, Direct3D 12 and Metal use RD's bit value (each driver asserts it).
+			const uint32_t no_opaque_flags = uint32_t(RD::ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT);
 			for (const GpuSource &source : gpu_sources) {
-				const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, source.blas, cursor, 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset, source.count_buffer);
+				// GodotNext: nextgi_shadow_policy (#145). Every element of a source shares its instance's layers and
+				// materials: one set of alpha entries (sampled or constant: a GPU-written instance has no hit record
+				// to retrace through), and a non-opaque instance when a geometry is alpha-tested (an alpha
+				// material_override); GI rays force opacity.
+				const uint32_t shadow_mask = nextgi_shadow_instance_mask(shadow_allocation, source.shadow_layers, true);
+				const MeshStorage::NextGIRTPart *gi_part = nullptr;
+				if (const LocalVector<MeshStorage::NextGIRTPart> *gi_parts = mesh_storage->mesh_nextgi_rt_get_parts(source.mesh)) {
+					gi_part = source.part_index < gi_parts->size() ? &(*gi_parts)[source.part_index] : nullptr;
+				}
+				const uint32_t alpha_base = gi_part != nullptr && source.instance != nullptr ? _push_shadow_alpha(source.instance, source.mesh, gi_part->geometries, source.shadow_layers, false) : UINT32_MAX;
+				const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, source.blas, cursor, alpha_base != UINT32_MAX ? no_opaque_flags : 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset, source.count_buffer, shadow_mask);
 				if (encoded == 0) {
+					shadow_alpha.resize(alpha_base != UINT32_MAX ? alpha_base : shadow_alpha.size());
 					continue;
+				}
+				for (uint32_t element = 0; element < encoded; element++) {
+					_push_shadow_word(source.shadow_layers, alpha_base);
+				}
+				if (alpha_base != UINT32_MAX) {
+					shadow_alpha_bits |= shadow_mask;
+					stats.shadow_alpha_instances += encoded;
+				}
+				stats.shadow_unallocated_instances += (shadow_mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? encoded : 0;
+				_check_shadow_word(cursor + encoded);
+				if (shadow_check_sources_enabled) {
+					ShadowCheckSource check;
+					check.world_bounds = source.bounds;
+					check.layers = source.shadow_layers;
+					check.opaque_caster = false;
+					check.has_geometry = false;
+					shadow_check_sources.push_back(check);
 				}
 				cursor += encoded;
 				referenced_blases.push_back(source.blas);
 				stats.coverage.numerator += encoded;
 			}
+			// GodotNext: nextgi_shadow_policy (#145). The elements' shadow parts (the surfaces #61 keeps out of GI):
+			// instances only shadow rays see (no GI bit), after every instance GI sees and only in the capacity left,
+			// so they never push a GI instance out. Their alpha entries are sampled or constant: a GPU-written
+			// instance has no hit record, so its shader-code alpha shadows as opaque.
+			for (const GpuSource &source : gpu_shadow_sources) {
+				const uint32_t shadow_mask = nextgi_shadow_instance_mask(shadow_allocation, source.shadow_layers, false);
+				const LocalVector<MeshStorage::NextGIRTPart> *shadow_parts = mesh_storage->mesh_nextgi_rt_get_shadow_parts(source.mesh);
+				if (shadow_mask == 0 || shadow_parts == nullptr || source.instance == nullptr) {
+					continue;
+				}
+				for (const MeshStorage::NextGIRTPart &part : *shadow_parts) {
+					if (!part.blas.is_valid() || part.geometries.is_empty() || cursor + source.count > NEXTGI_RT_TLAS_CAPACITY) {
+						continue;
+					}
+					const uint32_t alpha_base = _push_shadow_alpha(source.instance, source.mesh, part.geometries, source.shadow_layers, false);
+					const uint32_t encoded = encode_gpu_instances(source.buffer, source.stride, source.count, source.count, cursor, part.blas, cursor, alpha_base != UINT32_MAX ? no_opaque_flags : 0u, camera_pos, NEXTGI_RT_ANGULAR_CULL_DISTANCE, Math::deg_to_rad(0.5f), source.element_offset, source.count_buffer, shadow_mask);
+					if (encoded == 0) {
+						shadow_alpha.resize(alpha_base != UINT32_MAX ? alpha_base : shadow_alpha.size());
+						continue;
+					}
+					for (uint32_t element = 0; element < encoded; element++) {
+						_push_shadow_word(source.shadow_layers, alpha_base);
+					}
+					if (alpha_base != UINT32_MAX) {
+						shadow_alpha_bits |= shadow_mask;
+						stats.shadow_alpha_instances += encoded;
+					}
+					stats.shadow_only_instances += encoded;
+					stats.shadow_unallocated_instances += (shadow_mask & NEXTGI_SHADOW_MASK_UNALLOCATED) != 0 ? encoded : 0;
+					_check_shadow_word(cursor + encoded);
+					if (shadow_check_sources_enabled) {
+						ShadowCheckSource check;
+						check.world_bounds = source.bounds;
+						check.layers = source.shadow_layers;
+						check.opaque_caster = false;
+						check.has_geometry = false;
+						shadow_check_sources.push_back(check);
+					}
+					// The AS memory line tracks the mesh while its shadow parts are in the TLAS (it may have no GI part).
+					if (RSG::rasterizer != nullptr) {
+						mesh_last_tlas_frame[source.mesh] = frame;
+					}
+					cursor += encoded;
+					referenced_blases.push_back(part.blas);
+				}
+			}
 			stats.instance_count += cursor - tlas_instances.size();
+			stats.gpu_written_instances = cursor - tlas_instances.size(); // GodotNext: nextgi_shadow_policy (#145)
 			if (cursor > 0) {
 				built = rd->tlas_build_from_buffer(tlas, gpu_instance_buffer, 0, cursor, referenced_blases) == OK;
 			}
@@ -1960,6 +2686,7 @@ void NextGIRTScene::rebuild_tlas(const ::RenderDataRD *p_render_data) {
 		stats.tlas_build_count++;
 		tlas_traceable = true;
 	}
+	_upload_shadow_buffers(); // GodotNext: nextgi_shadow_policy (#145)
 	sdf_instances.upload();
 	// GodotNext: ps_mesh_sdf_atlas (#185). Request mips from camera distance;
 	// the readback is applied one frame later with a 4 MiB budget.
@@ -2150,21 +2877,25 @@ uint32_t NextGIRTScene::_mesh_triangle_count(RID p_mesh) const {
 	if (mesh_storage == nullptr || !mesh_storage->owns_mesh(p_mesh)) {
 		return 0;
 	}
-	const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(p_mesh);
-	if (parts != nullptr && !parts->is_empty()) {
-		uint32_t triangles = 0;
-		for (const MeshStorage::NextGIRTPart &part : *parts) {
-			triangles += part.triangle_count;
+	// GodotNext: nextgi_shadow_policy (#145). _build_dirty_mesh_parts() builds the shadow parts (the surfaces #61 keeps
+	// out of the GI parts) in the same call, so their triangles count too.
+	uint32_t built = 0;
+	const LocalVector<MeshStorage::NextGIRTPart> *part_lists[2] = { mesh_storage->mesh_nextgi_rt_get_parts(p_mesh), mesh_storage->mesh_nextgi_rt_get_shadow_parts(p_mesh) };
+	for (const LocalVector<MeshStorage::NextGIRTPart> *parts : part_lists) {
+		if (parts != nullptr) {
+			for (const MeshStorage::NextGIRTPart &part : *parts) {
+				built += part.triangle_count;
+			}
 		}
-		if (triangles > 0) {
-			return triangles;
-		}
+	}
+	if (built > 0) {
+		return built;
 	}
 	uint32_t triangles = 0;
 	const uint32_t surface_count = uint32_t(mesh_storage->mesh_get_surface_count(p_mesh));
 	for (uint32_t i = 0; i < surface_count; i++) {
 		MeshStorage::NextGIRTSurfaceInfo info;
-		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, i, info) || !info.eligible || _nextgi_rt_material_is_alpha(info.material)) {
+		if (!mesh_storage->mesh_nextgi_rt_get_surface_info(p_mesh, i, info) || !info.eligible) {
 			continue;
 		}
 		triangles += info.index_count / 3;
@@ -2189,8 +2920,12 @@ void NextGIRTScene::_apply_as_budget(uint64_t p_frame) {
 		mesh.id = ids.size();
 		ids.push_back(entry.key);
 		uint64_t bytes = 0;
-		const LocalVector<MeshStorage::NextGIRTPart> *parts = mesh_storage->mesh_nextgi_rt_get_parts(entry.key);
-		if (parts != nullptr) {
+		// GodotNext: nextgi_shadow_policy (#145). The shadow parts' BLASes count too; eviction clears both.
+		const LocalVector<MeshStorage::NextGIRTPart> *part_lists[2] = { mesh_storage->mesh_nextgi_rt_get_parts(entry.key), mesh_storage->mesh_nextgi_rt_get_shadow_parts(entry.key) };
+		for (const LocalVector<MeshStorage::NextGIRTPart> *parts : part_lists) {
+			if (parts == nullptr) {
+				continue;
+			}
 			for (const MeshStorage::NextGIRTPart &part : *parts) {
 				if (part.blas.is_valid()) {
 					bytes += RD::get_singleton()->acceleration_structure_get_size_bytes(part.blas);
@@ -2257,7 +2992,7 @@ bool NextGIRTScene::_ensure_gpu_instance_buffer() {
 	return gpu_instance_buffer.is_valid();
 }
 
-uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset, RID p_count_buffer) {
+uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset, RID p_count_buffer, uint32_t p_mask) {
 	RenderingDevice *rd = RD::get_singleton();
 	ERR_FAIL_NULL_V(rd, 0);
 	ERR_FAIL_COND_V(p_count == 0 || p_source_buffer.is_null() || p_blas.is_null() || p_source_stride_floats < 12, 0);
@@ -2289,7 +3024,7 @@ uint32_t NextGIRTScene::encode_gpu_instances(RID p_source_buffer, uint32_t p_sou
 	push_constants[4] = p_source_stride_floats;
 	push_constants[5] = p_visible_count;
 	push_constants[6] = p_flags;
-	push_constants[7] = 0xFFu;
+	push_constants[7] = p_mask & 0xFFu; // GodotNext: nextgi_shadow_policy (#145)
 	// camera: position and the distance limit.
 	auto to_bits = [](float p_value) {
 		uint32_t bits = 0;

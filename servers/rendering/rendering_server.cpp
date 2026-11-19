@@ -4240,6 +4240,8 @@ void RenderingServer::init() {
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/reference_readback", false);
 	// GodotNext: nextgi_hit_groups (#130). The material hit groups' check, and their consumer meanwhile.
 	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/hit_material_check", false);
+	// GodotNext: nextgi_shadow_policy (#145). GM-4's caster-mask matrix.
+	GLOBAL_DEF("rendering/global_illumination/nextgi/debug/shadow_ray_check", false);
 	// GodotNext: nextgi_reference_capture (#263). Changing it restarts the accumulation.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/global_illumination/nextgi/debug/reference_epoch", PROPERTY_HINT_RANGE, "0,65535,1,or_greater"), 0);
 	// GodotNext: path_tracer (#167). Reads each view's path tracer history back for its checks.

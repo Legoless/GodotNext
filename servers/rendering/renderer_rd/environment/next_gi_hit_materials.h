@@ -40,6 +40,7 @@
 #include "core/templates/vector.h"
 #include "core/variant/array.h"
 #include "core/variant/dictionary.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 #include "servers/rendering/shader_compiler.h"
 
 class RenderDataRD;
@@ -63,11 +64,15 @@ class NextGISRC;
 // hit_sbt_range 0.
 //
 // The contract for callers (#129 hit lighting, #145's material-evaluation retrace, translucency, far field):
-// - Every NextGI TLAS instance is ACCELERATION_STRUCTURE_INSTANCE_FORCE_OPAQUE_BIT, so a trace without ray
-//   flags runs closest-hit stages only: alpha-tested materials (only those traced as opaque enter the TLAS,
-//   #61) are hit as opaque there, as BaseMaterial3D's nextgi_rt_treat_as_opaque says. A trace with
-//   gl_RayFlagsNoOpaqueEXT overrides the instance flag, and the any-hit stage of an alpha-tested material's
-//   group then runs its alpha scissor or hash test and ignores what it cuts.
+// - GI rays trace the instances with mask bit 7 (next_gi_shadow_policy.h) with gl_RayFlagsOpaqueEXT, so they
+//   run closest-hit stages only: alpha-tested materials (only those traced as opaque enter the GI parts, #61)
+//   are hit as opaque there, as BaseMaterial3D's nextgi_rt_treat_as_opaque says. GodotNext:
+//   nextgi_shadow_policy (#145): an instance with an alpha-tested geometry is
+//   ACCELERATION_STRUCTURE_INSTANCE_FORCE_NO_OPAQUE_BIT for shadow rays (every other instance is
+//   FORCE_OPAQUE_BIT), and the shadow-only instances lack bit 7. A trace with gl_RayFlagsNoOpaqueEXT overrides
+//   the instance flag, and the any-hit stage of an alpha-tested material's group then runs its alpha scissor or
+//   hash test and ignores what it cuts; so does a trace without opacity flags on a FORCE_NO_OPAQUE instance (the
+//   retrace, trace_shadow_retrace()).
 // - HitParams.record_count must be get_record_count(): instances past it are written by the GPU (particles,
 //   dynamic MultiMesh), have no record and come back from the fallback group without one.
 // - Trace only on frames where has_current_records() is true: the records and shader binding table ranges
@@ -101,6 +106,9 @@ enum {
 	// card batch renders without the camera's Y flip), so the material stages decide the side as it does. Only
 	// the check sets it.
 	NEXTGI_HIT_PARAMS_CAPTURE_FACING = 1,
+	// GodotNext: nextgi_shadow_policy (#145). The ray generation stage traces the shadow retrace records
+	// (trace_shadow_retrace()).
+	NEXTGI_HIT_PARAMS_SHADOW_RETRACE = 2,
 };
 
 // Who needs the attribute stream and the hit groups. Hit lighting (#129) sets NEXTGI_HIT_CONSUMER_HIT_LIGHTING
@@ -114,7 +122,9 @@ enum NextGIHitConsumer : uint32_t {
 	NEXTGI_HIT_CONSUMER_FAR_FIELD = 1u << 2,
 	NEXTGI_HIT_CONSUMER_CHECK = 1u << 3,
 	// GodotNext: nextgi_hwrt_mode (#286). #145's material-evaluation retrace (any-hit groups of materials whose
-	// alpha comes from shader code), which #146's MegaLights retrace shares.
+	// alpha comes from shader code), which #146's MegaLights retrace shares. GodotNext: nextgi_shadow_policy
+	// (#145): the shadow rays ask for it while a caster's alpha comes from shader code; at Full only, as the other
+	// modes compile no material group (their shader-alpha casters shadow as opaque).
 	NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE = 1u << 4,
 	// GodotNext: path_tracer (#167). A viewport path traces (RendererRD::PathTracer). It shades hits with the
 	// material's own hit group, so it runs on them at Full only; otherwise it traces with its INLINE backend.
@@ -146,12 +156,14 @@ enum NextGIHitMode {
 	// The default. Every consumer runs on the material hit groups, as before the setting existed.
 	NEXTGI_HIT_MODE_FULL,
 	// The hit pipeline is the base library alone: its fallback group is the one simplified hit shader every
-	// geometry uses. No material shader compiles a hit group, and no attribute stream is kept. Only the consumers
-	// in NEXTGI_HIT_SIMPLIFIED_CONSUMERS run; the others report NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL and keep
-	// their inline path.
+	// geometry uses. No material shader compiles a hit group, and no attribute stream is kept for the hit groups.
+	// Only the consumers in NEXTGI_HIT_SIMPLIFIED_CONSUMERS run; the others report
+	// NEXTGI_HIT_HWRT_MODE_SIMPLIFIED_MATERIAL and keep their inline path.
 	NEXTGI_HIT_MODE_SIMPLIFIED_MATERIAL,
-	// No hit pipeline at all: no material hit group, no base library and no attribute stream. Every consumer
-	// reports NEXTGI_HIT_HWRT_MODE_INLINE and keeps its inline path.
+	// No hit pipeline at all: no material hit group, no base library and no attribute stream for the hit groups.
+	// Every consumer reports NEXTGI_HIT_HWRT_MODE_INLINE and keeps its inline path.
+	// GodotNext: nextgi_shadow_policy (#145). In every mode the shadow rays' bindless texture-alpha path, an inline
+	// ray query, keeps the streams it reads its UVs from (NextGI::_wants_shadow_streams()).
 	NEXTGI_HIT_MODE_INLINE,
 	NEXTGI_HIT_MODE_MAX,
 };
@@ -213,6 +225,8 @@ _FORCE_INLINE_ bool nextgi_hit_tables_releasing(uint64_t p_freed_frame, uint64_t
 const char *nextgi_hit_availability_name(NextGIHitAvailability p_availability);
 
 // The stream lives in the RT arena and only the material hit groups read it, so it exists only while they run.
+// GodotNext: nextgi_shadow_policy (#145). NextGI also keeps it, in every mode, while the shadow rays' texture-alpha
+// path needs it; this is the hit groups' part of that decision.
 _FORCE_INLINE_ bool nextgi_hit_stream_needed(NextGIHitAvailability p_availability, bool p_rt_arena, NextGIHitMode p_mode = NEXTGI_HIT_MODE_FULL) {
 	return p_availability == NEXTGI_HIT_AVAILABLE && p_rt_arena && nextgi_hit_mode_material_groups(p_mode);
 }
@@ -461,6 +475,7 @@ public:
 		uint32_t check[NEXTGI_HIT_CHECK_COUNTERS] = {};
 		uint32_t check_materials = 0; // Materials the last check sampled.
 		uint32_t check_pending_shaders = 0; // Shaders not ready when the check last ran.
+		uint64_t shadow_retrace_dispatches = 0; // GodotNext: nextgi_shadow_policy (#145)
 	};
 
 private:
@@ -533,12 +548,27 @@ public:
 	uint64_t get_pipeline_serial() const;
 	bool trace_path_tracer(NextGIRTScene *p_rt_scene, const NextGIHitPathTrace &p_trace);
 
+	// GodotNext: nextgi_shadow_policy (#145). The shadow rays' material retrace: traces every record of
+	// p_records (next_gi_shadow_policy.h, NextGIShadowRetraceRecord, up to p_capacity) through the hit groups with
+	// the record's cull mask and writes its result. Only on frames where has_current_records() is true; returns
+	// false when it traced nothing.
+	bool trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_records, uint32_t p_capacity, float p_time);
+	// Whether the retrace can evaluate the alpha of the shader code with this serial (ShaderData::nextgi_hit_serial):
+	// RETRACE once its hit group with an any-hit stage exists, OPAQUE when the shader is refused or has no any-hit
+	// stage (or no material group compiles, Simplified Material), UNKNOWN while it compiles or before a material
+	// with it was seen.
+	NextGIShadowRetraceVerdict get_shadow_retrace_verdict(uint64_t p_serial) const;
+
 	const Counters &get_counters() const;
 	void fill_counters(Dictionary &r_counters) const;
 
 	// p_material_groups false is the Simplified Material mode (#286): the base library alone, whose fallback group
 	// shades every hit; no material hit group compiles.
-	explicit NextGIHitMaterials(bool p_material_groups = true);
+	// GodotNext: nextgi_shadow_policy (#145). p_texture_table: a bindless texture table to allocate the texture slots
+	// from instead of a table of its own (NextGIRTScene's, which the shadow rays' alpha path shares: Direct3D 12 holds
+	// two texture or storage-buffer tables at a time). It must outlive this object, which does not free it. The
+	// check's, the path tracer's (#167) and the retrace's traces all bind it as set 1.
+	explicit NextGIHitMaterials(bool p_material_groups = true, RID p_texture_table = RID());
 	~NextGIHitMaterials();
 };
 

@@ -637,6 +637,10 @@ func _add_omni(root: Node3D, node_name: String, bake: Light3D.BakeMode, position
 
 
 func _result(scene_path: String, enabled: bool, info: Dictionary) -> Dictionary:
+	# The RT visibility policy (#145): one shadow instance word per TLAS custom index, on every path.
+	var counters: Dictionary = RenderingServer.nextgi_get_counters()
+	if String(info.get("tier", "")) == "HWRT":
+		_check(int(counters.get("shadow_word_misaligned", -1)) == 0, "the shadow instance words stay in step with the TLAS custom indices (%d)" % int(counters.get("shadow_word_misaligned", -1)))
 	return {
 		"pass": _failures.is_empty(),
 		"scene": scene_path,
@@ -644,5 +648,11 @@ func _result(scene_path: String, enabled: bool, info: Dictionary) -> Dictionary:
 		"driver": RenderingServer.get_current_rendering_driver_name(),
 		"nextgi_enabled": enabled,
 		"tier": info.get("tier", ""),
+		# The RT visibility policy (#145): the relight variant dispatched last (1: the shadow rays' alpha variant) and
+		# whether NextGI made its bindless texture table. Reported, not checked: they depend on the scene's casters.
+		"src_shadow_relight_variant": info.get("src_shadow_relight_variant", -1),
+		"shadow_texture_table": counters.get("shadow_texture_table", false),
+		"shadow_word_misaligned": counters.get("shadow_word_misaligned", -1),
+		"rt_gpu_written_instances": counters.get("rt_gpu_written_instances", -1),
 		"failures": _failures,
 	}

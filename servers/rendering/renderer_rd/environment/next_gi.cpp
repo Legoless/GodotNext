@@ -49,6 +49,7 @@
 // GodotNext: nextgi_hit_groups (#130)
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_shadow_check.h"
 // GodotNext: nextgeo_rt_native (#156)
 #include "servers/rendering/renderer_rd/environment/next_gi_rt_native.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
@@ -615,6 +616,13 @@ void NextGI::set_hardware_ray_tracing(int p_mode) {
 // GodotNext: nextgi_hit_groups (#130)
 static_assert(int(NEXTGI_HIT_NOT_HWRT) == 2, "NextGI::hit_availability starts at NEXTGI_HIT_NOT_HWRT (next_gi.h).");
 
+// GodotNext: nextgi_shadow_policy (#145). The last TLAS phase had an alpha-tested caster with an albedo texture,
+// and it was recent: a NextGI that stopped rendering keeps no stream.
+bool NextGI::_wants_shadow_streams() const {
+	const bool recent = scenario_frame != UINT64_MAX && (frame_tier_frame == UINT64_MAX || scenario_frame + 2 >= frame_tier_frame);
+	return recent && rt_scene != nullptr && rt_scene->wants_shadow_streams();
+}
+
 void NextGI::set_hit_consumer(uint32_t p_consumer, bool p_enabled) {
 	if (p_enabled) {
 		hit_consumers |= p_consumer;
@@ -665,10 +673,23 @@ void NextGI::_free_hit_materials() {
 	}
 }
 
+// GodotNext: nextgi_shadow_policy (#145)
+void NextGI::_free_shadow_check() {
+	if (shadow_check != nullptr) {
+		shadow_check->free();
+		memdelete(shadow_check);
+		shadow_check = nullptr;
+	}
+}
+
 void NextGI::_release_unused_hit_materials() {
 	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	if (singleton != this || (hit_materials == nullptr && (mesh_storage == nullptr || !mesh_storage->mesh_nextgi_get_hit_attributes()))) {
 		return;
+	}
+	// GodotNext: nextgi_shadow_policy (#145). The retrace asks again on the next frame that renders.
+	if (scenario_frame == UINT64_MAX || (frame_tier_frame != UINT64_MAX && scenario_frame + 2 < frame_tier_frame)) {
+		set_hit_consumer(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, false);
 	}
 	const uint32_t consumers = get_hit_consumers();
 	// GodotNext: nextgi_hwrt_mode (#286). A consumer the Hardware Ray Tracing Mode does not let run keeps nothing.
@@ -677,7 +698,9 @@ void NextGI::_release_unused_hit_materials() {
 		return;
 	}
 	_free_hit_materials();
-	if (mesh_storage != nullptr) {
+	// GodotNext: nextgi_shadow_policy (#145). The shadow rays' texture-alpha path is an inline pass: it keeps the
+	// streams it reads in every mode, with or without the hit groups.
+	if (mesh_storage != nullptr && !(result.tier == TIER_HWRT && _wants_shadow_streams())) {
 		mesh_storage->mesh_nextgi_set_hit_attributes(false);
 	}
 	hit_availability = setting_availability != NEXTGI_HIT_AVAILABLE ? setting_availability : NEXTGI_HIT_NOT_HWRT;
@@ -712,8 +735,11 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_RAYTRACING_PIPELINE_LIBRARY),
 			rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS), hit_init_failed, mode, releasing);
 	if (availability == NEXTGI_HIT_AVAILABLE && hit_materials == nullptr) {
-		hit_materials = memnew(NextGIHitMaterials(nextgi_hit_mode_material_groups(mode)));
+		// GodotNext: nextgi_shadow_policy (#145). The RT scene's texture table, which the shadow rays' alpha path shares
+		// (Direct3D 12 holds two texture or storage-buffer tables at a time), in every mode.
+		hit_materials = memnew(NextGIHitMaterials(nextgi_hit_mode_material_groups(mode), rt_scene != nullptr ? rt_scene->ensure_shadow_texture_table() : RID()));
 		hit_materials_mode = hit_mode;
+		hit_materials_created++;
 		if (!hit_materials->is_ready()) {
 			// Latched until the consumers go away, so a failure is not retried (and logged) every frame.
 			_free_hit_materials();
@@ -726,7 +752,11 @@ void NextGI::_update_hit_materials(bool p_hwrt_frame, uint64_t p_frame) {
 	}
 	hit_availability = availability;
 	if (mesh_storage != nullptr) {
-		mesh_storage->mesh_nextgi_set_hit_attributes(nextgi_hit_stream_needed(availability, mesh_storage->mesh_nextgi_rt_is_enabled(), mode));
+		// GodotNext: nextgi_shadow_policy (#145). The shadow rays' bindless alpha path reads UVs from the streams too. It
+		// is an inline ray query, which UE keeps in every Hardware Ray Tracing Mode ("other features fall back to
+		// inline ray tracing"), so its streams do not depend on the mode.
+		const bool shadow_streams = hwrt && _wants_shadow_streams() && rd != nullptr && rd->has_feature(RenderingDevice::SUPPORTS_BINDLESS);
+		mesh_storage->mesh_nextgi_set_hit_attributes(nextgi_hit_stream_needed(availability, mesh_storage->mesh_nextgi_rt_is_enabled(), mode) || (shadow_streams && mesh_storage->mesh_nextgi_rt_is_enabled()));
 	}
 	if (availability != NEXTGI_HIT_AVAILABLE) {
 		_free_hit_materials();
@@ -748,6 +778,9 @@ void NextGI::_ensure_rt_scene() {
 		rt_scene = memnew(NextGIRTScene);
 		rt_scene->init();
 	} else if (!hwrt_live && rt_scene != nullptr && singleton == this) {
+		// GodotNext: nextgi_shadow_policy (#145). The hit groups allocate from the RT scene's texture table: they go first.
+		_free_hit_materials();
+		_free_shadow_check();
 		rt_scene->free();
 		memdelete(rt_scene);
 		rt_scene = nullptr;
@@ -827,6 +860,31 @@ Dictionary NextGI::get_counters() const {
 		counters["rt_instance_cap"] = int64_t(coverage.instance_cap);
 		counters["rt_dynamic_excluded"] = int64_t(coverage.dynamic_excluded);
 		counters["rt_blas_pending"] = int64_t(coverage.blas_pending);
+		// GodotNext: nextgi_shadow_policy (#145)
+		const NextGIShadowMaskAllocator::Allocation &allocation = rt_scene->get_shadow_allocation();
+		PackedInt64Array allocated;
+		for (int i = 0; i < NEXTGI_SHADOW_DYNAMIC_BITS; i++) {
+			allocated.push_back((allocation.used & (1u << i)) != 0 ? int64_t(allocation.masks[i]) : int64_t(-1));
+		}
+		counters["shadow_allocation"] = allocated;
+		counters["shadow_allocation_generation"] = int64_t(allocation.generation);
+		counters["shadow_alpha_bits"] = int64_t(rt_scene->get_shadow_alpha_bits());
+		counters["shadow_only_instances"] = int64_t(rt_scene->get_stats().shadow_only_instances);
+		counters["shadow_alpha_instances"] = int64_t(rt_scene->get_stats().shadow_alpha_instances);
+		counters["shadow_unallocated_instances"] = int64_t(rt_scene->get_stats().shadow_unallocated_instances);
+		counters["shadow_texture_entries"] = int64_t(rt_scene->get_stats().shadow_texture_entries);
+		counters["shadow_cut_entries"] = int64_t(rt_scene->get_stats().shadow_cut_entries);
+		counters["shadow_retrace_entries"] = int64_t(rt_scene->get_stats().shadow_retrace_entries);
+		counters["shadow_opaque_alpha_entries"] = int64_t(rt_scene->get_stats().shadow_opaque_alpha_entries);
+		counters["rt_gpu_written_instances"] = int64_t(rt_scene->get_stats().gpu_written_instances);
+		counters["shadow_word_misaligned"] = int64_t(rt_scene->get_shadow_word_misaligned());
+		counters["shadow_texture_table"] = rt_scene->has_shadow_texture_table();
+		counters["shadow_wants_retrace"] = rt_scene->wants_shadow_retrace();
+		counters["hit_materials_created"] = int64_t(hit_materials_created);
+		counters["hit_materials_live"] = hit_materials != nullptr;
+		if (shadow_check != nullptr) {
+			NextGIShadowCheck::fill_counters(counters);
+		}
 	}
 	if (MeshStorage::get_singleton() != nullptr) {
 		const MeshStorage::NextGIRTStats ms_stats = MeshStorage::get_singleton()->mesh_nextgi_get_rt_stats();
@@ -1639,7 +1697,15 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 
 	// GodotNext: nextgi_hit_groups (#130). Before the TLAS phase, which writes the hit records.
 	if (new_scenario) {
+		// GodotNext: nextgi_shadow_policy (#145). Casters whose alpha comes from shader code in the last TLAS phase
+		// ask for the hit groups: their shadow rays retrace through the material any-hit stages.
+		set_hit_consumer(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE, hwrt_frame && rt_scene != nullptr && rt_scene->wants_shadow_retrace());
 		_update_hit_materials(hwrt_frame, render_frame_number);
+	}
+	// GodotNext: nextgi_shadow_policy (#145). The check's rays come from the TLAS phase's sources.
+	const bool shadow_check_on = hwrt_frame && rt_scene != nullptr && GLOBAL_GET_CACHED(bool, "rendering/global_illumination/nextgi/debug/shadow_ray_check");
+	if (rt_scene != nullptr && new_scenario) {
+		rt_scene->set_shadow_check_sources_enabled(shadow_check_on);
 	}
 
 	// Every slot emits its timestamp, also while it has no work yet.
@@ -1732,6 +1798,15 @@ void NextGI::render_frame(RenderDataRD *p_render_data, const RID *p_normal_rough
 	if (hwrt_frame && new_scenario && hit_materials != nullptr && (get_hit_consumers() & NEXTGI_HIT_CONSUMER_CHECK)) {
 		hit_materials->run_check(rt_scene, src, p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f);
 	}
+	// GodotNext: nextgi_shadow_policy (#145). GM-4's caster-mask matrix, against this frame's TLAS.
+	if (shadow_check_on && new_scenario) {
+		if (shadow_check == nullptr) {
+			shadow_check = memnew(NextGIShadowCheck);
+		}
+		shadow_check->run(rt_scene);
+	} else if (!shadow_check_on && new_scenario && shadow_check != nullptr) {
+		_free_shadow_check();
+	}
 	// GodotNext: ps_swrt_trace (#186). The verification trace (debug/swrt_trace_readback) reads
 	// this view's depth, Hi-Z and last frame after the slots; it adds no dispatch note.
 	if (swrt_frame && swrt_trace != nullptr && NextGISWRTTrace::readback_enabled() && rb->get_view_count() == 1) {
@@ -1811,6 +1886,7 @@ NextGI::~NextGI() {
 
 	// GodotNext: nextgi_hit_groups (#130). Before the RT scene: its pipeline and tables are its own.
 	_free_hit_materials();
+	_free_shadow_check(); // GodotNext: nextgi_shadow_policy (#145)
 
 	// GodotNext: nextgi_rt_scene
 	if (rt_scene != nullptr) {

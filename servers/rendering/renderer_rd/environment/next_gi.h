@@ -68,6 +68,9 @@ class NextGIHitMaterials;
 // GodotNext: path_tracer (#167)
 class PathTracer;
 
+// GodotNext: nextgi_shadow_policy (#145)
+class NextGIShadowCheck;
+
 // GodotNext: nextgi_src_relight
 class NextGIRelight;
 
@@ -341,6 +344,12 @@ private:
 	uint64_t hit_materials_freed_frame = UINT64_MAX; // GodotNext: path_tracer (#167). nextgi_hit_tables_releasing().
 	void _update_hit_materials(bool p_hwrt_frame, uint64_t p_frame);
 	void _free_hit_materials();
+	bool _wants_shadow_streams() const; // GodotNext: nextgi_shadow_policy (#145)
+	uint64_t hit_materials_created = 0; // GodotNext: nextgi_shadow_policy (#145). NextGIHitMaterials made so far.
+
+	// GodotNext: nextgi_shadow_policy (#145). GM-4's caster-mask matrix, only while debug/shadow_ray_check is on.
+	NextGIShadowCheck *shadow_check = nullptr;
+	void _free_shadow_check();
 	void _release_unused_hit_materials();
 
 	// GodotNext: nextgi_src_relight

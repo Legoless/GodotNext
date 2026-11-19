@@ -815,6 +815,7 @@ struct NextGIHitMaterials::Internal {
 	int64_t fallback_range = 0;
 
 	RID texture_table;
+	bool texture_table_shared = false; // GodotNext: nextgi_shadow_policy (#145). Owned by NextGIRTScene.
 	RID params_table;
 	RID texture_table_set;
 	RID params_table_set;
@@ -981,7 +982,10 @@ bool NextGIHitMaterials::_initialize() {
 	zeros.resize_initialized(NEXTGI_HIT_FALLBACK_RANGE);
 	rd->hit_sbt_range_update(in.hit_sbt, in.fallback_range, 0, Span<uint32_t>(zeros.ptr(), zeros.size()));
 
-	in.texture_table = rd->bindless_table_create(RD::UNIFORM_TYPE_TEXTURE, NEXTGI_HIT_TABLE_SLOTS);
+	// GodotNext: nextgi_shadow_policy (#145). The shared texture table, when the RT scene gave one.
+	if (!in.texture_table_shared) {
+		in.texture_table = rd->bindless_table_create(RD::UNIFORM_TYPE_TEXTURE, NEXTGI_HIT_TABLE_SLOTS);
+	}
 	in.params_table = rd->bindless_table_create(RD::UNIFORM_TYPE_STORAGE_BUFFER, NEXTGI_HIT_TABLE_SLOTS);
 	ERR_FAIL_COND_V(in.texture_table.is_null() || in.params_table.is_null(), false);
 	{
@@ -1747,6 +1751,25 @@ bool NextGIHitMaterials::has_current_records() const {
 	return internal->ready && internal->records_frame == internal->frame;
 }
 
+// GodotNext: nextgi_shadow_policy (#145). Set 0's bindings 0 to 22 (nextgi_hit_layout_inc.glsl), which the check and
+// the shadow retrace bind the same way.
+static void _nextgi_hit_append_scene_uniforms(NextGIRTScene *p_rt_scene, RID p_hit_surfaces, RID p_materials, RID p_texture_slots, RID p_dummy, LocalVector<RD::Uniform> &r_uniforms) {
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	MeshStorage *mesh_storage = MeshStorage::get_singleton();
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_rt_scene->get_tlas()));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_rt_scene->get_instance_record_buffer()));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_rt_scene->get_surface_record_buffer()));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, p_hit_surfaces));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, p_materials));
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_texture_slots));
+	for (uint32_t i = 0; i < 4; i++) {
+		RID chunk = mesh_storage != nullptr && i < mesh_storage->mesh_nextgi_rt_get_chunk_count() ? mesh_storage->mesh_nextgi_rt_get_chunk_buffer(i) : RID();
+		r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, chunk.is_valid() ? chunk : p_dummy));
+	}
+	r_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, material_storage->global_shader_uniforms_get_storage_buffer()));
+	material_storage->samplers_rd_get_default().append_uniforms(r_uniforms, 11);
+}
+
 void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, float p_time) {
 	Internal &in = *internal;
 	if (!has_current_records() || p_rt_scene == nullptr || p_src == nullptr || !p_rt_scene->is_tlas_traceable()) {
@@ -1794,8 +1817,6 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	}
 
 	RenderingDevice *rd = RD::get_singleton();
-	MaterialStorage *material_storage = MaterialStorage::get_singleton();
-	MeshStorage *mesh_storage = MeshStorage::get_singleton();
 	const uint32_t material_count = MIN(in.material_index_count, uint32_t(NEXTGI_HIT_CHECK_MAX_MATERIALS));
 	Vector<uint8_t> zeroed;
 	zeroed.resize_initialized((NEXTGI_HIT_CHECK_COUNTERS + MAX(material_count, 1u)) * sizeof(uint32_t));
@@ -1803,18 +1824,8 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	const RID job_buffer = rd->storage_buffer_create(jobs.size() * sizeof(uint32_t), Span<uint8_t>(reinterpret_cast<const uint8_t *>(jobs.ptr()), jobs.size() * sizeof(uint32_t)));
 
 	LocalVector<RD::Uniform> uniforms;
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, p_rt_scene->get_tlas()));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_rt_scene->get_instance_record_buffer()));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_rt_scene->get_surface_record_buffer()));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, in.hit_surface_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, in.material_table_buffer));
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, in.texture_slot_buffer));
-	for (uint32_t i = 0; i < 4; i++) {
-		RID chunk = mesh_storage != nullptr && i < mesh_storage->mesh_nextgi_rt_get_chunk_count() ? mesh_storage->mesh_nextgi_rt_get_chunk_buffer(i) : RID();
-		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6 + i, chunk.is_valid() ? chunk : in.dummy_buffer));
-	}
-	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, material_storage->global_shader_uniforms_get_storage_buffer()));
-	material_storage->samplers_rd_get_default().append_uniforms(uniforms, 11);
+	// GodotNext: nextgi_shadow_policy (#145). Shared with trace_shadow_retrace().
+	_nextgi_hit_append_scene_uniforms(p_rt_scene, in.hit_surface_buffer, in.material_table_buffer, in.texture_slot_buffer, in.dummy_buffer, uniforms);
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23, p_src->get_atlas_texture(NextGISRC::ATLAS_ALBEDO)));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 24, p_src->get_atlas_texture(NextGISRC::ATLAS_NORMAL)));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 25, p_src->get_atlas_texture(NextGISRC::ATLAS_ORM)));
@@ -1827,6 +1838,7 @@ void NextGIHitMaterials::run_check(NextGIRTScene *p_rt_scene, NextGISRC *p_src, 
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 32, in.dummy_buffer));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 33, in.dummy_buffer));
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, in.dummy_buffer)); // GodotNext: nextgi_shadow_policy (#145)
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 
 	struct PushConstant {
@@ -1936,6 +1948,8 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31, p_trace.params));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 32, p_trace.lights));
 	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 33, p_trace.materials));
+	// GodotNext: nextgi_shadow_policy (#145). The shadow retrace's records, which the path tracer does not read.
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, in.dummy_buffer));
 	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
 	ERR_FAIL_COND_V(scene_set.is_null(), false);
 
@@ -1970,6 +1984,81 @@ bool NextGIHitMaterials::trace_path_tracer(NextGIRTScene *p_rt_scene, const Next
 	return true;
 }
 
+// GodotNext: nextgi_shadow_policy (#145). The retrace evaluates the materials' any-hit stages: none exist without
+// material groups (Simplified Material, #286), where NextGI never asks for it.
+bool NextGIHitMaterials::trace_shadow_retrace(NextGIRTScene *p_rt_scene, RID p_records, uint32_t p_capacity, float p_time) {
+	Internal &in = *internal;
+	if (!in.material_groups || !has_current_records() || p_rt_scene == nullptr || !p_rt_scene->is_tlas_traceable() || p_records.is_null() || p_capacity == 0) {
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	TextureStorage *texture_storage = TextureStorage::get_singleton();
+	ERR_FAIL_COND_V(rd == nullptr || texture_storage == nullptr, false);
+	// The check's bindings (23 to 29) and the path tracer's (30 to 33, #167) are not read: any resource will do.
+	const RID texture = texture_storage->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
+	LocalVector<RD::Uniform> uniforms;
+	_nextgi_hit_append_scene_uniforms(p_rt_scene, in.hit_surface_buffer, in.material_table_buffer, in.texture_slot_buffer, in.dummy_buffer, uniforms);
+	for (uint32_t i = 0; i < 4; i++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_TEXTURE, 23 + i, texture));
+	}
+	for (uint32_t i = 0; i < 3; i++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 27 + i, in.dummy_buffer));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 30, in.path_tracer_dummy_image));
+	for (uint32_t i = 0; i < 3; i++) {
+		uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 31 + i, in.dummy_buffer));
+	}
+	uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 34, p_records));
+	const RID scene_set = rd->uniform_set_create(uniforms, in.base_shader_rid, 0);
+	ERR_FAIL_COND_V(scene_set.is_null(), false);
+
+	struct PushConstant {
+		float time;
+		uint32_t record_count;
+		uint32_t job_count;
+		uint32_t sample_count;
+		uint32_t material_count;
+		uint32_t flags;
+		uint32_t pad0;
+		uint32_t pad1;
+	};
+	static_assert(sizeof(PushConstant) == 32, "HitParams is 32 bytes (nextgi_hit_layout_inc.glsl).");
+	PushConstant push = {};
+	push.time = p_time;
+	push.record_count = in.record_count;
+	push.material_count = in.material_index_count;
+	push.flags = NEXTGI_HIT_PARAMS_SHADOW_RETRACE;
+
+	// A fixed launch: the records appended this frame are on the GPU only, and records past them return at once.
+	// The check's ray generation stage, which the flag turns into the retrace.
+	rd->draw_command_begin_label("NextGI Shadow Retrace");
+	RD::RaytracingListID list = rd->raytracing_list_begin();
+	rd->raytracing_list_bind_raytracing_pipeline(list, in.linked);
+	rd->raytracing_list_bind_uniform_set(list, scene_set, 0);
+	rd->raytracing_list_bind_uniform_set(list, in.texture_table_set, 1);
+	rd->raytracing_list_bind_uniform_set(list, in.params_table_set, 2);
+	rd->raytracing_list_set_push_constant(list, &push, sizeof(push));
+	rd->raytracing_list_trace_rays(list, NEXTGI_HIT_RAYGEN_CHECK, in.hit_sbt, p_capacity, 1, 1);
+	rd->raytracing_list_end();
+	rd->draw_command_end_label();
+	rd->free_rid(scene_set);
+	in.counters.shadow_retrace_dispatches++;
+	return true;
+}
+
+// GodotNext: nextgi_shadow_policy (#145)
+NextGIShadowRetraceVerdict NextGIHitMaterials::get_shadow_retrace_verdict(uint64_t p_serial) const {
+	// Simplified Material (#286): no material compiles a hit group, so nothing can evaluate the shader's alpha.
+	if (!internal->material_groups) {
+		return NEXTGI_SHADOW_VERDICT_OPAQUE;
+	}
+	HitShader *const *shader = internal->shaders.getptr(p_serial);
+	if (shader == nullptr || (*shader)->state == HitShader::STATE_COMPILING) {
+		return NEXTGI_SHADOW_VERDICT_UNKNOWN;
+	}
+	return (*shader)->state != HitShader::STATE_INELIGIBLE && (*shader)->any_hit ? NEXTGI_SHADOW_VERDICT_RETRACE : NEXTGI_SHADOW_VERDICT_OPAQUE;
+}
+
 const NextGIHitMaterials::Counters &NextGIHitMaterials::get_counters() const {
 	return internal->counters;
 }
@@ -1994,6 +2083,7 @@ void NextGIHitMaterials::fill_counters(Dictionary &r_counters) const {
 	r_counters["hit_relinks"] = int64_t(c.relinks);
 	r_counters["hit_sbt_ranges"] = int64_t(c.sbt_ranges);
 	r_counters["hit_links"] = int64_t(c.links);
+	r_counters["hit_shadow_retrace_dispatches"] = int64_t(c.shadow_retrace_dispatches); // GodotNext: nextgi_shadow_policy (#145)
 	r_counters["hit_group_add_ms_last"] = c.group_add_ms_last;
 	r_counters["hit_group_add_ms_max"] = c.group_add_ms_max;
 	r_counters["hit_link_ms_last"] = c.link_ms_last;
@@ -2006,12 +2096,15 @@ void NextGIHitMaterials::fill_counters(Dictionary &r_counters) const {
 	r_counters["hit_check_pending_shaders"] = int64_t(c.check_pending_shaders);
 }
 
-NextGIHitMaterials::NextGIHitMaterials(bool p_material_groups) {
+NextGIHitMaterials::NextGIHitMaterials(bool p_material_groups, RID p_texture_table) {
 	internal = memnew(Internal);
 	internal->material_groups = p_material_groups;
 	if (singleton == nullptr) {
 		singleton = this;
 	}
+	// GodotNext: nextgi_shadow_policy (#145)
+	internal->texture_table = p_texture_table;
+	internal->texture_table_shared = p_texture_table.is_valid();
 	internal->ready = _initialize();
 }
 
@@ -2053,7 +2146,8 @@ NextGIHitMaterials::~NextGIHitMaterials() {
 		if (in.base_library.is_valid()) {
 			rd->free_rid(in.base_library);
 		}
-		const RID buffers[] = { in.texture_table_set, in.params_table_set, in.texture_table, in.params_table, in.material_table_buffer, in.texture_slot_buffer, in.hit_surface_buffer, in.dummy_buffer, in.path_tracer_dummy_image };
+		// GodotNext: nextgi_shadow_policy (#145). A shared texture table stays with its owner.
+		const RID buffers[] = { in.texture_table_set, in.params_table_set, in.texture_table_shared ? RID() : in.texture_table, in.params_table, in.material_table_buffer, in.texture_slot_buffer, in.hit_surface_buffer, in.dummy_buffer, in.path_tracer_dummy_image };
 		for (const RID &rid : buffers) {
 			if (rid.is_valid()) {
 				rd->free_rid(rid);

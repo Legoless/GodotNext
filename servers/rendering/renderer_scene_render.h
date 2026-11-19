@@ -347,6 +347,9 @@ public:
 		uint32_t gpu_count = 0;
 		bool gpu_particles = false;
 		bool gpu_indirect = false; // The element count is in the MultiMesh command buffer.
+		// GodotNext: nextgi_shadow_policy (#145). The render layers the instance shadows with: its layer mask, or 0
+		// when its cast shadow setting is off (the raster shadow pass's caster rule).
+		uint32_t shadow_layers = 0;
 	};
 
 	struct RenderSDFGIUpdateData {

@@ -4432,6 +4432,8 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 					rt_instance.gpu_count = picked[i].gpu_count;
 					rt_instance.gpu_particles = picked[i].gpu_particles;
 					rt_instance.gpu_indirect = picked[i].gpu_indirect;
+					// GodotNext: nextgi_shadow_policy (#145)
+					rt_instance.shadow_layers = picked[i].instance->cast_shadows != RSE::SHADOW_CASTING_SETTING_OFF ? picked[i].instance->layer_mask : 0u;
 					scenario->nextgi_rt_selection.push_back(rt_instance);
 					selected += picked[i].gpu_source.is_valid() ? picked[i].gpu_count : 1;
 				}

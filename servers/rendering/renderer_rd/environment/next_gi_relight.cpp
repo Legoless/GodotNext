@@ -37,9 +37,13 @@
 #include "servers/rendering/renderer_geometry_instance.h"
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_far_field.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_rt_scene.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_swrt_trace.h"
 #include "servers/rendering/renderer_rd/renderer_scene_render_rd.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_retrace.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/environment/nextgi_src_relight_swrt.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
 #include "servers/rendering/renderer_rd/storage_rd/render_data_rd.h"
@@ -190,6 +194,24 @@ struct NextGIRelight::ShaderState {
 	NextgiSrcRelightShaderRD shader;
 	RID version;
 	RID pipeline;
+	// GodotNext: nextgi_shadow_policy (#145). The shadow rays' bindless-texture alpha and material retrace
+	// (get_shadow_alpha_variant_defines()), on devices with bindless tables: a ShaderRD of its own, compiled on the
+	// first frame an alpha-tested caster needs it, before that frame's relight (as _ensure_shader() compiles the
+	// relight), so the frame the relight switches to it does not depend on a compile's timing. The baked relight
+	// above is unchanged, runs in every scene without such a caster and keeps running if the compile fails.
+	NextgiSrcRelightShaderRD alpha_shader;
+	RID alpha_version;
+	RID alpha_shader_rid;
+	RID alpha_pipeline;
+	bool alpha_started = false;
+	bool alpha_failed = false;
+};
+
+// GodotNext: nextgi_shadow_policy (#145)
+struct NextGIRelight::RetraceShaderState {
+	NextgiSrcRelightRetraceShaderRD shader;
+	RID version;
+	RID pipeline;
 };
 
 // GodotNext: ps_swrt_trace (#186, #188)
@@ -316,9 +338,38 @@ void NextGIRelight::free_resources() {
 		rd->free_rid(readback_buffer);
 	}
 	readback_buffer = RID();
+	// GodotNext: nextgi_shadow_policy (#145). The sets go first: they use the buffers and the shaders below.
+	if (rd != nullptr) {
+		const RID sets[2] = { shadow_texture_set, retrace_resolve_set };
+		for (int i = 0; i < 2; i++) {
+			if (sets[i].is_valid() && rd->uniform_set_is_valid(sets[i])) {
+				rd->free_rid(sets[i]);
+			}
+		}
+	}
+	shadow_texture_set = RID();
+	shadow_texture_set_table = RID();
+	retrace_resolve_set = RID();
+	if (retrace_shader != nullptr) {
+		if (rd != nullptr && retrace_shader->pipeline.is_valid()) {
+			rd->free_rid(retrace_shader->pipeline);
+		}
+		if (retrace_shader->version.is_valid()) {
+			retrace_shader->shader.version_free(retrace_shader->version);
+		}
+		memdelete(retrace_shader);
+		retrace_shader = nullptr;
+	}
 	if (shader != nullptr) {
 		if (rd != nullptr && shader->pipeline.is_valid()) {
 			rd->free_rid(shader->pipeline);
+		}
+		// GodotNext: nextgi_shadow_policy (#145)
+		if (rd != nullptr && shader->alpha_pipeline.is_valid()) {
+			rd->free_rid(shader->alpha_pipeline);
+		}
+		if (shader->alpha_version.is_valid()) {
+			shader->alpha_shader.version_free(shader->alpha_version);
 		}
 		if (shader->version.is_valid()) {
 			shader->shader.version_free(shader->version);
@@ -340,13 +391,21 @@ void NextGIRelight::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
-	RID buffers[8] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer };
-	for (int i = 0; i < 8; i++) {
+	RID buffers[11] = { light_buffer, reuse_buffer, page_buffer, index_buffer, counter_buffer, probe_buffer, params_buffer, candidate_buffer, light_shadow_buffer, far_light_shadow_buffer, retrace_buffer };
+	for (int i = 0; i < 11; i++) {
 		if (buffers[i].is_valid()) {
 			rd->free_rid(buffers[i]);
 		}
 	}
 	light_buffer = RID();
+	// GodotNext: nextgi_shadow_policy (#145)
+	light_shadow_buffer = RID();
+	far_light_shadow_buffer = RID();
+	light_shadow_capacity = 0;
+	far_light_shadow_capacity = 0;
+	retrace_buffer = RID();
+	shadow_alpha_key = 0;
+	last_retrace_capacity = 0;
 	candidate_buffer = RID();
 	candidate_capacity = 0;
 	candidate_key = 0;
@@ -475,6 +534,40 @@ Vector<String> NextGIRelight::get_shader_variant_defines(bool p_radiance_packed)
 	return defines;
 }
 
+// GodotNext: nextgi_shadow_policy (#145)
+Vector<String> NextGIRelight::get_shadow_alpha_variant_defines(bool p_radiance_packed) {
+	Vector<String> defines;
+	defines.push_back(get_shader_variant_defines(p_radiance_packed)[0] + "#define NEXTGI_SHADOW_ALPHA_TEXTURES\n");
+	return defines;
+}
+
+bool NextGIRelight::_ensure_alpha_shader(bool p_wanted) {
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	if (shader == nullptr || rd == nullptr || shader->alpha_failed || !rd->has_feature(RD::SUPPORTS_BINDLESS)) {
+		return false;
+	}
+	if (!shader->alpha_started) {
+		if (!p_wanted) {
+			return false;
+		}
+		shader->alpha_started = true;
+		shader->alpha_shader.initialize(get_shadow_alpha_variant_defines(radiance_is_packed));
+		shader->alpha_version = shader->alpha_shader.version_create(false);
+		if (shader->alpha_version.is_valid()) {
+			shader->alpha_shader_rid = shader->alpha_shader.version_get_shader(shader->alpha_version, 0);
+		}
+		if (shader->alpha_shader_rid.is_valid()) {
+			shader->alpha_pipeline = rd->compute_pipeline_create(shader->alpha_shader_rid);
+		}
+		if (shader->alpha_pipeline.is_null()) {
+			shader->alpha_failed = true;
+			ERR_PRINT("NextGI SRC relight: the shadow rays' alpha variant failed to compile; alpha-tested casters shadow as opaque.");
+			return false;
+		}
+	}
+	return p_wanted && shader->alpha_pipeline.is_valid();
+}
+
 bool NextGIRelight::_ensure_shader() {
 	if (shader != nullptr && shader->pipeline.is_valid()) {
 		return true;
@@ -502,6 +595,21 @@ bool NextGIRelight::_ensure_shader() {
 	shader->pipeline = rd->compute_pipeline_create(shader_rid);
 	ERR_FAIL_COND_V(shader->pipeline.is_null(), false);
 	return true;
+}
+
+// GodotNext: nextgi_shadow_policy (#145)
+bool NextGIRelight::_ensure_retrace_shader() {
+	if (retrace_shader != nullptr) {
+		return retrace_shader->pipeline.is_valid();
+	}
+	RenderingDevice *rd = RenderingDevice::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	retrace_shader = memnew(RetraceShaderState);
+	retrace_shader->shader.initialize(Vector<String>({ "" }));
+	retrace_shader->version = retrace_shader->shader.version_create(false);
+	ERR_FAIL_COND_V_MSG(!retrace_shader->version.is_valid(), false, "The NextGI SRC relight retrace resolve shader failed to compile.");
+	retrace_shader->pipeline = rd->compute_pipeline_create(retrace_shader->shader.version_get_shader(retrace_shader->version, 0));
+	return retrace_shader->pipeline.is_valid();
 }
 
 // GodotNext: ps_swrt_trace (#186, #188). No can_initialize_ray_query_shaders() check and no
@@ -1229,6 +1337,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		bool directional = false;
 		bool is_static = false;
 		bool has_shadow = false;
+		uint32_t caster_mask = 0xFFFFFFFFu; // GodotNext: nextgi_shadow_policy (#145)
 	};
 	LocalVector<CpuLight> cpu_lights;
 
@@ -1266,6 +1375,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cpu.directional = p_directional;
 		cpu.is_static = p_static;
 		cpu.has_shadow = RSG::light_storage->light_has_shadow(light);
+		cpu.caster_mask = RSG::light_storage->light_get_shadow_caster_mask(light); // GodotNext: nextgi_shadow_policy (#145)
 		cpu.gpu.color_energy[0] = color.r;
 		cpu.gpu.color_energy[1] = color.g;
 		cpu.gpu.color_energy[2] = color.b;
@@ -1473,6 +1583,20 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	for (uint32_t i = 0; i < cpu_lights.size(); i++) {
 		gpu_lights[i] = cpu_lights[i].gpu;
 	}
+	// GodotNext: nextgi_shadow_policy (#145). Per light, the light word and the caster mask trace_shadow() takes. The
+	// far TLAS's proxies carry every bit and no shadow instance words, so the far dispatch traces them all as
+	// opaque, as before.
+	LocalVector<uint32_t> light_shadows;
+	LocalVector<uint32_t> far_light_shadows;
+	light_shadows.resize(gpu_lights.size() * 2);
+	far_light_shadows.resize(gpu_lights.size() * 2);
+	for (uint32_t i = 0; i < gpu_lights.size(); i++) {
+		const uint32_t caster_mask = i < cpu_lights.size() ? cpu_lights[i].caster_mask : 0xFFFFFFFFu;
+		light_shadows[i * 2] = swrt ? 0u : next_gi->get_rt_scene()->get_shadow_light_mode(caster_mask);
+		light_shadows[i * 2 + 1] = caster_mask & NEXTGI_SHADOW_LAYER_MASK;
+		far_light_shadows[i * 2] = NEXTGI_SHADOW_MODE_CULL_MASK;
+		far_light_shadows[i * 2 + 1] = NEXTGI_SHADOW_LAYER_MASK;
+	}
 	LocalVector<NextGIRelightPageGPU> gpu_pages;
 	LocalVector<NextGIRelightPageGPU> far_gpu_pages;
 	LocalVector<uint32_t> gpu_indices;
@@ -1581,6 +1705,9 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	max_texels = MAX(max_texels, last_texels);
 
 	_storage_buffer(light_buffer, light_capacity, gpu_lights.size(), sizeof(NextGILight));
+	// GodotNext: nextgi_shadow_policy (#145)
+	_storage_buffer(light_shadow_buffer, light_shadow_capacity, gpu_lights.size(), sizeof(uint32_t) * 2);
+	_storage_buffer(far_light_shadow_buffer, far_light_shadow_capacity, gpu_lights.size(), sizeof(uint32_t) * 2);
 	_storage_buffer(reuse_buffer, reuse_capacity, MAX(reuses.size(), 1u), sizeof(NextGIShadowReuse));
 	_storage_buffer(page_buffer, page_capacity, MAX(gpu_pages.size() + far_gpu_pages.size(), 1u), sizeof(NextGIRelightPageGPU));
 	_storage_buffer(index_buffer, index_capacity, MAX(gpu_indices.size(), 1u), sizeof(uint32_t));
@@ -1612,6 +1739,9 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 
 	if (!gpu_lights.is_empty()) {
 		rd->buffer_update(light_buffer, 0, gpu_lights.size() * sizeof(NextGILight), gpu_lights.ptr());
+		// GodotNext: nextgi_shadow_policy (#145)
+		rd->buffer_update(light_shadow_buffer, 0, light_shadows.size() * sizeof(uint32_t), light_shadows.ptr());
+		rd->buffer_update(far_light_shadow_buffer, 0, far_light_shadows.size() * sizeof(uint32_t), far_light_shadows.ptr());
 	}
 	if (!reuses.is_empty()) {
 		rd->buffer_update(reuse_buffer, 0, reuses.size() * sizeof(NextGIShadowReuse), reuses.ptr());
@@ -1653,8 +1783,30 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			candidate_key = key;
 		}
 	}
-	const RID shader_rid = swrt ? swrt_shader->shader.version_get_shader(swrt_shader->version, 0) : shader->shader.version_get_shader(shader->version, 0);
-	const RID pipeline = swrt ? swrt_shader->pipeline : shader->pipeline;
+	// GodotNext: nextgi_shadow_policy (#145). Variant 1 where the bindless texture table exists: alpha-tested casters
+	// sample their texture, and the rays that meet a caster whose alpha comes from shader code go to the material
+	// retrace when the hit groups have this frame's records.
+	// Only while a recent TLAS phase had a caster that needs it (NextGIRTScene::wants_shadow_alpha_variant()):
+	// otherwise the baked relight runs, as it did before, and no texture table is made for it.
+	NextGIRTScene *rt_scene = swrt ? nullptr : next_gi->get_rt_scene();
+	const bool alpha_variant = !swrt && _ensure_alpha_shader(rt_scene->wants_shadow_alpha_variant()) && rt_scene->ensure_shadow_texture_table().is_valid();
+	last_relight_variant = swrt ? -1 : (alpha_variant ? 1 : 0);
+	// GodotNext: nextgi_hwrt_mode (#286). The retrace traces through the hit groups only while they are available
+	// for it: never in Simplified Material or Inline, where no material any-hit stage exists.
+	NextGIHitMaterials *hit_materials = alpha_variant && next_gi->get_hit_availability_for(NEXTGI_HIT_CONSUMER_MATERIAL_RETRACE) == NEXTGI_HIT_AVAILABLE ? next_gi->get_hit_materials() : nullptr;
+	const uint32_t retrace_capacity = hit_materials != nullptr && near_ready && rt_scene->wants_shadow_retrace() && hit_materials->has_current_records() && _ensure_retrace_shader() ? uint32_t(NEXTGI_SHADOW_RETRACE_MAX_RECORDS) : 0u;
+	last_retrace_capacity = retrace_capacity;
+	if (alpha_variant && retrace_buffer.is_null()) {
+		retrace_buffer = rd->storage_buffer_create(nextgi_shadow_retrace_buffer_size(NEXTGI_SHADOW_RETRACE_MAX_RECORDS));
+		_reset_uniform_set();
+	}
+	if (alpha_variant) {
+		// Records appended, capacity: 0 turns the retrace off for this frame.
+		const uint32_t header[4] = { 0u, retrace_capacity, 0u, 0u };
+		rd->buffer_update(retrace_buffer, 0, sizeof(header), header);
+	}
+	const RID shader_rid = swrt ? swrt_shader->shader.version_get_shader(swrt_shader->version, 0) : (alpha_variant ? shader->alpha_shader_rid : shader->shader.version_get_shader(shader->version, 0));
+	const RID pipeline = swrt ? swrt_shader->pipeline : (alpha_variant ? shader->alpha_pipeline : shader->pipeline);
 	RID directional_tex = light_storage->directional_shadow_get_texture();
 	if (!directional_tex.is_valid()) {
 		directional_tex = dummy_depth;
@@ -1674,6 +1826,33 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 	static RID cached_near_tlas;
 	static RID cached_far_tlas;
 	static bool cached_swrt = false;
+	// GodotNext: nextgi_shadow_policy (#145). The RT scene's shadow instance words and alpha table.
+	const RID shadow_instances = swrt ? RID() : next_gi->get_rt_scene()->get_shadow_instance_buffer();
+	const RID shadow_alpha = swrt ? RID() : next_gi->get_rt_scene()->get_shadow_alpha_buffer();
+	static RID cached_shadow_instances;
+	static RID cached_shadow_alpha;
+	static bool cached_alpha_variant = false;
+	LocalVector<RD::Uniform> alpha_uniforms;
+	const uint64_t alpha_key = alpha_variant ? rt_scene->append_shadow_alpha_uniforms(23, 27, alpha_uniforms) : 0;
+	if (cached_shadow_instances != shadow_instances || cached_shadow_alpha != shadow_alpha || cached_alpha_variant != alpha_variant || shadow_alpha_key != alpha_key) {
+		_reset_uniform_set();
+		cached_shadow_instances = shadow_instances;
+		cached_shadow_alpha = shadow_alpha;
+		cached_alpha_variant = alpha_variant;
+		shadow_alpha_key = alpha_key;
+	}
+	// Set 1 of variant 1: the alpha path's bindless texture table.
+	if (alpha_variant) {
+		const RID table = rt_scene->ensure_shadow_texture_table();
+		if (shadow_texture_set.is_null() || shadow_texture_set_table != table || !rd->uniform_set_is_valid(shadow_texture_set)) {
+			if (shadow_texture_set.is_valid() && rd->uniform_set_is_valid(shadow_texture_set)) {
+				rd->free_rid(shadow_texture_set);
+			}
+			RD::Uniform table_uniform(RD::UNIFORM_TYPE_BINDLESS_TABLE, 0, table);
+			shadow_texture_set = rd->uniform_set_create(table_uniform, shader_rid, 1);
+			shadow_texture_set_table = table;
+		}
+	}
 	if (cached_directional != directional_tex || cached_positional != positional_tex || cached_cards != src->get_card_buffer() || cached_records != record_buffer || cached_near_tlas != tlas || cached_far_tlas != far_tlas || cached_swrt != swrt) {
 		_reset_uniform_set();
 		cached_directional = directional_tex;
@@ -1685,7 +1864,7 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		cached_swrt = swrt;
 	}
 	if (!uniform_set.is_valid()) {
-		RD::Uniform uniforms[20] = {
+		RD::Uniform uniforms[23] = {
 			RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, tlas),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 1, radiance),
 			RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, mask),
@@ -1706,16 +1885,33 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, probe_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, params_buffer),
 			RD::Uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 19, Vector<RID>({ material_sampler, indirect_texture })),
+			// GodotNext: nextgi_shadow_policy (#145). The hardware relight only.
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, shadow_instances),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, shadow_alpha),
+			RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, light_shadow_buffer),
 		};
 		if (swrt) {
 			// GodotNext: ps_swrt_trace (#186, #188). The sibling's set 0 holds the per-light candidate
 			// lists in place of the TLAS (#186 step 5), and there is no far field (HWRT only, plan L8).
 			uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, candidate_buffer);
 			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
-		} else {
-			uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
-			uniforms[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
-			far_uniform_set = rd->uniform_set_create(VectorView<RD::Uniform>(uniforms, 20), shader_rid, 0);
+		} else if (shadow_instances.is_valid() && shadow_alpha.is_valid()) {
+			// GodotNext: nextgi_shadow_policy (#145). Variant 1 adds the alpha path's arena chunks and sampler (23 to
+			// 27) and the retrace records (28). The far dispatch's words take the opaque path, which reads none of them.
+			LocalVector<RD::Uniform> list;
+			for (int i = 0; i < 23; i++) {
+				list.push_back(uniforms[i]);
+			}
+			if (alpha_variant) {
+				for (const RD::Uniform &uniform : alpha_uniforms) {
+					list.push_back(uniform);
+				}
+				list.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 28, retrace_buffer));
+			}
+			uniform_set = rd->uniform_set_create(list, shader_rid, 0);
+			list[0] = RD::Uniform(RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE, 0, far_tlas);
+			list[22] = RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, far_light_shadow_buffer);
+			far_uniform_set = rd->uniform_set_create(list, shader_rid, 0);
 		}
 	}
 	// GodotNext: ps_swrt_trace (#186, #188). Set 1: the global-SDF trace with this frame's scene
@@ -1733,9 +1929,30 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		rd->compute_list_bind_uniform_set(list, uniform_set, 0);
 		if (swrt) {
 			rd->compute_list_bind_uniform_set(list, trace_set, 1);
+		} else if (alpha_variant) {
+			rd->compute_list_bind_uniform_set(list, shadow_texture_set, 1); // GodotNext: nextgi_shadow_policy (#145)
 		}
 		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, gpu_pages.size());
 		rd->compute_list_end();
+		// GodotNext: nextgi_shadow_policy (#145). The rays this dispatch left to the material retrace: traced through
+		// the hit groups, then their mask bits written. Both launch at the full capacity; past the records appended
+		// they return at once.
+		if (retrace_capacity > 0 && hit_materials->trace_shadow_retrace(rt_scene, retrace_buffer, retrace_capacity, p_render_data->scene_data != nullptr ? float(p_render_data->scene_data->time) : 0.0f)) {
+			if (retrace_resolve_set.is_null() || !rd->uniform_set_is_valid(retrace_resolve_set)) {
+				LocalVector<RD::Uniform> resolve_uniforms;
+				resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 0, mask));
+				resolve_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, retrace_buffer));
+				retrace_resolve_set = rd->uniform_set_create(resolve_uniforms, retrace_shader->shader.version_get_shader(retrace_shader->version, 0), 0);
+			}
+			if (retrace_resolve_set.is_valid()) {
+				const RD::ComputeListID resolve_list = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(resolve_list, retrace_shader->pipeline);
+				rd->compute_list_bind_uniform_set(resolve_list, retrace_resolve_set, 0);
+				rd->compute_list_dispatch(resolve_list, (retrace_capacity + 63) / 64, 1, 1);
+				rd->compute_list_end();
+				retrace_frames++;
+			}
+		}
 	}
 	if (trace_set.is_valid()) {
 		rd->free_rid(trace_set);
@@ -1747,6 +1964,9 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 		const RD::ComputeListID list = rd->compute_list_begin();
 		rd->compute_list_bind_compute_pipeline(list, pipeline);
 		rd->compute_list_bind_uniform_set(list, far_uniform_set, 0);
+		if (alpha_variant) {
+			rd->compute_list_bind_uniform_set(list, shadow_texture_set, 1); // GodotNext: nextgi_shadow_policy (#145)
+		}
 		rd->compute_list_dispatch(list, (max_w + 7) / 8, (max_h + 7) / 8, far_gpu_pages.size());
 		rd->compute_list_end();
 	}
@@ -1817,6 +2037,22 @@ void NextGIRelight::relight(RenderDataRD *p_render_data) {
 					page["world"] = world;
 					mask_pages.push_back(page);
 				}
+			}
+		}
+	}
+	// GodotNext: nextgi_shadow_policy (#145). The retrace's records of this frame, for the fixtures.
+	if (read_mask && retrace_buffer.is_valid() && retrace_capacity > 0) {
+		const Vector<uint8_t> data = rd->buffer_get_data(retrace_buffer, 0, nextgi_shadow_retrace_buffer_size(retrace_capacity));
+		if (data.size() >= int64_t(nextgi_shadow_retrace_buffer_size(retrace_capacity))) {
+			const uint32_t *words = reinterpret_cast<const uint32_t *>(data.ptr());
+			retrace_appended = words[0];
+			retrace_occluded = 0;
+			retrace_clear = 0;
+			const uint32_t records = MIN(words[0], retrace_capacity);
+			for (uint32_t i = 0; i < records; i++) {
+				const uint32_t result = words[4 + i * 12 + 3];
+				retrace_occluded += result == NEXTGI_SHADOW_RETRACE_OCCLUDED ? 1 : 0;
+				retrace_clear += result == NEXTGI_SHADOW_RETRACE_CLEAR ? 1 : 0;
 			}
 		}
 	}
@@ -1974,6 +2210,20 @@ String NextGIRelight::build_shader_source(bool p_software) {
 	return p_software ? _nextgi_relight_source<NextgiSrcRelightSwrtShaderRD>() : _nextgi_relight_source<NextgiSrcRelightShaderRD>();
 }
 
+// GodotNext: nextgi_shadow_policy (#145)
+String NextGIRelight::build_hardware_shader_source(bool p_alpha) {
+	NextgiSrcRelightShaderRD relight;
+	relight.initialize(p_alpha ? get_shadow_alpha_variant_defines(true) : get_shader_variant_defines(true));
+	const RID version = relight.version_create(false);
+	ERR_FAIL_COND_V(!version.is_valid(), String());
+	const Vector<String> sources = relight.version_build_variant_stage_sources(version, 0);
+	relight.version_free(version);
+	if (sources.size() <= RenderingDevice::SHADER_STAGE_COMPUTE) {
+		return String();
+	}
+	return sources[RenderingDevice::SHADER_STAGE_COMPUTE];
+}
+
 void NextGIRelight::fill_info(Dictionary &r_info) const {
 	// GodotNext: nextgi_async_counters (#186). The readback callback writes the ray counters.
 	MutexLock lock(nextgi_relight_counter_mutex);
@@ -1982,6 +2232,15 @@ void NextGIRelight::fill_info(Dictionary &r_info) const {
 	r_info["src_radiance_bytes"] = int64_t(radiance_bytes);
 	r_info["src_relight_texels"] = int64_t(last_texels);
 	r_info["src_shadow_rays"] = int64_t(last_rays);
+	// GodotNext: nextgi_shadow_policy (#145)
+	r_info["src_shadow_alpha_variant"] = shader != nullptr && shader->alpha_pipeline.is_valid();
+	r_info["src_shadow_alpha_failed"] = shader != nullptr && shader->alpha_failed;
+	r_info["src_shadow_relight_variant"] = int64_t(last_relight_variant);
+	r_info["src_shadow_retrace_capacity"] = int64_t(last_retrace_capacity);
+	r_info["src_shadow_retrace_frames"] = int64_t(retrace_frames);
+	r_info["src_shadow_retrace_appended"] = int64_t(retrace_appended);
+	r_info["src_shadow_retrace_occluded"] = int64_t(retrace_occluded);
+	r_info["src_shadow_retrace_clear"] = int64_t(retrace_clear);
 	r_info["src_dirty_pages"] = int64_t(last_dirty_pages);
 	r_info["src_max_relight_age_frames"] = int64_t(last_max_age);
 	r_info["src_relight_rays"] = int64_t(last_rays);

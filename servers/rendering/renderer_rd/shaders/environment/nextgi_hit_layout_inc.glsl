@@ -149,6 +149,15 @@ layout(set = 0, binding = 33, std430) restrict readonly buffer HitPTMaterials {
 }
 hit_pt_materials;
 
+// GodotNext: nextgi_shadow_policy (#145). The shadow rays' material retrace (the ray generation stage with
+// NEXTGI_HIT_PARAMS_SHADOW_RETRACE): next_gi_shadow_policy.h's NextGIShadowRetraceRecord, three uvec4 per ray.
+// header = (records appended, capacity). A dummy buffer when the check or the path tracer runs.
+layout(set = 0, binding = 34, std430) restrict buffer HitShadowRetrace {
+	uvec4 header;
+	uvec4 data[];
+}
+hit_shadow_retrace;
+
 layout(set = 1, binding = 0) uniform texture2D hit_textures[];
 
 // Indexes the texture table with a run-time index. glslang sizes an unsized array that no code indexes
@@ -176,6 +185,9 @@ hit_params;
 // without the camera's Y flip, so its gl_FrontFacing is inverted; the material stages then decide the side
 // the same way. Consumers that shade hits never set it.
 #define NEXTGI_HIT_PARAMS_CAPTURE_FACING 1u
+// GodotNext: nextgi_shadow_policy (#145). The ray generation stage traces the shadow retrace records
+// (hit_shadow_retrace) instead of the check's samples.
+#define NEXTGI_HIT_PARAMS_SHADOW_RETRACE 2u
 
 // The payload (32 bytes): shading = (albedo RGBA8 with the opacity in alpha, octahedral normal
 // 2x snorm16, roughness | metallic << 8 | ao << 16 | flags << 24, emission R11G11B10F); hit = (t, material

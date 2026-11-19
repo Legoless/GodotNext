@@ -990,6 +990,14 @@ void MeshStorage::_mesh_nextgi_rt_clear_parts(Mesh *p_mesh) {
 		}
 	}
 	p_mesh->nextgi_parts.clear();
+	// GodotNext: nextgi_shadow_policy (#145). Shadow parts own no arena range.
+	for (NextGIRTPart &part : p_mesh->nextgi_shadow_parts) {
+		if (part.blas.is_valid()) {
+			RD::get_singleton()->free_rid(part.blas);
+			part.blas = RID();
+		}
+	}
+	p_mesh->nextgi_shadow_parts.clear();
 	p_mesh->nextgi_proxy_uploaded = false;
 	p_mesh->nextgi_proxy_alpha_excluded = 0;
 	_mesh_nextgi_release_empty_chunks();
@@ -1085,6 +1093,13 @@ LocalVector<MeshStorage::NextGIRTPart> *MeshStorage::mesh_nextgi_rt_get_parts(RI
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL_V(mesh, nullptr);
 	return &mesh->nextgi_parts;
+}
+
+// GodotNext: nextgi_shadow_policy (#145)
+LocalVector<MeshStorage::NextGIRTPart> *MeshStorage::mesh_nextgi_rt_get_shadow_parts(RID p_mesh) {
+	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
+	ERR_FAIL_NULL_V(mesh, nullptr);
+	return &mesh->nextgi_shadow_parts;
 }
 
 void MeshStorage::mesh_nextgi_rt_clear_parts(RID p_mesh) {
@@ -1842,6 +1857,12 @@ MeshStorage::NextGIRTStats MeshStorage::mesh_nextgi_get_rt_stats() const {
 		for (uint32_t i = 0; i < mesh->surface_count; i++) {
 			if (mesh->surfaces[i] != nullptr && mesh->surfaces[i]->rt_attr_chunk != UINT32_MAX) {
 				out.rt_attribute_surfaces++;
+			}
+		}
+		// GodotNext: nextgi_shadow_policy (#145). The shadow parts (never compacted) count as uncompacted BLAS bytes.
+		for (const NextGIRTPart &part : mesh->nextgi_shadow_parts) {
+			if (rd != nullptr && part.blas.is_valid()) {
+				out.blas_bytes_uncompacted += part.uncompacted_bytes > 0 ? part.uncompacted_bytes : rd->acceleration_structure_get_size_bytes(part.blas);
 			}
 		}
 		for (const NextGIRTPart &part : mesh->nextgi_parts) {

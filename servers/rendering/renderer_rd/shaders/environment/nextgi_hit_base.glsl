@@ -34,7 +34,32 @@ bool byte_close(uint p_a, uint p_b) {
 	return abs(int(p_a) - int(p_b)) <= 1;
 }
 
+// GodotNext: nextgi_shadow_policy (#145). One shadow retrace record: the ray again, now through the material
+// stages. Without opacity flags an opaque instance commits its first hit, and a non-opaque one (an alpha-tested
+// geometry, next_gi_shadow_policy.h) runs its group's any-hit stage, which ignores what the material's alpha
+// scissor or hash cuts; a group without an any-hit stage (the fallback group, opaque materials) commits. The cull
+// mask is the light word's, so the instances are exactly the light's casters. No closest-hit stage runs: the
+// payload keeps the hit flag set here unless the miss stage clears it.
+void shadow_retrace() {
+	uint index = gl_LaunchIDEXT.x;
+	if (index >= min(hit_shadow_retrace.header.x, hit_shadow_retrace.header.y)) {
+		return;
+	}
+	uvec4 info = hit_shadow_retrace.data[index * 3u];
+	vec4 origin_tmax = uintBitsToFloat(hit_shadow_retrace.data[index * 3u + 1u]);
+	vec3 direction = uintBitsToFloat(hit_shadow_retrace.data[index * 3u + 2u].xyz);
+	payload.shading = uvec4(0u, 0u, NEXTGI_HIT_PAYLOAD_HIT << 24u, 0u);
+	payload.hit = uvec4(floatBitsToUint(0.0), floatBitsToUint(0.0), 0u, 0u);
+	traceRayEXT(hit_tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsSkipClosestHitShaderEXT, info.y & 0xFFu, 0, 1, 0, origin_tmax.xyz, 0.0, direction, origin_tmax.w, 0);
+	bool occluded = ((payload.shading.z >> 24u) & NEXTGI_HIT_PAYLOAD_HIT) != 0u;
+	hit_shadow_retrace.data[index * 3u].w = occluded ? 1u : 2u;
+}
+
 void main() {
+	if ((hit_params.flags & NEXTGI_HIT_PARAMS_SHADOW_RETRACE) != 0u) {
+		shadow_retrace();
+		return;
+	}
 	uint sample_index = gl_LaunchIDEXT.x;
 	if (sample_index >= hit_params.sample_count || hit_params.job_count == 0u) {
 		return;
@@ -90,7 +115,9 @@ void main() {
 
 	payload.shading = uvec4(0u);
 	payload.hit = uvec4(floatBitsToUint(cone_width), floatBitsToUint(0.0), 0u, 0u);
-	traceRayEXT(hit_tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 1, 0, origin, 0.0, direction, t_max, 0);
+	// GodotNext: nextgi_shadow_policy (#145). GI's instances (mask bit 7), with forced opacity: an instance whose
+	// geometry an instance material makes alpha-tested is non-opaque for shadow rays only.
+	traceRayEXT(hit_tlas, gl_RayFlagsOpaqueEXT, 0x80, 0, 1, 0, origin, 0.0, direction, t_max, 0);
 	uint flags = payload.shading.z >> 24u;
 	bool any_hit_group = false;
 	if ((flags & NEXTGI_HIT_PAYLOAD_HIT) != 0u) {
@@ -153,7 +180,7 @@ void main() {
 	// ray hits exactly where the capture kept the texel.
 	payload.shading = uvec4(0u);
 	payload.hit = uvec4(floatBitsToUint(cone_width), floatBitsToUint(0.0), 0u, 0u);
-	traceRayEXT(hit_tlas, gl_RayFlagsNoOpaqueEXT, 0xFF, 0, 1, 0, origin, 0.0, direction, t_max, 0);
+	traceRayEXT(hit_tlas, gl_RayFlagsNoOpaqueEXT, 0x80, 0, 1, 0, origin, 0.0, direction, t_max, 0);
 	bool hit_again = ((payload.shading.z >> 24u) & NEXTGI_HIT_PAYLOAD_HIT) != 0u;
 	count(NEXTGI_HIT_CHECK_ANY_HIT_SAMPLES_COUNTER);
 	if (hit_again == (atlas_albedo_bytes.a >= 128u)) {
@@ -169,7 +196,7 @@ void main() {
 	// The probe: up to 4 units out of the card's face.
 	payload.shading = uvec4(0u);
 	payload.hit = uvec4(floatBitsToUint(cone_width), floatBitsToUint(0.0), 0u, 0u);
-	traceRayEXT(hit_tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 1, 0, origin, 0.01, -direction, 4.0, 0);
+	traceRayEXT(hit_tlas, gl_RayFlagsOpaqueEXT, 0x80, 0, 1, 0, origin, 0.01, -direction, 4.0, 0);
 	uint probe_flags = payload.shading.z >> 24u;
 	if ((probe_flags & NEXTGI_HIT_PAYLOAD_HIT) != 0u) {
 		count(NEXTGI_HIT_CHECK_PROBE_HITS_COUNTER);

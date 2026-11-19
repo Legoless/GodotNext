@@ -112,6 +112,10 @@ func _process(_delta: float) -> void:
 		_failures.append("rt_instance_cap %d does not count the %d over-budget elements" % [instance_cap, HUGE_COUNT])
 	if tlas_instances < SMALL_COUNT + PARTICLES:
 		_failures.append("tlas_instances %d does not include the %d small dynamic elements and %d particles" % [tlas_instances, SMALL_COUNT, PARTICLES])
+	# The RT visibility policy (#145): the GPU-written instances get one shadow instance word each.
+	var misaligned := int(counters.get("shadow_word_misaligned", -1))
+	if misaligned != 0:
+		_failures.append("shadow_word_misaligned %d: the shadow instance words fell out of step with the TLAS custom indices" % misaligned)
 
 	var ok := _failures.is_empty()
 	print("GODOTNEXT_RESULT " + JSON.stringify({
@@ -121,6 +125,8 @@ func _process(_delta: float) -> void:
 		"tlas_instances": tlas_instances,
 		"rt_instance_cap": instance_cap,
 		"rt_coverage": int(counters.get("rt_coverage", 0)),
+		"shadow_word_misaligned": misaligned,
+		"rt_gpu_written_instances": int(counters.get("rt_gpu_written_instances", -1)),
 		"failures": _failures,
 	}))
 	get_tree().quit(0 if ok else 1)

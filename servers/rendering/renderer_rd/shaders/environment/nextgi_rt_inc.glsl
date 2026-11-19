@@ -3,7 +3,9 @@
 // accelerationStructureEXT uniform, then includes this file.
 //
 // Rules for every includer:
-// - Opaque-only traversal: gl_RayFlagsOpaqueEXT, one rayQueryProceedEXT, no candidate loop.
+// - Opaque-only traversal: gl_RayFlagsOpaqueEXT, one rayQueryProceedEXT, no candidate loop. GodotNext:
+//   nextgi_shadow_policy (#145): the one exception is the shadow-ray include (nextgi_shadow_ray_inc.glsl), whose
+//   candidate loop plan §21.3 M4 requires for alpha-tested casters and unallocated caster masks.
 // - Workgroup shared memory stays at or under 8 KiB.
 // - Do not fetch triangle vertex positions, do not build an acceleration structure
 //   from a 64-bit address (OpConvertUToAccelerationStructureKHR), and do not read
@@ -15,6 +17,10 @@
 
 // GodotNext: ps_swrt_trace (#186). The hit record and the records are tier-neutral includes.
 #include "nextgi_hit_inc.glsl"
+
+// GodotNext: nextgi_shadow_policy (#145). GI rays see the TLAS instances with bit 7 (next_gi_shadow_policy.h):
+// the instances they saw before, and none of the shadow-only ones (alpha-tested and translucent surfaces, D17).
+const uint NEXTGI_RT_MASK_GI = 0x80u;
 
 NextGIHit nextgi_trace_opaque(vec3 origin, float tmin, vec3 dir, float tmax, uint mask) {
 	rayQueryEXT rq;
@@ -39,7 +45,7 @@ NextGIHit nextgi_trace_opaque(vec3 origin, float tmin, vec3 dir, float tmax, uin
 #undef NEXTGI_TLAS
 #define NEXTGI_TLAS nextgi_tlas
 NextGIHit nextgi_trace_near_opaque(vec3 origin, vec3 dir, float tmax) {
-	return nextgi_trace_opaque(origin, 0.0, dir, tmax, 0xFFu);
+	return nextgi_trace_opaque(origin, 0.0, dir, tmax, NEXTGI_RT_MASK_GI);
 }
 #undef NEXTGI_TLAS
 #define NEXTGI_TLAS NEXTGI_NEAR_TRACE_RESTORE
@@ -50,7 +56,7 @@ NextGIHit nextgi_trace_near_opaque(vec3 origin, vec3 dir, float tmax) {
 
 // Same query as nextgi_trace_opaque. The proceed stays in that one function.
 bool nextgi_trace(vec3 origin, vec3 direction, float tmax, out NextGIHit hit) {
-	hit = nextgi_trace_opaque(origin, 0.0, direction, tmax, 0xFFu);
+	hit = nextgi_trace_opaque(origin, 0.0, direction, tmax, NEXTGI_RT_MASK_GI);
 	return hit.hit;
 }
 

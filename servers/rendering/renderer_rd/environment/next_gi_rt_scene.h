@@ -39,6 +39,7 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_clipmaps.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_global_sdf_gpu.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_sdf.h"
+#include "servers/rendering/renderer_rd/environment/next_gi_shadow_policy.h"
 #include "servers/rendering/rendering_server_types.h"
 
 class RenderDataRD;
@@ -478,7 +479,8 @@ public:
 	}
 	// Encodes p_count elements of p_source_buffer into the GPU instance-record buffer at p_dest_offset.
 	// p_visible_count of them are active; the rest keep mask 0. Returns the records written.
-	uint32_t encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset = 0, RID p_count_buffer = RID());
+	// GodotNext: nextgi_shadow_policy (#145). p_mask is the active elements' TLAS mask.
+	uint32_t encode_gpu_instances(RID p_source_buffer, uint32_t p_source_stride_floats, uint32_t p_count, uint32_t p_visible_count, uint32_t p_dest_offset, RID p_blas, uint32_t p_id_base, uint32_t p_flags, const Vector3 &p_camera, float p_max_distance, float p_angle_limit, uint32_t p_source_element_offset = 0, RID p_count_buffer = RID(), uint32_t p_mask = 0xFFu);
 	RID get_gpu_instance_buffer() const { return gpu_instance_buffer; }
 	// GodotNext: ps_mesh_sdf_atlas (#185).
 	NextGISDFInstances &get_sdf_instances() { return sdf_instances; }
@@ -502,6 +504,33 @@ public:
 		double tlas_fill_ms = 0.0;
 		double scene_update_ms = 0.0;
 		uint64_t tlas_build_count = 0; // One TLAS rebuild per TLAS phase with instances.
+		// GodotNext: nextgi_shadow_policy (#145). TLAS instances of the last TLAS phase that only shadow rays see
+		// (alpha-tested and translucent surfaces), that are non-opaque (alpha-tested), and whose layers meet no
+		// allocated caster mask.
+		uint32_t shadow_only_instances = 0;
+		uint32_t shadow_alpha_instances = 0;
+		uint32_t shadow_unallocated_instances = 0;
+		// Alpha-tested geometries the bindless-texture path samples, BaseMaterial3D ones without an albedo texture
+		// (a constant alpha), those whose alpha comes from shader code and the retrace evaluates, and those neither
+		// path can evaluate (they shadow as opaque: a shader the hit groups refuse, a surface without its stream).
+		uint32_t shadow_texture_entries = 0;
+		uint32_t shadow_cut_entries = 0;
+		uint32_t shadow_retrace_entries = 0;
+		uint32_t shadow_opaque_alpha_entries = 0;
+		// TLAS instances the GPU wrote (dynamic MultiMesh and particle elements, #57), GI and shadow-only.
+		uint32_t gpu_written_instances = 0;
+	};
+
+	// GodotNext: nextgi_shadow_policy (#145). One TLAS instance GM-4's check builds its rays from: its triangles
+	// come from the mesh's CPU copy (MeshStorage::mesh_nextgi_get_cpu_geometry()).
+	struct ShadowCheckSource {
+		Transform3D transform;
+		AABB world_bounds;
+		uint32_t layers = 0;
+		RID mesh;
+		LocalVector<uint32_t> surfaces;
+		bool opaque_caster = true; // False for alpha-tested or translucent surfaces, skinned slots and GPU-written instances.
+		bool has_geometry = true; // False when its triangles are not on the CPU (rays near it are left out).
 	};
 
 private:
@@ -548,6 +577,72 @@ private:
 	// GodotNext: nextgeo_rt_native (#156). Exists only in native mode (EXPERIMENTAL); the fallback
 	// mode, the default, never creates it.
 	NextGIRTNative *native = nullptr;
+	// GodotNext: nextgi_shadow_policy (#145). The caster-mask allocation, and per TLAS custom index the shadow
+	// instance word (x, y) that nextgi_shadow_ray_inc.glsl reads, with the alpha table of the non-opaque
+	// instances' geometries.
+	NextGIShadowMaskAllocator shadow_allocator;
+	LocalVector<uint32_t> shadow_words;
+	LocalVector<NextGIShadowAlphaEntry> shadow_alpha;
+	RID shadow_instance_buffer;
+	RID shadow_alpha_buffer;
+	uint32_t shadow_instance_capacity = 0;
+	uint32_t shadow_alpha_capacity = 0;
+	uint32_t shadow_alpha_bits = 0;
+	bool shadow_check_sources_enabled = false;
+	LocalVector<ShadowCheckSource> shadow_check_sources;
+	// The bindless-texture alpha path (devices with bindless tables): the albedo textures of this frame's
+	// alpha-tested BaseMaterial3D casters in a table of their own, and whether a caster waits for its surface's
+	// attribute stream (NextGI then keeps the streams).
+	struct ShadowTextureSlot {
+		uint32_t slot = 0;
+		uint64_t frame = 0;
+	};
+	// What the alpha path knows about an alpha-tested material's shader code (ShaderData::nextgi_hit_serial, unique
+	// per code): whether BaseMaterial3D's texture alpha takes the bindless path, and the retrace verdict
+	// (next_gi_shadow_policy.h). Kept while the material was in a TLAS phase of the last
+	// NEXTGI_SHADOW_HYSTERESIS_FRAMES.
+	struct ShadowMaterialAlpha {
+		uint64_t serial = 0;
+		uint64_t frame = 0; // The last TLAS phase (shadow_frame) that used it.
+		bool texture_alpha = false;
+		bool hash = false;
+		uint32_t sampler_flags = 0; // NEXTGI_SHADOW_ALPHA_NEAREST and NEXTGI_SHADOW_ALPHA_CLAMP.
+		NextGIShadowRetraceVerdict verdict = NEXTGI_SHADOW_VERDICT_UNKNOWN;
+	};
+	RID shadow_texture_table;
+	RID shadow_dummy_buffer;
+	bool shadow_texture_table_failed = false;
+	HashMap<RID, ShadowTextureSlot> shadow_texture_slots;
+	HashMap<RID, ShadowMaterialAlpha> shadow_material_alpha;
+	bool shadow_streams_wanted = false;
+	uint64_t shadow_frame = 0;
+	// The last TLAS phase (shadow_frame) with a caster that needed the attribute streams, the retrace (and so the
+	// hit groups), or the relight's alpha variant. NextGI keeps each of them for NEXTGI_SHADOW_HYSTERESIS_FRAMES
+	// TLAS phases after it, so a caster missing from a phase or two (a BLAS rebuild, a cap, a hidden frame) does not
+	// free and rebuild them.
+	uint64_t shadow_streams_frame = 0;
+	uint64_t shadow_retrace_frame = 0;
+	uint64_t shadow_variant_frame = 0;
+	// Shadow instance words out of step with the TLAS custom indices (never expected; logged once).
+	uint64_t shadow_word_misaligned = 0;
+	bool _shadow_held(uint64_t p_frame) const { return p_frame != 0 && shadow_frame - p_frame < uint64_t(NEXTGI_SHADOW_HYSTERESIS_FRAMES); }
+	void _check_shadow_word(uint32_t p_custom_index_end);
+	uint32_t _shadow_texture_slot(RID p_rd_texture);
+	void _release_shadow_texture_slots();
+	// p_retrace: the instance has hit records, so shader-code alpha can go to the retrace (not a GPU-written one).
+	void _fill_shadow_alpha_entry(RID p_material, RID p_mesh, uint32_t p_surface, uint32_t p_first_triangle, bool p_retrace, NextGIShadowAlphaEntry &r_entry);
+	void _update_shadow_allocation(const ::RenderDataRD *p_render_data);
+	// One shadow instance word per TLAS instance, in TLAS order. p_alpha_base is the first alpha table entry of a
+	// non-opaque instance, or UINT32_MAX.
+	void _push_shadow_word(uint32_t p_layers, uint32_t p_alpha_base);
+	// The alpha table entries of a part's geometries when one is alpha-tested (for the instance's effective
+	// materials). Returns the first entry, or UINT32_MAX for an opaque instance (nothing is pushed).
+	uint32_t _push_shadow_alpha(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers, bool p_retrace);
+	// The word of a part's TLAS instance, and its alpha table entries when a geometry is alpha-tested. Returns the
+	// first entry, or UINT32_MAX for an opaque instance.
+	uint32_t _push_shadow_part(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, uint32_t p_layers);
+	void _push_shadow_check_source(RenderGeometryInstance *p_instance, RID p_mesh, const LocalVector<NextGIRTPartGeometry> &p_geometries, const Transform3D &p_transform, uint32_t p_layers);
+	void _upload_shadow_buffers();
 
 public:
 	// GodotNext: path_tracer (#167). What a surface record of the last TLAS phase draws: its geometry instance, mesh
@@ -609,6 +704,37 @@ public:
 	bool is_as_memory_exceeded() const { return as_memory_exceeded; }
 	// GodotNext: nextgeo_rt_native (#156). nullptr in the fallback mode.
 	const NextGIRTNative *get_native() const { return native; }
+	// GodotNext: nextgi_shadow_policy (#145). Valid after this frame's TLAS phase.
+	const NextGIShadowMaskAllocator::Allocation &get_shadow_allocation() const { return shadow_allocator.get_allocation(); }
+	uint32_t get_shadow_alpha_bits() const { return shadow_alpha_bits; }
+	// The light word trace_shadow() takes for a light with this caster mask, this frame.
+	uint32_t get_shadow_light_mode(uint32_t p_caster_mask) const { return nextgi_shadow_light_mode(shadow_allocator.get_allocation(), p_caster_mask, shadow_alpha_bits); }
+	RID get_shadow_instance_buffer() const { return shadow_instance_buffer; }
+	RID get_shadow_alpha_buffer() const { return shadow_alpha_buffer; }
+	// NextGI's bindless texture table, made on first use; invalid on a device without bindless tables. The shadow rays'
+	// alpha path and the material hit groups (NextGIHitMaterials) allocate their texture slots from it: Direct3D 12
+	// holds two texture or storage-buffer tables at a time, and the hit groups need a parameter table too.
+	RID ensure_shadow_texture_table();
+	// The other uniforms of the alpha path (nextgi_shadow_ray_inc.glsl with NEXTGI_SHADOW_ALPHA_TEXTURES): the first
+	// NEXTGI_SHADOW_ALPHA_CHUNKS arena chunks (a dummy for a missing chunk) and a linear repeating sampler. Returns a
+	// key of the resources, which changes when a set must be made again.
+	uint64_t append_shadow_alpha_uniforms(uint32_t p_chunk_binding, uint32_t p_sampler_binding, LocalVector<RD::Uniform> &r_uniforms);
+	// A 16-byte storage buffer for bindings a pass does not use.
+	RID get_shadow_dummy_buffer();
+	// An alpha-tested BaseMaterial3D caster with an albedo texture was in a recent TLAS phase (the last
+	// NEXTGI_SHADOW_HYSTERESIS_FRAMES): the bindless path reads its UVs from the attribute streams.
+	bool wants_shadow_streams() const { return _shadow_held(shadow_streams_frame); }
+	// An alpha-tested caster whose alpha comes from shader code, with a retrace verdict that is not OPAQUE, was in a
+	// recent TLAS phase: the retrace needs the material hit groups (to evaluate it, or to learn the verdict).
+	bool wants_shadow_retrace() const { return _shadow_held(shadow_retrace_frame); }
+	// A recent TLAS phase had a caster that only the relight's alpha variant evaluates (a sampled texture, a
+	// retrace, or a texture waiting for its stream). Without one the relight runs its baked variant.
+	bool wants_shadow_alpha_variant() const { return _shadow_held(shadow_variant_frame); }
+	bool has_shadow_texture_table() const { return shadow_texture_table.is_valid(); }
+	uint64_t get_shadow_word_misaligned() const { return shadow_word_misaligned; }
+	// GM-4's check asks for the sources of its rays; the TLAS phase records them only then.
+	void set_shadow_check_sources_enabled(bool p_enabled) { shadow_check_sources_enabled = p_enabled; }
+	const LocalVector<ShadowCheckSource> &get_shadow_check_sources() const { return shadow_check_sources; }
 	// True only after this frame's TLAS build, and only while line 1b has not rebuilt a BLAS the TLAS references.
 	bool is_tlas_traceable() const { return tlas_traceable; }
 	// GodotNext: path_tracer (#167). One SurfaceSource per surface record of the last TLAS phase, in record order,

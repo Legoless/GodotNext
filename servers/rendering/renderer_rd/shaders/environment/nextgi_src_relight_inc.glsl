@@ -211,8 +211,19 @@ void main() {
 	}
 
 	if (owner) {
+#ifdef NEXTGI_SHADOW_RETRACE_BINDING
+		// GodotNext: nextgi_shadow_policy (#145). A mask texel appends at most one retrace record per frame, for the
+		// first of its lights that needs one. Which light of the pair comes first flips on every visit of the pair
+		// (next_gi_shadow_policy.h, nextgi_shadow_retrace_turn()): the pairs repeat every n / 2 frames for an even n
+		// and every n frames for an odd n, so neither light waits for good.
+		uint turn_period = (page.shadowed_count & 1u) != 0u ? page.shadowed_count : page.shadowed_count / 2u;
+		uint slot_turn = nextgi_shadow_retrace_enabled() ? ((params.frame / max(turn_period, 1u)) & 1u) : 0u;
+		bool retrace_recorded = false;
+#else
+		uint slot_turn = 0u;
+#endif
 		for (uint s = 0u; s < slot_count; s++) {
-			uint light_slot = slots[s];
+			uint light_slot = slots[(s + slot_turn) % slot_count];
 			NextGILight light = lights.data[page_lights.data[page.light_offset + light_slot]];
 			uint reuse = light.flags >> 8u;
 			int reused = reuse != 0xFFFFFFu ? nextgi_reuse_state(reuse, world) : -1;
@@ -255,7 +266,24 @@ void main() {
 					lit = !nextgi_shadow_ray_to_light(origin, to_light, tmax, light_type, page_lights.data[page.light_offset + light_slot]);
 #else
 					vec3 origin = world + normal * rec.origin_offset;
-					lit = !nextgi_shadow_ray(origin, to_light, tmax);
+					// GodotNext: nextgi_shadow_policy (#145). The light's caster mask and the alpha-tested casters apply.
+					uint light_index = page_lights.data[page.light_offset + light_slot];
+					lit = !nextgi_shadow_ray(origin, to_light, tmax, light_index);
+#ifdef NEXTGI_SHADOW_RETRACE_BINDING
+					if (nextgi_shadow_retrace) {
+						// Only casters whose alpha comes from shader code stood in the way: the RT-pipeline retrace
+						// decides, and the resolve pass writes the bit after it. Until then the bit keeps its last
+						// answer, also when the texel already has a record this frame or the records are full. The
+						// record's ray counts against the ray budget (R2) like any other.
+						lit = (mask & (1u << light_slot)) != 0u;
+						if (!retrace_recorded && atomicAdd(counters.reserved, 1u) < params.ray_budget) {
+							retrace_recorded = nextgi_shadow_retrace_append(origin, to_light, tmax, light_shadows.data[light_index].x, uint(mask_coord.x) | (uint(mask_coord.y) << 16u), light_slot);
+							if (retrace_recorded) {
+								atomicAdd(counters.traced, 1u);
+							}
+						}
+					}
+#endif
 #endif
 				} else {
 					atomicAdd(counters.skipped, 1u);

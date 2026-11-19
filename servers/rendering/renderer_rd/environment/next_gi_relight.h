@@ -157,6 +157,31 @@ class NextGIRelight {
 	RID uniform_set;
 	RID far_uniform_set;
 	uint32_t light_capacity = 0;
+	// GodotNext: nextgi_shadow_policy (#145). Per light: the light word and caster mask of the near and far TLAS.
+	RID light_shadow_buffer;
+	RID far_light_shadow_buffer;
+	uint32_t light_shadow_capacity = 0;
+	uint32_t far_light_shadow_capacity = 0;
+	// The material retrace's records (next_gi_shadow_policy.h, NextGIShadowRetraceRecord), the bindless texture
+	// table's set, and the resolve pass that writes the retraced rays' mask bits.
+	RID retrace_buffer;
+	RID shadow_texture_set;
+	RID shadow_texture_set_table;
+	RID retrace_resolve_set;
+	uint64_t shadow_alpha_key = 0;
+	uint32_t last_retrace_capacity = 0;
+	uint64_t retrace_frames = 0;
+	// read_shadow_mask only: the last retrace's records, appended and by result.
+	uint32_t retrace_appended = 0;
+	uint32_t retrace_occluded = 0;
+	uint32_t retrace_clear = 0;
+	struct RetraceShaderState;
+	RetraceShaderState *retrace_shader = nullptr;
+	bool _ensure_retrace_shader();
+	// The relight variant the last hardware relight dispatched (1: the alpha variant), -1 for the software tier.
+	int last_relight_variant = -1;
+	// Compiles the alpha variant on the first frame p_wanted is true; true while it is ready and wanted.
+	bool _ensure_alpha_shader(bool p_wanted);
 	// GodotNext: ps_swrt_trace (#186 step 5). Per-light SWRT candidate lists (build_light_candidates),
 	// rebuilt when the lights or the software instances change.
 	RID candidate_buffer;
@@ -310,6 +335,8 @@ public:
 	float get_max_origin_offset() const;
 	uint32_t get_last_texels() const { return last_texels; }
 	uint32_t get_last_rays() const { return last_rays; }
+	// GodotNext: nextgi_shadow_policy (#145). The material retrace's capacity in the last relight (0: off).
+	uint32_t get_last_retrace_capacity() const { return last_retrace_capacity; }
 	uint32_t get_dirty_pages() const { return last_dirty_pages; }
 	uint32_t get_max_relight_age() const { return last_max_age; }
 
@@ -320,6 +347,13 @@ public:
 	// GodotNext: nextgi_vulkan (#50). The variant defines the runtime ShaderRD is initialized with, shared
 	// with the shader baker's bake-only instance (NextGIBakeShaders) so both resolve to the same cache path.
 	static Vector<String> get_shader_variant_defines(bool p_radiance_packed);
+	// GodotNext: nextgi_shadow_policy (#145). The hardware relight's alpha variant: get_shader_variant_defines()'s
+	// define with the shadow rays' bindless-texture alpha and their material retrace (NEXTGI_SHADOW_ALPHA_TEXTURES).
+	// A ShaderRD of its own that the shader baker does not bake: it compiles at runtime, on a device with bindless
+	// tables, on the first frame an alpha-tested caster needs it.
+	static Vector<String> get_shadow_alpha_variant_defines(bool p_radiance_packed);
+	// The compute source of the hardware relight (p_alpha: its alpha variant), for the doctests.
+	static String build_hardware_shader_source(bool p_alpha);
 
 	// GodotNext: ps_swrt_trace (#186 step 5, plan §21.2.6). The software relight's shadow rays
 	// toward a positional light march the mesh SDFs of the instances whose world bounds overlap

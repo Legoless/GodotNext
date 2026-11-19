@@ -100,7 +100,9 @@ bool path_tracer_trace(vec3 p_origin, vec3 p_dir, float p_tmax, out PathTracerHi
 	float tmin = 0.0;
 	bool cull = (ref_params.product.y & PATH_TRACER_FLAG_CULL) != 0u;
 	for (uint i = 0u; i <= PATH_TRACER_MAX_CULL_SKIPS; i++) {
-		NextGIHit hit = nextgi_trace_opaque(p_origin, tmin, p_dir, p_tmax, 0xFFu);
+		// GodotNext: nextgi_shadow_policy (#145). GI's instances (mask bit 7), as the D16 reference traces them: none of
+		// the shadow-only ones.
+		NextGIHit hit = nextgi_trace_opaque(p_origin, tmin, p_dir, p_tmax, NEXTGI_RT_MASK_GI);
 		if (!hit.hit) {
 			return false;
 		}
@@ -129,7 +131,9 @@ void path_tracer_prepare_hit(PathTracerHit p_hit, vec3 p_dir, inout vec3 r_norma
 	path_tracer_material = PATH_TRACER_TABLE(p_hit.surface);
 	payload.shading = uvec4(0u);
 	payload.hit = uvec4(floatBitsToUint(ref_params.ray_dx.w), floatBitsToUint(ref_params.ray_dy.w), 0u, 0u);
-	traceRayEXT(hit_tlas, gl_RayFlagsNoneEXT, 0xFF, 0, 1, 0, p_hit.origin, p_hit.tmin, p_dir, p_hit.t * 1.0001 + 1e-4, 0);
+	// GodotNext: nextgi_shadow_policy (#145). The instances the inline trace saw, with forced opacity: an instance whose
+	// geometry is alpha-tested is non-opaque for shadow rays only, so no any-hit stage runs here.
+	traceRayEXT(hit_tlas, gl_RayFlagsOpaqueEXT, NEXTGI_RT_MASK_GI, 0, 1, 0, p_hit.origin, p_hit.tmin, p_dir, p_hit.t * 1.0001 + 1e-4, 0);
 	uint flags = payload.shading.z >> 24u;
 	if ((flags & NEXTGI_HIT_PAYLOAD_HIT) == 0u || (flags & NEXTGI_HIT_PAYLOAD_FALLBACK) != 0u) {
 		return;

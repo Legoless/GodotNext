@@ -603,7 +603,9 @@ TEST_CASE("[NextGI][SWRT] The software siblings keep the hardware twins' set-0 b
 	relight_sibling_only.insert("light_candidates", 0);
 	const HashMap<String, SpirvBinding> relight_sibling_bindings = _spirv_bindings(relight_sibling);
 	CHECK(relight_sibling_bindings.has("light_candidates"));
-	_check_sibling_bindings(_spirv_bindings(relight_hardware), relight_sibling_bindings, {}, "SRC relight v0", relight_sibling_only);
+	// GodotNext: nextgi_shadow_policy (#145). The hardware relight's shadow rays read the shadow instance words (20),
+	// the alpha table (21) and the lights' words (22); the sibling's SDF shadow rays need none of them.
+	_check_sibling_bindings(_spirv_bindings(relight_hardware), relight_sibling_bindings, { 20, 21, 22 }, "SRC relight v0", relight_sibling_only);
 }
 
 // The built source is not preprocessed, so it is the same text for every variant apart from the
@@ -658,12 +660,16 @@ TEST_CASE("[NextGI][SWRT] The software siblings trace the SDF and carry no ray q
 	// The shared kernel's text holds both branches; the candidate buffer is the sibling's own.
 	const String relight_hardware_source = RendererRD::NextGIRelight::build_shader_source(false);
 	CHECK_FALSE(relight_hardware_source.contains("SWRTLightCandidates"));
-	CHECK(relight_hardware_source.contains("lit = !nextgi_shadow_ray(origin, to_light, tmax);"));
+	// GodotNext: nextgi_shadow_policy (#145). The hardware relight's shadow rays go through the shared include.
+	CHECK(relight_hardware_source.contains("lit = !nextgi_shadow_ray(origin, to_light, tmax, light_index);"));
+	CHECK(relight_hardware_source.contains("float trace_shadow(vec3 p_origin, vec3 p_direction, float p_tmax, uint p_light_mask_mode, uint p_layer_mask)"));
 	CHECK(relight_source.contains("vec3 origin = swrt_offset_origin(world, normal);"));
 	// Positional lights are aimed at from the offset origin (the ceiling-fixture GPU row checks it).
 	CHECK(relight_source.contains("to_light = light.position_inv_range.xyz - origin;"));
 	CHECK(gather_source.contains("resample_src(local, normalize(local_normal), rec.page_table, rec.card_set, resolved, projection)"));
 	CHECK(_spirv_declares_ray_query(_swrt_test_compile(RendererRD::NextGIRelight::build_shader_source(false), "the hardware SRC relight")));
+	// GodotNext: nextgi_shadow_policy (#145). The alpha variant: the shadow rays' bindless alpha and material retrace.
+	CHECK(_spirv_declares_ray_query(_swrt_test_compile(RendererRD::NextGIRelight::build_hardware_shader_source(true), "the hardware SRC relight's alpha variant")));
 	const Vector<uint8_t> relight_spirv = _swrt_test_compile(relight_source, "the software SRC relight");
 	REQUIRE_GE(relight_spirv.size(), 20);
 	CHECK_FALSE_MESSAGE(_spirv_declares_ray_query(relight_spirv), "the software SRC relight declares ray query");
