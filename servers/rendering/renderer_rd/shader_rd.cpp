@@ -1058,6 +1058,26 @@ void ShaderRD::version_set_raytracing_code(RID p_version, const HashMap<String, 
 	_version_set(version, p_code, p_custom_defines);
 }
 
+// GodotNext: nextgeo_shading_bins (#158)
+bool ShaderRD::version_get_fragment_code(RID p_version, HashMap<String, String> &r_code, String &r_uniforms, String &r_fragment_globals, Vector<String> &r_custom_defines) {
+	Version *version = version_owner.get_or_null(p_version);
+	ERR_FAIL_NULL_V(version, false);
+
+	MutexLock lock(*version->mutex);
+
+	r_code.clear();
+	for (const KeyValue<StringName, CharString> &E : version->code_sections) {
+		r_code[String(E.key)] = String::utf8(E.value.get_data());
+	}
+	r_uniforms = String::utf8(version->uniforms.get_data());
+	r_fragment_globals = String::utf8(version->fragment_globals.get_data());
+	r_custom_defines.clear();
+	for (const CharString &custom_define : version->custom_defines) {
+		r_custom_defines.push_back(String::utf8(custom_define.get_data()));
+	}
+	return true;
+}
+
 bool ShaderRD::version_is_valid(RID p_version) {
 	Version *version = version_owner.get_or_null(p_version);
 	ERR_FAIL_NULL_V(version, false);

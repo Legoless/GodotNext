@@ -139,6 +139,8 @@ uint32_t s_resolve_active_buckets = 0;
 uint32_t s_resolve_stage_a_draws = 0;
 uint32_t s_resolve_stage_b_draws = 0;
 bool s_resolve_stage_b_wrote = false;
+// GodotNext: nextgeo_shading_bins (#158)
+Dictionary s_shading_stats;
 Array s_last_shadow_views;
 int64_t s_last_shadow_tick = 0;
 int64_t s_last_shadow_render_frame = 0;
@@ -1436,6 +1438,10 @@ void NextGeoCut::_publish_stats(const PackedByteArray &p_data, uint32_t p_ring_s
 		info["resolve_stage_a_draws"] = int64_t(s_resolve_stage_a_draws);
 		info["resolve_stage_b_draws"] = int64_t(s_resolve_stage_b_draws);
 		info["resolve_stage_b_wrote"] = s_resolve_stage_b_wrote;
+		// GodotNext: nextgeo_shading_bins (#158)
+		for (const KeyValue<Variant, Variant> &E : s_shading_stats) {
+			info[E.key] = E.value;
+		}
 		info["shadow_views"] = s_last_shadow_views.duplicate(true);
 		info["shadow_tick"] = s_last_shadow_tick;
 		info["shadow_render_frame"] = s_last_shadow_render_frame;
@@ -2403,6 +2409,7 @@ void NextGeoCut::free_resources() {
 		s_resolve_stage_a_draws = 0;
 		s_resolve_stage_b_draws = 0;
 		s_resolve_stage_b_wrote = false;
+		s_shading_stats.clear(); // GodotNext: nextgeo_shading_bins (#158)
 		s_last_shadow_views.clear();
 		s_last_shadow_tick = 0;
 		s_last_shadow_render_frame = 0;
@@ -2424,6 +2431,15 @@ void NextGeoCut::set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a
 	s_last_stats["resolve_stage_a_draws"] = int64_t(p_stage_a_draws);
 	s_last_stats["resolve_stage_b_draws"] = int64_t(p_stage_b_draws);
 	s_last_stats["resolve_stage_b_wrote"] = p_stage_b_wrote;
+}
+
+// GodotNext: nextgeo_shading_bins (#158)
+void NextGeoCut::set_shading_stats(const Dictionary &p_stats) {
+	MutexLock lock(s_stats_mutex);
+	s_shading_stats = p_stats.duplicate();
+	for (const KeyValue<Variant, Variant> &E : s_shading_stats) {
+		s_last_stats[E.key] = E.value;
+	}
 }
 
 Dictionary NextGeoCut::get_last_stats() {

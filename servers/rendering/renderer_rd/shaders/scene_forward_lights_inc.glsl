@@ -300,6 +300,12 @@ void light_compute(hvec3 N, hvec3 L, hvec3 V, half A, hvec3 light_color, bool is
 #endif // LIGHT_CODE_USED
 }
 
+// GodotNext: nextgeo_shading_bins (#158). The pixel the shadow noise below is keyed on. NextGeo's compute
+// shading bins (forward_clustered/scene_forward_clustered.glsl) define it as the bin pixel's center.
+#ifndef NEXTGEO_FRAG_COORD
+#define NEXTGEO_FRAG_COORD gl_FragCoord
+#endif
+
 #ifndef SHADOWS_DISABLED
 
 // Interleaved Gradient Noise
@@ -326,7 +332,7 @@ half sample_directional_pcf_shadow(texture2D shadow, vec2 shadow_pixel_size, vec
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -353,7 +359,7 @@ half sample_pcf_shadow(texture2D shadow, vec2 shadow_pixel_size, vec3 coord, flo
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -379,7 +385,7 @@ half sample_omni_pcf_shadow(texture2D shadow, float blur_scale, vec2 coord, vec4
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -420,7 +426,7 @@ half sample_directional_soft_shadow(texture2D shadow, vec3 pssm_coord, vec2 tex_
 
 	mat2 disk_rotation;
 	{
-		float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+		float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 		float sr = sin(r);
 		float cr = cos(r);
 		disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -533,7 +539,7 @@ void light_process_omni(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 			mat2 disk_rotation;
 			{
-				float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+				float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 				float sr = sin(r);
 				float cr = cos(r);
 				disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -838,7 +844,7 @@ void light_process_spot(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 			mat2 disk_rotation;
 			{
-				float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+				float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 				float sr = sin(r);
 				float cr = cos(r);
 				disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));
@@ -1040,7 +1046,7 @@ void light_process_area(uint idx, vec3 vertex, hvec3 eye_vec, hvec3 normal, vec3
 
 			mat2 disk_rotation;
 			{
-				float r = quick_hash(gl_FragCoord.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI;
+				float r = quick_hash(NEXTGEO_FRAG_COORD.xy + vec2(taa_frame_count * 5.588238)) * 2.0 * M_PI; // GodotNext: nextgeo_shading_bins (#158)
 				float sr = sin(r);
 				float cr = cos(r);
 				disk_rotation = mat2(vec2(cr, -sr), vec2(sr, cr));

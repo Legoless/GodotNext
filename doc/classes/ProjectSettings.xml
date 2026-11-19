@@ -3467,8 +3467,11 @@
 		<member name="rendering/nextgeo/debug_programmable_raster" type="bool" setter="" getter="" default="false">
 			Route masked (alpha scissor, alpha hash, [code]discard[/code]) and vertex-offset ([code]VERTEX[/code] written in [code]vertex()[/code]) materials on virtual-geometry meshes through NextGeo's programmable raster bins, which run the material's raster program in the hybrid raster's software and hardware paths. It needs the hybrid raster (see [member rendering/nextgeo/raster_mode]); elsewhere these surfaces stay on legacy raster. It is off by default while the masked and vertex-offset features themselves are being built; with it off, such materials keep their legacy fallback reasons. Takes effect when a surface's material is next assigned.
 		</member>
+		<member name="rendering/nextgeo/debug_shading_bins_no_storage" type="bool" setter="" getter="" default="false">
+			Treat every output target of NextGeo's Stage A and Stage B as one the compute shading bins cannot write, so a view with [member rendering/nextgeo/shading_path] set to [code]Compute Bins[/code] shades through the tile quads with the reason [code]NO_STORAGE[/code], as it does on a device whose target formats lack storage support. For testing.
+		</member>
 		<member name="rendering/nextgeo/debug_stats" type="bool" setter="" getter="" default="false">
-			Publish the NextGeo cut counters and the GPU/CPU cut hash comparison through [method RenderingServer.virtual_geometry_get_debug_stats]. The counter read is queued asynchronously on a ring buffer so it does not add a mid-frame GPU stall. Leave it off outside tests.
+			Publish the NextGeo cut counters, the GPU/CPU cut hash comparison and the material shading-path stats ([code]shading_*[/code]: which of [member rendering/nextgeo/shading_path]'s paths shaded Stage A and Stage B, and why a stage kept the tile quads) through [method RenderingServer.virtual_geometry_get_debug_stats]. The counter read is queued asynchronously on a ring buffer so it does not add a mid-frame GPU stall. Leave it off outside tests.
 		</member>
 		<member name="rendering/nextgeo/debug_stats_interval" type="int" setter="" getter="" default="1">
 			Read the NextGeo cut debug stats every N frames instead of every frame, to limit the GPU stall during long sweeps.
@@ -3492,6 +3495,12 @@
 			How NextGeo meshes enter hardware ray tracing (the NextGI hardware tier's TLAS).
 			[b]Fallback[/b] (the default) traces each mesh's fixed ray tracing proxy, a cut built at import at [member rendering/global_illumination/nextgi/rt_max_error].
 			[b]Native (Experimental)[/b] traces BLASes built at run time from the resident pages, one per mesh and camera-distance band, with the band's error target capped at the proxy's error. Rebuilds follow page residency and are capped per frame; their BLAS memory is capped at twice the proxy BLAS memory, inside the ray tracing memory budget, and held there when either shrinks. Distance bands with the same cut share one BLAS. An instance whose BLAS is not built yet keeps its previous one, or the proxy; when the memory cap has room for the new BLAS only without the previous one, the instance traces the proxy until the new BLAS is built. Skinned instances, materials with custom vertex code and meshes with non-virtualized surfaces keep the proxy.
+		</member>
+		<member name="rendering/nextgeo/shading_path" type="int" setter="" getter="" default="0">
+			How NextGeo shades its materials after the visibility buffer is written (Stage A, the depth-prepass guides, and Stage B, the opaque colour).
+			[b]Auto[/b] (the default) shades through the tile quads for now; once the shading-bin comparison runs on a GPU class and passes, [code]Auto[/code] selects [code]Compute Bins[/code] there.
+			[b]Compute Bins[/b] bins every pixel by its material in a compute pass and shades each material's pixels with one indirect compute dispatch of its resolve, writing the targets as storage images. A material whose code can discard pixels or writes [code]DEPTH[/code] keeps the tile quads in the same frame, and so does a stage whose targets cannot be written as storage images (the DLSS-RR guides, or a format without storage support) or that shades at a variable rate.
+			[b]Tile Quads[/b] classifies 8×8 tiles per material and draws each material's tiles as quads.
 		</member>
 		<member name="rendering/nextgeo/streaming/debug_io_delay_ms" type="Vector2" setter="" getter="" default="Vector2(0, 0)">
 			Injects a deterministic seeded uniform wall-time IO delay in milliseconds ([code]Vector2(min_ms, max_ms)[/code]) on each background NextGeo page read request for slow-storage streaming stress tests. Set to [code]Vector2(0, 0)[/code] outside tests.

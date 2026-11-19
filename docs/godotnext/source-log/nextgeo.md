@@ -102,6 +102,20 @@ append with a per-bin prefix and scatter, and the per-bin dispatch and draw are 
 implementation's own design. No Unreal Engine documentation beyond what the plan already cites
 was read for them.
 
+### Material shading bins (#158)
+
+No outside input. The material shading bins (#158, plan §21.4 N7, GN-11, N3) were written from
+the plan and the issue: that Unreal Engine shades Nanite pixels through shading bins and compute
+is the plan's parity row (§21.4), which cites UE's public documentation; no UE page is recorded as
+read for this issue. The per-bucket bin words read through the v2.4 bucket table, the per-8x8-tile
+counts in shared memory, the exclusive prefix sum, the scatter of packed 16+16-bit pixel coordinates,
+the indirect arguments of ceil(count / 64) folded into balanced rows (65,535 workgroups per
+dimension is the minimum `maxComputeWorkGroupCount` Vulkan requires and Direct3D 12's
+per-dimension dispatch limit, values known to the implementer, not looked up), and the compute form of the Stage A/B resolve, which
+compiles the Forward+ fragment template itself (`#include_stage`) from the code the scene shader's
+version already holds, are this implementation's own design on GodotNext's #80 visibility resolve,
+following #155's pattern of a separate ShaderRD for a material's compute form. Copied files: none.
+
 ## Native Nanite ray tracing (#156)
 
 No outside input. `rendering/nextgeo/ray_tracing_mode`, the per-band cut buckets and

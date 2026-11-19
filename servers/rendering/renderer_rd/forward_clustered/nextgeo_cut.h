@@ -157,6 +157,9 @@ public:
 
 	RID get_clusters_buffer() const { return clusters; }
 	static void set_resolve_stats(uint32_t p_active_buckets, uint32_t p_stage_a_draws, uint32_t p_stage_b_draws, bool p_stage_b_wrote);
+	// GodotNext: nextgeo_shading_bins (#158). The shading path of the last main view's Stage A/B (keys
+	// shading_*), merged into the stats.
+	static void set_shading_stats(const Dictionary &p_stats);
 	static Dictionary get_last_stats();
 
 private:

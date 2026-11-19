@@ -4135,6 +4135,10 @@ void RenderingServer::init() {
 	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). Off until #153 and #164 route masked and
 	// vertex-offset materials through the programmable raster bins by default.
 	GLOBAL_DEF("rendering/nextgeo/debug_programmable_raster", false);
+	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Auto keeps the tile quads through the build; where
+	// GN-11 passes in PQ (§22), auto selects compute bins for that GPU class (Appendix A).
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/nextgeo/shading_path", PROPERTY_HINT_ENUM, "Auto,Compute Bins,Tile Quads"), 0);
+	GLOBAL_DEF("rendering/nextgeo/debug_shading_bins_no_storage", false);
 	// GodotNext: nextgeo_residency (#78).
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/geometry_cache_mb", PROPERTY_HINT_RANGE, "16,2047,1,suffix:MiB"), 512);
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/limits/nextgeo/page_upload_kib_per_frame", PROPERTY_HINT_RANGE, "64,65536,64,suffix:KiB"), 4096);

@@ -35,6 +35,8 @@
 #include "servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_hw.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/raster_material_sw.glsl.gen.h"
+// GodotNext: nextgeo_shading_bins (#158)
+#include "servers/rendering/renderer_rd/shaders/nextgeo/resolve_compute.glsl.gen.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/rendering_server_types.h"
 
@@ -205,6 +207,28 @@ public:
 		PIPELINE_VERSION_VSM_DEPTH,
 		PIPELINE_VERSION_MAX
 	};
+
+	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The variants of the Stage A/B resolve's compute
+	// form (resolve_compute_shader), one group each: Stage A's guides (+ voxel GI, + MegaLights inputs) and
+	// Stage B's colour (+ separate specular, + motion vectors). The RR guide targets have no storage usage,
+	// so Stage B with the guides keeps the tile quads and has no compute variant.
+	enum ResolveComputeVariant {
+		RESOLVE_COMPUTE_GUIDES,
+		RESOLVE_COMPUTE_GUIDES_VOXEL_GI,
+		RESOLVE_COMPUTE_GUIDES_ML,
+		RESOLVE_COMPUTE_GUIDES_VOXEL_GI_ML,
+		RESOLVE_COMPUTE_COLOR,
+		RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR,
+		RESOLVE_COMPUTE_COLOR_MOTION_VECTORS,
+		RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS,
+		RESOLVE_COMPUTE_VARIANT_MAX
+	};
+	static constexpr ResolveComputeVariant resolve_compute_stage_a_variant(bool p_voxel_gi, bool p_megalights_inputs) {
+		return ResolveComputeVariant(RESOLVE_COMPUTE_GUIDES + (p_voxel_gi ? 1 : 0) + (p_megalights_inputs ? 2 : 0));
+	}
+	static constexpr ResolveComputeVariant resolve_compute_stage_b_variant(bool p_separate_specular, bool p_motion_vectors) {
+		return ResolveComputeVariant(RESOLVE_COMPUTE_COLOR + (p_separate_specular ? 1 : 0) + (p_motion_vectors ? 2 : 0));
+	}
 
 	enum PipelineColorPassFlags {
 		PIPELINE_COLOR_PASS_FLAG_TRANSPARENT = 1 << 0, // Can't combine with SEPARATE_SPECULAR.
@@ -420,6 +444,29 @@ public:
 		RID raster_sw_version;
 		RID raster_hw_version;
 		bool nextgeo_raster_reject_logged = false;
+		// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The Stage A/B resolve's compute form: whether
+		// the material has one (a material NextGeo resolves, and whose code cannot discard or write DEPTH),
+		// whether it failed to compile or make a pipeline (it then keeps the tile quads until its code
+		// changes), its version, made from the scene shader version's code when a shading bin first takes the
+		// material, and its pipelines.
+		bool resolve_compute_valid = false;
+		bool resolve_compute_failed = false;
+		RID resolve_compute_version;
+		struct ResolveComputePipelineKey {
+			uint32_t variant = 0;
+			uint32_t spec_packed_0 = 0;
+			uint32_t spec_packed_1 = 0;
+			bool operator==(const ResolveComputePipelineKey &p_other) const {
+				return variant == p_other.variant && spec_packed_0 == p_other.spec_packed_0 && spec_packed_1 == p_other.spec_packed_1;
+			}
+			uint32_t hash() const {
+				uint32_t h = hash_murmur3_one_32(variant);
+				h = hash_murmur3_one_32(spec_packed_0, h);
+				h = hash_murmur3_one_32(spec_packed_1, h);
+				return hash_fmix32(h);
+			}
+		};
+		HashMap<ResolveComputePipelineKey, RID> resolve_compute_pipelines;
 		RSE::CullMode cull_mode = RSE::CULL_MODE_DISABLED;
 
 		bool stencil_enabled = false;
@@ -472,6 +519,13 @@ public:
 		// (image or buffer); invalid when this device does not build that storage.
 		RID get_raster_target_shader(bool p_hardware, bool p_buffer) const;
 		void _free_raster_target();
+		// GodotNext: nextgeo_shading_bins (#158). The compute form's shader and pipeline for one variant and
+		// specialization; invalid when the material has no compute form or it did not compile, which also
+		// marks the compute form failed.
+		bool has_resolve_compute() const { return resolve_compute_valid && !resolve_compute_failed; }
+		RID get_resolve_compute_shader(ResolveComputeVariant p_variant);
+		RID get_resolve_compute_pipeline(ResolveComputeVariant p_variant, ShaderSpecialization p_specialization);
+		void _free_resolve_compute();
 		virtual RenderingServerTypes::ShaderNativeSourceCode get_native_source_code() const override;
 		virtual Pair<ShaderRD *, RID> get_native_shader_and_version() const override;
 		virtual void get_extra_native_shader_and_versions(LocalVector<Pair<ShaderRD *, RID>> &r_versions) override;
@@ -527,6 +581,9 @@ public:
 	// enable on demand on devices with matching 64-bit atomic support.
 	RasterMaterialSwShaderRD raster_sw_shader;
 	RasterMaterialHwShaderRD raster_hw_shader;
+	// GodotNext: nextgeo_shading_bins (#158). The Stage A/B resolve's compute form, one group per
+	// ResolveComputeVariant; groups enable when a shading bin first uses them.
+	ResolveComputeShaderRD resolve_compute_shader;
 	bool raster_target_ready = false;
 	bool raster_image_int64_supported = false;
 	bool raster_buffer_int64_supported = false;

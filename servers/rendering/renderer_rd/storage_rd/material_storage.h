@@ -529,6 +529,11 @@ public:
 	bool owns_material(RID p_rid) { return material_owner.owns(p_rid); }
 
 	void _material_queue_update(Material *material, bool p_uniform, bool p_texture);
+	// GodotNext: nextgeo_shading_bins (#158). Queues p_material's texture update. A streaming texture swap
+	// (TextureStorage::texture_replace_compatible()) patches the material's own uniform set in place and
+	// leaves its texture cache on the freed RD texture, so a uniform set of another shader built from
+	// MaterialData::get_parameter_uniforms() asks for this when one of its textures is gone.
+	void material_queue_texture_update(RID p_material);
 	void _update_queued_materials();
 
 	virtual RID material_allocate() override;

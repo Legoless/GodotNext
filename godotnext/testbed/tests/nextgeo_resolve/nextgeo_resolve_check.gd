@@ -7,6 +7,11 @@ extends Node3D
 ## 3. Exclusion Matrix all 22 cells + frame-60 mesh mutation fallback.
 ## 4. Virtual-only StreamedTexture2D (.stex) mip convergence matching Forward+
 ##    within <= 120 frames via per-bucket material_feedback_index.
+## The user argument --nextgeo-shading-path=<n> sets rendering/nextgeo/shading_path (1: Compute Bins, #158),
+## so every phase also runs through the material shading bins: phases 1 to 3 then also check that every
+## Stage A/B shades its buckets with a compute form in their bins (phase 1: all of them; phases 2 and 3,
+## whose streamed textures can keep a bucket on the tile quads for a frame: at least one), and phase 4
+## that the virtual quad shades in its bin again after the last streaming swap.
 
 const ProbeScript = preload("res://tests/nextgeo_resolve/nextgeo_resolve_probe.gd")
 const ExclusionRules = preload("res://scenes/exclusion_matrix/exclusion_rules.gd")
@@ -15,6 +20,7 @@ const SENTINEL_U32 := 0xFFFFFFFF
 const REEXEC_ARG := "--nextgeo-resolve-reexec"
 const OVERRIDE_SRC := "res://tests/nextgeo_resolve/override.cfg"
 const OVERRIDE_DST := "res://override.cfg"
+const SHADING_PATH_ARG := "--nextgeo-shading-path="
 
 var _phase := ""
 var _phase_frame := 0
@@ -57,6 +63,10 @@ func _ready() -> void:
 	ProjectSettings.set_setting("rendering/nextgeo/visibility_only", false)
 	ProjectSettings.set_setting("rendering/nextgeo/debug_stats", true)
 	ProjectSettings.set_setting("rendering/nextgeo/debug_stats_interval", 1)
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with(SHADING_PATH_ARG):
+			ProjectSettings.set_setting("rendering/nextgeo/shading_path", arg.trim_prefix(SHADING_PATH_ARG).to_int())
+			_summary["shading_path"] = arg.trim_prefix(SHADING_PATH_ARG).to_int()
 
 	_start_phase_1()
 
@@ -95,6 +105,9 @@ func _reexec_with_streaming_override() -> void:
 		"--",
 		REEXEC_ARG,
 	])
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with(SHADING_PATH_ARG):
+			args.append(arg)
 	var output := []
 	var code := OS.execute(OS.get_executable_path(), args, output, true)
 	DirAccess.remove_absolute(dst_abs)
@@ -306,6 +319,7 @@ func _verify_p1_sample(p_label: String, p_expect_dynamic: bool) -> void:
 		"max_lsb_diff": max_diff,
 		"virt_inst": virt_inst,
 	}
+	_check_shading_bins("p1_" + p_label, vp_stats, true, true)
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +475,7 @@ func _verify_p2_step(p_tag: String, p_lightmapped: bool) -> void:
 		"stage_a_draws": int(vp_stats.get("resolve_stage_a_draws", 0)),
 		"stage_b_draws": int(vp_stats.get("resolve_stage_b_draws", 0)),
 	}
+	_check_shading_bins("p2_" + p_tag, vp_stats, not p_lightmapped, false)
 
 
 func _assert_instance_surface(p_inst: VisualInstance3D, p_surface: int, p_exp_route: String, p_exp_reason: String, p_ctx: String) -> void:
@@ -634,6 +649,45 @@ func _verify_p3_matrix(p_post_mutate: bool) -> void:
 		"double_dispatch": int(vp_stats.get("double_dispatch", -1)),
 		"missing": int(vp_stats.get("missing", -1)),
 	}
+	_check_shading_bins("p3_" + label, vp_stats, false, false)
+
+
+# With --nextgeo-shading-path=1 (#158): the main view's Stage A and B shaded their buckets with a compute
+# form in their shading bins (every one of them with p_all, else at least one), the other buckets in tile
+# quads, with no stage-wide fallback reason. p_require_compute: the step has a material with a compute form.
+func _check_shading_bins(p_label: String, p_stats: Dictionary, p_require_compute: bool, p_all: bool) -> void:
+	if int(ProjectSettings.get_setting("rendering/nextgeo/shading_path", 0)) != 1:
+		return
+	var buckets := int(p_stats.get("resolve_active_buckets", 0))
+	var compute_buckets := int(p_stats.get("shading_compute_buckets", 0))
+	var rejected := int(p_stats.get("shading_rejected_buckets", 0))
+	var stage_a := int(p_stats.get("shading_stage_a_compute", 0))
+	var stage_b := int(p_stats.get("shading_stage_b_compute", 0))
+	var quads_a := int(p_stats.get("shading_stage_a_tile_quads", 0))
+	var quads_b := int(p_stats.get("shading_stage_b_tile_quads", 0))
+	var reason_a := str(p_stats.get("shading_stage_a_reason", ""))
+	var reason_b := str(p_stats.get("shading_stage_b_reason", ""))
+	var binned := bool(p_stats.get("shading_binned", false))
+	_summary[p_label + "_shading"] = {
+		"buckets": buckets,
+		"compute_buckets": compute_buckets,
+		"rejected": rejected,
+		"compute": [stage_a, stage_b],
+		"tile_quads": [quads_a, quads_b],
+		"reasons": [reason_a, reason_b],
+		"binned": binned,
+	}
+	var detail := "buckets %d (%d with a compute form), binned %s, compute %d/%d, tile quads %d/%d, reasons %s/%s" % [buckets, compute_buckets, str(binned), stage_a, stage_b, quads_a, quads_b, reason_a, reason_b]
+	if str(p_stats.get("shading_path", "")) != "compute_bins" or compute_buckets + rejected != buckets:
+		_failures.append("%s: shading stats do not describe compute bins (path %s, %s)" % [p_label, str(p_stats.get("shading_path", "")), detail])
+		return
+	if compute_buckets == 0:
+		if p_require_compute:
+			_failures.append("%s: no bucket has a compute form (%s)" % [p_label, detail])
+		return
+	var expected := compute_buckets if p_all else 1
+	if not binned or reason_a != "NONE" or reason_b != "NONE" or stage_a < expected or stage_b < expected or (p_all and (quads_a != rejected or quads_b != rejected)):
+		_failures.append("%s: the buckets with a compute form did not shade in their bins (%s)" % [p_label, detail])
 
 
 # ---------------------------------------------------------------------------
@@ -803,13 +857,22 @@ func _tick_p4_streaming() -> void:
 		virt_green = virt_col.g > 0.25 and virt_col.g > virt_col.r * 2.0
 		fwd_green = fwd_col.g > 0.25 and fwd_col.g > fwd_col.r * 2.0
 
-	if vw == 512 and fw == 512 and virt_green and fwd_green and _phase_frame >= 4:
+	# With Compute Bins (#158), also wait until the virtual quad's material shades in its bin again after the
+	# last streaming swap, not through the tile quads it keeps until its texture cache is refreshed.
+	var compute_ready := true
+	var stage_b_compute := -1
+	if int(ProjectSettings.get_setting("rendering/nextgeo/shading_path", 0)) == 1:
+		var stats := RenderingServer.virtual_geometry_get_debug_stats(get_viewport().get_viewport_rid())
+		stage_b_compute = int(stats.get("shading_stage_b_compute", 0))
+		compute_ready = stage_b_compute >= 1
+	if vw == 512 and fw == 512 and virt_green and fwd_green and compute_ready and _phase_frame >= 4:
 		_summary["p4_streaming"] = {
 			"frames": _phase_frame,
 			"init_virt_w": _p4_init_virt_w,
 			"init_fwd_w": _p4_init_fwd_w,
 			"final_virt_w": vw,
 			"final_fwd_w": fw,
+			"shading_stage_b_compute": stage_b_compute,
 		}
 		_finish()
 		return

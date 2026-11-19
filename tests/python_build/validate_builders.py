@@ -45,6 +45,12 @@ FUNC_PATH_KWARGS: list[tuple[Callable[..., None], str, dict[str, Any]]] = [
         "tests/python_build/fixtures/rd_glsl/task_mesh.out",
         {"shader": "tests/python_build/fixtures/rd_glsl/task_mesh.glsl"},
     ),
+    # GodotNext: nextgeo_shading_bins (#158). A compute stage made of another file's fragment stage.
+    (
+        build_rd_header,
+        "tests/python_build/fixtures/rd_glsl/include_stage.out",
+        {"shader": "tests/python_build/fixtures/rd_glsl/include_stage.glsl"},
+    ),
 ]
 
 

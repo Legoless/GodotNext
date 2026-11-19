@@ -2457,6 +2457,14 @@ void MaterialStorage::_material_queue_update(Material *material, bool p_uniform,
 	material_update_list.add(&material->update_element);
 }
 
+// GodotNext: nextgeo_shading_bins (#158)
+void MaterialStorage::material_queue_texture_update(RID p_material) {
+	Material *material = material_owner.get_or_null(p_material);
+	if (material != nullptr && material->data != nullptr) {
+		_material_queue_update(material, false, true);
+	}
+}
+
 void MaterialStorage::_update_queued_materials() {
 	SelfList<Material>::List copy;
 	{

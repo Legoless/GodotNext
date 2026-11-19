@@ -84,6 +84,17 @@ class RenderForwardClustered : public RendererSceneRenderRD {
 	bool nextgeo_proxy_active = false;
 	bool nextgeo_rt_proxy_active = false;
 	LocalVector<uint32_t> nextgeo_bucket_table;
+	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Whether this view's Stage A/B may shade through
+	// compute bins (rendering/nextgeo/shading_path).
+	bool nextgeo_shading_compute_active = false;
+	// This frame's Stage A and B shading-path reasons, compute-form variants (-1: tile quads) and render pass
+	// sets' uniforms.
+	RendererRD::NextGeoShadingReason nextgeo_shading_stage_a_reason = RendererRD::NEXTGEO_SHADING_REASON_SETTING;
+	RendererRD::NextGeoShadingReason nextgeo_shading_stage_b_reason = RendererRD::NEXTGEO_SHADING_REASON_SETTING;
+	int32_t nextgeo_shading_stage_a_variant = -1;
+	int32_t nextgeo_shading_stage_b_variant = -1;
+	LocalVector<RD::Uniform> nextgeo_stage_a_pass_uniforms;
+	LocalVector<RD::Uniform> nextgeo_stage_b_pass_uniforms;
 	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). This frame's per-(instance, surface) raster-bin
 	// table (filled only while a programmable bin exists), the material of each programmable bin it
 	// uses, and whether the main view runs the hybrid raster that draws them. A surface with a
@@ -233,13 +244,20 @@ private:
 	virtual void setup_render_buffer_data(Ref<RenderSceneBuffersRD> p_render_buffers) override;
 
 	RID render_base_uniform_set;
+	// GodotNext: nextgeo_shading_bins (#158). render_base_uniform_set's uniforms, for the compute shading bins'
+	// own set 0.
+	Vector<RD::Uniform> render_base_uniforms;
 
 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
 
 	void _update_render_base_uniform_set();
 	RID _setup_sdfgi_render_pass_uniform_set(RID p_albedo_texture, RID p_emission_texture, RID p_emission_aniso_texture, RID p_geom_facing_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
+	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Fills r_stage for one stage's compute bins (Stage A
+	// or B with p_color_pass_flags) and returns why the stage keeps the tile quads, NONE when it does not.
+	RendererRD::NextGeoShadingReason _nextgeo_shading_stage(bool p_stage_b, const Ref<RenderSceneBuffersRD> &p_rb, const Ref<RenderBufferDataForwardClustered> &p_rb_data, bool p_voxel_gi, bool p_megalights_inputs, uint32_t p_color_pass_flags, bool p_zero_velocity_write, const LocalVector<RD::Uniform> &p_pass_uniforms, NextGeoResolve::ComputeStage &r_stage);
 	// GodotNext: megalights_decals (#136). p_cluster_buffer binds the cluster to the MegaLights input prepass.
-	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas = false, bool p_front_layer_pass = false, RID p_cluster_buffer = RID());
+	// GodotNext: nextgeo_shading_bins (#158). r_uniforms, when given, receives the set's uniforms.
+	RID _setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas = false, bool p_front_layer_pass = false, RID p_cluster_buffer = RID(), LocalVector<RD::Uniform> *r_uniforms = nullptr);
 
 	struct BestFitNormal {
 		BestFitNormalShaderRD shader;

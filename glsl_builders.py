@@ -124,6 +124,24 @@ def include_file_in_rd_header(filename: str, header_data: RDHeaderStruct, depth:
                 header_data.mesh_offset = header_data.line_offset
                 continue
 
+            # GodotNext: nextgeo_shading_bins (#158). `#include_stage "<file>" <stage>` puts one stage of another
+            # shader file, with its includes expanded, into the stage being read, so NextGeo's compute shading
+            # bins compile the Forward+ fragment template as compute without a copy of it.
+            if line.find("#include_stage ") != -1:
+                stage_args = line.replace("#include_stage ", "").strip().rsplit(" ", 1)
+                stage_file = os.path.relpath(os.path.dirname(filename) + "/" + stage_args[0].strip()[1:-1])
+                stage_data = RDHeaderStruct()
+                if include_file_in_rd_header(stage_file, stage_data, depth + 1) is None:
+                    print_error(f'In file "{filename}": #include_stage "{stage_file}" could not be found!"')
+                stage_lines = getattr(stage_data, stage_args[1] + "_lines", None)
+                if not stage_lines:
+                    print_error(f'In file "{filename}": "{stage_file}" has no {stage_args[1]} stage!"')
+                elif header_data.reading:
+                    getattr(header_data, header_data.reading + "_lines").extend(stage_lines)
+                line = fs.readline()
+                header_data.line_offset += 1
+                continue
+
             while line.find("#include ") != -1:
                 includeline = line.replace("#include ", "").strip()[1:-1]
 

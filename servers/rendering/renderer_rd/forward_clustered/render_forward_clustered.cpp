@@ -4973,6 +4973,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		const bool main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 		nextgeo_programmable_view_active = using_nextgeo && main_view && RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_raster_bins().get_active_count() > 0u && _nextgeo_view_runs_hybrid_raster();
 	}
+	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Compute shading bins when
+	// rendering/nextgeo/shading_path asks for them; auto keeps the tile quads through the build (§22).
+	nextgeo_shading_compute_active = using_nextgeo && !visibility_only && RendererRD::nextgeo_shading_path_wants_compute(RendererRD::NextGeoShadingPath(int(GLOBAL_GET("rendering/nextgeo/shading_path"))));
+	nextgeo_shading_stage_a_reason = RendererRD::NEXTGEO_SHADING_REASON_SETTING;
+	nextgeo_shading_stage_b_reason = RendererRD::NEXTGEO_SHADING_REASON_SETTING;
+	nextgeo_shading_stage_a_variant = -1;
+	nextgeo_shading_stage_b_variant = -1;
 
 	// GodotNext: megalights_inputs (#136). #143 takes over MegaLightsInputs::is_requested().
 	// Reflection probes leave the main view's targets alone. enable_view_shader_groups() is
@@ -5291,7 +5298,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RD::get_singleton()->draw_command_begin_label("Render Depth Pre-Pass");
 
 		// GodotNext: megalights_decals (#136). Only the MegaLights prepass binds the cluster.
-		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index, false, false, ml_prepass_cluster_buffer);
+		// GodotNext: nextgeo_shading_bins (#158). The set's uniforms also make Stage A's compute bins' set 1.
+		RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, nullptr, is_multiview, RID(), samplers, depth_prepass_uniform_buffer_index, false, false, ml_prepass_cluster_buffer, nextgeo_shading_compute_active ? &nextgeo_stage_a_pass_uniforms : nullptr);
 
 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
 		// GodotNext: nextgi_frame_block / nextgeo_visibility_raster (#83)
@@ -5398,10 +5406,22 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 				RD::get_singleton()->draw_command_begin_label("NextGeo Resolve Classify");
 				const bool nextgeo_classified = nextgeo_resolve.classify(RSG::virtual_mesh_storage, rb->get_nextgeo_visibility(), nextgeo_cut.get_clusters_buffer(), rb->get_internal_size());
 				RD::get_singleton()->draw_command_end_label();
+				// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). Per-pixel shading bins for the buckets
+				// whose material has a compute form; classify() still lists every bucket's tiles for the tile quads.
+				if (nextgeo_classified && nextgeo_shading_compute_active && nextgeo_resolve.get_compute_bucket_count() > 0) {
+					RENDER_TIMESTAMP("NextGeo Shading Bins");
+					RD::get_singleton()->draw_command_begin_label("NextGeo Shading Bins");
+					nextgeo_resolve.bin(RSG::virtual_mesh_storage, rb->get_nextgeo_visibility(), nextgeo_cut.get_clusters_buffer(), rb->get_internal_size(), p_render_data->render_region);
+					RD::get_singleton()->draw_command_end_label();
+				}
 				if (nextgeo_classified) {
 					RENDER_TIMESTAMP("NextGeo Stage A");
 					RD::get_singleton()->draw_command_begin_label("NextGeo Stage A");
 					bool stage_a_redraw = false;
+					// GodotNext: nextgeo_shading_bins (#158). Stage A's compute bins, when its targets are storable.
+					NextGeoResolve::ComputeStage stage_a_compute;
+					nextgeo_shading_stage_a_reason = _nextgeo_shading_stage(false, rb, rb_data, using_voxelgi, megalights_inputs_active, 0u, false, nextgeo_stage_a_pass_uniforms, stage_a_compute);
+					nextgeo_shading_stage_a_variant = nextgeo_shading_stage_a_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? int32_t(stage_a_compute.variant) : -1;
 					nextgeo_resolve.draw_stage_a(
 							RSG::virtual_mesh_storage,
 							rb->get_nextgeo_visibility(),
@@ -5416,7 +5436,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							p_render_data->render_region,
 							// GodotNext: megalights_inputs (#136)
 							megalights_inputs_active,
-							stage_a_redraw);
+							stage_a_redraw,
+							// GodotNext: nextgeo_shading_bins (#158)
+							nextgeo_shading_stage_a_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? &stage_a_compute : nullptr);
 					if (stage_a_redraw) {
 						RenderingServerDefault::redraw_request();
 					}
@@ -5497,7 +5519,8 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 
 	uint32_t opaque_pass_uniform_buffer_index = _setup_environment(p_render_data, is_reflection_probe, screen_size, screen_size, p_default_bg_color, true, using_motion_pass);
 
-	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true);
+	// GodotNext: nextgeo_shading_bins (#158). The set's uniforms also make Stage B's compute bins' set 1.
+	RID rp_uniform_set = _setup_render_pass_uniform_set(RENDER_LIST_OPAQUE, p_render_data, is_multiview, radiance_texture, samplers, opaque_pass_uniform_buffer_index, true, false, RID(), nextgeo_shading_compute_active ? &nextgeo_stage_b_pass_uniforms : nullptr);
 
 	{
 		bool render_motion_pass = !render_list[RENDER_LIST_MOTION].elements.is_empty();
@@ -5554,6 +5577,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 					RendererRD::RRGuides::clear_guides(stage_b_draw_flags, stage_b_clear, rr_has_specular, rr_has_velocity);
 				}
 				bool stage_b_redraw = false;
+				// GodotNext: nextgeo_shading_bins (#158). Stage B's compute bins, when its targets are storable.
+				NextGeoResolve::ComputeStage stage_b_compute;
+				nextgeo_shading_stage_b_reason = _nextgeo_shading_stage(true, rb, rb_data, using_voxelgi, megalights_inputs_active, opaque_color_pass_flags, zero_vel, nextgeo_stage_b_pass_uniforms, stage_b_compute);
+				nextgeo_shading_stage_b_variant = nextgeo_shading_stage_b_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? int32_t(stage_b_compute.variant) : -1;
 				const bool stage_b_opened = nextgeo_resolve.draw_stage_b(
 						RSG::virtual_mesh_storage,
 						rb->get_nextgeo_visibility(),
@@ -5570,7 +5597,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 						reverse_cull,
 						p_render_data->render_region,
 						stage_b_redraw,
-						stage_b_draws);
+						stage_b_draws,
+						// GodotNext: nextgeo_shading_bins (#158)
+						nextgeo_shading_stage_b_reason == RendererRD::NEXTGEO_SHADING_REASON_NONE ? &stage_b_compute : nullptr);
 				if (stage_b_redraw) {
 					RenderingServerDefault::redraw_request();
 				}
@@ -5600,6 +5629,29 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 						(!visibility_only && nextgeo_drew) ? nextgeo_resolve.get_last_published_stage_a_draws() : 0,
 						stage_b_draws,
 						stage_b_wrote);
+			}
+			// GodotNext: nextgeo_shading_bins (#158). With rendering/nextgeo/debug_stats, as the cut's counters:
+			// which path shaded Stage A/B, and why the tile quads stayed.
+			if (is_nextgeo_main_view && bool(GLOBAL_GET("rendering/nextgeo/debug_stats"))) {
+				Dictionary shading;
+				const bool resolved = !visibility_only && nextgeo_drew && nextgeo_resolve.get_bucket_count() > 0;
+				const uint32_t compute_buckets = resolved ? nextgeo_resolve.get_compute_bucket_count() : 0u;
+				const uint32_t stage_a_compute = resolved ? nextgeo_resolve.get_last_published_stage_a_compute() : 0u;
+				const uint32_t stage_b_compute = resolved ? nextgeo_resolve.get_last_published_stage_b_compute() : 0u;
+				shading["shading_path"] = nextgeo_shading_compute_active ? "compute_bins" : "tile_quads";
+				shading["shading_binned"] = resolved && nextgeo_resolve.is_binned();
+				shading["shading_compute_buckets"] = int64_t(compute_buckets);
+				shading["shading_rejected_buckets"] = int64_t(resolved ? nextgeo_resolve.get_bucket_count() - compute_buckets : 0u);
+				shading["shading_stage_a_compute"] = int64_t(stage_a_compute);
+				shading["shading_stage_b_compute"] = int64_t(stage_b_compute);
+				shading["shading_stage_a_tile_quads"] = int64_t(resolved ? nextgeo_resolve.get_last_published_stage_a_draws() - MIN(stage_a_compute, nextgeo_resolve.get_last_published_stage_a_draws()) : 0u);
+				shading["shading_stage_b_tile_quads"] = int64_t(stage_b_draws - MIN(stage_b_compute, stage_b_draws));
+				shading["shading_stage_a_reason"] = RendererRD::nextgeo_shading_reason_name(nextgeo_shading_stage_a_reason);
+				shading["shading_stage_b_reason"] = RendererRD::nextgeo_shading_reason_name(nextgeo_shading_stage_b_reason);
+				// SceneShaderForwardClustered::ResolveComputeVariant of each stage's compute bins, -1 for none.
+				shading["shading_stage_a_variant"] = int64_t(resolved ? nextgeo_shading_stage_a_variant : -1);
+				shading["shading_stage_b_variant"] = int64_t(resolved ? nextgeo_shading_stage_b_variant : -1);
+				NextGeoCut::set_shading_stats(shading);
 			}
 		}
 
@@ -7087,6 +7139,83 @@ void RenderForwardClustered::base_uniforms_changed() {
 	render_base_uniform_set = RID();
 }
 
+// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7).
+RendererRD::NextGeoShadingReason RenderForwardClustered::_nextgeo_shading_stage(bool p_stage_b, const Ref<RenderSceneBuffersRD> &p_rb, const Ref<RenderBufferDataForwardClustered> &p_rb_data, bool p_voxel_gi, bool p_megalights_inputs, uint32_t p_color_pass_flags, bool p_zero_velocity_write, const LocalVector<RD::Uniform> &p_pass_uniforms, NextGeoResolve::ComputeStage &r_stage) {
+	if (!nextgeo_shading_compute_active || p_rb.is_null() || p_rb_data.is_null()) {
+		return RendererRD::NEXTGEO_SHADING_REASON_SETTING;
+	}
+	if (nextgeo_resolve.get_compute_bucket_count() == 0u) {
+		return RendererRD::NEXTGEO_SHADING_REASON_COMPUTE_REJECTED;
+	}
+	if (!nextgeo_resolve.is_binned() || p_pass_uniforms.is_empty() || render_base_uniforms.is_empty()) {
+		return RendererRD::NEXTGEO_SHADING_REASON_SETTING;
+	}
+
+	// The stage's targets, in resolve_compute_inc.glsl's binding order; it declares their formats
+	// (NextGeoResolve::COMPUTE_STAGE_A_FORMATS and COMPUTE_STAGE_B_FORMATS).
+	RID targets[NextGeoResolve::COMPUTE_IMAGE_COUNT];
+	bool needed[NextGeoResolve::COMPUTE_IMAGE_COUNT] = {};
+	const RD::DataFormat *formats = p_stage_b ? NextGeoResolve::COMPUTE_STAGE_B_FORMATS : NextGeoResolve::COMPUTE_STAGE_A_FORMATS;
+	r_stage.flags = 0u;
+	if (!p_stage_b) {
+		r_stage.variant = SceneShaderForwardClustered::resolve_compute_stage_a_variant(p_voxel_gi, p_megalights_inputs);
+		targets[0] = p_rb_data->get_normal_roughness();
+		needed[0] = true;
+		if (p_megalights_inputs) {
+			targets[1] = p_rb->get_ml_albedo();
+			targets[2] = p_rb->get_ml_material();
+			needed[1] = needed[2] = true;
+		}
+		if (p_voxel_gi) {
+			targets[3] = p_rb_data->get_voxelgi();
+			needed[3] = true;
+		}
+		targets[4] = p_rb->get_nextgeo_instance_id();
+		needed[4] = true;
+	} else {
+		// The DLSS-RR albedo guides are attachments without storage usage.
+		if ((p_color_pass_flags & COLOR_PASS_FLAG_RR_GUIDES) != 0u) {
+			return RendererRD::NEXTGEO_SHADING_REASON_NO_STORAGE;
+		}
+		// The colour pass shades at the variable rate; a compute bin shades every pixel.
+		if (p_rb->has_texture(RB_SCOPE_VRS, RB_TEXTURE)) {
+			return RendererRD::NEXTGEO_SHADING_REASON_VRS;
+		}
+		const bool separate_specular = (p_color_pass_flags & COLOR_PASS_FLAG_SEPARATE_SPECULAR) != 0u;
+		const bool motion_vectors = (p_color_pass_flags & COLOR_PASS_FLAG_MOTION_VECTORS) != 0u;
+		r_stage.variant = SceneShaderForwardClustered::resolve_compute_stage_b_variant(separate_specular, motion_vectors);
+		targets[0] = p_rb->get_internal_texture();
+		needed[0] = true;
+		if (separate_specular) {
+			targets[1] = p_rb->get_texture(RB_SCOPE_FORWARD_CLUSTERED, RB_TEX_SPECULAR);
+			needed[1] = true;
+		}
+		if (motion_vectors) {
+			targets[2] = p_rb->get_velocity_buffer(false);
+			needed[2] = true;
+			r_stage.flags = p_zero_velocity_write ? NextGeoResolve::COMPUTE_FLAG_SKIP_VELOCITY : 0u;
+		}
+	}
+	const bool deny_storage = bool(GLOBAL_GET("rendering/nextgeo/debug_shading_bins_no_storage"));
+	for (uint32_t i = 0; i < NextGeoResolve::COMPUTE_IMAGE_COUNT; i++) {
+		r_stage.images[i] = RID();
+		if (!needed[i]) {
+			continue;
+		}
+		if (deny_storage || formats[i] == RD::DATA_FORMAT_MAX || !NextGeoResolve::compute_target_storable(targets[i], formats[i])) {
+			return RendererRD::NEXTGEO_SHADING_REASON_NO_STORAGE;
+		}
+		r_stage.images[i] = targets[i];
+	}
+
+	r_stage.scene_uniforms.clear();
+	for (const RD::Uniform &uniform : render_base_uniforms) {
+		r_stage.scene_uniforms.push_back(uniform);
+	}
+	r_stage.pass_uniforms = p_pass_uniforms;
+	return RendererRD::NEXTGEO_SHADING_REASON_NONE;
+}
+
 void RenderForwardClustered::_update_render_base_uniform_set() {
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -7276,11 +7405,13 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
 		}
 
 		render_base_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, scene_shader.default_shader_rd, SCENE_UNIFORM_SET);
+		render_base_uniforms = uniforms; // GodotNext: nextgeo_shading_bins (#158)
 	}
 }
 
 // GodotNext: megalights_decals (#136). p_cluster_buffer binds the cluster to a pass that has no render data.
-RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, bool p_front_layer_pass, RID p_cluster_buffer) {
+// GodotNext: nextgeo_shading_bins (#158). r_uniforms, when given, receives the set's uniforms.
+RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_render_list, const RenderDataRD *p_render_data, bool p_is_multiview, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index, bool p_use_directional_shadow_atlas, bool p_front_layer_pass, RID p_cluster_buffer, LocalVector<RD::Uniform> *r_uniforms) {
 	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
 
@@ -7751,6 +7882,10 @@ RID RenderForwardClustered::_setup_render_pass_uniform_set(RenderListType p_rend
 		}
 	}
 
+	// GodotNext: nextgeo_shading_bins (#158)
+	if (r_uniforms != nullptr) {
+		*r_uniforms = uniforms;
+	}
 	return UniformSetCacheRD::get_singleton()->get_cache_vec(scene_shader.get_default_shader_rd(is_multiview), RENDER_PASS_UNIFORM_SET, uniforms);
 }
 

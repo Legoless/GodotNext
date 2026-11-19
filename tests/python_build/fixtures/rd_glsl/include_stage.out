@@ -1,0 +1,17 @@
+#include "servers/rendering/renderer_rd/shader_rd.h"
+
+class IncludeStageShaderRD : public ShaderRD {
+public:
+	IncludeStageShaderRD() {
+		static const uint8_t _code_compressed[] = {
+			120, 218, 227, 226, 82, 46, 75, 45, 42, 206, 204, 207, 83, 48, 49, 53, 224, 226, 82, 14, 115, 13, 10, 246,
+			244, 247, 139, 119, 113, 117, 243, 244, 115, 13, 230, 226, 202, 73, 172, 204, 47, 45, 209, 200, 201, 79,
+			78, 44, 1, 41, 179, 85, 48, 208, 84, 200, 204, 83, 40, 75, 77, 54, 82, 40, 45, 139, 207, 204, 43, 73, 45,
+			42, 176, 230, 226, 42, 203, 207, 76, 81, 200, 77, 204, 204, 211, 208, 84, 168, 230, 226, 132, 75, 1, 117,
+			128, 212, 106, 24, 234, 0, 117, 90, 115, 213, 114, 49, 0, 0, 12, 213, 34, 149
+		};
+		const CharString _code = _decompress_code(_code_compressed, 112, 117);
+
+		setup(nullptr, nullptr, _code.get_data() + 0, "IncludeStageShaderRD");
+	}
+};

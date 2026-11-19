@@ -963,6 +963,19 @@ void main() {
 
 #VERSION_DEFINES
 
+// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). nextgeo/resolve_compute.glsl compiles this stage as
+// compute (NEXTGEO_RESOLVE_COMPUTE): one invocation per pixel of a material shading bin. NEXTGEO_FRAG_COORD
+// is the shaded pixel's coordinate, gl_FragCoord here and the bin pixel's center in the compute form, and
+// NEXTGEO_RESOLVE_DISCARD drops a pixel; both expand to the pixel stage's own tokens.
+#ifdef NEXTGEO_RESOLVE_COMPUTE
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+#define NEXTGEO_FRAG_COORD _ng_fragcoord
+#define NEXTGEO_RESOLVE_DISCARD return
+#else
+#define NEXTGEO_FRAG_COORD gl_FragCoord
+#define NEXTGEO_RESOLVE_DISCARD discard
+#endif
+
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
 
@@ -1175,6 +1188,11 @@ layout(set = MATERIAL_UNIFORM_SET, binding = 0, std140) uniform MaterialUniforms
 
 #GLOBALS
 
+// GodotNext: nextgeo_shading_bins (#158). The compute form keeps its outputs as globals and stores them.
+#ifdef NEXTGEO_RESOLVE_COMPUTE
+#include "../nextgeo/resolve_compute_inc.glsl"
+#else // !NEXTGEO_RESOLVE_COMPUTE
+
 #ifdef MODE_RENDER_DEPTH
 
 #ifdef MODE_RENDER_MATERIAL
@@ -1264,6 +1282,8 @@ layout(location = 3) out vec4 rr_diffuse_albedo_buffer;
 layout(location = 4) out vec4 rr_specular_albedo_buffer;
 #endif
 #endif
+
+#endif // !NEXTGEO_RESOLVE_COMPUTE
 
 #include "../scene_forward_aa_inc.glsl"
 
@@ -1705,7 +1725,7 @@ void fragment_shader(in SceneData scene_data) {
 
 	float normal_map_depth = 1.0;
 
-	vec2 screen_uv = gl_FragCoord.xy * scene_data.screen_pixel_size;
+	vec2 screen_uv = NEXTGEO_FRAG_COORD.xy * scene_data.screen_pixel_size; // GodotNext: nextgeo_shading_bins (#158)
 
 	float sss_strength = 0.0;
 
@@ -1840,7 +1860,12 @@ void fragment_shader(in SceneData scene_data) {
 #endif
 #endif
 
+		// GodotNext: nextgeo_shading_bins (#158). A compute invocation is never a helper invocation.
+#ifdef NEXTGEO_RESOLVE_COMPUTE
+		if (true) {
+#else
 		if (!gl_HelperInvocation) {
+#endif
 #if defined(STREAMING_LOD_USED)
 			// The shader supplied the level itself.
 			float footprint_sq = streaming_footprint_sq_from_lod(streaming_lod);
@@ -1911,7 +1936,8 @@ void fragment_shader(in SceneData scene_data) {
 		discard;
 	}
 #endif // USE_OPAQUE_PREPASS || ALPHA_ANTIALIASING_EDGE_USED
-#ifdef MODE_RENDER_NORMAL_ROUGHNESS
+// GodotNext: nextgeo_shading_bins (#158). NextGeo's compute shading bins never run in the front-layer pass.
+#if defined(MODE_RENDER_NORMAL_ROUGHNESS) && !defined(NEXTGEO_RESOLVE_COMPUTE)
 	if (bool(scene_data.flags & SCENE_DATA_FLAGS_NEXTGI_FRONT_LAYER)) {
 		float opaque_depth = texelFetch(nextgi_front_layer_opaque_depth, ivec2(gl_FragCoord.xy), 0).r;
 		if (alpha < 0.1 || gl_FragCoord.z < opaque_depth) {
@@ -2036,7 +2062,7 @@ void fragment_shader(in SceneData scene_data) {
 #ifdef USE_MULTIVIEW
 	uvec2 cluster_pos = uvec2(combined_uv.xy / scene_data.screen_pixel_size) >> implementation_data.cluster_shift;
 #else
-	uvec2 cluster_pos = uvec2(gl_FragCoord.xy) >> implementation_data.cluster_shift;
+	uvec2 cluster_pos = uvec2(NEXTGEO_FRAG_COORD.xy) >> implementation_data.cluster_shift; // GodotNext: nextgeo_shading_bins (#158)
 #endif
 	uint cluster_offset = (implementation_data.cluster_width * cluster_pos.y + cluster_pos.x) * (implementation_data.max_cluster_element_count_div_32 + 32);
 
@@ -2759,13 +2785,14 @@ void fragment_shader(in SceneData scene_data) {
 		if (reflection_accum.a > 0.0) {
 			indirect_specular_light = reflection_accum.rgb;
 		}
+		// GodotNext: nextgeo_shading_bins (#158). NEXTGEO_FRAG_COORD: compiled in the compute form, never set there.
 		if (bool(scene_data.flags & SCENE_DATA_FLAGS_NEXTGI_FRONT_LAYER)) {
-			float layer_depth = texelFetch(nextgi_front_layer_depth, ivec2(gl_FragCoord.xy), 0).r;
-			vec2 ndc = gl_FragCoord.xy / scene_data.viewport_size * 2.0 - 1.0;
+			float layer_depth = texelFetch(nextgi_front_layer_depth, ivec2(NEXTGEO_FRAG_COORD.xy), 0).r;
+			vec2 ndc = NEXTGEO_FRAG_COORD.xy / scene_data.viewport_size * 2.0 - 1.0;
 			vec4 view_position = inv_projection_matrix * vec4(ndc, layer_depth, 1.0);
 			float layer_view_z = view_position.z / view_position.w;
 			if (abs(vertex_interp.z - layer_view_z) <= 0.0001) {
-				indirect_specular_light = texelFetch(nextgi_front_layer_reflection, ivec2(gl_FragCoord.xy), 0).rgb;
+				indirect_specular_light = texelFetch(nextgi_front_layer_reflection, ivec2(NEXTGEO_FRAG_COORD.xy), 0).rgb;
 			}
 		}
 
@@ -3897,10 +3924,24 @@ void fragment_shader(in SceneData scene_data) {
 
 void main() {
 #ifdef MODE_VISIBILITY_RESOLVE
+#ifdef NEXTGEO_RESOLVE_COMPUTE
+	// GodotNext: nextgeo_shading_bins (#158). This invocation's pixel of its bin's list (the bin is the
+	// bucket); a slot past the bin's count shades nothing. The dispatch's width is the one PREFIX folded
+	// the bin's count to.
+	uint _ng_bin_word = resolve_push.bucket_id * NEXTGEO_SHADING_BIN_STATE_WORDS;
+	uint _ng_bin_count = nextgeo_shading_bins.data[_ng_bin_word + NEXTGEO_SHADING_BIN_STATE_COUNT];
+	uint _ng_slot = nextgeo_shading_slot(gl_WorkGroupID, nextgeo_shading_dispatch_args(_ng_bin_count).x, gl_LocalInvocationIndex);
+	if (_ng_slot >= _ng_bin_count) {
+		return;
+	}
+	ivec2 _ng_px = ivec2(nextgeo_shading_unpack_pixel(nextgeo_tile_list.data[nextgeo_shading_bins.data[_ng_bin_word + NEXTGEO_SHADING_BIN_STATE_OFFSET] + _ng_slot]));
+	_ng_fragcoord.xy = vec2(_ng_px) + 0.5;
+#else
 	ivec2 _ng_px = ivec2(gl_FragCoord.xy);
+#endif
 	uint _ng_vis_id = texelFetch(nextgeo_visibility_tex, _ng_px, 0).r;
 	if (_ng_vis_id == 0xFFFFFFFFu) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 
 	uint _ng_vis_cluster = _ng_vis_id >> 7u;
@@ -3908,27 +3949,27 @@ void main() {
 	uvec2 _ng_entry = nextgeo_visible_clusters.data[_ng_vis_cluster];
 	NextGeoInstanceRecord _ng_record = nextgeo_records.data[_ng_entry.x];
 	if ((_ng_record.flags & NEXTGEO_RECORD_VALID) == 0u) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 
 	NextGeoMeshRecord _ng_mesh = nextgeo_meshes.data[_ng_record.virtual_mesh];
 	if (_ng_mesh.page_count == 0u || _ng_entry.y < _ng_mesh.cluster_offset) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 	uint _ng_local_cluster = _ng_entry.y - _ng_mesh.cluster_offset;
 	if (_ng_local_cluster >= _ng_mesh.cluster_count) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 
 	uvec4 _ng_desc = nextgeo_cluster_table.data[_ng_mesh.page_table_offset + _ng_local_cluster];
 	uint _ng_surface_id = _ng_desc.w & 0xFFFFu;
 	if (_ng_surface_id >= 32u || (_ng_record.surface_mask & (1u << _ng_surface_id)) == 0u) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 
 	uint _ng_bucket_entry = nextgeo_bucket_table.data[_ng_record.bucket_base + _ng_surface_id];
 	if ((_ng_bucket_entry & NEXTGEO_BUCKET_ID_MASK) != resolve_push.bucket_id) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 
 	uint _ng_stride = _ng_desc.z & 0xFFu;
@@ -3936,7 +3977,7 @@ void main() {
 	uint _ng_tri_count = (_ng_desc.z >> 16u) & 0xFFu;
 	uint _ng_layout = (_ng_desc.z >> 24u) & 0xFFu;
 	if (_ng_tri_idx >= _ng_tri_count || _ng_stride < 3u || _ng_vert_count == 0u) {
-		discard;
+		NEXTGEO_RESOLVE_DISCARD;
 	}
 	if (_ng_layout == 0u) {
 		if (_ng_stride == 3u) {
@@ -3982,7 +4023,7 @@ void main() {
 		uint _ng_idx_byte = _ng_desc.y + _ng_tri_idx * 3u + _ng_corner;
 		uint _ng_v_idx = (nextgeo_pages.data[_ng_idx_byte >> 2u] >> ((_ng_idx_byte & 3u) * 8u)) & 0xFFu;
 		if (_ng_v_idx >= _ng_vert_count) {
-			discard;
+			NEXTGEO_RESOLVE_DISCARD;
 		}
 		uint _ng_w = _ng_desc.x + _ng_v_idx * _ng_stride;
 
@@ -4094,7 +4135,7 @@ void main() {
 	_ng_front_facing = (_ng_det > 0.0);
 
 	float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
-	vec2 _ng_p = gl_FragCoord.xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0;
+	vec2 _ng_p = NEXTGEO_FRAG_COORD.xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0;
 	vec2 _ng_dp = _ng_p - _ng_ndc0;
 	float _ng_l1 = (_ng_dp.x * _ng_e2.y - _ng_dp.y * _ng_e2.x) * _ng_inv_det;
 	float _ng_l2 = (_ng_e1.x * _ng_dp.y - _ng_e1.y * _ng_dp.x) * _ng_inv_det;
@@ -4116,7 +4157,7 @@ void main() {
 	vec3 _ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
 
 	vec3 _ng_z_ndc_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z) * _ng_inv_w;
-	_ng_fragcoord = vec4(gl_FragCoord.xy, dot(_ng_l, _ng_z_ndc_c), _ng_inv_w_sum);
+	_ng_fragcoord = vec4(NEXTGEO_FRAG_COORD.xy, dot(_ng_l, _ng_z_ndc_c), _ng_inv_w_sum);
 	_ng_fragcoord_ddx = vec4(1.0, 0.0, dot(_ng_dl_dx, _ng_z_ndc_c), _ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z);
 	_ng_fragcoord_ddy = vec4(0.0, 1.0, dot(_ng_dl_dy, _ng_z_ndc_c), _ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z);
 
@@ -4178,4 +4219,7 @@ void main() {
 #endif
 
 	fragment_shader(scene_data_block.data);
+#ifdef NEXTGEO_RESOLVE_COMPUTE
+	nextgeo_resolve_compute_store(_ng_px); // GodotNext: nextgeo_shading_bins (#158)
+#endif
 }

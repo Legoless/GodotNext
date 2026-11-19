@@ -4,13 +4,21 @@ from misc.utility.scons_hints import *
 Import("env")
 
 if "RD_GLSL" in env["BUILDERS"]:
-	gl_include_files = [str(f) for f in Glob("*_inc.glsl")]
-	glsl_files = [str(f) for f in Glob("*.glsl") if str(f) not in gl_include_files]
+    gl_include_files = [str(f) for f in Glob("*_inc.glsl")]
+    glsl_files = [str(f) for f in Glob("*.glsl") if str(f) not in gl_include_files]
 
-	env.Depends([f + ".gen.h" for f in gl_include_files], ["#glsl_builders.py"])
-	env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + ["#glsl_builders.py"])
+    env.Depends([f + ".gen.h" for f in gl_include_files], ["#glsl_builders.py"])
+    env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + ["#glsl_builders.py"])
+    # GodotNext: nextgeo_shading_bins (#158). resolve_compute.glsl is the Forward+ fragment stage
+    # (#include_stage), so it is rebuilt whenever that template or one of its includes changes.
+    env.Depends(
+        "resolve_compute.glsl.gen.h",
+        ["../forward_clustered/scene_forward_clustered.glsl"]
+        + [str(f) for f in Glob("../forward_clustered/*_inc.glsl")]
+        + [str(f) for f in Glob("../*_inc.glsl")],
+    )
 
-	for glsl_file in gl_include_files:
-		env.GLSL_HEADER(glsl_file)
-	for glsl_file in glsl_files:
-		env.RD_GLSL(glsl_file)
+    for glsl_file in gl_include_files:
+        env.GLSL_HEADER(glsl_file)
+    for glsl_file in glsl_files:
+        env.RD_GLSL(glsl_file)

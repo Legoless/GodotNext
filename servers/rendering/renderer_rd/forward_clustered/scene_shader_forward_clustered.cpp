@@ -36,6 +36,8 @@
 #include "core/config/engine.h"
 #include "servers/rendering/renderer_rd/forward_clustered/megalights_inputs.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
+// GodotNext: nextgeo_shading_bins (#158)
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_shading_bins.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
 #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
 #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
@@ -58,6 +60,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 
 	if (code.is_empty()) {
 		_free_raster_target();
+		_free_resolve_compute(); // GodotNext: nextgeo_shading_bins (#158)
 		raster_features = 0;
 		raster_rejects = 0;
 		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
@@ -215,6 +218,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 
 	if (err != OK) {
 		_free_raster_target();
+		_free_resolve_compute(); // GodotNext: nextgeo_shading_bins (#158)
 		raster_features = 0;
 		raster_rejects = 0;
 		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
@@ -377,6 +381,108 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 			ensure_raster_target();
 		}
 	}
+
+	// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The compute form of the Stage A/B resolve, for a
+	// material NextGeo resolves: the same code the tile quads compile (the Forward+ fragment stage with
+	// MODE_VISIBILITY_RESOLVE), so the compute form needs no compiler mode of its own. Its version is made
+	// from the scene shader version's code when a shading bin first takes the material, so nothing more is
+	// kept or compiled with tile quads.
+	_free_resolve_compute();
+	RendererRD::NextGeoShadingFacts shading_facts;
+	shading_facts.discard = uses_discard;
+	shading_facts.alpha_test = uses_alpha_clip;
+	shading_facts.alpha_antialiasing = uses_alpha_antialiasing;
+	shading_facts.depth_prepass_alpha = uses_depth_prepass_alpha;
+	shading_facts.writes_depth = writes_depth;
+	resolve_compute_valid = (nextgeo_fallback == RendererRD::NEXTGEO_FALLBACK_NONE || nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE) && !RendererRD::nextgeo_shading_compute_rejects(shading_facts);
+}
+
+// GodotNext: nextgeo_shading_bins (#158)
+RID SceneShaderForwardClustered::ShaderData::get_resolve_compute_shader(ResolveComputeVariant p_variant) {
+	ERR_FAIL_UNSIGNED_INDEX_V(uint32_t(p_variant), uint32_t(RESOLVE_COMPUTE_VARIANT_MAX), RID());
+	if (!has_resolve_compute() || SceneShaderForwardClustered::singleton == nullptr || version.is_null()) {
+		return RID();
+	}
+	ResolveComputeShaderRD &compute_shader = SceneShaderForwardClustered::singleton->resolve_compute_shader;
+	if (resolve_compute_version.is_null()) {
+		// The tile quads' code: what set_code() gave the scene shader's version.
+		HashMap<String, String> compute_code;
+		String compute_uniforms;
+		String compute_globals;
+		Vector<String> compute_defines;
+		if (!SceneShaderForwardClustered::singleton->shader.version_get_fragment_code(version, compute_code, compute_uniforms, compute_globals, compute_defines)) {
+			resolve_compute_failed = true;
+			return RID();
+		}
+		MutexLock lock(SceneShaderForwardClustered::singleton_mutex);
+		resolve_compute_version = compute_shader.version_create(false);
+		compute_shader.version_set_compute_code(resolve_compute_version, compute_code, compute_uniforms, compute_globals, compute_defines);
+	}
+	if (!compute_shader.is_group_enabled(p_variant)) {
+		compute_shader.enable_group(p_variant);
+	}
+	const RID shader_rid = compute_shader.version_get_shader(resolve_compute_version, p_variant);
+	if (shader_rid.is_null()) {
+		resolve_compute_failed = true;
+	}
+	return shader_rid;
+}
+
+RID SceneShaderForwardClustered::ShaderData::get_resolve_compute_pipeline(ResolveComputeVariant p_variant, ShaderSpecialization p_specialization) {
+	if (!has_resolve_compute()) {
+		return RID();
+	}
+	ResolveComputePipelineKey key;
+	key.variant = uint32_t(p_variant);
+	key.spec_packed_0 = p_specialization.packed_0;
+	key.spec_packed_1 = p_specialization.packed_1;
+	const RID *existing = resolve_compute_pipelines.getptr(key);
+	if (existing != nullptr) {
+		return *existing;
+	}
+	const RID shader_rid = get_resolve_compute_shader(p_variant);
+	if (shader_rid.is_null()) {
+		return RID();
+	}
+	// The specialization constants of the tile quads' pipelines (_create_pipeline()); the resolve never
+	// emulates point size.
+	Vector<RD::PipelineSpecializationConstant> specialization_constants;
+	RD::PipelineSpecializationConstant sc;
+	sc.constant_id = 0;
+	sc.int_value = p_specialization.packed_0;
+	sc.type = RD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_INT;
+	specialization_constants.push_back(sc);
+	sc.constant_id = 1;
+	sc.int_value = p_specialization.packed_1;
+	specialization_constants.push_back(sc);
+	sc = {};
+	sc.constant_id = 2;
+	sc.bool_value = false;
+	sc.type = RD::PIPELINE_SPECIALIZATION_CONSTANT_TYPE_BOOL;
+	specialization_constants.push_back(sc);
+	const RID pipeline = RD::get_singleton()->compute_pipeline_create(shader_rid, specialization_constants);
+	if (pipeline.is_null()) {
+		resolve_compute_failed = true;
+		return RID();
+	}
+	resolve_compute_pipelines.insert(key, pipeline);
+	return pipeline;
+}
+
+void SceneShaderForwardClustered::ShaderData::_free_resolve_compute() {
+	resolve_compute_valid = false;
+	resolve_compute_failed = false;
+	RenderingDevice *rd = RD::get_singleton();
+	for (const KeyValue<ResolveComputePipelineKey, RID> &E : resolve_compute_pipelines) {
+		if (rd != nullptr && E.value.is_valid() && rd->compute_pipeline_is_valid(E.value)) {
+			rd->free_rid(E.value);
+		}
+	}
+	resolve_compute_pipelines.clear();
+	if (resolve_compute_version.is_valid() && SceneShaderForwardClustered::singleton != nullptr) {
+		SceneShaderForwardClustered::singleton->resolve_compute_shader.version_free(resolve_compute_version);
+	}
+	resolve_compute_version = RID();
 }
 
 bool SceneShaderForwardClustered::ShaderData::ensure_raster_target() {
@@ -971,6 +1077,8 @@ SceneShaderForwardClustered::ShaderData::~ShaderData() {
 	pipeline_hash_map.clear_pipelines();
 	// GodotNext: nextgeo_raster_bins (#155).
 	_free_raster_target();
+	// GodotNext: nextgeo_shading_bins (#158).
+	_free_resolve_compute();
 
 	if (version.is_valid()) {
 		ERR_FAIL_NULL(SceneShaderForwardClustered::singleton);
@@ -1136,6 +1244,19 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		// GodotNext: megalights_inputs (#136). The F0 pack constants and ML_QUANTIZE_CHROMA reach every
 		// variant through the general defines; the MegaLights input variants use them.
 		shader.initialize(shader_versions, p_defines + String("\n") + RendererRD::MegaLightsInputs::glsl_pack_prelude(), Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
+
+		// GodotNext: nextgeo_shading_bins (#158, plan §21.4 N7). The compute form of the resolve variants above,
+		// with the same general defines and dynamic buffers, so its sets 0, 1 and 3 take the tile quads' uniforms.
+		Vector<ShaderRD::VariantDefine> compute_versions;
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_VOXEL_GI, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_ML, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_MEGALIGHTS_INPUTS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_GUIDES_VOXEL_GI_ML, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_RENDER_DEPTH\n#define MODE_RENDER_NORMAL_ROUGHNESS\n#define MODE_RENDER_VOXEL_GI\n#define MODE_MEGALIGHTS_INPUTS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR_MOTION_VECTORS, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MOTION_VECTORS\n", false));
+		compute_versions.push_back(ShaderRD::VariantDefine(RESOLVE_COMPUTE_COLOR_SEPARATE_SPECULAR_MOTION_VECTORS, "\n#define NEXTGEO_RESOLVE_COMPUTE\n#define MODE_VISIBILITY_RESOLVE\n#define MODE_SEPARATE_SPECULAR\n#define MOTION_VECTORS\n", false));
+		resolve_compute_shader.initialize(compute_versions, p_defines + String("\n") + RendererRD::MegaLightsInputs::glsl_pack_prelude(), Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
 
 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
 			shader.enable_group(SHADER_GROUP_MULTIVIEW);
