@@ -867,6 +867,9 @@ private:
 	RendererRD::TAA *taa = nullptr;
 	RendererRD::FSR2Effect *fsr2_effect = nullptr;
 	RendererRD::TSR *tsr_effect = nullptr;
+	// GodotNext: pt_tsr_async_compute (#193). The RD frame (get_frames_drawn()) whose async queue a
+	// TSR viewport last used; later TSR viewports of that frame record as level 0.
+	uint64_t tsr_async_frame = UINT64_MAX;
 	RendererRD::SSEffects *ss_effects = nullptr;
 
 #ifdef METAL_MFXTEMPORAL_ENABLED

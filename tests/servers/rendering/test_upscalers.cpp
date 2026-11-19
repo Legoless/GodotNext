@@ -1445,6 +1445,216 @@ TEST_CASE("[Upscalers][TSR] Debug draw value and debug view setting") {
 	}
 }
 
+// GodotNext: pt_tsr_async_compute (#193).
+namespace TestTSRAsync {
+
+constexpr uint32_t ALL_PASSES = (1u << TSR_PASS_MAX) - 1u;
+
+bool is_depth_velocity_pass(TSRPass p_pass) {
+	return p_pass == TSR_PASS_VELOCITY_DILATION || p_pass == TSR_PASS_DISOCCLUSION;
+}
+
+// One frame as TSR::process() records it: per record point in order, the role and the passes.
+struct FrameRecord {
+	TSRPointRole roles[TSR_RECORD_MAX];
+	TSRPointPasses passes[TSR_RECORD_MAX];
+	TSRPass order[TSR_PASS_MAX] = {};
+	uint32_t order_count = 0;
+	uint32_t async_mask = 0;
+};
+
+FrameRecord record_frame(const TSRAsyncSchedule &p_schedule, uint32_t p_frame_passes) {
+	FrameRecord frame;
+	for (uint32_t point = 0; point < TSR_RECORD_MAX; point++) {
+		frame.roles[point] = nextgi_tsr_point_role(p_schedule, TSRRecordPoint(point));
+		frame.passes[point] = nextgi_tsr_point_passes(p_schedule, TSRRecordPoint(point), p_frame_passes);
+		if (!frame.roles[point].runs()) {
+			continue; // process() returns before recording anything.
+		}
+		for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
+			if (frame.passes[point].records(TSRPass(i))) {
+				frame.order[frame.order_count++] = TSRPass(i);
+			}
+		}
+		frame.async_mask |= frame.passes[point].async_mask;
+	}
+	return frame;
+}
+
+// What every frame must do, at any level, with or without async compute: the once-per-frame work
+// once, at the first point that records, before any pass; advance_frame() once, at the upscaler's
+// place, which is the last point; every pass the frame runs recorded exactly once, at a point
+// whose process() call runs, in TSRPass order; no other pass; async passes only among them.
+void check_frame_invariants(const TSRAsyncSchedule &p_schedule, uint32_t p_frame_passes) {
+	const FrameRecord frame = record_frame(p_schedule, p_frame_passes);
+	uint32_t begins = 0;
+	uint32_t ends = 0;
+	int32_t first_running = -1;
+	uint32_t recorded = 0;
+	for (uint32_t point = 0; point < TSR_RECORD_MAX; point++) {
+		CAPTURE(point);
+		const TSRPointRole &role = frame.roles[point];
+		const TSRPointPasses &passes = frame.passes[point];
+		CHECK((passes.async_mask & ~passes.record_mask) == 0u);
+		CHECK((passes.record_mask & ~p_frame_passes) == 0u);
+		if (passes.record_mask != 0) {
+			CHECK(role.runs());
+		}
+		if (role.runs() && first_running < 0) {
+			first_running = int32_t(point);
+		}
+		begins += role.frame_begin ? 1 : 0;
+		ends += role.frame_end ? 1 : 0;
+		if (role.frame_begin) {
+			CHECK_EQ(int32_t(point), first_running);
+		}
+		if (role.frame_end) {
+			CHECK_EQ(point, uint32_t(TSR_RECORD_UPSCALE));
+		}
+		CHECK((recorded & passes.record_mask) == 0u);
+		recorded |= passes.record_mask;
+	}
+	CHECK_EQ(begins, 1u);
+	CHECK_EQ(ends, 1u);
+	CHECK_EQ(recorded, p_frame_passes);
+	for (uint32_t i = 1; i < frame.order_count; i++) {
+		CHECK(frame.order[i - 1] < frame.order[i]);
+	}
+}
+
+// The level-0 frame: one process() call at the upscaler's place that begins and ends the frame and
+// records every pass the frame runs on the main queue, in TSRPass order.
+void check_level_zero_frame(const TSRAsyncSchedule &p_schedule, uint32_t p_frame_passes) {
+	CHECK_FALSE(p_schedule.split);
+	CHECK_FALSE(p_schedule.uses_async());
+	CHECK_EQ(p_schedule.first_point(), TSR_RECORD_UPSCALE);
+	const FrameRecord frame = record_frame(p_schedule, p_frame_passes);
+	CHECK_FALSE(frame.roles[TSR_RECORD_AFTER_MOTION_VECTORS].runs());
+	CHECK_EQ(frame.passes[TSR_RECORD_AFTER_MOTION_VECTORS].record_mask, 0u);
+	CHECK(frame.roles[TSR_RECORD_UPSCALE].frame_begin);
+	CHECK(frame.roles[TSR_RECORD_UPSCALE].frame_end);
+	CHECK_EQ(frame.passes[TSR_RECORD_UPSCALE].record_mask, p_frame_passes);
+	CHECK_EQ(frame.async_mask, 0u);
+}
+
+} // namespace TestTSRAsync
+
+TEST_CASE("[Upscalers][TSR] Async compute setting and the passes each level moves") {
+	using namespace TestTSRAsync;
+
+	// The setting follows r.TSR.AsyncCompute's four levels, default 2, read live.
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	const String setting = "rendering/anti_aliasing/tsr/async_compute";
+	REQUIRE(ps->has_setting(setting));
+	CHECK_EQ(int64_t(ps->get_setting(setting)), TSR_ASYNC_DEFAULT_LEVEL);
+	CHECK_EQ(TSR_ASYNC_DEFAULT_LEVEL, int64_t(TSR_ASYNC_DEPTH_VELOCITY));
+	REQUIRE(ps->get_custom_property_info().has(StringName(setting)));
+	const PropertyInfo &info = ps->get_custom_property_info()[StringName(setting)];
+	CHECK_EQ(int(info.type), int(Variant::INT));
+	CHECK_EQ(int(info.hint), int(PROPERTY_HINT_ENUM));
+	CHECK_EQ(info.hint_string.split(",").size(), int(TSR_ASYNC_MAX));
+
+	// What each pass reads that this frame rendered decides the lowest level that moves it. No
+	// pass reads only earlier frames, so level 1 moves nothing.
+	CHECK_EQ(nextgi_tsr_pass_async_level(TSR_PASS_VELOCITY_DILATION), TSR_ASYNC_DEPTH_VELOCITY);
+	CHECK_EQ(nextgi_tsr_pass_async_level(TSR_PASS_DISOCCLUSION), TSR_ASYNC_DEPTH_VELOCITY);
+	for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
+		CAPTURE(i);
+		CHECK(nextgi_tsr_pass_async_level(TSRPass(i)) > TSR_ASYNC_HISTORY_CLEARS);
+		if (!is_depth_velocity_pass(TSRPass(i))) {
+			CHECK_EQ(nextgi_tsr_pass_async_level(TSRPass(i)), TSR_ASYNC_ALL);
+		}
+	}
+
+	// The passes a frame runs: the five core passes always, each optional pass with its feature.
+	const uint32_t core = nextgi_tsr_frame_passes(false, false, false, false, false);
+	CHECK_EQ(core, nextgi_tsr_pass_bit(TSR_PASS_VELOCITY_DILATION) | nextgi_tsr_pass_bit(TSR_PASS_DISOCCLUSION) | nextgi_tsr_pass_bit(TSR_PASS_SHADING_REJECTION) | nextgi_tsr_pass_bit(TSR_PASS_HISTORY_UPDATE) | nextgi_tsr_pass_bit(TSR_PASS_RESOLVE));
+	CHECK_EQ(nextgi_tsr_frame_passes(true, true, true, true, true), ALL_PASSES);
+	CHECK_EQ(nextgi_tsr_frame_passes(true, false, false, false, false), core | nextgi_tsr_pass_bit(TSR_PASS_FLICKER_ANALYSIS));
+	CHECK_EQ(nextgi_tsr_frame_passes(false, true, false, false, false), core | nextgi_tsr_pass_bit(TSR_PASS_THIN_ANALYSIS));
+	CHECK_EQ(nextgi_tsr_frame_passes(false, false, true, false, false), core | nextgi_tsr_pass_bit(TSR_PASS_REJECTION_AA));
+	CHECK_EQ(nextgi_tsr_frame_passes(false, false, false, true, false), core | nextgi_tsr_pass_bit(TSR_PASS_DEBUG_VIEW));
+	CHECK_EQ(nextgi_tsr_frame_passes(false, false, false, false, true), core | nextgi_tsr_pass_bit(TSR_PASS_PERSISTENT_STORE));
+
+	// The default parameters record every pass on the main queue in one call, as before #193.
+	const RendererRD::TSR::Parameters params;
+	CHECK_EQ(params.record_point, TSR_RECORD_UPSCALE);
+	check_level_zero_frame(params.async_schedule, ALL_PASSES);
+
+	// Every level, with and without async compute and the split, for every combination of the
+	// optional passes: the frame invariants hold; without async compute, at level 1, and at level 2
+	// without the split, the frame is level 0's.
+	const int64_t levels[] = { -3, 0, 1, 2, 3, 9 };
+	for (int64_t level : levels) {
+		for (int split_allowed = 0; split_allowed < 2; split_allowed++) {
+			for (uint32_t optional = 0; optional < 32; optional++) {
+				CAPTURE(level);
+				CAPTURE(split_allowed);
+				CAPTURE(optional);
+				const uint32_t frame_passes = nextgi_tsr_frame_passes((optional & 1) != 0, (optional & 2) != 0, (optional & 4) != 0, (optional & 8) != 0, (optional & 16) != 0);
+				const TSRAsyncSchedule without = nextgi_tsr_async_schedule(level, false, split_allowed != 0);
+				CHECK_EQ(without.level, uint32_t(CLAMP(level, int64_t(0), int64_t(3))));
+				CHECK_FALSE(without.async_active);
+				check_frame_invariants(without, frame_passes);
+				check_level_zero_frame(without, frame_passes);
+
+				const TSRAsyncSchedule with = nextgi_tsr_async_schedule(level, true, split_allowed != 0);
+				CHECK(with.async_active);
+				check_frame_invariants(with, frame_passes);
+				if (with.level <= TSR_ASYNC_HISTORY_CLEARS || (with.level == TSR_ASYNC_DEPTH_VELOCITY && split_allowed == 0)) {
+					check_level_zero_frame(with, frame_passes);
+				}
+			}
+		}
+	}
+
+	// Level 2: velocity dilation and parallax disocclusion on the async queue at the frame's first
+	// process() call, right after the motion vectors, which does the once-per-frame work; every
+	// other pass on the main queue at the upscaler's place, which ends the frame.
+	const TSRAsyncSchedule level2 = nextgi_tsr_async_schedule(2, true, true);
+	CHECK(level2.split);
+	CHECK(level2.uses_async());
+	const FrameRecord frame2 = record_frame(level2, ALL_PASSES);
+	CHECK(frame2.roles[TSR_RECORD_AFTER_MOTION_VECTORS].frame_begin);
+	CHECK_FALSE(frame2.roles[TSR_RECORD_AFTER_MOTION_VECTORS].frame_end);
+	CHECK_FALSE(frame2.roles[TSR_RECORD_UPSCALE].frame_begin);
+	CHECK(frame2.roles[TSR_RECORD_UPSCALE].frame_end);
+	for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
+		CAPTURE(i);
+		const bool early = is_depth_velocity_pass(TSRPass(i));
+		CHECK_EQ(frame2.passes[TSR_RECORD_AFTER_MOTION_VECTORS].records(TSRPass(i)), early);
+		CHECK_EQ(frame2.passes[TSR_RECORD_AFTER_MOTION_VECTORS].runs_async(TSRPass(i)), early);
+		CHECK_EQ(frame2.passes[TSR_RECORD_UPSCALE].records(TSRPass(i)), !early);
+		CHECK_FALSE(frame2.passes[TSR_RECORD_UPSCALE].runs_async(TSRPass(i)));
+	}
+	REQUIRE_EQ(frame2.order_count, uint32_t(TSR_PASS_MAX));
+	for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
+		CHECK_EQ(frame2.order[i], TSRPass(i));
+	}
+
+	// Level 3: every pass on the async queue, all at the upscaler's place (one fork-join window).
+	for (int split_allowed = 0; split_allowed < 2; split_allowed++) {
+		const TSRAsyncSchedule level3 = nextgi_tsr_async_schedule(3, true, split_allowed != 0);
+		CHECK_FALSE(level3.split);
+		CHECK_EQ(level3.first_point(), TSR_RECORD_UPSCALE);
+		const FrameRecord frame3 = record_frame(level3, ALL_PASSES);
+		CHECK_FALSE(frame3.roles[TSR_RECORD_AFTER_MOTION_VECTORS].runs());
+		CHECK_EQ(frame3.passes[TSR_RECORD_UPSCALE].record_mask, ALL_PASSES);
+		CHECK_EQ(frame3.passes[TSR_RECORD_UPSCALE].async_mask, ALL_PASSES);
+	}
+	CHECK_EQ(nextgi_tsr_async_schedule(9, true, true).level, uint32_t(TSR_ASYNC_ALL));
+	CHECK(nextgi_tsr_point_passes(nextgi_tsr_async_schedule(9, true, true), TSR_RECORD_UPSCALE, ALL_PASSES).runs_async(TSR_PASS_RESOLVE));
+
+	// Only the first single-view TSR viewport of an RD frame that uses the async queue gets it.
+	CHECK(nextgi_tsr_async_available(true, 1, 7, UINT64_MAX));
+	CHECK(nextgi_tsr_async_available(true, 1, 7, 6));
+	CHECK_FALSE(nextgi_tsr_async_available(true, 1, 7, 7));
+	CHECK_FALSE(nextgi_tsr_async_available(false, 1, 7, 6));
+	CHECK_FALSE(nextgi_tsr_async_available(true, 2, 7, 6));
+	CHECK_FALSE(nextgi_tsr_async_available(true, 2, 7, UINT64_MAX));
+}
+
 TEST_CASE("[Upscalers][DynRes] 16-bucket table, project settings defaults, and scale_range intersection") {
 	ProjectSettings *ps = ProjectSettings::get_singleton();
 	REQUIRE(ps != nullptr);

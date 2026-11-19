@@ -2933,6 +2933,15 @@
 		<member name="rendering/anti_aliasing/screen_space_roughness_limiter/limit" type="float" setter="" getter="" default="0.18">
 			[b]Note:[/b] This property is only read when the project starts. To control the screen-space roughness limiter at runtime, call [method RenderingServer.screen_space_roughness_limiter_set_active] instead.
 		</member>
+		<member name="rendering/anti_aliasing/tsr/async_compute" type="int" setter="" getter="" default="2">
+			Which Temporal Super Resolution (TSR) passes run on the async compute queue, so that they can overlap other rendering work on the GPU. It takes effect only while [RenderingDevice] has an async compute queue ([member rendering/rendering_device/async_compute] and a driver that supports it); without one, every level renders exactly as Off. The output is the same at every level. Only the first TSR viewport of each frame that uses the async queue gets it; the other TSR viewports of that frame, and viewports that render more than one view (XR), render as Off.
+			- [b]Off[/b]: every TSR pass runs on the main queue, after the transparent pass.
+			- [b]History Clears Only[/b]: passes that read nothing the current frame rendered. TSR has none (it resets its history in its shaders), so this renders as Off.
+			- [b]Depth and Velocity Passes[/b]: velocity dilation and parallax disocclusion, which read only the depth and velocity buffers, run on the async queue right after the motion vectors are drawn. The passes that read the scene color wait for them on the main queue. These two passes stay on the main queue in a frame where something after the motion vectors can change the depth or velocity: MSAA, a transparent material with [code]depth_draw_always[/code], a [CompositorEffect] between the opaque pass and the upscaler, or a VoxelGI or SDFGI debug draw.
+			- [b]All Passes[/b]: every TSR pass runs on the async queue, after the transparent pass.
+			[b]Note:[/b] The next pass that draws with the depth buffer (the sky, or else the transparent pass) waits for the depth and velocity passes, so at present they overlap little other work.
+			With the passes split, the GPU profiler shows "TSR depth and velocity" for the async passes and "TSR critical path" for the passes on the main queue instead of "TSR". While the profiler captures timestamps, every pass runs after the previous timestamp, so these entries do not show the overlap. The setting is read every frame, by the Forward+ renderer.
+		</member>
 		<member name="rendering/anti_aliasing/tsr/debug_view" type="int" setter="" getter="" default="0">
 			The Temporal Super Resolution (TSR) pass that [constant Viewport.DEBUG_DRAW_TSR] (or [constant RenderingServer.VIEWPORT_DEBUG_DRAW_TSR]) shows. Each view is drawn over the scene's luma at 25%. Green helps the image, red or yellow costs it, blue is below a threshold, and magenta means the feature is off, for the pixel or for the whole view.
 			- [b]History Validity[/b]: the confidence of each history pixel, from a single frame (red) to converged (green).

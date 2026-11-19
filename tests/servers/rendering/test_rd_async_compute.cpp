@@ -40,6 +40,7 @@ TEST_FORCE_LINK(test_rd_async_compute)
 #ifdef RD_ENABLED
 
 #include "core/error/error_macros.h"
+#include "servers/rendering/renderer_rd/effects/tsr_async.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_device_graph.h"
 
@@ -416,6 +417,152 @@ void add_color_pass(RDG &p_graph, RDG::ResourceTracker *p_color) {
 	p_graph.add_draw_list_usage(p_color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
 	p_graph.add_draw_list_draw(3, 16);
 	p_graph.add_draw_list_end();
+}
+
+// GodotNext: pt_tsr_async_compute (#193). A depth texture tracker, and a draw list that writes
+// color attachments and uses a depth attachment, as every RenderForwardClustered pass does: the
+// render graph always records a depth attachment as read-write.
+RDG::ResourceTracker *depth_tracker(uint64_t p_id) {
+	RDG::ResourceTracker *depth = texture_tracker(p_id, 1);
+	depth->texture_subresources.aspect = RDD::TEXTURE_ASPECT_DEPTH_BIT;
+	return depth;
+}
+
+void add_attachment_pass(RDG &p_graph, std::initializer_list<RDG::ResourceTracker *> p_colors, RDG::ResourceTracker *p_depth, RDG::ResourceTracker *p_sampled = nullptr) {
+	const uint32_t count = uint32_t(p_colors.size()) + (p_depth != nullptr ? 1 : 0);
+	LocalVector<RDG::AttachmentOperation> operations;
+	LocalVector<RDD::RenderPassClearValue> clear_values;
+	operations.resize(count);
+	clear_values.resize(count);
+	for (uint32_t i = 0; i < count; i++) {
+		operations[i] = RDG::ATTACHMENT_OPERATION_DEFAULT;
+	}
+	BitField<RDD::PipelineStageBits> stages = RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	stages.set_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+	stages.set_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+	p_graph.add_draw_list_begin(RDD::RenderPassID(), RDD::FramebufferID(), Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(operations.ptr(), count), VectorView<RDD::RenderPassClearValue>(clear_values.ptr(), count), stages);
+	for (RDG::ResourceTracker *color : p_colors) {
+		p_graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+	}
+	if (p_depth != nullptr) {
+		p_graph.add_draw_list_usage(p_depth, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE);
+	}
+	if (p_sampled != nullptr) {
+		p_graph.add_draw_list_usage(p_sampled, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+	}
+	p_graph.add_draw_list_draw(3, 1);
+	p_graph.add_draw_list_end();
+}
+
+// A compute list that samples every texture of p_sampled and writes every one of p_written as a
+// storage image.
+void add_image_compute(RDG &p_graph, RDG::Queue p_queue, std::initializer_list<RDG::ResourceTracker *> p_sampled, std::initializer_list<RDG::ResourceTracker *> p_written) {
+	p_graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, p_queue);
+	p_graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+	for (RDG::ResourceTracker *sampled : p_sampled) {
+		p_graph.add_compute_list_usage(sampled, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+	}
+	for (RDG::ResourceTracker *written : p_written) {
+		p_graph.add_compute_list_usage(written, RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+	}
+	p_graph.add_compute_list_dispatch(1, 1, 1);
+	p_graph.add_compute_list_end();
+}
+
+// The textures of a Forward+ frame with TSR, by id. p_base offsets the ids, so that two frames
+// (two viewports) can share one graph.
+struct TSRFrame {
+	enum : uint64_t {
+		DEPTH = 1,
+		NORMAL = 2,
+		COLOR = 3,
+		VELOCITY = 4,
+		DILATED = 5,
+		PREV_DEPTH = 6,
+		DISOCCLUSION = 7,
+		REJECTION = 8,
+		HISTORY = 9,
+		OUTPUT = 10,
+		FINAL = 11,
+		COUNT = 11,
+	};
+	RDG::ResourceTracker *trackers[COUNT] = {};
+
+	explicit TSRFrame(uint64_t p_base = 0) {
+		for (uint64_t id = 1; id <= COUNT; id++) {
+			trackers[id - 1] = id == DEPTH ? depth_tracker(p_base + id) : texture_tracker(p_base + id, 1);
+		}
+	}
+	~TSRFrame() { free_trackers(trackers, COUNT); }
+	RDG::ResourceTracker *operator[](uint64_t p_id) const { return trackers[p_id - 1]; }
+};
+
+// Command indices of record_tsr_frame() when the depth and velocity passes record after the
+// motion vectors.
+enum : int32_t {
+	TSR_CMD_PREPASS = 0,
+	TSR_CMD_OPAQUE = 1,
+	TSR_CMD_MOTION_STORE = 2,
+	TSR_CMD_MOTION_PASS = 3,
+	TSR_CMD_SPLIT_DILATION = 4,
+	TSR_CMD_SPLIT_DISOCCLUSION = 5,
+	TSR_CMD_SPLIT_SKY = 6,
+};
+
+// The five core passes, as TSR::process() records them: only at a record point whose call runs,
+// each pass where and on the queue nextgi_tsr_point_passes() names.
+void record_tsr_passes(RDG &p_graph, const TSRAsyncSchedule &p_schedule, TSRRecordPoint p_point, const TSRFrame &p_frame) {
+	if (!nextgi_tsr_point_role(p_schedule, p_point).runs()) {
+		return;
+	}
+	const TSRPointPasses passes = nextgi_tsr_point_passes(p_schedule, p_point, nextgi_tsr_frame_passes(false, false, false, false, false));
+	auto record = [&](TSRPass p_pass, std::initializer_list<RDG::ResourceTracker *> p_sampled, std::initializer_list<RDG::ResourceTracker *> p_written) {
+		if (passes.records(p_pass)) {
+			add_image_compute(p_graph, passes.runs_async(p_pass) ? RDG::QUEUE_ASYNC_COMPUTE : RDG::QUEUE_MAIN, p_sampled, p_written);
+		}
+	};
+	record(TSR_PASS_VELOCITY_DILATION, { p_frame[TSRFrame::DEPTH], p_frame[TSRFrame::VELOCITY] }, { p_frame[TSRFrame::DILATED] });
+	record(TSR_PASS_DISOCCLUSION, { p_frame[TSRFrame::DEPTH], p_frame[TSRFrame::DILATED], p_frame[TSRFrame::PREV_DEPTH] }, { p_frame[TSRFrame::DISOCCLUSION] });
+	record(TSR_PASS_SHADING_REJECTION, { p_frame[TSRFrame::COLOR], p_frame[TSRFrame::DEPTH], p_frame[TSRFrame::DILATED], p_frame[TSRFrame::DISOCCLUSION] }, { p_frame[TSRFrame::REJECTION], p_frame[TSRFrame::PREV_DEPTH] });
+	record(TSR_PASS_HISTORY_UPDATE, { p_frame[TSRFrame::COLOR], p_frame[TSRFrame::DILATED], p_frame[TSRFrame::REJECTION] }, { p_frame[TSRFrame::HISTORY] });
+	record(TSR_PASS_RESOLVE, { p_frame[TSRFrame::HISTORY] }, { p_frame[TSRFrame::OUTPUT] });
+}
+
+// One Forward+ frame with TSR, as RenderForwardClustered records it with p_schedule in a frame the
+// split allows: the depth prepass, the opaque pass (which samples p_opaque_samples, as a material
+// with another viewport's texture does), the camera motion vectors and the motion pass; the record
+// point after the motion vectors; the sky and the transparent pass, each with the depth attachment;
+// the upscaler's record point; and the tonemapper, which samples TSR's output. Nothing records on
+// the main queue between the record point and the sky: the split guard rules out post-opaque
+// compositor effects and VoxelGI/SDFGI debug draws, TSR rules out MSAA, and SSAO, SSIL, SSR and
+// the volumetric fog run before the opaque pass.
+void record_tsr_frame(RDG &p_graph, const TSRAsyncSchedule &p_schedule, const TSRFrame &p_frame, RDG::ResourceTracker *p_opaque_samples = nullptr) {
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::NORMAL] }, p_frame[TSRFrame::DEPTH]);
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH], p_opaque_samples);
+	add_image_compute(p_graph, RDG::QUEUE_MAIN, { p_frame[TSRFrame::DEPTH] }, { p_frame[TSRFrame::VELOCITY] });
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR], p_frame[TSRFrame::VELOCITY] }, p_frame[TSRFrame::DEPTH]);
+	record_tsr_passes(p_graph, p_schedule, TSR_RECORD_AFTER_MOTION_VECTORS, p_frame);
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH]);
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH]);
+	record_tsr_passes(p_graph, p_schedule, TSR_RECORD_UPSCALE, p_frame);
+	p_graph.add_compute_list_begin();
+	p_graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+	p_graph.add_compute_list_usage(p_frame[TSRFrame::OUTPUT], RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+	p_graph.add_compute_list_usage(p_frame[TSRFrame::FINAL], RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+	p_graph.add_compute_list_dispatch(1, 1, 1);
+	p_graph.add_compute_list_end();
+}
+
+// The emission step (main or async) that records p_command.
+const RDG::AsyncEmission::Step *find_command_step(const RDG::AsyncEmission &p_emission, int32_t p_command) {
+	for (const RDG::AsyncEmission::Step &step : p_emission.steps) {
+		for (int32_t command : step.commands) {
+			if (command == p_command) {
+				return &step;
+			}
+		}
+	}
+	return nullptr;
 }
 
 } // namespace TestRDAsyncCompute
@@ -1174,6 +1321,208 @@ TEST_CASE("[RD][AsyncCompute] a timestamp between the async list and the draw li
 	check_emission_order(emission, plan);
 
 	free_trackers(trackers, 3);
+}
+
+// GodotNext: pt_tsr_async_compute (#193).
+TEST_CASE("[RD][AsyncCompute][TSR] without async compute every level records the level-0 frame") {
+	// nextgi_tsr_async_schedule() keeps every pass on the main queue at the upscaler's place when
+	// the device has no active async queue, so the graph sees exactly the level-0 frame.
+	RDG level0_graph;
+	TSRFrame level0_frame;
+	record_tsr_frame(level0_graph, nextgi_tsr_async_schedule(0, true, true), level0_frame);
+	LocalVector<int32_t> level0_order;
+	RDG::AsyncPlan level0_plan;
+	level0_graph.plan_for_test(level0_order, level0_plan, true);
+	CHECK_FALSE(level0_plan.active);
+	CHECK_EQ(level0_plan.async_count, 0u);
+
+	for (int64_t level = 0; level <= 3; level++) {
+		CAPTURE(level);
+		RDG graph;
+		TSRFrame frame;
+		record_tsr_frame(graph, nextgi_tsr_async_schedule(level, false, true), frame);
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK_FALSE(plan.active);
+		CHECK_EQ(plan.async_count, 0u);
+		CHECK_EQ(plan.main_count, level0_plan.main_count);
+		CHECK(same_order(order, level0_order));
+	}
+
+	// Level 1 and level 2 without the split record the level-0 frame too.
+	const TSRAsyncSchedule same_as_level0[] = { nextgi_tsr_async_schedule(1, true, true), nextgi_tsr_async_schedule(2, true, false) };
+	for (const TSRAsyncSchedule &schedule : same_as_level0) {
+		RDG graph;
+		TSRFrame frame;
+		record_tsr_frame(graph, schedule, frame);
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK_EQ(plan.async_count, 0u);
+		CHECK(same_order(order, level0_order));
+	}
+}
+
+TEST_CASE("[RD][AsyncCompute][TSR] level 2 forks after the motion vectors and joins at the sky pass") {
+	// The two async passes sample the depth buffer, and every later draw list uses it as a
+	// read-write attachment, so the sky pass waits for them (write after read). In the frame
+	// RenderForwardClustered records, nothing on the main queue lies between the fork and that join:
+	// the async passes overlap no main work yet (read-only depth attachments would let the sky and
+	// transparent passes run beside them).
+	RDG graph;
+	graph.set_driver_traits_for_test(true, true);
+	TSRFrame frame;
+	const TSRAsyncSchedule schedule = nextgi_tsr_async_schedule(2, true, true);
+	REQUIRE(schedule.split);
+	record_tsr_frame(graph, schedule, frame);
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncEmission emission;
+	graph.emit_for_test(plan, emission);
+	REQUIRE(plan.active);
+	CHECK_EQ(plan.async_count, 2u);
+
+	const RDG::AsyncEmission::Step *motion_pass = find_command_step(emission, TSR_CMD_MOTION_PASS);
+	const RDG::AsyncEmission::Step *dilation = find_command_step(emission, TSR_CMD_SPLIT_DILATION);
+	const RDG::AsyncEmission::Step *disocclusion = find_command_step(emission, TSR_CMD_SPLIT_DISOCCLUSION);
+	const RDG::AsyncEmission::Step *sky = find_command_step(emission, TSR_CMD_SPLIT_SKY);
+	REQUIRE(motion_pass != nullptr);
+	REQUIRE(dilation != nullptr);
+	REQUIRE(disocclusion != nullptr);
+	REQUIRE(sky != nullptr);
+	CHECK_EQ(dilation->type, RDG::AsyncEmission::STEP_ASYNC);
+	CHECK_EQ(disocclusion->type, RDG::AsyncEmission::STEP_ASYNC);
+	CHECK_EQ(sky->type, RDG::AsyncEmission::STEP_MAIN);
+
+	// The fork follows the motion pass; the join is the sky pass, the first draw list with depth.
+	CHECK_EQ(plan.fork_level, motion_pass->level + 1);
+	CHECK_EQ(dilation->level, plan.fork_level);
+	CHECK_EQ(disocclusion->level, plan.fork_level + 1);
+	CHECK_EQ(plan.join_level, sky->level);
+	CHECK_EQ(sky->level, disocclusion->level + 1);
+	CHECK(int32_t(motion_pass->buffer) <= emission.fork_index);
+	CHECK(int32_t(sky->buffer) >= emission.join_index);
+	// No main step inside the window.
+	for (const RDG::AsyncEmission::Step &step : emission.steps) {
+		if (step.type == RDG::AsyncEmission::STEP_MAIN) {
+			CAPTURE(step.level);
+			CHECK((int32_t(step.buffer) <= emission.fork_index || int32_t(step.buffer) >= emission.join_index));
+		}
+	}
+	check_emission_order(emission, plan);
+
+	// One fork and one join: the async work waits once, and the frame waits once for it.
+	const uint32_t command_buffer_count = emission.buffers_used + 1;
+	check_fork_join_submits(submit_frame(command_buffer_count, emission.fork_index, emission.join_index), command_buffer_count, emission.fork_index, emission.join_index);
+
+	// The depth and velocity leave their attachment layouts on the main queue before the fork; the
+	// TSR textures change layout on the async queue.
+	RDG::AsyncPlan barrier_plan;
+	RDG::AsyncBarriers fork;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, barrier_plan, fork);
+	REQUIRE(barrier_plan.active);
+	CHECK_EQ(fork.texture_barriers.size(), 2u);
+	CHECK_EQ(count_texture_barriers(fork.texture_barriers, TSRFrame::DEPTH, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	CHECK_EQ(count_texture_barriers(fork.texture_barriers, TSRFrame::VELOCITY, RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	RDG::AsyncBarriers async;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_QUEUE, barrier_plan, async);
+	CHECK(find_texture_barrier(async.texture_barriers, TSRFrame::DEPTH) == nullptr);
+	CHECK(find_texture_barrier(async.texture_barriers, TSRFrame::VELOCITY) == nullptr);
+	CHECK(find_texture_barrier(async.texture_barriers, TSRFrame::DILATED) != nullptr);
+	CHECK(find_texture_barrier(async.texture_barriers, TSRFrame::DISOCCLUSION) != nullptr);
+	CHECK(find_texture_barrier(async.texture_barriers, TSRFrame::PREV_DEPTH) != nullptr);
+	for (const RDD::TextureBarrier &barrier : async.texture_barriers) {
+		CHECK(RDG::async_queue_supports_texture_layout(barrier.prev_layout));
+		CHECK(RDG::async_queue_supports_texture_layout(barrier.next_layout));
+	}
+}
+
+TEST_CASE("[RD][AsyncCompute][TSR] only the first TSR viewport of a frame uses the async queue") {
+	// A second TSR viewport whose opaque pass samples the first one's output: its motion pass, the
+	// producer of its async passes, comes after the first viewport's sky pass, the consumer of the
+	// first viewport's. One fork and one join cannot cover both, so the whole frame would go back to
+	// the main queue. nextgi_tsr_async_available() gives the queue to the first viewport only.
+	const int64_t levels[] = { 2, 3 };
+	for (int64_t level : levels) {
+		CAPTURE(level);
+		{
+			RDG graph;
+			graph.set_driver_traits_for_test(true, true);
+			TSRFrame first(0);
+			TSRFrame second(100);
+			const TSRAsyncSchedule schedule = nextgi_tsr_async_schedule(level, true, true);
+			record_tsr_frame(graph, schedule, first);
+			record_tsr_frame(graph, schedule, second, first[TSRFrame::FINAL]);
+			LocalVector<int32_t> order;
+			RDG::AsyncPlan plan;
+			graph.plan_for_test(order, plan, true);
+			CHECK(plan.async_count > 0u);
+			CHECK(plan.fork_level >= plan.join_level);
+			CHECK_FALSE(plan.active);
+		}
+		{
+			RDG graph;
+			graph.set_driver_traits_for_test(true, true);
+			TSRFrame first(0);
+			TSRFrame second(100);
+			const uint64_t rd_frame = 41;
+			uint64_t claimed_frame = UINT64_MAX;
+			const TSRAsyncSchedule first_schedule = nextgi_tsr_async_schedule(level, nextgi_tsr_async_available(true, 1, rd_frame, claimed_frame), true);
+			REQUIRE(first_schedule.uses_async());
+			claimed_frame = rd_frame;
+			const TSRAsyncSchedule second_schedule = nextgi_tsr_async_schedule(level, nextgi_tsr_async_available(true, 1, rd_frame, claimed_frame), true);
+			CHECK_FALSE(second_schedule.uses_async());
+			record_tsr_frame(graph, first_schedule, first);
+			record_tsr_frame(graph, second_schedule, second, first[TSRFrame::FINAL]);
+			RDG::AsyncPlan plan;
+			RDG::AsyncEmission emission;
+			graph.emit_for_test(plan, emission);
+			CHECK(plan.active);
+			CHECK_EQ(plan.async_count, level == 2 ? 2u : 5u);
+			check_emission_order(emission, plan);
+		}
+	}
+}
+
+TEST_CASE("[RD][AsyncCompute][TSR] level 3 records every pass at the upscaler's place") {
+	// Every pass on the async queue after the transparent pass: one fork after it, one join at the
+	// tonemapper.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		TSRFrame frame;
+		const TSRAsyncSchedule schedule = nextgi_tsr_async_schedule(3, true, true);
+		record_tsr_frame(graph, schedule, frame);
+		RDG::AsyncPlan plan;
+		RDG::AsyncEmission emission;
+		graph.emit_for_test(plan, emission);
+		REQUIRE(plan.active);
+		CHECK_EQ(plan.async_count, 5u);
+		check_emission_order(emission, plan);
+		const uint32_t command_buffer_count = emission.buffers_used + 1;
+		check_fork_join_submits(submit_frame(command_buffer_count, emission.fork_index, emission.join_index), command_buffer_count, emission.fork_index, emission.join_index);
+	}
+
+	// Splitting the depth and velocity passes off as well puts async work on both sides of the
+	// transparent pass: a consumer of the first part comes before a producer of the second, which
+	// one fork and one join cannot cover, so the whole frame would fall back to the main queue.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		TSRFrame frame;
+		TSRAsyncSchedule split_everything = nextgi_tsr_async_schedule(2, true, true);
+		for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
+			split_everything.async[i] = true;
+		}
+		record_tsr_frame(graph, split_everything, frame);
+		LocalVector<int32_t> order;
+		RDG::AsyncPlan plan;
+		graph.plan_for_test(order, plan, true);
+		CHECK_EQ(plan.async_count, 5u);
+		CHECK(plan.fork_level >= plan.join_level);
+		CHECK_FALSE(plan.active);
+	}
 }
 
 #endif // RD_ENABLED

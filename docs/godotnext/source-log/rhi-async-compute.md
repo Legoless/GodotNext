@@ -51,3 +51,20 @@ How it was used: it confirms that concurrent sharing gives both queue families d
 | Copied files | None |
 
 How it was used: it sets which texture barriers of async lists move to the main queue before the fork and which stages and accesses the async queue's barriers keep.
+
+## Cross-queue validation control (#193)
+
+### Khronos validation layer, synchronization validation settings
+
+| Field | Value |
+|---|---|
+| What | The `VK_LAYER_KHRONOS_validation` settings for synchronization validation as the layer's manifest (`VkLayer_khronos_validation.json`) describes them: `validate_sync` (default off) turns synchronization validation on, and `syncval_full_validation` (default on; `syncval_submit_time_validation` is its deprecated name) validates all accesses and reports errors during queue submission, where hazards between command buffers and between queues show. In this layer version a hazard message reads `<command>(): <KIND> hazard detected`, without the `SYNC-HAZARD-` message ID text of older layers. |
+| Upstream | The layer manifest shipped with the LunarG Vulkan SDK 1.4.363.1 (Khronos Vulkan-ValidationLayers) |
+| Version | Layer 1.4.363.1, compared with the Ubuntu 24.04 system layer 1.3.275 |
+| License | Apache-2.0 (Vulkan-ValidationLayers). The manifest's setting descriptions and the layer's messages were read; no layer source was read or copied. |
+| Read on | 2026-11-18, for issue #193 |
+| Consulted by | The #193 implementer |
+| Used in | `godotnext/testbed/tests/async_compute/cross_queue_hazard_probe.gd` (what the probe expects, and how a run counts hazards) |
+| Copied files | None |
+
+How it was used: it names the settings a 0-hazard async compute run needs, and the message text to count. That the probe's aliased write and clear give submit-time `WRITE_RACING_WRITE` errors naming two queues, and that layer 1.3.275 also reports `RACING` hazards for the render graph's fork and join where layer 1.4.363.1 reports none, are GodotNext's own observations from runs.

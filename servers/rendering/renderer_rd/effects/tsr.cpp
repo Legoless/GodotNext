@@ -636,9 +636,25 @@ void TSR::process(const Parameters &p_params) {
 		return;
 	}
 
-	p_params.context->sync_dimensions(p_params.internal_size, p_params.output_size, p_params.quality);
-	if (p_params.reset) {
-		p_params.context->request_reset();
+	// GodotNext: pt_tsr_async_compute (#193). This call records the passes of one record point, each
+	// on the queue the schedule gives it. Every per-point decision comes from tsr_async.h: the
+	// frame's first record point does the once-per-frame work below (on the main queue, before any
+	// async list), the upscaler's place ends the frame, and nextgi_tsr_point_passes() names the
+	// passes recorded here.
+	const TSRAsyncSchedule &schedule = p_params.async_schedule;
+	const TSRRecordPoint record_point = p_params.record_point;
+	ERR_FAIL_UNSIGNED_INDEX(uint32_t(record_point), uint32_t(TSR_RECORD_MAX));
+	const TSRPointRole role = nextgi_tsr_point_role(schedule, record_point);
+	if (!role.runs()) {
+		return; // Nothing records here this frame.
+	}
+	const bool first_point = role.frame_begin;
+
+	if (first_point) {
+		p_params.context->sync_dimensions(p_params.internal_size, p_params.output_size, p_params.quality);
+		if (p_params.reset) {
+			p_params.context->request_reset();
+		}
 	}
 
 	const Size2i internal_size = p_params.internal_size;
@@ -646,13 +662,17 @@ void TSR::process(const Parameters &p_params) {
 	const Size2i history_size = p_params.context->get_history_size();
 
 	bool textures_changed = false;
-	if (p_params.view == 0) {
+	if (p_params.view == 0 && first_point) {
 		textures_changed = ensure_textures(p_params.render_buffers, internal_size, history_size);
 	}
 
 	const int preset_idx = CLAMP(int(p_params.quality), 0, int(RSE::VIEWPORT_TSR_QUALITY_MAX) - 1);
 	const TSRPreset &preset = TSR_PRESETS[preset_idx];
-	const bool do_reset = p_params.context->consume_reset();
+	// GodotNext: pt_tsr_async_compute (#193). Consumed once per frame; later record points reuse it.
+	const bool do_reset = first_point ? p_params.context->consume_reset() : p_params.context->get_frame_reset();
+	if (first_point) {
+		p_params.context->set_frame_reset(do_reset);
+	}
 
 	const uint32_t read_idx = p_params.context->get_read_index();
 	const uint32_t write_idx = p_params.context->get_write_index();
@@ -667,7 +687,7 @@ void TSR::process(const Parameters &p_params) {
 	const uint32_t features = nextgi_tsr_feature_mask(p_params.quality, p_params.thin_geometry);
 	const TSRPassPlan plan = nextgi_tsr_pass_plan(features);
 	const TSRStabilityLayout layout = stability_layout(internal_size, p_params.max_internal_size, output_size, p_params.quality, features, format_selection.history_rgba16f);
-	if (p_params.view == 0) {
+	if (p_params.view == 0 && first_point) {
 		textures_changed = ensure_stability_textures(p_params.render_buffers, layout) || textures_changed;
 		if (textures_changed) {
 			// T6 accounting: the layout helper and the real allocation must not drift apart.
@@ -688,14 +708,16 @@ void TSR::process(const Parameters &p_params) {
 
 	// Persistent frames do not outlive a history reset, a history resize (handled
 	// in sync_dimensions) or their own texture.
-	if (do_reset) {
+	if (do_reset && first_point) {
 		p_params.context->invalidate_persistent();
 	}
 	RID persistent_frames;
 	if (plan.persistent_store && layout.persistent_count > 0 && p_params.render_buffers->has_texture(RB_SCOPE_TSR, SNAME("persistent_frames"))) {
 		persistent_frames = p_params.render_buffers->get_texture(RB_SCOPE_TSR, SNAME("persistent_frames"));
 	}
-	p_params.context->sync_persistent_storage(persistent_frames, layout.persistent_signature());
+	if (first_point) {
+		p_params.context->sync_persistent_storage(persistent_frames, layout.persistent_signature());
+	}
 	const uint32_t persistent_count = persistent_frames.is_valid() ? layout.persistent_count : 0;
 
 	// Flicker analysis: the state this frame writes and the one it continues from
@@ -708,7 +730,10 @@ void TSR::process(const Parameters &p_params) {
 	if (plan.analysis_flicker && p_params.render_buffers->has_texture(RB_SCOPE_TSR, flicker_state_names[0]) && p_params.render_buffers->has_texture(RB_SCOPE_TSR, flicker_state_names[1])) {
 		flicker_state_read = p_params.render_buffers->get_texture_slice(RB_SCOPE_TSR, flicker_state_names[read_idx], view, 0);
 		flicker_state_write = p_params.render_buffers->get_texture_slice(RB_SCOPE_TSR, flicker_state_names[write_idx], view, 0);
-		p_params.context->step_flicker_clock(double(p_params.delta_time), flicker_ticks, flicker_decay_steps);
+		if (first_point) {
+			// Once per frame: only the stability uniform buffer, filled at the first point, reads it.
+			p_params.context->step_flicker_clock(double(p_params.delta_time), flicker_ticks, flicker_decay_steps);
+		}
 	}
 	const bool use_flicker = flicker_state_write.is_valid();
 
@@ -727,7 +752,7 @@ void TSR::process(const Parameters &p_params) {
 	// sees it: created while the view is on, freed on the first frame it is off.
 	const bool debug_on = p_params.debug_view >= 0;
 	const StringName debug_view_name("debug_view");
-	if (p_params.view == 0) {
+	if (p_params.view == 0 && first_point) {
 		bool has_debug_texture = p_params.render_buffers->has_texture(RB_SCOPE_TSR_DEBUG, debug_view_name);
 		if (has_debug_texture) {
 			const RD::TextureFormat debug_tf = p_params.render_buffers->get_texture_format(RB_SCOPE_TSR_DEBUG, debug_view_name);
@@ -746,8 +771,12 @@ void TSR::process(const Parameters &p_params) {
 	}
 
 	// The visualizer reads the uniform buffer too, so it exists while the view is on even at Low.
+	// GodotNext: pt_tsr_async_compute (#193). Filled once per frame, at its first record point.
+	const bool uses_stability_ubo = plan.stability_ubo || debug_output.is_valid();
 	RID stability_ubo;
-	if (plan.stability_ubo || debug_output.is_valid()) {
+	if (uses_stability_ubo && !first_point) {
+		stability_ubo = p_params.context->get_stability_ubo();
+	} else if (uses_stability_ubo) {
 		stability_ubo = p_params.context->get_stability_ubo();
 		if (stability_ubo.is_null()) {
 			stability_ubo = rd->uniform_buffer_create(sizeof(StabilityUBO));
@@ -833,23 +862,24 @@ void TSR::process(const Parameters &p_params) {
 
 	const HistoryMode history_mode = format_selection.history_rgba16f ? HISTORY_MODE_RGBA16F : HISTORY_MODE_R11G11B10F;
 
-	ResolveMode resolve_mode = RESOLVE_MODE_R11G11B10F;
-	const RD::DataFormat out_format = rd->texture_get_format(p_params.output).format;
-	if (out_format == RD::DATA_FORMAT_R16G16B16A16_SFLOAT) {
-		resolve_mode = RESOLVE_MODE_RGBA16F;
-	} else if (out_format == RD::DATA_FORMAT_A2B10G10R10_UNORM_PACK32) {
-		resolve_mode = RESOLVE_MODE_RGB10A2;
-	}
+	// GodotNext: pt_tsr_stability (#198). The persistent frame this frame captures, if any.
+	const int32_t capture_slot = persistent_count > 0 ? nextgi_tsr_persistent_capture_slot(p_params.context->get_frames_since_reset(), persistent_count) : -1;
+
+	// GodotNext: pt_tsr_async_compute (#193). The passes of this record point and their queues.
+	const TSRPointPasses passes = nextgi_tsr_point_passes(schedule, record_point, nextgi_tsr_frame_passes(use_flicker, use_thin, preset.rejection_aa, debug_output.is_valid() && stability_ubo.is_valid(), capture_slot >= 0));
+	auto pass_queue = [&](TSRPass p_pass) {
+		return passes.runs_async(p_pass) ? RD::COMPUTE_QUEUE_ASYNC : RD::COMPUTE_QUEUE_MAIN;
+	};
 
 	// Pass 1: Velocity dilation (8x8 at internal resolution).
-	{
+	if (passes.records(TSR_PASS_VELOCITY_DILATION)) {
 		rd->draw_command_begin_label("TSR Velocity Dilation");
 		RID shader = shaders.velocity_dilate.version_get_shader(shaders.velocity_dilate_version, 0);
 		RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { nearest_sampler, p_params.depth });
 		RD::Uniform u_vel(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, { nearest_sampler, p_params.velocity });
 		RD::Uniform u_out(RD::UNIFORM_TYPE_IMAGE, 2, { dilated_velocity });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_VELOCITY_DILATION));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.velocity_dilate_pipeline);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_depth, u_vel, u_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -859,7 +889,7 @@ void TSR::process(const Parameters &p_params) {
 	}
 
 	// Pass 2: Parallax disocclusion (8x8 at internal resolution).
-	{
+	if (passes.records(TSR_PASS_DISOCCLUSION)) {
 		rd->draw_command_begin_label("TSR Parallax Disocclusion");
 		RID shader = shaders.disocclusion.version_get_shader(shaders.disocclusion_version, 0);
 		RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { nearest_sampler, p_params.depth });
@@ -867,7 +897,7 @@ void TSR::process(const Parameters &p_params) {
 		RD::Uniform u_prev_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 2, { nearest_sampler, prev_depth });
 		RD::Uniform u_out(RD::UNIFORM_TYPE_IMAGE, 3, { disocclusion });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_DISOCCLUSION));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.disocclusion_pipeline);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_depth, u_dil_vel, u_prev_depth, u_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -879,7 +909,7 @@ void TSR::process(const Parameters &p_params) {
 	// GodotNext: pt_tsr_stability (#198). Flicker analysis (8x8 at the flicker state's
 	// size): advances each state texel from the luma of the internal pixel at its center
 	// against the reprojected history. Shading rejection and the history update read it.
-	if (use_flicker) {
+	if (passes.records(TSR_PASS_FLICKER_ANALYSIS)) {
 		rd->draw_command_begin_label("TSR Flicker Analysis");
 		RID shader = shaders.stability_analysis.version_get_shader(shaders.stability_analysis_version, ANALYSIS_MODE_FLICKER);
 		RD::Uniform u_color(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { nearest_sampler, p_params.color });
@@ -891,7 +921,7 @@ void TSR::process(const Parameters &p_params) {
 		RD::Uniform u_state_prev(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, { nearest_sampler, flicker_state_read });
 		RD::Uniform u_state_out(RD::UNIFORM_TYPE_IMAGE, 7, { flicker_state_write });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_FLICKER_ANALYSIS));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.stability_analysis_pipelines[ANALYSIS_MODE_FLICKER]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_color, u_reactive, u_dil_vel, u_hist_prev, u_disocc, u_stability, u_state_prev, u_state_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -904,7 +934,7 @@ void TSR::process(const Parameters &p_params) {
 	// half the internal size): advances each texel's coverage from depth ridges and luma lines
 	// one pixel wide in the 2x2 internal pixels at its center. Shading rejection and the history
 	// update relax where it is set.
-	if (use_thin) {
+	if (passes.records(TSR_PASS_THIN_ANALYSIS)) {
 		rd->draw_command_begin_label("TSR Thin Geometry Analysis");
 		RID shader = shaders.stability_analysis.version_get_shader(shaders.stability_analysis_version, ANALYSIS_MODE_THIN);
 		RD::Uniform u_color(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { nearest_sampler, p_params.color });
@@ -915,7 +945,7 @@ void TSR::process(const Parameters &p_params) {
 		RD::Uniform u_state_prev(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 6, { linear_sampler, thin_coverage_read });
 		RD::Uniform u_state_out(RD::UNIFORM_TYPE_IMAGE, 7, { thin_coverage_write });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_THIN_ANALYSIS));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.stability_analysis_pipelines[ANALYSIS_MODE_THIN]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_color, u_reactive, u_dil_vel, u_depth, u_stability, u_state_prev, u_state_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -925,7 +955,7 @@ void TSR::process(const Parameters &p_params) {
 	}
 
 	// Pass 3: Shading rejection + prev_depth update (8x8 at internal resolution).
-	{
+	if (passes.records(TSR_PASS_SHADING_REJECTION)) {
 		rd->draw_command_begin_label("TSR Shading Rejection");
 		// GodotNext: pt_tsr_stability (#198). The TSR_STABILITY variant relaxes the shading
 		// rejection where the flicker analysis found periodic flicker, and the shading and
@@ -955,7 +985,7 @@ void TSR::process(const Parameters &p_params) {
 			uniform_set = uniform_set_cache->get_cache(shader, 0, u_color, u_depth, u_dil_vel, u_hist_prev, u_reactive, u_disocc, u_rej_out, u_prev_depth_out);
 		}
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_SHADING_REJECTION));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.shading_rejection_pipelines[rejection_variant]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -965,7 +995,7 @@ void TSR::process(const Parameters &p_params) {
 	}
 
 	// Pass 4: History update (8x8 at history_scale * output resolution).
-	{
+	if (passes.records(TSR_PASS_HISTORY_UPDATE)) {
 		rd->draw_command_begin_label("TSR History Update");
 		// GodotNext: pt_tsr_stability (#198). The TSR_STABILITY variant adds the stability
 		// uniform buffer, the depth, the persistent frames, the flicker state, the thin coverage
@@ -998,7 +1028,7 @@ void TSR::process(const Parameters &p_params) {
 			uniform_set = uniform_set_cache->get_cache(shader, 0, u_color, u_dil_vel, u_rej, u_hist_prev, u_meta_prev, u_hist_out, u_meta_out);
 		}
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_HISTORY_UPDATE));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.history_update_pipelines[history_update_variant]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set, 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -1012,31 +1042,40 @@ void TSR::process(const Parameters &p_params) {
 	// target so history_color[write_idx] remains crisp for next frame's reprojection
 	// without allocating an extra intermediate texture (T6 budget).
 	RID resolve_source = history_color_write;
-	if (preset.rejection_aa) {
+	if (passes.records(TSR_PASS_REJECTION_AA)) {
 		rd->draw_command_begin_label("TSR Rejection AA");
 		RID shader = shaders.rejection_aa.version_get_shader(shaders.rejection_aa_version, history_mode);
 		RD::Uniform u_hist_curr(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { linear_sampler, history_color_write });
 		RD::Uniform u_meta_curr(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 1, { nearest_sampler, history_meta_write });
 		RD::Uniform u_aa_out(RD::UNIFORM_TYPE_IMAGE, 2, { history_color_read });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_REJECTION_AA));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.rejection_aa_pipelines[history_mode]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_hist_curr, u_meta_curr, u_aa_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
 		rd->compute_list_dispatch_threads(cl, history_size.width, history_size.height, 1);
 		rd->compute_list_end();
 		rd->draw_command_end_label();
+	}
+	if (preset.rejection_aa) {
 		resolve_source = history_color_read;
 	}
 
 	// Pass 6: Resolve to get_upscaled_texture(v), downsampling 200% history when active.
-	{
+	if (passes.records(TSR_PASS_RESOLVE)) {
 		rd->draw_command_begin_label("TSR Resolve");
+		ResolveMode resolve_mode = RESOLVE_MODE_R11G11B10F;
+		const RD::DataFormat out_format = rd->texture_get_format(p_params.output).format;
+		if (out_format == RD::DATA_FORMAT_R16G16B16A16_SFLOAT) {
+			resolve_mode = RESOLVE_MODE_RGBA16F;
+		} else if (out_format == RD::DATA_FORMAT_A2B10G10R10_UNORM_PACK32) {
+			resolve_mode = RESOLVE_MODE_RGB10A2;
+		}
 		RID shader = shaders.resolve.version_get_shader(shaders.resolve_version, resolve_mode);
 		RD::Uniform u_src(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { linear_sampler, resolve_source });
 		RD::Uniform u_out(RD::UNIFORM_TYPE_IMAGE, 1, { p_params.output });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_RESOLVE));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.resolve_pipelines[resolve_mode]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_src, u_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -1049,7 +1088,7 @@ void TSR::process(const Parameters &p_params) {
 	// pass rendering/anti_aliasing/tsr/debug_view selects into RB_SCOPE_TSR_DEBUG, which
 	// RenderForwardClustered copies over the frame while Viewport.DEBUG_DRAW_TSR is on. It only
 	// reads; stores whose feature is off are bound as black placeholders and `features` skips them.
-	if (debug_output.is_valid() && stability_ubo.is_valid()) {
+	if (passes.records(TSR_PASS_DEBUG_VIEW)) {
 		rd->draw_command_begin_label("TSR Debug View");
 		RID shader = shaders.debug_view.version_get_shader(shaders.debug_view_version, 0);
 		const RID black = TextureStorage::get_singleton()->texture_rd_get_default(TextureStorage::DEFAULT_RD_TEXTURE_BLACK);
@@ -1067,7 +1106,7 @@ void TSR::process(const Parameters &p_params) {
 		RD::Uniform u_out(RD::UNIFORM_TYPE_IMAGE, 10, { debug_output });
 		RD::Uniform u_reactive(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 11, { linear_sampler, p_params.reactive });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_DEBUG_VIEW));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.debug_view_pipeline);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_output, u_meta, u_rej, u_disocc, u_depth, u_color, u_persistent, u_flicker, u_thin, u_stability, u_out, u_reactive), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -1081,15 +1120,14 @@ void TSR::process(const Parameters &p_params) {
 	// history_color[write_idx], which rejection AA and the resolve leave alone, and runs
 	// last, after every pass that reads the persistent frames (the history update and the
 	// pass visualizer), so they all see the frames the stability uniform buffer describes.
-	const int32_t capture_slot = persistent_count > 0 ? nextgi_tsr_persistent_capture_slot(p_params.context->get_frames_since_reset(), persistent_count) : -1;
-	if (capture_slot >= 0) {
+	if (passes.records(TSR_PASS_PERSISTENT_STORE)) {
 		rd->draw_command_begin_label("TSR Persistent Store");
 		RID shader = shaders.persistent_store.version_get_shader(shaders.persistent_store_version, history_mode);
 		const RID persistent_layer = p_params.render_buffers->get_texture_slice(RB_SCOPE_TSR, SNAME("persistent_frames"), view * layout.persistent_count + uint32_t(capture_slot), 0);
 		RD::Uniform u_src(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, { linear_sampler, history_color_write });
 		RD::Uniform u_out(RD::UNIFORM_TYPE_IMAGE, 1, { persistent_layer });
 
-		RD::ComputeListID cl = rd->compute_list_begin();
+		RD::ComputeListID cl = rd->compute_list_begin(pass_queue(TSR_PASS_PERSISTENT_STORE));
 		rd->compute_list_bind_compute_pipeline(cl, shaders.persistent_store_pipelines[history_mode]);
 		rd->compute_list_bind_uniform_set(cl, uniform_set_cache->get_cache(shader, 0, u_src, u_out), 0);
 		rd->compute_list_set_push_constant(cl, &pc, sizeof(PushConstant));
@@ -1100,5 +1138,7 @@ void TSR::process(const Parameters &p_params) {
 		p_params.context->set_persistent_frame(uint32_t(capture_slot), p_params.camera_projection, p_params.camera_transform);
 	}
 
-	p_params.context->advance_frame();
+	if (role.frame_end) {
+		p_params.context->advance_frame();
+	}
 }

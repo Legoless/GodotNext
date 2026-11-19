@@ -4071,6 +4071,8 @@ void RenderingServer::init() {
 	// GodotNext: pt_tsr_mode_presets (#197).
 	GLOBAL_DEF_BASIC(PropertyInfo(Variant::INT, "rendering/anti_aliasing/tsr/quality", PROPERTY_HINT_ENUM, "Low,Medium,High,Epic,Cinematic"), RSE::VIEWPORT_TSR_QUALITY_EPIC);
 	GLOBAL_DEF("rendering/anti_aliasing/tsr/thin_geometry_detection", false);
+	// GodotNext: pt_tsr_async_compute (#193). UE's r.TSR.AsyncCompute levels; read live.
+	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/anti_aliasing/tsr/async_compute", PROPERTY_HINT_ENUM, "Off,History Clears Only,Depth and Velocity Passes,All Passes"), 2);
 	// GodotNext: pt_tsr_stability (#198). The pass Viewport.DEBUG_DRAW_TSR shows (TSRDebugView); read live.
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/anti_aliasing/tsr/debug_view", PROPERTY_HINT_ENUM, "History Validity,Rejection,Disocclusion,Resurrection Hits,Flicker Period,Thin Coverage"), 0);
 

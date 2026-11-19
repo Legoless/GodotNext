@@ -1911,6 +1911,11 @@ public:
 	// GodotNext: async_compute (#174). C++-only: the queue the active list records for, which is
 	// COMPUTE_QUEUE_MAIN unless async compute is active. compute_list_add_barrier() keeps it.
 	ComputeQueue compute_list_get_queue(ComputeListID p_list) const;
+	// GodotNext: pt_tsr_async_compute (#193). C++-only: whether lists begun with COMPUTE_QUEUE_ASYNC
+	// run on the async compute queue (SUPPORTS_ASYNC_COMPUTE and
+	// rendering/rendering_device/async_compute, or set_async_compute_mock()). Consumers that move
+	// passes to the async queue check it, so that without it they record exactly as before.
+	bool is_async_compute_active() const { return async_compute_active; }
 	// Unit tests: route compute lists as a device with an active async compute queue does. Fails on a
 	// device with a driver.
 	void set_async_compute_mock(bool p_active);

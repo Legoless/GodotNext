@@ -34,6 +34,7 @@
 #include "core/math/transform_3d.h"
 #include "core/templates/safe_refcount.h"
 #include "servers/rendering/renderer_rd/effects/temporal_upscaler.h"
+#include "servers/rendering/renderer_rd/effects/tsr_async.h"
 #include "servers/rendering/renderer_rd/effects/tsr_presets.h"
 #include "servers/rendering/renderer_rd/effects/tsr_stability.h"
 #include "servers/rendering/renderer_rd/shaders/effects/tsr/tsr_debug_view.glsl.gen.h"
@@ -180,6 +181,9 @@ private:
 	// Flicker analysis clock: the parts of a step carried to the next frame.
 	double flicker_tick_remainder = 0.0;
 	double flicker_decay_remainder = 0.0;
+	// GodotNext: pt_tsr_async_compute (#193). Whether this frame resets the history, as the
+	// frame's first record point consumed it, for the passes of its later record point.
+	bool frame_reset = false;
 
 public:
 	TSRContext(const Size2i &p_internal_size, const Size2i &p_output_size, RSE::ViewportTSRQuality p_quality);
@@ -191,6 +195,9 @@ public:
 
 	void request_reset() { reset_latch.request(); }
 	bool consume_reset() { return reset_latch.consume(); }
+	// GodotNext: pt_tsr_async_compute (#193).
+	void set_frame_reset(bool p_reset) { frame_reset = p_reset; }
+	bool get_frame_reset() const { return frame_reset; }
 
 	Size2i get_internal_size() const { return internal_size; }
 	Size2i get_output_size() const { return output_size; }
@@ -314,6 +321,13 @@ public:
 		// The TSRDebugView to draw into RB_SCOPE_TSR_DEBUG after the resolve, or -1 when
 		// Viewport.DEBUG_DRAW_TSR is off. It never changes the other passes.
 		int32_t debug_view = -1;
+		// GodotNext: pt_tsr_async_compute (#193). The frame's schedule (nextgi_tsr_async_schedule)
+		// and the record point this call records. A frame calls process() once per record point
+		// that has passes, in TSRRecordPoint order, with the same schedule and the same other
+		// parameters; the default records every pass on the main queue in one call, as before.
+		// Only the call at the upscaler's place needs color, reactive and output.
+		TSRAsyncSchedule async_schedule;
+		TSRRecordPoint record_point = TSR_RECORD_UPSCALE;
 	};
 
 	TSR();
@@ -326,6 +340,10 @@ public:
 	// match the layout; with no feature it leaves RB_SCOPE_TSR as #194 made it.
 	// Returns true when it freed or created textures.
 	bool ensure_stability_textures(Ref<RenderSceneBuffersRD> p_render_buffers, const TSRStabilityLayout &p_layout) const;
+	// GodotNext: pt_tsr_async_compute (#193). Records the passes of p_params.record_point, each on
+	// the queue p_params.async_schedule gives it. The frame's first record point does the
+	// once-per-frame work (dimensions, reset, textures, the stability uniform buffer), all on the
+	// main queue and before the first async list; the upscaler's place ends the frame.
 	void process(const Parameters &p_params);
 
 	bool is_history_rgba16f() const { return format_selection.history_rgba16f; }

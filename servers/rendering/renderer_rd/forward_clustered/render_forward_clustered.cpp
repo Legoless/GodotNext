@@ -3717,6 +3717,108 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		_render_nextgeo_debug_scene_passes(p_render_data, using_nextgeo, nextgeo_drew, use_msaa, msaa, reverse_cull, screen_size, depth_prepass_uniform_buffer_index, samplers, base_specialization);
 	}
 
+	// GodotNext: pt_tsr_async_compute (#193). TSR's async schedule for this frame, from
+	// rendering/anti_aliasing/tsr/async_compute (UE's r.TSR.AsyncCompute levels). Without async
+	// compute (RD::is_async_compute_active()), in a multiview (XR) viewport, and in every TSR viewport
+	// of an RD frame after the first one that used it (nextgi_tsr_async_available()), every level
+	// records as level 0. At
+	// level 2, velocity dilation and parallax disocclusion record here on the async queue, as soon as
+	// the depth and velocity buffers are final, and the passes that read the scene color record at
+	// the upscaler's place below. The split needs the depth and velocity to stay as they are until
+	// then: no MSAA resolve, no transparent surface that writes depth, no compositor effect and no
+	// VoxelGI or SDFGI debug draw in between. Otherwise level 2 records as level 0. The render graph
+	// joins the two passes at the next draw list that attaches the depth buffer (the sky, or the
+	// transparent pass), which RD always attaches read-write, so they overlap only main-queue work
+	// recorded before it.
+	TSRAsyncSchedule tsr_async_schedule;
+	if (rb_data.is_valid() && scale_type == SCALE_TSR) {
+		const int64_t tsr_async_level = GLOBAL_GET_CACHED(int64_t, "rendering/anti_aliasing/tsr/async_compute");
+		const uint64_t rd_frame = RD::get_singleton()->get_frames_drawn();
+		const bool tsr_async_available = nextgi_tsr_async_available(RD::get_singleton()->is_async_compute_active(), rb->get_view_count(), rd_frame, tsr_async_frame);
+		bool tsr_split_allowed = false;
+		if (tsr_async_available && tsr_async_level == TSR_ASYNC_DEPTH_VELOCITY) {
+			tsr_split_allowed = !use_msaa && !debug_voxelgis && !debug_sdfgi_probes;
+			const RSE::CompositorEffectCallbackType tsr_split_callbacks[] = {
+				RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE,
+				RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_SKY,
+				RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_PRE_TRANSPARENT,
+				RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_TRANSPARENT,
+			};
+			for (RSE::CompositorEffectCallbackType callback : tsr_split_callbacks) {
+				tsr_split_allowed = tsr_split_allowed && !_has_compositor_effect(callback, p_render_data);
+			}
+			for (uint32_t i = 0; tsr_split_allowed && i < render_list[RENDER_LIST_ALPHA].elements.size(); i++) {
+				const GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_ALPHA].elements[i];
+				if (surf->shader->depth_draw == SceneShaderForwardClustered::ShaderData::DEPTH_DRAW_ALWAYS) {
+					tsr_split_allowed = false;
+				}
+			}
+		}
+		tsr_async_schedule = nextgi_tsr_async_schedule(tsr_async_level, tsr_async_available, tsr_split_allowed);
+		if (tsr_async_schedule.uses_async()) {
+			tsr_async_frame = rd_frame;
+		}
+	}
+
+	// GodotNext: pt_tsr_async_compute (#193). One view's TSR parameters, the same at both record
+	// points; only the upscaler's place passes the color, the reactive mask and the output.
+	auto tsr_parameters = [&](uint32_t p_view, TSRRecordPoint p_record_point) {
+		Projection correction;
+		correction.set_depth_correction(true, true, false);
+		const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
+		const Projection &cur_proj = p_render_data->scene_data->cam_projection;
+		const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
+		const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
+
+		RendererRD::TSR::Parameters params;
+		params.render_buffers = rb;
+		params.context = rb_data->get_tsr_context(p_view);
+		params.view = p_view;
+		if (p_record_point == TSR_RECORD_UPSCALE) {
+			params.color = rb->get_internal_texture(p_view);
+			params.reactive = rb->get_internal_texture_reactive(p_view);
+			params.output = rb->get_upscaled_texture(p_view);
+		}
+		params.depth = rb->get_depth_texture(p_view);
+		params.velocity = rb->get_velocity_buffer(false, p_view);
+		params.internal_size = rb->get_internal_size();
+		params.output_size = rb->get_target_size();
+		params.quality = rb->get_tsr_quality();
+		params.jitter_pixels = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
+		params.reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
+		params.z_near = p_render_data->scene_data->z_near;
+		params.z_far = p_render_data->scene_data->z_far;
+		params.is_orthogonal = p_render_data->scene_data->cam_orthogonal;
+		params.reset = reset_temporal_history;
+		// GodotNext: pt_tsr_stability (#198).
+		params.max_internal_size = rb->get_max_internal_size();
+		params.camera_projection = correction * cur_proj;
+		params.camera_transform = cur_transform;
+		// Wall-clock, not time_step: the flicker clock must advance while Engine.time_scale is 0.
+		params.delta_time = float(RSG::frame_step_unscaled);
+		// Thin-geometry detection is opt-in and read live.
+		params.thin_geometry = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/tsr/thin_geometry_detection");
+		// The pass visualizer draws while the viewport's debug draw is DEBUG_DRAW_TSR; the setting picks the pass.
+		params.debug_view = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_TSR ? int32_t(nextgi_tsr_debug_view_from_setting(GLOBAL_GET_CACHED(int64_t, "rendering/anti_aliasing/tsr/debug_view"))) : -1;
+		params.async_schedule = tsr_async_schedule;
+		params.record_point = p_record_point;
+		return params;
+	};
+
+	if (tsr_async_schedule.split) {
+		// While timestamps are captured, the render graph orders every command after the previous
+		// timestamp, so the two passes run alone, up to the next timestamp. A split frame records
+		// "TSR depth and velocity" here and "TSR critical path" at the upscaler's place, and no "TSR":
+		// "TSR" always covers all of TSR.
+		RD::get_singleton()->draw_command_begin_label("TSR Depth and Velocity");
+		RENDER_TIMESTAMP("TSR depth and velocity");
+		for (uint32_t v = 0; v < rb->get_view_count(); v++) {
+			rb_data->ensure_tsr(tsr_effect, v);
+			tsr_effect->process(tsr_parameters(v, TSR_RECORD_AFTER_MOTION_VECTORS));
+		}
+		RD::get_singleton()->draw_command_end_label();
+	}
+
 	// GodotNext: rr_guides (#205). The opaque passes wrote the two albedo guides; pack the
 	// normal and roughness guide from the prepass buffer where they drew a surface.
 	if (rr_guides_active) {
@@ -4071,51 +4173,19 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			RD::get_singleton()->draw_command_end_label();
 		} else if (scale_type == SCALE_TSR) {
 			RD::get_singleton()->draw_command_begin_label("TSR");
-			RENDER_TIMESTAMP("TSR");
-
-			Projection correction;
-			correction.set_depth_correction(true, true, false);
-			const Projection &prev_proj = p_render_data->scene_data->prev_cam_projection;
-			const Projection &cur_proj = p_render_data->scene_data->cam_projection;
-			const Transform3D &prev_transform = p_render_data->scene_data->prev_cam_transform;
-			const Transform3D &cur_transform = p_render_data->scene_data->cam_transform;
-			const Projection reprojection = (correction * prev_proj) * prev_transform.affine_inverse() * cur_transform * (correction * cur_proj).inverse();
-			const Vector2 jitter_pixels = p_render_data->scene_data->taa_jitter * Vector2(rb->get_internal_size()) * 0.5f;
-			// GodotNext: pt_tsr_stability (#198). Thin-geometry detection is opt-in and read live.
-			const bool tsr_thin_geometry = GLOBAL_GET_CACHED(bool, "rendering/anti_aliasing/tsr/thin_geometry_detection");
-			// The pass visualizer draws while the viewport's debug draw is DEBUG_DRAW_TSR; the setting picks the pass.
-			const int32_t tsr_debug_view = get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_TSR ? int32_t(nextgi_tsr_debug_view_from_setting(GLOBAL_GET_CACHED(int64_t, "rendering/anti_aliasing/tsr/debug_view"))) : -1;
+			// GodotNext: pt_tsr_async_compute (#193). After the async depth and velocity passes,
+			// this is TSR's main-queue part, from the first pass that waits for them to the resolve
+			// ("TSR critical path", beside "TSR depth and velocity"). Otherwise "TSR" starts here as
+			// before.
+			if (tsr_async_schedule.split) {
+				RENDER_TIMESTAMP("TSR critical path");
+			} else {
+				RENDER_TIMESTAMP("TSR");
+			}
 
 			for (uint32_t v = 0; v < rb->get_view_count(); v++) {
 				rb_data->ensure_tsr(tsr_effect, v);
-				RendererRD::TSR::Parameters params;
-				params.render_buffers = rb;
-				params.context = rb_data->get_tsr_context(v);
-				params.view = v;
-				params.color = rb->get_internal_texture(v);
-				params.depth = rb->get_depth_texture(v);
-				params.velocity = rb->get_velocity_buffer(false, v);
-				params.reactive = rb->get_internal_texture_reactive(v);
-				params.output = rb->get_upscaled_texture(v);
-				params.internal_size = rb->get_internal_size();
-				params.output_size = rb->get_target_size();
-				params.quality = rb->get_tsr_quality();
-				params.jitter_pixels = jitter_pixels;
-				params.reprojection = reprojection;
-				params.z_near = p_render_data->scene_data->z_near;
-				params.z_far = p_render_data->scene_data->z_far;
-				params.is_orthogonal = p_render_data->scene_data->cam_orthogonal;
-				params.reset = reset_temporal_history;
-				// GodotNext: pt_tsr_stability (#198).
-				params.max_internal_size = rb->get_max_internal_size();
-				params.camera_projection = correction * cur_proj;
-				params.camera_transform = cur_transform;
-				// Wall-clock, not time_step: the flicker clock must advance while Engine.time_scale is 0.
-				params.delta_time = float(RSG::frame_step_unscaled);
-				params.thin_geometry = tsr_thin_geometry;
-				params.debug_view = tsr_debug_view;
-
-				tsr_effect->process(params);
+				tsr_effect->process(tsr_parameters(v, TSR_RECORD_UPSCALE));
 			}
 
 			RD::get_singleton()->draw_command_end_label();

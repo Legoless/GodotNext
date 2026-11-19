@@ -185,6 +185,40 @@ GodotNext's own: the selection order, the "first missing format" report, the
 TSR uses no subgroup operations, and its largest thread-group array is 10 x 10 `vec3`
 (1,600 B with Metal's 16-byte `float3`), far below Metal's 32 KB.
 
+### Epic Games public documentation for TSR async compute (#193)
+
+| Field | Value |
+|---|---|
+| Upstream | Upstream 1 above (https://dev.epicgames.com/documentation/unreal-engine/temporal-super-resolution-in-unreal-engine), its `r.TSR.AsyncCompute` console variable entry and its notes on async compute and the critical path |
+| Type / License | As above: feature-level descriptions only; zero code or constants copied. |
+| Read on | 2026-11-18 (#193) |
+| Used in | `servers/rendering/renderer_rd/effects/tsr_async.h`, `servers/rendering/renderer_rd/effects/tsr.{h,cpp}`, `servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp`, `doc/classes/ProjectSettings.xml` |
+
+What was used:
+
+- The four levels and the default: 0 off; 1 runs on async compute only the passes that are
+  completely independent from any intermediary resource of the frame; 2 (the default) also
+  runs the passes that depend only on the depth and velocity buffers, which can overlap other
+  work such as translucency and depth of field, while the passes on the critical path stay on
+  the graphics queue; 3 runs every pass on async compute.
+- The idea that the parallax work depends only on depth and velocity, which are ready early in
+  the frame, so it can run asynchronously; and the split of TSR's cost into total GPU time and
+  critical-path time, which the `"TSR critical path"` timestamp mirrors (beside `"TSR depth and
+  velocity"` in a split frame; `"TSR"` always covers all of TSR).
+
+What was not used: the page's own pass names (its level-1 examples) and its cost figures. Which
+GodotNext pass belongs to which level follows from what each pass reads (`tsr_async.h`):
+velocity dilation and parallax disocclusion read only the depth, the velocity and TSR's own
+textures; every other pass reads the scene color or the history built from it; no pass reads
+only earlier frames, so level 1 moves nothing. The record point after the motion-vector pass,
+the conditions that keep level 2 on the main queue (MSAA, transparent depth writes, compositor
+effects, VoxelGI and SDFGI debug draws), and level 3 recording at the upscaler's place are
+GodotNext's own, from the render graph's one fork-join window per frame (#174,
+`source-log/rhi-async-compute.md`), as are the rules that only the first TSR viewport of a frame
+uses the async queue and that multiview (XR) viewports do not, and the timestamp names. The page's examples of overlapped work
+(translucency, depth of field) are not reached yet: RD attaches the depth buffer read-write in
+every draw list, so the sky or transparent pass joins the two passes.
+
 ### Standard academic / public graphics literature (general mathematical techniques)
 
 | Reference | Date / Venue | License / Status | What was used |
