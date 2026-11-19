@@ -4044,6 +4044,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				if (dir_light == nullptr || !RSG::light_storage->light_has_shadow(dir_ins->base) || RSG::light_storage->light_directional_get_sky_mode(dir_ins->base) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
 					continue;
 				}
+				// GodotNext: vsm_settings_debug (#221). Only lights whose shadow method resolves to VIRTUAL.
+				if (!RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(dir_ins->base))) {
+					continue;
+				}
 				HashSet<RenderGeometryInstance *> csm_casters;
 				// The cascade casters were moved into render_shadow_data above (merge_unordered empties its
 				// source); a cascade past MAX_UPDATE_SHADOWS keeps its list in scene_cull_result.
@@ -4143,6 +4147,10 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 				Instance *pos_ins = scene_cull_result.lights[i];
 				InstanceLightData *pos_light = static_cast<InstanceLightData *>(pos_ins->base_data);
 				if (pos_light == nullptr || !RSG::light_storage->light_has_shadow(pos_ins->base)) {
+					continue;
+				}
+				// GodotNext: vsm_settings_debug (#221). Only lights whose shadow method resolves to VIRTUAL.
+				if (!RendererVirtualShadowMapStorage::light_uses_vsm(RSG::light_storage->light_get_shadow_method(pos_ins->base))) {
 					continue;
 				}
 				const uint32_t caster_mask = RSG::light_storage->light_get_shadow_caster_mask(pos_ins->base);

@@ -64,6 +64,12 @@ public:
 	virtual void light_set_shadow_caster_mask(RID p_light, uint32_t p_caster_mask) = 0;
 	virtual uint32_t light_get_shadow_caster_mask(RID p_light) const = 0;
 	virtual void light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mode) = 0;
+	// GodotNext: vsm_settings_debug (#221). The stored method; RendererVirtualShadowMapStorage resolves it.
+	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) = 0;
+	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const = 0;
+	// False for the dummy renderer (headless runs, imports, exports), which draws no shadows: it prints no VSM
+	// fallback line and no shadow-method warning.
+	virtual bool draws_shadows() const { return true; }
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) = 0;
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) = 0;
 	virtual bool light_get_allow_contact_shadows(RID p_light) const = 0;

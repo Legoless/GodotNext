@@ -144,6 +144,11 @@ void Performance::_bind_methods() {
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 	BIND_ENUM_CONSTANT(RENDER_STREAMING_TEXTURE_MEM_USED);
 #endif
+	// GodotNext: vsm_settings_debug (#221)
+	BIND_ENUM_CONSTANT(RENDER_VSM_PAGES_ALLOCATED);
+	BIND_ENUM_CONSTANT(RENDER_VSM_PAGES_REQUESTED);
+	BIND_ENUM_CONSTANT(RENDER_VSM_PAGES_RERENDERED);
+	BIND_ENUM_CONSTANT(RENDER_VSM_PAGES_OVERFLOW);
 	BIND_ENUM_CONSTANT(MONITOR_MAX);
 
 	BIND_ENUM_CONSTANT(MONITOR_TYPE_QUANTITY);
@@ -242,6 +247,11 @@ String Performance::get_monitor_name(Monitor p_monitor) const {
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 		PNAME("video/streaming_texture_mem_used"),
 #endif
+		// GodotNext: vsm_settings_debug (#221)
+		PNAME("virtual_shadows/pages_allocated"),
+		PNAME("virtual_shadows/pages_requested"),
+		PNAME("virtual_shadows/pages_rerendered"),
+		PNAME("virtual_shadows/pages_overflow"),
 	};
 	static_assert(std_size(names) == MONITOR_MAX);
 
@@ -472,6 +482,15 @@ double Performance::get_monitor(Monitor p_monitor) const {
 			return texture_streaming ? texture_streaming->get_memory_budget_bytes_used() : 0;
 		}
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
+	   // GodotNext: vsm_settings_debug (#221)
+		case RENDER_VSM_PAGES_ALLOCATED:
+			return RS::get_singleton()->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_ALLOCATED);
+		case RENDER_VSM_PAGES_REQUESTED:
+			return RS::get_singleton()->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_REQUESTED);
+		case RENDER_VSM_PAGES_RERENDERED:
+			return RS::get_singleton()->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_RERENDERED);
+		case RENDER_VSM_PAGES_OVERFLOW:
+			return RS::get_singleton()->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_OVERFLOW);
 		default: {
 		}
 	}
@@ -547,6 +566,11 @@ Performance::MonitorType Performance::get_monitor_type(Monitor p_monitor) const 
 #ifdef MODULE_TEXTURE_STREAMING_ENABLED
 		MONITOR_TYPE_MEMORY,
 #endif // MODULE_TEXTURE_STREAMING_ENABLED
+	   // GodotNext: vsm_settings_debug (#221)
+		MONITOR_TYPE_QUANTITY,
+		MONITOR_TYPE_QUANTITY,
+		MONITOR_TYPE_QUANTITY,
+		MONITOR_TYPE_QUANTITY,
 	};
 	static_assert((sizeof(types) / sizeof(MonitorType)) == MONITOR_MAX);
 

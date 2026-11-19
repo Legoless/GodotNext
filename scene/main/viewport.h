@@ -241,6 +241,13 @@ public:
 		DEBUG_DRAW_TSR,
 		// GodotNext: path_tracer (#167)
 		DEBUG_DRAW_PATH_TRACER,
+		// GodotNext: vsm_settings_debug (#221)
+		DEBUG_DRAW_VSM_MASK,
+		DEBUG_DRAW_VSM_MIP,
+		DEBUG_DRAW_VSM_PAGES,
+		DEBUG_DRAW_VSM_CACHE,
+		DEBUG_DRAW_VSM_OVERDRAW,
+		DEBUG_DRAW_VSM_CLIPMAP,
 	};
 
 	enum DefaultCanvasItemTextureFilter {

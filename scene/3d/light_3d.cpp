@@ -206,6 +206,20 @@ PackedStringArray Light3D::get_configuration_warnings() const {
 		warnings.push_back(RTR("A light's scale does not affect the visual size of the light."));
 	}
 
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). The tier rule's reason on every light that would
+	// use virtual shadow maps but cannot.
+	if (shadow && RS::get_singleton() != nullptr) {
+		if (shadow_method == SHADOW_METHOD_RAY_TRACED || shadow_method == SHADOW_METHOD_DISTANCE_FIELD) {
+			warnings.push_back(RTR("This shadow method is not implemented yet. The light uses the project's shadow method (Rendering > Lights and Shadows > Shadow Method)."));
+		}
+		const Dictionary tier = RS::get_singleton()->virtual_shadow_maps_get_tier_info();
+		const bool project_virtual = String(tier.get("project_shadow_method", "atlas")) == "virtual";
+		const bool wants_virtual = shadow_method == SHADOW_METHOD_VIRTUAL || (shadow_method != SHADOW_METHOD_ATLAS && project_virtual);
+		if (wants_virtual && !bool(tier.get("available", false))) {
+			warnings.push_back(vformat(RTR("Virtual shadow maps are not available on this renderer or device (%s). This light uses the shadow atlas."), String(tier.get("reason", ""))));
+		}
+	}
+
 	return warnings;
 }
 
@@ -216,6 +230,18 @@ void Light3D::set_bake_mode(BakeMode p_mode) {
 
 Light3D::BakeMode Light3D::get_bake_mode() const {
 	return bake_mode;
+}
+
+void Light3D::set_shadow_method(ShadowMethod p_method) {
+	// GodotNext: vsm_settings_debug (#221).
+	ERR_FAIL_INDEX(int(p_method), int(RSE::LIGHT_SHADOW_METHOD_MAX));
+	shadow_method = p_method;
+	RS::get_singleton()->light_set_shadow_method(light, RSE::LightShadowMethod(p_method));
+	update_configuration_warnings();
+}
+
+Light3D::ShadowMethod Light3D::get_shadow_method() const {
+	return shadow_method;
 }
 
 void Light3D::set_projector(const Ref<Texture2D> &p_texture) {
@@ -401,6 +427,9 @@ void Light3D::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_bake_mode", "bake_mode"), &Light3D::set_bake_mode);
 	ClassDB::bind_method(D_METHOD("get_bake_mode"), &Light3D::get_bake_mode);
+	// GodotNext: vsm_settings_debug (#221).
+	ClassDB::bind_method(D_METHOD("set_shadow_method", "method"), &Light3D::set_shadow_method);
+	ClassDB::bind_method(D_METHOD("get_shadow_method"), &Light3D::get_shadow_method);
 
 	ClassDB::bind_method(D_METHOD("set_projector", "projector"), &Light3D::set_projector);
 	ClassDB::bind_method(D_METHOD("get_projector"), &Light3D::get_projector);
@@ -428,6 +457,8 @@ void Light3D::_bind_methods() {
 
 	ADD_GROUP("Shadow", "shadow_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shadow_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_shadow", "has_shadow");
+	// GodotNext: vsm_settings_debug (#221).
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_method", PROPERTY_HINT_ENUM, "Project,Virtual,Atlas,Ray Traced,Distance Field"), "set_shadow_method", "get_shadow_method");
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "shadow_bias", PROPERTY_HINT_RANGE, "0,10,0.001"), "set_param", "get_param", PARAM_SHADOW_BIAS);
 	ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, "shadow_normal_bias", PROPERTY_HINT_RANGE, "0,10,0.001"), "set_param", "get_param", PARAM_SHADOW_NORMAL_BIAS);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shadow_reverse_cull_face"), "set_shadow_reverse_cull_face", "get_shadow_reverse_cull_face");
@@ -478,6 +509,13 @@ void Light3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(BAKE_DISABLED);
 	BIND_ENUM_CONSTANT(BAKE_STATIC);
 	BIND_ENUM_CONSTANT(BAKE_DYNAMIC);
+
+	// GodotNext: vsm_settings_debug (#221).
+	BIND_ENUM_CONSTANT(SHADOW_METHOD_PROJECT);
+	BIND_ENUM_CONSTANT(SHADOW_METHOD_VIRTUAL);
+	BIND_ENUM_CONSTANT(SHADOW_METHOD_ATLAS);
+	BIND_ENUM_CONSTANT(SHADOW_METHOD_RAY_TRACED);
+	BIND_ENUM_CONSTANT(SHADOW_METHOD_DISTANCE_FIELD);
 }
 
 Light3D::Light3D(RSE::LightType p_type) {

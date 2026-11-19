@@ -4701,7 +4701,14 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 		// GodotNext: pt_tsr_stability (#198)
 		case VIEW_DISPLAY_TSR:
 		// GodotNext: path_tracer (#167)
-		case VIEW_DISPLAY_PATH_TRACER: {
+		case VIEW_DISPLAY_PATH_TRACER:
+		// GodotNext: vsm_settings_debug (#221)
+		case VIEW_DISPLAY_VSM_MASK:
+		case VIEW_DISPLAY_VSM_MIP:
+		case VIEW_DISPLAY_VSM_PAGES:
+		case VIEW_DISPLAY_VSM_CACHE:
+		case VIEW_DISPLAY_VSM_OVERDRAW:
+		case VIEW_DISPLAY_VSM_CLIPMAP: {
 			static const int display_options[] = {
 				VIEW_DISPLAY_NORMAL,
 				VIEW_DISPLAY_WIREFRAME,
@@ -4764,6 +4771,13 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				VIEW_DISPLAY_TSR,
 				// GodotNext: path_tracer (#167)
 				VIEW_DISPLAY_PATH_TRACER,
+				// GodotNext: vsm_settings_debug (#221)
+				VIEW_DISPLAY_VSM_MASK,
+				VIEW_DISPLAY_VSM_MIP,
+				VIEW_DISPLAY_VSM_PAGES,
+				VIEW_DISPLAY_VSM_CACHE,
+				VIEW_DISPLAY_VSM_OVERDRAW,
+				VIEW_DISPLAY_VSM_CLIPMAP,
 				VIEW_MAX
 			};
 			static const Viewport::DebugDraw debug_draw_modes[] = {
@@ -4828,6 +4842,13 @@ void Node3DEditorViewport::_menu_option(int p_option) {
 				Viewport::DEBUG_DRAW_TSR,
 				// GodotNext: path_tracer (#167)
 				Viewport::DEBUG_DRAW_PATH_TRACER,
+				// GodotNext: vsm_settings_debug (#221)
+				Viewport::DEBUG_DRAW_VSM_MASK,
+				Viewport::DEBUG_DRAW_VSM_MIP,
+				Viewport::DEBUG_DRAW_VSM_PAGES,
+				Viewport::DEBUG_DRAW_VSM_CACHE,
+				Viewport::DEBUG_DRAW_VSM_OVERDRAW,
+				Viewport::DEBUG_DRAW_VSM_CLIPMAP,
 			};
 
 			for (int idx = 0; display_options[idx] != VIEW_MAX; idx++) {
@@ -7239,6 +7260,20 @@ Node3DEditorViewport::Node3DEditorViewport(Node3DEditor *p_spatial_editor, int p
 			TTRC("Colors opaque surfaces by virtual vs legacy route, per-surface fallback reason, and ray-tracing exclusion reason, and updates fallback coverage."));
 	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("NextGeo Triangle Size"), VIEW_DISPLAY_NEXTGEO_TRIANGLE_SIZE, SupportedRenderingMethods::FORWARD_PLUS,
 			TTRC("Colors visible triangles by log2 screen-space pixel area and publishes the 16-bin triangle_size_histogram."));
+	// GodotNext: vsm_settings_debug (#221). Virtual shadow maps (Project Settings > Rendering > Lights and Shadows > Shadow Method).
+	display_submenu->add_separator();
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Mask"), VIEW_DISPLAY_VSM_MASK, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Shows each pixel's raw visibility in the virtual shadow maps of every light that has them, one depth comparison per light: white is lit, black is shadowed, gray is reached by no light with virtual shadow maps, and magenta means the page it needs is not mapped. This is not the filtered shadow the lights shade with. Shows the normal image when virtual shadow maps are off."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Mip"), VIEW_DISPLAY_VSM_MIP, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors each pixel by the mip of the virtual shadow page it samples for its first light with virtual shadow maps: mip 0 (finest) red, then orange, yellow, green, cyan, blue and purple. Magenta means no page is mapped."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Pages"), VIEW_DISPLAY_VSM_PAGES, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors each pixel by the virtual page address (map, mip and page) it samples for its first light with virtual shadow maps, with the page edges darkened."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Cache"), VIEW_DISPLAY_VSM_CACHE, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Green: the sampled virtual shadow page was cached and not rendered for this view. Blue: only its dynamic layer was rendered. Red: its static layer was rendered for this view (the dynamic layer may be too)."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Overdraw"), VIEW_DISPLAY_VSM_OVERDRAW, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Heat map of the non-Nanite shadow caster draws rasterized into the sampled virtual shadow page for this view: dark blue for none, through green and yellow to red at 16 or more."));
+	_add_advanced_debug_draw_mode_item(display_submenu, TTRC("Virtual Shadow Clipmap"), VIEW_DISPLAY_VSM_CLIPMAP, SupportedRenderingMethods::FORWARD_PLUS,
+			TTRC("Colors each pixel by the clipmap level of the virtual shadow page it samples for its first directional light, one hue per level from level 0 (red). Gray means no directional light with virtual shadow maps reaches it."));
 	view_display_menu->get_popup()->add_submenu_node_item(TTRC("Display Advanced..."), display_submenu, VIEW_DISPLAY_ADVANCED);
 
 	view_display_menu->get_popup()->add_separator();

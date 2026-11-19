@@ -30,9 +30,13 @@
 
 #include "virtual_shadow_map_storage.h"
 
+#include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
 #include "core/math/math_funcs.h"
 #include "core/math/projection.h"
+#include "core/os/mutex.h"
+#include "core/string/print_string.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/variant.h"
 
 #include <cmath>
@@ -975,7 +979,8 @@ void RendererVirtualShadowMapStorage::mark_local_point(const MapData *p_maps, ui
 		if (!inside) {
 			continue;
 		}
-		const int32_t bias = p_lod_bias + (p_map_bias != nullptr ? int32_t(overflow_bias(p_map_bias[map])) : 0);
+		// GodotNext: vsm_settings_debug (#221). Plus the map's moving-light bias.
+		const int32_t bias = p_lod_bias + data.lod_bias + (p_map_bias != nullptr ? int32_t(overflow_bias(p_map_bias[map])) : 0);
 		const uint32_t mip = biased_mip(int32_t(face_mip(w * data.texel_scale, p_footprint)), bias);
 		const uint32_t index = entry_index(map, mip, (texel_x >> mip) >> PAGE_SIZE_SHIFT, (texel_y >> mip) >> PAGE_SIZE_SHIFT);
 		r_requests.push_back(uint64_t(index));
@@ -1036,7 +1041,8 @@ void RendererVirtualShadowMapStorage::mark_directional_point(const MapData *p_ma
 	}
 	// The finest level that holds the point; level + mip as the footprint asks, then the map's overflow
 	// bias. A page outside that mip's window goes to the next level.
-	const int32_t level_mip = clipmap_level_mip(p_footprint, p_lod_bias);
+	// GodotNext: vsm_settings_debug (#221). Plus the light's moving bias, held by level 0.
+	const int32_t level_mip = clipmap_level_mip(p_footprint, p_lod_bias + p_maps[first].lod_bias);
 	for (uint32_t level = 0; level < count; level++) {
 		const uint32_t map = first + level;
 		if (map >= p_table_maps) {
@@ -1706,5 +1712,309 @@ void RendererVirtualShadowMapStorage::cull_box_dirty_pages(const MapData *p_maps
 				r_dirty_indices.push_back(d);
 			}
 		}
+	}
+}
+
+/* PRODUCT SURFACE (#221) */
+
+// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1, budget V6).
+
+static_assert(RendererVirtualShadowMapStorage::SHADOW_METHOD_ATLAS == 0 && RendererVirtualShadowMapStorage::SHADOW_METHOD_VIRTUAL == 1, "The project setting stores the index: 0 atlas, 1 virtual.");
+static_assert(RSE::LIGHT_SHADOW_METHOD_MAX <= 32, "The warn-once mask holds every method.");
+
+const char *const RendererVirtualShadowMapStorage::SETTING_QUALITY = "rendering/lights_and_shadows/virtual_shadows/quality";
+const char *const RendererVirtualShadowMapStorage::SETTING_MAX_PHYSICAL_PAGES = "rendering/lights_and_shadows/virtual_shadows/max_physical_pages";
+const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional";
+const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local";
+const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL_MOVING = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving";
+const char *const RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING = "rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving";
+
+namespace {
+
+// Process-wide state of the product surface. The Forward+ storage writes it once at startup; the
+// light storages, the scene cull, Light3D's warnings and get_rendering_info() read it on any thread.
+SafeNumeric<uint32_t> vsm_tier_reason(RendererVirtualShadowMapStorage::TIER_REASON_UNSUPPORTED_RENDERER);
+SafeNumeric<uint32_t> vsm_project_method(RendererVirtualShadowMapStorage::DEFAULT_SHADOW_METHOD);
+SafeFlag vsm_dev_switch;
+SafeFlag vsm_state_set; // A Forward+ storage called set_startup_state().
+SafeFlag vsm_fallback_reported;
+SafeNumeric<uint32_t> vsm_fallback_lines;
+SafeNumeric<uint32_t> vsm_unimplemented_warned; // One bit per RSE::LightShadowMethod.
+SafeNumeric<uint32_t> vsm_unimplemented_warnings;
+SafeNumeric<uint64_t> vsm_frame_stats[RendererVirtualShadowMapStorage::FRAME_STAT_MAX];
+
+} // namespace
+
+RendererVirtualShadowMapStorage::TierReason RendererVirtualShadowMapStorage::evaluate_tier(const TierInputs &p_inputs) {
+	if (!p_inputs.forward_plus) {
+		return TIER_REASON_UNSUPPORTED_RENDERER;
+	}
+	if (!p_inputs.image_atomic_32) {
+		return TIER_REASON_NO_IMAGE_ATOMIC_32;
+	}
+	if (!p_inputs.indirect_count) {
+		return TIER_REASON_NO_INDIRECT_COUNT;
+	}
+	return TIER_REASON_NONE;
+}
+
+const char *RendererVirtualShadowMapStorage::get_tier_reason_name(TierReason p_reason) {
+	switch (p_reason) {
+		case TIER_REASON_NONE:
+			return "NONE";
+		case TIER_REASON_UNSUPPORTED_RENDERER:
+			return "UNSUPPORTED_RENDERER";
+		case TIER_REASON_NO_IMAGE_ATOMIC_32:
+			return "NO_IMAGE_ATOMIC_32";
+		case TIER_REASON_NO_INDIRECT_COUNT:
+			return "NO_INDIRECT_COUNT";
+		default:
+			return "INVALID";
+	}
+}
+
+String RendererVirtualShadowMapStorage::format_fallback_line(TierReason p_reason) {
+	return vformat("VSM: virtual shadow maps are not available (reason=%s); lights with the virtual shadow method use the shadow atlas.", get_tier_reason_name(p_reason));
+}
+
+bool RendererVirtualShadowMapStorage::is_light_shadow_method_implemented(RSE::LightShadowMethod p_method) {
+	return p_method == RSE::LIGHT_SHADOW_METHOD_PROJECT || p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL || p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS;
+}
+
+const char *RendererVirtualShadowMapStorage::get_light_shadow_method_name(RSE::LightShadowMethod p_method) {
+	switch (p_method) {
+		case RSE::LIGHT_SHADOW_METHOD_PROJECT:
+			return "PROJECT";
+		case RSE::LIGHT_SHADOW_METHOD_VIRTUAL:
+			return "VIRTUAL";
+		case RSE::LIGHT_SHADOW_METHOD_ATLAS:
+			return "ATLAS";
+		case RSE::LIGHT_SHADOW_METHOD_RAY_TRACED:
+			return "RAY_TRACED";
+		case RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD:
+			return "DISTANCE_FIELD";
+		default:
+			return "INVALID";
+	}
+}
+
+bool RendererVirtualShadowMapStorage::light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project) {
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL) {
+		return true;
+	}
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_ATLAS) {
+		return false;
+	}
+	// PROJECT, and the methods that are not implemented yet (they resolve to PROJECT).
+	return p_project == SHADOW_METHOD_VIRTUAL;
+}
+
+RSE::LightShadowMethod RendererVirtualShadowMapStorage::resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available) {
+	return (p_vsm_available && light_shadow_method_wants_virtual(p_method, p_project)) ? RSE::LIGHT_SHADOW_METHOD_VIRTUAL : RSE::LIGHT_SHADOW_METHOD_ATLAS;
+}
+
+void RendererVirtualShadowMapStorage::set_startup_state(TierReason p_reason, ShadowMethod p_project, bool p_dev_switch) {
+	vsm_tier_reason.set(uint32_t(p_reason));
+	vsm_project_method.set(uint32_t(p_project));
+	vsm_dev_switch.set_to(p_dev_switch);
+	vsm_state_set.set();
+}
+
+void RendererVirtualShadowMapStorage::reset_startup_state() {
+	set_startup_state(TIER_REASON_UNSUPPORTED_RENDERER, DEFAULT_SHADOW_METHOD, false);
+	vsm_state_set.clear();
+	// A renderer created after this one reports its own fallback line and warnings once again.
+	vsm_fallback_reported.clear();
+	vsm_unimplemented_warned.set(0);
+	reset_frame_stats();
+}
+
+RendererVirtualShadowMapStorage::TierReason RendererVirtualShadowMapStorage::get_tier_reason() {
+	return TierReason(vsm_tier_reason.get());
+}
+
+RendererVirtualShadowMapStorage::ShadowMethod RendererVirtualShadowMapStorage::get_project_shadow_method() {
+	return ShadowMethod(vsm_project_method.get());
+}
+
+bool RendererVirtualShadowMapStorage::is_dev_switch_forcing() {
+	return vsm_dev_switch.is_set();
+}
+
+bool RendererVirtualShadowMapStorage::light_uses_vsm(RSE::LightShadowMethod p_method) {
+	return resolve_light_shadow_method(p_method, get_project_shadow_method(), is_vsm_available()) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL;
+}
+
+bool RendererVirtualShadowMapStorage::report_fallback() {
+	const TierReason reason = get_tier_reason();
+	if (reason == TIER_REASON_NONE || !vsm_fallback_reported.set_if_clear()) {
+		return false;
+	}
+	vsm_fallback_lines.increment();
+	print_line(format_fallback_line(reason));
+	return true;
+}
+
+void RendererVirtualShadowMapStorage::note_light_shadow_method(RSE::LightShadowMethod p_method) {
+	if (uint32_t(p_method) >= RSE::LIGHT_SHADOW_METHOD_MAX) {
+		return;
+	}
+	if (!is_light_shadow_method_implemented(p_method)) {
+		const uint32_t bit = 1u << uint32_t(p_method);
+		if ((vsm_unimplemented_warned.bit_or(bit) & bit) == 0) {
+			vsm_unimplemented_warnings.increment();
+			WARN_PRINT(vformat("The %s light shadow method is not implemented yet; lights with it use the project's shadow method (rendering/lights_and_shadows/shadow_method).", get_light_shadow_method_name(p_method)));
+		}
+	}
+	if (light_shadow_method_wants_virtual(p_method, get_project_shadow_method())) {
+		report_fallback();
+	}
+}
+
+void RendererVirtualShadowMapStorage::report_project_shadow_method(bool p_print) {
+	if (!vsm_state_set.is_set()) {
+		// No Forward+ storage (Mobile, Compatibility, the dummy renderer): the tier reason stays
+		// UNSUPPORTED_RENDERER, and the project's method still decides whether lights wanted VSM.
+		vsm_project_method.set(uint32_t(read_project_shadow_method()));
+	}
+	if (p_print && get_project_shadow_method() == SHADOW_METHOD_VIRTUAL) {
+		report_fallback();
+	}
+}
+
+uint32_t RendererVirtualShadowMapStorage::get_unimplemented_warning_count() {
+	return vsm_unimplemented_warnings.get();
+}
+
+uint32_t RendererVirtualShadowMapStorage::get_fallback_line_count() {
+	return vsm_fallback_lines.get();
+}
+
+RendererVirtualShadowMapStorage::ShadowMethod RendererVirtualShadowMapStorage::read_project_shadow_method() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName name = "rendering/lights_and_shadows/shadow_method";
+	if (settings == nullptr || !settings->has_setting(name)) {
+		return DEFAULT_SHADOW_METHOD;
+	}
+	const int64_t value = settings->get_setting_with_override(name);
+	return value == int64_t(SHADOW_METHOD_VIRTUAL) ? SHADOW_METHOD_VIRTUAL : SHADOW_METHOD_ATLAS;
+}
+
+RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::default_scalability(PoolQuality p_quality) {
+	Scalability values;
+	values.max_physical_pages = pool_quality_pages(p_quality < POOL_QUALITY_MAX ? p_quality : DEFAULT_QUALITY);
+	values.lod_bias_directional = p_quality == POOL_QUALITY_LOW ? 1 : 0;
+	values.lod_bias_local = values.lod_bias_directional;
+	values.lod_bias_directional_moving = values.lod_bias_directional + 1;
+	values.lod_bias_local_moving = values.lod_bias_local + 1;
+	return values;
+}
+
+RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::clamp_scalability(const Scalability &p_values) {
+	Scalability values = p_values;
+	values.max_physical_pages = CLAMP(values.max_physical_pages, MIN_PHYSICAL_PAGES, POOL_MAX_PAGES);
+	values.lod_bias_directional = CLAMP(values.lod_bias_directional, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
+	values.lod_bias_local = CLAMP(values.lod_bias_local, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
+	values.lod_bias_directional_moving = CLAMP(values.lod_bias_directional_moving, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
+	values.lod_bias_local_moving = CLAMP(values.lod_bias_local_moving, -MAX_SETTING_LOD_BIAS, MAX_SETTING_LOD_BIAS);
+	return values;
+}
+
+static int64_t _read_preset_setting(const char *p_setting, RendererVirtualShadowMapStorage::PoolQuality p_quality, int64_t p_default) {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (settings == nullptr) {
+		return p_default;
+	}
+	const StringName name = String(p_setting) + "." + RendererVirtualShadowMapStorage::pool_quality_name(p_quality);
+	if (!settings->has_setting(name)) {
+		return p_default;
+	}
+	return settings->get_setting(name);
+}
+
+RendererVirtualShadowMapStorage::Scalability RendererVirtualShadowMapStorage::read_scalability(PoolQuality p_quality) {
+	const Scalability defaults = default_scalability(p_quality);
+	Scalability values;
+	values.max_physical_pages = uint32_t(CLAMP(_read_preset_setting(SETTING_MAX_PHYSICAL_PAGES, p_quality, defaults.max_physical_pages), int64_t(0), int64_t(UINT32_MAX)));
+	values.lod_bias_directional = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_DIRECTIONAL, p_quality, defaults.lod_bias_directional), int64_t(INT32_MIN), int64_t(INT32_MAX)));
+	values.lod_bias_local = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_LOCAL, p_quality, defaults.lod_bias_local), int64_t(INT32_MIN), int64_t(INT32_MAX)));
+	values.lod_bias_directional_moving = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_DIRECTIONAL_MOVING, p_quality, defaults.lod_bias_directional_moving), int64_t(INT32_MIN), int64_t(INT32_MAX)));
+	values.lod_bias_local_moving = int32_t(CLAMP(_read_preset_setting(SETTING_LOD_BIAS_LOCAL_MOVING, p_quality, defaults.lod_bias_local_moving), int64_t(INT32_MIN), int64_t(INT32_MAX)));
+	return clamp_scalability(values);
+}
+
+RendererVirtualShadowMapStorage::PoolQuality RendererVirtualShadowMapStorage::read_quality() {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	const StringName name = SETTING_QUALITY;
+	if (settings == nullptr || !settings->has_setting(name)) {
+		return DEFAULT_QUALITY;
+	}
+	const int64_t value = settings->get_setting_with_override(name);
+	return (value >= 0 && value < int64_t(POOL_QUALITY_MAX)) ? PoolQuality(value) : DEFAULT_QUALITY;
+}
+
+int32_t RendererVirtualShadowMapStorage::moving_lod_bias(int32_t p_static_bias, int32_t p_moving_bias, uint64_t p_frames_since_moved) {
+	const int32_t delta = p_moving_bias - p_static_bias;
+	if (delta == 0 || p_frames_since_moved == NEVER_MOVED) {
+		return 0;
+	}
+	const uint64_t steps = p_frames_since_moved / MOVING_DECAY_FRAMES;
+	const int32_t magnitude = delta > 0 ? delta : -delta;
+	if (steps >= uint64_t(magnitude)) {
+		return 0;
+	}
+	return delta > 0 ? delta - int32_t(steps) : delta + int32_t(steps);
+}
+
+uint64_t RendererVirtualShadowMapStorage::note_light_motion(RID p_light_instance, const Transform3D &p_transform) {
+	LightMaps *maps = light_maps.getptr(p_light_instance);
+	if (maps == nullptr) {
+		return NEVER_MOVED;
+	}
+	if (!maps->motion_valid) {
+		maps->motion_transform = p_transform;
+		maps->motion_valid = true;
+	} else if (maps->motion_transform != p_transform) {
+		maps->motion_transform = p_transform;
+		maps->moved_frame = frame;
+	}
+	if (maps->moved_frame == NEVER_MOVED) {
+		return NEVER_MOVED;
+	}
+	return frame >= maps->moved_frame ? frame - maps->moved_frame : 0;
+}
+
+uint64_t RendererVirtualShadowMapStorage::get_frame_stat(FrameStat p_stat) {
+	ERR_FAIL_UNSIGNED_INDEX_V(p_stat, FRAME_STAT_MAX, 0);
+	return vsm_frame_stats[p_stat].get();
+}
+
+void RendererVirtualShadowMapStorage::publish_frame_stats(const uint32_t *p_view_states, uint32_t p_view_count) {
+	if (p_view_states == nullptr || p_view_count == 0) {
+		return;
+	}
+	uint64_t requested = 0;
+	uint64_t rerendered = 0;
+	uint64_t overflow = 0;
+	for (uint32_t view = 0; view < p_view_count; view++) {
+		const uint32_t *state = p_view_states + uint64_t(view) * STATE_VIEW_END;
+		requested += state[STATE_REQUESTS];
+		rerendered += state[STATE_DIRTY];
+		overflow += state[STATE_OVERFLOW];
+	}
+	// The pool after the frame's last view: pages kept for, given to or cached for an entry. The update pass
+	// counts a cached page before the assign pass may give it to a new request (STATE_STOLEN).
+	const uint32_t *last = p_view_states + uint64_t(p_view_count - 1) * STATE_VIEW_END;
+	const uint64_t held = uint64_t(last[STATE_KEPT]) + uint64_t(last[STATE_NEW]) + uint64_t(last[STATE_CACHED]);
+	const uint64_t stolen = MIN(uint64_t(last[STATE_STOLEN]), uint64_t(last[STATE_CACHED]));
+	vsm_frame_stats[FRAME_STAT_ALLOCATED].set(held - stolen);
+	vsm_frame_stats[FRAME_STAT_REQUESTED].set(requested);
+	vsm_frame_stats[FRAME_STAT_RERENDERED].set(rerendered);
+	vsm_frame_stats[FRAME_STAT_OVERFLOW].set(overflow);
+}
+
+void RendererVirtualShadowMapStorage::reset_frame_stats() {
+	for (uint32_t i = 0; i < FRAME_STAT_MAX; i++) {
+		vsm_frame_stats[i].set(0);
 	}
 }

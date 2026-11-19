@@ -34,6 +34,8 @@
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: vsm_settings_debug (#221).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 using namespace RendererRD;
 
@@ -189,6 +191,26 @@ DebugEffects::~DebugEffects() {
 
 	motion_vectors.shader.version_free(motion_vectors.shader_version);
 	nextgeo_rt_proxy.shader.version_free(nextgeo_rt_proxy.shader_version);
+
+	// GodotNext: vsm_settings_debug (#221).
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd != nullptr) {
+		if (vsm_debug.params_buffer.is_valid()) {
+			rd->free_rid(vsm_debug.params_buffer);
+		}
+		if (vsm_debug.page_info_buffer.is_valid()) {
+			rd->free_rid(vsm_debug.page_info_buffer);
+		}
+		if (vsm_debug.empty_buffer.is_valid()) {
+			rd->free_rid(vsm_debug.empty_buffer);
+		}
+	}
+	if (vsm_debug.shader_version.is_valid()) {
+		vsm_debug.shader.version_free(vsm_debug.shader_version);
+	}
+	if (vsm_debug.pages_version.is_valid()) {
+		vsm_debug.pages_shader.version_free(vsm_debug.pages_version);
+	}
 }
 
 void DebugEffects::draw_shadow_frustum(RID p_light, const Projection &p_cam_projection, const Transform3D &p_cam_transform, RID p_dest_fb, const Rect2 p_rect) {
@@ -420,4 +442,181 @@ void DebugEffects::draw_nextgeo_rt_proxy(RID p_raster_depth, RID p_proxy_depth, 
 	RD::get_singleton()->draw_list_set_push_constant(draw_list, &push, sizeof(NextGeoRTProxyPushConstant));
 	RD::get_singleton()->draw_list_draw(draw_list, false, 1u, 3u);
 	RD::get_singleton()->draw_list_end();
+}
+
+// GodotNext: vsm_settings_debug (#221, plan §21.3.2). The six virtual shadow map debug draws.
+
+namespace {
+
+// DebugParams in vsm_debug.glsl (std430), followed by the lights.
+struct VSMDebugParamsHeader {
+	float inv_projection[4][4];
+	float view_to_world[3][4];
+	uint32_t sizes[4];
+	float footprint[4];
+	int32_t bias[4];
+	uint32_t misc[4];
+	uint32_t misc2[4];
+};
+static_assert(sizeof(VSMDebugParamsHeader) == 192, "VSMDebugParamsHeader matches DebugParams in vsm_debug.glsl.");
+
+} // namespace
+
+bool DebugEffects::_ensure_vsm_debug() {
+	if (vsm_debug.ready) {
+		return true;
+	}
+	if (vsm_debug.failed) {
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	ERR_FAIL_NULL_V(rd, false);
+	vsm_debug.failed = true; // Until every part exists.
+	const String defines = RendererVirtualShadowMapStorage::get_glsl_defines();
+
+	Vector<String> modes;
+	modes.push_back("");
+	vsm_debug.shader.initialize(modes, defines);
+	vsm_debug.shader_version = vsm_debug.shader.version_create();
+	const RID shader = vsm_debug.shader.version_get_shader(vsm_debug.shader_version, 0);
+	ERR_FAIL_COND_V_MSG(shader.is_null(), false, "The virtual shadow map debug shader did not compile; the VSM debug draws stay off.");
+	vsm_debug.pipeline.setup(shader, RD::RENDER_PRIMITIVE_TRIANGLES, RD::PipelineRasterizationState(), RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_blend(), 0);
+
+	Vector<String> page_modes;
+	page_modes.push_back("\n#define MODE_CLEAR\n");
+	page_modes.push_back("\n#define MODE_DIRTY\n");
+	page_modes.push_back("\n#define MODE_PAIRS\n");
+	vsm_debug.pages_shader.initialize(page_modes, defines);
+	vsm_debug.pages_version = vsm_debug.pages_shader.version_create();
+	for (int mode = 0; mode < VSM_DEBUG_PAGES_MAX; mode++) {
+		const RID pages_shader = vsm_debug.pages_shader.version_get_shader(vsm_debug.pages_version, mode);
+		ERR_FAIL_COND_V_MSG(pages_shader.is_null(), false, "The virtual shadow map debug page shader did not compile; the VSM debug draws stay off.");
+		vsm_debug.pages_pipelines[mode] = rd->compute_pipeline_create(pages_shader);
+	}
+
+	vsm_debug.params_buffer = rd->storage_buffer_create(sizeof(VSMDebugParamsHeader) + VSM_DEBUG_MAX_LIGHTS * sizeof(VSMDebugLight));
+	rd->set_resource_name(vsm_debug.params_buffer, "VSM Debug Params");
+	vsm_debug.params_lights = VSM_DEBUG_MAX_LIGHTS;
+	vsm_debug.empty_buffer = rd->storage_buffer_create(16);
+	rd->set_resource_name(vsm_debug.empty_buffer, "VSM Debug Empty");
+	vsm_debug.failed = false;
+	vsm_debug.ready = true;
+	return true;
+}
+
+void DebugEffects::draw_vsm(const VSMDebugInput &p_input) {
+	RenderingDevice *rd = RD::get_singleton();
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	ERR_FAIL_NULL(rd);
+	ERR_FAIL_NULL(material_storage);
+	ERR_FAIL_NULL(uniform_set_cache);
+	if (p_input.depth_texture.is_null() || p_input.page_table.is_null() || p_input.map_data.is_null() || p_input.pool.is_null() || p_input.dest_fb.is_null() || p_input.table_maps == 0 || p_input.pool_pages == 0) {
+		return;
+	}
+	if (!_ensure_vsm_debug()) {
+		return;
+	}
+
+	// The pages this view rendered and the caster draws into each (VSM_CACHE and VSM_OVERDRAW).
+	const bool page_draw = (p_input.mode == 3 || p_input.mode == 4) && p_input.alloc_state.is_valid() && p_input.dirty.is_valid();
+	if (page_draw) {
+		if (vsm_debug.page_info_buffer.is_null() || vsm_debug.page_info_pages < p_input.pool_pages) {
+			if (vsm_debug.page_info_buffer.is_valid()) {
+				rd->free_rid(vsm_debug.page_info_buffer);
+			}
+			vsm_debug.page_info_buffer = rd->storage_buffer_create((p_input.pool_pages + 1) * uint32_t(sizeof(uint32_t)));
+			rd->set_resource_name(vsm_debug.page_info_buffer, "VSM Debug Page Info");
+			vsm_debug.page_info_pages = p_input.pool_pages;
+		}
+		const bool has_pairs = p_input.pairs.is_valid() && p_input.cull_state.is_valid() && p_input.pair_capacity > 0;
+		VSMDebugPagesPushConstant push = {};
+		push.pool_pages = p_input.pool_pages;
+		push.grid_width = p_input.grid_width;
+		push.pair_capacity = has_pairs ? p_input.pair_capacity : 0u;
+		// A grid-stride loop: the pair list holds up to 1 << 22 pairs, more than 65,535 groups of 64.
+		const uint32_t pair_groups = RendererVirtualShadowMapStorage::grid_stride_groups(push.pair_capacity, 64u, p_input.max_dispatch_groups);
+		push.pair_stride = pair_groups * 64u;
+		const RID pages_shader = vsm_debug.pages_shader.version_get_shader(vsm_debug.pages_version, VSM_DEBUG_PAGES_CLEAR);
+		RD::Uniform u_state(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_input.alloc_state);
+		RD::Uniform u_dirty(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_input.dirty);
+		RD::Uniform u_pairs(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, has_pairs ? p_input.pairs : vsm_debug.empty_buffer);
+		RD::Uniform u_cull(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, has_pairs ? p_input.cull_state : vsm_debug.empty_buffer);
+		RD::Uniform u_info(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_debug.page_info_buffer);
+		const RID set = uniform_set_cache->get_cache(pages_shader, 0, u_state, u_dirty, u_pairs, u_cull, u_info);
+
+		rd->draw_command_begin_label("VSM Debug Pages");
+		RD::ComputeListID list = rd->compute_list_begin();
+		rd->compute_list_bind_compute_pipeline(list, vsm_debug.pages_pipelines[VSM_DEBUG_PAGES_CLEAR]);
+		rd->compute_list_bind_uniform_set(list, set, 0);
+		rd->compute_list_set_push_constant(list, &push, sizeof(push));
+		rd->compute_list_dispatch_threads(list, p_input.pool_pages + 1, 1, 1);
+		rd->compute_list_add_barrier(list);
+		rd->compute_list_bind_compute_pipeline(list, vsm_debug.pages_pipelines[VSM_DEBUG_PAGES_DIRTY]);
+		rd->compute_list_bind_uniform_set(list, set, 0);
+		rd->compute_list_set_push_constant(list, &push, sizeof(push));
+		rd->compute_list_dispatch_threads(list, p_input.pool_pages, 1, 1);
+		if (has_pairs) {
+			rd->compute_list_add_barrier(list);
+			rd->compute_list_bind_compute_pipeline(list, vsm_debug.pages_pipelines[VSM_DEBUG_PAGES_PAIRS]);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			rd->compute_list_set_push_constant(list, &push, sizeof(push));
+			rd->compute_list_dispatch(list, pair_groups, 1, 1);
+		}
+		rd->compute_list_end();
+		rd->draw_command_end_label();
+	}
+
+	// The parameters and the lights.
+	const uint32_t light_count = MIN(p_input.lights.size(), VSM_DEBUG_MAX_LIGHTS);
+	Vector<uint8_t> data;
+	data.resize(sizeof(VSMDebugParamsHeader) + MAX(light_count, 1u) * sizeof(VSMDebugLight));
+	memset(data.ptrw(), 0, data.size());
+	VSMDebugParamsHeader *header = reinterpret_cast<VSMDebugParamsHeader *>(data.ptrw());
+	for (int row = 0; row < 4; row++) {
+		for (int column = 0; column < 4; column++) {
+			header->inv_projection[row][column] = float(p_input.inv_projection.columns[column][row]);
+		}
+	}
+	for (int row = 0; row < 3; row++) {
+		header->view_to_world[row][0] = float(p_input.cam_transform.basis.rows[row].x);
+		header->view_to_world[row][1] = float(p_input.cam_transform.basis.rows[row].y);
+		header->view_to_world[row][2] = float(p_input.cam_transform.basis.rows[row].z);
+		header->view_to_world[row][3] = float(p_input.cam_transform.origin[row]);
+	}
+	header->sizes[0] = uint32_t(MAX(p_input.internal_size.x, 1));
+	header->sizes[1] = uint32_t(MAX(p_input.internal_size.y, 1));
+	header->sizes[2] = uint32_t(MAX(p_input.output_size.x, 1));
+	header->sizes[3] = uint32_t(MAX(p_input.output_size.y, 1));
+	header->footprint[0] = p_input.pixel_scale;
+	header->footprint[1] = p_input.pixel_bias;
+	header->bias[0] = p_input.lod_bias_directional;
+	header->bias[1] = p_input.lod_bias_local;
+	header->misc[0] = p_input.table_maps;
+	header->misc[1] = light_count;
+	header->misc[2] = p_input.mode;
+	header->misc[3] = MAX(p_input.grid_width, 1u);
+	header->misc2[0] = p_input.pool_pages;
+	header->misc2[1] = page_draw ? 1u : 0u;
+	if (light_count > 0) {
+		memcpy(data.ptrw() + sizeof(VSMDebugParamsHeader), p_input.lights.ptr(), light_count * sizeof(VSMDebugLight));
+	}
+	rd->buffer_update(vsm_debug.params_buffer, 0, data.size(), data.ptr());
+
+	const RID shader = vsm_debug.shader.version_get_shader(vsm_debug.shader_version, 0);
+	const RID sampler = material_storage->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
+	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_input.depth_texture }));
+	RD::Uniform u_table(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_input.page_table);
+	RD::Uniform u_maps(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_input.map_data);
+	RD::Uniform u_pool(RD::UNIFORM_TYPE_IMAGE, 3, p_input.pool);
+	RD::Uniform u_params(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_debug.params_buffer);
+	RD::Uniform u_info(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_debug.page_info_buffer.is_valid() ? vsm_debug.page_info_buffer : vsm_debug.empty_buffer);
+
+	rd->draw_command_begin_label("VSM Debug Draw");
+	RD::DrawListID draw_list = rd->draw_list_begin(p_input.dest_fb);
+	rd->draw_list_bind_render_pipeline(draw_list, vsm_debug.pipeline.get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(p_input.dest_fb), false, rd->draw_list_get_current_pass()));
+	rd->draw_list_bind_uniform_set(draw_list, uniform_set_cache->get_cache(shader, 0, u_depth, u_table, u_maps, u_pool, u_params, u_info), 0);
+	rd->draw_list_draw(draw_list, false, 1u, 3u);
+	rd->draw_list_end();
+	rd->draw_command_end_label();
 }

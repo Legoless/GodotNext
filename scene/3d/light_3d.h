@@ -68,6 +68,15 @@ public:
 		BAKE_DYNAMIC,
 	};
 
+	// GodotNext: vsm_settings_debug (#221). Same values as RenderingServer.LightShadowMethod.
+	enum ShadowMethod {
+		SHADOW_METHOD_PROJECT = RSE::LIGHT_SHADOW_METHOD_PROJECT,
+		SHADOW_METHOD_VIRTUAL = RSE::LIGHT_SHADOW_METHOD_VIRTUAL,
+		SHADOW_METHOD_ATLAS = RSE::LIGHT_SHADOW_METHOD_ATLAS,
+		SHADOW_METHOD_RAY_TRACED = RSE::LIGHT_SHADOW_METHOD_RAY_TRACED,
+		SHADOW_METHOD_DISTANCE_FIELD = RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD,
+	};
+
 private:
 	Color color;
 	real_t param[PARAM_MAX] = {};
@@ -84,6 +93,8 @@ private:
 	bool editor_only = false;
 	void _update_visibility();
 	BakeMode bake_mode = BAKE_DYNAMIC;
+	// GodotNext: vsm_settings_debug (#221).
+	ShadowMethod shadow_method = SHADOW_METHOD_PROJECT;
 	Ref<Texture2D> projector;
 	Color correlated_color = Color(1.0, 1.0, 1.0);
 	float temperature = 6500.0;
@@ -146,6 +157,10 @@ public:
 	void set_bake_mode(BakeMode p_mode);
 	BakeMode get_bake_mode() const;
 
+	// GodotNext: vsm_settings_debug (#221).
+	void set_shadow_method(ShadowMethod p_method);
+	ShadowMethod get_shadow_method() const;
+
 	void set_projector(const Ref<Texture2D> &p_texture);
 	Ref<Texture2D> get_projector() const;
 
@@ -162,6 +177,8 @@ public:
 
 VARIANT_ENUM_CAST(Light3D::Param);
 VARIANT_ENUM_CAST(Light3D::BakeMode);
+// GodotNext: vsm_settings_debug (#221).
+VARIANT_ENUM_CAST(Light3D::ShadowMethod);
 
 class DirectionalLight3D : public Light3D {
 	GDCLASS(DirectionalLight3D, Light3D);

@@ -32,9 +32,19 @@
 
 TEST_FORCE_LINK(test_virtual_shadow_maps)
 
+#include "core/config/project_settings.h"
 #include "core/math/math_funcs.h"
 #include "core/math/random_pcg.h"
+#include "core/object/class_db.h"
+#include "main/performance.h"
+#include "scene/3d/light_3d.h"
+#include "scene/main/viewport.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
+#include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
+#include "servers/rendering/rendering_device.h"
+#include "servers/rendering/rendering_server.h"
+#include "servers/rendering/rendering_server_globals.h"
 #include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #include <cmath>
@@ -1306,6 +1316,538 @@ TEST_CASE("[VSM] Directional coarse marking and lookup cover (origin & 31) == 31
 		CHECK(box_unmapped == 0);
 		CHECK(box_no_far_unmapped > 0);
 		CHECK(box_no_mip4_unmapped > 0);
+	}
+}
+
+// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1, budget V6, §13.2). The product surface: the tier
+// rule with mocked device capabilities, the shadow methods, the scalability presets, moving lights, the
+// frame stats and the debug-draw and rendering-info enums.
+
+TEST_CASE("[VSM] Tier rule: Forward+, 32-bit image atomics and indirect-count draws, first failure wins (#221)") {
+	VSM::TierInputs inputs;
+	inputs.forward_plus = true;
+	inputs.image_atomic_32 = true;
+	inputs.indirect_count = true;
+	CHECK(VSM::evaluate_tier(inputs) == VSM::TIER_REASON_NONE);
+	VSM::TierInputs no_indirect = inputs;
+	no_indirect.indirect_count = false;
+	CHECK(VSM::evaluate_tier(no_indirect) == VSM::TIER_REASON_NO_INDIRECT_COUNT);
+	VSM::TierInputs no_atomics = inputs;
+	no_atomics.image_atomic_32 = false;
+	no_atomics.indirect_count = false;
+	CHECK(VSM::evaluate_tier(no_atomics) == VSM::TIER_REASON_NO_IMAGE_ATOMIC_32);
+	VSM::TierInputs mobile = no_atomics;
+	mobile.forward_plus = false;
+	CHECK(VSM::evaluate_tier(mobile) == VSM::TIER_REASON_UNSUPPORTED_RENDERER);
+	for (uint32_t reason = 0; reason < VSM::TIER_REASON_MAX; reason++) {
+		CHECK(String(VSM::get_tier_reason_name(VSM::TierReason(reason))) != "INVALID");
+		CHECK(VSM::format_fallback_line(VSM::TierReason(reason)).contains(VSM::get_tier_reason_name(VSM::TierReason(reason))));
+	}
+}
+
+static VSM::TierReason vsm_mocked_tier(uint64_t p_features) {
+	RenderingDevice *rd = memnew(RenderingDevice);
+	rd->set_feature_mock(true, p_features);
+	VSM::TierInputs inputs;
+	RendererRD::VirtualShadowMapStorage::collect_device_inputs(rd, true, inputs);
+	memdelete(rd);
+	return VSM::evaluate_tier(inputs);
+}
+
+TEST_CASE("[VSM] Tier rule with mocked device capabilities (#221, §13.2)") {
+	const uint64_t atomics = uint64_t(1) << RenderingDevice::SUPPORTS_IMAGE_ATOMIC_32_BIT;
+	const uint64_t indirect_count = uint64_t(1) << RenderingDevice::SUPPORTS_DRAW_INDIRECT_COUNT;
+	CHECK(vsm_mocked_tier(atomics | indirect_count) == VSM::TIER_REASON_NONE);
+	CHECK(vsm_mocked_tier(indirect_count) == VSM::TIER_REASON_NO_IMAGE_ATOMIC_32);
+	CHECK(vsm_mocked_tier(atomics) == VSM::TIER_REASON_NO_INDIRECT_COUNT);
+	CHECK(vsm_mocked_tier(0) == VSM::TIER_REASON_NO_IMAGE_ATOMIC_32);
+	// 64-bit atomics are not part of the rule: VSM without them is an extension, not a fallback.
+	CHECK(vsm_mocked_tier(atomics | indirect_count | (uint64_t(1) << RenderingDevice::SUPPORTS_BUFFER_INT64_ATOMICS)) == VSM::TIER_REASON_NONE);
+	VSM::TierInputs none;
+	RendererRD::VirtualShadowMapStorage::collect_device_inputs(nullptr, true, none);
+	CHECK(VSM::evaluate_tier(none) == VSM::TIER_REASON_NO_IMAGE_ATOMIC_32);
+}
+
+TEST_CASE("[VSM] Mocked capabilities: a virtual project with no VSM tier uses the atlas and logs one reason line (#221)") {
+	VSM::reset_startup_state();
+	const uint32_t lines_before = VSM::get_fallback_line_count();
+	// A device without 32-bit image atomics, in a project with shadow_method = virtual.
+	VSM::set_startup_state(vsm_mocked_tier(uint64_t(1) << RenderingDevice::SUPPORTS_DRAW_INDIRECT_COUNT), VSM::SHADOW_METHOD_VIRTUAL, false);
+	CHECK(VSM::get_tier_reason() == VSM::TIER_REASON_NO_IMAGE_ATOMIC_32);
+	CHECK_FALSE(VSM::is_vsm_available());
+	// Every method resolves to the atlas: no light gets virtual maps (LightStorage::update_light_buffers()
+	// and the scene cull ask light_uses_vsm()).
+	for (uint32_t method = 0; method < RSE::LIGHT_SHADOW_METHOD_MAX; method++) {
+		CHECK_FALSE(VSM::light_uses_vsm(RSE::LightShadowMethod(method)));
+	}
+	// One line, however many lights and starts report it.
+	ERR_PRINT_OFF;
+	VSM::report_project_shadow_method();
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_PROJECT);
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
+	VSM::report_project_shadow_method();
+	ERR_PRINT_ON;
+	CHECK(VSM::get_fallback_line_count() - lines_before == 1);
+	// With the tier, the same project gets virtual maps and prints nothing.
+	VSM::reset_startup_state();
+	const uint32_t lines_tier = VSM::get_fallback_line_count();
+	VSM::set_startup_state(VSM::TIER_REASON_NONE, VSM::SHADOW_METHOD_VIRTUAL, false);
+	CHECK(VSM::light_uses_vsm(RSE::LIGHT_SHADOW_METHOD_PROJECT));
+	CHECK(VSM::light_uses_vsm(RSE::LIGHT_SHADOW_METHOD_VIRTUAL));
+	CHECK_FALSE(VSM::light_uses_vsm(RSE::LIGHT_SHADOW_METHOD_ATLAS));
+	VSM::report_project_shadow_method();
+	CHECK(VSM::get_fallback_line_count() == lines_tier);
+	// An atlas project prints nothing until a light asks for VIRTUAL.
+	VSM::reset_startup_state();
+	VSM::set_startup_state(VSM::TIER_REASON_NO_INDIRECT_COUNT, VSM::SHADOW_METHOD_ATLAS, false);
+	const uint32_t lines_atlas = VSM::get_fallback_line_count();
+	VSM::report_project_shadow_method();
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_ATLAS);
+	CHECK(VSM::get_fallback_line_count() == lines_atlas);
+	ERR_PRINT_OFF;
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
+	ERR_PRINT_ON;
+	CHECK(VSM::get_fallback_line_count() - lines_atlas == 1);
+	VSM::reset_startup_state();
+}
+
+TEST_CASE("[VSM] Light shadow methods resolve to VIRTUAL or ATLAS; unimplemented ones take PROJECT (#221)") {
+	using M = RSE::LightShadowMethod;
+	const VSM::ShadowMethod projects[2] = { VSM::SHADOW_METHOD_ATLAS, VSM::SHADOW_METHOD_VIRTUAL };
+	for (VSM::ShadowMethod project : projects) {
+		const M project_result = project == VSM::SHADOW_METHOD_VIRTUAL ? RSE::LIGHT_SHADOW_METHOD_VIRTUAL : RSE::LIGHT_SHADOW_METHOD_ATLAS;
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_PROJECT, project, true) == project_result);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_VIRTUAL, project, true) == RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_ATLAS, project, true) == RSE::LIGHT_SHADOW_METHOD_ATLAS);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED, project, true) == project_result);
+		CHECK(VSM::resolve_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD, project, true) == project_result);
+		// Below the tier everything takes the atlas.
+		for (uint32_t method = 0; method < RSE::LIGHT_SHADOW_METHOD_MAX; method++) {
+			CHECK(VSM::resolve_light_shadow_method(M(method), project, false) == RSE::LIGHT_SHADOW_METHOD_ATLAS);
+		}
+	}
+	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_PROJECT));
+	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_VIRTUAL));
+	CHECK(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_ATLAS));
+	CHECK_FALSE(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED));
+	CHECK_FALSE(VSM::is_light_shadow_method_implemented(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD));
+}
+
+TEST_CASE("[VSM] Unimplemented shadow methods warn once each (#221)") {
+	VSM::reset_startup_state();
+	const uint32_t before = VSM::get_unimplemented_warning_count();
+	ERR_PRINT_OFF;
+	for (int i = 0; i < 3; i++) {
+		VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
+	}
+	ERR_PRINT_ON;
+	CHECK(VSM::get_unimplemented_warning_count() - before == 1);
+	ERR_PRINT_OFF;
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
+	ERR_PRINT_ON;
+	CHECK(VSM::get_unimplemented_warning_count() - before == 2);
+	// Implemented methods never warn.
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_PROJECT);
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
+	VSM::note_light_shadow_method(RSE::LIGHT_SHADOW_METHOD_ATLAS);
+	CHECK(VSM::get_unimplemented_warning_count() - before == 2);
+	VSM::reset_startup_state();
+}
+
+TEST_CASE("[VSM][SceneTree] The dummy renderer prints no fallback line and no shadow-method warning (#221)") {
+	// Headless runs, imports and exports use the dummy renderer, which draws no shadows.
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	REQUIRE(RSG::light_storage != nullptr);
+	CHECK_FALSE(RSG::light_storage->draws_shadows());
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	REQUIRE(settings != nullptr);
+	const StringName setting = "rendering/lights_and_shadows/shadow_method";
+	const Variant saved = settings->get_setting(setting, 0);
+	settings->set_setting(setting, int64_t(VSM::SHADOW_METHOD_VIRTUAL));
+	VSM::reset_startup_state();
+	const uint32_t lines = VSM::get_fallback_line_count();
+	const uint32_t warnings = VSM::get_unimplemented_warning_count();
+	// What RenderingServerDefault does at startup on this renderer: the project's method is recorded (Light3D's
+	// warnings read it), and nothing is printed.
+	VSM::report_project_shadow_method(RSG::light_storage->draws_shadows());
+	CHECK(VSM::get_project_shadow_method() == VSM::SHADOW_METHOD_VIRTUAL);
+	CHECK(VSM::get_fallback_line_count() == lines);
+	DirectionalLight3D *light = memnew(DirectionalLight3D);
+	for (uint32_t method = 0; method < RSE::LIGHT_SHADOW_METHOD_MAX; method++) {
+		rs->light_set_shadow_method(light->get_base(), RSE::LightShadowMethod(method));
+		light->set_shadow_method(Light3D::ShadowMethod(method));
+	}
+	memdelete(light);
+	CHECK(VSM::get_fallback_line_count() == lines);
+	CHECK(VSM::get_unimplemented_warning_count() == warnings);
+	// A renderer that draws shadows (Mobile, Compatibility) prints the one line for the same project.
+	ERR_PRINT_OFF;
+	VSM::report_project_shadow_method(true);
+	ERR_PRINT_ON;
+	CHECK(VSM::get_fallback_line_count() - lines == 1);
+	settings->set_setting(setting, saved);
+	VSM::reset_startup_state();
+}
+
+// RenderingServer has a setter and no getter (as for the other light parameters), and the doctests run on the
+// dummy renderer, which stores nothing: every value is bound on the server and round-trips through Light3D here.
+// tests/vsm/product_surface.gd sets PROJECT, ATLAS, RAY_TRACED and DISTANCE_FIELD on a light of the Forward+
+// light storage and checks what each resolves to.
+TEST_CASE("[VSM][SceneTree] Every shadow method is bound on RenderingServer and round-trips through Light3D (#221)") {
+	const char *names[RSE::LIGHT_SHADOW_METHOD_MAX] = { "PROJECT", "VIRTUAL", "ATLAS", "RAY_TRACED", "DISTANCE_FIELD" };
+	List<StringName> constants;
+	ClassDB::get_enum_constants("RenderingServer", "LightShadowMethod", &constants);
+	CHECK(constants.size() == RSE::LIGHT_SHADOW_METHOD_MAX + 1); // Plus LIGHT_SHADOW_METHOD_MAX.
+	List<StringName> light_constants;
+	ClassDB::get_enum_constants("Light3D", "ShadowMethod", &light_constants);
+	CHECK(light_constants.size() == RSE::LIGHT_SHADOW_METHOD_MAX);
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	VSM::reset_startup_state();
+	DirectionalLight3D *light = memnew(DirectionalLight3D);
+	CHECK(light->get_shadow_method() == Light3D::SHADOW_METHOD_PROJECT);
+	ERR_PRINT_OFF;
+	for (uint32_t method = 0; method < RSE::LIGHT_SHADOW_METHOD_MAX; method++) {
+		const String name = String("LIGHT_SHADOW_METHOD_") + names[method];
+		bool valid = false;
+		CHECK(ClassDB::get_integer_constant("RenderingServer", name, &valid) == int64_t(method));
+		CHECK(valid);
+		CHECK(ClassDB::get_integer_constant_enum("RenderingServer", name) == StringName("LightShadowMethod"));
+		valid = false;
+		CHECK(ClassDB::get_integer_constant("Light3D", String("SHADOW_METHOD_") + names[method], &valid) == int64_t(method));
+		CHECK(valid);
+		CHECK(String(VSM::get_light_shadow_method_name(RSE::LightShadowMethod(method))) == names[method]);
+		// The bound server setter takes every value, and the node keeps it (unimplemented ones are kept, too:
+		// only their resolution falls back).
+		Callable::CallError error;
+		const Variant light_rid = light->get_base();
+		const Variant value = int64_t(method);
+		const Variant *args[2] = { &light_rid, &value };
+		rs->callp("light_set_shadow_method", args, 2, error);
+		CHECK(error.error == Callable::CallError::CALL_OK);
+		light->set_shadow_method(Light3D::ShadowMethod(method));
+		CHECK(int(light->get_shadow_method()) == int(method));
+		CHECK(int(light->get("shadow_method")) == int(method));
+	}
+	ERR_PRINT_ON;
+	memdelete(light);
+	VSM::reset_startup_state();
+}
+
+static bool vsm_has_warning(const PackedStringArray &p_warnings, const String &p_text) {
+	for (const String &warning : p_warnings) {
+		if (warning.contains(p_text)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+TEST_CASE("[VSM][SceneTree] Light3D shows the tier reason on lights that would use virtual shadow maps (#221)") {
+	// The inspector hint of issue step 3: Light3D's configuration warnings read the tier rule's stored reason.
+	const String fallback = "Virtual shadow maps are not available";
+	OmniLight3D *light = memnew(OmniLight3D);
+	light->set_shadow(true);
+	ERR_PRINT_OFF;
+	// A virtual project on a device without 32-bit image atomics (mocked, as the tier tests above).
+	VSM::reset_startup_state();
+	VSM::set_startup_state(vsm_mocked_tier(uint64_t(1) << RenderingDevice::SUPPORTS_DRAW_INDIRECT_COUNT), VSM::SHADOW_METHOD_VIRTUAL, false);
+	PackedStringArray warnings = light->get_configuration_warnings();
+	CHECK(vsm_has_warning(warnings, fallback));
+	CHECK(vsm_has_warning(warnings, "NO_IMAGE_ATOMIC_32"));
+	light->set_shadow_method(Light3D::SHADOW_METHOD_ATLAS);
+	CHECK_FALSE(vsm_has_warning(light->get_configuration_warnings(), fallback));
+	light->set_shadow_method(Light3D::SHADOW_METHOD_VIRTUAL);
+	CHECK(vsm_has_warning(light->get_configuration_warnings(), fallback));
+	// Unimplemented methods take PROJECT (here Virtual), so they show both warnings.
+	light->set_shadow_method(Light3D::SHADOW_METHOD_RAY_TRACED);
+	warnings = light->get_configuration_warnings();
+	CHECK(vsm_has_warning(warnings, "not implemented yet"));
+	CHECK(vsm_has_warning(warnings, fallback));
+	// A light without shadows shows nothing.
+	light->set_shadow(false);
+	CHECK_FALSE(vsm_has_warning(light->get_configuration_warnings(), fallback));
+	light->set_shadow(true);
+	light->set_shadow_method(Light3D::SHADOW_METHOD_PROJECT);
+	// An atlas project shows nothing for PROJECT lights, but a VIRTUAL light still names the reason.
+	VSM::reset_startup_state();
+	VSM::set_startup_state(VSM::TIER_REASON_NO_INDIRECT_COUNT, VSM::SHADOW_METHOD_ATLAS, false);
+	CHECK_FALSE(vsm_has_warning(light->get_configuration_warnings(), fallback));
+	light->set_shadow_method(Light3D::SHADOW_METHOD_VIRTUAL);
+	warnings = light->get_configuration_warnings();
+	CHECK(vsm_has_warning(warnings, fallback));
+	CHECK(vsm_has_warning(warnings, "NO_INDIRECT_COUNT"));
+	// At the tier, no light shows it.
+	VSM::reset_startup_state();
+	VSM::set_startup_state(VSM::TIER_REASON_NONE, VSM::SHADOW_METHOD_VIRTUAL, false);
+	CHECK_FALSE(vsm_has_warning(light->get_configuration_warnings(), fallback));
+	light->set_shadow_method(Light3D::SHADOW_METHOD_PROJECT);
+	CHECK_FALSE(vsm_has_warning(light->get_configuration_warnings(), fallback));
+	ERR_PRINT_ON;
+	memdelete(light);
+	VSM::reset_startup_state();
+}
+
+TEST_CASE("[VSM] Scalability presets: pool memory per preset equals V6 within 1 MiB (#221, Q15)") {
+	const uint64_t v6_mib[VSM::POOL_QUALITY_MAX] = { 64, 128, 256, 512 };
+	for (uint32_t quality = 0; quality < VSM::POOL_QUALITY_MAX; quality++) {
+		const VSM::Scalability values = VSM::default_scalability(VSM::PoolQuality(quality));
+		const int64_t bytes = int64_t(VSM::pool_bytes(values.max_physical_pages));
+		CHECK(Math::abs(bytes - int64_t(v6_mib[quality] << 20)) <= int64_t(1) << 20);
+		CHECK(values.max_physical_pages == VSM::pool_quality_pages(VSM::PoolQuality(quality)));
+		// The settings read back the same values when the project sets none (or the registered defaults).
+		const VSM::Scalability read = VSM::read_scalability(VSM::PoolQuality(quality));
+		CHECK(read.max_physical_pages == values.max_physical_pages);
+		CHECK(read.lod_bias_directional == values.lod_bias_directional);
+		CHECK(read.lod_bias_local == values.lod_bias_local);
+		CHECK(read.lod_bias_directional_moving == values.lod_bias_directional_moving);
+		CHECK(read.lod_bias_local_moving == values.lod_bias_local_moving);
+		// Moving lights take one mip more than static ones.
+		CHECK(values.lod_bias_directional_moving == values.lod_bias_directional + 1);
+		CHECK(values.lod_bias_local_moving == values.lod_bias_local + 1);
+		// The pool texture stays within 16384 texels per side.
+		const Vector2i grid = VSM::pool_page_grid(values.max_physical_pages);
+		CHECK(grid.x * int32_t(VSM::PAGE_SIZE) <= 16384);
+		CHECK(grid.y * int32_t(VSM::PAGE_SIZE) <= 16384);
+	}
+	CHECK(VSM::default_scalability(VSM::POOL_QUALITY_LOW).lod_bias_directional == 1);
+	CHECK(VSM::default_scalability(VSM::POOL_QUALITY_HIGH).lod_bias_directional == 0);
+	CHECK(VSM::DEFAULT_QUALITY == VSM::POOL_QUALITY_HIGH);
+	// Out-of-range values clamp to what the pool and the mark pass take.
+	VSM::Scalability wild;
+	wild.max_physical_pages = 1;
+	wild.lod_bias_directional = -100;
+	wild.lod_bias_local = 100;
+	const VSM::Scalability clamped = VSM::clamp_scalability(wild);
+	CHECK(clamped.max_physical_pages == VSM::MIN_PHYSICAL_PAGES);
+	CHECK(clamped.lod_bias_directional == -VSM::MAX_SETTING_LOD_BIAS);
+	CHECK(clamped.lod_bias_local == VSM::MAX_SETTING_LOD_BIAS);
+	wild.max_physical_pages = UINT32_MAX;
+	CHECK(VSM::clamp_scalability(wild).max_physical_pages == VSM::POOL_MAX_PAGES);
+}
+
+TEST_CASE("[VSM] Scalability presets read their .low, .medium, .high and .epic settings (#221)") {
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	REQUIRE(settings != nullptr);
+	const String pages_high = String(VSM::SETTING_MAX_PHYSICAL_PAGES) + ".high";
+	const String bias_low = String(VSM::SETTING_LOD_BIAS_LOCAL_MOVING) + ".low";
+	// RenderingServer::init() registers them in the test setup, as in a running project.
+	REQUIRE(settings->has_setting(pages_high));
+	REQUIRE(settings->has_setting(bias_low));
+	REQUIRE(settings->has_setting(VSM::SETTING_QUALITY));
+	const Variant old_pages = settings->get_setting(pages_high);
+	const Variant old_bias = settings->get_setting(bias_low);
+	const Variant old_quality = settings->get_setting(VSM::SETTING_QUALITY);
+
+	settings->set_setting(pages_high, 2048); // A quarter of the High pool, as GODOT_DEV_VSM=25% does.
+	settings->set_setting(bias_low, 3);
+	settings->set_setting(VSM::SETTING_QUALITY, int(VSM::POOL_QUALITY_LOW));
+	CHECK(VSM::read_scalability(VSM::POOL_QUALITY_HIGH).max_physical_pages == 2048);
+	CHECK(VSM::read_scalability(VSM::POOL_QUALITY_LOW).lod_bias_local_moving == 3);
+	CHECK(VSM::read_scalability(VSM::POOL_QUALITY_MEDIUM).max_physical_pages == VSM::pool_quality_pages(VSM::POOL_QUALITY_MEDIUM));
+	CHECK(VSM::read_quality() == VSM::POOL_QUALITY_LOW);
+	settings->set_setting(VSM::SETTING_QUALITY, 9); // Out of range: the default preset.
+	CHECK(VSM::read_quality() == VSM::DEFAULT_QUALITY);
+
+	settings->set_setting(pages_high, old_pages);
+	settings->set_setting(bias_low, old_bias);
+	settings->set_setting(VSM::SETTING_QUALITY, old_quality);
+	CHECK(VSM::read_scalability(VSM::POOL_QUALITY_HIGH).max_physical_pages == VSM::pool_quality_pages(VSM::POOL_QUALITY_HIGH));
+	CHECK(VSM::read_quality() == VSM::DEFAULT_QUALITY);
+}
+
+TEST_CASE("[VSM] Project shadow method: atlas by default and for new projects until #223 (#221)") {
+	CHECK(VSM::DEFAULT_SHADOW_METHOD == VSM::SHADOW_METHOD_ATLAS);
+	CHECK(VSM::NEW_PROJECT_SHADOW_METHOD == VSM::SHADOW_METHOD_ATLAS);
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	REQUIRE(settings != nullptr);
+	const String name = "rendering/lights_and_shadows/shadow_method";
+	// RenderingServer::init() registers it in the test setup, as in a running project.
+	REQUIRE(settings->has_setting(name));
+	const Variant old = settings->get_setting(name);
+	CHECK(int(settings->property_get_revert(name)) == int(VSM::SHADOW_METHOD_ATLAS));
+	CHECK(int(old) == int(VSM::SHADOW_METHOD_ATLAS));
+	settings->set_setting(name, int(VSM::SHADOW_METHOD_VIRTUAL));
+	CHECK(VSM::read_project_shadow_method() == VSM::SHADOW_METHOD_VIRTUAL);
+	settings->set_setting(name, int(VSM::SHADOW_METHOD_ATLAS));
+	CHECK(VSM::read_project_shadow_method() == VSM::SHADOW_METHOD_ATLAS);
+	settings->set_setting(name, old);
+}
+
+TEST_CASE("[VSM] Moving lights take the moving bias and step back one mip per 30 frames (#221)") {
+	CHECK(VSM::moving_lod_bias(0, 1, 0) == 1);
+	CHECK(VSM::moving_lod_bias(0, 1, VSM::MOVING_DECAY_FRAMES - 1) == 1);
+	CHECK(VSM::moving_lod_bias(0, 1, VSM::MOVING_DECAY_FRAMES) == 0);
+	CHECK(VSM::moving_lod_bias(0, 2, VSM::MOVING_DECAY_FRAMES) == 1);
+	CHECK(VSM::moving_lod_bias(0, 2, 2 * VSM::MOVING_DECAY_FRAMES) == 0);
+	CHECK(VSM::moving_lod_bias(1, -1, 0) == -2);
+	CHECK(VSM::moving_lod_bias(1, -1, VSM::MOVING_DECAY_FRAMES) == -1);
+	CHECK(VSM::moving_lod_bias(1, -1, 5 * VSM::MOVING_DECAY_FRAMES) == 0);
+	CHECK(VSM::moving_lod_bias(2, 2, 0) == 0);
+	CHECK(VSM::moving_lod_bias(0, 1, VSM::NEVER_MOVED) == 0);
+
+	TestVSMStorage storage;
+	const RID light = light_rid(77);
+	CHECK(storage.note_light_motion(light, Transform3D()) == VSM::NEVER_MOVED); // No maps yet.
+	storage.set_frame(10);
+	REQUIRE(storage.map_allocate(light, VSM::MAP_KIND_SPOT) != VSM::MAP_NONE);
+	const Transform3D first(Basis(), Vector3(1.0f, 2.0f, 3.0f));
+	CHECK(storage.note_light_motion(light, first) == VSM::NEVER_MOVED);
+	storage.set_frame(11);
+	CHECK(storage.note_light_motion(light, first) == VSM::NEVER_MOVED);
+	const Transform3D moved(Basis(), Vector3(1.5f, 2.0f, 3.0f));
+	storage.set_frame(12);
+	CHECK(storage.note_light_motion(light, moved) == 0);
+	CHECK(storage.note_light_motion(light, moved) == 0); // A second view of the same frame.
+	storage.set_frame(12 + VSM::MOVING_DECAY_FRAMES);
+	CHECK(storage.note_light_motion(light, moved) == VSM::MOVING_DECAY_FRAMES);
+	storage.free_all();
+}
+
+TEST_CASE("[VSM] A map's moving bias adds to the view's LOD bias in the CPU model of page marking (#221)") {
+	const uint32_t table_maps = 16;
+	LocalVector<VSM::MapData> maps;
+	maps.resize(table_maps);
+	LocalVector<uint32_t> overflow;
+	overflow.resize(table_maps);
+	memset(overflow.ptr(), 0, table_maps * sizeof(uint32_t));
+	// A spot at map 7, as in the marking test above.
+	const Transform3D spot_transform(Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f)), Vector3(0.0f, 4.0f, 0.0f));
+	maps[7] = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_transform, 20.0f, 30.0f);
+	VSM::MarkLight spot;
+	spot.kind = VSM::MAP_KIND_SPOT;
+	spot.inv_radius = 1.0f / 20.0f;
+	spot.map_base = 7;
+	spot.flags = VSM::light_flags(VSM::MAP_KIND_SPOT, 1);
+	LocalVector<uint64_t> with_map_bias;
+	LocalVector<uint64_t> with_view_bias;
+	LocalVector<uint64_t> without;
+	VSM::mark_local_point(maps.ptr(), table_maps, overflow.ptr(), spot, Vector3(0.0f, 0.0f, 0.0f), 0.001f, 0, false, false, without);
+	VSM::mark_local_point(maps.ptr(), table_maps, overflow.ptr(), spot, Vector3(0.0f, 0.0f, 0.0f), 0.001f, 1, false, false, with_view_bias);
+	maps[7].lod_bias = 1;
+	VSM::mark_local_point(maps.ptr(), table_maps, overflow.ptr(), spot, Vector3(0.0f, 0.0f, 0.0f), 0.001f, 0, false, false, with_map_bias);
+	REQUIRE(with_map_bias.size() == 1);
+	REQUIRE(without.size() == 1);
+	CHECK(with_map_bias[0] == with_view_bias[0]);
+	CHECK(with_map_bias[0] != without[0]);
+	CHECK(with_map_bias[0] - VSM::ENTRIES_PER_MAP * 7 >= VSM::mip_entry_offset(1));
+
+	// A directional light reads level 0's moving bias for every level.
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f));
+	const Vector3 camera(0.3f, 2.0f, 0.7f);
+	const Vector2 center(sun.get_column(0).normalized().dot(camera), sun.get_column(1).normalized().dot(camera));
+	for (uint32_t level = 0; level < 7; level++) {
+		maps[level] = VSM::map_data_clipmap(sun, level, VSM::clipmap_level_origin(center, level), 100.0f);
+	}
+	const uint32_t sun_flags = VSM::light_flags(VSM::MAP_KIND_DIRECTIONAL, 7);
+	const Vector3 point(0.3f, 0.0f, 0.7f);
+	LocalVector<uint64_t> dir_without;
+	LocalVector<uint64_t> dir_view_bias;
+	LocalVector<uint64_t> dir_map_bias;
+	VSM::mark_directional_point(maps.ptr(), table_maps, overflow.ptr(), 0, sun_flags, point, std::ldexp(1.0f, -10), 0, false, dir_without);
+	VSM::mark_directional_point(maps.ptr(), table_maps, overflow.ptr(), 0, sun_flags, point, std::ldexp(1.0f, -10), 1, false, dir_view_bias);
+	maps[0].lod_bias = 1;
+	VSM::mark_directional_point(maps.ptr(), table_maps, overflow.ptr(), 0, sun_flags, point, std::ldexp(1.0f, -10), 0, false, dir_map_bias);
+	REQUIRE(dir_map_bias.size() == dir_view_bias.size());
+	REQUIRE(dir_map_bias.size() > 0);
+	CHECK(dir_map_bias[0] == dir_view_bias[0]);
+	CHECK(dir_map_bias[0] != dir_without[0]);
+}
+
+TEST_CASE("[VSM] Frame stats: the frame's views add up; allocated pages come from the last view (#221)") {
+	VSM::reset_frame_stats();
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_REQUESTED) == 0);
+	LocalVector<uint32_t> views;
+	views.resize(2 * VSM::STATE_VIEW_END);
+	memset(views.ptr(), 0, views.size() * sizeof(uint32_t));
+	uint32_t *first = views.ptr();
+	uint32_t *second = views.ptr() + VSM::STATE_VIEW_END;
+	first[VSM::STATE_REQUESTS] = 100;
+	first[VSM::STATE_DIRTY] = 40;
+	first[VSM::STATE_OVERFLOW] = 3;
+	first[VSM::STATE_KEPT] = 50;
+	first[VSM::STATE_NEW] = 40;
+	first[VSM::STATE_CACHED] = 10;
+	second[VSM::STATE_REQUESTS] = 30;
+	second[VSM::STATE_DIRTY] = 5;
+	second[VSM::STATE_OVERFLOW] = 0;
+	second[VSM::STATE_KEPT] = 120;
+	second[VSM::STATE_NEW] = 5;
+	second[VSM::STATE_CACHED] = 7;
+	second[VSM::STATE_STOLEN] = 3; // Cached pages the assign pass gave to new requests: counted in NEW, not CACHED.
+	VSM::publish_frame_stats(views.ptr(), 2);
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_REQUESTED) == 130);
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_RERENDERED) == 45);
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_OVERFLOW) == 3);
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_ALLOCATED) == 129);
+	// RenderingServer reports them as RENDERING_INFO_VSM_PAGES_* (the test setup's server, on the dummy
+	// renderer). The Performance monitors read the same values; tests/vsm/product_surface.gd checks them in a
+	// running project, where the Performance singleton exists.
+	RenderingServer *rs = RenderingServer::get_singleton();
+	REQUIRE(rs != nullptr);
+	CHECK(rs->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_REQUESTED) == 130);
+	CHECK(rs->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_ALLOCATED) == 129);
+	CHECK(rs->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_RERENDERED) == 45);
+	CHECK(rs->get_rendering_info(RSE::RENDERING_INFO_VSM_PAGES_OVERFLOW) == 3);
+	VSM::publish_frame_stats(nullptr, 0); // Ignored.
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_REQUESTED) == 130);
+	VSM::reset_frame_stats();
+	CHECK(VSM::get_frame_stat(VSM::FRAME_STAT_ALLOCATED) == 0);
+}
+
+TEST_CASE("[VSM] Debug draws, rendering info and monitors are appended and stay aligned (#221)") {
+	CHECK(int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK) == int(RSE::VIEWPORT_DEBUG_DRAW_TSR) + 1);
+	CHECK(int(RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK) + 5);
+	CHECK(int(Viewport::DEBUG_DRAW_VSM_MASK) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK));
+	CHECK(int(Viewport::DEBUG_DRAW_VSM_MIP) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP));
+	CHECK(int(Viewport::DEBUG_DRAW_VSM_PAGES) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_PAGES));
+	CHECK(int(Viewport::DEBUG_DRAW_VSM_CACHE) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE));
+	CHECK(int(Viewport::DEBUG_DRAW_VSM_OVERDRAW) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW));
+	CHECK(int(Viewport::DEBUG_DRAW_VSM_CLIPMAP) == int(RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP));
+	const RSE::ViewportDebugDraw draws[6] = { RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK, RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP, RSE::VIEWPORT_DEBUG_DRAW_VSM_PAGES, RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE, RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW, RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP };
+	for (RSE::ViewportDebugDraw draw : draws) {
+		// Overlays: the view keeps virtual geometry and is not routed through the legacy path.
+		CHECK_FALSE(RendererRD::nextgeo_is_unsupported_debug_draw(draw));
+		CHECK_FALSE(RendererRD::nextgeo_is_debug_view(draw));
+	}
+	CHECK(int(RSE::RENDERING_INFO_VSM_PAGES_ALLOCATED) == int(RSE::RENDERING_INFO_NEXTGI_REFERENCE_SAMPLES) + 1);
+	CHECK(int(RSE::RENDERING_INFO_VSM_PAGES_OVERFLOW) == int(RSE::RENDERING_INFO_MAX) - 1);
+	CHECK(int(Performance::RENDER_VSM_PAGES_OVERFLOW) == int(Performance::MONITOR_MAX) - 1);
+}
+
+TEST_CASE("[VSM] The VSM_OVERDRAW pair pass stays within the dispatch limit at every pair capacity (#221)") {
+	// vsm_debug_pages.glsl MODE_PAIRS: 64 threads per group, a grid-stride loop over the pairs. The pair list
+	// grows to 1 << 22 pairs (#218), which one thread per pair would dispatch as 65,536 groups; D3D12 and many
+	// Vulkan devices take at most 65,535 (LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X).
+	const uint32_t max_pairs = 1u << 22;
+	static_assert(VSM::grid_stride_groups(1u << 22, 64, 65535) == 65535);
+	CHECK(VSM::grid_stride_groups(0, 64, 65535) == 1);
+	CHECK(VSM::grid_stride_groups(1, 64, 65535) == 1);
+	CHECK(VSM::grid_stride_groups(64, 64, 65535) == 1);
+	CHECK(VSM::grid_stride_groups(65, 64, 65535) == 2);
+	CHECK(VSM::grid_stride_groups(max_pairs, 64, 65535) == 65535);
+	CHECK(VSM::grid_stride_groups(max_pairs, 64, 0x7FFFFFFF) == 65536);
+	CHECK(VSM::grid_stride_groups(max_pairs, 64, 0) == 1);
+	CHECK(VSM::grid_stride_groups(100, 0, 65535) == 100);
+	// The loop's CPU model: thread t visits t, t + stride, ... below the pair count, so every pair is visited
+	// exactly once whatever the cap.
+	const uint32_t pair_counts[] = { 0u, 1u, 63u, 64u, 65u, 4096u, 65535u * 64u + 1u, max_pairs };
+	const uint32_t limits[] = { 1u, 7u, 65535u, 0x7FFFFFFFu };
+	for (uint32_t pairs : pair_counts) {
+		for (uint32_t limit : limits) {
+			const uint32_t groups = VSM::grid_stride_groups(pairs, 64, limit);
+			CHECK(groups >= 1);
+			CHECK(groups <= limit);
+			const uint64_t stride = uint64_t(groups) * 64u;
+			uint64_t visits = 0;
+			for (uint64_t t = 0; t < stride && t < pairs; t++) {
+				visits += (uint64_t(pairs) - 1u - t) / stride + 1u;
+			}
+			CHECK(visits == pairs);
+		}
 	}
 }
 

@@ -90,6 +90,11 @@ public:
 	virtual void light_set_shadow_caster_mask(RID p_light, uint32_t p_caster_mask) override {}
 	virtual uint32_t light_get_shadow_caster_mask(RID p_light) const override { return 0xFFFFFFFF; }
 	virtual void light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mode) override {}
+	// GodotNext: vsm_settings_debug (#221). The dummy renderer draws no shadows, so a light's method changes
+	// nothing and prints neither the VSM fallback line nor the unimplemented-method warning.
+	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) override {}
+	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const override { return RSE::LIGHT_SHADOW_METHOD_PROJECT; }
+	virtual bool draws_shadows() const override { return false; }
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) override {}
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) override {}
 	virtual bool light_get_allow_contact_shadows(RID p_light) const override { return false; }

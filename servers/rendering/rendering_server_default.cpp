@@ -41,6 +41,8 @@
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: vsm_settings_debug (#221).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 // GodotNext: pu_fg_present_path (#203).
 #include "servers/rendering/storage/frame_generation_extension.h"
 #ifdef RD_ENABLED
@@ -309,6 +311,9 @@ void RenderingServerDefault::_init() {
 	RSG::fog = RSG::rasterizer->get_fog();
 	RSG::canvas_render = RSG::rasterizer->get_canvas();
 	sr->set_scene_render(RSG::rasterizer->get_scene());
+	// GodotNext: vsm_settings_debug (#221). A virtual project below the VSM tier (or on Mobile and
+	// Compatibility) prints its one fallback line; the dummy renderer (headless) prints none.
+	RendererVirtualShadowMapStorage::report_project_shadow_method(RSG::light_storage->draws_shadows());
 }
 
 void RenderingServerDefault::_finish() {
@@ -379,6 +384,16 @@ uint64_t RenderingServerDefault::get_rendering_info(RSE::RenderingInfo p_info) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_DRAW) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_DRAW);
 	} else if (p_info == RSE::RENDERING_INFO_PIPELINE_COMPILATIONS_SPECIALIZATION) {
 		return RSG::canvas_render->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION) + RSG::scene->get_pipeline_compilations(RSE::PIPELINE_SOURCE_SPECIALIZATION);
+	}
+	// GodotNext: vsm_settings_debug (#221). Read back asynchronously, a few frames late; 0 without virtual shadow maps.
+	else if (p_info == RSE::RENDERING_INFO_VSM_PAGES_ALLOCATED) {
+		return RendererVirtualShadowMapStorage::get_frame_stat(RendererVirtualShadowMapStorage::FRAME_STAT_ALLOCATED);
+	} else if (p_info == RSE::RENDERING_INFO_VSM_PAGES_REQUESTED) {
+		return RendererVirtualShadowMapStorage::get_frame_stat(RendererVirtualShadowMapStorage::FRAME_STAT_REQUESTED);
+	} else if (p_info == RSE::RENDERING_INFO_VSM_PAGES_RERENDERED) {
+		return RendererVirtualShadowMapStorage::get_frame_stat(RendererVirtualShadowMapStorage::FRAME_STAT_RERENDERED);
+	} else if (p_info == RSE::RENDERING_INFO_VSM_PAGES_OVERFLOW) {
+		return RendererVirtualShadowMapStorage::get_frame_stat(RendererVirtualShadowMapStorage::FRAME_STAT_OVERFLOW);
 	}
 #ifdef RD_ENABLED
 	else if (p_info == RSE::RENDERING_INFO_NEXTGI_COVERAGE_HITS) {

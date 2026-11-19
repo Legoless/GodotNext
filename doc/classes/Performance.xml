@@ -310,7 +310,19 @@
 		<constant name="RENDER_STREAMING_TEXTURE_MEM_USED" value="59" enum="Monitor">
 			The amount of memory used by texture streaming (in bytes). This represents the current VRAM usage of streamed textures at their currently loaded mipmap levels.
 		</constant>
-		<constant name="MONITOR_MAX" value="60" enum="Monitor">
+		<constant name="RENDER_VSM_PAGES_ALLOCATED" value="60" enum="Monitor">
+			Virtual shadow map pages that hold an entry after the frame's last 3D view (see [constant RenderingServer.RENDERING_INFO_VSM_PAGES_ALLOCATED]). Read back from the GPU without a stall, so it describes a frame a few frames old; 0 without virtual shadow maps.
+		</constant>
+		<constant name="RENDER_VSM_PAGES_REQUESTED" value="61" enum="Monitor">
+			Virtual shadow map pages that the frame's 3D views requested (see [constant RenderingServer.RENDERING_INFO_VSM_PAGES_REQUESTED]).
+		</constant>
+		<constant name="RENDER_VSM_PAGES_RERENDERED" value="62" enum="Monitor">
+			Virtual shadow map pages that the frame's 3D views rendered again (see [constant RenderingServer.RENDERING_INFO_VSM_PAGES_RERENDERED]).
+		</constant>
+		<constant name="RENDER_VSM_PAGES_OVERFLOW" value="63" enum="Monitor">
+			Virtual shadow map page requests that the frame's 3D views left without a page (see [constant RenderingServer.RENDERING_INFO_VSM_PAGES_OVERFLOW]).
+		</constant>
+		<constant name="MONITOR_MAX" value="64" enum="Monitor">
 			Represents the size of the [enum Monitor] enum.
 		</constant>
 		<constant name="MONITOR_TYPE_QUANTITY" value="0" enum="MonitorType">

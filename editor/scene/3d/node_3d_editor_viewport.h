@@ -238,6 +238,13 @@ class Node3DEditorViewport : public Control {
 		VIEW_DISPLAY_TSR,
 		// GodotNext: path_tracer (#167)
 		VIEW_DISPLAY_PATH_TRACER,
+		// GodotNext: vsm_settings_debug (#221)
+		VIEW_DISPLAY_VSM_MASK,
+		VIEW_DISPLAY_VSM_MIP,
+		VIEW_DISPLAY_VSM_PAGES,
+		VIEW_DISPLAY_VSM_CACHE,
+		VIEW_DISPLAY_VSM_OVERDRAW,
+		VIEW_DISPLAY_VSM_CLIPMAP,
 		VIEW_DISPLAY_MAX,
 		// > Keep in sync with menu.
 

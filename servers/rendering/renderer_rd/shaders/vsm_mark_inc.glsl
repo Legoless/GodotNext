@@ -27,7 +27,7 @@ struct VSMMapData {
 	float near_w;
 	float max_distance; // Clipmap: no view pixel deeper than this requests the light.
 	uint index; // The clipmap level or the face.
-	uint pad;
+	int lod_bias; // GodotNext: vsm_settings_debug (#221). The light's moving bias; directional lights use level 0's.
 };
 
 // ((r.x * p.x + r.y * p.y) + r.z * p.z) + r.w, in that order.

@@ -3411,12 +3411,81 @@
 		<member name="rendering/lights_and_shadows/positional_shadow/soft_shadow_filter_quality.mobile" type="int" setter="" getter="" default="0">
 			Lower-end override for [member rendering/lights_and_shadows/positional_shadow/soft_shadow_filter_quality] on mobile devices, due to performance concerns or driver support.
 		</member>
+		<member name="rendering/lights_and_shadows/shadow_method" type="int" setter="" getter="" default="0">
+			How lights with [member Light3D.shadow_method] set to Project cast shadows. [b]Atlas[/b] renders them into the directional shadow map and the positional shadow atlas. [b]Virtual[/b] uses virtual shadow maps: a pool of 64×64-texel pages, mapped from large virtual shadow maps per light (clipmap levels for directional lights), so each pixel gets about one shadow texel and unchanged pages stay cached between frames. The pool and its resolution follow [member rendering/lights_and_shadows/virtual_shadows/quality].
+			Virtual shadow maps need the Forward+ renderer on a device with 32-bit image atomics and indirect-count draws. Below that, lights use the atlas and one line names the reason (see [method RenderingServer.virtual_shadow_maps_get_tier_info]); the Mobile and Compatibility renderers always use the atlas. Existing and new projects use the atlas for now.
+			[b]Note:[/b] This property is only read when the project starts.
+			[b]Note:[/b] Lights do not shade with virtual shadow maps yet: until the light loop samples them, lights with the Virtual method still shade from the shadow atlas, and their virtual maps feed only the [code]VSM_*[/code] debug draws of [enum Viewport.DebugDraw] and the [code]RENDERING_INFO_VSM_PAGES_*[/code] counters, at the cost of both.
+		</member>
 		<member name="rendering/lights_and_shadows/tighter_shadow_caster_culling" type="bool" setter="" getter="" default="true">
 			If [code]true[/code], items that cannot cast shadows into the view frustum will not be rendered into shadow maps.
 			This can increase performance.
 		</member>
 		<member name="rendering/lights_and_shadows/use_physical_light_units" type="bool" setter="" getter="" default="false">
 			Enables the use of physically based units for light sources. Physically based units tend to be much larger than the arbitrary units used by Godot, but they can be used to match lighting within Godot to real-world lighting. Due to the large dynamic range of lighting conditions present in nature, Godot bakes exposure into the various lighting quantities before rendering. Most light sources bake exposure automatically at run time based on the active [CameraAttributes] resource, but [LightmapGI] and [VoxelGI] require a [CameraAttributes] resource to be set at bake time to reduce the dynamic range. At run time, Godot will automatically reconcile the baked exposure with the active exposure to ensure lighting remains consistent.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/max_physical_pages.epic" type="int" setter="" getter="" default="16384">
+			The physical pages in the virtual shadow map pool (32 KiB each) at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/max_physical_pages.high" type="int" setter="" getter="" default="8192">
+			The physical pages in the virtual shadow map pool (32 KiB each) at the High preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/max_physical_pages.low" type="int" setter="" getter="" default="2048">
+			The physical pages in the virtual shadow map pool (32 KiB each) at the Low preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/max_physical_pages.medium" type="int" setter="" getter="" default="4096">
+			The physical pages in the virtual shadow map pool (32 KiB each) at the Medium preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/quality" type="int" setter="" getter="" default="2">
+			The virtual shadow map scalability preset: [b]Low[/b], [b]Medium[/b], [b]High[/b] or [b]Epic[/b]. Each preset reads its own values of the [code]virtual_shadows[/code] settings that end in [code].low[/code], [code].medium[/code], [code].high[/code] or [code].epic[/code]. The default pools are 64, 128, 256 and 512 MiB. Changing the preset or its values while running creates a new pool when the page count changes.
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional.epic" type="int" setter="" getter="" default="0">
+			Mips added to the resolution that directional lights request (1 halves it, -1 doubles it) at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional.high" type="int" setter="" getter="" default="0">
+			Mips added to the resolution that directional lights request (1 halves it, -1 doubles it) at the High preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional.low" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that directional lights request (1 halves it, -1 doubles it) at the Low preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional.medium" type="int" setter="" getter="" default="0">
+			Mips added to the resolution that directional lights request (1 halves it, -1 doubles it) at the Medium preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving.epic" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that directional lights request while they turn; once a light stops, its bias steps back one mip every 30 frames at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving.high" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that directional lights request while they turn; once a light stops, its bias steps back one mip every 30 frames at the High preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving.low" type="int" setter="" getter="" default="2">
+			Mips added to the resolution that directional lights request while they turn; once a light stops, its bias steps back one mip every 30 frames at the Low preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_directional_moving.medium" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that directional lights request while they turn; once a light stops, its bias steps back one mip every 30 frames at the Medium preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local.epic" type="int" setter="" getter="" default="0">
+			Mips added to the resolution that omni, spot and area lights request (1 halves it, -1 doubles it) at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local.high" type="int" setter="" getter="" default="0">
+			Mips added to the resolution that omni, spot and area lights request (1 halves it, -1 doubles it) at the High preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local.low" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that omni, spot and area lights request (1 halves it, -1 doubles it) at the Low preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local.medium" type="int" setter="" getter="" default="0">
+			Mips added to the resolution that omni, spot and area lights request (1 halves it, -1 doubles it) at the Medium preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving.epic" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that omni, spot and area lights request while they move; once a light stops, its bias steps back one mip every 30 frames at the Epic preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving.high" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that omni, spot and area lights request while they move; once a light stops, its bias steps back one mip every 30 frames at the High preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving.low" type="int" setter="" getter="" default="2">
+			Mips added to the resolution that omni, spot and area lights request while they move; once a light stops, its bias steps back one mip every 30 frames at the Low preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
+		</member>
+		<member name="rendering/lights_and_shadows/virtual_shadows/resolution_lod_bias_local_moving.medium" type="int" setter="" getter="" default="1">
+			Mips added to the resolution that omni, spot and area lights request while they move; once a light stops, its bias steps back one mip every 30 frames at the Medium preset of [member rendering/lights_and_shadows/virtual_shadows/quality].
 		</member>
 		<member name="rendering/limits/cluster_builder/max_clustered_elements" type="float" setter="" getter="" default="512">
 			The maximum number of clustered elements ([OmniLight3D] + [SpotLight3D] + [Decal] + [ReflectionProbe]) that can be rendered at once in the camera view. If there are more clustered elements present in the camera view, some of them will not be rendered (leading to pop-in during camera movement). Enabling distance fade on lights and decals ([member Light3D.distance_fade_enabled], [member Decal.distance_fade_enabled]) can help avoid reaching this limit.

@@ -30,9 +30,12 @@
 
 #include "virtual_shadow_map_storage.h"
 
+#include "core/config/project_settings.h"
 #include "core/math/random_pcg.h"
+#include "core/object/callable_mp.h"
 #include "core/os/os.h"
 #include "core/templates/hash_set.h"
+#include "core/templates/safe_refcount.h"
 #include "core/variant/array.h"
 #include "servers/rendering/renderer_compositor.h"
 #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
@@ -90,21 +93,138 @@ bool VirtualShadowMapStorage::is_dev_switch_on(PoolQuality *r_quality, uint32_t 
 #endif
 }
 
+// GodotNext: vsm_settings_debug (#221). RENDERING_INFO_VSM_PAGES_*: one async read-back of a frame's view
+// counters at a time; the callback only writes the process-wide stats.
+static SafeFlag vsm_stats_pending;
+
+static void _vsm_stats_received(const Vector<uint8_t> &p_data, uint32_t p_views) {
+	vsm_stats_pending.clear();
+	const uint64_t bytes = uint64_t(p_views) * RendererVirtualShadowMapStorage::STATE_VIEW_END * sizeof(uint32_t);
+	if (p_views == 0 || uint64_t(p_data.size()) < bytes) {
+		return;
+	}
+	RendererVirtualShadowMapStorage::publish_frame_stats(reinterpret_cast<const uint32_t *>(p_data.ptr()), p_views);
+}
+
+void VirtualShadowMapStorage::collect_device_inputs(const RenderingDevice *p_device, bool p_forward_plus, TierInputs &r_inputs) {
+	r_inputs.forward_plus = p_forward_plus;
+	r_inputs.image_atomic_32 = p_device != nullptr && p_device->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT);
+	r_inputs.indirect_count = p_device != nullptr && p_device->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT);
+}
+
 VirtualShadowMapStorage::VirtualShadowMapStorage() {
 	singleton = this;
-	PoolQuality quality = POOL_QUALITY_HIGH;
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). The tier rule and the project's shadow method,
+	// once at startup. GODOT_DEV_VSM (debug builds) stands for shadow_method = virtual, like a console
+	// override of UE's project setting, and also picks the pool.
+	TierInputs inputs;
+	collect_device_inputs(RD::get_singleton(), true, inputs);
+	tier_reason = evaluate_tier(inputs);
+	const bool dev_switch = is_dev_switch_on();
+	const ShadowMethod project = dev_switch ? SHADOW_METHOD_VIRTUAL : read_project_shadow_method();
+	set_startup_state(tier_reason, project, dev_switch);
+	vsm_stats_pending.clear();
+	if (project == SHADOW_METHOD_VIRTUAL) {
+		request_activation();
+	}
+}
+
+bool VirtualShadowMapStorage::request_activation() {
+	// GodotNext: vsm_settings_debug (#221). The pool is created once: at startup for a virtual project, or
+	// when a light first asks for VIRTUAL. VSM stays active from then on.
+	if (active || activation_failed || tier_reason != TIER_REASON_NONE) {
+		return active;
+	}
+	PoolQuality quality = DEFAULT_QUALITY;
 	uint32_t pages = 0;
-	if (is_dev_switch_on(&quality, &pages)) {
-		active_quality = quality;
-		active_cache_frames = cache_frames(quality);
-		active = pool_create(pages);
-		if (active) {
-			print_line(vformat("VSM: GODOT_DEV_VSM is set: virtual shadow maps are active with the %s pool (%d pages, %d MiB).", pool_quality_name(quality), get_pool_page_count(), int64_t(pool_bytes(get_pool_page_count()) >> 20)));
+	const bool dev_switch = is_dev_switch_on(&quality, &pages);
+	if (!dev_switch) {
+		quality = read_quality();
+	}
+	const Scalability values = read_scalability(quality);
+	if (!dev_switch) {
+		pages = values.max_physical_pages;
+	}
+	active_quality = quality;
+	active_cache_frames = cache_frames(quality);
+	scalability = values;
+	set_lod_bias(values.lod_bias_directional, values.lod_bias_local);
+	settings_version = ProjectSettings::get_singleton() != nullptr ? ProjectSettings::get_singleton()->get_version() : 0;
+	active = pool_create(pages);
+	if (!active) {
+		activation_failed = true;
+		ERR_PRINT(vformat("VSM: the virtual shadow map pool of %d pages could not be created; lights use the shadow atlas.", pages));
+		return false;
+	}
+	if (dev_switch) {
+		print_line(vformat("VSM: GODOT_DEV_VSM is set: virtual shadow maps are active with the %s pool (%d pages, %d MiB).", pool_quality_name(quality), get_pool_page_count(), int64_t(pool_bytes(get_pool_page_count()) >> 20)));
+	} else {
+		print_verbose(vformat("VSM: virtual shadow maps are active with the %s preset (%d pages, %d MiB).", pool_quality_name(quality), get_pool_page_count(), int64_t(pool_bytes(get_pool_page_count()) >> 20)));
+	}
+	return true;
+}
+
+void VirtualShadowMapStorage::_update_scalability() {
+	// GodotNext: vsm_settings_debug (#221). The quality preset and its values follow the project settings
+	// while running; a new page count creates a new pool (the old one stays if that fails).
+	ProjectSettings *settings = ProjectSettings::get_singleton();
+	if (!active || settings == nullptr || settings->get_version() == settings_version) {
+		return;
+	}
+	settings_version = settings->get_version();
+	PoolQuality quality = DEFAULT_QUALITY;
+	uint32_t pages = 0;
+	const bool dev_switch = is_dev_switch_on(&quality, &pages);
+	if (!dev_switch) {
+		quality = read_quality();
+	}
+	const Scalability values = read_scalability(quality);
+	if (!dev_switch) {
+		pages = values.max_physical_pages;
+	}
+	scalability = values;
+	set_lod_bias(values.lod_bias_directional, values.lod_bias_local);
+	if (quality != active_quality || pages != get_pool_page_count()) {
+		if (pool_create(pages)) {
+			active_quality = quality;
+			active_cache_frames = cache_frames(quality);
 		}
 	}
 }
 
+void VirtualShadowMapStorage::_record_frame_stats(uint64_t p_frame, bool p_view_marked) {
+	// GodotNext: vsm_settings_debug (#221). A new frame publishes the views of the last one.
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	if (p_frame != stats_frame) {
+		if (stats_views > 0 && stats_buffer.is_valid() && vsm_stats_pending.set_if_clear()) {
+			if (rd->buffer_get_data_async(stats_buffer, callable_mp_static(&_vsm_stats_received).bind(stats_views), 0, stats_views * STATE_VIEW_END * uint32_t(sizeof(uint32_t))) != OK) {
+				vsm_stats_pending.clear();
+			}
+		}
+		stats_views = 0;
+		stats_frame = p_frame;
+	}
+	if (!p_view_marked || state_buffer.is_null() || stats_views >= STATS_MAX_VIEWS) {
+		return;
+	}
+	if (stats_buffer.is_null()) {
+		stats_buffer = rd->storage_buffer_create(STATS_MAX_VIEWS * STATE_VIEW_END * uint32_t(sizeof(uint32_t)));
+		rd->set_resource_name(stats_buffer, "VSM Frame Stats");
+	}
+	rd->buffer_copy(state_buffer, stats_buffer, 0, stats_views * STATE_VIEW_END * uint32_t(sizeof(uint32_t)), STATE_VIEW_END * uint32_t(sizeof(uint32_t)));
+	stats_views++;
+}
+
 VirtualShadowMapStorage::~VirtualShadowMapStorage() {
+	// GodotNext: vsm_settings_debug (#221).
+	reset_startup_state();
+	if (RD::get_singleton() != nullptr && stats_buffer.is_valid()) {
+		RD::get_singleton()->free_rid(stats_buffer);
+	}
+	stats_buffer = RID();
 	free_all();
 	_free_check_buffers();
 	_free_marking_resources();
@@ -278,6 +398,11 @@ bool VirtualShadowMapStorage::_pool_resize(uint32_t p_page_count) {
 
 void VirtualShadowMapStorage::begin_light_update() {
 	view_directional.clear();
+	// GodotNext: vsm_settings_debug (#221).
+	if (active) {
+		_update_scalability();
+		_record_frame_stats(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0, false);
+	}
 }
 
 void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpdate &p_light, uint32_t &r_map_base, uint32_t &r_flags) {
@@ -315,11 +440,19 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 	r_map_base = first;
 	r_flags = light_flags(range->kind, range->count);
 
+	// GodotNext: vsm_settings_debug (#221). A moving light's maps take the moving resolution LOD bias; a
+	// directional light moves when its basis turns.
+	const bool directional = range->kind == MAP_KIND_DIRECTIONAL;
+	const uint64_t since_moved = note_light_motion(p_light_instance, directional ? Transform3D(p_light.transform.basis, Vector3()) : p_light.transform);
+	const int32_t moving_bias = directional ? moving_lod_bias(scalability.lod_bias_directional, scalability.lod_bias_directional_moving, since_moved) : moving_lod_bias(scalability.lod_bias_local, scalability.lod_bias_local_moving, since_moved);
+
 	// GodotNext: vsm_page_marking (#219). Where world positions land in each map.
 	if (range->kind == MAP_KIND_DIRECTIONAL) {
 		if (p_light.move_clipmaps) {
 			for (uint32_t level = 0; level < range->count; level++) {
-				_set_map_data(first + level, map_data_clipmap(p_light.transform.basis, level, get_clipmap_origin(p_light_instance, level), p_light.max_distance));
+				MapData data = map_data_clipmap(p_light.transform.basis, level, get_clipmap_origin(p_light_instance, level), p_light.max_distance);
+				data.lod_bias = moving_bias;
+				_set_map_data(first + level, data);
 			}
 		}
 		if (view_directional.size() < MAX_DIRECTIONAL_LIGHTS) {
@@ -332,7 +465,9 @@ void VirtualShadowMapStorage::update_light(RID p_light_instance, const LightUpda
 		}
 	} else {
 		for (uint32_t face = 0; face < range->count; face++) {
-			_set_map_data(first + face, map_data_face(range->kind, face, p_light.transform, p_light.range, p_light.spot_angle));
+			MapData data = map_data_face(range->kind, face, p_light.transform, p_light.range, p_light.spot_angle);
+			data.lod_bias = moving_bias;
+			_set_map_data(first + face, data);
 		}
 	}
 }
@@ -345,6 +480,11 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 	Dictionary info;
 	info["active"] = active;
 	info["quality"] = active ? String(pool_quality_name(active_quality)) : String();
+	// GodotNext: vsm_settings_debug (#221).
+	info["tier_reason"] = String(get_tier_reason_name(tier_reason));
+	info["project_shadow_method"] = get_project_shadow_method() == SHADOW_METHOD_VIRTUAL ? String("virtual") : String("atlas");
+	info["dev_switch"] = is_dev_switch_forcing();
+	info["lod_bias_moving"] = Vector2i(scalability.lod_bias_directional_moving, scalability.lod_bias_local_moving);
 	info["pool_pages"] = int64_t(get_pool_page_count());
 	info["pool_grid"] = pool_page_grid(get_pool_page_count());
 	info["pool_texture_size"] = pool_texture_size;
@@ -1582,6 +1722,8 @@ void VirtualShadowMapStorage::mark_and_allocate(const MarkInput &p_input) {
 		check.captured = true;
 	}
 	marked_views++;
+	// GodotNext: vsm_settings_debug (#221). The view's counters for RENDERING_INFO_VSM_PAGES_*.
+	_record_frame_stats(RSG::rasterizer != nullptr ? RSG::rasterizer->get_frame_number() : 0, true);
 }
 
 namespace {

@@ -354,6 +354,30 @@ void LightStorage::light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mo
 	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
 }
 
+void LightStorage::light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) {
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1).
+	ERR_FAIL_INDEX(int(p_method), int(RSE::LIGHT_SHADOW_METHOD_MAX));
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	RendererVirtualShadowMapStorage::note_light_shadow_method(p_method);
+	if (light->shadow_method == p_method) {
+		return;
+	}
+	light->shadow_method = p_method;
+	if (p_method == RSE::LIGHT_SHADOW_METHOD_VIRTUAL && VirtualShadowMapStorage::get_singleton() != nullptr) {
+		VirtualShadowMapStorage::get_singleton()->request_activation();
+	}
+
+	light->version++;
+	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+}
+
+RSE::LightShadowMethod LightStorage::light_get_shadow_method(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RSE::LIGHT_SHADOW_METHOD_PROJECT);
+	return light->shadow_method;
+}
+
 void LightStorage::light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) {
 	Light *light = light_owner.get_or_null(p_light);
 	ERR_FAIL_NULL(light);
@@ -856,7 +880,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						}
 						VirtualShadowMapStorage::LightUpdate update;
 						update.kind = RendererVirtualShadowMapStorage::MAP_KIND_DIRECTIONAL;
-						update.casts_shadow = light->shadow;
+						// GodotNext: vsm_settings_debug (#221). Only lights whose method resolves to VIRTUAL.
+						update.casts_shadow = light->shadow && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method);
 						update.transform = light_transform;
 						update.camera_position = p_camera_transform.origin;
 						update.max_distance = max_distance;
@@ -1137,7 +1162,8 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 				const RendererVirtualShadowMapStorage::MapKind kind = type == RSE::LIGHT_OMNI ? RendererVirtualShadowMapStorage::MAP_KIND_OMNI : (type == RSE::LIGHT_SPOT ? RendererVirtualShadowMapStorage::MAP_KIND_SPOT : RendererVirtualShadowMapStorage::MAP_KIND_AREA);
 				VirtualShadowMapStorage::LightUpdate update;
 				update.kind = kind;
-				update.casts_shadow = light->shadow;
+				// GodotNext: vsm_settings_debug (#221). Only lights whose method resolves to VIRTUAL.
+				update.casts_shadow = light->shadow && RendererVirtualShadowMapStorage::light_uses_vsm(light->shadow_method);
 				update.transform = light_transform;
 				update.camera_position = p_camera_transform.origin;
 				update.range = light->param[RSE::LIGHT_PARAM_RANGE];

@@ -341,6 +341,8 @@ public:
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) = 0;
 
 	virtual void light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mode) = 0;
+	// GodotNext: vsm_settings_debug (#221).
+	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) = 0;
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) = 0;
 
 	// Omni light
@@ -600,6 +602,8 @@ public:
 	// GodotNext: vsm_non_nanite (#218). The GPU check of non-Nanite per-page culling and raster.
 	virtual void virtual_shadow_maps_request_raster_check();
 	virtual Dictionary virtual_shadow_maps_get_raster_check_result();
+	// GodotNext: vsm_settings_debug (#221). The tier rule's result and the project's shadow method.
+	virtual Dictionary virtual_shadow_maps_get_tier_info();
 	virtual void viewport_set_scaling_3d_scale(RID p_viewport, float p_scaling_3d_scale) = 0;
 	virtual void viewport_set_fsr_sharpness(RID p_viewport, float p_fsr_sharpness) = 0;
 	virtual void viewport_set_tsr_quality(RID p_viewport, RSE::ViewportTSRQuality p_quality) = 0;
@@ -1176,6 +1180,8 @@ VARIANT_ENUM_CAST_EXT(RSE::MultimeshPhysicsInterpolationQuality, RenderingServer
 VARIANT_ENUM_CAST_EXT(RSE::LightType, RenderingServer::LightType);
 VARIANT_ENUM_CAST_EXT(RSE::LightParam, RenderingServer::LightParam);
 VARIANT_ENUM_CAST_EXT(RSE::LightBakeMode, RenderingServer::LightBakeMode);
+// GodotNext: vsm_settings_debug (#221).
+VARIANT_ENUM_CAST_EXT(RSE::LightShadowMethod, RenderingServer::LightShadowMethod);
 VARIANT_ENUM_CAST_EXT(RSE::LightOmniShadowMode, RenderingServer::LightOmniShadowMode);
 VARIANT_ENUM_CAST_EXT(RSE::LightDirectionalShadowMode, RenderingServer::LightDirectionalShadowMode);
 VARIANT_ENUM_CAST_EXT(RSE::LightDirectionalSkyMode, RenderingServer::LightDirectionalSkyMode);

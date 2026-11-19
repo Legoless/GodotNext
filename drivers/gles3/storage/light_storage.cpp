@@ -40,6 +40,8 @@
 #include "drivers/gles3/rasterizer_util_gles3.h"
 #include "drivers/gles3/storage/render_scene_buffers_gles3.h"
 #include "drivers/gles3/storage/utilities.h"
+// GodotNext: vsm_settings_debug (#221).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 using namespace GLES3;
 
@@ -275,6 +277,22 @@ void LightStorage::light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mo
 
 	light->version++;
 	light->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_LIGHT);
+}
+
+void LightStorage::light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) {
+	// GodotNext: vsm_settings_debug (#221). Compatibility keeps the shadow atlas; the method is stored and
+	// its warnings and fallback line print once.
+	ERR_FAIL_INDEX(int(p_method), int(RSE::LIGHT_SHADOW_METHOD_MAX));
+	Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL(light);
+	RendererVirtualShadowMapStorage::note_light_shadow_method(p_method);
+	light->shadow_method = p_method;
+}
+
+RSE::LightShadowMethod LightStorage::light_get_shadow_method(RID p_light) const {
+	const Light *light = light_owner.get_or_null(p_light);
+	ERR_FAIL_NULL_V(light, RSE::LIGHT_SHADOW_METHOD_PROJECT);
+	return light->shadow_method;
 }
 
 void LightStorage::light_omni_set_shadow_mode(RID p_light, RSE::LightOmniShadowMode p_mode) {

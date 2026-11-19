@@ -1141,6 +1141,13 @@ private:
 	void _free_vsm_raster_resources();
 	RID _setup_vsm_render_pass_uniform_set(const RendererRD::MaterialStorage::Samplers &p_samplers, uint32_t p_uniform_buffer_index);
 	void _vsm_raster_non_nanite(RenderDataRD *p_render_data);
+	// GodotNext: vsm_settings_debug (#221). Viewport.DEBUG_DRAW_VSM_*. The two flags say whether this
+	// _render_scene() call marked pages (its dirty list is in the VSM state) and ran the non-Nanite cull
+	// (its pairs are in vsm_pairs_buffer); otherwise the buffers hold an earlier view's data, which the
+	// debug draw does not read.
+	void _vsm_debug_draw(const RenderDataRD *p_render_data);
+	bool vsm_debug_view_marked = false;
+	bool vsm_debug_view_pairs = false;
 	static void _arm_vsm_raster_check_cb(void *p_userdata);
 	static Dictionary _get_vsm_raster_check_cb(void *p_userdata);
 	Dictionary get_vsm_raster_check_result();

@@ -43,6 +43,8 @@
 #include "servers/rendering/storage/temporal_upscaler_extension.h"
 // GodotNext: pu_fg_present_path (#203).
 #include "servers/rendering/storage/frame_generation_extension.h"
+// GodotNext: vsm_settings_debug (#221).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 #if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_debug.h"
 // GodotNext: vsm_page_pool (#220).
@@ -2400,6 +2402,27 @@ Dictionary RenderingServer::virtual_shadow_maps_get_raster_check_result() {
 	return Dictionary();
 }
 
+Dictionary RenderingServer::virtual_shadow_maps_get_tier_info() {
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1). Valid on every renderer: without the Forward+
+	// storage the reason is UNSUPPORTED_RENDERER.
+	Dictionary info;
+	const RendererVirtualShadowMapStorage::TierReason reason = RendererVirtualShadowMapStorage::get_tier_reason();
+	info["available"] = reason == RendererVirtualShadowMapStorage::TIER_REASON_NONE;
+	info["reason"] = String(RendererVirtualShadowMapStorage::get_tier_reason_name(reason));
+	info["project_shadow_method"] = RendererVirtualShadowMapStorage::get_project_shadow_method() == RendererVirtualShadowMapStorage::SHADOW_METHOD_VIRTUAL ? String("virtual") : String("atlas");
+	info["dev_switch"] = RendererVirtualShadowMapStorage::is_dev_switch_forcing();
+	info["fallback_lines"] = int64_t(RendererVirtualShadowMapStorage::get_fallback_line_count());
+	info["unimplemented_warnings"] = int64_t(RendererVirtualShadowMapStorage::get_unimplemented_warning_count());
+	bool active = false;
+#if defined(RD_ENABLED) && defined(FORWARD_RD_ENABLED)
+	if (RendererRD::VirtualShadowMapStorage::get_singleton() != nullptr) {
+		active = RendererRD::VirtualShadowMapStorage::get_singleton()->is_active();
+	}
+#endif
+	info["active"] = active;
+	return info;
+}
+
 Dictionary RenderingServer::virtual_geometry_get_routing_counters() {
 	// GodotNext: nextgeo_residency (#78, Q12). Routing, residency invariants and page-upload GPU time.
 	Dictionary out;
@@ -2750,6 +2773,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_reverse_cull_face_mode", "light", "enabled"), &RenderingServer::light_set_reverse_cull_face_mode);
 	ClassDB::bind_method(D_METHOD("light_set_shadow_caster_mask", "light", "mask"), &RenderingServer::light_set_shadow_caster_mask);
 	ClassDB::bind_method(D_METHOD("light_set_bake_mode", "light", "bake_mode"), &RenderingServer::light_set_bake_mode);
+	// GodotNext: vsm_settings_debug (#221)
+	ClassDB::bind_method(D_METHOD("light_set_shadow_method", "light", "method"), &RenderingServer::light_set_shadow_method);
 	ClassDB::bind_method(D_METHOD("light_set_max_sdfgi_cascade", "light", "cascade"), &RenderingServer::light_set_max_sdfgi_cascade);
 	ClassDB::bind_method(D_METHOD("light_set_allow_contact_shadows", "light", "enable"), &RenderingServer::light_set_allow_contact_shadows);
 
@@ -2804,6 +2829,14 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_STATIC);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_BAKE_DYNAMIC);
+
+	// GodotNext: vsm_settings_debug (#221)
+	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_PROJECT);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_VIRTUAL);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_ATLAS);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_RAY_TRACED);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_DISTANCE_FIELD);
+	BIND_ENUM_CONSTANT(RSE::LIGHT_SHADOW_METHOD_MAX);
 
 	BIND_ENUM_CONSTANT(RSE::LIGHT_OMNI_SHADOW_DUAL_PARABOLOID);
 	BIND_ENUM_CONSTANT(RSE::LIGHT_OMNI_SHADOW_CUBE);
@@ -3105,6 +3138,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_check_result"), &RenderingServer::virtual_shadow_maps_get_check_result);
 	// GodotNext: vsm_non_nanite (#218).
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_request_raster_check"), &RenderingServer::virtual_shadow_maps_request_raster_check);
+	// GodotNext: vsm_settings_debug (#221).
+	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_tier_info"), &RenderingServer::virtual_shadow_maps_get_tier_info);
 	ClassDB::bind_method(D_METHOD("virtual_shadow_maps_get_raster_check_result"), &RenderingServer::virtual_shadow_maps_get_raster_check_result);
 	ClassDB::bind_method(D_METHOD("viewport_set_scaling_3d_scale", "viewport", "scale"), &RenderingServer::viewport_set_scaling_3d_scale);
 	ClassDB::bind_method(D_METHOD("viewport_set_fsr_sharpness", "viewport", "sharpness"), &RenderingServer::viewport_set_fsr_sharpness);
@@ -3325,6 +3360,13 @@ void RenderingServer::_bind_methods() {
 	// GodotNext: pt_tsr_stability (#198)
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_TSR);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_PATH_TRACER); // GodotNext: path_tracer (#167)
+	// GodotNext: vsm_settings_debug (#221)
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_PAGES);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW);
+	BIND_ENUM_CONSTANT(RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP);
 
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_DISABLED);
 	BIND_ENUM_CONSTANT(RSE::VIEWPORT_VRS_TEXTURE);
@@ -3891,6 +3933,11 @@ void RenderingServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_NEXTGI_COVERAGE_HITS);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_NEXTGI_COVERAGE_RAYS);
 	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_NEXTGI_REFERENCE_SAMPLES);
+	// GodotNext: vsm_settings_debug (#221)
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_VSM_PAGES_ALLOCATED);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_VSM_PAGES_REQUESTED);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_VSM_PAGES_RERENDERED);
+	BIND_ENUM_CONSTANT(RSE::RENDERING_INFO_VSM_PAGES_OVERFLOW);
 
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_CANVAS);
 	BIND_ENUM_CONSTANT(RSE::PIPELINE_SOURCE_MESH);
@@ -4027,6 +4074,22 @@ void RenderingServer::init() {
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/positional_shadow/soft_shadow_filter_quality", PROPERTY_HINT_ENUM, "Hard (Fastest),Soft Very Low (Faster),Soft Low (Fast),Soft Medium (Average),Soft High (Slow),Soft Ultra (Slowest)"), 2);
 	GLOBAL_DEF("rendering/lights_and_shadows/positional_shadow/soft_shadow_filter_quality.mobile", 0);
 	GLOBAL_DEF("rendering/lights_and_shadows/positional_shadow/atlas_16_bits", true);
+
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2 S1, budget V6). Existing and new projects keep the
+	// atlas until #223 flips the new-project default (RendererVirtualShadowMapStorage::NEW_PROJECT_SHADOW_METHOD).
+	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/shadow_method", PROPERTY_HINT_ENUM, "Atlas,Virtual"), int(RendererVirtualShadowMapStorage::DEFAULT_SHADOW_METHOD));
+	GLOBAL_DEF(PropertyInfo(Variant::INT, RendererVirtualShadowMapStorage::SETTING_QUALITY, PROPERTY_HINT_ENUM, "Low,Medium,High,Epic"), int(RendererVirtualShadowMapStorage::DEFAULT_QUALITY));
+	for (uint32_t quality = 0; quality < RendererVirtualShadowMapStorage::POOL_QUALITY_MAX; quality++) {
+		const RendererVirtualShadowMapStorage::Scalability values = RendererVirtualShadowMapStorage::default_scalability(RendererVirtualShadowMapStorage::PoolQuality(quality));
+		const String suffix = String(".") + RendererVirtualShadowMapStorage::pool_quality_name(RendererVirtualShadowMapStorage::PoolQuality(quality));
+		const String pages_hint = vformat("%d,%d,1", RendererVirtualShadowMapStorage::MIN_PHYSICAL_PAGES, RendererVirtualShadowMapStorage::POOL_MAX_PAGES);
+		const String bias_hint = vformat("%d,%d,1", -RendererVirtualShadowMapStorage::MAX_SETTING_LOD_BIAS, RendererVirtualShadowMapStorage::MAX_SETTING_LOD_BIAS);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_MAX_PHYSICAL_PAGES) + suffix, PROPERTY_HINT_RANGE, pages_hint), int64_t(values.max_physical_pages));
+		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_directional);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_local);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_DIRECTIONAL_MOVING) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_directional_moving);
+		GLOBAL_DEF(PropertyInfo(Variant::INT, String(RendererVirtualShadowMapStorage::SETTING_LOD_BIAS_LOCAL_MOVING) + suffix, PROPERTY_HINT_RANGE, bias_hint), values.lod_bias_local_moving);
+	}
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);
 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/2d/batching/item_buffer_size", PROPERTY_HINT_RANGE, "128,1048576,1"), 16384);

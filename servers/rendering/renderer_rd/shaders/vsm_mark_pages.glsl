@@ -182,7 +182,7 @@ void vsm_mark_local(uint map_base, uint light_flags, vec3 world, float footprint
 		if (!inside) {
 			continue;
 		}
-		int bias = view.data.bias.y + int(vsm_overflow_bias(map));
+		int bias = view.data.bias.y + map_data.lod_bias + int(vsm_overflow_bias(map));
 		uint mip = vsm_biased_mip(int(vsm_face_mip(w * map_data.texel_scale, footprint)), bias);
 		vsm_request(map, mip, (texel >> mip) >> VSM_PAGE_SIZE_SHIFT, false);
 	}
@@ -225,7 +225,7 @@ void vsm_mark_directional(uint map_base, uint light_flags, vec3 world, float foo
 		}
 		return;
 	}
-	int level_mip = vsm_clipmap_level_mip(footprint, view.data.bias.x);
+	int level_mip = vsm_clipmap_level_mip(footprint, view.data.bias.x + vsm_maps.data[first].lod_bias);
 	for (uint level = 0u; level < count; level++) {
 		uint map = first + level;
 		if (map >= view.data.misc.x) {

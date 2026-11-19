@@ -567,6 +567,8 @@ public:
 	FUNC2(light_set_reverse_cull_face_mode, RID, bool)
 	FUNC2(light_set_shadow_caster_mask, RID, uint32_t)
 	FUNC2(light_set_bake_mode, RID, RSE::LightBakeMode)
+	// GodotNext: vsm_settings_debug (#221).
+	FUNC2(light_set_shadow_method, RID, RSE::LightShadowMethod)
 	FUNC2(light_set_max_sdfgi_cascade, RID, uint32_t)
 	FUNC2(light_set_allow_contact_shadows, RID, bool)
 

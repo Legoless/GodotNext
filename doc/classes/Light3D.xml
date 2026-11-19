@@ -128,6 +128,11 @@
 		<member name="shadow_enabled" type="bool" setter="set_shadow" getter="has_shadow" default="false">
 			If [code]true[/code], the light will cast real-time shadows. This has a significant performance cost. Only enable shadow rendering when it makes a noticeable difference in the scene's appearance, and consider using [member distance_fade_enabled] to hide the light when far away from the [Camera3D].
 		</member>
+		<member name="shadow_method" type="int" setter="set_shadow_method" getter="get_shadow_method" enum="Light3D.ShadowMethod" default="0">
+			How this light casts shadows. [constant SHADOW_METHOD_PROJECT] follows [member ProjectSettings.rendering/lights_and_shadows/shadow_method]. With [constant SHADOW_METHOD_VIRTUAL] (or the project's Virtual method), the light uses virtual shadow maps on the Forward+ renderer when the device supports 32-bit image atomics and indirect-count draws; otherwise it uses the shadow atlas, and the node shows a configuration warning that names the reason (see [method RenderingServer.virtual_shadow_maps_get_tier_info]).
+			[b]Note:[/b] [constant SHADOW_METHOD_RAY_TRACED] and [constant SHADOW_METHOD_DISTANCE_FIELD] are not implemented yet and use [constant SHADOW_METHOD_PROJECT].
+			[b]Note:[/b] The light does not shade with its virtual shadow maps yet: until the light loop samples them, it still shades from the shadow atlas, and its virtual maps feed only the virtual shadow map debug draws and statistics (see [member ProjectSettings.rendering/lights_and_shadows/shadow_method]).
+		</member>
 		<member name="shadow_normal_bias" type="float" setter="set_param" getter="get_param" default="2.0">
 			Offsets the lookup into the shadow map by the object's normal. This can be used to reduce self-shadowing artifacts without using [member shadow_bias]. In practice, this value should be tweaked along with [member shadow_bias] to reduce artifacts as much as possible.
 		</member>
@@ -222,6 +227,21 @@
 		<constant name="BAKE_DYNAMIC" value="2" enum="BakeMode">
 			Light is taken into account in dynamic baking ([VoxelGI] and SDFGI ([member Environment.sdfgi_enabled])). The light can be moved around or modified with global illumination updating in real-time. The light's global illumination appearance will be slightly different compared to [constant BAKE_STATIC]. This has a greater performance cost compared to [constant BAKE_STATIC]. When using SDFGI, the update speed of dynamic lights is affected by [member ProjectSettings.rendering/global_illumination/sdfgi/frames_to_update_lights].
 			[b]Note:[/b] When using [LightmapGI], the light's indirect light is baked, but direct light and shadows remain real-time. This mode allows performing [i]subtle[/i] changes to a light's color, energy, and position while still looking fairly correct. For example, you can use this to create flickering static torches that have their indirect light baked.
+		</constant>
+		<constant name="SHADOW_METHOD_PROJECT" value="0" enum="ShadowMethod">
+			Uses [member ProjectSettings.rendering/lights_and_shadows/shadow_method].
+		</constant>
+		<constant name="SHADOW_METHOD_VIRTUAL" value="1" enum="ShadowMethod">
+			Uses virtual shadow maps where the renderer and device support them, and the shadow atlas elsewhere.
+		</constant>
+		<constant name="SHADOW_METHOD_ATLAS" value="2" enum="ShadowMethod">
+			Uses the shadow atlas.
+		</constant>
+		<constant name="SHADOW_METHOD_RAY_TRACED" value="3" enum="ShadowMethod">
+			Ray-traced shadows. Not implemented yet: uses [constant SHADOW_METHOD_PROJECT].
+		</constant>
+		<constant name="SHADOW_METHOD_DISTANCE_FIELD" value="4" enum="ShadowMethod">
+			Distance-field shadows. Not implemented yet: uses [constant SHADOW_METHOD_PROJECT].
 		</constant>
 	</constants>
 </class>

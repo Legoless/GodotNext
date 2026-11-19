@@ -1068,6 +1068,13 @@ bool RendererSceneRenderRD::_debug_draw_can_use_effects(RSE::ViewportDebugDraw p
 		case RSE::VIEWPORT_DEBUG_DRAW_ML_MATERIAL:
 		// GodotNext: pt_tsr_stability (#198)
 		case RSE::VIEWPORT_DEBUG_DRAW_TSR:
+		// GodotNext: vsm_settings_debug (#221). Drawn over the final image; without virtual shadow maps the view is the normal image.
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_PAGES:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP:
 		case RSE::VIEWPORT_DEBUG_DRAW_SSAO:
 		case RSE::VIEWPORT_DEBUG_DRAW_SSIL:
 		case RSE::VIEWPORT_DEBUG_DRAW_SDFGI:

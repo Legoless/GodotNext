@@ -2341,6 +2341,14 @@
 				Sets the shadow caster mask for this 3D light. Shadows will only be cast using objects in the selected layers. Equivalent to [member Light3D.shadow_caster_mask].
 			</description>
 		</method>
+		<method name="light_set_shadow_method">
+			<return type="void" />
+			<param index="0" name="light" type="RID" />
+			<param index="1" name="method" type="int" enum="RenderingServer.LightShadowMethod" />
+			<description>
+				Sets the shadow method of this 3D light. Equivalent to [member Light3D.shadow_method]. [constant LIGHT_SHADOW_METHOD_RAY_TRACED] and [constant LIGHT_SHADOW_METHOD_DISTANCE_FIELD] are not implemented yet: the light keeps the value and uses [constant LIGHT_SHADOW_METHOD_PROJECT], and the first light set to each prints one warning.
+			</description>
+		</method>
 		<method name="lightmap_create">
 			<return type="RID" />
 			<description>
@@ -4830,7 +4838,8 @@
 			<return type="Dictionary" />
 			<description>
 				Returns the state of the virtual shadow map core: [code]active[/code], [code]quality[/code], the physical pool ([code]pool_pages[/code], [code]pool_grid[/code], [code]pool_texture_size[/code], [code]pool_layers[/code], [code]pool_bytes[/code], [code]pool_driver_bytes[/code], [code]pool_reallocations[/code]), the page table ([code]page_table_maps[/code], [code]page_table_bytes[/code], [code]maps_allocated[/code], [code]maps_free[/code], [code]free_ranges[/code], [code]lights[/code], [code]scroll_passes[/code], [code]failed_allocations[/code], [code]map_allocations[/code], [code]evicted_lights[/code], [code]evicted_maps[/code], [code]frame[/code]), the provisional sizes ([code]page_size[/code], [code]virtual_size[/code], [code]mip_count[/code], [code]entries_per_map[/code], [code]map_table_bytes[/code], [code]table_growth_maps[/code], [code]table_max_maps[/code], [code]pool_quality_pages[/code], [code]clipmap_level0_extent[/code], [code]clipmap_max_levels[/code], [code]min_caster_texels[/code]), the page marking pass ([code]marking_ready[/code], [code]marked_views[/code], [code]cache_frames[/code], [code]lod_bias[/code], [code]request_capacity[/code], and in [code]pages[/code] the last marked view's counters: [code]requests[/code], [code]new[/code], [code]kept[/code], [code]stolen[/code], [code]evicted[/code], [code]overflow[/code], [code]dirty[/code], [code]biased_maps[/code] and more, plus [code]total_overflow[/code] and [code]overflow_views[/code] since start) and, once a view has rasterized non-Nanite shadow casters into the pages, that pass ([code]non_nanite[/code]: [code]light_count[/code], [code]caster_count[/code], [code]surface_element_count[/code], [code]group_count[/code], [code]box_record_count[/code], [code]sub_record_count[/code], [code]pair_capacity[/code], [code]min_caster_texels[/code], [code]used_indirect_count[/code], [code]point_size_skipped[/code], and, read back a frame or more late, [code]pair_capacity_floor[/code], [code]overflow_frames[/code], [code]dropped_pairs_total[/code], [code]redraw_marks_total[/code] and [code]write_mismatch_total[/code]). Reading [code]pages[/code] stalls the GPU. Returns an empty [Dictionary] when the renderer has no virtual shadow maps (the Mobile and Compatibility renderers).
-				[b]Note:[/b] No project setting turns virtual shadow maps on yet. In debug builds, the [code]GODOT_DEV_VSM[/code] environment variable ([code]1[/code], [code]low[/code], [code]medium[/code], [code]high[/code], [code]epic[/code], or a percentage of the High pool such as [code]25%[/code]) makes every shadow-casting light allocate its virtual maps, and every 3D view mark, allocate and rasterize non-Nanite geometry into the pages it samples; the lights keep their shadow atlas.
+				It also reports [code]tier_reason[/code], [code]project_shadow_method[/code], [code]dev_switch[/code] and [code]lod_bias_moving[/code] (see [method virtual_shadow_maps_get_tier_info]).
+				[b]Note:[/b] [member ProjectSettings.rendering/lights_and_shadows/shadow_method] set to Virtual, or a light set to [constant LIGHT_SHADOW_METHOD_VIRTUAL], turns virtual shadow maps on when the device meets the tier rule; every shadow-casting light whose method resolves to virtual then allocates its virtual maps, and every 3D view marks, allocates and rasterizes non-Nanite geometry into the pages it samples. The lights keep their shadow atlas until the virtual maps are projected. In debug builds, the [code]GODOT_DEV_VSM[/code] environment variable stands for the Virtual project setting and also picks the pool: [code]1[/code], [code]low[/code], [code]medium[/code], [code]high[/code], [code]epic[/code], or a percentage of the High pool such as [code]25%[/code].
 			</description>
 		</method>
 		<method name="virtual_shadow_maps_get_raster_check_result">
@@ -4839,6 +4848,13 @@
 				Returns the GPU check that [method virtual_shadow_maps_request_raster_check] armed, once a view has run the non-Nanite virtual shadow map raster pass ([code]captured[/code] is [code]false[/code] until then).
 				The check compares the instance-page pairs that the GPU culling pass emitted with its CPU model, over every single-instance box and every MultiMesh or particle sub-instance: [code]gpu_total_pairs[/code], [code]cpu_total_pairs[/code], [code]gpu_dropped_pairs[/code], [code]gpu_small_culled[/code], [code]cpu_small_culled[/code], [code]exact_match[/code], [code]exact_unexplained[/code] and [code]exact_missing[/code] (differences from the model's exact pairs, the first 16 of them in [code]exact_difference_samples[/code]), [code]pair_unexpected[/code] and [code]pair_missing[/code] (differences that a change of 1e-5 of the inputs cannot explain), [code]pair_duplicates[/code], [code]pair_bad_target[/code], [code]scan_mismatches[/code] (the indirect-count draw arguments) and [code]write_mismatch[/code] (pairs on which the cull's count and write passes disagreed). A pair list overflow is reported with [code]pair_capacity[/code], [code]redraw_marks[/code] (dropped pairs whose page was marked to be drawn again), [code]pair_missing_marked[/code] and [code]marked_pages[/code]; when the previous capture was the frame before, [code]consecutive[/code] is [code]true[/code] and [code]marked_not_redrawn[/code] counts the pages it marked that were neither drawn again nor evicted. Every vertex is tested against the box that culled its pair: [code]vertices_outside_box[/code], with the object IDs in [code]casters_outside_box[/code]. It counts the fragments each pair drew and checks every dirty page and layer: [code]texels_without_pair[/code] (texels in a page that no pair drew into), [code]fragments_without_texels[/code], [code]texels_exceed_fragments[/code], [code]pages_with_pairs[/code], [code]pages_with_texels[/code] and [code]total_fragments[/code]. It compares the shadow casters with the shadow atlas's, light by light ([code]missing_from_vsm[/code] counts the casters that the atlas draws for a light and that light's virtual maps do not; [code]vsm_extra_casters[/code], [code]atlas_non_virtual_casters[/code], [code]virtual_skipped[/code]; [code]point_size_skipped[/code] counts the surfaces that set [code]POINT_SIZE[/code] on a device without point sizes, which are not drawn into virtual shadow map pages) and lists every caster's pairs and fragments ([code]casters[/code]: [code]object_id[/code], [code]pairs_emitted[/code], [code]texels_written[/code], [code]vertices_outside_box[/code], [code]light_texels[/code] (fragments per light, keyed by the [code]id[/code] of the light in [code]lights[/code]) and its class); [code]lights[/code] lists the lights with virtual maps ([code]id[/code], [code]kind[/code], [code]position[/code], [code]direction[/code]), with [code]casters_without_texels[/code] holding the object IDs of casters that emitted pairs but wrote nothing. [code]dirty_pages[/code] holds each dirty page's pairs, fragments, written texels and depth profiles.
 				[code]failures[/code] lists what differs (including any [code]point_size_skipped[/code] surface, any vertex outside its cull box, and an overflow that left a dropped pair's page unmarked), and [code]pass[/code] is [code]true[/code] when nothing does. Reading the capture stalls the GPU; it is meant for tests. Returns an empty [Dictionary] when the renderer has no virtual shadow maps.
+			</description>
+		</method>
+		<method name="virtual_shadow_maps_get_tier_info">
+			<return type="Dictionary" />
+			<description>
+				Returns the virtual shadow map tier rule's result, on every renderer: [code]available[/code] is [code]true[/code] when the Forward+ renderer runs on a device with 32-bit image atomics and indirect-count draws; otherwise [code]reason[/code] names the first missing need ([code]UNSUPPORTED_RENDERER[/code], [code]NO_IMAGE_ATOMIC_32[/code] or [code]NO_INDIRECT_COUNT[/code]) and lights that would use virtual shadow maps use the shadow atlas. Also returns [code]project_shadow_method[/code] ([code]"atlas"[/code] or [code]"virtual"[/code], as read at startup), [code]dev_switch[/code] (the [code]GODOT_DEV_VSM[/code] override is set), [code]active[/code] (the page pool exists), and the counts of fallback lines and unimplemented-method warnings printed so far ([code]fallback_lines[/code], [code]unimplemented_warnings[/code]).
+				[b]Note:[/b] Virtual shadow maps on a device without 64-bit atomics (including Apple M1) are an extension that is not validated against Unreal Engine 5.9, which requires them.
 			</description>
 		</method>
 		<method name="virtual_shadow_maps_request_check">
@@ -5463,6 +5479,24 @@
 		</constant>
 		<constant name="LIGHT_BAKE_DYNAMIC" value="2" enum="LightBakeMode">
 			Light is taken into account in dynamic baking ([VoxelGI] and SDFGI ([member Environment.sdfgi_enabled]) only). The light can be moved around or modified with global illumination updating in real-time. The light's global illumination appearance will be slightly different compared to [constant LIGHT_BAKE_STATIC]. This has a greater performance cost compared to [constant LIGHT_BAKE_STATIC]. When using SDFGI, the update speed of dynamic lights is affected by [member ProjectSettings.rendering/global_illumination/sdfgi/frames_to_update_lights].
+		</constant>
+		<constant name="LIGHT_SHADOW_METHOD_PROJECT" value="0" enum="LightShadowMethod">
+			The light uses [member ProjectSettings.rendering/lights_and_shadows/shadow_method].
+		</constant>
+		<constant name="LIGHT_SHADOW_METHOD_VIRTUAL" value="1" enum="LightShadowMethod">
+			The light uses virtual shadow maps. On a renderer or device below the virtual shadow map tier ([method virtual_shadow_maps_get_tier_info]), it uses the shadow atlas and one line names the reason.
+		</constant>
+		<constant name="LIGHT_SHADOW_METHOD_ATLAS" value="2" enum="LightShadowMethod">
+			The light uses the shadow atlas.
+		</constant>
+		<constant name="LIGHT_SHADOW_METHOD_RAY_TRACED" value="3" enum="LightShadowMethod">
+			Ray-traced shadows. Not implemented yet: the light uses [constant LIGHT_SHADOW_METHOD_PROJECT].
+		</constant>
+		<constant name="LIGHT_SHADOW_METHOD_DISTANCE_FIELD" value="4" enum="LightShadowMethod">
+			Distance-field shadows. Not implemented yet: the light uses [constant LIGHT_SHADOW_METHOD_PROJECT].
+		</constant>
+		<constant name="LIGHT_SHADOW_METHOD_MAX" value="5" enum="LightShadowMethod">
+			Represents the size of the [enum LightShadowMethod] enum.
 		</constant>
 		<constant name="LIGHT_OMNI_SHADOW_DUAL_PARABOLOID" value="0" enum="LightOmniShadowMode">
 			Use a dual paraboloid shadow map for omni lights.
@@ -6144,6 +6178,30 @@
 			Path traces the view, as [method viewport_set_path_tracing_enabled] does, with the viewport's path tracing settings. Shows the normal image where the path tracer cannot run.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_VSM_MASK" value="63" enum="ViewportDebugDraw">
+			Shows each pixel's raw visibility in the virtual shadow maps of every light that has them, one depth comparison per light: white is lit, black is shadowed, gray is reached by no light with virtual shadow maps, and magenta means the page it needs is not mapped. This is not the filtered shadow the lights shade with.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_VSM_MIP" value="64" enum="ViewportDebugDraw">
+			Colors each pixel by the mip of the virtual shadow page it samples for its first light with virtual shadow maps (directional lights first): mip 0 (the finest) red, then orange, yellow, green, cyan, blue and purple. Magenta means no page is mapped.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_VSM_PAGES" value="65" enum="ViewportDebugDraw">
+			Colors each pixel by the virtual page address (map, mip and page) it samples for its first light with virtual shadow maps, with the page edges darkened.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_VSM_CACHE" value="66" enum="ViewportDebugDraw">
+			Shows whether the virtual shadow page each pixel samples was rendered for this view: green means cached, blue means only its dynamic layer was rendered, red means its static layer was rendered (the dynamic layer may be too).
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW" value="67" enum="ViewportDebugDraw">
+			Heat map of the non-Nanite shadow caster draws rasterized into the virtual shadow page each pixel samples, for this view: dark blue for none, through green and yellow to red at 16 or more. NextGeo virtual geometry is not counted yet.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
+		</constant>
+		<constant name="VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP" value="68" enum="ViewportDebugDraw">
+			Colors each pixel by the clipmap level of the virtual shadow page it samples for its first directional light, one hue per level. Gray means no directional light with virtual shadow maps reaches it.
+			[b]Note:[/b] Only supported when using the Forward+ rendering method. Shows the normal image while virtual shadow maps are off.
+		</constant>
 		<constant name="VIEWPORT_VRS_DISABLED" value="0" enum="ViewportVRSMode">
 			Variable rate shading is disabled.
 		</constant>
@@ -6784,6 +6842,18 @@
 		</constant>
 		<constant name="RENDERING_INFO_NEXTGI_REFERENCE_SAMPLES" value="13" enum="RenderingInfo">
 			Samples accumulated by the NextGI reference path tracer.
+		</constant>
+		<constant name="RENDERING_INFO_VSM_PAGES_ALLOCATED" value="14" enum="RenderingInfo">
+			Virtual shadow map pages that hold an entry after the frame's last 3D view: requested this frame or cached. Read back from the GPU without a stall: the read starts one frame after the views and arrives when the GPU has finished, so the value describes a frame a few frames old. The value is sampled: one read is in flight at a time, so frames in between are not counted, and a frame whose 3D views run no page marking keeps the last value. 0 without virtual shadow maps.
+		</constant>
+		<constant name="RENDERING_INFO_VSM_PAGES_REQUESTED" value="15" enum="RenderingInfo">
+			Virtual shadow map pages that the frame's 3D views requested. Read back a few frames late, like [constant RENDERING_INFO_VSM_PAGES_ALLOCATED].
+		</constant>
+		<constant name="RENDERING_INFO_VSM_PAGES_RERENDERED" value="16" enum="RenderingInfo">
+			Virtual shadow map pages that the frame's 3D views cleared and rendered again. Read back a few frames late, like [constant RENDERING_INFO_VSM_PAGES_ALLOCATED].
+		</constant>
+		<constant name="RENDERING_INFO_VSM_PAGES_OVERFLOW" value="17" enum="RenderingInfo">
+			Virtual shadow map page requests that the frame's 3D views left without a page because the pool was full. Such a page falls back to a coarser resident page, and the light's resolution bias rises. Read back a few frames late, like [constant RENDERING_INFO_VSM_PAGES_ALLOCATED].
 		</constant>
 		<constant name="PIPELINE_SOURCE_CANVAS" value="0" enum="PipelineSource">
 			Pipeline compilation that was triggered by the 2D canvas renderer.

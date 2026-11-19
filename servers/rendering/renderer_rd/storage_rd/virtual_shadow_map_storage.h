@@ -46,11 +46,13 @@ namespace RendererRD {
 // physical pool texture, the page-table buffer, the clipmap scroll pass and the page-table
 // self-check. It exists with the Forward+ renderer only, and allocates nothing until VSM is active.
 //
-// Nothing turns VSM on for a project yet: the shadow-method settings come with #221. Until then
-// GODOT_DEV_VSM in the environment (builds with DEBUG_ENABLED) turns the core on for every
-// shadow-casting light: 1 picks the High pool, or name the pool quality (low, medium, high, epic),
-// or a percentage of the default High pool ("25%"). The lights keep their atlas shadows; the maps
-// fill LightData's vsm_map_base and vsm_flags.
+// GodotNext: vsm_settings_debug (#221). rendering/lights_and_shadows/shadow_method = virtual (read at startup)
+// or a light's LIGHT_SHADOW_METHOD_VIRTUAL turns the core on when the tier rule allows it; then every
+// shadow-casting light whose method resolves to VIRTUAL gets maps. GODOT_DEV_VSM in the environment
+// (builds with DEBUG_ENABLED) stands for shadow_method = virtual and picks the pool: 1 the High pool, or
+// the pool quality (low, medium, high, epic), or a percentage of the default High pool ("25%"). The
+// lights keep their atlas shadows until #222 projects the maps; the maps fill LightData's vsm_map_base
+// and vsm_flags.
 //
 // GodotNext: vsm_page_marking (#219). With VSM on, every view with Forward+ render buffers forces the
 // depth prepass and, at the end of RenderForwardClustered::_pre_opaque_render() (once the light
@@ -244,6 +246,17 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 
 	bool active = false;
 	PoolQuality active_quality = POOL_QUALITY_HIGH;
+	// GodotNext: vsm_settings_debug (#221).
+	TierReason tier_reason = TIER_REASON_UNSUPPORTED_RENDERER;
+	bool activation_failed = false;
+	Scalability scalability = default_scalability(DEFAULT_QUALITY);
+	uint32_t settings_version = 0;
+	static constexpr uint32_t STATS_MAX_VIEWS = 16; // Views of one frame counted in RENDERING_INFO_VSM_PAGES_*.
+	RID stats_buffer;
+	uint32_t stats_views = 0;
+	uint64_t stats_frame = UINT64_MAX;
+	void _update_scalability();
+	void _record_frame_stats(uint64_t p_frame, bool p_view_marked);
 
 	bool _ensure_shader();
 	RID _shader(ShaderMode p_mode);
@@ -276,6 +289,16 @@ public:
 	static bool is_dev_switch_on(PoolQuality *r_quality = nullptr, uint32_t *r_pool_pages = nullptr);
 
 	bool is_active() const { return active; }
+	// GodotNext: vsm_settings_debug (#221). The tier rule's device half: SUPPORTS_IMAGE_ATOMIC_32_BIT and
+	// SUPPORTS_DRAW_INDIRECT_COUNT, which a RenderingDevice without a driver can mock.
+	static void collect_device_inputs(const RenderingDevice *p_device, bool p_forward_plus, TierInputs &r_inputs);
+	// Creates the pool once, when the tier allows it: at startup for a virtual project, or when a light first
+	// asks for LIGHT_SHADOW_METHOD_VIRTUAL. Returns whether VSM is active.
+	bool request_activation();
+	TierReason get_device_tier_reason() const { return tier_reason; }
+	const Scalability &get_scalability() const { return scalability; }
+	// The views mark_and_allocate() has marked; it rises once per view whose dirty list it wrote.
+	uint64_t get_marked_view_count() const { return marked_views; }
 	RID get_pool_texture() const { return pool_texture; }
 	RID get_page_table_buffer() const { return table_buffer; }
 	// GodotNext: vsm_non_nanite (#218). Read-only access to the marking/allocation outputs for raster passes.

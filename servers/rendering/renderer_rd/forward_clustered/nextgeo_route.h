@@ -252,6 +252,13 @@ inline bool nextgeo_is_unsupported_debug_draw(RSE::ViewportDebugDraw p_mode) {
 		case RSE::VIEWPORT_DEBUG_DRAW_TSR:
 		// GodotNext: path_tracer (#167). The path tracer replaces the frame; the raster frame under it is the normal one.
 		case RSE::VIEWPORT_DEBUG_DRAW_PATH_TRACER:
+		// GodotNext: vsm_settings_debug (#221). Drawn over the final image from the depth and the VSM state.
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_PAGES:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW:
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP:
 			return false;
 		default:
 			return true;

@@ -40,6 +40,8 @@
 #include "core/templates/hash_map.h"
 #include "core/templates/local_vector.h"
 #include "core/templates/rid.h"
+// GodotNext: vsm_settings_debug (#221).
+#include "servers/rendering/rendering_server_enums.h"
 
 // GodotNext: vsm_page_pool (#220, plan §21.3 contract S2, budget V6)
 //
@@ -284,7 +286,10 @@ public:
 		float near_w = 0.0f;
 		float max_distance = 0.0f; // Clipmap: no view pixel deeper than this requests the light.
 		uint32_t index = 0; // The clipmap level or the face.
-		uint32_t pad = 0;
+		// GodotNext: vsm_settings_debug (#221). Mips the map's light adds to the view's resolution LOD bias:
+		// the moving bias minus the static one while the light moves, stepping back to 0 once it stops
+		// (moving_lod_bias()). Directional lights read level 0's.
+		int32_t lod_bias = 0;
 		bool operator==(const MapData &p_other) const;
 		bool operator!=(const MapData &p_other) const { return !(*this == p_other); }
 	};
@@ -524,6 +529,137 @@ public:
 	// small-caster threshold p_min_texels.
 	static void cull_box_dirty_pages(const MapData *p_maps, uint32_t p_table_maps, const uint32_t *p_map_dirty_counts, const uint32_t *p_map_dirty_offsets, const DirtyPageRecord *p_dirty, uint32_t p_dirty_limit, uint32_t p_map_base, uint32_t p_light_flags, const AABB &p_box, bool p_dynamic, float p_min_texels, LocalVector<uint32_t> &r_dirty_indices, uint32_t &r_small_culled);
 
+	/* PRODUCT SURFACE (#221, plan §21.3.2 S1, budget V6) */
+
+	// rendering/lights_and_shadows/shadow_method, read once at startup (changing it needs a restart).
+	enum ShadowMethod : uint32_t {
+		SHADOW_METHOD_ATLAS,
+		SHADOW_METHOD_VIRTUAL,
+		SHADOW_METHOD_MAX,
+	};
+	// What EditorNode::get_initial_settings() writes into a new project. Existing projects keep the setting's
+	// default, ATLAS. #223 sets this to VIRTUAL once gate GV passes in PQ, and the default stays ATLAS.
+	static constexpr ShadowMethod NEW_PROJECT_SHADOW_METHOD = SHADOW_METHOD_ATLAS;
+	static constexpr ShadowMethod DEFAULT_SHADOW_METHOD = SHADOW_METHOD_ATLAS;
+
+	// The tier rule: VSM needs Forward+, 32-bit image atomics and indirect-count draws. Below it, lights that
+	// would use virtual shadow maps use the shadow atlas, and one line names the reason.
+	enum TierReason : uint32_t {
+		TIER_REASON_NONE,
+		TIER_REASON_UNSUPPORTED_RENDERER, // Mobile, Compatibility, or no Forward+ virtual shadow map storage.
+		TIER_REASON_NO_IMAGE_ATOMIC_32, // RenderingDevice::SUPPORTS_IMAGE_ATOMIC_32_BIT.
+		TIER_REASON_NO_INDIRECT_COUNT, // RenderingDevice::SUPPORTS_DRAW_INDIRECT_COUNT.
+		TIER_REASON_MAX,
+	};
+	struct TierInputs {
+		bool forward_plus = false;
+		bool image_atomic_32 = false;
+		bool indirect_count = false;
+	};
+	// Pure: the first failing check wins, in the order above.
+	static TierReason evaluate_tier(const TierInputs &p_inputs);
+	static const char *get_tier_reason_name(TierReason p_reason);
+	// The one line printed when a light would use virtual shadow maps below the tier.
+	static String format_fallback_line(TierReason p_reason);
+
+	// What a light's shadow method resolves to: LIGHT_SHADOW_METHOD_VIRTUAL or LIGHT_SHADOW_METHOD_ATLAS.
+	// PROJECT takes p_project; RAY_TRACED (#141) and DISTANCE_FIELD (#214) are not implemented yet and take
+	// PROJECT; VIRTUAL without p_vsm_available takes ATLAS. Pure.
+	static RSE::LightShadowMethod resolve_light_shadow_method(RSE::LightShadowMethod p_method, ShadowMethod p_project, bool p_vsm_available);
+	// Whether p_method resolves to VIRTUAL before the tier is applied (resolve_light_shadow_method() with VSM
+	// available).
+	static bool light_shadow_method_wants_virtual(RSE::LightShadowMethod p_method, ShadowMethod p_project);
+	static bool is_light_shadow_method_implemented(RSE::LightShadowMethod p_method);
+	static const char *get_light_shadow_method_name(RSE::LightShadowMethod p_method);
+
+	// The process-wide state the light storages and the scene cull read. The Forward+ storage sets it at
+	// startup (set_startup_state()); without one the tier reason is TIER_REASON_UNSUPPORTED_RENDERER.
+	static void set_startup_state(TierReason p_reason, ShadowMethod p_project, bool p_dev_switch);
+	// Back to the state without a Forward+ storage; the once-per-process lines and warnings may print again.
+	static void reset_startup_state();
+	static TierReason get_tier_reason();
+	static bool is_vsm_available() { return get_tier_reason() == TIER_REASON_NONE; }
+	static ShadowMethod get_project_shadow_method();
+	static bool is_dev_switch_forcing();
+	// resolve_light_shadow_method() with that state: whether a shadowed light with p_method gets virtual maps.
+	static bool light_uses_vsm(RSE::LightShadowMethod p_method);
+	// Every LightStorage::light_set_shadow_method() calls this. An unimplemented method prints one warning per
+	// method per process; VIRTUAL below the tier prints the fallback line (once per process, report_fallback()).
+	static void note_light_shadow_method(RSE::LightShadowMethod p_method);
+	// Prints format_fallback_line() once per process, when VSM is not available. Returns true when it printed.
+	static bool report_fallback();
+	// RenderingServerDefault calls this once the renderer exists: a virtual project below the tier prints
+	// the fallback line. Without p_print (the dummy renderer, which draws no shadows) it only records the
+	// project's method.
+	static void report_project_shadow_method(bool p_print = true);
+	// Counters for the doctests: unimplemented-method warnings and fallback lines printed since start.
+	static uint32_t get_unimplemented_warning_count();
+	static uint32_t get_fallback_line_count();
+	// rendering/lights_and_shadows/shadow_method, as an index (0 atlas, 1 virtual).
+	static ShadowMethod read_project_shadow_method();
+
+	// Scalability (budget V6): rendering/lights_and_shadows/virtual_shadows/quality picks a preset, and each
+	// preset reads <setting>.low, .medium, .high or .epic. The defaults below are the only copies.
+	struct Scalability {
+		uint32_t max_physical_pages = 0;
+		int32_t lod_bias_directional = 0;
+		int32_t lod_bias_local = 0;
+		int32_t lod_bias_directional_moving = 0;
+		int32_t lod_bias_local_moving = 0;
+	};
+	static constexpr PoolQuality DEFAULT_QUALITY = POOL_QUALITY_HIGH;
+	// Provisional until PQ (docs/godotnext/source-log/vsm.md): no bias at High and Epic; Low takes one mip,
+	// a quarter of the pages, for its quarter of High's pool; moving lights take one mip more than static
+	// ones at every preset.
+	static Scalability default_scalability(PoolQuality p_quality);
+	static constexpr uint32_t MIN_PHYSICAL_PAGES = 64;
+	static constexpr int32_t MAX_SETTING_LOD_BIAS = 4;
+	// Clamps a preset's values to what the pool and the mark pass take.
+	static Scalability clamp_scalability(const Scalability &p_values);
+	static const char *const SETTING_QUALITY;
+	static const char *const SETTING_MAX_PHYSICAL_PAGES;
+	static const char *const SETTING_LOD_BIAS_DIRECTIONAL;
+	static const char *const SETTING_LOD_BIAS_LOCAL;
+	static const char *const SETTING_LOD_BIAS_DIRECTIONAL_MOVING;
+	static const char *const SETTING_LOD_BIAS_LOCAL_MOVING;
+	// The preset's values from the project settings (the defaults where a setting is missing).
+	static Scalability read_scalability(PoolQuality p_quality);
+	static PoolQuality read_quality();
+
+	// Moving lights: a light whose transform (a directional light's basis) changed in the current frame is
+	// moving. It adds the moving bias minus the static bias to its maps; once it stops, that extra bias steps
+	// one mip back toward 0 per MOVING_DECAY_FRAMES frames.
+	static constexpr uint32_t MOVING_DECAY_FRAMES = 30;
+	static int32_t moving_lod_bias(int32_t p_static_bias, int32_t p_moving_bias, uint64_t p_frames_since_moved);
+	static constexpr uint64_t NEVER_MOVED = UINT64_MAX;
+	// Records the light's transform in the current frame and returns the frames since it last moved
+	// (NEVER_MOVED for a light that has not moved since it got its maps). Needs the light's maps.
+	uint64_t note_light_motion(RID p_light_instance, const Transform3D &p_transform);
+
+	// RENDERING_INFO_VSM_PAGES_*, read back from the GPU asynchronously: the read starts one frame after the views and arrives when the GPU is done (a few frames late). Process-wide, so get_rendering_info()
+	// reads them on any thread; 0 without virtual shadow maps.
+	enum FrameStat : uint32_t {
+		FRAME_STAT_ALLOCATED, // Pages holding an entry after the frame's last marked view: kept + new + cached - stolen.
+		FRAME_STAT_REQUESTED, // Entries the frame's views requested.
+		FRAME_STAT_RERENDERED, // Pages the frame's views cleared and rendered.
+		FRAME_STAT_OVERFLOW, // Requests the frame's views left without a page.
+		FRAME_STAT_MAX,
+	};
+	static uint64_t get_frame_stat(FrameStat p_stat);
+	// Sums the per-view allocation counters of one frame (STATE_VIEW_END words per view) into the stats.
+	static void publish_frame_stats(const uint32_t *p_view_states, uint32_t p_view_count);
+	static void reset_frame_stats();
+
+	// A grid-stride compute dispatch over p_items with p_group_size threads per group: the groups to dispatch,
+	// at least 1 and at most p_max_groups (LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X, 65,535 on D3D12). Each thread
+	// then steps by the groups times p_group_size. The VSM_OVERDRAW pass dispatches over up to 1 << 22 pairs.
+	static constexpr uint32_t grid_stride_groups(uint32_t p_items, uint32_t p_group_size, uint32_t p_max_groups) {
+		const uint64_t size = p_group_size > 0 ? uint64_t(p_group_size) : 1u;
+		const uint64_t wanted = (uint64_t(p_items) + size - 1u) / size;
+		const uint64_t cap = p_max_groups > 0 ? uint64_t(p_max_groups) : 1u;
+		return uint32_t(wanted < 1u ? 1u : (wanted > cap ? cap : wanted));
+	}
+
 private:
 	struct FreeRange {
 		uint32_t first = 0;
@@ -538,6 +674,10 @@ private:
 		Vector3 axis_y;
 		Vector2i origins[CLIPMAP_MAX_LEVELS];
 		bool origins_valid = false;
+		// GodotNext: vsm_settings_debug (#221). Moving lights.
+		Transform3D motion_transform;
+		bool motion_valid = false;
+		uint64_t moved_frame = NEVER_MOVED;
 	};
 
 	HashMap<RID, LightMaps> light_maps;

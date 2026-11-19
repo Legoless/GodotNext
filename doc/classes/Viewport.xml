@@ -927,6 +927,30 @@
 			Path traces the view, as [member path_tracing_enabled] does, with this viewport's path tracing settings. Shows the normal image where the path tracer cannot run.
 			[b]Note:[/b] Only supported when using the Forward+ rendering method.
 		</constant>
+		<constant name="DEBUG_DRAW_VSM_MASK" value="63" enum="DebugDraw">
+			Shows each pixel's raw visibility in the virtual shadow maps, one depth comparison per light. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_VSM_MASK].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_VSM_MIP" value="64" enum="DebugDraw">
+			Colors each pixel by the mip of the virtual shadow page it samples. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_VSM_MIP].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_VSM_PAGES" value="65" enum="DebugDraw">
+			Colors each pixel by the virtual shadow page address it samples. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_VSM_PAGES].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_VSM_CACHE" value="66" enum="DebugDraw">
+			Shows whether the virtual shadow page each pixel samples was cached or rendered for this view. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_VSM_CACHE].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_VSM_OVERDRAW" value="67" enum="DebugDraw">
+			Heat map of the non-Nanite shadow caster draws rasterized into each sampled virtual shadow page. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
+		<constant name="DEBUG_DRAW_VSM_CLIPMAP" value="68" enum="DebugDraw">
+			Colors each pixel by the clipmap level of its first directional light's virtual shadow page. See [constant RenderingServer.VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP].
+			[b]Note:[/b] Only supported when using the Forward+ rendering method.
+		</constant>
 		<constant name="DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_NEAREST" value="0" enum="DefaultCanvasItemTextureFilter">
 			The texture filter reads from the nearest pixel only. This makes the texture look pixelated from up close, and grainy from a distance (due to mipmaps not being sampled).
 		</constant>

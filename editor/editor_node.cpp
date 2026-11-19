@@ -191,6 +191,8 @@
 #include "servers/physics_3d/physics_server_3d_manager.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server.h"
+// GodotNext: vsm_settings_debug (#221).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #ifdef RD_ENABLED
 #include "editor/export/shader_baker/shader_baker_export_plugin.h"
@@ -8535,6 +8537,11 @@ HashMap<String, Variant> EditorNode::get_initial_settings() {
 	settings["rendering/lights_and_shadows/multi_bounce_occlusion/enabled"] = true;
 	// GodotNext: mesh_sdf_default
 	settings["rendering/global_illumination/mesh_sdf/generate"] = true;
+	// GodotNext: vsm_settings_debug (#221, plan §21.3). A new project starts with NEW_PROJECT_SHADOW_METHOD;
+	// existing projects keep the setting's default. Both are the atlas until #223 flips the constant.
+	if (RendererVirtualShadowMapStorage::NEW_PROJECT_SHADOW_METHOD != RendererVirtualShadowMapStorage::DEFAULT_SHADOW_METHOD) {
+		settings["rendering/lights_and_shadows/shadow_method"] = int(RendererVirtualShadowMapStorage::NEW_PROJECT_SHADOW_METHOD);
+	}
 	return settings;
 }
 

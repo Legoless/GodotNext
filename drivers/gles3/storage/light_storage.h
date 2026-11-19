@@ -55,6 +55,8 @@ struct Light {
 	bool negative = false;
 	bool reverse_cull = false;
 	RSE::LightBakeMode bake_mode = RSE::LIGHT_BAKE_DYNAMIC;
+	// GodotNext: vsm_settings_debug (#221). Stored only: Compatibility keeps the shadow atlas.
+	RSE::LightShadowMethod shadow_method = RSE::LIGHT_SHADOW_METHOD_PROJECT;
 	uint32_t max_sdfgi_cascade = 2;
 	uint32_t cull_mask = 0xFFFFFFFF;
 	uint32_t shadow_caster_mask = 0xFFFFFFFF;
@@ -336,6 +338,9 @@ public:
 	virtual void light_set_shadow_caster_mask(RID p_light, uint32_t p_caster_mask) override;
 	virtual uint32_t light_get_shadow_caster_mask(RID p_light) const override;
 	virtual void light_set_bake_mode(RID p_light, RSE::LightBakeMode p_bake_mode) override;
+	// GodotNext: vsm_settings_debug (#221).
+	virtual void light_set_shadow_method(RID p_light, RSE::LightShadowMethod p_method) override;
+	virtual RSE::LightShadowMethod light_get_shadow_method(RID p_light) const override;
 	virtual void light_set_max_sdfgi_cascade(RID p_light, uint32_t p_cascade) override {}
 	virtual void light_set_allow_contact_shadows(RID p_light, bool p_enable) override {}
 	virtual bool light_get_allow_contact_shadows(RID p_light) const override { return false; }

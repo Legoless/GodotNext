@@ -2550,7 +2550,11 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 
 	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218). After the light buffers (vsm_map_base) and the cluster.
 	if (vsm_mark_view && rb_data.is_valid() && current_cluster_builder) {
+		// GodotNext: vsm_settings_debug (#221). Whether this view wrote the dirty list the debug draws read.
+		RendererRD::VirtualShadowMapStorage *vsm_storage = RendererRD::VirtualShadowMapStorage::get_singleton();
+		const uint64_t vsm_marked_before = vsm_storage != nullptr ? vsm_storage->get_marked_view_count() : 0;
 		_vsm_mark_pages(p_render_data);
+		vsm_debug_view_marked = vsm_storage != nullptr && vsm_storage->get_marked_view_count() != vsm_marked_before;
 		_vsm_raster_non_nanite(p_render_data);
 	}
 	vsm_mark_view = false;
@@ -2637,6 +2641,127 @@ void RenderForwardClustered::_vsm_mark_pages(RenderDataRD *p_render_data) {
 	}
 
 	vsm->mark_and_allocate(input);
+}
+
+void RenderForwardClustered::_vsm_debug_draw(const RenderDataRD *p_render_data) {
+	// GodotNext: vsm_settings_debug (#221, plan §21.3.2). Viewport.DEBUG_DRAW_VSM_* over the final image.
+	uint32_t mode = 0;
+	switch (get_debug_draw_mode()) {
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_MASK:
+			mode = 0;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_MIP:
+			mode = 1;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_PAGES:
+			mode = 2;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CACHE:
+			mode = 3;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_OVERDRAW:
+			mode = 4;
+			break;
+		case RSE::VIEWPORT_DEBUG_DRAW_VSM_CLIPMAP:
+			mode = 5;
+			break;
+		default:
+			return;
+	}
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	RendererRD::TextureStorage *texture_storage = RendererRD::TextureStorage::get_singleton();
+	if (vsm == nullptr || !vsm->is_active() || p_render_data == nullptr || p_render_data->render_buffers.is_null() || p_render_data->scene_data == nullptr || p_render_data->scene_data->view_count != 1) {
+		return;
+	}
+	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+	const RenderSceneDataRD *scene_data = p_render_data->scene_data;
+	const uint32_t table_maps = vsm->get_table_capacity();
+	if (table_maps == 0 || vsm->get_map_buffers_capacity() < table_maps || vsm->get_pool_page_count() == 0) {
+		return;
+	}
+
+	RendererRD::DebugEffects::VSMDebugInput input;
+	input.mode = mode;
+	input.depth_texture = rb->get_depth_texture(0);
+	input.internal_size = rb->get_internal_size();
+	input.output_size = texture_storage->render_target_get_size(rb->get_render_target());
+	input.dest_fb = texture_storage->render_target_get_rd_framebuffer(rb->get_render_target());
+	input.inv_projection = NextGIView::inv_projection(*scene_data);
+	input.cam_transform = scene_data->cam_transform;
+	// A pixel's footprint, as _vsm_mark_pages() computes it.
+	const Projection &projection = scene_data->cam_projection;
+	const float size_x = 2.0f / (Math::abs(float(projection.columns[0][0])) * float(MAX(input.internal_size.x, 1)));
+	const float size_y = 2.0f / (Math::abs(float(projection.columns[1][1])) * float(MAX(input.internal_size.y, 1)));
+	if (projection.is_orthogonal()) {
+		input.pixel_bias = MIN(size_x, size_y);
+	} else {
+		input.pixel_scale = MIN(size_x, size_y);
+	}
+	const RendererVirtualShadowMapStorage::Scalability &scalability = vsm->get_scalability();
+	input.lod_bias_directional = scalability.lod_bias_directional;
+	input.lod_bias_local = scalability.lod_bias_local;
+	input.page_table = vsm->get_page_table_buffer();
+	input.table_maps = table_maps;
+	input.map_data = vsm->get_map_data_buffer();
+	input.pool = vsm->get_pool_texture();
+	input.pool_pages = vsm->get_pool_page_count();
+	input.grid_width = uint32_t(RendererVirtualShadowMapStorage::pool_page_grid(input.pool_pages).x);
+	// The dirty list and the pairs only when this view wrote them: a view that marked no pages, or whose
+	// lights had no non-Nanite casters, would otherwise show an earlier view's pages and draws.
+	if (vsm_debug_view_marked && vsm->get_page_buffers_capacity() >= input.pool_pages) {
+		input.alloc_state = vsm->get_state_buffer();
+		input.dirty = vsm->get_dirty_buffer();
+		if (vsm_debug_view_pairs) {
+			input.pairs = vsm_pairs_buffer;
+			input.pair_capacity = vsm_pairs_capacity;
+			input.cull_state = vsm_cull_state_buffer;
+			input.max_dispatch_groups = uint32_t(CLAMP(RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X), uint64_t(1), uint64_t(UINT32_MAX)));
+		}
+	}
+
+	// The view's lights with virtual maps, directional lights first.
+	if (p_render_data->lights != nullptr) {
+		for (int pass = 0; pass < 2; pass++) {
+			for (uint32_t i = 0; i < p_render_data->lights->size() && input.lights.size() < RendererRD::DebugEffects::VSM_DEBUG_MAX_LIGHTS; i++) {
+				const RID light_instance = (*p_render_data->lights)[i];
+				if (!light_storage->owns_light_instance(light_instance)) {
+					continue;
+				}
+				const RID base = light_storage->light_instance_get_base_light(light_instance);
+				const RSE::LightType type = light_storage->light_get_type(base);
+				if ((type == RSE::LIGHT_DIRECTIONAL) != (pass == 0)) {
+					continue;
+				}
+				const RendererVirtualShadowMapStorage::MapRange *range = vsm->map_get(light_instance);
+				if (range == nullptr || range->first == RendererVirtualShadowMapStorage::MAP_NONE || range->count == 0) {
+					continue;
+				}
+				RendererRD::DebugEffects::VSMDebugLight light;
+				light.map_base = range->first;
+				light.light_flags = RendererVirtualShadowMapStorage::light_flags(range->kind, range->count);
+				light.kind = uint32_t(range->kind);
+				if (type != RSE::LIGHT_DIRECTIONAL) {
+					const Transform3D transform = light_storage->light_instance_get_base_transform(light_instance);
+					const Vector3 direction = -transform.basis.get_column(2).normalized();
+					float reach = MAX(light_storage->light_get_param(base, RSE::LIGHT_PARAM_RANGE), 0.001f);
+					if (type == RSE::LIGHT_AREA) {
+						reach += float(light_storage->light_area_get_size(base).length()) * 0.5f;
+					}
+					light.inv_reach = 1.0f / reach;
+					light.position[0] = float(transform.origin.x);
+					light.position[1] = float(transform.origin.y);
+					light.position[2] = float(transform.origin.z);
+					light.cos_angle = Math::cos(Math::deg_to_rad(light_storage->light_get_param(base, RSE::LIGHT_PARAM_SPOT_ANGLE)));
+					light.direction[0] = float(direction.x);
+					light.direction[1] = float(direction.y);
+					light.direction[2] = float(direction.z);
+				}
+				input.lights.push_back(light);
+			}
+		}
+	}
+	debug_effects->draw_vsm(input);
 }
 
 // GodotNext: vsm_non_nanite (#218, plan §21.3 contract S4). Per-page GPU instance culling and indirect
@@ -3141,6 +3266,12 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		// Per light: a caster that the atlas draws for a light must be in that light's virtual maps. A light
 		// without virtual maps falls back to "in any light's virtual maps".
 		for (const KeyValue<RID, HashSet<GeometryInstanceForwardClustered *>> &kv : atlas_by_light) {
+			// GodotNext: vsm_settings_debug (#221). A light whose shadow method keeps the atlas has no virtual maps
+			// by design.
+			const RID atlas_base = light_storage->owns_light_instance(kv.key) ? light_storage->light_instance_get_base_light(kv.key) : RID();
+			if (atlas_base.is_valid() && !RendererVirtualShadowMapStorage::light_uses_vsm(light_storage->light_get_shadow_method(atlas_base))) {
+				continue;
+			}
 			const HashSet<GeometryInstanceForwardClustered *> *light_casters = vsm_light_casters.getptr(kv.key);
 			for (GeometryInstanceForwardClustered *inst : kv.value) {
 				if (light_casters != nullptr ? !light_casters->has(inst) : !caster_id_map.has(inst)) {
@@ -3707,6 +3838,8 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		rd->compute_list_set_push_constant(clist, &push, sizeof(VSMCullPushConstant));
 		rd->compute_list_dispatch_threads(clist, groups.size(), 1, 1);
 		rd->compute_list_end();
+		// GodotNext: vsm_settings_debug (#221). vsm_pairs_buffer and its count now belong to this view.
+		vsm_debug_view_pairs = true;
 
 		const RID vsm_rp_uniform_set = _setup_vsm_render_pass_uniform_set(RendererRD::MaterialStorage::get_singleton()->samplers_rd_get_default(), uniform_buffer_index);
 		if (vsm_rp_uniform_set.is_valid()) {
@@ -5402,6 +5535,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	force_depth_pre_pass = force_depth_pre_pass || using_vsm;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 	vsm_mark_view = using_vsm && depth_pre_pass;
+	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite cull.
+	vsm_debug_view_marked = false;
+	vsm_debug_view_pairs = false;
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -6530,6 +6666,9 @@ void RenderForwardClustered::_render_buffers_debug_draw(const RenderDataRD *p_re
 		Size2i rtsize = texture_storage->render_target_get_size(render_target);
 		copy_effects->copy_to_fb_rect(tsr_debug, texture_storage->render_target_get_rd_framebuffer(render_target), Rect2(Vector2(), rtsize), false, false, false, false, RID(), false, false, false, false, Rect2(), 1.0f, false);
 	}
+
+	// GodotNext: vsm_settings_debug (#221). Without virtual shadow maps the view shows the normal image.
+	_vsm_debug_draw(p_render_data);
 
 	// GodotNext: nextgi_user_surface
 	// Denoise views (#53) copy their producer texture. A view with no merged producer clears the
