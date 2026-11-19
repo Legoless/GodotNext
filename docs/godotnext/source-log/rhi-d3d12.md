@@ -185,3 +185,48 @@ shader-table part of a `D3D12_DISPATCH_RAYS_DESC` per trace and copies the launc
 
 How it was used: shader binding table buffers are committed resources, so each table starts on the
 64-byte boundary DXR needs on devices with tight alignment too.
+
+## The front-layer depth target (#299)
+
+The cause, that the D3D12 driver gives a texture with copy-to usage and no color-attachment
+usage unordered access "for clearing via UAV", so a depth-stencil texture that asks for copy-to
+becomes an invalid resource description, was read from this repository's own driver. The inputs
+below confirmed the rule and show where the allocator turns an invalid description into
+`E_INVALIDARG`.
+
+### D3D12 resource flags
+
+| Field | Value |
+|---|---|
+| What | `D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL` "can't be used with" `D3D12_RESOURCE_DIMENSION_BUFFER`, 4KB alignment, `D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET`, `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` or `D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS`, among others |
+| Upstream | https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_resource_flags |
+| Version | Microsoft Learn as published on 2026-11-19 (page updated 2026-08-21) |
+| License | Microsoft Learn documentation (CC-BY 4.0). Consulted, not copied. |
+| Read on | 2026-11-19, for issue #299 |
+| Consulted by | The #299 implementer |
+| Used in | `servers/rendering/renderer_rd/environment/next_gi_front_layer.cpp` (`nextgi_front_layer_depth_usage`, `NextGIFrontLayer::ensure_targets`) |
+| Copied files | None |
+
+How it was used: the front layer's D32 depth target asked for depth-stencil, sampling and copy-to
+usage. The D3D12 driver turns copy-to into `ALLOW_UNORDERED_ACCESS` and depth-stencil into
+`ALLOW_DEPTH_STENCIL`, which this rule forbids together. The target is cleared by its render pass
+and never copied to, so it now asks for depth-stencil and sampling only, like the view's own
+depth buffer. The D3D12 driver is unchanged.
+
+### D3D12 Memory Allocator (`thirdparty/d3d12ma`)
+
+| Field | Value |
+|---|---|
+| What | `D3D12MemAlloc.cpp`: `CreateResource` first asks the device for the resource's allocation size (`GetResourceAllocationInfo`), and returns `E_INVALIDARG` itself, before it creates the resource, when the size comes back as `UINT64_MAX` (the allocator's comment: "We've seen UINT64_MAX returned when the call to GetResourceAllocationInfo was invalid") |
+| Upstream | https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator |
+| Version | As vendored in `thirdparty/d3d12ma` |
+| License | MIT, as recorded in `thirdparty/README.md`. Read in the tree, not copied |
+| Read on | 2026-11-19, for issue #299 |
+| Consulted by | The #299 implementer |
+| Used in | Nothing; it was read to understand the failure's log |
+| Copied files | None |
+
+How it was used: to read the #299 failure's log. The log shows the driver's
+`CreateResource failed with error 0x80070057` for its allocator call, and no debug-layer message
+about the resource. That fits the allocator's size check failing before any resource is created,
+but which call returned the error was not traced.

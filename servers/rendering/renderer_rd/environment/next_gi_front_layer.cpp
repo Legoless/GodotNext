@@ -38,6 +38,11 @@
 
 using namespace RendererRD;
 
+// GodotNext: nextgi_front_layer_depth (#299).
+uint32_t RendererRD::nextgi_front_layer_depth_usage() {
+	return RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT;
+}
+
 void NextGIFrontLayer::set_owner(NextGI *p_owner) {
 	owner = p_owner;
 	if (owner != nullptr) {
@@ -72,7 +77,7 @@ bool NextGIFrontLayer::ensure_targets(const Size2i &p_size) {
 	format.width = p_size.x;
 	format.height = p_size.y;
 	format.format = RD::DATA_FORMAT_D32_SFLOAT;
-	format.usage_bits = RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT;
+	format.usage_bits = nextgi_front_layer_depth_usage();
 	depth = rd->texture_create(format, RD::TextureView());
 	ERR_FAIL_COND_V(depth.is_null(), false);
 

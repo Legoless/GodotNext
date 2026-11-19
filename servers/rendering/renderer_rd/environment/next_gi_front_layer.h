@@ -54,6 +54,12 @@ _FORCE_INLINE_ bool nextgi_front_layer_allowed(bool p_project_allow, bool p_envi
 	return p_project_allow && p_environment_enabled && p_hwrt;
 }
 
+// GodotNext: nextgi_front_layer_depth (#299). The depth target's usage: a depth-stencil attachment
+// that the forward pass and the gather sample. Its render pass clears it and nothing copies to it, so
+// it asks for no copy-to (or storage) usage. On D3D12 either one adds unordered access, which a
+// depth-stencil resource cannot have, and CreateResource fails with E_INVALIDARG.
+uint32_t nextgi_front_layer_depth_usage();
+
 class NextGIFrontLayer {
 	NextGI *owner = nullptr;
 	NextGIGather *gather = nullptr;

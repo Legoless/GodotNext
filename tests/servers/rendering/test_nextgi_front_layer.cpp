@@ -35,6 +35,7 @@ TEST_FORCE_LINK(test_nextgi_front_layer)
 #include "servers/rendering/renderer_rd/environment/next_gi.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_front_layer.h"
 #include "servers/rendering/renderer_rd/environment/next_gi_gather.h"
+#include "servers/rendering/rendering_device.h"
 
 TEST_CASE("[NextGI][FrontLayer] Fragment visibility and nearest-layer matching") {
 	CHECK_FALSE(RendererRD::nextgi_front_layer_fragment_visible(0.09f, 0.5f, 0.8f));
@@ -42,6 +43,21 @@ TEST_CASE("[NextGI][FrontLayer] Fragment visibility and nearest-layer matching")
 	CHECK_FALSE(RendererRD::nextgi_front_layer_fragment_visible(0.5f, 0.79f, 0.8f));
 	CHECK(RendererRD::nextgi_front_layer_depth_matches(5.0f, 5.00005f));
 	CHECK_FALSE(RendererRD::nextgi_front_layer_depth_matches(5.0f, 5.0002f));
+}
+
+// GodotNext: nextgi_front_layer_depth (#299).
+TEST_CASE("[NextGI][FrontLayer] The depth target is a sampled depth-stencil attachment without unordered access") {
+	const uint32_t usage = RendererRD::nextgi_front_layer_depth_usage();
+	CHECK((usage & RD::TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0);
+	CHECK((usage & RD::TEXTURE_USAGE_SAMPLING_BIT) != 0);
+	// The D3D12 driver gives a texture with copy-to usage (and no color-attachment usage) or storage
+	// usage unordered access, which a depth-stencil resource cannot have: CreateResource then fails
+	// with E_INVALIDARG and the front layer never traces.
+	CHECK((usage & RD::TEXTURE_USAGE_CAN_COPY_TO_BIT) == 0);
+	CHECK((usage & RD::TEXTURE_USAGE_STORAGE_BIT) == 0);
+	CHECK((usage & RD::TEXTURE_USAGE_COLOR_ATTACHMENT_BIT) == 0);
+	// This checks the usage NextGIFrontLayer::ensure_targets creates the target with. That the target
+	// is actually created is checked on the GPU by the front-layer check (--on) on D3D12.
 }
 
 TEST_CASE("[NextGI][FrontLayer] Allow and environment flags gate lazy resources") {
