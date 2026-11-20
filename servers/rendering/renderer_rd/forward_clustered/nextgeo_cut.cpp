@@ -250,7 +250,9 @@ static uint64_t CPU_cut_hash(const RendererVirtualMeshStorage *p_storage, const 
 					record.transform[0][0] * p_sphere[0] + record.transform[0][1] * p_sphere[1] + record.transform[0][2] * p_sphere[2] + record.transform[0][3],
 					record.transform[1][0] * p_sphere[0] + record.transform[1][1] * p_sphere[1] + record.transform[1][2] * p_sphere[2] + record.transform[1][3],
 					record.transform[2][0] * p_sphere[0] + record.transform[2][1] * p_sphere[1] + record.transform[2][2] * p_sphere[2] + record.transform[2][3]);
-			const float radius = p_sphere[3] * scale;
+			// GodotNext: nextgeo_displacement (#150). Mirror cluster_cull.glsl displacement bound inflation.
+			const float disp_bound = MAX(record.prev_world_aabb_max[3], 0.0f);
+			const float radius = (p_sphere[3] + disp_bound) * scale;
 			const float distance = MAX(center.distance_to(eye) - radius, znear);
 			if ((cut_flags & RendererRD::NEXTGEO_CUT_FLAG_DUAL_PARABOLOID) != 0) {
 				return p_error * scale * 0.5f * height / distance * lod_bias;

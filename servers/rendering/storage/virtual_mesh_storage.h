@@ -82,7 +82,7 @@ public:
 		float world_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = max scale.
 		float world_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = lod_bias.
 		float prev_world_aabb_min[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-		float prev_world_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		float prev_world_aabb_max[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; // w = displacement_bound (#150).
 		uint32_t virtual_mesh = UINT32_MAX;
 		uint32_t page_table_offset = 0;
 		uint32_t surface_mask = 0;
@@ -152,9 +152,10 @@ public:
 	};
 	static constexpr uint32_t RASTER_BIN_PROGRAMMABLE_MAX = 64;
 	static constexpr uint32_t RASTER_BIN_LIMIT = RASTER_BIN_PROGRAMMABLE_MAX + 1;
-	// The features that need the material's raster program (vertex() and the coverage subset of
+	// The features that need the material's raster program (vertex(), displacement(), and the coverage subset of
 	// fragment()). TWO_SIDED needs none: every bin flips facing from the per-surface cull bits.
-	static constexpr uint32_t RASTER_PROGRAM_FEATURES = RASTER_FEATURE_MASKED | RASTER_FEATURE_VERTEX_OFFSET | RASTER_FEATURE_DEPTH_OFFSET;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Include RASTER_FEATURE_DISPLACED.
+	static constexpr uint32_t RASTER_PROGRAM_FEATURES = RASTER_FEATURE_MASKED | RASTER_FEATURE_VERTEX_OFFSET | RASTER_FEATURE_DEPTH_OFFSET | RASTER_FEATURE_DISPLACED;
 
 	struct RasterBinEntry {
 		uint32_t features;
@@ -178,6 +179,9 @@ public:
 		// DEPTH_OFFSET arrives with #149's built-in; the bin evaluates it once the classifier sets the bit.
 		{ RASTER_FEATURE_DEPTH_OFFSET, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "DEPTH_OFFSET" },
 		{ RASTER_FEATURE_DEPTH_OFFSET, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_DEPTH_OFFSET" },
+		// GodotNext: nextgeo_displacement (#150). Displaced surfaces route through programmable raster bins (#163 adds dicing).
+		{ RASTER_FEATURE_DISPLACED, RASTER_PASS_VISIBILITY, RASTER_BIN_PROGRAMMABLE, "DISPLACED" },
+		{ RASTER_FEATURE_DISPLACED, RASTER_PASS_VSM, RASTER_BIN_PROGRAMMABLE, "VSM_DISPLACED" },
 	};
 	static constexpr uint32_t RASTER_BIN_TABLE_SIZE = sizeof(RASTER_BIN_TABLE) / sizeof(RASTER_BIN_TABLE[0]);
 
@@ -406,6 +410,14 @@ public:
 	void instance_record_set_transform(uint32_t p_record, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible, bool p_teleport = false, float p_lod_bias = 0.0f);
 	void instance_record_set_state(uint32_t p_record, uint32_t p_flags);
 	void instance_record_set_layer_mask(uint32_t p_record, uint32_t p_layer_mask);
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Per-instance max displacement magnitude in meters.
+	void instance_record_set_displacement_bound(uint32_t p_record, float p_magnitude);
+	static _FORCE_INLINE_ AABB inflate_aabb_for_displacement(const AABB &p_aabb, float p_magnitude) {
+		return (Math::is_finite(p_magnitude) && p_magnitude > 0.0f) ? p_aabb.grow(p_magnitude) : p_aabb;
+	}
+	static _FORCE_INLINE_ float inflate_sphere_radius_for_displacement(float p_radius, float p_magnitude) {
+		return (Math::is_finite(p_magnitude) && p_magnitude > 0.0f) ? (p_radius + p_magnitude) : p_radius;
+	}
 	void instance_record_set_gi_flags(uint32_t p_record, uint32_t p_gi_flags);
 	void instance_record_set_surface_mask(uint32_t p_record, uint32_t p_surface_mask, uint32_t p_shadow_surface_mask = UINT32_MAX);
 	void instance_record_set_surface_cull_masks(uint32_t p_record, uint32_t p_cull_disabled_mask, uint32_t p_cull_front_mask);

@@ -53,6 +53,8 @@ struct NextGeoRasterFacts {
 	bool discard = false;
 	bool writes_vertex = false; // VERTEX written in vertex()
 	bool depth_offset = false; // DEPTH_OFFSET (#149 adds the built-in)
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). True when Material.displacement_magnitude > 0.
+	bool displaced = false;
 	RSE::CullMode cull_mode = RSE::CULL_MODE_BACK;
 };
 
@@ -66,6 +68,10 @@ inline uint32_t nextgeo_raster_features(const NextGeoRasterFacts &p_facts) {
 	}
 	if (p_facts.depth_offset) {
 		features |= RendererVirtualMeshStorage::RASTER_FEATURE_DEPTH_OFFSET;
+	}
+	// GodotNext: nextgeo_displacement (#150).
+	if (p_facts.displaced) {
+		features |= RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED;
 	}
 	if (p_facts.cull_mode != RSE::CULL_MODE_BACK) {
 		features |= RendererVirtualMeshStorage::RASTER_FEATURE_TWO_SIDED;
@@ -170,6 +176,17 @@ inline NextGeoFallback nextgeo_material_fallback(const NextGeoMaterialFallbackFa
 		return NEXTGEO_FALLBACK_UNSUPPORTED_DERIVATIVE;
 	}
 	return NEXTGEO_FALLBACK_NONE;
+}
+
+// GodotNext: nextgeo_displacement (#150). When all programmable raster bins are occupied, a surface
+// keeps the material's default route: materials with a legacy default fallback return to legacy, while
+// displaced-only materials (default fallback NONE) stay on the virtual fixed-function bin (bin 0),
+// preserving the exclusive-dispatch invariant.
+inline void nextgeo_raster_bin_apply_exhausted(NextGeoSurfaceRoute &r_route, NextGeoFallback p_default_fallback) {
+	if (p_default_fallback != NEXTGEO_FALLBACK_NONE) {
+		r_route.virtual_geometry = false;
+		r_route.reason = p_default_fallback;
+	}
 }
 
 // The per-(instance, surface) raster-bin table: one byte per surface, four surfaces per word, indexed

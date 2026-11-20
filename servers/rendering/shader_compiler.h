@@ -115,6 +115,9 @@ public:
 		bool uses_normal_roughness_texture = false;
 		bool uses_unsupported_derivative = false;
 		uint32_t raster_uses = 0; // RasterTargetUse bits, with IdentifierActions::raster_target.
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). True when the shader defines displacement().
+		bool has_displacement = false;
+		bool uses_displacement_time = false;
 	};
 
 	struct DefaultIdentifierActions {
@@ -128,6 +131,9 @@ public:
 		HashSet<StringName> resolve_uniform_builtins;
 		HashMap<StringName, String> resolve_renames;
 		HashMap<StringName, String> resolve_vertex_renames;
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Built-in renames and edge-length derivatives for displacement().
+		HashMap<StringName, String> displacement_renames;
+		HashMap<StringName, Pair<String, String>> displacement_builtin_derivatives;
 		ShaderLanguage::TextureFilter default_filter = ShaderLanguage::TextureFilter::FILTER_NEAREST;
 		ShaderLanguage::TextureRepeat default_repeat = ShaderLanguage::TextureRepeat::REPEAT_DISABLE;
 		int base_texture_binding_index = 0;

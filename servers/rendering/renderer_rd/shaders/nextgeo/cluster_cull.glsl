@@ -184,7 +184,9 @@ float projected_error_params(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, 
 		return p_max_parent_error * scale * p_view.x * p_view.w;
 	}
 	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
-	float radius = p_lod_sphere.w * scale;
+	// GodotNext: nextgeo_displacement (#150). Inflate sphere radius by the instance's displacement bound.
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	float radius = (p_lod_sphere.w + disp_bound) * scale;
 	float distance = max(length(center - p_camera.xyz) - radius, p_view.z);
 	if ((p_flags & 8u) != 0u) {
 		return p_max_parent_error * scale * 0.5 * p_view.y / distance * p_view.w;
@@ -244,7 +246,9 @@ bool sw_raster_route(NextGeoInstanceRecord p_record, float p_scale, vec4 p_bound
 		return false;
 	}
 	vec3 center = instance_point(p_record, p_bounds.xyz);
-	float z_min = dot(center - cull.camera.xyz, cull.raster_forward.xyz) - p_bounds.w * p_scale;
+	// GodotNext: nextgeo_displacement (#150). Inflate cluster culling sphere by the displacement bound.
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	float z_min = dot(center - cull.camera.xyz, cull.raster_forward.xyz) - (p_bounds.w + disp_bound) * p_scale;
 	if (!(z_min > cull.raster_forward.w)) {
 		return false;
 	}
@@ -473,7 +477,9 @@ void main() {
 								last_requested_page = missing_page;
 								float scale = record.world_aabb_min.w;
 								vec3 center = instance_point(record, own_lod.xyz);
-								float dist = max(length(center - cull.camera.xyz) - own_lod.w * scale, 0.0);
+								// GodotNext: nextgeo_displacement (#150). Inflate sphere radius by the displacement bound.
+								float disp_bound = max(record.prev_world_aabb_max.w, 0.0);
+								float dist = max(length(center - cull.camera.xyz) - (own_lod.w + disp_bound) * scale, 0.0);
 								uint req_slot = atomicAdd(page_requests.data[0], 1u);
 								if (req_slot < page_requests.data[1]) {
 									uint req_base = 4u + page_requests.data[3] + req_slot * 4u;

@@ -62,7 +62,11 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		_free_raster_target();
 		_free_resolve_compute(); // GodotNext: nextgeo_shading_bins (#158)
 		raster_features = 0;
+		raster_uses = 0;
 		raster_rejects = 0;
+		has_displacement = false;
+		uses_displacement_time = false;
+		displacement_code = String();
 		nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		return; //just invalid, but no error
 	}
@@ -109,7 +113,11 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	uses_unsupported_derivative = false;
 	nextgeo_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	raster_features = 0;
+	raster_uses = 0;
 	raster_rejects = 0;
+	has_displacement = false;
+	uses_displacement_time = false;
+	displacement_code = String();
 	nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 	nextgeo_raster_reject_logged = false;
 
@@ -311,6 +319,14 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 		raster_fragment = gen_code.code["raster_fragment"];
 		gen_code.code.erase("raster_fragment");
 	}
+	// GodotNext: nextgeo_displacement (#150). Save the #163 dicing compute hook out of the scene shader code map;
+	// resolve_displacement stays in gen_code.code for scene_forward_clustered.glsl and resolve_compute.glsl.
+	has_displacement = gen_code.has_displacement;
+	uses_displacement_time = gen_code.uses_displacement_time;
+	if (gen_code.code.has("displacement")) {
+		displacement_code = gen_code.code["displacement"];
+		gen_code.code.erase("displacement");
+	}
 	SceneShaderForwardClustered::singleton->shader.version_set_code(version, gen_code.code, gen_code.uniforms, gen_code.stage_globals[ShaderCompiler::STAGE_VERTEX], gen_code.stage_globals[ShaderCompiler::STAGE_FRAGMENT], gen_code.defines);
 	// GodotNext: nextgi_hit_groups (#130). A new serial for each code, so a hit group is compiled once per code.
 	{
@@ -346,7 +362,7 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	raster_facts.writes_vertex = uses_vertex;
 	raster_facts.cull_mode = cull_mode;
 	raster_features = RendererRD::nextgeo_raster_features(raster_facts);
-	const uint32_t raster_uses = gen_code.raster_uses | (writes_depth ? uint32_t(ShaderCompiler::RASTER_WRITES_DEPTH) : 0u);
+	raster_uses = gen_code.raster_uses | (writes_depth ? uint32_t(ShaderCompiler::RASTER_WRITES_DEPTH) : 0u);
 	raster_rejects = RendererRD::nextgeo_raster_rejects(raster_uses, raster_features);
 
 	RendererRD::NextGeoMaterialFallbackFacts fallback_facts;
@@ -370,13 +386,20 @@ void SceneShaderForwardClustered::ShaderData::set_code(const String &p_code) {
 	// never route through a programmable bin compile nothing more.
 	const bool had_raster_versions = raster_sw_version.is_valid() || raster_hw_version.is_valid();
 	_free_raster_target();
-	raster_target_valid = RendererRD::nextgeo_raster_has_program(raster_features) && nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE && !raster_fragment.is_empty() &&
-			RendererVirtualMeshStorage::resolve_raster_bin(raster_features, RendererVirtualMeshStorage::RASTER_PASS_VISIBILITY) == int32_t(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE);
+	// GodotNext: nextgeo_displacement (#150). Shaders defining displacement() also prepare the raster target
+	// (including for shader baker) even when shader-level raster_features == 0, because displacement_magnitude
+	// is a per-Material property.
+	const uint32_t target_features = raster_features | (has_displacement ? uint32_t(RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) : 0u);
+	const uint32_t target_rejects = RendererRD::nextgeo_raster_rejects(raster_uses, target_features);
+	const bool has_raster_frag_or_no_frag = !raster_fragment.is_empty() || !gen_code.code.has("fragment");
+	raster_target_valid = RendererRD::nextgeo_raster_has_program(target_features) && nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE && target_rejects == 0u && has_raster_frag_or_no_frag &&
+			RendererVirtualMeshStorage::resolve_raster_bin(target_features, RendererVirtualMeshStorage::RASTER_PASS_VISIBILITY) == int32_t(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE);
 	if (raster_target_valid) {
 		raster_code.clear();
 		raster_code["resolve_vertex"] = gen_code.code.has("resolve_vertex") ? gen_code.code["resolve_vertex"] : String();
 		raster_code["resolve_vertex_store"] = gen_code.code.has("resolve_vertex_store") ? gen_code.code["resolve_vertex_store"] : String();
 		raster_code["resolve_interpolate"] = gen_code.code.has("resolve_interpolate") ? gen_code.code["resolve_interpolate"] : String();
+		raster_code["resolve_displacement"] = gen_code.code.has("resolve_displacement") ? gen_code.code["resolve_displacement"] : String();
 		raster_code["raster_fragment"] = raster_fragment;
 		raster_globals = gen_code.stage_globals[ShaderCompiler::STAGE_COMPUTE];
 		raster_uniforms = gen_code.uniforms;
@@ -1128,6 +1151,20 @@ void SceneShaderForwardClustered::MaterialData::set_next_pass(RID p_pass) {
 	next_pass = p_pass;
 }
 
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+void SceneShaderForwardClustered::MaterialData::set_displacement(float p_magnitude, float p_center) {
+	displacement_magnitude = p_magnitude;
+	displacement_center = p_center;
+}
+
+uint32_t SceneShaderForwardClustered::MaterialData::get_raster_features() const {
+	uint32_t features = shader_data != nullptr ? shader_data->get_raster_features() : 0u;
+	if (shader_data != nullptr && shader_data->has_displacement && displacement_magnitude > 0.0f) {
+		features |= RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED;
+	}
+	return features;
+}
+
 bool SceneShaderForwardClustered::MaterialData::update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) {
 	if (shader_data->version.is_valid()) {
 		RID shader_rid = SceneShaderForwardClustered::singleton->shader.version_get_shader(shader_data->version, 0);
@@ -1564,6 +1601,22 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		actions.resolve_renames["FRAGCOORD"] = "_ng_fragcoord";
 		actions.resolve_vertex_renames["VERTEX_ID"] = "_ng_vertex_id";
 		actions.resolve_vertex_renames["INSTANCE_ID"] = "_ng_instance_id";
+
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Built-in bindings and edge-length
+		// derivatives for displacement() in resolve, raster target, and #163 dicing compute.
+		actions.displacement_renames["VERTEX"] = "_ng_disp_vertex";
+		actions.displacement_renames["NORMAL"] = "_ng_disp_normal";
+		actions.displacement_renames["UV"] = "_ng_disp_uv";
+		actions.displacement_renames["UV2"] = "_ng_disp_uv2";
+		actions.displacement_renames["COLOR"] = "_ng_disp_color";
+		actions.displacement_renames["INSTANCE_CUSTOM"] = "_ng_disp_instance_custom";
+		actions.displacement_renames["DISPLACEMENT"] = "_ng_displacement";
+
+		actions.displacement_builtin_derivatives["VERTEX"] = Pair<String, String>("_ng_disp_vertex_ddx", "_ng_disp_vertex_ddy");
+		actions.displacement_builtin_derivatives["NORMAL"] = Pair<String, String>("_ng_disp_normal_ddx", "_ng_disp_normal_ddy");
+		actions.displacement_builtin_derivatives["UV"] = Pair<String, String>("_ng_disp_uv_ddx", "_ng_disp_uv_ddy");
+		actions.displacement_builtin_derivatives["UV2"] = Pair<String, String>("_ng_disp_uv2_ddx", "_ng_disp_uv2_ddy");
+		actions.displacement_builtin_derivatives["COLOR"] = Pair<String, String>("_ng_disp_color_ddx", "_ng_disp_color_ddy");
 
 		compiler.initialize(actions);
 	}

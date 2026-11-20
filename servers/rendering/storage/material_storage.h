@@ -88,6 +88,11 @@ public:
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) = 0;
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) = 0;
+	virtual float material_get_displacement_magnitude(RID p_material) const { return 0.0f; }
+	virtual float material_get_displacement_center(RID p_material) const { return 0.5f; }
+
 	virtual bool material_is_animated(RID p_material) = 0;
 	virtual bool material_casts_shadows(RID p_material) = 0;
 	virtual RSE::CullMode material_get_cull_mode(RID p_material) const = 0;

@@ -47,6 +47,8 @@ private:
 	HashMap<StringName, RSE::GlobalShaderParameterType> global_shader_variables;
 
 	struct DummyShader {
+		// GodotNext: nextgeo_displacement (#150). Keep shader source so doctests can inspect generated BaseMaterial3D code.
+		String code;
 		HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> uniforms;
 	};
 
@@ -58,6 +60,9 @@ private:
 	struct DummyMaterial {
 		RID shader;
 		RID next_pass;
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+		float displacement_magnitude = 0.0f;
+		float displacement_center = 0.5f;
 	};
 
 	mutable RID_Owner<DummyMaterial, true> material_owner;
@@ -97,7 +102,8 @@ public:
 	virtual void shader_set_code(RID p_shader, const String &p_code) override;
 	virtual void shader_set_path_hint(RID p_shader, const String &p_code) override {}
 
-	virtual String shader_get_code(RID p_shader) const override { return ""; }
+	// GodotNext: nextgeo_displacement (#150). Return stored dummy shader code.
+	virtual String shader_get_code(RID p_shader) const override;
 	virtual void get_shader_parameter_list(RID p_shader, List<PropertyInfo> *p_param_list) const override;
 
 	virtual void shader_set_default_texture_parameter(RID p_shader, const StringName &p_name, RID p_texture, int p_index) override {}
@@ -124,6 +130,10 @@ public:
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const override { return Variant(); }
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) override;
+	virtual float material_get_displacement_magnitude(RID p_material) const override;
+	virtual float material_get_displacement_center(RID p_material) const override;
 
 	virtual bool material_is_animated(RID p_material) override { return false; }
 	virtual bool material_casts_shadows(RID p_material) override { return false; }

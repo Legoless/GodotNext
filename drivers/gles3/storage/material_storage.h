@@ -126,6 +126,9 @@ struct Material {
 	HashMap<StringName, Variant> params;
 	int32_t priority = 0;
 	RID next_pass;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	float displacement_magnitude = 0.0f;
+	float displacement_center = 0.5f;
 	SelfList<Material> update_element;
 
 	Dependency dependency;
@@ -688,6 +691,10 @@ public:
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) override;
+	virtual float material_get_displacement_magnitude(RID p_material) const override;
+	virtual float material_get_displacement_center(RID p_material) const override;
 
 	virtual bool material_is_animated(RID p_material) override;
 	virtual bool material_casts_shadows(RID p_material) override;

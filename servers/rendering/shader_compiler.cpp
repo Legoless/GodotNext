@@ -818,23 +818,36 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 			HashMap<StringName, String> function_code;
 
 			//code for functions
-			// GodotNext: nextgi_hit_groups (#130). Hits never run light(), so neither light() nor a helper only it
-			// calls may set usage flags or defines for the hit module.
-			HashSet<StringName> hit_reachable_funcs;
-			if (p_actions.nextgi_hit) {
+			// GodotNext: nextgi_hit_groups (#130) / nextgeo_displacement (#150).
+			// Skip functions not reachable from active entry_point_stages when nextgi_hit drops light()
+			// or when a shader defines displacement() and the target does not include displacement() in
+			// entry_point_stages (Forward+, Mobile, Compatibility, NextGI hit compile it out silently).
+			bool has_displacement_func = false;
+			for (int i = 0; i < pnode->vfunctions.size(); i++) {
+				if (!pnode->vfunctions[i].callable && pnode->vfunctions[i].name == SNAME("displacement")) {
+					has_displacement_func = true;
+					break;
+				}
+			}
+			r_gen_code.has_displacement = has_displacement_func;
+
+			const bool filter_reachable_funcs = p_actions.nextgi_hit || (has_displacement_func && !p_actions.entry_point_stages.has(SNAME("displacement")));
+			HashSet<StringName> reachable_funcs;
+			if (filter_reachable_funcs) {
 				LocalVector<StringName> queue;
 				for (const KeyValue<StringName, Stage> &E : p_actions.entry_point_stages) {
-					if (E.key != "light") {
-						hit_reachable_funcs.insert(E.key);
-						queue.push_back(E.key);
+					if (p_actions.nextgi_hit && E.key == "light") {
+						continue;
 					}
+					reachable_funcs.insert(E.key);
+					queue.push_back(E.key);
 				}
 				for (uint32_t q = 0; q < queue.size(); q++) {
 					for (int i = 0; i < pnode->vfunctions.size(); i++) {
 						if (pnode->vfunctions[i].name == queue[q]) {
 							for (const StringName &dep : pnode->vfunctions[i].uses_function) {
-								if (!hit_reachable_funcs.has(dep)) {
-									hit_reachable_funcs.insert(dep);
+								if (!reachable_funcs.has(dep)) {
+									reachable_funcs.insert(dep);
 									queue.push_back(dep);
 								}
 							}
@@ -845,7 +858,7 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
 			}
 			for (int i = 0; i < pnode->vfunctions.size(); i++) {
 				SL::FunctionNode *fnode = pnode->vfunctions[i].function;
-				if (p_actions.nextgi_hit && !hit_reachable_funcs.has(fnode->name)) {
+				if (filter_reachable_funcs && !reachable_funcs.has(fnode->name)) {
 					continue;
 				}
 				function = fnode;
@@ -1983,6 +1996,9 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		bool is_vertex_mode = false;
 		bool is_entry_fragment = false;
 		bool is_entry_light = false;
+		// GodotNext: nextgeo_displacement (#150). Displacement processor and its _ng_rd_ helpers.
+		bool is_displacement_mode = false;
+		bool is_entry_displacement = false;
 		// GodotNext: nextgeo_raster_bins (#155). The raster target's form of discard, which its compute
 		// template defines (a compute shader has no discard).
 		bool raster_discard = false;
@@ -2240,7 +2256,10 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 						}
 					}
 
-					if (is_vertex_mode && def_actions->resolve_vertex_renames.has(vnode->name)) {
+					// GodotNext: nextgeo_displacement (#150). Displacement built-in renames apply in displacement().
+					if (is_entry_displacement && def_actions->displacement_renames.has(vnode->name)) {
+						res.val = def_actions->displacement_renames[vnode->name];
+					} else if (is_vertex_mode && def_actions->resolve_vertex_renames.has(vnode->name)) {
 						res.val = def_actions->resolve_vertex_renames[vnode->name];
 					} else if (!is_vertex_mode && def_actions->resolve_renames.has(vnode->name)) {
 						res.val = def_actions->resolve_renames[vnode->name];
@@ -2309,6 +2328,21 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 								res.exact = vi->exact;
 								res.has_varying = vi->has_varying;
 							}
+						} else if (!vnode->is_local && is_entry_displacement && def_actions->displacement_builtin_derivatives.has(vnode->name)) {
+							// GodotNext: nextgeo_displacement (#150). Edge-length derivatives for displacement() textureGrad lowering.
+							const Pair<String, String> &d = def_actions->displacement_builtin_derivatives[vnode->name];
+							res.ddx = d.first;
+							res.ddy = d.second;
+							res.exact = true;
+							res.has_varying = true;
+						} else if (!vnode->is_local && is_entry_displacement && vnode->name == SNAME("INSTANCE_CUSTOM")) {
+							res.ddx = _resolve_zero_expr(res.type);
+							res.ddy = _resolve_zero_expr(res.type);
+							res.exact = true;
+						} else if (!vnode->is_local && is_entry_displacement && vnode->name == SNAME("DISPLACEMENT")) {
+							res.ddx = _resolve_zero_expr(res.type);
+							res.ddy = _resolve_zero_expr(res.type);
+							res.exact = false;
 						} else if (!vnode->is_local && def_actions->resolve_builtin_derivatives.has(vnode->name)) {
 							const Pair<String, String> &d = def_actions->resolve_builtin_derivatives[vnode->name];
 							res.ddx = d.first;
@@ -2781,7 +2815,8 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 
 							// User-defined helper function call.
 							if (!is_internal_func && func != nullptr) {
-								String prefix = is_vertex_mode ? "_ng_rv_" : "_ng_rf_";
+								// GodotNext: nextgeo_displacement (#150). Dedicated _ng_rd_ helper prefix for displacement().
+								String prefix = is_vertex_mode ? "_ng_rv_" : (is_displacement_mode ? "_ng_rd_" : "_ng_rf_");
 								res.val = prefix + _mkid(vnode->rname) + "(";
 								bool first_arg = true;
 								for (int i = 1; i < onode->arguments.size(); i++) {
@@ -3257,7 +3292,8 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 
 	auto find_vfunc_index = [&](const StringName &p_name) -> int {
 		for (int i = 0; i < shader->vfunctions.size(); i++) {
-			if (shader->vfunctions[i].name == p_name) {
+			// GodotNext: nextgeo_displacement (#150). Match processor entry points only (!callable).
+			if (!shader->vfunctions[i].callable && shader->vfunctions[i].name == p_name) {
 				return i;
 			}
 		}
@@ -3274,7 +3310,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		HashMap<StringName, bool> *frag_to_light_exact_ptr = nullptr;
 		HashMap<StringName, bool> *frag_to_light_varying_ptr = nullptr;
 
-		void emit_deps(const StringName &p_for_func, bool p_vertex_mode, String &r_out, HashSet<StringName> &r_added) {
+		void emit_deps(const StringName &p_for_func, bool p_vertex_mode, String &r_out, HashSet<StringName> &r_added, bool p_displacement_mode = false) {
 			int fidx = -1;
 			for (int i = 0; i < shader_node->vfunctions.size(); i++) {
 				if (shader_node->vfunctions[i].name == p_for_func) {
@@ -3297,7 +3333,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 				if (r_added.has(dep_name)) {
 					continue;
 				}
-				emit_deps(dep_name, p_vertex_mode, r_out, r_added);
+				emit_deps(dep_name, p_vertex_mode, r_out, r_added, p_displacement_mode);
 
 				SL::FunctionNode *fnode = nullptr;
 				for (int i = 0; i < shader_node->vfunctions.size(); i++) {
@@ -3317,6 +3353,7 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 				emitter.cur_func = fnode;
 				emitter.cur_func_name = fnode->name;
 				emitter.is_vertex_mode = p_vertex_mode;
+				emitter.is_displacement_mode = p_displacement_mode;
 				emitter.frag_to_light_exact_ptr = frag_to_light_exact_ptr;
 				emitter.frag_to_light_varying_ptr = frag_to_light_varying_ptr;
 				emitter.scopes.push_back(HashMap<StringName, ResolveVarInfo>());
@@ -3330,7 +3367,8 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 				if (fnode->return_array_size > 0) {
 					header += "[" + itos(fnode->return_array_size) + "]";
 				}
-				header += " " + String(p_vertex_mode ? "_ng_rv_" : "_ng_rf_") + _mkid(fnode->rname) + "(";
+				// GodotNext: nextgeo_displacement (#150). Dedicated _ng_rd_ prefix for displacement() helpers.
+				header += " " + String(p_vertex_mode ? "_ng_rv_" : (p_displacement_mode ? "_ng_rd_" : "_ng_rf_")) + _mkid(fnode->rname) + "(";
 
 				bool first_param = true;
 				for (int i = 0; i < fnode->arguments.size(); i++) {
@@ -3518,6 +3556,38 @@ void ShaderCompiler::_compile_visibility_resolve(GeneratedCode &r_gen_code, Iden
 		r_gen_code.code["light"] = "#ifndef MODE_VISIBILITY_RESOLVE\n" + r_gen_code.code["light"] + "#else\n" + resolve_light_body + "#endif\n";
 	}
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	// 4. displacement() -> code["resolve_displacement"] (resolve + raster target), code["displacement"]
+	// (#163 dicing compute hook), and _ng_rd_ helpers in fragment and compute/raster globals.
+	int displacement_idx = find_vfunc_index(SNAME("displacement"));
+	if (displacement_idx != -1) {
+		HashSet<StringName> added_rd_funcs;
+		String rd_helpers;
+		deps_emitter.emit_deps(SNAME("displacement"), false, rd_helpers, added_rd_funcs, true);
+		resolve_frag_globals += rd_helpers;
+		raster_stage_globals += rd_helpers;
+
+		SL::FunctionNode *dfunc = shader->vfunctions[displacement_idx].function;
+		ResolveEmitter emitter;
+		emitter.self = this;
+		emitter.shader_node = shader;
+		emitter.gen_code = &r_gen_code;
+		emitter.id_actions = &p_actions;
+		emitter.def_actions = &p_default_actions;
+		emitter.cur_func = dfunc;
+		emitter.cur_func_name = dfunc->name;
+		emitter.is_vertex_mode = false;
+		emitter.is_displacement_mode = true;
+		emitter.is_entry_displacement = true;
+		emitter.frag_to_light_exact_ptr = &frag_to_light_exact;
+		emitter.frag_to_light_varying_ptr = &frag_to_light_varying;
+		emitter.scopes.push_back(HashMap<StringName, ResolveVarInfo>());
+
+		String resolve_disp_body = emitter.emit_node(dfunc->body, 2, false).val;
+		r_gen_code.code["resolve_displacement"] = resolve_disp_body;
+		r_gen_code.code["displacement"] = resolve_disp_body;
+	}
+
 	if (!resolve_frag_globals.is_empty()) {
 		r_gen_code.stage_globals[STAGE_FRAGMENT] += "#ifdef MODE_VISIBILITY_RESOLVE\n" + resolve_frag_globals + "#endif\n";
 	}
@@ -3671,6 +3741,42 @@ uint32_t ShaderCompiler::_get_raster_uses(const GeneratedCode &p_gen_code) const
 	if (light_used.has(SNAME("discard"))) {
 		uses |= RASTER_USES_LIGHT_DISCARD;
 	}
+	// GodotNext: nextgeo_displacement (#150). Check displacement() and its callees for screen/depth/normal-roughness textures.
+	if (p_gen_code.has_displacement) {
+		visited.clear();
+		pending.clear();
+		pending.push_back(SNAME("displacement"));
+		HashSet<StringName> disp_used;
+		while (!pending.is_empty()) {
+			const StringName name = pending[pending.size() - 1];
+			pending.resize(pending.size() - 1);
+			if (visited.has(name)) {
+				continue;
+			}
+			visited.insert(name);
+			for (int i = 0; i < shader->vfunctions.size(); i++) {
+				if (shader->vfunctions[i].name != name || (name == SNAME("displacement") && shader->vfunctions[i].callable)) {
+					continue;
+				}
+				_collect_used_names(shader->vfunctions[i].function->body, disp_used);
+				for (const StringName &callee : shader->vfunctions[i].uses_function) {
+					pending.push_back(callee);
+				}
+			}
+		}
+		for (const StringName &u_name : disp_used) {
+			if (shader->uniforms.has(u_name)) {
+				const SL::ShaderNode::Uniform &u = shader->uniforms[u_name];
+				if (u.hint == SL::ShaderNode::Uniform::HINT_SCREEN_TEXTURE) {
+					uses |= RASTER_USES_SCREEN_TEXTURE;
+				} else if (u.hint == SL::ShaderNode::Uniform::HINT_DEPTH_TEXTURE) {
+					uses |= RASTER_USES_DEPTH_TEXTURE;
+				} else if (u.hint == SL::ShaderNode::Uniform::HINT_NORMAL_ROUGHNESS_TEXTURE) {
+					uses |= RASTER_USES_NORMAL_ROUGHNESS_TEXTURE;
+				}
+			}
+		}
+	}
 	return uses;
 }
 
@@ -3784,6 +3890,9 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	r_gen_code.uses_normal_roughness_texture = false;
 	r_gen_code.uses_unsupported_derivative = false;
 	r_gen_code.raster_uses = 0;
+	// GodotNext: nextgeo_displacement (#150).
+	r_gen_code.has_displacement = false;
+	r_gen_code.uses_displacement_time = false;
 
 	used_name_defines.clear();
 	used_rmode_defines.clear();
@@ -3795,6 +3904,36 @@ Error ShaderCompiler::compile(RSE::ShaderMode p_mode, const String &p_code, Iden
 	function = nullptr;
 	// Return value only relevant within nested calls.
 	_ALLOW_DISCARD_ _dump_node_code(shader, 1, r_gen_code, *p_actions, actions, false);
+	// GodotNext: nextgeo_displacement (#150). Record TIME usage in displacement() separately so Forward+ stays unaffected.
+	if (p_mode != RSE::SHADER_SPATIAL) {
+		r_gen_code.has_displacement = false;
+	}
+	if (p_mode == RSE::SHADER_SPATIAL && r_gen_code.has_displacement) {
+		HashSet<StringName> visited;
+		LocalVector<StringName> pending;
+		pending.push_back(SNAME("displacement"));
+		HashSet<StringName> disp_used;
+		while (!pending.is_empty()) {
+			const StringName name = pending[pending.size() - 1];
+			pending.resize(pending.size() - 1);
+			if (visited.has(name)) {
+				continue;
+			}
+			visited.insert(name);
+			for (int i = 0; i < shader->vfunctions.size(); i++) {
+				if (shader->vfunctions[i].name != name || (name == SNAME("displacement") && shader->vfunctions[i].callable)) {
+					continue;
+				}
+				_collect_used_names(shader->vfunctions[i].function->body, disp_used);
+				for (const StringName &callee : shader->vfunctions[i].uses_function) {
+					pending.push_back(callee);
+				}
+			}
+		}
+		if (disp_used.has(time_name)) {
+			r_gen_code.uses_displacement_time = true;
+		}
+	}
 	if (p_actions->visibility_resolve) {
 		// GodotNext: nextgeo_raster_bins (#155). Computed before _compile_visibility_resolve so helper
 		// discard in fragment() stays out of STAGE_COMPUTE.

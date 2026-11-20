@@ -2468,6 +2468,15 @@
 				Returns the value of a certain material's parameter.
 			</description>
 		</method>
+		<method name="material_set_displacement">
+			<return type="void" />
+			<param index="0" name="material" type="RID" />
+			<param index="1" name="magnitude" type="float" />
+			<param index="2" name="center" type="float" />
+			<description>
+				Sets the displacement [param magnitude] (in meters, clamped to non-negative values) and neutral [param center] (clamped to [code][0.0, 1.0][/code]) for a spatial material. When [param magnitude] is greater than [code]0.0[/code], the material's displacement offset is [code](DISPLACEMENT - center) * magnitude[/code] along the surface normal and culling bounds are inflated by [param magnitude].
+			</description>
+		</method>
 		<method name="material_set_next_pass">
 			<return type="void" />
 			<param index="0" name="material" type="RID" />

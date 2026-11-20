@@ -1818,8 +1818,44 @@ void RendererSceneCull::_instance_record_attach(Instance *p_instance) const {
 		}
 	}
 	_instance_record_update_state(p_instance);
+	// GodotNext: nextgeo_displacement (#150). Push per-instance displacement bound before transform upload.
+	RSG::virtual_mesh_storage->instance_record_set_displacement_bound(p_instance->virtual_record, p_instance->displacement_bound);
 	const AABB world = p_instance->transformed_aabb.has_surface() ? p_instance->transformed_aabb : p_instance->transform.xform(p_instance->aabb);
 	_instance_record_set_transform(p_instance, p_instance->transform, world, p_instance->visible);
+}
+
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+float RendererSceneCull::_instance_displacement_bound(const Instance *p_instance) const {
+	if (RSG::material_storage == nullptr) {
+		return 0.0f;
+	}
+	float max_disp = 0.0f;
+	if (p_instance->material_override.is_valid()) {
+		max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(p_instance->material_override));
+	} else if (p_instance->base_type == RSE::INSTANCE_MESH && p_instance->base.is_valid()) {
+		const int surface_count = RSG::mesh_storage->mesh_get_surface_count(p_instance->base);
+		for (int i = 0; i < surface_count; i++) {
+			RID mat = (i < p_instance->materials.size() && p_instance->materials[i].is_valid()) ? p_instance->materials[i] : RSG::mesh_storage->mesh_surface_get_material(p_instance->base, i);
+			if (mat.is_valid()) {
+				max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(mat));
+			}
+		}
+	} else if (p_instance->base_type == RSE::INSTANCE_MULTIMESH && p_instance->base.is_valid()) {
+		RID mesh = RSG::mesh_storage->multimesh_get_mesh(p_instance->base);
+		if (mesh.is_valid()) {
+			const int surface_count = RSG::mesh_storage->mesh_get_surface_count(mesh);
+			for (int i = 0; i < surface_count; i++) {
+				RID mat = RSG::mesh_storage->mesh_surface_get_material(mesh, i);
+				if (mat.is_valid()) {
+					max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(mat));
+				}
+			}
+		}
+	}
+	if (p_instance->material_overlay.is_valid()) {
+		max_disp = MAX(max_disp, RSG::material_storage->material_get_displacement_magnitude(p_instance->material_overlay));
+	}
+	return max_disp;
 }
 
 void RendererSceneCull::_instance_record_release(Instance *p_instance) const {
@@ -2428,6 +2464,11 @@ void RendererSceneCull::_update_instance_aabb(Instance *p_instance) const {
 
 	if (p_instance->extra_margin) {
 		new_aabb.grow_by(p_instance->extra_margin);
+	}
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Inflate cull bounds by max displacement magnitude.
+	p_instance->displacement_bound = _instance_displacement_bound(p_instance);
+	if (p_instance->displacement_bound > 0.0f) {
+		new_aabb.grow_by(p_instance->displacement_bound);
 	}
 
 	p_instance->aabb = new_aabb;
@@ -5235,6 +5276,14 @@ void RendererSceneCull::_update_dirty_instance(Instance *p_instance) const {
 			geom->geometry_instance->set_surface_materials(p_instance->materials);
 		}
 		_instance_record_update_state(p_instance);
+		// GodotNext: nextgeo_displacement (#150). Re-inflate bounds if a material's displacement magnitude changed.
+		const float new_disp_bound = _instance_displacement_bound(p_instance);
+		if (new_disp_bound != p_instance->displacement_bound) {
+			_update_instance_aabb(p_instance);
+		}
+		if (RSG::virtual_mesh_storage != nullptr && p_instance->virtual_record != UINT32_MAX) {
+			RSG::virtual_mesh_storage->instance_record_set_displacement_bound(p_instance->virtual_record, p_instance->displacement_bound);
+		}
 	}
 
 	_instance_update_list.remove(&p_instance->update_item);

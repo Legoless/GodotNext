@@ -2298,6 +2298,8 @@ void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 				material->data->self = material->self;
 				material->data->set_next_pass(material->next_pass);
 				material->data->set_render_priority(material->priority);
+				// GodotNext: nextgeo_displacement (#150).
+				material->data->set_displacement(material->displacement_magnitude, material->displacement_center);
 			}
 			material->shader_type = new_type;
 		}
@@ -2573,6 +2575,8 @@ void MaterialStorage::material_set_shader(RID p_material, RID p_shader) {
 	material->data->self = p_material;
 	material->data->set_next_pass(material->next_pass);
 	material->data->set_render_priority(material->priority);
+	// GodotNext: nextgeo_displacement (#150).
+	material->data->set_displacement(material->displacement_magnitude, material->displacement_center);
 	//updating happens later
 	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
 	_material_queue_update(material, true, true);
@@ -2659,6 +2663,36 @@ void MaterialStorage::material_set_render_priority(RID p_material, int priority)
 		material->data->set_render_priority(priority);
 	}
 	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+}
+
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+void MaterialStorage::material_set_displacement(RID p_material, float p_magnitude, float p_center) {
+	Material *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL(material);
+
+	const float magnitude = (!Math::is_finite(p_magnitude) || p_magnitude < 0.0f) ? 0.0f : p_magnitude;
+	const float center = !Math::is_finite(p_center) ? 0.5f : CLAMP(p_center, 0.0f, 1.0f);
+	if (material->displacement_magnitude == magnitude && material->displacement_center == center) {
+		return;
+	}
+
+	material->displacement_magnitude = magnitude;
+	material->displacement_center = center;
+	material->change_serial = ++material_change_serial;
+	if (material->data) {
+		material->data->set_displacement(magnitude, center);
+	}
+	material->dependency.changed_notify(Dependency::DEPENDENCY_CHANGED_MATERIAL);
+}
+
+float MaterialStorage::material_get_displacement_magnitude(RID p_material) const {
+	const Material *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->displacement_magnitude : 0.0f;
+}
+
+float MaterialStorage::material_get_displacement_center(RID p_material) const {
+	const Material *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->displacement_center : 0.5f;
 }
 
 bool MaterialStorage::material_is_animated(RID p_material) {

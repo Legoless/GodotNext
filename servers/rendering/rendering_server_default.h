@@ -391,6 +391,8 @@ public:
 
 	FUNC2(material_set_render_priority, RID, int)
 	FUNC2(material_set_next_pass, RID, RID)
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	FUNC3(material_set_displacement, RID, float, float)
 
 	/* MESH API */
 

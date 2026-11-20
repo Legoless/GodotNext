@@ -431,6 +431,34 @@ void _ng_resolve_vertex_corner(
 #endif
 }
 
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Evaluates optional spatial displacement()
+// with edge-length derivatives for textureGrad() lowering (hooked by #163 dicing).
+float _ng_eval_displacement(
+		in vec3 _ng_disp_vertex,
+		in vec3 _ng_disp_normal,
+		in vec2 _ng_disp_uv,
+		in vec2 _ng_disp_uv2,
+		in vec4 _ng_disp_color,
+		in vec4 _ng_disp_instance_custom,
+		in vec3 _ng_disp_vertex_ddx,
+		in vec3 _ng_disp_vertex_ddy,
+		in vec3 _ng_disp_normal_ddx,
+		in vec3 _ng_disp_normal_ddy,
+		in vec2 _ng_disp_uv_ddx,
+		in vec2 _ng_disp_uv_ddy,
+		in vec2 _ng_disp_uv2_ddx,
+		in vec2 _ng_disp_uv2_ddy,
+		in vec4 _ng_disp_color_ddx,
+		in vec4 _ng_disp_color_ddy,
+		in SceneData scene_data) {
+	float _ng_displacement = 0.0;
+	float global_time = scene_data.time;
+	{
+#CODE : RESOLVE_DISPLACEMENT
+	}
+	return _ng_displacement;
+}
+
 #define projection_matrix scene_data.projection_matrix
 #define inv_projection_matrix scene_data.inv_projection_matrix
 #define global_time scene_data_block.data.time

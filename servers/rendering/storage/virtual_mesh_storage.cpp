@@ -861,6 +861,9 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 		}
 		for (int index = 0; index < 4; index++) {
 			record.prev_world_aabb_min[index] = record.world_aabb_min[index];
+		}
+		// GodotNext: nextgeo_displacement (#150). prev_world_aabb_max[3] carries displacement_bound; preserve it across transform updates.
+		for (int index = 0; index < 3; index++) {
 			record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 		}
 		if (!first) {
@@ -875,6 +878,9 @@ void RendererVirtualMeshStorage::instance_record_set_transform(uint32_t p_record
 		}
 		for (int index = 0; index < 4; index++) {
 			record.prev_world_aabb_min[index] = record.world_aabb_min[index];
+		}
+		// GodotNext: nextgeo_displacement (#150). Preserve prev_world_aabb_max[3] (displacement_bound).
+		for (int index = 0; index < 3; index++) {
 			record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 		}
 		_write_transform(record, p_transform, p_world_aabb, p_lod_bias);
@@ -904,6 +910,20 @@ void RendererVirtualMeshStorage::instance_record_set_layer_mask(uint32_t p_recor
 		return;
 	}
 	records[p_record].layer_mask = p_layer_mask;
+	_mark_dirty(p_record);
+}
+
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Stores max displacement magnitude (meters)
+// in prev_world_aabb_max[3] so cluster cull and CPU_cut_hash inflate BVH/group/cluster sphere bounds.
+void RendererVirtualMeshStorage::instance_record_set_displacement_bound(uint32_t p_record, float p_magnitude) {
+	if (p_record >= used_slots || !slot_states[p_record].allocated) {
+		return;
+	}
+	const float bound = (!Math::is_finite(p_magnitude) || p_magnitude < 0.0f) ? 0.0f : p_magnitude;
+	if (records[p_record].prev_world_aabb_max[3] == bound) {
+		return;
+	}
+	records[p_record].prev_world_aabb_max[3] = bound;
 	_mark_dirty(p_record);
 }
 
@@ -1068,6 +1088,9 @@ void RendererVirtualMeshStorage::flush() {
 			}
 			for (int index = 0; index < 4; index++) {
 				record.prev_world_aabb_min[index] = record.world_aabb_min[index];
+			}
+			// GodotNext: nextgeo_displacement (#150). Preserve prev_world_aabb_max[3] (displacement_bound).
+			for (int index = 0; index < 3; index++) {
 				record.prev_world_aabb_max[index] = record.world_aabb_max[index];
 			}
 			state.dirty = true;

@@ -459,7 +459,12 @@ public:
 		// programmable raster, and its raster target (the code, kept only for a material a programmable bin
 		// can take, and the software and hardware forms' versions, made the first time a bin takes it).
 		uint32_t raster_features = 0;
+		// GodotNext: nextgeo_displacement (#150). Raw ShaderCompiler::RasterTargetUse bits + displacement metadata/hook for #163.
+		uint32_t raster_uses = 0;
 		uint32_t raster_rejects = 0;
+		bool has_displacement = false;
+		bool uses_displacement_time = false;
+		String displacement_code;
 		RendererRD::NextGeoFallback nextgeo_programmable_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
 		bool raster_target_valid = false;
 		HashMap<String, String> raster_code;
@@ -588,8 +593,13 @@ public:
 		uint32_t index = 0;
 		RID next_pass;
 		uint8_t priority;
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+		float displacement_magnitude = 0.0f;
+		float displacement_center = 0.5f;
 		virtual void set_render_priority(int p_priority);
 		virtual void set_next_pass(RID p_pass);
+		virtual void set_displacement(float p_magnitude, float p_center) override;
+		uint32_t get_raster_features() const;
 		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty);
 		virtual ~MaterialData();
 	};

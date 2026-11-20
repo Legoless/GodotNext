@@ -1232,7 +1232,8 @@ private:
 	bool _check_node_constness(const Node *p_node) const;
 
 	bool _check_restricted_func(const StringName &p_name, const StringName &p_current_function) const;
-	bool _validate_restricted_func(const StringName &p_call_name, const CallInfo *p_func_info, bool p_is_builtin_hint = false);
+	// GodotNext: nextgeo_displacement (#150). Generalize restricted-function validation to displacement() as well as vertex().
+	bool _validate_restricted_func(const StringName &p_call_name, const CallInfo *p_func_info, bool p_is_builtin_hint = false, const StringName &p_root_function = "vertex");
 
 	Node *_parse_expression(BlockNode *p_block, const FunctionInfo &p_function_info, const ExpressionInfo *p_previous_expression_info = nullptr);
 	Error _parse_array_size(BlockNode *p_block, const FunctionInfo &p_function_info, bool p_forbid_unknown_size, Node **r_size_expression, int *r_array_size, bool *r_unknown_size);

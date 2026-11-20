@@ -86,6 +86,10 @@ TEST_CASE("[NextGeo][RasterBins] Raster features come from the material's flags 
 	facts = NextGeoRasterFacts();
 	facts.depth_offset = true;
 	CHECK_EQ(nextgeo_raster_features(facts), uint32_t(VMS::RASTER_FEATURE_DEPTH_OFFSET));
+	// GodotNext: nextgeo_displacement (#150).
+	facts = NextGeoRasterFacts();
+	facts.displaced = true;
+	CHECK_EQ(nextgeo_raster_features(facts), uint32_t(VMS::RASTER_FEATURE_DISPLACED));
 	facts = NextGeoRasterFacts();
 	facts.cull_mode = RSE::CULL_MODE_DISABLED;
 	CHECK_EQ(nextgeo_raster_features(facts), uint32_t(VMS::RASTER_FEATURE_TWO_SIDED));
@@ -105,7 +109,7 @@ TEST_CASE("[NextGeo][RasterBins] Only a raster program moves a surface out of th
 	CHECK_EQ(VMS::resolve_raster_bin(0u, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_FIXED));
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_TWO_SIDED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_FIXED));
 	CHECK_FALSE(nextgeo_raster_has_program(VMS::RASTER_FEATURE_TWO_SIDED));
-	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_MASKED), uint32_t(VMS::RASTER_FEATURE_VERTEX_OFFSET), uint32_t(VMS::RASTER_FEATURE_DEPTH_OFFSET) }) {
+	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_MASKED), uint32_t(VMS::RASTER_FEATURE_VERTEX_OFFSET), uint32_t(VMS::RASTER_FEATURE_DEPTH_OFFSET), uint32_t(VMS::RASTER_FEATURE_DISPLACED) }) {
 		CHECK(nextgeo_raster_has_program(feature));
 		CHECK_EQ(VMS::resolve_raster_bin(feature, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 		CHECK_EQ(VMS::resolve_raster_bin(feature | VMS::RASTER_FEATURE_TWO_SIDED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
@@ -113,8 +117,9 @@ TEST_CASE("[NextGeo][RasterBins] Only a raster program moves a surface out of th
 		CHECK_EQ(VMS::resolve_raster_bin(feature, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	}
 	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_VERTEX_OFFSET, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_DISPLACED | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
 	// Features later issues add have no entry yet: the surface keeps its legacy route.
-	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_SKINNED), uint32_t(VMS::RASTER_FEATURE_DISPLACED), uint32_t(VMS::RASTER_FEATURE_SPLINE), uint32_t(VMS::RASTER_FEATURE_VOXEL), uint32_t(VMS::RASTER_FEATURE_ASSEMBLY) }) {
+	for (uint32_t feature : { uint32_t(VMS::RASTER_FEATURE_SKINNED), uint32_t(VMS::RASTER_FEATURE_SPLINE), uint32_t(VMS::RASTER_FEATURE_VOXEL), uint32_t(VMS::RASTER_FEATURE_ASSEMBLY) }) {
 		CHECK_EQ(VMS::resolve_raster_bin(feature, VMS::RASTER_PASS_VISIBILITY), -1);
 		CHECK_EQ(VMS::resolve_raster_bin(feature | VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VISIBILITY), -1);
 	}

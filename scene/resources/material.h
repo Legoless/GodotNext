@@ -43,6 +43,9 @@ class Material : public Resource {
 	mutable RID material;
 	Ref<Material> next_pass;
 	int render_priority;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	float displacement_magnitude = 0.0f;
+	float displacement_center = 0.5f;
 
 	enum {
 		INIT_STATE_UNINITIALIZED,
@@ -81,6 +84,13 @@ public:
 
 	void set_render_priority(int p_priority);
 	int get_render_priority() const;
+
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	void set_displacement_magnitude(float p_magnitude);
+	float get_displacement_magnitude() const;
+
+	void set_displacement_center(float p_center);
+	float get_displacement_center() const;
 
 	virtual RID get_rid() const override;
 	virtual RID get_shader_rid() const;
@@ -204,6 +214,13 @@ public:
 		SHADING_MODE_PER_PIXEL,
 		SHADING_MODE_PER_VERTEX,
 		SHADING_MODE_MAX
+	};
+
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	enum HeightmapMode {
+		HEIGHTMAP_MODE_PARALLAX,
+		HEIGHTMAP_MODE_DISPLACEMENT,
+		HEIGHTMAP_MODE_MAX
 	};
 
 	enum Feature {
@@ -388,6 +405,8 @@ private:
 		uint64_t grow : 1;
 		uint64_t proximity_fade : 1;
 		uint64_t orm : 1;
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+		uint64_t heightmap_mode : Math::get_num_bits(HEIGHTMAP_MODE_MAX - 1);
 
 		// flag bitfield
 		uint32_t feature_mask;
@@ -442,6 +461,8 @@ private:
 		mk.emission_op = emission_op;
 		mk.alpha_antialiasing_mode = alpha_antialiasing_mode;
 		mk.orm = orm;
+		// GodotNext: nextgeo_displacement (#150).
+		mk.heightmap_mode = heightmap_mode;
 
 		mk.stencil_mode = stencil_mode;
 		mk.stencil_flags = stencil_flags;
@@ -588,6 +609,8 @@ private:
 	int deep_parallax_max_layers = 0;
 	bool heightmap_parallax_flip_tangent = false;
 	bool heightmap_parallax_flip_binormal = false;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	HeightmapMode heightmap_mode = HEIGHTMAP_MODE_PARALLAX;
 
 	bool proximity_fade_enabled = false;
 	float proximity_fade_distance = 0.0f;
@@ -685,6 +708,10 @@ public:
 
 	void set_anisotropy(float p_anisotropy);
 	float get_anisotropy() const;
+
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	void set_heightmap_mode(HeightmapMode p_mode);
+	HeightmapMode get_heightmap_mode() const;
 
 	void set_heightmap_scale(float p_heightmap_scale);
 	float get_heightmap_scale() const;
@@ -910,6 +937,8 @@ VARIANT_ENUM_CAST(BaseMaterial3D::DistanceFadeMode)
 VARIANT_ENUM_CAST(BaseMaterial3D::StencilMode)
 VARIANT_ENUM_CAST(BaseMaterial3D::StencilFlags)
 VARIANT_ENUM_CAST(BaseMaterial3D::StencilCompare)
+// GodotNext: nextgeo_displacement (#150).
+VARIANT_ENUM_CAST(BaseMaterial3D::HeightmapMode)
 
 class StandardMaterial3D : public BaseMaterial3D {
 	GDCLASS(StandardMaterial3D, BaseMaterial3D)

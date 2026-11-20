@@ -50,6 +50,14 @@
 		</method>
 	</methods>
 	<members>
+		<member name="displacement_center" type="float" setter="set_displacement_center" getter="get_displacement_center" default="0.5">
+			The neutral center value (from [code]0.0[/code] to [code]1.0[/code]) subtracted from the shader's [code]DISPLACEMENT[/code] output before scaling by [member displacement_magnitude]. The displacement offset along the surface normal is [code](DISPLACEMENT - displacement_center) * displacement_magnitude[/code].
+			[b]Note:[/b] This only applies to spatial materials.
+		</member>
+		<member name="displacement_magnitude" type="float" setter="set_displacement_magnitude" getter="get_displacement_magnitude" default="0.0">
+			The maximum displacement amplitude in meters for spatial materials defining [code]displacement()[/code] (including [BaseMaterial3D] with [member BaseMaterial3D.heightmap_mode] set to [constant BaseMaterial3D.HEIGHTMAP_MODE_DISPLACEMENT]). When [code]0.0[/code], displacement is disabled and rendering is unchanged. Values greater than [code]0.0[/code] mark the material as displaced and inflate culling bounds by this distance.
+			[b]Note:[/b] This only applies to spatial materials.
+		</member>
 		<member name="next_pass" type="Material" setter="set_next_pass" getter="get_next_pass">
 			Sets the [Material] to be used for the next pass. This renders the object again using a different material.
 			[b]Note:[/b] [member next_pass] materials are not necessarily drawn immediately after the source [Material]. Draw order is determined by material properties, [member render_priority], and distance to camera.

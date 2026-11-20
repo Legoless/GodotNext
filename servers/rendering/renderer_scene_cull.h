@@ -418,6 +418,8 @@ public:
 	void _instance_record_release(Instance *p_instance) const;
 	void _instance_record_update_state(Instance *p_instance) const;
 	void _instance_record_set_transform(Instance *p_instance, const Transform3D &p_transform, const AABB &p_world_aabb, bool p_visible) const;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Max displacement magnitude across an instance's active materials.
+	float _instance_displacement_bound(const Instance *p_instance) const;
 	void _process_nextgeo_residency_shadow_dirty();
 	uint64_t last_nextgeo_residency_epoch = 0;
 
@@ -462,6 +464,8 @@ public:
 		RID mesh_instance; //only used for meshes and when skeleton/blendshapes exist
 		// GodotNext: nextgeo_instance_records (#75). Persistent GPU record, UINT32_MAX = none.
 		uint32_t virtual_record = UINT32_MAX;
+		// GodotNext: nextgeo_displacement (#150). Last applied max displacement magnitude (meters) for AABB and cluster cull bound inflation.
+		float displacement_bound = 0.0f;
 
 		Transform3D transform;
 		bool teleported = false;

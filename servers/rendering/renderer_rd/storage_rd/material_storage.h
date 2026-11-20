@@ -127,6 +127,8 @@ public:
 
 		virtual void set_render_priority(int p_priority) = 0;
 		virtual void set_next_pass(RID p_pass) = 0;
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+		virtual void set_displacement(float p_magnitude, float p_center) {}
 		virtual bool update_parameters(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty) = 0;
 		virtual ~MaterialData();
 
@@ -337,6 +339,9 @@ private:
 		HashMap<StringName, Variant> params;
 		int32_t priority = 0;
 		RID next_pass;
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+		float displacement_magnitude = 0.0f;
+		float displacement_center = 0.5f;
 		SelfList<Material> update_element;
 		// GodotNext: path_tracer (#167). The material_change_serial of its last change (an update, a shader).
 		uint64_t change_serial = 0;
@@ -556,6 +561,10 @@ public:
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) override;
 	virtual void material_set_render_priority(RID p_material, int priority) override;
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) override;
+	virtual float material_get_displacement_magnitude(RID p_material) const override;
+	virtual float material_get_displacement_center(RID p_material) const override;
 
 	virtual bool material_is_animated(RID p_material) override;
 	virtual bool material_casts_shadows(RID p_material) override;

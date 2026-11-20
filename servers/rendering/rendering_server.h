@@ -199,6 +199,9 @@ public:
 
 	virtual void material_set_next_pass(RID p_material, RID p_next_material) = 0;
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	virtual void material_set_displacement(RID p_material, float p_magnitude, float p_center) = 0;
+
 	virtual void material_set_use_debanding(bool p_enable) = 0;
 
 	/* MESH API */

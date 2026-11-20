@@ -367,7 +367,8 @@ const ShaderLanguage::KeyWord ShaderLanguage::keyword_list[] = {
 	{ TK_CF_BREAK, "break", CF_BLOCK, {}, {} },
 	{ TK_CF_CONTINUE, "continue", CF_BLOCK, {}, {} },
 	{ TK_CF_RETURN, "return", CF_BLOCK, {}, {} },
-	{ TK_CF_DISCARD, "discard", CF_BLOCK, { "particles", "sky", "fog" }, { "vertex" } },
+	// GodotNext: nextgeo_displacement (#150). Exclude discard from displacement() completion as well as vertex().
+	{ TK_CF_DISCARD, "discard", CF_BLOCK, { "particles", "sky", "fog" }, { "vertex", "displacement" } },
 
 	// function specifier keywords
 
@@ -5659,7 +5660,8 @@ bool ShaderLanguage::_check_restricted_func(const StringName &p_name, const Stri
 	while (frag_only_func_defs[idx].name) {
 		if (StringName(frag_only_func_defs[idx].name) == p_name) {
 			if (is_supported_frag_only_funcs) {
-				if (p_current_function == "vertex" && stages->has(p_current_function)) {
+				// GodotNext: nextgeo_displacement (#150). Fragment-only built-ins are disallowed in displacement() too.
+				if ((p_current_function == "vertex" || p_current_function == "displacement") && stages->has(p_current_function)) {
 					return true;
 				}
 			} else {
@@ -5673,8 +5675,10 @@ bool ShaderLanguage::_check_restricted_func(const StringName &p_name, const Stri
 	return false;
 }
 
-bool ShaderLanguage::_validate_restricted_func(const StringName &p_name, const CallInfo *p_func_info, bool p_is_builtin_hint) {
-	const bool is_in_restricted_function = p_func_info->name == "vertex";
+bool ShaderLanguage::_validate_restricted_func(const StringName &p_name, const CallInfo *p_func_info, bool p_is_builtin_hint, const StringName &p_root_function) {
+	// GodotNext: nextgeo_displacement (#150). Validate restricted items for both vertex() and displacement().
+	const StringName root_function = p_root_function == StringName() ? SNAME("vertex") : p_root_function;
+	const bool is_in_restricted_function = p_func_info->name == root_function;
 
 	// No need to check up the hierarchy if it's a built-in.
 	if (!p_is_builtin_hint) {
@@ -5684,7 +5688,7 @@ bool ShaderLanguage::_validate_restricted_func(const StringName &p_name, const C
 				continue;
 			}
 
-			if (!_validate_restricted_func(p_name, func_info)) {
+			if (!_validate_restricted_func(p_name, func_info, false, root_function)) {
 				return false;
 			}
 		}
@@ -5696,7 +5700,7 @@ bool ShaderLanguage::_validate_restricted_func(const StringName &p_name, const C
 		if (first_element.second.type == CallInfo::Item::ITEM_TYPE_VARYING) {
 			const ShaderNode::Varying &varying = shader->varyings[first_element.first];
 
-			if (varying.stage == ShaderNode::Varying::STAGE_VERTEX) {
+			if (root_function == "vertex" && varying.stage == ShaderNode::Varying::STAGE_VERTEX) {
 				return true;
 			}
 		}
@@ -5704,9 +5708,9 @@ bool ShaderLanguage::_validate_restricted_func(const StringName &p_name, const C
 		_set_tkpos(first_element.second.pos);
 
 		if (is_in_restricted_function) {
-			_set_error(vformat(RTR("'%s' cannot be used within the '%s' processor function."), first_element.first, "vertex"));
+			_set_error(vformat(RTR("'%s' cannot be used within the '%s' processor function."), first_element.first, root_function));
 		} else {
-			_set_error(vformat(RTR("'%s' cannot be used here, because '%s' is called by the '%s' processor function (which is not allowed)."), first_element.first, p_func_info->name, "vertex"));
+			_set_error(vformat(RTR("'%s' cannot be used here, because '%s' is called by the '%s' processor function (which is not allowed)."), first_element.first, p_func_info->name, root_function));
 		}
 		return false;
 	}
@@ -6505,7 +6509,8 @@ ShaderLanguage::Node *ShaderLanguage::_parse_expression(BlockNode *p_block, cons
 						}
 
 						// Recursively checks for the restricted function call.
-						if (is_supported_frag_only_funcs && current_function == "vertex" && stages->has(current_function) && !_validate_restricted_func(name, &calls_info[current_function], is_builtin)) {
+						// GodotNext: nextgeo_displacement (#150). Also validate restricted calls/varyings in displacement().
+						if ((is_supported_frag_only_funcs || current_function == "displacement") && (current_function == "vertex" || current_function == "displacement") && stages->has(current_function) && !_validate_restricted_func(name, &calls_info[current_function], is_builtin, current_function)) {
 							return nullptr;
 						}
 					}
@@ -6563,28 +6568,33 @@ ShaderLanguage::Node *ShaderLanguage::_parse_expression(BlockNode *p_block, cons
 										}
 
 										if (shader->varyings.has(varname)) {
-											switch (shader->varyings[varname].stage) {
-												case ShaderNode::Varying::STAGE_UNKNOWN:
-													if (is_out_arg) {
-														error = true;
-													}
-													break;
-												case ShaderNode::Varying::STAGE_VERTEX:
-													if (is_out_arg && current_function != varying_function_names.vertex) { // inout/out
-														error = true;
-													}
-													break;
-												case ShaderNode::Varying::STAGE_FRAGMENT:
-													if (!is_out_arg) {
-														if (current_function != varying_function_names.fragment && current_function != varying_function_names.light) {
+											// GodotNext: nextgeo_displacement (#150). Varyings are unavailable in displacement().
+											if (current_function == "displacement" && stages->has(current_function)) {
+												error = true;
+											} else {
+												switch (shader->varyings[varname].stage) {
+													case ShaderNode::Varying::STAGE_UNKNOWN:
+														if (is_out_arg) {
 															error = true;
 														}
-													} else if (current_function != varying_function_names.fragment) { // inout/out
-														error = true;
-													}
-													break;
-												default:
-													break;
+														break;
+													case ShaderNode::Varying::STAGE_VERTEX:
+														if (is_out_arg && current_function != varying_function_names.vertex) { // inout/out
+															error = true;
+														}
+														break;
+													case ShaderNode::Varying::STAGE_FRAGMENT:
+														if (!is_out_arg) {
+															if (current_function != varying_function_names.fragment && current_function != varying_function_names.light) {
+																error = true;
+															}
+														} else if (current_function != varying_function_names.fragment) { // inout/out
+															error = true;
+														}
+														break;
+													default:
+														break;
+												}
 											}
 
 											if (error) {
@@ -6799,6 +6809,11 @@ ShaderLanguage::Node *ShaderLanguage::_parse_expression(BlockNode *p_block, cons
 								return nullptr;
 							}
 						} else {
+							// GodotNext: nextgeo_displacement (#150). Varyings are unavailable in displacement().
+							if (current_function == "displacement" && stages->has(current_function)) {
+								_set_error(vformat(RTR("'%s' cannot be used within the '%s' processor function."), identifier, "displacement"));
+								return nullptr;
+							}
 							if (var.stage == ShaderNode::Varying::STAGE_UNKNOWN && var.type < TYPE_INT) {
 								if (current_function == varying_function_names.vertex) {
 									_set_error(vformat(RTR("Varying with '%s' data type may only be used in the '%s' function."), get_datatype_name(var.type), "fragment"));

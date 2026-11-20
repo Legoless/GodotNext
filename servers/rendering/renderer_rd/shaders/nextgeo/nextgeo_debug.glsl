@@ -233,7 +233,9 @@ float projected_error(NextGeoInstanceRecord p_record, vec4 p_lod_sphere, float p
 		return p_max_parent_error * scale * dbg.view_info.x * dbg.view_info.w;
 	}
 	vec3 center = instance_point(p_record, p_lod_sphere.xyz);
-	float radius = p_lod_sphere.w * scale;
+	// GodotNext: nextgeo_displacement (#150). Inflate sphere radius by the instance's displacement bound.
+	float disp_bound = max(p_record.prev_world_aabb_max.w, 0.0);
+	float radius = (p_lod_sphere.w + disp_bound) * scale;
 	float dist = max(length(center - dbg.camera.xyz) - radius, max(dbg.view_info.z, 1e-4));
 	return p_max_parent_error * scale * 0.5 * dbg.view_info.y * abs(dbg.proj[1][1]) / dist * dbg.view_info.w;
 }

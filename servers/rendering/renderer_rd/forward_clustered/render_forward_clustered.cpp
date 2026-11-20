@@ -9155,11 +9155,19 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	route_facts.lightmapped = ginstance->lightmap_instance.is_valid();
 	route_facts.chain_blocked = p_chain_blocked;
 	route_facts.material_fallback = RendererRD::NextGeoFallback(p_material->shader_data->get_nextgeo_fallback());
+	// GodotNext: nextgeo_displacement (#150). Combine shader features with material displacement_magnitude > 0.
+	const uint32_t material_raster_features = p_material->get_raster_features();
+	const bool material_displaced = (material_raster_features & RendererVirtualMeshStorage::RASTER_FEATURE_DISPLACED) != 0u;
+	const uint32_t material_raster_rejects = RendererRD::nextgeo_raster_rejects(p_material->shader_data->raster_uses, material_raster_features);
+	if (material_displaced && material_raster_rejects != 0u && route_facts.material_fallback == RendererRD::NEXTGEO_FALLBACK_NONE) {
+		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE;
+	}
 	// GodotNext: nextgeo_raster_bins (#155, plan §21.4 N3). rendering/nextgeo/debug_programmable_raster admits
-	// a masked or vertex-offset material into a programmable raster bin on the Nanite device tier; by
-	// default these keep their #80 reasons until #153 and #164 turn the features on.
+	// a masked, vertex-offset, or displaced material into a programmable raster bin on the Nanite device tier; by
+	// default these keep their #80 reasons until #153, #163 and #164 turn the features on.
 	bool admit_programmable = false;
-	if (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE && p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
+	const bool wants_programmable_bin = (route_facts.material_fallback != RendererRD::NEXTGEO_FALLBACK_NONE) || material_displaced;
+	if (wants_programmable_bin && material_raster_rejects == 0u && p_material->shader_data->nextgeo_programmable_fallback == RendererRD::NEXTGEO_FALLBACK_NONE &&
 			p_material->shader_data->has_raster_target() && route_facts.mesh_has_virtual_geometry && _nextgeo_programmable_raster_admitted() && p_material->shader_data->ensure_raster_target()) {
 		admit_programmable = true;
 		route_facts.material_fallback = RendererRD::NEXTGEO_FALLBACK_NONE;
@@ -9177,24 +9185,26 @@ void RenderForwardClustered::_geometry_instance_add_surface_with_material(Geomet
 	uint32_t raster_bin = 0;
 	if (route.virtual_geometry && admit_programmable) {
 		RendererVirtualMeshStorage::RasterBinKey bin_key;
-		bin_key.features = p_material->shader_data->get_raster_features();
+		bin_key.features = material_raster_features;
 		bin_key.shader_version = p_material->shader_data->version;
 		bin_key.material = p_material->get_self();
 		raster_bin = RSG::virtual_mesh_storage->raster_bin_acquire(bin_key);
 		if (raster_bin == 0u) {
-			route.virtual_geometry = false;
-			route.reason = RendererRD::NextGeoFallback(p_material->shader_data->get_nextgeo_fallback());
+			// GodotNext: nextgeo_displacement (#150). Displaced-only materials keep their virtual
+			// fixed-function bin when bins are full; masked and vertex-offset materials return to legacy.
+			RendererRD::nextgeo_raster_bin_apply_exhausted(route, RendererRD::NextGeoFallback(p_material->shader_data->get_nextgeo_fallback()));
 			if (!nextgeo_raster_bins_exhausted_warned) {
 				nextgeo_raster_bins_exhausted_warned = true;
-				WARN_PRINT(vformat("NextGeo: all %d programmable raster bins are in use; further masked and vertex-offset materials stay on legacy raster.", int(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX)));
+				WARN_PRINT(vformat("NextGeo: all %d programmable raster bins are in use; further masked, vertex-offset, and displaced materials keep their default route.", int(RendererVirtualMeshStorage::RASTER_BIN_PROGRAMMABLE_MAX)));
 			}
 		}
 	}
 	// N4: one line per material shader the raster target rejects.
+	const uint32_t effective_raster_rejects = p_material->shader_data->raster_rejects | material_raster_rejects;
 	if (route.reason == RendererRD::NEXTGEO_FALLBACK_UNSUPPORTED_RASTER_FEATURE && !p_material->shader_data->nextgeo_raster_reject_logged) {
 		p_material->shader_data->nextgeo_raster_reject_logged = true;
 		const String shader_name = p_material->shader_data->path.is_empty() ? vformat("<built-in>:%d", p_material->shader_data->code.hash()) : p_material->shader_data->path;
-		print_line(vformat("NextGeo: material shader \"%s\" stays on legacy raster (UNSUPPORTED_RASTER_FEATURE: %s).", shader_name, RendererRD::nextgeo_raster_reject_names(p_material->shader_data->raster_rejects)));
+		print_line(vformat("NextGeo: material shader \"%s\" stays on legacy raster (UNSUPPORTED_RASTER_FEATURE: %s).", shader_name, RendererRD::nextgeo_raster_reject_names(effective_raster_rejects)));
 	}
 	if (route.virtual_geometry) {
 		flags |= GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL;

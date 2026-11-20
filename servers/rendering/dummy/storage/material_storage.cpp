@@ -158,9 +158,18 @@ void MaterialStorage::shader_free(RID p_rid) {
 	shader_owner.free(p_rid);
 }
 
+// GodotNext: nextgeo_displacement (#150).
+String MaterialStorage::shader_get_code(RID p_shader) const {
+	const DummyShader *shader = shader_owner.get_or_null(p_shader);
+	ERR_FAIL_NULL_V(shader, String());
+	return shader->code;
+}
+
 void MaterialStorage::shader_set_code(RID p_shader, const String &p_code) {
 	DummyShader *shader = shader_owner.get_or_null(p_shader);
 	ERR_FAIL_NULL(shader);
+	// GodotNext: nextgeo_displacement (#150). Store source code for shader_get_code().
+	shader->code = p_code;
 	if (p_code.is_empty()) {
 		return;
 	}
@@ -257,6 +266,25 @@ void MaterialStorage::material_set_next_pass(RID p_material, RID p_next_material
 	ERR_FAIL_NULL(material);
 
 	material->next_pass = p_next_material;
+}
+
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+void MaterialStorage::material_set_displacement(RID p_material, float p_magnitude, float p_center) {
+	DummyMaterial *material = material_owner.get_or_null(p_material);
+	ERR_FAIL_NULL(material);
+
+	material->displacement_magnitude = (!Math::is_finite(p_magnitude) || p_magnitude < 0.0f) ? 0.0f : p_magnitude;
+	material->displacement_center = !Math::is_finite(p_center) ? 0.5f : CLAMP(p_center, 0.0f, 1.0f);
+}
+
+float MaterialStorage::material_get_displacement_magnitude(RID p_material) const {
+	const DummyMaterial *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->displacement_magnitude : 0.0f;
+}
+
+float MaterialStorage::material_get_displacement_center(RID p_material) const {
+	const DummyMaterial *material = material_owner.get_or_null(p_material);
+	return material != nullptr ? material->displacement_center : 0.5f;
 }
 
 void MaterialStorage::material_get_instance_shader_parameters(RID p_material, List<InstanceShaderParam> *r_parameters) {

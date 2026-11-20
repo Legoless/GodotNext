@@ -2587,6 +2587,8 @@ void RenderingServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("material_set_render_priority", "material", "priority"), &RenderingServer::material_set_render_priority);
 
 	ClassDB::bind_method(D_METHOD("material_set_next_pass", "material", "next_material"), &RenderingServer::material_set_next_pass);
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	ClassDB::bind_method(D_METHOD("material_set_displacement", "material", "magnitude", "center"), &RenderingServer::material_set_displacement);
 
 	ClassDB::bind_method(D_METHOD("material_set_use_debanding", "enable"), &RenderingServer::material_set_use_debanding);
 

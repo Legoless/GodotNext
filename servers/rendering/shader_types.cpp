@@ -134,6 +134,17 @@ ShaderTypes::ShaderTypes() {
 	shader_modes[RSE::SHADER_SPATIAL].functions["vertex"].built_ins["VIEW_RIGHT"] = constt(ShaderLanguage::TYPE_INT);
 	shader_modes[RSE::SHADER_SPATIAL].functions["vertex"].built_ins["EYE_OFFSET"] = constt(ShaderLanguage::TYPE_VEC3);
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Optional spatial displacement processor function.
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["VERTEX"] = constt(ShaderLanguage::TYPE_VEC3);
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["NORMAL"] = constt(ShaderLanguage::TYPE_VEC3);
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["UV"] = constt(ShaderLanguage::TYPE_VEC2);
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["UV2"] = constt(ShaderLanguage::TYPE_VEC2);
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["COLOR"] = constt(ShaderLanguage::TYPE_VEC4);
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["INSTANCE_CUSTOM"] = constt(ShaderLanguage::TYPE_VEC4);
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].built_ins["DISPLACEMENT"] = ShaderLanguage::TYPE_FLOAT;
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].can_discard = false;
+	shader_modes[RSE::SHADER_SPATIAL].functions["displacement"].main_function = true;
+
 	shader_modes[RSE::SHADER_SPATIAL].functions["fragment"].built_ins["VERTEX"] = constt(ShaderLanguage::TYPE_VEC3);
 	shader_modes[RSE::SHADER_SPATIAL].functions["fragment"].built_ins["LIGHT_VERTEX"] = ShaderLanguage::TYPE_VEC3;
 	shader_modes[RSE::SHADER_SPATIAL].functions["fragment"].built_ins["FRAGCOORD"] = constt(ShaderLanguage::TYPE_VEC4);

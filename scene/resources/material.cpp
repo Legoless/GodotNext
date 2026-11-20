@@ -85,6 +85,39 @@ int Material::get_render_priority() const {
 	return render_priority;
 }
 
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+void Material::set_displacement_magnitude(float p_magnitude) {
+	const float sanitized = (!Math::is_finite(p_magnitude) || p_magnitude < 0.0f) ? 0.0f : p_magnitude;
+	if (displacement_magnitude == sanitized) {
+		return;
+	}
+	displacement_magnitude = sanitized;
+
+	if (material.is_valid()) {
+		RS::get_singleton()->material_set_displacement(material, displacement_magnitude, displacement_center);
+	}
+}
+
+float Material::get_displacement_magnitude() const {
+	return displacement_magnitude;
+}
+
+void Material::set_displacement_center(float p_center) {
+	const float sanitized = !Math::is_finite(p_center) ? 0.5f : CLAMP(p_center, 0.0f, 1.0f);
+	if (displacement_center == sanitized) {
+		return;
+	}
+	displacement_center = sanitized;
+
+	if (material.is_valid()) {
+		RS::get_singleton()->material_set_displacement(material, displacement_magnitude, displacement_center);
+	}
+}
+
+float Material::get_displacement_center() const {
+	return displacement_center;
+}
+
 RID Material::get_rid() const {
 	return material;
 }
@@ -93,6 +126,9 @@ void Material::_validate_property(PropertyInfo &p_property) const {
 	if (!_can_do_next_pass() && p_property.name == "next_pass") {
 		p_property.usage = PROPERTY_USAGE_NONE;
 	} else if (!_can_use_render_priority() && p_property.name == "render_priority") {
+		p_property.usage = PROPERTY_USAGE_NONE;
+	} else if (get_shader_mode() != Shader::MODE_SPATIAL && (p_property.name == "displacement_magnitude" || p_property.name == "displacement_center")) {
+		// GodotNext: nextgeo_displacement (#150). Displacement applies only to spatial materials.
 		p_property.usage = PROPERTY_USAGE_NONE;
 	}
 }
@@ -167,6 +203,12 @@ void Material::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_render_priority", "priority"), &Material::set_render_priority);
 	ClassDB::bind_method(D_METHOD("get_render_priority"), &Material::get_render_priority);
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	ClassDB::bind_method(D_METHOD("set_displacement_magnitude", "magnitude"), &Material::set_displacement_magnitude);
+	ClassDB::bind_method(D_METHOD("get_displacement_magnitude"), &Material::get_displacement_magnitude);
+	ClassDB::bind_method(D_METHOD("set_displacement_center", "center"), &Material::set_displacement_center);
+	ClassDB::bind_method(D_METHOD("get_displacement_center"), &Material::get_displacement_center);
+
 	ClassDB::bind_method(D_METHOD("inspect_native_shader_code"), &Material::inspect_native_shader_code);
 	ClassDB::set_method_flags(get_class_static(), StringName("inspect_native_shader_code"), METHOD_FLAGS_DEFAULT | METHOD_FLAG_EDITOR);
 
@@ -174,6 +216,9 @@ void Material::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "render_priority", PROPERTY_HINT_RANGE, itos(RENDER_PRIORITY_MIN) + "," + itos(RENDER_PRIORITY_MAX) + ",1"), "set_render_priority", "get_render_priority");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "next_pass", PROPERTY_HINT_RESOURCE_TYPE, Material::get_class_static()), "set_next_pass", "get_next_pass");
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "displacement_magnitude", PROPERTY_HINT_RANGE, "0,16,0.001,or_greater,suffix:m"), "set_displacement_magnitude", "get_displacement_magnitude");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "displacement_center", PROPERTY_HINT_RANGE, "0,1,0.01"), "set_displacement_center", "get_displacement_center");
 
 	BIND_CONSTANT(RENDER_PRIORITY_MAX);
 	BIND_CONSTANT(RENDER_PRIORITY_MIN);
@@ -475,6 +520,11 @@ void ShaderMaterial::_check_material_rid() const {
 		}
 
 		_set_material(RS::get_singleton()->material_create_from_shader(next_pass_rid, get_render_priority(), shader_rid));
+
+		// GodotNext: nextgeo_displacement (#150). Forward displacement settings set before lazy RID creation.
+		if (get_displacement_magnitude() != 0.0f || get_displacement_center() != 0.5f) {
+			RS::get_singleton()->material_set_displacement(_get_material(), get_displacement_magnitude(), get_displacement_center());
+		}
 
 		for (KeyValue<StringName, Variant> param : param_cache) {
 			if (param.value.get_type() == Variant::OBJECT) {
@@ -1151,14 +1201,22 @@ uniform sampler2D texture_backlight : hint_default_black, %s;
 	}
 
 	if (features[FEATURE_HEIGHT_MAPPING]) {
-		code += vformat(R"(
+		// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Displacement mode uses texture_heightmap without parallax uniforms.
+		if (heightmap_mode == HEIGHTMAP_MODE_DISPLACEMENT) {
+			code += vformat(R"(
+uniform sampler2D texture_heightmap : hint_default_black, %s;
+)",
+					texfilter_height_str);
+		} else {
+			code += vformat(R"(
 uniform sampler2D texture_heightmap : hint_default_black, %s;
 uniform float heightmap_scale : hint_range(-16.0, 16.0, 0.001);
 uniform int heightmap_min_layers : hint_range(1, 64);
 uniform int heightmap_max_layers : hint_range(1, 64);
 uniform vec2 heightmap_flip;
 )",
-				texfilter_height_str);
+					texfilter_height_str);
+		}
 	}
 	if (flags[FLAG_UV1_USE_TRIPLANAR]) {
 		code += "varying vec3 uv1_triplanar_pos;\n";
@@ -1526,7 +1584,8 @@ void fragment() {)";
 	}
 
 	// Heightmapping isn't supported at the same time as triplanar mapping.
-	if (features[FEATURE_HEIGHT_MAPPING] && !flags[FLAG_UV1_USE_TRIPLANAR]) {
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Displacement mode leaves parallax off.
+	if (features[FEATURE_HEIGHT_MAPPING] && heightmap_mode == HEIGHTMAP_MODE_PARALLAX && !flags[FLAG_UV1_USE_TRIPLANAR]) {
 		// Binormal is negative due to mikktspace. Flipping it "unflips" it.
 		code += R"(
 	{
@@ -2089,6 +2148,20 @@ void fragment() {)";
 
 	code += "}\n";
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11). Emit displacement() from texture_heightmap in displacement mode.
+	if (features[FEATURE_HEIGHT_MAPPING] && heightmap_mode == HEIGHTMAP_MODE_DISPLACEMENT && !flags[FLAG_UV1_USE_TRIPLANAR]) {
+		code += R"(
+void displacement() {
+	vec2 heightmap_uv = UV * uv1_scale.xy + uv1_offset.xy;
+)";
+		if (flags[FLAG_INVERT_HEIGHTMAP]) {
+			code += "\tDISPLACEMENT = 1.0 - texture(texture_heightmap, heightmap_uv).r;\n";
+		} else {
+			code += "\tDISPLACEMENT = texture(texture_heightmap, heightmap_uv).r;\n";
+		}
+		code += "}\n";
+	}
+
 	// We must create the shader outside the shader_map_mutex to avoid potential deadlocks with
 	// other tasks in the WorkerThreadPool simultaneously creating materials, which
 	// may also hold the shared shader_map_mutex lock.
@@ -2126,6 +2199,11 @@ void BaseMaterial3D::_check_material_rid() {
 		}
 
 		_set_material(RS::get_singleton()->material_create_from_shader(next_pass_rid, get_render_priority(), shader_rid));
+
+		// GodotNext: nextgeo_displacement (#150). Forward displacement settings set before lazy RID creation.
+		if (get_displacement_magnitude() != 0.0f || get_displacement_center() != 0.5f) {
+			RS::get_singleton()->material_set_displacement(_get_material(), get_displacement_magnitude(), get_displacement_center());
+		}
 
 		for (KeyValue<StringName, Variant> param : pending_params) {
 			RS::get_singleton()->material_set_param(_get_material(), param.key, param.value);
@@ -2301,6 +2379,21 @@ void BaseMaterial3D::set_anisotropy(float p_anisotropy) {
 
 float BaseMaterial3D::get_anisotropy() const {
 	return anisotropy;
+}
+
+// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+void BaseMaterial3D::set_heightmap_mode(HeightmapMode p_mode) {
+	ERR_FAIL_INDEX(p_mode, HEIGHTMAP_MODE_MAX);
+	if (heightmap_mode == p_mode) {
+		return;
+	}
+	heightmap_mode = p_mode;
+	_queue_shader_change();
+	notify_property_list_changed();
+}
+
+BaseMaterial3D::HeightmapMode BaseMaterial3D::get_heightmap_mode() const {
+	return heightmap_mode;
 }
 
 void BaseMaterial3D::set_heightmap_scale(float p_heightmap_scale) {
@@ -2708,6 +2801,17 @@ void BaseMaterial3D::_validate_property(PropertyInfo &p_property) const {
 		}
 
 		if (p_property.name == "stencil_outline_thickness" && stencil_mode != STENCIL_MODE_OUTLINE) {
+			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+		}
+
+		// GodotNext: nextgeo_displacement (#150). Hide parallax-only controls when heightmap_mode is Displacement.
+		if (heightmap_mode == HEIGHTMAP_MODE_DISPLACEMENT &&
+				(p_property.name == "heightmap_scale" ||
+						p_property.name == "heightmap_deep_parallax" ||
+						p_property.name == "heightmap_min_layers" ||
+						p_property.name == "heightmap_max_layers" ||
+						p_property.name == "heightmap_flip_tangent" ||
+						p_property.name == "heightmap_flip_binormal")) {
 			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
 		}
 	}
@@ -3434,6 +3538,10 @@ void BaseMaterial3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_anisotropy", "anisotropy"), &BaseMaterial3D::set_anisotropy);
 	ClassDB::bind_method(D_METHOD("get_anisotropy"), &BaseMaterial3D::get_anisotropy);
 
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	ClassDB::bind_method(D_METHOD("set_heightmap_mode", "mode"), &BaseMaterial3D::set_heightmap_mode);
+	ClassDB::bind_method(D_METHOD("get_heightmap_mode"), &BaseMaterial3D::get_heightmap_mode);
+
 	ClassDB::bind_method(D_METHOD("set_heightmap_scale", "heightmap_scale"), &BaseMaterial3D::set_heightmap_scale);
 	ClassDB::bind_method(D_METHOD("get_heightmap_scale"), &BaseMaterial3D::get_heightmap_scale);
 
@@ -3704,6 +3812,8 @@ void BaseMaterial3D::_bind_methods() {
 
 	ADD_GROUP("Height", "heightmap_");
 	ADD_PROPERTYI(PropertyInfo(Variant::BOOL, "heightmap_enabled", PROPERTY_HINT_GROUP_ENABLE), "set_feature", "get_feature", FEATURE_HEIGHT_MAPPING);
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "heightmap_mode", PROPERTY_HINT_ENUM, "Parallax,Displacement"), "set_heightmap_mode", "get_heightmap_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "heightmap_scale", PROPERTY_HINT_RANGE, "-16,16,0.001"), "set_heightmap_scale", "get_heightmap_scale");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "heightmap_deep_parallax"), "set_heightmap_deep_parallax", "is_heightmap_deep_parallax_enabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "heightmap_min_layers", PROPERTY_HINT_RANGE, "1,64,1"), "set_heightmap_deep_parallax_min_layers", "get_heightmap_deep_parallax_min_layers");
@@ -3856,6 +3966,11 @@ void BaseMaterial3D::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADING_MODE_PER_PIXEL);
 	BIND_ENUM_CONSTANT(SHADING_MODE_PER_VERTEX);
 	BIND_ENUM_CONSTANT(SHADING_MODE_MAX);
+
+	// GodotNext: nextgeo_displacement (#150, plan §21.4 N11).
+	BIND_ENUM_CONSTANT(HEIGHTMAP_MODE_PARALLAX);
+	BIND_ENUM_CONSTANT(HEIGHTMAP_MODE_DISPLACEMENT);
+	BIND_ENUM_CONSTANT(HEIGHTMAP_MODE_MAX);
 
 	BIND_ENUM_CONSTANT(FEATURE_EMISSION);
 	BIND_ENUM_CONSTANT(FEATURE_NORMAL_MAPPING);

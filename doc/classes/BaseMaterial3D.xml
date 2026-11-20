@@ -269,6 +269,10 @@
 			The number of layers to use for parallax occlusion mapping when the camera is far away from the material. Higher values result in a more convincing depth effect, especially in materials that have steep height changes. Higher values have a significant cost on the GPU, so it should only be increased on materials where it makes a significant visual difference.
 			[b]Note:[/b] Only effective if [member heightmap_deep_parallax] is [code]true[/code].
 		</member>
+		<member name="heightmap_mode" type="int" setter="set_heightmap_mode" getter="get_heightmap_mode" enum="BaseMaterial3D.HeightmapMode" default="0">
+			Selects how [member heightmap_texture] is used when [member heightmap_enabled] is [code]true[/code].
+			[constant HEIGHTMAP_MODE_PARALLAX] applies screen-space parallax offset/occlusion mapping. [constant HEIGHTMAP_MODE_DISPLACEMENT] disables parallax and emits a spatial [code]displacement()[/code] function sampling [member heightmap_texture] (controlled by [member Material.displacement_magnitude] and [member Material.displacement_center]).
+		</member>
 		<member name="heightmap_scale" type="float" setter="set_heightmap_scale" getter="get_heightmap_scale" default="5.0">
 			The heightmap scale to use for the parallax effect (see [member heightmap_enabled]). The default value is tuned so that the highest point (value = 255) appears to be 5 cm higher than the lowest point (value = 0). Higher values result in a deeper appearance, but may result in artifacts appearing when looking at the material from oblique angles, especially when the camera moves. Negative values can be used to invert the parallax effect, but this is different from inverting the texture using [member heightmap_flip_texture] as the material will also appear to be "closer" to the camera. In most cases, [member heightmap_scale] should be kept to a positive value.
 			[b]Note:[/b] If the height map effect looks strange regardless of this value, try adjusting [member heightmap_flip_binormal] and [member heightmap_flip_tangent]. See also [member heightmap_texture] for recommendations on authoring heightmap textures, as the way the heightmap texture is authored affects how [member heightmap_scale] behaves.
@@ -617,6 +621,15 @@
 		</constant>
 		<constant name="SHADING_MODE_MAX" value="3" enum="ShadingMode">
 			Represents the size of the [enum ShadingMode] enum.
+		</constant>
+		<constant name="HEIGHTMAP_MODE_PARALLAX" value="0" enum="HeightmapMode">
+			Uses [member heightmap_texture] for parallax offset or parallax occlusion mapping in the fragment shader (default).
+		</constant>
+		<constant name="HEIGHTMAP_MODE_DISPLACEMENT" value="1" enum="HeightmapMode">
+			Uses [member heightmap_texture] to generate a spatial [code]displacement()[/code] function for geometric displacement and disables parallax mapping.
+		</constant>
+		<constant name="HEIGHTMAP_MODE_MAX" value="2" enum="HeightmapMode">
+			Represents the size of the [enum HeightmapMode] enum.
 		</constant>
 		<constant name="FEATURE_EMISSION" value="0" enum="Feature">
 			Constant for setting [member emission_enabled].
