@@ -45,4 +45,5 @@ String get_temp_path(const String &p_suffix);
 class TestProjectSettingsInternalsAccessor {
 public:
 	static String &resource_path();
+	static bool &project_loaded(); // GodotNext: #298.
 };

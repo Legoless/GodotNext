@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/os/mutex.h" // GodotNext: #298.
 #include "core/os/thread.h"
 #include "editor/doc/doc_tools.h"
 #include "editor/plugins/editor_plugin.h"
@@ -81,9 +82,11 @@ public:
 };
 
 class EditorFileSystemDirectory;
+class EditorHelpTestAccess; // GodotNext: #298.
 
 class EditorHelp : public VBoxContainer {
 	GDCLASS(EditorHelp, VBoxContainer);
+	friend class EditorHelpTestAccess; // GodotNext: #298.
 
 	enum MethodType {
 		METHOD_TYPE_METHOD,
@@ -189,6 +192,9 @@ class EditorHelp : public VBoxContainer {
 	inline static String doc_version_hash;
 	inline static Thread worker_thread;
 	inline static Thread loader_thread; // Only load scripts here to avoid deadlocking with main thread.
+	// GodotNext: #298. Synchronize doc-thread handoff with cleanup_doc() and ignore late deferred callbacks.
+	inline static Mutex doc_thread_mutex;
+	inline static SafeFlag doc_cleaned = SafeFlag(false);
 
 	inline static SafeFlag _script_docs_loaded = SafeFlag(false);
 	inline static LocalVector<DocData::ClassDoc> _docs_to_add;
@@ -198,6 +204,7 @@ class EditorHelp : public VBoxContainer {
 	static void _wait_for_thread(Thread &p_thread = worker_thread);
 	static void _load_doc_thread(void *p_udata);
 	static void _gen_doc_thread(void *p_udata);
+	static void _regenerate_doc_deferred(bool p_use_script_cache); // GodotNext: #298.
 	static void _gen_extensions_docs();
 	static void _process_postponed_docs();
 	static void _load_script_doc_cache_thread(void *p_udata);

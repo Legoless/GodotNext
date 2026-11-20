@@ -79,12 +79,13 @@ godotnext/testbed/harness/run_selftest.sh -Mode capture -Runs 2 \
 
 The last form is the Feature Parity Room capture-identity pair (#240): two same-seed captures with the room's fog on, compared by SHA-256, plus the manifest override check below.
 
-Argument and override checks (no GPU):
+Argument, override, and headless-import checks (no GPU):
 
 ```bash
 ./bin/godot.macos.editor.arm64 --headless --path godotnext/testbed \
   --script res://harness/tests/test_args.gd
 godotnext/testbed/harness/tests/test_override.sh
+python3 godotnext/testbed/harness/tests/test_headless_import.py --runs 20
 ```
 
 ## Arguments

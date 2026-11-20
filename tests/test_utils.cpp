@@ -52,3 +52,8 @@ String TestUtils::get_temp_path(const String &p_suffix) {
 String &TestProjectSettingsInternalsAccessor::resource_path() {
 	return ProjectSettings::get_singleton()->resource_path;
 }
+
+// GodotNext: #298.
+bool &TestProjectSettingsInternalsAccessor::project_loaded() {
+	return ProjectSettings::get_singleton()->project_loaded;
+}

@@ -54,6 +54,7 @@
 #include "editor/file_system/editor_paths.h"
 #include "editor/gui/editor_toaster.h"
 #include "editor/inspector/editor_property_name_processor.h"
+#include "editor/project_manager/project_manager.h" // GodotNext: #298.
 #include "editor/script/script_editor_navigation_marker.h"
 #include "editor/script/script_editor_plugin.h"
 #include "editor/script/syntax_highlighters.h"
@@ -3104,19 +3105,31 @@ void EditorHelp::remove_class(const String &p_class) {
 void EditorHelp::_load_doc_thread(void *p_udata) {
 	bool use_script_cache = (bool)p_udata;
 	Ref<Resource> cache_res = ResourceLoader::load(get_cache_full_path());
+	// GodotNext: #298. Stop queuing deferred callbacks once cleanup_doc() has started.
+	if (doc_cleaned.is_set()) {
+		OS::get_singleton()->benchmark_end_measure("EditorHelp", vformat("Generate Documentation (Run %d)", doc_generation_count));
+		return;
+	}
 	if (cache_res.is_valid() && cache_res->get_meta("version_hash", "") == doc_version_hash) {
 		Array classes = cache_res->get_meta("classes", Array());
 		for (int i = 0; i < classes.size(); i++) {
+			if (doc_cleaned.is_set()) {
+				OS::get_singleton()->benchmark_end_measure("EditorHelp", vformat("Generate Documentation (Run %d)", doc_generation_count));
+				return;
+			}
 			doc->add_doc(DocData::ClassDoc::from_dict(classes[i]));
 		}
-		if (use_script_cache) {
-			callable_mp_static(&EditorHelp::load_script_doc_cache).call_deferred();
+		if (!doc_cleaned.is_set()) {
+			if (use_script_cache) {
+				callable_mp_static(&EditorHelp::load_script_doc_cache).call_deferred();
+			}
+			// Extensions' docs are not cached. Generate them now (on the main thread).
+			callable_mp_static(&EditorHelp::_gen_extensions_docs).call_deferred();
 		}
-		// Extensions' docs are not cached. Generate them now (on the main thread).
-		callable_mp_static(&EditorHelp::_gen_extensions_docs).call_deferred();
-	} else {
+	} else if (!doc_cleaned.is_set()) {
 		// We have to go back to the main thread to start from scratch, bypassing any possibly existing cache.
-		callable_mp_static(&EditorHelp::generate_doc).call_deferred(false, use_script_cache);
+		// GodotNext: #298. Defer through a guarded helper so a flush after cleanup_doc() cannot restart doc threads.
+		callable_mp_static(&EditorHelp::_regenerate_doc_deferred).call_deferred(use_script_cache);
 	}
 
 	OS::get_singleton()->benchmark_end_measure("EditorHelp", vformat("Generate Documentation (Run %d)", doc_generation_count));
@@ -3147,15 +3160,29 @@ void EditorHelp::_gen_doc_thread(void *p_udata) {
 	}
 
 	// Load script docs after native ones are cached so native cache doesn't contain script docs.
+	// GodotNext: #298. Skip queuing deferred load_script_doc_cache() once cleanup_doc() has started.
 	bool use_script_cache = (bool)p_udata;
-	if (use_script_cache) {
+	if (use_script_cache && !doc_cleaned.is_set()) {
 		callable_mp_static(&EditorHelp::load_script_doc_cache).call_deferred();
 	}
 
 	OS::get_singleton()->benchmark_end_measure("EditorHelp", vformat("Generate Documentation (Run %d)", doc_generation_count));
 }
 
+// GodotNext: #298. Ignore deferred cache regeneration if EditorNode/ProjectManager/EditorHelp already shut down.
+void EditorHelp::_regenerate_doc_deferred(bool p_use_script_cache) {
+	if (doc_cleaned.is_set() || !doc || (!EditorNode::get_singleton() && !ProjectManager::get_singleton())) {
+		return;
+	}
+	generate_doc(false, p_use_script_cache);
+}
+
 void EditorHelp::_gen_extensions_docs() {
+	// GodotNext: #298. Ignore deferred call flushed after EditorHelp::cleanup_doc().
+	if (doc_cleaned.is_set() || !doc) {
+		return;
+	}
+
 	doc->generate((DocTools::GENERATE_FLAG_SKIP_BASIC_TYPES | DocTools::GENERATE_FLAG_EXTENSION_CLASSES_ONLY));
 
 	// Append extra doc data, as it gets overridden by the generation step.
@@ -3168,7 +3195,14 @@ static void _load_script_doc_cache(bool p_changes) {
 }
 
 void EditorHelp::load_script_doc_cache() {
-	if (!ProjectSettings::get_singleton()->is_project_loaded()) {
+	// GodotNext: #298. A doc thread can queue this deferred right before EditorNode::~EditorNode()
+	// calls EditorHelp::cleanup_doc(); Main::cleanup() then flushes MessageQueue after EditorNode
+	// and EditorFileSystem are gone.
+	if (doc_cleaned.is_set() || !doc || !EditorNode::get_singleton() || !EditorFileSystem::get_singleton()) {
+		return;
+	}
+
+	if (!ProjectSettings::get_singleton() || !ProjectSettings::get_singleton()->is_project_loaded()) {
 		print_verbose("Skipping loading script doc cache since no project is open.");
 		return;
 	}
@@ -3214,15 +3248,24 @@ void EditorHelp::_load_script_doc_cache_thread(void *p_udata) {
 	ERR_FAIL_COND_MSG(!ResourceLoader::exists(get_script_doc_cache_full_path()), "Error: cannot load script doc cache from inexistent file.");
 
 	Ref<Resource> script_doc_cache_res = ResourceLoader::load(get_script_doc_cache_full_path(), "", ResourceFormatLoader::CACHE_MODE_IGNORE);
+	// GodotNext: #298. Bail out if cleanup_doc() started while loading the script doc cache.
+	if (doc_cleaned.is_set()) {
+		return;
+	}
 	if (script_doc_cache_res.is_null()) {
 		print_verbose("Script doc cache is corrupted. Regenerating it instead.");
 		_delete_script_doc_cache();
-		callable_mp_static(EditorHelp::regenerate_script_doc_cache).call_deferred();
+		if (!doc_cleaned.is_set()) {
+			callable_mp_static(EditorHelp::regenerate_script_doc_cache).call_deferred();
+		}
 		return;
 	}
 
 	Array classes = script_doc_cache_res->get_meta("classes", Array());
 	for (const Dictionary dict : classes) {
+		if (doc_cleaned.is_set()) {
+			return;
+		}
 		doc->add_doc(DocData::ClassDoc::from_dict(dict));
 	}
 
@@ -3242,22 +3285,39 @@ static void _regenerate_script_doc_cache(bool p_changes) {
 }
 
 void EditorHelp::regenerate_script_doc_cache() {
+	// GodotNext: #298. Ignore deferred or signal-triggered calls after cleanup_doc() or EditorFileSystem teardown.
+	if (doc_cleaned.is_set() || !doc || !EditorNode::get_singleton() || !EditorFileSystem::get_singleton()) {
+		return;
+	}
+
+	if (EditorNode::is_cmdline_mode()) {
+		return;
+	}
+
 	if (EditorFileSystem::get_singleton()->is_scanning()) {
 		// Wait until EditorFileSystem scanning is complete to use updated filesystem structure.
 		EditorFileSystem::get_singleton()->connect(SNAME("sources_changed"), callable_mp_static(_regenerate_script_doc_cache), CONNECT_ONE_SHOT);
 		return;
 	}
 
+	EditorFileSystemDirectory *fs = EditorFileSystem::get_singleton()->get_filesystem();
+	if (!fs) {
+		return;
+	}
+
 	_wait_for_thread(worker_thread);
 	_wait_for_thread(loader_thread);
-	loader_thread.start(_regen_script_doc_thread, EditorFileSystem::get_singleton()->get_filesystem());
+	loader_thread.start(_regen_script_doc_thread, fs);
 }
 
 // Runs on worker_thread since it writes to DocData.
 void EditorHelp::_finish_regen_script_doc_thread(void *p_udata) {
 	loader_thread.wait_to_finish();
-	_process_postponed_docs();
-	_script_docs_loaded.set();
+	// GodotNext: #298. Avoid touching doc if cleanup_doc() is in progress.
+	if (!doc_cleaned.is_set() && doc) {
+		_process_postponed_docs();
+		_script_docs_loaded.set();
+	}
 
 	OS::get_singleton()->benchmark_end_measure("EditorHelp", "Generate Script Documentation");
 }
@@ -3279,16 +3339,35 @@ void EditorHelp::_regen_script_doc_thread(void *p_udata) {
 
 	// All ResourceLoader::load() calls are done, so we can no longer deadlock with main thread.
 	// Switch to back to worker_thread from loader_thread to resynchronize access to DocData.
-	worker_thread.start(_finish_regen_script_doc_thread, nullptr);
+	// GodotNext: #298. Synchronize worker_thread handoff with cleanup_doc() so shutdown joins cleanly.
+	{
+		MutexLock lock(doc_thread_mutex);
+		if (doc_cleaned.is_set()) {
+			OS::get_singleton()->benchmark_end_measure("EditorHelp", "Generate Script Documentation");
+			return;
+		}
+		worker_thread.start(_finish_regen_script_doc_thread, nullptr);
+	}
 }
 
 void EditorHelp::_reload_scripts_documentation(EditorFileSystemDirectory *p_dir) {
+	// GodotNext: #298. Guard null directory and stop early during cleanup_doc().
+	if (!p_dir || doc_cleaned.is_set()) {
+		return;
+	}
+
 	// Recursively force compile all scripts, which should generate their documentation.
 	for (int i = 0; i < p_dir->get_subdir_count(); i++) {
+		if (doc_cleaned.is_set()) {
+			return;
+		}
 		_reload_scripts_documentation(p_dir->get_subdir(i));
 	}
 
 	for (int i = 0; i < p_dir->get_file_count(); i++) {
+		if (doc_cleaned.is_set()) {
+			return;
+		}
 		if (ClassDB::is_parent_class(p_dir->get_file_type(i), SNAME("Script"))) {
 			Ref<Script> scr = ResourceLoader::load(p_dir->get_file_path(i));
 			if (scr.is_valid()) {
@@ -3307,7 +3386,8 @@ void EditorHelp::_delete_script_doc_cache() {
 }
 
 void EditorHelp::save_script_doc_cache() {
-	if (!_script_docs_loaded.is_set()) {
+	// GodotNext: #298. Also verify doc is valid before iterating.
+	if (!_script_docs_loaded.is_set() || !doc) {
 		print_verbose("Script docs haven't been properly loaded or regenerated, so don't save them to disk.");
 		return;
 	}
@@ -3327,6 +3407,8 @@ void EditorHelp::save_script_doc_cache() {
 }
 
 void EditorHelp::generate_doc(bool p_use_cache, bool p_use_script_cache) {
+	// GodotNext: #298. Clear cleanup state on an explicit doc-generation request.
+	doc_cleaned.clear();
 	doc_generation_count++;
 	OS::get_singleton()->benchmark_begin_measure("EditorHelp", vformat("Generate Documentation (Run %d)", doc_generation_count));
 
@@ -3445,7 +3527,26 @@ Dictionary EditorHelp::get_state() {
 }
 
 void EditorHelp::cleanup_doc() {
-	_wait_for_thread();
+	// GodotNext: #298. Mark doc generation as cleaned up before joining threads so no background
+	// thread queues new deferred callbacks or hands off to worker_thread, and any already-queued
+	// deferred callbacks become no-ops when Main::cleanup() flushes MessageQueue.
+	bool wait_loader_first = false;
+	{
+		MutexLock lock(doc_thread_mutex);
+		doc_cleaned.set();
+		wait_loader_first = !worker_thread.is_started() && loader_thread.is_started();
+	}
+	if (wait_loader_first) {
+		_wait_for_thread(loader_thread);
+	}
+	_wait_for_thread(worker_thread);
+	_wait_for_thread(loader_thread);
+
+	_script_docs_loaded.clear();
+	_docs_to_add.clear();
+	_docs_to_remove.clear();
+	_docs_to_remove_by_path.clear();
+
 	memdelete(doc);
 	doc = nullptr;
 }
