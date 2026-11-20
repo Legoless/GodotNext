@@ -47,6 +47,8 @@
 #include "servers/rendering/renderer_rd/environment/next_gi_hit_materials.h"
 // GodotNext: avboit (#295)
 #include "servers/rendering/renderer_rd/effects/avboit.h"
+// GodotNext: vsm_nanite (#217)
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 using namespace RendererSceneRenderImplementation;
 
@@ -559,6 +561,25 @@ RID SceneShaderForwardClustered::ShaderData::get_raster_target_shader(bool p_har
 		return RID();
 	}
 	const int group = p_buffer ? 1 : 0;
+	if (p_hardware) {
+		if (!SceneShaderForwardClustered::singleton->raster_hw_shader.is_group_enabled(group)) {
+			SceneShaderForwardClustered::singleton->raster_hw_shader.enable_group(group);
+		}
+		return SceneShaderForwardClustered::singleton->raster_hw_shader.version_get_shader(raster_hw_version, group);
+	}
+	if (!SceneShaderForwardClustered::singleton->raster_sw_shader.is_group_enabled(group)) {
+		SceneShaderForwardClustered::singleton->raster_sw_shader.enable_group(group);
+	}
+	return SceneShaderForwardClustered::singleton->raster_sw_shader.version_get_shader(raster_sw_version, group);
+}
+
+// GodotNext: vsm_nanite (#217, plan §21.3 contract S4, step 7). Depth-only VSM form (group 2): 32-bit
+// imageAtomicMax into the physical page pool, sharing #155's raster-feature table without 64-bit atomics.
+RID SceneShaderForwardClustered::ShaderData::get_raster_target_vsm_shader(bool p_hardware) const {
+	if (raster_sw_version.is_null() || raster_hw_version.is_null() || SceneShaderForwardClustered::singleton == nullptr || !SceneShaderForwardClustered::singleton->raster_vsm_supported) {
+		return RID();
+	}
+	constexpr int group = 2;
 	if (p_hardware) {
 		if (!SceneShaderForwardClustered::singleton->raster_hw_shader.is_group_enabled(group)) {
 			SceneShaderForwardClustered::singleton->raster_hw_shader.enable_group(group);
@@ -1633,6 +1654,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		Vector<ShaderRD::VariantDefine> raster_variants;
 		raster_variants.push_back(ShaderRD::VariantDefine(0, "", false));
 		raster_variants.push_back(ShaderRD::VariantDefine(1, "\n#define VIS64_BUFFER\n", false));
+		// GodotNext: vsm_nanite (#217). Group 2: depth-only VSM page raster (32-bit imageAtomicMax, no 64-bit atomics).
+		raster_variants.push_back(ShaderRD::VariantDefine(2, "\n#define NEXTGEO_RASTER_DEPTH_ONLY\n" + RendererVirtualShadowMapStorage::get_glsl_defines(), false));
 		raster_sw_shader.initialize(raster_variants, raster_defines);
 		raster_sw_shader.set_group_int64_atomics(0, true, false);
 		raster_sw_shader.set_group_int64_atomics(1, false, true);
@@ -1644,6 +1667,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
 		raster_target_ready = tier.hybrid;
 		raster_image_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_INT64_ATOMICS);
 		raster_buffer_int64_supported = tier.hybrid && RD::get_singleton()->has_feature(RD::SUPPORTS_BUFFER_INT64_ATOMICS);
+		raster_vsm_supported = RD::get_singleton()->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT);
 	}
 
 	{

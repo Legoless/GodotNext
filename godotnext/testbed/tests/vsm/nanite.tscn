@@ -1,0 +1,6 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://tests/vsm/nanite.gd" id="1_nanite"]
+
+[node name="VSMNanite" type="Node3D"]
+script = ExtResource("1_nanite")

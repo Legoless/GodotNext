@@ -486,6 +486,8 @@ bool DebugEffects::_ensure_vsm_debug() {
 	page_modes.push_back("\n#define MODE_CLEAR\n");
 	page_modes.push_back("\n#define MODE_DIRTY\n");
 	page_modes.push_back("\n#define MODE_PAIRS\n");
+	// GodotNext: vsm_nanite (#217).
+	page_modes.push_back("\n#define MODE_NANITE_PAIRS\n");
 	vsm_debug.pages_shader.initialize(page_modes, defines);
 	vsm_debug.pages_version = vsm_debug.pages_shader.version_create();
 	for (int mode = 0; mode < VSM_DEBUG_PAGES_MAX; mode++) {
@@ -562,6 +564,30 @@ void DebugEffects::draw_vsm(const VSMDebugInput &p_input) {
 			rd->compute_list_bind_uniform_set(list, set, 0);
 			rd->compute_list_set_push_constant(list, &push, sizeof(push));
 			rd->compute_list_dispatch(list, pair_groups, 1, 1);
+		}
+		// GodotNext: vsm_nanite (#217). Add NextGeo (cluster, page) pairs to VSM_OVERDRAW.
+		if (p_input.nanite_cluster_capacity > 0) {
+			const RID nanite_shader = vsm_debug.pages_shader.version_get_shader(vsm_debug.pages_version, VSM_DEBUG_PAGES_NANITE_PAIRS);
+			const uint32_t nanite_groups = RendererVirtualShadowMapStorage::grid_stride_groups(p_input.nanite_cluster_capacity, 64u, p_input.max_dispatch_groups);
+			VSMDebugPagesPushConstant npush = push;
+			npush.pair_capacity = p_input.nanite_cluster_capacity;
+			npush.pair_stride = nanite_groups * 64u;
+			for (int chain = 0; chain < 2; chain++) {
+				if (p_input.nanite_clusters[chain].is_null() || p_input.nanite_counters[chain].is_null()) {
+					continue;
+				}
+				RD::Uniform u_npairs(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, p_input.nanite_clusters[chain]);
+				RD::Uniform u_ncnt(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, p_input.nanite_counters[chain]);
+				const RID nset = uniform_set_cache->get_cache(nanite_shader, 0, u_state, u_dirty, u_npairs, u_ncnt, u_info);
+				if (nset.is_null()) {
+					continue;
+				}
+				rd->compute_list_add_barrier(list);
+				rd->compute_list_bind_compute_pipeline(list, vsm_debug.pages_pipelines[VSM_DEBUG_PAGES_NANITE_PAIRS]);
+				rd->compute_list_bind_uniform_set(list, nset, 0);
+				rd->compute_list_set_push_constant(list, &npush, sizeof(npush));
+				rd->compute_list_dispatch(list, nanite_groups, 1, 1);
+			}
 		}
 		rd->compute_list_end();
 		rd->draw_command_end_label();

@@ -51,7 +51,12 @@ void main() {
 		}
 	} else {
 		NextGeoInstanceRecord record = nextgeo_records.data[entry.x];
-		float effective_cull_sign = ((cull_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u) ? -raster.cull_sign : raster.cull_sign;
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+		float base_cull_sign = _ng_vsm_reverse_cull ? 1.0 : -1.0;
+#else
+		float base_cull_sign = raster.cull_sign;
+#endif
+		float effective_cull_sign = ((cull_flags & NEXTGEO_BUCKET_CULL_FRONT) != 0u) ? -base_cull_sign : base_cull_sign;
 		mat3 basis = mat3(record.transform[0].xyz, record.transform[1].xyz, record.transform[2].xyz);
 		if (determinant(basis) * effective_cull_sign < 0.0 && corner != 0u) {
 			corner = 3u - corner;
@@ -68,11 +73,13 @@ void main() {
 
 #VERSION_DEFINES
 
+#ifndef NEXTGEO_RASTER_DEPTH_ONLY
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #ifdef VIS64_BUFFER
 #extension GL_EXT_shader_atomic_int64 : require
 #else
 #extension GL_EXT_shader_image_int64 : require
+#endif
 #endif
 
 #define MODE_VISIBILITY_RESOLVE
@@ -85,10 +92,16 @@ void main() {
 layout(location = 0) in flat uint vis_id_in;
 
 void main() {
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	if (gl_HelperInvocation || vis_id_in == 0xFFFFFFFFu) {
+		return;
+	}
+#else
 	// Depth 0 is the far plane and the empty texel.
 	if (!(gl_FragCoord.z > 0.0) || vis_id_in == 0xFFFFFFFFu) {
 		return;
 	}
+#endif
 	uvec2 entry;
 	uvec4 desc;
 	uint cull_flags;
@@ -100,5 +113,9 @@ void main() {
 	if (!_ng_raster_covered) {
 		return;
 	}
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	_ng_raster_write(ivec2(gl_FragCoord.xy), _ng_vsm_depth_interp, vis_id_in);
+#else
 	_ng_raster_write(ivec2(gl_FragCoord.xy), gl_FragCoord.z, vis_id_in);
+#endif
 }

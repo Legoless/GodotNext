@@ -23,6 +23,11 @@
 #include "../scene_data_inc.glsl"
 #include "nextgeo_records_inc.glsl"
 #include "raster_features_inc.glsl"
+// GodotNext: vsm_nanite (#217). Depth-only VSM page raster shares the material raster target.
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+#include "../vsm_mark_inc.glsl"
+#include "../vsm_raster_inc.glsl"
+#endif
 
 #define SHADER_IS_SRGB false
 #define SHADER_SPACE_FAR 0.0
@@ -55,6 +60,23 @@ layout(set = 0, binding = 3, std430) buffer restrict readonly NextGeoClusterTabl
 }
 nextgeo_cluster_table;
 
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+// GodotNext: vsm_nanite (#217). (record_idx, global_cluster, dirty_idx, flags) pairs, per-map data and dirty pages.
+layout(set = 0, binding = 4, std430) buffer restrict readonly NextGeoVSMClusters {
+	uvec4 data[];
+}
+nextgeo_vsm_clusters;
+
+layout(set = 0, binding = 5, std430) buffer restrict readonly VSMMapDataBuffer {
+	VSMMapData data[];
+}
+vsm_maps;
+
+layout(set = 0, binding = 6, std430) buffer restrict readonly VSMDirtyBuffer {
+	uvec4 data[];
+}
+vsm_dirty;
+#else
 layout(set = 0, binding = 4, std430) buffer restrict readonly NextGeoVisibleClusters {
 	uvec2 data[];
 }
@@ -79,6 +101,7 @@ layout(set = 0, binding = 6, std430) buffer restrict readonly NextGeoBucketTable
 	uint data[];
 }
 nextgeo_bucket_table;
+#endif
 
 /* Set 1: the scene environment the material code reads, as scene_forward_clustered_inc.glsl names it. */
 
@@ -144,7 +167,14 @@ raster_bin_state;
 
 // Vertex stages may not write storage resources without vertexPipelineStoresAndAtomics.
 #ifndef NEXTGEO_RASTER_HW_VERTEX
-#ifdef VIS64_BUFFER
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+// GodotNext: vsm_nanite (#217). 32-bit depth-only VSM physical page pool and #277 sink buffer.
+layout(set = 2, binding = 2, r32ui) uniform restrict uimage2DArray vsm_pool;
+layout(set = 2, binding = 3, std430) buffer restrict VSMCounters {
+	uint data[];
+}
+vsm_counters;
+#elif defined(VIS64_BUFFER)
 layout(set = 2, binding = 2, std430) buffer restrict Vis64 {
 	uint64_t data[];
 }
@@ -232,6 +262,19 @@ vec3 _ng_bin_c[3];
 vec2 _ng_uv_c[3];
 vec2 _ng_uv2_c[3];
 vec4 _ng_col_c[3];
+
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+// GodotNext: vsm_nanite (#217). Active VSM page context for the current (cluster, page) pair.
+VSMMapData _ng_vsm_map;
+uint _ng_vsm_mip = 0u;
+uvec2 _ng_vsm_slot = uvec2(0u);
+ivec2 _ng_vsm_phys_origin = ivec2(0);
+int _ng_vsm_layer = 0;
+bool _ng_vsm_reverse_cull = false;
+float _ng_vsm_depth_c[3];
+float _ng_vsm_last_depth = 0.0;
+float _ng_vsm_depth_interp = 0.0;
+#endif
 
 // Cleared by _NG_RASTER_DISCARD and by the alpha tests.
 bool _ng_raster_covered = true;
@@ -322,6 +365,11 @@ void _ng_resolve_vertex_corner(
 			scene_data.inv_view_matrix[1],
 			scene_data.inv_view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	// GodotNext: vsm_nanite (#217). The pair's map is the light camera, as in MODE_VSM.
+	mat4 _ng_vsm_view_matrix;
+	vsm_map_view(_ng_vsm_map, scene_data.main_cam_inv_view_matrix[3].xyz, _ng_vsm_view_matrix, inv_view_matrix);
+#endif
 
 	mat4 model_matrix = transpose(mat4(in_model_matrix[0],
 			in_model_matrix[1],
@@ -330,6 +378,9 @@ void _ng_resolve_vertex_corner(
 
 #ifdef USE_DOUBLE_PRECISION
 	vec3 view_precision = scene_data.inv_view_precision.xyz;
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	view_precision = vec3(0.0);
+#endif
 #endif
 
 	mat3 model_normal_matrix;
@@ -374,6 +425,9 @@ void _ng_resolve_vertex_corner(
 			scene_data.view_matrix[1],
 			scene_data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	read_view_matrix = _ng_vsm_view_matrix;
+#endif
 
 #ifdef USE_DOUBLE_PRECISION
 	mat4 modelview = read_view_matrix * model_matrix;
@@ -424,7 +478,11 @@ void _ng_resolve_vertex_corner(
 	binormal_interp = _ng_safe_normalize(binormal, vec3(0.0, 1.0, 0.0));
 #endif
 
-#ifdef OVERRIDE_POSITION
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	// GodotNext: vsm_nanite (#217). Project world position after vertex() into the target VSM page.
+	vec3 _ng_vsm_world = (inv_view_matrix * vec4(vertex_interp, 1.0)).xyz;
+	r_clip_pos = vsm_page_clip_position(_ng_vsm_map, _ng_vsm_mip, _ng_vsm_slot, _ng_vsm_world, _ng_vsm_last_depth);
+#elif defined(OVERRIDE_POSITION)
 	r_clip_pos = position;
 #else
 	r_clip_pos = projection_matrix * vec4(vertex_interp, 1.0);
@@ -469,6 +527,46 @@ bool _ng_raster_cluster(uint p_vis_cluster, out uvec2 r_entry, out uvec4 r_desc,
 	r_entry = uvec2(0u);
 	r_desc = uvec4(0u);
 	r_cull_flags = 0u;
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	// bin_push.pad.x carries VSM cluster_capacity.
+	if (p_vis_cluster >= bin_push.pad.x || p_vis_cluster >= 0x1FFFFFFu) {
+		return false;
+	}
+	uvec4 pair = nextgeo_vsm_clusters.data[p_vis_cluster];
+	r_entry = pair.xy;
+	NextGeoInstanceRecord record = nextgeo_records.data[r_entry.x];
+	if ((record.flags & NEXTGEO_RECORD_VALID) == 0u || (record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_OFF) {
+		return false;
+	}
+	NextGeoMeshRecord mesh = nextgeo_meshes.data[record.virtual_mesh];
+	if (mesh.page_count == 0u || r_entry.y < mesh.cluster_offset) {
+		return false;
+	}
+	uint local_cluster = r_entry.y - mesh.cluster_offset;
+	if (local_cluster >= mesh.cluster_count) {
+		return false;
+	}
+	r_desc = nextgeo_cluster_table.data[mesh.page_table_offset + local_cluster];
+	uint stride = r_desc.z & 0xFFu;
+	uint vert_count = (r_desc.z >> 8u) & 0xFFu;
+	uint surface_id = r_desc.w & 0xFFFFu;
+	if (stride < 3u || vert_count == 0u || surface_id >= 32u || (record.surface_mask & (1u << surface_id)) == 0u) {
+		return false;
+	}
+	if ((record.flags & NEXTGEO_RECORD_CAST_SHADOW_MASK) == NEXTGEO_RECORD_CAST_SHADOW_DOUBLE_SIDED || (record.pad1[0] & (1u << surface_id)) != 0u) {
+		r_cull_flags |= NEXTGEO_BUCKET_CULL_DISABLED;
+	} else if ((record.pad1[1] & (1u << surface_id)) != 0u) {
+		r_cull_flags |= NEXTGEO_BUCKET_CULL_FRONT;
+	}
+	uvec4 rec = vsm_dirty.data[pair.z];
+	_ng_vsm_map = vsm_maps.data[rec.x];
+	_ng_vsm_mip = rec.y & 0xFFu;
+	_ng_vsm_slot = uvec2((rec.y >> 8u) & 0xFFu, (rec.y >> 16u) & 0xFFu);
+	_ng_vsm_phys_origin = ivec2(vsm_raster_entry_page(rec.z) * VSM_PAGE_SIZE);
+	_ng_vsm_layer = int(pair.w & 1u);
+	_ng_vsm_reverse_cull = (pair.w & 2u) != 0u;
+	return true;
+#else
 	if (p_vis_cluster >= raster.visible_capacity || p_vis_cluster >= 0x1FFFFFFu) {
 		return false;
 	}
@@ -504,6 +602,7 @@ bool _ng_raster_cluster(uint p_vis_cluster, out uvec2 r_entry, out uvec4 r_desc,
 		r_cull_flags = bucket_word & (NEXTGEO_BUCKET_CULL_DISABLED | NEXTGEO_BUCKET_CULL_FRONT);
 	}
 	return true;
+#endif
 }
 
 // Loads triangle p_tri of the visible cluster and runs vertex() at its three corners: _ng_clip_c and
@@ -632,6 +731,9 @@ bool _ng_raster_load_triangle(uvec2 p_entry, uvec4 p_desc, uint p_tri) {
 		_ng_uv_c[_ng_corner] = uv_interp;
 		_ng_uv2_c[_ng_corner] = uv2_interp;
 		_ng_col_c[_ng_corner] = color_interp;
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+		_ng_vsm_depth_c[_ng_corner] = _ng_vsm_last_depth;
+#endif
 		{
 #CODE : RESOLVE_VERTEX_STORE
 		}
@@ -652,16 +754,25 @@ void _ng_raster_interpolate(vec2 p_frag_xy) {
 	_ng_front_facing = (_ng_det > 0.0);
 
 	float _ng_inv_det = abs(_ng_det) > 1e-20 ? (1.0 / _ng_det) : 0.0;
-	vec3 _ng_p = vec3(p_frag_xy * scene_data_block.data.screen_pixel_size * 2.0 - 1.0, 1.0);
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	vec2 _ng_pixel_size = vec2(1.0 / float(VSM_PAGE_SIZE));
+#else
+	vec2 _ng_pixel_size = scene_data_block.data.screen_pixel_size;
+#endif
+	vec3 _ng_p = vec3(p_frag_xy * _ng_pixel_size * 2.0 - 1.0, 1.0);
 	vec3 _ng_q = vec3(dot(_ng_u0, _ng_p), dot(_ng_u1, _ng_p), dot(_ng_u2, _ng_p)) * _ng_inv_det;
 	float _ng_inv_w_sum = _ng_q.x + _ng_q.y + _ng_q.z;
 	float _ng_w_interp = abs(_ng_inv_w_sum) > 1e-20 ? (1.0 / _ng_inv_w_sum) : 1.0;
 	vec3 _ng_bary = abs(_ng_inv_w_sum) > 1e-20 ? (_ng_q * _ng_w_interp) : vec3(1.0, 0.0, 0.0);
 
-	vec3 _ng_dq_dx = vec3(_ng_u0.x, _ng_u1.x, _ng_u2.x) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.x);
-	vec3 _ng_dq_dy = vec3(_ng_u0.y, _ng_u1.y, _ng_u2.y) * (_ng_inv_det * 2.0 * scene_data_block.data.screen_pixel_size.y);
+	vec3 _ng_dq_dx = vec3(_ng_u0.x, _ng_u1.x, _ng_u2.x) * (_ng_inv_det * 2.0 * _ng_pixel_size.x);
+	vec3 _ng_dq_dy = vec3(_ng_u0.y, _ng_u1.y, _ng_u2.y) * (_ng_inv_det * 2.0 * _ng_pixel_size.y);
 	vec3 _ng_dbary_dx = (_ng_dq_dx - _ng_bary * (_ng_dq_dx.x + _ng_dq_dx.y + _ng_dq_dx.z)) * _ng_w_interp;
 	vec3 _ng_dbary_dy = (_ng_dq_dy - _ng_bary * (_ng_dq_dy.x + _ng_dq_dy.y + _ng_dq_dy.z)) * _ng_w_interp;
+
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	_ng_vsm_depth_interp = _ng_vsm_depth_c[0] * _ng_bary.x + _ng_vsm_depth_c[1] * _ng_bary.y + _ng_vsm_depth_c[2] * _ng_bary.z;
+#endif
 
 	vec3 _ng_z_c = vec3(_ng_clip_c[0].z, _ng_clip_c[1].z, _ng_clip_c[2].z);
 	_ng_fragcoord = vec4(p_frag_xy, dot(_ng_q, _ng_z_c), _ng_inv_w_sum);
@@ -830,6 +941,10 @@ void _ng_raster_fragment(in SceneData scene_data) {
 			scene_data.view_matrix[2],
 			vec4(0.0, 0.0, 0.0, 1.0)));
 	vec2 read_viewport_size = scene_data.viewport_size;
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+	vsm_map_view(_ng_vsm_map, scene_data.main_cam_inv_view_matrix[3].xyz, read_view_matrix, inv_view_matrix);
+	read_viewport_size = vec2(float(VSM_PAGE_SIZE));
+#endif
 
 #ifdef POINT_COORD_USED
 	vec2 point_coord = vec2(0.5);
@@ -858,6 +973,23 @@ void _ng_raster_fragment(in SceneData scene_data) {
 #endif
 #endif
 }
+
+#ifdef NEXTGEO_RASTER_DEPTH_ONLY
+// GodotNext: vsm_nanite (#217). 32-bit reversed-Z depth atomic into the VSM physical page pool.
+void nextgeo_raster_write_depth(ivec2 p_pixel, float p_depth) {
+	if (any(lessThan(p_pixel, ivec2(0))) || any(greaterThanEqual(p_pixel, ivec2(int(VSM_PAGE_SIZE))))) {
+		return;
+	}
+	uint packed_depth = vsm_depth_pack(p_depth);
+	if (packed_depth != 0u) {
+		ivec3 pool_coord = ivec3(_ng_vsm_phys_origin + p_pixel, _ng_vsm_layer);
+		// #277: every atomic's result is used.
+		if (imageAtomicMax(vsm_pool, pool_coord, packed_depth) == 0xFFFFFFFFu) {
+			vsm_counters.data[21u] = 1u;
+		}
+	}
+}
+#endif
 
 // The result of a 64-bit atomic max is never read: Metal's 64-bit max returns nothing (#175).
 void _ng_raster_write(ivec2 p_pixel, float p_depth, uint p_visibility_id) {

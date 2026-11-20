@@ -92,4 +92,23 @@ void main() {
 		}
 	}
 #endif
+#ifdef MODE_NANITE_PAIRS
+	// GodotNext: vsm_nanite (#217). Count NextGeo (cluster, dirty_page) pairs into VSM_OVERDRAW.
+	// cull_state binds NextGeoVSMCounters (word 11 = cluster_count); pairs binds VSMClusters (z = dirty_idx).
+	uint count = min(cull_state.data[11], params.pair_capacity);
+	uint dirty_count = min(alloc_state.data[VSM_STATE_DIRTY], params.pool_pages);
+	uint stride = max(params.pair_stride, 1u);
+	for (uint i = index; i < count; i += stride) {
+		uint record_index = pairs.data[i].z;
+		if (record_index < dirty_count) {
+			uint page = page_index(dirty.data[record_index].z);
+			if (page < params.pool_pages) {
+				// #277: every atomic's result is used.
+				if (atomicAdd(page_info.data[page], 256u) == 0xFFFFFFFFu) {
+					page_info.data[params.pool_pages] = 1u;
+				}
+			}
+		}
+	}
+#endif
 }

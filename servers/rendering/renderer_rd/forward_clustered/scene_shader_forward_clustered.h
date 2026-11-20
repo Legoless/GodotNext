@@ -548,6 +548,8 @@ public:
 		// The raster target's shader for one form (software or hardware) and visibility-buffer storage
 		// (image or buffer); invalid when this device does not build that storage.
 		RID get_raster_target_shader(bool p_hardware, bool p_buffer) const;
+		// GodotNext: vsm_nanite (#217). Depth-only VSM form (group 2): 32-bit imageAtomicMax, no 64-bit atomics.
+		RID get_raster_target_vsm_shader(bool p_hardware) const;
 		void _free_raster_target();
 		// GodotNext: nextgeo_shading_bins (#158). The compute form's shader and pipeline for one variant and
 		// specialization; invalid when the material has no compute form or it did not compile, which also
@@ -622,6 +624,8 @@ public:
 	bool raster_target_ready = false;
 	bool raster_image_int64_supported = false;
 	bool raster_buffer_int64_supported = false;
+	// GodotNext: vsm_nanite (#217). Group 2 needs only 32-bit image atomics.
+	bool raster_vsm_supported = false;
 	bool emulate_point_size = false;
 	bool depth_prepass_enabled = false;
 

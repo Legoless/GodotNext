@@ -43,6 +43,8 @@
 #include "core/variant/dictionary.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_raster_bins.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_sw_raster.h"
+// GodotNext: vsm_nanite (#217).
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_vsm.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/cluster_cull.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/hiz_pyramid.glsl.gen.h"
@@ -51,6 +53,9 @@
 #include "servers/rendering/renderer_rd/shaders/nextgeo/sw_raster.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_export.glsl.gen.h"
 #include "servers/rendering/renderer_rd/shaders/nextgeo/visibility_raster.glsl.gen.h"
+// GodotNext: vsm_nanite (#217).
+#include "servers/rendering/renderer_rd/shaders/vsm_raster_nextgeo.glsl.gen.h"
+#include "servers/rendering/renderer_rd/shaders/vsm_raster_sw.glsl.gen.h"
 
 class RendererVirtualMeshStorage;
 
@@ -83,6 +88,42 @@ struct NextGeoRasterBinProgram {
 	RID sw_shader[2];
 	RID hw_shader[2];
 	LocalVector<RD::Uniform> material_uniforms;
+};
+
+// GodotNext: vsm_nanite (#217, plan §21.3 contract S4, step 7). One programmable raster bin in the VSM
+// page raster (group 2 depth-only shaders from SceneShaderForwardClustered, sharing #155's table).
+struct NextGeoVSMBinProgram {
+	uint32_t bin = 0;
+	uint32_t features = 0;
+	RID sw_shader;
+	RID hw_shader;
+	LocalVector<RD::Uniform> material_uniforms;
+};
+
+// GodotNext: vsm_nanite (#217). Inputs for one view's VSM x Nanite directional + local cull & raster.
+struct NextGeoVSMInputs {
+	RID pool_texture;
+	RID page_table_buffer;
+	RID map_data_buffer;
+	RID dirty_buffer;
+	RID alloc_state_buffer;
+	RID indirect_buffer;
+	uint32_t table_maps = 0;
+	uint32_t pool_pages = 0;
+	uint32_t grid_width = 0;
+	uint64_t pool_reallocations = 0;
+	Vector3 camera_position;
+	float max_texel_error = RendererRD::NEXTGEO_VSM_DEFAULT_MAX_TEXEL_ERROR;
+	float lod_bias = 1.0f;
+	float sw_max_edge_texels = RendererRD::NEXTGEO_VSM_DEFAULT_SW_MAX_EDGE_TEXELS;
+	bool hiz_enabled = true;
+	bool dynamic_layer_hook = false;
+	bool count_sw_writes = false;
+	LocalVector<RendererRD::NextGeoVSMMapMeta> map_meta;
+	const uint32_t *raster_bin_table = nullptr;
+	uint32_t raster_bin_table_words = 0;
+	LocalVector<NextGeoVSMBinProgram> raster_bin_programs;
+	LocalVector<RD::Uniform> environment_uniforms;
 };
 
 struct NextGeoRasterInputs {
@@ -151,6 +192,16 @@ public:
 	bool dispatch(RendererVirtualMeshStorage *p_storage, RID p_depth, const Projection &p_view_projection, const Projection &p_prev_view_projection, const Vector3 &p_camera, const Size2i &p_internal_size, uint32_t p_cull_mask, float p_max_pixel_error, float p_lod_bias, bool p_occlusion, bool p_debug_stats, const NextGeoRasterInputs *p_raster = nullptr, bool p_is_main_view = true);
 	bool dispatch_shadows(RendererVirtualMeshStorage *p_storage, const NextGeoShadowViewDesc *p_views, uint32_t p_view_count, bool p_debug_stats);
 	bool draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, const Rect2i &p_rect, bool p_dual_paraboloid);
+	// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). Per-page multi-view cluster cull, hybrid
+	// HW/SW rasterization (1 indirect chain for directional maps, 1 for local maps), and 1-level
+	// per-page Hi-Z build.
+	bool is_vsm_available();
+	bool dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextGeoVSMInputs &p_inputs, Dictionary *r_stats = nullptr);
+	void update_vsm_hiz(RID p_pool_texture, RID p_dirty_buffer, RID p_alloc_state_buffer, RID p_indirect_buffer, uint32_t p_table_maps, uint32_t p_pool_pages, uint32_t p_grid_width, uint64_t p_pool_reallocations);
+	void invalidate_vsm_hiz();
+	void mark_vsm_dynamic_test(RID p_page_table, uint32_t p_table_maps, uint32_t p_pool_pages);
+	RID get_vsm_clusters_buffer(uint32_t p_chain) const { return p_chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT ? vsm_clusters[p_chain] : RID(); }
+	RID get_vsm_counters_buffer(uint32_t p_chain) const { return p_chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT ? vsm_counters[p_chain] : RID(); }
 	void begin_shadow_raster_timestamps();
 	void end_shadow_raster_timestamps();
 	void free_resources();
@@ -180,6 +231,18 @@ private:
 	void _draw_raster_bins(uint32_t p_phase, uint32_t p_list_base, const NextGeoRasterInputs &p_raster, const Size2i &p_internal_size);
 	RID _raster_bin_compute_pipeline(RID p_shader);
 	RID _raster_bin_render_pipeline(RID p_shader, RD::FramebufferFormatID p_format);
+	// GodotNext: vsm_nanite (#217).
+	bool _ensure_vsm();
+	bool _ensure_vsm_hiz(uint32_t p_pool_pages, uint32_t p_grid_width, uint64_t p_pool_reallocations);
+	void _dispatch_vsm_hiz_build(RID p_pool_texture, RID p_dirty_buffer, RID p_alloc_state_buffer, RID p_indirect_buffer, uint32_t p_table_maps, uint32_t p_pool_pages, uint32_t p_grid_width);
+	bool _ensure_vsm_bins(RenderingDevice *p_rd);
+	void _compact_vsm_bins();
+	void _draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inputs);
+	RID _vsm_bin_render_pipeline(RID p_shader, RD::FramebufferFormatID p_format);
+	void _free_vsm_resources();
+	void _request_vsm_stats(uint32_t p_ring_slot);
+	void _publish_vsm_stats(const PackedByteArray &p_data, uint32_t p_ring_slot);
+	static void _readback_vsm_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot);
 	void _swap_hiz();
 	void _release_hiz();
 	RID _storage(uint32_t p_bytes);
@@ -327,4 +390,60 @@ private:
 	uint32_t shadow_active_view_count = 0;
 	bool shadow_capture_timestamps = false;
 	uint64_t last_harvested_ts_frame = UINT64_MAX;
+
+	// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). Lazily initialized on first VSM x Nanite view.
+	bool vsm_ready = false;
+	bool vsm_failed = false;
+	ClusterCullShaderRD vsm_cluster_shader;
+	RID vsm_cluster_version;
+	RID vsm_setup_pipeline;
+	RID vsm_seed_pipeline;
+	RID vsm_bvh_pipeline;
+	RID vsm_leaf_pipeline;
+	VsmRasterNextgeoShaderRD vsm_hw_shader;
+	RID vsm_hw_version;
+	PipelineCacheRD vsm_hw_pipeline;
+	VsmRasterSwShaderRD vsm_sw_shader;
+	RID vsm_sw_version;
+	RID vsm_sw_pipeline;
+	RID vsm_hiz_build_pipeline;
+	RID vsm_mark_dynamic_pipeline;
+	RID vsm_empty_fb;
+	RID vsm_params_buffer;
+	RID vsm_map_meta_buffer;
+	uint32_t vsm_map_meta_capacity = 0;
+	RID vsm_counters[RendererRD::NEXTGEO_VSM_CHAIN_COUNT];
+	RID vsm_counters_ring[3]; // 2 * sizeof(NextGeoVSMCounters) per ring slot for async telemetry.
+	uint32_t vsm_counters_ring_cursor = 0;
+	bool vsm_counters_ring_pending[3] = { false, false, false };
+	RID vsm_seed_args;
+	RID vsm_bvh_args[2]; // Ping-pong across BVH levels (zero render-graph dual-usage hazards).
+	RID vsm_group_args;
+	RID vsm_raster_args;
+	RID vsm_raster_counts;
+	RID vsm_nodes_a;
+	RID vsm_nodes_b;
+	RID vsm_groups;
+	RID vsm_clusters[RendererRD::NEXTGEO_VSM_CHAIN_COUNT];
+	RID vsm_raster_lists;
+	// Per-page 1-level 8x8 Hi-Z texture & owner table (resized with the VSM pool).
+	RID vsm_hiz_texture;
+	RID vsm_hiz_owner;
+	uint32_t vsm_hiz_pool_pages = 0;
+	uint32_t vsm_hiz_grid_width = 0;
+	uint64_t vsm_hiz_pool_reallocations = UINT64_MAX;
+	// VSM programmable raster bins (Step 7, reuses raster_bin_compact_shader with dedicated VSM buffers).
+	bool vsm_bins_ready = false;
+	RID vsm_bin_state;
+	RID vsm_bin_args;
+	RID vsm_bin_append;
+	RID vsm_bin_lists;
+	RID vsm_bin_table_buffer;
+	uint32_t vsm_bin_table_capacity = 0;
+	HashMap<RID, RID> vsm_bin_render_pipelines;
+	RD::FramebufferFormatID vsm_bin_render_format = RD::INVALID_ID;
+	// Last asynchronous GPU counters read back from vsm_counters_ring.
+	RendererRD::NextGeoVSMCounters vsm_last_gpu_counters[RendererRD::NEXTGEO_VSM_CHAIN_COUNT];
+	bool vsm_have_gpu_counters = false;
+	uint64_t vsm_dispatched_views = 0;
 };

@@ -1351,6 +1351,10 @@ void RenderForwardClustered::_fill_render_list(RenderListType p_render_list, con
 		// GodotNext: nextgeo_raster_bins (#155). The raster-bin table exists only while a programmable bin does.
 		if (!p_append) {
 			nextgeo_raster_bins_used = 0;
+			// GodotNext: vsm_nanite (#217). Clear per-view bin owners so recycled bins never retain stale pointers.
+			for (uint32_t bin = 0; bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT; bin++) {
+				nextgeo_raster_bin_owners[bin] = {};
+			}
 			if (nextgeo_programmable_view_active) {
 				const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
 				nextgeo_raster_bin_table.resize(MAX(record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
@@ -2577,14 +2581,21 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
 		current_cluster_builder->bake_cluster();
 	}
 
-	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218). After the light buffers (vsm_map_base) and the cluster.
+	// GodotNext: vsm_page_marking (#219) / vsm_non_nanite (#218) / vsm_nanite (#217). After the light buffers (vsm_map_base) and the cluster.
 	if (vsm_mark_view && rb_data.is_valid() && current_cluster_builder) {
+		// GodotNext: vsm_nanite (#217). Optional test/debug hook (off by default until #212 lands):
+		// marks cached pages' dynamic layer dirty before allocation so dynamic-layer routing and
+		// next-frame Hi-Z culling can be exercised end-to-end on the GPU.
+		if (vsm_storage != nullptr && bool(_vsm_setting("debug_nanite_dynamic_layer", false))) {
+			nextgeo_cut.mark_vsm_dynamic_test(vsm_storage->get_page_table_buffer(), vsm_storage->get_table_capacity(), vsm_storage->get_pool_page_count());
+		}
 		// GodotNext: vsm_settings_debug (#221). Whether this view wrote the dirty list the debug draws read
 		// (vsm_storage from vsm_projection (#222) above).
 		const uint64_t vsm_marked_before = vsm_storage != nullptr ? vsm_storage->get_marked_view_count() : 0;
 		_vsm_mark_pages(p_render_data);
 		vsm_debug_view_marked = vsm_storage != nullptr && vsm_storage->get_marked_view_count() != vsm_marked_before;
 		_vsm_raster_non_nanite(p_render_data);
+		_vsm_raster_nanite(p_render_data);
 	}
 	vsm_mark_view = false;
 	// GodotNext: vsm_projection (#222). What this view's light loop reads to sample the maps.
@@ -2618,16 +2629,15 @@ bool RenderForwardClustered::_vsm_marks_view(const RenderDataRD *p_render_data) 
 	return _vsm_view_marks(p_render_data->render_buffers, p_render_data->reflection_probe.is_valid(), p_render_data->scene_data->view_count);
 }
 
-// GodotNext: vsm_projection (#222). NextGeo virtual-mesh casters reach the shadow atlas only, until #217
-// rasterizes their clusters into VSM pages: while any is live, views keep the atlas path (their pages are
-// still marked and drawn).
+// GodotNext: vsm_projection (#222) / vsm_nanite (#217). True while any NextGeo virtual-mesh
+// instance is live; views still sample VSM once NextGeoCut's VSM raster is ready.
 static bool _vsm_nextgeo_casters_live() {
 	return RSG::virtual_mesh_storage != nullptr && RSG::virtual_mesh_storage->get_live_record_count() > 0;
 }
 
 bool RenderForwardClustered::vsm_view_samples(const Ref<RenderSceneBuffers> &p_render_buffers, bool p_reflection_probe, uint32_t p_view_count) {
-	// GodotNext: vsm_projection (#222).
-	return _vsm_view_marks(p_render_buffers, p_reflection_probe, p_view_count) && !_vsm_nextgeo_casters_live();
+	// GodotNext: vsm_projection (#222) / vsm_nanite (#217).
+	return _vsm_view_marks(p_render_buffers, p_reflection_probe, p_view_count) && (!_vsm_nextgeo_casters_live() || nextgeo_cut.is_vsm_available());
 }
 
 bool RenderForwardClustered::vsm_light_skips_atlas(RID p_light_instance, RID p_environment) const {
@@ -2909,11 +2919,21 @@ void RenderForwardClustered::_vsm_debug_draw(const RenderDataRD *p_render_data) 
 	if (vsm_debug_view_marked && vsm->get_page_buffers_capacity() >= input.pool_pages) {
 		input.alloc_state = vsm->get_state_buffer();
 		input.dirty = vsm->get_dirty_buffer();
+		if (vsm_debug_view_pairs || vsm_debug_view_nanite_pairs) {
+			input.max_dispatch_groups = uint32_t(CLAMP(RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X), uint64_t(1), uint64_t(UINT32_MAX)));
+		}
 		if (vsm_debug_view_pairs) {
 			input.pairs = vsm_pairs_buffer;
 			input.pair_capacity = vsm_pairs_capacity;
 			input.cull_state = vsm_cull_state_buffer;
-			input.max_dispatch_groups = uint32_t(CLAMP(RD::get_singleton()->limit_get(RD::LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X), uint64_t(1), uint64_t(UINT32_MAX)));
+		}
+		// GodotNext: vsm_nanite (#217). Include NextGeo (cluster, page) pairs in VSM_OVERDRAW.
+		if (vsm_debug_view_nanite_pairs) {
+			input.nanite_clusters[0] = nextgeo_cut.get_vsm_clusters_buffer(0);
+			input.nanite_clusters[1] = nextgeo_cut.get_vsm_clusters_buffer(1);
+			input.nanite_counters[0] = nextgeo_cut.get_vsm_counters_buffer(0);
+			input.nanite_counters[1] = nextgeo_cut.get_vsm_counters_buffer(1);
+			input.nanite_cluster_capacity = RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY;
 		}
 	}
 
@@ -3319,7 +3339,11 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 			RSG::virtual_mesh_storage->get_live_record_count() > 0 &&
 			RSG::virtual_mesh_storage->get_record_count() > 0 &&
 			RSG::virtual_mesh_storage->get_record_buffer().is_valid() &&
-			RSG::virtual_mesh_storage->get_max_bvh_levels() > 0;
+			RSG::virtual_mesh_storage->get_max_bvh_levels() > 0 &&
+			nextgeo_cut.is_vsm_available();
+	// GodotNext: vsm_nanite (#217, step 7). Programmable-bin virtual surfaces hand off to VSM Nanite
+	// whenever this view runs programmable raster bins; otherwise they stay on the non-Nanite VSM path.
+	const bool skip_prog_for_vsm = skip_virtual_for_vsm && nextgeo_programmable_view_active;
 
 	auto has_non_virtual_shadow_surface = [&](GeometryInstanceForwardClustered *p_inst) -> bool {
 		if (p_inst == nullptr || p_inst->data == nullptr || p_inst->instance_count == 0) {
@@ -3329,7 +3353,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 			if ((s->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) == 0) {
 				continue;
 			}
-			if (skip_virtual_for_vsm && (s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0) {
+			if (skip_virtual_for_vsm && (s->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0 && (s->nextgeo_raster_bin == 0u || skip_prog_for_vsm)) {
 				continue;
 			}
 			if (s->surface_shadow != nullptr && s->shader_shadow != nullptr) {
@@ -3397,7 +3421,7 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 			}
 			if (!has_non_virtual_shadow_surface(inst)) {
 				for (const GeometryInstanceSurfaceDataCache *sc = inst->surface_caches; sc != nullptr; sc = sc->next) {
-					if ((sc->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) != 0 && skip_virtual_for_vsm && (sc->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0) {
+					if ((sc->flags & GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW) != 0 && skip_virtual_for_vsm && (sc->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0 && (sc->nextgeo_raster_bin == 0u || skip_prog_for_vsm)) {
 						virtual_skipped_set.insert(inst);
 						break;
 					}
@@ -3670,6 +3694,10 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 		void *mesh_surface = surf->surface_shadow;
 		SceneShaderForwardClustered::ShaderData *shader = surf->shader_shadow;
 		if (mesh_surface == nullptr || shader == nullptr) {
+			continue;
+		}
+		// GodotNext: vsm_nanite (#217). Never double-draw surfaces handled by _vsm_raster_nanite().
+		if (skip_virtual_for_vsm && (surf->flags & GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL) != 0 && (surf->nextgeo_raster_bin == 0u || skip_prog_for_vsm)) {
 			continue;
 		}
 		if (shader->uses_time || (surf->shader != nullptr && surf->shader->uses_time)) {
@@ -4191,6 +4219,250 @@ void RenderForwardClustered::_vsm_raster_non_nanite(RenderDataRD *p_render_data)
 			vsm_raster_check.page_table_snap = vsm->snapshot_buffer(vsm->get_page_table_buffer(), 0, page_table_maps * uint32_t(RendererVirtualShadowMapStorage::MAP_TABLE_BYTES), "Raster Page Table");
 		}
 		vsm_raster_check.pool_snap = vsm->snapshot_pool("Raster Pool");
+	}
+}
+
+void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
+	// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). Per-page multi-view cluster cull, hybrid
+	// HW/SW rasterization (1 indirect chain for directional maps, 1 for local maps), 1-level per-page
+	// Hi-Z build, and programmable raster-bin integration shared with #155.
+	RendererRD::VirtualShadowMapStorage *vsm = RendererRD::VirtualShadowMapStorage::get_singleton();
+	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+	// Keep per-page static Hi-Z in sync whenever this view marked/updated VSM pages but skips Nanite raster
+	// (e.g. an MSAA SubViewport or a frame with 0 live virtual instances).
+	auto sync_hiz_without_nanite = [&]() {
+		if (!vsm_debug_view_marked) {
+			return;
+		}
+		if (vsm == nullptr || !vsm->is_active()) {
+			nextgeo_cut.invalidate_vsm_hiz();
+			return;
+		}
+		const uint32_t tm = vsm->get_map_buffers_capacity();
+		const uint32_t pp = vsm->get_page_buffers_capacity();
+		const uint32_t gw = pp > 0u ? uint32_t(RendererVirtualShadowMapStorage::pool_page_grid(pp).x) : 0u;
+		nextgeo_cut.update_vsm_hiz(vsm->get_pool_texture(), vsm->get_dirty_buffer(), vsm->get_state_buffer(), vsm->get_indirect_buffer(), tm, pp, gw, vsm->get_pool_reallocation_count());
+	};
+	if (vsm == nullptr || !vsm->is_active() || light_storage == nullptr || p_render_data == nullptr || p_render_data->scene_data == nullptr || p_render_data->reflection_probe.is_valid()) {
+		sync_hiz_without_nanite();
+		return;
+	}
+	const bool virtual_live = nextgeo_virtual_active &&
+			RSG::virtual_mesh_storage != nullptr &&
+			RSG::virtual_mesh_storage->get_live_record_count() > 0 &&
+			RSG::virtual_mesh_storage->get_record_count() > 0 &&
+			RSG::virtual_mesh_storage->get_record_buffer().is_valid() &&
+			RSG::virtual_mesh_storage->get_max_bvh_levels() > 0;
+	if (!virtual_live) {
+		sync_hiz_without_nanite();
+		return;
+	}
+	const uint32_t table_maps = vsm->get_map_buffers_capacity();
+	const uint32_t pool_pages = vsm->get_page_buffers_capacity();
+	if (table_maps == 0u || pool_pages == 0u || vsm->get_pool_texture().is_null() || vsm->get_page_table_buffer().is_null() ||
+			vsm->get_map_data_buffer().is_null() || vsm->get_dirty_buffer().is_null() || vsm->get_state_buffer().is_null() || vsm->get_indirect_buffer().is_null()) {
+		sync_hiz_without_nanite();
+		return;
+	}
+	if (!nextgeo_cut.is_vsm_available()) {
+		sync_hiz_without_nanite();
+		return;
+	}
+
+	RENDER_TIMESTAMP("VSM Nanite Raster");
+	_update_dirty_geometry_instances();
+
+	NextGeoVSMInputs inputs;
+	inputs.pool_texture = vsm->get_pool_texture();
+	inputs.page_table_buffer = vsm->get_page_table_buffer();
+	inputs.map_data_buffer = vsm->get_map_data_buffer();
+	inputs.dirty_buffer = vsm->get_dirty_buffer();
+	inputs.alloc_state_buffer = vsm->get_state_buffer();
+	inputs.indirect_buffer = vsm->get_indirect_buffer();
+	inputs.table_maps = table_maps;
+	inputs.pool_pages = pool_pages;
+	inputs.grid_width = uint32_t(RendererVirtualShadowMapStorage::pool_page_grid(pool_pages).x);
+	inputs.pool_reallocations = vsm->get_pool_reallocation_count();
+	inputs.camera_position = p_render_data->scene_data->cam_transform.origin;
+	inputs.max_texel_error = RendererRD::NEXTGEO_VSM_DEFAULT_MAX_TEXEL_ERROR;
+	inputs.lod_bias = 1.0f;
+	inputs.sw_max_edge_texels = float(_vsm_setting("nanite_sw_raster_max_edge_texels", double(RendererRD::NEXTGEO_VSM_DEFAULT_SW_MAX_EDGE_TEXELS)));
+	inputs.hiz_enabled = bool(_vsm_setting("nanite_hiz", true));
+	inputs.dynamic_layer_hook = bool(_vsm_setting("debug_nanite_dynamic_layer", false));
+	inputs.count_sw_writes = bool(GLOBAL_GET("rendering/nextgeo/debug_stats")) || inputs.dynamic_layer_hook;
+
+	// Build per-map metadata (shadow_caster_mask, reverse_cull, active) so one directional chain and
+	// one local chain cull every active VSM light cleanly without per-light CPU loops.
+	inputs.map_meta.resize(table_maps);
+	uint32_t active_lights = 0;
+	if (p_render_data->lights != nullptr) {
+		for (uint32_t i = 0; i < p_render_data->lights->size(); i++) {
+			const RID light_instance = (*p_render_data->lights)[i];
+			if (!light_storage->owns_light_instance(light_instance)) {
+				continue;
+			}
+			const RID base_light = light_storage->light_instance_get_base_light(light_instance);
+			if (base_light.is_null() || !light_storage->light_has_shadow(base_light)) {
+				continue;
+			}
+			if (light_storage->light_get_type(base_light) == RSE::LIGHT_DIRECTIONAL && light_storage->light_directional_get_sky_mode(base_light) == RSE::LIGHT_DIRECTIONAL_SKY_MODE_SKY_ONLY) {
+				continue;
+			}
+			const RendererVirtualShadowMapStorage::MapRange *range = vsm->map_get(light_instance);
+			if (range == nullptr || range->first == RendererVirtualShadowMapStorage::MAP_NONE || range->count == 0) {
+				continue;
+			}
+			active_lights++;
+			const uint32_t caster_mask = light_storage->light_get_shadow_caster_mask(base_light);
+			const uint32_t mflags = RendererRD::NEXTGEO_VSM_MAP_META_ACTIVE | (light_storage->light_get_reverse_cull_face_mode(base_light) ? RendererRD::NEXTGEO_VSM_MAP_META_REVERSE_CULL : 0u);
+			const uint32_t end_map = MIN(range->first + range->count, table_maps);
+			for (uint32_t m = range->first; m < end_map; m++) {
+				inputs.map_meta[m].cull_mask = caster_mask;
+				inputs.map_meta[m].flags = mflags;
+			}
+		}
+	}
+	if (active_lights == 0u) {
+		sync_hiz_without_nanite();
+		return;
+	}
+
+	// Step 7: Share #155's programmable raster bins and material raster targets (group 2 depth-only).
+	if (nextgeo_programmable_view_active && p_render_data->render_buffers.is_valid()) {
+		Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
+		const uint32_t record_count = RSG::virtual_mesh_storage->get_record_count();
+		if (nextgeo_raster_bin_table.size() < record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD) {
+			const uint32_t old_words = nextgeo_raster_bin_table.size();
+			nextgeo_raster_bin_table.resize(MAX(record_count * RendererRD::NEXTGEO_RASTER_BIN_TABLE_WORDS_PER_RECORD, 1u));
+			memset(nextgeo_raster_bin_table.ptr() + old_words, 0, (nextgeo_raster_bin_table.size() - old_words) * sizeof(uint32_t));
+		}
+		if (nextgeo_instance_data.size() < record_count) {
+			const uint32_t old_size = nextgeo_instance_data.size();
+			nextgeo_instance_data.resize(record_count);
+			memset(nextgeo_instance_data.ptr() + old_size, 0, (nextgeo_instance_data.size() - old_size) * sizeof(SceneState::InstanceData));
+		}
+		bool extra_instance_uploaded = false;
+		const RenderVSMShadowData *vsm_shadows = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->vsm_shadows : nullptr;
+		const uint32_t vsm_shadow_count = p_render_data->sdfgi_update_data != nullptr ? p_render_data->sdfgi_update_data->vsm_shadow_count : 0;
+		for (uint32_t s = 0; s < vsm_shadow_count && vsm_shadows != nullptr; s++) {
+			for (uint32_t i = 0; i < vsm_shadows[s].casters.size(); i++) {
+				GeometryInstanceForwardClustered *inst = static_cast<GeometryInstanceForwardClustered *>(vsm_shadows[s].casters[i].geometry_instance);
+				if (inst == nullptr || inst->nextgeo_record_index >= record_count) {
+					continue;
+				}
+				for (GeometryInstanceSurfaceDataCache *surf = inst->surface_caches; surf != nullptr; surf = surf->next) {
+					if ((surf->flags & (GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL | GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW)) != (GeometryInstanceSurfaceDataCache::FLAG_VIRTUAL | GeometryInstanceSurfaceDataCache::FLAG_PASS_SHADOW)) {
+						continue;
+					}
+					if (surf->nextgeo_raster_bin == 0u || surf->nextgeo_raster_bin >= RendererVirtualMeshStorage::RASTER_BIN_LIMIT || surf->surface_index >= 32u || surf->shader == nullptr || surf->material == nullptr) {
+						continue;
+					}
+					const uint32_t existing_bin = RendererRD::nextgeo_raster_bin_table_get(nextgeo_raster_bin_table.ptr(), inst->nextgeo_record_index, surf->surface_index);
+					if (existing_bin != surf->nextgeo_raster_bin) {
+						RendererRD::nextgeo_raster_bin_table_set(nextgeo_raster_bin_table.ptr(), inst->nextgeo_record_index, surf->surface_index, surf->nextgeo_raster_bin);
+						nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].shader = surf->shader;
+						nextgeo_raster_bin_owners[surf->nextgeo_raster_bin].material = surf->material;
+						nextgeo_raster_bins_used |= uint64_t(1) << (surf->nextgeo_raster_bin - 1u);
+						// Off-camera and SHADOWS_ONLY instances were not visited in RENDER_LIST_OPAQUE;
+						// populate their SceneState::InstanceData with the exact transposed 3x4 layout
+						// expected by raster_material_inc.glsl.
+						SceneState::InstanceData &idata = nextgeo_instance_data[inst->nextgeo_record_index];
+						if (idata.material_feedback_index == 0u) {
+							if (inst->store_transform_cache) {
+								RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->transform, idata.transform);
+								RendererRD::MaterialStorage::store_transform_transposed_3x4(inst->prev_transform, idata.prev_transform);
+#ifdef REAL_T_IS_DOUBLE
+								RendererRD::MaterialStorage::split_double(inst->transform.origin.x, &idata.transform[3], &idata.model_precision[0]);
+								RendererRD::MaterialStorage::split_double(inst->transform.origin.y, &idata.transform[7], &idata.model_precision[1]);
+								RendererRD::MaterialStorage::split_double(inst->transform.origin.z, &idata.transform[11], &idata.model_precision[2]);
+								RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.x, &idata.prev_transform[3], &idata.prev_model_precision[0]);
+								RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.y, &idata.prev_transform[7], &idata.prev_model_precision[1]);
+								RendererRD::MaterialStorage::split_double(inst->prev_transform.origin.z, &idata.prev_transform[11], &idata.prev_model_precision[2]);
+#endif
+							} else {
+								RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), idata.transform);
+								RendererRD::MaterialStorage::store_transform_transposed_3x4(Transform3D(), idata.prev_transform);
+							}
+							uint32_t flags = inst->base_flags;
+							if (inst->non_uniform_scale) {
+								flags |= INSTANCE_DATA_FLAGS_NON_UNIFORM_SCALE;
+							}
+							float fade_alpha = 1.0f;
+							if (inst->fade_near || inst->fade_far) {
+								float fade_dist = inst->transformed_aabb.get_center().distance_to(p_render_data->scene_data->cam_transform.origin);
+								if (inst->fade_far && fade_dist > inst->fade_far_begin) {
+									fade_alpha = Math::smoothstep(0.0f, 1.0f, 1.0f - (fade_dist - inst->fade_far_begin) / (inst->fade_far_end - inst->fade_far_begin));
+								} else if (inst->fade_near && fade_dist < inst->fade_near_end) {
+									fade_alpha = Math::smoothstep(0.0f, 1.0f, (fade_dist - inst->fade_near_begin) / (inst->fade_near_end - inst->fade_near_begin));
+								}
+							}
+							fade_alpha *= inst->force_alpha * inst->parent_fade_alpha;
+							flags = (flags & ~INSTANCE_DATA_FLAGS_FADE_MASK) | (uint32_t(CLAMP(int(fade_alpha * 255.0f), 0, 255)) << INSTANCE_DATA_FLAGS_FADE_SHIFT);
+							idata.flags = flags;
+							idata.gi_offset = 0xFFFFFFFF;
+							idata.layer_mask = inst->layer_mask;
+							idata.instance_uniforms_ofs = uint32_t(inst->shader_uniforms_offset);
+							idata.set_lightmap_uv_scale(inst->lightmap_uv_scale);
+							idata.set_compressed_aabb(AABB(Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0)));
+							// GodotNext: megalights_inputs (#136)
+							idata.set_megalights_layer_group(megalights_inputs_active ? RendererRD::MegaLightsInputs::assign_layer_group(inst->layer_mask) : 0);
+							idata.material_feedback_index = UINT32_MAX;
+							idata.set_uv_scale(Vector4(0.0, 0.0, 0.0, 0.0));
+							extra_instance_uploaded = true;
+						}
+					}
+				}
+			}
+		}
+		if (extra_instance_uploaded) {
+			nextgeo_resolve.upload_tables(
+					nextgeo_bucket_table.ptr(),
+					nextgeo_bucket_table.size(),
+					nextgeo_instance_data.ptr(),
+					nextgeo_instance_data.size() * sizeof(SceneState::InstanceData));
+		}
+		if (nextgeo_raster_bins_used != 0u && !nextgeo_raster_bin_table.is_empty() && nextgeo_resolve.get_instance_data_buffer().is_valid() && p_render_data->scene_data->get_uniform_buffer().is_valid()) {
+			for (uint32_t bin = 1; bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT; bin++) {
+				const NextGeoRasterBinOwner &owner = nextgeo_raster_bin_owners[bin];
+				if ((nextgeo_raster_bins_used & (uint64_t(1) << (bin - 1u))) == 0u || owner.shader == nullptr || owner.material == nullptr) {
+					continue;
+				}
+				const RID sw_sh = owner.shader->get_raster_target_vsm_shader(false);
+				const RID hw_sh = owner.shader->get_raster_target_vsm_shader(true);
+				if (sw_sh.is_null() && hw_sh.is_null()) {
+					continue;
+				}
+				NextGeoVSMBinProgram program;
+				program.bin = bin;
+				// GodotNext: nextgeo_displacement (#150) x vsm_nanite (#217). Include per-material raster features (DISPLACED).
+				program.features = owner.material->get_raster_features();
+				program.sw_shader = sw_sh;
+				program.hw_shader = hw_sh;
+				Vector<RD::Uniform> material_uniforms;
+				owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
+				for (const RD::Uniform &uniform : material_uniforms) {
+					program.material_uniforms.push_back(uniform);
+				}
+				inputs.raster_bin_programs.push_back(program);
+			}
+			if (!inputs.raster_bin_programs.is_empty()) {
+				inputs.raster_bin_table = nextgeo_raster_bin_table.ptr();
+				inputs.raster_bin_table_words = nextgeo_raster_bin_table.size();
+				inputs.environment_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, p_render_data->scene_data->get_uniform_buffer()));
+				inputs.environment_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, nextgeo_resolve.get_instance_data_buffer()));
+				inputs.environment_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, RendererRD::MaterialStorage::get_singleton()->global_shader_uniforms_get_storage_buffer()));
+				rb->get_samplers().append_uniforms(inputs.environment_uniforms, 3);
+			}
+		}
+	}
+
+	Dictionary nanite_stats;
+	if (nextgeo_cut.dispatch_vsm(RSG::virtual_mesh_storage, inputs, &nanite_stats)) {
+		vsm_debug_view_nanite_pairs = true;
+		nanite_stats["light_count"] = int64_t(active_lights);
+		vsm->set_last_nanite_stats(nanite_stats);
+	} else {
+		sync_hiz_without_nanite();
 	}
 }
 
@@ -5732,11 +6004,13 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	force_depth_pre_pass = force_depth_pre_pass || using_vsm;
 	bool depth_pre_pass = (force_depth_pre_pass || scene_shader.depth_prepass_enabled) && depth_framebuffer.is_valid();
 	vsm_mark_view = using_vsm && depth_pre_pass;
-	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite cull.
+	// GodotNext: vsm_settings_debug (#221). Set again by this view's marking and non-Nanite/Nanite cull.
 	vsm_debug_view_marked = false;
 	vsm_debug_view_pairs = false;
-	// GodotNext: vsm_projection (#222). Only sample VSM when this view also runs page marking and non-Nanite raster.
-	vsm_sample_view = vsm_mark_view && current_cluster_builder != nullptr && !_vsm_nextgeo_casters_live();
+	vsm_debug_view_nanite_pairs = false;
+	// GodotNext: vsm_projection (#222) / vsm_nanite (#217). Sample VSM when this view runs page marking
+	// and rasterizes both non-Nanite and any live NextGeo virtual-mesh casters.
+	vsm_sample_view = vsm_mark_view && current_cluster_builder != nullptr && (!_vsm_nextgeo_casters_live() || nextgeo_cut.is_vsm_available());
 	const bool is_nextgeo_main_view = !is_reflection_probe && rb.is_valid() && (RSG::viewport == nullptr || RSG::viewport->get_main_3d_render_target().is_null() || rb->get_render_target() == RSG::viewport->get_main_3d_render_target());
 
 	SceneShaderForwardClustered::ShaderSpecialization base_specialization = scene_shader.default_specialization;
@@ -6686,6 +6960,11 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 	nextgeo_visibility_only_active = false;
 	nextgeo_programmable_view_active = false;
 	nextgeo_shadow_pass_active = false;
+	// GodotNext: vsm_nanite (#217). Release per-view shader/material pointers at end of view.
+	nextgeo_raster_bins_used = 0;
+	for (uint32_t bin = 0; bin < RendererVirtualMeshStorage::RASTER_BIN_LIMIT; bin++) {
+		nextgeo_raster_bin_owners[bin] = {};
+	}
 	// GodotNext: megalights_inputs (#136)
 	megalights_inputs_active = false;
 }

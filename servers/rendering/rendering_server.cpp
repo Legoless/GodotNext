@@ -4105,6 +4105,9 @@ void RenderingServer::init() {
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/virtual_shadows/smrt_rays_directional", PROPERTY_HINT_RANGE, ray_hint), -1);
 		GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/lights_and_shadows/virtual_shadows/smrt_steps", PROPERTY_HINT_RANGE, vformat("-1,%d,1", VSM::SMRT_MAX_STEPS)), -1);
 		GLOBAL_DEF(PropertyInfo(Variant::BOOL, "rendering/lights_and_shadows/virtual_shadows/prefiltered_distant"), false);
+		// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). Provisional SW/HW triangle-edge switch in
+		// shadow texels of the target page's mip (0 sends every cluster to HW; measured and tuned in PQ).
+		GLOBAL_DEF(PropertyInfo(Variant::FLOAT, "rendering/lights_and_shadows/virtual_shadows/nanite_sw_raster_max_edge_texels", PROPERTY_HINT_RANGE, "0,64,0.25,suffix:tx"), 8.0);
 	}
 
 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/2d/shadow_atlas/size", PROPERTY_HINT_RANGE, "128,16384"), 2048);

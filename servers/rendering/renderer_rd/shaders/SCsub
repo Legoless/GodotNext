@@ -13,6 +13,10 @@ if "RD_GLSL" in env["BUILDERS"]:
     # make sure we recompile shaders if builders or include files change
     env.Depends([f + ".gen.h" for f in gl_include_files], ["#glsl_builders.py"])
     env.Depends([f + ".gen.h" for f in glsl_files], gl_include_files + ["#glsl_builders.py"])
+    # GodotNext: vsm_nanite (#217). VSM NextGeo raster shaders include NextGeo records/setup headers.
+    nextgeo_includes = [str(f) for f in Glob("nextgeo/*_inc.glsl")]
+    env.Depends("vsm_raster_nextgeo.glsl.gen.h", nextgeo_includes)
+    env.Depends("vsm_raster_sw.glsl.gen.h", nextgeo_includes)
 
     # compile include files
     for glsl_file in gl_include_files:

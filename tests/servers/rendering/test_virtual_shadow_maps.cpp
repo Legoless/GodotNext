@@ -40,6 +40,7 @@ TEST_FORCE_LINK(test_virtual_shadow_maps)
 #include "scene/3d/light_3d.h"
 #include "scene/main/viewport.h"
 #include "servers/rendering/renderer_rd/forward_clustered/nextgeo_route.h"
+#include "servers/rendering/renderer_rd/forward_clustered/nextgeo_vsm.h"
 #include "servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.h"
 #include "servers/rendering/renderer_rd/storage_rd/virtual_shadow_map_storage.h"
 #include "servers/rendering/rendering_device.h"
@@ -3458,4 +3459,385 @@ TEST_CASE("[VSM] Omni projection picks the face that holds the point (#222)") {
 	// Past the table's map count: nothing.
 	float w = 0.0f;
 	CHECK(VSM::face_projection_select(maps.ptr(), 3, 0, flags, light.origin + directions[5] * 2.0f, w) == VSM::MAP_NONE);
+}
+
+// GodotNext: vsm_nanite (#217, plan §21.3 contract S4). CPU reference tests for VSM x Nanite:
+// layout/setting contracts, page-mip projected error matching P5's texel rule, world/local AABB
+// per-page culling, 1-level 8x8 per-page max-depth Hi-Z build & occlusion, SW/HW triangle-size
+// routing, perspective-correct 1/w software depth raster, static/dynamic layer hook, and shared
+// RASTER_BIN_TABLE parity with #155.
+
+namespace TestVSMNanite {
+
+using VSM = RendererVirtualShadowMapStorage;
+using VMS = RendererVirtualMeshStorage;
+
+void fill_xform_rows(const Transform3D &p_xform, float r_rows[3][4]) {
+	for (int r = 0; r < 3; r++) {
+		r_rows[r][0] = float(p_xform.basis.rows[r][0]);
+		r_rows[r][1] = float(p_xform.basis.rows[r][1]);
+		r_rows[r][2] = float(p_xform.basis.rows[r][2]);
+		r_rows[r][3] = float(p_xform.origin[r]);
+	}
+}
+
+} // namespace TestVSMNanite
+
+TEST_CASE("[VSM][NextGeo] Layout, capacities, provisional settings and shared RASTER_BIN_TABLE parity (#217)") {
+	using namespace RendererRD;
+	using namespace TestVSMNanite;
+
+	CHECK_EQ(sizeof(NextGeoVSMMapMeta), size_t(16));
+	CHECK_EQ(sizeof(NextGeoVSMParams), size_t(352));
+	CHECK_EQ(sizeof(NextGeoVSMCounters), size_t(96));
+	CHECK_EQ(NEXTGEO_VSM_HIZ_PAGE_SIZE, 8u);
+	CHECK_EQ(NEXTGEO_VSM_HIZ_BLOCK_SIZE, 8u);
+	CHECK(NEXTGEO_VSM_CLUSTER_CAPACITY <= (1u << 21));
+	CHECK_EQ(NEXTGEO_VSM_COUNTER_CLUSTER_COUNT, 11u);
+	CHECK_EQ(NEXTGEO_VSM_COUNTER_SW_CLUSTERS, 12u);
+	CHECK_EQ(NEXTGEO_VSM_COUNTER_SW_WRITES, 20u);
+	CHECK_EQ(NEXTGEO_VSM_COUNTER_SINK, 21u);
+	CHECK_EQ(NEXTGEO_VSM_COUNTER_HIZ_PAGES_BUILT, 22u);
+
+	// Provisional SW/HW switch threshold clamping.
+	CHECK_EQ(nextgeo_vsm_sw_switch_texels(0.0f), 0.0f);
+	CHECK_EQ(nextgeo_vsm_sw_switch_texels(-5.0f), 0.0f);
+	CHECK_EQ(nextgeo_vsm_sw_switch_texels(NAN), 0.0f);
+	CHECK_EQ(nextgeo_vsm_sw_switch_texels(INFINITY), 0.0f);
+	CHECK_EQ(nextgeo_vsm_sw_switch_texels(NEXTGEO_VSM_DEFAULT_SW_MAX_EDGE_TEXELS), doctest::Approx(8.0f));
+	CHECK_EQ(nextgeo_vsm_sw_switch_texels(128.0f), doctest::Approx(float(NEXTGEO_SW_FULL_PRECISION_EXTENT_PX)));
+
+	// Project setting registered with provisional default 8.0.
+	const ProjectSettings *ps = ProjectSettings::get_singleton();
+	REQUIRE(ps != nullptr);
+	CHECK(ps->has_setting("rendering/lights_and_shadows/virtual_shadows/nanite_sw_raster_max_edge_texels"));
+	CHECK(double(ps->get_setting("rendering/lights_and_shadows/virtual_shadows/nanite_sw_raster_max_edge_texels")) == doctest::Approx(double(NEXTGEO_VSM_DEFAULT_SW_MAX_EDGE_TEXELS)));
+
+	// Step 7: every visibility entry in RASTER_BIN_TABLE has a matching VSM entry with identical bin kind.
+	uint32_t vsm_entries = 0;
+	for (uint32_t i = 0; i < VMS::RASTER_BIN_TABLE_SIZE; i++) {
+		const VMS::RasterBinEntry &entry = VMS::RASTER_BIN_TABLE[i];
+		if (entry.pass == VMS::RASTER_PASS_VSM) {
+			vsm_entries++;
+		}
+		const VMS::RasterPass other = entry.pass == VMS::RASTER_PASS_VISIBILITY ? VMS::RASTER_PASS_VSM : VMS::RASTER_PASS_VISIBILITY;
+		const int32_t twin = VMS::find_raster_bin_entry(entry.features, other);
+		REQUIRE(twin >= 0);
+		CHECK_EQ(uint32_t(VMS::RASTER_BIN_TABLE[twin].bin), uint32_t(entry.bin));
+	}
+	CHECK(vsm_entries > 0u);
+	CHECK_EQ(VMS::resolve_raster_bin(0u, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_FIXED));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_MASKED, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_VERTEX_OFFSET, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+	CHECK_EQ(VMS::resolve_raster_bin(VMS::RASTER_FEATURE_MASKED | VMS::RASTER_FEATURE_VERTEX_OFFSET, VMS::RASTER_PASS_VSM), int32_t(VMS::RASTER_BIN_PROGRAMMABLE));
+}
+
+TEST_CASE("[VSM][NextGeo] Page-mip projected error matches P5 at mip 0 and scales by 2^mip (#217)") {
+	using namespace RendererRD;
+	using namespace TestVSMNanite;
+
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-55.0f), Math::deg_to_rad(25.0f), 0.0f));
+	const VSM::MapData clip0 = VSM::map_data_clipmap(sun, 0, Vector2i(-17, 29), 100.0f);
+	const VSM::MapData clip2 = VSM::map_data_clipmap(sun, 2, Vector2i(5, -9), 100.0f);
+
+	Transform3D xf(Basis::from_euler(Vector3(0.2f, -0.4f, 0.1f)).scaled(Vector3(2.0f, 2.0f, 2.0f)), Vector3(1.5f, 0.5f, -2.0f));
+	float rows[3][4];
+	fill_xform_rows(xf, rows);
+	const float lod_sphere[4] = { 0.1f, 0.2f, -0.1f, 0.5f };
+	const float err_m = 0.004f;
+
+	// Directional: matches P5 ortho error (error * scale / texel_size) at mip 0 and halves per mip.
+	const float dir_mip0 = nextgeo_vsm_page_projected_error(rows, lod_sphere, err_m, clip0, 0u, 1.0f, 1.0f);
+	CHECK(dir_mip0 == doctest::Approx(err_m * 2.0f / clip0.texel_scale).epsilon(1e-5f));
+	for (uint32_t mip = 1; mip < VSM::MIP_COUNT; mip++) {
+		const float dir_m = nextgeo_vsm_page_projected_error(rows, lod_sphere, err_m, clip0, mip, 1.0f, 1.0f);
+		CHECK(dir_m == doctest::Approx(dir_mip0 / float(1u << mip)).epsilon(1e-5f));
+	}
+	// Clipmap level 2 has 4x coarser texels than level 0, matching mip 2 of level 0.
+	CHECK(nextgeo_vsm_page_projected_error(rows, lod_sphere, err_m, clip2, 0u, 1.0f, 1.0f) == doctest::Approx(dir_mip0 * 0.25f).epsilon(1e-5f));
+	// Infinite error always refines.
+	CHECK(nextgeo_vsm_page_projected_error(rows, lod_sphere, 3.4e38f, clip0, 0u, 1.0f, 1.0f) > 1.0f);
+	// Mirrored non-uniformly scaled transforms must use the largest axis scale (4.0), never Basis::get_scale()'s max(-4,-1,-1) = -1.
+	{
+		// Right-multiply (scaled_local) keeps orthogonal columns of lengths (4, 1, 1) under rotation.
+		const Transform3D mirrored_xf(Basis::from_euler(Vector3(0.3f, -0.5f, 0.2f)).scaled_local(Vector3(-4.0f, 1.0f, 1.0f)), Vector3(1.5f, 0.5f, -2.0f));
+		float mirrored_rows[3][4];
+		fill_xform_rows(mirrored_xf, mirrored_rows);
+		CHECK(nextgeo_vsm_instance_scale(mirrored_rows) == doctest::Approx(4.0f).epsilon(1e-4f));
+		const float mirrored_dir = nextgeo_vsm_page_projected_error(mirrored_rows, lod_sphere, err_m, clip0, 0u, 1.0f, 1.0f);
+		CHECK(mirrored_dir == doctest::Approx(err_m * 4.0f / clip0.texel_scale).epsilon(1e-4f));
+
+		// Left-multiply (sheared mirrored transform): Gershgorin bound stays conservatively >= max singular value (4.0).
+		const Transform3D sheared_xf(Basis::from_euler(Vector3(0.3f, -0.5f, 0.2f)).scaled(Vector3(-4.0f, 1.0f, 1.0f)), Vector3(1.5f, 0.5f, -2.0f));
+		float sheared_rows[3][4];
+		fill_xform_rows(sheared_xf, sheared_rows);
+		CHECK(nextgeo_vsm_instance_scale(sheared_rows) >= 4.0f - 1e-4f);
+
+		const Transform3D mirrored_aniso(Basis::from_scale(Vector3(-4.0f, 2.0f, 0.5f)), Vector3(0.0f, 0.0f, 0.0f));
+		float aniso_rows[3][4];
+		fill_xform_rows(mirrored_aniso, aniso_rows);
+		CHECK(nextgeo_vsm_instance_scale(aniso_rows) == doctest::Approx(4.0f).epsilon(1e-4f));
+		CHECK(nextgeo_vsm_page_projected_error(aniso_rows, lod_sphere, err_m, clip0, 0u, 1.0f, 1.0f) == doctest::Approx(err_m * 4.0f / clip0.texel_scale).epsilon(1e-4f));
+	}
+
+	// Local perspective faces: light origin recovery is exact for spot, all 6 omni faces and 5 area faces.
+	const Transform3D light_xf(Basis::from_euler(Vector3(-0.7f, 0.5f, -0.3f)), Vector3(-3.2f, 4.7f, 2.1f));
+	for (uint32_t face = 0; face < 6; face++) {
+		const VSM::MapData omni = VSM::map_data_face(VSM::MAP_KIND_OMNI, face, light_xf, 20.0f, 0.0f);
+		const Vector3 recovered = nextgeo_vsm_light_origin(omni);
+		CHECK(recovered.distance_to(light_xf.origin) < 1e-4f);
+	}
+	const VSM::MapData spot = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, light_xf, 20.0f, 35.0f);
+	CHECK(nextgeo_vsm_light_origin(spot).distance_to(light_xf.origin) < 1e-4f);
+
+	// Perspective projected error at mip 0 matches P5's exact formula:
+	// error * scale * 0.5 * VIRTUAL_SIZE * cot(spot_angle) / max(dist - radius, near_w).
+	const Vector3 center_w = nextgeo_vsm_xform_point(rows, Vector3(lod_sphere[0], lod_sphere[1], lod_sphere[2]));
+	const float dist_eff = MAX(float(center_w.distance_to(light_xf.origin)) - lod_sphere[3] * 2.0f, spot.near_w);
+	const float p5_mip0 = err_m * 2.0f * 0.5f * float(VSM::VIRTUAL_SIZE) / (float(Math::tan(Math::deg_to_rad(35.0))) * dist_eff);
+	const float vsm_mip0 = nextgeo_vsm_page_projected_error(rows, lod_sphere, err_m, spot, 0u, 1.0f, 1.0f);
+	CHECK(vsm_mip0 == doctest::Approx(p5_mip0).epsilon(1e-4f));
+	for (uint32_t mip = 1; mip < VSM::MIP_COUNT; mip++) {
+		CHECK(nextgeo_vsm_page_projected_error(rows, lod_sphere, err_m, spot, mip, 1.0f, 1.0f) == doctest::Approx(vsm_mip0 / float(1u << mip)).epsilon(1e-4f));
+	}
+	// Bounding sphere enclosing the light clamps effective distance to near_w (finite, never negative).
+	float unit_rows[3][4];
+	fill_xform_rows(Transform3D(Basis(), Vector3(1.5f, 0.5f, -2.0f)), unit_rows);
+	const float huge_sphere[4] = { 0.0f, 0.0f, 0.0f, 100.0f };
+	const float enclosed_err = nextgeo_vsm_page_projected_error(unit_rows, huge_sphere, err_m, spot, 0u, 1.0f, 1.0f);
+	CHECK(enclosed_err == doctest::Approx(err_m / (spot.texel_scale * spot.near_w)).epsilon(1e-4f));
+}
+
+TEST_CASE("[VSM][NextGeo] Per-page AABB overlap culling across directional wrap and local faces (#217)") {
+	using namespace RendererRD;
+	using namespace TestVSMNanite;
+
+	// Directional clipmap with negative non-power-of-two toroidal origin.
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f));
+	const Vector3 cam(1.3f, 2.0f, -0.7f);
+	const Vector2 cam_light(sun.get_column(0).normalized().dot(cam), sun.get_column(1).normalized().dot(cam));
+	const VSM::MapData clip = VSM::map_data_clipmap(sun, 0, VSM::clipmap_level_origin(cam_light, 0), 100.0f);
+
+	const Vector3 box_center(1.25f, 0.5f, -0.75f);
+	const Vector2i tex0 = VSM::clipmap_texel0(clip, box_center);
+	const Vector2i page0 = VSM::clipmap_page(tex0, 0);
+	Vector2 px_min;
+	Vector2 px_max;
+	float min_depth = 0.0f;
+	bool straddles_near = false;
+	CHECK(nextgeo_vsm_aabb_page_bounds(box_center - Vector3(0.01f, 0.1f, 0.01f), box_center + Vector3(0.01f, 0.1f, 0.01f), clip, 0u, page0, px_min, px_max, min_depth, straddles_near));
+	CHECK_FALSE(straddles_near);
+	CHECK(px_max.x >= 0.0f);
+	CHECK(px_min.x <= float(VSM::PAGE_SIZE));
+	CHECK(px_max.y >= 0.0f);
+	CHECK(px_min.y <= float(VSM::PAGE_SIZE));
+	CHECK(min_depth == doctest::Approx(VSM::row_dot(clip.rows[2], box_center + Vector3(0.0f, 0.1f, 0.0f))).epsilon(1e-4f));
+
+	// A distant toroidal slot on the opposite side of the clipmap does not overlap this small box.
+	const Vector2i far_slot((page0.x + 32) & 63, (page0.y + 32) & 63);
+	CHECK_FALSE(nextgeo_vsm_aabb_page_bounds(box_center - Vector3(0.01f, 0.1f, 0.01f), box_center + Vector3(0.01f, 0.1f, 0.01f), clip, 0u, far_slot, px_min, px_max, min_depth, straddles_near));
+
+	// Local spot face: box at axis center overlaps center page, rejects far corner, behind-light, and past-range.
+	const Transform3D spot_xf(Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f)), Vector3(0.0f, 6.0f, 0.0f));
+	const VSM::MapData spot = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xf, 12.0f, 30.0f);
+	const Vector2i root_slot(0, 0);
+	CHECK(nextgeo_vsm_aabb_page_bounds(Vector3(-0.2f, 1.0f, -0.2f), Vector3(0.2f, 2.0f, 0.2f), spot, VSM::MIP_COUNT - 1, root_slot, px_min, px_max, min_depth, straddles_near));
+	CHECK_FALSE(straddles_near);
+	CHECK(min_depth == doctest::Approx(4.0f).epsilon(1e-4f)); // 6.0 - 2.0 = 4.0 m from spot.
+	CHECK(px_min.x > 16.0f);
+	CHECK(px_max.x < 48.0f);
+
+	// Behind the light: rejected.
+	CHECK_FALSE(nextgeo_vsm_aabb_page_bounds(Vector3(-0.5f, 7.0f, -0.5f), Vector3(0.5f, 8.0f, 0.5f), spot, VSM::MIP_COUNT - 1, root_slot, px_min, px_max, min_depth, straddles_near));
+	// Past max_distance (12 m below y = 6 -> y < -6): rejected.
+	CHECK_FALSE(nextgeo_vsm_aabb_page_bounds(Vector3(-0.5f, -9.0f, -0.5f), Vector3(0.5f, -7.0f, 0.5f), spot, VSM::MIP_COUNT - 1, root_slot, px_min, px_max, min_depth, straddles_near));
+	// Outside the 30-degree cone: rejected.
+	CHECK_FALSE(nextgeo_vsm_aabb_page_bounds(Vector3(8.0f, 1.0f, -0.5f), Vector3(9.0f, 2.0f, 0.5f), spot, VSM::MIP_COUNT - 1, root_slot, px_min, px_max, min_depth, straddles_near));
+	// Straddling near plane: conservatively accepted with full page rect and straddles_near = true.
+	CHECK(nextgeo_vsm_aabb_page_bounds(Vector3(-0.3f, 5.5f, -0.3f), Vector3(0.3f, 6.5f, 0.3f), spot, 0u, Vector2i(32, 32), px_min, px_max, min_depth, straddles_near));
+	CHECK(straddles_near);
+	CHECK(px_min == Vector2(0.0f, 0.0f));
+	CHECK(px_max == Vector2(float(VSM::PAGE_SIZE), float(VSM::PAGE_SIZE)));
+
+	// Local rotated AABB helper produces identical overlap decision.
+	Transform3D box_xf(Basis::from_euler(Vector3(0.0f, Math::deg_to_rad(45.0f), 0.0f)), Vector3(0.0f, 1.5f, 0.0f));
+	float box_rows[3][4];
+	fill_xform_rows(box_xf, box_rows);
+	CHECK(nextgeo_vsm_local_aabb_page_bounds(box_rows, Vector3(-0.2f, -0.5f, -0.2f), Vector3(0.2f, 0.5f, 0.2f), spot, VSM::MIP_COUNT - 1, root_slot, px_min, px_max, min_depth, straddles_near));
+	CHECK_FALSE(straddles_near);
+	CHECK(min_depth == doctest::Approx(4.0f).epsilon(1e-4f));
+}
+
+TEST_CASE("[VSM][NextGeo] Per-page 1-level 8x8 max-depth Hi-Z build and conservative occlusion (#217)") {
+	using namespace RendererRD;
+	using namespace TestVSMNanite;
+
+	LocalVector<uint32_t> static_page;
+	static_page.resize(VSM::PAGE_SIZE * VSM::PAGE_SIZE);
+	const uint32_t d_wall = VSM::depth_pack(5.0f);
+	const uint32_t d_near = VSM::depth_pack(3.0f);
+	for (uint32_t i = 0; i < static_page.size(); i++) {
+		static_page[i] = d_wall;
+	}
+	// Make cell (1, 1) mixed (3 m and 5 m -> max depth is still 5 m = min packed uint32).
+	static_page[8 * VSM::PAGE_SIZE + 8] = d_near;
+	// Make cell (6, 6) contain one empty texel (0u -> cell must become 0u and never occlude).
+	static_page[50 * VSM::PAGE_SIZE + 50] = 0u;
+
+	uint32_t hiz[NEXTGEO_VSM_HIZ_PAGE_SIZE * NEXTGEO_VSM_HIZ_PAGE_SIZE] = {};
+	nextgeo_vsm_hiz_build_page(static_page.ptr(), hiz);
+	CHECK_EQ(hiz[0], d_wall);
+	CHECK_EQ(hiz[1 * 8 + 1], d_wall); // Farthest depth wins over nearer 3 m texel.
+	CHECK_EQ(hiz[6 * 8 + 6], 0u); // Empty texel disables occlusion for that 8x8 block.
+
+	// Cached page with dynamic-only dirty bit and matching owner:
+	// Behind wall (6 m > 5 m) in solid cells -> occluded.
+	CHECK(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 6.0f, false));
+	// In front of wall (4 m < 5 m) -> visible.
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 4.0f, false));
+	// Exact equal depth (5 m) -> conservative visible (strict <).
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 5.0f, false));
+	// Bounds overlapping the partial-empty cell (6, 6) -> visible even at 10 m.
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(40.0f, 40.0f), Vector2(56.0f, 56.0f), 10.0f, false));
+
+	// Uncached, scrolled, static-dirty, unowned, or near-straddling pages ALWAYS skip Hi-Z.
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_UNCACHED | VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 10.0f, false));
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_SCROLLED | VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 10.0f, false));
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_STATIC | VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 10.0f, false));
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_DYNAMIC, false, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 10.0f, false));
+	CHECK_FALSE(nextgeo_vsm_hiz_occluded(hiz, VSM::ENTRY_DIRTY_DYNAMIC, true, Vector2(2.0f, 2.0f), Vector2(20.0f, 20.0f), 10.0f, true));
+}
+
+TEST_CASE("[VSM][NextGeo] SW/HW triangle-size routing and perspective-correct SW depth raster (#217)") {
+	using namespace RendererRD;
+	using namespace TestVSMNanite;
+
+	const Basis sun = Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f));
+	const VSM::MapData clip0 = VSM::map_data_clipmap(sun, 0, Vector2i(-32, -32), 100.0f);
+	const Transform3D spot_xf(Basis::from_euler(Vector3(Math::deg_to_rad(-90.0f), 0.0f, 0.0f)), Vector3(0.0f, 6.0f, 0.0f));
+	const VSM::MapData spot = VSM::map_data_face(VSM::MAP_KIND_SPOT, 0, spot_xf, 16.0f, 35.0f);
+
+	float id_rows[3][4];
+	fill_xform_rows(Transform3D(), id_rows);
+	const float bounds_spot[4] = { 0.0f, 2.0f, 0.0f, 0.25f }; // w_center = 4 m, w_min = 3.75 m.
+
+	// Directional: level 0 texel = 2^-10 (~0.976 mm). Edge 0.004 m -> ~4.1 texels (< 8 -> SW); 0.02 m -> ~20.5 texels (HW at mip 0, SW at mip 2).
+	CHECK(nextgeo_vsm_sw_route(id_rows, 1.0f, bounds_spot, 0.004f, clip0, 0u, 8.0f));
+	CHECK_FALSE(nextgeo_vsm_sw_route(id_rows, 1.0f, bounds_spot, 0.02f, clip0, 0u, 8.0f));
+	CHECK(nextgeo_vsm_sw_route(id_rows, 1.0f, bounds_spot, 0.02f, clip0, 2u, 8.0f));
+	CHECK_FALSE(nextgeo_vsm_sw_route(id_rows, 1.0f, bounds_spot, 0.004f, clip0, 0u, 0.0f)); // Threshold 0 forces HW.
+
+	// Local perspective: small edge at w_min = 3.75 m routes SW; sphere touching near plane forces HW.
+	CHECK(nextgeo_vsm_sw_route(id_rows, 1.0f, bounds_spot, 0.005f, spot, 0u, 8.0f));
+	CHECK_FALSE(nextgeo_vsm_sw_route(id_rows, 1.0f, bounds_spot, 0.1f, spot, 0u, 8.0f));
+	const float near_bounds[4] = { 0.0f, 5.9f, 0.0f, 0.25f }; // w_min < near_w -> must stay HW.
+	CHECK_FALSE(nextgeo_vsm_sw_route(id_rows, 1.0f, near_bounds, 0.001f, spot, 0u, 64.0f));
+
+	// Directional SW raster: tilted plane z = a*x + b*z + c matches analytic depth at every covered pixel.
+	const Vector3 dv0(-0.02f, 1.0f, -0.02f);
+	const Vector3 dv1(0.03f, 2.5f, -0.01f);
+	const Vector3 dv2(-0.01f, 0.4f, 0.03f);
+	const Vector2i dslot = VSM::clipmap_page(VSM::clipmap_texel0(clip0, Vector3(0.0f, 1.0f, 0.0f)), 0);
+	const Vector4 dp0 = nextgeo_vsm_sw_project_vertex(clip0, 0u, dslot, dv0);
+	const Vector4 dp1 = nextgeo_vsm_sw_project_vertex(clip0, 0u, dslot, dv1);
+	const Vector4 dp2 = nextgeo_vsm_sw_project_vertex(clip0, 0u, dslot, dv2);
+	const float dpx[3][2] = { { float(dp0.x), float(dp0.y) }, { float(dp1.x), float(dp1.y) }, { float(dp2.x), float(dp2.y) } };
+	const float dz[3] = { float(dp0.z), float(dp1.z), float(dp2.z) };
+	const NextGeoSwTriangle dtri = nextgeo_sw_setup_triangle(dpx, dz, int32_t(VSM::PAGE_SIZE), int32_t(VSM::PAGE_SIZE), NEXTGEO_SW_KEEP_BOTH);
+	REQUIRE(dtri.valid);
+	const Vector3 d_normal = (dv1 - dv0).cross(dv2 - dv0);
+	uint32_t dir_samples = 0;
+	float dir_max_err = 0.0f;
+	for (int32_t y = dtri.min_y; y <= dtri.max_y; y++) {
+		for (int32_t x = dtri.min_x; x <= dtri.max_x; x++) {
+			float interp = 0.0f;
+			if (!nextgeo_sw_sample(dtri, x, y, interp)) {
+				continue;
+			}
+			float depth = 0.0f;
+			REQUIRE(nextgeo_vsm_sw_recover_depth(clip0, interp, depth));
+			// Analytic plane intersection along straight-down sun (-Y): tx = x_w / texel, ty = -z_w / texel.
+			const Vector2 bary_p(float(x) + 0.5f, float(y) + 0.5f);
+			const float denom = (dp1.x - dp0.x) * (dp2.y - dp0.y) - (dp1.y - dp0.y) * (dp2.x - dp0.x);
+			const float l1 = ((bary_p.x - dp0.x) * (dp2.y - dp0.y) - (bary_p.y - dp0.y) * (dp2.x - dp0.x)) / denom;
+			const float l2 = ((dp1.x - dp0.x) * (bary_p.y - dp0.y) - (dp1.y - dp0.y) * (bary_p.x - dp0.x)) / denom;
+			const float l0 = 1.0f - l1 - l2;
+			const Vector3 world_p = dv0 * l0 + dv1 * l1 + dv2 * l2;
+			CHECK(Math::abs((world_p - dv0).dot(d_normal)) < 1e-4f);
+			const float analytic_depth = VSM::row_dot(clip0.rows[2], world_p);
+			dir_max_err = MAX(dir_max_err, Math::abs(depth - analytic_depth));
+			dir_samples++;
+		}
+	}
+	CHECK(dir_samples > 20u);
+	CHECK(dir_max_err < 1e-3f);
+
+	// Local perspective SW raster: steeply tilted triangle (w from 2 m to 8 m!) verifies exact 1/w interpolation.
+	const Vector3 pv0(-0.8f, 4.0f, -0.6f); // w = 2.0 m
+	const Vector3 pv1(3.2f, -2.0f, -2.4f); // w = 8.0 m
+	const Vector3 pv2(-0.8f, 4.0f, 0.8f); // w = 2.0 m
+	const Vector4 pp0 = nextgeo_vsm_sw_project_vertex(spot, VSM::MIP_COUNT - 1, Vector2i(0, 0), pv0);
+	const Vector4 pp1 = nextgeo_vsm_sw_project_vertex(spot, VSM::MIP_COUNT - 1, Vector2i(0, 0), pv1);
+	const Vector4 pp2 = nextgeo_vsm_sw_project_vertex(spot, VSM::MIP_COUNT - 1, Vector2i(0, 0), pv2);
+	REQUIRE(pp0.w == 1.0f);
+	REQUIRE(pp1.w == 1.0f);
+	REQUIRE(pp2.w == 1.0f);
+	const float ppx[3][2] = { { float(pp0.x), float(pp0.y) }, { float(pp1.x), float(pp1.y) }, { float(pp2.x), float(pp2.y) } };
+	const float pz[3] = { float(pp0.z), float(pp1.z), float(pp2.z) };
+	const NextGeoSwTriangle ptri = nextgeo_sw_setup_triangle(ppx, pz, int32_t(VSM::PAGE_SIZE), int32_t(VSM::PAGE_SIZE), NEXTGEO_SW_KEEP_BOTH);
+	REQUIRE(ptri.valid);
+	const Vector3 p_normal = (pv1 - pv0).cross(pv2 - pv0).normalized();
+	const float plane_d = p_normal.dot(pv0);
+	const float tan_spot = float(Math::tan(Math::deg_to_rad(35.0)));
+	uint32_t persp_samples = 0;
+	float persp_max_err = 0.0f;
+	for (int32_t y = ptri.min_y; y <= ptri.max_y; y++) {
+		for (int32_t x = ptri.min_x; x <= ptri.max_x; x++) {
+			float interp_inv_w = 0.0f;
+			if (!nextgeo_sw_sample(ptri, x, y, interp_inv_w)) {
+				continue;
+			}
+			float depth_w = 0.0f;
+			REQUIRE(nextgeo_vsm_sw_recover_depth(spot, interp_inv_w, depth_w));
+			// Cast ray from spot origin through pixel center (x + 0.5, y + 0.5) on root mip (mip 6, slot 0,0).
+			const float ndc_x = ((float(x) + 0.5f) / float(VSM::PAGE_SIZE)) * 2.0f - 1.0f;
+			const float ndc_y = ((float(y) + 0.5f) / float(VSM::PAGE_SIZE)) * 2.0f - 1.0f;
+			// For spot looking straight down (-Y): row0 = cot * (+X), row1 = cot * (-Z), row3 = -Y + 6.
+			const Vector3 ray_dir = spot_xf.basis.get_column(0) * (ndc_x * tan_spot) + spot_xf.basis.get_column(1) * (ndc_y * tan_spot) - spot_xf.basis.get_column(2);
+			const float t_hit = (plane_d - p_normal.dot(spot_xf.origin)) / p_normal.dot(ray_dir);
+			// Since ray_dir has unit projection along -spot.basis.z, t_hit IS exact linear depth w!
+			persp_max_err = MAX(persp_max_err, Math::abs(depth_w - t_hit));
+			persp_samples++;
+		}
+	}
+	CHECK(persp_samples > 30u);
+	CHECK(persp_max_err < 0.02f); // Sub-pixel vertex snap over 6 m depth span gives ~0.005 m error (vs > 0.5 m for affine w).
+}
+
+TEST_CASE("[VSM][NextGeo] Static/dynamic layer routing hook defaults to static until #212 (#217)") {
+	using namespace RendererRD;
+	using namespace TestVSMNanite;
+
+	const uint32_t valid = VMS::RECORD_VALID | VMS::RECORD_VISIBLE;
+	float cur[3][4];
+	float prev[3][4];
+	fill_xform_rows(Transform3D(Basis(), Vector3(1.0f, 2.0f, 3.0f)), cur);
+	fill_xform_rows(Transform3D(Basis(), Vector3(1.0f, 2.0f, 3.0f)), prev);
+	CHECK_FALSE(nextgeo_vsm_transform_moved(cur, prev));
+	cur[0][3] = 1.25f;
+	CHECK(nextgeo_vsm_transform_moved(cur, prev));
+
+	// Default (hook unset): every instance routes to static layer 0.
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid, false, 0u, false), 0u);
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid, true, 0u, false), 0u);
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid | VMS::RECORD_RT_SKINNED, false, 0u, false), 0u);
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid, false, 0u, true), 0u);
+
+	// Hook enabled (#212): stationary opaque stays static (0); moved-this-frame/skinned/WPO routes dynamic (1).
+	const uint32_t hook = NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK;
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid, false, hook, false), 0u);
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid | VMS::RECORD_MOVED, false, hook, false), 0u); // Sticky flag alone does not keep a stopped instance dynamic.
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid, true, hook, false), 1u);
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid | VMS::RECORD_RT_SKINNED, false, hook, false), 1u);
+	CHECK_EQ(nextgeo_vsm_instance_layer(valid, false, hook, true), 1u);
 }

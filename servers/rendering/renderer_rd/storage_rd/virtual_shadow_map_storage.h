@@ -185,6 +185,8 @@ class VirtualShadowMapStorage : public RendererVirtualShadowMapStorage {
 	void (*raster_check_arm_callback)(void *p_userdata) = nullptr;
 	void *raster_check_userdata = nullptr;
 	Dictionary last_raster_stats;
+	// GodotNext: vsm_nanite (#217).
+	Dictionary last_nanite_stats;
 
 	// The GPU check (RenderingServer.virtual_shadow_maps_request_check()): the next marked view copies
 	// its inputs and the state after marking and after allocation into these buffers.
@@ -351,6 +353,9 @@ public:
 	RID get_map_state_buffer() const { return map_state_buffer; }
 	RID get_dirty_buffer() const { return dirty_buffer; }
 	RID get_state_buffer() const { return state_buffer; }
+	// GodotNext: vsm_nanite (#217). Indirect dispatch args written by MODE_MAPS (VSM_INDIRECT_ALL).
+	RID get_indirect_buffer() const { return indirect_buffer; }
+	void set_last_nanite_stats(const Dictionary &p_stats) { last_nanite_stats = p_stats; }
 	uint32_t get_map_buffers_capacity() const { return map_buffers_maps; }
 	uint32_t get_page_buffers_capacity() const { return page_buffers_pages; }
 	const LocalVector<MapData> &get_map_data() const { return map_data; }

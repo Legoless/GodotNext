@@ -105,6 +105,8 @@ private:
 		VSM_DEBUG_PAGES_CLEAR,
 		VSM_DEBUG_PAGES_DIRTY,
 		VSM_DEBUG_PAGES_PAIRS,
+		// GodotNext: vsm_nanite (#217).
+		VSM_DEBUG_PAGES_NANITE_PAIRS,
 		VSM_DEBUG_PAGES_MAX,
 	};
 	struct VSMDebugPagesPushConstant {
@@ -178,6 +180,10 @@ public:
 		RID pairs;
 		uint32_t pair_capacity = 0;
 		RID cull_state;
+		// GodotNext: vsm_nanite (#217). NextGeo VSM cluster-page pairs for directional (0) and local (1).
+		RID nanite_clusters[2];
+		RID nanite_counters[2];
+		uint32_t nanite_cluster_capacity = 0;
 		uint32_t max_dispatch_groups = 65535; // LIMIT_MAX_COMPUTE_WORKGROUP_COUNT_X.
 		LocalVector<VSMDebugLight> lights;
 	};

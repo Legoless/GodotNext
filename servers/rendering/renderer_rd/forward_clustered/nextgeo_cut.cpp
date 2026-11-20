@@ -45,6 +45,8 @@
 #include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+// GodotNext: vsm_nanite (#217).
+#include "servers/rendering/storage/virtual_shadow_map_storage.h"
 
 #include <cstddef>
 
@@ -2282,6 +2284,909 @@ bool NextGeoCut::draw_shadow_view(uint32_t p_shadow_view, RID p_framebuffer, con
 	return true;
 }
 
+// GodotNext: vsm_nanite (#217, plan §21.3 contract S4, steps 1-7).
+// Per-page multi-view cluster cull, hybrid HW/SW rasterization into the VSM physical page pool
+// (1 indirect dispatch chain for all directional maps, 1 for all local maps), 1-level 8x8 per-page
+// max-depth Hi-Z build, and programmable raster-bin integration shared with #155.
+bool NextGeoCut::_ensure_vsm() {
+	if (vsm_ready) {
+		return true;
+	}
+	if (vsm_failed) {
+		return false;
+	}
+	if (!_ensure()) {
+		vsm_failed = true;
+		return false;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || !rd->has_feature(RD::SUPPORTS_IMAGE_ATOMIC_32_BIT)) {
+		vsm_failed = true;
+		return false;
+	}
+#ifdef REAL_T_IS_DOUBLE
+	const String base_defines = "\n#define REAL_T_IS_DOUBLE\n";
+#else
+	const String base_defines = "";
+#endif
+	const String vsm_defines = RendererVirtualShadowMapStorage::get_glsl_defines();
+	const String vsm_base = base_defines + "\n#define VSM_VIEW\n" + vsm_defines;
+	if (vsm_cluster_shader.get_variant_count() == 0) {
+		vsm_cluster_shader.initialize(Vector<String>({
+				vsm_base + "\n#define VSM_SETUP\n",
+				vsm_base + "\n#define VSM_SEED\n",
+				vsm_base,
+				vsm_base + "\n#define CLUSTER_CULL\n",
+		}));
+	}
+	if (vsm_hw_shader.get_variant_count() == 0) {
+		vsm_hw_shader.initialize(Vector<String>({ base_defines + vsm_defines }));
+	}
+	if (vsm_sw_shader.get_variant_count() == 0) {
+		vsm_sw_shader.initialize(Vector<String>({
+				base_defines + vsm_defines,
+				base_defines + "\n#define MODE_HIZ_BUILD\n" + vsm_defines,
+				base_defines + "\n#define MODE_MARK_DYNAMIC_TEST\n" + vsm_defines,
+		}));
+	}
+	vsm_cluster_version = vsm_cluster_shader.version_create();
+	vsm_hw_version = vsm_hw_shader.version_create();
+	vsm_sw_version = vsm_sw_shader.version_create();
+	if (vsm_cluster_version.is_null() || vsm_hw_version.is_null() || vsm_sw_version.is_null()) {
+		_free_vsm_resources();
+		vsm_failed = true;
+		return false;
+	}
+	const RID setup_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 0);
+	const RID seed_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 1);
+	const RID bvh_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 2);
+	const RID leaf_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 3);
+	const RID hw_sh = vsm_hw_shader.version_get_shader(vsm_hw_version, 0);
+	const RID sw_sh = vsm_sw_shader.version_get_shader(vsm_sw_version, 0);
+	const RID hiz_sh = vsm_sw_shader.version_get_shader(vsm_sw_version, 1);
+	const RID dyn_sh = vsm_sw_shader.version_get_shader(vsm_sw_version, 2);
+	if (setup_sh.is_null() || seed_sh.is_null() || bvh_sh.is_null() || leaf_sh.is_null() || hw_sh.is_null() || sw_sh.is_null() || hiz_sh.is_null() || dyn_sh.is_null()) {
+		_free_vsm_resources();
+		vsm_failed = true;
+		return false;
+	}
+	vsm_setup_pipeline = rd->compute_pipeline_create(setup_sh);
+	vsm_seed_pipeline = rd->compute_pipeline_create(seed_sh);
+	vsm_bvh_pipeline = rd->compute_pipeline_create(bvh_sh);
+	vsm_leaf_pipeline = rd->compute_pipeline_create(leaf_sh);
+	vsm_sw_pipeline = rd->compute_pipeline_create(sw_sh);
+	vsm_hiz_build_pipeline = rd->compute_pipeline_create(hiz_sh);
+	vsm_mark_dynamic_pipeline = rd->compute_pipeline_create(dyn_sh);
+
+	RD::PipelineRasterizationState hw_raster_state;
+	hw_raster_state.cull_mode = RD::POLYGON_CULL_BACK;
+	vsm_hw_pipeline.setup(hw_sh, RD::RENDER_PRIMITIVE_TRIANGLES, hw_raster_state, RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(0));
+
+	vsm_empty_fb = rd->framebuffer_create_empty(Size2i(RendererVirtualShadowMapStorage::PAGE_SIZE, RendererVirtualShadowMapStorage::PAGE_SIZE));
+	vsm_params_buffer = _storage(sizeof(RendererRD::NextGeoVSMParams));
+	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
+		vsm_counters[chain] = _storage(sizeof(RendererRD::NextGeoVSMCounters));
+		vsm_clusters[chain] = _storage(RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY * 4u * sizeof(uint32_t));
+	}
+	for (int ring = 0; ring < 3; ring++) {
+		vsm_counters_ring[ring] = _storage(RendererRD::NEXTGEO_VSM_CHAIN_COUNT * sizeof(RendererRD::NextGeoVSMCounters));
+		vsm_counters_ring_pending[ring] = false;
+	}
+	vsm_counters_ring_cursor = 0;
+	vsm_seed_args = rd->storage_buffer_create(4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	vsm_bvh_args[0] = rd->storage_buffer_create(8u * 4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	vsm_bvh_args[1] = rd->storage_buffer_create(8u * 4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	vsm_group_args = rd->storage_buffer_create(4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	vsm_raster_args = rd->storage_buffer_create(8u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	vsm_raster_counts = rd->storage_buffer_create(4u * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	vsm_nodes_a = _storage(RendererRD::NEXTGEO_VSM_NODE_CAPACITY * 4u * sizeof(uint32_t));
+	vsm_nodes_b = _storage(RendererRD::NEXTGEO_VSM_NODE_CAPACITY * 4u * sizeof(uint32_t));
+	vsm_groups = _storage(RendererRD::NEXTGEO_VSM_GROUP_CAPACITY * 4u * sizeof(uint32_t));
+	vsm_raster_lists = _storage(RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY * sizeof(uint32_t));
+
+	const bool ok = vsm_setup_pipeline.is_valid() && vsm_seed_pipeline.is_valid() && vsm_bvh_pipeline.is_valid() && vsm_leaf_pipeline.is_valid() &&
+			vsm_sw_pipeline.is_valid() && vsm_hiz_build_pipeline.is_valid() && vsm_mark_dynamic_pipeline.is_valid() &&
+			vsm_empty_fb.is_valid() && vsm_params_buffer.is_valid() &&
+			vsm_counters[0].is_valid() && vsm_counters[1].is_valid() &&
+			vsm_clusters[0].is_valid() && vsm_clusters[1].is_valid() &&
+			vsm_counters_ring[0].is_valid() && vsm_counters_ring[1].is_valid() && vsm_counters_ring[2].is_valid() &&
+			vsm_seed_args.is_valid() && vsm_bvh_args[0].is_valid() && vsm_bvh_args[1].is_valid() &&
+			vsm_group_args.is_valid() && vsm_raster_args.is_valid() && vsm_raster_counts.is_valid() &&
+			vsm_nodes_a.is_valid() && vsm_nodes_b.is_valid() && vsm_groups.is_valid() && vsm_raster_lists.is_valid();
+	if (!ok) {
+		_free_vsm_resources();
+		vsm_failed = true;
+		return false;
+	}
+	vsm_ready = true;
+	return true;
+}
+
+bool NextGeoCut::is_vsm_available() {
+	return _ensure_vsm();
+}
+
+bool NextGeoCut::_ensure_vsm_hiz(uint32_t p_pool_pages, uint32_t p_grid_width, uint64_t p_pool_reallocations) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_pool_pages == 0u || p_grid_width == 0u) {
+		return false;
+	}
+	const bool needs_create = vsm_hiz_texture.is_null() || vsm_hiz_owner.is_null() ||
+			vsm_hiz_pool_pages != p_pool_pages || vsm_hiz_grid_width != p_grid_width;
+	if (needs_create) {
+		if (vsm_hiz_texture.is_valid()) {
+			rd->free_rid(vsm_hiz_texture);
+			vsm_hiz_texture = RID();
+		}
+		if (vsm_hiz_owner.is_valid()) {
+			rd->free_rid(vsm_hiz_owner);
+			vsm_hiz_owner = RID();
+		}
+		const uint32_t grid_height = (p_pool_pages + p_grid_width - 1u) / p_grid_width;
+		RD::TextureFormat tf;
+		tf.format = RD::DATA_FORMAT_R32_UINT;
+		tf.texture_type = RD::TEXTURE_TYPE_2D;
+		tf.width = p_grid_width * RendererRD::NEXTGEO_VSM_HIZ_PAGE_SIZE;
+		tf.height = grid_height * RendererRD::NEXTGEO_VSM_HIZ_PAGE_SIZE;
+		tf.usage_bits = RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_COPY_TO_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT;
+		vsm_hiz_texture = rd->texture_create(tf, RD::TextureView());
+		vsm_hiz_owner = _storage(p_pool_pages * sizeof(uint32_t));
+		if (vsm_hiz_texture.is_null() || vsm_hiz_owner.is_null()) {
+			if (vsm_hiz_texture.is_valid()) {
+				rd->free_rid(vsm_hiz_texture);
+				vsm_hiz_texture = RID();
+			}
+			if (vsm_hiz_owner.is_valid()) {
+				rd->free_rid(vsm_hiz_owner);
+				vsm_hiz_owner = RID();
+			}
+			vsm_hiz_pool_pages = 0;
+			vsm_hiz_grid_width = 0;
+			return false;
+		}
+		rd->set_resource_name(vsm_hiz_texture, "VSM Nanite Hi-Z");
+		rd->set_resource_name(vsm_hiz_owner, "VSM Nanite Hi-Z Owner");
+		rd->texture_clear(vsm_hiz_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->buffer_clear(vsm_hiz_owner, 0, p_pool_pages * sizeof(uint32_t));
+		vsm_hiz_pool_pages = p_pool_pages;
+		vsm_hiz_grid_width = p_grid_width;
+		vsm_hiz_pool_reallocations = p_pool_reallocations;
+	} else if (vsm_hiz_pool_reallocations != p_pool_reallocations) {
+		rd->texture_clear(vsm_hiz_texture, Color(0, 0, 0, 0), 0, 1, 0, 1);
+		rd->buffer_clear(vsm_hiz_owner, 0, p_pool_pages * sizeof(uint32_t));
+		vsm_hiz_pool_reallocations = p_pool_reallocations;
+	}
+	return true;
+}
+
+void NextGeoCut::invalidate_vsm_hiz() {
+	if (vsm_hiz_owner.is_null() || vsm_hiz_pool_pages == 0u) {
+		return;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr) {
+		return;
+	}
+	rd->buffer_clear(vsm_hiz_owner, 0, vsm_hiz_pool_pages * sizeof(uint32_t));
+}
+
+void NextGeoCut::_dispatch_vsm_hiz_build(RID p_pool_texture, RID p_dirty_buffer, RID p_alloc_state_buffer, RID p_indirect_buffer, uint32_t p_table_maps, uint32_t p_pool_pages, uint32_t p_grid_width) {
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || uniform_set_cache == nullptr || vsm_hiz_build_pipeline.is_null() || vsm_hiz_texture.is_null() || vsm_hiz_owner.is_null()) {
+		invalidate_vsm_hiz();
+		return;
+	}
+	const RID hiz_sh = vsm_sw_shader.version_get_shader(vsm_sw_version, 1);
+	LocalVector<RD::Uniform> u;
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_alloc_state_buffer));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, p_dirty_buffer));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_pool_texture));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 3, vsm_hiz_texture));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_hiz_owner));
+	u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_counters[0]));
+	const RID set = uniform_set_cache->get_cache_vec(hiz_sh, 0, u);
+	if (set.is_null()) {
+		invalidate_vsm_hiz();
+		return;
+	}
+	const uint32_t push[4] = { p_pool_pages, p_grid_width, p_table_maps, 0u };
+	RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, vsm_hiz_build_pipeline);
+	rd->compute_list_bind_uniform_set(list, set, 0);
+	rd->compute_list_set_push_constant(list, push, sizeof(push));
+	rd->compute_list_dispatch_indirect(list, p_indirect_buffer, RendererVirtualShadowMapStorage::INDIRECT_ALL * sizeof(uint32_t));
+	rd->compute_list_end();
+}
+
+void NextGeoCut::update_vsm_hiz(RID p_pool_texture, RID p_dirty_buffer, RID p_alloc_state_buffer, RID p_indirect_buffer, uint32_t p_table_maps, uint32_t p_pool_pages, uint32_t p_grid_width, uint64_t p_pool_reallocations) {
+	if (!vsm_ready || vsm_hiz_texture.is_null() || vsm_hiz_owner.is_null()) {
+		return;
+	}
+	if (p_pool_texture.is_null() || p_dirty_buffer.is_null() || p_alloc_state_buffer.is_null() || p_indirect_buffer.is_null() ||
+			p_table_maps == 0u || p_pool_pages == 0u || p_grid_width == 0u) {
+		invalidate_vsm_hiz();
+		return;
+	}
+	if (!_ensure_vsm_hiz(p_pool_pages, p_grid_width, p_pool_reallocations)) {
+		invalidate_vsm_hiz();
+		return;
+	}
+	_dispatch_vsm_hiz_build(p_pool_texture, p_dirty_buffer, p_alloc_state_buffer, p_indirect_buffer, p_table_maps, p_pool_pages, p_grid_width);
+}
+
+bool NextGeoCut::_ensure_vsm_bins(RenderingDevice *p_rd) {
+	if (vsm_bins_ready) {
+		return true;
+	}
+	if (!_ensure_raster_bins(p_rd)) {
+		return false;
+	}
+	if (vsm_bin_state.is_null()) {
+		vsm_bin_state = _storage(RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t));
+	}
+	if (vsm_bin_args.is_null()) {
+		vsm_bin_args = p_rd->storage_buffer_create(RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t), Vector<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
+	}
+	if (vsm_bin_append.is_null()) {
+		vsm_bin_append = _storage(RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY * sizeof(uint32_t));
+	}
+	if (vsm_bin_lists.is_null()) {
+		vsm_bin_lists = _storage(RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY * sizeof(uint32_t));
+	}
+	vsm_bins_ready = vsm_bin_state.is_valid() && vsm_bin_args.is_valid() && vsm_bin_append.is_valid() && vsm_bin_lists.is_valid();
+	return vsm_bins_ready;
+}
+
+RID NextGeoCut::_vsm_bin_render_pipeline(RID p_shader, RD::FramebufferFormatID p_format) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (vsm_bin_render_format != p_format) {
+		for (const KeyValue<RID, RID> &E : vsm_bin_render_pipelines) {
+			if (rd->render_pipeline_is_valid(E.value)) {
+				rd->free_rid(E.value);
+			}
+		}
+		vsm_bin_render_pipelines.clear();
+		vsm_bin_render_format = p_format;
+	}
+	RID *existing = vsm_bin_render_pipelines.getptr(p_shader);
+	if (existing != nullptr && rd->render_pipeline_is_valid(*existing)) {
+		return *existing;
+	}
+	RD::PipelineRasterizationState raster_state;
+	raster_state.cull_mode = RD::POLYGON_CULL_BACK;
+	const RID pipeline = rd->render_pipeline_create(p_shader, p_format, RD::INVALID_ID, RD::RENDER_PRIMITIVE_TRIANGLES, raster_state, RD::PipelineMultisampleState(), RD::PipelineDepthStencilState(), RD::PipelineColorBlendState::create_disabled(0));
+	if (pipeline.is_valid()) {
+		vsm_bin_render_pipelines[p_shader] = pipeline;
+	}
+	return pipeline;
+}
+
+void NextGeoCut::_compact_vsm_bins() {
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	const RID prefix = raster_bin_compact_shader.version_get_shader(raster_bin_compact_version, 0);
+	const RID scatter = raster_bin_compact_shader.version_get_shader(raster_bin_compact_version, 1);
+	RD::Uniform u_state(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, vsm_bin_state);
+	RD::Uniform u_append(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, vsm_bin_append);
+	RD::Uniform u_lists(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, vsm_bin_lists);
+	RD::Uniform u_args(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, vsm_bin_args);
+	const RID prefix_set = uniform_set_cache->get_cache(prefix, 0, u_state, u_append, u_lists, u_args);
+	const RID scatter_set = uniform_set_cache->get_cache(scatter, 0, u_state, u_append, u_lists);
+	if (prefix_set.is_null() || scatter_set.is_null()) {
+		return;
+	}
+	const uint32_t push[4] = { 0u, 0u, RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, RendererRD::NEXTGEO_RASTER_VERTEX_COUNT };
+	RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, raster_bin_prefix_pipeline);
+	rd->compute_list_bind_uniform_set(list, prefix_set, 0);
+	rd->compute_list_set_push_constant(list, push, sizeof(push));
+	rd->compute_list_dispatch(list, 1u, 1u, 1u);
+	rd->compute_list_end();
+
+	list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, raster_bin_scatter_pipeline);
+	rd->compute_list_bind_uniform_set(list, scatter_set, 0);
+	rd->compute_list_set_push_constant(list, push, sizeof(push));
+	rd->compute_list_dispatch_indirect(list, vsm_bin_args, RendererRD::nextgeo_raster_bin_scatter_args_word(0u) * sizeof(uint32_t));
+	rd->compute_list_end();
+}
+
+void NextGeoCut::_draw_vsm_bins(uint32_t p_chain, const NextGeoVSMInputs &p_inputs) {
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	const RID page_buf = RSG::virtual_mesh_storage->get_page_buffer().is_valid() ? RSG::virtual_mesh_storage->get_page_buffer() : dummy_page_buf;
+	const RID cluster_buf = RSG::virtual_mesh_storage->get_cluster_buffer().is_valid() ? RSG::virtual_mesh_storage->get_cluster_buffer() : dummy_page_buf;
+	LocalVector<RD::Uniform> geometry_uniforms;
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, RSG::virtual_mesh_storage->get_record_buffer()));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, RSG::virtual_mesh_storage->get_mesh_record_buffer()));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_clusters[p_chain]));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, p_inputs.map_data_buffer));
+	geometry_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_inputs.dirty_buffer));
+
+	LocalVector<RD::Uniform> bin_uniforms;
+	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, vsm_bin_lists));
+	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, vsm_bin_state));
+	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 2, p_inputs.pool_texture));
+	bin_uniforms.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, vsm_counters[p_chain]));
+
+	struct BinPush {
+		uint32_t list_base;
+		uint32_t phase;
+		uint32_t bin;
+		uint32_t flags;
+		int32_t size[2];
+		uint32_t pad[2]; // pad[0] = cluster_capacity
+	};
+	static_assert(sizeof(BinPush) == 32, "BinPush must match raster_material_inc.glsl's RasterBinPush.");
+
+	auto bind_sets = [&](RID p_shader, const NextGeoVSMBinProgram &p_program, RID r_sets[4]) -> bool {
+		r_sets[0] = uniform_set_cache->get_cache_vec(p_shader, 0, geometry_uniforms);
+		r_sets[1] = uniform_set_cache->get_cache_vec(p_shader, 1, p_inputs.environment_uniforms);
+		r_sets[2] = uniform_set_cache->get_cache_vec(p_shader, 2, bin_uniforms);
+		r_sets[3] = p_program.material_uniforms.is_empty() ? RID() : uniform_set_cache->get_cache_vec(p_shader, 3, p_program.material_uniforms);
+		return r_sets[0].is_valid() && r_sets[1].is_valid() && r_sets[2].is_valid() && (p_program.material_uniforms.is_empty() || r_sets[3].is_valid());
+	};
+
+	const int32_t ps = int32_t(RendererVirtualShadowMapStorage::PAGE_SIZE);
+	{
+		RD::ComputeListID list = rd->compute_list_begin();
+		for (const NextGeoVSMBinProgram &program : p_inputs.raster_bin_programs) {
+			if (program.sw_shader.is_null()) {
+				continue;
+			}
+			const RID pipeline = _raster_bin_compute_pipeline(program.sw_shader);
+			RID sets[4];
+			if (pipeline.is_null() || !bind_sets(program.sw_shader, program, sets)) {
+				continue;
+			}
+			const BinPush push = { 0u, 0u, program.bin, 0u, { ps, ps }, { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, 0u } };
+			rd->compute_list_bind_compute_pipeline(list, pipeline);
+			for (uint32_t set = 0; set < 4; set++) {
+				if (sets[set].is_valid()) {
+					rd->compute_list_bind_uniform_set(list, sets[set], set);
+				}
+			}
+			rd->compute_list_set_push_constant(list, &push, sizeof(push));
+			rd->compute_list_dispatch_indirect(list, vsm_bin_args, RendererRD::nextgeo_raster_bin_args_word(0u, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_SW) * sizeof(uint32_t));
+		}
+		rd->compute_list_end();
+	}
+
+	{
+		const RD::FramebufferFormatID format = rd->framebuffer_get_format(vsm_empty_fb);
+		RD::DrawListID dl = rd->draw_list_begin(vsm_empty_fb, RD::DRAW_DEFAULT_ALL);
+		for (const NextGeoVSMBinProgram &program : p_inputs.raster_bin_programs) {
+			if (program.hw_shader.is_null()) {
+				continue;
+			}
+			const RID pipeline = _vsm_bin_render_pipeline(program.hw_shader, format);
+			RID sets[4];
+			if (pipeline.is_null() || !bind_sets(program.hw_shader, program, sets)) {
+				continue;
+			}
+			const BinPush push = { 0u, 0u, program.bin, 0u, { ps, ps }, { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, 0u } };
+			rd->draw_list_bind_render_pipeline(dl, pipeline);
+			for (uint32_t set = 0; set < 4; set++) {
+				if (sets[set].is_valid()) {
+					rd->draw_list_bind_uniform_set(dl, sets[set], set);
+				}
+			}
+			rd->draw_list_set_push_constant(dl, &push, sizeof(push));
+			// firstInstance = 0 in vsm_bin_args (written by raster_bin_compact PREFIX).
+			rd->draw_list_draw_indirect(dl, false, vsm_bin_args, RendererRD::nextgeo_raster_bin_args_word(0u, program.bin, RendererRD::NEXTGEO_RASTER_BIN_KIND_HW) * sizeof(uint32_t), 1u, 0u);
+		}
+		rd->draw_list_end();
+	}
+}
+
+void NextGeoCut::_readback_vsm_stats_static(const PackedByteArray &p_data, uint64_t p_token, uint32_t p_ring_slot) {
+	NextGeoCut *self = nullptr;
+	{
+		MutexLock lock(s_page_req_registry_mutex);
+		NextGeoCut **found = s_page_req_registry.getptr(p_token);
+		if (found != nullptr) {
+			self = *found;
+		}
+		s_page_req_registry.erase(p_token);
+	}
+	if (self != nullptr) {
+		self->pending_readback_tokens.erase(p_token);
+		self->_publish_vsm_stats(p_data, p_ring_slot);
+	}
+}
+
+void NextGeoCut::_publish_vsm_stats(const PackedByteArray &p_data, uint32_t p_ring_slot) {
+	if (p_ring_slot < 3u) {
+		vsm_counters_ring_pending[p_ring_slot] = false;
+	}
+	const uint32_t expected = RendererRD::NEXTGEO_VSM_CHAIN_COUNT * sizeof(RendererRD::NextGeoVSMCounters);
+	if (uint32_t(p_data.size()) < expected) {
+		return;
+	}
+	memcpy(vsm_last_gpu_counters, p_data.ptr(), expected);
+	vsm_have_gpu_counters = true;
+}
+
+void NextGeoCut::_request_vsm_stats(uint32_t p_ring_slot) {
+	RenderingDevice *rd = RD::get_singleton();
+	if (rd == nullptr || p_ring_slot >= 3u || vsm_counters_ring_pending[p_ring_slot] || vsm_counters_ring[p_ring_slot].is_null()) {
+		return;
+	}
+	const uint32_t one = uint32_t(sizeof(RendererRD::NextGeoVSMCounters));
+	rd->buffer_copy(vsm_counters[0], vsm_counters_ring[p_ring_slot], 0, 0, one);
+	rd->buffer_copy(vsm_counters[1], vsm_counters_ring[p_ring_slot], 0, one, one);
+	uint64_t token = 0;
+	{
+		MutexLock lock(s_page_req_registry_mutex);
+		token = s_page_req_next_token++;
+		s_page_req_registry[token] = this;
+	}
+	pending_readback_tokens.push_back(token);
+	vsm_counters_ring_pending[p_ring_slot] = true;
+	const Error err = rd->buffer_get_data_async(vsm_counters_ring[p_ring_slot], callable_mp_static(&NextGeoCut::_readback_vsm_stats_static).bind(token, p_ring_slot), 0, one * RendererRD::NEXTGEO_VSM_CHAIN_COUNT);
+	if (err != OK) {
+		vsm_counters_ring_pending[p_ring_slot] = false;
+		pending_readback_tokens.erase(token);
+		MutexLock lock(s_page_req_registry_mutex);
+		s_page_req_registry.erase(token);
+	}
+}
+
+void NextGeoCut::mark_vsm_dynamic_test(RID p_page_table, uint32_t p_table_maps, uint32_t p_pool_pages) {
+	if (!vsm_ready || vsm_hiz_owner.is_null() || p_page_table.is_null() || p_table_maps == 0u || p_pool_pages == 0u) {
+		return;
+	}
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || uniform_set_cache == nullptr) {
+		return;
+	}
+	const uint32_t pages_to_mark = MIN(p_pool_pages, vsm_hiz_pool_pages);
+	if (pages_to_mark == 0u) {
+		return;
+	}
+	const RID sh = vsm_sw_shader.version_get_shader(vsm_sw_version, 2);
+	RD::Uniform u_table(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, p_page_table);
+	RD::Uniform u_owner(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, vsm_hiz_owner);
+	RD::Uniform u_cnt(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, vsm_counters[0]);
+	const RID set = uniform_set_cache->get_cache(sh, 0, u_table, u_owner, u_cnt);
+	if (set.is_null()) {
+		return;
+	}
+	const uint32_t push[4] = { pages_to_mark, p_table_maps, 0u, 0u };
+	RD::ComputeListID list = rd->compute_list_begin();
+	rd->compute_list_bind_compute_pipeline(list, vsm_mark_dynamic_pipeline);
+	rd->compute_list_bind_uniform_set(list, set, 0);
+	rd->compute_list_set_push_constant(list, push, sizeof(push));
+	rd->compute_list_dispatch_threads(list, pages_to_mark, 1u, 1u);
+	rd->compute_list_end();
+}
+
+bool NextGeoCut::dispatch_vsm(RendererVirtualMeshStorage *p_storage, const NextGeoVSMInputs &p_inputs, Dictionary *r_stats) {
+	if (p_storage == nullptr || p_inputs.pool_texture.is_null() || p_inputs.page_table_buffer.is_null() ||
+			p_inputs.map_data_buffer.is_null() || p_inputs.dirty_buffer.is_null() ||
+			p_inputs.alloc_state_buffer.is_null() || p_inputs.indirect_buffer.is_null() ||
+			p_inputs.table_maps == 0u || p_inputs.pool_pages == 0u || p_inputs.grid_width == 0u) {
+		return false;
+	}
+	if (!_ensure_vsm() || !_ensure_vsm_hiz(p_inputs.pool_pages, p_inputs.grid_width, p_inputs.pool_reallocations)) {
+		return false;
+	}
+	const uint32_t record_count = p_storage->get_record_count();
+	const uint32_t max_levels = MIN(p_storage->get_max_bvh_levels(), 8u);
+	if (record_count == 0u || max_levels == 0u || p_storage->get_record_buffer().is_null() || p_storage->get_mesh_record_buffer().is_null() || p_storage->get_dag_buffer().is_null()) {
+		return false;
+	}
+
+	RenderingDevice *rd = RD::get_singleton();
+	UniformSetCacheRD *uniform_set_cache = UniformSetCacheRD::get_singleton();
+	if (rd == nullptr || uniform_set_cache == nullptr) {
+		return false;
+	}
+
+	const uint32_t meta_count = MAX(p_inputs.table_maps, 1u);
+	if (vsm_map_meta_buffer.is_null() || vsm_map_meta_capacity < meta_count) {
+		if (vsm_map_meta_buffer.is_valid()) {
+			rd->free_rid(vsm_map_meta_buffer);
+		}
+		vsm_map_meta_capacity = MAX(Math::next_power_of_2(meta_count), 128u);
+		vsm_map_meta_buffer = _storage(vsm_map_meta_capacity * sizeof(RendererRD::NextGeoVSMMapMeta));
+		if (vsm_map_meta_buffer.is_null()) {
+			vsm_map_meta_capacity = 0;
+			return false;
+		}
+	}
+	if (p_inputs.map_meta.size() >= p_inputs.table_maps) {
+		rd->buffer_update(vsm_map_meta_buffer, 0, p_inputs.table_maps * sizeof(RendererRD::NextGeoVSMMapMeta), p_inputs.map_meta.ptr());
+	} else {
+		LocalVector<RendererRD::NextGeoVSMMapMeta> padded;
+		padded.resize(p_inputs.table_maps);
+		for (uint32_t i = 0; i < p_inputs.map_meta.size() && i < p_inputs.table_maps; i++) {
+			padded[i] = p_inputs.map_meta[i];
+		}
+		rd->buffer_update(vsm_map_meta_buffer, 0, p_inputs.table_maps * sizeof(RendererRD::NextGeoVSMMapMeta), padded.ptr());
+	}
+
+	const bool use_bins = !p_inputs.raster_bin_programs.is_empty() && p_inputs.raster_bin_table != nullptr && p_inputs.raster_bin_table_words > 0u && !p_inputs.environment_uniforms.is_empty() && _ensure_vsm_bins(rd);
+	if (use_bins) {
+		if (vsm_bin_table_buffer.is_null() || vsm_bin_table_capacity < p_inputs.raster_bin_table_words) {
+			if (vsm_bin_table_buffer.is_valid()) {
+				rd->free_rid(vsm_bin_table_buffer);
+			}
+			vsm_bin_table_capacity = MAX(Math::next_power_of_2(p_inputs.raster_bin_table_words), 256u);
+			vsm_bin_table_buffer = _storage(vsm_bin_table_capacity * sizeof(uint32_t));
+		}
+		if (vsm_bin_table_buffer.is_valid()) {
+			rd->buffer_update(vsm_bin_table_buffer, 0, p_inputs.raster_bin_table_words * sizeof(uint32_t), p_inputs.raster_bin_table);
+		}
+	}
+
+	const RID records_buf = p_storage->get_record_buffer();
+	const RID meshes_buf = p_storage->get_mesh_record_buffer();
+	const RID dag_buf = p_storage->get_dag_buffer();
+	const RID residency_buf = p_storage->get_residency_buffer().is_valid() ? p_storage->get_residency_buffer() : dummy_page_buf;
+	const RID page_buf = p_storage->get_page_buffer().is_valid() ? p_storage->get_page_buffer() : dummy_page_buf;
+	const RID cluster_buf = p_storage->get_cluster_buffer().is_valid() ? p_storage->get_cluster_buffer() : dummy_page_buf;
+	const RID bin_table_buf = (use_bins && vsm_bin_table_buffer.is_valid()) ? vsm_bin_table_buffer : dummy_page_buf;
+	const RID bin_append_buf = (use_bins && vsm_bin_append.is_valid()) ? vsm_bin_append : dummy_page_buf;
+	const RID bin_state_buf = (use_bins && vsm_bin_state.is_valid()) ? vsm_bin_state : dummy_page_buf;
+	const bool use_indirect_count = rd->has_feature(RD::SUPPORTS_DRAW_INDIRECT_COUNT);
+	const float sw_threshold = RendererRD::nextgeo_vsm_sw_switch_texels(p_inputs.sw_max_edge_texels);
+
+	uint32_t cull_flags = 0u;
+	if (p_inputs.hiz_enabled) {
+		cull_flags |= RendererRD::NEXTGEO_VSM_CULL_FLAG_HIZ;
+	}
+	if (use_bins) {
+		cull_flags |= RendererRD::NEXTGEO_VSM_CULL_FLAG_PROGRAMMABLE_BINS;
+	}
+	if (p_inputs.dynamic_layer_hook) {
+		cull_flags |= RendererRD::NEXTGEO_VSM_CULL_FLAG_DYNAMIC_HOOK;
+	}
+	if (p_inputs.count_sw_writes) {
+		cull_flags |= RendererRD::NEXTGEO_VSM_CULL_FLAG_COUNT_SW_WRITES;
+	}
+
+	const uint32_t seed_init[4] = { 0u, 0u, 1u, 0u };
+	uint32_t bvh_init[8 * 4] = {};
+	for (uint32_t lvl = 0; lvl < 8; lvl++) {
+		bvh_init[lvl * 4 + 0] = 0u;
+		bvh_init[lvl * 4 + 1] = 1u;
+		bvh_init[lvl * 4 + 2] = 1u;
+		bvh_init[lvl * 4 + 3] = 0u;
+	}
+	const uint32_t group_init[4] = { 0u, 1u, 1u, 0u };
+	// SW dispatch: (0, 0, 1, 0); HW draw: (384, 0, 0, 0) with firstInstance = 0.
+	const uint32_t raster_args_init[8] = { 0u, 0u, 1u, 0u, RendererRD::NEXTGEO_RASTER_VERTEX_COUNT, 0u, 0u, 0u };
+	const uint32_t raster_counts_init[4] = { 0u, 0u, 0u, 0u };
+
+	const RID setup_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 0);
+	const RID seed_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 1);
+	const RID bvh_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 2);
+	const RID leaf_sh = vsm_cluster_shader.version_get_shader(vsm_cluster_version, 3);
+	const RID hw_sh = vsm_hw_shader.version_get_shader(vsm_hw_version, 0);
+	const RID sw_sh = vsm_sw_shader.version_get_shader(vsm_sw_version, 0);
+
+	auto push_common_vsm_uniforms = [&](LocalVector<RD::Uniform> &r_u, uint32_t p_chain, RID p_nodes_in) {
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, records_buf));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, meshes_buf));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, dag_buf));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, vsm_params_buffer));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, residency_buf));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_counters[p_chain]));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_inputs.map_data_buffer));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, vsm_map_meta_buffer));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, p_inputs.dirty_buffer));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, p_inputs.alloc_state_buffer));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 10, p_inputs.page_table_buffer));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 11, vsm_hiz_texture));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 12, vsm_hiz_owner));
+		r_u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 13, p_nodes_in));
+	};
+
+	rd->draw_command_begin_label("VSM NextGeo Cull and Raster");
+
+	// Chain 0: all directional maps; Chain 1: all local maps (1 indirect dispatch chain each).
+	for (uint32_t chain = 0; chain < RendererRD::NEXTGEO_VSM_CHAIN_COUNT; chain++) {
+		RendererRD::NextGeoVSMParams vp = {};
+		vp.table_maps = p_inputs.table_maps;
+		vp.pool_pages = p_inputs.pool_pages;
+		vp.grid_width = p_inputs.grid_width;
+		vp.record_count = record_count;
+		vp.node_capacity = RendererRD::NEXTGEO_VSM_NODE_CAPACITY;
+		vp.group_capacity = RendererRD::NEXTGEO_VSM_GROUP_CAPACITY;
+		vp.cluster_capacity = RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY;
+		vp.cull_flags = cull_flags;
+		vp.chain_index = chain;
+		vp.bucket_table_words = use_bins ? p_inputs.raster_bin_table_words : 0u;
+		vp.max_texel_error = p_inputs.max_texel_error;
+		vp.lod_bias = p_inputs.lod_bias;
+		vp.sw_max_edge_texels = sw_threshold;
+		vp.camera_position[0] = float(p_inputs.camera_position.x);
+		vp.camera_position[1] = float(p_inputs.camera_position.y);
+		vp.camera_position[2] = float(p_inputs.camera_position.z);
+		vp.camera_position[3] = 1.0f;
+		if (use_bins) {
+			for (const NextGeoVSMBinProgram &prog : p_inputs.raster_bin_programs) {
+				if (prog.bin < 68u) {
+					vp.bin_features[prog.bin] = prog.features;
+				}
+			}
+		}
+		rd->buffer_update(vsm_params_buffer, 0, sizeof(vp), &vp);
+		rd->buffer_clear(vsm_counters[chain], 0, sizeof(RendererRD::NextGeoVSMCounters));
+		rd->buffer_update(vsm_seed_args, 0, sizeof(seed_init), seed_init);
+		rd->buffer_update(vsm_bvh_args[0], 0, sizeof(bvh_init), bvh_init);
+		rd->buffer_update(vsm_bvh_args[1], 0, sizeof(bvh_init), bvh_init);
+		rd->buffer_update(vsm_group_args, 0, sizeof(group_init), group_init);
+		rd->buffer_update(vsm_raster_args, 0, sizeof(raster_args_init), raster_args_init);
+		rd->buffer_update(vsm_raster_counts, 0, sizeof(raster_counts_init), raster_counts_init);
+		if (use_bins) {
+			rd->buffer_clear(vsm_bin_state, 0, RendererRD::NEXTGEO_RASTER_BIN_STATE_WORDS * sizeof(uint32_t));
+			rd->buffer_clear(vsm_bin_args, 0, RendererRD::NEXTGEO_RASTER_BIN_ARGS_WORDS * sizeof(uint32_t));
+		}
+
+		// 1. VSM_SETUP: compute indirect dispatch grid for VSM_SEED from vsm_alloc_state.
+		{
+			LocalVector<RD::Uniform> u;
+			push_common_vsm_uniforms(u, chain, vsm_nodes_b);
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, vsm_nodes_a));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm_groups));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, vsm_seed_args));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_group_args));
+			const RID set = uniform_set_cache->get_cache_vec(setup_sh, 0, u);
+			if (set.is_null()) {
+				continue;
+			}
+			const uint32_t push[4] = { 0u, 0u, 0u, 0u };
+			RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, vsm_setup_pipeline);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			rd->compute_list_set_push_constant(list, push, sizeof(push));
+			rd->compute_list_dispatch(list, 1u, 1u, 1u);
+			rd->compute_list_end();
+		}
+
+		// 2. VSM_SEED: cull (instance, dirty_page) pairs -> vsm_nodes_a + vsm_bvh_args[0].
+		{
+			LocalVector<RD::Uniform> u;
+			push_common_vsm_uniforms(u, chain, vsm_nodes_b);
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, vsm_nodes_a));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm_groups));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, vsm_bvh_args[0]));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_group_args));
+			const RID set = uniform_set_cache->get_cache_vec(seed_sh, 0, u);
+			if (set.is_null()) {
+				continue;
+			}
+			const uint32_t push[4] = { 0u, 0u, 0u, 0u };
+			RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, vsm_seed_pipeline);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			rd->compute_list_set_push_constant(list, push, sizeof(push));
+			rd->compute_list_dispatch_indirect(list, vsm_seed_args, 0u);
+			rd->compute_list_end();
+		}
+
+		// 3. VSM_BVH: level-synchronous indirect descent ping-ponging nodes & indirect args.
+		for (uint32_t level = 0; level < max_levels; level++) {
+			const RID nodes_in = (level & 1u) == 0u ? vsm_nodes_a : vsm_nodes_b;
+			const RID nodes_out = (level & 1u) == 0u ? vsm_nodes_b : vsm_nodes_a;
+			const RID args_in = vsm_bvh_args[level & 1u];
+			const RID args_out = vsm_bvh_args[(level + 1u) & 1u];
+			LocalVector<RD::Uniform> u;
+			push_common_vsm_uniforms(u, chain, nodes_in);
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, nodes_out));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, vsm_groups));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, args_out));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_group_args));
+			const RID set = uniform_set_cache->get_cache_vec(bvh_sh, 0, u);
+			if (set.is_null()) {
+				break;
+			}
+			const uint32_t push[4] = { level, 0u, 0u, 0u };
+			RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, vsm_bvh_pipeline);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			rd->compute_list_set_push_constant(list, push, sizeof(push));
+			rd->compute_list_dispatch_indirect(list, args_in, level * 4u * sizeof(uint32_t));
+			rd->compute_list_end();
+		}
+
+		// 4. VSM_CLUSTER_CULL: leaf groups -> (cluster, page) pairs routed to HW/SW + programmable bins.
+		{
+			LocalVector<RD::Uniform> u;
+			push_common_vsm_uniforms(u, chain, vsm_groups);
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 14, page_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 15, cluster_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 16, vsm_clusters[chain]));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 17, vsm_raster_args));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 18, vsm_raster_counts));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 19, vsm_raster_lists));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 20, bin_table_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 21, bin_append_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 22, bin_state_buf));
+			const RID set = uniform_set_cache->get_cache_vec(leaf_sh, 0, u);
+			if (set.is_null()) {
+				continue;
+			}
+			const uint32_t push[4] = { 0u, 0u, 0u, 0u };
+			RD::ComputeListID list = rd->compute_list_begin();
+			rd->compute_list_bind_compute_pipeline(list, vsm_leaf_pipeline);
+			rd->compute_list_bind_uniform_set(list, set, 0);
+			rd->compute_list_set_push_constant(list, push, sizeof(push));
+			rd->compute_list_dispatch_indirect(list, vsm_group_args, 0u);
+			rd->compute_list_end();
+		}
+
+		// 5. Fixed-function SW raster (compute indirect, 1 workgroup per cluster-page pair).
+		{
+			LocalVector<RD::Uniform> u;
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, records_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, meshes_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_clusters[chain]));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_raster_lists));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_inputs.map_data_buffer));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_inputs.dirty_buffer));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_inputs.pool_texture));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, vsm_counters[chain]));
+			const RID set = uniform_set_cache->get_cache_vec(sw_sh, 0, u);
+			if (set.is_valid()) {
+				const uint32_t push[4] = { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, p_inputs.count_sw_writes ? 1u : 0u, 0u, 0u };
+				RD::ComputeListID list = rd->compute_list_begin();
+				rd->compute_list_bind_compute_pipeline(list, vsm_sw_pipeline);
+				rd->compute_list_bind_uniform_set(list, set, 0);
+				rd->compute_list_set_push_constant(list, push, sizeof(push));
+				rd->compute_list_dispatch_indirect(list, vsm_raster_args, 0u);
+				rd->compute_list_end();
+			}
+		}
+
+		// 6. Fixed-function HW raster (empty 64x64 FB, indirect-count draw #177 with firstInstance = 0).
+		{
+			const RID pipeline = vsm_hw_pipeline.get_render_pipeline(RD::INVALID_ID, rd->framebuffer_get_format(vsm_empty_fb));
+			LocalVector<RD::Uniform> u;
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, records_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, meshes_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, page_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, cluster_buf));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, vsm_clusters[chain]));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, vsm_raster_lists));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, p_inputs.map_data_buffer));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, p_inputs.dirty_buffer));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_IMAGE, 8, p_inputs.pool_texture));
+			u.push_back(RD::Uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, vsm_counters[chain]));
+			const RID set = uniform_set_cache->get_cache_vec(hw_sh, 0, u);
+			if (pipeline.is_valid() && set.is_valid()) {
+				const uint32_t push[4] = { RendererRD::NEXTGEO_VSM_CLUSTER_CAPACITY, 0u, 0u, 0u };
+				RD::DrawListID dl = rd->draw_list_begin(vsm_empty_fb, RD::DRAW_DEFAULT_ALL);
+				rd->draw_list_bind_render_pipeline(dl, pipeline);
+				rd->draw_list_bind_uniform_set(dl, set, 0);
+				rd->draw_list_set_push_constant(dl, push, sizeof(push));
+				if (use_indirect_count) {
+					rd->draw_list_draw_indirect_count(dl, false, vsm_raster_args, 4u * sizeof(uint32_t), vsm_raster_counts, 0u, 1u, 0u);
+				} else {
+					rd->draw_list_draw_indirect(dl, false, vsm_raster_args, 4u * sizeof(uint32_t), 1u, 0u);
+				}
+				rd->draw_list_end();
+			}
+		}
+
+		// 7. Programmable raster bins (Step 7, shared table with #155).
+		if (use_bins) {
+			_compact_vsm_bins();
+			_draw_vsm_bins(chain, p_inputs);
+		}
+	}
+
+	// Build 1-level 8x8 max-depth Hi-Z per cached dirty page after both non-Nanite and Nanite raster.
+	_dispatch_vsm_hiz_build(p_inputs.pool_texture, p_inputs.dirty_buffer, p_inputs.alloc_state_buffer, p_inputs.indirect_buffer, p_inputs.table_maps, p_inputs.pool_pages, p_inputs.grid_width);
+
+	rd->draw_command_end_label();
+
+	vsm_dispatched_views++;
+	_request_vsm_stats(vsm_counters_ring_cursor++ % 3u);
+
+	if (r_stats != nullptr) {
+		Dictionary stats;
+		stats["active"] = true;
+		stats["views"] = int64_t(vsm_dispatched_views);
+		stats["directional_chains"] = int64_t(1);
+		stats["local_chains"] = int64_t(1);
+		stats["used_indirect_count"] = use_indirect_count;
+		stats["sw_threshold_texels"] = double(sw_threshold);
+		stats["hiz_enabled"] = p_inputs.hiz_enabled;
+		stats["dynamic_layer_hook"] = p_inputs.dynamic_layer_hook;
+		stats["programmable_bins"] = int64_t(use_bins ? p_inputs.raster_bin_programs.size() : 0u);
+		stats["gpu_counters_valid"] = vsm_have_gpu_counters;
+		if (vsm_have_gpu_counters) {
+			const RendererRD::NextGeoVSMCounters &dc = vsm_last_gpu_counters[0];
+			const RendererRD::NextGeoVSMCounters &lc = vsm_last_gpu_counters[1];
+			stats["directional_dirty_pages"] = int64_t(dc.dirty_pages);
+			stats["local_dirty_pages"] = int64_t(lc.dirty_pages);
+			stats["directional_clusters"] = int64_t(dc.cluster_count);
+			stats["local_clusters"] = int64_t(lc.cluster_count);
+			stats["sw_clusters"] = int64_t(dc.sw_clusters + lc.sw_clusters);
+			stats["hw_clusters"] = int64_t(dc.hw_clusters + lc.hw_clusters);
+			stats["prog_sw_clusters"] = int64_t(dc.prog_sw_clusters + lc.prog_sw_clusters);
+			stats["prog_hw_clusters"] = int64_t(dc.prog_hw_clusters + lc.prog_hw_clusters);
+			stats["hiz_culled_nodes"] = int64_t(dc.hiz_culled_nodes + lc.hiz_culled_nodes);
+			stats["hiz_culled_clusters"] = int64_t(dc.hiz_culled_clusters + lc.hiz_culled_clusters);
+			stats["hiz_pages_built"] = int64_t(dc.hiz_pages_built);
+			stats["sw_writes"] = int64_t(dc.sw_writes + lc.sw_writes);
+			stats["overflow"] = int64_t(dc.overflow + lc.overflow);
+			stats["redraw_marks"] = int64_t(dc.redraw_marks + lc.redraw_marks);
+			stats["sink"] = int64_t(dc.sink | lc.sink);
+		}
+		*r_stats = stats;
+	}
+	return true;
+}
+
+void NextGeoCut::_free_vsm_resources() {
+	RenderingDevice *rd = RD::get_singleton();
+	for (int ring = 0; ring < 3; ring++) {
+		vsm_counters_ring_pending[ring] = false;
+	}
+	vsm_have_gpu_counters = false;
+	vsm_ready = false;
+	if (rd == nullptr) {
+		return;
+	}
+	vsm_hw_pipeline.clear();
+	for (const KeyValue<RID, RID> &E : vsm_bin_render_pipelines) {
+		if (rd->render_pipeline_is_valid(E.value)) {
+			rd->free_rid(E.value);
+		}
+	}
+	vsm_bin_render_pipelines.clear();
+	vsm_bin_render_format = RD::INVALID_ID;
+	if (vsm_cluster_version.is_valid()) {
+		vsm_cluster_shader.version_free(vsm_cluster_version);
+		vsm_cluster_version = RID();
+	}
+	if (vsm_hw_version.is_valid()) {
+		vsm_hw_shader.version_free(vsm_hw_version);
+		vsm_hw_version = RID();
+	}
+	if (vsm_sw_version.is_valid()) {
+		vsm_sw_shader.version_free(vsm_sw_version);
+		vsm_sw_version = RID();
+	}
+	vsm_setup_pipeline = RID();
+	vsm_seed_pipeline = RID();
+	vsm_bvh_pipeline = RID();
+	vsm_leaf_pipeline = RID();
+	vsm_sw_pipeline = RID();
+	vsm_hiz_build_pipeline = RID();
+	vsm_mark_dynamic_pipeline = RID();
+	if (vsm_empty_fb.is_valid() && rd->framebuffer_is_valid(vsm_empty_fb)) {
+		rd->free_rid(vsm_empty_fb);
+	}
+	vsm_empty_fb = RID();
+	if (vsm_hiz_texture.is_valid()) {
+		rd->free_rid(vsm_hiz_texture);
+		vsm_hiz_texture = RID();
+	}
+	for (RID *buf : { &vsm_params_buffer, &vsm_map_meta_buffer, &vsm_counters[0], &vsm_counters[1], &vsm_counters_ring[0], &vsm_counters_ring[1], &vsm_counters_ring[2], &vsm_seed_args, &vsm_bvh_args[0], &vsm_bvh_args[1], &vsm_group_args, &vsm_raster_args, &vsm_raster_counts, &vsm_nodes_a, &vsm_nodes_b, &vsm_groups, &vsm_clusters[0], &vsm_clusters[1], &vsm_raster_lists, &vsm_hiz_owner, &vsm_bin_state, &vsm_bin_args, &vsm_bin_append, &vsm_bin_lists, &vsm_bin_table_buffer }) {
+		if (buf->is_valid()) {
+			rd->free_rid(*buf);
+			*buf = RID();
+		}
+	}
+	vsm_map_meta_capacity = 0;
+	vsm_hiz_pool_pages = 0;
+	vsm_hiz_grid_width = 0;
+	vsm_hiz_pool_reallocations = UINT64_MAX;
+	vsm_bin_table_capacity = 0;
+	vsm_bins_ready = false;
+}
+
 void NextGeoCut::free_resources() {
 	{
 		MutexLock lock(s_page_req_registry_mutex);
@@ -2304,6 +3209,7 @@ void NextGeoCut::free_resources() {
 	if (rd == nullptr) {
 		return;
 	}
+	_free_vsm_resources();
 	_release_hiz();
 	for (int variant = 0; variant < 4; variant++) {
 		raster_pipelines[variant].clear();

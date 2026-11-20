@@ -534,6 +534,10 @@ Dictionary VirtualShadowMapStorage::get_debug_info() const {
 	if (!last_raster_stats.is_empty()) {
 		info["non_nanite"] = last_raster_stats;
 	}
+	// GodotNext: vsm_nanite (#217).
+	if (!last_nanite_stats.is_empty()) {
+		info["nanite"] = last_nanite_stats;
+	}
 	// GodotNext: vsm_projection (#222). The last view whose light loop sampled the maps.
 	{
 		Dictionary projection;
