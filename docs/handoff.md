@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-20, night. #212 (`a5b4d5d660`, VSM caching and per-page invalidation) landed as unverified progress: repository hooks pass, but its engine builds, new tests, counter checks and GPU validation remain open. The earlier Mac-hosted batch is complete across 6 issues: #298 (`96a9a204c5`) and #297 (plan v3.9.17, `430d5b13fe`) closed; #150 (`7b7d2f5982`), #217 (`230a613b62`, VSM × Nanite — unblocking 12 M6/M7 tasks), #305 (`95f6bc869b`, `MaterialData::texture_cache` refresh), and #301 (`1c738bdcf7`, RD read-only depth attachments for TSR level 2 overlap / GT-7) landed as progress after Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV verification (waiting only on Metal/M5 Max). No lane is running, all worktrees are removed, and both cloud VMs are stopped.
+**Last updated:** 2026-11-20, night. #212 (`a5b4d5d660`, VSM caching and per-page invalidation) landed as unverified progress: repository hooks pass, but its engine builds, new tests, counter checks and GPU validation remain open. The earlier Mac-hosted batch is complete across 6 issues: #298 (`96a9a204c5`) and #297 (plan v3.9.17, `430d5b13fe`) closed; #150 (`7b7d2f5982`), #217 (`230a613b62`, VSM × Nanite — unblocking 12 M6/M7 tasks), #305 (`95f6bc869b`, `MaterialData::texture_cache` refresh), and #301 (`1c738bdcf7`, RD read-only depth attachments for TSR level 2 overlap / GT-7) landed as progress after Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV verification (waiting only on Metal/M5 Max). No lane is running, all worktrees are removed, and all GodotNext cloud VMs, boot disks and template snapshots are deleted.
 
 ## How to continue
 
@@ -10,10 +10,10 @@ The current state of the build and what to do next. It is written for any agent:
    - `godotnext-implement-issue` builds an issue and lands it;
    - `godotnext-fleet` covers the machines and how to use them;
    - `godotnext-update-tracker`, `godotnext-plan-revision` and `godotnext-issues` cover the tracker, the plan and the issues.
-2. Read this file, then `local/handoff-private.md`. The private file has the two remaining cloud VMs (one Linux L4 and one Windows L4 with the private Mesa NIR library), the VM start command, and the pending on-VM agent setup plan.
+2. Read this file, then `local/handoff-private.md`. The private file retains historical cloud setup notes, but no GodotNext cloud VMs, disks or template snapshots currently exist.
 3. `git fetch`; master should be at or after this commit. Refresh the tracker with `python3 docs/godotnext/tracker/export.py`.
-4. Lead preference (2026-11-20): keep the orchestrating agent running locally on the Mac while builds, doctests and GPU validation runs execute on the cloud Linux L4 and Windows L4 VMs (or the RTX 4080 SUPER machine when reachable).
-5. Stop cloud VMs as soon as they have no work left.
+4. Lead preference (2026-11-20): keep the orchestrating agent running locally on the Mac while builds, doctests and GPU validation runs execute on cloud Linux L4 and Windows L4 VMs (or the RTX 4080 SUPER machine when reachable). Reprovision the cloud VMs before cloud work.
+5. Stop cloud VMs as soon as they have no work left; delete them when the build is paused.
 
 ### The lane loop (what Claude's workflows did)
 
@@ -46,7 +46,7 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## Open work from the closed lanes
 
-All Linux Vulkan (VVL 1.4 / 1.4.363.1 syncval) and Windows Vulkan/D3D12/D3D12-GBV verification and code-review items for Stack 2 (`#145`, `#158`, `#221`, `#222`, `#295`) and today's earlier 2026-11-20 batch (`#150`, `#217`, `#305`, `#301`, plus closed `#298` and `#297`) are complete on `master` (`1c738bdcf7`). The open issues from both batches wait only on Metal / M5 Max builds and runs (plus PQ lines). #212 now has unverified code on `master` (`a5b4d5d660`); its next lane must add the required tests and prove the build, counter and GPU acceptance criteria before it can close. No lane is running, all worktrees are cleaned up, and both cloud VMs are stopped.
+All Linux Vulkan (VVL 1.4 / 1.4.363.1 syncval) and Windows Vulkan/D3D12/D3D12-GBV verification and code-review items for Stack 2 (`#145`, `#158`, `#221`, `#222`, `#295`) and today's earlier 2026-11-20 batch (`#150`, `#217`, `#305`, `#301`, plus closed `#298` and `#297`) are complete on `master` (`1c738bdcf7`). The open issues from both batches wait only on Metal / M5 Max builds and runs (plus PQ lines). #212 now has unverified code on `master` (`a5b4d5d660`); its next lane must add the required tests and prove the build, counter and GPU acceptance criteria before it can close. No lane is running, all worktrees are cleaned up, and all GodotNext cloud VMs, boot disks and template snapshots are deleted.
 
 ## Ready to start (phase order)
 
