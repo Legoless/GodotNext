@@ -4439,7 +4439,21 @@ void RenderForwardClustered::_vsm_raster_nanite(RenderDataRD *p_render_data) {
 				program.sw_shader = sw_sh;
 				program.hw_shader = hw_sh;
 				Vector<RD::Uniform> material_uniforms;
-				owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
+				// GodotNext: nextgeo_texture_cache_refresh (#305) x vsm_nanite (#217). Guard VSM programmable bins against freed textures mid-frame.
+				bool uniforms_valid = owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
+				RenderingDevice *rd = RD::get_singleton();
+				for (const RD::Uniform &uniform : material_uniforms) {
+					if (uniform.uniform_type == RD::UNIFORM_TYPE_TEXTURE) {
+						uniforms_valid = uniforms_valid && uniform.get_id_count() > 0;
+						for (uint32_t j = 0; j < uniform.get_id_count(); j++) {
+							uniforms_valid = uniforms_valid && rd->texture_is_valid(uniform.get_id(j));
+						}
+					}
+				}
+				if (!uniforms_valid) {
+					RendererRD::MaterialStorage::get_singleton()->material_queue_texture_update(owner.material->get_self());
+					continue;
+				}
 				for (const RD::Uniform &uniform : material_uniforms) {
 					program.material_uniforms.push_back(uniform);
 				}
@@ -6134,7 +6148,22 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 							program.sw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(false, buffer);
 							program.hw_shader[buffer ? 1 : 0] = owner.shader->get_raster_target_shader(true, buffer);
 							Vector<RD::Uniform> material_uniforms;
-							owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
+							// GodotNext: nextgeo_texture_cache_refresh (#305). Streaming swaps refresh texture_cache in
+							// place; this guards against a texture freed mid-frame before update_dirty_resources().
+							bool uniforms_valid = owner.material->get_parameter_uniforms(material_uniforms, owner.shader->texture_uniforms, owner.shader->ubo_size, true);
+							RenderingDevice *rd = RD::get_singleton();
+							for (const RD::Uniform &uniform : material_uniforms) {
+								if (uniform.uniform_type == RD::UNIFORM_TYPE_TEXTURE) {
+									uniforms_valid = uniforms_valid && uniform.get_id_count() > 0;
+									for (uint32_t j = 0; j < uniform.get_id_count(); j++) {
+										uniforms_valid = uniforms_valid && rd->texture_is_valid(uniform.get_id(j));
+									}
+								}
+							}
+							if (!uniforms_valid) {
+								RendererRD::MaterialStorage::get_singleton()->material_queue_texture_update(owner.material->get_self());
+								continue;
+							}
 							for (const RD::Uniform &uniform : material_uniforms) {
 								program.material_uniforms.push_back(uniform);
 							}

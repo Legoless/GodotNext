@@ -845,6 +845,11 @@ void MaterialStorage::MaterialData::update_uniform_buffer(const HashMap<StringNa
 MaterialStorage::MaterialData::~MaterialData() {
 	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Remove this material from the RD texture reverse index.
+	if (material_storage != nullptr) {
+		material_storage->texture_cache_index.unregister_material(this, texture_cache);
+	}
+
 	if (global_buffer_E) {
 		//unregister global buffers
 		material_storage->global_shader_uniforms.materials_using_buffer.erase(global_buffer_E);
@@ -1211,7 +1216,12 @@ bool MaterialStorage::MaterialData::update_parameters_uniform_set(const HashMap<
 		tex_uniform_count += uint32_t(p_texture_uniforms[i].array_size > 0 ? p_texture_uniforms[i].array_size : 1);
 	}
 
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
 	if ((uint32_t)texture_cache.size() != tex_uniform_count || p_textures_dirty) {
+		// GodotNext: nextgeo_texture_cache_refresh (#305). Unregister old RD texture entries before resizing/overwriting.
+		if (material_storage != nullptr) {
+			material_storage->texture_cache_index.unregister_material(this, texture_cache);
+		}
 		texture_cache.resize(tex_uniform_count);
 		render_target_cache.clear();
 		p_textures_dirty = true;
@@ -1226,6 +1236,10 @@ bool MaterialStorage::MaterialData::update_parameters_uniform_set(const HashMap<
 
 	if (p_textures_dirty && tex_uniform_count) {
 		update_textures(p_parameters, p_default_texture_params, p_texture_uniforms, texture_cache.ptrw(), p_use_linear_color, p_3d_material);
+		// GodotNext: nextgeo_texture_cache_refresh (#305). Register updated RD textures in the reverse index.
+		if (material_storage != nullptr) {
+			material_storage->texture_cache_index.register_material(this, texture_cache);
+		}
 	}
 
 	if (p_ubo_size == 0 && (p_texture_uniforms.is_empty())) {
@@ -1248,31 +1262,121 @@ bool MaterialStorage::MaterialData::update_parameters_uniform_set(const HashMap<
 	return true;
 }
 
-void MaterialStorage::MaterialData::get_parameter_uniforms(Vector<RD::Uniform> &r_uniforms, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, uint32_t p_ubo_size, bool p_use_linear_color) const {
+bool MaterialStorage::MaterialData::get_parameter_uniforms(Vector<RD::Uniform> &r_uniforms, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, uint32_t p_ubo_size, bool p_use_linear_color) const {
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Track completeness because RD::Uniform::append_id(RID())
+	// leaves id/ids unchanged (dropping null entries and shrinking get_id_count()).
+	bool complete = true;
 	if (p_ubo_size) {
 		RD::Uniform u;
 		u.uniform_type = RD::UNIFORM_TYPE_UNIFORM_BUFFER;
 		u.binding = 0;
-		u.append_id(uniform_buffer[p_use_linear_color]);
+		const RID ubo = uniform_buffer[p_use_linear_color];
+		if (ubo.is_valid()) {
+			u.append_id(ubo);
+		} else {
+			complete = false;
+		}
 		r_uniforms.push_back(u);
 	}
 
 	const RID *textures = texture_cache.ptr();
+	const int cache_size = texture_cache.size();
 	for (int i = 0, k = 0; i < p_texture_uniforms.size(); i++) {
 		const int array_size = p_texture_uniforms[i].array_size;
 
 		RD::Uniform u;
 		u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 		u.binding = 1 + k;
-		if (array_size > 0) {
-			for (int j = 0; j < array_size; j++) {
-				u.append_id(textures[k++]);
+		const int slot_count = array_size > 0 ? array_size : 1;
+		for (int j = 0; j < slot_count; j++) {
+			const RID tex = k < cache_size ? textures[k] : RID();
+			k++;
+			if (tex.is_valid()) {
+				u.append_id(tex);
+			} else {
+				complete = false;
 			}
-		} else {
-			u.append_id(textures[k++]);
 		}
 		r_uniforms.push_back(u);
 	}
+	return complete;
+}
+
+// GodotNext: nextgeo_texture_cache_refresh (#305).
+void MaterialStorage::TextureCacheIndex::register_material(MaterialData *p_material, const Vector<RID> &p_textures) {
+	if (p_material == nullptr) {
+		return;
+	}
+	const RID *textures = p_textures.ptr();
+	const int count = p_textures.size();
+	for (int i = 0; i < count; i++) {
+		if (textures[i].is_valid()) {
+			materials_by_texture[textures[i]].insert(p_material);
+		}
+	}
+}
+
+void MaterialStorage::TextureCacheIndex::unregister_material(MaterialData *p_material, const Vector<RID> &p_textures) {
+	if (p_material == nullptr) {
+		return;
+	}
+	const RID *textures = p_textures.ptr();
+	const int count = p_textures.size();
+	for (int i = 0; i < count; i++) {
+		if (!textures[i].is_valid()) {
+			continue;
+		}
+		HashMap<RID, HashSet<MaterialData *>>::Iterator E = materials_by_texture.find(textures[i]);
+		if (E) {
+			E->value.erase(p_material);
+			if (E->value.is_empty()) {
+				materials_by_texture.remove(E);
+			}
+		}
+	}
+}
+
+void MaterialStorage::TextureCacheIndex::set_material_textures(MaterialData *p_material, const Vector<RID> &p_textures) {
+	if (p_material == nullptr) {
+		return;
+	}
+	unregister_material(p_material, p_material->texture_cache);
+	p_material->texture_cache = p_textures;
+	register_material(p_material, p_material->texture_cache);
+}
+
+uint32_t MaterialStorage::TextureCacheIndex::replace_texture(RID p_old_rd_texture, RID p_new_rd_texture, LocalVector<MaterialData *> *r_affected) {
+	if (p_old_rd_texture.is_null() || p_old_rd_texture == p_new_rd_texture) {
+		return 0;
+	}
+	HashMap<RID, HashSet<MaterialData *>>::Iterator E = materials_by_texture.find(p_old_rd_texture);
+	if (!E) {
+		return 0;
+	}
+	LocalVector<MaterialData *> affected;
+	affected.reserve(E->value.size());
+	for (MaterialData *md : E->value) {
+		affected.push_back(md);
+	}
+	materials_by_texture.remove(E);
+
+	HashSet<MaterialData *> *dest = p_new_rd_texture.is_valid() ? &materials_by_texture[p_new_rd_texture] : nullptr;
+	for (MaterialData *md : affected) {
+		RID *cache = md->texture_cache.ptrw();
+		const int count = md->texture_cache.size();
+		for (int i = 0; i < count; i++) {
+			if (cache[i] == p_old_rd_texture) {
+				cache[i] = p_new_rd_texture;
+			}
+		}
+		if (dest != nullptr) {
+			dest->insert(md);
+		}
+		if (r_affected != nullptr) {
+			r_affected->push_back(md);
+		}
+	}
+	return affected.size();
 }
 
 void MaterialStorage::MaterialData::set_as_used() {
@@ -2464,6 +2568,29 @@ void MaterialStorage::material_queue_texture_update(RID p_material) {
 	Material *material = material_owner.get_or_null(p_material);
 	if (material != nullptr && material->data != nullptr) {
 		_material_queue_update(material, false, true);
+	}
+}
+
+// GodotNext: nextgeo_texture_cache_refresh (#305).
+void MaterialStorage::texture_rd_replaced(RID p_old_rd_texture, RID p_new_rd_texture, bool p_queue_material_update) {
+	if (p_old_rd_texture.is_null() || p_old_rd_texture == p_new_rd_texture) {
+		return;
+	}
+	LocalVector<MaterialData *> affected;
+	texture_cache_index.replace_texture(p_old_rd_texture, p_new_rd_texture, &affected);
+	if (affected.is_empty()) {
+		return;
+	}
+	const bool queue_update = p_queue_material_update || p_new_rd_texture.is_null();
+	for (MaterialData *md : affected) {
+		Material *material = material_owner.get_or_null(md->self);
+		if (material == nullptr) {
+			continue;
+		}
+		material->change_serial = ++material_change_serial;
+		if (queue_update) {
+			_material_queue_update(material, false, true);
+		}
 	}
 }
 

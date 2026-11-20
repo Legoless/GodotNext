@@ -1221,33 +1221,62 @@ NextGIHitMaterials::Material *NextGIHitMaterials::_get_material(RID p_material, 
 
 	// Textures: the RD textures of the uniform set, in texture order, each in the bindless texture table.
 	// update_textures() resolves a missing texture to a default one, so the cache holds no null RID.
+	// GodotNext: nextgeo_texture_cache_refresh (#305). TextureStorage::texture_replace_compatible() refreshes
+	// texture_cache in place, so streaming swaps update the bindless slots immediately. Acquire the new slots
+	// before releasing the old ones so unchanged textures keep their slots, and skip any RD texture cleared or
+	// freed mid-frame (queueing a material texture update instead of calling bindless_table_allocate on it).
 	const Vector<RID> &textures = data->get_texture_cache();
 	if (material->textures != textures) {
-		for (const RID &texture : material->textures) {
-			_release_texture_slot(texture);
+		Vector<RID> new_textures;
+		new_textures.resize(textures.size());
+		RID *new_textures_ptr = new_textures.ptrw();
+		LocalVector<uint32_t> new_slots;
+		new_slots.reserve(textures.size());
+		bool needs_texture_refresh = false;
+		for (int i = 0; i < textures.size(); i++) {
+			const RID &texture = textures[i];
+			if (texture.is_valid() && rd->texture_is_valid(texture)) {
+				new_textures_ptr[i] = texture;
+				new_slots.push_back(_texture_slot(texture));
+			} else {
+				new_textures_ptr[i] = RID();
+				new_slots.push_back(RDBindless::INVALID_SLOT);
+				needs_texture_refresh = true;
+			}
 		}
-		material->textures = textures;
-		material->texture_slots.clear();
-		for (const RID &texture : textures) {
-			material->texture_slots.push_back(texture.is_valid() ? _texture_slot(texture) : RDBindless::INVALID_SLOT);
+		for (const RID &texture : material->textures) {
+			if (texture.is_valid()) {
+				_release_texture_slot(texture);
+			}
+		}
+		material->textures = new_textures;
+		material->texture_slots = new_slots;
+		if (needs_texture_refresh && material_storage != nullptr) {
+			material_storage->material_queue_texture_update(p_material);
 		}
 		in.tables_dirty = true;
 	}
 	bool slots_full = material->params_slot == RDBindless::INVALID_SLOT;
+	bool textures_stale = false;
 	for (uint32_t i = 0; i < material->texture_slots.size(); i++) {
 		const RID &texture = material->textures[i];
-		if (material->texture_slots[i] == RDBindless::INVALID_SLOT && texture.is_valid()) {
-			material->texture_slots[i] = _retry_texture_slot(texture);
-			if (material->texture_slots[i] == RDBindless::INVALID_SLOT) {
-				slots_full = true;
+		if (material->texture_slots[i] == RDBindless::INVALID_SLOT) {
+			if (texture.is_valid() && rd->texture_is_valid(texture)) {
+				material->texture_slots[i] = _retry_texture_slot(texture);
+				if (material->texture_slots[i] == RDBindless::INVALID_SLOT) {
+					slots_full = true;
+				} else {
+					in.tables_dirty = true;
+				}
 			} else {
-				in.tables_dirty = true;
+				textures_stale = true;
 			}
-		} else if (material->texture_slots[i] == RDBindless::INVALID_SLOT) {
-			slots_full = true;
 		}
 	}
-	material->ready_for_hits = !slots_full && int(material->texture_slots.size()) >= data->shader_data->texture_uniforms.size();
+	if (textures_stale && material_storage != nullptr) {
+		material_storage->material_queue_texture_update(p_material);
+	}
+	material->ready_for_hits = !slots_full && !textures_stale && int(material->texture_slots.size()) >= data->shader_data->texture_uniforms.size();
 	if (slots_full) {
 		// No parameter or texture slot: the shader would index past its table. The fallback group shades it.
 		material->reason = NEXTGI_HIT_INELIGIBLE_TABLE_FULL;

@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/local_vector.h"
 #include "core/templates/rid_owner.h"
 #include "core/templates/self_list.h"
 #include "servers/rendering/renderer_rd/pipeline_cache_rd.h"
@@ -135,10 +136,12 @@ public:
 		//to be used internally by update_parameters, in the most common configuration of material parameters
 		bool update_parameters_uniform_set(const HashMap<StringName, Variant> &p_parameters, bool p_uniform_dirty, bool p_textures_dirty, const HashMap<StringName, ShaderLanguage::ShaderNode::Uniform> &p_uniforms, const uint32_t *p_uniform_offsets, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, const HashMap<StringName, HashMap<int, RID>> &p_default_texture_params, uint32_t p_ubo_size, RID &r_uniform_set, RID p_shader, uint32_t p_shader_uniform_set, bool p_use_linear_color, bool p_3d_material);
 		void free_parameters_uniform_set(RID p_uniform_set);
-		// GodotNext: nextgeo_raster_bins (#155). The uniforms update_parameters_uniform_set() binds (the
-		// uniform buffer at binding 0, the textures from binding 1), for a uniform set of another shader
-		// that declares the same material layout, such as a NextGeo raster bin's.
-		void get_parameter_uniforms(Vector<RD::Uniform> &r_uniforms, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, uint32_t p_ubo_size, bool p_use_linear_color) const;
+		// GodotNext: nextgeo_raster_bins (#155), nextgeo_texture_cache_refresh (#305). The uniforms
+		// update_parameters_uniform_set() binds (the uniform buffer at binding 0, the textures from
+		// binding 1), for a uniform set of another shader that declares the same material layout, such
+		// as a NextGeo raster bin's or compute shading bin's. Returns false if any required UBO or
+		// texture slot is null or missing from texture_cache.
+		bool get_parameter_uniforms(Vector<RD::Uniform> &r_uniforms, const Vector<ShaderCompiler::GeneratedCode::Texture> &p_texture_uniforms, uint32_t p_ubo_size, bool p_use_linear_color) const;
 		RID get_self() const { return self; }
 		RID material_feedback_rid;
 		// GodotNext: nextgi_hit_groups (#130). What update_parameters_uniform_set() last wrote, for the NextGI hit
@@ -148,6 +151,8 @@ public:
 
 	private:
 		friend class MaterialStorage;
+		// GodotNext: nextgeo_texture_cache_refresh (#305).
+		friend class TextureCacheIndex;
 
 		RID self;
 		List<RID>::Element *global_buffer_E = nullptr;
@@ -159,6 +164,26 @@ public:
 		Vector<uint8_t> ubo_data[2]; // 0: linear buffer; 1: sRGB buffer.
 		RID uniform_buffer[2]; // 0: linear buffer; 1: sRGB buffer.
 		Vector<RID> texture_cache;
+	};
+
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Reverse index from each cached RD texture RID to every
+	// MaterialData whose texture_cache currently holds it, so streaming texture swaps (texture_replace_compatible)
+	// and texture frees/replacements refresh texture_cache immediately instead of leaving freed RD texture RIDs
+	// for #155 raster bins, #158 shading bins and #130 material hit groups.
+	class TextureCacheIndex {
+		HashMap<RID, HashSet<MaterialData *>> materials_by_texture;
+
+	public:
+		void register_material(MaterialData *p_material, const Vector<RID> &p_textures);
+		void unregister_material(MaterialData *p_material, const Vector<RID> &p_textures);
+		void set_material_textures(MaterialData *p_material, const Vector<RID> &p_textures);
+		uint32_t replace_texture(RID p_old_rd_texture, RID p_new_rd_texture, LocalVector<MaterialData *> *r_affected = nullptr);
+		uint32_t get_tracked_texture_count() const { return materials_by_texture.size(); }
+		uint32_t get_material_count_for_texture(RID p_rd_texture) const {
+			const HashSet<MaterialData *> *set = materials_by_texture.getptr(p_rd_texture);
+			return set != nullptr ? set->size() : 0u;
+		}
+		void clear() { materials_by_texture.clear(); }
 	};
 
 	struct Samplers {
@@ -358,6 +383,8 @@ private:
 
 	SelfList<Material>::List material_update_list;
 	Mutex material_update_list_mutex;
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Reverse index of RD textures stored in MaterialData::texture_cache.
+	TextureCacheIndex texture_cache_index;
 	// GodotNext: path_tracer (#167). Counts material changes; each change stamps its material. The global serial
 	// counts value changes of the global shader parameters in the uniform buffer.
 	uint64_t material_change_serial = 0;
@@ -534,11 +561,13 @@ public:
 	bool owns_material(RID p_rid) { return material_owner.owns(p_rid); }
 
 	void _material_queue_update(Material *material, bool p_uniform, bool p_texture);
-	// GodotNext: nextgeo_shading_bins (#158). Queues p_material's texture update. A streaming texture swap
-	// (TextureStorage::texture_replace_compatible()) patches the material's own uniform set in place and
-	// leaves its texture cache on the freed RD texture, so a uniform set of another shader built from
-	// MaterialData::get_parameter_uniforms() asks for this when one of its textures is gone.
+	// GodotNext: nextgeo_shading_bins (#158), nextgeo_texture_cache_refresh (#305). Queues p_material's texture
+	// update when a consumer sees a stale/cleared cached RD texture before update_dirty_resources() runs.
 	void material_queue_texture_update(RID p_material);
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Refreshes every MaterialData::texture_cache entry pointing
+	// at p_old_rd_texture to p_new_rd_texture (or clears it when p_new_rd_texture is null) after TextureStorage
+	// swaps or frees an RD texture, optionally queueing a full material texture update.
+	void texture_rd_replaced(RID p_old_rd_texture, RID p_new_rd_texture, bool p_queue_material_update = false);
 	void _update_queued_materials();
 
 	virtual RID material_allocate() override;

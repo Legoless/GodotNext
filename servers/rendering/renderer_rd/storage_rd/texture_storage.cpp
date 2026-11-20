@@ -965,6 +965,23 @@ void TextureStorage::texture_free(RID p_texture) {
 	ERR_FAIL_NULL(t);
 	ERR_FAIL_COND(t->is_render_target);
 
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Snapshot RD textures before cleanup so materials
+	// caching them in MaterialData::texture_cache refresh even when bindless residency defers RD::free_rid().
+	const RID old_rd_texture = t->rd_texture;
+	const RID old_rd_texture_srgb = t->rd_texture_srgb;
+	LocalVector<RID> old_proxy_rd_textures;
+	for (int i = 0; i < t->proxies.size(); i++) {
+		Texture *p = texture_owner.get_or_null(t->proxies[i]);
+		if (p != nullptr) {
+			if (p->rd_texture_srgb.is_valid()) {
+				old_proxy_rd_textures.push_back(p->rd_texture_srgb);
+			}
+			if (p->rd_texture.is_valid()) {
+				old_proxy_rd_textures.push_back(p->rd_texture);
+			}
+		}
+	}
+
 	t->cleanup();
 
 	if (t->is_proxy && t->proxy_to.is_valid()) {
@@ -986,6 +1003,19 @@ void TextureStorage::texture_free(RID p_texture) {
 	}
 
 	texture_owner.free(p_texture);
+
+	// GodotNext: nextgeo_texture_cache_refresh (#305).
+	if (MaterialStorage *material_storage = MaterialStorage::get_singleton()) {
+		if (old_rd_texture_srgb.is_valid()) {
+			material_storage->texture_rd_replaced(old_rd_texture_srgb, RID(), true);
+		}
+		if (old_rd_texture.is_valid()) {
+			material_storage->texture_rd_replaced(old_rd_texture, RID(), true);
+		}
+		for (const RID &proxy_rd : old_proxy_rd_textures) {
+			material_storage->texture_rd_replaced(proxy_rd, RID(), true);
+		}
+	}
 }
 
 void TextureStorage::texture_2d_initialize(RID p_texture, const Ref<Image> &p_image) {
@@ -1704,16 +1734,21 @@ void TextureStorage::texture_proxy_update(RID p_texture, RID p_proxy_to) {
 	ERR_FAIL_NULL(proxy_to);
 	ERR_FAIL_COND(proxy_to->is_proxy);
 
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Snapshot old proxy RD textures unconditionally before
+	// checking RD::texture_is_valid(), because freeing the previous target (e.g. in texture_replace() or
+	// _clear_render_target()) may have already freed these shared views via RD dependencies.
+	const RID old_rd_texture = tex->rd_texture;
+	const RID old_rd_texture_srgb = tex->rd_texture_srgb;
 	if (tex->proxy_to.is_valid()) {
 		//unlink proxy
-		if (RD::get_singleton()->texture_is_valid(tex->rd_texture)) {
-			RD::get_singleton()->free_rid(tex->rd_texture);
-			tex->rd_texture = RID();
-		}
 		if (RD::get_singleton()->texture_is_valid(tex->rd_texture_srgb)) {
 			RD::get_singleton()->free_rid(tex->rd_texture_srgb);
-			tex->rd_texture_srgb = RID();
 		}
+		tex->rd_texture_srgb = RID();
+		if (RD::get_singleton()->texture_is_valid(tex->rd_texture)) {
+			RD::get_singleton()->free_rid(tex->rd_texture);
+		}
+		tex->rd_texture = RID();
 		Texture *prev_tex = texture_owner.get_or_null(tex->proxy_to);
 		ERR_FAIL_NULL(prev_tex);
 		prev_tex->proxies.erase(p_texture);
@@ -1736,6 +1771,18 @@ void TextureStorage::texture_proxy_update(RID p_texture, RID p_proxy_to) {
 	if (tex->rd_texture_srgb.is_valid()) {
 		tex->rd_view.format_override = tex->rd_format_srgb;
 		tex->rd_texture_srgb = RD::get_singleton()->texture_create_shared(tex->rd_view, proxy_to->rd_texture);
+	}
+
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Clear old proxy RD textures from MaterialData::texture_cache
+	// and queue a material update rather than writing the new RD RID in place, since a proxy may retarget to a
+	// different texture type or a render target before update_textures() refreshes render_target_cache.
+	if (MaterialStorage *material_storage = MaterialStorage::get_singleton()) {
+		if (old_rd_texture_srgb.is_valid()) {
+			material_storage->texture_rd_replaced(old_rd_texture_srgb, RID(), true);
+		}
+		if (old_rd_texture.is_valid()) {
+			material_storage->texture_rd_replaced(old_rd_texture, RID(), true);
+		}
 	}
 }
 
@@ -2061,10 +2108,17 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 		return;
 	}
 
-	if (tex->rd_texture_srgb.is_valid()) {
-		RD::get_singleton()->free_rid(tex->rd_texture_srgb);
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Snapshot old RD textures so MaterialData::texture_cache
+	// refreshes and queues material updates even if bindless residency defers RD::free_rid().
+	const RID old_rd_texture = tex->rd_texture;
+	const RID old_rd_texture_srgb = tex->rd_texture_srgb;
+
+	if (old_rd_texture_srgb.is_valid()) {
+		RD::get_singleton()->free_rid(old_rd_texture_srgb);
 	}
-	RD::get_singleton()->free_rid(tex->rd_texture);
+	if (old_rd_texture.is_valid()) {
+		RD::get_singleton()->free_rid(old_rd_texture);
+	}
 
 	if (tex->canvas_texture) {
 		memdelete(tex->canvas_texture);
@@ -2094,6 +2148,16 @@ void TextureStorage::texture_replace(RID p_texture, RID p_by_texture) {
 	}
 	//delete last, so proxies can be updated
 	texture_owner.free(p_by_texture);
+
+	// GodotNext: nextgeo_texture_cache_refresh (#305).
+	if (MaterialStorage *material_storage = MaterialStorage::get_singleton()) {
+		if (old_rd_texture_srgb.is_valid()) {
+			material_storage->texture_rd_replaced(old_rd_texture_srgb, RID(), true);
+		}
+		if (old_rd_texture.is_valid()) {
+			material_storage->texture_rd_replaced(old_rd_texture, RID(), true);
+		}
+	}
 
 	decal_atlas_mark_dirty_on_texture(p_texture);
 	area_light_atlas_mark_dirty_on_texture(p_texture);
@@ -2140,15 +2204,40 @@ void TextureStorage::texture_replace_compatible(RID p_texture, RID p_by_texture)
 	}
 
 	// Replace RD-level textures: patches uniform sets and defers old resources.
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Also refresh MaterialData::texture_cache in place so
+	// #155 raster bins, #158 shading bins and #130 hit-group bindless tables never see the freed RD texture RID.
+	MaterialStorage *material_storage = MaterialStorage::get_singleton();
+	const bool gained_srgb = old_rd_texture_srgb.is_null() && new_rd_texture_srgb.is_valid();
 	if (old_rd_texture_srgb.is_valid() && old_rd_texture_srgb != new_rd_texture_srgb) {
 		if (new_rd_texture_srgb.is_valid()) {
 			RD::get_singleton()->texture_replace_rid(old_rd_texture_srgb, new_rd_texture_srgb);
+			if (material_storage != nullptr) {
+				material_storage->texture_rd_replaced(old_rd_texture_srgb, new_rd_texture_srgb, false);
+			}
+		} else if (new_rd_texture.is_valid()) {
+			RD::get_singleton()->texture_replace_rid(old_rd_texture_srgb, new_rd_texture);
+			if (material_storage != nullptr) {
+				material_storage->texture_rd_replaced(old_rd_texture_srgb, new_rd_texture, false);
+			}
 		} else {
 			RD::get_singleton()->free_rid(old_rd_texture_srgb);
+			if (material_storage != nullptr) {
+				material_storage->texture_rd_replaced(old_rd_texture_srgb, RID(), true);
+			}
 		}
 	}
-	if (old_rd_texture != new_rd_texture) {
-		RD::get_singleton()->texture_replace_rid(old_rd_texture, new_rd_texture);
+	if (old_rd_texture.is_valid() && old_rd_texture != new_rd_texture) {
+		if (new_rd_texture.is_valid()) {
+			RD::get_singleton()->texture_replace_rid(old_rd_texture, new_rd_texture);
+			if (material_storage != nullptr) {
+				material_storage->texture_rd_replaced(old_rd_texture, new_rd_texture, gained_srgb);
+			}
+		} else {
+			RD::get_singleton()->free_rid(old_rd_texture);
+			if (material_storage != nullptr) {
+				material_storage->texture_rd_replaced(old_rd_texture, RID(), true);
+			}
+		}
 	}
 
 	//delete last, so proxies can be updated
@@ -4478,9 +4567,63 @@ void TextureStorage::_update_render_target(RenderTarget *rt) {
 		tex->path = "Render Target (Internal)";
 	}
 
+	// GodotNext: nextgeo_texture_cache_refresh (#305). Snapshot existing RD textures before
+	// _clear_render_target() frees rt->color, because freeing rt->color immediately frees its shared views
+	// (tex->rd_texture, tex->rd_texture_srgb, and proxy views) unless bindless residency defers it.
+	const bool had_color = rt->color.is_valid();
+	Texture *rt_tex = get_texture(rt->texture);
+	const RID old_rd_texture = rt_tex->rd_texture;
+	const RID old_rd_texture_srgb = rt_tex->rd_texture_srgb;
+
 	_clear_render_target(rt);
 
 	if (rt->size.width == 0 || rt->size.height == 0) {
+		// GodotNext: nextgeo_texture_cache_refresh (#305). When shrinking to 0x0 after having a color buffer,
+		// free any still-valid (deferred) shared views, clear stale RD RIDs on the render-target texture and
+		// its proxies, and notify MaterialStorage so texture_cache drops them.
+		if (had_color) {
+			LocalVector<RID> old_proxy_rd_textures;
+			for (int i = 0; i < rt_tex->proxies.size(); i++) {
+				Texture *p = texture_owner.get_or_null(rt_tex->proxies[i]);
+				if (p == nullptr) {
+					continue;
+				}
+				if (p->rd_texture_srgb.is_valid()) {
+					old_proxy_rd_textures.push_back(p->rd_texture_srgb);
+					if (RD::get_singleton()->texture_is_valid(p->rd_texture_srgb)) {
+						RD::get_singleton()->free_rid(p->rd_texture_srgb);
+					}
+					p->rd_texture_srgb = RID();
+				}
+				if (p->rd_texture.is_valid()) {
+					old_proxy_rd_textures.push_back(p->rd_texture);
+					if (RD::get_singleton()->texture_is_valid(p->rd_texture)) {
+						RD::get_singleton()->free_rid(p->rd_texture);
+					}
+					p->rd_texture = RID();
+				}
+			}
+			if (RD::get_singleton()->texture_is_valid(rt_tex->rd_texture_srgb)) {
+				RD::get_singleton()->free_rid(rt_tex->rd_texture_srgb);
+			}
+			if (RD::get_singleton()->texture_is_valid(rt_tex->rd_texture)) {
+				RD::get_singleton()->free_rid(rt_tex->rd_texture);
+			}
+			rt_tex->rd_texture = RID();
+			rt_tex->rd_texture_srgb = RID();
+
+			if (MaterialStorage *material_storage = MaterialStorage::get_singleton()) {
+				if (old_rd_texture_srgb.is_valid()) {
+					material_storage->texture_rd_replaced(old_rd_texture_srgb, RID(), true);
+				}
+				if (old_rd_texture.is_valid()) {
+					material_storage->texture_rd_replaced(old_rd_texture, RID(), true);
+				}
+				for (const RID &proxy_rd : old_proxy_rd_textures) {
+					material_storage->texture_rd_replaced(proxy_rd, RID(), true);
+				}
+			}
+		}
 		return;
 	}
 
@@ -4543,11 +4686,13 @@ void TextureStorage::_update_render_target(RenderTarget *rt) {
 		Texture *tex = get_texture(rt->texture);
 
 		//free existing textures
-		if (RD::get_singleton()->texture_is_valid(tex->rd_texture)) {
-			RD::get_singleton()->free_rid(tex->rd_texture);
-		}
+		// GodotNext: nextgeo_texture_cache_refresh (#305). Free any still-valid views (e.g. initial placeholder
+		// or views deferred by bindless residency); old_rd_texture* were snapshotted before _clear_render_target().
 		if (RD::get_singleton()->texture_is_valid(tex->rd_texture_srgb)) {
 			RD::get_singleton()->free_rid(tex->rd_texture_srgb);
+		}
+		if (RD::get_singleton()->texture_is_valid(tex->rd_texture)) {
+			RD::get_singleton()->free_rid(tex->rd_texture);
 		}
 
 		tex->rd_texture = RID();
@@ -4575,6 +4720,16 @@ void TextureStorage::_update_render_target(RenderTarget *rt) {
 		tex->rd_format_srgb = rt->color_format_srgb;
 		tex->format = rt->image_format;
 		tex->validated_format = rt->use_hdr ? Image::FORMAT_RGBAH : Image::FORMAT_RGBA8;
+
+		// GodotNext: nextgeo_texture_cache_refresh (#305).
+		if (MaterialStorage *material_storage = MaterialStorage::get_singleton()) {
+			if (old_rd_texture_srgb.is_valid()) {
+				material_storage->texture_rd_replaced(old_rd_texture_srgb, RID(), true);
+			}
+			if (old_rd_texture.is_valid()) {
+				material_storage->texture_rd_replaced(old_rd_texture, RID(), true);
+			}
+		}
 
 		Vector<RID> proxies = tex->proxies; //make a copy, since update may change it
 		for (int i = 0; i < proxies.size(); i++) {

@@ -632,13 +632,15 @@ void NextGeoResolve::_prepare_compute_buckets(const ComputeStage &p_compute, Ren
 		entry.sets[RenderForwardClustered::TRANSFORMS_UNIFORM_SET] = uniform_set_cache->get_cache_vec(shader_rid, RenderForwardClustered::TRANSFORMS_UNIFORM_SET, resolve_uniforms);
 		if (bucket.material_uniform_set.is_valid()) {
 			Vector<RD::Uniform> material_uniforms;
-			bucket.material->get_parameter_uniforms(material_uniforms, bucket.shader->texture_uniforms, bucket.shader->ubo_size, true);
-			// After a streaming texture swap the material's texture cache names a freed RD texture until its next
-			// texture update, which this queues; the bucket keeps the tile quads until then.
-			bool textures_valid = true;
+			// GodotNext: nextgeo_texture_cache_refresh (#305). Streaming texture swaps refresh texture_cache in
+			// place; this guards against a texture freed mid-frame before update_dirty_resources().
+			bool textures_valid = bucket.material->get_parameter_uniforms(material_uniforms, bucket.shader->texture_uniforms, bucket.shader->ubo_size, true);
 			for (const RD::Uniform &uniform : material_uniforms) {
-				for (uint32_t j = 0; uniform.uniform_type == RD::UNIFORM_TYPE_TEXTURE && j < uniform.get_id_count(); j++) {
-					textures_valid = textures_valid && rd->texture_is_valid(uniform.get_id(j));
+				if (uniform.uniform_type == RD::UNIFORM_TYPE_TEXTURE) {
+					textures_valid = textures_valid && uniform.get_id_count() > 0;
+					for (uint32_t j = 0; j < uniform.get_id_count(); j++) {
+						textures_valid = textures_valid && rd->texture_is_valid(uniform.get_id(j));
+					}
 				}
 			}
 			if (!textures_valid) {
