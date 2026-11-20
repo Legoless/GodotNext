@@ -2249,7 +2249,9 @@ static D3D12_BARRIER_ACCESS _rd_texture_layout_access_mask(RDD::TextureLayout p_
 		case RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
 			return D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_DEPTH_STENCIL_WRITE;
 		case RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-			return D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ;
+			// GodotNext: rd_readonly_depth (#301). Shared read-only depth layout supports both
+			// Direct-queue read-only DSV and Direct/Compute SRV reads.
+			return D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ | D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
 		case RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
 			return D3D12_BARRIER_ACCESS_SHADER_RESOURCE;
 		case RDD::TEXTURE_LAYOUT_COPY_SRC_OPTIMAL:
@@ -2483,6 +2485,18 @@ static void _rd_stages_and_access_to_d3d12(BitField<RDD::PipelineStageBits> p_st
 	// Only enable synchronization stages compatible with the access bits that were used.
 	r_sync &= sync_mask;
 
+	// GodotNext: rd_readonly_depth (#301). D3D12 Enhanced Barriers requires every access bit in
+	// r_access to have at least one matching sync bit in r_sync. When the shared read-only depth
+	// layout combines DEPTH_STENCIL_READ and SHADER_RESOURCE, guarantee both sync scopes are present.
+	if (r_sync != D3D12_BARRIER_SYNC_NONE && r_sync != D3D12_BARRIER_SYNC_ALL) {
+		if ((r_access & D3D12_BARRIER_ACCESS_DEPTH_STENCIL_READ) && !(r_sync & (D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_DEPTH_STENCIL))) {
+			r_sync |= D3D12_BARRIER_SYNC_DEPTH_STENCIL;
+		}
+		if ((r_access & D3D12_BARRIER_ACCESS_SHADER_RESOURCE) && !(r_sync & (D3D12_BARRIER_SYNC_VERTEX_SHADING | D3D12_BARRIER_SYNC_PIXEL_SHADING | D3D12_BARRIER_SYNC_COMPUTE_SHADING | D3D12_BARRIER_SYNC_DRAW | D3D12_BARRIER_SYNC_ALL_SHADING | D3D12_BARRIER_SYNC_BUILD_RAYTRACING_ACCELERATION_STRUCTURE | D3D12_BARRIER_SYNC_RAYTRACING))) {
+			r_sync |= D3D12_BARRIER_SYNC_ALL_SHADING;
+		}
+	}
+
 	if (r_sync == D3D12_BARRIER_SYNC_NONE) {
 		if (p_access.is_empty()) {
 			// No valid synchronization scope was defined and no access in particular is required.
@@ -2519,7 +2533,11 @@ static D3D12_BARRIER_LAYOUT _rd_texture_layout_to_d3d12_barrier_layout(RDD::Text
 		case RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
 			return D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE;
 		case RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
-			return D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ;
+			// GodotNext: rd_readonly_depth (#301). Per D3D12 Enhanced Barriers specification,
+			// DIRECT_QUEUE_GENERIC_READ_COMPUTE_QUEUE_ACCESSIBLE supports both direct-queue
+			// DEPTH_STENCIL_READ and direct/compute SHADER_RESOURCE without a layout transition
+			// (transitions into and out of it run on the direct queue only).
+			return D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ_COMPUTE_QUEUE_ACCESSIBLE;
 		case RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
 			return D3D12_BARRIER_LAYOUT_SHADER_RESOURCE;
 		case RDD::TEXTURE_LAYOUT_COPY_SRC_OPTIMAL:
@@ -3407,10 +3425,11 @@ D3D12_UNORDERED_ACCESS_VIEW_DESC RenderingDeviceDriverD3D12::_make_ranged_uav_fo
 	return uav_desc;
 }
 
-D3D12_DEPTH_STENCIL_VIEW_DESC RenderingDeviceDriverD3D12::_make_dsv_for_texture(const TextureInfo *p_texture_info, uint32_t p_mipmap_offset, uint32_t p_layer_offset, uint32_t p_layers, bool p_add_bases) {
+// GodotNext: rd_readonly_depth (#301).
+D3D12_DEPTH_STENCIL_VIEW_DESC RenderingDeviceDriverD3D12::_make_dsv_for_texture(const TextureInfo *p_texture_info, uint32_t p_mipmap_offset, uint32_t p_layer_offset, uint32_t p_layers, bool p_add_bases, D3D12_DSV_FLAGS p_dsv_flags) {
 	D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {};
 	dsv_desc.Format = RD_TO_D3D12_FORMAT[p_texture_info->format].dsv_format;
-	dsv_desc.Flags = D3D12_DSV_FLAG_NONE;
+	dsv_desc.Flags = p_dsv_flags;
 
 	switch (p_texture_info->view_descs.srv.ViewDimension) {
 		case D3D12_SRV_DIMENSION_TEXTURE1D: {
@@ -3525,7 +3544,18 @@ RDD::FramebufferID RenderingDeviceDriverD3D12::_framebuffer_create(RenderPassID 
 			fb_info->attachments.push_back(p_attachments[i]);
 			color_idx++;
 		} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
-			D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = _make_dsv_for_texture(tex_info, 0, 0, UINT32_MAX);
+			// GodotNext: rd_readonly_depth (#301). A read-only depth-stencil render pass requires a
+			// read-only DSV so D3D12 allows concurrent SRV reads in the shared layout; only set
+			// READ_ONLY_STENCIL when the format actually has a stencil plane.
+			D3D12_DSV_FLAGS dsv_flags = D3D12_DSV_FLAG_NONE;
+			if (i < pass_info->attachments.size() && pass_info->attachments[i].initial_layout == TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) {
+				dsv_flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+				if (format_get_plane_count(tex_info->format) > 1) {
+					dsv_flags |= D3D12_DSV_FLAG_READ_ONLY_STENCIL;
+				}
+				fb_info->depth_read_only = true;
+			}
+			D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = _make_dsv_for_texture(tex_info, 0, 0, UINT32_MAX, true, dsv_flags);
 			device->CreateDepthStencilView(tex_info->resource, &dsv_desc, get_cpu_handle(fb_info->dsv_alloc.cpu_handle, depth_stencil_idx, dsv_descriptor_heap_pool.increment_size));
 
 			fb_info->attachments_handle_inds[i] = depth_stencil_idx;
@@ -4909,7 +4939,8 @@ void RenderingDeviceDriverD3D12::command_begin_render_pass(CommandBufferID p_cmd
 			if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)) {
 				_transition_subresources(tex_info, D3D12_RESOURCE_STATE_RENDER_TARGET);
 			} else if ((tex_info->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
-				_transition_subresources(tex_info, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+				// GodotNext: rd_readonly_depth (#301). Legacy barrier fallback respects read-only DSVs.
+				_transition_subresources(tex_info, fb_info->depth_read_only ? D3D12_RESOURCE_STATE_DEPTH_READ : D3D12_RESOURCE_STATE_DEPTH_WRITE);
 			} else {
 				DEV_ASSERT(false);
 			}
@@ -5006,7 +5037,9 @@ static const BitField<RDD::BarrierAccessBits> RD_RENDER_PASS_LAYOUT_TO_ACCESS_BI
 	RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT, // TEXTURE_LAYOUT_STORAGE_OPTIMAL
 	RDD::BARRIER_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, // TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 	RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, // TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-	RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT, // TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	// GodotNext: rd_readonly_depth (#301). Depth/stencil input attachments also use this layout in
+	// multi-subpass render passes, so include SHADER_READ / FRAGMENT_SHADER alongside depth test.
+	RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | RDD::BARRIER_ACCESS_SHADER_READ_BIT, // TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
 	RDD::BARRIER_ACCESS_SHADER_READ_BIT, // TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 	RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT, // TEXTURE_LAYOUT_COPY_SRC_OPTIMAL
 	RDD::BARRIER_ACCESS_MEMORY_READ_BIT | RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT, // TEXTURE_LAYOUT_COPY_DST_OPTIMAL
@@ -5023,7 +5056,8 @@ static const BitField<RDD::PipelineStageBits> RD_RENDER_PASS_LAYOUT_TO_STAGE_BIT
 	RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, // TEXTURE_LAYOUT_STORAGE_OPTIMAL
 	RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, // TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
 	RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, // TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-	RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, // TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	// GodotNext: rd_readonly_depth (#301).
+	RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT | RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT, // TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
 	RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT, // TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 	RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, // TEXTURE_LAYOUT_COPY_SRC_OPTIMAL
 	RDD::PIPELINE_STAGE_ALL_COMMANDS_BIT, // TEXTURE_LAYOUT_COPY_DST_OPTIMAL

@@ -1850,6 +1850,10 @@ RDD::RenderPassID RenderingDeviceDriverMetal::render_pass_create(VectorView<Atta
 	static const MTL::StoreAction STORE_ACTIONS[] = {
 		MTL::StoreActionStore, // ATTACHMENT_STORE_OP_STORE
 		MTL::StoreActionDontCare, // ATTACHMENT_STORE_OP_DONT_CARE
+		// GodotNext: rd_readonly_depth (#301). Metal has no StoreActionNone; DontCare skips writing
+		// tile depth back to device memory on read-only depth passes, avoiding a store race while
+		// async compute reads the depth texture concurrently.
+		MTL::StoreActionDontCare, // ATTACHMENT_STORE_OP_NONE
 	};
 
 	LocalVector<MDAttachment> attachments;
@@ -1865,6 +1869,8 @@ RDD::RenderPassID RenderingDeviceDriverMetal::render_pass_create(VectorView<Atta
 		}
 		mda.loadAction = LOAD_ACTIONS[a.load_op];
 		mda.storeAction = STORE_ACTIONS[a.store_op];
+		// GodotNext: rd_readonly_depth (#301).
+		mda.storeOpNone = (a.store_op == ATTACHMENT_STORE_OP_NONE);
 		bool is_depth = pf.isDepthFormat(format);
 		if (is_depth) {
 			mda.type |= MDAttachmentType::Depth;
@@ -1874,6 +1880,8 @@ RDD::RenderPassID RenderingDeviceDriverMetal::render_pass_create(VectorView<Atta
 			mda.type |= MDAttachmentType::Stencil;
 			mda.stencilLoadAction = LOAD_ACTIONS[a.stencil_load_op];
 			mda.stencilStoreAction = STORE_ACTIONS[a.stencil_store_op];
+			// GodotNext: rd_readonly_depth (#301).
+			mda.stencilStoreOpNone = (a.stencil_store_op == ATTACHMENT_STORE_OP_NONE);
 		}
 		if (!is_depth && !is_stencil) {
 			mda.type |= MDAttachmentType::Color;

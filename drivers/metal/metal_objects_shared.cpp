@@ -463,6 +463,13 @@ MTL::StoreAction MDAttachment::getMTLStoreAction(const MDSubpass &p_subpass,
 		bool p_has_resolve,
 		bool p_can_resolve,
 		bool p_is_stencil) const {
+	// GodotNext: rd_readonly_depth (#301). A read-only attachment (ATTACHMENT_STORE_OP_NONE)
+	// is never modified on tile, so skipping the store preserves both out-of-region pixels and
+	// contents for later subpasses without writing device memory while async compute reads it.
+	if (p_is_stencil ? stencilStoreOpNone : storeOpNone) {
+		return MTL::StoreActionDontCare;
+	}
+
 	if (!p_is_rendering_entire_area || !isLastUseOf(p_subpass)) {
 		return p_has_resolve && p_can_resolve ? MTL::StoreActionStoreAndMultisampleResolve : MTL::StoreActionStore;
 	}

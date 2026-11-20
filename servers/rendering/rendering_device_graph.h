@@ -197,6 +197,10 @@ public:
 		RESOURCE_USAGE_GENERAL,
 		RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ,
 		RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE,
+		// GodotNext: rd_readonly_depth (#301). Read-only depth/stencil attachment (depth test without
+		// depth or stencil writes), sharing TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL with
+		// sampled reads of depth/stencil textures.
+		RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ,
 		RESOURCE_USAGE_MAX
 	};
 
@@ -249,6 +253,9 @@ public:
 		// used the resource. A slice records it on its parent.
 		int64_t async_command_frame = -1;
 		int32_t async_command_index = -1;
+		// GodotNext: rd_readonly_depth (#301). Active entry in shared_read_transitions for this frame,
+		// or -1 when the resource has not entered the shared read-only depth layout since its last write.
+		int32_t shared_read_transition_index = -1;
 		ResourceTracker *parent = nullptr;
 		ResourceTracker *dirty_shared_list = nullptr;
 		ResourceTracker *next_shared = nullptr;
@@ -275,6 +282,8 @@ public:
 				raytracing_list_index = -1;
 				texture_slice_command_index = -1;
 				write_command_list_enabled = false;
+				// GodotNext: rd_readonly_depth (#301).
+				shared_read_transition_index = -1;
 			}
 		}
 	};
@@ -309,12 +318,28 @@ public:
 		RDD::RenderPassID render_pass;
 	};
 
+	// GodotNext: rd_readonly_depth (#301). Load and store ops each have 3 values (2 bits each);
+	// packing 4 bits per attachment across two 64-bit words supports up to 32 attachments.
+	struct FramebufferStorageKey {
+		uint64_t lo = 0;
+		uint64_t hi = 0;
+
+		bool operator==(const FramebufferStorageKey &p_other) const {
+			return lo == p_other.lo && hi == p_other.hi;
+		}
+
+		static uint32_t hash(const FramebufferStorageKey &p_key) {
+			uint32_t h = hash_murmur3_one_64(p_key.lo);
+			return hash_fmix32(hash_murmur3_one_64(p_key.hi, h));
+		}
+	};
+
 	struct FramebufferCache {
 		uint32_t width = 0;
 		uint32_t height = 0;
 		LocalVector<RDD::TextureID> textures;
 		LocalVector<ResourceTracker *> trackers;
-		HashMap<uint64_t, FramebufferStorage> storage_map;
+		HashMap<FramebufferStorageKey, FramebufferStorage, FramebufferStorageKey> storage_map;
 		void *render_pass_creation_user_data = nullptr;
 	};
 
@@ -468,6 +493,8 @@ public:
 		ATTACHMENT_OPERATION_CLEAR,
 		// Ignore any contents from the attachment.
 		ATTACHMENT_OPERATION_IGNORE,
+		// GodotNext: rd_readonly_depth (#301). Attach depth/stencil read-only (load, store op none).
+		ATTACHMENT_OPERATION_READ_ONLY,
 	};
 
 private:
@@ -517,6 +544,10 @@ private:
 		bool split_cmd_buffer = false;
 		// GodotNext: rd_indirect_count (#177). Where the indirect-count draws sit in data.
 		LocalVector<uint32_t> indirect_count_offsets;
+		// GodotNext: rd_readonly_depth (#301). Depth/stencil trackers attached read-only in this
+		// draw list that are also dirty in a bound bindless texture table, so _add_command_to_graph()
+		// merges SHADER_READ access into their read-only depth transition without a duplicate usage.
+		LocalVector<ResourceTracker *> bindless_readonly_depth_trackers;
 	};
 
 	struct RecordedCommandSort {
@@ -1114,6 +1145,18 @@ private:
 	LocalVector<RDD::TextureBarrier> command_transition_barriers;
 	LocalVector<RDD::BufferBarrier> command_buffer_barriers;
 	LocalVector<RDD::AccelerationStructureBarrier> command_acceleration_structure_barriers;
+	// GodotNext: rd_readonly_depth (#301). Depth/stencil texture transitions into the shared
+	// read-only layout (TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) that serve concurrent
+	// readers across queues without creating a reader-to-reader dependency.
+	struct SharedReadLayoutTransition {
+		RDD::TextureBarrier barrier;
+		BitField<RDD::PipelineStageBits> src_stages = {};
+		BitField<RDD::PipelineStageBits> dst_stages = {};
+		LocalVector<int32_t> reader_commands;
+		int32_t emit_level = -1;
+		bool emit_at_fork = false;
+	};
+	LocalVector<SharedReadLayoutTransition> shared_read_transitions;
 	LocalVector<char> command_label_chars;
 	LocalVector<Color> command_label_colors;
 	LocalVector<uint32_t> command_label_offsets;
@@ -1156,7 +1199,9 @@ private:
 	bool _draw_list_indirect_buffer_usable(ResourceTracker *p_tracker, const char *p_role, const char *p_draw);
 	bool _add_draw_list_draw_indirect_count(DrawListInstruction::Type p_type, RDD::BufferID p_buffer, ResourceTracker *p_buffer_tracker, uint32_t p_offset, RDD::BufferID p_count_buffer, ResourceTracker *p_count_buffer_tracker, uint32_t p_count_buffer_offset, uint32_t p_max_draw_count, uint32_t p_stride);
 	static bool _is_write_usage(ResourceUsage p_usage);
-	static RDD::TextureLayout _usage_to_image_layout(ResourceUsage p_usage);
+	// GodotNext: rd_readonly_depth (#301).
+	static bool _is_depth_stencil_texture(const ResourceTracker *p_tracker);
+	static RDD::TextureLayout _usage_to_image_layout(ResourceUsage p_usage, bool p_is_depth_stencil = false);
 	static RDD::BarrierAccessBits _usage_to_access_bits(ResourceUsage p_usage);
 	bool _check_command_intersection(ResourceTracker *p_resource_tracker, int32_t p_previous_command_index, int32_t p_command_index) const;
 	bool _check_command_partial_coverage(ResourceTracker *p_resource_tracker, int32_t p_command_index) const;
@@ -1200,6 +1245,9 @@ private:
 	void _group_barriers_for_render_commands(RDD::CommandBufferID p_command_buffer, const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection = BARRIER_SELECTION_ALL);
 	bool _gather_barriers_for_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count, bool p_full_memory_barrier, BarrierSelection p_selection);
 	bool _async_fork_texture_barriers_added(const RecordedCommand *p_command, int32_t p_normalization_start, int32_t p_transition_start) const;
+	// GodotNext: rd_readonly_depth (#301). Places each shared read-only depth transition at the
+	// fork (main queue, before fork_level) or at the earliest main-queue reader's level.
+	void _resolve_shared_read_transitions(const LocalVector<RecordedCommandSort> &p_commands_sorted, const AsyncPlan &p_plan);
 	// GodotNext: rd_bindless (#176).
 	typedef void (RenderingDeviceGraph::*ListUsageFunction)(ResourceTracker *p_tracker, ResourceUsage p_usage);
 	static BindlessResidency *_bindless_find_residency(ResourceTracker *p_tracker, BindlessTableTracker *p_table);
@@ -1207,9 +1255,9 @@ private:
 	void _bindless_resource_used(ResourceTracker *p_resident, ResourceUsage p_usage, int32_t p_command_index, RecordedCommand *r_command);
 	void _bindless_tables_add_usages(InstructionList &r_list, ListUsageFunction p_add_usage);
 	void _bindless_tables_bound(InstructionList &r_list, int32_t p_command_index, RecordedCommand *r_command);
-	// GodotNext: rd_indirect_count (#177).
+	// GodotNext: rd_indirect_count (#177), rd_readonly_depth (#301).
 	static bool _bindless_dirty_in_list_tables(const InstructionList &p_list, const ResourceTracker *p_tracker);
-	void _bindless_draw_list_tables_add_usages(int32_t p_command_index);
+	void _bindless_draw_list_tables_add_usages(int32_t p_command_index, RecordedCommand *r_command);
 	// GodotNext: rd_rt_pipelines (#179). The same for the raytracing list and its indirect traces.
 	void _bindless_raytracing_list_tables_add_usages(int32_t p_command_index);
 	void _print_render_commands(const RecordedCommandSort *p_sorted_commands, uint32_t p_sorted_commands_count);
@@ -1336,6 +1384,10 @@ public:
 	};
 	LocalVector<IndirectCountDraw> indirect_count_draws_for_test(int32_t p_command_index) const;
 	void async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers);
+	// GodotNext: rd_readonly_depth (#301). C++-only and driver-free, for the doctests: barriers
+	// emitted on the main queue at p_level (after async planning) and a draw list's store ops.
+	void main_level_barriers_for_test(uint32_t p_level, bool p_async_queue_available, AsyncPlan &r_plan, AsyncBarriers &r_barriers);
+	void draw_list_store_ops_for_test(int32_t p_command_index, LocalVector<RDD::AttachmentStoreOp> &r_store_ops) const;
 	// GodotNext: rd_clear_values (#275). C++-only and driver-free, for the doctests: what a recorded
 	// draw list passes to the driver, the load ops of its framebuffer slots and its clear values.
 	void draw_list_attachments_for_test(int32_t p_command_index, LocalVector<RDD::AttachmentLoadOp> &r_load_ops, LocalVector<RDD::RenderPassClearValue> &r_clear_values) const;

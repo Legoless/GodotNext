@@ -87,6 +87,9 @@ String RenderingDeviceGraph::_usage_to_string(ResourceUsage p_usage) {
 			return "Attachment Color Read Write";
 		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE:
 			return "Attachment Depth Stencil Read Write";
+		// GodotNext: rd_readonly_depth (#301).
+		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ:
+			return "Attachment Depth Stencil Read";
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_SHADING_RATE_READ:
 			return "Attachment Fragment Shading Rate Read";
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_DENSITY_MAP_READ:
@@ -123,6 +126,8 @@ bool RenderingDeviceGraph::_is_write_usage(ResourceUsage p_usage) {
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_DENSITY_MAP_READ:
 		case RESOURCE_USAGE_ATTACHMENT_RASTERIZATION_RATE_MAP_READ:
 		case RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ:
+		// GodotNext: rd_readonly_depth (#301).
+		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ:
 			return false;
 		case RESOURCE_USAGE_COPY_TO:
 		case RESOURCE_USAGE_RESOLVE_TO:
@@ -140,7 +145,14 @@ bool RenderingDeviceGraph::_is_write_usage(ResourceUsage p_usage) {
 	}
 }
 
-RDD::TextureLayout RenderingDeviceGraph::_usage_to_image_layout(ResourceUsage p_usage) {
+// GodotNext: rd_readonly_depth (#301).
+bool RenderingDeviceGraph::_is_depth_stencil_texture(const ResourceTracker *p_tracker) {
+	return p_tracker->texture_driver_id.id != 0 &&
+			(p_tracker->texture_subresources.aspect.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) ||
+					p_tracker->texture_subresources.aspect.has_flag(RDD::TEXTURE_ASPECT_STENCIL_BIT));
+}
+
+RDD::TextureLayout RenderingDeviceGraph::_usage_to_image_layout(ResourceUsage p_usage, bool p_is_depth_stencil) {
 	switch (p_usage) {
 		case RESOURCE_USAGE_COPY_FROM:
 			return RDD::TEXTURE_LAYOUT_COPY_SRC_OPTIMAL;
@@ -151,7 +163,10 @@ RDD::TextureLayout RenderingDeviceGraph::_usage_to_image_layout(ResourceUsage p_
 		case RESOURCE_USAGE_RESOLVE_TO:
 			return RDD::TEXTURE_LAYOUT_RESOLVE_DST_OPTIMAL;
 		case RESOURCE_USAGE_TEXTURE_SAMPLE:
-			return RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			// GodotNext: rd_readonly_depth (#301). Depth/stencil textures sample in the shared
+			// read-only depth layout so sampled reads and read-only depth attachments need no
+			// layout transition between them.
+			return p_is_depth_stencil ? RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		case RESOURCE_USAGE_STORAGE_IMAGE_READ:
 		case RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE:
 			return RDD::TEXTURE_LAYOUT_STORAGE_OPTIMAL;
@@ -159,6 +174,9 @@ RDD::TextureLayout RenderingDeviceGraph::_usage_to_image_layout(ResourceUsage p_
 			return RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE:
 			return RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+		// GodotNext: rd_readonly_depth (#301).
+		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ:
+			return RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_SHADING_RATE_READ:
 			return RDD::TEXTURE_LAYOUT_FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL;
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_DENSITY_MAP_READ:
@@ -215,6 +233,9 @@ RDD::BarrierAccessBits RenderingDeviceGraph::_usage_to_access_bits(ResourceUsage
 			return RDD::BarrierAccessBits(RDD::BARRIER_ACCESS_COLOR_ATTACHMENT_READ_BIT | RDD::BARRIER_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
 		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE:
 			return RDD::BarrierAccessBits(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+		// GodotNext: rd_readonly_depth (#301).
+		case RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ:
+			return RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_SHADING_RATE_READ:
 			return RDD::BARRIER_ACCESS_FRAGMENT_SHADING_RATE_ATTACHMENT_READ_BIT;
 		case RESOURCE_USAGE_ATTACHMENT_FRAGMENT_DENSITY_MAP_READ:
@@ -376,7 +397,10 @@ void RenderingDeviceGraph::_check_discardable_attachment_dependency(ResourceTrac
 	ResourceTracker **trackers = previous_draw_list_command->trackers();
 	for (uint32_t i = 0; i < previous_draw_list_command->trackers_count; i++) {
 		if (trackers[i] == p_resource_tracker) {
-			previous_draw_list_command->store_ops()[i] = RDD::ATTACHMENT_STORE_OP_STORE;
+			// GodotNext: rd_readonly_depth (#301). Never promote a read-only attachment's STORE_OP_NONE to STORE.
+			if (previous_draw_list_command->store_ops()[i] != RDD::ATTACHMENT_STORE_OP_NONE) {
+				previous_draw_list_command->store_ops()[i] = RDD::ATTACHMENT_STORE_OP_STORE;
+			}
 			return;
 		}
 	}
@@ -455,6 +479,13 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		ResourceUsage new_resource_usage = p_resource_usages[i];
 		bool write_usage = _is_write_usage(new_resource_usage);
 		BitField<RDD::BarrierAccessBits> new_usage_access = _usage_to_access_bits(new_resource_usage);
+		// GodotNext: rd_readonly_depth (#301). A draw list attaching depth read-only while also
+		// binding a bindless texture table containing that dirty depth texture needs both read accesses.
+		if (r_command->type == RecordedCommand::TYPE_DRAW_LIST &&
+				!draw_instruction_list.bindless_readonly_depth_trackers.is_empty() &&
+				draw_instruction_list.bindless_readonly_depth_trackers.has(resource_tracker)) {
+			new_usage_access = new_usage_access | RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | RDD::BARRIER_ACCESS_SHADER_READ_BIT;
+		}
 		bool is_resource_a_slice = resource_tracker->parent != nullptr;
 		if (is_resource_a_slice) {
 			// This resource depends on a parent resource.
@@ -463,8 +494,22 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 			// Quit early if the parent is already in this command.
 			if (resource_tracker->parent->command_index == p_command_index) {
 				DEV_ASSERT(resource_tracker->parent->usage_index != UINT32_MAX);
+				const ResourceUsage parent_usage = p_resource_usages[resource_tracker->parent->usage_index];
+				// GodotNext: rd_readonly_depth (#301). A depth/stencil slice attached read-only in
+				// a draw list that also samples the whole parent via a bindless texture table shares
+				// the same read-only depth layout; merge both read accesses onto the parent.
+				const bool shared_readonly_depth_pair = r_command->type == RecordedCommand::TYPE_DRAW_LIST &&
+						_is_depth_stencil_texture(resource_tracker) &&
+						((parent_usage == RESOURCE_USAGE_TEXTURE_SAMPLE && new_resource_usage == RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ) ||
+								(parent_usage == RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ && new_resource_usage == RESOURCE_USAGE_TEXTURE_SAMPLE));
+				if (shared_readonly_depth_pair) {
+					if (!draw_instruction_list.bindless_readonly_depth_trackers.has(resource_tracker->parent)) {
+						draw_instruction_list.bindless_readonly_depth_trackers.push_back(resource_tracker->parent);
+					}
+					continue;
+				}
 
-				ERR_FAIL_COND_MSG(p_resource_usages[resource_tracker->parent->usage_index] != new_resource_usage, "Using a full texture and its slices at the same time with different usages is not allowed.");
+				ERR_FAIL_COND_MSG(parent_usage != new_resource_usage, "Using a full texture and its slices at the same time with different usages is not allowed.");
 
 				continue;
 			}
@@ -578,7 +623,19 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 				resource_tracker->usage_access = resource_tracker->parent->usage_access;
 				resource_tracker->usage_stages = resource_tracker->parent->usage_stages; // GodotNext: rdg_access_stages (#267)
 
-				if (resource_tracker->usage != new_resource_usage) {
+				// GodotNext: rd_readonly_depth (#301). A depth/stencil slice reading in the shared
+				// read-only depth layout while its parent is cleanly in that layout needs no layout
+				// transition and must not enter dirty_shared_list.
+				const bool slice_same_shared_read_only_depth = driver_textures_require_layout_transitions &&
+						!write_usage &&
+						_is_depth_stencil_texture(resource_tracker) &&
+						resource_tracker->parent->dirty_shared_list == nullptr &&
+						resource_tracker->parent->usage != RESOURCE_USAGE_NONE &&
+						!_is_write_usage(resource_tracker->parent->usage) &&
+						_usage_to_image_layout(resource_tracker->parent->usage, true) == RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL &&
+						_usage_to_image_layout(new_resource_usage, true) == RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+				if (resource_tracker->usage != new_resource_usage && !slice_same_shared_read_only_depth) {
 					// Insert to the dirty list if the requested usage is different.
 					resource_tracker->next_shared = resource_tracker->parent->dirty_shared_list;
 					resource_tracker->parent->dirty_shared_list = resource_tracker;
@@ -616,60 +673,160 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		// Use the resource's parent tracker directly for all search operations.
 		bool resource_has_parent = resource_tracker->parent != nullptr;
 		ResourceTracker *search_tracker = resource_has_parent ? resource_tracker->parent : resource_tracker;
+		// GodotNext: rd_readonly_depth (#301). Whole depth/stencil textures (and clean slices
+		// inheriting a parent already in the shared read-only depth layout) share
+		// TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL across sampled reads and read-only depth
+		// attachments. Record the transition into that layout in shared_read_transitions instead of
+		// marking the first reader as write_usage, so concurrent readers across queues do not wait
+		// on one another while still sharing visibility from the prior write.
+		const bool is_depth_stencil = _is_depth_stencil_texture(resource_tracker);
+		const RDD::TextureLayout prev_layout = resource_tracker->texture_driver_id.id != 0 ? _usage_to_image_layout(resource_tracker->usage, is_depth_stencil) : RDD::TEXTURE_LAYOUT_UNDEFINED;
+		const RDD::TextureLayout new_layout = resource_tracker->texture_driver_id.id != 0 ? _usage_to_image_layout(new_resource_usage, is_depth_stencil) : RDD::TEXTURE_LAYOUT_UNDEFINED;
+		const bool prev_is_shared_read_only_depth = prev_layout == RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL && !_is_write_usage(resource_tracker->usage) && resource_tracker->usage != RESOURCE_USAGE_NONE;
+		const bool shared_read_only_depth_layout = driver_textures_require_layout_transitions && is_depth_stencil && !write_usage && new_layout == RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL &&
+				((!resource_has_parent && resource_tracker->dirty_shared_list == nullptr) || (resource_has_parent && !resource_tracker->in_parent_dirty_list && prev_is_shared_read_only_depth && search_tracker->dirty_shared_list == nullptr));
+		const bool has_read_visibility = search_tracker->shared_read_transition_index >= 0 ||
+				(((uint64_t(resource_tracker->usage_access) & uint64_t(new_usage_access)) == uint64_t(new_usage_access)) &&
+						((uint64_t(resource_tracker->usage_stages) & uint64_t(r_command->self_stages)) == uint64_t(r_command->self_stages)));
+		const bool same_shared_read_only_depth = shared_read_only_depth_layout && prev_is_shared_read_only_depth && has_read_visibility;
 		bool different_usage = resource_tracker->usage != new_resource_usage;
-		bool write_usage_after_write = (write_usage && search_tracker->write_command_or_list_index >= 0);
-		// GodotNext: rdg_cross_frame_waw (#262). Or the last write was in an earlier frame.
-		write_usage_after_write = write_usage_after_write || cross_frame_write_after_write(resource_tracker->usage, new_resource_usage, !search_tracker->previous_frame_stages.is_empty(), resource_tracker->buffer_driver_id.id != 0);
-		if (different_usage || write_usage_after_write) {
-			// A barrier must be pushed if the usage is different of it's a write usage and there was already a command that wrote to this resource previously.
-			// GodotNext: rdg_access_stages (#267). The barrier waits on the access it names. That access
-			// can be older than this frame and than the command this one depends on: a slice that is
-			// first used after the parent's first use in a frame inherits the parent's access from an
-			// earlier frame (a texture cleared in one frame and given its mips in the next).
-			r_command->previous_stages = r_command->previous_stages | resource_tracker->usage_stages;
-			if (resource_tracker->texture_driver_id.id != 0) {
-				if (resource_tracker->usage_access.is_empty()) {
-					// FIXME: If the tracker does not know the previous type of usage, assume the generic memory write one.
-					// Tracking access bits across texture slices can be tricky, so this failsafe can be removed once that's improved.
-					resource_tracker->usage_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+		bool added_shared_read_transition = false;
+		if (same_shared_read_only_depth) {
+			// Already in the shared read-only depth layout with visibility for this access/stage
+			// (or sharing this frame's entry transition): no new barrier, no write_usage, no
+			// reader-to-reader edge. Accumulate read accesses and stages on the whole/parent tracker
+			// and any active entry transition.
+			search_tracker->usage_access = search_tracker->usage_access | new_usage_access;
+			search_tracker->usage_stages = search_tracker->usage_stages | r_command->self_stages;
+			if (resource_has_parent) {
+				resource_tracker->usage_access = search_tracker->usage_access;
+				resource_tracker->usage_stages = search_tracker->usage_stages;
+			}
+			if (search_tracker->shared_read_transition_index >= 0) {
+				SharedReadLayoutTransition &transition = shared_read_transitions[search_tracker->shared_read_transition_index];
+				transition.barrier.dst_access = transition.barrier.dst_access | new_usage_access;
+				transition.dst_stages = transition.dst_stages | r_command->self_stages;
+				transition.reader_commands.push_back(p_command_index);
+			}
+			search_tracker->current_frame_stages = search_tracker->current_frame_stages | r_command->self_stages;
+			if (!search_tracker->previous_frame_stages.is_empty()) {
+				r_command->previous_stages = r_command->previous_stages | search_tracker->previous_frame_stages;
+				search_tracker->previous_frame_stages.clear();
+			}
+			if (!resource_has_parent) {
+				resource_tracker->usage = new_resource_usage;
+			}
+		} else if (shared_read_only_depth_layout) {
+			// First reader entering TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL after a write or
+			// UNDEFINED, or a cross-frame reader expanding visibility to a new access/stage scope.
+			r_command->previous_stages = r_command->previous_stages | search_tracker->usage_stages;
+			if (driver_honors_barriers) {
+				SharedReadLayoutTransition transition;
+				transition.barrier.texture = search_tracker->texture_driver_id;
+				if (prev_layout == RDD::TEXTURE_LAYOUT_UNDEFINED) {
+					transition.barrier.src_access = RDD::BarrierAccessBits(0);
+				} else if (search_tracker->usage_access.is_empty()) {
+					transition.barrier.src_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+				} else {
+					transition.barrier.src_access = search_tracker->usage_access;
 				}
-
-				_add_texture_barrier_to_command(resource_tracker->texture_driver_id, resource_tracker->usage_access, new_usage_access, resource_tracker->usage, new_resource_usage, resource_tracker->texture_subresources, command_transition_barriers, r_command->transition_barrier_index, r_command->transition_barrier_count);
-			} else if (resource_tracker->buffer_driver_id.id != 0) {
-#if USE_BUFFER_BARRIERS
-				_add_buffer_barrier_to_command(resource_tracker->buffer_driver_id, resource_tracker->usage_access, new_usage_access, r_command->buffer_barrier_index, r_command->buffer_barrier_count);
-#endif
-				// Memory barriers are pushed regardless of buffer barriers being used or not.
-				r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | resource_tracker->usage_access;
-				r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | new_usage_access;
-			} else if (resource_tracker->acceleration_structure_driver_id.id != 0) {
-				// Make sure the acceleration structure has been built before accessing it from raytracing shaders.
-				_add_acceleration_structure_barrier_to_command(resource_tracker->acceleration_structure_driver_id, resource_tracker->usage_access, new_usage_access, command_acceleration_structure_barriers, r_command->acceleration_structure_barrier_index, r_command->acceleration_structure_barrier_count);
-				r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | resource_tracker->usage_access;
-				r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | new_usage_access;
+				transition.barrier.dst_access = new_usage_access;
+				transition.barrier.prev_layout = prev_layout;
+				transition.barrier.next_layout = RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+				transition.barrier.subresources = search_tracker->texture_subresources;
+				transition.src_stages = search_tracker->usage_stages | search_tracker->previous_frame_stages;
+				transition.dst_stages = r_command->self_stages;
+				transition.reader_commands.push_back(p_command_index);
+				search_tracker->shared_read_transition_index = int32_t(shared_read_transitions.size());
+				shared_read_transitions.push_back(transition);
+				added_shared_read_transition = true;
+			}
+			if (prev_is_shared_read_only_depth) {
+				search_tracker->usage_access = search_tracker->usage_access | new_usage_access;
+				search_tracker->usage_stages = search_tracker->usage_stages | r_command->self_stages;
 			} else {
-				DEV_ASSERT(false && "Resource tracker does not contain a valid buffer or texture ID.");
+				search_tracker->usage_access = new_usage_access;
+				search_tracker->usage_stages = r_command->self_stages;
+			}
+			if (resource_has_parent) {
+				resource_tracker->usage_access = search_tracker->usage_access;
+				resource_tracker->usage_stages = search_tracker->usage_stages;
+			}
+			search_tracker->current_frame_stages = search_tracker->current_frame_stages | r_command->self_stages;
+			if (!search_tracker->previous_frame_stages.is_empty()) {
+				r_command->previous_stages = r_command->previous_stages | search_tracker->previous_frame_stages;
+				search_tracker->previous_frame_stages.clear();
+			}
+			if (!resource_has_parent) {
+				resource_tracker->usage = new_resource_usage;
+			}
+		} else {
+			bool write_usage_after_write = (write_usage && search_tracker->write_command_or_list_index >= 0);
+			// GodotNext: rdg_cross_frame_waw (#262). Or the last write was in an earlier frame.
+			write_usage_after_write = write_usage_after_write || cross_frame_write_after_write(resource_tracker->usage, new_resource_usage, !search_tracker->previous_frame_stages.is_empty(), resource_tracker->buffer_driver_id.id != 0);
+			const bool accumulate_depth_read = !write_usage && is_depth_stencil && prev_is_shared_read_only_depth && prev_layout == new_layout;
+			const bool needs_shared_depth_visibility = accumulate_depth_read && !has_read_visibility;
+			if (different_usage || write_usage_after_write || needs_shared_depth_visibility) {
+				// A barrier must be pushed if the usage is different of it's a write usage and there was already a command that wrote to this resource previously.
+				// GodotNext: rdg_access_stages (#267). The barrier waits on the access it names. That access
+				// can be older than this frame and than the command this one depends on: a slice that is
+				// first used after the parent's first use in a frame inherits the parent's access from an
+				// earlier frame (a texture cleared in one frame and given its mips in the next).
+				r_command->previous_stages = r_command->previous_stages | resource_tracker->usage_stages;
+				if (resource_tracker->texture_driver_id.id != 0) {
+					if (resource_tracker->usage_access.is_empty()) {
+						// FIXME: If the tracker does not know the previous type of usage, assume the generic memory write one.
+						// Tracking access bits across texture slices can be tricky, so this failsafe can be removed once that's improved.
+						resource_tracker->usage_access = RDD::BARRIER_ACCESS_MEMORY_WRITE_BIT;
+					}
+
+					_add_texture_barrier_to_command(resource_tracker->texture_driver_id, resource_tracker->usage_access, new_usage_access, resource_tracker->usage, new_resource_usage, resource_tracker->texture_subresources, command_transition_barriers, r_command->transition_barrier_index, r_command->transition_barrier_count);
+				} else if (resource_tracker->buffer_driver_id.id != 0) {
+#if USE_BUFFER_BARRIERS
+					_add_buffer_barrier_to_command(resource_tracker->buffer_driver_id, resource_tracker->usage_access, new_usage_access, r_command->buffer_barrier_index, r_command->buffer_barrier_count);
+#endif
+					// Memory barriers are pushed regardless of buffer barriers being used or not.
+					r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | resource_tracker->usage_access;
+					r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | new_usage_access;
+				} else if (resource_tracker->acceleration_structure_driver_id.id != 0) {
+					// Make sure the acceleration structure has been built before accessing it from raytracing shaders.
+					_add_acceleration_structure_barrier_to_command(resource_tracker->acceleration_structure_driver_id, resource_tracker->usage_access, new_usage_access, command_acceleration_structure_barriers, r_command->acceleration_structure_barrier_index, r_command->acceleration_structure_barrier_count);
+					r_command->memory_barrier.src_access = r_command->memory_barrier.src_access | resource_tracker->usage_access;
+					r_command->memory_barrier.dst_access = r_command->memory_barrier.dst_access | new_usage_access;
+				} else {
+					DEV_ASSERT(false && "Resource tracker does not contain a valid buffer or texture ID.");
+				}
+			}
+
+			// Always update the access of the tracker according to the latest usage.
+			if (accumulate_depth_read) {
+				resource_tracker->usage_access = resource_tracker->usage_access | new_usage_access;
+				resource_tracker->usage_stages = resource_tracker->usage_stages | r_command->self_stages;
+			} else {
+				resource_tracker->usage_access = new_usage_access;
+				resource_tracker->usage_stages = r_command->self_stages; // GodotNext: rdg_access_stages (#267)
+			}
+
+			// Always accumulate the stages of the tracker with the commands that use it.
+			search_tracker->current_frame_stages = search_tracker->current_frame_stages | r_command->self_stages;
+
+			if (!search_tracker->previous_frame_stages.is_empty()) {
+				// Add to the command the stages the tracker was used on in the previous frame.
+				r_command->previous_stages = r_command->previous_stages | search_tracker->previous_frame_stages;
+				search_tracker->previous_frame_stages.clear();
+			}
+
+			if (different_usage) {
+				// Even if the usage of the resource isn't a write usage explicitly, a different usage implies a transition and it should therefore be considered a write.
+				// However, this is not necessary if the driver does not consider different usages as different states (e.g. no image layouts).
+				write_usage = write_usage || (driver_textures_require_layout_transitions && bool(resource_tracker->texture_driver_id)) || driver_buffers_require_transitions;
+				resource_tracker->usage = new_resource_usage;
 			}
 		}
 
-		// Always update the access of the tracker according to the latest usage.
-		resource_tracker->usage_access = new_usage_access;
-		resource_tracker->usage_stages = r_command->self_stages; // GodotNext: rdg_access_stages (#267)
-
-		// Always accumulate the stages of the tracker with the commands that use it.
-		search_tracker->current_frame_stages = search_tracker->current_frame_stages | r_command->self_stages;
-
-		if (!search_tracker->previous_frame_stages.is_empty()) {
-			// Add to the command the stages the tracker was used on in the previous frame.
-			r_command->previous_stages = r_command->previous_stages | search_tracker->previous_frame_stages;
-			search_tracker->previous_frame_stages.clear();
-		}
-
-		if (different_usage) {
-			// Even if the usage of the resource isn't a write usage explicitly, a different usage implies a transition and it should therefore be considered a write.
-			// However, this is not necessary if the driver does not consider different usages as different states (e.g. no image layouts).
-			write_usage = write_usage || (driver_textures_require_layout_transitions && bool(resource_tracker->texture_driver_id)) || driver_buffers_require_transitions;
-			resource_tracker->usage = new_resource_usage;
+		if (write_usage) {
+			// GodotNext: rd_readonly_depth (#301). A write closes any active shared read-only depth window.
+			search_tracker->shared_read_transition_index = -1;
 		}
 
 		bool write_usage_has_partial_coverage = !different_usage && _check_command_partial_coverage(resource_tracker, p_command_index);
@@ -802,7 +959,9 @@ void RenderingDeviceGraph::_add_command_to_graph(ResourceTracker **p_resource_tr
 		// after an earlier async list used the slice, makes the frame run on the main queue.
 		if (r_command->queue == QUEUE_ASYNC_COMPUTE && driver_textures_require_layout_transitions) {
 			const bool used_by_earlier_async_command = search_tracker->async_command_frame == tracking_frame && search_tracker->async_command_index != p_command_index;
-			if (used_by_earlier_async_command && _async_fork_texture_barriers_added(r_command, async_normalization_start, async_transition_start)) {
+			// GodotNext: rd_readonly_depth (#301). A shared read-only depth transition moves to the
+			// fork just like any other unsupported async texture barrier.
+			if (used_by_earlier_async_command && (added_shared_read_transition || _async_fork_texture_barriers_added(r_command, async_normalization_start, async_transition_start))) {
 				async_fork_barrier_conflict = true;
 			}
 			search_tracker->async_command_frame = tracking_frame;
@@ -820,12 +979,15 @@ void RenderingDeviceGraph::_add_texture_barrier_to_command(RDD::TextureID p_text
 		r_barrier_index = r_barrier_vector.size();
 	}
 
+	// GodotNext: rd_readonly_depth (#301). Derive depth/stencil aspect so sampled depth reads map
+	// to TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL across whole textures and slices alike.
+	const bool is_depth_stencil = p_subresources.aspect.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) || p_subresources.aspect.has_flag(RDD::TEXTURE_ASPECT_STENCIL_BIT);
 	RDD::TextureBarrier texture_barrier;
 	texture_barrier.texture = p_texture_id;
 	texture_barrier.src_access = p_src_access;
 	texture_barrier.dst_access = p_dst_access;
-	texture_barrier.prev_layout = _usage_to_image_layout(p_prev_usage);
-	texture_barrier.next_layout = _usage_to_image_layout(p_next_usage);
+	texture_barrier.prev_layout = _usage_to_image_layout(p_prev_usage, is_depth_stencil);
+	texture_barrier.next_layout = _usage_to_image_layout(p_next_usage, is_depth_stencil);
 	texture_barrier.subresources = p_subresources;
 	r_barrier_vector.push_back(texture_barrier);
 	r_barrier_count++;
@@ -967,20 +1129,26 @@ void RenderingDeviceGraph::_run_compute_list_command(RDD::CommandBufferID p_comm
 }
 
 void RenderingDeviceGraph::_get_draw_list_render_pass_and_framebuffer(const RecordedDrawListCommand *p_draw_list_command, RDD::RenderPassID &r_render_pass, RDD::FramebufferID &r_framebuffer) {
-	DEV_ASSERT(p_draw_list_command->trackers_count <= 21 && "Max number of attachments that can be encoded into the key.");
+	// GodotNext: rd_readonly_depth (#301). Pack 4 bits per attachment (2 load, 2 store) into two
+	// 64-bit words so ATTACHMENT_STORE_OP_NONE never collides with neighboring attachments.
+	DEV_ASSERT(p_draw_list_command->trackers_count <= 32 && "Max number of attachments that can be encoded into the key.");
 
 	// Build a unique key from the load and store ops for each attachment.
 	const RDD::AttachmentLoadOp *load_ops = p_draw_list_command->load_ops();
 	const RDD::AttachmentStoreOp *store_ops = p_draw_list_command->store_ops();
-	uint64_t key = 0;
+	FramebufferStorageKey key;
 	for (uint32_t i = 0; i < p_draw_list_command->trackers_count; i++) {
-		key |= uint64_t(load_ops[i]) << (i * 3);
-		key |= uint64_t(store_ops[i]) << (i * 3 + 2);
+		const uint64_t bits = uint64_t(load_ops[i]) | (uint64_t(store_ops[i]) << 2);
+		if (i < 16) {
+			key.lo |= bits << (i * 4);
+		} else {
+			key.hi |= bits << ((i - 16) * 4);
+		}
 	}
 
 	// Check the storage map if the render pass and the framebuffer needs to be created.
 	FramebufferCache *framebuffer_cache = p_draw_list_command->framebuffer_cache;
-	HashMap<uint64_t, FramebufferStorage>::Iterator it = framebuffer_cache->storage_map.find(key);
+	HashMap<FramebufferStorageKey, FramebufferStorage, FramebufferStorageKey>::Iterator it = framebuffer_cache->storage_map.find(key);
 	if (it == framebuffer_cache->storage_map.end()) {
 		FramebufferStorage storage;
 		VectorView<RDD::AttachmentLoadOp> load_ops_view(load_ops, p_draw_list_command->trackers_count);
@@ -1160,6 +1328,7 @@ void RenderingDeviceGraph::_add_draw_list_begin(FramebufferCache *p_framebuffer_
 
 	draw_instruction_list.clear();
 	draw_instruction_list.indirect_count_offsets.clear(); // GodotNext: rd_indirect_count (#177)
+	draw_instruction_list.bindless_readonly_depth_trackers.clear(); // GodotNext: rd_readonly_depth (#301)
 	draw_instruction_list.index++;
 	draw_instruction_list.framebuffer_cache = p_framebuffer_cache;
 	draw_instruction_list.render_pass = p_render_pass;
@@ -1670,6 +1839,27 @@ bool RenderingDeviceGraph::_gather_barriers_for_render_commands(const RecordedCo
 		}
 	}
 
+	// GodotNext: rd_readonly_depth (#301). Emit shared read-only depth transitions at their resolved
+	// execution point: before the fork on the main queue, or at the earliest main-queue reader's level.
+	if (p_selection == BARRIER_SELECTION_ASYNC_FORK) {
+		for (const SharedReadLayoutTransition &t : shared_read_transitions) {
+			if (t.emit_at_fork) {
+				barrier_group.transition_barriers.push_back(t.barrier);
+				barrier_group.src_stages = barrier_group.src_stages | t.src_stages;
+				barrier_group.dst_stages = barrier_group.dst_stages | t.dst_stages;
+			}
+		}
+	} else if (p_selection == BARRIER_SELECTION_ALL && p_sorted_commands_count > 0) {
+		const int32_t current_level = int32_t(p_sorted_commands[0].level);
+		for (const SharedReadLayoutTransition &t : shared_read_transitions) {
+			if (!t.emit_at_fork && t.emit_level == current_level) {
+				barrier_group.transition_barriers.push_back(t.barrier);
+				barrier_group.src_stages = barrier_group.src_stages | t.src_stages;
+				barrier_group.dst_stages = barrier_group.dst_stages | t.dst_stages;
+			}
+		}
+	}
+
 	// GodotNext: async_compute (#174).
 	if (p_selection == BARRIER_SELECTION_ASYNC_FORK && barrier_group.normalization_barriers.is_empty() && barrier_group.transition_barriers.is_empty()) {
 		return false;
@@ -2071,6 +2261,8 @@ void RenderingDeviceGraph::begin() {
 	command_transition_barriers.clear();
 	command_buffer_barriers.clear();
 	command_acceleration_structure_barriers.clear();
+	// GodotNext: rd_readonly_depth (#301).
+	shared_read_transitions.clear();
 	command_label_chars.clear();
 	command_label_colors.clear();
 	command_label_offsets.clear();
@@ -2884,22 +3076,29 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	for (uint32_t i = 0; i < command->trackers_count; i++) {
 		ResourceTracker *resource_tracker = framebuffer_cache->trackers[i];
 		if (resource_tracker != nullptr) {
-			// GodotNext: rd_clear_values (#275). The clear values are not per slot (draw_list_driver_clear_values()).
-			if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_CLEAR) {
-				load_ops[i] = RDD::ATTACHMENT_LOAD_OP_CLEAR;
-			} else if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_IGNORE) {
-				load_ops[i] = RDD::ATTACHMENT_LOAD_OP_DONT_CARE;
-			} else if (resource_tracker->is_discardable) {
-				bool resource_has_parent = resource_tracker->parent != nullptr;
-				ResourceTracker *search_tracker = resource_has_parent ? resource_tracker->parent : resource_tracker;
-				search_tracker->reset_if_outdated(tracking_frame);
-				bool resource_was_modified_this_frame = search_tracker->write_command_or_list_index >= 0;
-				load_ops[i] = resource_was_modified_this_frame ? RDD::ATTACHMENT_LOAD_OP_LOAD : RDD::ATTACHMENT_LOAD_OP_DONT_CARE;
-			} else {
+			// GodotNext: rd_clear_values (#275), rd_readonly_depth (#301). The clear values are not per
+			// slot (draw_list_driver_clear_values()). A read-only depth attachment always loads and
+			// uses ATTACHMENT_STORE_OP_NONE so no store write races with concurrent readers.
+			if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_READ_ONLY) {
 				load_ops[i] = RDD::ATTACHMENT_LOAD_OP_LOAD;
-			}
+				store_ops[i] = RDD::ATTACHMENT_STORE_OP_NONE;
+			} else {
+				if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_CLEAR) {
+					load_ops[i] = RDD::ATTACHMENT_LOAD_OP_CLEAR;
+				} else if (i < attachment_op_count && draw_instruction_list.attachment_operations[i] == ATTACHMENT_OPERATION_IGNORE) {
+					load_ops[i] = RDD::ATTACHMENT_LOAD_OP_DONT_CARE;
+				} else if (resource_tracker->is_discardable) {
+					bool resource_has_parent = resource_tracker->parent != nullptr;
+					ResourceTracker *search_tracker = resource_has_parent ? resource_tracker->parent : resource_tracker;
+					search_tracker->reset_if_outdated(tracking_frame);
+					bool resource_was_modified_this_frame = search_tracker->write_command_or_list_index >= 0;
+					load_ops[i] = resource_was_modified_this_frame ? RDD::ATTACHMENT_LOAD_OP_LOAD : RDD::ATTACHMENT_LOAD_OP_DONT_CARE;
+				} else {
+					load_ops[i] = RDD::ATTACHMENT_LOAD_OP_LOAD;
+				}
 
-			store_ops[i] = resource_tracker->is_discardable ? attachment_store_op_dont_care : RDD::ATTACHMENT_STORE_OP_STORE;
+				store_ops[i] = resource_tracker->is_discardable ? attachment_store_op_dont_care : RDD::ATTACHMENT_STORE_OP_STORE;
+			}
 		} else {
 			load_ops[i] = RDD::ATTACHMENT_LOAD_OP_DONT_CARE;
 			store_ops[i] = RDD::ATTACHMENT_STORE_OP_DONT_CARE;
@@ -2919,9 +3118,10 @@ void RenderingDeviceGraph::add_draw_list_end() {
 	if (indirect_count_draws > 0) {
 		memcpy(command->indirect_count_offsets(), draw_instruction_list.indirect_count_offsets.ptr(), indirect_count_draws * sizeof(uint32_t));
 	}
-	// GodotNext: rd_bindless (#176), rd_indirect_count (#177).
-	_bindless_draw_list_tables_add_usages(command_index);
+	// GodotNext: rd_bindless (#176), rd_indirect_count (#177), rd_readonly_depth (#301).
+	_bindless_draw_list_tables_add_usages(command_index, command);
 	_add_command_to_graph(draw_instruction_list.command_trackers.ptr(), draw_instruction_list.command_tracker_usages.ptr(), draw_instruction_list.command_trackers.size(), command_index, command);
+	draw_instruction_list.bindless_readonly_depth_trackers.clear();
 	_bindless_tables_bound(draw_instruction_list, command_index, command);
 }
 
@@ -3243,13 +3443,18 @@ void RenderingDeviceGraph::end(bool p_reorder_commands, bool p_full_barriers, RD
 	if (p_reorder_commands) {
 		_compute_command_levels(commands_sorted);
 		async_plan = _plan_async_frame(commands_sorted, bool(r_command_buffer_pool.async_command_buffer));
+		// GodotNext: rd_readonly_depth (#301).
+		_resolve_shared_read_transitions(commands_sorted, async_plan);
 	} else {
 		commands_sorted.clear();
 		commands_sorted.resize(command_count);
 
 		for (uint32_t i = 0; i < command_count; i++) {
 			commands_sorted[i].index = i;
+			commands_sorted[i].level = i; // GodotNext: rd_readonly_depth (#301). Match sequential emit order.
 		}
+		// GodotNext: rd_readonly_depth (#301).
+		_resolve_shared_read_transitions(commands_sorted, async_plan);
 	}
 	// GodotNext: async_compute (#174).
 	r_command_buffer_pool.async_fallback = async_command_count > 0 && !async_plan.active;
@@ -3354,10 +3559,12 @@ void RenderingDeviceGraph::_bindless_table_reset_if_outdated(BindlessTableTracke
 }
 
 void RenderingDeviceGraph::_bindless_resource_used(ResourceTracker *p_resident, ResourceUsage p_usage, int32_t p_command_index, RecordedCommand *r_command) {
-	// A texture is ready while it is sampled; any other usage changes its layout. A buffer is ready
-	// until it is written.
+	// A texture is ready while it is sampled (or, for a depth/stencil texture, attached read-only
+	// in the same shared layout); any other usage changes its layout. A buffer is ready until it
+	// is written.
+	// GodotNext: rd_readonly_depth (#301).
 	const bool is_texture = p_resident->texture_driver_id.id != 0;
-	const bool leaves_unready = is_texture ? p_usage != RESOURCE_USAGE_TEXTURE_SAMPLE : _is_write_usage(p_usage);
+	const bool leaves_unready = is_texture ? (p_usage != RESOURCE_USAGE_TEXTURE_SAMPLE && !(_is_depth_stencil_texture(p_resident) && p_usage == RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ)) : _is_write_usage(p_usage);
 	if (!leaves_unready) {
 		return;
 	}
@@ -3402,11 +3609,19 @@ bool RenderingDeviceGraph::_bindless_dirty_in_list_tables(const InstructionList 
 	return false;
 }
 
-// GodotNext: rd_indirect_count (#177). _bindless_tables_add_usages() for the draw list. A dirty resident the
-// list already reads as indirect arguments (an indirect draw, or a count draw recorded before the table was
-// bound) keeps that usage, so the table's read in this list gets no barrier. It stays dirty, as if this
-// list had left it unready, so the next command that binds the table gets the barrier.
-void RenderingDeviceGraph::_bindless_draw_list_tables_add_usages(int32_t p_command_index) {
+// GodotNext: rd_indirect_count (#177), rd_readonly_depth (#301). _bindless_tables_add_usages() for
+// the draw list. A dirty resident the list already reads as indirect arguments keeps that usage and
+// stays dirty. A dirty depth/stencil texture already attached read-only shares
+// TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL with sampled reads, so SHADER_READ access is merged
+// into its read-only depth transition instead of adding a conflicting duplicate usage.
+void RenderingDeviceGraph::_bindless_draw_list_tables_add_usages(int32_t p_command_index, RecordedCommand *r_command) {
+	BitField<RDD::PipelineStageBits> graphics_shader_stages = RDD::PIPELINE_STAGE_VERTEX_SHADER_BIT;
+	graphics_shader_stages.set_flag(RDD::PIPELINE_STAGE_TESSELLATION_CONTROL_SHADER_BIT);
+	graphics_shader_stages.set_flag(RDD::PIPELINE_STAGE_TESSELLATION_EVALUATION_SHADER_BIT);
+	graphics_shader_stages.set_flag(RDD::PIPELINE_STAGE_GEOMETRY_SHADER_BIT);
+	graphics_shader_stages.set_flag(RDD::PIPELINE_STAGE_TASK_SHADER_BIT);
+	graphics_shader_stages.set_flag(RDD::PIPELINE_STAGE_MESH_SHADER_BIT);
+	graphics_shader_stages.set_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
 	for (BindlessTableTracker *table : draw_instruction_list.bindless_tables) {
 		for (ResourceTracker *tracker : table->dirty) {
 			tracker->reset_if_outdated(tracking_frame);
@@ -3416,6 +3631,18 @@ void RenderingDeviceGraph::_bindless_draw_list_tables_add_usages(int32_t p_comma
 				DEV_ASSERT(residency != nullptr);
 				residency->dirty_frame = tracking_frame;
 				residency->dirty_command_index = p_command_index;
+				continue;
+			}
+			if (tracker->draw_list_index == draw_instruction_list.index &&
+					tracker->draw_list_usage == RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ &&
+					table->read_usage == RESOURCE_USAGE_TEXTURE_SAMPLE &&
+					_is_depth_stencil_texture(tracker)) {
+				if (!draw_instruction_list.bindless_readonly_depth_trackers.has(tracker)) {
+					draw_instruction_list.bindless_readonly_depth_trackers.push_back(tracker);
+				}
+				if (r_command->self_stages.get_shared(graphics_shader_stages).is_empty()) {
+					r_command->self_stages.set_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+				}
 				continue;
 			}
 			add_draw_list_usage(tracker, table->read_usage);
@@ -3620,7 +3847,8 @@ void RenderingDeviceGraph::framebuffer_cache_free(RDD *p_driver, FramebufferCach
 		return;
 	}
 
-	for (KeyValue<uint64_t, FramebufferStorage> &E : p_cache->storage_map) {
+	// GodotNext: rd_readonly_depth (#301).
+	for (KeyValue<FramebufferStorageKey, FramebufferStorage> &E : p_cache->storage_map) {
 		p_driver->framebuffer_free(E.value.framebuffer);
 		p_driver->render_pass_free(E.value.render_pass);
 	}

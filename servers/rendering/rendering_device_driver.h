@@ -656,6 +656,9 @@ public:
 	enum AttachmentStoreOp {
 		ATTACHMENT_STORE_OP_STORE = 0,
 		ATTACHMENT_STORE_OP_DONT_CARE = 1,
+		// GodotNext: rd_readonly_depth (#301). No store access: preserves contents when no shader
+		// writes the attachment (Vulkan VK_ATTACHMENT_STORE_OP_NONE).
+		ATTACHMENT_STORE_OP_NONE = 2,
 	};
 
 	struct Attachment {
@@ -1048,6 +1051,9 @@ public:
 		API_TRAIT_SHADER_GROUP_HANDLE_SIZE,
 		API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT,
 		API_TRAIT_SHADER_GROUP_HANDLE_ALIGNMENT,
+		// GodotNext: rd_readonly_depth (#301). True when ATTACHMENT_STORE_OP_NONE executes without a
+		// depth/stencil store write (Vulkan VK_KHR/EXT_load_store_op_none, D3D12, Metal).
+		API_TRAIT_SUPPORTS_ATTACHMENT_STORE_OP_NONE,
 	};
 
 	enum ShaderChangeInvalidation {

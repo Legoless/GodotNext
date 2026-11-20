@@ -5261,7 +5261,9 @@ bool RenderForwardClustered::_avboit_view_active(const RenderDataRD *p_render_da
 	return reason == AVBOITPolicy::REASON_NONE;
 }
 
-bool RenderForwardClustered::_render_avboit(RenderDataRD *p_render_data, RID p_alpha_framebuffer, uint32_t p_color_pass_flags, uint32_t p_uniform_buffer_index, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_reverse_cull, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization) {
+// GodotNext: rd_readonly_depth (#301). Pass the transparent list's depth/stencil write scan so
+// AVBOIT composite and remainder passes keep the depth buffer read-only whenever possible.
+bool RenderForwardClustered::_render_avboit(RenderDataRD *p_render_data, RID p_alpha_framebuffer, uint32_t p_color_pass_flags, uint32_t p_uniform_buffer_index, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_reverse_cull, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, const ForwardTransparentDepthScan &p_alpha_depth_scan) {
 	Ref<RenderSceneBuffersRD> rb = p_render_data->render_buffers;
 	ERR_FAIL_COND_V(rb.is_null(), false);
 	RendererRD::AVBOIT::Targets targets;
@@ -5318,7 +5320,12 @@ bool RenderForwardClustered::_render_avboit(RenderDataRD *p_render_data, RID p_a
 		params.avboit_pass = RendererRD::AVBOIT::PASS_COMPOSITE;
 		Vector<Color> clear;
 		clear.push_back(Color(0, 0, 0, 0));
-		_render_list_with_draw_list(&params, targets.composite_framebuffer, RD::DRAW_CLEAR_COLOR_0, clear, 0.0f, 0u, p_render_data->render_region);
+		// GodotNext: rd_readonly_depth (#301). AVBOIT composite never writes depth; keep depth read-only unless a surface writes stencil.
+		BitField<RD::DrawFlags> composite_flags = RD::DRAW_CLEAR_COLOR_0;
+		if (p_alpha_depth_scan.avboit_composite_read_only_depth()) {
+			composite_flags.set_flag(RD::DRAW_READ_ONLY_DEPTH);
+		}
+		_render_list_with_draw_list(&params, targets.composite_framebuffer, composite_flags, clear, 0.0f, 0u, p_render_data->render_region);
 	}
 
 	// 4: the resolve, over the region the composite drew.
@@ -5342,7 +5349,9 @@ bool RenderForwardClustered::_render_avboit(RenderDataRD *p_render_data, RID p_a
 	if (has_remainder) {
 		RenderListParameters params(alpha.elements.ptr(), alpha.element_info.ptr(), alpha.elements.size(), p_reverse_cull, PASS_MODE_COLOR, p_color_pass_flags, false, p_render_data->directional_light_soft_shadows, uniform_set, false, Vector2(), lod_distance_multiplier, screen_mesh_lod_threshold, 1, 0, p_base_specialization, true);
 		params.avboit_pass = RendererRD::AVBOIT::PASS_REMAINDER;
-		_render_list_with_draw_list(&params, p_alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+		// GodotNext: rd_readonly_depth (#301).
+		const BitField<RD::DrawFlags> remainder_flags = p_alpha_depth_scan.transparent_pass_read_only_depth() ? BitField<RD::DrawFlags>(RD::DRAW_READ_ONLY_DEPTH) : BitField<RD::DrawFlags>(RD::DRAW_DEFAULT_ALL);
+		_render_list_with_draw_list(&params, p_alpha_framebuffer, remainder_flags, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 	}
 	return true;
 }
@@ -6469,19 +6478,32 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		_render_nextgeo_debug_scene_passes(p_render_data, using_nextgeo, nextgeo_drew, use_msaa, msaa, reverse_cull, screen_size, depth_prepass_uniform_buffer_index, samplers, base_specialization);
 	}
 
-	// GodotNext: pt_tsr_async_compute (#193). TSR's async schedule for this frame, from
-	// rendering/anti_aliasing/tsr/async_compute (UE's r.TSR.AsyncCompute levels). Without async
-	// compute (RD::is_async_compute_active()), in a multiview (XR) viewport, and in every TSR viewport
-	// of an RD frame after the first one that used it (nextgi_tsr_async_available()), every level
-	// records as level 0. At
-	// level 2, velocity dilation and parallax disocclusion record here on the async queue, as soon as
-	// the depth and velocity buffers are final, and the passes that read the scene color record at
-	// the upscaler's place below. The split needs the depth and velocity to stay as they are until
-	// then: no MSAA resolve, no transparent surface that writes depth, no compositor effect and no
-	// VoxelGI or SDFGI debug draw in between. Otherwise level 2 records as level 0. The render graph
-	// joins the two passes at the next draw list that attaches the depth buffer (the sky, or the
-	// transparent pass), which RD always attaches read-write, so they overlap only main-queue work
-	// recorded before it.
+	// GodotNext: rd_readonly_depth (#301). Scan the transparent list once to decide both whether
+	// TSR level 2 can split right after the motion-vector pass (no depth_draw_always surface) and
+	// whether the transparent pass can attach the depth buffer read-only (also no stencil-writing
+	// surface).
+	ForwardTransparentDepthScan alpha_depth_scan;
+	for (uint32_t i = 0; i < render_list[RENDER_LIST_ALPHA].elements.size(); i++) {
+		const GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_ALPHA].elements[i];
+		const bool writes_depth = surf->shader->depth_draw == SceneShaderForwardClustered::ShaderData::DEPTH_DRAW_ALWAYS;
+		const bool writes_stencil = surf->shader->stencil_enabled && (surf->shader->stencil_flags & (SceneShaderForwardClustered::ShaderData::STENCIL_FLAG_WRITE | SceneShaderForwardClustered::ShaderData::STENCIL_FLAG_WRITE_DEPTH_FAIL)) != 0;
+		alpha_depth_scan.add_surface(writes_depth, writes_stencil);
+	}
+
+	// GodotNext: pt_tsr_async_compute (#193) & rd_readonly_depth (#301). TSR's async schedule for
+	// this frame, from rendering/anti_aliasing/tsr/async_compute (UE's r.TSR.AsyncCompute levels).
+	// Without async compute (RD::is_async_compute_active()), in a multiview (XR) viewport, and in
+	// every TSR viewport of an RD frame after the first one that used it
+	// (nextgi_tsr_async_available()), every level records as level 0. At level 2, velocity dilation
+	// and parallax disocclusion record here on the async queue, as soon as the depth and velocity
+	// buffers are final, and the passes that read the scene color record at the upscaler's place
+	// below. The split needs the depth and velocity to stay as they are until then: no MSAA
+	// resolve, no transparent surface that writes depth, no compositor effect and no VoxelGI or
+	// SDFGI debug draw in between. Otherwise level 2 records as level 0. With read-only depth
+	// attachments (#301), the sky pass, SSS, specular merge, depth copy, and transparent pass (when
+	// no depth_draw_always or stencil-writing surface draws) share the depth buffer's read-only
+	// layout with the async passes, so the fork-join window spans them and closes at TSR's shading
+	// rejection pass.
 	TSRAsyncSchedule tsr_async_schedule;
 	if (rb_data.is_valid() && scale_type == SCALE_TSR) {
 		const int64_t tsr_async_level = GLOBAL_GET_CACHED(int64_t, "rendering/anti_aliasing/tsr/async_compute");
@@ -6489,7 +6511,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		const bool tsr_async_available = nextgi_tsr_async_available(RD::get_singleton()->is_async_compute_active(), rb->get_view_count(), rd_frame, tsr_async_frame);
 		bool tsr_split_allowed = false;
 		if (tsr_async_available && tsr_async_level == TSR_ASYNC_DEPTH_VELOCITY) {
-			tsr_split_allowed = !use_msaa && !debug_voxelgis && !debug_sdfgi_probes;
+			tsr_split_allowed = !use_msaa && !debug_voxelgis && !debug_sdfgi_probes && alpha_depth_scan.tsr_split_depth_unchanged();
 			const RSE::CompositorEffectCallbackType tsr_split_callbacks[] = {
 				RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_OPAQUE,
 				RSE::COMPOSITOR_EFFECT_CALLBACK_TYPE_POST_SKY,
@@ -6498,12 +6520,6 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 			};
 			for (RSE::CompositorEffectCallbackType callback : tsr_split_callbacks) {
 				tsr_split_allowed = tsr_split_allowed && !_has_compositor_effect(callback, p_render_data);
-			}
-			for (uint32_t i = 0; tsr_split_allowed && i < render_list[RENDER_LIST_ALPHA].elements.size(); i++) {
-				const GeometryInstanceSurfaceDataCache *surf = render_list[RENDER_LIST_ALPHA].elements[i];
-				if (surf->shader->depth_draw == SceneShaderForwardClustered::ShaderData::DEPTH_DRAW_ALWAYS) {
-					tsr_split_allowed = false;
-				}
 			}
 		}
 		tsr_async_schedule = nextgi_tsr_async_schedule(tsr_async_level, tsr_async_available, tsr_split_allowed);
@@ -6629,7 +6645,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		RENDER_TIMESTAMP("Render Sky");
 
 		RD::get_singleton()->draw_command_begin_label("Draw Sky");
-		RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_only_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 1.0f, 0u, p_render_data->render_region);
+		// GodotNext: rd_readonly_depth (#301). Sky only depth-tests without writes; attach depth
+		// read-only so async depth readers (TSR level 2) can overlap the sky pass.
+		RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(color_only_framebuffer, RD::DRAW_READ_ONLY_DEPTH, Vector<Color>(), 1.0f, 0u, p_render_data->render_region);
 
 		sky.draw_sky(draw_list, rb, p_render_data->environment, color_only_framebuffer, time, sky_luminance_multiplier, sky_brightness_multiplier);
 
@@ -6757,11 +6775,14 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
 		transparent_color_pass_flags &= ~uint32_t(COLOR_PASS_FLAG_RR_GUIDES);
 
 		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
-		// GodotNext: avboit (#295, plan §21.2.1). With AVBOIT the alpha list is drawn in any order.
-		if (!(_avboit_view_active(p_render_data, use_msaa, is_reflection_probe) && _render_avboit(p_render_data, alpha_framebuffer, transparent_color_pass_flags, transparent_pass_uniform_buffer_index, screen_size, p_default_bg_color, reverse_cull, radiance_texture, samplers, base_specialization))) {
+		// GodotNext: avboit (#295, plan §21.2.1) & rd_readonly_depth (#301). With AVBOIT the alpha
+		// list is drawn in any order. Keep the depth attachment read-only when no transparent
+		// surface writes depth or stencil so TSR level 2 overlaps the transparent pass.
+		if (!(_avboit_view_active(p_render_data, use_msaa, is_reflection_probe) && _render_avboit(p_render_data, alpha_framebuffer, transparent_color_pass_flags, transparent_pass_uniform_buffer_index, screen_size, p_default_bg_color, reverse_cull, radiance_texture, samplers, base_specialization, alpha_depth_scan))) {
 			RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization, !is_reflection_probe);
 			render_list_params.use_nextgeo_proxy = is_reflection_probe;
-			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+			const BitField<RD::DrawFlags> transparent_draw_flags = alpha_depth_scan.transparent_pass_read_only_depth() ? BitField<RD::DrawFlags>(RD::DRAW_READ_ONLY_DEPTH) : BitField<RD::DrawFlags>(RD::DRAW_DEFAULT_ALL);
+			_render_list_with_draw_list(&render_list_params, alpha_framebuffer, transparent_draw_flags, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
 		}
 	}
 	p_render_data->scene_data->nextgi_front_layer = false;

@@ -647,6 +647,11 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	// GodotNext: rd_mesh_shaders (#178). Task and mesh shaders. It needs SPIR-V 1.4 (Vulkan 1.2, or
 	// VK_KHR_spirv_1_4 above).
 	_register_requested_device_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME, false);
+	// GodotNext: rd_readonly_depth (#301). Enables VK_ATTACHMENT_STORE_OP_NONE so read-only depth
+	// render passes perform no depth/stencil write access on store (avoiding sync hazards with
+	// concurrent sampled depth reads on the async compute queue).
+	_register_requested_device_extension(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME, false);
 
 	// We don't actually use this extension, but some runtime components on some platforms
 	// can and will fill the validation layers with useless info otherwise if not enabled.
@@ -987,6 +992,8 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 
 	// Cache extension availability we query often.
 	framebuffer_depth_resolve = enabled_device_extension_names.has(VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME);
+	// GodotNext: rd_readonly_depth (#301).
+	load_store_op_none_supported = enabled_device_extension_names.has(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME) || enabled_device_extension_names.has(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME);
 
 	bool use_fdm_offsets = false;
 	if (VulkanHooks::get_singleton() != nullptr) {
@@ -5405,15 +5412,19 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 				VkDescriptorImageInfo *vk_img_infos = ALLOCA_ARRAY(VkDescriptorImageInfo, num_descriptors);
 
 				for (uint32_t j = 0; j < num_descriptors; j++) {
+					const TextureInfo *tex_info = (const TextureInfo *)uniform.ids[j * 2 + 1].id;
 #ifdef DEBUG_ENABLED
-					if (((const TextureInfo *)uniform.ids[j * 2 + 1].id)->transient) {
+					if (tex_info->transient) {
 						ERR_PRINT("TEXTURE_USAGE_TRANSIENT_BIT texture must not be used for sampling in a shader.");
 					}
 #endif
 					vk_img_infos[j] = {};
 					vk_img_infos[j].sampler = (VkSampler)uniform.ids[j * 2 + 0].id;
-					vk_img_infos[j].imageView = ((const TextureInfo *)uniform.ids[j * 2 + 1].id)->vk_view;
-					vk_img_infos[j].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					vk_img_infos[j].imageView = tex_info->vk_view;
+					// GodotNext: rd_readonly_depth (#301). Depth/stencil textures sample in the shared read-only layout.
+					vk_img_infos[j].imageLayout = (tex_info->vk_view_create_info.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+							? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+							: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				}
 
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -5424,14 +5435,18 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 				VkDescriptorImageInfo *vk_img_infos = ALLOCA_ARRAY(VkDescriptorImageInfo, num_descriptors);
 
 				for (uint32_t j = 0; j < num_descriptors; j++) {
+					const TextureInfo *tex_info = (const TextureInfo *)uniform.ids[j].id;
 #ifdef DEBUG_ENABLED
-					if (((const TextureInfo *)uniform.ids[j].id)->transient) {
+					if (tex_info->transient) {
 						ERR_PRINT("TEXTURE_USAGE_TRANSIENT_BIT texture must not be used for sampling in a shader.");
 					}
 #endif
 					vk_img_infos[j] = {};
-					vk_img_infos[j].imageView = ((const TextureInfo *)uniform.ids[j].id)->vk_view;
-					vk_img_infos[j].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					vk_img_infos[j].imageView = tex_info->vk_view;
+					// GodotNext: rd_readonly_depth (#301). Depth/stencil textures sample in the shared read-only layout.
+					vk_img_infos[j].imageLayout = (tex_info->vk_view_create_info.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+							? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+							: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				}
 
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -5562,9 +5577,13 @@ RDD::UniformSetID RenderingDeviceDriverVulkan::uniform_set_create(VectorView<Bou
 				VkDescriptorImageInfo *vk_img_infos = ALLOCA_ARRAY(VkDescriptorImageInfo, num_descriptors);
 
 				for (uint32_t j = 0; j < uniform.ids.size(); j++) {
+					const TextureInfo *tex_info = (const TextureInfo *)uniform.ids[j].id;
 					vk_img_infos[j] = {};
-					vk_img_infos[j].imageView = ((const TextureInfo *)uniform.ids[j].id)->vk_view;
-					vk_img_infos[j].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+					vk_img_infos[j].imageView = tex_info->vk_view;
+					// GodotNext: rd_readonly_depth (#301).
+					vk_img_infos[j].imageLayout = (tex_info->vk_view_create_info.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+							? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+							: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				}
 
 				vk_writes[writes_amount].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
@@ -5882,7 +5901,10 @@ void RenderingDeviceDriverVulkan::bindless_table_write(BindlessTableID p_table, 
 		case UNIFORM_TYPE_TEXTURE: {
 			const TextureInfo *texture_info = (const TextureInfo *)p_resource.id;
 			image_info.imageView = texture_info->vk_view;
-			image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+			// GodotNext: rd_readonly_depth (#301).
+			image_info.imageLayout = (texture_info->vk_view_create_info.subresourceRange.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+					? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+					: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 			write.pImageInfo = &image_info;
 		} break;
 		case UNIFORM_TYPE_SAMPLER: {
@@ -6292,6 +6314,22 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Att
 	const uint32_t view_mask = (1 << p_view_count) - 1;
 	const uint32_t correlation_mask = (1 << p_view_count) - 1;
 
+	// GodotNext: rd_readonly_depth (#301). Map RDD::ATTACHMENT_STORE_OP_NONE to
+	// VK_ATTACHMENT_STORE_OP_NONE when VK_KHR_load_store_op_none / VK_EXT_load_store_op_none is enabled.
+	auto _rd_to_vk_store_op = [this](AttachmentStoreOp p_op) -> VkAttachmentStoreOp {
+		switch (p_op) {
+			case ATTACHMENT_STORE_OP_STORE:
+				return VK_ATTACHMENT_STORE_OP_STORE;
+			case ATTACHMENT_STORE_OP_DONT_CARE:
+				return VK_ATTACHMENT_STORE_OP_DONT_CARE;
+			case ATTACHMENT_STORE_OP_NONE:
+				return load_store_op_none_supported ? VK_ATTACHMENT_STORE_OP_NONE : VK_ATTACHMENT_STORE_OP_STORE;
+			default:
+				DEV_ASSERT(false);
+				return VK_ATTACHMENT_STORE_OP_STORE;
+		}
+	};
+
 	VkAttachmentDescription2KHR *vk_attachments = ALLOCA_ARRAY(VkAttachmentDescription2KHR, p_attachments.size());
 	for (uint32_t i = 0; i < p_attachments.size(); i++) {
 		vk_attachments[i] = {};
@@ -6299,9 +6337,9 @@ RDD::RenderPassID RenderingDeviceDriverVulkan::render_pass_create(VectorView<Att
 		vk_attachments[i].format = RD_TO_VK_FORMAT[p_attachments[i].format];
 		vk_attachments[i].samples = _ensure_supported_sample_count(p_attachments[i].samples);
 		vk_attachments[i].loadOp = (VkAttachmentLoadOp)p_attachments[i].load_op;
-		vk_attachments[i].storeOp = (VkAttachmentStoreOp)p_attachments[i].store_op;
+		vk_attachments[i].storeOp = _rd_to_vk_store_op(p_attachments[i].store_op);
 		vk_attachments[i].stencilLoadOp = (VkAttachmentLoadOp)p_attachments[i].stencil_load_op;
-		vk_attachments[i].stencilStoreOp = (VkAttachmentStoreOp)p_attachments[i].stencil_store_op;
+		vk_attachments[i].stencilStoreOp = _rd_to_vk_store_op(p_attachments[i].stencil_store_op);
 		vk_attachments[i].initialLayout = RD_TO_VK_LAYOUT[p_attachments[i].initial_layout];
 		vk_attachments[i].finalLayout = RD_TO_VK_LAYOUT[p_attachments[i].final_layout];
 	}
@@ -8652,6 +8690,10 @@ uint64_t RenderingDeviceDriverVulkan::api_trait_get(ApiTrait p_trait) {
 			return raytracing_capabilities.shader_group_handle_alignment;
 		case API_TRAIT_SHADER_GROUP_BASE_ALIGNMENT:
 			return raytracing_capabilities.shader_group_base_alignment;
+		// GodotNext: rd_readonly_depth (#301). Without VK_KHR/EXT_load_store_op_none, render_pass_create()
+		// falls back to VK_ATTACHMENT_STORE_OP_STORE, which writes depth/stencil and cannot overlap reads.
+		case API_TRAIT_SUPPORTS_ATTACHMENT_STORE_OP_NONE:
+			return load_store_op_none_supported;
 		default:
 			return RenderingDeviceDriver::api_trait_get(p_trait);
 	}

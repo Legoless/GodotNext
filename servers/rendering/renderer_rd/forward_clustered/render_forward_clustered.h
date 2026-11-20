@@ -614,7 +614,8 @@ private:
 	RID avboit_bind_bounds;
 	RID avboit_bind_occlusion;
 	bool _avboit_view_active(const RenderDataRD *p_render_data, bool p_use_msaa, bool p_reflection_probe);
-	bool _render_avboit(RenderDataRD *p_render_data, RID p_alpha_framebuffer, uint32_t p_color_pass_flags, uint32_t p_uniform_buffer_index, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_reverse_cull, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
+	// GodotNext: rd_readonly_depth (#301). Pass the transparent list's depth/stencil write scan.
+	bool _render_avboit(RenderDataRD *p_render_data, RID p_alpha_framebuffer, uint32_t p_color_pass_flags, uint32_t p_uniform_buffer_index, const Size2i &p_screen_size, const Color &p_default_bg_color, bool p_reverse_cull, RID p_radiance_texture, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization, const ForwardTransparentDepthScan &p_alpha_depth_scan);
 	void _render_nextgeo_debug_scene_passes(RenderDataRD *p_render_data, bool p_using_nextgeo, bool p_nextgeo_drew, bool p_use_msaa, RSE::ViewportMSAA p_msaa, bool p_reverse_cull, const Size2i &p_screen_size, uint32_t p_depth_ubo_index, const RendererRD::MaterialStorage::Samplers &p_samplers, SceneShaderForwardClustered::ShaderSpecialization p_base_specialization);
 
 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);

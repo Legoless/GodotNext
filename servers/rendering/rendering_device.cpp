@@ -2898,7 +2898,8 @@ Error RenderingDevice::_texture_initialize(RID p_texture, uint32_t p_layer, cons
 				tb.texture = texture->driver_id;
 				tb.src_access = RDD::BARRIER_ACCESS_COPY_WRITE_BIT;
 				tb.prev_layout = p_dst_layout;
-				tb.next_layout = RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				// GodotNext: rd_readonly_depth (#301). Keep depth/stencil textures in the shared read-only layout.
+				tb.next_layout = (texture->barrier_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_DEPTH_BIT) || texture->barrier_aspect_flags.has_flag(RDD::TEXTURE_ASPECT_STENCIL_BIT)) ? RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				tb.subresources.aspect = texture->barrier_aspect_flags;
 				tb.subresources.mipmap_count = texture->mipmaps;
 				tb.subresources.base_layer = p_layer;
@@ -3894,8 +3895,10 @@ RDD::RenderPassID RenderingDevice::_render_pass_create(RenderingDeviceDriver *p_
 				description.store_op = p_store_ops[i];
 				description.stencil_load_op = p_load_ops[i];
 				description.stencil_store_op = p_store_ops[i];
-				description.initial_layout = RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-				description.final_layout = RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+				// GodotNext: rd_readonly_depth (#301). Read-only depth attachments use STORE_OP_NONE and stay in the shared read-only layout.
+				const RDD::TextureLayout depth_layout = p_store_ops[i] == RDD::ATTACHMENT_STORE_OP_NONE ? RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+				description.initial_layout = depth_layout;
+				description.final_layout = depth_layout;
 			} else if (p_attachments[i].usage_flags & TEXTURE_USAGE_DEPTH_RESOLVE_ATTACHMENT_BIT) {
 				description.load_op = p_load_ops[i];
 				description.store_op = p_store_ops[i];
@@ -3965,10 +3968,12 @@ RDD::RenderPassID RenderingDevice::_render_pass_create(RenderingDeviceDriver *p_
 				ERR_FAIL_COND_V_MSG(!(p_attachments[attachment].usage_flags & TEXTURE_USAGE_INPUT_ATTACHMENT_BIT), RDD::RenderPassID(), "Invalid framebuffer format attachment(" + itos(attachment) + "), in pass (" + itos(i) + "), it isn't marked as an input texture.");
 				ERR_FAIL_COND_V_MSG(attachment_last_pass[attachment] == i, RDD::RenderPassID(), "Invalid framebuffer format attachment(" + itos(attachment) + "), in pass (" + itos(i) + "), it already was used for something else before in this pass.");
 				reference.attachment = attachment_remap[attachment];
-				reference.layout = RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+				// GodotNext: rd_readonly_depth (#301). Depth/stencil input attachments stay in the shared read-only layout.
+				const bool is_depth_input = (p_attachments[attachment].usage_flags & (TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_RESOLVE_ATTACHMENT_BIT)) != 0;
+				reference.layout = is_depth_input ? RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 				attachment_last_pass[attachment] = i;
 			}
-			reference.aspect = RDD::TEXTURE_ASPECT_COLOR_BIT;
+			reference.aspect = (attachment != ATTACHMENT_UNUSED && (p_attachments[attachment].usage_flags & (TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_RESOLVE_ATTACHMENT_BIT)) != 0) ? RDD::TEXTURE_ASPECT_DEPTH_BIT : RDD::TEXTURE_ASPECT_COLOR_BIT;
 			subpass.input_references.push_back(reference);
 		}
 
@@ -4005,7 +4010,8 @@ RDD::RenderPassID RenderingDevice::_render_pass_create(RenderingDeviceDriver *p_
 			ERR_FAIL_COND_V_MSG(!(p_attachments[attachment].usage_flags & TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT), RDD::RenderPassID(), "Invalid framebuffer depth format attachment(" + itos(attachment) + "), in pass (" + itos(i) + "), it's marked as depth, but it's not a depth attachment.");
 			ERR_FAIL_COND_V_MSG(attachment_last_pass[attachment] == i, RDD::RenderPassID(), "Invalid framebuffer depth format attachment(" + itos(attachment) + "), in pass (" + itos(i) + "), it already was used for something else before in this pass.");
 			subpass.depth_stencil_reference.attachment = attachment_remap[attachment];
-			subpass.depth_stencil_reference.layout = RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+			// GodotNext: rd_readonly_depth (#301).
+			subpass.depth_stencil_reference.layout = p_store_ops[attachment] == RDD::ATTACHMENT_STORE_OP_NONE ? RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 			attachment_last_pass[attachment] = i;
 
 			if (is_multisample_first) {
@@ -6023,6 +6029,9 @@ RID RenderingDevice::render_pipeline_create(RID p_shader, FramebufferFormatID p_
 	pipeline.validation.render_pass = p_for_render_pass;
 	pipeline.validation.vertex_format = p_vertex_format;
 	pipeline.validation.uses_restart_indices = p_render_primitive == RENDER_PRIMITIVE_TRIANGLE_STRIPS_WITH_RESTART_INDEX;
+	// GodotNext: rd_readonly_depth (#301). Track depth/stencil write intent for DRAW_READ_ONLY_DEPTH validation.
+	pipeline.validation.writes_depth = p_depth_stencil_state.enable_depth_write;
+	pipeline.validation.writes_stencil = p_depth_stencil_state.enable_stencil && (p_depth_stencil_state.front_op.write_mask != 0 || p_depth_stencil_state.back_op.write_mask != 0);
 
 	static const uint32_t primitive_divisor[RENDER_PRIMITIVE_MAX] = {
 		1, 2, 1, 1, 1, 3, 1, 1, 1, 1, 1
@@ -6775,6 +6784,16 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 		framebuffer_key = &framebuffer_formats[framebuffer->format_id].E->key();
 	}
 
+	// GodotNext: rd_readonly_depth (#301).
+	const bool read_only_depth = p_draw_flags.has_flag(DRAW_READ_ONLY_DEPTH);
+	if (read_only_depth) {
+		ERR_FAIL_COND_V_MSG(p_draw_flags.has_flag(DRAW_CLEAR_DEPTH) || p_draw_flags.has_flag(DRAW_IGNORE_DEPTH) || p_draw_flags.has_flag(DRAW_CLEAR_STENCIL) || p_draw_flags.has_flag(DRAW_IGNORE_STENCIL), INVALID_ID, "DRAW_READ_ONLY_DEPTH cannot be combined with DRAW_CLEAR_DEPTH, DRAW_IGNORE_DEPTH, DRAW_CLEAR_STENCIL, or DRAW_IGNORE_STENCIL.");
+		for (int i = 0; i < framebuffer_key->passes.size(); i++) {
+			ERR_FAIL_COND_V_MSG(framebuffer_key->passes[i].depth_resolve_attachment != ATTACHMENT_UNUSED, INVALID_ID, "DRAW_READ_ONLY_DEPTH cannot be used with a framebuffer that has a depth resolve attachment.");
+		}
+	}
+	const bool graph_read_only_depth = read_only_depth && driver->api_trait_get(RDD::API_TRAIT_SUPPORTS_ATTACHMENT_STORE_OP_NONE);
+
 	Point2i viewport_offset;
 	Point2i viewport_size = framebuffer->size;
 
@@ -6803,6 +6822,10 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 	stages.clear();
 
 	uint32_t color_index = 0;
+#ifdef DEBUG_ENABLED
+	// GodotNext: rd_readonly_depth (#301).
+	bool has_read_only_depth = false;
+#endif
 	for (int i = 0; i < framebuffer->texture_ids.size(); i++) {
 		RID texture_rid = framebuffer->texture_ids[i];
 		Texture *texture = texture_owner.get_or_null(texture_rid);
@@ -6816,7 +6839,10 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 		_texture_check_pending_clear(texture_rid, texture);
 
 		// Indicate the texture will get modified for the shared texture fallback.
-		_texture_update_shared_fallback(texture_rid, texture, true);
+		// GodotNext: rd_readonly_depth (#301). Read-only depth attachments are not modified when the
+		// driver executes STORE_OP_NONE without a store write.
+		const bool texture_modified = !(graph_read_only_depth && (texture->usage_flags & TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT));
+		_texture_update_shared_fallback(texture_rid, texture, texture_modified);
 
 		RDG::AttachmentOperation operation = RDG::ATTACHMENT_OPERATION_DEFAULT;
 		RDD::RenderPassClearValue clear_value;
@@ -6838,16 +6864,30 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 			stages.set_flag(RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
 			color_index++;
 		} else if (texture->usage_flags & (TEXTURE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | TEXTURE_USAGE_DEPTH_RESOLVE_ATTACHMENT_BIT)) {
-			if (p_draw_flags.has_flag(DRAW_CLEAR_DEPTH) || p_draw_flags.has_flag(DRAW_CLEAR_STENCIL)) {
-				operation = RDG::ATTACHMENT_OPERATION_CLEAR;
-				clear_value.depth = p_clear_depth_value;
-				clear_value.stencil = p_clear_stencil_value;
-			} else if (p_draw_flags.has_flag(DRAW_IGNORE_DEPTH) || p_draw_flags.has_flag(DRAW_IGNORE_STENCIL)) {
-				operation = RDG::ATTACHMENT_OPERATION_IGNORE;
+			// GodotNext: rd_readonly_depth (#301). Keep DEBUG_ENABLED no-write pipeline validation
+			// active whenever DRAW_READ_ONLY_DEPTH is requested, but degrade graph tracking to
+			// read-write when the driver lacks store-op none (e.g. Vulkan without load_store_op_none).
+			if (read_only_depth) {
+#ifdef DEBUG_ENABLED
+				has_read_only_depth = true;
+#endif
 			}
+			if (graph_read_only_depth) {
+				operation = RDG::ATTACHMENT_OPERATION_READ_ONLY;
+				resource_trackers.push_back(texture->draw_tracker);
+				resource_usages.push_back(RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ);
+			} else {
+				if (p_draw_flags.has_flag(DRAW_CLEAR_DEPTH) || p_draw_flags.has_flag(DRAW_CLEAR_STENCIL)) {
+					operation = RDG::ATTACHMENT_OPERATION_CLEAR;
+					clear_value.depth = p_clear_depth_value;
+					clear_value.stencil = p_clear_stencil_value;
+				} else if (p_draw_flags.has_flag(DRAW_IGNORE_DEPTH) || p_draw_flags.has_flag(DRAW_IGNORE_STENCIL)) {
+					operation = RDG::ATTACHMENT_OPERATION_IGNORE;
+				}
 
-			resource_trackers.push_back(texture->draw_tracker);
-			resource_usages.push_back(RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE);
+				resource_trackers.push_back(texture->draw_tracker);
+				resource_usages.push_back(RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE);
+			}
 			stages.set_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
 			stages.set_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
 		}
@@ -6875,6 +6915,8 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer, 
 	_draw_list_start(Rect2i(viewport_offset, viewport_size));
 #ifdef DEBUG_ENABLED
 	draw_list_framebuffer_format = framebuffer->format_id;
+	// GodotNext: rd_readonly_depth (#301).
+	draw_list.validation.read_only_depth = has_read_only_depth;
 #endif
 	draw_list_current_subpass = 0;
 	draw_list_subpass_count = framebuffer_key->passes.size();
@@ -6909,6 +6951,10 @@ void RenderingDevice::draw_list_bind_render_pipeline(DrawListID p_list, RID p_re
 	ERR_FAIL_NULL(pipeline);
 #ifdef DEBUG_ENABLED
 	ERR_FAIL_COND(pipeline->validation.framebuffer_format != draw_list_framebuffer_format && pipeline->validation.render_pass != draw_list_current_subpass);
+	// GodotNext: rd_readonly_depth (#301).
+	if (draw_list.validation.read_only_depth) {
+		ERR_FAIL_COND_MSG(pipeline->validation.writes_depth || pipeline->validation.writes_stencil, "Cannot bind a render pipeline that writes depth or stencil inside a draw list started with DRAW_READ_ONLY_DEPTH.");
+	}
 #endif
 
 	if (p_render_pipeline == draw_list.state.pipeline) {
@@ -7744,12 +7790,19 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_switch_to_next_pass() {
 
 	draw_list_current_subpass++;
 
+#ifdef DEBUG_ENABLED
+	// GodotNext: rd_readonly_depth (#301). Keep read-only depth validation active across subpasses.
+	const bool read_only_depth = draw_list.validation.read_only_depth;
+#endif
 	Rect2i viewport;
 	_draw_list_end(&viewport);
 
 	draw_graph.add_draw_list_next_subpass(RDD::COMMAND_BUFFER_TYPE_PRIMARY);
 
 	_draw_list_start(viewport);
+#ifdef DEBUG_ENABLED
+	draw_list.validation.read_only_depth = read_only_depth;
+#endif
 
 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
 }
@@ -11857,6 +11910,8 @@ void RenderingDevice::_bind_methods() {
 	BIND_BITFIELD_FLAG(DRAW_IGNORE_DEPTH);
 	BIND_BITFIELD_FLAG(DRAW_CLEAR_STENCIL);
 	BIND_BITFIELD_FLAG(DRAW_IGNORE_STENCIL);
+	// GodotNext: rd_readonly_depth (#301).
+	BIND_BITFIELD_FLAG(DRAW_READ_ONLY_DEPTH);
 	BIND_BITFIELD_FLAG(DRAW_CLEAR_ALL);
 	BIND_BITFIELD_FLAG(DRAW_IGNORE_ALL);
 }
@@ -12310,4 +12365,6 @@ static_assert(ENUM_MEMBERS_EQUAL(RD::CALLBACK_RESOURCE_USAGE_STORAGE_IMAGE_READ_
 static_assert(ENUM_MEMBERS_EQUAL(RD::CALLBACK_RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE));
 static_assert(ENUM_MEMBERS_EQUAL(RD::CALLBACK_RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE));
 static_assert(ENUM_MEMBERS_EQUAL(RD::CALLBACK_RESOURCE_USAGE_GENERAL, RDG::RESOURCE_USAGE_GENERAL));
+// GodotNext: rd_readonly_depth (#301).
+static_assert(ENUM_MEMBERS_EQUAL(RD::CALLBACK_RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ));
 static_assert(ENUM_MEMBERS_EQUAL(RD::CALLBACK_RESOURCE_USAGE_MAX, RDG::RESOURCE_USAGE_MAX));

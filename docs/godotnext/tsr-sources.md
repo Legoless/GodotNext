@@ -215,9 +215,7 @@ the conditions that keep level 2 on the main queue (MSAA, transparent depth writ
 effects, VoxelGI and SDFGI debug draws), and level 3 recording at the upscaler's place are
 GodotNext's own, from the render graph's one fork-join window per frame (#174,
 `source-log/rhi-async-compute.md`), as are the rules that only the first TSR viewport of a frame
-uses the async queue and that multiview (XR) viewports do not, and the timestamp names. The page's examples of overlapped work
-(translucency, depth of field) are not reached yet: RD attaches the depth buffer read-write in
-every draw list, so the sky or transparent pass joins the two passes.
+uses the async queue and that multiview (XR) viewports do not, and the timestamp names. With read-only depth attachments (#301), the sky pass, read-only depth post-opaque work (SSS, specular merge, depth copy), and the transparent pass (when no `depth_draw_always` or stencil-writing surface draws) share the depth buffer's read-only layout with the async depth and velocity passes, so the fork-join window spans them and closes at TSR's shading rejection pass.
 
 ### Standard academic / public graphics literature (general mathematical techniques)
 

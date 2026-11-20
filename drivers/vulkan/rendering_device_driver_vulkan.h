@@ -250,6 +250,8 @@ class RenderingDeviceDriverVulkan : public RenderingDeviceDriver {
 	bool pipeline_cache_control_support = false;
 	bool device_fault_support = false;
 	bool framebuffer_depth_resolve = false;
+	// GodotNext: rd_readonly_depth (#301). VK_KHR_load_store_op_none or VK_EXT_load_store_op_none.
+	bool load_store_op_none_supported = false;
 #if defined(VK_TRACK_DEVICE_MEMORY)
 	bool device_memory_report_support = false;
 #endif

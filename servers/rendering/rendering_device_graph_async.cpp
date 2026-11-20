@@ -409,10 +409,39 @@ LocalVector<RenderingDeviceGraph::IndirectCountDraw> RenderingDeviceGraph::indir
 	return draws;
 }
 
+// GodotNext: rd_readonly_depth (#301). Places each shared read-only depth transition before the
+// earliest reader that depends on it: at the fork on the main queue when an async reader shares
+// it and no main reader runs before fork_level, otherwise at the earliest main-queue reader's level.
+void RenderingDeviceGraph::_resolve_shared_read_transitions(const LocalVector<RecordedCommandSort> &p_commands_sorted, const AsyncPlan &p_plan) {
+	for (SharedReadLayoutTransition &t : shared_read_transitions) {
+		uint32_t min_level = UINT32_MAX;
+		uint32_t min_main_level = UINT32_MAX;
+		bool has_async_reader = false;
+		for (int32_t cmd_index : t.reader_commands) {
+			const RecordedCommandSort &cmd_sort = p_commands_sorted[cmd_index];
+			min_level = MIN(min_level, cmd_sort.level);
+			if (p_plan.active && cmd_sort.queue == QUEUE_ASYNC_COMPUTE) {
+				has_async_reader = true;
+			} else {
+				min_main_level = MIN(min_main_level, cmd_sort.level);
+			}
+		}
+		if (p_plan.active && has_async_reader && min_main_level >= p_plan.fork_level) {
+			t.emit_at_fork = true;
+			t.emit_level = -1;
+		} else {
+			t.emit_at_fork = false;
+			t.emit_level = int32_t(min_main_level != UINT32_MAX ? min_main_level : min_level);
+		}
+	}
+}
+
 void RenderingDeviceGraph::async_barriers_for_test(BarrierSelection p_selection, AsyncPlan &r_plan, AsyncBarriers &r_barriers) {
 	LocalVector<RecordedCommandSort> commands_sorted;
 	_compute_command_levels(commands_sorted);
 	r_plan = _plan_async_frame(commands_sorted, true);
+	// GodotNext: rd_readonly_depth (#301).
+	_resolve_shared_read_transitions(commands_sorted, r_plan);
 	commands_sorted.sort();
 
 	r_barriers = AsyncBarriers();
@@ -455,6 +484,54 @@ void RenderingDeviceGraph::async_barriers_for_test(BarrierSelection p_selection,
 #endif
 		}
 		level_start = level_end;
+	}
+}
+
+// GodotNext: rd_readonly_depth (#301).
+void RenderingDeviceGraph::main_level_barriers_for_test(uint32_t p_level, bool p_async_queue_available, AsyncPlan &r_plan, AsyncBarriers &r_barriers) {
+	LocalVector<RecordedCommandSort> commands_sorted;
+	_compute_command_levels(commands_sorted);
+	r_plan = _plan_async_frame(commands_sorted, p_async_queue_available);
+	_resolve_shared_read_transitions(commands_sorted, r_plan);
+	commands_sorted.sort();
+
+	r_barriers = AsyncBarriers();
+	LocalVector<RecordedCommandSort> level_main_commands;
+	for (const RecordedCommandSort &command_sort : commands_sorted) {
+		if (command_sort.level == p_level && (!r_plan.active || command_sort.queue == QUEUE_MAIN)) {
+			level_main_commands.push_back(command_sort);
+		}
+	}
+	if (level_main_commands.is_empty()) {
+		return;
+	}
+	if (_gather_barriers_for_render_commands(level_main_commands.ptr(), level_main_commands.size(), false, BARRIER_SELECTION_ALL)) {
+		r_barriers.src_stages = barrier_group.src_stages;
+		r_barriers.dst_stages = barrier_group.dst_stages;
+		r_barriers.memory_barrier = barrier_group.memory_barrier;
+		for (const RDD::TextureBarrier &barrier : barrier_group.normalization_barriers) {
+			r_barriers.texture_barriers.push_back(barrier);
+		}
+		for (const RDD::TextureBarrier &barrier : barrier_group.transition_barriers) {
+			r_barriers.texture_barriers.push_back(barrier);
+		}
+#if USE_BUFFER_BARRIERS
+		for (const RDD::BufferBarrier &barrier : barrier_group.buffer_barriers) {
+			r_barriers.buffer_barriers.push_back(barrier);
+		}
+#endif
+	}
+}
+
+void RenderingDeviceGraph::draw_list_store_ops_for_test(int32_t p_command_index, LocalVector<RDD::AttachmentStoreOp> &r_store_ops) const {
+	r_store_ops.clear();
+	ERR_FAIL_COND(p_command_index < 0 || uint32_t(p_command_index) >= command_count);
+	const RecordedCommand *command = reinterpret_cast<const RecordedCommand *>(&command_data[command_data_offsets[p_command_index]]);
+	ERR_FAIL_COND(command->type != RecordedCommand::TYPE_DRAW_LIST);
+	const RecordedDrawListCommand *draw_list_command = static_cast<const RecordedDrawListCommand *>(command);
+	const RDD::AttachmentStoreOp *store_ops = draw_list_command->store_ops();
+	for (uint32_t i = 0; i < draw_list_command->trackers_count; i++) {
+		r_store_ops.push_back(store_ops[i]);
 	}
 }
 

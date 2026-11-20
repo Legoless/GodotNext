@@ -235,3 +235,22 @@ inline constexpr TSRPointPasses nextgi_tsr_point_passes(const TSRAsyncSchedule &
 	}
 	return passes;
 }
+
+// GodotNext: rd_readonly_depth (#301). Tracks whether Forward+'s transparent render list writes
+// depth or stencil. Any depth_draw_always surface modifies the depth buffer (requiring a
+// read-write depth attachment and disabling TSR level 2's early split); any surface with stencil
+// write flags requires a read-write depth-stencil attachment (even in AVBOIT composite, which
+// suppresses depth writes), though depth itself stays unchanged for TSR.
+struct ForwardTransparentDepthScan {
+	bool any_depth_draw_always = false;
+	bool any_stencil_write = false;
+
+	constexpr void add_surface(bool p_depth_draw_always, bool p_stencil_write) {
+		any_depth_draw_always = any_depth_draw_always || p_depth_draw_always;
+		any_stencil_write = any_stencil_write || p_stencil_write;
+	}
+
+	constexpr bool tsr_split_depth_unchanged() const { return !any_depth_draw_always; }
+	constexpr bool transparent_pass_read_only_depth() const { return !any_depth_draw_always && !any_stencil_write; }
+	constexpr bool avboit_composite_read_only_depth() const { return !any_stencil_write; }
+};

@@ -3446,6 +3446,9 @@
 		<constant name="DRAW_IGNORE_STENCIL" value="524288" enum="DrawFlags" is_bitfield="true">
 			Ignore the previous contents of the stencil attachment.
 		</constant>
+		<constant name="DRAW_READ_ONLY_DEPTH" value="1048576" enum="DrawFlags" is_bitfield="true">
+			Attach the framebuffer's depth/stencil texture read-only, allowing depth and stencil tests without depth or stencil writes. The depth texture stays in its shared read-only layout so concurrent sampled reads (including async compute passes) can overlap this draw list. Cannot be combined with [constant DRAW_CLEAR_DEPTH], [constant DRAW_IGNORE_DEPTH], [constant DRAW_CLEAR_STENCIL], [constant DRAW_IGNORE_STENCIL], a depth resolve attachment, or pipelines that write depth or stencil.
+		</constant>
 		<constant name="DRAW_CLEAR_ALL" value="327935" enum="DrawFlags" is_bitfield="true">
 			Clear all attachments.
 		</constant>

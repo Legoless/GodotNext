@@ -419,16 +419,16 @@ void add_color_pass(RDG &p_graph, RDG::ResourceTracker *p_color) {
 	p_graph.add_draw_list_end();
 }
 
-// GodotNext: pt_tsr_async_compute (#193). A depth texture tracker, and a draw list that writes
-// color attachments and uses a depth attachment, as every RenderForwardClustered pass does: the
-// render graph always records a depth attachment as read-write.
+// GodotNext: pt_tsr_async_compute (#193) & rd_readonly_depth (#301). A depth texture tracker, and a
+// draw list that writes color attachments and uses a depth attachment (either read-write or
+// read-only, matching RD::DRAW_READ_ONLY_DEPTH).
 RDG::ResourceTracker *depth_tracker(uint64_t p_id) {
 	RDG::ResourceTracker *depth = texture_tracker(p_id, 1);
 	depth->texture_subresources.aspect = RDD::TEXTURE_ASPECT_DEPTH_BIT;
 	return depth;
 }
 
-void add_attachment_pass(RDG &p_graph, std::initializer_list<RDG::ResourceTracker *> p_colors, RDG::ResourceTracker *p_depth, RDG::ResourceTracker *p_sampled = nullptr) {
+void add_attachment_pass(RDG &p_graph, std::initializer_list<RDG::ResourceTracker *> p_colors, RDG::ResourceTracker *p_depth, RDG::ResourceTracker *p_sampled = nullptr, bool p_depth_read_only = false) {
 	const uint32_t count = uint32_t(p_colors.size()) + (p_depth != nullptr ? 1 : 0);
 	LocalVector<RDG::AttachmentOperation> operations;
 	LocalVector<RDD::RenderPassClearValue> clear_values;
@@ -436,6 +436,9 @@ void add_attachment_pass(RDG &p_graph, std::initializer_list<RDG::ResourceTracke
 	clear_values.resize(count);
 	for (uint32_t i = 0; i < count; i++) {
 		operations[i] = RDG::ATTACHMENT_OPERATION_DEFAULT;
+	}
+	if (p_depth != nullptr && p_depth_read_only) {
+		operations[count - 1] = RDG::ATTACHMENT_OPERATION_READ_ONLY;
 	}
 	BitField<RDD::PipelineStageBits> stages = RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 	stages.set_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
@@ -445,7 +448,7 @@ void add_attachment_pass(RDG &p_graph, std::initializer_list<RDG::ResourceTracke
 		p_graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
 	}
 	if (p_depth != nullptr) {
-		p_graph.add_draw_list_usage(p_depth, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE);
+		p_graph.add_draw_list_usage(p_depth, p_depth_read_only ? RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ : RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE);
 	}
 	if (p_sampled != nullptr) {
 		p_graph.add_draw_list_usage(p_sampled, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
@@ -507,6 +510,9 @@ enum : int32_t {
 	TSR_CMD_SPLIT_DILATION = 4,
 	TSR_CMD_SPLIT_DISOCCLUSION = 5,
 	TSR_CMD_SPLIT_SKY = 6,
+	// GodotNext: rd_readonly_depth (#301).
+	TSR_CMD_SPLIT_TRANSPARENT = 7,
+	TSR_CMD_SPLIT_REJECTION = 8,
 };
 
 // The five core passes, as TSR::process() records them: only at a record point whose call runs,
@@ -531,19 +537,22 @@ void record_tsr_passes(RDG &p_graph, const TSRAsyncSchedule &p_schedule, TSRReco
 // One Forward+ frame with TSR, as RenderForwardClustered records it with p_schedule in a frame the
 // split allows: the depth prepass, the opaque pass (which samples p_opaque_samples, as a material
 // with another viewport's texture does), the camera motion vectors and the motion pass; the record
-// point after the motion vectors; the sky and the transparent pass, each with the depth attachment;
-// the upscaler's record point; and the tonemapper, which samples TSR's output. Nothing records on
-// the main queue between the record point and the sky: the split guard rules out post-opaque
-// compositor effects and VoxelGI/SDFGI debug draws, TSR rules out MSAA, and SSAO, SSIL, SSR and
-// the volumetric fog run before the opaque pass.
-void record_tsr_frame(RDG &p_graph, const TSRAsyncSchedule &p_schedule, const TSRFrame &p_frame, RDG::ResourceTracker *p_opaque_samples = nullptr) {
+// point after the motion vectors; the sky (read-only depth) and the transparent pass (read-only
+// depth unless p_transparent_writes_depth is set); the upscaler's record point; and the
+// tonemapper, which samples TSR's output. Nothing records on the main queue between the record
+// point and the sky: the split guard rules out post-opaque compositor effects and VoxelGI/SDFGI
+// debug draws, TSR rules out MSAA, and SSAO, SSIL, SSR and the volumetric fog run before the
+// opaque pass.
+void record_tsr_frame(RDG &p_graph, const TSRAsyncSchedule &p_schedule, const TSRFrame &p_frame, RDG::ResourceTracker *p_opaque_samples = nullptr, bool p_transparent_writes_depth = false) {
 	add_attachment_pass(p_graph, { p_frame[TSRFrame::NORMAL] }, p_frame[TSRFrame::DEPTH]);
 	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH], p_opaque_samples);
 	add_image_compute(p_graph, RDG::QUEUE_MAIN, { p_frame[TSRFrame::DEPTH] }, { p_frame[TSRFrame::VELOCITY] });
 	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR], p_frame[TSRFrame::VELOCITY] }, p_frame[TSRFrame::DEPTH]);
 	record_tsr_passes(p_graph, p_schedule, TSR_RECORD_AFTER_MOTION_VECTORS, p_frame);
-	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH]);
-	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH]);
+	// GodotNext: rd_readonly_depth (#301). Sky always attaches depth read-only; transparent does
+	// when no surface writes depth or stencil.
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH], nullptr, true);
+	add_attachment_pass(p_graph, { p_frame[TSRFrame::COLOR] }, p_frame[TSRFrame::DEPTH], nullptr, !p_transparent_writes_depth);
 	record_tsr_passes(p_graph, p_schedule, TSR_RECORD_UPSCALE, p_frame);
 	p_graph.add_compute_list_begin();
 	p_graph.add_compute_list_bind_pipeline(RDD::PipelineID());
@@ -1364,12 +1373,13 @@ TEST_CASE("[RD][AsyncCompute][TSR] without async compute every level records the
 	}
 }
 
-TEST_CASE("[RD][AsyncCompute][TSR] level 2 forks after the motion vectors and joins at the sky pass") {
-	// The two async passes sample the depth buffer, and every later draw list uses it as a
-	// read-write attachment, so the sky pass waits for them (write after read). In the frame
-	// RenderForwardClustered records, nothing on the main queue lies between the fork and that join:
-	// the async passes overlap no main work yet (read-only depth attachments would let the sky and
-	// transparent passes run beside them).
+// GodotNext: rd_readonly_depth (#301). Updated from #193: read-only depth attachments let the sky
+// and transparent passes overlap TSR level 2's async depth/velocity passes.
+TEST_CASE("[RD][AsyncCompute][TSR] level 2 forks after the motion vectors and spans the sky and transparent passes") {
+	// The two async passes sample the depth buffer in the shared read-only layout, and both the sky
+	// and transparent passes attach depth read-only in that same layout. Neither waits for the
+	// async passes, so the fork-join window spans both passes and joins at TSR's shading rejection
+	// pass (the first main-queue consumer of the dilated velocity and disocclusion outputs).
 	RDG graph;
 	graph.set_driver_traits_for_test(true, true);
 	TSRFrame frame;
@@ -1387,44 +1397,62 @@ TEST_CASE("[RD][AsyncCompute][TSR] level 2 forks after the motion vectors and jo
 	const RDG::AsyncEmission::Step *dilation = find_command_step(emission, TSR_CMD_SPLIT_DILATION);
 	const RDG::AsyncEmission::Step *disocclusion = find_command_step(emission, TSR_CMD_SPLIT_DISOCCLUSION);
 	const RDG::AsyncEmission::Step *sky = find_command_step(emission, TSR_CMD_SPLIT_SKY);
+	const RDG::AsyncEmission::Step *transparent = find_command_step(emission, TSR_CMD_SPLIT_TRANSPARENT);
+	const RDG::AsyncEmission::Step *rejection = find_command_step(emission, TSR_CMD_SPLIT_REJECTION);
 	REQUIRE(motion_pass != nullptr);
 	REQUIRE(dilation != nullptr);
 	REQUIRE(disocclusion != nullptr);
 	REQUIRE(sky != nullptr);
+	REQUIRE(transparent != nullptr);
+	REQUIRE(rejection != nullptr);
 	CHECK_EQ(dilation->type, RDG::AsyncEmission::STEP_ASYNC);
 	CHECK_EQ(disocclusion->type, RDG::AsyncEmission::STEP_ASYNC);
 	CHECK_EQ(sky->type, RDG::AsyncEmission::STEP_MAIN);
+	CHECK_EQ(transparent->type, RDG::AsyncEmission::STEP_MAIN);
+	CHECK_EQ(rejection->type, RDG::AsyncEmission::STEP_MAIN);
 
-	// The fork follows the motion pass; the join is the sky pass, the first draw list with depth.
+	// The fork follows the motion pass; sky and transparent run on the main queue inside the
+	// fork-join window; the join is TSR's shading rejection pass.
 	CHECK_EQ(plan.fork_level, motion_pass->level + 1);
 	CHECK_EQ(dilation->level, plan.fork_level);
 	CHECK_EQ(disocclusion->level, plan.fork_level + 1);
-	CHECK_EQ(plan.join_level, sky->level);
-	CHECK_EQ(sky->level, disocclusion->level + 1);
+	CHECK_EQ(sky->level, plan.fork_level);
+	CHECK_EQ(transparent->level, sky->level + 1);
+	CHECK_EQ(plan.join_level, rejection->level);
 	CHECK(int32_t(motion_pass->buffer) <= emission.fork_index);
-	CHECK(int32_t(sky->buffer) >= emission.join_index);
-	// No main step inside the window.
-	for (const RDG::AsyncEmission::Step &step : emission.steps) {
-		if (step.type == RDG::AsyncEmission::STEP_MAIN) {
-			CAPTURE(step.level);
-			CHECK((int32_t(step.buffer) <= emission.fork_index || int32_t(step.buffer) >= emission.join_index));
-		}
-	}
+	CHECK(int32_t(sky->buffer) > emission.fork_index);
+	CHECK(int32_t(sky->buffer) < emission.join_index);
+	CHECK(int32_t(transparent->buffer) > emission.fork_index);
+	CHECK(int32_t(transparent->buffer) < emission.join_index);
+	CHECK(int32_t(rejection->buffer) >= emission.join_index);
 	check_emission_order(emission, plan);
 
-	// One fork and one join: the async work waits once, and the frame waits once for it.
+	// One fork and one join: the async work waits once, and the sky/transparent command buffer does
+	// not wait for the async work.
 	const uint32_t command_buffer_count = emission.buffers_used + 1;
-	check_fork_join_submits(submit_frame(command_buffer_count, emission.fork_index, emission.join_index), command_buffer_count, emission.fork_index, emission.join_index);
+	const LocalVector<Submit> submits = submit_frame(command_buffer_count, emission.fork_index, emission.join_index);
+	check_fork_join_submits(submits, command_buffer_count, emission.fork_index, emission.join_index);
+	CHECK_FALSE(submits[find_submit(submits, main_command_buffer(int32_t(sky->buffer)))].waits.has(JOIN_SEMAPHORE));
+	CHECK_FALSE(submits[find_submit(submits, main_command_buffer(int32_t(transparent->buffer)))].waits.has(JOIN_SEMAPHORE));
 
-	// The depth and velocity leave their attachment layouts on the main queue before the fork; the
-	// TSR textures change layout on the async queue.
+	// Before the fork, the main queue transitions DEPTH once to the shared read-only depth layout
+	// covering both sampled reads and read-only depth attachments, and VELOCITY to shader-read.
+	// Neither the async queue nor the sky/transparent main levels emit another barrier on DEPTH.
 	RDG::AsyncPlan barrier_plan;
 	RDG::AsyncBarriers fork;
 	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, barrier_plan, fork);
 	REQUIRE(barrier_plan.active);
 	CHECK_EQ(fork.texture_barriers.size(), 2u);
-	CHECK_EQ(count_texture_barriers(fork.texture_barriers, TSRFrame::DEPTH, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	CHECK_EQ(count_texture_barriers(fork.texture_barriers, TSRFrame::DEPTH, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
 	CHECK_EQ(count_texture_barriers(fork.texture_barriers, TSRFrame::VELOCITY, RDD::TEXTURE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), 1u);
+	const RDD::TextureBarrier *depth_fork = find_texture_barrier(fork.texture_barriers, TSRFrame::DEPTH);
+	REQUIRE(depth_fork != nullptr);
+	CHECK(depth_fork->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+	CHECK(depth_fork->dst_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+	CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+	CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT));
+	CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT));
+
 	RDG::AsyncBarriers async;
 	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_QUEUE, barrier_plan, async);
 	CHECK(find_texture_barrier(async.texture_barriers, TSRFrame::DEPTH) == nullptr);
@@ -1436,6 +1464,14 @@ TEST_CASE("[RD][AsyncCompute][TSR] level 2 forks after the motion vectors and jo
 		CHECK(RDG::async_queue_supports_texture_layout(barrier.prev_layout));
 		CHECK(RDG::async_queue_supports_texture_layout(barrier.next_layout));
 	}
+
+	RDG::AsyncPlan main_plan;
+	RDG::AsyncBarriers sky_barriers;
+	graph.main_level_barriers_for_test(sky->level, true, main_plan, sky_barriers);
+	CHECK(find_texture_barrier(sky_barriers.texture_barriers, TSRFrame::DEPTH) == nullptr);
+	RDG::AsyncBarriers transparent_barriers;
+	graph.main_level_barriers_for_test(transparent->level, true, main_plan, transparent_barriers);
+	CHECK(find_texture_barrier(transparent_barriers.texture_barriers, TSRFrame::DEPTH) == nullptr);
 }
 
 TEST_CASE("[RD][AsyncCompute][TSR] only the first TSR viewport of a frame uses the async queue") {
@@ -1505,8 +1541,11 @@ TEST_CASE("[RD][AsyncCompute][TSR] level 3 records every pass at the upscaler's 
 	}
 
 	// Splitting the depth and velocity passes off as well puts async work on both sides of the
-	// transparent pass: a consumer of the first part comes before a producer of the second, which
-	// one fork and one join cannot cover, so the whole frame would fall back to the main queue.
+	// transparent pass. When the transparent pass writes depth, it consumes the first async part
+	// before producing color for the second, so one fork-join window cannot cover both and the
+	// frame falls back to the main queue. Even when the transparent pass is read-only depth, the
+	// second async part waits on transparent's color write, pushing the single fork past the
+	// transparent pass so the split gains no overlap over level 3.
 	{
 		RDG graph;
 		graph.set_driver_traits_for_test(true, true);
@@ -1515,13 +1554,668 @@ TEST_CASE("[RD][AsyncCompute][TSR] level 3 records every pass at the upscaler's 
 		for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
 			split_everything.async[i] = true;
 		}
-		record_tsr_frame(graph, split_everything, frame);
+		record_tsr_frame(graph, split_everything, frame, nullptr, true);
 		LocalVector<int32_t> order;
 		RDG::AsyncPlan plan;
 		graph.plan_for_test(order, plan, true);
 		CHECK_EQ(plan.async_count, 5u);
 		CHECK(plan.fork_level >= plan.join_level);
 		CHECK_FALSE(plan.active);
+	}
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		TSRFrame frame;
+		TSRAsyncSchedule split_everything = nextgi_tsr_async_schedule(2, true, true);
+		for (uint32_t i = 0; i < TSR_PASS_MAX; i++) {
+			split_everything.async[i] = true;
+		}
+		record_tsr_frame(graph, split_everything, frame, nullptr, false);
+		RDG::AsyncPlan plan;
+		RDG::AsyncEmission emission;
+		graph.emit_for_test(plan, emission);
+		REQUIRE(plan.active);
+		const RDG::AsyncEmission::Step *transparent = find_command_step(emission, TSR_CMD_SPLIT_TRANSPARENT);
+		REQUIRE(transparent != nullptr);
+		CHECK(plan.fork_level > transparent->level);
+	}
+}
+
+// GodotNext: rd_readonly_depth (#301). Step 5 doctests.
+TEST_CASE("[RD][AsyncCompute][Graph] read-only depth draw list overlaps async sampled depth read while read-write waits") {
+	// Part A: depth write -> async compute sampling depth -> read-only depth draw list -> main consumer.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *async_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *final_out = texture_tracker(4, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color, async_out, final_out };
+
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0: depth write
+		add_async_sampling_compute(graph, { depth }, async_out); // cmd 1: async sampled depth read
+		add_attachment_pass(graph, { color }, depth, nullptr, true); // cmd 2: read-only depth draw list
+		add_image_compute(graph, RDG::QUEUE_MAIN, { async_out, color }, { final_out }); // cmd 3: main consumer
+
+		RDG::AsyncPlan plan;
+		RDG::AsyncEmission emission;
+		graph.emit_for_test(plan, emission);
+		REQUIRE(plan.active);
+
+		const RDG::AsyncEmission::Step *async_step = find_command_step(emission, 1);
+		const RDG::AsyncEmission::Step *draw_step = find_command_step(emission, 2);
+		const RDG::AsyncEmission::Step *consumer_step = find_command_step(emission, 3);
+		REQUIRE(async_step != nullptr);
+		REQUIRE(draw_step != nullptr);
+		REQUIRE(consumer_step != nullptr);
+		CHECK_EQ(draw_step->level, plan.fork_level);
+		CHECK_EQ(async_step->level, plan.fork_level);
+		CHECK_EQ(plan.join_level, consumer_step->level);
+		CHECK(int32_t(draw_step->buffer) > emission.fork_index);
+		CHECK(int32_t(draw_step->buffer) < emission.join_index);
+		check_emission_order(emission, plan);
+
+		// One shared transition before the fork covers both compute sampling and read-only depth attachment.
+		RDG::AsyncPlan barrier_plan;
+		RDG::AsyncBarriers fork;
+		graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, barrier_plan, fork);
+		CHECK_EQ(count_texture_barriers(fork.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
+		const RDD::TextureBarrier *depth_barrier = find_texture_barrier(fork.texture_barriers, 1);
+		REQUIRE(depth_barrier != nullptr);
+		CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+		CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+
+		RDG::AsyncBarriers async_barriers;
+		graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_QUEUE, barrier_plan, async_barriers);
+		CHECK(find_texture_barrier(async_barriers.texture_barriers, 1) == nullptr);
+
+		RDG::AsyncPlan draw_plan;
+		RDG::AsyncBarriers draw_barriers;
+		graph.main_level_barriers_for_test(draw_step->level, true, draw_plan, draw_barriers);
+		CHECK(find_texture_barrier(draw_barriers.texture_barriers, 1) == nullptr);
+
+		free_trackers(trackers, 4);
+	}
+
+	// Part B: identical sequence, except the draw list attaches depth read-write: it must wait on the async reader.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *async_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *final_out = texture_tracker(4, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color, async_out, final_out };
+
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0: depth write
+		add_async_sampling_compute(graph, { depth }, async_out); // cmd 1: async sampled depth read
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 2: read-write depth draw list
+		add_image_compute(graph, RDG::QUEUE_MAIN, { async_out, color }, { final_out }); // cmd 3: main consumer
+
+		RDG::AsyncPlan plan;
+		RDG::AsyncEmission emission;
+		graph.emit_for_test(plan, emission);
+		REQUIRE(plan.active);
+
+		const RDG::AsyncEmission::Step *async_step = find_command_step(emission, 1);
+		const RDG::AsyncEmission::Step *draw_step = find_command_step(emission, 2);
+		REQUIRE(async_step != nullptr);
+		REQUIRE(draw_step != nullptr);
+		CHECK(draw_step->level > async_step->level);
+		CHECK_EQ(plan.join_level, draw_step->level);
+		CHECK(int32_t(draw_step->buffer) >= emission.join_index);
+		check_emission_order(emission, plan);
+
+		free_trackers(trackers, 4);
+	}
+
+	// Part C: a later depth write after both async compute sampling and a read-only depth draw list
+	// transitions back from the shared read-only layout and waits on both reader accesses/stages.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *async_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color, async_out };
+
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0: depth write
+		add_async_sampling_compute(graph, { depth }, async_out); // cmd 1: async sampled depth read
+		add_attachment_pass(graph, { color }, depth, nullptr, true); // cmd 2: read-only depth draw list
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 3: subsequent depth write
+
+		RDG::AsyncPlan plan;
+		RDG::AsyncEmission emission;
+		graph.emit_for_test(plan, emission);
+		REQUIRE(plan.active);
+
+		const RDG::AsyncEmission::Step *ro_step = find_command_step(emission, 2);
+		const RDG::AsyncEmission::Step *rw_step = find_command_step(emission, 3);
+		REQUIRE(ro_step != nullptr);
+		REQUIRE(rw_step != nullptr);
+		CHECK(int32_t(ro_step->buffer) > emission.fork_index);
+		CHECK(int32_t(ro_step->buffer) < emission.join_index);
+		CHECK_EQ(plan.join_level, rw_step->level);
+
+		RDG::AsyncPlan rw_plan;
+		RDG::AsyncBarriers rw_barriers;
+		graph.main_level_barriers_for_test(rw_step->level, true, rw_plan, rw_barriers);
+		CHECK_EQ(count_texture_barriers(rw_barriers.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL), 1u);
+		const RDD::TextureBarrier *back_barrier = find_texture_barrier(rw_barriers.texture_barriers, 1);
+		REQUIRE(back_barrier != nullptr);
+		CHECK(back_barrier->src_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+		CHECK(back_barrier->src_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+		CHECK(rw_barriers.src_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+		CHECK(rw_barriers.src_stages.has_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT));
+		CHECK(rw_barriers.src_stages.has_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT));
+
+		free_trackers(trackers, 3);
+	}
+}
+
+TEST_CASE("[RD][AsyncCompute][TSR] SSS, specular merge, and depth copy stay in the shared depth layout inside the fork-join window") {
+	// Models all read-only depth users between the motion pass and TSR shading rejection:
+	// sky (read-only depth), SSS (compute depth sample), specular merge (read-only depth),
+	// depth copy (compute depth sample), and transparent pass (read-only depth).
+	RDG graph;
+	graph.set_driver_traits_for_test(true, true);
+	TSRFrame frame;
+	RDG::ResourceTracker *specular = texture_tracker(50, 1);
+	RDG::ResourceTracker *sss_tmp = texture_tracker(51, 1);
+	RDG::ResourceTracker *depth_copy = texture_tracker(52, 1);
+	RDG::ResourceTracker *extra[] = { specular, sss_tmp, depth_copy };
+
+	const TSRAsyncSchedule schedule = nextgi_tsr_async_schedule(2, true, true);
+	REQUIRE(schedule.split);
+
+	add_attachment_pass(graph, { frame[TSRFrame::NORMAL] }, frame[TSRFrame::DEPTH]); // 0: prepass
+	add_attachment_pass(graph, { frame[TSRFrame::COLOR], specular }, frame[TSRFrame::DEPTH]); // 1: opaque
+	add_image_compute(graph, RDG::QUEUE_MAIN, { frame[TSRFrame::DEPTH] }, { frame[TSRFrame::VELOCITY] }); // 2: motion store
+	add_attachment_pass(graph, { frame[TSRFrame::COLOR], frame[TSRFrame::VELOCITY] }, frame[TSRFrame::DEPTH]); // 3: motion pass
+	record_tsr_passes(graph, schedule, TSR_RECORD_AFTER_MOTION_VECTORS, frame); // 4: dilation, 5: disocclusion
+	add_attachment_pass(graph, { frame[TSRFrame::COLOR] }, frame[TSRFrame::DEPTH], nullptr, true); // 6: sky
+	add_image_compute(graph, RDG::QUEUE_MAIN, { frame[TSRFrame::COLOR], frame[TSRFrame::DEPTH] }, { sss_tmp }); // 7: SSS
+	add_attachment_pass(graph, { frame[TSRFrame::COLOR] }, frame[TSRFrame::DEPTH], specular, true); // 8: specular merge
+	add_image_compute(graph, RDG::QUEUE_MAIN, { frame[TSRFrame::DEPTH] }, { depth_copy }); // 9: depth copy
+	add_attachment_pass(graph, { frame[TSRFrame::COLOR] }, frame[TSRFrame::DEPTH], depth_copy, true); // 10: transparent
+	record_tsr_passes(graph, schedule, TSR_RECORD_UPSCALE, frame); // 11: shading rejection, 12: history, 13: resolve
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncEmission emission;
+	graph.emit_for_test(plan, emission);
+	REQUIRE(plan.active);
+	CHECK_EQ(plan.async_count, 2u);
+
+	const int32_t overlapped[] = { 6, 7, 8, 9, 10 };
+	for (int32_t cmd : overlapped) {
+		CAPTURE(cmd);
+		const RDG::AsyncEmission::Step *step = find_command_step(emission, cmd);
+		REQUIRE(step != nullptr);
+		CHECK_EQ(step->type, RDG::AsyncEmission::STEP_MAIN);
+		CHECK(int32_t(step->buffer) > emission.fork_index);
+		CHECK(int32_t(step->buffer) < emission.join_index);
+
+		RDG::AsyncPlan level_plan;
+		RDG::AsyncBarriers level_barriers;
+		graph.main_level_barriers_for_test(step->level, true, level_plan, level_barriers);
+		CHECK(find_texture_barrier(level_barriers.texture_barriers, TSRFrame::DEPTH) == nullptr);
+	}
+	const RDG::AsyncEmission::Step *rejection = find_command_step(emission, 11);
+	REQUIRE(rejection != nullptr);
+	CHECK_EQ(plan.join_level, rejection->level);
+	check_emission_order(emission, plan);
+
+	// And when the transparent pass writes depth (depth_draw_always), sky still overlaps while
+	// transparent closes the fork-join window.
+	{
+		RDG rw_graph;
+		rw_graph.set_driver_traits_for_test(true, true);
+		TSRFrame rw_frame;
+		record_tsr_frame(rw_graph, schedule, rw_frame, nullptr, true);
+		RDG::AsyncPlan rw_plan;
+		RDG::AsyncEmission rw_emission;
+		rw_graph.emit_for_test(rw_plan, rw_emission);
+		REQUIRE(rw_plan.active);
+		const RDG::AsyncEmission::Step *sky = find_command_step(rw_emission, TSR_CMD_SPLIT_SKY);
+		const RDG::AsyncEmission::Step *transparent = find_command_step(rw_emission, TSR_CMD_SPLIT_TRANSPARENT);
+		REQUIRE(sky != nullptr);
+		REQUIRE(transparent != nullptr);
+		CHECK(int32_t(sky->buffer) > rw_emission.fork_index);
+		CHECK(int32_t(sky->buffer) < rw_emission.join_index);
+		CHECK_EQ(rw_plan.join_level, transparent->level);
+		CHECK(int32_t(transparent->buffer) >= rw_emission.join_index);
+	}
+
+	free_trackers(extra, 3);
+}
+
+TEST_CASE("[RD][Graph] shared read-only depth transition runs at the earliest main reader when fork is later") {
+	// Main writes depth and buffer A at level 0; at level 1 main writes B from A and runs a
+	// read-only depth pass; at level 2 async compute reads depth and B (so fork_level = 2 > 1).
+	// The shared read-only depth transition must run at level 1, not duplicated at the fork.
+	RDG graph;
+	graph.set_driver_traits_for_test(true, true);
+	RDG::ResourceTracker *depth = depth_tracker(1);
+	RDG::ResourceTracker *color = texture_tracker(2, 1);
+	RDG::ResourceTracker *buf_a = tracker();
+	RDG::ResourceTracker *buf_b = tracker();
+	RDG::ResourceTracker *async_out = texture_tracker(3, 1);
+	RDG::ResourceTracker *trackers[] = { depth, color, buf_a, buf_b, async_out };
+
+	add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0 (level 0): depth write
+	graph.add_buffer_update(buffer_id(1), buf_a, VectorView<RDG::RecordedBufferCopy>()); // cmd 1 (level 0)
+	add_main_compute(graph, buf_a, buf_b); // cmd 2 (level 1): produces buf_b
+	add_attachment_pass(graph, { color }, depth, nullptr, true); // cmd 3 (level 1): early main read-only depth
+	graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, RDG::QUEUE_ASYNC_COMPUTE); // cmd 4 (level 2): async reads depth + buf_b
+	graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+	graph.add_compute_list_usage(depth, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+	graph.add_compute_list_usage(buf_b, RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ);
+	graph.add_compute_list_usage(async_out, RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+	graph.add_compute_list_dispatch(1, 1, 1);
+	graph.add_compute_list_end();
+
+	RDG::AsyncPlan plan;
+	RDG::AsyncBarriers fork;
+	graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan, fork);
+	REQUIRE(plan.active);
+	CHECK_EQ(plan.fork_level, 2u);
+	// Transition already happened at main level 1; fork must not duplicate it.
+	CHECK(find_texture_barrier(fork.texture_barriers, 1) == nullptr);
+
+	RDG::AsyncPlan level1_plan;
+	RDG::AsyncBarriers level1;
+	graph.main_level_barriers_for_test(1u, true, level1_plan, level1);
+	CHECK_EQ(count_texture_barriers(level1.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
+	const RDD::TextureBarrier *depth_barrier = find_texture_barrier(level1.texture_barriers, 1);
+	REQUIRE(depth_barrier != nullptr);
+	CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+	CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+
+	free_trackers(trackers, 5);
+}
+
+TEST_CASE("[RD][Graph] read-only depth attachment uses LOAD and STORE_OP_NONE even when discardable") {
+	RDG graph;
+	graph.set_driver_traits_for_test(true, true);
+	RDG::ResourceTracker *depth = depth_tracker(1);
+	RDG::ResourceTracker *color = texture_tracker(2, 1);
+	depth->is_discardable = true;
+	RDG::ResourceTracker *trackers[] = { depth, color };
+
+	RDG::FramebufferCache fb_cache;
+	fb_cache.width = 64;
+	fb_cache.height = 64;
+	fb_cache.trackers.push_back(color);
+	fb_cache.trackers.push_back(depth);
+	fb_cache.textures.push_back(color->texture_driver_id);
+	fb_cache.textures.push_back(depth->texture_driver_id);
+
+	BitField<RDD::PipelineStageBits> stages = RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	stages.set_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+	stages.set_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+	const RDD::RenderPassClearValue clears[2] = {};
+
+	// cmd 0: write depth.
+	const RDG::AttachmentOperation rw_ops[2] = { RDG::ATTACHMENT_OPERATION_DEFAULT, RDG::ATTACHMENT_OPERATION_DEFAULT };
+	graph.add_draw_list_begin(&fb_cache, Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(rw_ops, 2), VectorView<RDD::RenderPassClearValue>(clears, 2), stages);
+	graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+	graph.add_draw_list_usage(depth, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ_WRITE);
+	graph.add_draw_list_draw(3, 1);
+	graph.add_draw_list_end();
+
+	// cmd 1: read-only depth attachment (even though depth is discardable and has no later consumer).
+	const RDG::AttachmentOperation ro_ops[2] = { RDG::ATTACHMENT_OPERATION_DEFAULT, RDG::ATTACHMENT_OPERATION_READ_ONLY };
+	graph.add_draw_list_begin(&fb_cache, Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(ro_ops, 2), VectorView<RDD::RenderPassClearValue>(clears, 2), stages);
+	graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+	graph.add_draw_list_usage(depth, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ);
+	graph.add_draw_list_draw(3, 1);
+	graph.add_draw_list_end();
+
+	LocalVector<RDD::AttachmentLoadOp> load_ops;
+	LocalVector<RDD::RenderPassClearValue> clear_values;
+	LocalVector<RDD::AttachmentStoreOp> store_ops;
+	graph.draw_list_attachments_for_test(1, load_ops, clear_values);
+	graph.draw_list_store_ops_for_test(1, store_ops);
+	REQUIRE_EQ(load_ops.size(), 2u);
+	REQUIRE_EQ(store_ops.size(), 2u);
+	CHECK_EQ(load_ops[1], RDD::ATTACHMENT_LOAD_OP_LOAD);
+	CHECK_EQ(store_ops[1], RDD::ATTACHMENT_STORE_OP_NONE);
+
+	// The flag bit must stay disjoint from all clear/ignore draw flags.
+	CHECK_EQ(uint64_t(RenderingDevice::DRAW_READ_ONLY_DEPTH) & uint64_t(RenderingDevice::DRAW_CLEAR_ALL | RenderingDevice::DRAW_IGNORE_ALL), 0u);
+
+	free_trackers(trackers, 2);
+}
+
+TEST_CASE("[RD][Forward+] transparent pass read-only depth follows depth_draw_always and stencil writes") {
+	// Empty transparent list: read-only depth allowed, TSR split allowed.
+	ForwardTransparentDepthScan scan;
+	CHECK(scan.tsr_split_depth_unchanged());
+	CHECK(scan.transparent_pass_read_only_depth());
+	CHECK(scan.avboit_composite_read_only_depth());
+
+	// Normal transparent surfaces (depth_draw_never / depth_draw_opaque, no stencil write): still read-only.
+	scan.add_surface(false, false);
+	scan.add_surface(false, false);
+	CHECK(scan.tsr_split_depth_unchanged());
+	CHECK(scan.transparent_pass_read_only_depth());
+	CHECK(scan.avboit_composite_read_only_depth());
+
+	// A depth_draw_always surface disables both transparent read-only depth and TSR level 2 split,
+	// while AVBOIT composite (which disables depth writes) can still keep depth read-only.
+	ForwardTransparentDepthScan depth_write_scan = scan;
+	depth_write_scan.add_surface(true, false);
+	CHECK_FALSE(depth_write_scan.tsr_split_depth_unchanged());
+	CHECK_FALSE(depth_write_scan.transparent_pass_read_only_depth());
+	CHECK(depth_write_scan.avboit_composite_read_only_depth());
+
+	// A stencil-writing surface without depth_draw_always leaves depth unchanged for TSR split,
+	// but disables read-only depth-stencil attachments for both transparent and AVBOIT composite.
+	ForwardTransparentDepthScan stencil_write_scan = scan;
+	stencil_write_scan.add_surface(false, true);
+	CHECK(stencil_write_scan.tsr_split_depth_unchanged());
+	CHECK_FALSE(stencil_write_scan.transparent_pass_read_only_depth());
+	CHECK_FALSE(stencil_write_scan.avboit_composite_read_only_depth());
+
+	// Both depth_draw_always and stencil write: everything falls back to read-write.
+	ForwardTransparentDepthScan both_scan = depth_write_scan;
+	both_scan.add_surface(false, true);
+	CHECK_FALSE(both_scan.tsr_split_depth_unchanged());
+	CHECK_FALSE(both_scan.transparent_pass_read_only_depth());
+	CHECK_FALSE(both_scan.avboit_composite_read_only_depth());
+}
+
+TEST_CASE("[RD][Graph] slice reader inheriting parent shared read-only depth joins parent transition") {
+	// Whole depth texture P is written at level 0. A whole-texture reader is delayed to level 2 by
+	// another dependency, while a slice reader S of P sits at level 1 (both same usage in a
+	// different stage, and the other shared read-only usage). P's SharedReadLayoutTransition must
+	// include S's command, access, and stage, and emit at level 1 before S runs.
+	for (int variant = 0; variant < 3; variant++) {
+		const bool cross_usage = (variant == 1);
+		const bool async_parent = (variant == 2);
+		CAPTURE(cross_usage);
+		CAPTURE(async_parent);
+
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		depth->texture_subresources.mipmap_count = 2;
+		RDG::ResourceTracker *slice = mip_slice_tracker(depth, 10, 0);
+		slice->texture_subresources.aspect = RDD::TEXTURE_ASPECT_DEPTH_BIT;
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *buf_a = tracker();
+		RDG::ResourceTracker *buf_b = tracker();
+		RDG::ResourceTracker *comp_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *trackers[] = { slice, depth, color, buf_a, buf_b, comp_out };
+
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0 (level 0): writes P
+		graph.add_buffer_update(buffer_id(1), buf_a, VectorView<RDG::RecordedBufferCopy>()); // cmd 1 (level 0)
+		add_main_compute(graph, buf_a, buf_b); // cmd 2 (level 1): produces buf_b
+
+		// cmd 3 (level 2): reads whole P after buf_b (main or async compute).
+		graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, async_parent ? RDG::QUEUE_ASYNC_COMPUTE : RDG::QUEUE_MAIN);
+		graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+		graph.add_compute_list_usage(depth, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+		graph.add_compute_list_usage(buf_b, RDG::RESOURCE_USAGE_STORAGE_BUFFER_READ);
+		graph.add_compute_list_usage(comp_out, RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+		graph.add_compute_list_dispatch(1, 1, 1);
+		graph.add_compute_list_end();
+
+		// cmd 4 (level 1): reads slice S of P directly after cmd 0.
+		if (cross_usage) {
+			add_attachment_pass(graph, { color }, slice, nullptr, true);
+		} else {
+			const RDG::AttachmentOperation op = RDG::ATTACHMENT_OPERATION_DEFAULT;
+			const RDD::RenderPassClearValue clear_val;
+			BitField<RDD::PipelineStageBits> stages = RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+			stages.set_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+			graph.add_draw_list_begin(RDD::RenderPassID(), RDD::FramebufferID(), Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(&op, 1), VectorView<RDD::RenderPassClearValue>(&clear_val, 1), stages);
+			graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+			graph.add_draw_list_usage(slice, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+			graph.add_draw_list_draw(3, 1);
+			graph.add_draw_list_end();
+		}
+
+		// Transition on P must execute at main level 1 (before cmd 4), not level 2 or the fork.
+		RDG::AsyncPlan level1_plan;
+		RDG::AsyncBarriers level1;
+		graph.main_level_barriers_for_test(1u, true, level1_plan, level1);
+		CHECK_EQ(count_texture_barriers(level1.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
+		const RDD::TextureBarrier *depth_barrier = find_texture_barrier(level1.texture_barriers, 1);
+		REQUIRE(depth_barrier != nullptr);
+		CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+		CHECK(level1.dst_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+		if (cross_usage) {
+			CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+			CHECK(level1.dst_stages.has_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT));
+			CHECK(level1.dst_stages.has_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT));
+		} else {
+			CHECK(level1.dst_stages.has_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT));
+		}
+
+		if (async_parent) {
+			RDG::AsyncPlan fork_plan;
+			RDG::AsyncBarriers fork;
+			graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, fork_plan, fork);
+			REQUIRE(fork_plan.active);
+			CHECK_EQ(fork_plan.fork_level, 2u);
+			CHECK(find_texture_barrier(fork.texture_barriers, 1) == nullptr);
+			CHECK(find_texture_barrier(fork.texture_barriers, 10) == nullptr);
+		} else {
+			RDG::AsyncPlan level2_plan;
+			RDG::AsyncBarriers level2;
+			graph.main_level_barriers_for_test(2u, true, level2_plan, level2);
+			CHECK(find_texture_barrier(level2.texture_barriers, 1) == nullptr);
+			CHECK(find_texture_barrier(level2.texture_barriers, 10) == nullptr);
+		}
+
+		free_trackers(trackers, 6);
+	}
+}
+
+TEST_CASE("[RD][Bindless] dirty depth texture attached read-only in a draw list binding the table merges SHADER_READ") {
+	// With layouts (Vulkan / D3D12): dirty depth texture D in bindless table T is attached
+	// read-only in a draw list that also binds T, while async compute samples D concurrently.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::BindlessTableTracker *table = RDG::bindless_table_tracker_create(RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *async_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *final_out = texture_tracker(4, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color, async_out, final_out };
+		RDG::bindless_table_add_resident(table, depth);
+
+		ErrorCapture errors;
+		graph.begin();
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0: writes D (dirties T)
+		CHECK_EQ(table->dirty.size(), 1u);
+
+		// cmd 1: read-only depth attachment on D + binds T.
+		const RDG::AttachmentOperation ro_ops[2] = { RDG::ATTACHMENT_OPERATION_DEFAULT, RDG::ATTACHMENT_OPERATION_READ_ONLY };
+		const RDD::RenderPassClearValue clears[2] = {};
+		BitField<RDD::PipelineStageBits> stages = RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		stages.set_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+		stages.set_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+		graph.add_draw_list_begin(RDD::RenderPassID(), RDD::FramebufferID(), Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(ro_ops, 2), VectorView<RDD::RenderPassClearValue>(clears, 2), stages);
+		graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+		graph.add_draw_list_usage(depth, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ);
+		graph.add_draw_list_bindless_table(table);
+		graph.add_draw_list_draw(3, 1);
+		graph.add_draw_list_end();
+
+		CHECK_EQ(errors.count, 0);
+		CHECK(table->dirty.is_empty());
+
+		// cmd 2: concurrent async compute sampling D directly.
+		add_async_sampling_compute(graph, { depth }, async_out);
+		// cmd 3: main consumer reading async_out + binding T.
+		graph.add_compute_list_begin(RDD::BreadcrumbMarker::NONE, 0, RDG::QUEUE_MAIN);
+		graph.add_compute_list_bind_pipeline(RDD::PipelineID());
+		graph.add_compute_list_usage(async_out, RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+		graph.add_compute_list_usage(final_out, RDG::RESOURCE_USAGE_STORAGE_IMAGE_READ_WRITE);
+		graph.add_compute_list_bindless_table(table);
+		graph.add_compute_list_dispatch(1, 1, 1);
+		graph.add_compute_list_end();
+
+		RDG::AsyncPlan plan;
+		RDG::AsyncEmission emission;
+		graph.emit_for_test(plan, emission);
+		REQUIRE(plan.active);
+		const RDG::AsyncEmission::Step *draw_step = find_command_step(emission, 1);
+		const RDG::AsyncEmission::Step *async_step = find_command_step(emission, 2);
+		const RDG::AsyncEmission::Step *consumer_step = find_command_step(emission, 3);
+		REQUIRE(draw_step != nullptr);
+		REQUIRE(async_step != nullptr);
+		REQUIRE(consumer_step != nullptr);
+		CHECK_EQ(draw_step->level, plan.fork_level);
+		CHECK_EQ(async_step->level, plan.fork_level);
+		CHECK(consumer_step->level > draw_step->level);
+
+		RDG::AsyncPlan barrier_plan;
+		RDG::AsyncBarriers fork;
+		graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, barrier_plan, fork);
+		CHECK_EQ(count_texture_barriers(fork.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
+		const RDD::TextureBarrier *depth_barrier = find_texture_barrier(fork.texture_barriers, 1);
+		REQUIRE(depth_barrier != nullptr);
+		CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+		CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+		CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_FRAGMENT_SHADER_BIT));
+		CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT));
+		CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+
+		RDG::bindless_table_remove_resident(table, depth);
+		RDG::bindless_table_tracker_free(table);
+		free_trackers(trackers, 4);
+	}
+
+	// Without layouts (Metal): a read-only depth draw list without T leaves D dirty in T; a
+	// second read-only depth draw list that binds T still emits a visibility barrier with SHADER_READ.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, false);
+		RDG::BindlessTableTracker *table = RDG::bindless_table_tracker_create(RDG::RESOURCE_USAGE_TEXTURE_SAMPLE);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color };
+		RDG::bindless_table_add_resident(table, depth);
+
+		ErrorCapture errors;
+		graph.begin();
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // cmd 0: writes D
+		add_attachment_pass(graph, { color }, depth, nullptr, true); // cmd 1: read-only depth (no T)
+		CHECK_EQ(table->dirty.size(), 1u);
+
+		const RDG::AttachmentOperation ro_ops[2] = { RDG::ATTACHMENT_OPERATION_DEFAULT, RDG::ATTACHMENT_OPERATION_READ_ONLY };
+		const RDD::RenderPassClearValue clears[2] = {};
+		BitField<RDD::PipelineStageBits> stages = RDD::PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		stages.set_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+		stages.set_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+		graph.add_draw_list_begin(RDD::RenderPassID(), RDD::FramebufferID(), Rect2i(0, 0, 64, 64), VectorView<RDG::AttachmentOperation>(ro_ops, 2), VectorView<RDD::RenderPassClearValue>(clears, 2), stages);
+		graph.add_draw_list_usage(color, RDG::RESOURCE_USAGE_ATTACHMENT_COLOR_READ_WRITE);
+		graph.add_draw_list_usage(depth, RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ);
+		graph.add_draw_list_bindless_table(table);
+		graph.add_draw_list_draw(3, 1);
+		graph.add_draw_list_end();
+
+		CHECK_EQ(errors.count, 0);
+		CHECK(table->dirty.is_empty());
+
+		LocalVector<RDD::TextureBarrier> tex_barriers;
+		LocalVector<RDD::BufferBarrier> buf_barriers;
+		RDD::MemoryAccessBarrier mem_barrier;
+		graph.command_barriers_for_test(2, tex_barriers, buf_barriers, mem_barrier);
+		const RDD::TextureBarrier *depth_barrier = find_texture_barrier(tex_barriers, 1);
+		REQUIRE(depth_barrier != nullptr);
+		CHECK(depth_barrier->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+
+		RDG::bindless_table_remove_resident(table, depth);
+		RDG::bindless_table_tracker_free(table);
+		free_trackers(trackers, 2);
+	}
+}
+
+TEST_CASE("[RD][Graph] cross-frame switch between read-only depth attachment and sampled read emits visibility barrier") {
+	// Direction 1: Frame 1 writes D and reads it ONLY via read-only depth attachment; Frame 2 does
+	// not write D and samples it on async compute. Frame 2 must emit a same-layout visibility
+	// barrier covering SHADER_READ / COMPUTE_SHADER. Frame 3 reading both needs no new barrier.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *async_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color, async_out };
+
+		graph.begin();
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // write D
+		add_attachment_pass(graph, { color }, depth, nullptr, true); // read-only depth only
+
+		graph.begin();
+		add_async_sampling_compute(graph, { depth }, async_out); // cross-frame switch to TEXTURE_SAMPLE
+
+		RDG::AsyncPlan plan;
+		RDG::AsyncBarriers fork;
+		graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan, fork);
+		REQUIRE(plan.active);
+		CHECK_EQ(count_texture_barriers(fork.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
+		const RDD::TextureBarrier *vis = find_texture_barrier(fork.texture_barriers, 1);
+		REQUIRE(vis != nullptr);
+		CHECK(vis->src_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+		CHECK(vis->dst_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+		CHECK(fork.src_stages.has_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT));
+		CHECK(fork.src_stages.has_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT));
+		CHECK(fork.dst_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+
+		// Frame 3: both read-only depth and compute sample are now already visible since last write.
+		graph.begin();
+		add_attachment_pass(graph, { color }, depth, nullptr, true);
+		add_async_sampling_compute(graph, { depth }, async_out);
+		RDG::AsyncPlan plan3;
+		RDG::AsyncBarriers fork3;
+		graph.async_barriers_for_test(RDG::BARRIER_SELECTION_ASYNC_FORK, plan3, fork3);
+		REQUIRE(plan3.active);
+		CHECK(find_texture_barrier(fork3.texture_barriers, 1) == nullptr);
+		RDG::AsyncBarriers level0;
+		graph.main_level_barriers_for_test(0u, true, plan3, level0);
+		CHECK(find_texture_barrier(level0.texture_barriers, 1) == nullptr);
+
+		free_trackers(trackers, 3);
+	}
+
+	// Direction 2: Frame 1 writes D and reads it ONLY via compute TEXTURE_SAMPLE; Frame 2 reads D
+	// via read-only depth attachment without writing D. Frame 2 must emit a same-layout visibility
+	// barrier covering DEPTH_STENCIL_ATTACHMENT_READ / EARLY+LATE_FRAGMENT_TESTS.
+	{
+		RDG graph;
+		graph.set_driver_traits_for_test(true, true);
+		RDG::ResourceTracker *depth = depth_tracker(1);
+		RDG::ResourceTracker *color = texture_tracker(2, 1);
+		RDG::ResourceTracker *comp_out = texture_tracker(3, 1);
+		RDG::ResourceTracker *trackers[] = { depth, color, comp_out };
+
+		graph.begin();
+		add_attachment_pass(graph, { color }, depth, nullptr, false); // write D
+		add_image_compute(graph, RDG::QUEUE_MAIN, { depth }, { comp_out }); // compute sample only
+
+		graph.begin();
+		add_attachment_pass(graph, { color }, depth, nullptr, true); // cross-frame switch to read-only depth
+
+		RDG::AsyncPlan plan;
+		RDG::AsyncBarriers level0;
+		graph.main_level_barriers_for_test(0u, true, plan, level0);
+		CHECK_EQ(count_texture_barriers(level0.texture_barriers, 1, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL, RDD::TEXTURE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL), 1u);
+		const RDD::TextureBarrier *vis = find_texture_barrier(level0.texture_barriers, 1);
+		REQUIRE(vis != nullptr);
+		CHECK(vis->src_access.has_flag(RDD::BARRIER_ACCESS_SHADER_READ_BIT));
+		CHECK(vis->dst_access.has_flag(RDD::BARRIER_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT));
+		CHECK(level0.src_stages.has_flag(RDD::PIPELINE_STAGE_COMPUTE_SHADER_BIT));
+		CHECK(level0.dst_stages.has_flag(RDD::PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT));
+		CHECK(level0.dst_stages.has_flag(RDD::PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT));
+
+		free_trackers(trackers, 3);
 	}
 }
 

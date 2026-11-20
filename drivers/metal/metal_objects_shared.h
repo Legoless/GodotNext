@@ -447,6 +447,11 @@ public:
 	MTL::StoreAction storeAction = MTL::StoreActionDontCare;
 	MTL::LoadAction stencilLoadAction = MTL::LoadActionDontCare;
 	MTL::StoreAction stencilStoreAction = MTL::StoreActionDontCare;
+	// GodotNext: rd_readonly_depth (#301). Distinguish RDD::ATTACHMENT_STORE_OP_NONE from
+	// ATTACHMENT_STORE_OP_DONT_CARE so getMTLStoreAction() never promotes a read-only
+	// attachment to MTL::StoreActionStore on partial render regions or multi-subpass draws.
+	bool storeOpNone = false;
+	bool stencilStoreOpNone = false;
 	uint32_t samples = 1;
 
 	/*!

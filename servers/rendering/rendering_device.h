@@ -327,6 +327,8 @@ public:
 		CALLBACK_RESOURCE_USAGE_GENERAL,
 		CALLBACK_RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ,
 		CALLBACK_RESOURCE_USAGE_ACCELERATION_STRUCTURE_READ_WRITE,
+		// GodotNext: rd_readonly_depth (#301). Matches RDG::RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ.
+		CALLBACK_RESOURCE_USAGE_ATTACHMENT_DEPTH_STENCIL_READ,
 		CALLBACK_RESOURCE_USAGE_MAX
 	};
 
@@ -1315,6 +1317,9 @@ private:
 			bool uses_restart_indices = false;
 			uint32_t primitive_minimum = 0;
 			uint32_t primitive_divisor = 0;
+			// GodotNext: rd_readonly_depth (#301).
+			bool writes_depth = false;
+			bool writes_stencil = false;
 		} validation;
 #endif
 		// Actual pipeline.
@@ -1670,6 +1675,8 @@ private:
 			uint32_t pipeline_primitive_minimum = 0;
 			uint32_t pipeline_push_constant_size = 0;
 			bool pipeline_push_constant_supplied = false;
+			// GodotNext: rd_readonly_depth (#301).
+			bool read_only_depth = false;
 		} validation;
 #else
 		struct Validation {
@@ -1724,6 +1731,11 @@ public:
 		DRAW_IGNORE_DEPTH = (1 << 17),
 		DRAW_CLEAR_STENCIL = (1 << 18),
 		DRAW_IGNORE_STENCIL = (1 << 19),
+		// GodotNext: rd_readonly_depth (#301). Attach the framebuffer's depth/stencil texture
+		// read-only (depth/stencil testing without writes), keeping it in the shared read-only
+		// layout so concurrent sampled reads (such as async compute passes) need not synchronize
+		// against this draw list.
+		DRAW_READ_ONLY_DEPTH = (1 << 20),
 		DRAW_CLEAR_ALL = DRAW_CLEAR_COLOR_ALL | DRAW_CLEAR_DEPTH | DRAW_CLEAR_STENCIL,
 		DRAW_IGNORE_ALL = DRAW_IGNORE_COLOR_ALL | DRAW_IGNORE_DEPTH | DRAW_IGNORE_STENCIL
 	};

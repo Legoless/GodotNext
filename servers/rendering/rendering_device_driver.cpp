@@ -69,6 +69,9 @@ uint64_t RenderingDeviceDriver::api_trait_get(ApiTrait p_trait) {
 			return true;
 		case API_TRAIT_TEXTURE_OUTPUTS_REQUIRE_CLEARS:
 			return false;
+		// GodotNext: rd_readonly_depth (#301).
+		case API_TRAIT_SUPPORTS_ATTACHMENT_STORE_OP_NONE:
+			return true;
 		default:
 			ERR_FAIL_V(0);
 	}

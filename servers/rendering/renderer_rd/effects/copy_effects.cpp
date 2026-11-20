@@ -1483,7 +1483,9 @@ void CopyEffects::merge_specular(RID p_dest_framebuffer, RID p_specular, RID p_b
 
 	RD::get_singleton()->draw_command_begin_label("Merge Specular");
 
-	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer);
+	// GodotNext: rd_readonly_depth (#301). Specular merge never writes depth or stencil; keep the
+	// framebuffer's depth attachment read-only so async depth readers need not synchronize on it.
+	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_dest_framebuffer, RD::DRAW_READ_ONLY_DEPTH);
 
 	int mode;
 	if (p_reflection.is_valid()) {
