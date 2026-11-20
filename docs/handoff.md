@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-20, morning. #298 (headless `--import` shutdown abort) is closed (`96a9a204c5`) on Linux and Windows; Mac-hosted lanes are running on the cloud Linux L4 and Windows L4 VMs for #217, #150, #301, and #297.
+**Last updated:** 2026-11-20, midday. #298 (headless `--import` shutdown abort) is closed (`96a9a204c5`) and #150 (displacement material output) landed as progress (`7b7d2f5982`, verified on Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV; waits only on Metal/M5 Max); Mac-hosted lanes remain running on the cloud Linux L4 and Windows L4 VMs for #217, #301, and #297.
 
 ## How to continue
 
@@ -30,6 +30,7 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 - Master: see `git log`. Plan v3.9.16.
 - Landed on 2026-11-20:
   - **#298 closed (`96a9a204c5`)**: fixed upstream `EditorHelp` shutdown race (`EditorHelp::doc_cleaned`, thread handoff sync, guarded deferred callbacks, clearing `EditorFileSystem::singleton`), added 4 doctests and a 20-run cross-platform `test_headless_import.py` regression check; verified 20/20 imports + 0 warnings + full doctests + Vulkan VVL 1.4 / D3D12+GBV smoke on the cloud Linux L4 VM and cloud Windows L4 test machine (`25.3.1-gn4`).
+  - **#150 (progress, `7b7d2f5982`)**: added `displacement()` spatial shader function with `DISPLACEMENT` output and `texture()` → `textureGrad()` lowering, `Material.displacement_magnitude`/`displacement_center` (`RenderingServer.material_set_displacement()`), `BaseMaterial3D.heightmap_mode = PARALLAX | DISPLACEMENT`, `RASTER_FEATURE_DISPLACED` + cull bound inflation, `#163` dicing-compute compiler hook, `--doctool` class docs, doctests (Forward+, Forward Mobile, Compatibility, Vulkan/D3D12/Metal containers), and `nextgeo_displacement_check.tscn`. Independently reviewed (5 findings fixed) and verified on the cloud Linux L4 VM (`0` warnings, `2,188/2,188` doctests, Vulkan VVL 1.4) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,212/2,212` doctests, Vulkan + D3D12 + D3D12 GBV, `0/6,220,800` bytes diff at magnitude `0`). Waits only on macOS/Metal build and M5 Max GPU run.
 - Landed on 2026-11-19, all as progress unless noted:
   - #193 TSR async compute, #218 VSM non-Nanite raster and #167 the path tracer (checked together on the cloud L4 and T4 test machines), with plan v3.9.15.
   - #299 closed (the D3D12 front-layer depth target).
@@ -44,7 +45,7 @@ All Linux Vulkan and Windows Vulkan/D3D12/D3D12-GBV verification and code-review
 
 ## Ready to start (phase order)
 
-- **In progress (Mac-hosted lanes on cloud L4 VMs):** **#217** VSM × Nanite, **#150** displacement material output, **#301** RD read-only depth attachments (GT-7), and **#297** D3D12 legacy SDFGI drift.
+- **In progress (Mac-hosted lanes on cloud L4 VMs):** **#217** VSM × Nanite, **#301** RD read-only depth attachments (GT-7), and **#297** D3D12 legacy SDFGI drift.
 - Blocked until their blocker lands: #294, #296, #141, #302, #303, #304, #305 (plus the M6/M7 issues waiting on #217 and #150).
 
 ## Waiting on the lead
