@@ -2,7 +2,7 @@
 
 The current state of the build and what to do next. It is written for any agent: Claude, Gemini or another. Update this file whenever work stops and after each landing, in the same change set as the landing or the tracker refresh. Machine-specific details (exact local paths, VM names and zones, private library folders, saved lane results) are in the git-ignored companion `local/handoff-private.md`.
 
-**Last updated:** 2026-11-20, evening. #298 is closed (`96a9a204c5`), and #150 (`7b7d2f5982`) and #217 (`230a613b62`, VSM × Nanite — unblocking 12 M6/M7 tasks) landed as progress after Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV verification (waiting only on Metal/M5 Max); Mac-hosted lanes remain running for #301, #297, and #305.
+**Last updated:** 2026-11-20, evening. #298 (`96a9a204c5`) and #297 (plan v3.9.17) are closed; #150 (`7b7d2f5982`) and #217 (`230a613b62`, VSM × Nanite — unblocking 12 M6/M7 tasks) landed as progress after Linux Vulkan VVL 1.4 and Windows Vulkan/D3D12/D3D12-GBV verification (waiting only on Metal/M5 Max); #305 is running its Windows landing check and #301 remains active.
 
 ## How to continue
 
@@ -27,9 +27,10 @@ The lead does not want questions. Take the recommended option, or follow UE 5.9,
 
 ## State at the handover
 
-- Master: see `git log`. Plan v3.9.16.
+- Master: see `git log`. Plan v3.9.17.
 - Landed on 2026-11-20:
   - **#298 closed (`96a9a204c5`)**: fixed upstream `EditorHelp` shutdown race (`EditorHelp::doc_cleaned`, thread handoff sync, guarded deferred callbacks, clearing `EditorFileSystem::singleton`), added 4 doctests and a 20-run cross-platform `test_headless_import.py` regression check; verified 20/20 imports + 0 warnings + full doctests + Vulkan VVL 1.4 / D3D12+GBV smoke on the cloud Linux L4 VM and cloud Windows L4 test machine (`25.3.1-gn4`).
+  - **#297 closed (plan v3.9.17)**: counterbalanced 15×15 interleaved AB/BA runs on the cloud Windows L4 test machine (D3D12 + Vulkan, 1920×1080, `--gpu-validation`, NextGI off, VSM off) and a static audit across `b6596def89..953e76ffe0` proved legacy SDFGI's bimodal ±1 binary16 ULP variation is ordinary upstream GPU non-determinism (Fisher `p = 1.0000` D3D12, `p = 0.6999` Vulkan; bit-exact cross-tree EXRs in both clusters; zero engine code changes); recorded baselines and the interleaved AB/BA `max_ulp <= 1` rule in plan §22.2.
   - **#150 (progress, `7b7d2f5982`)**: added `displacement()` spatial shader function with `DISPLACEMENT` output and `texture()` → `textureGrad()` lowering, `Material.displacement_magnitude`/`displacement_center` (`RenderingServer.material_set_displacement()`), `BaseMaterial3D.heightmap_mode = PARALLAX | DISPLACEMENT`, `RASTER_FEATURE_DISPLACED` + cull bound inflation, `#163` dicing-compute compiler hook, `--doctool` class docs, doctests (Forward+, Forward Mobile, Compatibility, Vulkan/D3D12/Metal containers), and `nextgeo_displacement_check.tscn`. Independently reviewed (5 findings fixed) and verified on the cloud Linux L4 VM (`0` warnings, `2,188/2,188` doctests, Vulkan VVL 1.4) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,212/2,212` doctests, Vulkan + D3D12 + D3D12 GBV, `0/6,220,800` bytes diff at magnitude `0`). Waits only on macOS/Metal build and M5 Max GPU run.
   - **#217 (progress, `230a613b62`)**: added VSM × Nanite per-page multi-view cluster culling in `cluster_cull.glsl` (`1` directional + `1` local indirect dispatch chain), 1-level 8×8 per-page static Hi-Z, fixed-function HW (`vsm_raster_nextgeo.glsl`, `#177` indirect-count with `firstInstance = 0`) and SW (`vsm_raster_sw.glsl`, 32-bit `imageAtomicMax`) rasterizers, static/dynamic layer routing hook for `#212`, programmable raster-bin VSM Group 2 (`NEXTGEO_RASTER_DEPTH_ONLY`) integrated with `#150` (`RASTER_FEATURE_DISPLACED` + `displacement_bound` cull inflation), live NextGeo VSM projection sampling, `VSM_OVERDRAW` Nanite pairs, `[VSM][NextGeo]` doctests, and `tests/vsm/nanite.tscn`. Independently reviewed (5 findings fixed) and verified on `master` (over `#150`) on the cloud Linux L4 VM (`0` warnings, `2,198/2,198` doctests, Vulkan VVL 1.4) and cloud Windows L4 test machine (`25.3.1-gn4`, `0` warnings, `2,222/2,222` doctests, Vulkan + D3D12 + D3D12 GBV). Waits only on macOS/Metal build/run and PQ lines.
 - Landed on 2026-11-19, all as progress unless noted:
@@ -46,7 +47,7 @@ All Linux Vulkan and Windows Vulkan/D3D12/D3D12-GBV verification and code-review
 
 ## Ready to start (phase order)
 
-- **In progress (Mac-hosted lanes on cloud L4 VMs):** **#301** RD read-only depth attachments (GT-7), **#297** D3D12 legacy SDFGI drift, and **#305** stale `MaterialData::texture_cache` refresh.
+- **In progress (Mac-hosted lanes on cloud L4 VMs):** **#305** stale `MaterialData::texture_cache` refresh (Windows landing check running) and **#301** RD read-only depth attachments (GT-7).
 - **Unblocked on master by #150 and #217 (Linux/Windows code ready):** M6 VSM tasks (#212, #216) and M7 Nanite tasks (#149, #151, #153, #154, #160, #161, #163, #164, #165), plus #145 follow-ups (#302, #303, #304).
 
 ## Waiting on the lead
